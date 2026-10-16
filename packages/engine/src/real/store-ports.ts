@@ -39,6 +39,7 @@ import {
   readQuotaReserveSetting,
   readTaskRoutePin,
   recordStepTiming,
+  recordTaskRound,
   releaseTaskReservation,
   reservePoolSlot,
   resolveAlertWithReason,
@@ -48,7 +49,7 @@ import {
   type TaskRoutePin,
   upsertAlert,
 } from '@fleet-dao/db';
-import { type HostId, noteOnlyOptions, type OrgKind, type StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { routeBreaker } from '../failure/breaker.ts';
@@ -202,7 +203,10 @@ export interface StorePortsDeps {
   reservationTtlMs?: number;
 }
 
-type StorePorts = Pick<EnginePorts, 'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState'> & {
+type StorePorts = Pick<
+  EnginePorts,
+  'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState' | 'recordRound'
+> & {
   /**
    * 这个阶段现在是不是全熔断。和 pickRoute 同一个 loadStage、同一套熔断判定；暂停的账号池同样避开。
    * 不带某一步的模型过滤（提醒是整个阶段的），不调 allOpenAlarm、不写任何表。读不了就抛。
@@ -948,17 +952,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     },
 
     async raiseAlert(input) {
-      // decision 进「要你拍的」。工作流这一路补不出具体动作，给两个只留言的选项（decision 没有选项写不进）。
-      // stuck、info 仍进提醒：info 只在封号、事件数到线、全熔断这类事上发，量很小。
-      const level = input.level === 'decision' ? 'decision' : 'alert';
+      // 工作流这一路（任务挂起、封号、事件数到线、全熔断……）一律记卡住报警（#2729）：挂起由指挥官点继续、放弃、重做，
+      // 不是掏新钱、删了找不回、只有人能做的事，不进「要你拍」。工作流报的 decision 也按这一级记。
       const { id } = await upsertAlert(db, {
         dedupeKey: input.dedupeKey,
-        level,
+        level: 'alert',
         // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。
         taskId: UUID.test(input.taskId) ? input.taskId : null,
         title: input.title.slice(0, 300),
         body: input.detail,
-        ...(level === 'decision' ? { options: noteOnlyOptions('continue') } : {}),
       });
       return { alertId: id };
     },
@@ -984,6 +986,20 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         runMs: input.runMs,
         outcome: input.outcome,
         ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+      });
+    },
+
+    async recordRound(input) {
+      // 一轮怎么收场的（#2762）：同一条工作流同一个 seq 只记一行，活动重试不重复
+      await recordTaskRound(db, {
+        taskId: input.taskId,
+        workflowId: input.workflowId,
+        seq: input.seq,
+        round: input.round,
+        outcome: input.outcome,
+        tier: input.tier ?? null,
+        firstModel: input.firstModel ?? null,
+        addedLines: input.addedLines ?? null,
       });
     },
 

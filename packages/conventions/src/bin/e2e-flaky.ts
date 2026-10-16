@@ -3,7 +3,8 @@
 //     一轮的汇总（偶发的、隔离集里的结局、过了限期的），打到标准输出；ci.yml 的 e2e job 接进 job 摘要。
 //   node packages/conventions/src/bin/e2e-flaky.ts scan <runs.json> <报告目录>
 //     runs.json 是 `gh run list --json databaseId,url` 的输出（新的在前），报告目录下 <运行号>/results*.json 是那一轮下载下来的报告；
-//     取有报告的近 10 轮，数每条用例首跑红的次数，达阈值的开单（同标题已有开着的单就不开）；
+//     取有报告的近 10 轮，数每条用例偶发（重试才过）的次数，达阈值的开单（同标题已有开着的单就不开；超过 5 条只开一张汇总单；
+//     一次最多新开 3 张，多的下次再开）；
 //     最新一轮整轮坏了开「整轮坏了」单，最新一轮好了就把开着的那张留言关掉。要 GITHUB_TOKEN、GITHUB_REPOSITORY。
 // 读不到、认不出就退出码 1 并明说，不把「没查成」当「没有偶发」。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';

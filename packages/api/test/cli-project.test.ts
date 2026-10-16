@@ -11,6 +11,32 @@ const T0 = new Date('2026-10-16T09:00:00.000Z');
 function setup(rows: RepoProfileRow[] = [fluxwatch()]) {
   const audits: { repoId: string; profile: unknown; reason: string; actor: unknown }[] = [];
   const port: ProjectPort = {
+    async register(input) {
+      const byId = rows.find((r) => r.githubId === input.githubId);
+      const byName = rows.find((r) => r.owner === input.owner && r.name === input.name);
+      if (byId && byId !== byName)
+        return { outcome: 'conflict', why: `仓号已经登记在 ${byId.owner}/${byId.name} 上` };
+      if (byName?.githubId === input.githubId) return { outcome: 'unchanged', repoId: byName.id };
+      if (byName) {
+        byName.githubId = input.githubId;
+        audits.push({ repoId: byName.id, profile: null, reason: input.reason, actor: input.actor });
+        return { outcome: 'updated', repoId: byName.id, auditId: audits.length };
+      }
+      const id = `22222222-2222-2222-2222-22222222222${rows.length}`;
+      rows.push({
+        id,
+        owner: input.owner,
+        name: input.name,
+        githubId: input.githubId,
+        defaultBranch: input.defaultBranch,
+        testCommand: 'pnpm check',
+        ciPolicy: 'force',
+        autoDispatchSince: null,
+        profile: {},
+      });
+      audits.push({ repoId: id, profile: null, reason: input.reason, actor: input.actor });
+      return { outcome: 'created', repoId: id, auditId: audits.length };
+    },
     async find(owner, name) {
       return (
         rows.find(
@@ -200,5 +226,40 @@ describe('project set-profile', () => {
     s.files.set('ok.json', '{}');
     expect(await s.run(['set-profile', 'thoerwink8/nope', '--file', 'ok.json'])).toBe(1);
     expect(s.audits).toEqual([]);
+  });
+});
+
+describe('project register（#2749）', () => {
+  it('参数：要 --github-id 正整数，--default-branch 可选（默认 main）；别的写法拒', () => {
+    expect(parseProjectArgs(['register', 'acme/new', '--github-id', '42'])).toEqual({
+      action: 'register',
+      owner: 'acme',
+      name: 'new',
+      githubId: 42,
+      defaultBranch: 'main',
+    });
+    expect(
+      parseProjectArgs(['register', 'acme/new', '--github-id', '42', '--default-branch', 'trunk']),
+    ).toMatchObject({ defaultBranch: 'trunk' });
+    for (const argv of [
+      ['register', 'acme/new'],
+      ['register', 'acme/new', '--github-id', '0'],
+      ['register', 'acme/new', '--github-id', 'abc'],
+      ['register', 'acme/new', '--github-id', '42', '--force'],
+    ])
+      expect(() => parseProjectArgs(argv)).toThrow(ProjectCliError);
+  });
+
+  it('没有就建、老行补仓号、一样的不改；仓号在别的名字上（改名）退出码 1', async () => {
+    const s = setup([{ ...fluxwatch(), githubId: null }]);
+    expect(await s.run(['register', 'acme/new', '--github-id', '42'])).toBe(0);
+    expect(s.out.at(-1)).toContain('已登记');
+    expect(await s.run(['register', 'thoerwink8/fluxwatch', '--github-id', '1418484822'])).toBe(0);
+    expect(s.out.at(-1)).toContain('补上了仓号');
+    expect(await s.run(['register', 'thoerwink8/fluxwatch', '--github-id', '1418484822'])).toBe(0);
+    expect(s.out.at(-1)).toContain('没改');
+    expect(s.audits).toHaveLength(2);
+    expect(await s.run(['register', 'acme/renamed', '--github-id', '42'])).toBe(1);
+    expect(s.err.at(-1)).toContain('acme/new');
   });
 });

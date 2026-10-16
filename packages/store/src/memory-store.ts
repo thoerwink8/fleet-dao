@@ -72,6 +72,7 @@ import type {
   PageRequest,
   PasswordCredentials,
   PullRequestRecord,
+  QuotaSampleRecord,
   QuotaWindowRecord,
   RunPlan,
   SegmentRunRecord,
@@ -176,6 +177,8 @@ export interface MemoryData {
   bans: Ban[];
   /** 按（池, 原名 label）一行，和库的主键一样。 */
   quotaWindows: QuotaWindowRecord[];
+  /** 额度窗历史（quota_window_samples），按（池, 原名, 读数时刻）一行。 */
+  quotaSamples: QuotaSampleRecord[];
   jobs: JobRegistration[];
   scheduleRuns: ScheduleRunRecord[];
   notifications: NotificationRecord[];
@@ -214,6 +217,7 @@ export function emptyData(): MemoryData {
     routes: [],
     bans: [],
     quotaWindows: [],
+    quotaSamples: [],
     jobs: [],
     scheduleRuns: [],
     notifications: [],
@@ -566,6 +570,18 @@ export function createMemoryStore(
       return [...data.quotaWindows].sort(
         (a, b) => a.poolId.localeCompare(b.poolId) || a.label.localeCompare(b.label),
       );
+    },
+    async listQuotaSamples(since) {
+      const from = since.getTime();
+      return (data.quotaSamples ?? [])
+        .filter((s) => Date.parse(s.readAt) >= from)
+        .map((s) => ({ ...s }))
+        .sort(
+          (a, b) =>
+            a.poolId.localeCompare(b.poolId) ||
+            a.label.localeCompare(b.label) ||
+            Date.parse(a.readAt) - Date.parse(b.readAt),
+        );
     },
     async setChannelEnabled({ channelId, enabled }, entry) {
       const channel = data.channels.find((ch) => ch.id === channelId);

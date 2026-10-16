@@ -912,7 +912,7 @@ async function startOne(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tal
 /** 「怎么算做完」要 diff 外证据、引擎不拉时留在单子上的话。 */
 export function offDiffComment(hits: readonly OffDiffItem[]): string {
   return [
-    '引擎想拉起这张单，可「怎么算做完」里有条目要 diff 外的证据，引擎做不出来，冷验收也验不过，先没派：',
+    '引擎想拉起这张单，可「怎么算做完」里有条目要 diff 外的证据，引擎做不出来，冷验收也验不过，先没派（命中的是哪一条、为什么见下方）：',
     '',
     describeOffDiff(hits),
     '',

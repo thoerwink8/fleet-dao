@@ -2,7 +2,7 @@
 //
 // 改这里之前必须知道：
 // - 只有一份原件（决定 0087）：agents/subagents/ 下恰好三份，名字就是 Claude Code 内置的 Explore（斥候 Haiku）、
-//   general-purpose（工人 Sonnet）、Plan（设计 Opus）。同一份既由 agents-sync 装到每台机器的 ~/.claude/agents/，也由这里转成
+//   general-purpose（工人 Opus，决定 0103）、Plan（设计 Opus）。同一份既由 agents-sync 装到每台机器的 ~/.claude/agents/，也由这里转成
 //   --agents 传给引擎的会话；--agents 的优先级高于项目级、用户级，同名条目压住内置的（本机 2.1.296 实测）。
 // - 为什么要转：法国上引擎经 reclaude 起的会话带 `--setting-sources project`，不读用户级 ~/.claude/agents/；转成 --agents 以后
 //   发哪一版就用哪一版（方案 specs/1641-子代理分档/法国实装.md 第一节第 4 条）。

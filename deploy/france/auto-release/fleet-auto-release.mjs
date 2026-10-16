@@ -380,14 +380,21 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
     );
     return { code: r.code, out: `${r.stdout}\n${r.stderr}` };
   },
+  /**
+   * 报警（卡住报警级）：走 current 那一版 fleet-api 的 notify raise（统一写入口 upsertAlert，#2729），不直写表；同键原地更新、
+   * 处理过的重新打开。正文从标准输入喂。没记上抛（lib.mjs 记着没发的，下一轮再发）。
+   */
   async alert({ key, title, body }) {
-    sql(
-      `insert into notifications (level, dedupe_key, title, body)
-values ('alert'::notification_level, :'key', :'title', :'body')
-on conflict (dedupe_key) do update
-  set title = excluded.title, body = excluded.body, updated_at = now(), resolved_at = null, resolved_by = null;`,
-      { key, title, body },
+    const r = run(
+      'bash',
+      [FLEET_API, 'notify', 'raise', '--key', key, '--title', title, '--level', 'alert'],
+      {
+        input: body,
+        timeoutMs: 60_000,
+      },
     );
+    if (r.code !== 0)
+      throw new Error(`fleet-api notify raise 退出码 ${r.code}：${tail(r.stderr || r.stdout)}`);
   },
   async resolve(prefix) {
     sql(

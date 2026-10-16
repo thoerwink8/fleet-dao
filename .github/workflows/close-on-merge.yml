@@ -4,9 +4,23 @@ name: close-on-merge
 # 用 pull_request_target：跑的是主线上的代码，不检出、不跑 PR 里的东西；PR 的号和内容按 API 现读。
 # 红了只是这一轮没收成（读不到 GitHub、关单报错），不挡任何事；每日 github-audit 会兜底报「有合并 PR 提到、却还开着」。
 # 退出码：0 = 收完了；1 = 参数不对；2 = 没查成、没关成。
+# 可复用（#2749）：别的仓用 workflow_call 引它（触发、权限由引用方写）。要收的仓取 github.repository（被引用时是引用方的仓），
+# 收口的代码从 standard-repo 检出（引用方填它所在的仓，本仓自己跑时留空＝本仓），这里不写死哪个仓。
 on:
   pull_request_target:
     types: [closed]
+  workflow_call:
+    inputs:
+      standard-repo:
+        description: 收口代码所在的仓（owner/名字）；留空＝就是本仓
+        type: string
+        required: false
+        default: ''
+      standard-ref:
+        description: 检出哪个分支；留空＝那个仓的默认分支
+        type: string
+        required: false
+        default: ''
 concurrency:
   group: close-on-merge-${{ github.event.pull_request.number }}
   cancel-in-progress: false
@@ -22,6 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.standard-repo || github.repository }}
+          ref: ${{ inputs.standard-ref }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:

@@ -5,7 +5,7 @@
 // 并行（决定 0093）：每个 worker 自己一整套环境（support/fixtures.ts 的 stack 夹具：自己的库、自己的端口），所以 worker 开到核数；
 // 一个文件整个落在一个 worker 里、按顺序走（fullyParallel: false：文件里的用例前后有依赖）。
 // 偶发（决定 0093）：首跑红的重试一次，重试过了 Playwright 标 flaky、这一轮不算红；JSON 报告留给偶发统计（packages/conventions/src/e2e-flaky.ts），
-// 近 10 轮首跑红 2 次的自动开单、放进隔离集（e2e/quarantine.json，E2E_QUARANTINE=skip|only 挑，support/quarantine.ts）。
+// 近 10 轮偶发（重试才过）2 次的自动开单、放进隔离集（e2e/quarantine.json，E2E_QUARANTINE=skip|only 挑，support/quarantine.ts）。
 import { availableParallelism } from 'node:os';
 import { defineConfig } from '@playwright/test';
 import { quarantineFilter } from './support/quarantine.ts';

@@ -1151,7 +1151,7 @@ describe('0078：开着的发版开始、成功和再提醒标成已撤', () => 
   );
 });
 
-describe('0073：提醒这一次挂起的时刻回填成建立时刻', () => {
+describe('0073：提醒这一次挂起的时刻回填成建立时刻', { timeout: TEST_DB_TIMEOUT_MS }, () => {
   const tag = '0073_notification_raised_at';
 
   it('已有行的 raised_at 等于 created_at，不写成迁移时刻', async () => {
@@ -1422,6 +1422,81 @@ describe('0080、0081：repos 加 GitHub 仓号和仓档案，fleet-dao 回填�
         await expect(
           pg.exec(`update repos set github_id = 1418484822 where name = 'fleet-dao'`),
         ).rejects.toThrow(/repos_github_id_unique/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
+describe('0084：「要你拍」库层强制带选项和原因（#2729）', () => {
+  const tag = '0084_elite_nuke';
+  const two = JSON.stringify([
+    { id: 'a', label: '甲', detail: '选甲', recommended: '甲稳' },
+    { id: 'b', label: '乙', detail: '选乙' },
+  ]);
+
+  it(
+    '旧的没选项的要你拍降成报警、去掉选项；带两个选项的记「只有人能做」；之后没选项、没原因的要你拍写不进',
+    async () => {
+      const target = ordered.findIndex((e) => e.tag === tag);
+      expect(target).toBeGreaterThanOrEqual(0);
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(`
+          insert into notifications (level, dedupe_key, title, body, decision_options) values
+            ('decision', 'worktree:a', '要删吗', '', null),
+            ('decision', 'release:failed:aaaaaaaaaaaa:1', '发版失败', '', '[{"id":"x","label":"x","detail":"x","recommended":"x"}]'),
+            ('decision', 'github-app:o/r', '授权限', '', '${two}'),
+            ('alert', 'stuck:1', '卡住', '', null);
+        `);
+        await runMigration(pg, tag);
+        const rows = new Map(
+          (
+            await pg.query<{
+              dedupe_key: string;
+              level: string;
+              decision_options: unknown;
+              decision_reason: string | null;
+            }>(`select dedupe_key, level, decision_options, decision_reason from notifications`)
+          ).rows.map((r) => [r.dedupe_key, r]),
+        );
+        expect(rows.get('worktree:a')).toMatchObject({
+          level: 'alert',
+          decision_options: null,
+          decision_reason: null,
+        });
+        expect(rows.get('release:failed:aaaaaaaaaaaa:1')).toMatchObject({
+          level: 'alert',
+          decision_options: null,
+          decision_reason: null,
+        });
+        expect(rows.get('github-app:o/r')).toMatchObject({
+          level: 'decision',
+          decision_reason: 'human-only',
+        });
+        expect(rows.get('stuck:1')).toMatchObject({ level: 'alert', decision_reason: null });
+
+        // 【故意造出的失败】迁移之后：没选项的要你拍、没原因的要你拍、带原因的报警都写不进
+        await expect(
+          pg.exec(
+            `insert into notifications (level, dedupe_key, title) values ('decision', 'ask:none', '要你拍')`,
+          ),
+        ).rejects.toThrow(/notifications_decision_needs_options_reason/);
+        await expect(
+          pg.exec(
+            `insert into notifications (level, dedupe_key, title, decision_options) values ('decision', 'ask:noreason', '要你拍', '${two}')`,
+          ),
+        ).rejects.toThrow(/notifications_decision_needs_options_reason/);
+        await expect(
+          pg.exec(
+            `insert into notifications (level, dedupe_key, title, decision_reason) values ('alert', 'ask:alert', '卡住', 'new-money')`,
+          ),
+        ).rejects.toThrow(/notifications_reason_only_decision/);
+        await pg.exec(
+          `insert into notifications (level, dedupe_key, title, decision_options, decision_reason) values ('decision', 'ask:ok', '要你拍', '${two}', 'new-money')`,
+        );
       } finally {
         await pg.close();
       }

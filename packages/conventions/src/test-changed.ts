@@ -205,7 +205,7 @@ export function vitestArgs(selection: TestSelection): string[] {
 // ---- 要全跑时本机跑不跑（创始人的规矩：几个会话同时全跑会把机器拖满，全量交给 CI；只写在 AGENTS.md 里拦不住，
 // 三个工人照样在本机跑了全量，所以拦在这个必经的入口上）
 
-/** 退出码：0 过；1 没过（含 vitest 被信号杀掉）；2 没算成要跑什么、参数不对、vitest 起不来；3 本机要全跑、没带 --all，没跑。 */
+/** 退出码：0 过；1 没过（含 vitest 被信号杀掉）；2 没算成要跑什么、参数不对、vitest 起不来；3 本机要全跑、没带 --all 也没带 --affected，没跑。 */
 export const REFUSED_FULL_RUN = 3;
 
 /**
@@ -216,7 +216,7 @@ export const REFUSED_FULL_RUN = 3;
 export const ENGINE_SESSION_MARKER = 'FLEET_RUN_ID';
 
 export const USAGE_LINE =
-  '用法：pnpm test:changed [--all]（不带参数：按改动选测试；要全跑时本机不跑、退出码 3，带 --all 才在本机全跑）';
+  '用法：pnpm test:changed [--all | --affected]（不带参数：按改动选测试；要全跑时本机不跑、退出码 3，带 --all 才在本机全跑，带 --affected 只跑受影响的包）';
 
 export type RunDecision =
   | { kind: 'run'; args: string[]; note?: string }
@@ -247,12 +247,16 @@ function refuseLines(local: LocalRun): string[] {
 }
 
 /**
- * 跑不跑、跑什么。只在「判出要全跑、没带 --all、不在 CI、不是引擎会话」时拒跑：写明原因、全量交给 CI、留给 CI 的那些、
- * 真要全跑怎么说，退出码 REFUSED_FULL_RUN（不再打单跑对应包的命令，#1066）。带 --all 就全跑（明说了要）。
+ * 跑不跑、跑什么。只在「判出要全跑、没带 --all、没带 --affected、不在 CI、不是引擎会话」时拒跑：写明原因、全量交给 CI、
+ * 留给 CI 的那些、真要全跑怎么说，退出码 REFUSED_FULL_RUN（不再打单跑对应包的命令，#1066）。
+ * 带 --all 就全跑（明说了要）。带 --affected 时不拒，改跑受影响的包（要全跑时先跑的那份，local.paths）：
+ * 引擎自测看到退出码 3 之后用这个，不把测试整段推给 CI。CI 里、引擎会话里仍全跑，--affected 改不了那两条。
  */
 export function decideRun(input: {
   selection: TestSelection;
   all: boolean;
+  /** 要全跑时不拒，只跑受影响的包。不传当没带。 */
+  affected?: boolean;
   env: Readonly<Record<string, string | undefined>>;
 }): RunDecision {
   const { selection, env } = input;
@@ -264,6 +268,14 @@ export function decideRun(input: {
       kind: 'run',
       args: ['run'],
       note: '引擎起的会话：照旧全跑（交活只认它；会话有内存上限，测试进程数按上限算）',
+    };
+  }
+  if (input.affected && selection.local.paths.length > 0) {
+    const paths = selection.local.paths;
+    return {
+      kind: 'run',
+      args: ['run', ...paths],
+      note: `要全跑，本机改跑受影响的包：${paths.join(' ')}`,
     };
   }
   return { kind: 'refuse', code: REFUSED_FULL_RUN, lines: refuseLines(selection.local) };
@@ -284,10 +296,10 @@ export interface TestChangedDeps {
 
 /** 入口的全部逻辑（bin/test-changed.ts 只接上真的 git、仓、vitest）：回进程的退出码，见 REFUSED_FULL_RUN 上面那行。 */
 export function testChanged(deps: TestChangedDeps): number {
-  const extra = deps.argv.filter((a) => a !== '--all');
+  const extra = deps.argv.filter((a) => a !== '--all' && a !== '--affected');
   if (extra.length > 0) {
     deps.err(
-      `test:changed 没跑成：只收 --all，不收别的参数（给了：${extra.join(' ')}）。跑哪些由改动决定；要单跑几个文件用 pnpm exec vitest run <路径>。${USAGE_LINE}`,
+      `test:changed 没跑成：只收 --all 和 --affected，不收别的参数（给了：${extra.join(' ')}）。跑哪些由改动决定；要单跑几个文件用 pnpm exec vitest run <路径>。${USAGE_LINE}`,
     );
     return 2;
   }
@@ -303,7 +315,12 @@ export function testChanged(deps: TestChangedDeps): number {
   deps.out(`和 ${BASE} 比改了 ${changed.length} 个文件（含没提交的）`);
   for (const reason of selection.reasons) deps.out(`- ${reason}`);
   if (selection.ciOnly.length > 0) deps.out(`CI 另外还跑（这里不跑）：${selection.ciOnly.join('、')}`);
-  const decision = decideRun({ selection, all: deps.argv.includes('--all'), env: deps.env });
+  const decision = decideRun({
+    selection,
+    all: deps.argv.includes('--all'),
+    affected: deps.argv.includes('--affected'),
+    env: deps.env,
+  });
   if (decision.kind === 'refuse') {
     for (const line of decision.lines) deps.err(line);
     return decision.code;

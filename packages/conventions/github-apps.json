@@ -1,0 +1,13 @@
+{
+  "说明": "两个 GitHub App 在各账号、组织下的安装号（pnpm project add 第二步用：本机 gh 令牌走单仓接口 PUT /user/installations/{安装号}/repositories/{仓号} 把新仓加进安装）。经典令牌调 GET /user/installations 回 403（只认 App 用户令牌），所以安装号按 owner 记在这里。一个账号或组织下还没装过的，要先在网页 https://github.com/apps/<slug>/installations/new 装一次，再把安装号补进来。安装号不是密钥。",
+  "apps": {
+    "agent": {
+      "slug": "fleet-dao-agent",
+      "installations": { "thoerwink8": 164544168 }
+    },
+    "engine": {
+      "slug": "fleet-dao-engine",
+      "installations": { "thoerwink8": 164544479, "adfx-studio": 171236276 }
+    }
+  }
+}

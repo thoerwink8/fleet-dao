@@ -133,3 +133,95 @@ export async function setRepoProfile(
     return { changed: true, auditId: audit.id };
   });
 }
+
+/** 操作记录里登记仓这件事的名字；target 是 repo:<仓的编号>。 */
+export const REPO_REGISTER = 'repo.register';
+
+export type RegisterRepoResult =
+  | { outcome: 'created' | 'updated'; repoId: string; auditId: number }
+  | { outcome: 'unchanged'; repoId: string }
+  | { outcome: 'conflict'; why: string };
+
+/**
+ * 登记一个仓（pnpm project add 第一步经 fleet-api project register 调，#2749）。认仓认 GitHub 仓号（design 15.7 第 1 条）：
+ * 没有这一行就建（接活关着、档案空、测试命令先填 pnpm check 占位，档案那一步再改）；老行没有仓号就补上；
+ * 已经是这个仓号不改不记。仓号对不上，或这个号已经登记在别的名字上（多半改了名），拒、什么都不改，原因写明。
+ * 建和补都和操作记录同一事务。
+ */
+export async function registerRepo(
+  db: Db,
+  input: {
+    owner: string;
+    name: string;
+    githubId: number;
+    defaultBranch: string;
+    actor: { kind: 'user' | 'ai' | 'engine' | 'agent' | 'ops'; id: string };
+    reason: string;
+  },
+): Promise<RegisterRepoResult> {
+  return db.transaction(async (tx) => {
+    const cols = { id: repos.id, owner: repos.owner, name: repos.name, githubId: repos.githubId };
+    const [byId] = await tx.select(cols).from(repos).where(eq(repos.githubId, input.githubId)).for('update');
+    const [byName] = await tx
+      .select(cols)
+      .from(repos)
+      .where(
+        and(
+          sql`lower(${repos.owner}) = lower(${input.owner})`,
+          sql`lower(${repos.name}) = lower(${input.name})`,
+        ),
+      )
+      .for('update');
+    const asked = `${input.owner}/${input.name}`;
+    if (byId && byId.id !== byName?.id)
+      return {
+        outcome: 'conflict' as const,
+        why: `仓号 ${input.githubId} 已经登记在 ${byId.owner}/${byId.name} 上（多半改了名或转了主人），没把 ${asked} 再登记一遍`,
+      };
+    if (byName && byName.githubId !== null && byName.githubId !== input.githubId)
+      return {
+        outcome: 'conflict' as const,
+        why: `库里的 ${byName.owner}/${byName.name} 登记的仓号是 ${byName.githubId}，GitHub 上现在是 ${input.githubId}（多半删了重建）：先核对，没改`,
+      };
+    if (byName && byName.githubId === input.githubId)
+      return { outcome: 'unchanged' as const, repoId: byName.id };
+
+    let repoId: string;
+    let outcome: 'created' | 'updated';
+    if (byName) {
+      await tx.update(repos).set({ githubId: input.githubId }).where(eq(repos.id, byName.id));
+      repoId = byName.id;
+      outcome = 'updated';
+    } else {
+      const [row] = await tx
+        .insert(repos)
+        .values({
+          owner: input.owner,
+          name: input.name,
+          githubId: input.githubId,
+          defaultBranch: input.defaultBranch,
+          testCommand: 'pnpm check',
+        })
+        .returning({ id: repos.id });
+      if (!row) throw new Error('仓没写进去：insert 没回行');
+      repoId = row.id;
+      outcome = 'created';
+    }
+    const [audit] = await tx
+      .insert(auditLog)
+      .values({
+        actorKind: input.actor.kind,
+        actorId: input.actor.id,
+        action: REPO_REGISTER,
+        target: `repo:${repoId}`,
+        before: byName ? { githubId: null } : null,
+        after: { owner: input.owner, name: input.name, githubId: input.githubId },
+        reason: input.reason,
+        via: 'ops',
+        ok: true,
+      })
+      .returning({ id: auditLog.id });
+    if (!audit) throw new Error('操作记录没写进去：insert 没回行');
+    return { outcome, repoId, auditId: audit.id };
+  });
+}

@@ -367,6 +367,8 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
       title: `账号池 ${t.poolId} 整池暂停：${a.poolHold.title}`,
       body: `路由探针探 ${t.routeId} 时发现的。${a.poolHold.body}${notice ? `。${notice}` : ''}`,
       options: poolHoldOptions(t.poolId),
+      // 整池要人修（封号、订阅到期、要人登录）：只有创始人的账号上做得了（#2729）
+      reason: 'human-only',
     });
     return;
   }

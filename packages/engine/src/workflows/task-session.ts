@@ -101,6 +101,7 @@ export async function writeSession(
   brief: TaskBrief,
   tier: TierDecision,
   wt: Worktree,
+  opts: { plan?: boolean } = {},
 ): Promise<void> {
   let counters = ZERO;
   let avoid: Avoid = NO_AVOID;
@@ -169,6 +170,8 @@ export async function writeSession(
       'implement',
       `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}${resumeNote}${picked.probeNote ? `；${picked.probeNote}` : ''}`,
     );
+    // 这一轮第一个派上的模型（#2762 流程健康记账，纯状态）
+    rt.roundFirstModel ??= route.modelId;
     // 这一段的起跑时刻：被暂停取消时拿不到执行编号，续会话凭它去库里找这一段
     const attemptAt = Date.now();
     let evidence: SegmentEvidence | null = null;
@@ -194,6 +197,8 @@ export async function writeSession(
         ...(resumeSessionId ? { resumeSessionId } : {}),
         // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
         ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
+        // 重活先出方案的那一段（#2755）：提示词另说只读、只回方案 JSON
+        ...(opts.plan ? { mode: 'plan' as const } : {}),
       };
       // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
       let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });

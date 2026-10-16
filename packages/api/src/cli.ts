@@ -26,6 +26,7 @@
 //   release pause|continue（#2038）：release.sh 切版本前给手上有会话的任务发 hard 暂停、切完只继续这一批。见 release-pause.ts。
 //   project show|set-profile <owner/仓名>（#2738）：看、换一个仓的档案（repos.profile）。见 project-cli.ts。
 //   emergency-issue --key <键> --title <标题>（#2728）：开急修单（四节正文从标准输入读），法国自动发布在同一个提交发版连败时调。见 emergency-issue.ts。
+//   notify raise --key <键> --title <标题>（#2729）：法国上的发版脚本写卡住报警的统一入口（经 upsertAlert，正文从标准输入读）。见 notify-cli.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 
@@ -34,6 +35,7 @@ import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
 import { ENGINE_LABEL, LOCAL_LABEL } from '@fleet-dao/conventions';
+import type { Db } from '@fleet-dao/db';
 import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
@@ -55,6 +57,13 @@ import {
   parseFeishuPushArgs,
   runFeishuPush,
 } from './feishu-push-cli.ts';
+import {
+  NOTIFY_USAGE,
+  NotifyCliError,
+  type NotifyRaiseArgs,
+  parseNotifyArgs,
+  raiseNotify,
+} from './notify-cli.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type { AuditRecord, AutoDispatchChange, IntakeRepo, Store, User } from './ports.ts';
 import {
@@ -796,6 +805,43 @@ export interface CliDeps {
   readFile?: (path: string) => Promise<string>;
   /** 开急修单（emergency-issue 命令用，#2728）：「引擎」机器人的 GitHub，挂当前版本。不给就是真的：连库记幂等账、读机器人凭据。 */
   openEmergencyIssues?: (url: string) => Promise<{ port: EmergencyIssuePort; close(): Promise<void> }>;
+  /** 连库给出 Db（notify 命令用，#2729）。不给就是真的 createDb。 */
+  openDb?: (url: string) => Promise<{ db: Db; close(): Promise<void> }>;
+}
+
+/** notify raise（#2729）：脚本写提醒的统一入口。参数不对不连库（退出 2）；记上了打编号（新建还是原地更新），没记上退出 1。 */
+async function runNotifyCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  let args: NotifyRaiseArgs;
+  try {
+    args = parseNotifyArgs(rest);
+  } catch (err) {
+    if (err instanceof NotifyCliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    throw err;
+  }
+  let opened: { db: Db; close(): Promise<void> } | undefined;
+  try {
+    const body = await (deps.readStdin ?? readAllStdin)();
+    const url = databaseUrl(deps.env);
+    const conn = deps.openDb
+      ? await deps.openDb(url)
+      : await import('@fleet-dao/db').then(({ createDb }) => createDb({ url }));
+    opened = conn;
+    const got = await raiseNotify(conn.db, args, body);
+    deps.out(`${got.created ? '记了' : '更新了'}提醒 ${args.key}（编号 ${got.id}）`);
+    return 0;
+  } catch (err) {
+    if (err instanceof CliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    deps.err(`提醒没记上：${errMessage(err)}`);
+    return 1;
+  } finally {
+    await opened?.close().catch(() => undefined);
+  }
 }
 
 async function openPgEmergencyIssues(
@@ -876,11 +922,12 @@ async function openPgStore(url: string): Promise<{ store: Store; close(): Promis
 }
 
 async function openPgProject(url: string): Promise<{ port: ProjectPort; close(): Promise<void> }> {
-  const { createDb, findRepoProfile, setRepoProfile } = await import('@fleet-dao/db');
+  const { createDb, findRepoProfile, registerRepo, setRepoProfile } = await import('@fleet-dao/db');
   const { withStatementTimeout } = await import('@fleet-dao/store');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   return {
     port: {
+      register: (input) => registerRepo(db, input),
       find: (owner, name) => findRepoProfile(db, owner, name),
       setProfile: (input) => setRepoProfile(db, input),
     },
@@ -953,6 +1000,7 @@ const USAGES: Record<string, string> = {
   attention: ATTENTION_USAGE,
   project: PROJECT_USAGE,
   'emergency-issue': EMERGENCY_ISSUE_USAGE,
+  notify: NOTIFY_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -1067,6 +1115,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'attention') return runAttentionCommand(rest, deps);
   if (command === 'project') return runProjectCommand(rest, deps);
   if (command === 'emergency-issue') return runEmergencyIssueCommand(rest, deps);
+  if (command === 'notify') return runNotifyCommand(rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
 }
@@ -1268,6 +1317,7 @@ async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promis
         port: {
           find: async (owner, name) => (port ?? (await connect())).find(owner, name),
           setProfile: async (input) => (port ?? (await connect())).setProfile(input),
+          register: async (input) => (port ?? (await connect())).register(input),
         },
         operator: operatorName(deps.env),
         readFile: deps.readFile ?? ((path) => readFile(path, 'utf8')),

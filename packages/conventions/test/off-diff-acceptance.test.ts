@@ -8,6 +8,22 @@ import {
   splitAcceptanceItems,
 } from '../src/off-diff-acceptance.ts';
 
+// 真单 #2032 / #2082 的「怎么算做完」原文：这些是现场、线上和 SSH 的
+// 运行态证据，不能只靠 PR 的 diff 和测试输出验收。
+const ISSUE_2032_DONE = [
+  '1. 确认落后的是哪些「相关提交」（人工档路径），是否确需整套 `bash /srv/fleet-dao/deploy/france.sh`（或以 root 等价应用）。',
+  '2. 重跑/应用后 healthz `deploy_lag` 回到 `ok:true`（整体是否仍因 #2023 的 github_app 503 另论）。',
+  '3. 若属可接受的短暂窗口或已有意暂缓：在本单注明原因与可接受状态后关单，避免监督反复当新断链开单。',
+  '4. 顺带：恢复指挥官到法国机的 SSH（见 #1775），以便断链时能做最小恢复。',
+].join('\n');
+
+const ISSUE_2082_DONE = [
+  '1. 查清 10-14 08:40 那轮 canary 在「记账」失败的具体原因（日志、失败单号、台账写入结果）。',
+  '2. 修好后让 canary 再跑通一轮（或明确「无待验」且 healthz canary 不再因本断点报红）。',
+  '3. healthz 至少不再因 canary_broken「记账」报红（整体是否仍因 #2023/#2032 503 另论）。',
+  '4. 顺带：恢复指挥官到法国机的 SSH（见 #1775），以便断链时能做最小恢复。',
+].join('\n');
+
 describe('offDiffWords：该拦的', () => {
   it.each([
     ['截图', '- 手机宽度（390）下按钮点击区不小于 44px，截图贴在 PR 里。', '截图'],
@@ -23,6 +39,11 @@ describe('offDiffWords：该拦的', () => {
     ['真机', '- 真机上点发布能看到结论。', '真机'],
     ['人工确认', '- 人工确认页面不乱。', '人工确认'],
     ['创始人确认', '- 创始人看过后确认可以。', '创始人看过后确认'],
+    ['读库', '- 在法国库上读一遍实际的用途→模型→档位。', '在法国库上读'],
+    ['读回', '- 读回接口响应里的状态和结论。', '读回接口响应里的状态和结论'],
+    ['贴评论', '- 把核对结果贴进本单评论。', '贴进本单评论'],
+    ['恢复连接', '- 恢复指挥官到法国机的 SSH。', '恢复指挥官到法国机的 SSH'],
+    ['健康检查读回', '- healthz deploy_lag 回到 ok:true。', 'healthz deploy_lag 回到'],
   ])('%s', (_name, item, word) => {
     expect(offDiffWords(item)).toContain(word);
   });
@@ -49,6 +70,22 @@ describe('offDiffWords：不该拦的', () => {
 });
 
 describe('offDiffAcceptanceItems / describeOffDiff', () => {
+  it('#2032 和 #2082 的原文逐条命中，并保留哪一条、为什么', () => {
+    const two = offDiffAcceptanceItems(ISSUE_2032_DONE);
+    expect(two).toHaveLength(3);
+    expect(two[0]?.words).toContain('healthz `deploy_lag` 回到');
+    expect(two[1]?.words).toContain('在本单注明');
+    expect(two[2]?.words).toContain('恢复指挥官到法国机的 SSH');
+
+    const eight = offDiffAcceptanceItems(ISSUE_2082_DONE);
+    expect(eight).toHaveLength(4);
+    expect(eight[0]?.words).toContain('（日志、');
+    expect(eight[1]?.words).toContain('healthz canary 不再');
+    expect(eight[2]?.words).toContain('healthz 至少不再');
+    expect(eight[3]?.words).toContain('恢复指挥官到法国机的 SSH');
+    expect(describeOffDiff(eight)).toContain('healthz 至少不再因 canary_broken');
+  });
+
   it('按条切开，只回命中的那几条，原文带列表符号', () => {
     const hits = offDiffAcceptanceItems('- 测试 a 过。\n- 带两张截图。\n\n上线后看一眼\n监控面板。');
     expect(hits).toEqual([

@@ -70,6 +70,12 @@
 //   （ColdVerifyInput.testOutput，只给和验收的头对得上的那一份）。
 // - PR 说明的「做了什么」取动手会话最后一条回复（#2723，taskPrDid / sessionDidLines，有截断上限）：开 PR 时写进去；
 //   第 2 轮起推上去后改 PR 正文换成这一轮的回复（patched('pr-body-from-session')，updatePrBody，没改成不挡原流程）。
+// - 重活先出方案（#2755，patched('plan-first-heavy')，planFirst）：heavyweight 第一轮先跑一段只读会话，最后一条回复只回方案 JSON，
+//   格式不对续进会话重出一次，还不对照常动手；认下了带进意见、动手续这个会话。
+// - 体量预算（#2755，Limits.prLineBudget，0 = 关；patched('pr-line-budget')，withinLineBudget）：推之前看交的头相对主线新增几行，
+//   超了第一次打回收窄，第二次停下等人并附拆单建议，人点「继续」照推。
+// - 每一轮收场记进库（#2762，patched('round-outcome')，startRound / endRound）：返工、合并、放弃叫停时各记一行 task_rounds
+//   （怎么结束的按 lastProblem 认，roundOutcomeOf；档位、首派模型、PR 新增行数），每日简报「流程健康」按它算。记不成不挡原流程。
 // - 交活没提交续一次（#2722，patched('commit-nudge-same-round')，nudgeCommit）：会话收场时没提交、或树里有剩（常见是把测试丢到后台就结束了），
 //   读完交付先续同一个会话一次让它提交，不算一轮；续不上（planResume 判开新会话）就不续。续了还没交干净，照旧返工进下一轮。
 
@@ -78,7 +84,7 @@ import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
 import type { Limits } from '../limits.ts';
-import type { PrBody, Worktree } from '../ports.ts';
+import type { PrBody, RecordRoundInput, RoundOutcome, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import {
@@ -112,11 +118,19 @@ import {
   hygieneSpotKey,
   hygieneSpots,
   noteEmptyCommit,
+  overBudgetLine,
+  parsePlan,
+  planGoLine,
+  planRetryLine,
   RESUME_STREAK_LIMIT,
+  roundOutcomeOf,
   SELF_CHECK_RED_LINE,
   SKIP_CI_PR_VERIFIED,
   SKIP_CI_SELF_VERIFY,
   selfCheckText,
+  splitSuggestion,
+  stoppedOutcomeOf,
+  type TaskPlan,
   taskPrDid,
   withFamily,
 } from './task-support.ts';
@@ -143,6 +157,14 @@ class TaskFlow {
   private emptyDeliveryRedone = false;
   /** 上一回推分支被卫生检查拦下的命中处（排好序）。同一处再拦才停下；推上去了就清掉。 */
   private lastHygieneSpots: string | null = null;
+  /** 有一轮开始了、还没记收场（#2762）：一轮只记一次。 */
+  private roundOpen = false;
+  /** 重活先出方案（#2755）：这张单试过没有、认下的方案。 */
+  private planTried = false;
+  private plan: TaskPlan | null = null;
+  /** 体量预算（#2755）：打回过一次没有；人看过点「继续」后这张单不再判。 */
+  private budgetBounced = false;
+  private budgetApproved = false;
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
     this.rt = new TaskRuntime(input, acts, limits);
@@ -189,17 +211,60 @@ class TaskFlow {
           rt.head !== null &&
           patched('continue-redelivers-open-pr')
         ) {
+          // 继续后先重走交付的这一次也算一轮收场（#2762）：合了记 merged，又返工记返工的原因
+          this.startRound();
           const redelivered = await this.deliver(brief);
           if (redelivered !== 'rework') return this.finish(redelivered.commit);
+          await this.endRound(roundOutcomeOf('deliver', rt.status.lastProblem, rt.feedback));
           continue;
         }
       }
       rt.round += 1;
-      if (!(await this.implement(brief, tier))) continue;
+      this.startRound();
+      if (!(await this.implement(brief, tier))) {
+        await this.endRound(roundOutcomeOf('implement', rt.status.lastProblem, rt.feedback));
+        continue;
+      }
 
       const delivered = await this.deliver(brief);
-      if (delivered === 'rework') continue;
+      if (delivered === 'rework') {
+        await this.endRound(roundOutcomeOf('deliver', rt.status.lastProblem, rt.feedback));
+        continue;
+      }
       return this.finish(delivered.commit);
+    }
+  }
+
+  /** 一轮开始（#2762）：清掉上一轮的首派模型，记下有一轮没收场。纯状态。 */
+  private startRound(): void {
+    this.rt.roundFirstModel = null;
+    this.roundOpen = true;
+  }
+
+  /**
+   * 一轮收场（#2762，patched('round-outcome')）：怎么结束的、档位、首派模型、PR 新增行数记进库（task_rounds），每日简报「流程健康」按它算。
+   * 一轮只记一次；记不成只写日志，不挡原流程。放弃、叫停时也要记，所以不进可取消的范围。老历史没有这个标记，不记。
+   */
+  private async endRound(outcome: RoundOutcome): Promise<void> {
+    const rt = this.rt;
+    if (!this.roundOpen) return;
+    this.roundOpen = false;
+    if (!patched('round-outcome')) return;
+    rt.roundSeq += 1;
+    const input: RecordRoundInput = {
+      taskId: rt.input.taskId,
+      workflowId: workflowInfo().workflowId,
+      seq: rt.roundSeq,
+      round: rt.round,
+      outcome,
+      ...(rt.status.tier ? { tier: rt.status.tier.tier } : {}),
+      ...(rt.roundFirstModel ? { firstModel: rt.roundFirstModel } : {}),
+      ...(rt.addedLines !== null ? { addedLines: rt.addedLines } : {}),
+    };
+    try {
+      await CancellationScope.nonCancellable(() => rt.acts.recordRound(input));
+    } catch (error) {
+      log.warn('这一轮怎么收场的没记进库，照旧往下走', { error: String(error), outcome });
     }
   }
 
@@ -427,6 +492,10 @@ class TaskFlow {
       return true;
     }
     this.planReworkResume();
+    // 重活第一轮先出方案（#2755）。老历史没有这个标记，照旧直接动手
+    if (tier.tier === 'heavyweight' && rt.round === 1 && !this.planTried && patched('plan-first-heavy')) {
+      await this.planFirst(brief, tier, wt);
+    }
     await writeSession(rt, brief, tier, wt);
 
     let delivery = await this.readDelivery(wt);
@@ -481,6 +550,7 @@ class TaskFlow {
       return false;
     }
     if (patched('avoid-empty-commit-route')) rt.commitMisses = 0;
+    if (!(await this.withinLineBudget(delivery))) return false;
     let pushed: Awaited<ReturnType<typeof rt.acts.pushBranch>>;
     try {
       pushed = await rt.step(
@@ -519,6 +589,8 @@ class TaskFlow {
       rt.selfCheckOutput = { ...rt.selfCheckOutput, head: pushed.head };
     rt.since = delivery.head;
     rt.changedFiles = pushed.changedFiles ?? delivery.changedFiles;
+    // PR 新增行数（#2762 流程健康记账）：推分支没数成就是没量到，不拿 0 顶
+    rt.addedLines = pushed.addedLines ?? null;
     if (rt.prNumber === null) {
       // 代数只在新历史里传给开 PR：重做的新一代才能关掉自己上一代留下的 PR。老历史重放不传，活动入参对得上。
       const generation = patched('redo-supersede-pr')
@@ -667,6 +739,72 @@ class TaskFlow {
     return this.readDelivery(wt);
   }
 
+  /**
+   * 重活先出方案（#2755，patched('plan-first-heavy')）：先跑一段只读会话，最后一条回复只回方案 JSON（改哪些文件、预计新增行、对应哪几条验收）。
+   * 格式不对续进同一个会话重出一次；还不对照常动手（不停下）。认下了，方案带进这一轮的意见，动手那一段续这个会话（读过的代码不再读）。
+   * 方案这几段不算返工、不算连着续的次数。
+   */
+  private async planFirst(brief: TaskBrief, tier: TierDecision, wt: Worktree): Promise<void> {
+    const rt = this.rt;
+    this.planTried = true;
+    const keep = rt.feedback;
+    await rt.advance('implement', `第 ${rt.round} 轮：重活，先出方案（只读）`);
+    await writeSession(rt, brief, tier, wt, { plan: true });
+    let parsed = parsePlan(rt.lastAnswer);
+    const first = rt.lastSession;
+    if (!parsed.ok && first) {
+      rt.feedback = [planRetryLine(parsed.why)];
+      rt.resumeFrom = { previous: { runId: first.runId }, worktreePath: first.worktreePath };
+      await rt.advance('implement', `第 ${rt.round} 轮：方案格式不对（${parsed.why}），续进会话重出一次`);
+      await writeSession(rt, brief, tier, wt, { plan: true });
+      parsed = parsePlan(rt.lastAnswer);
+    }
+    if (parsed.ok) {
+      this.plan = parsed.plan;
+      rt.feedback = [planGoLine(parsed.plan, this.lineBudget()), ...keep];
+      await rt.advance(
+        'implement',
+        `第 ${rt.round} 轮：方案认下了（${parsed.plan.files.length} 个文件、预计新增 ${parsed.plan.addedLines} 行），照方案动手`,
+      );
+    } else {
+      rt.feedback = keep;
+      await rt.advance('implement', `第 ${rt.round} 轮：方案两次都没认出（${parsed.why}），照常动手`);
+    }
+    const last = rt.lastSession;
+    if (last) rt.resumeFrom = { previous: { runId: last.runId }, worktreePath: last.worktreePath };
+    rt.resumeStreak = 0;
+  }
+
+  /** 这张单的体量预算（#2755）：老历史开工时解析的上限里没有这一项、或设成 0，都是不判。 */
+  private lineBudget(): number {
+    const budget: unknown = this.rt.limits.prLineBudget;
+    return typeof budget === 'number' && Number.isFinite(budget) && budget > 0 ? budget : 0;
+  }
+
+  /**
+   * 推之前比体量预算（#2755，patched('pr-line-budget')）：交的头相对主线新增行超了预算，第一次打回让会话收窄（意见带上方案和方案外的文件）；
+   * 收窄过还超就停下等人，附拆单建议，人点「继续」照这一版推、这张单后面不再判。没量到新增行（老历史、没数成）不判。回 false＝这一轮返工。
+   */
+  private async withinLineBudget(delivery: DeliveryRead): Promise<boolean> {
+    const rt = this.rt;
+    const budget = this.lineBudget();
+    const added = delivery.addedLines;
+    if (budget === 0 || added === undefined || added <= budget || this.budgetApproved) return true;
+    if (!patched('pr-line-budget')) return true;
+    if (!this.budgetBounced) {
+      this.budgetBounced = true;
+      rt.feedback = [overBudgetLine(added, budget, this.plan, delivery.changedFiles)];
+      rt.status.lastProblem = '改动超出体量预算';
+      return false;
+    }
+    await rt.park(
+      `改动超出体量预算：新增 ${added} 行，预算 ${budget} 行，收窄过一次仍超`,
+      `${splitSuggestion(delivery.changedFiles)} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。`,
+    );
+    this.budgetApproved = true;
+    return true;
+  }
+
   /** 交付核对过得去：有新提交、树里没剩没提交的、没有冲突标记。 */
   private deliveredClean(delivery: DeliveryRead): boolean {
     return (
@@ -736,6 +874,7 @@ class TaskFlow {
   /** 收尾：关单、收工作树、写库。 */
   private async finish(commit?: string): Promise<TaskRun> {
     const rt = this.rt;
+    await this.endRound('merged');
     rt.set('done', `PR #${rt.prNumber} 已合并`);
     rt.status.lastProblem = null;
     await rt.step('closeIssue', () =>
@@ -781,6 +920,7 @@ class TaskFlow {
 
   async abandoned(command: AbandonCommand): Promise<TaskRun> {
     const rt = this.rt;
+    await this.endRound(stoppedOutcomeOf(rt.status.lastProblem));
     rt.set('abandoned', `被 ${command.by} 放弃：${command.reason}`);
     await this.cleanup(true);
     await rt.mirror('stopped');
@@ -796,6 +936,7 @@ class TaskFlow {
   /** 工作流自己被取消（叫停）：先存档收树，再让取消往外抛。 */
   async cancelled(): Promise<void> {
     const rt = this.rt;
+    await this.endRound(stoppedOutcomeOf(rt.status.lastProblem));
     rt.set('abandoned', '工作流被取消');
     await this.cleanup(true);
     await CancellationScope.nonCancellable(() => rt.mirror('stopped'));

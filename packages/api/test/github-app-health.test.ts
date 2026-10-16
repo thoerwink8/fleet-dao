@@ -66,6 +66,7 @@ describe('github_app', () => {
       title: 'acme/gadgets：先去 GitHub 把两个机器人装到这个仓',
       body: '占位',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     const err = await githubAppHealthCheck(t.db)().then(
       () => null,
@@ -105,6 +106,7 @@ describe('github_app', () => {
       title: '没装',
       body: '占位',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     await upsertAlert(t.db, {
       dedupeKey: failKey,
