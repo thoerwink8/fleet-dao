@@ -146,6 +146,7 @@ export const SQL = {
   // （没跑迁移 0025）这一块就报「库查询出错」，不拿旧表顶。
   routes: `select coalesce(jsonb_agg(x order by x.id), '[]'::jsonb) from (
     select ro.id, ro.pool_id as pool, ro.model_id as model, ro.host_id as host, ro.alive, ro.probe_state, ro.probed_at,
+           ro.probe_tier, ro.probe_next_at,
            left(ro.probe_detail, 400) as probe_detail, p.org_kind, ch.enabled as channel_enabled, ch.billing,
            exists (select 1 from routing_catalog rc join routing_purpose_models rpm on rpm.model_id = rc.model_id
                    where rc.route_id = ro.id and rc.enabled) as in_use

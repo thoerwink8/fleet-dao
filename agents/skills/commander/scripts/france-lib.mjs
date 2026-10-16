@@ -35,7 +35,7 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
 /** @typedef {{ repo?: string | null, n?: number | null, stage: string, route_id: string, model?: string | null, model_name?: string | null, host?: string | null, pool?: string | null, billing?: string | null, actual_model?: string | null, queued_at: string, started_at?: string | null, ended_at?: string | null, input_tokens?: number | null, output_tokens?: number | null, cache_read_tokens?: number | null, cache_write_tokens?: number | null, cost_usd?: number | null, session_cost_usd?: number | null, outcome?: string | null, failure_code?: string | null, failure_message?: string | null, subtask_index?: number | null, subtask_title?: string | null }} RunRow */
 /** @typedef {{ level: string, dedupe_key: string, title: string, body?: string | null, link?: string | null, created_at: string, updated_at?: string | null, n?: number | null }} NotificationRow */
 /** @typedef {{ id: string, name: string, schedule: string, every: number, last_run?: JobRunFact | null, last_finished?: JobRunFact | null, last_success?: JobRunFact | null }} JobRow */
-/** @typedef {{ id: string, pool: string, model: string, host: string, alive: boolean, probe_state?: string | null, probed_at?: string | null, probe_detail?: string | null, org_kind?: string | null, channel_enabled: boolean, billing: string, in_use: boolean }} RouteRow */
+/** @typedef {{ id: string, pool: string, model: string, host: string, alive: boolean, probe_state?: string | null, probed_at?: string | null, probe_tier?: string | null, probe_next_at?: string | null, probe_detail?: string | null, org_kind?: string | null, channel_enabled: boolean, billing: string, in_use: boolean }} RouteRow */
 /** @typedef {{ at: string, action: string, ok: boolean, from_org?: string | null, to_org?: string | null, error?: string | null }} OrgAuditRow */
 /** @typedef {{ repo: string, auto_dispatch_since?: string | null }} RepoRow */
 /** @typedef {{ at: string, text: string }} RoundRow */
@@ -90,7 +90,8 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
 /**
  * 异常的类别（可选，稳定的英文名，给程序按类别过滤用，不要去匹配 what 的文案）。现在有两种，都是引擎总开关关着（发版车暂停期）时必然出现、开回来就消失的：
  * `task-idle`＝单在跑、手上没有会话、N 分钟没动。
- * `route-stale`＝路由算在线，但结论过了该探的时候没更新（或从没探过）：路由探针要引擎开着才跑（#1520）。
+ * `route-stale`＝路由算在线，但过了该探的时刻（probe_next_at）20 分钟还没探（或从没探过）：路由探针要引擎开着才跑（#1520）。
+ * 在线、probe_next_at 为空的不算：决定 0093 起定时这一轮不复探探通了的路由，派之前由派前探测再探，结论旧是常态（#2700）。
  * @typedef {{ level: 'bad' | 'note', what: string, where: string, kind?: 'task-idle' | 'route-stale' | 'task-park', key?: string }} Issue
  */
 export const KIND_TASK_IDLE = 'task-idle';
@@ -165,9 +166,16 @@ export const LIMITS = {
   taskQuiet: 60,
 };
 
-/** 路由探针：钟每 15 分钟走一次，结论 45 分钟没更新算过期，不分执行方式（真探间隔按活跃三档，#1798 片 3；shared 的 web-api/routing.ts）。 */
+/**
+ * 路由探针：钟每 15 分钟走一次，不分执行方式（shared 的 web-api/routing.ts）。
+ * 在线的路由算不算「探针停了、在线是旧结论」（记 bad）只看两样：从没探过；或探针排了下一次（probe_next_at 有值）、
+ * 过了它 PROBE_OVERDUE 分钟还没探（和驾驶舱「检测中断」同一条线）。探通了的在线路由定时这一轮不复探、probe_next_at 写空
+ * （决定 0093，design 第九节「路由探针」），由派前探测在派之前真探一次：这种结论超过 PROBE_STALE 分钟只在展示上标「旧结论」，
+ * 不记 bad（#2700：原先一律按 45 分钟记 bad，常态下十几条在线的路由天天报）。探针整个停没停看 route-probe 定时任务新不新鲜。
+ */
 export const PROBE_EVERY = 15;
 export const PROBE_STALE = 45;
+export const PROBE_OVERDUE = 20;
 /** @param {string} _host 留着给旧调用方，已不再按执行方式放宽。 */
 export const probeStaleMinutes = (_host) => PROBE_STALE;
 
@@ -665,6 +673,8 @@ const ROW_SPECS = {
     alive: 'bool',
     probe_state: 'str?',
     probed_at: 'iso?',
+    probe_tier: 'str?',
+    probe_next_at: 'iso?',
     probe_detail: 'str?',
     org_kind: 'str?',
     channel_enabled: 'bool',
@@ -1473,10 +1483,16 @@ export function buildView(snapshot) {
     ? S.routes.rows.map((r) => {
         const staleAfter = probeStaleMinutes(r.host);
         const age = r.probed_at ? minutesBetween(r.probed_at, at) : null;
-        const stale = r.alive && (age === null || age > staleAfter);
+        const nextAt = r.probe_tier === 'unused' ? null : (r.probe_next_at ?? null);
+        const late = nextAt === null ? null : minutesBetween(nextAt, at);
+        const stale = r.alive && (age === null || (late !== null && late > PROBE_OVERDUE));
+        // 在线、探针没排下一次（派前再探）、结论超过 45 分钟：展示上标旧，不记 bad
+        const expired = r.alive && !stale && nextAt === null && age !== null && age > staleAfter;
         if (stale)
           bad(
-            `路由 ${r.id} 算在线，但结论 ${age === null ? '从没探过' : `${age} 分钟没更新`}（过 ${staleAfter} 分钟算旧：在线是旧结论）`,
+            age === null
+              ? `路由 ${r.id} 算在线，但结论从没探过（在线是旧结论）`
+              : `路由 ${r.id} 算在线，但过了该探的时刻 ${late} 分钟还没探、结论 ${age} 分钟没更新（过 ${PROBE_OVERDUE} 分钟算探针停了：在线是旧结论）`,
             WHERE.route,
             KIND_ROUTE_STALE,
           );
@@ -1486,6 +1502,7 @@ export function buildView(snapshot) {
           !/会话用户挂的组织认不出/.test(r.probe_detail ?? '')
         )
           note(`路由 ${r.id} 没探通：${r.probe_detail ?? '没写原因'}`, WHERE.route);
+        const word = r.probe_state ? (PROBE_WORDS[r.probe_state] ?? r.probe_state) : '还没探过';
         return {
           id: r.id,
           pool: r.pool,
@@ -1494,13 +1511,15 @@ export function buildView(snapshot) {
           hostName: HOST_NAMES[r.host] ?? r.host,
           alive: r.alive,
           state: r.probe_state,
-          stateName: r.probe_state ? (PROBE_WORDS[r.probe_state] ?? r.probe_state) : '还没探过',
+          stateName: expired ? `${word}（旧结论：定时不复探，派之前再探）` : word,
           probedAt: r.probed_at,
+          nextProbeAt: nextAt,
           detail: r.probe_detail,
           orgKind: r.org_kind,
           inUse: r.in_use,
           billing: r.billing,
           stale,
+          expired,
           staleAfter,
         };
       })
