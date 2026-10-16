@@ -24,6 +24,8 @@ export interface CatalogEntry {
   modelId: string;
   displayName: string;
   family: string;
+  /** 强弱档（目录独占）；没标没有。 */
+  strength?: Model['strength'];
   /** 在路由两层里的结论；没配进任何用途 = null（没人算过，不画成活也不画成死）。 */
   verdict: LivenessVerdict | null;
   /** 路由两层里这个模型下的路由（带开关、三件事）；没配进用途为空。 */
@@ -79,6 +81,7 @@ export function buildCatalog(
         continue;
       }
       const meta = info.get(m.modelId);
+      const strength = m.strength ?? meta?.strength;
       entries.set(m.modelId, {
         modelId: m.modelId,
         displayName: m.displayName,
@@ -92,6 +95,7 @@ export function buildCatalog(
         channelIds: channelsOf(m.modelId, m.routes),
         discovered: discoveredOf(m.modelId, m.routes),
         ...(meta?.retiredAt ? { retiredAt: meta.retiredAt } : {}),
+        ...(strength ? { strength } : {}),
       });
     }
   }
@@ -112,6 +116,7 @@ export function buildCatalog(
         channelIds: channelsOf(m.id, []),
         discovered: discoveredOf(m.id, []),
         ...(m.retiredAt ? { retiredAt: m.retiredAt } : {}),
+        ...(m.strength ? { strength: m.strength } : {}),
       }),
     )
     .sort((a, b) => a.displayName.localeCompare(b.displayName) || a.modelId.localeCompare(b.modelId));

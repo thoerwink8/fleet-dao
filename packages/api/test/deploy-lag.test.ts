@@ -126,6 +126,12 @@ describe('判定：读的时候现算', () => {
     expect(judge(input(H2, state({ tier: { commit: H2, at: ago(MIN), result: 'ok', detail: '' } }))).ok).toBe(
       true,
     );
+    // 冷启动窗口记 unchecked：4318 还没 listen，不当成没装成，healthz 不因此 503
+    expect(
+      judge(
+        input(H2, state({ tier: { commit: H2, at: ago(MIN), result: 'unchecked', detail: 'curl 退出 7' } })),
+      ).ok,
+    ).toBe(true);
     expect(judge(input(H2, state())).ok).toBe(true);
   });
 

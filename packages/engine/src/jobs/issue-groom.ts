@@ -1,7 +1,7 @@
-// 单子进门自动打标挂版本（#448）：新 issue 没类别标签问 Jev、没里程碑按规则挂、版本关了没做完的单挪到下一版、
-// 未排期的单闲置够久照 Kubernetes 两段清理。GitHub 对账补漏每小时起一轮（github-reconcile.ts 的 issueGroomDue，
-// 和关单对账同一种「按点起」）。判断全在 @fleet-dao/conventions 的 issue-groom.ts（categoryPlan、milestonePlan、
-// handoffPlan、idlePlan），这里只按受管的仓读现状、调判断、把结果写回去，一个仓一个仓地记「查成了没有」。
+// 单子进门自动打标挂版本（#448）：新 issue 没类别标签问 Jev、没里程碑按规则挂、未排期的单闲置够久照 Kubernetes 两段清理
+// （版本关了没做完的单挪到下一版归版本收口 @fleet-dao/conventions 的 version-cut.ts，#2683）。GitHub 对账补漏每小时起一轮
+// （github-reconcile.ts 的 issueGroomDue，和关单对账同一种「按点起」）。判断全在 @fleet-dao/conventions 的 issue-groom.ts
+// （categoryPlan、milestonePlan、idlePlan），这里只按受管的仓读现状、调判断、把结果写回去，一个仓一个仓地记「查成了没有」。
 //
 // 挂版本和查闲置揉在同一个循环（都只看 milestone === null 的单）：这一轮刚挂上当前版本的单，同一轮不再查闲置——
 // 不然一张单既被挂了当前版本、又被判「未排期闲置太久」，自相矛盾。milestonePlan 判「未排期」或「算不出当前版本」
@@ -16,8 +16,6 @@ import {
   categoryRemovedByHuman,
   DEFAULT_IDLE_POLICY,
   daysBetween,
-  handoffComment,
-  handoffPlan,
   IDLE_LABEL,
   type IdlePolicy,
   idleCloseComment,
@@ -41,7 +39,7 @@ export interface GroomIssueFacts {
   number: number;
   title: string;
   body: string;
-  /** 开单人是不是我们自己的机器人：milestonePlan 判「机器人开的」用它。 */
+  /** 开单人是不是机器人账号（GitHub 标 Bot 的都算）：milestonePlan 判「机器人开的」用它。 */
   authorIsBot: boolean;
   updatedAt: string;
   labels: readonly string[];
@@ -72,8 +70,6 @@ export interface IssueGroomJobDeps {
   addLabel(repo: IssueGroomRepo, issueNumber: number, label: string): Promise<void>;
   /** 给一张单挂里程碑。抛错＝没写成。 */
   setMilestone(repo: IssueGroomRepo, issueNumber: number, milestone: number): Promise<void>;
-  /** 在单上留一条言（幂等，按 key 认）：版本交接用。 */
-  comment(repo: IssueGroomRepo, issueNumber: number, key: string, body: string): Promise<void>;
   /** 关成「不做了」（@fleet-dao/github 的 closeIssue）。 */
   closeNotPlanned(repo: IssueGroomRepo, issueNumber: number, comment: string): Promise<void>;
   /** 这一轮的活动汇总成一条日报级提醒（同一个键，原地更新；design 第七节，不是要人拍的 decision）。 */
@@ -86,7 +82,7 @@ export interface IssueGroomJobDeps {
 export interface IssueGroomResult {
   /** 查成了几个仓。 */
   scanned: number;
-  /** 这一轮做了几个动作（贴的类别标签、挂的里程碑、交接挪的、标过时的、关掉的）。 */
+  /** 这一轮做了几个动作（贴的类别标签、挂的里程碑、标过时的、关掉的）。 */
   found: number;
   /** 没查成、没写成的，一条一句：照实写进这一轮的 why，这一轮不记 ok。 */
   unchecked: string[];
@@ -106,7 +102,6 @@ interface RepoActivity {
   labeled: { issue: number; label: KindLabel }[];
   lowConfidence: { issue: number; note: string }[];
   milestoned: { issue: number; milestone: string }[];
-  handedOff: { issue: number; from: string; to: string }[];
   staleMarked: number[];
   closed: number[];
 }
@@ -115,7 +110,6 @@ const emptyActivity = (): RepoActivity => ({
   labeled: [],
   lowConfidence: [],
   milestoned: [],
-  handedOff: [],
   staleMarked: [],
   closed: [],
 });
@@ -144,11 +138,6 @@ export function renderDigest(a: RepoActivity): string {
       `挂了当前版本（${a.milestoned.length}）：${lines(a.milestoned.map((x) => `#${x.issue} → ${x.milestone}`)).join('、')}`,
     );
   }
-  if (a.handedOff.length) {
-    parts.push(
-      `版本交接（${a.handedOff.length}）：${lines(a.handedOff.map((x) => `#${x.issue} ${x.from} → ${x.to}`)).join('、')}`,
-    );
-  }
   if (a.staleMarked.length)
     parts.push(
       `闲置贴「过时」（${a.staleMarked.length}）：${lines(a.staleMarked.map((n) => `#${n}`)).join('、')}`,
@@ -173,7 +162,6 @@ async function groomRepo(
   let found = 0;
   const slug = `${repo.owner}/${repo.name}`;
   const openMilestones = facts.milestones.filter((m) => m.state === 'open');
-  const milestoneByNumber = new Map(facts.milestones.map((m) => [m.number, m]));
 
   // 一、类别：没有类别标签的单，看标签时间线判「人摘过没有」，没摘过才问 Jev。
   for (const issue of facts.issues) {
@@ -259,34 +247,7 @@ async function groomRepo(
     }
   }
 
-  // 三、版本交接：挂着的里程碑已经关了、单还开着——挪到下一个版本。
-  for (const issue of facts.issues) {
-    if (issue.milestone === null) continue;
-    const target = milestoneByNumber.get(issue.milestone.number);
-    if (!target) {
-      unchecked.push(`${slug}#${issue.number} 挂着的里程碑「${issue.milestone.title}」不在这次读到的列表里`);
-      continue;
-    }
-    if (target.state !== 'closed') continue;
-    const decision = handoffPlan(openMilestones);
-    if (decision.action === 'stuck') {
-      unchecked.push(`${slug}#${issue.number} 挂着已关闭的「${issue.milestone.title}」，${decision.why}`);
-      continue;
-    }
-    try {
-      await deps.setMilestone(repo, issue.number, decision.to.number);
-      await deps.comment(
-        repo,
-        issue.number,
-        `issue-groom:handoff:${issue.milestone.number}`,
-        handoffComment(issue.milestone, decision.to),
-      );
-      activity.handedOff.push({ issue: issue.number, from: issue.milestone.title, to: decision.to.title });
-      found += 1;
-    } catch (err) {
-      unchecked.push(`${slug}#${issue.number} 版本交接没写成（${errMessage(err)}）`);
-    }
-  }
+  // 三、版本交接（里程碑关了、单还开着）不在这里：版本收口（@fleet-dao/conventions 的 version-cut.ts，#2683）到期那一步挪、每天兜底。
 
   return { activity, unchecked, found };
 }
@@ -318,7 +279,6 @@ export async function sweepIssueGroom(deps: IssueGroomJobDeps): Promise<IssueGro
       labeled: activity.labeled.length,
       lowConfidence: activity.lowConfidence.length,
       milestoned: activity.milestoned.length,
-      handedOff: activity.handedOff.length,
       staleMarked: activity.staleMarked.length,
       closed: activity.closed.length,
       unchecked: unchecked.length,

@@ -1,5 +1,7 @@
 # Changelog
 
+v4 起每版做了什么看里程碑收口段：版本一周一版、到期自动收口，收口时在那一版的 [里程碑](https://github.com/thoerwink8/fleet-dao/milestones?state=closed) 说明末尾写上关了几张、滚过去哪些、收口时的主线头（决定 0100）。
+
 写给人看的更新日志（#227）：格式照 [Keep a Changelog 1.1.0](https://keepachangelog.com/zh-CN/1.1.0/)，小标题用白话。平时把要发出去的更新写进下面的 `[Unreleased]`。
 
 发版不再按 `v<N>` 标记（决定 0032）：发版的单位是主线上的一个提交，由驾驶舱「发布到法国」按钮发；不再有「发布 v<N>」PR、`pnpm publish:pr`、`release.yml` 打 tag 和自动收节。下面已有的 `## [v<N>]` 节和 `v3` 等 tag 是历史，照旧保留。

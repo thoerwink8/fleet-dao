@@ -1,5 +1,5 @@
 {
-  "id": "aadb9027-7f9a-4dcb-bdf2-5ef856c6da3c",
+  "id": "1ed5ad45-8c04-4fbd-ae2f-c10536a07519",
   "prevId": "9b1e5c42-6d7a-4f0e-8a3b-2c4d5e6f7081",
   "version": "7",
   "dialect": "postgresql",
@@ -416,6 +416,12 @@
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": false
+        },
+        "strength": {
+          "name": "strength",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {},
@@ -433,7 +439,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "models_strength_known": {
+          "name": "models_strength_known",
+          "value": "\"models\".\"strength\" is null or \"models\".\"strength\" in ('strong', 'standard', 'light')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.pools": {

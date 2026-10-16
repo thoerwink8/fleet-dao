@@ -64,7 +64,10 @@ export const DeployLagState = z.object({
       detail: z.string(),
     })
     .nullable(),
-  /** 装机的自动档（france.sh --auto-tier，发完版顺带跑）：装到哪个提交、成没成；老版本的自动发布没有这个字段。 */
+  /**
+   * 装机的自动档（france.sh --auto-tier，发完版顺带跑）：装到哪个提交、成没成；老版本的自动发布没有这个字段。
+   * result=unchecked 是冷启动窗口（服务刚 ActiveEnter、4318 还没 listen），不是失败，不报 tier_failed。
+   */
   tier: z
     .object({
       commit: Sha.optional(),
@@ -195,7 +198,8 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
     });
   }
 
-  // 自动档没装成：自动发布单元当场报过警（alreadyAlerted）、30 分钟后自己再试，这里只让它进读数
+  // 自动档没装成（result=failed）：自动发布单元当场报过警（alreadyAlerted）、真失败隔 30 分钟再试，这里只让它进读数。
+  // result=unchecked 是冷启动窗口（4318 还没 listen，本轮不落 failed）：不报 tier_failed，否则发版重启后 healthz 会红到窗口结束甚至半小时。
   if (st.tier?.result === 'failed') {
     add({
       code: 'tier_failed',

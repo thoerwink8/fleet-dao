@@ -305,6 +305,27 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
     const r = run('bash', [`${CHECKOUT}/deploy/france.sh`, '--auto-tier'], { timeoutMs: 600_000 });
     return { code: r.code, out: `${r.stdout}\n${r.stderr}` };
   },
+  /**
+   * fleet-mirasim-session 这次进入 active 的时刻（毫秒）。冷启动窗口从这里起算（lib.mjs 的 TIER_BOOT_MS）：
+   * 刚 ActiveEnter 时 4318 还没 listen，curl 退出 7 不是装机失败。读不到回 null，调用方改从第一次看见退出 7 起算。
+   * `--timestamp=unix` 有时带 @ 前缀（和 release.sh 的 env_changed_since_start 同一套）。
+   */
+  async mirasimActiveEnter() {
+    const r = run(
+      'systemctl',
+      ['show', '-p', 'ActiveEnterTimestamp', '--timestamp=unix', '--value', 'fleet-mirasim-session.service'],
+      { timeoutMs: 10_000 },
+    );
+    if (r.code !== 0) return null;
+    const raw = String(r.stdout).trim().split('\n')[0]?.replace(/^@/, '') ?? '';
+    if (!/^[0-9]+$/.test(raw)) return null;
+    const sec = Number(raw);
+    return sec > 0 ? sec * 1000 : null;
+  },
+  /** 冷启动窗口内再探之前歇一会儿（lib.mjs 的 tierStep）。 */
+  sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  },
   async syncRules(user) {
     const flags = NO_SKILLS_USERS.includes(user) ? ['--no-skills'] : [];
     const r = run(

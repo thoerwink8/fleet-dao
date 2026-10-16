@@ -25,6 +25,8 @@ mirasim_run_dir() { printf '%s' "${MIRASIM_RUN_DIR//\{user\}/$1}"; } # 会话用
 # 连上了但不回（退出 28）只用 MIRASIM_HEALTH_TIMEOUT_TRIES：每次要等满 MIRASIM_HEALTH_MAX_TIME，试太多次会把装机读回拖很长。
 # 90 次：法国上重启后要 60 多秒才 listen（起服务时 relay-ticket、目录登记几个外网请求超时才往下走，10-16 实测 66 秒），
 # 15 次时自动档刚装完就判「没装成」。连上就停，平常不多等。
+# 等满仍是退出 7：这里判红。自动发布的 tierStep 另有冷启动窗口（auto-release/lib.mjs 的 TIER_BOOT_MS，从 ActiveEnter 起 3 分钟），
+# 窗口内不把 state.tier 写成 failed，隔几秒再探；不必干等 TIER_RETRY_MS 那 30 分钟才改回 ok。
 MIRASIM_HEALTH_TRIES=${MIRASIM_HEALTH_TRIES:-90}
 MIRASIM_HEALTH_TIMEOUT_TRIES=${MIRASIM_HEALTH_TIMEOUT_TRIES:-3}
 # 每次最多等几秒：/api/health 在法国平常 0.1 秒、忙时 6–7 秒才回（10-16 实测），5 秒会把「慢」判成「没回」。

@@ -1,6 +1,7 @@
 // 领域对象：引擎、数据库、驾驶舱、fleet 命令、飞书网关共用的一份定义。
 // 改这里之前：数据库表结构（packages/db）以本文件为准；字段增删要同时改表和迁移。
 import type { SessionEffort } from './effort.ts';
+import type { ModelStrength } from './track-score.ts';
 
 /** 流程里的一种活（库里的枚举，只增不删）。路由页和选路现在用哪些，见 flow-purposes.ts。 */
 export type StageKind =
@@ -241,9 +242,11 @@ export interface Model {
   displayName: string;
   /** 下架时间；下架后对应路由自动离线。 */
   retiredAt?: string;
+  /** 强弱档（models.strength，目录独占）；没标不给。 */
+  strength?: ModelStrength;
 }
 
-/** 路由 = 渠道 + 账号池 + 模型 + 执行方式，一条能跑的线。 */
+/** 路由 =渠道 + 账号池 + 模型 + 执行方式，一条能跑的线。 */
 export interface Route {
   id: string;
   channelId: string;

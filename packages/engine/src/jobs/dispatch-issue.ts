@@ -7,8 +7,9 @@
 //   （有一代任务工作流在跑或已结束；只有任务行、没有任何一代、行是 queued 或 stopped 的不算，接手那一行再派）、
 //   任务工作流没查成（不确定，不当成没有工作流）、碰 workflows、碰改标准的路径（standard-paths.json 列的，判法同拉单的
 //   standardPathIn；引擎的 PR 正文没有创始人原话，合并闸永远判红，决定 0093）、
-//   已有 PR 挂着、版本认不出（没查成）、交代不全（任务工作流第一步会拒收，放行了只会起一条马上失败的工作流）。
-//   「就绪度闸」--force 可以放行：不是当前版本（含未排期）、改动规模是最重档、历史失败超限。放行必须带 --note，进操作记录。
+//   已有 PR 挂着、交代不全（任务工作流第一步会拒收，放行了只会起一条马上失败的工作流）。
+//   「就绪度闸」--force 可以放行：改动规模是最重档、历史失败超限。放行必须带 --note，进操作记录。
+//   挂不挂当前版本不是闸（决定 0031：拉单不看版本；#2683 删了原来的版本这一道）。
 // - 硬闸遇到第一个就停（后面的不必读）；就绪度闸全部判完一次说全，让人看清 force 放行的是哪几样。
 // - 不看「让 AI 接活」开关（这条命令就是给开关关着用的），但引擎总开关关着一律拒：关着的引擎不起会话，派了也只是排队。
 // - 读不到、认不出的一律抛错（命令行打印「没查成」并非 0 退出），不当成「过了」。
@@ -17,7 +18,7 @@
 //   #1336 合并后如果加了新的准入闸（比如「验收条是 diff 里看得见的」），要把它也排进这里（硬还是就绪度，按 FORCEABLE 分），见 PR 说明。
 
 import { loadStandardPaths, type StandardPath } from '@fleet-dao/conventions';
-import { familyGate, isGithubActionsAuthor, localGate, versionGate } from '@fleet-dao/core';
+import { familyGate, isGithubActionsAuthor, localGate } from '@fleet-dao/core';
 import { type EngineMasterState, engineMasterOf, type MasterSettingRow } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
@@ -54,20 +55,12 @@ export type DispatchGateReason =
   | 'touches_workflows'
   | 'touches_standard'
   | 'pr_claimed'
-  | 'version_unreadable'
   | 'brief_incomplete'
-  | 'unscheduled'
-  | 'not_current_version'
   | 'heaviest_tier'
   | 'failure_history';
 
 /** --force 能放行的就绪度闸。别的一律不放行：往这里加一个，就是放宽一道闸，要在 PR 里说清。 */
-export const FORCEABLE: ReadonlySet<DispatchGateReason> = new Set([
-  'unscheduled',
-  'not_current_version',
-  'heaviest_tier',
-  'failure_history',
-]);
+export const FORCEABLE: ReadonlySet<DispatchGateReason> = new Set(['heaviest_tier', 'failure_history']);
 
 export interface GateFailure {
   reason: DispatchGateReason;
@@ -151,12 +144,6 @@ function masterNote(row: MasterSettingRow | null): { on: true } | { on: false; w
   return state.on ? { on: true } : { on: false, why: masterOffNote(state) };
 }
 
-/** 版本这一道：判法是 core 的 versionGate；没挂、不是当前版本能 force，认不出版本号是没查成不能 force。 */
-function versionFailure(plan: IntakePlan): GateFailure | null {
-  const gate = versionGate({ milestone: plan.milestone, openMilestones: plan.openMilestones });
-  return gate.ok ? null : fail(gate.reason, gate.why);
-}
-
 /** 硬闸，按便宜的先判；回第一个没过的。读不到的照抛。 */
 async function hardFailure(
   deps: DispatchIssueDeps,
@@ -218,12 +205,6 @@ async function hardFailure(
     return { failure: fail('pr_claimed', `已有 PR #${prNumber} 在做，别并行再写一遍`) };
   }
 
-  // 版本号认不出是「没查成」，不是「不是当前版本」：不让 force 顶过去
-  const version = versionGate({ milestone: plan.milestone, openMilestones: plan.openMilestones });
-  if (!version.ok && version.reason === 'version_unreadable') {
-    return { failure: fail('version_unreadable', version.why) };
-  }
-
   const brief = await readTaskBrief(
     {
       readIssue: async () => ({ number: issue.number, title: issue.title, body: issue.body, state: 'open' }),
@@ -245,12 +226,10 @@ async function readinessFailures(
   deps: DispatchIssueDeps,
   repo: IntakeRepo,
   issueNumber: number,
-  plan: IntakePlan,
   brief: TaskBrief,
 ): Promise<GateFailure[]> {
+  // 挂不挂当前版本不卡点名派单（决定 0031：拉单不看版本，版本只影响排序；#2683）
   const out: GateFailure[] = [];
-  const version = versionFailure(plan);
-  if (version) out.push(version);
   if (brief.tier.tier === 'heavyweight') {
     out.push(fail('heaviest_tier', `改动规模是最重档：${brief.tier.reason}`));
   }
@@ -328,7 +307,7 @@ async function decide(deps: DispatchIssueDeps, args: DispatchIssueArgs): Promise
   if (hard.failure) return { outcome: 'refused', failures: [hard.failure] };
 
   const { issue, plan, brief, adopted } = hard;
-  const soft = await readinessFailures(deps, repo, args.issueNumber, plan, brief);
+  const soft = await readinessFailures(deps, repo, args.issueNumber, brief);
   if (soft.length > 0 && !args.force) return { outcome: 'refused', failures: soft };
 
   const got = await deps.start({

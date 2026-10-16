@@ -29,6 +29,7 @@ import { Section, SectionGrid } from '../components/layout/section';
 import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
 import { ManualTracks } from '../components/manual-tracks';
+import { ModelStrengthBadge } from '../components/model-strength-badge';
 import {
   ChannelTab,
   LIST_HEIGHT,
@@ -717,6 +718,7 @@ function ModelRow({
             <span data-row-name className="text-body font-medium break-words">
               {m.displayName}
             </span>
+            <ModelStrengthBadge strength={m.strength} />
             <FounderOnlyBadge modelId={m.modelId} family={m.family} displayName={m.displayName} />
           </span>
           <span

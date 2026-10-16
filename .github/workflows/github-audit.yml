@@ -1,7 +1,8 @@
 name: github-audit
 # GitHub 对账（#654，packages/conventions/src/github-audit.ts）：每天一轮，查 GitHub 上的单子、母子单、版本先后有没有断裂——
 # 开着的单没有类别标签、母单的子单都关了它还开着、子单挂在已关的母单下面、母单标签和子单对不上、里程碑说明里的先后和实际对不上。
-# 查出来的挂得到单上的留言到那张单上（同一条只留一次），再把这一轮标红，修好才绿。
+# 查出来的挂得到单上的留言到那张单上（同一条只留一次），再把这一轮标红，修好才绿；红了开（或更新）同一张「GitHub 对账没过」单，绿了自动关（--alarm）。
+# 还查一周一版的兜底：开着的 v<N> 恰好一个、带到期日、过期一天多还没收口、已关的版本还挂着开着的单、开着的 PR 挂了里程碑。
 # 只在定时和手动时跑：结果随单子开关、随时间变，不进 PR 的必过检查（#87），也不在 PR、主线推送上跑；随时想核就 pnpm github:audit。
 # 退出码：没有断裂 = 0；有断裂 = 1；没查成（读不到 GitHub、留言没留成）= 2。
 # branches：分支体检（#769，packages/conventions/src/branch-hygiene.ts）：判远端每条分支删、留还是等人定，删内容全在主线（或已合并
@@ -30,7 +31,26 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: node packages/conventions/src/bin/github-audit.ts --comment
+      - run: node packages/conventions/src/bin/github-audit.ts --comment --alarm
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  version-cut:
+    # 版本收口（#2683，packages/conventions/src/version-cut.ts）：一周一版，北京时间过了到期日就开下一版、把开着的单滚过去、关旧版；
+    # 没到期什么都不做；已关的版本还挂着开着的单也挪到当前版本。退出码 0 收完或没到期；1 要人看；2 没做成（旧版没关）。
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node packages/conventions/src/bin/version-cut.ts
         env:
           GITHUB_TOKEN: ${{ github.token }}
 

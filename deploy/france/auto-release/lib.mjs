@@ -93,8 +93,24 @@ export const STATE_UNREADABLE_KEY = `${ALERT_PREFIX}state-unreadable`;
 export const RULES_PREFIX = `${ALERT_PREFIX}rules:`;
 /** 装机的自动档（france.sh --auto-tier）没装成：一个提交一条，装成了自己撤。 */
 export const TIER_PREFIX = `${ALERT_PREFIX}tier:`;
-/** 自动档没装成，同一个提交最快隔这么久再试一次（脚本幂等，网络、单元一时起不来的多半过会儿就好）。 */
+/**
+ * 真失败才用这个间隔：单元没起来、文件对不上、读回红了且不是 Mirasim 冷启动。同一个提交最快隔这么久再试一次
+ * （脚本幂等，网络、单元一时起不来的多半过会儿就好）。
+ * 发版重启 fleet-mirasim-session 后 4318 还没 listen（curl 退出 7）走 TIER_BOOT_MS，不落 failed，也不干等这 30 分钟。
+ */
 export const TIER_RETRY_MS = 30 * 60_000;
+/**
+ * 冷启动窗口。发版会停再起 fleet-mirasim-session：ActiveEnter 之后 Mirasim 还要十几秒到一分多钟才 listen
+ * 127.0.0.1:4318（2026-10-16 实测 boot 约 19 秒、另一次约 66 秒）。这段里对 /api/health 的 curl 退出 7 是「还在起」，
+ * 不是装机步骤坏了。窗口从 ActiveEnter 起算（读不到就从第一次看见这次退出 7 起算）；窗口内隔几秒再跑自动档，
+ * 健康口回了含 ok:true 的 JSON 就写成 ok。超过窗口仍连不上才落 failed，之后才套 TIER_RETRY_MS。
+ * france.sh 读回自己也会等约 90 秒（MIRASIM_HEALTH_TRIES）；等满仍是退出 7 时，靠这个窗口接着探，而不是立刻记失败。
+ */
+export const TIER_BOOT_MS = 3 * 60_000;
+/** 冷启动窗口内两次自动档之间歇这么久。真等的大头在 france.sh 里那 90 秒探活，这里只是别空转。 */
+const TIER_BOOT_POLL_MS = 5_000;
+/** 一轮里最多再探这么多次，防止时钟不动或 ActiveEnter 被反复重启拨回时死循环。 */
+const TIER_BOOT_POLLS = 40;
 /**
  * 自动发版防重复：同一个主线头请求过之后这么久内不再写请求。不是间隔（换了头照发）：接活单元读走请求文件到写进发版进度之间
  * 有个空档，那时闸看着全过，不挡这一下会对同一个头再请求一次。
@@ -886,17 +902,76 @@ async function alignCheckout(io, current) {
   }
 }
 
+/** france.sh --auto-tier 的红行（`  ✗ …`）。待配是 `…`，不算红。 */
+function tierRedLines(out) {
+  return String(out)
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('✗'));
+}
+
+/**
+ * 唯一的红是「4318 的 /api/health 还连不上」（curl 退出 7）。服务刚 ActiveEnter、还没 listen 就是这样。
+ * 旁边还有别的红（单元没起来、文件对不上）：那是真失败，不拿冷启动挡。
+ */
+function isMirasimBootRace(out) {
+  const reds = tierRedLines(out);
+  return reds.length > 0 && reds.every((l) => l.includes('curl 退出 7') && l.includes('/api/health'));
+}
+
+function tierDetail(r) {
+  const lines = String(r.out)
+    .split('\n')
+    .filter((l) => /^\s*[✗…]/.test(l))
+    .slice(0, 3)
+    .map((l) => l.trim());
+  return `退出码 ${r.code}${lines.length ? `，${lines.join('；')}` : `，${why(r.out)}`}`;
+}
+
+function tierFailed(st, now, current, detail) {
+  st.tier = { commit: current, at: iso(now), result: 'failed', detail };
+  raise(
+    st,
+    `${TIER_PREFIX}${current}`,
+    `装机的自动档没装成（${short(current)}）`,
+    `france.sh --auto-tier 没做成：${detail}。每隔 30 分钟自动再试，好了这条自己撤。` +
+      `手动：在法国以 root 跑 bash ${CHECKOUT}/deploy/france.sh --auto-tier`,
+  );
+}
+
+/**
+ * 冷启动从何时起算。读得到 ActiveEnter 用它（刚进入 active、端口还没开）。
+ * 读不到：用这一提交上已经记下的 unchecked.at，没有就从这一轮看见退出 7 起算。不把「读不到」当成窗口已过。
+ */
+async function bootSince(io, st, now, current) {
+  if (typeof io.mirasimActiveEnter === 'function') {
+    try {
+      const v = await io.mirasimActiveEnter();
+      if (Number.isFinite(v) && v > 0) return v;
+    } catch {
+      // 落到下面：从第一次看见这次连不上起算
+    }
+  }
+  if (st.tier?.commit === current && st.tier.result === 'unchecked') {
+    const at = Date.parse(st.tier.at);
+    if (!Number.isNaN(at)) return at;
+  }
+  return Number(now);
+}
+
 /**
  * 装机的自动档（决定见 docs/ops.md 第九节「装机层」）：在用的版本和检出是同一个提交、这个提交还没装过，就以 root 跑
  * `france.sh --auto-tier`（自动发布脚本副本、systemd 单元、fleet-agents.slice、清掉已删的老单元；不碰防火墙、sudoers、用户、钥匙）。
- * 发一版（驾驶舱按钮）之后检出和在用的对上，下一轮就装。没成记下、报警；成了的提交不重跑，没成的最快隔 TIER_RETRY_MS 再试。
+ * 发一版（驾驶舱按钮）之后检出和在用的对上，下一轮就装。真失败记下、报警，同一个提交最快隔 TIER_RETRY_MS 再试。
+ * 冷启动（curl 退出 7，ActiveEnter 还在 TIER_BOOT_MS 内）本轮不落 failed：隔几秒再探，探到 ok 就写成 ok，不必干等 30 分钟。
  * 退出码 2（没红、有待配）算装上了。先于规矩那一步：规矩同步用的是检出里的脚本，和这里无关，但装机脚本要先到位。
  */
 async function tierStep(io, st, now, current) {
   if (!current || typeof io.applyAutoTier !== 'function') return;
   if (st.tier?.commit === current) {
     if (st.tier.result === 'ok') return;
-    if (now - Date.parse(st.tier.at) < TIER_RETRY_MS) return;
+    // 只有真失败才套 30 分钟。unchecked 是冷启动窗口还开着，下一轮（或本轮接着探）就要再试。
+    if (st.tier.result === 'failed' && now - Date.parse(st.tier.at) < TIER_RETRY_MS) return;
   }
   const al = await alignCheckout(io, current);
   if (!al.ok) {
@@ -910,31 +985,39 @@ async function tierStep(io, st, now, current) {
     );
     return;
   }
-  let r;
-  try {
-    r = await io.applyAutoTier();
-  } catch (e) {
-    r = { code: -1, out: why(e) };
+  for (let polls = 0; ; polls++) {
+    let r;
+    try {
+      r = await io.applyAutoTier();
+    } catch (e) {
+      r = { code: -1, out: why(e) };
+    }
+    if (r.code === 0 || r.code === EXIT_PENDING) {
+      st.tier = { commit: current, at: iso(io.now()), result: 'ok', detail: '' };
+      resolveLater(st, TIER_PREFIX);
+      return;
+    }
+    const detail = tierDetail(r);
+    // 不是「刚重启、4318 还没 listen」：立刻落 failed，之后隔 TIER_RETRY_MS 再试。
+    if (!isMirasimBootRace(r.out)) {
+      tierFailed(st, io.now(), current, detail);
+      return;
+    }
+    const tick = Number(io.now());
+    const since = await bootSince(io, st, tick, current);
+    if (tick - since >= TIER_BOOT_MS) {
+      tierFailed(st, tick, current, detail);
+      return;
+    }
+    // 窗口还开着：先记 unchecked（不报警、healthz 不报 tier_failed）。能睡就再探，探到 ok 或窗口关。
+    st.tier = { commit: current, at: iso(since), result: 'unchecked', detail };
+    if (polls >= TIER_BOOT_POLLS || typeof io.sleep !== 'function') return;
+    const left = since + TIER_BOOT_MS - tick;
+    const before = tick;
+    await io.sleep(Math.min(TIER_BOOT_POLL_MS, left));
+    // 时钟没往前走就停，免得空转把这一轮卡死；unchecked 留着，下一轮接着探。
+    if (Number(io.now()) <= before) return;
   }
-  if (r.code === 0 || r.code === EXIT_PENDING) {
-    st.tier = { commit: current, at: iso(now), result: 'ok', detail: '' };
-    resolveLater(st, TIER_PREFIX);
-    return;
-  }
-  const lines = String(r.out)
-    .split('\n')
-    .filter((l) => /^\s*[✗…]/.test(l))
-    .slice(0, 3)
-    .map((l) => l.trim());
-  const detail = `退出码 ${r.code}${lines.length ? `，${lines.join('；')}` : `，${why(r.out)}`}`;
-  st.tier = { commit: current, at: iso(now), result: 'failed', detail };
-  raise(
-    st,
-    `${TIER_PREFIX}${current}`,
-    `装机的自动档没装成（${short(current)}）`,
-    `france.sh --auto-tier 没做成：${detail}。每隔 30 分钟自动再试，好了这条自己撤。` +
-      `手动：在法国以 root 跑 bash ${CHECKOUT}/deploy/france.sh --auto-tier`,
-  );
 }
 
 /**

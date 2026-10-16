@@ -1,5 +1,5 @@
 // 单子进门自动打标挂版本（#448）的真装配：受管的仓从库里列（和关单对账同一份），现状、标签时间线、贴标签、挂里程碑、
-// 版本交接留言、闲置关单都经「引擎」机器人（@fleet-dao/github 的 groom.ts）；问 Jev 走 issue-kind-jev.ts（现找后端，
+// 闲置关单都经「引擎」机器人（@fleet-dao/github 的 groom.ts）；问 Jev 走 issue-kind-jev.ts（现找后端，
 // 和 /healthz 的 judge 项同一个 resolveJevBackend）；这一轮的活动摘要写成一条日报级提醒（level=daily，design 第七节，
 // 和关单对账的提醒同一个口子、同一个库，不是要人拍的 decision）。
 import { DEFAULT_IDLE_POLICY, type IdlePolicy, type JevKindAnswer } from '@fleet-dao/conventions';
@@ -11,12 +11,7 @@ import type { IssueGroomJobDeps, IssueGroomRepo } from '../jobs/issue-groom.ts';
 /** 单子打标挂版本要用到的这几下（不要整个 GitHub）。 */
 export type GroomGitHub = Pick<
   GitHub,
-  | 'readGroomFacts'
-  | 'readIssueLabelEvents'
-  | 'addIssueLabel'
-  | 'setIssueMilestone'
-  | 'commentIssue'
-  | 'closeIssue'
+  'readGroomFacts' | 'readIssueLabelEvents' | 'addIssueLabel' | 'setIssueMilestone' | 'closeIssue'
 >;
 
 export interface IssueGroomWiring {
@@ -72,9 +67,6 @@ export function issueGroomJob(
     },
     async setMilestone(repo, issueNumber, milestone) {
       await w.gh.setIssueMilestone({ repo, issueNumber, milestone });
-    },
-    async comment(repo, issueNumber, key, body) {
-      await w.gh.commentIssue({ repo, issueNumber, key, body });
     },
     async closeNotPlanned(repo, issueNumber, comment) {
       await w.gh.closeIssue({ repo, issueNumber, reason: 'not_planned', comment });

@@ -170,14 +170,14 @@ describe('GitHub 对账：版本里程碑说明里的先后', () => {
     expect(r.notQueried).toEqual([]);
   });
 
-  it('开着的单没排进先后：报', async () => {
+  it('开着的单没排进先后：不报（拉单、发版车把没排进先后的排后面照样拉，#2683 删了这条）', async () => {
     const r = await audit(
       editWorld((w) => {
         w.issues.push(issue(70, { milestone: V1 }));
       }),
     );
-    expect(r.findings).toEqual([expect.objectContaining({ issue: 70 })]);
-    expect(r.texts[0]).toContain('#70 开着，挂在「v1 Fusion 接活」里却没排进先后');
+    expect(r.findings).toEqual([]);
+    expect(r.notQueried).toEqual([]);
   });
 
   it('pnpm issue:new 开单那一刻写进先后的（addToOrder 写的样子，排末尾和 --order-after 各一张）：判已排进，不报（#807）', async () => {
@@ -197,14 +197,86 @@ describe('GitHub 对账：版本里程碑说明里的先后', () => {
     expect(r.notQueried).toEqual([]);
   });
 
-  it('先后里的单不在这个版本里：报', async () => {
-    const r = await audit(
+  it('先后里的单挪出了这个版本、还开着（#2683）：不整个报错，别的几条照核；给了 writer 就从先后里清掉', async () => {
+    // #30 开着、挂在未排期：从前 readPlan 报「不是这个版本里的单」整个失败，清理也跟着不跑
+    const moved = () =>
       editWorld((w) => {
         const v1 = w.milestones.find((m) => m.title === V1);
-        if (v1) v1.description = order(10, 20, 30);
+        if (v1) v1.description = `目标：做完。\n\n${order(10, 30, 20)}`;
+      });
+    const r = await audit(moved());
+    expect(r.findings).toEqual([]);
+    expect(r.notQueried).toEqual([]);
+    expect(r.checked.versions).toBe(2);
+
+    const w = moved();
+    const { reader } = fakeReader(w);
+    const writer = {
+      async setMilestoneDescription(n: number, description: string) {
+        const m = w.milestones.find((x) => x.number === n);
+        if (!m) throw new Error(`假数据里没有里程碑 ${n}`);
+        m.description = description;
+        return { ...m };
+      },
+    };
+    const cleaned = await auditGitHub(reader, NOW, writer);
+    expect(cleaned.pruned).toEqual([{ milestone: V1, removed: [30] }]);
+    expect(w.milestones[0]?.description).toBe(`目标：做完。\n\n${order(10, 20)}`);
+  });
+});
+
+describe('GitHub 对账：一周一版的兜底（#2683）', () => {
+  const v1 = (w: World) => {
+    const m = w.milestones.find((x) => x.title === V1);
+    if (!m) throw new Error('假数据里没有 v1');
+    return m;
+  };
+  const keys = (r: { findings: { key: string }[] }, prefix: string) =>
+    r.findings.filter((f) => f.key.startsWith(prefix)).map((f) => f.key);
+
+  it('开着的 v<N> 不是恰好一个：两个、零个都报；恰好一个不报', async () => {
+    const two = await audit(editWorld((w) => w.milestones.push(milestone(12, 'v2 下一版', order(30)))));
+    expect(keys(two, 'versions-open:')).toEqual(['versions-open:8,12']);
+    const none = await audit(editWorld((w) => Object.assign(v1(w), { state: 'closed', closedAt: ago(DAY) })));
+    expect(none.texts.join('\n')).toContain('现在是 0 个');
+    expect(keys(await audit(cleanWorld()), 'versions-open:')).toEqual([]);
+  });
+
+  it('当前版本没有到期日：报；有就不报；接口没给到期日是没查成', async () => {
+    const r = await audit(editWorld((w) => Object.assign(v1(w), { dueOn: null })));
+    expect(keys(r, 'version-no-due:')).toEqual(['version-no-due:8']);
+    expect(keys(await audit(cleanWorld()), 'version-no-due:')).toEqual([]);
+    const unknown = await audit(editWorld((w) => Object.assign(v1(w), { dueOn: undefined })));
+    expect(unknown.notQueried).toEqual(['接口没给「v1 Fusion 接活」的到期日（due_on），到没到期没核']);
+  });
+
+  it('过了到期日超过一天还没收口：报；只过了一天（收口任务今天会跑）不报', async () => {
+    // NOW 是北京时间 10-03 08:00
+    const late = await audit(editWorld((w) => Object.assign(v1(w), { dueOn: '2026-10-01T07:00:00Z' })));
+    expect(keys(late, 'version-overdue:')).toEqual(['version-overdue:8']);
+    const fresh = await audit(editWorld((w) => Object.assign(v1(w), { dueOn: '2026-10-02T07:00:00Z' })));
+    expect(keys(fresh, 'version-overdue:')).toEqual([]);
+  });
+
+  it('已关的版本还挂着开着的单：报；挂的都关了不报', async () => {
+    const r = await audit(editWorld((w) => w.issues.push(issue(5, { milestone: V0 }))));
+    expect(keys(r, 'closed-version-open:')).toEqual(['closed-version-open:9:5']);
+    expect(r.texts.join('\n')).toContain('已关的版本「v0 试跑」还挂着开着的单 #5');
+    expect(keys(await audit(cleanWorld()), 'closed-version-open:')).toEqual([]);
+  });
+
+  it('开着的 PR 挂了里程碑：报；没挂的、已经关了的 PR 不报', async () => {
+    const r = await audit(
+      editWorld((w) => {
+        w.pulls = [
+          pull(600, column('Closes #20'), { state: 'open', mergedAt: null, milestone: V1 }),
+          pull(601, column('Closes #20'), { state: 'open', mergedAt: null, milestone: null }),
+          pull(602, column('Closes #20'), { milestone: V1 }),
+        ];
       }),
     );
-    expect(r.texts[0]).toContain('先后里有 #30，可它不是这个版本里的单');
+    expect(keys(r, 'pr-milestone:')).toEqual(['pr-milestone:600']);
+    expect(r.texts.join('\n')).toContain('gh pr edit 600 --remove-milestone');
   });
 });
 
@@ -390,7 +462,7 @@ describe('GitHub 对账：先后里已关的号直接清掉（#2393）', () => {
     const { reader: broken } = fakeReader(w, { fail: { openIssues: new Error('连不上 GitHub') } });
     const r = await auditGitHub(broken, NOW, writer);
     expect(writes).toEqual([]);
-    expect(r.notQueried[0]).toContain('读不到开着的单');
+    expect(r.notQueried).toContainEqual(expect.stringContaining('读不到版本和先后'));
   });
 
   it('【故意造出的失败】改说明失败：记没查成、带原因，不当成清好了', async () => {
@@ -440,6 +512,13 @@ describe('GitHub 对账：定时任务只报告、不挡 PR，也不进必过检
     expect(yml).not.toMatch(/^ {2}push:/m);
     expect(yml).toMatch(/^ {2}schedule:/m);
     expect(yml).toMatch(/^ {2}workflow_dispatch:/m);
-    expect(yml).toMatch(/run: node packages\/conventions\/src\/bin\/github-audit\.ts --comment\s*$/m);
+    expect(yml).toMatch(/run: node packages\/conventions\/src\/bin\/github-audit\.ts --comment --alarm\s*$/m);
+  });
+
+  it('收口任务（#2683）在同一份定时工作流里：每天跟着跑、也能手动触发，能写里程碑（issues: write）', () => {
+    const yml = read('.github/workflows/github-audit.yml');
+    const job = /^ {2}version-cut:\n([\s\S]*?)(?=^ {2}\S|(?![\s\S]))/m.exec(yml)?.[1] ?? '';
+    expect(job).toContain('issues: write');
+    expect(job).toMatch(/run: node packages\/conventions\/src\/bin\/version-cut\.ts\s*$/m);
   });
 });

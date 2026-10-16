@@ -48,3 +48,7 @@ WHERE
   AND usage_note IS NULL
   AND ended_at IS NOT NULL
   AND ended_at >= now() - interval '14 days';
+--> statement-breakpoint
+ALTER TABLE "models" ADD COLUMN "strength" text;
+--> statement-breakpoint
+ALTER TABLE "models" ADD CONSTRAINT "models_strength_known" CHECK ("models"."strength" is null or "models"."strength" in ('strong', 'standard', 'light'));

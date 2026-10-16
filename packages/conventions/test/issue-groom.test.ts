@@ -1,12 +1,11 @@
-// 单子进门自动打标挂版本（#448）的纯判断：类别（Jev + 标签时间线）、版本（创始人 vs AI）、版本交接、闲置清理。
+// 单子进门自动打标挂版本（#448）的纯判断：类别（Jev + 标签时间线）、版本（创始人 vs AI）、闲置清理。
+// 版本到期、关了以后开着的单挪到哪归版本收口（version-cut.ts，#2683），不在这里。
 import { describe, expect, it } from 'vitest';
 import {
   categoryPlan,
   categoryRemovedByHuman,
   DEFAULT_IDLE_POLICY,
   daysBetween,
-  handoffComment,
-  handoffPlan,
   idlePlan,
   type LabelEvent,
   milestonePlan,
@@ -119,14 +118,6 @@ describe('staleSinceOf：「过时」最近一次是什么时候贴上的', () =
   });
 });
 
-describe('handoffComment：版本交接留的言', () => {
-  it('写清从哪个版本挪到哪个版本', () => {
-    const text = handoffComment({ title: 'v1 Fusion 接活' }, { title: 'v2 下一步' });
-    expect(text).toContain('v1 Fusion 接活');
-    expect(text).toContain('v2 下一步');
-  });
-});
-
 describe('版本：创始人开的进当前版本，AI 发现的进未排期', () => {
   const milestones = [
     { number: 5, title: 'v2 下一步' },
@@ -156,21 +147,6 @@ describe('版本：创始人开的进当前版本，AI 发现的进未排期', (
 
   it('一个里程碑都没有：一样是没查成，不是「没有当前版本就当未排期」', () => {
     expect(milestonePlan('human', false, [])).toMatchObject({ action: 'unknown' });
-  });
-});
-
-describe('版本交接：里程碑关了，没做完的单挪到下一个版本', () => {
-  it('还开着一个 v<N>：挪到它', () => {
-    expect(handoffPlan([{ number: 5, title: 'v2 下一步' }])).toEqual({
-      action: 'move',
-      to: { number: 5, title: 'v2 下一步' },
-    });
-  });
-
-  it('没有下一个版本：不挪、报出来', () => {
-    const got = handoffPlan([]);
-    expect(got).toMatchObject({ action: 'stuck' });
-    expect((got as { why: string }).why).toContain('没有下一个版本');
   });
 });
 

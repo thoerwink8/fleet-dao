@@ -1,4 +1,4 @@
-// 单子进门自动打标挂版本（#448）：类别问 Jev、版本按规则挂、版本交接、闲置清理，一个仓一个仓地查、记没查成。
+// 单子进门自动打标挂版本（#448）：类别问 Jev、版本按规则挂、闲置清理，一个仓一个仓地查、记没查成。
 import type { LabelEvent } from '@fleet-dao/conventions';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -39,7 +39,6 @@ function fakeDeps(opts: {
   }) => Promise<import('@fleet-dao/conventions').JevKindAnswer>;
   addLabelFails?: Set<string>;
   setMilestoneFails?: Set<number>;
-  commentFails?: Set<number>;
   closeFails?: Set<number>;
   digestFails?: boolean;
 }) {
@@ -71,10 +70,6 @@ function fakeDeps(opts: {
     async setMilestone(r, n, m) {
       if (opts.setMilestoneFails?.has(n)) throw new Error('回了 422');
       writes.push(`milestone ${key(r)}#${n} ${m}`);
-    },
-    async comment(r, n, k) {
-      if (opts.commentFails?.has(n)) throw new Error('回了 500');
-      writes.push(`comment ${key(r)}#${n} ${k}`);
     },
     async closeNotPlanned(r, n) {
       if (opts.closeFails?.has(n)) throw new Error('回了 409');
@@ -247,8 +242,8 @@ describe('版本：创始人开的进当前版本，AI 发现的进未排期', (
   });
 });
 
-describe('版本交接：里程碑关了，没做完的单挪到下一个版本', () => {
-  it('挂着已关闭里程碑的单：挪到当前版本、留一句言', async () => {
+describe('版本交接不归这里（#2683：版本收口 version-cut.ts 到期那一步挪、每天兜底）', () => {
+  it('挂着已关闭里程碑的单：不挪、不留言、不报没查成（只有一处写，免得两边各挪一次）', async () => {
     const { deps, writes } = fakeDeps({
       facts: new Map([
         [
@@ -261,53 +256,8 @@ describe('版本交接：里程碑关了，没做完的单挪到下一个版本'
       ]),
     });
     const r = await sweepIssueGroom(deps);
-    expect(writes).toContain('milestone o/r#1 3');
-    expect(writes).toContain('comment o/r#1 issue-groom:handoff:2');
-    expect(r.found).toBe(1);
-  });
-
-  it('挂着的里程碑还开着：不用交接', async () => {
-    const { deps, writes } = fakeDeps({
-      facts: new Map([
-        ['o/r', facts({ issues: [issue({ milestone: { number: 3, title: 'v1 Fusion 接活' } })] })],
-      ]),
-    });
-    await sweepIssueGroom(deps);
-    expect(writes.some((w) => w.includes('handoff'))).toBe(false);
-  });
-
-  it('【故意造出的失败】没有下一个版本：不挪、报出来', async () => {
-    const { deps, writes } = fakeDeps({
-      facts: new Map([
-        [
-          'o/r',
-          facts({
-            milestones: [V0_CLOSED],
-            issues: [issue({ milestone: { number: 2, title: 'v0 老版本' } })],
-          }),
-        ],
-      ]),
-    });
-    const r = await sweepIssueGroom(deps);
-    expect(writes.some((w) => w.startsWith('milestone'))).toBe(false);
-    expect(r.unchecked).toEqual([expect.stringContaining('没有下一个版本')]);
-  });
-
-  it('【故意造出的失败】版本交接写不成：记没查成', async () => {
-    const { deps } = fakeDeps({
-      facts: new Map([
-        [
-          'o/r',
-          facts({
-            milestones: [V1, V0_CLOSED],
-            issues: [issue({ milestone: { number: 2, title: 'v0 老版本' } })],
-          }),
-        ],
-      ]),
-      setMilestoneFails: new Set([1]),
-    });
-    const r = await sweepIssueGroom(deps);
-    expect(r.unchecked).toEqual([expect.stringContaining('回了 422')]);
+    expect(writes.filter((w) => !w.startsWith('digest'))).toEqual([]);
+    expect(r.unchecked).toEqual([]);
   });
 });
 
@@ -421,7 +371,6 @@ describe('仓、日报', () => {
         labeled: [],
         lowConfidence: [],
         milestoned: [],
-        handedOff: [],
         staleMarked: [],
         closed: [],
       }),
@@ -443,11 +392,10 @@ describe('仓、日报', () => {
       labeled: [{ issue: 1, label: '需求' }],
       lowConfidence: [{ issue: 2, note: '把握度 0.4' }],
       milestoned: [{ issue: 3, milestone: 'v1 Fusion 接活' }],
-      handedOff: [{ issue: 4, from: 'v0', to: 'v1' }],
       staleMarked: [5],
       closed: [6],
     });
-    for (const needle of ['#1', '需求', '#2', '把握度 0.4', '#3', 'v1 Fusion 接活', '#4', '#5', '#6']) {
+    for (const needle of ['#1', '需求', '#2', '把握度 0.4', '#3', 'v1 Fusion 接活', '#5', '#6']) {
       expect(text).toContain(needle);
     }
   });

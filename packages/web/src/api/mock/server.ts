@@ -3077,6 +3077,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             modelId,
             displayName: model?.displayName ?? modelId,
             ...(model ? { family: model.family } : {}),
+            ...(model?.strength ? { strength: model.strength } : {}),
             verdict: layerVerdict(routes.map((r) => r.verdict)),
             routes,
             ...(effort ? { effort } : {}),
