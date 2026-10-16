@@ -2,7 +2,8 @@
 // 发版本身仍只有一条路：驾驶舱按钮（或发版车）写请求文件、法国上的接活单元（deploy/france/release-request）核请求、走同一趟流程。
 // 这个单元自己不调 release.sh：它到点写同样的请求文件（releaseStep），由接活单元去发。这个单元每一轮做的有：
 //   读主线头和它自己那次 CI 的结论、读法国在用的提交、数落后几个，写进状态文件，后端的 /healthz（deploy_lag）和驾驶舱读它；
-//   主线头落后在用的、头的 CI 全绿、没有发版在走也没有卡住的，就请求发这个头（releaseStep；不再隔 1 小时，#2038、决定 0093）；
+//   主线头落后在用的、在用之后有 CI 全绿的提交、没有发版在走也没有卡住的，就请求发其中最近绿的那个（头绿就是头；头的 CI
+//   还在跑就发头之前最近绿的，#2676）（releaseStep；不再隔 1 小时，#2038、决定 0093）；
 //   发版驱动中途死了留下的残局自动收：发版暂停的任务放久了没人发「继续」、老版驱动关了总开关没开回（recoverStep）；
 //   发完版之后顺带把装机的自动档（france.sh --auto-tier）装上、把各家 AI 的规矩同步给会话用户；
 //   拿法国 /etc/fleet-dao 下的环境文件跟在用那一版里的期望对账（#323，config.mjs）。
@@ -12,7 +13,7 @@
 // - **这个单元不自己发版**：不调 release.sh、不看 `v<N>` 标记、不取 tag。要发只写请求文件（releaseStep），请求的核对（CI 绿、主线祖先、
 //   没有发版在走）接活单元还会再做一遍。没有任何 tag 的仓上读数照常（测试：没有标记也照样写出主线头、在用、落后几个）。
 // - 自动发版的闸（releaseGate 读来的事实交给 gateVerdict 判）：任何一项读不到、认不出都不发（原因写进状态的 auto.note），不当成可以发。
-//   两次发版之间不设间隔（发版不再关总开关、只暂停在跑的任务，#2038）；只防同一个头 REQUEST_DEDUPE_MS 内重复请求。
+//   两次发版之间不设间隔（发版不再关总开关、只暂停在跑的任务，#2038）；只防同一个要发的提交 REQUEST_DEDUPE_MS 内重复请求。
 // - 状态文件后端也读（packages/store/src/deploy-lag.ts 按 STATE_SCHEMA 认），指挥官的法国页也读（agents/skills/commander/scripts/
 //   france-lib.mjs 的 autoReleaseProblem）；改字段几边一起改，那边的测试拿这里造的状态核对。
 // - RULES_USERS 要和 deploy/france.sh 的 AGENT_RULES_USERS 一样；HUMAN_TIER_PATHS 要盖住人工档（deploy/lib/human-tier.sh）读的仓里文件（测试都核对）。
@@ -36,6 +37,7 @@ export const CI_WORKFLOW = '.github/workflows/ci.yml';
 /**
  * 一轮读一次主线最近这么多次 ci.yml 的运行（一次问完；不带凭据一个钟头只有 60 次）。
  * 比这更早的提交查不到结论，当没查成——落后这么多，驾驶舱早就标出来了。
+ * 自动发版找「最近绿的」也只看在用之后最近这么多个提交（greenStep）；GitHub 单页最多 100，所以不再翻页。
  */
 export const CI_RUNS_PAGE = 100;
 /** 提交落到主线这么久还查不到它的 CI 记录：不再当「还没开跑」，记没查成。 */
@@ -212,6 +214,8 @@ export function carryOver(prev) {
     current: p.current ?? null,
     /** 主线头那次 CI 的结论（verdict 是 green / red / pending / unknown）；只是读数，没人拿它去拦谁。 */
     ci: p.ci ?? null,
+    /** 在用的之后到头这一段里最近一个 CI 全绿的提交 { sha, at, index（在主线里排第几，0 是头）, checkedAt }；每轮重算，没有是 null。老状态没有这个字段。 */
+    ciGreen: null,
     rules: p.rules ?? null,
     tier: p.tier ?? null,
     system: p.system ?? null,
@@ -368,7 +372,7 @@ async function readStep(io, st, now) {
     commits: commits.slice(0, MAIN_HISTORY).map((c) => [c.sha, c.at]),
   };
   st.system = await systemLayer(io, head.sha);
-  await ciStep(io, st, now, head);
+  const ci = await ciStep(io, st, now, head);
 
   let current;
   try {
@@ -378,6 +382,7 @@ async function readStep(io, st, now) {
     return undefined;
   }
   st.current = current;
+  greenStep(st, now, commits, current, ci);
 
   const at = commits.findIndex((c) => c.sha === current);
   if (current === null) act(st, now, 'not-released', '法国还没发布过');
@@ -392,14 +397,41 @@ async function readStep(io, st, now) {
  * 读不到（限流、连不上、回的认不出）记 unknown 和原因，不当成绿。
  */
 async function ciStep(io, st, now, head) {
-  if (st.ci?.sha === head.sha && st.ci.verdict === 'green') return;
+  if (st.ci?.sha === head.sha && st.ci.verdict === 'green') return { skipped: true, body: null, unread: '' };
   const { body, unread } = await readCiBody(io);
   if (unread) {
     st.ci = { sha: head.sha, verdict: 'unknown', detail: unread, checkedAt: iso(now) };
-    return;
+    return { skipped: false, body: null, unread };
   }
   const v = ciVerdict(body, head.sha, head.at, Number(now));
   st.ci = { sha: head.sha, verdict: v.verdict, detail: v.detail, checkedAt: iso(now) };
+  return { skipped: false, body, unread: '' };
+}
+
+/**
+ * 在用的之后到主线头这一段（不含在用的），从新到旧找第一个 CI 全绿的提交，记进 st.ciGreen（#2676）：自动发版发它，不只认头。
+ * 同一份运行列表（ciStep 刚问的那一次，不再多问）对每个候选算 ciVerdict。只看最近 CI_RUNS_PAGE 个候选：运行列表就这么长，更早的查不到结论。
+ * 头已经读到全绿（ciStep 没再问）就是头。读不到运行列表、没有在用的、没落后：st.ciGreen 是 null。
+ * st.ciGreen 每轮重算，不带到下一轮（只有 st.ci 带着，用来省掉对已绿的头重复问）。
+ */
+function greenStep(st, now, commits, current, ci) {
+  st.ciGreen = null;
+  const idx = commits.findIndex((c) => c.sha === current);
+  if (current === null || idx <= 0) return;
+  const head = commits[0];
+  const found = (c, n) => ({ sha: c.sha, at: c.at, index: n, checkedAt: iso(now) });
+  if (ci.skipped) {
+    st.ciGreen = found(head, 0);
+    return;
+  }
+  if (!ci.body) return;
+  const span = commits.slice(0, Math.min(idx, CI_RUNS_PAGE));
+  for (const [n, c] of span.entries()) {
+    if (ciVerdict(ci.body, c.sha, c.at, Number(now)).verdict === 'green') {
+      st.ciGreen = found(c, n);
+      return;
+    }
+  }
 }
 
 /** 问一次 GitHub 要主线上 ci.yml 最近的运行：{ body }（认得出的运行列表）或 { unread }（读不到的原因：限流、回的认不出、连不上）。 */
@@ -493,11 +525,12 @@ export function gateVerdict(facts) {
 }
 
 /**
- * 自动发版（决定 0088 第 1 条；#2038、决定 0093 起不再隔 1 小时）：法国在用的落后主线头、头的 CI 全绿、闸全过，
- * 就请求发这个头（写和驾驶舱按钮一样的请求文件）。发版不再关总开关、只暂停在跑的任务，攒着发没有好处，绿了就发。
- * 只防一件事：同一个头 REQUEST_DEDUPE_MS 内请求过就不再写（接活单元读走请求到写进度之间的空档，闸看着全过）。
- * 不过的把原因记进 st.auto.note（journal 和状态里看得到）。
- * 只看主线头：头的 CI 红了就等下一个绿的头，不回头发旧的。写不出请求就报警，写成了撤。
+ * 自动发版（决定 0088 第 1 条；#2038、决定 0093 起不再隔 1 小时）：法国在用的落后主线头、闸全过，
+ * 就请求发「在用的之后最近一个 CI 全绿的提交」（st.ciGreen，greenStep 算；写和驾驶舱按钮一样的请求文件）。
+ * 合得勤时头的 CI 总在跑，只认头就永远发不出去（#2676）；头绿就是发头，头不绿发头之前最近绿的，都不绿才等。
+ * 只往前走：要发的必须比在用的新，在用的自己和比它旧的不发。发版不再关总开关、只暂停在跑的任务，攒着发没有好处，绿了就发。
+ * 只防一件事：同一个要发的提交 REQUEST_DEDUPE_MS 内请求过就不再写（接活单元读走请求到写进度之间的空档，闸看着全过）。
+ * 不过的把原因记进 st.auto.note（journal 和状态里看得到）；发的不是头时 note 写明头的 CI 怎么了、发的是哪个。写不出请求就报警，写成了撤。
  */
 async function releaseStep(io, st, now, current) {
   const note = (text) => {
@@ -509,13 +542,27 @@ async function releaseStep(io, st, now, current) {
   const idx = st.main.commits.findIndex(([sha]) => sha === current);
   if (idx === 0) return note('在用的就是主线头，没有要发的');
   if (idx < 0) return note('在用的不在主线最近的提交里，不自动发');
-  if (st.ci?.sha !== head || st.ci.verdict !== 'green') {
-    const v = st.ci?.sha === head ? st.ci.verdict : '没查';
-    return note(`主线头 ${short(head)} 的 CI 不是绿的（${v}），等绿`);
+  const headCi = st.ci?.sha === head ? st.ci.verdict : '没查';
+  const green = st.ciGreen;
+  if (!green) {
+    const span = Math.min(idx, CI_RUNS_PAGE);
+    return note(
+      `主线头 ${short(head)} 的 CI 不是绿的（${headCi}），在用的之后最近 ${span} 个提交里也没有 CI 全绿的，等绿`,
+    );
   }
-  const askedAt = st.auto?.sha === head ? Date.parse(st.auto.at ?? '') : Number.NaN;
+  // 只往前走：要发的必须比在用的新（green.index 是它在主线里排第几，在用的排 idx）
+  const target = st.main.commits[green.index]?.[0];
+  if (target !== green.sha || green.index >= idx) {
+    return note(`最近绿的 ${short(green.sha)} 不比在用的 ${short(current)} 新，不发`);
+  }
+  // 为什么发的不是头：写进 note 和 summary
+  const reason =
+    green.index === 0
+      ? ''
+      : `；头 ${short(head)} 的 CI ${headCi === 'pending' ? '还在跑' : `不是绿的（${headCi}）`}，发最近绿的 ${short(target)}，比在用的新 ${idx - green.index} 个`;
+  const askedAt = st.auto?.sha === target ? Date.parse(st.auto.at ?? '') : Number.NaN;
   if (!Number.isNaN(askedAt) && Number(now) - askedAt < REQUEST_DEDUPE_MS) {
-    return note(`刚请求过 ${short(head)}，等接活单元发`);
+    return note(`刚请求过 ${short(target)}，等接活单元发${reason}`);
   }
   let blocked;
   try {
@@ -528,26 +575,26 @@ async function releaseStep(io, st, now, current) {
   } catch (e) {
     blocked = `发版闸读不到：${why(e)}`;
   }
-  if (blocked) return note(`现在不发：${blocked}`);
+  if (blocked) return note(`现在不发：${blocked}${reason}`);
   try {
-    await io.requestRelease({ sha: head, at: iso(now), by: AUTO_RELEASE_BY });
+    await io.requestRelease({ sha: target, at: iso(now), by: AUTO_RELEASE_BY });
   } catch (e) {
-    note(`发版请求没写成：${why(e)}`);
+    note(`发版请求没写成：${why(e)}${reason}`);
     raise(
       st,
       AUTO_REQUEST_KEY,
-      `自动发版的请求没写出去（${short(head)}）`,
+      `自动发版的请求没写出去（${short(target)}）`,
       `${why(e)}。下一轮自动再试；要马上发可以点驾驶舱「发布到法国」。`,
     );
     return;
   }
   resolveKeyLater(st, AUTO_REQUEST_KEY);
   st.auto = {
-    sha: head,
+    sha: target,
     at: iso(now),
-    note: `已请求自动发版 ${short(head)}（在用 ${short(current)}，落后 ${idx} 个提交）`,
+    note: `已请求自动发版 ${short(target)}（在用 ${short(current)}，落后 ${idx} 个提交${reason}）`,
   };
-  act(st, now, 'auto-release-requested', `请求发 ${short(head)}`);
+  act(st, now, 'auto-release-requested', `请求发 ${short(target)}`);
 }
 
 /**
