@@ -186,4 +186,87 @@ describe('GET /api/tasks', () => {
     expect(queued?.cost.usd).toBeNull();
     expect(queued?.cost.note).toBeTruthy();
   });
+
+  it('重做的下一代和验收算进花费：grok 没报 cost_usd 按 API 价折算，缺价不当成 0，token 全空另计', async () => {
+    const { h, get } = await open();
+    const repo = h.store.data.repos.find((r) => r.id === REPO);
+    if (!repo) throw new Error('样例仓不在');
+    const at = (m: number) => minutesAgo(m);
+    const full = {
+      inputTokens: 500_000,
+      outputTokens: 100_000,
+      cacheReadTokens: 200_000,
+      cacheWriteTokens: 50_000,
+    };
+    h.store.data.tasks.push(
+      task(40, { state: 'done', title: '两代花费' }),
+      task(41, { state: 'done', title: '没有单价' }),
+      task(42, { state: 'done', title: '读不到用量' }),
+    );
+    const base = `task:${repo.owner}/${repo.name}#40`;
+    h.store.data.segmentRuns.push(
+      {
+        id: uuid(401),
+        taskId: uuid(40),
+        issueNumber: 40,
+        segment: 'scope',
+        model: 'grok-4.7',
+        startedAt: at(30),
+        endedAt: at(20),
+        outcome: 'done',
+        workflowId: base,
+        ...full,
+      },
+      {
+        id: uuid(402),
+        issueNumber: 40,
+        segment: 'verify',
+        model: 'grok-4.7',
+        startedAt: at(10),
+        endedAt: at(5),
+        outcome: 'done',
+        workflowId: `${base}:r2`,
+        ...full,
+      },
+      {
+        id: uuid(411),
+        taskId: uuid(41),
+        issueNumber: 41,
+        segment: 'manual',
+        model: 'cursor-auto',
+        tier: 'fast',
+        startedAt: at(15),
+        endedAt: at(8),
+        outcome: 'done',
+        workflowId: `task:${repo.owner}/${repo.name}#41`,
+        ...full,
+      },
+      {
+        id: uuid(421),
+        taskId: uuid(42),
+        issueNumber: 42,
+        segment: 'scope',
+        model: 'grok-4.7',
+        startedAt: at(12),
+        endedAt: at(11),
+        outcome: 'done',
+      },
+    );
+    const list = await body(await get('?limit=50'));
+    const grok = list.items.find((i) => i.issueNumber === 40);
+    expect(grok?.cost.actual).toBeNull();
+    expect(grok?.cost.usd).toBeNull();
+    expect(grok?.cost.estimated).toBeCloseTo(3.6, 6);
+    expect(grok?.cost.segments).toBe(2);
+    expect(grok?.cost.note).toContain('按 API 价折算');
+    const noprice = list.items.find((i) => i.issueNumber === 41);
+    expect(noprice?.cost.estimated).toBeNull();
+    expect(noprice?.cost.noPrice).toBe(1);
+    expect(noprice?.cost.usd).toBeNull();
+    expect(noprice?.cost.note).toContain('没有单价');
+    expect(JSON.stringify(noprice?.cost)).not.toContain('"estimated":0');
+    const blank = list.items.find((i) => i.issueNumber === 42);
+    expect(blank?.cost.unreadSegments).toBe(1);
+    expect(blank?.cost.note).toContain('另有 1 段读不到用量');
+  });
 });

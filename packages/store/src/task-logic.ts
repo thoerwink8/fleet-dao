@@ -3,7 +3,7 @@
  * 改这里之前必须知道：pg 版把同样的判断写在 SQL 里（priority 的子查询、`is distinct from`、`where state = 'queued'`、行锁里比开关），
  * 只能共用常量和「判完之后」的形状；内存版直接调这里的函数。两边必须判得一样，契约测试（store-contract）管。
  */
-import { TASK_LIST_GROUPS, type Task, type TaskListGroup } from '@fleet-dao/shared';
+import { runBelongsToTask, TASK_LIST_GROUPS, type Task, type TaskListGroup } from '@fleet-dao/shared';
 import type { AutoDispatchChange, NewAuditEntry } from './ports.ts';
 
 /** 到了这些状态就不再动了；看板上只留最近一段时间内结束的。 */
@@ -39,10 +39,11 @@ export const isRequestUnchanged = (
 export const canStopTask = (state: string): boolean => state === NEW_TASK_STATE;
 
 /**
- * 一条三段流水算不算这张任务的：记了任务号的只认任务号（别张任务的不收）；没记任务号的老行按 issue 号兜底，还得工作流编号
- * 对得上（没记工作流编号的分不出是哪个仓，不收——别的仓可能有同号的单）。回怎么对上的：task = 任务号对上，issueNumber = 兜底。
- * pg 版把同样的筛法写在 SQL 里（packages/db 的 runsOfTask：task_id = 任务，或 task_id 为空且 issue 号、工作流编号都对上），
- * 筛出来的行里 task_id 等于任务号的标 task、其余标 issueNumber；改这里要对着改那条 SQL。
+ * 一条三段流水算不算这张任务的：记了任务号的只认任务号（别张任务的不收）；没记任务号的老行按 issue 号兜底，还得工作流是
+ * 这张单的第一代或重做的下一代（:r2、:r3，shared 的 runBelongsToTask）。没记工作流编号的分不出是哪个仓，不收。
+ * 回怎么对上的：task = 任务号对上，issueNumber = 兜底。
+ * pg 版把同样的筛法写在 SQL 里（packages/db 的 runsOfTask：task_id = 任务，或 task_id 为空且 issue 号对上、工作流是第一代或
+ * :rN）。筛出来的行里 task_id 等于任务号的标 task、其余标 issueNumber；改这里要对着改那条 SQL。
  */
 export function segmentRunMatch(
   run: {
@@ -52,10 +53,7 @@ export function segmentRunMatch(
   },
   task: { id: string; issueNumber: number; workflowId: string | undefined },
 ): 'task' | 'issueNumber' | undefined {
-  if (run.taskId !== undefined && run.taskId !== null) return run.taskId === task.id ? 'task' : undefined;
-  if (run.issueNumber !== task.issueNumber) return undefined;
-  if (task.workflowId === undefined || run.workflowId !== task.workflowId) return undefined;
-  return 'issueNumber';
+  return runBelongsToTask(run, task);
 }
 
 /** 开关要改成 on：现在已经是了（有打开时刻 = 开着）就不改、不记操作记录。 */

@@ -522,12 +522,39 @@ export function createMemoryStore(
         })
         .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));
     },
-    async listSegmentRunsForTasks(taskIds) {
+    async listSegmentRunsForTasks(taskIds, opts) {
       const wanted = new Set(taskIds);
-      return data.segmentRuns
+      const byStart = (a: SegmentRunRecord, b: SegmentRunRecord) =>
+        a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id);
+      const direct = data.segmentRuns
         .filter((r) => r.taskId !== undefined && wanted.has(r.taskId))
-        .map((r): SegmentRunRecord => ({ ...r, matchedBy: 'task' }))
-        .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || compareIds(a.id, b.id));
+        .map(
+          (r): SegmentRunRecord => ({
+            ...r,
+            matchedBy: 'task',
+            ...(opts?.includeIssueMatch && r.taskId ? { matchedTaskId: r.taskId } : {}),
+          }),
+        );
+      // 主页流水线图走默认：不按单号兜底。任务列表要重做各代的花费才开 includeIssueMatch。
+      if (!opts?.includeIssueMatch) return direct.sort(byStart);
+      const taken = new Set(direct.map((r) => r.id));
+      const loose: SegmentRunRecord[] = [];
+      for (const task of data.tasks) {
+        if (!wanted.has(task.id)) continue;
+        const repo = data.repos.find((r) => r.id === task.repoId);
+        const workflowId = repo ? taskWorkflowId(repo, task.issueNumber) : undefined;
+        for (const r of data.segmentRuns) {
+          if (taken.has(r.id)) continue;
+          if (
+            segmentRunMatch(r, { id: task.id, issueNumber: task.issueNumber, workflowId }) !== 'issueNumber'
+          ) {
+            continue;
+          }
+          loose.push({ ...r, matchedBy: 'issueNumber', matchedTaskId: task.id });
+          taken.add(r.id);
+        }
+      }
+      return [...direct, ...loose].sort(byStart);
     },
     async getPlans(runIds) {
       const out = new Map<string, RunPlan>();

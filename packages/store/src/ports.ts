@@ -39,7 +39,14 @@ export interface TaskListPage {
 }
 
 /** 一张单的三段流水（库里的 runs 表）一笔，加上它是怎么和这张单对上的。 */
-export type SegmentRunRecord = SegmentRun & { matchedBy: SegmentMatch };
+export type SegmentRunRecord = SegmentRun & {
+  matchedBy: SegmentMatch;
+  /**
+   * 对上的是哪张单。listSegmentRunsForTasks 开了 includeIssueMatch 时才写：task_id 对上的就是 taskId，
+   * task_id 没记、按单号兜底的是那张单的 id。主页那条路不写。
+   */
+  matchedTaskId?: string;
+};
 
 /** 库里的一行额度窗：原名、单位、读法入库必填（领域类型里可选，是给还没入库的读数用的）；staleSince 由库的写入口管。 */
 export type QuotaWindowRecord = QuotaWindow & Required<Pick<QuotaWindow, 'label' | 'unit' | 'source'>>;
@@ -329,17 +336,21 @@ export interface BoardStore {
   }): Promise<SessionRun[]>;
   getRun(id: string): Promise<SessionRun | null>;
   /**
-   * 一张单的三段流水（runs 表），按起跑先后：task_id 是这张单的（matchedBy = task），加上 task_id 没记、单号对得上的老行
-   * （matchedBy = issueNumber，兜底；记了工作流编号却不是这张单的 taskWorkflowId 的不收——那是别的仓同号的单）。
-   * 没这张单（含编号不是 uuid）回空。memory-store.ts 是参照实现。
+   * 一张单的三段流水（runs 表），按起跑先后：task_id 是这张单的（matchedBy = task），加上 task_id 没记、单号对得上、
+   * 工作流是这张单第一代或重做下一代（:r2、:r3）的老行（matchedBy = issueNumber）。工作流对不上、或没记的不收
+   * （别的仓可能有同号的单）。没这张单（含编号不是 uuid）回空。memory-store.ts 是参照实现。
    */
   listSegmentRuns(taskId: string): Promise<SegmentRunRecord[]>;
   /**
-   * 一批单的三段流水，一次读完（主页流水线图用，一张张读要几十个往返）。只认 task_id 对得上的行（matchedBy 一律 task）：
-   * task_id 没记的老行不按单号兜底（兜底要逐张单查仓，主页这条路不值得；老单在图上落进「还没分段」）。
+   * 一批单的三段流水，一次读完（主页流水线图用，一张张读要几十个往返）。默认只认 task_id 对得上的行（matchedBy 一律 task）：
+   * task_id 没记的老行不按单号兜底（主页这条路不收；老单在图上落进「还没分段」）。
+   * includeIssueMatch：任务列表要各代的花费，再收 task_id 没记、单号和工作流（含重做 :rN）对得上的，matchedTaskId 写对上的单。
    * 按起跑先后排；不是 uuid 的编号忽略；一张单都没给回空。memory-store.ts 是参照实现。
    */
-  listSegmentRunsForTasks(taskIds: readonly string[]): Promise<SegmentRunRecord[]>;
+  listSegmentRunsForTasks(
+    taskIds: readonly string[],
+    opts?: { includeIssueMatch?: boolean },
+  ): Promise<SegmentRunRecord[]>;
   /** 每个会话最近一次 fleet plan 的步骤清单；没报过的会话不在结果里。 */
   getPlans(runIds: readonly string[]): Promise<Map<string, RunPlan>>;
   lastSay(runId: string): Promise<{ text: string; at: string } | null>;

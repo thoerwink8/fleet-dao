@@ -2,8 +2,9 @@
 // 改这里之前必须知道：
 // - 现在在哪一段、用的模型沿用主页「在跑的」的算法（shared 的 taskFlow），不另算一份。已结束的单（做完、失败、叫停）segment 一律给 null：
 //   「现在在哪」对结束了的单没有意思，页面看状态就行。
-// - 累计花费 = 三段流水加老流程会话里结束了的各笔报的花费（shared 的 summarizeUsage，和任务详情同一份算法）。
-//   一笔都没有 → null 加原因；有的没读到 → 给读到的合计，note 写明偏低。永远不拿 0 顶。
+// - 累计花费 = 三段流水加老流程会话（shared 的 summarizeUsage，和任务详情同一份算法），再拆成实付和按 API 价折算
+//   （taskListCost）。一段都没报实付、token 和单价都齐的给估计，不当成 0；没有单价的标出来。永远不拿 0 顶。
+//   流水要带上 task_id 没记、按单号对上的各代（调用方开 includeIssueMatch），按 matchedTaskId 归到那张单。
 // - PR 号取起跑最晚的、带 PR 号的那一笔三段流水。
 
 import {
@@ -15,6 +16,7 @@ import {
   type SessionRun,
   type TaskListResponse,
   taskFlow,
+  taskListCost,
   taskListGroupOf,
 } from '@fleet-dao/shared';
 import type { SegmentRunRecord, TaskListPage } from '@fleet-dao/store';
@@ -50,34 +52,32 @@ const lastStarted = (views: readonly SegmentRunView[]): SegmentRunView | undefin
     undefined,
   );
 
-function costOf(usage: ReturnType<typeof usageView>['total']): Row['cost'] {
-  const read = usage.runs - usage.missingCost;
-  if (usage.runs === 0) return { usd: null, note: '还没有结束的会话记录，花费没得算' };
-  if (read <= 0) return { usd: null, note: `${usage.runs} 笔会话都没报花费` };
-  const usd = Math.round(usage.costUsd * 1_000_000) / 1_000_000;
-  return usage.missingCost > 0
-    ? { usd, note: `另有 ${usage.missingCost} 笔会话没报花费，这个数偏低` }
-    : { usd };
-}
+/** 归到哪张单：按单号兜底的用 matchedTaskId（task_id 是空的），其余用 task_id。 */
+const taskKeyOf = (r: {
+  matchedTaskId?: string | undefined;
+  taskId?: string | undefined;
+}): string | undefined => r.matchedTaskId ?? r.taskId;
 
 export function taskListView(input: TaskListInput): Response {
   const repoById = new Map(input.repos.map((r) => [r.id, r]));
   const route = routeLookup([...input.routes], [...input.models], [...input.channels]);
   const tasks = input.page.items.map((i) => i.task);
   const finished = new Set(tasks.filter(isTaskFinished).map((t) => t.id));
-  // 单子结束与否决定「开着的那一笔」算在跑还是没收尾（readSegmentRun 的 taskFinished），所以按这个分两批读
+  // 单子结束与否决定「开着的那一笔」算在跑还是没收尾（readSegmentRun 的 taskFinished），所以按这个分两批读。
+  // 重做各代里 task_id 没记的行靠 matchedTaskId 归单，不然做完的单的验收会被当成还没结束的单。
   const viewsByTask = new Map<string, SegmentRunView[]>();
   for (const taskFinished of [true, false]) {
-    const records = input.segmentRuns.filter(
-      (r) => (r.taskId !== undefined && finished.has(r.taskId)) === taskFinished,
-    );
+    const records = input.segmentRuns.filter((r) => {
+      const key = taskKeyOf(r);
+      return (key !== undefined && finished.has(key)) === taskFinished;
+    });
     const batch = segmentRunViews(records, {
       models: [...input.models],
       channels: [...input.channels],
       taskFinished,
     });
     batch.forEach((view, i) => {
-      const taskId = records[i]?.taskId;
+      const taskId = records[i] ? taskKeyOf(records[i]) : undefined;
       if (taskId !== undefined) viewsByTask.set(taskId, [...(viewsByTask.get(taskId) ?? []), view]);
     });
   }
@@ -90,6 +90,7 @@ export function taskListView(input: TaskListInput): Response {
     const group = taskListGroupOf(task);
     const sessions = runsOf(task.id);
     const latestSession = sessions.at(-1);
+    const usage = usageView(sessions, route, views);
     const model =
       flow.worker ??
       lastStarted(views)?.modelName ??
@@ -114,7 +115,7 @@ export function taskListView(input: TaskListInput): Response {
       model,
       createdAt: task.createdAt,
       updatedAt,
-      cost: costOf(usageView(sessions, route, views).total),
+      cost: taskListCost(usage.total, views.filter((v) => !v.running).length),
       prNumber,
       ...(requestSeq === undefined ? {} : { requestSeq }),
     };

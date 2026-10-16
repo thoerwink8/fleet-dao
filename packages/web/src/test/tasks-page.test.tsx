@@ -34,7 +34,12 @@ function open(route: string, api: FleetApi = createMockApi({ live: false })) {
 const where = () => screen.getByTestId('where').textContent;
 const tab = (name: string) => screen.getByRole('tab', { name: new RegExp(`^${name}`) });
 
-function row(n: number, over: Partial<TaskListRow> = {}): TaskListRow {
+function row(
+  n: number,
+  over: Partial<Omit<TaskListRow, 'cost'>> & { cost?: Partial<TaskListRow['cost']> } = {},
+): TaskListRow {
+  const { cost, ...rest } = over;
+  const usd = cost?.usd === undefined ? 1.5 : cost.usd;
   return {
     taskId: `t-${n}`,
     repoId: 'repo-1',
@@ -47,9 +52,17 @@ function row(n: number, over: Partial<TaskListRow> = {}): TaskListRow {
     model: 'Opus 5.5',
     createdAt: '2026-10-01T00:00:00.000Z',
     updatedAt: '2026-10-09T00:00:00.000Z',
-    cost: { usd: 1.5 },
+    cost: {
+      actual: cost?.actual === undefined ? usd : cost.actual,
+      estimated: cost?.estimated ?? null,
+      usd,
+      segments: cost?.segments ?? 0,
+      unreadSegments: cost?.unreadSegments ?? 0,
+      noPrice: cost?.noPrice ?? 0,
+      ...(cost?.note === undefined ? {} : { note: cost.note }),
+    },
     prNumber: null,
-    ...over,
+    ...rest,
   };
 }
 
@@ -288,7 +301,12 @@ describe('任务列表页', () => {
     const api = createMockApi({ live: false });
     api.tasks = async () => ({
       items: [
-        row(1, { title: '甲单', cost: { usd: null, note: '没有会话' } }),
+        row(1, {
+          title: '甲单',
+          // 相对时间只覆盖不到 7 天；写死的日子过了这个窗会变成「10月9日」，断言对不上
+          updatedAt: new Date(Date.now() - 60_000).toISOString(),
+          cost: { usd: null, note: '没有会话' },
+        }),
         row(2, { title: '乙单', cost: { usd: null, note: '没有会话' }, prNumber: 7 }),
       ],
       counts: counts({ all: 2, running: 2 }),
@@ -350,5 +368,32 @@ describe('任务列表页', () => {
     expect(empty?.querySelector('[data-cost-empty]')?.getAttribute('title')).toBe('3 笔会话都没报花费');
     const done = (await screen.findByText('已结束没花费')).closest('a');
     expect(done?.querySelector('[data-cost-empty]')?.getAttribute('title')).toBe('没有会话');
+  });
+
+  test('订阅渠道没报实付：列上写按 API 价折算的估计和段数，不当成 0；缺价写没有单价', async () => {
+    const api = createMockApi({ live: false });
+    api.tasks = async () => ({
+      items: [
+        row(1, {
+          title: '只有估计',
+          cost: { usd: null, actual: null, estimated: 1.8, segments: 2, note: '按 API 价折算 $1.80' },
+        }),
+        row(2, {
+          title: '没有单价的',
+          cost: { usd: null, actual: null, estimated: null, noPrice: 1, note: '1 段没有单价' },
+        }),
+      ],
+      counts: counts({ all: 2, running: 2 }),
+    });
+    open('/tasks', api);
+    const est = (await screen.findByText('只有估计')).closest('a') as HTMLElement;
+    expect(est.querySelector('[data-cost-col]')).not.toBeNull();
+    expect(est.textContent).toContain('花费');
+    expect(est.textContent).toContain('估算 $1.80');
+    expect(est.textContent).toContain('2 段');
+    expect(est.textContent).not.toContain('$0.00');
+    const none = (await screen.findByText('没有单价的')).closest('a') as HTMLElement;
+    expect(none.querySelector('[data-cost-noprice]')?.textContent).toContain('没有单价');
+    expect(none.textContent).not.toContain('$0');
   });
 });
