@@ -332,25 +332,26 @@ describe('受影响包的整机锁', () => {
         },
       });
       const signal = new AbortController().signal;
-      let secondGot = false;
-      const firstP = lock.acquire(signal);
-      const secondP = lock.acquire(signal).then((rel) => {
-        secondGot = true;
-        return rel;
-      });
-      const firstRel = await firstP;
+      const done: Array<() => Promise<void>> = [];
+      const tasks = [0, 1].map(() =>
+        lock.acquire(signal).then((rel) => {
+          done.push(rel);
+          return rel;
+        }),
+      );
+      // 先进入拆锁的那个拿锁；后进入的等这把锁公布之后才删。和两个 promise 谁先被调度无关。
+      const leaderRel = await Promise.race(tasks);
       releaseSecond();
       await secondRemoved;
       await new Promise((resolve) => setTimeout(resolve, 30));
-      expect(secondGot).toBe(false);
+      expect(done).toHaveLength(1);
       const name = readdirSync(lockDir)[0];
       if (name === undefined) throw new Error('新锁被拆掉了');
       expect(name).not.toBe('deadbeefdeadbeef');
       expect(readFileSync(join(lockDir, name), 'utf8').startsWith(`${process.pid}\n`)).toBe(true);
-      await firstRel();
-      const secondRel = await secondP;
-      expect(secondGot).toBe(true);
-      await secondRel();
+      await leaderRel();
+      await Promise.all(tasks);
+      expect(done).toHaveLength(2);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
