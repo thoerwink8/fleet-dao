@@ -14,7 +14,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS } from '@fleet-dao/db/testing';
-import { FLEET_CHANGES_CHANNEL } from '@fleet-dao/shared';
+import { FLEET_CHANGES_CHANNEL, noteOnlyOptions } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE, silentLogger } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import { startPgChangeFeed } from '../src/changes.ts';
@@ -211,6 +211,7 @@ async function publicFailures(log: Logger) {
       taskId: null,
       title: 'acme/fleet-dao：先去 GitHub 把两个机器人装到这个仓',
       body: '占位',
+      options: noteOnlyOptions(),
     });
     warning = await runHealthChecks([{ name: 'item', check: githubAppHealthCheck(judgeDb.db) }], log);
     // 看门狗：只有一处 new PublicHealthError（说法有几种），这里造一种（还没登记）；每一种说法都在 watchdog-health.test.ts 用同一份名单扫

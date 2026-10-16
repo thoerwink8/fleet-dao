@@ -1,5 +1,6 @@
 // 报警、人闸批准，外加 asks 表的约束。
 import { randomUUID } from 'node:crypto';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -115,6 +116,7 @@ describe('upsertAlert', () => {
       taskId: null,
       title: '要你拍',
       body: '批不批',
+      options: noteOnlyOptions(),
     });
     await t.db
       .update(notifications)
@@ -126,6 +128,7 @@ describe('upsertAlert', () => {
       taskId: null,
       title: '要你拍',
       body: '又要批一次',
+      options: noteOnlyOptions(),
     });
     const [row] = await t.db.select().from(notifications).where(eq(notifications.id, id));
     expect(row?.resolvedAt).toBeNull();
@@ -141,6 +144,7 @@ describe('resolveAlertByKey', () => {
       taskId: null,
       title: '账号池暂停',
       body: '要重新登录',
+      options: noteOnlyOptions(),
     });
     expect(await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:carpool-1', by: 'engine', at: NOW })).toBe(
       'ok',
@@ -227,7 +231,13 @@ describe('「要你拍」的选项落库（#1915）', () => {
     await t.db
       .update(notifications)
       .set({
-        answer: { optionId: 'a', text: '甲', at: ago(MIN).toISOString(), by: 'u' },
+        answer: {
+          optionId: 'a',
+          text: '甲',
+          at: ago(MIN).toISOString(),
+          by: 'u',
+          execution: { ok: false, text: '上次没成', at: ago(MIN).toISOString() },
+        },
         resolvedAt: new Date(),
         resolvedBy: 'u',
       })
@@ -248,9 +258,17 @@ describe('「要你拍」的选项落库（#1915）', () => {
 
   it('【故意造出的失败】不合规矩的选项、非要人拍的带选项：照抛，不悄悄存成没选项', async () => {
     const base = { dedupeKey: `decision-test:${randomUUID()}`, taskId: null, title: 't', body: 'b' };
+    await expect(upsertAlert(t.db, { ...base, level: 'decision' })).rejects.toThrow('至少给两个选项');
     await expect(
       upsertAlert(t.db, { ...base, level: 'decision', options: [two[0] as (typeof two)[0]] }),
     ).rejects.toThrow('至少给两个选项');
+    await expect(
+      upsertAlert(t.db, {
+        ...base,
+        level: 'decision',
+        options: [{ ...two[0], action: { kind: 'nope' } }, two[1]] as never,
+      }),
+    ).rejects.toThrow('动作认不出');
     await expect(
       upsertAlert(t.db, {
         ...base,

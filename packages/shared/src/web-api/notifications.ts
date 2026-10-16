@@ -56,11 +56,51 @@ export const AlertHandlingSchema = z.object({
 });
 
 // —— 「要你拍」的选项和答案（#1915）——
-// 要人拍的事给几个选项（每项一句话，其中一项标推荐并写理由），外加一个自己输入的框；创始人点一个或自己写，答案连同时间、谁存下，
-// 通知转已处理，答案再记到进度单 #1055 交给指挥官。补不出选项的，页面写明 NO_OPTIONS_TEXT，不静默退回单纯确认。
+// 要人拍的事给几个选项（每项一句话，其中一项标推荐并写理由，并带上选了以后系统执行的动作），外加一个自己输入的框。
+// 创始人点一个或自己写：系统按动作执行，结果写回这张卡，成功才转已处理。自己写的、以及没有具体动作的，交给指挥官，
+// 卡上写 HANDED_TO_COMMANDER。补不出选项的，页面写明 NO_OPTIONS_TEXT，不静默退回单纯确认。
 
 /** 补不出选项的「要你拍」：页面和通知里照这句写，让人直接回复。 */
 export const NO_OPTIONS_TEXT = '没有选项，请直接回复';
+
+/** 自己写的、以及没有具体动作的选项，交给指挥官之后写在卡上的那句。 */
+export const HANDED_TO_COMMANDER = '已转给指挥官';
+
+/** 选了「删掉」工作树：后端提不了权，交给引擎（execution.queued），卡上先写这句。 */
+export const WORKTREE_DELETE_QUEUED =
+  '已交给引擎：下一轮每小时对账删掉这棵树，删成了这条转已处理，删不掉写原因';
+
+/**
+ * 选了这项系统做什么。旧数据、补不出具体动作的不带 action，读的时候按 note-only（交给指挥官），不报错。
+ * delete-worktree 删一棵工作树；keep 留着（处理掉这条，对账不再报）；pause-pool / resume-pool 整池暂停开关；
+ * recheck 再查一遍（GitHub App 要带 repo = owner/name，飞书推送不带）；drop-repo 把仓移出受管列表；note-only 只留言。
+ */
+export const DecisionActionSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('delete-worktree'), path: z.string().min(1).max(500) }),
+  z.object({ kind: z.literal('keep') }),
+  z.object({ kind: z.literal('pause-pool'), poolId: z.string().min(1).max(80) }),
+  z.object({ kind: z.literal('resume-pool'), poolId: z.string().min(1).max(80) }),
+  z.object({
+    kind: z.literal('recheck'),
+    what: z.enum(['github-app', 'feishu-push']),
+    /** 重查 GitHub App 时是 owner/name；重查飞书推送没有。 */
+    repo: z.string().min(1).max(200).optional(),
+  }),
+  z.object({
+    kind: z.literal('drop-repo'),
+    owner: z.string().min(1).max(100),
+    name: z.string().min(1).max(100),
+  }),
+  z.object({ kind: z.literal('note-only') }),
+]);
+export type DecisionAction = z.infer<typeof DecisionActionSchema>;
+
+/** 读不出来（没写、写坏了）一律按只留言，不让一张老卡把列表接口打垮。 */
+export function readDecisionAction(option: { action?: unknown } | null | undefined): DecisionAction {
+  if (!option || option.action === undefined) return { kind: 'note-only' };
+  const parsed = DecisionActionSchema.safeParse(option.action);
+  return parsed.success ? parsed.data : { kind: 'note-only' };
+}
 
 export const DecisionOptionSchema = z.object({
   /** 选项编号：同一条通知里不重，答案按它认。 */
@@ -72,12 +112,37 @@ export const DecisionOptionSchema = z.object({
   /** 推荐理由：有它就是推荐的那一项（一条通知恰好一项）。 */
   recommended: z.string().min(1).max(300).optional(),
   /**
-   * 选了这项，答案记下、交给指挥官，但通知不转已处理（#1931）：有的通知开着本身就起作用（整池暂停开着池子就停着），
-   * 选「先停着」却把它处理掉等于放开，是骗人的选项。只有真要「放开、了结」的那项才不带它。
+   * 选了这项，执行成功也不转已处理（#1931）：这条开着本身还在起作用（先看看还没看完、这个池还要留着停）。
+   * 执行结果照样写上卡。只有真要了结的那项才不带它。
    */
   keepsOpen: z.literal(true).optional(),
+  /** 选了以后系统执行的动作。老数据没有：按 note-only 读。 */
+  action: DecisionActionSchema.optional(),
 });
 export type DecisionOption = z.infer<typeof DecisionOptionSchema>;
+
+/**
+ * 系统没有对应动作时的两个选项（恰好一项推荐）。recommendedId 不要用 hold（第二项占用了）。
+ * 工作流挂起这类补不出具体动作的「要你拍」用它，满足「decision 至少两项」。
+ */
+export function noteOnlyOptions(recommendedId = 'note'): DecisionOption[] {
+  return [
+    {
+      id: recommendedId,
+      label: '记下，交给指挥官',
+      detail: '答案交给指挥官；交出去了这条才转已处理',
+      recommended: '系统没有对应的自动动作，交给指挥官',
+      action: { kind: 'note-only' },
+    },
+    {
+      id: 'hold',
+      label: '先留着',
+      detail: '这条留着，答案仍交给指挥官',
+      keepsOpen: true,
+      action: { kind: 'note-only' },
+    },
+  ];
+}
 
 /**
  * 这个回答会不会把通知转已处理：点的选项看它带不带 keepsOpen；自己输入的，只要这条有任何一项要留着就留着
@@ -106,7 +171,19 @@ export const DecisionOptionsSchema = z.array(DecisionOptionSchema).superRefine((
   if (problem) ctx.addIssue({ code: 'custom', message: problem });
 });
 
-/** 创始人拍了什么：点了哪个选项（optionId）或自己写的原文（没有 optionId），连同时刻和谁。 */
+/**
+ * 选完以后系统执行的结果，存在答案里（answer.execution，再拍一次连答案一起换掉）。失败时 text 是原因，通知不转已处理。
+ * queued：这一步不在驾驶舱后端做（删工作树要引擎经 sudo 删，后端进程不许提权），已经交给引擎，做完引擎把结果写回来。
+ */
+export const DecisionExecutionSchema = z.object({
+  ok: z.boolean(),
+  text: z.string().min(1).max(500),
+  at: Time,
+  queued: z.literal(true).optional(),
+});
+export type DecisionExecution = z.infer<typeof DecisionExecutionSchema>;
+
+/** 创始人拍了什么：点了哪个选项（optionId）或自己写的原文（没有 optionId），连同时刻和谁；系统照着做的结果。 */
 export const DecisionAnswerSchema = z.object({
   /** 点的那个选项；自己输入的没有这一项。 */
   optionId: z.string().optional(),
@@ -115,6 +192,8 @@ export const DecisionAnswerSchema = z.object({
   at: Time,
   /** 谁拍的（用户编号）。 */
   by: z.string(),
+  /** 照着做的结果；刚存下还没做、老数据没有。 */
+  execution: DecisionExecutionSchema.optional(),
 });
 export type DecisionAnswer = z.infer<typeof DecisionAnswerSchema>;
 
@@ -136,13 +215,17 @@ export const DecisionHandoffResultSchema = z.union([
 
 export const AnswerNotificationResponse = z.object({
   ok: z.literal(true),
+  /** 答案连同照着做的结果（answer.execution）。 */
   answer: DecisionAnswerSchema,
-  handoff: z.object({
-    /** 进度单 #1055 那一条。 */
-    progress: DecisionHandoffResultSchema,
-    /** 通知挂了任务的，任务那张单上的留言；没挂任务没有这一项。 */
-    task: DecisionHandoffResultSchema.optional(),
-  }),
+  /** 交给指挥官那一步：自己写的、没有具体动作的选项才有；点了系统自己做的选项没有这一项。 */
+  handoff: z
+    .object({
+      /** 进度单 #1055 那一条。 */
+      progress: DecisionHandoffResultSchema,
+      /** 通知挂了任务的，任务那张单上的留言；没挂任务没有这一项。 */
+      task: DecisionHandoffResultSchema.optional(),
+    })
+    .optional(),
 });
 
 export const NotificationSchema = z.object({
@@ -152,7 +235,7 @@ export const NotificationSchema = z.object({
   body: z.string(),
   /** 「要你拍」的选项（#1915）；老通知、补不出选项的没有，页面写 NO_OPTIONS_TEXT 并给输入框。 */
   options: z.array(DecisionOptionSchema).optional(),
-  /** 拍过了：选了什么、什么时候、谁。 */
+  /** 拍过了：选了什么、什么时候、谁，系统照着做的结果（answer.execution）。 */
   answer: DecisionAnswerSchema.optional(),
   /** 点开直达驾驶舱对应页的站内路径。 */
   link: z.string().optional(),

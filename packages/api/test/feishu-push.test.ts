@@ -9,6 +9,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { silentLogger } from '@fleet-dao/store';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -79,6 +80,7 @@ const decision = (key: string) =>
     title: `拍 ${key}`,
     body: '第一行\n第二行',
     link: '/tasks',
+    options: noteOnlyOptions(),
   });
 
 describe('createFeishuPusher', () => {

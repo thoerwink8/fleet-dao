@@ -3,6 +3,7 @@ import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { CliToolsPort } from './cli-versions.ts';
 import type { Config } from './config.ts';
+import type { DecisionCapabilities } from './decision-actions.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { PreflightReaders } from './france-preflight.ts';
@@ -141,6 +142,11 @@ export interface Deps {
    * 没给（开发环境、机器人凭据没读到）的答案照样存下，回包里 handoff 写没接上，不当成记上了。
    */
   decisionCommenter?: DecisionCommenter | undefined;
+  /**
+   * 「要你拍」选完要本机做的事（decision-actions.ts）：重查 GitHub App、重查飞书推送。
+   * 没给（开发、内存版）这两样回「没接上」，卡留着；暂停、放开、移出仓、留着只靠库，删工作树交给引擎，都不看这项。
+   */
+  decisionCapabilities?: DecisionCapabilities | undefined;
   /**
    * 环境页（#820 片 1）的版本那一项：读这台的发布目录（current 链接 + 状态文件）现算。只在正式环境装配
    * （main.ts 的 production；法国是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。

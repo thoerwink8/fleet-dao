@@ -32,10 +32,12 @@ export interface AskItem {
   n: Notification;
 }
 
-/** 这条该不该摆进「要你拍的」：没处理、没拍过的人闸，或看门狗进来的卡。 */
+/**
+ * 这条该不该摆进「要你拍的」：没处理、没拍过的人闸（拍了但系统没做成的也算，要再拍一次，#2353），或看门狗进来的卡。
+ */
 export function askKindOf(n: Notification): AskKind | null {
   if (n.resolvedAt) return null;
-  if (n.level === 'decision') return n.answer ? null : 'gate';
+  if (n.level === 'decision') return n.answer && n.answer.execution?.ok !== false ? null : 'gate';
   if (n.level === 'alert' && n.dedupeKey?.startsWith(WATCHDOG_KEY_PREFIX)) return 'watchdog';
   return null;
 }

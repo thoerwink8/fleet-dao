@@ -1,11 +1,13 @@
-// 「要你拍」带选项（#1915）：接口给出选项；点选项、自己输入都记下答案并转已处理；答案交给指挥官——进度单 #1055 收到一条
-// 待处理的创始人引导（progress read、开会话钩子认得出），挂了任务的任务单也收到一句；没接上 GitHub 的照实写在 handoff 里。
+// 「要你拍」带选项：接口给出选项（带 action）和执行结果。自己写的、没有具体动作的交给指挥官，卡上写「已转给指挥官」，
+// 进度单 #1055 收到一条待处理的创始人引导，挂了任务的任务单也收到一句。执行失败不转已处理。没接上 GitHub 的照实写。
 import { progressKindOf, progressOwnerOf } from '@fleet-dao/conventions';
 import {
   AnswerNotificationResponse,
   AuditResponse,
+  HANDED_TO_COMMANDER,
   NO_OPTIONS_TEXT,
   NotificationsResponse,
+  WORKTREE_DELETE_QUEUED,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { DecisionCommenter } from '../src/decision-handoff.ts';
@@ -62,6 +64,8 @@ describe('「要你拍」带选项（#1915）', () => {
     expect(decision?.options?.length).toBeGreaterThanOrEqual(2);
     expect(decision?.options?.every((o) => o.detail.length > 0)).toBe(true);
     expect(decision?.options?.filter((o) => o.recommended)).toHaveLength(1);
+    // 老选项没写 action：读出来按只留言，列表接口把动作带上
+    expect(decision?.options?.every((o) => o.action?.kind === 'note-only')).toBe(true);
   });
 
   it('点选项记下答案：转已处理、记操作记录，进度单 #1055 收到一条「创始人已选」，任务单也收到一句', async () => {
@@ -77,12 +81,13 @@ describe('「要你拍」带选项（#1915）', () => {
       text: '批，合进去',
       at: h.clock.now.toISOString(),
       by: DEV_USER_ID,
+      execution: { ok: true, text: HANDED_TO_COMMANDER, at: h.clock.now.toISOString() },
     });
-    expect(body.handoff.progress).toEqual({
+    expect(body.handoff?.progress).toEqual({
       ok: true,
       url: 'https://github.com/thoerwink8/fleet-dao/issues/1055#c1',
     });
-    expect(body.handoff.task?.ok).toBe(true);
+    expect(body.handoff?.task?.ok).toBe(true);
 
     // 选了以后进度单收到一条：在 fleet-dao 的 #1055 下，是待处理的创始人引导（无主），原话写明选了什么、哪条通知
     const progress = posted[0];
@@ -104,6 +109,7 @@ describe('「要你拍」带选项（#1915）', () => {
     const n = all.items.find((x) => x.id === IDS.notification2);
     expect(n?.answer?.optionId).toBe('approve');
     expect(n?.resolvedAt).toBe(h.clock.now.toISOString());
+    expect(n?.answer?.execution).toMatchObject({ ok: true, text: HANDED_TO_COMMANDER });
     const audit = AuditResponse.parse(
       await (
         await h.cockpit.request(`/api/audit?target=notification:${IDS.notification2}`, {
@@ -127,14 +133,23 @@ describe('「要你拍」带选项（#1915）', () => {
     const res = await answer(h, s, IDS.notification2, { text: '  先别合，等我周一看  ' });
     expect(res.status).toBe(200);
     const body = AnswerNotificationResponse.parse(await res.json());
-    expect(body.answer).toEqual({
+    expect(body.answer).toMatchObject({
       text: '先别合，等我周一看',
       at: h.clock.now.toISOString(),
       by: DEV_USER_ID,
     });
+    expect(body.answer.optionId).toBeUndefined();
     expect(posted[0]?.body).toContain(
       `创始人已选：自己输入：先别合，等我周一看（通知 ${IDS.notification2}）`,
     );
+    // 这条有「先留着」的选项：自己写的交给指挥官，卡上写明，但不转已处理
+    expect(body.answer.execution).toMatchObject({ ok: true, text: HANDED_TO_COMMANDER });
+    const open = NotificationsResponse.parse(
+      await (await h.cockpit.request('/api/notifications', { headers: { cookie: s.cookie } })).json(),
+    );
+    const n = open.items.find((x) => x.id === IDS.notification2);
+    expect(n?.resolvedAt).toBeUndefined();
+    expect(n?.answer?.execution?.text).toBe(HANDED_TO_COMMANDER);
   });
 
   it('没有选项的老通知照旧列出；能自己输入回答', async () => {
@@ -161,12 +176,15 @@ describe('「要你拍」带选项（#1915）', () => {
     expect(res.status).toBe(200);
     // 没接上 GitHub：答案存下了，handoff 照实写没接上，不冒充记上了
     const body = AnswerNotificationResponse.parse(await res.json());
-    expect(body.handoff.progress).toEqual({ ok: false, why: HANDOFF_NOT_WIRED });
-    // 没有要留着的选项：自己写的也转已处理
+    expect(body.handoff?.progress).toEqual({ ok: false, why: HANDOFF_NOT_WIRED });
+    // 交给指挥官没写成：不转已处理，卡上写失败原因
+    expect(body.answer.execution).toMatchObject({ ok: false, text: HANDOFF_NOT_WIRED });
     const open = NotificationsResponse.parse(
       await (await h.cockpit.request('/api/notifications', { headers: { cookie: s.cookie } })).json(),
     );
-    expect(open.items.map((n) => n.id)).not.toContain('n-old');
+    const still = open.items.find((n) => n.id === 'n-old');
+    expect(still?.resolvedAt).toBeUndefined();
+    expect(still?.answer?.execution).toMatchObject({ ok: false, text: HANDOFF_NOT_WIRED });
   });
 
   it('请求不对、不是要人拍的、没有这条：分开报', async () => {
@@ -190,10 +208,60 @@ describe('「要你拍」带选项（#1915）', () => {
     const body = AnswerNotificationResponse.parse(
       await (await answer(h, s, IDS.notification2, { optionId: 'review' })).json(),
     );
-    expect(body.handoff.progress).toEqual({ ok: false, why: 'GitHub 限流了' });
-    expect(body.handoff.task).toEqual({ ok: false, why: 'GitHub 限流了' });
+    expect(body.handoff?.progress).toEqual({ ok: false, why: 'GitHub 限流了' });
+    expect(body.handoff?.task).toEqual({ ok: false, why: 'GitHub 限流了' });
     expect(h.store.data.notifications.find((n) => n.id === IDS.notification2)?.answer?.optionId).toBe(
       'review',
     );
+    expect(h.store.data.notifications.find((n) => n.id === IDS.notification2)?.resolvedAt).toBeUndefined();
+    expect(body.answer.execution).toMatchObject({ ok: false, text: 'GitHub 限流了' });
+  });
+
+  it('删工作树交给引擎：卡上写「已交给引擎」，不留言、不转已处理，选项的 action 带给界面', async () => {
+    const h = harness();
+    const s = await h.login();
+    h.store.data.notifications.push({
+      id: 'n-del',
+      level: 'decision',
+      title: '工作树删不删',
+      body: '要你拍',
+      createdAt: h.clock.now.toISOString(),
+      deliveries: [],
+      options: [
+        {
+          id: 'keep',
+          label: '留着',
+          detail: '这条转已处理',
+          recommended: '删了就没了',
+          action: { kind: 'keep' },
+        },
+        {
+          id: 'remove',
+          label: '删掉',
+          detail: '系统删掉这棵工作树',
+          action: { kind: 'delete-worktree', path: '/tmp/fleet-tree' },
+        },
+      ],
+    });
+    const res = await answer(h, s, 'n-del', { optionId: 'remove' });
+    expect(res.status).toBe(200);
+    const body = AnswerNotificationResponse.parse(await res.json());
+    expect(body.answer.execution).toEqual({
+      ok: true,
+      queued: true,
+      text: WORKTREE_DELETE_QUEUED,
+      at: h.clock.now.toISOString(),
+    });
+    expect(body.handoff).toBeUndefined();
+    const open = NotificationsResponse.parse(
+      await (await h.cockpit.request('/api/notifications', { headers: { cookie: s.cookie } })).json(),
+    );
+    const card = open.items.find((n) => n.id === 'n-del');
+    expect(card?.resolvedAt).toBeUndefined();
+    expect(card?.answer?.execution?.queued).toBe(true);
+    expect(card?.options?.find((o) => o.id === 'remove')?.action).toEqual({
+      kind: 'delete-worktree',
+      path: '/tmp/fleet-tree',
+    });
   });
 });

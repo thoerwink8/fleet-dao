@@ -16,6 +16,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ROUTE_PROBE_JOB, runRouteProbeJob } from '../../src/jobs/route-probe.ts';
 import { CURSOR_KEY_BAD, CURSOR_KEY_EXIT, CURSOR_MISSING, GROK_MISSING } from '../../src/real/hosts.ts';
@@ -180,6 +181,7 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
       taskId: null,
       title: '拼车池登录失效',
       body: '会话那边报的整池问题',
+      options: noteOnlyOptions(),
     });
     const s = setup(answered);
     await s.round();
