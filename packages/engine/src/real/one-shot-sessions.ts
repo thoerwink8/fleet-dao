@@ -13,6 +13,7 @@
 //   不是起新会话）。
 // - 别的会话只管这个工人进程里起的：上一轮工人留下的 runs 行起来时已经收掉了（orphan-reap.ts）；脱开跑、等人接回的除外。
 
+import { StopReason } from '@fleet-dao/adapters';
 import { type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, masterOffNote } from '../engine-master.ts';
 import type { OrgSwitchSessions } from './org-switch.ts';
@@ -91,10 +92,13 @@ export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSe
       // runOneShot 当场回 org_switch（一行 runs 记账、没起进程），工作流回去选路、选路回「过一会儿再选」，新引擎起来再派
       // 接回的（attach）不是起新会话，不拦；也不进在途清单（排空不等它）
       const stopping = attach ? null : drain?.stopping();
-      if (stopping) entry.ac.abort(new Error(`${stoppingNote(stopping)}；这一段没起会话`));
+      if (stopping)
+        entry.ac.abort(new StopReason('release-pause', `${stoppingNote(stopping)}；这一段没起会话`));
       // 引擎总开关关着（#1086）：同一种拒法，这一段不起会话
       else if (!attach && master && !master.isOn())
-        entry.ac.abort(new Error(`${masterOffNote(master.state())}；这一段没起会话`));
+        entry.ac.abort(
+          new StopReason('user-stop', `引擎总开关：${masterOffNote(master.state())}；这一段没起会话`),
+        );
       if (!entry.detachable) track(idOf(key, entry), entry);
       return {
         signal: entry.ac.signal,
@@ -129,7 +133,7 @@ export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSe
       const stopped: string[] = [];
       for (const [key, e] of entries) {
         if (!poolIds.has(e.poolId) || e.ac.signal.aborted) continue;
-        e.ac.abort(new Error(why));
+        e.ac.abort(new StopReason('route-swap', why));
         stopped.push(idOf(key, e));
       }
       return stopped;
@@ -139,7 +143,7 @@ export function oneShotSessions(options: OneShotSessionsOptions = {}): OneShotSe
       for (const [key, e] of entries) {
         // 脱开跑的不停：引擎走的时候放手，下一个引擎接回（#2238）
         if (e.ac.signal.aborted || e.detachable) continue;
-        e.ac.abort(new Error(`发布排空：${why}，这一段停下，新引擎起来重跑`));
+        e.ac.abort(new StopReason('release-pause', `发布排空：${why}，这一段停下，新引擎起来重跑`));
         stopped.push(idOf(key, e));
       }
       return stopped;

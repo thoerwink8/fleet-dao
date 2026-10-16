@@ -9,6 +9,7 @@ import type { ProgressEvent } from '@fleet-dao/shared';
 import { CallbackGate, type LineMeta } from '../cli-run.ts';
 import { assertSessionEffort, SESSION_EFFORTS } from '../effort.ts';
 import type { RunFacts, RunSummary } from '../judge.ts';
+import { abortCause, type StopCause, stopCauseOf } from '../stop-reason.ts';
 import { looksLikeQuotaExhausted, num, rec, relayQuotaNotice, str } from '../stream-kit.ts';
 import type { KillReason, TranscriptEntry } from '../types.ts';
 import {
@@ -150,7 +151,7 @@ export interface MirasimRunReport {
    * （没有、多条、档案读不了，或没给档案目录）。可能已经在跑（MS-18：不许重发）。
    */
   launchUnknown?: boolean;
-  killed?: { reason: KillReason; at: string };
+  killed?: { reason: KillReason; at: string; cause?: StopCause };
   /** 叫停之后有没有看到它翻终态（MS-16：没看到就是「没查成」，不是停好了）。 */
   stop?: { confirmed: boolean; error?: string };
   /** 读状态的连接建不起来或一直断：会话后来怎样没查成。 */
@@ -321,7 +322,7 @@ export async function runMirasim(
     return done();
   }
   if (options.signal?.aborted) {
-    report.killed = { reason: 'aborted', at: now().toISOString() };
+    report.killed = { reason: 'aborted', at: now().toISOString(), ...abortCause(options.signal) };
     return done();
   }
 
@@ -421,9 +422,9 @@ export async function runMirasim(
       if (report.stop) report.stop.error = `stop 帧没发出去：${(err as Error).message}`;
     }
   };
-  const kill = (reason: KillReason) => {
+  const kill = (reason: KillReason, cause?: StopCause) => {
     if (report.killed) return;
-    report.killed = { reason, at: now().toISOString() };
+    report.killed = { reason, at: now().toISOString(), ...(cause ? { cause } : {}) };
     killedAt = Date.now();
     report.stop = { confirmed: false };
     void sendStop(false);
@@ -461,7 +462,7 @@ export async function runMirasim(
   while (sub) {
     const elapsed = Date.now() - t0;
     const sinceStartup = Date.now() - startupAt;
-    if (options.signal?.aborted) kill('aborted');
+    if (options.signal?.aborted) kill('aborted', stopCauseOf(options.signal.reason));
     if (!report.killed) {
       const phase = session.state.phase;
       if ((!session.current || !phase || QUEUED.has(phase)) && sinceStartup > limits.startupMs) {
@@ -644,7 +645,9 @@ export function mirasimRunFacts(report: MirasimRunReport): RunFacts {
   return {
     ...(modelMismatch ? { mismatch: modelMismatch } : {}),
     ...(launch ? (report.launchUnknown ? { launchUnknown: launch } : { spawnError: launch }) : {}),
-    ...(report.killed ? { killed: report.killed.reason } : {}),
+    ...(report.killed
+      ? { killed: report.killed.reason, ...(report.killed.cause ? { stopCause: report.killed.cause } : {}) }
+      : {}),
     ...(terminal ? { terminal } : {}),
     quotaExhausted: looksLikeQuotaExhausted(error),
     ...(relayQuota ? { relayQuota } : {}),
