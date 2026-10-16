@@ -332,7 +332,7 @@ describe('受影响包的整机锁', () => {
         },
       });
       const signal = new AbortController().signal;
-      const done: Array<() => Promise<void>> = [];
+      const done: Array<() => void | Promise<void>> = [];
       const tasks = [0, 1].map(() =>
         lock.acquire(signal).then((rel) => {
           done.push(rel);
