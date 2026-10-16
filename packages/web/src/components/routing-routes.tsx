@@ -46,6 +46,7 @@ import {
 } from './routing-edit';
 import { RouteEffortField, useConfiguredRouteEffort } from './routing-efforts';
 import { KindChip, useKindEnv } from './routing-kinds';
+import { Toggle } from './ui/toggle';
 
 /**
  * 档位配不了时的长说明（「没有单独的档位参数……不带方括号」等）：行内不铺开，
@@ -116,37 +117,53 @@ export function CollapsibleOffModelRoutes({
       </button>
       <div id={`off-routes-${model.modelId}`} hidden={!open}>
         {open ? (
-          <ModelRoutes model={model} now={now} firstLiveRoute={firstLiveRoute} summary={summary} />
+          <ModelRoutes
+            model={model}
+            now={now}
+            firstLiveRoute={firstLiveRoute}
+            summary={summary}
+            showAllByDefault
+          />
         ) : null}
       </div>
     </>
   );
 }
 
-/** 一个模型下的路由，可拖动改先后（先后不分用途，管这个模型在所有用途里）。 */
+/** 一个模型下的路由，可拖动改先后（先后不分用途，管这个模型在所有用途里）。默认只列开着的。 */
 export function ModelRoutes({
   model: m,
   now,
   firstLiveRoute,
   summary = true,
+  showAllByDefault = false,
 }: {
   model: RoutingLayerModel;
   now: number;
   firstLiveRoute?: string | undefined;
   /** 列表上面写一行「引擎按序试……」；调用方已经写在区块标题下面就传 false。 */
   summary?: boolean;
+  /** 已关模型展开后把关着的也列出来，方便当场看。用途页上开着的模型默认不传。 */
+  showAllByDefault?: boolean;
 }) {
   const edit = useRoutingEdit();
   const env = useKindEnv();
+  const [showAll, setShowAll] = useState(showAllByDefault);
   if (m.routes.length === 0) {
     return <p className="px-4 py-3 text-body text-ink-fail">这个模型下一条路由都没有：排了它也派不到它</p>;
   }
-  // 引擎自动跳过关着的、顺延给下一个：实际顺位只数开着的（lib/routing-order.ts）
+  // 引擎自动跳过关着的、顺延给下一个：实际顺位只数开着的（lib/routing-order.ts）。筛选不改这个数。
   const states = m.routes.map((r) => routeSlotState(r, env.channelEnabled));
   const ranks = actualRanks(states);
   const slotOf = new Map(
     m.routes.map((r, i) => [r.routeId, { state: states[i] ?? 'on', rank: ranks[i] ?? null }]),
   );
+  const indexOf = new Map(m.routes.map((r, i) => [r.routeId, i]));
+  const hidden = m.routes.filter((r) => !r.enabled).length;
+  const visible = showAll ? m.routes : m.routes.filter((r) => r.enabled);
+  // 只画了一部分时不能调先后：保存的顺序会把没画出来的丢掉。
+  const filtered = visible.length !== m.routes.length;
+  const hideWhy = filtered ? '只显示了开着的路由：点「显示全部」再调先后' : null;
   return (
     <>
       {summary ? (
@@ -154,14 +171,26 @@ export function ModelRoutes({
           <OrderSummaryLine summary={summarizeOrder(states, '路由')} noun="路由" />
         </p>
       ) : null}
+      {hidden > 0 ? (
+        <div className="flex items-center gap-2 px-4 pt-2">
+          <Toggle size="sm" pressed={showAll} onPressedChange={setShowAll} className="shrink-0">
+            显示全部
+          </Toggle>
+          {showAll ? null : (
+            <span className="text-meta text-muted-foreground">
+              还有 <span className="num">{hidden}</span> 条关着的
+            </span>
+          )}
+        </div>
+      ) : null}
       <SortableList
         ariaLabel={`${m.displayName} 的路由`}
-        items={m.routes}
+        items={visible}
         itemId={(r) => r.routeId}
         itemLabel={(r) => `${routeTitle(r)}（${m.displayName} 下的先后）`}
-        disabled={edit.disabledWhy !== null}
+        disabled={edit.disabledWhy !== null || filtered}
         busy={edit.busy}
-        disabledWhy={edit.disabledWhy}
+        disabledWhy={edit.disabledWhy ?? hideWhy}
         className="divide-y divide-border"
         rowClassName={() => 'hover:bg-accent'}
         rowProps={(r) => ({ 'data-route': r.routeId })}
@@ -169,10 +198,10 @@ export function ModelRoutes({
           edit.reorderRoutes({ modelId: m.modelId, movedId, order, expected })
         }
       >
-        {(r, i, controls) => (
+        {(r, _i, controls) => (
           <RouteItem
             route={r}
-            index={i}
+            index={indexOf.get(r.routeId) ?? 0}
             modelId={m.modelId}
             modelName={m.displayName}
             rowControls={controls}

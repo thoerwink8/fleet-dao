@@ -1184,3 +1184,128 @@ describe('0074：机器人权限提醒合成每个仓一个键', () => {
     TEST_DB_TIMEOUT_MS,
   );
 });
+
+describe('0076：删掉从没开过、没跑过、没被引用的路由', () => {
+  const tag = '0076_drop_unused_routes';
+
+  it(
+    '有引用或开着或在线的留下，没引用的删掉；用途顺序不动；再跑一遍不改',
+    async () => {
+      const target = ordered.findIndex((e) => e.tag === tag);
+      expect(target).toBeGreaterThanOrEqual(0);
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(`
+        insert into families (id, display_name, vendor) values ('fam', '族', 'v');
+        insert into channels (id, name, billing) values ('ch', '渠道', 'subscription');
+        insert into pools (id, channel_id, max_concurrency) values ('pool', 'ch', 1);
+        insert into models (id, family, display_name) values ('m', 'fam', '模型');
+        insert into routes (id, channel_id, pool_id, model_id, host_id, upstream_model, alive, probe_state, probed_at, probe_detail)
+        values ('keep-alive', 'ch', 'pool', 'm', 'grok', 'up-alive', true, 'ok', '2026-10-01T00:00:00Z', '通了');
+        insert into routes (id, channel_id, pool_id, model_id, host_id, upstream_model) values
+          ('keep-enabled', 'ch', 'pool', 'm', 'grok', 'up-enabled'),
+          ('keep-run', 'ch', 'pool', 'm', 'grok', 'up-run'),
+          ('keep-probe', 'ch', 'pool', 'm', 'grok', 'up-probe'),
+          ('keep-pin', 'ch', 'pool', 'm', 'grok', 'up-pin'),
+          ('keep-attempt', 'ch', 'pool', 'm', 'grok', 'up-attempt'),
+          ('keep-state', 'ch', 'pool', 'm', 'grok', 'up-state'),
+          ('keep-reserve', 'ch', 'pool', 'm', 'grok', 'up-reserve'),
+          ('keep-chat', 'ch', 'pool', 'm', 'grok', 'up-chat'),
+          ('doomed', 'ch', 'pool', 'm', 'grok', 'up-doomed'),
+          ('doomed-bare', 'ch', 'pool', 'm', 'grok', 'up-bare');
+        insert into routing_catalog (model_id, route_id, position, enabled) values
+          ('m', 'keep-enabled', 0, true),
+          ('m', 'keep-run', 1, false),
+          ('m', 'doomed', 2, false);
+        insert into routing_purpose_models (purpose, model_id, position) values
+          ('execute', 'm', 0),
+          ('verify', 'm', 1);
+        insert into runs (segment, model, started_at, route_id)
+        values ('manual', 'm', '2026-10-01T00:00:00Z', 'keep-run');
+        insert into route_probe_history (route_id, probed_at, result, failure_reason)
+        values ('keep-probe', '2026-10-01T00:00:00Z', 'not_probed', '这一轮没探');
+        insert into repos (id, owner, name, test_command)
+        values ('11111111-1111-1111-1111-111111111111', 'acme', 'widgets', 'pnpm test');
+        insert into tasks (id, repo_id, issue_number, title, raw_request, requested_by, priority) values
+          ('22222222-2222-2222-2222-222222222222', '11111111-1111-1111-1111-111111111111', 1, '钉住', '钉住', 'u', 0),
+          ('22222222-2222-2222-2222-222222222223', '11111111-1111-1111-1111-111111111111', 2, '预占', '预占', 'u', 0),
+          ('22222222-2222-2222-2222-222222222224', '11111111-1111-1111-1111-111111111111', 3, '只钉模型', '只钉模型', 'u', 0);
+        insert into task_route_pins (task_id, segment, model_id, route_id, set_by, set_at) values
+          ('22222222-2222-2222-2222-222222222222', 'manual', 'm', 'keep-pin', 'u', '2026-10-01T00:00:00Z'),
+          ('22222222-2222-2222-2222-222222222224', 'manual', 'm', null, 'u', '2026-10-01T00:00:00Z');
+        insert into channel_attempts (attempt_idx, model_id, route_id, channel_id, started_at, ended_at, duration_ms)
+        values (1, 'm', 'keep-attempt', 'ch', '2026-10-01T00:00:00Z', '2026-10-01T00:01:00Z', 0);
+        insert into channel_states (channel_id, status, failed_route_id) values ('ch', 'ok', 'keep-state');
+        insert into pool_reservations (task_id, segment, route_id, reserved_at, expires_at)
+        values (
+          '22222222-2222-2222-2222-222222222223',
+          'manual',
+          'keep-reserve',
+          '2026-10-01T00:00:00Z',
+          '2026-10-01T01:00:00Z'
+        );
+        insert into users (id, display_name, role)
+        values ('33333333-3333-3333-3333-333333333333', '创始人', 'founder');
+        insert into requests (id, repo_id, initiator_id, draft_json, last_activity_at)
+        values (
+          '44444444-4444-4444-4444-444444444444',
+          '11111111-1111-1111-1111-111111111111',
+          '33333333-3333-3333-3333-333333333333',
+          '{"title":"一条需求"}',
+          '2026-10-01T00:00:00Z'
+        );
+        insert into request_chats (request_id, route_id)
+        values ('44444444-4444-4444-4444-444444444444', 'keep-chat');
+      `);
+        await runMigration(pg, tag);
+        const ids = async () =>
+          (await pg.query<{ id: string }>('select id from routes order by id')).rows.map((r) => r.id);
+        const kept = [
+          'keep-alive',
+          'keep-attempt',
+          'keep-chat',
+          'keep-enabled',
+          'keep-pin',
+          'keep-probe',
+          'keep-reserve',
+          'keep-run',
+          'keep-state',
+        ];
+        expect(await ids()).toEqual(kept);
+        const catalog = await pg.query<{ route_id: string; position: number; enabled: boolean }>(
+          'select route_id, position, enabled from routing_catalog order by position',
+        );
+        expect(catalog.rows).toEqual([
+          { route_id: 'keep-enabled', position: 0, enabled: true },
+          { route_id: 'keep-run', position: 1, enabled: false },
+        ]);
+        const purposes = await pg.query<{ purpose: string; position: number }>(
+          'select purpose, position from routing_purpose_models order by purpose',
+        );
+        expect(purposes.rows).toEqual([
+          { purpose: 'execute', position: 0 },
+          { purpose: 'verify', position: 1 },
+        ]);
+        expect((await pg.query('select id from models')).rows).toEqual([{ id: 'm' }]);
+        const audit = await pg.query<{ action: string; deleted: number }>(
+          `select action, (after->>'deleted')::int as deleted from audit_log where action = 'catalog.prune-routes'`,
+        );
+        expect(audit.rows).toEqual([{ action: 'catalog.prune-routes', deleted: 2 }]);
+        const pin = await pg.query<{ route_id: string | null }>(
+          `select route_id from task_route_pins where task_id = '22222222-2222-2222-2222-222222222224'`,
+        );
+        expect(pin.rows).toEqual([{ route_id: null }]);
+
+        await runMigration(pg, tag);
+        expect(await ids()).toEqual(kept);
+        const auditAfter = await pg.query('select id from audit_log where action = $1', [
+          'catalog.prune-routes',
+        ]);
+        expect(auditAfter.rows).toHaveLength(1);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});

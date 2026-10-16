@@ -700,7 +700,7 @@ describe('调整顺序：关着的行置灰写「已跳过」，实际顺位只�
     for (const m of off) expect(slotOf(m.modelId).textContent).toBe('关着，已跳过');
   });
 
-  test('路由层：模型下关着的路由写「关着，已跳过」，开着的写实际第几位', async () => {
+  test('路由层默认只显示开着的，点「显示全部」才列出关着的；开着的写实际第几位', async () => {
     const model: RoutingLayerModel = {
       modelId: 'm-x',
       displayName: 'Mx',
@@ -712,9 +712,19 @@ describe('调整顺序：关着的行置灰写「已跳过」，实际顺位只�
     await screen.findByRole('list', { name: '模型' });
     const slot = (id: string) =>
       document.querySelector(`li[data-route="${id}"] [data-slot-state]`) as HTMLElement;
-    await waitFor(() => expect(slot('r-a')).toBeTruthy());
+    await waitFor(() => expect(slot('r-b')).toBeTruthy());
+    expect(document.querySelector('[data-route="r-a"]')).toBeNull();
+    expect(slot('r-b').textContent).toBe('实际第 1 位');
+    expect(slot('r-c').textContent).toBe('实际第 2 位');
+    const toggle = screen.getByRole('button', { name: '显示全部' });
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-pressed')).toBe('true');
     expect(slot('r-a').textContent).toBe('关着，已跳过');
     expect(slot('r-b').textContent).toBe('实际第 1 位');
     expect(slot('r-c').textContent).toBe('实际第 2 位');
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute('aria-pressed')).toBe('false');
+    expect(document.querySelector('[data-route="r-a"]')).toBeNull();
   });
 });

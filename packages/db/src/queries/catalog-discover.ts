@@ -1,9 +1,18 @@
-// 名册读成之后，把看见的上游串补进目录（#1355）。只补没有的行。已有的模型、路由不改，只清或打「渠道已下架」。
+// 名册读成之后，已有路由清或打「渠道已下架」，早先未归类的自动入库路由能拆名就挪走（#1355）。
+// 新看见的上游串不建模型、不建路由：调用方已经写进 channel_seen_models。人把它「加进模型」时才建路由行。
 import type { HostId } from '@fleet-dao/shared';
 import { and, eq } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { DISCOVERED_ROUTE_PREFIX, discoveredModelId, nameUpstreamModel } from '../model-naming.ts';
-import { auditLog, families, models, pools, routes, routingCatalog } from '../schema/index.ts';
+import {
+  auditLog,
+  channelSeenModels,
+  families,
+  models,
+  pools,
+  routes,
+  routingCatalog,
+} from '../schema/index.ts';
 
 const HOST_BY_CHANNEL: Record<string, HostId> = {
   mirasim: 'mirasim',
@@ -27,7 +36,9 @@ const FAMILY_ROWS: Record<string, { displayName: string; vendor: string }> = {
 };
 
 export interface DiscoverCounts {
+  /** 这次新插进 models 的条数。只来自把早先未归类的路由挪到认出的模型下；新看见的串不建模型。 */
   modelsAdded: number;
+  /** 名册发现不再插路由，这一项是 0。路由行只在「加进模型」时建。 */
   routesAdded: number;
   goneMarked: number;
   goneCleared: number;
@@ -53,7 +64,7 @@ function listedKeys(route: { upstreamModel: string | null; upstreamAliases: read
 
 /**
  * 一个渠道这一次读成的名单。调用方要包在和名册写入同一笔事务里：这里失败，整笔一起回滚。
- * 新路由不进任何用途，routing_catalog.enabled 写 false。变体写在路由上，不写进起会话的档位列。
+ * 新看见的串不建路由、不建模型（人「加进模型」才建，见 addChannelModel）。已有的路由：对得上的清下架、能拆名的挪走，名单里没有的标下架。
  * 没有名册命令、靠手工登记的渠道（#1371）：给的只是登记过的那几个串，不是完整名单，所以 markGone 要关（不能拿它判别的路由消失），
  * 登记自己有操作记录，writeAudit 也关。
  */
@@ -90,7 +101,7 @@ export async function discoverChannelModels(
   const familiesReady = new Set<string>();
   let modelsAdded = 0;
   const newModelIds: string[] = [];
-  let routesAdded = 0;
+  const routesAdded = 0;
   let goneCleared = 0;
   let reclassified = 0;
 
@@ -160,49 +171,16 @@ export async function discoverChannelModels(
 
   for (const key of modelKeys) {
     const hits = existing.filter((route) => listedKeys(route).includes(key));
-    if (hits.length > 0) {
-      for (const hit of hits) {
-        matched.add(hit.id);
-        if (await reclassify(hit, key)) reclassified += 1;
-        if (!hit.goneAt) continue;
-        await db.update(routes).set({ goneAt: null }).where(eq(routes.id, hit.id));
-        hit.goneAt = null;
-        goneCleared += 1;
-      }
-      continue;
+    // 新串不建模型、不建路由。调用方已经写进 channel_seen_models；人「加进模型」才建行。
+    if (hits.length === 0) continue;
+    for (const hit of hits) {
+      matched.add(hit.id);
+      if (await reclassify(hit, key)) reclassified += 1;
+      if (!hit.goneAt) continue;
+      await db.update(routes).set({ goneAt: null }).where(eq(routes.id, hit.id));
+      hit.goneAt = null;
+      goneCleared += 1;
     }
-
-    const named = nameUpstreamModel(channelId, key);
-    const unclassified = 'unclassified' in named;
-    const modelId = discoveredModelId(channelId, key);
-    const familyId = unclassified ? 'unclassified' : named.family;
-    await ensureModel(modelId, familyId, unclassified ? key : modelId);
-
-    const routeId = `${DISCOVERED_ROUTE_PREFIX}${channelId}:${key}`;
-    const insertedRoute = await db
-      .insert(routes)
-      .values({
-        id: routeId,
-        channelId,
-        poolId,
-        modelId,
-        hostId,
-        alive: false,
-        upstreamModel: key,
-        variantEffort: unclassified ? null : named.effort,
-        variantFast: unclassified ? null : named.fast,
-        variantThinking: unclassified ? null : named.thinking,
-        variantContext: unclassified ? null : named.context,
-      })
-      .returning({ id: routes.id });
-    const insertedId = insertedRoute[0]?.id;
-    if (!insertedId) throw new Error(`路由 ${routeId} 没写进去`);
-    routesAdded += 1;
-    matched.add(insertedId);
-
-    const position = nextPos.get(modelId) ?? 0;
-    nextPos.set(modelId, position + 1);
-    await db.insert(routingCatalog).values({ modelId, routeId: insertedId, position, enabled: false });
   }
 
   let goneMarked = 0;
@@ -223,9 +201,111 @@ export async function discoverChannelModels(
       action: 'catalog.discover',
       target: `channel:${channelId}`,
       after: counts,
-      reason: '名册读成，自动入库',
+      reason: '名册读成，记进渠道见过的模型',
       via: 'engine',
     });
   }
   return { ...counts, newModelIds };
+}
+
+export interface AddChannelModelResult {
+  /** 这次新插了一条路由。这个渠道已经有路由列着这个串（上游串或别名）时是 false，不另插。 */
+  created: boolean;
+  routeId: string | null;
+  modelId: string | null;
+}
+
+/**
+ * 把渠道名册里已经见过的一个串加进模型：补族、模型、一条关着的路由（不进任何用途）。
+ * 路由编号 `auto:<渠道>:<原串>`，变体写在路由上，不写进起会话的档位列。执行体留空，下次名册读成再盖。
+ * 这个串还没记在 channel_seen_models 里就拒绝（先登记或先读成名册）。已经有路由列着它就不另插，也不补目录行。
+ */
+export async function addChannelModel(
+  db: Db,
+  channelId: string,
+  rawKey: string,
+  now: Date,
+  options: { writeAudit?: boolean } = {},
+): Promise<AddChannelModelResult> {
+  const writeAudit = options.writeAudit ?? true;
+  const modelKey = rawKey.trim();
+  if (!modelKey) throw new Error('模型串是空的');
+  const hostId = HOST_BY_CHANNEL[channelId];
+  if (!hostId) throw new Error(`渠道 ${channelId} 没有对应的执行方式，路由挂不上去`);
+
+  return db.transaction(async (tx) => {
+    const [seen] = await tx
+      .select({ modelKey: channelSeenModels.modelKey })
+      .from(channelSeenModels)
+      .where(and(eq(channelSeenModels.channelId, channelId), eq(channelSeenModels.modelKey, modelKey)));
+    if (!seen) throw new Error('这个模型串还没在渠道名册里见过，不能加进模型');
+
+    const poolRows = await tx
+      .select({ id: pools.id })
+      .from(pools)
+      .where(eq(pools.channelId, channelId))
+      .orderBy(pools.id);
+    const poolId = poolRows[0]?.id;
+    if (!poolId) throw new Error(`渠道 ${channelId} 没有账号池，路由挂不上去`);
+
+    const existing = await tx.select().from(routes).where(eq(routes.channelId, channelId));
+    const hit = existing.find((route) => listedKeys(route).includes(modelKey));
+    if (hit) return { created: false, routeId: hit.id, modelId: hit.modelId };
+
+    const named = nameUpstreamModel(channelId, modelKey);
+    const unclassified = 'unclassified' in named;
+    const modelId = discoveredModelId(channelId, modelKey);
+    const familyId = unclassified ? 'unclassified' : named.family;
+    const family = FAMILY_ROWS[familyId];
+    if (!family) throw new Error(`拆名给出了不认识的族 ${familyId}`);
+    await tx
+      .insert(families)
+      .values({ id: familyId, displayName: family.displayName, vendor: family.vendor })
+      .onConflictDoNothing();
+    await tx
+      .insert(models)
+      .values({ id: modelId, family: familyId, displayName: unclassified ? modelKey : modelId })
+      .onConflictDoNothing({ target: models.id });
+
+    const routeId = `${DISCOVERED_ROUTE_PREFIX}${channelId}:${modelKey}`;
+    const insertedRoute = await tx
+      .insert(routes)
+      .values({
+        id: routeId,
+        channelId,
+        poolId,
+        modelId,
+        hostId,
+        alive: false,
+        upstreamModel: modelKey,
+        variantEffort: unclassified ? null : named.effort,
+        variantFast: unclassified ? null : named.fast,
+        variantThinking: unclassified ? null : named.thinking,
+        variantContext: unclassified ? null : named.context,
+      })
+      .returning({ id: routes.id });
+    const insertedId = insertedRoute[0]?.id;
+    if (!insertedId) throw new Error(`路由 ${routeId} 没写进去`);
+
+    const posRows = await tx
+      .select({ position: routingCatalog.position })
+      .from(routingCatalog)
+      .where(eq(routingCatalog.modelId, modelId));
+    const position = posRows.reduce((max, row) => Math.max(max, row.position + 1), 0);
+    await tx.insert(routingCatalog).values({ modelId, routeId: insertedId, position, enabled: false });
+
+    if (writeAudit) {
+      await tx.insert(auditLog).values({
+        at: now,
+        actorKind: 'engine',
+        actorId: 'model-roster',
+        action: 'catalog.add-model',
+        target: `channel:${channelId}`,
+        after: { modelKey, routeId: insertedId, modelId },
+        reason: '加进模型',
+        via: 'engine',
+      });
+    }
+    return { created: true, routeId: insertedId, modelId };
+  });
 }
