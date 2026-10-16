@@ -13,6 +13,11 @@ var transientRetryDelay = 50 * time.Millisecond
 
 const transientRetries = 3
 
+// beforeJSONRetry 在解析失败、还要重读之前调用。生产环境保持 nil。
+// 测试在这里把半截文件换成完整的：不另起 goroutine 睡几十毫秒再替换，忙的时候那一下排不上，
+// 150ms 的重试窗口已经耗尽，读到的仍是半截（CI 上 TestReadJSONFileRetriesHalfWrittenFile 因此红过）。
+var beforeJSONRetry func()
+
 type readFailure struct {
 	notExist bool
 	parse    bool
@@ -48,6 +53,9 @@ func readJSONFile(path string, v any) error {
 		}
 		if json.Unmarshal(b, v) != nil {
 			last = &readFailure{parse: true}
+			if attempt < transientRetries && beforeJSONRetry != nil {
+				beforeJSONRetry()
+			}
 			continue
 		}
 		return nil
