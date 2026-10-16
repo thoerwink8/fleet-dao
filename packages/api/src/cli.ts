@@ -13,6 +13,9 @@
 // 引擎总开关（设置 engine.master，#1086）：on 打开引擎接活，off 全停（不拉单、不派活、不起干活的会话；探针照跑），
 // status 只看。没设过是关。和按项目的「让 AI 接活」串联：总开关开着、项目的开关也开着才派。发版脚本每次发版成功后
 // 经 engine off 置关（#1050）；本机 WSL 的小版本更新不碰它。
+//   flow-mode status | set <three|split:<0-100>|full> --reason "<原因>"（#2823）
+// 全程模式开关（设置 engine.flowMode）：three 都走三步单，full 都走全程，split:N 约 N% 的单走全程。没设过是 three；库里的值认不出也按
+// three 并把原因打印出来。set 改的同时记一条操作记录（原因必填）。这一步只记账，引擎不读它。
 //   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
 //   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
 //   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
@@ -36,7 +39,13 @@ import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
 import { ENGINE_LABEL, LOCAL_LABEL } from '@fleet-dao/conventions';
 import type { Db } from '@fleet-dao/db';
-import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@fleet-dao/shared';
+import {
+  AUTO_DISPATCH_DISABLE,
+  AUTO_DISPATCH_ENABLE,
+  formatFlowModeSetting,
+  NodeIdSchema,
+  parseFlowModeSetting,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
@@ -57,6 +66,7 @@ import {
   parseFeishuPushArgs,
   runFeishuPush,
 } from './feishu-push-cli.ts';
+import { describeFlowMode, readFlowMode, setFlowMode } from './flow-mode-switch.ts';
 import {
   NOTIFY_USAGE,
   NotifyCliError,
@@ -100,6 +110,8 @@ const USAGE =
   '用法：fleet-api set-password <飞书名或用户 id> [--username <用户名>]（密码从标准输入读，不收参数）';
 const ENGINE_USAGE =
   '用法：fleet-api engine on|off|status [--reason <原因>]（引擎总开关：on 打开，off 关上，status 只看；没设过是关。开关写进操作记录，本来就是要的状态就不改不记）';
+const FLOW_MODE_USAGE =
+  '用法：fleet-api flow-mode status | fleet-api flow-mode set <three|split:<0-100>|full> --reason "<原因>"（全程模式开关：three 都走三步单，full 都走全程，split:N 约 N% 的单走全程；没设过是 three，认不出的值也按 three 并报出来。set 的原因必填，改动写进操作记录，本来就是这个值就不改不记）';
 /** dispatch-issue（#1337）的本体在引擎包（packages/engine/src/bin/dispatch-issue.ts）：后端不依赖引擎包，由 bin/fleet-api 按命令名转过去。这里只管 --help 列得出来。 */
 const DISPATCH_ISSUE_POINTER =
   '用法：fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]（开关关着时点名把一张单交给引擎；本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api dispatch-issue --help）';
@@ -765,6 +777,72 @@ export async function engine(input: { store: Store; args: EngineArgs; operator: 
   return `已${on ? '打开' : '关上'}：引擎总开关：${describeEngineMaster(change.state)}`;
 }
 
+// —— flow-mode：全程模式开关（#2823，设置 engine.flowMode）——
+
+export type FlowModeArgs = { action: 'status' } | { action: 'set'; value: string; reason: string };
+
+/** status，或 set <值> --reason <原因>（值要认得出、原因必填）；别的写法一律拒，不猜。 */
+export function parseFlowModeArgs(argv: readonly string[]): FlowModeArgs {
+  const [action = '', ...rest] = argv;
+  if (action === 'status') {
+    if (rest.length > 0) throw new CliError(`status 不带别的参数。${FLOW_MODE_USAGE}`, 2);
+    return { action };
+  }
+  if (action !== 'set') throw new CliError(`认不出「${action}」：只收 status、set。${FLOW_MODE_USAGE}`, 2);
+  const [value, flag, reason, ...extra] = rest;
+  if (
+    value === undefined ||
+    flag !== '--reason' ||
+    reason === undefined ||
+    reason.trim() === '' ||
+    extra.length > 0
+  )
+    throw new CliError(`set 要写成 set <值> --reason <原因>。${FLOW_MODE_USAGE}`, 2);
+  const parsed = parseFlowModeSetting(value);
+  if (!parsed.ok) throw new CliError(`${parsed.problem}。${FLOW_MODE_USAGE}`, 2);
+  const why = reason.trim();
+  if (why.length > MAX_REASON)
+    throw new CliError(`--reason 太长（最多 ${MAX_REASON} 个字）。${FLOW_MODE_USAGE}`, 2);
+  return { action: 'set', value: formatFlowModeSetting(parsed.setting), reason: why };
+}
+
+const OPS_FLOW_MODE = { kind: 'ops', id: 'ops:flow-mode' } as const;
+
+/** fleet-api flow-mode 本身（#2823）。status 只读打印；set 经 setFlowMode 改（开关和操作记录同一事务），版本冲突报出来让重跑。 */
+export async function flowMode(input: {
+  store: Store;
+  args: FlowModeArgs;
+  operator: string;
+}): Promise<string> {
+  const { store, args, operator } = input;
+  if (args.action === 'status') {
+    const reading = await dbStep('没查成：', () => readFlowMode(store));
+    return `全程模式开关：${describeFlowMode(reading)}`;
+  }
+  const change = await dbStep(
+    '没改成（什么都没改）：',
+    () =>
+      setFlowMode(
+        store,
+        { value: args.value, by: OPS_FLOW_MODE },
+        {
+          actor: OPS_FLOW_MODE,
+          reason: `${args.reason}（服务器上 ${operator} 跑的 fleet-api flow-mode set ${args.value}）`,
+          via: 'ops',
+          ok: true,
+        },
+      ),
+    '。开关和操作记录在同一个事务里，要么都改了、要么都没改：跑 status 看现在是哪样',
+  );
+  if ('conflict' in change)
+    throw new CliError(
+      `没改成：开关刚被别处改过（现在是「${describeFlowMode(change.reading)}」），再跑一遍或跑 status 核对`,
+    );
+  if (!change.changed)
+    return `没改：开关本来就是 ${args.value}（现在是「${describeFlowMode(change.reading)}」）`;
+  return `已改：全程模式开关：${describeFlowMode(change.reading)}`;
+}
+
 /**
  * 谁跑的。bin/fleet-api 换成 fleet 身份之前，把 root（经 sudo 跑的记 sudo 前的用户）放进 FLEET_OPS_OPERATOR；
  * 没经它、直接跑 node 的，记这个进程的用户并写明。
@@ -991,6 +1069,7 @@ const USAGES: Record<string, string> = {
   'usage-backfill-once': USAGE_BACKFILL_ONCE_POINTER,
   'daily-brief': DAILY_BRIEF_POINTER,
   engine: ENGINE_USAGE,
+  'flow-mode': FLOW_MODE_USAGE,
   'node-key': NODE_KEY_USAGE,
   'session-mint': SESSION_MINT_USAGE,
   alert: ALERT_USAGE,
@@ -1055,6 +1134,16 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     const { store, close } = await deps.openStore(databaseUrl(deps.env));
     try {
       deps.out(await engine({ store, args, operator: operatorName(deps.env) }));
+      return 0;
+    } finally {
+      await close();
+    }
+  }
+  if (command === 'flow-mode') {
+    const args = parseFlowModeArgs(rest);
+    const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    try {
+      deps.out(await flowMode({ store, args, operator: operatorName(deps.env) }));
       return 0;
     } finally {
       await close();
