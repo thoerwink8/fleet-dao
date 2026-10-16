@@ -253,10 +253,16 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
   return { tasks, calls };
 }
 
-/** 测试里同一份 scripted() 的任务共用这一张表，两个任务各打一次 401 才算第二次。 */
+/**
+ * 测试里同一份 scripted() 的任务共用这一张表，两个任务各打一次 401 才算第二次。
+ * 窗口按真实时间算，不用工作流传进来的 now。那是可跳时间的测试服务端时钟：
+ * await result() 会放开跳时间，活动的超时定时器能把时钟拨过 10 分钟（#1764）。
+ * 两张单在真实时间里是紧挨着的，却会被算成窗口过了、第二次变成第一次。
+ * 同一个 claim 再来（活动重试）仍算同一次，由 nextBare401Stamp 认。
+ */
 function noteSharedBare401(stamps: Map<string, Bare401Stamp>, input: NoteBare401Input) {
   const { stamp, repeated } = nextBare401Stamp(stamps.get(input.poolId), {
-    now: input.now,
+    now: new Date().toISOString(),
     claim: input.claim,
   });
   stamps.set(input.poolId, stamp);
