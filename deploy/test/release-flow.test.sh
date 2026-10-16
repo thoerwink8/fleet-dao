@@ -101,7 +101,7 @@ write_release_npmrc "$NPMRC_DIR"
 check ".npmrc 的内容固定为关闭全局虚拟仓、依赖拷贝" "$(cat "$NPMRC_DIR/.npmrc")" \
   $'enable-global-virtual-store=false\npackage-import-method=copy'
 check "构建流程确实写发布目录根的 .npmrc" \
-  "$(grep -cF 'write_release_npmrc "$stage"' "$HERE/../release.sh")" 1
+  "$(grep -cF "write_release_npmrc \"\$stage\"" "$HERE/../release.sh")" 1
 
 echo "== 头一版、第二版：健康，照常切过去"
 reset
