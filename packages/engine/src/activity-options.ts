@@ -14,11 +14,14 @@ import {
   type DecideFlowModeInput,
   type DecideFlowModeResult,
   type DeliveryRead,
+  type EngineStartedAt,
   type GuardedPaths,
   MERGE_POLL_MINUTES,
   type MergeNowInput,
   type MergeNowResult,
   type MergeWait,
+  type NoteBare401Input,
+  type NoteBare401Result,
   type PlanSegmentResumeInput,
   type PlanSegmentResumeResult,
   type ProbeAssignedInput,
@@ -47,6 +50,8 @@ type PortActivities = {
 
 /** 工作流看到的活动：端口（EnginePorts）里的，加上引擎自己的。 */
 export type EngineActivities = PortActivities & {
+  /** 当前 worker 进程的启动时刻；超时分流用它和旧活动最后一次心跳作严格比较。 */
+  engineStartedAt(input: { schemaVersion: 1 }): Promise<EngineStartedAt>;
   // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
   /** 现读单子和它指着的需求文档，拼出动手的交代（runner/task-brief.ts）。单子读不到抛错；缺栏回 problems。 */
   readTaskBrief(input: ReadTaskBriefInput): Promise<TaskBriefResult>;
@@ -74,6 +79,10 @@ export type EngineActivities = PortActivities & {
   selfCheck(input: SelfCheckInput): Promise<SelfCheckResult>;
   /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
   taskSpend(input: TaskSpendInput): Promise<TaskSpendResult>;
+  /**
+   * 只凭 HTTP 401：记下这个池这一次，并回答短时间里是不是已经有过一次（所有任务共用，不单记在这张单里）。
+   */
+  noteBare401(input: NoteBare401Input): Promise<NoteBare401Result>;
   /** 定这张单走三段还是全程（#2826）：第一次选路之后、第一段动手之前问一次。读不到抛，工作流按三段走。 */
   decideFlowMode(input: DecideFlowModeInput): Promise<DecideFlowModeResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
@@ -98,6 +107,7 @@ export type ActivityName = keyof EngineActivities;
 export type Profile = 'quick' | 'git' | 'setup' | 'ci' | 'job' | 'segment' | 'poll';
 
 export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
+  engineStartedAt: 'quick',
   pickRoute: 'quick',
   recordTiming: 'quick',
   saveTaskState: 'quick',
@@ -126,6 +136,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   segmentSettled: 'quick',
   selfCheck: 'setup',
   taskSpend: 'quick',
+  noteBare401: 'quick',
   decideFlowMode: 'git',
 };
 

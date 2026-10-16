@@ -59,6 +59,7 @@ import { type EnginePorts, PortError } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { toTaskSpendResult } from '../task-spend.ts';
 import { configFromEnv } from '../worker.ts';
+import { createNoteBare401 } from './bare-401.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
@@ -1131,6 +1132,7 @@ export function realPortsFromEnv(
         latestRunOfTask(db, { taskId, segment: 'manual', startedAfter }),
     }),
     selfCheck: createSelfCheck({ trees, exec, log: taskLog }),
+    noteBare401: createNoteBare401(db),
     taskSpend: async (input) => {
       if (input?.schemaVersion !== 1 || !input.taskId) {
         throw new PortError('INVALID_INPUT', '查这张单花掉的 token：要有 taskId', { retryable: false });

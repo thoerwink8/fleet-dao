@@ -1,8 +1,8 @@
 // pnpm test:changed 的判法：这次改了哪些文件、跑哪些测试（入口 bin/test-changed.ts）。引擎的交活核对只认会话里跑过它、
 // 最后一次通过（specs/164-会话内存与交活测试/）。
 // 改动 = 和 origin/main 分叉以来提交了的 + 暂存的 + 没暂存的 + 没跟踪的：会话交活前测的是自己手上的这棵树。
-// 跑哪些测试和 CI 按改动跑同一套判法（ci-plan.ts 的 planCi：改到的包和依赖它们的包、测试读的包外文件；根配置、shared、夹具、
-// deploy/ 这类改到就全跑）；要全跑、本机又不全跑时先跑的那份也从同一份判法算（ci-plan.ts 的 fallbackUnits），这里不另写
+// 跑哪些测试和 CI 按改动跑同一套判法（ci-plan.ts 的 planCi：改到的包和依赖它们的包、测试读的包外文件；根配置、shared、
+// deploy/ 这类改到就全跑；夹具只测它所在的包，跨包读由 TEST_READS 带上）；要全跑、本机又不全跑时先跑的那份也从同一份判法算（ci-plan.ts 的 fallbackUnits），这里不另写
 // 「改动落在哪」。本机不带 CI 每个 PR 都跑的整个 agents/test/（ci-plan.ts 的 ALWAYS_TESTS，一百秒上下；决定 0093 改了 #740 的
 // 「本机每次都带上」）：agents/ 只在 planCi 判它受影响时带（改到 agents/、或它的测试读的包外文件，ci-plan.test.ts 扫测试源码兜着），
 // 另外每次带两份指针检查（LOCAL_ALWAYS_TESTS），改到文档时再带「源码里写着这些文档路径」的测试（doc-readers.ts），判不出谁读时
@@ -250,7 +250,8 @@ function refuseLines(local: LocalRun): string[] {
  * 跑不跑、跑什么。只在「判出要全跑、没带 --all、没带 --affected、不在 CI、不是引擎会话」时拒跑：写明原因、全量交给 CI、
  * 留给 CI 的那些、真要全跑怎么说，退出码 REFUSED_FULL_RUN（不再打单跑对应包的命令，#1066）。
  * 带 --all 就全跑（明说了要）。带 --affected 时不拒，改跑受影响的包（要全跑时先跑的那份，local.paths）：
- * 引擎自测看到退出码 3 之后用这个，不把测试整段推给 CI。CI 里、引擎会话里仍全跑，--affected 改不了那两条。
+ * 引擎自测用它在测试锁下跑受影响的包，不把测试整段推给 CI；显式 --affected 覆盖引擎会话标记。
+ * CI 仍全跑，--affected 不改 CI 的全量规则。
  */
 export function decideRun(input: {
   selection: TestSelection;
@@ -263,19 +264,19 @@ export function decideRun(input: {
   if (input.all) return { kind: 'run', args: ['run'], note: '带了 --all：本机全跑' };
   if (selection.kind === 'some') return { kind: 'run', args: vitestArgs(selection) };
   if (inCi(env)) return { kind: 'run', args: ['run'], note: '在 CI 里：全跑' };
-  if (env[ENGINE_SESSION_MARKER]?.trim()) {
-    return {
-      kind: 'run',
-      args: ['run'],
-      note: '引擎起的会话：照旧全跑（交活只认它；会话有内存上限，测试进程数按上限算）',
-    };
-  }
   if (input.affected && selection.local.paths.length > 0) {
     const paths = selection.local.paths;
     return {
       kind: 'run',
       args: ['run', ...paths],
       note: `要全跑，本机改跑受影响的包：${paths.join(' ')}`,
+    };
+  }
+  if (env[ENGINE_SESSION_MARKER]?.trim()) {
+    return {
+      kind: 'run',
+      args: ['run'],
+      note: '引擎起的会话：照旧全跑（交活只认它；会话有内存上限，测试进程数按上限算）',
     };
   }
   return { kind: 'refuse', code: REFUSED_FULL_RUN, lines: refuseLines(selection.local) };
