@@ -211,7 +211,7 @@ export function renderGroomPrompt(input: GroomPromptInput): string {
     `1. reviews：对一张单下判断，每次最多 ${GROOM_MAX_REVIEWS} 条。verdict 三选一：`,
     `   - "sound"：这张单的前提今天仍成立、范围清楚、适合交给引擎做。引擎会贴「${GROOMED_LABEL}」，老单只有贴了它才会被引擎挑。**拿不准就不要判 sound**：引擎前几天就因为拉到前提已经过期的老单白烧了一轮。`,
     `   - "expired"：前提已被后来的决定取代、事情已经做完、或要等一个还没发生的条件才成立。引擎会留言建议关闭并贴「${GROOM_PENDING_LABEL}」，**不会关单**。reason 里写清是哪条决定 / 哪个 PR / 哪段代码说明它过期了。`,
-    `   - "human"：只有两件要创始人拍的事——要掏新钱（新开订阅、充值、开按量计费），或删了找不回又没备份（删 GitHub 仓、删没备份的生产库数据、删创始人自己的文件）。引擎会贴「${HUMAN_DECISION_LABEL}」，从此不拉。改标准的路径、.github/workflows/、对外发布不要判 human：写在正文里，引擎会贴「${LOCAL_LABEL}」并留一句原因，不问创始人（决定 0097）。`,
+    `   - "human"：只有两件要创始人拍的事——要掏新钱（新开订阅、充值、开按量计费），或删了找不回又没备份（删 GitHub 仓、删没备份的生产库数据、删创始人自己的文件）。引擎会贴「${HUMAN_DECISION_LABEL}」，从此不拉。reason 里要写明是哪件（要掏什么钱、删什么找不回）：原因和原单都没写这两件的，引擎改贴「${LOCAL_LABEL}」。改标准的路径、.github/workflows/、对外发布不要判 human：写在正文里，引擎会贴「${LOCAL_LABEL}」并留一句原因，不问创始人（决定 0097）。`,
     `2. amendments：给缺东西的老单补写，每次最多 ${GROOM_MAX_AMENDS} 张。只补它缺的节（scene 场景 / modules 已知的模块 / done 怎么算做完，done 每条要写成 diff 里或界面上看得见的东西，不要写「跑 grep 看结果」），note 放别的补充。引擎只在原正文末尾追加「## ${AMEND_HEADING}」一节，原文和原话一个字都不会改；老单里已经写了的节不补。补完若涉及改标准、.github/workflows/ 或对外发布，引擎贴「${LOCAL_LABEL}」并留一句原因，不贴「${GROOMED_LABEL}」；否则贴「${GROOMED_LABEL}」，所以只补你认为仍成立的单。`,
     `3. newIssues：开新的独立小单，每次最多 ${GROOM_MAX_NEW_ISSUES} 张：把一张太大的单拆成几张能单独做完的小单（填 splitFrom=大单号，引擎会在大单上留言；**不要开子单**），或开你在仓里读到的、确实该做又没人记的事。总账的下一片也走这里，但只有下面「总账分片」点了名的才开。每张给 title、kind（需求 / 缺陷 / 杂项）、scene、modules（可省）、done（至少一条，写成看得见的验收条）。引擎自己拼成四节的单，「原话」一栏它写「无（AI 发现）」，你不要编创始人的原话。新单一律是未排期。开之前先看下面「开着的单」「最近关掉的」「开着的 PR」，已经有的不要再开。`,
     '',

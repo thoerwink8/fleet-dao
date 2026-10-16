@@ -554,7 +554,7 @@ describe('executeGroomPlan · 判断', () => {
         reviews: [
           { issue: 1, verdict: 'sound', reason: '今天仍成立' },
           { issue: 2, verdict: 'expired', reason: '前提被决定 0030 取代' },
-          { issue: 3, verdict: 'human', reason: '要改 agents/ 下的说明' },
+          { issue: 3, verdict: 'human', reason: '要新开一份按量计费的订阅' },
         ],
       }),
       ctxOf([issue(1), issue(2), issue(3)]),
@@ -601,6 +601,51 @@ describe('executeGroomPlan · 判断', () => {
     expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
     expect(String(f.calls.find((c) => c.kind === 'comment')?.args.body)).toContain('.github/workflows/');
     expect(out.result.flagged).toEqual([]);
+  });
+
+  it('判 human、原单列了 CI 工作流、原因只写交本机 → 贴「本机做」并留工作流那条原因，不贴「要人拍」', async () => {
+    const old = issue(3, {
+      body: ['## 场景', '', '要改 `.github/workflows/ci.yml`。', '', '## 原话', '', '「改工作流」', ''].join(
+        '\n',
+      ),
+    });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ reviews: [{ issue: 3, verdict: 'human', reason: '引擎令牌推不了，交本机处理' }] }),
+      ctxOf([old]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    expect(String(f.calls.find((c) => c.kind === 'comment')?.args.body)).toContain('.github/workflows/');
+    expect(out.result.flagged).toEqual([]);
+  });
+
+  it('判 human、原因和原单都没写掏钱或删了找不回、也认不出本机的 → 贴「本机做」，原因写没说是哪件', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ reviews: [{ issue: 3, verdict: 'human', reason: '方向要先定' }] }),
+      ctxOf([issue(3)]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    const body = String(f.calls.find((c) => c.kind === 'comment')?.args.body);
+    expect(body).toContain('方向要先定');
+    expect(body).toContain('决定 0097');
+    expect(out.result.flagged).toEqual([]);
+  });
+
+  it('判 human、原单写了删没备份的生产库数据 → 贴「要人拍」', async () => {
+    const old = issue(3, {
+      body: ['## 场景', '', '清掉旧表，生产库数据没备份。', '', '## 原话', '', '「清表」', ''].join('\n'),
+    });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ reviews: [{ issue: 3, verdict: 'human', reason: '要创始人拍' }] }),
+      ctxOf([old]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['要人拍']);
+    expect(out.result.flagged).toEqual([3]);
   });
 
   it('已经贴着这个标签的不重复贴；超过 40 条判断的丢掉', async () => {

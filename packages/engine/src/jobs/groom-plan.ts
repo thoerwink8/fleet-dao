@@ -20,7 +20,8 @@
 // - 会话只看得到、也只能点到「作者在白名单里」的开着的单：陌生人开的单正文不进提示词（防提示词注入），清单点到它们也丢进 rejected。
 // - 涉及改标准路径、`.github/workflows/`（正文里认得出路径，补老单连原单正文一起认）或对外发布，贴「本机做」并留一句原因，引擎不拉。
 //   「要人拍」只留给会话标了要掏新钱、或删了找不回又没备份的（needsHuman 一标就是，哪怕那句话里也写了工作流路径；
-//   判断写成 human 的，原因里写了掏钱、删了找不回也是，哪怕也写了工作流路径；别的只在引擎认不出是上面三类时才是）。
+//   判断写成 human 的，原因或原单正文里写了掏钱、删了找不回才是，哪怕也写了工作流路径；都没写的连原单正文一起认，
+//   认得出是上面三类贴「本机做」留那条原因，认不出也贴「本机做」，原因写会话判了要人拍却没说是哪件）。
 // - 单条动作失败（GitHub 写不进）进 rejected，别的条照做；全部尝试的动作都失败，调用方当整理失败。
 
 import {
@@ -198,11 +199,32 @@ export function localWorkReason(text: string, rules: readonly StandardPath[]): s
 }
 
 /**
- * 判断的原因里写没写要创始人拍的两件事：掏新钱（订阅、充值、按量计费……）、删了找不回又没备份。
- * 只认这两件的说法，光写「删」不算（删一个工作流文件是本机做的事）。
+ * 这段文字写没写要创始人拍的两件事：掏新钱（新开订阅、充值、按量计费……）、删了找不回又没备份。
+ * 只认这两件的说法，光写「删」「订阅」不算（删一个工作流文件是本机做的事，订阅事件流不花钱）。
  */
 export function founderMatter(text: string): boolean {
-  return /掏新钱|花钱|付费|计费|充值|订阅|账单|找不回|没备份|无备份|没有备份|不可恢复|恢复不了/.test(text);
+  return /掏新钱|花钱|付费|按量计费|开通计费|充值|新开订阅|开订阅|订阅费|账单|找不回|没备份|无备份|没有备份|不可恢复|恢复不了/.test(
+    text,
+  );
+}
+
+/**
+ * 会话判 human 的单该贴什么（决定 0097：只为掏新钱、删了找不回又没备份问创始人）。
+ * 原因或原单正文写了这两件 → 「要人拍」，同一处写了工作流路径也不改判；
+ * 都没写 → 「本机做」：连原单正文一起认得出改标准、改工作流、对外发布就留那条原因，认不出写会话判了要人拍却没说是哪件。
+ */
+export function reviewHold(
+  reason: string,
+  body: string,
+  rules: readonly StandardPath[],
+): { kind: 'local'; reason: string } | { kind: 'human'; reason: string } {
+  if (founderMatter(reason) || founderMatter(body)) return { kind: 'human', reason };
+  const local = localWorkReason(`${body}\n${reason}`, rules);
+  if (local) return { kind: 'local', reason: local };
+  return {
+    kind: 'local',
+    reason: `会话判了要人拍（${reason}），但原因和原单都没写要掏新钱、或删了找不回又没备份；决定 0097 只为这两件问创始人，留给本机看`,
+  };
 }
 
 /** 贴「本机做」时留在单上的那一句。 */
@@ -483,9 +505,8 @@ export async function executeGroomPlan(
       });
       if (ok) suggestedClose.push(item.issue);
     } else {
-      // 会话判 human：原因里写了掏钱、删了找不回就照它贴「要人拍」，不因同一句里的工作流路径改判；否则认得出是本机做的改判。
-      const hold = founderMatter(reason) ? null : groomHold(reason, undefined, ctx.standardPaths);
-      const local = hold?.kind === 'local' ? hold : null;
+      const hold = reviewHold(reason, issue.body, ctx.standardPaths);
+      const local = hold.kind === 'local' ? hold : null;
       const ok = await act(what, async () => {
         if (local) {
           await writes.comment({
