@@ -601,6 +601,13 @@ describe('喂熔断：哪些算路由的失败', () => {
     expect(outcome({ message: 'socket hang up' })).toBe('fail');
     expect(outcome({ message: '503 status code (no body)' })).toBe('fail');
     expect(outcome({ code: 'agent_error', message: 'odd' })).toBe('fail');
+    // one-shot 到点强停（#2759）：原文里的 timeout 是我们的时限，不算路由的错。上游超时照旧算。
+    expect(outcome({ code: 'wall_clock_timeout', message: '引擎叫停（时限到了：one-shot timeout）' })).toBe(
+      'neutral',
+    );
+    expect(outcome({ httpStatus: 504, message: 'HTTP 504 Gateway Timeout' })).toBe('fail');
+    expect(outcome({ message: 'connect ETIMEDOUT 10.0.0.1:443' })).toBe('fail');
+    expect(outcome({ message: 'connection timed out' })).toBe('fail');
     expect(outcome({ code: 'interrupted' })).toBe('neutral');
     expect(outcome({ code: 'incomplete' })).toBe('neutral');
     expect(outcome({ message: 'weekly limit reached' })).toBe('neutral');
