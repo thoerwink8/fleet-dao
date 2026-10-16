@@ -299,6 +299,8 @@ describe('推分支', () => {
       head,
       // 推上去的头相对主线的净改动：工作流开 PR 前验证判界面、给验证方的清单按它
       changedFiles: ['src/login.ts'],
+      // 同口径的新增行数（#2762 流程健康记账）：commitIn 写了一行
+      addedLines: 1,
     });
     expect(calls.pushBranch).toHaveLength(1);
     expect(readdirSync(join(root, 'tmp')).filter((f) => f.startsWith('push-'))).toEqual([]);
@@ -387,7 +389,11 @@ describe('推之前把最新主线并进会话的树', () => {
     const input = { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head };
     await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED', retryable: true });
     const merged = git(dir, 'rev-parse', 'HEAD');
-    expect(await ports.pushBranch(input, ctx)).toEqual({ head: merged, changedFiles: ['src/login.ts'] });
+    expect(await ports.pushBranch(input, ctx)).toEqual({
+      head: merged,
+      changedFiles: ['src/login.ts'],
+      addedLines: 1,
+    });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([merged, merged]);
   });
 
@@ -484,7 +490,11 @@ describe('推之前把最新主线并进会话的树', () => {
     await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED' });
     const second = git(dir, 'rev-parse', 'HEAD');
     expect(parentsOf(dir, second)).toEqual([first, main]);
-    expect(await ports.pushBranch(input, ctx)).toEqual({ head: second, changedFiles: ['src/login.ts'] });
+    expect(await ports.pushBranch(input, ctx)).toEqual({
+      head: second,
+      changedFiles: ['src/login.ts'],
+      addedLines: 1,
+    });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([first, second, second]);
   });
 

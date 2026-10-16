@@ -2,7 +2,7 @@
 // 这里是工作流代码，会被重放：别加随机数、Date、Node 自带模块（test/structure.test.ts 会拦）。
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
-import type { RouteChoice } from '../ports.ts';
+import type { RoundOutcome, RouteChoice } from '../ports.ts';
 import {
   type AbandonCommand,
   type PauseCommand,
@@ -97,7 +97,13 @@ export function commitNudgeFeedback(commits: number, leftover: readonly string[]
 export function selfCheckText(result: SelfCheckResult): string {
   const parts = result.steps.map((s) => {
     const mark =
-      s.outcome === 'pass' ? '过了' : s.outcome === 'fail' ? `没过（退出码 ${s.exitCode}）` : '没跑';
+      s.outcome === 'pass'
+        ? '过了'
+        : s.outcome === 'fail'
+          ? s.exitCode === null
+            ? '没过（自测超时）'
+            : `没过（退出码 ${s.exitCode}）`
+          : '没跑';
     return `$ ${s.command}：${mark}\n${s.digest}`;
   });
   if (result.state === 'skipped' && parts.length === 0) parts.push(`没跑成：${result.reason}`);
@@ -714,4 +720,33 @@ export function taskPrDid(
   if (issueNumber === 1733) did.push(...FOUNDERS_INBOX_PR_NOTES);
   if (issueNumber === 1983) did.push(...MERGE_WAIT_RED_PR_NOTES);
   return did;
+}
+
+/** 等合并时必过检查红了交回的意见、lastProblem 的开头（和 @fleet-dao/shared/checks-red 同一个字面）。 */
+const CHECKS_RED_LEAD = '检查红了：';
+
+/**
+ * 这一轮怎么收场的（#2762，记进 task_rounds 给每日简报「流程健康」算）：按返工那一刻写下的 lastProblem 认。
+ * implement＝动手那一段就返工了（没提交、树里有剩、推分支并主线冲突……）；deliver＝推上去以后返工（CI 红、验收没过、等合并冲突）。
+ * 认不出的记 other，不硬塞进某一类。
+ */
+export function roundOutcomeOf(
+  stage: 'implement' | 'deliver',
+  lastProblem: string | null,
+  feedback: readonly string[],
+): RoundOutcome {
+  const p = lastProblem ?? '';
+  if (p.startsWith(CHECKS_RED_LEAD) || feedback.some((line) => line.startsWith(CHECKS_RED_LEAD)))
+    return 'ci_red';
+  if (p === 'CI 红了') return 'ci_red';
+  if (p === '验收没过') return 'verify_rejected';
+  if (p === '和主线有冲突') return stage === 'implement' ? 'push_conflict' : 'merge_conflict';
+  if (p === '会话跑完没有提交' || p === '推的时候没有新提交') return 'no_commit';
+  if (p === '会话跑完工作树里还有没提交的改动') return 'leftover';
+  return 'other';
+}
+
+/** 放弃、叫停时这一轮怎么算：停下的原因是超时（会话总时长到顶、没在时限里跑完）记 timeout，其余记 stopped。 */
+export function stoppedOutcomeOf(lastProblem: string | null): RoundOutcome {
+  return /超时|时限|总时长|timeout/i.test(lastProblem ?? '') ? 'timeout' : 'stopped';
 }

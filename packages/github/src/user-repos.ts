@@ -1,7 +1,7 @@
 // 用户身份那一套（#1989）：换 OAuth 用户令牌、列「我 GitHub 上能看到的仓」、把 App 安装加仓/减仓。
 //
 // 为什么必须走用户令牌（官方文档 + 实测）：列「某个 App 安装能看到哪些仓」（GET /user/installations/{id}/repositories）
-// 和「把一个仓加进/移出某个安装」（PUT/DELETE 同一个地址）这三条，GitHub 只认**本人的** OAuth 用户令牌；
+// 和「把一个仓加进/移出某个安装」（PUT/DELETE /user/installations/{id}/repositories/{repo}，一次一个仓、没有请求体）这三条，GitHub 只认**本人的** OAuth 用户令牌；
 // App 机器人令牌调不了（403）。所以这一层不能用 client.ts 那套 App JWT / 安装令牌。
 //
 // 三条路都过 client.request，只把 auth 换成 { as: 'user', token }：
@@ -312,32 +312,30 @@ export function createGitHubUserApi(
     },
 
     async addReposToInstallation(token, installationId, repoIds) {
-      if (repoIds.length === 0) return;
-      // 官方上限 500 个一批；我们一次就加一个，留出余量分块。
-      for (let i = 0; i < repoIds.length; i += 100) {
+      // GitHub 只有单仓接口 PUT /user/installations/{id}/repositories/{repo}，没有请求体（#2749：原来不带仓号、带一串仓号，从没成过）
+      for (const id of repoIds) {
         await client.request({
           method: 'PUT',
-          path: `/user/installations/${installationId}/repositories`,
+          path: `/user/installations/${installationId}/repositories/${id}`,
           auth: { as: 'user', token },
-          body: { repositories: repoIds.slice(i, i + 100).map((id) => String(id)) },
           // 已经被加进去过：GitHub 回的 204 和首次一样，不另判
           idempotent: true,
         });
       }
+      if (repoIds.length === 0) return;
       log?.info('把仓加进 App 安装', { installationId, count: repoIds.length });
     },
 
     async removeReposFromInstallation(token, installationId, repoIds) {
-      if (repoIds.length === 0) return;
-      for (let i = 0; i < repoIds.length; i += 100) {
+      for (const id of repoIds) {
         await client.request({
           method: 'DELETE',
-          path: `/user/installations/${installationId}/repositories`,
+          path: `/user/installations/${installationId}/repositories/${id}`,
           auth: { as: 'user', token },
-          body: { repositories: repoIds.slice(i, i + 100).map((id) => String(id)) },
           idempotent: true,
         });
       }
+      if (repoIds.length === 0) return;
       log?.info('把仓移出 App 安装', { installationId, count: repoIds.length });
     },
 

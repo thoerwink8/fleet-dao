@@ -10,6 +10,16 @@ export interface MergeWaitCheckRead {
   failed: { name: string; detail?: string }[];
 }
 
+function gateWaitingForColdVerify(
+  checks: readonly { name: string; state: string; detail?: string | undefined }[],
+): boolean {
+  const cold = checks.find((item) => item.name === COLD_VERIFY_CONTEXT);
+  const gate = checks.find((item) => item.name === GATE_CONTEXT);
+  return (
+    cold?.state === 'pending' && gate?.state === 'failure' && gate.detail?.startsWith('等验收：') === true
+  );
+}
+
 export async function readMergeWaitChecks(
   gh: Pick<GitHub, 'deps'>,
   repo: RepoRef,
@@ -28,6 +38,11 @@ export async function readMergeWaitChecks(
   const failed = evaluation.checks
     .filter((item) => item.state === 'failure')
     .map((item) => ({ name: item.name, ...(item.detail ? { detail: item.detail } : {}) }));
+  if (gateWaitingForColdVerify(evaluation.checks)) {
+    const actualFailures = failed.filter((item) => item.name !== GATE_CONTEXT);
+    if (actualFailures.length === 0) return { overall: 'pending', failed: [] };
+    return { overall: 'red', failed: actualFailures };
+  }
   if (failed.length > 0) return { overall: 'red', failed };
   if (evaluation.overall === 'green') return { overall: 'green', failed: [] };
   if (evaluation.overall === 'none') return { overall: 'none', failed: [] };

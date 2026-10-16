@@ -97,6 +97,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   pickRoute: 'quick',
   recordTiming: 'quick',
   saveTaskState: 'quick',
+  recordRound: 'quick',
   raiseAlert: 'quick',
   removeWorktree: 'git',
   pushBranch: 'git',

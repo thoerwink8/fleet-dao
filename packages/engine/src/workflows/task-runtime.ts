@@ -158,6 +158,12 @@ export class TaskRuntime {
    * 最近一次跑成的动手会话的最后一条回复（#2723）：开 PR、第 2 轮起改 PR 正文时进「做了什么」。纯状态，没跑成的不覆盖。
    */
   lastAnswer: string | null = null;
+  /** 这一轮第一个派上的模型（#2762 流程健康记账）：每轮开头清掉，起第一段会话时记下。纯状态。 */
+  roundFirstModel: string | null = null;
+  /** 最近一次推上去的头相对主线新增的行数（#2762）；没推过、推分支没数成是 null。 */
+  addedLines: number | null = null;
+  /** 这条工作流里已经记了几次一轮收场（task_rounds.seq）。只在 patched('round-outcome') 下加。 */
+  roundSeq = 0;
   /** 连着几次跑成的动手会话是续起来的：到 RESUME_STREAK_LIMIT 下一轮开新会话。 */
   resumeStreak = 0;
   /** 最近一次自测（决定 0093）的精炼输出：交给冷验收当材料（ColdVerifyInput.testOutput）。没跑过、头换了就是 null。 */
