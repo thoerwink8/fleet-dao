@@ -253,6 +253,7 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
     expect(calls.segment.map((x) => x.route.routeId)).toEqual(['r1', 'r2']);
     expect(calls.segment[1]?.tier).toEqual(calls.segment[0]?.tier);
+    expect(calls.segment[1]?.resumeSessionId).toBeUndefined();
     expect(world.callsOf('pickRoute')[1]?.input).toMatchObject({
       avoidRouteIds: ['r1'],
       avoidModelIds: [],
@@ -1367,14 +1368,16 @@ describe('任务工作流 · model_mismatch 自动换同模型路由，第二次
       async (q) => {
         const h = await start(q, input());
         const s = await statusUntil(h, parked, '第二次模型对不上，停下等人');
-        expect(s.lastProblem).toContain('回话的模型不是点名的那个');
+        expect(s.lastProblem).toBe('回话的模型不是点名的那个：换了一条同档路由仍对不上，停下等人');
+        expect(s.lastProblem).not.toContain('挂起并报警');
         expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c2']);
+        expect(calls.segment[1]?.resumeSessionId).toBeUndefined();
         expect(picks).toHaveLength(2);
         expect(picks[0]?.failedChannel).toBeUndefined();
         expect(picks[1]?.avoidRouteIds).toEqual(['r-c1']);
+        expect(picks[1]?.models).toEqual(['m1']);
         expect(picks[1]?.tier).toEqual(picks[0]?.tier);
         expect(world.alerts[0]).toMatchObject({ level: 'stuck' });
-        expect(picks).toHaveLength(2);
         expect(calls.segment).toHaveLength(2);
         await h.signal(taskAbandonSignal, { by: 'frank', reason: '测完了' });
         return h.result().catch(() => undefined);
@@ -1399,6 +1402,7 @@ describe('任务工作流 · model_mismatch 自动换同模型路由，第二次
     );
     expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
     expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c2']);
+    expect(calls.segment[1]?.resumeSessionId).toBeUndefined();
     expect(picks[1]?.failedChannel).toBeUndefined();
     expect(picks[1]?.avoidRouteIds).toEqual(['r-c1']);
     expect(picks[1]?.stickRouteId).toBeUndefined();

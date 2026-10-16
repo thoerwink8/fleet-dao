@@ -103,7 +103,7 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     });
     expect(realTimeout).toMatchObject({ rule: 'EN1', action: 'park', alert: true });
     // #2710 的 doing 就是这句：分流把可重试的 timeout_start_to_close 当成「原路再试不会变」。
-    // 不是发版叫停（KL3 / #2797）、不是 Mirasim 接回（#2815）、不是 model_mismatch 挂整单（MD3 / #2811）。
+    // 不是发版叫停（KL3 / #2797）、不是 Mirasim 接回（#2815）、不是 model_mismatch（MD3 / #2811，分流仍判停下，动手会话另按点名重派）。
     // 动手会话见到这个 park 不挂整单，停掉这一段按点名路由重派（task-session.ts，patched en1-timeout-redispatch）。
     expect(realTimeout.reason).toContain('引擎这边丢了这一步（timeout_start_to_close）');
     expect(realTimeout.reason).toContain('挂起并报警');
