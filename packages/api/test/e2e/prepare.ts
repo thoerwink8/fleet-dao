@@ -30,6 +30,7 @@ import {
   saveOrgState,
   startRun,
 } from '@fleet-dao/db';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { createPgStore, DEV_USER_ID, devFixtures, IDS } from '@fleet-dao/store';
 import { seedPg } from '@fleet-dao/store/testing';
 import { eq, inArray } from 'drizzle-orm';
@@ -406,6 +407,8 @@ export async function prepare(env: Record<string, string | undefined> = process.
           taskId: taskIds.asking,
           createdAt: ago(15),
           dedupeKey: `asking:${taskIds.asking}`,
+          // 库里约束（#2729）：要你拍的至少两个选项、带原因（原因由 seedPg 按级别补「只有人能做」）
+          options: noteOnlyOptions(),
           deliveries: [],
         },
         {
