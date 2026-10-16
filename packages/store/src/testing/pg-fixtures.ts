@@ -181,7 +181,9 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
   for (const r of (data.runs ?? []).filter((x) => x.endedAt === undefined)) {
     const segment = r.stage === 'execute' ? 'manual' : r.stage === 'verify' ? 'verify' : undefined;
     if (segment === undefined) {
-      throw new Error(`样例会话 ${r.id} 的阶段 ${r.stage}：库里只有动手（execute）、验收（verify）两段会选路占池`);
+      throw new Error(
+        `样例会话 ${r.id} 的阶段 ${r.stage}：库里只有动手（execute）、验收（verify）两段会选路占池`,
+      );
     }
     if (r.startedAt !== undefined) {
       const model = (data.routes ?? []).find((x) => x.id === r.routeId)?.modelId;

@@ -66,33 +66,23 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
     }
   }
   const taskIds = tasks.map((t) => t.id);
-  const [
-    notifications,
-    pools,
-    channels,
-    windows,
-    routes,
-    models,
-    segmentRuns,
-    occupancy,
-    engine,
-    resources,
-  ] = await Promise.all([
-    store.listNotifications({ status: 'open', limit: 200 }),
-    store.listPools(),
-    store.listChannels(),
-    store.listQuotaWindows(),
-    store.listRoutes(),
-    store.listModels(),
-    // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
-    store.listSegmentRunsForTasks(taskIds),
-    // 在跑数、池占用：和法国页、额度页同一份
-    store.poolOccupancy(),
-    // 引擎那一格读真实健康（#902 D7）：开着的要真探到在线的工人，不只看配置里开没开
-    deps.engineProbe(),
-    // 这台机器此刻的内存、CPU（#1973）：采样器最近一回还新就直接给，不读库；没装采样器（测试）就不带
-    deps.hostResources?.current(),
-  ]);
+  const [notifications, pools, channels, windows, routes, models, segmentRuns, occupancy, engine, resources] =
+    await Promise.all([
+      store.listNotifications({ status: 'open', limit: 200 }),
+      store.listPools(),
+      store.listChannels(),
+      store.listQuotaWindows(),
+      store.listRoutes(),
+      store.listModels(),
+      // 三段流水线图的数（在哪一段、谁在做、平均耗时）：看板窗口里全部单的流水一次读完
+      store.listSegmentRunsForTasks(taskIds),
+      // 在跑数、池占用：和法国页、额度页同一份
+      store.poolOccupancy(),
+      // 引擎那一格读真实健康（#902 D7）：开着的要真探到在线的工人，不只看配置里开没开
+      deps.engineProbe(),
+      // 这台机器此刻的内存、CPU（#1973）：采样器最近一回还新就直接给，不读库；没装采样器（测试）就不带
+      deps.hostResources?.current(),
+    ]);
   const now = deps.now();
   const poolViews = buildPools({ pools, channels, windows, occupancy }, now, config.quotaStaleAfterMs);
   return buildHome({

@@ -253,4 +253,3 @@ export const toSegmentRun = (r: typeof runs.$inferSelect): SegmentRun =>
     workflowId: opt(r.workflowId),
     sessionId: opt(r.sessionId),
   });
-

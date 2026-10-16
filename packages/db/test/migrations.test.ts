@@ -738,9 +738,7 @@ describe('0074：删老流程的会话表 session_runs 和进度表 progress_eve
 
         expect(await exists(pg, 'session_runs')).toBe(false);
         expect(await exists(pg, 'progress_events')).toBe(false);
-        expect(
-          (await pg.query(`select question, run_id from asks order by question`)).rows,
-        ).toEqual([
+        expect((await pg.query(`select question, run_id from asks order by question`)).rows).toEqual([
           { question: '三段会话问的', run_id: RUN_NEW },
           { question: '没挂会话的', run_id: null },
           { question: '老会话问的', run_id: null },

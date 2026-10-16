@@ -6,15 +6,8 @@ import { type CiPolicy, ciPolicyOf, type TaskState } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, inArray, isNull, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { TERMINAL_TASK_STATES } from '../schema/enums.ts';
+import { githubEvents, githubEventVersions, pullRequests, repos, runs, tasks } from '../schema/index.ts';
 import type { RunOutcomeValue } from '../schema/runs.ts';
-import {
-  githubEvents,
-  githubEventVersions,
-  pullRequests,
-  repos,
-  runs,
-  tasks,
-} from '../schema/index.ts';
 
 /**
  * 镜像里这条 PR 的合并时刻。没有这一行、或合并时刻是空，回 null（不是读失败）。库读失败照抛。

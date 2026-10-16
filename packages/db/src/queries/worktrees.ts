@@ -3,7 +3,7 @@
 // 哪些目录里还有没结束的会话（有就不碰那棵树）。
 import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { pullRequests, repos, type RunSegment, runs, subtasks, tasks } from '../schema/index.ts';
+import { pullRequests, type RunSegment, repos, runs, subtasks, tasks } from '../schema/index.ts';
 
 export interface IssueWorkFacts {
   taskId: string;

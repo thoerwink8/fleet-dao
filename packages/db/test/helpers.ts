@@ -158,7 +158,10 @@ export async function addRun(
   db: Db,
   over: Partial<typeof runs.$inferInsert> & { taskId: string | null; routeId: string },
 ) {
-  const [route] = await db.select({ modelId: routes.modelId }).from(routes).where(eq(routes.id, over.routeId));
+  const [route] = await db
+    .select({ modelId: routes.modelId })
+    .from(routes)
+    .where(eq(routes.id, over.routeId));
   if (!route) throw new Error(`路由 ${over.routeId} 还没建，addRun 取不到模型`);
   const [row] = await db
     .insert(runs)

@@ -248,7 +248,11 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(
       c,
       BoardResponse,
-      buildBoard(repo, { tasks, subtasks, activeRuns: NO_OLD_FLOW_RUNS, plans: new Map(), route }, deps.now()),
+      buildBoard(
+        repo,
+        { tasks, subtasks, activeRuns: NO_OLD_FLOW_RUNS, plans: new Map(), route },
+        deps.now(),
+      ),
     );
   });
 
