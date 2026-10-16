@@ -2,19 +2,29 @@
 // 后端（packages/api 的 request-chat-pg.ts）判该不该排一轮、能不能排；引擎（packages/engine 的 jobs/intake-chat.ts）
 // 认会话交回来的话、分草稿补丁。判法只有这一份。
 // 改这里之前必须知道：
-// - 会话只交两样：回话正文、一份草稿补丁。补丁只能改 REQUEST_DRAFT_FIELDS 那几栏；碰到人改过的栏不改，转成「建议改」。
-// - 一次只问一个问题，带 2～4 个选项（页面另加「我自己说」）；不合规矩的回话明说认不出，不拿半截当回话。
+// - 会话交回话正文、一份草稿补丁，到了给方案的轮次再加一张方案卡。补丁只能改 REQUEST_DRAFT_FIELDS 那几栏；
+//   碰到人改过的栏不改，转成「建议改」。方案卡的草稿版本号由写回时按落库后的版本填。
+// - 出方案之前一次只问一个问题，带 2～4 个选项（页面另加「我自己说」）。人说满 INTAKE_PROPOSAL_AFTER_TURNS 次之后
+//   必须给方案卡，不再追问；不合规矩的回话明说认不出，不拿半截当回话。每条最多 maxTurns 轮的硬上限不动。
 // - 只有一个人说过话时每句都回；两个人都说过话以后，只在 @指挥官 或有人点「让指挥官接着问」时才说话。
 // - 限额是软闸、能调（INTAKE_CHAT_LIMITS 是默认值）；超了、引擎关着、额度熔断都回「指挥官暂停了：原因」，人话照存。
 import { z } from 'zod';
 import {
   REQUEST_DRAFT_FIELDS,
   REQUEST_KINDS,
+  REQUEST_PROPOSAL_SUMMARY_MAX,
   REQUEST_QUESTION_MAX_OPTIONS,
   REQUEST_QUESTION_MIN_OPTIONS,
+  type RequestCard,
   type RequestDraftField,
   RequestDraftSchema,
 } from './web-api/requests.ts';
+
+/**
+ * 人说满这么多次之后，这一轮必须给出方案卡，不再逐条追问。
+ * 这是提示词里的节点，不是硬上限：每条最多几轮仍是 INTAKE_CHAT_LIMITS.maxTurns。
+ */
+export const INTAKE_PROPOSAL_AFTER_TURNS = 3;
 
 /** 限额：每人同时最多几条在聊、每条最多几轮、闲置多久收掉会话（分钟）。 */
 export interface IntakeChatLimits {
@@ -144,16 +154,45 @@ const QuestionSchema = z.object({
     ),
 });
 
+/** 回话块里的方案：完整草稿摘要。草稿版本号不在这里，写回时按落库后的版本填。 */
+const ProposalInBlockSchema = z
+  .object({
+    summary: z.string().trim().min(1).max(REQUEST_PROPOSAL_SUMMARY_MAX),
+  })
+  .strict();
+
 const CommanderBlockSchema = z
   .object({
     question: QuestionSchema.optional(),
+    proposal: ProposalInBlockSchema.optional(),
     patch: z.record(z.string(), z.unknown()).optional(),
   })
   .strict();
 
+/** 方案卡：完整草稿摘要，带写回后的草稿版本号。确认开单带这一版。 */
+export const ProposalCardSchema = z.object({
+  type: z.literal('proposal'),
+  draftVersion: z.number().int().positive(),
+  summary: z.string().trim().min(1).max(REQUEST_PROPOSAL_SUMMARY_MAX),
+});
+export type ProposalCard = z.infer<typeof ProposalCardSchema>;
+
+export function proposalCard(
+  draftVersion: number,
+  summary: string,
+): Extract<RequestCard, { type: 'proposal' }> {
+  return { type: 'proposal', draftVersion, summary };
+}
+
+export interface CommanderProposal {
+  summary: string;
+}
+
 export interface CommanderOutput {
   reply: string;
   question?: { text: string; options: string[] };
+  /** 给了方案就不再同时留下问题。 */
+  proposal?: CommanderProposal;
   patch?: Record<string, unknown>;
 }
 
@@ -193,11 +232,13 @@ export function parseCommanderOutput(
   const parsed = CommanderBlockSchema.safeParse(raw);
   if (!parsed.success)
     return { ok: false, why: `${COMMANDER_BLOCK} 那一块不合规矩：${zodWhy(parsed.error)}` };
+  // 方案和问题一起交：认方案，问题丢掉（到了给方案的轮次不再追问）
+  const proposal = parsed.data.proposal;
   return {
     ok: true,
     value: {
       reply,
-      ...(parsed.data.question ? { question: parsed.data.question } : {}),
+      ...(proposal ? { proposal } : parsed.data.question ? { question: parsed.data.question } : {}),
       ...(parsed.data.patch ? { patch: parsed.data.patch } : {}),
     },
   };

@@ -3,8 +3,8 @@
 // → 认会话交回来的话 → 写回话和草稿补丁；没接上写「指挥官暂停了：原因」。另外收掉闲置 30 分钟的会话、删检出。
 // 真装配（选路、检出、Spawner、一次性会话登记）在 real/intake-chat.ts。
 // 改这里之前必须知道：
-// - 会话只交两样：回话正文、一份草稿补丁（shared 的 parseCommanderOutput 认）；补丁在写回的事务里按「人改过的栏」分（db 的
-//   finishCommanderReply），这里不分。认不出的回话明说，不拿半截当回话。
+// - 会话交回话正文、一份草稿补丁，到了给方案的轮次再加一张方案卡（shared 的 parseCommanderOutput 认）。补丁在写回的事务里
+//   按「人改过的栏」分（db 的 finishCommanderReply），方案卡的草稿版本号也在那里按落库后的版本填。认不出的回话明说，不拿半截当回话。
 // - 续会话（--resume）只喂上一轮之后的新消息；会话没了（检出删了、换了模型、换了路由）就按存下来的消息和草稿重起，整份喂。
 // - 停下有三种：人点停下（不算暂停）、切号或发布排空（算暂停，写原因）、超时或会话没成（算暂停）。
 // - 起会话那一下抛了、没选到路由：这一轮写暂停原因、会话回 idle，不卡在 running。
@@ -12,6 +12,7 @@ import type { ChatSessionAfter, ClaimedRequestChat } from '@fleet-dao/db';
 import {
   COMMANDER_BLOCK,
   INTAKE_CHAT_LIMITS,
+  INTAKE_PROPOSAL_AFTER_TURNS,
   type IntakeChatLimits,
   parseCommanderOutput,
   parseReviewOutput,
@@ -80,6 +81,7 @@ export interface IntakeChatDeps {
     requestId: string;
     reply: string;
     question?: { text: string; options: string[] };
+    proposal?: { summary: string };
     patch?: Record<string, unknown>;
     session: ChatSessionAfter;
   }): Promise<void>;
@@ -123,9 +125,11 @@ function line(m: ClaimedRequestChat['messages'][number]): string {
   const card =
     m.card?.type === 'question'
       ? `\n  （问题：${m.card.question}；选项：${m.card.options.join(' / ')}；或者「我自己说」）`
-      : m.card?.type === 'review'
-        ? `\n${m.card.items.map((i, n) => `  ${n + 1}. ${i.text}（${i.verdict === 'adopt' ? '采用' : i.verdict === 'reject' ? '不用' : '还没标'}）`).join('\n')}`
-        : '';
+      : m.card?.type === 'proposal'
+        ? `\n  （方案卡：草稿第 ${m.card.draftVersion} 版）\n  ${m.card.summary}`
+        : m.card?.type === 'review'
+          ? `\n${m.card.items.map((i, n) => `  ${n + 1}. ${i.text}（${i.verdict === 'adopt' ? '采用' : i.verdict === 'reject' ? '不用' : '还没标'}）`).join('\n')}`
+          : '';
   return `[${m.createdAt.toISOString()}] ${who}：${m.body}${card}`;
 }
 
@@ -145,11 +149,18 @@ function draftBlock(c: ClaimedRequestChat): string {
 
 const OUTPUT_RULES = [
   '## 交回格式',
-  '先写给人看的回话（中文，短句）。最后附一块（可以不附：只说话、不问、不改草稿）：',
+  '先写给人看的回话（中文，短句）。最后附一块（可以不附：只说话、不问、不改草稿、不给方案）：',
   `\`\`\`${COMMANDER_BLOCK}`,
   '{"question": {"text": "一个问题", "options": ["选项一", "选项二"]}, "patch": {"scene": "……"}}',
   '```',
-  `- question：一次只问一个，选项 ${REQUEST_QUESTION_MIN_OPTIONS}～${REQUEST_QUESTION_MAX_OPTIONS} 个；页面另加「我自己说」，你不用写。`,
+  '到了给方案的轮次，不要写 question，改成 proposal：',
+  `\`\`\`${COMMANDER_BLOCK}`,
+  '{"proposal": {"summary": "标题：…\\n类别：…\\n场景：…\\n已知的模块：…\\n要什么：…\\n怎么算做完：…\\n不做什么：…\\n规模建议：…\\n要不要人拍：…"}, "patch": {"scene": "……"}}',
+  '```',
+  `- question：出方案之前一次只问一个问题，选项 ${REQUEST_QUESTION_MIN_OPTIONS}～${REQUEST_QUESTION_MAX_OPTIONS} 个；页面另加「我自己说」，你不用写。到了给方案的轮次不要再追问，不要写 question。`,
+  '- proposal.summary：完整草稿摘要，上面九栏都写上；没填的写「还没写」。页面会画出「确认开单」和每一栏的「改」。草稿版本号由服务端按写回后的版本填，你别写。',
+  '- 每一轮都先把能从代码和已有对话里推出来的草稿栏写进 patch，能填的都填上。',
+  `- 过了给方案的节点（第 ${INTAKE_PROPOSAL_AFTER_TURNS} 次发言之后），创始人又提了新信息：下一轮直接给更新后的 proposal，把新信息写进 patch，不回到逐条提问。`,
   '- patch 只能有这些键：title、kind、scene、modules、want、done（字符串数组，每条是一条看得见的验收）、notDo、size、needsHuman（碰发布、花钱、删数据、改标准时写为什么要人拍）。',
   `- kind 只能是 ${REQUEST_KINDS.join('、')} 之一（文档、重构这类都算「杂项」）。`,
   '- 除了 done，别的键的值都是一段字符串；要列几条就写成一段多行文字（每行「- 」开头），别写成数组。',
@@ -157,12 +168,35 @@ const OUTPUT_RULES = [
   '- 原话由系统按时间拼，你碰不到、也不要往草稿里写原话。',
 ].join('\n');
 
+/** 人说过几次：第几次发言之后，由提示词要求给方案。指挥官自己的回话不算。 */
+function humanTurns(c: ClaimedRequestChat): number {
+  return c.messages.filter((m) => m.kind === 'human').length;
+}
+
+/** 提示词里写明当前是第几次发言之后；到了阈值必须给方案，不再追问。 */
+function roundBlock(c: ClaimedRequestChat): string {
+  const n = humanTurns(c);
+  const head = `## 这一轮\n当前是第 ${n} 次发言之后（人已经说了 ${n} 次；方案从第 ${INTAKE_PROPOSAL_AFTER_TURNS} 次发言之后给出）。`;
+  if (n >= INTAKE_PROPOSAL_AFTER_TURNS) {
+    return [
+      head,
+      '已经到了给方案的时候：这一轮必须输出一张 proposal 卡，summary 写完整草稿摘要。不要再追问，不要写 question。页面会给出「确认开单」和「改某一栏」。',
+      '创始人要是又提了新信息：把新信息写进 patch，这一轮直接给更新后的 proposal，不回到逐条提问。',
+    ].join('\n');
+  }
+  return [
+    head,
+    '还没到给方案的轮次：先把能从代码和已有对话里推出来的草稿栏写进 patch；缺的、代码里查不到的，一次只问一个问题。',
+  ].join('\n');
+}
+
 /** 重起（第一次、或会话收掉了、换了模型）：整份存档喂进去。 */
 export function freshCommanderPrompt(c: ClaimedRequestChat): string {
   return [
     `你是 fleet-dao 驾驶舱「提需求」里的指挥官，在帮人把口语需求聊清楚、写成仓 ${c.repo.owner}/${c.repo.name} 的一张单（需求 ${c.seq}）。`,
     '当前目录是这个仓主线的只读检出：可以读代码、跑只读命令（先读再问），不改文件、不提交、不推送。你手上没有 GitHub 令牌：开单、评论由引擎和后端做。',
-    '规矩：一次只问一个问题；问之前先看代码里已经有什么；能从代码里查到的别问人。',
+    '规矩：每一轮先把能从代码和已有对话里推出来的草稿栏填上；问之前先看代码里已经有什么；能从代码里查到的别问人。出方案之前，一次只问一个问题。',
+    roundBlock(c),
     draftBlock(c),
     '## 对话（按时间）',
     c.messages.map(line).join('\n') || '（还没有）',
@@ -170,12 +204,13 @@ export function freshCommanderPrompt(c: ClaimedRequestChat): string {
   ].join('\n\n');
 }
 
-/** 续会话：只喂上一轮之后的新消息和现在的草稿。没有新消息（有人点「让指挥官接着问」）就说接着问。 */
+/** 续会话：只喂上一轮之后的新消息和现在的草稿。没有新消息（有人点「让指挥官接着问」）就说还没给方案就给方案。 */
 export function resumeCommanderPrompt(c: ClaimedRequestChat): string {
   const fresh = c.messages.filter((m) => c.lastMessageId === null || m.id > c.lastMessageId);
   return [
     '## 你上一轮回话之后的新消息',
-    fresh.map(line).join('\n') || '（没有新消息：有人点了「让指挥官接着问」，接着问下一个问题）',
+    fresh.map(line).join('\n') || '（没有新消息：有人点了「让指挥官接着问」。还没给方案就给方案）',
+    roundBlock(c),
     draftBlock(c),
     OUTPUT_RULES,
   ].join('\n\n');
@@ -291,6 +326,7 @@ export async function runIntakeChatTurn(deps: IntakeChatDeps, c: ClaimedRequestC
       requestId: c.requestId,
       reply: got.value.reply,
       ...(got.value.question ? { question: got.value.question } : {}),
+      ...(got.value.proposal ? { proposal: got.value.proposal } : {}),
       ...(got.value.patch ? { patch: got.value.patch } : {}),
       session: out.session,
     });

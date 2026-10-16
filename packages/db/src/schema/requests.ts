@@ -164,7 +164,7 @@ export const requestMessages = pgTable(
     answerError: text('answer_error'),
     answeredBy: uuid('answered_by').references(() => users.id),
     answeredAt: timestamp('answered_at', tz),
-    /** 结构化卡片（C 片，#2061）：指挥官的问题和选项、建议改、换模型分隔线、暂停原因、别家意见。形状见 shared 的 RequestCardSchema。 */
+    /** 结构化卡片（C 片，#2061）：指挥官的问题和选项、方案卡、建议改、换模型分隔线、暂停原因、别家意见。形状见 shared 的 RequestCardSchema。 */
     card: jsonb('card').$type<RequestCard>(),
     createdAt: timestamp('created_at', tz).notNull(),
   },
