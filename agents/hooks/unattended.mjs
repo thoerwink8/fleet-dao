@@ -196,7 +196,7 @@ export function blockReason(state, now, streak = 1) {
   return (
     `无人值守开着（还剩约 ${left} 分钟，什么都没在跑时连着第 ${streak} 次挡，到 ${MAX_STREAK} 次放行）：不要空着结束这一轮。${watching}` +
     `每次子代理有进展（PR 开了、做完、卡住）就 pnpm progress note 记一句、给创始人一行汇报，再接着盯；没有新结果就不写话、别空转、别重复上一句。` +
-    `全做完（工人都收口、队列空了）：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的（对外发布、花钱、删数据、改标准）：` +
+    `全做完（工人都收口、队列空了）：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的（掏新钱、删了找不回又没备份的）：` +
     `node ${SCRIPT} needs-you "要他拍什么"，再把问题放在最后一条；创始人说停：node ${SCRIPT} off。`
   );
 }
