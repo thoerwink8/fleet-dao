@@ -1,0 +1,154 @@
+// 设置页的全程模式开关（engine.flowMode，#2828）：三段 / 对半分（split:50）/ 全程。
+// 点了先二次确认，原因必填。写走通用的 PUT /settings/engine.flowMode（版本号、操作记录都在那条路上）。
+// 改不成：选项留在改之前的值，原因写在这一行上。
+import {
+  FLOW_MODE_SETTING,
+  type FlowModeReading,
+  flowModeLabel,
+  formatFlowModeSetting,
+  readFlowModeSetting,
+} from '@fleet-dao/shared';
+import { useState } from 'react';
+import { toast } from 'sonner';
+import { errorText, useUpdateSetting } from '../api/client';
+import type { Setting } from '../api/types';
+import { settingLabel } from '../lib/audit';
+import { FieldRow } from './layout/field-row';
+import { FilterTabs } from './layout/filter-tabs';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from './ui/alert-dialog';
+import { Input } from './ui/input';
+import { Label } from './ui/label';
+
+const CHOICES = [
+  { id: 'three', label: '三段' },
+  { id: 'split:50', label: '对半分' },
+  { id: 'full', label: '全程' },
+] as const;
+
+type ChoiceId = (typeof CHOICES)[number]['id'];
+
+const DETAIL: Record<ChoiceId, string> = {
+  three: '写成 three。之后新分组的单都走三步单。',
+  'split:50': '写成 split:50。之后新分组的单大约一半走全程，其余走三步单。',
+  full: '写成 full。之后新分组的单都走全程。',
+};
+
+function isChoice(value: string): value is ChoiceId {
+  return CHOICES.some((c) => c.id === value);
+}
+
+function choiceLabel(id: ChoiceId): string {
+  return CHOICES.find((c) => c.id === id)?.label ?? id;
+}
+
+/** 认得出、并且就是这三个档位之一，才把对应的按钮按下。别的百分比、认不出的值都不按下，免得看成「对半分」或「三段」。 */
+function selectedChoice(reading: FlowModeReading): ChoiceId | undefined {
+  if (reading.state === 'unrecognized') return undefined;
+  const formatted = formatFlowModeSetting(reading.setting);
+  return isChoice(formatted) ? formatted : undefined;
+}
+
+function currentText(reading: FlowModeReading): string {
+  if (reading.state === 'never_set') return '还没设过，默认三段';
+  if (reading.state === 'unrecognized') return reading.problem;
+  return flowModeLabel(reading.setting);
+}
+
+export function FlowModeSetting({ s }: { s: Setting | undefined }) {
+  const update = useUpdateSetting();
+  const reading = readFlowModeSetting(s?.value);
+  const selected = selectedChoice(reading);
+  const [ask, setAsk] = useState<ChoiceId | null>(null);
+  const [reason, setReason] = useState('');
+  const [failure, setFailure] = useState<string | null>(null);
+  const why = reason.trim();
+
+  const pick = (id: ChoiceId) => {
+    if (update.isPending) return;
+    if (id === selected) return;
+    setFailure(null);
+    setReason('');
+    setAsk(id);
+  };
+
+  const confirm = async () => {
+    if (!ask || why === '') throw new Error('先写一句原因');
+    try {
+      await update.mutateAsync({
+        key: FLOW_MODE_SETTING,
+        body: { value: ask, version: s?.version ?? 0, reason: why },
+      });
+      setFailure(null);
+      setReason('');
+      setAsk(null);
+      toast.success(`已保存：${settingLabel[FLOW_MODE_SETTING]}`);
+    } catch (e) {
+      const text = errorText(e);
+      setFailure(text);
+      toast.error('没改成', { description: text });
+      throw e instanceof Error ? e : new Error(text);
+    }
+  };
+
+  const askLabel = ask ? choiceLabel(ask) : '';
+
+  return (
+    <FieldRow
+      onSubmit={(e) => e.preventDefault()}
+      formLabel={settingLabel[FLOW_MODE_SETTING]}
+      label={settingLabel[FLOW_MODE_SETTING]}
+      error={failure ?? undefined}
+      hint={
+        <>
+          新开的单走哪一种。三段是对题、动手、验收各一段；对半分是大约一半走全程（split:50）；全程是一个会话自己走到合并。已经分过组的单保持分组时定下的模式。改的时候要写原因。
+          <p data-flow-mode-current>{currentText(reading)}</p>
+        </>
+      }
+    >
+      <FilterTabs mode="toggle" aria-label="全程模式" items={CHOICES} value={selected} onChange={pick} />
+      <AlertDialog
+        open={ask !== null}
+        onOpenChange={(open) => {
+          if (open || update.isPending) return;
+          setAsk(null);
+          setReason('');
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>改成「{askLabel}」？</AlertDialogTitle>
+            <AlertDialogDescription>
+              {ask ? DETAIL[ask] : ''}
+              已经分过组的单保持分组时定下的模式。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="flow-mode-reason">原因</Label>
+            <Input
+              id="flow-mode-reason"
+              value={reason}
+              maxLength={500}
+              placeholder="为什么改"
+              onChange={(e) => setReason(e.target.value)}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>先不</AlertDialogCancel>
+            <AlertDialogAction disabled={why === ''} onConfirm={confirm}>
+              确认改成{askLabel}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </FieldRow>
+  );
+}

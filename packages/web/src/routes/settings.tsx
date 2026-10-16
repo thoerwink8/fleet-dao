@@ -20,6 +20,7 @@ import {
 import type { Me, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { EngineMasterRelation } from '../components/engine-master';
+import { FlowModeSetting } from '../components/flow-mode-setting';
 import { EmptyState } from '../components/layout/empty-state';
 import { FieldGroup, FieldRow } from '../components/layout/field-row';
 import { FilterTabs } from '../components/layout/filter-tabs';
@@ -675,7 +676,7 @@ export default function Settings() {
             {/* 读失败后再重拉会先清掉 error、回到 pending。已经读过就不再画骨架。 */}
             {settings.data ? (
               <div className="space-y-3">
-                {/* 单栏：只有 3 项，分两栏会剩 1 项孤零零（#1910 第 11 条） */}
+                {/* 单栏：项数不多，分两栏会有一边空着（#1910 第 11 条） */}
                 <FieldGroup>
                   <NumberSetting
                     k="sessions.maxConcurrent"
@@ -692,6 +693,7 @@ export default function Settings() {
                     placeholder="没设"
                   />
                   <SoloPaused s={find('engine.soloPaused')} />
+                  <FlowModeSetting s={find('engine.flowMode')} />
                 </FieldGroup>
                 <QuotaReserve s={find('engine.quotaReserve')} />
               </div>

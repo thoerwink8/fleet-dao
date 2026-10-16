@@ -383,6 +383,19 @@ export function poolHoldDedupeKey(poolId: string): string {
   return `pool-hold:${poolId}`;
 }
 
+/**
+ * 引擎活动超时（EN1 的 timeout_*，#2824）。失败分流第二次原文一字不差仍判挂起；动手会话不拿这个挂起整单，
+ * 停掉这一段再按点名路由重派（task-session.ts，patched('en1-timeout-redispatch')）。
+ * 不放进 AUTO_REDISPATCH_CODES：这些码老历史里出现过，那张表一真，重放会把已经挂起的判断改道。
+ * session_lost、exit_lost 不在这里：那两句可以是真的同一处再犯。
+ */
+export const EN1_ACTIVITY_TIMEOUT_CODES: readonly string[] = [
+  'timeout_start_to_close',
+  'timeout_heartbeat',
+  'timeout_schedule_to_close',
+  'timeout_schedule_to_start',
+];
+
 /** 整族避开之后剩下的都在等额度或空位：放掉整族避让再选。写进 lastProblem，驾驶舱看得见。 */
 export const RELEASE_FAMILY_WAIT = '剩下的路由在等额度或空位，先放掉整族避让再选';
 
@@ -405,7 +418,8 @@ export function infraAvoidScope(
     normalized === 'wall_clock_timeout' ||
     normalized === 'spawn_failed' ||
     normalized === 'spawn_timeout' ||
-    normalized === 'startup_timeout'
+    normalized === 'startup_timeout' ||
+    EN1_ACTIVITY_TIMEOUT_CODES.includes(normalized)
   ) {
     return modelAlreadyRouteAvoided ? 'model' : 'route';
   }

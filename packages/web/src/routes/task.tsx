@@ -13,6 +13,7 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { isNotFound, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
+import { FlowModeTag } from '../components/flow-mode-tag';
 import { EmptyState } from '../components/layout/empty-state';
 import { LoadError, LoadingRows } from '../components/layout/load-state';
 import { Page } from '../components/layout/page';
@@ -214,7 +215,8 @@ function TaskHero({ d, now }: { d: TaskDetail; now: number }) {
         <span data-hero-text className="min-w-0 truncate">
           {d.task.paused === undefined ? c.text : <span data-paused-note>{c.text}</span>}
         </span>
-        <span className="shrink-0">
+        <span className="flex shrink-0 items-center gap-1.5">
+          <FlowModeTag mode={d.task.flowMode} />
           <StatusBadge tone={c.tone} label={c.label} />
         </span>
       </p>
