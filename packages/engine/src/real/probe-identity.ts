@@ -131,7 +131,12 @@ export function probePromptFor(kind: RouteProbeKind, question: IdentityQuestion 
 }
 
 export interface ProbeReply {
-  /** 第一个非空行整行就是 pong（不分大小写）。 */
+  /**
+   * 有一行整行就是 pong（不分大小写），前后夹着别的行也认。
+   * 取舍：放宽认读，不改成只靠提示词压「只回一行 pong」。Mirasim 中转的 gpt-6-sol 答身份题时先写一两句说明再写 pong，
+   * 提示词再怎么强调也压不住，只认第一行会把通着的路由当成认不出、一路退避。提示词仍要求不要解释，身份题仍要求第一行只写 pong。
+   * 整行判、不判「含 pong」，Not pong、pong.、pong 好的这类照旧认不出。
+   */
   pong: boolean;
   /** 「答案：」那一行冒号后面的原话，没有这一行是 null。 */
   answer: string | null;
@@ -158,7 +163,7 @@ export function parseProbeReply(text: string): ProbeReply {
     return null;
   };
   return {
-    pong: /^pong$/i.test(lines[0] ?? ''),
+    pong: lines.some((line) => /^pong$/i.test(line)),
     answer: labelled('答案'),
     identity: labelled('模型'),
   };

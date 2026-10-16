@@ -52,15 +52,30 @@ describe('连通 pong', () => {
     expect(p).not.toContain('答案：');
   });
 
-  it('第一行整行等于 pong（不分大小写）才算通；Not pong、pong. 都算认不出', () => {
+  it('有一行整行等于 pong（不分大小写）就算通，前后夹别的行也认；Not pong、pong. 都算认不出', () => {
     expect(parseProbeReply('pong').pong).toBe(true);
     expect(parseProbeReply('PONG').pong).toBe(true);
     expect(parseProbeReply('**pong**').pong).toBe(true);
     expect(parseProbeReply('Not pong').pong).toBe(false);
     expect(parseProbeReply('pong.').pong).toBe(false);
     expect(parseProbeReply('pong\n多余').pong).toBe(true);
-    expect(parseProbeReply('好的\npong').pong).toBe(false);
+    expect(parseProbeReply('好的\npong').pong).toBe(true);
     expect(parseProbeReply('').pong).toBe(false);
+  });
+
+  it('首行仅 pong 和多行夹 pong 都认；全文没有单独一行 pong 的照旧认不出', () => {
+    expect(parseProbeReply('pong\n答案：高市早苗\n模型：gpt-6-sol')).toMatchObject({
+      pong: true,
+      answer: '高市早苗',
+    });
+    expect(
+      parseProbeReply(
+        '我先核实现任人选。\n参考 https://example.com/pm\npong\n答案：高市早苗\n模型：gpt-6-sol',
+      ),
+    ).toEqual({ pong: true, answer: '高市早苗', identity: 'gpt-6-sol' });
+    expect(parseProbeReply('说明在前\n**pong**\n说明在后').pong).toBe(true);
+    expect(parseProbeReply('我先核实现任人选。\n答案：高市早苗').pong).toBe(false);
+    expect(parseProbeReply('先说明\npong pong\npong 好的\n答案：pong').pong).toBe(false);
   });
 });
 
