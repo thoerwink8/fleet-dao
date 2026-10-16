@@ -75,6 +75,14 @@ describe('全读到的一笔', () => {
     expect(v.unread).toEqual([]);
   });
 
+  it('为什么派它照给；空的、没记的都不给，页面自己写「没记」', () => {
+    expect(read(run({ routeWhy: '主力档，强级在前；opus 难单一段过 2/4' })).routeWhy).toBe(
+      '主力档，强级在前；opus 难单一段过 2/4',
+    );
+    expect(read(run()).routeWhy).toBeUndefined();
+    expect(read(run({ routeWhy: '   ' })).routeWhy).toBeUndefined();
+  });
+
   it('CPU 秒数照给；0 和没记都不给，不当成 0（#1980）', () => {
     expect(read(run({ cpuSeconds: 720 })).cpuSeconds).toBe(720);
     expect(read(run({ cpuSeconds: 0 })).cpuSeconds).toBeUndefined();

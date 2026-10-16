@@ -519,7 +519,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         return { modelTierTracks: tracks };
       }
       const tracks = await modelExecuteTracks(db, since);
-      // 战绩变了才记一笔（等路由时每隔一两分钟就选一次，不刷屏）：驾驶舱没有战绩页，看各模型的分就看这行日志
+      // 战绩变了才记一笔（等路由时每隔一两分钟就选一次，不刷屏）：驾驶舱路由页有同一份表，这行日志仍在变了时记
       const summary = tracks
         .map(
           (t) =>
@@ -759,6 +759,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
             authorFamily: authorFamilyOf(r.family, r.modelId),
             hostId: r.hostId,
             channelId: fact.channelId,
+            why,
             ...(fact.orgKind ? { orgKind: fact.orgKind } : {}),
             ...(reservationId ? { reservationId } : {}),
           };
@@ -867,7 +868,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const said = (r: PickRouteResult): PickRouteResult => {
         if (!pinned) return r;
         const note = `按人指定的 ${pinLabel(pinned)}`;
-        if (r.ok) return { ...r, why: `${note}：${r.why}` };
+        if (r.ok) {
+          const why = `${note}：${r.why}`;
+          return { ...r, why, route: { ...r.route, why } };
+        }
         // 派不出、要等：写明是指定的那个模型在等，等的是它、不换别的
         return r.detail.startsWith('人在驾驶舱')
           ? r

@@ -10,7 +10,7 @@
 // byTier 关掉时仍按每单期望成本重排（要明显更省才挪到人排的前面），一轮做成率明显差的挪到最后、由 choose.ts 挡在动手外面
 // （别的都派不了时兜底）；样本不够的模型留在人排的位置。有钉住的行时整段不动。
 
-import { type QuotaPace, quotaPace } from '@fleet-dao/shared';
+import { type QuotaPace, quotaPace, tierQuality as sharedTierQuality } from '@fleet-dao/shared';
 import { duration, percent, remaining, windowName } from './names.ts';
 import type { RoutingPolicy } from './policy.ts';
 import type {
@@ -169,10 +169,7 @@ const TIER_LABEL: Record<string, string> = { fast: '快档', medium: '中档', h
  * 本档平均由调用方按这一档全部模型的一段过之和 / 第一段之和算好。
  */
 export function tierQuality(onePass: number, tasks: number, average: number, prior: number): number {
-  const denom = tasks + prior;
-  if (denom <= 0) return 0;
-  const m = Math.min(1, Math.max(0, (onePass + prior * average) / denom));
-  return m - Math.sqrt((m * (1 - m)) / denom);
+  return sharedTierQuality(onePass, tasks, average, prior);
 }
 
 /**

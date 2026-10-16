@@ -93,6 +93,11 @@ export const runs = pgTable(
     routeId: text('route_id').references(() => routes.id),
     /** 派工档（动手段按改动面分的档）；对题、验收不分档，没记的也是空——读的一方按段判是「不分档」还是「没记」。 */
     tier: text('tier').$type<RunTier>(),
+    /**
+     * 选路时那句「为什么派它」（和引擎端口 RouteChoice.why 同一句）。起这一段时写；没经选路、这一列加上之前的老行是空。
+     * 任务页动手段下面照它显示，空的写「没记」。
+     */
+    routeWhy: text('route_why'),
     /** 起止；ended_at 还在跑的为空（和 outcome 的空一一对应，见约束）。 */
     startedAt: timestamp('started_at', tz).notNull(),
     endedAt: timestamp('ended_at', tz),

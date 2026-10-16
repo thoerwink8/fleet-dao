@@ -70,6 +70,7 @@ import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { readLocalSessions } from './local-sessions.ts';
+import { manualTracksView } from './manual-tracks.ts';
 import { modelRosterFields } from './model-roster.ts';
 import { registerModelRosterRoutes } from './model-roster-routes.ts';
 import { readNodeDetail, readNodes } from './node-views.ts';
@@ -640,10 +641,22 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const roster = await modelRosterFields(deps.modelRoster, (err) => {
       deps.log.error('渠道模型表没读成', { error: fullStack(err) });
     });
+    let manualTracks: ReturnType<typeof manualTracksView> | undefined;
+    let manualTracksUnavailable: string | undefined;
+    if (deps.manualTracks) {
+      try {
+        manualTracks = manualTracksView(await deps.manualTracks.read(now), models);
+      } catch (err) {
+        deps.log.error('动手战绩没读成', { error: fullStack(err) });
+        manualTracksUnavailable = (err instanceof Error && err.message) || String(err);
+      }
+    }
     return reply(c, RoutingLayersResponse, {
       asOf: now.toISOString(),
       purposes: routingLayersView(layers, { models, channels }),
       ...roster,
+      ...(manualTracks ? { manualTracks } : {}),
+      ...(manualTracksUnavailable ? { manualTracksUnavailable } : {}),
     });
   });
 

@@ -594,6 +594,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             routeId: route.routeId,
             runId,
             ...(route.reservationId ? { reservationId: route.reservationId } : {}),
+            ...(route.why?.trim() ? { routeWhy: route.why.trim() } : {}),
           };
         },
         // 会话的工作目录由 prepareCwd 备（挑完路由才知道归哪个会话用户）；这个只是占个位，不会被用到

@@ -33,6 +33,8 @@ export interface RunInsert {
   routeId?: string | undefined;
   /** 派工档（只有动手段分档）；没给就是没记（NULL）。 */
   tier?: RunTier | undefined;
+  /** 选路时那句「为什么派它」。没给就是没记（NULL）。收场没带就留着开跑写的，不冲成空。 */
+  routeWhy?: string | null;
   startedAt?: Date;
   endedAt?: Date;
   outcome?: RunOutcome;
@@ -561,6 +563,7 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     channel: row.channel ?? null,
     routeId: row.routeId ?? null,
     tier: row.tier ?? null,
+    routeWhy: row.routeWhy ?? null,
     startedAt: row.startedAt ?? now,
     endedAt: row.endedAt ?? null,
     outcome: row.outcome ?? null,
@@ -592,6 +595,8 @@ function pickRowWithoutId(r: RunRowSure) {
   const { id: _i, createdAt: _c, ...rest } = r;
   return {
     ...rest,
+    // 开跑写的「为什么派它」：收场那一笔常常不带，没带就留着，不冲成空
+    routeWhy: sql`coalesce(${r.routeWhy}, ${runs.routeWhy})`,
     usageNote: sql`coalesce(${r.usageNote}, ${runs.usageNote})`,
     sessionId: sql`coalesce(${r.sessionId}, ${runs.sessionId})`,
     endedAt: sql`coalesce(${r.endedAt?.toISOString() ?? null}::timestamptz, ${runs.endedAt})`,

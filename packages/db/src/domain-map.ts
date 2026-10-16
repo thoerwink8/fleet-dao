@@ -236,6 +236,7 @@ export const toSegmentRun = (r: typeof runs.$inferSelect): SegmentRun =>
     model: r.model,
     channel: opt(r.channel),
     tier: opt(r.tier),
+    routeWhy: opt(r.routeWhy),
     startedAt: r.startedAt.toISOString(),
     endedAt: isoOpt(r.endedAt),
     outcome: opt(r.outcome),

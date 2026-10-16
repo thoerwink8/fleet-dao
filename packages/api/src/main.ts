@@ -61,6 +61,7 @@ import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
 import { pgLocalClaims } from './local-claims.ts';
+import { pgManualTracks } from './manual-tracks.ts';
 import { pgModelRoster } from './model-roster.ts';
 import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
@@ -333,6 +334,8 @@ async function assemble(): Promise<{
     alertWork: pgAlertWork(db, production ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）
     routingLayers: pgRoutingLayers(db),
+    // 动手战绩：和选路读的 modelTierTracks 同一份，路由页按模型和档画出来
+    manualTracks: pgManualTracks(db),
     // 探针真历史（#1139）：渠道状态页的近 60 次格子。读库，不看引擎开没开
     probeHistory: pgProbeHistory(db),
     // 命令行工具版本（#1969）：读引擎写下的读数。引擎没跑过时各行写「还没读过」，不拿最新顶。
