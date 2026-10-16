@@ -59,6 +59,7 @@ import {
 } from '../task-contract.ts';
 import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
 import { failureOf, iso } from './kit.ts';
+import { decideFlowOnce } from './task-flow.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
@@ -152,6 +153,8 @@ export async function writeSession(
         : route.family,
     );
     rt.attemptSeq += 1;
+    // 定模式（#2826）：第一次选路之后、第一段动手之前定一次，结果进历史（task-flow.ts）
+    await decideFlowOnce(rt, brief, tier, route);
     // 续会话（决定 0088）：上一段留了要续的记号才问；判一次就清掉
     let resumeSessionId: string | undefined;
     let resumeNote = '';
@@ -199,6 +202,8 @@ export async function writeSession(
         ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
         // 重活先出方案的那一段（#2755）：提示词另说只读、只回方案 JSON
         ...(opts.plan ? { mode: 'plan' as const } : {}),
+        // 全程的单（#2826）：提示词多一节「到合并都归你」。三段、老历史不带
+        ...(rt.flowMode === 'full' ? { flowMode: 'full' as const } : {}),
       };
       // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
       let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });
