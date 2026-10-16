@@ -34,7 +34,7 @@ import {
   updateRouteProbePace,
   upsertAlert,
 } from '@fleet-dao/db';
-import { type DecisionOption, type HostId, type OrgKind, probeBackoffNotice } from '@fleet-dao/shared';
+import { type HostId, type OrgKind, probeBackoffNotice } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { classifyFailure } from '../failure/classify.ts';
 import type { OrgSwitchRound } from '../jobs/org-switch.ts';
@@ -48,7 +48,7 @@ import {
   sessionUserOf,
   WIRED_HOSTS,
 } from './hosts.ts';
-import { loadHeldPools } from './pool-holds.ts';
+import { loadHeldPools, poolHoldOptions } from './pool-holds.ts';
 import {
   expectedNewAnswers,
   expectedOldAnswers,
@@ -62,6 +62,8 @@ import {
 import type { SessionOrgControl, SessionOrgReader } from './session-org.ts';
 import { poolHoldKey } from './store-ports.ts';
 import type { WorkTrees } from './worktrees.ts';
+
+export { poolHoldOptions };
 
 /** 近多久开跑过算活跃（和方案 3.2、片 3 的 ROUTE_PROBE_ACTIVE_RECENT_HOURS 同一档）。 */
 const ACTIVE_RECENT_MS = 6 * 60 * 60_000;
@@ -367,39 +369,12 @@ export async function poolHoldAfterProbe(db: Db, t: ProbeTarget, a: ProbeAttempt
       title: `账号池 ${t.poolId} 整池暂停：${a.poolHold.title}`,
       body: `路由探针探 ${t.routeId} 时发现的。${a.poolHold.body}${notice ? `。${notice}` : ''}`,
       options: poolHoldOptions(t.poolId),
+      // 整池要人修（封号、订阅到期、要人登录）：只有创始人的账号上做得了（#2729）
+      reason: 'human-only',
     });
     return;
   }
   await resolveAlertByKey(db, { dedupeKey, by: 'engine' });
-}
-
-/**
- * 整池暂停的选项。提醒开着时选路整池避开；「先停着」另外写进整池暂停开关（探针探通撤得掉提醒，撤不掉开关）。
- * 「修好了，放开」拿掉开关并转已处理，池子当场回来。「这个池不要了」带 keepsOpen：交给指挥官，提醒照旧开着、池子照旧停着。
- */
-export function poolHoldOptions(poolId: string): DecisionOption[] {
-  return [
-    {
-      id: 'fixed',
-      label: '修好了，放开',
-      detail: `放开账号池 ${poolId}：整池暂停开关里拿掉它，这条转已处理，选路当场能用`,
-      recommended: '没修好也不怕：探针、会话再撞上同样的问题会再报一条、再停这个池',
-      action: { kind: 'resume-pool', poolId },
-    },
-    {
-      id: 'hold',
-      label: '先停着',
-      detail: `把账号池 ${poolId} 记进整池暂停开关（探针探通也不会放开）；记下了这条才转已处理`,
-      action: { kind: 'pause-pool', poolId },
-    },
-    {
-      id: 'retire',
-      label: '这个池不要了',
-      detail: `这条留着，账号池 ${poolId} 照旧停着；记下交给指挥官去把它从路由里下掉`,
-      keepsOpen: true,
-      action: { kind: 'note-only' },
-    },
-  ];
 }
 
 /** 老降智提醒的去重键（上线后探通时一并撤）。 */

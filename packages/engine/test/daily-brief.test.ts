@@ -1,6 +1,16 @@
 // 每日简报（jobs/daily-brief.ts，决定 0096）：发布历史怎么认上线、四块怎么写、写不进/评论没发成怎么记；看门狗「今天的简报送到没」。
 // 库那一头（对 PR、开单时刻、送达判法）在 packages/db/test/daily-brief.test.ts 用真库测。
-import type { BriefNote, BriefPull, DailyBriefStatus, ExecutorLineStat, ScheduleResult } from '@fleet-dao/db';
+import {
+  type BriefNote,
+  type BriefPull,
+  type DailyBriefStatus,
+  type ExecutorLineStat,
+  type FlowGroupStat,
+  type FlowModeHealth,
+  type PipelineHealth,
+  ROUND_OUTCOMES,
+  type ScheduleResult,
+} from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import {
   BRIEF_ISSUE,
@@ -8,9 +18,11 @@ import {
   DAILY_BRIEF_JOB,
   type DailyBriefDeps,
   DailyBriefFailedError,
+  flowModeLines,
   liveAt,
   liveSwitches,
   median,
+  releaseKillsLine,
   runDailyBriefJob,
   shippedByIssue,
 } from '../src/jobs/daily-brief.ts';
@@ -43,6 +55,35 @@ function compareFake(base: string, head: string): CompareResult {
     .reverse()
     .map((s) => ({ sha: s, title: `提交 ${s.slice(0, 1)} 的标题 (#${s.slice(0, 1)})` }));
   return { status: 'ahead', aheadBy: recent.length, recent };
+}
+
+/** 北京 10-15 零点截止的这一周和再往前一周（#2762 流程健康）。 */
+const THIS_WEEK_END = at('2026-10-14T16:00:00Z');
+function healthFixture(to: Date): PipelineHealth {
+  const thisWeek = to.getTime() === THIS_WEEK_END.getTime();
+  const rounds = thisWeek ? 20 : 10;
+  const n = thisWeek
+    ? { merged: 7, verify_rejected: 5, ci_red: 8 }
+    : { merged: 2, verify_rejected: 5, ci_red: 3 };
+  return {
+    from: new Date(to.getTime() - 7 * 86_400_000),
+    to,
+    rounds,
+    outcomes: ROUND_OUTCOMES.map((outcome) => {
+      const k = (n as Record<string, number>)[outcome] ?? 0;
+      return { outcome, n: k, share: k / rounds };
+    }),
+    byTier: [
+      {
+        tier: 'heavyweight',
+        rounds: thisWeek ? 11 : 6,
+        oneRoundRate: thisWeek ? 0.18 : 0.1,
+        avgRounds: thisWeek ? 2.77 : 3.5,
+      },
+    ],
+    heavyAddedP90: thisWeek ? 7117 : 5000,
+    verifyRejectShare: 5 / rounds,
+  };
 }
 
 function makeDeps(over: Partial<DailyBriefDeps> = {}) {
@@ -111,6 +152,7 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
       },
     ],
     lineStats: async () => stats,
+    pipelineHealth: async (to) => healthFixture(to),
     publish: async (x) => {
       published.push(x);
     },
@@ -258,14 +300,132 @@ describe('runDailyBriefJob', () => {
     expect(d.comments).toEqual([]);
   });
 
-  it('简报只有四节，没有「日报」一节（#2368）', async () => {
+  it('简报五节（第五节是 #2762 的流程健康），没有「日报」一节（#2368）', async () => {
     const d = makeDeps();
     const r = await runDailyBriefJob(d.deps);
     expect(r.outcome).toBe('ok');
     const body = d.published[0]?.body ?? '';
     expect(body).toContain('四、关键指标');
-    expect(body).not.toContain('五、');
+    expect(body).toContain('五、流程健康');
+    expect(body).not.toContain('六、');
     expect(body).not.toContain('日报');
+  });
+});
+
+describe('流程健康：发版叫停的动手会话（#2797）', () => {
+  const kills = (to: Date, total: number, hours: number) => ({
+    from: new Date(to.getTime() - 7 * 86_400_000),
+    to,
+    total,
+    hours,
+    byDay: ['10-08', '10-09', '10-10', '10-11', '10-12', '10-13', '10-14'].map((day, i) => ({
+      day,
+      n: i === 6 ? total : 0,
+    })),
+  });
+
+  it('近 7 天按天数、和再往前 7 天比、写一共跑了几小时；问的是这一周和上一周', async () => {
+    const asked: string[] = [];
+    const d = makeDeps({
+      releaseKills: async (to) => {
+        asked.push(to.toISOString());
+        return to.toISOString().startsWith('2026-10-14') ? kills(to, 42, 6.7) : kills(to, 63, 22.9);
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('ok');
+    expect(asked).toEqual(['2026-10-14T16:00:00.000Z', '2026-10-07T16:00:00.000Z']);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain(
+      '发版叫停的动手会话：42 段（7 天前 63 段，跌 21），被叫停的段一共跑了 6.7 小时；按天：10-08 0，10-09 0，10-10 0，10-11 0，10-12 0，10-13 0，10-14 42',
+    );
+  });
+
+  it('【故意造出的失败】读不到：这一行写「没查成」、这一轮记 partial，流程健康别的行照写；上一周读不到只写这周', async () => {
+    const d = makeDeps({
+      releaseKills: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('partial');
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('发版叫停的动手会话：没查成（读发版叫停的动手会话：库连不上）');
+    expect(body).toContain('收场 20 轮');
+    expect(releaseKillsLine(kills(new Date('2026-10-14T16:00:00Z'), 3, 1), '库连不上')).toBe(
+      '发版叫停的动手会话：3 段（7 天前没查成：库连不上），被叫停的段一共跑了 1 小时；按天：10-08 0，10-09 0，10-10 0，10-11 0，10-12 0，10-13 0，10-14 3',
+    );
+  });
+});
+
+describe('流程健康（#2762）', () => {
+  it('列总轮数、各结束类占比、按档一轮做成率和平均轮数、重活新增行 p90、冷验收拒绝占比，和 7 天前比涨跌', async () => {
+    const asked: string[] = [];
+    const d = makeDeps({
+      pipelineHealth: async (to) => {
+        asked.push(to.toISOString());
+        return healthFixture(to);
+      },
+    });
+    await runDailyBriefJob(d.deps);
+    // 截至北京今天零点的这一周、再往前一周
+    expect(asked).toEqual(['2026-10-14T16:00:00.000Z', '2026-10-07T16:00:00.000Z']);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('收场 20 轮（7 天前 10 轮，涨 10）');
+    expect(body).toContain('做成 7 轮，占 35%（7 天前 20%，涨 15 点）');
+    expect(body).toContain('CI 红 8 轮，占 40%（7 天前 30%，涨 10 点）');
+    expect(body).toContain('冷验收拒绝占比：25%（7 天前 50%，跌 25 点）');
+    expect(body).toContain(
+      '重活（11 轮）：一轮做成率 18%（7 天前 10%，涨 8 点），合并的平均 2.77 轮（7 天前 3.5 轮，跌 0.73）',
+    );
+    expect(body).toContain('重活 PR 新增行 p90：7117 行（7 天前 5000 行，涨 2117）');
+    expect(d.comments[0]?.body).toContain('五、流程健康');
+  });
+
+  it('【故意造出的失败】这一周读不到：整节写「没查成」、记 partial，不写 0', async () => {
+    const d = makeDeps({
+      pipelineHealth: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('partial');
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('五、流程健康');
+    expect(body).toContain('没查成：读流程健康：库连不上');
+    expect(body).not.toMatch(/收场 0 轮/);
+  });
+
+  it('【故意造出的失败】只有 7 天前那一周读不到：列这一周、写明对比没查成', async () => {
+    const d = makeDeps({
+      pipelineHealth: async (to) => {
+        if (to.getTime() !== THIS_WEEK_END.getTime()) throw new Error('超时');
+        return healthFixture(to);
+      },
+    });
+    await runDailyBriefJob(d.deps);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('7 天前那一周没查成（读 7 天前的流程健康：超时）');
+    expect(body).toContain('收场 20 轮');
+    expect(body).not.toContain('7 天前 10 轮');
+  });
+
+  it('这一周一轮都没有：写「没有收场的轮」，不写 0%', async () => {
+    const d = makeDeps({
+      pipelineHealth: async (to) => ({
+        from: new Date(to.getTime() - 7 * 86_400_000),
+        to,
+        rounds: 0,
+        outcomes: ROUND_OUTCOMES.map((outcome) => ({ outcome, n: 0, share: null })),
+        byTier: [],
+        heavyAddedP90: null,
+        verifyRejectShare: null,
+      }),
+    });
+    await runDailyBriefJob(d.deps);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('近 7 天没有收场的轮（7 天前 0 轮）');
+    expect(body).not.toContain('0%');
   });
 });
 
@@ -454,5 +614,125 @@ describe('watchDailyBrief（看门狗：今天的简报送到没）', () => {
     expect(r.problems[0]).toContain('connection refused');
     expect(a.resolved).toEqual([]);
     expect(a.raised).toEqual([]);
+  });
+});
+
+describe('流程健康：两种流程对照（决定 0105）', () => {
+  const group = (mode: 'full' | 'three', over: Partial<FlowGroupStat> = {}): FlowGroupStat => ({
+    mode,
+    tasks: 0,
+    merged: 0,
+    successRate: null,
+    wilson: null,
+    durationMedianMin: null,
+    durationP90Min: null,
+    equivalentPerMerged: null,
+    rawTokensPerMerged: null,
+    runsTokenUnread: 0,
+    ...over,
+  });
+  const health = (over: Partial<FlowModeHealth> = {}): FlowModeHealth => ({
+    to: new Date('2026-10-14T16:00:00Z'),
+    full: group('full'),
+    three: group('three'),
+    enough: false,
+    verdict: null,
+    ...over,
+  });
+
+  it('没数：两栏写「—」不写 0，写「还不够判（全程 0 / 三段 0）」', () => {
+    const lines = flowModeLines(health());
+    expect(lines).toContain('还不够判（全程 0 / 三段 0）');
+    expect(lines.join('\n')).toContain('· 全程：0 单，合并 0；成功率 —；时长中位 —、p90 —；每合并单 —');
+    expect(lines.join('\n')).not.toContain('非劣效');
+  });
+
+  it('样本不够：数照写，不出差值和止损，写「还不够判（全程 N / 三段 M）」', () => {
+    const lines = flowModeLines(
+      health({
+        full: group('full', {
+          tasks: 10,
+          merged: 6,
+          successRate: 0.6,
+          wilson: { low: 0.31, high: 0.83 },
+          durationMedianMin: 42,
+          durationP90Min: 120,
+          equivalentPerMerged: 12_000,
+          rawTokensPerMerged: 16_000,
+        }),
+        three: group('three', {
+          tasks: 14,
+          merged: 9,
+          successRate: 9 / 14,
+          wilson: { low: 0.39, high: 0.84 },
+        }),
+      }),
+    );
+    const text = lines.join('\n');
+    expect(text).toContain(
+      '· 全程：10 单，合并 6；成功率 60%（Wilson 95% 区间 31%–83%）；时长中位 42 分钟、p90 120 分钟；每合并单 输入当量 12k',
+    );
+    // #2859：每合并单按输入当量给，原始四样相加另列
+    expect(text).toContain('每合并单 输入当量 12k（原始四样相加 16k）');
+    expect(text).not.toContain('折算');
+    expect(lines).toContain('还不够判（全程 10 / 三段 14）');
+    expect(text).not.toContain('成功率差');
+  });
+
+  it('够判：写差值、非劣效、成本倍数和止损', () => {
+    const lines = flowModeLines(
+      health({
+        enough: true,
+        full: group('full', {
+          tasks: 30,
+          merged: 12,
+          successRate: 0.4,
+          wilson: { low: 0.25, high: 0.58 },
+          equivalentPerMerged: 50_000,
+        }),
+        three: group('three', {
+          tasks: 30,
+          merged: 24,
+          successRate: 0.8,
+          wilson: { low: 0.63, high: 0.9 },
+          equivalentPerMerged: 5000,
+        }),
+        verdict: {
+          diff: { diff: -0.4, low: -0.6, high: -0.17 },
+          worse90: { diff: -0.4, low: -0.57, high: -0.2 },
+          noninferior: false,
+          effectStop: true,
+          costRatio: 10,
+          costStop: true,
+        },
+      }),
+    );
+    const text = lines.join('\n');
+    expect(text).not.toContain('还不够判');
+    expect(text).toContain(
+      '成功率差（全程减三段）-40.0 点，95% 区间 -60.0 点 到 -17.0 点：下界没过 −5 点，非劣效还没成立',
+    );
+    expect(text).toContain('全程每合并单输入当量是三段的 10.00 倍，超过 2 倍，触发成本类止损');
+    expect(text).toContain('触发效果类止损');
+  });
+
+  it('接进简报：没接这一栏的不写；读不到写「没查成」、这一轮记 partial', async () => {
+    const plain = makeDeps();
+    await runDailyBriefJob(plain.deps);
+    expect(plain.published[0]?.body ?? '').not.toContain('两种流程对照');
+    const shown = makeDeps({ flowModeHealth: async () => health() });
+    const ok = await runDailyBriefJob(shown.deps);
+    expect(ok.outcome).toBe('ok');
+    expect(shown.published[0]?.body ?? '').toContain('还不够判（全程 0 / 三段 0）');
+    const broken = makeDeps({
+      flowModeHealth: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const bad = await runDailyBriefJob(broken.deps);
+    expect(bad.outcome).toBe('partial');
+    expect(broken.published[0]?.body ?? '').toContain(
+      '两种流程对照（决定 0105，自开跑累计）：没查成（读两种流程对照：库连不上）',
+    );
   });
 });

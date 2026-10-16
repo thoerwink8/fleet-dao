@@ -9,6 +9,7 @@ import {
   clearReservations,
   endedPoolRuns,
   openPoolRuns,
+  openRunTranscriptMarks,
   PoolFullError,
   type PoolReservationRequest,
   poolRunUsage,
@@ -18,7 +19,7 @@ import {
 } from '../src/queries/pool-runs.ts';
 import { poolOccupancy } from '../src/queries/quota.ts';
 import { getRun, startRun } from '../src/queries/runs.ts';
-import { poolReservations } from '../src/schema/index.ts';
+import { poolReservations, type RunTranscriptKind, runTranscript } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addRoute, addRun, addTask, ago, catalog, HOUR, later, MIN, NOW } from './helpers.ts';
 
@@ -279,6 +280,68 @@ describe('openPoolRuns：还开着的带上路由（熔断半开时按路由数�
   });
 });
 
+describe('openRunTranscriptMarks：在途会话的回话证据（熔断半开时当试探，#2862）', () => {
+  const mark = (runId: string, seq: number, minutesAgo: number, kind: RunTranscriptKind) => ({
+    runId,
+    seq,
+    at: ago(minutesAgo * MIN),
+    kind,
+    text: kind,
+  });
+
+  it('只给在途的、只给 assistant/tool_call/error 三种、按路由分好；收了场的、太早的、别的种类的不给', async () => {
+    const task = await addTask(t.db, (await addRepo(t.db)).id);
+    const a = await addRun(t.db, { taskId: task.id, routeId: 'a-opus' });
+    const b = await addRun(t.db, { taskId: task.id, routeId: 'b-opus' });
+    const done = await addRun(t.db, {
+      taskId: task.id,
+      routeId: 'a-opus',
+      endedAt: ago(MIN),
+      outcome: 'done',
+      routeOutcome: 'ok',
+    });
+    await t.db
+      .insert(runTranscript)
+      .values([
+        mark(a.id, 0, 20, 'prompt'),
+        mark(a.id, 1, 19, 'assistant'),
+        mark(a.id, 2, 18, 'tool_call'),
+        mark(a.id, 3, 17, 'tool_result'),
+        mark(a.id, 4, 16, 'error'),
+        mark(a.id, 5, 15, 'result'),
+        mark(a.id, 6, 600, 'assistant'),
+        mark(b.id, 0, 10, 'assistant'),
+        mark(done.id, 0, 5, 'assistant'),
+      ]);
+    const got = await openRunTranscriptMarks(t.db, { since: ago(6 * HOUR) });
+    expect(got.map((m) => [m.runId, m.routeId, m.kind, m.at])).toEqual([
+      [a.id, 'a-opus', 'assistant', ago(19 * MIN)],
+      [a.id, 'a-opus', 'tool_call', ago(18 * MIN)],
+      [a.id, 'a-opus', 'error', ago(16 * MIN)],
+      [b.id, 'b-opus', 'assistant', ago(10 * MIN)],
+    ]);
+  });
+
+  it('每个会话只留最近 perRun 条', async () => {
+    const task = await addTask(t.db, (await addRepo(t.db)).id);
+    const a = await addRun(t.db, { taskId: task.id, routeId: 'a-opus' });
+    await t.db
+      .insert(runTranscript)
+      .values(Array.from({ length: 6 }, (_, i) => mark(a.id, i, 10 - i, 'assistant')));
+    const got = await openRunTranscriptMarks(t.db, { since: ago(HOUR), perRun: 4 });
+    expect(got.map((m) => m.at)).toEqual([ago(8 * MIN), ago(7 * MIN), ago(6 * MIN), ago(5 * MIN)]);
+  });
+
+  it('【故意造出的失败】run_transcript 读不了：照抛，不当成没有回话', async () => {
+    await t.client.exec('alter table run_transcript rename to run_transcript_unreadable');
+    try {
+      await expect(openRunTranscriptMarks(t.db, { since: ago(HOUR) })).rejects.toThrow();
+    } finally {
+      await t.client.exec('alter table run_transcript_unreadable rename to run_transcript');
+    }
+  });
+});
+
 describe('三段的一段选定路由、还没开跑时预占着的名额（pool_reservations，#757）', () => {
   /** 几张单（同一个仓）。 */
   const tasksOf = async (n: number): Promise<string[]> => {
@@ -377,10 +440,51 @@ describe('三段的一段选定路由、还没开跑时预占着的名额（pool
     const ids = await tasksOf(5);
     const results = await Promise.all(ids.map((id) => reservePoolSlot(t.db, req(id, 'a-opus'))));
     expect(results.filter((r) => r.reserved)).toHaveLength(2);
-    expect(results.flatMap((r) => (r.reserved ? [] : [r.occupied]))).toEqual([2, 2, 2]);
+    expect(results.flatMap((r) => (r.reserved || r.trialTaken ? [] : [r.occupied]))).toEqual([2, 2, 2]);
     expect(await poolOccupancy(t.db, { now: NOW })).toEqual(
       new Map([['relay-a', { inFlight: 0, reserved: 2 }]]),
     );
+  });
+
+  it('半开的试探（trial: true）：两个同时进，这条路由只成一个；另一个回「试探已经被别的单占了」，不拿池满硬凑', async () => {
+    const [a, b, c] = await three();
+    const results = await Promise.all([
+      reservePoolSlot(t.db, req(a, 'a-opus', { trial: true })),
+      reservePoolSlot(t.db, req(b, 'a-opus', { trial: true })),
+    ]);
+    expect(results.filter((r) => r.reserved)).toHaveLength(1);
+    expect(results.find((r) => !r.reserved)).toEqual({
+      reserved: false,
+      trialTaken: true,
+      poolId: 'relay-a',
+      routeOccupied: 1,
+      expired: [],
+    });
+    // 池还有空位（上限 2、占了 1）：不是试探的照样占得上，行为不变
+    expect(await reservePoolSlot(t.db, req(c, 'a-opus'))).toMatchObject({ reserved: true });
+  });
+
+  it('半开的试探：这条路由上有在途的会话、或没过期的预占就不占；别的路由上的不挡；自己这一段上次的预占不算', async () => {
+    const [a, b, c] = await three();
+    await addRoute(t.db, { id: 'a-opus49', poolId: 'relay-a', modelId: 'opus-4.9' });
+    // 同一个池的另一条路由上有在途会话：不挡这条路由的试探
+    await addRun(t.db, { taskId: c, routeId: 'a-opus49', startedAt: ago(MIN) });
+    const first = await reservePoolSlot(t.db, req(a, 'a-opus', { trial: true }));
+    expect(first).toMatchObject({ reserved: true });
+    // 自己再选路（换掉自己上次的预占）：不和自己抢
+    expect(await reservePoolSlot(t.db, req(a, 'a-opus', { trial: true }))).toMatchObject({ reserved: true });
+    // 别的单来：这条路由上已经有预占了
+    expect(await reservePoolSlot(t.db, req(b, 'a-opus', { trial: true }))).toMatchObject({
+      reserved: false,
+      trialTaken: true,
+      routeOccupied: 1,
+    });
+    // 在途的会话一样挡：relay-b 上开着一行
+    await addRun(t.db, { taskId: c, routeId: 'b-opus', startedAt: ago(MIN) });
+    expect(await reservePoolSlot(t.db, req(b, 'b-opus', { trial: true }))).toMatchObject({
+      reserved: false,
+      trialTaken: true,
+    });
   });
 
   it('过了期的预占不占名额：预占的时候顺手收掉、交回给调用方（那一段多半卡住了，要记一笔）', async () => {

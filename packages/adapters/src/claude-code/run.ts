@@ -120,6 +120,8 @@ export async function runClaudeCode(
       inspect(effect, control) {
         if (effect.init?.sessionId && effect.init.sessionId !== spec.session.id) {
           control.kill('session_mismatch');
+        } else if (effect.init?.sessionId) {
+          options.onSessionId?.(effect.init.sessionId);
         }
         if (effect.init?.cliVersion && versionAtLeast(effect.init.cliVersion, minVersion) === false) {
           control.kill('cli_too_old');

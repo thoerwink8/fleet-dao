@@ -11,6 +11,7 @@
 // 改这里之前必须知道：
 // - 测试不只读自己包里的文件（读别的包的源码、夹具，读 docs/ops.md、AGENTS.md、deploy/ 下的脚本）。PATH_RULES 和 TEST_READS
 //   就是这些「谁的测试读谁」的清单；test/ci-plan.test.ts 扫所有测试文件里指向包外的路径，漏记一条就红。
+//   夹具不升全跑：在包的面以外，本机只测它所在的包，跨包读靠 TEST_READS。
 // - 这里判「少跑」等于放行没测过的改动，改它要连测试一起看。
 
 import { type Reuse, reuseOf } from './main-reuse.ts';
@@ -131,6 +132,8 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'web'] as const;
  */
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
+  // conventions/test/subagent-stats.test.ts 用 agents/hooks/subagent-ledger.mjs 读写收回策略文件（subagent:stats --enforce 和钩子是同一份）
+  conventions: ['agents/hooks/subagent-ledger.mjs'],
   db: ['adapters', 'core'],
   [AGENTS_UNIT]: ['db', 'agents-sync', 'packages/conventions/standard-paths.json'],
 };
@@ -336,7 +339,12 @@ export const ROOT_CONFIG_FILES: readonly string[] = [
   'vitest.config.ts',
 ];
 
-/** 测试夹具：别的包的测试也读（PATH_RULES 全跑；ci-cache.ts 的缓存键也认这一条）。 */
+/**
+ * 测试夹具的路径（ci-cache.ts 的缓存键认这一条）。
+ * 不升全跑：夹具在包的面以外，本机只测它所在的包；别的包的测试读它时由 TEST_READS 带上
+ * （ci-plan.test.ts 扫测试里的路径，漏记就红）。升全跑会让引擎自测改走「受影响的包必须在 8 分钟内跑完」，
+ * 引擎整包测试过不了这道线，改一份夹具就红。
+ */
 export const FIXTURE_PATH = /^packages\/[^/]+\/test\/(?:.+\/)?fixtures\//;
 
 /** 包外路径的去处，按顺序取第一条。包内的（packages/<包>/…）不在这里，按依赖图算。 */
@@ -347,7 +355,6 @@ export const PATH_RULES: readonly Rule[] = [
   ...ROOT_CONFIG_FILES.map((p) => ({ match: exact(p), full: '根配置，所有包都受影响' })),
   { match: under('.github/workflows/'), full: 'CI 工作流本身' },
   { match: under('packages/shared/'), full: '几乎所有包都依赖 shared' },
-  { match: (f) => FIXTURE_PATH.test(f), full: '测试夹具，别的包的测试也读' },
   {
     match: under('deploy/'),
     full: '装机脚本：deploy/test 全跑，好几个包的测试也直接读 deploy/ 下的文件',
@@ -555,7 +562,7 @@ function testReaders(pkgs: ReadonlySet<string>, changed: readonly string[]): str
 interface Sorted {
   /** 升全跑的文件和为什么。 */
   fullWhy: string[];
-  /** 升全跑的文件落在的包：shared、测试夹具所在的包、不在依赖图里的包目录。 */
+  /** 升全跑的文件落在的包：shared、不在依赖图里的包目录。 */
   hubs: Set<string>;
   /** 改到了面（PackageGraph.surface）上的文件的包：它们和依赖它们的都要测。 */
   units: Set<string>;
@@ -661,7 +668,7 @@ export function planCi({ event, changed, graph, rules = PATH_RULES, specExists }
 export interface Fallback {
   /** 先跑的单元。 */
   units: string[];
-  /** 升全跑的文件落在的包（shared、测试夹具所在的包这类）：它们自己在 units 里。 */
+  /** 升全跑的文件落在的包（shared、不在依赖图里的包目录这类）：它们自己在 units 里。 */
   hubs: string[];
   /** 依赖 hubs 的、units 里没有的单元：CI 全跑会测到，本机不逐个跑。依赖图读不出是一句为什么（不拿空清单冒充「没人依赖」）。 */
   dependents: string[] | string;
@@ -670,7 +677,7 @@ export interface Fallback {
 /**
  * planCi 判出全跑、本机又不全跑时（test:changed：几个会话同时全跑会把机器拖满）先跑哪些——同一份判法，只是放下「升全跑」那一档：
  * - 没升全跑的文件照 planCi：改到的包和直接间接依赖它们的、测试读到改动的单元。改动里没有升全跑的文件时，units 就是 planCi 的 testUnits；
- * - 升全跑的文件落在某个包下的（shared、测试夹具、不在依赖图里的包目录）只算那个包自己：依赖它的（升全跑正是因为几乎都依赖它）
+ * - 升全跑的文件落在某个包下的（shared、不在依赖图里的包目录）只算那个包自己：依赖它的（升全跑正是因为几乎都依赖它）
  *   放进 dependents，写给人看；
  * - 根配置、CI 工作流、deploy/、认不出的路径不落在哪个单元，什么都不加（全量交给 CI）。
  */
@@ -898,25 +905,35 @@ function testsProblem(plan: CiPlan): string | undefined {
  * 「本该跑 → success、本该不跑 → skipped」，changes、docs 必须 success；有一条不对、认不出，就不通过。
  * hygiene 不在这条判定里（红了不挡，见 ALWAYS_JOBS 的注释），但 ci.yml 仍然 needs 它，check 会等它跑完。
  */
-export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines: string[] } {
+export function ciVerdict(
+  needs: unknown,
+  event?: string,
+): { ok: boolean; lines: string[]; redJobs: string[] } {
   const lines: string[] = [];
+  // 不对的 job（job id，带它这次的结果）：入口把它打成一条 ::error，check 的检查输出里就有「哪几个 job 红了」，
+  // 引擎等 CI 时读到的失败摘要（packages/github 的 failureDigest）才不是一句空的「check：failure」（#2795）
+  const redJobs: string[] = [];
   if (typeof needs !== 'object' || needs === null)
-    return { ok: false, lines: ['读不出各 job 的结果（needs）'] };
+    return { ok: false, lines: ['读不出各 job 的结果（needs）'], redJobs };
   const n = needs as Record<string, { result?: unknown; outputs?: Record<string, unknown> } | undefined>;
   let ok = true;
-  const bad = (line: string) => {
+  const bad = (line: string, job?: string) => {
     ok = false;
     lines.push(`✗ ${line}`);
+    if (job !== undefined) {
+      const r = n[job]?.result;
+      redJobs.push(`${job}（${r === undefined ? '没有结果' : String(r)}）`);
+    }
   };
   for (const job of ALWAYS_JOBS) {
     const r = n[job]?.result;
     if (r === 'success') lines.push(`✓ ${job}：success`);
-    else bad(`${job}：${r === undefined ? '没有这个 job 的结果' : String(r)}（每次都得跑且绿）`);
+    else bad(`${job}：${r === undefined ? '没有这个 job 的结果' : String(r)}（每次都得跑且绿）`, job);
   }
   const plan = parsePlan(n.changes?.outputs?.plan);
   if (typeof plan === 'string') {
     bad(plan);
-    return { ok: false, lines };
+    return { ok: false, lines, redJobs };
   }
   // test job 的矩阵铺的是 outputs.tests：必须和 plan 里核过的那份是同一份
   if (n.changes?.outputs?.tests !== JSON.stringify(plan.tests))
@@ -960,7 +977,7 @@ export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines:
     const want = expected(plan, job) ? 'success' : 'skipped';
     const r = n[job]?.result;
     if (r === want) lines.push(`✓ ${job}：${r}`);
-    else bad(`${job}：${r === undefined ? '没有这个 job 的结果' : String(r)}，本该 ${want}`);
+    else bad(`${job}：${r === undefined ? '没有这个 job 的结果' : String(r)}，本该 ${want}`, job);
   }
-  return { ok, lines };
+  return { ok, lines, redJobs };
 }

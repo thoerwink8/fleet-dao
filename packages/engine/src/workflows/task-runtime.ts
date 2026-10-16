@@ -147,6 +147,8 @@ export class TaskRuntime {
   lastImplementRoute: RouteChoice | null = null;
   /** 这一轮选路时避让把候选滤光了，改派了原来的路由。 */
   fellBackToMissRoute = false;
+  /** 上一次因为等路由落库的「在做什么」那一句（#2863，patched('route-wait-mirror')）：同一句不重复写。 */
+  lastRouteWaitLine: string | null = null;
   /**
    * 下一次动手会话打算续哪一段（决定 0088，task-session.ts）：判一次就清掉，续不上的不再试。
    * 只在 patched('segment-resume') 之后才会被写上，老历史一直是 null。
@@ -158,8 +160,21 @@ export class TaskRuntime {
    * 最近一次跑成的动手会话的最后一条回复（#2723）：开 PR、第 2 轮起改 PR 正文时进「做了什么」。纯状态，没跑成的不覆盖。
    */
   lastAnswer: string | null = null;
+  /** 这一轮第一个派上的模型（#2762 流程健康记账）：每轮开头清掉，起第一段会话时记下。纯状态。 */
+  roundFirstModel: string | null = null;
+  /** 最近一次推上去的头相对主线新增的行数（#2762）；没推过、推分支没数成是 null。 */
+  addedLines: number | null = null;
+  /** 这条工作流里已经记了几次一轮收场（task_rounds.seq）。只在 patched('round-outcome') 下加。 */
+  roundSeq = 0;
   /** 连着几次跑成的动手会话是续起来的：到 RESUME_STREAK_LIMIT 下一轮开新会话。 */
   resumeStreak = 0;
+  /**
+   * 这张单走哪种流程（#2826，patched('flow-mode')，task-flow.ts）：第一次选路之后、第一段动手之前定一次，之后不变。
+   * null＝老历史（没定过，按三段）。只来自活动结果（进了历史），重放不再读配置。
+   */
+  flowMode: 'three' | 'full' | null = null;
+  /** 全程的单回到动手几次了（MAX_FULL_PUSHES 兜底）：到了停下，人点「继续」清零。 */
+  fullPushes = 0;
   /** 最近一次自测（决定 0093）的精炼输出：交给冷验收当材料（ColdVerifyInput.testOutput）。没跑过、头换了就是 null。 */
   selfCheckOutput: { head: string; text: string } | null = null;
   /** 单任务 token 预算给了几份（决定 0093）：超了停下，点「继续」再给。 */
@@ -345,6 +360,21 @@ export class TaskRuntime {
    */
   routeWakeMark(): number {
     return this.routeWakes;
+  }
+
+  /**
+   * 选路回要等时，睡之前把原因落库（#2863，patched('route-wait-mirror')）：waiting() 只改内存，
+   * 库里 doing / updated_at 会冻在上一次动手那句。原因取 detail 第一个「（」之前那一句（最多 120 字）；
+   * 和上一次落库的同一句（且 doing 还是它）就不重复写。记的那一句只在内存里，重放时照样算得出来；
+   * 选到路由起会话时 advance 把 doing 换回动手那句（并落库）。
+   */
+  async mirrorRouteWait(detail: string): Promise<void> {
+    if (!patched('route-wait-mirror')) return;
+    const line = `等路由：${detail.split('（')[0]?.slice(0, 120) ?? ''}`;
+    if (line === this.lastRouteWaitLine && this.status.doing === line) return;
+    this.status.doing = line;
+    this.lastRouteWaitLine = line;
+    await this.mirror('running');
   }
 
   /**
@@ -623,7 +653,7 @@ export class TaskRuntime {
       } catch (error) {
         if (error instanceof Abandoned) throw error;
         if (isCancellation(error)) throw error;
-        const failure = failureOf(error, source);
+        const failure = failureOf(error, source, this.limits);
         // 合并冲突不在这一步里原地重试：第二次原文必一字不差，会直接挂起，会话根本看不到冲突。
         // 老历史没有这个标记，照旧交给失败分流（重试这一步，再不行挂起）。
         if (failure.code.toLowerCase() === 'merge_conflict' && patched('conflict-handoff-keeps-tree')) {
@@ -675,7 +705,17 @@ export class TaskRuntime {
   }
 
   classify(
-    failure: { source: string; code: string; message: string; retryable: boolean | null },
+    failure: {
+      source: string;
+      code: string;
+      message: string;
+      retryable: boolean | null;
+      activity?: string | undefined;
+      startToCloseSeconds?: number | undefined;
+      engineStartedAt?: string | undefined;
+      currentEngineStartedAt?: string | undefined;
+      engineRestarted?: boolean | undefined;
+    },
     counters: LadderCounters,
     routeBound: boolean,
     context: FailureContext,

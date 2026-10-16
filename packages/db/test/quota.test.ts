@@ -1,17 +1,20 @@
 import { randomUUID } from 'node:crypto';
-import { eq, sql } from 'drizzle-orm';
+import { asc, eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   inFlightByPool,
   type PoolQuotaSnapshot,
+  poolRouteFacts,
+  QUOTA_SAMPLE_RETENTION_MS,
   QUOTA_UNREPORTED_TTL_MS,
+  quotaSamplesSince,
   quotaTable,
   type StoredQuotaWindow,
   savePoolQuota,
   windowState,
 } from '../src/queries/quota.ts';
 import { finishRun, startRun } from '../src/queries/runs.ts';
-import { pools, quotaWindows } from '../src/schema/index.ts';
+import { pools, quotaWindowSamples, quotaWindows } from '../src/schema/index.ts';
 import { createTestDb, realTestPgUrl, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -26,6 +29,7 @@ import {
   later,
   MIN,
   NOW,
+  setRoutingLayers,
 } from './helpers.ts';
 
 const reading = {
@@ -197,6 +201,66 @@ describe('额度写入与额度表', () => {
     const rows = await t.db.select().from(quotaWindows);
     expect(rows).toHaveLength(1);
     expect(rows[0]?.utilization).toBe(0.11);
+  });
+
+  it('额度历史（#2737）：每读成一次追加一行，现值只留一行；晚到的旧读数不进历史', async () => {
+    for (let i = 0; i < 3; i++) {
+      await save(
+        readOk('relay-a', ago((3 - i) * 10 * MIN), [{ label: '7d', window: '7d', utilization: i / 10 }]),
+      );
+    }
+    // 晚到的：比库里最近一次还早，整批不生效，也不记历史
+    await save(readOk('relay-a', ago(HOUR), [{ label: '7d', window: '7d', utilization: 0.9 }]));
+    const samples = await t.db.select().from(quotaWindowSamples).orderBy(asc(quotaWindowSamples.readAt));
+    expect(samples.map((s) => s.utilization)).toEqual([0, 0.1, 0.2]);
+    expect(await t.db.select().from(quotaWindows)).toHaveLength(1);
+    const since = await quotaSamplesSince(t.db, ago(25 * MIN));
+    expect(since.map((s) => s.utilization)).toEqual([0.1, 0.2]);
+  });
+
+  it('额度历史有保留期上限：写入时删掉这个池超期的行，别的池、没超期的不动', async () => {
+    const old = new Date(NOW.getTime() - QUOTA_SAMPLE_RETENTION_MS - HOUR);
+    const keep = new Date(NOW.getTime() - QUOTA_SAMPLE_RETENTION_MS + HOUR);
+    const row = (poolId: string, readAt: Date) => ({
+      poolId,
+      label: '7d',
+      window: '7d' as const,
+      unit: 'percent' as const,
+      utilization: 0.1,
+      reading: 'measured' as const,
+      readAt,
+    });
+    await t.db
+      .insert(quotaWindowSamples)
+      .values([row('relay-a', old), row('relay-a', keep), row('relay-b', old)]);
+    await save(readOk('relay-a', ago(MIN), [{ label: '7d', window: '7d', utilization: 0.3 }]));
+    const left = await t.db.select().from(quotaWindowSamples);
+    expect(
+      left
+        .filter((s) => s.poolId === 'relay-a')
+        .map((s) => s.readAt.getTime())
+        .sort(),
+    ).toEqual([keep.getTime(), ago(MIN).getTime()].sort());
+    expect(left.filter((s) => s.poolId === 'relay-b')).toHaveLength(1);
+  });
+
+  it('池上的路由（#2737 额度快作废列接得住的）：开关开着的、关着的、没挂进路由两层的（算关着）都列', async () => {
+    await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await addRoute(t.db, {
+      id: 'a-k3',
+      poolId: 'relay-a',
+      modelId: 'kimi-k3',
+      hostId: 'mirasim',
+      alive: false,
+    });
+    await addRoute(t.db, { id: 'b-opus', poolId: 'relay-b', modelId: 'opus-5.5' });
+    await setRoutingLayers(t.db, { purposes: {}, models: { 'opus-5.5': ['a-opus', 'b-opus'] } });
+    await t.db.execute(sql`update routing_catalog set enabled = false where route_id = 'b-opus'`);
+    expect(await poolRouteFacts(t.db)).toEqual([
+      { routeId: 'a-k3', poolId: 'relay-a', modelId: 'kimi-k3', alive: false, enabled: false },
+      { routeId: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5', alive: true, enabled: true },
+      { routeId: 'b-opus', poolId: 'relay-b', modelId: 'opus-5.5', alive: true, enabled: false },
+    ]);
   });
 
   it('晚到的旧读数整批不生效：窗口不覆盖，最近读成时刻不倒退，也不标过期', async () => {

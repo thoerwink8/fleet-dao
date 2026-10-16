@@ -13,6 +13,7 @@ import {
   alertByKey,
   countAlertFilings,
   type Db,
+  findRepoProfile,
   finishScheduleRun,
   getApproval,
   insertAlertOnce,
@@ -47,6 +48,7 @@ import {
   writeLocalOrphans,
 } from '@fleet-dao/db';
 import { type GitHub, type RepoRef, readCi, readPull, requiredChecksFor } from '@fleet-dao/github';
+import { parseRepoProfile } from '@fleet-dao/shared';
 import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
@@ -76,6 +78,7 @@ import {
 import type { WorktreeCleanupDeps } from '../jobs/worktree-cleanup.ts';
 import type { PortContext } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
+import { standardPathsList } from '../standard-paths-list.ts';
 import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { mainCiRuns } from './main-ci-runs.ts';
@@ -451,9 +454,14 @@ export function hourlyReconcileJob(
       }),
   };
   // 自动合并兜底（#242）要的 GitHub：列 PR 经 claims.openPulls，把作者是不是机器人、自动合并开没开带过来；
-  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单照 main 上的 standard-paths.json 读，
-  // 判法是 conventions 的 parseStandardPaths / standardFiles（认目录、通配、section）。
-  const standardPathsFile = w.gh.standardPathsFile ?? STANDARD_PATHS_FILE;
+  // 必过检查、CI 判读照和合并闸同一份 readCi / requiredChecksFor；改标准路径的清单读这个仓档案里的文件，
+  // 文件不在＝空清单（standardPathsList），认不出照抛。
+  const standardPathsOverride = w.gh.standardPathsFile;
+  const standardPathsPath = async (repo: RepoRef): Promise<string> => {
+    if (standardPathsOverride) return standardPathsOverride;
+    const row = await findRepoProfile(w.db, repo.owner, repo.name);
+    return parseRepoProfile(row?.profile).standardPathsFile;
+  };
   const autoMergeGh: AutoMergeGitHub = w.autoMergeGh ?? {
     async listPrs(repo: RepoRef) {
       const pulls = await w.gh.claims.openPulls(repo);
@@ -475,13 +483,13 @@ export function hourlyReconcileJob(
     },
     requiredChecks: (repo: RepoRef) => requiredChecksFor(w.gh.deps, repo),
     async readStandardPathsFile(repo: RepoRef) {
-      const r = await w.gh.readRepoFile({ repo, path: standardPathsFile });
-      if (r.file.kind !== 'text') {
-        throw new Error(
-          `读 ${standardPathsFile} 没成（${r.file.kind === 'missing' ? '文件不在' : r.file.why}）`,
-        );
-      }
-      return r.file.text;
+      const path = await standardPathsPath(repo);
+      const r = await w.gh.readRepoFile({ repo, path });
+      if (r.file.kind === 'not_file') throw new Error(`读 ${path} 没成（${r.file.why}）`);
+      const text = r.file.kind === 'text' ? r.file.text : null;
+      // 文件不在＝空清单；认不出在这里抛。原文交给兜底再过同一份函数。
+      const recognized = standardPathsList(text);
+      return recognized.length === 0 ? null : text;
     },
     enableAutoMerge: (repo: RepoRef, pull) => w.gh.claims.enableAutoMerge(repo, pull),
     async mergeNow(repo: RepoRef, pull: { number: number; expectedHead: string }) {
@@ -610,6 +618,7 @@ export function hourlyReconcileJob(
             body: x.body,
             ...(x.link ? { link: x.link } : {}),
             ...(x.options ? { options: x.options } : {}),
+            ...(x.reason ? { reason: x.reason } : {}),
           });
         },
         insertOnce: (x) => insertAlertOnce(w.db, x),

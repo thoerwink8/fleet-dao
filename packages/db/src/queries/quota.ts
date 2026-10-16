@@ -1,8 +1,15 @@
 // 额度：唯一写入口 savePoolQuota，驾驶舱「额度表」quotaTable，以及判一个窗口能不能用的 windowState（调度也用它）。
 import type { QuotaWindow, ScopeMembership } from '@fleet-dao/shared';
-import { and, asc, eq, inArray, isNotNull, isNull, lte, notInArray, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, inArray, isNotNull, isNull, lt, lte, notInArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { channels, pools, quotaWindows, routes } from '../schema/index.ts';
+import {
+  channels,
+  pools,
+  quotaWindowSamples,
+  quotaWindows,
+  routes,
+  routingCatalog,
+} from '../schema/index.ts';
 import { openPoolRuns } from './pool-runs.ts';
 
 /** 读数超过这么久没更新就不当现值（设计 §6：每个账号池的额度读数不超过 30 分钟）。 */
@@ -10,6 +17,12 @@ export const QUOTA_STALE_AFTER_MS = 30 * 60_000;
 
 /** 上游不再报的窗口，标过期满这么久就删掉（清理派生数据）。 */
 export const QUOTA_UNREPORTED_TTL_MS = 24 * 60 * 60_000;
+
+/**
+ * 额度窗历史（quota_window_samples）留多久（#2737）：最长的窗口按 30 天，多留 5 天，够算一整期的用量速度。
+ * 每次写读数时删掉这个池超期的行。
+ */
+export const QUOTA_SAMPLE_RETENTION_MS = 35 * 24 * 60 * 60_000;
 
 /** 一个池的读数新不新看两个时刻。 */
 export interface PoolReadTimes {
@@ -108,7 +121,25 @@ async function writeWindow(db: Db, w: StoredQuotaWindow, readAt: Date): Promise<
       setWhere: sql`${quotaWindows.readAt} <= excluded.read_at`,
     })
     .returning({ poolId: quotaWindows.poolId });
-  return written.length > 0;
+  if (written.length === 0) return false;
+  // 写进现值的那一份读数同时记进历史（同一事务）；同一份读数重写不重记
+  await db
+    .insert(quotaWindowSamples)
+    .values({
+      poolId: w.poolId,
+      label: w.label,
+      window: changes.window,
+      scope: changes.scope,
+      utilization: changes.utilization,
+      used: changes.used,
+      limit: changes.limit,
+      unit: changes.unit,
+      resetsAt: changes.resetsAt,
+      reading: changes.reading,
+      readAt,
+    })
+    .onConflictDoNothing();
+  return true;
 }
 
 /** 读成的一次读数（和 adapters 额度读取器的 PoolReadOk 对得上）。读失败没有这个东西。 */
@@ -195,6 +226,15 @@ export async function savePoolQuota(
 
     let written = 0;
     for (const w of snapshot.windows) if (await writeWindow(tx, w, notAfterNow(w.readAt))) written++;
+    // 历史有保留期上限：这个池超期的行顺手删掉
+    await tx
+      .delete(quotaWindowSamples)
+      .where(
+        and(
+          eq(quotaWindowSamples.poolId, snapshot.poolId),
+          lt(quotaWindowSamples.readAt, new Date(readAt.getTime() - QUOTA_SAMPLE_RETENTION_MS)),
+        ),
+      );
     const inPool = eq(quotaWindows.poolId, snapshot.poolId);
     const reported = [...labels];
     if (reported.length > 0) {
@@ -402,4 +442,64 @@ export async function quotaTable(db: Db, options: QuotaTableOptions = {}): Promi
       windows,
     };
   });
+}
+
+/** 额度窗历史的一行（#2737）。 */
+export interface QuotaSampleRow {
+  poolId: string;
+  label: string;
+  window: (typeof quotaWindowSamples.$inferSelect)['window'];
+  scope: string | null;
+  unit: (typeof quotaWindowSamples.$inferSelect)['unit'];
+  utilization: number | null;
+  resetsAt: Date | null;
+  reading: (typeof quotaWindowSamples.$inferSelect)['reading'];
+  readAt: Date;
+}
+
+/** since 之后（含）的额度窗历史，按池、原名、读数时刻排。算用量速度用；读不到照抛。 */
+export async function quotaSamplesSince(db: Db, since: Date): Promise<QuotaSampleRow[]> {
+  const rows = await db
+    .select()
+    .from(quotaWindowSamples)
+    .where(gte(quotaWindowSamples.readAt, since))
+    .orderBy(asc(quotaWindowSamples.poolId), asc(quotaWindowSamples.label), asc(quotaWindowSamples.readAt));
+  return rows.map((r) => ({
+    poolId: r.poolId,
+    label: r.label,
+    window: r.window,
+    scope: r.scope === '' ? null : r.scope,
+    unit: r.unit,
+    utilization: r.utilization,
+    resetsAt: r.resetsAt,
+    reading: r.reading,
+    readAt: r.readAt,
+  }));
+}
+
+/** 挂在池上的一条路由（#2737 额度快作废的提醒列「接得住的路由」，关着的也列）。 */
+export interface PoolRouteFactRow {
+  routeId: string;
+  poolId: string;
+  modelId: string;
+  /** 路由两层里这条路由的开关开着（挂在几个模型下的，任一开着就算开着）；没挂进路由两层的算关着。 */
+  enabled: boolean;
+  alive: boolean;
+}
+
+/** 所有路由挂在哪个池、开关开没开、探针说活没活，按池、路由编号排。读不到照抛。 */
+export async function poolRouteFacts(db: Db): Promise<PoolRouteFactRow[]> {
+  const rows = await db
+    .select({
+      routeId: routes.id,
+      poolId: routes.poolId,
+      modelId: routes.modelId,
+      alive: routes.alive,
+      enabled: sql<boolean>`coalesce(bool_or(${routingCatalog.enabled}), false)`,
+    })
+    .from(routes)
+    .leftJoin(routingCatalog, eq(routingCatalog.routeId, routes.id))
+    .groupBy(routes.id, routes.poolId, routes.modelId, routes.alive)
+    .orderBy(asc(routes.poolId), asc(routes.id));
+  return rows.map((r) => ({ ...r, enabled: r.enabled === true }));
 }

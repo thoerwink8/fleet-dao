@@ -44,7 +44,7 @@
       "origin": "旧系统 VPS 执行记录 1 条",
       "evidence": { "hostId": "claude-code", "message": "Not logged in · Please run /login" },
       "expect": {
-        "action": "park",
+        "action": "swapRoute",
         "rule": "AU2",
         "avoid": "pool",
         "alert": true,
@@ -59,7 +59,7 @@
         "hostId": "claude-code",
         "message": "API Error: 400 此设备已被解绑，请在终端重新运行 reclaude 完成登录（请勿在 Claude Code 内使用 /login 登录）（请求 ID: <请求ID>）"
       },
-      "expect": { "action": "park", "rule": "DV1", "avoid": "pool", "alert": true }
+      "expect": { "action": "swapRoute", "rule": "DV1", "avoid": "pool", "alert": true }
     },
     {
       "id": "S06",
@@ -151,6 +151,21 @@
         "message": "step-failed:UNKNOWN：worker 部署重启：活动随旧进程丢失（execute），立即判失败以免干等 startToClose"
       },
       "expect": { "action": "retry", "rule": "EN1" }
+    },
+    {
+      "id": "R2710",
+      "provenance": "observed",
+      "origin": "2026-10-16 #2710、#2750：发版重启引擎后活动丢失，旧活动心跳和新引擎启动时刻不同",
+      "evidence": {
+        "code": "timeout_start_to_close",
+        "message": "activity StartToClose timeout",
+        "activity": "runSegment",
+        "startToCloseSeconds": 4500,
+        "engineStartedAt": "2026-10-16T12:00:00.000Z",
+        "currentEngineStartedAt": "2026-10-16T12:01:00.000Z",
+        "engineRestarted": true
+      },
+      "expect": { "action": "retry", "rule": "EN1", "routeOutcome": "neutral" }
     },
     {
       "id": "S17",
@@ -384,7 +399,7 @@
         "message": "reclaude org use: sync Claude config: sync current account: unexpected status 403: {\"error\":{\"code\":\"account_banned\",\"status\":403,\"message\":\"当前绑定账号暂不可用，系统将自动处理，请稍后重试\"}}"
       },
       "expect": {
-        "action": "park",
+        "action": "swapRoute",
         "rule": "AU1",
         "avoid": "pool",
         "alert": true,
@@ -399,7 +414,7 @@
         "hostId": "claude-code",
         "message": "API Error: 400 当前绑定账号暂不可用，系统将自动处理…"
       },
-      "expect": { "action": "park", "rule": "AU1", "avoid": "pool", "alert": true }
+      "expect": { "action": "swapRoute", "rule": "AU1", "avoid": "pool", "alert": true }
     },
     {
       "id": "X03",
@@ -447,7 +462,7 @@
       "provenance": "observed",
       "origin": "ai-gateway-stack docs/DECISIONS.md（同号多机高频触发，设备被解绑）；docs/reference/adapters.md 2.5；reclaude 文档「设备被自动撤销」：这台机器再发请求会拿到 401 device_revoked",
       "evidence": { "hostId": "claude-code", "message": "401 device_revoked" },
-      "expect": { "action": "park", "rule": "DV1", "avoid": "pool", "alert": true }
+      "expect": { "action": "swapRoute", "rule": "DV1", "avoid": "pool", "alert": true }
     },
     {
       "id": "X06",
@@ -657,7 +672,7 @@
       "provenance": "production",
       "origin": "旧系统 VPS mirasim 回合结束码 auth（7 天 3 次，kimi）",
       "evidence": { "hostId": "mirasim", "code": "auth" },
-      "expect": { "action": "park", "rule": "AU2", "avoid": "pool", "alert": true }
+      "expect": { "action": "swapRoute", "rule": "AU2", "avoid": "pool", "alert": true }
     },
     {
       "id": "X29",
@@ -1094,7 +1109,7 @@
         "message": "起来之后迟迟没有第一帧 · Syncing config… ⏎ reclaude: no valid login detected, starting device authorization flow… ⏎ Connecting to reclaude.ai…"
       },
       "expect": {
-        "action": "park",
+        "action": "swapRoute",
         "rule": "AU2",
         "avoid": "pool",
         "alert": true,

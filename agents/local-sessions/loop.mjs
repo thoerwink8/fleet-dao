@@ -7,11 +7,12 @@
 // - 只认一个实例：锁文件 ~/.fleet-dao/local-sessions/loop.pid，里面的进程还活着就退出、不起第二个。
 // - 一次没推成不退出（网断了下一轮再试）；push.mjs 起不来、超时也只是这一轮没推成。
 // - 退出时只删自己写的那把锁。
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnDetached } from './detach.mjs';
 import { loopPidPath, PUSH_EVERY_MS } from './lib.mjs';
 
 /** @param {number} pid */
@@ -65,10 +66,13 @@ export function reviveLoop({ home, alive = isAlive, start }) {
   return 'started';
 }
 
-/** 真起一个脱离当前进程的隐藏循环。 */
+/**
+ * 真起一个脱离当前进程树的隐藏循环。心跳钩子是 Claude Code 起的，以前用 spawn({ detached: true })，Mirasim 重启会话时
+ * taskkill /T 顺着父进程号把循环一起杀了（单 #2761：循环的起始时间正好等于会话 resume 的时刻）；改经 detach.mjs（Windows 走 WMI）。
+ */
 export function startLoopDetached() {
   const loop = join(dirname(fileURLToPath(import.meta.url)), 'loop.mjs');
-  spawn(process.execPath, [loop], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  spawnDetached(process.execPath, [loop]);
 }
 
 function main() {

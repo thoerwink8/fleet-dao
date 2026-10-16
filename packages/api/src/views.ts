@@ -22,8 +22,10 @@ import {
   type Model,
   type NotificationSchema,
   type Pool,
+  type PoolPressureViewSchema,
   type PoolViewSchema,
   type ProgressSchema,
+  poolPressureWindow,
   type Repo,
   type Route,
   type RunSchema,
@@ -44,6 +46,7 @@ import type {
   NotificationRecord,
   PoolOccupancyRead,
   PullRequestRecord,
+  QuotaSampleRecord,
   QuotaWindowRecord,
   RunPlan,
   SegmentRunRecord,
@@ -326,6 +329,8 @@ export function buildPools(
     windows: QuotaWindowRecord[];
     /** 池占用（store.poolOccupancy）：各页的在跑数、已选定数都读这一份。 */
     occupancy: PoolOccupancyRead;
+    /** 最近 24 小时的额度窗历史（#2737，store.listQuotaSamples）：算用量速度；不给就按本期平均速度算。 */
+    samples?: readonly QuotaSampleRecord[];
   },
   now: Date,
   staleAfterMs: number,
@@ -366,6 +371,11 @@ export function buildPools(
         stale: now.getTime() - Date.parse(w.readAt) > staleAfterMs,
       }));
     const dataAt = dataTimes.get(p.id);
+    const pressure = pressureOf(
+      windows.filter((w) => w.window !== '5h'),
+      (input.samples ?? []).filter((s) => s.poolId === p.id),
+      now,
+    );
     // 按池判，和每小时对账、选路由同一个判法（数据库包的 quotaReadOverdue），不逐窗口看。
     const overdue = quotaReadOverdue(
       { lastReadOkAt: p.lastReadOkAt ? new Date(p.lastReadOkAt) : null, dataAt: dataAt ?? null },
@@ -387,8 +397,53 @@ export function buildPools(
       lastReadOkAt: p.lastReadOkAt,
       dataAt: dataAt?.toISOString(),
       windows,
+      pressure,
     };
   });
+}
+
+/**
+ * 一个池的压力和作废预估（#2737）：只拿读数新、上游还在报的窗口算（读数过期的不当现值）；一个都算不出写为什么。
+ */
+function pressureOf(
+  windows: readonly {
+    label: string;
+    window: QuotaWindowRecord['window'];
+    utilization?: number | undefined;
+    resetsAt?: string | undefined;
+    readAt: string;
+    stale: boolean;
+    staleSince?: string | undefined;
+  }[],
+  samples: readonly QuotaSampleRecord[],
+  now: Date,
+): z.input<typeof PoolPressureViewSchema> {
+  if (windows.length === 0) return { state: 'unknown', why: '只有 5 小时窗，或一个窗口都没有' };
+  const fresh = windows.filter((w) => !w.stale && !w.staleSince);
+  if (fresh.length === 0) return { state: 'unknown', why: '读数过期，不当现值' };
+  const hit = poolPressureWindow(
+    fresh.map((w) => ({ ...w, used: w.utilization, resetsAt: w.resetsAt })),
+    now.getTime(),
+    (w) =>
+      samples.flatMap((s) =>
+        s.label === w.label && s.utilization !== undefined
+          ? [{ readAt: s.readAt, used: s.utilization, resetsAt: s.resetsAt ?? null }]
+          : [],
+      ),
+  );
+  if (!hit) return { state: 'unknown', why: '用量比例或清零时刻没报' };
+  const p = hit.pressure;
+  return {
+    state: 'known',
+    label: hit.window.label,
+    resetsAt: hit.window.resetsAt as string,
+    expectedUsed: p.pace.elapsed,
+    used: Math.max(0, p.pace.used),
+    rho: p.rho,
+    leftAtReset: p.leftAtReset,
+    exhaustedHoursEarly: p.exhaustedHoursEarly,
+    rateFrom: p.rateFrom,
+  };
 }
 
 // —— 新主页（/，#589）——

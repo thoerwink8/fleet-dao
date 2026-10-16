@@ -23,6 +23,7 @@ import {
   auditVia,
   CANARY_VERDICTS,
   type CanaryVerdict,
+  decisionReason,
   jevMode,
   jevQuestionType,
   jevTruthSource,
@@ -109,6 +110,8 @@ export const notifications = pgTable(
     resolvedBy: text('resolved_by'),
     /** 「要你拍」的选项（#1915）：只 decision 级有；老的、补不出选项的是空，页面写「没有选项，请直接回复」。 */
     decisionOptions: jsonb('decision_options').$type<DecisionOption[]>(),
+    /** 为什么要创始人拍（#2729）：掏新钱 / 删了找不回 / 只有人能做；只 decision 级有，且必须有。 */
+    decisionReason: decisionReason('decision_reason'),
     /** 创始人拍了什么（选项编号或原文、时刻、谁）；没拍是空。再报（原地重开）时清空。 */
     answer: jsonb('answer').$type<DecisionAnswer>(),
   },
@@ -117,6 +120,12 @@ export const notifications = pgTable(
       'notifications_options_only_decision',
       sql`${t.decisionOptions} is null or ${t.level} = 'decision'`,
     ),
+    // 「要你拍」在库层强制带选项和原因（#2729）：谁直写表（发版脚本用 psql 写过）都绕不过去
+    check(
+      'notifications_decision_needs_options_reason',
+      sql`${t.level} <> 'decision' or (${t.decisionOptions} is not null and jsonb_typeof(${t.decisionOptions}) = 'array' and jsonb_array_length(${t.decisionOptions}) >= 2 and ${t.decisionReason} is not null)`,
+    ),
+    check('notifications_reason_only_decision', sql`${t.decisionReason} is null or ${t.level} = 'decision'`),
     index('notifications_task_idx').on(t.taskId),
     index('notifications_open_idx').on(t.createdAt).where(sql`${t.resolvedAt} is null`),
   ],

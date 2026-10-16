@@ -10,8 +10,10 @@ import type {
   DecisionAnswer,
   DecisionExecution,
   DecisionOption,
+  FlowAssignment,
   LocalSessionsReport,
   Model,
+  NewFlowAssignment,
   NodeReport,
   NodeSnapshot,
   Pool,
@@ -48,6 +50,18 @@ export type SegmentRunRecord = SegmentRun & {
 
 /** 库里的一行额度窗：原名、单位、读法入库必填（领域类型里可选，是给还没入库的读数用的）；staleSince 由库的写入口管。 */
 export type QuotaWindowRecord = QuotaWindow & Required<Pick<QuotaWindow, 'label' | 'unit' | 'source'>>;
+
+/** 额度窗历史的一行（#2737，库里是 quota_window_samples）：算用量速度、清零时会作废多少用。 */
+export interface QuotaSampleRecord {
+  poolId: string;
+  label: string;
+  window: QuotaWindow['window'];
+  unit: NonNullable<QuotaWindow['unit']>;
+  reading: QuotaWindow['reading'];
+  utilization?: number;
+  resetsAt?: string;
+  readAt: string;
+}
 
 // —— 人 ——
 
@@ -292,6 +306,13 @@ export interface BoardStore {
   listBoardTasks(repoId: string): Promise<Task[]>;
   getTask(id: string): Promise<Task | null>;
   /**
+   * 全程模式的分组记录（#2823，task_flow_assignments）：每张单最多一行，写一次。分组时刻用 Store 的钟。
+   * 同一张单写第二次抛 FlowAssignmentExistsError，不覆盖；没有这张单抛普通错。
+   */
+  writeFlowAssignmentOnce(input: NewFlowAssignment): Promise<FlowAssignment>;
+  /** 读一张单的分组记录；没分过组、编号不是 uuid 都是 null。 */
+  getFlowAssignment(taskId: string): Promise<FlowAssignment | null>;
+  /**
    * 任务列表页（#1639）：所有仓的需求（不限 7 天窗口，做完、失败、叫停的都在），按最近更新（开单、快照写入、状态最近一次变化三者最晚）倒序翻页，
    * 同一毫秒的按编号倒序。分组规则在 shared 的 taskListGroupOf。仓编号不是 uuid（库版）或不存在，回空页、各组都是 0。
    * q：全是数字（可带 #）= 单号精确，也找标题里带这串数字的；其余 = 标题包含，不分大小写。counts 受仓和 q 影响、不受 group 影响。
@@ -353,6 +374,8 @@ export interface RoutingStore {
   listBans(): Promise<Ban[]>;
   /** 按（池, 原名 label）排。上游这次没报的窗口也在（带 staleSince），满 24 小时库里才删。 */
   listQuotaWindows(): Promise<QuotaWindowRecord[]>;
+  /** since 之后（含）的额度窗历史，按（池, 原名, 读数时刻）排。读不到抛错，不给空的顶。 */
+  listQuotaSamples(since: Date): Promise<QuotaSampleRecord[]>;
   setChannelEnabled(
     input: { channelId: string; enabled: boolean },
     audit: NewAuditEntry,

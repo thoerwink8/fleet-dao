@@ -25,6 +25,7 @@ import { isTaskBranch } from '../task-branch.ts';
 import type { UserExec } from './exec.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
 import {
+  addedLinesAgainst,
   bundleSince,
   changedFilesAgainst,
   commitShasBetween,
@@ -178,6 +179,8 @@ export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiRe
         head: r.head,
         failedChecks: r.failedChecks,
         ...(r.digest ? { digest: r.digest } : {}),
+        // 红的 job 名和日志尾巴（或「日志没取到：原因」）：task-ci 把它原样拼进返工意见（#2795）
+        ...(r.detail ? { detail: r.detail } : {}),
       };
     case 'conflict':
       return {
@@ -471,6 +474,20 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     async pushBranch(input, ctx) {
       const user = await ownerOrFail(input.worktreePath);
       const t = treeAs(input.worktreePath, user, `push-${input.subtaskId ?? input.taskId}`, ctx);
+      // 推上去的头相对主线的净改动和新增行数（#2762）。新增行只是给流程健康记账的：没数成不挡推，不带这一项
+      const delivered = async (mainline: string, pushedHead: string) => {
+        const changedFiles = await changedFilesAgainst(t, mainline, pushedHead);
+        try {
+          return {
+            head: pushedHead,
+            changedFiles,
+            addedLines: await addedLinesAgainst(t, mainline, pushedHead),
+          };
+        } catch (error) {
+          if (ctx.signal.aborted) throw error;
+          return { head: pushedHead, changedFiles };
+        }
+      };
       let head = await headOf(t);
       // 上一次（或上几次）这一步已经把主线并进来了、只是没推成：头是会话交的头之后只有并提交的一串，接着推它
       if (head !== input.head && !(await isMergeChainOnto(t, head, input.head))) {
@@ -518,7 +535,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         );
         await fetchBundle(t, bytes, ref);
       }
-      if (remoteAtIncoming) return { head, changedFiles: await changedFilesAgainst(t, main.head, head) };
+      if (remoteAtIncoming) return delivered(main.head, head);
       // 最新主线已经在树里：先钉上再并。内容冲突留下合并状态交给会话解；合并没开始的仍让会话自己 git merge。
       // pnpm test:changed 和钉住的主线比。
       await pinMainline(t, input.repo.defaultBranch, main.head);
@@ -635,7 +652,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         const pushed = await doPush(head);
         // 推上去的头相对主线的净改动：工作流开 PR 前验证判界面、给验证方的清单、PR 正文按它，
         // 不按一轮轮会话交的累计（撤回了的、老版算进来的主线改动都还在那里面，#293）
-        return { head: pushed, changedFiles: await changedFilesAgainst(t, main.head, pushed) };
+        return delivered(main.head, pushed);
       } catch (error) {
         if (!(error instanceof PortError) || (error.code !== 'DIVERGED' && error.code !== 'REMOTE_AHEAD')) {
           throw error;
@@ -643,10 +660,10 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         const recovered = await recoverDiverged(error);
         head = recovered.head;
         if (!recovered.needsPush) {
-          return { head, changedFiles: await changedFilesAgainst(t, main.head, head) };
+          return delivered(main.head, head);
         }
         const pushed = await doPush(head);
-        return { head: pushed, changedFiles: await changedFilesAgainst(t, main.head, pushed) };
+        return delivered(main.head, pushed);
       }
     },
 

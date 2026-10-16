@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { judgeRun } from '../src/judge.ts';
-import { ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
+import { ledgerlessDetail, ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
 import { METER_EARLY_MS, type MeterFs, type MeterWindow, readMirasimMeter } from '../src/mirasim/meter.ts';
 import {
   type MirasimRunOptions,
@@ -12,6 +12,7 @@ import {
   type MirasimRunSpec,
   mirasimRunFacts,
   mirasimRunSummary,
+  mirasimUsageFromSnapshot,
   runMirasim,
   stopMirasimSession,
   WATCH_CONNECT_BUDGET_MS,
@@ -96,13 +97,15 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
     });
   });
 
-  it('pi：两条命令、累计输出', () => {
+  it('pi：真实流夹具的 snapshot 带 sessionKey 和本轮累计输出', () => {
     const { session, events } = replay(pi);
+    expect(pi.sessionKey).toMatch(/^pi:[0-9a-f-]{36}$/);
     expect(
       events.filter((e) => e.kind === 'tool' && (e.payload as ToolPayload).phase === 'end'),
     ).toHaveLength(2);
     expect(session.state.model).toBe('kimi-k3');
     expect(session.state.usage?.turnOutputTokens).toBe(239);
+    expect(mirasimUsageFromSnapshot(session)).toEqual({ outputTokens: 239 });
   });
 
   it('补丁跳号：回 gap 让调用方重订阅；旧 seq 的快照丢掉', () => {
@@ -953,6 +956,39 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     ).rejects.toThrow('不是 kimi 的');
   });
 
+  it('grok 走 Mirasim（#2720）：账本缺目录判「中转没查成」且原因写明不写流量账本；账本有 2xx 中转行、答上 pong 判 ok', async () => {
+    // 法国 grok 会话从来没有账本目录：用 kimi 的录像换成 grok 的会话号跑整段
+    const grokKey = 'grok:f8dd5195-5a21-4d17-b687-a90ee99bcc81';
+    const grok = JSON.parse(
+      JSON.stringify(kimi)
+        .replaceAll(kimi.sessionKey, grokKey)
+        .replaceAll('kimi-code/k3', 'grok-4.7')
+        .replaceAll('"appendText":"好了"', '"appendText":"pong"'),
+    ) as typeof kimi;
+    const grokSpec = spec({ agent: 'grok', expectModel: 'grok-4.7' });
+    const missing = await runMirasim(grokSpec, {
+      connect: new FakeMirasim({ agents: ['grok'], reply: accepted(grok), stream: grok.stream }).connect,
+      ledgerDir: tempDir(),
+    });
+    expect(missing.terminal?.isError).toBe(false);
+    const verdict = judgeRun(mirasimRunSummary(missing).facts);
+    expect(verdict).toMatchObject({ outcome: 'failed', reason: 'relay_unknown' });
+    expect(verdict.detail).toContain('不写流量账本');
+    expect(verdict.detail).not.toContain('账本换了地方');
+
+    const relayed = await runMirasim(grokSpec, {
+      connect: new FakeMirasim({ agents: ['grok'], reply: accepted(grok), stream: grok.stream }).connect,
+      ledgerDir: okLedger(grokKey),
+    });
+    expect(mirasimRunSummary(relayed).facts.relayUnknown).toBeUndefined();
+    expect(relayed.session.state.text).toBe('pong');
+    expect(judgeRun(mirasimRunSummary(relayed).facts)).toEqual({
+      outcome: 'ok',
+      reason: 'answered',
+      detail: '正常结束',
+    });
+  });
+
   it('中转路由：账本里起针之后没有 2xx，done 不算数；账本没读成、没给账本目录判「中转没查成」', async () => {
     const ledgerDir = tempDir();
     const uuid = kimi.sessionKey.split(':')[1] as string;
@@ -1088,6 +1124,122 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     });
     const deaf = new FakeMirasim({});
     expect((await stopMirasimSession(deaf.connect, kimi.sessionKey, 200)).confirmed).toBe(false);
+  });
+});
+
+describe('Mirasim 放手与接回（#2815：发版重启引擎不停会话）', () => {
+  it('放手（release）：只断开连接，不发 stop、不记成被叫停；报告带会话号和轮次号，服务端会话没动', async () => {
+    const release = new AbortController();
+    const stopSignal = new AbortController();
+    const server = new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream.slice(0, 3) });
+    setTimeout(() => {
+      // 引擎停机时放手信号先响，随后活动被取消（signal 也响）：放手优先，不能走叫停那条发 stop 的路
+      release.abort();
+      stopSignal.abort();
+    }, 100);
+    const report = await runMirasim(spec(), {
+      connect: server.connect,
+      release: release.signal,
+      signal: stopSignal.signal,
+    });
+    expect(report.detached).toEqual({ sessionKey: kimi.sessionKey, taskId: kimi.taskId });
+    expect(report.killed).toBeUndefined();
+    expect(report.stop).toBeUndefined();
+    expect(report.terminal).toBeUndefined();
+    expect(server.framesOf('stop')).toEqual([]);
+  });
+
+  it('不放手（只有叫停：切号、人叫停、总时长、卡住）：照旧发 stop', async () => {
+    const controller = new AbortController();
+    const server = new FakeMirasim({
+      reply: accepted(kimi),
+      stream: kimi.stream.slice(0, 3),
+      afterStop: [
+        { type: 'snapshot', sessionKey: kimi.sessionKey, seq: 100, snapshot: { phase: 'stopped' } },
+      ],
+    });
+    setTimeout(() => controller.abort(), 100);
+    const report = await runMirasim(spec(), {
+      connect: server.connect,
+      release: new AbortController().signal,
+      signal: controller.signal,
+    });
+    expect(report.detached).toBeUndefined();
+    expect(report.killed?.reason).toBe('aborted');
+    expect(server.framesOf('stop')).toHaveLength(1);
+  });
+
+  it('接回：不握手发 prompt，按会话号重新订阅；重复的帧按序号去掉，读到收场', async () => {
+    const dup = [...kimi.stream.slice(0, 3), ...kimi.stream.slice(0, 3), ...kimi.stream.slice(3)];
+    const server = new FakeMirasim({ stream: dup });
+    const events: { kind: string; replay: boolean }[] = [];
+    const accepts: unknown[] = [];
+    const report = await runMirasim(spec({ prompt: '' }), {
+      connect: server.connect,
+      attach: { sessionKey: kimi.sessionKey, taskId: kimi.taskId },
+      onEvent: (e, meta) => void events.push({ kind: e.kind, replay: meta.replay }),
+      onAccepted: (a) => void accepts.push(a),
+      ledgerDir: okLedger(kimi.sessionKey),
+    });
+    expect(server.framesOf('prompt')).toEqual([]);
+    expect(server.framesOf('stop')).toEqual([]);
+    expect(server.framesOf('subscribe')[0]).toMatchObject({ sessionKey: kimi.sessionKey });
+    expect(report).toMatchObject({ sessionKey: kimi.sessionKey, taskId: kimi.taskId });
+    expect(report.terminal).toEqual(expect.objectContaining({ isError: false }));
+    expect(accepts).toEqual([expect.objectContaining({ sessionKey: kimi.sessionKey })]);
+    // 事件一个不多（重复的帧没重放出事件）：和一次不断线的完整跑一样
+    expect(events.map((e) => e.kind)).toEqual(['tool', 'tool', 'test', 'say']);
+    expect(judgeRun(mirasimRunSummary(report).facts)).toMatchObject({ outcome: 'ok' });
+  });
+
+  it('接回的会话已经收场（订阅回的第一份快照就是 done）：读到就收，不等总时长', async () => {
+    const server = new FakeMirasim({
+      stream: [
+        {
+          type: 'snapshot',
+          sessionKey: kimi.sessionKey,
+          seq: 9,
+          snapshot: { phase: 'done', taskId: kimi.taskId, text: '好了' },
+        },
+      ],
+    });
+    const report = await runMirasim(spec({ prompt: '' }), {
+      connect: server.connect,
+      attach: { sessionKey: kimi.sessionKey, taskId: kimi.taskId },
+    });
+    expect(report.terminal).toEqual({ isError: false, detail: 'done' });
+    expect(report.session.state.text).toBe('好了');
+  });
+
+  it('接回后再放手（发版连着发）：又只断开、不发 stop', async () => {
+    const release = new AbortController();
+    const server = new FakeMirasim({ stream: kimi.stream.slice(0, 3) });
+    setTimeout(() => release.abort(), 100);
+    const report = await runMirasim(spec({ prompt: '' }), {
+      connect: server.connect,
+      attach: { sessionKey: kimi.sessionKey, taskId: kimi.taskId },
+      release: release.signal,
+    });
+    expect(report.detached).toEqual({ sessionKey: kimi.sessionKey, taskId: kimi.taskId });
+    expect(server.framesOf('stop')).toEqual([]);
+  });
+
+  it('接回后被叫停（切号）：没有发起连接也能发出 stop', async () => {
+    const controller = new AbortController();
+    const server = new FakeMirasim({
+      stream: kimi.stream.slice(0, 3),
+      afterStop: [
+        { type: 'snapshot', sessionKey: kimi.sessionKey, seq: 100, snapshot: { phase: 'stopped' } },
+      ],
+    });
+    setTimeout(() => controller.abort(), 100);
+    const report = await runMirasim(spec({ prompt: '' }), {
+      connect: server.connect,
+      attach: { sessionKey: kimi.sessionKey, taskId: kimi.taskId },
+      signal: controller.signal,
+    });
+    expect(report.killed?.reason).toBe('aborted');
+    expect(server.framesOf('stop')).toHaveLength(1);
   });
 });
 
@@ -1311,6 +1463,30 @@ describe('Mirasim 账本', () => {
       detail: '账本目录里没有 index 文件',
     });
     expect((await readMirasimLedger(dir, 'pi:../../etc')).state).toBe('unknown');
+  });
+
+  it('grok 执行体不写流量账本（#2720）：缺目录单独写原因，不和「账本换了地方」混；有目录照常读', async () => {
+    const dir = tempDir();
+    const uuid = 'f8dd5195-5a21-4d17-b687-a90ee99bcc81';
+    expect(await readMirasimLedger(dir, `grok:${uuid}`)).toEqual({
+      state: 'unknown',
+      detail: ledgerlessDetail('grok'),
+    });
+    expect(ledgerlessDetail('grok')).toContain('不写流量账本');
+    expect(await readMirasimLedger(dir, `claude:${uuid}`)).toEqual({
+      state: 'unknown',
+      detail: '账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）',
+    });
+    // 哪天 Mirasim 让 grok 走中转、写了账本：照常读，不靠执行体名单判死
+    mkdirSync(join(dir, uuid));
+    writeFileSync(
+      join(dir, uuid, 'index-1.ndjson'),
+      `${JSON.stringify({ ts: Date.now(), status: 200, viaRelay: true, model: 'grok-4.7' })}\n`,
+    );
+    expect(await readMirasimLedger(dir, `grok:${uuid}`)).toMatchObject({
+      state: 'read',
+      rows: [{ status: 200, viaRelay: true, model: 'grok-4.7' }],
+    });
   });
 
   it('给了 fs 就经它读，不碰本机文件系统（账本在别的系统用户家里、调用方进不去时用，real/index.ts 的生产装配）；readdir 认 ENOENT 分「没有这个会话的目录」和别的读不了；readFile 抛的错按 code 报', async () => {

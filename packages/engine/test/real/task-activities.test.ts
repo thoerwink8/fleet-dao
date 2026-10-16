@@ -263,6 +263,8 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
       changedFiles: ['a.ts', 'b.ts'],
       leftover: [],
       conflicts: [],
+      // 相对钉住的主线新增几行（#2755 体量预算）：两个文件各一行
+      addedLines: 2,
     });
   });
 

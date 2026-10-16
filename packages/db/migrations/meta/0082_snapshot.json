@@ -1,5 +1,5 @@
 {
-  "id": "e8cf0498-f4db-4292-996f-33d4169a2a14",
+  "id": "b7991a1f-e62c-4d00-aef8-e0fadac1cedb",
   "prevId": "afd87097-e994-488e-a8c1-d4ab78ffa757",
   "version": "7",
   "dialect": "postgresql",
@@ -197,12 +197,8 @@
           "name": "alert_work_notification_id_notifications_id_fk",
           "tableFrom": "alert_work",
           "tableTo": "notifications",
-          "columnsFrom": [
-            "notification_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["notification_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -210,12 +206,8 @@
           "name": "alert_work_repo_id_repos_id_fk",
           "tableFrom": "alert_work",
           "tableTo": "repos",
-          "columnsFrom": [
-            "repo_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["repo_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -288,12 +280,8 @@
           "name": "bans_family_families_id_fk",
           "tableFrom": "bans",
           "tableTo": "families",
-          "columnsFrom": [
-            "family"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["family"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -301,12 +289,8 @@
           "name": "bans_model_id_models_id_fk",
           "tableFrom": "bans",
           "tableTo": "models",
-          "columnsFrom": [
-            "model_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["model_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -316,11 +300,7 @@
         "bans_target_stage_unique": {
           "name": "bans_target_stage_unique",
           "nullsNotDistinct": true,
-          "columns": [
-            "family",
-            "model_id",
-            "stage"
-          ]
+          "columns": ["family", "model_id", "stage"]
         }
       },
       "policies": {},
@@ -450,12 +430,8 @@
           "name": "models_family_families_id_fk",
           "tableFrom": "models",
           "tableTo": "families",
-          "columnsFrom": [
-            "family"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["family"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -530,12 +506,8 @@
           "name": "pools_channel_id_channels_id_fk",
           "tableFrom": "pools",
           "tableTo": "channels",
-          "columnsFrom": [
-            "channel_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -545,10 +517,7 @@
         "pools_channel_id_id_unique": {
           "name": "pools_channel_id_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "channel_id",
-            "id"
-          ]
+          "columns": ["channel_id", "id"]
         }
       },
       "policies": {},
@@ -682,12 +651,8 @@
           "name": "quota_windows_pool_id_pools_id_fk",
           "tableFrom": "quota_windows",
           "tableTo": "pools",
-          "columnsFrom": [
-            "pool_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["pool_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -695,10 +660,7 @@
       "compositePrimaryKeys": {
         "quota_windows_pool_id_label_pk": {
           "name": "quota_windows_pool_id_label_pk",
-          "columns": [
-            "pool_id",
-            "label"
-          ]
+          "columns": ["pool_id", "label"]
         }
       },
       "uniqueConstraints": {},
@@ -883,12 +845,8 @@
           "name": "routes_model_id_models_id_fk",
           "tableFrom": "routes",
           "tableTo": "models",
-          "columnsFrom": [
-            "model_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["model_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -896,14 +854,8 @@
           "name": "routes_pool_in_channel_fk",
           "tableFrom": "routes",
           "tableTo": "pools",
-          "columnsFrom": [
-            "channel_id",
-            "pool_id"
-          ],
-          "columnsTo": [
-            "channel_id",
-            "id"
-          ],
+          "columnsFrom": ["channel_id", "pool_id"],
+          "columnsTo": ["channel_id", "id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -913,20 +865,12 @@
         "routes_pool_model_host_unique": {
           "name": "routes_pool_model_host_unique",
           "nullsNotDistinct": true,
-          "columns": [
-            "pool_id",
-            "model_id",
-            "host_id",
-            "upstream_model"
-          ]
+          "columns": ["pool_id", "model_id", "host_id", "upstream_model"]
         },
         "routes_id_model_unique": {
           "name": "routes_id_model_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "id",
-            "model_id"
-          ]
+          "columns": ["id", "model_id"]
         }
       },
       "policies": {},
@@ -1019,12 +963,8 @@
           "name": "routing_catalog_model_id_models_id_fk",
           "tableFrom": "routing_catalog",
           "tableTo": "models",
-          "columnsFrom": [
-            "model_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["model_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -1032,14 +972,8 @@
           "name": "routing_catalog_route_of_model_fk",
           "tableFrom": "routing_catalog",
           "tableTo": "routes",
-          "columnsFrom": [
-            "route_id",
-            "model_id"
-          ],
-          "columnsTo": [
-            "id",
-            "model_id"
-          ],
+          "columnsFrom": ["route_id", "model_id"],
+          "columnsTo": ["id", "model_id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1047,20 +981,14 @@
       "compositePrimaryKeys": {
         "routing_catalog_model_id_route_id_pk": {
           "name": "routing_catalog_model_id_route_id_pk",
-          "columns": [
-            "model_id",
-            "route_id"
-          ]
+          "columns": ["model_id", "route_id"]
         }
       },
       "uniqueConstraints": {
         "routing_catalog_model_position_unique": {
           "name": "routing_catalog_model_position_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "model_id",
-            "position"
-          ]
+          "columns": ["model_id", "position"]
         }
       },
       "policies": {},
@@ -1112,12 +1040,8 @@
           "name": "routing_purpose_models_model_id_models_id_fk",
           "tableFrom": "routing_purpose_models",
           "tableTo": "models",
-          "columnsFrom": [
-            "model_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["model_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1125,20 +1049,14 @@
       "compositePrimaryKeys": {
         "routing_purpose_models_purpose_model_id_pk": {
           "name": "routing_purpose_models_purpose_model_id_pk",
-          "columns": [
-            "purpose",
-            "model_id"
-          ]
+          "columns": ["purpose", "model_id"]
         }
       },
       "uniqueConstraints": {
         "routing_purpose_models_purpose_position_unique": {
           "name": "routing_purpose_models_purpose_position_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "purpose",
-            "position"
-          ]
+          "columns": ["purpose", "position"]
         }
       },
       "policies": {},
@@ -1319,12 +1237,8 @@
           "name": "channel_attempts_run_id_runs_id_fk",
           "tableFrom": "channel_attempts",
           "tableTo": "runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -1332,12 +1246,8 @@
           "name": "channel_attempts_task_id_tasks_id_fk",
           "tableFrom": "channel_attempts",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -1345,12 +1255,8 @@
           "name": "channel_attempts_model_id_models_id_fk",
           "tableFrom": "channel_attempts",
           "tableTo": "models",
-          "columnsFrom": [
-            "model_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["model_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -1358,12 +1264,8 @@
           "name": "channel_attempts_route_id_routes_id_fk",
           "tableFrom": "channel_attempts",
           "tableTo": "routes",
-          "columnsFrom": [
-            "route_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["route_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -1371,12 +1273,8 @@
           "name": "channel_attempts_channel_id_channels_id_fk",
           "tableFrom": "channel_attempts",
           "tableTo": "channels",
-          "columnsFrom": [
-            "channel_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1470,12 +1368,8 @@
           "name": "channel_states_channel_id_channels_id_fk",
           "tableFrom": "channel_states",
           "tableTo": "channels",
-          "columnsFrom": [
-            "channel_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -1483,12 +1377,8 @@
           "name": "channel_states_failed_route_id_routes_id_fk",
           "tableFrom": "channel_states",
           "tableTo": "routes",
-          "columnsFrom": [
-            "failed_route_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["failed_route_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -1496,12 +1386,8 @@
           "name": "channel_states_fallback_channel_id_channels_id_fk",
           "tableFrom": "channel_states",
           "tableTo": "channels",
-          "columnsFrom": [
-            "fallback_channel_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["fallback_channel_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         },
@@ -1509,12 +1395,8 @@
           "name": "channel_states_fallback_model_id_models_id_fk",
           "tableFrom": "channel_states",
           "tableTo": "models",
-          "columnsFrom": [
-            "fallback_model_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["fallback_model_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -1579,12 +1461,8 @@
           "name": "channel_model_reads_channel_id_channels_id_fk",
           "tableFrom": "channel_model_reads",
           "tableTo": "channels",
-          "columnsFrom": [
-            "channel_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1642,12 +1520,8 @@
           "name": "channel_seen_models_channel_id_channels_id_fk",
           "tableFrom": "channel_seen_models",
           "tableTo": "channels",
-          "columnsFrom": [
-            "channel_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["channel_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -1655,10 +1529,7 @@
       "compositePrimaryKeys": {
         "channel_seen_models_pk": {
           "name": "channel_seen_models_pk",
-          "columns": [
-            "channel_id",
-            "model_key"
-          ]
+          "columns": ["channel_id", "model_key"]
         }
       },
       "uniqueConstraints": {},
@@ -1743,11 +1614,7 @@
       "compositePrimaryKeys": {
         "cli_tool_readings_pk": {
           "name": "cli_tool_readings_pk",
-          "columns": [
-            "scope",
-            "owner",
-            "tool"
-          ]
+          "columns": ["scope", "owner", "tool"]
         }
       },
       "uniqueConstraints": {},
@@ -1764,6 +1631,125 @@
         "cli_tool_readings_latest_one": {
           "name": "cli_tool_readings_latest_one",
           "value": "(\"cli_tool_readings\".\"latest_version\" is not null and \"cli_tool_readings\".\"latest_error\" is null) or (\"cli_tool_readings\".\"latest_version\" is null and coalesce(\"cli_tool_readings\".\"latest_error\", '') <> '')"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.github_tokens": {
+      "name": "github_tokens",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "github_id": {
+          "name": "github_id",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "login": {
+          "name": "login",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "role": {
+          "name": "role",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'agent'"
+        },
+        "access_token_cipher": {
+          "name": "access_token_cipher",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "scopes": {
+          "name": "scopes",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "''"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "github_tokens_github_id_idx": {
+          "name": "github_tokens_github_id_idx",
+          "columns": [
+            {
+              "expression": "github_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "github_tokens_user_id_users_id_fk": {
+          "name": "github_tokens_user_id_users_id_fk",
+          "tableFrom": "github_tokens",
+          "tableTo": "users",
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "github_tokens_user_role_unique": {
+          "name": "github_tokens_user_role_unique",
+          "nullsNotDistinct": false,
+          "columns": ["user_id", "role"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "github_tokens_role_known": {
+          "name": "github_tokens_role_known",
+          "value": "\"github_tokens\".\"role\" in ('agent', 'engine')"
+        },
+        "github_tokens_cipher_not_empty": {
+          "name": "github_tokens_cipher_not_empty",
+          "value": "length(\"github_tokens\".\"access_token_cipher\") > 0"
         }
       },
       "isRLSEnabled": false
@@ -2029,12 +2015,8 @@
           "name": "canary_runs_schedule_run_id_schedule_runs_id_fk",
           "tableFrom": "canary_runs",
           "tableTo": "schedule_runs",
-          "columnsFrom": [
-            "schedule_run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["schedule_run_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -2042,12 +2024,8 @@
           "name": "canary_runs_task_id_tasks_id_fk",
           "tableFrom": "canary_runs",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -2140,12 +2118,8 @@
           "name": "github_event_versions_delivery_id_github_events_delivery_id_fk",
           "tableFrom": "github_event_versions",
           "tableTo": "github_events",
-          "columnsFrom": [
-            "delivery_id"
-          ],
-          "columnsTo": [
-            "delivery_id"
-          ],
+          "columnsFrom": ["delivery_id"],
+          "columnsTo": ["delivery_id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2153,10 +2127,7 @@
       "compositePrimaryKeys": {
         "github_event_versions_delivery_id_object_pk": {
           "name": "github_event_versions_delivery_id_object_pk",
-          "columns": [
-            "delivery_id",
-            "object"
-          ]
+          "columns": ["delivery_id", "object"]
         }
       },
       "uniqueConstraints": {},
@@ -2543,12 +2514,8 @@
           "name": "jev_answers_question_id_jev_questions_id_fk",
           "tableFrom": "jev_answers",
           "tableTo": "jev_questions",
-          "columnsFrom": [
-            "question_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["question_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -2556,12 +2523,8 @@
           "name": "jev_answers_truth_by_users_id_fk",
           "tableFrom": "jev_answers",
           "tableTo": "users",
-          "columnsFrom": [
-            "truth_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["truth_by"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -2851,12 +2814,8 @@
           "name": "notification_deliveries_notification_id_notifications_id_fk",
           "tableFrom": "notification_deliveries",
           "tableTo": "notifications",
-          "columnsFrom": [
-            "notification_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["notification_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -2866,11 +2825,7 @@
         "notification_deliveries_target_unique": {
           "name": "notification_deliveries_target_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "notification_id",
-            "channel",
-            "target"
-          ]
+          "columns": ["notification_id", "channel", "target"]
         }
       },
       "policies": {},
@@ -3019,12 +2974,8 @@
           "name": "notifications_task_id_tasks_id_fk",
           "tableFrom": "notifications",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -3034,9 +2985,7 @@
         "notifications_dedupe_key_unique": {
           "name": "notifications_dedupe_key_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "dedupe_key"
-          ]
+          "columns": ["dedupe_key"]
         }
       },
       "policies": {},
@@ -3142,12 +3091,8 @@
           "name": "schedule_runs_job_scheduled_jobs_id_fk",
           "tableFrom": "schedule_runs",
           "tableTo": "scheduled_jobs",
-          "columnsFrom": [
-            "job"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["job"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -3693,23 +3638,17 @@
         "users_feishu_open_id_unique": {
           "name": "users_feishu_open_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "feishu_open_id"
-          ]
+          "columns": ["feishu_open_id"]
         },
         "users_feishu_union_id_unique": {
           "name": "users_feishu_union_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "feishu_union_id"
-          ]
+          "columns": ["feishu_union_id"]
         },
         "users_github_id_unique": {
           "name": "users_github_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "github_id"
-          ]
+          "columns": ["github_id"]
         }
       },
       "policies": {},
@@ -3895,12 +3834,8 @@
           "name": "request_chats_request_id_requests_id_fk",
           "tableFrom": "request_chats",
           "tableTo": "requests",
-          "columnsFrom": [
-            "request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -3908,12 +3843,8 @@
           "name": "request_chats_queued_by_users_id_fk",
           "tableFrom": "request_chats",
           "tableTo": "users",
-          "columnsFrom": [
-            "queued_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["queued_by"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -4016,12 +3947,8 @@
           "name": "request_issue_openings_request_id_requests_id_fk",
           "tableFrom": "request_issue_openings",
           "tableTo": "requests",
-          "columnsFrom": [
-            "request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4029,12 +3956,8 @@
           "name": "request_issue_openings_requested_by_users_id_fk",
           "tableFrom": "request_issue_openings",
           "tableTo": "users",
-          "columnsFrom": [
-            "requested_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["requested_by"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -4042,12 +3965,8 @@
           "name": "request_issue_openings_opened_by_users_id_fk",
           "tableFrom": "request_issue_openings",
           "tableTo": "users",
-          "columnsFrom": [
-            "opened_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["opened_by"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -4055,10 +3974,7 @@
       "compositePrimaryKeys": {
         "request_issue_openings_request_id_draft_version_pk": {
           "name": "request_issue_openings_request_id_draft_version_pk",
-          "columns": [
-            "request_id",
-            "draft_version"
-          ]
+          "columns": ["request_id", "draft_version"]
         }
       },
       "uniqueConstraints": {},
@@ -4246,12 +4162,8 @@
           "name": "request_messages_request_id_requests_id_fk",
           "tableFrom": "request_messages",
           "tableTo": "requests",
-          "columnsFrom": [
-            "request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4259,12 +4171,8 @@
           "name": "request_messages_author_id_users_id_fk",
           "tableFrom": "request_messages",
           "tableTo": "users",
-          "columnsFrom": [
-            "author_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["author_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -4272,12 +4180,8 @@
           "name": "request_messages_answered_by_users_id_fk",
           "tableFrom": "request_messages",
           "tableTo": "users",
-          "columnsFrom": [
-            "answered_by"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["answered_by"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -4360,12 +4264,8 @@
           "name": "request_user_state_request_id_requests_id_fk",
           "tableFrom": "request_user_state",
           "tableTo": "requests",
-          "columnsFrom": [
-            "request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["request_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4373,12 +4273,8 @@
           "name": "request_user_state_user_id_users_id_fk",
           "tableFrom": "request_user_state",
           "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["user_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -4386,10 +4282,7 @@
       "compositePrimaryKeys": {
         "request_user_state_request_id_user_id_pk": {
           "name": "request_user_state_request_id_user_id_pk",
-          "columns": [
-            "request_id",
-            "user_id"
-          ]
+          "columns": ["request_id", "user_id"]
         }
       },
       "uniqueConstraints": {},
@@ -4608,12 +4501,8 @@
           "name": "requests_repo_id_repos_id_fk",
           "tableFrom": "requests",
           "tableTo": "repos",
-          "columnsFrom": [
-            "repo_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["repo_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -4621,12 +4510,8 @@
           "name": "requests_initiator_id_users_id_fk",
           "tableFrom": "requests",
           "tableTo": "users",
-          "columnsFrom": [
-            "initiator_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["initiator_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -4634,12 +4519,8 @@
           "name": "requests_decider_id_users_id_fk",
           "tableFrom": "requests",
           "tableTo": "users",
-          "columnsFrom": [
-            "decider_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["decider_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -4647,12 +4528,8 @@
           "name": "requests_continues_request_id_requests_id_fk",
           "tableFrom": "requests",
           "tableTo": "requests",
-          "columnsFrom": [
-            "continues_request_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["continues_request_id"],
+          "columnsTo": ["id"],
           "onDelete": "set null",
           "onUpdate": "no action"
         }
@@ -4662,9 +4539,7 @@
         "requests_seq_unique": {
           "name": "requests_seq_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "seq"
-          ]
+          "columns": ["seq"]
         }
       },
       "policies": {},
@@ -4966,12 +4841,8 @@
           "name": "pool_reservations_task_id_tasks_id_fk",
           "tableFrom": "pool_reservations",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -4979,12 +4850,8 @@
           "name": "pool_reservations_route_id_routes_id_fk",
           "tableFrom": "pool_reservations",
           "tableTo": "routes",
-          "columnsFrom": [
-            "route_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["route_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -5063,12 +4930,8 @@
           "name": "run_transcript_run_id_runs_id_fk",
           "tableFrom": "run_transcript",
           "tableTo": "runs",
-          "columnsFrom": [
-            "run_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["run_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -5076,10 +4939,7 @@
       "compositePrimaryKeys": {
         "run_transcript_pk": {
           "name": "run_transcript_pk",
-          "columns": [
-            "run_id",
-            "seq"
-          ]
+          "columns": ["run_id", "seq"]
         }
       },
       "uniqueConstraints": {},
@@ -5385,12 +5245,8 @@
           "name": "runs_task_id_tasks_id_fk",
           "tableFrom": "runs",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -5398,12 +5254,8 @@
           "name": "runs_route_id_routes_id_fk",
           "tableFrom": "runs",
           "tableTo": "routes",
-          "columnsFrom": [
-            "route_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["route_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -5411,12 +5263,8 @@
           "name": "runs_retry_of_self_fk",
           "tableFrom": "runs",
           "tableTo": "runs",
-          "columnsFrom": [
-            "retry_of"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["retry_of"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -5426,10 +5274,7 @@
         "runs_task_id_id_unique": {
           "name": "runs_task_id_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "task_id",
-            "id"
-          ]
+          "columns": ["task_id", "id"]
         }
       },
       "policies": {},
@@ -5538,12 +5383,8 @@
           "name": "task_route_pins_task_id_tasks_id_fk",
           "tableFrom": "task_route_pins",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -5551,12 +5392,8 @@
           "name": "task_route_pins_model_id_models_id_fk",
           "tableFrom": "task_route_pins",
           "tableTo": "models",
-          "columnsFrom": [
-            "model_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["model_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -5564,14 +5401,8 @@
           "name": "task_route_pins_route_of_model_fk",
           "tableFrom": "task_route_pins",
           "tableTo": "routes",
-          "columnsFrom": [
-            "route_id",
-            "model_id"
-          ],
-          "columnsTo": [
-            "id",
-            "model_id"
-          ],
+          "columnsFrom": ["route_id", "model_id"],
+          "columnsTo": ["id", "model_id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -5579,10 +5410,7 @@
       "compositePrimaryKeys": {
         "task_route_pins_pk": {
           "name": "task_route_pins_pk",
-          "columns": [
-            "task_id",
-            "segment"
-          ]
+          "columns": ["task_id", "segment"]
         }
       },
       "uniqueConstraints": {},
@@ -5733,12 +5561,8 @@
           "name": "approvals_task_id_tasks_id_fk",
           "tableFrom": "approvals",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -5746,14 +5570,8 @@
           "name": "approvals_subtask_in_task_fk",
           "tableFrom": "approvals",
           "tableTo": "subtasks",
-          "columnsFrom": [
-            "task_id",
-            "subtask_id"
-          ],
-          "columnsTo": [
-            "task_id",
-            "id"
-          ],
+          "columnsFrom": ["task_id", "subtask_id"],
+          "columnsTo": ["task_id", "id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -5918,12 +5736,8 @@
           "name": "asks_task_id_tasks_id_fk",
           "tableFrom": "asks",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         },
@@ -5931,14 +5745,8 @@
           "name": "asks_run_in_task_fk",
           "tableFrom": "asks",
           "tableTo": "runs",
-          "columnsFrom": [
-            "task_id",
-            "run_id"
-          ],
-          "columnsTo": [
-            "task_id",
-            "id"
-          ],
+          "columnsFrom": ["task_id", "run_id"],
+          "columnsTo": ["task_id", "id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -6110,12 +5918,8 @@
           "name": "pull_requests_repo_id_repos_id_fk",
           "tableFrom": "pull_requests",
           "tableTo": "repos",
-          "columnsFrom": [
-            "repo_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["repo_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -6123,10 +5927,7 @@
       "compositePrimaryKeys": {
         "pull_requests_repo_id_number_pk": {
           "name": "pull_requests_repo_id_number_pk",
-          "columns": [
-            "repo_id",
-            "number"
-          ]
+          "columns": ["repo_id", "number"]
         }
       },
       "uniqueConstraints": {},
@@ -6213,17 +6014,12 @@
         "repos_owner_name_unique": {
           "name": "repos_owner_name_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "owner",
-            "name"
-          ]
+          "columns": ["owner", "name"]
         },
         "repos_github_id_unique": {
           "name": "repos_github_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "github_id"
-          ]
+          "columns": ["github_id"]
         }
       },
       "policies": {},
@@ -6277,12 +6073,8 @@
           "name": "specs_task_id_tasks_id_fk",
           "tableFrom": "specs",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -6402,12 +6194,8 @@
           "name": "state_changes_task_id_tasks_id_fk",
           "tableFrom": "state_changes",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -6447,14 +6235,8 @@
           "name": "subtask_deps_subtask_fk",
           "tableFrom": "subtask_deps",
           "tableTo": "subtasks",
-          "columnsFrom": [
-            "task_id",
-            "subtask_id"
-          ],
-          "columnsTo": [
-            "task_id",
-            "id"
-          ],
+          "columnsFrom": ["task_id", "subtask_id"],
+          "columnsTo": ["task_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
@@ -6462,14 +6244,8 @@
           "name": "subtask_deps_depends_on_fk",
           "tableFrom": "subtask_deps",
           "tableTo": "subtasks",
-          "columnsFrom": [
-            "task_id",
-            "depends_on_id"
-          ],
-          "columnsTo": [
-            "task_id",
-            "id"
-          ],
+          "columnsFrom": ["task_id", "depends_on_id"],
+          "columnsTo": ["task_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
@@ -6477,10 +6253,7 @@
       "compositePrimaryKeys": {
         "subtask_deps_subtask_id_depends_on_id_pk": {
           "name": "subtask_deps_subtask_id_depends_on_id_pk",
-          "columns": [
-            "subtask_id",
-            "depends_on_id"
-          ]
+          "columns": ["subtask_id", "depends_on_id"]
         }
       },
       "uniqueConstraints": {},
@@ -6604,12 +6377,8 @@
           "name": "subtasks_task_id_tasks_id_fk",
           "tableFrom": "subtasks",
           "tableTo": "tasks",
-          "columnsFrom": [
-            "task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -6619,14 +6388,145 @@
         "subtasks_task_id_id_unique": {
           "name": "subtasks_task_id_id_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "task_id",
-            "id"
-          ]
+          "columns": ["task_id", "id"]
         }
       },
       "policies": {},
       "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.task_rounds": {
+      "name": "task_rounds",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "bigint",
+          "primaryKey": true,
+          "notNull": true,
+          "identity": {
+            "type": "always",
+            "name": "task_rounds_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "9223372036854775807",
+            "cache": "1",
+            "cycle": false
+          }
+        },
+        "task_id": {
+          "name": "task_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workflow_id": {
+          "name": "workflow_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "seq": {
+          "name": "seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "round": {
+          "name": "round",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "outcome": {
+          "name": "outcome",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "tier": {
+          "name": "tier",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "first_model": {
+          "name": "first_model",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "added_lines": {
+          "name": "added_lines",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "ended_at": {
+          "name": "ended_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "task_rounds_ended_at_idx": {
+          "name": "task_rounds_ended_at_idx",
+          "columns": [
+            {
+              "expression": "ended_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "task_rounds_task_id_tasks_id_fk": {
+          "name": "task_rounds_task_id_tasks_id_fk",
+          "tableFrom": "task_rounds",
+          "tableTo": "tasks",
+          "columnsFrom": ["task_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "task_rounds_workflow_seq_unique": {
+          "name": "task_rounds_workflow_seq_unique",
+          "nullsNotDistinct": false,
+          "columns": ["workflow_id", "seq"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {
+        "task_rounds_outcome_known": {
+          "name": "task_rounds_outcome_known",
+          "value": "\"task_rounds\".\"outcome\" in ('merged', 'verify_rejected', 'ci_red', 'leftover', 'no_commit', 'push_conflict', 'merge_conflict', 'timeout', 'stopped', 'other')"
+        },
+        "task_rounds_seq_positive": {
+          "name": "task_rounds_seq_positive",
+          "value": "\"task_rounds\".\"seq\" > 0"
+        },
+        "task_rounds_round_nonneg": {
+          "name": "task_rounds_round_nonneg",
+          "value": "\"task_rounds\".\"round\" >= 0"
+        },
+        "task_rounds_added_lines_nonneg": {
+          "name": "task_rounds_added_lines_nonneg",
+          "value": "\"task_rounds\".\"added_lines\" is null or \"task_rounds\".\"added_lines\" >= 0"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.tasks": {
@@ -6778,12 +6678,8 @@
           "name": "tasks_repo_id_repos_id_fk",
           "tableFrom": "tasks",
           "tableTo": "repos",
-          "columnsFrom": [
-            "repo_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
+          "columnsFrom": ["repo_id"],
+          "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
         }
@@ -6793,10 +6689,7 @@
         "tasks_repo_issue_unique": {
           "name": "tasks_repo_issue_unique",
           "nullsNotDistinct": false,
-          "columns": [
-            "repo_id",
-            "issue_number"
-          ]
+          "columns": ["repo_id", "issue_number"]
         }
       },
       "policies": {},
@@ -6817,159 +6710,82 @@
     "public.actor_kind": {
       "name": "actor_kind",
       "schema": "public",
-      "values": [
-        "user",
-        "ai",
-        "engine",
-        "agent",
-        "ops"
-      ]
+      "values": ["user", "ai", "engine", "agent", "ops"]
     },
     "public.audit_via": {
       "name": "audit_via",
       "schema": "public",
-      "values": [
-        "cockpit",
-        "feishu",
-        "github",
-        "engine",
-        "agent",
-        "ops"
-      ]
+      "values": ["cockpit", "feishu", "github", "engine", "agent", "ops"]
     },
     "public.billing_kind": {
       "name": "billing_kind",
       "schema": "public",
-      "values": [
-        "subscription",
-        "metered"
-      ]
+      "values": ["subscription", "metered"]
     },
     "public.host_id": {
       "name": "host_id",
       "schema": "public",
-      "values": [
-        "claude-code",
-        "codex",
-        "cursor-agent",
-        "grok",
-        "mirasim",
-        "api-shell"
-      ]
+      "values": ["claude-code", "codex", "cursor-agent", "grok", "mirasim", "api-shell"]
     },
     "public.jev_mode": {
       "name": "jev_mode",
       "schema": "public",
-      "values": [
-        "shadow",
-        "enforce",
-        "off"
-      ]
+      "values": ["shadow", "enforce", "off"]
     },
     "public.jev_question_type": {
       "name": "jev_question_type",
       "schema": "public",
-      "values": [
-        "noul",
-        "choice"
-      ]
+      "values": ["noul", "choice"]
     },
     "public.jev_truth_source": {
       "name": "jev_truth_source",
       "schema": "public",
-      "values": [
-        "human",
-        "outcome",
-        "canary"
-      ]
+      "values": ["human", "outcome", "canary"]
     },
     "public.notification_level": {
       "name": "notification_level",
       "schema": "public",
-      "values": [
-        "decision",
-        "alert",
-        "daily"
-      ]
+      "values": ["decision", "alert", "daily"]
     },
     "public.pr_checks": {
       "name": "pr_checks",
       "schema": "public",
-      "values": [
-        "success",
-        "failure",
-        "pending",
-        "none"
-      ]
+      "values": ["success", "failure", "pending", "none"]
     },
     "public.pr_state": {
       "name": "pr_state",
       "schema": "public",
-      "values": [
-        "open",
-        "closed",
-        "merged"
-      ]
+      "values": ["open", "closed", "merged"]
     },
     "public.quota_status": {
       "name": "quota_status",
       "schema": "public",
-      "values": [
-        "allowed",
-        "warning",
-        "limit_reached"
-      ]
+      "values": ["allowed", "warning", "limit_reached"]
     },
     "public.quota_unit": {
       "name": "quota_unit",
       "schema": "public",
-      "values": [
-        "percent",
-        "usd",
-        "tokens",
-        "points"
-      ]
+      "values": ["percent", "usd", "tokens", "points"]
     },
     "public.quota_window_kind": {
       "name": "quota_window_kind",
       "schema": "public",
-      "values": [
-        "5h",
-        "7d",
-        "7d_model",
-        "month_usd",
-        "points",
-        "period_usd",
-        "other"
-      ]
+      "values": ["5h", "7d", "7d_model", "month_usd", "points", "period_usd", "other"]
     },
     "public.reading_kind": {
       "name": "reading_kind",
       "schema": "public",
-      "values": [
-        "measured",
-        "estimated"
-      ]
+      "values": ["measured", "estimated"]
     },
     "public.route_probe_state": {
       "name": "route_probe_state",
       "schema": "public",
-      "values": [
-        "ok",
-        "failed",
-        "not_wired",
-        "skipped"
-      ]
+      "values": ["ok", "failed", "not_wired", "skipped"]
     },
     "public.schedule_outcome": {
       "name": "schedule_outcome",
       "schema": "public",
-      "values": [
-        "ok",
-        "partial",
-        "unscanned",
-        "failed"
-      ]
+      "values": ["ok", "partial", "unscanned", "failed"]
     },
     "public.stage_kind": {
       "name": "stage_kind",
@@ -6991,10 +6807,7 @@
     "public.state_entity": {
       "name": "state_entity",
       "schema": "public",
-      "values": [
-        "task",
-        "subtask"
-      ]
+      "values": ["task", "subtask"]
     },
     "public.subtask_state": {
       "name": "subtask_state",
@@ -7031,11 +6844,7 @@
     "public.user_role": {
       "name": "user_role",
       "schema": "public",
-      "values": [
-        "founder",
-        "collaborator",
-        "bot"
-      ]
+      "values": ["founder", "collaborator", "bot"]
     }
   },
   "schemas": {},

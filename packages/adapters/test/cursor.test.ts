@@ -74,6 +74,7 @@ describe('cursor 过程记录', () => {
   it('改文件并提交：会话号、说的话、命令、终帧用量', () => {
     const { summary, inits, of } = readAll('cursor-edit-commit', ['git commit']);
     expect(inits[0]).toEqual({ sessionId: SESSION, model: 'Auto' });
+    expect(summary.sessionId).toBe(SESSION);
     expect(of<SayPayload>('say').map((s) => s.text)).toEqual(['先追加那一行，再按你给的信息提交。', '好了']);
     const tools = of<ToolPayload>('tool');
     expect(tools.map((t) => [t.phase, t.name, t.action, t.ok])).toEqual([

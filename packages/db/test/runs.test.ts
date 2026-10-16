@@ -17,7 +17,9 @@ import {
   closeOpenRuns,
   getRun,
   latestRunOfTask,
+  observeRunSessionId,
   type RunInsert,
+  runSessionIdStats,
   runsOfTask,
   startRun,
   taskTokenSpend,
@@ -49,6 +51,46 @@ describe('runs 表本身的约束', () => {
       ...over,
     });
   }
+
+  it('流里先拿到会话号时提前写回；收场后不接受迟到的号', async () => {
+    const id = randomUUID();
+    await startRun(t.db, {
+      id,
+      segment: 'manual',
+      model: 'opus-4.9',
+      routeId: 'kimi-r',
+      startedAt: ago(MIN),
+    });
+    expect(await observeRunSessionId(t.db, { runId: id, sessionId: 'claude:real-1' })).toBe(true);
+    expect((await getRun(t.db, id))?.sessionId).toBe('claude:real-1');
+    await t.db.update(runs).set({ endedAt: NOW, outcome: 'done', routeOutcome: 'ok' }).where(eq(runs.id, id));
+    expect(await observeRunSessionId(t.db, { runId: id, sessionId: 'claude:late' })).toBe(false);
+    expect((await getRun(t.db, id))?.sessionId).toBe('claude:real-1');
+  });
+
+  it('会话号缺失按执行方式分开计数，没路由的归 unknown', async () => {
+    await addRoute(t.db, { id: 'cursor-r', poolId: 'relay-b', modelId: 'opus-4.9', hostId: 'cursor-agent' });
+    await addRoute(t.db, { id: 'grok-r', poolId: 'relay-b', modelId: 'opus-4.9', hostId: 'grok' });
+    await addRoute(t.db, { id: 'claude-r', poolId: 'relay-b', modelId: 'opus-4.9', hostId: 'claude-code' });
+    const rows = [
+      { id: randomUUID(), routeId: 'cursor-r', sessionId: null },
+      { id: randomUUID(), routeId: 'cursor-r', sessionId: 'cursor:1' },
+      { id: randomUUID(), routeId: 'grok-r', sessionId: null },
+      { id: randomUUID(), routeId: 'claude-r', sessionId: null },
+      { id: randomUUID(), routeId: 'kimi-r', sessionId: 'mirasim:1' },
+      { id: randomUUID(), routeId: undefined, sessionId: null },
+    ];
+    for (const row of rows) {
+      await insertRun({ ...row, endedAt: NOW, outcome: 'done' });
+    }
+    expect(await runSessionIdStats(t.db, { endedAfter: ago(HOUR) })).toEqual([
+      { hostId: 'claude-code', endedRuns: 1, missingSessionIds: 1 },
+      { hostId: 'cursor-agent', endedRuns: 2, missingSessionIds: 1 },
+      { hostId: 'grok', endedRuns: 1, missingSessionIds: 1 },
+      { hostId: 'mirasim', endedRuns: 1, missingSessionIds: 0 },
+      { hostId: 'unknown', endedRuns: 1, missingSessionIds: 1 },
+    ]);
+  });
 
   it('正常一行：读不到的字段（token、costUsd、memoryPeakMb、pr、branch）= NULL，不是 0', async () => {
     const id = randomUUID();
@@ -544,12 +586,21 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       runs: 3,
       unmetered: 1,
       estimated: 519,
+      // 原始四样分开给（#2830：折算在活动里做，库只交原始的）
+      inputTokens: 11,
+      outputTokens: 22,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 5,
     });
     expect(await taskTokenSpend(t.db, randomUUID())).toEqual({
       tokens: 0,
       runs: 0,
       unmetered: 0,
       estimated: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
     });
   });
 
@@ -574,6 +625,10 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       runs: 0,
       unmetered: 0,
       estimated: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
     });
     expect((await taskTokenSpend(t.db, task.id)).tokens).toBe(83_500_000);
     await row({
@@ -585,6 +640,10 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       runs: 1,
       unmetered: 0,
       estimated: 0,
+      inputTokens: 38_000_000,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
     });
   });
 
@@ -599,6 +658,10 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       runs: 1,
       unmetered: 1,
       estimated: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
     });
   });
 });

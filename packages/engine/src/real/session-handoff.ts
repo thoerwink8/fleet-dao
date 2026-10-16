@@ -13,8 +13,16 @@
 // - 新引擎起来：收孤儿时（orphan-reap.ts）带 detached 标记、还没过 HANDOFF_TTL_MS 的不收（scope、临时目录、runs 那一行都留着）；
 //   工作流隔一小会儿带上 attach 再调 runSegment，Spawner 清掉标记、从头重读输出接回，等它收场，结局记到原来那一行。
 //   过了 HANDOFF_TTL_MS 还没人接的（单子在引擎不在时被放弃了之类）照孤儿收掉。
-// - Mirasim 的会话在 Mirasim 服务里跑、引擎经 ws 读，不走这条（照旧管道、照旧发版暂停）；验收、整理这些短会话也不走。
+// - Mirasim 的动手段（#2815）也走这条，但没有进程、没有输出文件：会话在 Mirasim 服务里跑，不靠引擎的 ws 连接活着，引擎只是
+//   经 ws 读。所以收发目录里存的是「交接单」mirasim.json（会话号、这一轮的轮次号、run 号），服务端一接下（accepted）就写；
+//   引擎停机放手 = 只断开 ws、不发 stop（适配器的 release），照样写放手标记；新引擎带 attach 来，按交接单的会话号重新订阅，
+//   订阅回的整份快照重建状态、重复的帧按序号丢掉，一直读到收场。过了 HANDOFF_TTL_MS 没人接回的，照孤儿收，这时才给服务端发 stop
+//   （orphan-reap.ts 的 stopMirasim）。切号、人叫停、总时长、卡住被杀走的是叫停（signal），照旧发 stop，不放手。
+// - 冷验收（#2848）一家验的会话也走这条（real/task-verify.ts）：coldVerify 交回 detached，工作流带 attach 再调同一次验收，
+//   接回的结论照常贴、照常认；交接单、放手标记、收孤儿都和动手段同一套。两家都验的两个会话并行跑、不脱开，发版叫停了
+//   不算没过、重验一次。整理、指挥官会话不走这条。
 
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { StopReason } from '@fleet-dao/adapters';
@@ -25,8 +33,64 @@ export const DEFAULT_SESSION_IO_ROOT = '/var/lib/fleet-sessions/io';
 export const DETACHED_MARK = 'detached';
 /** 放手以后最多等多久有人接回；过了还带着标记的照孤儿收（scope、目录、runs 那一行）。 */
 export const HANDOFF_TTL_MS = 30 * 60_000;
-/** 命令行那几家：会话是我们起的进程，能走文件、能接回。Mirasim 不在里面。 */
-export const DETACHABLE_HOSTS: ReadonlySet<string> = new Set(['claude-code', 'cursor-agent', 'grok']);
+/** 交接单的文件名（Mirasim，#2815）：和放手标记同在收发目录里。 */
+export const MIRASIM_HANDLE_FILE = 'mirasim.json';
+/**
+ * 能脱开引擎跑、引擎重启后接回的执行方式：命令行那几家（我们起的进程，走收发目录文件）和 Mirasim（会话在服务端，
+ * 收发目录里只放交接单）。
+ */
+export const DETACHABLE_HOSTS: ReadonlySet<string> = new Set([
+  'claude-code',
+  'cursor-agent',
+  'grok',
+  'mirasim',
+]);
+
+/** Mirasim 会话的交接单：新引擎凭它重新订阅（会话号、轮次号），orphan 收时凭它给服务端发 stop。 */
+export interface MirasimHandle {
+  /** runs 编号（run 号）。 */
+  runId: string;
+  /** 服务端的会话号（sessionKey）。 */
+  sessionKey: string;
+  /** 这一轮的轮次号（accepted 帧的 taskId）：接回后按它认哪一份快照是这一轮的；服务端没给就没有。 */
+  taskId?: string;
+  acceptedAt: string;
+  /** 放手时过程记录写到了第几条（下一条的序号）：接回的记录员从这里接着编。没记就没有。 */
+  transcriptNext?: number;
+}
+
+/** 写交接单（同步：服务端一接下就落盘，放手来得再快也不会差这一步）。目录还没建先建上。 */
+export function writeMirasimHandle(dir: string, handle: MirasimHandle): void {
+  mkdirSync(dir, { recursive: true, mode: 0o711 });
+  writeFileSync(join(dir, MIRASIM_HANDLE_FILE), `${JSON.stringify(handle)}\n`, { mode: 0o600 });
+}
+
+/** 读交接单：没有文件是 undefined（不是 Mirasim 的会话，或还没被服务端接下）；有文件但认不出就抛，不当成没有。 */
+export async function readMirasimHandle(dir: string): Promise<MirasimHandle | undefined> {
+  let text: string;
+  try {
+    text = await readFile(join(dir, MIRASIM_HANDLE_FILE), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
+    throw error;
+  }
+  const raw: unknown = JSON.parse(text);
+  const o = typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>) : {};
+  if (typeof o.runId !== 'string' || typeof o.sessionKey !== 'string' || typeof o.acceptedAt !== 'string') {
+    throw new Error(
+      `Mirasim 交接单认不出（缺 runId、sessionKey 或 acceptedAt）：${join(dir, MIRASIM_HANDLE_FILE)}`,
+    );
+  }
+  return {
+    runId: o.runId,
+    sessionKey: o.sessionKey,
+    acceptedAt: o.acceptedAt,
+    ...(typeof o.taskId === 'string' && o.taskId ? { taskId: o.taskId } : {}),
+    ...(typeof o.transcriptNext === 'number' && Number.isInteger(o.transcriptNext) && o.transcriptNext >= 0
+      ? { transcriptNext: o.transcriptNext }
+      : {}),
+  };
+}
 
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 
@@ -87,6 +151,8 @@ export interface IoEntry {
   dir: string;
   /** 放手的时刻（标记里写的）；没有标记是 undefined。 */
   detachedAt?: Date;
+  /** Mirasim 会话的交接单（#2815）；不是 Mirasim 的、或还没写、读不出，都是 undefined。 */
+  mirasim?: MirasimHandle;
 }
 
 /** 列收发目录：根不在当成一格都没有；读不了照抛（调用方报，不当成没有）。 */
@@ -106,10 +172,13 @@ export async function listIo(root: string): Promise<IoEntry[]> {
     if (!info?.isDirectory()) continue;
     const text = await readFile(join(dir, DETACHED_MARK), 'utf8').catch(() => undefined);
     const at = text === undefined ? undefined : new Date(text.trim());
+    // 交接单读不出（写坏了）当没有：收孤儿时没有它发不了 stop，只能收本机的东西
+    const mirasim = await readMirasimHandle(dir).catch(() => undefined);
     // 标记写坏了（读得出、认不出）按「刚放手」算：宁可多留到 TTL，也不把可能还要接回的会话收掉
     out.push({
       runId,
       dir,
+      ...(mirasim ? { mirasim } : {}),
       ...(text === undefined
         ? {}
         : { detachedAt: at && !Number.isNaN(at.getTime()) ? at : new Date(info.mtimeMs) }),

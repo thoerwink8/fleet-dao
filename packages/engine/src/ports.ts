@@ -231,6 +231,33 @@ export interface UpdatePrBodyInput extends Scope {
   body: PrBody;
 }
 
+/** 一轮动手怎么结束的（#2762）：和 @fleet-dao/db 的 ROUND_OUTCOMES 同一份名单（store-ports 写库时类型核对）。 */
+export type RoundOutcome =
+  | 'merged'
+  | 'verify_rejected'
+  | 'ci_red'
+  | 'leftover'
+  | 'no_commit'
+  | 'push_conflict'
+  | 'merge_conflict'
+  | 'timeout'
+  | 'stopped'
+  | 'other';
+
+/** 记一轮收场（#2762，每日简报「流程健康」按它算）。同一条工作流同一个 seq 只记一行。 */
+export interface RecordRoundInput extends Scope {
+  workflowId: string;
+  /** 这条工作流里第几次收场（从 1 起）。 */
+  seq: number;
+  round: number;
+  outcome: RoundOutcome;
+  tier?: string;
+  firstModel?: string;
+  addedLines?: number;
+  /** 这张单走的流程（#2826，task_rounds.flow_mode）。定模式之前开工的老历史没有。 */
+  flowMode?: 'three' | 'full';
+}
+
 export interface PullRequestRef {
   prNumber: number;
   url?: string;
@@ -366,14 +393,18 @@ export interface EnginePorts {
   removeWorktree(input: RemoveWorktreeInput, ctx: PortContext): Promise<RemoveWorktreeResult>;
   /**
    * changedFiles：推上去的头相对主线的净改动（推之前刚并了最新主线，git diff 主线...头）。老版端口推的没有（重放在途任务
-   * 的历史里就是这样），工作流照旧按会话交的累计算。
+   * 的历史里就是这样），工作流照旧按会话交的累计算。addedLines：同一个口径的新增行数（#2762，流程健康记账用；没数成不带）。
    */
-  pushBranch(input: PushBranchInput, ctx: PortContext): Promise<{ head: string; changedFiles?: string[] }>;
+  pushBranch(
+    input: PushBranchInput,
+    ctx: PortContext,
+  ): Promise<{ head: string; changedFiles?: string[]; addedLines?: number }>;
   openPr(input: OpenPrInput, ctx: PortContext): Promise<PullRequestRef>;
   updatePrBody(input: UpdatePrBodyInput, ctx: PortContext): Promise<void>;
   waitCi(input: WaitCiInput, ctx: PortContext): Promise<CiResult>;
   syncMainline(input: SyncMainlineInput, ctx: PortContext): Promise<SyncResult>;
   saveTaskState(input: TaskStateSnapshot, ctx: PortContext): Promise<void>;
+  recordRound(input: RecordRoundInput, ctx: PortContext): Promise<void>;
   closeIssue(input: CloseIssueInput, ctx: PortContext): Promise<void>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;
   recordTiming(input: TimingEntry, ctx: PortContext): Promise<void>;

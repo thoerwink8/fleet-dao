@@ -403,6 +403,29 @@ export async function readTreeFile(t: UserTree, rel: string): Promise<Buffer | n
   return r.stdout;
 }
 
+/**
+ * 以会话用户读他家目录里的一个文件（rel 相对家目录）；不在回 null，读不了抛 PortError。
+ * 家目录按系统账号库（getent）查，不信环境里的 HOME（引擎起的一次性会话进程不一定带它）；home 只给测试用。
+ */
+export async function readHomeFile(t: UserTree, rel: string, home?: string): Promise<Buffer | null> {
+  const r = await run(t, [
+    t.sh ?? SH,
+    '-c',
+    'h=$2; if [ -z "$h" ]; then h=$(getent passwd "$(id -un)" | cut -d: -f6); fi; if [ -z "$h" ]; then exit 4; fi; f="$h/$1"; if [ -e "$f" ]; then exec cat -- "$f"; else exit 3; fi',
+    'sh',
+    rel,
+    home ?? '',
+  ]);
+  if (r.code === 3) return null;
+  if (r.code !== 0) {
+    throw new PortError('GIT_FAILED', describeFailure(`读家目录里的 ${rel}`, r), {
+      retryable: !r.aborted,
+      details: { user: t.user },
+    });
+  }
+  return r.stdout;
+}
+
 /** 以会话用户把字节写进树里的一个文件（相对路径，上级目录不在就建）。写不成抛 PortError。 */
 export async function writeTreeFile(t: UserTree, rel: string, bytes: Buffer): Promise<void> {
   const r = await run(t, [t.sh ?? SH, '-c', 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', 'sh', rel], {
@@ -507,6 +530,28 @@ export async function changedFilesAgainst(t: UserTree, mainline: string, head: s
   assertSha(mainline, '主线');
   assertSha(head, '头');
   return lines(await git(t, ['diff', '--name-only', `${mainline}...${head}`], '列分支相对主线改了哪些文件'));
+}
+
+/**
+ * 分支相对主线新增了多少行（git diff --numstat 主线...头 第一列相加，和 PR 在 GitHub 上的 additions 同口径；二进制文件记 0）。
+ * 每日简报「流程健康」的重活 PR 新增行 p90 按它算（#2762）。输出认不出照抛，不拿 0 顶。
+ */
+export async function addedLinesAgainst(t: UserTree, mainline: string, head: string): Promise<number> {
+  assertSha(mainline, '主线');
+  assertSha(head, '头');
+  const out = lines(await git(t, ['diff', '--numstat', `${mainline}...${head}`], '数分支相对主线新增的行'));
+  let total = 0;
+  for (const line of out) {
+    const added = line.split('\t')[0] ?? '';
+    if (added === '-') continue;
+    if (!/^\d+$/.test(added)) {
+      throw new PortError('GIT_FAILED', `数新增行：numstat 有一行认不出（${line.slice(0, 80)}）`, {
+        retryable: false,
+      });
+    }
+    total += Number(added);
+  }
+  return total;
 }
 
 /** head 在不在 base 之后（base 是 head 的祖先）。 */

@@ -14,7 +14,7 @@ import {
 } from '../src/queries/feishu-push.ts';
 import { notificationDeliveries, notifications } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { ago, HOUR, MIN, NOW } from './helpers.ts';
+import { ago, askFields, HOUR, MIN, NOW } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -31,7 +31,15 @@ async function note(
 ): Promise<string> {
   const [row] = await t.db
     .insert(notifications)
-    .values({ dedupeKey, level, title: `标题 ${dedupeKey}`, body: '正文', createdAt, ...extra })
+    .values({
+      dedupeKey,
+      level,
+      title: `标题 ${dedupeKey}`,
+      body: '正文',
+      createdAt,
+      ...askFields(level),
+      ...extra,
+    })
     .returning({ id: notifications.id });
   if (!row) throw new Error('没插进去');
   return row.id;

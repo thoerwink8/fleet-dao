@@ -51,6 +51,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     const dir = tempDir();
     const files = { stdinTo: join(dir, 'stdin'), argvTo: join(dir, 'argv'), envTo: join(dir, 'env') };
     const events: ProgressEvent[] = [];
+    const sessionIds: string[] = [];
     const s = spec('cc-haiku-edit');
     const report = await runClaudeCode(s, {
       command: fakeAgent({
@@ -59,6 +60,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
         replay: fixturePath('claude-code', 'cc-haiku-edit'),
       }),
       onEvent: (e) => events.push(e),
+      onSessionId: (id) => sessionIds.push(id),
     });
 
     expect(readText(files.stdinTo)).toBe(s.prompt);
@@ -90,6 +92,7 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     expect(report.stderrTail).toContain('Syncing config…');
     expect(report.stream.result?.isError).toBe(false);
     expect(report.lines).toBe(fixtureLines('claude-code', 'cc-haiku-edit').length);
+    expect(sessionIds).toEqual([s.session.id]);
     expect(judgeClaudeRun(report)).toEqual({ outcome: 'ok', reason: 'answered', detail: '正常结束' });
   });
 

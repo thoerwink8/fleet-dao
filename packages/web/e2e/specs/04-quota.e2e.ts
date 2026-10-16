@@ -28,20 +28,24 @@ test.describe('额度页', () => {
     expect(Number.isFinite(left)).toBe(true);
     await expect(page.getByText(new RegExp(`约 ${left} 分钟后用满`))).toBeVisible();
 
+    // 池 × 窗口的矩阵（下面的「作废预估」也是每池一行，按池名找行要限在矩阵里）
+    const matrix = page.locator('[data-quota-matrix]');
     // 拼车额度：美元窗口 $38.00 / $100，用了 38%
-    const carpool = page.getByRole('row', { name: /claude-carpool/ });
+    const carpool = matrix.getByRole('row', { name: /claude-carpool/ });
     await expect(carpool).toContainText('$38.00');
     await expect(carpool).toContainText('$100');
     await expect(carpool).toContainText('38%');
 
     // 独享额度：5 小时窗 55%、周窗 31%
-    const solo = page.getByRole('row', { name: /claude-solo/ });
+    const solo = matrix.getByRole('row', { name: /claude-solo/ });
     await expect(solo).toContainText('55%');
     await expect(solo).toContainText('31%');
 
     // 读数过期的池要明说（Cursor 两小时前读的），一次没读成的池写「没查成」
     await expect(page.getByText(/读数过期或没查成/)).toBeVisible();
-    await expect(page.getByRole('row', { name: /cursor/ }).first()).toContainText('估算');
+    await expect(matrix.getByRole('row', { name: /cursor/ }).first()).toContainText('估算');
+    // 作废预估（#2737）：每个池一行，独享池也在里面
+    await expect(page.locator('[data-quota-pressure] [data-pressure-pool="claude-solo"]')).toBeVisible();
 
     // 拼车对账：本机没记到花费、接口说用了 $38，写明「多半是别的设备在用」（不是假装对得上）
     await expect(page.getByText(/接口说用了 \$38\.00/)).toBeVisible();

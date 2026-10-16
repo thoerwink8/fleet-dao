@@ -115,6 +115,32 @@ function lockBusy() {
   return lock.code === 1;
 }
 
+/** 一个单元这次进入 active 的时刻（毫秒）；读不到、没在跑回 null。`--timestamp=unix` 有时带 @ 前缀（同 mirasimActiveEnter）。 */
+function activeEnterMs(unit) {
+  let r;
+  try {
+    r = run('systemctl', ['show', '-p', 'ActiveEnterTimestamp', '--timestamp=unix', '--value', unit], {
+      timeoutMs: 10_000,
+    });
+  } catch {
+    return null;
+  }
+  if (r.code !== 0) return null;
+  const raw = String(r.stdout).trim().split('\n')[0]?.replace(/^@/, '') ?? '';
+  if (!/^[0-9]+$/.test(raw)) return null;
+  const sec = Number(raw);
+  return sec > 0 ? sec * 1000 : null;
+}
+
+/** 发版历史（release.sh 的 HISTORY）最后一行；不在、读不了回 null。 */
+function historyLastLine() {
+  try {
+    return readFileSync(`${RELEASES}/.history`, 'utf8').trim().split('\n').at(-1) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** 进程活没活：kill 0 不发信号只问；EPERM 是活着但不归我们（同 release-request 的 pidAlive）。 */
 function pidAlive(pid) {
   try {
@@ -174,7 +200,31 @@ export const realIo = {
       marker: existsSync(TRAIN_MARKER),
       trainText: readTrainText(),
       lockBusy: lockBusy(),
+      // 攒着发（lib.mjs 的 batchVerdict，#2797）：引擎这次起来的时刻、发版历史最后一行（上一版退回过就照发）
+      engineSince: activeEnterMs('fleet-engine.service'),
+      historyLast: historyLastLine(),
     };
+  },
+  /**
+   * 这一版要不要停引擎（lib.mjs 的 batchStep）：在用那一版的 deploy/lib/runtime-closure.mjs（和 release.sh 同一份判法），
+   * 两个提交从部署检出里取（readStep 刚 fetch 过主线）。退出码 0 不停、10 要停，别的（算不出、在用那版还没有这个脚本）是 null。
+   */
+  async engineRestart(current, target) {
+    const script = `${RELEASES}/${current}/deploy/lib/runtime-closure.mjs`;
+    if (!existsSync(script))
+      return { restart: null, why: `在用的 ${current.slice(0, 12)} 里还没有引用闭包的脚本` };
+    let r;
+    try {
+      r = run(NODE, [script, '--git', CHECKOUT, '--old', current, '--new', target, '--service', 'engine'], {
+        timeoutMs: 600_000,
+      });
+    } catch (e) {
+      return { restart: null, why: `引用闭包没算成：${e instanceof Error ? e.message : String(e)}` };
+    }
+    const line = String(r.stdout).trim().split('\n').at(-1) ?? '';
+    if (r.code === 0) return { restart: false, why: line };
+    if (r.code === 10) return { restart: true, why: line };
+    return { restart: null, why: `引用闭包没算成（退出码 ${r.code}）：${tail(line || r.stderr)}` };
   },
   /** release.sh 的暂停名单遗留（lib.mjs 的 recoverPaused 判）：在不在、放了多久（文件修改时间距今）、发布锁占没占。读不了的抛。 */
   async pausedLeftover() {
@@ -380,14 +430,21 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
     );
     return { code: r.code, out: `${r.stdout}\n${r.stderr}` };
   },
+  /**
+   * 报警（卡住报警级）：走 current 那一版 fleet-api 的 notify raise（统一写入口 upsertAlert，#2729），不直写表；同键原地更新、
+   * 处理过的重新打开。正文从标准输入喂。没记上抛（lib.mjs 记着没发的，下一轮再发）。
+   */
   async alert({ key, title, body }) {
-    sql(
-      `insert into notifications (level, dedupe_key, title, body)
-values ('alert'::notification_level, :'key', :'title', :'body')
-on conflict (dedupe_key) do update
-  set title = excluded.title, body = excluded.body, updated_at = now(), resolved_at = null, resolved_by = null;`,
-      { key, title, body },
+    const r = run(
+      'bash',
+      [FLEET_API, 'notify', 'raise', '--key', key, '--title', title, '--level', 'alert'],
+      {
+        input: body,
+        timeoutMs: 60_000,
+      },
     );
+    if (r.code !== 0)
+      throw new Error(`fleet-api notify raise 退出码 ${r.code}：${tail(r.stderr || r.stdout)}`);
   },
   async resolve(prefix) {
     sql(

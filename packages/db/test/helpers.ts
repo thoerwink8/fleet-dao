@@ -1,6 +1,6 @@
 // 测试夹具：每个测试一份内存库（createTestDb 克隆出来的），数据互不可见。
 import { randomUUID } from 'node:crypto';
-import type { StageKind } from '@fleet-dao/shared';
+import { noteOnlyOptions, type StageKind } from '@fleet-dao/shared';
 import { and, eq, isNull, lt, or } from 'drizzle-orm';
 import { expect } from 'vitest';
 import type { Db } from '../src/client.ts';
@@ -27,6 +27,15 @@ export const DAY = 24 * HOUR;
 export const NOW = new Date('2026-09-25T12:00:00Z');
 export const ago = (ms: number) => new Date(NOW.getTime() - ms);
 export const later = (ms: number) => new Date(NOW.getTime() + ms);
+
+/**
+ * 直写 notifications 时「要你拍」要带的两样（库里约束，#2729）：两个只留言的选项、原因「只有人能做」。别的级别什么都不带。
+ */
+export function askFields(level: 'decision' | 'alert' | 'daily') {
+  return level === 'decision'
+    ? { decisionOptions: noteOnlyOptions(), decisionReason: 'human-only' as const }
+    : { decisionOptions: null, decisionReason: null };
+}
 
 /** 断言写入被某条约束拒掉（按约束名认，不按报错措辞认）。 */
 export async function expectViolation(write: Promise<unknown>, constraint: string): Promise<void> {

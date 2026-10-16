@@ -172,10 +172,69 @@ export async function finishRun(
   }
 }
 
+/** 流里提前拿到真会话号时先写回；已经收场的行不改，避免把晚到的临时号盖进账本。 */
+export async function observeRunSessionId(
+  db: Db,
+  input: { runId: string; sessionId: string },
+): Promise<boolean> {
+  const sessionId = input.sessionId.trim();
+  if (!sessionId) throw new RunInputError('会话号是空的');
+  try {
+    const rows = await db
+      .update(runs)
+      .set({ sessionId, updatedAt: new Date() })
+      .where(and(eq(runs.id, input.runId), isNull(runs.endedAt), isNull(runs.sessionId)))
+      .returning({ id: runs.id });
+    return rows.length > 0;
+  } catch (error) {
+    const message = errMessage(error);
+    throw new RunInputError(`提前写入 runs 会话号失败：${message}`, { cause: error });
+  }
+}
+
 /** 查一段。不给 id 就查不到。 */
 export async function getRun(db: Db, id: string): Promise<RunRow | null> {
   const [row] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
   return row ?? null;
+}
+
+export interface RunSessionIdStat {
+  /** 路由没有执行方式时归到 unknown。 */
+  hostId: string;
+  endedRuns: number;
+  missingSessionIds: number;
+}
+
+/**
+ * 按执行方式数一段时间内已结束的 runs，以及其中没有会话号的笔数。
+ * 左连路由是为了不把旧的无路由记录悄悄漏掉；这类归 unknown。
+ */
+export async function runSessionIdStats(
+  db: Db,
+  input: { endedAfter: Date; endedBefore?: Date },
+): Promise<RunSessionIdStat[]> {
+  const rows = await db
+    .select({
+      hostId: routes.hostId,
+      endedRuns: sql<string>`count(*)`,
+      missingSessionIds: sql<string>`count(*) filter (where ${runs.sessionId} is null)`,
+    })
+    .from(runs)
+    .leftJoin(routes, eq(routes.id, runs.routeId))
+    .where(
+      and(
+        isNotNull(runs.endedAt),
+        gte(runs.endedAt, input.endedAfter),
+        ...(input.endedBefore ? [sql`${runs.endedAt} < ${input.endedBefore}`] : []),
+      ),
+    )
+    .groupBy(routes.hostId)
+    .orderBy(asc(routes.hostId));
+  return rows.map((row) => ({
+    hostId: row.hostId ?? 'unknown',
+    endedRuns: Number(row.endedRuns),
+    missingSessionIds: Number(row.missingSessionIds),
+  }));
 }
 
 /**
@@ -201,6 +260,18 @@ export async function latestRunOfTask(
   return row ?? null;
 }
 
+/** 一张单某一段起过几次会话（加权抽签的「第几次选」用，决定 0104）：只认 task_id 对得上的。读不到照抛。 */
+export async function runCountOfTask(
+  db: Db,
+  input: { taskId: string; segment: 'scope' | 'manual' | 'verify' },
+): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<string>`count(*)` })
+    .from(runs)
+    .where(and(eq(runs.taskId, input.taskId), eq(runs.segment, input.segment)));
+  return Number(row?.n ?? 0);
+}
+
 /**
  * 一张单到现在花掉的 token（单任务预算用，决定 0093）：task_id 对得上的动手、验收两段，输入、输出、缓存读、缓存写四样相加。
  * 四样都还空着的行（被引擎叫停、超时杀，或中转会话的用量稍后才补）算不出确数：按这张单已经记到用量的几行的每分钟速率（合并了
@@ -212,7 +283,17 @@ export async function taskTokenSpend(
   db: Db,
   taskId: string,
   opts?: { since?: Date },
-): Promise<{ tokens: number; runs: number; unmetered: number; estimated: number }> {
+): Promise<{
+  tokens: number;
+  runs: number;
+  unmetered: number;
+  estimated: number;
+  /** 原始四样分开给（缺的按 0 加）：折成输入当量在引擎的 taskSpend 活动里做（#2859），库只交原始的。 */
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}> {
   const perRun = sql`coalesce(${runs.inputTokens}, 0) + coalesce(${runs.outputTokens}, 0) + coalesce(${runs.cacheReadTokens}, 0) + coalesce(${runs.cacheWriteTokens}, 0)`;
   const blank = sql`${runs.inputTokens} is null and ${runs.outputTokens} is null and ${runs.cacheReadTokens} is null and ${runs.cacheWriteTokens} is null`;
   const seconds = sql`greatest(extract(epoch from (coalesce(${runs.endedAt}, now()) - ${runs.startedAt})), 0)`;
@@ -220,6 +301,10 @@ export async function taskTokenSpend(
     .select({
       tokens: sql<string>`coalesce(sum(case when ${blank} then 0 else ${perRun} end), 0)`,
       runs: sql<string>`count(*)`,
+      inputTokens: sql<string>`coalesce(sum(coalesce(${runs.inputTokens}, 0)), 0)`,
+      outputTokens: sql<string>`coalesce(sum(coalesce(${runs.outputTokens}, 0)), 0)`,
+      cacheReadTokens: sql<string>`coalesce(sum(coalesce(${runs.cacheReadTokens}, 0)), 0)`,
+      cacheWriteTokens: sql<string>`coalesce(sum(coalesce(${runs.cacheWriteTokens}, 0)), 0)`,
       unmetered: sql<string>`count(*) filter (where ${blank})`,
       measuredSeconds: sql<string>`coalesce(sum(case when ${blank} then 0 else ${seconds} end), 0)`,
       blankSeconds: sql<string>`coalesce(sum(case when ${blank} then ${seconds} else 0 end), 0)`,
@@ -244,6 +329,10 @@ export async function taskTokenSpend(
     runs: Number(row?.runs ?? 0),
     unmetered: Number(row?.unmetered ?? 0),
     estimated,
+    inputTokens: Number(row?.inputTokens ?? 0),
+    outputTokens: Number(row?.outputTokens ?? 0),
+    cacheReadTokens: Number(row?.cacheReadTokens ?? 0),
+    cacheWriteTokens: Number(row?.cacheWriteTokens ?? 0),
   };
 }
 

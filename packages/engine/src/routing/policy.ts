@@ -101,6 +101,27 @@ export interface RoutingPolicy {
   trackScore: TrackScorePolicy;
   /** 按模型强弱档排（决定 0099），见 StrengthPolicy。 */
   strength: StrengthPolicy;
+  /** 怎么在能派的候选里挑一条（决定 0104），见 AllocatePolicy。 */
+  allocate: AllocatePolicy;
+}
+
+/**
+ * 怎么在能派的候选里挑一条（决定 0104，#2757）：
+ * - weighted：能力下限（floor.ts，硬过滤）之后，按池压力加权抽签，质量作乘数。权重 = q × min(ρ, rhoCap)²：
+ *   ρ 是这条路由的池压力（剩余比例 ÷ 剩余时间比例，取 5 小时窗以外最紧的那个窗口，读不到按 neutralRho），
+ *   q 是动手按这一档的质量下界（不低于 minQuality；没打分的按候选里打了分的平均，都没打分为 1）。
+ *   用 seedDraw(单号:段:第几次选) 抽，同一单同一段重算结果不变；权重都一样（平手）时照人排的先后。
+ *   中档单不进 ρ < 1 的强档池（强档自己都快用完了，留给主力档）。
+ * - legacy：照决定 0095、0098、0099 那一套排好以后取第一条能派的（快清零、按进度、战绩、先给强档、让位、探索、同档分流）。
+ */
+export interface AllocatePolicy {
+  mode: 'weighted' | 'legacy';
+  /** ρ 封顶：4。ρ 再大（快清零还剩一大截）也只算 4，免得一个快作废的池把别的全挤没。 */
+  rhoCap: number;
+  /** 读不到读数（额度未知、只有 5 小时窗、读数过期）的池按这个 ρ 算：1 = 中性，不排到最后，也不顶到最前。 */
+  neutralRho: number;
+  /** 质量下界的下限：收缩下界可以是 0 甚至负数，乘数不能把一条能派的路由乘没。 */
+  minQuality: number;
 }
 
 /**
@@ -217,6 +238,7 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
     explore: { heavyweight: 0.2, medium: 0.1, fast: 0.05 },
     pool: true,
   },
+  allocate: { mode: 'weighted', rhoCap: 4, neutralRho: 1, minQuality: 0.05 },
 });
 
 const ROUTE_TIERS: readonly RouteTier[] = ['fast', 'medium', 'heavyweight'];
@@ -235,6 +257,7 @@ export function resolveRoutingPolicy(partial?: RoutingPolicyInput): RoutingPolic
       ...partial?.strength,
       explore: { ...DEFAULT_ROUTING_POLICY.strength.explore, ...partial?.strength?.explore },
     },
+    allocate: { ...DEFAULT_ROUTING_POLICY.allocate, ...partial?.allocate },
   };
   const bad = (key: string, want: string, got: unknown) =>
     new RoutingInputError(`选路策略的 ${key} 不对：要${want}，给的是 ${JSON.stringify(got)}`);
@@ -298,11 +321,24 @@ export function resolveRoutingPolicy(partial?: RoutingPolicyInput): RoutingPolic
       throw bad(`strength.explore.${key}`, '派工档名', key);
   }
   if (typeof st.pool !== 'boolean') throw bad('strength.pool', ' true 或 false', st.pool);
+  const al = p.allocate;
+  if (al.mode !== 'weighted' && al.mode !== 'legacy')
+    throw bad('allocate.mode', ' weighted 或 legacy', al.mode);
+  const positive = (key: string, v: unknown) => {
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0) throw bad(key, '大于 0 的数', v);
+  };
+  positive('allocate.rhoCap', al.rhoCap);
+  positive('allocate.neutralRho', al.neutralRho);
+  ratio('allocate.minQuality', al.minQuality, { zeroOk: false });
   return p;
 }
 
 /** 调用方可以只改 trackScore、pace、strength 里的几项，没写的留默认。 */
-export type RoutingPolicyInput = Omit<Partial<RoutingPolicy>, 'trackScore' | 'pace' | 'strength'> & {
+export type RoutingPolicyInput = Omit<
+  Partial<RoutingPolicy>,
+  'trackScore' | 'pace' | 'strength' | 'allocate'
+> & {
+  allocate?: Partial<AllocatePolicy>;
   pace?: Partial<PacePolicy>;
   trackScore?: Partial<TrackScorePolicy>;
   strength?: Partial<Omit<StrengthPolicy, 'explore'>> & { explore?: Partial<Record<RouteTier, number>> };

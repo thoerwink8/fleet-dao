@@ -3,24 +3,18 @@
 // 一轮：列根下每个仓的每棵树 → 认出是哪张需求的 → 需求工作流和它的子任务工作流都不在跑了、树里也没有没结束的会话，才算
 // 残留 → 以会话用户的身份看树里还剩什么 → 什么都不剩就删（fleet-agent-scope remove）；能重新生成的编译和工具缓存
 // （*.tsbuildinfo、node_modules/ 这些，名单是 real/user-git.ts 的 DISPOSABLE）不算剩着，只剩这些的树照空树删，是不是 git 仓
-// 都一样；还剩没推的提交、没提交的改动、stash、名单以外的文件就不删，报「要人拍」（删数据要人拍），列出前几个、写明
-// 一共几个。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
+// 都一样；还剩没推的提交、没提交的改动、stash、名单以外的文件的，也照决定 0097 直接删（AI 自己产生的工作树，#2729 起不再报
+// 「要人拍」），删掉的是哪几样记进日志和撤卡原因；以前报过、人点了留着的照旧留着。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
 // 改之前必须知道：「在用」只认任务工作流（task:，含重做后的 :rN）和旧子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
 // 里一起认。认漏了还有一道：树里有没结束的会话（runs.worktree_path）就不碰。
 // 顺带撤提醒：子任务报的「工作树没收掉」（sub:<子任务>:worktree）、Fusion 报的（req:<仓>#<号>:worktree，按这张需求的
-// Fusion 树认）树不在了、被删了、改成要人拍了就撤；
-// 这里报的「要人拍」（worktree:<仓>/<树>）树没了、清干净删了、又被在跑的任务用上了就撤。
+// Fusion 树认）树不在了、被删了就撤；
+// 以前这里报的「要人拍」（worktree:<仓>/<树>）还开着的，树没了、删了、又被在跑的任务用上了就撤。
 // 读不了、查不了、删不掉的都记「没查成」写明原因（这一轮不算 ok），不当成没事。
 
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { AlertRow, IssueWorkFacts, OpenSessionTree, SubtaskTreeRef } from '@fleet-dao/db';
-import {
-  type DecisionOption,
-  SEGMENT_LABELS,
-  type SizeRead,
-  type StageKind,
-  type WorktreeRow,
-} from '@fleet-dao/shared';
+import { SEGMENT_LABELS, type SizeRead, type StageKind, type WorktreeRow } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { subtaskBranch } from '../contract.ts';
@@ -28,7 +22,6 @@ import type { TreeLeftovers } from '../real/user-git.ts';
 import { STAGE_NAMES } from '../routing/names.ts';
 import {
   type AlertStore,
-  clip,
   isStage,
   RECONCILE_ACTOR,
   type ReconcileLog,
@@ -190,9 +183,9 @@ type TreeOutcome =
   | { kind: 'in-use'; by: string }
   | { kind: 'gone' }
   | { kind: 'removed' }
-  /** 剩着东西，报了（或更新了）要人拍。what 是剩着的东西，一样一句。 */
-  | { kind: 'escalated'; title: string; what: string[] }
-  /** 剩着东西，人已经看过那条要人拍、点了处理：留着，不再提醒。 */
+  /** 剩着没推的东西，照决定 0097 直接删了（#2729 起不再报要人拍）。what 是删掉的东西，一样一句。 */
+  | { kind: 'purged'; what: string[] }
+  /** 剩着东西，人以前看过那条要人拍、点了留着：留着，不再提醒。 */
   | { kind: 'kept'; what: string[] }
   /** 树里还有没结束的会话（#1993 从 unchecked 里分出来：清单上写「会话在用」）。这一轮照旧算没查成。 */
   | { kind: 'session'; why: string }
@@ -266,95 +259,21 @@ async function escalate(
   const { deps } = s;
   const dedupeKey = `${KEEP_ALERT_PREFIX}${ctx.rel}`;
   const existing = await deps.alerts.byKey(dedupeKey);
-  // 人已经看过、点了处理（不是对账自己撤的）：留着，不再报。树里又清干净了，照样删
+  // 以前（#2729 之前）报过「要你拍」、人看过点了留着（不是对账自己撤的）：照人的意思留着，不删
   if (existing?.resolvedAt && existing.resolvedBy !== RECONCILE_ACTOR)
     return { kind: 'kept', what: ctx.what };
-  // 人在驾驶舱选了「删掉」：后端提不了权，交到这里（answer.execution.queued）。删成了这条转已处理；删不掉把原因写回卡上，
-  // 不再每小时重试（人再选一次「删掉」才再删）
-  const answer = existing && !existing.resolvedAt ? existing.answer : null;
-  if (answer?.optionId === KEEP_TREE_REMOVE && answer.execution?.queued) {
-    if (!deps.alerts.settleQueued) {
-      return { kind: 'unchecked', why: `${ctx.rel} 人选了「删掉」，可写回结果的口子没接上，没删` };
-    }
-    let failed: string | null = null;
-    try {
-      await deps.remove(ctx.path);
-    } catch (err) {
-      failed = errMessage(err);
-    }
-    const settled = await deps.alerts.settleQueued({
-      dedupeKey,
-      answeredAt: answer.at,
-      execution: failed
-        ? { ok: false, text: clip(`删不掉：${failed}`, 500), at: new Date().toISOString() }
-        : { ok: true, text: clip(`已删工作树 ${ctx.path}`, 500), at: new Date().toISOString() },
-      resolve: failed === null,
-    });
-    if (failed) return { kind: 'unchecked', why: `${ctx.rel} 人选了「删掉」，删不掉：${failed}` };
-    deps.log('info', '每小时对账：按驾驶舱选的「删掉」删了一棵工作树', { tree: ctx.rel, settled });
-    return { kind: 'removed' };
+  // 决定 0097：AI 自己产生的工作树（会话的检出、副本）直接删，不问人（#2729）。剩下的是哪几样写进日志和撤卡的原因里
+  try {
+    await deps.remove(ctx.path);
+  } catch (err) {
+    return { kind: 'unchecked', why: `${ctx.rel} 还剩没推的东西，直接删没删成：${errMessage(err)}` };
   }
-  const title = clip(`工作树里有没推的东西，删不删要你拍：${ctx.rel}`, 300);
-  const body = [
-    `${deps.machine}的 ${ctx.path}（${treeWords(ctx.tree)}）已经没有在跑的任务在用了，但里面还有：`,
-    ...ctx.what.map((w) => `- ${w}`),
-    '删了就没了，所以每小时对账没删它（删数据要人拍）。',
-    `选「删掉」由下一轮对账删这棵树。删不掉时在${deps.machine}以 root 跑 /usr/local/sbin/fleet-agent-scope remove ${ctx.path}，下一轮对账看它不在了就撤掉这条。`,
-    '选「留着」：这条转已处理，之后不再提醒；里面的东西推走或清掉以后，下一轮对账会自己删。',
-    ctx.repo
-      ? `看里面：sudo -u ${ctx.user} git -C ${ctx.path} status；sudo -u ${ctx.user} git -C ${ctx.path} log --oneline -5`
-      : `看里面：sudo -u ${ctx.user} find ${ctx.path} ! -type d`,
-  ].join('\n');
-  if (existing && !existing.resolvedAt) {
-    if (existing.title !== title || existing.body !== body) {
-      await deps.alerts.updateOpen({ dedupeKey, title, body });
-    }
-  } else {
-    // taskId 不挂：需求结束了的「要人拍」照样要算进等你拍的（飞书盘面按需求结束就不算等人）；点提醒直达那张需求
-    await deps.alerts.raise({
-      dedupeKey,
-      level: 'decision',
-      taskId: null,
-      title,
-      body,
-      ...(ctx.taskId ? { link: `/tasks/${ctx.taskId}` } : {}),
-      options: keepTreeOptions(deps.machine, ctx.path),
-    });
-  }
-  return { kind: 'escalated', title, what: ctx.what };
-}
-
-/** 「删掉」那一项的编号：驾驶舱选了它，后端记 execution.queued，下一轮这里删（escalate）。 */
-export const KEEP_TREE_REMOVE = 'remove';
-
-/**
- * 有没推东西的工作树删不删的选项。推荐留着：删了就没了，留着只占点盘。
- * 「留着」执行成功后这条转已处理，人处理过的树对账不再报（上面 escalate 开头那一句）。
- * 「删掉」交给下一轮对账删，删成了才转已处理；「先看看」带 keepsOpen，交给指挥官，这条留着等看完再拍。
- */
-export function keepTreeOptions(machine: string, path: string): DecisionOption[] {
-  return [
-    {
-      id: 'keep',
-      label: '留着',
-      detail: '这条转已处理，这棵树不再提醒；里面的东西推走或清掉以后，对账自己删',
-      recommended: '删了就找不回来，留着只占一点盘',
-      action: { kind: 'keep' },
-    },
-    {
-      id: KEEP_TREE_REMOVE,
-      label: '删掉',
-      detail: `下一轮每小时对账删掉这棵工作树（在${machine}上），里面没推的东西就没了；删成了这条才转已处理`,
-      action: { kind: 'delete-worktree', path },
-    },
-    {
-      id: 'look',
-      label: '先看看里面',
-      detail: '这条留着；记下交给指挥官把里面没推的改动列给我看，看完再拍',
-      keepsOpen: true,
-      action: { kind: 'note-only' },
-    },
-  ];
+  deps.log('info', '每小时对账：删了一棵还剩没推东西的残留工作树（AI 产生的，决定 0097 直接删）', {
+    tree: ctx.rel,
+    what: ctx.what,
+    ...(ctx.taskId ? { taskId: ctx.taskId } : {}),
+  });
+  return { kind: 'purged', what: ctx.what };
 }
 
 async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): Promise<TreeOutcome> {
@@ -426,7 +345,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
       taskId: use.facts?.taskId ?? null,
     });
   } catch (err) {
-    return { kind: 'unchecked', why: `${rel} 里还有没推的东西，报要人拍没报成：${errMessage(err)}` };
+    return { kind: 'unchecked', why: `${rel} 里还有没推的东西，没删成：${errMessage(err)}` };
   }
 }
 
@@ -437,8 +356,8 @@ function outcomeWhy(outcome: TreeOutcome, rel: string): string | null {
       return `每小时对账把这棵树删了（${rel}）：里面没有没推的提交、也没有没提交的改动（能重新生成的编译和工具缓存不算）`;
     case 'gone':
       return `树已经不在了（${rel}）`;
-    case 'escalated':
-      return `树里还有没推、没提交的东西，改成要你拍：看「${outcome.title}」那条`;
+    case 'purged':
+      return `每小时对账把这棵树删了（${rel}）：AI 产生的工作树，剩下的（${outcome.what.join('；')}）照决定 0097 直接删`;
     case 'kept':
       return `树里还有没推、没提交的东西，人已经看过那条要人拍、决定留着（${rel}）`;
     case 'in-use':
@@ -532,8 +451,8 @@ async function settleTreeAlerts(s: Sweep, open: readonly AlertRow[]): Promise<vo
       const why =
         outcome?.kind === 'in-use'
           ? `这棵树又被在跑的任务（${outcome.by}）用上了：新一轮会换掉它，不用拍了`
-          : outcome?.kind === 'escalated'
-            ? null
+          : outcome?.kind === 'purged'
+            ? `树里剩着没推的东西，每小时对账照决定 0097 直接删了（${rel}）：${outcome.what.join('；')}`
             : outcome?.kind === 'removed'
               ? `树里已经没有没推、没提交的东西了（能重新生成的编译和工具缓存不算），每小时对账把树删了（${rel}）`
               : await treeGoneWhy(s, path, rel);
@@ -607,7 +526,7 @@ export async function sweepWorktrees(
       const path = `${deps.root}/${entry.name}/${t.name}`;
       s.outcomes.set(path, outcome);
       s.where.set(path, { repo, repoDir: entry.name, name: t.name });
-      if (outcome.kind === 'removed' || outcome.kind === 'escalated') s.part.found += 1;
+      if (outcome.kind === 'removed' || outcome.kind === 'purged') s.part.found += 1;
       if ((outcome.kind === 'unchecked' || outcome.kind === 'session') && outcome.why) {
         s.part.unchecked.push(outcome.why);
       }
@@ -627,16 +546,12 @@ function rowState(outcome: TreeOutcome): { state: WorktreeRow['state']; why: str
   switch (outcome.kind) {
     case 'removed':
     case 'gone':
+    case 'purged':
       return null;
     case 'in-use':
       return { state: 'running', why: `在用：任务工作流 ${outcome.by} 在跑` };
     case 'session':
       return { state: 'session', why: `在用：${outcome.why}` };
-    case 'escalated':
-      return {
-        state: 'leftover',
-        why: `没人用了，但里面还有：${outcome.what.join('；')}（删了就没了，报了要人拍）`,
-      };
     case 'kept':
       return { state: 'kept', why: `里面还有：${outcome.what.join('；')}；人看过那条要人拍、决定留着` };
     case 'unchecked':
@@ -666,7 +581,7 @@ async function collectInventory(s: Sweep): Promise<SweepInventory> {
     const at = s.where.get(path);
     if (!at) continue;
     const rel = `${at.repoDir}/${at.name}`;
-    if (outcome.kind === 'removed') removed.push(rel);
+    if (outcome.kind === 'removed' || outcome.kind === 'purged') removed.push(rel);
     const st = rowState(outcome);
     if (!st) continue;
     const kind = parseTreeName(at.name);

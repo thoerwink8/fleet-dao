@@ -1,5 +1,6 @@
 // 一次运行用到的上限与超时。全部可配（驾驶舱设置 → 工作流输入）；缺的字段读时现算默认值，不写回输入。
 // 工作流开头经 decide 本地活动解析一次，结果进历史：以后改默认值，在途任务照旧用它开工时那一套（windsurf-dao#1813）。
+import { DEFAULT_TASK_TOKEN_BUDGET } from '@fleet-dao/shared';
 
 export interface Limits {
   /** 兜底梯：有界重试次数。 */
@@ -23,18 +24,28 @@ export interface Limits {
   /** 跑测试的限时。 */
   testsMinutes: number;
   /**
-   * 一张单动手和验收会话合计最多花多少 token（四样相加），超了停下等人（决定 0093）；0 = 不设。
+   * 一张单动手和验收会话合计最多花多少输入当量（#2859，权重见 shared 的 INPUT_EQUIVALENT_WEIGHTS），超了停下等人（决定 0093）；0 = 不设。
    * 老历史开工时解析出来的上限里没有这一项：工作流见不到它就不查。
    */
   taskTokenBudget: number;
+  /**
+   * 一张单的 PR 最多新增多少行（#2755 体量预算，相对主线、含测试）；0 = 不设。推之前比：超了第一次打回让会话收窄，
+   * 第二次停下等人并附拆单建议。老历史开工时解析出来的上限里没有这一项：工作流见不到它就不判。
+   */
+  prLineBudget: number;
 }
 
 /**
- * 单任务 token 预算的默认值（决定 0093）：法国库 2026-10-14 查近 14 天 254 张单（1008 次动手和验收会话），每张单四样 token
- * 相加的 p95 是 36,357,792，取整到 37,000,000。超了停下等人；点「继续」再给一份同样多的。
- * 查法：_tmp/rethink/resume-q1.sql（runs 按 task_id 汇总 input+output+cache_read+cache_write）。
+ * 体量预算的默认值（#2755）：近 7 天重活 PR 新增行 p90 是 7117（#2385、#2401 涨到 +8000），推分支撞冲突 31 次里重活占 24 次。
+ * 取 3000：多数单子放得下（中、快活远在这之下），7000 行那种整片重写会被打回收窄或拆单。真要大改的，人看过点「继续」照推。
  */
-export const DEFAULT_TASK_TOKEN_BUDGET = 37_000_000;
+export const DEFAULT_PR_LINE_BUDGET = 3000;
+
+/**
+ * 单任务 token 预算的默认值（决定 0093，#2859 改成按输入当量）：数和查法写在 shared 的 DEFAULT_TASK_TOKEN_BUDGET 上
+ * （驾驶舱要显示「上限」，两边读同一个数）。这里转出来给引擎用。
+ */
+export { DEFAULT_TASK_TOKEN_BUDGET };
 
 /** 法国 VPS 能分给会话的内存（MiB）：机器约 11.7G，给内核和系统留约 0.7G。 */
 export const FRANCE_USABLE_MB = 11 * 1024;
@@ -107,6 +118,7 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   ciMinutes: 40,
   testsMinutes: 30,
   taskTokenBudget: DEFAULT_TASK_TOKEN_BUDGET,
+  prLineBudget: DEFAULT_PR_LINE_BUDGET,
 });
 
 /** 缺的、非法的（非有限数、负数）一律取默认值。 */

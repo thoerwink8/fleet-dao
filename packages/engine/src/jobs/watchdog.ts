@@ -29,7 +29,7 @@
 
 import type { JobHealth, MergeStallFacts, RedStreak, ScheduleResult } from '@fleet-dao/db';
 import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
-import type { DecisionOption } from '@fleet-dao/shared';
+import type { DecisionOption, DecisionReason } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { WatchdogRun } from '../contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
@@ -56,6 +56,7 @@ import {
 import { type BriefWatchDeps, watchDailyBrief } from './watchdog-brief.ts';
 import { type PushWatchDeps, watchFeishuPush } from './watchdog-push.ts';
 import { type QuotaWatchDeps, watchQuotaFreshness } from './watchdog-quota.ts';
+import { type QuotaWasteDeps, watchQuotaWaste } from './watchdog-quota-waste.ts';
 
 /** 登记进 scheduled_jobs 的那一行。 */
 export const WATCHDOG_JOB = {
@@ -100,8 +101,10 @@ export interface WatchdogAlerts {
     body: string;
     link: string;
     level?: 'alert' | 'decision';
-    /** decision 级带。不给时真装配补两个只留言的选项。 */
+    /** decision 级带，至少两项（落库时核，#2729 起真装配不再替它补只留言的选项）。 */
     options?: readonly DecisionOption[];
+    /** decision 级必带：为什么要创始人拍（掏新钱、删了找不回、只有人能做，#2729）。 */
+    reason?: DecisionReason;
   }): Promise<void>;
   /** 撤：处理人记 WATCHDOG_ACTOR，正文开头写「已撤：why」，进操作记录（resolveAlertWithReason）。 */
   resolve(input: { dedupeKey: string; why: string }): Promise<'ok' | 'already_resolved' | 'not_found'>;
@@ -121,7 +124,9 @@ export interface WatchdogDeps {
    * 「在用的账号池额度读数不超过 30 分钟」要的读（jobs/watchdog-quota.ts，决定 0093 从每小时对账搬来）。读不到照抛：这一轮记没查成，
    * 开着的不撤。不给（只测别的部分的单测）就不看这一条。
    */
-  quota?: Pick<QuotaWatchDeps, 'quotaPools' | 'quotaNotRead'>;
+  quota?: Pick<QuotaWatchDeps, 'quotaPools' | 'quotaNotRead'> &
+    /** 额度快作废（#2737，jobs/watchdog-quota-waste.ts）要的额度历史和路由；不给就不看这一条。 */
+    Partial<Pick<QuotaWasteDeps, 'quotaSamples' | 'poolRoutes'>>;
   /**
    * 每个任务当前连着没跑全的那一段（@fleet-dao/db 的 scheduleRedStreaks）。读不到照抛：这一轮记没查成，开着的不撤。
    * 不给（只测别的部分的单测）就不看这一项。
@@ -447,6 +452,15 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     s.problems.push(...q.problems);
     found += q.found;
     quotaScanned = q.scanned;
+    const { quotaSamples, poolRoutes } = deps.quota;
+    if (quotaSamples && poolRoutes) {
+      const waste = await watchQuotaWaste(
+        { ...deps.quota, quotaSamples, poolRoutes, alerts: deps.alerts, log: deps.log },
+        now,
+      );
+      s.problems.push(...waste.problems);
+      found += waste.found;
+    }
   }
   const releases = deps.releaseWatch
     ? await releaseWatchRound(s, deps.releaseWatch, now)
