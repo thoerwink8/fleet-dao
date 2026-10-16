@@ -147,6 +147,8 @@ export class TaskRuntime {
   lastImplementRoute: RouteChoice | null = null;
   /** 这一轮选路时避让把候选滤光了，改派了原来的路由。 */
   fellBackToMissRoute = false;
+  /** 上一次因为等路由落库的「在做什么」那一句（#2863，patched('route-wait-mirror')）：同一句不重复写。 */
+  lastRouteWaitLine: string | null = null;
   /**
    * 下一次动手会话打算续哪一段（决定 0088，task-session.ts）：判一次就清掉，续不上的不再试。
    * 只在 patched('segment-resume') 之后才会被写上，老历史一直是 null。
@@ -358,6 +360,21 @@ export class TaskRuntime {
    */
   routeWakeMark(): number {
     return this.routeWakes;
+  }
+
+  /**
+   * 选路回要等时，睡之前把原因落库（#2863，patched('route-wait-mirror')）：waiting() 只改内存，
+   * 库里 doing / updated_at 会冻在上一次动手那句。原因取 detail 第一个「（」之前那一句（最多 120 字）；
+   * 和上一次落库的同一句（且 doing 还是它）就不重复写。记的那一句只在内存里，重放时照样算得出来；
+   * 选到路由起会话时 advance 把 doing 换回动手那句（并落库）。
+   */
+  async mirrorRouteWait(detail: string): Promise<void> {
+    if (!patched('route-wait-mirror')) return;
+    const line = `等路由：${detail.split('（')[0]?.slice(0, 120) ?? ''}`;
+    if (line === this.lastRouteWaitLine && this.status.doing === line) return;
+    this.status.doing = line;
+    this.lastRouteWaitLine = line;
+    await this.mirror('running');
   }
 
   /**
