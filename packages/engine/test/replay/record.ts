@@ -190,6 +190,34 @@ const SCENARIOS: Record<string, Scenario> = {
       return { 'task-full-reworked': handle };
     },
   },
+  // 冷验收会话脱开引擎跑、接回（#2848）：第一次验收（和 CI 同时起）时引擎在换版本，交回 detached；隔一会儿带 attach 再调同一次验收，
+  // 接回的结论是过，合上。历史里带 patched('cold-verify-attach') 的标记。
+  'task-verify-reattach': {
+    tasks: scripted({
+      verify: (_i, n) =>
+        n === 1
+          ? {
+              pass: false,
+              problems: [],
+              round: 1,
+              detached: {
+                runId: 'run-verify-1',
+                startedAt: '2026-10-16T08:00:00.000Z',
+                family: 'gpt',
+                modelId: 'gpt-model',
+                routeId: 'route-gpt',
+                poolId: 'pool-gpt',
+                cwd: '/var/lib/fleet-work/_tmp/verify-run-verify-1',
+              },
+            }
+          : { pass: true, problems: [], round: 1 },
+    }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-verify-reattach': handle };
+    },
+  },
   // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。
   'task-merging': {
     tasks: scripted({ merged: () => ({ state: 'waiting', detail: '必过检查还没齐' }) }).tasks,
