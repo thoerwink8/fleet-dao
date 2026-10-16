@@ -1,5 +1,5 @@
 // release-onekey.mjs 是外壳：真的 ssh/gh/git/pnpm/node 子进程、睡眠。逻辑都在 release-onekey-lib.mjs。
-// 薄封装 release-train（只到预检；start 走 release-train 原路，行为一字不改）。
+// 预检只读、不递请求；start / status / abort 交给 release-train（往法国递请求、跟着进度）。
 // node release-onekey.mjs 不带参数看用法。
 // 改这里之前必须知道：
 // - 登法国的 ssh 名字读法复用 france-lib.mjs 的 readTarget（环境变量 FLEET_FRANCE_SSH，或 ~/.fleet-dao/france-ssh 的第一行）；

@@ -1,12 +1,12 @@
 // 发版命令行薄壳（release-train-lib.mjs）：往法国递一份和驾驶舱同格式的请求，再跟着进度读到结束。
 // 九步在法国接活脚本里，这里不再测。ssh、睡眠是假的（sleep 只把时间往前拨）。
 // 法国在跑会话数的只读查询仍在这个文件里测（france-sessions-query.mjs / france-sessions-lib.mjs）。
-import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { runChild } from './child.ts';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
 const load = async (file: string) => import(pathToFileURL(join(SCRIPTS, file)).href);
@@ -355,8 +355,8 @@ function runReadCommand(dir: string): CmdResult {
     .readProgressCommand()
     .replaceAll(train.TRAIN_FILE, join(dir, 'release-train.json'))
     .replaceAll(train.LAST_FILE, join(dir, 'last-request.json'));
-  const r = spawnSync('sh', ['-c', cmd], { encoding: 'utf8' });
-  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+  const r = runChild('sh', ['-c', cmd]);
+  return { status: r.status, stdout: r.stdout, stderr: r.stderr };
 }
 
 describe('读进度命令：没有文件是空，读不了照实失败', () => {
