@@ -1806,7 +1806,7 @@ check_chain() {
 }
 
 # 健康检查过了、current 已切到这一趟的提交：把发版进度写成非 failed。
-# 发版车（fleet-train-release）只跑 release.sh，不经过接活单元，不会改 .train/release-train.json。
+# 人手直接跑 release.sh 不经过接活单元，不会改 .train/release-train.json。
 # 更早一趟留下的 status=failed 会一直让自动发版说「要人看」。这里盖成 done（驾驶舱和自动发版闸都认 done 为做完）。
 # 写不进不挡这次发版：版本已经切过去了，闸还会用「current 已等于或新于旧目标」放行。
 # 法国的 node 在 /usr/bin/node。CI 用 sudo 跑，PATH 收成安全路径，/usr/bin/node 没有，
