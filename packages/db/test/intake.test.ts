@@ -36,15 +36,7 @@ describe('受管的仓（listIntakeRepos）', () => {
       owner: 'acme',
       defaultBranch: 'main',
       testCommand: 'pnpm check',
-      profile: {
-        language: 'unknown',
-        toolchain: [],
-        testCommand: 'pnpm check',
-        moduleRoots: [],
-        mergeSignals: [],
-        standardPathsFile: 'packages/conventions/standard-paths.json',
-        weight: 1,
-      },
+      profile: {},
       autoDispatchSince: null,
       ciPolicy: 'force',
     });

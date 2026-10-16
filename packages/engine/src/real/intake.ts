@@ -400,6 +400,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
             name: repo.name,
             defaultBranch: repo.defaultBranch,
             testCommand: repo.testCommand,
+            ...(repo.profile === undefined ? {} : { profile: parseRepoProfile(repo.profile) }),
           },
           issueNumber,
           title,
