@@ -671,7 +671,7 @@ function CatalogDetail({ entry: e, now }: { entry: CatalogEntry; now: number }) 
       flush
     >
       {e.switchKnown ? (
-        <ModelRoutes model={model} now={now} summary={false} />
+        <ModelRoutes key={model.modelId} model={model} now={now} summary={false} />
       ) : (
         <div>
           <p role="note" className="border-b px-4 py-2.5 text-body text-muted-foreground">
@@ -813,7 +813,7 @@ export function ChannelTab({ layers }: { layers: RoutingLayers }) {
         </WindowedRows>
       </Section>
       <div id="routing-channel-detail" className="min-w-0 scroll-mt-4">
-        {current ? <ChannelDetail card={current} layers={layers} now={now} /> : null}
+        {current ? <ChannelDetail key={current.channel.id} card={current} layers={layers} now={now} /> : null}
       </div>
     </div>
   );
@@ -848,6 +848,11 @@ function ChannelRow({
 function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: RoutingLayers; now: number }) {
   const routing = useRouting();
   const { inLayers, others } = channelRoutes(c.channel.id, layers, routing.data);
+  const [showAll, setShowAll] = useState(false);
+  const enabledInLayers = inLayers.filter((row) => row.route.enabled);
+  const hidden = inLayers.length - enabledInLayers.length + others.length;
+  const visibleInLayers = showAll ? inLayers : enabledInLayers;
+  const visibleOthers = showAll ? others : [];
   return (
     <Section
       title={c.channel.name}
@@ -875,9 +880,21 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
       {inLayers.length === 0 && others.length === 0 ? (
         <p className="px-4 py-6 text-center text-body text-muted-foreground">这个渠道下一条路由都没有</p>
       ) : null}
-      {inLayers.length > 0 ? (
+      {hidden > 0 ? (
+        <div className="flex items-center gap-2 px-4 pt-2">
+          <Toggle size="sm" pressed={showAll} onPressedChange={setShowAll} className="shrink-0">
+            显示全部
+          </Toggle>
+          {showAll ? null : (
+            <span className="text-meta text-muted-foreground">
+              还有 <span className="num">{hidden}</span> 条没开或没配进用途
+            </span>
+          )}
+        </div>
+      ) : null}
+      {visibleInLayers.length > 0 ? (
         <ol aria-label={`${c.channel.name} 的路由`} className="divide-y divide-border">
-          {inLayers.map(({ route, modelId, modelName }) => (
+          {visibleInLayers.map(({ route, modelId, modelName }) => (
             // 行高、内边距由 RouteItem 的行框（RowFrame）给；关着的只变淡，不整行灰底（路由页样板 #1914）
             <li key={route.routeId} data-route={route.routeId} className="relative hover:bg-accent">
               <RouteItem
@@ -891,12 +908,12 @@ function ChannelDetail({ card: c, layers, now }: { card: ChannelCard; layers: Ro
           ))}
         </ol>
       ) : null}
-      {others.length > 0 ? (
-        <div className={cn(inLayers.length > 0 && 'border-t')}>
+      {visibleOthers.length > 0 ? (
+        <div className={cn(visibleInLayers.length > 0 && 'border-t')}>
           {/* 分组小标题：淡字一行，不再是灰底横条 */}
           <p className="px-4 pt-3 pb-1 text-meta text-muted-foreground">没配进任何用途的路由（读不到开关）</p>
           <ul aria-label={`${c.channel.name} 里没配进用途的路由`} className="divide-y divide-border">
-            {others.map(({ route, modelName }) => (
+            {visibleOthers.map(({ route, modelName }) => (
               <UnassignedRouteRow
                 key={route.id}
                 route={route}

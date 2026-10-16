@@ -1,11 +1,12 @@
-// 渠道模型名册（#1302）：记下看见的模型。读成的同一笔事务里把新串补进目录（#1355），读失败不动目录。
+// 渠道模型名册（#1302）：记下看见的模型。读成的同一笔事务里给已有路由标下架或重新归类（#1355），不新建路由。
+// 新串留在 channel_seen_models，人把它「加进模型」时才建路由行。读失败不动目录。
 // 最近一次读失败的渠道不拿更早的名单去报「新增 / 消失」：那会把没读成说成渠道里已经没有。
 import { MIRASIM_EXECUTOR_UNKNOWN, resolveMirasimExecutor } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, channelModelReads, channelSeenModels, channels, routes } from '../schema/index.ts';
-import { discoverChannelModels } from './catalog-discover.ts';
+import { addChannelModel, discoverChannelModels } from './catalog-discover.ts';
 
 /** 一天四次左右：额度任务每 15 分钟醒一次，名册没到这个间隔就跳过。四个渠道一起读。 */
 export const MODEL_ROSTER_EVERY_MS = 6 * 60 * 60 * 1000;
@@ -100,7 +101,7 @@ export interface SaveChannelModelReadsResult {
 }
 
 /**
- * 每个渠道自己一笔事务。读成：名册里的模型 last_seen 盖成这一次，并在同一笔里把新串补进目录、给消失的路由标下架。
+ * 每个渠道自己一笔事务。读成：名册里的模型 last_seen 盖成这一次，并在同一笔里给已有路由标下架或重新归类。新串不建路由。
  * 读失败：只盖「最近一次读」，不动见过的模型，也不动目录。比库里那次还早的结果整笔丢掉。
  */
 export async function saveChannelModelReads(
@@ -146,7 +147,7 @@ export async function saveChannelModelReads(
               set: { lastSeenAt: now },
             });
         }
-        // 先入库再盖执行体：新插进来的 Mirasim 路由也要盖上
+        // 先归类已有路由再盖执行体：这一轮还没有的串不建路由，盖不到，等加进模型之后的下一次读成再盖。
         const found = await discoverChannelModels(tx, result.channelId, result.models, now, {
           markGone: !isManualRosterChannel(result.channelId),
         });
@@ -547,11 +548,8 @@ export async function registerManualModel(db: Db, input: ManualModelInput): Prom
         firstSeenAt: input.now,
         lastSeenAt: input.now,
       });
-      // 手工登记的串也走入库（#1355）：目录里没有就补进来、关着；只补这一个，不拿它判别的路由下架
-      await discoverChannelModels(tx, input.channelId, [modelKey], input.now, {
-        markGone: false,
-        writeAudit: false,
-      });
+      // 手工登记就是人把它加进模型：目录里没有就补一条关着的路由。不拿这一个串判别的路由下架，操作记录由下面自己写。
+      await addChannelModel(tx, input.channelId, modelKey, input.now, { writeAudit: false });
       const count = await manualCount(tx, input.channelId);
       await tx.insert(auditLog).values({
         at: input.now,

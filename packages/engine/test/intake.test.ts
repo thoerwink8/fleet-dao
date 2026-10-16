@@ -92,6 +92,26 @@ const bodyWith = (modules: string[], criteria: string[] = ['1. 页面上能看�
     '',
   ].join('\n');
 
+/** 没有「已知的模块」一节的老单：场景、原话、怎么算做完。路径检查不因为缺这一节就放行。 */
+const bodyWithoutModules = (
+  scene = '创始人要在驾驶舱看到每张单走到哪一步。',
+  criteria: string[] = ['1. 页面上能看到「验收中」这个状态'],
+) =>
+  [
+    '## 场景',
+    '',
+    scene,
+    '',
+    '## 原话',
+    '',
+    '「我回来打开驾驶舱，这张单就该在做完的那一栏」',
+    '',
+    '## 怎么算做完',
+    '',
+    ...criteria,
+    '',
+  ].join('\n');
+
 /** 窗口里 n 条失败（熔断用）。 */
 const failedOf = (n: number, doneAfter = 0): BreakerFacts['recent'] => [
   ...Array.from({ length: n }, () => ({ state: 'failed' as const })),
@@ -581,20 +601,20 @@ describe('runIntakeJob · 一轮', () => {
     expect(h.comments).toHaveLength(1); // 再来一轮不重复留言
   });
 
-  it('场景、怎么算做完里写了工作流路径也算；只在「原话」里提到不算（照拉）', async () => {
+  it('有「已知的模块」时，场景、怎么算做完、原话里的工作流路径都不算（只认这一节列出的）', async () => {
     const inScene = harness(
       {},
       {
         issues: [
           issue({
-            body: BODY.replace('创始人要在驾驶舱', '要改 .github/workflows/ 下的 ci.yml，创始人要在驾驶舱'),
+            body: BODY.replace('创始人要在驾驶舱', '不改 `.github/workflows/ci.yml`。创始人要在驾驶舱'),
           }),
         ],
       },
     );
     await runIntakeJob(inScene.deps);
-    expect(inScene.started).toEqual([]);
-    expect(inScene.localMarked).toEqual([12]);
+    expect(inScene.localMarked).toEqual([]);
+    expect(inScene.started).toHaveLength(1);
 
     const inCriteria = harness(
       {},
@@ -607,7 +627,8 @@ describe('runIntakeJob · 一轮', () => {
       },
     );
     await runIntakeJob(inCriteria.deps);
-    expect(inCriteria.started).toEqual([]);
+    expect(inCriteria.localMarked).toEqual([]);
+    expect(inCriteria.started).toHaveLength(1);
 
     const inQuote = harness(
       {},
@@ -625,6 +646,83 @@ describe('runIntakeJob · 一轮', () => {
     await runIntakeJob(inQuote.deps);
     expect(inQuote.started).toHaveLength(1);
     expect(inQuote.localMarked).toEqual([]);
+  });
+
+  it('场景里提到 CI 工作流、已知的模块只列 packages/web/src/x.ts → 不贴「本机做」；已知的模块列了 CI 工作流 → 照旧贴', async () => {
+    const mention = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: bodyWith(['`packages/web/src/x.ts`']).replace(
+              '创始人要在驾驶舱看到每张单走到哪一步。',
+              '场景里写了不碰 `.github/workflows/ci.yml`。创始人要在驾驶舱看到每张单走到哪一步。',
+            ),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(mention.deps);
+    expect(mention.localMarked).toEqual([]);
+    expect(mention.started.map((s) => s.issueNumber)).toEqual([12]);
+    expect(workflowPathIn(mention.started[0]?.body)).toBeNull();
+
+    const listed = harness({}, { issues: [issue({ body: bodyWith(['`.github/workflows/ci.yml`']) })] });
+    await runIntakeJob(listed.deps);
+    expect(listed.started).toEqual([]);
+    expect(listed.localMarked).toEqual([12]);
+    expect(listed.comments[0]?.body).toContain('.github/workflows/ci.yml');
+  });
+
+  it('没有「已知的模块」一节的老单：场景或怎么算做完里的工作流路径仍贴「本机做」（不放松）', async () => {
+    const inScene = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: bodyWithoutModules(
+              '要改 `.github/workflows/ci.yml`。创始人要在驾驶舱看到每张单走到哪一步。',
+            ),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inScene.deps);
+    expect(inScene.started).toEqual([]);
+    expect(inScene.localMarked).toEqual([12]);
+    expect(inScene.comments[0]?.key).toBe('intake-touches-workflows');
+
+    const inCriteria = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: bodyWithoutModules('创始人要在驾驶舱看到每张单走到哪一步。', [
+              '1. `.github/workflows/ci.yml` 里有一步',
+            ]),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inCriteria.deps);
+    expect(inCriteria.started).toEqual([]);
+    expect(inCriteria.localMarked).toEqual([12]);
+
+    const inQuoteOnly = harness(
+      {},
+      {
+        issues: [
+          issue({
+            body: bodyWithoutModules().replace(
+              '「我回来打开驾驶舱',
+              '「顺口说一句 .github/workflows/ci.yml 慢。我回来打开驾驶舱',
+            ),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(inQuoteOnly.deps);
+    expect(inQuoteOnly.localMarked).toEqual([]);
   });
 
   it('workflowPathIn：没写返回 null；正文不是文字（读不到）抛错，不当成没写（故意造出失败）', () => {
@@ -659,7 +757,7 @@ describe('runIntakeJob · 一轮', () => {
     expect(h.comments).toHaveLength(1);
   });
 
-  it('改标准：目录和通配也认（技能目录、子代理目录、怎么算做完里裸写的路径）；只在场景、原话里提到的照拉', async () => {
+  it('改标准：目录和通配也认；有「已知的模块」时怎么算做完里的路径不算，没有这一节的老单仍认；只在场景、原话里提到的照拉', async () => {
     const rules = [
       { path: 'agents/subagents/', why: '子代理' },
       { path: 'agents/**/*.md', why: '技能说明' },
@@ -675,9 +773,19 @@ describe('runIntakeJob · 一轮', () => {
     expect(standardPathIn(withModule('- `agents/skills/commander/SKILL.md`'), rules)?.path).toBe(
       'agents/skills/commander/SKILL.md',
     );
+    // 有「已知的模块」时，怎么算做完里顺口写的标准路径不算
     expect(
       standardPathIn(
         BODY.replace('1. 页面上能看到', '1. packages/conventions/standard-paths.json 多一条；'),
+        rules,
+      ),
+    ).toBeNull();
+    // 没有「已知的模块」的老单：怎么算做完里裸写的路径仍算（不放松）
+    expect(
+      standardPathIn(
+        bodyWithoutModules('创始人要在驾驶舱看到每张单走到哪一步。', [
+          '1. packages/conventions/standard-paths.json 多一条；',
+        ]),
         rules,
       )?.path,
     ).toBe('packages/conventions/standard-paths.json');
@@ -720,6 +828,25 @@ describe('runIntakeJob · 一轮', () => {
 
   it('登记的是 5 分钟一轮、连着三轮没跑成才过期', () => {
     expect(INTAKE_JOB).toMatchObject({ id: 'intake', schedule: '每 5 分钟', expectEveryMinutes: 15 });
+  });
+
+  it('作者是 github-actions[bot]（本仓工作流用 GITHUB_TOKEN 开的单）→ 过作者门、起任务；random-user 不过、不留言', async () => {
+    const bot = harness(
+      {},
+      { issues: [issue({ author: { login: 'github-actions[bot]', id: 41898282, type: 'Bot' } })] },
+    );
+    await runIntakeJob(bot.deps);
+    expect(bot.started).toHaveLength(1);
+    expect(bot.started[0]?.author?.login).toBe('github-actions[bot]');
+
+    const stranger = harness(
+      {},
+      { issues: [issue({ author: { login: 'random-user', id: 4242, type: 'User' } })] },
+    );
+    await runIntakeJob(stranger.deps);
+    expect(stranger.started).toEqual([]);
+    expect(stranger.comments).toEqual([]);
+    expect(stranger.planReads).toEqual([]);
   });
 
   it('作者是陌生人 → 不起、不留言（陌生人的单不打扰）', async () => {
