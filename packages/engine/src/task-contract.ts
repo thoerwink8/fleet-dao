@@ -443,6 +443,21 @@ export interface TaskSpendInput {
   since?: string;
 }
 
+/**
+ * 记下这个池这一次只凭 HTTP 401，并回答窗口里是不是已经有过一次（别的任务记的也算）。
+ * claim 重试时不变：同一次活动重试不会把自己数成第二次。now 是工作流时间（ISO）。
+ */
+export interface NoteBare401Input {
+  schemaVersion: 1;
+  poolId: string;
+  now: string;
+  claim: string;
+}
+
+export interface NoteBare401Result {
+  repeated: boolean;
+}
+
 /** 单任务 token 预算的默认值见 limits.ts 的 DEFAULT_TASK_TOKEN_BUDGET。 */
 export interface TaskSpendResult {
   tokens: number;

@@ -2,6 +2,7 @@
 // 这里是工作流代码，会被重放：别加随机数、Date、Node 自带模块（test/structure.test.ts 会拦）。
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
+import { classifyFailure } from '../failure/classify.ts';
 import type { RouteChoice } from '../ports.ts';
 import {
   type AbandonCommand,
@@ -294,6 +295,55 @@ export function bare401Repeats(previousAtMs: number | undefined, nowMs: number):
   if (previousAtMs === undefined || !Number.isFinite(previousAtMs) || !Number.isFinite(nowMs)) return false;
   const age = nowMs - previousAtMs;
   return age >= 0 && age <= BARE_401_WINDOW_MS;
+}
+
+/**
+ * 一个池上「只凭 401」的共享记号（设置表 engine.bare401，所有任务一起看）。
+ * claim 是这一次记下的身份：活动重试带同一个 claim，仍算同一次，不会把自己数成第二次。
+ */
+export interface Bare401Stamp {
+  at: string;
+  claim: string;
+  repeated: boolean;
+}
+
+/**
+ * 记下这一次只凭 401。同一个 claim 再来（活动重试）原样交回；别的 claim 落在窗口里就是第二次。
+ * 过了窗口、或还没有记号，这一次算第一次，时刻改成现在。
+ */
+export function nextBare401Stamp(
+  existing: Bare401Stamp | undefined,
+  input: { now: string; claim: string },
+): { stamp: Bare401Stamp; repeated: boolean } {
+  if (existing && existing.claim === input.claim) return { stamp: existing, repeated: existing.repeated };
+  const nowMs = Date.parse(input.now);
+  const prevMs = existing === undefined ? undefined : Date.parse(existing.at);
+  if (existing && bare401Repeats(prevMs, nowMs)) {
+    const stamp: Bare401Stamp = { at: existing.at, claim: input.claim, repeated: true };
+    return { stamp, repeated: true };
+  }
+  const stamp: Bare401Stamp = { at: input.now, claim: input.claim, repeated: false };
+  return { stamp, repeated: false };
+}
+
+/**
+ * 这次失败是不是「只凭 HTTP 401」（还没算是不是第二次）。明确的登录失效、封号不算。
+ * 工作流用它决定要不要去读共享记号；真正算不算第二次仍交给失败分流。
+ */
+export function failureLooksLikeBare401(input: {
+  code: string;
+  message: string;
+  httpStatus?: number;
+}): boolean {
+  const verdict = classifyFailure({
+    source: 'session:execute',
+    routeBound: true,
+    code: input.code,
+    message: input.message,
+    retryable: null,
+    ...(input.httpStatus !== undefined ? { httpStatus: input.httpStatus } : {}),
+  });
+  return verdict.authReroute === 'route';
 }
 
 /** 整池暂停提醒的标题后半句。和规则表的白话名同一句；认不出的规则按登录失效写。 */

@@ -1,5 +1,6 @@
 // 出在账号池上的停（登录失效、封号、设备被撤销）：池暂停并报警，这张单马上回去选路避开这个池。
-// 只凭一次 HTTP 401 不暂停整池，换一条路由；同一个池再来一次才暂停。避开之后没有能派的路由，才挂起「能派的池都停了」。
+// 只凭一次 HTTP 401 不暂停整池，换一条路由；同一个池再来一次才暂停（别的任务打到的也算）。
+// 避开之后没有能派的路由，才挂起「能派的池都停了」。
 
 import { randomUUID } from 'node:crypto';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -125,6 +126,36 @@ describe('账号池上的停：停池、单换路（auth-reroute）', { timeout:
     expect(holds).toHaveLength(1);
     expect(holds[0]?.detail).toContain('第二次 401');
     expect(world.states.some((s) => s.phase === 'parked')).toBe(false);
+  });
+
+  it('两个任务各打到同一个池一次 401：第二个任务按第二次处理，暂停整池', async () => {
+    const world = createFakeWorld({ routes: [R1, R2] });
+    const { tasks, calls } = scripted({
+      segment: async (seg) => (seg.route.poolId === 'p1' ? UNAUTHORIZED : OK_SEGMENT),
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const first = (await (await start(q, input())).result()) as TaskRun;
+        expect(first).toMatchObject({ outcome: 'merged' });
+        expect(holdAlerts(world, 'p1')).toHaveLength(0);
+        const picksBefore = world.callsOf('pickRoute').length;
+        const second = (await (
+          await start(q, input({ issueNumber: 2711, title: '另一个任务再撞上 401' }))
+        ).result()) as TaskRun;
+        expect(second).toMatchObject({ outcome: 'merged' });
+        expect(calls.segment.map((s) => s.route.poolId)).toEqual(['p1', 'p2', 'p1', 'p2']);
+        const later = world.callsOf('pickRoute').slice(picksBefore);
+        expect(later[0]?.input.avoidPoolIds).not.toContain('p1');
+        expect(later.some((p) => p.input.avoidPoolIds.includes('p1'))).toBe(true);
+        const holds = holdAlerts(world, 'p1');
+        expect(holds).toHaveLength(1);
+        expect(holds[0]?.detail).toContain('第二次 401');
+        expect(world.states.some((s) => s.phase === 'parked')).toBe(false);
+      },
+      { tasks },
+    );
   });
 
   it('避开停着的池之后没有能派的路由：挂起，原因写明能派的池都停了', async () => {

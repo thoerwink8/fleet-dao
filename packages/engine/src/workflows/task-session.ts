@@ -44,6 +44,7 @@
 //   叫醒之后走 patched('wall-clock-switch-wake')，下一轮再选不出就停下，不再睡第二觉。
 // - 出在账号池上的停（登录失效、封号、设备被撤销，patched('auth-reroute')）：池照旧暂停并报警，这张单马上回去选路避开这个池。
 //   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
+//   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
 //   避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」。老历史没有这个标记，仍把这张单挂起。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
@@ -68,12 +69,12 @@ import {
   AUTO_REDISPATCH_CODES,
   type Avoid,
   afterDispatchProbe,
-  bare401Repeats,
   bump,
   dispatchProbeBlockedLine,
   dispatchProbeLine,
   dispatchProbeStopText,
   EMPTY_DISPATCH_PROBE,
+  failureLooksLikeBare401,
   isDispatchProbePassOnly,
   mergeAvoid,
   NO_AVOID,
@@ -127,8 +128,8 @@ export async function writeSession(
   let authOn = false;
   /** 已经因登录失效、封号、设备被撤销避开了池：选路一条都没有才挂起。 */
   let authPoolsDown = false;
-  /** 每个池上一次只凭 HTTP 401 的时刻（工作流时间）。窗口外的下一次仍算第一次。 */
-  let bare401At: Record<string, number> = {};
+  /** 这张单记下只凭 401 的次数：活动重试用同一个身份，不会把自己数成第二次。 */
+  let bare401Seq = 0;
   /** 这一次只凭 401 避开的路由：没有别的路由可换时，选路放它再试一次，好凑第二次。 */
   let bare401RouteId: string | undefined;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
@@ -279,8 +280,27 @@ export async function writeSession(
         };
     // 切号停下的（失败分流 OS1：不算失败、不记账、马上接着干）：选路照常选到切过去的那个池，在原分支上重跑这一段
     if (failure.code === ORG_SWITCH_CODE) interrupted = failure.message;
-    // 写在问分流之前：老历史重放时这一支为假，分流的入参不带 priorBare401，和原来一样。
+    // 写在问分流之前：老历史重放时这一支为假，不多一次记 401 的活动，分流的入参也不带 priorBare401。
     authOn = patched('auth-reroute');
+    let priorBare401 = false;
+    if (
+      authOn &&
+      failureLooksLikeBare401({
+        code: failure.code,
+        message: failure.message,
+        ...(evidence?.httpStatus !== undefined ? { httpStatus: evidence.httpStatus } : {}),
+      })
+    ) {
+      const seq = bare401Seq;
+      bare401Seq += 1;
+      const noted = await rt.acts.noteBare401({
+        schemaVersion: 1,
+        poolId: route.poolId,
+        now: iso(Date.now()),
+        claim: `${workflowInfo().workflowId}:${route.poolId}:${seq}`,
+      });
+      priorBare401 = noted.repeated;
+    }
     const next = await rt.classify(failure, counters, true, {
       stage: SEGMENT_STAGE.manual,
       route: {
@@ -295,9 +315,7 @@ export async function writeSession(
       ...(evidence?.httpStatus !== undefined ? { httpStatus: evidence.httpStatus } : {}),
       ...(evidence?.exitCode !== undefined ? { exitCode: evidence.exitCode } : {}),
       previousMessage,
-      ...(authOn && bare401Repeats(bare401At[route.poolId], Date.now())
-        ? { priorBare401: true as const }
-        : {}),
+      ...(priorBare401 ? { priorBare401: true as const } : {}),
     });
     // 切号停下的不是这一段的失败：不当「上一次的原文」——既不凑成「和上一次一字不差」，也不打断切号前后两次真失败的比对
     if (failure.code !== ORG_SWITCH_CODE) previousMessage = failure.message;
@@ -309,7 +327,6 @@ export async function writeSession(
       avoid = widen(avoid, route, next.authReroute);
       previousMessage = undefined;
       if (next.authReroute === 'pool') {
-        bare401At = Object.fromEntries(Object.entries(bare401At).filter(([id]) => id !== route.poolId));
         authPoolsDown = true;
         bare401RouteId = undefined;
         try {
@@ -325,7 +342,6 @@ export async function writeSession(
           log.warn('整池暂停的提醒没发出去，这张单照旧换池', { poolId: route.poolId, error: String(error) });
         }
       } else {
-        bare401At = { ...bare401At, [route.poolId]: Date.now() };
         bare401RouteId = route.routeId;
       }
       await rt.note(next.reason);

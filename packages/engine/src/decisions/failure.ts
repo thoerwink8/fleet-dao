@@ -62,7 +62,7 @@ export interface FailureContext {
   /** 这一步上一次失败的原文：一字不差再犯，原路再试不会变。 */
   previousMessage?: string | undefined;
   /**
-   * 这个池短时间里已经有过一次只凭 HTTP 401（工作流自己记的时刻）。
+   * 这个池短时间里已经有过一次只凭 HTTP 401（设置表里的共享记号，别的任务记的也算）。
    * 不给 = 没有。分流据此决定这次 401 是换路由，还是暂停整池。
    */
   priorBare401?: true | undefined;
