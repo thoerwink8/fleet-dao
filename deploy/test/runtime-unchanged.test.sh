@@ -84,19 +84,43 @@ load_catalog() { :; }
 load_routing() { :; }
 api_report_before() { :; }
 apply_config() { :; }
-activate() { echo "$RUNTIME_UNCHANGED" >"$TMP/flag"; }
+activate() { echo "$ENGINE_UNCHANGED$API_UNCHANGED" >"$TMP/flag"; }
 saved_health_gate=$(declare -f health_gate)
 health_gate() { :; }
 prune() { :; }
 do_release "$docs_sha" >"$TMP/out" 2>&1
 check "只改文档：没暂停" "$(<"$TMP/pauses")" 0
-check "只改文档：日志写了没重启" "$(grep -cF '只改了文档或测试，引擎运行内容没变，没重启' "$TMP/out")" 1
-check "只改文档：activate 不重启" "$(<"$TMP/flag")" 1
+check "只改文档：日志写了引擎没重启" "$(grep -cF '引擎运行内容没变，没重启（只改了文档或测试）' "$TMP/out")" 1
+check "只改文档：日志写了后端没重启" "$(grep -cF '后端运行内容没变，没重启（只改了文档或测试）' "$TMP/out")" 1
+check "只改文档：activate 两个都不重启" "$(<"$TMP/flag")" 11
 echo 0 >"$TMP/pauses"
 do_release "$src_sha" >"$TMP/out" 2>&1
 check "改了源码：暂停了" "$(<"$TMP/pauses")" 1
 check "改了源码：不写没重启" "$(grep -cF '引擎运行内容没变，没重启' "$TMP/out")" 0
-check "改了源码：activate 照旧" "$(<"$TMP/flag")" 0
+check "改了源码：activate 照旧" "$(<"$TMP/flag")" 00
+check "改了源码：写明要停引擎、为什么" "$(grep -cF '要停引擎：' "$TMP/out")" 1
+# 这一版目录里有引用闭包的脚本（#2797）：按它的退出码判。0 不停引擎；10 停、原因照抄；别的（算不出）照旧停、写明没算成。
+# 这里放替身脚本只核接线，真判法在 runtime-closure.test.mjs。
+fake_closure() { # 退出码 输出
+  mkdir -p "$RELEASES/$src_sha/deploy/lib"
+  printf 'console.log(%s); process.exit(%s);\n' "$(printf '%s' "$2" | "$NODE" -e 'process.stdout.write(JSON.stringify(require("fs").readFileSync(0,"utf8")))')" "$1" \
+    >"$RELEASES/$src_sha/deploy/lib/runtime-closure.mjs"
+  UNCHANGED_RC=()
+  echo 0 >"$TMP/pauses"
+  do_release "$src_sha" >"$TMP/out" 2>&1
+}
+fake_closure 0 '改的 1 个文件都不在引擎的引用闭包里'
+check "闭包说没碰：没暂停" "$(<"$TMP/pauses")" 0
+check "闭包说没碰：两个都不重启" "$(<"$TMP/flag")" 11
+check "闭包说没碰：原因照抄" "$(grep -cF '引擎运行内容没变，没重启（改的 1 个文件都不在引擎的引用闭包里）' "$TMP/out")" 1
+fake_closure 10 '改了 引擎运行要读的文件：packages/engine/src/a.ts'
+check "闭包说碰了：暂停了" "$(<"$TMP/pauses")" 1
+check "闭包说碰了：原因照抄" "$(grep -cF '要停引擎：改了 引擎运行要读的文件：packages/engine/src/a.ts' "$TMP/out")" 1
+fake_closure 2 '判不了：tsc 没跑成'
+check "闭包算不出：照旧停" "$(<"$TMP/pauses")" 1
+check "闭包算不出：写明没算成" "$(grep -cF '引用闭包没算成（退出码 2：判不了：tsc 没跑成），照旧重启' "$TMP/out")" 1
+rm -rf -- "${RELEASES:?}/$src_sha"
+UNCHANGED_RC=()
 
 # 故意造出的发布：主进程留在上一版目录。只改文档应退出 0、current 指向新版、历史不记不健康；
 # 改了源码却没重启仍判红。看门狗用真判法（judgeReleaseAttention），不在这里重写。
@@ -186,7 +210,9 @@ check "只改文档：历史不记不健康" "$(grep -cE 'unhealthy|auto-rollbac
 check "只改文档：不写「重启后」" "$(grep -c '重启后' "$TMP/docs.out" || true)" 0
 check "只改文档：写了沿用上一版进程" "$(grep -cF '没重启，沿用上一版进程' "$TMP/docs.out")" 1
 check "只改文档：两个服务都核运行内容一致" "$(grep -cF '运行内容一致' "$TMP/docs.out")" 2
-RUNTIME_UNCHANGED=0
+ENGINE_UNCHANGED=0
+API_UNCHANGED=0
+UNCHANGED_RC=()
 REDS=()
 check_running_release "$docs_sha" >"$TMP/check.out" 2>&1
 check "只改文档：另一次进程没有标志也认可沿用" "$?" 0
@@ -216,7 +242,8 @@ src_watch=$(judge_watch)
 check "改了源码、没重启：发版没成由接活脚本报，看门狗不再多报一条" "${src_watch%%$'\t'*}" fine
 
 printf '%s' "$RELEASES/$BASE" >"$TMP/proc"
-RUNTIME_UNCHANGED=1
+ENGINE_UNCHANGED=1
+API_UNCHANGED=1
 REDS=()
 check_running_release "$src_sha" >"$TMP/flag-src.out" 2>&1
 check "改了源码：标志不能把内容不同说成一致" "$?" 1

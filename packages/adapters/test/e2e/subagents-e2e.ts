@@ -1,5 +1,5 @@
 // 真跑验收（#1641 第 6 片，决定 0087 改成三个角色）：Mirasim 中转起的 claude 会话里，同名覆盖内置的三个子代理
-// （Explore 斥候 Haiku、general-purpose 工人 Opus（决定 0103）、Plan 设计 Opus）真用上了、各自的模型对得上。判账本里的上游模型、
+// （Explore 斥候 Haiku、general-purpose 工人 Sonnet、Plan 设计 Opus）真用上了、各自的模型对得上。判账本里的上游模型、
 // 最终回答里三个角色各一行、会话结局、快照模型核对。
 // 并发上限（CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=2）只在 settings.local.json 里写上，这里不单独触发超限，也不判它。
 // 以登录好的会话用户（即 Mirasim 服务的那个用户）、带 FLEET_ENV=development 跑：
@@ -56,7 +56,7 @@ const stripModel = (m: string) =>
 /** 三个角色和各自该用的模型（agents/subagents/ 下同名定义，决定 0087）。 */
 const ROLES: Record<string, string> = {
   Explore: 'claude-haiku-5-5',
-  'general-purpose': 'claude-opus-5-5',
+  'general-purpose': 'claude-sonnet-5-5',
   Plan: 'claude-opus-5-5',
 };
 

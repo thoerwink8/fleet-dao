@@ -47,6 +47,11 @@ export interface CiEvaluation {
   overall: 'green' | 'red' | 'pending' | 'none';
   checks: CheckVerdict[];
   failed: string[];
+  /**
+   * 这个头上红了的、但不在必过名单里的检查名（lint、test (3/8) 这种真 job）。必过检查常常只是汇总 job（check），
+   * 它红的时候自己的结论、摘要都是空话，真正红在哪靠这一项（#2795）。同名取最新；按名字排序。
+   */
+  failedJobs: string[];
   pending: string[];
   missing: string[];
 }
@@ -72,6 +77,18 @@ export function latestRun(runs: readonly CheckRun[]): CheckRun | undefined {
     if (a > b || (a === b && r.id > best.id)) best = r;
   }
   return best;
+}
+
+/** 这个头上红了的检查（每个名字只看最新一条，已经跑完、结论是红的）。 */
+export function failedRuns(runs: readonly CheckRun[]): CheckRun[] {
+  const latest = new Map<string, CheckRun[]>();
+  for (const r of runs) latest.set(r.name, [...(latest.get(r.name) ?? []), r]);
+  const out: CheckRun[] = [];
+  for (const same of latest.values()) {
+    const run = latestRun(same);
+    if (run && run.status === 'completed' && FAIL.has(run.conclusion ?? '')) out.push(run);
+  }
+  return out;
 }
 
 function fromRun(name: string, run: CheckRun, attempts: number): CheckVerdict {
@@ -125,12 +142,16 @@ export function evaluateChecks(
   const failed = checks.filter((c) => c.state === 'failure').map((c) => c.name);
   const pending = checks.filter((c) => c.state === 'pending').map((c) => c.name);
   const missing = checks.filter((c) => c.state === 'missing').map((c) => c.name);
+  const failedJobs = failedRuns(runs)
+    .map((r) => r.name)
+    .filter((name) => !required.includes(name))
+    .sort();
   let overall: CiEvaluation['overall'];
   if (failed.length > 0) overall = 'red';
   else if (checks.length > 0 && checks.every((c) => c.state === 'success')) overall = 'green';
   else if (missing.length === checks.length) overall = 'none';
   else overall = 'pending';
-  return { overall, checks, failed, pending, missing };
+  return { overall, checks, failed, failedJobs, pending, missing };
 }
 
 /** 给 PR 镜像（pull_requests.checks）的汇总。 */
@@ -147,9 +168,13 @@ export function mirrorChecks(e: CiEvaluation): 'success' | 'failure' | 'pending'
   }
 }
 
-/** 失败摘要：失败的检查名 + 第一条的输出标题。引擎用它判「同一处连红两轮」。 */
+/**
+ * 失败摘要：失败的检查名 + 第一条的输出标题 + 同一个头上别的红 job。引擎用它判「同一处连红两轮」。
+ * 汇总 job（check）红的时候它自己没有标题，「红的 job：…」才是真正说明红在哪的那一段（#2795）。
+ */
 export function failureDigest(e: CiEvaluation): string | undefined {
   const first = e.checks.find((c) => c.state === 'failure');
   if (!first) return undefined;
-  return [first.name, first.conclusion, first.detail].filter(Boolean).join('：');
+  const jobs = e.failedJobs.length > 0 ? `红的 job：${e.failedJobs.join('、')}` : undefined;
+  return [first.name, first.conclusion, first.detail, jobs].filter(Boolean).join('：');
 }

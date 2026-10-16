@@ -458,7 +458,8 @@ describe('读进度命令：没有文件是空，读不了照实失败', () => {
     writeFileSync(blocked, '{}\n');
     chmodSync(blocked, 0o000);
     const unreadable = runReadCommand(denied);
-    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+    // Windows 不认 chmod 0o000（和 root 一样读得出）；跨平台的「在但读不了」由下面同名目录那段管
+    if (process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0)) {
       expect(unreadable.status).toBe(0);
     } else {
       expect(unreadable.status).not.toBe(0);

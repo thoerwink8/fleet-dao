@@ -60,6 +60,7 @@ export type IntakeGitHub = Pick<
   GitHub,
   | 'readGroomFacts'
   | 'readIssuePlan'
+  | 'readIssueStates'
   | 'readSpecDoc'
   | 'commentIssue'
   | 'addIssueLabel'
@@ -196,6 +197,9 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         const pulls = await w.gh.claims.openPulls({ owner: repo.owner, name: repo.name });
         return prClaimedIssues(pulls);
       },
+      // 前置单（正文「前置：」里写的）开没开着：一批一次问，读不到、有号查不到都抛，拉单按「等前置」算
+      prerequisiteStates: (repo, numbers) =>
+        w.gh.readIssueStates({ repo: { owner: repo.owner, name: repo.name }, numbers }),
       async markLocal({ repo, issueNumber }) {
         await w.gh.addIssueLabel({
           repo: { owner: repo.owner, name: repo.name },

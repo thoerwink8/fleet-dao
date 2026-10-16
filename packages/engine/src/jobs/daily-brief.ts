@@ -27,6 +27,7 @@ import {
   dailyBriefKey,
   type ExecutorLineStat,
   type PipelineHealth,
+  type ReleaseKills,
   type RoundOutcome,
   type ScheduleResult,
 } from '@fleet-dao/db';
@@ -117,6 +118,8 @@ export interface DailyBriefDeps {
   lineStats(now: Date): Promise<ExecutorLineStat[]>;
   /** 截至 to 的 7 天流程健康（@fleet-dao/db 的 pipelineHealth，#2762）。读不到照抛。 */
   pipelineHealth(to: Date): Promise<PipelineHealth>;
+  /** 截至 to 的 7 天里发版叫停的动手会话（@fleet-dao/db 的 releaseKilledSessions，#2797）。读不到照抛；没接上的不写这一行。 */
+  releaseKills?(to: Date): Promise<ReleaseKills>;
   /** 写那一行提醒（有就原地更新）。写不进照抛。 */
   publish(input: { dedupeKey: string; title: string; body: string; link: string }): Promise<void>;
   /** 在 #1055 发评论（幂等：同一个 key 只发一条）。没发成照抛。 */
@@ -429,15 +432,27 @@ function numVs(now: number | null, before: number | null | undefined, unit = '')
  * 五、流程健康（#2762）：近 7 天每轮怎么收场的（task_rounds），和再往前 7 天比。
  * 这周读不到整节写「没查成」；上周读不到只写这周、注明对比没查成。窗口里一轮都没有写「没有」，不写 0%。
  */
-export function healthSection(now: PipelineHealth | string, before: PipelineHealth | string): BriefSection {
+export function healthSection(
+  now: PipelineHealth | string,
+  before: PipelineHealth | string,
+  kills?: { now: ReleaseKills | string; before: ReleaseKills | string },
+): BriefSection {
   const heading = '五、流程健康（近 7 天，和再往前 7 天比）';
-  if (typeof now === 'string') return { heading, lines: [`没查成：${now}`], unread: now };
+  const killLine = kills ? releaseKillsLine(kills.now, kills.before) : null;
+  // 这一行没查成也算这一节没查全（这一轮记 partial）
+  const killUnread = typeof kills?.now === 'string' ? kills.now : undefined;
+  const withKills = (s: BriefSection): BriefSection => {
+    if (!killLine) return s;
+    const unread = s.unread ?? killUnread;
+    return { ...s, lines: [...s.lines, killLine], ...(unread !== undefined ? { unread } : {}) };
+  };
+  if (typeof now === 'string') return withKills({ heading, lines: [`没查成：${now}`], unread: now });
   const prev = typeof before === 'string' ? undefined : before;
   const lines: string[] = [];
   if (typeof before === 'string') lines.push(`7 天前那一周没查成（${before}），只列这一周`);
   if (now.rounds === 0) {
     lines.push(`近 7 天没有收场的轮${prev ? `（7 天前 ${prev.rounds} 轮）` : ''}。`);
-    return { heading, lines };
+    return withKills({ heading, lines });
   }
   lines.push(`收场 ${numVs(now.rounds, prev ? prev.rounds : undefined, ' 轮')}`);
   const shown = now.outcomes.filter(
@@ -460,7 +475,20 @@ export function healthSection(now: PipelineHealth | string, before: PipelineHeal
   lines.push(
     `重活 PR 新增行 p90：${now.heavyAddedP90 === null ? '这周没有量到行数的重活合并' : numVs(now.heavyAddedP90, prev ? prev.heavyAddedP90 : undefined, ' 行')}`,
   );
-  return { heading, lines };
+  return withKills({ heading, lines });
+}
+
+/**
+ * 「发版叫停的动手会话」一行（#2797）：近 7 天一共几段（和再往前 7 天比）、一共跑了几小时、按天的数。
+ * 这周读不到写「没查成」；上周读不到只写这周、注明对比没查成。
+ */
+export function releaseKillsLine(now: ReleaseKills | string, before: ReleaseKills | string): string {
+  const head = '发版叫停的动手会话';
+  if (typeof now === 'string') return `${head}：没查成（${now}）`;
+  const vs = typeof before === 'string' ? `（7 天前没查成：${before}）` : '';
+  const total = typeof before === 'string' ? `${now.total} 段` : numVs(now.total, before.total, ' 段');
+  const days = now.byDay.map((d) => `${d.day} ${d.n}`).join('，');
+  return `${head}：${total}${vs}，被叫停的段一共跑了 ${now.hours} 小时；按天：${days}`;
 }
 
 /** 收齐的简报。 */
@@ -488,6 +516,15 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
   const healthBefore = await guard('读 7 天前的流程健康', () =>
     deps.pipelineHealth(new Date(today.getTime() - 7 * 24 * 3_600_000)),
   );
+  const releaseKills = deps.releaseKills;
+  const kills = releaseKills
+    ? {
+        now: await guard('读发版叫停的动手会话', () => releaseKills(today)),
+        before: await guard('读 7 天前发版叫停的动手会话', () =>
+          releaseKills(new Date(today.getTime() - 7 * 24 * 3_600_000)),
+        ),
+      }
+    : undefined;
   const unread = (heading: string, why: string): BriefSection => ({
     heading,
     lines: [`没查成：${why}`],
@@ -501,7 +538,7 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
         ? unread('三、失败了要你看的', [alerts, stopped].filter((x) => typeof x === 'string').join('；'))
         : failuresSection(alerts, stopped, now),
       metricsSection(typeof shipped === 'string' ? null : shipped.leadMinutes, stats),
-      healthSection(health, healthBefore),
+      healthSection(health, healthBefore, kills),
     ],
   };
 }
