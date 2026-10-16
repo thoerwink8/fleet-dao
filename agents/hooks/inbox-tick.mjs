@@ -153,7 +153,6 @@ function shortBackgroundText(text) {
  * Agent/Task/Bash 的 tool_use、回执里的 agentId，以及通知里的 task-id；认不出编号时
  * 退回 tool_use id，至少给会话一个能定位原调用的编号。
  * @param {string} tail
- * @param {unknown} input
  */
 function interruptedBackgroundTasks(tail) {
   const lines = tail.split('\n');
