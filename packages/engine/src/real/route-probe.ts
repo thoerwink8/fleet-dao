@@ -146,8 +146,8 @@ function probeCapture(
 }
 
 /**
- * 一次探针会话的报告（各家整理成的同一个形状）→ 结论。第一行整行等于 pong 才算通；额度用满被拒算通（quota）；其余按
- * 失败分流的同一张规则表认出是什么事（登录失效、设备被撤销……），要人修的整池问题带上 poolHold。
+ * 一次探针会话的报告（各家整理成的同一个形状）→ 结论。有一行整行等于 pong 才算通（前后夹别的行也认）；额度用满被拒
+ * 算通（quota）；其余按失败分流的同一张规则表认出是什么事（登录失效、设备被撤销……），要人修的整池问题带上 poolHold。
  * 身份题三种结果见 probe-identity.ts。
  */
 export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeContext): ProbeAttempt {
@@ -160,7 +160,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
     if (!reply.pong) {
       return {
         kind: 'failed',
-        detail: `回答认不出（要的是第一行只写 pong）：${text ? clip(withoutQueries(text), 80) : '回答是空的'}`,
+        detail: `回答认不出（要的是单独一行 pong）：${text ? clip(withoutQueries(text), 80) : '回答是空的'}`,
         ...captured,
         ...(q
           ? {
