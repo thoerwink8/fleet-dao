@@ -511,7 +511,8 @@ export const RULES: readonly FailureRule[] = [
   // 归类：分类把可重试的活动超时当成「原路再试不会变」。不是另外三件：
   // - #2797 发版叫停：排空到点把会话停下，码是 engine_stop（KL3，kind resume），不记账、马上续，不进这张表。
   // - #2815 Mirasim 发版后接回：会话脱开引擎接着跑，活动交回 detached，工作流隔一会儿 attach，不以 timeout_start_to_close 收场。
-  // - #2811 model_mismatch 挂整单：MD3，kind stop，第一次就停下等人，不重派。
+  // - #2811 model_mismatch：MD3，kind stop。分流仍判停下（老历史挂起）。新历史停这一段、按点名开新会话重派
+  //   （patched('model-mismatch-reroute')）。#2742 是发版叫停后误续上一段 opus，不是活动超时。
   // timeout_* 的原文是 Temporal 固定句（activity StartToClose timeout 等），第二次必然一字不差。runSegment 的
   // StartToClose 是 75 分钟；#2710 离新进程起来只有约 8 分钟，凑不齐一次在新进程上跑满的 StartToClose。
   // 心跳还在才会落成 start_to_close，工人一死先是 timeout_heartbeat。这次没标上 engineRestarted（心跳里的启动时刻
@@ -702,8 +703,20 @@ export const RULES: readonly FailureRule[] = [
     hint: '续一句提醒它，续不上开新会话',
   },
   // 经桥接连这个会话用户的 Mirasim 服务，等桥接报 ready 等到顶（adapters 的 bridge-connect.ts，BRIDGE_CONNECT_TIMEOUT_TEXT）：
-  // 连接都没建起来，会话根本没起，和下面「起了、迟迟没有第一帧」（ST1）、「答了但认不出 pong」（探针自己判）不是一类。
-  // 多半是服务单线程被堵住、或服务没在跑：原路重起一次，再不行停下报警；探针撞上判这条路由离线。
+  // 连接都没建起来，会话根本没起。这是桥接未就绪（服务单线程被堵住，或服务没在跑），不是已经在跑的会话被掐掉。
+  //
+  // #2710、#2742（2026-10-16 约 21:04 CST，发版列车刚切过、引擎自愈重启后约一分钟，phase 仍是 implement、
+  // state 仍是 running）：last_problem 都是「桥接连 Mirasim 超时（桥接连 Mirasim 超时）：挂起并报警（已重试 1 次）」。
+  // 归类：分类把可重试的桥接连接超时当成「挂起并报警」。maxRetries 是 1，第二次（原文略有差别，凑不成「一字不差」）
+  // 就写出这句。不是另外四件：
+  // - #2703 探针侧同一句：再探一次仍不通就判这条路由离线，不挂整单（已关）。
+  // - #2815 引擎停时 Mirasim 动手会话：脱开再按交接单接回，不以这句收场。
+  // - #2824 timeout_start_to_close：EN1，Temporal 活动超时，原文一字不差才挂起。
+  // - #2811 model_mismatch：MD3，kind stop。分流仍判停下（老历史挂起）。新历史停这一段、按点名开新会话重派
+  //   （patched('model-mismatch-reroute')）。#2742 是发版叫停后误续上一段 opus，不是桥接超时。
+  // 分流这里仍判「原路重试一次，再不行挂起」（探针认这句，改 kind 会把探针带偏）。动手会话不拿这个挂起整单：
+  // 停掉这一段、按点名路由重派；没有能派的路由，或同一原因连败到重派预算（先避开这条路由，同一模型再避开模型，
+  // 再撞上才挂起），才 parked（task-session.ts，patched('mb1-bridge-redispatch')）。
   {
     id: 'MB1',
     title: '桥接连 Mirasim 超时',

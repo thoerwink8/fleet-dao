@@ -103,11 +103,34 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     });
     expect(realTimeout).toMatchObject({ rule: 'EN1', action: 'park', alert: true });
     // #2710 的 doing 就是这句：分流把可重试的 timeout_start_to_close 当成「原路再试不会变」。
-    // 不是发版叫停（KL3 / #2797）、不是 Mirasim 接回（#2815）、不是 model_mismatch 挂整单（MD3 / #2811）。
+    // 不是发版叫停（KL3 / #2797）、不是 Mirasim 接回（#2815）、不是 model_mismatch（MD3 / #2811，分流仍判停下，动手会话另按点名重派）。
     // 动手会话见到这个 park 不挂整单，停掉这一段按点名路由重派（task-session.ts，patched en1-timeout-redispatch）。
     expect(realTimeout.reason).toContain('引擎这边丢了这一步（timeout_start_to_close）');
     expect(realTimeout.reason).toContain('挂起并报警');
     expect(realTimeout.reason).toContain('和上一次的原文一字不差，原路再试不会变');
+  });
+
+  it('桥接连 Mirasim 超时：分流仍重试一次再挂起（#2710/#2742 的那句）', () => {
+    const message = '没起来：桥接连 Mirasim 超时（100 秒）';
+    const { trail, verdicts } = drive(session({ code: 'spawn_failed', message }));
+    expect(trail).toEqual(['retry', 'park']);
+    expect(verdicts.every((v) => v.rule === 'MB1')).toBe(true);
+    // 第二次原文略有差别，凑不成「一字不差」，落到 maxRetries：这就是库里那句 last_problem。
+    // 归类是「可重试的桥接连接超时被判成挂起」，不是探针离线（#2703）、不是引擎停时接回（#2815）、
+    // 不是 timeout_start_to_close（#2824 / EN1）、不是 model_mismatch（#2811 / MD3）。
+    // 动手会话不拿这个 park 挂整单（task-session.ts，patched mb1-bridge-redispatch）。
+    const parked = classifyFailure(
+      session({
+        code: 'spawn_failed',
+        message,
+        attempts: { retries: 1 },
+        previousMessage: '没起来：桥接连 Mirasim 超时（90 秒）',
+      }),
+    );
+    expect(parked).toMatchObject({ rule: 'MB1', action: 'park', alert: true });
+    expect(parked.reason).toBe('桥接连 Mirasim 超时（桥接连 Mirasim 超时）：挂起并报警（已重试 1 次）');
+    // 码不是 spawn_failed 也认这句：认的是原文，不是起不来那个码。
+    expect(classifyFailure(session({ code: 'failed', message })).rule).toBe('MB1');
   });
 
   it('retry 认不出的：同样按临时的办，不无限重试；绑不绑路由都一样', () => {

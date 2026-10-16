@@ -483,17 +483,84 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
         const h = await start(q, input());
         // 自动重派、自动重查之前要隔一会儿（决定 0093）：只查状态时测试服务端不跳时间，这里把时间拨过去
         await env.sleep('10 minutes');
-        await statusUntil(h, parked, '换路由后还起不来，停下');
+        const stalled = await statusUntil(h, parked, '换路由后还起不来，停下');
         const models = calls.segment.map((s) => s.route.modelId);
         expect(models).toContain('m1');
         expect(models).toContain('m2');
         const picks = world.callsOf('pickRoute').map((c) => c.input);
         expect(picks.some((p) => p.avoidModelIds.includes('m1'))).toBe(true);
         expect(picks.every((p) => p.avoidFamilies === undefined)).toBe(true);
+        expect(world.states.some((s) => s.doing.includes('自动换一条路由重派一次'))).toBe(true);
+        expect(stalled.lastProblem).toContain('同一原因连败到重派预算');
         await h.terminate('测完了');
       },
       { tasks },
     );
+  });
+
+  const BRIDGE_TIMEOUT = {
+    ok: false as const,
+    runId: null,
+    outcome: 'failed' as const,
+    evidence: {
+      code: 'spawn_failed',
+      message: '没起来：桥接连 Mirasim 超时（100 秒）',
+      quotaExhausted: false,
+    },
+  };
+
+  it('桥接连 Mirasim 超时（MB1）：不挂整单，避开这条路由重派，下一条跑成了照常做完', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 ? BRIDGE_TIMEOUT : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[0]?.route.routeId).toBe('r1');
+    expect(calls.segment[1]?.route.routeId).not.toBe('r1');
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks.some((p) => p.avoidRouteIds.includes('r1'))).toBe(true);
+    expect(picks.every((p) => p.avoidFamilies === undefined)).toBe(true);
+    expect(world.states.some((s) => s.phase === 'parked')).toBe(false);
+    expect(world.states.some((s) => s.lastProblem?.includes('挂起并报警'))).toBe(false);
+    expect(world.states.some((s) => s.doing.includes('自动换一条路由重派一次'))).toBe(true);
+    expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
+  });
+
+  it('桥接连 Mirasim 超时但码不是 spawn_failed：同样换一条路由，不因「已重试 1 次」挂整单', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) =>
+        n === 1
+          ? {
+              ok: false,
+              runId: null,
+              outcome: 'failed',
+              evidence: {
+                code: 'failed',
+                message: '桥接连 Mirasim 超时（100 秒）',
+                quotaExhausted: false,
+              },
+            }
+          : OK_SEGMENT,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[1]?.route.routeId).not.toBe(calls.segment[0]?.route.routeId);
+    expect(world.states.some((s) => s.phase === 'parked')).toBe(false);
+    expect(world.states.some((s) => s.lastProblem?.includes('挂起并报警'))).toBe(false);
   });
 
   it('只有人能修的（没权限）：不自动重派，当场停下', async () => {
