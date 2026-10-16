@@ -41,6 +41,7 @@ import type { UserExec } from './exec.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import { mapped } from './mirror.ts';
 import {
+  addedLinesAgainst,
   changedFilesSince,
   commitsSince,
   deliveryLeftover,
@@ -240,7 +241,23 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const leftover = await deliveryLeftover(t);
       // since 是起会话前的头：提交进 HEAD 的冲突标记要和它比。和主线一个字节都不差的文件在 unresolvedConflicts 里剔除。
       const conflicts = await unresolvedConflicts(t, { since: input.baseSha, mainline: span.mainline });
-      return { head, commits: commits.length, changedFiles, leftover, conflicts };
+      // 相对钉住的主线新增了多少行（#2755 体量预算）：只给预算判用，没数成不带、不挡交活核对
+      let addedLines: number | undefined;
+      if (span.mainline) {
+        try {
+          addedLines = await addedLinesAgainst(t, span.mainline, head);
+        } catch (error) {
+          if (ctx.signal.aborted) throw error;
+        }
+      }
+      return {
+        head,
+        commits: commits.length,
+        changedFiles,
+        leftover,
+        conflicts,
+        ...(addedLines === undefined ? {} : { addedLines }),
+      };
     },
 
     async checkGuarded(input: CheckGuardedInput, ctx: PortContext): Promise<GuardedPaths> {
