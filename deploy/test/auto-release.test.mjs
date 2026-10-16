@@ -39,6 +39,7 @@ import {
   STATE_SCHEMA,
   STATE_UNREADABLE_KEY,
   summary,
+  TIER_BOOT_MS,
   TIER_PREFIX,
   TIER_RETRY_MS,
   TRAIN_MARKER_KEY,
@@ -495,6 +496,70 @@ test('装机自动档：发完一版顺带装，成了的提交不重装；没�
   assert.equal(st.tier.result, 'failed');
   assert.match(st.tier.detail, /bash 起不来/);
   assert.deepEqual(m.forbidden, []);
+});
+
+// 发版重启 fleet-mirasim-session 后，4318 要十几秒到一分多钟才 listen。curl 退出 7 在冷启动窗口内不是真失败。
+const MIRASIM_REFUSED = {
+  code: 1,
+  out: '  ✗ fleet-mirasim-session.service 在跑但 http://127.0.0.1:4318/api/health 连不上或没回（curl 退出 7）：Connection refused\n',
+};
+
+function bootMachine(activeEnterOffset) {
+  const m = machine();
+  m.activeEnter = m.t + activeEnterOffset;
+  m.io.mirasimActiveEnter = async () => m.activeEnter;
+  m.io.sleep = async (ms) => {
+    m.t += ms;
+  };
+  return m;
+}
+
+test('冷启动窗口：第一次探 4318 连不上、短时间后探通，最终 ok；超过窗口仍连不上才 failed', async () => {
+  const up = bootMachine(0); // 刚 ActiveEnter
+  let n = 0;
+  up.io.applyAutoTier = async () => {
+    up.tierCalls += 1;
+    n += 1;
+    if (n === 1) return MIRASIM_REFUSED;
+    return {
+      code: 0,
+      out: '  ✓ fleet-mirasim-session.service 在跑，http://127.0.0.1:4318/api/health 回 ok:true\n',
+    };
+  };
+  let st = await up.round();
+  assert.equal(st.tier.result, 'ok');
+  assert.ok(up.tierCalls >= 2, '第一次连不上之后还会再探');
+  assert.ok(up.t - up.activeEnter < TIER_BOOT_MS);
+  assert.ok(up.t - up.activeEnter < TIER_RETRY_MS, '改回 ok 不干等 30 分钟');
+  assert.equal(
+    up.alerts.filter((a) => String(a.key).startsWith(TIER_PREFIX)).length,
+    0,
+  );
+
+  const stuck = bootMachine(0);
+  stuck.io.applyAutoTier = async () => {
+    stuck.tierCalls += 1;
+    return MIRASIM_REFUSED;
+  };
+  st = await stuck.round();
+  assert.equal(st.tier.result, 'failed');
+  assert.ok(stuck.t - stuck.activeEnter >= TIER_BOOT_MS);
+  assert.ok(stuck.t - stuck.activeEnter < TIER_RETRY_MS, '判失败走冷启动窗口，不干等 30 分钟');
+  assert.match(st.tier.detail, /curl 退出 7/);
+  assert.ok(stuck.alerts.some((a) => a.key === `${TIER_PREFIX}${H0}`));
+
+  // ActiveEnter 已经超出窗口：第一次探就连不上，立刻算真失败，不再空探
+  const late = bootMachine(-TIER_BOOT_MS);
+  late.io.sleep = async () => {
+    throw new Error('窗口已过不该再睡');
+  };
+  late.io.applyAutoTier = async () => {
+    late.tierCalls += 1;
+    return MIRASIM_REFUSED;
+  };
+  st = await late.round();
+  assert.equal(st.tier.result, 'failed');
+  assert.equal(late.tierCalls, 1);
 });
 
 test('库连不上：报警留到下一轮再发，不丢', async () => {
