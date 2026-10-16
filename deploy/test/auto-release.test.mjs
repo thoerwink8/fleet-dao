@@ -805,6 +805,8 @@ test('规矩同步给的人和 france.sh 的 AGENT_RULES_USERS 一样', () => {
 // 不在两档里。新加一个被 france.sh 引用的仓里文件，必须在这里登记它属于哪一档，免得悄悄漏了。
 const AUTO_TIER_FILES = [
   'deploy/france/fleet-agents.slice',
+  // root 的 ssh 会话内存上限（#2842）
+  'deploy/france/user-0-slice-memory.conf',
   'deploy/france/fleet-auto-release.service',
   'deploy/france/fleet-auto-release.timer',
   // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
@@ -884,6 +886,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
   for (const fn of [
     'setup_auto_tier',
     'setup_slice',
+    'setup_user_slice_cap',
     'retire_old_units',
     'setup_auto_release',
     'setup_release_request_scripts',
@@ -900,7 +903,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
   // 自动档入口只调这五个（接活脚本副本跟在自动发布之后，#2728；Mirasim 常驻单元放最后，#1274；注释行不算）
   assert.match(
     body('setup_auto_tier').replace(/^\s*#.*\n/gm, ''),
-    /^\s*setup_slice\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*setup_mirasim_session\s*$/,
+    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*setup_mirasim_session\s*$/,
   );
   // 读回也读回它：缺了 MIRASIM_NO_AGENT_EGRESS=1 之类判红（check_mirasim_session_unit_file）
   const france2 = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
