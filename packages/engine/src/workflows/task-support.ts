@@ -647,6 +647,22 @@ export const MERGE_WAIT_RED_PR_NOTES = [
   '同一根子旁的路径：检查还在跑（pending）或一条都没有，仍等，和红不是同一件事，检查一直 pending 这次不改。PR 被关了本来就停下报人。和主线冲突已经并主线或交回返工；草稿被标成 mergeable=false 也会进冲突那条，这次不改分类。自动合并被撤掉就重新挂，挂不上停下；重新挂上之后红检查走上面的新路径。头被别人改了就停下，人点继续后重走 CI 和验收，不是一直等。落后主线但 mergeable=true 仍等（GitHub 还能合）；mergeable=false 走冲突那条。读检查失败抛错重试，不装成还在等；没接上读检查也抛，不默认 pending。不强制 CI 的直接合并 mergeNow 故意不看检查，另一条路，这次不改。每小时对账不推卡在 waitMerged 里的任务：红了由这条工作流自己返工，不加第二套看守。',
 ] as const;
 
+/**
+ * 验收原文里点名要 GitHub 合并时关掉的别的单。本单不算：引擎第 7 步自己关，
+ * 写进正文会让 GitHub 抢先关、第 7 步的关单评论做不完（C13、#241）。
+ */
+export function requirementCloses(acceptance: readonly string[] | undefined, self: number): number[] {
+  const closeRef = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?:\s*:\s*|\s+)#(\d+)\b/gi;
+  const out = new Set<number>();
+  for (const line of acceptance ?? []) {
+    for (const match of line.matchAll(closeRef)) {
+      const n = Number(match[1]);
+      if (Number.isInteger(n) && n > 0 && n !== self) out.add(n);
+    }
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
 /** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，其余单子仍是原来两句。 */
 export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];

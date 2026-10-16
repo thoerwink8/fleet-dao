@@ -24,8 +24,8 @@ import { idempotencyKey, once } from './idempotency.ts';
 import { assertPublishable } from './publish-check.ts';
 import {
   assertBodySize,
-  hasCloseKeywords,
   neutralizeCloseKeywords,
+  neutralizeExceptRequirementCloses,
   type PrBodyInput,
   renderPrBody,
 } from './text.ts';
@@ -139,7 +139,8 @@ export async function openPr(
   const { repo, branch } = input;
   const slug = repoSlug(repo);
   const rawBody = typeof input.body === 'string' ? input.body : renderPrBody(input.body);
-  const body = neutralizeCloseKeywords(rawBody);
+  // 「需求」栏单独一行的 Closes #N 留着（验收点名的别的单）；其余关单词改成「关联」
+  const body = neutralizeExceptRequirementCloses(rawBody);
   const title = neutralizeCloseKeywords(input.title.trim());
   assertBodySize('PR 正文', body);
   // 标题、正文（会话交活时写的总结在里面）和分支名开出去就公开了（分支名进 PR 的网页地址和 git 的分支列表），
@@ -260,6 +261,20 @@ export async function openPr(
       number: pr.number,
       author,
     });
+  }
+  // 这个分支已经有 PR（账上记过，replay 为真）时，正文仍按这次给的结构补上。
+  // 只改「干活的」机器人自己开的：别人开在同一分支上的不动。
+  if (deps.bots.is('agent', pr.user) && (pr.body ?? '') !== body) {
+    const patched = await deps.client.request({
+      method: 'PATCH',
+      path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/pulls/${pr.number}`,
+      auth: { as: 'agent', repo },
+      body: { body },
+      signal: ctx.signal,
+    });
+    const parsed = PullSchema.safeParse(patched.data);
+    if (!parsed.success) throw unexpected(`改 PR #${pr.number} 正文的回执`, patched.data);
+    await pullEcho(deps, repo, pr.number, parsed.data.updated_at, 'agent');
   }
   // 认回声：开 PR 的回执；再加上这次回读——引擎每推一轮都会调 openPr，推送带来的 PR 更新也就认得出
   if (!replay && value.updatedAt) await pullEcho(deps, repo, pr.number, value.updatedAt, 'agent');
@@ -804,15 +819,17 @@ export async function mergePr(
       );
     }
 
-    // 关单词：正文里的「Closes #N」合并时会让 GitHub 自己关单（C13）
+    // 关单词：标题和条目里的「Closes #N」合并时会让 GitHub 自己关单（C13）。
+    // 「需求」栏下面单独一行的留着：那是验收点名、要 GitHub 合并时关掉的别的单。
     const title = neutralizeCloseKeywords(pr.title);
     const prBody = pr.body ?? '';
-    if (hasCloseKeywords(prBody) || title !== pr.title) {
+    const nextBody = neutralizeExceptRequirementCloses(prBody);
+    if (nextBody !== prBody || title !== pr.title) {
       const patched = await deps.client.request({
         method: 'PATCH',
         path: `${base}/pulls/${prNumber}`,
         auth,
-        body: { title, body: neutralizeCloseKeywords(prBody) },
+        body: { title, body: nextBody },
         signal: ctx.signal,
       });
       const p = PullSchema.safeParse(patched.data);

@@ -199,6 +199,11 @@ export interface PrBody {
   risks?: string[];
   /** 「按推荐先做了」：问创始人的岔路里没等他回、按推荐先做了的（core 的 assumedLines，#259）；空 = 无。 */
   assumed?: string[];
+  /**
+   * 验收点名、合并时要 GitHub 关掉的别的单（不是这张任务单）。
+   * 写在「需求」栏下面，一行一个 `Closes #N`。空 = 不写。
+   */
+  closes?: number[];
 }
 
 export interface OpenPrInput extends Scope {

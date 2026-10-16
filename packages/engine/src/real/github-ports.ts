@@ -152,6 +152,8 @@ function prBody(body: PrBody): PrBodyInput {
     ...(body.risks ? { risks: body.risks } : {}),
     // 「按推荐先做了」一栏（#259）：漏传了正文里就没有这一栏
     ...(body.assumed ? { assumed: body.assumed } : {}),
+    // 验收点名的别的单：漏传了「需求」栏下面就没有 Closes 行
+    ...(body.closes ? { closes: body.closes } : {}),
   };
 }
 

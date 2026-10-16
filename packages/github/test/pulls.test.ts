@@ -100,6 +100,27 @@ describe('开 PR', () => {
     expect(pr?.body).toBe('做完了。关联 #12, 关联 acme/other#9');
   });
 
+  it('需求栏的 Closes 留着；同一分支再开一次把正文补上', async () => {
+    const { gh, fake } = setup();
+    fake.refs.set('task/close', A);
+    const opened = await gh.openPr({
+      repo,
+      branch: 'task/close',
+      head: A,
+      title: 't',
+      body: { requirement: 2388, did: ['a'], verified: ['b'] },
+    });
+    expect(fake.pulls.get(opened.number)?.body).not.toContain('Closes #');
+    await gh.openPr({
+      repo,
+      branch: 'task/close',
+      head: A,
+      title: 't',
+      body: { requirement: 2388, did: ['a'], verified: ['b'], closes: [2191] },
+    });
+    expect(fake.pulls.get(opened.number)?.body).toContain('**需求**：#2388\nCloses #2191');
+  });
+
   it('B3：长正文走请求体；超过 65536 个字符发出前就拒，报实际字数', async () => {
     const { gh, fake } = setup();
     fake.refs.set('task/5', A);
@@ -666,6 +687,16 @@ describe('合并', () => {
       .filter((r) => r.method === 'PATCH' || r.method === 'PUT')
       .map((r) => r.method);
     expect(order).toEqual(['PATCH', 'PUT']);
+  });
+
+  it('C13：需求栏单独一行的 Closes 合并前留着，条目里的关单词仍改掉', async () => {
+    const { gh, fake } = setup();
+    const pr = ready(fake, {
+      head: { ref: 'task/1', sha: A },
+      body: '**做了什么**：\n- fixes #3\n**需求**：#2388\nCloses #2191',
+    });
+    await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A });
+    expect(pr.body).toBe('**做了什么**：\n- 关联 #3\n**需求**：#2388\nCloses #2191');
   });
 
   it('C13：squash 的提交正文一定非空（空串 GitHub 会换成默认正文，把分支提交里的 Fixes #N 带进主线）', async () => {

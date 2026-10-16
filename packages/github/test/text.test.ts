@@ -114,6 +114,20 @@ describe('PR 正文模板', () => {
   it('条目里的关单词也改掉', () => {
     expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'] })).toContain('- 关联 #3');
   });
+
+  it('验收点名的别的单写在需求栏下面，关单词留着；本单仍是 #号，条目里的关单词仍改成关联', () => {
+    const body = renderPrBody({
+      requirement: 2388,
+      closes: [2191, 2191, 0],
+      did: ['做完了 closes #2388'],
+      verified: ['ok'],
+      fixesAlerts: ['watchdog:job:backup'],
+    });
+    expect(body).toContain('**需求**：#2388\nCloses #2191\n**修提醒**：watchdog:job:backup');
+    expect(body).toContain('- 做完了 关联 #2388');
+    expect(body.split('\n').filter((line) => line === 'Closes #2191')).toHaveLength(1);
+    expect(body.split('\n').length).toBeLessThanOrEqual(PR_BODY_MAX_LINES);
+  });
 });
 
 describe('CI 结论', () => {

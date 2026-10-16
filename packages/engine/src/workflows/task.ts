@@ -108,6 +108,7 @@ import {
   hygieneSpots,
   noteEmptyCommit,
   RESUME_STREAK_LIMIT,
+  requirementCloses,
   SELF_CHECK_RED_LINE,
   SKIP_CI_PR_VERIFIED,
   SKIP_CI_SELF_VERIFY,
@@ -513,6 +514,10 @@ class TaskFlow {
       rt.selfCheckOutput = { ...rt.selfCheckOutput, head: pushed.head };
     rt.since = delivery.head;
     rt.changedFiles = pushed.changedFiles ?? delivery.changedFiles;
+    // 验收点名要关的别的单。老历史没有这个标记：重放时不传，开 PR 的活动入参对得上。
+    const extraCloses = patched('pr-requirement-closes')
+      ? requirementCloses(rt.brief?.acceptance, rt.input.issueNumber)
+      : [];
     if (rt.prNumber === null) {
       // 代数只在新历史里传给开 PR：重做的新一代才能关掉自己上一代留下的 PR。老历史重放不传，活动入参对得上。
       const generation = patched('redo-supersede-pr')
@@ -533,11 +538,33 @@ class TaskFlow {
                 ? SKIP_CI_PR_VERIFIED
                 : 'CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）',
             ],
+            ...(extraCloses.length > 0 ? { closes: extraCloses } : {}),
           },
           ...(generation === undefined ? {} : { generation }),
         }),
       );
       rt.prNumber = pr.prNumber;
+    } else if (extraCloses.length > 0) {
+      // 已经开过的 PR 不会再走上面那次。再调一次：按分支幂等，只把「需求」栏补上 Closes。
+      await rt.step('syncPrCloses', () =>
+        rt.acts.openPr({
+          taskId: rt.input.taskId,
+          repo: rt.input.repo,
+          branch: rt.branch,
+          head: pushed.head,
+          title: rt.input.title,
+          body: {
+            requirement: rt.input.issueNumber,
+            did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length),
+            verified: [
+              patched('repo-ci-policy') && this.ciMode === 'off'
+                ? SKIP_CI_PR_VERIFIED
+                : 'CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）',
+            ],
+            closes: extraCloses,
+          },
+        }),
+      );
     }
     await rt.advance('implement', `第 ${rt.round} 轮推上去了，PR #${rt.prNumber}`);
     rt.feedback = [];

@@ -7,6 +7,7 @@ import {
   CONFLICT_HANDOFF_CAUSE,
   conflictFilesForHandoff,
   FOUNDERS_INBOX_PR_NOTES,
+  requirementCloses,
   taskPrDid,
 } from '../src/workflows/task-support.ts';
 
@@ -108,5 +109,18 @@ describe('PR 正文里的根因', () => {
       expect(body).toContain(line);
     }
     expect(taskPrDid(12, 1, 1)).toEqual(['按 #12 的要求动手（第 1 轮）', '改了 1 个文件']);
+  });
+});
+
+describe('验收里点名要关的别的单', () => {
+  it('认 Closes / Fixes，本单不算，去重后从小到大', () => {
+    expect(
+      requirementCloses(
+        ['5. 修好后关掉 #2191（PR「需求」栏写 `Closes #2191` 和本单）。', '顺手 Fixes #2191、resolves #7'],
+        2388,
+      ),
+    ).toEqual([7, 2191]);
+    expect(requirementCloses(['Closes #2388'], 2388)).toEqual([]);
+    expect(requirementCloses(undefined, 2388)).toEqual([]);
   });
 });

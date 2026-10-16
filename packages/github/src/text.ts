@@ -13,7 +13,9 @@ export function assertBodySize(what: string, body: string): void {
   }
 }
 
-// —— 关单词：PR 正文或合并提交里写「Closes #12」，合并那一刻 GitHub 自己就把需求单关了，绕过引擎的关单（C13）。——
+// —— 关单词：PR 正文或合并提交里写「Closes #12」，合并那一刻 GitHub 自己就把需求单关了，绕过引擎的关单（C13）。
+// 例外只有一处：「需求」栏下面单独一行的 `Closes #N`。那是验收点名、要 GitHub 合并时关掉的别的单
+// （引擎第 7 步只关自己那张）。标题和条目里的关单词仍改成「关联」。——
 
 const KEYWORD = '(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)';
 const REF = String.raw`(?:[A-Za-z0-9-]+\/[A-Za-z0-9._-]+)?#\d+|GH-\d+|https?:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+\/issues\/\d+`;
@@ -27,6 +29,61 @@ export function hasCloseKeywords(text: string): boolean {
 /** 「Closes #12」→「关联 #12」：引用留着（GitHub 照样互相链接），关单的语义去掉。 */
 export function neutralizeCloseKeywords(text: string): string {
   return text.replace(CLOSING, (_m, _kw, _sep, ref: string) => `关联 ${ref}`);
+}
+
+const REQUIREMENT_LINE = /^\*\*需求\*\*：/;
+const COLUMN_LINE = /^\*\*[^*]+\*\*：/;
+const STANDALONE_CLOSE = /^Closes #(\d+)$/;
+
+/** 点名要关的单：正整数、去重、从小到大。0、小数、重复的丢掉。 */
+export function closeIssueNumbers(closes: readonly number[] | undefined): number[] {
+  const out = new Set<number>();
+  for (const n of closes ?? []) {
+    if (typeof n === 'number' && Number.isInteger(n) && n > 0) out.add(n);
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/**
+ * 把 `Closes #N` 放进「需求」栏：紧跟在栏名那一行后面、下一栏之前。栏里已经有的同一行先拿掉，不重复。
+ * 没有「需求」栏就加在正文末尾。
+ */
+export function withRequirementCloses(body: string, closes: readonly number[] | undefined): string {
+  const extra = closeIssueNumbers(closes).map((n) => `Closes #${n}`);
+  if (extra.length === 0) return body;
+  const kept = new Set(extra);
+  const src = body
+    .replace(/\r\n?/g, '\n')
+    .split('\n')
+    .filter((line) => !kept.has(line.trim()));
+  const head = src.findIndex((line) => REQUIREMENT_LINE.test(line));
+  if (head < 0) return [...src, ...extra].join('\n');
+  src.splice(head + 1, 0, ...extra);
+  return src.join('\n');
+}
+
+/**
+ * 中和关单词，但「需求」栏里单独一行的 `Closes #N` 留着（合并时 GitHub 关这些单）。
+ * 标题不要走这里：标题里的关单词全部中和。
+ */
+export function neutralizeExceptRequirementCloses(text: string): string {
+  const kept: number[] = [];
+  const rest: string[] = [];
+  let inRequirement = false;
+  for (const line of text.replace(/\r\n?/g, '\n').split('\n')) {
+    if (COLUMN_LINE.test(line)) {
+      inRequirement = REQUIREMENT_LINE.test(line);
+      rest.push(line);
+      continue;
+    }
+    const match = inRequirement ? STANDALONE_CLOSE.exec(line.trim()) : null;
+    if (match?.[1]) {
+      kept.push(Number(match[1]));
+      continue;
+    }
+    rest.push(line);
+  }
+  return withRequirementCloses(neutralizeCloseKeywords(rest.join('\n')), kept);
 }
 
 // —— PR 正文：栏目以仓根 .github/pull_request_template.md 为准。人开的 PR 由 GitHub 套那份模板，引擎开的走这里；
@@ -51,6 +108,11 @@ export interface PrBodyInput {
   assumed?: readonly string[] | undefined;
   /** 「修提醒」：这个 PR 修的是哪几条提醒（键），驾驶舱据此显示修到哪（design 15.3「谁在处理」）；空 = 不写这一栏。 */
   fixesAlerts?: readonly string[] | undefined;
+  /**
+   * 验收点名、合并时要 GitHub 关掉的别的单（不是引擎第 7 步关的那张）。
+   * 写在「需求」栏下面，一行一个 `Closes #N`，中和关单词时留着。
+   */
+  closes?: readonly number[] | undefined;
 }
 
 export const PR_BODY_MAX_LINES = 14;
@@ -71,10 +133,11 @@ export function renderPrBody(input: PrBodyInput): string {
       .filter(Boolean)
       .join(' · ') || '无';
   const alerts = (input.fixesAlerts ?? []).map(oneLine).filter(Boolean).join(' ');
+  const closes = closeIssueNumbers(input.closes);
   const tail = [`**需求**：${requirement}`, ...(alerts ? [`**修提醒**：${alerts}`] : [])];
 
-  // 总行数不超过上限：每栏标题占一行，条目从最长的一栏往下砍，砍掉的用一行「另有 N 条」代替
-  const budget = PR_BODY_MAX_LINES - lists.length - tail.length;
+  // 总行数不超过上限：每栏标题占一行，关单行也占行，条目从最长的一栏往下砍，砍掉的用一行「另有 N 条」代替
+  const budget = PR_BODY_MAX_LINES - lists.length - tail.length - closes.length;
   const counts = lists.map(([, items]) => items.length);
   while (counts.reduce((a, b) => a + b, 0) > budget) {
     const i = counts.indexOf(Math.max(...counts));
@@ -97,7 +160,8 @@ export function renderPrBody(input: PrBodyInput): string {
     }
   });
   lines.push(...tail);
-  return neutralizeCloseKeywords(lines.join('\n'));
+  // 关单行在中和之后补回「需求」栏，避免刚写上就被改成「关联」
+  return withRequirementCloses(neutralizeCloseKeywords(lines.join('\n')), closes);
 }
 
 /** 折叠空白（含换行）成单个空格、掐头去尾：标题、单行栏目用这个压。 */
