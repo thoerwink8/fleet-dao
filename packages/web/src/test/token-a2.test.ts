@@ -1,5 +1,6 @@
 // #1444 的 19 处：六个共用件里的写死尺寸换成 token 类名。
 // #1446 已经落在主线上。这里把每一处「写死值 → token 类名」钉住，写回去就红。
+// 后来删掉的组件（整池暂停的 pool-holds.tsx、老流程那一块的 usage.tsx 和 run-timeline.tsx）身上的处数跟着去掉，这里只留下还在的。
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,34 +11,6 @@ const webRoot = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 /** 一处写死尺寸和换上的 token 类名。from 是原来的任意值类名，to 是现在的 token 类名。 */
 const SITES = [
-  { file: 'src/components/usage.tsx', where: '不全标', from: 'text-[10px]', to: '<Tag tone="stall">' },
-  { file: 'src/components/usage.tsx', where: '合计只读到一部分', from: 'text-[11px]', to: 'text-meta' },
-  { file: 'src/components/usage.tsx', where: '合计一次都没读到', from: 'text-[11px]', to: 'text-meta' },
-  { file: 'src/components/usage.tsx', where: '合计附注', from: 'text-[11px]', to: 'text-meta' },
-  {
-    file: 'src/components/usage.tsx',
-    where: '花费行',
-    from: 'grid-cols-[3.5rem_minmax(0,1fr)]',
-    to: 'grid-cols-usage',
-  },
-  { file: 'src/components/usage.tsx', where: '花费明细', from: 'text-[11px]', to: 'text-meta' },
-  { file: 'src/components/usage.tsx', where: '分开看', from: 'text-[11px]', to: 'text-meta' },
-  { file: 'src/components/usage.tsx', where: '额度提示', from: 'text-[11px]', to: 'text-meta' },
-  { file: 'src/components/run-timeline.tsx', where: '时间刻度字号', from: 'text-[10px]', to: 'text-meta' },
-  {
-    file: 'src/components/run-timeline.tsx',
-    where: '刻度左内边距',
-    from: 'md:pl-[172px]',
-    to: 'md:pl-timeline-label',
-  },
-  {
-    file: 'src/components/run-timeline.tsx',
-    where: '两列',
-    from: 'md:grid-cols-[160px_1fr]',
-    to: 'md:grid-cols-timeline',
-  },
-  { file: 'src/components/run-timeline.tsx', where: '阶段角标', from: 'text-[10px]', to: 'text-meta' },
-  { file: 'src/components/run-timeline.tsx', where: '时长行', from: 'text-[11px]', to: 'text-meta' },
   {
     file: 'src/components/channel-status.tsx',
     where: '故障说明',
@@ -49,16 +22,15 @@ const SITES = [
 ] as const;
 
 const COUNTS: Record<string, number> = {
-  'src/components/usage.tsx': 8,
-  'src/components/run-timeline.tsx': 5,
   'src/components/channel-status.tsx': 3,
 };
 
 // 发版卡的一处（grid-cols-release）在片 7（#1853）改用 KeyValue，不再有写死的标签列宽，这一处不再钉。
 // 整池暂停面板删了之后，原来钉在 pool-holds.tsx 的那一处跟着去掉。
-describe('token A2：16 处写死尺寸换成 token', () => {
-  test('四个组件各对上原来说的处数，加起来 16', () => {
-    expect(SITES).toHaveLength(16);
+// 老流程那一块删了（#2357、#2710 收尾）之后，usage.tsx、run-timeline.tsx 两个组件整个没了，钉在它俩身上的 13 处跟着去掉。
+describe('token A2：写死尺寸换成 token', () => {
+  test('留下来的组件各对上钉住的处数', () => {
+    expect(SITES).toHaveLength(3);
     for (const [file, n] of Object.entries(COUNTS)) {
       expect(SITES.filter((site) => site.file === file)).toHaveLength(n);
     }

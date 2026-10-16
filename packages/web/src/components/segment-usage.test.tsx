@@ -26,6 +26,8 @@ afterEach(cleanup);
 describe('花费一格两行', () => {
   test('按量和套餐内折合两个标签都在，上下排列，大字只在按量那一行', async () => {
     const d = await createMockApi({ live: false }).task('t-12');
+    // t-12 的三段流水只走套餐内。按量那一笔原先在老流程会话里，那一路已经不进用量，这里补上一笔按量才看得到大字。
+    d.usage.total.cost.metered = { runs: 1, usd: 0.08, missing: 0 };
     render(<SegmentStats d={d} now={Date.now()} />);
     const metered = screen.getByText('按量');
     const folded = screen.getByText('套餐内折合');

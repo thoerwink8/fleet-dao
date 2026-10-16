@@ -91,7 +91,6 @@ import type {
   RoutingLayerRouteSchema,
   RoutingLayersResponse,
   RoutingResponse,
-  RunSchema,
   RunTranscriptResponse,
   SendRequestMessageRequest,
   SetChannelEnabledRequest,
@@ -179,7 +178,6 @@ export type TaskListFilter = Pick<z.input<typeof TaskListQuery>, 'status' | 'rep
 export type RunTranscript = z.infer<typeof RunTranscriptResponse>;
 export type TranscriptEntry = RunTranscript['entries'][number];
 export type RunTranscriptQuery = { after?: number | undefined; limit?: number | undefined };
-export type Run = z.infer<typeof RunSchema>;
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 
 export type Routing = z.infer<typeof RoutingResponse>;
