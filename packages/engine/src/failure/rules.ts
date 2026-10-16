@@ -735,11 +735,18 @@ export const RULES: readonly FailureRule[] = [
   // 带上会话号再起）。同一张单、同一条路由上第二次不再原路续：
   // 失败分流判停下后，工作流避开这个模型换一条路由，带上树上的进度续一次（task-session.ts，#2244）。
   // 这条路由在这张单上只是慢、会话还在出字，再原路续白烧额度；换过去的那条再在第二次到顶，交帅位去拆。
+  //
+  // 强码、只认证据的 code 字段（#2759）：one-shot 到点强停，插头把叫停写成「引擎叫停（时限到了：one-shot timeout）」。
+  // 句里的 timeout 是我们自己的时限，不是上游超时。这码若留在第 3 轮，第 2 轮 NT2 的 \btimeout\b 会先抢走，
+  // routeOutcome 落成 fail——会话干满还在回话，半开熔断却把这次试探判成又失败、冷却翻倍。时限是我们定的，
+  // 到点还在干活说明不了路由坏了，不进熔断、不进路由战绩。上游超时（HTTP 504、连接超时、ETIMEDOUT）没有这个码，
+  // 仍走 UP1 / NT1 / NT2，照旧算失败。
   {
     id: 'WT1',
     title: '会话总时长到顶',
     kind: 'retry',
-    weakCodes: ['wall_clock_timeout'],
+    codes: ['wall_clock_timeout'],
+    codeFieldOnly: true,
     maxRetries: 1,
     routeOutcome: 'neutral',
     hint: '接着上次的进度续一轮',
@@ -834,6 +841,7 @@ export const RULES: readonly FailureRule[] = [
     title: '超时',
     kind: 'retry',
     // \b 挡住 idle_timeout 这类码：它们是症状码，归第 3 轮。
+    // one-shot 的「时限到了：one-shot timeout」不在这里：证据码是 wall_clock_timeout，WT1 强码先拿走（#2759）。
     text: /\btimed out\b|\btimeout\b/i,
     routeOutcome: 'fail',
   },
