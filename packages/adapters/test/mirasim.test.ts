@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { judgeRun } from '../src/judge.ts';
-import { ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
+import { ledgerlessDetail, ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
 import { METER_EARLY_MS, type MeterFs, type MeterWindow, readMirasimMeter } from '../src/mirasim/meter.ts';
 import {
   type MirasimRunOptions,
@@ -1311,6 +1311,30 @@ describe('Mirasim 账本', () => {
       detail: '账本目录里没有 index 文件',
     });
     expect((await readMirasimLedger(dir, 'pi:../../etc')).state).toBe('unknown');
+  });
+
+  it('grok 执行体不写流量账本（#2720）：缺目录单独写原因，不和「账本换了地方」混；有目录照常读', async () => {
+    const dir = tempDir();
+    const uuid = 'f8dd5195-5a21-4d17-b687-a90ee99bcc81';
+    expect(await readMirasimLedger(dir, `grok:${uuid}`)).toEqual({
+      state: 'unknown',
+      detail: ledgerlessDetail('grok'),
+    });
+    expect(ledgerlessDetail('grok')).toContain('不写流量账本');
+    expect(await readMirasimLedger(dir, `claude:${uuid}`)).toEqual({
+      state: 'unknown',
+      detail: '账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）',
+    });
+    // 哪天 Mirasim 让 grok 走中转、写了账本：照常读，不靠执行体名单判死
+    mkdirSync(join(dir, uuid));
+    writeFileSync(
+      join(dir, uuid, 'index-1.ndjson'),
+      `${JSON.stringify({ ts: Date.now(), status: 200, viaRelay: true, model: 'grok-4.7' })}\n`,
+    );
+    expect(await readMirasimLedger(dir, `grok:${uuid}`)).toMatchObject({
+      state: 'read',
+      rows: [{ status: 200, viaRelay: true, model: 'grok-4.7' }],
+    });
   });
 
   it('给了 fs 就经它读，不碰本机文件系统（账本在别的系统用户家里、调用方进不去时用，real/index.ts 的生产装配）；readdir 认 ENOENT 分「没有这个会话的目录」和别的读不了；readFile 抛的错按 code 报', async () => {
