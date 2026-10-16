@@ -147,6 +147,12 @@
   "cliTools": {
     "说明": "法国上的命令行工具跟哪个渠道（#1971）。空闲或发版重启窗口里由 root 升。没写 channel 的不升：Cursor、reclaude 有各自的更新路径。Claude Code 跟 npm 的 stable（官方说约晚一周、跳过有大问题的版本）。Codex、Grok 跟 latest 且发布满 3 天（latest+3d）才升。要用刚发的新模型，把那一项的 channel 改成 latest。",
     "tools": {
+      "go": {
+        "name": "Go",
+        "via": "tar",
+        "version": "1.25.1",
+        "bin": "/usr/local/bin/go"
+      },
       "claude-code": {
         "name": "Claude Code",
         "via": "npm",
