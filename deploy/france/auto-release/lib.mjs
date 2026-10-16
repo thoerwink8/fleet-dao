@@ -481,7 +481,11 @@ export function gateVerdict(facts) {
       return `有一趟发版在跑（${sha}），等它收尾`;
     }
     // 判据在 trainFailureSuperseded：current 已等于或新于失败记录的 target，旧 failed 不再要人看。
-    if (t.status !== 'done' && t.status !== 'aborted' && !trainFailureSuperseded(t, facts.current, facts.mainline)) {
+    if (
+      t.status !== 'done' &&
+      t.status !== 'aborted' &&
+      !trainFailureSuperseded(t, facts.current, facts.mainline)
+    ) {
       return `上一趟发版是「${t.status}」状态，要人看，不自动再发`;
     }
   }
