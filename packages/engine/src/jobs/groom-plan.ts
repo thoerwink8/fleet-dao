@@ -20,7 +20,7 @@
 // - 会话只看得到、也只能点到「作者在白名单里」的开着的单：陌生人开的单正文不进提示词（防提示词注入），清单点到它们也丢进 rejected。
 // - 涉及改标准路径、`.github/workflows/`（正文里认得出路径，补老单连原单正文一起认）或对外发布，贴「本机做」并留一句原因，引擎不拉。
 //   「要人拍」只留给会话标了要掏新钱、或删了找不回又没备份的（needsHuman 一标就是，哪怕那句话里也写了工作流路径；
-//   或判断写成 human 而引擎认不出是上面三类）。
+//   判断写成 human 的，原因里写了掏钱、删了找不回也是，哪怕也写了工作流路径；别的只在引擎认不出是上面三类时才是）。
 // - 单条动作失败（GitHub 写不进）进 rejected，别的条照做；全部尝试的动作都失败，调用方当整理失败。
 
 import {
@@ -195,6 +195,14 @@ export function localWorkReason(text: string, rules: readonly StandardPath[]): s
     if (rule) return `涉及改标准的路径 ${p}（${rule.path}），留给本机做`;
   }
   return null;
+}
+
+/**
+ * 判断的原因里写没写要创始人拍的两件事：掏新钱（订阅、充值、按量计费……）、删了找不回又没备份。
+ * 只认这两件的说法，光写「删」不算（删一个工作流文件是本机做的事）。
+ */
+export function founderMatter(text: string): boolean {
+  return /掏新钱|花钱|付费|计费|充值|订阅|账单|找不回|没备份|无备份|没有备份|不可恢复|恢复不了/.test(text);
 }
 
 /** 贴「本机做」时留在单上的那一句。 */
@@ -475,7 +483,8 @@ export async function executeGroomPlan(
       });
       if (ok) suggestedClose.push(item.issue);
     } else {
-      const hold = groomHold(reason, undefined, ctx.standardPaths);
+      // 会话判 human：原因里写了掏钱、删了找不回就照它贴「要人拍」，不因同一句里的工作流路径改判；否则认得出是本机做的改判。
+      const hold = founderMatter(reason) ? null : groomHold(reason, undefined, ctx.standardPaths);
       const local = hold?.kind === 'local' ? hold : null;
       const ok = await act(what, async () => {
         if (local) {

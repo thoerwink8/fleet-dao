@@ -578,6 +578,31 @@ describe('executeGroomPlan · 判断', () => {
     expect(new Set(f.calls.map((c) => c.kind))).toEqual(new Set(['addLabel', 'comment']));
   });
 
+  it('判 human、原因里写了按量计费又写了工作流路径 → 贴「要人拍」，不因路径改判「本机做」', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        reviews: [{ issue: 3, verdict: 'human', reason: '为 `.github/workflows/ci.yml` 开通新的按量计费' }],
+      }),
+      ctxOf([issue(3)]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['要人拍']);
+    expect(out.result.flagged).toEqual([3]);
+  });
+
+  it('判 human、原因里只写了工作流路径 → 改贴「本机做」并留原因，不贴「要人拍」', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ reviews: [{ issue: 3, verdict: 'human', reason: '要改 `.github/workflows/ci.yml`' }] }),
+      ctxOf([issue(3)]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    expect(String(f.calls.find((c) => c.kind === 'comment')?.args.body)).toContain('.github/workflows/');
+    expect(out.result.flagged).toEqual([]);
+  });
+
   it('已经贴着这个标签的不重复贴；超过 40 条判断的丢掉', async () => {
     const f = fakeWrites();
     const issues = Array.from({ length: 42 }, (_, i) =>
