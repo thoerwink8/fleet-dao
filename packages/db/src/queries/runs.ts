@@ -409,7 +409,13 @@ const usageIncomplete = or(
 export const USAGE_GAVE_UP_PREFIX = '用量不再补：';
 
 /**
- * #2675 改了读法（用量账本里没有计费调用的再拿流量记录核）：按新读法定案不再补的，usage_note 末尾带这个记号；不带的是改读法
+ * 按放宽后的计费窗口算过的一笔，usage_note 以它开头（「已补」或「没读成」）。已补齐的老行重读尾巴时认这个前缀，只碰一次。
+ */
+export const USAGE_TAIL_PREFIX = '叫停后的调用';
+
+/** 尾巴补进这一笔之后的记号（USAGE_TAIL_PREFIX 开头）。页面不显示：四样已经齐。 */
+export const USAGE_TAIL_MARKER = '叫停后的调用已补';
+/** #2675 改了读法（用量账本里没有计费调用的再拿流量记录核）：按新读法定案不再补的，usage_note 末尾带这个记号；不带的是改读法
  * 之前定案的老行，runsGaveUpAwaitingReread 收它们按新读法再读一次，读完带上记号，不再读第二次。
  */
 export const USAGE_REREAD_MARK = '（按 #2675 起的读法读过）';
@@ -422,12 +428,59 @@ export interface MeterPendingRun {
   model: string;
   startedAt: Date;
   endedAt: Date;
+  /** 同一会话里更晚的那一笔的起点；没有下一笔是 null。这一笔的计费窗口收到它和结束后宽限里更早的那个。 */
+  nextStartedAt: Date | null;
   /** 同一会话（续跑）在这一笔起点之前结束的上一笔的终点：读账本时起点往前放宽不越过它。没有上一笔是 null。 */
   previousEndedAt: Date | null;
   usageNote: string | null;
   /** 这一行上次动是什么时候：读不成的每次都改写 usage_note（带第几次），所以它就是上次补记的时刻，退避看它。 */
   updatedAt: Date;
 }
+
+/** 四样已经齐、还没按放宽后的窗口重读过尾巴的一笔。 */
+export interface MeterTailRun {
+  id: string;
+  sessionId: string;
+  model: string;
+  startedAt: Date;
+  endedAt: Date;
+  nextStartedAt: Date | null;
+  usageNote: string | null;
+  /** 原来记上的花费；尾巴上也有花费才相加，空的不拿尾巴的花费顶成整笔的花费。 */
+  costUsd: number | null;
+}
+
+/** 同一会话里、这一笔之后最先起的那一笔（还没结束的也算）。没有就是 null。 */
+function nextRunStartedAt() {
+  return sql<string | Date | null>`(
+    select min(n.started_at) from runs n
+    where n.session_id = ${runs.sessionId}
+      and (
+        n.started_at > ${runs.startedAt}
+        or (n.started_at = ${runs.startedAt} and n.id > ${runs.id})
+      )
+  )`;
+}
+
+function dateOrNull(v: unknown): Date | null {
+  if (v == null) return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  if (typeof v === 'string' || typeof v === 'number') {
+    const d = new Date(v);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+const tailNotMarked = or(isNull(runs.usageNote), sql`${runs.usageNote} not like ${`${USAGE_TAIL_PREFIX}%`}`);
+
+/** 四样 token 都记上了。 */
+const usageComplete = and(
+  isNotNull(runs.inputTokens),
+  isNotNull(runs.outputTokens),
+  isNotNull(runs.cacheReadTokens),
+  isNotNull(runs.cacheWriteTokens),
+);
 
 /** 同一会话在这一笔起点之前（含）结束的上一笔的终点（毫秒），续跑的会话才有。 */
 const previousEndedMs = sql<number | string | null>`(
@@ -442,6 +495,7 @@ const meterPendingColumns = {
   model: runs.model,
   startedAt: runs.startedAt,
   endedAt: runs.endedAt,
+  nextStartedAt: nextRunStartedAt(),
   previousEndedMs,
   usageNote: runs.usageNote,
   updatedAt: runs.updatedAt,
@@ -454,21 +508,42 @@ function toMeterPending(
     model: string;
     startedAt: Date;
     endedAt: Date | null;
+    nextStartedAt: string | Date | null;
     previousEndedMs: number | string | null;
     usageNote: string | null;
     updatedAt: Date;
   }[],
 ): MeterPendingRun[] {
-  return rows.flatMap(({ previousEndedMs: prev, ...r }) =>
+  return rows.flatMap(({ previousEndedMs: prev, nextStartedAt, ...r }) =>
     r.sessionId !== null && r.endedAt !== null
       ? [
           {
             ...r,
             sessionId: r.sessionId,
             endedAt: r.endedAt,
+            nextStartedAt: dateOrNull(nextStartedAt),
             previousEndedAt: prev === null ? null : new Date(Math.round(Number(prev))),
           },
         ]
+      : [],
+  );
+}
+
+function toMeterTail(
+  rows: {
+    id: string;
+    sessionId: string | null;
+    model: string;
+    startedAt: Date;
+    endedAt: Date | null;
+    nextStartedAt: string | Date | null;
+    usageNote: string | null;
+    costUsd: number | null;
+  }[],
+): MeterTailRun[] {
+  return rows.flatMap((r) =>
+    r.sessionId !== null && r.endedAt !== null
+      ? [{ ...r, sessionId: r.sessionId, endedAt: r.endedAt, nextStartedAt: dateOrNull(r.nextStartedAt) }]
       : [],
   );
 }
@@ -500,6 +575,44 @@ export async function runsAwaitingMeter(
     .orderBy(asc(runs.endedAt), asc(runs.id))
     .limit(input.limit);
   return toMeterPending(rows);
+}
+
+/**
+ * 四样已经齐、endedAfter 以后结束、记了会话号、usage_note 还没带「叫停后的调用」记号的 Mirasim 行。
+ * 近 14 天里按旧窗口（收到 ended_at）补齐的那些，重读时把终点之后的尾巴补上；带了记号的不再收。
+ */
+export async function runsAwaitingMeterTail(
+  db: Db,
+  input: { endedAfter: Date; limit: number },
+): Promise<MeterTailRun[]> {
+  if (!Number.isInteger(input.limit) || input.limit <= 0)
+    throw new RunInputError(`limit 要是正整数：${input.limit}`);
+  const rows = await db
+    .select({
+      id: runs.id,
+      sessionId: runs.sessionId,
+      model: runs.model,
+      startedAt: runs.startedAt,
+      endedAt: runs.endedAt,
+      nextStartedAt: nextRunStartedAt(),
+      usageNote: runs.usageNote,
+      costUsd: runs.costUsd,
+    })
+    .from(runs)
+    .innerJoin(routes, eq(routes.id, runs.routeId))
+    .where(
+      and(
+        eq(routes.hostId, 'mirasim'),
+        isNotNull(runs.sessionId),
+        isNotNull(runs.endedAt),
+        gte(runs.endedAt, input.endedAfter),
+        usageComplete,
+        tailNotMarked,
+      ),
+    )
+    .orderBy(asc(runs.endedAt), asc(runs.id))
+    .limit(input.limit);
+  return toMeterTail(rows);
 }
 
 /**
@@ -541,16 +654,7 @@ export interface MeterUsageWrite {
   costUsd?: number | undefined;
 }
 
-/**
- * 把读齐了的用量写回这一笔：四样 token 整套换成计量的数（会话结束时快照里的输出只是近似，计量才是逐次调用的账），中转报了花费才写
- * 花费，清掉原因（给了 note 就换成它：用量记 0 的那种要写明为什么是 0）。只改四样还有缺的行：补齐了的再来一遍什么都不做
- * （回 false），重复跑、两轮叠着跑都不会改第二次。
- */
-export async function fillRunUsageFromMeter(
-  db: Db,
-  input: { runId: string; usage: MeterUsageWrite; at: Date; note?: string },
-): Promise<boolean> {
-  const u = input.usage;
+function assertMeterUsage(u: MeterUsageWrite): void {
   for (const [name, v] of Object.entries({
     inputTokens: u.inputTokens,
     outputTokens: u.outputTokens,
@@ -562,6 +666,26 @@ export async function fillRunUsageFromMeter(
   if (u.costUsd !== undefined && !(Number.isFinite(u.costUsd) && u.costUsd >= 0)) {
     throw new RunInputError(`costUsd 要是非负数：${u.costUsd}`);
   }
+}
+
+/** 记号不以「叫停后的调用」开头的话，下一轮还会把这行收进来，尾巴加第二次。 */
+function assertTailNote(note: string): void {
+  if (!note.startsWith(USAGE_TAIL_PREFIX)) {
+    throw new RunInputError(`补记要带「${USAGE_TAIL_PREFIX}」开头的记号，不然同一笔会再补一次`);
+  }
+}
+
+/**
+ * 把读齐了的用量写回这一笔：四样 token 整套换成计量的数（会话结束时快照里的输出只是近似，计量才是逐次调用的账），中转报了花费才写
+ * 花费，usage_note 写上记号（按放宽后的窗口算过，尾巴不会再加一遍）。只改四样还有缺的行：补齐了的再来一遍什么都不做（回 false），
+ * 重复跑、两轮叠着跑都不会改第二次。
+ */
+export async function fillRunUsageFromMeter(
+  db: Db,
+  input: { runId: string; usage: MeterUsageWrite; at: Date; note?: string },
+): Promise<boolean> {
+  const u = input.usage;
+  assertMeterUsage(u);
   const rows = await db
     .update(runs)
     .set({
@@ -574,6 +698,37 @@ export async function fillRunUsageFromMeter(
       updatedAt: input.at,
     })
     .where(and(eq(runs.id, input.runId), isNotNull(runs.endedAt), usageIncomplete))
+    .returning({ id: runs.id });
+  return rows.length > 0;
+}
+
+/**
+ * 已补齐的老行补上终点之后的尾巴：四样加上 add（没给就是只做记号、不改数），花费只在原来有、尾巴上也有时才加。
+ * 只改还没带记号的、四样已经齐的行。写了回 true；已经带过记号的回 false，再补不会加第二次。
+ */
+export async function fillRunMeterTail(
+  db: Db,
+  input: { runId: string; at: Date; note: string; add?: MeterUsageWrite },
+): Promise<boolean> {
+  assertTailNote(input.note);
+  const add = input.add;
+  if (add) assertMeterUsage(add);
+  const rows = await db
+    .update(runs)
+    .set({
+      ...(add
+        ? {
+            inputTokens: sql`${runs.inputTokens} + ${add.inputTokens}::bigint`,
+            outputTokens: sql`${runs.outputTokens} + ${add.outputTokens}::bigint`,
+            cacheReadTokens: sql`${runs.cacheReadTokens} + ${add.cacheReadTokens}::bigint`,
+            cacheWriteTokens: sql`${runs.cacheWriteTokens} + ${add.cacheWriteTokens}::bigint`,
+            ...(add.costUsd !== undefined ? { costUsd: sql`${runs.costUsd} + ${add.costUsd}::numeric` } : {}),
+          }
+        : {}),
+      usageNote: input.note,
+      updatedAt: input.at,
+    })
+    .where(and(eq(runs.id, input.runId), isNotNull(runs.endedAt), usageComplete, tailNotMarked))
     .returning({ id: runs.id });
   return rows.length > 0;
 }
