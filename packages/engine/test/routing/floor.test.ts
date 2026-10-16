@@ -189,8 +189,37 @@ describe('人的指令不驳', () => {
     expect(r.modelId).toBe('deepseek-flash');
   });
 
-  it('没标强弱档的模型照决定 0099「没标档照以前」：不按下限挡', () => {
-    const r = dispatched(pick({ tier: 'medium' }, routesOf({ flash: { strength: null } })));
+  it('人点名放行没标强弱档的模型（floorWaived）', () => {
+    const r = dispatched(
+      pick(
+        { tier: 'medium', floorWaived: '人在驾驶舱给这张单指定了 deepseek-flash' },
+        routesOf({ flash: { strength: null } }),
+      ),
+    );
     expect(r.modelId).toBe('deepseek-flash');
+  });
+});
+
+describe('没标强弱档按不够格（#2725 收尾）', () => {
+  const untagged = () => routesOf({ flash: { strength: null } });
+
+  it('主力档、中档：没标档的挡掉，理由写去 deploy/catalog.json 标档', () => {
+    for (const tier of ['heavyweight', 'medium'] as const) {
+      const r = dispatched(pick({ tier }, untagged()));
+      expect(r.modelId).not.toBe('deepseek-flash');
+      expect(blockOf(r, 'flash')?.text).toContain('没标强弱档，够不上能力下限：去 deploy/catalog.json 标档');
+    }
+  });
+
+  it('降档后也不放行没标档的：强档、标准档都被挡就派不出', () => {
+    const r = pick({}, off(untagged(), 'opus', 'grok'));
+    expect(r.kind).toBe('none');
+    expect(r.kind === 'none' && r.reason).toContain('没标强弱档');
+  });
+
+  it('快档、没有下限的用途照旧不管', () => {
+    expect(dispatched(pick({ tier: 'fast' }, untagged())).modelId).toBe('deepseek-flash');
+    expect(dispatched(pick({ stage: 'judge' }, untagged())).modelId).toBe('deepseek-flash');
+    expect(dispatched(chooseRoute(input(untagged()))).modelId).toBe('deepseek-flash');
   });
 });

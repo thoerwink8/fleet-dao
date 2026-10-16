@@ -222,9 +222,11 @@ describe('重活先给强档', () => {
     }
   });
 
-  it('没标档：主力档也照以前（按质量下界），不先给强档', () => {
-    const r = dispatched(chooseRoute(heavy(routesOf({}, false))));
-    expect(r.why).not.toContain('先给强档');
+  it('没标档：主力档不先给强档；没标档的都够不上能力下限，派不出（#2725 收尾）', () => {
+    const r = chooseRoute(heavy(routesOf({}, false)));
+    expect(r.kind).toBe('none');
+    expect(r.kind === 'none' && r.reason).not.toContain('先给强档');
+    expect(r.kind === 'none' && r.reason).toContain('没标强弱档，够不上能力下限');
     expect(r.verdicts.flatMap((v) => v.nudges.map((n) => n.kind))).not.toContain('strength-first');
   });
 
