@@ -1,7 +1,7 @@
 // 任务页的三段（对题 / 动手 / 验收）那几块：合计四格、按段每段再按模型的表、每一笔的明细（#216）。
 // 数都是后端算好的（usage.bySegment、segmentRuns，算法在 shared 的 usage.ts、segment-runs.ts），这里只管怎么说：
 // 读到的照数写；读到一部分照数写、写明几次没读到；全没读到写「没读到」，不写 0；每一笔没读到的原因原样列出来。
-import type { SegmentKind, UsageTotals } from '@fleet-dao/shared';
+import { type SegmentKind, USAGE_BOARD_UNREAD, type UsageTotals } from '@fleet-dao/shared';
 import { ChevronDown } from 'lucide-react';
 import { Fragment, type ReactNode, useState } from 'react';
 import type { Repo, TaskDetail } from '../api/types';
@@ -676,7 +676,7 @@ function SegmentTag({ segment }: { segment: SegmentKind | null }) {
   );
 }
 
-/** 一笔的 token、当量、花费：读到的照写，没读到的不写在这里（原因在下面那几行）。 */
+/** 一笔的 token、当量、花费：读到的照写，没读到的不写在这里（原因在下面那几行）。会话号没拿到的写「读不到」，不留空行。 */
 function runFigures(run: SegmentRunView): string[] {
   const parts: string[] = [];
   if (run.inputTokens !== undefined) parts.push(`输入 ${formatCount(run.inputTokens)}`);
@@ -692,6 +692,9 @@ function runFigures(run: SegmentRunView): string[] {
   }
   if (run.estimate?.kind === 'estimated') parts.push(`估算 ${formatUsd(run.estimate.usd)}（按目录单价）`);
   if (run.memoryPeakMb !== undefined) parts.push(`内存峰值 ${formatCount(run.memoryPeakMb)} MB`);
+  if (parts.length === 0 && !run.running && run.unread.some((n) => n.reason === USAGE_BOARD_UNREAD)) {
+    parts.push(USAGE_BOARD_UNREAD);
+  }
   return parts;
 }
 
@@ -775,11 +778,17 @@ function RunRow({
       </div>
       {figures.length || run.prNumber !== undefined || run.branch ? (
         <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-meta text-muted-foreground">
-          {figures.map((f) => (
-            <span key={f} className="num">
-              {f}
-            </span>
-          ))}
+          {figures.map((f) =>
+            f === USAGE_BOARD_UNREAD ? (
+              <span key={f} data-usage-unread="">
+                {f}
+              </span>
+            ) : (
+              <span key={f} className="num">
+                {f}
+              </span>
+            ),
+          )}
           {run.prNumber !== undefined ? (
             <RepoLink
               repo={repo}

@@ -15,6 +15,8 @@
 //   的，会话结束过了 NONE_SETTLE_MS 就把四样和花费记 0，usage_note 写明为什么是 0；有调用没对上的照旧留空、退避着读，原因写清
 //   是哪种没对上。改读法之前就定案不再补的老行（回看 USAGE_REREAD_LOOKBACK_MS）按新读法再读一次，读完带 USAGE_REREAD_MARK，
 //   不再读第二次。
+// - 没会话号的不进账本（不知道是哪个会话）。每一轮先在 14 天窗口里把它们写上原因（#2689）：确定没发出模型调用的记 0，
+//   读不准的只写「会话号没拿到，用量读不到」。已经有原因的不再碰。
 
 import type { MeterReading, MeterWindow } from '@fleet-dao/adapters';
 import {
@@ -32,6 +34,11 @@ export const USAGE_BACKFILL_EVERY_MINUTES = 5;
 export const USAGE_BACKFILL_OFFSET_MINUTES = 2;
 /** 补多久以内结束的会话：Mirasim 自己最多回填 14 天，引擎这边一天还没齐就不再问了（原因留着）。 */
 export const USAGE_BACKFILL_LOOKBACK_MS = 24 * 60 * 60_000;
+/**
+ * 没有会话号的已结束 run 补写原因的窗口（#2689）。补记任务不收它们，窗口要比上面的一天长，
+ * 和法国复查、Mirasim 账本保留一样看 14 天。确定没调用的记 0，读不准的只写原因。
+ */
+export const USAGE_SESSIONLESS_LOOKBACK_MS = 14 * 24 * 60 * 60_000;
 /** 一轮最多补多少笔（先结束的先补）：一次 ls、一次筛行，量大了下一轮接着补。 */
 export const USAGE_BACKFILL_BATCH = 50;
 /** 会话结束过了这么久还没回填齐，原因里写「迟迟没回填」（正常几分钟就齐）。 */
@@ -82,6 +89,11 @@ export interface UsageBackfillJobDeps {
   fill(runId: string, usage: MeterUsageWrite, at: Date, note?: string): Promise<boolean>;
   /** db 的 noteRunUsage。 */
   note(runId: string, note: string, at: Date): Promise<boolean>;
+  /**
+   * db 的 annotateSessionlessRuns：这一轮先把没有会话号的写上原因（确定没调用的记 0）。
+   * 不给就跳过（测试里只看按会话号补的那一段）。
+   */
+  annotateSessionless?(endedAfter: Date, at: Date): Promise<number>;
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -122,6 +134,10 @@ export function meterNote(
 
 async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
   const now = deps.now();
+  // 没会话号的补记任务不收：先把确定没调用的记成 0、读不准的写上原因，看板上才分得清真漏和没跑起来（#2689）
+  const noted =
+    (await deps.annotateSessionless?.(new Date(now.getTime() - USAGE_SESSIONLESS_LOOKBACK_MS), now)) ?? 0;
+  if (noted > 0) deps.log('info', '没有会话号的用量已写上原因', { noted });
   // 读不成过的还在退避里的这一轮不碰（它们的原因已经在 usage_note 里）
   const fresh = (
     await deps.pending({

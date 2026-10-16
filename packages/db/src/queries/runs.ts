@@ -3,10 +3,10 @@
 // 操作条款：
 // - start/runId：幂等（同一次跑写进去两笔）
 // - endedAt / outcome 一对空/不空；
-// - 读不到的字段 NULL，不拿 0 顶（#216）。
+// - 读不到的字段 NULL，不拿 0 顶（#216）。确定没发出模型调用的例外：记 0 并写 usage_note（#2689）。
 
 import { randomUUID } from 'node:crypto';
-import { laterGenerationPattern } from '@fleet-dao/shared';
+import { laterGenerationPattern, sessionlessUsage, USAGE_SESSION_UNREAD } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
@@ -282,6 +282,7 @@ export async function runsOfTask(
  * （起来时的收尾收掉了它们的 scope），库里那几行不收，切号就一直以为它们在跑、一直等。脱开引擎跑、等人接回的那几个
  * （#2238）放进 except 不收；过了时限还没人接的再用 only 单收那几行。
  * 收的时刻早于开跑时刻（时钟回拨）就按开跑时刻收，不撞 runs_ended_after_start。是引擎退了断的，不算路由的账（neutral）。
+ * 没有会话号的写上「会话号没拿到，用量读不到」：开跑那一行已经写下，说明进程可能起来过，不能记成 0（#2689）。已经有原因或有会话号的不改。
  */
 export async function closeOpenRuns(
   db: Db,
@@ -298,6 +299,7 @@ export async function closeOpenRuns(
         outcome: 'killed',
         routeOutcome: 'neutral',
         failureReason: input.reason,
+        usageNote: sql`coalesce(${runs.usageNote}, case when ${runs.sessionId} is null then ${USAGE_SESSION_UNREAD} else null end)`,
         updatedAt: input.endedAt,
       })
       .where(
@@ -313,6 +315,83 @@ export async function closeOpenRuns(
     const message = errMessage(error);
     throw new RunInputError(`收掉没结束的 runs 失败：${message}`, { cause: error });
   }
+}
+
+/**
+ * 近一段时间结束、没有会话号、原因也空着的 runs：确定没发出模型调用的记 0 并写原因，读不准的只写
+ * 「会话号没拿到，用量读不到」（#2689）。补记任务不收没会话号的，不在这里补，它们会永远显示成用量缺。
+ * 已经有原因、有会话号、还在跑的不动。再跑一次一行都不改。返回这次写上原因的笔数。
+ */
+export async function annotateSessionlessRuns(
+  db: Db,
+  input: { endedAfter: Date; at: Date },
+): Promise<number> {
+  const rows = await db
+    .select({
+      id: runs.id,
+      outcome: runs.outcome,
+      failureReason: runs.failureReason,
+      inputTokens: runs.inputTokens,
+      outputTokens: runs.outputTokens,
+      cacheReadTokens: runs.cacheReadTokens,
+      cacheWriteTokens: runs.cacheWriteTokens,
+    })
+    .from(runs)
+    .where(
+      and(
+        isNull(runs.sessionId),
+        isNull(runs.usageNote),
+        isNotNull(runs.endedAt),
+        gte(runs.endedAt, input.endedAfter),
+      ),
+    );
+  let noted = 0;
+  for (const row of rows) {
+    const hasToken =
+      row.inputTokens !== null ||
+      row.outputTokens !== null ||
+      row.cacheReadTokens !== null ||
+      row.cacheWriteTokens !== null;
+    const decision = sessionlessUsage({
+      outcome: row.outcome ?? '',
+      failureReason: row.failureReason,
+      hasSessionId: false,
+      hasUsageWhy: false,
+      hasToken,
+    });
+    if (decision.kind === 'leave') continue;
+    const updated =
+      decision.kind === 'zero'
+        ? await db
+            .update(runs)
+            .set({
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheWriteTokens: 0,
+              costUsd: sql`coalesce(${runs.costUsd}, 0)`,
+              usageNote: decision.note,
+              updatedAt: input.at,
+            })
+            .where(
+              and(
+                eq(runs.id, row.id),
+                isNull(runs.usageNote),
+                isNull(runs.inputTokens),
+                isNull(runs.outputTokens),
+                isNull(runs.cacheReadTokens),
+                isNull(runs.cacheWriteTokens),
+              ),
+            )
+            .returning({ id: runs.id })
+        : await db
+            .update(runs)
+            .set({ usageNote: decision.note, updatedAt: input.at })
+            .where(and(eq(runs.id, row.id), isNull(runs.usageNote)))
+            .returning({ id: runs.id });
+    if (updated.length > 0) noted += 1;
+  }
+  return noted;
 }
 
 /** 四样 token 有一样没记上（「用量补记」要补的那几笔，和补齐之后不再碰的判法是同一条）。 */

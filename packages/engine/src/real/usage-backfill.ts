@@ -6,6 +6,7 @@
 // runsGaveUpAwaitingReread 按新读法再读一次。
 import { type MeterFs, readMirasimMeter, type SessionUser } from '@fleet-dao/adapters';
 import {
+  annotateSessionlessRuns,
   type Db,
   fillRunUsageFromMeter,
   finishScheduleRun,
@@ -45,6 +46,7 @@ export function usageBackfillJob(w: UsageBackfillWiring): () => UsageBackfillJob
     fill: (runId, usage, at, note) =>
       fillRunUsageFromMeter(w.db, { runId, usage, at, ...(note !== undefined ? { note } : {}) }),
     note: (runId, note, at) => noteRunUsage(w.db, { runId, note, at }),
+    annotateSessionless: (endedAfter, at) => annotateSessionlessRuns(w.db, { endedAfter, at }),
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),
       finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

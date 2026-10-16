@@ -1,7 +1,12 @@
 // 三段的一笔怎么读（#216）：认得出的照给，读不到的逐样点名、带原因。每条「没读到」的路径都故意造一次——段名认不出、
 // 起止缺一头、token 没记到、花费没记到、派工档没记——看它写明为什么，而不是给 0、给空、或当在跑。
 import { describe, expect, it } from 'vitest';
-import { readSegmentRun, type SegmentRunFacts } from '../src/segment-runs.ts';
+import {
+  readSegmentRun,
+  type SegmentRunFacts,
+  USAGE_BOARD_UNREAD,
+  USAGE_SESSION_UNREAD,
+} from '../src/segment-runs.ts';
 import { SegmentRunSchema } from '../src/web-api.ts';
 
 const T0 = Date.parse('2026-10-03T01:00:00.000Z');
@@ -194,6 +199,24 @@ describe('【失败】token、花费没记到', () => {
     const bad = read(run({ costUsd: Number.NaN }));
     expect(bad.costUsd).toBeUndefined();
     expect(reasonOf(bad, 'cost')).toBe('花费「NaN」认不出');
+  });
+
+  it('会话号没拿到：看板写「读不到」，不是空、也不是「都没记到」', () => {
+    const v = read(
+      without(
+        run({ usageNote: USAGE_SESSION_UNREAD, outcome: 'killed' }),
+        'inputTokens',
+        'outputTokens',
+        'cacheReadTokens',
+        'cacheWriteTokens',
+        'costUsd',
+      ),
+    );
+    expect(v.inputTokens).toBeUndefined();
+    expect(v.costUsd).toBeUndefined();
+    expect(reasonOf(v, 'tokens')).toBe(USAGE_BOARD_UNREAD);
+    expect(reasonOf(v, 'cost')).toBe(USAGE_BOARD_UNREAD);
+    expect(v.estimate).toBeUndefined();
   });
 
   it('进程没起来的一段：说清是没起来，不是漏记', () => {
