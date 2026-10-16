@@ -104,8 +104,8 @@ runMain(() => {
   if (typeof assigned === 'string') fail(assigned);
   let { plan } = assigned;
   const { packed } = assigned;
-  // e2e 出 PR 闸（决定 0093）：PR 上不跑，合并后主线推送那一轮按区间跑、当发版闸
-  if (event === 'pull_request') plan = deferE2eToMain(plan);
+  // e2e 出 PR 闸（决定 0093）：PR 上不跑，合并后主线推送那一轮按区间跑、当发版闸；碰到风险路径（#2674）的 PR 跑全套
+  if (event === 'pull_request') plan = deferE2eToMain(plan, changed);
   // 同树复用：只在主线推送、给了区间基准时认；这里再核一遍两棵树（main-reuse.ts 那一步核过，这里不信它的输出）。
   // 对不上、认不出一律当没复用：test、web、deploy 照区间全跑，并留 ::warning::。
   if (reuseText.trim() !== '') {

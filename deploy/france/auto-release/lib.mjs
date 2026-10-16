@@ -429,9 +429,33 @@ async function readCiBody(io) {
 }
 
 /**
+ * 旧的 failed 进度还挡不挡自动发版。
+ * 判据：current 的提交号等于这份失败记录里的 target，或在 mainline（从新到旧）里排在它前面（新于它）。
+ * current 已经追上或超过那一趟的目标时，不得再因这份 failed 回「上一趟 failed 要人看」。
+ * 比不出先后（current 没有、target 不是提交号、两边不都在 mainline 里）仍挡，不猜成可以发。
+ * 只认 status=failed；running 由调用方先挡掉，不拿这条把正在走的一趟放过去。
+ */
+export function trainFailureSuperseded(train, current, mainline) {
+  if (!train || typeof train !== 'object' || train.status !== 'failed') return false;
+  const raw = train.target && typeof train.target === 'object' ? train.target.value : '';
+  if (typeof raw !== 'string' || typeof current !== 'string') return false;
+  if (!/^[0-9a-f]{7,40}$/.test(raw) || !/^[0-9a-f]{7,40}$/.test(current)) return false;
+  const same = (a, b) => a === b || a.startsWith(b) || b.startsWith(a);
+  if (same(current, raw)) return true;
+  if (!Array.isArray(mainline)) return false;
+  const at = (sha) => mainline.findIndex((s) => typeof s === 'string' && same(s, sha));
+  const ci = at(current);
+  const ti = at(raw);
+  if (ci < 0 || ti < 0) return false;
+  return ci < ti;
+}
+
+/**
  * 自动发版的闸：releaseGate 读来的事实 → 回 null（可以发）或不发的原因。读不到、认不出的一律是原因，不当成可以发。
  * facts：{ missing: 缺的接活文件（数组，空 = 装了）, requestPending: 上一份请求还没被接走, marker: 有暂停标记,
- * trainText: 发版进度文件原文（不在是 null）, lockBusy: 发布锁被占着 }。
+ * trainText: 发版进度文件原文（不在是 null）, lockBusy: 发布锁被占着,
+ * current: 法国 current 的提交号（没有是 null）, mainline: 主线提交号，从新到旧 }。
+ * failed 记录：current 已等于或新于它所记 target 时不挡（trainFailureSuperseded）。
  */
 export function gateVerdict(facts) {
   if (!facts || typeof facts !== 'object') return '发版闸的事实没读到';
@@ -456,7 +480,12 @@ export function gateVerdict(facts) {
       const sha = typeof raw === 'string' && raw ? short(raw) : '进度记录没写提交';
       return `有一趟发版在跑（${sha}），等它收尾`;
     }
-    if (t.status !== 'done' && t.status !== 'aborted') {
+    // 判据在 trainFailureSuperseded：current 已等于或新于失败记录的 target，旧 failed 不再要人看。
+    if (
+      t.status !== 'done' &&
+      t.status !== 'aborted' &&
+      !trainFailureSuperseded(t, facts.current, facts.mainline)
+    ) {
       return `上一趟发版是「${t.status}」状态，要人看，不自动再发`;
     }
   }
@@ -490,7 +519,12 @@ async function releaseStep(io, st, now, current) {
   }
   let blocked;
   try {
-    blocked = gateVerdict(await io.releaseGate());
+    const gateFacts = await io.releaseGate();
+    blocked = gateVerdict({
+      ...gateFacts,
+      current,
+      mainline: Array.isArray(st.main?.commits) ? st.main.commits.map((row) => row[0]) : [],
+    });
   } catch (e) {
     blocked = `发版闸读不到：${why(e)}`;
   }

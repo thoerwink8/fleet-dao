@@ -25,7 +25,9 @@ import {
   deferE2eToMain,
   dependentsClosure,
   E2E_PAGE_MAP,
+  E2E_PR_RISK_PATHS,
   E2E_SPEC_DIR,
+  e2eRiskHit,
   e2eRuns,
   e2eSpecsFor,
   fallbackUnits,
@@ -1692,10 +1694,10 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
   });
 
   it('e2e 不在 PR 闸（决定 0093）：PR 上 deferE2eToMain 把清单清空、写进理由；PR 的 plan 里还有清单汇总就红', () => {
-    for (const changed of [['packages/web/src/routes/login.tsx'], ['packages/web/e2e/support/stack.ts']]) {
+    for (const changed of [['packages/web/src/routes/login.tsx'], ['packages/web/src/routes/task.tsx']]) {
       const p = assigned(pr(...changed));
       expect(e2eRuns(p.e2e), '这条查的场景不成立了').toBe(true);
-      const d = deferE2eToMain(p);
+      const d = deferE2eToMain(p, changed);
       expect(d.e2e).toEqual([]);
       expect(planOutputs(d).e2e).toBe('');
       expect(d.reasons.join('\n')).toContain('e2e 不在 PR 闸');
@@ -1705,18 +1707,65 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
       // 【故意造出的失败】PR 这一轮的 plan 里 e2e 还有清单（算计划那步漏了挪）：汇总红，即使 e2e 跑绿了
       const leaked = ciVerdict(needs(p), 'pull_request');
       expect(leaked.ok).toBe(false);
-      expect(leaked.lines.join('\n')).toContain('e2e 不在 PR 闸');
+      expect(leaked.lines.join('\n')).toContain('PR 上 e2e 只能全套或不跑');
       // 同一份清单在主线推送上照常要跑
       expect(ciVerdict(needs(p), 'push').ok).toBe(true);
     }
     // 本来就不跑的：原样返回，不多写理由
     const none = assigned(pr('packages/api/src/cockpit.ts'));
-    expect(deferE2eToMain(none)).toBe(none);
+    expect(deferE2eToMain(none, ['packages/api/src/cockpit.ts'])).toBe(none);
   });
 
-  it('changes 的入口在 PR 事件上调 deferE2eToMain（清单只在主线推送那一轮用）', () => {
+  it('PR 碰到风险路径（表结构、迁移、e2e 样例数据和用例、catalog）跑 e2e 全套，合并闸当必过项（#2674）', () => {
+    const risky = [
+      'packages/db/src/schema/tasks.ts',
+      'packages/db/migrations/0001_triggers.sql',
+      'packages/store/src/testing/pg-fixtures.ts',
+      'packages/api/test/e2e/seed.ts',
+      'packages/web/e2e/specs/01-login.e2e.ts',
+      'deploy/catalog.json',
+    ];
+    for (const f of risky) {
+      const d = deferE2eToMain(assigned(pr(f)), [f]);
+      expect(d.e2e, f).toBe('all');
+      expect(planOutputs(d).e2e).toBe('all');
+      expect(d.reasons.join('\n')).toContain('e2e 在 PR 上跑全套');
+      const ok = ciVerdict(needs(d), 'pull_request');
+      expect(ok.ok, ok.lines.join('\n')).toBe(true);
+      expect(ok.lines.join('\n')).toContain('✓ e2e：success');
+      // 跑了却红、被取消、被误跳过：合并闸红
+      for (const result of ['failure', 'cancelled', 'skipped']) {
+        const bad = ciVerdict(needs(d, { e2e: { result, outputs: {} } }), 'pull_request');
+        expect(bad.ok, `${f} ${result}`).toBe(false);
+        expect(bad.lines.join('\n')).toContain('e2e');
+      }
+    }
+    // 其余 PR 照旧不跑：只改 task.tsx（有 spec 映射）、只改 api 源码
+    for (const f of ['packages/web/src/routes/task.tsx', 'packages/api/src/cockpit.ts']) {
+      const d = deferE2eToMain(assigned(pr(f)), [f]);
+      expect(d.e2e, f).toEqual([]);
+      expect(planOutputs(d).e2e).toBe('');
+    }
+    // 风险路径加别的改动一起：照样全套
+    expect(
+      e2eRiskHit(['packages/web/src/routes/task.tsx', 'packages/store/src/testing/pg-fixtures.ts']),
+    ).toBe('packages/store/src/testing/pg-fixtures.ts');
+    expect(
+      e2eRiskHit(['packages/db/src/queries/tasks.ts', 'packages/store/src/testing-x.ts']),
+    ).toBeUndefined();
+  });
+
+  it('风险路径清单里的目录都真有（改名了这里要跟着改）', () => {
+    for (const p of E2E_PR_RISK_PATHS) {
+      expect(REPO.exists(p.replace(/\/$/, '')), `${p} 在仓里不存在`).toBe(true);
+    }
+  });
+
+  it('changes 的入口在 PR 事件上调 deferE2eToMain，并把改动文件交给它（清单只在 ci-plan.ts 一处）', () => {
     const bin = readFileSync(join(ROOT, 'packages/conventions/src/bin/ci-plan.ts'), 'utf8');
-    expect(bin).toMatch(/if \(event === 'pull_request'\) plan = deferE2eToMain\(plan\);/);
+    expect(bin).toMatch(/if \(event === 'pull_request'\) plan = deferE2eToMain\(plan, changed\);/);
+    const yml = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
+    expect(yml, 'ci.yml 不许另抄一份风险路径').not.toContain('packages/db/migrations');
   });
 
   /**

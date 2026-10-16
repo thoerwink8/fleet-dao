@@ -55,3 +55,11 @@
 ## 落地
 
 resume（#2037 及返工续会话）、release（#2038 及取消 1 小时间隔）、verify、ci、hooks、canary 六包，各自 PR 引用本决定。
+
+## 修订（2026-10-15，#2674）：碰到风险路径的 PR 照样跑 e2e
+
+第 6 条「E2E 挡发版、不挡 PR」补一个例外：PR 改动碰到表结构（`packages/db/src/schema/`）、迁移（`packages/db/migrations/`）、e2e 备库和样例数据（`packages/store/src/testing/`、`packages/api/test/e2e/`）、e2e 用例和夹具（`packages/web/e2e/`）、`deploy/catalog.json` 时，PR 的 CI 跑 e2e 全套（和主线推送同一个 job、同样分片），合并闸把它当必过项（跑了才算，没跑算过）；其余 PR 照旧不跑。
+
+为什么：#2399（删 session_runs）改了表结构和测试样例数据的读法，PR 上单元测试全绿就合了，主线 e2e 备库那一步对每个 worker 都失败，主线连红两轮、自动发版停了约 3 小时，偶发统计还开了两波共 168 张假单。e2e 出事的口子很集中，别的 PR 跑 e2e 多半白跑，所以只把减多了的这一小块按风险加回来。
+
+路径清单只写在 `packages/conventions/src/ci-plan.ts` 的 `E2E_PR_RISK_PATHS` 一处，`ci.yml` 只读 changes 的 e2e 输出。命中时输出 `all`（全套）而不是按 spec 映射：这些路径是整个备库、样例库的地基，说不准会碰到哪一页。
