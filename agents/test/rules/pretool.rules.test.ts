@@ -1,7 +1,8 @@
 // 钉住调工具前钩子（agents/hooks/pretool.mjs）拦的规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
-// 几条规矩：fleet-dao 里不用 git stash（list、show 放行）；fleet-dao 也不用 git reset --hard
-// （2026-10-05 把主检出还没验证的活丢过；要丢弃改动用 `git stash push -u -m '<tag>'` 或 `git diff > 文件`，其余 reset 紫色放行）；
-// 本机不切号、不登录、不退出（ssh 到别处的放行）；bash 里会被当命令执行的反引号全机都拦（单引号、带引号的 heredoc 里放行，
+// 几条规矩：fleet-dao 里不真跑 git stash（list、show 放行，命令里别处写到 stash 字样不算）；fleet-dao 也不用 git reset --hard
+// （会丢主检出没提交的活；要丢弃改动先 `git diff > 文件` 留底，其余 reset 放行）；
+// 本机有 Claude 会话在跑时不切号、不登录、不退出（调用来自 Claude Code 就算有；别家的调用数本机 Claude 进程，查不成放行并提示；
+// ssh 到别处的放行）；bash 里会被当命令执行的反引号全机都拦（单引号、带引号的 heredoc 里放行，
 // PowerShell 不管）；fleet-dao 开单走 pnpm issue:new；认不出的输入按拦处理；
 // 密钥文件的内容不进对话：碰到密钥路径只放行不读内容的（列目录、看权限、判断在不在），看结构走 secret-shape.mjs，
 // 它一个值都不打（2026-09-27 帅位按字段名猜着遮值，把 reclaude 的设备密钥和账号名打进了对话）。脚本改了这些判断，这里会红。
@@ -16,7 +17,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { runChild } from '../child.ts';
 
 interface PretoolLib {
-  decide(raw: string, fallbackCwd?: string): { code: number; message?: string };
+  decide(
+    raw: string,
+    fallbackCwd?: string,
+    opts?: { claudeRunning?: () => number },
+  ): { code: number; message?: string; context?: string };
+  gitStashWrites(command: string): boolean;
   SHELL_TOOLS: Record<string, string>;
   GITIGNORE_NOT_BLOCKED: Record<string, string>;
 }
@@ -67,6 +73,16 @@ const cases: Case[] = [
   [`git -C ../wt ${s} pop`, 2, F],
   [`git ${s} list`, 0, F],
   [`git ${s} show -p`, 0, F],
+  // 只认真正执行的 git stash：命令里别处写到 stash 字样的放行
+  [`grep -rn ${s} agents/hooks`, 0, F],
+  [`git log --grep ${s} --oneline`, 0, F],
+  [`git log | grep ${s}`, 0, F],
+  [`git commit -m "drop the ${s} rule"`, 0, F],
+  [`git grep -n ${s}`, 0, F],
+  [`cd ../wt && git ${s} drop`, 2, F],
+  [`git --no-pager ${s} clear`, 2, F],
+  [`git -c core.quotepath=off ${s} save x`, 2, F],
+  [`git ${s} apply`, 2, F],
   [`git ${resetHard}`, 2, F],
   [`git ${resetHard} origin/main`, 2, F],
   [`git ${resetHard} HEAD~3`, 2, F],
@@ -134,7 +150,8 @@ describe('调工具前钩子拦的规矩', () => {
   it.each(cases.map((c) => [JSON.stringify(c[0]), c[3] ?? 'Bash', c[1], c] as const))(
     '%s（%s）→ 退出码 %i',
     (_name, _tool, want, c) => {
-      const got = lib.decide(input(c));
+      // 切号那几条：当作本机有一个 Claude 进程在跑（真查本机进程的那条在下面「切号」一段单测）
+      const got = lib.decide(input(c), '', { claudeRunning: () => 1 });
       expect(got.code).toBe(want);
       if (want === 2) expect(got.message?.length ?? 0).toBeGreaterThan(0);
     },
@@ -174,7 +191,7 @@ describe('借道读这条钩子的几家：格式认得、规矩照拦', () => {
       });
     expect(lib.decide(grok('git status')).code).toBe(0);
     expect(lib.decide(grok(stash)).code).toBe(2);
-    expect(lib.decide(grok(`${rc} login`)).code).toBe(2);
+    expect(lib.decide(grok(`${rc} login`), '', { claudeRunning: () => 1 }).code).toBe(2);
   });
 
   it('Devin：终端工具叫 exec，输入里没有会话目录——按钩子进程的工作目录认是不是 fleet-dao', () => {
@@ -205,6 +222,93 @@ describe('借道读这条钩子的几家：格式认得、规矩照拦', () => {
         tool,
       ).toBe(0);
     }
+  });
+});
+
+describe('切号：真查本机有没有 Claude 会话在跑', () => {
+  const other = (command: string) => JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: O });
+  /** Claude Code 自己送来的输入（isClaudeCodeInput 认的那几个键都在） */
+  const claude = (command: string) =>
+    JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      transcript_path: '/t.jsonl',
+      permission_mode: 'default',
+      tool_use_id: 'toolu_1',
+      tool_name: 'Bash',
+      tool_input: { command },
+      cwd: O,
+    });
+
+  it('调用来自 Claude Code：它自己就是在跑的会话，拦，不用再数进程；文案说的是实情', () => {
+    let asked = 0;
+    const v = lib.decide(claude(`${rc} login`), '', { claudeRunning: () => (asked += 1) });
+    expect(v.code).toBe(2);
+    expect(asked).toBe(0);
+    expect(v.message).toContain('这次调用就来自本机一个在跑的 Claude 会话');
+  });
+
+  it('别家的调用：本机有 Claude 进程在跑就拦，文案带个数', () => {
+    const v = lib.decide(other(`${rc} org use x`), '', { claudeRunning: () => 2 });
+    expect(v.code).toBe(2);
+    expect(v.message).toContain('本机有 2 个 Claude 进程在跑');
+  });
+
+  it('别家的调用：本机一个 Claude 进程都没有，放行、不说话', () => {
+    const v = lib.decide(other(`${rc} logout`), '', { claudeRunning: () => 0 });
+    expect(v).toEqual({ code: 0 });
+  });
+
+  it('【故意造出的失败】查不成（tasklist 起不来）：放行，但给一句软提示，说清没查成和原因', () => {
+    const v = lib.decide(other(`${rc} login`), '', {
+      claudeRunning: () => {
+        throw new Error('spawn tasklist ENOENT');
+      },
+    });
+    expect(v.code).toBe(0);
+    expect(v.context).toContain('没查成本机有没有 Claude 会话在跑');
+    expect(v.context).toContain('ENOENT');
+  });
+});
+
+describe('广搜：Claude Code 的 Grep 不写 output_mode 就是 files_with_matches', () => {
+  const claudeGrep = (toolInput: Record<string, unknown>) =>
+    JSON.stringify({
+      hook_event_name: 'PreToolUse',
+      transcript_path: '/t.jsonl',
+      permission_mode: 'default',
+      tool_use_id: 'toolu_1',
+      tool_name: 'Grep',
+      tool_input: { pattern: 'sk-', ...toolInput },
+      cwd: '/work/repo',
+    });
+
+  it('从家目录搜、没写 output_mode：只列文件名，放行', () => {
+    expect(lib.decide(claudeGrep({ path: '~' })).code).toBe(0);
+  });
+
+  it('从家目录搜、写明 output_mode: content：照拦', () => {
+    expect(lib.decide(claudeGrep({ path: '~', output_mode: 'content' })).code).toBe(2);
+  });
+
+  it('别家（认不出是 Claude Code 的输入）不写 output_mode：按打内容算，照拦', () => {
+    const plain = JSON.stringify({ tool_name: 'Grep', tool_input: { pattern: 'sk-', path: '~' }, cwd: '/w' });
+    expect(lib.decide(plain).code).toBe(2);
+  });
+});
+
+describe('git stash：只认真正执行的', () => {
+  it.each([
+    [`git ${s}`, true],
+    [`git ${s} push -u -m x`, true],
+    [`git ${s} pop`, true],
+    [`(cd x; git ${s})`, true],
+    [`git ${s} list`, false],
+    [`git ${s} show stash@{0}`, false],
+    [`grep ${s} file`, false],
+    [`git log -S ${s}`, false],
+    [`echo "git ${s}-like"`, false],
+  ])('%s → %s', (command, want) => {
+    expect(lib.gitStashWrites(command)).toBe(want);
   });
 });
 

@@ -6,6 +6,7 @@
 // 自动接 redactor），或 additionalContext 给模型一句提示（起子代理前取不到远端）。
 // 输入认不出一律按拦处理（退出码 2），不当成没事放行。
 // 规矩本身由 agents/test/rules/pretool.rules.test.ts 钉住：改这里的判断改了规矩，那边会红。
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -2194,9 +2195,12 @@ function readVerdict(tool, what, input, fallbackCwd) {
       );
     }
   }
-  // 从上层目录往下搜（上面「从上层目录往下搜」那一段）。Claude 的 Grep 不写 output_mode 时只列文件名，别家的默认打内容：
-  // 不写的一律按打内容算，写明 files_with_matches、count 的放行
-  const mode = args.output_mode ?? args.outputMode;
+  // 从上层目录往下搜（上面「从上层目录往下搜」那一段）。按各家的真实默认值判：Claude Code 的 Grep 不写 output_mode 就是
+  // files_with_matches（只列文件名），放行；别家（Grok、Devin、Cursor）的默认打内容，不写的按打内容算。写明 files_with_matches、count 的放行
+  const mode =
+    args.output_mode ??
+    args.outputMode ??
+    (tool === 'Grep' && isClaudeCodeInput(input) ? 'files_with_matches' : undefined);
   const globs = typeof args.glob === 'string' ? [args.glob] : [];
   const types = typeof args.type === 'string' ? [args.type] : [];
   if (
@@ -2368,9 +2372,10 @@ function recursiveDeleteVerdict(command, kind, cwd) {
 /**
  * @param {string} raw
  * @param {string} [fallbackCwd]
+ * @param {{ claudeRunning?: () => number }} [opts] claudeRunning：本机在跑几个 Claude 进程（查不成就抛），测试换掉
  * @returns {Verdict}
  */
-export function decide(raw, fallbackCwd = '') {
+export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProcesses } = {}) {
   /** @type {unknown} */
   let parsed;
   try {
@@ -2440,17 +2445,42 @@ export function decide(raw, fallbackCwd = '') {
     );
   }
   // 本机有 Claude 会话在跑时，在本机切号、登录、退出会让所有会话当场断掉（全局规矩「我的机器与模型」）。
-  // 经 ssh 到别的机器上跑的放行。不分仓，全机都拦。
+  // 真查有没有：调用来自 Claude Code 本身就是一个在跑的会话；别家的调用数本机的 Claude 进程，一个都没有就放行，
+  // 查不成放行并提示。经 ssh 到别的机器上跑的放行。不分仓。
   // ssh 开头也不放行反引号、$( ) 里的：本机 bash 会先把它们执行掉，根本到不了远端。
   const rc = String.raw`\breclaude\s+(?:login|logout|org\s+use)\b`;
   const localSubst = new RegExp(String.raw`\x60[^\x60]*${rc}[^\x60]*\x60|\$\([^)]*${rc}`);
+  /** @type {string} */
+  let switchNote = '';
   if (new RegExp(rc).test(outer) && (!/^\s*ssh\s/.test(outer) || localSubst.test(outer))) {
-    return block(
-      "本机有 Claude 会话在跑：不许在本机跑 reclaude login / logout / org use（会让本机所有会话当场断掉）。要切号请创始人自己来；要在别的机器上跑，用 ssh <机器> '…'。",
-    );
+    const how = "要切号请创始人自己来；要在别的机器上跑，用 ssh <机器> '…'。";
+    if (claudeCode) {
+      return block(
+        `这次调用就来自本机一个在跑的 Claude 会话：在本机跑 reclaude login / logout / org use 会让本机所有 Claude 会话（包括这个）当场断掉。${how}`,
+      );
+    }
+    /** @type {number | undefined} */
+    let running;
+    /** @type {string} */
+    let why = '';
+    try {
+      running = claudeRunning();
+    } catch (err) {
+      why = String(messageOf(err) ?? err);
+    }
+    if (running !== undefined && running > 0) {
+      return block(
+        `本机有 ${running} 个 Claude 进程在跑：在本机跑 reclaude login / logout / org use 会让它们当场断掉。${how}`,
+      );
+    }
+    if (running === undefined) {
+      switchNote = `fleet-guard：没查成本机有没有 Claude 会话在跑（${why}），已放行；切号会让本机所有 Claude 会话当场断掉，先确认没有在跑的。`;
+    }
   }
-  // stash 栈是整个仓（所有工作树）共用一个：两个会话同时 stash/pop 会拿到对方的改动
-  if (inFleet && /\bgit\b[^|;&\n]*\sstash\b(?!\s+(?:list|show)\b)/.test(outer)) {
+  // stash 栈是整个仓（所有工作树）共用一个：两个会话同时 stash/pop 会拿到对方的改动。
+  // 只认真正执行的 git stash（git 后面只隔着全局选项，子命令就是 stash）；list、show 只读，放行；
+  // 命令里别处写到 stash 字样（grep stash、git log --grep stash、提交说明里）不算。
+  if (inFleet && gitStashWrites(outer)) {
     return block(
       'fleet-dao 里不用 git stash：stash 栈所有工作树共用，并行会话会互相拿错改动。临时存改动用 `git diff > 文件` / `git apply 文件`，或先提交到自己分支。',
     );
@@ -2460,7 +2490,7 @@ export function decide(raw, fallbackCwd = '') {
   // 想放下不要的活先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支（stash 被上一条拦，别指给人用）。
   if (inFleet && /\bgit\b[^|;&\n]*\sreset\b[^|;&\n]*\s--hard\b/.test(outer)) {
     return block(
-      'fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，过去把主检出还没验证的活丢过。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支，再决定要不要真扔。',
+      'fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，把主检出里还没提交、没验证的活一并丢掉。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支，再决定要不要真扔。',
     );
   }
   const bg = claudeCode && kind !== 'shell' && longForeground(toolInput);
@@ -2481,8 +2511,49 @@ export function decide(raw, fallbackCwd = '') {
         .join('\n'),
     };
   }
-  if (bg) return { code: 0, updatedInput: { ...base, run_in_background: true }, context: bgNote };
+  if (bg) {
+    const context = [bgNote, switchNote].filter(Boolean).join('\n');
+    return { code: 0, updatedInput: { ...base, run_in_background: true }, context };
+  }
+  if (switchNote) return { code: 0, context: switchNote };
   return { code: 0 };
+}
+
+/**
+ * 命令行里有没有真正执行、会改工作树或 stash 栈的 git stash：行首（或 ; & | ( 引号、$( 之后）的 git，中间只隔着全局选项
+ * （-C 路径、-c 键=值、--no-pager 这类），子命令是 stash；stash 后面是 list、show 的只读，不算。
+ * @param {string} command
+ */
+export function gitStashWrites(command) {
+  const re =
+    /(?:^|[;&|(\n'"]|\$\()\s*(?:sudo\s+)?git(?:\.exe)?(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+stash(?![\w-])(?:\s+([\w-]+))?/g;
+  for (const m of command.matchAll(re)) {
+    const sub = m[1];
+    if (sub !== 'list' && sub !== 'show') return true;
+  }
+  return false;
+}
+
+/**
+ * 本机在跑几个 Claude 进程。Windows 用 tasklist 数 claude.exe，别处用 pgrep -x claude。查不成就抛（调用方放行并提示）。
+ * @returns {number}
+ */
+export function countClaudeProcesses() {
+  if (process.platform === 'win32') {
+    const r = spawnSync('tasklist', ['/FO', 'CSV', '/NH', '/FI', 'IMAGENAME eq claude.exe'], {
+      encoding: 'utf8',
+      timeout: 3000,
+      windowsHide: true,
+    });
+    if (r.error) throw r.error;
+    if (r.status !== 0) throw new Error(`tasklist 退出码 ${r.status}`);
+    return r.stdout.split(/\r?\n/).filter((l) => /^"claude\.exe"/i.test(l)).length;
+  }
+  const r = spawnSync('pgrep', ['-x', 'claude'], { encoding: 'utf8', timeout: 3000 });
+  if (r.error) throw r.error;
+  if (r.status === 1) return 0;
+  if (r.status !== 0) throw new Error(`pgrep 退出码 ${r.status}`);
+  return r.stdout.split('\n').filter((l) => l.trim() !== '').length;
 }
 
 /**
@@ -2629,6 +2700,14 @@ if (isMain()) {
           updatedInput: verdict.updatedInput,
           ...(verdict.context ? { additionalContext: verdict.context } : {}),
         },
+      })}\n`,
+    );
+  } else if (verdict.context) {
+    // 只有一句提示（比如切号前没查成有没有会话在跑）：给模型看，也给人看
+    process.stdout.write(
+      `${JSON.stringify({
+        systemMessage: verdict.context,
+        hookSpecificOutput: { hookEventName: 'PreToolUse', additionalContext: verdict.context },
       })}\n`,
     );
   }

@@ -1,7 +1,8 @@
 // PreToolUse 钩子。登记在 fleet-dao 仓的 .claude/settings.json（项目级，不写 matcher），不装进用户级设置。
 // 只管主对话的一条：
 // 引导先回。创始人在一轮中途打的字叫「引导」：transcript 里是一行 attachment（type: queued_command，commandMode: prompt），
-// 附在下一次工具结果后面送进主对话。最后一条引导之后，主对话还没写过一段非空文字，就拒这次工具调用。
+// 附在下一次工具结果后面送进主对话。最后一条引导之后，主对话还没写过一段非空文字（和 tool_use 在同一条消息里的文字也算），就拒这次工具调用；
+// 同一条引导只拒一次（之后的工具结果里已有拒的理由，就放行）。
 // 不再读 diag、不再起 ui-cli。以前转过的记在 ~/.fleet-dao/steer-shown/，开会话对账还读，这边只留路径、不再写。
 // 引擎的无头会话（FLEET_HEADLESS=1）读得到项目级设置，进到这里直接退出。
 // 子代理里的调用（输入带 agent_id）不管。
@@ -36,7 +37,7 @@ const SETTLE_TRIES = 4;
 const REPLY_TOOLS = new Set(['SendMessage', 'mcp__mirasim__deliver_artifact', 'PushNotification']);
 
 /** @typedef {{ deny?: string, notice?: string }} Verdict 拒（理由给模型看）、或要明说的话（systemMessage，给创始人看）；空对象是没意见 */
-/** @typedef {{ kind: 'pending', text: string } | { kind: 'clear' } | { kind: 'sidechain' }} Tail 最后一条引导回了没有 */
+/** @typedef {{ kind: 'pending', text: string, seenCall: boolean } | { kind: 'clear' } | { kind: 'sidechain' }} Tail 最后一条引导回了没有；seenCall：这次的工具调用已经落盘 */
 /** @typedef {{ settleMs?: number, sleep?: (ms: number) => void }} Opts 测试换掉等待 */
 
 /**
@@ -142,6 +143,45 @@ function saidSomething(o) {
   return content.some((b) => prop(b, 'type') === 'text' && String(prop(b, 'text') ?? '').trim() !== '');
 }
 
+/** 拒的理由开头这几个字：工具结果里见到它，说明这条引导已经提醒过一次 */
+const REMINDER_MARK = '你刚收到创始人的引导『';
+
+/**
+ * 工具结果里有没有本钩子拒过的理由（同一条引导只拦一次，提醒过了就不再拦）。
+ * @param {Record<string, unknown>} o
+ */
+function remindedHere(o) {
+  if (o.type !== 'user') return false;
+  const content = prop(o.message, 'content');
+  if (!Array.isArray(content)) return false;
+  return content.some((b) => {
+    if (prop(b, 'type') !== 'tool_result') return false;
+    const c = prop(b, 'content');
+    const text =
+      typeof c === 'string'
+        ? c
+        : Array.isArray(c)
+          ? c.map((p) => String(prop(p, 'text') ?? '')).join('')
+          : '';
+    return text.includes(REMINDER_MARK);
+  });
+}
+
+/**
+ * 这一行是不是这次要判的工具调用（assistant 行里 tool_use.id 等于钩子输入的 tool_use_id）。
+ * 它落了盘，同一条回复里排在它前面的文字一定也落了盘，不用再等。
+ * @param {Record<string, unknown>} o
+ * @param {string | undefined} toolUseId
+ */
+function isThisCall(o, toolUseId) {
+  if (toolUseId === undefined || o.type !== 'assistant') return false;
+  const content = prop(o.message, 'content');
+  return (
+    Array.isArray(content) &&
+    content.some((b) => prop(b, 'type') === 'tool_use' && prop(b, 'id') === toolUseId)
+  );
+}
+
 /**
  * 创始人开了新的一轮（真的用户消息，不是工具结果、不是系统塞的 isMeta）：在它之前的引导已经过去了。
  * @param {Record<string, unknown>} o
@@ -166,13 +206,16 @@ function machineTurn(text) {
 }
 
 /**
- * 从尾部往回看：先碰到主对话写的话 → 回了（或者后来没有新引导）；先碰到创始人的引导 → 没回；先碰到新一轮的开头 → 没有待回的引导。
+ * 从尾部往回看：先碰到主对话写的话（任何一段非空文字，和 tool_use 同一条消息也算）→ 回了；先碰到本钩子拒过的工具结果 → 这条引导提醒过了，
+ * 不再拦；先碰到创始人的引导 → 没回；先碰到新一轮的开头 → 没有待回的引导。
  * 最后一行是子代理的（isSidechain: true）→ 这份是子代理的 transcript，不查。读不了就抛，由调用方明说没查成；往回读到 MAX_BACK_BYTES 还没认出就按没有待回的引导。
  * @param {string} path
+ * @param {string} [toolUseId] 这次工具调用的 id：引导之后见到它那一行，pending 里的 seenCall 为 true
  * @returns {Tail}
  */
-export function lastDirective(path) {
+export function lastDirective(path, toolUseId) {
   let first = true;
+  let seenCall = false;
   for (const line of linesFromEnd(path)) {
     /** @type {unknown} */
     let o;
@@ -188,8 +231,10 @@ export function lastDirective(path) {
     }
     if (o.isSidechain === true) continue;
     if (saidSomething(o)) return { kind: 'clear' };
+    if (remindedHere(o)) return { kind: 'clear' };
+    if (isThisCall(o, toolUseId)) seenCall = true;
     if (o.type === 'attachment' && isFounderDirective(o.attachment)) {
-      return { kind: 'pending', text: directiveText(prop(o.attachment, 'prompt')) };
+      return { kind: 'pending', text: directiveText(prop(o.attachment, 'prompt')), seenCall };
     }
     if (newTurn(o)) return { kind: 'clear' };
   }
@@ -262,11 +307,14 @@ export function check(raw, { settleMs = SETTLE_MS, sleep = sleepSync } = {}) {
   if (typeof path !== 'string' || path.trim() === '') {
     notice = `引导检查没查成：钩子输入里没有 transcript_path（${JSON.stringify(path) ?? 'undefined'}）`;
   } else {
+    const toolUseId =
+      typeof input.tool_use_id === 'string' && input.tool_use_id !== '' ? input.tool_use_id : undefined;
     try {
-      let tail = lastDirective(path);
-      for (let i = 0; i < SETTLE_TRIES && tail.kind === 'pending'; i++) {
+      let tail = lastDirective(path, toolUseId);
+      // 这次的工具调用已经落盘还没见到文字：同一条回复里排在前面的文字也早该在了，不用再等
+      for (let i = 0; i < SETTLE_TRIES && tail.kind === 'pending' && !tail.seenCall; i++) {
         sleep(settleMs);
-        tail = lastDirective(path);
+        tail = lastDirective(path, toolUseId);
       }
       if (tail.kind === 'pending') reasons.push(replyFirst(tail.text));
       sidechain = tail.kind === 'sidechain';
