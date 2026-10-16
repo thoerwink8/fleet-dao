@@ -57,12 +57,15 @@
 //   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
 //   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
 //   避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」。老历史没有这个标记，仍把这张单挂起。
-// - 点名和读回不是同一个模型（#2742，patched('model-mismatch-reroute')）：失败分流 MD3 仍判停下（老历史重放就是挂起）。
+// - 点名和读回不是同一个模型（#2742，patched('model-mismatch-reroute')）：失败分流 MD3 仍判停下。
 //   #2742 是发版叫停后误续上一段 opus：续会话不比模型，同一 mirasim-relay 池点名 sonnet 仍续上 opus，快照还是
 //   opus[1m]。不是比对串剥错 `[1m]`，不是 #1298 那种名单里没有才换模，也不是 #2797 的叫停本身。
 //   新的不把整张单挂起。先停这一段，按点名这条路由开新会话重派一次（不写 resumeFrom，误续靠开新会话解开）。
 //   同一条开了新会话仍对不上，才说明这条路由会换模，避开它再选。还有能派的就继续；选路确认一条都没有才挂起，
-//   不改去等探针，也不把刚避开的那条再派出去。老历史没有这个标记，仍在 MD3 上挂起。
+//   不改去等探针，也不把刚避开的那条再派出去。
+//   已经走进挂起的在途单：重放时 model-mismatch-reroute 为假，必须再走进已经记下的 park（跳过会 TMPRL1100）。
+//   看门狗发 taskContinue 之后，patched('model-mismatch-wake-reroute') 为真，按点名开新会话重派，不接着挂着。
+//   这一版之前就已经点过继续、并且已经记下后面的选路：醒来这个标记为假，仍清零再选，步序不变。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -530,7 +533,7 @@ export async function writeSession(
         await rt.note(redispatchLine);
         continue;
       }
-      // 写在挂起之前：老历史重放时这一支为假，下一步仍是原来的 park，活动序列不变。
+      // 写在挂起之前：已经走进挂起的老历史重放时这一支为假，下一步仍是原来的 park，活动序列不变。
       // 只在 model_mismatch 上打标记。MB1 走上面的重派，到不了这里，重放不多一个 marker。
       if (code === 'model_mismatch' && patched('model-mismatch-reroute')) {
         if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
@@ -563,6 +566,31 @@ export async function writeSession(
               : next.reason,
         modelDown ? modelUnavailableStallDetail(failure.message) : failure.message,
       );
+      // 已经挂上的在途单：上面的 model-mismatch-reroute 重放为假，所以走进了这次 park。
+      // 人点「继续」或看门狗发 taskContinue 之后才到这里。这一支是新执行（标记为真）：按点名开新会话重派。
+      // 这一版之前就已经点过继续、历史里已经有后面的选路：标记为假，仍清零再选，不多一次 note。
+      if (code === 'model_mismatch' && patched('model-mismatch-wake-reroute')) {
+        rt.resumeFrom = null;
+        counters = ZERO;
+        previousMessage = undefined;
+        failedChannel = undefined;
+        if (!mismatchRetried.has(route.routeId)) {
+          mismatchRetried.add(route.routeId);
+          avoid = NO_AVOID;
+          stick = route.routeId;
+          const line = `第 ${rt.round} 轮：${route.modelId} 回话的模型不是点名的，这次挂起已解开，按点名路由重派一次（开新会话，不续上一段），不停下等人`;
+          rt.status.lastProblem = line;
+          await rt.note(line);
+          continue;
+        }
+        stick = undefined;
+        avoid = widen(avoid, route, 'route');
+        mismatchRoutesDown = true;
+        const line = `第 ${rt.round} 轮：${route.modelId} 这条路由再次读回的不是点名的模型，避开它再选；还有能派的就继续`;
+        rt.status.lastProblem = line;
+        await rt.note(line);
+        continue;
+      }
       counters = ZERO;
       avoid = NO_AVOID;
       stick = undefined;

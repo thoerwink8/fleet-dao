@@ -217,14 +217,22 @@ export function lazyTemporalWakeClient(opts: {
   address: string;
   namespace: string;
   timeoutMs?: number;
-}): RouteWakeClient & { close(): Promise<void> } {
-  let connecting: Promise<{ connection: Connection; wake: RouteWakeClient }> | undefined;
+}): RouteWakeClient & {
+  close(): Promise<void>;
+  /** 第一次用到才连。看门狗发 taskContinue 和叫醒等路由共用这一条连接。 */
+  use<T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>): Promise<T>;
+} {
+  let connecting: Promise<{ connection: Connection; client: Client; wake: RouteWakeClient }> | undefined;
   const get = () => {
     connecting ??= Connection.connect({ address: opts.address }).then(
-      (connection) => ({
-        connection,
-        wake: temporalWakeClient(new Client({ connection, namespace: opts.namespace }), opts.timeoutMs),
-      }),
+      (connection) => {
+        const client = new Client({ connection, namespace: opts.namespace });
+        return {
+          connection,
+          client,
+          wake: temporalWakeClient(client, opts.timeoutMs),
+        };
+      },
       (err: unknown) => {
         connecting = undefined;
         throw err;
@@ -235,6 +243,7 @@ export function lazyTemporalWakeClient(opts: {
   return {
     runningTaskWorkflowIds: async () => (await get()).wake.runningTaskWorkflowIds(),
     signal: async (workflowId, command) => (await get()).wake.signal(workflowId, command),
+    use: async (fn) => fn((await get()).client),
     close: async () => {
       const c = connecting;
       connecting = undefined;
