@@ -323,6 +323,11 @@ export interface StrengthOptions {
    * 战绩没读成（不知道谁样本少）为空，不探。
    */
   explore: { draw: number; ratio: number; samples: ReadonlyMap<string, number> } | null;
+  /**
+   * 硬挡着的路由（人关了、不在这一单能用的执行方式、被避开……，choose.ts 先算好）：判让位时不算它们的进度——
+   * 派不出去的渠道「持平」不能拦住能派的渠道让位（#2724）。不给 = 全算。
+   */
+  hardBlocked?: ReadonlySet<string>;
 }
 
 /** 一条路由读成了的窗口里超前最多的那个（5 小时窗、过期的、不扣它的不算）。没有能算进度的窗口为空。 */
@@ -506,32 +511,47 @@ export function rank(
   let explored: string | null = null;
   if (strength?.strongFirst && !anyPinned) {
     const work = WORK_LABEL[strength.tier];
+    const blocked = strength.hardBlocked ?? new Set<string>();
     const strong = models.filter((m) => strengthOf.get(m) === 'strong');
+    // 强档分三种：不超前的（先派）、能派的渠道都超前的（让位）、渠道全被硬挡的（派不出，不算「不超前」）。
+    // 让位只在强档之间换（#2724）：让位的排在不超前的强档后面、仍在别的档前面；强档都超前时照派强档，不让给标准档
     const lifted: string[] = [];
+    const out: string[] = [];
+    const hits = new Map<string, NonNullable<ReturnType<typeof yieldHit>>>();
     for (const m of strong) {
-      const hit = yieldHit(
-        itemsOf(m).map((it) => it.route),
-        policy,
-        now,
-      );
-      if (!hit) {
-        lifted.push(m);
+      const open = itemsOf(m)
+        .map((it) => it.route)
+        .filter((r) => !blocked.has(r.routeId));
+      if (open.length === 0) {
+        out.push(m);
         continue;
       }
+      const hit = yieldHit(open, policy, now);
+      if (hit) hits.set(m, hit);
+      else lifted.push(m);
+    }
+    const allAhead = lifted.length === 0;
+    for (const [m, hit] of hits) {
       yielded.add(m);
-      const nextStrength = models.find((o) => o !== m && strengthOf.get(o) !== 'strong' && strengthOf.get(o));
-      const next = nextStrength ? STRENGTH_LABEL[strengthOf.get(nextStrength) as ModelStrength] : '下一档';
+      const detail = `${hit.route.poolName}${windowName(hit.window)}按时间该用 ${percent(hit.pace.elapsed)}、实际用了 ${percent(hit.pace.used)}`;
       say(
         m,
         'strength-yield',
-        `强档池超前 ${percent(-hit.pace.behind)}（${hit.route.poolName}${windowName(hit.window)}按时间该用 ${percent(hit.pace.elapsed)}、实际用了 ${percent(hit.pace.used)}），让给${next}`,
+        allAhead
+          ? `强档都超前，照派：强档池超前 ${percent(-hit.pace.behind)}（${detail}），不让给别的档`
+          : `强档池超前 ${percent(-hit.pace.behind)}（${detail}），让给强档 ${lifted[0]}`,
       );
     }
-    const next = [...lifted, ...models.filter((m) => !lifted.includes(m))];
+    // 让位的强档之间：超前少的在前（同一个数照原来的先后）
+    const yieldedOrder = strong
+      .filter((m) => hits.has(m))
+      .sort((a, b) => (hits.get(b)?.pace.behind ?? 0) - (hits.get(a)?.pace.behind ?? 0));
+    const strongOrder = [...lifted, ...out, ...yieldedOrder];
+    const next = [...strongOrder, ...models.filter((m) => !strongOrder.includes(m))];
     next.forEach((m, i) => {
       const was = models.indexOf(m);
-      if (lifted.includes(m) && i < was) say(m, 'strength-first', `${work}先给强档：${m}`);
-      else if (!lifted.includes(m) && i > was) {
+      if (strongOrder.includes(m) && i < was) say(m, 'strength-first', `${work}先给强档：${m}`);
+      else if (!strongOrder.includes(m) && i > was) {
         const s = strengthOf.get(m);
         say(m, 'strength-first', `${work}先给强档，${s ? STRENGTH_LABEL[s] : '没标档的模型'}排在强档后面`);
       }
