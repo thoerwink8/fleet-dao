@@ -1,6 +1,6 @@
 // 选路的参数与能力表。全是起步值：驾驶舱「战绩」「额度」攒够真实数据后再调，每个数的理由写在旁边。
 // 给了但不对的直接报错，不悄悄换成默认值。
-import type { HostId, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
+import { type HostId, type QuotaWindowKind, type StageKind, TRACK_PRIOR_TASKS } from '@fleet-dao/shared';
 import { RoutingInputError } from './types.ts';
 
 /** 执行方式能做的事。answer = 只答题；read = 读仓库；edit = 改文件；shell = 跑命令和测试。 */
@@ -175,7 +175,7 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
     roundOverheadMinutes: 15,
     promoteMargin: 0.3,
     byTier: true,
-    priorTasks: 4,
+    priorTasks: TRACK_PRIOR_TASKS,
     qualityMargin: 0.08,
   },
 });

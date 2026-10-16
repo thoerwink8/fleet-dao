@@ -74,6 +74,11 @@ export interface RouteChoice {
   authorFamily?: string;
   hostId: HostId;
   /**
+   * 选路时那句「为什么派它」（和 PickRouteResult 成功时的 why 同一句）。起这一段时写进 runs.route_why。
+   * 老历史、假端口里没有。
+   */
+  why?: string;
+  /**
    * Claude 订阅池的组织类型（pools.org_kind：拼车、独享，共用一个会话用户）：额度用满时不原地睡到清零（失败分流 QT1
    * 的 orgLadder）。别的池、老历史里没有。
    */
