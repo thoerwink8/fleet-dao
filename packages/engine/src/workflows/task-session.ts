@@ -45,6 +45,10 @@
 // - 引擎活动超时（timeout_start_to_close 等，#2824，patched('en1-timeout-redispatch')）：失败分流 EN1 第二次原文一字不差会判挂起。
 //   那一挂不起整单：停掉这一段，避开这条路由按点名再派；同一模型再撞上再避开模型，还撞上才停下等人。没有能派的路由仍挂起。
 //   标了 engineRestarted 的仍原路重试，并按起跑时刻续可接回的会话。老历史没有这个标记，重放时仍把这一挂挂起。
+// - 桥接连 Mirasim 超时（MB1，#2838，patched('mb1-bridge-redispatch')）：失败分流第一次原路重试、第二次判挂起
+//   （「已重试 1 次」或原文一字不差）。那一挂和第一次的原路重试都不起整单：停掉这一段，避开这条路由按点名再派；
+//   同一模型再撞上再避开模型，还撞上、或没有能派的路由，才停下等人。重派时 lastProblem 写成重派那一句，不留「挂起并报警」。
+//   老历史没有这个标记，重放时仍原路重试、次数用完再挂起。
 // - 出在账号池上的停（登录失效、封号、设备被撤销，patched('auth-reroute')）：池照旧暂停并报警，这张单马上回去选路避开这个池。
 //   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
 //   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
@@ -389,7 +393,9 @@ export async function writeSession(
     }
     // 老历史没有这个标记：不问上一段收场没有、不耐心等，照旧
     const patienceOn = patched('route-patience');
-    if (next.action === 'retry') {
+    // 桥接连 Mirasim 超时（#2838）：标记只在 MB1 上打，别的失败重放不多这一下。老历史为假，仍走原来的原路重试 / 挂起。
+    const mb1Redispatch = next.rule === 'MB1' && patched('mb1-bridge-redispatch');
+    if (next.action === 'retry' && !mb1Redispatch) {
       // 原路再试：还是这条路由（额度要等的，等到清零再来，不算墙钟）
       stick = route.routeId;
       // 总时长到顶第一次：原路续同一个会话（#2244）。有执行编号才问续不续；会话没起成就没有编号，照旧开新会话。
@@ -455,15 +461,19 @@ export async function writeSession(
       }
       // 被引擎在时限上叫停、总时长到顶、起不来（决定 0093）：先自动换一条路由重派一次，进度里写一行，不停下等人。
       // 引擎活动超时（EN1 的 timeout_*，#2824）同一条：分流判挂起也不挂整单，停掉这一段再派。
+      // 桥接连 Mirasim 超时（MB1，#2838）也进这里：第一次的原路重试和第二次的挂起都不挂整单。上面的 mb1 标记为真时，
+      // retry 分支被跳过，第一次失败直接落到这一支。
       // 超时、起不来只避开这条路由，同一模型第二次再避开模型；中转欠费避开那个池。都不整族避开（#2261）。
       // 第一次按路由避开之后，同一模型再撞上还可以再自动一次（升到避开模型）。除此之外这一段里只自动一次，再撞上照旧停下。
       // 只有人能修的码不在名单里。老历史没有 auto-redispatch-session，照旧停下；没有 avoid-scope-by-cause，仍避开模型和它那一族。
       const code = failure.code.toLowerCase();
       // 引擎活动超时（#2824）：分流因原文一字不差判的挂起不挂整单。标记只对这几个码打，别的码重放不多这一下。
       // 写在 auto-redispatch-session 之前：老历史重放时这一支为假，listed 仍只看原来那张表。
+      // MB1 用上面已经打过的标记，这里不再打一次（重放不多一个 marker）。
       const listed =
         AUTO_REDISPATCH_CODES.includes(code) ||
-        (EN1_ACTIVITY_TIMEOUT_CODES.includes(code) && patched('en1-timeout-redispatch'));
+        (EN1_ACTIVITY_TIMEOUT_CODES.includes(code) && patched('en1-timeout-redispatch')) ||
+        mb1Redispatch;
       // 写在 auto-redispatch-session 之前、且 redispatched 为假时短路：老历史重派过一次之后不会多调这个标记。
       const escalate =
         redispatched && listed && patched('avoid-scope-by-cause') && rt.infraCanEscalate(route, code);
@@ -487,14 +497,23 @@ export async function writeSession(
           // 只记在内存里，不调活动：下一轮选路若只剩等，不进长睡。已经写过这行、正睡着的老历史重放时也会置上。
           rt.landSwitch = true;
         }
-        await rt.note(
-          carryProgress
-            ? `第 ${rt.round} 轮：${route.modelId} 同一条路由第二次总时长到顶，换一条路由带上进度续一次，不停下等人`
-            : `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`,
-        );
+        const redispatchLine = carryProgress
+          ? `第 ${rt.round} 轮：${route.modelId} 同一条路由第二次总时长到顶，换一条路由带上进度续一次，不停下等人`
+          : `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`;
+        // 桥接超时的挂起句（「挂起并报警（已重试 1 次）」）已经写进 lastProblem。重派不是挂起：落库前换成重派这一句。
+        // 老历史标记为假，不改 lastProblem，saveTaskState 的入参和原来一样。
+        if (mb1Redispatch) rt.status.lastProblem = redispatchLine;
+        await rt.note(redispatchLine);
         continue;
       }
-      await rt.park(next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason, failure.message);
+      await rt.park(
+        mb1Redispatch && next.action !== 'park'
+          ? '桥接连 Mirasim 超时：同一原因连败到重派预算，停下等人'
+          : next.humanFix
+            ? `${next.reason}；要人：${next.humanFix}`
+            : next.reason,
+        failure.message,
+      );
       counters = ZERO;
       avoid = NO_AVOID;
       stick = undefined;
