@@ -1,6 +1,5 @@
 // 创始人引导记在仓里 docs/directives/（决定 0093）：文件的写读、时间统一 +0800、从 prompt-log 取原话、认领和办完的规矩、
 // 开 PR 时分支已在就拒绝（锁）。【故意造出的失败】：取不到原话、时间认不出、主人定不下来、分支被占、git 报错都明确拒绝或报没查成。
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -26,6 +25,7 @@ import {
 } from '../src/directives.ts';
 import { gitRunner } from '../src/git-runner.ts';
 import type { GhResult } from '../src/issue-new.ts';
+import { runChild } from './child.ts';
 
 const okR = (stdout = ''): GhResult => ({ code: 0, stdout, stderr: '' });
 const base = {
@@ -242,7 +242,7 @@ describe('真 git 在临时仓里读待处理（#2726：没匹配时 git 退出�
     const dir = mkdtempSync(join(tmpdir(), 'directives-real-'));
     dirs.push(dir);
     const g = (...a: string[]) =>
-      execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir, stdio: 'pipe' });
+      runChild('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: dir });
     g('init', '-q');
     writeFileSync(join(dir, 'x.txt'), 'x');
     for (const [p, v] of Object.entries(files)) {
