@@ -1747,11 +1747,13 @@ check_engine() {
 
 # 香港在发的对不对：经隧道连香港的 nginx（证书照常按域名校验）。发了 web 的，读 release.json 与健康页——
 # release.json 香港只给经隧道来的，别处来的是 404。
-# 没配 web 的不查根地址（根地址上是什么由人定）
+# 没配 web 的不查根地址（根地址上是什么由人定）。经香港、隧道读远端：一次网络超时不算红（#2728），curl 自己退避重试
+# （超时、连不上、5xx 算一时的；1、2、4 秒……最多 3 次、总共不超过 60 秒），仍不通才红
+WEB_CHECK_RETRY=(--retry 3 --retry-connrefused --retry-max-time 60)
 check_web() { # 提交号
   local body commit code
   if has_part web; then
-    if ! body=$(curl -sS -f --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/release.json" 2>&1); then
+    if ! body=$(curl -sS -f "${WEB_CHECK_RETRY[@]}" --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/release.json" 2>&1); then
       red "从香港取不到 https://$FLEET_DOMAIN/release.json：$(tail -1 <<<"$body")"
       return 1
     fi
@@ -1760,7 +1762,7 @@ check_web() { # 提交号
       red "香港在发的是「${commit:0:12}」，不是 ${1:0:12}"
       return 1
     fi
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/health/") || code=000
+    code=$(curl -s -o /dev/null -w '%{http_code}' "${WEB_CHECK_RETRY[@]}" --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/health/") || code=000
     if [[ "$code" != 200 ]]; then
       red "健康页 https://$FLEET_DOMAIN/health/ 返回「$code」"
       return 1

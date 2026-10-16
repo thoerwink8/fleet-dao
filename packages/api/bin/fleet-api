@@ -12,6 +12,7 @@
 #   bash /srv/fleet-dao-releases/<版本>/packages/api/bin/fleet-api release pause|continue …   发版切版本前后暂停、继续手上有会话的任务（release.sh 调，名单走标准输出、标准输入）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api project show <owner/仓名>   只读：仓号和仓档案（JSON）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api project set-profile <owner/仓名> --file <json 文件|->   整份换掉仓档案（- 读标准输入）
+#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api emergency-issue --key <键> --title "<标题>" [--json] < 正文.md   开急修单（自动发布在同一个提交发版连败时调，#2728）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat|claim …   帅位只一个（#299）：本机经 ssh 调，写法见 seat --help
 # 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST 这些）去跑：
 # 库只认 fleet 这个本机用户（peer 认证），环境文件按 systemd 的读法读、和服务读同一组（清单取自 deploy/france/fleet-api.service）。

@@ -25,6 +25,7 @@
 //   attention --json（#2370）：现在要人看的事一份结论（healthz、该推的通知、推送不通、简报没到），指挥官巡检只读它。见 attention-cli.ts。
 //   release pause|continue（#2038）：release.sh 切版本前给手上有会话的任务发 hard 暂停、切完只继续这一批。见 release-pause.ts。
 //   project show|set-profile <owner/仓名>（#2738）：看、换一个仓的档案（repos.profile）。见 project-cli.ts。
+//   emergency-issue --key <键> --title <标题>（#2728）：开急修单（四节正文从标准输入读），法国自动发布在同一个提交发版连败时调。见 emergency-issue.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 
@@ -39,6 +40,14 @@ import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
 import { ATTENTION_USAGE, AttentionCliError, attentionJson, parseAttentionArgs } from './attention-cli.ts';
 import { type Config, loadConfig } from './config.ts';
+import {
+  EMERGENCY_ISSUE_USAGE,
+  type EmergencyIssueArgs,
+  EmergencyIssueError,
+  type EmergencyIssuePort,
+  fileEmergencyIssue,
+  parseEmergencyIssueArgs,
+} from './emergency-issue.ts';
 import { describeEngineMaster, readEngineMaster, setEngineMaster } from './engine-switch.ts';
 import {
   FEISHU_PUSH_USAGE,
@@ -56,6 +65,8 @@ import {
   runProject,
 } from './project-cli.ts';
 import { RELEASE_USAGE, runReleaseCommand } from './release-pause.ts';
+import { currentMilestoneOf } from './request-issue.ts';
+import { findSelfRepo, SELF_REPO_NAME } from './self-repo.ts';
 import { cookieNames, isCockpitUser, signSessionClaims } from './session.ts';
 import {
   type OpenedTaskControl,
@@ -783,6 +794,77 @@ export interface CliDeps {
   openProject?: (url: string) => Promise<{ port: ProjectPort; close(): Promise<void> }>;
   /** 读一个文本文件（project set-profile --file 用）。不给就是真的 fs。 */
   readFile?: (path: string) => Promise<string>;
+  /** 开急修单（emergency-issue 命令用，#2728）：「引擎」机器人的 GitHub，挂当前版本。不给就是真的：连库记幂等账、读机器人凭据。 */
+  openEmergencyIssues?: (url: string) => Promise<{ port: EmergencyIssuePort; close(): Promise<void> }>;
+}
+
+async function openPgEmergencyIssues(
+  url: string,
+): Promise<{ port: EmergencyIssuePort; close(): Promise<void> }> {
+  const { createDb } = await import('@fleet-dao/db');
+  const { pgLedger, pgLocker, withStatementTimeout } = await import('@fleet-dao/store');
+  const { createGitHub } = await import('@fleet-dao/github');
+  const { db, close } = createDb({ url: withStatementTimeout(url) });
+  try {
+    const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db) });
+    return {
+      port: {
+        async openIssue(input) {
+          // 挂当前版本（同驾驶舱提需求，#2683）：急修进当前版本，不落未排期
+          const milestone = await currentMilestoneOf(() => gh.readOpenMilestones({ repo: input.repo }));
+          return gh.openIssue({ ...input, milestone });
+        },
+      },
+      close,
+    };
+  } catch (err) {
+    await close();
+    throw err;
+  }
+}
+
+/** emergency-issue（#2728）：参数不对不连库。开成了打单号和网址（--json 打一行 JSON）；没开成打一句原因、退出 1。 */
+async function runEmergencyIssueCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  let args: EmergencyIssueArgs;
+  try {
+    args = parseEmergencyIssueArgs(rest);
+  } catch (err) {
+    if (err instanceof EmergencyIssueError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    throw err;
+  }
+  let opened: { store: Store; close(): Promise<void> } | undefined;
+  let issues: { port: EmergencyIssuePort; close(): Promise<void> } | undefined;
+  try {
+    const body = await (deps.readStdin ?? readAllStdin)();
+    const url = databaseUrl(deps.env);
+    opened = await deps.openStore(url);
+    const self = await findSelfRepo(opened.store);
+    if (!self) throw new CliError(`受管的仓里没有 ${SELF_REPO_NAME}：不知道急修单开在哪，没开`, 1);
+    issues = await (deps.openEmergencyIssues ?? openPgEmergencyIssues)(url);
+    const got = await fileEmergencyIssue(args, body, {
+      port: issues.port,
+      repo: { owner: self.owner, name: self.name },
+    });
+    deps.out(
+      args.json
+        ? JSON.stringify(got)
+        : `${got.created ? '开了' : '以前开过'}急修单 #${got.number}：${got.url}`,
+    );
+    return 0;
+  } catch (err) {
+    if (err instanceof EmergencyIssueError || err instanceof CliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    deps.err(`急修单没开成：${errMessage(err)}`);
+    return 1;
+  } finally {
+    await issues?.close().catch(() => undefined);
+    await opened?.close().catch(() => undefined);
+  }
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -870,6 +952,7 @@ const USAGES: Record<string, string> = {
   'feishu-push': FEISHU_PUSH_USAGE,
   attention: ATTENTION_USAGE,
   project: PROJECT_USAGE,
+  'emergency-issue': EMERGENCY_ISSUE_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -983,6 +1066,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'feishu-push') return runFeishuPushCommand(rest, deps);
   if (command === 'attention') return runAttentionCommand(rest, deps);
   if (command === 'project') return runProjectCommand(rest, deps);
+  if (command === 'emergency-issue') return runEmergencyIssueCommand(rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
 }

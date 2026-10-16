@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type { Git } from '../directives.ts';
 import { ghRunner } from '../issue-new.ts';
 import { liveClaimsPost, readClaimsEndpoint, work } from '../work.ts';
-import { readLocalBeats } from '../work-queue.ts';
+import { readLeases, readLocalBeats, removeLease, writeLease } from '../work-queue.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 
@@ -29,5 +29,6 @@ process.exitCode = await work(process.argv.slice(2), {
   post: liveClaimsPost(() => readClaimsEndpoint()),
   out: (line) => console.log(line),
   err: (line) => console.error(line),
-  queue: { git, readBeats: () => readLocalBeats(), now: () => new Date() },
+  queue: { git, readBeats: () => readLocalBeats(), readLeases: () => readLeases(), now: () => new Date() },
+  leases: { write: (rec) => writeLease(rec), remove: (repo, issue) => removeLease(repo, issue) },
 });

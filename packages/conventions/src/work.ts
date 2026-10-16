@@ -19,7 +19,7 @@ import { localBranchPrefix } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { LOCAL_LABEL } from './labels.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
-import { buildQueue, type QueueDeps, renderQueue } from './work-queue.ts';
+import { buildQueue, type LeaseRecord, type QueueDeps, renderQueue } from './work-queue.ts';
 
 /** 和 agents/local-sessions/lib.mjs 的 TOKEN_HEADER 同一个头。 */
 const TOKEN_HEADER = 'X-Fleet-Node-Token';
@@ -85,8 +85,28 @@ export interface WorkDeps {
   post: ClaimsPost;
   out: (line: string) => void;
   err: (line: string) => void;
-  /** pnpm work queue 要的另外几样（git、心跳、时钟）；不给 queue 就报没接上 */
+  /** pnpm work queue 要的另外几样（git、心跳、租约、时钟）；不给 queue 就报没接上 */
   queue?: Omit<QueueDeps, 'gh'>;
+  /**
+   * 本机记下领单租约（work-queue.ts 的 writeLease / removeLease）：法国的租约本机读不到，claim / renew 成了记一份、done 删掉，
+   * 队列靠它认「在做」。不给就不记（测试）；记不成只提示，不算领单没成。
+   */
+  leases?: {
+    write: (rec: LeaseRecord) => void;
+    remove: (repo: string, issue: number) => void;
+  };
+}
+
+/** 记租约：没接上不记；记不成提示一句，不把领单算失败 */
+function noteLease(deps: WorkDeps, fn: (l: NonNullable<WorkDeps['leases']>) => void): void {
+  if (!deps.leases) return;
+  try {
+    fn(deps.leases);
+  } catch (e) {
+    deps.err(
+      `提示：法国那边登记成了，本机租约记录没写成（${e instanceof Error ? e.message : String(e)}）；pnpm work queue 可能把这张当成可接`,
+    );
+  }
 }
 
 /** pnpm work queue [--json]：退出码 0 列出来了（没查成的部分写在 problems / 末尾），1 单或 PR 没读成 */
@@ -240,6 +260,8 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
         throw new Error(`#${p.issue} 已经有开着的 PR #${other} 在做，不再领、不重复做：先看 #${other}`);
       }
       const got = await send(deps, { action: 'claim', repo, issue: p.issue, title: title.slice(0, 300) });
+      const until = got.leaseUntil;
+      if (until !== null) noteLease(deps, (l) => l.write({ repo, issue: p.issue, leaseUntil: until }));
       const label = await deps.gh(['issue', 'edit', String(p.issue), '--add-label', LOCAL_LABEL]);
       if (label.code !== 0) {
         deps.err(
@@ -254,12 +276,15 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
     }
     if (p.action === 'renew') {
       const got = await send(deps, { action: 'renew', repo, issue: p.issue });
+      const until = got.leaseUntil;
+      if (until !== null) noteLease(deps, (l) => l.write({ repo, issue: p.issue, leaseUntil: until }));
       deps.out(`续上了 #${p.issue}（租约到 ${got.leaseUntil ?? '？'}）`);
       return 0;
     }
     const outcome = p.failed !== undefined ? 'failed' : p.release !== undefined ? 'released' : 'done';
     const reason = p.failed ?? p.release;
     await send(deps, { action: 'finish', repo, issue: p.issue, outcome, ...(reason ? { reason } : {}) });
+    noteLease(deps, (l) => l.remove(repo, p.issue));
     if (outcome === 'released') {
       const label = await deps.gh(['issue', 'edit', String(p.issue), '--remove-label', LOCAL_LABEL]);
       if (label.code !== 0) {
