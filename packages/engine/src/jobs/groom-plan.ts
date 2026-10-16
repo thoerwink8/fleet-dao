@@ -18,8 +18,9 @@
 //   已知的模块列了超过 50 个不同路径的下一片也不开（和拉单的最重档同一条线）：开出来引擎不拉，这张单还开着，后面的片也开不了。
 // - 补老单只往末尾接，原文、原话一个字不动：老单里已有的节（场景、已知的模块、怎么算做完写了字的）不补，已经有整理补充的单不再补。
 // - 会话只看得到、也只能点到「作者在白名单里」的开着的单：陌生人开的单正文不进提示词（防提示词注入），清单点到它们也丢进 rejected。
-// - 涉及改标准路径、`.github/workflows/`（正文里认得出路径）或对外发布，贴「本机做」并留一句原因，引擎不拉。
-//   「要人拍」只留给会话标了要掏新钱、或删了找不回又没备份的（needsHuman，或判断写成 human 而引擎认不出是上面三类）。
+// - 涉及改标准路径、`.github/workflows/`（正文里认得出路径，补老单连原单正文一起认）或对外发布，贴「本机做」并留一句原因，引擎不拉。
+//   「要人拍」只留给会话标了要掏新钱、或删了找不回又没备份的（needsHuman 一标就是，哪怕那句话里也写了工作流路径；
+//   或判断写成 human 而引擎认不出是上面三类）。
 // - 单条动作失败（GitHub 写不进）进 rejected，别的条照做；全部尝试的动作都失败，调用方当整理失败。
 
 import {
@@ -206,18 +207,17 @@ export function localWorkComment(reason: string): string {
 }
 
 /**
- * 这张单该贴什么：改标准、改工作流、对外发布是「本机做」；会话标了要人拍、而那句话本身不是这三类，是「要人拍」
- * （掏新钱、删了找不回又没备份）。都不是回 null。
+ * 这张单该贴什么：改标准、改工作流、对外发布是「本机做」。
+ * 会话标了 needsHuman 就是要掏新钱或删了找不回，一标就是「要人拍」：那句话里再写工作流路径也不改判成本机做。
+ * 都不是回 null。text 要带上原单正文（补老单不能只看这次追加的）。
  */
 export function groomHold(
   text: string,
   needsHuman: string | undefined,
   rules: readonly StandardPath[],
 ): { kind: 'local'; reason: string } | { kind: 'human'; reason: string } | null {
-  if (needsHuman && localWorkReason(needsHuman, rules) === null) {
-    return { kind: 'human', reason: plainText(needsHuman) };
-  }
-  const local = localWorkReason(`${needsHuman ?? ''}\n${text}`, rules);
+  if (needsHuman) return { kind: 'human', reason: plainText(needsHuman) };
+  const local = localWorkReason(text, rules);
   return local ? { kind: 'local', reason: local } : null;
 }
 
@@ -532,7 +532,7 @@ export async function executeGroomPlan(
     }
     amends += 1;
     const text = renderAmendment(item, include, date);
-    const hold = groomHold(text, item.needsHuman, ctx.standardPaths);
+    const hold = groomHold(`${issue.body}\n${text}`, item.needsHuman, ctx.standardPaths);
     const verdict = judged.get(item.issue);
     const ok = await act(what, async () => {
       await writes.appendBody({ issueNumber: item.issue, key: `groom-amend:${ctx.requestId}`, text });

@@ -318,6 +318,22 @@ describe('executeGroomPlan · 开新单', () => {
     expect(labels[1]).toEqual(['需求', '本机做']);
   });
 
+  it('needsHuman 里既写按量计费又写了工作流路径 → 贴「要人拍」，不因路径改判「本机做」', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        newIssues: [newItem(1, { needsHuman: '为 `.github/workflows/ci.yml` 开通新的按量计费' })],
+      }),
+      ctxOf([]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'openIssue').map((c) => c.args.labels)).toEqual([
+      ['需求', '要人拍'],
+    ]);
+    expect(f.calls.filter((c) => c.kind === 'comment')).toEqual([]);
+    expect(out.result.flagged).toEqual([901]);
+  });
+
   it('localWorkReason：认得出标准路径、workflows 和对外发布，认不出的不乱判', () => {
     const rules = [{ path: 'agents/**/*.md', why: 'x' }];
     expect(localWorkReason('改 agents/skills/a/SKILL.md', rules)).toContain('agents/skills/a/SKILL.md');
@@ -507,6 +523,26 @@ describe('executeGroomPlan · 补老单：追加补充，不改原文', () => {
     expect(String(comment?.args.body)).toContain('本机做');
     expect(out.result.flagged).toEqual([]);
     expect(out.result.groomed).toEqual([]);
+  });
+
+  it('原单已写 CI 工作流、这次只补普通验收条 → 贴「本机做」并留原因，不贴「整理过」', async () => {
+    const old = issue(3, {
+      body: ['## 场景', '', '要改 `.github/workflows/ci.yml`。', '', '## 原话', '', '「改工作流」', ''].join(
+        '\n',
+      ),
+    });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ amendments: [{ issue: 3, done: ['页面上多出「按钮」'] }] }),
+      ctxOf([old]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    const comment = f.calls.find((c) => c.kind === 'comment');
+    expect(String(comment?.args.body)).toContain('.github/workflows/');
+    expect(String(comment?.args.body)).toContain('本机做');
+    expect(out.result.groomed).toEqual([]);
+    expect(out.result.flagged).toEqual([]);
   });
 });
 
