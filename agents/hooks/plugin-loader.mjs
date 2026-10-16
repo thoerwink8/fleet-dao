@@ -23,6 +23,57 @@ export function scriptOf(command) {
 }
 
 /**
+ * 一条钩子登记跑的是哪个脚本：shell 形式写在 command 里（`node "…/x.mjs"`），exec 形式是 command: "node"、脚本在 args 里。
+ * @param {unknown} handler
+ * @returns {string | null}
+ */
+export function handlerScript(handler) {
+  if (!plainObject(handler)) return null;
+  const direct = scriptOf(handler.command);
+  if (direct !== null) return direct;
+  if (!Array.isArray(handler.args)) return null;
+  for (const arg of handler.args) {
+    const s = scriptOf(arg);
+    if (s !== null) return s;
+  }
+  return null;
+}
+
+/**
+ * 写盘的 JSON 排版和仓里 biome 格式化后的一致：对象逐键换行；只含标量的数组放得下一行（行宽 110）就写一行，否则逐项换行。
+ * 这样加载器写过的文件 `biome check` 照样过，内容不变时也不会改出整文件 diff。
+ * @param {unknown} value
+ * @param {string} [indent] 这一层的缩进
+ * @param {number} [column] 这个值从第几列开始写（前面有缩进和键名）
+ * @returns {string}
+ */
+export function formatJson(value, indent = '', column = indent.length) {
+  const inner = `${indent}  `;
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]';
+    if (value.every((v) => v === null || typeof v !== 'object')) {
+      const flat = `[${value.map((v) => JSON.stringify(v)).join(', ')}]`;
+      // 后面可能还跟一个逗号
+      if (column + flat.length + 1 <= JSON_LINE_WIDTH) return flat;
+    }
+    return `[\n${value.map((v) => `${inner}${formatJson(v, inner)}`).join(',\n')}\n${indent}]`;
+  }
+  if (plainObject(value)) {
+    const keys = Object.keys(value);
+    if (keys.length === 0) return '{}';
+    const lines = keys.map((k) => {
+      const lead = `${inner}${JSON.stringify(k)}: `;
+      return `${lead}${formatJson(value[k], inner, lead.length)}`;
+    });
+    return `{\n${lines.join(',\n')}\n${indent}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/** 仓根 biome.json 的 formatter.lineWidth */
+const JSON_LINE_WIDTH = 110;
+
+/**
  * @param {string} text
  * @returns {string[]}
  */
@@ -79,8 +130,7 @@ export function applyCatalog(settings, track, hooksDir) {
         continue;
       }
       const hooks = list.filter((handler) => {
-        const command = plainObject(handler) ? handler.command : undefined;
-        const script = scriptOf(command);
+        const script = handlerScript(handler);
         if (script === null || !catalog.has(script)) return true;
         return subscribed;
       });
@@ -128,7 +178,7 @@ function hasScript(hooks, script) {
       const list = /** @type {{ hooks?: unknown[] }} */ (group)?.hooks;
       if (!Array.isArray(list)) continue;
       for (const handler of list) {
-        if (scriptOf(/** @type {{ command?: unknown }} */ (handler)?.command) === script) return true;
+        if (handlerScript(handler) === script) return true;
       }
     }
   }
@@ -181,9 +231,10 @@ if (isMain()) {
       }
     }
     const next = applyCatalog(current, track, join(homedir(), '.fleet-dao', 'hooks'));
+    // 内容等价就不写盘：不碰文件、不改排版
     if (JSON.stringify(current) !== JSON.stringify(next)) {
       mkdirSync(dirname(settingsPath), { recursive: true });
-      writeFileSync(settingsPath, `${JSON.stringify(next, null, 2)}\n`);
+      writeFileSync(settingsPath, `${formatJson(next)}\n`);
     }
   } catch (err) {
     const why = err instanceof Error ? err.message : String(err);
