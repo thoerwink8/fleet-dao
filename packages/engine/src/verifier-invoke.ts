@@ -89,6 +89,16 @@ export const VerifierInvokeInputSchema = z
     /** 这是第几轮：默认 1 轮、最多 2 轮（specs/555 第 3 条）；本模块不判上限，只透传。 */
     round: z.union([z.literal(1), z.literal(2)]),
     /**
+     * 第 2 轮复核（工作流在 patched('verify-recheck') 下才给）：上一轮没过的验收条编号（从 1 起，对得上
+     * howToFinish），和上轮问题原话。有它时，喂进来的 diff 是这一轮的增量，判法只复核这些条和增量里的改动。
+     */
+    recheck: z
+      .object({
+        failedCriteria: z.array(z.number().int().positive()),
+        priorProblems: z.array(z.string()),
+      })
+      .optional(),
+    /**
      * 要求两家都验（两个不同的族各验一遍，都过才算过）：作者族认不出时由调用方设为 true。
      * 为 true 时 modelFamiliesAvoid 和 otherAuthorFamilies 可以都为空。不为 true 时，别家一家都派不出也会改成两家都验。
      */
@@ -342,6 +352,58 @@ export interface VerifierInvokeDeps {
 
 /** 三种能挡的问题前缀（specs/555 第 3 条）。problems 里每条必须以这三种之一开头；风格意见不许进。 */
 export const BLOCKER_KINDS = ['没做到验收条', '弄坏了原有功能', '安全或丢数据'] as const;
+
+/** 提示词里这一句：验收会话可以读 PR 头的完整检出，不只好看 diff。 */
+export const VERIFY_MAY_READ_HEAD = '你可以在 PR 头的完整检出里读文件';
+
+/**
+ * 第 2 轮的判法原句。新提出的、不在增量里的问题只记备注、不拒。
+ * 增量里新出现的问题，模型要在正文里写上能对上本轮 changedFiles 的「增量文件：`路径`」证据，
+ * 否则和「不在上轮没过的条里」一样改记备注。
+ */
+export const VERIFY_RECHECK_RULE =
+  '只复核上轮没过的条和增量里的改动，新提出的、不在增量里的问题只记备注、不拒';
+
+/** 问题正文里的验收条编号（从 1 起）。认不出就空。 */
+export function criterionNumbersIn(problem: string): number[] {
+  return [...problem.matchAll(/第\s*(\d+)\s*条/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => Number.isInteger(n) && n >= 1);
+}
+
+/** 每条问题都要有一个落在「怎么算做完」里的编号。没有、或编号对不上，算格式错。 */
+export function missingCriterionNumbers(problems: readonly string[], criterionCount: number): boolean {
+  if (problems.length === 0) return false;
+  return problems.some((problem) => {
+    const nums = criterionNumbersIn(problem);
+    return !nums.some((n) => n <= criterionCount);
+  });
+}
+
+/**
+ * 第 2 轮：编号在上轮没过的条里，或正文写了「增量」（模型标明这是增量里的新问题），才继续挡。
+ * 增量里的新问题必须带能对上本轮 changedFiles 的「增量文件：`路径`」证据；其余新提出的改记备注。
+ */
+export function splitRecheckProblems(
+  problems: readonly string[],
+  failedCriteria: ReadonlySet<number>,
+  changedFiles: readonly string[] = [],
+): { keep: string[]; noted: string[] } {
+  const changed = new Set(changedFiles);
+  const incrementalEvidence = (problem: string): boolean =>
+    [...problem.matchAll(/增量文件\s*[:：]\s*`([^`\n]+)`/g)].some((match) => {
+      const path = match[1]?.trim();
+      return path !== undefined && changed.has(path);
+    });
+  const keep: string[] = [];
+  const noted: string[] = [];
+  for (const problem of problems) {
+    const cited = criterionNumbersIn(problem).some((n) => failedCriteria.has(n));
+    if (cited || incrementalEvidence(problem)) keep.push(problem);
+    else noted.push(problem);
+  }
+  return { keep, noted };
+}
 export type BlockerKind = (typeof BLOCKER_KINDS)[number];
 
 /** 行数按人看到的行算：文件末尾那个换行不算多出来的一行。 */
@@ -451,13 +513,32 @@ function renderPrompt(
 ): string {
   const prBody = input.prBody?.trim() ?? '';
   const testOutput = input.testOutput?.trim() ?? '';
+  const recheck = input.round === 2 ? input.recheck : undefined;
   const materials = [
     '上面的需求原文',
     ...(prBody !== '' ? ['下面的 PR 正文'] : []),
     ...(testOutput !== '' ? ['引擎跑过的测试输出'] : []),
-    'diff',
+    recheck ? '这一轮的增量 diff' : 'diff',
     ...(named.length > 0 ? ['「单子点名但这次没改的文件」里的当前内容'] : []),
+    'PR 头的完整检出',
   ];
+  const recheckLines =
+    recheck === undefined
+      ? []
+      : [
+          '',
+          '## 上一轮没过的条',
+          '这一轮只复核下面这些，再加这一轮增量 diff 里的改动。',
+          ...(recheck.failedCriteria.length === 0
+            ? ['（上轮问题里没有认得出的验收条编号，按下面对原话复核。）']
+            : recheck.failedCriteria.map((n) => {
+                const text = input.howToFinish[n - 1];
+                return text ? `- 第 ${n} 条：${text}` : `- 第 ${n} 条`;
+              })),
+          ...(recheck.priorProblems.length > 0
+            ? ['', '上轮写的问题：', ...recheck.priorProblems.map((p) => `- ${p}`)]
+            : []),
+        ];
   return [
     `# 任务：验收 PR #${input.prNumber}（第 ${input.round} 轮）`,
     '',
@@ -467,11 +548,12 @@ function renderPrompt(
     '## 怎么算做完（逐条都要回）',
     ...input.howToFinish.map((a, i) => `${i + 1}. ${a}`),
     ...(specDir !== undefined ? ['', `## 需求文档出处`, `\`${specDir}\`（对照这份，不要凭印象）。`] : []),
+    ...recheckLines,
     '',
     '## 验什么',
     `PR：#${input.prNumber}`,
     `分支：\`${input.branch}\`  基线：\`${input.baseSha}\``,
-    `你手上没有仓库的检出（当前目录是空的）。能看的材料：${materials.join('、')}。`,
+    `${VERIFY_MAY_READ_HEAD}。能看的材料：${materials.join('、')}。当前目录是 PR 头的完整检出时，直接读文件；某个文件读不到，只根据下面这些材料判，不要因为读不到就当成没做到。`,
     '你只做一件事：逐条判「怎么算做完」在这些材料里成不成立。',
     `- 材料里看得出做到了：成立。材料里看得出没做到，或这一条本该在 diff 里看得见却找不到：写进「## 问题」（${BLOCKER_KINDS[0]}），不要凭想象放行。这一句只管 diff 能看见的内容，不包括只要求测试、检查、构建或类型检查通过的条目。`,
     '- 这一条要 diff 以外的证据才判得了（截图、页面现场、线上或法国的数据、审计结果、人手操作的结果），或只靠标了「跳过」的文件才判得了：',
@@ -489,7 +571,8 @@ function renderPrompt(
     ...renderTextBlock('PR 正文（写代码的会话写的，只当线索）', prBody, PR_BODY_MAX_CHARS, 'head'),
     ...renderTextBlock('引擎跑过的测试输出', testOutput, TEST_OUTPUT_MAX_CHARS, 'tail'),
     '',
-    '## diff（unified patch）',
+    recheck ? '## 这一轮的增量 diff（unified patch）' : '## diff（unified patch）',
+    ...(recheck ? ['下面只是上一轮验收之后、这一轮新推上来的增量，不是整张 PR 从基线起的全部 diff。'] : []),
     '```diff',
     diff.diffText,
     '```',
@@ -500,9 +583,16 @@ function renderPrompt(
     `- ${BLOCKER_KINDS[1]}：diff 里有证据显示这次改动弄坏了原有功能`,
     `- ${BLOCKER_KINDS[2]}：diff 里有证据显示安全或丢数据的问题`,
     '风格、命名、设计好不好、「最好再加个……」**不许写**进「## 问题」，放「## 建议」，不影响结论。',
+    '每条问题都要带验收条编号，写成「第 N 条」（N 是上面「怎么算做完」的序号，从 1 起）。没有编号算格式错。',
+    ...(recheck
+      ? [
+          VERIFY_RECHECK_RULE,
+          '上轮没过的条没修好：写进「## 问题」，带第 N 条。增量 diff 里新改坏的：也写进「## 问题」，带第 N 条，并且正文写「增量文件：`本轮 diff 中的实际路径`」。新提出的、不在增量里的：写进「## 建议」。增量文件路径对不上本轮 diff、或没有这句证据，且编号也不在上轮没过的条里的，引擎会改记备注、不拒。',
+        ]
+      : []),
     '',
     '## 输出形状',
-    `先写一段「## 问题」（每行一条，以 \`- ${BLOCKER_KINDS[0]}：\`、\`- ${BLOCKER_KINDS[1]}：\` 或 \`- ${BLOCKER_KINDS[2]}：\` 开头；没有问题就留空）；`,
+    `先写一段「## 问题」（每行一条，以 \`- ${BLOCKER_KINDS[0]}：第 N 条：\`、\`- ${BLOCKER_KINDS[1]}：第 N 条：\` 或 \`- ${BLOCKER_KINDS[2]}：第 N 条：\` 开头，N 是「怎么算做完」的序号；没有编号算格式错；没有问题就留空）；`,
     '再写「## 不归我验」（每行一条，`- 第 N 条：要什么证据、为什么 diff 里看不出`；没有就留空）；',
     '可以写「## 建议」段（不挡，不影响结论）；',
     '**最后一行写** `verdict: pass` 或 `verdict: fail`（不许别的话、不许两个都写）。只有「## 问题」里有条目才写 fail；',
@@ -898,7 +988,7 @@ export async function invokeVerifier(
       round: parsed.round,
     };
   }
-  if (diff.diffText.trim() === '') {
+  if (parsed.round === 1 && diff.diffText.trim() === '') {
     return {
       pass: false,
       problems: ['读不到 diff：fetchDiff 返回了空 diff（不许拿空当「没改动所以没挡的」）'],
@@ -906,7 +996,7 @@ export async function invokeVerifier(
       round: parsed.round,
     };
   }
-  if (diff.changedFiles.length === 0) {
+  if (parsed.round === 1 && diff.changedFiles.length === 0) {
     return {
       pass: false,
       problems: ['读不到 diff：fetchDiff 返回了空 changedFiles（没改任何文件就是没干活）'],
@@ -936,6 +1026,8 @@ export async function invokeVerifier(
   const seenRoutes = new Set<string>();
   const misses: { route: string; tail: string }[] = [];
   let lastSession: VerifierInvokeOutput['session'];
+  /** 问题没带验收条编号：整次验收只重跑一次，跨家族也不能再重跑。 */
+  let formatRetried = false;
   const named = await loadNamedFiles(parsed, diff.changedFiles, deps.fetchNamedFiles);
   const prompt = renderPrompt(parsed, diff, spec.specDir, named);
 
@@ -1068,7 +1160,49 @@ export async function invokeVerifier(
         if (await missAndNext(label, judged.why)) continue;
         return { kind: 'none' };
       }
-      return { ...judged, family: picked.family, modelId: picked.modelId };
+      let problems = judged.problems;
+      let suggestions = judged.suggestions;
+      if (missingCriterionNumbers(problems, parsed.howToFinish.length)) {
+        // 没有验收条编号：格式错，只重跑一次。下一条路由还是刚才这条时，拿掉「已经试过」再跑这一次。
+        const why = '问题没带验收条编号（格式错）';
+        misses.push({ route: label, tail: why });
+        if (!formatRetried) {
+          formatRetried = true;
+          const next = await pickFor(family);
+          if (next.kind === 'model') {
+            const nextLabel = next.m.routeId ?? `${family}/${next.m.modelId}`;
+            if (seenRoutes.has(nextLabel)) seenRoutes.delete(nextLabel);
+            m = next.m;
+          } else {
+            seenRoutes.delete(label);
+          }
+          continue;
+        }
+        return { kind: 'none' };
+      }
+      const recheck = parsed.round === 2 ? parsed.recheck : undefined;
+      const notes = [...judged.notes];
+      if (recheck !== undefined) {
+        const split = splitRecheckProblems(problems, new Set(recheck.failedCriteria), diff.changedFiles);
+        problems = split.keep;
+        if (split.noted.length > 0) {
+          suggestions = [...suggestions, ...split.noted];
+          notes.push(`新提出的、不在增量里的 ${split.noted.length} 条只记备注、不拒`);
+        }
+      }
+      if (formatRetried) notes.push('上一次问题没带验收条编号，按格式错重跑了一次');
+      if (!judged.passed && problems.length === 0 && recheck !== undefined) {
+        notes.push('模型写了不通过，但保留下来的问题为空：新问题只记备注、不拒，按过算');
+      }
+      return {
+        ...judged,
+        family: picked.family,
+        modelId: picked.modelId,
+        passed: problems.length === 0,
+        problems,
+        suggestions,
+        notes,
+      };
     }
   };
   /** 各家的「不归我验」「建议」合起来（去重，两家时带上族名）；空的不带。 */
@@ -1164,7 +1298,7 @@ export async function invokeVerifier(
         ...verdicts.flatMap((v) => v.notes.slice(1).map((n) => `${v.family}：${n}`)),
       ].join('；'),
       round: parsed.round,
-      session: verdicts[1]!.session,
+      session: verdicts[1]?.session,
       ...extras(verdicts),
     };
   }

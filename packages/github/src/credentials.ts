@@ -15,12 +15,6 @@ export interface AppCredentials {
   appId: number;
   /** JWT 的 iss 优先用它（官方推荐），没有才用 appId。 */
   clientId?: string | undefined;
-  /**
-   * OAuth 用户授权的 client_secret（#1989）：列「我 GitHub 上能看到的仓」、把 App 装到某个仓，都要用本人身份的
-   * OAuth 用户令牌，换令牌这一步要它。建 App 时 GitHub 回的那份里有；老凭据文件没有就是 undefined，
-   * 对应的「一键授权」在这一台上回 503 并说明，不拿 App 机器人令牌硬顶（那看不到别人的个人仓）。
-   */
-  clientSecret?: string | undefined;
   slug: string;
   privateKey: KeyObject;
   /** 凭据文件在哪；只给人看报错用。 */
@@ -86,7 +80,6 @@ export function loadAppCredentials(role: AppRole, file: string, read: ReadFile =
   const slug = o.slug;
   if (typeof slug !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(slug)) throw bad('缺 slug（App 的短名）');
   const clientId = typeof o.client_id === 'string' && o.client_id ? o.client_id : undefined;
-  const clientSecret = typeof o.client_secret === 'string' && o.client_secret ? o.client_secret : undefined;
 
   let pem: string;
   if (typeof o.pem === 'string' && o.pem.trim()) {
@@ -115,7 +108,7 @@ export function loadAppCredentials(role: AppRole, file: string, read: ReadFile =
     throw bad('私钥不是合法的 PEM');
   }
   if (privateKey.asymmetricKeyType !== 'rsa') throw bad('私钥不是 RSA（GitHub App 只签 RS256）');
-  return { role, appId, clientId, clientSecret, slug, privateKey, source: file };
+  return { role, appId, clientId, slug, privateKey, source: file };
 }
 
 export function loadApps(

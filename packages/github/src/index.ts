@@ -118,6 +118,10 @@ export {
   once,
 } from './idempotency.ts';
 export {
+  type InstallationListedRepo,
+  listInstallationRepositories,
+} from './installation-repos.ts';
+export {
   type InteractionLimitInput,
   type InteractionLimitResult,
   renewInteractionLimit,
@@ -222,10 +226,3 @@ export {
   renderPrBody,
 } from './text.ts';
 export { TOKEN_SCOPES, type TokenScope } from './token-scopes.ts';
-export {
-  createGitHubUserApi,
-  GITHUB_AUTHORIZE_URL,
-  GITHUB_TOKEN_URL,
-  type GitHubUserApi,
-  type UserRepo,
-} from './user-repos.ts';
