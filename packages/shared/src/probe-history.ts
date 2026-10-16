@@ -13,7 +13,7 @@ export type ProbeHistoryResult = (typeof PROBE_HISTORY_RESULTS)[number];
 
 /**
  * 一次探测带的身份题（#1798 片 5；原先是 #1637 降智题）：问的题、标准答案、实答、判过没过
- * （null = 没判：连通探测、或身份题认不出、或回答里没有第一行 pong）、自报的身份。
+ * （null = 没判：连通探测、或身份题认不出、或回答里没有单独一行 pong）、自报的身份。
  * 实答、自报身份回答里没写就是 null，不当空串。
  */
 export interface ProbeCheck {
