@@ -12,6 +12,7 @@
 // - 任务表（停下等人）读不到：stoppedTasks 是 null，整理照常跑，摘要和提示词写没查成，不换成空数组。
 
 import { randomUUID } from 'node:crypto';
+import { StopReason } from '@fleet-dao/adapters';
 import { loadStandardPaths } from '@fleet-dao/conventions';
 import {
   type Db,
@@ -219,7 +220,7 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
         ctx,
       );
       // 4. 起会话：切号 / 排空叫停（ticket.signal）和我们自己的时限都接进去
-      const timer = setTimeout(() => stop.abort(new Error('整理会话超时')), timeoutMs);
+      const timer = setTimeout(() => stop.abort(new StopReason('wall-clock', '整理会话超时')), timeoutMs);
       let out: Awaited<ReturnType<typeof spawn>>;
       try {
         ticket.running();

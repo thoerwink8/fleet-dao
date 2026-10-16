@@ -14,6 +14,7 @@ import {
   runClaudeCode,
 } from '../src/claude-code/run.ts';
 import { DEFAULT_PROCESS_LIMITS, type SpawnInfo } from '../src/process.ts';
+import { StopReason } from '../src/stop-reason.ts';
 import type { ToolPayload } from '../src/types.ts';
 import { fakeAgent, fixtureInit, fixtureLines, fixturePath, pidAlive, tempDir } from './helpers.ts';
 
@@ -287,6 +288,28 @@ describe('runClaudeCode', { timeout: 30_000 }, () => {
     });
     expect(report.killed?.reason).toBe('aborted');
     expect(judgeClaudeRun(report).outcome).toBe('stopped');
+  });
+
+  it('叫停带原因：记进 killed.cause，判定文案含原因；不带原因写「原因没传」', async () => {
+    const run = async (reason?: unknown) => {
+      const controller = new AbortController();
+      const report = await runClaudeCode(spec('cc-haiku-read'), {
+        command: fakeAgent({
+          replay: fixturePath('claude-code', 'cc-haiku-read'),
+          replayLines: 5,
+          after: 'hang',
+        }),
+        signal: controller.signal,
+        onEvent: () => controller.abort(reason),
+      });
+      return { report, verdict: judgeClaudeRun(report) };
+    };
+    const given = await run(new StopReason('release-pause', '发布排空：新版本'));
+    expect(given.report.killed?.cause).toEqual({ kind: 'release-pause', detail: '发布排空：新版本' });
+    expect(given.verdict.detail).toContain('发版暂停：发布排空：新版本');
+    const bare = await run();
+    expect(bare.report.killed?.cause).toBeUndefined();
+    expect(bare.verdict.detail).toContain('原因没传');
   });
 
   it('起之前就已叫停：不起进程', async () => {

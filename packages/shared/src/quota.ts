@@ -31,6 +31,8 @@ export function windowAppliesTo(
   if (!window.scope) return 'yes';
   const membership = scopeModels?.[window.scope];
   if (membership) {
+    // 空名单的 in = 谁都不扣（只显示的窗口，例如 Cursor 有桶读数时的账期美元），不必知道路由的上游名字。
+    if ('in' in membership && membership.in.length === 0) return 'no';
     const names = (model.upstreamNames ?? []).filter((n) => n !== '').map(norm);
     if (names.length === 0) return 'unknown';
     const listed = (m: string) => names.includes(norm(m));

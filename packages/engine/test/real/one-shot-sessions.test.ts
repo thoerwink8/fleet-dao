@@ -2,6 +2,7 @@
 // 发布排空照它看手上还有几段在动手、验收，到点不分池停下。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { stopCauseOf } from '@fleet-dao/adapters';
 import { describe, expect, it } from 'vitest';
 import { createEngineDrain } from '../../src/drain.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
@@ -30,6 +31,7 @@ describe('oneShotSessions：一段从定了路由起登记，收场走', () => {
     expect(reg.stop(pools('claude-carpool', 'claude-solo'), '切号：拼车切到独享')).toEqual(['run-car']);
     expect(car.signal.aborted).toBe(true);
     expect((car.signal.reason as Error).message).toBe('切号：拼车切到独享');
+    expect(stopCauseOf(car.signal.reason)).toEqual({ kind: 'route-swap', detail: '切号：拼车切到独享' });
     expect(other.signal.aborted).toBe(false);
     // 再叫一遍：已经在停的不算这一次叫停的，但没收场就还在 live 里（切号要等它收场）
     expect(reg.stop(pools('claude-carpool'), '又一次')).toEqual([]);
@@ -81,6 +83,7 @@ describe('发布排空的在途清单（#957）：登记就 track、收场一定
     b.attempt('run-b');
     expect(reg.drainStop('到了发布宽限的截止').sort()).toEqual(['run-a', 'run-b']);
     expect((a.signal.reason as Error).message).toContain('发布排空：到了发布宽限的截止');
+    expect(stopCauseOf(a.signal.reason)?.kind).toBe('release-pause');
     expect(reg.drainStop('再来一次')).toEqual([]);
     expect(drain.inFlight()).toHaveLength(2);
     a.leave();

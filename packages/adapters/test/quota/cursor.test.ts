@@ -47,8 +47,29 @@ describe('Cursor Dashboard：账期用量（VPS 真机回包）', () => {
     const out = readingsFromPeriodUsage(period(), ctx);
     const labels = (model: string) =>
       windowsForModel(out.windows, { id: model }, out.scopeModels).map((w) => w.label);
-    expect(labels('composer-2.5')).toEqual(['plan_usd', 'auto_percent']);
-    expect(labels('kimi-k3')).toEqual(['plan_usd', 'api_percent']);
+    expect(labels('composer-2.5')).toEqual(['auto_percent']);
+    expect(labels('kimi-k3')).toEqual(['api_percent']);
+  });
+
+  it('账期美元 101%、Auto 桶 13%：Auto 桶模型（grok-4.7）不被账期美元挡；Auto 桶 100% 才挡；API 桶模型只看 API 桶', () => {
+    const body = (autoPct: number) => {
+      const b = period() as { planUsage: Record<string, unknown>; autoBucketModels: string[] };
+      b.planUsage.totalSpend = 40639;
+      b.planUsage.limit = 40000;
+      b.planUsage.autoPercentUsed = autoPct;
+      b.autoBucketModels = [...b.autoBucketModels, 'grok-4.7-high-fast'];
+      return b;
+    };
+    const applicable = (autoPct: number, model: string) => {
+      const out = readingsFromPeriodUsage(body(autoPct), ctx);
+      return windowsForModel(out.windows, { id: model }, out.scopeModels);
+    };
+    const plan = readingsFromPeriodUsage(body(13), ctx).windows.find((w) => w.label === 'plan_usd');
+    expect(plan?.utilization).toBeGreaterThan(1);
+    expect(applicable(13, 'grok-4.7-high-fast').map((w) => w.label)).toEqual(['auto_percent']);
+    expect(applicable(13, 'grok-4.7-high-fast')[0]?.utilization).toBeCloseTo(0.13);
+    expect(applicable(100, 'grok-4.7-high-fast')[0]?.utilization).toBe(1);
+    expect(applicable(13, 'kimi-k3').map((w) => w.label)).toEqual(['api_percent']);
   });
 
   it('以后多出来的桶照收（xxxPercentUsed）', () => {
@@ -81,6 +102,8 @@ describe('Cursor Dashboard：账期用量（VPS 真机回包）', () => {
     delete body.planUsage.apiPercentUsed;
     const out = readingsFromPeriodUsage(body, ctx);
     expect(out.windows.map((w) => w.label)).toEqual(['plan_usd']);
+    expect(out.windows[0]?.scope).toBeUndefined();
+    expect(windowsForModel(out.windows, { id: 'grok-4.7' }, out.scopeModels)).toHaveLength(1);
     expect(out.notes.join()).toContain('按桶卡不住');
   });
 });

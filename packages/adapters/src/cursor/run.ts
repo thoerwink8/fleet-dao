@@ -120,7 +120,9 @@ export function cursorRunFacts(report: CursorRunReport): RunFacts {
   const words = cursorLastWords(report.stderrTail);
   return {
     ...(report.spawnError ? { spawnError: report.spawnError } : {}),
-    ...(report.killed ? { killed: report.killed.reason } : {}),
+    ...(report.killed
+      ? { killed: report.killed.reason, ...(report.killed.cause ? { stopCause: report.killed.cause } : {}) }
+      : {}),
     exitCode: report.exitCode,
     ...(report.exitLost ? { exitLost: report.exitLost } : {}),
     signal: report.signal,
