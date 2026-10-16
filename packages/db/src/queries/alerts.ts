@@ -1,7 +1,7 @@
 // 提醒（notifications）的对账要用的查询：列出没处理的、按前缀连同已处理的一起列、按条件撤掉（写明谁撤的、为什么，
 // 进操作记录）、只在没有时插一条（再提醒一天一条）、只改还开着的（不把人刚处理掉的又打开）。
 // 报警本身的写法（同一件事一条、再报原地更新）在 engine-alerts.ts 的 upsertAlert。
-import type { DecisionOption } from '@fleet-dao/shared';
+import type { DecisionAnswer, DecisionExecution, DecisionOption } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, notifications } from '../schema/index.ts';
@@ -22,6 +22,8 @@ export interface AlertRow {
   resolvedAt: Date | null;
   /** 谁处理掉的：人是用户编号，系统写自己的名字（engine:…、auto-release、fleet-backup……）。 */
   resolvedBy: string | null;
+  /** 「要你拍」拍了什么、照着做到哪（answer.execution）；没拍是 null。查询都带，手写的假数据可以不给。 */
+  answer?: DecisionAnswer | null;
 }
 
 /**
@@ -45,6 +47,7 @@ const columns = {
   updatedAt: notifications.updatedAt,
   resolvedAt: notifications.resolvedAt,
   resolvedBy: notifications.resolvedBy,
+  answer: notifications.answer,
 };
 
 /**
@@ -127,6 +130,55 @@ export async function resolveAlertWithReason(
       reason: why,
       via: 'engine',
     });
+    return 'ok';
+  });
+}
+
+/**
+ * 引擎把「要你拍」交过来的那一步做完了（删工作树：answer.execution.queued）：结果写回答案里；resolve 才标已处理
+ * （处理人记拍板的人，操作记录记引擎）。只改还开着、答案还是 answeredAt 那一次的（人又拍了一次就不拿旧结果盖新答案），
+ * 对不上回 not_open。
+ */
+export async function settleQueuedDecision(
+  db: Db,
+  input: {
+    dedupeKey: string;
+    answeredAt: string;
+    execution: DecisionExecution;
+    resolve: boolean;
+    auditActor: string;
+    at?: Date;
+  },
+): Promise<'ok' | 'not_open'> {
+  const at = input.at ?? new Date();
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(notifications)
+      .set({
+        answer: sql`${notifications.answer} || jsonb_build_object('execution', ${JSON.stringify(input.execution)}::jsonb)`,
+        updatedAt: at,
+        ...(input.resolve ? { resolvedAt: at, resolvedBy: sql`${notifications.answer} ->> 'by'` } : {}),
+      })
+      .where(
+        and(
+          eq(notifications.dedupeKey, input.dedupeKey),
+          isNull(notifications.resolvedAt),
+          sql`${notifications.answer} ->> 'at' = ${input.answeredAt}`,
+        ),
+      )
+      .returning({ id: notifications.id });
+    if (!row) return 'not_open';
+    if (input.resolve) {
+      await tx.insert(auditLog).values({
+        at,
+        actorKind: 'engine',
+        actorId: input.auditActor,
+        action: 'notification.resolve',
+        target: `notification:${row.id}`,
+        reason: input.execution.text,
+        via: 'engine',
+      });
+    }
     return 'ok';
   });
 }

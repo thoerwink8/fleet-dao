@@ -1,9 +1,13 @@
 // 选路、报警、提问、人闸、计时、快照接真库（PGlite）：三种结果原样换成端口的；点名、续会话、被暂停的账号池、
 // 没接上的执行方式各有去处；库里对不上的明确报错，不当成「没有路由」「记上了」。
 import { randomUUID } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   alertByKey,
   finishRun,
+  getRun,
   notifications,
   poolReservations,
   runs,
@@ -15,6 +19,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { createPgStore } from '@fleet-dao/store';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fixedEngineMaster, MASTER_ROUTE_RETRY_SECONDS } from '../../src/engine-master.ts';
@@ -23,6 +28,7 @@ import { SLICE_MEMORY_HIGH_MB } from '../../src/limits.ts';
 import type { PickRouteInput } from '../../src/ports.ts';
 import type { UserExec } from '../../src/real/exec.ts';
 import { poolHoldAfterProbe } from '../../src/real/route-probe.ts';
+import { realRuns } from '../../src/real/runs-writer.ts';
 import { type SessionOrgReader, sessionOrgReader } from '../../src/real/session-org.ts';
 import {
   createStorePorts,
@@ -31,6 +37,7 @@ import {
   poolHoldKey,
   QUOTA_ROUTE_WAIT_CAP_SECONDS,
 } from '../../src/real/store-ports.ts';
+import { runOneShot } from '../../src/runner/one-shot.ts';
 import {
   addCursorRoute,
   addGrokRoute,
@@ -119,6 +126,38 @@ describe('选路', () => {
     });
   });
 
+  it('派出去以后，这一行的 route_why 不是空的', async () => {
+    await world(t.db);
+    const picked = await pick({ stage: 'execute' });
+    if (!picked.ok) throw new Error(`没派出去：${picked.detail}`);
+    const why = picked.route.why;
+    if (!why?.trim()) throw new Error('为什么派它是空的');
+    expect(why).toBe(picked.why);
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-route-why-'));
+    try {
+      const shot = await runOneShot(
+        {
+          segment: 'manual',
+          modelId: picked.route.modelId,
+          routeId: picked.route.routeId,
+          routeWhy: why,
+          prompt: '动手',
+          cwd: dir,
+        },
+        {
+          spawn: async () => ({ exitCode: 0, stdout: '做完了', stderr: '', killed: false }),
+          runs: realRuns({ db: t.db }),
+          tmpDir: dir,
+        },
+      );
+      const row = await getRun(t.db, shot.runId);
+      expect(row?.routeWhy?.trim().length).toBeGreaterThan(0);
+      expect(row?.routeWhy).toBe(picked.why);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('会话用户挂着拼车组织：独享池挡着不派（写明为什么），拼车池照派；池名按组织类型分', async () => {
     await world(t.db);
     await t.client.query(`update pools set org_kind = 'solo' where id = 'claude-solo'`);
@@ -183,6 +222,7 @@ describe('选路', () => {
       taskId: null,
       title: '账号池 claude-solo 整池暂停',
       body: '在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login',
+      options: noteOnlyOptions(),
     });
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     const probe = await pick({ stickRouteId: 'solo' });
@@ -248,10 +288,15 @@ describe('选路', () => {
       const hold = (await alarms()).find((a) => a.dedupeKey === 'pool-hold:claude-solo');
       expect(hold).toMatchObject({ level: 'decision', title: '账号池 claude-solo 整池暂停：登录失效' });
       expect(hold?.decisionOptions?.map((o) => o.id)).toEqual(['fixed', 'hold', 'retire']);
+      expect(hold?.decisionOptions?.map((o) => o.action?.kind)).toEqual([
+        'resume-pool',
+        'pause-pool',
+        'note-only',
+      ]);
       expect(hold?.decisionOptions?.find((o) => o.recommended)?.id).toBe('fixed');
     });
 
-    it('整池暂停的每个选项真有说的效果（#1931）：「先停着」「不要了」只记答案、池子照旧避开；「修好了，放开」转已处理、池子当场回来', async () => {
+    it('整池暂停：「先停着」「不要了」只记答案、池子照旧避开；「修好了，放开」要 settleDecision 才转已处理、池子才回来', async () => {
       await world(t.db);
       await poolHoldAfterProbe(
         t.db,
@@ -281,6 +326,16 @@ describe('选路', () => {
         expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
       }
       expect((await answer('fixed')).kind).toBe('ok');
+      expect((await alarms()).find((a) => a.id === id)?.resolvedAt).toBeNull();
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      expect(
+        await store.settleDecision({
+          id,
+          execution: { ok: true, text: '账号池 claude-solo 已放开', at: new Date().toISOString() },
+          resolve: true,
+          by,
+        }),
+      ).toBe('ok');
       expect((await alarms()).find((a) => a.id === id)?.resolvedAt).not.toBeNull();
       expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
     });
@@ -331,6 +386,7 @@ describe('选路', () => {
         taskId: null,
         title: '账号池 claude-solo 整池暂停',
         body: '占位',
+        options: noteOnlyOptions(),
       });
       expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
       expect(await pick({ stickRouteId: 'solo' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
@@ -800,6 +856,7 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
       taskId: null,
       title: '账号池 claude-carpool 整池暂停：登录失效',
       body: '要重新登录',
+      options: noteOnlyOptions(),
     });
     const none = await pick({ stage: 'execute', avoidRouteIds: ['solo'] }, p);
     expect(none).toMatchObject({ ok: false, waitFor: 'none' });
@@ -1011,6 +1068,7 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
       taskId: null,
       title: '账号池 claude-carpool 整池暂停：登录失效',
       body: '要重新登录',
+      options: noteOnlyOptions(),
     });
     rig.answer('solo');
     const r = await pick({ stage: 'execute' }, onRig());
@@ -1274,6 +1332,10 @@ describe('报警、提问、人闸', () => {
         ['wf:park:red', 'decision'],
       ].sort(),
     );
+    expect(rows.find((r) => r.dedupeKey === 'wf:park:red')?.decisionOptions?.length).toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(rows.find((r) => r.dedupeKey === 'wf:info')?.decisionOptions).toBeNull();
   });
 });
 

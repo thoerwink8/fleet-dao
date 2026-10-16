@@ -31,6 +31,8 @@ const RunRecordFields = z.object({
   routeId: z.string().min(1).optional(),
   /** 派工档（runner/tier.ts 的三档）：只有动手段分档（决定 0010 第 3 条），对题、验收带了就拒收。 */
   tier: TierEnum.optional(),
+  /** 选路时那句「为什么派它」（写进 runs.route_why）。没经选路、老历史不给。 */
+  routeWhy: z.string().min(1).optional(),
   /** 跑在哪条 Temporal 工作流里（任务工作流是 taskWorkflowId(仓, 单号)）；不在工作流里跑的不给。 */
   workflowId: z.string().min(1).optional(),
   /** 这一段对着的 PR；还没开 PR 的（动手第一轮）不给。 */
@@ -105,6 +107,7 @@ export const RunStartSchema = RunRecordFields.pick({
   channel: true,
   routeId: true,
   tier: true,
+  routeWhy: true,
   workflowId: true,
   prNumber: true,
   branch: true,

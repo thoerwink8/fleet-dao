@@ -793,6 +793,11 @@ function RunRow({
           {run.branch ? <span className="num truncate">{run.branch}</span> : null}
         </div>
       ) : null}
+      {run.segment === 'manual' ? (
+        <p className="mt-1 text-meta text-muted-foreground" data-route-why>
+          为什么派它：{run.routeWhy ?? '没记'}
+        </p>
+      ) : null}
       {run.failureReason ? (
         <p className="mt-1 text-meta text-muted-foreground">为什么没成：{run.failureReason}</p>
       ) : null}

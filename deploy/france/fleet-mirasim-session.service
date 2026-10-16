@@ -49,7 +49,12 @@ Environment=GROK_ASK_USER_QUESTION=0
 # 这两个开关不许被当成「多余」去掉
 Environment=MIRASIM_NO_AGENT_EGRESS=1
 Environment=MIRASIM_ACCOUNT_USAGE_PROBE=0
-ExecStart=/home/@@SESSION_USER@@/.mirasim-remote/current/node /home/@@SESSION_USER@@/.mirasim-remote/current/server.cjs --port @@MIRASIM_SESSION_PORT@@ --host 127.0.0.1 --no-open --no-im --workdir /home/@@SESSION_USER@@
+# 0.0.425 的 server.cjs 会在某条连接已经 end 之后再 write。Node 24 没人听 error 就把
+# ERR_STREAM_WRITE_AFTER_END 变成未捕获异常，整进程退出，Restart=on-failure 把正在跑的会话全掐掉
+# （法国 2026-10-15 13:06、20:44，2026-10-16 12:10）。--require 先装守卫：只拆那一条连接，进程继续听。
+# 守卫文件由 france.sh 在重启本单元之前写到 /usr/local/lib/fleet-dao/（deploy/lib/mirasim-stream-guard.cjs）。
+# 不用 NODE_OPTIONS：那会进经它起的 claude / grok。--require 只作用在这个 node 进程。
+ExecStart=/home/@@SESSION_USER@@/.mirasim-remote/current/node --require /usr/local/lib/fleet-dao/mirasim-stream-guard.cjs /home/@@SESSION_USER@@/.mirasim-remote/current/server.cjs --port @@MIRASIM_SESSION_PORT@@ --host 127.0.0.1 --no-open --no-im --workdir /home/@@SESSION_USER@@
 Restart=on-failure
 RestartSec=5
 # 和旧系统那份共用的 mirasim-server 同一套限额（docs/reference/adapters.md 第八节）：这份不算「AI 会话」，不进

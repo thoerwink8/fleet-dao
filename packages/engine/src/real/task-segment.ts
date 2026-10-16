@@ -360,6 +360,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               cwd: input.worktreePath,
               timeoutMinutes: input.timeoutMinutes,
               routeId: input.route.routeId,
+              ...(input.route.why?.trim() ? { routeWhy: input.route.why.trim() } : {}),
               effort: input.tier.effort,
               ...(input.route.reservationId ? { reservationId: input.route.reservationId } : {}),
               ...(input.resumeSessionId ? { resumeSessionId: input.resumeSessionId } : {}),

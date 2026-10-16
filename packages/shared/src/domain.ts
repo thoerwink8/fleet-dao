@@ -379,6 +379,8 @@ export interface SegmentRun {
   /** 渠道（channels.id）：花费按它的计费方式分按量、套餐内。 */
   channel?: string;
   tier?: SegmentTier;
+  /** 选路时那句「为什么派它」。没经选路、加列之前的老行不给。 */
+  routeWhy?: string;
   startedAt: string;
   /** 还在跑的没有（和 outcome 一起空）。 */
   endedAt?: string;

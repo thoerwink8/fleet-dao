@@ -235,6 +235,25 @@ describe('【失败】读不到的都写明，不写 0', () => {
     expect(document.querySelector('[data-segment-stats] .text-display')?.textContent).not.toBe('没读到');
   });
 
+  test('动手段下面写为什么派这个模型；没记的写「没记」，不留空白', async () => {
+    open(
+      '/tasks/t-x',
+      apiWith(
+        detailWith([
+          { ...base, routeWhy: '主力档，强级在前；opus 难单一段过 2/4' },
+          { ...base, id: 'x-2' },
+          { ...base, id: 'x-3', segment: 'verify', tier: undefined },
+        ]),
+      ),
+    );
+    const runs = await panel('每一笔');
+    expect(runRow(runs, 'x-1').querySelector('[data-route-why]')?.textContent).toBe(
+      '为什么派它：主力档，强级在前；opus 难单一段过 2/4',
+    );
+    expect(runRow(runs, 'x-2').querySelector('[data-route-why]')?.textContent).toBe('为什么派它：没记');
+    expect(runRow(runs, 'x-3').querySelector('[data-route-why]')).toBeNull();
+  });
+
   test('动手段没记派工档：写「没记」，不猜成哪一档；没跑过的段写明没有记录', async () => {
     open('/tasks/t-x', apiWith(detailWith([{ ...base, tier: undefined }])));
     const box = await panel('三段');

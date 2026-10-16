@@ -5,12 +5,21 @@
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
-import { claimLocalTask, createDb, type Db, finishLocalTask, renewLocalTask } from '@fleet-dao/db';
+import {
+  claimLocalTask,
+  createDb,
+  type Db,
+  feishuPushFacts,
+  finishLocalTask,
+  renewLocalTask,
+} from '@fleet-dao/db';
 import {
   createGitHub,
   GITHUB_AUTHORIZE_URL,
   type GitHubUserApi,
   type ReleaseFactsReader,
+  type RepoRef,
+  type SelfCheckItem,
 } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import { intakeChatLimitsFrom } from '@fleet-dao/shared';
@@ -37,6 +46,7 @@ import { pgCliTools } from './cli-versions.ts';
 import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
 import { pgDatabaseSizes } from './db-sizes.ts';
+import { runFeishuPushRecheck, runGitHubAppRecheck } from './decision-actions.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
@@ -61,6 +71,7 @@ import { judgeHealthCheck } from './judge-health.ts';
 import { COCKPIT_KEEP_ALIVE_MS } from './keep-alive.ts';
 import { ListenFdError, startListeners } from './listen.ts';
 import { pgLocalClaims } from './local-claims.ts';
+import { pgManualTracks } from './manual-tracks.ts';
 import { pgModelRoster } from './model-roster.ts';
 import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
@@ -147,6 +158,8 @@ function githubMirror(db: Db): {
   userHit?: GitHubUserPort;
   /** 「要你拍」拍完往进度单、任务单留言（#1915）；凭据没读到就没有，答案照存、回包写没接上。 */
   decisionCommenter?: DecisionCommenter;
+  /** 重查 GitHub App。凭据没读到就没有，重查报「凭据没读到」。 */
+  selfCheck?: (repos: RepoRef[]) => Promise<SelfCheckItem[]>;
   /** 提需求（#2060）开单、写回评论、读单子状态，都用「引擎」机器人；凭据没读到就没有，开单回 503，不假装开了。 */
   requestIssues?: RequestIssuePort;
 } {
@@ -163,6 +176,7 @@ function githubMirror(db: Db): {
           return { url: got.url };
         },
       },
+      selfCheck: (repos) => gh.selfCheck(repos),
       requestIssues: {
         // 不走发件箱，同步调（母单 #2047 方案第六节）；正文过卫生检查、幂等都在 @fleet-dao/github 的 openIssue / commentIssue 里
         async openIssue(input) {
@@ -328,11 +342,20 @@ async function assemble(): Promise<{
     github: github.sink,
     ...(github.userHit ? { githubUser: github.userHit } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
+    decisionCapabilities: {
+      recheckGitHubApp: (repo) => runGitHubAppRecheck(github.selfCheck, repo),
+      recheckFeishuPush: async () => {
+        const at = now();
+        await runFeishuPushRecheck(await feishuPushFacts(db, at), at);
+      },
+    },
     alerts: pgCockpitAlerts(db),
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在正式环境有
     alertWork: pgAlertWork(db, production ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）
     routingLayers: pgRoutingLayers(db),
+    // 动手战绩：和选路读的 modelTierTracks 同一份，路由页按模型和档画出来
+    manualTracks: pgManualTracks(db),
     // 探针真历史（#1139）：渠道状态页的近 60 次格子。读库，不看引擎开没开
     probeHistory: pgProbeHistory(db),
     // 命令行工具版本（#1969）：读引擎写下的读数。引擎没跑过时各行写「还没读过」，不拿最新顶。

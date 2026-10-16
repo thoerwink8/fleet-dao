@@ -1,10 +1,14 @@
-// 本包 test/ 顶层不许直接同步起子进程（#264 这一片）：spawnSync / execFileSync / execSync 只留在 child.ts。
-// 注释和引号里的字是在提这个词，不是调用，去掉再扫。只扫顶层 .ts，子目录（fixtures/）本片不碰。
+// 本包的静态检查，两条：
+// 1. test/ 顶层不许直接同步起子进程（#264 这一片）：spawnSync / execFileSync / execSync 只留在 child.ts。只扫顶层 .ts，子目录（fixtures/）本片不碰。
+// 2. src/ 里不许用 Promise.all / race / any 并行（#2261）：一条失败（或一条先落定）就返回，其余库查询还在别的连接上占着锁，
+//    紧接着的写或清表交叉等锁，真 Postgres 报 deadlock detected（#2181）。并行查询用 src/queries/all-settled.ts 的 allSettledOrThrow。
+// 注释和引号里的字是在提这个词，不是调用，去掉再扫。
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const TEST = import.meta.dirname;
+const SRC = join(TEST, '..', 'src');
 
 /** 去掉注释和引号里的字符串（反引号 ${} 里的代码留下：那是代码，不是字面量）。 */
 function stripCommentsAndStrings(code: string): string {
@@ -165,5 +169,60 @@ describe('测试里不许同步起子进程', () => {
   it('模板里只有普通文字和不含这三个词的插值时，不误报', () => {
     const sample = 'const s = `普通文字 ' + slot('prefix') + slot('name') + '`;';
     expect(scanSyncChildSpawns(sample)).toEqual([]);
+  });
+});
+
+/** 会提前返回、把其余还在跑的 Promise 丢下的组合子。allSettled 等全部落定，不在内。 */
+const EARLY_RETURN = /\bPromise\s*\.\s*(?:all|race|any)\b/g;
+
+const EARLY_RETURN_HINT =
+  'Promise.all / race / any 并行库查询会在一条失败（或先落定）时提前返回，其余查询还占着连接和锁（#2181、#2261）。' +
+  "改用 src/queries/all-settled.ts 的 allSettledOrThrow（import { allSettledOrThrow } from './all-settled.ts'）。";
+
+/** 一段源码里提前返回的组合子调用（去掉注释和字符串后）。 */
+function earlyReturnCalls(code: string): string[] {
+  return [...stripCommentsAndStrings(code).matchAll(EARLY_RETURN)].map((m) => m[0].replace(/\s+/g, ''));
+}
+
+/** 扫 src/ 下全部 .ts（含子目录），返回「相对路径：命中的写法」。 */
+function scanSrcEarlyReturn(): string[] {
+  const files = readdirSync(SRC, { recursive: true, encoding: 'utf8' }).filter((f) => f.endsWith('.ts'));
+  if (files.length === 0) throw new Error(`没扫到 ${SRC} 下的 .ts，路径不对`);
+  return files.flatMap((f) => {
+    const calls = earlyReturnCalls(readFileSync(join(SRC, f), 'utf8'));
+    return calls.length === 0 ? [] : [`${f.replaceAll('\\', '/')}：${calls.join('、')}`];
+  });
+}
+
+describe('src 里并行查询不许提前返回', () => {
+  it('src/ 下没有 Promise.all / race / any', () => {
+    expect(scanSrcEarlyReturn(), EARLY_RETURN_HINT).toEqual([]);
+  });
+
+  it('扫到的文件里有 queries/（路径对、真的在扫）', () => {
+    const files = readdirSync(SRC, { recursive: true, encoding: 'utf8' }).map((f) => f.replaceAll('\\', '/'));
+    expect(files).toContain('queries/pool-runs.ts');
+    expect(files).toContain('queries/all-settled.ts');
+  });
+
+  it('故意放几行违规的样本，扫得出来', () => {
+    expect(earlyReturnCalls('const [a, b] = await Promise.all([db.select().from(t), q2]);')).toEqual([
+      'Promise.all',
+    ]);
+    expect(earlyReturnCalls('const pending = [q1, q2];\nconst rows = await Promise.all(pending);')).toEqual([
+      'Promise.all',
+    ]);
+    expect(earlyReturnCalls('await Promise.all(ids.map((id) => readRow(db, id)));')).toEqual(['Promise.all']);
+    expect(earlyReturnCalls('const all = Promise.all.bind(Promise);')).toEqual(['Promise.all']);
+    expect(earlyReturnCalls('await Promise\n  .race([q1, timeout]);')).toEqual(['Promise.race']);
+    expect(earlyReturnCalls('await Promise.any([q1, q2]);')).toEqual(['Promise.any']);
+    expect(earlyReturnCalls('const s = `' + slot('await Promise.all([q])') + '`;')).toEqual(['Promise.all']);
+  });
+
+  it('allSettled、注释和字符串里提到的不算', () => {
+    expect(earlyReturnCalls('const s = await Promise.allSettled([q1, q2]);')).toEqual([]);
+    expect(earlyReturnCalls('// 以前用 Promise.all：一条失败就立刻返回')).toEqual([]);
+    expect(earlyReturnCalls('/** 和 Promise.race 的区别 */')).toEqual([]);
+    expect(earlyReturnCalls("const msg = 'Promise.all 不许用';")).toEqual([]);
   });
 });

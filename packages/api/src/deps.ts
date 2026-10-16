@@ -3,6 +3,7 @@ import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { CliToolsPort } from './cli-versions.ts';
 import type { Config } from './config.ts';
+import type { DecisionCapabilities } from './decision-actions.ts';
 import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { PreflightReaders } from './france-preflight.ts';
@@ -10,6 +11,7 @@ import type { FranceReleasePort } from './france-release.ts';
 import type { GitHubUserPort } from './github-user.ts';
 import type { HostResourceSampler } from './host-resources.ts';
 import type { LocalClaimsPort } from './local-claims.ts';
+import type { ManualTracksPort } from './manual-tracks.ts';
 import type { ModelRosterPort } from './model-roster.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
@@ -77,6 +79,11 @@ export interface Deps {
    */
   routingLayers?: RoutingLayersPort | undefined;
   /**
+   * 动手战绩（manual-tracks.ts）：路由页那张表，和选路读的 modelTierTracks 同一份。没给（开发、内存版）的路由页不画这张表，
+   * 不拿空表冒充「都没战绩」。
+   */
+  manualTracks?: ManualTracksPort | undefined;
+  /**
    * 探针真历史（#1139，probe-history.ts）：渠道状态页的近 60 次格子。没给（开发、内存版没有这张表）时接口写没查成，
    * 不拿空列表冒充「还没有探测」。不看引擎开没开。
    */
@@ -135,6 +142,11 @@ export interface Deps {
    * 没给（开发环境、机器人凭据没读到）的答案照样存下，回包里 handoff 写没接上，不当成记上了。
    */
   decisionCommenter?: DecisionCommenter | undefined;
+  /**
+   * 「要你拍」选完要本机做的事（decision-actions.ts）：重查 GitHub App、重查飞书推送。
+   * 没给（开发、内存版）这两样回「没接上」，卡留着；暂停、放开、移出仓、留着只靠库，删工作树交给引擎，都不看这项。
+   */
+  decisionCapabilities?: DecisionCapabilities | undefined;
   /**
    * 环境页（#820 片 1）的版本那一项：读这台的发布目录（current 链接 + 状态文件）现算。只在正式环境装配
    * （main.ts 的 production；法国是）；别的环境不给，环境页写「没查成 + 原因」，不拿「还没发布过」顶。

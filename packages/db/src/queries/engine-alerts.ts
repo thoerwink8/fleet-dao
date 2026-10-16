@@ -1,22 +1,32 @@
 // 引擎的报警：同一件事（dedupe_key）一条、再报原地更新，按 dedupe_key 标成已处理，按前缀列还没处理的。
-import { type DecisionOption, decisionOptionsProblem } from '@fleet-dao/shared';
+import { DecisionActionSchema, type DecisionOption, decisionOptionsProblem } from '@fleet-dao/shared';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { notifications } from '../schema/index.ts';
 
 /**
- * 「要你拍」的选项（#1915）落库前核一遍：只有 decision 级能带；带了就要合规矩（至少两项、编号不重、恰好一项推荐）。
- * 不合规矩的照抛，不悄悄存成没有选项。没带回 null（页面写「没有选项，请直接回复」）。
+ * 「要你拍」的选项落库前核一遍：decision 级必须带至少两项（编号不重、恰好一项推荐）；别的级别不能带。
+ * 不合规矩的照抛，不悄悄存成没有选项。选项可以不带 action（老数据、只留言），带了就要是认得出的动作。
  */
 export function decisionOptionsFor(
   dedupeKey: string,
   level: 'alert' | 'decision' | 'daily',
   options: readonly DecisionOption[] | undefined,
 ): DecisionOption[] | null {
-  if (options === undefined) return null;
+  if (options === undefined) {
+    if (level === 'decision') {
+      throw new Error(`报警 ${dedupeKey} 的选项不合规矩：要你拍的事至少给两个选项`);
+    }
+    return null;
+  }
   if (level !== 'decision') throw new Error(`报警 ${dedupeKey} 是 ${level} 级，只有要人拍的才带选项`);
   const problem = decisionOptionsProblem(options);
   if (problem) throw new Error(`报警 ${dedupeKey} 的选项不合规矩：${problem}`);
+  for (const option of options) {
+    if (option.action === undefined) continue;
+    const parsed = DecisionActionSchema.safeParse(option.action);
+    if (!parsed.success) throw new Error(`报警 ${dedupeKey} 的选项 ${option.id} 的动作认不出`);
+  }
   return [...options];
 }
 

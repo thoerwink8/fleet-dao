@@ -3,7 +3,10 @@
 # deploy/lib/mirasim.sh 的会话用户 Mirasim 常驻单元这一层（mirasim_server_installed、check_mirasim_session_unit，
 # #424）；和 mirasim.test.sh（认令牌）分开测——那份管「引擎连哪个端口」，这份管「该不该有常驻单元、单元活没活」。
 #   0. deploy/france/fleet-mirasim-session.service 渲染出来的样子钉住：User、Group、端口、--host 127.0.0.1、
-#      --no-open、--no-im 都要在（改坏了这条先炸，不用真起服务就测得出）
+#      --no-open、--no-im、--require 流守卫都要在（改坏了这条先炸，不用真起服务就测得出）
+#   0b. 流守卫（deploy/lib/mirasim-stream-guard.cjs）：不装时对已 end 的流再 write，进程因
+#      ERR_STREAM_WRITE_AFTER_END 退出；装上之后这次写入丢掉、进程还在，正常的 end(数据) 仍写得出去。
+#      别的未捕获异常照旧退出。要 node，不要 root。
 #   1. 服务端本体不在（最常见的起始状态，装机脚本还没装过服务端）：mirasim_server_installed 返回假、
 #      check_mirasim_session_unit 记一笔待配，不判红——【故意造出的失败】照 france.sh 挂上 ERR 陷阱再跑一遍，
 #      陷阱不许响、返回 0（同一个坑 mirasim.test.sh 已经钉过一次，check_mirasim_session_unit 是新函数，重新钉一遍）
@@ -15,8 +18,8 @@
 #      ①健康清零不重启 ②连续失败 2 次不重启、第 3 次重启且清零 ③健康检查超时算失败
 #      ③b 有会话在跑且超时：只记不重启 ④单元没装退出 0、不重启；
 #      另钉：单元没在跑不重启、令牌不是恰好一份不重启、重启失败退出 1 且计数保留、定时器和单元文件的样子
-# 第 0、5 步不要 root；1～4 步要 root（建临时用户、用 systemd-run 起 transient 单元）、要这台机器有 systemd 和 node，
-# 不满足就在跑完第 5 步之后以 2 退出。
+# 第 0、0b、5 步不要 root（0b 要 node）；1～4 步要 root（建临时用户、用 systemd-run 起 transient 单元）、要这台机器有 systemd 和 node，
+# 不满足就在跑完第 5 步之后以 2 退出。0b 没有 node 则当时就以 2 退出。
 # 用法：sudo bash deploy/test/mirasim-session.test.sh。退出码：0 通过，1 不通过，2 没跑成。
 set -uo pipefail
 HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -54,12 +57,91 @@ has "User 是渲染进去的会话用户" "$RENDERED" '^User=fleet-mirasim-fake$
 has "Group 跟着同一个用户" "$RENDERED" '^Group=fleet-mirasim-fake$'
 has "ExecStart 带上端口、只听回环、不开浏览器、不进 IM" "$RENDERED" \
   'ExecStart=.*--port 54321 --host 127\.0\.0\.1 --no-open --no-im --workdir /home/fleet-mirasim-fake'
+has "ExecStart 先 --require 流守卫再起 server.cjs" "$RENDERED" \
+  'ExecStart=.*--require /usr/local/lib/fleet-dao/mirasim-stream-guard\.cjs .*/\.mirasim-remote/current/server\.cjs --port 54321'
 has "经它起的 grok 不认目录信任（不然不加载 AGENTS.md、还弹「信不信」）" "$RENDERED" '^Environment=GROK_FOLDER_TRUST=0$'
 has "经它起的 grok 不给反问选择题（没人答会干等）" "$RENDERED" '^Environment=GROK_ASK_USER_QUESTION=0$'
 has "Mirasim 出网不借 agent 的代理（settings 里的 reclaude 代理口一死就全断，#1274；P39、Q21）" "$RENDERED" '^Environment=MIRASIM_NO_AGENT_EGRESS=1$'
 has "Mirasim 不跑它自带的账号额度探针（Q21）" "$RENDERED" '^Environment=MIRASIM_ACCOUNT_USAGE_PROBE=0$'
 has "起不来会重试（on-failure）" "$RENDERED" '^Restart=on-failure$'
 has "不进 fleet-agents.slice（平台常驻服务，不占会话额度）" "$RENDERED" 'MemoryHigh=|MemoryMax='
+
+echo "== 0b. 流守卫：已结束的流再 write 不再把进程打退出"
+if ! command -v node >/dev/null; then
+  echo "mirasim-session：没跑成：流守卫这一步要 node"
+  exit $((fail ? 1 : 2))
+fi
+GUARD=$HERE/../lib/mirasim-stream-guard.cjs
+GF=$(mktemp)
+cat >"$GF" <<'EOF'
+const http = require('node:http');
+const net = require('node:net');
+const { PassThrough } = require('node:stream');
+
+const p = new PassThrough();
+p.end();
+p.write('x');
+
+const httpSrv = http.createServer((req, res) => {
+  if (req.url === '/bad') {
+    res.end('ok');
+    res.write('late');
+    return;
+  }
+  if (req.url === '/body') {
+    res.end('hello');
+    return;
+  }
+  res.end('up');
+});
+const netSrv = net.createServer((sock) => {
+  sock.end('bye');
+  sock.write('late');
+});
+httpSrv.listen(0, '127.0.0.1', () => {
+  const port = httpSrv.address().port;
+  netSrv.listen(0, '127.0.0.1', () => {
+    const np = netSrv.address().port;
+    const c = net.connect(np);
+    c.on('data', () => {});
+    c.on('close', () => {
+      http.get({ host: '127.0.0.1', port, path: '/bad' }, (r) => {
+        r.resume();
+        r.on('end', () => {
+          setTimeout(() => {
+            http.get({ host: '127.0.0.1', port, path: '/body' }, (r3) => {
+              let body = '';
+              r3.on('data', (d) => { body += d; });
+              r3.on('end', () => {
+                console.log(JSON.stringify({ body }));
+                httpSrv.close();
+                netSrv.close();
+                process.exit(0);
+              });
+            }).on('error', (e) => { console.error(e); process.exit(4); });
+          }, 50);
+        });
+      }).on('error', (e) => { console.error(e); process.exit(4); });
+    });
+  });
+});
+setTimeout(() => { console.error('timeout'); process.exit(3); }, 2000);
+EOF
+GOUT=$(mktemp)
+GRC=0
+node "$GF" >"$GOUT" 2>"$GOUT.err" || GRC=$?
+check "不装守卫：进程退出" "$GRC" "1"
+has "不装守卫：ERR_STREAM_WRITE_AFTER_END" "$(<"$GOUT.err")" 'ERR_STREAM_WRITE_AFTER_END'
+GRC=0
+node --require "$GUARD" "$GF" >"$GOUT" 2>"$GOUT.err" || GRC=$?
+check "装上守卫：进程还在（退出 0）" "$GRC" "0"
+has "装上守卫：正常的 end(数据) 仍写得出去" "$(<"$GOUT")" '"body":"hello"'
+has "装上守卫：记下丢掉的那次写入" "$(<"$GOUT.err")" 'mirasim-stream-guard'
+GRC=0
+node --require "$GUARD" -e 'throw new Error("boom-not-stream")' >"$GOUT" 2>"$GOUT.err" || GRC=$?
+check "别的未捕获异常照旧退出" "$GRC" "1"
+has "别的异常的原文还在" "$(<"$GOUT.err")" 'boom-not-stream'
+rm -f -- "$GF" "$GOUT" "$GOUT.err"
 
 echo "== 5. 健康检查脚本 deploy/lib/mirasim-liveness.sh（#1676）：curl、systemctl、logger 换成桩"
 LIVE=$HERE/../lib/mirasim-liveness.sh

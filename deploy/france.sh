@@ -145,6 +145,9 @@ MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑
 MIRASIM_LIVENESS_SCRIPT=/usr/local/lib/fleet-dao/mirasim-liveness.sh
 MIRASIM_LIVENESS_UNITS=(fleet-mirasim-liveness.service fleet-mirasim-liveness.timer)
+# 常驻进程的流写守卫（deploy/lib/mirasim-stream-guard.cjs）：node --require 在 server.cjs 之前装上。
+# 必须先于单元重启写到磁盘，否则 ExecStart 的 --require 找不到文件，服务起不来。
+MIRASIM_STREAM_GUARD=/usr/local/lib/fleet-dao/mirasim-stream-guard.cjs
 # AI 会话跑在一个专用用户下（lib/session-user.sh：reclaude 设备上限，法国只占 1 台）；引擎（fleet）经 sudo 只能调
 # fleet-agent-scope 起会话。会话用户：没有 sudo、不能提权、家目录干净、没有 GitHub 凭据、读不到 /etc/fleet-dao。
 # 旧系统的会话用户不用、不碰；停用的 fleet-agent-dedicated 不建、不查（已删）。
@@ -692,9 +695,17 @@ setup_grok() {
 # server.cjs）不是这一步装的，创始人或帅位先用 mirasim ssh connect（或桌面端 SSH 远程模式）连一次装好
 # （docs/ops.md 第五节「会话用户的 Mirasim」）——这一步只把它做成常驻：本体还没到位就不装单元、记待配（不许把
 # 整个装机停下：这里改成一个 if 判断，不走「赋值 || rc=$?」那条容易踩坑的路，见 lib/mirasim.sh 顶上的注释）。
+
+# 已结束的流再 write 时不让整进程退出。put_file 开头会把 WROTE 清零，所以返回后的 WROTE 只反映守卫文件
+# 本身有没有变（目录元数据变了不必重启 Mirasim）。
+install_mirasim_stream_guard() {
+  ensure_dir /usr/local/lib/fleet-dao root:root 755
+  put_file "$MIRASIM_STREAM_GUARD" root:root 644 "$(<"$DEPLOY_DIR/lib/mirasim-stream-guard.cjs")"
+}
+
 setup_mirasim_session() {
   step "会话用户 ${SESSION_USERS[0]} 的 Mirasim 服务（本地模式常驻，端口 $MIRASIM_SESSION_PORT；deploy/france/fleet-mirasim-session.service）"
-  local u=${SESSION_USERS[0]} unit_changed
+  local u=${SESSION_USERS[0]} unit_changed guard_changed=0
   if ! id "$u" >/dev/null 2>&1; then
     pending "$u 这个用户还没有，Mirasim 常驻单元没装（建了再跑一遍）"
     return 0
@@ -703,9 +714,14 @@ setup_mirasim_session() {
     pending "$u 还没有 Mirasim 服务端本体（没有 $(mirasim_server_bin "$u")），这轮不装常驻单元（docs/ops.md 第五节「会话用户的 Mirasim」）"
     return 0
   fi
+  # 先落守卫再换单元：单元的 ExecStart 带 --require，文件不在的话一重启就起不来。
+  # 守卫内容变了也要重启一次，正在跑的进程不会自己重新 --require。
+  install_mirasim_stream_guard
+  guard_changed=$WROTE
   render "$DEPLOY_DIR/france/fleet-mirasim-session.service" \
     SESSION_USER="$u" MIRASIM_SESSION_PORT="$MIRASIM_SESSION_PORT"
   put_file "$MIRASIM_SESSION_UNIT_FILE" root:root 644 "$RENDERED"
+  if ((guard_changed)); then WROTE=1; fi
   unit_changed=$WROTE
   if ((unit_changed)); then systemctl daemon-reload; fi
   ensure_unit_running fleet-mirasim-session.service "$unit_changed"

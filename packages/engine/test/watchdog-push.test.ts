@@ -11,7 +11,14 @@ type Row = { title: string; body: string; resolvedAt: Date | null; resolvedBy: s
 function world(facts: FeishuPushFacts | (() => Promise<FeishuPushFacts>), row: Row | null = null) {
   const state = {
     row,
-    raised: [] as { level: string; title: string; body: string; link: string }[],
+    raised: [] as {
+      dedupeKey: string;
+      level: string;
+      title: string;
+      body: string;
+      link: string;
+      options?: readonly { action?: { kind: string } | undefined }[] | undefined;
+    }[],
     resolved: [] as string[],
   };
   const deps: PushWatchDeps = {
@@ -64,6 +71,8 @@ describe('watchFeishuPush', () => {
     expect(r.found).toBe(1);
     expect(w.state.raised).toHaveLength(1);
     expect(w.state.raised[0]).toMatchObject({ dedupeKey: PUSH_ALERT_KEY, level: 'decision' });
+    expect(w.state.raised[0]?.options?.length).toBeGreaterThanOrEqual(2);
+    expect(w.state.raised[0]?.options?.every((o) => o.action !== undefined)).toBe(true);
     expect(w.state.raised[0]?.body).toContain('认不出哪个是团队群');
     expect(w.state.raised[0]?.body).toContain('fleet-api feishu-push test');
   });

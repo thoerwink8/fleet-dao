@@ -28,6 +28,7 @@ import { Page } from '../components/layout/page';
 import { Section, SectionGrid } from '../components/layout/section';
 import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
+import { ManualTracks } from '../components/manual-tracks';
 import {
   ChannelTab,
   LIST_HEIGHT,
@@ -222,7 +223,12 @@ export default function Routing() {
           {tab === 'models' ? <ModelCatalogTab layers={data} /> : null}
           {tab === 'channels' ? <ChannelTab layers={data} /> : null}
           {tab === 'efforts' ? <EffortsTab /> : null}
-          {tab === 'purposes' ? <PurposesTab purposes={purposes} params={params} /> : null}
+          {tab === 'purposes' ? (
+            <div className="flex flex-col gap-8">
+              <ManualTracks data={data} />
+              <PurposesTab purposes={purposes} params={params} />
+            </div>
+          ) : null}
         </div>
       </RoutingEditProvider>
     </Page>

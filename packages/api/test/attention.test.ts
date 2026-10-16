@@ -8,6 +8,7 @@ import {
   writeLocalOrphans,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   ATTENTION_USAGE,
@@ -27,7 +28,16 @@ beforeEach(() => resetTestDb(t));
 
 const GREEN = async () => ({ code: 200, red: [] as string[] });
 const add = (key: string, level: 'decision' | 'alert' | 'daily', title = key) =>
-  upsertAlert(t.db, { dedupeKey: key, level, taskId: null, title, body: '', link: '/x' });
+  upsertAlert(t.db, {
+    dedupeKey: key,
+    level,
+    taskId: null,
+    title,
+    body: '',
+    link: '/x',
+    // decision 级没有至少两个选项写不进。
+    ...(level === 'decision' ? { options: noteOnlyOptions() } : {}),
+  });
 
 describe('fleet-api attention', () => {
   it('参数：只认 --json', () => {

@@ -33,6 +33,7 @@ import {
   upsertAlert,
   writeHealthzBadSince,
 } from '@fleet-dao/db';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { RELEASES_DIR } from '@fleet-dao/store';
 import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { type HealthzProbe, parseHealthzResponse, type ReleaseFacts } from '../jobs/release-watch.ts';
@@ -147,13 +148,16 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
       latestByPrefix: (prefix) => latestAlertByPrefix(w.db, prefix),
       byKey: (key) => alertByKey(w.db, key),
       async raise(x) {
+        const level = x.level ?? 'alert';
+        const options = x.options ?? (level === 'decision' ? noteOnlyOptions('continue') : undefined);
         await upsertAlert(w.db, {
           dedupeKey: x.dedupeKey,
-          level: x.level ?? 'alert',
+          level,
           taskId: null,
           title: x.title,
           body: x.body,
           link: x.link,
+          ...(options ? { options } : {}),
         });
       },
       resolve: (x) =>
