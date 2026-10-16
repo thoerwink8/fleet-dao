@@ -267,7 +267,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const taskIds = page.items.map((i) => i.task.id);
     const [repos, segmentRuns, runs, routes, models, channels] = await Promise.all([
       store.listRepos(),
-      store.listSegmentRunsForTasks(taskIds),
+      store.listSegmentRunsForTasks(taskIds, { includeIssueMatch: true }),
       store.listRuns({ taskIds }),
       store.listRoutes(),
       store.listModels(),

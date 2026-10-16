@@ -124,8 +124,9 @@ export interface Avoid {
   poolIds: string[];
   modelIds: string[];
   /**
-   * 整族避开的作者族（决定 0093，换路由按族避开：同族换个模型多半重蹈覆辙）。只有自动处理时换路由（rt.avoidModel）会加；
-   * 别的族一条都派不出时选路退回只避开模型（task-session.ts 的 pickRoute）。老历史里没有。
+   * 整族避开的作者族。只有轮数用完（rt.avoidModel）和连着两轮没提交才加。
+   * 超时、起不来、中转欠费不加（#2261，patched('avoid-scope-by-cause')）：那些跟模型能力无关。
+   * 别的族一条都派不出，或只剩等额度、等空位时，选路放掉这一层再选。老历史里没有。
    */
   families?: string[];
 }
@@ -265,6 +266,33 @@ export const NO_OTHER_FAMILY = '没有别的模型族可换，只避开模型';
 /** 避让之后一条别的路由都没有：不死等，照旧派原来的。写进 lastProblem，驾驶舱看得见。 */
 export const NO_OTHER_ROUTE = '没有别的路由可换';
 
+/** 整族避开之后剩下的都在等额度或空位：放掉整族避让再选。写进 lastProblem，驾驶舱看得见。 */
+export const RELEASE_FAMILY_WAIT = '剩下的路由在等额度或空位，先放掉整族避让再选';
+
+/**
+ * 自动换路由时按失败原因定避开哪一层（#2261）。
+ * 会话超时、起不来只避开这条路由；同一模型已经这样避开过，再避开模型。
+ * 中转欠费避开那个池。整族避开不在这里：只有轮数用完、连着两轮没提交才整族避开。
+ * 认不出的码回 null。
+ */
+export function infraAvoidScope(
+  code: string,
+  modelAlreadyRouteAvoided: boolean,
+): 'route' | 'model' | 'pool' | null {
+  const normalized = code.trim().toLowerCase();
+  if (normalized === 'relay_quota_exhausted') return 'pool';
+  if (
+    normalized === 'aborted' ||
+    normalized === 'wall_clock_timeout' ||
+    normalized === 'spawn_failed' ||
+    normalized === 'spawn_timeout' ||
+    normalized === 'startup_timeout'
+  ) {
+    return modelAlreadyRouteAvoided ? 'model' : 'route';
+  }
+  return null;
+}
+
 /** 返工意见：上一轮用的哪条路由，这一轮避开它。连着第二轮起写明也避开模型（认得出族的连这一族）。 */
 export function emptyCommitFeedback(
   route: RouteChoice,
@@ -298,9 +326,10 @@ export class AutoEscape extends Error {
 }
 
 /**
- * 动手会话没跑成、失败分流判停下等人时，先自动换一条路由（避开这个模型）重派一次的码（决定 0093，task-session.ts）：
- * 被引擎在时限上叫停（aborted）、总时长到顶、起不来、中转这一路额度用完或欠费（失败分流 QT3：换一路就能干，充值归人另办）。
- * 只有人能修的（没权限、卫生检查、登录失效……）不在里面。只加老历史里不会出现的码：已经记下的判断重放时走的分支不变。
+ * 动手会话没跑成、失败分流判停下等人时，先自动换一条路由重派一次的码（决定 0093，task-session.ts）。
+ * 超时、起不来只避开这条路由（同一模型第二次再避开模型）；中转欠费避开那个池（#2261，patched('avoid-scope-by-cause')）。
+ * 老历史没有这个标记，仍避开这个模型和它那一族。只有人能修的（没权限、卫生检查、登录失效……）不在里面。
+ * 只加老历史里不会出现的码：已经记下的判断重放时走的分支不变。
  */
 export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'aborted',

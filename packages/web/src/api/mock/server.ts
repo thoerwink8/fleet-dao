@@ -120,6 +120,7 @@ import {
   TaskDetailResponse,
   TaskListResponse,
   taskFlow,
+  taskListCost,
   taskListGroupOf,
   UpdateCredentialsRequest,
   UpdateModelRouteRequest,
@@ -2727,15 +2728,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             }),
             views,
           ).total;
-          const read = usage.runs - usage.missingCost;
-          const cost =
-            usage.runs === 0
-              ? { usd: null, note: '还没有结束的会话记录，花费没得算' }
-              : read <= 0
-                ? { usd: null, note: `${usage.runs} 笔会话都没报花费` }
-                : usage.missingCost > 0
-                  ? { usd: usage.costUsd, note: `另有 ${usage.missingCost} 笔会话没报花费，这个数偏低` }
-                  : { usd: usage.costUsd };
+          const cost = taskListCost(usage, views.filter((v) => !v.running).length);
           const times = [
             tv.task.createdAt,
             ...sessions.flatMap((r) => [r.queuedAt, r.startedAt, r.endedAt]),

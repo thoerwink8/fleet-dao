@@ -4,7 +4,7 @@
 // 手机上同一份字段只读，放在从下往上弹出的面板里（手机不改草稿）。查重、「让别家挑错」是 B、C 片的，这里不放。
 import { REQUEST_KINDS } from '@fleet-dao/shared';
 import { Lock, PanelRightClose, Pencil, Plus, ScanSearch } from 'lucide-react';
-import { Fragment, type ReactNode, useState } from 'react';
+import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { errorText, useRequestReview, useUpdateRequestDraft } from '../../api/client';
 import type { RequestDetail, RequestDraft, RequestDraftField } from '../../api/types';
@@ -59,11 +59,14 @@ function FieldBlock({
   d,
   field,
   editable,
+  edit,
   onPanelSaved,
 }: {
   d: RequestDetail;
   field: RequestDraftField;
   editable: boolean;
+  /** 外面点了「改这一栏」：n 变一次就打开这一栏的输入框。 */
+  edit?: { field: RequestDraftField; n: number } | null;
   onPanelSaved?: () => void;
 }) {
   const r = d.request;
@@ -73,11 +76,19 @@ function FieldBlock({
   const [error, setError] = useState<string | null>(null);
   const value = textOf(r.draft, field);
   const edited = r.humanEdited.includes(field);
+  const seen = useRef(0);
   const start = () => {
     setText(value);
     setError(null);
     setEditing(true);
   };
+  useEffect(() => {
+    if (!edit || edit.field !== field || !editable || edit.n === seen.current) return;
+    seen.current = edit.n;
+    setText(textOf(r.draft, field));
+    setError(null);
+    setEditing(true);
+  }, [edit, field, editable, r.draft]);
   const submit = () => {
     setError(null);
     save.mutate(
@@ -223,12 +234,20 @@ function Quotes({ d }: { d: RequestDetail }) {
   );
 }
 
-export function DraftFields({ d, editable }: { d: RequestDetail; editable: boolean }) {
+export function DraftFields({
+  d,
+  editable,
+  edit,
+}: {
+  d: RequestDetail;
+  editable: boolean;
+  edit?: { field: RequestDraftField; n: number } | null;
+}) {
   return (
     <div className="space-y-1">
       {ORDER.map((f) => (
         <Fragment key={f}>
-          <FieldBlock d={d} field={f} editable={editable} />
+          <FieldBlock d={d} field={f} editable={editable} edit={edit ?? null} />
           {f === 'scene' ? <Quotes d={d} /> : null}
         </Fragment>
       ))}
@@ -239,11 +258,14 @@ export function DraftFields({ d, editable }: { d: RequestDetail; editable: boole
 export function DraftPanel({
   d,
   meId,
+  edit,
   onClose,
   onContinue,
 }: {
   d: RequestDetail;
   meId: string | undefined;
+  /** 方案卡点了「改」：打开对应栏的输入框。 */
+  edit?: { field: RequestDraftField; n: number } | null;
   onClose: () => void;
   onContinue: () => void;
 }) {
@@ -286,7 +308,7 @@ export function DraftPanel({
         项目 <span className="font-mono">{r.repo.slug}</span>（开聊后不改）
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-2 py-3 scrollbar-thin" data-intake-draft>
-        <DraftFields d={d} editable={editable} />
+        <DraftFields d={d} editable={editable} edit={edit ?? null} />
       </div>
       {closed ? (
         <footer className="space-y-2 border-t px-4 py-3">

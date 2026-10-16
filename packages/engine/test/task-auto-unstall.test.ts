@@ -244,7 +244,7 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     expect(world.states.some((s) => s.doing.includes('第二次总时长到顶'))).toBe(false);
   });
 
-  it('同一条路由第二次总时长到顶：第三次 runSegment 换模型，带上树上的进度，不再原路续', async () => {
+  it('同一条路由第二次总时长到顶：第三次 runSegment 换一条路由，带上树上的进度，不再原路续', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       segment: async (_i, n) =>
@@ -263,7 +263,9 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     expect(second?.route.modelId).toBe(first?.route.modelId);
     expect(second?.route.routeId).toBe(first?.route.routeId);
     expect(second?.resumeSessionId).toBe(WALL_SESSION);
-    expect(third?.route.modelId).not.toBe(first?.route.modelId);
+    // 超时只避开这条路由，不整族避开，同模型的另一条照常派（#2261）
+    expect(third?.route.routeId).not.toBe(first?.route.routeId);
+    expect(third?.route.modelId).toBe(first?.route.modelId);
     const progress = wallClockSwitchLine(first?.route.modelId ?? '');
     expect(third?.interrupted).toBe(progress);
     expect(third?.feedback.join('\n')).toContain(progress);
@@ -271,13 +273,18 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     // 只问了第一次到顶那一次；第二次到顶换路由，不再拿这个会话号去续
     expect(calls.resume.map((r) => r.previous)).toEqual([{ runId: WALL_RUN }]);
     const picks = world.callsOf('pickRoute').map((c) => c.input);
-    expect(picks[2]).toMatchObject({ avoidModelIds: [first?.route.modelId] });
+    expect(picks[2]).toMatchObject({
+      avoidRouteIds: [first?.route.routeId],
+      avoidModelIds: [],
+      avoidPoolIds: [],
+    });
+    expect(picks[2]?.avoidFamilies).toBeUndefined();
     expect(picks[2]?.stickRouteId).toBeUndefined();
     expect(world.states.some((s) => s.doing.includes('带上进度续一次'))).toBe(true);
     expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
   });
 
-  it('被引擎在时限上叫停（aborted）两次判停下：先避开这个模型重派一次，不报警', async () => {
+  it('被引擎在时限上叫停（aborted）两次判停下：先避开这条路由重派一次，不整族避开、不报警', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       segment: async (_i, n) =>
@@ -300,12 +307,16 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     );
     expect(run.outcome).toBe('merged');
     expect(calls.segment).toHaveLength(3);
-    expect(calls.segment[2]?.route.modelId).toBe('m2');
+    expect(calls.segment[2]?.route.routeId).not.toBe(calls.segment[0]?.route.routeId);
+    expect(calls.segment[2]?.route.modelId).toBe(calls.segment[0]?.route.modelId);
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks[2]).toMatchObject({ avoidRouteIds: ['r1'], avoidModelIds: [], avoidPoolIds: [] });
+    expect(picks[2]?.avoidFamilies).toBeUndefined();
     expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
     expect(world.states.some((s) => s.doing.includes('自动换一条路由重派一次'))).toBe(true);
   });
 
-  it('中转这一路额度用完或欠费（QT3，#2249）：不挂起，当场避开这个模型换一条路由重派', async () => {
+  it('中转这一路额度用完或欠费（QT3，#2249）：不挂起，当场避开那个池换一条路由重派', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       segment: async (_i, n) =>
@@ -331,8 +342,11 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     );
     expect(run.outcome).toBe('merged');
     expect(calls.segment).toHaveLength(2);
-    expect(calls.segment[0]?.route.modelId).toBe('m1');
-    expect(calls.segment[1]?.route.modelId).toBe('m2');
+    expect(calls.segment[0]?.route).toMatchObject({ routeId: 'r1', poolId: 'p1', modelId: 'm1' });
+    expect(calls.segment[1]?.route).toMatchObject({ routeId: 'r2', poolId: 'p2', modelId: 'm1' });
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks[1]).toMatchObject({ avoidPoolIds: ['p1'], avoidRouteIds: [], avoidModelIds: [] });
+    expect(picks[1]?.avoidFamilies).toBeUndefined();
     expect(world.states.some((s) => s.doing.includes('relay_quota_exhausted'))).toBe(true);
     expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
   });
@@ -358,6 +372,9 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
         const models = calls.segment.map((s) => s.route.modelId);
         expect(models).toContain('m1');
         expect(models).toContain('m2');
+        const picks = world.callsOf('pickRoute').map((c) => c.input);
+        expect(picks.some((p) => p.avoidModelIds.includes('m1'))).toBe(true);
+        expect(picks.every((p) => p.avoidFamilies === undefined)).toBe(true);
         await h.terminate('测完了');
       },
       { tasks },
@@ -385,6 +402,89 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
       },
       { tasks },
     );
+  });
+});
+
+describe('换路由不整族避开，等额度先放掉族避让（#2261）', { timeout: 90_000 }, () => {
+  it('超时之后的下一次 pickRoute 输入里没有 avoidFamilies', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) =>
+        n === 1 ? wallTimedOut(WALL_RUN) : n === 2 ? wallTimedOut('run-wall-2') : OK_SEGMENT,
+      resume: resumeWallSession,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    const first = calls.segment[0];
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    // 第一次到顶原路重试；第二次才换路由。这一次只避开这条路由，不带整族避让
+    expect(picks[1]?.avoidFamilies).toBeUndefined();
+    expect(picks[2]?.avoidFamilies).toBeUndefined();
+    expect(picks[2]).toMatchObject({
+      avoidRouteIds: [first?.route.routeId],
+      avoidModelIds: [],
+      avoidPoolIds: [],
+    });
+  });
+
+  it('避开一族之后只剩等额度的路由：派到别族在线的路由，不进入等待', async () => {
+    const world = createFakeWorld({
+      routes: [
+        { routeId: 'r1', poolId: 'p1', modelId: 'm1', family: 'claude', hostId: 'claude-code' },
+        // 被整族避让挡在外面、其实在线的另一条（别的模型）。放掉族避让之后派它，不干等额度
+        {
+          routeId: 'r-online',
+          poolId: 'p-online',
+          modelId: 'm3',
+          family: 'claude',
+          hostId: 'claude-code',
+        },
+        // 族外只剩这一条，剧本里它额度满了
+        { routeId: 'r-quota', poolId: 'p-quota', modelId: 'm2', family: 'kimi', hostId: 'api-shell' },
+      ],
+      ci: (_i, n) => (n <= MAX_IMPLEMENT_ROUNDS ? RED : undefined),
+      route: (pick) => {
+        if (
+          (pick.stage === 'ui' || pick.stage === 'execute') &&
+          (pick.avoidFamilies ?? []).includes('claude')
+        ) {
+          return {
+            ok: false,
+            waitFor: 'quota',
+            detail: '剩下的路由额度都满了，最早 4 小时后清零',
+            retryAfterSeconds: 4 * 3600,
+          };
+        }
+        return undefined;
+      },
+    });
+    const { tasks, calls } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    const picks = world
+      .callsOf('pickRoute')
+      .map((c) => c.input)
+      .filter((p) => p.stage === 'ui' || p.stage === 'execute');
+    const held = picks.findIndex((p) => (p.avoidFamilies ?? []).includes('claude'));
+    expect(held).toBeGreaterThanOrEqual(0);
+    expect(picks[held + 1]?.avoidFamilies).toBeUndefined();
+    expect(picks[held + 1]?.avoidModelIds).toEqual(['m1']);
+    expect(calls.segment.at(-1)?.route).toMatchObject({
+      routeId: 'r-online',
+      modelId: 'm3',
+      family: 'claude',
+    });
+    expect(calls.segment.some((s) => s.route.routeId === 'r-quota')).toBe(false);
   });
 });
 

@@ -1,15 +1,77 @@
 // 排序与微调：按人排的顺序取；钉住的行原地不动；没钉住的在各自模型内按三条微调重排，填回该模型剩下的位置（不跨模型）。
 // 微调（设计 §九 选路第 3 条）：
-//   ① 快清零还没用完的往前提（清零早的在前）；② 战绩明显差的往后放，样本少不动；
-//   ③ 额度未知的排在读到了的后面。
+//   ① 按消耗进度（#2363，policy.pace 开着时）：落后不少于 margin 的往前提（清零早的在前），超前不少于 margin 的往后放，
+//      其余照人排；5 小时窗不参与排序、只挡。pace 关着时退回老的「快清零还没用完的往前提」；
+//   ② 战绩明显差的往后放，样本少不动；③ 额度未知的排在读到了的后面。
 // （原先还有一条「备池排在主池后面」：两个会话用户同时跑时拼车号是备池，法国只留一个会话用户后作废，#59 删掉。）
 // 模型之间默认严格按用途里排的先后（#1089）。例外是动手（policy.trackScore.stages，PLAN 3f，决定 0093）：拿到了各模型的动手战绩时，
 // 打了分的模型按每单期望成本在它们自己占的位置之间重排（要明显更省才挪到人排的前面），一轮做成率明显差的挪到最后、由 choose.ts
 // 挡在动手外面（别的都派不了时兜底）；样本不够的模型留在人排的位置。有钉住的行时整段不动。
 
+import { type QuotaPace, quotaPace } from '@fleet-dao/shared';
 import { duration, percent, remaining, windowName } from './names.ts';
 import type { RoutingPolicy } from './policy.ts';
 import type { ModelTrackFacts, Nudge, RouteFacts, RouteWindow, StageRouteEntry } from './types.ts';
+
+/** 按消耗进度判出的一条路由：behind = 落后够多往前提，ahead = 超前够多往后放。 */
+export interface PaceHit {
+  side: 'behind' | 'ahead';
+  window: RouteWindow;
+  pace: QuotaPace;
+  resetAt: number;
+}
+
+/** 参与按进度排的窗口：扣这条路由、读成了、上游这次报了、有已用和清零时刻；5 小时窗不算（只挡不排）。 */
+function paceOf(w: RouteWindow, now: number): QuotaPace | null {
+  if (w.window === '5h' || w.applies !== 'yes' || w.state !== 'ok' || w.staleSince !== null) return null;
+  return quotaPace(w, now);
+}
+
+/**
+ * 按消耗进度判这条路由（policy.pace 开着时用）：额度读成了（ok）才判。
+ * - 有一个窗口超前不少于 margin：往后放（取超前最多的那个写理由）——照这个速度它清零前就会用完，哪怕别的窗口落后。
+ * - 否则有窗口落后不少于 margin、且其余适用窗口（含 5 小时窗）都读成了、都还剩不少于 othersMinRemaining：往前提，
+ *   命中几个取清零最早的。5 小时窗快满的池不因此被顶到最前（派过去也跑不完）。
+ * - 都不是：null，照人排的。
+ */
+export function paceHit(route: RouteFacts, policy: RoutingPolicy, now: number): PaceHit | null {
+  if (route.quota !== 'ok') return null;
+  const margin = policy.pace.margin;
+  let ahead: PaceHit | null = null;
+  let behind: PaceHit | null = null;
+  for (const w of route.windows) {
+    const pace = paceOf(w, now);
+    if (!pace || w.resetsAt === null) continue;
+    const resetAt = Date.parse(w.resetsAt);
+    if (-pace.behind >= margin - 1e-9) {
+      if (!ahead || pace.behind < ahead.pace.behind) ahead = { side: 'ahead', window: w, pace, resetAt };
+      continue;
+    }
+    if (pace.behind < margin - 1e-9) continue;
+    const othersOk = route.windows.every((o) => {
+      if (o === w) return true;
+      const l = remaining(o);
+      return o.applies === 'yes' && o.state === 'ok' && l !== null && l >= policy.othersMinRemaining;
+    });
+    if (othersOk && (!behind || resetAt < behind.resetAt))
+      behind = { side: 'behind', window: w, pace, resetAt };
+  }
+  return ahead ?? behind;
+}
+
+/** 「池A周额度按时间该用 62%、实际用了 75%，超前 13%，往后放」。 */
+function paceText(route: RouteFacts, hit: PaceHit, now: number): string {
+  const { pace, window: w } = hit;
+  const est = [
+    pace.estimated ? `窗口长度推不出、按 30 天算` : null,
+    w.reading === 'estimated' ? '用量是估算' : null,
+  ].filter(Boolean);
+  const note = est.length > 0 ? `（${est.join('，')}）` : '';
+  const head = `${route.poolName}${windowName(w)}按时间该用 ${percent(pace.elapsed)}、实际用了 ${percent(pace.used)}${note}`;
+  return hit.side === 'behind'
+    ? `${head}，落后 ${percent(pace.behind)}、${duration(hit.resetAt - now)}后清零，往前提`
+    : `${head}，超前 ${percent(-pace.behind)}，往后放`;
+}
 
 export interface FastResetHit {
   window: RouteWindow;
@@ -125,7 +187,10 @@ export interface Ranked {
   humanIndex: number;
   pinned: boolean;
   nudges: { kind: Nudge; text: string }[];
+  /** 往前提的那一条（pace 开着时是落后够多的窗口，关着时是快清零的窗口）。 */
   fast: FastResetHit | null;
+  /** 按进度判出的结果（pace 开着时）。 */
+  pace: PaceHit | null;
 }
 
 /** 输入已按 position 排好。返回微调后的顺序。 */
@@ -141,9 +206,21 @@ export function rank(
   const items: Ranked[] = rows.map(({ route, entry }, humanIndex) => {
     const pinned = stagePinned || entry.pinned;
     const nudges: Ranked['nudges'] = [];
-    const fast = pinned ? null : fastResetHit(route, policy, now);
+    const pace = pinned || !policy.pace.enabled ? null : paceHit(route, policy, now);
+    const fast = pinned
+      ? null
+      : policy.pace.enabled
+        ? pace?.side === 'behind'
+          ? { window: pace.window, resetAt: pace.resetAt, left: Math.max(0, 1 - pace.pace.used) }
+          : null
+        : fastResetHit(route, policy, now);
     if (!pinned) {
-      if (fast) {
+      if (pace) {
+        nudges.push({
+          kind: pace.side === 'behind' ? 'pace-behind' : 'pace-ahead',
+          text: paceText(route, pace, now),
+        });
+      } else if (fast) {
         nudges.push({
           kind: 'fast-reset',
           text: `${route.poolName}${windowName(fast.window)} ${duration(fast.resetAt - now)}后清零、还剩 ${percent(fast.left)}${fast.window.reading === 'estimated' ? '（估算）' : ''}，往前提`,
@@ -159,13 +236,13 @@ export function rank(
         nudges.push({ kind: 'quota-unknown', text: '额度未知（没读成或读数过期），排在读到了的后面' });
       }
     }
-    return { route, entry, humanIndex, pinned, nudges, fast };
+    return { route, entry, humanIndex, pinned, nudges, fast, pace };
   });
 
   const has = (it: Ranked, kind: Nudge) => it.nudges.some((n) => n.kind === kind);
   const key = (it: Ranked): number[] => [
     has(it, 'quota-unknown') ? 1 : 0,
-    it.fast ? 0 : 1,
+    it.fast ? 0 : it.pace?.side === 'ahead' ? 2 : 1,
     it.fast ? it.fast.resetAt : 0,
     has(it, 'poor-record') ? 1 : 0,
     it.humanIndex,

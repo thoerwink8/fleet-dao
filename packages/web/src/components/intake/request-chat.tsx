@@ -161,6 +161,15 @@ function ChatBody(p: ChatProps & { d: RequestDetail }) {
   const openPanel = (field?: RequestDraftField) => {
     if (p.phone) {
       setSheet(true);
+      if (field) {
+        window.setTimeout(
+          () =>
+            document
+              .getElementById(`draft-${field}`)
+              ?.scrollIntoView({ block: 'center', behavior: 'smooth' }),
+          300,
+        );
+      }
       return;
     }
     p.onPanel(true, field);

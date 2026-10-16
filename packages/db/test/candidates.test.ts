@@ -336,6 +336,63 @@ describe('某个用途的候选路由', () => {
     ]);
   });
 
+  it('账期美元 101% 只是显示：Auto 桶 13% 时 Grok（auto 桶）可派，Auto 桶 100% 才挡；没读到桶时账期美元照旧整池挡（#2360）', async () => {
+    expect(windowAppliesTo({ scope: 'plan' }, { id: 'x', family: 'y' }, { plan: { in: [] } })).toBe('no');
+    await t.db.insert(pools).values({ id: 'cursor-a', channelId: 'cursor', maxConcurrency: 2 });
+    await addRoute(t.db, {
+      id: 'grok-on-cursor',
+      modelId: 'grok-4.7',
+      upstreamModel: 'grok-4.7-high-fast',
+      channelId: 'cursor',
+      poolId: 'cursor-a',
+      hostId: 'cursor-agent',
+    });
+    await setRoutingLayers(t.db, {
+      purposes: { execute: ['grok-4.7'] },
+      models: { 'grok-4.7': ['grok-on-cursor'] },
+    });
+    const win = (label: string, over: Partial<StoredQuotaWindow>, at: Date): StoredQuotaWindow => ({
+      poolId: 'cursor-a',
+      label,
+      window: 'other',
+      reading: 'measured',
+      source: 'cursor-dashboard',
+      readAt: at.toISOString(),
+      unit: 'percent',
+      limit: 100,
+      ...over,
+    });
+    const read = (autoPct: number, withBuckets: boolean, at: Date) =>
+      saveRead({
+        poolId: 'cursor-a',
+        readAt: at.toISOString(),
+        scopeModels: withBuckets
+          ? { auto: { in: ['grok-4.7-high-fast'] }, plan: { in: [] } }
+          : ({} as Record<string, never>),
+        windows: [
+          win(
+            'plan_usd',
+            {
+              window: 'month_usd',
+              unit: 'usd',
+              used: 406.39,
+              limit: 400,
+              utilization: 1.016,
+              ...(withBuckets ? { scope: 'plan' } : {}),
+            },
+            at,
+          ),
+          ...(withBuckets ? [win('auto_percent', { scope: 'auto', used: autoPct }, at)] : []),
+        ],
+      });
+    await read(13, true, ago(3 * MIN));
+    expect(await summary('execute')).toEqual([['grok-on-cursor', []]]);
+    await read(100, true, ago(2 * MIN));
+    expect(await summary('execute')).toEqual([['grok-on-cursor', ['quota-exhausted']]]);
+    await read(0, false, ago(MIN));
+    expect(await summary('execute')).toEqual([['grok-on-cursor', ['quota-exhausted']]]);
+  });
+
   it('上游这次没报的窗口不挡路由、不让路由排后；最后一次读到是用满、还没到清零时刻的照样挡', async () => {
     await addRoute(t.db, { id: 'opus-b', poolId: 'relay-b', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'k3-a', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });

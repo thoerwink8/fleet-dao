@@ -28,7 +28,10 @@
 //   重试、重派、耐心再起之前都先问 segmentSettled：上一段没收场就不起第二段（同一张单不并发两段），停下写明原因；
 //   问不成（库一时不通）只记日志，照今天的做法接着走。
 // - 停下之前先自动处理一次（决定 0093，patched('auto-redispatch-session')）：失败分流判停下、码是被引擎在时限上叫停（aborted）、
-//   总时长到顶、起不来（AUTO_REDISPATCH_CODES）的，这一段里先避开这个模型换一条路由重派一次，进度里写一行；再判停下才停。
+//   总时长到顶、起不来（AUTO_REDISPATCH_CODES）的，这一段里先换一条路由重派一次，进度里写一行；再判停下才停。
+//   超时、起不来只避开这条路由，同一模型第二次再避开模型；中转欠费避开那个池。都不整族避开
+//   （patched('avoid-scope-by-cause')，#2261）。老历史没有这个标记，仍避开这个模型和它那一族。
+//   选路带着整族避让却回「等额度」或「等空位」：先放掉整族避让再选一次，还派不出才等。
 //   总时长到顶（WT1）第一次仍原路续同一个会话：这一次有执行编号就记下，下一轮问 planSegmentResume，带上会话号再起
 //   （patched('wall-clock-resume-session')，#2244）。没有编号、或老历史没有这个标记，只钉原路由、开新会话。
 //   同一条路由上第二次不再原路续：换路由时把树上的进度写进提示词
@@ -68,6 +71,7 @@ import {
   NO_OTHER_ROUTE,
   PausedInterrupt,
   patienceStep,
+  RELEASE_FAMILY_WAIT,
   RESUME_STARTED_SLACK_MS,
   RepinInterrupt,
   type ResumeFrom,
@@ -313,24 +317,28 @@ export async function writeSession(
         previousMessage = undefined;
         continue;
       }
-      // 被引擎在时限上叫停、总时长到顶、起不来（决定 0093）：先自动换一条路由（避开这个模型）重派一次，进度里写一行，不停下等人。
-      // 这一段里只自动一次；再撞上照旧停下。只有人能修的码不在名单里。老历史没有这个标记，照旧停下。
-      if (
-        !redispatched &&
-        AUTO_REDISPATCH_CODES.includes(failure.code.toLowerCase()) &&
-        patched('auto-redispatch-session')
-      ) {
+      // 被引擎在时限上叫停、总时长到顶、起不来（决定 0093）：先自动换一条路由重派一次，进度里写一行，不停下等人。
+      // 超时、起不来只避开这条路由，同一模型第二次再避开模型；中转欠费避开那个池。都不整族避开（#2261）。
+      // 第一次按路由避开之后，同一模型再撞上还可以再自动一次（升到避开模型）。除此之外这一段里只自动一次，再撞上照旧停下。
+      // 只有人能修的码不在名单里。老历史没有 auto-redispatch-session，照旧停下；没有 avoid-scope-by-cause，仍避开模型和它那一族。
+      const code = failure.code.toLowerCase();
+      const listed = AUTO_REDISPATCH_CODES.includes(code);
+      // 写在 auto-redispatch-session 之前、且 redispatched 为假时短路：老历史重派过一次之后不会多调这个标记。
+      const escalate =
+        redispatched && listed && patched('avoid-scope-by-cause') && rt.infraCanEscalate(route, code);
+      if ((escalate || !redispatched) && listed && patched('auto-redispatch-session')) {
         if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
         redispatched = true;
         stick = undefined;
-        // 避让记在这张单上（没提交的避让那一处）：没有别的候选时选路照旧派原来那条，不死等
-        rt.avoidModel(route);
+        // 避让记在这张单上（没提交的避让那一处）：没有别的候选时选路照旧派原来那条，不死等。
+        // 老历史没有 avoid-scope-by-cause：重放时为假，仍避开模型（认得出族的连这一族），活动入参和原来一样。
+        if (patched('avoid-scope-by-cause')) rt.avoidInfra(route, code);
+        else rt.avoidModel(route);
         counters = ZERO;
         previousMessage = undefined;
-        // 同一条路由第二次总时长到顶：不再原路续。提示词带上树上的进度，下一轮换模型接着做。
+        // 同一条路由第二次总时长到顶：不再原路续。提示词带上树上的进度，下一轮换路由接着做。
         // 第一次到顶走不到这里（WT1 还在原路重试）。老历史没有这个标记：只换路由，提示词和进度那一行照旧。
-        const carryProgress =
-          failure.code.toLowerCase() === 'wall_clock_timeout' && patched('wall-clock-carry-progress');
+        const carryProgress = code === 'wall_clock_timeout' && patched('wall-clock-carry-progress');
         if (carryProgress) {
           const line = wallClockSwitchLine(route.modelId);
           interrupted = line;
@@ -471,7 +479,7 @@ async function pickRoute(
   let stickTo = stick;
   let prefer: string | undefined;
   let droppedDry = false;
-  // 没提交的避让里整族避开的那一层已经去掉（别的族一条都派不出，决定 0093）：只避开模型再选
+  // 没提交的避让里整族避开的那一层已经去掉（别的族一条都派不出，或只剩等额度、等空位，#2261）：只避开模型再选
   let droppedFamilies = false;
   let holdForProbe = false;
   let lastStopDetail = '';
@@ -631,6 +639,18 @@ async function pickRoute(
       }
       if (probeOn && (round.fails.length > 0 || holdForProbe)) {
         await stopForProbe('', mark);
+        continue;
+      }
+      // 带着整族避让，选路却只剩等额度或等空位（#2261）：别族在线的路由还空着，先放掉整族避让再选一次。
+      // 还派不出才照旧等。老历史没有这个标记：重放时为假，照旧睡到清零，不多一次选路。
+      if (
+        (got.waitFor === 'quota' || got.waitFor === 'slot') &&
+        (merged.families?.length ?? 0) > 0 &&
+        !droppedFamilies &&
+        patched('avoid-scope-by-cause')
+      ) {
+        droppedFamilies = true;
+        rt.status.lastProblem = RELEASE_FAMILY_WAIT;
         continue;
       }
       // 睡到下一次选路。等额度且选路给了清零时刻：秒数按那个时刻（上限几小时），不是每 120 秒醒一次。

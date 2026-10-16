@@ -11,6 +11,7 @@ export * from './effort.ts';
 export * from './flow-purposes.ts';
 export * from './groom.ts';
 export * from './home-flow.ts';
+export * from './issue-workflows.ts';
 export * from './local-claims.ts';
 export * from './mirasim-executor.ts';
 export * from './model-prices.ts';

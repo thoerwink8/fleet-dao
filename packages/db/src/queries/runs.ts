@@ -6,6 +6,7 @@
 // - 读不到的字段 NULL，不拿 0 顶（#216）。
 
 import { randomUUID } from 'node:crypto';
+import { laterGenerationPattern } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
@@ -243,10 +244,11 @@ export async function taskTokenSpend(
 }
 
 /**
- * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号和工作流编号都对得上的老行（兜底，调用方要标明）。
- * 单号在几个仓里会重：兜底必须靠工作流编号（带着仓名）认；工作流编号也没记的行分不出是哪个仓的，不收——
- * 宁可少一行，也不把别的仓同号的单的会话混进这张单。
- * 按起跑先后排。
+ * 一张单的三段流水（任务详情读）：task_id 对得上的，加上 task_id 没记、单号对得上、工作流是这张单的第一代或重做下一代
+ * （:r2、:r3，和 shared 的 runBelongsToTask 同一个正则）的老行。调用方要标明是兜底。
+ * 单号在几个仓里会重：兜底必须靠工作流编号（带着仓名）认；工作流编号也没记、或是挂起键之类的别的后缀，不收——
+ * 宁可少一行，也不把别的仓同号的单的会话混进这张单。记了别的 task_id 的行不收。
+ * 按起跑先后排。workflowId 传第一代的编号（taskWorkflowId 不带代数）。
  */
 export async function runsOfTask(
   db: Db,
@@ -261,7 +263,10 @@ export async function runsOfTask(
         and(
           isNull(runs.taskId),
           eq(runs.issueNumber, task.issueNumber),
-          eq(runs.workflowId, task.workflowId),
+          or(
+            eq(runs.workflowId, task.workflowId),
+            sql`${runs.workflowId} ~ ${laterGenerationPattern(task.workflowId)}`,
+          ),
         ),
       ),
     )

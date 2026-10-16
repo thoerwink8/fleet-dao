@@ -14,6 +14,7 @@ import {
   SESSION_USERS,
   type SessionsFs,
   type SessionUser,
+  StopReason,
   sessionProxyEnv,
   switchSessionOrg,
 } from '@fleet-dao/adapters';
@@ -520,7 +521,10 @@ export async function refreshCursorLogin(
   timeoutMs = CURSOR_REFRESH_TIMEOUT_MS,
 ): Promise<void> {
   const own = new AbortController();
-  const timer = setTimeout(() => own.abort(), timeoutMs);
+  const timer = setTimeout(
+    () => own.abort(new StopReason('wall-clock', `刷新登录超过 ${Math.round(timeoutMs / 1000)} 秒`)),
+    timeoutMs,
+  );
   try {
     const r = await run(cursorBareCommand(versionsDir, ['status']), {
       cwd: '/',
@@ -557,7 +561,10 @@ export async function refreshGrokLogin(
   timeoutMs = GROK_REFRESH_TIMEOUT_MS,
 ): Promise<void> {
   const own = new AbortController();
-  const timer = setTimeout(() => own.abort(), timeoutMs);
+  const timer = setTimeout(
+    () => own.abort(new StopReason('wall-clock', `刷新登录超过 ${Math.round(timeoutMs / 1000)} 秒`)),
+    timeoutMs,
+  );
   try {
     const r = await run(['/usr/bin/env', 'GROK_DISABLE_AUTOUPDATER=1', ...grokLaunchCommand(bin), 'models'], {
       cwd,
