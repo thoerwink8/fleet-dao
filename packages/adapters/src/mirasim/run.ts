@@ -703,6 +703,13 @@ export function mirasimRunSummary(report: MirasimRunReport, previous?: MirasimRu
       },
     };
   }
-  const output = num(rec(report.session.state.usage)?.turnOutputTokens);
-  return { ...base, usage: output === undefined ? {} : { outputTokens: output } };
+  return { ...base, usage: mirasimUsageFromSnapshot(report.session) };
+}
+
+/** 从真实 snapshot 的 usage 读本轮累计输出；没有 sessionTotals 的执行体只有这一项可靠。 */
+export function mirasimUsageFromSnapshot(
+  session: Pick<MirasimRunReport['session'], 'state'>,
+): RunSummary['usage'] {
+  const output = num(rec(session.state.usage)?.turnOutputTokens);
+  return output === undefined ? {} : { outputTokens: output };
 }

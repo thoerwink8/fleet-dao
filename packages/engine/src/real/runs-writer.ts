@@ -16,6 +16,7 @@ import type { Db, RunInsert } from '@fleet-dao/db';
 import {
   admitRun,
   type ChannelAttemptWrite,
+  observeRunSessionId,
   PoolFullError,
   recordChannelAttempt,
   releaseReservation,
@@ -82,6 +83,9 @@ export function realRuns(deps: RealRunsDeps): RunsWriter {
         },
         'runs 写入失败',
       );
+    },
+    async observeSessionId(runId: string, sessionId: string) {
+      await observeRunSessionId(deps.db, { runId, sessionId });
     },
   };
 }

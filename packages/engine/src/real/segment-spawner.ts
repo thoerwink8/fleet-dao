@@ -40,6 +40,7 @@ import { routeEffortProblem } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CarpoolRejection } from '../jobs/carpool-outage.ts';
 import { hostName } from '../routing/names.ts';
+import type { RunsWriter } from '../runner/not-wired.ts';
 import type { OneShotSpawner, SpawnFacts, SpawnOutcome } from '../runner/one-shot.ts';
 import { type CpuUsageDeps, type CpuUsageResult, sampleCpuUsage } from './cpu-usage.ts';
 import {
@@ -84,6 +85,8 @@ export interface SegmentSpawnerDeps {
   /** 路由编号 → 执行方式、池、会话用户、上游模型串。不给就用库里的（routeLaunchFacts）。 */
   routeFacts?: (routeId: string) => Promise<RouteLaunchFacts | null>;
   db?: Db;
+  /** 流里提前拿到真会话号时写回 runs；测试和未接库的调用方可以不传。 */
+  runs?: Pick<RunsWriter, 'observeSessionId'>;
   drivers: Record<WiredHost, HostDriver>;
   /** 会话临时目录的管理（real/worktrees.ts）：只用这三样。 */
   trees: Pick<WorkTrees, 'tmpFor' | 'adopt' | 'remove'>;
@@ -142,7 +145,11 @@ export function outcomeOfReport(report: HostReport): SpawnOutcome {
   const facts: SpawnFacts = {
     usage: report.usage,
     ...(report.usageWhy !== undefined ? { usageWhy: report.usageWhy } : {}),
-    ...(report.sessionCostUsd !== undefined ? { costUsd: report.sessionCostUsd } : {}),
+    ...(report.costUsd !== undefined
+      ? { costUsd: report.costUsd }
+      : report.sessionCostUsd !== undefined
+        ? { costUsd: report.sessionCostUsd }
+        : {}),
     ...(report.actualModel !== undefined ? { actualModel: report.actualModel } : {}),
     // 只记真号：起会话前的临时号（cursor-pending: / mirasim-pending:）不是执行体的会话，拿它补读不到用量
     ...(report.sessionId !== undefined && !/^[a-z]+-pending:/.test(report.sessionId)
@@ -318,6 +325,17 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           ...(deps.transcriptFlushMs === undefined ? {} : { flushEveryMs: deps.transcriptFlushMs }),
         })
       : undefined;
+    const sessionWrites: Promise<void>[] = [];
+    const observeSessionId = (sessionId: string): void => {
+      if (/^[a-z]+-pending:/.test(sessionId)) return;
+      const observe = deps.runs?.observeSessionId;
+      if (!observe) return;
+      sessionWrites.push(
+        observe(runId, sessionId).catch((error: unknown) => {
+          log('流里拿到的会话号没提前写回 runs', { runId, sessionId, error: errMessage(error) });
+        }),
+      );
+    };
     let anchorOutcome: 'done' | 'failed' | 'killed' | undefined;
     // 接回时提示词那一条（编号 0）上一个引擎记过了：占住编号，后面重读出来的条目编号和原来一样，库里按编号跳过重复的
     recorder?.prompt(attach ? '' : cmd.stdin);
@@ -396,6 +414,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         ...(deps.db
           ? { onRateLimit: (reading: RateLimitReading) => saveReading(deps.db as Db, route, reading) }
           : {}),
+        onSessionId: observeSessionId,
       });
       let report: HostReport;
       if (io && detach) {
@@ -428,6 +447,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
       } else {
         report = await running;
       }
+      await Promise.all(sessionWrites);
       const outcome = outcomeOfReport(report);
       const measured = await finishPeak();
       if (measured) {

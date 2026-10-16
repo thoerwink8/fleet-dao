@@ -936,7 +936,7 @@ describe('grok 的驱动', () => {
     expect(fake.count()).toBe(0);
   });
 
-  it('报告：token 照终帧（含缓存读写），实际模型取终帧 modelUsage 的键；没有会话累计花费、上下文大小；回答是最后一段话', async () => {
+  it('报告：token 和终帧 total_cost_usd 都记上，实际模型取终帧 modelUsage 的键；回答是最后一段话', async () => {
     const { driver } = grokWith({ replay: 'grok-edit-commit' });
     const report = await driver.run(grokSpec(), {});
     expect(report.usage).toEqual({
@@ -946,7 +946,7 @@ describe('grok 的驱动', () => {
       cacheWriteTokens: 0,
     });
     expect(report.actualModel).toBe('grok-4.7-build');
-    expect(report).not.toHaveProperty('sessionCostUsd');
+    expect(report.costUsd).toBe(0.04253468);
     expect(report).not.toHaveProperty('contextTokens');
     expect(report).not.toHaveProperty('rawError');
     expect(report.answer).toBe('好了');

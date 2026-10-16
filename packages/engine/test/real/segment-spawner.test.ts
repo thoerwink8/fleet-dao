@@ -117,6 +117,8 @@ function harness(
     transcriptWrite?: (runId: string, rows: TranscriptRow[]) => Promise<void>;
     /** 动手会话脱开引擎跑（#2238）。 */
     handoff?: SessionHandoff;
+    /** 流里拿到会话号时的 runs 写回钩子。 */
+    observeSessionId?: (runId: string, sessionId: string) => Promise<void>;
   } = {},
 ): Harness {
   const calls: Harness['calls'] = [];
@@ -166,6 +168,7 @@ function harness(
     ...(opts.transcriptWrite ? { transcriptWrite: opts.transcriptWrite, transcriptFlushMs: 5 } : {}),
     ...(opts.onCarpoolRejection ? { onCarpoolRejection: opts.onCarpoolRejection } : {}),
     ...(opts.handoff ? { handoff: opts.handoff } : {}),
+    ...(opts.observeSessionId ? { runs: { observeSessionId: opts.observeSessionId } } : {}),
     log: (message, fields) => void logs.push(`${message} ${JSON.stringify(fields ?? {})}`),
   });
   const run: Harness['run'] = (input = {}, timeoutMinutes = 60) =>
@@ -197,6 +200,24 @@ function harness(
     );
   return { calls, adopted, removed, order, recorded, logs, spawn, run };
 }
+
+describe('hostSegmentSpawner · 会话号与花费', () => {
+  it('流里拿到真会话号时立即交给 runs 写回，临时号不写', async () => {
+    const observed: string[] = [];
+    const h = harness({
+      observeSessionId: async (_runId, sessionId) => {
+        observed.push(sessionId);
+      },
+      driverRun: async (_spec, hooks) => {
+        hooks.onSessionId?.('claude:real-1');
+        hooks.onSessionId?.('mirasim-pending:run-1');
+        return report({ sessionId: 'claude:real-1' });
+      },
+    });
+    await h.run();
+    expect(observed).toEqual(['claude:real-1']);
+  });
+});
 
 describe('hostSegmentSpawner · 内存峰值（#948）', () => {
   const FAKE_PEAK = (readText: MemoryPeakDeps['readText']): MemoryPeakDeps => ({
@@ -580,6 +601,13 @@ describe('outcomeOfReport · 【故意造出的失败】不是 ok 的，退出�
     expect(real.facts?.sessionId).toBe('claude:403c41e2-8629-410a-8d7a-d61f65add9be');
     const pending = outcomeOfReport(report({ sessionId: 'mirasim-pending:r-1' }));
     expect(pending.facts).not.toHaveProperty('sessionId');
+  });
+
+  it('执行体报告的本轮折算花费传进 runs，不把缺失花费写成 0', () => {
+    expect(outcomeOfReport(report({ costUsd: 0.04253468 })).facts?.costUsd).toBe(0.04253468);
+    expect(
+      outcomeOfReport(report({ costUsd: undefined, sessionCostUsd: undefined })).facts,
+    ).not.toHaveProperty('costUsd');
   });
 
   it('进程自己退出码非 0 → 保留它的退出码', () => {

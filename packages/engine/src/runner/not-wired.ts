@@ -128,6 +128,8 @@ export interface RunsWriter {
   start(run: RunStart, options?: { reservationId?: string }): Promise<void>;
   /** 收场（或没开跑就收了，比如内存放不下）：整行记下；开跑时留过那一行的，补完同一行。 */
   record(run: RunRecord): Promise<void>;
+  /** 流里拿到真会话号时提前记回；占位实现可不做。 */
+  observeSessionId?(runId: string, sessionId: string): Promise<void>;
 }
 
 /**
