@@ -25,6 +25,7 @@
 // - 单条动作失败（GitHub 写不进）进 rejected，别的条照做；全部尝试的动作都失败，调用方当整理失败。
 
 import {
+  describeOffDiff,
   doneSection,
   GROOM_PENDING_LABEL,
   GROOMED_LABEL,
@@ -34,6 +35,9 @@ import {
   LOCAL_LABEL,
   matchesStandardPath,
   modulePaths,
+  OFF_DIFF_REWRITE,
+  type OffDiffItem,
+  offDiffAcceptanceItems,
   parseMd,
   rankSimilar,
   requiredSectionProblems,
@@ -280,6 +284,7 @@ export function renderAmendment(
   item: AmendItem,
   include: { scene: boolean; modules: boolean; done: boolean },
   date: string,
+  replaceOffDiffDone = false,
 ): string {
   const parts = [
     `## ${AMEND_HEADING}`,
@@ -289,7 +294,12 @@ export function renderAmendment(
   if (include.scene && item.scene) parts.push('', '### 场景', '', plainText(item.scene));
   if (include.modules && item.modules) parts.push('', '### 已知的模块', '', plainText(item.modules));
   if (include.done && item.done) {
-    parts.push('', '### 怎么算做完', '', ...item.done.map((d) => `- ${plainText(d).replace(/\n+/g, ' ')}`));
+    parts.push(
+      '',
+      replaceOffDiffDone ? '## 怎么算做完（整理后的替代条）' : '### 怎么算做完',
+      '',
+      ...item.done.map((d) => `- ${plainText(d).replace(/\n+/g, ' ')}`),
+    );
   }
   if (item.note) parts.push('', plainText(item.note));
   return parts.join('\n');
@@ -310,6 +320,12 @@ export function presentSections(body: string): {
     done: doneSection(doc) === 'ok',
     amended: doc.headings.some((h) => h.title.trim() === AMEND_HEADING),
   };
+}
+
+/** 老单已有的「怎么算做完」里，哪些条要换成 diff 看得见的写法。 */
+function offDiffDoneOf(body: string): OffDiffItem[] {
+  const doc = parseMd('issue.md', body);
+  return offDiffAcceptanceItems(sectionText(doc, '怎么算做完') ?? '');
 }
 
 /** 标题里的「（#12 第 3 片）」。N 从 1 起，号和片数都是阿拉伯数字，括号是全角。 */
@@ -550,7 +566,30 @@ export async function executeGroomPlan(
       rejected.push({ what, why: `已经有「## ${AMEND_HEADING}」，不重复补` });
       continue;
     }
-    const include = { scene: !present.scene, modules: !present.modules, done: !present.done };
+    const oldOffDiff = offDiffDoneOf(issue.body);
+    const replaceOffDiffDone = oldOffDiff.length > 0;
+    if (replaceOffDiffDone && !item.done) {
+      rejected.push({
+        what,
+        why: `「怎么算做完」已有 diff 外证据条目，必须在 done 里给出替代条：\n${describeOffDiff(oldOffDiff)}`,
+      });
+      continue;
+    }
+    const replacementHits = item.done
+      ? offDiffAcceptanceItems(item.done.map((d) => `- ${d}`).join('\n'))
+      : [];
+    if (replacementHits.length > 0) {
+      rejected.push({
+        what,
+        why: `整理补充的替代验收条仍要 diff 外证据：\n${describeOffDiff(replacementHits)}\n${OFF_DIFF_REWRITE}`,
+      });
+      continue;
+    }
+    const include = {
+      scene: !present.scene,
+      modules: !present.modules,
+      done: !present.done || replaceOffDiffDone,
+    };
     const usable =
       (include.scene && item.scene) ||
       (include.modules && item.modules) ||
@@ -561,7 +600,7 @@ export async function executeGroomPlan(
       continue;
     }
     amends += 1;
-    const text = renderAmendment(item, include, date);
+    const text = renderAmendment(item, include, date, replaceOffDiffDone);
     const hold = groomHold(`${issue.body}\n${text}`, item.needsHuman, ctx.standardPaths);
     const verdict = judged.get(item.issue);
     const ok = await act(what, async () => {
@@ -621,9 +660,18 @@ export async function executeGroomPlan(
     }
     const body = renderNewIssueBody(item);
     // 开单脚本同一份判法再核一遍：模板拼错了、会话塞进了「涉及面」都在这里挡
-    const problems = requiredSectionProblems(parseMd('body.md', body));
-    if (problems.length > 0 || doneSection(parseMd('body.md', body)) !== 'ok') {
+    const bodyDoc = parseMd('body.md', body);
+    const problems = requiredSectionProblems(bodyDoc);
+    if (problems.length > 0 || doneSection(bodyDoc) !== 'ok') {
       rejected.push({ what, why: problems[0]?.why ?? '「怎么算做完」一节是空的' });
+      continue;
+    }
+    const offDiff = offDiffAcceptanceItems(sectionText(bodyDoc, '怎么算做完') ?? '');
+    if (offDiff.length > 0) {
+      rejected.push({
+        what,
+        why: `「怎么算做完」要 diff 外证据，不能开给引擎：\n${describeOffDiff(offDiff)}\n${OFF_DIFF_REWRITE}`,
+      });
       continue;
     }
     if (parent !== undefined && isLedgerIssue(parent)) {
