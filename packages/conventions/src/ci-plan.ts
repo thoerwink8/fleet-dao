@@ -219,9 +219,7 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   {
     files: [
       `${W}routes/task.tsx`,
-      `${W}components/run-timeline.tsx`,
       `${W}components/segment-usage.tsx`,
-      `${W}components/usage.tsx`,
       `${W}components/route-label.tsx`,
       `${W}lib/usage.ts`,
     ],

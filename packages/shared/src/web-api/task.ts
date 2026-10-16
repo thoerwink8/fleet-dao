@@ -58,28 +58,6 @@ export const TASK_FLOW_MODE_MATCHES: Same<
   FlowMode
 > = true;
 
-export const RunSchema = z.object({
-  id: Id,
-  subtaskId: Id.optional(),
-  stage: StageKindSchema,
-  routeId: Id,
-  modelName: z.string(),
-  hostId: HostIdSchema.optional(),
-  /** 一句话「为什么派给它」。 */
-  whyRoute: z.string(),
-  queuedAt: Time,
-  startedAt: Time.optional(),
-  endedAt: Time.optional(),
-  outcome: RunOutcomeSchema.optional(),
-  inputTokens: z.number().int().min(0).optional(),
-  outputTokens: z.number().int().min(0).optional(),
-  cacheReadTokens: z.number().int().min(0).optional(),
-  cacheWriteTokens: z.number().int().min(0).optional(),
-  costUsd: z.number().min(0).optional(),
-  /** 路由所在渠道的计费方式：按量的花费是真花的钱，套餐内的只是按 API 价折合。渠道查不到就没有（不猜成套餐内）。 */
-  billing: BillingKindSchema.optional(),
-});
-
 // 用量汇总：算法和各栏的意思在 usage.ts。每一样只加读到的，没读到的次数在 missing* 里，不当成 0。
 const Count = z.number().int().min(0);
 const CostShareSchema = z.object({ runs: Count, usd: z.number().min(0), missing: Count });
@@ -101,11 +79,8 @@ export const UsageTotalsSchema = z.object({
   cost: z.object({ metered: CostShareSchema, subscription: CostShareSchema, unknown: CostShareSchema }),
   /** 没报花费的那几笔按模型目录的单价估（model-prices.ts）：估成了几笔、合计；没有单价几笔；token 没读全几笔。 */
   estimate: z.object({ runs: Count, usd: z.number().min(0), noPrice: Count, noTokens: Count }),
-  queueMs: Count,
   runMs: Count,
   missingTime: Count,
-  /** 结束了的里没有排队记录的笔数（三段的 runs 不记排队）：排队合计要把它算作没读到。 */
-  noQueue: Count,
   /** 结束了的三段里四样 token 一个都没读到的段数。页面写「另有 N 段读不到用量」。 */
   unreadSegments: Count,
 });
@@ -113,7 +88,6 @@ const ModelUsageTotalsSchema = UsageTotalsSchema.extend({ model: z.string(), mod
 export const TaskUsageSchema = z.object({
   total: UsageTotalsSchema,
   byModel: z.array(ModelUsageTotalsSchema),
-  byStage: z.array(UsageTotalsSchema.extend({ stage: StageKindSchema })),
   /** 三段按段（对题、动手、验收；段名认不出的 segment 为 null，排最后），每段再按模型分。 */
   bySegment: z.array(
     UsageTotalsSchema.extend({
@@ -236,11 +210,9 @@ export const TaskDetailResponse = z.object({
   task: TaskSchema,
   repo: RepoSchema,
   subtasks: z.array(BoardSubtaskSchema),
-  /** 老流程的会话（老会话表 09-29 起没人写、#2357 已删，现在恒为空）。 */
-  runs: z.array(RunSchema),
   /** 三段（runs 表）的流水，按起跑先后：task_id 对上的，加上 task_id 没记、按单号兜底的（matchedBy 标明）。 */
   segmentRuns: z.array(SegmentRunSchema),
-  /** 用量：老流程的会话加三段的流水整张合计、按模型；会话按阶段、三段按段（每段再按模型）。 */
+  /** 用量：三段的流水整张合计、按模型、按段（每段再按模型）。 */
   usage: TaskUsageSchema,
   /** 这张单每段指定的模型（动手、验收）。 */
   routePins: TaskRoutePinsSchema,

@@ -1,4 +1,4 @@
-// 会话用量的汇总：按模型、按阶段、整张合计，折成输入当量。每条「读不到」的路径都故意造一次：缺哪一样就记一次没读到，
+// 三段流水的用量汇总：按模型、按段、整张合计，折成输入当量。每条「读不到」的路径都故意造一次：缺哪一样就记一次没读到，
 // 不当成 0 加进合计。
 import { describe, expect, it } from 'vitest';
 import { runBelongsToTask } from '../src/issue-workflows.ts';
@@ -6,7 +6,7 @@ import { readSegmentRun, type SegmentRunFacts } from '../src/segment-runs.ts';
 import {
   INPUT_EQUIVALENT_WEIGHTS,
   inputEquivalentOf,
-  type RunUsageFacts,
+  type SegmentUsageFacts,
   summarizeUsage,
   taskListCost,
 } from '../src/usage.ts';
@@ -15,29 +15,31 @@ import { TaskUsageSchema } from '../src/web-api.ts';
 const T0 = Date.parse('2026-09-27T01:00:00.000Z');
 const at = (minutes: number) => new Date(T0 + minutes * 60_000).toISOString();
 
-/** 一次正常结束的会话：排队 1 分钟、干活 10 分钟，四样 token 都有、花费也有（Claude 订阅，套餐内）。 */
-function run(over: Partial<RunUsageFacts> = {}): RunUsageFacts {
+/** 一笔正常结束的三段（动手、主力档）：干活 10 分钟，四样 token 都有、花费也有（Claude 订阅，套餐内）。 */
+function run(over: Partial<SegmentUsageFacts> = {}): SegmentUsageFacts {
   return {
+    segment: 'manual',
     model: 'opus-5.5',
     modelName: 'Opus 5.5',
     billing: 'subscription',
-    stage: 'execute',
-    queuedAt: at(0),
-    startedAt: at(1),
-    endedAt: at(11),
+    tier: 'heavyweight',
+    running: false,
+    outcome: 'done',
+    durationMs: 600_000,
     inputTokens: 1000,
     outputTokens: 500,
     cacheReadTokens: 30_000,
     cacheWriteTokens: 2000,
     costUsd: 0.25,
+    unread: [],
     ...over,
   };
 }
 
-function without(r: RunUsageFacts, ...keys: (keyof RunUsageFacts)[]): RunUsageFacts {
+function without(r: SegmentUsageFacts, ...keys: (keyof SegmentUsageFacts)[]): SegmentUsageFacts {
   const copy: Record<string, unknown> = { ...r };
   for (const k of keys) delete copy[k];
-  return copy as RunUsageFacts;
+  return copy as SegmentUsageFacts;
 }
 
 describe('输入当量', () => {
@@ -89,8 +91,8 @@ describe('输入当量', () => {
   });
 });
 
-describe('一张单按模型、按阶段、整张合计', () => {
-  it('四样都读到的会话：token、当量、花费、排队和干活时长照加', () => {
+describe('一张单按模型、整张合计', () => {
+  it('四样都读到的一笔：token、当量、花费、干活时长照加', () => {
     const u = summarizeUsage([run()]);
     expect(u.total).toEqual({
       runs: 1,
@@ -113,10 +115,8 @@ describe('一张单按模型、按阶段、整张合计', () => {
       },
       // 报了花费的不另估
       estimate: { runs: 0, usd: 0, noPrice: 0, noTokens: 0 },
-      queueMs: 60_000,
       runMs: 600_000,
       missingTime: 0,
-      noQueue: 0,
       unreadSegments: 0,
     });
     // 后端按同一份定义校验返回：算出来的必须过得了
@@ -149,7 +149,7 @@ describe('一张单按模型、按阶段、整张合计', () => {
 
   it('渠道查不到（没给计费方式）、计费方式认不出：记进分不清，不猜成套餐内', () => {
     const lost = without(run(), 'billing');
-    const odd = { ...run(), billing: 'prepaid' } as unknown as RunUsageFacts;
+    const odd = { ...run(), billing: 'prepaid' } as unknown as SegmentUsageFacts;
     const u = summarizeUsage([lost, odd, without(run(), 'billing', 'costUsd')]);
     expect(u.total.cost).toEqual({
       metered: { runs: 0, usd: 0, missing: 0 },
@@ -159,10 +159,10 @@ describe('一张单按模型、按阶段、整张合计', () => {
   });
 
   it('各组的花费分开记账，互不串（每组一份新的空账）', () => {
-    const u = summarizeUsage([run({ stage: 'plan' }), run({ stage: 'execute', billing: 'metered' })]);
-    expect(u.byStage.map((s) => [s.stage, s.cost.subscription.runs, s.cost.metered.runs])).toEqual([
-      ['plan', 1, 0],
-      ['execute', 0, 1],
+    const u = summarizeUsage([run({ segment: 'scope' }), run({ billing: 'metered' })]);
+    expect(u.bySegment.map((s) => [s.segment, s.cost.subscription.runs, s.cost.metered.runs])).toEqual([
+      ['scope', 1, 0],
+      ['manual', 0, 1],
     ]);
     expect(u.total.cost.subscription.runs + u.total.cost.metered.runs).toBe(2);
   });
@@ -183,7 +183,7 @@ describe('一张单按模型、按阶段、整张合计', () => {
     ]);
   });
 
-  it('缓存读写没存下来的老会话：输入输出照加，缓存和当量记没读到，不当成 0 加进去', () => {
+  it('缓存读写没记下来的一笔：输入输出照加，缓存和当量记没读到，不当成 0 加进去', () => {
     const old = without(run(), 'cacheReadTokens', 'cacheWriteTokens');
     const u = summarizeUsage([old, run()]);
     expect(u.total).toMatchObject({
@@ -228,6 +228,7 @@ describe('一张单按模型、按阶段、整张合计', () => {
       missingEquivalent: 1,
       missingCost: 1,
       missingTime: 0,
+      unreadSegments: 1,
     });
   });
 
@@ -241,33 +242,11 @@ describe('一张单按模型、按阶段、整张合计', () => {
     });
   });
 
-  it('进程没起来就结束的会话：记 notStarted，各项照记没读到；排队算到结束，干活按 0', () => {
-    const never = without(
-      run({ endedAt: at(3) }),
-      'startedAt',
-      'inputTokens',
-      'outputTokens',
-      'cacheReadTokens',
-      'cacheWriteTokens',
-      'costUsd',
-    );
-    const u = summarizeUsage([never]);
-    expect(u.total).toMatchObject({
-      runs: 1,
-      notStarted: 1,
-      missingTokens: 1,
-      missingCache: 1,
-      missingCost: 1,
-      queueMs: 180_000,
-      runMs: 0,
-      missingTime: 0,
-    });
-  });
-
-  it('还在跑的会话只记 running：用量还没出来，不进合计，也不算没读到', () => {
+  it('还在跑的一笔只记 running：用量还没出来，不进合计，也不算没读到', () => {
     const live = without(
-      run(),
-      'endedAt',
+      run({ running: true }),
+      'outcome',
+      'durationMs',
       'inputTokens',
       'outputTokens',
       'cacheReadTokens',
@@ -283,13 +262,13 @@ describe('一张单按模型、按阶段、整张合计', () => {
     });
   });
 
-  it('时刻认不出或倒着的：时长记没读到，不当成 0', () => {
+  it('耗时读不到、认不出（负数、NaN）的：时长记没读到，不当成 0', () => {
     const u = summarizeUsage([
-      run({ queuedAt: '不是时刻' }),
-      run({ startedAt: at(20), endedAt: at(11) }),
-      run({ endedAt: 'x' }),
+      without(run(), 'durationMs'),
+      run({ durationMs: -1 }),
+      run({ durationMs: Number.NaN }),
     ]);
-    expect(u.total).toMatchObject({ runs: 3, queueMs: 0, runMs: 0, missingTime: 3 });
+    expect(u.total).toMatchObject({ runs: 3, runMs: 0, missingTime: 3 });
   });
 
   it('花费认不出（负数、NaN）的记没读到', () => {
@@ -297,31 +276,25 @@ describe('一张单按模型、按阶段、整张合计', () => {
     expect(u.total).toMatchObject({ costUsd: 0.25, missingCost: 2 });
   });
 
-  it('按模型、按阶段分组，按第一次出现的先后排', () => {
+  it('按模型分组，按第一次出现的先后排', () => {
     const u = summarizeUsage([
-      run({ stage: 'triage', model: 'sonnet-5', modelName: 'Sonnet 5' }),
-      run({ stage: 'plan' }),
-      run({ stage: 'execute' }),
-      without(run({ stage: 'execute', model: 'cursor-auto', modelName: 'Cursor Auto' }), 'costUsd'),
+      run({ segment: 'scope', model: 'sonnet-5', modelName: 'Sonnet 5' }),
+      run(),
+      run(),
+      without(run({ model: 'cursor-auto', modelName: 'Cursor Auto' }), 'costUsd'),
     ]);
     expect(u.byModel.map((m) => [m.model, m.runs, m.missingCost])).toEqual([
       ['sonnet-5', 1, 0],
       ['opus-5.5', 2, 0],
       ['cursor-auto', 1, 1],
     ]);
-    expect(u.byStage.map((s) => [s.stage, s.runs, s.inputEquivalent])).toEqual([
-      ['triage', 1, 9000],
-      ['plan', 1, 9000],
-      ['execute', 2, 18_000],
-    ]);
     expect(u.total).toMatchObject({ runs: 4, inputEquivalent: 36_000, costUsd: 0.75, missingCost: 1 });
   });
 
-  it('一次会话都没有：合计全是 0 次，分组是空的', () => {
+  it('一笔都没有：合计全是 0 次，分组是空的', () => {
     expect(summarizeUsage([])).toEqual({
       total: expect.objectContaining({ runs: 0, running: 0, missingTokens: 0 }),
       byModel: [],
-      byStage: [],
       bySegment: [],
     });
   });
@@ -355,16 +328,13 @@ describe('三段按段、每段再按模型（runs 表的流水）', () => {
   }
 
   it('按对题、动手、验收的固定先后排（不管谁先跑），段名认不出的一组排最后；每段里按模型分', () => {
-    const u = summarizeUsage(
-      [],
-      [
-        seg({ segment: 'verify', model: 'gpt-5.6', modelName: 'GPT 5.6', tier: undefined }),
-        seg({ segment: 'mystery' }),
-        seg(),
-        seg({ model: 'kimi-k3', modelName: 'Kimi k3', tier: 'fast' }),
-        seg({ segment: 'scope', tier: undefined }),
-      ],
-    );
+    const u = summarizeUsage([
+      seg({ segment: 'verify', model: 'gpt-5.6', modelName: 'GPT 5.6', tier: undefined }),
+      seg({ segment: 'mystery' }),
+      seg(),
+      seg({ model: 'kimi-k3', modelName: 'Kimi k3', tier: 'fast' }),
+      seg({ segment: 'scope', tier: undefined }),
+    ]);
     expect(u.bySegment.map((s) => [s.segment, s.runs, s.byModel.map((m) => [m.model, m.runs])])).toEqual([
       ['scope', 1, [['opus-5.5', 1]]],
       [
@@ -388,29 +358,22 @@ describe('三段按段、每段再按模型（runs 表的流水）', () => {
     expect(TaskUsageSchema.parse(u)).toEqual(u);
   });
 
-  it('整张合计和按模型把会话和三段加在一起；按阶段只算会话', () => {
-    const u = summarizeUsage([run()], [seg(), seg({ segment: 'verify', tier: undefined })]);
-    expect(u.total).toMatchObject({ runs: 3, inputEquivalent: 27_000, costUsd: 0.75 });
-    expect(u.byModel.map((m) => [m.model, m.runs])).toEqual([['opus-5.5', 3]]);
-    expect(u.byStage.map((s) => [s.stage, s.runs])).toEqual([['execute', 1]]);
-  });
-
-  it('三段没有排队：干活照加耗时，排队一笔不加、记 noQueue（排队合计算作没读到，不当 0 秒）', () => {
-    const u = summarizeUsage([run()], [seg()]);
-    expect(u.total).toMatchObject({ runs: 2, queueMs: 60_000, runMs: 1_200_000, missingTime: 0, noQueue: 1 });
-    expect(u.bySegment[0]).toMatchObject({ runs: 1, queueMs: 0, noQueue: 1, runMs: 600_000 });
+  it('整张合计、按模型把三段各笔加在一起', () => {
+    const u = summarizeUsage([seg(), seg({ segment: 'verify', tier: undefined })]);
+    expect(u.total).toMatchObject({ runs: 2, inputEquivalent: 18_000, costUsd: 0.5, runMs: 1_200_000 });
+    expect(u.byModel.map((m) => [m.model, m.runs])).toEqual([['opus-5.5', 2]]);
   });
 
   it('【失败】起止读不到的一笔：耗时记没读到（missingTime），不当 0 加进去', () => {
-    const u = summarizeUsage([], [seg({ endedAt: undefined }, { taskFinished: true }), seg()]);
+    const u = summarizeUsage([seg({ endedAt: undefined }, { taskFinished: true }), seg()]);
     expect(u.bySegment[0]).toMatchObject({ runs: 2, running: 0, runMs: 600_000, missingTime: 1 });
   });
 
   it('【失败】token、花费没记到的一笔：各记没读到，读到的照加', () => {
-    const u = summarizeUsage(
-      [],
-      [seg({ cacheReadTokens: undefined, cacheWriteTokens: undefined, costUsd: undefined }), seg()],
-    );
+    const u = summarizeUsage([
+      seg({ cacheReadTokens: undefined, cacheWriteTokens: undefined, costUsd: undefined }),
+      seg(),
+    ]);
     expect(u.bySegment[0]).toMatchObject({
       runs: 2,
       inputTokens: 2000,
@@ -423,37 +386,33 @@ describe('三段按段、每段再按模型（runs 表的流水）', () => {
   });
 
   it('【失败】动手段没记派工档：记 missingTier，不猜档', () => {
-    const u = summarizeUsage([], [seg({ tier: undefined }), seg()]);
+    const u = summarizeUsage([seg({ tier: undefined }), seg()]);
     expect(u.bySegment[0]).toMatchObject({ segment: 'manual', tiers: ['heavyweight'], missingTier: 1 });
   });
 
   it('还在跑的一段只记 running：用量等它结束，不进合计、也不算没读到', () => {
-    const u = summarizeUsage([], [seg({ endedAt: undefined, outcome: undefined, costUsd: undefined })]);
+    const u = summarizeUsage([seg({ endedAt: undefined, outcome: undefined, costUsd: undefined })]);
     expect(u.bySegment[0]).toMatchObject({
       runs: 0,
       running: 1,
       missingCost: 0,
       missingTime: 0,
-      noQueue: 0,
       unreadSegments: 0,
     });
   });
 
   it('进程没起来的一段：记 notStarted，用量照记没读到', () => {
-    const u = summarizeUsage(
-      [],
-      [
-        seg({
-          outcome: 'spawn_failed',
-          endedAt: at(0),
-          inputTokens: undefined,
-          outputTokens: undefined,
-          cacheReadTokens: undefined,
-          cacheWriteTokens: undefined,
-          costUsd: undefined,
-        }),
-      ],
-    );
+    const u = summarizeUsage([
+      seg({
+        outcome: 'spawn_failed',
+        endedAt: at(0),
+        inputTokens: undefined,
+        outputTokens: undefined,
+        cacheReadTokens: undefined,
+        cacheWriteTokens: undefined,
+        costUsd: undefined,
+      }),
+    ]);
     expect(u.total).toMatchObject({
       runs: 1,
       notStarted: 1,
@@ -586,7 +545,7 @@ describe('一张单的各代花费', () => {
       ['g1-manual', 'g1-scope', 'g2-blank', 'g2-redo', 'g2-verify'].sort(),
     );
     const views = kept.map((r) => readSegmentRun(r, { taskFinished: true }));
-    const u = summarizeUsage([], views);
+    const u = summarizeUsage(views);
     expect(views.find((v) => v.id === 'g2-verify')?.segment).toBe('verify');
     expect(u.total.costUsd).toBeCloseTo(
       views.reduce((n, v) => n + (v.costUsd ?? 0), 0),
@@ -625,7 +584,7 @@ describe('一张单的各代花费', () => {
 
   it('一段都没报实付：估计有数，实付是 null，不当成 0', () => {
     const views = [readSegmentRun(linked({ id: 'g', segment: 'scope' }), { taskFinished: true })];
-    const listed = taskListCost(summarizeUsage([], views).total, 1);
+    const listed = taskListCost(summarizeUsage(views).total, 1);
     expect(listed.actual).toBeNull();
     expect(listed.usd).toBeNull();
     expect(listed.estimated).toBeCloseTo(1.8, 6);
@@ -640,19 +599,11 @@ describe('一张单的各代花费', () => {
         { taskFinished: true },
       ),
     ];
-    const listed = taskListCost(summarizeUsage([], views).total, 1);
+    const listed = taskListCost(summarizeUsage(views).total, 1);
     expect(listed.estimated).toBeNull();
     expect(listed.actual).toBeNull();
     expect(listed.noPrice).toBe(1);
     expect(listed.note).toContain('没有单价');
     expect(JSON.stringify(listed)).not.toContain('"estimated":0');
-  });
-
-  it('老流程的会话不计入读不到用量的段数', () => {
-    const u = summarizeUsage([
-      without(run(), 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens', 'costUsd'),
-    ]);
-    expect(u.total.unreadSegments).toBe(0);
-    expect(u.total.missingTokens).toBe(1);
   });
 });

@@ -1,17 +1,17 @@
 // 任务页（/tasks/:taskId）：一张单走了哪几段、每段每个模型花了多久、多少 token 和钱（#216）；动手、验收各用哪个模型，
 // 能在这里指定或回到自动（components/task-model-pins.tsx）。执行体没报花费的按目录单价估、标「估算」。
-// 主页「在跑的」卡片、「要你拍的」都链到这里。三段的单读 runs 表的流水（segmentRuns、usage.bySegment）；
-// 老流程的单照旧是会话时间线加「时间与用量」。读不到的写「没读到」和原因，不写 0。
+// 主页「在跑的」卡片、「要你拍的」都链到这里。读 runs 表的三段流水（segmentRuns、usage.bySegment）。
+// 读不到的写「没读到」和原因，不写 0。
 //
 // 层级照路由页样板（#1914，本页 #1920）：标题下先是一句结论块（这张单现在怎么样 + 一个状态，下面一行灰字：仓#单号、开单、PR），
-// 再是四个数，然后才是明细（用哪个模型、三段、每一笔、老流程的会话）。各块的长说明收进页头 ⓘ，块头只留一句。
+// 再是四个数，然后才是明细（用哪个模型、三段、每一笔）。各块的长说明收进页头 ⓘ，块头只留一句。
 
 import { errMessage } from '@fleet-dao/shared/util';
 import { ListChecks, SearchX } from 'lucide-react';
 import { Fragment, type ReactNode, useRef } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
-import { isNotFound, useRouting, useTaskDetail } from '../api/client';
+import { isNotFound, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
 import { FlowModeTag } from '../components/flow-mode-tag';
 import { EmptyState } from '../components/layout/empty-state';
@@ -21,19 +21,16 @@ import { Section } from '../components/layout/section';
 import { StatusBadge } from '../components/layout/status-badge';
 import type { LayoutTone } from '../components/layout/tone';
 import { RepoLink } from '../components/repo-link';
-import { RunTimeline } from '../components/run-timeline';
 import { RunTranscriptDrawer } from '../components/run-transcript';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { ActionButtons } from '../components/task-actions';
 import { TaskModelPins } from '../components/task-model-pins';
 import { Button } from '../components/ui/button';
-import { UsagePanel } from '../components/usage';
-import { stageLabel } from '../lib/catalog';
 import { formatAgo, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { liveMs, runNth, segmentLabel, UNKNOWN_SEGMENT } from '../lib/segments';
 import { useShownError } from '../lib/shown-error';
-import { isTaskFinished, taskStateLabel, taskTone, workMs } from '../lib/status';
+import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
 import { backToList, FROM_PARAM } from '../lib/task-list';
 import { cn } from '../lib/utils';
 
@@ -56,7 +53,6 @@ const DETAIL = (
         每一笔：三段每跑一次一笔，按起跑先后。没记 task_id、按单号对上的标「按单号兜底」；没读到的写明为什么。
         点「看会话」在右侧抽屉里看会话内容，网址带着这一笔，能发给别人。
       </li>
-      <li>老流程的会话时间线：斜纹是排队，实色是干活。</li>
     </ul>
   </div>
 );
@@ -103,26 +99,6 @@ function TaskActionBar({ d }: { d: TaskDetail }) {
   );
 }
 
-/** 老流程会话的那几块：会话时间线、时间与用量。 */
-function SessionPart({ d, now, mixed }: { d: TaskDetail; now: number; mixed: boolean }) {
-  const { data: routing } = useRouting();
-  if (mixed) {
-    return (
-      <Section title="老流程的会话" description="三段之前按老流程跑的会话，上面的合计已经算进去了">
-        <RunTimeline runs={d.runs} routing={routing} now={now} />
-      </Section>
-    );
-  }
-  return (
-    <div className="grid gap-4 lg:grid-cols-3">
-      <Section title="会话时间线" description="斜纹是排队，实色是干活" className="lg:col-span-2">
-        <RunTimeline runs={d.runs} routing={routing} now={now} />
-      </Section>
-      <UsagePanel d={d} now={now} />
-    </div>
-  );
-}
-
 /** 「用哪个模型」：结束了的单从没指定过，也没什么可看的，不画。 */
 function Pins({ d, now }: { d: TaskDetail; now: number }) {
   if (isTaskFinished(d.task) && !d.routePins.pins.length && !d.routePins.unavailable) return null;
@@ -166,15 +142,6 @@ export function taskConclusion(
       Boolean,
     );
     return { tone, label, text: `${segOf(running)}中：${parts.join('，')}` };
-  }
-  // 老流程的会话还在跑（三段之前的单、两种流水都有的单）：照样写哪一步、哪个模型、干了多久
-  const liveSession = [...d.runs].filter((r) => !r.endedAt && r.startedAt).at(-1);
-  if (liveSession) {
-    return {
-      tone,
-      label,
-      text: `${stageLabel[liveSession.stage]}中：${liveSession.modelName}，已跑 ${formatDuration(workMs(liveSession, now))}`,
-    };
   }
   const segments = new Set(runs.map((r) => r.segment)).size;
   switch (d.task.state) {
@@ -327,7 +294,7 @@ function RunsWithDrawer({ d, now }: { d: TaskDetail; now: number }) {
 
 /** 结论块下面的明细：一块接一块，块间距一样（区块间距令牌，经 Section 自己的外边距）。 */
 function Body({ d, now }: { d: TaskDetail; now: number }) {
-  if (!d.segmentRuns.length && !d.runs.length) {
+  if (!d.segmentRuns.length) {
     return (
       <>
         <TaskHero d={d} now={now} />
@@ -344,17 +311,6 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
       </>
     );
   }
-  if (!d.segmentRuns.length) {
-    return (
-      <>
-        <TaskHero d={d} now={now} />
-        <div className="flex flex-col gap-4 lg:gap-6">
-          <SessionPart d={d} now={now} mixed={false} />
-          <Pins d={d} now={now} />
-        </div>
-      </>
-    );
-  }
   return (
     <>
       <TaskHero d={d} now={now} />
@@ -363,7 +319,6 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
         <Pins d={d} now={now} />
         <SegmentBreakdown d={d} now={now} />
         <RunsWithDrawer d={d} now={now} />
-        {d.runs.length ? <SessionPart d={d} now={now} mixed /> : null}
       </div>
     </>
   );
