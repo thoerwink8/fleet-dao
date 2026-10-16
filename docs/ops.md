@@ -625,7 +625,7 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 推送只看香港本机 `/etc/fleet-dao/hk-probe.env`，不经过法国（#2705）。两种通道，飞书应用优先：
 
 - **飞书应用**（香港在用的这一种）：`FLEET_HK_PROBE_FEISHU_APP_ID`、`FLEET_HK_PROBE_FEISHU_APP_SECRET`、`FLEET_HK_PROBE_FEISHU_CHAT_ID` 三项齐了就用。应用就是法国驾驶舱那一个（法国 `api.env` 的 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`），群就是驾驶舱推提醒的那个团队群（机器人只在这一个群里）。香港自己换 `tenant_access_token`、按 `chat_id` 发一条文本，法国断了照样发得出。每条带去重号（`hk-probe-down-<失联起点>` / `hk-probe-up-<失联起点>`），重试时飞书一小时内不会重复显示。
-- **群机器人**：飞书应用三项一项都没配时，看 `FLEET_HK_PROBE_WEBHOOK`（http(s) 地址，正文 `{"msg_type":"text","content":{"text":"…"}}`）。
+- **飞书群机器人**：飞书应用三项一项都没配时，看 `FLEET_HK_PROBE_WEBHOOK`（http(s) 地址，正文 `{"msg_type":"text","content":{"text":"…"}}`）。
 
 为什么用应用不用群机器人：应用、凭据、团队群都已经在用，不用创始人再去群里加一个自定义机器人，消息也落在他平时收驾驶舱提醒的同一个群；接口是飞书开放平台的正式接口，不花钱（一次推送两次调用，失联、恢复各一次）。
 
