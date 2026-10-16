@@ -91,8 +91,8 @@ export const VerifierInvokeInputSchema = z
      */
     recheck: z
       .object({
-        failedCriteria: z.array(z.number().int().positive()),
-        priorProblems: z.array(z.string()),
+        failedCriteria: z.array(z.number().int().positive()).min(1),
+        priorProblems: z.array(z.string()).min(1),
       })
       .optional(),
     /**
@@ -115,7 +115,11 @@ export const VerifierInvokeInputSchema = z
       message: '作者族一个都没有：不知道该避开谁，没法保证换了家族',
       path: ['modelFamiliesAvoid'],
     },
-  );
+  )
+  .refine((v) => v.round !== 2 || v.recheck !== undefined, {
+    message: '第 2 轮必须带上一轮没过的验收条和问题原话',
+    path: ['recheck'],
+  });
 export type VerifierInvokeInput = z.infer<typeof VerifierInvokeInputSchema>;
 
 /** 输出 zod：pass / fail + 问题清单。 */
@@ -326,7 +330,8 @@ export const VERIFY_MAY_READ_HEAD = '你可以在 PR 头的完整检出里读文
 
 /**
  * 第 2 轮的判法原句。新提出的、不在增量里的问题只记备注、不拒。
- * 增量里新出现的问题，模型要在正文里写上「增量」，否则和「不在上轮没过的条里」一样改记备注。
+ * 增量里新出现的问题，模型要在正文里写上能对上本轮 changedFiles 的「增量文件：`路径`」证据，
+ * 否则和「不在上轮没过的条里」一样改记备注。
  */
 export const VERIFY_RECHECK_RULE =
   '只复核上轮没过的条和增量里的改动，新提出的、不在增量里的问题只记备注、不拒';
@@ -349,18 +354,24 @@ export function missingCriterionNumbers(problems: readonly string[], criterionCo
 
 /**
  * 第 2 轮：编号在上轮没过的条里，或正文写了「增量」（模型标明这是增量里的新问题），才继续挡。
- * 其余新提出的改记备注。上轮一条编号都没解析出来时不过滤（没有清单可对）。
+ * 增量里的新问题必须带能对上本轮 changedFiles 的「增量文件：`路径`」证据；其余新提出的改记备注。
  */
 export function splitRecheckProblems(
   problems: readonly string[],
   failedCriteria: ReadonlySet<number>,
+  changedFiles: readonly string[] = [],
 ): { keep: string[]; noted: string[] } {
-  if (failedCriteria.size === 0) return { keep: [...problems], noted: [] };
+  const changed = new Set(changedFiles);
+  const incrementalEvidence = (problem: string): boolean =>
+    [...problem.matchAll(/增量文件\s*[:：]\s*`([^`\n]+)`/g)].some((match) => {
+      const path = match[1]?.trim();
+      return path !== undefined && changed.has(path);
+    });
   const keep: string[] = [];
   const noted: string[] = [];
   for (const problem of problems) {
     const cited = criterionNumbersIn(problem).some((n) => failedCriteria.has(n));
-    if (cited || problem.includes('增量')) keep.push(problem);
+    if (cited || incrementalEvidence(problem)) keep.push(problem);
     else noted.push(problem);
   }
   return { keep, noted };
@@ -548,7 +559,7 @@ function renderPrompt(
     ...(recheck
       ? [
           VERIFY_RECHECK_RULE,
-          '上轮没过的条没修好：写进「## 问题」，带第 N 条。增量 diff 里新改坏的：也写进「## 问题」，带第 N 条，并且正文里写上「增量」。新提出的、不在增量里的：写进「## 建议」。没写「增量」、编号也不在上轮没过的条里的，引擎会改记备注、不拒。',
+          '上轮没过的条没修好：写进「## 问题」，带第 N 条。增量 diff 里新改坏的：也写进「## 问题」，带第 N 条，并且正文写「增量文件：`本轮 diff 中的实际路径`」。新提出的、不在增量里的：写进「## 建议」。增量文件路径对不上本轮 diff、或没有这句证据，且编号也不在上轮没过的条里的，引擎会改记备注、不拒。',
         ]
       : []),
     '',
@@ -767,6 +778,8 @@ export async function invokeVerifier(
   const seenRoutes = new Set<string>();
   const misses: { route: string; tail: string }[] = [];
   let lastSession: VerifierInvokeOutput['session'];
+  /** 问题没带验收条编号：整次验收只重跑一次，跨家族也不能再重跑。 */
+  let formatRetried = false;
   const named = await loadNamedFiles(parsed, diff.changedFiles, deps.fetchNamedFiles);
   const prompt = renderPrompt(parsed, diff, spec.specDir, named);
 
@@ -815,8 +828,6 @@ export async function invokeVerifier(
    */
   const runFamily = async (family: ModelFamily, first: ChosenModel): Promise<FamilyOutcome> => {
     let m = first;
-    /** 问题没带验收条编号：只重跑一次，不再顺着路由一直换。 */
-    let formatRetried = false;
     /** 这一条路由没验成：记下，换这一族的下一条路由；换不出就回 none。 */
     const missAndNext = async (route: string, why: string): Promise<boolean> => {
       misses.push({ route, tail: why });
@@ -981,8 +992,8 @@ export async function invokeVerifier(
       }
       let problems = stdoutPieces.problems;
       const recheck = parsed.round === 2 ? parsed.recheck : undefined;
-      if (recheck !== undefined && recheck.failedCriteria.length > 0) {
-        const split = splitRecheckProblems(problems, new Set(recheck.failedCriteria));
+      if (recheck !== undefined) {
+        const split = splitRecheckProblems(problems, new Set(recheck.failedCriteria), diff.changedFiles);
         problems = split.keep;
         if (split.noted.length > 0) {
           suggestions = [...suggestions, ...split.noted];

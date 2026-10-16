@@ -1626,6 +1626,42 @@ describe('材料带 PR 正文和测试输出；「不归我验」留言到单上
     expect(prompt).toContain('你可以在 PR 头的完整检出里读文件');
   });
 
+  it('第 2 轮真实装配只留下上一轮问题和能对上增量文件的问题', async () => {
+    const oldProblem = '没做到验收条：第 1 条：上一轮的问题还没修好';
+    const newProblem = '弄坏了原有功能：第 2 条：增量文件：`src/status.ts`，把状态导出删了';
+    const unrelated = '弄坏了原有功能：第 2 条：增量里顺手发现的旧问题，但不在本轮改动';
+    const stdout = [
+      '## 问题',
+      `- ${oldProblem}`,
+      `- ${newProblem}`,
+      `- ${unrelated}`,
+      '',
+      'verdict: fail',
+    ].join('\n');
+    const r = rig({
+      deps: {
+        rangeDiff: async () => ({ diffText: 'INCREMENTAL-DIFF-MARKER', changedFiles: ['src/status.ts'] }),
+      },
+      driverRun: async () => report(stdout),
+    });
+    const got = await r.run(
+      r.input({
+        round: 2,
+        howToFinish: ['第一条', '第二条'],
+        recheck: {
+          failedCriteria: [1],
+          sinceSha: 'c'.repeat(40),
+          priorProblems: [oldProblem],
+        },
+      }),
+      ctx(),
+    );
+    expect(got.pass).toBe(false);
+    expect(got.problems).toEqual([oldProblem, newProblem]);
+    expect(got.notes).toContain('只记备注、不拒');
+    expect(got.problems).not.toContain(unrelated);
+  });
+
   it('「不归我验」：结论 pass、状态 success，outOfScope 带出，并留言到单上（幂等键带 PR 号和头）', async () => {
     const comments: { issueNumber: number; key: string; body: string }[] = [];
     const r = rig({

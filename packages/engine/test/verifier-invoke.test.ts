@@ -1520,6 +1520,26 @@ describe('问题带验收条编号；没有编号判格式错、重跑一次', (
     expect(out.problems[0]).toContain('冷调用没跑成');
     expect(out.problems[0]).toContain('验收条编号');
   });
+
+  it('第一家格式错后换到另一家：整次验收仍只重跑一次', async () => {
+    const bad = ['## 问题', `- ${BLOCKER_KINDS[0]}：单子要 A`, '', 'verdict: fail'].join('\n');
+    const { oneShot, commands } = fakeOneShot(() => done(bad));
+    const asked: ModelFamily[] = [];
+    const out = await invokeVerifier(BASE_INPUT, {
+      ...DEPS(oneShot),
+      chooseModelForFamily: async (family) => {
+        asked.push(family);
+        if (family === 'grok' && asked.filter((f) => f === 'grok').length === 1) {
+          return { modelId: 'grok-1' };
+        }
+        if (family === 'claude') return { modelId: 'claude-1' };
+        return undefined;
+      },
+    });
+    expect(commands).toHaveLength(3);
+    expect(asked).toContain('claude');
+    expect(out.problems[0]).toContain('试过的路由都没验成');
+  });
 });
 
 describe('第 2 轮只复核上轮没过的条和增量', () => {
@@ -1527,6 +1547,13 @@ describe('第 2 轮只复核上轮没过的条和增量', () => {
     failedCriteria: [1],
     priorProblems: ['没做到验收条：第 1 条：没有 A'],
   };
+
+  it('第 2 轮没有复核材料：拒绝退回整张 PR 从头判', async () => {
+    const { oneShot } = fakeOneShot(done(MODEL_STDOUT_PASS));
+    await expect(invokeVerifier({ ...BASE_INPUT, round: 2 }, DEPS(oneShot))).rejects.toThrow(
+      '第 2 轮必须带上一轮没过的验收条和问题原话',
+    );
+  });
 
   it('提示词带上轮没过的条、增量 diff，判法写成只复核那一句；并允许在 PR 头的完整检出里读文件', async () => {
     const { oneShot, commands } = fakeOneShot(done(MODEL_STDOUT_PASS));
@@ -1559,13 +1586,32 @@ describe('第 2 轮只复核上轮没过的条和增量', () => {
   });
 
   it('增量里新改坏的（正文写了增量）仍然拒', async () => {
-    const stdout = ['## 问题', `- ${BLOCKER_KINDS[1]}：第 2 条：增量里把 B 删了`, '', 'verdict: fail'].join(
-      '\n',
-    );
+    const stdout = [
+      '## 问题',
+      `- ${BLOCKER_KINDS[1]}：第 2 条：增量文件：\`foo.ts\`，把 B 删了`,
+      '',
+      'verdict: fail',
+    ].join('\n');
     const { oneShot } = fakeOneShot(done(stdout));
     const out = await invokeVerifier({ ...BASE_INPUT, round: 2, recheck }, DEPS(oneShot));
     expect(out.pass).toBe(false);
-    expect(out.problems).toEqual([`${BLOCKER_KINDS[1]}：第 2 条：增量里把 B 删了`]);
+    expect(out.problems).toEqual([`${BLOCKER_KINDS[1]}：第 2 条：增量文件：\`foo.ts\`，把 B 删了`]);
+  });
+
+  it('只写「增量」但没有对上本轮改动文件：只记备注、不拒', async () => {
+    const stdout = [
+      '## 问题',
+      `- ${BLOCKER_KINDS[1]}：第 2 条：增量里发现 B 的名字不好，但不是本轮改动`,
+      '',
+      'verdict: fail',
+    ].join('\n');
+    const { oneShot } = fakeOneShot(done(stdout));
+    const out = await invokeVerifier({ ...BASE_INPUT, round: 2, recheck }, DEPS(oneShot));
+    expect(out.pass).toBe(true);
+    expect(out.problems).toEqual([]);
+    expect(out.suggestions).toEqual([
+      `${BLOCKER_KINDS[1]}：第 2 条：增量里发现 B 的名字不好，但不是本轮改动`,
+    ]);
   });
 
   it('新问题全被改记备注：按过算，不挡', async () => {
