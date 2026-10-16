@@ -10,6 +10,7 @@ export FLEET_RELEASES_DIR=$TMP/releases
 # shellcheck source=../release.sh
 source "$HERE/../release.sh"
 set +e # release.sh 开了 -e；这里自己判每一步
+NODE=$(command -v node) # release.sh 写死法国的 /usr/bin/node，CI 机器的 node 在别处
 fail=0
 check() { # 说明 实际 期望
   if [[ "$2" == "$3" ]]; then printf '  ✓ %s\n' "$1"
