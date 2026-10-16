@@ -531,10 +531,7 @@ test('冷启动窗口：第一次探 4318 连不上、短时间后探通，最�
   assert.ok(up.tierCalls >= 2, '第一次连不上之后还会再探');
   assert.ok(up.t - up.activeEnter < TIER_BOOT_MS);
   assert.ok(up.t - up.activeEnter < TIER_RETRY_MS, '改回 ok 不干等 30 分钟');
-  assert.equal(
-    up.alerts.filter((a) => String(a.key).startsWith(TIER_PREFIX)).length,
-    0,
-  );
+  assert.equal(up.alerts.filter((a) => String(a.key).startsWith(TIER_PREFIX)).length, 0);
 
   const stuck = bootMachine(0);
   stuck.io.applyAutoTier = async () => {
