@@ -1544,9 +1544,13 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       };
     });
     expect(whats(v).some((w) => w.includes('算在线'))).toBe(false);
-    const got = (v.health.routes?.rows as { id: string; stale: boolean; expired: boolean; stateName: string }[]).map(
-      ({ id, stale, expired, stateName }) => ({ id, stale, expired, stateName }),
-    );
+    const rows = (v.health.routes?.rows ?? []) as {
+      id: string;
+      stale: boolean;
+      expired: boolean;
+      stateName: string;
+    }[];
+    const got = rows.map(({ id, stale, expired, stateName }) => ({ id, stale, expired, stateName }));
     expect(got).toEqual([
       {
         id: 'auto:cursor:claude-haiku-5-5-a',
@@ -1554,7 +1558,12 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
         expired: true,
         stateName: '探通了（旧结论：定时不复探，派之前再探）',
       },
-      { id: 'grok:grok-4.7:grok', stale: false, expired: true, stateName: '探通了（旧结论：定时不复探，派之前再探）' },
+      {
+        id: 'grok:grok-4.7:grok',
+        stale: false,
+        expired: true,
+        stateName: '探通了（旧结论：定时不复探，派之前再探）',
+      },
       { id: 'fresh:m:claude-code', stale: false, expired: false, stateName: '探通了' },
     ]);
   });
