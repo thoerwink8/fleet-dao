@@ -114,7 +114,7 @@ pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一�
 
   | 子代理 | 定义里写的模型 | 派的时候没写 `model`，用的是 |
   |---|---|---|
-  | `Explore`、`general-purpose`、`Plan`（装了 `agents/subagents/` 那三份的机器） | `claude-haiku-5-5`、`claude-sonnet-5-5`、`claude-opus-5-5` | 定义里的钉 |
+  | `Explore`、`general-purpose`、`Plan`（装了 `agents/subagents/` 那三份的机器） | `claude-haiku-5-5`、`claude-opus-5-5`、`claude-opus-5-5`（工人从决定 0103 起是 Opus） | 定义里的钉 |
   | workflow 里不写 `agentType` 起的、队友、自己定义又没写模型的 | 没写 | **这个变量：Sonnet 5.5** |
   | `fork` | 跟主会话 | 主会话（主会话是 Fable 就是 Fable） |
   | claude-code-guide | `haiku` | Haiku |
