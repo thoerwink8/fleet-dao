@@ -21,13 +21,11 @@ import {
   applyReuse,
   assignTests,
   type CiPlan,
+  ciFullPlan,
   ciVerdict,
-  deferE2eToMain,
   dependentsClosure,
   E2E_PAGE_MAP,
-  E2E_PR_RISK_PATHS,
   E2E_SPEC_DIR,
-  e2eRiskHit,
   e2eRuns,
   e2eSpecsFor,
   fallbackUnits,
@@ -689,39 +687,63 @@ describe('测试读包外的文件，改那个文件的 PR 一定测到它（漏
   });
 });
 
-describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的跳过了', () => {
-  // 汇总核的是 changes 给的 plan + 矩阵里的那份台：和入口同一条路（planCi → assignTests），不然「有单元没装箱」会被判成该跳过
-  // 不用 ci-plan.ts 本身：改它（映射表）会让 e2e 全套，这里要的是 e2e 不跑的那一份
-  const plan = assigned(pr('packages/conventions/src/repo.ts'));
+describe('汇总（必过检查 check）：一律全套（决定 0101），该跑的跑了且绿', () => {
+  // 汇总核的是 changes 给的 plan + 矩阵里的那份台：和入口同一条路（ciFullPlan → assignTests），不然「有单元没装箱」会被判成该跳过
+  const plan = assigned(ciFullPlan());
+  const green = { result: 'success', outputs: {} };
   const needs = (over: Record<string, unknown> = {}, p: CiPlan = plan) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
-    lint: { result: 'success', outputs: {} },
-    test: { result: 'success', outputs: {} },
-    web: { result: 'skipped', outputs: {} },
-    e2e: { result: 'skipped', outputs: {} },
-    deploy: { result: 'skipped', outputs: {} },
+    lint: green,
+    test: green,
+    web: green,
+    e2e: green,
+    deploy: green,
     ...over,
   });
 
   it('对得上就过，逐个写出来', () => {
-    const v = ciVerdict(needs());
-    expect(v.ok).toBe(true);
+    const v = ciVerdict(needs(), 'pull_request');
+    expect(v.ok, v.lines.join('\n')).toBe(true);
     expect(v.lines).toHaveLength(ALWAYS_JOBS.length + PLANNED_JOBS.length);
   });
 
-  it('纯文档：lint（里面只跑 docs、hygiene 两步）、changes 跑了，test、web、deploy 跳过', () => {
-    const docs = assigned(pr('docs/design.md'));
+  it('CI 的计划就是全套：全部测试、web、e2e all（两种屏宽）、deploy all、biome、整棵树的 tsc', () => {
+    expect(plan).toMatchObject({ full: true, web: true, e2e: 'all', deploy: 'all', biome: true, tsc: 'all' });
+    const files = plan.tests.flatMap((b) => b.files).sort();
+    expect(files).toEqual([...ALL_TESTS].sort());
+    expect(planOutputs(plan)).toMatchObject({ web: 'true', e2e: 'all', deploy: 'all' });
+  });
+
+  /**
+   * 【故意造出的失败】#2502 那种：PR 只改了 agents/…/release-train-lib.mjs，按改动选测时 agents/ 的规则不开 deploy、也不开 e2e，
+   * PR 上 deploy 被跳过、合进主线才红。现在 CI 不按改动选：plan 里一定有 deploy all、e2e all；按改动选出来的 plan 交给汇总就红。
+   */
+  it('【故意造出的失败】只改 release-train-lib.mjs 的 PR：CI 计划里有 deploy all、e2e all；按改动选的 plan 汇总红', () => {
+    const f = 'agents/skills/commander/scripts/release-train-lib.mjs';
+    const picked = assigned(pr(f));
+    expect(picked.deploy, '这条查的场景不成立了（本机选测开了 deploy？）').toBe('none');
+    expect(picked.e2e).toEqual([]);
+    expect(plan.deploy).toBe('all');
+    expect(plan.e2e).toBe('all');
     const skipped = { result: 'skipped' };
-    expect(ciVerdict(needs({ test: skipped }, docs)).ok).toBe(true);
-    // lint 是每次都得跑的（它里面有 docs、hygiene 两步每次都跑）：跳过它 = 没跑该跑的
-    expect(ciVerdict(needs({ test: skipped, lint: skipped }, docs)).ok).toBe(false);
+    for (const event of ['pull_request', 'push']) {
+      const v = ciVerdict(needs({ web: skipped, e2e: skipped, deploy: skipped }, picked), event);
+      expect(v.ok, event).toBe(false);
+      expect(v.lines.join('\n')).toContain('plan 不是全套');
+    }
+  });
+
+  it('lint 被跳过（每次都得跑）：不过', () => {
+    expect(ciVerdict(needs({ lint: { result: 'skipped' } })).ok).toBe(false);
   });
 
   it('本该跑的被跳过、红了、取消了：不过', () => {
-    for (const result of ['skipped', 'failure', 'cancelled']) {
-      const v = ciVerdict(needs({ test: { result } }));
-      expect(v.ok, result).toBe(false);
-      expect(v.lines.join('\n')).toContain(`✗ test：${result}，本该 success`);
+    for (const job of PLANNED_JOBS) {
+      for (const result of ['skipped', 'failure', 'cancelled']) {
+        const v = ciVerdict(needs({ [job]: { result } }));
+        expect(v.ok, `${job} ${result}`).toBe(false);
+        expect(v.lines.join('\n')).toContain(`✗ ${job}：${result}，本该 success`);
+      }
     }
   });
 
@@ -729,21 +751,6 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     const v = ciVerdict(needs({ lint: { result: 'failure' } }));
     expect(v.ok).toBe(false);
     expect(v.lines.join('\n')).toContain('✗ lint：failure');
-  });
-
-  it('deploy=ops：deploy job 要跑且绿（只跑端口表那块也是跑），跳过、红了都不过', () => {
-    const ops = assigned(pr('docs/ops.md'));
-    const over = { test: { result: 'success' } };
-    expect(ciVerdict(needs({ ...over, deploy: { result: 'success' } }, ops)).ok).toBe(true);
-    for (const result of ['skipped', 'failure']) {
-      const v = ciVerdict(needs({ ...over, deploy: { result } }, ops));
-      expect(v.ok, result).toBe(false);
-      expect(v.lines.join('\n')).toContain(`✗ deploy：${result}，本该 success`);
-    }
-  });
-
-  it('本该跳过的却跑了（开关和 if 对不上）：不过', () => {
-    expect(ciVerdict(needs({ web: { result: 'success' } })).ok).toBe(false);
   });
 
   it('changes 没算成、少了某个 job 的结果：不过', () => {
@@ -761,7 +768,7 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   });
 
   it('plan 读不出（空、不是 JSON、缺字段）、needs 不是对象：不过，不当成全跳过', () => {
-    const withDeploy = (d: unknown) => JSON.stringify({ ...pr('docs/ops.md'), deploy: d });
+    const withDeploy = (d: unknown) => JSON.stringify({ ...plan, deploy: d });
     for (const bad of ['', '{', '{"full":true}', undefined, withDeploy(true), withDeploy('some')]) {
       const n = needs();
       n.changes.outputs = { ...n.changes.outputs, plan: bad as string };
@@ -771,29 +778,27 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
     expect(ciVerdict('x').ok).toBe(false);
   });
 
-  it('plan 说全跑却有 job 没开（被改坏的 plan）：不过', () => {
-    const full = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
-    const broken = { ...full, web: false };
-    expect(ciVerdict(needs({ web: { result: 'skipped' } }, broken)).ok).toBe(false);
-    // 全跑却只跑 deploy 的端口表那块：job 照样 success，但 plan 本身不对
-    const opsOnly: CiPlan = { ...full, deploy: 'ops' };
-    const allGreen = {
-      web: { result: 'success' },
-      e2e: { result: 'success' },
-      tsc: { result: 'success' },
-      deploy: { result: 'success' },
-    };
-    expect(ciVerdict(needs(allGreen, full)).ok).toBe(true);
-    expect(ciVerdict(needs(allGreen, opsOnly)).ok).toBe(false);
+  it('【故意造出的失败】plan 说全跑却有一样不是全套（被改坏的 plan）：不过，即使 job 都绿', () => {
+    const broken: CiPlan[] = [
+      { ...plan, web: false },
+      { ...plan, deploy: 'ops' },
+      { ...plan, e2e: [`${E2E_SPEC_DIR}01-login.e2e.ts`] },
+      { ...plan, tsc: ['packages/core'] },
+      { ...plan, biome: false },
+    ];
+    for (const b of broken) {
+      const v = ciVerdict(needs({}, b));
+      expect(v.ok, JSON.stringify({ web: b.web, deploy: b.deploy, e2e: b.e2e, tsc: b.tsc })).toBe(false);
+      expect(v.lines.join('\n')).toContain('plan 不是全套');
+    }
   });
 
   /**
-   * 【故意造出的失败】planCi 之后忘了装箱（或者装箱失败还照常往下走）：test job 会被 if 判成不该跑、汇总却当它
-   * 「本该 skipped」，一个测试都不跑还算绿。有要测的单元却一台都没有，汇总必须红。
+   * 【故意造出的失败】算计划之后忘了装箱（或者装箱失败还照常往下走）：test job 会被 if 判成不该跑、汇总却当它
+   * 「本该 skipped」，一个测试都不跑还算绿。要全跑却一台都没有，汇总必须红。
    */
-  it('【故意造出的失败】有要测的单元却一台测试都没有（没装箱）：不过，不当成「本该 skipped」', () => {
-    const noBoxes = pr('packages/agent-eval/src/cli.ts');
-    expect(noBoxes.testUnits, '这条查的场景不成立了（planCi 现在自己装箱了？）').toEqual(['agent-eval']);
+  it('【故意造出的失败】要全跑却一台测试都没有（没装箱）：不过，不当成「本该 skipped」', () => {
+    const noBoxes = ciFullPlan();
     expect(noBoxes.tests).toEqual([]);
     const v = ciVerdict(needs({ test: { result: 'skipped' } }, noBoxes));
     expect(v.ok).toBe(false);
@@ -809,15 +814,14 @@ describe('汇总（必过检查 check）：该跑的跑了且绿，不该跑的�
   /** 矩阵铺的是 outputs.tests：它和 plan 里核过的那份不是同一份（工作流被改坏），就红。 */
   it('【故意造出的失败】矩阵里的台和 plan 里的不是同一份：不过', () => {
     const n = needs();
-    const p = assigned(pr('packages/agent-eval/src/cli.ts'));
-    n.changes.outputs = { ...n.changes.outputs, plan: JSON.stringify(p), tests: '[]' };
+    n.changes.outputs = { ...n.changes.outputs, tests: '[]' };
     expect(ciVerdict(n).ok).toBe(false);
     expect(ciVerdict(n).lines.join('\n')).toContain('和 plan 里的测试台不是同一份');
   });
 
   /** 台本身认不出（缺名字、文件空、一个文件两台里都有、两台同名）：不过，不拿半份清单去核对。 */
   it('【故意造出的失败】台认不出：缺名字、没文件、一个文件分到两台、两台同名、开关不是真假值', () => {
-    const good = assigned(pr('packages/db/src/schema/index.ts'));
+    const good = plan;
     const first = good.tests[0] as (typeof good.tests)[number];
     const broken: Partial<CiPlan>[] = [
       { ...good, tests: [{ ...first, label: '' }] },
@@ -843,46 +847,28 @@ describe('入口', { timeout: 0 }, () => {
       env: { ...process.env, GITHUB_OUTPUT: '', GITHUB_STEP_SUMMARY: '', ...env },
     });
 
-  it('拿不到 base：退出 2 判红，不静默少跑', () => {
-    const r = run(plan, ['--event', 'pull_request', '--base', 'refs/heads/没有这个分支-ci-plan-test']);
-    expect(r.status).toBe(2);
-    expect(r.stderr).toContain('没算成要跑什么');
-  });
+  /**
+   * 【故意造出的失败】PR 那一轮：原来按 origin/main...HEAD 的改动选测、e2e 挪到主线（输出空串），漏的到主线才红。
+   * 现在不管改了什么都是全套：e2e=all、deploy=all、web=true、全部测试都装了台。
+   */
+  for (const event of ['pull_request', 'push', 'schedule', 'workflow_dispatch']) {
+    it(`${event}：一律全套，开关写进 GITHUB_OUTPUT（e2e all、deploy all、web、全部测试）`, () => {
+      const out = join(mkdtempSync(join(tmpdir(), 'ci-plan-')), 'out');
+      const r = run(plan, ['--event', event], { GITHUB_OUTPUT: out });
+      expect(r.status, r.stderr).toBe(0);
+      const text = readFileSync(out, 'utf8');
+      for (const line of ['biome=true', 'tsc=all', 'web=true', 'e2e=all', 'deploy=all', 'reused='])
+        expect(text).toContain(`${line}\n`);
+      const tests = /^tests=(.*)$/m.exec(text)?.[1] ?? '[]';
+      const files = (JSON.parse(tests) as TestBox[]).flatMap((b) => b.files).sort();
+      expect(files).toEqual([...ALL_TESTS].sort());
+    });
+  }
 
-  it('base 像参数：退出 2', () => {
-    expect(run(plan, ['--base=--output=/tmp/x']).status).toBe(2);
-  });
-
-  it('主线推送：不看 git，全跑，开关写进 GITHUB_OUTPUT', () => {
-    const out = join(mkdtempSync(join(tmpdir(), 'ci-plan-')), 'out');
-    const r = run(plan, ['--event', 'push'], { GITHUB_OUTPUT: out });
-    expect(r.status).toBe(0);
-    const text = readFileSync(out, 'utf8');
-    for (const line of ['biome=true', 'tsc=all', 'web=true', 'deploy=all'])
-      expect(text).toContain(`${line}\n`);
-    expect(text).toMatch(/^tests=\[.*"files":\[.*\]/m);
-  });
-
-  it('主线给的基准就是 HEAD（区间里没有改动）：认不出改了什么，兜底全跑，不当成「没东西要跑」', () => {
-    const out = join(mkdtempSync(join(tmpdir(), 'ci-plan-')), 'out');
-    const r = run(plan, ['--event', 'push', '--main-base', 'HEAD'], { GITHUB_OUTPUT: out });
-    expect(r.status).toBe(0);
-    expect(r.stdout).toContain('改了 0 个文件（push）');
-    // 走的是按改动算的那条路（不是「push 事件：全跑」那句兜底），只是空改动认不出所以升成全跑
-    expect(r.stdout).toContain('改动列表是空的');
-    expect(readFileSync(out, 'utf8')).toContain('tsc=all\n');
-  });
-
-  it('【故意造出的失败】主线基准认不出（不是提交、像参数）：退出 2 判红，不静默少跑', () => {
-    expect(run(plan, ['--event', 'push', '--main-base', '0'.repeat(40)]).status).toBe(2);
-    expect(run(plan, ['--event', 'push', '--main-base=--output=/tmp/x']).status).toBe(2);
-  });
-
-  it('【故意造出的失败】主线给了空基准（查不到上一次绿）：照旧全跑', () => {
-    const out = join(mkdtempSync(join(tmpdir(), 'ci-plan-')), 'out');
-    const r = run(plan, ['--event', 'push', '--main-base', ''], { GITHUB_OUTPUT: out });
-    expect(r.status).toBe(0);
-    expect(readFileSync(out, 'utf8')).toContain('tsc=all\n');
+  it('【故意造出的失败】旧参数（--base、--main-base）、认不出的参数：退出 2，不静默照旧算', () => {
+    expect(run(plan, ['--base', 'origin/main']).status).toBe(2);
+    expect(run(plan, ['--event', 'push', '--main-base', 'HEAD']).status).toBe(2);
+    expect(run(plan, ['--frobnicate']).status).toBe(2);
   });
 
   it('GITHUB_OUTPUT 写不进去：退出 2', () => {
@@ -911,14 +897,14 @@ describe('入口', { timeout: 0 }, () => {
   it('汇总入口：没给 CI_NEEDS、不是 JSON 退出 2；对不上退出 1；对得上退出 0', () => {
     expect(run(verdict, [], { CI_NEEDS: '' }).status).toBe(2);
     expect(run(verdict, [], { CI_NEEDS: '{' }).status).toBe(2);
-    const p = planOutputs(pr('docs/design.md'));
+    const p = planOutputs(assigned(ciFullPlan()));
     const base = {
       changes: { result: 'success', outputs: p },
       lint: { result: 'success' },
-      test: { result: 'skipped' },
-      web: { result: 'skipped' },
-      e2e: { result: 'skipped' },
-      deploy: { result: 'skipped' },
+      test: { result: 'success' },
+      web: { result: 'success' },
+      e2e: { result: 'success' },
+      deploy: { result: 'success' },
     };
     expect(run(verdict, [], { CI_NEEDS: JSON.stringify(base) }).status).toBe(0);
     expect(
@@ -977,7 +963,7 @@ describe('ci.yml 和这里对得上', () => {
       jobs: { lint: { steps: { id?: string; run?: string }[] } };
     };
     const script = doc.jobs.lint.steps.find((s) => s.id === 'checks')?.run ?? '';
-    const go = (env: Record<string, string>, fail: string[]) => {
+    const go = (fail: string[]) => {
       const dir = mkdtempSync(join(tmpdir(), 'lint-checks-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
@@ -1002,7 +988,6 @@ describe('ci.yml 和这里对得上', () => {
           PATH: `${bin}${process.platform === 'win32' ? ';' : ':'}${process.env.PATH}`,
           GITHUB_OUTPUT: out,
           LOGS: join(dir, 'logs'),
-          ...env,
         },
       });
       const outputs = Object.fromEntries(
@@ -1020,13 +1005,13 @@ describe('ci.yml 和这里对得上', () => {
     });
 
     it('每一样的分组标题带上它自己跑了几秒（三样并行，墙钟 = 最慢那样，不记看不出该省哪个）', () => {
-      const { r } = go({ BIOME_WANT: 'true', TSC: 'all' }, []);
+      const { r } = go([]);
       for (const name of ['biome', 'tsc', 'doc_pointers', 'agents_test', 'deps', 'release_smoke'])
         expect(r.stdout, name).toMatch(new RegExp(`::group::${name}（退出码 0，\\d+ 秒）`));
     });
 
-    it('四样都绿：四样都写 success，tsc 带上算出来的项目', () => {
-      const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'packages/agent-eval packages/core' }, []);
+    it('都绿：每一样都写 success；biome 查整个仓、tsc 查整棵树（一律全套，没有开关）', () => {
+      const { outputs, calls } = go([]);
       expect(outputs).toEqual({
         biome: 'success',
         tsc: 'success',
@@ -1035,12 +1020,12 @@ describe('ci.yml 和这里对得上', () => {
         deps: 'success',
         release_smoke: 'success',
       });
-      expect(calls).toContain('exec tsc -b packages/agent-eval packages/core');
+      expect(calls).toMatch(/^exec tsc -b$/m);
       expect(calls).toContain('exec biome check .');
     });
 
     it('【故意造出的失败】biome 红了：tsc、doc_pointers、agents_test 照样跑完、照样 success，biome 写 failure（#566 不许再漏）', () => {
-      const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['biome']);
+      const { outputs, calls } = go(['biome']);
       expect(outputs).toEqual({
         biome: 'failure',
         tsc: 'success',
@@ -1055,7 +1040,7 @@ describe('ci.yml 和这里对得上', () => {
     });
 
     it('【故意造出的失败】只有文档指针那一样红：只它写 failure，agents_test 照跑照 success（红在哪一类一眼看得出）', () => {
-      const { outputs } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['doc-pointers']);
+      const { outputs } = go(['doc-pointers']);
       expect(outputs).toEqual({
         biome: 'success',
         tsc: 'success',
@@ -1067,7 +1052,7 @@ describe('ci.yml 和这里对得上', () => {
     });
 
     it('【故意造出的失败】只有 agents/test 那一样红：只它写 failure，doc_pointers 照 success', () => {
-      const { outputs } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['agents/test']);
+      const { outputs } = go(['agents/test']);
       expect(outputs).toEqual({
         biome: 'success',
         tsc: 'success',
@@ -1079,7 +1064,7 @@ describe('ci.yml 和这里对得上', () => {
     });
 
     it('【故意造出的失败】四样全红：四样都写 failure，一个不少', () => {
-      const { outputs } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['biome', 'tsc', 'vitest']);
+      const { outputs } = go(['biome', 'tsc', 'vitest']);
       expect(outputs).toEqual({
         biome: 'failure',
         tsc: 'failure',
@@ -1091,7 +1076,7 @@ describe('ci.yml 和这里对得上', () => {
     });
 
     it('【故意造出的失败】未声明依赖、照法国装的冒烟各自红：只它们写 failure，别的照 success', () => {
-      const { outputs, calls } = go({ BIOME_WANT: 'true', TSC: 'all' }, ['deps:check', 'release:smoke']);
+      const { outputs, calls } = go(['deps:check', 'release:smoke']);
       expect(outputs).toEqual({
         biome: 'success',
         tsc: 'success',
@@ -1102,20 +1087,6 @@ describe('ci.yml 和这里对得上', () => {
       });
       expect(calls).toContain('run deps:check');
       expect(calls).toContain('run release:smoke');
-    });
-
-    it('开关说不跑（只改了 .md）：biome、tsc 写 skipped、没被叫，doc_pointers、agents_test 照跑', () => {
-      const { outputs, calls } = go({ BIOME_WANT: 'false', TSC: '' }, []);
-      expect(outputs).toEqual({
-        biome: 'skipped',
-        tsc: 'skipped',
-        doc_pointers: 'success',
-        agents_test: 'success',
-        deps: 'success',
-        release_smoke: 'success',
-      });
-      expect(calls).not.toContain('biome');
-      expect(calls).not.toContain('tsc');
     });
   });
 
@@ -1201,8 +1172,6 @@ describe('ci.yml 和这里对得上', () => {
       AGENTS_TEST: 'success',
       DEPS: 'success',
       RELEASE_SMOKE: 'success',
-      BIOME_WANT: 'true',
-      TSC_WANT: 'all',
       HYGIENE: 'success',
     };
     const run = (over: Record<string, string> = {}) =>
@@ -1265,21 +1234,17 @@ describe('ci.yml 和这里对得上', () => {
       }
     });
 
-    it('【故意造出的失败】开关说要跑、那一步却是 skipped：红，不把「没跑」当成「跑过了」', () => {
-      const r = run({ BIOME: 'skipped' });
-      expect(r.status).toBe(1);
-      expect(r.stdout).toContain('biome（skipped，本该 success）');
-      const t = run({ TSC: 'skipped' });
-      expect(t.status).toBe(1);
-      expect(t.stdout).toContain('tsc（skipped，本该 success）');
-    });
-
-    it('开关说不跑（只改了 .md）：那两步是 skipped 才对；跑了反而红', () => {
-      const off = { BIOME_WANT: 'false', TSC_WANT: '' };
-      expect(run({ ...off, BIOME: 'skipped', TSC: 'skipped' }).status).toBe(0);
-      const r = run({ ...off, BIOME: 'success', TSC: 'skipped' });
-      expect(r.status).toBe(1);
-      expect(r.stdout).toContain('biome（success，本该 skipped）');
+    it('【故意造出的失败】biome、tsc 是 skipped 或空（没跑、并行那步崩了）：红，不把「没跑」当成「跑过了」', () => {
+      for (const [k, name] of [
+        ['BIOME', 'biome'],
+        ['TSC', 'tsc'],
+      ] as const) {
+        for (const v of ['skipped', '']) {
+          const r = run({ [k]: v });
+          expect(r.status, `${k}=${v}`).toBe(1);
+          expect(r.stdout).toContain(`${name}（${v}，本该 success）`);
+        }
+      }
     });
 
     it('卫生检查红了：只打 ::warning::、不让 job 红（只报不挡）；skipped（push 事件）也不红', () => {
@@ -1299,11 +1264,16 @@ describe('ci.yml 和这里对得上', () => {
     expect(check).toContain('node packages/conventions/src/bin/ci-verdict.ts');
   });
 
-  it('【故意造出的失败】并发组 PR 按号分、推主线按分支分、定时轮按事件分：三路互不挤', () => {
+  /**
+   * 【故意造出的失败】原来主线推送按分支分组（github.ref）：一组只许一个排队，新推的把排着的那个挤掉，7 天 49 轮被挤掉、那些提交没有结论。
+   * 现在 PR 按号分（新推的挤掉旧的），别的事件按提交号分（github.sha）：主线每个提交各自一组，一个都不挤掉；带事件名，夜跑和推送同一个提交也不撞。
+   */
+  it('【故意造出的失败】并发组 PR 按号分、主线推送按提交号分（一个都不挤掉）、末尾带事件名', () => {
     const group = /^concurrency:\n {2}group: (.+)$/m.exec(yml)?.[1];
     expect(group).toBe(
-      ['ci-$', '{{ github.event.pull_request.number || github.ref }}-$', '{{ github.event_name }}'].join(''),
+      ['ci-$', '{{ github.event.pull_request.number || github.sha }}-$', '{{ github.event_name }}'].join(''),
     );
+    expect(group).not.toContain('github.ref');
   });
 
   it('【故意造出的失败】只有 PR 上新的一轮挤掉旧的，主线推送和定时轮不挤掉在跑的全量：挤了的话合并一密一个全绿的提交都没有，自动发布无可发（#362）；定时轮被主线顶掉的话那一夜的全量回归直接不跑（2026-10-05 第二意见）', () => {
@@ -1311,25 +1281,30 @@ describe('ci.yml 和这里对得上', () => {
     expect(cancel).toBe(['$', "{{ github.event_name == 'pull_request' }}"].join(''));
   });
 
-  it('按开关跑的几个 job 都看 changes 给的开关；lint 每次跑，里面几步各看自己的开关', () => {
+  it('test、web、e2e、deploy 都看 changes 给的开关（全套时都开、同树复用时都关）；lint 每次跑、没有开关；没有按改动选测的那一套', () => {
     for (const j of PLANNED_JOBS) {
       expect(job(j), j).toMatch(/^ {4}needs: changes$/m);
       expect(job(j), j).toMatch(/^ {4}if: .*needs\.changes\.outputs\./m);
     }
-    expect(job('changes')).toContain('fetch-depth: 0');
-    expect(job('changes')).toContain('node packages/conventions/src/bin/ci-plan.ts');
-    // lint 是每次都跑的 job（里面有 docs、hygiene 两步每次都跑），没有 job 级 if；不等 changes，自己用同一个入口
-    // 算同一份计划，biome、tsc 看自己算出来的开关。
+    const changes = job('changes');
+    expect(changes).toContain(
+      'node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --reuse "$REUSE"',
+    );
+    // 【故意造出的失败】找「上一次主线真绿的头」、按区间选测的那一步删了（决定 0101）
+    expect(changes).not.toContain('mainbase');
+    expect(changes).not.toContain('main-base');
+    expect(changes).not.toContain('--base');
+    expect(changes).not.toContain('narrowed');
+    // lint 是每次都跑的 job，没有 job 级 if；不再算计划，biome、tsc 每次都跑整仓
     const lint = job('lint')
       .split('\n')
       .filter((l) => !/^\s*#/.test(l))
       .join('\n');
     expect(lint).not.toMatch(/^ {4}(needs|if): /m);
-    expect(lint).toContain(
-      'node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE"',
-    );
-    expect(lint).toContain(['BIOME_WANT: $', '{{ steps.plan.outputs.biome }}'].join(''));
-    expect(lint).toContain(['TSC: $', '{{ steps.plan.outputs.tsc }}'].join(''));
+    expect(lint).not.toContain('ci-plan.ts');
+    expect(lint).not.toContain('steps.plan');
+    expect(lint).toContain('start biome pnpm exec biome check .');
+    expect(lint).toContain('start tsc pnpm exec tsc -b');
   });
 
   it('没有 job 用仓库密钥；lint 里卫生检查一行 PR 里的代码都不执行：代码取目标分支上的 trusted/，PR 检出到仓根只当数据扫（这个 PR 自己改不宽卫生检查的规则，#115 第二意见）', () => {
@@ -1358,9 +1333,6 @@ describe('ci.yml 和这里对得上', () => {
     const install = at('pnpm install --frozen-lockfile');
     expect(install, '找不到装依赖那步').toBeGreaterThan(0);
     expect(at('id: hygiene\n')).toBeLessThan(install);
-    // 算计划那步跑的也是 PR 里的代码（ci-plan.ts）：同样得排在卫生检查两步之后
-    expect(at('id: plan\n'), '找不到算计划那步').toBeGreaterThan(0);
-    expect(at('id: hygiene\n')).toBeLessThan(at('id: plan\n'));
     // 动态 import 的只有 trusted/ 下的卫生检查
     const imports = [...lint.matchAll(/import\(([^)]*)\)/g)].map((m) => m[1]);
     expect(imports).toHaveLength(1);
@@ -1496,7 +1468,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
   });
 });
 
-describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：不在 PR 闸、主线推送那一轮跑）：输出是 spec 清单，红了汇总就红', () => {
+describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 planCi 按改动给 spec 清单（决定 0029）；红了汇总就红', () => {
   const needs = (p: CiPlan, over: Record<string, unknown> = {}) => ({
     changes: { result: 'success', outputs: planOutputs(p) },
     lint: { result: 'success', outputs: {} },
@@ -1668,153 +1640,64 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     ]);
   });
 
-  it('同树复用（主线推送）：test、web、deploy 不再重测，e2e 照区间跑（PR 上没跑过 e2e，没有可复用的）', () => {
-    const full = assigned(planCi({ event: 'push', changed: [], graph: graph() }));
-    expect(full.e2e).toBe('all');
-    const reuse = { run: 11, pr: 7, tree: 'a'.repeat(40), baseTree: 'b'.repeat(40) };
+  it('同树复用（主线推送）：PR 那一轮跑的是全套，test、web、e2e、deploy 都不再跑（e2e 也复用）', () => {
+    const full = assigned(ciFullPlan());
+    const reuse = { run: 11, pr: 7, tree: 'a'.repeat(40) };
     const reused = applyReuse(full, reuse);
-    expect(reused.e2e).toBe('all');
+    expect(reused.e2e).toEqual([]);
+    expect(planOutputs(reused).e2e).toBe('');
     const ok = ciVerdict(needs(reused), 'push');
     expect(ok.ok, ok.lines.join('\n')).toBe(true);
-    expect(ok.lines.join('\n')).toContain('✓ e2e：success');
-    // 【故意造出的失败】复用了，e2e 却没跑（被跳过、红了）：汇总红
-    for (const result of ['skipped', 'failure']) {
-      const v = ciVerdict(needs(reused, { e2e: { result } }), 'push');
-      expect(v.ok, result).toBe(false);
-      expect(v.lines.join('\n')).toContain(`✗ e2e：${result}，本该 success`);
+    expect(ok.lines.join('\n')).toContain('✓ e2e：skipped');
+    // 【故意造出的失败】复用了，e2e 却又跑了：开关和 if 对不上，汇总红
+    const ran = ciVerdict(needs(reused, { e2e: { result: 'success' } }), 'push');
+    expect(ran.ok).toBe(false);
+    expect(ran.lines.join('\n')).toContain('✗ e2e：success，本该 skipped');
+    // 复用的 plan 里还有 e2e、web 要跑：汇总不信
+    for (const lying of [
+      { ...reused, e2e: 'all' as const },
+      { ...reused, web: true },
+    ]) {
+      const v = ciVerdict(needs(lying), 'push');
+      expect(v.ok).toBe(false);
+      expect(v.lines.join('\n')).toContain('还有要测的');
     }
-    // 区间里只有页面改动：复用之后照样点那一页
-    const page = assigned(pr('packages/web/src/routes/login.tsx'));
-    expect(applyReuse(page, reuse).e2e).toEqual([`${SPECS}01-login.e2e.ts`]);
-    // 复用的 plan 里还有 test、web、deploy 要测：汇总不信
-    const lying = { ...reused, web: true };
-    const v = ciVerdict(needs(lying, { web: { result: 'success' } }), 'push');
-    expect(v.ok).toBe(false);
-    expect(v.lines.join('\n')).toContain('还有要测的');
-  });
-
-  it('e2e 不在 PR 闸（决定 0093）：PR 上 deferE2eToMain 把清单清空、写进理由；PR 的 plan 里还有清单汇总就红', () => {
-    for (const changed of [['packages/web/src/routes/login.tsx'], ['packages/web/src/routes/task.tsx']]) {
-      const p = assigned(pr(...changed));
-      expect(e2eRuns(p.e2e), '这条查的场景不成立了').toBe(true);
-      const d = deferE2eToMain(p, changed);
-      expect(d.e2e).toEqual([]);
-      expect(planOutputs(d).e2e).toBe('');
-      expect(d.reasons.join('\n')).toContain('e2e 不在 PR 闸');
-      const ok = ciVerdict(needs(d), 'pull_request');
-      expect(ok.ok, ok.lines.join('\n')).toBe(true);
-      expect(ok.lines.join('\n')).toContain('✓ e2e：skipped');
-      // 【故意造出的失败】PR 这一轮的 plan 里 e2e 还有清单（算计划那步漏了挪）：汇总红，即使 e2e 跑绿了
-      const leaked = ciVerdict(needs(p), 'pull_request');
-      expect(leaked.ok).toBe(false);
-      expect(leaked.lines.join('\n')).toContain('PR 上 e2e 只能全套或不跑');
-      // 同一份清单在主线推送上照常要跑
-      expect(ciVerdict(needs(p), 'push').ok).toBe(true);
-    }
-    // 本来就不跑的：原样返回，不多写理由
-    const none = assigned(pr('packages/api/src/cockpit.ts'));
-    expect(deferE2eToMain(none, ['packages/api/src/cockpit.ts'])).toBe(none);
-  });
-
-  it('PR 碰到风险路径（表结构、迁移、e2e 样例数据和用例、catalog）跑 e2e 全套，合并闸当必过项（#2674）', () => {
-    const risky = [
-      'packages/db/src/schema/tasks.ts',
-      'packages/db/migrations/0001_triggers.sql',
-      'packages/store/src/testing/pg-fixtures.ts',
-      'packages/api/test/e2e/seed.ts',
-      'packages/web/e2e/specs/01-login.e2e.ts',
-      'deploy/catalog.json',
-    ];
-    for (const f of risky) {
-      const d = deferE2eToMain(assigned(pr(f)), [f]);
-      expect(d.e2e, f).toBe('all');
-      expect(planOutputs(d).e2e).toBe('all');
-      expect(d.reasons.join('\n')).toContain('e2e 在 PR 上跑全套');
-      const ok = ciVerdict(needs(d), 'pull_request');
-      expect(ok.ok, ok.lines.join('\n')).toBe(true);
-      expect(ok.lines.join('\n')).toContain('✓ e2e：success');
-      // 跑了却红、被取消、被误跳过：合并闸红
-      for (const result of ['failure', 'cancelled', 'skipped']) {
-        const bad = ciVerdict(needs(d, { e2e: { result, outputs: {} } }), 'pull_request');
-        expect(bad.ok, `${f} ${result}`).toBe(false);
-        expect(bad.lines.join('\n')).toContain('e2e');
-      }
-    }
-    // 其余 PR 照旧不跑：只改 task.tsx（有 spec 映射）、只改 api 源码
-    for (const f of ['packages/web/src/routes/task.tsx', 'packages/api/src/cockpit.ts']) {
-      const d = deferE2eToMain(assigned(pr(f)), [f]);
-      expect(d.e2e, f).toEqual([]);
-      expect(planOutputs(d).e2e).toBe('');
-    }
-    // 风险路径加别的改动一起：照样全套
-    expect(
-      e2eRiskHit(['packages/web/src/routes/task.tsx', 'packages/store/src/testing/pg-fixtures.ts']),
-    ).toBe('packages/store/src/testing/pg-fixtures.ts');
-    expect(
-      e2eRiskHit(['packages/db/src/queries/tasks.ts', 'packages/store/src/testing-x.ts']),
-    ).toBeUndefined();
-  });
-
-  it('风险路径清单里的目录都真有（改名了这里要跟着改）', () => {
-    for (const p of E2E_PR_RISK_PATHS) {
-      expect(REPO.exists(p.replace(/\/$/, '')), `${p} 在仓里不存在`).toBe(true);
-    }
-  });
-
-  it('changes 的入口在 PR 事件上调 deferE2eToMain，并把改动文件交给它（清单只在 ci-plan.ts 一处）', () => {
-    const bin = readFileSync(join(ROOT, 'packages/conventions/src/bin/ci-plan.ts'), 'utf8');
-    expect(bin).toMatch(/if \(event === 'pull_request'\) plan = deferE2eToMain\(plan, changed\);/);
-    const yml = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
-    expect(yml, 'ci.yml 不许另抄一份风险路径').not.toContain('packages/db/migrations');
   });
 
   /**
-   * 【故意造出的失败】e2e 红 → 汇总红。changes 说要跑（碰了页面），job 红了、被取消、被误跳过，汇总都得红并点名；
-   * 反过来 changes 说不用跑，job 却跑了（开关和 if 对不上）也红。
+   * 【故意造出的失败】e2e 红 → 汇总红。全套里 e2e job 红了、被取消、被误跳过，汇总都得红并点名。
    */
-  it('【故意造出的失败】e2e 该跑却红了、取消了、被跳过：汇总红，点名 e2e（清单和全套都一样）', () => {
-    for (const p of [
-      assigned(pr('packages/web/src/routes/login.tsx')),
-      assigned(pr('packages/web/e2e/support/stack.ts')),
-    ]) {
-      expect(e2eRuns(p.e2e), '这条查的场景不成立了').toBe(true);
-      expect(ciVerdict(needs(p)).ok).toBe(true);
-      for (const result of ['failure', 'cancelled', 'skipped']) {
-        const v = ciVerdict(needs(p, { e2e: { result } }));
-        expect(v.ok, result).toBe(false);
-        expect(v.lines.join('\n')).toContain(`✗ e2e：${result}，本该 success`);
-      }
-      const missing = needs(p) as Record<string, unknown>;
-      delete missing.e2e;
-      const none = ciVerdict(missing);
-      expect(none.ok).toBe(false);
-      expect(none.lines.join('\n')).toContain('✗ e2e：没有这个 job 的结果');
+  it('【故意造出的失败】e2e 该跑却红了、取消了、被跳过、没有结果：汇总红，点名 e2e', () => {
+    const p = assigned(ciFullPlan());
+    expect(ciVerdict(needs(p)).ok).toBe(true);
+    for (const result of ['failure', 'cancelled', 'skipped']) {
+      const v = ciVerdict(needs(p, { e2e: { result } }));
+      expect(v.ok, result).toBe(false);
+      expect(v.lines.join('\n')).toContain(`✗ e2e：${result}，本该 success`);
     }
+    const missing = needs(p) as Record<string, unknown>;
+    delete missing.e2e;
+    const none = ciVerdict(missing);
+    expect(none.ok).toBe(false);
+    expect(none.lines.join('\n')).toContain('✗ e2e：没有这个 job 的结果');
   });
 
-  it('清单为空（本该跳过）：skipped 才对、汇总绿；跑了反而红；开关输出和 plan 不是同一份也红', () => {
-    const p = assigned(pr('packages/api/src/cockpit.ts'));
-    expect(p.e2e).toEqual([]);
-    const ok = ciVerdict(needs(p));
-    expect(ok.ok, ok.lines.join('\n')).toBe(true);
-    expect(ok.lines.join('\n')).toContain('✓ e2e：skipped');
-    const ran = ciVerdict(needs(p, { e2e: { result: 'success' } }));
-    expect(ran.ok).toBe(false);
-    expect(ran.lines.join('\n')).toContain('✗ e2e：success，本该 skipped');
-    // GitHub 不把空串输出放进 needs（#1204 那次真事：清单为空的 PR，check 判「不是同一份」红了）：没有 e2e 这一项按空串认
-    const omitted = needs(p);
+  it('开关输出和 plan 不是同一份：红；GitHub 不放空串输出（复用时 e2e 空）按空串认', () => {
+    const p = assigned(ciFullPlan());
+    const reused = applyReuse(p, { run: 11, pr: 7, tree: 'a'.repeat(40) });
+    // GitHub 不把空串输出放进 needs（#1204 那次真事）：没有 e2e 这一项按空串认
+    const omitted = needs(reused);
     const { e2e: _dropped, ...rest } = omitted.changes.outputs;
     omitted.changes.outputs = rest;
-    const okOmitted = ciVerdict(omitted);
+    const okOmitted = ciVerdict(omitted, 'push');
     expect(okOmitted.ok, okOmitted.lines.join('\n')).toBe(true);
     // 【故意造出的失败】plan 要跑 e2e，输出却缺了这一项：不能当成空清单放过
-    const wantAll = { ...p, e2e: 'all' as const };
-    const missing = needs(wantAll, { e2e: { result: 'success' } });
+    const missing = needs(p);
     const { e2e: _gone, ...rest2 } = missing.changes.outputs;
     missing.changes.outputs = rest2;
     expect(ciVerdict(missing).ok).toBe(false);
-    // 开关输出和 plan 里的清单不是同一份
-    for (const wrong of ['all', 'e2e/specs/01-login.e2e.ts']) {
+    // 开关输出和 plan 里的不是同一份
+    for (const wrong of ['', 'e2e/specs/01-login.e2e.ts']) {
       const n = needs(p);
       n.changes.outputs = { ...n.changes.outputs, e2e: wrong };
       const off = ciVerdict(n);
@@ -1832,18 +1715,18 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     }
   });
 
-  it('全跑但没碰 e2e 认的路径（deploy/ 脚本）：e2e 本该 skipped，汇总照 plan 核', () => {
+  it('【故意造出的失败】本机选测的 plan（全跑但 e2e 只点几页或不点，比如改 deploy/ 脚本）交给汇总：红，CI 不认', () => {
     const p = assigned(pr('deploy/france.sh'));
     expect(p).toMatchObject({ full: true, e2e: [] });
-    expect(ciVerdict(needs(p)).ok).toBe(true);
-    expect(ciVerdict(needs(p, { e2e: { result: 'success' } })).ok).toBe(false);
-    // 全跑又碰了页面：e2e 要跑（只跑那一页）
+    expect(ciVerdict(needs(p)).ok).toBe(false);
     const withPage = assigned(pr('deploy/france.sh', 'packages/web/src/routes/login.tsx'));
     expect(withPage).toMatchObject({ full: true, e2e: [`${SPECS}01-login.e2e.ts`] });
-    expect(ciVerdict(needs(withPage, { e2e: { result: 'skipped' } })).ok).toBe(false);
+    const v = ciVerdict(needs(withPage));
+    expect(v.ok).toBe(false);
+    expect(v.lines.join('\n')).toContain('plan 不是全套');
   });
 
-  it('ci.yml 的 e2e job：只按 changes 的 e2e 开关开、红了不吞（没有 continue-on-error / || true）、Postgres 和 Chromium 照 README 给，汇总 job 等它', () => {
+  it('ci.yml 的 e2e job：只在 changes 给 all 时开、跑全套切 2 台、红了不吞（没有 continue-on-error / || true）、Postgres 和 Chromium 照 README 给，汇总 job 等它', () => {
     const yml = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
     const doc = parse(yml) as {
       jobs: Record<
@@ -1860,7 +1743,9 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     const e2e = doc.jobs.e2e;
     expect(e2e, 'ci.yml 里没有 e2e job').toBeDefined();
     expect(e2e?.needs).toBe('changes');
-    expect(e2e?.if, '清单为空（输出空串）就整个跳过').toBe("needs.changes.outputs.e2e != ''");
+    expect(e2e?.if, '只有全套这一种跑法；同树复用（输出空串）整个跳过').toBe(
+      "needs.changes.outputs.e2e == 'all'",
+    );
     expect(e2e?.['timeout-minutes'], '要给总耗时上限').toBeGreaterThan(0);
     expect(e2e?.['timeout-minutes']).toBeLessThanOrEqual(15);
     expect(e2e?.env?.E2E_PG_ADMIN_URL).toMatch(/^postgres:\/\/postgres@127\.0\.0\.1:5432\/postgres$/);
@@ -1884,24 +1769,20 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     const run = steps.find((s) => String(s.run ?? '').includes('pnpm --filter @fleet-dao/web e2e'));
     expect(run, '找不到跑 e2e 的那一步').toBeDefined();
     expect(run).not.toHaveProperty('if');
-    // 清单经环境变量交给 shell（不把表达式插进脚本）：all 跑全套，否则把清单当参数传给 playwright
-    expect((run?.env as Record<string, string> | undefined)?.E2E_SPECS).toBe(
-      '${{ needs.changes.outputs.e2e }}',
-    );
     expect((run?.env as Record<string, string> | undefined)?.E2E_QUARANTINE, '挡的那一步跳过隔离集').toBe(
       'skip',
     );
+    // 全套：不给 spec 参数（两种屏宽都在 playwright 配置的项目里），不再有「只点改动页」那条路
     expect(String(run?.run)).not.toContain('${{');
-    expect(String(run?.run)).toContain('"$E2E_SPECS" = all');
-    expect(String(run?.run)).toContain('pnpm --filter @fleet-dao/web e2e $E2E_SPECS');
-    // 全套切 2 台、只点改动页 1 台（决定 0093）；分片经环境变量给，空分片照绿
-    expect(String((e2e as { strategy?: { matrix?: { shard?: unknown } } })?.strategy?.matrix?.shard)).toBe(
-      "${{ fromJSON(needs.changes.outputs.e2e == 'all' && '[1,2]' || '[1]') }}",
+    expect(String(run?.run).trim()).toBe(
+      'pnpm --filter @fleet-dao/web e2e --shard="$SHARD" --pass-with-no-tests',
     );
+    expect(run?.env as Record<string, string> | undefined).not.toHaveProperty('E2E_SPECS');
+    // 全套切 2 台（决定 0093）；分片经环境变量给，空分片照绿
+    expect((e2e as { strategy?: { matrix?: { shard?: unknown } } })?.strategy?.matrix?.shard).toEqual([1, 2]);
     expect((run?.env as Record<string, string> | undefined)?.SHARD).toBe(
       '${{ matrix.shard }}/${{ strategy.job-total }}',
     );
-    expect(String(run?.run).match(/--shard="\$SHARD" --pass-with-no-tests/g)).toHaveLength(2);
     // 汇总 job 等它
     expect(doc.jobs.check?.needs).toContain('e2e');
     // 它的名字在 PLANNED_JOBS 里（汇总核对）

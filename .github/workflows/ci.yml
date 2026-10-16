@@ -1,12 +1,11 @@
 name: ci
-# 按改动跑、并行跑（design 第五节「CI 按改动跑」）：changes 算出这次改了什么、哪几个 job 要跑（packages/conventions/src/ci-plan.ts），
-# 各 job 看它给的开关；check 汇总核对「该跑的跑了且绿、不该跑的确实跳过」。
-# 主线推送只跑「上一次主线真绿的头…这次的头」这段累计改动该跑的（基准查不到就全跑）。不做「取消前一轮」：发布闸认的是「这个提交自己那次绿」，取消了它就断。
-# 同树复用：这次提交的树和某次绿的 PR 检查测的是同一棵、基准树也一样，test、web、deploy 就不重测（同树同结果；对不上一律全跑并留 ::warning::）。
-# PR 只改了 deploy/ 时不全跑（决定 0093，B8）：deploy 全套照跑，单元测试只跑读 deploy/ 的那些文件（packages/conventions/src/deploy-readers.ts 从代码里算，不是清单），
-# 不开 web 打包、不跑 tsc。主线推送、每夜、手动一律仍全跑——发版只认主线全绿，所以这里少测的有兜底。
-# e2e 不在 PR 闸（决定 0093）：PR 上默认不跑，主线推送这一轮照区间跑映射到的 spec，不复用；发版只认主线头 CI 全绿，所以 e2e 是发版闸。
-# 例外（#2674）：PR 碰到表结构、迁移、e2e 样例数据和用例这类风险路径就跑全套（路径清单只在 ci-plan.ts 的 E2E_PR_RISK_PATHS，这里只读 changes 的 e2e 输出），check 把它当必过项。
+# 一律全套、并行跑（决定 0101，design 第五节「CI 一律全套」）：PR、主线推送、每夜、手动都跑全部测试（按耗时分台）、web 打包、
+# e2e 全套（两种屏宽，切 2 台）、deploy 全套（切 3 台），lint 每轮都跑；check 汇总核对「是全套（或主线同树复用）、该跑的跑了且绿」。
+# 原来按改动预测只跑一部分，漏的到主线才红（7 天 18 轮、234 分钟）；全套墙钟 3.4 分钟，只比选测多 1 分钟上下，公开仓 Actions 分钟不收钱。
+# 只剩两种省法，都是「输入完全相同、结果一样」：
+# - PR 上的测试缓存（packages/conventions/src/ci-cache.ts）：同一 PR 重推，某一台的输入没变、上一轮全绿，就不再跑 vitest。
+# - 主线同树复用：这次提交的树和某次成功的 PR 检查测的是同一棵（PR 那轮就是全套），test、web、e2e、deploy 就不重跑；对不上一律全套并留 ::warning::。
+# 不做「取消前一轮」：发布闸认的是「这个提交自己那次绿」，取消了它就断。
 #
 # 改这里之前必须知道：
 # - 必过检查（规则集「主线保护」）只认 check 这一个 job 名，别改名；它 needs 全部 job、if: always()，少 needs 一个就等于不拦那个。
@@ -20,28 +19,26 @@ on:
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
-  # 每夜一轮全量兜底（2026-10-05 加）：e2e 触发面收窄到只碰 web、api、ci.yml 之后，全量回归落在这里（非 pull_request 事件在 planCi 里一律全跑）。
-  # 北京时间约 4 点，避开白天的并发槽。
+  # 每夜一轮：主线头上没有新提交时也按时跑一遍全套（外部依赖、镜像、时间相关的回归）。北京时间约 4 点，避开白天的并发槽。
   schedule:
     - cron: '23 20 * * *'
-  # 手动在任意分支上跑一轮全量（含 e2e）：e2e 不在 PR 闸（决定 0093），改 e2e 地基（夹具、配置、备库）的 PR 合前用它在 CI 上先跑一遍：
-  # gh workflow run ci.yml --ref <分支>。非 PR 事件在 planCi 里一律全跑；发版只认主线 push 那一轮，手动跑的不算。
+  # 手动在任意分支上跑一轮全套：gh workflow run ci.yml --ref <分支>。发版只认主线 push 那一轮，手动跑的不算。
   workflow_dispatch:
 # 令牌只给读代码：这里的检查都只看检出来的文件，不读 GitHub 上的现状（#87：必过检查必须确定）。
 permissions:
   contents: read
-# 并发组：PR 按号分，推主线按分支分，定时轮按事件分，三者不撞。主线推送不挤掉在跑的那一轮（它是发布的依据，被挤掉过就没有可发的绿提交，2026-09-27 #362）。
-# 末尾带事件名：schedule 的 github.ref 也是 refs/heads/main，不带的话夜跑会被主线推送顶掉（2026-10-05 第二意见挑出来的）。
+# 并发组：PR 按号分（新推的挤掉旧的）；别的事件按提交号分——主线每个提交各自一组，一个都不挤掉、不排队等前一个
+# （原来按分支分，一组只许一个排队，7 天 49 轮被挤掉、那些提交没有结论，决定 0101）。主线推送不取消在跑的那一轮（它是发布的依据，#362）。
+# 末尾带事件名：夜跑和主线推送可能是同一个提交，不带的话会互相顶掉（2026-10-05 第二意见挑出来的）。
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
+  group: ci-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # 这次改了什么 → 各 job 的开关。PR 按 origin/<目标分支>...HEAD 算（HEAD 是 GitHub 造的合并提交，比的就是合进去会带进来的改动）；
-  # base 拿不到、diff 失败判红（退出码 2），认不出的路径升成全跑，不静默少查。
+  # 各 job 的开关和测试分台：一律全套（ci-plan.ts 的 ciFullPlan），主线推送同树时整轮复用。列不出测试文件、装不了箱判红（退出码 2）。
   changes:
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    # 只有这一个 job 多要 actions: read（读主线运行记录找基准）；别的 job 仍只读代码。
+    # 只有这一个 job 多要 actions: read（读 PR 的运行记录找同树的检查）；别的 job 仍只读代码。
     permissions:
       contents: read
       actions: read
@@ -63,42 +60,27 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # 主线推送：查「上一次主线真绿的头」，这一轮只跑它到现在这段累计改动该跑的（读不到就空，下一步照旧全跑）。
-      - id: mainbase
-        if: github.event_name == 'push'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-          BRANCH: ${{ github.ref_name }}
-        run: echo "sha=$(node packages/conventions/src/bin/main-base.ts ci.yml "$BRANCH")" >> "$GITHUB_OUTPUT"
-      # 主线推送：这次提交的树和基准树，是不是和某次绿的 PR 检查测的同一棵（判法在 packages/conventions/src/main-reuse.ts）。是就让算计划那步
-      # 把 test、web、deploy 标成「复用，不重测」；对不上、查不到、读不到都只打 ::warning::，照旧按区间全跑。lint 仍每轮自己跑。
+      # 主线推送：这次提交的树是不是和某次成功的 PR 检查（全套）测的同一棵（判法在 packages/conventions/src/main-reuse.ts）。是就让算计划那步
+      # 把 test、web、e2e、deploy 标成「复用，不重跑」；对不上、查不到、读不到都只打 ::warning::，照旧全套。lint 仍每轮自己跑。
       - id: reuse
         if: github.event_name == 'push'
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
-        run: node packages/conventions/src/bin/main-reuse.ts --base "$MAIN_BASE" --workflow ci.yml >> "$GITHUB_OUTPUT"
+        run: node packages/conventions/src/bin/main-reuse.ts --workflow ci.yml >> "$GITHUB_OUTPUT"
       - id: plan
         env:
           EVENT: ${{ github.event_name }}
-          BASE: ${{ github.base_ref }}
-          MAIN_BASE: ${{ steps.mainbase.outputs.sha }}
           REUSE: ${{ steps.reuse.outputs.reuse }}
-        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE" --main-base "$MAIN_BASE" --reuse "$REUSE"
-      # PR：留下「这一轮测的是哪棵树、比的基准树是哪棵」，供合并后主线那一轮查。只放在步骤名里，只读令牌就查得到；只有整轮成功才会被认。
+        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --reuse "$REUSE"
+      # PR：留下「这一轮测的是哪棵树」，供合并后主线那一轮查。只放在步骤名里，只读令牌就查得到；只有整轮成功才会被认。
       # HEAD 不是合并提交就写「无」，主线那边认不出就不复用。步骤名的写法由 main-reuse.ts 的 claimStepName 定，test/main-reuse.test.ts 核对这里对得上。
-      # 窄跑的（只改 deploy/，单元测试只跑了读 deploy/ 的）不留树声明：合并后主线那一轮不许复用它，得自己全跑——这才是少测的兜底（决定 0093 第 6 条）。
       - id: tested
         if: github.event_name == 'pull_request'
-        env:
-          NARROWED: ${{ steps.plan.outputs.narrowed }}
         run: |
           set -euo pipefail
           parents=$(git rev-list --parents -n 1 HEAD | wc -w)
-          if [ "$NARROWED" = true ]; then
-            echo "claim=无（只改 deploy/，测试窄跑，主线要全跑）" >> "$GITHUB_OUTPUT"
-          elif [ "$parents" = 3 ]; then
-            echo "claim=tree=$(git rev-parse 'HEAD^{tree}') base=$(git rev-parse 'HEAD^1^{tree}')" >> "$GITHUB_OUTPUT"
+          if [ "$parents" = 3 ]; then
+            echo "claim=tree=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
           else
             echo "claim=无（HEAD 不是合并提交）" >> "$GITHUB_OUTPUT"
           fi
@@ -109,12 +91,12 @@ jobs:
   # 一堆「装一次依赖、跑一条命令」的小检查并进这一个 job：原来 biome、tsc、docs、hygiene 各占一台，每台都有 25 秒的 checkout + setup-node + install 固定开销，
   # 四台占四个并发槽。这几步各自最慢 20 秒上下，串起来仍短于最慢的测试台（db 约 87 秒），所以整轮墙钟不变。
   #
-  # 每一步 continue-on-error，最后汇总判红，不靠默认的「前一步红了后一步跳过」（那正是 #566 漏检的来路）。汇总还核「该跑的真跑了、不该跑的确实跳过」。
+  # 每一步 continue-on-error，最后汇总判红，不靠默认的「前一步红了后一步跳过」（那正是 #566 漏检的来路）。汇总还核「每一样都真跑了且绿」。
   # 这一步的脚本由 test/ci-plan.test.ts 抠出来真跑，每种红法都造一遍。
   #
-  # 各步的分工：
-  # - biome：只改 .md 时不跑（biome 不认 md）。
-  # - tsc -b：跟着 biome；只查受影响的项目，全跑时查整棵树。
+  # 各步的分工（一律全套，决定 0101：每一样每轮都跑）：
+  # - biome：整个仓。
+  # - tsc -b：整棵树。
   # - doc_pointers、agents_test：文档里的路径、章节指针（doc-pointers 测试），和 agents/test（技能指针、规矩钉子）。每个 PR 都跑、不裁剪：挪文件会让指针指空。
   #   原来合成一步 docs，红了看不出是指针指空还是技能规矩红；拆成两样各自后台跑、各写各的结果，汇总点名红的是哪一样，墙钟不变（并行，最慢那样说了算）。
   # - 卫生检查一步（文件树和历史两遍在同一步里）：每个 PR 都跑，只报不挡（不进汇总判红，也不进必过名单）。真挡的是推之前的 pre-push 钩子和引擎推分支时的扫描（创始人 2026-09-28 拍，
@@ -122,7 +104,7 @@ jobs:
   #   PR 检出到 pr/ 只当数据扫，执行的是主线上的 packages/hygiene（检出到 trusted/），且排在 pnpm install 和一切跑 PR 代码的步骤之前：
   #   否则 PR 自己改宽规则、白名单就能放过自己（#115 第二意见）。除扫文件树，还按提交扫历史，只在 pull_request 上跑。
   lint:
-    # 不等 changes：自己现算同一份计划（ci-plan.ts），和它并行，小 PR 少等一跳。几步各有开关，没法用 job 级 if 表达，所以 job 一律开、步骤自己看开关。
+    # 不等 changes：和它并行，少等一跳。每一样每轮都跑，没有开关。
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # PR 在 pr/、主线的卫生检查代码在 trusted/，并排放：biome check . 不会扫到 trusted/。
@@ -171,15 +153,7 @@ jobs:
           fi
           exit "$rc"
 
-      # ——从这里往下才跑 PR 里的代码（算计划、装依赖都会跑 PR 的安装脚本）——
-      # 算不成（base 拿不到、diff 失败）退出 2，这一步红、job 红，不静默少查。
-      - name: 算这次要查什么（和 changes 同一份判法）
-        id: plan
-        env:
-          EVENT: ${{ github.event_name }}
-          BASE: ${{ github.base_ref }}
-        run: node packages/conventions/src/bin/ci-plan.ts --event "$EVENT" --base "origin/$BASE"
-
+      # ——从这里往下才跑 PR 里的代码（装依赖会跑 PR 的安装脚本）——
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: pr/package.json
@@ -191,12 +165,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       # biome、tsc、doc_pointers、agents_test、deps、release_smoke 各自后台跑、各写各的日志和退出码，一样红不影响另外几样（#566：串行时 biome 先红就把 tsc 跳过）。
-      # 结果写成 biome/tsc/doc_pointers/agents_test = success | failure | skipped，由汇总逐样核对；这一步自己崩了、输出没写全，汇总读到空值同样判红。
+      # 结果写成 biome/tsc/doc_pointers/agents_test/deps/release_smoke = success | failure，由汇总逐样核对；这一步自己崩了、输出没写全，汇总读到空值同样判红。
       - name: biome、tsc、doc_pointers、agents_test、deps、release_smoke 并行跑
         id: checks
         env:
-          BIOME_WANT: ${{ steps.plan.outputs.biome }}
-          TSC: ${{ steps.plan.outputs.tsc }}
           LOGS: ${{ runner.temp }}/lint-checks
         run: |
           set -uo pipefail
@@ -204,24 +176,19 @@ jobs:
           start() {
             local name=$1
             shift
-            # 各自记下跑了几秒（写进下面的分组标题）：三样并行，这一步的墙钟就是最慢那一样，不记就看不出该省哪个
+            # 各自记下跑了几秒（写进下面的分组标题）：几样并行，这一步的墙钟就是最慢那一样，不记就看不出该省哪个
             ( s=$SECONDS; "$@" >"$LOGS/$name.log" 2>&1; echo $? >"$LOGS/$name.rc"; echo $((SECONDS - s)) >"$LOGS/$name.secs" ) &
           }
-          run_tsc() {
-            if [[ $TSC == all ]]; then pnpm exec tsc -b; else read -ra projects <<<"$TSC"; pnpm exec tsc -b "${projects[@]}"; fi
-          }
-          names=()
-          if [ "$BIOME_WANT" = true ]; then start biome pnpm exec biome check .; names+=(biome); else echo "biome=skipped" >>"$GITHUB_OUTPUT"; fi
-          if [ -n "$TSC" ]; then start tsc run_tsc; names+=(tsc); else echo "tsc=skipped" >>"$GITHUB_OUTPUT"; fi
+          start biome pnpm exec biome check .
+          start tsc pnpm exec tsc -b
           start doc_pointers pnpm exec vitest run packages/conventions/test/doc-pointers.test.ts
           start agents_test pnpm exec vitest run agents/test/
           # 未声明依赖（代码 import 了、自己包和仓根 package.json 都没写）：能不能碰巧找到看安装布局，法国会起不来
           start deps pnpm run deps:check
           # 照法国发版的样子（env -i、release.sh 的装依赖参数）装一版，从 fleet-api、fleet-engine 入口把每条 import 解析一遍
           start release_smoke pnpm run release:smoke
-          names+=(doc_pointers agents_test deps release_smoke)
           wait
-          for name in "${names[@]}"; do
+          for name in biome tsc doc_pointers agents_test deps release_smoke; do
             rc=$(cat "$LOGS/$name.rc" 2>/dev/null || echo missing)
             echo "::group::$name（退出码 $rc，$(cat "$LOGS/$name.secs" 2>/dev/null || echo 未知) 秒）"
             cat "$LOGS/$name.log" 2>/dev/null || echo "（没有日志）"
@@ -229,7 +196,7 @@ jobs:
             if [ "$rc" = 0 ]; then echo "$name=success" >>"$GITHUB_OUTPUT"; else echo "::error::$name 没过（退出码 $rc）"; echo "$name=failure" >>"$GITHUB_OUTPUT"; fi
           done
 
-      # 汇总：该跑的必须 success、不该跑的必须 skipped，哪一样不对 job 就红、连名字一起报。卫生检查只报不挡，红了只打 ::warning::。
+      # 汇总：每一样都必须 success，哪一样不对 job 就红、连名字一起报。卫生检查只报不挡，红了只打 ::warning::。
       - name: 汇总（biome / tsc / doc_pointers / agents_test / deps / release_smoke 有一样不对这里就红）
         if: always()
         env:
@@ -239,28 +206,20 @@ jobs:
           AGENTS_TEST: ${{ steps.checks.outputs.agents_test }}
           DEPS: ${{ steps.checks.outputs.deps }}
           RELEASE_SMOKE: ${{ steps.checks.outputs.release_smoke }}
-          BIOME_WANT: ${{ steps.plan.outputs.biome }}
-          TSC_WANT: ${{ steps.plan.outputs.tsc }}
           HYGIENE: ${{ steps.hygiene.outcome }}
         run: |
           set -euo pipefail
           bad=''
-          # 参数：名字、这一步的 outcome、本该跑吗（yes/no）
+          # 参数：名字、这一步的结果
           verify() {
-            if [ "$3" = yes ]; then
-              [ "$2" = success ] || bad="$bad $1（$2，本该 success）"
-            else
-              [ "$2" = skipped ] || bad="$bad $1（$2，本该 skipped）"
-            fi
+            [ "$2" = success ] || bad="$bad $1（$2，本该 success）"
           }
-          biome_want=no; if [ "$BIOME_WANT" = true ]; then biome_want=yes; fi
-          tsc_want=no; if [ -n "$TSC_WANT" ]; then tsc_want=yes; fi
-          verify biome "$BIOME" "$biome_want"
-          verify tsc "$TSC" "$tsc_want"
-          verify doc_pointers "$DOC_POINTERS" yes
-          verify agents_test "$AGENTS_TEST" yes
-          verify deps "$DEPS" yes
-          verify release_smoke "$RELEASE_SMOKE" yes
+          verify biome "$BIOME"
+          verify tsc "$TSC"
+          verify doc_pointers "$DOC_POINTERS"
+          verify agents_test "$AGENTS_TEST"
+          verify deps "$DEPS"
+          verify release_smoke "$RELEASE_SMOKE"
           if [ "$HYGIENE" = failure ]; then
             echo "::warning::卫生检查没过（只报不挡，看上面那一步的日志）"
           fi
@@ -268,9 +227,9 @@ jobs:
             echo "::error::lint 里有检查不对：$bad"
             exit 1
           fi
-          echo "lint 里该跑的几步都过了、不该跑的都跳过了：biome=$BIOME tsc=$TSC doc_pointers=$DOC_POINTERS agents_test=$AGENTS_TEST deps=$DEPS release_smoke=$RELEASE_SMOKE"
+          echo "lint 里每一样都过了：biome=$BIOME tsc=$TSC doc_pointers=$DOC_POINTERS agents_test=$AGENTS_TEST deps=$DEPS release_smoke=$RELEASE_SMOKE"
 
-  # 测试分几台：ci-plan.ts 选单元 → test-split.ts 按 test-timings.json 耗时装箱，一台一份明确的文件清单（job 名就是那一台，如「2/5 · pg」）。
+  # 测试分几台：全部测试文件（一律全套）→ test-split.ts 按 test-timings.json 耗时装箱，一台一份明确的文件清单（job 名就是那一台，如「2/5 · pg」）。
   # 耗时表只读仓里的 test-timings.json（引擎每天开 PR 从最近几轮 PR 的 CI 日志刷新，也可手跑 pnpm ci:timings）。不用 vitest --shard 按文件个数切：那样各台差得太远（#654 时 engine 三台 89/35/137 秒）。
   # 环境按这一台装进的文件算：要真 Postgres 的（matrix.pg）才起 postgres:16 容器，和法国同大版本；要 Temporal 命令行的（matrix.temporal）才装它，
   # 版本和校验和从 deploy/france.sh 读，CI 没给变量测试就直接红（test/support.ts）。
@@ -472,21 +431,20 @@ jobs:
       - run: pnpm --filter ./packages/web run build
 
   # 驾驶舱用户视角 e2e（#930）：真 Postgres 16 + 真后端（packages/api/src/main.ts，线上同一个入口）+ 真前端 + Chromium，站在创始人角度逐页走（packages/web/e2e）。
-  # 决定 0093：不在 PR 闸、在发版闸。PR 上 changes 的 e2e 输出默认空串（ci-plan.ts 的 deferE2eToMain），这个 job 跳过；碰到风险路径的 PR 输出 all（#2674），跑全套、同样分两台；
-  # 主线推送那一轮按「上次真绿的头…这次」的累计改动算 spec 清单（e2eSpecsFor，决定 0029），`all`（每夜、查不到基准，或改了夹具、本文件）跑全套。
+  # 决定 0101：PR 和主线都跑全套（playwright 配置里的两种屏宽都跑），是合并闸也是发版闸；只有主线同树复用 PR 的结果时跳过（changes 的 e2e 输出空串）。
   # 红了这一轮 check 红：主线头 CI 不绿就不发版（法国的自动发版只认主线头 ci.yml 这一轮 conclusion=success）。
   # 本机（Windows + 本机 Chrome + Windows 版 PG）和这里（Linux + Chromium + 容器 PG）的差别：浏览器走 E2E_BROWSER_CHANNEL=chromium，管理连接串指向容器；库名、端口、顺序和本机一样。
-  # 提速（决定 0093）：每台 4 个 worker、每个 worker 一整套环境（packages/web/e2e/support/fixtures.ts）；全套（all）再切成 2 台各跑一半文件
-  # （--shard，一台约 1.6 分钟），只点改动页时 1 台。分片空了（改动页都落在另一台）照绿（--pass-with-no-tests）。
+  # 提速（决定 0093）：每台 4 个 worker、每个 worker 一整套环境（packages/web/e2e/support/fixtures.ts）；全套切成 2 台各跑一半文件
+  # （--shard，一台约 1.6 分钟）。分片空了照绿（--pass-with-no-tests）。
   e2e:
     needs: changes
-    if: needs.changes.outputs.e2e != ''
+    if: needs.changes.outputs.e2e == 'all'
     name: e2e (${{ matrix.shard }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: ${{ fromJSON(needs.changes.outputs.e2e == 'all' && '[1,2]' || '[1]') }}
+        shard: [1, 2]
     timeout-minutes: 15
     env:
       # 一次性 runner 上的一次性容器，只有本机回环连得到：用 trust 认证，连接串里不放密码
@@ -546,22 +504,13 @@ jobs:
           if ! docker logs fleet-e2e-pg >&2; then echo "（拿不到容器日志）" >&2; fi
           echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
           exit 1
-      # E2E_SPECS：all 跑全套；否则是 changes 算出的 spec 路径（相对 packages/web，文件名由 ci-plan.ts 限定成安全字符），原样当参数交给 playwright
+      # 全套：不给 spec 参数，playwright 配置里的全部 spec、全部屏宽（项目）都跑，按分片切一半
       - name: 驾驶舱 e2e
         env:
-          E2E_SPECS: ${{ needs.changes.outputs.e2e }}
           SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
           # 隔离集（packages/web/e2e/quarantine.json）不在 ci 里跑：e2e-quarantine.yml 每天定时跑
           E2E_QUARANTINE: skip
-        run: |
-          set -euo pipefail
-          if [ "$E2E_SPECS" = all ]; then
-            pnpm --filter @fleet-dao/web e2e --shard="$SHARD" --pass-with-no-tests
-          else
-            echo "只点改动页：$E2E_SPECS"
-            # shellcheck disable=SC2086  # 故意按空格拆成多个 spec 参数
-            pnpm --filter @fleet-dao/web e2e $E2E_SPECS --shard="$SHARD" --pass-with-no-tests
-          fi
+        run: pnpm --filter @fleet-dao/web e2e --shard="$SHARD" --pass-with-no-tests
       # 隔离集不在这里跑（2026-10-16 挪走）：每天定时跑一次、可手动触发，见 e2e-quarantine.yml（照跑照报，本来也不挡）。
       # 偶发和隔离集的结局写进 job 摘要（判法 packages/conventions/src/e2e-flaky.ts）；近 10 轮统计、开单在 e2e-flaky.yml
       - name: 偶发与隔离集汇总
@@ -577,7 +526,8 @@ jobs:
           if-no-files-found: warn
 
   # 装机脚本的检查：退出码 2 = 有项没跑成，同样算红，别让「没跑」冒充「通过」。
-  # deploy=all 时切 3 台并行（ci-plan.ts 的 deployMatrix，一台 100 秒上下）；deploy=ops（只动了 docs/ops.md）只跑读 ops.md 的两块，不装依赖、不用 sudo。
+  # 全套切 3 台并行（ci-plan.ts 的 deployMatrix，一台 100 秒上下）；矩阵来自 changes，CI 里一律 all（决定 0101），同树复用时空、整个 job 跳过。
+  # deployMatrix 还认 ops（一台、不装依赖、不用 sudo），只是 CI 的计划不再出它，下面装依赖那几步的条件为它留着。
   # FLEET_TEST_SYSTEM_USERS=1 只在这里开（一次性的机器）。sudo 会清掉环境变量，所以写在命令行上；漏带过去的那段会报「没跑成」，不会悄悄当通过。
   deploy:
     needs: changes
