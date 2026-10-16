@@ -1,16 +1,14 @@
 // 实时推送的约定：这些表一有写入，数据库就 NOTIFY fleet_changes（触发器在 packages/db 的迁移里，测试逐表核对），
 // 驾驶舱后端 LISTEN 它，再经 SSE 推给页面。
-// 只增不改：删掉或改名一张表，正在监听它的页面会悄悄收不到变化。
+// 只增不改：删掉或改名一张还在写的表，正在监听它的页面会悄悄收不到变化。表本身删了（老会话表和进度表，#2357）才从这里摘。
 
 export const FLEET_CHANGES_CHANNEL = 'fleet_changes';
 
 export const REALTIME_TABLES = [
   'tasks',
   'subtasks',
-  'session_runs',
   // 三段流水（scope / manual / verify，迁移 0023）：主页的流水线图、任务详情的流水读它。触发器在 0035。
   'runs',
-  'progress_events',
   'quota_windows',
   'notifications',
   'asks',

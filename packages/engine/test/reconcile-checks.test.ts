@@ -428,10 +428,10 @@ describe('合了的 PR 对上的单记了账', () => {
       sessions: [
         {
           runId: randomUUID(),
-          stage: 'execute',
+          stage: 'manual',
           startedAt: new Date(NOW.getTime() - 5 * 60 * 60_000),
           endedAt: new Date(NOW.getTime() - 4 * 60 * 60_000),
-          outcome: 'ok',
+          outcome: 'done',
           inputTokens: 1200,
           outputTokens: 300,
         },
@@ -440,14 +440,14 @@ describe('合了的 PR 对上的单记了账', () => {
           stage: 'verify',
           startedAt: new Date(NOW.getTime() - 3 * 60 * 60_000),
           endedAt: new Date(NOW.getTime() - 3 * 60 * 60_000),
-          outcome: 'ok',
+          outcome: 'done',
           // 没读到：留空，关单评论写「没读到」，不算缺
           inputTokens: null,
           outputTokens: null,
         },
         {
           runId: randomUUID(),
-          stage: 'execute',
+          stage: 'manual',
           startedAt: new Date(NOW.getTime() - 6 * 60 * 60_000),
           endedAt: new Date(NOW.getTime() - 6 * 60 * 60_000),
           // 刚起就被限流：一个 token 都没花，照实记的 0 不算缺
@@ -493,7 +493,7 @@ describe('合了的 PR 对上的单记了账', () => {
       link: 'https://github.com/acme/widgets/pull/88',
     });
     const body = w.raised[0]?.body ?? '';
-    expect(body).toContain('单 #160：1 次会话没有结局（execute）');
+    expect(body).toContain('单 #160：1 次会话没有结局（manual）');
     expect(body).toContain('单 #160：2 次跑成了的会话用量记成了 0');
     expect(body).toContain('单 #160：合并关单那一步没写完：库里这张单是「在合并」');
   });

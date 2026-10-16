@@ -900,14 +900,14 @@ export function emptyTotals() {
     costUsd: 0,
     missingCost: 0,
     cost: { metered: emptyShare(), subscription: emptyShare(), unknown: emptyShare() },
-    // shared 的 usage.ts 只给三段的 runs 按目录单价估没报的花费；这页只读会话（session_runs），老流程不估，恒为 0
+    // shared 的 usage.ts 只给三段的 runs 按目录单价估没报的花费；这页读的是会话行（SQL.runs），不估，恒为 0
     estimate: { runs: 0, usd: 0, noPrice: 0, noTokens: 0 },
     queueMs: 0,
     runMs: 0,
     missingTime: 0,
-    // shared 的 usage.ts 给三段的 runs 记「没有排队」的笔数；这页只读会话（session_runs），恒为 0
+    // shared 的 usage.ts 给三段的 runs 记「没有排队」的笔数；这页读的是会话行（SQL.runs），恒为 0
     noQueue: 0,
-    // shared 的 usage.ts 给三段里四样 token 都没读到的段计数；这页只读会话（session_runs），恒为 0
+    // shared 的 usage.ts 给三段里四样 token 都没读到的段计数；这页读的是会话行（SQL.runs），恒为 0
     unreadSegments: 0,
   };
 }

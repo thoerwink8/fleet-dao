@@ -692,9 +692,83 @@ describe('0037：删八张没人读写的表（只放删表语句）', () => {
     TEST_DB_TIMEOUT_MS,
   );
 
-  it('【故意造出的失败】schema 里不许再有这八张表，也不许少了 session_runs（它还有读方）', () => {
+  it('【故意造出的失败】schema 里不许再有这八张表', () => {
     for (const name of DROPPED) expect(schemaTables).not.toContain(name);
-    expect(schemaTables).toContain('session_runs');
+  });
+});
+
+describe('0075：删老流程的会话表 session_runs 和进度表 progress_events（#2357）', () => {
+  const target = ordered.findIndex((e) => e.tag.startsWith('0075_'));
+  const exists = async (pg: PGlite, name: string) =>
+    (await pg.query<{ r: string | null }>(`select to_regclass('public.${name}')::text as r`)).rows[0]?.r !==
+    null;
+  const RUN_OLD = '11111111-1111-4111-8111-111111111111';
+  const RUN_NEW = '22222222-2222-4222-8222-222222222222';
+  const seedOld = `
+    insert into repos (id, owner, name, test_command) values ('aaaaaaaa-0000-4000-8000-000000000001', 'acme', 'widgets', 'pnpm check');
+    insert into tasks (id, repo_id, issue_number, title, raw_request, requested_by, priority)
+      values ('bbbbbbbb-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000001', 1, '单', '原话', 'founder', 0);
+    insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
+    insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
+    insert into pools (id, channel_id, max_concurrency) values ('relay', 'sub', 5);
+    insert into models (id, family, display_name) values ('opus', 'claude', 'Opus');
+    insert into routes (id, channel_id, pool_id, model_id, host_id) values ('r1', 'sub', 'relay', 'opus', 'claude-code');
+    insert into session_runs (id, task_id, stage, route_id, why_route)
+      values ('${RUN_OLD}', 'bbbbbbbb-0000-4000-8000-000000000001', 'execute', 'r1', '老会话');
+    insert into progress_events (run_id, kind, payload) values ('${RUN_OLD}', 'say', '"好了"');
+    insert into runs (id, segment, task_id, model, route_id, started_at)
+      values ('${RUN_NEW}', 'manual', 'bbbbbbbb-0000-4000-8000-000000000001', 'opus', 'r1', now());
+    insert into asks (task_id, run_id, question) values
+      ('bbbbbbbb-0000-4000-8000-000000000001', '${RUN_OLD}', '老会话问的'),
+      ('bbbbbbbb-0000-4000-8000-000000000001', null, '没挂会话的');
+  `;
+
+  it(
+    '旧库升级：两张表连旧行一起没了；asks 的问答都留着，指着旧会话的 run_id 置空、指着 runs 的保留；新外键指 runs；runs 多出 worktree_path',
+    async () => {
+      expect(target).toBeGreaterThan(0);
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(seedOld);
+        expect(await exists(pg, 'session_runs')).toBe(true);
+        expect(await exists(pg, 'progress_events')).toBe(true);
+
+        await runMigration(pg, ordered[target]?.tag ?? '');
+
+        expect(await exists(pg, 'session_runs')).toBe(false);
+        expect(await exists(pg, 'progress_events')).toBe(false);
+        expect((await pg.query(`select question, run_id from asks order by question`)).rows).toEqual([
+          { question: '没挂会话的', run_id: null },
+          { question: '老会话问的', run_id: null },
+        ]);
+        // 新外键指 runs：挂在同一张单的三段会话上可以
+        await pg.exec(
+          `insert into asks (task_id, run_id, question) values ('bbbbbbbb-0000-4000-8000-000000000001', '${RUN_NEW}', '三段会话问的')`,
+        );
+        // 追问挂的会话必须属于追问的那张单：新外键指 runs 的 (task_id, id)
+        await expect(
+          pg.exec(
+            `insert into asks (task_id, run_id, question) values (gen_random_uuid(), '${RUN_NEW}', '别的单')`,
+          ),
+        ).rejects.toThrow(/asks_run_in_task_fk|tasks_id_fk|violates foreign key/);
+        expect((await pg.query(`select worktree_path from runs`)).rows).toEqual([{ worktree_path: null }]);
+        // 老的枚举也没了，别的表还在用的 stage_kind 留着
+        const types = (
+          await pg.query<{ typname: string }>(
+            `select typname from pg_type where typname in ('run_outcome', 'progress_kind', 'stage_kind') order by typname`,
+          )
+        ).rows;
+        expect(types).toEqual([{ typname: 'stage_kind' }]);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+
+  it('【故意造出的失败】schema 里不许再有这两张表', () => {
+    expect(schemaTables).not.toContain('session_runs');
+    expect(schemaTables).not.toContain('progress_events');
   });
 });
 
@@ -1111,8 +1185,8 @@ describe('0074：机器人权限提醒合成每个仓一个键', () => {
   );
 });
 
-describe('0075：删掉从没开过、没跑过、没被引用的路由', () => {
-  const tag = '0075_drop_unused_routes';
+describe('0076：删掉从没开过、没跑过、没被引用的路由', () => {
+  const tag = '0076_drop_unused_routes';
 
   it(
     '有引用或开着或在线的留下，没引用的删掉；用途顺序不动；再跑一遍不改',
@@ -1133,7 +1207,6 @@ describe('0075：删掉从没开过、没跑过、没被引用的路由', () => 
           ('keep-run', 'ch', 'pool', 'm', 'grok', 'up-run'),
           ('keep-probe', 'ch', 'pool', 'm', 'grok', 'up-probe'),
           ('keep-pin', 'ch', 'pool', 'm', 'grok', 'up-pin'),
-          ('keep-session', 'ch', 'pool', 'm', 'grok', 'up-session'),
           ('keep-attempt', 'ch', 'pool', 'm', 'grok', 'up-attempt'),
           ('keep-state', 'ch', 'pool', 'm', 'grok', 'up-state'),
           ('keep-reserve', 'ch', 'pool', 'm', 'grok', 'up-reserve'),
@@ -1160,8 +1233,6 @@ describe('0075：删掉从没开过、没跑过、没被引用的路由', () => 
         insert into task_route_pins (task_id, segment, model_id, route_id, set_by, set_at) values
           ('22222222-2222-2222-2222-222222222222', 'manual', 'm', 'keep-pin', 'u', '2026-10-01T00:00:00Z'),
           ('22222222-2222-2222-2222-222222222224', 'manual', 'm', null, 'u', '2026-10-01T00:00:00Z');
-        insert into session_runs (stage, route_id, why_route, queued_at)
-        values ('execute', 'keep-session', '测试', '2026-10-01T00:00:00Z');
         insert into channel_attempts (attempt_idx, model_id, route_id, channel_id, started_at, ended_at, duration_ms)
         values (1, 'm', 'keep-attempt', 'ch', '2026-10-01T00:00:00Z', '2026-10-01T00:01:00Z', 0);
         insert into channel_states (channel_id, status, failed_route_id) values ('ch', 'ok', 'keep-state');
@@ -1198,7 +1269,6 @@ describe('0075：删掉从没开过、没跑过、没被引用的路由', () => 
           'keep-probe',
           'keep-reserve',
           'keep-run',
-          'keep-session',
           'keep-state',
         ];
         expect(await ids()).toEqual(kept);

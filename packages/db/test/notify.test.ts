@@ -11,11 +11,9 @@ import {
   nodeReports,
   notifications,
   pools,
-  progressEvents,
   quotaWindows,
   requests,
   runs,
-  sessionRuns,
   settings,
   tasks,
   users,
@@ -93,23 +91,6 @@ describe('写入即通知 fleet_changes', () => {
     expect(heard).toEqual([
       { table: 'quota_windows', id: 'relay-a' },
       { table: 'quota_windows', id: 'relay-b' },
-    ]);
-  });
-
-  it('会话排进队、开跑、结束都发（看板和额度页要刷新）；不属于任何需求的会话也发', async () => {
-    await catalog(t.db);
-    await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
-    const repo = await addRepo(t.db);
-    const task = await addTask(t.db, repo.id);
-    await freshEars();
-    const run = await addRun(t.db, { taskId: task.id, routeId: 'r1' });
-    await t.db.update(sessionRuns).set({ startedAt: NOW }).where(eq(sessionRuns.id, run.id));
-    const exam = await addRun(t.db, { taskId: null, stage: 'judge', routeId: 'r1', whyRoute: '考新模型' });
-    await settle();
-    expect(heard).toEqual([
-      { table: 'session_runs', id: run.id },
-      { table: 'session_runs', id: run.id },
-      { table: 'session_runs', id: exam.id },
     ]);
   });
 
@@ -228,8 +209,7 @@ describe('写入即通知 fleet_changes', () => {
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
     const sub = await addSubtask(t.db, task.id);
-    const run = await addRun(t.db, { taskId: task.id, subtaskId: sub.id, routeId: 'r1' });
-    await t.db.insert(progressEvents).values({ runId: run.id, kind: 'done', payload: null });
+    const run = await addRun(t.db, { taskId: task.id, routeId: 'r1' });
     await t.db.insert(runs).values({ segment: 'manual', taskId: task.id, model: 'opus-5.5', startedAt: NOW });
     await t.db.insert(quotaWindows).values({
       poolId: 'relay-a',

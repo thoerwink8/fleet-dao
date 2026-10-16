@@ -475,8 +475,9 @@ describe('只读：法国上的查询脚本不许写库、改文件、起停服�
     expect(sqlProblems(query.SQL)).toEqual([]);
   });
 
-  it('会话那一块两处都读：session_runs（老 Fusion）和 runs（任务工作流的动手、验收），只读前者会误报「手上没有会话」', () => {
-    expect(query.SQL.runs).toMatch(/from session_runs s/);
+  it('会话那一块读 runs（任务工作流的动手、验收）；老 Fusion 的会话表已删（#2357），不许再读它，读了库里报「关系不存在」', () => {
+    expect(query.SQL.runs).not.toMatch(/session_runs/);
+    expect(query.SQL.tasks).not.toMatch(/session_runs/);
     expect(query.SQL.runs).toMatch(/from runs r/);
     expect(query.SQL.tasks).toMatch(/from runs r where r\.task_id = t\.id/);
   });

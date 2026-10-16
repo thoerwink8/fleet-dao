@@ -12,7 +12,6 @@ WHERE c."route_id" = r."id"
     SELECT 1 FROM "routing_catalog" AS e WHERE e."route_id" = r."id" AND e."enabled"
   )
   AND NOT EXISTS (SELECT 1 FROM "runs" AS x WHERE x."route_id" = r."id")
-  AND NOT EXISTS (SELECT 1 FROM "session_runs" AS x WHERE x."route_id" = r."id")
   AND NOT EXISTS (SELECT 1 FROM "route_probe_history" AS x WHERE x."route_id" = r."id")
   AND NOT EXISTS (SELECT 1 FROM "task_route_pins" AS x WHERE x."route_id" = r."id")
   AND NOT EXISTS (SELECT 1 FROM "channel_attempts" AS x WHERE x."route_id" = r."id")
@@ -27,7 +26,6 @@ WITH dropped AS (
       SELECT 1 FROM "routing_catalog" AS e WHERE e."route_id" = r."id" AND e."enabled"
     )
     AND NOT EXISTS (SELECT 1 FROM "runs" AS x WHERE x."route_id" = r."id")
-    AND NOT EXISTS (SELECT 1 FROM "session_runs" AS x WHERE x."route_id" = r."id")
     AND NOT EXISTS (SELECT 1 FROM "route_probe_history" AS x WHERE x."route_id" = r."id")
     AND NOT EXISTS (SELECT 1 FROM "task_route_pins" AS x WHERE x."route_id" = r."id")
     AND NOT EXISTS (SELECT 1 FROM "channel_attempts" AS x WHERE x."route_id" = r."id")
@@ -40,7 +38,7 @@ n AS (SELECT count(*)::int AS deleted FROM dropped)
 INSERT INTO "audit_log" ("actor_kind", "actor_id", "action", "target", "reason", "via", "after")
 SELECT
   'engine',
-  'migration:0075',
+  'migration:0076',
   'catalog.prune-routes',
   'routes',
   '删掉从没开过、没跑过、没被引用的路由',

@@ -9,13 +9,11 @@ import {
   notificationDeliveries,
   notifications,
   pools,
-  progressEvents,
   pullRequests,
   quotaWindows,
   routes,
   scheduledJobs,
   scheduleRuns,
-  sessionRuns,
   settings,
   stateChanges,
   subtaskDeps,
@@ -34,7 +32,6 @@ import {
   catalog,
   expectViolation,
   HOUR,
-  MIN,
   NOW,
 } from './helpers.ts';
 
@@ -276,133 +273,13 @@ describe('子任务依赖', () => {
 });
 
 describe('会话记录', () => {
-  let taskId: string;
-  beforeEach(async () => {
-    await addRoute(t.db, { id: 'r1', poolId: 'relay-a', modelId: 'opus-5.5' });
-    const repo = await addRepo(t.db);
-    taskId = (await addTask(t.db, repo.id)).id;
-  });
-
-  it('排队时间和干活时间分开算，由库算', async () => {
-    const run = await addRun(t.db, {
-      taskId,
-      routeId: 'r1',
-      queuedAt: ago(30 * MIN),
-      startedAt: ago(25 * MIN),
-      endedAt: ago(5 * MIN),
-      outcome: 'ok',
-    });
-    expect(run.queueMs).toBe(5 * MIN);
-    expect(run.runMs).toBe(20 * MIN);
-  });
-
-  it('排队时就被叫停：排队时长算到结束，干活时长为空', async () => {
-    const run = await addRun(t.db, {
-      taskId,
-      routeId: 'r1',
-      queuedAt: ago(30 * MIN),
-      endedAt: ago(10 * MIN),
-      outcome: 'stopped',
-    });
-    expect(run.queueMs).toBe(20 * MIN);
-    expect(run.runMs).toBeNull();
-  });
-
-  it('时长列不许手写', async () => {
-    await expectViolation(
-      t.client.query(
-        `insert into session_runs (task_id, stage, route_id, why_route, queue_ms) values ($1, 'execute', 'r1', 'x', 5)`,
-        [taskId],
-      ),
-      'cannot insert a non-DEFAULT value into column "queue_ms"',
+  // 老会话表的约束（时长生成列、子任务属于需求、缓存非负……）随表一起没了（#2357）；runs 自己的约束在 runs 的测试里，
+  // 追问挂会话的外键在下面「追问」那一组。
+  it('老会话表和进度表已经没了', async () => {
+    const { rows } = await t.client.query<{ name: string }>(
+      `select tablename as name from pg_tables where schemaname = 'public' and tablename in ('session_runs', 'progress_events')`,
     );
-  });
-
-  it('结束了就必须有结局，有结局就必须已结束', async () => {
-    await expectViolation(
-      addRun(t.db, { taskId, routeId: 'r1', endedAt: NOW }),
-      'session_runs_outcome_iff_ended',
-    );
-    await expectViolation(
-      addRun(t.db, { taskId, routeId: 'r1', outcome: 'ok' }),
-      'session_runs_outcome_iff_ended',
-    );
-  });
-
-  it('开工不能早于排队', async () => {
-    await expectViolation(
-      addRun(t.db, { taskId, routeId: 'r1', queuedAt: ago(MIN), startedAt: ago(2 * MIN) }),
-      'session_runs_started_after_queued',
-    );
-  });
-
-  it('子任务必须属于会话写的那个需求', async () => {
-    const repo = await addRepo(t.db);
-    const other = await addTask(t.db, repo.id);
-    const foreign = await addSubtask(t.db, other.id);
-    await expectViolation(
-      addRun(t.db, { taskId, subtaskId: foreign.id, routeId: 'r1' }),
-      'session_runs_subtask_in_task_fk',
-    );
-  });
-
-  it('帅位、考新模型的会话可以不属于任何需求；但写了子任务就必须写需求', async () => {
-    const marshal = await addRun(t.db, {
-      taskId: null,
-      stage: 'research',
-      routeId: 'r1',
-      whyRoute: '帅位诊断',
-    });
-    expect(marshal.taskId).toBeNull();
-    const sub = await addSubtask(t.db, taskId);
-    await expectViolation(
-      addRun(t.db, { taskId: null, subtaskId: sub.id, routeId: 'r1' }),
-      'session_runs_subtask_needs_task',
-    );
-  });
-
-  it('token 和花费不知道就是空，不记成 0', async () => {
-    const run = await addRun(t.db, { taskId, routeId: 'r1' });
-    expect([run.inputTokens, run.outputTokens, run.costUsd]).toEqual([null, null, null]);
-    expect([run.cacheReadTokens, run.cacheWriteTokens]).toEqual([null, null]);
-  });
-
-  it('缓存读写不能是负数', async () => {
-    await expectViolation(
-      addRun(t.db, { taskId, routeId: 'r1', cacheReadTokens: -1 }),
-      'session_runs_cache_nonneg',
-    );
-    await expectViolation(
-      addRun(t.db, { taskId, routeId: 'r1', cacheWriteTokens: -5 }),
-      'session_runs_cache_nonneg',
-    );
-    const zero = await addRun(t.db, { taskId, routeId: 'r1', cacheReadTokens: 0, cacheWriteTokens: 0 });
-    expect([zero.cacheReadTokens, zero.cacheWriteTokens]).toEqual([0, 0]);
-  });
-
-  it('请求的模型（看路由）和上游实际用的模型分开记', async () => {
-    const run = await addRun(t.db, { taskId, routeId: 'r1', actualModel: 'claude-sonnet-fallback' });
-    const [row] = await t.db
-      .select({ requested: routes.modelId, actual: sessionRuns.actualModel })
-      .from(sessionRuns)
-      .innerJoin(routes, eq(routes.id, sessionRuns.routeId))
-      .where(eq(sessionRuns.id, run.id));
-    expect(row).toEqual({ requested: 'opus-5.5', actual: 'claude-sonnet-fallback' });
-  });
-
-  it('plan 进度的载荷必须是 { steps: [...] }（和 fleet plan 的请求体同形）', async () => {
-    const run = await addRun(t.db, { taskId, routeId: 'r1' });
-    for (const payload of [[{ title: '写测试', state: 'in_progress' }], { steps: 'x' }, {}, null]) {
-      await expectViolation(
-        t.db.insert(progressEvents).values({ runId: run.id, kind: 'plan', payload }),
-        'progress_events_plan_has_steps',
-      );
-    }
-    await t.db.insert(progressEvents).values({
-      runId: run.id,
-      kind: 'plan',
-      payload: { steps: [{ title: '写测试', state: 'in_progress' }] },
-    });
+    expect(rows).toEqual([]);
   });
 });
 

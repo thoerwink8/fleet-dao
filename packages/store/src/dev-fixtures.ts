@@ -305,28 +305,6 @@ export function devFixtures(now: Date): Partial<MemoryData> {
         prNumber: 39,
       },
     ],
-    progress: [
-      {
-        id: '1',
-        runId: IDS.run1,
-        at: ago(10),
-        kind: 'say',
-        payload: { text: '正在写验证码过期的测试' },
-      },
-      {
-        id: '2',
-        runId: IDS.run1,
-        at: ago(3),
-        kind: 'plan',
-        payload: {
-          steps: [
-            { title: '读需求和方案', state: 'done' },
-            { title: '写验证码过期的测试', state: 'in_progress' },
-            { title: '实现发送和校验接口', state: 'pending' },
-          ],
-        },
-      },
-    ],
     jobs: [
       { id: 'job-quota', name: '额度读取', schedule: '每 15 分钟', expectEveryMinutes: 20 },
       { id: 'job-reconcile', name: '每小时对账', schedule: '每小时', expectEveryMinutes: 75 },

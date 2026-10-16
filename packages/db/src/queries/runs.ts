@@ -56,6 +56,8 @@ export interface RunInsert {
   failureReason?: string | null;
   prNumber?: number | undefined;
   branch?: string | undefined;
+  /** 会话起在哪个目录（工作树路径）；开跑、收场两次都要带，没给写回 NULL。 */
+  worktreePath?: string | undefined;
   workflowId?: string | undefined;
   temporalRunId?: string;
 }
@@ -576,6 +578,7 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     failureReason: row.failureReason ?? null,
     prNumber: row.prNumber ?? null,
     branch: row.branch ?? null,
+    worktreePath: row.worktreePath ?? null,
     workflowId: row.workflowId ?? null,
     temporalRunId: row.temporalRunId ?? null,
     retryOf: null,

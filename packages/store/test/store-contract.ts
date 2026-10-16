@@ -26,7 +26,6 @@ export interface StoreUnderTest {
 export type MakeStore = (data: Partial<MemoryData>, clock: { now: Date }) => Promise<StoreUnderTest>;
 
 const OTHER_UUID = '99999999-0000-4000-8000-000000000000';
-const TASKLESS_RUN = 'd0000000-0000-4000-8000-0000000000ff';
 /** 三段流水里不该算进 #13 的三笔：别的仓同号（记了别的仓的工作流编号）、记了别的单的 task_id（单号却也是 13）、task_id 和工作流编号都没记（分不出是哪个仓的）。 */
 const OTHER_REPO_SEG = 'd1000000-0000-4000-8000-0000000130ff';
 const OTHER_TASK_SEG = 'd1000000-0000-4000-8000-0000000130fe';
@@ -54,17 +53,6 @@ function contractData(): Partial<MemoryData> {
   data.users = (data.users ?? []).map((u) =>
     u.id === IDS.founderB ? { ...u, feishuUnionId: 'on_founder_b' } : u,
   );
-  data.runs = [
-    ...(data.runs ?? []),
-    {
-      id: TASKLESS_RUN,
-      stage: 'judge',
-      routeId: 'rt-claude-opus',
-      whyRoute: '帅位会话',
-      queuedAt: ago(5),
-      startedAt: ago(4),
-    },
-  ];
   data.segmentRuns = [
     ...(data.segmentRuns ?? []),
     {
@@ -265,24 +253,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect((await fresh.store.listBans()).map((b) => b.reason)).toEqual(['先写的', '后写的']);
       });
 
-      it('listRuns：排队时刻并列时按编号', async () => {
-        const run = (id: string) => ({
-          id,
-          stage: 'judge' as const,
-          routeId: 'rt-claude-opus',
-          whyRoute: '并列',
-          queuedAt: ago(3),
-        });
-        const data = contractData();
-        // 写入先后 b、a，排队时刻相同：应读回 a、b。
-        data.runs = [...(data.runs ?? []), run(uuid(902)), run(uuid(901))];
-        const fresh = await make(data, clock);
-        const tail = (await fresh.store.listRuns({}))
-          .map((r) => r.id)
-          .filter((id) => id.startsWith('e0000000'));
-        expect(tail).toEqual([uuid(901), uuid(902)]);
-      });
-
       it('listPullRequests：merged 按合并时刻倒序，没读到合并时刻的排最后（不拿更新时刻顶），并列按编号倒序', async () => {
         const pr = (number: number, over: { mergedAt?: string; updatedAt: string }) => ({
           repoId: IDS.repo,
@@ -345,39 +315,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(subtasks.map((st) => [st.id, st.index, st.dependsOn])).toEqual([
           [IDS.sub12a, 0, []],
           [IDS.sub12b, 1, [IDS.sub12a]],
-        ]);
-      });
-
-      it('会话：按需求过滤时不含不属于需求的会话；只要没结束的；按排队先后排', async () => {
-        const all = await store.listRuns({});
-        expect(all.map((r) => r.id)).toEqual([IDS.run0, IDS.run1, TASKLESS_RUN]);
-        expect(all.find((r) => r.id === TASKLESS_RUN)?.taskId).toBeUndefined();
-        expect((await store.listRuns({ taskIds: [IDS.task12] })).map((r) => r.id)).toEqual([
-          IDS.run0,
-          IDS.run1,
-        ]);
-        expect((await store.listRuns({ taskIds: [IDS.task12], active: true })).map((r) => r.id)).toEqual([
-          IDS.run1,
-        ]);
-        expect(await store.listRuns({ taskIds: ['nope'] })).toEqual([]);
-        expect(await store.getRun(IDS.run1)).toMatchObject({ branch: 'fleet/12-a', subtaskId: IDS.sub12a });
-        expect(await store.getRun('run-1')).toBeNull();
-      });
-
-      it('会话的 token 读得回来，缓存读写单列；没读到的（花费、还在跑的那次的用量）不给，不是 0', async () => {
-        const done = await store.getRun(IDS.run0);
-        expect(done).toMatchObject({
-          inputTokens: 120_000,
-          outputTokens: 8_000,
-          cacheReadTokens: 1_450_000,
-          cacheWriteTokens: 64_000,
-        });
-        expect(done?.costUsd).toBeUndefined();
-        const running = await store.getRun(IDS.run1);
-        expect([running?.inputTokens, running?.cacheReadTokens, running?.cacheWriteTokens]).toEqual([
-          undefined,
-          undefined,
-          undefined,
         ]);
       });
 
@@ -457,55 +394,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         const stale = rows.find((r) => r.id === STALE_SEG);
         expect([stale?.endedAt, stale?.outcome, stale?.tier]).toEqual([undefined, undefined, undefined]);
         expect(Date.parse(stale?.startedAt ?? '')).toBe(T0.getTime() - 505 * MIN);
-      });
-    });
-
-    describe('进度', () => {
-      it('步骤清单以最近一次 fleet plan 为准，带序号；没报过的会话不在结果里', async () => {
-        const before = await store.getPlans([IDS.run1, IDS.run0]);
-        expect([...before.keys()]).toEqual([IDS.run1]);
-        expect(before.get(IDS.run1)?.steps.map((st) => [st.index, st.state])).toEqual([
-          [0, 'done'],
-          [1, 'in_progress'],
-          [2, 'pending'],
-        ]);
-        tick();
-        await store.savePlan(IDS.run1, [
-          { index: 0, title: '读需求和方案', state: 'done' },
-          { index: 1, title: '写实现', state: 'in_progress' },
-        ]);
-        const after = (await store.getPlans([IDS.run1])).get(IDS.run1);
-        expect(after?.steps.map((st) => st.title)).toEqual(['读需求和方案', '写实现']);
-        expect(after?.updatedAt).toBe(clock.now.toISOString());
-      });
-
-      it('最近一句进度', async () => {
-        expect((await store.lastSay(IDS.run1))?.text).toBe('正在写验证码过期的测试');
-        tick();
-        await store.appendProgress(IDS.run1, 'say', { text: '测试写好了' });
-        expect(await store.lastSay(IDS.run1)).toEqual({ text: '测试写好了', at: clock.now.toISOString() });
-        expect(await store.lastSay(IDS.run0)).toBeNull();
-      });
-
-      it('测试记录：按时间正序；结果认不出的（插头写了原因、或载荷坏了）也列出来、passed 为 null，不悄悄丢掉', async () => {
-        tick();
-        await store.appendProgress(IDS.run1, 'test', { passed: false, command: 'pnpm check' });
-        tick();
-        await store.appendProgress(IDS.run1, 'test', { passed: 'maybe' });
-        tick();
-        await store.appendProgress(IDS.run1, 'test', { passed: true });
-        tick();
-        await store.appendProgress(IDS.run1, 'test', {
-          command: 'pnpm check | tail',
-          unknownBecause: '带管道又没开 pipefail，退出码是管道最后一段的',
-        });
-        const runs = await store.listTestRuns(IDS.run1);
-        expect(runs.map((r) => [r.passed, r.command, r.unknownBecause])).toEqual([
-          [false, 'pnpm check', undefined],
-          [null, undefined, '记录里没有结果'],
-          [true, undefined, undefined],
-          [null, 'pnpm check | tail', '带管道又没开 pipefail，退出码是管道最后一段的'],
-        ]);
       });
     });
 
@@ -854,26 +742,6 @@ export function describeStoreContract(name: string, make: MakeStore): void {
     });
 
     describe('fleet 命令', () => {
-      it('会话：分支、做完标准（从需求来）、起会话时交代的测试命令；不属于需求的会话、看不懂的编号都没有', async () => {
-        // 测试命令是这次会话开工时记下的（session_runs.test_command），不是仓那一行给人看的旧值 pnpm check
-        expect(await store.getAgentSession(IDS.run1)).toEqual({
-          runId: IDS.run1,
-          taskId: IDS.task12,
-          subtaskId: IDS.sub12a,
-          stage: 'execute',
-          repoId: IDS.repo,
-          testCommand: 'pnpm test:changed',
-          branch: 'fleet/12-a',
-          acceptance: ['验证码 5 分钟过期', '同一手机号 60 秒内只能发一次'],
-        });
-        const planRun = await store.getAgentSession(IDS.run0);
-        expect(planRun?.endedAt).toBe(new Date(T0.getTime() - 20 * MIN).toISOString());
-        // 开工时没记（加这一列之前开的会话）：没有就是没有，不拿仓的命令顶
-        expect(planRun?.testCommand).toBeUndefined();
-        expect(await store.getAgentSession(TASKLESS_RUN)).toBeNull();
-        expect(await store.getAgentSession('run-1')).toBeNull();
-      });
-
       it('翻历史：每个词都要命中；只找本仓有需求文档索引的', async () => {
         expect(
           (await store.searchHistory({ repoId: IDS.repo, query: 'readme', limit: 5 })).map((h) => h.taskId),

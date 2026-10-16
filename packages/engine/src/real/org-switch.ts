@@ -57,8 +57,8 @@ export interface OrgSwitchSessions {
 
 /**
  * 「Fusion 会话端口」那一槽的生产值：老会话端口（startSession / awaitSession）已经删了，不会再有 Fusion 会话在这个进程里跑，
- * 所以停不用停、也没有要等的。仍然接上这一槽而不是不给，是因为 session_runs 里可能还留着没收场的老行：不给的话
- * unstoppable() 会把它们算成「停不下的在跑会话」，切号就一直等（#157 的老做法）；接上就不算。
+ * 所以停不用停、也没有要等的。仍然接上这一槽而不是不给：不给的话 unstoppable() 会把库里还开着、手上没有的老会话
+ * 算成「停不下的在跑会话」，切号就一直等（#157 的老做法）；接上就不算。（老会话表已在 #2357 删了。）
  */
 export const NO_FUSION_SESSIONS: OrgSwitchSessions = { stop: () => [], live: () => [] };
 
@@ -86,7 +86,7 @@ export const ORG_POOL_HOLD_OVERDUE_ALERT = `${SESSION_ORG_ALERT_PREFIX}pool-hold
 /** 切号账本认不出：引擎不切号，要人看（jobs/org-ledger.ts）。 */
 export const ORG_LEDGER_ALERT = `${SESSION_ORG_ALERT_PREFIX}ledger`;
 /**
- * 让选路停下以后等多久、再数一遍没结束的会话才切：选路派出去到起会话那一步登记（session_runs）之间隔着一次活动调度和几次查库，
+ * 让选路停下以后等多久、再数一遍没结束的会话才切：选路派出去到起会话那一步登记（runs 开跑那一行）之间隔着一次活动调度和几次查库，
  * 平时一两秒。切号一次（一个 5 小时窗口最多两次）Claude 停派这么久，换不让刚派的会话被切号掐断。
  */
 export const ORG_SWITCH_GRACE_MS = 15_000;

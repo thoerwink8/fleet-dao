@@ -164,6 +164,9 @@ describe('策略给了但不对就报错，不悄悄换成默认', () => {
     [{ fastReset: { '7d': { withinHours: 24, minRemaining: 0 } } }, /minRemaining/],
     [{ needPerTask: { '5h': 2 } }, /needPerTask/],
     [{ trialEnabled: 'yes' as never }, /trialEnabled/],
+    [{ trackScore: { byTier: 'yes' as never } }, /trackScore\.byTier/],
+    [{ trackScore: { priorTasks: 0 } }, /priorTasks/],
+    [{ trackScore: { qualityMargin: 2 } }, /qualityMargin/],
   ])('%j', (policy, message) => {
     expect(() => resolveRoutingPolicy(policy)).toThrow(message);
   });
@@ -173,5 +176,14 @@ describe('策略给了但不对就报错，不悄悄换成默认', () => {
     expect(p.needPerTask['5h']).toBe(0.2);
     expect(p.needPerTask['7d']).toBe(0.03);
     expect(p.trialEnabled).toBe(false);
+  });
+
+  it('trackScore 只改给了的项', () => {
+    const p = resolveRoutingPolicy({ trackScore: { byTier: false } });
+    expect(p.trackScore.byTier).toBe(false);
+    expect(p.trackScore.minTasks).toBe(5);
+    expect(p.trackScore.poorOneRoundRate).toBe(0.15);
+    expect(p.trackScore.priorTasks).toBe(4);
+    expect(p.trackScore.qualityMargin).toBe(0.08);
   });
 });

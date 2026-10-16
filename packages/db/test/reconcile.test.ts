@@ -125,7 +125,7 @@ describe('合了的 PR 和它对上的单的记账（mergedPrLedgers）', () => 
       taskId: task.id,
       routeId: route.id,
       branch: 'fleet/160-a',
-      stage: 'verify',
+      segment: 'verify',
     });
     // 同一张单更早一轮（别的分支）、没带分支的会话：不算这条 PR 的账
     await addRun(t.db, { taskId: task.id, routeId: route.id, branch: 'fleet/160-old' });
@@ -152,6 +152,8 @@ describe('合了的 PR 和它对上的单的记账（mergedPrLedgers）', () => 
     });
     expect(recent[0]?.sessions.map((s) => s.runId).sort()).toEqual([run.id, verify.id].sort());
     expect(recent[0]?.sessions.every((s) => s.endedAt === null && s.inputTokens === null)).toBe(true);
+    // 会话的「阶段」就是 runs 的段名（对题 / 动手 / 验收）
+    expect(recent[0]?.sessions.map((s) => s.stage).sort()).toEqual(['manual', 'verify']);
 
     const named = await mergedPrLedgers(t.db, {
       since: ago(DAY),
