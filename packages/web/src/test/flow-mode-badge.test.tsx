@@ -9,6 +9,7 @@ import type { TaskList, TaskListRow } from '../api/types';
 import { FlowModeTag } from '../components/flow-mode-tag';
 import { FarTicket } from '../components/home/board/nodes';
 import { RunningCard } from '../components/home/running-card';
+import { RunBlock } from '../components/home/today-blocks';
 import type { HomeRunning } from '../components/home/types';
 import TaskPage from '../routes/task';
 import TasksPage from '../routes/tasks';
@@ -137,6 +138,22 @@ describe('首页在跑卡片', () => {
     cleanup();
     renderApp(<RunningCard item={card()} />);
     expect(document.querySelector('[data-flow-mode]')).toBeNull();
+  });
+
+  test('主页「在跑的」一行：有值才标', async () => {
+    renderApp(
+      <RunBlock
+        running={[
+          card({ issueNumber: 1, title: '全程单', flowMode: 'full' }),
+          card({ issueNumber: 2, title: '三段单', flowMode: 'three' }),
+          card({ issueNumber: 3, title: '老单' }),
+        ]}
+      />,
+    );
+    const line = async (title: string) => (await screen.findByText(title)).closest('li');
+    expect((await line('#1 全程单'))?.querySelector('[data-flow-mode="full"]')?.textContent).toBe('全程');
+    expect((await line('#2 三段单'))?.querySelector('[data-flow-mode="three"]')?.textContent).toBe('三段');
+    expect((await line('#3 老单'))?.querySelector('[data-flow-mode]')).toBeNull();
   });
 
   test('看板远档卡片：有值才标', () => {
