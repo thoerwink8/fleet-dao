@@ -148,7 +148,11 @@ function parseAttention(text) {
     notes.push({ key: scrubText(n.key), level: n.level, title: scrubText(n.title) });
   }
   const localOrphans = parseLocalOrphans(v.localOrphans);
-  if (!localOrphans) return { ok: false, why: 'fleet-api attention 的 localOrphans 认不出（要是数组，每条有 repo、issue、labeledFor、reason）' };
+  if (!localOrphans)
+    return {
+      ok: false,
+      why: 'fleet-api attention 的 localOrphans 认不出（要是数组，每条有 repo、issue、labeledFor、reason）',
+    };
   return {
     ok: true,
     healthz: { code: h.code, red: h.red },
