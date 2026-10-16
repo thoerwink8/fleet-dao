@@ -80,7 +80,10 @@ export function expired(due: string, now: Date): boolean {
 /** 留在单上的那一句：带标记，重跑时按标记认出已经留过。 */
 function rollComment(from: string, to: string, why: string): { key: string; body: string } {
   const key = `<!-- fleet:version-cut ${milestoneVersion(from) ?? from}→${milestoneVersion(to) ?? to} -->`;
-  return { key, body: `${key}\n${why}，这张单还开着，挪到「${to}」接着做（packages/conventions/src/version-cut.ts）。` };
+  return {
+    key,
+    body: `${key}\n${why}，这张单还开着，挪到「${to}」接着做（packages/conventions/src/version-cut.ts）。`,
+  };
 }
 
 /**
@@ -105,7 +108,10 @@ export function rollOrder(
       .sort((a, b) => a - b);
   }
   // 标记之间整段按 wanted 重写：先清成空段，再一张张加（写法和认法都是 plan-view 那一份）
-  const blank = newDescription.replace(/<!--\s*fleet:order\s*-->[\s\S]*?<!--\s*\/fleet:order\s*-->/, ORDER_EMPTY);
+  const blank = newDescription.replace(
+    /<!--\s*fleet:order\s*-->[\s\S]*?<!--\s*\/fleet:order\s*-->/,
+    ORDER_EMPTY,
+  );
   if (blank === newDescription && !/<!--\s*fleet:order\s*-->/.test(newDescription)) {
     return { ok: false, problem: `新版说明里没有先后标记，接不上先后` };
   }
@@ -219,7 +225,9 @@ export async function cutVersions(gh: VersionCutGitHub, now: Date): Promise<CutR
       return r;
     }
     if (due === null) {
-      r.problems.push(`当前版本「${current.milestone.title}」没设到期日：在里程碑页上设一个（一周一版），设了才会到期自动收口`);
+      r.problems.push(
+        `当前版本「${current.milestone.title}」没设到期日：在里程碑页上设一个（一周一版），设了才会到期自动收口`,
+      );
     } else if (expired(due, now)) {
       const next = await openVersion(gh, current.version + 1, addDays(due, 1), addDays(due, WEEK), r);
       if (!next) return r;
@@ -270,7 +278,13 @@ async function openVersion(
 }
 
 /** 到期收口：挪单 → 接先后 → 写收口段 → 关旧版 → 回读。哪一步没成都记 failed、不往下走。 */
-async function rollOver(gh: VersionCutGitHub, from: Version, to: Version, now: Date, r: CutResult): Promise<void> {
+async function rollOver(
+  gh: VersionCutGitHub,
+  from: Version,
+  to: Version,
+  now: Date,
+  r: CutResult,
+): Promise<void> {
   const fromTitle = from.milestone.title;
   const toTitle = to.milestone.title;
   let issues: PlanIssue[];
@@ -303,7 +317,9 @@ async function rollOver(gh: VersionCutGitHub, from: Version, to: Version, now: D
   const why = `版本「${fromTitle}」到期收口（北京时间 ${beijingDate(now)}）`;
   const moved = await moveAll(gh, moving, fromTitle, to, why, r);
   if (moved.length !== moving.length) {
-    r.failed.push(`「${fromTitle}」还有 ${moving.length - moved.length} 张单没挪过去，旧版不关；下一轮接着挪`);
+    r.failed.push(
+      `「${fromTitle}」还有 ${moving.length - moved.length} 张单没挪过去，旧版不关；下一轮接着挪`,
+    );
     return;
   }
 
@@ -320,7 +336,9 @@ async function rollOver(gh: VersionCutGitHub, from: Version, to: Version, now: D
       const check = parseOrder(back.description);
       const got = check.ok ? check.order : [];
       if (got.join() !== next.order.join()) {
-        r.failed.push(`「${toTitle}」的先后改完回读对不上（要 ${next.order.join('、')}，读回来 ${got.join('、')}），旧版不关`);
+        r.failed.push(
+          `「${toTitle}」的先后改完回读对不上（要 ${next.order.join('、')}，读回来 ${got.join('、')}），旧版不关`,
+        );
         return;
       }
       to.milestone = back;
@@ -336,7 +354,9 @@ async function rollOver(gh: VersionCutGitHub, from: Version, to: Version, now: D
     const finalIssues = await gh.milestoneIssues(from.milestone.number);
     const left = finalIssues.filter((i) => i.state === 'open');
     if (left.length) {
-      r.failed.push(`「${fromTitle}」里又冒出开着的单 ${left.map((i) => `#${i.number}`).join('、')}，旧版不关；下一轮接着挪`);
+      r.failed.push(
+        `「${fromTitle}」里又冒出开着的单 ${left.map((i) => `#${i.number}`).join('、')}，旧版不关；下一轮接着挪`,
+      );
       return;
     }
     const section = cutSection({ issues: finalIssues, rolled, to: toTitle, head, at: now, done: true });
@@ -363,12 +383,21 @@ async function rollOver(gh: VersionCutGitHub, from: Version, to: Version, now: D
 }
 
 /** 已关的版本里还挂着开着的单（有人手工关了）：挪到当前版本、各留一句。 */
-async function sweepClosed(gh: VersionCutGitHub, closed: Version, current: Version, r: CutResult): Promise<void> {
+async function sweepClosed(
+  gh: VersionCutGitHub,
+  closed: Version,
+  current: Version,
+  r: CutResult,
+): Promise<void> {
   let left: number[];
   try {
-    left = (await gh.milestoneIssues(closed.milestone.number)).filter((i) => i.state === 'open').map((i) => i.number);
+    left = (await gh.milestoneIssues(closed.milestone.number))
+      .filter((i) => i.state === 'open')
+      .map((i) => i.number);
   } catch (e) {
-    r.failed.push(`读不到已关的「${closed.milestone.title}」里的单（${message(e)}），没核它还挂没挂着开着的单`);
+    r.failed.push(
+      `读不到已关的「${closed.milestone.title}」里的单（${message(e)}），没核它还挂没挂着开着的单`,
+    );
     return;
   }
   if (left.length === 0) return;

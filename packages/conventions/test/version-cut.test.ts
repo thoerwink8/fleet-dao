@@ -86,7 +86,11 @@ function fake(w: World, opts: { failMove?: number[] } = {}) {
 function world(): World {
   return {
     milestones: [
-      milestone(10, 'v3 旧版本', order(1), { state: 'closed', closedAt: '2026-10-05T00:00:00Z', dueOn: null }),
+      milestone(10, 'v3 旧版本', order(1), {
+        state: 'closed',
+        closedAt: '2026-10-05T00:00:00Z',
+        dueOn: null,
+      }),
       milestone(11, V4, `目标：统一。\n\n${order(20, 10, 40)}`, { dueOn: '2026-10-18T07:00:00Z' }),
     ],
     issues: [

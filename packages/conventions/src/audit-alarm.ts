@@ -51,8 +51,11 @@ function body(input: AlarmInput): string {
 }
 
 export async function followAlarm(gh: GitHubAlarmWriter, input: AlarmInput): Promise<AlarmOutcome> {
-  if (input.open === undefined) return { action: 'failed', why: '读不到开着的单，判不了「GitHub 对账没过」那张单开没开，这一轮没动它' };
-  const [existing, ...dupes] = input.open.filter((i) => i.title === ALARM_TITLE && !i.isPr).sort((a, b) => a.number - b.number);
+  if (input.open === undefined)
+    return { action: 'failed', why: '读不到开着的单，判不了「GitHub 对账没过」那张单开没开，这一轮没动它' };
+  const [existing, ...dupes] = input.open
+    .filter((i) => i.title === ALARM_TITLE && !i.isPr)
+    .sort((a, b) => a.number - b.number);
   try {
     if (!input.red) {
       if (!existing) return { action: 'none' };
@@ -73,6 +76,9 @@ export async function followAlarm(gh: GitHubAlarmWriter, input: AlarmInput): Pro
     if (input.milestone !== undefined) await gh.setIssueMilestone(n, input.milestone);
     return { action: 'opened', issue: n };
   } catch (e) {
-    return { action: 'failed', why: `「${ALARM_TITLE}」那张单没开成、没改成（${e instanceof Error ? e.message : String(e)}）` };
+    return {
+      action: 'failed',
+      why: `「${ALARM_TITLE}」那张单没开成、没改成（${e instanceof Error ? e.message : String(e)}）`,
+    };
   }
 }

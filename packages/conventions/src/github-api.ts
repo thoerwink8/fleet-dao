@@ -575,7 +575,11 @@ export function toPullBody(raw: unknown, what = 'PR'): PullBody {
     throw bad(`#${number} 的 merged_at`);
   if (!isObject(head) || typeof head.ref !== 'string') throw bad(`#${number} 的 head`);
   const { milestone } = raw;
-  if (milestone !== undefined && milestone !== null && !(isObject(milestone) && typeof milestone.title === 'string')) {
+  if (
+    milestone !== undefined &&
+    milestone !== null &&
+    !(isObject(milestone) && typeof milestone.title === 'string')
+  ) {
     throw bad(`#${number} 的 milestone`);
   }
   return {

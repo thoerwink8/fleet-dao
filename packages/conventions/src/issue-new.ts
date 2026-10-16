@@ -552,7 +552,9 @@ async function resolveMilestone(gh: Gh, want: string): Promise<Picked> {
     const [only, ...more] = versions;
     if (only !== undefined && more.length === 0) return only;
     const list = versions.map((m) => m.title).join('、') || '一个也没有';
-    throw new Error(`--milestone 当前：开着的 v<N> 版本该恰好一个，现在是 ${versions.length} 个（${list}），单没开。`);
+    throw new Error(
+      `--milestone 当前：开着的 v<N> 版本该恰好一个，现在是 ${versions.length} 个（${list}），单没开。`,
+    );
   }
   const exact = items.filter((m) => m.title === want);
   const phase = /^P\d+$/.test(want) ? Number(want.slice(1)) : undefined;
