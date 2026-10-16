@@ -1,5 +1,5 @@
-// 开会话钩子对待处理引导的两件事（决定 0093）：主人会话确定已不在的自动认领（只在认得出本会话血缘的指挥官会话）；
-// 挂了超过 24 小时、本会话接不了的进「要你拍的」。主人在不在由 founder-inbox.mjs 的 ownerPresence 按本机 Mirasim 记录判，判不了的不认。
+// 开会话钩子对没办完引导的两件事：挂了超过 24 小时、本会话接不了的写成指挥官自己接着办（决定 0097，不进「要你拍的」）；
+// 办没办完看挂的单，没有认领（#2727，认领和自动认领都删了）。主人在不在由 founder-inbox.mjs 的 ownerPresence 按本机 Mirasim 记录判。
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,11 +12,7 @@ const hook = (await import(pathToFileURL(join(HOOKS, 'session-start.mjs')).href)
   progressLines(
     r: { status: number | null; stdout: string; stderr: string },
     lineage: unknown,
-    o?: {
-      presence?: (owner: string) => Presence;
-      adopt?: (id: string, owner: string) => { ok: boolean };
-      now?: number;
-    },
+    o?: { now?: number },
   ): string[];
 };
 const inbox = (await import(pathToFileURL(join(HOOKS, 'founder-inbox.mjs')).href)) as {
@@ -34,51 +30,8 @@ const iso = (hAgo: number) => new Date(NOW - hAgo * 3_600_000).toISOString();
 const run = (rows: string[]) => ({ status: 0, stdout: `${rows.join('\n')}\n`, stderr: '' });
 const A = { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] };
 
-describe('自动认领和交给创始人拍', () => {
-  it('主人确定已不在的：起后台认领，按归本会话列；在的、判不了的不认', () => {
-    const adopted: string[] = [];
-    const lines = hook
-      .progressLines(
-        run([
-          `1\t${H}\t原话：走了的会话的\tdir-gone\t${iso(2)}`,
-          `2\t${H}\t原话：还在的\tdir-here\t${iso(2)}`,
-          `3\t${H}\t原话：判不了的\tdir-x\t${iso(2)}`,
-        ]),
-        A,
-        {
-          now: NOW,
-          presence: (o) => ({
-            state: o === 'dir-gone' ? 'gone' : o === 'dir-here' ? 'here' : 'unknown',
-            why: `${o} 的说法`,
-          }),
-          adopt: (id, owner) => {
-            adopted.push(`${id}:${owner}`);
-            return { ok: true };
-          },
-        },
-      )
-      .join('\n');
-    expect(adopted).toEqual(['1:dir-gone']);
-    expect(lines).toMatch(/后台正在替本会话认领.*1（dir-gone 的说法）/);
-    expect(lines).toContain('走了的会话的');
-    expect(lines).not.toContain('还在的');
-    expect(lines).toContain('别的会话还有 2 条');
-  });
-
-  it('【故意造出失败】认不出本会话血缘（不是指挥官会话）：一条也不认', () => {
-    let called = 0;
-    hook.progressLines(run([`1\t${H}\t原话：x\tdir-gone\t${iso(2)}`]), null, {
-      now: NOW,
-      presence: () => ({ state: 'gone', why: '' }),
-      adopt: () => {
-        called++;
-        return { ok: true };
-      },
-    });
-    expect(called).toBe(0);
-  });
-
-  it('挂了超过 24 小时、本会话接不了的写成指挥官自己认领，不出现「要你拍」；自己的、不满 24 小时的不进', () => {
+describe('挂久了的引导交给指挥官自己办', () => {
+  it('挂了超过 24 小时、本会话接不了的写成指挥官自己接着办（不用认领），不出现「要你拍」；自己的、不满 24 小时的不进', () => {
     const lines = hook
       .progressLines(
         run([
@@ -88,13 +41,16 @@ describe('自动认领和交给创始人拍', () => {
           `4\t${H}\t原话：新的别人的\tdir-b\t${iso(3)}`,
         ]),
         A,
-        { now: NOW, presence: () => ({ state: 'here', why: '' }), adopt: () => ({ ok: true }) },
+        { now: NOW },
       )
       .join('\n');
     expect(lines).not.toContain('要你拍');
     const ask = lines.split('\n').find((l) => l.includes('挂了超过 24 小时')) ?? '';
     expect(ask).toContain('指挥官自己的活，不用问创始人');
-    expect(ask).toContain('pnpm progress claim');
+    expect(ask).not.toContain('progress claim');
+    expect(ask).not.toContain('progress done');
+    expect(ask).toContain('不用认领');
+    expect(ask).toContain('把挂的单关掉');
     expect(ask).toContain('2 条挂了超过 24 小时');
     expect(ask).toContain('老的无主');
     expect(ask).toContain('老的别人的');
@@ -107,7 +63,7 @@ describe('自动认领和交给创始人拍', () => {
     const lines = hook.progressLines(
       run([`1\t${H}\t原话：${long}\t无主\t${iso(30)}`, `2\t${H}\t原话：新的无主\t无主\t${iso(1)}`]),
       A,
-      { now: NOW, presence: () => ({ state: 'here', why: '' }), adopt: () => ({ ok: true }) },
+      { now: NOW },
     );
     const text = lines.join('\n');
     expect(text.split('长'.repeat(40)).length - 1).toBe(1);
@@ -166,5 +122,20 @@ describe('ownerPresence：主人会话在不在', () => {
     expect(inbox.ownerPresence({ home: h, owner: 'x', now: NOW, env }).state).toBe('unknown');
     expect(inbox.ownerPresence({ home: h, owner: 'nobody', now: NOW, env }).state).toBe('unknown');
     expect(inbox.ownerPresence({ home: h, owner: '无主', now: NOW, env }).state).toBe('unknown');
+  });
+});
+
+describe('挂的单（#2727）', () => {
+  it('progress.ts 第 6 列是挂的单：开场里写「单 #N」；没有这一列的旧输出照常列', () => {
+    const lines = hook
+      .progressLines(
+        run([`1\t${H}\t原话：有单的\tdir-a\t${iso(2)}\t#2727`, `2\t${H}\t原话：没单的\tdir-a\t${iso(2)}`]),
+        A,
+        { now: NOW },
+      )
+      .join('\n');
+    expect(lines).toContain('1，单 #2727');
+    expect(lines).toContain('2（2026-10-14 16:00 +0800）没单的');
+    expect(lines).not.toContain('2，单');
   });
 });

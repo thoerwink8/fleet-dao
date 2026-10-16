@@ -1,7 +1,7 @@
 // 置顶单 #1055「进度与创始人引导」现在只管两件事（决定 0093：创始人引导搬进仓里 docs/directives/，见 ./directives.ts）：
 // - 进度流水：pnpm progress note 贴一条【进度】评论；pnpm progress read 读最近几条。
 // - 外面来的引导的收件箱：驾驶舱「要你拍」拍完（packages/api 的 decision-handoff.ts，法国上没有仓的写权限）仍往这里贴
-//   【创始人引导·待处理】评论。开会话钩子把它和仓里的待处理引导一起列；本机认领或办完它时先搬进仓（编号沿用评论号），
+//   【创始人引导·待处理】评论。开会话钩子把它和仓里的待处理引导一起列；pnpm progress directive --from-inbox <评论号> 把它搬进仓（编号沿用评论号、挂一张单），
 //   评论改成【创始人引导·已迁】并写上搬到哪。旧的引导（10-14 以前的 94 条）已整批搬进仓，这里留作只读归档。
 // 读的上限：不再从第一页读全量（原来读满 2000 条就报错，约 11-01 会撞）。收件箱只看最近 INBOX_DAYS 天里改过的评论
 // （GitHub 的 since 按更新时间筛；待处理的收件超过这么久没人动，开会话钩子早在 24 小时时就交给创始人拍了）；进度流水只读最后一页。
@@ -24,9 +24,9 @@ export const ownerLine = (owner: string): string => `〔主：${owner}〕`;
 export const INBOX_DAYS = 30;
 
 export const PROGRESS_USAGE =
-  '用法：pnpm progress note "<一句话进度>"｜pnpm progress directive ["<创始人原话>" --at "<时间>"] [--owner <会话目录名|无主>]' +
-  '（不给原话就从 prompt-log 取本会话他最近一句）｜pnpm progress claim <编号> [--force --why "原会话为什么没了"]｜' +
-  'pnpm progress done <编号> [--note "办成了什么"] [--drop]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
+  '用法：pnpm progress note "<一句话进度>"｜pnpm progress directive ["<创始人原话>" --at "<时间>"] [--owner <会话目录名|无主>] [--issue <单号>]' +
+  '（不给原话就从 prompt-log 取本会话他最近一句；不给 --issue 就顺手开一张单，引导办没办完看这张单开着还是关了）｜' +
+  'pnpm progress directive --from-inbox <收件箱评论号> [--issue <单号>]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
 
 /** 参数不对、评论不是该办的那种：拒绝。入口退出码 1。 */
 export class ProgressRefused extends Error {
@@ -184,7 +184,7 @@ export async function readInboxComment(id: number, deps: ProgressDeps): Promise<
 /** 收件箱里的一条搬进仓以后：第一行换成【创始人引导·已迁】，下面写搬到哪。改完回读核对。 */
 export async function markMigrated(c: ProgressComment, where: string, deps: ProgressDeps): Promise<void> {
   const rest = c.body.trimStart().slice(c.head.length);
-  const next = `${MIGRATED_TAG}${c.head.slice(PENDING_TAG.length)}${rest}\n\n已迁到仓里：${where}（以后在那里认领、办完）`;
+  const next = `${MIGRATED_TAG}${c.head.slice(PENDING_TAG.length)}${rest}\n\n已迁到仓里：${where}（办没办完看它挂的单）`;
   const res = await deps.gh([
     'api',
     '-X',
