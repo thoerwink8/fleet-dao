@@ -60,12 +60,12 @@ export interface FloorDecision {
 }
 
 /**
- * 没标强弱档的模型：认不出强弱，照决定 0099「没标档照以前」不按下限挡（标档在 deploy/catalog.json）。
- * 标了的才比。
+ * 够不够这一档。没标强弱档的模型认不出强弱，按不够格算（#2725 收尾）：下限是保证，认不出的不能当够格；
+ * 去 deploy/catalog.json 标档。人在驾驶舱点名、钉住的照旧放行（不经这里）。
  */
 function meets(route: RouteFacts, floor: ModelStrength): boolean {
   const s = route.strength ?? null;
-  return s === null || RANK[s] >= RANK[floor];
+  return s !== null && RANK[s] >= RANK[floor];
 }
 
 /** 一条路由此刻派不出、2 小时内也好不了：硬挡，或在等（不是等空位）且等的时刻不知道（额度）或在 2 小时以后。 */
@@ -80,7 +80,7 @@ function stuck(blocks: readonly Block[], now: number): boolean {
 
 /**
  * 下限硬过滤：rows 是这一用途的候选（含已经被别的原因挡着的）。
- * 够格（强弱档不低于下限，或没标档）的里面有一条不是「硬挡、2 小时内好不了」，就照下限挡；
+ * 够格（标了强弱档、不低于下限）的里面有一条不是「硬挡、2 小时内好不了」，就照下限挡；
  * 够格的全都派不出（或一条够格的都没有）时降一档，降到轻档就不降（轻档永远不接有下限的单）。
  */
 export function applyFloor(
@@ -111,7 +111,16 @@ export function applyFloor(
   const below = new Map<string, Block>();
   for (const r of rows) {
     if (meets(r.route, effective)) continue;
-    const s = r.route.strength as ModelStrength;
+    const s = r.route.strength ?? null;
+    if (s === null) {
+      below.set(r.route.routeId, {
+        code: 'below-floor',
+        text: `没标强弱档，够不上能力下限：去 deploy/catalog.json 标档（${r.route.modelName}，${work}要${LABEL[effective]}${effective === 'strong' ? '' : '以上'}）`,
+        wait: null,
+        until: null,
+      });
+      continue;
+    }
     const tail =
       effective === floor
         ? `${work}要${LABEL[floor]}${floor === 'strong' ? '' : '以上'}，${r.route.modelName} 是${LABEL[s]}（额度剩多少都不放宽）`

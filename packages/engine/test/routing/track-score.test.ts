@@ -9,7 +9,11 @@ import {
   resolveRoutingPolicy,
 } from '../../src/routing/index.ts';
 import { modelOrder, scoreOf, tierQuality } from '../../src/routing/rank.ts';
-import { entry, input, route } from './helpers.ts';
+import { route as anyRoute, entry, input } from './helpers.ts';
+
+// 这里只测按战绩排模型，不测能力下限（#2725）：路由都标成强档，主力档、中档的下限不挡它们，模型先后照战绩
+const route = (routeId: string, over: Partial<RouteFacts> = {}): RouteFacts =>
+  anyRoute(routeId, { strength: 'strong', ...over });
 
 const track = (
   modelId: string,
