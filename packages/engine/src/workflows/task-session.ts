@@ -442,10 +442,13 @@ export async function writeSession(
       // 只有人能修的码不在名单里。老历史没有 auto-redispatch-session，照旧停下；没有 avoid-scope-by-cause，仍避开模型和它那一族。
       const code = failure.code.toLowerCase();
       const listed = AUTO_REDISPATCH_CODES.includes(code);
+      // model_mismatch 是新增的自动换路行为；单独加标记，避免在途任务重放时把原本要报人的失败改成重派。
+      const modelMismatchRedispatch = code === 'model_mismatch' && patched('model-mismatch-redispatch');
+      const eligible = listed && (code !== 'model_mismatch' || modelMismatchRedispatch);
       // 写在 auto-redispatch-session 之前、且 redispatched 为假时短路：老历史重派过一次之后不会多调这个标记。
       const escalate =
-        redispatched && listed && patched('avoid-scope-by-cause') && rt.infraCanEscalate(route, code);
-      if ((escalate || !redispatched) && listed && patched('auto-redispatch-session')) {
+        redispatched && eligible && patched('avoid-scope-by-cause') && rt.infraCanEscalate(route, code);
+      if ((escalate || !redispatched) && eligible && patched('auto-redispatch-session')) {
         if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
         redispatched = true;
         stick = undefined;
