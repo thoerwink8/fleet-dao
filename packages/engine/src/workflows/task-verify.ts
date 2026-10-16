@@ -118,7 +118,7 @@ function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): Cold
   }
   const prior = rt.verifyRecheck;
   // 老历史重放：标记不在历史里，patched() 为假，入参和原来一字不差。
-  if (!patched('verify-recheck') || prior === null || prior.head === headSha || prior.problems.length === 0) {
+  if (!patched('verify-recheck') || prior === null || prior.problems.length === 0) {
     return input;
   }
   return {

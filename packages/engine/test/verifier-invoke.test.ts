@@ -1548,11 +1548,24 @@ describe('第 2 轮只复核上轮没过的条和增量', () => {
     priorProblems: ['没做到验收条：第 1 条：没有 A'],
   };
 
-  it('第 2 轮没有复核材料：拒绝退回整张 PR 从头判', async () => {
+  it('旧工作流第 2 轮没有复核材料：仍可按旧输入兼容运行', async () => {
     const { oneShot } = fakeOneShot(done(MODEL_STDOUT_PASS));
-    await expect(invokeVerifier({ ...BASE_INPUT, round: 2 }, DEPS(oneShot))).rejects.toThrow(
-      '第 2 轮必须带上一轮没过的验收条和问题原话',
+    const out = await invokeVerifier({ ...BASE_INPUT, round: 2 }, DEPS(oneShot));
+    expect(out.pass).toBe(true);
+    expect(out.round).toBe(2);
+  });
+
+  it('第 2 轮头没变：空的增量 diff 仍按复核材料运行，不当成读不到 diff', async () => {
+    const { oneShot } = fakeOneShot(done(MODEL_STDOUT_PASS));
+    const out = await invokeVerifier(
+      { ...BASE_INPUT, round: 2, recheck },
+      {
+        ...DEPS(oneShot),
+        fetchDiff: async () => ({ diffText: '', changedFiles: [] }),
+      },
     );
+    expect(out.pass).toBe(true);
+    expect(out.round).toBe(2);
   });
 
   it('提示词带上轮没过的条、增量 diff，判法写成只复核那一句；并允许在 PR 头的完整检出里读文件', async () => {

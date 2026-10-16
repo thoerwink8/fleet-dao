@@ -94,8 +94,8 @@ export const VerifierInvokeInputSchema = z
      */
     recheck: z
       .object({
-        failedCriteria: z.array(z.number().int().positive()).min(1),
-        priorProblems: z.array(z.string()).min(1),
+        failedCriteria: z.array(z.number().int().positive()),
+        priorProblems: z.array(z.string()),
       })
       .optional(),
     /**
@@ -118,11 +118,7 @@ export const VerifierInvokeInputSchema = z
       message: '作者族一个都没有：不知道该避开谁，没法保证换了家族',
       path: ['modelFamiliesAvoid'],
     },
-  )
-  .refine((v) => v.round !== 2 || v.recheck !== undefined, {
-    message: '第 2 轮必须带上一轮没过的验收条和问题原话',
-    path: ['recheck'],
-  });
+  );
 export type VerifierInvokeInput = z.infer<typeof VerifierInvokeInputSchema>;
 
 /** 输出 zod：pass / fail + 问题清单。 */
@@ -992,7 +988,7 @@ export async function invokeVerifier(
       round: parsed.round,
     };
   }
-  if (diff.diffText.trim() === '') {
+  if (parsed.round === 1 && diff.diffText.trim() === '') {
     return {
       pass: false,
       problems: ['读不到 diff：fetchDiff 返回了空 diff（不许拿空当「没改动所以没挡的」）'],
@@ -1000,7 +996,7 @@ export async function invokeVerifier(
       round: parsed.round,
     };
   }
-  if (diff.changedFiles.length === 0) {
+  if (parsed.round === 1 && diff.changedFiles.length === 0) {
     return {
       pass: false,
       problems: ['读不到 diff：fetchDiff 返回了空 changedFiles（没改任何文件就是没干活）'],
