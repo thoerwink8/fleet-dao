@@ -1,15 +1,15 @@
 // 每小时对账（design 第六节「断链怎么被发现」第 4 层）：一轮 = 记下开始 → 工作树（jobs/worktree-sweep.ts：没有在跑的任务
 // 在用的树，什么都不剩的删掉，剩着没推的东西的报要人拍）→ 核对（jobs/reconcile-checks.ts：合了的
-// PR 都记了账、撤掉随 Fusion 删了的那一处核对留下的旧提醒；额度读数那处等 #76）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、卡住报警超过 24 小时没人处理的再推一次、同一条立案）
+// PR 都记了账、撤掉随 Fusion 删了的那一处核对留下的旧提醒；额度读数那处等 #76）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、不再另写再提醒、卡住报警超过 24 小时没人处理的立案）
 // → 单已关且停下等人的发放弃信号并撤挂起提醒（jobs/closed-issue-tasks.ts，#1198 / #1816）
 // → GitHub 两个机器人的权限自检（jobs/github-app-check.ts：缺的、没查成的报提醒，好了自己撤）
 // → 整池暂停到期的飞书（jobs/pool-hold-push.ts：没配、没推成记没查成，不当成推过；不给 poolHoldPush 的单测这一项跳过）
 // → 主线红的飞书（jobs/main-red-push.ts：变红推一次、转绿推已恢复；没配、没推成、运行列表读不到记没查成，不当成推过；不给 mainRedPush 的单测这一项跳过）
 // → 结局记进 schedule_runs。
-// 核对在提醒之前：它新报的提醒这一轮还不满 24 小时，不会被再推；权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰。
+// 核对在提醒之前：它新报的提醒这一轮还不满 24 小时，不会被立案；权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰。
 // scanned = 看了几个对象（树、探针目录、审到的合并 PR、对上单的合并 PR、没处理的提醒、
 // 机器人 × 仓），found = 处理了几个问题（删掉的树、改成要人拍的树、合并 PR 对上的问题、记账不全的
-// PR、撤掉的过时提醒、再推的提醒、立的单、权限不对的和撤掉的权限提醒）。一部分没跑成、只查了一部分，照实记 failed / partial，
+// PR、撤掉的过时提醒、收掉的旧再提醒、立的单、权限不对的和撤掉的权限提醒）。一部分没跑成、只查了一部分，照实记 failed / partial，
 // 写明哪里没查成；不记成 ok（没跑成 ≠ 没问题）。
 
 import type { AlertRow, ScheduleResult } from '@fleet-dao/db';
@@ -142,7 +142,7 @@ function skipRepos<T extends { owner: string; name: string }>(
 }
 
 async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
-  // 工作树先跑（它撤的「工作树没收掉」，提醒那部分就不再为它再推）；两部分各列一次没处理的提醒
+  // 工作树先跑（它撤的「工作树没收掉」，提醒那部分就不再为它立案）；两部分各列一次没处理的提醒
   let before: AlertRow[] | null = null;
   try {
     before = (await listOpen(deps)).alerts;
@@ -159,7 +159,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
       trees.unchecked.push(`工作树清单没存成（资源页上还是上一份）：${errMessage(err)}`);
     }
   }
-  // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会再推它们
+  // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会立案
   const retired = await retireWorkflowAlerts(deps);
   // 已知没装机器人的仓（有开着的 github-app-missing 提醒）：读不了是意料之中，两处读 PR 的核对跳过，why 里交代一句
   const skip = await knownNotInstalled(deps);

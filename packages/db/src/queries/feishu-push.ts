@@ -14,7 +14,7 @@
 //   开满多久按 created_at 算：同一个键撤了又重开，created_at 不变，重开那一刻若已过线、之前又没推过，会马上推（反复冒出来不算自愈）。
 // - 看门狗判「推送不通」用 feishuPushFacts：有该推的过了 1 小时还没送到，而且这 1 小时里一条都没送成；或者后端记下的推送状态是「没配」。
 // - 推送状态（设置表 feishu.push）由后端写：configured=false 时 why 写清缺什么。没这一行 = 后端还没跑过推送（不单独当成坏了）。
-// - 指挥官巡检（agents/skills/commander/scripts/patrol-lib.mjs 的 PUSHABLE_SINCE）照这里写了一份 SQL，改判法两边一起改。
+// - 指挥官巡检不再另抄一份 SQL（#2370）：法国上 fleet-api attention 用这里的 feishuPushableSince，巡检只读那一份结论。改判法只改这里。
 import { and, eq, gte, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { notificationDeliveries, notifications, settings } from '../schema/index.ts';

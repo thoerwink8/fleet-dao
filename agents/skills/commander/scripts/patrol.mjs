@@ -1,11 +1,12 @@
 // 法国只读巡查，命令行（决定 0034，#1372）：node patrol.mjs [--baseline <文件>] | --selftest
 // 判法全在 patrol-lib.mjs；这里只接 ssh、本机时钟和基线文件。最后一行是 VERDICT，退出码 0 OK、1 ALERT、2 BROKEN。
-// 读不到法国时，VERDICT 前多一行显眼中文：原因，以及该看香港状态页（法国上的看门狗这时一起哑）。
+// 读不到法国时，VERDICT 前多一行显眼中文：原因，以及该看香港状态页（法国上的看门狗这时一起哑）；本机配了香港状态页地址就顺手 curl 一次再多一行。
+// 法国上只跑 fleet-api attention --json（引擎的结论），判法不在这里抄（#2370）。
 // 用 exitCode 不用 process.exit：输出接到管道上时，exit 可能把没写完的截掉。
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
-import { DEFAULT_BASELINE, fetchFrance, runPatrol, selftest } from './patrol-lib.mjs';
+import { DEFAULT_BASELINE, fetchFrance, readHkStatus, runPatrol, selftest } from './patrol-lib.mjs';
 import { trainAlertNote } from './train-state-lib.mjs';
 
 const isAlive = (/** @type {number} */ pid) => {
@@ -45,6 +46,8 @@ async function main(argv) {
     fetchRaw: () =>
       fetchFrance({ home: homedir(), env: process.env, readText: (f) => readFileSync(f, 'utf8') }),
     now: () => new Date(),
+    hkStatus: () =>
+      readHkStatus({ home: homedir(), env: process.env, readText: (f) => readFileSync(f, 'utf8') }),
     trainNote: () => trainAlertNote({ home: homedir(), now: new Date(), isAlive, host: hostname() }),
     loadBaseline: () => {
       try {

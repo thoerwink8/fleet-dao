@@ -369,7 +369,7 @@ export function hourlyReconcileJob(
   // 受管的仓：两处核对里审合并的 PR、机器人权限自检都按这一份（库里的 repos 表）
   const managedRepos = async () =>
     (await listManagedRepos(w.db)).map((r) => ({ owner: r.owner, name: r.name, ciPolicy: r.ciPolicy }));
-  // 谁在处理（24 小时再推不给有人在处理、静默了的推）：和驾驶舱同一个口子、同一份判法（原来还有提醒派单，#445 删掉了）
+  // 谁在处理（24 小时立案不给有人在处理、静默了的开）：和驾驶舱同一个口子、同一份判法（原来还有提醒派单，#445 删掉了）
   const alertWork = pgAlertWork(w.db, () => deployFacts(readDeployLagInput()));
   const handling: HourlyReconcileJobDeps['handling'] = async (ids) => {
     const r = await handlingOf(alertWork, ids);

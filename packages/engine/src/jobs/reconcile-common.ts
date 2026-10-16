@@ -73,7 +73,7 @@ export interface SweepPart {
   failed?: string;
   /** 看了几个对象。 */
   scanned: number;
-  /** 发现、处理了几个问题（删掉的残留树、改成要人拍的树、撤掉的过时提醒、再推的提醒、立的单）。 */
+  /** 发现、处理了几个问题（删掉的残留树、改成要人拍的树、撤掉的过时提醒、收掉的旧再提醒、立的单）。 */
   found: number;
   /** 没查成的，一条一句：照实写进这一轮的 why，这一轮不记 ok。 */
   unchecked: string[];
