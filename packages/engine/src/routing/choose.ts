@@ -198,7 +198,7 @@ function whyFirst(stageName: string, chosen: Judged, judged: Judged[]): string {
   ];
   const at = judged.indexOf(chosen);
   if (item.fast) {
-    const fast = item.nudges.find((n) => n.kind === 'fast-reset');
+    const fast = item.nudges.find((n) => n.kind === 'fast-reset' || n.kind === 'pace-behind');
     if (fast && item.humanIndex > at)
       parts.push(fast.text.replace(/往前提$/, at === 0 ? '提到最前' : `提到第 ${at + 1}`));
   }
@@ -214,7 +214,7 @@ function whyFirst(stageName: string, chosen: Judged, judged: Judged[]): string {
       j.blocks.length > 0
         ? j.blocks.map((b) => b.text).join('、')
         : j.item.nudges
-            .filter((n) => n.kind !== 'fast-reset')
+            .filter((n) => n.kind !== 'fast-reset' && n.kind !== 'pace-behind')
             .map((n) => n.text)
             .join('、') || '排到了后面';
     return `第 ${j.item.humanIndex + 1} 条 ${routeLabel(j.item.route)}：${cause}`;

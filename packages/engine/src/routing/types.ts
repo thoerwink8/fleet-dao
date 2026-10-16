@@ -286,10 +286,19 @@ export interface Block {
 }
 
 /**
+ * pace-behind / pace-ahead：按消耗进度（#2363）落后够多往前提 / 超前够多往后放，文案里写按时间该用和实际用了几成；
+ * fast-reset：pace 关着时的老排法，快清零还没用完往前提。
  * track-score：这个模型的动手战绩分（每单期望分钟、一轮做成率），按它在模型之间挪了位置也写在这里；
  * poor-one-round：一轮做成率明显差，不进这个用途（别的都派不了、也不是只差空位时兜底）。
  */
-export type Nudge = 'fast-reset' | 'poor-record' | 'quota-unknown' | 'track-score' | 'poor-one-round';
+export type Nudge =
+  | 'fast-reset'
+  | 'pace-behind'
+  | 'pace-ahead'
+  | 'poor-record'
+  | 'quota-unknown'
+  | 'track-score'
+  | 'poor-one-round';
 
 /** 每条路由的判定，按它写「这次为什么派 / 不派它」。 */
 export interface RouteVerdict {

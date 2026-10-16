@@ -5,7 +5,7 @@ import { createMockApi } from '../api/mock/server';
 import type { QuotaWindowView } from '../api/types';
 import QuotaPage from '../routes/quota';
 import { openSummary, renderApp } from '../test/harness';
-import { amountPair, QuotaCell } from './quota';
+import { amountPair, QuotaCell, QuotaLine } from './quota';
 
 afterEach(cleanup);
 
@@ -281,12 +281,60 @@ describe('额度页金额和窄表', () => {
     renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
     const used = await screen.findByText('$61.20');
     const line = used.closest('[data-quota-line]') as HTMLElement;
-    // 字一行（flex）、条一行：格子里只有窗口名（宽屏藏）、这一行字、条这三块
-    expect(line.children).toHaveLength(3);
+    // 字一行（flex）、条一行、消耗进度一行（#2363）：格子里只有窗口名（宽屏藏）、这一行字、条、进度这四块
+    expect(line.children).toHaveLength(4);
     expect(line.children[1]?.textContent).toContain('$61.20');
     expect(line.children[1]?.textContent).toContain('/ $100');
     expect(line.children[1]?.textContent).toContain('清零');
     expect(within(line.children[2] as HTMLElement).getByText('实读')).toBeTruthy();
+    expect(line.children[3]?.textContent).toMatch(/^按时间该用 \d+%，实际 61%/);
+  });
+});
+
+describe('消耗进度一行（#2363）', () => {
+  function line(w: Partial<QuotaWindowView> & Pick<QuotaWindowView, 'window'>) {
+    const full: QuotaWindowView = {
+      stale: false,
+      label: w.window,
+      unit: 'percent',
+      source: 'claude-usage',
+      reading: 'measured',
+      readAt: at(-4),
+      ...w,
+    };
+    const { container } = render(<QuotaLine w={full} now={NOW} />);
+    return container.querySelector('[data-quota-pace]');
+  }
+
+  test('周窗：已用 75%、过了 62%，写「按时间该用 62%，实际 75%」并标黄', () => {
+    const el = line({ window: '7d', utilization: 0.75, resetsAt: at(0.38 * 7 * 1440) });
+    expect(el?.textContent).toBe('按时间该用 62%，实际 75%');
+    expect(el?.className).toContain('text-ink-stall');
+  });
+
+  test('Cursor 桶推不出窗口长度：按 30 天估并写明', () => {
+    const el = line({
+      window: 'other',
+      label: 'auto_percent',
+      scope: 'auto',
+      utilization: 0.13,
+      resetsAt: at(0.02 * 30 * 1440),
+    });
+    expect(el?.textContent).toBe('按时间该用 98%，实际 13%（按 30 天估）');
+    expect(el?.className).not.toContain('text-ink-stall');
+  });
+
+  test('额度页每个读到了用量和清零时刻的窗口都有这一行', async () => {
+    renderApp(<QuotaPage />, { api: createMockApi({ live: false }) });
+    await screen.findByText('$61.20');
+    expect(document.querySelectorAll('[data-quota-pace]').length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/^按时间该用 \d+%，实际 \d+%/).length).toBeGreaterThan(0);
+  });
+
+  test('清零时间、用量没读到或读数过期：不写这一行（不拿 0 顶）', () => {
+    expect(line({ window: '7d', utilization: 0.5 })).toBeNull();
+    expect(line({ window: '7d', resetsAt: at(600) })).toBeNull();
+    expect(line({ window: '7d', utilization: 0.5, resetsAt: at(600), stale: true })).toBeNull();
   });
 });
 
