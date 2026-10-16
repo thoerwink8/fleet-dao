@@ -329,6 +329,61 @@ export const pullRequests = pgTable(
   ],
 );
 
+/**
+ * 一轮动手怎么结束的（#2762）：引擎任务工作流每一轮收场时写一行（patched('round-outcome')），每日简报的「流程健康」按它算。
+ * merged 做成；verify_rejected 冷验收拒；ci_red CI 红（含等合并时必过检查红）；leftover 交活树里有剩；no_commit 没提交（含推的时候空交付）；
+ * push_conflict 推分支并主线冲突；merge_conflict 等 CI、等合并时和主线冲突；timeout 超时停下后被放弃；stopped 放弃、叫停；other 别的（卫生检查拦下……）。
+ * 同一条工作流里第几次收场（seq）只记一行：活动重试不重复写。
+ */
+export const ROUND_OUTCOMES = [
+  'merged',
+  'verify_rejected',
+  'ci_red',
+  'leftover',
+  'no_commit',
+  'push_conflict',
+  'merge_conflict',
+  'timeout',
+  'stopped',
+  'other',
+] as const;
+export type RoundOutcome = (typeof ROUND_OUTCOMES)[number];
+
+export const taskRounds = pgTable(
+  'task_rounds',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    workflowId: text('workflow_id').notNull(),
+    /** 这条工作流里第几次收场（从 1 起）：「继续」后轮数会从 0 再计，round 会重复，seq 不会。 */
+    seq: integer('seq').notNull(),
+    /** 工作流里的轮数（动手第几轮；「继续」后从 0 再计）。 */
+    round: integer('round').notNull(),
+    outcome: text('outcome').$type<RoundOutcome>().notNull(),
+    /** 派工档（fast / medium / heavyweight）；判不出是空。 */
+    tier: text('tier'),
+    /** 这一轮第一个派上的模型；一个会话都没派上是空。 */
+    firstModel: text('first_model'),
+    /** 收场时 PR 相对主线的新增行数（最近一次推上去的头）；还没推过、没量成是空。 */
+    addedLines: integer('added_lines'),
+    endedAt: timestamp('ended_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    unique('task_rounds_workflow_seq_unique').on(t.workflowId, t.seq),
+    // 名单和 ROUND_OUTCOMES 一字不差（test/task-rounds.test.ts 核对）
+    check(
+      'task_rounds_outcome_known',
+      sql`${t.outcome} in ('merged', 'verify_rejected', 'ci_red', 'leftover', 'no_commit', 'push_conflict', 'merge_conflict', 'timeout', 'stopped', 'other')`,
+    ),
+    check('task_rounds_seq_positive', sql`${t.seq} > 0`),
+    check('task_rounds_round_nonneg', sql`${t.round} >= 0`),
+    check('task_rounds_added_lines_nonneg', sql`${t.addedLines} is null or ${t.addedLines} >= 0`),
+    index('task_rounds_ended_at_idx').on(t.endedAt),
+  ],
+);
+
 /** specs/<编号>-<短名>/ 的索引，给 fleet history 翻历史需求。目录名在 tasks.spec_dir，这里只放文件里的摘要。 */
 export const specs = pgTable('specs', {
   taskId: uuid('task_id')

@@ -509,6 +509,28 @@ export async function changedFilesAgainst(t: UserTree, mainline: string, head: s
   return lines(await git(t, ['diff', '--name-only', `${mainline}...${head}`], '列分支相对主线改了哪些文件'));
 }
 
+/**
+ * 分支相对主线新增了多少行（git diff --numstat 主线...头 第一列相加，和 PR 在 GitHub 上的 additions 同口径；二进制文件记 0）。
+ * 每日简报「流程健康」的重活 PR 新增行 p90 按它算（#2762）。输出认不出照抛，不拿 0 顶。
+ */
+export async function addedLinesAgainst(t: UserTree, mainline: string, head: string): Promise<number> {
+  assertSha(mainline, '主线');
+  assertSha(head, '头');
+  const out = lines(await git(t, ['diff', '--numstat', `${mainline}...${head}`], '数分支相对主线新增的行'));
+  let total = 0;
+  for (const line of out) {
+    const added = line.split('\t')[0] ?? '';
+    if (added === '-') continue;
+    if (!/^\d+$/.test(added)) {
+      throw new PortError('GIT_FAILED', `数新增行：numstat 有一行认不出（${line.slice(0, 80)}）`, {
+        retryable: false,
+      });
+    }
+    total += Number(added);
+  }
+  return total;
+}
+
 /** head 在不在 base 之后（base 是 head 的祖先）。 */
 export async function isAncestor(t: UserTree, base: string, head: string): Promise<boolean> {
   assertSha(base, '起点');

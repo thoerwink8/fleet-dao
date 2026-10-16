@@ -194,6 +194,8 @@ export async function writeSession(
       'implement',
       `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}${resumeNote}${picked.probeNote ? `；${picked.probeNote}` : ''}`,
     );
+    // 这一轮第一个派上的模型（#2762 流程健康记账，纯状态）
+    rt.roundFirstModel ??= route.modelId;
     // 这一段的起跑时刻：被暂停取消时拿不到执行编号，续会话凭它去库里找这一段
     const attemptAt = Date.now();
     let evidence: SegmentEvidence | null = null;

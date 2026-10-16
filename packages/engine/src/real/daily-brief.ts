@@ -7,6 +7,7 @@ import {
   executorLineStats,
   finishScheduleRun,
   openBriefNotes,
+  pipelineHealth,
   pullsByMergeSha,
   repoByName,
   startScheduleRun,
@@ -52,6 +53,7 @@ export function dailyBriefJob(w: {
     alerts: () => openBriefNotes(w.db, 'alert'),
     stopped: (from, to) => stoppedTasksBetween(w.db, from, to),
     lineStats: (at) => executorLineStats(w.db, at),
+    pipelineHealth: (to) => pipelineHealth(w.db, to),
     async publish(x) {
       await upsertAlert(w.db, { ...x, level: 'daily', taskId: null });
     },

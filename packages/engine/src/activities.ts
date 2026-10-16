@@ -77,6 +77,7 @@ const PORT_KEYS: Readonly<Record<PortName, true>> = {
   waitCi: true,
   syncMainline: true,
   saveTaskState: true,
+  recordRound: true,
   closeIssue: true,
   raiseAlert: true,
   recordTiming: true,
