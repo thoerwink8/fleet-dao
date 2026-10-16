@@ -174,20 +174,54 @@ export const issueTitle = (k: TestKey): string => `e2e 偶发：${keyText(k)}`;
  */
 export const BROKEN_ROUND_TITLE = '主线 e2e 整轮坏了';
 
-export function brokenRoundBody(urls: readonly string[]): string {
+/** 自动开的单贴的类别：引擎拉单要类别标签（对账也查），e2e 坏了都是缺陷。 */
+export const ISSUE_KIND = '缺陷';
+
+/** 正文的四节（场景、原话、已知的模块、怎么算做完）和 pnpm issue:new 开的单一样，不然引擎不拉、对账报缺。 */
+function issueSections(s: { scene: string[]; modules: string[]; done: string[] }): string {
   return [
-    `近 ${FLAKY_WINDOW} 轮主线 e2e 里有 ${urls.length} 轮整轮坏了：报告里有全局准备/备库的错，或首跑红的用例超过这一轮用例数的一半。这是环境或备库的事，不是哪条用例偶发，这几轮没有计入任何用例的偶发次数。`,
+    '## 场景',
     '',
-    '先看这几轮的日志找整轮的根子（备库、起服务、全局准备），修好后关本单：',
-    ...urls.map((u) => `- ${u}`),
+    ...s.scene,
     '',
-    '（这张单由 `.github/workflows/e2e-flaky.yml` 自动开，同一时间只开一张；判法在 `packages/conventions/src/e2e-flaky.ts`。）',
+    '## 原话',
+    '',
+    '无（AI 发现）',
+    '',
+    '## 已知的模块',
+    '',
+    ...s.modules.map((m) => `- ${m}`),
+    '',
+    '## 怎么算做完',
+    '',
+    ...s.done.map((d) => `- ${d}`),
+    '',
+    '（这张单由 `.github/workflows/e2e-flaky.yml` 自动开，判法在 `packages/conventions/src/e2e-flaky.ts`。）',
   ].join('\n');
+}
+
+export function brokenRoundBody(urls: readonly string[]): string {
+  return issueSections({
+    scene: [
+      `近 ${FLAKY_WINDOW} 轮主线 e2e 里有 ${urls.length} 轮整轮坏了：报告里有全局准备/备库的错，或首跑红的用例超过这一轮用例数的一半。这是环境或备库的事，不是哪条用例偶发，这几轮没有计入任何用例的偶发次数。同一时间只开这一张。`,
+      '',
+      '先看这几轮的日志找整轮的根子（备库、起服务、全局准备）：',
+      ...urls.map((u) => `- ${u}`),
+    ],
+    modules: [
+      '`packages/web/e2e/`（全局准备、备库、起服务）',
+      '`packages/store/src/testing/pg-fixtures.ts`（样例库）',
+    ],
+    done: [
+      '找到整轮坏的根子并修掉，修法带能复现它的测试（或说明为什么只能靠主线 e2e 复现）',
+      '修好之后主线 e2e 连着几轮没有整轮坏，下一次 `e2e-flaky.yml` 扫描不再报这张单',
+    ],
+  });
 }
 
 /** 一件要做的事：开新单，或给已开着的单留言补新的轮链接，或已有单不用动。 */
 export type IssueAction =
-  | { kind: 'create'; title: string; body: string; label: string }
+  | { kind: 'create'; title: string; body: string; labels: string[]; label: string }
   | { kind: 'comment'; number: number; body: string; label: string }
   | { kind: 'exists'; label: string };
 
@@ -217,6 +251,7 @@ export function planIssues(
         kind: 'create',
         title: BROKEN_ROUND_TITLE,
         body: brokenRoundBody(broken),
+        labels: [ISSUE_KIND],
         label: `${BROKEN_ROUND_TITLE}（${broken.length} 轮）`,
       });
     } else {
@@ -244,6 +279,7 @@ export function planIssues(
       kind: 'create',
       title,
       body: issueBody(f, until, quarantined),
+      labels: [ISSUE_KIND],
       label: `开了单：${title}（${f.bad}/${f.ran}）`,
     });
   }
@@ -257,20 +293,23 @@ export function deadline(now: Date, days = 7): string {
 
 export function issueBody(f: FlakyFinding, until: string, quarantined: boolean): string {
   const entry = JSON.stringify({ file: f.key.file, title: f.key.title, issue: 0, until });
-  return [
-    `驾驶舱 e2e 的用例 \`${keyText(f.key)}\` 在近 ${FLAKY_WINDOW} 轮主线 e2e 里首跑红了 ${f.bad} 次（跑了 ${f.ran} 次），达到偶发阈值（${FLAKY_THRESHOLD} 次，决定 0093）。`,
-    '',
-    `**限期 ${until} 前修掉**：找到时序或隔离上的根子，修好后从隔离集删掉这一条。`,
-    '',
-    quarantined
-      ? '它已经在隔离集（`packages/web/e2e/quarantine.json`）里：照跑、照报，不挡发版。'
-      : `先把它放进隔离集（\`packages/web/e2e/quarantine.json\` 的 tests 里加一条，issue 填本单号），放进去后照跑、照报，不挡发版：\n\n\`\`\`json\n${entry}\n\`\`\``,
-    '',
-    '最近首跑红的几轮：',
-    ...f.urls.map((u) => `- ${u}`),
-    '',
-    '（这张单由 `.github/workflows/e2e-flaky.yml` 自动开，统计法在 `packages/conventions/src/e2e-flaky.ts`。）',
-  ].join('\n');
+  return issueSections({
+    scene: [
+      `驾驶舱 e2e 的用例 \`${keyText(f.key)}\` 在近 ${FLAKY_WINDOW} 轮主线 e2e 里首跑红了 ${f.bad} 次（跑了 ${f.ran} 次），达到偶发阈值（${FLAKY_THRESHOLD} 次，决定 0093）。**限期 ${until} 前修掉。**`,
+      '',
+      quarantined
+        ? '它已经在隔离集（`packages/web/e2e/quarantine.json`）里：照跑、照报，不挡发版。'
+        : `先把它放进隔离集（\`packages/web/e2e/quarantine.json\` 的 tests 里加一条，issue 填本单号），放进去后照跑、照报，不挡发版：\n\n\`\`\`json\n${entry}\n\`\`\``,
+      '',
+      '最近首跑红的几轮：',
+      ...f.urls.map((u) => `- ${u}`),
+    ],
+    modules: [`\`packages/web/e2e/specs/${f.key.file}\``, '`packages/web/e2e/quarantine.json`'],
+    done: [
+      `找到 \`${keyText(f.key)}\` 首跑红的时序或隔离上的根子并修掉（改用例或改页面，不为凑绿放宽断言）`,
+      '`packages/web/e2e/quarantine.json` 里没有这一条',
+    ],
+  });
 }
 
 /** 一轮的汇总（写进 Actions 的 job 摘要）：偶发的、隔离集里的各自结局、过了限期还在隔离集里的。 */
