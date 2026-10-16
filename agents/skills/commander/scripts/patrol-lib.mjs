@@ -28,7 +28,8 @@ import { readTarget, runRemote, scrubText, sshArgs } from './france-lib.mjs';
 /**
  * 一次巡查读到的。at 是法国的采集时间（ISO）。healthz、notes、pushProblem、briefProblem 都是 fleet-api attention 的结论
  * （pushProblem、briefProblem：没问题是 null）。
- * @typedef {{ at: string, release: string, healthz: HealthzFact, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notes: NoteFact[], pushProblem: string | null, briefProblem: string | null }} Facts
+ * @typedef {{ repo: string, issue: number, labeledFor: string, reason: string }} LocalOrphanFact
+ * @typedef {{ at: string, release: string, healthz: HealthzFact, diskPct: number, memMb: number, load: number, master: string, tasks: TaskFact[], jobs: JobFact[], notes: NoteFact[], pushProblem: string | null, briefProblem: string | null, localOrphans: LocalOrphanFact[] }} Facts
  */
 /** @typedef {'OK' | 'ALERT' | 'BROKEN'} Verdict */
 /** @typedef {{ verdict: Verdict, facts: Facts | null, alerts: string[], delta: string[], broken: string | null, notes: string[] }} Report */
@@ -105,7 +106,8 @@ const isStrOrNull = (v) => v === null || typeof v === 'string';
 /**
  * 认 fleet-api attention --json 打回来的那一行 JSON。认不出、里面写着没读成都回失败，不拿空顶。
  * @param {string} text
- * @returns {{ ok: true, healthz: HealthzFact, notes: NoteFact[], pushProblem: string | null, briefProblem: string | null } | { ok: false, why: string }}
+ * 没给 localOrphans 当成空数组（法国还是旧版、或对账还没写过）。给了但不是数组，整份认不出。
+ * @returns {{ ok: true, healthz: HealthzFact, notes: NoteFact[], pushProblem: string | null, briefProblem: string | null, localOrphans: LocalOrphanFact[] } | { ok: false, why: string }}
  */
 function parseAttention(text) {
   let v;
@@ -145,13 +147,44 @@ function parseAttention(text) {
       return { ok: false, why: 'fleet-api attention 的 notes 里有认不出的一条（要 key、level、title）' };
     notes.push({ key: scrubText(n.key), level: n.level, title: scrubText(n.title) });
   }
+  const localOrphans = parseLocalOrphans(v.localOrphans);
+  if (!localOrphans)
+    return {
+      ok: false,
+      why: 'fleet-api attention 的 localOrphans 认不出（要是数组，每条有 repo、issue、labeledFor、reason）',
+    };
   return {
     ok: true,
     healthz: { code: h.code, red: h.red },
     notes,
     pushProblem: v.feishuPushProblem === null ? null : scrubText(v.feishuPushProblem),
     briefProblem: v.dailyBriefProblem === null ? null : scrubText(v.dailyBriefProblem),
+    localOrphans,
   };
+}
+
+/** 没给当成没有。给了不是数组、或有一条缺字段，回 null。 @param {unknown} raw */
+function parseLocalOrphans(raw) {
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw)) return null;
+  /** @type {LocalOrphanFact[]} */
+  const out = [];
+  for (const o of raw) {
+    if (
+      typeof o?.repo !== 'string' ||
+      !Number.isInteger(o?.issue) ||
+      typeof o?.labeledFor !== 'string' ||
+      typeof o?.reason !== 'string'
+    )
+      return null;
+    out.push({
+      repo: scrubText(o.repo),
+      issue: o.issue,
+      labeledFor: scrubText(o.labeledFor),
+      reason: scrubText(o.reason),
+    });
+  }
+  return out;
 }
 
 /**
@@ -242,6 +275,7 @@ export function parseRaw(text) {
       notes: att.notes,
       pushProblem: att.pushProblem,
       briefProblem: att.briefProblem,
+      localOrphans: att.localOrphans,
     },
   };
 }
@@ -281,6 +315,8 @@ export function invariants(f, base) {
     out.push(`单 ${taskWord(t)} 已 ${t.minutes} 分钟没动（超过 ${LIMITS.stuckMinutes}）：${t.doing}`);
   for (const j of f.jobs)
     out.push(`定时任务 ${j.job} 最近一次是 ${j.outcome}（${j.minutes} 分钟前）：${j.why}`);
+  for (const o of f.localOrphans ?? [])
+    out.push(`本机没人领 #${o.issue}（${o.repo}）贴了「本机做」${o.labeledFor}：${o.reason}`);
   if (f.pushProblem) out.push(f.pushProblem);
   if (f.briefProblem) out.push(f.briefProblem);
   if (base) {
@@ -390,6 +426,7 @@ export function render(r) {
     `通知 该推且开着 ${watch} 条（引擎 attention 的结论） ${at}`,
     `飞书推送 ${f.pushProblem ? '不通' : '通着'} ${at}`,
     `每日简报 ${f.briefProblem ? '没送到' : '没问题'} ${at}`,
+    `本机没人领 ${(f.localOrphans ?? []).length} 张 ${at}`,
     ...r.notes,
     `DELTA ${r.delta.length}`,
     ...r.delta.map((d) => `  ${d}`),
@@ -527,7 +564,7 @@ export async function fetchFrance({ home, env, readText, timeoutMs = 55_000, spa
  * 造一份法国回来的样子（自检和测试用）。默认是一切正常；over 改哪项就坏哪项。
  * notes 用 'note|<level>|<key>|<title>' 写，会进 attention 的 JSON；push、brief 是 attention 里 feishuPushProblem、dailyBriefProblem 的文字（不给是 null）。
  * attention 给了就原样当 attention| 那一行的内容；attentionErr 给了就打 attention-err 那一行（'<退出码>|<输出>'）。
- * @param {{ at: Date, disk?: number, mem?: number, master?: string, tasks?: string[], jobs?: string[], notes?: string[], push?: string, brief?: string, noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], attention?: string, attentionErr?: string }} o
+ * @param {{ at: Date, disk?: number, mem?: number, master?: string, tasks?: string[], jobs?: string[], notes?: string[], push?: string, brief?: string, noEnd?: boolean, err?: string, healthz?: number, healthRed?: string[], attention?: string, attentionErr?: string, localOrphans?: { repo: string, issue: number, labeledFor: string, reason: string }[] }} o
  */
 export function sampleRaw(o) {
   const notes = (o.notes ?? ['note|alert|deploy-lag|发布落后']).map((n) => {
@@ -541,6 +578,7 @@ export function sampleRaw(o) {
     notes,
     feishuPushProblem: o.push ?? null,
     dailyBriefProblem: o.brief ?? null,
+    ...(o.localOrphans ? { localOrphans: o.localOrphans } : {}),
   });
   const lines = [
     `at|${Math.floor(o.at.getTime() / 1000)}`,

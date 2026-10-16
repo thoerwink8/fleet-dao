@@ -74,7 +74,7 @@ function tsFiles(dir: string): string[] {
 }
 
 describe('整理提示词 · 验收停下', () => {
-  it('有停下任务时，提示词含单号、类别、原话，并写明 amend 只能追加、补不出报 needsHuman', () => {
+  it('有停下任务时，提示词含单号、类别、原话，并写明 amend 只能追加；needsHuman 只留给掏新钱和删了找不回', () => {
     const prompt = renderGroomPrompt({
       ...promptBase,
       stoppedTasks: [

@@ -14,7 +14,7 @@ import {
   AMEND_HEADING,
   executeGroomPlan,
   type GroomWrites,
-  humanDecisionReason,
+  localWorkReason,
   type PlanContext,
   parseGroomPlan,
   plainText,
@@ -286,30 +286,60 @@ describe('executeGroomPlan · 开新单', () => {
     expect(String(f.calls[0]?.args.body)).toContain('从 #5 拆出来的独立小单，不是子单');
   });
 
-  it('涉及改标准的路径或 workflows 的新单贴「要人拍」；会话自己标了删数据 / 花钱的也贴', async () => {
+  it('只涉及 CI 工作流文件的新单贴「本机做」并留原因，不贴「要人拍」；改标准同样；掏新钱 / 删了找不回仍贴「要人拍」', async () => {
     const f = fakeWrites();
     const out = await executeGroomPlan(
       plan({
         newIssues: [
           newItem(1, { modules: '改 `agents/skills/x/SKILL.md`' }),
           newItem(2, { modules: '改 `.github/workflows/ci.yml`' }),
-          newItem(3, { needsHuman: '要清理一批生产数据' }),
+          newItem(3, { needsHuman: '要清理一批生产数据，删了找不回又没备份' }),
           newItem(4),
+          newItem(5, { scene: '要把这一版对外发布到生产' }),
         ],
       }),
       ctxOf([]),
       f.writes,
     );
     const labels = f.calls.filter((c) => c.kind === 'openIssue').map((c) => c.args.labels);
-    expect(labels).toEqual([['需求', '要人拍'], ['需求', '要人拍'], ['需求', '要人拍'], ['需求']]);
-    expect(out.result.flagged).toHaveLength(3);
+    expect(labels).toEqual([
+      ['需求', '本机做'],
+      ['需求', '本机做'],
+      ['需求', '要人拍'],
+      ['需求'],
+      ['需求', '本机做'],
+    ]);
+    expect(out.result.flagged).toEqual([903]);
+    const workflow = f.calls.find(
+      (c) => c.kind === 'comment' && String(c.args.body).includes('.github/workflows/'),
+    );
+    expect(String(workflow?.args.body)).toContain('本机做');
+    expect(String(workflow?.args.body)).not.toContain('要人拍');
+    expect(labels[1]).toEqual(['需求', '本机做']);
   });
 
-  it('humanDecisionReason：认得出标准路径和 workflows，认不出的不乱判', () => {
+  it('needsHuman 里既写按量计费又写了工作流路径 → 贴「要人拍」，不因路径改判「本机做」', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        newIssues: [newItem(1, { needsHuman: '为 `.github/workflows/ci.yml` 开通新的按量计费' })],
+      }),
+      ctxOf([]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'openIssue').map((c) => c.args.labels)).toEqual([
+      ['需求', '要人拍'],
+    ]);
+    expect(f.calls.filter((c) => c.kind === 'comment')).toEqual([]);
+    expect(out.result.flagged).toEqual([901]);
+  });
+
+  it('localWorkReason：认得出标准路径、workflows 和对外发布，认不出的不乱判', () => {
     const rules = [{ path: 'agents/**/*.md', why: 'x' }];
-    expect(humanDecisionReason('改 agents/skills/a/SKILL.md', rules)).toContain('agents/skills/a/SKILL.md');
-    expect(humanDecisionReason('改 .github/workflows/ci.yml', rules)).toContain('workflows');
-    expect(humanDecisionReason('改 packages/web/src/a.ts', rules)).toBeNull();
+    expect(localWorkReason('改 agents/skills/a/SKILL.md', rules)).toContain('agents/skills/a/SKILL.md');
+    expect(localWorkReason('改 .github/workflows/ci.yml', rules)).toContain('workflows');
+    expect(localWorkReason('这一版要对外发布', rules)).toContain('对外发布');
+    expect(localWorkReason('改 packages/web/src/a.ts', rules)).toBeNull();
   });
 
   it('splitFrom 的新单标题缺「第 N 片」：整条被拒，不开', async () => {
@@ -477,7 +507,7 @@ describe('executeGroomPlan · 补老单：追加补充，不改原文', () => {
     expect(presentSections(amended.body).amended).toBe(true);
   });
 
-  it('补的是改标准路径的单 → 补完贴「要人拍」，不贴「整理过」', async () => {
+  it('补的是改标准路径的单 → 补完贴「本机做」并留原因，不贴「整理过」，也不贴「要人拍」', async () => {
     const old = issue(3, { body: THIN_BODY });
     const f = fakeWrites();
     const out = await executeGroomPlan(
@@ -487,9 +517,32 @@ describe('executeGroomPlan · 补老单：追加补充，不改原文', () => {
       ctxOf([old]),
       f.writes,
     );
-    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['要人拍']);
-    expect(out.result.flagged).toEqual([3]);
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    const comment = f.calls.find((c) => c.kind === 'comment');
+    expect(String(comment?.args.body)).toContain('agents/skills/x/SKILL.md');
+    expect(String(comment?.args.body)).toContain('本机做');
+    expect(out.result.flagged).toEqual([]);
     expect(out.result.groomed).toEqual([]);
+  });
+
+  it('原单已写 CI 工作流、这次只补普通验收条 → 贴「本机做」并留原因，不贴「整理过」', async () => {
+    const old = issue(3, {
+      body: ['## 场景', '', '要改 `.github/workflows/ci.yml`。', '', '## 原话', '', '「改工作流」', ''].join(
+        '\n',
+      ),
+    });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ amendments: [{ issue: 3, done: ['页面上多出「按钮」'] }] }),
+      ctxOf([old]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    const comment = f.calls.find((c) => c.kind === 'comment');
+    expect(String(comment?.args.body)).toContain('.github/workflows/');
+    expect(String(comment?.args.body)).toContain('本机做');
+    expect(out.result.groomed).toEqual([]);
+    expect(out.result.flagged).toEqual([]);
   });
 });
 
@@ -501,7 +554,7 @@ describe('executeGroomPlan · 判断', () => {
         reviews: [
           { issue: 1, verdict: 'sound', reason: '今天仍成立' },
           { issue: 2, verdict: 'expired', reason: '前提被决定 0030 取代' },
-          { issue: 3, verdict: 'human', reason: '要改 agents/ 下的说明' },
+          { issue: 3, verdict: 'human', reason: '要新开一份按量计费的订阅' },
         ],
       }),
       ctxOf([issue(1), issue(2), issue(3)]),
@@ -523,6 +576,76 @@ describe('executeGroomPlan · 判断', () => {
     expect(String(expired?.args.body)).toContain('没有关这张单');
     // 动作只有这四种：没有关单、改里程碑
     expect(new Set(f.calls.map((c) => c.kind))).toEqual(new Set(['addLabel', 'comment']));
+  });
+
+  it('判 human、原因里写了按量计费又写了工作流路径 → 贴「要人拍」，不因路径改判「本机做」', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        reviews: [{ issue: 3, verdict: 'human', reason: '为 `.github/workflows/ci.yml` 开通新的按量计费' }],
+      }),
+      ctxOf([issue(3)]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['要人拍']);
+    expect(out.result.flagged).toEqual([3]);
+  });
+
+  it('判 human、原因里只写了工作流路径 → 改贴「本机做」并留原因，不贴「要人拍」', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ reviews: [{ issue: 3, verdict: 'human', reason: '要改 `.github/workflows/ci.yml`' }] }),
+      ctxOf([issue(3)]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    expect(String(f.calls.find((c) => c.kind === 'comment')?.args.body)).toContain('.github/workflows/');
+    expect(out.result.flagged).toEqual([]);
+  });
+
+  it('判 human、原单列了 CI 工作流、原因只写交本机 → 贴「本机做」并留工作流那条原因，不贴「要人拍」', async () => {
+    const old = issue(3, {
+      body: ['## 场景', '', '要改 `.github/workflows/ci.yml`。', '', '## 原话', '', '「改工作流」', ''].join(
+        '\n',
+      ),
+    });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ reviews: [{ issue: 3, verdict: 'human', reason: '引擎令牌推不了，交本机处理' }] }),
+      ctxOf([old]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    expect(String(f.calls.find((c) => c.kind === 'comment')?.args.body)).toContain('.github/workflows/');
+    expect(out.result.flagged).toEqual([]);
+  });
+
+  it('判 human、原因和原单都没写掏钱或删了找不回、也认不出本机的 → 贴「本机做」，原因写没说是哪件', async () => {
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ reviews: [{ issue: 3, verdict: 'human', reason: '方向要先定' }] }),
+      ctxOf([issue(3)]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    const body = String(f.calls.find((c) => c.kind === 'comment')?.args.body);
+    expect(body).toContain('方向要先定');
+    expect(body).toContain('决定 0097');
+    expect(out.result.flagged).toEqual([]);
+  });
+
+  it('判 human、原单写了删没备份的生产库数据 → 贴「要人拍」', async () => {
+    const old = issue(3, {
+      body: ['## 场景', '', '清掉旧表，生产库数据没备份。', '', '## 原话', '', '「清表」', ''].join('\n'),
+    });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({ reviews: [{ issue: 3, verdict: 'human', reason: '要创始人拍' }] }),
+      ctxOf([old]),
+      f.writes,
+    );
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['要人拍']);
+    expect(out.result.flagged).toEqual([3]);
   });
 
   it('已经贴着这个标签的不重复贴；超过 40 条判断的丢掉', async () => {
@@ -587,6 +710,10 @@ describe('提示词', () => {
     expect(prompt).toContain('最多 5 张');
     expect(prompt).toContain('最多 10 张');
     expect(prompt).toContain('拿不准就不要判 sound');
+    expect(prompt).toContain('本机做');
+    expect(prompt).toContain('.github/workflows/');
+    expect(prompt).toContain('对外发布不要判 human');
+    expect(prompt).toContain('掏新钱');
     expect(prompt).toContain('#50 关掉的单');
     expect(prompt).toContain('#60 开着的 PR');
     expect(prompt.indexOf('### #1 ')).toBeLessThan(prompt.indexOf('### #2 '));

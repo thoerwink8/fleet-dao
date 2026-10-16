@@ -8,14 +8,19 @@ import { describe, expect, it } from 'vitest';
 import {
   CI_TIMINGS_SKIP_WHY,
   checkLedgers,
+  checkLocalOrphans,
   checkMergedPrs,
   LEDGER_GRACE_MS,
+  LOCAL_ORPHAN_MS,
+  type LocalLabeledIssue,
+  labeledForText,
   ledgerAlertKey,
   MERGED_PR_LOOKBACK_MS,
   prAlertKey,
   type ReconcileCheckDeps,
   retireHistoricalFactAlerts,
   retireWorkflowAlerts,
+  selectLocalOrphans,
   WORKFLOW_ALERT_PREFIX,
 } from '../src/jobs/reconcile-checks.ts';
 import { RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
@@ -634,5 +639,99 @@ describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
     // 交给历史事实那一步撤
     await retireHistoricalFactAlerts(w.deps);
     expect(old.resolvedAt).not.toBeNull();
+  });
+});
+
+const HOUR = 60 * 60_000;
+const labeled = (over: Partial<LocalLabeledIssue> = {}): LocalLabeledIssue => ({
+  repo: { owner: 'Acme', name: 'App' },
+  issue: 12,
+  events: [
+    {
+      label: '本机做',
+      action: 'labeled',
+      at: new Date(NOW.getTime() - 25 * HOUR).toISOString(),
+      actor: 'fleet-engine[bot]',
+    },
+  ],
+  comments: [
+    {
+      body: '引擎的临时指挥官整理待办时把这张单留给本机做：涉及 .github/workflows/ci.yml',
+      at: new Date(NOW.getTime() - 25 * HOUR).toISOString(),
+    },
+  ],
+  ...over,
+});
+
+describe('selectLocalOrphans：贴了「本机做」超过 24 小时、又没有租约', () => {
+  it('超过 24 小时、没租约的列出单号、贴了多久、谁和原因', () => {
+    const got = selectLocalOrphans([labeled()], new Set(), NOW);
+    expect(got).toEqual([
+      {
+        repo: 'Acme/App',
+        issue: 12,
+        labeledForMs: 25 * HOUR,
+        labeledFor: '25 小时',
+        reason:
+          'fleet-engine[bot]：引擎的临时指挥官整理待办时把这张单留给本机做：涉及 .github/workflows/ci.yml',
+      },
+    ]);
+  });
+
+  it('有还没到期的租约的不列', () => {
+    expect(selectLocalOrphans([labeled()], new Set(['acme/app#12']), NOW)).toEqual([]);
+  });
+
+  it('不到 24 小时的不列；刚好 24 小时的也不列', () => {
+    const fresh = labeled({
+      events: [
+        {
+          label: '本机做',
+          action: 'labeled',
+          at: new Date(NOW.getTime() - 23 * HOUR).toISOString(),
+          actor: 'a',
+        },
+      ],
+    });
+    const exact = labeled({
+      events: [
+        {
+          label: '本机做',
+          action: 'labeled',
+          at: new Date(NOW.getTime() - LOCAL_ORPHAN_MS).toISOString(),
+          actor: 'a',
+        },
+      ],
+    });
+    expect(selectLocalOrphans([fresh, exact], new Set(), NOW)).toEqual([]);
+    expect(labeledForText(LOCAL_ORPHAN_MS + 1000)).toBe('24 小时');
+  });
+
+  it('读单失败不写名单；写成失败 found 不加', async () => {
+    const saved: unknown[] = [];
+    const unread = await checkLocalOrphans({
+      now: () => NOW,
+      log: () => {},
+      localLabeled: async () => {
+        throw new Error('GitHub 500');
+      },
+      activeLeases: async () => new Set(),
+      saveLocalOrphans: async (items) => {
+        saved.push(items);
+      },
+    });
+    expect(unread.failed).toContain('没读成');
+    expect(saved).toEqual([]);
+    const unwritten = await checkLocalOrphans({
+      now: () => NOW,
+      log: () => {},
+      localLabeled: async () => [labeled()],
+      activeLeases: async () => new Set(),
+      saveLocalOrphans: async () => {
+        throw new Error('库写不进');
+      },
+    });
+    expect(unwritten.unchecked.join('')).toContain('没写成');
+    expect(unwritten.found).toBe(0);
   });
 });
