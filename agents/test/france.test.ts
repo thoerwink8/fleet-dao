@@ -117,6 +117,7 @@ interface FranceLib {
   ENV_NAME: string;
   LIMITS: Record<string, number>;
   probeStaleMinutes(host: string): number;
+  PROBE_OVERDUE: number;
   scrubText(text: string): string;
   scrubDeep(value: unknown): unknown;
   readTarget(opts: {
@@ -181,6 +182,7 @@ const sharedUsage = (await load(join(ROOT, 'packages/shared/src/usage.ts'))) as 
 };
 const sharedWebApi = (await load(join(ROOT, 'packages/shared/src/web-api.ts'))) as {
   routeProbeStaleMinutes(host: string): number;
+  ROUTE_PROBE_OVERDUE_MINUTES: number;
 };
 
 const made: string[] = [];
@@ -275,6 +277,9 @@ function route(o: {
   alive?: boolean;
   state?: string | null;
   probed?: number | null;
+  /** 探针排的下一次是几分钟前（负数＝还没到）；不给＝没排（在线的不复探，probe_next_at 为空）。 */
+  nextAgo?: number;
+  tier?: string;
   detail?: string;
   org?: string | null;
   inUse?: boolean;
@@ -287,6 +292,8 @@ function route(o: {
     alive: o.alive ?? true,
     probe_state: o.state === undefined ? 'ok' : o.state,
     probed_at: o.probed === null ? null : ago(o.probed ?? 5),
+    probe_tier: o.tier ?? 'idle',
+    probe_next_at: o.nextAgo === undefined ? null : ago(o.nextAgo),
     probe_detail: o.detail ?? '回答了',
     org_kind: o.org ?? null,
     channel_enabled: true,
@@ -1156,9 +1163,10 @@ describe('额度汇总和驾驶舱（packages/shared/src/usage.ts）算出来一
     expect(got.byStage.map(({ stageName: _n, ...rest }) => rest)).toEqual(want.byStage);
   });
 
-  it('探针过期线和 shared 的 routeProbeStaleMinutes 一样', () => {
+  it('探针过期线、探针停了的线和 shared 的 routeProbeStaleMinutes、ROUTE_PROBE_OVERDUE_MINUTES 一样', () => {
     for (const host of ['claude-code', 'codex', 'cursor-agent', 'grok', 'mirasim', 'api-shell'])
       expect(lib.probeStaleMinutes(host), host).toBe(sharedWebApi.routeProbeStaleMinutes(host));
+    expect(lib.PROBE_OVERDUE).toBe(sharedWebApi.ROUTE_PROBE_OVERDUE_MINUTES);
   });
 });
 
@@ -1493,27 +1501,62 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     expect(lib.jobStatus({ ...running, last_success: null }, AT)).toBe('stale');
   });
 
-  it('路由：在线却过了该探的时候没探——不分执行方式都是 45 分钟（#1798 片 3，原先 cursor-agent、grok 放宽到 150）', () => {
+  it('路由：排了下一次探测、过了 20 分钟还没探，或从没探过，才记「在线是旧结论」——不分执行方式', () => {
     const v = viewOf((s) => {
       s.routes = {
         ok: true,
         rows: [
-          route({ id: 'a:m:claude-code', probed: 50 }),
-          route({ id: 'g:m:grok', host: 'grok', probed: 140 }),
-          route({ id: 'c:m:cursor-agent', host: 'cursor-agent', probed: 160 }),
+          route({ id: 'a:m:claude-code', tier: 'active', probed: 90, nextAgo: 30 }),
+          route({ id: 'g:m:grok', host: 'grok', probed: 140, nextAgo: 21 }),
+          route({ id: 'c:m:cursor-agent', host: 'cursor-agent', probed: null }),
+          route({ id: 'e:m:claude-code', tier: 'active', probed: 70, nextAgo: 20 }),
+          route({ id: 'f:m:cursor-agent', host: 'cursor-agent', probed: 50, nextAgo: -10 }),
+          route({ id: 'u:m:claude-code', tier: 'unused', probed: 3000, nextAgo: 2000 }),
           route({ id: 'n:m:claude-code', alive: false, state: null, probed: null, inUse: false }),
         ],
       };
     });
-    has(v, 'bad', '路由 a:m:claude-code 算在线，但结论 50 分钟没更新');
-    has(v, 'bad', '路由 g:m:grok 算在线，但结论 140 分钟没更新');
-    has(v, 'bad', '路由 c:m:cursor-agent 算在线，但结论 160 分钟没更新');
-    expect(whats(v).some((w) => w.includes('n:m:claude-code'))).toBe(false);
+    has(v, 'bad', '路由 a:m:claude-code 算在线，但过了该探的时刻 30 分钟还没探、结论 90 分钟没更新');
+    has(v, 'bad', '路由 g:m:grok 算在线，但过了该探的时刻 21 分钟还没探、结论 140 分钟没更新');
+    has(v, 'bad', '路由 c:m:cursor-agent 算在线，但结论从没探过');
+    // 刚好 20 分钟、还没到点、没有用途在用（不主动探，没有「下次」可晚）：都不算探针停了
+    for (const id of ['e:m:claude-code', 'f:m:cursor-agent', 'u:m:claude-code', 'n:m:claude-code'])
+      expect(
+        whats(v).some((w) => w.includes(id)),
+        id,
+      ).toBe(false);
     // 稳定类别（#1520）：发版车暂停期探针不跑，旧结论按它过滤，不匹配文案
     const kindOf = (prefix: string) =>
       (v.anomalies as { what: string; kind?: string }[]).find((a) => a.what.startsWith(prefix))?.kind;
     expect(kindOf('路由 a:m:claude-code ')).toBe('route-stale');
     expect(kindOf('路由 c:m:cursor-agent ')).toBe('route-stale');
+  });
+
+  it('路由：在线、探针没排下一次（探通了定时不复探，派之前再探）、结论 47 小时前的：不记 bad，展示上标旧结论（#2700）', () => {
+    const v = viewOf((s) => {
+      s.routes = {
+        ok: true,
+        rows: [
+          route({ id: 'auto:cursor:claude-haiku-5-5-a', host: 'cursor-agent', probed: 47 * 60 }),
+          route({ id: 'grok:grok-4.7:grok', host: 'grok', probed: 46 }),
+          route({ id: 'fresh:m:claude-code', probed: 45 }),
+        ],
+      };
+    });
+    expect(whats(v).some((w) => w.includes('算在线'))).toBe(false);
+    const got = (v.health.routes?.rows as { id: string; stale: boolean; expired: boolean; stateName: string }[]).map(
+      ({ id, stale, expired, stateName }) => ({ id, stale, expired, stateName }),
+    );
+    expect(got).toEqual([
+      {
+        id: 'auto:cursor:claude-haiku-5-5-a',
+        stale: false,
+        expired: true,
+        stateName: '探通了（旧结论：定时不复探，派之前再探）',
+      },
+      { id: 'grok:grok-4.7:grok', stale: false, expired: true, stateName: '探通了（旧结论：定时不复探，派之前再探）' },
+      { id: 'fresh:m:claude-code', stale: false, expired: false, stateName: '探通了' },
+    ]);
   });
 
   it('会话跑了 90 分钟还没完、登记了 30 分钟还没起来；3 小时内没成的列成留意，更早的不列', () => {
