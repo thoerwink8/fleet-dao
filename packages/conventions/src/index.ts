@@ -184,6 +184,7 @@ export {
 } from './pr-columns.ts';
 export { annotation } from './pr-fields.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
+export { type Prerequisites, parsePrerequisites, waitingUntil } from './prerequisites.ts';
 export {
   kindOf as progressKindOf,
   NO_OWNER,
