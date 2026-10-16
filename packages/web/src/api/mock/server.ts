@@ -3068,6 +3068,18 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       return RoutingLayersResponse.parse({
         asOf: iso(),
         purposes,
+        manualTracks: [
+          {
+            modelId: 'opus-5.5',
+            modelName: 'Opus 5.5',
+            tier: 'heavyweight',
+            onePass: 2,
+            tasks: 4,
+            lower: 0.31,
+            notDone: 1,
+            avgMinutes: 48,
+          },
+        ],
         // 假数据没有渠道名册：差集按空写。个数用目录里的模型数，两边一样，页面才能写出各几个。
         modelRoster: {
           missingFromCatalog: [],

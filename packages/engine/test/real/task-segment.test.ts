@@ -264,6 +264,21 @@ describe('备树', { timeout: 60_000 }, () => {
     expect(r.recorded[0]).not.toHaveProperty('prNumber');
   });
 
+  it('选路那句为什么派它，开跑和收场都带着', async () => {
+    const why = '主力档，强级在前；opus 难单一段过 2/4';
+    const r = rig({
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    const base = r.input();
+    const got = await r.run(r.input({ route: { ...base.route, why } }), ctx());
+    expect(got.ok).toBe(true);
+    expect(r.started[0]?.routeWhy).toBe(why);
+    expect(r.recorded[0]?.routeWhy).toBe(why);
+  });
+
   it('开了 PR 以后的轮次：PR 号开跑、收场两处都记上（#216）', async () => {
     const r = rig({
       driverRun: async (spec) => {

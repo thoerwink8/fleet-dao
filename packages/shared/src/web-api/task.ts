@@ -147,6 +147,8 @@ export const SegmentRunSchema = z.object({
   billing: BillingKindSchema.optional(),
   /** 派工档；只有动手段分档。 */
   tier: SegmentTierSchema.optional(),
+  /** 选路时那句「为什么派它」。没记的老行没有，页面写「没记」。 */
+  routeWhy: z.string().min(1).optional(),
   startedAt: Time.optional(),
   endedAt: Time.optional(),
   /** 还在跑：没结束、单子也没结束。用量等它结束才有。 */

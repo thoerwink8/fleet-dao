@@ -10,6 +10,7 @@ import type { FranceReleasePort } from './france-release.ts';
 import type { GitHubUserPort } from './github-user.ts';
 import type { HostResourceSampler } from './host-resources.ts';
 import type { LocalClaimsPort } from './local-claims.ts';
+import type { ManualTracksPort } from './manual-tracks.ts';
 import type { ModelRosterPort } from './model-roster.ts';
 import type { OrgSwitchPort } from './org-switch-view.ts';
 import type { ScryptParams } from './password.ts';
@@ -76,6 +77,11 @@ export interface Deps {
    * 另写一句 unavailable，不拿空列表冒充「都没配」。
    */
   routingLayers?: RoutingLayersPort | undefined;
+  /**
+   * 动手战绩（manual-tracks.ts）：路由页那张表，和选路读的 modelTierTracks 同一份。没给（开发、内存版）的路由页不画这张表，
+   * 不拿空表冒充「都没战绩」。
+   */
+  manualTracks?: ManualTracksPort | undefined;
   /**
    * 探针真历史（#1139，probe-history.ts）：渠道状态页的近 60 次格子。没给（开发、内存版没有这张表）时接口写没查成，
    * 不拿空列表冒充「还没有探测」。不看引擎开没开。

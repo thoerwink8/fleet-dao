@@ -60,6 +60,7 @@ import { meBody } from './auth.ts';
 import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
 import { registerCiPolicyRoutes } from './ci-policy-routes.ts';
 import { registerCliToolsRoutes } from './cli-versions.ts';
+import { continueSignals } from './continue-signals.ts';
 import { registerCredentialRoutes } from './credentials.ts';
 import { handOffDecision } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
@@ -70,6 +71,7 @@ import { registerGroomRoutes } from './groom-routes.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { ApiError, fullStack, readJson, readQuery, reply } from './http.ts';
 import { readLocalSessions } from './local-sessions.ts';
+import { manualTracksView } from './manual-tracks.ts';
 import { modelRosterFields } from './model-roster.ts';
 import { registerModelRosterRoutes } from './model-roster-routes.ts';
 import { readNodeDetail, readNodes } from './node-views.ts';
@@ -543,11 +545,16 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
     const by = c.get('user').id;
     let signal: TaskSignal;
+    // 「继续」再带一发路由叫醒：等选路的那一觉不看 taskContinue（#2392）。
+    let routeWake: TaskSignal | null = null;
     switch (body.action) {
       case 'resume': {
         const exhausted = continueExhausted(task.stalled?.why);
         if (exhausted) throw new ApiError(409, 'continue_exhausted', exhausted);
-        signal = { name: TASK_SIGNAL_NAMES.continue, by };
+        const [cont, wake] = continueSignals(by);
+        if (!cont || !wake) throw new ApiError(500, 'continue_signals', '继续信号没配全');
+        signal = cont;
+        routeWake = wake;
         break;
       }
       case 'stop':
@@ -571,15 +578,26 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         throw new ApiError(409, 'action_not_supported', UNSUPPORTED_ACTION_WHY[body.action]);
     }
     const { name: _name, by: _by, ...detail } = signal;
-    await signalAndAudit(taskId, signal, {
+    const auditBase = {
       actor: actorOf(c),
-      action: `task.${body.action}`,
       target: `task:${taskId}`,
-      after: detail,
       reason: 'reason' in body ? body.reason : undefined,
       via: c.get('via'),
-      ok: true,
+      ok: true as const,
+    };
+    await signalAndAudit(taskId, signal, {
+      ...auditBase,
+      action: `task.${body.action}`,
+      after: detail,
     });
+    if (routeWake) {
+      const { name: _wakeName, by: _wakeBy, ...wakeDetail } = routeWake;
+      await signalAndAudit(taskId, routeWake, {
+        ...auditBase,
+        action: 'task.routeWake',
+        after: wakeDetail,
+      });
+    }
     return reply(c, TaskActionResponse, { ok: true });
   });
 
@@ -640,10 +658,22 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const roster = await modelRosterFields(deps.modelRoster, (err) => {
       deps.log.error('渠道模型表没读成', { error: fullStack(err) });
     });
+    let manualTracks: ReturnType<typeof manualTracksView> | undefined;
+    let manualTracksUnavailable: string | undefined;
+    if (deps.manualTracks) {
+      try {
+        manualTracks = manualTracksView(await deps.manualTracks.read(now), models);
+      } catch (err) {
+        deps.log.error('动手战绩没读成', { error: fullStack(err) });
+        manualTracksUnavailable = (err instanceof Error && err.message) || String(err);
+      }
+    }
     return reply(c, RoutingLayersResponse, {
       asOf: now.toISOString(),
       purposes: routingLayersView(layers, { models, channels }),
       ...roster,
+      ...(manualTracks ? { manualTracks } : {}),
+      ...(manualTracksUnavailable ? { manualTracksUnavailable } : {}),
     });
   });
 

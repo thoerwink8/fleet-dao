@@ -97,6 +97,8 @@ export interface OneShotInput {
   effort?: string;
   /** 选路时给这一段预占的池的名额（#757，pool_reservations 的编号）：开跑那一行写进去时换成这一行。不经选路的不给。 */
   reservationId?: string;
+  /** 选路那句「为什么派它」（写进 runs.route_why）。不经选路的不给。 */
+  routeWhy?: string;
   /**
    * 交给 Spawner 的脱开引擎跑的那一套（#2238，SpawnCommand.detach 原样交下去）：只有动手段给。给了，引擎要走时 Spawner 交回
    * detached，这里抛 OneShotDetached（开跑那一行不收、不落盘）。attach 时 runId 必给。
@@ -535,6 +537,7 @@ function runFields(input: OneShotInput, runId: string, startedAt: string): RunSt
     ...(input.channel !== undefined ? { channel: input.channel } : {}),
     ...(input.routeId !== undefined ? { routeId: input.routeId } : {}),
     ...(input.tier !== undefined ? { tier: input.tier } : {}),
+    ...(input.routeWhy?.trim() ? { routeWhy: input.routeWhy.trim() } : {}),
     ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
     ...(input.prNumber !== undefined ? { prNumber: input.prNumber } : {}),
     ...(input.branch !== undefined ? { branch: input.branch } : {}),

@@ -124,6 +124,7 @@ function columns(run: RunStart): RunInsert {
     channel: run.channel,
     routeId: run.routeId,
     tier: run.tier,
+    ...(run.routeWhy ? { routeWhy: run.routeWhy } : {}),
     workflowId: run.workflowId,
     prNumber: run.prNumber,
     branch: run.branch,

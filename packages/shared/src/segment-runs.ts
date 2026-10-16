@@ -59,6 +59,8 @@ export interface SegmentRunFacts {
   /** 渠道的计费方式；渠道在库里查不到就不给（花费记进「分不清」，不猜成套餐内）。 */
   billing?: BillingKind | undefined;
   tier?: string | undefined;
+  /** 选路时那句「为什么派它」（runs.route_why）。没记的不给。 */
+  routeWhy?: string | undefined;
   startedAt?: string | undefined;
   endedAt?: string | undefined;
   outcome?: string | undefined;
@@ -88,6 +90,8 @@ export interface SegmentRunView {
   channel?: string | undefined;
   billing?: BillingKind | undefined;
   tier?: SegmentTier | undefined;
+  /** 选路时那句「为什么派它」。没记的不给，页面写「没记」。 */
+  routeWhy?: string | undefined;
   /** 认得出的时刻（统一成 toISOString 的写法）。 */
   startedAt?: string | undefined;
   endedAt?: string | undefined;
@@ -239,6 +243,7 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
     ...(run.channel !== undefined ? { channel: run.channel } : {}),
     ...(run.billing !== undefined ? { billing: run.billing } : {}),
     ...(tier !== undefined ? { tier } : {}),
+    ...(run.routeWhy?.trim() ? { routeWhy: run.routeWhy.trim() } : {}),
     ...(start ? { startedAt: start.iso } : {}),
     ...(end ? { endedAt: end.iso } : {}),
     running,

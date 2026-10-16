@@ -23,7 +23,7 @@ source "$HERE/../lib/mirasim.sh"
 FRANCE_SH=$HERE/../france.sh
 # 取函数原文（到行首的 } 为止），去掉 CR（Windows 检出可能带）
 fn_text() { tr -d '\r' <"$FRANCE_SH" | sed -n "/^$1() {/,/^}/p"; }
-for f in setup_auto_tier setup_mirasim_session readback_auto_tier readback_mirasim_session_unit; do
+for f in setup_auto_tier setup_mirasim_session readback_auto_tier readback_mirasim_session_unit install_mirasim_stream_guard; do
   if [[ -z "$(fn_text "$f")" ]]; then
     echo "mirasim-auto-tier：没跑成：在 deploy/france.sh 里没取到 $f"
     exit 2
@@ -75,6 +75,8 @@ put_file() { # 目标 属主:组 权限 内容
 }
 # 自动档里的另外几步：只记顺序。liveness 是 setup_mirasim_session 的最后一步，这里不测它装没装上。
 setup_mirasim_liveness() { CALLS+=(setup_mirasim_liveness); }
+# 真函数会写 /usr/local/lib（要 root）。这里只记调用顺序，并清掉 WROTE，免得守卫的「变了」被当成单元变了。
+install_mirasim_stream_guard() { CALLS+=(install_mirasim_stream_guard); WROTE=0; }
 setup_slice() { CALLS+=(setup_slice); }
 retire_old_units() { CALLS+=(retire_old_units); }
 setup_auto_release() { CALLS+=(setup_auto_release); }
@@ -118,6 +120,7 @@ setup_mirasim_session >/dev/null
 check "记一笔待配、没有红" "${#PENDING[@]} ${#REDS[@]}" "1 0"
 check "没写单元文件" "$([[ -e "$MIRASIM_SESSION_UNIT_FILE" ]] && echo 有 || echo 没有)" "没有"
 check "没有 daemon-reload，没有 ensure_unit_running" "$(printf '%s\n' "${CALLS[@]}" | grep -cE 'daemon-reload|ensure_unit_running' || true)" "0"
+check "本体不在不装流守卫（--require 的文件还不该被单元指上）" "$(printf '%s\n' "${CALLS[@]}" | grep -c install_mirasim_stream_guard || true)" "0"
 
 echo "== 3. 服务端本体在：首次装 → 写、重启；内容没变 → 不动、不重启；模板变了 → 重启"
 SERVER_INSTALLED=1
@@ -127,6 +130,9 @@ check "首次：写了文件" "$([[ -f "$MIRASIM_SESSION_UNIT_FILE" ]] && echo �
 has "首次：装的文件带 MIRASIM_NO_AGENT_EGRESS=1" "$(<"$MIRASIM_SESSION_UNIT_FILE")" '^Environment=MIRASIM_NO_AGENT_EGRESS=1$'
 has "首次：daemon-reload 了" "${CALLS[*]}" "systemctl daemon-reload"
 has "首次：ensure_unit_running 带重启=1" "${CALLS[*]}" "ensure_unit_running fleet-mirasim-session.service 1"
+has "首次：先装流守卫再重启（--require 的文件得先在）" "${CALLS[*]}" "install_mirasim_stream_guard.*ensure_unit_running fleet-mirasim-session.service 1"
+has "守卫脚本的安装路径钉在 france.sh" "$(<"$FRANCE_SH")" '^MIRASIM_STREAM_GUARD=/usr/local/lib/fleet-dao/mirasim-stream-guard\.cjs$'
+has "安装函数从仓里把守卫写出去" "$(fn_text install_mirasim_stream_guard)" 'DEPLOY_DIR/lib/mirasim-stream-guard\.cjs'
 check "首次：没有红、没有待配" "${#REDS[@]} ${#PENDING[@]}" "0 0"
 
 fresh

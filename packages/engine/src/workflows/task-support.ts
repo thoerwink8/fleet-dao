@@ -349,6 +349,18 @@ export function wallClockSwitchLine(modelId: string): string {
 }
 
 /**
+ * 换路由续之后选路只剩等额度或等空位，不长睡时停下等人的标题（#2392）。
+ * 进度已经写成「换一条路由带上进度续一次」，但再睡进 pauseForRoute 任务行就冻住了。
+ */
+export const WALL_CLOCK_SWITCH_STALL = '换路由续不上';
+
+/** 停下时写给人的原因：选路原话，加上为什么不能在这里接着睡。 */
+export function wallClockSwitchStallDetail(detail: string): string {
+  const why = detail.trim() || '选路没有给出能派的路由';
+  return `${why}。进度已经写成换路由续，但这一步若睡到额度清零（最长约 4 小时）或反复等空位，任务行不再刷新，工作流仍是 running、没有开着的会话，拉单把它算进在干活。点「继续」再选一次；不要了点「放弃」。`;
+}
+
+/**
  * 有界耐心（决定 0093，借 magpie gateway-routing 的 Patience）：动手会话撞上上游临时故障（失败分流规则表上标了 blip 的：
  * 限流、繁忙、容量满……）、次数用完要停下时，先不停：歇一会儿重新选一次路由（不粘原路由）再起，直到预算用完才照旧停下。
  * 预算从第一次「该停下」起按墙钟算（含中间重跑的会话），默认 60 秒、最多 240 秒；歇的时长从会话时限里扣（计入会话总时限）。
