@@ -50,6 +50,7 @@ import {
   bump,
   ConflictHandoff,
   HygieneHandoff,
+  infraAvoidScope,
   type LastSession,
   NO_AVOID,
   PausedInterrupt,
@@ -124,6 +125,13 @@ export class TaskRuntime {
   commitMisses = 0;
   /** 最近一轮没提交时用的路由。避让之后没有别的候选，就照旧派它。 */
   commitMissRoute: RouteChoice | null = null;
+  /**
+   * 超时、起不来已经按路由避开过的模型（#2261）。同一模型再失败就避开模型，不整族避开。
+   * 只在 patched('avoid-scope-by-cause') 之后写入，老历史一直是空的。
+   */
+  private infraRouteModels: string[] = [];
+  /** 已经升到「避开模型」的那些模型。再失败不再为它自动重派。 */
+  private infraModelIds: string[] = [];
   /** 这一轮动手会话实际跑完时用的路由。没跑成的不算。 */
   lastImplementRoute: RouteChoice | null = null;
   /** 这一轮选路时避让把候选滤光了，改派了原来的路由。 */
@@ -445,9 +453,10 @@ export class TaskRuntime {
   }
 
   /**
-   * 自动处理时换路由（决定 0093）：把这个模型记进这张单的避让（和没提交的避让同一处，pickRoute 读它）；认得出族的连这一族一起避开
+   * 轮数用完换路由（决定 0093）：把这个模型记进这张单的避让（和没提交的避让同一处，pickRoute 读它）；认得出族的连这一族一起避开
    * （patched('avoid-model-family')：同族换个模型多半重蹈覆辙）。别的族派不出时选路退回只避开模型，还没有别的候选就照旧派原来那条
    * （commitMissRoute），不死等。人点「继续」时清掉。老历史没有这个标记，只避开模型。
+   * 超时、起不来、中转欠费不走这里（avoidInfra，不整族避开）。
    */
   avoidModel(route: RouteChoice): void {
     this.commitAvoid = widen(this.commitAvoid, route, 'model');
@@ -457,12 +466,40 @@ export class TaskRuntime {
     this.commitMissRoute = route;
   }
 
+  /**
+   * 超时、起不来、中转欠费换路由（#2261，patched('avoid-scope-by-cause')）：不整族避开。
+   * 超时、起不来只避开这条路由；同一模型已经这样避开过，再避开模型。中转欠费避开那个池。
+   */
+  avoidInfra(route: RouteChoice, code: string): void {
+    const seen = this.infraRouteModels.includes(route.modelId);
+    const scope = infraAvoidScope(code, seen);
+    if (scope === 'pool') {
+      this.commitAvoid = widen(this.commitAvoid, route, 'pool');
+    } else if (scope === 'model') {
+      this.commitAvoid = widen(this.commitAvoid, route, 'route');
+      this.commitAvoid = widen(this.commitAvoid, route, 'model');
+      if (!this.infraModelIds.includes(route.modelId)) this.infraModelIds.push(route.modelId);
+    } else {
+      this.commitAvoid = widen(this.commitAvoid, route, 'route');
+      if (!seen) this.infraRouteModels.push(route.modelId);
+    }
+    this.commitMissRoute = route;
+  }
+
+  /** 同一模型的超时、起不来已经避开过路由、还没升到避开模型：可以再自动重派一次。 */
+  infraCanEscalate(route: RouteChoice, code: string): boolean {
+    if (this.infraModelIds.includes(route.modelId)) return false;
+    return infraAvoidScope(code, this.infraRouteModels.includes(route.modelId)) === 'model';
+  }
+
   /** 「继续」之后，没提交攒下的避让不再带到后面的轮。 */
   private clearCommitAvoid(): void {
     this.commitAvoid = NO_AVOID;
     this.commitMisses = 0;
     this.commitMissRoute = null;
     this.fellBackToMissRoute = false;
+    this.infraRouteModels = [];
+    this.infraModelIds = [];
   }
 
   /**
