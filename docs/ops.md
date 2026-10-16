@@ -102,6 +102,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /etc/fleet-dao/github | root:fleet | 750 | deploy/lib/human-tier.sh |
 | /etc/ssh/authorized_keys | root:root | 755 | deploy/lib/human-tier.sh |
 | /etc/systemd/system/postgresql@16-main.service.d | root:root | 755 | deploy/france.sh |
+| /etc/systemd/system/user-0.slice.d | root:root | 755 | deploy/france.sh |
 | /etc/wireguard | root:root | 700 | deploy/france.sh |
 | /etc/wireguard | root:root | 700 | deploy/hk.sh |
 | /home/fleet | fleet:fleet | 750 | deploy/hk.sh |
