@@ -90,21 +90,32 @@ export interface MirasimAccepted {
 export interface MirasimRunOptions {
   connect: MirasimConnect;
   /**
-   * meta：和 cli-run.ts 的 spawn 类插头共用同一个形状（session-io.ts 的接回要用），但 Mirasim 没有「进程脱开引擎再
-   * 接回」这件事——工具是在已经在跑的 Mirasim 服务里执行的，引擎自己重启只是这条 ws 断了重连、重订阅（session.ts
-   * 的 seq 自己会丢旧快照、拒绝倒退的补丁），不是接一个留在磁盘上的收发目录。所以这里的 seq 只是单调递增、
-   * replay 恒为 false：Mirasim 的事件在进 onEvent 之前已经被 MirasimSession 去重过，没有「重放上一个引擎处理过的
-   * 行」这个概念。
+   * meta：和 cli-run.ts 的 spawn 类插头共用同一个形状。Mirasim 没有收发目录：工具在已经在跑的 Mirasim 服务里执行，
+   * 引擎重启只是这条 ws 断了，下一个引擎按会话号重新订阅（attach，#2815；session.ts 的 seq 自己会丢旧快照、拒绝倒退
+   * 的补丁）。seq 只是单调递增；replay 只在接回时订阅回的第一份整份快照上为 true（放手前已经交过的旧内容），
+   * 其余恒为 false：事件在进 onEvent 之前已经被 MirasimSession 按 seq 去重过。
    */
   onEvent?: (event: ProgressEvent, meta: LineMeta) => unknown;
   /**
-   * 会话过程记录（#1640，见 TranscriptEntry）：和 onEvent 同一个节拍。seq 同样只是单调递增、replay 恒为 false
-   * （快照已经被 MirasimSession 去重过）。
+   * 会话过程记录（#1640，见 TranscriptEntry）：和 onEvent 同一个节拍。seq 同样只是单调递增；replay 同 onEvent
+   * （接回时第一份快照为 true）。
    */
   onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
   /** 服务端接下了：引擎记下 sessionKey，重启后用 stopMirasimSession 收掉它。对账接回时也报一次（没收到 accepted 帧）。 */
   onAccepted?: (info: MirasimAccepted) => unknown;
   signal?: AbortSignal;
+  /**
+   * 放手（#2815，引擎停机、发版重启）：响了就只断开连接，不发 stop、不记成被叫停，报告里带 detached（会话号、轮次号）：
+   * Mirasim 服务端的会话不靠引擎的 ws 连接活着，下一个引擎用 attach 按会话号重新订阅接回。和 signal（叫停，要收掉会话）
+   * 不是一回事：两个都响时放手优先；已经叫停了（切号、总时长、卡住）的不再放手，照旧等它翻终态。
+   * 还没等到 accepted（没有会话号可交）时放手不生效，等到 accepted 再放。
+   */
+  release?: AbortSignal;
+  /**
+   * 接回（#2815）：上一个引擎放手时记下的会话号和轮次号。不握手、不发 prompt，直接按会话号订阅，读到收场；
+   * 订阅回的第一份快照是整份旧内容，交出去的事件和过程记录标 replay（meta.replay）。
+   */
+  attach?: { sessionKey: string; taskId?: string };
   now?: () => Date;
   /**
    * 毫秒钟。不给用 Date.now。没等到 accepted 时对账要等到时间窗上沿（MS-18）：测试用它和 pause 一起把这段拨快。
@@ -154,6 +165,8 @@ export interface MirasimRunReport {
   killed?: { reason: KillReason; at: string; cause?: StopCause };
   /** 叫停之后有没有看到它翻终态（MS-16：没看到就是「没查成」，不是停好了）。 */
   stop?: { confirmed: boolean; error?: string };
+  /** 放手了（options.release，#2815）：连接断了、会话在服务端接着跑，没发 stop；没有终态。 */
+  detached?: { sessionKey: string; taskId?: string };
   /** 读状态的连接建不起来或一直断：会话后来怎样没查成。 */
   watchError?: string;
   terminal?: { isError: boolean; detail: string };
@@ -228,7 +241,10 @@ export async function runMirasim(
   spec: MirasimRunSpec,
   options: MirasimRunOptions,
 ): Promise<MirasimRunReport> {
-  if (!spec.prompt.trim()) throw new Error('提示词是空的');
+  if (!options.attach && !spec.prompt.trim()) throw new Error('提示词是空的');
+  if (options.attach && !options.attach.sessionKey.startsWith(`${spec.agent}:`)) {
+    throw new Error(`接回的 sessionKey 不是 ${spec.agent} 的：${options.attach.sessionKey}`);
+  }
   if (spec.effort !== undefined) assertSessionEffort(spec.effort, SESSION_EFFORTS, 'Mirasim');
   if (!AGENT.test(spec.agent)) throw new Error(`执行体名不合法：${JSON.stringify(spec.agent)}`);
   if (spec.agent === 'pi' && spec.model && !spec.model.startsWith('profile:')) {
@@ -274,15 +290,18 @@ export async function runMirasim(
   let sub: MirasimWire | undefined;
   let eventSeq = -1;
   let transcriptSeq = -1;
+  // 接回后订阅回的第一份快照是整份旧内容（放手前已经交出去过的、加上引擎不在时服务端新长的）：交出去标 replay，
+  // 调用方只拿它重建状态、别再当新事件记。之后的补丁才是新的。
+  let replaying = options.attach !== undefined;
   const deliver = (events: ProgressEvent[]) => {
     for (const event of events) {
       eventSeq += 1;
-      const meta: LineMeta = { seq: eventSeq, replay: false };
+      const meta: LineMeta = { seq: eventSeq, replay: replaying };
       gate.call(() => options.onEvent?.(event, meta));
     }
     for (const entry of session.drainTranscript()) {
       transcriptSeq += 1;
-      const meta: LineMeta = { seq: transcriptSeq, replay: false };
+      const meta: LineMeta = { seq: transcriptSeq, replay: replaying };
       gate.call(() => options.onTranscript?.(entry, meta));
     }
   };
@@ -299,102 +318,110 @@ export async function runMirasim(
     };
   };
 
-  // 1. 连上、握手、核对执行体
-  try {
-    control = await options.connect();
-  } catch (err) {
-    report.launchError = (err as Error).message;
-    return done();
-  }
-  const state = await hello(control, limits.replyMs);
-  if (typeof state === 'string') {
-    report.launchError = state;
-    return done();
-  }
-  const version = str(state.version);
-  if (version) report.serverVersion = version;
-  if (!Array.isArray(state.agentsAvailable)) {
-    report.launchError = 'state 帧里没有 agentsAvailable，契约没查成——不派';
-    return done();
-  }
-  if (!state.agentsAvailable.includes(spec.agent)) {
-    report.launchError = `服务端没有 ${spec.agent} 这个执行体（有：${state.agentsAvailable.join('、')}）`;
-    return done();
-  }
-  if (options.signal?.aborted) {
-    report.killed = { reason: 'aborted', at: now().toISOString(), ...abortCause(options.signal) };
-    return done();
-  }
-
-  // 2. 起会话 / 续跑：同一个 prompt 帧带上已有的 sessionKey（MS-17）
-  const clientRef = `fleet-${spec.runId}-${t0}`;
-  control.send({
-    type: 'prompt',
-    prompt: spec.prompt,
-    agent: spec.agent,
-    workdir: spec.cwd,
-    route: spec.route === 'auto' ? null : spec.route,
-    ...(spec.model ? { model: spec.model } : {}),
-    ...(spec.effort ? { effort: spec.effort } : {}),
-    ...(spec.session.mode === 'resume' ? { sessionKey: spec.session.key } : {}),
-    clientRef,
-  });
-  // 被拒只认带本次 clientRef 的 error 帧。认不出是冲这一针来的报错不当成「被拒」：被拒的会重派，
-  // 而会话可能已经起了，重派就扣两次额度。记下原话接着等 accepted，等不到按「没查成」收。
-  // 等 accepted 的上限是起会话的总预算（startupMs，从起针算），不是一问一答的 replyMs：服务单线程，被别的会话堵住时
-  // 几十秒才读到这一帧（MS-08；#2249 那次 prompt 帧发出 16 秒后服务才读到、34 秒才起会话，按 30 秒收就报了没查成，
-  // 会话其实起了、跑完了）。起不来的照旧由下面的 startup_timeout 管。
-  const acceptMs = Math.max(limits.replyMs, limits.startupMs - (Date.now() - t0));
   const pause = options.pause ?? sleep;
-  let stray: string | undefined;
-  const reply = await waitFor(
-    control,
-    (f) => {
-      if (f.type === 'accepted') return f.clientRef === undefined || f.clientRef === clientRef;
-      if (f.type !== 'error') return false;
-      if (f.clientRef === clientRef) return true;
-      stray ??= str(f.message) ?? JSON.stringify(f);
-      return false;
-    },
-    acceptMs,
-  );
-  // 没等到应答：先按工作目录 + 起针时间窗对账（MS-18）。对上唯一一条就接上，不重发 prompt。
-  // 没给档案目录、对上多条、一条都没有、档案读不了，才照旧报没查成。
   let sessionKey: string;
   let taskId: string | undefined;
-  if (reply === 'timeout' || reply === 'closed') {
-    const found = options.sessionsDir
-      ? await reconcileLaunchSession({
-          sessionsDir: options.sessionsDir,
-          agent: spec.agent,
-          cwd: spec.cwd,
-          t0,
-          startupMs: limits.startupMs,
-          ...(options.sessionsFs ? { sessionsFs: options.sessionsFs } : {}),
-          clock,
-          pause,
-          ...(options.signal ? { signal: options.signal } : {}),
-        })
-      : undefined;
-    if (found?.kind !== 'unique') {
-      report.launchUnknown = true;
-      report.launchError = launchMissMessage(stray, found?.detail);
-      return done();
-    }
-    sessionKey = found.sessionKey;
-    taskId = found.taskId;
+  if (options.attach) {
+    // 接回（#2815）：会话早就在服务端跑着，上一个引擎放手时记下了会话号和轮次号。不握手、不发 prompt，直接订阅；
+    // 等应答的预算用不上，排队超时从接回起算。
+    sessionKey = options.attach.sessionKey;
+    taskId = options.attach.taskId;
     startupAt = Date.now();
-  } else if (reply.type === 'error') {
-    report.launchError = `服务端拒了这一针：${str(reply.message) ?? JSON.stringify(reply)}`;
-    return done();
   } else {
-    const key = str(reply.sessionKey);
-    if (!key?.startsWith(`${spec.agent}:`)) {
-      report.launchError = `应答里的 sessionKey 认不出：${JSON.stringify(reply.sessionKey)}`;
+    // 1. 连上、握手、核对执行体
+    try {
+      control = await options.connect();
+    } catch (err) {
+      report.launchError = (err as Error).message;
       return done();
     }
-    sessionKey = key;
-    taskId = str(reply.taskId);
+    const state = await hello(control, limits.replyMs);
+    if (typeof state === 'string') {
+      report.launchError = state;
+      return done();
+    }
+    const version = str(state.version);
+    if (version) report.serverVersion = version;
+    if (!Array.isArray(state.agentsAvailable)) {
+      report.launchError = 'state 帧里没有 agentsAvailable，契约没查成——不派';
+      return done();
+    }
+    if (!state.agentsAvailable.includes(spec.agent)) {
+      report.launchError = `服务端没有 ${spec.agent} 这个执行体（有：${state.agentsAvailable.join('、')}）`;
+      return done();
+    }
+    if (options.signal?.aborted) {
+      report.killed = { reason: 'aborted', at: now().toISOString(), ...abortCause(options.signal) };
+      return done();
+    }
+
+    // 2. 起会话 / 续跑：同一个 prompt 帧带上已有的 sessionKey（MS-17）
+    const clientRef = `fleet-${spec.runId}-${t0}`;
+    control.send({
+      type: 'prompt',
+      prompt: spec.prompt,
+      agent: spec.agent,
+      workdir: spec.cwd,
+      route: spec.route === 'auto' ? null : spec.route,
+      ...(spec.model ? { model: spec.model } : {}),
+      ...(spec.effort ? { effort: spec.effort } : {}),
+      ...(spec.session.mode === 'resume' ? { sessionKey: spec.session.key } : {}),
+      clientRef,
+    });
+    // 被拒只认带本次 clientRef 的 error 帧。认不出是冲这一针来的报错不当成「被拒」：被拒的会重派，
+    // 而会话可能已经起了，重派就扣两次额度。记下原话接着等 accepted，等不到按「没查成」收。
+    // 等 accepted 的上限是起会话的总预算（startupMs，从起针算），不是一问一答的 replyMs：服务单线程，被别的会话堵住时
+    // 几十秒才读到这一帧（MS-08；#2249 那次 prompt 帧发出 16 秒后服务才读到、34 秒才起会话，按 30 秒收就报了没查成，
+    // 会话其实起了、跑完了）。起不来的照旧由下面的 startup_timeout 管。
+    const acceptMs = Math.max(limits.replyMs, limits.startupMs - (Date.now() - t0));
+    let stray: string | undefined;
+    const reply = await waitFor(
+      control,
+      (f) => {
+        if (f.type === 'accepted') return f.clientRef === undefined || f.clientRef === clientRef;
+        if (f.type !== 'error') return false;
+        if (f.clientRef === clientRef) return true;
+        stray ??= str(f.message) ?? JSON.stringify(f);
+        return false;
+      },
+      acceptMs,
+    );
+    // 没等到应答：先按工作目录 + 起针时间窗对账（MS-18）。对上唯一一条就接上，不重发 prompt。
+    // 没给档案目录、对上多条、一条都没有、档案读不了，才照旧报没查成。
+    if (reply === 'timeout' || reply === 'closed') {
+      const found = options.sessionsDir
+        ? await reconcileLaunchSession({
+            sessionsDir: options.sessionsDir,
+            agent: spec.agent,
+            cwd: spec.cwd,
+            t0,
+            startupMs: limits.startupMs,
+            ...(options.sessionsFs ? { sessionsFs: options.sessionsFs } : {}),
+            clock,
+            pause,
+            ...(options.signal ? { signal: options.signal } : {}),
+          })
+        : undefined;
+      if (found?.kind !== 'unique') {
+        report.launchUnknown = true;
+        report.launchError = launchMissMessage(stray, found?.detail);
+        return done();
+      }
+      sessionKey = found.sessionKey;
+      taskId = found.taskId;
+      startupAt = Date.now();
+    } else if (reply.type === 'error') {
+      report.launchError = `服务端拒了这一针：${str(reply.message) ?? JSON.stringify(reply)}`;
+      return done();
+    } else {
+      const key = str(reply.sessionKey);
+      if (!key?.startsWith(`${spec.agent}:`)) {
+        report.launchError = `应答里的 sessionKey 认不出：${JSON.stringify(reply.sessionKey)}`;
+        return done();
+      }
+      sessionKey = key;
+      taskId = str(reply.taskId);
+    }
   }
   report.sessionKey = sessionKey;
   if (taskId) report.taskId = taskId;
@@ -404,14 +431,16 @@ export async function runMirasim(
     ...(taskId ? { taskId } : {}),
   };
   gate.call(() => options.onAccepted?.(accepted));
-  session.expectTurn(taskId, spec.session.mode === 'resume');
+  // 接回：服务端的会话早已是这一轮，订阅回的整份快照就是它（有轮次号的按轮次号认）；不是「续跑先回上一轮收尾」那回事
+  session.expectTurn(taskId, options.attach ? false : spec.session.mode === 'resume');
 
   // 3. 叫停：stop 帧只在失败时回 error，送没送到要看它翻不翻终态（MS-16）。过半个确认期还没翻，换条新连接再发一次。
   let killedAt = 0;
   let stopResent = false;
   const sendStop = async (fresh: boolean) => {
     try {
-      if (fresh) {
+      // 接回的没有发起连接：一律另开一条发
+      if (fresh || !control) {
         const wire = await options.connect();
         const st = await hello(wire, limits.replyMs);
         if (typeof st === 'string') throw new Error(st);
@@ -429,7 +458,9 @@ export async function runMirasim(
     report.stop = { confirmed: false };
     void sendStop(false);
   };
-  if (spec.session.mode === 'resume' && sessionKey !== spec.session.key) kill('session_mismatch');
+  if (!options.attach && spec.session.mode === 'resume' && sessionKey !== spec.session.key) {
+    kill('session_mismatch');
+  }
 
   // 4. 另开一条连接订阅（推送不保证送到发起连接，MS-03）。
   // 连不上（服务正在重启、令牌文件还没写回来）按退避再试，总时长盖住一次重启，不是连试 3 次就放弃。
@@ -437,6 +468,8 @@ export async function runMirasim(
     const deadline = Date.now() + WATCH_CONNECT_BUDGET_MS;
     let wait = 500;
     for (;;) {
+      // 放手了就不再重连：下一个引擎接回
+      if (options.release?.aborted && !report.killed) return undefined;
       try {
         const wire = await options.connect();
         const st = await hello(wire, limits.replyMs);
@@ -459,9 +492,15 @@ export async function runMirasim(
   sub = await openSub();
   let lastFingerprint = '';
   let lastProgress = Date.now();
+  let detached = false;
   while (sub) {
     const elapsed = Date.now() - t0;
     const sinceStartup = Date.now() - startupAt;
+    // 放手优先于叫停：引擎停机时放手信号先响，随后活动被取消（signal 也响）也不能走发 stop 那条路
+    if (options.release?.aborted && !report.killed) {
+      detached = true;
+      break;
+    }
     if (options.signal?.aborted) kill('aborted', stopCauseOf(options.signal.reason));
     if (!report.killed) {
       const phase = session.state.phase;
@@ -502,6 +541,11 @@ export async function runMirasim(
     }
     if (frame.type === 'snapshot') {
       deliver(session.applySnapshot(num(frame.seq) ?? 0, rec(frame.snapshot) ?? {}));
+      if (replaying) {
+        // 旧内容到此为止：没说完的话也算旧的，免得之后和新长出来的粘在一起重复交
+        deliver(session.flush());
+        replaying = false;
+      }
     } else if (frame.type === 'session') {
       const events = session.applyPatch(num(frame.seq) ?? 0, rec(frame.patch) ?? {});
       if (events === 'gap') {
@@ -531,7 +575,11 @@ export async function runMirasim(
       break;
     }
   }
-  if (!sub && !report.terminal) {
+  if (!sub && !report.terminal && !report.killed && options.release?.aborted) detached = true;
+  if (detached) {
+    report.detached = { sessionKey, ...(taskId ? { taskId } : {}) };
+    delete report.watchError;
+  } else if (!sub && !report.terminal) {
     report.watchError ??= '读状态的连接建不起来';
     // 看不见它了：停掉，免得它在服务端一直跑；它后来怎样照实记「没查成」，不记成我们叫停
     report.stop ??= { confirmed: false };
@@ -540,7 +588,7 @@ export async function runMirasim(
   deliver(session.flush());
 
   // 5. 账本：这次到底走了哪条上游、有没有真的 2xx（MS-27）
-  if (options.ledgerDir) {
+  if (options.ledgerDir && !detached) {
     // 中转路由要看到起针之后的 2xx：行是调用结束后才写的，刚结束就读会读空，等它追上来（最多 ledgerWaitMs）
     const deadline = Date.now() + limits.ledgerWaitMs;
     for (;;) {

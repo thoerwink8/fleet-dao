@@ -42,6 +42,10 @@
 //   那一睡不写任务行，doing / updated_at 停在这一句，工作流仍 Running、没有新的 runs，拉单把它算进在干活。
 //   新跑的当场停下等人。已经睡在里面的老历史：这一标记重放时为假（不能插在已记下的定时器前面），
 //   叫醒之后走 patched('wall-clock-switch-wake')，下一轮再选不出就停下，不再睡第二觉。
+// - 出在账号池上的停（登录失效、封号、设备被撤销，patched('auth-reroute')）：池照旧暂停并报警，这张单马上回去选路避开这个池。
+//   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
+//   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
+//   避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」。老历史没有这个标记，仍把这张单挂起。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -55,10 +59,12 @@ import {
   SEGMENT_MINUTES,
   SEGMENT_STAGE,
   type SegmentEvidence,
+  type TaskSpendResult,
   UI_PURPOSE,
 } from '../task-contract.ts';
 import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
 import { failureOf, iso } from './kit.ts';
+import { decideFlowOnce } from './task-flow.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
@@ -70,13 +76,17 @@ import {
   dispatchProbeLine,
   dispatchProbeStopText,
   EMPTY_DISPATCH_PROBE,
+  failureLooksLikeBare401,
   isDispatchProbePassOnly,
   mergeAvoid,
   NO_AVOID,
   NO_OTHER_FAMILY,
   NO_OTHER_ROUTE,
   PausedInterrupt,
+  POOLS_ALL_HELD,
   patienceStep,
+  poolAuthHoldTitle,
+  poolHoldDedupeKey,
   RELEASE_FAMILY_WAIT,
   RESUME_STARTED_SLACK_MS,
   RepinInterrupt,
@@ -117,6 +127,14 @@ export async function writeSession(
   let patienceFrom: number | null = null;
   let patienceRounds = 0;
   let patienceWaited = 0;
+  // 账号池上的停（patched('auth-reroute')）：第一次失败才问标记，问过就记住。老历史这一支为假，仍挂起这张单。
+  let authOn = false;
+  /** 已经因登录失效、封号、设备被撤销避开了池：选路一条都没有才挂起。 */
+  let authPoolsDown = false;
+  /** 这张单记下只凭 401 的次数：活动重试用同一个身份，不会把自己数成第二次。 */
+  let bare401Seq = 0;
+  /** 这一次只凭 401 避开的路由：没有别的路由可换时，选路放它再试一次，好凑第二次。 */
+  let bare401RouteId: string | undefined;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
   // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
   const ui: UiJudgement | undefined = patched('ui-work-implement')
@@ -127,7 +145,16 @@ export async function writeSession(
   for (;;) {
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
     await holdForBudget(rt);
-    const picked = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
+    const picked = await pickRoute(
+      rt,
+      avoid,
+      stick,
+      failedChannel,
+      ui?.uiWork === true,
+      authOn && authPoolsDown,
+      authOn ? bare401RouteId : undefined,
+    );
+    bare401RouteId = undefined;
     failedChannel = undefined;
     const route = picked.route;
     if (picked.probeNote) {
@@ -152,6 +179,8 @@ export async function writeSession(
         : route.family,
     );
     rt.attemptSeq += 1;
+    // 定模式（#2826）：第一次选路之后、第一段动手之前定一次，结果进历史（task-flow.ts）
+    await decideFlowOnce(rt, brief, tier, route);
     // 续会话（决定 0088）：上一段留了要续的记号才问；判一次就清掉
     let resumeSessionId: string | undefined;
     let resumeNote = '';
@@ -199,6 +228,8 @@ export async function writeSession(
         ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
         // 重活先出方案的那一段（#2755）：提示词另说只读、只回方案 JSON
         ...(opts.plan ? { mode: 'plan' as const } : {}),
+        // 全程的单（#2826）：提示词多一节「到合并都归你」。三段、老历史不带
+        ...(rt.flowMode === 'full' ? { flowMode: 'full' as const } : {}),
       };
       // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
       let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });
@@ -250,7 +281,7 @@ export async function writeSession(
       }
       infra = error;
     }
-    const failure = infra
+    let failure = infra
       ? failureOf(infra, 'session:execute')
       : {
           source: 'session:execute',
@@ -258,8 +289,54 @@ export async function writeSession(
           message: evidence?.message ?? '会话没跑成',
           retryable: null,
         };
+    // Temporal 只凭 StartToClose timeout 不知道活动是不是被旧 worker 丢了。
+    // 有旧心跳时比较两个启动时刻；旧心跳被服务端丢掉时，用当前引擎启动时刻和这一段起跑时刻比较。
+    // 两种凭据都不足时保守地按真实超时。
+    if (patched('engine-restart-timeout') && failure.code.toLowerCase().startsWith('timeout_')) {
+      try {
+        const current = await rt.cancellable(() => rt.acts.engineStartedAt({ schemaVersion: 1 }));
+        const currentStartedAt = Date.parse(current.startedAt);
+        const changed =
+          failure.engineStartedAt !== undefined
+            ? current.startedAt !== failure.engineStartedAt
+            : Number.isFinite(currentStartedAt) && currentStartedAt > attemptAt;
+        if (changed) {
+          failure = {
+            ...failure,
+            currentEngineStartedAt: current.startedAt,
+            engineRestarted: true,
+          };
+        }
+      } catch (error) {
+        if (error instanceof Abandoned || isCancellation(error)) throw error;
+        log.warn('超时活动的引擎启动代次没查成，按真实超时处理', {
+          error: failureOf(error, 'engineStartedAt').message,
+        });
+      }
+    }
     // 切号停下的（失败分流 OS1：不算失败、不记账、马上接着干）：选路照常选到切过去的那个池，在原分支上重跑这一段
     if (failure.code === ORG_SWITCH_CODE) interrupted = failure.message;
+    // 写在问分流之前：老历史重放时这一支为假，不多一次记 401 的活动，分流的入参也不带 priorBare401。
+    authOn = patched('auth-reroute');
+    let priorBare401 = false;
+    if (
+      authOn &&
+      failureLooksLikeBare401({
+        code: failure.code,
+        message: failure.message,
+        ...(evidence?.httpStatus !== undefined ? { httpStatus: evidence.httpStatus } : {}),
+      })
+    ) {
+      const seq = bare401Seq;
+      bare401Seq += 1;
+      const noted = await rt.acts.noteBare401({
+        schemaVersion: 1,
+        poolId: route.poolId,
+        now: iso(Date.now()),
+        claim: `${workflowInfo().workflowId}:${route.poolId}:${seq}`,
+      });
+      priorBare401 = noted.repeated;
+    }
     const next = await rt.classify(failure, counters, true, {
       stage: SEGMENT_STAGE.manual,
       route: {
@@ -274,11 +351,38 @@ export async function writeSession(
       ...(evidence?.httpStatus !== undefined ? { httpStatus: evidence.httpStatus } : {}),
       ...(evidence?.exitCode !== undefined ? { exitCode: evidence.exitCode } : {}),
       previousMessage,
+      ...(priorBare401 ? { priorBare401: true as const } : {}),
     });
     // 切号停下的不是这一段的失败：不当「上一次的原文」——既不凑成「和上一次一字不差」，也不打断切号前后两次真失败的比对
     if (failure.code !== ORG_SWITCH_CODE) previousMessage = failure.message;
     rt.status.lastProblem = next.reason;
     counters = bump(counters, next);
+    // 出在账号池上（登录失效、封号、设备被撤销）：不挂起这张单。标记在问分流时已经记下（老历史为假，仍走下面的挂起）。
+    if (authOn && next.authReroute) {
+      stick = undefined;
+      avoid = widen(avoid, route, next.authReroute);
+      previousMessage = undefined;
+      if (next.authReroute === 'pool') {
+        authPoolsDown = true;
+        bare401RouteId = undefined;
+        try {
+          await rt.acts.raiseAlert({
+            taskId: rt.input.taskId,
+            level: 'decision',
+            title: `账号池 ${route.poolId} 整池暂停：${poolAuthHoldTitle(next.rule)}`,
+            detail: next.reason,
+            dedupeKey: poolHoldDedupeKey(route.poolId),
+          });
+        } catch (error) {
+          if (error instanceof Abandoned || isCancellation(error)) throw error;
+          log.warn('整池暂停的提醒没发出去，这张单照旧换池', { poolId: route.poolId, error: String(error) });
+        }
+      } else {
+        bare401RouteId = route.routeId;
+      }
+      await rt.note(next.reason);
+      continue;
+    }
     // 老历史没有这个标记：不问上一段收场没有、不耐心等，照旧
     const patienceOn = patched('route-patience');
     if (next.action === 'retry') {
@@ -419,7 +523,7 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   if (!patched('task-token-budget')) return;
   // 写在查花费之前、估用量那个标记之前：老历史重放时这一支为假，不多一个字段，后面的标记顺序也对得上。
   const thisGeneration = patched('task-budget-this-generation');
-  let spent: { tokens: number; unmetered: number; estimated?: number };
+  let spent: TaskSpendResult;
   try {
     spent = await rt.cancellable(() =>
       rt.acts.taskSpend({
@@ -436,11 +540,23 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   }
   // 被叫停、超时杀掉的会话多半到不了 CLI 的收尾用量帧，用量就空着；按这张单别的行估出来的下限一起算进预算，
   // 不然一张单反复被叫停可以一直换会话、账面一次都不超。老历史没有这个字段，估出来的是 0，照旧（patched('task-budget-unmetered-estimate')）。
-  const counted = spent.tokens + (patched('task-budget-unmetered-estimate') ? (spent.estimated ?? 0) : 0);
+  // #2859：判超没超用活动算好的输入当量（inputEquivalent）；#2830 那一版记的是 weighted / weightedEstimated，照读；
+  // 再老的结果两样都没有，用原来的 tokens / estimated。当量不在这里重算：历史里记的是活动当时的结果，重放读到的数不变。
+  // 没动步序，所以不用新标记。
+  const equivalent = spent.inputEquivalent !== undefined;
+  const measured = spent.inputEquivalent ?? spent.weighted ?? spent.tokens;
+  const estimatedPart =
+    spent.inputEquivalent !== undefined
+      ? (spent.inputEquivalentEstimated ?? 0)
+      : spent.weighted !== undefined
+        ? (spent.weightedEstimated ?? 0)
+        : (spent.estimated ?? 0);
+  const counted = measured + (patched('task-budget-unmetered-estimate') ? estimatedPart : 0);
   if (counted <= budget * rt.budgetGrants) return;
   const stop = tokenBudgetStop({ tokens: counted, unmetered: spent.unmetered }, budget, rt.budgetGrants, {
-    measured: spent.tokens,
-    estimated: counted - spent.tokens,
+    measured,
+    estimated: counted - measured,
+    ...(equivalent ? { raw: spent } : {}),
   });
   await rt.park(stop.title, stop.detail);
   // 人看过、点了「继续」：再给到比花掉的多一份
@@ -488,6 +604,10 @@ async function pickRoute(
   stick?: string,
   failedChannel?: FailedChannel,
   uiWork = false,
+  /** 已经因登录失效、封号、设备被撤销避开了池：一条能派的都没有就挂起，不改去等探针。 */
+  authPoolsDown = false,
+  /** 只凭一次 401 避开的路由。没有别的路由时放它再试一次，好让第二次 401 暂停整池。 */
+  bare401RouteId?: string,
 ): Promise<{ route: RouteChoice; probeNote: string | null }> {
   const stage = uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual;
   // 老历史重放时这一支为假：选路参数和原来一样，不多选一次。要写在派前探测那个标记之前，已有历史里的标记顺序才对得上。
@@ -501,6 +621,8 @@ async function pickRoute(
   let droppedFamilies = false;
   let holdForProbe = false;
   let lastStopDetail = '';
+  // 只凭 401 的那条路由已经放回去再试过一次：再派不出就不再放，免得来回选。
+  let releasedBare401 = false;
   // 这一轮已经记下「全都探不通」。再选到能派的，把上次停下的原因清掉，别留在任务状态里。
   const clearProbeStop = () => {
     if (holdForProbe || rt.status.lastProblem?.startsWith('派前探测：')) rt.status.lastProblem = null;
@@ -646,6 +768,24 @@ async function pickRoute(
           if (chosen) return chosen;
           continue;
         }
+        // 登录失效、封号、设备被撤销把能派的池都避开了：挂起这张单，不改去等探针（探针恢复不了要人重新登录的池）。
+        // 人点「继续」之后避让清掉再选：生产上池的提醒还在，选路仍是一条都没有，再挂起。
+        if (authPoolsDown) {
+          await rt.park(POOLS_ALL_HELD, got.detail);
+          avoid = NO_AVOID;
+          continue;
+        }
+        // 只凭一次 401、没有别的路由：放回这条再试一次。第二次仍是 401 才暂停整池。已经放过、或同时还避开了池，就不再放。
+        if (
+          bare401RouteId &&
+          !releasedBare401 &&
+          merged.poolIds.length === 0 &&
+          avoidRouteIds.includes(bare401RouteId)
+        ) {
+          releasedBare401 = true;
+          avoid = { ...avoid, routeIds: avoid.routeIds.filter((id) => id !== bare401RouteId) };
+          continue;
+        }
         // 还没探过、候选一开始就被挡，也走同一条停下：写出原因，沿用全熔断提醒，等探针恢复再继续。
         if (probeOn) {
           await stopForProbe(got.detail, mark);
@@ -683,9 +823,10 @@ async function pickRoute(
       }
       // #2392 钉在这里：总时长第二次到顶、rt.note 写完「换一条路由带上进度续一次」之后 continue 回到本循环。
       // 上一段已经收场（不然走不到 note），holdForBudget 的 taskSpend 是 quick 档，撑不到十几个小时。
-      // 能冻住 tasks.doing / updated_at、又不插入 runs 的，就是下面这次 pauseForRoute：condition 睡着，
-      // waiting() 只改内存、不 mirror。等额度 retryAfterSeconds 封顶 4 小时，连睡几觉就是十几个小时；
-      // 等空位、熔断每档最多约 2 分钟，但同样不写任务行，看起来和定时器没醒一样。
+      // 能冻住 tasks.doing / updated_at、又不插入 runs 的，就是下面这次 pauseForRoute：condition 睡着。
+      // 等额度 retryAfterSeconds 封顶 4 小时，连睡几觉就是十几个小时。
+      // 现在睡之前先 mirrorRouteWait（#2863，patched('route-wait-mirror')）：把「等路由：<原因>」落库，
+      // 原因不变不重复写、变了再写一次；选到路由起会话时 advance 换回动手那一句。
       // taskContinue 不在这个条件里（在途重放不能改谓词）；叫醒靠 taskRouteWake。
       // 新跑的（wall-clock-switch-lands）：不睡，当场停下等人。已经睡在这一觉里的老历史重放时这一标记为假，
       // 仍睡原来那一觉；醒了（继续附带的叫醒、或定时器）再走 wall-clock-switch-wake，下一轮选不出就停下，不睡第二觉。
@@ -702,6 +843,7 @@ async function pickRoute(
       // 等空位、熔断仍是短间隔。路由变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒。
       // 步序没变（秒数是选路活动的结果）：老历史重放不用新的 patched 标记。
       // 多张单同时停在这里时，测试不要 await result()（会 unlockTimeSkipping，见 #1764）。
+      await rt.mirrorRouteWait(got.detail);
       await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
       if (rt.landSwitch && patched('wall-clock-switch-wake')) rt.switchWake = true;
       continue;

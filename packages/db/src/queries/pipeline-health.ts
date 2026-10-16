@@ -6,6 +6,14 @@
 //   平均轮数＝这一档窗口里合并的工作流，从开工到合并一共收场了几轮（含窗口之前的轮）。
 // - 重活 PR 新增行 p90：窗口里合并的 heavyweight 轮，收场时 PR 相对主线的新增行数的 p90；没有量到的行不算。
 // 读不到照抛，不拿空顶；窗口里一轮都没有时各占比是 null（调用方写「没有」），不是 0。
+
+import {
+  FLOW_MODES,
+  type FlowMode,
+  INPUT_EQUIVALENT_WEIGHTS,
+  VERIFY_REJECT_CLASSES,
+  type VerifyRejectClass,
+} from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { ROUND_OUTCOMES, type RoundOutcome, taskRounds } from '../schema/work.ts';
@@ -22,12 +30,25 @@ export interface RoundRecord {
   firstModel?: string | null;
   addedLines?: number | null;
   endedAt?: Date;
+  /** 这一轮走的流程（#2823）；不给就是空。 */
+  flowMode?: FlowMode | null;
+  /** 冷验收拒绝的分类（#2823）：只在人工审过之后填，不给就是空。 */
+  verifyRejectClass?: VerifyRejectClass | null;
 }
 
 /** 记一轮怎么收场的。同一条工作流同一个 seq 已经记过就不动（活动重试不写第二行）。 */
 export async function recordTaskRound(db: Db, r: RoundRecord): Promise<void> {
   if (!(ROUND_OUTCOMES as readonly string[]).includes(r.outcome)) {
     throw new Error(`认不出的一轮结束类：${r.outcome}`);
+  }
+  if (r.flowMode != null && !(FLOW_MODES as readonly string[]).includes(r.flowMode)) {
+    throw new Error(`认不出的流程模式：${r.flowMode}`);
+  }
+  if (
+    r.verifyRejectClass != null &&
+    !(VERIFY_REJECT_CLASSES as readonly string[]).includes(r.verifyRejectClass)
+  ) {
+    throw new Error(`认不出的冷验收拒绝分类：${r.verifyRejectClass}`);
   }
   await db
     .insert(taskRounds)
@@ -40,6 +61,8 @@ export async function recordTaskRound(db: Db, r: RoundRecord): Promise<void> {
       tier: r.tier ?? null,
       firstModel: r.firstModel ?? null,
       addedLines: r.addedLines ?? null,
+      flowMode: r.flowMode ?? null,
+      verifyRejectClass: r.verifyRejectClass ?? null,
       ...(r.endedAt ? { endedAt: r.endedAt } : {}),
     })
     .onConflictDoNothing({ target: [taskRounds.workflowId, taskRounds.seq] });
@@ -171,4 +194,170 @@ export async function releaseKilledSessions(db: Db, to: Date): Promise<ReleaseKi
   const total = rows.reduce((a, r) => a + Number(r.n), 0);
   const secs = rows.reduce((a, r) => a + Number(r.secs), 0);
   return { from, to, total, hours: Math.round(secs / 360) / 10, byDay };
+}
+
+// —— 两种流程的对照（决定 0105，#2827）：按 task_flow_assignments 分到组的合格单，自开跑累计（不按 7 天窗口：样本量才是要看的）。
+// 口径和决定 0105 的试点规则一致：
+// - 单数＝分到组的合格单（source ≠ ineligible）；合并数＝其中有一轮 outcome = merged 的单。
+// - 成功率这里按「合并数 / 单数」算，带 Wilson 95% 区间；0105 里「合并后 7 天没被修也没被回退」库里读不到，那一条由人核，不在这数里。
+// - 时长＝分到组到第一次 merged 收场的分钟数，只看已合并的单（没合的不进时长），中位和 p90。
+// - 每合并单输入当量＝这一组所有单的 runs 输入当量之和 / 合并数（没合的单花的也算进来；#2859，原始四样相加另给 rawTokensPerMerged）；有 run 的 token 没读全，
+//   数里按 0 加，同时报有几条 run 没读全，不当没有。
+// 读不到照抛；没有分组记录时每组都是 0 单、各个比率是 null，不是 0。
+
+/** 这一组满多少单才出对照结论（决定 0105：效果类止损满 30 单起判）。 */
+export const FLOW_VERDICT_MIN_TASKS = 30;
+/** 安全门槛：每组先跑满这么多单（决定 0105）。 */
+export const FLOW_SAFETY_GATE_TASKS = 90;
+/** 非劣效边界：5 个百分点（决定 0105）。 */
+export const FLOW_NONINFERIORITY_MARGIN = 0.05;
+/** 成本类止损：全程每合并单输入当量超过三段的这个倍数（决定 0105）。 */
+export const FLOW_COST_STOP_RATIO = 2;
+
+/** Wilson 区间（z=1.96 即 95%）。n=0 回 null。 */
+export function wilsonInterval(k: number, n: number, z = 1.96): { low: number; high: number } | null {
+  if (n <= 0) return null;
+  const p = k / n;
+  const z2 = z * z;
+  const denom = 1 + z2 / n;
+  const centre = (p + z2 / (2 * n)) / denom;
+  const half = (z * Math.sqrt((p * (1 - p)) / n + z2 / (4 * n * n))) / denom;
+  return { low: Math.max(0, centre - half), high: Math.min(1, centre + half) };
+}
+
+/** 两个比例之差（a − b）的 Newcombe 区间（用两边的 Wilson 区间拼）。任一边没有单回 null。 */
+export function newcombeDiff(
+  a: { k: number; n: number },
+  b: { k: number; n: number },
+  z = 1.96,
+): { diff: number; low: number; high: number } | null {
+  const wa = wilsonInterval(a.k, a.n, z);
+  const wb = wilsonInterval(b.k, b.n, z);
+  if (!wa || !wb) return null;
+  const pa = a.k / a.n;
+  const pb = b.k / b.n;
+  return {
+    diff: pa - pb,
+    low: pa - pb - Math.sqrt((pa - wa.low) ** 2 + (wb.high - pb) ** 2),
+    high: pa - pb + Math.sqrt((wa.high - pa) ** 2 + (pb - wb.low) ** 2),
+  };
+}
+
+export interface FlowGroupStat {
+  mode: FlowMode;
+  tasks: number;
+  merged: number;
+  successRate: number | null;
+  wilson: { low: number; high: number } | null;
+  /** 分到组到合并的分钟数；没有合并的单是 null。 */
+  durationMedianMin: number | null;
+  durationP90Min: number | null;
+  /** 每合并单输入当量（INPUT_EQUIVALENT_WEIGHTS：输入 1、缓存写 1.25、缓存读 0.1、输出 5，#2859）；没有合并的单是 null。成本对比按它算。 */
+  equivalentPerMerged: number | null;
+  /** 每合并单原始四样 token 相加（另列给人对照）；没有合并的单是 null。 */
+  rawTokensPerMerged: number | null;
+  /** 这一组的 run 里 token 没读全的条数（数里按 0 加了）。 */
+  runsTokenUnread: number;
+}
+
+export interface FlowModeHealth {
+  to: Date;
+  full: FlowGroupStat;
+  three: FlowGroupStat;
+  /** 两组都满 FLOW_VERDICT_MIN_TASKS 单才算够判；不够时调用方写「还不够判」，不出结论。 */
+  enough: boolean;
+  /** 够判时：全程减三段的成功率差（Newcombe 95% 区间，用来判非劣效）和 90% 区间（上界 < 0 即单侧 95% 全程更差，用来判效果止损）。 */
+  verdict: {
+    diff: { diff: number; low: number; high: number };
+    worse90: { diff: number; low: number; high: number };
+    noninferior: boolean;
+    effectStop: boolean;
+    /** 全程每合并单输入当量是三段的几倍；任一边没有合并的单是 null。 */
+    costRatio: number | null;
+    costStop: boolean;
+  } | null;
+}
+
+export async function flowModeHealth(db: Db, to: Date): Promise<FlowModeHealth> {
+  if (Number.isNaN(to.getTime())) throw new Error('flowModeHealth: 时刻不是有效日期');
+  const at = to.toISOString();
+  const groups = rowsOf(
+    await db.execute(sql`
+      with g as (
+        select task_id, mode, assigned_at from task_flow_assignments
+        where source <> 'ineligible' and assigned_at < ${at}::timestamptz
+      ),
+      m as (
+        select g.task_id, g.mode, extract(epoch from (min(r.ended_at) - g.assigned_at)) / 60 as minutes
+        from g join task_rounds r on r.task_id = g.task_id and r.outcome = 'merged' and r.ended_at < ${at}::timestamptz
+        group by g.task_id, g.mode, g.assigned_at
+      )
+      select g.mode,
+             count(*)::int as tasks,
+             (select count(*)::int from m where m.mode = g.mode) as merged,
+             (select percentile_cont(0.5) within group (order by minutes) from m where m.mode = g.mode) as med,
+             (select percentile_cont(0.9) within group (order by minutes) from m where m.mode = g.mode) as p90
+      from g group by g.mode`),
+  );
+  const tokens = rowsOf(
+    await db.execute(sql`
+      select a.mode,
+             coalesce(sum(coalesce(u.input_tokens, 0) + coalesce(u.output_tokens, 0)
+                        + coalesce(u.cache_read_tokens, 0) + coalesce(u.cache_write_tokens, 0)), 0)::float8 as total,
+             coalesce(sum(coalesce(u.input_tokens, 0) * ${INPUT_EQUIVALENT_WEIGHTS.input}::float8
+                        + coalesce(u.output_tokens, 0) * ${INPUT_EQUIVALENT_WEIGHTS.output}::float8
+                        + coalesce(u.cache_read_tokens, 0) * ${INPUT_EQUIVALENT_WEIGHTS.cacheRead}::float8
+                        + coalesce(u.cache_write_tokens, 0) * ${INPUT_EQUIVALENT_WEIGHTS.cacheWrite}::float8), 0)::float8 as equivalent,
+             (count(*) filter (where u.input_tokens is null or u.output_tokens is null
+                                 or u.cache_read_tokens is null or u.cache_write_tokens is null))::int as unread
+      from task_flow_assignments a join runs u on u.task_id = a.task_id and u.started_at < ${at}::timestamptz
+      where a.source <> 'ineligible' and a.assigned_at < ${at}::timestamptz
+      group by a.mode`),
+  );
+  const stat = (mode: FlowMode): FlowGroupStat => {
+    const g = groups.find((r) => r.mode === mode);
+    const k = tokens.find((r) => r.mode === mode);
+    const tasks = g ? Number(g.tasks) : 0;
+    const merged = g ? Number(g.merged) : 0;
+    const med = num(g?.med);
+    const p90 = num(g?.p90);
+    return {
+      mode,
+      tasks,
+      merged,
+      successRate: tasks === 0 ? null : merged / tasks,
+      wilson: wilsonInterval(merged, tasks),
+      durationMedianMin: med === null ? null : Math.round(med),
+      durationP90Min: p90 === null ? null : Math.round(p90),
+      equivalentPerMerged: merged === 0 ? null : Math.round(Number(k?.equivalent ?? 0) / merged),
+      rawTokensPerMerged: merged === 0 ? null : Math.round(Number(k?.total ?? 0) / merged),
+      runsTokenUnread: k ? Number(k.unread) : 0,
+    };
+  };
+  const full = stat('full');
+  const three = stat('three');
+  const enough = full.tasks >= FLOW_VERDICT_MIN_TASKS && three.tasks >= FLOW_VERDICT_MIN_TASKS;
+  let verdict: FlowModeHealth['verdict'] = null;
+  if (enough) {
+    const a = { k: full.merged, n: full.tasks };
+    const b = { k: three.merged, n: three.tasks };
+    const diff = newcombeDiff(a, b);
+    const worse90 = newcombeDiff(a, b, 1.645);
+    if (!diff || !worse90) throw new Error('flowModeHealth: 够判的两组算不出差值');
+    const costRatio =
+      full.equivalentPerMerged === null ||
+      three.equivalentPerMerged === null ||
+      three.equivalentPerMerged === 0
+        ? null
+        : full.equivalentPerMerged / three.equivalentPerMerged;
+    verdict = {
+      diff,
+      worse90,
+      noninferior: diff.low > -FLOW_NONINFERIORITY_MARGIN,
+      effectStop: worse90.high < 0,
+      costRatio,
+      costStop: costRatio !== null && costRatio > FLOW_COST_STOP_RATIO,
+    };
+  }
+  return { to, full, three, enough, verdict };
 }

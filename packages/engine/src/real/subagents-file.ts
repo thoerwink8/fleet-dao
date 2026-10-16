@@ -80,11 +80,15 @@ export async function prepareSubagents(options: PrepareSubagentsOptions = {}): P
 export async function readSubagentGuard(sourceDir: string = SUBAGENTS_DIR): Promise<{
   names: string[];
   isolated: string[];
+  /** 仓里的定义（和 --agents 文件同一个 loadSubagents）：Mirasim 的 Claude 会话开跑前拿它核对会话用户家里装的那份（#2820）。 */
+  definitions: SubagentDefinitions;
 }> {
   try {
+    const definitions = await loadSubagents(sourceDir);
     return {
-      names: Object.keys(await loadSubagents(sourceDir)),
+      names: Object.keys(definitions),
       isolated: await isolatedSubagentNames(sourceDir),
+      definitions,
     };
   } catch (error) {
     throw new Error(

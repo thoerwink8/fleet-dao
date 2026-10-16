@@ -321,8 +321,11 @@ export function UsagePanel({ d, now }: { d: TaskDetail; now: number }) {
             label="输入当量"
             r={reading(t.inputEquivalent, t.missingEquivalent, t.runs)}
             empty={noRuns}
-            note={t.runs ? `额度按它比：各家 token 按${EQUIVALENT_RULE} 折算` : undefined}
-            big
+            note={
+              t.runs
+                ? `额度和每单预算都按它比：各家 token 按${EQUIVALENT_RULE} 折算。原始四样在下面`
+                : undefined
+            }
             className="col-span-2"
           >
             {formatCount(t.inputEquivalent)}

@@ -34,6 +34,8 @@ interface Opts {
   issueReplies?: GhResult[];
   /** 当前分支，默认 feat/x。 */
   branch?: string;
+  /** 读提交全文（尾注）的回话：默认没有尾注。 */
+  trailers?: RunResult;
 }
 
 function world(o: Opts = {}) {
@@ -44,6 +46,7 @@ function world(o: Opts = {}) {
   const out: string[] = [];
   const err: string[] = [];
   const gitCalls: string[][] = [];
+  const trailerCalls: string[][] = [];
   const issueCalls: string[][] = [];
   const issueBodies: string[] = [];
   const replies = [...(o.replies ?? [])];
@@ -67,6 +70,11 @@ function world(o: Opts = {}) {
   const git: Gh = (args) => {
     if (args[0] === 'push') return ok(); // pr-open 开 PR 前的 git push：本文件不关心，pr-open.test.ts 管
     if (args[0] === 'rev-parse') return ok(`${o.branch ?? 'feat/x'}\n`); // 同上：开之前读当前分支
+    // 读提交里的 Co-Authored-By 尾注（写码模型那一行用）：单独记，不混进读提交说明的那一次
+    if (args.includes('--format=%B%x1e')) {
+      trailerCalls.push(args);
+      return o.trailers ?? ok('');
+    }
     gitCalls.push(args);
     return o.log ?? ok('加个东西\n');
   };
@@ -95,6 +103,7 @@ function world(o: Opts = {}) {
     out,
     err,
     gitCalls,
+    trailerCalls,
     issueCalls,
     issueBodies,
     run,
@@ -112,6 +121,40 @@ describe('pnpm pr:open 自己生成正文', () => {
     expect(w.bodies).toEqual(['**做了什么**：加个东西\n\n**需求**：\nCloses #7\n']);
     expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
     expect(w.text()).toContain('挂上了自动合并');
+  });
+
+  it('提交带 Co-Authored-By: Claude Haiku 尾注：正文写一行固定格式「写码模型」，放在最后', async () => {
+    const w = world({
+      trailers: ok('加个东西\n\nCo-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>\n\x1e'),
+      replies: [CREATED, files('a.ts'), ok()],
+    });
+    expect(await w.run('--closes', '7')).toBe(0);
+    expect(w.trailerCalls).toEqual([['log', '--no-merges', '--format=%B%x1e', 'origin/main..HEAD']]);
+    expect(w.bodies[0]).toBe(
+      '**做了什么**：加个东西\n\n**需求**：\nCloses #7\n\n**写码模型**：claude-haiku-5-5\n',
+    );
+    expect(issueColumnRefs(w.bodies[0] ?? '')).toEqual({ closes: [7], refs: [] });
+  });
+
+  it('没有 Claude 尾注：不写「写码模型」；读尾注失败：照开 PR，提示一句', async () => {
+    const none = world({ replies: [CREATED, files('a.ts'), ok()] });
+    expect(await none.run('--closes', '7')).toBe(0);
+    expect(none.bodies[0]).not.toContain('写码模型');
+    const failed = world({ trailers: bad('boom', 128), replies: [CREATED, files('a.ts'), ok()] });
+    expect(await failed.run('--closes', '7')).toBe(0);
+    expect(failed.bodies[0]).not.toContain('写码模型');
+    expect(failed.text()).toContain('没读到提交尾注');
+  });
+
+  it('改标准：写码模型那一行在创始人原话之后，原话照旧认得出', async () => {
+    const w = world({
+      trailers: ok('x\n\nCo-Authored-By: Claude Haiku 5.5 <n@a>\n\x1e'),
+      replies: [CREATED, files('agents/shared-rules.md'), ok()],
+    });
+    expect(await w.run('--closes', '7', '--founder-quote', '同意', '--at', '2026-10-16 19:52')).toBe(0);
+    expect(w.bodies[0]).toMatch(
+      /\*\*创始人原话\*\*：「同意」（2026-10-16 19:52）\n\n\*\*写码模型\*\*：claude-haiku-5-5\n$/,
+    );
   });
 
   it('多条提交列成短列表；--refs 写 Refs；--base 换比较的分支；单号写 #12 也认；--closes 可重复', async () => {

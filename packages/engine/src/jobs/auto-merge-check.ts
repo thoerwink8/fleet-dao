@@ -12,9 +12,10 @@
 // - 任务工作流（#632）起的 PR（分支 fleet/<单号>-t<8 位>）不归这里挂：它们的自动合并只由工作流在冷验收通过之后挂；
 //   这里照 CI 绿就挂，会抢在验收之前把没验过的合进主线。判在读文件和清单之前（便宜、也不会因为清单读不出报一堆提醒）。
 
-import { parseStandardPaths, standardFiles } from '@fleet-dao/conventions';
+import { type StandardPath, standardFiles } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
+import { standardPathsList } from '../standard-paths-list.ts';
 import { isTaskBranch } from '../task-branch.ts';
 import { clip, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
 
@@ -59,10 +60,10 @@ export interface AutoMergeGitHub {
   /** 这几个必过检查的名字（取自主线规则集；仓里没有就抛错，不拿空算绿）。 */
   requiredChecks(repo: RepoRef): Promise<string[]>;
   /**
-   * 主线上 packages/conventions/standard-paths.json 那份清单的原文。读不到照抛、调用方记没查成（不查这个仓）；
-   * 照 parseStandardPaths 判（目录、通配都认）。
+   * 这个仓主线上的改标准路径清单原文。文件不在回 null（空清单，standardPathsList）；
+   * 读失败照抛，调用方记没查成。认不认得出由 standardPathsList 判。
    */
-  readStandardPathsFile(repo: RepoRef): Promise<string>;
+  readStandardPathsFile(repo: RepoRef): Promise<string | null>;
   /** 挂上自动合并（「引擎」机器人身份，squash）。 */
   enableAutoMerge(repo: RepoRef, pull: { number: number; nodeId: string }): Promise<void>;
   /**
@@ -153,6 +154,14 @@ function repoCiPolicy(repo: AutoMergeRepo): 'force' | 'off' {
   return repo.ciPolicy === 'off' ? 'off' : 'force';
 }
 
+/** 这个仓的改标准清单。文件不在＝空清单；读失败、认不出照抛。 */
+async function standardList(deps: AutoMergeCheckDeps, repo: AutoMergeRepo): Promise<StandardPath[]> {
+  const text = await deps.gh.readStandardPathsFile(repo).catch((e) => {
+    throw new Error(`读改标准路径清单没成：${errMessage(e)}`);
+  });
+  return standardPathsList(text);
+}
+
 /** 不强制 CI 的任务分支：改标准照旧不合并，其余由引擎直接合并，不看检查、不挂自动合并。 */
 async function mergeOffTaskBranch(
   deps: AutoMergeCheckDeps,
@@ -161,12 +170,7 @@ async function mergeOffTaskBranch(
   part: SweepPart,
 ): Promise<void> {
   const files = await deps.gh.pullFiles(repo, pr.number);
-  const text = await deps.gh.readStandardPathsFile(repo).catch((e) => {
-    throw new Error(`读改标准路径清单没成：${errMessage(e)}`);
-  });
-  const parsed = parseStandardPaths(text);
-  if (typeof parsed === 'string') throw new Error(`改标准路径清单认不出：${parsed}`);
-  const risks = standardFiles(files, parsed);
+  const risks = standardFiles(files, await standardList(deps, repo));
   if (risks.length > 0) {
     await resolveOne(deps, repo, pr.number, '改到了改标准的路径，不挂：等创始人同意');
     deps.log('info', '每小时对账：不强制 CI 的任务 PR 改到改标准路径，不直接合并', {
@@ -221,14 +225,7 @@ async function judgeOne(
     return;
   }
   const files = await deps.gh.pullFiles(repo, pr.number);
-  const text = await deps.gh.readStandardPathsFile(repo).catch((e) => {
-    throw new Error(`读改标准路径清单没成：${errMessage(e)}`);
-  });
-  const parsed = parseStandardPaths(text);
-  if (typeof parsed === 'string') {
-    throw new Error(`改标准路径清单认不出：${parsed}`);
-  }
-  const risks = standardFiles(files, parsed);
+  const risks = standardFiles(files, await standardList(deps, repo));
   if (risks.length > 0) {
     await resolveOne(deps, repo, pr.number, '改到了改标准的路径，不挂：等创始人同意');
     deps.log('info', '每小时对账：PR 改到改标准路径，不挂自动合并', {

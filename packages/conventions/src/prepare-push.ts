@@ -12,6 +12,7 @@
 // - 只放确定的检查。要网络、要时间、会偶发不稳的（deploy 全套、Temporal、香港）都留给 CI，不在这里跑。
 import { type PackageGraph, planCi } from './ci-plan.ts';
 import type { RepoView } from './repo.ts';
+import { BASE, type GitRun } from './test-changed.ts';
 
 export interface CmdResult {
   status: number | null;
@@ -28,6 +29,8 @@ export interface PreparePushDeps {
   graph: () => PackageGraph | string;
   /** 跑一条命令（cwd 是仓根），同步。 */
   run: (cmd: string, args: readonly string[]) => CmdResult;
+  /** 这次推送的提交改到的文件（`pushedFiles`）；读不出来返回 null。不给就一律走老路。 */
+  pushed?: () => string[] | null;
 }
 
 export interface PreparePushResult {
@@ -54,6 +57,16 @@ const BIOME_RAN = /Checked [1-9]\d* files? in /;
 const TSC_RAN = /error TS\d+/;
 
 export function preparePush(deps: PreparePushDeps): PreparePushResult {
+  // 只推图片（截图分支）：格式和类型检查对它没意义。拿不准（读不出、混了非图片、没有 ref）一律照查，不放行。
+  let pushed: string[] | null = null;
+  try {
+    pushed = deps.pushed?.() ?? null;
+  } catch {
+    pushed = null;
+  }
+  if (pushed !== null && allImages(pushed)) {
+    return { code: 0, lines: ['推送前预检：只推了图片，跳过格式和类型检查'] };
+  }
   let changed: string[];
   try {
     changed = deps.changed();
@@ -134,4 +147,54 @@ export function preparePush(deps: PreparePushDeps): PreparePushResult {
     lines.push(`${step.name} 过了`);
   }
   return { code: 0, lines };
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
+const isZeroOid = (oid: string) => /^0+$/.test(oid);
+
+/** 非空且全是图片（png、jpg、jpeg、webp、gif，大小写不分）。 */
+export const allImages = (files: readonly string[]): boolean =>
+  files.length > 0 && files.every((f) => IMAGE_EXT.test(f));
+
+/**
+ * 这次推送实际推上去的提交改到了哪些文件（不是当前检出对主线的差）。stdin 是 git 给钩子的行：
+ * `<本地 ref> <本地 sha> <远端 ref> <远端 sha>`；本地 sha 全 0 是删分支，跳过。
+ * 远端已有这个分支 → 从远端 sha 比到本地 sha；新分支 → 和主线有共同祖先就从祖先比，没有（孤儿分支）就是整棵树。
+ * 一切读不出来（没有 ref 行、git 报错、认不出共同祖先）返回 null，调用方照老路全查，不放行。
+ */
+export function pushedFiles(stdin: string, git: GitRun, base = BASE): string[] | null {
+  const refs = stdin
+    .split(/\r?\n/)
+    .map((line) => line.trim().split(/\s+/))
+    .filter((p) => p.length === 4)
+    .map(([, localOid = '', , remoteOid = '']) => ({ localOid, remoteOid }))
+    .filter((r) => !isZeroOid(r.localOid));
+  if (refs.length === 0) return null;
+  const files = new Set<string>();
+  const names = (args: readonly string[]): string[] | null => {
+    const r = git(args);
+    if (r.error || r.status !== 0) return null;
+    return r.stdout.split('\0').filter((f) => f !== '');
+  };
+  for (const { localOid, remoteOid } of refs) {
+    let from: string;
+    if (!isZeroOid(remoteOid)) {
+      from = remoteOid;
+    } else {
+      const mb = git(['merge-base', base, localOid]);
+      if (mb.error) return null;
+      if (mb.status === 0) from = mb.stdout.trim();
+      else if (mb.status === 1 && mb.stderr.trim() === '')
+        from = ''; // 没有共同祖先：孤儿分支
+      else return null;
+      if (mb.status === 0 && from === '') return null;
+    }
+    const got =
+      from === ''
+        ? names(['ls-tree', '-r', '-z', '--name-only', localOid])
+        : names(['diff', '--name-only', '-z', '--no-renames', from, localOid]);
+    if (got === null) return null;
+    for (const f of got) files.add(f);
+  }
+  return [...files];
 }

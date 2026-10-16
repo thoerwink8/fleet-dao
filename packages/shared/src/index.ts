@@ -8,6 +8,7 @@ export * from './cli-versions.ts';
 export * from './continue-exhausted.ts';
 export type * from './domain.ts';
 export * from './effort.ts';
+export * from './flow-mode.ts';
 export * from './flow-purposes.ts';
 export * from './groom.ts';
 export * from './home-flow.ts';
