@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
+import type { RepoWithProfile } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { PortContext } from '../../src/ports.ts';
 import type { UserCommand, UserCommandResult } from '../../src/real/exec.ts';
@@ -28,11 +29,14 @@ function result(code: number | null, out = '', over: Partial<UserCommandResult> 
   return { code, stdout: Buffer.from(out), stderr: '', timedOut: false, aborted: false, ...over };
 }
 
-function input(testCommand = 'pnpm test:changed'): SelfCheckInput {
+function input(
+  testCommand = 'pnpm test:changed',
+  profile?: NonNullable<RepoWithProfile['profile']>,
+): SelfCheckInput {
   return {
     schemaVersion: 1,
     taskId: 't-1',
-    repo: { ...freshRepo(), testCommand },
+    repo: { ...freshRepo(), testCommand, ...(profile === undefined ? {} : { profile }) },
     worktreePath: '/work/t-1',
   };
 }
@@ -85,6 +89,7 @@ describe('selfCheck', () => {
     expect(test?.argv[2]).toContain(
       'PATH=$HOME/.local/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin',
     );
+    expect(test?.argv[2]).toContain('unset FLEET_RUN_ID');
     expect(test?.argv[2]).toContain('2>&1');
     expect(JSON.stringify(commands.map((c) => c.env ?? {}))).not.toContain('FLEET_RUN_ID');
   });
@@ -231,6 +236,48 @@ describe('selfCheck', () => {
     expect(got.steps[0]?.outcome).toBe('skipped');
     expect(got.steps[0]?.digest).toContain('没跑完');
     expect(got.state).toBe('green');
+  });
+
+  it('非 Node 仓按档案命令跑：没有 node_modules 也不整个跳过', async () => {
+    const { check, commands } = rig({ deps: 'no\n', hasTsc: 'no\n' });
+    const got = await check(
+      input('pnpm check', {
+        language: 'go',
+        toolchain: ['go'],
+        testCommand: 'go test ./...',
+        moduleRoots: [],
+        mergeSignals: [],
+        standardPathsFile: 'packages/conventions/standard-paths.json',
+        weight: 1,
+        flowEligible: false,
+      }),
+      ctx(),
+    );
+    expect(got.state).toBe('green');
+    expect(got.steps.map((s) => [s.command, s.outcome])).toEqual([
+      ['go test ./...', 'pass'],
+      ['node_modules/.bin/tsc -b --pretty false', 'skipped'],
+    ]);
+    expect(commands.some((c) => scriptOf(c).includes('test -d node_modules'))).toBe(false);
+  });
+
+  it('工具链只写 pnpm、不写 node：仍算 Node 仓，没有 node_modules 整个跳过', async () => {
+    const { check, commands } = rig({ deps: 'no\n' });
+    const got = await check(
+      input('pnpm check', {
+        language: 'typescript',
+        toolchain: ['pnpm'],
+        testCommand: 'pnpm check',
+        moduleRoots: ['packages/*'],
+        mergeSignals: ['merge-gate'],
+        standardPathsFile: 'packages/conventions/standard-paths.json',
+        weight: 1,
+        flowEligible: false,
+      }),
+      ctx(),
+    );
+    expect(got).toMatchObject({ state: 'skipped', reason: expect.stringContaining('没装依赖') });
+    expect(commands.some((c) => scriptOf(c).includes('pnpm check'))).toBe(false);
   });
 
   it('没装依赖、树不在、没有命令也没有 tsc：skipped 加原因，不抛', async () => {
