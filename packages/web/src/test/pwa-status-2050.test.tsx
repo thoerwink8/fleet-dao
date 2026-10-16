@@ -10,18 +10,15 @@ let permission = 'default';
 
 function stubBrowser(opts: { notification?: boolean; badge?: boolean; serviceWorker?: boolean }) {
   if (opts.notification !== false) {
-    vi.stubGlobal(
-      'Notification',
-      class {
-        static get permission() {
-          return permission;
-        }
-        static requestPermission = async () => {
-          permission = 'granted';
-          return requestPermission();
-        };
+    vi.stubGlobal('Notification', {
+      get permission() {
+        return permission;
       },
-    );
+      requestPermission: async () => {
+        permission = 'granted';
+        return requestPermission();
+      },
+    });
   } else {
     vi.stubGlobal('Notification', undefined);
   }
