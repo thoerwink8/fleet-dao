@@ -82,7 +82,9 @@ describe('selfCheck', () => {
     const test = commands.find((c) => (c.argv[2] ?? '').includes('pnpm test:changed'));
     expect(test).toMatchObject({ user: USER, cwd: '/work/t-1' });
     expect(test?.argv.slice(0, 2)).toEqual(['/bin/sh', '-c']);
-    expect(test?.argv[2]).toContain('PATH=/usr/local/bin:/usr/bin:/bin');
+    expect(test?.argv[2]).toContain(
+      'PATH=$HOME/.local/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin',
+    );
     expect(test?.argv[2]).toContain('2>&1');
     expect(JSON.stringify(commands.map((c) => c.env ?? {}))).not.toContain('FLEET_RUN_ID');
   });
