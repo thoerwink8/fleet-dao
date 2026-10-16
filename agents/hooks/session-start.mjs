@@ -45,7 +45,7 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lineageOf, markSeen, ownerPresence, readSeen, reconcileInbox, seenKey } from './founder-inbox.mjs';
+import { lineageOf, markSeen, readSeen, reconcileInbox, seenKey } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
 import { proxyEnvOf, writeProxyEnv } from './proxy-env.mjs';
@@ -301,7 +301,7 @@ const DIRECTIVE_NOT_CHECKED = '创始人引导待处理清单没查成';
 /**
  * 引导认主（同一个仓开着几个指挥官会话时，每个都被叫去办全部待处理引导，会撞车开出重复 PR）。
  * 主人是记下它的那个会话的血缘（Mirasim 会话目录名，founder-inbox.mjs 的 lineageOf），写成 `〔主：<目录名>〕`：进度单 #1055 的评论里
- * 由 pnpm progress directive 写、pnpm progress claim 改；别的仓「## 创始人引导（待处理）」清单的条目里手写。
+ * 由 pnpm progress directive 写（认主后不再改）；别的仓「## 创始人引导（待处理）」清单的条目里手写。
  * 开会话时本血缘的列出来叫它办；有主、主不是本血缘的只计数、不列原文；没写主或写「无主」的照列，但要先认领。
  */
 export const NO_OWNER = '无主';
@@ -678,7 +678,7 @@ export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
  * 优先用同步专用检出里那份脚本，没有再用会话所在检出里的。
  */
 export const PROGRESS_MS = 8_000;
-/** 引导挂了多久、本会话又接不了，就提醒指挥官自己认领 */
+/** 引导挂了多久、本会话又接不了，就提醒指挥官自己接着办 */
 export const STALE_DIRECTIVE_MS = 24 * 60 * 60_000;
 const PROGRESS_SCRIPT = join('packages', 'conventions', 'src', 'bin', 'progress.ts');
 const PROGRESS_NOT_CHECKED = '创始人引导（进度单 #1055）没查成';
@@ -700,7 +700,7 @@ export function progressRunner(timeoutMs = PROGRESS_MS) {
 /**
  * 参数同 checkIdlePrs，加 lineage（本会话的血缘）；返回要说的几行：没有待处理的、不是 fleet-dao 都不出声。
  * 认主（见 NO_OWNER 上面）：progress.ts 的第 4 列是主人（旧版脚本没有这一列，就从正文里的〔主：…〕认，再没有算无主）。
- * 本血缘的列全文叫它办；有主、主不是本血缘的只说条数；无主的照列开头，但先认领（pnpm progress claim）。
+ * 本血缘的列全文叫它办；有主、主不是本血缘的只说条数；无主的照列开头。办没办完看挂的单（#2727），没有认领这一步。
  */
 export function checkProgressIssue({ cwd, git, run, mirror = null, lineage = null, opts = {} }) {
   const root = fleetRoot(cwd, git);
@@ -728,7 +728,7 @@ const progressMissing = () => `${PROGRESS_NOT_CHECKED}：找不到 ${PROGRESS_SC
  * progress.ts read --pending 跑出来的结果 → 要说的几行（开会话的同步那半拿后台存下的结果调它，认主要用本会话的血缘）。
  * @param {{ status: number | null, stdout: string, stderr: string, error?: { message?: string, code?: string } | null, timeoutMs?: number }} r
  */
-export function progressLines(r, lineage = null, { presence = null, adopt = null, now = Date.now() } = {}) {
+export function progressLines(r, lineage = null, { now = Date.now() } = {}) {
   if (r.error || r.status !== 0) return [`${PROGRESS_NOT_CHECKED}：${why(r)}。`];
   const rows = String(r.stdout)
     .split(/\r?\n/)
@@ -738,7 +738,7 @@ export function progressLines(r, lineage = null, { presence = null, adopt = null
     return [`${PROGRESS_NOT_CHECKED}：progress.ts 的输出认不出（${String(r.stdout).trim().slice(0, 60)}）。`];
   if (items.length === 0) return [];
   const mine = lineageDir(lineage);
-  const all = items.map(([id, head, text, col, created]) => {
+  const all = items.map(([id, head, text, col, created, issue]) => {
     const split = splitOwner(text);
     const owner = col?.trim() || split.owner;
     const at = Date.parse(created?.trim() ?? '');
@@ -747,62 +747,46 @@ export function progressLines(r, lineage = null, { presence = null, adopt = null
       when: head.replace(/^【[^】]*】/, ''),
       text: split.text.replace(/^原话：/, ''),
       owner,
+      issue: /^#\d+$/.test(issue?.trim() ?? '') ? issue.trim() : null,
       age: Number.isFinite(at) ? now - at : null,
     };
   });
   const lines = [];
-  // 自动认领（只在指挥官会话：认得出本会话血缘；机器派的会话不走到这里）：主人会话确定已不在（ownerPresence 判 gone）的才认，
-  // 判不了的不认。认领在后台跑 progress.ts claim --auto，那边再核一遍、用原主做乐观锁；这里照实说「在认领」，不说「认领了」。
-  const adopted = [];
-  if (mine !== null && presence && adopt) {
-    for (const d of all) {
-      if (d.owner === mine || d.owner === NO_OWNER) continue;
-      const p = presence(d.owner);
-      if (p?.state !== 'gone') continue;
-      const started = adopt(d.id, d.owner);
-      if (started?.ok) {
-        adopted.push(d);
-        d.owner = mine;
-        d.why = p.why;
-      }
-    }
-  }
-  if (adopted.length > 0)
-    lines.push(
-      `主人会话已不在的创始人引导 ${adopted.length} 条，后台正在替本会话认领（开 PR 改主人）：${adopted.map((d) => `${d.id}（${d.why}）`).join('；')}。下面按归本会话列；认领没成的下次开场照实再列。`,
-    );
   // 每条只列编号、时间、前 DIRECTIVE_HEAD_CHARS 个字和怎么处理；一条只进一处（挂久了的不在无主那行再列一遍）
   const ours = all.filter((d) => mine !== null && d.owner === mine);
-  // 挂了超过 24 小时、本会话又接不了的（无主、主人还在或判不了）：指挥官自己认领，不进「要你拍的」（决定 0097）
+  // 挂了超过 24 小时、本会话又接不了的（无主、主人还在或判不了）：指挥官自己接着办，不进「要你拍的」（决定 0097）
   const stale = all.filter((d) => d.owner !== mine && d.age !== null && d.age > STALE_DIRECTIVE_MS);
   const unowned = all.filter((d) => d.owner === NO_OWNER);
   const unownedFresh = unowned.filter((d) => !stale.includes(d));
   const others = all.filter((d) => !ours.includes(d) && d.owner !== NO_OWNER && !stale.includes(d)).length;
   const full = '全文 pnpm progress read --pending';
+  // 办没办完看挂的单（#2727）：办完 = 把单关了（干活的 PR 写 Closes）；没有认领这一步
+  const ref = (d) => `${d.id}${d.issue ? `，单 ${d.issue}` : ''}`;
+  const done = '办完把挂的单关掉（PR 写 Closes #单号），不用改引导文件';
   if (stale.length > 0)
     lines.push(
       `创始人引导 ${stale.length} 条挂了超过 24 小时、本会话还没接：${stale
         .slice(0, 5)
-        .map((d) => `${d.id}（${d.when}，主：${d.owner}）${head(d.text)}`)
+        .map((d) => `${ref(d)}（${d.when}，主：${d.owner}）${head(d.text)}`)
         .join(
           '；',
-        )}${stale.length > 5 ? ' 等' : ''}。这是指挥官自己的活，不用问创始人：先看一眼主人会话还在不在，不在就自己认领（pnpm progress claim <编号> --force --why "<依据>"）接着办，不用办了的作废（pnpm progress done <编号> --drop）；${full}。`,
+        )}${stale.length > 5 ? ' 等' : ''}。这是指挥官自己的活，不用问创始人：直接接着办（不用认领；主人会话还在办的话别重复），${done}；不用办了的就把挂的单关掉并写明原因；${full}。`,
     );
   if (ours.length > 0)
     lines.push(
-      `创始人引导有 ${ours.length} 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 ${mine}）：${ours.map((d) => `${d.id}（${d.when}）${head(d.text)}`).join('；')}。先接着办（${full}），办完 pnpm progress done <评论号>。`,
+      `创始人引导有 ${ours.length} 条归本会话、没办完（本会话是 Mirasim 会话 ${mine}）：${ours.map((d) => `${ref(d)}（${d.when}）${head(d.text)}`).join('；')}。先接着办（${full}），${done}。`,
     );
   if (unownedFresh.length > 0) {
-    const shown = unownedFresh.slice(0, 5).map((d) => `${d.id}（${d.when}）${head(d.text)}`);
+    const shown = unownedFresh.slice(0, 5).map((d) => `${ref(d)}（${d.when}）${head(d.text)}`);
     const how =
       mine !== null
-        ? '先认领再办：pnpm progress claim <评论号>（已归别的会话的会被拒）'
-        : '本会话认不出是哪个 Mirasim 会话、认领不了：是这个会话记的就接着办，不是就别动';
+        ? `直接接着办，${done}`
+        : '本会话认不出是哪个 Mirasim 会话：是这个会话记的就接着办，不是就别动';
     lines.push(
-      `无主的创始人引导 ${unownedFresh.length} 条（进度单 #1055；旧的、或在 Mirasim 外记的）：${shown.join('；')}${unownedFresh.length > 5 ? ' 等' : ''}。${how}；${full}。`,
+      `无主的创始人引导 ${unownedFresh.length} 条（旧的、或在 Mirasim 外记的）：${shown.join('；')}${unownedFresh.length > 5 ? ' 等' : ''}。${how}；${full}。`,
     );
   }
-  if (others > 0) lines.push(`别的会话还有 ${others} 条创始人引导在办（进度单 #1055），不归你，别动。`);
+  if (others > 0) lines.push(`别的会话还有 ${others} 条创始人引导在办，不归你，别动。`);
   return lines;
 }
 
@@ -1277,30 +1261,6 @@ function spawnDetached({ cwd, home }) {
 }
 
 /**
- * 后台替本会话认领一条主人已不在的引导：起 progress.ts claim <编号> --auto --expect-owner <原主>（脱离、不等），那边再核
- * 一遍「指挥官会话、原主确定不在、主人没变」才开 PR 改主。起不来返回 { ok: false }，这条就不算在认领。测试用 setAdoptDirective 换掉。
- */
-let adoptDirective = ({ script, root, id, owner, sessionId }) => {
-  try {
-    const child = spawn(process.execPath, [script, 'claim', String(id), '--auto', '--expect-owner', owner], {
-      cwd: root,
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      env: { ...process.env, CLAUDE_CODE_SESSION_ID: sessionId },
-    });
-    child.on('error', () => {});
-    child.unref();
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, why: err?.message ?? String(err) };
-  }
-};
-export function setAdoptDirective(fn) {
-  adoptDirective = fn;
-}
-
-/**
  * 同步那半（真开会话走这个）：只跑本地的，联网的几项读后台上一次的结果；该刷新就起一个后台。返回要说的几行。
  * spawnBackground 测试换成假的；git 只跑本地命令（GREP_MS 那份就够）。
  */
@@ -1347,14 +1307,8 @@ export function fastSessionStart({
   lines.push(...failed('holds', '整池暂停'));
   lines.push(...checkDirectives(cwd, localGit, lineage));
   lines.push(...(repoContract ? repoContract(cwd) : []));
-  // 引导段同步跑本地查询（读本地 origin/main，不联网），不用后台缓存：缓存里的「待处理」可能已经收掉了（#2726）
+  // 引导段同步现查，不用后台缓存：缓存里的「没办完」可能已经办完了（#2726）；办没办完看挂的单，读 GitHub（#2727）
   const syncDir = source ? source.syncDirIn(home) : null;
-  const sid = cleanId(sessionId);
-  const progressRoot = fleetRoot(cwd, localGit);
-  const progressScriptPath =
-    progressRoot === null
-      ? null
-      : progressScript(progressRoot, syncDir ? join(syncDir, PROGRESS_SCRIPT) : null);
   lines.push(
     ...checkProgressIssue({
       cwd,
@@ -1362,15 +1316,7 @@ export function fastSessionStart({
       run: progress,
       mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
       lineage,
-      opts: {
-        now,
-        presence: (owner) => ownerPresence({ home, owner, now, env }),
-        adopt:
-          progressScriptPath && progressRoot && sid
-            ? (id, owner) =>
-                adoptDirective({ script: progressScriptPath, root: progressRoot, id, owner, sessionId: sid })
-            : null,
-      },
+      opts: { now },
     }),
   );
   lines.push(...recentPrompts({ home, now, sessionId, env, lineage, markSeen: true }));
