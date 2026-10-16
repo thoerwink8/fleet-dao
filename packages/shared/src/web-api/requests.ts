@@ -2,7 +2,8 @@
 // 需求（requests）、消息（request_messages）、每人对需求的置顶和读到哪（request_user_state）。
 // 改这里之前必须知道：
 // - 身份只认登录会话：请求体里没有、也不收「谁说的、谁发起、谁拍板」的字段；带了也被剥掉（zod 默认丢掉多余字段）。
-// - 状态只有四个（讨论中、待拍板、已结案·做、已结案·不做）。「在做 / 已合并 / 已上线」是单子的状态（issueRefs[].state），由 B 片从 GitHub 接。
+// - 状态只有四个（讨论中、待拍板、已结案·做、已结案·不做）。讨论中闲置满 3 天收口：记成已结案·不做，原因以「闲置 N 天没动静，自动收口」开头，能「重开」。
+//   「在做 / 已合并 / 已上线」是单子的状态（issueRefs[].state），由 B 片从 GitHub 接。
 // - 详情里的 actions 对每个动作写「能不能做 + 为什么不能」：页面靠它决定菜单里出现哪些项，不靠自己猜。
 // - 能不能做的判法只有一份：request-rules.ts（后端和定时任务都调它）。
 import { z } from 'zod';
@@ -39,6 +40,8 @@ export const REQUEST_PURGE_AFTER_DAYS = 30;
 export const REQUEST_ARCHIVE_AFTER_SETTLED_DAYS = 3;
 /** 讨论中这么多天没动静，列表和详情标「搁置 N 天」。 */
 export const REQUEST_IDLE_DAYS = 14;
+/** 讨论中这么多天没动静，定时任务自动收口（写成已结案·不做、写原因、归档），能「重开」。 */
+export const REQUEST_IDLE_CLOSE_DAYS = 3;
 
 /**
  * 草稿的栏。原话不在这里：原话是消息，开单时由系统按时间拼。
@@ -91,6 +94,7 @@ export const REQUEST_ACTIONS = [
   'reject',
   'rediscuss',
   'withdraw',
+  'reopen',
   'drop',
   'archive',
   'unarchive',
@@ -321,7 +325,7 @@ export const RequestDetailResponse = z.object({
     /** 拍板人：提交拍板或确定之后才有。 */
     decider: RequestPersonSchema.optional(),
     closedAt: z.string().optional(),
-    /** 放下、不做的理由。 */
+    /** 放下、不做的理由。收口的原因也写在这里（闲置几天、最后一句是谁说的），页面靠这句话认成收口。 */
     closeReason: z.string().optional(),
     modelChoice: z.string().optional(),
     createdAt: z.string(),
@@ -403,6 +407,8 @@ export const RequestActionRequest = z.discriminatedUnion('action', [
   z.object({ action: z.literal('drop'), reason: Reason }),
   z.object({ action: z.literal('rediscuss'), note: Reason.optional() }),
   z.object({ action: z.literal('withdraw') }),
+  /** 收口的重开，回到讨论中。 */
+  z.object({ action: z.literal('reopen') }),
   z.object({ action: z.literal('archive') }),
   z.object({ action: z.literal('unarchive') }),
   z.object({ action: z.literal('delete') }),
