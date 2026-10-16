@@ -56,9 +56,9 @@ export type Verdict =
   | { kind: 'ask'; why: string }
   | { kind: 'unknown'; why: string };
 
-/** 存档标签：`archive/<分支名里的 / 换成 -->-<头的前 7 位>`。同一个头重复跑，名字不变。 */
+/** 存档标签：`archive/` 加上把分支名里的 `/` 换成 `-->`，再接 `-` 和头的前 7 位。例如 `fleet/292-…` → `archive/fleet-->292-…-abcdefg`。同一个头重复跑，名字不变。 */
 export function archiveTagName(branch: string, sha: string): string {
-  return `archive/${branch.replaceAll('/', '--')}-${sha.slice(0, 7)}`;
+  return `archive/${branch.replaceAll('/', '-->')}-${sha.slice(0, 7)}`;
 }
 
 /** 巡检单上人勾的：对哪个头勾的、勾的是删还是留。 */

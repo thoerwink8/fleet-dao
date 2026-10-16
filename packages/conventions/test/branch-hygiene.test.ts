@@ -714,7 +714,7 @@ describe('分支体检：整轮', () => {
       expect(ops[0]).toMatchObject({ op: 'createTag', sha: head });
     }
     expect(archiveTagName('fleet/292-f3f3472d3', sha('8'))).toBe(
-      `archive/fleet--292-f3f3472d3-${sha('8').slice(0, 7)}`,
+      `archive/fleet-->292-f3f3472d3-${sha('8').slice(0, 7)}`,
     );
     expect(calls.ops.some((o) => o.op === 'createTag' && o.name.includes('empty-old'))).toBe(false);
     expect(calls.ops.some((o) => o.op === 'createTag' && o.name.includes('merged'))).toBe(false);
