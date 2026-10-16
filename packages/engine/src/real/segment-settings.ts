@@ -16,6 +16,7 @@ import {
   renderAgentsJson,
   type SubagentDefinitions,
 } from '@fleet-dao/adapters';
+import { type Db, resolveAlertWithReason, upsertAlert } from '@fleet-dao/db';
 import { PortError } from '../ports.ts';
 import { readHomeFile, readTreeFile, type UserTree, writeTreeFile } from './user-git.ts';
 
@@ -67,21 +68,31 @@ export function mergeLocalSettings(existing: unknown, deny: readonly string[]): 
  * Mirasim 的 Claude 会话怎么拿到子代理定义（#2820）：它不带 --agents，读会话用户家里的 ~/.claude/agents/<名>.md，
  * 那三份由 agents-sync 随每次发版装进去（packages/agents-sync 的 SUBAGENT_TARGET，docs/ops.md 第五节）。
  * 这里在 Claude 模型的会话开跑前核对：家里装的那份按 loadSubagents 同一个解析函数（parseSubagent）读出来，和仓里的定义逐份比
- * （比的是 --agents 里的那个形状，不比字节）。缺了、解析不了、不一样都抛可重试的 PortError——发版后同步还没到的几分钟里
- * 这一段稍后重来，不带着内置的 Explore 等（模型不受分档管）起会话。非 Claude 模型全部子代理已经 deny，不核对。
+ * （比的是 --agents 里的那个形状，不比字节）。对上了回 []；对不上的每份回一条说明（家里没有、和仓里不一样、解析不了、读不了）。
+ * 对不上照常起会话（#2834）：挡掉整条主力线的代价远大于子代理档位不对的代价（子代理跟着会话用主模型，只是多花钱），
+ * 所以这里不抛错；说明交给调用方（task-segment.ts）经 reportSubagentDefs 报成一条提醒，对上了再撤。
+ * 非 Claude 模型全部子代理已经 deny，不核对，回 null（没核对）；清单里没带定义也回 null。被叫停（signal 已经 aborted）照常抛。
  * home 只给测试用（默认按账号库查会话用户的家目录）。
  */
-export async function assertSubagentsInstalled(
+export async function checkSubagentsInstalled(
   t: UserTree,
   guard: SubagentGuard,
   model: string,
   home?: string,
-): Promise<void> {
-  if (!guard.definitions || !isClaudeModel(model)) return;
+): Promise<string[] | null> {
+  if (!guard.definitions || !isClaudeModel(model)) return null;
   const problems: string[] = [];
   for (const [name, want] of Object.entries(guard.definitions)) {
     const file = `${name}.md`;
-    const raw = await readHomeFile(t, `.claude/agents/${file}`, home);
+    let raw: Buffer | null;
+    try {
+      raw = await readHomeFile(t, `.claude/agents/${file}`, home);
+    } catch (error) {
+      if (t.signal?.aborted) throw error;
+      const why = error instanceof Error ? error.message : String(error);
+      problems.push(`${name}：读不了 .claude/agents/${file}（${why}）`);
+      continue;
+    }
     if (raw === null) {
       problems.push(`${name}：家里没有 .claude/agents/${file}`);
       continue;
@@ -94,13 +105,33 @@ export async function assertSubagentsInstalled(
       problems.push(`${name}：${error instanceof Error ? error.message : String(error)}`);
     }
   }
-  if (problems.length > 0) {
-    throw new PortError(
-      'SEGMENT_SUBAGENT_DEFS',
-      `会话用户家里的子代理定义和仓里对不上（${problems.join('；')}）。发版后 agents-sync 会换回仓里的，没跟上就手动跑 docs/ops.md 第五节那条同步命令`,
-      { retryable: true, details: { user: t.user } },
-    );
+  return problems;
+}
+
+/** 提醒的键前缀：每个会话用户一条（#2834）。 */
+export const SUBAGENT_DEFS_ALERT_PREFIX = 'segment-subagent-defs:';
+
+/**
+ * 子代理定义对不上的提醒（#2834）：problems 非空就写（同一个键原地更新、不重复推）；空的就撤掉（本来没有、撤过了都不算错）。
+ * 报不成的话抛出来，由调用方记日志、不挡会话。
+ */
+export async function reportSubagentDefs(db: Db, user: string, problems: readonly string[]): Promise<void> {
+  const dedupeKey = `${SUBAGENT_DEFS_ALERT_PREFIX}${user}`;
+  if (problems.length === 0) {
+    await resolveAlertWithReason(db, {
+      dedupeKey,
+      by: 'engine',
+      why: '会话用户家里的子代理定义和仓里对上了',
+    });
+    return;
   }
+  await upsertAlert(db, {
+    dedupeKey,
+    level: 'alert',
+    taskId: null,
+    title: `会话用户 ${user} 家里的子代理定义和仓里对不上（会话照常起）`,
+    body: `${problems.join('\n')}\n\n子代理的档位可能不对（比如 Explore 跟着会话用主模型）。发版时 agents-sync 会换回仓里的；没跟上就照 docs/ops.md 第五节那条同步命令手动跑一次。`,
+  });
 }
 
 /** 以会话用户读—合并—写。读不了、不是 JSON、写不成都抛 PortError（deny 没写上不能装作写上了）。 */

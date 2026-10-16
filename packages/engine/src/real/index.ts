@@ -108,6 +108,7 @@ import {
 } from './route-wake.ts';
 import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
 import { createPlanSegmentResume, createSegmentSettled } from './segment-resume.ts';
+import { reportSubagentDefs } from './segment-settings.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { createSelfCheck } from './self-check.ts';
 import { DEFAULT_SESSION_IO_ROOT, sessionHandoff } from './session-handoff.ts';
@@ -1087,6 +1088,7 @@ export function realPortsFromEnv(
       runsDir,
       sessions: oneShots,
       subagentGuard,
+      reportSubagentDefs: (user, problems) => reportSubagentDefs(db, user, problems),
       log: taskLog,
     }),
     planSegmentResume: createPlanSegmentResume({
