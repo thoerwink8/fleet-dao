@@ -44,6 +44,29 @@ export const QuotaWindowViewSchema = z.object({
   stale: z.boolean(),
 });
 
+/**
+ * 池压力和作废预估（#2737，shared 的 quotaPressure / poolPressureWindow）：取这个池清零时预计剩得最多的窗口（5 小时窗不算）。
+ * known 带按时间该用多少（expectedUsed）、实际用了多少、ρ、清零时预计剩多少；unknown 写为什么算不出（没读到、读数过期），
+ * 不拿 0 顶。
+ */
+export const PoolPressureViewSchema = z.discriminatedUnion('state', [
+  z.object({
+    state: z.literal('known'),
+    label: z.string(),
+    resetsAt: Time,
+    expectedUsed: z.number().min(0),
+    used: z.number().min(0),
+    /** 剩余比例 ÷ 剩余时间比例；清零时刻就在眼前、没法除时为空。 */
+    rho: z.number().min(0).nullable(),
+    leftAtReset: z.number().min(0),
+    /** 照现速会提前几小时用完；用不完为空。 */
+    exhaustedHoursEarly: z.number().min(0).nullable(),
+    /** samples = 按最近 24 小时的历史读数算的速度；average = 历史不够，按本期平均。 */
+    rateFrom: z.enum(['samples', 'average']),
+  }),
+  z.object({ state: z.literal('unknown'), why: z.string() }),
+]);
+
 export const PoolViewSchema = z.object({
   id: Id,
   channelId: Id,
@@ -70,6 +93,8 @@ export const PoolViewSchema = z.object({
   dataAt: Time.optional(),
   /** 按清零时刻排，快清零的在前（不知道清零时刻的在后）；同时清零的按原名。 */
   windows: z.array(QuotaWindowViewSchema),
+  /** 池压力和作废预估（#2737）。后端没算（老后端）没有。 */
+  pressure: PoolPressureViewSchema.optional(),
 });
 
 /**

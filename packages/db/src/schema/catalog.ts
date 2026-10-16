@@ -390,3 +390,32 @@ export const quotaWindows = pgTable(
     check('quota_windows_model_scope', sql`${t.window} <> '7d_model' or ${t.scope} <> ''`),
   ],
 );
+
+/**
+ * 额度窗历史（#2737）：savePoolQuota 每写进一个窗口的读数就在同一事务里追加一行，算用量速度、清零时会作废多少用。
+ * 主键（池, 原名, 读数时刻）：同一份读数重写不重记。保留期有上限（queries/quota.ts 的 QUOTA_SAMPLE_RETENTION_MS），
+ * 写入时顺手删掉这个池超期的行，行数不随时间无限增长。
+ */
+export const quotaWindowSamples = pgTable(
+  'quota_window_samples',
+  {
+    poolId: text('pool_id')
+      .notNull()
+      .references(() => pools.id),
+    label: text('label').notNull(),
+    window: quotaWindowKind('window').notNull(),
+    scope: text('scope').notNull().default(''),
+    utilization: doublePrecision('utilization'),
+    used: doublePrecision('used'),
+    limit: doublePrecision('limit'),
+    unit: quotaUnit('unit').notNull(),
+    resetsAt: timestamp('resets_at', tz),
+    reading: readingKind('reading').notNull(),
+    readAt: timestamp('read_at', tz).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.poolId, t.label, t.readAt] }),
+    check('quota_window_samples_label_nonempty', sql`${t.label} <> ''`),
+    check('quota_window_samples_utilization_nonneg', sql`${t.utilization} is null or ${t.utilization} >= 0`),
+  ],
+);

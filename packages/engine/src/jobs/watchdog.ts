@@ -56,6 +56,7 @@ import {
 import { type BriefWatchDeps, watchDailyBrief } from './watchdog-brief.ts';
 import { type PushWatchDeps, watchFeishuPush } from './watchdog-push.ts';
 import { type QuotaWatchDeps, watchQuotaFreshness } from './watchdog-quota.ts';
+import { type QuotaWasteDeps, watchQuotaWaste } from './watchdog-quota-waste.ts';
 
 /** 登记进 scheduled_jobs 的那一行。 */
 export const WATCHDOG_JOB = {
@@ -121,7 +122,9 @@ export interface WatchdogDeps {
    * 「在用的账号池额度读数不超过 30 分钟」要的读（jobs/watchdog-quota.ts，决定 0093 从每小时对账搬来）。读不到照抛：这一轮记没查成，
    * 开着的不撤。不给（只测别的部分的单测）就不看这一条。
    */
-  quota?: Pick<QuotaWatchDeps, 'quotaPools' | 'quotaNotRead'>;
+  quota?: Pick<QuotaWatchDeps, 'quotaPools' | 'quotaNotRead'> &
+    /** 额度快作废（#2737，jobs/watchdog-quota-waste.ts）要的额度历史和路由；不给就不看这一条。 */
+    Partial<Pick<QuotaWasteDeps, 'quotaSamples' | 'poolRoutes'>>;
   /**
    * 每个任务当前连着没跑全的那一段（@fleet-dao/db 的 scheduleRedStreaks）。读不到照抛：这一轮记没查成，开着的不撤。
    * 不给（只测别的部分的单测）就不看这一项。
@@ -447,6 +450,15 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     s.problems.push(...q.problems);
     found += q.found;
     quotaScanned = q.scanned;
+    const { quotaSamples, poolRoutes } = deps.quota;
+    if (quotaSamples && poolRoutes) {
+      const waste = await watchQuotaWaste(
+        { ...deps.quota, quotaSamples, poolRoutes, alerts: deps.alerts, log: deps.log },
+        now,
+      );
+      s.problems.push(...waste.problems);
+      found += waste.found;
+    }
   }
   const releases = deps.releaseWatch
     ? await releaseWatchRound(s, deps.releaseWatch, now)

@@ -24,6 +24,8 @@ import {
   listRunningEngineTasks,
   mergeStallFacts,
   openAlertsByPrefix,
+  poolRouteFacts,
+  quotaSamplesSince,
   quotaTable,
   readHealthzBadSince,
   resolveAlertWithReason,
@@ -203,6 +205,9 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
     redStreaks: (at) => scheduleRedStreaks(w.db, at),
     quota: {
       quotaPools: (at) => quotaTable(w.db, { now: at }),
+      // 额度快作废（#2737）：额度历史算速度，路由列「接得住的」（关着的也列）
+      quotaSamples: (since) => quotaSamplesSince(w.db, since),
+      poolRoutes: () => poolRouteFacts(w.db),
       // 配置写明不读的池（现在是 jev：没有日账）。读不到配置要抛，不许当成「都要读」。
       quotaNotRead:
         w.quotaNotRead ?? (async () => (await loadQuotaConfig()).notRead?.map((p) => p.poolId) ?? []),

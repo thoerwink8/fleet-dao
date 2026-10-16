@@ -19,6 +19,7 @@ import {
   poolReservations,
   pools,
   pullRequests,
+  quotaWindowSamples,
   quotaWindows,
   repos,
   routes,
@@ -117,6 +118,20 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         source: w.source,
         readAt: date(w.readAt),
         staleSince: dateOpt(w.staleSince),
+      })),
+    );
+  }
+  if (data.quotaSamples?.length) {
+    await db.insert(quotaWindowSamples).values(
+      data.quotaSamples.map((s) => ({
+        poolId: s.poolId,
+        label: s.label,
+        window: s.window,
+        unit: s.unit,
+        reading: s.reading,
+        utilization: s.utilization ?? null,
+        resetsAt: dateOpt(s.resetsAt),
+        readAt: date(s.readAt),
       })),
     );
   }
