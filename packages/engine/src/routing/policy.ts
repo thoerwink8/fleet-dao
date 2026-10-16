@@ -102,8 +102,9 @@ export interface RoutingPolicy {
 }
 
 /**
- * 动手按模型的真实战绩排（PLAN 3f，决定 0093）。战绩由引擎从库里现算（db 的 modelExecuteTracks，近 7 天、按第一段动手的模型记）；
- * 读不到就整段不做，退回人排的先后（选路理由里写明）。
+ * 动手按模型的真实战绩排（PLAN 3f，决定 0093、0095、0098）。战绩由引擎从库里现算，取数近 14 天。
+ * byTier 开着且这一单带了档时用 db 的 modelTierTracks（只算第一段、按档）；否则用 modelExecuteTracks
+ * （整单记在第一段的模型名下，决定 0095 第 2–4 条）。读不到就整段不做，退回人排的先后（选路理由里写明）。
  */
 export interface TrackScorePolicy {
   /**
@@ -128,8 +129,21 @@ export interface TrackScorePolicy {
   /**
    * 打了分的模型要比人排在它前面的模型的期望成本至少低这么多比例，才挪到它前面。0.3：样本只有几单时成本抖得厉害，
    * 差得不多就照人排的，免得一两单的运气把顺序翻来翻去（也免得把创始人排在后面的订阅大量拉进动手）。
+   * 只在 byTier 关掉时用（决定 0095 第 2 条）。
    */
   promoteMargin: number;
+  /**
+   * 按这一单的派工档排（决定 0098）。开着、又给了档和分档战绩时，用收缩后的质量下界在人排的位置之间重排，
+   * 分钟只在质量分打平手时才比。关掉就回到决定 0095 第 2–4 条（期望成本、样本线、一轮做成率闸），取数窗口仍是 14 天。
+   */
+  byTier: boolean;
+  /** 收缩用的先验强度：往本档平均拉这么多单。4：小样本不会被自己的一两个结果拉飞，样本上来以后自己的数占大头。 */
+  priorTasks: number;
+  /**
+   * 质量下界要比前一个高这么多才往前挪。0.08：差一截才换人排的先后，读数一抖不翻顺序。
+   * 分相同（打平手）才比每段分钟，低的往前。
+   */
+  qualityMargin: number;
 }
 
 export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<RoutingPolicy>({
@@ -160,17 +174,21 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
     poorOneRoundRate: 0.15,
     roundOverheadMinutes: 15,
     promoteMargin: 0.3,
+    byTier: true,
+    priorTasks: 4,
+    qualityMargin: 0.08,
   },
 });
 
-/** 缺的取默认值，给了但不对的报错。 */
-export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingPolicy {
-  // fastReset 整张换（换了就能去掉某种窗口）；needPerTask、pace 按项合并，只改给了的那几项。
+/** 缺的取默认值，给了但不对的报错。trackScore、pace 可以只给要改的那几项。 */
+export function resolveRoutingPolicy(partial?: RoutingPolicyInput): RoutingPolicy {
+  // fastReset 整张换（换了就能去掉某种窗口）；needPerTask、pace、trackScore 按项合并，只改给了的那几项。
   const p: RoutingPolicy = {
     ...DEFAULT_ROUTING_POLICY,
     ...(partial ?? {}),
     pace: { ...DEFAULT_ROUTING_POLICY.pace, ...partial?.pace },
     needPerTask: { ...DEFAULT_ROUTING_POLICY.needPerTask, ...partial?.needPerTask },
+    trackScore: { ...DEFAULT_ROUTING_POLICY.trackScore, ...partial?.trackScore },
   };
   const bad = (key: string, want: string, got: unknown) =>
     new RoutingInputError(`选路策略的 ${key} 不对：要${want}，给的是 ${JSON.stringify(got)}`);
@@ -212,5 +230,15 @@ export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingP
   )
     throw bad('trackScore.roundOverheadMinutes', '不小于 0 的分钟数', ts.roundOverheadMinutes);
   ratio('trackScore.promoteMargin', ts.promoteMargin);
+  if (typeof ts.byTier !== 'boolean') throw bad('trackScore.byTier', ' true 或 false', ts.byTier);
+  if (!Number.isInteger(ts.priorTasks) || ts.priorTasks < 1)
+    throw bad('trackScore.priorTasks', '不小于 1 的整数', ts.priorTasks);
+  ratio('trackScore.qualityMargin', ts.qualityMargin);
   return p;
 }
+
+/** 调用方可以只改 trackScore、pace 里的几项，没写的留默认。 */
+export type RoutingPolicyInput = Omit<Partial<RoutingPolicy>, 'trackScore' | 'pace'> & {
+  pace?: Partial<PacePolicy>;
+  trackScore?: Partial<TrackScorePolicy>;
+};

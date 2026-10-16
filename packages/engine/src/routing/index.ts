@@ -10,6 +10,7 @@ export {
   HOST_ABILITIES,
   type PacePolicy,
   type RoutingPolicy,
+  type RoutingPolicyInput,
   resolveRoutingPolicy,
   STAGE_NEEDS,
 } from './policy.ts';
