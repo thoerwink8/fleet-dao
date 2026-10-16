@@ -2,6 +2,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   BROKEN_ROUND_TITLE,
+  brokenRoundBody,
   deadline,
   flakyTests,
   globalErrorCount,
@@ -14,6 +15,7 @@ import {
   planIssues,
   runSummary,
 } from '../src/e2e-flaky.ts';
+import { checkIssueBody } from '../src/issue-new.ts';
 
 /** 造一份 Playwright JSON 报告：文件 → describe → 用例，每条用例两个视口的结局。 */
 function report(specs: { file: string; title: string; statuses: string[] }[]) {
@@ -140,6 +142,15 @@ describe('先判整轮（#2499）：整轮坏了不算每条用例偶发', () =>
     expect(actions[0]).toMatchObject({ kind: 'create', title: 'e2e 偶发：07c-nodes.e2e.ts › 甲' });
   });
 
+  test('开的单（整轮坏了、偶发）都贴「缺陷」类别', () => {
+    const broken = [round(0, 'unexpected'), round(1, 'expected', {}, true)];
+    const flaky = [round(0, 'expected', { 甲: 'unexpected' }), round(1, 'expected', { 甲: 'flaky' })];
+    for (const runs of [broken, flaky]) {
+      const [a] = planIssues(runs, [], noQuarantine, '2026-10-22');
+      expect(a).toMatchObject({ kind: 'create', labels: ['缺陷'] });
+    }
+  });
+
   test('首跑红刚好一半不算整轮坏，超过一半才算；跳过的不进分母', () => {
     expect(isBrokenRound(round(0, 'expected', { 甲: 'unexpected', 乙: 'unexpected', 丙: 'flaky' }))).toBe(
       false,
@@ -224,6 +235,16 @@ describe('单子和汇总', () => {
     expect(body).toContain('- https://ci/run/9\n- https://ci/run/4');
     expect(body).toContain('"file":"07c-nodes.e2e.ts","title":"失联"');
     expect(issueBody(finding, '2026-10-21', true)).toContain('已经在隔离集');
+  });
+
+  test('自动开的两种单都过开单检查（四节齐，引擎能拉、对账不报缺）', () => {
+    for (const body of [
+      issueBody(finding, '2026-10-21', false),
+      issueBody(finding, '2026-10-21', true),
+      brokenRoundBody(['https://ci/run/1']),
+    ]) {
+      expect(checkIssueBody(body)).toMatchObject({ ok: true });
+    }
   });
 
   test('限期：今天起 7 天', () => {

@@ -89,7 +89,8 @@ runMain(async () => {
         broken.body = [broken.body ?? '', ...comments.map((c) => c.body ?? '')].join('\n');
       }
       for (const a of planIssues(window, open, quarantine, deadline(new Date()))) {
-        if (a.kind === 'create') await api.post('/issues', { title: a.title, body: a.body });
+        if (a.kind === 'create')
+          await api.post('/issues', { title: a.title, body: a.body, labels: a.labels });
         else if (a.kind === 'comment') await api.post(`/issues/${a.number}/comments`, { body: a.body });
         console.log(a.label);
       }
