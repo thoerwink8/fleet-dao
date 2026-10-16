@@ -729,6 +729,9 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         const families = (input.avoidFamilies ?? []).filter((f) => f.trim());
         // 续会话的试探只放过「提醒顶着」的池；开关暂停的池（人拍的）一个都不放，续会话的也换池 fork 续上
         const fallbackAvoidRouteIds = new Set<string>();
+        // 长等待的点名/续会话路由先避开照常选；若没有任何替代路由（例如切号失败、另一组织也被挡），
+        // 保留原来的等待结论，不能把「还在等额度」误报成「一条路由都没有」。
+        let fallbackWait: Extract<ChooseRouteResult, { kind: 'wait' }> | undefined;
         const avoid = (exceptPool?: string) => ({
           routeIds: [...new Set([...input.avoidRouteIds, ...fallbackAvoidRouteIds])],
           poolIds: [
@@ -853,6 +856,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
               Date.parse(r.until) - now.getTime() > namedWaitMaxSeconds * 1000;
             if (waitTooLong) {
               fallbackAvoidRouteIds.add(input.preferRouteId);
+              fallbackWait = r;
               notes.push(`点名的路由要等到 ${r.until}，太久，照常选`);
             } else {
               notes.push(`点名的路由这次用不了（${r.reason}），照常选`);
@@ -888,6 +892,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
             }
             if (waitTooLong) {
               fallbackAvoidRouteIds.add(stick.routeId);
+              fallbackWait = r;
               notes.push(`续会话的路由要等到 ${r.until}，太久，照常选`);
             } else {
               notes.push(
@@ -929,6 +934,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         const r = choose({ ...base, avoid: avoid() });
         if (r.kind === 'dispatch') return dispatched(r, [r.why, ...notes].join('；'));
         if (r.kind === 'wait') return waiting(r, context);
+        if (fallbackWait) return waiting(fallbackWait, [...context, '没有可替代的路由，先等原路由']);
         return { ok: false, waitFor: 'none', detail: [...noOther, r.reason, ...context].join('；') };
       };
 
