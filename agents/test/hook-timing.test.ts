@@ -76,7 +76,8 @@ describe('真跑 pretool.mjs', () => {
         env,
       });
     expect(run('echo hi').status).toBe(0);
-    expect(run('reclaude login').status).toBe(2);
+    // 反引号那条不看本机有没有会话、哪台机器都拦（切号那条要真查本机进程，CI 上没有 Claude 会放行）
+    expect(run('echo `date`').status).toBe(2);
     const rows = readFileSync(join(home, '.fleet-dao', 'logs', 'hook-timing.jsonl'), 'utf8')
       .trim()
       .split('\n')

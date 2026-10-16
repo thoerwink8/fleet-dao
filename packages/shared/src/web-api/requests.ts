@@ -212,9 +212,13 @@ export type RequestReviewVerdict = z.infer<typeof RequestReviewVerdictSchema>;
 export const REQUEST_QUESTION_MIN_OPTIONS = 2;
 export const REQUEST_QUESTION_MAX_OPTIONS = 4;
 
+/** 方案卡摘要最长这么多字（和一条消息正文同一个量级）：各栏都写上也不该被截掉。 */
+export const REQUEST_PROPOSAL_SUMMARY_MAX = 20_000;
+
 /**
  * 消息上挂的结构化卡片（页面直接渲染成按钮、分隔线、意见卡）：
  * - question：指挥官这一问，带 2～4 个选项和「我自己说」；
+ * - proposal：到了给方案的轮次，完整草稿摘要；draftVersion 是写回后的那一版（确认开单带这一版）；
  * - suggest：指挥官想改人改过的栏，服务端没改，转成一条「建议改」；
  * - model_switch：换模型的分隔线（from / to 是模型编号，null = 用「提需求」用途配的默认）；
  * - paused：指挥官没接上这句（超了限额、引擎关着、额度熔断、切号），写明原因；
@@ -229,6 +233,13 @@ export const RequestCardSchema = z.discriminatedUnion('type', [
       .min(REQUEST_QUESTION_MIN_OPTIONS)
       .max(REQUEST_QUESTION_MAX_OPTIONS),
     allowOwn: z.literal(true),
+  }),
+  z.object({
+    type: z.literal('proposal'),
+    /** 写回这张卡时的草稿版本（补丁落库之后）。确认开单带这一版，幂等键仍是「需求号 + 草稿版本号」。 */
+    draftVersion: z.number().int().positive(),
+    /** 完整草稿摘要（各栏）。 */
+    summary: z.string().trim().min(1).max(REQUEST_PROPOSAL_SUMMARY_MAX),
   }),
   z.object({
     type: z.literal('suggest'),

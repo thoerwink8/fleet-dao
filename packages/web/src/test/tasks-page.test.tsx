@@ -286,10 +286,12 @@ describe('任务列表页', () => {
 
   test('花费列整列都读不到：不画花费列；单元格里不再写「更新」「开单」两个字（#1902）', async () => {
     const api = createMockApi({ live: false });
+    // 更新时间钉在两小时前：过了 7 天 formatAgo 会写成「M月D日」，这一格断言认的是相对时间
+    const updatedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
     api.tasks = async () => ({
       items: [
-        row(1, { title: '甲单', cost: { usd: null, note: '没有会话' } }),
-        row(2, { title: '乙单', cost: { usd: null, note: '没有会话' }, prNumber: 7 }),
+        row(1, { title: '甲单', cost: { usd: null, note: '没有会话' }, updatedAt }),
+        row(2, { title: '乙单', cost: { usd: null, note: '没有会话' }, prNumber: 7, updatedAt }),
       ],
       counts: counts({ all: 2, running: 2 }),
     });

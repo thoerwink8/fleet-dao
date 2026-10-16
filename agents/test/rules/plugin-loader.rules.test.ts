@@ -14,6 +14,7 @@ const HOOKS = 'C:/Users/ada/.fleet-dao/hooks';
 interface Handler {
   type: string;
   command: string;
+  args?: string[];
   timeout: number;
 }
 interface Group {
@@ -27,6 +28,8 @@ interface Settings {
 interface Lib {
   PROCESS_HOOKS: { event: string; script: string; timeout: number }[];
   scriptOf(command: unknown): string | null;
+  handlerScript(handler: unknown): string | null;
+  formatJson(value: unknown): string;
   trackOf(text: string): string[];
   commandFor(hooksDir: string, script: string): string;
   applyCatalog(settings: unknown, track: string[], hooksDir: string): Settings;
@@ -185,6 +188,37 @@ describe('订阅目录（决定 0085）', () => {
     expect(stillWrites).not.toEqual(off);
   });
 
+  it('exec 形式（command: "node"、脚本写在 args 里）认得出是同一个脚本，不再补一条重复的', () => {
+    const exec = projectHooks();
+    const pre = exec.hooks?.PreToolUse?.[0];
+    if (pre === undefined) throw new Error('夹具里没有 PreToolUse');
+    pre.hooks = [
+      {
+        type: 'command',
+        command: 'node',
+        args: ['${CLAUDE_PROJECT_DIR}/agents/hooks/main-thread.mjs'],
+        timeout: 10,
+      },
+    ];
+    expect(lib.handlerScript(pre.hooks[0])).toBe('main-thread.mjs');
+    expect(lib.applyCatalog(exec, ['process'], HOOKS)).toEqual(exec);
+    // 【故意造出的失败】只看 command 字符串的旧判断：认不出，会再补一条安装目录的
+    expect(lib.scriptOf('node')).toBeNull();
+  });
+
+  it('写盘排版和 biome 一致：本仓的 .claude/settings.json 原样过一遍不变；只含标量的短数组写一行', () => {
+    const repo = readFileSync(
+      fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)),
+      'utf8',
+    );
+    expect(`${lib.formatJson(JSON.parse(repo))}\n`).toBe(repo);
+    expect(lib.formatJson({ a: ['x', 'y'], b: {}, c: [] })).toBe(
+      '{\n  "a": ["x", "y"],\n  "b": {},\n  "c": []\n}',
+    );
+    const long = Array.from({ length: 12 }, (_, i) => `item-number-${i}`);
+    expect(lib.formatJson({ a: long })).toContain('[\n    "item-number-0",');
+  });
+
   it('订阅文件不是带 track 字符串数组的对象就抛', () => {
     expect(lib.trackOf('{"track":["process"]}')).toEqual(['process']);
     expect(() => lib.trackOf('[]')).toThrow(/对象/);
@@ -245,6 +279,20 @@ describe('加载器真跑（决定 0085）', () => {
       expect(text).toContain(`"timeout": ${hook.timeout}`);
     }
     expect(text).not.toContain('agents/hooks/');
+  });
+
+  it('本仓这份项目设置（main-thread 是 exec 形式）跑过加载器：一个字节不变，不补重复项', () => {
+    const cwd = temp();
+    mkdirSync(join(cwd, '.claude'));
+    const repo = readFileSync(
+      fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)),
+      'utf8',
+    );
+    writeFileSync(join(cwd, '.claude', 'settings.json'), repo);
+    writeFileSync(join(cwd, '.fleet-plugins.json'), '{ "track": ["process"] }\n');
+    const r = run(cwd);
+    expect(r.status, r.stderr).toBe(0);
+    expect(readSettings(cwd)).toBe(repo);
   });
 
   it('拿掉标记：已经写上的过程钩子从项目设置里消失', () => {

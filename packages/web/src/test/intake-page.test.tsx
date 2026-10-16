@@ -445,6 +445,25 @@ async function shown<T extends Element = HTMLElement>(selector: string): Promise
 }
 
 describe('和指挥官、引擎一起聊（B、C 片）', () => {
+  test('方案卡：点「确认开单」走 confirm，幂等键是现在的草稿版本', async () => {
+    wide();
+    const api = createMockApi({ live: false });
+    const spy = vi.spyOn(api, 'requestAction');
+    renderApp(<Intake />, { route: '/intake?r=90', api });
+    const card = await shown('[data-proposal-card]');
+    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '确认开单' }));
+    await waitFor(() => expect(spy).toHaveBeenCalledWith(90, { action: 'confirm', draftVersion: 2 }));
+  });
+
+  test('方案卡：点「改」打开对应草稿栏的输入框', async () => {
+    wide();
+    renderApp(<Intake />, { route: '/intake?r=90' });
+    const card = await shown('[data-proposal-card]');
+    fireEvent.click(within(card as HTMLElement).getByRole('button', { name: '改场景' }));
+    const panel = await shown('[data-intake-panel]');
+    await waitFor(() => expect(within(panel).getByRole('textbox', { name: '场景' })).not.toBeNull());
+  });
+
   test('指挥官一问：点一个选项就当成一句话发出去，指挥官接着回；回过的那一问不能再点', async () => {
     wide();
     const { api } = renderApp(<Intake />, { route: '/intake?r=46' });

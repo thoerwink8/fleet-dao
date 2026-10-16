@@ -1,4 +1,5 @@
-// SessionStart 钩子（agents-sync 装进 ~/.fleet-dao/hooks/，登记在 ~/.claude/settings.json；Grok、Devin、Cursor 默认借道读这份）。
+// SessionStart 钩子（agents-sync 装进 ~/.fleet-dao/hooks/；登记在仓级 .claude/settings.json：fleet-dao 自己的那份直接写着，
+// 别的仓有订阅标记时由用户级的 plugin-loader.mjs 写进去，用户级设置里不登记它）。
 // 开会话、续会话时跑；stdout 打一段 JSON，hookSpecificOutput.additionalContext 进会话上下文（Grok 不收开会话钩子的输出）。三件事：
 // 1. 会话所在的仓：取一下远端；在 main 上、没有未提交的改动、落后了就快进；快进不了，或在别的分支上而 AGENTS.md 和主线不同，
 //    提醒一句。不是 git 仓、没有 origin/main 的不出声。
@@ -188,6 +189,16 @@ function cellsOf(line) {
 }
 
 const brief = (s) => (s.length > 30 ? `${s.slice(0, 30)}…` : s) || '（内容空着）';
+/** 开场列进度单上的引导时每条只带前多少字：全文每次开场都注入太长，要看全文跑 pnpm progress read --pending */
+export const DIRECTIVE_HEAD_CHARS = 40;
+/** @param {string} s */
+const head = (s) => {
+  const chars = Array.from(s);
+  return (
+    (chars.length > DIRECTIVE_HEAD_CHARS ? `${chars.slice(0, DIRECTIVE_HEAD_CHARS).join('')}…` : s) ||
+    '（内容空着）'
+  );
+};
 
 /**
  * 解析「## 生效中的临时调整」（在 headingLine 行，从 1 数）下面的表：到下一个一、二级标题之前的第一张表，
@@ -796,32 +807,35 @@ export function progressLines(r, lineage = null, { presence = null, adopt = null
     lines.push(
       `主人会话已不在的创始人引导 ${adopted.length} 条，后台正在替本会话认领（开 PR 改主人）：${adopted.map((d) => `${d.id}（${d.why}）`).join('；')}。下面按归本会话列；认领没成的下次开场照实再列。`,
     );
+  // 每条只列编号、时间、前 DIRECTIVE_HEAD_CHARS 个字和怎么处理；一条只进一处（进了「要你拍的」的不在无主那行再列一遍）
   const ours = all.filter((d) => mine !== null && d.owner === mine);
-  const unowned = all.filter((d) => d.owner === NO_OWNER);
-  const others = all.length - ours.length - unowned.length;
   // 挂了超过 24 小时、本会话又接不了的（无主、主人还在或判不了）：交给创始人拍
   const stale = all.filter((d) => d.owner !== mine && d.age !== null && d.age > STALE_DIRECTIVE_MS);
+  const unowned = all.filter((d) => d.owner === NO_OWNER);
+  const unownedFresh = unowned.filter((d) => !stale.includes(d));
+  const others = all.filter((d) => !ours.includes(d) && d.owner !== NO_OWNER && !stale.includes(d)).length;
+  const full = '全文 pnpm progress read --pending';
   if (stale.length > 0)
     lines.push(
       `要你拍的（放进报进度的「要你拍的」）：创始人引导 ${stale.length} 条挂了超过 24 小时、本会话接不了：${stale
         .slice(0, 5)
-        .map((d) => `${d.id}（${d.when}，主：${d.owner}）${brief(d.text)}`)
+        .map((d) => `${d.id}（${d.when}，主：${d.owner}）${head(d.text)}`)
         .join(
           '；',
-        )}${stale.length > 5 ? ' 等' : ''}。请他定：交给本会话办（pnpm progress claim <编号> --force --why "<他的话>"）、作废（pnpm progress done <编号> --drop）还是再等。`,
+        )}${stale.length > 5 ? ' 等' : ''}。请他定：交给本会话办（pnpm progress claim <编号> --force --why "<他的话>"）、作废（pnpm progress done <编号> --drop）还是再等；${full}。`,
     );
   if (ours.length > 0)
     lines.push(
-      `创始人引导有 ${ours.length} 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 ${mine}）：${ours.map((d) => `${d.id}（${d.when}）${d.text}`).join('；')}。先接着办，办完 pnpm progress done <评论号>。`,
+      `创始人引导有 ${ours.length} 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 ${mine}）：${ours.map((d) => `${d.id}（${d.when}）${head(d.text)}`).join('；')}。先接着办（${full}），办完 pnpm progress done <评论号>。`,
     );
-  if (unowned.length > 0) {
-    const shown = unowned.slice(0, 5).map((d) => `${d.id}（${d.when}）${brief(d.text)}`);
+  if (unownedFresh.length > 0) {
+    const shown = unownedFresh.slice(0, 5).map((d) => `${d.id}（${d.when}）${head(d.text)}`);
     const how =
       mine !== null
         ? '先认领再办：pnpm progress claim <评论号>（已归别的会话的会被拒）'
         : '本会话认不出是哪个 Mirasim 会话、认领不了：是这个会话记的就接着办，不是就别动';
     lines.push(
-      `无主的创始人引导 ${unowned.length} 条（进度单 #1055；旧的、或在 Mirasim 外记的）：${shown.join('；')}${unowned.length > 5 ? ' 等' : ''}。${how}；全文 pnpm progress read。`,
+      `无主的创始人引导 ${unownedFresh.length} 条（进度单 #1055；旧的、或在 Mirasim 外记的）：${shown.join('；')}${unownedFresh.length > 5 ? ' 等' : ''}。${how}；${full}。`,
     );
   }
   if (others > 0) lines.push(`别的会话还有 ${others} 条创始人引导在办（进度单 #1055），不归你，别动。`);

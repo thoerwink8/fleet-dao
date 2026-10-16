@@ -5,10 +5,13 @@ import {
   COMMANDER_PAUSED_PREFIX,
   commanderShouldReply,
   INTAKE_CHAT_LIMITS,
+  INTAKE_PROPOSAL_AFTER_TURNS,
   judgeCommanderTurn,
   mentionsCommander,
+  ProposalCardSchema,
   parseCommanderOutput,
   parseReviewOutput,
+  proposalCard,
   splitCommanderPatch,
   visibleCommanderText,
 } from '../src/request-chat.ts';
@@ -65,8 +68,9 @@ describe('限额：每人同时 3 条在聊、每条 40 轮，超了回「指挥
     limits: INTAKE_CHAT_LIMITS,
   };
 
-  it('默认值是 3 条、40 轮、闲置 30 分钟', () => {
+  it('默认值是 3 条、40 轮、闲置 30 分钟；方案从第 3 次发言之后给出，40 轮硬上限不动', () => {
     expect(INTAKE_CHAT_LIMITS).toEqual({ maxActivePerUser: 3, maxTurns: 40, idleMinutes: 30 });
+    expect(INTAKE_PROPOSAL_AFTER_TURNS).toBe(3);
   });
 
   it('都没超：能排', () => {
@@ -147,6 +151,38 @@ describe('会话交回来的话：回话正文 + 一块 fleet-intake', () => {
     expect(!extra.ok && extra.why).toContain('不合规矩');
     const empty = parseCommanderOutput(block({ patch: { title: 'x' } }));
     expect(!empty.ok && empty.why).toBe('回话正文是空的');
+  });
+
+  it('proposal 卡：完整摘要；和问题一起交时只留方案', () => {
+    const got = parseCommanderOutput(
+      `方案齐了。${block({
+        proposal: { summary: '标题：导出\n场景：月底对账' },
+        question: { text: '还问吗？', options: ['问', '不问'] },
+        patch: { scene: '月底对账' },
+      })}`,
+    );
+    expect(got).toEqual({
+      ok: true,
+      value: {
+        reply: '方案齐了。',
+        proposal: { summary: '标题：导出\n场景：月底对账' },
+        patch: { scene: '月底对账' },
+      },
+    });
+  });
+
+  it('proposal 摘要是空的：明说不合规矩', () => {
+    const got = parseCommanderOutput(`话${block({ proposal: { summary: '  ' } })}`);
+    expect(got.ok).toBe(false);
+    expect(!got.ok && got.why).toContain('不合规矩');
+  });
+
+  it('方案卡带草稿版本号，页面认的卡和解析用的卡是同一张', () => {
+    const card = proposalCard(3, '标题：导出');
+    expect(card).toEqual({ type: 'proposal', draftVersion: 3, summary: '标题：导出' });
+    expect(ProposalCardSchema.parse(card)).toEqual(card);
+    expect(RequestCardSchema.parse(card)).toEqual(card);
+    expect(RequestCardSchema.safeParse({ type: 'proposal', summary: '缺版本号' }).success).toBe(false);
   });
 
   it('问题卡存成结构化的 question 卡（页面直接渲染成按钮，另加「我自己说」）', () => {
