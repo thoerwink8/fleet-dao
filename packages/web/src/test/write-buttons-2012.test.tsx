@@ -62,25 +62,6 @@ describe('导入仓库（设置页）', () => {
     await busyOnce(add, calls);
     await act(async () => d.resolve({ created: true }));
   });
-
-  test('「断开」：慢请求时 aria-busy，连点只发一次', async () => {
-    const inner = createMockApi({ live: false });
-    const d = deferred<void>();
-    const calls: number[] = [];
-    const api = {
-      ...inner,
-      disconnectGitHub: () => {
-        calls.push(1);
-        return d.promise;
-      },
-    } as unknown as MockApi;
-    renderApp(<SettingsPage />, { api: api as unknown as FleetApi, route: '/settings' });
-    fireEvent.click(await screen.findByRole('button', { name: '断开' }));
-    expect(calls).toHaveLength(0);
-    const dialog = await screen.findByRole('alertdialog');
-    await busyOnce(within(dialog).getByRole('button', { name: '断开' }), calls);
-    await act(async () => d.resolve());
-  });
 });
 
 describe('整理确认（设置页「指挥官整理待办」）', () => {

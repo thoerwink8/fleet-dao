@@ -49,12 +49,9 @@ import {
 } from './notifications.ts';
 import { PoolsResponse } from './pools.ts';
 import {
-  DisconnectGitHubResponse,
   ImportableReposResponse,
   ImportRepoRequest,
   ImportRepoResponse,
-  InstallAppRequest,
-  InstallAppResponse,
   RemoveRepoResponse,
 } from './repo-import.ts';
 import {
@@ -175,9 +172,9 @@ export const WebRoutes = {
     request: UpdateRepoCiPolicyRequest,
     response: UpdateRepoCiPolicyResponse,
   },
-  /** 设置页「仓库」一节的「导入仓库」（#1989）：我 GitHub 上看得见的仓，每个标好装没装、在不在驾驶舱；外加我这份授权现在怎样。 */
+  /** 设置页「仓库」一节的「导入仓库」：两个机器人已经装上的仓，每个标好装没装全、在不在驾驶舱。 */
   importableRepos: { method: 'GET', path: '/repos/importable', response: ImportableReposResponse },
-  /** 把一个仓接进驾驶舱（写 repos 表，默认不打开自动派活）；记操作记录。 */
+  /** 把一个已经装上的仓接进驾驶舱（写 repos 表，默认不打开自动派活）；记操作记录。 */
   importRepo: {
     method: 'POST',
     path: '/repos/import',
@@ -186,33 +183,6 @@ export const WebRoutes = {
   },
   /** 把一个仓移出驾驶舱（删 repos 那一行）；还挂着没结束的单时不删，回 removed=false 带原因。记操作记录。 */
   removeRepo: { method: 'DELETE', path: '/repos/:repoId/cockpit', response: RemoveRepoResponse },
-  /** 把两个 App 装到某个仓（一键授权那一步，走本人 OAuth 用户令牌）；记操作记录。 */
-  installAppOnRepo: {
-    method: 'POST',
-    path: '/repos/install',
-    request: InstallAppRequest,
-    response: InstallAppResponse,
-  },
-  /** 断开本人这份 GitHub 授权。 */
-  disconnectGitHub: {
-    method: 'POST',
-    path: '/github/oauth/disconnect',
-    response: DisconnectGitHubResponse,
-  },
-  /**
-   * 「连接 GitHub」（#1989）：浏览器整页跳到 GitHub 授权页，回来落在设置页。
-   * 没有响应体（302 跳转），所以不写 response；挂在 /api 下过登录门——要登进驾驶舱的人才能连自己的 GitHub。
-   */
-  githubConnect: { method: 'GET', path: '/github/connect' },
-  /** GitHub 授权完回这里：拿 code 换令牌、存起来、跳回设置页。没有响应体（302）。 */
-  githubCallback: { method: 'GET', path: '/github/callback' },
-  /**
-   * 「一键授权」（#1989）：浏览器整页跳到 GitHub 授权页，回来后两个 App 都装到 ?githubId= 那个仓上。
-   * 没有响应体（302）。
-   */
-  githubAuthorize: { method: 'GET', path: '/github/authorize' },
-  /** GitHub 安装页装完回到这里（App 的 Setup URL）。没有响应体（302）。 */
-  githubSetup: { method: 'GET', path: '/github/setup' },
   /** 「让指挥官整理」按钮的现状（母单 #1335 第 3 片，#1338）：这个项目今日剩余次数、最近几次结果、有没有一次在排队或在做。没有这个项目 404。 */
   groomStatus: { method: 'GET', path: '/repos/:repoId/dispatch/groom', response: GroomStatusResponse },
   /**

@@ -61,9 +61,7 @@ import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import type {
   AuditRecord,
   CommandClaim,
-  GitHubAppRole,
   GitHubDelivery,
-  GitHubTokenRecord,
   JobRecord,
   NewAuditEntry,
   NodeReportRecord,
@@ -188,8 +186,6 @@ export interface MemoryData {
   githubEvents: Map<string, GitHubDelivery>;
   /** 账密登录的几列（库里是 users 表上的列），按用户编号；没设过的人不在里面。 */
   credentials: Map<string, PasswordCredentials>;
-  /** 各人自己的 GitHub 授权（#1989，库里是 github_tokens），按用户编号；没授权过的人不在里面。 */
-  githubTokens: Map<string, GitHubTokenRecord>;
   /** 别的环境推来的快照（node_reports），一个环境一行。 */
   nodeReports: NodeReportRecord[];
   /** 本机会话（node_sessions，#1991），一个环境一行；report 原样放（读回来再认一遍）。 */
@@ -224,7 +220,6 @@ export function emptyData(): MemoryData {
     idempotency: new Map(),
     githubEvents: new Map(),
     credentials: new Map(),
-    githubTokens: new Map(),
     nodeReports: [],
     nodeSessions: [],
     worktreeInventory: null,
@@ -1118,38 +1113,5 @@ export function createMemoryStore(
       data.repos = data.repos.filter((r) => r.id !== repoId);
       return 'removed';
     },
-    async getGitHubToken(userId, role) {
-      const row = data.githubTokens.get(githubTokenKey(userId, role));
-      return row ? { ...row } : null;
-    },
-    async listGitHubTokens(userId) {
-      const out: GitHubTokenRecord[] = [];
-      for (const role of ['agent', 'engine'] as const) {
-        const row = data.githubTokens.get(githubTokenKey(userId, role));
-        if (row) out.push({ ...row });
-      }
-      return out;
-    },
-    async putGitHubToken(input) {
-      data.githubTokens.set(githubTokenKey(input.userId, input.role), {
-        userId: input.userId,
-        githubId: input.githubId,
-        login: input.login,
-        role: input.role,
-        accessTokenCipher: input.accessTokenCipher,
-        scopes: input.scopes,
-        expiresAt: input.expiresAt,
-        updatedAt: now().toISOString(),
-      });
-    },
-    async deleteGitHubToken(userId, role) {
-      const roles: GitHubAppRole[] = role ? [role] : ['agent', 'engine'];
-      for (const item of roles) data.githubTokens.delete(githubTokenKey(userId, item));
-    },
   };
-}
-
-/** 一个人每个 App 一行。键把两边分开，断开时按人删光。 */
-function githubTokenKey(userId: string, role: GitHubAppRole): string {
-  return `${userId}:${role}`;
 }

@@ -41,8 +41,6 @@ import type {
   ImportableReposResponse,
   ImportRepoRequest,
   ImportRepoResponse,
-  InstallAppRequest,
-  InstallAppResponse,
   JobsResponse,
   JobViewSchema,
   LivenessFactSchema,
@@ -154,14 +152,12 @@ export type UpdatedRepoDispatch = z.infer<typeof UpdateRepoDispatchResponse>;
 export type RepoCiPolicy = z.infer<typeof RepoCiPolicyResponse>['repos'][number];
 export type UpdateRepoCiPolicyBody = z.input<typeof UpdateRepoCiPolicyRequest>;
 export type UpdatedRepoCiPolicy = z.infer<typeof UpdateRepoCiPolicyResponse>;
-/** 设置页「导入仓库」（#1989）：我 GitHub 上看得见的仓 + 我这份授权现在怎样。 */
+/** 设置页「导入仓库」：两个机器人已经装上的仓。 */
 export type ImportableRepos = z.infer<typeof ImportableReposResponse>;
 export type ImportableRepo = ImportableRepos['repos'][number];
-export type GitHubAuthState = ImportableRepos['auth'];
 export type ImportRepoBody = z.input<typeof ImportRepoRequest>;
 export type ImportRepoResult = z.infer<typeof ImportRepoResponse>;
 export type RemoveRepoResult = z.infer<typeof RemoveRepoResponse>;
-export type InstallAppResult = z.infer<typeof InstallAppResponse>;
 /** 一个仓的「指挥官整理待办」：今日剩余次数、最近几次、有没有一次在做。 */
 export type GroomStatus = z.infer<typeof GroomStatusResponse>;
 export type GroomNowBody = z.input<typeof GroomNowRequest>;

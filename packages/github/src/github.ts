@@ -111,7 +111,6 @@ import { createReleaseFacts, type ReleaseFactsReader } from './release-facts.ts'
 import { RepoFactsCache } from './repos.ts';
 import { type SyncMainlineInput, type SyncMainlineResult, syncMainline } from './sync.ts';
 import { requiredPermissions } from './token-scopes.ts';
-import { createGitHubUserApi, type GitHubUserApi } from './user-repos.ts';
 
 export interface GitHubOptions {
   /** 防重复写的账、PR 镜像：生产用 pgLedger(db)。 */
@@ -170,12 +169,6 @@ export interface SelfCheckItem {
 export interface GitHub {
   client: GitHubClient;
   deps: Deps;
-  /**
-   * 本人身份那一套（#1989）：列「我 GitHub 上能看到的仓」、把 App 装到某个仓。走 OAuth 用户令牌，
-   * 和 App 机器人令牌那条路分开（GitHub 只认本人令牌）。两个 App 的凭据里缺 client_id/client_secret 时，
-   * 调用它的那一刻如实抛 BAD_CONFIG，不在建对象时就炸（别的功能照用）。
-   */
-  userApi: GitHubUserApi;
   pushBranch(input: PushBranchInput, ctx?: ActivityContext): Promise<PushBranchResult>;
   /** 把最新主线并进 PR 分支、推上去（干净或本来就最新都算 clean；冲突、分支头对不上分别回 conflict / head_moved）。 */
   syncMainline(input: SyncMainlineInput, ctx?: ActivityContext): Promise<SyncMainlineResult>;
@@ -341,21 +334,6 @@ export function createGitHub(options: GitHubOptions): GitHub {
   return {
     client,
     deps,
-    userApi: createGitHubUserApi(client, {
-      appCredentials: {
-        agent: {
-          clientId: apps.agent.clientId,
-          clientSecret: apps.agent.clientSecret,
-          slug: apps.agent.slug,
-        },
-        engine: {
-          clientId: apps.engine.clientId,
-          clientSecret: apps.engine.clientSecret,
-          slug: apps.engine.slug,
-        },
-      },
-      ...(options.log ? { log: options.log } : {}),
-    }),
     async pushBranch(input, ctx = {}) {
       return pushBranch(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
     },

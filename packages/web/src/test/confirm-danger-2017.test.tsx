@@ -1,44 +1,16 @@
 // @vitest-environment happy-dom
-// 危险动作先确认（#2017）：断开 GitHub 授权、清理没用的工作树、撤掉手工登记的模型。
+// 危险动作先确认（#2017）：清理没用的工作树、撤掉手工登记的模型。
 // 不点确认不发请求；确认键走 onConfirm，点一次只发一次。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { createMockApi } from '../api/mock/server';
 import ResourcesPage from '../routes/resources';
 import RoutingPage from '../routes/routing';
-import SettingsPage from '../routes/settings';
 import { renderApp } from './harness';
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
-});
-
-test('断开 GitHub 授权：不确认不发请求，确认后只发一次，确认键带着忙态', async () => {
-  const api = createMockApi({ live: false });
-  let finish: (value: { disconnected: boolean }) => void = () => {};
-  const disconnect = vi.spyOn(api, 'disconnectGitHub').mockImplementation(
-    () =>
-      new Promise((resolve) => {
-        finish = resolve;
-      }),
-  );
-  renderApp(<SettingsPage />, { api, route: '/settings' });
-  const open = await screen.findByRole('button', { name: '断开' });
-  fireEvent.click(open);
-  await Promise.resolve();
-  expect(disconnect).not.toHaveBeenCalled();
-  const dialog = await screen.findByRole('alertdialog');
-  const confirm = within(dialog).getByRole('button', { name: '断开' });
-  fireEvent.click(confirm);
-  await waitFor(() => expect(disconnect).toHaveBeenCalledTimes(1));
-  await waitFor(() => expect(confirm.getAttribute('data-loading')).toBe(''));
-  expect(confirm.getAttribute('aria-busy')).toBe('true');
-  fireEvent.click(confirm);
-  await Promise.resolve();
-  expect(disconnect).toHaveBeenCalledTimes(1);
-  expect(screen.getByRole('alertdialog')).toBeTruthy();
-  finish({ disconnected: true });
 });
 
 test('清理没用的工作树：不确认不发请求，确认后只发一次，确认键带着忙态', async () => {

@@ -575,6 +575,13 @@
       "when": 1792160000005,
       "tag": "0081_repos_profile_backfill",
       "breakpoints": true
+    },
+    {
+      "idx": 82,
+      "version": "7",
+      "when": 1792170796183,
+      "tag": "0082_drop_github_tokens",
+      "breakpoints": true
     }
   ]
 }

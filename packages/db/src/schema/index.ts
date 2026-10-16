@@ -5,7 +5,6 @@ export * from './channel-fallback.ts';
 export * from './channel-models.ts';
 export * from './cli-tool-readings.ts';
 export * from './enums.ts';
-export * from './github-tokens.ts';
 export * from './ops.ts';
 export * from './requests.ts';
 export * from './route-probe-history.ts';
