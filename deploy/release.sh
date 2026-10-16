@@ -12,7 +12,8 @@
 # 要换引擎的版本时（#2038、决定 0093）：构建期间引擎照常干活。构建完才写排空请求（$DRAIN_REQUEST，引擎不起新会话），
 # 给引擎手上有会话的任务发 hard 暂停（暂停人「发版」，名单落 $PAUSE_FILE），等会话收掉（停不下来的最多再做 DRAIN_GRACE 秒，
 # 到点由引擎按切号那一套停下、按编号续上）就停引擎，再迁移、切版本；新引擎起来后只对名单里这一批发「继续」（续上原会话见 #2037）。
-# 相对在用版本只改了文档或测试（runtime_unchanged）时不暂停、不重启。
+# 相对在用版本只改了文档或测试（runtime_unchanged）时不暂停、不重启。健康检查这时核主进程所在版本和这一版运行内容一致，
+# 不要求它已经在新版目录里，也不把这一版记成不健康。
 # 发版不碰引擎总开关和各仓「让 AI 接活」开关：停接新活只在切版本这一段，由排空请求管，脚本退了请求就撤。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
@@ -1454,6 +1455,7 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
       restart=1
     fi
     running=$(running_release "$u.service")
+    # 运行内容没变：主进程留在上一版目录。健康检查改核运行内容，不在这里重启。
     if ((RUNTIME_UNCHANGED)) && [[ "$u" == fleet-engine || "$u" == fleet-api ]]; then
       restart=0
     elif [[ -n "$running" && "$running" != "$dir" ]]; then
@@ -1565,19 +1567,29 @@ api_healthz() {
   printf '%s\t%s' "${out##*$'\n'}" "${out%$'\n'*}"
 }
 
-# 切版本、重启后端以后，等它在驾驶舱接口上答话（回什么状态码都算，逐项好坏留给健康检查）。平常几秒就答；
+# 切版本以后等后端在驾驶舱接口上答话（回什么状态码都算，逐项好坏留给健康检查）。平常几秒就答；
 # 到 API_UP_WAIT 秒还不答（起不来、反复崩）判红返回 1，调用方马上退回。不等的话要走完发香港、健康检查好几分钟才退，
-# 这几分钟端口在 socket 手里排队、没进程 accept，/healthz 连得上却挂着（#2186）
+# 这几分钟端口在 socket 手里排队、没进程 accept，/healthz 连得上却挂着（#2186）。
+# 运行内容没变、这次没重启时不写「重启后」：进程是上一版留下的，这句话和事实不符。
 api_wait_up() {
-  local start=$SECONDS
+  local start=$SECONDS waited
   while ((SECONDS - start < API_UP_WAIT)); do
     if curl -s -o /dev/null --max-time 5 "http://$COCKPIT/healthz"; then
-      ok "fleet-api 在驾驶舱接口上答话了（重启后 $((SECONDS - start)) 秒）"
+      waited=$((SECONDS - start))
+      if ((RUNTIME_UNCHANGED)); then
+        ok "fleet-api 在驾驶舱接口上答话了（没重启，沿用上一版进程）"
+      else
+        ok "fleet-api 在驾驶舱接口上答话了（重启后 ${waited} 秒）"
+      fi
       return 0
     fi
     sleep 1
   done
-  red "fleet-api 重启后 ${API_UP_WAIT} 秒还没在驾驶舱接口 http://$COCKPIT/healthz 上答话（起不来或反复崩，累计重启 $(unit_prop fleet-api.service NRestarts) 次）：journalctl -u fleet-api -n 50"
+  if ((RUNTIME_UNCHANGED)); then
+    red "fleet-api 没重启，但 ${API_UP_WAIT} 秒还没在驾驶舱接口 http://$COCKPIT/healthz 上答话（起不来或反复崩，累计重启 $(unit_prop fleet-api.service NRestarts) 次）：journalctl -u fleet-api -n 50"
+  else
+    red "fleet-api 重启后 ${API_UP_WAIT} 秒还没在驾驶舱接口 http://$COCKPIT/healthz 上答话（起不来或反复崩，累计重启 $(unit_prop fleet-api.service NRestarts) 次）：journalctl -u fleet-api -n 50"
+  fi
   return 1
 }
 
@@ -1622,13 +1634,28 @@ settle_services() {
   return "$bad"
 }
 
-# 起着的服务跑的真是这一版：主进程的当前目录就是这一版的目录（不是 current 指过去了、进程还是旧的）
+# 主进程目录是某一版，且那一版相对要查的这一版只改了文档或测试（同一份 runtime_unchanged）。
+# 没在跑、目录不是某一版、运行内容不一样、清单读不出，都返回 1：调用方照旧判红（读不出不当成一致）。
+running_runtime_matches() { # 主进程当前目录 要查的提交
+  local running=$1 sha=$2 name
+  [[ "$running" == "$RELEASES/"* ]] || return 1
+  name=${running#"$RELEASES/"}
+  is_sha "$name" || return 1
+  runtime_unchanged "$name" "$sha"
+}
+
+# 起着的服务跑的真是这一版：主进程的当前目录就是这一版的目录（不是 current 指过去了、进程还是旧的）。
+# 只改了文档或测试、故意没重启时目录还是上一版：改核那一版和这一版运行内容一致，一致就认可沿用，不判红、不退回。
+# --check 是另一次进程，没有 RUNTIME_UNCHANGED，也走这一份核对，免得发完立刻被接活脚本的 --check 判红。
 check_running_release() { # 提交号
-  local u running bad=0
+  local u running bad=0 sha=$1 short
   for u in $FLEET_SERVICES; do
     running=$(running_release "$u.service")
-    if [[ "$running" == "$RELEASES/$1" ]]; then
-      ok "$u 的主进程跑的是这一版（${1:0:12}）"
+    if [[ "$running" == "$RELEASES/$sha" ]]; then
+      ok "$u 的主进程跑的是这一版（${sha:0:12}）"
+    elif running_runtime_matches "$running" "$sha"; then
+      short=${running##*/}
+      ok "$u 的主进程沿用 ${short:0:12}（和 ${sha:0:12} 运行内容一致，没重启）"
     else
       red "$u 的主进程跑的不是这一版：在「${running:-没在跑}」"
       bad=1
