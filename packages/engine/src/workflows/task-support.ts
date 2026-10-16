@@ -79,6 +79,20 @@ export function freshSessionFeedback(feedback: readonly string[]): string[] {
 /** 自测红了续进会话的那一句（第一行），后面跟精炼输出。 */
 export const SELF_CHECK_RED_LINE = '引擎在你交活之后跑了测试和类型检查，没过。改到它过再提交：';
 
+/**
+ * 交活时没提交、树里有剩：同一轮续进会话补提交的那一句（#2722）。后面跟树里剩的文件。
+ * 常见是会话把测试丢到后台就结束了回答：一次性会话收不到后台回调，改动就留在树里。
+ */
+export const COMMIT_NUDGE_LINE =
+  '你的回答结束了，但改动还没提交完（引擎只认提交）。不要把命令放到后台再结束回答：要跑的测试、检查在前台跑完看到结果，然后 git add、git commit 提交，工作树里别留没提交的文件。';
+
+/** 续进会话补提交的意见：那一句 + 树里剩的文件（最多 10 个）。 */
+export function commitNudgeFeedback(commits: number, leftover: readonly string[]): string {
+  const none = commits === 0 ? '这一轮一个提交都没有。' : '';
+  const left = leftover.length > 0 ? `工作树里还有没提交的改动：${leftover.slice(0, 10).join('、')}。` : '';
+  return `${COMMIT_NUDGE_LINE}${none || left ? `\n${none}${left}` : ''}`;
+}
+
 /** 自测的精炼输出合成一段（喂回会话、交给冷验收都用这一份）：每条命令一节，限 SELF_CHECK_DIGEST_MAX 字。 */
 export function selfCheckText(result: SelfCheckResult): string {
   const parts = result.steps.map((s) => {

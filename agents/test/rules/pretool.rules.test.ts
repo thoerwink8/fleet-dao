@@ -342,6 +342,90 @@ describe('命令行外壳：stdin 进、退出码出', { timeout: 0 }, () => {
     expect(r.status).toBe(2);
     expect(r.stderr).toContain('secret-shape.mjs');
   });
+
+  it('主线程挂「循环 + sleep」的 Monitor：退出码 2，指向 wait.mjs（Monitor 不再见到就放行）', () => {
+    const r = run(
+      cc('Monitor', { command: 'while true; do gh pr view 1; sleep 30; done', timeout_ms: 1_800_000 }),
+    );
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain('wait.mjs');
+  });
+
+  it('子代理里的同一条 Monitor：退出码 0', () => {
+    const r = run(
+      cc('Monitor', { command: 'while true; do gh pr view 1; sleep 30; done', timeout_ms: 1_800_000 }, 'a1'),
+    );
+    expect(r.status).toBe(0);
+  });
+});
+
+/** Claude Code 自己送来的输入（isClaudeCodeInput 认的那几个键都在）；给了 agentId 就是子代理里的调用 */
+function cc(tool: string, toolInput: Record<string, unknown>, agentId?: string): string {
+  return JSON.stringify({
+    hook_event_name: 'PreToolUse',
+    transcript_path: '/tmp/t.jsonl',
+    permission_mode: 'default',
+    tool_use_id: 'toolu_1',
+    session_id: 's1',
+    tool_name: tool,
+    tool_input: toolInput,
+    cwd: F,
+    ...(agentId === undefined ? {} : { agent_id: agentId, agent_type: 'general-purpose' }),
+  });
+}
+
+// 单 #2730：旧会话主线程手写 46 个「for/while … sleep」后台盯梢，最后一个 jq 写错、错误进了 /dev/null，空跑 90 分钟。
+// 主线程的后台命令（run_in_background、会被改成后台跑的长 timeout、Monitor）里有循环加 sleep 就拦，指向 wait.mjs；
+// 子代理、前台短命令、别家的输入照放。
+describe('主线程不手写轮询：循环 + sleep 的后台命令拦下，指向 wait.mjs', () => {
+  const jqLoop = `for i in $(seq 1 180); do s=$(gh pr view 2701 --json state --jq '"\\(.state)"' 2>/dev/null); [ "$s" = MERGED ] && break; sleep 30; done`;
+  const blocked: [string, Record<string, unknown>][] = [
+    ['Bash', { command: jqLoop, run_in_background: true }],
+    ['Bash', { command: 'until gh run view 1 --exit-status; do sleep 60; done', run_in_background: true }],
+    ['Bash', { command: 'while :; do date; sleep 5; done', timeout: 600_000 }],
+    [
+      'PowerShell',
+      { command: 'while ($true) { gh pr view 1; Start-Sleep -Seconds 30 }', run_in_background: true },
+    ],
+    ['PowerShell', { command: 'do { Start-Sleep 10 } until (Test-Path x)', run_in_background: true }],
+    ['Monitor', { command: 'while true; do gh pr checks 1; sleep 30; done', timeout_ms: 1_800_000 }],
+  ];
+  it.each(blocked)('主线程 %s %j：拦下，理由指向 wait.mjs', (tool, toolInput) => {
+    const v = lib.decide(cc(tool, toolInput));
+    expect(v.code).toBe(2);
+    expect(v.message).toContain('wait.mjs');
+    expect(v.message).toContain('不手写');
+  });
+
+  it.each(blocked)('子代理里 %s %j：照放', (tool, toolInput) => {
+    expect(lib.decide(cc(tool, toolInput, 'agent-1')).code).toBe(0);
+  });
+
+  const allowed: [string, Record<string, unknown>][] = [
+    // 前台短命令：不是后台盯梢
+    ['Bash', { command: 'for f in a b; do echo $f; done; sleep 1' }],
+    // 后台跑，但没有循环 + sleep
+    [
+      'Bash',
+      { command: 'node ~/.claude/skills/commander/scripts/wait.mjs pr 2730', run_in_background: true },
+    ],
+    ['Bash', { command: 'gh pr checks 2730 --watch --fail-fast', run_in_background: true }],
+    ['Bash', { command: 'for f in a b; do echo $f; done', run_in_background: true }],
+    ['Bash', { command: 'sleep 5 && pnpm test', run_in_background: true }],
+    // 单词边界：sleepy、for-each 这类不算
+    ['Bash', { command: 'pnpm run for-each sleepy', run_in_background: true }],
+    ['Monitor', { command: 'tail -f log | grep --line-buffered ERROR', timeout_ms: 60_000 }],
+  ];
+  it.each(allowed)('主线程 %s %j：放行', (tool, toolInput) => {
+    expect(lib.decide(cc(tool, toolInput)).code).toBe(0);
+  });
+
+  it('别家的输入（没有 Claude Code 那几个键）不管：没有这套后台命令', () => {
+    const v = lib.decide(
+      JSON.stringify({ tool_name: 'Bash', tool_input: { command: jqLoop, run_in_background: true }, cwd: F }),
+    );
+    expect(v.code).toBe(0);
+  });
 });
 
 // —— 密钥文件：值不进对话 ——

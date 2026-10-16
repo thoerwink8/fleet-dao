@@ -2,12 +2,14 @@
 // 没有标记，就把本目录里的过程钩子从项目设置里拿掉，别的钩子不动。
 // 另：配了 ~/.fleet-dao/fallback-proxy 就往 $CLAUDE_ENV_FILE 写代理变量（proxy-env.mjs），Bash 里的 gh/curl 不穿 reclaude 的口。
 // 0083 删的是「每个仓都跑流程钩子」。这个加载器没标记就不写。
-// 引擎无头会话（FLEET_HEADLESS=1）直接退出，不改项目设置。
+// 引擎无头会话（FLEET_HEADLESS=1）直接退出，不改项目设置；引擎的树（有 refs/fleet/incoming，别家执行体起的会话不带
+// FLEET_HEADLESS）也不改（#2721）。
 // 订阅文件读不成：不改项目设置，退出 0，并在 stderr 说明。退出 0 是为了不挡住开会话。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { gitRunner } from './git-run.mjs';
 import { PROCESS_HOOKS } from './plugin-catalog.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
 
@@ -190,6 +192,18 @@ function hasScript(hooks, script) {
   return false;
 }
 
+/** 引擎建树时从 bundle 取进来的引用（packages/engine/src/real/user-git.ts 的 fetchBundle）：本机的检出没有它。 */
+export const ENGINE_TREE_REF = 'refs/fleet/incoming';
+
+/**
+ * 这个目录是不是引擎的树（有 ENGINE_TREE_REF）。Grok、Cursor、Mirasim 起的引擎会话不带 FLEET_HEADLESS，照样跑这个用户级
+ * 加载器（#2721）；树里的项目设置一改，交活核对就把它当成没提交的改动判返工。git 跑不成当成不是（照旧写），不挡开会话。
+ * @param {string} cwd
+ */
+export function isEngineTree(cwd) {
+  return gitRunner()(cwd, ['rev-parse', '--verify', '--quiet', `${ENGINE_TREE_REF}^{commit}`]).status === 0;
+}
+
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -209,6 +223,7 @@ if (isMain()) {
       input = {};
     }
     const cwd = typeof input.cwd === 'string' && input.cwd !== '' ? input.cwd : process.cwd();
+    if (isEngineTree(cwd)) process.exit(0);
     const markerPath = join(cwd, '.fleet-plugins.json');
     let track = [];
     if (existsSync(markerPath)) {
