@@ -561,6 +561,20 @@
       "when": 1792160000003,
       "tag": "0079_sessionless_usage_notes",
       "breakpoints": true
+    },
+    {
+      "idx": 80,
+      "version": "7",
+      "when": 1792160000004,
+      "tag": "0080_cold_beyonder",
+      "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1792160000005,
+      "tag": "0081_repos_profile_backfill",
+      "breakpoints": true
     }
   ]
 }

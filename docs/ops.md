@@ -935,6 +935,14 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api dispatch --all off --reason "<原因>"   # 所有仓一起关（手动用；发版不再自己跑它，#1256）；只许 off
   ```
   和 set-password 一样换成 fleet、带上 `api.env` 连库；仓名不分大小写。已经是要的状态就不改、不记：开着时再 `on` 不重设时刻、不记（时刻现在只显示用，拉单不再拿它和开单时间比）。改了就在同一个事务里记一条操作记录（`repo.auto_dispatch.enable` / `repo.auto_dispatch.disable`，target 是 `repo:<仓的 id>`，来源记成 engine，reason 写明谁跑的哪条命令，before / after 是开关原来和现在的值），改完从库里读回开关和这条记录再打印。退出码：0 查到了、改好了或本来就是；1 没做成（库里没这个仓、连不上库、写库出错、读回来对不上，一句话说原因和怎么核对）；2 参数不对或没带上库连接。
+- **仓档案**（#2738，库里是 `repos.profile`，形状和默认值见 `packages/shared/src/repo-profile.ts`：语言 `language`、工具链 `toolchain`、测试命令 `testCommand`、模块根 `moduleRoots`、合并要等的检查 `mergeSignals`、改标准路径清单在哪 `standardPathsFile`、权重 `weight`）：
+
+  ```
+  # 在本机，经 ssh 到法国以 root 跑（ssh 名字同 france.mjs：FLEET_FRANCE_SSH 或 ~/.fleet-dao/france-ssh 第一行）
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'cd /tmp && sudo bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api project show <owner>/<仓名>'   # 只读：仓号、档案原文、补了默认值的档案、缺哪几项（JSON）
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'cd /tmp && sudo bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api project set-profile <owner>/<仓名> --file -' < profile.json   # 整份换掉；- 读标准输入
+  ```
+  形状不对（不是 JSON、认不出的键、值不对）就拒、库不动，退出码 2；库里只存显式写了的项，缺的项由读的人补默认值。写了 `testCommand` 的，`repos.test_command` 一起改。改了就在同一个事务里记一条操作记录（`repo.profile.set`，target `repo:<仓的 id>`，来源 ops，before / after 是档案原文），改完读回对得上才打印「已改」；和库里一样不改不记。退出码：0 做成了或本来就是；1 库里没这个仓、库出错、读回对不上；2 参数或档案形状不对。
 - **关着开关时点名派单**（`fleet-api dispatch-issue`，母单 #1335 第 2 片、#1337；创始人 2026-10-08：「如果按钮不开，可以本机操纵vps派单」「按推荐」）：项目的「让 AI 接活」关着时，本机（指挥官）把某一张单立刻交给法国引擎，不用先把开关打开（打开会让引擎同时去拉别的单）。
 
   ```
