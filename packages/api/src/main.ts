@@ -80,7 +80,7 @@ import { pgProbeHistory } from './probe-history.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
 import { pgRequestChat } from './request-chat-pg.ts';
-import type { RequestIssuePort } from './request-issue.ts';
+import { currentMilestoneOf, type RequestIssuePort } from './request-issue.ts';
 import { startRequestProgressWatch } from './request-progress.ts';
 import { pgRequests } from './request-store-pg.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
@@ -180,7 +180,9 @@ function githubMirror(db: Db): {
       requestIssues: {
         // 不走发件箱，同步调（母单 #2047 方案第六节）；正文过卫生检查、幂等都在 @fleet-dao/github 的 openIssue / commentIssue 里
         async openIssue(input) {
-          return gh.openIssue({ ...input, milestone: null });
+          // 挂当前版本（#2683）：创始人开的进当前版本，不落未排期
+          const milestone = await currentMilestoneOf(() => gh.readOpenMilestones({ repo: input.repo }));
+          return gh.openIssue({ ...input, milestone });
         },
         async commentIssue(input) {
           return gh.commentIssue(input);

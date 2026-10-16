@@ -287,11 +287,6 @@ describe('已派过的不重复派', () => {
 describe('--force 放行就绪度类', () => {
   const cases: { reason: DispatchGateReason; over: Over }[] = [
     {
-      reason: 'not_current_version',
-      over: { plan: plan({ milestone: V2 }), issue: issue({ milestone: V2 }) },
-    },
-    { reason: 'unscheduled', over: { plan: plan({ milestone: null }), issue: issue({ milestone: null }) } },
-    {
       reason: 'heaviest_tier',
       over: { issue: issue({ body: body('- `packages/web/src/` 和 `packages/api/src/`') }) },
     },
@@ -324,6 +319,16 @@ describe('--force 放行就绪度类', () => {
     },
   );
 
+  it('挂不挂当前版本不是闸（决定 0031；#2683 删了版本这一道）：别的版本、未排期、认不出版本号的都照派', async () => {
+    for (const milestone of [V2, null, { number: 9, title: 'P1 旧写法' }]) {
+      const w = world({
+        plan: plan({ milestone, openMilestones: [V1, V2, { number: 9, title: 'P1 旧写法' }] }),
+        issue: issue({ milestone }),
+      });
+      expect((await dispatchIssue(w.deps, ARGS)).outcome, JSON.stringify(milestone)).toBe('started');
+    }
+  });
+
   it('失败恰好 2 次还没超限，不拦', async () => {
     const w = world({ failed: MAX_FAILED_ATTEMPTS });
     expect((await dispatchIssue(w.deps, ARGS)).outcome).toBe('started');
@@ -337,7 +342,6 @@ describe('--force 放行就绪度类', () => {
     });
     const r = await dispatchIssue(w.deps, ARGS);
     expect(r.outcome === 'refused' && r.failures.map((f) => f.reason)).toEqual([
-      'unscheduled',
       'heaviest_tier',
       'failure_history',
     ]);
@@ -368,15 +372,6 @@ describe('硬闸：--force 怎么都不放行', () => {
       reason: 'brief_incomplete',
       over: { issue: issue({ body: '## 场景\n\n只写了场景' }) },
     },
-    {
-      reason: 'version_unreadable',
-      over: {
-        plan: plan({
-          milestone: { number: 9, title: 'P1 旧写法' },
-          openMilestones: [V1, { number: 9, title: 'P1 旧写法' }],
-        }),
-      },
-    },
   ];
 
   it.each(hard)('$reason：带 --force --note 也拒绝，写明不放行，不起工作流', async ({ reason, over }) => {
@@ -393,8 +388,8 @@ describe('硬闸：--force 怎么都不放行', () => {
 
   it('硬闸遇到第一个就停：同时还有就绪度问题，只报硬闸', async () => {
     const w = world({
-      issue: issue({ author: { login: 'stranger', id: 99, type: 'User' }, milestone: V2 }),
-      plan: plan({ milestone: V2 }),
+      issue: issue({ author: { login: 'stranger', id: 99, type: 'User' } }),
+      failed: MAX_FAILED_ATTEMPTS + 1,
     });
     const r = await dispatchIssue(w.deps, FORCE);
     expect(r).toMatchObject({ outcome: 'refused', failures: [{ reason: 'untrusted_author' }] });
