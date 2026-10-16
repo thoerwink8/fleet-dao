@@ -8,6 +8,8 @@ import { QuotaReadError } from '../types.ts';
 import { expandHome, isRecord, num, pruned, redact, toIso } from '../util.ts';
 
 const SOURCE = 'cursor-dashboard';
+/** 账期美元在有桶读数时挂的组名：成员表为空，只显示、不挡路由。 */
+const PLAN_DISPLAY_SCOPE = 'plan';
 export const DEFAULT_CURSOR_BASE_URL = 'https://api2.cursor.sh';
 /** 只读方法：类型上只许这三个，别的方法名发不出去。 */
 type Method = 'GetCurrentPeriodUsage' | 'GetPlanInfo' | 'GetHardLimit';
@@ -40,24 +42,6 @@ export function readingsFromPeriodUsage(
   const windows: QuotaReading[] = [];
   const notes: string[] = [];
 
-  const spent = num(plan.totalSpend);
-  const limit = num(plan.limit);
-  if (spent !== undefined && limit !== undefined && limit > 0) {
-    windows.push(
-      pruned<QuotaReading>({
-        ...base,
-        window: 'month_usd',
-        label: 'plan_usd',
-        unit: 'usd',
-        used: spent / 100,
-        limit: limit / 100,
-        utilization: spent / limit,
-      }),
-    );
-  } else {
-    notes.push('账期美元（totalSpend / limit）缺，没收');
-  }
-
   let buckets = 0;
   for (const [key, value] of Object.entries(plan)) {
     const m = /^(.+)PercentUsed$/.exec(key);
@@ -81,6 +65,28 @@ export function readingsFromPeriodUsage(
         utilization: percent / 100,
       }),
     );
+  }
+
+  // 账期美元：读到了桶的百分比时只作显示（挂在谁都不属于的 plan 组上，成员表是空的，不扣任何模型）——
+  // Cursor 两个池子（auto+grok 一个、高级模型一个）各管各的，账期美元过 100% 不等于 auto 桶也满了（#2360）。
+  // 一个桶都没读到时才照旧当账号级窗口，整池挡。
+  const spent = num(plan.totalSpend);
+  const limit = num(plan.limit);
+  if (spent !== undefined && limit !== undefined && limit > 0) {
+    windows.unshift(
+      pruned<QuotaReading>({
+        ...base,
+        window: 'month_usd',
+        ...(buckets > 0 ? { scope: PLAN_DISPLAY_SCOPE } : {}),
+        label: 'plan_usd',
+        unit: 'usd',
+        used: spent / 100,
+        limit: limit / 100,
+        utilization: spent / limit,
+      }),
+    );
+  } else {
+    notes.push('账期美元（totalSpend / limit）缺，没收');
   }
 
   if (windows.length === 0) {
@@ -109,6 +115,7 @@ export function readingsFromPeriodUsage(
   } else if (buckets > 0) {
     notes.push('没读到 Auto 桶的模型名单：桶窗口只能按名字匹配模型，可能卡不准');
   }
+  if (buckets > 0) scopeModels = { ...scopeModels, [PLAN_DISPLAY_SCOPE]: { in: [] } };
   const out: {
     windows: QuotaReading[];
     notes: string[];
