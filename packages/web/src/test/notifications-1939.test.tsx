@@ -17,10 +17,10 @@ describe('通知中心结论块（#1939）', () => {
     const hero = await screen.findByTestId('pending-rule');
     const title = hero.querySelector('h2') as HTMLElement;
     expect(title.className).toContain('text-subtitle');
-    // 假数据 n-10 是看门狗的卡（决定 0093 主页三块），算进卡住的
-    expect(title.textContent).toBe('待处理 7 条');
+    // 假数据 n-10 是看门狗的卡（决定 0093 主页三块），算进卡住的；n-11、n-12 是带动作的要你拍（#2353）
+    expect(title.textContent).toBe('待处理 9 条');
     const line = hero.querySelector('[data-hero-line]') as HTMLElement;
-    expect(line.textContent).toContain('2 件要你拍，5 个卡住');
+    expect(line.textContent).toContain('4 件要你拍，5 个卡住');
     expect(line.querySelector('[data-tone="human"]')?.textContent).toBe('等你拍板');
     const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
     expect(notes.textContent).toBe('要你拍的和卡住的，处理了就从这里消失。');

@@ -1,6 +1,8 @@
-// 「要你拍」选完以后按选项上的动作执行（删工作树、整池暂停/放开、重查、移出仓），结果写回这张卡。
+// 「要你拍」选完以后按选项上的动作执行（#2353：整池暂停/放开、重查、移出仓、留着；删工作树交给引擎），结果写回这张卡。
 // 自己写的、以及没有具体动作的（note-only，含老数据没写 action）仍交给指挥官（decision-handoff）。
 // 执行成功才由调用方 settleDecision 标已处理；失败把原因写上卡，resolved_at 留空。
+// 改这里之前必须知道：删工作树要 sudo 调 fleet-agent-scope，驾驶舱后端的单元开着 NoNewPrivileges、提不了权，
+// 所以这里只记「交给引擎」（execution.queued），由引擎每小时对账的工作树那一段删、再把结果写回（engine 的 worktree-sweep.ts）。
 import type { FeishuPushFacts } from '@fleet-dao/db';
 import { feishuPushProblem } from '@fleet-dao/db';
 import type { RepoRef, SelfCheckItem } from '@fleet-dao/github';
@@ -14,15 +16,14 @@ import {
   REPO_IMPORT_REMOVE,
   readDecisionAction,
   revocationProblem,
+  WORKTREE_DELETE_QUEUED,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { HandoffResult } from './decision-handoff.ts';
 import type { Actor, AuditVia, NotificationRecord, Store } from './ports.ts';
 
-/** 删工作树、重查要本机能力。没接上（开发环境）时对应动作失败，卡留着并写明没接上。暂停、放开、移出仓、留着只靠库。 */
+/** 重查要本机能力。没接上（开发环境）时对应动作失败，卡留着并写明没接上。暂停、放开、移出仓、留着只靠库。 */
 export interface DecisionCapabilities {
-  /** 删一棵工作树。没成抛错，话写原因。 */
-  deleteWorktree(path: string): Promise<void>;
   /** 再查这个仓的两个 GitHub App。还没装好、没查成抛错。 */
   recheckGitHubApp(repo: string): Promise<void>;
   /** 再读飞书推送。还不通抛错。 */
@@ -31,6 +32,7 @@ export interface DecisionCapabilities {
 
 /** 每种动作一个口。执行器按 kind 只调对应的那一个；测试用它断言调到了。 */
 export interface DecisionActionPorts {
+  /** 把删这棵树交给引擎（真端口只核路径：答案已经落库，引擎按答案删）。 */
   deleteWorktree(path: string): Promise<void>;
   keep(): Promise<void>;
   pausePool(poolId: string): Promise<void>;
@@ -56,12 +58,12 @@ const clip = (text: string, max: number): string => {
 export async function executeDecisionAction(
   action: DecisionAction,
   ports: DecisionActionPorts,
-): Promise<{ ok: true; text: string } | { ok: false; text: string }> {
+): Promise<{ ok: boolean; text: string; queued?: true }> {
   try {
     switch (action.kind) {
       case 'delete-worktree':
         await ports.deleteWorktree(action.path);
-        return { ok: true, text: clip(`已删工作树 ${action.path}`, 500) };
+        return { ok: true, queued: true, text: WORKTREE_DELETE_QUEUED };
       case 'keep':
         await ports.keep();
         return { ok: true, text: '记下留着：这条转已处理，之后不再提醒' };
@@ -104,24 +106,19 @@ export function actionOfAnswer(
 }
 
 /**
- * 答案已经落库之后：执行，并算出要不要标已处理（成功、且这一项不带 keepsOpen）。
- * note-only 的交接结果由端口的 handOff 记到 onHandoff，调用方拿它回给页面。
+ * 答案已经落库之后：执行，并算出要不要标已处理（做成了、不是交给引擎的、且这一项不带 keepsOpen）。
+ * note-only 的交接结果由端口的 handOff 交给调用方，调用方拿它回给页面。
  */
 export async function applyDecisionAnswer(input: {
   notification: NotificationRecord;
   optionId: string | undefined;
   ports: DecisionActionPorts;
-}): Promise<{
-  executed: { ok: boolean; text: string };
-  resolve: boolean;
-  noteOnly: boolean;
-}> {
+}): Promise<{ executed: { ok: boolean; text: string; queued?: true }; resolve: boolean }> {
   const action = actionOfAnswer(input.notification, input.optionId);
   const executed = await executeDecisionAction(action, input.ports);
   return {
     executed,
-    resolve: executed.ok && answerResolves(input.notification.options, input.optionId),
-    noteOnly: action.kind === 'note-only',
+    resolve: executed.ok && !executed.queued && answerResolves(input.notification.options, input.optionId),
   };
 }
 
@@ -169,7 +166,7 @@ async function writeHolds(
 /**
  * 真端口：暂停/放开写 engine.poolHolds（写上之后提醒可以转已处理，探针撤不掉这个开关）；
  * 移出仓走 removeRepo；留着是空操作（处理人不是对账，扫树才认「人决定留着」）；
- * 删树、重查走 capabilities，没接上抛「没接上」。
+ * 删树只核路径（引擎按答案删）；重查走 capabilities，没接上抛「没接上」。
  */
 export function liveDecisionPorts(input: {
   store: Store;
@@ -182,8 +179,7 @@ export function liveDecisionPorts(input: {
   const setting = async () => (await store.listSettings()).find((s) => s.key === POOL_HOLDS_SETTING);
   return {
     async deleteWorktree(path) {
-      if (!input.capabilities?.deleteWorktree) throw new Error('删工作树没接上：这台没有工作树帮手');
-      await input.capabilities.deleteWorktree(path);
+      if (!path.startsWith('/')) throw new Error(`工作树的路径认不出（要绝对路径）：${path}`);
     },
     async keep() {
       // 处理人写成拍板的人，扫树看见不是对账自己撤的就不再报。这里没有别的要写的。

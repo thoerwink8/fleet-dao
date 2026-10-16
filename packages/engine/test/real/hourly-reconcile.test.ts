@@ -22,7 +22,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { noteOnlyOptions } from '@fleet-dao/shared';
+import { noteOnlyOptions, WORKTREE_DELETE_QUEUED } from '@fleet-dao/shared';
 import { createPgStore } from '@fleet-dao/store';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type AlertSweepDeps, type RouteCheck, sweepAlerts } from '../../src/jobs/alert-sweep.ts';
@@ -35,6 +35,7 @@ import {
   type WorkflowState,
   type WorkflowView,
 } from '../../src/jobs/reconcile-common.ts';
+import { KEEP_TREE_REMOVE } from '../../src/jobs/worktree-sweep.ts';
 import { localExec } from '../../src/real/exec.ts';
 import {
   type HourlyReconcileWiring,
@@ -345,6 +346,48 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     expect(await runHourlyReconcileJob(deps())).toMatchObject({ outcome: 'ok', found: 0 });
     expect(await alertByKey(t.db, key)).toMatchObject({ resolvedBy: 'founder-a' });
     expect(existsSync(tree.dir)).toBe(true);
+  });
+
+  it('工作树要你拍：驾驶舱选了「删掉」（交给引擎），下一轮对账删掉树，结果写回卡上、转已处理（处理人是拍板的人）', async () => {
+    await work();
+    const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
+    probeDir();
+    await runHourlyReconcileJob(deps());
+    const key = 'worktree:acme_widgets/160-login';
+    const id = (await alertByKey(t.db, key))?.id ?? '';
+    const store = createPgStore(t.db);
+    const by = { kind: 'user' as const, id: 'founder-a' };
+    expect(
+      (
+        await store.answerNotification(
+          { id, by, optionId: KEEP_TREE_REMOVE },
+          {
+            actor: by,
+            action: 'notification.answer',
+            target: `notification:${id}`,
+            via: 'cockpit',
+            ok: true,
+          },
+        )
+      ).kind,
+    ).toBe('ok');
+    // 后端那一步：只记交给引擎，不转已处理
+    expect(
+      await store.settleDecision({
+        id,
+        execution: { ok: true, queued: true, text: WORKTREE_DELETE_QUEUED, at: new Date().toISOString() },
+        resolve: false,
+        by,
+      }),
+    ).toBe('ok');
+    expect(existsSync(tree.dir)).toBe(true);
+    await runHourlyReconcileJob(deps());
+    expect(existsSync(tree.dir)).toBe(false);
+    const row = await alertByKey(t.db, key);
+    expect(row?.resolvedBy).toBe('founder-a');
+    expect(row?.answer?.optionId).toBe(KEEP_TREE_REMOVE);
+    expect(row?.answer?.execution).toMatchObject({ ok: true, text: `已删工作树 ${tree.dir}` });
+    expect(row?.answer?.execution?.queued).toBeUndefined();
   });
 
   it('有没推的提交：不删，报要人拍（写清哪棵树、有什么、怎么删），「工作树没收掉」改成指向它；人点了处理之后不再报', async () => {
@@ -1475,15 +1518,15 @@ describe('GitHub 机器人权限自检：受管的仓从库里列，缺的报进
 
     expect(await runHourlyReconcileJob(deps({ selfCheck }))).toMatchObject({ outcome: 'ok', found: 1 });
     expect(asked).toEqual([['acme/widgets']]);
-    const open = await alertByKey(t.db, 'github-app:engine:acme/widgets');
+    const open = await alertByKey(t.db, 'github-app:acme/widgets');
     expect(open).toMatchObject({ level: 'alert', resolvedAt: null });
     expect(open?.title).toBe('「引擎」机器人在 acme/widgets 上的权限不对：缺 statuses:write');
 
     engineHas = true;
     expect(await runHourlyReconcileJob(deps({ selfCheck }))).toMatchObject({ outcome: 'ok', found: 1 });
-    const closed = await alertByKey(t.db, 'github-app:engine:acme/widgets');
+    const closed = await alertByKey(t.db, 'github-app:acme/widgets');
     expect(closed?.resolvedBy).toBe(RECONCILE_ACTOR);
-    expect(closed?.body).toMatch(/^已撤：「引擎」机器人在 acme\/widgets 上的权限够了/);
+    expect(closed?.body).toMatch(/^已撤：acme\/widgets 的两个机器人都装上了、权限够了/);
   });
 });
 

@@ -708,7 +708,6 @@ export function notificationView(n: NotificationRecord): z.input<typeof Notifica
     resolvedBy: n.resolvedBy,
     ...(n.options ? { options: n.options.map((o) => ({ ...o, action: readDecisionAction(o) })) } : {}),
     ...(n.answer ? { answer: n.answer } : {}),
-    ...(n.execution ? { execution: n.execution } : {}),
     deliveries: n.deliveries.map((d) => ({
       channel: d.channel,
       delivered: !!d.messageId,

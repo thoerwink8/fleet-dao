@@ -260,10 +260,10 @@ describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_00
     expect(await pullsOf(w.repoId)).toHaveLength(0);
   });
 
-  describe('已知没装机器人的仓（开着 github-app-missing 提醒）', () => {
+  describe('已知没装机器人的仓（开着 decision 级 github-app:<仓> 提醒）', () => {
     const FRESH = `${OWNER}/fresh`;
     const missingAlert = () => ({
-      dedupeKey: `github-app-missing:${FRESH}`,
+      dedupeKey: `github-app:${FRESH}`,
       level: 'decision' as const,
       taskId: null,
       title: `${FRESH}：先去 GitHub 把两个机器人装到这个仓`,
@@ -300,7 +300,7 @@ describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_00
       await addFresh();
       await upsertAlert(t.db, missingAlert());
       await resolveAlertWithReason(t.db, {
-        dedupeKey: `github-app-missing:${FRESH}`,
+        dedupeKey: `github-app:${FRESH}`,
         by: 'founder',
         why: '测试里撤掉',
         at: new Date(),

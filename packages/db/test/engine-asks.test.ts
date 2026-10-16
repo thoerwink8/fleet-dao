@@ -231,10 +231,15 @@ describe('「要你拍」的选项落库（#1915）', () => {
     await t.db
       .update(notifications)
       .set({
-        answer: { optionId: 'a', text: '甲', at: ago(MIN).toISOString(), by: 'u' },
+        answer: {
+          optionId: 'a',
+          text: '甲',
+          at: ago(MIN).toISOString(),
+          by: 'u',
+          execution: { ok: false, text: '上次没成', at: ago(MIN).toISOString() },
+        },
         resolvedAt: new Date(),
         resolvedBy: 'u',
-        execution: { ok: false, text: '上次没成', at: ago(MIN).toISOString() },
       })
       .where(eq(notifications.id, id));
     await upsertAlert(t.db, {
@@ -249,7 +254,6 @@ describe('「要你拍」的选项落库（#1915）', () => {
     expect(row?.decisionOptions?.map((o) => o.id)).toEqual(['b', 'a']);
     expect(row?.answer).toBeNull();
     expect(row?.resolvedAt).toBeNull();
-    expect(row?.execution).toBeNull();
   });
 
   it('【故意造出的失败】不合规矩的选项、非要人拍的带选项：照抛，不悄悄存成没选项', async () => {

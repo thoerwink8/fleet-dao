@@ -7,6 +7,7 @@ import {
   HANDED_TO_COMMANDER,
   POOL_HOLDS_SETTING,
   readDecisionAction,
+  WORKTREE_DELETE_QUEUED,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
@@ -56,11 +57,12 @@ function ports(fail?: string) {
 const actor = { kind: 'user' as const, id: 'founder-a' };
 
 describe('executeDecisionAction', () => {
-  it('delete-worktree 调删工作树', async () => {
+  it('delete-worktree 调删工作树的口，结果记成交给引擎', async () => {
     const { calls, p } = ports();
     expect(await executeDecisionAction({ kind: 'delete-worktree', path: '/tmp/tree' }, p)).toEqual({
       ok: true,
-      text: '已删工作树 /tmp/tree',
+      queued: true,
+      text: WORKTREE_DELETE_QUEUED,
     });
     expect(calls).toEqual(['delete:/tmp/tree']);
   });
@@ -242,7 +244,7 @@ describe('liveDecisionPorts', () => {
     expect((await h.store.listRepos()).some((r) => r.name === 'empty')).toBe(false);
   });
 
-  it('删工作树、重查没接上：失败，话里写没接上', async () => {
+  it('删工作树只核路径（后端不删，交给引擎）；重查、交给指挥官没接上：失败，话里写没接上', async () => {
     const h = harness();
     const live = liveDecisionPorts({
       store: h.store,
@@ -250,9 +252,11 @@ describe('liveDecisionPorts', () => {
       via: 'cockpit',
       handOff: async () => ({ progress: { ok: false, why: '没接上' } }),
     });
-    const deleted = await executeDecisionAction({ kind: 'delete-worktree', path: '/tmp/tree' }, live);
-    expect(deleted.ok).toBe(false);
-    expect(deleted.ok === false && deleted.text).toContain('没接上');
+    const queued = await executeDecisionAction({ kind: 'delete-worktree', path: '/tmp/tree' }, live);
+    expect(queued).toMatchObject({ ok: true, queued: true });
+    const relative = await executeDecisionAction({ kind: 'delete-worktree', path: 'tmp/tree' }, live);
+    expect(relative.ok).toBe(false);
+    expect(relative.text).toContain('绝对路径');
     const recheck = await executeDecisionAction(
       { kind: 'recheck', what: 'github-app', repo: 'acme/widgets' },
       live,

@@ -76,7 +76,6 @@ export async function upsertAlert(
         resolvedAt: null,
         resolvedBy: null,
         answer: null,
-        execution: null,
         // 重开才拨这一次的起点。还开着时再报：resolved_at 仍是空，留着原来的 raised_at。
         // SET 各项按更新前的行算，这里看见的 resolved_at 是重开前的，不会被上面那句清掉的赋值盖住。
         raisedAt: sql`case when ${notifications.resolvedAt} is not null then excluded.raised_at else ${notifications.raisedAt} end`,

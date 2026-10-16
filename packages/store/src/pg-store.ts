@@ -58,7 +58,7 @@ import {
   worktreeInventory,
 } from '@fleet-dao/db';
 import { ciPolicyOf, type ProgressKind, runBelongsToTask, taskWorkflowId } from '@fleet-dao/shared';
-import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
   commandKey,
@@ -289,7 +289,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         dedupeKey: n.dedupeKey,
         options: opt(n.decisionOptions),
         answer: opt(n.answer),
-        execution: opt(n.execution),
         deliveries: deliveries
           .filter((d) => d.notificationId === n.id)
           .map((d) => ({
@@ -742,12 +741,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         if (answer === 'unknown_option') return { kind: 'unknown_option' as const };
         const [updated] = await tx
           .update(notifications)
-          .set({
-            answer,
-            // 执行结果等 settleDecision。再拍一次把上一次没做成的结果清掉。
-            execution: null,
-            updatedAt: at,
-          })
+          // 只记答案，转不转已处理等照着做完（settleDecision）。再拍一次连上一次的结果一起换掉
+          .set({ answer, updatedAt: at })
           .where(eq(notifications.id, id))
           .returning();
         if (!updated) throw new Error(`通知 ${id} 锁住了却没改成`);
@@ -765,11 +760,13 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const [updated] = await db
         .update(notifications)
         .set({
-          execution,
+          answer: sql`${notifications.answer} || jsonb_build_object('execution', ${JSON.stringify(execution)}::jsonb)`,
           updatedAt: at,
           ...(resolve ? { resolvedAt: at, resolvedBy: by.id } : {}),
         })
-        .where(and(eq(notifications.id, id), isNull(notifications.resolvedAt)))
+        .where(
+          and(eq(notifications.id, id), isNull(notifications.resolvedAt), isNotNull(notifications.answer)),
+        )
         .returning({ id: notifications.id });
       if (updated) return 'ok';
       const [exists] = await db

@@ -733,10 +733,9 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore + 1);
         const all = await store.listNotifications({ status: 'all', limit: 10 });
         expect(all.items.find((n) => n.id === IDS.notification2)).toMatchObject({
-          answer,
+          answer: { ...answer, execution },
           resolvedAt: clock.now.toISOString(),
           resolvedBy: DEV_USER_ID,
-          execution,
         });
         // 拍过的再拍：已处理，不盖掉前一个答案
         expect(
@@ -746,7 +745,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           (await store.listNotifications({ status: 'all', limit: 10 })).items.find(
             (n) => n.id === IDS.notification2,
           )?.answer,
-        ).toEqual(answer);
+        ).toEqual({ ...answer, execution });
       });
 
       it('「要你拍」（#1931）：答案先记下、不转已处理；keepsOpen 的 settle 留着、能再拍；了结的要 settleDecision 才转已处理', async () => {
@@ -770,14 +769,14 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(
           await store.settleDecision({ id: IDS.notification2, execution: kept, resolve: false, by }),
         ).toBe('ok');
-        expect((await row())?.execution).toEqual(kept);
+        expect((await row())?.answer?.execution).toEqual(kept);
         expect((await row())?.resolvedAt).toBeUndefined();
         const typed = await store.answerNotification(
           { id: IDS.notification2, by, text: '周一再说' },
           audit(),
         );
         expect(typed.kind === 'ok' && typed.notification.resolvedAt).toBeUndefined();
-        expect(typed.kind === 'ok' && typed.notification.execution).toBeUndefined();
+        expect(typed.kind === 'ok' && typed.notification.answer?.execution).toBeUndefined();
         expect(await openIds()).toContain(IDS.notification2);
         const approve = await store.answerNotification(
           { id: IDS.notification2, by, optionId: 'approve' },

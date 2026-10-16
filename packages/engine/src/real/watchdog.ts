@@ -10,7 +10,7 @@
 // 「提醒真的推到飞书了」读同一个库的 feishuPushFacts（后端写的推送状态、送达记录）。
 // 拼车池整池暂停时 carpool-watch 不要求新鲜（和盯读、引擎起来时的登记同一句，pool-holds.ts 的 carpoolPoolsHeldReason）：
 // 摘登记行挡不住启动时 registerEngineJobs 把它写回来，单看登记行会误报「停了」。暂停读不到照抛，看门狗这一轮不当成暂停。
-import { readFile, readlink, stat } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
@@ -35,12 +35,7 @@ import {
 import { noteOnlyOptions } from '@fleet-dao/shared';
 import { RELEASES_DIR } from '@fleet-dao/store';
 import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
-import {
-  type HealthzProbe,
-  lastHistoryEntry,
-  parseHealthzResponse,
-  type ReleaseFacts,
-} from '../jobs/release-watch.ts';
+import { type HealthzProbe, parseHealthzResponse, type ReleaseFacts } from '../jobs/release-watch.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { WATCHDOG_ACTOR, type WatchdogDeps } from '../jobs/watchdog.ts';
 import { carpoolPoolsHeldReason } from './pool-holds.ts';
@@ -77,8 +72,8 @@ async function readOptional(file: string): Promise<string | null> {
 }
 
 /**
- * 读发布目录里的发版现状。目录不在 = 这台不是法国（null）；目录在、发布历史读不了或认不出照抛。
- * 进度记录、自动发布状态不在是正常的（null）；在但不是 JSON 照抛，不当成没事。
+ * 读发布目录里的发版进度。目录不在 = 这台不是法国（null）。
+ * 进度记录不在是正常的（null）；在但不是 JSON 照抛，不当成没事。
  */
 export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null> {
   try {
@@ -87,8 +82,6 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
     if (errno(e) === 'ENOENT') return null;
     throw e;
   }
-  const history = await readOptional(join(dir, '.history'));
-  if (history === null) throw new Error(`${dir}/.history 不在，但目录在：发布历史读不到`);
   const train = await readOptional(join(dir, '.train', 'release-train.json'));
   let trainStatus: string | null = null;
   let trainSince: string | null = null;
@@ -108,36 +101,7 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
     trainSince = typeof since === 'string' ? since : null;
     trainSha = typeof v.target?.value === 'string' ? v.target.value : null;
   }
-  const state = await readOptional(join(dir, '.auto', 'state.json'));
-  let autoNote: string | null = null;
-  if (state !== null) {
-    const v = JSON.parse(state) as { auto?: { note?: unknown } | null } | null;
-    autoNote = typeof v?.auto?.note === 'string' ? v.auto.note : null;
-  }
-  return {
-    last: lastHistoryEntry(history),
-    trainStatus,
-    trainSince,
-    trainSha,
-    currentSha: await readCurrentSha(dir),
-    autoNote,
-  };
-}
-
-/**
- * 法国 current 指向的提交：它是链到 <发布目录>/<40 位提交号> 的符号链接（deploy/release.sh 的 activate）。
- * 不在、不是链接是 null（判「这一趟落地了没」时当没落地，照报）；链的不是提交号也是 null；别的错照抛。
- */
-async function readCurrentSha(dir: string): Promise<string | null> {
-  let link: string;
-  try {
-    link = await readlink(join(dir, 'current'));
-  } catch (e) {
-    if (errno(e) === 'ENOENT' || errno(e) === 'EINVAL') return null;
-    throw e;
-  }
-  const base = link.replace(/[/]+$/, '').split(/[/]/).pop() ?? '';
-  return /^[0-9a-f]{40}$/i.test(base) ? base.toLowerCase() : null;
+  return { trainStatus, trainSince, trainSha };
 }
 
 /** 发布目录在不在（在 = 这台是法国）。不在是 false，别的错照抛。 */

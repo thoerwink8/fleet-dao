@@ -179,10 +179,8 @@ export interface NotificationRecord {
   dedupeKey?: string | undefined;
   /** 「要你拍」的选项（#1915）；老的、补不出选项的没有。 */
   options?: DecisionOption[] | undefined;
-  /** 拍过了：选了什么、什么时候、谁。 */
+  /** 拍过了：选了什么、什么时候、谁，照着做的结果（answer.execution）。 */
   answer?: DecisionAnswer | undefined;
-  /** 选完以后系统执行的结果；还没执行、执行被清掉的没有。 */
-  execution?: DecisionExecution | undefined;
 }
 
 /** 回答「要你拍」的结局：存下了（连同存下的那条）；这条不是要人拍的、已经处理过、没有这条、选项编号认不出。 */
@@ -408,7 +406,7 @@ export interface OpsStore {
   ): Promise<'ok' | 'already_resolved' | 'not_found'>;
   /**
    * 回答一条还开着的「要你拍」（#1915）：点选项给 optionId，自己输入给 text（二选一，路由已核过）。只记答案和操作记录，
-   * 不转已处理——执行成功以后由 settleDecision 写结果、再决定转不转。开着时可以再拍，答案换成新的，上一次的执行结果清掉。
+   * 不转已处理——执行成功以后由 settleDecision 写结果、再决定转不转。开着时可以再拍，答案（连同上一次的执行结果）换成新的。
    * 选项编号不在这条的选项里回 unknown_option，什么都不改。
    */
   answerNotification(
@@ -416,8 +414,8 @@ export interface OpsStore {
     audit: NewAuditEntry,
   ): Promise<AnswerNotificationResult>;
   /**
-   * 把执行结果写回还开着的通知。resolve 为真才标已处理（执行成功、并且这一项不是 keepsOpen）。
-   * 已经处理过的不改（回 already_resolved），没有这条回 not_found。不另记操作记录（回答那条已经记过）。
+   * 把执行结果写进还开着的通知的答案里（answer.execution）。resolve 为真才标已处理（执行成功、并且这一项不是 keepsOpen）。
+   * 已经处理过的、还没有答案的不改（回 already_resolved），没有这条回 not_found。不另记操作记录（回答那条已经记过）。
    */
   settleDecision(input: {
     id: string;

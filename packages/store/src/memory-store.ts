@@ -701,9 +701,8 @@ export function createMemoryStore(
       const answer = decisionAnswerOf(n.options, { optionId, text }, by.id, at);
       if (answer === 'unknown_option') return { kind: 'unknown_option' };
       checkAudit(entry);
+      // 只记答案，转不转已处理等照着做完（settleDecision）。再拍一次连上一次的结果一起换掉
       n.answer = answer;
-      // 执行结果等 settleDecision。再拍一次把上一次没做成的结果清掉。
-      n.execution = undefined;
       audit(entry);
       changed('notifications', id);
       // 送到哪（target）和列表一样不往外给
@@ -715,8 +714,8 @@ export function createMemoryStore(
     async settleDecision({ id, execution, resolve, by }) {
       const n = data.notifications.find((x) => x.id === id);
       if (!n) return 'not_found';
-      if (!isNotificationOpen(n)) return 'already_resolved';
-      n.execution = execution;
+      if (!isNotificationOpen(n) || !n.answer) return 'already_resolved';
+      n.answer = { ...n.answer, execution };
       if (resolve) {
         n.resolvedAt = now().toISOString();
         n.resolvedBy = by.id;

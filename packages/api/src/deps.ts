@@ -65,11 +65,6 @@ export interface Deps {
   github: GitHubEventSink;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
-  /**
-   * 外部看门狗的编号对上了就记一轮成功（#292）。没给（开发内存版没有登记表）对上了也不记、不报错。
-   * 编号在 config.edgeWatchId；没配时路由不调用它。
-   */
-  recordExternalWatchRound?: (() => Promise<void>) | undefined;
   /** 驾驶舱提醒（#795）。生产的两套装配都给。 */
   alerts?: CockpitAlerts | undefined;
   /**
@@ -142,8 +137,8 @@ export interface Deps {
    */
   decisionCommenter?: DecisionCommenter | undefined;
   /**
-   * 「要你拍」选完要本机做的事（decision-actions.ts）：删工作树、重查 GitHub App、重查飞书推送。
-   * 没给（开发、内存版）这三样回「没接上」，卡留着；暂停、放开、移出仓、留着只靠库，不看这项。
+   * 「要你拍」选完要本机做的事（decision-actions.ts）：重查 GitHub App、重查飞书推送。
+   * 没给（开发、内存版）这两样回「没接上」，卡留着；暂停、放开、移出仓、留着只靠库，删工作树交给引擎，都不看这项。
    */
   decisionCapabilities?: DecisionCapabilities | undefined;
   /**

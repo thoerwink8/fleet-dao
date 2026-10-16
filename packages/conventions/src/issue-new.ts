@@ -18,6 +18,8 @@
 // 却没排进先后」，原来靠人记得事后补，一天红了两回。默认排末尾，--order-after <号> 插在那张后面；子单在母单页面上排、
 // 未排期和旧的 P 阶段没有先后，都不排。认法和对账、pnpm plan 是同一份（plan-view.ts 的 addToOrder / parseOrder）。排不进去
 // （标记缺了、认不出、说明读不到、改不成）单照开、不回滚，报「开了 #N，但没排进先后」和怎么手工补，退出码非 0。
+// 写先后的同一刻读一次开着的单（gh issue list），把先后里已关或已挪走的号一并清掉（#2393），回显只数开着的；
+// 开着的单读不到、读满、认不出就一个也不清、照旧追加（不拿读不到当成全关了），回显明说没清。
 // gh 出错原样报出来，退出码非 0。
 // 帅位座位整张删掉（#531）：开单时替帅位认领那一步（claimLocal）一并删——本机不再在库里认领。
 import { execFile } from 'node:child_process';
@@ -75,8 +77,12 @@ export interface IssueNewResult {
   local?: true | undefined;
   /** 开的是母单（--mother）时是 true；母单不派，开单后不戳法国。 */
   mother?: true | undefined;
-  /** 排进了版本的先后（挂版本的母单、单独的单）：排在第几位（从 1 数）、先后里一共几张。 */
-  order?: { position: number; count: number } | undefined;
+  /**
+   * 排进了版本的先后（挂版本的母单、单独的单）：排在第几位（从 1 数）、先后里一共几张。
+   * openKnown 为 true：写的同时清掉了已关的号（removed），position、count 只数开着的单；
+   * false：没读到开着的单，一个号也没清，count 含已关的。
+   */
+  order?: { position: number; count: number; removed: number[]; openKnown: boolean } | undefined;
   /** 开单前查的可能重复的单（deps.similar 给了才有）；只提示，开单不受它影响。 */
   similar?: SimilarReport | undefined;
   /** 本机做的单「怎么算做完」里要 diff 外证据的条目：照开，入口提示改写（交给引擎的单这种直接拒开）。 */
@@ -597,7 +603,7 @@ function checkOrderAfter(after: number, milestone: string, version: MilestoneDet
 async function orderIntoVersion(
   gh: Gh,
   a: { number: number; url: string; version: MilestoneDetail; after: number | undefined },
-): Promise<{ position: number; count: number }> {
+): Promise<NonNullable<IssueNewResult['order']>> {
   const page = a.url.replace(/\/issues\/\d+$/, `/milestone/${a.version.number}`);
   const where = a.after === undefined ? '末尾加一行' : `#${a.after} 后面插一行（后面的序号顺延）`;
   const unordered = (why: string) =>
@@ -614,7 +620,8 @@ async function orderIntoVersion(
   } catch (e) {
     throw unordered(`gh 读回来的里程碑认不出（${message(e)}）`);
   }
-  const added = addToOrder(description, a.number, a.after);
+  const open = await openIssueNumbers(gh);
+  const added = addToOrder(description, a.number, a.after, open);
   if (!added.ok) throw unordered(added.problem);
   if (added.changed) {
     const patch = await gh(['api', '-X', 'PATCH', path, '-f', `description=${added.description}`]);
@@ -629,7 +636,53 @@ async function orderIntoVersion(
       throw unordered('gh 说改好了，可改完回来的说明里认不出它（可能已经改了一半）：先打开看一眼');
     }
   }
-  return { position: added.order.indexOf(a.number) + 1, count: added.order.length };
+  return {
+    position: added.order.indexOf(a.number) + 1,
+    count: added.order.length,
+    removed: added.removed,
+    openKnown: open !== undefined,
+  };
+}
+
+/** 开单回显里「排进先后」那一句：读到开着的单就只数开着的；没读到就明说没清、数里含已关的。 */
+export function describeOrder(o: NonNullable<IssueNewResult['order']>): string {
+  if (!o.openKnown) {
+    return `排进先后第 ${o.position} 位（没读到开着的单，没清已关的；先后里共 ${o.count} 张，含已关的）`;
+  }
+  const cleared = o.removed.length > 0 ? `，顺手清掉 ${o.removed.length} 张已关的` : '';
+  return `排进先后第 ${o.position} 位（开着的共 ${o.count} 张）${cleared}`;
+}
+
+/** gh issue list 一次最多读这么多；读满了说明可能还有，不当成读全了。 */
+const OPEN_LIST_LIMIT = 1000;
+
+/**
+ * 开着的单号（不含 PR），用来清先后里已关的号（#2393）。读不到、认不出、空（刚开了一张，不可能一张都没有）、读满了都回
+ * undefined：调用方照旧追加、一个号也不清，不拿「没读到」当成「全关了」。
+ */
+async function openIssueNumbers(gh: Gh): Promise<Set<number> | undefined> {
+  const r = await gh([
+    'issue',
+    'list',
+    '--state',
+    'open',
+    '--limit',
+    String(OPEN_LIST_LIMIT),
+    '--json',
+    'number',
+  ]);
+  if (r.code !== 0) return undefined;
+  try {
+    const rows: unknown = JSON.parse(r.stdout);
+    if (!Array.isArray(rows) || rows.length === 0 || rows.length >= OPEN_LIST_LIMIT) return undefined;
+    const numbers = rows.map((x) =>
+      typeof x === 'object' && x !== null ? (x as { number?: unknown }).number : undefined,
+    );
+    if (!numbers.every((x): x is number => Number.isInteger(x))) return undefined;
+    return new Set(numbers);
+  } catch {
+    return undefined;
+  }
 }
 
 /** 真的 gh：不经 shell，参数原样传；gh 起不来（没装、不在 PATH）也回一个非 0 的结果，不抛。 */

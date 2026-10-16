@@ -48,9 +48,6 @@ importers:
 
   packages/api:
     dependencies:
-      '@fleet-dao/adapters':
-        specifier: workspace:*
-        version: link:../adapters
       '@fleet-dao/conventions':
         specifier: workspace:*
         version: link:../conventions
@@ -127,8 +124,6 @@ importers:
       drizzle-kit:
         specifier: ^0.31.11
         version: 0.31.11
-
-  packages/edge: {}
 
   packages/engine:
     dependencies:

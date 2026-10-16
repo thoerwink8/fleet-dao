@@ -66,6 +66,10 @@ export const NO_OPTIONS_TEXT = '没有选项，请直接回复';
 /** 自己写的、以及没有具体动作的选项，交给指挥官之后写在卡上的那句。 */
 export const HANDED_TO_COMMANDER = '已转给指挥官';
 
+/** 选了「删掉」工作树：后端提不了权，交给引擎（execution.queued），卡上先写这句。 */
+export const WORKTREE_DELETE_QUEUED =
+  '已交给引擎：下一轮每小时对账删掉这棵树，删成了这条转已处理，删不掉写原因';
+
 /**
  * 选了这项系统做什么。旧数据、补不出具体动作的不带 action，读的时候按 note-only（交给指挥官），不报错。
  * delete-worktree 删一棵工作树；keep 留着（处理掉这条，对账不再报）；pause-pool / resume-pool 整池暂停开关；
@@ -167,7 +171,19 @@ export const DecisionOptionsSchema = z.array(DecisionOptionSchema).superRefine((
   if (problem) ctx.addIssue({ code: 'custom', message: problem });
 });
 
-/** 创始人拍了什么：点了哪个选项（optionId）或自己写的原文（没有 optionId），连同时刻和谁。 */
+/**
+ * 选完以后系统执行的结果，存在答案里（answer.execution，再拍一次连答案一起换掉）。失败时 text 是原因，通知不转已处理。
+ * queued：这一步不在驾驶舱后端做（删工作树要引擎经 sudo 删，后端进程不许提权），已经交给引擎，做完引擎把结果写回来。
+ */
+export const DecisionExecutionSchema = z.object({
+  ok: z.boolean(),
+  text: z.string().min(1).max(500),
+  at: Time,
+  queued: z.literal(true).optional(),
+});
+export type DecisionExecution = z.infer<typeof DecisionExecutionSchema>;
+
+/** 创始人拍了什么：点了哪个选项（optionId）或自己写的原文（没有 optionId），连同时刻和谁；系统照着做的结果。 */
 export const DecisionAnswerSchema = z.object({
   /** 点的那个选项；自己输入的没有这一项。 */
   optionId: z.string().optional(),
@@ -176,16 +192,10 @@ export const DecisionAnswerSchema = z.object({
   at: Time,
   /** 谁拍的（用户编号）。 */
   by: z.string(),
+  /** 照着做的结果；刚存下还没做、老数据没有。 */
+  execution: DecisionExecutionSchema.optional(),
 });
 export type DecisionAnswer = z.infer<typeof DecisionAnswerSchema>;
-
-/** 选完以后系统执行的结果。失败时 text 是原因，通知不转已处理。 */
-export const DecisionExecutionSchema = z.object({
-  ok: z.boolean(),
-  text: z.string().min(1).max(500),
-  at: Time,
-});
-export type DecisionExecution = z.infer<typeof DecisionExecutionSchema>;
 
 /** 回答一条「要你拍」：点一个选项（optionId）或自己输入（text），二选一。 */
 export const AnswerNotificationRequest = z
@@ -205,15 +215,17 @@ export const DecisionHandoffResultSchema = z.union([
 
 export const AnswerNotificationResponse = z.object({
   ok: z.literal(true),
+  /** 答案连同照着做的结果（answer.execution）。 */
   answer: DecisionAnswerSchema,
-  handoff: z.object({
-    /** 进度单 #1055 那一条。点了会自己执行的选项时，这里不是进度单：ok=false，why 是执行结果（没交给指挥官）。 */
-    progress: DecisionHandoffResultSchema,
-    /** 通知挂了任务的，任务那张单上的留言；没挂任务没有这一项。 */
-    task: DecisionHandoffResultSchema.optional(),
-  }),
-  /** 系统执行的结果。真接口总是带；老的假数据可以不带。 */
-  execution: DecisionExecutionSchema.optional(),
+  /** 交给指挥官那一步：自己写的、没有具体动作的选项才有；点了系统自己做的选项没有这一项。 */
+  handoff: z
+    .object({
+      /** 进度单 #1055 那一条。 */
+      progress: DecisionHandoffResultSchema,
+      /** 通知挂了任务的，任务那张单上的留言；没挂任务没有这一项。 */
+      task: DecisionHandoffResultSchema.optional(),
+    })
+    .optional(),
 });
 
 export const NotificationSchema = z.object({
@@ -223,10 +235,8 @@ export const NotificationSchema = z.object({
   body: z.string(),
   /** 「要你拍」的选项（#1915）；老通知、补不出选项的没有，页面写 NO_OPTIONS_TEXT 并给输入框。 */
   options: z.array(DecisionOptionSchema).optional(),
-  /** 拍过了：选了什么、什么时候、谁。 */
+  /** 拍过了：选了什么、什么时候、谁，系统照着做的结果（answer.execution）。 */
   answer: DecisionAnswerSchema.optional(),
-  /** 选完以后系统执行的结果；还没执行、老数据没有。 */
-  execution: DecisionExecutionSchema.optional(),
   /** 点开直达驾驶舱对应页的站内路径。 */
   link: z.string().optional(),
   taskId: Id.optional(),

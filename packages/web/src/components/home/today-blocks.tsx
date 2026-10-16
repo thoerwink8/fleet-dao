@@ -17,6 +17,7 @@ import {
   useResolveNotification,
 } from '../../api/client';
 import type { Notification } from '../../api/types';
+import { decisionToast } from '../../lib/decision-result';
 import { formatAgo, formatDateTime } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import { EmptyState } from '../layout/empty-state';
@@ -77,6 +78,7 @@ function AskRow({
   const options = n.options ?? [];
   const busy = answering?.id === n.id;
   const recommendation = pick ? `推荐：${pick}。${why ?? ''}` : null;
+  const failed = n.answer?.execution?.ok === false ? n.answer.execution.text : null;
   return (
     <li className={rowCls} data-ask-row={kind}>
       <div className="min-w-0 flex-1">
@@ -109,6 +111,12 @@ function AskRow({
         ) : kind === 'gate' ? (
           <p className="mt-0.5 truncate text-meta text-muted-foreground" data-ask-pick>
             {NO_OPTIONS_TEXT}
+          </p>
+        ) : null}
+        {failed ? (
+          // 拍了但系统没做成（#2353）：原因写在这里，再点一次选项就是再拍
+          <p className="mt-0.5 truncate text-meta text-ink-fail" title={failed} data-ask-failed>
+            上次选「{n.answer?.text}」没做成：{failed}
           </p>
         ) : null}
       </div>
@@ -173,13 +181,9 @@ export function AskBlock() {
       { id: n.id, body: { optionId } },
       {
         onSuccess: (r) => {
-          // 答案存下了；交没交给指挥官照实说，没交出去不弹成「都好了」
-          if (r.handoff.progress.ok)
-            toast.success(`记下了：${r.answer.text}`, { description: '已交给指挥官' });
-          else
-            toast.warning(`记下了：${r.answer.text}`, {
-              description: `没交给指挥官：${r.handoff.progress.why}`,
-            });
+          // 系统照着做的结果照实说（#2353）：没做成不弹成「都好了」，卡留着可以再选
+          const t = decisionToast(r);
+          toast[t.level](t.title, { description: t.description });
         },
         onError: (e) => toast.error('没记下', { description: errorText(e) }),
       },

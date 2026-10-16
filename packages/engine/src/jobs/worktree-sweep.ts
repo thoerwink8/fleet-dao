@@ -263,12 +263,37 @@ async function escalate(
   // 人已经看过、点了处理（不是对账自己撤的）：留着，不再报。树里又清干净了，照样删
   if (existing?.resolvedAt && existing.resolvedBy !== RECONCILE_ACTOR)
     return { kind: 'kept', what: ctx.what };
+  // 人在驾驶舱选了「删掉」：后端提不了权，交到这里（answer.execution.queued）。删成了这条转已处理；删不掉把原因写回卡上，
+  // 不再每小时重试（人再选一次「删掉」才再删）
+  const answer = existing && !existing.resolvedAt ? existing.answer : null;
+  if (answer?.optionId === KEEP_TREE_REMOVE && answer.execution?.queued) {
+    if (!deps.alerts.settleQueued) {
+      return { kind: 'unchecked', why: `${ctx.rel} 人选了「删掉」，可写回结果的口子没接上，没删` };
+    }
+    let failed: string | null = null;
+    try {
+      await deps.remove(ctx.path);
+    } catch (err) {
+      failed = errMessage(err);
+    }
+    const settled = await deps.alerts.settleQueued({
+      dedupeKey,
+      answeredAt: answer.at,
+      execution: failed
+        ? { ok: false, text: clip(`删不掉：${failed}`, 500), at: new Date().toISOString() }
+        : { ok: true, text: clip(`已删工作树 ${ctx.path}`, 500), at: new Date().toISOString() },
+      resolve: failed === null,
+    });
+    if (failed) return { kind: 'unchecked', why: `${ctx.rel} 人选了「删掉」，删不掉：${failed}` };
+    deps.log('info', '每小时对账：按驾驶舱选的「删掉」删了一棵工作树', { tree: ctx.rel, settled });
+    return { kind: 'removed' };
+  }
   const title = clip(`工作树里有没推的东西，删不删要你拍：${ctx.rel}`, 300);
   const body = [
     `${deps.machine}的 ${ctx.path}（${treeWords(ctx.tree)}）已经没有在跑的任务在用了，但里面还有：`,
     ...ctx.what.map((w) => `- ${w}`),
     '删了就没了，所以每小时对账没删它（删数据要人拍）。',
-    `选「删掉」由系统删这棵树。删不掉时在${deps.machine}以 root 跑 /usr/local/sbin/fleet-agent-scope remove ${ctx.path}，下一轮对账看它不在了就撤掉这条。`,
+    `选「删掉」由下一轮对账删这棵树。删不掉时在${deps.machine}以 root 跑 /usr/local/sbin/fleet-agent-scope remove ${ctx.path}，下一轮对账看它不在了就撤掉这条。`,
     '选「留着」：这条转已处理，之后不再提醒；里面的东西推走或清掉以后，下一轮对账会自己删。',
     ctx.repo
       ? `看里面：sudo -u ${ctx.user} git -C ${ctx.path} status；sudo -u ${ctx.user} git -C ${ctx.path} log --oneline -5`
@@ -293,10 +318,13 @@ async function escalate(
   return { kind: 'escalated', title, what: ctx.what };
 }
 
+/** 「删掉」那一项的编号：驾驶舱选了它，后端记 execution.queued，下一轮这里删（escalate）。 */
+export const KEEP_TREE_REMOVE = 'remove';
+
 /**
  * 有没推东西的工作树删不删的选项。推荐留着：删了就没了，留着只占点盘。
  * 「留着」执行成功后这条转已处理，人处理过的树对账不再报（上面 escalate 开头那一句）。
- * 「删掉」由系统删这棵树，删成了才转已处理；「先看看」带 keepsOpen，交给指挥官，这条留着等看完再拍。
+ * 「删掉」交给下一轮对账删，删成了才转已处理；「先看看」带 keepsOpen，交给指挥官，这条留着等看完再拍。
  */
 export function keepTreeOptions(machine: string, path: string): DecisionOption[] {
   return [
@@ -308,9 +336,9 @@ export function keepTreeOptions(machine: string, path: string): DecisionOption[]
       action: { kind: 'keep' },
     },
     {
-      id: 'remove',
+      id: KEEP_TREE_REMOVE,
       label: '删掉',
-      detail: `系统删掉这棵工作树（在${machine}上）；删成了这条才转已处理`,
+      detail: `下一轮每小时对账删掉这棵工作树（在${machine}上），里面没推的东西就没了；删成了这条才转已处理`,
       action: { kind: 'delete-worktree', path },
     },
     {

@@ -5,7 +5,6 @@
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
-import { removeWorktreeDir } from '@fleet-dao/adapters';
 import {
   claimLocalTask,
   createDb,
@@ -57,7 +56,6 @@ import {
   measureFootprint,
   realFootprintFs,
 } from './disk-footprint.ts';
-import { recordExternalWatchRound } from './external-watch.ts';
 import { createFeishuAuth } from './feishu.ts';
 import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
 import { feishuBotFromConfig, startFeishuPush } from './feishu-push.ts';
@@ -344,10 +342,6 @@ async function assemble(): Promise<{
     ...(github.userHit ? { githubUser: github.userHit } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     decisionCapabilities: {
-      deleteWorktree: async (path) => {
-        const removed = await removeWorktreeDir({ dir: path });
-        if (!removed.ok) throw new Error(removed.detail || '删工作树没成');
-      },
       recheckGitHubApp: (repo) => runGitHubAppRecheck(github.selfCheck, repo),
       recheckFeishuPush: async () => {
         const at = now();
@@ -402,8 +396,6 @@ async function assemble(): Promise<{
     ...(production ? { releaseCard: liveReleaseCardPort(github.releaseFacts) } : {}),
     // /france 页「发布到法国」按钮（#1232）：写请求文件，法国上 root 的单元接活（人工档）；后端自己不起带 root 的进程
     ...(production ? { releaseRequest: liveReleaseRequestPort() } : {}),
-    // 外部看门狗（#292）来查 /healthz 且编号对上：给登记表记一轮成功。登记行由引擎在配了编号时写入。
-    recordExternalWatchRound: () => recordExternalWatchRound(db, now()),
     health: serviceHealthChecks({
       probeDb: () => probeDb(db),
       feed,

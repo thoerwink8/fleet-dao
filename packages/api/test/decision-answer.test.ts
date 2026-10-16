@@ -7,6 +7,7 @@ import {
   HANDED_TO_COMMANDER,
   NO_OPTIONS_TEXT,
   NotificationsResponse,
+  WORKTREE_DELETE_QUEUED,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { DecisionCommenter } from '../src/decision-handoff.ts';
@@ -80,13 +81,13 @@ describe('「要你拍」带选项（#1915）', () => {
       text: '批，合进去',
       at: h.clock.now.toISOString(),
       by: DEV_USER_ID,
+      execution: { ok: true, text: HANDED_TO_COMMANDER, at: h.clock.now.toISOString() },
     });
-    expect(body.handoff.progress).toEqual({
+    expect(body.handoff?.progress).toEqual({
       ok: true,
       url: 'https://github.com/thoerwink8/fleet-dao/issues/1055#c1',
     });
-    expect(body.handoff.task?.ok).toBe(true);
-    expect(body.execution).toMatchObject({ ok: true, text: HANDED_TO_COMMANDER });
+    expect(body.handoff?.task?.ok).toBe(true);
 
     // 选了以后进度单收到一条：在 fleet-dao 的 #1055 下，是待处理的创始人引导（无主），原话写明选了什么、哪条通知
     const progress = posted[0];
@@ -108,7 +109,7 @@ describe('「要你拍」带选项（#1915）', () => {
     const n = all.items.find((x) => x.id === IDS.notification2);
     expect(n?.answer?.optionId).toBe('approve');
     expect(n?.resolvedAt).toBe(h.clock.now.toISOString());
-    expect(n?.execution).toMatchObject({ ok: true, text: HANDED_TO_COMMANDER });
+    expect(n?.answer?.execution).toMatchObject({ ok: true, text: HANDED_TO_COMMANDER });
     const audit = AuditResponse.parse(
       await (
         await h.cockpit.request(`/api/audit?target=notification:${IDS.notification2}`, {
@@ -132,22 +133,23 @@ describe('「要你拍」带选项（#1915）', () => {
     const res = await answer(h, s, IDS.notification2, { text: '  先别合，等我周一看  ' });
     expect(res.status).toBe(200);
     const body = AnswerNotificationResponse.parse(await res.json());
-    expect(body.answer).toEqual({
+    expect(body.answer).toMatchObject({
       text: '先别合，等我周一看',
       at: h.clock.now.toISOString(),
       by: DEV_USER_ID,
     });
+    expect(body.answer.optionId).toBeUndefined();
     expect(posted[0]?.body).toContain(
       `创始人已选：自己输入：先别合，等我周一看（通知 ${IDS.notification2}）`,
     );
     // 这条有「先留着」的选项：自己写的交给指挥官，卡上写明，但不转已处理
-    expect(body.execution).toMatchObject({ ok: true, text: HANDED_TO_COMMANDER });
+    expect(body.answer.execution).toMatchObject({ ok: true, text: HANDED_TO_COMMANDER });
     const open = NotificationsResponse.parse(
       await (await h.cockpit.request('/api/notifications', { headers: { cookie: s.cookie } })).json(),
     );
     const n = open.items.find((x) => x.id === IDS.notification2);
     expect(n?.resolvedAt).toBeUndefined();
-    expect(n?.execution?.text).toBe(HANDED_TO_COMMANDER);
+    expect(n?.answer?.execution?.text).toBe(HANDED_TO_COMMANDER);
   });
 
   it('没有选项的老通知照旧列出；能自己输入回答', async () => {
@@ -174,15 +176,15 @@ describe('「要你拍」带选项（#1915）', () => {
     expect(res.status).toBe(200);
     // 没接上 GitHub：答案存下了，handoff 照实写没接上，不冒充记上了
     const body = AnswerNotificationResponse.parse(await res.json());
-    expect(body.handoff.progress).toEqual({ ok: false, why: HANDOFF_NOT_WIRED });
+    expect(body.handoff?.progress).toEqual({ ok: false, why: HANDOFF_NOT_WIRED });
     // 交给指挥官没写成：不转已处理，卡上写失败原因
-    expect(body.execution).toMatchObject({ ok: false, text: HANDOFF_NOT_WIRED });
+    expect(body.answer.execution).toMatchObject({ ok: false, text: HANDOFF_NOT_WIRED });
     const open = NotificationsResponse.parse(
       await (await h.cockpit.request('/api/notifications', { headers: { cookie: s.cookie } })).json(),
     );
     const still = open.items.find((n) => n.id === 'n-old');
     expect(still?.resolvedAt).toBeUndefined();
-    expect(still?.execution).toMatchObject({ ok: false, text: HANDOFF_NOT_WIRED });
+    expect(still?.answer?.execution).toMatchObject({ ok: false, text: HANDOFF_NOT_WIRED });
   });
 
   it('请求不对、不是要人拍的、没有这条：分开报', async () => {
@@ -206,16 +208,16 @@ describe('「要你拍」带选项（#1915）', () => {
     const body = AnswerNotificationResponse.parse(
       await (await answer(h, s, IDS.notification2, { optionId: 'review' })).json(),
     );
-    expect(body.handoff.progress).toEqual({ ok: false, why: 'GitHub 限流了' });
-    expect(body.handoff.task).toEqual({ ok: false, why: 'GitHub 限流了' });
+    expect(body.handoff?.progress).toEqual({ ok: false, why: 'GitHub 限流了' });
+    expect(body.handoff?.task).toEqual({ ok: false, why: 'GitHub 限流了' });
     expect(h.store.data.notifications.find((n) => n.id === IDS.notification2)?.answer?.optionId).toBe(
       'review',
     );
     expect(h.store.data.notifications.find((n) => n.id === IDS.notification2)?.resolvedAt).toBeUndefined();
-    expect(body.execution).toMatchObject({ ok: false, text: 'GitHub 限流了' });
+    expect(body.answer.execution).toMatchObject({ ok: false, text: 'GitHub 限流了' });
   });
 
-  it('删工作树没接上：执行失败，resolved_at 仍为空，卡还在未处理里', async () => {
+  it('删工作树交给引擎：卡上写「已交给引擎」，不留言、不转已处理，选项的 action 带给界面', async () => {
     const h = harness();
     const s = await h.login();
     h.store.data.notifications.push({
@@ -244,16 +246,19 @@ describe('「要你拍」带选项（#1915）', () => {
     const res = await answer(h, s, 'n-del', { optionId: 'remove' });
     expect(res.status).toBe(200);
     const body = AnswerNotificationResponse.parse(await res.json());
-    expect(body.execution?.ok).toBe(false);
-    expect(body.execution?.text).toContain('没接上');
-    expect(body.handoff.progress.ok).toBe(false);
+    expect(body.answer.execution).toEqual({
+      ok: true,
+      queued: true,
+      text: WORKTREE_DELETE_QUEUED,
+      at: h.clock.now.toISOString(),
+    });
+    expect(body.handoff).toBeUndefined();
     const open = NotificationsResponse.parse(
       await (await h.cockpit.request('/api/notifications', { headers: { cookie: s.cookie } })).json(),
     );
     const card = open.items.find((n) => n.id === 'n-del');
     expect(card?.resolvedAt).toBeUndefined();
-    expect(card?.execution?.ok).toBe(false);
-    expect(card?.execution?.text).toContain('没接上');
+    expect(card?.answer?.execution?.queued).toBe(true);
     expect(card?.options?.find((o) => o.id === 'remove')?.action).toEqual({
       kind: 'delete-worktree',
       path: '/tmp/fleet-tree',

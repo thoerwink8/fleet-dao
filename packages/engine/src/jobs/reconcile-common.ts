@@ -1,7 +1,7 @@
 // 每小时对账（jobs/hourly-reconcile.ts）这几部分共用的：读 Temporal 的口子、读写提醒的口子、每部分的结局，
 // 写给人看的北京时间和时长。
 import type { AlertRow } from '@fleet-dao/db';
-import type { DecisionOption, StageKind } from '@fleet-dao/shared';
+import type { DecisionExecution, DecisionOption, StageKind } from '@fleet-dao/shared';
 import { STAGE_NAMES } from '../routing/names.ts';
 
 /** 撤提醒、写再提醒时记的「谁」（notifications.resolved_by、操作记录的 actor_id）。 */
@@ -65,6 +65,16 @@ export interface AlertStore {
   }): Promise<{ created: boolean }>;
   /** 只改还开着的；已经处理掉的不替人打开。 */
   updateOpen(input: { dedupeKey: string; title?: string; body?: string }): Promise<'ok' | 'not_open'>;
+  /**
+   * 「要你拍」交给引擎做的那一步做完了：结果写回答案（answer.execution），resolve 才标已处理（@fleet-dao/db 的
+   * settleQueuedDecision）。人在这期间又拍了一次（answeredAt 对不上）、已经处理掉的回 not_open。没接上的当没查成。
+   */
+  settleQueued?(input: {
+    dedupeKey: string;
+    answeredAt: string;
+    execution: DecisionExecution;
+    resolve: boolean;
+  }): Promise<'ok' | 'not_open'>;
 }
 
 /** 对账的一部分（工作树、两处核对、提醒）跑下来的样子。 */

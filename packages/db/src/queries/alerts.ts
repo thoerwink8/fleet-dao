@@ -1,7 +1,7 @@
 // 提醒（notifications）的对账要用的查询：列出没处理的、按前缀连同已处理的一起列、按条件撤掉（写明谁撤的、为什么，
 // 进操作记录）、只在没有时插一条（再提醒一天一条）、只改还开着的（不把人刚处理掉的又打开）。
 // 报警本身的写法（同一件事一条、再报原地更新）在 engine-alerts.ts 的 upsertAlert。
-import type { DecisionOption } from '@fleet-dao/shared';
+import type { DecisionAnswer, DecisionExecution, DecisionOption } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gte, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, notifications } from '../schema/index.ts';
@@ -22,20 +22,17 @@ export interface AlertRow {
   resolvedAt: Date | null;
   /** 谁处理掉的：人是用户编号，系统写自己的名字（engine:…、auto-release、fleet-backup……）。 */
   resolvedBy: string | null;
+  /** 「要你拍」拍了什么、照着做到哪（answer.execution）；没拍是 null。查询都带，手写的假数据可以不给。 */
+  answer?: DecisionAnswer | null;
 }
 
 /**
  * GitHub 两个机器人的权限自检（引擎每小时对账，engine 的 jobs/github-app-check.ts）报的提醒都用这个前缀
- * （github-app:<机器人>:<仓>）；开着就让驾驶舱后端的健康检查 github_app 那一项红，权限好了引擎下一轮自己撤、跟着回绿。
+ * （github-app:<仓>，一个仓一条，正文写清是哪个机器人缺什么）都用这个前缀；开着就让驾驶舱后端的健康检查 github_app 那一项红，
+ * 权限好了引擎下一轮自己撤、跟着回绿。例外：这个仓只有「机器人没装到」（创始人刚导入新仓、还没去 GitHub 装）一种问题时，
+ * 那条是 decision 级（要人拍的），健康检查只报警告、不让整个 /healthz 503；同一个仓还有别的问题就是 alert 级、照红。
  */
 export const GITHUB_APP_ALERT_PREFIX = 'github-app:';
-
-/**
- * 同一轮自检里「某个机器人没装到某个仓」（创始人刚导入新仓、还没去 GitHub 装）单独走这个前缀
- * （github-app-missing:<机器人>:<仓>，要人拍的）：它是要人去配的事，健康检查只报警告、不让整个 /healthz 503。
- * 故意不以 GITHUB_APP_ALERT_PREFIX 开头（那个前缀带冒号，这个在 app 后面是横线），两类各查各的，真权限故障不会被降级。
- */
-export const GITHUB_APP_MISSING_ALERT_PREFIX = 'github-app-missing:';
 
 const columns = {
   id: notifications.id,
@@ -50,6 +47,7 @@ const columns = {
   updatedAt: notifications.updatedAt,
   resolvedAt: notifications.resolvedAt,
   resolvedBy: notifications.resolvedBy,
+  answer: notifications.answer,
 };
 
 /**
@@ -132,6 +130,55 @@ export async function resolveAlertWithReason(
       reason: why,
       via: 'engine',
     });
+    return 'ok';
+  });
+}
+
+/**
+ * 引擎把「要你拍」交过来的那一步做完了（删工作树：answer.execution.queued）：结果写回答案里；resolve 才标已处理
+ * （处理人记拍板的人，操作记录记引擎）。只改还开着、答案还是 answeredAt 那一次的（人又拍了一次就不拿旧结果盖新答案），
+ * 对不上回 not_open。
+ */
+export async function settleQueuedDecision(
+  db: Db,
+  input: {
+    dedupeKey: string;
+    answeredAt: string;
+    execution: DecisionExecution;
+    resolve: boolean;
+    auditActor: string;
+    at?: Date;
+  },
+): Promise<'ok' | 'not_open'> {
+  const at = input.at ?? new Date();
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .update(notifications)
+      .set({
+        answer: sql`${notifications.answer} || jsonb_build_object('execution', ${JSON.stringify(input.execution)}::jsonb)`,
+        updatedAt: at,
+        ...(input.resolve ? { resolvedAt: at, resolvedBy: sql`${notifications.answer} ->> 'by'` } : {}),
+      })
+      .where(
+        and(
+          eq(notifications.dedupeKey, input.dedupeKey),
+          isNull(notifications.resolvedAt),
+          sql`${notifications.answer} ->> 'at' = ${input.answeredAt}`,
+        ),
+      )
+      .returning({ id: notifications.id });
+    if (!row) return 'not_open';
+    if (input.resolve) {
+      await tx.insert(auditLog).values({
+        at,
+        actorKind: 'engine',
+        actorId: input.auditActor,
+        action: 'notification.resolve',
+        target: `notification:${row.id}`,
+        reason: input.execution.text,
+        via: 'engine',
+      });
+    }
     return 'ok';
   });
 }
