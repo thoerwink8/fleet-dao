@@ -9,7 +9,12 @@
 //   作者在白名单里（公开仓陌生人能开单，白名单是唯一的门；本仓工作流用 GITHUB_TOKEN 开的单，作者是 github-actions[bot]，也算可信）→
 //   不是母单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→
 //   还没派过（和点名派单共用 readDispatchStanding：没有任务行，或行是 queued/stopped 且 Temporal 里没有任何一代；
-//   有一代在跑或已结束算派过。问不清抛错，不当成没派过）→ 历史失败不超过 2 次 → 正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
+//   有一代在跑或已结束算派过。问不清抛错，不当成没派过）→ 历史失败不超过 2 次 →
+//   前置没等完（#2783：正文里以「前置：」开头的那一行，认法只有一份，conventions 的 parsePrerequisites，本机 pnpm work queue 同用：
+//   写的单号里还有开着的就不拉、原因写「等前置 #N」；写了日期的，北京时间到那天之前不拉、原因写「等到 <日期>」；
+//   前置单开没开着读不到，按「等前置」算、记没查成。不留言、不贴「本机做」，前置合了下一轮自然拉。
+//   前置单开没开着：先看这一轮读到的开着的单列表，不在里面的（关了的、PR）整个仓一次批量读，不一张单一次请求）→
+//   正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
 //   留一句话。有「已知的模块」一节时只看这一节列出的路径，其余段落里提到的不算；没有这一节的老单仍看场景、已知的模块、怎么算做完）→
 //   没写改标准的路径（有「已知的模块」时同样只看这一节；没有这一节的老单仍看「已知的模块」和「怎么算做完」。清单在
 //   packages/conventions/standard-paths.json，决定 0093：引擎的 PR 正文没有创始人原话，合并闸会永远判红；写了的同样贴一次「本机做」、
@@ -60,8 +65,10 @@ import {
   type OffDiffItem,
   offDiffItems,
   parseMd,
+  parsePrerequisites,
   type StandardPath,
   sectionText,
+  waitingUntil,
 } from '@fleet-dao/conventions';
 import {
   cleanBody,
@@ -137,6 +144,8 @@ export const MAX_RUNNING_TASKS = 6;
 export { MAX_ISSUE_FAILURES, MAX_STARTS_PER_HOUR } from './intake-pick.ts';
 /** why 最长多少字：没查成的一条一句，太多了截断（总数照写）。 */
 export const INTAKE_WHY_MAX = 1500;
+/** 结局和日志里最多列几张等前置的单。 */
+const BLOCKED_SHOWN = 12;
 
 export interface IntakeRepo {
   id: string;
@@ -175,6 +184,7 @@ export type IntakeSkipReason =
   | 'already_dispatched'
   | 'too_many_failures'
   | 'pr_claimed'
+  | 'waiting_prerequisite'
   | 'needs_human'
   | 'groom_pending'
   | 'not_groomed'
@@ -453,6 +463,11 @@ export interface IntakeDeps {
   taskGenerations(repo: IntakeRepo, issueNumber: number): Promise<TaskGenerationFacts>;
   /** 这个仓开着的 PR 的「需求」栏挂着的单（单号 → PR 号，见 prClaimedIssues）。读不到（含 PR 列表翻不完）照抛：不当成「没有 PR」。 */
   openPrClaims(repo: IntakeRepo): Promise<Map<number, number>>;
+  /**
+   * 一批单号（前置单，可能是 issue 也可能是 PR）此刻开没开着：一次批量读（整个仓每轮最多一次，只问不在「开着的单」列表里的）。
+   * 读不到照抛；回来的结果里缺了哪个单号，那个单号按读不到算。都不当成「已经关了」。
+   */
+  prerequisiteStates(repo: IntakeRepo, numbers: readonly number[]): Promise<Map<number, 'open' | 'closed'>>;
   /** 改标准的路径清单（standard-paths.json）；不给读引擎自己带的那一份。读不到、认不出照抛：不当成「没有标准路径」。 */
   standardPaths?(): Promise<StandardPath[]>;
   /** 给单子贴「本机做」标签（幂等）。 */
@@ -541,11 +556,14 @@ interface Tally {
   breakerWhy: string;
   /** 每个仓「过了准入、只因没空位没起」的有几张（仓编号 → 张数）；单子没读成的仓不在里面。 */
   waiting: Map<string, number>;
+  /** 这一轮在等前置的单：「仓#单号 等前置 #N」或「仓#单号 等到 <日期>」（写进结局和日志，驾驶舱里看得到是哪张等哪张）。 */
+  blocked: string[];
 }
 
 function skip(t: Tally, slug: string, issue: number, s: IntakeSkip): void {
   t.skipped.set(s.reason, (t.skipped.get(s.reason) ?? 0) + 1);
   if (UNREADABLE.has(s.reason)) t.unchecked.push(`${slug}#${issue}：没查成：${s.why}`);
+  if (s.reason === 'waiting_prerequisite') t.blocked.push(`${slug}#${issue} ${s.why}`);
 }
 
 /**
@@ -588,6 +606,57 @@ function listedModuleCount(brief: TaskBrief): number {
   return new Set(moduleRefsOf(brief.touches).refs.map((r) => r.path)).size;
 }
 
+/** 列表里就能判的几道（screenListed）加上作者在不在白名单。admitIssue 和批量读前置单之前圈单子都用它，口径一样。 */
+function listedSkip(repo: IntakeRepo, issue: IntakeIssue, whitelist: GithubWhitelist): IntakeSkip | null {
+  return screenListed({
+    issue,
+    trusted: isTrusted(issue.author, whitelist) || isGithubActionsAuthor(issue.author),
+    autoDispatchSince: repo.autoDispatchSince,
+  });
+}
+
+const issueRefs = (numbers: readonly number[]) => numbers.map((n) => `#${n}`).join('、');
+
+/**
+ * 前置（#2783）：正文里以「前置：」开头的那一行（conventions 的 parsePrerequisites，和 pnpm work queue 同一份认法）。
+ * 日期没到：「等到 <日期>」，不用读任何东西。写了单号：还开着的就「等前置 #N」；开没开着读不到（整批读失败，或回来的结果缺了这个号），
+ * 按「等前置」算、记进这一轮的没查成，不当成都关了。回 null＝没有前置、或前置都等完了。
+ */
+async function prerequisiteSkip(
+  deps: IntakeDeps,
+  repo: IntakeRepo,
+  issue: IntakeIssue,
+  states: (numbers: readonly number[]) => Promise<Map<number, 'open' | 'closed'>>,
+  t: Tally,
+): Promise<IntakeSkip | null> {
+  // 正文不是文字（读不到）就抛：不当成「没写前置」（和 workflowPathIn 同一个口径，这张单这一轮记没查成）
+  const body: unknown = issue.body;
+  if (typeof body !== 'string')
+    throw new Error(`单正文读不到（拿到的是 ${body === null ? 'null' : typeof body}）`);
+  const pre = parsePrerequisites(body);
+  const until = waitingUntil(pre, deps.now());
+  if (until !== null) return { reason: 'waiting_prerequisite', why: `等到 ${until}` };
+  if (pre.issues.length === 0) return null;
+  const open: number[] = [];
+  try {
+    const got = await states(pre.issues);
+    for (const n of pre.issues) {
+      const s = got.get(n);
+      if (s === undefined) throw new Error(`前置单 #${n} 没读到状态`);
+      if (s === 'open') open.push(n);
+    }
+  } catch (err) {
+    t.unchecked.push(
+      `${repo.owner}/${repo.name}#${issue.number}：前置单 ${issueRefs(pre.issues)} 开没开着没查成，按等前置算（${errMessage(err)}）`,
+    );
+    return {
+      reason: 'waiting_prerequisite',
+      why: `等前置 ${issueRefs(pre.issues)}（前置单状态没查成，按没关算）`,
+    };
+  }
+  return open.length > 0 ? { reason: 'waiting_prerequisite', why: `等前置 ${issueRefs(open)}` } : null;
+}
+
 /**
  * 准入：一张开着的单过完不用现读 GitHub 的所有关，回候选；不拉的记原因（该留言、该贴「本机做」的当场做）回 null。
  * 排序要用的东西（版本里的序号、是不是当前版本、规模、失败次数、开单时刻）都在这里一起算好。
@@ -596,17 +665,18 @@ async function admitIssue(
   deps: IntakeDeps,
   repo: IntakeRepo,
   issue: IntakeIssue,
-  ctx: { current: number | undefined; book: OrderBook; rules: () => Promise<StandardPath[]> },
+  ctx: {
+    current: number | undefined;
+    book: OrderBook;
+    rules: () => Promise<StandardPath[]>;
+    prereqStates: (numbers: readonly number[]) => Promise<Map<number, 'open' | 'closed'>>;
+  },
   whitelist: GithubWhitelist,
   prClaims: () => Promise<Map<number, number>>,
   t: Tally,
 ): Promise<Candidate | null> {
   const slug = `${repo.owner}/${repo.name}`;
-  const early = screenListed({
-    issue,
-    trusted: isTrusted(issue.author, whitelist) || isGithubActionsAuthor(issue.author),
-    autoDispatchSince: repo.autoDispatchSince,
-  });
+  const early = listedSkip(repo, issue, whitelist);
   if (early) {
     skip(t, slug, issue.number, early);
     return null;
@@ -623,6 +693,13 @@ async function admitIssue(
       reason: 'too_many_failures',
       why: `这张单的任务已经失败过 ${failures} 次（上限 ${MAX_ISSUE_FAILURES}）：人看过原因后在驾驶舱点「重做」`,
     });
+    return null;
+  }
+  // 前置没等完：不拉，不留言、不贴「本机做」（前置合了下一轮自然拉）。排在改工作流、改标准、PR 挂单这些会贴「本机做」的关前面：
+  // 前置没合的单不该先被永久留给本机（#2783）
+  const waiting = await prerequisiteSkip(deps, repo, issue, ctx.prereqStates, t);
+  if (waiting) {
+    skip(t, slug, issue.number, waiting);
     return null;
   }
   // 正文要改 .github/workflows/：引擎推不上去，不拉（#1194）。正文读不到就抛，这张单这一轮记没查成
@@ -877,12 +954,41 @@ async function prepareRepo(
   }
   // 改标准的路径清单：这一轮这个仓里第一张走到这道关的单才读，读一次
   let rules: Promise<StandardPath[]> | undefined;
+  // 前置单开没开着（#2783）：在这一轮读到的开着的单列表里的，就是开着的，不用问；其余的（关了的、PR、不存在的）整个仓一次批量读，
+  // 第一张走到这道关、写了这种前置的单才读，读一次（读失败的话，后面的单拿到的是同一个错，各自按「等前置」算、记没查成）。
+  // 要问的单号只圈列表里就能判过的单（作者在白名单里等，和 admitIssue 同一个口径）、日期还没到的不算：陌生人在正文里写一串号不会变成一次大查询。
+  const openNow = new Set(listed.issues.map((i) => i.number));
+  const toAsk = [
+    ...new Set(
+      listed.issues
+        .filter((i) => typeof i.body === 'string' && listedSkip(repo, i, whitelist) === null)
+        .flatMap((i) => {
+          const pre = parsePrerequisites(i.body);
+          return waitingUntil(pre, deps.now()) === null ? pre.issues : [];
+        })
+        .filter((n) => !openNow.has(n)),
+    ),
+  ].sort((a, b) => a - b);
+  let asked: Promise<Map<number, 'open' | 'closed'>> | undefined;
   const ctx = {
     current: currentVersion(listed.openMilestones)?.milestone.number,
     book,
     rules: () => {
       rules ??= (deps.standardPaths ?? loadStandardPaths)();
       return rules;
+    },
+    prereqStates: async (numbers: readonly number[]) => {
+      const out = new Map<number, 'open' | 'closed'>();
+      for (const n of numbers) if (openNow.has(n)) out.set(n, 'open');
+      if (numbers.some((n) => !openNow.has(n))) {
+        asked ??= deps.prerequisiteStates(repo, toAsk);
+        const got = await asked;
+        for (const n of numbers) {
+          const s = got.get(n);
+          if (!openNow.has(n) && s !== undefined) out.set(n, s);
+        }
+      }
+      return out;
     },
   };
 
@@ -996,7 +1102,13 @@ function milestoneNeedsOrder(m: MilestoneRef, issues: readonly IntakeIssue[]): b
 
 function summarize(t: Tally): string {
   const skipped = [...t.skipped].map(([reason, n]) => `${reason}×${n}`).join('、') || '无';
-  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}`;
+  // 等前置的单：写明是哪张等哪张（结局和日志里看得到，不用翻每张单）；太多了截断，总数在上面 waiting_prerequisite×N
+  const shown = t.blocked.slice(0, BLOCKED_SHOWN);
+  const blocked =
+    shown.length === 0
+      ? ''
+      : `；等前置的单：${shown.join('、')}${t.blocked.length > shown.length ? `……（共 ${t.blocked.length} 张）` : ''}`;
+  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}${blocked}`;
 }
 
 async function round(deps: IntakeDeps): Promise<ScheduleResult> {
@@ -1022,6 +1134,7 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     breakerAllow: Number.POSITIVE_INFINITY,
     breakerWhy: '',
     waiting: new Map(),
+    blocked: [],
   };
   if (repos.some((r) => r.autoDispatchSince !== null)) {
     if (!(deps.gateLive ?? MERGE_GATE_REQUIRES_COLD_VERIFY)) {
