@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { createDecide, nextAction, retryDelaySeconds } from '../src/decisions/index.ts';
 import type { FailureVerdict } from '../src/failure/index.ts';
+import { LEGACY_MODEL_MISMATCH_STALL } from '../src/failure/model-mismatch-stall.ts';
 import {
   assertSessionFitsSlice,
   DEFAULT_LIMITS,
@@ -334,6 +335,8 @@ describe('渠道运行中失败：分流判停下就停下报人，不再换同�
       delaySeconds: 0,
       counter: null,
     });
+    // 看门狗靠这一句认已经挂上的在途单。改标题必须连那一处一起改。
+    expect(next.reason).toBe(LEGACY_MODEL_MISMATCH_STALL);
     expect(next).not.toHaveProperty('failChannel');
     expect(next.reason).not.toContain('换同一个模型');
     expect(next.reason).not.toContain('已换过');

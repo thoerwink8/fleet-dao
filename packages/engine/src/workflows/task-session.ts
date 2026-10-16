@@ -57,6 +57,15 @@
 //   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
 //   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
 //   避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」。老历史没有这个标记，仍把这张单挂起。
+// - 点名和读回不是同一个模型（#2742，patched('model-mismatch-reroute')）：失败分流 MD3 仍判停下。
+//   #2742 是发版叫停后误续上一段 opus：续会话不比模型，同一 mirasim-relay 池点名 sonnet 仍续上 opus，快照还是
+//   opus[1m]。不是比对串剥错 `[1m]`，不是 #1298 那种名单里没有才换模，也不是 #2797 的叫停本身。
+//   新的不把整张单挂起。先停这一段，按点名这条路由开新会话重派一次（不写 resumeFrom，误续靠开新会话解开）。
+//   同一条开了新会话仍对不上，才说明这条路由会换模，避开它再选。还有能派的就继续；选路确认一条都没有才挂起，
+//   不改去等探针，也不把刚避开的那条再派出去。
+//   已经走进挂起的在途单：重放时 model-mismatch-reroute 为假，必须再走进已经记下的 park（跳过会 TMPRL1100）。
+//   看门狗发 taskContinue 之后，patched('model-mismatch-wake-reroute') 为真，按点名开新会话重派，不接着挂着。
+//   这一版之前就已经点过继续、并且已经记下后面的选路：醒来这个标记为假，仍清零再选，步序不变。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -147,6 +156,10 @@ export async function writeSession(
   let bare401Seq = 0;
   /** 这一次只凭 401 避开的路由：没有别的路由可换时，选路放它再试一次，好凑第二次。 */
   let bare401RouteId: string | undefined;
+  /** 点名和读回对不上、已经按点名重派过一次的路由（#2742）。同一条再对不上就避开，不在原会话上续。 */
+  const mismatchRetried = new Set<string>();
+  /** 已经因模型对不上避开了路由：选路一条都没有才挂起，不改去等探针。 */
+  let mismatchRoutesDown = false;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
   // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
   const ui: UiJudgement | undefined = patched('ui-work-implement')
@@ -165,7 +178,9 @@ export async function writeSession(
       ui?.uiWork === true,
       authOn && authPoolsDown,
       authOn ? bare401RouteId : undefined,
+      mismatchRoutesDown,
     );
+    mismatchRoutesDown = false;
     bare401RouteId = undefined;
     failedChannel = undefined;
     const route = picked.route;
@@ -518,6 +533,29 @@ export async function writeSession(
         await rt.note(redispatchLine);
         continue;
       }
+      // 写在挂起之前：已经走进挂起的老历史重放时这一支为假，下一步仍是原来的 park，活动序列不变。
+      // 只在 model_mismatch 上打标记。MB1 走上面的重派，到不了这里，重放不多一个 marker。
+      if (code === 'model_mismatch' && patched('model-mismatch-reroute')) {
+        if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
+        counters = ZERO;
+        previousMessage = undefined;
+        if (!mismatchRetried.has(route.routeId)) {
+          mismatchRetried.add(route.routeId);
+          // 钉住点名的这条，开新会话。不写 resumeFrom：#2742 就是续会话不比模型，把上一段 opus 接了回来。
+          stick = route.routeId;
+          const line = `第 ${rt.round} 轮：${route.modelId} 回话的模型不是点名的，停掉这一段，按点名路由重派一次（开新会话，不续上一段），不停下等人`;
+          rt.status.lastProblem = line;
+          await rt.note(line);
+          continue;
+        }
+        stick = undefined;
+        avoid = widen(avoid, route, 'route');
+        mismatchRoutesDown = true;
+        const line = `第 ${rt.round} 轮：${route.modelId} 这条路由再次读回的不是点名的模型，避开它再选；还有能派的就继续`;
+        rt.status.lastProblem = line;
+        await rt.note(line);
+        continue;
+      }
       await rt.park(
         modelDown
           ? MODEL_UNAVAILABLE_STALL
@@ -528,6 +566,31 @@ export async function writeSession(
               : next.reason,
         modelDown ? modelUnavailableStallDetail(failure.message) : failure.message,
       );
+      // 已经挂上的在途单：上面的 model-mismatch-reroute 重放为假，所以走进了这次 park。
+      // 人点「继续」或看门狗发 taskContinue 之后才到这里。这一支是新执行（标记为真）：按点名开新会话重派。
+      // 这一版之前就已经点过继续、历史里已经有后面的选路：标记为假，仍清零再选，不多一次 note。
+      if (code === 'model_mismatch' && patched('model-mismatch-wake-reroute')) {
+        rt.resumeFrom = null;
+        counters = ZERO;
+        previousMessage = undefined;
+        failedChannel = undefined;
+        if (!mismatchRetried.has(route.routeId)) {
+          mismatchRetried.add(route.routeId);
+          avoid = NO_AVOID;
+          stick = route.routeId;
+          const line = `第 ${rt.round} 轮：${route.modelId} 回话的模型不是点名的，这次挂起已解开，按点名路由重派一次（开新会话，不续上一段），不停下等人`;
+          rt.status.lastProblem = line;
+          await rt.note(line);
+          continue;
+        }
+        stick = undefined;
+        avoid = widen(avoid, route, 'route');
+        mismatchRoutesDown = true;
+        const line = `第 ${rt.round} 轮：${route.modelId} 这条路由再次读回的不是点名的模型，避开它再选；还有能派的就继续`;
+        rt.status.lastProblem = line;
+        await rt.note(line);
+        continue;
+      }
       counters = ZERO;
       avoid = NO_AVOID;
       stick = undefined;
@@ -682,6 +745,11 @@ async function pickRoute(
   authPoolsDown = false,
   /** 只凭一次 401 避开的路由。没有别的路由时放它再试一次，好让第二次 401 暂停整池。 */
   bare401RouteId?: string,
+  /**
+   * 点名和读回的模型对不上，能派的都避开了（#2742）。一条都没有就挂起，不改去等探针，
+   * 也不把刚证实会换模的那条再派出去。不给 = 照旧。
+   */
+  mismatchRoutesDown = false,
 ): Promise<{ route: RouteChoice; probeNote: string | null }> {
   const stage = uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual;
   // 老历史重放时这一支为假：选路参数和原来一样，不多选一次。要写在派前探测那个标记之前，已有历史里的标记顺序才对得上。
@@ -840,7 +908,9 @@ async function pickRoute(
           continue;
         }
         // 点名再选仍派不出：照旧用原来的路由。派之前照样探，探不通就不拿它起会话。
-        if (droppedDry && missUsable) {
+        // 模型对不上的不走这里：那条刚证实读回的不是点名的，再派回去还会挂。
+        // 模型暂时不可用也不退回刚才那条：退回去还是这个模型，任务又会 running 着空转。
+        if (droppedDry && missUsable && !mismatchRoutesDown) {
           if (await parkIfModelDown(rt, got.detail)) continue;
           rt.status.lastProblem = NO_OTHER_ROUTE;
           rt.fellBackToMissRoute = true;
@@ -864,6 +934,18 @@ async function pickRoute(
         ) {
           releasedBare401 = true;
           avoid = { ...avoid, routeIds: avoid.routeIds.filter((id) => id !== bare401RouteId) };
+          continue;
+        }
+        // 模型对不上把能派的路由都避开了：挂起。探针恢复不了「读回的不是点名的」。
+        // 人点「继续」之后这一轮的避让清掉再选。不给这个标志时，下面两步和原来一样。
+        if (mismatchRoutesDown) {
+          await rt.park(
+            '没有还能派的路由：点名和读回的模型对不上',
+            `${got.detail}。这一段已停。按点名路由重派过一次仍对不上，避开这些路由之后没有还能派的。点「继续」再选一次；不要了点「放弃」。`,
+          );
+          avoid = NO_AVOID;
+          prefer = undefined;
+          droppedDry = false;
           continue;
         }
         // 还没探过、候选一开始就被挡，也走同一条停下：写出原因，沿用全熔断提醒，等探针恢复再继续。
