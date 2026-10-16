@@ -84,6 +84,12 @@ export interface GitHubCommenter {
   comment(n: number, body: string): Promise<void>;
 }
 
+/** 对账改里程碑说明用（清先后里已关的号，#2393；要能写 issue 的令牌）。 */
+export interface GitHubMilestoneWriter {
+  /** 把里程碑说明整份换成 description，回改完之后 GitHub 那边的样子；改不成抛。 */
+  setMilestoneDescription(milestone: number, description: string): Promise<MilestoneDetail>;
+}
+
 /** 远端的一条分支。 */
 export interface RemoteBranch {
   name: string;
@@ -202,7 +208,7 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader & GitHubCommenter & GitHubBranches {
+): GitHubReader & GitHubCommenter & GitHubBranches & GitHubMilestoneWriter {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -318,6 +324,15 @@ export function liveGitHub(
         if (data.length < 100) break;
       }
       return rows.map((r) => toPullBody(r, what));
+    },
+    async setMilestoneDescription(milestone, description) {
+      const what = `在里程碑 ${milestone} 上改说明`;
+      const res = await get(`/repos/${repo}/milestones/${milestone}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ description }),
+      });
+      if (!res.ok) throw failed(res, what);
+      return toMilestoneDetail(await json(res, what));
     },
     comments: readComments,
     async comment(n, body) {
