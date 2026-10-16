@@ -3,7 +3,13 @@
 // - 菜单只出现详情 actions 里「能做」的项，不在前端猜规则（规则只有 shared 的 request-rules.ts 一份）。
 // - 删不了时不出现「删除」：为什么删不了写在「放下」「归档」的悬停上；两样都没有时另给一句（deleteNote）。
 // - 批量操作：读不到某条能不能做，就当做不了、留在选中里写原因，不当成能做。
-import type { RequestActions, RequestRow, RequestStatus, RequestWaiting } from '@fleet-dao/shared';
+import {
+  isIdleCloseReason,
+  type RequestActions,
+  type RequestRow,
+  type RequestStatus,
+  type RequestWaiting,
+} from '@fleet-dao/shared';
 import type { RequestDetail } from '../../api/types';
 import type { LayoutTone } from '../layout/tone';
 
@@ -22,11 +28,15 @@ const SHORT: Record<RequestStatus, string> = {
   closed_drop: '已结案',
 };
 
-/** 状态：讨论中、待拍板、已结案·不做；已结案·做之后跟着开出的单子走（单子状态由 B 片从 GitHub 接）。 */
-export function statusView(r: Pick<RequestRow, 'status' | 'issueRefs'>): StatusView {
+/** 状态：讨论中、待拍板、已结案·不做；已结案·做之后跟着开出的单子走（单子状态由 B 片从 GitHub 接）。收口和「不做」同一个状态，靠原因那句认。 */
+export function statusView(
+  r: Pick<RequestRow, 'status' | 'issueRefs'> & { closeReason?: string | undefined },
+): StatusView {
   const short = SHORT[r.status];
   if (r.status === 'discussing') return { tone: 'wait', label: '讨论中', short };
   if (r.status === 'pending_decision') return { tone: 'human', label: '待拍板', short };
+  if (r.status === 'closed_drop' && isIdleCloseReason(r.closeReason))
+    return { tone: 'stall', label: '收口', short: '收口' };
   if (r.status === 'closed_drop') return { tone: 'stop', label: '已结案·不做', short };
   const refs = r.issueRefs;
   if (refs.length === 0) return { tone: 'run', label: '已结案·做 · 等开单', short };
@@ -97,6 +107,7 @@ export type MenuAction =
   | 'unpin'
   | 'rename'
   | 'withdraw'
+  | 'reopen'
   | 'drop'
   | 'archive'
   | 'unarchive'
@@ -116,6 +127,7 @@ const MENU: readonly { action: MenuAction; label: string; danger?: boolean }[] =
   { action: 'unpin', label: '取消置顶' },
   { action: 'rename', label: '改名' },
   { action: 'withdraw', label: '撤回到讨论中' },
+  { action: 'reopen', label: '重开' },
   { action: 'drop', label: '放下（写理由）' },
   { action: 'archive', label: '归档' },
   { action: 'unarchive', label: '取消归档' },
@@ -188,6 +200,7 @@ export function nextUp(d: RequestDetail, meId: string | undefined): string {
     if (!r.decider) return '等拍板';
     return r.decider.id === meId ? '等你拍板' : `等 ${r.decider.name} 拍板`;
   }
+  if (r.status === 'closed_drop' && isIdleCloseReason(r.closeReason)) return `收口：${r.closeReason}`;
   if (r.status === 'closed_drop') return r.closeReason ? `不做：${r.closeReason}` : '不做';
   if (r.status === 'closed_do') {
     return r.issueRefs.length > 0 ? `开成 ${r.issueRefs.map((i) => `#${i.number}`).join('、')}` : '等开单';
