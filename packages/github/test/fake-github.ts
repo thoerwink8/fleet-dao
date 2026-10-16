@@ -144,6 +144,10 @@ export class FakeGitHub {
   /** 需求文档（Contents API），键是仓内路径。 */
   specs = new Map<string, { sha: string; content: string }>();
   checkRuns: CheckRunState[] = [];
+  /** 每个 job（= Actions 检查的编号）的日志原文；没有的回 404（GitHub 日志过期、被删也是 404）。 */
+  jobLogs = new Map<number, string>();
+  /** 每条检查的注解（GET /check-runs/{id}/annotations 的回包数组）。 */
+  annotations = new Map<number, unknown[]>();
   /** 提交状态，按贴的先后；creator 是谁贴的（POST /statuses 记成那个身份的机器人）。 */
   statuses: {
     sha: string;
@@ -666,6 +670,23 @@ export class FakeGitHub {
         total_count: runs.length,
         check_runs: runs.map((r) => ({ ...r, html_url: `https://github.test/run/${r.id}` })),
       });
+    }
+    // job 日志：真 GitHub 回 302 到一个带签名的下载地址，最终是纯文本；要 actions: read，令牌没有就 403
+    x = /^\/actions\/jobs\/(\d+)\/logs$/.exec(rest);
+    if (x && m === 'GET') {
+      if (req.grants?.actions !== 'read' && req.grants?.actions !== 'write') {
+        return this.json(403, { message: 'Resource not accessible by integration' });
+      }
+      const log = this.jobLogs.get(Number(x[1]));
+      if (log === undefined) return this.notFound();
+      return new Response(log, { status: 200, headers: { 'content-type': 'text/plain; charset=utf-8' } });
+    }
+    x = /^\/check-runs\/(\d+)\/annotations$/.exec(rest);
+    if (x && m === 'GET') {
+      if (req.grants?.checks !== 'read' && req.grants?.checks !== 'write') {
+        return this.json(403, { message: 'Resource not accessible by integration' });
+      }
+      return this.json(200, this.annotations.get(Number(x[1])) ?? []);
     }
     x = /^\/commits\/([0-9a-f]+)\/status$/.exec(rest);
     if (x && m === 'GET') {

@@ -97,6 +97,28 @@ describe('返工续会话（决定 0093）', { timeout: 60_000 }, () => {
     expect(world.states.some((s) => s.doing.includes('续上一段的会话'))).toBe(true);
   });
 
+  it('CI 红了：返工意见里有红的 job 名、摘要和日志尾巴，不只一句「check 红」（#2795）', async () => {
+    const detail =
+      '红的 job：lint、check\n\n【lint】failure\n「biome（退出码 1，12 秒）」的输出结尾：\nFound 6 errors.';
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n === 1
+          ? {
+              state: 'red',
+              failedChecks: ['check', 'lint'],
+              digest: 'check：failure：红的 job：lint',
+              detail,
+            }
+          : undefined,
+    });
+    const { tasks, calls } = scripted({ resume: RESUME_ALWAYS });
+    await withWorker(env, world, async (q) => (await start(q, input())).result() as Promise<TaskRun>, {
+      tasks,
+    });
+    const feedback = calls.segment[1]?.feedback ?? [];
+    expect(feedback).toEqual(['CI 红了：check、lint', 'check：failure：红的 job：lint', detail]);
+  });
+
   it('续不上（换了执行方式）：照旧开新会话带全份交代，进度写明为什么', async () => {
     const world = createFakeWorld({
       ci: (_i, n) =>
