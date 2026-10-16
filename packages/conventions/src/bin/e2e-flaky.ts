@@ -8,15 +8,17 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
+  BROKEN_ROUND_TITLE,
   deadline,
   FLAKY_WINDOW,
   flakyTests,
-  issueBody,
-  issueTitle,
-  keyText,
+  globalErrorCount,
+  isBrokenRound,
+  type OpenIssue,
   type Outcomes,
   outcomesOf,
   parseQuarantine,
+  planIssues,
   type RunOutcomes,
   runSummary,
 } from '../e2e-flaky.ts';
@@ -57,30 +59,39 @@ runMain(async () => {
         .filter((f) => /^results.*\.json$/.test(f))
         .map((f) => join(runDir, f));
       if (files.length === 0) continue;
-      window.push({ url: run.url, outcomes: readReports(files) });
+      const reports = files.map((f) => JSON.parse(readFileSync(f, 'utf8')) as unknown);
+      const all: Outcomes = new Map();
+      for (const r of reports) for (const [k, v] of outcomesOf(r)) all.set(k, v);
+      window.push({
+        url: run.url,
+        outcomes: all,
+        globalError: reports.some((r) => globalErrorCount(r) > 0),
+      });
     }
     console.log(`近 ${window.length} 轮有报告的主线 e2e（最多看 ${FLAKY_WINDOW} 轮）`);
-    const findings = flakyTests(window);
-    if (findings.length === 0) {
+    const brokenCount = window.filter(isBrokenRound).length;
+    if (brokenCount > 0) console.log(`其中 ${brokenCount} 轮整轮坏了，不计入用例的偶发次数`);
+    if (brokenCount === 0 && flakyTests(window).length === 0) {
       console.log('没有达到偶发阈值的用例');
     } else {
       const api = ghApi(process.env);
-      const open: { title: string }[] = [];
+      const open: OpenIssue[] = [];
       for (let page = 1; page <= 5; page++) {
-        const got = (await api.get(`/issues?state=open&per_page=100&page=${page}`)) as { title: string }[];
+        const got = (await api.get(`/issues?state=open&per_page=100&page=${page}`)) as OpenIssue[];
         open.push(...got);
         if (got.length < 100) break;
       }
-      const until = deadline(new Date());
-      for (const f of findings) {
-        const title = issueTitle(f.key);
-        if (open.some((i) => i.title === title)) {
-          console.log(`已有开着的单：${title}（${f.bad}/${f.ran}）`);
-          continue;
-        }
-        const quarantined = quarantine.some((q) => keyText(q) === keyText(f.key));
-        await api.post('/issues', { title, body: issueBody(f, until, quarantined) });
-        console.log(`开了单：${title}（${f.bad}/${f.ran}）`);
+      const broken = open.find((i) => i.title === BROKEN_ROUND_TITLE);
+      if (broken) {
+        const comments = (await api.get(`/issues/${broken.number}/comments?per_page=100`)) as {
+          body?: string | null;
+        }[];
+        broken.body = [broken.body ?? '', ...comments.map((c) => c.body ?? '')].join('\n');
+      }
+      for (const a of planIssues(window, open, quarantine, deadline(new Date()))) {
+        if (a.kind === 'create') await api.post('/issues', { title: a.title, body: a.body });
+        else if (a.kind === 'comment') await api.post(`/issues/${a.number}/comments`, { body: a.body });
+        console.log(a.label);
       }
     }
   } else {

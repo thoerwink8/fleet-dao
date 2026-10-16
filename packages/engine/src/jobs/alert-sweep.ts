@@ -2,15 +2,9 @@
 // 两处都在这里补。
 // 1. 能判断条件还在不在的，现算：条件没了就撤，写明谁撤的（engine:hourly-reconcile）、为什么（正文开头「已撤：…」，
 //    操作记录里也有一条）。条件还在的原样留着。判法一种提醒一条（RULES），没列进来的不在这里判（见下面的清单）。
-// 2. 卡住报警（alert 这一级）超过 24 小时没人处理：再推一次——「超过 24 小时」按这一次挂起算（raised_at：第一次报等于
-//    建立时刻，撤过再报从重开算，还开着再报不重置），不按第一次的 created_at，刚重开的不会被当成挂了一天。
-//    新写一条「还没处理：<原标题>」（键 remind:<原提醒>:<北京日期>，
-//    同一条一天最多一次），驾驶舱弹一条、飞书发一张新卡（原来那张卡只会原地改，沉在群里）。原来那条处理掉，再提醒跟着撤；
-//    在再提醒上点「处理」，原来那条也跟着撤。有人在处理（有人在修、PR 开着、合了、发布了）、静默了的不再推（谁在处理现算，
-//    core 的 alertHandling）；谁在处理读不到：照旧再推，记没查全（宁可多一张卡）。键以 reconcile:pr:、reconcile:ledger:
-//    开头、对应 PR 已合并超过 7 天的，不再每天重推：沿用静默的效果（驾驶舱留原来那一条，不发新的飞书卡），不另开通道，
-//    也不写会在 7 天后续期的静默行；已经推出去的「还没处理」跟着撤。没到 24 小时的还不重推、不立案，不去问合并时刻
-//    （刚报出来的问不到，会把整轮对账记成没查成）。到了再问；合并时刻读不到的照旧再推，记没查成。
+// 2. 再提醒（remind:）已删（#2368）：它只是每天多写一条通知，飞书不推、只喂简报，没人用。
+//    「超过 24 小时」按这一次挂起算（raised_at：第一次报等于建立时刻，撤过再报从重开算，还开着再报不重置），
+//    不按第一次的 created_at，刚重开的不会被当成挂了一天。谁在处理现算，core 的 alertHandling。
 // 3. 同一条再立案（#1406，对 #445「不自动开跟进单」的有意收窄，只这一层、还限量）：alert 级、开着、这一次挂起超过 24 小时、
 //    alertHandling 判为没人处理、没静默、键不是自己会撤的、正文开头还没有单号的，开一张未排期的缺陷单。四节按整理会话
 //    同一份模板拼，再用 requiredSectionProblems 核过；不贴「要人拍」。单号写回这条提醒的正文开头。同一键只一张；那张关了
@@ -57,9 +51,8 @@
 //   能判它还在不在——最近一次被报（updated_at；条件还在的报警者每次再报都会刷新它）过了 3 天，就标「已撤：过期」（写 resolved_at、
 //   谁撤的和原因，记录不删）。要人拍的（level = decision）不在此列：那是等人定的事，不是等条件过去的提醒。真的还在的，
 //   报警者下一次再报会重新打开（upsert 把已处理的重新打开）。新加一种自己会撤的提醒，前缀加进 SELF_RESOLVING_PREFIXES。
-//   日报级（level = daily）不走这条：循环前按建立时刻算，开着超过 48 小时就收（jobs/daily-notes.ts，「已撤：超过 48 小时自动收」），
-//   也不走规则和 24 小时再提醒。每日简报把它们写进去并发出后会更早收（处理人 engine:daily-brief）。
-//   简报自己那一行（feishu:brief:）要留给飞书推，不按「已收进简报」收，满 48 小时才由这里收。要你拍（decision）仍不自动收。
+//   日报级（level = daily）不走这条：循环前按建立时刻算，开着超过 48 小时就收（「已撤：超过 48 小时自动收」），
+//   也不走规则。简报自己那一行（feishu:brief:）要留给飞书推，满 48 小时才由这里收。要你拍（decision）仍不自动收。
 
 import { doneSection, parseMd, requiredSectionProblems } from '@fleet-dao/conventions';
 import { type AlertStage, criteriaOf, HANDLED_STAGES, isEscalationKey } from '@fleet-dao/core';
@@ -69,7 +62,6 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { TASK_DONE_PARK_WHY } from '../park-alerts.ts';
 import { duration, STAGE_NAMES } from '../routing/names.ts';
 import type { AllOpenCheck } from '../routing/types.ts';
-import { settleDailyNotes } from './daily-notes.ts';
 import { plainText } from './groom-plan.ts';
 import {
   type AlertStore,
@@ -85,9 +77,10 @@ import {
 } from './reconcile-common.ts';
 import { FUSION_TREE_ALERT, KEEP_ALERT_PREFIX, SUBTASK_TREE_ALERT } from './worktree-sweep.ts';
 
-/** 再提醒的键：remind:<原提醒的编号>:<北京日期>。 */
-export const REMIND_PREFIX = 'remind:';
-/** 卡住报警多久没人处理就再推一次、并立案（同一条再推一天最多一次）。 */
+/** 日报级开着超过这么久，每小时对账收掉。 */
+const DAILY_STALE_MS = 48 * 60 * 60_000;
+const DAILY_STALE_WHY = '超过 48 小时自动收';
+/** 卡住报警多久没人处理就立案。 */
 export const REMIND_AFTER_MS = 24 * 60 * 60_000;
 /** 一次对账最多新开几张单（没立成的也占这一轮的名额，免得 GitHub 不通时把开着的全打一遍）。 */
 export const FILE_PER_RUN = 2;
@@ -505,19 +498,6 @@ async function resolve(c: Ctx, alert: AlertRow, why: string, by = RECONCILE_ACTO
   return true;
 }
 
-function reminderBody(alert: AlertRow, now: Date): string {
-  const since = hangStartedAt(alert);
-  const updated =
-    alert.updatedAt.getTime() - since.getTime() >= 60_000 ? `（最近一次更新 ${stamp(alert.updatedAt)}）` : '';
-  return [
-    `这条卡住报警北京时间 ${stamp(since)} 就报了，到现在 ${duration(now.getTime() - since.getTime())} 没人处理${updated}。`,
-    '每天最多再提醒一次；原来那条处理掉，这条跟着撤；在这条上点「处理」也算把原来那条处理了。',
-    '',
-    '原来那条的正文：',
-    clip(alert.body, 2000) || '（没写）',
-  ].join('\n');
-}
-
 const uncheckedMergeTime = (key: string, why: string) => `提醒 ${key} 的 PR 合并时刻没查成，不跳过：${why}`;
 
 /**
@@ -550,66 +530,6 @@ async function historicalSkip(c: Ctx, alert: AlertRow): Promise<boolean> {
   }
   c.historical.set(alert.id, skip ? 'skip' : 'go');
   return skip;
-}
-
-/** 历史事实不再每天重推：原来那条留着，已经推出去的「还没处理」撤掉。不写静默行（静默最长 7 天，这条是一直如此）。 */
-async function settleHistorical(c: Ctx, alert: AlertRow, open: readonly AlertRow[]): Promise<void> {
-  c.deps.log('info', '每小时对账：PR 已合并超过 7 天，历史事实不再重推、不立案', {
-    dedupeKey: alert.dedupeKey,
-  });
-  for (const child of open) {
-    if (child.resolvedAt || !child.dedupeKey.startsWith(REMIND_PREFIX)) continue;
-    const rest = child.dedupeKey.slice(REMIND_PREFIX.length);
-    const cut = rest.indexOf(':');
-    if (cut < 0 || rest.slice(0, cut) !== alert.id) continue;
-    try {
-      await resolve(
-        c,
-        child,
-        '原来那条说的 PR 已经合并超过 7 天，是改不了的历史事实，不再每天重推；驾驶舱留原来那一条',
-      );
-    } catch (err) {
-      c.part.unchecked.push(`再提醒 ${child.dedupeKey} 没撤成：${errMessage(err)}`);
-    }
-  }
-}
-
-/** 再推：卡住报警超过 24 小时没人处理，一天一条；人在再提醒上点了处理，原来那条跟着撤。 */
-async function remind(c: Ctx, alert: AlertRow): Promise<void> {
-  const { deps } = c;
-  const now = deps.now();
-  const hungSince = hangStartedAt(alert).getTime();
-  const last = await deps.alerts.latestByPrefix(`${REMIND_PREFIX}${alert.id}:`);
-  // 上一次挂起留下的再提醒不算这一次：撤过又重开的，不能拿旧卡的建立时刻把刚重开的当成已经等了 24 小时。
-  const fromThisEpisode = last !== null && last.createdAt.getTime() >= hungSince;
-  if (
-    fromThisEpisode &&
-    last?.resolvedAt &&
-    last.resolvedBy !== RECONCILE_ACTOR &&
-    last.resolvedAt.getTime() >= alert.updatedAt.getTime()
-  ) {
-    await resolve(
-      c,
-      alert,
-      `人在再提醒上点了处理（北京时间 ${stamp(last.resolvedAt)}），原来这条跟着撤`,
-      last.resolvedBy ?? RECONCILE_ACTOR,
-    );
-    return;
-  }
-  const since = Math.max(hungSince, fromThisEpisode && last ? last.createdAt.getTime() : 0);
-  if (now.getTime() - since < REMIND_AFTER_MS) return;
-  const { created } = await deps.alerts.insertOnce({
-    dedupeKey: `${REMIND_PREFIX}${alert.id}:${beijingDate(now)}`,
-    level: 'alert',
-    taskId: alert.taskId,
-    title: clip(`还没处理：${alert.title}`, 300),
-    body: reminderBody(alert, now),
-    link: alert.link,
-  });
-  if (created) {
-    c.part.found += 1;
-    deps.log('info', '每小时对账：卡住报警超过 24 小时没人处理，再推了一次', { dedupeKey: alert.dedupeKey });
-  }
 }
 
 /**
@@ -817,25 +737,25 @@ export async function sweepAlerts(
   const c: Ctx = {
     deps,
     part: { scanned: open.length, found: 0, unchecked: [] },
-    stillOpen: new Map(open.filter((a) => !a.dedupeKey.startsWith(REMIND_PREFIX)).map((a) => [a.id, a])),
+    stillOpen: new Map(open.map((a) => [a.id, a])),
     historical: new Map(),
   };
   if (truncated) c.part.unchecked.push(`没处理的提醒太多，这一轮只看了前 ${open.length} 条`);
-  const settled = await settleDailyNotes((input) => deps.alerts.resolve(input), open, { now: deps.now() });
-  const resolvedKeys = new Set(settled.resolved);
-  const dropKeys = new Set([...settled.resolved, ...settled.already]);
+  // 日报级（简报那一行 feishu:brief:、retired-schedule:）开着超过 48 小时就收；刚好满 48 小时还留着。看 created_at。
   for (const alert of open) {
-    if (!dropKeys.has(alert.dedupeKey)) continue;
+    if (alert.level !== 'daily') continue;
     c.stillOpen.delete(alert.id);
-    if (!resolvedKeys.has(alert.dedupeKey)) continue;
-    c.part.found += 1;
-    deps.log('info', '每小时对账：日报超过 48 小时，收掉了', { dedupeKey: alert.dedupeKey });
+    if (deps.now().getTime() - alert.createdAt.getTime() <= DAILY_STALE_MS) continue;
+    try {
+      await resolve(c, alert, DAILY_STALE_WHY);
+    } catch (err) {
+      c.part.unchecked.push(`提醒 ${alert.dedupeKey} 没收成：${errMessage(err)}`);
+    }
   }
-  for (const why of settled.failed) c.part.unchecked.push(why);
   // 1. 条件没了的撤掉；还在的留着（路由恢复了的改一句正文）
   for (const alert of open) {
-    if (alert.dedupeKey.startsWith(REMIND_PREFIX) || handledByTrees(alert.dedupeKey)) continue;
-    // 日报级只由上面 48 小时那一条收，不走规则、再提醒和 3 天过期。
+    if (handledByTrees(alert.dedupeKey)) continue;
+    // 日报级只由上面 48 小时那一条收，不走规则和 3 天过期。
     if (alert.level === 'daily') continue;
     let judged = false;
     for (const rule of RULES) {
@@ -873,41 +793,11 @@ export async function sweepAlerts(
       }
     }
   }
-  // 2. 还开着的卡住报警（工作树的也算），超过 24 小时没人处理就再推；有人在处理、静默了的不推
+  // 2. 还开着的卡住报警（工作树的也算），超过 24 小时没人处理的立案（不再写再提醒，#2368）；有人在处理、静默了的不立
   const candidates = [...c.stillOpen.values()].filter(
     (a) => a.level === 'alert' && !isEscalationKey(a.dedupeKey),
   );
   const { quiet, failed: handlingFailed, stage } = await quietAlerts(c, candidates);
-  const now = deps.now();
-  for (const alert of candidates) {
-    if (quiet.has(alert.id)) continue;
-    try {
-      // 已合并超过 7 天：不发新的飞书卡（不插 remind:），原来那条留在驾驶舱。沿用静默的效果，不另开通道。
-      // 没到 24 小时还不会重推，合并时刻用不上，不去问（问不到会把这一轮记成没查成）。
-      if (
-        now.getTime() - hangStartedAt(alert).getTime() >= REMIND_AFTER_MS &&
-        (await historicalSkip(c, alert))
-      ) {
-        await settleHistorical(c, alert, open);
-        continue;
-      }
-      await remind(c, alert);
-    } catch (err) {
-      c.part.unchecked.push(`提醒 ${alert.dedupeKey} 的再提醒没做成：${errMessage(err)}`);
-    }
-  }
-  // 3. 同一批里该立案的立案（再推照旧；开单失败不挡再推，再推失败也不挡立案）
   await fileStuckAlerts(c, candidates, quiet, handlingFailed, stage);
-  // 4. 原来那条已经处理了的再提醒，跟着撤
-  for (const alert of open) {
-    if (!alert.dedupeKey.startsWith(REMIND_PREFIX)) continue;
-    const origin = alert.dedupeKey.slice(REMIND_PREFIX.length).split(':')[0] ?? '';
-    if (c.stillOpen.has(origin)) continue;
-    try {
-      await resolve(c, alert, '原来那条已经处理了');
-    } catch (err) {
-      c.part.unchecked.push(`再提醒 ${alert.dedupeKey} 没撤成：${errMessage(err)}`);
-    }
-  }
   return c.part;
 }

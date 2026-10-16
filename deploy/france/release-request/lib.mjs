@@ -21,7 +21,7 @@
 //   没有和这次发版有关的新异常（RELEASE_ALERT_PREFIXES；重启打断的几类 15 分钟内重试；无关的只列出不拦）、再跑一遍预检（已是最新）；
 //   第 7 步核引擎总开关和各仓接活开关和发版前一致（被人动过的照实报不一致，不替人改回）。
 //   结论写进 release-train.json 的 check 和 last-request.json；开始、成功、卡住、失败各记一条提醒进通知中心（notifications，键 release:…）：
-//   卡住、失败是「要你拍」，由驾驶舱后端用飞书应用机器人立刻推进团队群（packages/api/src/feishu-push.ts）；开始、成功等只是 daily 级，不推，留给每日简报读。
+//   卡住、失败是「要你拍」，由驾驶舱后端用飞书应用机器人立刻推进团队群（packages/api/src/feishu-push.ts）；开始、成功等不写通知，只写进度记录（#2368）。
 // - 请求的种类（#2027，请求文件的 kind，没写就是 release 发布，老后端照常）：retry 从停在第 3 步「等收尾」的那一趟接着走（老版本留下的）、
 //   restore 从没成在第 7 步「恢复」的那一趟把引擎总开关开回（只认我们关过的：发版前开着、pausedMaster 不是 false）、abort 撤掉暂停（等价 release-train abort：
 //   我们关过的、还没动手发版就开回暂停前的样子，已动手发过版保持关）；不认识的 kind 拒绝并写原因，不当成发布。各种都落 last-request.json（kind、by）。
@@ -946,7 +946,7 @@ export function releaseMessage(kind, state) {
   return `${text}。${buttonHint(state, kind)}。`.replace(/\s+/g, ' ').slice(0, 900);
 }
 
-/** 哪几种要人看：进「要你拍」，后端马上推飞书；其余（开始、成功、重试、恢复、撤暂停）只是 daily，进每日简报，不推。 */
+/** 哪几种要人看：进「要你拍」，后端马上推飞书；其余（开始、成功、重试、恢复、撤暂停）不写通知（level 为 null），只写进度记录。 */
 export const RELEASE_ALERT_KINDS = ['check', 'blocked', 'failed'];
 /** 发版提醒的键前缀（简报按它认「发版」这一类）。 */
 export const RELEASE_NOTE_PREFIX = 'release:';
@@ -956,7 +956,7 @@ export function releaseNote(kind, state, text, now) {
   const sha = String(state.target?.value ?? '').slice(0, 12);
   return {
     kind,
-    level: RELEASE_ALERT_KINDS.includes(kind) ? 'decision' : 'daily',
+    level: RELEASE_ALERT_KINDS.includes(kind) ? 'decision' : null,
     key: `${RELEASE_NOTE_PREFIX}${kind}:${sha}:${Math.floor(now.getTime() / 1000)}`,
     title: text.split('。')[0].slice(0, 200),
   };

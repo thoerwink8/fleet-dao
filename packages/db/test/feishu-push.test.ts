@@ -69,7 +69,32 @@ describe('feishuPushableSince（推送分级）', () => {
     expect(since('daily', 'feishu:main-recovered:abc')).toBeNull();
   });
 
-  it('其余进每日简报、不推：再提醒、路由疑似降智、日报、整池暂停到期、主线结论记账行', () => {
+  it('白名单里的几类报警都是开满 120 分钟才推', () => {
+    for (const key of [
+      'task:o/r#1:park:2',
+      'deploy-lag:abc',
+      'auto-release:o/r:failed',
+      'watchdog:healthz:x',
+      'watchdog:release:x',
+      'github-app:bot:o/r',
+      'reconcile:pr:o/r#5',
+    ]) {
+      expect(since('alert', key), key).toEqual(escalated);
+    }
+  });
+
+  it('白名单之外一律不推：看门狗任务、红、额度读数、对账额度、主线已恢复、再提醒、路由疑似降智、日报、整池暂停到期、主线结论记账行', () => {
+    for (const key of [
+      'watchdog:job:x:run',
+      'watchdog:red:x',
+      'quota-read:x',
+      'reconcile:quota:x',
+      'task:o/r#1:history',
+      'new-kind:x',
+    ]) {
+      expect(since('alert', key), key).toBeNull();
+    }
+    expect(since('daily', 'feishu:main-recovered:abc')).toBeNull();
     expect(since('alert', 'remind:abc:2026-10-14')).toBeNull();
     expect(since('alert', 'probe-iq:auto:cursor:claude-haiku-5-5-low')).toBeNull();
     expect(since('daily', 'groom:done:1')).toBeNull();
@@ -81,9 +106,12 @@ describe('feishuPushableSince（推送分级）', () => {
 describe('pendingFeishuPushes', () => {
   it('只给该推、到点、没处理、24 小时内的，老的在前', async () => {
     await note('decide', 'decision', ago(5 * MIN));
-    await note('alert-old-enough', 'alert', ago(121 * MIN));
-    await note('alert-too-new', 'alert', ago(90 * MIN));
-    await note('alert-healed', 'alert', ago(3 * HOUR), { resolvedAt: ago(70 * MIN) });
+    await note('deploy-lag:old-enough', 'alert', ago(121 * MIN));
+    await note('deploy-lag:too-new', 'alert', ago(90 * MIN));
+    await note('deploy-lag:healed', 'alert', ago(3 * HOUR), { resolvedAt: ago(70 * MIN) });
+    await note('task:o/r#1:park:1', 'alert', ago(122 * MIN));
+    await note('watchdog:job:x:run', 'alert', ago(3 * HOUR));
+    await note('quota-read:x', 'alert', ago(3 * HOUR));
     await note('remind:abc:2026-10-14', 'alert', ago(3 * HOUR));
     await note('probe-iq:auto:cursor:x', 'alert', ago(3 * HOUR));
     await note('feishu:brief:2026-10-15', 'daily', ago(1 * MIN));
@@ -92,7 +120,12 @@ describe('pendingFeishuPushes', () => {
     await note('groom:done:1', 'daily', ago(1 * MIN));
     await note('handled', 'decision', ago(5 * MIN), { resolvedAt: ago(1 * MIN) });
     await note('too-old', 'decision', ago(25 * HOUR));
-    expect(await keys()).toEqual(['alert-old-enough', 'decide', 'feishu:brief:2026-10-15']);
+    expect(await keys()).toEqual([
+      'task:o/r#1:park:1',
+      'deploy-lag:old-enough',
+      'decide',
+      'feishu:brief:2026-10-15',
+    ]);
     // 主线红开满 60 分钟还没撤（没转绿）：推
     expect(await keys(new Date(NOW.getTime() + 41 * MIN))).toContain('feishu:main-red:abc');
   });
