@@ -115,6 +115,13 @@ const TIER_BOOT_POLLS = 40;
  * 有个空档，那时闸看着全过，不挡这一下会对同一个头再请求一次。
  */
 export const REQUEST_DEDUPE_MS = 30 * 60_000;
+/**
+ * 攒着发（#2797）：要停引擎的版本，离上一次停引擎（fleet-engine 这次起来的时刻）不到这么久就先不发，到点发那时主线最新的绿提交
+ * （攒着的几版一次发）。不停引擎的版本照旧马上发。10-16 法国 07:09Z～10:02Z 平均 4～5 分钟一版，每版都叫停一轮动手会话。
+ */
+export const ENGINE_RESTART_GAP_MS = 30 * 60_000;
+/** 发版历史（release.sh 的 HISTORY）最后一行是这几种事件：上一版没过健康检查或退回过，要停引擎也照发（修好的版本别再等）。 */
+export const HOLD_EXEMPT_EVENTS = ['unhealthy', 'auto-rollback', 'rollback'];
 /** release.sh 的 PAUSE_FILE：切版本前给在跑的任务发 hard 暂停的名单，发完由它用 fleet-api release continue 续上（#2038、决定 0093）。 */
 export const PAUSE_FILE = `${RELEASES}/.release-paused.json`;
 /** 暂停名单放了这么久、发布锁也空着：发版驱动没收尾（死在中途），这边替它发「继续」。 */
@@ -286,6 +293,8 @@ export function carryOver(prev) {
     config: null,
     /** 自动发版最近一次请求的提交和时间（带到下一轮，防同一个头 REQUEST_DEDUPE_MS 内重复请求）；note 是这一轮为什么发或没发。 */
     auto: p.auto ? { sha: p.auto.sha ?? null, at: p.auto.at ?? null, note: null } : null,
+    /** 「在用 → 要发的」要不要停引擎（引用闭包，batchStep；同一对提交只算一次）：{ current, target, restart: true|false|null, why }。 */
+    engineCheck: p.engineCheck ?? null,
     /** 同一个提交发版还没动手就连败 UNTOUCHED_FAIL_LIMIT 趟、开的急修单：{ sha, number, url, at } 或没开成 { sha, number: null, error, at }。 */
     emergency: p.emergency ?? null,
     /** 已撤过失败卡的那一趟目标（被后来的发版取代，supersededStep；同一个只撤一次）。 */
@@ -692,6 +701,8 @@ async function releaseStep(io, st, now, current) {
     }
     return note(`现在不发：${blocked}${reason}`);
   }
+  const hold = await batchStep(io, st, now, current, target, gateFacts);
+  if (hold) return note(`${hold}${reason}`);
   try {
     await io.requestRelease({ sha: target, at: iso(now), by: AUTO_RELEASE_BY });
   } catch (e) {
@@ -710,9 +721,66 @@ async function releaseStep(io, st, now, current) {
   st.auto = {
     sha: target,
     at: iso(now),
-    note: `已请求自动发版 ${short(target)}（在用 ${short(current)}，落后 ${idx} 个提交${reason}）`,
+    note: `已请求自动发版 ${short(target)}（在用 ${short(current)}，落后 ${idx} 个提交${reason}${
+      st.engineCheck?.target === target && st.engineCheck.restart === false ? '；不停引擎' : ''
+    }）`,
   };
   act(st, now, 'auto-release-requested', `请求发 ${short(target)}`);
+}
+
+/**
+ * 攒着发的判法（纯函数）：回 null 就是现在发，回一句话就是先不发（为什么、攒到几点）。
+ * restart：这一版要不要停引擎（true / false / null 判不了，判不了当要停）；engineSince：fleet-engine 这次起来的时刻（毫秒，读不到 null）；
+ * historyLast：发版历史最后一行（「时间 提交号 事件」）。
+ */
+export function batchVerdict({ restart, why: reason, engineSince, historyLast, now }) {
+  if (restart === false) return null;
+  const event =
+    String(historyLast ?? '')
+      .trim()
+      .split(/\s+/)[2] ?? '';
+  if (HOLD_EXEMPT_EVENTS.includes(event)) return null;
+  // 读不到引擎什么时候起的：不拦（拦了可能一直不发），照旧发
+  if (typeof engineSince !== 'number' || !Number.isFinite(engineSince)) return null;
+  const until = engineSince + ENGINE_RESTART_GAP_MS;
+  const t = Number(now);
+  if (t >= until) return null;
+  const ago = Math.max(0, Math.round((t - engineSince) / 60_000));
+  return (
+    `要停引擎（${reason || '这一版碰了引擎的运行内容'}），上次停引擎才 ${ago} 分钟（不到 ${ENGINE_RESTART_GAP_MS / 60_000} 分钟），` +
+    `攒到 ${new Date(until).toISOString().slice(11, 16)}Z 再发那时主线最新的绿提交`
+  );
+}
+
+/**
+ * 攒着发（#2797）：判这一版要不要停引擎（io.engineRestart：在用那一版的 deploy/lib/runtime-closure.mjs，和 release.sh 同一份判法），
+ * 同一对提交只算一次（记在 st.engineCheck）。回 null 现在发；回一句话先不发。没接上 engineRestart 的（老入口、测试）不攒。
+ */
+async function batchStep(io, st, now, current, target, facts) {
+  if (typeof io.engineRestart !== 'function') return null;
+  let check =
+    st.engineCheck?.current === current && st.engineCheck?.target === target ? st.engineCheck : null;
+  if (!check) {
+    try {
+      const r = await io.engineRestart(current, target);
+      check = {
+        current,
+        target,
+        restart: typeof r?.restart === 'boolean' ? r.restart : null,
+        why: String(r?.why ?? ''),
+      };
+    } catch (e) {
+      check = { current, target, restart: null, why: `判不了：${why(e)}` };
+    }
+    st.engineCheck = check;
+  }
+  return batchVerdict({
+    restart: check.restart,
+    why: check.why,
+    engineSince: facts?.engineSince ?? null,
+    historyLast: facts?.historyLast ?? null,
+    now,
+  });
 }
 
 const PHASE_NAMES = ['预检', '暂停本机', '暂停法国', '等收尾'];

@@ -69,6 +69,7 @@ function intakeHarness(issues: IntakeIssue[], over: Partial<IntakeDeps> = {}) {
     issueTask: async () => null,
     taskGenerations: async () => ({ ok: true, lives: [] }),
     openPrClaims: async () => new Map(),
+    prerequisiteStates: async (_repo, numbers) => new Map(numbers.map((n) => [n, 'closed'] as const)),
     markLocal: async () => undefined,
     readSpecDoc: async () => null,
     runningTasks: async () => 0,

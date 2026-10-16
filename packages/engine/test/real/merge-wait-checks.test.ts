@@ -7,6 +7,8 @@ import { readMergeWaitChecks } from '../../src/real/merge-wait-checks.ts';
 
 const repo = { owner: 'acme', name: 'widgets' };
 const A = 'a'.repeat(40);
+/** fleet-dao 回填的那两样。别的仓的档案里没有就不传。 */
+const fleetSignals = [GATE_CONTEXT, COLD_VERIFY_CONTEXT];
 
 interface Run {
   name: string;
@@ -72,6 +74,7 @@ describe('等合并时读必过检查', () => {
       gh(['check'], [{ name: 'check', conclusion: 'failure', title: '2 个测试没过' }], []),
       repo,
       A,
+      fleetSignals,
     );
     expect(got).toEqual({ overall: 'red', failed: [{ name: 'check', detail: '2 个测试没过' }] });
   });
@@ -81,12 +84,18 @@ describe('等合并时读必过检查', () => {
       gh([], [], [{ context: GATE_CONTEXT, state: 'failure', description: 'cold-verify 没过' }]),
       repo,
       A,
+      fleetSignals,
     );
     expect(got).toEqual({ overall: 'red', failed: [{ name: GATE_CONTEXT, detail: 'cold-verify 没过' }] });
   });
 
   it('检查还在跑：pending，不是红', async () => {
-    const got = await readMergeWaitChecks(gh(['check'], [{ name: 'check', conclusion: null }], []), repo, A);
+    const got = await readMergeWaitChecks(
+      gh(['check'], [{ name: 'check', conclusion: null }], []),
+      repo,
+      A,
+      fleetSignals,
+    );
     expect(got).toEqual({ overall: 'pending', failed: [] });
   });
 
@@ -102,6 +111,7 @@ describe('等合并时读必过检查', () => {
       ),
       repo,
       A,
+      fleetSignals,
     );
     expect(got).toEqual({ overall: 'pending', failed: [] });
   });
@@ -111,6 +121,7 @@ describe('等合并时读必过检查', () => {
       gh(['check'], [{ name: 'check', conclusion: 'success' }], []),
       repo,
       A,
+      fleetSignals,
     );
     expect(got.overall).toBe('pending');
     expect(got.failed).toEqual([]);
@@ -128,6 +139,21 @@ describe('等合并时读必过检查', () => {
       ),
       repo,
       A,
+      fleetSignals,
+    );
+    expect(got).toEqual({ overall: 'green', failed: [] });
+  });
+
+  it('档案的 mergeSignals 没有 merge-gate：不等它，闸红也不挡', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [{ context: GATE_CONTEXT, state: 'failure', description: 'cold-verify 没过' }],
+      ),
+      repo,
+      A,
+      [],
     );
     expect(got).toEqual({ overall: 'green', failed: [] });
   });

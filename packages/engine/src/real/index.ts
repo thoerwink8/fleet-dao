@@ -23,6 +23,7 @@ import {
   closeInterruptedScheduleRuns as closeInterruptedScheduleRunsInDb,
   createDb,
   type Db,
+  findRepoProfile,
   finishScheduleRun,
   getRun,
   latestRunOfTask,
@@ -36,7 +37,7 @@ import {
   taskTokenSpend,
 } from '@fleet-dao/db';
 import { createGitHub } from '@fleet-dao/github';
-import { intakeChatLimitsFrom } from '@fleet-dao/shared';
+import { intakeChatLimitsFrom, parseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
@@ -1005,10 +1006,12 @@ export function realPortsFromEnv(
     taskLog('子代理定义文件生成不成', { error: error.message }),
   );
   const subagentGuard = lazyOnSuccess(readSubagentGuard);
+  const taskRuns = realRuns({ db });
   // 动手会话（#632 S2-4b-2）和冷验收会话（S2-5b）：和 Fusion 的会话用同一份执行方式驱动，但自己一份（驱动没有状态，只是包着各家的
   // run 函数）；内存准入、会话的资源上限、runs 记账都用生产的那份，两种会话共用同一个 Spawner 装配。
   const segmentSpawner: SegmentSpawnerDeps = {
     db,
+    runs: taskRuns,
     handoff,
     drivers: hostDrivers({
       claudeCommand,
@@ -1035,7 +1038,6 @@ export function realPortsFromEnv(
     },
     log: taskLog,
   };
-  const taskRuns = realRuns({ db });
   // 选路给三段的一段预占的池的名额（#757）：开跑那一行（taskRuns.start）换掉，没开跑就收场的由这两个活动放掉
   const reservations = realReservations({ db });
   // 派前探测不通时工作流放掉这次预占（#1409）：没进 runSegment，不能占到过期
@@ -1050,7 +1052,16 @@ export function realPortsFromEnv(
       trees,
       exec,
       log: taskLog,
-      readChecks: (repo, head, signal) => readMergeWaitChecks(gh, repo, head, signal),
+      profileOf: async (repo) => {
+        const row = await findRepoProfile(db, repo.owner, repo.name);
+        if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);
+        return row.profile;
+      },
+      readChecks: async (repo, head, signal) => {
+        const row = await findRepoProfile(db, repo.owner, repo.name);
+        if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，不知道合并要等哪些检查`);
+        return readMergeWaitChecks(gh, repo, head, parseRepoProfile(row.profile).mergeSignals, signal);
+      },
     }),
     async readCiPolicy(input) {
       if (input?.schemaVersion !== 1 || !input.repo?.owner || !input.repo?.name) {

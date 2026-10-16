@@ -64,6 +64,19 @@ function world(extraSteers: Array<{ text: string; at: number }> = []) {
   return { home, env, input, turnsFile: join(d, 'turns.jsonl'), logFile: join(log, '2026-10-16.jsonl') };
 }
 
+/** Claude Code 重启后写进 transcript 的那条通知（真样本：type user、origin.kind=task-notification、content 是字符串） */
+function restartNote(taskId: string, what: string, uuid: string) {
+  return {
+    type: 'user',
+    uuid,
+    origin: { kind: 'task-notification' },
+    message: {
+      role: 'user',
+      content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>stopped</status>\n<summary>${what} didn't finish before the previous session ended</summary>\n<note>No completion record was found for it in the previous session.</note>\n</task-notification>`,
+    },
+  };
+}
+
 describe('轮中发的引导在下一次工具调用后进会话（#2382）', () => {
   it('发了、没收到的一条：下一次工具调用就塞，原文照贴、写明发出时间；再调不重复塞', async () => {
     const w = world();
@@ -236,17 +249,7 @@ describe('轮中发的引导在下一次工具调用后进会话（#2382）', ()
             ],
           },
         },
-        {
-          type: 'user',
-          message: {
-            content: [
-              {
-                type: 'text',
-                text: "Some background tasks didn't finish before the previous session ended.",
-              },
-            ],
-          },
-        },
+        restartNote('agent-42', 'Background agent "查门禁根因"', 'n-1'),
       ]
         .map((r) => `${JSON.stringify(r)}\n`)
         .join(''),
@@ -289,17 +292,7 @@ describe('轮中发的引导在下一次工具调用后进会话（#2382）', ()
             content: [{ type: 'tool_result', content: 'Background task started; taskId: cmd-7' }],
           },
         },
-        {
-          type: 'user',
-          message: {
-            content: [
-              {
-                type: 'text',
-                text: "Some background tasks didn't finish before the previous session ended.",
-              },
-            ],
-          },
-        },
+        restartNote('cmd-7', 'Background shell command', 'n-1'),
       ]
         .map((r) => `${JSON.stringify(r)}\n`)
         .join(''),
@@ -309,6 +302,159 @@ describe('轮中发的引导在下一次工具调用后进会话（#2382）', ()
     expect(out).toContain('pnpm check');
     expect(out).toContain('要不要重跑，由本会话判断');
     expect(out).not.toContain('SendMessage');
+  });
+});
+
+// 单 #2802：重启提示只认 Claude Code 自己发的重启通知（type user、origin.kind=task-notification、summary 里带原话），
+// 只列通知前派出且没收到完成通知的后台任务，同一次重启只提醒一次。
+describe('重启补回后台任务的提示不误报（#2802）', () => {
+  const launch = (id: string, desc: string) => ({
+    type: 'assistant',
+    message: {
+      content: [
+        {
+          type: 'tool_use',
+          id,
+          name: 'Agent',
+          input: { description: desc, prompt: `${desc}的详细要求`, run_in_background: true },
+        },
+      ],
+    },
+  });
+  const receipt = (toolUseId: string, agentId: string, isError = false) => ({
+    type: 'user',
+    message: {
+      content: [
+        {
+          type: 'tool_result',
+          tool_use_id: toolUseId,
+          ...(isError ? { is_error: true } : {}),
+          content: isError ? 'blocked by hook' : `Async agent launched successfully.\nagentId: ${agentId}`,
+        },
+      ],
+    },
+  });
+  const done = (taskId: string, uuid: string) => ({
+    type: 'user',
+    uuid,
+    origin: { kind: 'task-notification' },
+    message: {
+      role: 'user',
+      content: `<task-notification>\n<task-id>${taskId}</task-id>\n<status>completed</status>\n<summary>Agent done</summary>\n</task-notification>`,
+    },
+  });
+  const run = async (rows: unknown[], at = NOW) => {
+    const w = world();
+    const transcript = join(w.home, 't.jsonl');
+    const write = (r: unknown[]) =>
+      writeFileSync(transcript, r.map((x) => `${JSON.stringify(x)}\n`).join(''));
+    write(rows);
+    const out = await tick(w.input({ transcript_path: transcript }), { home: w.home, env: w.env, now: at });
+    return { w, transcript, write, out };
+  };
+
+  it('transcript 里只有钩子上次注入的上下文、助手引用了那句话：不触发', async () => {
+    const { out } = await run([
+      {
+        type: 'attachment',
+        attachment: {
+          type: 'hook_additional_context',
+          content: ["Claude Code 提示 “didn't finish before the previous session ended”"],
+        },
+      },
+      {
+        type: 'assistant',
+        message: {
+          content: [{ type: 'text', text: "它说 didn't finish before the previous session ended" }],
+        },
+      },
+      {
+        type: 'user',
+        message: {
+          content: [{ type: 'text', text: "引用：didn't finish before the previous session ended" }],
+        },
+      },
+      launch('toolu_a', '正在跑的活'),
+      receipt('toolu_a', 'agent-live'),
+    ]);
+    // 夹具里本来就有一条丢了的引导，所以 out 不一定是 null；只要不带后台任务的提示
+    expect(out ?? '').not.toContain('SendMessage');
+    expect(out ?? '').not.toContain('agent-live');
+  });
+
+  it('通知前派了 A、通知后派了 B：只列 A，输出里不带英文原句', async () => {
+    const { out } = await run([
+      launch('toolu_a', '任务甲'),
+      receipt('toolu_a', 'agent-a'),
+      restartNote('agent-a', 'Background agent "任务甲"', 'n-1'),
+      launch('toolu_b', '任务乙'),
+      receipt('toolu_b', 'agent-b'),
+    ]);
+    expect(out).toContain('agent-a');
+    expect(out).not.toContain('agent-b');
+    expect(out).not.toContain('任务乙');
+    expect(out).not.toMatch(/previous session ended/i);
+  });
+
+  it('同一次重启只提醒一次：之后再派任务、transcript 变长也不再触发；新的一次重启才再提醒', async () => {
+    const base = [
+      launch('toolu_a', '任务甲'),
+      receipt('toolu_a', 'agent-a'),
+      restartNote('agent-a', 'Agent', 'n-1'),
+    ];
+    const r = await run(base);
+    expect(r.out).toContain('agent-a');
+    r.write([...base, launch('toolu_b', '任务乙'), receipt('toolu_b', 'agent-b')]);
+    const again = (at: number) =>
+      tick(r.w.input({ transcript_path: r.transcript }), { home: r.w.home, env: r.w.env, now: at });
+    expect(await again(NOW + 120_000)).toBeNull();
+    r.write([
+      ...base,
+      launch('toolu_b', '任务乙'),
+      receipt('toolu_b', 'agent-b'),
+      restartNote('agent-b', 'Agent', 'n-2'),
+    ]);
+    expect(await again(NOW + 240_000)).toContain('agent-b');
+  });
+
+  it('用 SendMessage 续上、之后又收到完成通知的代理：不算没跑完', async () => {
+    const { out } = await run([
+      launch('toolu_a', '任务甲'),
+      receipt('toolu_a', 'agent-a'),
+      launch('toolu_c', '任务丙'),
+      receipt('toolu_c', 'agent-c'),
+      restartNote('agent-a', 'Agent a', 'n-1'),
+      restartNote('agent-c', 'Agent c', 'n-2'),
+      {
+        type: 'assistant',
+        message: {
+          content: [
+            {
+              type: 'tool_use',
+              id: 'toolu_s',
+              name: 'SendMessage',
+              input: { to: 'agent-a', message: '续上' },
+            },
+          ],
+        },
+      },
+      done('agent-a', 'd-1'),
+    ]);
+    expect(out).toContain('agent-c');
+    expect(out).not.toContain('agent-a');
+  });
+
+  it('被钩子挡掉、根本没起来的后台调用：不列', async () => {
+    const { out } = await run([
+      launch('toolu_ok', '起来了的'),
+      receipt('toolu_ok', 'agent-ok'),
+      launch('toolu_blocked', '被挡掉的'),
+      receipt('toolu_blocked', '', true),
+      restartNote('agent-ok', 'Agent ok', 'n-1'),
+    ]);
+    expect(out).toContain('agent-ok');
+    expect(out).not.toContain('被挡掉的');
+    expect(out).not.toContain('toolu_blocked');
   });
 });
 

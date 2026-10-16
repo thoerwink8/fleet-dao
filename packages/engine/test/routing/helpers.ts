@@ -67,8 +67,13 @@ export function entry(
   return { routeId, position, enabled: true, pinned: false, ...overrides };
 }
 
-/** 按给的顺序排好一个阶段：第 i 条路由位置 i。 */
+/**
+ * 按给的顺序排好一个阶段：第 i 条路由位置 i。
+ * 选路默认是按池压力加权抽签（决定 0104）；这些老用例钉的是 legacy 的排法（快清零、按进度、战绩、强弱档），
+ * 所以这里默认切到 legacy，给了 policy.allocate 就照给的。测加权抽签的用例自己给 allocate: { mode: 'weighted' }。
+ */
 export function input(routes: RouteFacts[], overrides: Partial<ChooseRouteInput> = {}): ChooseRouteInput {
+  const { policy, ...rest } = overrides;
   return {
     stage: 'execute',
     configured: true,
@@ -76,7 +81,8 @@ export function input(routes: RouteFacts[], overrides: Partial<ChooseRouteInput>
     order: routes.map((r, i) => entry(r.routeId, i)),
     routes,
     now: NOW,
-    ...overrides,
+    ...rest,
+    policy: { ...policy, allocate: { mode: 'legacy', ...policy?.allocate } },
   };
 }
 

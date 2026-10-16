@@ -17,6 +17,7 @@ import {
 import {
   AUTO_RELEASE_BY,
   AUTO_REQUEST_KEY,
+  batchVerdict,
   CI_RUNS_PAGE,
   CI_WORKFLOW,
   CONFIG_PREFIX,
@@ -24,6 +25,7 @@ import {
   ciVerdict,
   DEPS_PREFIX,
   EMERGENCY_KEY,
+  ENGINE_RESTART_GAP_MS,
   emergencyIssue,
   gateVerdict,
   HUMAN_TIER_PATHS,
@@ -2018,4 +2020,107 @@ test('【#2728】急修单正文：四节齐、原话写明 AI 发现、只列 d
   assert.match(issue.body, /^## 场景\n/);
   assert.match(issue.body, /## 原话\n\n无（AI 发现/);
   assert.doesNotMatch(issue.body, /截图|线上看到/);
+});
+
+// ── 攒着发（#2797）：要停引擎的版本离上次停引擎不到 30 分钟先不发；不停引擎的马上发；上一版退回过照发 ──
+
+/** autoMachine 上再接「要不要停引擎」：restart 由用例定，记下问了几次；引擎 since 分钟前起来的。 */
+function batchMachine({ restart, sinceMin, historyLast = null }) {
+  const m = autoMachine();
+  m.asked = [];
+  m.restart = restart;
+  m.io.engineRestart = async (current, target) => {
+    m.asked.push([current, target]);
+    if (m.restart instanceof Error) throw m.restart;
+    return {
+      restart: m.restart,
+      why: m.restart
+        ? '改了 引擎运行要读的文件：packages/engine/src/a.ts'
+        : '改的 2 个文件都不在引擎的引用闭包里',
+    };
+  };
+  m.gate.engineSince = sinceMin === null ? null : T0 - sinceMin * MIN;
+  m.gate.historyLast = historyLast;
+  return m;
+}
+
+test('间隔是 30 分钟（常量钉住）', () => {
+  assert.equal(ENGINE_RESTART_GAP_MS, 30 * MIN);
+});
+
+test('要停引擎、上次停引擎才 10 分钟：先不发，写明攒到几点；到点发那时主线最新的绿提交（攒着的几版一次发）；同一对提交只判一次', async () => {
+  const m = batchMachine({ restart: true, sinceMin: 10 });
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(
+    st.auto.note,
+    /要停引擎（改了 引擎运行要读的文件：packages\/engine\/src\/a\.ts），上次停引擎才 10 分钟（不到 30 分钟），攒到 \d\d:\d\dZ 再发/,
+  );
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.equal(m.asked.length, 1, '同一对提交不重算闭包');
+  // 这期间又合了一版（也绿了）：到点发最新的 H2，不是 H1
+  m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.ci = runsBody(run(H2, 'completed', 'success'));
+  m.t += 16 * MIN; // 距引擎起来 31 分钟
+  const sent = await m.round();
+  assert.deepEqual(
+    m.requests.map((r) => r.sha),
+    [H2],
+  );
+  assert.equal(sent.last.action, 'auto-release-requested');
+});
+
+test('不停引擎的版本：上次停引擎才 2 分钟也马上发，写明不停引擎', async () => {
+  const m = batchMachine({ restart: false, sinceMin: 2 });
+  const st = await m.round();
+  assert.equal(m.requests.length, 1);
+  assert.equal(m.requests[0].sha, H1);
+  assert.match(st.auto.note, /不停引擎/);
+});
+
+test('例外照发：上一版没过健康检查、自动退回、手动退回过，要停引擎也不等', async () => {
+  for (const event of ['unhealthy', 'auto-rollback', 'rollback']) {
+    const m = batchMachine({
+      restart: true,
+      sinceMin: 3,
+      historyLast: `2026-09-27T07:58:00Z ${H0} ${event}`,
+    });
+    await m.round();
+    assert.equal(m.requests.length, 1, event);
+  }
+  // 上一版正常发完（release）：照样攒
+  const m = batchMachine({ restart: true, sinceMin: 3, historyLast: `2026-09-27T07:58:00Z ${H0} release` });
+  await m.round();
+  assert.equal(m.requests.length, 0);
+});
+
+test('【故意造出的失败】判不了要不要停引擎（闭包没算成）：当要停，照样攒；读不到引擎什么时候起的：不拦，照发', async () => {
+  const m = batchMachine({ restart: new Error('tsc 没跑成'), sinceMin: 5 });
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(st.auto.note, /要停引擎（判不了：tsc 没跑成）/);
+  const blind = batchMachine({ restart: true, sinceMin: null });
+  await blind.round();
+  assert.equal(blind.requests.length, 1);
+});
+
+test('batchVerdict：纯函数的边界', () => {
+  const now = T0;
+  assert.equal(batchVerdict({ restart: false, why: '', engineSince: now, historyLast: null, now }), null);
+  assert.equal(
+    batchVerdict({
+      restart: null,
+      why: '',
+      engineSince: now - ENGINE_RESTART_GAP_MS,
+      historyLast: null,
+      now,
+    }),
+    null,
+  );
+  assert.match(
+    String(batchVerdict({ restart: null, why: '', engineSince: now - 1, historyLast: null, now })),
+    /要停引擎/,
+  );
 });

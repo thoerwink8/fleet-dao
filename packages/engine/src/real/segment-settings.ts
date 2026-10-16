@@ -10,9 +10,14 @@
 //   不覆盖人写的东西。
 // - 文件在 .gitignore 里（仓根），不然会被会话的 git add -A 带进 PR。
 
-import { MAX_CONCURRENT_SUBAGENTS } from '@fleet-dao/adapters';
+import {
+  MAX_CONCURRENT_SUBAGENTS,
+  parseSubagent,
+  renderAgentsJson,
+  type SubagentDefinitions,
+} from '@fleet-dao/adapters';
 import { PortError } from '../ports.ts';
-import { readTreeFile, type UserTree, writeTreeFile } from './user-git.ts';
+import { readHomeFile, readTreeFile, type UserTree, writeTreeFile } from './user-git.ts';
 
 export const LOCAL_SETTINGS_PATH = '.claude/settings.local.json';
 
@@ -22,6 +27,8 @@ export interface SubagentGuard {
   names: readonly string[];
   /** 带 isolation: worktree 的。 */
   isolated: readonly string[];
+  /** 仓里的定义（不给 = 不核对家里装的那份）。 */
+  definitions?: SubagentDefinitions;
 }
 
 /** 这一段会话的模型是不是 Claude（路由的上游模型串，例如 claude-sonnet-5-5、deepseek-flash）。 */
@@ -54,6 +61,46 @@ export function mergeLocalSettings(existing: unknown, deny: readonly string[]): 
     env: { CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: MAX_CONCURRENT_SUBAGENTS, ...env },
     permissions: { ...permissions, deny: [...new Set([...oldDeny, ...deny])] },
   };
+}
+
+/**
+ * Mirasim 的 Claude 会话怎么拿到子代理定义（#2820）：它不带 --agents，读会话用户家里的 ~/.claude/agents/<名>.md，
+ * 那三份由 agents-sync 随每次发版装进去（packages/agents-sync 的 SUBAGENT_TARGET，docs/ops.md 第五节）。
+ * 这里在 Claude 模型的会话开跑前核对：家里装的那份按 loadSubagents 同一个解析函数（parseSubagent）读出来，和仓里的定义逐份比
+ * （比的是 --agents 里的那个形状，不比字节）。缺了、解析不了、不一样都抛可重试的 PortError——发版后同步还没到的几分钟里
+ * 这一段稍后重来，不带着内置的 Explore 等（模型不受分档管）起会话。非 Claude 模型全部子代理已经 deny，不核对。
+ * home 只给测试用（默认按账号库查会话用户的家目录）。
+ */
+export async function assertSubagentsInstalled(
+  t: UserTree,
+  guard: SubagentGuard,
+  model: string,
+  home?: string,
+): Promise<void> {
+  if (!guard.definitions || !isClaudeModel(model)) return;
+  const problems: string[] = [];
+  for (const [name, want] of Object.entries(guard.definitions)) {
+    const file = `${name}.md`;
+    const raw = await readHomeFile(t, `.claude/agents/${file}`, home);
+    if (raw === null) {
+      problems.push(`${name}：家里没有 .claude/agents/${file}`);
+      continue;
+    }
+    try {
+      const got = parseSubagent(file, raw.toString('utf8'));
+      if (renderAgentsJson({ [name]: got.definition }) !== renderAgentsJson({ [name]: want }))
+        problems.push(`${name}：和仓里 agents/subagents/${file} 不一样`);
+    } catch (error) {
+      problems.push(`${name}：${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  if (problems.length > 0) {
+    throw new PortError(
+      'SEGMENT_SUBAGENT_DEFS',
+      `会话用户家里的子代理定义和仓里对不上（${problems.join('；')}）。发版后 agents-sync 会换回仓里的，没跟上就手动跑 docs/ops.md 第五节那条同步命令`,
+      { retryable: true, details: { user: t.user } },
+    );
+  }
 }
 
 /** 以会话用户读—合并—写。读不了、不是 JSON、写不成都抛 PortError（deny 没写上不能装作写上了）。 */
