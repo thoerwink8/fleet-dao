@@ -78,7 +78,7 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     expect(verdicts.every((v) => v.rule === 'ST1')).toBe(true);
   });
 
-  it('活动期间引擎换过进程：同一原文也继续同一段，并写出活动和 StartToClose；没换过仍按 EN1 的重复失败挂起', () => {
+  it('活动超时原文一字不差：引擎换过进程就原路续；没换过分流仍判挂起（#2710 就是这句）', () => {
     const restarted = session({
       code: 'timeout_start_to_close',
       message: 'activity StartToClose timeout',
@@ -102,7 +102,12 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
       currentEngineStartedAt: '2026-10-16T12:00:00.000Z',
     });
     expect(realTimeout).toMatchObject({ rule: 'EN1', action: 'park', alert: true });
-    expect(realTimeout.reason).toContain('和上一次的原文一字不差');
+    // #2710 的 doing 就是这句：分流把可重试的 timeout_start_to_close 当成「原路再试不会变」。
+    // 不是发版叫停（KL3 / #2797）、不是 Mirasim 接回（#2815）、不是 model_mismatch 挂整单（MD3 / #2811）。
+    // 动手会话见到这个 park 不挂整单，停掉这一段按点名路由重派（task-session.ts，patched en1-timeout-redispatch）。
+    expect(realTimeout.reason).toContain('引擎这边丢了这一步（timeout_start_to_close）');
+    expect(realTimeout.reason).toContain('挂起并报警');
+    expect(realTimeout.reason).toContain('和上一次的原文一字不差，原路再试不会变');
   });
 
   it('retry 认不出的：同样按临时的办，不无限重试；绑不绑路由都一样', () => {
