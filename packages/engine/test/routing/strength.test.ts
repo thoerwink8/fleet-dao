@@ -80,8 +80,10 @@ describe('重活先给强档', () => {
     expect(r.why).toContain(`重活先给强档：${r.modelId}`);
     // 档内仍按 #2403 的质量下界：opus 4 单过 2 比 sonnet 3 单过 0 高一截
     expect(ranked[0]).toBe('opus-5.5');
-    // grok 人排在它前面，没派它写的是被挪到了强档后面
-    expect(r.why).toContain('标准档排在强档后面');
+    // grok 人排在它前面：被挪到了强档后面，又够不上主力档动手的能力下限（#2725），理由写的是下限
+    const grok = r.verdicts.find((v) => v.routeId === 'grok-4.7');
+    expect(grok?.nudges.map((n) => n.text).join('\n')).toContain('标准档排在强档后面');
+    expect(r.why).toContain('够不上能力下限');
   });
 
   it('强档都超前 35%：不让给标准档，仍派强档，理由写「强档都超前，照派」（#2724）', () => {
@@ -165,14 +167,14 @@ describe('重活先给强档', () => {
     expect(['opus-5.5', 'sonnet-5.5']).toContain(r.modelId);
   });
 
-  it('强档全被挡（一个额度用满、一个熔断）：照旧往下派 grok', () => {
+  it('强档全被挡、2 小时内好不了（一个额度用满、一个熔断 3 小时后到点）：下限降一档，往下派 grok（#2725）', () => {
     const r = dispatched(
       chooseRoute(
         heavy(
           routesOf({
             'opus-5.5': { quota: 'exhausted', blockers: ['quota-exhausted'] },
             'sonnet-5.5': {
-              breaker: { state: 'open', admit: 'none', reason: '连败 3 次', probeAt: at(1) },
+              breaker: { state: 'open', admit: 'none', reason: '连败 3 次', probeAt: at(3) },
             },
           }),
         ),
@@ -180,6 +182,21 @@ describe('重活先给强档', () => {
     );
     expect(r.modelId).toBe('grok-4.7');
     expect(order(r).slice(0, 2).sort()).toEqual(['opus-5.5', 'sonnet-5.5']);
+    expect(r.why).toContain('降一档到标准档');
+  });
+
+  it('强档一个额度用满、一个熔断 1 小时后到点：等强档，不降档（#2725）', () => {
+    const r = chooseRoute(
+      heavy(
+        routesOf({
+          'opus-5.5': { quota: 'exhausted', blockers: ['quota-exhausted'] },
+          'sonnet-5.5': {
+            breaker: { state: 'open', admit: 'none', reason: '连败 3 次', probeAt: at(1) },
+          },
+        }),
+      ),
+    );
+    expect(r.kind).toBe('wait');
   });
 
   it('强档被人关掉（开关关着）：照旧往下派 grok', () => {
@@ -211,9 +228,15 @@ describe('重活先给强档', () => {
     expect(r.verdicts.flatMap((v) => v.nudges.map((n) => n.kind))).not.toContain('strength-first');
   });
 
-  it('不在动手的用途（验收）给了档也不先给强档', () => {
+  it('不在动手的用途（验收）给了档也不先给强档；grok 是被验收的能力下限挡掉的（#2725）', () => {
     const r = dispatched(chooseRoute(heavy(routesOf(), { stage: 'verify' })));
-    expect(r.modelId).toBe('grok-4.7');
+    expect(r.modelId).toBe('sonnet-5.5');
+    expect(r.why).not.toContain('先给强档');
+    expect(r.why).toContain('够不上能力下限');
+    // 快档的验收不设下限：照人排的派 grok
+    expect(dispatched(chooseRoute(heavy(routesOf(), { stage: 'verify', tier: 'fast' }))).modelId).toBe(
+      'grok-4.7',
+    );
   });
 
   it('policy 把 strongFirstTiers 置空就关掉', () => {
