@@ -26,6 +26,8 @@ const CHECKED = [
   'hooks/pretool-kimi.mjs',
   'hooks/main-thread.mjs',
   'hooks/hook-timing.mjs',
+  'hooks/inbox-tick.mjs',
+  'hooks/steer-shown.mjs',
   'hooks/fresh-main.mjs',
   'hooks/git-run.mjs',
   'hooks/proxy-env.mjs',
