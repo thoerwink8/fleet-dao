@@ -31,13 +31,12 @@ export function parseRepoSlug(slug: string): RepoRef {
 
 /**
  * app = App 自己的 JWT（只调 /app/…）；agent / engine = 那个机器人在某个仓上的安装令牌（scope 不写 = 'api'，见 token-scopes.ts）；
- * user = 某人自己的 OAuth 用户令牌（#1989，明文令牌由调用方从库里解出来传进来）：列「我 GitHub 上能看到的仓」、
- * 把人自己的安装加仓/减仓，GitHub 只认本人令牌，App 机器人令牌看不到别人的个人仓。
+ * bearer = 已经换好的安装令牌原文（列这个安装能看到的仓：GET /installation/repositories 只认它，不认 JWT）。
  */
 export type Auth =
   | { as: 'app'; role: AppRole }
   | { as: AppRole; repo: RepoRef; scope?: TokenScope | undefined }
-  | { as: 'user'; token: string }
+  | { as: 'bearer'; token: string }
   | { as: 'anonymous' };
 
 export type Method = 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE';
@@ -266,10 +265,41 @@ export class GitHubClient {
     });
   }
 
+  /**
+   * 这个安装的访问令牌，不限定单个仓（请求体不写 repositories）。
+   * 用来调 GET /installation/repositories：限定到一个仓的令牌只能看见那一个仓。
+   * 只要 metadata:read，列仓够用；装上没有这项就换不出来，调用方如实报。
+   */
+  async accessTokenForInstallation(
+    role: AppRole,
+    installationId: number,
+    signal?: AbortSignal,
+  ): Promise<MintedToken> {
+    return this.tokens.get(`installation:${role}:${installationId}`, async () => {
+      const res = await this.request<{ token?: unknown; expires_at?: unknown; permissions?: unknown }>({
+        method: 'POST',
+        path: `/app/installations/${installationId}/access_tokens`,
+        auth: { as: 'app', role },
+        body: { permissions: { metadata: 'read' } },
+        idempotent: true,
+        signal,
+      });
+      const { token, expires_at: expiresAt, permissions } = res.data;
+      if (typeof token !== 'string' || typeof expiresAt !== 'string') {
+        throw unexpected('换安装令牌', {});
+      }
+      return {
+        token,
+        expiresAt: new Date(expiresAt),
+        permissions: isStringRecord(permissions) ? permissions : undefined,
+      };
+    });
+  }
+
   private async credential(auth: Auth, signal?: AbortSignal): Promise<string | null> {
     if (auth.as === 'anonymous') return null;
     if (auth.as === 'app') return this.appJwt(auth.role);
-    if (auth.as === 'user') return auth.token;
+    if (auth.as === 'bearer') return auth.token;
     return (await this.installationToken(auth.as, auth.repo, signal, auth.scope)).token;
   }
 

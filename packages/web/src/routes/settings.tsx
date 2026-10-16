@@ -655,11 +655,12 @@ export default function Settings() {
               </Section>
             ) : null}
 
-            {/* 从自己的 GitHub 加仓 / 移仓（#1989）：列本人能看到的仓，勾选接进派单，一键装 App。 */}
+            {/* 两个机器人已经装上的仓：接进或移出驾驶舱。新项目走本机 pnpm project add。 */}
             <div className="mt-4 border-t pt-4">
               <h3 className="text-heading">导入仓库</h3>
               <p className="mt-1 mb-3 text-meta text-muted-foreground">
-                连上你自己的 GitHub，这里列出你能看到的所有仓；接进来的仓「让 AI 接活」默认关着，要另外打开。
+                这里只列两个机器人已经装上的仓。新项目在本机跑 pnpm project add 做到底；接进来的仓「让 AI
+                接活」默认关着，要另外打开。
               </p>
               <RepoImportSection />
             </div>
