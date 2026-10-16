@@ -118,6 +118,21 @@ function deliveredKeys(tail, keyOf) {
 
 const INTERRUPTED_BACKGROUND_RE = /did(?:n['’]?t| not) finish before the previous session ended/i;
 const MAX_BACKGROUND_TEXT = 1200;
+/** 同一次重启的几条通知之间最多隔几行（中间会夹队列行） */
+const RESTART_BATCH_GAP = 8;
+
+/**
+ * 这一行是不是 Claude Code 自己发的「上一会话没跑完」通知。
+ * 真样本：{type:'user', origin:{kind:'task-notification'}, message:{content:'<task-notification>…<summary>… didn't finish before the previous session ended</summary>…'}}。
+ * @param {unknown} value
+ */
+function restartNotice(value) {
+  if (!isObj(value) || value.type !== 'user') return false;
+  if (!isObj(value.origin) || value.origin.kind !== 'task-notification') return false;
+  const text = textOf(isObj(value.message) ? value.message.content : undefined);
+  const summary = text.match(/<summary>\s*([\s\S]*?)\s*<\/summary>/i)?.[1] ?? '';
+  return INTERRUPTED_BACKGROUND_RE.test(summary);
+}
 
 /** @param {unknown} v */
 function textOf(v) {
@@ -140,18 +155,37 @@ function shortBackgroundText(text) {
  * @param {string} tail
  * @param {unknown} input
  */
-function interruptedBackgroundTasks(tail, input) {
-  const rawInput = isObj(input) ? JSON.stringify(input) : '';
-  const raw = `${tail}\n${rawInput}`;
-  if (!INTERRUPTED_BACKGROUND_RE.test(raw)) return null;
+function interruptedBackgroundTasks(tail) {
+  const lines = tail.split('\n');
+  const parsed = lines.map((text) => {
+    try {
+      return JSON.parse(text);
+    } catch {
+      return null;
+    }
+  });
+
+  // 只认 Claude Code 自己发的重启通知：type=user、origin.kind=task-notification、summary 里带原话。
+  // 钩子注入的上下文、助手的话、用户消息里引用这句，都不是通知。
+  const restartLines = [];
+  for (let i = 0; i < parsed.length; i++) if (restartNotice(parsed[i])) restartLines.push(i);
+  if (restartLines.length === 0) return null;
+  // 一次重启会连发好几条（每个任务一条，中间隔着队列行）；取最近一批：相邻两条隔得不远算同一批。
+  let first = restartLines.length - 1;
+  while (first > 0 && (restartLines[first] ?? 0) - (restartLines[first - 1] ?? 0) <= RESTART_BATCH_GAP)
+    first--;
+  const batch = restartLines.slice(first);
+  const boundary = batch[0] ?? 0;
+  const lastNotice = parsed[batch[batch.length - 1] ?? 0];
 
   /** @type {{ kind: 'agent' | 'command', id: string, ref: string, taskId?: string, description: string, line: number }[]} */
   const launched = [];
   const completed = new Set();
   const stoppedIds = new Set();
+  /** 调用没成功（被钩子挡掉等）的 tool_use id */
+  const failedCalls = new Set();
   /** @type {string[]} */
   const notificationTexts = [];
-  const lines = tail.split('\n');
 
   /** @param {unknown} value @param {number} line */
   const inspect = (value, line) => {
@@ -159,6 +193,12 @@ function interruptedBackgroundTasks(tail, input) {
     const content = isObj(value.message) ? value.message.content : undefined;
     const blocks = Array.isArray(content) ? content : [];
     for (const block of blocks) {
+      if (isObj(block) && block.type === 'tool_result' && block.is_error === true) {
+        if (typeof block.tool_use_id === 'string') failedCalls.add(block.tool_use_id);
+        continue;
+      }
+      // 通知之后派的不算上一会话留下的
+      if (line >= boundary) continue;
       if (!isObj(block) || block.type !== 'tool_use' || !isObj(block.input)) continue;
       const name = String(block.name ?? '');
       const spec = block.input;
@@ -187,37 +227,31 @@ function interruptedBackgroundTasks(tail, input) {
         });
       }
     }
-    const attachment = value.attachment;
-    const attachedText = isObj(attachment) ? textOf(attachment.prompt) : '';
-    const messageText = textOf(content);
-    const notification = `${attachedText}\n${messageText}`;
-    const interrupted = INTERRUPTED_BACKGROUND_RE.test(notification);
-    if (interrupted) notificationTexts.push(notification);
-    const status = notification.match(/<status>\s*([^<]+?)\s*<\/status>/i)?.[1]?.toLowerCase();
-    const taskId = notification.match(/<task-id>\s*([^<]+?)\s*<\/task-id>/i)?.[1]?.trim();
-    if (taskId) {
-      if (interrupted || status === 'stopped' || status === 'canceled' || status === 'cancelled')
-        stoppedIds.add(taskId);
-      else if (status === 'completed' || status === 'succeeded' || status === 'failed' || status === 'error')
+    // 任务通知（完成/停止）：只认 Claude Code 发的那种行
+    if (isObj(value.origin) && value.origin.kind === 'task-notification') {
+      const notification = textOf(content);
+      const status = notification.match(/<status>\s*([^<]+?)\s*<\/status>/i)?.[1]?.toLowerCase();
+      const taskId = notification.match(/<task-id>\s*([^<]+?)\s*<\/task-id>/i)?.[1]?.trim();
+      if (restartNotice(value)) {
+        if (batch.includes(line)) {
+          notificationTexts.push(notification);
+          if (taskId) stoppedIds.add(taskId);
+        }
+      } else if (
+        taskId &&
+        (status === 'completed' || status === 'succeeded' || status === 'failed' || status === 'error')
+      ) {
+        // 通知前后都算：通知前已收尾的不用补；用 SendMessage 续上后又收尾的也不用补
         completed.add(taskId);
+      }
     }
-    if (interrupted)
-      for (const m of notification.matchAll(
-        /(?:agentId|agent_id|taskId|task_id)\s*[:=]\s*["']?([A-Za-z0-9_.-]+)/gi,
-      ))
-        if (m[1]) stoppedIds.add(m[1]);
   };
 
   for (let line = 0; line < lines.length; line++) {
     const text = lines[line] ?? '';
-    let value;
-    try {
-      value = JSON.parse(text);
-    } catch {
-      value = null;
-    }
-    inspect(value, line);
+    inspect(parsed[line], line);
     // 启动回执通常紧跟 Agent tool_use；把真实 agentId 绑回最近一个尚未编号的代理。
+    if (line >= boundary) continue;
     const taskId = text.match(/(?:agentId|agent_id|taskId|task_id)\s*[:=]\s*["']?([A-Za-z0-9_.-]+)/i)?.[1];
     if (taskId) {
       const pending = [...launched].reverse().find((t) => !t.taskId && t.line <= line);
@@ -225,37 +259,15 @@ function interruptedBackgroundTasks(tail, input) {
     }
   }
 
-  if (isObj(input) && Array.isArray(input.background_tasks)) {
-    for (const task of input.background_tasks) {
-      if (!isObj(task)) continue;
-      const kind = task.type === 'shell' || task.type === 'command' ? 'command' : 'agent';
-      const id = String(task.id ?? task.task_id ?? task.agent_id ?? '').trim();
-      if (!id) continue;
-      launched.push({
-        kind,
-        id,
-        ref: id,
-        ...(typeof task.agent_id === 'string' ? { taskId: task.agent_id } : {}),
-        description:
-          shortBackgroundText(
-            kind === 'command'
-              ? [String(task.command ?? ''), String(task.description ?? '')]
-                  .filter((s) => s.trim() !== '')
-                  .join('；')
-              : [String(task.description ?? ''), String(task.prompt ?? '')]
-                  .filter((s) => s.trim() !== '')
-                  .join('；'),
-          ) || '（没有任务说明）',
-        line: Number.MAX_SAFE_INTEGER,
-      });
-    }
-  }
-
-  // 通知若明确列了编号，只保留这些；没有列编号时取未见完成通知的后台启动项。
+  // 通知列了编号就以它为准；没列编号时取通知前派出、没收到完成通知的后台启动项。
+  // 没起来（调用被挡掉、工具结果是错误）的不算。
+  const alive = launched.filter((t) => !failedCalls.has(t.ref));
+  const finished = (/** @type {{ id: string, taskId?: string }} */ t) =>
+    completed.has(t.id) || (t.taskId !== undefined && completed.has(t.taskId));
   const selected =
     stoppedIds.size > 0
-      ? launched.filter((t) => stoppedIds.has(t.id) || (t.taskId && stoppedIds.has(t.taskId)))
-      : launched.filter((t) => !t.taskId || !completed.has(t.taskId));
+      ? alive.filter((t) => (stoppedIds.has(t.id) || (t.taskId && stoppedIds.has(t.taskId))) && !finished(t))
+      : alive.filter((t) => !finished(t));
   const unique = [];
   const seen = new Set();
   for (const task of selected) {
@@ -274,38 +286,30 @@ function interruptedBackgroundTasks(tail, input) {
     const kind = /\b(?:Bash|PowerShell|Shell|command)\b/i.test(summary) ? 'command' : 'agent';
     for (const id of stoppedIds) {
       if (launched.some((task) => task.id === id || task.taskId === id)) continue;
+      if (completed.has(id)) continue;
       unique.push({ kind, id, ref: id, description: shortBackgroundText(summary), line: 0 });
     }
   }
-  const key = JSON.stringify({
-    stopped: [...stoppedIds].sort(),
-    tasks: unique.map((t) => [t.kind, t.id, t.description]),
-    notification: notificationTexts.join('\n').slice(0, 2000),
-  });
-  return { key, tasks: unique };
+  // key 绑在那批重启通知上（最后一条的 uuid，没有就用行位置）；之后再派任务、记录变长都不改它。
+  const noticeId =
+    isObj(lastNotice) && typeof lastNotice.uuid === 'string' ? lastNotice.uuid : `line-${boundary}`;
+  return { key: `restart:${noticeId}`, tasks: unique };
 }
 
 /**
- * 重启后 Claude Code 会告诉会话「didn't finish before the previous session ended」。
- * 把它变成能直接接手的上下文；同一批只提醒一次。
- * @param {unknown} input
+ * 重启后 Claude Code 会发一条「上一会话没跑完」的任务通知。
+ * 把它变成能直接接手的上下文；同一次重启只提醒一次（key 绑在那条通知上）。
  * @param {string} tail
  * @param {Record<string, unknown>} state
  */
-function interruptedBackgroundContext(input, tail, state) {
-  const found = interruptedBackgroundTasks(tail, input);
+function interruptedBackgroundContext(tail, state) {
+  const found = interruptedBackgroundTasks(tail);
   if (!found || found.key === state.backgroundRestartKey) return null;
   const agents = found.tasks.filter((t) => t.kind === 'agent');
   const commands = found.tasks.filter((t) => t.kind === 'command');
-  if (agents.length === 0 && commands.length === 0) {
-    return {
-      key: found.key,
-      text: '上一会话结束时有后台任务没跑完，但没从记录里认出代理编号或命令；请先查看重启通知和 transcript，再决定怎么续。',
-    };
-  }
-  const lines = [
-    '上一会话结束时没跑完、被停掉的后台任务（Claude Code 提示 “didn’t finish before the previous session ended”）：',
-  ];
+  // 通知里列的任务都已收尾（含用 SendMessage 续上后收尾的）：没有要补的
+  if (agents.length === 0 && commands.length === 0) return null;
+  const lines = ['上一会话结束时没跑完、被停掉的后台任务（Claude Code 重启通知里列出的）：'];
   if (agents.length > 0) {
     lines.push(...agents.map((t) => `子代理编号 ${t.id}：任务说明：${t.description}`));
     lines.push('请逐个用 SendMessage 按子代理编号续上；不要把已经有的任务凭空再派一遍。');
@@ -468,7 +472,6 @@ export async function tick(
   const restart =
     r.status === 'checked'
       ? interruptedBackgroundContext(
-          input,
           typeof input.transcript_path === 'string' ? transcriptTail(input.transcript_path) : '',
           state,
         )
