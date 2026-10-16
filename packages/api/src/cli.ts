@@ -876,11 +876,12 @@ async function openPgStore(url: string): Promise<{ store: Store; close(): Promis
 }
 
 async function openPgProject(url: string): Promise<{ port: ProjectPort; close(): Promise<void> }> {
-  const { createDb, findRepoProfile, setRepoProfile } = await import('@fleet-dao/db');
+  const { createDb, findRepoProfile, registerRepo, setRepoProfile } = await import('@fleet-dao/db');
   const { withStatementTimeout } = await import('@fleet-dao/store');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   return {
     port: {
+      register: (input) => registerRepo(db, input),
       find: (owner, name) => findRepoProfile(db, owner, name),
       setProfile: (input) => setRepoProfile(db, input),
     },
@@ -1268,6 +1269,7 @@ async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promis
         port: {
           find: async (owner, name) => (port ?? (await connect())).find(owner, name),
           setProfile: async (input) => (port ?? (await connect())).setProfile(input),
+          register: async (input) => (port ?? (await connect())).register(input),
         },
         operator: operatorName(deps.env),
         readFile: deps.readFile ?? ((path) => readFile(path, 'utf8')),

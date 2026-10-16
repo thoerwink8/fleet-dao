@@ -124,7 +124,7 @@ const newItem = (n: number, over: Record<string, unknown> = {}) => ({
   title: TITLES[n] ?? `独一无二的标题 ${n}`,
   kind: '需求',
   scene: `场景 ${n}`,
-  done: [`` + `页面上多出「按钮${n}」`],
+  done: [`页面上多出「按钮${n}」`],
   ...over,
 });
 
@@ -487,6 +487,39 @@ describe('executeGroomPlan · 补老单：追加补充，不改原文', () => {
     expect(after.ok).toBe(true);
   });
 
+  it('老单的验收条要线上证据 → 整理会话追加可从 diff 判的替代条，之后拉单读替代条', async () => {
+    const old = issue(3, {
+      body: FULL_BODY.replace('1. 页面上能看到「验收中」', '1. 发版后线上确认页面显示「验收中」'),
+    });
+    const f = fakeWrites();
+    const out = await executeGroomPlan(
+      plan({
+        amendments: [{ issue: 3, done: ['`packages/web/test/status.test.ts` 断言页面出现「验收中」'] }],
+      }),
+      ctxOf([old]),
+      f.writes,
+    );
+
+    expect(out.result.amended).toEqual([3]);
+    const text = String(f.calls.find((c) => c.kind === 'appendBody')?.args.text);
+    expect(text).toContain('## 怎么算做完（整理后的替代条）');
+    expect(text).toContain('packages/web/test/status.test.ts');
+    expect(text).not.toContain('发版后线上');
+
+    const merged = `${old.body.trimEnd()}\n\n${text}\n`;
+    const after = await readTaskBrief(
+      {
+        readIssue: async () => ({ number: 3, title: 't', body: merged, state: 'open' }),
+        readSpecDoc: async () => null,
+      },
+      { repo: { owner: 'acme', name: 'demo' }, issueNumber: 3 },
+    );
+    expect(after).toMatchObject({
+      ok: true,
+      brief: { acceptance: ['`packages/web/test/status.test.ts` 断言页面出现「验收中」'] },
+    });
+  });
+
   it('要补的节老单里都写了 / 已经有整理补充 → 不补', async () => {
     const f = fakeWrites();
     const amended = issue(4, { body: `${THIN_BODY}\n## ${AMEND_HEADING}\n\n补过了\n` });
@@ -730,6 +763,23 @@ describe('提示词', () => {
     mainHead: 'a'.repeat(40),
     now: NOW,
   };
+
+  it('命中 diff 外验收的单，提示词列出原条目并交给 amendments 改写', () => {
+    const prompt = renderGroomPrompt({
+      ...promptBase,
+      issues: [
+        issue(2032, {
+          body: FULL_BODY.replace('1. 页面上能看到「验收中」', '1. healthz 回到 ok:true。'),
+        }),
+      ],
+      mergedPulls: [],
+    });
+    expect(prompt).toContain('整理动作');
+    expect(prompt).toContain('healthz 回到');
+    expect(prompt).toContain('amendments 的 done');
+    expect(prompt).toContain('同级替代条');
+  });
+
   const ledger = issue(139, { title: 'design 拆分（总账）' });
 
   it('有已合并分片、没有开着的分片：提示词里出现该总账的分片线索', () => {

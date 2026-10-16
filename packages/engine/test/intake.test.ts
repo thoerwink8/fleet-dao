@@ -92,6 +92,26 @@ const bodyWith = (modules: string[], criteria: string[] = ['1. 页面上能看�
     '',
   ].join('\n');
 
+const ISSUE_2032_BODY = bodyWith(
+  ['`packages/api` healthz 的 `deploy_lag` 检查；`deploy/france.sh`'],
+  [
+    '1. 确认落后的是哪些「相关提交」（人工档路径），是否确需整套 `bash /srv/fleet-dao/deploy/france.sh`（或以 root 等价应用）。',
+    '2. 重跑/应用后 healthz `deploy_lag` 回到 `ok:true`（整体是否仍因 #2023 的 github_app 503 另论）。',
+    '3. 若属可接受的短暂窗口或已有意暂缓：在本单注明原因与可接受状态后关单，避免监督反复当新断链开单。',
+    '4. 顺带：恢复指挥官到法国机的 SSH（见 #1775），以便断链时能做最小恢复。',
+  ],
+);
+
+const ISSUE_2082_BODY = bodyWith(
+  ['`packages/api` healthz canary 检查；引擎 canary/全流程巡检'],
+  [
+    '1. 查清 10-14 08:40 那轮 canary 在「记账」失败的具体原因（日志、失败单号、台账写入结果）。',
+    '2. 修好后让 canary 再跑通一轮（或明确「无待验」且 healthz canary 不再因本断点报红）。',
+    '3. healthz 至少不再因 canary_broken「记账」报红（整体是否仍因 #2023/#2032 503 另论）。',
+    '4. 顺带：恢复指挥官到法国机的 SSH（见 #1775），以便断链时能做最小恢复。',
+  ],
+);
+
 /** 没有「已知的模块」一节的老单：场景、原话、怎么算做完。路径检查不因为缺这一节就放行。 */
 const bodyWithoutModules = (
   scene = '创始人要在驾驶舱看到每张单走到哪一步。',
@@ -999,6 +1019,21 @@ describe('runIntakeJob · 一轮', () => {
     expect(offDiffKey([{ item: 'a', words: ['截图'] }])).not.toBe(
       offDiffKey([{ item: 'b', words: ['截图'] }]),
     );
+  });
+
+  it.each([
+    ['#2032 真单原文', 2032, ISSUE_2032_BODY, ['healthz', '本单注明', 'SSH']],
+    ['#2082 真单原文', 2082, ISSUE_2082_BODY, ['日志', 'healthz', 'SSH']],
+  ] as const)('%s：换了说法也命中，交给整理会话改写，不起任务', async (_name, number, body, words) => {
+    const h = harness({}, { issues: [issue({ number, body })] });
+    const first = await runIntakeJob(h.deps);
+
+    expect(h.started).toEqual([]);
+    expect(h.comments).toHaveLength(1);
+    expect(h.comments[0]?.body).toContain('是哪一条');
+    for (const word of words) expect(h.comments[0]?.body).toContain(word);
+    expect(first.found).toBe(1);
+    expect(first.outcome).toBe('ok');
   });
 
   it('缺的内容变了 → 键变了，是另一条留言', async () => {
