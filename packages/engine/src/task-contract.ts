@@ -290,6 +290,28 @@ export interface ColdVerifyInput {
   round: 1 | 2;
   /** 引擎在会话收场后自己跑过的测试输出（有才给）：放进验收材料（决定 0093）。老历史里没有这个字段。 */
   testOutput?: string;
+  /**
+   * 接回（#2848，和动手段的 RunSegmentInput.attach 同一个意思）：上一次 coldVerify 交回 detached，验收会话还在跑。
+   * 给了就不选路、不拼提示词、不起会话，接回那一次会话、等它收场，结论照常贴、结局记到原来那一行 runs。老历史里没有这个字段。
+   */
+  attach?: ColdVerifyAttach;
+}
+
+/** 脱开引擎跑着的那一次验收会话（#2848）：接回要的东西。 */
+export interface ColdVerifyAttach {
+  /** runs 编号（收发目录也按它）。 */
+  runId: string;
+  /** 起的时刻：接回后总时长照它算，结局记回那一行用同一个起点。 */
+  startedAt: string;
+  /** 验它的族、模型、路由、池：接回时登记切号、记账照原样。 */
+  family: string;
+  modelId: string;
+  routeId: string;
+  poolId: string;
+  /** 选路那句「为什么派它」：接回收场那一笔整行覆盖开跑那一行，带上原来的。选路没给就没有。 */
+  routeWhy?: string;
+  /** 会话的工作目录（验收的空目录，归会话用户）：放手时留着，接回收场后删。 */
+  cwd: string;
 }
 
 export interface ColdVerifyResult {
@@ -316,6 +338,11 @@ export interface ColdVerifyResult {
    * 老历史里没有这个字段。
    */
   outOfScope?: string[];
+  /**
+   * 引擎要走了（发版切版本、重启），验收会话没停、脱开引擎接着跑（#2848）：没有结论，不是没过、不算一轮。
+   * 工作流隔一会儿带上它再调 coldVerify（ColdVerifyInput.attach），由下一个引擎接回。老历史里没有这个字段。
+   */
+  detached?: ColdVerifyAttach;
 }
 
 /** 改到了哪些要人拍的路径。空＝除了 CI 和冷验收没有别的门。 */
