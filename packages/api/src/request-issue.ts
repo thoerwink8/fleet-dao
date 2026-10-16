@@ -16,6 +16,7 @@ import {
   issueBodyTooLong,
   KIND_LABELS,
 } from '@fleet-dao/conventions';
+import { currentVersion } from '@fleet-dao/core';
 import type { RequestChannel, RequestDraft, RequestDraftField } from '@fleet-dao/shared';
 
 /** 开单要的外部能力（引擎机器人的 GitHub）。真实现在 main.ts 用 @fleet-dao/github 装配；测试换成假的。 */
@@ -40,6 +41,17 @@ export interface RequestIssuePort {
     repo: { owner: string; name: string };
     issueNumber: number;
   }): Promise<{ state: 'open' | 'closed'; stateReason: string | null }>;
+}
+
+/**
+ * 驾驶舱提需求开的单挂当前版本（#2683）：创始人开的进当前版本（docs/workflow.md「进度和单」），不落未排期——落了会被闲置清理关掉。
+ * 当前版本＝还开着的 v<N> 里程碑（一周一版、到期自动收口，永远只开一个；万一不止一个取 N 最小的，和拉单排序同一份认法）。
+ * 一个开着的 v<N> 都没有就不挂（未排期），读不到里程碑照抛：不拿「没读到」当「没有当前版本」。
+ */
+export async function currentMilestoneOf(
+  readOpenMilestones: () => Promise<readonly { number: number; title: string }[]>,
+): Promise<number | null> {
+  return currentVersion(await readOpenMilestones())?.milestone.number ?? null;
 }
 
 export const ISSUES_NOT_HERE = '这台后端没接上 GitHub（开发环境，或机器人凭据没读到），开不了单';
