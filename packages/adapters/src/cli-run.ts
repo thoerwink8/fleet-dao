@@ -48,6 +48,8 @@ export interface AgentRunOptions {
   onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
   /** 进程起来了：引擎记下进程号和 scope，重启后用 reapSession 收旧会话。 */
   onSpawn?: (info: SpawnInfo) => unknown;
+  /** 流里确认了真会话号时调用；没有会话号的执行体不调用。 */
+  onSessionId?: (id: string) => void;
   signal?: AbortSignal;
   now?: () => Date;
   /** 走文件、不接管道（会话脱开引擎进程）；attach = 引擎重启后接回。 */
