@@ -40,8 +40,13 @@ async function note(
 const keys = async (now = NOW) => (await pendingFeishuPushes(t.db, now, 50)).map((p) => p.dedupeKey);
 
 describe('feishuPushableSince（推送分级）', () => {
-  const since = (level: 'decision' | 'alert' | 'daily', dedupeKey: string) =>
-    feishuPushableSince({ level, dedupeKey, createdAt: NOW });
+  const since = (level: 'decision' | 'alert' | 'daily', dedupeKey: string, redPushedBefore?: boolean) =>
+    feishuPushableSince({
+      level,
+      dedupeKey,
+      createdAt: NOW,
+      ...(redPushedBefore === undefined ? {} : { redPushedBefore }),
+    });
   const escalated = new Date(NOW.getTime() + 120 * MIN);
   const redEscalated = new Date(NOW.getTime() + 60 * MIN);
 
@@ -56,6 +61,12 @@ describe('feishuPushableSince（推送分级）', () => {
     expect(FEISHU_MAIN_RED_ESCALATE_MS).toBe(60 * MIN);
     expect(since('alert', 'task:o/r#1:park:1')).toEqual(escalated);
     expect(since('daily', 'feishu:main-red:abc')).toEqual(redEscalated);
+  });
+
+  it('主线已恢复：之前真推出去过主线红才推，没推过不打扰', () => {
+    expect(since('daily', 'feishu:main-recovered:abc', true)).toEqual(NOW);
+    expect(since('daily', 'feishu:main-recovered:abc', false)).toBeNull();
+    expect(since('daily', 'feishu:main-recovered:abc')).toBeNull();
   });
 
   it('白名单里的几类报警都是开满 120 分钟才推', () => {
@@ -119,11 +130,12 @@ describe('pendingFeishuPushes', () => {
     expect(await keys(new Date(NOW.getTime() + 41 * MIN))).toContain('feishu:main-red:abc');
   });
 
-  it('主线已恢复不在白名单：推过主线红也不推', async () => {
+  it('主线已恢复：之前 24 小时内真推出去过主线红才推', async () => {
     const red = await note('feishu:main-red:aaa', 'daily', ago(3 * HOUR), { resolvedAt: ago(1 * HOUR) });
     await note('feishu:main-recovered:aaa', 'daily', ago(1 * HOUR));
-    await recordFeishuDelivery(t.db, { notificationId: red, at: ago(2 * HOUR), messageId: 'om_red' });
     expect(await keys()).toEqual([]);
+    await recordFeishuDelivery(t.db, { notificationId: red, at: ago(2 * HOUR), messageId: 'om_red' });
+    expect(await keys()).toEqual(['feishu:main-recovered:aaa']);
   });
 
   it('送到了不再给；没送成按退避再给，试满不再给', async () => {

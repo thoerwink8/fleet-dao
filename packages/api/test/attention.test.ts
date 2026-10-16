@@ -78,7 +78,7 @@ describe('fleet-api attention', () => {
     ]);
   });
 
-  it('主线已恢复：不在白名单，不列', async () => {
+  it('主线已恢复：之前没真推出去过主线红就不列', async () => {
     await add('feishu:main-recovered:1', 'daily', '主线恢复了');
     const r = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
     expect(r.notes).toEqual([]);
