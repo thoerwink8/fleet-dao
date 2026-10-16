@@ -2,7 +2,7 @@
 // 真 Temporal 测试服务端上的工作流。需求里的每一种都故意造一次：停了（stale）、连着失败（failing）、从没跑过（never）、
 // 恢复了自动撤（写清为什么）、读不到登记表算没查成、推送没写进去记没跑成下一轮重推。看门狗自己停了由后端现算，
 // 在 packages/api 的 watchdog-health.test.ts。
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -859,6 +859,30 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     expect(card?.title).toBe('发版要人看：新版没发成或退回了');
     expect(card?.body).toContain('自动发版没停');
     expect(card?.body).not.toContain('不会再发');
+  });
+
+  it('只改文档的版本发成了：历史末行是 release、进度记录不是 failed，不报「新版没发成或退回了」', async () => {
+    const prev = '1478b87a15f7'.padEnd(40, 'a');
+    const next = 'b0ef012b26a1'.padEnd(40, 'b');
+    history(`2026-10-16T02:08:44Z ${prev} release`, `2026-10-16T02:09:00Z ${next} release`);
+    writeFileSync(
+      join(dir, '.train', 'release-train.json'),
+      JSON.stringify({
+        schema: 1,
+        status: 'done',
+        phase: 8,
+        startedAt: '2026-10-16T02:06:00.000Z',
+        target: { kind: 'sha', value: next },
+      }),
+    );
+    writeFileSync(join(dir, '.auto', 'state.json'), JSON.stringify({ auto: { note: '在用的就是主线头' } }));
+    symlinkSync(next, join(dir, 'current'));
+    await runWatchdogJob(wd());
+    expect(await openKeys()).toEqual([]);
+    const train = JSON.parse(readFileSync(join(dir, '.train', 'release-train.json'), 'utf8')) as {
+      status: string;
+    };
+    expect(train.status).not.toBe('failed');
   });
 
   it('重放 2026-10-14 22:58Z：一趟正常自动发版在走（真格式进度记录 running）不报，挂在上一版身上的误报撤掉；超过阈值才报、键写正在发的；发完撤', async () => {
