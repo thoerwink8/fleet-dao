@@ -52,7 +52,6 @@ describe('假后端：任务详情的用量汇总', () => {
       running: 0,
       missingTokens: 0,
       missingCache: 1,
-      noQueue: 4,
     });
     expect(d.usage.total.cost.subscription).toMatchObject({ runs: 4, missing: 2 });
     expect(d.usage.bySegment.map((s) => [s.segment, s.byModel.map((m) => m.model)])).toEqual([

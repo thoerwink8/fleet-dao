@@ -4,7 +4,6 @@ import {
   hardBanFor,
   type Model,
   type Route,
-  type SessionRun,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { NotificationRecord, SegmentRunRecord } from '../src/ports.ts';
@@ -14,7 +13,6 @@ import {
   jobView,
   routeLookup,
   routeProblem,
-  runView,
   segmentRunViews,
   usageView,
 } from '../src/views.ts';
@@ -205,40 +203,17 @@ describe('任务详情的花费分清按量、套餐内', () => {
     { id: 'm', name: '按量接口', billing: 'metered', enabled: true },
   ];
   const onChannel = (id: string, channelId: string): Route => ({ ...route(id, opus.id), channelId });
-  const ended = (id: string, routeId: string, costUsd?: number): SessionRun => ({
-    id,
-    stage: 'execute',
-    routeId,
-    whyRoute: '测试',
-    queuedAt: '2026-09-27T01:00:00.000Z',
-    startedAt: '2026-09-27T01:01:00.000Z',
-    endedAt: '2026-09-27T01:11:00.000Z',
-    outcome: 'ok',
-    ...(costUsd === undefined ? {} : { costUsd }),
-  });
-
-  it('计费方式从路由所在的渠道来：会话带上它，汇总按它分', () => {
+  it('计费方式从路由所在的渠道来', () => {
     const route = routeLookup([onChannel('r-sub', 'c'), onChannel('r-api', 'm')], [opus], channels);
-    expect(runView(ended('a', 'r-api', 0.04), route('r-api')).billing).toBe('metered');
-    const usage = usageView(
-      [ended('a', 'r-api', 0.04), ended('b', 'r-sub', 0.25), ended('c', 'r-sub')],
-      route,
-    );
-    expect(usage.total.cost).toEqual({
-      metered: { runs: 1, usd: 0.04, missing: 0 },
-      subscription: { runs: 2, usd: 0.25, missing: 1 },
-      unknown: { runs: 0, usd: 0, missing: 0 },
-    });
+    expect(route('r-api').billing).toBe('metered');
+    expect(route('r-sub').billing).toBe('subscription');
   });
 
-  it('渠道查不到、路由查不到、没传渠道表：计费方式留空，汇总记进分不清，不猜成套餐内', () => {
+  it('渠道查不到、路由查不到、没传渠道表：计费方式留空，不猜成套餐内', () => {
     const route = routeLookup([onChannel('r-lost', 'gone'), onChannel('r-sub', 'c')], [opus], channels);
     expect(route('r-lost').billing).toBeUndefined();
     expect(route('r-none').billing).toBeUndefined();
     expect(routeLookup([onChannel('r-sub', 'c')], [opus])('r-sub').billing).toBeUndefined();
-    const usage = usageView([ended('a', 'r-lost', 0.1), ended('b', 'r-none')], route);
-    expect(usage.total.cost.unknown).toEqual({ runs: 2, usd: 0.1, missing: 1 });
-    expect(usage.total.cost.subscription.runs).toBe(0);
   });
 
   it('三段的一笔：模型名查目录（查不到照写模型编号），计费方式查渠道（渠道没记、查不到都不给，汇总记进分不清）', () => {
@@ -264,7 +239,7 @@ describe('任务详情的花费分清按量、套餐内', () => {
       ['mystery-9', null],
       ['GPT 5.6', null],
     ]);
-    const usage = usageView([], routeLookup([], []), views);
+    const usage = usageView(views);
     expect(usage.total.cost.metered).toEqual({ runs: 1, usd: 0.1, missing: 0 });
     expect(usage.total.cost.unknown).toEqual({ runs: 2, usd: 0.2, missing: 0 });
   });

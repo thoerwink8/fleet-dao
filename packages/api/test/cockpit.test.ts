@@ -111,11 +111,11 @@ describe('看板与任务', () => {
     const detail = TaskDetailResponse.parse(
       await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie } })).json(),
     );
-    // 老流程会话表 #2357 删了，任务详情的老会话恒为空（三段的流水在 segmentRuns）
-    expect(detail.runs).toEqual([]);
+    // 老流程会话表 #2357 删了：任务详情不再有老会话这个字段（三段的流水在 segmentRuns）
+    expect(detail).not.toHaveProperty('runs');
   });
 
-  it('任务详情带用量汇总：按模型、按阶段、整张合计；没读到的花费记次数，不当成 0；还在跑的只记在跑', async () => {
+  it('任务详情带用量汇总：按模型、按段、整张合计；没读到的花费记次数，不当成 0；还在跑的只记在跑', async () => {
     const h = harness();
     const { cookie } = await h.login();
     const { usage } = TaskDetailResponse.parse(
@@ -131,7 +131,7 @@ describe('看板与任务', () => {
       missingCost: 0,
     });
     expect(usage.byModel).toEqual([]);
-    expect(usage.byStage).toEqual([]);
+    expect(usage).not.toHaveProperty('byStage');
   });
 
   describe('三段的单（runs 表）：任务详情按段、按模型，读不到的逐笔写明原因', () => {
@@ -146,7 +146,6 @@ describe('看板与任务', () => {
 
     it('每一笔：段、模型名（查模型目录）、计费方式（查渠道）、派工档、耗时；兜底对上的标明；读不到的带原因', async () => {
       const d = await detailOf(harness(), IDS.task13);
-      expect(d.runs).toEqual([]);
       expect(
         d.segmentRuns.map((r) => [r.id, r.segment, r.modelName, r.tier ?? null, r.matchedBy, r.durationMs]),
       ).toEqual([
@@ -170,7 +169,7 @@ describe('看板与任务', () => {
       expect(reasons(verify)).toEqual({ cost: '花费没记到' });
     });
 
-    it('用量按段（对题、动手、验收），每段再按模型；整张合计把三段算进去，排队记作没读到（noQueue），不当 0', async () => {
+    it('用量按段（对题、动手、验收），每段再按模型；整张合计把三段算进去', async () => {
       const { usage } = await detailOf(harness(), IDS.task13);
       expect(
         usage.bySegment.map((s) => [
@@ -192,8 +191,8 @@ describe('看板与任务', () => {
         costUsd: 1.86,
         cost: { subscription: { runs: 2, usd: 1.86, missing: 1 } },
       });
-      expect(usage.total).toMatchObject({ runs: 4, running: 0, noQueue: 4, queueMs: 0, missingCost: 2 });
-      expect(usage.byStage).toEqual([]);
+      expect(usage.total).toMatchObject({ runs: 4, running: 0, missingCost: 2 });
+      expect(usage).not.toHaveProperty('byStage');
       expect(usage.byModel.map((m) => [m.model, m.runs])).toEqual([
         ['opus-5.5', 2],
         ['kimi-k3', 1],
