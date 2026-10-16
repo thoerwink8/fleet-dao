@@ -1,4 +1,5 @@
 import { answerResolves, NO_OPTIONS_TEXT } from '@fleet-dao/shared';
+import { useQueryClient } from '@tanstack/react-query';
 import {
   ArrowUpRight,
   Bell,
@@ -9,12 +10,13 @@ import {
   Send,
   TriangleAlert,
 } from 'lucide-react';
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { brand } from '#brand';
 import {
   errorText,
+  keys,
   NOTIFICATIONS_PAGE,
   useAnswerNotification,
   useMe,
@@ -647,7 +649,42 @@ export default function Notifications() {
   const status = params.get('status') === 'all' ? 'all' : 'open';
   const level = (LEVELS.find((l) => l.id === params.get('level'))?.id ?? 'all') as 'all' | NotificationLevel;
   const [limit, setLimit] = useState(NOTIFICATIONS_PAGE);
+  const qc = useQueryClient();
+  // 必须在 useNotifications 订阅之前拍下来：订阅发生在渲染里，拍晚了看到的是这一页自己刚发起的那次。
+  // 外壳角标和这一页共用 ['notifications', status]。全局 staleTime（5 秒）内进页不重读；
+  // 那次读取还在飞时，新观察者只跟上、不另开。后端若在进页前刚断，跟上的是断之前发出的，
+  // 回来仍是成功，页面就把旧的当成这次读成了（e2e 08「用着用着后端断了」时红时绿）。
+  const [entry] = useState(() => {
+    const state = qc.getQueryState(keys.notifications(status));
+    return {
+      hadData: state?.data !== undefined,
+      busy: state?.fetchStatus === 'fetching' || state?.fetchStatus === 'paused',
+      invalidated: state?.isInvalidated === true,
+      updatedAt: state?.dataUpdatedAt ?? 0,
+    };
+  });
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useNotifications(status, limit);
+  const rereadOnce = useRef(false);
+  useEffect(() => {
+    if (rereadOnce.current) return;
+    const raw = qc.getDefaultOptions().queries?.staleTime;
+    const staleMs = typeof raw === 'number' ? raw : 0;
+    const fresh =
+      entry.hadData &&
+      !entry.busy &&
+      !entry.invalidated &&
+      staleMs > 0 &&
+      Date.now() - entry.updatedAt < staleMs;
+    // 不新鲜、也没有在飞的读取：进页自己的那次订阅会读，不必再强制一次。
+    if (!entry.busy && !fresh) return;
+    rereadOnce.current = true;
+    // 在飞且还没有数据时，refetch 会跟上那一次而不是另开（cancelRefetch 只在已有数据时才取消）。
+    // 先取消，晚到的成功就盖不掉这次失败。这一页卸了也要把补读做完，外壳才不会停在没数据上。
+    void (async () => {
+      if (entry.busy) await qc.cancelQueries({ queryKey: keys.notifications(status) });
+      await refetch();
+    })();
+  }, [qc, refetch, entry, status]);
   const { data: me } = useMe();
   const resolve = useResolveNotification();
   const answerMutation = useAnswerNotification();
