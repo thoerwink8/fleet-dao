@@ -365,6 +365,72 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     expect(world.states.some((s) => s.doing.includes('自动换一条路由重派一次'))).toBe(true);
   });
 
+  const START_TO_CLOSE = {
+    ok: false as const,
+    runId: null,
+    outcome: 'failed' as const,
+    evidence: {
+      code: 'timeout_start_to_close',
+      message: 'activity StartToClose timeout',
+      quotaExhausted: false,
+    },
+  };
+
+  it('引擎活动超时（timeout_start_to_close，#2824）：第二次原文一样不挂整单，避开这条路由重派', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n <= 2 ? START_TO_CLOSE : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(3);
+    expect(calls.segment[1]?.route.routeId).toBe(calls.segment[0]?.route.routeId);
+    expect(calls.segment[2]?.route.routeId).not.toBe(calls.segment[0]?.route.routeId);
+    expect(calls.segment[2]?.route.modelId).toBe(calls.segment[0]?.route.modelId);
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks[2]).toMatchObject({ avoidRouteIds: ['r1'], avoidModelIds: [], avoidPoolIds: [] });
+    expect(picks[2]?.avoidFamilies).toBeUndefined();
+    expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
+    expect(world.states.some((s) => s.phase === 'parked')).toBe(false);
+    expect(
+      world.states.some(
+        (s) => s.doing.includes('自动换一条路由重派一次') && s.doing.includes('timeout_start_to_close'),
+      ),
+    ).toBe(true);
+  });
+
+  it('【故意造出的失败】活动超时换了路由、同一模型再避开之后还是超时：这回停下等人', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async () => START_TO_CLOSE,
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await env.sleep('10 minutes');
+        const stalled = await statusUntil(h, parked, '活动超时连败到预算，停下等人');
+        expect(stalled.doing).toContain('引擎这边丢了这一步');
+        expect(stalled.lastProblem).toContain('和上一次的原文一字不差，原路再试不会变');
+        const models = calls.segment.map((s) => s.route.modelId);
+        expect(models).toContain('m1');
+        expect(models).toContain('m2');
+        const picks = world.callsOf('pickRoute').map((c) => c.input);
+        expect(picks.some((p) => p.avoidRouteIds.includes('r1'))).toBe(true);
+        expect(picks.some((p) => p.avoidModelIds.includes('m1'))).toBe(true);
+        expect(picks.every((p) => p.avoidFamilies === undefined)).toBe(true);
+        await h.terminate('测完了');
+      },
+      { tasks },
+    );
+  });
+
   it('中转这一路额度用完或欠费（QT3，#2249）：不挂起，当场避开那个池换一条路由重派', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({

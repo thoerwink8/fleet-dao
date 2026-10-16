@@ -47,8 +47,8 @@ describe('接口跑在真库上', () => {
     const board = BoardResponse.parse(await get(`/api/repos/${IDS.repo}/board`));
     expect(board.tasks.map((task) => task.id)).toContain(IDS.task12);
     const detail = TaskDetailResponse.parse(await get(`/api/tasks/${IDS.task12}`));
-    // 老流程的会话表 09-29 起没人写、已删（#2357）：任务详情里老流程的会话、用量恒为空，三段的流水另有用例（下面 runs 表那一组）
-    expect(detail.runs).toEqual([]);
+    // 老流程的会话表 09-29 起没人写、已删（#2357）：任务详情不再有老会话这个字段，用量也就没有可汇总的，三段的流水另有用例（下面 runs 表那一组）
+    expect(detail).not.toHaveProperty('runs');
     expect(detail.usage.total.runs).toBe(0);
     // 登录本身也落了库里的操作记录。
     expect(await t.db.select().from(auditLog).where(eq(auditLog.action, 'login'))).toHaveLength(1);
@@ -184,7 +184,7 @@ describe('三段的流水（runs 表）跑在真库上：任务详情按段、�
       ['manual', 2, ['kimi-k3', 'opus-5.5']],
       ['verify', 1, ['gpt-5.6']],
     ]);
-    expect(d.usage.total).toMatchObject({ runs: 4, noQueue: 4, missingCost: 2 });
+    expect(d.usage.total).toMatchObject({ runs: 4, missingCost: 2 });
   });
 
   it('【失败】起止缺一头：库里一段 ended_at、outcome 都空，单子却已经结束——不当在跑，耗时没读到并写明原因', async () => {
