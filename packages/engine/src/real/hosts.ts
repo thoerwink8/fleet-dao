@@ -98,6 +98,7 @@ import {
   routeEffortProblem,
 } from '@fleet-dao/shared';
 import { hostName } from '../routing/names.ts';
+import { MIRASIM_HANDLE_FILE, readMirasimHandle, writeMirasimHandle } from './session-handoff.ts';
 
 /** 引擎接上的执行方式。加一家：写它的驱动，探针跟着就能探、选路跟着就派。 */
 export const WIRED_HOSTS = [
@@ -299,6 +300,11 @@ export interface HostReport {
    * 失败信息里没有就接上，失败分流靠它认出是哪一种。Claude 的报错在流里、已经在判定原因里，不给。
    */
   rawError?: string;
+  /**
+   * 放手了（只有 Mirasim，#2815）：引擎停机、插头只断开连接、没发 stop，会话在服务端接着跑；这份报告不是结局
+   * （facts 里没有终态），调用方（segment-spawner）写放手标记、交回 detached。
+   */
+  detached?: true;
   wallMs: number;
   stderrTail: string;
 }
@@ -882,6 +888,19 @@ function mirasimDriver(
       }
       const effort = applySessionEffort('mirasim', spec);
       const agent = mirasimAgentFor(effort.model, spec.executor);
+      // 脱开引擎跑（#2815）：收发目录里只放交接单。接回时凭它里的会话号、轮次号重新订阅；读不到就不能接，明说，
+      // 不当成起新会话（那会再烧一次额度、还把旧会话丢在服务端）
+      const io = hooks.io;
+      let attach: { sessionKey: string; taskId?: string } | undefined;
+      if (io?.attach) {
+        const handle = await readMirasimHandle(io.dir);
+        if (!handle) {
+          throw new Error(
+            `接回 Mirasim 会话 ${spec.runId} 没接成：收发目录 ${io.dir} 里没有交接单（${MIRASIM_HANDLE_FILE}），读不到会话号`,
+          );
+        }
+        attach = { sessionKey: handle.sessionKey, ...(handle.taskId ? { taskId: handle.taskId } : {}) };
+      }
       // spec.cgroup 这里不用：不在本机起 fleet-agent-<runId>.scope。用量不采，原因在 segment-spawner。
       const report = await run(
         {
@@ -910,10 +929,21 @@ function mirasimDriver(
           ...(hooks.now ? { now: hooks.now } : {}),
           ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
           ...(hooks.onTranscript ? { onTranscript: hooks.onTranscript } : {}),
+          ...(io?.release ? { release: io.release } : {}),
+          ...(attach ? { attach } : {}),
           // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）。accepted 也就是「起来了」：引擎起会话
           // 要等 onSpawn，不报它等满 spawnTimeoutMs 一律判 SPAWN_TIMEOUT（09-28 上线后这条路由一个会话都没起成）。
           // 没有我们 spawn 的进程：pid 记 0（sessions.ts 认 0 是「没有根进程」，不拿它去杀）。
           onAccepted: (info) => {
+            // 交接单一接下就写（放手来得再快也有）；写不进抛出去，插头记进 hookError——不吞：没有它就接不回
+            if (io && !io.attach) {
+              writeMirasimHandle(io.dir, {
+                runId: spec.runId,
+                sessionKey: info.sessionKey,
+                ...(info.taskId ? { taskId: info.taskId } : {}),
+                acceptedAt: info.acceptedAt,
+              });
+            }
             hooks.onSpawn?.({ pid: 0, runId: spec.runId, startedAt: info.acceptedAt });
             hooks.onSessionId?.(info.sessionKey);
           },
@@ -942,6 +972,7 @@ export function mirasimReport(report: MirasimRunReport): HostReport {
     usage: summary.usage,
     ...defined('actualModel', summary.actualModel),
     ...defined('answer', text || undefined),
+    ...(report.detached ? { detached: true as const } : {}),
     wallMs: report.wallMs,
     stderrTail: '',
   };

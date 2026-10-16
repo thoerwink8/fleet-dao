@@ -16,6 +16,7 @@ import {
   type SessionUser,
   StopReason,
   sessionProxyEnv,
+  stopMirasimSession,
   switchSessionOrg,
 } from '@fleet-dao/adapters';
 import type { RunCommand } from '@fleet-dao/adapters/quota';
@@ -108,9 +109,10 @@ import {
 } from './route-wake.ts';
 import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
 import { createPlanSegmentResume, createSegmentSettled } from './segment-resume.ts';
+import { reportSubagentDefs } from './segment-settings.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { createSelfCheck } from './self-check.ts';
-import { DEFAULT_SESSION_IO_ROOT, sessionHandoff } from './session-handoff.ts';
+import { DEFAULT_SESSION_IO_ROOT, type MirasimHandle, sessionHandoff } from './session-handoff.ts';
 import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
 import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } from './subagents-file.ts';
@@ -149,6 +151,10 @@ export interface RealPortsDeps {
    * 动手会话收发目录的根（#2238，session-handoff.ts）：收孤儿时认放手标记，等人接回的不收。不给 = 不认（测试）。
    */
   sessionIoRoot?: string;
+  /**
+   * 放手的 Mirasim 会话过了时限没人接回时，给服务端发 stop（#2815，orphan-reap.ts）。不给 = 服务端的会话留着（测试）。
+   */
+  stopMirasim?: (handle: MirasimHandle) => Promise<{ confirmed: boolean; detail: string }>;
   /** 以下测试用。 */
   session?: Partial<{ helper: string; sudo: readonly string[]; gitBin: string; shBin: string }>;
   now?: () => Date;
@@ -206,6 +212,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
       ...(deps.session?.helper ? { helper: deps.session.helper } : {}),
       ...(deps.session?.sudo ? { sudo: deps.session.sudo } : {}),
       ...(deps.sessionIoRoot ? { ioRoot: deps.sessionIoRoot } : {}),
+      ...(deps.stopMirasim ? { stopMirasim: deps.stopMirasim } : {}),
       ...(deps.now ? { now: deps.now } : {}),
       ...(deps.log ? { log: deps.log } : {}),
     }),
@@ -839,6 +846,8 @@ export function realPortsFromEnv(
     exec,
     sessionOrg,
     sessionIoRoot: handoff.root,
+    // 放手的 Mirasim 会话过了时限没人接回：经桥接以会话用户的身份连服务端发 stop（法国只有一个会话用户）
+    stopMirasim: (handle) => stopMirasimSession(mirasim.connect(SESSION_USERS[0]), handle.sessionKey),
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     ...(extra.drain ? { drain: extra.drain } : {}),
@@ -1087,6 +1096,7 @@ export function realPortsFromEnv(
       runsDir,
       sessions: oneShots,
       subagentGuard,
+      reportSubagentDefs: (user, problems) => reportSubagentDefs(db, user, problems),
       log: taskLog,
     }),
     planSegmentResume: createPlanSegmentResume({

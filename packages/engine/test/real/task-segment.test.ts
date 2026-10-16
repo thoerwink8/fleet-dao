@@ -1133,12 +1133,16 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
     };
     const claudeRoute = () => mirasimRoute({ modelId: 'claude-opus-5-5', upstreamModel: 'claude-opus-5-5' });
 
-    it('Mirasim 的 Claude 会话：家里装着的和仓里一样，起会话', async () => {
+    it('Mirasim 的 Claude 会话：家里装着的和仓里一样，起会话，提醒报「没有问题」（空数组）', async () => {
+      const reported: [string, readonly string[]][] = [];
       const r = rig({
         route: claudeRoute(),
         deps: {
           subagentGuard: () => readSubagentGuard(),
           subagentsHome: installedHome(['Explore.md', 'general-purpose.md', 'Plan.md']),
+          reportSubagentDefs: async (user, problems) => {
+            reported.push([user, problems]);
+          },
         },
         driverRun: async (spec) => {
           commitInTree(spec);
@@ -1147,28 +1151,71 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
       });
       await r.run(r.input(), ctx());
       expect(r.specs).toHaveLength(1);
+      expect(reported).toEqual([[USER, []]]);
     });
 
-    it('【故意造出的失败】Mirasim 的 Claude 会话：家里缺一份，不起会话、可重试', async () => {
+    it('Mirasim 的 Claude 会话：家里缺一份，照常起会话（不挡），提醒收到这一份的问题（#2834）', async () => {
+      const reported: [string, readonly string[]][] = [];
       const r = rig({
         route: claudeRoute(),
         deps: {
           subagentGuard: () => readSubagentGuard(),
           subagentsHome: installedHome(['Explore.md', 'Plan.md']),
+          reportSubagentDefs: async (user, problems) => {
+            reported.push([user, problems]);
+          },
+        },
+        driverRun: async (spec) => {
+          commitInTree(spec);
+          return report({ hostId: 'mirasim' });
         },
       });
-      await expect(r.run(r.input(), ctx())).rejects.toMatchObject({
-        code: 'SEGMENT_SUBAGENT_DEFS',
-        retryable: true,
+      await r.run(r.input(), ctx());
+      expect(r.specs).toHaveLength(1);
+      expect(reported).toHaveLength(1);
+      expect(reported[0]?.[0]).toBe(USER);
+      expect(reported[0]?.[1]).toEqual([expect.stringContaining('general-purpose')]);
+    });
+
+    it('Mirasim 的 Claude 会话：报提醒的那一下抛错，只记日志，照常起会话', async () => {
+      const logs: { message: string; fields?: Record<string, unknown> | undefined }[] = [];
+      const r = rig({
+        route: claudeRoute(),
+        deps: {
+          subagentGuard: () => readSubagentGuard(),
+          subagentsHome: installedHome(['Explore.md', 'Plan.md']),
+          reportSubagentDefs: async () => {
+            throw new Error('库连不上');
+          },
+          log: (message, fields) => logs.push({ message, fields }),
+        },
+        driverRun: async (spec) => {
+          commitInTree(spec);
+          return report({ hostId: 'mirasim' });
+        },
       });
-      expect(r.specs).toHaveLength(0);
+      await r.run(r.input(), ctx());
+      expect(r.specs).toHaveLength(1);
+      expect(logs).toEqual([
+        {
+          message: '子代理定义对不上的提醒没报成（不挡会话）',
+          fields: { user: USER, error: '库连不上' },
+        },
+      ]);
     });
 
     it('Mirasim 的非 Claude 会话：不核对家里装的，照旧挡掉全部子代理', async () => {
       let seen: ReturnType<typeof settingsOf> | undefined;
+      const reported: unknown[] = [];
       const r = rig({
         route: mirasimRoute(),
-        deps: { subagentGuard: () => readSubagentGuard(), subagentsHome: installedHome([]) },
+        deps: {
+          subagentGuard: () => readSubagentGuard(),
+          subagentsHome: installedHome([]),
+          reportSubagentDefs: async (...args) => {
+            reported.push(args);
+          },
+        },
         driverRun: async (spec) => {
           seen = settingsOf(spec.cwd);
           commitInTree(spec);
@@ -1177,6 +1224,7 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
       });
       await r.run(r.input(), ctx());
       expect(seen?.permissions.deny).toEqual(['Agent(Explore)', 'Agent(Plan)', 'Agent(general-purpose)']);
+      expect(reported).toEqual([]);
     });
   });
 
@@ -1310,19 +1358,65 @@ describe('脱开引擎跑、引擎重启后接回（#2238：发版不再停在�
     expect(r.recorded).toEqual([]);
   });
 
-  it('Mirasim 上的动手会话不脱开：照旧在排空清单里、到截止被停（发版暂停那一套）', async () => {
+  /** 假的 Mirasim 驱动（#2815）：放手信号响了交回「放手」的报告（不发 stop）；叫停信号响了交回被叫停的报告。 */
+  const mirasimUntilReleasedOrStopped = (_spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport> =>
+    new Promise((resolve) => {
+      if (hooks.io && !hooks.io.attach) mkdirSync(hooks.io.dir, { recursive: true });
+      hooks.io?.release?.addEventListener('abort', () =>
+        resolve(report({ hostId: 'mirasim', detached: true })),
+      );
+      hooks.signal?.addEventListener('abort', () =>
+        resolve(report({ hostId: 'mirasim', facts: okFacts({ exitCode: null, killed: 'aborted' }) })),
+      );
+    });
+
+  it('Mirasim 上的动手会话（#2815）：发版到截止不停它（不在排空清单里），引擎要走了放手、交回 detached，不发 stop；新引擎带 attach 接回，结局记到原来那一行', async () => {
+    const ioRoot = join(root, 'io');
     const drain = createEngineDrain();
     const sessions = oneShotSessions({ drain });
+    const oldEngine = sessionHandoff(ioRoot);
     const r = rig({
       route: route({ hostId: 'mirasim' }),
-      handoff: sessionHandoff(join(root, 'io')),
-      driverRun: runsUntilStopped,
+      handoff: oldEngine,
+      driverRun: mirasimUntilReleasedOrStopped,
       deps: { sessions },
     });
     const pending = r.run(r.input(), ctx());
     await sessionUp(r.specs);
-    expect(drain.inFlight()).toEqual([expect.objectContaining({ runId: 'run-0002' })]);
-    expect(sessions.drainStop('到了发布宽限的截止')).toEqual(['run-0002']);
+    expect(drain.inFlight()).toEqual([]);
+    expect(sessions.drainStop('到了发布宽限的截止')).toEqual([]);
+    expect(oldEngine.leave('收到 SIGTERM')).toEqual(['run-0002']);
+    const got = await pending;
+    expect(got).toMatchObject({ ok: false, outcome: SEGMENT_DETACHED, runId: 'run-0002' });
+    expect(r.recorded).toEqual([]);
+    expect(existsSync(join(ioRoot, 'run-0002', DETACHED_MARK))).toBe(true);
+
+    const r2 = rig({
+      route: route({ hostId: 'mirasim' }),
+      handoff: sessionHandoff(ioRoot),
+      driverRun: async () => report({ hostId: 'mirasim' }),
+    });
+    if (got.ok || !got.detached) throw new Error('上面没交回 detached');
+    const back = await r2.run(r2.input({ attach: got.detached }), ctx());
+    expect(back).toMatchObject({ ok: true, runId: 'run-0002' });
+    expect(r2.started).toEqual([]);
+    expect(r2.recorded).toEqual([
+      expect.objectContaining({ runId: 'run-0002', outcome: 'done', startedAt: got.detached.startedAt }),
+    ]);
+  });
+
+  it('Mirasim 上的动手会话：切号叫停照旧停（发 stop 那条路），不放手', async () => {
+    const sessions = oneShotSessions({ drain: createEngineDrain() });
+    const r = rig({
+      route: route({ hostId: 'mirasim' }),
+      handoff: sessionHandoff(join(root, 'io')),
+      driverRun: mirasimUntilReleasedOrStopped,
+      deps: { sessions },
+    });
+    const pending = r.run(r.input(), ctx());
+    await sessionUp(r.specs);
+    expect(sessions.stop(new Set([route({ hostId: 'mirasim' }).poolId]), '切号')).toEqual(['run-0002']);
     expect(await pending).toMatchObject({ ok: false, outcome: 'org_switch' });
+    expect(existsSync(join(root, 'io', 'run-0002', DETACHED_MARK))).toBe(false);
   });
 });

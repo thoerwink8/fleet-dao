@@ -11,7 +11,8 @@
 // - 脱开引擎跑（cmd.detach，#2238，只有动手段给；session-handoff.ts 讲为什么）：执行方式是命令行那几家、装了 handoff，就把收发目录
 //   交给驱动（io），会话的输入输出走文件；引擎要走（handoff.signal）时驱动放手、这里写上放手标记交回 detached——会话的临时目录、
 //   收发目录都留着给下一个引擎。attach 是接回：清掉标记，驱动不起进程、从头重读输出等它收场。正常收场的连收发目录一起删。
-//   Mirasim、没给 detach 的（验收、整理、指挥官会话）照旧走管道。
+//   Mirasim（#2815）同样走：收发目录里只放交接单（会话号、轮次号、run 号），放手时插头只断开 ws、不发 stop，这里写放手标记；
+//   接回时驱动凭交接单重新订阅。没给 detach 的（验收、整理、指挥官会话）照旧走管道、被停就发 stop。
 // - 成败只认 adapters 的 judgeRun（和 Fusion 同一份判法）：它不是 ok，退出码就不会是 0。「终帧报错」「没有终帧」这些，
 //   即使进程自己退出码是 0，这里也报 1，不让 one-shot 把它判成 done。
 // - 读不到、认不出一律抛错（路由没给、库里没有这条路由、执行方式没接上、会话用户定不下来），runOneShot 把它记成
@@ -59,8 +60,10 @@ import {
   ensureIoRoot,
   ioDirOf,
   markDetached,
+  readMirasimHandle,
   removeIo,
   type SessionHandoff,
+  writeMirasimHandle,
 } from './session-handoff.ts';
 import { dbWriteFailure, TranscriptRecorder } from './transcript-recorder.ts';
 import type { WorkTrees } from './worktrees.ts';
@@ -317,11 +320,16 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         log('会话过程记录的锚点行没写上（过程记录可能整批写不进）', { runId, ...dbWriteFailure(err) });
       }
     }
+    // Mirasim 接回（#2815）：重读订阅回的快照拼不出和放手前一模一样的条目，不能靠重复编号去重；接回的记录员从交接单里记的序号
+    // 接着编，订阅回的旧内容（meta.replay）不记
+    const mirasimAttach = attach && driver.hostId === 'mirasim' && io !== undefined;
+    const attachHandle = mirasimAttach ? await readMirasimHandle(io.dir).catch(() => undefined) : undefined;
     const recorder = write
       ? new TranscriptRecorder({
           runId,
           write,
           log,
+          ...(attachHandle?.transcriptNext === undefined ? {} : { startSeq: attachHandle.transcriptNext }),
           ...(deps.transcriptFlushMs === undefined ? {} : { flushEveryMs: deps.transcriptFlushMs }),
         })
       : undefined;
@@ -338,7 +346,8 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
     };
     let anchorOutcome: 'done' | 'failed' | 'killed' | undefined;
     // 接回时提示词那一条（编号 0）上一个引擎记过了：占住编号，后面重读出来的条目编号和原来一样，库里按编号跳过重复的
-    recorder?.prompt(attach ? '' : cmd.stdin);
+    if (!(mirasimAttach && attachHandle?.transcriptNext !== undefined))
+      recorder?.prompt(attach ? '' : cmd.stdin);
     // Mirasim 的模型会话不在 fleet-agent-<runId>.scope 里（那个目录根本不会建）。本机 scope 是桥接自己起的
     // fleet-agent-mirasim-<随机>.scope，一次会话还不止一个，读到的也只是桥接。不拿它填用量。
     const sampleLocalScope = driver.hostId !== 'mirasim';
@@ -375,8 +384,8 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
     const listen = cmd.onTranscript;
     const onTranscript =
       recorder || listen
-        ? (entry: TranscriptEntry) => {
-            recorder?.record(entry);
+        ? (entry: TranscriptEntry, meta?: { replay: boolean }) => {
+            if (!(mirasimAttach && meta?.replay)) recorder?.record(entry);
             if (!listen) return;
             try {
               listen(entry);
@@ -416,36 +425,52 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           : {}),
         onSessionId: observeSessionId,
       });
+      // 放手：写标记、交回 detached（会话和收发目录都留给下一个引擎）
+      const letGo = async (dir: string): Promise<SpawnOutcome> => {
+        detached = true;
+        const at = new Date();
+        try {
+          await markDetached(dir, at);
+        } catch (err) {
+          // 标记没写上：新引擎收孤儿时会把它当没人接的收掉，接回那一步读不到输出、照实报
+          log('放手标记没写上（新引擎起来可能把这个会话当孤儿收掉）', { runId, error: errMessage(err) });
+        }
+        log('引擎要走了：动手会话脱开接着跑，下一个引擎接回', { runId, dir });
+        return {
+          exitCode: null,
+          stdout: '',
+          stderr: '',
+          killed: false,
+          detached: { at: at.toISOString() },
+        };
+      };
       let report: HostReport;
-      if (io && detach) {
-        // 引擎要走了：驱动放手以后这次调用永远不落定（detached.ts），所以和放手信号赛跑；放手先到就交回 detached
+      if (io && detach && driver.hostId !== 'mirasim') {
+        // 引擎要走了：命令行那几家的驱动放手以后这次调用永远不落定（detached.ts），所以和放手信号赛跑；放手先到就交回 detached
         const released = new Promise<null>((resolve) => {
           if (detach.signal.aborted) resolve(null);
           else detach.signal.addEventListener('abort', () => resolve(null), { once: true });
         });
         const first = await Promise.race([running, released]);
         if (first === null) {
-          detached = true;
           running.catch(() => undefined);
-          const at = new Date();
-          try {
-            await markDetached(io.dir, at);
-          } catch (err) {
-            // 标记没写上：新引擎收孤儿时会把它当没人接的收掉，接回那一步读不到输出、照实报
-            log('放手标记没写上（新引擎起来可能把这个会话当孤儿收掉）', { runId, error: errMessage(err) });
-          }
-          log('引擎要走了：动手会话脱开接着跑，下一个引擎接回', { runId, dir: io.dir });
-          return {
-            exitCode: null,
-            stdout: '',
-            stderr: '',
-            killed: false,
-            detached: { at: at.toISOString() },
-          };
+          return await letGo(io.dir);
         }
         report = first;
       } else {
         report = await running;
+        // Mirasim（#2815）：插头放手以后会交回一份「放手了」的报告（不赛跑：它要等到服务端接下、有了会话号才放手，
+        // 交接单在那一刻已经写好）。交接单不在就接不回，日志里明说
+        if (report.detached && io) {
+          const handle = await readMirasimHandle(io.dir).catch(() => undefined);
+          if (!handle) {
+            log('Mirasim 会话放手了，可交接单没有（新引擎接不回，会话要等孤儿清扫收）', {
+              runId,
+              dir: io.dir,
+            });
+          }
+          return await letGo(io.dir);
+        }
       }
       await Promise.all(sessionWrites);
       const outcome = outcomeOfReport(report);
@@ -497,6 +522,18 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
     } finally {
       leaveHandoff?.();
       await recorder?.close();
+      // Mirasim 放手：交接单里记下过程记录写到了第几条，接回的记录员从这里接着编
+      if (detached && recorder && io && driver.hostId === 'mirasim') {
+        try {
+          const handle = await readMirasimHandle(io.dir);
+          if (handle) writeMirasimHandle(io.dir, { ...handle, transcriptNext: recorder.nextSeq });
+        } catch (err) {
+          log('Mirasim 交接单没补上过程记录的序号（接回后的过程记录可能和放手前的编号重了）', {
+            runId,
+            error: errMessage(err),
+          });
+        }
+      }
       // 只收自己补的那一行。三段会话的开跑行留给 runOneShot 收场，带着用量；脱开引擎跑的还没结束，留着。
       if (transcriptAnchor && !detached && db) {
         const settled = anchorOutcome ?? 'failed';
