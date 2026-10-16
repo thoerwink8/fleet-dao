@@ -32,6 +32,8 @@ export const DROPPED = '作废';
 export type Status = typeof PENDING | typeof DONE | typeof DROPPED;
 const STATUSES: readonly string[] = [PENDING, DONE, DROPPED];
 const OWNER_NAME = /^[\w-]{1,128}$/;
+/** 单、PR 正文里写到一条引导的写法（「引导 <编号>」；本机队列用它把引导对到单上） */
+export const DIRECTIVE_REF = /引导\s*#?(\d{6,20})/g;
 /** 参数不对、这条不是该办的那种：拒绝（入口退出码 1）。 */
 export class DirectiveRefused extends Error {
   constructor(message: string) {
