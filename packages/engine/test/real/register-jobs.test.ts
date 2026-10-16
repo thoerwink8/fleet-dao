@@ -7,9 +7,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type { EngineJobs } from '../../src/activities.ts';
 import { CARPOOL_WATCH_JOB } from '../../src/jobs/carpool-watch.ts';
 import { engineTimerJobs } from '../../src/jobs/engine-timers.ts';
-import { EXTERNAL_WATCHDOG_JOB } from '../../src/jobs/external-watchdog.ts';
 import { RETIRED_SCHEDULE_IDS } from '../../src/jobs/retired-schedules.ts';
-import { ENGINE_JOBS, EXTERNAL_DRIVEN_JOBS, registerEngineJobs } from '../../src/real/jobs.ts';
+import { ENGINE_JOBS, registerEngineJobs } from '../../src/real/jobs.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -113,76 +112,8 @@ describe('registerEngineJobs：登记在跑的、摘掉退役的（#1140）', ()
   });
 });
 
-describe('外部看门狗登记（#292 第 2 片）：只在配了 FLEET_EDGE_WATCH_ID 时进登记表', () => {
-  it('配了键：登记 external-watchdog，期望间隔 15 分钟；从没跑过也列得出来；先前摘掉的会回来', async () => {
-    await t.db.insert(scheduledJobs).values({
-      id: 'external-watchdog',
-      name: '旧名字',
-      schedule: '旧计划',
-      expectEveryMinutes: 60,
-      removedAt: new Date('2026-01-01T00:00:00Z'),
-    });
-
-    await registerEngineJobs(t.db, { FLEET_EDGE_WATCH_ID: 'edge-1' });
-
-    const row = (await rows()).find((r) => r.id === 'external-watchdog');
-    expect(row).toMatchObject({
-      id: EXTERNAL_WATCHDOG_JOB.id,
-      name: '外部看门狗',
-      schedule: EXTERNAL_WATCHDOG_JOB.schedule,
-      expectEveryMinutes: 15,
-      removedAt: null,
-    });
-    expect(EXTERNAL_WATCHDOG_JOB).toMatchObject({
-      id: 'external-watchdog',
-      name: '外部看门狗',
-      expectEveryMinutes: 15,
-    });
-    const listed = (await scheduleHealth(t.db)).find((h) => h.job.id === 'external-watchdog');
-    expect(listed?.status).toBe('never');
-    expect(listed?.lastRun).toBeNull();
-    expect(listed?.job.expectEveryMinutes).toBe(15);
-  });
-
-  it.each([
-    ['没有这个键', {}],
-    ['空字符串', { FLEET_EDGE_WATCH_ID: '' }],
-    ['只有空白', { FLEET_EDGE_WATCH_ID: '  \t' }],
-  ] as const)('%s：登记表里没有 external-watchdog', async (_label, env) => {
-    await registerEngineJobs(t.db, env);
-    expect((await rows()).find((r) => r.id === 'external-watchdog')).toBeUndefined();
-    expect((await scheduleHealth(t.db)).some((h) => h.job.id === 'external-watchdog')).toBe(false);
-  });
-
-  it.each([
-    ['没有这个键', {}],
-    ['空字符串', { FLEET_EDGE_WATCH_ID: '' }],
-    ['只有空白', { FLEET_EDGE_WATCH_ID: '  \t' }],
-  ] as const)('%s：库里已有的这一行摘掉，别的外部登记不动', async (_label, env) => {
-    await t.db.insert(scheduledJobs).values({
-      id: 'external-watchdog',
-      name: '外部看门狗',
-      schedule: '每 5 分钟',
-      expectEveryMinutes: 15,
-    });
-    await t.db.insert(scheduledJobs).values({
-      id: 'backup.nightly',
-      name: '备份',
-      schedule: '每晚',
-      expectEveryMinutes: 60 * 24,
-    });
-
-    await registerEngineJobs(t.db, env);
-
-    const all = await rows();
-    expect(all.find((r) => r.id === 'external-watchdog')?.removedAt).not.toBeNull();
-    expect((await scheduleHealth(t.db)).some((h) => h.job.id === 'external-watchdog')).toBe(false);
-    expect(all.find((r) => r.id === 'backup.nightly')?.removedAt).toBeNull();
-  });
-});
-
 describe('登记编号和定时器编号对得上', () => {
-  it('严格核对 ENGINE_JOBS 的编号和顺序；外部驱动清单没有进程内定时器，核对不因此改成子集', () => {
+  it('严格核对 ENGINE_JOBS 的编号和顺序', () => {
     const never = () => {
       throw new Error('这里不该被叫');
     };
@@ -205,13 +136,5 @@ describe('登记编号和定时器编号对得上', () => {
     const timerIds = engineTimerJobs({ jobs, client: {} as never, taskQueue: 'fleet' }).map((j) => j.id);
 
     expect(timerIds).toEqual(ENGINE_JOBS.map((j) => j.id));
-    expect(EXTERNAL_DRIVEN_JOBS.map((j) => j.id)).toEqual(['external-watchdog']);
-    for (const job of EXTERNAL_DRIVEN_JOBS) {
-      expect(timerIds, job.id).not.toContain(job.id);
-      expect(
-        ENGINE_JOBS.map((j) => j.id),
-        job.id,
-      ).not.toContain(job.id);
-    }
   });
 });

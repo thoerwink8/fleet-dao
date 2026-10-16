@@ -1,11 +1,6 @@
 // /healthz 的 github_app 项：引擎每小时对账自检 GitHub 两个机器人的权限，缺的、没查成的开着提醒就红；撤了自己回绿。
 // 对外只有一句中性的话（不提仓名、缺哪样权限），提醒的标题只进日志。
-import {
-  GITHUB_APP_ALERT_PREFIX,
-  GITHUB_APP_MISSING_ALERT_PREFIX,
-  resolveAlertByKey,
-  upsertAlert,
-} from '@fleet-dao/db';
+import { GITHUB_APP_ALERT_PREFIX, resolveAlertByKey, upsertAlert } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { silentLogger } from '@fleet-dao/store';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -31,7 +26,7 @@ describe('github_app', () => {
   });
 
   it('【故意造出的失败】「引擎」缺 statuses:write 的提醒开着：报红，对外一句中性的话，哪一条只进日志；撤了回绿', async () => {
-    const key = `${GITHUB_APP_ALERT_PREFIX}engine:acme/widgets`;
+    const key = `${GITHUB_APP_ALERT_PREFIX}acme/widgets`;
     await upsertAlert(t.db, {
       dedupeKey: key,
       level: 'alert',
@@ -47,7 +42,7 @@ describe('github_app', () => {
     expect(err).toMatchObject({
       code: 'github_app',
       message: 'GitHub 机器人的权限有要人看的问题',
-      detail: 'github-app:engine:acme/widgets：「引擎」机器人在 acme/widgets 上的权限不对：缺 statuses:write',
+      detail: 'github-app:acme/widgets：「引擎」机器人在 acme/widgets 上的权限不对：缺 statuses:write',
     });
     const report = await runHealthChecks(
       [{ name: 'github_app', check: githubAppHealthCheck(t.db) }],
@@ -61,8 +56,8 @@ describe('github_app', () => {
     await expect(githubAppHealthCheck(t.db)()).resolves.toBeUndefined();
   });
 
-  it('机器人没装到某个仓（github-app-missing）：降成警告，整体仍 200、对外一句中性的话、仓名只进日志；装好了回绿', async () => {
-    const key = `${GITHUB_APP_MISSING_ALERT_PREFIX}acme/gadgets`;
+  it('机器人没装到某个仓（只有这一种问题，decision 级）：降成警告，整体仍 200、对外一句中性的话、仓名只进日志；装好了回绿', async () => {
+    const key = `${GITHUB_APP_ALERT_PREFIX}acme/gadgets`;
     await upsertAlert(t.db, {
       dedupeKey: key,
       level: 'decision',
@@ -99,8 +94,8 @@ describe('github_app', () => {
   });
 
   it('【不降级】没装的警告和真权限故障同时开着：红的优先，整体 503', async () => {
-    const warnKey = `${GITHUB_APP_MISSING_ALERT_PREFIX}acme/gadgets`;
-    const failKey = `${GITHUB_APP_ALERT_PREFIX}engine:acme/widgets`;
+    const warnKey = `${GITHUB_APP_ALERT_PREFIX}acme/gadgets`;
+    const failKey = `${GITHUB_APP_ALERT_PREFIX}acme/widgets`;
     await upsertAlert(t.db, {
       dedupeKey: warnKey,
       level: 'decision',

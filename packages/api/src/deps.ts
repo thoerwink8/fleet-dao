@@ -64,11 +64,6 @@ export interface Deps {
   github: GitHubEventSink;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
-  /**
-   * 外部看门狗的编号对上了就记一轮成功（#292）。没给（开发内存版没有登记表）对上了也不记、不报错。
-   * 编号在 config.edgeWatchId；没配时路由不调用它。
-   */
-  recordExternalWatchRound?: (() => Promise<void>) | undefined;
   /** 驾驶舱提醒（#795）。生产的两套装配都给。 */
   alerts?: CockpitAlerts | undefined;
   /**
