@@ -6,6 +6,7 @@ import {
   type Db,
   executorLineStats,
   finishScheduleRun,
+  flowModeHealth,
   openBriefNotes,
   pipelineHealth,
   pullsByMergeSha,
@@ -56,6 +57,7 @@ export function dailyBriefJob(w: {
     lineStats: (at) => executorLineStats(w.db, at),
     pipelineHealth: (to) => pipelineHealth(w.db, to),
     releaseKills: (to) => releaseKilledSessions(w.db, to),
+    flowModeHealth: (to) => flowModeHealth(w.db, to),
     async publish(x) {
       await upsertAlert(w.db, { ...x, level: 'daily', taskId: null });
     },

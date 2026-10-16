@@ -1,8 +1,15 @@
 // 流程健康（queries/pipeline-health.ts，#2762）：task_rounds 每轮一行，按 7 天窗口算结束类占比、按档一轮做成率和平均轮数、
 // 重活 PR 新增行 p90、冷验收拒绝占比。PGlite 造数据。
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { pipelineHealth, recordTaskRound, releaseKilledSessions } from '../src/queries/pipeline-health.ts';
-import { ROUND_OUTCOMES, taskRounds } from '../src/schema/index.ts';
+import {
+  flowModeHealth,
+  newcombeDiff,
+  pipelineHealth,
+  recordTaskRound,
+  releaseKilledSessions,
+  wilsonInterval,
+} from '../src/queries/pipeline-health.ts';
+import { ROUND_OUTCOMES, taskFlowAssignments, taskRounds } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -208,5 +215,128 @@ describe('releaseKilledSessions（#2797）', () => {
     expect(k.hours).toBe(0);
     expect(k.byDay.map((d) => d.n)).toEqual([0, 0, 0, 0, 0, 0, 0]);
     await expect(releaseKilledSessions(t.db, new Date('x'))).rejects.toThrow('不是有效日期');
+  });
+});
+
+describe('flowModeHealth（决定 0105：两种流程对照）', () => {
+  const to = new Date('2026-10-16T00:00:00Z');
+  const at = (hoursBefore: number) => new Date(to.getTime() - hoursBefore * HOUR);
+
+  /** 造 n 张分到某组的单，其中前 merged 张有一轮 merged；每张单一条 run，token 四样都给。 */
+  async function seedGroup(
+    repoId: string,
+    mode: 'three' | 'full',
+    n: number,
+    merged: number,
+    o: { source?: 'hash' | 'label' | 'ineligible'; tokens?: number | null; minutes?: number } = {},
+  ) {
+    for (let i = 0; i < n; i++) {
+      const task = await addTask(t.db, repoId);
+      await t.db.insert(taskFlowAssignments).values({
+        taskId: task.id,
+        mode,
+        source: o.source ?? 'hash',
+        stratum: 'fast',
+        assignedAt: at(100),
+      });
+      if (i < merged) {
+        await t.db.insert(taskRounds).values({
+          taskId: task.id,
+          workflowId: `wf-${task.id}`,
+          seq: 1,
+          round: 1,
+          outcome: 'merged',
+          endedAt: new Date(at(100).getTime() + (o.minutes ?? 60) * 60_000),
+        });
+      }
+      const tokens = o.tokens === undefined ? 1000 : o.tokens;
+      await addRun(t.db, {
+        taskId: task.id,
+        routeId: 'k-opus',
+        startedAt: at(99),
+        endedAt: at(98),
+        outcome: 'done',
+        inputTokens: tokens,
+        outputTokens: tokens,
+        cacheReadTokens: tokens,
+        cacheWriteTokens: tokens,
+      });
+    }
+  }
+
+  it('没数：两组都是 0 单、各比率是 null、不够判，不抛', async () => {
+    const h = await flowModeHealth(t.db, to);
+    for (const g of [h.full, h.three]) {
+      expect(g.tasks).toBe(0);
+      expect(g.merged).toBe(0);
+      expect(g.successRate).toBeNull();
+      expect(g.wilson).toBeNull();
+      expect(g.durationMedianMin).toBeNull();
+      expect(g.durationP90Min).toBeNull();
+      expect(g.tokensPerMerged).toBeNull();
+    }
+    expect(h.enough).toBe(false);
+    expect(h.verdict).toBeNull();
+    await expect(flowModeHealth(t.db, new Date('x'))).rejects.toThrow('不是有效日期');
+  });
+
+  it('样本不够：数照出、不够判、不给结论；不合格退回三段的单不进分母', async () => {
+    const r = await addRepo(t.db);
+    await catalog(t.db);
+    await addRoute(t.db, { id: 'k-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await seedGroup(r.id, 'full', 10, 6);
+    await seedGroup(r.id, 'three', 12, 9);
+    await seedGroup(r.id, 'three', 5, 5, { source: 'ineligible' });
+    const h = await flowModeHealth(t.db, to);
+    expect(h.full.tasks).toBe(10);
+    expect(h.full.merged).toBe(6);
+    expect(h.full.successRate).toBeCloseTo(0.6);
+    expect(h.three.tasks).toBe(12);
+    expect(h.three.merged).toBe(9);
+    expect(h.full.durationMedianMin).toBe(60);
+    expect(h.full.durationP90Min).toBe(60);
+    // 10 张单 × 一条 run × 4000 token，除以 6 张合并的
+    expect(h.full.tokensPerMerged).toBe(Math.round(40_000 / 6));
+    expect(h.full.runsTokenUnread).toBe(0);
+    expect(h.enough).toBe(false);
+    expect(h.verdict).toBeNull();
+  });
+
+  it('够判：每组满 30 单，出差值、非劣效、止损三项', async () => {
+    const r = await addRepo(t.db);
+    await catalog(t.db);
+    await addRoute(t.db, { id: 'k-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await seedGroup(r.id, 'full', 30, 12, { tokens: 5000 });
+    await seedGroup(r.id, 'three', 30, 24, { tokens: 1000 });
+    const h = await flowModeHealth(t.db, to);
+    expect(h.enough).toBe(true);
+    const v = h.verdict;
+    expect(v).not.toBeNull();
+    expect(v?.diff.diff).toBeCloseTo(0.4 - 0.8);
+    expect(v?.noninferior).toBe(false);
+    expect(v?.effectStop).toBe(true);
+    // 全程 30 张 × 20000 / 12 合并 = 50000；三段 30 × 4000 / 24 = 5000
+    expect(v?.costRatio).toBeCloseTo(10);
+    expect(v?.costStop).toBe(true);
+  });
+
+  it('token 没读全：不当 0 悄悄吞，报出有几段没读全', async () => {
+    const r = await addRepo(t.db);
+    await catalog(t.db);
+    await addRoute(t.db, { id: 'k-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
+    await seedGroup(r.id, 'full', 2, 1, { tokens: null });
+    const h = await flowModeHealth(t.db, to);
+    expect(h.full.runsTokenUnread).toBe(2);
+  });
+
+  it('Wilson 和 Newcombe：算得和手算对得上', () => {
+    const w = wilsonInterval(9, 10);
+    expect(w?.low).toBeCloseTo(0.596, 2);
+    expect(w?.high).toBeCloseTo(0.982, 2);
+    expect(wilsonInterval(0, 0)).toBeNull();
+    const d = newcombeDiff({ k: 9, n: 10 }, { k: 9, n: 10 });
+    expect(d?.diff).toBe(0);
+    expect(d?.low).toBeLessThan(0);
+    expect(d?.high).toBeGreaterThan(0);
   });
 });
