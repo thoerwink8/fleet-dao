@@ -98,10 +98,12 @@ import {
   HOUR_MS,
   hasVisibleSignal,
   hourlyRemaining,
+  intakeTierCost,
   MAX_ISSUE_FAILURES,
   MAX_STARTS_PER_HOUR,
   type OrderBook,
   type PickKey,
+  pickDeficitRoundRobin,
   readOrderBook,
   serialOf,
   sortCandidates,
@@ -144,6 +146,8 @@ export interface IntakeRepo {
   name: string;
   defaultBranch: string;
   testCommand: string;
+  /** 仓之间分名额的相对份额；旧档案或测试没给时按 1。 */
+  weight?: number;
   /** 「让 AI 接活」打开的时刻（ISO）；null＝关着。现在只当开关用：不再拿它和开单时间比（#1336）。 */
   autoDispatchSince: string | null;
 }
@@ -468,10 +472,12 @@ export interface IntakeDeps {
   failures(repo: IntakeRepo, issueNumber: number): Promise<number>;
   /** 从 since 起建出的任务行有几条（滚动一小时限速）。读不到照抛：不当成「一条没起」。 */
   startedSince(since: Date): Promise<number>;
-  /** 熔断此刻的样子（最近结束的任务、熔断状态、试探那条的结局）。读不到、认不出照抛：不当成「正常」。 */
-  breaker(): Promise<BreakerFacts>;
+  /** 熔断此刻的样子（按仓取最近结束的任务、熔断状态、试探那条的结局）。读不到、认不出照抛：不当成「正常」。 */
+  breaker(repo: IntakeRepo): Promise<BreakerFacts>;
   /** 熔断状态变了：写库并推一条通知（trip 进入、recover 恢复；retrip 只重新计冷却、不再推）。写不成照抛：这一轮不拉。 */
-  breakerChanged(input: { event: BreakerEvent; at: Date; why: string }): Promise<void>;
+  breakerChanged(input: { repo: IntakeRepo; event: BreakerEvent; at: Date; why: string }): Promise<void>;
+  /** 近 24 小时各仓已经起过的加权工作量；读不到照抛，不拿 0 顶。不给时测试按空历史处理。 */
+  repoWorkload?(since: Date): Promise<Record<string, number>>;
   /** 起任务工作流（编号定死、REJECT_DUPLICATE）：编号已经用过回 already_exists。 */
   start(input: {
     repo: IntakeRepo;
@@ -480,6 +486,7 @@ export interface IntakeDeps {
     /** 单子正文原样（建任务行的「原话」）。 */
     body: string;
     author: IntakeIssue['author'];
+    tier?: 'fast' | 'medium' | 'heavyweight';
   }): Promise<'started' | 'already_exists'>;
   /** 在单子上留言（同一个键只留一条）；以前留过回 created: false。 */
   comment(input: {
@@ -536,15 +543,20 @@ interface Tally {
   workingAtStart: number;
   /** 这一轮开头读到的滚动一小时内已起的条数，起一条加一。 */
   hourStarted: number;
-  /** 熔断这一轮还允许起几条（正常是 Infinity，起一条减一）和为什么。 */
-  breakerAllow: number;
-  breakerWhy: string;
+  /** 各仓熔断这一轮还允许起几条（正常是 Infinity，起一条减一）和为什么。 */
+  breakerAllow: Map<string, number>;
+  breakerWhy: Map<string, string>;
   /** 每个仓「过了准入、只因没空位没起」的有几张（仓编号 → 张数）；单子没读成的仓不在里面。 */
   waiting: Map<string, number>;
+  /** 按仓留一份跳过原因，避免公平交错后把别的仓的原因算进整理触发。 */
+  skippedByRepo: Map<string, Map<IntakeSkipReason, number>>;
 }
 
 function skip(t: Tally, slug: string, issue: number, s: IntakeSkip): void {
   t.skipped.set(s.reason, (t.skipped.get(s.reason) ?? 0) + 1);
+  const byRepo = t.skippedByRepo.get(slug) ?? new Map<IntakeSkipReason, number>();
+  byRepo.set(s.reason, (byRepo.get(s.reason) ?? 0) + 1);
+  t.skippedByRepo.set(slug, byRepo);
   if (UNREADABLE.has(s.reason)) t.unchecked.push(`${slug}#${issue}：没查成：${s.why}`);
 }
 
@@ -755,7 +767,7 @@ async function admitIssue(
  * 空位：每轮条数、同时在跑、每小时、熔断，哪一个先用完就按哪一个的原因不起。回 null＝还有位子。
  * 先看便宜的、说得最清楚的：本轮上限 → 在跑上限 → 每小时 → 熔断。
  */
-function noRoom(deps: IntakeDeps, t: Tally): IntakeSkip | null {
+function noRoom(deps: IntakeDeps, repo: IntakeRepo, t: Tally): IntakeSkip | null {
   const maxStarts = deps.limits?.maxStartsPerRound ?? MAX_STARTS_PER_ROUND;
   const maxRunning = deps.limits?.maxRunningTasks ?? MAX_RUNNING_TASKS;
   const maxHourly = deps.limits?.maxStartsPerHour;
@@ -775,7 +787,12 @@ function noRoom(deps: IntakeDeps, t: Tally): IntakeSkip | null {
       why: `最近一小时已经起了 ${t.hourStarted} 条（每小时最多 ${maxHourly ?? MAX_STARTS_PER_HOUR} 条），等滚出一小时`,
     };
   }
-  if (t.breakerAllow <= 0) return { reason: 'breaker_open', why: t.breakerWhy };
+  if ((t.breakerAllow.get(repo.id) ?? 0) <= 0) {
+    return {
+      reason: 'breaker_open',
+      why: t.breakerWhy.get(repo.id) ?? '这个仓的熔断状态认不出，保守停拉',
+    };
+  }
   return null;
 }
 
@@ -783,7 +800,7 @@ function noRoom(deps: IntakeDeps, t: Tally): IntakeSkip | null {
 async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tally): Promise<boolean> {
   const slug = `${repo.owner}/${repo.name}`;
   const { issue } = c;
-  const full = noRoom(deps, t);
+  const full = noRoom(deps, repo, t);
   if (full) {
     skip(t, slug, issue.number, full);
     t.waiting.set(repo.id, (t.waiting.get(repo.id) ?? 0) + 1);
@@ -800,6 +817,7 @@ async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, 
     title: c.brief.title,
     body: issue.body,
     author: issue.author,
+    tier: c.brief.tier.tier,
   });
   if (got === 'already_exists') {
     skip(t, slug, issue.number, { reason: 'already_exists', why: '任务工作流的编号已经用过' });
@@ -808,7 +826,7 @@ async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, 
   t.started += 1;
   t.running += 1;
   t.hourStarted += 1;
-  t.breakerAllow -= 1;
+  t.breakerAllow.set(repo.id, (t.breakerAllow.get(repo.id) ?? 0) - 1);
   deps.log('info', `拉单：起了 ${slug}#${issue.number} 的任务工作流`, {
     tier: c.brief.tier.tier,
     why: c.brief.tier.reason,
@@ -835,7 +853,7 @@ async function prepareRepo(
   const slug = `${repo.owner}/${repo.name}`;
   if (repo.autoDispatchSince === null) return null;
   t.reposOn += 1;
-  const skippedBefore = new Map(t.skipped);
+  const skippedBefore = new Map(t.skippedByRepo.get(slug) ?? []);
   let listed: Awaited<ReturnType<IntakeDeps['openIssues']>>;
   try {
     listed = await deps.openIssues(repo);
@@ -909,6 +927,29 @@ async function startOne(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, t: Tal
   }
 }
 
+/** 每个仓分别读熔断；一个仓坏了或熔断，不影响别的仓继续吃自己的名额。 */
+async function prepareBreaker(deps: IntakeDeps, repo: IntakeRepo, t: Tally): Promise<void> {
+  const slug = `${repo.owner}/${repo.name}`;
+  try {
+    const at = deps.now();
+    const verdict = decideBreaker(await deps.breaker(repo), at);
+    if (verdict.event !== null) {
+      await deps.breakerChanged({ repo, event: verdict.event, at, why: verdict.why });
+      deps.log(
+        verdict.event === 'recover' ? 'info' : 'warn',
+        `拉单熔断：${slug} ${verdict.event}，${verdict.why}`,
+      );
+    }
+    t.breakerAllow.set(repo.id, verdict.allow);
+    t.breakerWhy.set(repo.id, verdict.why);
+  } catch (err) {
+    t.reposFailed += 1;
+    t.breakerAllow.set(repo.id, 0);
+    t.breakerWhy.set(repo.id, `这个仓的熔断状态读不到或写不进去：${errMessage(err)}`);
+    t.unchecked.push(`${slug}：仓级熔断没查成（${errMessage(err)}）`);
+  }
+}
+
 /** 「怎么算做完」要 diff 外证据、引擎不拉时留在单子上的话。 */
 export function offDiffComment(hits: readonly OffDiffItem[]): string {
   return [
@@ -939,9 +980,10 @@ async function groomRepo(
 ): Promise<void> {
   if (!deps.groomRequest) return;
   const slug = `${repo.owner}/${repo.name}`;
-  const delta = (reason: IntakeSkipReason) => (t.skipped.get(reason) ?? 0) - (skippedBefore.get(reason) ?? 0);
+  const current = t.skippedByRepo.get(slug) ?? new Map<IntakeSkipReason, number>();
+  const delta = (reason: IntakeSkipReason) => (current.get(reason) ?? 0) - (skippedBefore.get(reason) ?? 0);
   const why = autoGroomWhy({
-    spare: noRoom(deps, t) === null,
+    spare: noRoom(deps, repo, t) === null,
     started: startedHere,
     backlog:
       delta('brief_incomplete') +
@@ -965,9 +1007,7 @@ async function groomRepo(
   }
 }
 
-/**
- * 各仓先准入，再起（仓按名单顺序，仓内按 comparePick）。整理待办按仓、在这个仓的单起完之后判。
- */
+/** 各仓先准入，再按 deficit round robin 交错起；整理待办仍按仓判。 */
 async function intakeRepos(
   deps: IntakeDeps,
   pulling: readonly IntakeRepo[],
@@ -980,11 +1020,34 @@ async function intakeRepos(
     if (one) prepared.push(one);
   }
 
+  for (const p of prepared) await prepareBreaker(deps, p.repo, t);
+
+  const workload = deps.repoWorkload
+    ? await deps.repoWorkload(new Date(deps.now().getTime() - 24 * HOUR_MS))
+    : {};
+  const totalCandidates = prepared.reduce((n, p) => n + p.admitted.length, 0);
+  const order = pickDeficitRoundRobin(
+    prepared.map((p) => ({
+      repoId: p.repo.id,
+      weight: p.repo.weight ?? 1,
+      used: workload[p.repo.id] ?? 0,
+      candidates: sortCandidates(p.admitted, (x) => x.key),
+    })),
+    totalCandidates,
+    (c) => intakeTierCost(c.brief.tier.tier),
+  );
+  const startedByRepo = new Map<string, number>();
+  const repoById = new Map(prepared.map((p) => [p.repo.id, p.repo] as const));
+  for (const picked of order) {
+    const repo = repoById.get(picked.repoId);
+    if (!repo) continue;
+    const started = await startOne(deps, repo, picked.item, t);
+    if (started) startedByRepo.set(repo.id, (startedByRepo.get(repo.id) ?? 0) + 1);
+  }
+
   for (const p of prepared) {
     t.waiting.set(p.repo.id, t.waiting.get(p.repo.id) ?? 0);
-    const startedBefore = t.started;
-    for (const c of sortCandidates(p.admitted, (x) => x.key)) await startOne(deps, p.repo, c, t);
-    const startedHere = t.started - startedBefore;
+    const startedHere = startedByRepo.get(p.repo.id) ?? 0;
     await groomRepo(deps, p.repo, p.admitted, p.skippedBefore, startedHere, t);
   }
 }
@@ -1019,9 +1082,10 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     stalled: 0,
     workingAtStart: 0,
     hourStarted: 0,
-    breakerAllow: Number.POSITIVE_INFINITY,
-    breakerWhy: '',
+    breakerAllow: new Map(),
+    breakerWhy: new Map(),
     waiting: new Map(),
+    skippedByRepo: new Map(),
   };
   if (repos.some((r) => r.autoDispatchSince !== null)) {
     if (!(deps.gateLive ?? MERGE_GATE_REQUIRES_COLD_VERIFY)) {
@@ -1046,21 +1110,14 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
         scanned: repos.length,
       };
     }
-    // 限速和熔断：读不到就不拉（不当成「一条没起」「没失败过」），状态变了先写库、推通知再拉
+    // 限速：读不到就不拉（不当成「一条没起」）。
     try {
       const at = deps.now();
       t.hourStarted = await deps.startedSince(new Date(at.getTime() - HOUR_MS));
-      const verdict = decideBreaker(await deps.breaker(), at);
-      if (verdict.event !== null) {
-        await deps.breakerChanged({ event: verdict.event, at, why: verdict.why });
-        deps.log(verdict.event === 'recover' ? 'info' : 'warn', `拉单熔断：${verdict.event}，${verdict.why}`);
-      }
-      t.breakerAllow = verdict.allow;
-      t.breakerWhy = verdict.why;
     } catch (err) {
       return {
         outcome: 'failed',
-        why: `最近一小时已起的条数或熔断状态读不到（或状态写不进去），这一轮一张单都没拉：${errMessage(err)}`,
+        why: `最近一小时已起的条数读不到，这一轮一张单都没拉：${errMessage(err)}`,
         scanned: repos.length,
       };
     }

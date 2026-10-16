@@ -1,7 +1,7 @@
 // 引擎拉单挑单要从库里读的历史（#1336）：这张单失败过几次、滚动一小时内起了几条、最近结束的几条任务成没成、熔断的状态。
 // 失败和结束都以 state_changes 为准（触发器写的，应用写不漏）：任务行本身只有当前状态，重做过的单看不出失败过几次。
 // 读不到照抛，不拿 0 或「没有」顶。只数引擎的任务行（executor = engine）：本机领的单（决定 0096）不占引擎的名额、不算引擎的成败。
-import type { TaskState } from '@fleet-dao/shared';
+import type { SegmentTier, TaskState } from '@fleet-dao/shared';
 import { and, asc, count, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, settings, stateChanges, tasks } from '../schema/index.ts';
@@ -68,7 +68,7 @@ export interface EndedTask {
  */
 export async function recentEndedTasks(
   db: Db,
-  input: { limit: number; after?: Date | null },
+  input: { limit: number; after?: Date | null; repoId?: string },
 ): Promise<EndedTask[]> {
   const rows = await db
     .select({ taskId: stateChanges.taskId, state: stateChanges.toState, endedAt: stateChanges.at })
@@ -80,6 +80,7 @@ export async function recentEndedTasks(
         eq(tasks.executor, 'engine'),
         inArray(stateChanges.toState, ['done', 'failed']),
         input.after ? gt(stateChanges.at, input.after) : undefined,
+        input.repoId ? eq(tasks.repoId, input.repoId) : undefined,
       ),
     )
     .orderBy(desc(stateChanges.id))
@@ -95,19 +96,28 @@ export async function recentEndedTasks(
 export async function firstTaskCreatedSince(
   db: Db,
   since: Date,
+  repoId?: string,
 ): Promise<{ id: string; state: TaskState; createdAt: Date } | null> {
   const [row] = await db
     .select({ id: tasks.id, state: tasks.state, createdAt: tasks.createdAt })
     .from(tasks)
-    .where(and(gte(tasks.createdAt, since), eq(tasks.executor, 'engine')))
+    .where(
+      and(
+        gte(tasks.createdAt, since),
+        eq(tasks.executor, 'engine'),
+        repoId ? eq(tasks.repoId, repoId) : undefined,
+      ),
+    )
     .orderBy(asc(tasks.createdAt))
     .limit(1);
   return row ?? null;
 }
 
-// —— 熔断状态：设置表里 engine.intakeBreaker 那一行 ——
+// —— 熔断状态：设置表里按仓分开的 engine.intakeBreaker:<仓号> 那一行 ——
 
 export const INTAKE_BREAKER_SETTING = 'engine.intakeBreaker';
+export const intakeBreakerSetting = (repoId?: string) =>
+  repoId ? `${INTAKE_BREAKER_SETTING}:${repoId}` : INTAKE_BREAKER_SETTING;
 
 /**
  * open：熔断着，at 是进入（或试探失败后重新计冷却）的时刻；
@@ -117,14 +127,15 @@ export const INTAKE_BREAKER_SETTING = 'engine.intakeBreaker';
 export type IntakeBreakerRow = { state: 'open' | 'closed'; at: Date } | null;
 
 /** 读熔断状态。这一行认不出（形状不对）照抛，不当成「正常」。 */
-export async function readIntakeBreaker(db: Db): Promise<IntakeBreakerRow> {
-  const [row] = await db.select().from(settings).where(eq(settings.key, INTAKE_BREAKER_SETTING));
+export async function readIntakeBreaker(db: Db, repoId?: string): Promise<IntakeBreakerRow> {
+  const key = intakeBreakerSetting(repoId);
+  const [row] = await db.select().from(settings).where(eq(settings.key, key));
   if (!row) return null;
   const v = row.value as { state?: unknown; at?: unknown } | null;
   const at = typeof v?.at === 'string' ? new Date(v.at) : null;
   if ((v?.state !== 'open' && v?.state !== 'closed') || at === null || Number.isNaN(at.getTime())) {
     throw new Error(
-      `设置 ${INTAKE_BREAKER_SETTING} 的值认不出（要 {state: open|closed, at: 时间}）：${JSON.stringify(row.value)}`,
+      `设置 ${key} 的值认不出（要 {state: open|closed, at: 时间}）：${JSON.stringify(row.value)}`,
     );
   }
   return { state: v.state, at };
@@ -134,14 +145,78 @@ export async function readIntakeBreaker(db: Db): Promise<IntakeBreakerRow> {
 export async function writeIntakeBreaker(
   db: Db,
   input: { state: 'open' | 'closed'; at: Date; by: string },
+  repoId?: string,
 ): Promise<void> {
+  const key = intakeBreakerSetting(repoId);
   const value = { state: input.state, at: input.at.toISOString() };
   await db
     .insert(settings)
-    .values({ key: INTAKE_BREAKER_SETTING, value, updatedBy: input.by })
+    .values({ key, value, updatedBy: input.by })
     .onConflictDoUpdate({
       target: settings.key,
       set: { value, updatedBy: input.by, version: sql`${settings.version} + 1` },
+    });
+}
+
+// —— 近 24 小时各仓已起单的加权工作量 ——
+
+export const INTAKE_STARTS_SETTING = 'engine.intakeStarts';
+type IntakeStart = { repoId: string; at: string; tier: SegmentTier };
+
+function parseIntakeStarts(value: unknown): IntakeStart[] {
+  if (!Array.isArray(value)) throw new Error(`设置 ${INTAKE_STARTS_SETTING} 的值认不出（要任务起单数组）`);
+  const starts = value as Record<string, unknown>[];
+  if (
+    starts.some(
+      (v) =>
+        typeof v?.repoId !== 'string' ||
+        typeof v.at !== 'string' ||
+        !['fast', 'medium', 'heavyweight'].includes(v.tier as string) ||
+        Number.isNaN(new Date(v.at).getTime()),
+    )
+  ) {
+    throw new Error(`设置 ${INTAKE_STARTS_SETTING} 的值认不出（要 [{repoId, at, tier}]）`);
+  }
+  return starts as IntakeStart[];
+}
+
+const intakeTierCost = (tier: SegmentTier): number => (tier === 'fast' ? 1 : tier === 'medium' ? 2 : 4);
+
+/** 读近 24 小时（或调用方给的 since）各仓已成功起单的加权工作量；没有历史就是空。 */
+export async function intakeWorkloadSince(db: Db, since: Date): Promise<Record<string, number>> {
+  const [row] = await db
+    .select({ value: settings.value })
+    .from(settings)
+    .where(eq(settings.key, INTAKE_STARTS_SETTING));
+  if (!row) return {};
+  const totals: Record<string, number> = {};
+  for (const start of parseIntakeStarts(row.value)) {
+    if (new Date(start.at).getTime() < since.getTime()) continue;
+    totals[start.repoId] = (totals[start.repoId] ?? 0) + intakeTierCost(start.tier);
+  }
+  return totals;
+}
+
+/** 成功起一条任务后登记；同时清掉 24 小时以前的历史，避免设置值无限长。 */
+export async function recordIntakeStart(
+  db: Db,
+  input: { repoId: string; at: Date; tier: SegmentTier; by: string },
+): Promise<void> {
+  const [row] = await db
+    .select({ value: settings.value })
+    .from(settings)
+    .where(eq(settings.key, INTAKE_STARTS_SETTING));
+  const since = input.at.getTime() - 24 * 60 * 60_000;
+  const starts = row
+    ? parseIntakeStarts(row.value).filter((start) => new Date(start.at).getTime() >= since)
+    : [];
+  starts.push({ repoId: input.repoId, at: input.at.toISOString(), tier: input.tier });
+  await db
+    .insert(settings)
+    .values({ key: INTAKE_STARTS_SETTING, value: starts, updatedBy: input.by })
+    .onConflictDoUpdate({
+      target: settings.key,
+      set: { value: starts, updatedBy: input.by, version: sql`${settings.version} + 1` },
     });
 }
 

@@ -1078,6 +1078,77 @@ describe('runIntakeJob · 一轮', () => {
     expect(run.outcome).toBe('ok');
   });
 
+  it('两个仓各 10 张候选、在跑上限 6：按仓轮转，各起 3 条；名单换序结果不变', async () => {
+    const a = { ...REPO, id: 'r1', owner: 'zeta', name: 'later' };
+    const b = { ...REPO, id: 'r2', owner: 'alpha', name: 'earlier' };
+    const runWith = async (repos: (typeof REPO)[]) => {
+      const h = harness({
+        limits: { maxStartsPerRound: 6, maxRunningTasks: 6, maxStartsPerHour: 99 },
+        async repos() {
+          return repos;
+        },
+        async openIssues(repo) {
+          const base = repo.id === 'r1' ? 100 : 200;
+          return {
+            issues: Array.from({ length: 10 }, (_, i) => issue({ number: base + i })),
+            openMilestones: [V1, V2],
+          };
+        },
+      });
+      await runIntakeJob(h.deps);
+      return h.started.map((s) => s.issueNumber);
+    };
+    const first = await runWith([a, b]);
+    const second = await runWith([b, a]);
+    expect(first).toEqual([100, 200, 101, 201, 102, 202]);
+    expect(second).toEqual(first);
+  });
+
+  it('一个仓没单时，另一个仓能吃满 6 个名额', async () => {
+    const empty = { ...REPO, id: 'r1', name: 'empty' };
+    const busy = { ...REPO, id: 'r2', name: 'busy' };
+    const h = harness({
+      limits: { maxStartsPerRound: 6, maxRunningTasks: 6, maxStartsPerHour: 99 },
+      async repos() {
+        return [empty, busy];
+      },
+      async openIssues(repo) {
+        return {
+          issues: repo.id === busy.id ? Array.from({ length: 10 }, (_, i) => issue({ number: 300 + i })) : [],
+          openMilestones: [V1, V2],
+        };
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toHaveLength(6);
+    expect(h.started.every((s) => s.issueNumber >= 300)).toBe(true);
+  });
+
+  it('A 仓熔断时只停 A，B 仓照样起单', async () => {
+    const a = { ...REPO, id: 'r1', name: 'a' };
+    const b = { ...REPO, id: 'r2', name: 'b' };
+    const h = harness({
+      limits: { maxStartsPerRound: 6, maxRunningTasks: 6, maxStartsPerHour: 99 },
+      async repos() {
+        return [a, b];
+      },
+      async openIssues(repo) {
+        return {
+          issues: [issue({ number: repo.id === a.id ? 401 : 501 })],
+          openMilestones: [V1, V2],
+        };
+      },
+      async breaker(repo) {
+        return repo.id === a.id
+          ? { open: { since: new Date(NOW.getTime() - 30 * 60_000), trial: null }, recent: [] }
+          : { open: null, recent: [] };
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([501]);
+    expect(h.logs.some((l) => l.text.includes('breaker_open×1'))).toBe(true);
+  });
+
   it('在跑的任务已经到上限 → 一条都不起（不是丢，下一轮再来）', async () => {
     const h = harness({
       async runningTasks() {
