@@ -316,6 +316,26 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     expect(cursor.authReroute).toBeUndefined();
   });
 
+  it('只给结构化 httpStatus=401、原文没有登录语义：也按第一次临时失败换路由，第二次才停池', () => {
+    const structured = session({
+      code: 'agent_error',
+      message: '上游返回了未注明原因的认证响应',
+      httpStatus: 401,
+    });
+    expect(classifyFailure(structured)).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU2',
+      authReroute: 'route',
+      alert: false,
+    });
+    expect(classifyFailure({ ...structured, priorBare401: true })).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU2',
+      authReroute: 'pool',
+      alert: true,
+    });
+  });
+
   it('rework 卫生检查拦下了要公开的内容：退回会话去掉再交；同一处连续被拦两次就停；卫生检查没扫成不推、直接停', () => {
     const spots = '卫生检查拦下了要公开的内容：config/app.env:3 github-token';
     const blocked = (over: FailureEvidence = {}) =>

@@ -93,11 +93,11 @@ const POOL_AUTH_REROUTE = new Set(['AU1', 'AU2', 'DV1']);
 
 /**
  * 只凭 HTTP 401，没有「要重新登录」的整句、也没有结构化的登录码。
- * 原文里的 Unauthorized / 状态码 401 都算；not logged in、token expired、authentication failed 不算。
+ * 结构化 httpStatus、原文里的 Unauthorized / 状态码 401 都算；not logged in、token expired、authentication failed 不算。
  */
-function isBare401(plan: Plan, message: string | undefined): boolean {
+function isBare401(plan: Plan, evidence: FailureEvidence): boolean {
   if (plan.rule !== 'AU2' || plan.via === 'signal') return false;
-  const text = message ?? '';
+  const text = evidence.message ?? '';
   if (
     /not logged in|please run \/login|no valid login detected|重新登录|完成登录|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)/i.test(
       text,
@@ -105,6 +105,7 @@ function isBare401(plan: Plan, message: string | undefined): boolean {
   ) {
     return false;
   }
+  if (evidence.httpStatus === 401) return true;
   if (plan.via === 'generic' && plan.hit.startsWith('HTTP 401')) return true;
   return /^(?:unauthori[sz]ed|unauthenticated)$/i.test(plan.hit);
 }
@@ -112,7 +113,7 @@ function isBare401(plan: Plan, message: string | undefined): boolean {
 /** 绑路由的会话撞上账号池的停：回去选路。不绑路由的（推送令牌过期）仍挂起。只凭 401 要第二次才停池。 */
 function poolAuthLeave(plan: Plan, ctx: Ctx): 'pool' | 'route' | undefined {
   if (!ctx.routeBound || !POOL_AUTH_REROUTE.has(plan.rule)) return undefined;
-  if (isBare401(plan, ctx.evidence.message)) {
+  if (isBare401(plan, ctx.evidence)) {
     return ctx.evidence.priorBare401 === true ? 'pool' : 'route';
   }
   return plan.hold ? 'pool' : undefined;
@@ -240,7 +241,7 @@ function decide(plan: Plan, ctx: Ctx): Step {
           counter: null,
           wait: false,
           authReroute: 'pool',
-          ...(isBare401(plan, ctx.evidence.message) ? { second401: true as const } : {}),
+          ...(isBare401(plan, ctx.evidence) ? { second401: true as const } : {}),
         };
       }
       return PARK;

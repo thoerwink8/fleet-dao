@@ -75,7 +75,8 @@ function failed(message: string, code: string, httpStatus?: number): RunSegmentR
 }
 
 const BANNED = failed('当前绑定账号暂不可用', 'account_banned');
-const UNAUTHORIZED = failed('HTTP 401 Unauthorized', 'agent_error', 401);
+// 真实端口可能只交结构化状态码，消息里没有 "HTTP 401" 或 "Unauthorized"。
+const UNAUTHORIZED = failed('上游返回了未注明原因的认证响应', 'agent_error', 401);
 
 function holdAlerts(world: FakeWorld, poolId: string) {
   return world.alerts.filter((a) => a.dedupeKey === `pool-hold:${poolId}`);

@@ -233,6 +233,33 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(twice.reason).toContain('整池暂停，回去选路避开这个池');
   });
 
+  it('只有结构化 httpStatus=401 时也识别为裸 401，不因消息没有 Unauthorized 而首次停池', () => {
+    const route = {
+      routeId: 'r-structured',
+      poolId: 'p-structured',
+      modelId: 'opus',
+      hostId: 'mirasim' as const,
+    };
+    const next = nextAction({
+      failure: {
+        source: 'session:execute',
+        code: 'agent_error',
+        message: '上游返回了未注明原因的认证响应',
+        retryable: null,
+      },
+      limits,
+      routeBound: true,
+      context: { httpStatus: 401, route },
+    });
+    expect(next).toMatchObject({
+      action: 'swapRoute',
+      authReroute: 'route',
+      avoid: 'route',
+      alert: false,
+      rule: 'AU2',
+    });
+  });
+
   it('要人的直接挂起并报警', () => {
     expect(nextAction({ failure: failure('PERMISSION_DENIED'), limits, routeBound: true })).toMatchObject({
       action: 'park',
