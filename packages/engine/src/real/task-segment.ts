@@ -56,7 +56,11 @@ import {
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import type { ChannelAttempts, SegmentReservations } from './runs-writer.ts';
-import { type SubagentGuard, writeSegmentLocalSettings } from './segment-settings.ts';
+import {
+  assertSubagentsInstalled,
+  type SubagentGuard,
+  writeSegmentLocalSettings,
+} from './segment-settings.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { prepareSegmentTree, type SegmentTreeDeps } from './segment-tree.ts';
 import { readTreeFile } from './user-git.ts';
@@ -87,6 +91,8 @@ export interface RunSegmentDeps {
    * 模型时 deny 全部）。给了而读不到清单，这一段不起会话（deny 写不上，不带着没挡的状态起）。不给 = 不写（测试）。
    */
   subagentGuard?: () => Promise<SubagentGuard>;
+  /** 测试用：会话用户的家目录（默认按账号库查）。 */
+  subagentsHome?: string;
   /** 设置 engine.subagentHint（默认关）：开着提示词多一句可以派哪些子代理。读不了记日志、按关，不挡会话。 */
   readSubagentHint?: () => Promise<boolean>;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
@@ -267,19 +273,19 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       } catch (error) {
         throw new PortError('SEGMENT_SUBAGENT_GUARD', errMessage(error), { retryable: true });
       }
-      await writeSegmentLocalSettings(
-        {
-          exec: deps.tree.exec,
-          user: routeInfo.user,
-          dir: input.worktreePath,
-          scopePrefix: `local-settings-${treeRunId}`,
-          signal: ctx.signal,
-          ...(deps.tree.gitBin ? { git: deps.tree.gitBin } : {}),
-          ...(deps.tree.shBin ? { sh: deps.tree.shBin } : {}),
-        },
-        guard,
-        routeInfo.route.upstreamModel ?? routeInfo.route.modelId,
-      );
+      const settingsTree = {
+        exec: deps.tree.exec,
+        user: routeInfo.user,
+        dir: input.worktreePath,
+        scopePrefix: `local-settings-${treeRunId}`,
+        signal: ctx.signal,
+        ...(deps.tree.gitBin ? { git: deps.tree.gitBin } : {}),
+        ...(deps.tree.shBin ? { sh: deps.tree.shBin } : {}),
+      };
+      const sessionModel = routeInfo.route.upstreamModel ?? routeInfo.route.modelId;
+      // Claude 模型：定义靠会话用户家里的 ~/.claude/agents（agents-sync 装的），开跑前核对和仓里是同一份（#2820）
+      await assertSubagentsInstalled(settingsTree, guard, sessionModel, deps.subagentsHome);
+      await writeSegmentLocalSettings(settingsTree, guard, sessionModel);
     }
     // 3. 提示词
     let subagentHint = false;
