@@ -16,6 +16,7 @@ import type {
   MergeNowInput,
   MergeNowResult,
   MergeWait,
+  NoteBare401Input,
   PlanSegmentResumeInput,
   PlanSegmentResumeResult,
   ReadCiPolicyResult,
@@ -29,6 +30,7 @@ import type {
   TaskSpendInput,
   TaskSpendResult,
 } from '../src/task-contract.ts';
+import { type Bare401Stamp, nextBare401Stamp } from '../src/workflows/task-support.ts';
 
 export const BODY = [
   '## 场景',
@@ -164,6 +166,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     flow: () => ({ mode: 'three', source: 'ineligible', reason: '测试默认三段' }),
     ...over,
   };
+  const bare401 = new Map<string, Bare401Stamp>();
   const tasks: EngineTasks = {
     async readTaskBrief() {
       calls.order.push('brief');
@@ -238,6 +241,9 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.spendInputs.push(input);
       return script.spend(calls.spend, input);
     },
+    async noteBare401(input) {
+      return noteSharedBare401(bare401, input);
+    },
     async decideFlowMode(input) {
       calls.flowAfterSegments.push(calls.segment.length);
       calls.flow.push(input);
@@ -245,4 +251,14 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     },
   };
   return { tasks, calls };
+}
+
+/** 测试里同一份 scripted() 的任务共用这一张表，两个任务各打一次 401 才算第二次。 */
+function noteSharedBare401(stamps: Map<string, Bare401Stamp>, input: NoteBare401Input) {
+  const { stamp, repeated } = nextBare401Stamp(stamps.get(input.poolId), {
+    now: input.now,
+    claim: input.claim,
+  });
+  stamps.set(input.poolId, stamp);
+  return { repeated };
 }

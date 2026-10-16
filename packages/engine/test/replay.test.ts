@@ -25,6 +25,7 @@ const REQUIRED = [
   'task-repinned',
   'task-full-merged',
   'task-full-reworked',
+  'task-verify-reattach',
 ];
 
 const HOW =
@@ -132,6 +133,21 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
       const text = readFileSync(`${DIR}${old}.json`, 'utf8');
       expect(text).not.toContain(marker);
       expect(scheduledActivities(load(`${old}.json`).history)).not.toContain('decideFlowMode');
+    }
+  });
+
+  it('task-verify-reattach 夹具（#2848）真走过冷验收接回：带 cold-verify-attach 标记，coldVerify 调了两次（第二次带 attach）；老夹具里没有这个标记', () => {
+    const marker = Buffer.from(JSON.stringify({ id: 'cold-verify-attach', deprecated: false })).toString(
+      'base64',
+    );
+    const text = readFileSync(`${DIR}task-verify-reattach.json`, 'utf8');
+    expect(text).toContain(marker);
+    const { history } = load('task-verify-reattach.json');
+    expect(scheduledActivities(history).filter((n) => n === 'coldVerify').length).toBe(2);
+    // 只动手一次：脱开不是没过，没回去返工
+    expect(scheduledActivities(history).filter((n) => n === 'runSegment').length).toBe(1);
+    for (const old of files.filter((f) => f !== 'task-verify-reattach.json')) {
+      expect(readFileSync(`${DIR}${old}`, 'utf8')).not.toContain(marker);
     }
   });
 
