@@ -1641,6 +1641,17 @@
         "message": "API Error: 503 This model is temporarily unavailable"
       },
       "expect": { "action": "park", "rule": "MU1", "alert": true, "routeOutcome": "fail" }
+    },
+    {
+      "id": "X115",
+      "provenance": "production",
+      "origin": "2026-10-16 #2759：Mirasim opus-5.5 动手会话干满 60 分钟被 one-shot 强停。failure_reason 是「引擎叫停（时限到了：one-shot timeout）」，收场码是 wall_clock_timeout。句里的 timeout 曾让 NT2 抢走，route_outcome 记成 fail，半开试探被判又失败",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "wall_clock_timeout",
+        "message": "引擎叫停（时限到了：one-shot timeout）"
+      },
+      "expect": { "action": "retry", "rule": "WT1", "routeOutcome": "neutral" }
     }
   ],
   "skipped": [

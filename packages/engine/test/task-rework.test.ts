@@ -302,6 +302,25 @@ describe('会话收场后引擎自测（决定 0093）', { timeout: 60_000 }, ()
     expect(calls.verify[0]?.testOutput).toContain('没过（退出码 1）');
   });
 
+  it('活动限时到了：记 skipped，只调一次，照旧推', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      selfCheck: () => {
+        throw new Error('activity StartToClose timeout');
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.selfCheck).toHaveLength(1);
+    expect(calls.verify[0]?.testOutput).toBeUndefined();
+    expect(world.count('pushBranch')).toBe(1);
+  });
+
   it('【故意造出的失败】自测活动没装（抛错）：不挡原流程，照旧推，验收不带测试输出', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted();

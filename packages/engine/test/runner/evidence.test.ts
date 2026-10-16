@@ -38,14 +38,15 @@ describe('segmentEvidence：交给失败分流的证据', () => {
   });
 
   it('【故意造出的失败】one-shot 的时限先到（驱动没先收场）：驱动交回的 aborted 只是在回应我们的 kill，码还是 wall_clock_timeout，分流认 WT1，不认成「我们自己停的」（#1859/#1877/#1933）', () => {
-    // 法国原样：Mirasim 驱动没拿到时限，one-shot 60 分钟杀，驱动报 aborted、尾巴是「引擎叫停」
+    // 法国原样（#2759）：Mirasim 驱动没拿到时限，one-shot 60 分钟杀，驱动报 aborted，叫停原文带上种类和说明
+    const stop = '引擎叫停（时限到了：one-shot timeout）';
     const echoed: OneShotResult = {
       ...base,
       outcome: 'timeout',
       exitCode: null,
-      stderrTail: '引擎叫停',
-      failureReason: 'exit=null killed=true；引擎叫停',
-      facts: { reason: 'aborted', detail: '引擎叫停' },
+      stderrTail: stop,
+      failureReason: `exit=null killed=true；${stop}`,
+      facts: { reason: 'aborted', detail: stop },
     };
     const e = segmentEvidence(echoed);
     expect(e.code).toBe('wall_clock_timeout');
@@ -56,7 +57,9 @@ describe('segmentEvidence：交给失败分流的证据', () => {
       code: e.code ?? '',
       message: e.message ?? '',
     });
+    // 原文里的 “one-shot timeout” 不能让 NT2 抢走：时限是我们定的，不算路由的错
     expect(verdict.rule).toBe('WT1');
+    expect(verdict.routeOutcome).toBe('neutral');
     // 驱动自己报的别的原因（额度用满、繁忙）照样优先：只换掉「回应我们的 kill」那一个
     expect(segmentEvidence({ ...echoed, facts: { reason: 'quota_exhausted' } }).code).toBe('quota_exhausted');
     // 不是超时（切号、人叫停走 killed）的 aborted 原样
@@ -79,6 +82,44 @@ describe('routeOutcomeOf：这一次算不算这条路由的账（#758）', () =
     expect(routeOutcomeOf({ ...base, outcome: 'timeout', exitCode: null }, 'manual')).toBe('neutral');
   });
 
+  it('【故意造出的失败】one-shot 时限强停（原文带 one-shot timeout）记 neutral；上游超时、连不上照旧 fail（#2759）', () => {
+    const stop = '引擎叫停（时限到了：one-shot timeout）';
+    const oneShot: OneShotResult = {
+      ...base,
+      outcome: 'timeout',
+      exitCode: null,
+      stderrTail: stop,
+      failureReason: `exit=null killed=true；${stop}`,
+      facts: { reason: 'aborted', detail: stop },
+    };
+    expect(routeOutcomeOf(oneShot, 'manual')).toBe('neutral');
+    // 上游 504：状态码和 “gateway timeout” 都是 UP1，算路由的错
+    expect(
+      routeOutcomeOf(
+        {
+          ...base,
+          outcome: 'failed',
+          facts: { httpStatus: 504, detail: 'HTTP 504 Gateway Timeout' },
+        },
+        'manual',
+      ),
+    ).toBe('fail');
+    // 连不上：ETIMEDOUT 是 NT1；只有 “connection timed out” 这句是 NT2。都算路由的错
+    expect(
+      routeOutcomeOf(
+        {
+          ...base,
+          outcome: 'failed',
+          facts: { reason: 'etimedout', detail: 'connect ETIMEDOUT 10.0.0.1:443' },
+        },
+        'manual',
+      ),
+    ).toBe('fail');
+    expect(routeOutcomeOf({ ...base, outcome: 'failed', stderrTail: 'connection timed out' }, 'manual')).toBe(
+      'fail',
+    );
+  });
+
   it('和任务工作流的失败分流对同一次失败下的结论一样（照 workflows/task.ts 的 classify 那样把证据交给分流）', () => {
     for (const result of [
       base,
@@ -87,6 +128,20 @@ describe('routeOutcomeOf：这一次算不算这条路由的账（#758）', () =
       { ...base, stderrTail: 'HTTP 529 overloaded_error' },
       { ...base, facts: { reason: 'relay_unknown', detail: '账本没读成' } },
       { ...base, outcome: 'timeout' as const, exitCode: null },
+      {
+        ...base,
+        outcome: 'timeout' as const,
+        exitCode: null,
+        stderrTail: '引擎叫停（时限到了：one-shot timeout）',
+        failureReason: 'exit=null killed=true；引擎叫停（时限到了：one-shot timeout）',
+        facts: { reason: 'aborted', detail: '引擎叫停（时限到了：one-shot timeout）' },
+      },
+      { ...base, outcome: 'failed' as const, facts: { httpStatus: 504, detail: 'HTTP 504 Gateway Timeout' } },
+      {
+        ...base,
+        outcome: 'failed' as const,
+        facts: { reason: 'etimedout', detail: 'connect ETIMEDOUT 10.0.0.1:443' },
+      },
     ]) {
       const e = segmentEvidence(result);
       const triaged = classifyFailure(
