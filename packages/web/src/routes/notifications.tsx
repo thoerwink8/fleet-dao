@@ -1,4 +1,5 @@
 import { answerResolves, NO_OPTIONS_TEXT } from '@fleet-dao/shared';
+import { useQueryClient } from '@tanstack/react-query';
 import { ArrowUpRight, Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
@@ -6,6 +7,7 @@ import { toast } from 'sonner';
 import { brand } from '#brand';
 import {
   errorText,
+  keys,
   NOTIFICATIONS_PAGE,
   useAnswerNotification,
   useMe,
@@ -609,7 +611,39 @@ export default function Notifications() {
   const status = params.get('status') === 'all' ? 'all' : 'open';
   const level = (LEVELS.find((l) => l.id === params.get('level'))?.id ?? 'all') as 'all' | NotificationLevel;
   const [limit, setLimit] = useState(NOTIFICATIONS_PAGE);
+  const qc = useQueryClient();
+  // 必须在 useNotifications 订阅之前拍下来：订阅发生在渲染里，拍晚了看到的是这一页自己刚发起的那次。
+  const [entry] = useState(() => {
+    const state = qc.getQueryState(keys.notifications(status));
+    return {
+      hadData: state?.data !== undefined,
+      busy: state?.fetchStatus === 'fetching' || state?.fetchStatus === 'paused',
+      invalidated: state?.isInvalidated === true,
+      updatedAt: state?.dataUpdatedAt ?? 0,
+    };
+  });
   const { data, error, isLoading, isFetching, dataUpdatedAt, refetch } = useNotifications(status, limit);
+  const rereadOnce = useRef(false);
+  // 外壳进页前已把通知读进缓存（5 秒新鲜期内不再读）或那次读取还在飞（新观察者跟上、不另开），
+  // 后端若刚断，页面会拿进页前的成功当读成了，所以这两种都先取消在飞的再强制读一次。
+  useEffect(() => {
+    if (rereadOnce.current) return;
+    const raw = qc.getDefaultOptions().queries?.staleTime;
+    const staleMs = typeof raw === 'number' ? raw : 0;
+    const fresh =
+      entry.hadData &&
+      !entry.busy &&
+      !entry.invalidated &&
+      staleMs > 0 &&
+      Date.now() - entry.updatedAt < staleMs;
+    if (!entry.busy && !fresh) return;
+    rereadOnce.current = true;
+    // 取消的是外壳共用的那份：这一页卸了也要把补读做完，外壳才不会停在没数据上。
+    void (async () => {
+      if (entry.busy) await qc.cancelQueries({ queryKey: keys.notifications(status) });
+      await refetch();
+    })();
+  }, [qc, refetch, entry, status]);
   const { data: me } = useMe();
   const resolve = useResolveNotification();
   const answerMutation = useAnswerNotification();

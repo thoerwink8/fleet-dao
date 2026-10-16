@@ -21,10 +21,21 @@ const STUCK: Notification = {
   deliveries: [],
 };
 
-/** 外壳那份订阅：先把通知读进缓存，页面还没挂上。 */
+const OK = { items: [STUCK], counts: { decision: 0, alert: 1, daily: 0 } };
+
+/** 外壳那份订阅一直挂着（侧栏、顶栏进页前就订了），页面另外再挂。 */
 function Prefetch() {
   useNotifications('open');
   return null;
+}
+
+function Scenario({ onPage }: { onPage: boolean }) {
+  return (
+    <>
+      <Prefetch />
+      {onPage ? <NotificationsPage /> : null}
+    </>
+  );
 }
 
 describe('通知中心进页重读', () => {
@@ -36,19 +47,19 @@ describe('通知中心进页重读', () => {
     api.notifications = () => {
       calls += 1;
       if (down) return Promise.reject(new ApiError(0, 'network', '连不上后端'));
-      return Promise.resolve({ items: [STUCK], counts: { decision: 0, alert: 1, daily: 0 } });
+      return Promise.resolve(OK);
     };
 
     let openPage = (_open: boolean) => {};
-    function Scenario() {
+    function Harness() {
       const [onPage, setOnPage] = useState(false);
       useEffect(() => {
         openPage = setOnPage;
       }, []);
-      return onPage ? <NotificationsPage /> : <Prefetch />;
+      return <Scenario onPage={onPage} />;
     }
 
-    const { qc } = renderApp(<Scenario />, { api, staleTime: 5_000 });
+    const { qc } = renderApp(<Harness />, { api, staleTime: 5_000 });
     expect(qc.getDefaultOptions().queries?.staleTime).toBe(5_000);
 
     await waitFor(() => expect(qc.getQueryData(['notifications', 'open'])).toBeTruthy());
@@ -73,5 +84,46 @@ describe('通知中心进页重读', () => {
     fireEvent.click(screen.getByRole('button', { name: '重试' }));
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
     expect(screen.getByText('任务 12 卡住了')).toBeTruthy();
+  });
+
+  test('外壳那次读取还在飞时进页：不把进页前发出的成功当成读成了', async () => {
+    // 只跟上在飞的那一次、不另开，或晚到的成功把失败盖掉，这一条会红。
+    const api = createMockApi({ live: false });
+    let calls = 0;
+    let releaseFirst: () => void = () => {};
+    api.notifications = () => {
+      calls += 1;
+      if (calls === 1) {
+        return new Promise((resolve) => {
+          releaseFirst = () => resolve(OK);
+        });
+      }
+      return Promise.reject(new ApiError(0, 'network', '连不上后端'));
+    };
+
+    let openPage = (_open: boolean) => {};
+    function Harness() {
+      const [onPage, setOnPage] = useState(false);
+      useEffect(() => {
+        openPage = setOnPage;
+      }, []);
+      return <Scenario onPage={onPage} />;
+    }
+
+    renderApp(<Harness />, { api, staleTime: 5_000 });
+    await waitFor(() => expect(calls).toBe(1));
+
+    act(() => openPage(true));
+    const alert = await screen.findByRole('alert');
+    expect(calls).toBeGreaterThan(1);
+    expect(alert.textContent).toContain('提醒没读成');
+    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+
+    // 进页前那一次这时才成功：不能把「没读成」盖掉。
+    releaseFirst();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByRole('alert').textContent).toContain('提醒没读成');
   });
 });
