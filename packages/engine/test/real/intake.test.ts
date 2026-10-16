@@ -64,6 +64,8 @@ interface Seed {
   repoSwitch?: Date | null;
   /** 仓名；不给是 demo。 */
   name?: string;
+  /** 换掉档案里的工具链。不给仍是 pnpm。 */
+  toolchain?: string[];
 }
 
 async function seedWorld(db: Db, over: Seed = {}) {
@@ -76,7 +78,7 @@ async function seedWorld(db: Db, over: Seed = {}) {
       autoDispatchSince: over.repoSwitch === undefined ? new Date('2026-09-30T00:00:00Z') : over.repoSwitch,
       profile: {
         language: 'typescript',
-        toolchain: ['pnpm'],
+        toolchain: over.toolchain ?? ['pnpm'],
         testCommand: 'pnpm check',
         moduleRoots: ['packages/*'],
         mergeSignals: ['merge-gate', 'cold-verify'],
@@ -250,7 +252,21 @@ function fakeClient(
 }
 
 const logs: string[] = [];
+/**
+ * 真装配默认换掉法国本机的工具链探测：CI 的 pnpm 不在 /usr/local/bin，
+ * 真探测会把这仓判成没就绪、一张单都不拉。要测真探测的用例走 wireLive。
+ */
 const wire = (gh: IntakeGitHub) =>
+  intakeJob({
+    db: t.db,
+    gh,
+    now: () => NOW,
+    log: (_l, text) => logs.push(text),
+    gateLive: true,
+    toolchainReady: async () => [],
+  });
+/** 不换探测：command -v 看这台机器的固定安装位置。 */
+const wireLive = (gh: IntakeGitHub) =>
   intakeJob({
     db: t.db,
     gh,
@@ -1089,5 +1105,29 @@ describe('reportIntakeProfile · 仓档案没就绪的提醒（#2839）', () => 
   it('一上来就报 null → 不报错，表里没有这一行', async () => {
     await expect(reportIntakeProfile(t.db, repo, null)).resolves.toBeUndefined();
     expect(await alertByKey(t.db, KEY)).toBeNull();
+  });
+});
+
+describe('拉单的真装配 · 法国本机的工具链', () => {
+  it('档案里的工具这台没有：不读单、不拉，原因写明缺哪个', async () => {
+    await seedWorld(t.db, { toolchain: ['sh', 'fleet-dao-no-such-go'] });
+    const { gh, calls } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wireLive(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(starts).toEqual([]);
+    expect(calls.groomed).toBe(0);
+    expect(run.why).toContain('toolchain_unready×1');
+    expect(run.why).toContain('缺工具链：fleet-dao-no-such-go');
+    expect(run.why).not.toContain('缺工具链：sh');
+  });
+
+  it('档案里的工具这台有：照常拉单', async () => {
+    await seedWorld(t.db, { toolchain: ['sh'] });
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wireLive(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(starts).toHaveLength(1);
   });
 });

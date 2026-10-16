@@ -25,19 +25,31 @@ describe('受管的仓（listIntakeRepos）', () => {
     const a = await addRepo(t.db, 'aaa');
     const opened = ago(DAY);
     await t.db.update(repos).set({ autoDispatchSince: opened }).where(eq(repos.id, b.id));
+    await t.db
+      .update(repos)
+      .set({ profile: { language: 'go', toolchain: ['go'], testCommand: 'go test ./...' } })
+      .where(eq(repos.id, b.id));
     const rows = await listIntakeRepos(t.db);
     expect(rows.map((r) => r.name).sort()).toEqual(['aaa', 'bbb']);
-    expect(rows.find((r) => r.id === b.id)).toMatchObject({
+    const gotB = rows.find((r) => r.id === b.id);
+    expect(gotB).toMatchObject({
       id: b.id,
       owner: 'acme',
       defaultBranch: 'main',
       testCommand: 'pnpm check',
       autoDispatchSince: opened,
+      profile: { language: 'go', toolchain: ['go'], testCommand: 'go test ./...' },
       ciPolicy: 'force',
       weight: 1,
     });
-    expect(rows.find((r) => r.id === a.id)).toMatchObject({ id: a.id, autoDispatchSince: null, weight: 1 });
-    expect(rows.find((r) => r.id === a.id)?.ciPolicy).toBe('force');
+    expect(gotB?.autoDispatchSince?.toISOString()).toBe(opened.toISOString());
+    expect(rows.find((r) => r.id === a.id)).toMatchObject({
+      id: a.id,
+      autoDispatchSince: null,
+      profile: {},
+      ciPolicy: 'force',
+      weight: 1,
+    });
   });
 
   it('切成不强制之后读回来是 off；没改过的仍是强制', async () => {

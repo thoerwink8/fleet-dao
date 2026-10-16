@@ -4,7 +4,7 @@
 import type { SegmentTier, TaskState } from '@fleet-dao/shared';
 import { and, asc, count, desc, eq, gt, gte, inArray, lt, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog, settings, stateChanges, tasks } from '../schema/index.ts';
+import { auditLog, runs, settings, stateChanges, tasks } from '../schema/index.ts';
 
 /** 接手没有任务工作流的老任务行时写的操作记录（engine real/intake.ts 用同一个名字）。 */
 export const TASK_ADOPT_AUDIT_ACTION = 'task.adopt';
@@ -159,48 +159,129 @@ export async function writeIntakeBreaker(
 }
 
 // —— 近 24 小时各仓已起单的加权工作量 ——
+// 数的是任务行（新建的看建出时刻，接手老行看 task.adopt），不数设置表里单独的一份流水。
+// 设置 engine.intakeStarts 只给「已经起了、动手段还没写下档」的那条补上拉单时知道的档，并带上任务编号；
+// 没有任务行的流水不算一条已起的单。合并前起的单没有这份流水，档从动手段（runs.tier）读。
 
 export const INTAKE_STARTS_SETTING = 'engine.intakeStarts';
-type IntakeStart = { repoId: string; at: string; tier: SegmentTier };
+type IntakeStart = { repoId: string; at: string; tier: SegmentTier; taskId?: string };
+
+function isTier(value: unknown): value is SegmentTier {
+  return value === 'fast' || value === 'medium' || value === 'heavyweight';
+}
 
 function parseIntakeStarts(value: unknown): IntakeStart[] {
   if (!Array.isArray(value)) throw new Error(`设置 ${INTAKE_STARTS_SETTING} 的值认不出（要任务起单数组）`);
-  const starts = value as Record<string, unknown>[];
-  if (
-    starts.some(
-      (v) =>
-        typeof v?.repoId !== 'string' ||
-        typeof v.at !== 'string' ||
-        !['fast', 'medium', 'heavyweight'].includes(v.tier as string) ||
-        Number.isNaN(new Date(v.at).getTime()),
-    )
-  ) {
-    throw new Error(`设置 ${INTAKE_STARTS_SETTING} 的值认不出（要 [{repoId, at, tier}]）`);
-  }
-  return starts as IntakeStart[];
+  return value.map((v) => {
+    const row = v as { repoId?: unknown; at?: unknown; tier?: unknown; taskId?: unknown };
+    if (
+      typeof row?.repoId !== 'string' ||
+      typeof row.at !== 'string' ||
+      !isTier(row.tier) ||
+      Number.isNaN(new Date(row.at).getTime()) ||
+      (row.taskId !== undefined && typeof row.taskId !== 'string')
+    ) {
+      throw new Error(`设置 ${INTAKE_STARTS_SETTING} 的值认不出（要 [{repoId, taskId, at, tier}]）`);
+    }
+    return row.taskId === undefined
+      ? { repoId: row.repoId, at: row.at, tier: row.tier }
+      : { repoId: row.repoId, at: row.at, tier: row.tier, taskId: row.taskId };
+  });
 }
 
 const intakeTierCost = (tier: SegmentTier): number => (tier === 'fast' ? 1 : tier === 'medium' ? 2 : 4);
 
-/** 读近 24 小时（或调用方给的 since）各仓已成功起单的加权工作量；没有历史就是空。 */
-export async function intakeWorkloadSince(db: Db, since: Date): Promise<Record<string, number>> {
+async function readIntakeStarts(db: Db): Promise<IntakeStart[]> {
   const [row] = await db
     .select({ value: settings.value })
     .from(settings)
     .where(eq(settings.key, INTAKE_STARTS_SETTING));
-  if (!row) return {};
+  return row ? parseIntakeStarts(row.value) : [];
+}
+
+/**
+ * 近 24 小时（或调用方给的 since）各仓已起单的加权工作量：快档 1、中档 2、主力档 4。
+ * 已起 = 这段时间新建的引擎任务行，加上这段时间接手的更老的引擎任务行。本机领的不算。
+ * 档：起单时写下的那条（带任务编号）优先，否则取这条任务最早的动手段档；两处都没有按快档算，不当成没起过。
+ * 只有设置、没有对应任务行的，不算。
+ */
+export async function intakeWorkloadSince(db: Db, since: Date): Promise<Record<string, number>> {
+  const sinceMs = since.getTime();
+  const created = await db
+    .select({ id: tasks.id, repoId: tasks.repoId, at: tasks.createdAt })
+    .from(tasks)
+    .where(and(gte(tasks.createdAt, since), eq(tasks.executor, 'engine')));
+  const adopted = await db
+    .select({ id: tasks.id, repoId: tasks.repoId, at: auditLog.at })
+    .from(auditLog)
+    .innerJoin(tasks, sql`${auditLog.target} = 'task:' || ${tasks.id}::text`)
+    .where(
+      and(
+        eq(auditLog.action, TASK_ADOPT_AUDIT_ACTION),
+        eq(auditLog.ok, true),
+        gte(auditLog.at, since),
+        lt(tasks.createdAt, since),
+        eq(tasks.executor, 'engine'),
+      ),
+    );
+  const started = new Map<string, { id: string; repoId: string; at: Date }>();
+  for (const row of [...created, ...adopted]) {
+    const prev = started.get(row.id);
+    if (!prev || row.at.getTime() < prev.at.getTime()) started.set(row.id, row);
+  }
+  if (started.size === 0) return {};
+
+  const ids = [...started.keys()];
+  const runRows = await db
+    .select({ taskId: runs.taskId, tier: runs.tier, startedAt: runs.startedAt })
+    .from(runs)
+    .where(
+      and(
+        inArray(runs.taskId, ids),
+        eq(runs.segment, 'manual'),
+        inArray(runs.tier, ['fast', 'medium', 'heavyweight']),
+      ),
+    )
+    .orderBy(asc(runs.startedAt));
+  const tierByRun = new Map<string, SegmentTier>();
+  for (const row of runRows) {
+    if (!row.taskId || tierByRun.has(row.taskId) || !isTier(row.tier)) continue;
+    tierByRun.set(row.taskId, row.tier);
+  }
+
+  const recorded = (await readIntakeStarts(db)).filter((start) => new Date(start.at).getTime() >= sinceMs);
+  const tierByRecord = new Map<string, SegmentTier>();
+  const loose: IntakeStart[] = [];
+  for (const start of recorded) {
+    if (start.taskId) tierByRecord.set(start.taskId, start.tier);
+    else loose.push(start);
+  }
+  const usedLoose = new Set<number>();
   const totals: Record<string, number> = {};
-  for (const start of parseIntakeStarts(row.value)) {
-    if (new Date(start.at).getTime() < since.getTime()) continue;
-    totals[start.repoId] = (totals[start.repoId] ?? 0) + intakeTierCost(start.tier);
+  for (const task of started.values()) {
+    let tier = tierByRecord.get(task.id) ?? tierByRun.get(task.id);
+    if (!tier) {
+      const idx = loose.findIndex(
+        (start, i) =>
+          !usedLoose.has(i) &&
+          start.repoId === task.repoId &&
+          Math.abs(new Date(start.at).getTime() - task.at.getTime()) <= 2 * 60_000,
+      );
+      const matched = idx >= 0 ? loose[idx] : undefined;
+      if (matched) {
+        usedLoose.add(idx);
+        tier = matched.tier;
+      }
+    }
+    totals[task.repoId] = (totals[task.repoId] ?? 0) + intakeTierCost(tier ?? 'fast');
   }
   return totals;
 }
 
-/** 成功起一条任务后登记；同时清掉 24 小时以前的历史，避免设置值无限长。 */
+/** 成功起一条任务后记下它的档（带任务编号）；同时清掉 24 小时以前的历史，避免设置值无限长。 */
 export async function recordIntakeStart(
   db: Db,
-  input: { repoId: string; at: Date; tier: SegmentTier; by: string },
+  input: { repoId: string; taskId: string; at: Date; tier: SegmentTier; by: string },
 ): Promise<void> {
   const [row] = await db
     .select({ value: settings.value })
@@ -210,7 +291,12 @@ export async function recordIntakeStart(
   const starts = row
     ? parseIntakeStarts(row.value).filter((start) => new Date(start.at).getTime() >= since)
     : [];
-  starts.push({ repoId: input.repoId, at: input.at.toISOString(), tier: input.tier });
+  starts.push({
+    repoId: input.repoId,
+    taskId: input.taskId,
+    at: input.at.toISOString(),
+    tier: input.tier,
+  });
   await db
     .insert(settings)
     .values({ key: INTAKE_STARTS_SETTING, value: starts, updatedBy: input.by })

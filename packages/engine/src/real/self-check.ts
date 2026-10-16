@@ -17,6 +17,7 @@ import { mkdir, readdir, readFile, rename, rmdir, stat, unlink, writeFile } from
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
+import type { RepoWithProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type PortContext, PortError } from '../ports.ts';
 import {
@@ -43,6 +44,8 @@ const HEARTBEAT_MS = 30_000;
  * $HOME 由会话用户的 shell 展开。
  */
 const PATH = '$HOME/.local/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin';
+/** 这些工具链表示仓要 Node 依赖。pnpm / npm / yarn 单独写、不带 node 时也算。 */
+const NODE_TOOLS: ReadonlySet<string> = new Set(['node', 'pnpm', 'npm', 'yarn']);
 const SH = '/bin/sh';
 const TSC = 'node_modules/.bin/tsc';
 /** 锁目录放哪（几个引擎进程共用）。测试和特殊机器用。 */
@@ -457,7 +460,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         deps.exec({
           user: owner,
           cwd: input.worktreePath,
-          argv: [SH, '-c', `PATH=${PATH}; export PATH; ${script} 2>&1`],
+          argv: [SH, '-c', `PATH=${PATH}; export PATH; unset FLEET_RUN_ID; ${script} 2>&1`],
           timeoutMs,
           signal: ctx.signal,
           scopeId: scopeId(input.taskId, what),
@@ -493,21 +496,28 @@ export function createSelfCheck(deps: SelfCheckDeps) {
           }
         }
       };
-      // 没装依赖就什么都跑不起来：整个跳过，不算红
-      const probe = await sh('probe', 'test -d node_modules && echo yes || echo no', 30_000);
-      if (probe.code !== 0) {
-        return {
-          state: 'skipped',
-          reason: `看不了树里装没装依赖：${digestOutput(probe.stdout.toString('utf8') || probe.stderr, 300)}`,
-          steps: [],
-        };
-      }
-      if (probe.stdout.toString('utf8').trim() !== 'yes') {
-        return { state: 'skipped', reason: '树里没装依赖（没有 node_modules），交给 CI', steps: [] };
+      const profile = (input.repo as RepoWithProfile).profile;
+      // 没写档案的老仓按 Node 仓算。写了档案的：工具链里有 node / pnpm / npm / yarn 才看 node_modules；
+      // 只有 go、cargo、python 这类的，没有 node_modules 也要跑档案里的测试命令。
+      const needsNodeModules =
+        profile === undefined || profile.toolchain.some((tool) => NODE_TOOLS.has(tool));
+      if (needsNodeModules) {
+        // Node 仓没装依赖就什么都跑不起来：整个跳过，不算红；非 Node 仓不看 node_modules。
+        const probe = await sh('probe', 'test -d node_modules && echo yes || echo no', 30_000);
+        if (probe.code !== 0) {
+          return {
+            state: 'skipped',
+            reason: `看不了树里装没装依赖：${digestOutput(probe.stdout.toString('utf8') || probe.stderr, 300)}`,
+            steps: [],
+          };
+        }
+        if (probe.stdout.toString('utf8').trim() !== 'yes') {
+          return { state: 'skipped', reason: '树里没装依赖（没有 node_modules），交给 CI', steps: [] };
+        }
       }
 
       const steps: SelfCheckStep[] = [];
-      const testCommand = input.repo.testCommand?.trim() ?? '';
+      const testCommand = (profile?.testCommand ?? input.repo.testCommand)?.trim() ?? '';
       if (testCommand === '') {
         steps.push(notRun('（测试命令）', '这个仓没配测试命令（repos.test_command）'));
       } else {
