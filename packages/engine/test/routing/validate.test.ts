@@ -156,6 +156,8 @@ describe('【故意造出的失败】组织那几样认不出（#335）：不把
 
 describe('策略给了但不对就报错，不悄悄换成默认', () => {
   it.each([
+    [{ stickRouteWaitMaxSeconds: -1 }, /stickRouteWaitMaxSeconds/],
+    [{ stickRouteWaitMaxSeconds: 1.5 }, /stickRouteWaitMaxSeconds/],
     [{ minSamples: 0 }, /minSamples/],
     [{ poorSuccessRate: 1.5 }, /poorSuccessRate/],
     [{ trialRatio: 0 }, /trialRatio/],
@@ -173,6 +175,7 @@ describe('策略给了但不对就报错，不悄悄换成默认', () => {
 
   it('只改给了的项，其余照默认', () => {
     const p = resolveRoutingPolicy({ needPerTask: { '5h': 0.2 } });
+    expect(p.stickRouteWaitMaxSeconds).toBe(30 * 60);
     expect(p.needPerTask['5h']).toBe(0.2);
     expect(p.needPerTask['7d']).toBe(0.03);
     expect(p.trialEnabled).toBe(false);

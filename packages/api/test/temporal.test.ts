@@ -5,6 +5,7 @@ import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableErro
 import {
   createEnginePollerCheck,
   createNamespaceCheck,
+  createTemporalRouteWake,
   createTemporalWorkflowControl,
   type EnginePollerSource,
   type NamespaceCheckClient,
@@ -104,6 +105,41 @@ describe('Temporal 信号', () => {
     const boom = new Error('boom');
     const control = createTemporalWorkflowControl(fakeClient(boom).client);
     await expect(control.signal('t1', { name: 'taskContinue', by: 'u1' })).rejects.toBe(boom);
+  });
+});
+
+describe('配置变更叫醒等路由的任务', () => {
+  it('只列在跑的任务工作流，并给每条发一次 taskRouteWake', async () => {
+    const listed = ['task:acme/demo#1', 'task:acme/demo#2'];
+    const sent: { workflowId: string; name: string; arg: unknown }[] = [];
+    const client = {
+      connection: {
+        async withDeadline<R>(_deadline: number | Date, fn: () => Promise<R>) {
+          return fn();
+        },
+      },
+      workflow: {
+        async *list(options: { query: string }) {
+          expect(options.query).toBe("WorkflowType = 'taskWorkflow' AND ExecutionStatus = 'Running'");
+          for (const workflowId of listed) yield { workflowId };
+        },
+        getHandle(workflowId: string) {
+          return {
+            async signal(name: string, arg: unknown) {
+              sent.push({ workflowId, name, arg });
+            },
+          };
+        },
+      },
+    };
+    await createTemporalRouteWake(client)('渠道开关已提交');
+    expect(sent).toEqual(
+      listed.map((workflowId) => ({
+        workflowId,
+        name: 'taskRouteWake',
+        arg: { by: '驾驶舱路由配置', reason: '渠道开关已提交' },
+      })),
+    );
   });
 });
 

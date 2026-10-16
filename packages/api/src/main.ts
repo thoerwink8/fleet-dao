@@ -337,7 +337,10 @@ async function assemble(): Promise<{
     // 每条路由的思考档位（#470）：引擎起会话时现读的就是这一列，改了下一个会话照新的
     routingEfforts: pgRoutingEfforts(db, now),
     // 路由两层的先后和开关（母单 #1089）：驾驶舱「路由」页改的就是选路读的那两张表的 position、enabled
-    routingOrder: pgRoutingOrder(db, now),
+    routingOrder: pgRoutingOrder(db, now, {
+      routeWake: { wake: temporal.routeWake },
+      log,
+    }),
     // 按单指定模型：引擎给这张单的一段选路时现读的就是这张表，改了下一次选路照新的
     taskRoutePins: pgTaskRoutePins(db, now),
     // 本机领单（决定 0096）：本机会话经通行证写 tasks 那一行（executor = local、带租约），法国拉单按它不接、到期收回

@@ -67,6 +67,8 @@ export interface PacePolicy {
 }
 
 export interface RoutingPolicy {
+  /** 续会话或点名的路由，已知要等超过这个时长就当作暂时用不了，照常挑别的路由。 */
+  stickRouteWaitMaxSeconds: number;
   /** 按消耗进度排（开着时代替 fastReset）。5 小时窗不参与排序（它几小时就轮一次），只挡：见 othersMinRemaining。 */
   pace: PacePolicy;
   /**
@@ -201,6 +203,7 @@ export interface TrackScorePolicy {
 }
 
 export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<RoutingPolicy>({
+  stickRouteWaitMaxSeconds: 30 * 60,
   pace: { enabled: true, margin: 0.1 },
   fastReset: {
     '7d': { withinHours: 24, minRemaining: 0.3 },
@@ -266,6 +269,9 @@ export function resolveRoutingPolicy(partial?: RoutingPolicyInput): RoutingPolic
       throw bad(key, zeroOk ? ' 0 到 1 之间的数' : '大于 0、不超过 1 的数', v);
     }
   };
+  if (!Number.isInteger(p.stickRouteWaitMaxSeconds) || p.stickRouteWaitMaxSeconds < 0) {
+    throw bad('stickRouteWaitMaxSeconds', '不小于 0 的整数秒数', p.stickRouteWaitMaxSeconds);
+  }
   if (typeof p.pace.enabled !== 'boolean') throw bad('pace.enabled', ' true 或 false', p.pace.enabled);
   ratio('pace.margin', p.pace.margin, { zeroOk: false });
   for (const [kind, f] of Object.entries(p.fastReset)) {

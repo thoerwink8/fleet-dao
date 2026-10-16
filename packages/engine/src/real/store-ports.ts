@@ -83,6 +83,7 @@ import {
   type RouteWaitKind,
   RoutingInputError,
   type RoutingPolicyInput,
+  resolveRoutingPolicy,
   routeLabel,
   STAGE_NAMES,
 } from '../routing/index.ts';
@@ -112,19 +113,17 @@ export const WIRED_HOSTS: readonly HostId[] = WIRED_HOST_IDS;
 /** 战绩和熔断看最近几天的会话结局。14 天：难单样本少，7 天不够看一档（决定 0098）。熔断仍按连续失败和 6 小时失败率回放。 */
 export const RECORD_DAYS = 14;
 /**
- * 等空位、熔断到点、等切号、等探针：有明确时刻也最多隔这么久再选。这些随时可能提前好，2 分钟是兜底
- * （原来 10 分钟，#194）。切号切完探通会当场发 taskRouteWake（real/route-wake.ts），信号到了不等满。
+ * 等空位、熔断到点、等切号、等探针：有明确时刻也最多隔这么久再选。这些随时可能提前好，10 分钟是兜底。
+ * 切号切完探通会当场发 taskRouteWake（real/route-wake.ts），信号到了不等满。
  * 等额度且清零时刻明确不走这里，见 QUOTA_ROUTE_WAIT_CAP_SECONDS。
  */
-export const MAX_ROUTE_WAIT_SECONDS = 120;
+export const MAX_ROUTE_WAIT_SECONDS = 10 * 60;
 /**
  * 等额度（waitFor quota）且清零时刻明确：按 until 睡，不超过这个上限。
  * 上限兜住人点名换路由、额度提前清零、叫醒信号丢了——最多再隔这么久重选一次；taskRouteWake 仍能当场叫醒，长睡不会错过切号。
- * 4 小时：一张单等额度 24 小时（清零不早于 24 小时后）约 6 轮 × 约 9 条事件 ≈ 54 条（约 2 条/小时）。
- * 现在每 120 秒一轮、约 270 条/小时、24 小时约 6480 条。这个增速离 Temporal 约 1 万条历史警告线还差很远
- * （要连着等额度一百多天才靠近），等路由循环不上 continueAsNew。等空位、熔断仍用 MAX_ROUTE_WAIT_SECONDS。
+ * 10 分钟：选路只读库，十几张单每 10 分钟各问一次的开销可以忽略。所有等待共用这个封顶。
  */
-export const QUOTA_ROUTE_WAIT_CAP_SECONDS = 4 * 60 * 60;
+export const QUOTA_ROUTE_WAIT_CAP_SECONDS = MAX_ROUTE_WAIT_SECONDS;
 /** 选路读会话用户挂的组织最多等多久：选路这一步（quick 一档）一次尝试只有 30 秒，还要查库。 */
 export const ORG_READ_WAIT_MS = 15_000;
 /** 组织还没读出来时隔多久再选：平时一读 0.3 秒，慢的是 reclaude 首跑同步配置（上百秒），读在后台接着跑。 */
@@ -729,8 +728,9 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         // 开 PR 前验证只派别家：写这张单的族整族避开，点名的、续会话的也一样（一条都没有就明说没有别家可验，不拿同族顶）
         const families = (input.avoidFamilies ?? []).filter((f) => f.trim());
         // 续会话的试探只放过「提醒顶着」的池；开关暂停的池（人拍的）一个都不放，续会话的也换池 fork 续上
+        const fallbackAvoidRouteIds = new Set<string>();
         const avoid = (exceptPool?: string) => ({
-          routeIds: input.avoidRouteIds,
+          routeIds: [...new Set([...input.avoidRouteIds, ...fallbackAvoidRouteIds])],
           poolIds: [
             ...new Set([
               ...input.avoidPoolIds,
@@ -751,6 +751,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(await carpoolRegistryFor(all.routes)),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
+        let namedWaitMaxSeconds: number;
+        try {
+          namedWaitMaxSeconds = resolveRoutingPolicy(deps.routingPolicy).stickRouteWaitMaxSeconds;
+        } catch (error) {
+          if (error instanceof RoutingInputError) {
+            throw new PortError('ROUTING_INPUT', `选路没查成：${error.message}`, { retryable: true });
+          }
+          throw error;
+        }
         const tier = input.tier ?? taskTier;
         const tracks = await tracksFor(input.stage, now, tier);
         const base = {
@@ -837,7 +846,17 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
               avoid: avoid(),
             });
             if (r.kind === 'dispatch') return dispatched(r, `点名的路由：${r.why}`);
-            notes.push(`点名的路由这次用不了（${r.reason}），照常选`);
+            const waitTooLong =
+              !pin &&
+              r.kind === 'wait' &&
+              r.until !== null &&
+              Date.parse(r.until) - now.getTime() > namedWaitMaxSeconds * 1000;
+            if (waitTooLong) {
+              fallbackAvoidRouteIds.add(input.preferRouteId);
+              notes.push(`点名的路由要等到 ${r.until}，太久，照常选`);
+            } else {
+              notes.push(`点名的路由这次用不了（${r.reason}），照常选`);
+            }
           }
         } else if (input.stickRouteId) {
           const stick = known(input.stickRouteId);
@@ -858,14 +877,25 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
             const orgWait = r.verdicts.some((v) =>
               v.blocks.some((b) => b.wait === 'org' || b.wait === 'probe'),
             );
-            if (r.kind === 'wait' && !orgWait) {
+            const waitTooLong =
+              !pin &&
+              !orgWait &&
+              r.kind === 'wait' &&
+              r.until !== null &&
+              Date.parse(r.until) - now.getTime() > namedWaitMaxSeconds * 1000;
+            if (r.kind === 'wait' && !orgWait && !waitTooLong) {
               return waiting(r, ['续同一个会话，等这条路由']);
             }
-            notes.push(
-              r.kind === 'wait'
-                ? `续会话的路由要等切号（${r.reason}），照常选`
-                : `续会话的路由用不了了（${r.reason}），照常选`,
-            );
+            if (waitTooLong) {
+              fallbackAvoidRouteIds.add(stick.routeId);
+              notes.push(`续会话的路由要等到 ${r.until}，太久，照常选`);
+            } else {
+              notes.push(
+                r.kind === 'wait'
+                  ? `续会话的路由要等切号（${r.reason}），照常选`
+                  : `续会话的路由用不了了（${r.reason}），照常选`,
+              );
+            }
           }
         }
 

@@ -14,7 +14,7 @@ import {
 import { and, asc, eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { pgRoutingLayers } from '../src/routing-layers.ts';
-import { pgRoutingOrder, type RoutingOrderPort } from '../src/routing-order.ts';
+import { pgRoutingOrder, type RoutingOrderPort, type RoutingRouteWake } from '../src/routing-order.ts';
 import { errorCode, harness, pgHarness, T0, viaBearer, write } from './harness.ts';
 
 let t: TestDb;
@@ -53,8 +53,8 @@ async function hang() {
   ]);
 }
 
-const withPorts = () => ({
-  routingOrder: pgRoutingOrder(t.db, () => T0),
+const withPorts = (routeWake?: RoutingRouteWake) => ({
+  routingOrder: pgRoutingOrder(t.db, () => T0, routeWake ? { routeWake } : {}),
   routingLayers: pgRoutingLayers(t.db),
 });
 
@@ -370,6 +370,60 @@ describe('驾驶舱改路由先后：模型下的渠道和开关', () => {
     });
     expect(on.status).toBe(200);
     expect(await row()).toMatchObject({ enabled: true });
+  });
+
+  it('渠道开关提交后叫醒一次；叫醒回调能读到新开关和操作记录，版本冲突不叫醒', async () => {
+    let wakeCount = 0;
+    current = await pgHarness(
+      t,
+      withPorts({
+        wake: async () => {
+          wakeCount += 1;
+          expect((await t.db.select().from(channels).where(eq(channels.id, 'ch-mirasim')))[0]?.enabled).toBe(
+            false,
+          );
+          expect((await audits()).some((a) => a.action === 'channel.disable')).toBe(true);
+        },
+      }),
+    );
+    await hang();
+    const s = await current.login();
+    const off = await current.cockpit.request(
+      '/api/routing/channels/ch-mirasim',
+      write('PUT', s, { enabled: false, expected: true }),
+    );
+    expect(off.status).toBe(200);
+    expect(wakeCount).toBe(1);
+
+    const stale = await current.cockpit.request(
+      '/api/routing/channels/ch-mirasim',
+      write('PUT', s, { enabled: true, expected: true }),
+    );
+    expect(stale.status).toBe(409);
+    expect(wakeCount).toBe(1);
+  });
+
+  it('叫醒失败只记日志，不回滚已经提交的渠道开关', async () => {
+    const errors: string[] = [];
+    current = await pgHarness(t, {
+      routingOrder: pgRoutingOrder(t.db, () => T0, {
+        routeWake: {
+          wake: async () => {
+            throw new Error('Temporal unavailable');
+          },
+        },
+        log: { error: (message) => errors.push(message) },
+      }),
+    });
+    await hang();
+    const s = await current.login();
+    const off = await current.cockpit.request(
+      '/api/routing/channels/ch-mirasim',
+      write('PUT', s, { enabled: false, expected: true }),
+    );
+    expect(off.status).toBe(200);
+    expect((await t.db.select().from(channels).where(eq(channels.id, 'ch-mirasim')))[0]?.enabled).toBe(false);
+    expect(errors).toHaveLength(1);
   });
 
   it('【故意造出的失败】没登录 401、网关通行证 403、不存在的渠道 404、已在最下 422、请求不合约定 400：库里不动', async () => {
