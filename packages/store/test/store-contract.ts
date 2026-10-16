@@ -147,6 +147,17 @@ function contractData(): Partial<MemoryData> {
       staleSince: ago(1),
     },
   ];
+  // 额度窗历史（#2737）：同一个窗口三次读数，最早那次在 2 天前
+  data.quotaSamples = [ago(2 * 24 * 60), ago(60), ago(1)].map((readAt, i) => ({
+    poolId: 'pool-mirasim',
+    label: '7d_fable',
+    window: '7d_model' as const,
+    unit: 'percent' as const,
+    reading: 'measured' as const,
+    utilization: 0.5 + i / 10,
+    resetsAt: new Date(T0.getTime() + 3 * 24 * 60 * MIN).toISOString(),
+    readAt,
+  }));
   data.pools = (data.pools ?? []).map((p) => (p.id === 'pool-mirasim' ? { ...p, lastReadOkAt: ago(1) } : p));
   data.pullRequests = [
     {
@@ -479,6 +490,21 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.listBans()).toEqual([
           { family: 'kimi', stage: 'ui', reason: '（样例）库里另配的禁令：Kimi 暂不进 UI' },
         ]);
+      });
+
+      it('额度窗历史（#2737）：只给 since 之后的，按读数时刻排，原样带利用率、清零时刻', async () => {
+        const samples = await store.listQuotaSamples(new Date(T0.getTime() - 24 * 60 * MIN));
+        expect(samples.map((x) => x.utilization)).toEqual([0.6, 0.7]);
+        expect(samples[0]).toEqual({
+          poolId: 'pool-mirasim',
+          label: '7d_fable',
+          window: '7d_model',
+          unit: 'percent',
+          reading: 'measured',
+          utilization: 0.6,
+          resetsAt: new Date(T0.getTime() + 3 * 24 * 60 * MIN).toISOString(),
+          readAt: new Date(T0.getTime() - 60 * MIN).toISOString(),
+        });
       });
 
       it('额度窗：按（池, 原名）排；原名、组名、单位、读法、上游原状态字原样保存；超额（利用率大于 1）原样保存', async () => {

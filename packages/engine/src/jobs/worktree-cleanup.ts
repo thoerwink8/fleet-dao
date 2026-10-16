@@ -1,7 +1,7 @@
 // 一键清理没用的工作树（#1993，母单 #1990）和工作树清单。
 // 驾驶舱的按钮、命令行都只记一条 worktrees.cleanup.request（shared/web-api/worktrees.ts）；这里每几秒看一眼，有排队的就接手：
-// 记 worktrees.cleanup.start → 跑一轮和每小时对账**同一个**清扫（worktree-sweep.ts 的 sweepWorktrees：只删没人用、里面什么都不剩的树，
-// 剩着没推的提交、没提交的改动、stash、认不出的文件，或在跑的任务、没结束的会话在用的，一律不删）→ 存清单 → 记 worktrees.cleanup.done
+// 记 worktrees.cleanup.start → 跑一轮和每小时对账**同一个**清扫（worktree-sweep.ts 的 sweepWorktrees：没人用的树都删，剩着没推的提交、
+// 没提交的改动也删——AI 产生的树，决定 0097、#2729；在跑的任务、没结束的会话在用的、认不出的、人以前点过留着的不删）→ 存清单 → 记 worktrees.cleanup.done
 // （删了哪些、拒了哪些、为什么）。每小时对账那一轮也调 inventoryOf 存一份清单（jobs/hourly-reconcile.ts）。
 //
 // 改这里之前必须知道：

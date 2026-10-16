@@ -81,6 +81,7 @@ const decision = (key: string) =>
     body: '第一行\n第二行',
     link: '/tasks',
     options: noteOnlyOptions(),
+    reason: 'human-only',
   });
 
 describe('createFeishuPusher', () => {

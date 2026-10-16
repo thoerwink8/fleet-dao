@@ -25,6 +25,7 @@ import {
   openPoolRuns,
   pools,
   pullRequests,
+  quotaSamplesSince,
   quotaWindows,
   readChannelStates,
   repos,
@@ -584,6 +585,18 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .orderBy(asc(quotaWindows.poolId), asc(quotaWindows.label));
       // 原名、单位、读法在库里不可空；领域类型里是可选的，这里按列补上必填的类型。
       return rows.map((r) => ({ ...toQuotaWindow(r), label: r.label, unit: r.unit, source: r.source }));
+    },
+    async listQuotaSamples(since) {
+      return (await quotaSamplesSince(db, since)).map((r) => ({
+        poolId: r.poolId,
+        label: r.label,
+        window: r.window,
+        unit: r.unit,
+        reading: r.reading,
+        ...(r.utilization === null ? {} : { utilization: r.utilization }),
+        ...(r.resetsAt === null ? {} : { resetsAt: r.resetsAt.toISOString() }),
+        readAt: r.readAt.toISOString(),
+      }));
     },
     async setChannelEnabled({ channelId, enabled }, entry) {
       return db.transaction(async (tx) => {

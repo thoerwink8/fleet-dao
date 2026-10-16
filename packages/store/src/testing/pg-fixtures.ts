@@ -19,6 +19,7 @@ import {
   poolReservations,
   pools,
   pullRequests,
+  quotaWindowSamples,
   quotaWindows,
   repos,
   routes,
@@ -117,6 +118,20 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         source: w.source,
         readAt: date(w.readAt),
         staleSince: dateOpt(w.staleSince),
+      })),
+    );
+  }
+  if (data.quotaSamples?.length) {
+    await db.insert(quotaWindowSamples).values(
+      data.quotaSamples.map((s) => ({
+        poolId: s.poolId,
+        label: s.label,
+        window: s.window,
+        unit: s.unit,
+        reading: s.reading,
+        utilization: s.utilization ?? null,
+        resetsAt: dateOpt(s.resetsAt),
+        readAt: date(s.readAt),
       })),
     );
   }
@@ -253,6 +268,8 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       resolvedAt: dateOpt(n.resolvedAt),
       resolvedBy: n.resolvedBy ?? null,
       decisionOptions: n.options ?? null,
+      // 库里要你拍必须带原因（#2729，CHECK 约束）；样例数据里的要你拍都是人闸那种（审批）
+      decisionReason: n.level === 'decision' ? 'human-only' : null,
       answer: n.answer ?? null,
     });
     if (n.deliveries.length > 0) {

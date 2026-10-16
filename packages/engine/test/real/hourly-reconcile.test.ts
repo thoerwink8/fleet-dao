@@ -1,6 +1,6 @@
 // 每小时对账的真装配：内存库上跑真迁移（提醒、需求、PR 头、结局记账都是真查询）、临时目录里的真 git 树（以本机执行器顶替
 // 会话用户）、假的工作树管家（属主记在表里）、假的 Temporal（工作流在不在跑、挂没挂着由用例定）。
-// 残留的干净树删掉、提醒跟着撤；有没推的东西不删、改报要人拍；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
+// 残留的树删掉、提醒跟着撤（有没推的东西也删：AI 产生的树，决定 0097、#2729）；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
 // 条件还在的提醒不撤；卡住报警超过 24 小时再推一次、同一天不重复。每条失败路径都故意造一次。
 import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -22,8 +22,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { noteOnlyOptions, WORKTREE_DELETE_QUEUED } from '@fleet-dao/shared';
-import { createPgStore } from '@fleet-dao/store';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type AlertSweepDeps, type RouteCheck, sweepAlerts } from '../../src/jobs/alert-sweep.ts';
 import { HOURLY_RECONCILE_JOB, runHourlyReconcileJob } from '../../src/jobs/hourly-reconcile.ts';
@@ -34,7 +33,6 @@ import {
   type WorkflowState,
   type WorkflowView,
 } from '../../src/jobs/reconcile-common.ts';
-import { KEEP_TREE_REMOVE } from '../../src/jobs/worktree-sweep.ts';
 import { localExec } from '../../src/real/exec.ts';
 import {
   type HourlyReconcileWiring,
@@ -253,7 +251,7 @@ const alert = (
     taskId: over.taskId ?? null,
     title: over.title ?? dedupeKey,
     body: '原来的正文',
-    ...(over.level === 'decision' ? { options: noteOnlyOptions() } : {}),
+    ...(over.level === 'decision' ? { options: noteOnlyOptions(), reason: 'human-only' as const } : {}),
   });
 
 /** 直接改库（引擎包不直接依赖 drizzle）：时刻一律 ISO 字符串再 ::timestamptz（生产驱动不收 Date 参数）。 */
@@ -285,7 +283,7 @@ async function resolvedByHuman(where: { key: string } | { id: string }, by: stri
 const runsOf = async () =>
   (await t.db.select().from(scheduleRuns)).filter((r) => r.job === HOURLY_RECONCILE_JOB.id);
 
-describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_000 }, () => {
+describe('工作树：残留的删掉（有没推的东西也删，人以前点过留着的照旧留着）', { timeout: 120_000 }, () => {
   it('没有在跑的任务在用、什么都不剩的树删掉，「工作树没收掉」跟着撤（写明为什么、记操作记录）；检出副本里会话交给引擎的结论文件不算剩着；探针目录不算残留', async () => {
     const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login');
@@ -314,152 +312,69 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     expect((await runsOf())[0]).toMatchObject({ outcome: 'ok', scanned: 3, found: 3 });
   });
 
-  it('工作树要你拍：「先看看」只记答案、这条照旧开着；「留着」要 settleDecision 才转已处理，下一轮不再报、树不删', async () => {
-    await work();
-    const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
-    probeDir();
-    await runHourlyReconcileJob(deps());
-    const key = 'worktree:acme_widgets/160-login';
-    const id = (await alertByKey(t.db, key))?.id ?? '';
-    const store = createPgStore(t.db);
-    const by = { kind: 'user' as const, id: 'founder-a' };
-    const answer = (optionId: string) =>
-      store.answerNotification(
-        { id, by, optionId },
-        { actor: by, action: 'notification.answer', target: `notification:${id}`, via: 'cockpit', ok: true },
-      );
-    expect((await answer('look')).kind).toBe('ok');
-    expect(await alertByKey(t.db, key)).toMatchObject({ resolvedAt: null });
-    await runHourlyReconcileJob(deps());
-    expect(await alertByKey(t.db, key)).toMatchObject({ resolvedAt: null });
-    expect((await answer('keep')).kind).toBe('ok');
-    expect(await alertByKey(t.db, key)).toMatchObject({ resolvedAt: null });
-    expect(
-      await store.settleDecision({
-        id,
-        execution: { ok: true, text: '记下留着：这条转已处理，之后不再提醒', at: new Date().toISOString() },
-        resolve: true,
-        by,
-      }),
-    ).toBe('ok');
-    expect(await runHourlyReconcileJob(deps())).toMatchObject({ outcome: 'ok', found: 0 });
-    expect(await alertByKey(t.db, key)).toMatchObject({ resolvedBy: 'founder-a' });
-    expect(existsSync(tree.dir)).toBe(true);
-  });
-
-  it('工作树要你拍：驾驶舱选了「删掉」（交给引擎），下一轮对账删掉树，结果写回卡上、转已处理（处理人是拍板的人）', async () => {
-    await work();
-    const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
-    probeDir();
-    await runHourlyReconcileJob(deps());
-    const key = 'worktree:acme_widgets/160-login';
-    const id = (await alertByKey(t.db, key))?.id ?? '';
-    const store = createPgStore(t.db);
-    const by = { kind: 'user' as const, id: 'founder-a' };
-    expect(
-      (
-        await store.answerNotification(
-          { id, by, optionId: KEEP_TREE_REMOVE },
-          {
-            actor: by,
-            action: 'notification.answer',
-            target: `notification:${id}`,
-            via: 'cockpit',
-            ok: true,
-          },
-        )
-      ).kind,
-    ).toBe('ok');
-    // 后端那一步：只记交给引擎，不转已处理
-    expect(
-      await store.settleDecision({
-        id,
-        execution: { ok: true, queued: true, text: WORKTREE_DELETE_QUEUED, at: new Date().toISOString() },
-        resolve: false,
-        by,
-      }),
-    ).toBe('ok');
-    expect(existsSync(tree.dir)).toBe(true);
-    await runHourlyReconcileJob(deps());
-    expect(existsSync(tree.dir)).toBe(false);
-    const row = await alertByKey(t.db, key);
-    expect(row?.resolvedBy).toBe('founder-a');
-    expect(row?.answer?.optionId).toBe(KEEP_TREE_REMOVE);
-    expect(row?.answer?.execution).toMatchObject({ ok: true, text: `已删工作树 ${tree.dir}` });
-    expect(row?.answer?.execution?.queued).toBeUndefined();
-  });
-
-  it('有没推的提交：不删，报要人拍（写清哪棵树、有什么、怎么删），「工作树没收掉」改成指向它；人点了处理之后不再报', async () => {
-    const { task, sub } = await work();
+  it('【#2729，决定 0097】有没推的提交、没提交的改动：AI 产生的树直接删，不报要你拍；「工作树没收掉」跟着撤、写明删了什么', async () => {
+    const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
     probeDir();
     await alert(`sub:${sub.id}:worktree`, { title: '工作树没收掉' });
 
     const run = await runHourlyReconcileJob(deps());
-    expect(existsSync(tree.dir)).toBe(true);
-    const keep = await alertByKey(t.db, 'worktree:acme_widgets/160-login');
-    expect(keep).toMatchObject({
-      level: 'decision',
-      taskId: null,
-      link: `/tasks/${task.id}`,
-      resolvedAt: null,
-      title: '工作树里有没推的东西，删不删要你拍：acme_widgets/160-login',
-    });
-    expect(keep?.body).toContain(`法国的 ${tree.dir}（需求 #160 的子任务「login」）`);
-    expect(keep?.body).toContain('没推的提交 2 个：');
-    expect(keep?.body).toContain('session work 1');
-    expect(keep?.body).toContain('没提交的改动 1 处：?? half-done.ts');
-    expect(keep?.body).toContain(`fleet-agent-scope remove ${tree.dir}`);
-    // 「要你拍」带选项（#1915）：留着（推荐，写理由）、删掉、先看看
-    const [opts] = (
-      await t.client.query<{
-        decision_options: { id: string; recommended?: string; action?: { kind: string } }[] | null;
-      }>(`select decision_options from notifications where dedupe_key = $1`, [
-        'worktree:acme_widgets/160-login',
-      ])
-    ).rows;
-    expect(opts?.decision_options?.map((o) => o.id)).toEqual(['keep', 'remove', 'look']);
-    expect(opts?.decision_options?.map((o) => o.action?.kind)).toEqual([
-      'keep',
-      'delete-worktree',
-      'note-only',
-    ]);
-    expect(opts?.decision_options?.find((o) => o.id === 'keep')?.recommended).toBeTruthy();
-    expect((await alertByKey(t.db, `sub:${sub.id}:worktree`))?.body).toMatch(
-      /^已撤：树里还有没推、没提交的东西，改成要你拍：看「工作树里有没推的东西/,
-    );
+    expect(existsSync(tree.dir)).toBe(false);
+    expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toBeNull();
+    expect((await t.db.select().from(notifications)).filter((n) => n.level === 'decision')).toEqual([]);
+    const row = await alertByKey(t.db, `sub:${sub.id}:worktree`);
+    expect(row?.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(row?.body).toMatch(/^已撤：每小时对账把这棵树删了（acme_widgets\/160-login）：AI 产生的工作树/);
+    expect(row?.body).toContain('没推的提交 2 个');
+    expect(row?.body).toContain('照决定 0097 直接删');
+    // 一棵树 + 探针目录；删了一棵、撤了一条
     expect(run).toMatchObject({ outcome: 'ok', found: 2 });
+  });
 
-    // 人看过、点了处理（决定留着）：下一轮不再报、不重新打开
+  it('以前（#2729 之前）报过的工作树要你拍、人点了留着：照人的意思留着，不删、不再报', async () => {
+    await work();
+    const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
+    probeDir();
+    await alert('worktree:acme_widgets/160-login', { level: 'decision', title: '工作树里有没推的东西' });
     await resolvedByHuman({ key: 'worktree:acme_widgets/160-login' }, 'founder-a');
+
     expect(await runHourlyReconcileJob(deps())).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(existsSync(tree.dir)).toBe(true);
     expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toMatchObject({
       resolvedBy: 'founder-a',
     });
+    expect(await runHourlyReconcileJob(deps())).toMatchObject({ outcome: 'ok', found: 0 });
     expect(existsSync(tree.dir)).toBe(true);
   });
 
-  it('要人拍的那棵后来推上去了（PR 镜像里有它的头）、也清干净了：下一轮删掉，要人拍的跟着撤', async () => {
-    const { repo } = await work();
+  it('以前报的工作树要你拍还开着（没人拍）：这一轮直接删树，那条跟着撤、写明删了什么', async () => {
+    await work();
     const tree = makeTree('acme_widgets/160-login', { extra: 1 });
     probeDir();
-    await runHourlyReconcileJob(deps());
-    expect((await alertByKey(t.db, 'worktree:acme_widgets/160-login'))?.resolvedAt).toBeNull();
+    await alert('worktree:acme_widgets/160-login', { level: 'decision', title: '工作树里有没推的东西' });
 
-    await t.db.insert(pullRequests).values({
-      repoId: repo.id,
-      number: 7,
-      state: 'merged',
-      headRef: 'fleet/160-login',
-      headSha: tree.head,
-      updatedAt: new Date(),
-    });
     await runHourlyReconcileJob(deps());
     expect(existsSync(tree.dir)).toBe(false);
     expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toMatchObject({
       resolvedBy: RECONCILE_ACTOR,
-      body: expect.stringMatching(/^已撤：树里已经没有没推、没提交的东西了/),
+      body: expect.stringMatching(
+        /^已撤：树里剩着没推的东西，每小时对账照决定 0097 直接删了（acme_widgets\/160-login）：没推的提交 1 个/,
+      ),
     });
+  });
+
+  it('【故意造出的失败】还剩没推东西的树删不掉：记没查成（partial），树留着，不报要你拍', async () => {
+    await work();
+    const tree = makeTree('acme_widgets/160-login', { extra: 1 });
+    probeDir();
+    ft.trees.remove = async () => {
+      throw new Error('权限不够');
+    };
+    const run = await runHourlyReconcileJob(deps());
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('acme_widgets/160-login 还剩没推的东西，直接删没删成：权限不够');
+    expect(existsSync(tree.dir)).toBe(true);
+    expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toBeNull();
   });
 
   /** 一棵不是 git 仓的树（上一版删到一半、会话的编译进程又写回来的那种）：rel 下按路径写文件，属主记会话用户。 */
@@ -503,30 +418,28 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     expect(run).toMatchObject({ outcome: 'ok', scanned: 3, found: 3 });
   });
 
-  it('缓存以外还剩一个源文件：不删，报要人拍，提醒里列出那个文件、写明一共几个（缓存不列），看里面给 find 不给 git', async () => {
-    const { task } = await work();
+  it('缓存以外还剩一个源文件：照决定 0097 直接删（#2729），撤卡的原因里列出那个文件、写明一共几个（缓存不列）', async () => {
+    await work();
     probeDir();
     const dir = plainTree('acme_widgets/160-handover-store', {
       'packages/api/tsconfig.tsbuildinfo': '{}',
       'packages/api/src/handover.ts': 'export const h = 1;\n',
     });
+    await alert('worktree:acme_widgets/160-handover-store', {
+      level: 'decision',
+      title: '工作树里有没推的东西',
+    });
 
     const run = await runHourlyReconcileJob(deps());
-    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
-    expect(existsSync(dir)).toBe(true);
-    const keep = await alertByKey(t.db, 'worktree:acme_widgets/160-handover-store');
-    expect(keep).toMatchObject({
-      level: 'decision',
-      resolvedAt: null,
-      link: `/tasks/${task.id}`,
-      title: '工作树里有没推的东西，删不删要你拍：acme_widgets/160-handover-store',
-    });
-    expect(keep?.body).toContain(
-      '- 这一层不是 git 仓，里面有 1 个文件（能重新生成的编译和工具缓存不算）：packages/api/src/handover.ts\n',
+    // 删了一棵、撤了一条
+    expect(run).toMatchObject({ outcome: 'ok', found: 2 });
+    expect(existsSync(dir)).toBe(false);
+    const row = await alertByKey(t.db, 'worktree:acme_widgets/160-handover-store');
+    expect(row?.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(row?.body).toContain(
+      '这一层不是 git 仓，里面有 1 个文件（能重新生成的编译和工具缓存不算）：packages/api/src/handover.ts',
     );
-    expect(keep?.body).not.toContain('tsbuildinfo');
-    expect(keep?.body).toContain(`看里面：sudo -u ${USER} find ${dir} ! -type d`);
-    expect(keep?.body).not.toContain('git -C');
+    expect(row?.body).not.toContain('tsbuildinfo');
   });
 
   it('树里有目录读不了：记没查成（partial，写明哪棵、为什么），不删，也不报要人拍', async () => {

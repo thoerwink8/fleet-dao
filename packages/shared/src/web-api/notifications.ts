@@ -60,6 +60,21 @@ export const AlertHandlingSchema = z.object({
 // 创始人点一个或自己写：系统按动作执行，结果写回这张卡，成功才转已处理。自己写的、以及没有具体动作的，交给指挥官，
 // 卡上写 HANDED_TO_COMMANDER。补不出选项的，页面写明 NO_OPTIONS_TEXT，不静默退回单纯确认。
 
+/**
+ * 「要你拍」的原因（#2729，决定 0097）：只有这三种才配叫创始人拍——要掏新钱、删了找不回又没备份、只有人能做（他的账号、设备、
+ * 他自己的判断）。AI 自己能做的写成卡住报警（alert）或直接做掉，不进「要你拍」。库里 CHECK 约束钉着：decision 级必须带其中之一、
+ * 且至少两个选项（迁移 0082）。
+ */
+export const DECISION_REASONS = ['new-money', 'irreversible-delete', 'human-only'] as const;
+export type DecisionReason = (typeof DECISION_REASONS)[number];
+export const DecisionReasonSchema = z.enum(DECISION_REASONS);
+/** 原因说成人话（卡片上、报错里用）。 */
+export const DECISION_REASON_WORDS: Record<DecisionReason, string> = {
+  'new-money': '要掏新钱',
+  'irreversible-delete': '删了找不回',
+  'human-only': '只有人能做',
+};
+
 /** 补不出选项的「要你拍」：页面和通知里照这句写，让人直接回复。 */
 export const NO_OPTIONS_TEXT = '没有选项，请直接回复';
 

@@ -183,6 +183,7 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
       title: '拼车池登录失效',
       body: '会话那边报的整池问题',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     const s = setup(answered);
     await s.round();

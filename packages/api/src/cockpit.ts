@@ -25,6 +25,7 @@ import {
   POOL_HOLDS_SETTING,
   PoolHoldsResponse,
   PoolsResponse,
+  PRESSURE_RATE_LOOKBACK_MS,
   poolHoldsView,
   QUOTA_RESERVE_SETTING,
   ReposResponse,
@@ -747,17 +748,22 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   });
 
   app.get(WebRoutes.pools.path, async (c) => {
-    const [pools, channels, windows, occupancy, savedSettings] = await Promise.all([
+    const now = deps.now();
+    const [pools, channels, windows, occupancy, savedSettings, samples] = await Promise.all([
       store.listPools(),
       store.listChannels(),
       store.listQuotaWindows(),
       store.poolOccupancy(),
       store.listSettings(),
+      store.listQuotaSamples(new Date(now.getTime() - PRESSURE_RATE_LOOKBACK_MS)),
     ]);
-    const now = deps.now();
     // 切号现状（#194）：读不到不拖垮额度页，但要明说没读成（不拿空冒充没事）
     const soloPaused = savedSettings.find((s) => s.key === 'engine.soloPaused')?.value === true;
-    const poolViews = buildPools({ pools, channels, windows, occupancy }, now, config.quotaStaleAfterMs);
+    const poolViews = buildPools(
+      { pools, channels, windows, occupancy, samples },
+      now,
+      config.quotaStaleAfterMs,
+    );
     // 独享的额度留量线现状（#194 方案 4.8）：选路、切号用同一份判法（shared 的 evaluateReserve）
     const soloReserve = soloReserveView(
       poolViews,

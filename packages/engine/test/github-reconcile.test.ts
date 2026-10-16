@@ -270,6 +270,7 @@ describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_00
       body: '正文',
       link: '/settings',
       options: noteOnlyOptions(),
+      reason: 'human-only' as const,
     });
     async function addFresh() {
       await t.db.insert(repos).values({ owner: OWNER, name: 'fresh', testCommand: 'pnpm check' });

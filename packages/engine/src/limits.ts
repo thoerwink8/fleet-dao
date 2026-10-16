@@ -27,7 +27,18 @@ export interface Limits {
    * 老历史开工时解析出来的上限里没有这一项：工作流见不到它就不查。
    */
   taskTokenBudget: number;
+  /**
+   * 一张单的 PR 最多新增多少行（#2755 体量预算，相对主线、含测试）；0 = 不设。推之前比：超了第一次打回让会话收窄，
+   * 第二次停下等人并附拆单建议。老历史开工时解析出来的上限里没有这一项：工作流见不到它就不判。
+   */
+  prLineBudget: number;
 }
+
+/**
+ * 体量预算的默认值（#2755）：近 7 天重活 PR 新增行 p90 是 7117（#2385、#2401 涨到 +8000），推分支撞冲突 31 次里重活占 24 次。
+ * 取 3000：多数单子放得下（中、快活远在这之下），7000 行那种整片重写会被打回收窄或拆单。真要大改的，人看过点「继续」照推。
+ */
+export const DEFAULT_PR_LINE_BUDGET = 3000;
 
 /**
  * 单任务 token 预算的默认值（决定 0093）：法国库 2026-10-14 查近 14 天 254 张单（1008 次动手和验收会话），每张单四样 token
@@ -107,6 +118,7 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   ciMinutes: 40,
   testsMinutes: 30,
   taskTokenBudget: DEFAULT_TASK_TOKEN_BUDGET,
+  prLineBudget: DEFAULT_PR_LINE_BUDGET,
 });
 
 /** 缺的、非法的（非有限数、负数）一律取默认值。 */
