@@ -1111,6 +1111,67 @@ test('gateVerdict：进度收了尾没成（failed、blocked）仍含「要人�
   }
 });
 
+test('gateVerdict：current 已等于或新于失败进度记的目标时，旧 failed 不再要人看', () => {
+  const oldSha = 'b0ef012b26a1aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const newSha = '6999045b1d66bbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const older = '1478b87a15f7cccccccccccccccccccccccccccc';
+  const trainText = JSON.stringify({
+    status: 'failed',
+    phase: 4,
+    target: { kind: 'sha', value: oldSha },
+    why: '主进程跑的不是这一版 / 已退回 1478b87a15f7',
+  });
+  assert.equal(
+    gateVerdict({ ...GOOD_GATE, current: newSha, mainline: [newSha, oldSha, older], trainText }),
+    null,
+    'current 新于失败目标：可发',
+  );
+  assert.equal(
+    gateVerdict({ ...GOOD_GATE, current: oldSha, mainline: [oldSha, older], trainText }),
+    null,
+    'current 等于失败目标：可发',
+  );
+  assert.match(
+    gateVerdict({ ...GOOD_GATE, current: older, mainline: [oldSha, older], trainText }),
+    /要人看/,
+    'current 比失败目标旧（退回了）：仍要人看',
+  );
+  assert.match(gateVerdict({ ...GOOD_GATE, trainText }), /要人看/, '比不出先后：仍要人看');
+});
+
+test('上一趟 failed 记的是更旧的提交，current 已经新于它：不写「要人看」，照常请求发主线头', async () => {
+  const older = '1'.repeat(40);
+  const m = autoMachine();
+  m.main.push([older, '2026-09-27T05:00:00Z']);
+  m.gate = {
+    ...GOOD_GATE,
+    trainText: JSON.stringify({
+      status: 'failed',
+      phase: 4,
+      target: { kind: 'sha', value: older },
+    }),
+  };
+  const st = await m.round();
+  assert.equal(m.requests.length, 1);
+  assert.equal(m.requests[0].sha, H1);
+  assert.doesNotMatch(st.auto.note, /要人看/);
+});
+
+test('failed 的目标比 current 新（退回了还没追上）：仍要人看，不自动再发', async () => {
+  const m = autoMachine();
+  m.gate = {
+    ...GOOD_GATE,
+    trainText: JSON.stringify({
+      status: 'failed',
+      phase: 4,
+      target: { kind: 'sha', value: H1 },
+    }),
+  };
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(st.auto.note, /要人看/);
+});
+
 // ── 发版驱动死在中途的残局（#2038、决定 0093）：暂停名单没人发「继续」、老版驱动关了总开关没开回 ──
 
 const pausedOut = (entries, code = 0) => ({

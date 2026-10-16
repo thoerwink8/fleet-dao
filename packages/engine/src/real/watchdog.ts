@@ -10,7 +10,7 @@
 // 「提醒真的推到飞书了」读同一个库的 feishuPushFacts（后端写的推送状态、送达记录）。
 // 拼车池整池暂停时 carpool-watch 不要求新鲜（和盯读、引擎起来时的登记同一句，pool-holds.ts 的 carpoolPoolsHeldReason）：
 // 摘登记行挡不住启动时 registerEngineJobs 把它写回来，单看登记行会误报「停了」。暂停读不到照抛，看门狗这一轮不当成暂停。
-import { readFile, stat } from 'node:fs/promises';
+import { readFile, readlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { loadQuotaConfig } from '@fleet-dao/adapters/quota';
 import {
@@ -101,7 +101,39 @@ export async function readReleaseFacts(dir: string): Promise<ReleaseFacts | null
     trainSince = typeof since === 'string' ? since : null;
     trainSha = typeof v.target?.value === 'string' ? v.target.value : null;
   }
-  return { trainStatus, trainSince, trainSha };
+  return {
+    trainStatus,
+    trainSince,
+    trainSha,
+    currentSha: await readCurrentSha(dir),
+    mainline: await readMainline(dir),
+  };
+}
+
+/** current 链接指向的提交号。不在、不是符号链接、指的不是提交号：null。别的错照抛。 */
+async function readCurrentSha(dir: string): Promise<string | null> {
+  try {
+    const target = await readlink(join(dir, 'current'));
+    const base = target.split('/').pop() ?? target;
+    return /^[0-9a-f]{7,40}$/.test(base) ? base : null;
+  } catch (e) {
+    if (errno(e) === 'ENOENT' || errno(e) === 'EINVAL') return null;
+    throw e;
+  }
+}
+
+/** 自动发布状态里的主线顺序（从新到旧）。文件不在、认不出：null，不当成「current 更新」。 */
+async function readMainline(dir: string): Promise<string[] | null> {
+  const text = await readOptional(join(dir, '.auto', 'state.json'));
+  if (text === null) return null;
+  try {
+    const commits = (JSON.parse(text) as { main?: { commits?: unknown } } | null)?.main?.commits;
+    if (!Array.isArray(commits)) return null;
+    const shas = commits.flatMap((row) => (Array.isArray(row) && typeof row[0] === 'string' ? [row[0]] : []));
+    return shas.length > 0 ? shas : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 发布目录在不在（在 = 这台是法国）。不在是 false，别的错照抛。 */

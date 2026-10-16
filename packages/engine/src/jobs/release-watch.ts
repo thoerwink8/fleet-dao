@@ -40,6 +40,43 @@ export interface ReleaseFacts {
   trainSince?: string | null;
   /** 这一趟发的提交（进度记录的 target.value）；没有是 null。 */
   trainSha?: string | null;
+  /** 法国 current 指向的提交；不在、不是提交号是 null。 */
+  currentSha?: string | null;
+  /** 主线提交号，从新到旧（自动发布状态里的 main.commits）。没有是 null。用来判 current 是否新于旧的 failed。 */
+  mainline?: readonly string[] | null;
+}
+
+/** 两个提交号是同一个（一边是另一边的前缀也算，至少 7 位）。 */
+function sameCommit(a: string, b: string): boolean {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  if (Math.min(x.length, y.length) < 7) return false;
+  return x.startsWith(y) || y.startsWith(x);
+}
+
+const FAILED_TRAIN_ALERT = /^watchdog:release:train:([0-9a-f]{7,40}):failed$/;
+
+/**
+ * 开着的 `watchdog:release:train:<sha>:failed` 该不该撤。
+ * 判据：进度 status 已不是 failed，或 current 已等于、新于这条键上的提交
+ * （mainline 从新到旧，current 的下标更小；提交号相同也算追上）。
+ * 比不出先后（没有 current、两边不都在 mainline 里）且进度仍是 failed：不凭这条判据撤。
+ */
+export function failedTrainAlertCleared(key: string, facts: ReleaseFacts): boolean {
+  const m = FAILED_TRAIN_ALERT.exec(key);
+  if (!m) return false;
+  if (facts.trainStatus !== 'failed') return true;
+  const failedSha = m[1] ?? '';
+  const current = facts.currentSha;
+  if (!current || !/^[0-9a-f]{7,40}$/.test(current)) return false;
+  if (sameCommit(current, failedSha)) return true;
+  const line = facts.mainline;
+  if (!line || line.length === 0) return false;
+  const at = (sha: string) => line.findIndex((s) => sameCommit(s, sha));
+  const ci = at(current);
+  const ti = at(failedSha);
+  if (ci < 0 || ti < 0) return false;
+  return ci < ti;
 }
 
 const shortSha = (sha: string | null | undefined) => (sha ? sha.slice(0, 12) : '（进度记录没写提交）');
