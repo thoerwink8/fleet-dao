@@ -1,7 +1,7 @@
 // 任务页的三段（对题 / 动手 / 验收）那几块：合计四格、按段每段再按模型的表、每一笔的明细（#216）。
 // 数都是后端算好的（usage.bySegment、segmentRuns，算法在 shared 的 usage.ts、segment-runs.ts），这里只管怎么说：
 // 读到的照数写；读到一部分照数写、写明几次没读到；全没读到写「没读到」，不写 0；每一笔没读到的原因原样列出来。
-import { type SegmentKind, USAGE_BOARD_UNREAD, type UsageTotals } from '@fleet-dao/shared';
+import { budgetTokensOf, type SegmentKind, USAGE_BOARD_UNREAD, type UsageTotals } from '@fleet-dao/shared';
 import { ChevronDown } from 'lucide-react';
 import { Fragment, type ReactNode, useState } from 'react';
 import type { Repo, TaskDetail } from '../api/types';
@@ -193,6 +193,24 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
     );
   }
 
+  // 折算 token：每单 token 预算按它比（缓存读乘 0.1，其余乘 1，#2830）；原始四样放悬停和下面的段表里。和输入当量同一个读数条件（四样都读到）
+  if (equivalent.kind === 'missing') {
+    collapsed.push('折算 token 没读到');
+  } else {
+    cards.push(
+      <Figure
+        key="budget"
+        label="折算 token"
+        value={equivalent.kind === 'none' ? '—' : formatCount(budgetTokensOf(t))}
+        hint={
+          equivalent.kind === 'none'
+            ? notYet
+            : `缓存读乘 0.1${equivalent.kind === 'partial' ? ` · 另有 ${equivalent.missing} 次没读到` : ''} · 原始：输入 ${formatCount(t.inputTokens)} 输出 ${formatCount(t.outputTokens)} 缓存读 ${formatCount(t.cacheReadTokens)} 缓存写 ${formatCount(t.cacheWriteTokens)}`
+        }
+      />,
+    );
+  }
+
   if (equivalent.kind === 'missing') {
     collapsed.push('输入当量没读到');
   } else {
@@ -215,11 +233,13 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
 
   // 有几张大格排几栏；四格手机就是 2×2（#1802，一行一张页面太长），电脑宽屏四列并排；三格手机一列
   const cols =
-    cards.length >= 4
-      ? 'grid-cols-2 gap-4 xl:grid-cols-4'
-      : cards.length === 3
-        ? 'grid-cols-1 gap-3 sm:grid-cols-3'
-        : 'grid-cols-2 gap-3';
+    cards.length >= 5
+      ? 'grid-cols-2 gap-4 xl:grid-cols-5'
+      : cards.length === 4
+        ? 'grid-cols-2 gap-4 xl:grid-cols-4'
+        : cards.length === 3
+          ? 'grid-cols-1 gap-3 sm:grid-cols-3'
+          : 'grid-cols-2 gap-3';
 
   const wallText = formatDuration(wallMs(d, now));
   const segmentCount = new Set(d.segmentRuns.map((r) => r.segment).filter(Boolean)).size;

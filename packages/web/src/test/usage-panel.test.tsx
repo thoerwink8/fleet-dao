@@ -95,6 +95,25 @@ describe('任务详情「时间与用量」：读到的照数写，没读到的�
     expect(figure('输入当量')).toContain('9,000');
   });
 
+  test('折算 token（#2830，预算按它比）：缓存读乘 0.1、其余乘 1，原始四样另列', () => {
+    // 输入 1000 + 输出 500 + 缓存写 2000 + 缓存读 30000 × 0.1 = 6,500
+    render(<UsagePanel d={detail([run()])} now={NOW} />);
+    expect(shownValue('折算 token')).toBe('6,500');
+    expect(figure('折算 token')).toContain('缓存读乘 0.1');
+    expect(figure('token')).toContain('输入 1,000');
+    expect(figure('缓存')).toContain('读 3.0 万');
+  });
+
+  test('折算 token 有一次折不成（缺一样）：标「不全」，不当 0', () => {
+    render(
+      <UsagePanel d={detail([run(), without(run(), 'cacheReadTokens', 'cacheWriteTokens')])} now={NOW} />,
+    );
+    expect(figure('折算 token')).toContain('不全');
+    // 缓存读写缺的那次只加了输入、输出（和下面「token」「缓存」两项一个口径：只算读到的）
+    expect(shownValue('折算 token')).toBe('8,000');
+    expect(figure('折算 token')).toContain('另有 1 次没读到，没算进来');
+  });
+
   test('token、缓存、当量一次都没读到：写「没读到」和几次，不写 0', () => {
     const blank = without(
       run(),

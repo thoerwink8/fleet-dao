@@ -20,6 +20,20 @@ const SCALED = {
   output: Math.round(INPUT_EQUIVALENT_WEIGHTS.output * SCALE),
 };
 
+/**
+ * 折算 token 里缓存读的权重（#2830）：缓存读的价钱约为新输入的十分之一，取 0.1；输入、输出、缓存写照旧乘 1。
+ * 单任务预算、驾驶舱单子页的「折算 token」、每日简报的「每合并单 token」都按它算。引擎的 limits.ts 以
+ * CACHE_READ_TOKEN_WEIGHT 的名字转出这个数并写明理由；改它只改这一处。
+ * 和上面的输入当量（输出 5、缓存写 1.25，比额度）是两把尺子：这一把比的是 token 账，不加权输出和缓存写。
+ */
+export const BUDGET_CACHE_READ_WEIGHT = 0.1;
+
+/** 折算 token（四舍五入到整数）：输入 + 输出 + 缓存写 + 缓存读 × 0.1。缺的算 0，调用方另记没读到。 */
+export function budgetTokensOf(u: TokenCounts): number {
+  const sum = (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cacheWriteTokens ?? 0);
+  return Math.round(sum + (u.cacheReadTokens ?? 0) * BUDGET_CACHE_READ_WEIGHT);
+}
+
 /** 一次会话的四样 token；没读到的不给。 */
 export interface TokenCounts {
   inputTokens?: number | undefined;
