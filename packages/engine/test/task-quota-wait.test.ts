@@ -2,8 +2,7 @@
 // store-ports 把超过上限的 until 压到这里），工作流一次只起一个这么长的定时器。时间跳过后再选；
 // 叫醒信号到了当场醒、重选，不睡满。
 //
-// 24 小时等额度的事件数：上限 4 小时 → 约 6 轮 × 约 9 条 ≈ 54 条（约 2 条/小时）。
-// 现在每 120 秒一轮、约 270 条/小时、24 小时约 6480 条。
+// 等额度的单次睡眠上限改为 10 分钟；叫醒信号仍能让工作流不等到定时器到点。
 
 import { randomUUID } from 'node:crypto';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -30,7 +29,7 @@ beforeEach(() => {
   env = currentEnv();
 });
 
-/** store-ports 在 until 超过上限时回的秒数。28 小时后的清零时刻走这一档，不是 120 秒。 */
+/** store-ports 在 until 超过上限时回的秒数。28 小时后的清零时刻走统一的 10 分钟上限。 */
 const LONG_SECONDS = QUOTA_ROUTE_WAIT_CAP_SECONDS;
 const WAIT_QUOTA: PickRouteResult = {
   ok: false,
@@ -128,12 +127,12 @@ describe('等额度按清零时刻长睡', { timeout: 60_000 }, () => {
         await waitingQuota(h);
         expect(world.count('pickRoute')).toBe(1);
         const events = ((await h.fetchHistory()).events ?? []) as HistEvent[];
-        // 等着的时候只有这一个长定时器，没有 120 秒那档。
+        // 等着的时候只有这一个 10 分钟定时器，没有更短的旧上限那档。
         expect(openTimerSeconds(events)).toEqual([LONG_SECONDS]);
         expect(startedTimerSeconds(events).filter((s) => s === 120)).toEqual([]);
         const t0 = await env.currentTimeMs();
         // 用带时长的 sleep 跳时。h.result() 会 unlockTimeSkipping 且不给时长，测试钟最多被拨 10 年，
-        // 量出来的间隔不能拿来证明「只睡了 4 小时」。
+        // 量出来的间隔不能拿来证明「只睡了 10 分钟」。
         await env.sleep((LONG_SECONDS - 60) * 1000);
         expect(world.count('pickRoute')).toBe(1);
         expect((await env.currentTimeMs()) - t0).toBeLessThan(LONG_SECONDS * 1000);

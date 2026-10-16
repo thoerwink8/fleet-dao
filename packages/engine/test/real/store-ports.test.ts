@@ -1734,9 +1734,12 @@ describe('等额度按清零时刻睡（#2329）', () => {
   const hour = 60 * 60 * 1000;
 
   /** 两条 Claude 路由的 5 小时窗、周窗都用满。resetsAt 空 = 清零时刻不知道。 */
-  async function exhaust(resetsAt: string | null): Promise<void> {
+  async function exhaust(
+    resetsAt: string | null,
+    poolIds: readonly string[] = ['claude-solo', 'claude-carpool'],
+  ): Promise<void> {
     const readAt = NOW.toISOString();
-    for (const poolId of ['claude-solo', 'claude-carpool']) {
+    for (const poolId of poolIds) {
       const window = (kind: '5h' | '7d', label: string) => ({
         poolId,
         window: kind,
@@ -1761,11 +1764,32 @@ describe('等额度按清零时刻睡（#2329）', () => {
     }
   }
 
-  it('until 在 28 小时后：按上限睡，不再压成 120 秒', async () => {
+  it('续会话路由额度窗三天后清零：超过默认阈值，照常改选别的路由并写明时刻', async () => {
+    await world(t.db);
+    const resetsAt = new Date(NOW.getTime() + 3 * 24 * hour).toISOString();
+    await exhaust(resetsAt, ['claude-solo']);
+    const r = await pick({ stage: 'execute', stickRouteId: 'solo' });
+    expect(r).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+    expect(r.ok && r.why).toContain(`续会话的路由要等到 ${resetsAt}`);
+    expect(r.ok && r.why).toContain('太久，照常选');
+  });
+
+  it('续会话路由熔断两分钟后到点：仍然等这条路由', async () => {
+    await world(t.db);
+    for (const minutesAgo of [4, 3, 2]) {
+      await oneShotEnded('solo', minutesAgo);
+    }
+    const r = await pick({ stage: 'execute', stickRouteId: 'solo' });
+    expect(r).toMatchObject({ ok: false, waitFor: 'slot' });
+    expect(!r.ok && r.detail).toContain('续同一个会话，等这条路由');
+  });
+
+  it('额度清零在 28 小时后：按统一的 10 分钟上限睡', async () => {
     await world(t.db);
     await exhaust(new Date(NOW.getTime() + 28 * hour).toISOString());
     const r = await pick({ stage: 'execute' });
-    expect(QUOTA_ROUTE_WAIT_CAP_SECONDS).toBeGreaterThan(MAX_ROUTE_WAIT_SECONDS);
+    expect(QUOTA_ROUTE_WAIT_CAP_SECONDS).toBe(10 * 60);
+    expect(QUOTA_ROUTE_WAIT_CAP_SECONDS).toBe(MAX_ROUTE_WAIT_SECONDS);
     expect(r).toMatchObject({
       ok: false,
       waitFor: 'quota',
@@ -1774,11 +1798,11 @@ describe('等额度按清零时刻睡（#2329）', () => {
     expect(!r.ok && r.detail).toContain('清零');
   });
 
-  it('until 在上限之内（45 分钟）：按 until 睡，不拉到上限、也不压成 120 秒', async () => {
+  it('until 在上限之内（5 分钟）：按 until，不拉长', async () => {
     await world(t.db);
-    await exhaust(new Date(NOW.getTime() + 45 * MIN).toISOString());
+    await exhaust(new Date(NOW.getTime() + 5 * MIN).toISOString());
     const r = await pick({ stage: 'execute' });
-    expect(r).toMatchObject({ ok: false, waitFor: 'quota', retryAfterSeconds: 45 * 60 });
+    expect(r).toMatchObject({ ok: false, waitFor: 'quota', retryAfterSeconds: 5 * 60 });
   });
 
   it('清零时刻不知道：不给秒数，交给工作流按短间隔轮询', async () => {

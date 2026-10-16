@@ -54,7 +54,7 @@ export interface AbandonCommand {
 
 /**
  * 「叫醒」（#194 方案 4.3）：路由那边变了（切号切完、切过去的池探通了），等路由的活不用睡满这一轮，当场重新选一次。
- * 等空位、熔断的一轮最多 2 分钟；等额度且有清零时刻的一轮按那个时刻，最多 4 小时（store-ports 的 QUOTA_ROUTE_WAIT_CAP_SECONDS）。
+ * 等空位、熔断、额度的一轮都最多 10 分钟；有清零时刻的额度按那个时刻提前醒（store-ports 的 QUOTA_ROUTE_WAIT_CAP_SECONDS）。
  * 只叫醒「等路由」那一种等待；停下等人、等 CI、等合并都不理它。
  */
 export interface RouteWakeCommand {

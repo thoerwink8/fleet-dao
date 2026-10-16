@@ -56,7 +56,7 @@ import type { Context, Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { type FounderOnlySubjects, guardFounderOnly, operatorOf } from './founder-only.ts';
 import { ApiError, fullStack, readJson, reply } from './http.ts';
-import type { Actor, NewAuditEntry } from './ports.ts';
+import type { Actor, Logger, NewAuditEntry } from './ports.ts';
 import type { CockpitEnv } from './session.ts';
 
 /** 改先后 / 开关的操作记录：前后两个值由改的那一步按库里实际的填。 */
@@ -90,7 +90,15 @@ export interface RoutingOrderPort {
   subjectsOf(modelId: string): Promise<FounderOnlySubjects>;
 }
 
-export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
+export interface RoutingRouteWake {
+  wake(reason: string): Promise<void>;
+}
+
+export function pgRoutingOrder(
+  db: Db,
+  now: () => Date,
+  options: { routeWake?: RoutingRouteWake; log?: Pick<Logger, 'error'> } = {},
+): RoutingOrderPort {
   type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
   // 和 pg-store 的 insertAudit、routing-efforts.ts 同一个写法（那份是 Store 里的私有函数，这里另起一份写同一张表）
   const record = (tx: Tx, audit: OrderAudit, before: unknown, after: unknown) =>
@@ -107,6 +115,22 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
       ok: audit.ok,
       error: audit.error ?? null,
     });
+  const wakeAfterCommit = async <T extends { ok: boolean }>(
+    result: T,
+    changed: boolean,
+    reason: string,
+  ): Promise<T> => {
+    if (!result.ok || !changed || !options.routeWake) return result;
+    try {
+      await options.routeWake.wake(reason);
+    } catch (error) {
+      options.log?.error('路由配置已提交，但叫醒等路由的活没发成', {
+        reason,
+        error: fullStack(error),
+      });
+    }
+    return result;
+  };
   return {
     subjectsOf: async (modelId) => {
       const [model] = await db.select().from(models).where(eq(models.id, modelId));
@@ -121,8 +145,8 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
           : [],
       };
     },
-    movePurposeModel: (input, audit) =>
-      db.transaction(async (tx) => {
+    movePurposeModel: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await movePurposeModel(tx, input);
         if (!result.ok) return result;
         await record(
@@ -132,9 +156,11 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
           { order: result.after, moved: input.modelId, direction: input.direction },
         );
         return result;
-      }),
-    moveModelRoute: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(result, result.ok, '路由配置先后变更：用途下模型移动');
+    },
+    moveModelRoute: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await moveModelRoute(tx, input);
         if (!result.ok) return result;
         await record(
@@ -144,9 +170,11 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
           { order: result.after, moved: input.routeId, direction: input.direction },
         );
         return result;
-      }),
-    setRouteEnabled: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(result, result.ok, '路由配置开关变更：单条路由');
+    },
+    setRouteEnabled: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await setRouteEnabled(tx, input);
         if (!result.ok) return result;
         await record(
@@ -156,23 +184,41 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
           { modelId: input.modelId, enabled: result.after },
         );
         return result;
-      }),
-    reorderPurposeModels: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(
+        result,
+        result.ok && result.before !== result.after,
+        '路由配置开关变更：单条路由',
+      );
+    },
+    reorderPurposeModels: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await reorderPurposeModels(tx, input);
         if (!result.ok || sameList(result.before, result.after)) return result;
         await record(tx, audit, { order: result.before }, { order: result.after, moved: input.modelId });
         return result;
-      }),
-    reorderModelRoutes: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(
+        result,
+        result.ok && !sameList(result.before, result.after),
+        '路由配置先后变更：用途下模型重排',
+      );
+    },
+    reorderModelRoutes: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await reorderModelRoutes(tx, input);
         if (!result.ok || sameList(result.before, result.after)) return result;
         await record(tx, audit, { order: result.before }, { order: result.after, moved: input.routeId });
         return result;
-      }),
-    setModelEnabled: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(
+        result,
+        result.ok && !sameList(result.before, result.after),
+        '路由配置先后变更：模型下路由重排',
+      );
+    },
+    setModelEnabled: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await setModelEnabled(tx, input);
         if (!result.ok) return result;
         await record(
@@ -182,16 +228,24 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
           { enabled: input.enabled, enabledRouteIds: result.after },
         );
         return result;
-      }),
-    setChannelEnabled: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(
+        result,
+        result.ok && !sameList(result.before, result.after),
+        '路由配置开关变更：模型',
+      );
+    },
+    setChannelEnabled: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await setChannelEnabledFlag(tx, input);
         if (!result.ok) return result;
         await record(tx, audit, { enabled: result.before }, { enabled: result.after });
         return result;
-      }),
-    addPurposeModel: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(result, result.ok && result.before !== result.after, '路由配置开关变更：渠道');
+    },
+    addPurposeModel: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await addPurposeModel(tx, input);
         if (!result.ok) return result;
         await record(
@@ -207,9 +261,11 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
           },
         );
         return result;
-      }),
-    removePurposeModel: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(result, result.ok, '路由配置用途变更：加入模型');
+    },
+    removePurposeModel: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await removePurposeModel(tx, input);
         if (!result.ok) return result;
         await record(
@@ -219,9 +275,11 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
           { version: result.version, order: result.order, removed: input.modelId },
         );
         return result;
-      }),
-    setPurposeModelEffort: (input, audit) =>
-      db.transaction(async (tx) => {
+      });
+      return wakeAfterCommit(result, result.ok, '路由配置用途变更：移出模型');
+    },
+    setPurposeModelEffort: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
         const result = await setPurposeModelEffort(tx, input);
         if (!result.ok) return result;
         await record(
@@ -231,7 +289,9 @@ export function pgRoutingOrder(db: Db, now: () => Date): RoutingOrderPort {
           { version: result.version, order: result.order, modelId: input.modelId, effort: input.effort },
         );
         return result;
-      }),
+      });
+      return wakeAfterCommit(result, result.ok, '路由配置用途变更：模型档位');
+    },
   };
 }
 
