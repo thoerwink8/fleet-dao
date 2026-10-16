@@ -2,13 +2,14 @@
 // 真进程的那条照 Mirasim 重启会话的做法杀父进程树（Windows：taskkill /PID <父> /T /F，server.cjs 里就是这一句；别的平台：杀父进程组），
 // 断言 spawnDetached 起的还活着、参数一个字不差地到了；对照组（普通 spawn、Windows 上的 spawn({ detached: true })）被一起杀掉，
 // 证明测的确实是「整棵树被杀」这件事。另有几条拿假的 PowerShell 钉住认不出、没起成时照实报。
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { commandLine, quoteArg, spawnDetached } from '../local-sessions/detach.mjs';
+import { runChild } from './child.ts';
 
 const DETACH = fileURLToPath(new URL('../local-sessions/detach.mjs', import.meta.url));
 
@@ -73,8 +74,8 @@ describe('spawnDetached 起的进程不跟着父进程树一起死', () => {
       expect(alive(pids.plain)).toBe(true);
       if (typeof parent.pid !== 'number') throw new Error('父进程没起来');
       if (win) {
-        const k = spawnSync('taskkill', ['/PID', String(parent.pid), '/T', '/F'], { encoding: 'utf8' });
-        expect(k.status).toBe(0);
+        const k = runChild('taskkill', ['/PID', String(parent.pid), '/T', '/F']);
+        expect(k.status, k.stderr).toBe(0);
       } else {
         process.kill(-parent.pid, 'SIGKILL');
       }
