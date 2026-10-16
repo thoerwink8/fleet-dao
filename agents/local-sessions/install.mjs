@@ -5,7 +5,7 @@
 //   pnpm local-sessions uninstall
 //   pnpm local-sessions status
 //
-// 装做四件事：① 把 lib.mjs、heartbeat.mjs、push.mjs 拷进 ~/.fleet-dao/local-sessions/bin/；② 写 config.json（地址、通行证、机器名，
+// 装做四件事：① 把 lib.mjs、heartbeat.mjs、push.mjs、loop.mjs、detach.mjs 拷进 ~/.fleet-dao/local-sessions/bin/；② 写 config.json（地址、通行证、机器名，
 // 通行证只从环境变量 FLEET_NODE_TOKEN 读，不进命令行历史；已经有 config.json 又没给新的就留着旧的）；③ 在 ~/.claude/settings.json
 // 的 SessionStart / Stop / SubagentStop / SessionEnd 各登记一条 node 跑 heartbeat.mjs（async；调工具前不挂，见 lib.mjs HOOK_EVENTS；
 // 只动指向 ~/.fleet-dao/local-sessions/bin/ 的那几条，别人的钩子原样留着；重装不重复）；④ 定时推送，先试 Windows 计划任务 fleet-local-sessions
@@ -21,11 +21,12 @@
 // - 两路只留一路：计划任务建成了就把自启那一套（vbs、循环进程）清掉；退回自启时先结束旧循环再起新的，重装不会有两个循环
 //   （loop.mjs 自己也有 loop.pid 锁）。旧版本手工放在 ~/.fleet-dao/local-sessions/loop.mjs（根上）的，重装时删掉。
 // - 启动文件夹只认调用方传进来的 startupDir（main 里按 %APPDATA% 算）：测试不传，就不会碰到真的启动文件夹。
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { spawnDetached } from './detach.mjs';
 import {
   baseDir,
   binDir,
@@ -41,7 +42,7 @@ import {
 } from './lib.mjs';
 import { readLoopPid, isAlive as realIsAlive } from './loop.mjs';
 
-const SCRIPTS = ['lib.mjs', 'heartbeat.mjs', 'push.mjs', 'loop.mjs'];
+const SCRIPTS = ['lib.mjs', 'heartbeat.mjs', 'push.mjs', 'loop.mjs', 'detach.mjs'];
 const OURS = /[\\/]\.fleet-dao[\\/]local-sessions[\\/]bin[\\/]/;
 
 /** @typedef {Record<string, unknown>} Obj */
@@ -66,12 +67,12 @@ export const startupDirOf = (/** @type {NodeJS.ProcessEnv} */ env) =>
   env.APPDATA ? join(env.APPDATA, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup') : undefined;
 
 /**
- * 起循环：脱离当前进程、不开窗口。
+ * 起循环：脱离当前进程树、不开窗口（detach.mjs：Windows 走 WMI，装的人在 Claude Code 里跑也不会跟着会话一起被杀，单 #2761）。
  * @param {string} nodePath
  * @param {string} loopPath
  */
 const realStartLoop = (nodePath, loopPath) => {
-  spawn(nodePath, [loopPath], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
+  spawnDetached(nodePath, [loopPath]);
 };
 
 /** @param {number} ms */
