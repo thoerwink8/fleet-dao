@@ -149,6 +149,36 @@ describe('判定：读的时候现算', () => {
     expect(v.problems[0]?.message).toBe('装机脚本落后主线 2 个相关提交、30 小时，要人重跑');
   });
 
+  it('【#2728 故意造出的失败】装着的发版脚本和在用版本不一致：当轮就红，不等 24 小时；不是在用这一版的读数不算；依赖被动过只进读数（自动发布报过）', () => {
+    const installed = (over: Partial<NonNullable<State['installed']>> = {}) => ({
+      commit: H2,
+      checkedAt: ago(2 * MIN),
+      result: 'drift' as const,
+      drift: ['/usr/local/lib/fleet-dao/release-request/lib.mjs'],
+      detail: '和在用的 cccccccccccc 不一样：/usr/local/lib/fleet-dao/release-request/lib.mjs',
+      ...over,
+    });
+    const v = judge(input(H2, state({ installed: installed() })));
+    expect(codes(v)).toEqual(['installed_drift']);
+    expect(v.problems[0]?.alreadyAlerted).toBe(false);
+    expect(v.problems[0]?.detail).toMatch(/release-request\/lib\.mjs/);
+    // 刚切了版本、自动发布还没跑到这一版：不算
+    expect(judge(input(H2, state({ installed: installed({ commit: H1 }) }))).ok).toBe(true);
+    expect(
+      judge(input(H2, state({ installed: installed({ result: 'ok', drift: [], detail: '' }) }))).ok,
+    ).toBe(true);
+    expect(
+      codes(judge(input(H2, state({ installed: installed({ result: 'unchecked', drift: [] }) })))),
+    ).toEqual(['installed']);
+    const deps = judge(
+      input(H2, state({ deps: { commit: H2, result: 'changed', detail: 'prunedAt 08:20 → 08:30' } })),
+    );
+    expect(codes(deps)).toEqual(['deps_changed']);
+    expect(deps.problems[0]?.alreadyAlerted).toBe(true);
+    // 老状态没有这两个字段：绿
+    expect(judge(input(H2, state())).ok).toBe(true);
+  });
+
   it('对外的话：不带提交号、路径；和公开页禁用词名单扫', async () => {
     const scan = (await import(/* @vite-ignore */ SCAN)) as {
       BUILTIN_TERMS: readonly string[];

@@ -11,6 +11,7 @@ import { pokeFrance } from '../issue-poke.ts';
 import { renderSimilar, similarIssues } from '../issue-similar.ts';
 import { describeOffDiff, OFF_DIFF_REWRITE } from '../off-diff-acceptance.ts';
 import { liveClaimsPost, readClaimsEndpoint, work } from '../work.ts';
+import { removeLease, writeLease } from '../work-queue.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 
@@ -42,6 +43,8 @@ try {
       post: liveClaimsPost(() => readClaimsEndpoint()),
       out: (line) => console.log(line),
       err: (line) => console.error(`单开了，可本机领单没成：${line}。补领：pnpm work claim ${r.number}`),
+      // 租约本机记一份，pnpm work queue 才认得这张在做（法国的租约本机读不到，单 #2731）
+      leases: { write: (rec) => writeLease(rec), remove: (repo, issue) => removeLease(repo, issue) },
     });
     if (claimed !== 0) process.exitCode = 1;
   }

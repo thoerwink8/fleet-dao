@@ -193,6 +193,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       }
       return { prNumber: pr };
     },
+    async updatePrBody() {},
     async waitCi(input) {
       return { state: 'green', head: input.head, failedChecks: [], ...script.ci?.(input, next('waitCi')) };
     },
