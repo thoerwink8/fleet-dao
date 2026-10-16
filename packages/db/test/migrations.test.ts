@@ -706,8 +706,8 @@ describe('0075：删老流程的会话表 session_runs 和进度表 progress_eve
   const RUN_NEW = '22222222-2222-4222-8222-222222222222';
   const seedOld = `
     insert into repos (id, owner, name, test_command) values ('aaaaaaaa-0000-4000-8000-000000000001', 'acme', 'widgets', 'pnpm check');
-    insert into tasks (id, repo_id, issue_number, title, raw_request, requested_by)
-      values ('bbbbbbbb-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000001', 1, '单', '原话', 'founder');
+    insert into tasks (id, repo_id, issue_number, title, raw_request, requested_by, priority)
+      values ('bbbbbbbb-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000001', 1, '单', '原话', 'founder', 0);
     insert into families (id, display_name, vendor) values ('claude', 'Claude', 'Anthropic');
     insert into channels (id, name, billing) values ('sub', '订阅', 'subscription');
     insert into pools (id, channel_id, max_concurrency) values ('relay', 'sub', 5);
