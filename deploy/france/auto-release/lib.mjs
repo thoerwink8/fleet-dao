@@ -1230,6 +1230,15 @@ async function tierStep(io, st, now, current) {
     );
     return;
   }
+  let mirasimRetired = false;
+  if (typeof io.mirasimRetired === 'function') {
+    try {
+      mirasimRetired = (await io.mirasimRetired(current)) === true;
+    } catch (e) {
+      tierFailed(st, io.now(), current, `读 Mirasim 退役标记没成：${why(e)}`);
+      return;
+    }
+  }
   for (let polls = 0; ; polls++) {
     let r;
     try {
@@ -1244,7 +1253,7 @@ async function tierStep(io, st, now, current) {
     }
     const detail = tierDetail(r);
     // 不是「刚重启、4318 还没 listen」：立刻落 failed，之后隔 TIER_RETRY_MS 再试。
-    if (!isMirasimBootRace(r.out)) {
+    if (!isMirasimBootRace(r.out) || mirasimRetired) {
       tierFailed(st, io.now(), current, detail);
       return;
     }
