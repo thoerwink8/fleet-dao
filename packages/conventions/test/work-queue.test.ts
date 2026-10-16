@@ -15,7 +15,6 @@ import {
   type LeaseRecord,
   LIVE_MINUTES,
   parseWorktrees,
-  prerequisitesIn,
   type QueueItem,
   type QueueReport,
   readLeases,
@@ -202,8 +201,81 @@ describe('buildQueue：本机做的开着的单，每张一个状态', () => {
     expect(by.get(82)).toMatchObject({ state: 'takeable', blockedBy: [] });
     // 一次问完所有前置单的状态
     expect(d.graphql).toHaveLength(1);
-    expect(prerequisitesIn('前置：#2725（能力下限）和 #2737 合并后再做')).toEqual([2725, 2737]);
-    expect(prerequisitesIn('不是前置：#1\n- 前置：#3')).toEqual([]);
+    // 「前置：」那一行怎么认见 prerequisites.test.ts（解析只有一份，prerequisites.ts）
+  });
+
+  describe('日期前置（#2783）：前置：2026-11-12 复查日', () => {
+    // NOW 是 2026-10-16（北京时间 17:00）
+    const dated = (extra: Record<string, unknown>[]) =>
+      ok(
+        JSON.stringify([
+          { number: 1960, title: '复查日', body: '改完了。\n\n前置：2026-11-12 复查日', labels: L },
+          { number: 1961, title: '日期过了', body: '前置：2026-10-16 当天', labels: L },
+          ...extra,
+        ]),
+      );
+
+    it('北京时间到那天之前：不可接，why 写「等到 2026-11-12」；到了那天（含）照常；不用问 GitHub 前置单', async () => {
+      const d = deps({ issues: dated([]) });
+      const r = await buildQueue(d);
+      const by = byIssue(r);
+      expect(by.get(1960)).toMatchObject({
+        state: 'blocked',
+        takeable: false,
+        blockedBy: [],
+        blockedUntil: '2026-11-12',
+      });
+      expect(by.get(1960)?.why).toBe('等到 2026-11-12');
+      expect(by.get(1961)).toMatchObject({ state: 'takeable', blockedUntil: null });
+      expect(d.graphql).toHaveLength(0);
+      expect(r.problems).toEqual([]);
+    });
+
+    it('北京时间 2026-11-12 0 点（UTC 11-11 16:00）起可接；前一秒仍等', async () => {
+      const at = (iso: string) => ({ ...deps({ issues: dated([]) }), now: () => new Date(iso) });
+      expect(byIssue(await buildQueue(at('2026-11-11T15:59:59Z'))).get(1960)?.state).toBe('blocked');
+      expect(byIssue(await buildQueue(at('2026-11-11T16:00:00Z'))).get(1960)?.state).toBe('takeable');
+    });
+
+    it('单号和日期同写：前置单关了、日期没到仍等；日期到了、前置单还开着仍等，why 两样都写', async () => {
+      const issues = ok(
+        JSON.stringify([
+          { number: 1, title: 'a', body: '前置：#83 且 2026-11-12', labels: L },
+          { number: 2, title: 'b', body: '前置：#81 且 2026-10-01', labels: L },
+        ]),
+      );
+      const by = byIssue(await buildQueue(deps({ issues })));
+      expect(by.get(1)).toMatchObject({ state: 'blocked', blockedBy: [], blockedUntil: '2026-11-12' });
+      expect(by.get(2)).toMatchObject({ state: 'blocked', blockedBy: [81], blockedUntil: null });
+      const both = ok(
+        JSON.stringify([{ number: 3, title: 'c', body: '前置：#81 且 2026-11-12', labels: L }]),
+      );
+      const three = byIssue(await buildQueue(deps({ issues: both }))).get(3);
+      expect(three?.why).toBe('等前置 #81（还开着）；等到 2026-11-12');
+    });
+
+    it('文字版：行首写「等到 2026-11-12」，头一行的「等前置」数里算上它', async () => {
+      const out: string[] = [];
+      const d = deps({ issues: dated([]) });
+      await work(['queue'], {
+        gh: d.gh,
+        post: async () => {
+          throw new Error('queue 不该碰法国');
+        },
+        out: (l) => out.push(l),
+        err: () => {},
+        queue: { git: d.git, readBeats: d.readBeats, readLeases: d.readLeases, now: d.now },
+      });
+      expect(out[0]).toContain('等前置 1');
+      expect(out.find((l) => l.includes('#1960 '))).toMatch(
+        /^\[等到 2026-11-12\] #1960 复查日 \| 等到 2026-11-12 \|/,
+      );
+    });
+
+    it('先后：有 PR 在做的单，日期没到也算在做', async () => {
+      const issues = ok(JSON.stringify([{ number: 30, title: 'p', body: '前置：2026-11-12', labels: L }]));
+      expect(byIssue(await buildQueue(deps({ issues }))).get(30)?.state).toBe('working');
+    });
   });
 
   it('【故意造出的失败】前置单的状态读不成：写了前置的一律按等前置算，不当成都关了；没写前置的照判', async () => {

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { ProgressEvent } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { judgeRun } from '../src/judge.ts';
-import { ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
+import { ledgerlessDetail, ledgerRouting, readMirasimLedger } from '../src/mirasim/ledger.ts';
 import { METER_EARLY_MS, type MeterFs, type MeterWindow, readMirasimMeter } from '../src/mirasim/meter.ts';
 import {
   type MirasimRunOptions,
@@ -12,6 +12,7 @@ import {
   type MirasimRunSpec,
   mirasimRunFacts,
   mirasimRunSummary,
+  mirasimUsageFromSnapshot,
   runMirasim,
   stopMirasimSession,
   WATCH_CONNECT_BUDGET_MS,
@@ -96,13 +97,15 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
     });
   });
 
-  it('pi：两条命令、累计输出', () => {
+  it('pi：真实流夹具的 snapshot 带 sessionKey 和本轮累计输出', () => {
     const { session, events } = replay(pi);
+    expect(pi.sessionKey).toMatch(/^pi:[0-9a-f-]{36}$/);
     expect(
       events.filter((e) => e.kind === 'tool' && (e.payload as ToolPayload).phase === 'end'),
     ).toHaveLength(2);
     expect(session.state.model).toBe('kimi-k3');
     expect(session.state.usage?.turnOutputTokens).toBe(239);
+    expect(mirasimUsageFromSnapshot(session)).toEqual({ outputTokens: 239 });
   });
 
   it('补丁跳号：回 gap 让调用方重订阅；旧 seq 的快照丢掉', () => {
@@ -953,6 +956,39 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     ).rejects.toThrow('不是 kimi 的');
   });
 
+  it('grok 走 Mirasim（#2720）：账本缺目录判「中转没查成」且原因写明不写流量账本；账本有 2xx 中转行、答上 pong 判 ok', async () => {
+    // 法国 grok 会话从来没有账本目录：用 kimi 的录像换成 grok 的会话号跑整段
+    const grokKey = 'grok:f8dd5195-5a21-4d17-b687-a90ee99bcc81';
+    const grok = JSON.parse(
+      JSON.stringify(kimi)
+        .replaceAll(kimi.sessionKey, grokKey)
+        .replaceAll('kimi-code/k3', 'grok-4.7')
+        .replaceAll('"appendText":"好了"', '"appendText":"pong"'),
+    ) as typeof kimi;
+    const grokSpec = spec({ agent: 'grok', expectModel: 'grok-4.7' });
+    const missing = await runMirasim(grokSpec, {
+      connect: new FakeMirasim({ agents: ['grok'], reply: accepted(grok), stream: grok.stream }).connect,
+      ledgerDir: tempDir(),
+    });
+    expect(missing.terminal?.isError).toBe(false);
+    const verdict = judgeRun(mirasimRunSummary(missing).facts);
+    expect(verdict).toMatchObject({ outcome: 'failed', reason: 'relay_unknown' });
+    expect(verdict.detail).toContain('不写流量账本');
+    expect(verdict.detail).not.toContain('账本换了地方');
+
+    const relayed = await runMirasim(grokSpec, {
+      connect: new FakeMirasim({ agents: ['grok'], reply: accepted(grok), stream: grok.stream }).connect,
+      ledgerDir: okLedger(grokKey),
+    });
+    expect(mirasimRunSummary(relayed).facts.relayUnknown).toBeUndefined();
+    expect(relayed.session.state.text).toBe('pong');
+    expect(judgeRun(mirasimRunSummary(relayed).facts)).toEqual({
+      outcome: 'ok',
+      reason: 'answered',
+      detail: '正常结束',
+    });
+  });
+
   it('中转路由：账本里起针之后没有 2xx，done 不算数；账本没读成、没给账本目录判「中转没查成」', async () => {
     const ledgerDir = tempDir();
     const uuid = kimi.sessionKey.split(':')[1] as string;
@@ -1311,6 +1347,30 @@ describe('Mirasim 账本', () => {
       detail: '账本目录里没有 index 文件',
     });
     expect((await readMirasimLedger(dir, 'pi:../../etc')).state).toBe('unknown');
+  });
+
+  it('grok 执行体不写流量账本（#2720）：缺目录单独写原因，不和「账本换了地方」混；有目录照常读', async () => {
+    const dir = tempDir();
+    const uuid = 'f8dd5195-5a21-4d17-b687-a90ee99bcc81';
+    expect(await readMirasimLedger(dir, `grok:${uuid}`)).toEqual({
+      state: 'unknown',
+      detail: ledgerlessDetail('grok'),
+    });
+    expect(ledgerlessDetail('grok')).toContain('不写流量账本');
+    expect(await readMirasimLedger(dir, `claude:${uuid}`)).toEqual({
+      state: 'unknown',
+      detail: '账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）',
+    });
+    // 哪天 Mirasim 让 grok 走中转、写了账本：照常读，不靠执行体名单判死
+    mkdirSync(join(dir, uuid));
+    writeFileSync(
+      join(dir, uuid, 'index-1.ndjson'),
+      `${JSON.stringify({ ts: Date.now(), status: 200, viaRelay: true, model: 'grok-4.7' })}\n`,
+    );
+    expect(await readMirasimLedger(dir, `grok:${uuid}`)).toMatchObject({
+      state: 'read',
+      rows: [{ status: 200, viaRelay: true, model: 'grok-4.7' }],
+    });
   });
 
   it('给了 fs 就经它读，不碰本机文件系统（账本在别的系统用户家里、调用方进不去时用，real/index.ts 的生产装配）；readdir 认 ENOENT 分「没有这个会话的目录」和别的读不了；readFile 抛的错按 code 报', async () => {

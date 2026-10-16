@@ -974,6 +974,32 @@ export class FakeGitHub {
           };
       return this.json(200, { data: { repository: { issueOrPullRequest: node, milestones } } });
     }
+    if (query.includes('query IssueStates')) {
+      // 一批单号（issue 或 PR）开没开着（readIssueStates）：变量 $n0、$n1…，别名 a0、a1…；有一个不存在整条带 NOT_FOUND 错误（和 GitHub 一样）
+      const repository: Record<string, unknown> = {};
+      const errors: { type: string; message: string }[] = [];
+      for (const [key, value] of Object.entries(variables)) {
+        const m = /^n(\d+)$/.exec(key);
+        if (!m) continue;
+        const n = Number(value);
+        const issue = this.issues.get(n);
+        const pr = issue ? undefined : this.pulls.get(n);
+        if (issue) repository[`a${m[1]}`] = { __typename: 'Issue', state: issue.state.toUpperCase() };
+        else if (pr)
+          repository[`a${m[1]}`] = {
+            __typename: 'PullRequest',
+            prState: pr.merged ? 'MERGED' : pr.state.toUpperCase(),
+          };
+        else {
+          repository[`a${m[1]}`] = null;
+          errors.push({
+            type: 'NOT_FOUND',
+            message: `Could not resolve to an issue or pull request with the number of ${n}.`,
+          });
+        }
+      }
+      return this.json(200, { data: { repository }, ...(errors.length > 0 ? { errors } : {}) });
+    }
     if (query.includes('query OpenMilestones')) {
       const open = [...this.milestones]
         .filter(([number]) => !this.closedMilestones.has(number))

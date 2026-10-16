@@ -19,6 +19,7 @@ import {
   liveAt,
   liveSwitches,
   median,
+  releaseKillsLine,
   runDailyBriefJob,
   shippedByIssue,
 } from '../src/jobs/daily-brief.ts';
@@ -305,6 +306,52 @@ describe('runDailyBriefJob', () => {
     expect(body).toContain('五、流程健康');
     expect(body).not.toContain('六、');
     expect(body).not.toContain('日报');
+  });
+});
+
+describe('流程健康：发版叫停的动手会话（#2797）', () => {
+  const kills = (to: Date, total: number, hours: number) => ({
+    from: new Date(to.getTime() - 7 * 86_400_000),
+    to,
+    total,
+    hours,
+    byDay: ['10-08', '10-09', '10-10', '10-11', '10-12', '10-13', '10-14'].map((day, i) => ({
+      day,
+      n: i === 6 ? total : 0,
+    })),
+  });
+
+  it('近 7 天按天数、和再往前 7 天比、写一共跑了几小时；问的是这一周和上一周', async () => {
+    const asked: string[] = [];
+    const d = makeDeps({
+      releaseKills: async (to) => {
+        asked.push(to.toISOString());
+        return to.toISOString().startsWith('2026-10-14') ? kills(to, 42, 6.7) : kills(to, 63, 22.9);
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('ok');
+    expect(asked).toEqual(['2026-10-14T16:00:00.000Z', '2026-10-07T16:00:00.000Z']);
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain(
+      '发版叫停的动手会话：42 段（7 天前 63 段，跌 21），被叫停的段一共跑了 6.7 小时；按天：10-08 0，10-09 0，10-10 0，10-11 0，10-12 0，10-13 0，10-14 42',
+    );
+  });
+
+  it('【故意造出的失败】读不到：这一行写「没查成」、这一轮记 partial，流程健康别的行照写；上一周读不到只写这周', async () => {
+    const d = makeDeps({
+      releaseKills: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const r = await runDailyBriefJob(d.deps);
+    expect(r.outcome).toBe('partial');
+    const body = d.published[0]?.body ?? '';
+    expect(body).toContain('发版叫停的动手会话：没查成（读发版叫停的动手会话：库连不上）');
+    expect(body).toContain('收场 20 轮');
+    expect(releaseKillsLine(kills(new Date('2026-10-14T16:00:00Z'), 3, 1), '库连不上')).toBe(
+      '发版叫停的动手会话：3 段（7 天前没查成：库连不上），被叫停的段一共跑了 1 小时；按天：10-08 0，10-09 0，10-10 0，10-11 0，10-12 0，10-13 0，10-14 3',
+    );
   });
 });
 

@@ -44,12 +44,25 @@ export interface LedgerRouting {
   models: string[];
 }
 
+/**
+ * 不写流量账本的执行体：Mirasim 起 grok 时它用会话用户自己的 grok 登录直连 xAI，不经中转，账本里永远没有这个会话的目录
+ * （法国实测 grok 会话全无目录，claude、codex、dsh 都有）。这种「没有目录」是执行体不走中转，不是账本换了地方、也不是探针
+ * 误判：照旧算没查成（平台额度核实不了，MS-27），原因单独写，好和「账本丢了」、桥接超时、认不出回答分开。
+ */
+export const LEDGERLESS_AGENTS: ReadonlySet<string> = new Set(['grok']);
+
+/** 不写账本的执行体缺目录时的原因，关键字「不写流量账本」。 */
+export function ledgerlessDetail(agent: string): string {
+  return `账本里没有这个会话的目录：Mirasim 的 ${agent} 执行体不经中转、不写流量账本，平台额度核实不了`;
+}
+
 export async function readMirasimLedger(
   dir: string,
   sessionKey: string,
   since?: number,
   fs: LedgerFs = nodeLedgerFs,
 ): Promise<LedgerReading> {
+  const agent = sessionKey.slice(0, Math.max(0, sessionKey.indexOf(':')));
   const uuid = sessionKey.slice(sessionKey.indexOf(':') + 1);
   if (!/^[0-9a-f-]{36}$/i.test(uuid)) return { state: 'unknown', detail: `会话号认不出：${sessionKey}` };
   const folder = join(dir, uuid);
@@ -62,7 +75,9 @@ export async function readMirasimLedger(
       state: 'unknown',
       detail:
         code === 'ENOENT'
-          ? '账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）'
+          ? LEDGERLESS_AGENTS.has(agent)
+            ? ledgerlessDetail(agent)
+            : '账本里没有这个会话的目录（可能一次上游调用都没有，也可能账本换了地方）'
           : `读不了账本：${code}`,
     };
   }
