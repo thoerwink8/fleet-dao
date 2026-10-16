@@ -154,6 +154,10 @@ export class TaskRuntime {
   resumeFrom: ResumeFrom | null = null;
   /** 上一次跑成的动手会话（决定 0093）：返工轮续它（task.ts 的 implement，patched('rework-resume')）。 */
   lastSession: LastSession | null = null;
+  /**
+   * 最近一次跑成的动手会话的最后一条回复（#2723）：开 PR、第 2 轮起改 PR 正文时进「做了什么」。纯状态，没跑成的不覆盖。
+   */
+  lastAnswer: string | null = null;
   /** 连着几次跑成的动手会话是续起来的：到 RESUME_STREAK_LIMIT 下一轮开新会话。 */
   resumeStreak = 0;
   /** 最近一次自测（决定 0093）的精炼输出：交给冷验收当材料（ColdVerifyInput.testOutput）。没跑过、头换了就是 null。 */

@@ -76,6 +76,11 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
         list.push(number);
         calls.closePull = list;
       },
+      updatePullBody: async (_repo: unknown, number: number, body: unknown) => {
+        const list = calls.updatePullBody ?? [];
+        list.push({ number, body });
+        calls.updatePullBody = list;
+      },
     },
     waitCi: record('waitCi', (input: { head: string }) => ({ state: 'green', head: input.head })),
     fetchBranchHead: record('fetchBranchHead', () => ({ head: m.head })),
@@ -823,6 +828,14 @@ describe('开 PR、CI、合并', () => {
       expect(calls.commentPull ?? []).toEqual([]);
       expect(calls.openPr).toBeUndefined();
     }
+  });
+
+  it('改 PR 正文（#2723）：同一份结构交给 github 包，按 PR 号改', async () => {
+    const { ports, calls } = setup();
+    await ports.updatePrBody({ taskId: 't1', repo, prNumber: 101, body }, ctx);
+    expect(calls.updatePullBody).toEqual([
+      { number: 101, body: expect.objectContaining({ requirement: 12, did: ['加了验证码'] }) },
+    ]);
   });
 
   it('自己这条分支上已经开着的 PR 不算（重放幂等）', async () => {
