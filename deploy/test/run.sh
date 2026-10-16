@@ -22,7 +22,7 @@
 # 香港防火墙基线（hk-firewall：ufw 没开、命令失败或认不出、默认不是拒绝、多开的对公网端口都判红；只有出站 ALLOW OUT 不算已放行；第二遍不改 ufw；别家 8443 不动）、
 # 香港 self-proxy 程序目录收成 root:root、别人不可写，变回去读回判红（hk-self-proxy-owner，#2235）、
 # 香港上已退役的飞书网关清干净（hk-retired-gateway，#2226：单元停删、目录先打包再删、令牌文件直接删、打包不成不删、留着判红）、
-# 香港每分钟经隧道探法国 healthz（hk-france-probe：连续 2 次失败不推、第 3 次推、恢复推一次、没配 webhook 只写状态且退出 0）、
+# 香港每分钟经隧道探法国 healthz（hk-france-probe：连续 2 次失败不推、第 3 次推、恢复推一次、没配推送只写状态且退出 0、飞书应用优先、推送回错下一轮重推）、
 # france.sh 读回看板收件口挡不挡得住假通行证（node-report-gate：401 才算通过，503 没配钥匙记待配，200/400 判红）、
 # docs/ops.md 端口表和脚本对得上、--ops 真跑了端口表那块（ops-only）、
 # france.sh 读不到 Temporal 表结构的版本号（连不上库）判红、不建不升（temporal-schema），

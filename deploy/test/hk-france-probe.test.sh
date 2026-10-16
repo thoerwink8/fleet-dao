@@ -2,7 +2,8 @@
 # shellcheck source-path=SCRIPTDIR
 # shellcheck disable=SC2317 # cleanup 由 trap 调用，shellcheck 看成走不到
 # 香港探法国（deploy/hk/france-probe.sh）：连续 2 次失败不推，第 3 次推「法国失联自」，
-# 再失败不重复推，恢复推一次；没配 webhook 只写状态、退出 0，不把地址打进日志。
+# 再失败不重复推，恢复推一次；没配推送只写状态、退出 0，不把地址打进日志。
+# 飞书应用三项齐了走应用、不打凭据；配一半不推、写明缺哪项；推送回错写日志、退出 0、下一轮重推同一条，试满放弃；演练前缀。
 # 读回：探活定时器 NextElapseUSecRealtime 为空、单调钟已有下次时间仍算在排班；没在跑仍红。
 # 第三种兜底只认 OnUnitActiveSec 且刚启动。没有它、下次和上次都空，不算在排班。
 # 不碰真机器：状态、推送地址、时刻都换到临时目录；探测和 POST 换成钩子。
@@ -77,8 +78,13 @@ probe_observe_hook() {
   OBS_KIND=$HOOK_KIND
   OBS_REASON=$HOOK_REASON
 }
-probe_post_hook() {
-  printf '%s\n' "$2" >>"$POSTS"
+HOOK_POST_RC=0
+probe_post_hook() { # 通道 正文 uuid：每试一次记一行；HOOK_POST_RC 非 0 当成飞书回错
+  printf '%s|%s|%s\n' "$1" "$3" "$2" >>"$POSTS"
+  if ((HOOK_POST_RC != 0)); then
+    PUSH_ERR="飞书没收下（code=99991663 测试）"
+    return "$HOOK_POST_RC"
+  fi
 }
 
 post_count() {
@@ -159,6 +165,108 @@ check "坏地址不推" "$(post_count)" 0
 check "坏地址照样写成失联" "$(state_field down)" "true"
 has "日志写明地址不对" "$OUT" "不是 http(s)"
 
+PENDING=$TMP/state/push-pending
+three_down() { # 从头连败三次，到失联
+  rm -f -- "$STATE" "$PENDING"
+  step_probe down 连不上 "$FIRST"
+  step_probe down 连不上 "$((FIRST + 60))"
+  step_probe down 连不上 "$((FIRST + 120))"
+}
+last_post() { tail -n 1 "$POSTS"; }
+
+echo "== 配了飞书应用：失联、恢复各推一条，走应用，不打凭据"
+printf 'FLEET_HK_PROBE_FEISHU_APP_ID=cli_test_app_id\nFLEET_HK_PROBE_FEISHU_APP_SECRET="sekrit-test-value"\nFLEET_HK_PROBE_FEISHU_CHAT_ID=oc_test_chat\nFLEET_HK_PROBE_WEBHOOK=https://example.invalid/hook\n' >"$ENVF"
+: >"$POSTS"
+HOOK_POST_RC=0
+three_down
+check "应用：失联推了一条" "$(post_count)" 1
+has "应用：飞书应用三项齐了就走应用，不走 webhook" "$(last_post)" "app|hk-probe-down-$FIRST|法国失联自 10:38"
+has "应用：日志写明已推送、走的哪条" "$OUT" "已推送（down，app）"
+lacks "应用：日志不打密钥" "$OUT" "sekrit-test-value"
+lacks "应用：日志不打群号" "$OUT" "oc_test_chat"
+check "应用：推成了不留待推" "$([[ -e "$PENDING" ]] && echo 有 || echo 无)" 无
+step_probe down 连不上 "$((FIRST + 180))"
+check "应用：失联期间不重复推" "$(post_count)" 1
+step_probe up "" "$((FIRST + 240))"
+check "应用：恢复推了一条" "$(post_count)" 2
+has "应用：恢复正文和去重号" "$(last_post)" "app|hk-probe-up-$FIRST|法国恢复了"
+
+echo "== 演练：正文开头加前缀"
+: >"$POSTS"
+PROBE_PREFIX=演练：
+three_down
+has "演练：推送正文以「演练：」开头" "$(last_post)" "|演练：法国失联自 10:38"
+step_probe up "" "$((FIRST + 180))"
+has "演练：恢复也带前缀" "$(last_post)" "|演练：法国恢复了"
+PROBE_PREFIX=
+
+echo "== 飞书应用配了一半：不推，日志写明缺哪项，退出 0"
+printf 'FLEET_HK_PROBE_FEISHU_APP_ID=cli_test_app_id\nFLEET_HK_PROBE_FEISHU_APP_SECRET=sekrit-test-value\n' >"$ENVF"
+: >"$POSTS"
+three_down
+check "配一半：退出 0" "$RC" 0
+check "配一半：不推" "$(post_count)" 0
+has "配一半：写明缺群号" "$OUT" "缺 FLEET_HK_PROBE_FEISHU_CHAT_ID"
+check "配一半：照样写成失联" "$(state_field down)" "true"
+check "配一半：不留待推（配好之前不攒旧消息）" "$([[ -e "$PENDING" ]] && echo 有 || echo 无)" 无
+
+echo "== 推送接口回错：写日志、退出 0、状态照写，下一轮重试，推成了就不再推"
+printf 'FLEET_HK_PROBE_FEISHU_APP_ID=cli_test_app_id\nFLEET_HK_PROBE_FEISHU_APP_SECRET=sekrit-test-value\nFLEET_HK_PROBE_FEISHU_CHAT_ID=oc_test_chat\n' >"$ENVF"
+: >"$POSTS"
+HOOK_POST_RC=1
+three_down
+check "回错：退出 0，不挡探活" "$RC" 0
+check "回错：试过一次" "$(post_count)" 1
+check "回错：状态照样写成失联" "$(state_field down)" "true"
+has "回错：日志写明没送成和原因" "$OUT" "推送没送成（down，app）：飞书没收下（code=99991663"
+has "回错：日志写明下一轮再推" "$OUT" "下一轮再推（已试 1 次）"
+check "回错：留了待推" "$(head -n 1 "$PENDING" 2>/dev/null)" down
+step_probe down 连不上 "$((FIRST + 180))"
+check "回错：下一轮又试了一次" "$(post_count)" 2
+has "回错：第二轮写明这轮再推" "$OUT" "还没推成，这轮再推（第 2 次）"
+has "回错：重试的是同一条（同一个去重号）" "$(last_post)" "app|hk-probe-down-$FIRST|法国失联自 10:38"
+check "回错：探活照样记仍失联" "$(state_field consecutiveFailures)" 4
+HOOK_POST_RC=0
+step_probe down 连不上 "$((FIRST + 240))"
+check "回错后飞书好了：推成" "$(post_count)" 3
+has "推成写明已推送" "$OUT" "已推送（down，app）"
+check "推成后待推清掉" "$([[ -e "$PENDING" ]] && echo 有 || echo 无)" 无
+step_probe down 连不上 "$((FIRST + 300))"
+check "推成后不再推" "$(post_count)" 3
+
+echo "== 失联没推成就恢复了：只推「恢复了」，不再补推失联"
+: >"$POSTS"
+HOOK_POST_RC=1
+three_down
+HOOK_POST_RC=0
+step_probe up "" "$((FIRST + 180))"
+check "恢复这轮只推一条" "$(post_count)" 2
+has "推的是恢复" "$(last_post)" "法国恢复了"
+check "恢复推成后无待推" "$([[ -e "$PENDING" ]] && echo 有 || echo 无)" 无
+step_probe up "" "$((FIRST + 240))"
+check "之后不再推" "$(post_count)" 2
+
+echo "== 连试满 ${PROBE_PUSH_TRIES} 次还不成：放弃，写日志"
+: >"$POSTS"
+HOOK_POST_RC=1
+three_down
+printf 'down\nhk-probe-down-%s\n%s\n法国失联自 10:38：测试\n' "$FIRST" "$((PROBE_PUSH_TRIES - 1))" >"$PENDING"
+step_probe down 连不上 "$((FIRST + 180))"
+check "试满：退出 0" "$RC" 0
+has "试满：写明放弃" "$OUT" "连试 ${PROBE_PUSH_TRIES} 次都没推成，放弃"
+check "试满：待推清掉" "$([[ -e "$PENDING" ]] && echo 有 || echo 无)" 无
+HOOK_POST_RC=0
+
+echo "== 待推留着、推送配置被清空：丢掉待推，不报错"
+three_down
+printf 'down\nhk-probe-down-%s\n3\n法国失联自 10:38：测试\n' "$FIRST" >"$PENDING"
+: >"$ENVF"
+: >"$POSTS"
+step_probe down 连不上 "$((FIRST + 180))"
+check "没配：退出 0" "$RC" 0
+check "没配：不推" "$(post_count)" 0
+check "没配：待推丢掉" "$([[ -e "$PENDING" ]] && echo 有 || echo 无)" 无
+
 echo "== hk.sh 会装定时器，两份站点都把状态文件指给健康页"
 HK=$HERE/../hk.sh
 has "hk.sh 装探活" "$(<"$HK")" "setup_france_probe"
@@ -168,6 +276,10 @@ has "探的是隧道上的法国 healthz" "$(<"$HERE/../hk/france-probe.sh")" "h
 has "服务跑这份脚本" "$(<"$HERE/../hk/fleet-hk-france-probe.service")" "ExecStart=/usr/local/lib/fleet-dao/france-probe.sh"
 has "每分钟一次" "$(<"$HERE/../hk/fleet-hk-france-probe.timer")" "OnUnitInactiveSec=1min"
 has "样例里有 webhook 键" "$(<"$HERE/../hk/hk-probe.env.example")" "FLEET_HK_PROBE_WEBHOOK="
+for key in FLEET_HK_PROBE_FEISHU_APP_ID FLEET_HK_PROBE_FEISHU_APP_SECRET FLEET_HK_PROBE_FEISHU_CHAT_ID; do
+  has "样例里有 $key" "$(<"$HERE/../hk/hk-probe.env.example")" "$key="
+done
+has "hk.sh 装 jq（探活拼飞书请求要用）" "$(<"$HK")" "ensure_pkgs curl jq"
 for tpl in nginx-http.conf nginx-https.conf; do
   text=$(<"$HERE/../hk/$tpl")
   has "$tpl 有精确路径" "$text" "location = /health/france-link.json"
