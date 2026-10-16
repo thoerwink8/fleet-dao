@@ -26,9 +26,19 @@
 // - 以前钩子转进来过的引导也算收到：现在不再往这份里写。旧记录还在，
 //   不进 prompt-log；它只记在 ~/.fleet-dao/steer-shown/<原生会话号>.json（{ at: 最后转过的那条的 Mirasim 时刻 }）。
 //   本血缘任一号的 at 以前（含）的本 Mirasim 会话的引导算收到（relayedUpTo）。那份读不了、认不出照实说没核成，不当成收到。
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
-import { shownFile, steerShownDir } from './main-thread.mjs';
+import { inboxSeenDir } from './inbox-tick.mjs';
+import { dayOf, logDir } from './prompt-log.mjs';
+import { shownFile, steerShownDir } from './steer-shown.mjs';
 import { isMachineOpening, isMachineSession } from './unattended.mjs';
 
 /** 最近多久以内的话算数（和 session-start.mjs 列「收到的话」同一个窗口） */
@@ -419,4 +429,157 @@ export function ownerPresence({ home, owner, now = Date.now(), env = process.env
   if (now - last > OWNER_IDLE_MS)
     return { state: 'gone', why: `${owner} 没在跑、已闲置 ${idleH.toFixed(0)} 小时` };
   return { state: 'here', why: `${owner} ${idleH.toFixed(1)} 小时前还动过` };
+}
+
+// —— 对账（开会话钩子和主线程每次工具调用后的钩子共用）和「本会话已见」名单 ——
+
+/** 后台任务完成、系统提醒也会以「用户消息」的身份进 UserPromptSubmit，落盘时原样记，列的时候不算创始人的话（和 session-start.mjs 原来的一样） */
+const LOGGED_SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
+
+/**
+ * 发了的账和收到的账对一遍（session-start.mjs 的开场对账、inbox-tick.mjs 的轮中对账都走这一个，不各抄一份）。
+ * 返回：
+ * - { status: 'none' }：无血缘（不是 Mirasim 起的、这台没装），不出声；
+ * - { status: 'unchecked', why }：认不出本会话是哪个 Mirasim 会话；
+ * - { status: 'ok', line, sent, received, readError, relayProblems, lost }：readError 非空 = prompt-log 没读成（别的字段不可信）；
+ *   sent 是 sentByFounder 的原样结果（absent / problems 在里面）；lost 是发了、没收到的（sent.absent 时为空）。
+ * @param {{ home: string, now?: number, sessionId: unknown, env?: Record<string, string | undefined>, dir?: string | null, lineage?: Lineage | null }} opts
+ */
+export function reconcileInbox({
+  home,
+  now = Date.now(),
+  sessionId,
+  env = process.env,
+  dir = null,
+  lineage = null,
+}) {
+  const line = lineage ?? lineageOf({ home, sessionId, env });
+  if (line.status === 'none') return { status: /** @type {const} */ ('none') };
+  if (line.status === 'unchecked') return { status: /** @type {const} */ ('unchecked'), why: line.why };
+  const family = new Set(line.sessionIds);
+  // 落盘目录和写的那边（prompt-log.mjs 的 logDir）同一份
+  const base = dir ?? logDir(process.env, home);
+  // 发了的账（本血缘那一个 Mirasim 会话目录）：对账范围是「上一轮（含）以来」，可能比 RECENT_MS 早得多（文件开头），收到的账也读到那么早
+  const sent = sentByFounder({ home, now, env, only: line.dir });
+  const since = sent.absent ? now - RECENT_MS : Math.min(now - RECENT_MS, sent.since);
+  const days = new Set([dayOf(now), dayOf(since)]);
+  for (let t = since; t < now; t += 12 * 3_600_000) days.add(dayOf(t));
+  /** @type {Received[]} 收到的账：本血缘里哪个原生会话号收到的都记，别的会话收到的不记 */
+  const received = [];
+  for (const day of days) {
+    const file = join(base, `${day}.jsonl`);
+    let text;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch (err) {
+      if (errCode(err) === 'ENOENT') continue;
+      return {
+        status: /** @type {const} */ ('ok'),
+        line,
+        sent,
+        received: [],
+        relayProblems: [],
+        lost: [],
+        readError: `创始人落盘的话没读成：${file} 读不了（${errCode(err)}）；这个会话没送到的话可能在里面。`,
+      };
+    }
+    for (const row of text.split(/\r?\n/)) {
+      if (!row.trim()) continue;
+      try {
+        const e = JSON.parse(row);
+        const at = Date.parse(e?.at);
+        if (
+          typeof e?.prompt === 'string' &&
+          typeof e.sessionId === 'string' &&
+          family.has(e.sessionId) &&
+          !LOGGED_SYSTEM_PROMPT.test(e.prompt) &&
+          !isMachineOpening(e.prompt) &&
+          !isMachineSession({ env: {}, cwd: e.cwd }) &&
+          Number.isFinite(at) &&
+          at >= since &&
+          at <= now + 60_000
+        )
+          received.push({ at, text: e.prompt, sessionId: e.sessionId, line: line.dir });
+      } catch {
+        // 坏的一行跳过：别因为一行坏了就把别的话也藏起来
+      }
+    }
+  }
+  /** @type {Sent[]} */
+  let lost = [];
+  /** @type {string[]} */
+  let relayProblems = [];
+  if (!sent.absent) {
+    // 现在不再往 steer-shown 写。旧记录还在：转过的仍算收到，免得把已经转过的再列一遍
+    const relay = relayedUpTo({ home, sessionIds: line.sessionIds, env });
+    relayProblems = relay.problems;
+    lost = reconcile(sent.entries, received, { relayed: { line: line.dir, at: relay.at } }).lost;
+  }
+  return {
+    status: /** @type {const} */ ('ok'),
+    line,
+    sent,
+    received,
+    relayProblems,
+    lost,
+    readError: /** @type {string | null} */ (null),
+  };
+}
+
+/** 已见名单里最多留多久（比 MAX_LOOKBACK_MS 长一点，过了的条目对账也不会再翻出来） */
+const SEEN_KEEP_MS = MAX_LOOKBACK_MS + 60 * 60_000;
+
+/** 一条发出的话在已见名单里的键：发出时刻 + 话的开头 @param {{ at: number, text: string }} s */
+export const seenKey = (s) => `${Math.round(s.at)}:${promptKey(s.text)}`;
+
+/** @param {string} dir @param {string} lineDir */
+const seenFile = (dir, lineDir) => join(dir, `seen-${lineDir.replace(/[^\w.-]/g, '_')}.json`);
+
+/**
+ * 读本血缘的已见名单。没有文件 = 空名单；读不了、认不出给 problem（调用方明说，名单当空）。
+ * @param {{ home: string, env?: Record<string, string | undefined>, lineDir: string }} opts
+ * @returns {{ keys: Set<string>, problem: string | null }}
+ */
+export function readSeen({ home, env = process.env, lineDir }) {
+  const file = seenFile(inboxSeenDir(env, home), lineDir);
+  let text;
+  try {
+    text = readOrNull(file);
+  } catch (err) {
+    return { keys: new Set(), problem: `${file} 读不了（${errCode(err)}）` };
+  }
+  if (text === null) return { keys: new Set(), problem: null };
+  try {
+    const seen = JSON.parse(text)?.seen;
+    if (seen && typeof seen === 'object' && !Array.isArray(seen))
+      return { keys: new Set(Object.keys(seen)), problem: null };
+  } catch {
+    // 落到下面的「认不出」
+  }
+  return { keys: new Set(), problem: `${file} 认不出（不是 { seen: { 键: 时刻 } }）` };
+}
+
+/**
+ * 把这些话记进本血缘的已见名单（合并旧的、丢掉过期的）。写不了抛。
+ * @param {{ home: string, env?: Record<string, string | undefined>, lineDir: string, entries: Array<{ at: number, text: string }>, now?: number }} opts
+ */
+export function markSeen({ home, env = process.env, lineDir, entries, now = Date.now() }) {
+  if (entries.length === 0) return;
+  const dir = inboxSeenDir(env, home);
+  const file = seenFile(dir, lineDir);
+  /** @type {Record<string, number>} */
+  const seen = {};
+  try {
+    const old = JSON.parse(readOrNull(file) ?? '{}')?.seen;
+    if (old && typeof old === 'object')
+      for (const [k, v] of Object.entries(old))
+        if (typeof v === 'number' && now - v <= SEEN_KEEP_MS) seen[k] = v;
+  } catch {
+    // 旧名单坏了：重写一份新的
+  }
+  for (const e of entries) seen[seenKey(e)] = now;
+  mkdirSync(dir, { recursive: true });
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify({ v: 1, seen }), 'utf8');
+  renameSync(tmp, file);
 }

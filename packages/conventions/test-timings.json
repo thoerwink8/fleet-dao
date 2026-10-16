@@ -217,7 +217,6 @@
     "packages/conventions/test/decisions-index.test.ts": 39,
     "packages/conventions/test/declared-deps.test.ts": 66,
     "packages/conventions/test/deploy-readers.test.ts": 1625,
-    "packages/conventions/test/design-map.test.ts": 23,
     "packages/conventions/test/directives.test.ts": 43,
     "packages/conventions/test/doc-pointers.test.ts": 78,
     "packages/conventions/test/e2e-flaky.test.ts": 13,
