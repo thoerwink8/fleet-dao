@@ -32,10 +32,12 @@ export {
   bridgeMirasimConnector,
 } from './mirasim/bridge-connect.ts';
 export {
+  LEDGERLESS_AGENTS,
   type LedgerFs,
   type LedgerReading,
   type LedgerRouting,
   type LedgerRow,
+  ledgerlessDetail,
   ledgerRouting,
   readMirasimLedger,
 } from './mirasim/ledger.ts';
