@@ -6,11 +6,14 @@
 // 开单时间在不在开关之后原来也是硬闸（#1336 去掉过），#1338 换了个说法放回来：老单要先被整理会话判过（见下面「整理待办」）。
 //
 // 准入（先便宜的再贵的，不用现读 GitHub 的都在前面；排序之前一律不多读一次这张单）：
-//   作者在白名单里（公开仓陌生人能开单，白名单是唯一的门）→ 不是母单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→
+//   作者在白名单里（公开仓陌生人能开单，白名单是唯一的门；本仓工作流用 GITHUB_TOKEN 开的单，作者是 github-actions[bot]，也算可信）→
+//   不是母单、没贴「本机做」（「本机做」和「交给引擎」一起贴时以「本机做」为准）→
 //   还没派过（和点名派单共用 readDispatchStanding：没有任务行，或行是 queued/stopped 且 Temporal 里没有任何一代；
 //   有一代在跑或已结束算派过。问不清抛错，不当成没派过）→ 历史失败不超过 2 次 → 正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
-//   留一句话）→「已知的模块」「怎么算做完」没写改标准的路径（packages/conventions/standard-paths.json 列的，决定 0093：引擎的 PR 正文没有
-//   创始人原话，合并闸会永远判红；写了的同样贴一次「本机做」、留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
+//   留一句话。有「已知的模块」一节时只看这一节列出的路径，其余段落里提到的不算；没有这一节的老单仍看场景、已知的模块、怎么算做完）→
+//   没写改标准的路径（有「已知的模块」时同样只看这一节；没有这一节的老单仍看「已知的模块」和「怎么算做完」。清单在
+//   packages/conventions/standard-paths.json，决定 0093：引擎的 PR 正文没有创始人原话，合并闸会永远判红；写了的同样贴一次「本机做」、
+//   留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
 //   缺则留一次言，不拉）→「怎么算做完」没有要 diff 外证据的条目（截图、线上、现场、审计、看日志、飞书收到……，判据是 conventions 的
 //   offDiffItems，和 pnpm issue:new、驾驶舱开单同一份，决定 0093：不是用 issue:new 开的单也在这里挡住；有就留一次言、不拉）→
 //   改动规模不是最重档（单子列的路径超过 50 个）。
@@ -21,7 +24,8 @@
 // 排序（intake-pick.ts 的 comparePick）：版本先后列表里的序号 → 挂当前版本的 → 规模小 → 同档里贴了「交给引擎」的 → 历史失败少 → 开单早。
 // 起之前才现读这张单（开着、不是 PR、母单子单和「本机做」再核一遍）：只对真有空位的那几张读，不为每张开着的单读一次。
 // 空位 = 每轮最多 5 条、同时在跑最多 6 条、每小时最多起 20 条、熔断没停拉（最近 6 条结束的任务里失败过半就停，冷却 1 小时后放 1 条试探）。
-// 母单子单、本机做、版本这几道的判法是 @fleet-dao/core 的 dispatch.ts 的纯函数（familyGate、localGate），这里只排顺序。
+// 母单子单、本机做、版本、工作流机器人作者这几道的判法是 @fleet-dao/core 的 dispatch.ts 的纯函数（familyGate、localGate、
+// isGithubActionsAuthor），这里只排顺序。
 //
 // 改这里之前必须知道：
 // - 读不到的不当成没有：读仓里的单失败、白名单读不出、现读一张单失败、起工作流失败，都记进 unchecked，这一轮记 partial / failed，
@@ -50,6 +54,7 @@ import {
   HUMAN_DECISION_LABEL,
   LOCAL_LABEL,
   loadStandardPaths,
+  type MdDoc,
   matchesStandardPath,
   OFF_DIFF_REWRITE,
   type OffDiffItem,
@@ -64,6 +69,7 @@ import {
   familyGate,
   type IssueFamily,
   type IssueMilestones,
+  isGithubActionsAuthor,
   localGate,
   type MilestoneRef,
 } from '@fleet-dao/core';
@@ -299,13 +305,25 @@ export function prClaimedComment(prNumber: number): string {
   ].join('\n');
 }
 
-/** 单正文里认「要改工作流」的三节（不含「原话」：创始人的原话里顺口提到路径不算这张单要改它）。 */
+/**
+ * 没有「已知的模块」一节的老单，仍在这三节里认工作流路径（不含「原话」：创始人的原话里顺口提到路径不算这张单要改它）。
+ * 有这一节时只看它（pathSections）。
+ */
 const WORKFLOW_SECTIONS = ['场景', '已知的模块', '怎么算做完'] as const;
 // 整个目录（`.github/workflows`，不带末尾斜杠）也算：写的是「改那个目录」
 const WORKFLOW_PATH = /\.github\/workflows(?:\/[\w.*-]*|(?![\w.-]))/;
 
 /**
- * 单正文的场景、已知的模块、怎么算做完三节里写到的第一个 `.github/workflows/` 路径；没写回 null。
+ * 有「已知的模块」一节时，路径只认这一节里写到的；没有这一节的老单用 fallback，不把「没写这一节」当成「没写路径」。
+ * 一节在、但是空的，也算有这一节：别的段落里的路径不再算。
+ */
+function pathSections(doc: MdDoc, fallback: readonly string[]): readonly string[] {
+  return sectionText(doc, '已知的模块') !== undefined ? ['已知的模块'] : fallback;
+}
+
+/**
+ * 单正文里写到的第一个 `.github/workflows/` 路径；没写回 null。
+ * 有「已知的模块」时只看这一节列出的路径，场景、怎么算做完、原话里提到的不算。没有这一节的老单仍看场景、已知的模块、怎么算做完。
  * 引擎的 GitHub 令牌不能推改了工作流的提交（workflows_permission），这种单拉了只会白烧一轮（#1186 烧了约 35 万输入 token）。
  * 正文不是文字（读不到）就抛：不当成「没写工作流路径」。正文是空的不在这里管（交代齐不齐那一道会留言）。
  */
@@ -315,7 +333,7 @@ export function workflowPathIn(body: unknown): string | null {
   const text = cleanBody(humanPart(body));
   if (!text) return null;
   const doc = parseMd('单正文', text);
-  for (const name of WORKFLOW_SECTIONS) {
+  for (const name of pathSections(doc, WORKFLOW_SECTIONS)) {
     const hit = WORKFLOW_PATH.exec(sectionText(doc, name) ?? '');
     if (hit) return hit[0];
   }
@@ -331,7 +349,10 @@ export function workflowPathComment(path: string): string {
   ].join('\n');
 }
 
-/** 单正文里认「要改标准」的两节：要动的文件和做完的样子（场景、原话里顺口提到的路径不算）。 */
+/**
+ * 没有「已知的模块」一节时，改标准的路径仍认这两节（场景、原话里顺口提到的路径不算）。
+ * 有这一节时只看它（pathSections）。
+ */
 const STANDARD_SECTIONS = ['已知的模块', '怎么算做完'] as const;
 // 没写进反引号的路径：只认仓里这几个顶层目录开头的（和 conventions 的 modulePaths 同一个口径，不补上级目录）
 const BARE_PATH = /(?<![\w/.-])((?:packages|agents|docs|specs|deploy|scripts)\/[\w./*-]*[\w*/])/g;
@@ -356,7 +377,8 @@ function refTouches(ref: { path: string; kind: 'file' | 'dir' }, rule: StandardP
 }
 
 /**
- * 单正文「已知的模块」「怎么算做完」两节里写到的第一个改标准的路径（清单在 packages/conventions/standard-paths.json）；没写回 null。
+ * 单正文里写到的第一个改标准的路径（清单在 packages/conventions/standard-paths.json）；没写回 null。
+ * 有「已知的模块」时只看这一节列出的路径，怎么算做完、场景、原话里提到的不算。没有这一节的老单仍看「已知的模块」和「怎么算做完」。
  * 引擎开的 PR 正文里没有创始人原话，合并闸（merge-gate）碰了标准路径就判红，拉了只会做完卡在合并（决定 0093）。
  * 正文不是文字（读不到）就抛：不当成「没写」。
  */
@@ -369,7 +391,7 @@ export function standardPathIn(
   const text = cleanBody(humanPart(body));
   if (!text) return null;
   const doc = parseMd('单正文', text);
-  for (const name of STANDARD_SECTIONS) {
+  for (const name of pathSections(doc, STANDARD_SECTIONS)) {
     const section = sectionText(doc, name) ?? '';
     const refs = [
       ...[...section.matchAll(/`([^`\n]+)`/g)].map((m) => asModuleRef(m[1] ?? '')),
@@ -582,7 +604,7 @@ async function admitIssue(
   const slug = `${repo.owner}/${repo.name}`;
   const early = screenListed({
     issue,
-    trusted: isTrusted(issue.author, whitelist),
+    trusted: isTrusted(issue.author, whitelist) || isGithubActionsAuthor(issue.author),
     autoDispatchSince: repo.autoDispatchSince,
   });
   if (early) {
