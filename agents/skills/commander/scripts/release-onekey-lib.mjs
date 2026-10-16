@@ -1,23 +1,17 @@
-// 发版一键命令的薄封装（只到预检，真发版不在这里做）：把 release-train 包成更直观的命令。
-// 逻辑一点不重写：真正干活的还是 release-train-lib.mjs 的 runTrain，这里只做三件事——
-// 1. 多一个只读的 preflight 命令：借 runTrain 跑「start」，但在它刚开始第 1 步
-//    （release-train-lib 的 runFrom 打印「—— 第 1 步「本机」——」那一行，即预检已通过、
-//    马上就要进第 2 步「暂停法国」之前的占位步）那一刻从 io.out 里抛一个哨兵错误打断它，再把临时状态文件删掉。
-//    从头到尾什么都没动过（第 2 步也只读总开关：发版不关总开关，release.sh 切版本时只暂停在跑的任务，决定 0093）；预检没过时 runTrain 自己停在 phase 0 的 failed，我们照旧删状态。
-// 2. preflight 命令前面带一段中文摘要（主线 CI 怎么样、挂了自动合并的 PR 有哪几个、法国在跑几个会话）。
-// 3. start 命令在透传 runTrain 之前，用更直白的中文先拦一遍用法错误（sha 必填、founder-ok 必填）。
-//    过了这层照原样进 runTrain：参数、状态、退出码全一样，行为一字不改。
+// 发版一键命令的薄封装：预检自己做、只读；真发版交给 release-train-lib.mjs 的 runTrain
+// （往法国递请求、跟着进度，九步在法国接活脚本里）。
+// 这里做两件事——
+// 1. preflight 只读：主线 CI、挂了自动合并的 PR、法国在跑的会话、法国现状（france.mjs）。
+//    不调用 runTrain，不写发布请求，不关法国引擎。主线 CI 不是绿的、法国现状读不到，回 2，输出里有「预检没过」。
+//    本机还留着旧的发版车状态文件时不碰，回 1。
+// 2. start 先用中文拦用法（sha 必填且是完整 40 位、founder-ok 必填），过了照原样进 runTrain。
+//    status / abort 也是透传。
 // 改这里之前必须知道：
-// - 和 release-train-lib 一样，这份文件里没有任何真的起进程、连网、睡觉的代码：一切经 io 进来，
+// - 这份文件里没有任何真的起进程、连网、睡觉的代码：一切经 io 进来，
 //   agents/test/release-onekey.test.ts 换假 ssh、假 gh、假时钟。
-// - 打断预检靠的是 release-train-lib 里 runFrom 打出来的固定字样「—— 第 1 步」（PHASES[1]＝「本机」）。
-//   它要是改了，这里就拦不住，预检过后会真的去关法国引擎——agents/test/release-onekey.test.ts 里
-//   有一条盯住「拦截生效、且没关法国引擎」，字样改动会当场红。
-// - start/status/abort 全是透传 runTrain：这里不加新行为，不替它把关（它在 founder-ok 上有一道槛；
-//   这里先拦只为更早给中文说法，双保险而不是替代）。
-// - 退出码照 runTrain：0 做完了；1 用法不对或被拒；2 没做成；3 卡住。preflight 没过回 2
-//   （什么都没改，不算卡住，回 2 不回 3）。
-import { existsSync, rmSync } from 'node:fs';
+// - 预检不许再借 runTrain start：那条路会往法国写请求。只读查完就停。
+// - 退出码：0 做完了（预检过了，或 status 没有一趟）；1 用法不对或被拒；2 没做成（预检没过也是 2，不算卡住）；3 卡住（runTrain 跟到法国卡住）。
+import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { scrubText } from './france-lib.mjs';
 import { runTrain, STATE_REL } from './release-train-lib.mjs';
@@ -26,13 +20,12 @@ export const ONEKEY_USAGE = `用法：node release-onekey.mjs <命令>（在项�
   preflight [--sha <提交>]
         只读预检，什么都不改：主线 CI 绿不绿、法国读不读得到、有没有别的发布在跑、
         列出挂了自动合并的 PR 和法国在跑的会话数，前面带一段中文摘要。不给 --sha 就只查环境。
-  start --sha <提交> --founder-ok "<创始人原话>" [--restore]
-        一键发版：记下发版前的总开关（不关它：release.sh 切版本时只暂停在跑的任务，决定 0093）→ 等要发的提交的 CI
-        → 发版 → 验证 → 核对开关和发版前一致 → 打印清单。
-        和 node release-train.mjs start 是同一条路：参数、状态、退出码全一样。
-  status          看这一趟走到哪、法国总开关发版前是什么（同 release-train.mjs status）
-  abort           撤掉这一趟（同 release-train.mjs abort；只有老版本发版车关过的总开关才开回）
-退出码：0 做完了；1 用法不对或被拒；2 没做成；3 卡住（到点还有拖后腿的，名单已列出）。`;
+  start --sha <40位提交> --founder-ok "<创始人原话>" [--restore]
+        一键发版：用法过了就交给 release-train，往法国递一份发布请求并跟着进度。
+        --restore 用不上（法国那趟自己核对开关），给了也忽略。
+  status          读一次法国上的进度（同 release-train.mjs status）
+  abort           往法国递撤掉暂停的请求（同 release-train.mjs abort）
+退出码：0 做完了；1 用法不对或被拒；2 没做成（预检没过也是 2）；3 卡住。`;
 
 const USAGE_HINT = '（node release-onekey.mjs 不带参数看用法）';
 
@@ -73,33 +66,23 @@ const stateFile = (home) => join(home, STATE_REL);
 const say = (io, text) => io.out(scrubText(text));
 const warn = (io, text) => io.err(scrubText(text));
 
-/** start/preflight 公用的 sha 面检查：只为更早给出中文说法；runTrain 自己还会再查一遍。 */
+/** start/preflight 公用的 sha 面检查：法国只认完整 40 位；runTrain 还会再查一遍。 */
 function checkTargetFormat(io, p) {
-  if (p.sha !== undefined && !/^[0-9a-f]{7,40}$/.test(p.sha)) {
-    warn(io, `--sha 要是十六进制的提交号（7–40 位），给的是「${p.sha}」`);
+  if (p.sha !== undefined && !/^[0-9a-f]{40}$/.test(p.sha)) {
+    warn(io, `--sha 要是完整的 40 位小写十六进制，给的是「${p.sha}」`);
     return 1;
   }
   return null;
 }
 
-// —— 预检 ——
-
-const SENTINEL_MSG = '__onekey_preflight_done__';
-class StopAfterPreflight extends Error {
-  constructor() {
-    super(SENTINEL_MSG);
-  }
-}
+// —— 预检（只读，不调用 runTrain）——
 
 /**
- * 只读预检：借 runTrain 跑 start，用一只包过的 io.out 在「—— 第 1 步」字样上抛哨兵。
- * runTrain 的最外层 catch 会把哨兵当成一般错误（「没做成：…」回 2）——所以不靠异常穿透判断，
- * 用闭包变量 hit 记「哨兵是不是真的被触发了」。预检没过时 runTrain 自己停在 phase 0 的 failed，
- * 打出的行里含「预检没过」，hit 是 false。两种都删状态文件。
- * 返回 { code, lines }：lines 是摘要 + runTrain 打出来的全部行。
+ * 只读预检。不写发布请求、不关引擎。
+ * 返回 { code, lines }：lines 是摘要，加上过了或「预检没过」。
  */
 export async function runPreflight(io, target) {
-  // 已有一趟在走/卡住/没成的：不碰，拒
+  // 本机还留着旧发版车的状态文件：不碰，拒（新的一趟记在法国，这份只是旧现场）
   if (existsSync(stateFile(io.home))) {
     return {
       code: 1,
@@ -109,51 +92,44 @@ export async function runPreflight(io, target) {
     };
   }
 
-  const lines = [];
-  const errLines = [];
-  let hit = false;
-  const LEAK_MSG = '__onekey_preflight_leaked__';
-  const ioWrapped = {
-    ...io,
-    out: (t) => {
-      const s = String(t);
-      if (s.includes('—— 第 1 步')) {
-        hit = true;
-        throw new StopAfterPreflight();
-      }
-      // 「—— 第 0 步」是预检本身，放心放过去；「—— 第 2 步」往后只可能是第 1 步的哨兵字样变了没拦住，拦下来由 code 兜成「拦漏了」
-      if (/—— 第 [2-9] 步/.test(s)) throw new Error(LEAK_MSG);
-      lines.push(s);
-    },
-    // 哨兵被 runTrain 最外层 catch 吞成「没做成：__onekey_preflight_done__」时走 err：那行是拦出来的噪声，吃掉；
-    // 预检真没过时的「第 0 步「预检」没成：…」也是走 err，留着，等下并进输出；拦漏了（leak 哨兵）也吃掉，
-    // 由 code 判断走到「拦漏了」那条报错。
-    err: (t) => {
-      const s = String(t);
-      if (s.includes(SENTINEL_MSG) || s.includes(LEAK_MSG)) return;
-      errLines.push(s);
-    },
-    // 预检里 runTrain 只在 phase 3（等收尾）之后才睡；预检过不去到不了那。保险起见还是换成不等。
-    sleep: async () => {},
-  };
-  const trainArgv =
-    target.value === null
-      ? ['start', '--sha', '0'.repeat(40), '--founder-ok', '（只读预检，到不了发版那一步）']
-      : ['start', '--sha', target.value, '--founder-ok', '（只读预检，到不了发版那一步）'];
-  const code = await runTrain(trainArgv, ioWrapped);
-  // 预检是只读的：过没过都把临时状态删掉（什么都没暂停过，不用碰）
-  rmSync(stateFile(io.home), { force: true });
-
   const summary = await buildSummary(io, target);
-  const all = [...summary, ...lines.map((l) => scrubText(l)), ...errLines.map((l) => scrubText(l))];
-  if (hit) {
-    all.push('预检过了：主线 CI 绿、法国读得到、没有别的发布在跑（开关、发版什么都没动）');
-    return { code: 0, lines: all };
+  const ci = await readMainCi(io);
+  if (ci !== '绿') {
+    return { code: 2, lines: [...summary, `预检没过：主线 CI 不是绿的（${ci}），什么都没改`] };
   }
-  if (code === 2) return { code: 2, lines: all }; // 「预检没过」那句 runTrain 已打进 errLines；拦漏的哨兵行也在这
-  // code 0 且 hit 为假：哨兵字样变了、release-train 一路跑完了。这条命令不能再用，写清楚让盯哨兵的测试红。
-  all.push('预检的拦截没生效（哨兵「—— 第 1 步」没在输出里出现）：这条命令不能再用，去改回拦得住');
-  return { code: 2, lines: all };
+  const health = await readFranceHealth(io);
+  if (!health.ok) {
+    return { code: 2, lines: [...summary, `预检没过：${health.why}，什么都没改`] };
+  }
+  return {
+    code: 0,
+    lines: [
+      ...summary,
+      `预检：法国现状 ${health.bad} 处异常、${health.note} 处留意（只读，不发版）`,
+      '预检过了：主线 CI 绿、法国读得到（开关、发版什么都没动）',
+    ],
+  };
+}
+
+/** france.mjs --json：读得到就数异常和留意；读不到是 { ok: false, why }，不当成没有异常。 */
+async function readFranceHealth(io) {
+  const r = io.run(io.nodePath, [join(io.scriptsDir, 'france.mjs'), '--json'], {
+    cwd: io.cwd(),
+    timeoutMs: 120_000,
+  });
+  if (r.error || r.status === null || (r.status !== 0 && r.status !== 1))
+    return { ok: false, why: '法国现状读不到' };
+  try {
+    const view = JSON.parse(String(r.stdout));
+    if (!view || !Array.isArray(view.anomalies)) return { ok: false, why: '法国现状认不出' };
+    return {
+      ok: true,
+      bad: view.anomalies.filter((a) => a.level === 'bad').length,
+      note: view.anomalies.filter((a) => a.level === 'note').length,
+    };
+  } catch {
+    return { ok: false, why: '法国现状不是 JSON' };
+  }
 }
 
 /** 摘要段：和 phasePreflight 用的同一批只读接口，把现状说成三行中文。读不到的写「读不到」，不拦预检。 */
@@ -164,7 +140,7 @@ async function buildSummary(io, target) {
   lines.push(`挂了自动合并的 PR：${await readAutoMergePrs(io)}`);
   const s = await io.runningSessions();
   lines.push(`法国在跑的会话：${s.ok ? `${s.running} 个` : `读不到（${s.kind}）：${s.why}`}`);
-  lines.push('—— 下面是 release-train 自己的预检输出 ——');
+  lines.push('—— 只读预检（不递发布请求）——');
   return lines;
 }
 
@@ -216,7 +192,6 @@ function toTrainArgv(p) {
     const argv = ['start'];
     if (p.sha !== undefined) argv.push('--sha', p.sha);
     argv.push('--founder-ok', p.founderOk);
-    if (p.restore) argv.push('--restore');
     return argv;
   }
   return [p.cmd]; // status / abort：release-train 不收参数
@@ -242,7 +217,7 @@ export async function runOnekey(argv, io) {
     if (bad !== null) return bad;
     const target = { kind: 'sha', value: p.sha ?? null };
     const r = await runPreflight(io, target);
-    for (const line of r.lines) io.out(line);
+    for (const line of r.lines) io.out(scrubText(line));
     return r.code;
   }
   if (p.cmd === 'start') {
@@ -256,9 +231,10 @@ export async function runOnekey(argv, io) {
       warn(io, '发版是对外发布，必须带 --founder-ok "<创始人原话>"：没带就什么都不做');
       return 1;
     }
+    if (p.restore) warn(io, '--restore 用不上：法国那趟自己核对开关，这次忽略');
     say(
       io,
-      `一键发版：目标提交 ${String(p.sha).slice(0, 12)}，不关总开关（release.sh 切版本时只暂停在跑的任务，决定 0093），CI 绿了就发，发完核对开关和发版前一致（不一致照实报、不替人开关）。下面接入 release-train：`,
+      `一键发版：目标提交 ${String(p.sha).slice(0, 12)}。下面交给 release-train，往法国递发布请求并跟着进度：`,
     );
     return runTrain(toTrainArgv(p), io);
   }
