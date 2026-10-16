@@ -867,7 +867,8 @@ class TaskFlow {
   }
 
   /**
-   * 引擎自己跑一遍测试和 tsc（决定 0093）。不抛、不停下：活动没跑成当没跑。输出记在 rt.selfCheckOutput（绑着这个头），交给冷验收。
+   * 引擎自己跑一遍测试和 tsc（决定 0093）。不抛、不停下：活动没跑成（含活动限时到了）当没跑。
+   * 活动只试一次，限时到了不会整段重跑。输出记在 rt.selfCheckOutput（绑着这个头），交给冷验收。
    * 回 red / green / skipped。
    */
   private async selfCheck(wt: Worktree, head: string): Promise<'red' | 'green' | 'skipped'> {

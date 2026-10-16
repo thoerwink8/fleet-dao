@@ -10,6 +10,7 @@ import {
   ChildWorkflowFailure,
   isCancellation,
   log,
+  patched,
   proxyActivities,
   proxyLocalActivities,
   sleep,
@@ -21,10 +22,12 @@ import {
   type ActivityName,
   activityOptions,
   type EngineActivities,
+  profileOptions,
 } from '../activity-options.ts';
 import type { FailureInfo } from '../decisions/failure.ts';
 import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
 import type { Limits } from '../limits.ts';
+import { SELF_CHECK_ACTIVITY_MS } from '../self-check-budget.ts';
 
 /** 流程判断：本地活动，结果进历史，重放时不重算。自己带几次重试；再不行由调用方按兜底梯走，不判死。 */
 const { decide } = proxyLocalActivities<{ decide: Decide }>({
@@ -70,8 +73,16 @@ export function limitsFor(partial: Partial<Limits> | undefined): Promise<Limits>
 /** 给每个活动配上它自己的选项（那一档的超时与重试、叫停时等不等它收场），见 activity-options.ts。 */
 export function activitiesFor(limits: Limits): EngineActivities {
   const out: Partial<Record<ActivityName, unknown>> = {};
+  // 自测原来和建树同一档（20 分钟、重试 3 次）。预算比这档长，限时先到就整段重跑。
+  // 新历史用自己的档。老历史重放仍用建树那档，调度出去的超时和重试才和历史对得上。
+  // 只在造代理时问一次：问过档就定了，同一条历史里不会一会儿旧档一会儿新档。
+  const selfCheckOwnTimeout = patched('self-check-own-timeout');
   for (const name of Object.keys(ACTIVITY_PROFILE) as ActivityName[]) {
-    out[name] = proxyActivities<EngineActivities>(activityOptions(name, limits))[name];
+    const options =
+      name === 'selfCheck' && !selfCheckOwnTimeout
+        ? profileOptions('setup', limits)
+        : activityOptions(name, limits);
+    out[name] = proxyActivities<EngineActivities>(options)[name];
   }
   return out as EngineActivities;
 }
@@ -122,8 +133,9 @@ function startToCloseFor(activity: string, limits?: Limits): number | undefined 
     case 'coldVerify':
       return 75 * 60;
     case 'createWorktree':
-    case 'selfCheck':
       return 20 * 60;
+    case 'selfCheck':
+      return SELF_CHECK_ACTIVITY_MS / 1000;
     case 'waitMerged':
       return 20 * 60;
     case 'probeAssignedRoute':
