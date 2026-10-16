@@ -217,8 +217,8 @@ export interface SpawnCommand {
   /** 会话过程每一条（指挥官会话流式推给页面用）：按流里的先后给，抛了只记日志、不影响会话。 */
   onTranscript?: (entry: TranscriptEntry) => void;
   /**
-   * 脱开引擎跑（#2238，只有动手段给）：执行方式支持的（命令行那几家），会话输入输出走收发目录、引擎要走时放手（交回 detached）；
-   * attach = 接回上一个引擎放手的那个会话，不起进程。Mirasim 不支持，照旧管道跑、引擎要走时照旧被停。
+   * 脱开引擎跑（#2238，只有动手段给）：执行方式支持的（命令行那几家，和 Mirasim：#2815），会话输入输出走收发目录（Mirasim 只放交接单）、引擎要走时放手
+   * （交回 detached）；attach = 接回上一个引擎放手的那个会话，不起进程。
    * detachable 在定了「脱开跑」、交给驱动之前调：发布排空不再等它、不再停它。
    */
   detach?: { attach?: boolean; detachable?: () => void };

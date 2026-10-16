@@ -22,7 +22,12 @@ import {
   RETIRED_IO_ROOT_ALERT_KEY,
   UNCLAIMED_RUN_REASON,
 } from '../../src/real/orphan-reap.ts';
-import { DETACHED_MARK, HANDOFF_TTL_MS } from '../../src/real/session-handoff.ts';
+import {
+  DETACHED_MARK,
+  HANDOFF_TTL_MS,
+  type MirasimHandle,
+  writeMirasimHandle,
+} from '../../src/real/session-handoff.ts';
 import { addTask, fakeScopeHelper, fakeTrees, NOW, world } from './fixtures.ts';
 
 let t: TestDb;
@@ -195,6 +200,7 @@ describe('脱开引擎跑、等人接回的动手会话（#2238）', () => {
     const logs: Logged[] = [];
     const ioRoot = join(root, 'io');
     const delayed: { fn: () => void; ms: number }[] = [];
+    const mirasimStops: MirasimHandle[] = [];
     let clock = NOW;
     const reap = orphanReaper({
       db: t.db,
@@ -203,10 +209,26 @@ describe('脱开引擎跑、等人接回的动手会话（#2238）', () => {
       sudo: scope.sudo,
       ioRoot,
       later: (fn, ms) => void delayed.push({ fn, ms }),
+      stopMirasim: async (handle) => {
+        mirasimStops.push(handle);
+        return { confirmed: true, detail: 'stopped' };
+      },
       now: () => clock,
       log: (message, fields) => logs.push({ message, fields }),
     });
-    return { reap, trees, scope, logs, ioRoot, delayed, setNow: (d: Date) => (clock = d) };
+    return { reap, trees, scope, logs, ioRoot, delayed, mirasimStops, setNow: (d: Date) => (clock = d) };
+  }
+
+  /** Mirasim 的一格：会话在服务端，没有本机 scope；交接目录里有会话号，detachedAt 给了就写放手标记。 */
+  function mirasimCell(ioRoot: string, runId: string, detachedAt?: Date): string {
+    const dir = ioCell(ioRoot, runId, detachedAt);
+    writeMirasimHandle(dir, {
+      runId,
+      sessionKey: `claude:${runId}`,
+      taskId: 'task-1',
+      acceptedAt: NOW.toISOString(),
+    });
+    return dir;
   }
 
   const open = (id: string) =>
@@ -284,5 +306,86 @@ describe('脱开引擎跑、等人接回的动手会话（#2238）', () => {
     expect(await getRun(t.db, stale)).toMatchObject({ outcome: 'killed', failureReason: ORPHAN_RUN_REASON });
     expect(existsSync(join(ioRoot, stale))).toBe(false);
     expect(delayed).toEqual([]);
+  });
+
+  it('Mirasim（#2815）：刚放手的不收、不给服务端发 stop，runs 那一行和临时目录、交接目录都留着等接回', async () => {
+    const { reap, trees, scope, ioRoot, delayed, mirasimStops } = handoffSetup();
+    const kept = randomUUID();
+    // Mirasim 没有本机 scope：列出来是空的
+    process.env.FAKE_SCOPE_LIST = '';
+    await open(kept);
+    const dir = mirasimCell(ioRoot, kept, new Date(NOW.getTime() - 60_000));
+    mkdirSync(tmpOf(trees, kept), { recursive: true });
+    expect(await reap()).toBe(0);
+    expect(mirasimStops).toEqual([]);
+    expect(scope.calls().filter((c) => c.action === 'stop')).toEqual([]);
+    expect(await getRun(t.db, kept)).toMatchObject({ endedAt: null, outcome: null });
+    expect(existsSync(dir)).toBe(true);
+    expect(existsSync(tmpOf(trees, kept))).toBe(true);
+    expect(delayed.map((d) => d.ms)).toEqual([HANDOFF_TTL_MS]);
+  });
+
+  it('【故意造出的失败】Mirasim 放手以后过了时限没人接回：延迟清扫这时才给服务端发 stop，再收 runs 那一行、交接目录、临时目录；已经接回的（标记删了）不碰', async () => {
+    const { reap, trees, scope, ioRoot, delayed, mirasimStops, setNow } = handoffSetup();
+    const lost = randomUUID();
+    const claimed = randomUUID();
+    process.env.FAKE_SCOPE_LIST = '';
+    for (const id of [lost, claimed]) {
+      await open(id);
+      mirasimCell(ioRoot, id, NOW);
+      mkdirSync(tmpOf(trees, id), { recursive: true });
+    }
+    expect(await reap()).toBe(0);
+    expect(mirasimStops).toEqual([]);
+    rmSync(join(ioRoot, claimed, DETACHED_MARK));
+    setNow(new Date(NOW.getTime() + HANDOFF_TTL_MS));
+    for (const d of delayed) d.fn();
+    await vi.waitFor(async () => expect((await getRun(t.db, lost))?.outcome).toBe('killed'));
+    expect(mirasimStops).toEqual([expect.objectContaining({ runId: lost, sessionKey: `claude:${lost}` })]);
+    expect(await getRun(t.db, lost)).toMatchObject({ failureReason: UNCLAIMED_RUN_REASON });
+    expect(await getRun(t.db, claimed)).toMatchObject({ endedAt: null });
+    // Mirasim 的会话不在本机 scope 里：不去收 scope
+    expect(scope.calls().filter((c) => c.action === 'stop')).toEqual([]);
+    expect(existsSync(join(ioRoot, lost))).toBe(false);
+    expect(existsSync(tmpOf(trees, lost))).toBe(false);
+    expect(existsSync(join(ioRoot, claimed))).toBe(true);
+  });
+
+  it('【故意造出的失败】Mirasim 标记早就过了时限（引擎停了很久才起来）：起来那一下就发 stop 收掉，不等', async () => {
+    const { reap, ioRoot, delayed, mirasimStops } = handoffSetup();
+    const stale = randomUUID();
+    process.env.FAKE_SCOPE_LIST = '';
+    await open(stale);
+    mirasimCell(ioRoot, stale, new Date(NOW.getTime() - HANDOFF_TTL_MS - 1));
+    await reap();
+    expect(mirasimStops).toEqual([expect.objectContaining({ runId: stale })]);
+    expect(await getRun(t.db, stale)).toMatchObject({ outcome: 'killed', failureReason: ORPHAN_RUN_REASON });
+    expect(existsSync(join(ioRoot, stale))).toBe(false);
+    expect(delayed).toEqual([]);
+  });
+
+  it('Mirasim 的 stop 没发成：只记日志，照样收本机的东西、不挡工人接活', async () => {
+    const { ioRoot, trees, scope, logs } = handoffSetup();
+    const stale = randomUUID();
+    process.env.FAKE_SCOPE_LIST = '';
+    await open(stale);
+    mirasimCell(ioRoot, stale, new Date(NOW.getTime() - HANDOFF_TTL_MS - 1));
+    const reap = orphanReaper({
+      db: t.db,
+      trees: trees.trees,
+      helper: scope.helper,
+      sudo: scope.sudo,
+      ioRoot,
+      stopMirasim: async () => {
+        throw new Error('连不上 Mirasim');
+      },
+      now: () => NOW,
+      log: (message, fields) => logs.push({ message, fields }),
+    });
+    await reap();
+    expect(
+      logs.some((l) => l.message.includes('Mirasim') && JSON.stringify(l.fields).includes('连不上')),
+    ).toBe(true);
+    expect(existsSync(join(ioRoot, stale))).toBe(false);
   });
 });

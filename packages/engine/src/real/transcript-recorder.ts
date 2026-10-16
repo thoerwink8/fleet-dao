@@ -34,6 +34,8 @@ export interface TranscriptRecorderDeps {
   flushEveryMs?: number;
   batchSize?: number;
   limits?: TranscriptLimits;
+  /** 从这个序号起编（接回 Mirasim 会话时接着上一个引擎写到哪）。不给从 0 起。 */
+  startSeq?: number;
 }
 
 /** 每种条目的字数上限。 */
@@ -136,7 +138,7 @@ export class TranscriptRecorder {
   readonly #limits: TranscriptLimits;
   readonly #flushEveryMs: number;
   readonly #batchSize: number;
-  #seq = 0;
+  #seq: number;
   #pending: TranscriptRow[] = [];
   #dropped = 0;
   #timer: ReturnType<typeof setTimeout> | undefined;
@@ -152,6 +154,12 @@ export class TranscriptRecorder {
     this.#limits = deps.limits ?? TRANSCRIPT_LIMITS;
     this.#flushEveryMs = deps.flushEveryMs ?? TRANSCRIPT_FLUSH_MS;
     this.#batchSize = deps.batchSize ?? TRANSCRIPT_BATCH;
+    this.#seq = deps.startSeq ?? 0;
+  }
+
+  /** 下一条的序号：放手时记进交接单，接回的记录员从这里接着编（Mirasim 重读不出同样的条目，不能靠重复编号去重）。 */
+  get nextSeq(): number {
+    return this.#seq;
   }
 
   /** 交给会话的那份提示词（第一条）。 */
