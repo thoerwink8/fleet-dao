@@ -20,7 +20,7 @@ afterAll(() => t.close());
 beforeEach(() => resetTestDb(t));
 
 describe('受管的仓（listIntakeRepos）', () => {
-  it('开关开着的、关着的都列，按仓名排；开关打开的时刻带着，关着是 null', async () => {
+  it('开关开着的、关着的都列；不再用 owner/仓名排序决定拉单先后，权重缺省为 1', async () => {
     const b = await addRepo(t.db, 'bbb');
     const a = await addRepo(t.db, 'aaa');
     const opened = ago(DAY);
@@ -30,20 +30,25 @@ describe('受管的仓（listIntakeRepos）', () => {
       .set({ profile: { language: 'go', toolchain: ['go'], testCommand: 'go test ./...' } })
       .where(eq(repos.id, b.id));
     const rows = await listIntakeRepos(t.db);
-    expect(rows.map((r) => r.name)).toEqual(['aaa', 'bbb']);
-    expect(rows[0]).toMatchObject({
-      id: a.id,
+    expect(rows.map((r) => r.name).sort()).toEqual(['aaa', 'bbb']);
+    const gotB = rows.find((r) => r.id === b.id);
+    expect(gotB).toMatchObject({
+      id: b.id,
       owner: 'acme',
       defaultBranch: 'main',
       testCommand: 'pnpm check',
-      profile: {},
-      autoDispatchSince: null,
-      ciPolicy: 'force',
-    });
-    expect(rows[1]?.autoDispatchSince?.toISOString()).toBe(opened.toISOString());
-    expect(rows[1]).toMatchObject({
+      autoDispatchSince: opened,
       profile: { language: 'go', toolchain: ['go'], testCommand: 'go test ./...' },
       ciPolicy: 'force',
+      weight: 1,
+    });
+    expect(gotB?.autoDispatchSince?.toISOString()).toBe(opened.toISOString());
+    expect(rows.find((r) => r.id === a.id)).toMatchObject({
+      id: a.id,
+      autoDispatchSince: null,
+      profile: {},
+      ciPolicy: 'force',
+      weight: 1,
     });
   });
 

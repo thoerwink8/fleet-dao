@@ -60,6 +60,69 @@ export function sortCandidates<T>(items: readonly T[], keyOf: (item: T) => PickK
     .map((x) => x.item);
 }
 
+/** 拉单公平分配用的单子工作量：越重的单越快吃掉这个仓的 deficit。 */
+export type IntakeTier = 'fast' | 'medium' | 'heavyweight';
+
+export function intakeTierCost(tier: IntakeTier): number {
+  return tier === 'fast' ? 1 : tier === 'medium' ? 2 : 4;
+}
+
+export interface DeficitQueue<T> {
+  /** 仓编号，不用 owner/name，避免数据库返回顺序影响结果。 */
+  repoId: string;
+  /** 仓的相对份额，缺省由调用方补成 1。 */
+  weight: number;
+  /** 最近 24 小时已经吃掉的加权工作量。 */
+  used: number;
+  candidates: readonly T[];
+}
+
+/**
+ * 按仓做 deficit round robin。
+ *
+ * 每轮给每个有候选的仓增加自己的 quantum；单子的成本是 1/2/4。
+ * used 从负 deficit 开始，所以最近 24 小时已经起得越重的仓越晚再拿名额；
+ * 没候选的仓自然不参加，名额由其余仓吃满。仓编号只用于平手确定性排序。
+ */
+export function pickDeficitRoundRobin<T>(
+  queues: readonly DeficitQueue<T>[],
+  max: number,
+  costOf: (item: T) => number,
+): { repoId: string; item: T }[] {
+  if (max <= 0) return [];
+  const states = queues
+    .map((queue) => ({
+      ...queue,
+      deficit: -Math.max(0, queue.used),
+      index: 0,
+      quantum: Math.max(1, queue.weight),
+    }))
+    .sort((a, b) => a.repoId.localeCompare(b.repoId));
+  const picked: { repoId: string; item: T }[] = [];
+
+  while (picked.length < max && states.some((state) => state.index < state.candidates.length)) {
+    let progress = false;
+    for (const state of states) {
+      if (state.index >= state.candidates.length) continue;
+      state.deficit += state.quantum;
+      while (state.index < state.candidates.length) {
+        const item = state.candidates[state.index];
+        if (item === undefined) break;
+        const cost = Math.max(1, costOf(item));
+        if (cost > state.deficit) break;
+        state.deficit -= cost;
+        state.index += 1;
+        picked.push({ repoId: state.repoId, item });
+        progress = true;
+        if (picked.length >= max) return picked;
+      }
+    }
+    // 每个仓的 quantum 都是正数、单子成本也有限，下一轮一定会有进展。
+    if (!progress) continue;
+  }
+  return picked;
+}
+
 /** 每个版本里程碑的先后：里程碑编号 → (单号 → 序号)。 */
 export type OrderBook = ReadonlyMap<number, ReadonlyMap<number, number>>;
 

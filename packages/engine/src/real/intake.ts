@@ -22,10 +22,12 @@ import {
   extendLocalLease,
   finishScheduleRun,
   firstTaskCreatedSince,
+  intakeWorkloadSince,
   listIntakeRepos,
   mergedPrForIssue,
   readIntakeBreaker,
   recentEndedTasks,
+  recordIntakeStart,
   requesterForRequestIssue,
   resolveAlertWithReason,
   settleExpiredLocalClaim,
@@ -175,6 +177,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           defaultBranch: r.defaultBranch,
           profile: r.profile,
           testCommand: r.testCommand,
+          weight: r.weight,
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
         }));
       },
@@ -298,10 +301,11 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         ]);
         return created + adopted;
       },
-      async breaker() {
-        const row = await readIntakeBreaker(w.db);
+      repoWorkload: (since) => intakeWorkloadSince(w.db, since),
+      async breaker(repo) {
+        const row = await readIntakeBreaker(w.db, repo.id);
         if (row?.state === 'open') {
-          const trial = await firstTaskCreatedSince(w.db, row.at);
+          const trial = await firstTaskCreatedSince(w.db, row.at, repo.id);
           const state = trial?.state;
           return {
             open: {
@@ -320,15 +324,20 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         }
         return {
           open: null,
-          recent: await recentEndedTasks(w.db, { limit: BREAKER_WINDOW, after: row?.at ?? null }),
+          recent: await recentEndedTasks(w.db, {
+            limit: BREAKER_WINDOW,
+            after: row?.at ?? null,
+            repoId: repo.id,
+          }),
         };
       },
-      async breakerChanged({ event, at, why }) {
+      async breakerChanged({ repo, event, at, why }) {
         if (event === 'recover') {
-          await writeIntakeBreaker(w.db, { state: 'closed', at, by: BREAKER_ACTOR });
-          await resolveAlertWithReason(w.db, { dedupeKey: BREAKER_ALERT_KEY, by: BREAKER_ACTOR, why, at });
+          const alertKey = `${BREAKER_ALERT_KEY}:${repo.id}`;
+          await writeIntakeBreaker(w.db, { state: 'closed', at, by: BREAKER_ACTOR }, repo.id);
+          await resolveAlertWithReason(w.db, { dedupeKey: alertKey, by: BREAKER_ACTOR, why, at });
           await upsertAlert(w.db, {
-            dedupeKey: `${BREAKER_ALERT_KEY}:recovered:${at.toISOString()}`,
+            dedupeKey: `${alertKey}:recovered:${at.toISOString()}`,
             level: 'daily',
             taskId: null,
             title: '引擎恢复拉单',
@@ -336,11 +345,11 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           });
           return;
         }
-        await writeIntakeBreaker(w.db, { state: 'open', at, by: BREAKER_ACTOR });
+        await writeIntakeBreaker(w.db, { state: 'open', at, by: BREAKER_ACTOR }, repo.id);
         // 试探失败重新计冷却（retrip）不再推第二条：原来那条还开着
         if (event === 'trip') {
           await upsertAlert(w.db, {
-            dedupeKey: BREAKER_ALERT_KEY,
+            dedupeKey: `${BREAKER_ALERT_KEY}:${repo.id}`,
             level: 'alert',
             taskId: null,
             title: '引擎停拉单：最近的任务失败过半',
@@ -348,7 +357,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           });
         }
       },
-      async start({ repo, issueNumber, title, body, author }) {
+      async start({ repo, issueNumber, title, body, author, tier }) {
         const member = memberFor(await usersOnce(), author);
         // 驾驶舱「提需求」开的单是「引擎」机器人开的，GitHub 上的作者认不出是谁（母单 #2047 第 B 片）：
         // 提出人以开单那一刻写进库的 requested_by 为准（按正文末尾「来自驾驶舱 需求 N」找）。只认自家机器人开的单。
@@ -479,6 +488,15 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
               `任务 ${created.task.id} 的工作流已经起了，接手的操作记录写不进（${errMessage(err)}）`,
             );
           }
+        }
+        if (tier !== undefined) {
+          await recordIntakeStart(w.db, {
+            repoId: repo.id,
+            taskId: created.task.id,
+            at: now(),
+            tier,
+            by: BREAKER_ACTOR,
+          });
         }
         return 'started';
       },
