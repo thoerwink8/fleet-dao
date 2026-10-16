@@ -79,13 +79,21 @@ describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', { 
     expect(TARGETS).not.toContain('prompt-log.mjs');
   });
 
-  it('项目设置里所有钩子的 timeout 按秒写，不超过 600', () => {
+  it('项目设置里前台钩子的 timeout 按秒写，不超过 600；后台叫醒的（asyncRewake，只有盯账那条）不超过 4 小时', () => {
     const settings = JSON.parse(
       readFileSync(fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)), 'utf8'),
-    ) as { hooks: Record<string, { hooks: { timeout?: number }[] }[]> };
+    ) as {
+      hooks: Record<string, { hooks: { command?: string; timeout?: number; asyncRewake?: boolean }[] }[]>;
+    };
     const all = Object.values(settings.hooks).flatMap((groups) => groups.flatMap((g) => g.hooks));
     expect(all.length).toBeGreaterThan(0);
-    for (const h of all) expect(h.timeout ?? 0).toBeLessThanOrEqual(600);
+    for (const h of all.filter((x) => x.asyncRewake !== true))
+      expect(h.timeout ?? 0).toBeLessThanOrEqual(600);
+    const background = all.filter((x) => x.asyncRewake === true);
+    expect(background.map((h) => h.command)).toEqual([
+      'node "$CLAUDE_PROJECT_DIR/agents/hooks/inbox-watch.mjs"',
+    ]);
+    for (const h of background) expect(h.timeout ?? 0).toBeLessThanOrEqual(4 * 3600);
   });
 
   it('绝不拦、绝不插话：正常路径 exit 0 且不往 stdout 打东西', () => {

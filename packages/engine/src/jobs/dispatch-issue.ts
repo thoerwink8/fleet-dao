@@ -17,7 +17,7 @@
 //   #1336 合并后如果加了新的准入闸（比如「验收条是 diff 里看得见的」），要把它也排进这里（硬还是就绪度，按 FORCEABLE 分），见 PR 说明。
 
 import { loadStandardPaths, type StandardPath } from '@fleet-dao/conventions';
-import { familyGate, localGate, versionGate } from '@fleet-dao/core';
+import { familyGate, isGithubActionsAuthor, localGate, versionGate } from '@fleet-dao/core';
 import { type EngineMasterState, engineMasterOf, type MasterSettingRow } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
@@ -177,7 +177,7 @@ async function hardFailure(
   if (issue === null) {
     throw new Error(`#${issueNumber} 现读是开着的 issue，可开着的单列表里找不到它：读不全，没查成`);
   }
-  if (!isTrusted(issue.author, await deps.whitelist())) {
+  if (!isTrusted(issue.author, await deps.whitelist()) && !isGithubActionsAuthor(issue.author)) {
     return { failure: fail('untrusted_author', '开单人不在白名单里') };
   }
   const family = familyGate(plan);
