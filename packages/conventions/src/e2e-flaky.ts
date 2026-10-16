@@ -1,6 +1,8 @@
 // 驾驶舱 e2e 的偶发失败（决定 0093）：首跑红、重试过了的用例 Playwright 标成 flaky，这一轮不算红（retries=1，packages/web/e2e/playwright.config.ts）。
 // 同一条用例在近 10 轮主线 e2e 里首跑红到 2 次就算「常偶发」：开一张单（限期修、带最近几次失败的链接），单里写明把它加进隔离集
 // （packages/web/e2e/quarantine.json：照跑、照报，不挡这一轮；ci.yml 的 e2e job 跳过它们、e2e-quarantine.yml 每天单跑，按它挑用例的是 packages/web/e2e/support/quarantine.ts）。
+// 先判整轮（#2499）：一轮里首跑红的用例超过这一轮用例数的一半、或报告里有全局准备/备库的错，这轮记「整轮坏了」，不计入任何用例的次数，
+// 只汇成一张固定标题的「主线 e2e 整轮坏了」单（同一时间只一张），免得环境坏一次就给每条用例各开一张偶发单。
 // 这里只有纯函数：读 Playwright 的 JSON 报告、数次数、拼单子；取报告（gh run download）和开单在 .github/workflows/e2e-flaky.yml 和 bin/e2e-flaky.ts。
 
 /** 一条用例在一轮里的结局（多个视口里取最坏的：有一个红就是红，否则有一个偶发就是偶发）。 */
@@ -63,10 +65,36 @@ export function outcomesOf(report: unknown): Outcomes {
   return out;
 }
 
+/** 报告顶层 errors 的条数：全局准备（globalSetup）、备库这类整轮的错 Playwright 记在这里，不记在某条用例上。认不出长相就抛。 */
+export function globalErrorCount(report: unknown): number {
+  const errors = (report as { errors?: unknown } | null)?.errors;
+  if (errors === undefined) return 0;
+  if (!Array.isArray(errors)) throw new Error('报告里的 errors 不是数组');
+  return errors.length;
+}
+
 /** 一轮主线 e2e：运行的链接和它的报告读出来的结局。 */
 export interface RunOutcomes {
   url: string;
   outcomes: Outcomes;
+  /** 报告里有全局准备/备库这类整轮的错（globalErrorCount > 0）。 */
+  globalError?: boolean;
+}
+
+/**
+ * 这一轮是不是整轮坏了：报告里有全局错，或首跑红（偶发、真红）的用例超过这一轮跑了的用例数的一半。
+ * 整轮坏了是环境的事（备库、起服务），不是哪条用例偶发，不计入任何一条用例的次数。
+ */
+export function isBrokenRound(run: RunOutcomes): boolean {
+  if (run.globalError) return true;
+  let ran = 0;
+  let bad = 0;
+  for (const { outcome } of run.outcomes.values()) {
+    if (outcome === 'skipped') continue;
+    ran++;
+    if (outcome === 'flaky' || outcome === 'failed') bad++;
+  }
+  return ran > 0 && bad * 2 > ran;
 }
 
 export interface FlakyFinding {
@@ -89,6 +117,7 @@ export const FLAKY_THRESHOLD = 2;
 export function flakyTests(runs: readonly RunOutcomes[], threshold = FLAKY_THRESHOLD): FlakyFinding[] {
   const tally = new Map<string, FlakyFinding>();
   for (const run of runs) {
+    if (isBrokenRound(run)) continue;
     for (const [id, { key, outcome }] of run.outcomes) {
       if (outcome === 'skipped') continue;
       const f = tally.get(id) ?? { key, bad: 0, ran: 0, urls: [] };
@@ -139,6 +168,87 @@ export function parseQuarantine(text: string): QuarantineEntry[] {
 
 /** 开单的标题：认单也靠它（同一条用例已有开着的单就不再开）。 */
 export const issueTitle = (k: TestKey): string => `e2e 偶发：${keyText(k)}`;
+
+/**
+ * 「整轮坏了」单的标题：固定，同一时间只开一张（认单靠它）。不以「e2e 偶发」开头，免得和偶发单混在一起被批量处理。
+ */
+export const BROKEN_ROUND_TITLE = '主线 e2e 整轮坏了';
+
+export function brokenRoundBody(urls: readonly string[]): string {
+  return [
+    `近 ${FLAKY_WINDOW} 轮主线 e2e 里有 ${urls.length} 轮整轮坏了：报告里有全局准备/备库的错，或首跑红的用例超过这一轮用例数的一半。这是环境或备库的事，不是哪条用例偶发，这几轮没有计入任何用例的偶发次数。`,
+    '',
+    '先看这几轮的日志找整轮的根子（备库、起服务、全局准备），修好后关本单：',
+    ...urls.map((u) => `- ${u}`),
+    '',
+    '（这张单由 `.github/workflows/e2e-flaky.yml` 自动开，同一时间只开一张；判法在 `packages/conventions/src/e2e-flaky.ts`。）',
+  ].join('\n');
+}
+
+/** 一件要做的事：开新单，或给已开着的单留言补新的轮链接，或已有单不用动。 */
+export type IssueAction =
+  | { kind: 'create'; title: string; body: string; label: string }
+  | { kind: 'comment'; number: number; body: string; label: string }
+  | { kind: 'exists'; label: string };
+
+export interface OpenIssue {
+  number: number;
+  title: string;
+  /** 正文；「整轮坏了」那张要把留言也拼在后面（补链接是留言），不然每次都会重复留。 */
+  body?: string | null;
+}
+
+/**
+ * 近几轮（新的在前）→ 要开/留言的单。先剔整轮坏了的轮：它们只汇成一张固定标题的单（已有开着的就只补没写过的轮链接）；
+ * 剩下的轮里首跑红达阈值的用例各开一张偶发单，同标题已有开着的就不重开。
+ */
+export function planIssues(
+  runs: readonly RunOutcomes[],
+  open: readonly OpenIssue[],
+  quarantine: readonly QuarantineEntry[],
+  until: string,
+): IssueAction[] {
+  const actions: IssueAction[] = [];
+  const broken = runs.filter(isBrokenRound).map((r) => r.url);
+  if (broken.length > 0) {
+    const existing = open.find((i) => i.title === BROKEN_ROUND_TITLE);
+    if (!existing) {
+      actions.push({
+        kind: 'create',
+        title: BROKEN_ROUND_TITLE,
+        body: brokenRoundBody(broken),
+        label: `${BROKEN_ROUND_TITLE}（${broken.length} 轮）`,
+      });
+    } else {
+      const fresh = broken.filter((u) => !(existing.body ?? '').includes(u));
+      actions.push(
+        fresh.length > 0
+          ? {
+              kind: 'comment',
+              number: existing.number,
+              body: ['又有整轮坏了的轮：', ...fresh.map((u) => `- ${u}`)].join('\n'),
+              label: `${BROKEN_ROUND_TITLE}：补 ${fresh.length} 轮链接到 #${existing.number}`,
+            }
+          : { kind: 'exists', label: `已有开着的单：${BROKEN_ROUND_TITLE}（#${existing.number}）` },
+      );
+    }
+  }
+  for (const f of flakyTests(runs)) {
+    const title = issueTitle(f.key);
+    if (open.some((i) => i.title === title)) {
+      actions.push({ kind: 'exists', label: `已有开着的单：${title}（${f.bad}/${f.ran}）` });
+      continue;
+    }
+    const quarantined = quarantine.some((q) => keyText(q) === keyText(f.key));
+    actions.push({
+      kind: 'create',
+      title,
+      body: issueBody(f, until, quarantined),
+      label: `开了单：${title}（${f.bad}/${f.ran}）`,
+    });
+  }
+  return actions;
+}
 
 /** 限期：今天起 7 天。 */
 export function deadline(now: Date, days = 7): string {
