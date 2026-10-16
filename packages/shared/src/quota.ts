@@ -116,3 +116,124 @@ export function windowAppliesTo(
     (model.family !== undefined && norm(model.family) === scope) || norm(model.id).includes(scope);
   return matched ? 'yes' : 'no';
 }
+
+// —— 池压力与作废预估（#2737）——
+
+/** 历史读数的一点：读数时刻、已用比例、那时报的清零时刻（换期了的点不和这一期混算）。 */
+export interface QuotaSamplePoint {
+  readAt: string;
+  used: number;
+  resetsAt: string | null;
+}
+
+/** 算用量速度只看最近这么久的历史点；点少于两个、或跨度不到 MIN_SPAN 就退回「本期平均速度」。 */
+export const PRESSURE_RATE_LOOKBACK_MS = 24 * HOUR;
+const MIN_RATE_SPAN_MS = 30 * 60_000;
+/** 两次读数报的清零时刻差在这之内算同一期。 */
+const SAME_PERIOD_MS = 10 * 60_000;
+
+export interface QuotaPressure {
+  pace: QuotaPace;
+  /**
+   * 池压力 ρ = 剩余比例 ÷ 剩余时间比例。> 1：剩得比时间多，照时间均匀用也用不完；< 1：剩得比时间少。
+   * 剩余时间比例是 0（清零时刻就在眼前）时没法除，为空。
+   */
+  rho: number | null;
+  /** 每小时用掉的比例（不为负）。 */
+  ratePerHour: number;
+  /** samples：按最近 24 小时的历史读数算；average：历史不够，按本期到现在的平均速度算。 */
+  rateFrom: 'samples' | 'average';
+  /** 离清零还有几小时。 */
+  hoursToReset: number;
+  /** 照现速到清零时还剩多少（比例，不为负）：这部分会作废。 */
+  leftAtReset: number;
+  /** 照现速会在清零前用完：提前几小时用完；用不完为空。 */
+  exhaustedHoursEarly: number | null;
+}
+
+/**
+ * 一个会作废的窗口的池压力和作废预估（纯函数）。算不出进度（没读到已用、没清零时刻、已过清零）返回 null，不拿 0 顶。
+ * 速度：同一期（清零时刻一致）最近 24 小时的历史点加上这次读数，首尾两点之差除以时间；不够两点或跨度不到半小时，
+ * 按本期平均（已用 ÷ 本期已过的小时数）。
+ */
+export function quotaPressure(
+  w: {
+    window: QuotaWindowKind;
+    label?: string | null;
+    used: number | null | undefined;
+    resetsAt: string | null | undefined;
+    readAt: string;
+  },
+  now: number,
+  samples: readonly QuotaSamplePoint[] = [],
+): QuotaPressure | null {
+  const pace = quotaPace(w, now);
+  if (!pace || w.resetsAt === null || w.resetsAt === undefined) return null;
+  const resetAt = Date.parse(w.resetsAt);
+  const msToReset = resetAt - now;
+  const hoursToReset = msToReset / HOUR;
+  const remaining = Math.max(0, 1 - pace.used);
+  const timeLeft = msToReset / pace.spanMs;
+  const rho = timeLeft > 0 ? remaining / Math.min(1, timeLeft) : null;
+
+  const points = [
+    ...samples.filter((s) => {
+      const at = Date.parse(s.readAt);
+      if (!Number.isFinite(at) || at > now || now - at > PRESSURE_RATE_LOOKBACK_MS) return false;
+      if (!Number.isFinite(s.used)) return false;
+      const r = s.resetsAt === null ? Number.NaN : Date.parse(s.resetsAt);
+      return Number.isFinite(r) && Math.abs(r - resetAt) <= SAME_PERIOD_MS;
+    }),
+    { readAt: w.readAt, used: pace.used, resetsAt: w.resetsAt },
+  ]
+    .map((p) => ({ at: Date.parse(p.readAt), used: p.used }))
+    .filter((p) => Number.isFinite(p.at))
+    .sort((a, b) => a.at - b.at);
+  const first = points[0];
+  const last = points[points.length - 1];
+  let ratePerHour: number;
+  let rateFrom: QuotaPressure['rateFrom'];
+  if (first && last && last.at - first.at >= MIN_RATE_SPAN_MS) {
+    ratePerHour = Math.max(0, (last.used - first.used) / ((last.at - first.at) / HOUR));
+    rateFrom = 'samples';
+  } else {
+    const elapsedHours = (pace.elapsed * pace.spanMs) / HOUR;
+    ratePerHour = elapsedHours > 0 ? Math.max(0, pace.used) / elapsedHours : 0;
+    rateFrom = 'average';
+  }
+  const burn = ratePerHour * hoursToReset;
+  const leftAtReset = Math.max(0, remaining - burn);
+  const exhaustedHoursEarly =
+    ratePerHour > 0 && remaining / ratePerHour < hoursToReset ? hoursToReset - remaining / ratePerHour : null;
+  return { pace, rho, ratePerHour, rateFrom, hoursToReset, leftAtReset, exhaustedHoursEarly };
+}
+
+/** 一个池拿哪个窗口说「会作废多少」：5 小时窗不算（只挡不排），其余能算的里取清零时预计剩得最多的；一样多取先清零的。 */
+export function poolPressureWindow<
+  T extends {
+    window: QuotaWindowKind;
+    label?: string | null;
+    used: number | null | undefined;
+    resetsAt: string | null | undefined;
+    readAt: string;
+  },
+>(
+  windows: readonly T[],
+  now: number,
+  samplesOf: (w: T) => readonly QuotaSamplePoint[] = () => [],
+): { window: T; pressure: QuotaPressure } | null {
+  let best: { window: T; pressure: QuotaPressure } | null = null;
+  for (const w of windows) {
+    if (w.window === '5h') continue;
+    const pressure = quotaPressure(w, now, samplesOf(w));
+    if (!pressure) continue;
+    if (
+      !best ||
+      pressure.leftAtReset > best.pressure.leftAtReset + 1e-9 ||
+      (Math.abs(pressure.leftAtReset - best.pressure.leftAtReset) <= 1e-9 &&
+        pressure.hoursToReset < best.pressure.hoursToReset)
+    )
+      best = { window: w, pressure };
+  }
+  return best;
+}

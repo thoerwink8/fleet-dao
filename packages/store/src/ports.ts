@@ -49,6 +49,18 @@ export type SegmentRunRecord = SegmentRun & {
 /** 库里的一行额度窗：原名、单位、读法入库必填（领域类型里可选，是给还没入库的读数用的）；staleSince 由库的写入口管。 */
 export type QuotaWindowRecord = QuotaWindow & Required<Pick<QuotaWindow, 'label' | 'unit' | 'source'>>;
 
+/** 额度窗历史的一行（#2737，库里是 quota_window_samples）：算用量速度、清零时会作废多少用。 */
+export interface QuotaSampleRecord {
+  poolId: string;
+  label: string;
+  window: QuotaWindow['window'];
+  unit: NonNullable<QuotaWindow['unit']>;
+  reading: QuotaWindow['reading'];
+  utilization?: number;
+  resetsAt?: string;
+  readAt: string;
+}
+
 // —— 人 ——
 
 export type UserRole = 'founder' | 'collaborator' | 'bot';
@@ -353,6 +365,8 @@ export interface RoutingStore {
   listBans(): Promise<Ban[]>;
   /** 按（池, 原名 label）排。上游这次没报的窗口也在（带 staleSince），满 24 小时库里才删。 */
   listQuotaWindows(): Promise<QuotaWindowRecord[]>;
+  /** since 之后（含）的额度窗历史，按（池, 原名, 读数时刻）排。读不到抛错，不给空的顶。 */
+  listQuotaSamples(since: Date): Promise<QuotaSampleRecord[]>;
   setChannelEnabled(
     input: { channelId: string; enabled: boolean },
     audit: NewAuditEntry,

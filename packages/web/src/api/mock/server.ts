@@ -73,6 +73,7 @@ import {
   PurposeMembershipResponse,
   poolFull,
   poolHoldsView,
+  poolPressureWindow,
   probeHistoryStrips,
   REPO_IMPORT_ADD,
   REPO_IMPORT_REMOVE,
@@ -3514,6 +3515,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             reserved: poolReserved(p.id),
             quotaStatus: windows.length === 0 ? 'unread' : windows.some((w) => w.stale) ? 'stale' : 'fresh',
             windows,
+            pressure: mockPressure(windows, t),
           };
         }),
         staleAfterMinutes: STALE_MS / 60_000,
@@ -3961,3 +3963,39 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   };
   return api;
 }
+
+/** 假后端的作废预估（#2737）：和后端同一份 shared 判法，没有历史读数，按本期平均速度算。 */
+function mockPressure(
+  windows: readonly {
+    label?: string | undefined;
+    window: QuotaWindowKindName;
+    utilization?: number | undefined;
+    resetsAt?: string | undefined;
+    readAt: string;
+    stale: boolean;
+    staleSince?: string | undefined;
+  }[],
+  t: number,
+) {
+  const fresh = windows.filter((w) => w.window !== '5h' && !w.stale && !w.staleSince);
+  if (fresh.length === 0) return { state: 'unknown' as const, why: '只有 5 小时窗，或一个窗口都没有' };
+  const hit = poolPressureWindow(
+    fresh.map((w) => ({ ...w, label: w.label ?? w.window, used: w.utilization, resetsAt: w.resetsAt })),
+    t,
+  );
+  if (!hit) return { state: 'unknown' as const, why: '用量比例或清零时刻没报' };
+  const p = hit.pressure;
+  return {
+    state: 'known' as const,
+    label: hit.window.label,
+    resetsAt: hit.window.resetsAt as string,
+    expectedUsed: p.pace.elapsed,
+    used: Math.max(0, p.pace.used),
+    rho: p.rho,
+    leftAtReset: p.leftAtReset,
+    exhaustedHoursEarly: p.exhaustedHoursEarly,
+    rateFrom: p.rateFrom,
+  };
+}
+
+type QuotaWindowKindName = Parameters<typeof poolPressureWindow>[0][number]['window'];
