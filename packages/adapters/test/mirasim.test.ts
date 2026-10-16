@@ -12,6 +12,7 @@ import {
   type MirasimRunSpec,
   mirasimRunFacts,
   mirasimRunSummary,
+  mirasimUsageFromSnapshot,
   runMirasim,
   stopMirasimSession,
   WATCH_CONNECT_BUDGET_MS,
@@ -96,13 +97,15 @@ describe('Mirasim 会话状态（真跑夹具）', () => {
     });
   });
 
-  it('pi：两条命令、累计输出', () => {
+  it('pi：真实流夹具的 snapshot 带 sessionKey 和本轮累计输出', () => {
     const { session, events } = replay(pi);
+    expect(pi.sessionKey).toMatch(/^pi:[0-9a-f-]{36}$/);
     expect(
       events.filter((e) => e.kind === 'tool' && (e.payload as ToolPayload).phase === 'end'),
     ).toHaveLength(2);
     expect(session.state.model).toBe('kimi-k3');
     expect(session.state.usage?.turnOutputTokens).toBe(239);
+    expect(mirasimUsageFromSnapshot(session)).toEqual({ outputTokens: 239 });
   });
 
   it('补丁跳号：回 gap 让调用方重订阅；旧 seq 的快照丢掉', () => {
