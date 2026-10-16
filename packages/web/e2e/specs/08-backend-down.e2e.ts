@@ -49,6 +49,10 @@ test.describe('后端不可用', () => {
     await request.post(`${stack.controlOrigin}/mode/down`);
     // 站内跳到「通知中心」：它的读取这时候失败
     await page.getByRole('link', { name: /通知中心/ }).click();
+    // 提醒是外壳角标一直在读的，刚读过不到 5 秒（staleTime）进页面不会重读、直接用缓存；
+    // 所以点页上的「刷新」强制重读一次，才是确定的「读不成」（不然点得快慢决定红绿）
+    await expect(page.getByRole('heading', { name: '通知中心' })).toBeVisible();
+    await page.getByRole('button', { name: '刷新', exact: true }).click();
     const alert = page
       .getByRole('alert')
       .filter({ hasText: /没读成|没查成/ })
