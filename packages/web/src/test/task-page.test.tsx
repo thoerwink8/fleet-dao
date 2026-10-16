@@ -122,6 +122,16 @@ describe('页头：面包屑代替「回任务列表」按钮（#1903）', () =>
   });
 });
 
+describe('老流程的会话那一块已经不在', () => {
+  test('t-12 只剩三段：页面上没有「老流程的会话」，也没有「时间与用量」「会话时间线」', async () => {
+    open('/tasks/t-12');
+    expect(await screen.findByRole('heading', { name: '三段' })).toBeTruthy();
+    expect(screen.queryByText('老流程的会话')).toBeNull();
+    expect(screen.queryByRole('heading', { name: '时间与用量' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: '会话时间线' })).toBeNull();
+  });
+});
+
 /** 照真后端的路子拼一份任务详情：每一笔过 readSegmentRun，用量过 summarizeUsage，整个过一遍接口约定。 */
 function detailWith(facts: SegmentRunFacts[], state: TaskDetail['task']['state'] = 'running'): TaskDetail {
   const segmentRuns = facts.map((f) => readSegmentRun(f, { taskFinished: state === 'done' }));
