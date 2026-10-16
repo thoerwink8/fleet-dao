@@ -443,8 +443,9 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
 /**
  * 这一段能不能续上一段的会话：换了工作树不续（会话记录按目录存）；别的交给 planSegmentResume 现查。
  * 查不成（活动没装、库一时不通）不挂起、不重试：退回开新会话，原因照写。放弃、叫停照常往外抛。
+ * task.ts 交活没提交续一次之前也先问它（#2722）：续不上就不在这一轮另开会话。
  */
-async function planResume(
+export async function planResume(
   rt: TaskRuntime,
   from: ResumeFrom,
   route: RouteChoice,
