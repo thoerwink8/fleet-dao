@@ -49,7 +49,7 @@
       "orgKind": "carpool"
     },
     {
-      "_说明": "Mirasim 中转账号：Opus、Sonnet、GPT（codex）、Kimi、DeepSeek、GLM（zcode）都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务（docs/ops.md 第五节「会话用户的 Mirasim」）。引擎已接上这种执行方式（#345）；2026-09-27 创始人拍「mirasim 额度不太够，先只用 DeepSeek 4.1 flash」，2026-10-06 又要接上 glm-5.3-flash。2026-10-07 夜按 Mirasim 服务端 0.0.425 的执行体表补了 codex 的 gpt-6-sol、gpt-6-luna、gpt-6-astra、gpt-5.6-sol、gpt-5.6-terra 和 zcode 的 glm-5.3（此前误写成服务端没有的 gpt-6.1-sol）；2026-10-08 又补了 dsh 的 deepseek-v4-pro。路由两层配置在 packages/db/routing.default.json，由发布时装进库；驾驶舱可调整库里的路由安排。2026-10-07 路由探针发现法国 Mirasim 服务端执行体表里没有 zcode，glm-5.3-flash 现有路由也探不通；Mirasim 服务端还认 gemini、antigravity、qwen 这几个执行体的模型，但法国没装这几个执行体的本体（2026-10-08 在会话用户下 command -v 都找不到），起不来，所以不挂路由。执行体看名册帧上的 agent，没有就按上游串前缀，对不上标「执行体未知」、不派（#1357）。并发 5 是旧系统拍的，没量过。",
+      "_说明": "Mirasim 中转账号：Opus、Sonnet、GPT（codex）、Kimi、DeepSeek、GLM（zcode）都扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude、7d_fable）。经 Mirasim 起的会话要给会话用户单独起一份 Mirasim 服务（docs/ops.md 第五节「会话用户的 Mirasim」）。引擎已接上这种执行方式（#345）；2026-09-27 创始人拍「mirasim 额度不太够，先只用 DeepSeek 4.1 flash」，2026-10-06 又要接上 glm-5.3-flash。2026-10-07 夜按 Mirasim 服务端 0.0.425 的执行体表补了 codex 的 gpt-6-sol、gpt-6-luna、gpt-6-astra、gpt-5.6-sol、gpt-5.6-terra 和 zcode 的 glm-5.3（此前误写成服务端没有的 gpt-6.1-sol）；2026-10-08 又补了 dsh 的 deepseek-v4-pro。路由两层配置在 packages/db/routing.default.json，由发布时装进库；驾驶舱可调整库里的路由安排。2026-10-07 路由探针发现法国 Mirasim 服务端执行体表里没有 zcode，glm-5.3-flash 现有路由也探不通；Mirasim 服务端还认 gemini、antigravity、qwen 这几个执行体的模型，但法国没装这几个执行体的本体（2026-10-08 在会话用户下 command -v 都找不到），对应会话无法启动。执行体看名册帧上的 agent，没有就按上游串前缀，对不上标「执行体未知」、不派（#1357）。并发 5 是旧系统拍的，没量过。",
       "id": "mirasim-relay",
       "channelId": "mirasim",
       "maxConcurrency": 5
@@ -159,7 +159,7 @@
       "upstreamModel": "claude-opus-5-5"
     },
     {
-      "_说明": "reclaude -p --model claude-haiku-4-5（插头夹具 packages/adapters/test/fixtures/claude-code/cc-haiku-edit 里用的就是这个串）。2026-10-08 补的。经 Mirasim 的 claude 执行体起 haiku 没有实测记录（MS-30 的名单里没有它），不挂。",
+      "_说明": "reclaude -p --model claude-haiku-4-5（插头夹具 packages/adapters/test/fixtures/claude-code/cc-haiku-edit 里用的就是这个串）。2026-10-08 补的。经 Mirasim 的 claude 执行体起 haiku 没有实测记录（MS-30 的名单里没有它）。",
       "id": "claude-solo:haiku-4.5:claude-code",
       "poolId": "claude-solo",
       "modelId": "haiku-4.5",
@@ -182,7 +182,7 @@
       "upstreamModel": "gpt-5.6-luna"
     },
     {
-      "_说明": "codex 经 Mirasim 起、走中转，点名 gpt-6.1-sol（模型 id 仍叫 gpt-6-sol）；验收用途排第一；GPT 不做界面，不挂 ui。不点 gpt-6-sol：它不在中转给这个账号的名单里，服务端会悄悄换成 gpt-6-astra，探针会判回话的不是点名的模型。",
+      "_说明": "codex 经 Mirasim 起、走中转，点名 gpt-6.1-sol（模型 id 仍叫 gpt-6-sol）；验收用途排第一；GPT 不做界面，由代码的硬禁令挡住。服务端对 gpt-6-sol 会悄悄换成 gpt-6-astra，探针会判回话的不是点名的模型。",
       "id": "mirasim-relay:gpt-6-sol:mirasim",
       "poolId": "mirasim-relay",
       "modelId": "gpt-6-sol",
@@ -271,7 +271,7 @@
       "upstreamAliases": ["default"]
     },
     {
-      "_说明": "cursor-agent --model gpt-5.6-luna-high（cursor-agent models 里列作「GPT-5.6 Luna 1M High」，2026-09-27 法国读的），扣 Cursor 订阅的包含用量（点名的模型走 API 桶，不是 Auto 桶）。开 PR 前的验证排第一（创始人 2026-09-27 拍，specs/212 方案「真流量」）；碰界面的单不给 GPT，由代码的硬禁令挡，所以不挂 ui。",
+      "_说明": "cursor-agent --model gpt-5.6-luna-high（cursor-agent models 里列作「GPT-5.6 Luna 1M High」，2026-09-27 法国读的），扣 Cursor 订阅的包含用量（点名的模型走 API 桶，不是 Auto 桶）。开 PR 前的验证排第一（创始人 2026-09-27 拍，specs/212 方案「真流量」）；碰界面的单不给 GPT，由代码的硬禁令挡住。",
       "id": "cursor:gpt-5.6-luna:cursor-agent",
       "poolId": "cursor",
       "modelId": "gpt-5.6-luna",
@@ -477,7 +477,7 @@
       "upstreamAliases": ["grok-4.7-build"]
     },
     {
-      "_说明": "grok -m grok-4.7-build-fast（2026-10-08 在法国会话用户下 grok models 列的：grok-4.7、grok-4.7-build-fast、grok-4.6、grok-4.5，默认 grok-4.7）。暂未安排用途。grok-4.5 太老，不挂。",
+      "_说明": "grok -m grok-4.7-build-fast（2026-10-08 在法国会话用户下 grok models 列的：grok-4.7、grok-4.7-build-fast、grok-4.6、grok-4.5，默认 grok-4.7）。暂未安排用途。grok-4.5 太老。",
       "id": "grok:grok-4.7-fast:grok",
       "poolId": "grok",
       "modelId": "grok-4.7-fast",

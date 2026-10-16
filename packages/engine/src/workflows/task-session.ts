@@ -135,6 +135,8 @@ export async function writeSession(
   let failedChannel: FailedChannel | undefined;
   // 这一段已经自动换路由重派过一次（决定 0093）：再判停下就真停下
   let redispatched = false;
+  // model_mismatch 的第一次重派只在同一个模型下找另一条路由，不能因该路由失效而悄悄换成别的模型。
+  let mismatchModel: string | undefined;
   // 有界耐心（决定 0093）：第一次该停下的时刻、歇了几次、一共歇了多少秒（从会话时限里扣）
   let patienceFrom: number | null = null;
   let patienceRounds = 0;
@@ -165,6 +167,7 @@ export async function writeSession(
       ui?.uiWork === true,
       authOn && authPoolsDown,
       authOn ? bare401RouteId : undefined,
+      mismatchModel,
     );
     bare401RouteId = undefined;
     failedChannel = undefined;
@@ -492,6 +495,7 @@ export async function writeSession(
         if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
         redispatched = true;
         stick = undefined;
+        if (code === 'model_mismatch') mismatchModel = route.modelId;
         // 避让记在这张单上（没提交的避让那一处）：没有别的候选时选路照旧派原来那条，不死等。
         // 老历史没有 avoid-scope-by-cause：重放时为假，仍避开模型（认得出族的连这一族），活动入参和原来一样。
         if (patched('avoid-scope-by-cause')) rt.avoidInfra(route, code);
@@ -534,6 +538,7 @@ export async function writeSession(
       counters = ZERO;
       avoid = NO_AVOID;
       stick = undefined;
+      mismatchModel = undefined;
       previousMessage = undefined;
     }
   }
@@ -685,6 +690,8 @@ async function pickRoute(
   authPoolsDown = false,
   /** 只凭一次 401 避开的路由。没有别的路由时放它再试一次，好让第二次 401 暂停整池。 */
   bare401RouteId?: string,
+  /** model_mismatch 的第一次自动重派只允许同一个模型的其他路由。 */
+  mismatchModel?: string,
 ): Promise<{ route: RouteChoice; probeNote: string | null }> {
   const stage = uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual;
   // 老历史重放时这一支为假：选路参数和原来一样，不多选一次。要写在派前探测那个标记之前，已有历史里的标记顺序才对得上。
@@ -817,6 +824,7 @@ async function pickRoute(
         ...(merged.families && merged.families.length > 0 ? { avoidFamilies: merged.families } : {}),
         ...(stickTo ? { stickRouteId: stickTo } : {}),
         ...(prefer ? { preferRouteId: prefer } : {}),
+        ...(mismatchModel ? { models: [mismatchModel] } : {}),
         ...(failedChannel ? { failedChannel } : {}),
         ...(tierName ? { tier: tierName } : {}),
         reserve: { segment: 'manual' },

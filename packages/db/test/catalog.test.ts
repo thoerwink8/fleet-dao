@@ -173,7 +173,7 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
       }
     };
     collect(JSON.parse(exampleText));
-    expect(notes.join('\n')).not.toMatch(/关着|开着|开关|打开|关闭|启用|停用|同\s*opus/);
+    expect(notes.join('\n')).not.toMatch(/关着|开着|开关|打开|关闭|启用|停用|不挂|同\s*opus/);
   });
 
   it('两个 Claude 池跑在同一个会话用户下、按组织类型分（法国只留一个会话用户，design 第十节）；同一时刻只有一个在跑，各 4', () => {

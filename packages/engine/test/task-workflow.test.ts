@@ -1319,7 +1319,7 @@ describe('任务工作流 · 切号停下动手那一段（org_switch，#59）',
   });
 });
 
-describe('任务工作流 · 渠道运行中失败停下报人，不再换同一个模型的下一个渠道', { timeout: 60_000 }, () => {
+describe('任务工作流 · model_mismatch 自动换同模型路由，第二次才停下报人', { timeout: 60_000 }, () => {
   const via = (channelId: string): RouteChoice => ({
     routeId: `r-${channelId}`,
     poolId: `p-${channelId}`,
@@ -1336,14 +1336,24 @@ describe('任务工作流 · 渠道运行中失败停下报人，不再换同一
     evidence: { code: 'model_mismatch', message: '回话的不是点名的模型', quotaExhausted: false },
   };
   /** 真选路的样子：按顺序派第一个没被避开的渠道；都用尽就派不出（waitFor none）。 */
-  const channelWorld = (channels: string[], picks: PickRouteInput[]) =>
+  const channelWorld = (
+    channels: string[],
+    picks: PickRouteInput[],
+    modelByChannel: Record<string, string> = {},
+  ) =>
     createFakeWorld({
       route: (i) => {
         picks.push(i);
-        const route = channels.map(via).find((r) => !i.avoidRouteIds.includes(r.routeId));
+        const route = channels
+          .map((channel) => ({ ...via(channel), modelId: modelByChannel[channel] ?? 'm1' }))
+          .find((r) => !i.avoidRouteIds.includes(r.routeId) && (!i.models || i.models.includes(r.modelId)));
         return route
           ? { ok: true, route, why: '测试' }
-          : { ok: false, waitFor: 'none', detail: '这个模型的渠道都用尽了' };
+          : {
+              ok: false,
+              waitFor: 'none',
+              detail: i.models ? `模型 ${i.models.join('、')} 的渠道都用尽了` : '这个模型的渠道都用尽了',
+            };
       },
     });
 
@@ -1393,6 +1403,26 @@ describe('任务工作流 · 渠道运行中失败停下报人，不再换同一
     expect(picks[1]?.avoidRouteIds).toEqual(['r-c1']);
     expect(picks[1]?.stickRouteId).toBeUndefined();
     expect(world.count('createWorktree')).toBe(1);
+  });
+
+  it('model_mismatch 重派只找同一个模型的另一条路由，不误派到下一模型', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = channelWorld(['c1', 'c2', 'c3'], picks, { c2: 'm2' });
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 ? REJECTED : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment.map((x) => [x.route.channelId, x.route.modelId])).toEqual([
+      ['c1', 'm1'],
+      ['c3', 'm1'],
+    ]);
+    expect(picks[1]?.models).toEqual(['m1']);
   });
 });
 

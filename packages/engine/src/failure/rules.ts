@@ -508,7 +508,8 @@ export const RULES: readonly FailureRule[] = [
   // 归类：分类把可重试的活动超时当成「原路再试不会变」。不是另外三件：
   // - #2797 发版叫停：排空到点把会话停下，码是 engine_stop（KL3，kind resume），不记账、马上续，不进这张表。
   // - #2815 Mirasim 发版后接回：会话脱开引擎接着跑，活动交回 detached，工作流隔一会儿 attach，不以 timeout_start_to_close 收场。
-  // - #2811 model_mismatch 挂整单：MD3，kind stop，第一次就停下等人，不重派。
+  // - #2811 model_mismatch：MD3 仍是 kind stop、按路由记失败；动手会话由 task-session.ts 先换同档路由自动重派一次，
+  //   第二次再按这条规则停下等人。
   // timeout_* 的原文是 Temporal 固定句（activity StartToClose timeout 等），第二次必然一字不差。runSegment 的
   // StartToClose 是 75 分钟；#2710 离新进程起来只有约 8 分钟，凑不齐一次在新进程上跑满的 StartToClose。
   // 心跳还在才会落成 start_to_close，工人一死先是 timeout_heartbeat。这次没标上 engineRestarted（心跳里的启动时刻
@@ -708,7 +709,7 @@ export const RULES: readonly FailureRule[] = [
   // - #2703 探针侧同一句：再探一次仍不通就判这条路由离线，不挂整单（已关）。
   // - #2815 引擎停时 Mirasim 动手会话：脱开再按交接单接回，不以这句收场。
   // - #2824 timeout_start_to_close：EN1，Temporal 活动超时，原文一字不差才挂起。
-  // - #2811 model_mismatch：MD3，kind stop，第一次就停下等人，不重派。
+  // - #2811 model_mismatch：MD3，kind stop；动手会话先换同档路由自动重派一次，第二次才停下等人。
   // 分流这里仍判「原路重试一次，再不行挂起」（探针认这句，改 kind 会把探针带偏）。动手会话不拿这个挂起整单：
   // 停掉这一段、按点名路由重派；没有能派的路由，或同一原因连败到重派预算（先避开这条路由，同一模型再避开模型，
   // 再撞上才挂起），才 parked（task-session.ts，patched('mb1-bridge-redispatch')）。
