@@ -151,6 +151,8 @@ describe('one-shot.ts', () => {
           model: 'fake-model',
           channel: 'claude-sub',
           routeId: 'claude-carpool:opus-5.5:claude-code',
+          // 开跑那一行带工作目录（#2357：每小时对账认树里有没有没结束的会话，原先读 session_runs 的这一列）
+          worktreePath: BASE_INPUT.cwd,
           startedAt: r.startedAt,
         },
       ]);
@@ -208,7 +210,9 @@ describe('one-shot.ts', () => {
       const r = await runOneShot({ ...BASE_INPUT, issueNumber: 216, ...OWNER }, deps);
       expect(r.outcome).toBe('done');
       const owner = { runId: r.runId, segment: 'manual', issueNumber: 216, ...OWNER };
-      expect(started).toEqual([{ ...owner, model: 'fake-model', startedAt: r.startedAt }]);
+      expect(started).toEqual([
+        { ...owner, model: 'fake-model', worktreePath: BASE_INPUT.cwd, startedAt: r.startedAt },
+      ]);
       expect(recorded).toHaveLength(1);
       const { endedAt, outcome, routeOutcome, ...opening } = recorded[0] as NonNullable<(typeof recorded)[0]>;
       expect(opening).toEqual(started[0]);
