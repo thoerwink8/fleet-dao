@@ -6,6 +6,7 @@ import { SEGMENT_TIERS } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
   decideTier,
+  decideTierFromModules,
   TIER_HEAVYWEIGHT_FILE_THRESHOLD,
   TierDecisionSchema,
   TierEnum,
@@ -86,6 +87,24 @@ describe('decideTier · 边界与造红', () => {
     const d = decideTier(['packages/engine/src/x.ts', 'agents/config/claude-permissions.json']);
     expect(d.tier).toBe('heavyweight');
     expect(d.effort).toBe('high');
+  });
+
+  it('档案模块根 cmd/*：cmd/a.go 和 cmd/b.go 两处都是中档', () => {
+    const roots = ['cmd/*', 'internal/*'];
+    const diff = decideTier(['cmd/a.go', 'cmd/b.go'], roots);
+    expect(diff.tier).toBe('medium');
+    expect(diff.reason).toContain('cmd/');
+    const listed = decideTierFromModules(
+      [
+        { path: 'cmd/a.go', kind: 'file' },
+        { path: 'cmd/b.go', kind: 'file' },
+      ],
+      [],
+      roots,
+    );
+    expect(listed.tier).toBe('medium');
+    expect(listed.reason).toContain('cmd/');
+    expect(decideTier(['cmd/a.go', 'internal/x.go'], roots).tier).toBe('heavyweight');
   });
 
   it('reason 必非空（zod schema 约束 + 全三档 happy path 都验证）', () => {

@@ -73,6 +73,15 @@ async function seedWorld(db: Db, over: Seed = {}) {
       name: over.name ?? 'demo',
       testCommand: 'pnpm check',
       autoDispatchSince: over.repoSwitch === undefined ? new Date('2026-09-30T00:00:00Z') : over.repoSwitch,
+      profile: {
+        language: 'typescript',
+        toolchain: ['pnpm'],
+        testCommand: 'pnpm check',
+        moduleRoots: ['packages/*'],
+        mergeSignals: ['merge-gate', 'cold-verify'],
+        standardPathsFile: 'packages/conventions/standard-paths.json',
+        weight: 1,
+      },
     })
     .returning();
   const [founder] = await db
@@ -154,6 +163,9 @@ function fakeGh(
     },
     async readSpecDoc() {
       return null;
+    },
+    async readRepoFile() {
+      return { defaultBranch: 'main', commit: 'a'.repeat(40), file: { kind: 'missing' as const } };
     },
     async commentIssue(input: { issueNumber: number; key: string; body: string }) {
       calls.comments.push({ issueNumber: input.issueNumber, key: input.key, body: input.body });

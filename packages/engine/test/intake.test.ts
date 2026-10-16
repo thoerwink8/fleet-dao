@@ -822,6 +822,70 @@ describe('runIntakeJob · 一轮', () => {
     expect(() => standardPathIn(undefined, rules)).toThrow(/读不到/);
   });
 
+  it('拉单用这个仓自己的标准清单，不用 fleet-dao 本地那份', async () => {
+    const seen: string[] = [];
+    const own = [{ path: 'docs/own-standard.md', why: '这个仓自己的' }];
+    const localOnly = BODY.replace(
+      '- `packages/web/src/pages/`：驾驶舱页面',
+      '- `agents/shared-rules.md`：通用段',
+    );
+    const h = harness(
+      {
+        async standardPaths(repo) {
+          seen.push(`${repo.owner}/${repo.name}`);
+          return own;
+        },
+      },
+      { issues: [issue({ body: localOnly })] },
+    );
+    await runIntakeJob(h.deps);
+    expect(seen).toEqual(['acme/demo']);
+    // agents/shared-rules.md 在 fleet-dao 本地清单里；这个仓的清单没有它，照拉
+    expect(h.started).toHaveLength(1);
+    expect(h.localMarked).toEqual([]);
+
+    const blocked = harness(
+      {
+        async standardPaths(repo) {
+          seen.push(`${repo.owner}/${repo.name}`);
+          return own;
+        },
+      },
+      {
+        issues: [
+          issue({
+            body: BODY.replace('- `packages/web/src/pages/`：驾驶舱页面', '- `docs/own-standard.md`：标准'),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(blocked.deps);
+    expect(blocked.started).toEqual([]);
+    expect(blocked.localMarked).toEqual([12]);
+  });
+
+  it('仓档案缺项：没就绪，不拉单，原因写明缺哪几项', async () => {
+    let listed = 0;
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { language: 'go' } }];
+      },
+      async openIssues() {
+        listed += 1;
+        return { issues: [issue()], openMilestones: [V1, V2] };
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(listed).toBe(0);
+    expect(h.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+    expect(run.why).toContain('没就绪');
+    expect(run.why).toContain('moduleRoots');
+    expect(run.why).toContain('mergeSignals');
+    expect(run.why).toContain('standardPathsFile');
+    expect(run.why).not.toContain('language');
+  });
+
   it('改标准的清单读不到 → 这张单这一轮不拉、不贴标签不留言，记没查成（故意造出失败）', async () => {
     const h = harness({
       async standardPaths() {
