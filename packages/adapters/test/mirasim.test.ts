@@ -953,6 +953,31 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
     ).rejects.toThrow('不是 kimi 的');
   });
 
+  it('grok 走 Mirasim（#2720）：账本缺目录判「中转没查成」且原因写明不写流量账本；账本有 2xx 中转行判成功', async () => {
+    // 法国 grok 会话从来没有账本目录：用 kimi 的录像换成 grok 的会话号跑整段
+    const grokKey = 'grok:f8dd5195-5a21-4d17-b687-a90ee99bcc81';
+    const grok = JSON.parse(
+      JSON.stringify(kimi).replaceAll(kimi.sessionKey, grokKey).replaceAll('kimi-code/k3', 'grok-4.7'),
+    ) as typeof kimi;
+    const grokSpec = spec({ agent: 'grok', expectModel: 'grok-4.7' });
+    const missing = await runMirasim(grokSpec, {
+      connect: new FakeMirasim({ agents: ['grok'], reply: accepted(grok), stream: grok.stream }).connect,
+      ledgerDir: tempDir(),
+    });
+    expect(missing.terminal?.isError).toBe(false);
+    const verdict = judgeRun(mirasimRunSummary(missing).facts);
+    expect(verdict).toMatchObject({ outcome: 'failed', reason: 'relay_unknown' });
+    expect(verdict.detail).toContain('不写流量账本');
+    expect(verdict.detail).not.toContain('账本换了地方');
+
+    const relayed = await runMirasim(grokSpec, {
+      connect: new FakeMirasim({ agents: ['grok'], reply: accepted(grok), stream: grok.stream }).connect,
+      ledgerDir: okLedger(grokKey),
+    });
+    expect(mirasimRunSummary(relayed).facts.relayUnknown).toBeUndefined();
+    expect(judgeRun(mirasimRunSummary(relayed).facts).outcome).not.toBe('failed');
+  });
+
   it('中转路由：账本里起针之后没有 2xx，done 不算数；账本没读成、没给账本目录判「中转没查成」', async () => {
     const ledgerDir = tempDir();
     const uuid = kimi.sessionKey.split(':')[1] as string;
