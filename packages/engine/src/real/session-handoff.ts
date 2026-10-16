@@ -18,7 +18,9 @@
 //   引擎停机放手 = 只断开 ws、不发 stop（适配器的 release），照样写放手标记；新引擎带 attach 来，按交接单的会话号重新订阅，
 //   订阅回的整份快照重建状态、重复的帧按序号丢掉，一直读到收场。过了 HANDOFF_TTL_MS 没人接回的，照孤儿收，这时才给服务端发 stop
 //   （orphan-reap.ts 的 stopMirasim）。切号、人叫停、总时长、卡住被杀走的是叫停（signal），照旧发 stop，不放手。
-// - 验收、整理这些短会话不走这条。
+// - 冷验收（#2848）一家验的会话也走这条（real/task-verify.ts）：coldVerify 交回 detached，工作流带 attach 再调同一次验收，
+//   接回的结论照常贴、照常认；交接单、放手标记、收孤儿都和动手段同一套。两家都验的两个会话并行跑、不脱开，发版叫停了
+//   不算没过、重验一次。整理、指挥官会话不走这条。
 
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';

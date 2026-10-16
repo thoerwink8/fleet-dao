@@ -6,11 +6,17 @@
 // 引擎自测（决定 0093）的精炼输出只在测的就是要验的这个头时带上（testOutput）；老历史里没有自测，不带，入参和原来一样。
 // 第 2 轮起只复核上轮没过的条和这一轮的增量 diff（patched('verify-recheck')）：老历史没有这个标记，冷验收入参和原来一样。
 
+// 验收会话脱开引擎跑（#2848）：活动交回 detached 时隔 VERIFY_REATTACH_SECONDS 带上 attach 再调同一次验收（patched('cold-verify-attach')），
+// 接回的结论照常认；接回没接成的活动回 retry（重验一次），不算一轮、不算没过，全程「冷验收被拒」的次数也不数它。
+
 import { CancellationScope, patched } from '@temporalio/workflow';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import { type ColdVerifyInput, type ColdVerifyResult, MAX_VERIFY_ROUNDS } from '../task-contract.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import { headMovedDetail, verifyStopDetail } from './task-support.ts';
+
+/** 验收会话脱开引擎跑着、引擎在换版本（#2848）：隔多久去接回一次（和动手段的 SEGMENT_REATTACH_SECONDS 一样）。 */
+export const VERIFY_REATTACH_SECONDS = 20;
 
 /**
  * 冷验收。没过：记下问题表回动手（'rework'）；做不出来：停下等人，不让写代码的会话白改一轮；这会儿验不了、过一会儿就行：睡一会儿再来，
@@ -45,9 +51,19 @@ export async function coldVerifyPr(
     const headSha: string = rt.head;
     const mark = rt.routeWakeMark(); // 叫醒的记号在验之前取，理由见 task-session.ts 的 pickRoute
     const verifyInput = coldVerifyInput(rt, current, rt.verifyRound);
-    const res =
+    let res =
       ready ?? (await rt.step('coldVerify', () => rt.cancellable(() => rt.acts.coldVerify(verifyInput))));
     ready = undefined;
+    // 引擎换版本、重启时验收会话没停、脱开接着跑（#2848，和动手段 segment-reattach 同一套）：隔一会儿带上 attach 再调同一次验收，
+    // 等它收场——不算一轮、不算没过、不重新起会话。老引擎还在排空时接回会当场再交回 detached，所以隔一会儿再接。
+    // 老历史没有这个标记（也不会有 detached）
+    while (res.detached && patched('cold-verify-attach')) {
+      const attach = res.detached;
+      await rt.pause('retry', '引擎在换版本：验收会话脱开引擎接着跑，等新引擎接回', VERIFY_REATTACH_SECONDS);
+      res = await rt.step('coldVerify', () =>
+        rt.cancellable(() => rt.acts.coldVerify({ ...verifyInput, attach })),
+      );
+    }
     if (res.headMoved !== undefined) {
       rt.verifyRound -= 1;
       await rt.park('PR 的头被别人改了', headMovedDetail(res.headMoved, headSha));

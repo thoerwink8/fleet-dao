@@ -57,6 +57,7 @@ import type { InterruptedScheduleClose } from '../jobs/timers.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import { type EnginePorts, PortError } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
+import { toTaskSpendResult } from '../task-spend.ts';
 import { configFromEnv } from '../worker.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
@@ -1143,7 +1144,9 @@ export function realPortsFromEnv(
           });
         }
       }
-      return taskTokenSpend(db, input.taskId, since === undefined ? undefined : { since });
+      return toTaskSpendResult(
+        await taskTokenSpend(db, input.taskId, since === undefined ? undefined : { since }),
+      );
     },
     coldVerify: createColdVerify({
       gh,

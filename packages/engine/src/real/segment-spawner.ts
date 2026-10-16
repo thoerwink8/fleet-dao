@@ -8,11 +8,11 @@
 // 改这里之前必须知道：
 // - 开新还是续按入参：带了 resumeSessionId（动手段续上一段，决定 0088；驾驶舱「提需求」的指挥官会话，#2061）就
 //   session.mode = 'resume' 续那个号，不带就开新的。不 fork。续不续由调用方判（planSegmentResume），这里不再判一遍。
-// - 脱开引擎跑（cmd.detach，#2238，只有动手段给；session-handoff.ts 讲为什么）：执行方式是命令行那几家、装了 handoff，就把收发目录
+// - 脱开引擎跑（cmd.detach，#2238，动手段和一家验的冷验收给（#2848）；session-handoff.ts 讲为什么）：执行方式是命令行那几家、装了 handoff，就把收发目录
 //   交给驱动（io），会话的输入输出走文件；引擎要走（handoff.signal）时驱动放手、这里写上放手标记交回 detached——会话的临时目录、
 //   收发目录都留着给下一个引擎。attach 是接回：清掉标记，驱动不起进程、从头重读输出等它收场。正常收场的连收发目录一起删。
 //   Mirasim（#2815）同样走：收发目录里只放交接单（会话号、轮次号、run 号），放手时插头只断开 ws、不发 stop，这里写放手标记；
-//   接回时驱动凭交接单重新订阅。没给 detach 的（验收、整理、指挥官会话）照旧走管道、被停就发 stop。
+//   接回时驱动凭交接单重新订阅。没给 detach 的（两家都验的验收、整理、指挥官会话）照旧走管道、被停就发 stop。
 // - 成败只认 adapters 的 judgeRun（和 Fusion 同一份判法）：它不是 ok，退出码就不会是 0。「终帧报错」「没有终帧」这些，
 //   即使进程自己退出码是 0，这里也报 1，不让 one-shot 把它判成 done。
 // - 读不到、认不出一律抛错（路由没给、库里没有这条路由、执行方式没接上、会话用户定不下来），runOneShot 把它记成
@@ -435,7 +435,10 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           // 标记没写上：新引擎收孤儿时会把它当没人接的收掉，接回那一步读不到输出、照实报
           log('放手标记没写上（新引擎起来可能把这个会话当孤儿收掉）', { runId, error: errMessage(err) });
         }
-        log('引擎要走了：动手会话脱开接着跑，下一个引擎接回', { runId, dir });
+        log(`引擎要走了：${input.segment === 'verify' ? '验收' : '动手'}会话脱开接着跑，下一个引擎接回`, {
+          runId,
+          dir,
+        });
         return {
           exitCode: null,
           stdout: '',

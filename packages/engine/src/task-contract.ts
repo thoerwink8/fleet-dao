@@ -299,6 +299,28 @@ export interface ColdVerifyInput {
     sinceSha: string;
     priorProblems: string[];
   };
+  /**
+   * 接回（#2848，和动手段的 RunSegmentInput.attach 同一个意思）：上一次 coldVerify 交回 detached，验收会话还在跑。
+   * 给了就不选路、不拼提示词、不起会话，接回那一次会话、等它收场，结论照常贴、结局记到原来那一行 runs。老历史里没有这个字段。
+   */
+  attach?: ColdVerifyAttach;
+}
+
+/** 脱开引擎跑着的那一次验收会话（#2848）：接回要的东西。 */
+export interface ColdVerifyAttach {
+  /** runs 编号（收发目录也按它）。 */
+  runId: string;
+  /** 起的时刻：接回后总时长照它算，结局记回那一行用同一个起点。 */
+  startedAt: string;
+  /** 验它的族、模型、路由、池：接回时登记切号、记账照原样。 */
+  family: string;
+  modelId: string;
+  routeId: string;
+  poolId: string;
+  /** 选路那句「为什么派它」：接回收场那一笔整行覆盖开跑那一行，带上原来的。选路没给就没有。 */
+  routeWhy?: string;
+  /** 会话的工作目录（验收的空目录，归会话用户）：放手时留着，接回收场后删。 */
+  cwd: string;
 }
 
 export interface ColdVerifyResult {
@@ -325,6 +347,11 @@ export interface ColdVerifyResult {
    * 老历史里没有这个字段。
    */
   outOfScope?: string[];
+  /**
+   * 引擎要走了（发版切版本、重启），验收会话没停、脱开引擎接着跑（#2848）：没有结论，不是没过、不算一轮。
+   * 工作流隔一会儿带上它再调 coldVerify（ColdVerifyInput.attach），由下一个引擎接回。老历史里没有这个字段。
+   */
+  detached?: ColdVerifyAttach;
 }
 
 /** 改到了哪些要人拍的路径。空＝除了 CI 和冷验收没有别的门。 */
@@ -493,6 +520,7 @@ export interface TaskSpendInput {
 
 /** 单任务 token 预算的默认值见 limits.ts 的 DEFAULT_TASK_TOKEN_BUDGET。 */
 export interface TaskSpendResult {
+  /** 原始四样相加（老字段，老历史记的结果里只有这个）。 */
   tokens: number;
   runs: number;
   /** 用量还空着的行数（被叫停、超时杀，或中转会话的用量稍后才补）：花掉的只多不少。 */
@@ -502,6 +530,25 @@ export interface TaskSpendResult {
    * 页面上写明是估的。
    */
   estimated: number;
+  /**
+   * #2859：预算按输入当量判。当量只在活动里算（toTaskSpendResult），工作流不重算：下面这几项都是可选的，
+   * 新活动结果带全；老历史里记的结果没有它们，工作流退回用 tokens / estimated，重放判法和原来一样。
+   */
+  /** 原始四样（新输入、输出、缓存读、缓存写），缺的按 0 加。 */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** 输入当量（shared 的 inputEquivalentOf）。预算判超没超看它；四样有读不到的折不成就不给。 */
+  inputEquivalent?: number;
+  /** estimated 按同一比例折成当量后的数。 */
+  inputEquivalentEstimated?: number;
+  /**
+   * 只读，不再写：#2830 的活动结果记在这两个名下（缓存读乘 0.1 的数）。在途单的历史里还有，重放要照原样读，
+   * 所以字段留着；新结果不带。
+   */
+  weighted?: number;
+  weightedEstimated?: number;
 }
 
 /**
