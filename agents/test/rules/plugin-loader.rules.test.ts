@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runChild } from '../child.ts';
+import { runChild, runChildOk } from '../child.ts';
 
 const LOADER = fileURLToPath(new URL('../../hooks/plugin-loader.mjs', import.meta.url));
 const HOOKS = 'C:/Users/ada/.fleet-dao/hooks';
@@ -388,5 +388,29 @@ describe('加载器真跑（决定 0085）', () => {
     expect(stuck.status).toBe(0);
     expect(stuck.stderr).toContain('项目设置读不成，没改');
     expect(readSettings(broken)).toBe('{');
+  });
+
+  // #2721：Grok、Cursor、Mirasim 起的引擎会话不带 FLEET_HEADLESS，照样跑用户级的这个加载器，改了树里的项目设置，
+  // 交活核对看到 M .claude/settings.json 就判返工。引擎的树都是从 bundle 取的，一定有 refs/fleet/incoming（本机的检出没有）。
+  it('【故意造出的失败】引擎的树（有 refs/fleet/incoming）、没带 FLEET_HEADLESS：项目设置一个字节不改', () => {
+    const cwd = temp();
+    const git = (...args: string[]) =>
+      runChildOk('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd });
+    git('init', '-q');
+    mkdirSync(join(cwd, '.claude'));
+    const original = '{\n  "env": {}\n}\n';
+    writeFileSync(join(cwd, '.claude', 'settings.json'), original);
+    writeFileSync(join(cwd, '.fleet-plugins.json'), '{"track":["process"]}\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    git('update-ref', 'refs/fleet/incoming', 'HEAD');
+    const r = run(cwd, { FLEET_HEADLESS: '' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readSettings(cwd)).toBe(original);
+
+    // 同样的树没有这个引用（本机的检出）：照旧写
+    git('update-ref', '-d', 'refs/fleet/incoming');
+    expect(run(cwd, { FLEET_HEADLESS: '' }).status).toBe(0);
+    expect(readSettings(cwd)).not.toBe(original);
   });
 });

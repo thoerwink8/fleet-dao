@@ -43,11 +43,11 @@ import { mapped } from './mirror.ts';
 import {
   changedFilesSince,
   commitsSince,
+  deliveryLeftover,
   headOf,
   ownSpan,
   type UserTree,
   unresolvedConflicts,
-  worktreeChanges,
 } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
 
@@ -236,7 +236,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const head = await headOf(t);
       const changedFiles = await changedFilesSince(t, span);
       const commits = await commitsSince(t, span);
-      const leftover = await worktreeChanges(t);
+      // 环境文件（钩子改的项目设置这些）先还原、再剔除，不算没提交的改动（#2721）
+      const leftover = await deliveryLeftover(t);
       // since 是起会话前的头：提交进 HEAD 的冲突标记要和它比。和主线一个字节都不差的文件在 unresolvedConflicts 里剔除。
       const conflicts = await unresolvedConflicts(t, { since: input.baseSha, mainline: span.mainline });
       return { head, commits: commits.length, changedFiles, leftover, conflicts };
