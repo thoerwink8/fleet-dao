@@ -458,6 +458,9 @@ describe('期望里的渠道', () => {
     expect(byId.grok).toMatchObject({ channel: 'latest+3d', via: 'self-update' });
     expect(byId['cursor-agent']?.channel).toBeUndefined();
     expect(byId.reclaude?.channel).toBeUndefined();
+    // Go 钉死版本，不跟渠道升：via tar 升级器不认，没写 channel 就跳过
+    expect(byId.go).toMatchObject({ name: 'Go', bin: '/usr/local/bin/go', via: null });
+    expect(byId.go?.channel).toBeUndefined();
   });
 
   it('npm 装进 prefix，环境清干净', () => {

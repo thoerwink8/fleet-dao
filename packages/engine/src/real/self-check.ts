@@ -44,6 +44,8 @@ const HEARTBEAT_MS = 30_000;
  * $HOME 由会话用户的 shell 展开。
  */
 const PATH = '$HOME/.local/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin';
+/** 这些工具链表示仓要 Node 依赖。pnpm / npm / yarn 单独写、不带 node 时也算。 */
+const NODE_TOOLS: ReadonlySet<string> = new Set(['node', 'pnpm', 'npm', 'yarn']);
 const SH = '/bin/sh';
 const TSC = 'node_modules/.bin/tsc';
 /** 锁目录放哪（几个引擎进程共用）。测试和特殊机器用。 */
@@ -495,7 +497,10 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         }
       };
       const profile = (input.repo as RepoWithProfile).profile;
-      const needsNodeModules = profile === undefined || profile.toolchain.includes('node');
+      // 没写档案的老仓按 Node 仓算。写了档案的：工具链里有 node / pnpm / npm / yarn 才看 node_modules；
+      // 只有 go、cargo、python 这类的，没有 node_modules 也要跑档案里的测试命令。
+      const needsNodeModules =
+        profile === undefined || profile.toolchain.some((tool) => NODE_TOOLS.has(tool));
       if (needsNodeModules) {
         // Node 仓没装依赖就什么都跑不起来：整个跳过，不算红；非 Node 仓不看 node_modules。
         const probe = await sh('probe', 'test -d node_modules && echo yes || echo no', 30_000);

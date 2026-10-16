@@ -261,6 +261,25 @@ describe('selfCheck', () => {
     expect(commands.some((c) => scriptOf(c).includes('test -d node_modules'))).toBe(false);
   });
 
+  it('工具链只写 pnpm、不写 node：仍算 Node 仓，没有 node_modules 整个跳过', async () => {
+    const { check, commands } = rig({ deps: 'no\n' });
+    const got = await check(
+      input('pnpm check', {
+        language: 'typescript',
+        toolchain: ['pnpm'],
+        testCommand: 'pnpm check',
+        moduleRoots: ['packages/*'],
+        mergeSignals: ['merge-gate'],
+        standardPathsFile: 'packages/conventions/standard-paths.json',
+        weight: 1,
+        flowEligible: false,
+      }),
+      ctx(),
+    );
+    expect(got).toMatchObject({ state: 'skipped', reason: expect.stringContaining('没装依赖') });
+    expect(commands.some((c) => scriptOf(c).includes('pnpm check'))).toBe(false);
+  });
+
   it('没装依赖、树不在、没有命令也没有 tsc：skipped 加原因，不抛', async () => {
     expect(await rig({ deps: 'no\n' }).check(input(), ctx())).toMatchObject({
       state: 'skipped',

@@ -58,7 +58,12 @@ import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
 
 const execFileAsync = promisify(execFile);
-const TOOLCHAIN_PATH = '/usr/local/bin:/usr/bin:/bin';
+/**
+ * 法国装机的固定位置，不跟引擎进程当时的 PATH 走：CI 的 pnpm 在动作装出来的目录里，
+ * 不能据此说法国装好了。Go 官方包在 /usr/local/go/bin，期望里的入口是 /usr/local/bin/go。
+ * 真装配的测试要换掉 toolchainReady，别拿这台机器有没有 pnpm 决定拉不拉单。
+ */
+const TOOLCHAIN_PATH = '/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin';
 
 function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
