@@ -938,26 +938,65 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     const first = fakeClient();
     await runIntakeJob(wire(gh)(first.client, 'fleet'));
     expect(first.starts).toEqual([]);
-    const row = await readIntakeBreaker(t.db);
+    const row = await readIntakeBreaker(t.db, repo.id);
     expect(row).toMatchObject({ state: 'open' });
     const alerts = await t.db.select().from(notifications);
-    expect(alerts.filter((a) => a.dedupeKey === 'intake-breaker' && a.resolvedAt === null)).toHaveLength(1);
+    expect(
+      alerts.filter((a) => a.dedupeKey === `intake-breaker:${repo.id}` && a.resolvedAt === null),
+    ).toHaveLength(1);
 
     const again = fakeClient();
     await runIntakeJob(wire(gh)(again.client, 'fleet'));
     expect(again.starts).toEqual([]);
     expect(
-      (await t.db.select().from(notifications)).filter((a) => a.dedupeKey.startsWith('intake-breaker')),
+      (await t.db.select().from(notifications)).filter((a) =>
+        a.dedupeKey.startsWith(`intake-breaker:${repo.id}`),
+      ),
     ).toHaveLength(1);
   });
 
+  it('A 仓的熔断状态带仓号：A 停拉时 B 仓仍能起工作流', async () => {
+    const { repo: a } = await seedWorld(t.db, { name: 'aaa' });
+    const [b] = await t.db
+      .insert(repos)
+      .values({
+        owner: 'acme',
+        name: 'bbb',
+        testCommand: 'pnpm check',
+        autoDispatchSince: new Date('2026-09-30T00:00:00Z'),
+        profile: {
+          language: 'typescript',
+          toolchain: ['pnpm'],
+          testCommand: 'pnpm check',
+          moduleRoots: ['packages/*'],
+          mergeSignals: ['merge-gate', 'cold-verify'],
+          standardPathsFile: 'packages/conventions/standard-paths.json',
+          weight: 1,
+        },
+      })
+      .returning();
+    if (!b) throw new Error('B 仓没写进去');
+    await writeIntakeBreaker(
+      t.db,
+      { state: 'open', at: new Date(NOW.getTime() - 30 * 60_000), by: 'test' },
+      a.id,
+    );
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.options.workflowId).toContain('acme/bbb#12');
+    expect(await readIntakeBreaker(t.db, a.id)).toMatchObject({ state: 'open' });
+    expect(await readIntakeBreaker(t.db, b.id)).toBeNull();
+  });
+
   it('熔断着、冷却完了：只放 1 条试探；试探那条做成了，下一轮恢复——设置表记 closed、撤掉报警、推一条恢复通知', async () => {
-    await seedWorld(t.db);
+    const { repo } = await seedWorld(t.db);
     // 3 小时前进入熔断（报警还开着）
     const openedAt = new Date(NOW.getTime() - 3 * HOURS);
-    await writeIntakeBreaker(t.db, { state: 'open', at: openedAt, by: 'test' });
+    await writeIntakeBreaker(t.db, { state: 'open', at: openedAt, by: 'test' }, repo.id);
     await upsertAlert(t.db, {
-      dedupeKey: 'intake-breaker',
+      dedupeKey: `intake-breaker:${repo.id}`,
       level: 'alert',
       taskId: null,
       title: '停拉',
@@ -984,17 +1023,19 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     });
     const next = fakeClient();
     await runIntakeJob(wire(gh)(next.client, 'fleet'));
-    expect(await readIntakeBreaker(t.db)).toMatchObject({ state: 'closed' });
+    expect(await readIntakeBreaker(t.db, repo.id)).toMatchObject({ state: 'closed' });
     const all = await t.db.select().from(notifications);
-    expect(all.find((a) => a.dedupeKey === 'intake-breaker')?.resolvedAt).not.toBeNull();
-    expect(all.filter((a) => a.dedupeKey.startsWith('intake-breaker:recovered'))).toHaveLength(1);
+    expect(all.find((a) => a.dedupeKey === `intake-breaker:${repo.id}`)?.resolvedAt).not.toBeNull();
+    expect(all.filter((a) => a.dedupeKey.startsWith(`intake-breaker:${repo.id}:recovered`))).toHaveLength(1);
     // 恢复的这一轮照常拉：试探用掉了 #11，没派过的 #12 这一轮起来
     expect(next.starts).toHaveLength(1);
   });
 
   it('【故意造出的失败】熔断状态那一行的值认不出：这一轮记没跑成，一张都不起，不当成正常', async () => {
-    await seedWorld(t.db);
-    await t.db.insert(settings).values({ key: INTAKE_BREAKER_SETTING, value: { state: '半开' } });
+    const { repo } = await seedWorld(t.db);
+    await t.db
+      .insert(settings)
+      .values({ key: `${INTAKE_BREAKER_SETTING}:${repo.id}`, value: { state: '半开' } });
     const { gh } = fakeGh();
     const { client, starts } = fakeClient();
     await expect(runIntakeJob(wire(gh)(client, 'fleet'))).rejects.toThrow(/认不出/);
