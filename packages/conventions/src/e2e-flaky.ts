@@ -203,7 +203,7 @@ function issueSections(s: { scene: string[]; modules: string[]; done: string[] }
 export function brokenRoundBody(urls: readonly string[]): string {
   return issueSections({
     scene: [
-      `近 ${FLAKY_WINDOW} 轮主线 e2e 里有 ${urls.length} 轮整轮坏了：报告里有全局准备/备库的错，或首跑红的用例超过这一轮用例数的一半。这是环境或备库的事，不是哪条用例偶发，这几轮没有计入任何用例的偶发次数。同一时间只开这一张。`,
+      `最近连着 ${urls.length} 轮主线 e2e 整轮坏了：报告里有全局准备/备库的错，或首跑红的用例超过这一轮用例数的一半。这是环境或备库的事，不是哪条用例偶发，这几轮没有计入任何用例的偶发次数。同一时间只开这一张；最新一轮恢复正常时扫描会自动关掉它，再坏会重开。`,
       '',
       '先看这几轮的日志找整轮的根子（备库、起服务、全局准备）：',
       ...urls.map((u) => `- ${u}`),
@@ -219,10 +219,11 @@ export function brokenRoundBody(urls: readonly string[]): string {
   });
 }
 
-/** 一件要做的事：开新单，或给已开着的单留言补新的轮链接，或已有单不用动。 */
+/** 一件要做的事：开新单，或给已开着的单留言补新的轮链接，或留言后关单（整轮坏的已恢复），或已有单不用动。 */
 export type IssueAction =
   | { kind: 'create'; title: string; body: string; labels: string[]; label: string }
   | { kind: 'comment'; number: number; body: string; label: string }
+  | { kind: 'close'; number: number; body: string; label: string }
   | { kind: 'exists'; label: string };
 
 export interface OpenIssue {
@@ -233,8 +234,10 @@ export interface OpenIssue {
 }
 
 /**
- * 近几轮（新的在前）→ 要开/留言的单。先剔整轮坏了的轮：它们只汇成一张固定标题的单（已有开着的就只补没写过的轮链接）；
- * 剩下的轮里首跑红达阈值的用例各开一张偶发单，同标题已有开着的就不重开。
+ * 近几轮（新的在前）→ 要开/留言/关的单。「整轮坏了」只看最新一段：最新一轮是整轮坏的，才开那张固定标题的单
+ * （已有开着的就只补没写过的轮链接），链接只列从最新往回连着坏的几轮；最新一轮是好的就不开，
+ * 已有开着的「整轮坏了」单则留言关掉（再坏会重开）。没有任何一轮时不动（读不到不当成已恢复）。
+ * 整轮坏了的轮不计入偶发；其余轮里首跑红达阈值的用例各开一张偶发单，同标题已有开着的就不重开（判法不变）。
  */
 export function planIssues(
   runs: readonly RunOutcomes[],
@@ -243,9 +246,20 @@ export function planIssues(
   until: string,
 ): IssueAction[] {
   const actions: IssueAction[] = [];
-  const broken = runs.filter(isBrokenRound).map((r) => r.url);
-  if (broken.length > 0) {
-    const existing = open.find((i) => i.title === BROKEN_ROUND_TITLE);
+  const streak = runs.findIndex((r) => !isBrokenRound(r));
+  const broken = (streak === -1 ? runs : runs.slice(0, streak)).map((r) => r.url);
+  const existing = open.find((i) => i.title === BROKEN_ROUND_TITLE);
+  if (broken.length === 0) {
+    const latest = runs[0];
+    if (existing && latest) {
+      actions.push({
+        kind: 'close',
+        number: existing.number,
+        body: `最新一轮 ${latest.url} 已正常，关单；再坏会重开`,
+        label: `关单：${BROKEN_ROUND_TITLE}（#${existing.number}），最新一轮已正常`,
+      });
+    }
+  } else {
     if (!existing) {
       actions.push({
         kind: 'create',

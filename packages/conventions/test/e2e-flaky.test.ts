@@ -131,6 +131,41 @@ describe('先判整轮（#2499）：整轮坏了不算每条用例偶发', () =>
     expect(a?.kind === 'create' && a.body).toContain('- https://ci/run/0\n- https://ci/run/1');
   });
 
+  test('最新一轮好、窗口里更早有整轮坏的轮：不开「整轮坏了」单', () => {
+    const runs = [round(0, 'expected'), round(1, 'unexpected'), round(2, 'unexpected'), round(3, 'expected')];
+    expect(planIssues(runs, [], noQuarantine, '2026-10-22')).toEqual([]);
+  });
+
+  test('最新两轮坏、更早的好：开单，正文只列这两轮；中间隔着好轮的更早坏轮不列', () => {
+    const runs = [
+      round(0, 'unexpected'),
+      round(1, 'unexpected'),
+      round(2, 'expected'),
+      round(3, 'unexpected'),
+    ];
+    const [a] = planIssues(runs, [], noQuarantine, '2026-10-22');
+    expect(a).toMatchObject({ kind: 'create', title: BROKEN_ROUND_TITLE });
+    const body = a?.kind === 'create' ? a.body : '';
+    expect(body).toContain('最近连着 2 轮主线 e2e 整轮坏了');
+    expect(body).toContain('- https://ci/run/0\n- https://ci/run/1');
+    expect(body).not.toContain('https://ci/run/3');
+  });
+
+  test('有开着的「整轮坏了」单、最新一轮好：留言关单；没有任何一轮时不动', () => {
+    const open = [{ number: 7, title: BROKEN_ROUND_TITLE, body: '- https://ci/run/1' }];
+    const runs = [round(0, 'expected'), round(1, 'unexpected')];
+    const actions = planIssues(runs, open, noQuarantine, '2026-10-22');
+    expect(actions).toEqual([
+      {
+        kind: 'close',
+        number: 7,
+        body: '最新一轮 https://ci/run/0 已正常，关单；再坏会重开',
+        label: expect.stringContaining('#7'),
+      },
+    ]);
+    expect(planIssues([], open, noQuarantine, '2026-10-22')).toEqual([]);
+  });
+
   test('某条用例在两轮里各单独红一次、其余全绿：照旧开它的单', () => {
     const runs = [
       round(0, 'expected', { 甲: 'unexpected' }),

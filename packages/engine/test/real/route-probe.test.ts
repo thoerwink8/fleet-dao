@@ -485,13 +485,29 @@ describe('身份题（#1798 片 5）', () => {
     expect(await identityAlert()).toBeUndefined();
   });
 
-  it('没有第一行 pong：回答认不出，不推身份提醒', async () => {
+  it('没有单独一行 pong：回答认不出，不推身份提醒', async () => {
     const s = setup(() => ({ result: { text: '答案：高市早苗' } }), { identity: true });
     await s.round();
     const down = await row('carpool');
     expect(down?.probeDetail).toContain('回答认不出');
     expect(down?.probeDetail).not.toContain('疑似换成旧模型');
     expect(await identityAlert()).toBeUndefined();
+  });
+
+  it('身份题先写说明再单独一行 pong：认得出，不当成回答认不出', async () => {
+    const s = setup(
+      () => ({
+        result: {
+          text: '我先核实现任人选。\n参考 https://example.com/pm\npong\n答案：高市早苗\n模型：gpt-6-sol',
+        },
+      }),
+      { identity: true },
+    );
+    await s.round();
+    const up = await row('carpool');
+    expect(up).toMatchObject({ alive: true, probeState: 'ok', probeFailStreak: 0 });
+    expect(up?.probeDetail).toContain('身份题通过');
+    expect(up?.probeDetail).not.toContain('回答认不出');
   });
 
   it('额度用满被拒：照旧算通，没有身份题记录', async () => {
@@ -527,19 +543,30 @@ describe('没探通的：离线，写明是哪一种（不许拿默认值、上�
       await s.round();
       const down = await row('carpool');
       expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-      expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 pong）');
+      expect(down?.probeDetail).toContain('回答认不出（要的是单独一行 pong）');
       expect(down?.probeDetail).toContain(reply);
     },
   );
 
-  it.each(['pong', 'PONG', '  pong\n', '```\npong\n```', '**pong**'])(
-    '回答「%s」（第一行整行是 pong；粗体、代码块围栏都认）：探通',
+  it.each(['pong', 'PONG', '  pong\n', '```\npong\n```', '**pong**', '好的，这是连通性测试。\npong'])(
+    '回答「%s」（有一行整行是 pong；前面夹说明、粗体、代码块围栏都认）：探通',
     async (reply) => {
       const s = setup(() => ({ result: { text: reply } }));
       await s.round();
       expect(await row('carpool')).toMatchObject({ alive: true, probeState: 'ok' });
     },
   );
+
+  it('全文没有单独一行 pong：记失败、连着不通的次数逐轮累加（退避照旧）', async () => {
+    const s = setup(() => ({ result: { text: '我先核实一下现任人选。\n参考：https://example.com/pm' } }));
+    await s.round();
+    expect(await row('carpool')).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 1 });
+    s.advance(24 * 60);
+    await s.round();
+    const down = await row('carpool');
+    expect(down).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 2 });
+    expect(down?.probeDetail).toContain('回答认不出（要的是单独一行 pong）');
+  });
 
   // 超时三种（插头强杀）：迟迟没有第一帧（reclaude 卡在同步配置上）、总时长到顶、长时间没动静。都不是要人修的整池问题：
   // 隔一会儿同一轮再探一次，还不通才离线，原因写明是哪种超时和执行体最后说的话；不写「整池暂停」。
@@ -815,7 +842,7 @@ describe('cursor-agent 的路由（#212）：和干活的会话同一个驱动�
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 pong）');
+    expect(down?.probeDetail).toContain('回答认不出（要的是单独一行 pong）');
   });
 });
 
@@ -978,7 +1005,7 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain('回答认不出（要的是第一行只写 pong）');
+    expect(down?.probeDetail).toContain('回答认不出（要的是单独一行 pong）');
   });
 });
 
