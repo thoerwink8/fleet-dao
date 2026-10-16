@@ -1410,6 +1410,8 @@ readback_dirs() {
       bad=1
     fi
   done
+  # _tmp 归引擎用户：冷验收要在这下面 mkdir。只核对，不改权限。
+  readback_work_tmp || bad=1
   if ((bad == 0)); then ok "目录与配置文件的属主、权限都对"; fi
 }
 
