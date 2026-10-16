@@ -12,7 +12,9 @@
 // - 在跑的任务数查 Temporal 的可见性（WorkflowType 加 ExecutionStatus），读不到就让这一轮记没跑成：不拿 0 顶。
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { promisify } from 'node:util';
 import { LOCAL_LABEL, type StandardPath } from '@fleet-dao/conventions';
 import {
   type Db,
@@ -54,6 +56,34 @@ import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
+
+const execFileAsync = promisify(execFile);
+/**
+ * 法国装机的固定位置，不跟引擎进程当时的 PATH 走：CI 的 pnpm 在动作装出来的目录里，
+ * 不能据此说法国装好了。Go 官方包在 /usr/local/go/bin，期望里的入口是 /usr/local/bin/go。
+ * 真装配的测试要换掉 toolchainReady，别拿这台机器有没有 pnpm 决定拉不拉单。
+ */
+const TOOLCHAIN_PATH = '/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin';
+
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function missingToolchain(repo: IntakeRepo): Promise<readonly string[]> {
+  const tools = parseRepoProfile(repo.profile).toolchain;
+  if (tools.length === 0) return [];
+  const script = `for tool in ${tools.map(shQuote).join(' ')}; do command -v "$tool" >/dev/null 2>&1 || printf '%s\\n' "$tool"; done`;
+  try {
+    const { stdout } = await execFileAsync('/bin/sh', ['-c', script], {
+      env: { ...process.env, PATH: TOOLCHAIN_PATH },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    return stdout.trim() === '' ? [] : stdout.trim().split(/\s+/);
+  } catch (error) {
+    throw new Error(`检查工具链起不来：${errMessage(error)}`);
+  }
+}
 
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
 export type IntakeGitHub = Pick<
@@ -112,6 +142,8 @@ export interface IntakeWiring {
   startTimeoutMs?: number;
   /** 测试用：换掉「合并闸认冷验收了没有」（jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。 */
   gateLive?: boolean;
+  /** 测试用：替换法国本机的工具链探测。 */
+  toolchainReady?: IntakeDeps['toolchainReady'];
 }
 
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -141,11 +173,12 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           owner: r.owner,
           name: r.name,
           defaultBranch: r.defaultBranch,
+          profile: r.profile,
           testCommand: r.testCommand,
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
-          profile: r.profile,
         }));
       },
+      toolchainReady: w.toolchainReady ?? missingToolchain,
       standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
       profileAlert: ({ repo, why }) => reportIntakeProfile(w.db, repo, why),
@@ -372,6 +405,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
             name: repo.name,
             defaultBranch: repo.defaultBranch,
             testCommand: repo.testCommand,
+            ...(repo.profile === undefined ? {} : { profile: parseRepoProfile(repo.profile) }),
           },
           issueNumber,
           title,
