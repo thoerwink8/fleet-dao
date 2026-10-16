@@ -1,6 +1,7 @@
 // 主页三块（决定 0093）：要你拍的、在跑的、上线了的，按重要度从上到下，一件事一行。数据怎么挑写在 today.ts 文件头。
 // - 要你拍的：一行写事、要定什么、推荐哪个、为什么，选项就是按钮，点一下就是拍板（和通知中心同一个接口）；
-//   看门狗的卡没有选项，给「处理」和「看看」。看远程环境时只读：按钮置灰、写去那台上答。
+//   看门狗的卡没有选项，也不给「处理」（报警自己修、自己撤）：一行写谁在修、修了多久、开了多久，右边只留「看看」。
+//   看远程环境时只读：按钮置灰、写去那台上答。
 // - 在跑的：法国引擎的单和本机会话混在一起排，卡着的、等你的在前；一行写事、谁在做、进度、卡没卡。
 // - 上线了的：最近 5 次切到法国的提交，一行一句改了什么，带上同一版还带的 PR。
 import { ArrowRight, CheckCheck, CirclePlay, Rocket } from 'lucide-react';
@@ -14,7 +15,6 @@ import {
   useFranceReleasedCommits,
   useLocalSessions,
   useNotifications,
-  useResolveNotification,
 } from '../../api/client';
 import type { Notification } from '../../api/types';
 import { decisionToast } from '../../lib/decision-result';
@@ -38,6 +38,7 @@ import {
   type ShippedRow,
   shippedRows,
   sortRunRows,
+  watchdogRepair,
 } from './today';
 import type { HomeDecision, HomeDone, HomeRunning } from './types';
 
@@ -61,17 +62,16 @@ function AskRow({
   item,
   now,
   answering,
-  resolving,
+  handlingProblem,
   onAnswer,
-  onResolve,
 }: {
   item: AskItem;
   now: number;
   /** 正在答的那一条和点的哪一项。 */
   answering: { id: string; optionId: string } | undefined;
-  resolving: string | undefined;
+  /** 这一页谁在修没算成：为什么。有了也不拿「还没人接」顶。 */
+  handlingProblem: string | undefined;
   onAnswer: (n: Notification, optionId: string) => void;
-  onResolve: (n: Notification) => void;
 }) {
   const { n, kind } = item;
   const { question, pick, why } = askLine(n);
@@ -79,6 +79,7 @@ function AskRow({
   const busy = answering?.id === n.id;
   const recommendation = pick ? `推荐：${pick}。${why ?? ''}` : null;
   const failed = n.answer?.execution?.ok === false ? n.answer.execution.text : null;
+  const repair = kind === 'watchdog' ? watchdogRepair(n, now, handlingProblem) : null;
   return (
     <li className={rowCls} data-ask-row={kind}>
       <div className="min-w-0 flex-1">
@@ -113,6 +114,22 @@ function AskRow({
             {NO_OPTIONS_TEXT}
           </p>
         ) : null}
+        {repair ? (
+          <p
+            className="mt-0.5 truncate text-meta text-muted-foreground"
+            title={repair.title}
+            data-ask-repair={repair.state}
+          >
+            {repair.who ? (
+              <>
+                <span className="font-medium text-foreground">{repair.who}</span>
+                {repair.text.slice(repair.who.length)}
+              </>
+            ) : (
+              repair.text
+            )}
+          </p>
+        ) : null}
         {failed ? (
           // 拍了但系统没做成（#2353）：原因写在这里，再点一次选项就是再拍
           <p className="mt-0.5 truncate text-meta text-ink-fail" title={failed} data-ask-failed>
@@ -145,24 +162,12 @@ function AskRow({
           </Button>
         ) : null}
         {kind === 'watchdog' ? (
-          <>
-            <Button
-              size="sm"
-              variant="outline"
-              loading={resolving === n.id}
-              loadingText="处理中"
-              onClick={() => onResolve(n)}
-            >
-              <CheckCheck aria-hidden />
-              处理
-            </Button>
-            <Button asChild size="sm" variant="ghost">
-              <Link to={n.link ?? '/notifications'}>
-                看看
-                <ArrowRight aria-hidden />
-              </Link>
-            </Button>
-          </>
+          <Button asChild size="sm" variant="ghost">
+            <Link to={n.link ?? '/notifications'}>
+              看看
+              <ArrowRight aria-hidden />
+            </Link>
+          </Button>
         ) : null}
       </div>
     </li>
@@ -174,7 +179,6 @@ export function AskBlock() {
   const now = useNow();
   const q = useNotifications('open');
   const answer = useAnswerNotification();
-  const resolve = useResolveNotification();
   const items = q.data ? askItems(q.data.items) : [];
   const onAnswer = (n: Notification, optionId: string) =>
     answer.mutate(
@@ -188,11 +192,6 @@ export function AskBlock() {
         onError: (e) => toast.error('没记下', { description: errorText(e) }),
       },
     );
-  const onResolve = (n: Notification) =>
-    resolve.mutate(n.id, {
-      onSuccess: () => toast.success('处理了', { description: n.title }),
-      onError: (e) => toast.error('没处理成', { description: errorText(e) }),
-    });
   const answering =
     answer.isPending && answer.variables && 'optionId' in answer.variables.body
       ? { id: answer.variables.id, optionId: String(answer.variables.body.optionId) }
@@ -227,9 +226,8 @@ export function AskBlock() {
               item={it}
               now={now}
               answering={answering}
-              resolving={resolve.isPending ? resolve.variables : undefined}
+              handlingProblem={q.data.handlingProblem}
               onAnswer={onAnswer}
-              onResolve={onResolve}
             />
           ))}
         </List>
