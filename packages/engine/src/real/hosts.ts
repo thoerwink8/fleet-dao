@@ -253,7 +253,7 @@ export interface HostRunHooks {
   /** 会话过程记录（#1640，adapters 的 TranscriptEntry）：按流里出现的先后一条一条给。只记账，抛了也不影响会话。 */
   onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
   onSpawn?: (info: SpawnInfo) => unknown;
-  /** 执行体报出自己的会话号（cursor 的 init 帧）。同步调，别抛。 */
+  /** 流里确认了真会话号时调用（Claude/Cursor 的 init、Mirasim 的 accepted）。同步调，别抛。 */
   onSessionId?: (id: string) => void;
 }
 
@@ -283,6 +283,8 @@ export interface HostReport {
   usageWhy?: string;
   /** 只有 Claude 报：会话累计花费（续会话含前几轮）、会话结束时的上下文大小。 */
   sessionCostUsd?: number;
+  /** 这一轮执行体报告的折算花费（例如 Grok 终帧 total_cost_usd）；没有就不带，不拿 0 顶。 */
+  costUsd?: number;
   /** 实际回话的模型：Claude 流里的、grok 终帧 modelUsage 的键（grok-4.7-build）；cursor 没有。 */
   actualModel?: string;
   contextTokens?: number;
@@ -423,7 +425,7 @@ function defined<K extends string, V>(key: K, value: V | null | undefined): Part
   return value === undefined || value === null ? {} : ({ [key]: value } as Record<K, V>);
 }
 
-/** 插头的公共回调（onSessionId 另给：只有 cursor 的插头认它）。不给的不带，不传 undefined 进去。 */
+/** 插头的公共回调（会话号由 Claude/Cursor 的流确认）。不给的不带，不传 undefined 进去。 */
 function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOptions {
   return {
     command,
@@ -435,6 +437,7 @@ function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOption
     ...(hooks.onRateLimit ? { onRateLimit: hooks.onRateLimit } : {}),
     ...(hooks.onTranscript ? { onTranscript: hooks.onTranscript } : {}),
     ...(hooks.onSpawn ? { onSpawn: hooks.onSpawn } : {}),
+    ...(hooks.onSessionId ? { onSessionId: hooks.onSessionId } : {}),
   };
 }
 
@@ -500,7 +503,9 @@ export function claudeReport(report: ClaudeCodeRunReport): HostReport {
     facts: claudeRunFacts(report),
     ...defined('sessionId', report.stream.sessionId),
     ...claudeUsage(report.stream),
-    ...defined('sessionCostUsd', r?.sessionCostUsd),
+    ...(report.session.mode === 'resume' || report.session.mode === 'fork'
+      ? {}
+      : defined('costUsd', r?.sessionCostUsd)),
     ...defined('actualModel', report.stream.observedModel),
     ...defined('contextTokens', report.stream.lastContextTokens),
     ...defined('resetsAt', resetsAt),
@@ -818,14 +823,19 @@ export function grokReport(report: GrokRunReport): HostReport {
  * grok 这一轮的用量：有终帧照终帧；没走到终帧（被叫停、超时杀）按过程里每次模型调用的 usage 帧加起来（真跑记录里逐帧加和
  * 终帧四样一个不差），最后一次没跑完的调用不在里面；一帧 usage 都没有就读不到。
  */
-function grokUsage(s: GrokRunReport['stream']): Pick<HostReport, 'usage' | 'usageWhy'> {
+function grokUsage(s: GrokRunReport['stream']): Pick<HostReport, 'usage' | 'usageWhy' | 'costUsd'> {
   const pick = (u: GrokRunReport['stream']['callUsage']): HostUsage => ({
     ...defined('inputTokens', u?.inputTokens),
     ...defined('outputTokens', u?.outputTokens),
     ...defined('cacheReadTokens', u?.cacheReadTokens),
     ...defined('cacheWriteTokens', u?.cacheWriteTokens),
   });
-  if (s.end?.usage) return { usage: pick(s.end.usage) };
+  if (s.end)
+    return {
+      usage: pick(s.end.usage),
+      ...(s.end.usage ? {} : { usageWhy: USAGE_UNREAD.grok }),
+      ...defined('costUsd', s.end.costUsd),
+    };
   if (!s.callUsage) return { usage: {}, usageWhy: USAGE_UNREAD.grok };
   return {
     usage: pick(s.callUsage),

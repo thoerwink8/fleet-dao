@@ -172,10 +172,69 @@ export async function finishRun(
   }
 }
 
+/** 流里提前拿到真会话号时先写回；已经收场的行不改，避免把晚到的临时号盖进账本。 */
+export async function observeRunSessionId(
+  db: Db,
+  input: { runId: string; sessionId: string },
+): Promise<boolean> {
+  const sessionId = input.sessionId.trim();
+  if (!sessionId) throw new RunInputError('会话号是空的');
+  try {
+    const rows = await db
+      .update(runs)
+      .set({ sessionId, updatedAt: new Date() })
+      .where(and(eq(runs.id, input.runId), isNull(runs.endedAt), isNull(runs.sessionId)))
+      .returning({ id: runs.id });
+    return rows.length > 0;
+  } catch (error) {
+    const message = errMessage(error);
+    throw new RunInputError(`提前写入 runs 会话号失败：${message}`, { cause: error });
+  }
+}
+
 /** 查一段。不给 id 就查不到。 */
 export async function getRun(db: Db, id: string): Promise<RunRow | null> {
   const [row] = await db.select().from(runs).where(eq(runs.id, id)).limit(1);
   return row ?? null;
+}
+
+export interface RunSessionIdStat {
+  /** 路由没有执行方式时归到 unknown。 */
+  hostId: string;
+  endedRuns: number;
+  missingSessionIds: number;
+}
+
+/**
+ * 按执行方式数一段时间内已结束的 runs，以及其中没有会话号的笔数。
+ * 左连路由是为了不把旧的无路由记录悄悄漏掉；这类归 unknown。
+ */
+export async function runSessionIdStats(
+  db: Db,
+  input: { endedAfter: Date; endedBefore?: Date },
+): Promise<RunSessionIdStat[]> {
+  const rows = await db
+    .select({
+      hostId: routes.hostId,
+      endedRuns: sql<string>`count(*)`,
+      missingSessionIds: sql<string>`count(*) filter (where ${runs.sessionId} is null)`,
+    })
+    .from(runs)
+    .leftJoin(routes, eq(routes.id, runs.routeId))
+    .where(
+      and(
+        isNotNull(runs.endedAt),
+        gte(runs.endedAt, input.endedAfter),
+        ...(input.endedBefore ? [sql`${runs.endedAt} < ${input.endedBefore}`] : []),
+      ),
+    )
+    .groupBy(routes.hostId)
+    .orderBy(asc(routes.hostId));
+  return rows.map((row) => ({
+    hostId: row.hostId ?? 'unknown',
+    endedRuns: Number(row.endedRuns),
+    missingSessionIds: Number(row.missingSessionIds),
+  }));
 }
 
 /**
