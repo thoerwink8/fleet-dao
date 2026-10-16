@@ -2,6 +2,7 @@
 // 这里是工作流代码，会被重放：别加随机数、Date、Node 自带模块（test/structure.test.ts 会拦）。
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
+import { classifyFailure } from '../failure/classify.ts';
 import type { RoundOutcome, RouteChoice } from '../ports.ts';
 import {
   type AbandonCommand,
@@ -304,6 +305,83 @@ export const NO_OTHER_FAMILY = '没有别的模型族可换，只避开模型';
 
 /** 避让之后一条别的路由都没有：不死等，照旧派原来的。写进 lastProblem，驾驶舱看得见。 */
 export const NO_OTHER_ROUTE = '没有别的路由可换';
+
+/**
+ * 避开登录失效、封号、设备被撤销的池之后，一条能派的路由都没有（patched('auth-reroute')）。
+ * 驾驶舱「停下等人」读这一句。
+ */
+export const POOLS_ALL_HELD = '能派的池都停了';
+
+/** 只凭 HTTP 401：同一个池在这段时间里再来一次才暂停整池。10 分钟盖得住一次抖动，盖不住真登出。 */
+export const BARE_401_WINDOW_MS = 10 * 60 * 1000;
+
+/** 这个池上一次只凭 401 的时刻还在窗口里。没记过、或已经过了窗口，都不算第二次。 */
+export function bare401Repeats(previousAtMs: number | undefined, nowMs: number): boolean {
+  if (previousAtMs === undefined || !Number.isFinite(previousAtMs) || !Number.isFinite(nowMs)) return false;
+  const age = nowMs - previousAtMs;
+  return age >= 0 && age <= BARE_401_WINDOW_MS;
+}
+
+/**
+ * 一个池上「只凭 401」的共享记号（设置表 engine.bare401，所有任务一起看）。
+ * claim 是这一次记下的身份：活动重试带同一个 claim，仍算同一次，不会把自己数成第二次。
+ */
+export interface Bare401Stamp {
+  at: string;
+  claim: string;
+  repeated: boolean;
+}
+
+/**
+ * 记下这一次只凭 401。同一个 claim 再来（活动重试）原样交回；别的 claim 落在窗口里就是第二次。
+ * 过了窗口、或还没有记号，这一次算第一次，时刻改成现在。
+ */
+export function nextBare401Stamp(
+  existing: Bare401Stamp | undefined,
+  input: { now: string; claim: string },
+): { stamp: Bare401Stamp; repeated: boolean } {
+  if (existing && existing.claim === input.claim) return { stamp: existing, repeated: existing.repeated };
+  const nowMs = Date.parse(input.now);
+  const prevMs = existing === undefined ? undefined : Date.parse(existing.at);
+  if (existing && bare401Repeats(prevMs, nowMs)) {
+    const stamp: Bare401Stamp = { at: existing.at, claim: input.claim, repeated: true };
+    return { stamp, repeated: true };
+  }
+  const stamp: Bare401Stamp = { at: input.now, claim: input.claim, repeated: false };
+  return { stamp, repeated: false };
+}
+
+/**
+ * 这次失败是不是「只凭 HTTP 401」（还没算是不是第二次）。明确的登录失效、封号不算。
+ * 工作流用它决定要不要去读共享记号；真正算不算第二次仍交给失败分流。
+ */
+export function failureLooksLikeBare401(input: {
+  code: string;
+  message: string;
+  httpStatus?: number;
+}): boolean {
+  const verdict = classifyFailure({
+    source: 'session:execute',
+    routeBound: true,
+    code: input.code,
+    message: input.message,
+    retryable: null,
+    ...(input.httpStatus !== undefined ? { httpStatus: input.httpStatus } : {}),
+  });
+  return verdict.authReroute === 'route';
+}
+
+/** 整池暂停提醒的标题后半句。和规则表的白话名同一句；认不出的规则按登录失效写。 */
+export function poolAuthHoldTitle(rule: string | undefined): string {
+  if (rule === 'AU1') return '账号被封';
+  if (rule === 'DV1') return '这台机器的 reclaude 登录被撤销';
+  return '登录失效';
+}
+
+/** 和 real/pool-holds.ts 的 poolHoldKey 同一个键：选路见了没处理的这条就整池避开。 */
+export function poolHoldDedupeKey(poolId: string): string {
+  return `pool-hold:${poolId}`;
+}
 
 /** 整族避开之后剩下的都在等额度或空位：放掉整族避让再选。写进 lastProblem，驾驶舱看得见。 */
 export const RELEASE_FAMILY_WAIT = '剩下的路由在等额度或空位，先放掉整族避让再选';

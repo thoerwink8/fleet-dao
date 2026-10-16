@@ -5,8 +5,9 @@
 import { count, nonNegative, resolvePolicy } from './policy.ts';
 
 /**
- * 下一步动作。名字和引擎兜底梯一样，可以直接接。分流自己只给 retry 和 park；换模型由路由熔断和人去做。
- * 正常分流不再换路由；swapRoute 只剩分流出错时的兜底梯，以及历史里已经记下的判断。
+ * 下一步动作。名字和引擎兜底梯一样，可以直接接。分流自己给 retry 和 park；换模型由路由熔断和人去做。
+ * 正常分流不再换路由，除了出在账号池上的停（登录失效、封号、设备被撤销）：那一档给 swapRoute，单回去选路，
+ * 池照旧暂停。swapRoute 其余只剩分流出错时的兜底梯，以及历史里已经记下的判断。
  */
 export type FailureAction = 'retry' | 'swapRoute' | 'swapModel' | 'park';
 
@@ -64,6 +65,11 @@ export interface FailureEvidence {
   attempts?: Partial<AttemptCounters>;
   /** 这一步上一次失败的原文。一字不差再犯 = 重试不会变，不在原路再试（windsurf-dao#1237）。 */
   previousMessage?: string;
+  /**
+   * 这个账号池在短时间里已经出现过一次只凭 HTTP 401 的失败（工作流传进来）。
+   * 不给 = 没有。只有「只凭 401」才看它：第二次才整池暂停。明确的登录失效、封号、设备被撤销不看它。
+   */
+  priorBare401?: true;
 }
 
 /** 所有任务一起避开的范围（路由探针把整池暂停用它）。 */
@@ -101,6 +107,13 @@ export interface FailureVerdict {
   wait?: 'quota' | 'upstream';
   /** 整池暂停：同一个池的别的任务也不该再派过去（挂起的也要给——设备被撤销时这个任务挂起，同一个池的别的任务也不该再派）。 */
   shared?: Avoid;
+  /**
+   * 出在账号池上，这张单不挂起，回去选路。
+   * pool = 整池暂停（shared 照旧）并报警，避开这个池；
+   * route = 只凭一次 HTTP 401，按临时失败换一条路由，不暂停整池。
+   * 缺 = 按 action 办（不绑路由的登录失效、以及别的 stop，仍是 park）。
+   */
+  authReroute?: 'pool' | 'route';
   /** 只有人能修、修法确定时给：写给人看的一句（填好了机器、会话用户）。 */
   humanFix?: string;
   /** 这一步之后（等完、或挂起后人点「继续」）续同一个会话、同一条路由；false = 下一次照常选路。 */

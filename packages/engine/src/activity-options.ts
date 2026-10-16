@@ -19,6 +19,8 @@ import {
   type MergeNowInput,
   type MergeNowResult,
   type MergeWait,
+  type NoteBare401Input,
+  type NoteBare401Result,
   type PlanSegmentResumeInput,
   type PlanSegmentResumeResult,
   type ProbeAssignedInput,
@@ -74,6 +76,10 @@ export type EngineActivities = PortActivities & {
   selfCheck(input: SelfCheckInput): Promise<SelfCheckResult>;
   /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
   taskSpend(input: TaskSpendInput): Promise<TaskSpendResult>;
+  /**
+   * 只凭 HTTP 401：记下这个池这一次，并回答短时间里是不是已经有过一次（所有任务共用，不单记在这张单里）。
+   */
+  noteBare401(input: NoteBare401Input): Promise<NoteBare401Result>;
   /** 定这张单走三段还是全程（#2826）：第一次选路之后、第一段动手之前问一次。读不到抛，工作流按三段走。 */
   decideFlowMode(input: DecideFlowModeInput): Promise<DecideFlowModeResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
@@ -126,6 +132,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   segmentSettled: 'quick',
   selfCheck: 'setup',
   taskSpend: 'quick',
+  noteBare401: 'quick',
   decideFlowMode: 'git',
 };
 

@@ -250,7 +250,8 @@ function refuseLines(local: LocalRun): string[] {
  * 跑不跑、跑什么。只在「判出要全跑、没带 --all、没带 --affected、不在 CI、不是引擎会话」时拒跑：写明原因、全量交给 CI、
  * 留给 CI 的那些、真要全跑怎么说，退出码 REFUSED_FULL_RUN（不再打单跑对应包的命令，#1066）。
  * 带 --all 就全跑（明说了要）。带 --affected 时不拒，改跑受影响的包（要全跑时先跑的那份，local.paths）：
- * 引擎自测看到退出码 3 之后用这个，不把测试整段推给 CI。CI 里、引擎会话里仍全跑，--affected 改不了那两条。
+ * 引擎自测用它在测试锁下跑受影响的包，不把测试整段推给 CI；显式 --affected 覆盖引擎会话标记。
+ * CI 仍全跑，--affected 不改 CI 的全量规则。
  */
 export function decideRun(input: {
   selection: TestSelection;
@@ -263,19 +264,19 @@ export function decideRun(input: {
   if (input.all) return { kind: 'run', args: ['run'], note: '带了 --all：本机全跑' };
   if (selection.kind === 'some') return { kind: 'run', args: vitestArgs(selection) };
   if (inCi(env)) return { kind: 'run', args: ['run'], note: '在 CI 里：全跑' };
-  if (env[ENGINE_SESSION_MARKER]?.trim()) {
-    return {
-      kind: 'run',
-      args: ['run'],
-      note: '引擎起的会话：照旧全跑（交活只认它；会话有内存上限，测试进程数按上限算）',
-    };
-  }
   if (input.affected && selection.local.paths.length > 0) {
     const paths = selection.local.paths;
     return {
       kind: 'run',
       args: ['run', ...paths],
       note: `要全跑，本机改跑受影响的包：${paths.join(' ')}`,
+    };
+  }
+  if (env[ENGINE_SESSION_MARKER]?.trim()) {
+    return {
+      kind: 'run',
+      args: ['run'],
+      note: '引擎起的会话：照旧全跑（交活只认它；会话有内存上限，测试进程数按上限算）',
     };
   }
   return { kind: 'refuse', code: REFUSED_FULL_RUN, lines: refuseLines(selection.local) };

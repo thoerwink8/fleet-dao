@@ -46,6 +46,8 @@ import type {
   MergeNowInput,
   MergeNowResult,
   MergeWait,
+  NoteBare401Input,
+  NoteBare401Result,
   PlanSegmentResumeInput,
   PlanSegmentResumeResult,
   ProbeAssignedInput,
@@ -275,6 +277,8 @@ export interface EngineTasks {
   selfCheck?: (input: SelfCheckInput, ctx: PortContext) => Promise<SelfCheckResult>;
   /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
   taskSpend?: (input: TaskSpendInput, ctx: PortContext) => Promise<TaskSpendResult>;
+  /** 只凭 HTTP 401 的共享记号：所有任务一起数，短时间里第二次才停池。 */
+  noteBare401?: (input: NoteBare401Input, ctx: PortContext) => Promise<NoteBare401Result>;
   /** 定这张单走三段还是全程（#2826，flow-mode.ts）：读标签、开关、仓档案，写一次分组记录。读不到抛。 */
   decideFlowMode?: (input: DecideFlowModeInput, ctx: PortContext) => Promise<DecideFlowModeResult>;
 }
@@ -294,6 +298,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   segmentSettled: true,
   selfCheck: true,
   taskSpend: true,
+  noteBare401: true,
   decideFlowMode: true,
 };
 export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
