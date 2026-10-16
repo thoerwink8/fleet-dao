@@ -131,6 +131,8 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'web'] as const;
  */
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
+  // conventions/test/subagent-stats.test.ts 用 agents/hooks/subagent-ledger.mjs 读写收回策略文件（subagent:stats --enforce 和钩子是同一份）
+  conventions: ['agents/hooks/subagent-ledger.mjs'],
   db: ['adapters', 'core'],
   [AGENTS_UNIT]: ['db', 'agents-sync', 'packages/conventions/standard-paths.json'],
 };
