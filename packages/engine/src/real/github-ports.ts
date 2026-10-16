@@ -1,5 +1,5 @@
 // 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；PR 不抄单子的类别标签、
-// 里程碑，#654）、等 CI、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
+// 里程碑，#654）、第 2 轮起改 PR 正文（#2723）、等 CI、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
 // 并不上才停下留言）、关单，以及建树（记下主线的头；树等起会话时由会话
 // 自己建，见 sessions.ts）、收树（先存档没提交的改动）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
@@ -110,7 +110,14 @@ async function withHeartbeat<T>(ctx: PortContext, everyMs: number, fn: () => Pro
 
 type GitHubPorts = Pick<
   EnginePorts,
-  'createWorktree' | 'removeWorktree' | 'pushBranch' | 'openPr' | 'waitCi' | 'syncMainline' | 'closeIssue'
+  | 'createWorktree'
+  | 'removeWorktree'
+  | 'pushBranch'
+  | 'openPr'
+  | 'updatePrBody'
+  | 'waitCi'
+  | 'syncMainline'
+  | 'closeIssue'
 >;
 
 /** 重做的新一代取代上一代留下的 PR：先留一句评论，再关掉。评论按代幂等，重试不会写第二遍。 */
@@ -690,6 +697,11 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         ),
       );
       return { prNumber: r.number, url: r.url };
+    },
+
+    async updatePrBody(input) {
+      // 第 2 轮起「做了什么」换成这一轮会话的回复（#2723）：和开 PR 同一份结构、同一个模板，用「引擎」机器人改
+      await mapped(() => gh.claims.updatePullBody(input.repo, input.prNumber, prBody(input.body)));
     },
 
     async waitCi(input, ctx) {

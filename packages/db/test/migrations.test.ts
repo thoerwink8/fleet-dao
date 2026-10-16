@@ -1371,3 +1371,61 @@ describe('0076：删掉从没开过、没跑过、没被引用的路由', () => 
     TEST_DB_TIMEOUT_MS,
   );
 });
+
+describe('0080、0081：repos 加 GitHub 仓号和仓档案，fleet-dao 回填（#2738）', () => {
+  it(
+    '老行档案是空对象、仓号空；只有 fleet-dao 回填模块根和合并要等的检查，写过的键不覆盖；仓号唯一可空；再跑一遍不变',
+    async () => {
+      const addCols = ordered.findIndex((e) => e.tag === '0080_cold_beyonder');
+      const backfill = '0081_repos_profile_backfill';
+      expect(ordered[addCols + 1]?.tag).toBe(backfill);
+      const pg = await migratedBefore(addCols);
+      try {
+        await pg.exec(`
+          insert into repos (owner, name, test_command) values
+            ('thoerwink8', 'fleet-dao', 'pnpm check'),
+            ('thoerwink8', 'fluxwatch', 'pnpm check'),
+            ('thoerwink8', 'fleet-dao-canary', 'pnpm check');
+        `);
+        await runMigration(pg, '0080_cold_beyonder');
+        await runMigration(pg, backfill);
+        const rows = async () =>
+          new Map(
+            (
+              await pg.query<{ name: string; github_id: string | null; profile: unknown }>(
+                `select name, github_id, profile from repos`,
+              )
+            ).rows.map((r) => [r.name, r]),
+          );
+        const once = await rows();
+        expect(once.get('fleet-dao')).toEqual({
+          name: 'fleet-dao',
+          github_id: null,
+          profile: { moduleRoots: ['packages/*'], mergeSignals: ['merge-gate', 'cold-verify'] },
+        });
+        expect(once.get('fluxwatch')).toEqual({ name: 'fluxwatch', github_id: null, profile: {} });
+        expect(once.get('fleet-dao-canary')?.profile).toEqual({});
+
+        // 已经写过的键不覆盖，没写的补上
+        await pg.exec(
+          `update repos set profile = '{"mergeSignals": ["ci"], "language": "typescript"}' where name = 'fleet-dao'`,
+        );
+        await runMigration(pg, backfill);
+        expect((await rows()).get('fleet-dao')?.profile).toEqual({
+          moduleRoots: ['packages/*'],
+          mergeSignals: ['ci'],
+          language: 'typescript',
+        });
+
+        // 仓号：可空、多行空不冲突，同一个号只能一行
+        await pg.exec(`update repos set github_id = 1418484822 where name = 'fluxwatch'`);
+        await expect(
+          pg.exec(`update repos set github_id = 1418484822 where name = 'fleet-dao'`),
+        ).rejects.toThrow(/repos_github_id_unique/);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});

@@ -212,6 +212,8 @@ export async function writeSession(
         rt.lastImplementRoute = route;
         const resumed = resumeSessionId !== undefined;
         rt.lastSession = { runId: res.runId, worktreePath: wt.path, resumed };
+        // 最后一条回复进 PR 说明（#2723）：纯状态，不多调活动。老版活动回的可能没带，当没有
+        rt.lastAnswer = typeof res.answer === 'string' ? res.answer : null;
         rt.resumeStreak = resumed ? rt.resumeStreak + 1 : 0;
         return;
       }

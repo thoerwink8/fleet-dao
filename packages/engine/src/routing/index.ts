@@ -1,6 +1,14 @@
 // 选路（设计 §九）：纯函数，引擎的 pickRoute 端口从库里取齐输入后调 chooseRoute。
 export { chooseRoute, stageAllOpen } from './choose.ts';
 export { familyAvoidIsRetry, hostUnfit } from './filter.ts';
+export {
+  applyFloor,
+  FLOOR_SOON_MS,
+  type FloorDecision,
+  type FloorRow,
+  floorOf,
+  STRENGTH_FLOOR,
+} from './floor.ts';
 export { HOST_NAMES, hostName, ORG_NAMES, routeLabel, STAGE_NAMES } from './names.ts';
 export {
   ABILITY_NAMES,

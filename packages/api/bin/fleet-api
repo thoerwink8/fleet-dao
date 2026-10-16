@@ -10,6 +10,8 @@
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api daily-brief [--as-today]   手动跑一次每日简报（推飞书、#1055 评论）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api attention --json   只读：现在要人看的事一份结论（healthz、该推的通知、推送不通、简报没到），指挥官巡检读它
 #   bash /srv/fleet-dao-releases/<版本>/packages/api/bin/fleet-api release pause|continue …   发版切版本前后暂停、继续手上有会话的任务（release.sh 调，名单走标准输出、标准输入）
+#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api project show <owner/仓名>   只读：仓号和仓档案（JSON）
+#   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api project set-profile <owner/仓名> --file <json 文件|->   整份换掉仓档案（- 读标准输入）
 #   bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api seat|claim …   帅位只一个（#299）：本机经 ssh 调，写法见 seat --help
 # 换成 fleet 身份、带上 fleet-api.service 同一份 /etc/fleet-dao/api.env（连库用的 DATABASE_URL、PGHOST 这些）去跑：
 # 库只认 fleet 这个本机用户（peer 认证），环境文件按 systemd 的读法读、和服务读同一组（清单取自 deploy/france/fleet-api.service）。
