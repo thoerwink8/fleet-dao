@@ -109,6 +109,11 @@ export class TaskRuntime {
    * 最近一次冷验收没过的原话。推上去之后 feedback 会被清掉，验收轮数用尽时通知还要靠它，不能跟着清。
    */
   verifyProblems: string[] = [];
+  /**
+   * 上一轮验收没过时的头和问题。第 2 轮才写进冷验收入参（patched('verify-recheck')）。
+   * 老历史重放不读它：patched() 为假时入参和原来一样。
+   */
+  verifyRecheck: { head: string; criteria: number[]; problems: string[] } | null = null;
   /** 当前单子正文读出来的交代。点「继续」重读之后换掉，验收用这一份，不用起任务时的旧版。 */
   brief: TaskBrief | null = null;
   /** 轮数用尽、人点「继续」之后重读单子。由 TaskFlow 接上。 */

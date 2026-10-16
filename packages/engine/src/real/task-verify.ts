@@ -21,7 +21,8 @@
 //   GitHub 改 PR 的头是异步的、比推送晚一两秒：读到的头对不上先隔 HEAD_SETTLE_WAIT_MS 再读，读满 HEAD_SETTLE_READS 次还对不上
 //   才算有人推过（#2181：推完 0.1 秒就读到推之前的头，判成「头被别人改了」停下等人两个多小时）。
 // - 读 GitHub 先于一切、在 runColdVerifyForPr 外面做：GitHub 一时不通是 PortError（工作流按失败分流重试），不是「读不到 PR」那种要报人的结论。
-// - 验收会话手上没有仓库的检出：只给一个空的临时目录（归那条路由的会话用户，会话收场就删），diff 全在提示词里。
+// - 验收会话的目录尽量放进 PR 头的完整检出（镜像里 git archive，放不进去就仍是空目录，不因此让验收失败）。
+//   提示词允许在这个检出里读文件。diff 仍在提示词里。第 2 轮的 diff 是上一轮头到现在的头的增量，不是整张 PR。
 //   diff 超过 MAX_DIFF_CHARS：放不下的文件跳过并写明，不截断了假装看全。
 // - 有文本文件 GitHub 的文件接口没给 patch（大文件，#1308）：先用引擎镜像里的 git 补读（基线...头）；补出来超过
 //   MAX_FILE_DIFF_LINES 行就只给摘要（行数、头尾各几十行），diff 里明说「这个文件太大，只给了摘要」；接口和 git 两条路都读不到、
@@ -50,7 +51,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
-import { runColdVerifyForPr } from '../cold-verify-run.ts';
+import { checkoutPrHead, incrementalDiffAtHead, runColdVerifyForPr } from '../cold-verify-run.ts';
 import { createStatusMemo } from '../cold-verify-status.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
@@ -155,6 +156,15 @@ export interface ColdVerifyActivityDeps {
    * 不给 = 补不了，这样的文件照旧回 unavailable。
    */
   fileDiff?: FileDiffReader;
+  /**
+   * 第 2 轮的增量 diff（sinceSha..headSha）。不给就用引擎镜像（incrementalDiffAtHead）。
+   * 读不到抛错，这一轮验收失败，不退回整张 PR 的 diff。
+   */
+  rangeDiff?: (args: {
+    sinceSha: string;
+    headSha: string;
+    workflowId: string | undefined;
+  }) => Promise<{ diffText: string; changedFiles: string[] }>;
   now?: () => Date;
   /** 以下测试用。 */
   /** 头对不上时两次读之间怎么等（默认真等 HEAD_SETTLE_WAIT_MS）。 */
@@ -603,6 +613,15 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             return { head: input.headSha, baseSha: input.baseSha, branch: input.branch, body: pull.body };
           },
           diff: async () => {
+            if (input.recheck) {
+              const workflowId = ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber);
+              const read = deps.rangeDiff ?? incrementalDiffAtHead;
+              return read({
+                sinceSha: input.recheck.sinceSha,
+                headSha: input.headSha,
+                workflowId,
+              });
+            }
             const { fileDiff } = deps;
             const complete = await fillMissingPatches(
               files,
@@ -631,6 +650,14 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               what: input.what,
               howToFinish: input.howToFinish,
               ...(input.testOutput === undefined ? {} : { testOutput: input.testOutput }),
+              ...(input.recheck === undefined
+                ? {}
+                : {
+                    recheck: {
+                      failedCriteria: input.recheck.failedCriteria,
+                      priorProblems: input.recheck.priorProblems,
+                    },
+                  }),
             };
           },
           authorFamilies: async () => input.authorFamilies,
@@ -715,6 +742,18 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           }
           const { user } = await resolveSegmentRoute(deps.spawner, picked.routeId);
           const dir = deps.spawner.trees.tmpFor(`verify-${newRunId()}`);
+          // 放得进 PR 头的完整检出就放；镜像没有、提交不在，会话仍起，提示词里的材料还在。
+          try {
+            await checkoutPrHead(
+              dir,
+              input.headSha,
+              ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
+            );
+          } catch (error) {
+            log('验收会话没有放进 PR 头的完整检出（仍可看提示词里的材料）', {
+              error: errMessage(error),
+            });
+          }
           await deps.spawner.trees.adopt(dir, user);
           return {
             cwd: dir,

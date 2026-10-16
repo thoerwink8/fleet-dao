@@ -44,7 +44,9 @@ const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
 
 const MODEL_PASS = ['看过了。', '', '## 问题', '', 'verdict: pass'].join('\n');
-const MODEL_FAIL = ['## 问题', '- 没做到验收条：单子要状态栏，代码里没有', '', 'verdict: fail'].join('\n');
+const MODEL_FAIL = ['## 问题', '- 没做到验收条：第 1 条：单子要状态栏，代码里没有', '', 'verdict: fail'].join(
+  '\n',
+);
 
 const routeFacts = (routeId: string, over: Partial<RouteLaunchFacts> = {}): RouteLaunchFacts => ({
   routeId,
@@ -337,7 +339,7 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     const r = rig({ driverRun: async () => report(MODEL_FAIL) });
     const got = await r.run(r.input(), ctx());
     expect(got.pass).toBe(false);
-    expect(got.problems).toEqual(['没做到验收条：单子要状态栏，代码里没有']);
+    expect(got.problems).toEqual(['没做到验收条：第 1 条：单子要状态栏，代码里没有']);
     expect(got.unavailable).toBeUndefined();
     expect(got.retry).toBeUndefined();
     expect(r.posted.at(-1)).toMatchObject({ sha: HEAD, state: 'failure' });
@@ -1757,6 +1759,69 @@ describe('材料带 PR 正文和测试输出；「不归我验」留言到单上
     expect(prompt).toContain('加了状态栏，截图在评论里。');
     expect(prompt).toContain('## 引擎跑过的测试输出');
     expect(prompt).toContain('Tests  12 passed (12)');
+    expect(prompt).toContain('你可以在 PR 头的完整检出里读文件');
+  });
+
+  it('第 2 轮用增量 diff，提示词带上轮没过的条和只复核那一句', async () => {
+    const r = rig({
+      deps: {
+        rangeDiff: async () => ({ diffText: 'INCREMENTAL-DIFF-MARKER', changedFiles: ['src/status.ts'] }),
+      },
+    });
+    await r.run(
+      r.input({
+        round: 2,
+        recheck: {
+          failedCriteria: [1],
+          sinceSha: 'c'.repeat(40),
+          priorProblems: ['没做到验收条：第 1 条：没有状态栏'],
+        },
+      }),
+      ctx(),
+    );
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain('INCREMENTAL-DIFF-MARKER');
+    expect(prompt).not.toContain('export const Status = 1');
+    expect(prompt).toContain('## 上一轮没过的条');
+    expect(prompt).toContain('没做到验收条：第 1 条：没有状态栏');
+    expect(prompt).toContain('只复核上轮没过的条和增量里的改动，新提出的、不在增量里的问题只记备注、不拒');
+    expect(prompt).toContain('你可以在 PR 头的完整检出里读文件');
+  });
+
+  it('第 2 轮真实装配只留下上一轮问题和能对上增量文件的问题', async () => {
+    const oldProblem = '没做到验收条：第 1 条：上一轮的问题还没修好';
+    const newProblem = '弄坏了原有功能：第 2 条：增量文件：`src/status.ts`，把状态导出删了';
+    const unrelated = '弄坏了原有功能：第 2 条：增量里顺手发现的旧问题，但不在本轮改动';
+    const stdout = [
+      '## 问题',
+      `- ${oldProblem}`,
+      `- ${newProblem}`,
+      `- ${unrelated}`,
+      '',
+      'verdict: fail',
+    ].join('\n');
+    const r = rig({
+      deps: {
+        rangeDiff: async () => ({ diffText: 'INCREMENTAL-DIFF-MARKER', changedFiles: ['src/status.ts'] }),
+      },
+      driverRun: async () => report(stdout),
+    });
+    const got = await r.run(
+      r.input({
+        round: 2,
+        howToFinish: ['第一条', '第二条'],
+        recheck: {
+          failedCriteria: [1],
+          sinceSha: 'c'.repeat(40),
+          priorProblems: [oldProblem],
+        },
+      }),
+      ctx(),
+    );
+    expect(got.pass).toBe(false);
+    expect(got.problems).toEqual([oldProblem, newProblem]);
+    expect(got.notes).toContain('只记备注、不拒');
+    expect(got.problems).not.toContain(unrelated);
   });
 
   it('「不归我验」：结论 pass、状态 success，outOfScope 带出，并留言到单上（幂等键带 PR 号和头）', async () => {

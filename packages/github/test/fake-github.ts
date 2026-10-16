@@ -482,6 +482,18 @@ export class FakeGitHub {
       if (!isApp) return this.json(401, { message: 'JWT required' });
       return this.json(200, { id: Number(x[1]), permissions: this.permissions[role] });
     }
+    if (path === '/app/installations' && m === 'GET') {
+      if (!isApp) return this.json(401, { message: 'A JSON web token could not be decoded' });
+      if (!this.installed[role]) return this.json(200, []);
+      return this.json(200, [
+        {
+          id: role === 'agent' ? 11 : 22,
+          account: { login: OWNER, id: 1, type: 'Organization' },
+          repository_selection: 'selected',
+          permissions: this.permissions[role],
+        },
+      ]);
+    }
     if (path === '/app/hook/deliveries' && m === 'GET') {
       if (!isApp) return this.json(401, { message: 'JWT required' });
       return this.page(req, this.deliveries);
@@ -493,6 +505,27 @@ export class FakeGitHub {
       return this.json(202, {});
     }
     if (isApp) return this.json(403, { message: 'JWT 只能调 /app 接口' });
+
+    if (path === '/installation/repositories' && m === 'GET') {
+      if (role !== 'agent' && role !== 'engine') return this.json(401, { message: 'Bad credentials' });
+      if (!this.installed[role]) return this.json(200, { total_count: 0, repositories: [] });
+      return this.json(200, {
+        total_count: 1,
+        repository_selection: 'selected',
+        repositories: [
+          {
+            id: 4242,
+            name: REPO,
+            full_name: `${OWNER}/${REPO}`,
+            private: false,
+            default_branch: this.defaultBranch,
+            archived: false,
+            size: 12,
+            owner: { login: OWNER, id: 1, type: 'Organization' },
+          },
+        ],
+      });
+    }
 
     x = /^\/users\/([^/]+)$/.exec(path);
     if (x && m === 'GET') {
