@@ -1,6 +1,6 @@
 // 引擎端口 → 库（packages/db）：选路、提问、人闸、报警、计时、任务快照。
 // 选路：路由两层的顺序和候选事实（routeFactsForPurpose，#574：先按这个用途的模型顺序、再按模型下的路由顺序，摊平成一串；
-// 不读旧的阶段平铺表 stage_policy_routes）+ 熔断（近 7 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
+// 不读旧的阶段平铺表 stage_policy_routes）+ 熔断（近 14 天的会话结局现算，failure/breaker.ts）+ 这个阶段的战绩
 // （熔断、战绩、半开时在途的试探都是两种会话并起来算：Fusion 的会话和三段的一次性会话，db 的 pool-runs.ts，#758；三段的那一段按
 // 它选路的用途算战绩，task-contract.ts 的 SEGMENT_STAGE）
 // + 被暂停的账号池（开关 engine.poolHolds，人拍的；加 pool-hold:<池> 那条没处理的「要人拍」提醒，见 real/pool-holds.ts）交给纯函数
@@ -30,6 +30,7 @@ import {
   endedPoolRuns,
   markChannelDisabled,
   modelExecuteTracks,
+  modelTierTracks,
   openAlertKeysOfTask,
   openAlertsByPrefix,
   openPoolRuns,
@@ -69,13 +70,14 @@ import {
   familyAvoidIsRetry,
   stageAllOpen as judgeStageAllOpen,
   type LiveOrgReading,
+  type ModelTierTrackFacts,
   type ModelTrackFacts,
   type OrgPlanView,
   type RouteFacts,
   type RouteRecord,
   type RouteWaitKind,
   RoutingInputError,
-  type RoutingPolicy,
+  type RoutingPolicyInput,
   routeLabel,
   STAGE_NAMES,
 } from '../routing/index.ts';
@@ -96,8 +98,8 @@ export { POOL_HOLD_PREFIX, poolHoldKey };
  */
 export const WIRED_HOSTS: readonly HostId[] = WIRED_HOST_IDS;
 
-/** 战绩和熔断看最近几天的会话结局。 */
-export const RECORD_DAYS = 7;
+/** 战绩和熔断看最近几天的会话结局。14 天：难单样本少，7 天不够看一档（决定 0098）。熔断仍按连续失败和 6 小时失败率回放。 */
+export const RECORD_DAYS = 14;
 /**
  * 等空位、熔断到点、等切号、等探针：有明确时刻也最多隔这么久再选。这些随时可能提前好，2 分钟是兜底
  * （原来 10 分钟，#194）。切号切完探通会当场发 taskRouteWake（real/route-wake.ts），信号到了不等满。
@@ -174,7 +176,7 @@ export interface StorePortsDeps {
   /** [0, 1) 的随机数，试探用（调度策略开了试探才用得上）。 */
   draw?: () => number;
   wiredHosts?: readonly HostId[];
-  routingPolicy?: Partial<RoutingPolicy>;
+  routingPolicy?: RoutingPolicyInput;
   log?: (message: string, fields?: Record<string, unknown>) => void;
   /** 选路读组织最多等多久（默认 ORG_READ_WAIT_MS），测试用。 */
   orgReadWaitMs?: number;
@@ -489,14 +491,35 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
   const trackStages: readonly StageKind[] = Array.isArray(givenStages)
     ? givenStages
     : DEFAULT_ROUTING_POLICY.trackScore.stages;
+  const trackByTier = deps.routingPolicy?.trackScore?.byTier ?? DEFAULT_ROUTING_POLICY.trackScore.byTier;
   let lastTrackLog = '';
   async function tracksFor(
     stage: StageKind,
     now: Date,
-  ): Promise<{ modelTracks?: ModelTrackFacts[]; note?: string }> {
+    tier: 'fast' | 'medium' | 'heavyweight' | undefined,
+  ): Promise<{ modelTracks?: ModelTrackFacts[]; modelTierTracks?: ModelTierTrackFacts[]; note?: string }> {
     if (!trackStages.includes(stage)) return {};
+    const since = new Date(now.getTime() - RECORD_DAYS * DAY_MS);
     try {
-      const tracks = await modelExecuteTracks(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS));
+      if (trackByTier && tier) {
+        const tracks = await modelTierTracks(db, since);
+        const summary = tracks
+          .map(
+            (t) =>
+              `${t.modelId} ${t.tier} 第一段 ${t.firstSegs}、一段过 ${t.onePass}、退回 ${t.sentBack}、没交付 ${t.noDeliver}、没做成 ${t.notDone}、${Math.round(t.minutes)} 分钟`,
+          )
+          .join('；');
+        if (summary !== lastTrackLog) {
+          lastTrackLog = summary;
+          log('动手战绩（选路按它排模型）', {
+            stage,
+            tier,
+            tracks: summary || '近 14 天没有到终态的分档动手单',
+          });
+        }
+        return { modelTierTracks: tracks };
+      }
+      const tracks = await modelExecuteTracks(db, since);
       // 战绩变了才记一笔（等路由时每隔一两分钟就选一次，不刷屏）：驾驶舱没有战绩页，看各模型的分就看这行日志
       const summary = tracks
         .map(
@@ -506,7 +529,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         .join('；');
       if (summary !== lastTrackLog) {
         lastTrackLog = summary;
-        log('动手战绩（选路按它排模型）', { stage, tracks: summary || '近 7 天没有到终态的动手单' });
+        log('动手战绩（选路按它排模型）', { stage, tracks: summary || '近 14 天没有到终态的动手单' });
       }
       return { modelTracks: tracks };
     } catch (error) {
@@ -688,7 +711,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(await carpoolRegistryFor(all.routes)),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
-        const tracks = await tracksFor(input.stage, now);
+        const tracks = await tracksFor(input.stage, now, input.tier);
         const base = {
           stage: input.stage,
           configured: facts.configured,
@@ -699,7 +722,9 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           draw: drawn,
           ...orgFacts,
           ...(input.uiWork ? { uiWork: true } : {}),
+          ...(input.tier ? { tier: input.tier } : {}),
           ...(tracks.modelTracks ? { modelTracks: tracks.modelTracks } : {}),
+          ...(tracks.modelTierTracks ? { modelTierTracks: tracks.modelTierTracks } : {}),
           ...policy,
         } satisfies Omit<ChooseRouteInput, 'avoid' | 'taskRouteId'>;
         const notes: string[] = tracks.note ? [tracks.note] : [];

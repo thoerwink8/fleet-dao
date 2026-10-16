@@ -8,6 +8,7 @@ const QUOTA_STATES = ['ok', 'exhausted', 'unknown'];
 const ADMITS = ['all', 'trial', 'none'];
 const ORGS = ['solo', 'carpool'];
 const PROBE_STATES = ['ok', 'failed', 'not_wired', 'skipped'];
+const TIERS = ['fast', 'medium', 'heavyweight'];
 
 export function time(iso: unknown, what: string): number {
   const ms = typeof iso === 'string' ? Date.parse(iso) : Number.NaN;
@@ -94,6 +95,40 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
       ) {
         throw new RoutingInputError(
           `选路判不了：模型 ${t.modelId} 的动手战绩分钟数认不出（${String(t.segmentMinutes)}）`,
+        );
+      }
+    }
+  }
+  if (input.tier !== undefined && !TIERS.includes(input.tier)) {
+    throw new RoutingInputError(`选路判不了：派工档认不出（${String(input.tier)}）`);
+  }
+  // 分档战绩认不出就不往下判：四个结局对不上会把质量分算飞
+  if (input.modelTierTracks !== undefined) {
+    if (!Array.isArray(input.modelTierTracks)) throw new RoutingInputError('选路判不了：分档战绩不是一张表');
+    const seenTier = new Set<string>();
+    for (const t of input.modelTierTracks) {
+      if (typeof t?.modelId !== 'string' || !t.modelId) {
+        throw new RoutingInputError(`选路判不了：分档战绩的模型认不出（${String(t?.modelId)}）`);
+      }
+      if (typeof t.tier !== 'string' || !TIERS.includes(t.tier)) {
+        throw new RoutingInputError(`选路判不了：分档战绩的档认不出（${String(t?.tier)}）`);
+      }
+      const key = `${t.modelId}\0${t.tier}`;
+      if (seenTier.has(key)) {
+        throw new RoutingInputError(`选路判不了：分档战绩 ${t.modelId} ${t.tier} 重复`);
+      }
+      seenTier.add(key);
+      for (const k of ['firstSegs', 'onePass', 'sentBack', 'noDeliver', 'notDone'] as const) {
+        count(t[k], `模型 ${t.modelId} ${t.tier} 的分档战绩 ${k}`);
+      }
+      if (t.onePass + t.sentBack + t.noDeliver + t.notDone !== t.firstSegs) {
+        throw new RoutingInputError(
+          `选路判不了：分档战绩对不上（${t.modelId} ${t.tier} 第一段 ${t.firstSegs}、一段过 ${t.onePass}、退回 ${t.sentBack}、没交付 ${t.noDeliver}、没做成 ${t.notDone}）`,
+        );
+      }
+      if (typeof t.minutes !== 'number' || !Number.isFinite(t.minutes) || t.minutes < 0) {
+        throw new RoutingInputError(
+          `选路判不了：分档战绩 ${t.modelId} ${t.tier} 的分钟数认不出（${String(t.minutes)}）`,
         );
       }
     }
