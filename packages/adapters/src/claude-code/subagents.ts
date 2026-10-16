@@ -163,11 +163,14 @@ export function parseSubagent(file: string, text: string): { name: string; defin
   return { name, definition: { ...fields, prompt: body } as unknown as SubagentDefinition };
 }
 
-/** 读一个目录里所有 *.md，转成 --agents 要的对象（按名字排序，同样的输入出同样的字节）。目录读不了、一个都没有也抛错。 */
+/** 目录里哪些是子代理定义：*.md，但 README.md 是规范说明（agents/subagents/README.md），不是定义。 */
+const isDefinitionFile = (n: string) => n.endsWith('.md') && n !== 'README.md';
+
+/** 读一个目录里所有定义（*.md，不含 README.md），转成 --agents 要的对象（按名字排序，同样的输入出同样的字节）。目录读不了、一个都没有也抛错。 */
 export async function loadSubagents(dir: string = SUBAGENTS_DIR): Promise<SubagentDefinitions> {
   let names: string[];
   try {
-    names = (await readdir(dir)).filter((n) => n.endsWith('.md')).sort();
+    names = (await readdir(dir)).filter(isDefinitionFile).sort();
   } catch (error) {
     throw new Error(
       `子代理定义的目录读不了：${dir}（${error instanceof Error ? error.message : String(error)}）`,
@@ -189,7 +192,7 @@ export async function loadSubagents(dir: string = SUBAGENTS_DIR): Promise<Subage
 
 /** 带 isolation: worktree 的那几个子代理的名字（引擎写 settings.local.json 时用它们拼 deny）。 */
 export async function isolatedSubagentNames(dir: string = SUBAGENTS_DIR): Promise<string[]> {
-  const names = (await readdir(dir)).filter((n) => n.endsWith('.md')).sort();
+  const names = (await readdir(dir)).filter(isDefinitionFile).sort();
   const out: string[] = [];
   for (const file of names) {
     const text = await readFile(join(dir, file), 'utf8');
