@@ -129,7 +129,7 @@ describe('仓里真的那 3 份（agents/subagents/，决定 0087）', () => {
     expect(Object.fromEntries(Object.entries(defs).map(([n, d]) => [n, d.model]))).toEqual({
       Explore: 'claude-haiku-5-5',
       Plan: 'claude-opus-5-5',
-      'general-purpose': 'claude-sonnet-5-5',
+      'general-purpose': 'claude-opus-5-5',
     });
     for (const def of Object.values(defs)) {
       expect(def.description).not.toBe('');
