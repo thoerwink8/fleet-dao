@@ -4,10 +4,15 @@
 // 总账的下一片也写在这里（#1405）：只有点了名的才开，一次最多 1 片。合并了的 PR 没读到要写明，不能当成没有。
 
 import {
+  describeOffDiff,
   GROOM_PENDING_LABEL,
   GROOMED_LABEL,
   HUMAN_DECISION_LABEL,
   LOCAL_LABEL,
+  OFF_DIFF_REWRITE,
+  offDiffAcceptanceItems,
+  parseMd,
+  sectionText,
 } from '@fleet-dao/conventions';
 import { GROOM_MAX_AMENDS, GROOM_MAX_NEW_ISSUES, GROOM_MAX_REVIEWS } from '@fleet-dao/shared';
 import { GROOM_VERIFY_STOP_CATEGORIES } from '../workflows/task-support.ts';
@@ -201,7 +206,12 @@ export function renderGroomPrompt(input: GroomPromptInput): string {
         : '\n（正文省略：提示词放不下，要看原文读检出里的相关文件或略过这张单）';
     const block = `${head}${body}`;
     used += block.length;
-    blocks.push(block);
+    const offDiff = offDiffAcceptanceItems(sectionText(parseMd(`#${i.number}`, i.body), '怎么算做完') ?? '');
+    const handoff =
+      offDiff.length === 0
+        ? ''
+        : `\n整理动作：这张单的「怎么算做完」命中了 diff 外证据，不能判 sound 直接交给引擎。用 amendments 的 done 追加同级替代条，原文不改；替代条也必须能从 diff 或测试输出验收。\n${describeOffDiff(offDiff)}\n${OFF_DIFF_REWRITE}`;
+    blocks.push(`${block}${handoff}`);
   }
   return [
     `你是「临时指挥官」：${input.repo} 的引擎在没有可挑的单、待办却还很多时叫起来的一个短命会话，只做一件事——整理待办，让引擎有活可挑。你不写代码、不改仓库。`,
@@ -212,7 +222,7 @@ export function renderGroomPrompt(input: GroomPromptInput): string {
     `   - "sound"：这张单的前提今天仍成立、范围清楚、适合交给引擎做。引擎会贴「${GROOMED_LABEL}」，老单只有贴了它才会被引擎挑。**拿不准就不要判 sound**：引擎前几天就因为拉到前提已经过期的老单白烧了一轮。`,
     `   - "expired"：前提已被后来的决定取代、事情已经做完、或要等一个还没发生的条件才成立。引擎会留言建议关闭并贴「${GROOM_PENDING_LABEL}」，**不会关单**。reason 里写清是哪条决定 / 哪个 PR / 哪段代码说明它过期了。`,
     `   - "human"：只有两件要创始人拍的事——要掏新钱（新开订阅、充值、开按量计费），或删了找不回又没备份（删 GitHub 仓、删没备份的生产库数据、删创始人自己的文件）。引擎会贴「${HUMAN_DECISION_LABEL}」，从此不拉。reason 里要写明是哪件（要掏什么钱、删什么找不回）：原因和原单都没写这两件的，引擎改贴「${LOCAL_LABEL}」。改标准的路径、.github/workflows/、对外发布不要判 human：写在正文里，引擎会贴「${LOCAL_LABEL}」并留一句原因，不问创始人（决定 0097）。`,
-    `2. amendments：给缺东西的老单补写，每次最多 ${GROOM_MAX_AMENDS} 张。只补它缺的节（scene 场景 / modules 已知的模块 / done 怎么算做完，done 每条要写成 diff 里或界面上看得见的东西，不要写「跑 grep 看结果」），note 放别的补充。引擎只在原正文末尾追加「## ${AMEND_HEADING}」一节，原文和原话一个字都不会改；老单里已经写了的节不补。补完若涉及改标准、.github/workflows/ 或对外发布，引擎贴「${LOCAL_LABEL}」并留一句原因，不贴「${GROOMED_LABEL}」；否则贴「${GROOMED_LABEL}」，所以只补你认为仍成立的单。`,
+    `2. amendments：给缺东西的老单补写，每次最多 ${GROOM_MAX_AMENDS} 张。只补它缺的节（scene 场景 / modules 已知的模块 / done 怎么算做完，done 每条要写成 diff 里或测试输出里看得见的东西，不要写「跑 grep 看结果」），note 放别的补充。引擎只在原正文末尾追加「## ${AMEND_HEADING}」一节，原文和原话一个字都不会改；老单已经写了的普通节不补，但上面明确命中 diff 外证据的「怎么算做完」要在 done 里给替代条，替代条会追加成最后一个同级小节并取代旧条参与拉单和冷验收。替代条仍命中判据的整条不执行。补完若涉及改标准、.github/workflows/ 或对外发布，引擎贴「${LOCAL_LABEL}」并留一句原因，不贴「${GROOMED_LABEL}」；否则贴「${GROOMED_LABEL}」，所以只补你认为仍成立的单。`,
     `3. newIssues：开新的独立小单，每次最多 ${GROOM_MAX_NEW_ISSUES} 张：把一张太大的单拆成几张能单独做完的小单（填 splitFrom=大单号，引擎会在大单上留言；**不要开子单**），或开你在仓里读到的、确实该做又没人记的事。总账的下一片也走这里，但只有下面「总账分片」点了名的才开。每张给 title、kind（需求 / 缺陷 / 杂项）、scene、modules（可省）、done（至少一条，写成看得见的验收条）。引擎自己拼成四节的单，「原话」一栏它写「无（AI 发现）」，你不要编创始人的原话。新单一律是未排期。开之前先看下面「开着的单」「最近关掉的」「开着的 PR」，已经有的不要再开。`,
     '',
     '## 你不能做的（写了也不会执行，还会被记成越权）',
