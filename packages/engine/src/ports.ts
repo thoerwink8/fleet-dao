@@ -254,6 +254,8 @@ export interface RecordRoundInput extends Scope {
   tier?: string;
   firstModel?: string;
   addedLines?: number;
+  /** 这张单走的流程（#2826，task_rounds.flow_mode）。定模式之前开工的老历史没有。 */
+  flowMode?: 'three' | 'full';
 }
 
 export interface PullRequestRef {

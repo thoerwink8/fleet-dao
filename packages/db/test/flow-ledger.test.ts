@@ -3,9 +3,13 @@
 import { FlowAssignmentExistsError } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { getFlowAssignment, recordFlowAssignment } from '../src/queries/flow-assignments.ts';
+import {
+  getFlowAssignment,
+  readFlowModeSettingRaw,
+  recordFlowAssignment,
+} from '../src/queries/flow-assignments.ts';
 import { recordTaskRound } from '../src/queries/pipeline-health.ts';
-import { taskFlowAssignments, taskRounds, tasks } from '../src/schema/index.ts';
+import { settings, taskFlowAssignments, taskRounds, tasks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, expectViolation } from './helpers.ts';
 
@@ -17,6 +21,29 @@ afterAll(() => t.close());
 beforeEach(() => resetTestDb(t));
 
 const AT = new Date('2026-10-16T12:00:00.000Z');
+
+describe('分组时顺带写 tasks.flow_mode、读开关原值（#2826）', () => {
+  it('写分组记录时 tasks.flow_mode 跟着写；同一张单再写抛错、任务行不变', async () => {
+    const r = await addRepo(t.db);
+    const task = await addTask(t.db, r.id);
+    const before = await t.db.select({ m: tasks.flowMode }).from(tasks).where(eq(tasks.id, task.id));
+    expect(before[0]?.m).toBeNull();
+    await recordFlowAssignment(t.db, { taskId: task.id, mode: 'full', source: 'label', stratum: 'standard' });
+    const after = await t.db.select({ m: tasks.flowMode }).from(tasks).where(eq(tasks.id, task.id));
+    expect(after[0]?.m).toBe('full');
+    await expect(
+      recordFlowAssignment(t.db, { taskId: task.id, mode: 'three', source: 'hash', stratum: 'standard' }),
+    ).rejects.toBeInstanceOf(FlowAssignmentExistsError);
+    const still = await t.db.select({ m: tasks.flowMode }).from(tasks).where(eq(tasks.id, task.id));
+    expect(still[0]?.m).toBe('full');
+  });
+
+  it('开关没设过回 undefined；设过原样回值', async () => {
+    expect(await readFlowModeSettingRaw(t.db)).toBeUndefined();
+    await t.db.insert(settings).values({ key: 'engine.flowMode', value: 'split:50' });
+    expect(await readFlowModeSettingRaw(t.db)).toBe('split:50');
+  });
+});
 
 describe('task_flow_assignments：每张单一行，写一次', () => {
   it('没分过组：读回 null', async () => {

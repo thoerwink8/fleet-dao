@@ -20,7 +20,17 @@ describe('仓档案', () => {
       mergeSignals: [],
       standardPathsFile: 'packages/conventions/standard-paths.json',
       weight: 1,
+      flowEligible: false,
     });
+  });
+
+  it('flowEligible（#2826）默认关；不写不算档案缺项（不挡拉单）', () => {
+    expect(parseRepoProfile({}).flowEligible).toBe(false);
+    expect(parseRepoProfile({ flowEligible: true }).flowEligible).toBe(true);
+    expect(REPO_PROFILE_KEYS).not.toContain('flowEligible');
+    const full = Object.fromEntries(REPO_PROFILE_KEYS.map((k) => [k, DEFAULT_REPO_PROFILE[k]]));
+    expect(repoProfileGaps(full)).toEqual([]);
+    expect(() => parseRepoProfile({ flowEligible: 'yes' })).toThrow('flowEligible');
   });
 
   it('给了的项照用，没给的补默认值', () => {

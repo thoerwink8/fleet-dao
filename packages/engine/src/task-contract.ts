@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { Repo } from '@fleet-dao/shared';
+import type { FlowMode, FlowSource, Repo } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
@@ -27,6 +27,32 @@ export const MAX_VERIFY_ROUNDS = 2;
  * 超过就停下交给指挥官，不再清零。同一次继续之内仍受上面两个上限约束。
  */
 export const MAX_ROUND_RESETS = 3;
+/**
+ * 全程模式（#2826）一张单最多交付几次：CI 红、冲突、冷验收被拒都续同一个会话、不算新的一轮，这个数兜底。
+ * 每回到动手一次算一次（推上去的、交活没提交被打回的都算），到了停下等人。冷验收被拒的上限仍是 MAX_VERIFY_ROUNDS。
+ */
+export const MAX_FULL_PUSHES = 6;
+
+/** 定这张单走三段还是全程（#2826）：第一次选路之后、第一段动手之前问一次，结果进历史，重放不再读配置。 */
+export interface DecideFlowModeInput {
+  schemaVersion: 1;
+  taskId: string;
+  repo: Repo;
+  issueNumber: number;
+  /** 第一次选中的路由的模型：只有 Claude 5.5（Sonnet 或 Opus）才可能进全程。 */
+  modelId: string;
+  /** 单子「已知的模块」每一项的原文：碰到迁移、合并闸、凭据、权限、任务工作流、发布脚本的一律三段。 */
+  touches: string[];
+  /** 分层（档位）：split 在同一档位里按单号哈希分组。 */
+  stratum: string;
+}
+
+export interface DecideFlowModeResult {
+  mode: FlowMode;
+  source: FlowSource;
+  /** 退回三段的原因（写进 task_flow_assignments.reason）；别的是 null。 */
+  reason: string | null;
+}
 /** 一轮动手的会话最长多少分钟（one-shot 默认也是 60）。 */
 export const SEGMENT_MINUTES = 60;
 /** 等合并时每次长轮询多少分钟（工作流一直轮到合并、关闭或人放弃）。 */
@@ -170,6 +196,10 @@ export interface RunSegmentInput {
    * 不给就是照常动手。老历史里没有这个字段。
    */
   mode?: 'plan';
+  /**
+   * full＝这张单走全程（#2826）：提示词多一节「这张单到合并都归你」。三段的单、老历史里没有这个字段，提示词一字不变。
+   */
+  flowMode?: 'full';
 }
 
 /**

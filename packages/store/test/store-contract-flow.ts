@@ -37,6 +37,18 @@ export function describeFlowStoreContract(name: string, make: MakeStore): void {
       expect(await store.getFlowAssignment(IDS.task13)).toBeNull();
     });
 
+    it('分组时顺带写任务行的 flowMode（#2826）；没分组的单没有这个键', async () => {
+      expect(await store.getTask(IDS.task12)).not.toHaveProperty('flowMode');
+      await store.writeFlowAssignmentOnce({
+        taskId: IDS.task12,
+        mode: 'full',
+        source: 'label',
+        stratum: 'x',
+      });
+      expect((await store.getTask(IDS.task12))?.flowMode).toBe('full');
+      expect(await store.getTask(IDS.task13)).not.toHaveProperty('flowMode');
+    });
+
     it('不合格退回三段：reason 原样留着', async () => {
       const written = await store.writeFlowAssignmentOnce({
         taskId: IDS.task13,
