@@ -47,9 +47,11 @@
 //   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
 //   避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」。老历史没有这个标记，仍把这张单挂起。
 // - 点名和读回不是同一个模型（#2742，patched('model-mismatch-reroute')）：失败分流 MD3 仍判停下（老历史重放就是挂起）。
-//   新的不把整张单挂起。先停这一段，按点名这条路由开新会话重派一次（不续上一段：续会话不比模型，发版叫停 opus 之后
-//   同一池点名 sonnet 会续上 opus）。同一条再对不上，当成这条路由会换模，避开它再选。还有能派的就继续；
-//   选路确认一条都没有才挂起，不改去等探针，也不把刚避开的那条再派出去。老历史没有这个标记，仍在 MD3 上挂起。
+//   #2742 是发版叫停后误续上一段 opus：续会话不比模型，同一 mirasim-relay 池点名 sonnet 仍续上 opus，快照还是
+//   opus[1m]。不是比对串剥错 `[1m]`，不是 #1298 那种名单里没有才换模，也不是 #2797 的叫停本身。
+//   新的不把整张单挂起。先停这一段，按点名这条路由开新会话重派一次（不写 resumeFrom，误续靠开新会话解开）。
+//   同一条开了新会话仍对不上，才说明这条路由会换模，避开它再选。还有能派的就继续；选路确认一条都没有才挂起，
+//   不改去等探针，也不把刚避开的那条再派出去。老历史没有这个标记，仍在 MD3 上挂起。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -489,7 +491,7 @@ export async function writeSession(
         previousMessage = undefined;
         if (!mismatchRetried.has(route.routeId)) {
           mismatchRetried.add(route.routeId);
-          // 钉住点名的这条，开新会话。不写 resumeFrom：续会话不比模型，会把上一段 opus 接回来。
+          // 钉住点名的这条，开新会话。不写 resumeFrom：#2742 就是续会话不比模型，把上一段 opus 接了回来。
           stick = route.routeId;
           const line = `第 ${rt.round} 轮：${route.modelId} 回话的模型不是点名的，停掉这一段，按点名路由重派一次（开新会话，不续上一段），不停下等人`;
           rt.status.lastProblem = line;

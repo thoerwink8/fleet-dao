@@ -8,6 +8,10 @@
 // - 同一个账号池才续：Claude 的会话绑着账号（换了组织直接 --resume 会被拒），cursor、grok、Mirasim 的会话记录跟着各自的
 //   登录走。会话用户不同，会话记录不在同一个家目录里。工作树是不是同一棵由工作流比（它手上有路径）。
 // - 会话号只认执行体报的真号（segment-spawner.ts 只往 runs 写真号）；起会话前的临时号（cursor-pending: 一类）不续。
+// - 不比模型。#2742（2026-10-16，法国刚切到 0c35f93a）就是这条：前几段 opus 被发版停机取消（「引擎叫停（其他：CANCELLED）」，
+//   当时 Mirasim 不脱开），继续后选路点到 mirasim-relay 的 sonnet，主机、池、会话用户都没变，仍续上那段 opus。
+//   快照读回 claude-opus-5-5[1m]，点名是 claude-sonnet-5-5。不是中转换模（sonnet 在名册里，新会话的快照会是 sonnet[1m]），
+//   也不是 `[1m]` 剥错。对不上之后怎么重派在任务工作流，不在这里改判续的条件。
 
 import type { RunRow } from '@fleet-dao/db';
 import { abortableSleep, errMessage } from '@fleet-dao/shared/util';

@@ -221,12 +221,13 @@ async function hello(wire: MirasimWire, ms: number): Promise<Record<string, unkn
  * 只剥末尾的方括号标记，不宽松到「前缀相同就算」——那样点 `gpt-5.6-luna` 回 `gpt-5.6-luna-preview`
  * 也会被认成对。
  *
- * #2742（发版把前几段 opus 叫停之后，下一轮点名 sonnet-5.5，快照读回 opus-5.5[1m]）不是这里剥错了：
- * 剥掉末尾 `[1m]` 之后仍是 `claude-sonnet-5-5` 对 `claude-opus-5-5`，两个模型。也不是 #1298
- * （探针侧把 gpt-6-sol 换成 gpt-6-astra），也不是 #2797 的发版叫停本身（叫停只让上一段收场）。
- * 归类是会话/路由身份不一致：续会话只比执行方式、账号池、会话用户，不比模型，同一中转池上点名 sonnet
- * 仍可能续上一段 opus，快照 model 还是 opus；中转若静默换成另一个模型，也在这里叫停这一段。
- * 两种都只停这一段。怎么重派由失败分流 MD3 和任务工作流 `model-mismatch-reroute` 管，不在插头里挂整张单。
+ * #2742 不是这里剥错了：点名 `claude-sonnet-5-5`、读回 `claude-opus-5-5[1m]`，剥掉末尾方括号仍是
+ * sonnet 对 opus。也不是中转静默换模：新会话的快照在出上游请求之前就是点名加 `[1m]`（下面那条实测）；
+ * sonnet 在名册里，照点名起会对得上。#1298 才是换模——新会话、点名不在中转名单里，服务端换成名单第一个
+ * （gpt-6-sol → gpt-6-astra）。#2797 的发版叫停只让上一段收场，叫停本身不改快照里的模型。
+ * 这一例是发版叫停后误续上一段 opus：续会话不比模型，同一 mirasim-relay 池点名 sonnet 仍续上 opus，
+ * 快照 model 还是那段会话的 `claude-opus-5-5[1m]`。这里只停这一段。怎么重派由失败分流 MD3 和任务工作流
+ * `model-mismatch-reroute` 管，不在插头里挂整张单。
  */
 function modelMatches(expected: string, observed: string): boolean {
   const strip = (s: string) =>

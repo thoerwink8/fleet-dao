@@ -413,17 +413,22 @@ export const RULES: readonly FailureRule[] = [
     text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
     routeOutcome: 'fail',
   },
-  // 点名的模型和实际回话的不一样（#2742）。归类是会话/路由身份不一致，不是三件别的事：
-  // - 不是比对串把 `[1m]` 剥错。mirasim/run.ts 的 modelMatches 已剥末尾方括号；点名 claude-sonnet-5-5、
-  //   读回 claude-opus-5-5[1m]，剥完仍是 sonnet 对 opus。
-  // - 不是 #1298。那一单是探针侧把目录里的 gpt-6-sol 换成 gpt-6-astra。
-  // - 不是 #2797。那一单是发版排空把还在跑的会话叫停（CANCELLED / engine_stop）。叫停本身不算这种失败。
-  // 能对上 #2742 的机制：续会话只比执行方式、账号池、会话用户，不比模型。发版叫停 opus 之后，同一
-  // mirasim-relay 池点名 sonnet，仍可能续上那段 opus，快照继续报 opus[1m]。中转静默换成另一个模型
-  // 也落成同一个码。两种都是这一段的身份和点名对不上，记进这条路由的失败（routeOutcome fail）。
+  // 点名的模型和实际回话的不一样（#2742）。这一例是发版叫停后误续上一段 opus 会话，记进这条路由的失败
+  // （routeOutcome fail）。当时法国在跑 0c35f93a，Mirasim 还不脱开：
+  // - 前几段结局是「引擎叫停（其他：CANCELLED）」：引擎停机取消了还在跑的活动，会话收场（#2797 统计的那一种）。
+  //   叫停本身不是这种失败，也不改模型。
+  // - 继续时按决定 0088 续会话。resumeVerdict 只比执行方式、账号池、会话用户，不比模型；同池换模型照样续
+  //   （#2119）。mirasim-relay 上的 opus-5.5 和 sonnet-5.5 是同一个执行方式、同一个池、同一个会话用户。
+  //   发版后重新选路（决定 0104 已在上一版 b4686835）可以点到 sonnet，续的仍是上一段 opus。prompt 带上
+  //   model=claude-sonnet-5-5 和旧 sessionKey，快照 model 仍是这段会话自己的 claude-opus-5-5[1m]。
+  // - 不是比对串把 `[1m]` 剥错。modelMatches 已剥末尾方括号，剥完仍是 sonnet 对 opus。新会话若照点名起，
+  //   快照在出上游请求之前就是点名加 `[1m]`（MS-29）；sonnet 在名册里，对得上，不会停。约 56 秒是服务单线程
+  //   起会话的阻塞（MS-08），第一份当前轮快照就已经是 opus。
+  // - 不是 #1298。那一单是新会话、点名的型号不在中转名单里，服务端换成名单第一个（gpt-6-sol → gpt-6-astra）。
+  //   sonnet 在名单里。读回的是上一段的 opus，不是名单替换。
   // 这里仍判停下：老历史重放读到的判断就是挂起。新历史由任务工作流 patched('model-mismatch-reroute')
-  // 接住——停这一段，按点名路由开新会话重派一次；同一条再对不上就避开它。还有能派的就继续，一条都没有才挂起。
-  // 发版排空和 Mirasim 接回不在这里改。
+  // 接住——停这一段，按点名路由开新会话重派一次（误续靠开新会话解开）。同一条开了新会话仍对不上，才是这条
+  // 路由在换模，避开它。还有能派的就继续，一条都没有才挂起。发版排空和 Mirasim 接回不在这里改。
   {
     id: 'MD3',
     title: '回话的模型不是点名的那个',
