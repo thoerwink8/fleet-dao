@@ -4,6 +4,7 @@
 // mirasimDriver：userFrom 'sole'），所以账本只看这一个人的。
 import { type MeterFs, readMirasimMeter, type SessionUser } from '@fleet-dao/adapters';
 import {
+  annotateSessionlessRuns,
   type Db,
   fillRunUsageFromMeter,
   finishScheduleRun,
@@ -34,6 +35,7 @@ export function usageBackfillJob(w: UsageBackfillWiring): () => UsageBackfillJob
     readMeter: (windows) => readMirasimMeter(w.meterDir(w.user), windows, w.meterFs(w.user)),
     fill: (runId, usage, at) => fillRunUsageFromMeter(w.db, { runId, usage, at }),
     note: (runId, note, at) => noteRunUsage(w.db, { runId, note, at }),
+    annotateSessionless: (endedAfter, at) => annotateSessionlessRuns(w.db, { endedAfter, at }),
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),
       finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),

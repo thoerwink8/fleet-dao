@@ -2,6 +2,12 @@
 
 import { readdir, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
+import {
+  USAGE_NOTE_MASTER_OFF,
+  USAGE_NOTE_MEMORY,
+  USAGE_NOTE_SPAWN_FAILED,
+  USAGE_SESSION_UNREAD,
+} from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { OneShotError, runOneShot } from '../../src/runner/one-shot.ts';
 import { fakeDeps } from './helpers.ts';
@@ -214,9 +220,16 @@ describe('one-shot.ts', () => {
         { ...owner, model: 'fake-model', worktreePath: BASE_INPUT.cwd, startedAt: r.startedAt },
       ]);
       expect(recorded).toHaveLength(1);
-      const { endedAt, outcome, routeOutcome, ...opening } = recorded[0] as NonNullable<(typeof recorded)[0]>;
+      const { endedAt, outcome, routeOutcome, usageNote, ...opening } = recorded[0] as NonNullable<
+        (typeof recorded)[0]
+      >;
       expect(opening).toEqual(started[0]);
-      expect([endedAt, outcome, routeOutcome]).toEqual([r.endedAt, 'done', 'ok']);
+      expect([endedAt, outcome, routeOutcome, usageNote]).toEqual([
+        r.endedAt,
+        'done',
+        'ok',
+        USAGE_SESSION_UNREAD,
+      ]);
     } finally {
       await cleanup();
     }
@@ -463,6 +476,117 @@ describe('切号叫停（deps.stop，#59）：结局 org_switch，不是 killed�
     try {
       const r = await runOneShot({ ...BASE_INPUT, timeoutMinutes: 0.0005 }, deps);
       expect(r.outcome).toBe('timeout');
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+/** 确定没发出模型调用：四样 token 和花费都是 0。 */
+const ZERO_USAGE = {
+  inputTokens: 0,
+  outputTokens: 0,
+  cacheReadTokens: 0,
+  cacheWriteTokens: 0,
+  costUsd: 0,
+};
+
+describe('没会话号的用量（#2689）：确定没调用的记 0，读不准的写「读不到」', () => {
+  it('总开关关、还没起会话：记 0 用量，原因写总开关关', async () => {
+    const stop = new AbortController();
+    stop.abort(new Error('引擎总开关：总开关关着；这一段没起会话'));
+    const { deps, calls, recorded, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '不该跑', stderr: '', killed: false },
+    });
+    deps.stop = stop.signal;
+    try {
+      const r = await runOneShot(BASE_INPUT, deps);
+      expect(r.outcome).toBe('org_switch');
+      expect(calls).toHaveLength(0);
+      expect(recorded[0]).toMatchObject({ ...ZERO_USAGE, usageNote: USAGE_NOTE_MASTER_OFF });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('内存不够、没起会话：记 0 用量，原因写内存不够', async () => {
+    const { deps, calls, recorded, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '不该跑', stderr: '', killed: false },
+    });
+    deps.memoryAdmission = {
+      readText: async () => String(9500 * 1024 * 1024),
+      cgroupRoot: '/sys/fs/cgroup',
+      slicePath: 'fleet.slice/fleet-agents.slice',
+      sliceHighMb: 10_000,
+      reservePerSessionMb: 2048,
+    };
+    try {
+      const r = await runOneShot(BASE_INPUT, deps);
+      expect(r.outcome).toBe('admission_blocked');
+      expect(calls).toHaveLength(0);
+      expect(recorded[0]).toMatchObject({ ...ZERO_USAGE, usageNote: USAGE_NOTE_MEMORY });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('起会话失败：记 0 用量，原因写起会话失败', async () => {
+    const { deps, recorded, cleanup } = await fakeDeps({
+      scripted: () => {
+        throw new Error('spawn ENOENT');
+      },
+    });
+    try {
+      await expect(runOneShot(BASE_INPUT, deps)).rejects.toMatchObject({ code: 'SPAWN_FAILED' });
+      expect(recorded[0]).toMatchObject({
+        outcome: 'spawn_failed',
+        ...ZERO_USAGE,
+        usageNote: USAGE_NOTE_SPAWN_FAILED,
+      });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('起会话是否成功读不准（没有会话号、也没有用量）：不记 0，原因写会话号没拿到', async () => {
+    const { deps, recorded, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: '做完了', stderr: '', killed: false },
+    });
+    try {
+      const r = await runOneShot(BASE_INPUT, deps);
+      expect(r.outcome).toBe('done');
+      expect(recorded[0]?.usageNote).toBe(USAGE_SESSION_UNREAD);
+      expect(recorded[0]?.inputTokens).toBeUndefined();
+      expect(recorded[0]?.outputTokens).toBeUndefined();
+      expect(recorded[0]?.costUsd).toBeUndefined();
+      expect(recorded[0]?.sessionId).toBeUndefined();
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('有会话号、用量也读到了：不记 0，也不写「会话号没拿到」', async () => {
+    const { deps, recorded, cleanup } = await fakeDeps({
+      scripted: {
+        exitCode: 0,
+        stdout: '做完了',
+        stderr: '',
+        killed: false,
+        facts: {
+          sessionId: 'claude:403c41e2-8629-410a-8d7a-d61f65add9be',
+          usage: { inputTokens: 3, outputTokens: 4, cacheReadTokens: 5, cacheWriteTokens: 6 },
+        },
+      },
+    });
+    try {
+      await runOneShot(BASE_INPUT, deps);
+      expect(recorded[0]).toMatchObject({
+        sessionId: 'claude:403c41e2-8629-410a-8d7a-d61f65add9be',
+        inputTokens: 3,
+        outputTokens: 4,
+      });
+      expect(recorded[0]?.usageNote).toBeUndefined();
+      expect(recorded[0]?.inputTokens).not.toBe(0);
     } finally {
       await cleanup();
     }

@@ -31,6 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { redact, StopReason, type TranscriptEntry } from '@fleet-dao/adapters';
+import { sessionlessUsage } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { admitSessionMemory } from '../real/memory-admission.ts';
@@ -555,7 +556,7 @@ async function recordRun(input: OneShotInput, result: OneShotResult, runs: RunsW
     outcome: result.outcome,
     routeOutcome: routeOutcomeOf(result, input.segment),
     ...(result.failureReason !== undefined ? { failureReason: result.failureReason } : {}),
-    ...usageFields(result.facts),
+    ...usageFields(result),
   };
   await runs.record(record);
 }
@@ -565,21 +566,52 @@ function isCpuSeconds(v: number | undefined): v is number {
   return v !== undefined && Number.isSafeInteger(v) && v > 0;
 }
 
-/** 执行体读到的用量和花费记进这一笔；读不到的字段不写，不当成 0（#216）。 */
-function usageFields(facts: SpawnFacts | undefined): Partial<RunRecord> {
-  if (!facts) return {};
-  const u = facts.usage;
-  return {
-    ...(u?.inputTokens !== undefined ? { inputTokens: u.inputTokens } : {}),
-    ...(u?.outputTokens !== undefined ? { outputTokens: u.outputTokens } : {}),
-    ...(u?.cacheReadTokens !== undefined ? { cacheReadTokens: u.cacheReadTokens } : {}),
-    ...(u?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
-    ...(facts.costUsd !== undefined ? { costUsd: facts.costUsd } : {}),
-    ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
-    ...(isCpuSeconds(facts.cpuSeconds) ? { cpuSeconds: facts.cpuSeconds } : {}),
-    ...(facts.sessionId !== undefined ? { sessionId: facts.sessionId } : {}),
-    ...(facts.usageWhy?.trim() ? { usageNote: facts.usageWhy.trim() } : {}),
-  };
+/**
+ * 执行体读到的用量和花费记进这一笔；读不到的字段不写，不当成 0（#216）。
+ * 例外（#2689）：确定没发出模型调用的（总开关关、内存不够、起会话失败）四样和花费记 0，并写原因。
+ * 没有会话号、又读不准起没起的，数留空，usage_note 写「会话号没拿到，用量读不到」。
+ */
+function usageFields(result: OneShotResult): Partial<RunRecord> {
+  const facts = result.facts;
+  const u = facts?.usage;
+  const recorded: Partial<RunRecord> = facts
+    ? {
+        ...(u?.inputTokens !== undefined ? { inputTokens: u.inputTokens } : {}),
+        ...(u?.outputTokens !== undefined ? { outputTokens: u.outputTokens } : {}),
+        ...(u?.cacheReadTokens !== undefined ? { cacheReadTokens: u.cacheReadTokens } : {}),
+        ...(u?.cacheWriteTokens !== undefined ? { cacheWriteTokens: u.cacheWriteTokens } : {}),
+        ...(facts.costUsd !== undefined ? { costUsd: facts.costUsd } : {}),
+        ...(facts.memoryPeakMb !== undefined ? { memoryPeakMb: facts.memoryPeakMb } : {}),
+        ...(isCpuSeconds(facts.cpuSeconds) ? { cpuSeconds: facts.cpuSeconds } : {}),
+        ...(facts.sessionId !== undefined ? { sessionId: facts.sessionId } : {}),
+        ...(facts.usageWhy?.trim() ? { usageNote: facts.usageWhy.trim() } : {}),
+      }
+    : {};
+  const decision = sessionlessUsage({
+    outcome: result.outcome,
+    failureReason: result.failureReason,
+    hasSessionId: facts?.sessionId !== undefined,
+    hasUsageWhy: Boolean(facts?.usageWhy?.trim()),
+    hasToken:
+      u?.inputTokens !== undefined ||
+      u?.outputTokens !== undefined ||
+      u?.cacheReadTokens !== undefined ||
+      u?.cacheWriteTokens !== undefined,
+  });
+  if (decision.kind === 'leave') return recorded;
+  if (decision.kind === 'zero') {
+    return {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+      usageNote: decision.note,
+      ...(recorded.memoryPeakMb !== undefined ? { memoryPeakMb: recorded.memoryPeakMb } : {}),
+      ...(recorded.cpuSeconds !== undefined ? { cpuSeconds: recorded.cpuSeconds } : {}),
+    };
+  }
+  return { ...recorded, usageNote: decision.note };
 }
 
 /** 类型导出方便外部用 brief 的类型参数。 */

@@ -1,12 +1,23 @@
 // runs 表（#555-3，#599）：三段每次跑一次的流水账。
 import { randomUUID } from 'node:crypto';
-import { eq, isNull } from 'drizzle-orm';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  USAGE_NOTE_MASTER_OFF,
+  USAGE_NOTE_MEMORY,
+  USAGE_NOTE_NOT_STARTED,
+  USAGE_NOTE_SPAWN_FAILED,
+  USAGE_SESSION_UNREAD,
+} from '@fleet-dao/shared';
+import { eq, isNull, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { listRunningEngineTasks } from '../src/queries/idle-running.ts';
 import {
+  annotateSessionlessRuns,
   closeOpenRuns,
   getRun,
   latestRunOfTask,
+  type RunInsert,
   runsOfTask,
   startRun,
   taskTokenSpend,
@@ -343,6 +354,9 @@ describe('startRun / closeOpenRuns：开跑留一行没结束的，引擎起来�
       outcome: 'killed',
       routeOutcome: 'neutral',
       failureReason: '引擎重启时这一段还没收场',
+      sessionId: null,
+      usageNote: '会话号没拿到，用量读不到',
+      inputTokens: null,
     });
     expect((await getRun(t.db, future))?.endedAt).toEqual(new Date(NOW.getTime() + MIN));
     expect(await getRun(t.db, done)).toMatchObject({
@@ -638,5 +652,148 @@ describe('listRunningEngineTasks：在干活的引擎任务，带开着的会话
     ]);
     expect(rows[0]?.doing).toContain('带上进度续一次');
     expect(rows[0]?.updatedAt).toEqual(ago(HOUR));
+  });
+});
+
+describe('没有会话号的用量（#2689）', () => {
+  const recent = () => new Date(Date.now() - 60_000);
+  const at = new Date('2026-10-16T06:00:00Z');
+
+  async function ended(over: Partial<RunInsert> & Pick<RunInsert, 'outcome'>) {
+    const startedAt = new Date(recent().getTime() - 60_000);
+    return startRun(t.db, { segment: 'manual', model: 'kimi-k3', startedAt, endedAt: recent(), ...over });
+  }
+
+  it('确定没调用的三种记 0 并写原因；读不准的只写原因、数留空；有会话号、已有原因、窗口外的不动', async () => {
+    const memory = await ended({ outcome: 'admission_blocked', failureReason: '内存余量放不下' });
+    const spawn = await ended({ outcome: 'spawn_failed', failureReason: '起子进程没起成：spawn ENOENT' });
+    const master = await ended({
+      outcome: 'org_switch',
+      failureReason: '引擎总开关：总开关关着；这一段没起会话（还没起会话）',
+    });
+    const drained = await ended({
+      outcome: 'org_switch',
+      failureReason: '发布排空：到点了；这一段没起会话（还没起会话）',
+    });
+    const unread = await ended({ outcome: 'killed', failureReason: '引擎重启时这一段还没收场' });
+    const partial = await ended({ outcome: 'done', outputTokens: 12 });
+    const hasSession = await ended({ outcome: 'done', sessionId: 'claude:abc' });
+    const noted = await ended({ outcome: 'killed', usageNote: '原先的原因' });
+    const old = await startRun(t.db, {
+      segment: 'manual',
+      model: 'kimi-k3',
+      startedAt: ago(HOUR),
+      endedAt: NOW,
+      outcome: 'admission_blocked',
+    });
+
+    const n = await annotateSessionlessRuns(t.db, {
+      endedAfter: new Date(Date.now() - 14 * 24 * 60 * 60_000),
+      at,
+    });
+    expect(n).toBe(6);
+
+    expect(await getRun(t.db, memory.id)).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+      usageNote: USAGE_NOTE_MEMORY,
+    });
+    expect(await getRun(t.db, spawn.id)).toMatchObject({
+      inputTokens: 0,
+      costUsd: 0,
+      usageNote: USAGE_NOTE_SPAWN_FAILED,
+    });
+    expect(await getRun(t.db, master.id)).toMatchObject({
+      inputTokens: 0,
+      costUsd: 0,
+      usageNote: USAGE_NOTE_MASTER_OFF,
+    });
+    expect(await getRun(t.db, drained.id)).toMatchObject({
+      inputTokens: 0,
+      costUsd: 0,
+      usageNote: USAGE_NOTE_NOT_STARTED,
+    });
+    expect(await getRun(t.db, unread.id)).toMatchObject({
+      inputTokens: null,
+      costUsd: null,
+      usageNote: USAGE_SESSION_UNREAD,
+    });
+    expect(await getRun(t.db, partial.id)).toMatchObject({
+      outputTokens: 12,
+      inputTokens: null,
+      usageNote: USAGE_SESSION_UNREAD,
+    });
+    expect(await getRun(t.db, hasSession.id)).toMatchObject({
+      sessionId: 'claude:abc',
+      usageNote: null,
+      inputTokens: null,
+    });
+    expect(await getRun(t.db, noted.id)).toMatchObject({ usageNote: '原先的原因', inputTokens: null });
+    expect(await getRun(t.db, old.id)).toMatchObject({ usageNote: null, inputTokens: null });
+
+    expect(await annotateSessionlessRuns(t.db, { endedAfter: new Date(0), at })).toBe(1);
+    expect(await getRun(t.db, old.id)).toMatchObject({ inputTokens: 0, usageNote: USAGE_NOTE_MEMORY });
+  });
+
+  it('有会话号的开着的行被收掉时不写「读不到」', async () => {
+    const id = randomUUID();
+    await startRun(t.db, {
+      id,
+      segment: 'manual',
+      model: 'kimi-k3',
+      startedAt: ago(MIN),
+      sessionId: 'claude:still-running',
+    });
+    await closeOpenRuns(t.db, { endedAt: NOW, reason: '引擎重启时这一段还没收场' });
+    expect(await getRun(t.db, id)).toMatchObject({
+      outcome: 'killed',
+      sessionId: 'claude:still-running',
+      usageNote: null,
+      inputTokens: null,
+    });
+  });
+
+  it('迁移语句和补写函数同一套说法：近 14 天没会话号的补上，更早的不动', async () => {
+    const memory = await ended({ outcome: 'admission_blocked', failureReason: '内存余量放不下' });
+    const unread = await ended({ outcome: 'timeout', failureReason: '超过时限' });
+    const old = await startRun(t.db, {
+      segment: 'verify',
+      model: 'kimi-k3',
+      startedAt: ago(2 * HOUR),
+      endedAt: NOW,
+      outcome: 'spawn_failed',
+    });
+    const text = readFileSync(
+      join(import.meta.dirname, '../migrations/0079_sessionless_usage_notes.sql'),
+      'utf8',
+    );
+    for (const phrase of [
+      USAGE_NOTE_MASTER_OFF,
+      USAGE_NOTE_MEMORY,
+      USAGE_NOTE_SPAWN_FAILED,
+      USAGE_NOTE_NOT_STARTED,
+      USAGE_SESSION_UNREAD,
+    ]) {
+      expect(text).toContain(phrase);
+    }
+    for (const statement of text
+      .split(';')
+      .map((s) => s.trim())
+      .filter((s) => s.includes('UPDATE'))) {
+      await t.db.execute(sql.raw(statement));
+    }
+    expect(await getRun(t.db, memory.id)).toMatchObject({
+      inputTokens: 0,
+      costUsd: 0,
+      usageNote: USAGE_NOTE_MEMORY,
+    });
+    expect(await getRun(t.db, unread.id)).toMatchObject({
+      inputTokens: null,
+      usageNote: USAGE_SESSION_UNREAD,
+    });
+    expect(await getRun(t.db, old.id)).toMatchObject({ inputTokens: null, usageNote: null });
   });
 });

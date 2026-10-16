@@ -34,6 +34,61 @@ export const SEGMENT_OUTCOME_LABELS: Record<SegmentOutcome, string> = {
 /** 进程没起来就结束的两种结局：没有用量读数。 */
 const NOT_STARTED: readonly SegmentOutcome[] = ['spawn_failed', 'admission_blocked'];
 
+/**
+ * 确定没发出模型调用时写进 runs.usage_note 的原因（#2689）。哪一种写哪一句。
+ * 起会话之前就停、但不是总开关（发布排空、切号）也确定没有调用，用 NOT_STARTED 那句。
+ */
+export const USAGE_NOTE_MASTER_OFF = '总开关关，没起会话，没有模型调用';
+export const USAGE_NOTE_MEMORY = '内存不够，没起会话，没有模型调用';
+export const USAGE_NOTE_SPAWN_FAILED = '起会话失败，没有模型调用';
+export const USAGE_NOTE_NOT_STARTED = '还没起会话，没有模型调用';
+/**
+ * 起会话是否成功读不准、又没有会话号：用量留空（可能已经调用过模型，不能记成 0），原因写这一句。
+ * 看板据此显示「读不到」，不留空。
+ */
+export const USAGE_SESSION_UNREAD = '会话号没拿到，用量读不到';
+/** 上面那句在看板上的短字。 */
+export const USAGE_BOARD_UNREAD = '读不到';
+
+export interface SessionlessUsageInput {
+  outcome: string;
+  failureReason?: string | null;
+  /** 有会话号就不改：补记任务按它补。 */
+  hasSessionId: boolean;
+  /** 插头已经写了为什么读不到（被叫停、超时杀没走到终帧）。留着那句，不改成「会话号没拿到」。 */
+  hasUsageWhy: boolean;
+  /** 四样 token 里已经有数。有数就不记成 0。 */
+  hasToken: boolean;
+}
+
+/** 没会话号的一笔该怎么记：记 0 并写原因、只写「读不到」、或者不动。 */
+export type SessionlessUsage =
+  | { kind: 'zero'; note: string }
+  | { kind: 'unread'; note: string }
+  | { kind: 'leave' };
+
+/** 还没把进程拉起来（总开关、排空、切号都在这一步停）。 */
+function stoppedBeforeStart(failureReason: string): boolean {
+  return failureReason.includes('还没起会话') || failureReason.includes('这一段没起会话');
+}
+
+/**
+ * 没有会话号的一笔怎么记用量。确定没发出模型调用的记 0（总开关关、内存不够、起会话失败，以及起会话之前就停的）；
+ * 读不准起没起的只写原因、数留空。有会话号、或插头已经解释过为什么读不到的，不动。
+ */
+export function sessionlessUsage(input: SessionlessUsageInput): SessionlessUsage {
+  if (input.hasSessionId || input.hasUsageWhy) return { kind: 'leave' };
+  const why = input.failureReason ?? '';
+  if (!input.hasToken) {
+    if (input.outcome === 'admission_blocked') return { kind: 'zero', note: USAGE_NOTE_MEMORY };
+    if (input.outcome === 'spawn_failed') return { kind: 'zero', note: USAGE_NOTE_SPAWN_FAILED };
+    if (input.outcome === 'org_switch' && stoppedBeforeStart(why)) {
+      return { kind: 'zero', note: why.includes('总开关') ? USAGE_NOTE_MASTER_OFF : USAGE_NOTE_NOT_STARTED };
+    }
+  }
+  return { kind: 'unread', note: USAGE_SESSION_UNREAD };
+}
+
 /** 怎么和这张单对上的：task = 按 task_id；issueNumber = task_id 没记，按单号兜底（单号几个仓可能重）。 */
 export type SegmentMatch = 'task' | 'issueNumber';
 
@@ -193,6 +248,7 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
     else note('outcome', [`结局「${run.outcome}」认不出`]);
   }
   const notStarted = outcome !== undefined && NOT_STARTED.includes(outcome);
+  const sessionUnread = run.usageNote?.trim() === USAGE_SESSION_UNREAD;
 
   const counts: Partial<Record<TokenKey, number>> = {};
   if (!running) {
@@ -205,12 +261,17 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
       else bad.push(`${TOKEN_NAMES[key]}（${v}）`);
     }
     const tokens: string[] = [];
-    if (missing.length === TOKEN_KEYS.length) {
-      tokens.push(notStarted ? '进程没起来，没有用量读数' : '四样 token 都没记到');
-    } else if (missing.length) tokens.push(`没记到：${missing.join('、')}`);
-    // 「用量补记」写下的原因（还在等中转计量回填、中转没有这次调用的记录……）：有缺才接上
+    // 「用量补记」写下的原因（还在等中转计量回填、中转没有这次调用的记录……）：有缺才接上。
+    // 会话号没拿到的那一句，看板写「读不到」，不写成空、也不混进「都没记到」（那是真漏）。
     const why = run.usageNote?.trim();
-    if (missing.length && !notStarted && why) tokens.push(why);
+    if (missing.length === TOKEN_KEYS.length) {
+      tokens.push(
+        sessionUnread ? USAGE_BOARD_UNREAD : notStarted ? '进程没起来，没有用量读数' : '四样 token 都没记到',
+      );
+    } else if (missing.length) tokens.push(`没记到：${missing.join('、')}`);
+    if (missing.length && !notStarted && why && !(sessionUnread && missing.length === TOKEN_KEYS.length)) {
+      tokens.push(why);
+    }
     if (bad.length) tokens.push(`认不出：${bad.join('、')}`);
     note('tokens', tokens);
   }
@@ -219,13 +280,17 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
   if (!running) {
     const v = run.costUsd;
     if (v !== undefined && Number.isFinite(v) && v >= 0) costUsd = v;
-    else if (v === undefined) note('cost', [notStarted ? '进程没起来，没有花费读数' : '花费没记到']);
-    else note('cost', [`花费「${v}」认不出`]);
+    else if (v === undefined) {
+      note('cost', [
+        sessionUnread ? USAGE_BOARD_UNREAD : notStarted ? '进程没起来，没有花费读数' : '花费没记到',
+      ]);
+    } else note('cost', [`花费「${v}」认不出`]);
   }
 
   // 没报花费、进程起来过的：按目录单价估一个数（页面标「估算」），没有单价、token 没读全的照实写
+  // 会话号没拿到的不估：数是空的是因为读不准，不是「token 没读全所以估不了」
   const estimate =
-    !running && costUsd === undefined && !notStarted
+    !running && costUsd === undefined && !notStarted && !sessionUnread
       ? estimateCostUsd(counts, run.model, (ctx.priceOf ?? modelPriceOf)(run.model))
       : undefined;
 
