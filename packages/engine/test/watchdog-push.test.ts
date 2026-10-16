@@ -17,7 +17,7 @@ function world(facts: FeishuPushFacts | (() => Promise<FeishuPushFacts>), row: R
       title: string;
       body: string;
       link: string;
-      options?: readonly { action?: { kind: string } }[] | undefined;
+      options?: readonly { action?: { kind: string } | undefined }[] | undefined;
     }[],
     resolved: [] as string[],
   };

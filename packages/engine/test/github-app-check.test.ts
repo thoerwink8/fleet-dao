@@ -46,7 +46,7 @@ interface World {
     title: string;
     body: string;
     link?: string | undefined;
-    options?: readonly { action?: { kind: string } }[] | undefined;
+    options?: readonly { action?: { kind: string } | undefined }[] | undefined;
   }[];
   resolved: { dedupeKey: string; by: string; why: string }[];
   asked: RepoRef[][];
