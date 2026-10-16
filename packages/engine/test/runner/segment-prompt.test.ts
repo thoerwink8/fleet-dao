@@ -95,6 +95,18 @@ describe('动手会话的提示词', () => {
     expect(renderResumePrompt({ feedback: [] })).toContain('最后一条回复会写进 PR 的说明');
   });
 
+  it('重活先出方案的那一段（#2755）：规矩照给，最后另起一节说只读、只回方案 JSON；重出那一次续会话也只要 JSON、不叫它提交', () => {
+    const text = render({ plan: true });
+    expect(text).toContain('## 怎么干（一次性会话）');
+    expect(text).toContain('## 这一段先只出方案（只读）');
+    expect(text).toContain('"addedLines"');
+    expect(text.indexOf('## 这一段先只出方案')).toBeGreaterThan(text.indexOf('## 怎么干'));
+    expect(render()).not.toContain('先只出方案');
+    const retry = renderResumePrompt({ feedback: ['上一条回复不是要的方案 JSON'], plan: true });
+    expect(retry).toContain('只回一个 JSON 代码块');
+    expect(retry).not.toContain('git commit');
+  });
+
   it('派前探测探通且没换路不进返工意见；换路、探不通的仍按条带上', () => {
     const onlyPass = render({ feedback: ['派前探测：grok-4.7 通'] });
     expect(onlyPass).not.toContain('派前探测');

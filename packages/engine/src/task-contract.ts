@@ -165,6 +165,11 @@ export interface RunSegmentInput {
    * 从收发目录读回已有的输出、等它收场，结局照常记到原来那一行 runs。老历史里没有这个字段。
    */
   attach?: SegmentAttach;
+  /**
+   * plan＝重活先出方案的那一段（#2755）：提示词照常给交代和规矩，另说这一段只读、不改文件不提交，最后一条回复只回方案 JSON。
+   * 不给就是照常动手。老历史里没有这个字段。
+   */
+  mode?: 'plan';
 }
 
 /**
@@ -232,6 +237,10 @@ export interface DeliveryRead {
    * 真实现一定给（没有就是空数组）；老历史里没有这个字段（当作没有）。
    */
   conflicts?: string[];
+  /**
+   * 交的头相对树里钉住的主线新增了多少行（#2755 体量预算按它判）。没数成、老历史里没有：当作没量到，不判预算。
+   */
+  addedLines?: number;
 }
 
 export interface ColdVerifyInput {

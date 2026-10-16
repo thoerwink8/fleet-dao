@@ -35,6 +35,31 @@ export interface SegmentPromptInput {
   preload?: readonly PreloadRead[];
   /** 已废（子代理提示整条链路已删）：只为 task-segment.ts 还在传它而留，不读；等 #1972 合并后随那处一起删。 */
   subagentHint?: boolean;
+  /** 重活先出方案的那一段（#2755）：规矩照给，另说这一段只读、最后一条回复只回方案 JSON（planSection）。 */
+  plan?: boolean;
+}
+
+/** 方案 JSON 的样子（#2755）：引擎按 workflows/task-support.ts 的 parsePlan 认，认不出让会话重出一次。 */
+export const PLAN_JSON_EXAMPLE =
+  '{"files": ["packages/x/src/a.ts", "packages/x/test/a.test.ts"], "addedLines": 120, "acceptance": [1, 2]}';
+
+/**
+ * 重活先出方案（#2755：重活一轮做成 18%、PR 新增行 p90 7117）：这一段只读，最后一条回复只回方案 JSON；
+ * 下一条消息才让它照方案动手（续同一个会话）。
+ */
+export function planSection(): string[] {
+  return [
+    '',
+    '## 这一段先只出方案（只读）',
+    '这张单是重活：先别动手。这一段只读代码，不改任何文件、不提交。想清楚最小的改法，最后一条回复只回一个 JSON 代码块，别的什么都不写：',
+    '```json',
+    PLAN_JSON_EXAMPLE,
+    '```',
+    '- files：要改或新建的文件（仓内路径），只列做到验收条必须动的；单子范围外的不列。',
+    '- addedLines：预计新增多少行（整数，含测试）。',
+    '- acceptance：这些改动对应「怎么算做完」里的第几条（从 1 数），每条验收都要对得上。',
+    '下一条消息会让你照这个方案动手；动手时超出方案太多、超出体量预算，引擎会打回让你收窄。',
+  ];
 }
 
 /**
@@ -63,7 +88,11 @@ function feedbackSection(feedback: readonly string[], title: string): string[] {
  * 续上一段会话时的提示词：会话里已经有整张单、怎么干的规矩和前面的过程，这里只补这一次为什么接着干、要改什么。
  * 被打断的说一句原因；返工意见按条给。两样都没有也给一句「接着做」，不交空提示词。
  */
-export function renderResumePrompt(input: { interrupted?: string; feedback: readonly string[] }): string {
+export function renderResumePrompt(input: {
+  interrupted?: string;
+  feedback: readonly string[];
+  plan?: boolean;
+}): string {
   const interrupted = input.interrupted?.trim();
   const out = [
     interrupted
@@ -71,8 +100,14 @@ export function renderResumePrompt(input: { interrupted?: string; feedback: read
       : '接着这个会话往下做：分支和工作树都没变，单子和规矩照前面的。',
     ...feedbackSection(input.feedback, '## 这一轮要改的（照着改，改完才算做完）'),
     '',
-    NO_BACKGROUND_RULE,
-    `改完照旧 git add、git commit 提交，不推送、不开 PR；${ANSWER_TO_PR}：逐条一行回验收条，再加一行欠什么。`,
+    ...(input.plan
+      ? [
+          `这一段还是只出方案：不改文件、不提交，最后一条回复只回一个 JSON 代码块（${PLAN_JSON_EXAMPLE} 这个样子）。`,
+        ]
+      : [
+          NO_BACKGROUND_RULE,
+          `改完照旧 git add、git commit 提交，不推送、不开 PR；${ANSWER_TO_PR}：逐条一行回验收条，再加一行欠什么。`,
+        ]),
   ];
   return out.join('\n');
 }
@@ -82,6 +117,7 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     return renderResumePrompt({
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
       feedback: input.feedback,
+      ...(input.plan ? { plan: true } : {}),
     });
   }
   const { brief, specDir, feedback } = input;
@@ -111,5 +147,7 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     );
   }
   out.push(...feedbackSection(feedback, '## 上几轮留下的返工意见（照着改，改完才算做完）'));
+  // 先出方案的那一段：规矩照给（续着动手时会话手里要有），最后另起一节说这一段只读、只回方案 JSON
+  if (input.plan) out.push(...planSection());
   return out.join('\n');
 }
