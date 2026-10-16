@@ -1,5 +1,6 @@
 // fleet-api task continue|abandon|redo（#1402）：任务停下后，指挥官在命令行续、放弃、重做，不用再靠仓外脚本直接打 Temporal。
 // 继续、放弃发的信号名和驾驶舱按钮一样（shared/task-signals.ts：taskContinue、taskAbandon）。
+// 继续同时发 taskRouteWake：等选路的那一觉不看 taskContinue（#2392）。
 // 重做不自己另起工作流，走 temporal.ts 现成的 taskRedo.redo；只在已叫停或挂起时允许，其余拒绝并说原因。
 // 挂起且上一代还停在 parked：重做入口自己先叫停再另起。真在跑仍由入口拒绝。
 // 继续次数用满（停住原因是「已继续 N 次仍没过」）时不发信号，退出码 1，写明要重开用 redo。
@@ -8,6 +9,7 @@
 
 import { continueExhausted, TASK_SIGNAL_NAMES, type TaskState, taskWorkflowId } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
+import { continueSignals } from './continue-signals.ts';
 import type { TaskRedoPort } from './deps.ts';
 import type { Store, TaskSignal, WorkflowControl } from './ports.ts';
 import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableError } from './ports.ts';
@@ -24,6 +26,7 @@ export class TaskCliError extends Error {
 export const TASK_USAGE =
   '用法：fleet-api task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"' +
   '（继续、放弃发给任务工作流，信号名和驾驶舱「继续」「叫停」一样：taskContinue、taskAbandon；' +
+  '继续同时发 taskRouteWake，把睡在等选路里的叫醒；' +
   '重做走现成的 taskRedo.redo，只在已叫停或挂起时另起一代，做完、失败和还在跑的拒绝并说原因。' +
   '--note 必填，写进操作记录。找不到任务工作流退出码 1，不打印成功。退出码：0 做成了；1 没做成；2 参数不对）';
 
@@ -220,12 +223,12 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
     return refuse(ref, `查在跑的任务工作流没成：${why}`, task.id);
   }
 
-  const signal: TaskSignal =
+  const signals: TaskSignal[] =
     args.action === 'continue'
-      ? { name: TASK_SIGNAL_NAMES.continue, by: deps.operator }
-      : { name: TASK_SIGNAL_NAMES.abandon, by: deps.operator, reason: args.note };
+      ? continueSignals(deps.operator)
+      : [{ name: TASK_SIGNAL_NAMES.abandon, by: deps.operator, reason: args.note }];
   try {
-    await deps.workflows.signal(workflowId, signal);
+    for (const signal of signals) await deps.workflows.signal(workflowId, signal);
   } catch (err) {
     if (err instanceof WorkflowGoneError || err instanceof WorkflowTargetNotFoundError) {
       return refuse(
@@ -241,7 +244,7 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
   }
 
   const verb = args.action === 'continue' ? '已继续' : '已放弃';
-  const text = `${verb}：${ref}（信号 ${signal.name}）`;
+  const text = `${verb}：${ref}（信号 ${signals.map((s) => s.name).join('、')}）`;
   await record(deps, args, ref, { ok: true, result: text, taskId: task.id });
   return text;
 }

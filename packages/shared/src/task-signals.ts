@@ -8,7 +8,10 @@ export const TASK_SIGNAL_NAMES = {
   continue: 'taskContinue',
   /** 「放弃」：工作流收尾退出（工作树存档后删，PR 和单子不动，由人处理）。 */
   abandon: 'taskAbandon',
-  /** 「叫醒」等路由的活（#194）：只有引擎进程自己发，驾驶舱后端不发。 */
+  /**
+   * 「叫醒」等路由的活（#194）：切号切完由引擎发。
+   * 「继续」也带一发（#2392）：pauseForRoute 不看 taskContinue，换路由续之后睡在等选路里的，只靠这一下醒。
+   */
   routeWake: 'taskRouteWake',
   /** 「暂停」（#820 片 3）：这一张单停在下一个检查点，不起新会话；点「继续」（taskContinue）接着走。 */
   pause: 'taskPause',
@@ -58,3 +61,9 @@ export interface RouteWakeCommand {
   by: string;
   reason: string;
 }
+
+/**
+ * 「继续」附带的那一发叫醒为什么（命令行和驾驶舱同一句）。
+ * pauseForRoute 只看这个信号，不看 taskContinue。
+ */
+export const CONTINUE_ROUTE_WAKE_REASON = '继续：如果正在等选路，醒过来再选一次，不睡满这一轮';

@@ -21,6 +21,7 @@ export * from './queries/groom.ts';
 export * from './queries/healthz-watch.ts';
 export * from './queries/history.ts';
 export * from './queries/idempotency.ts';
+export * from './queries/idle-running.ts';
 export * from './queries/intake.ts';
 export * from './queries/intake-history.ts';
 export * from './queries/jev.ts';
