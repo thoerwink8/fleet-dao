@@ -1,11 +1,9 @@
-// release-train.mjs 是外壳：真的 ssh/gh/git/pnpm/node 子进程、睡眠。逻辑都在 release-train-lib.mjs。node release-train.mjs 不带参数看用法。
-// 发版：预检，等要发的提交的 CI，发版，等部署，验证，核对开关，按最优顺序打印清单（#618）。不关总开关：release.sh 切版本时只暂停
-// 在跑的任务（决定 0093）。发版会等很久，用 run_in_background 起。
+// release-train.mjs 是外壳：真的 ssh、睡眠。逻辑都在 release-train-lib.mjs（往法国递一份和驾驶舱同格式的请求，再读进度）。
+// 九步在法国接活脚本里跑，这里不再自己做。发版会等很久，用 run_in_background 起。node release-train.mjs 不带参数看用法。
 // 改这里之前必须知道：
 // - 登法国的 ssh 名字读法复用 france-lib.mjs 的 readTarget（环境变量 FLEET_FRANCE_SSH，或 ~/.fleet-dao/france-ssh 的第一行）；
 //   ssh 的参数同 france-lib.mjs 的 sshArgs（不问口令、连 10 秒连不上就算、开压缩）。名字不进任何输出。
-// - gh、git、pnpm 连 GitHub：先去掉代理直连，失败且环境里有代理再原样带代理试一次。
-// - 同步的 spawnSync：每条命令都带超时，超时当场杀。pnpm 在 Windows 上是 .cmd 套壳，走 cmd.exe。
+// - 同步的 spawnSync：每条命令都带超时，超时当场杀。pnpm 在 Windows 上是 .cmd 套壳，走 cmd.exe（run 仍留给外壳，薄壳本身只用 ssh）。
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
