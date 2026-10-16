@@ -6,13 +6,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { RepoWithProfile } from '@fleet-dao/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { PortContext } from '../../src/ports.ts';
 import type { UserCommand, UserCommandResult } from '../../src/real/exec.ts';
 import {
   createAffectedLock,
   createSelfCheck,
+  createSelfCheckSlots,
   digestOutput,
+  SELF_CHECK_HEARTBEAT_MS,
+  SELF_CHECK_SLOTS,
   SELF_CHECK_TEST_MS,
   type SelfCheckFullLock,
 } from '../../src/real/self-check.ts';
@@ -53,6 +56,8 @@ function rig(over: {
   tsc?: () => UserCommandResult;
   owner?: SessionUser | null;
   lock?: SelfCheckFullLock;
+  /** 不给就一直有名额。要测排队就换上会等的。 */
+  slots?: SelfCheckFullLock;
   testMs?: number;
 }) {
   const commands: UserCommand[] = [];
@@ -60,6 +65,7 @@ function rig(over: {
     trees: { ownerOf: async () => (over.owner === undefined ? USER : over.owner) },
     ...(over.testMs === undefined ? {} : { testMs: over.testMs }),
     fullLock: over.lock ?? openLock,
+    slots: over.slots ?? openLock,
     exec: async (command) => {
       commands.push(command);
       const script = command.argv[2] ?? '';
@@ -405,6 +411,142 @@ describe('受影响包的整机锁', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   }, 4_000);
+});
+
+describe('自测名额', () => {
+  it('同时 4 个自测只有 2 个同时在跑', async () => {
+    expect(SELF_CHECK_SLOTS).toBe(2);
+    const dir = mkdtempSync(join(tmpdir(), 'self-check-slots-'));
+    try {
+      const slots = createSelfCheckSlots(dir, { pollMs: 10, slots: SELF_CHECK_SLOTS });
+      let running = 0;
+      let maxRunning = 0;
+      let sawTwo!: () => void;
+      const twoRunning = new Promise<void>((resolve) => {
+        sawTwo = resolve;
+      });
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const check = createSelfCheck({
+        trees: { ownerOf: async () => USER },
+        slots,
+        fullLock: openLock,
+        exec: async (command) => {
+          const script = command.argv[2] ?? '';
+          if (script.includes('test -d node_modules')) return result(0, 'yes\n');
+          if (script.includes('test -f tsconfig')) return result(0, 'no\n');
+          running += 1;
+          if (running > maxRunning) maxRunning = running;
+          if (running === SELF_CHECK_SLOTS) sawTwo();
+          await hold;
+          running -= 1;
+          return result(0, 'ok');
+        },
+      });
+      const pending = [0, 1, 2, 3].map((i) => check({ ...input(), taskId: `t-${i}` }, ctx()));
+      const timedOut = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error(`名额没拦住：同时在跑 ${running}`)), 2_000);
+      });
+      try {
+        await Promise.race([twoRunning, timedOut]);
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        expect(running).toBe(SELF_CHECK_SLOTS);
+        expect(maxRunning).toBe(SELF_CHECK_SLOTS);
+      } finally {
+        release();
+      }
+      const got = await Promise.all(pending);
+      expect(maxRunning).toBe(SELF_CHECK_SLOTS);
+      expect(got.map((g) => g.state)).toEqual(['green', 'green', 'green', 'green']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('死进程占满名额后，后来的拆掉再占', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'self-check-slots-'));
+    try {
+      for (const name of ['slot-0', 'slot-1']) {
+        const lockDir = join(dir, name);
+        mkdirSync(lockDir);
+        writeFileSync(join(lockDir, 'deadbeefdeadbeef'), `2147483646\n${Date.now()}\n`);
+      }
+      const slots = createSelfCheckSlots(dir, { pollMs: 10, staleMs: 60_000 });
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 1_000);
+      try {
+        const release = await slots.acquire(ac.signal);
+        await release();
+      } finally {
+        clearTimeout(timer);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('排队等名额的时间不吃测试预算', async () => {
+    const waited = 150;
+    const testMs = 5_000;
+    const { check, commands } = rig({
+      testMs,
+      hasTsc: 'no\n',
+      test: () => result(3, '要全跑'),
+      affected: () => result(0, 'Tests  1 passed (1)'),
+      slots: {
+        async acquire() {
+          await new Promise((resolve) => setTimeout(resolve, waited));
+          return () => {};
+        },
+      },
+    });
+    const got = await check(input(), ctx());
+    expect(got.state).toBe('green');
+    const first = commands.find(
+      (c) => scriptOf(c).includes('pnpm test:changed') && !scriptOf(c).includes('--affected'),
+    );
+    const affected = commands.find((c) => scriptOf(c).includes('--affected'));
+    expect(first?.timeoutMs).toBe(testMs);
+    // 等名额的 150 毫秒如果扣进预算，受影响的包就只剩不到 testMs - 50。
+    expect(affected?.timeoutMs).toBeGreaterThan(testMs - 50);
+    expect(affected?.timeoutMs).toBeLessThanOrEqual(testMs);
+  });
+
+  it('排队等名额时每 30 秒心跳', async () => {
+    expect(SELF_CHECK_HEARTBEAT_MS).toBe(30_000);
+    vi.useFakeTimers();
+    try {
+      const beats: unknown[] = [];
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const { check } = rig({
+        hasTsc: 'no\n',
+        slots: {
+          acquire: () => hold.then(() => () => {}),
+        },
+      });
+      const pending = check(input(), {
+        signal: new AbortController().signal,
+        heartbeat: (detail) => {
+          beats.push(detail);
+        },
+        attempt: 1,
+        lastHeartbeat: undefined,
+      });
+      await vi.advanceTimersByTimeAsync(SELF_CHECK_HEARTBEAT_MS);
+      expect(beats).toEqual([{ selfCheck: 't-1' }]);
+      await vi.advanceTimersByTimeAsync(SELF_CHECK_HEARTBEAT_MS);
+      expect(beats).toHaveLength(2);
+      release();
+      await pending;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('digestOutput', () => {
