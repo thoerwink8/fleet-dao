@@ -42,7 +42,8 @@ describe('fleet-api attention', () => {
 
   it('notes：只列开着且按白名单到点该推的（要你拍马上；卡住报警满 120 分钟；再提醒、降智、日报不列）', async () => {
     await add('d1', 'decision', '要拍');
-    await add('task-stuck:1', 'alert', '单卡住');
+    await add('task:o/r#1:park:1', 'alert', '单卡住');
+    await add('watchdog:job:x:run', 'alert', '看门狗任务');
     await add('remind:d1', 'alert', '再提醒');
     await add('probe-iq:x', 'alert', '降智');
     await add('release:done:abc', 'daily', '发版成功');
@@ -55,7 +56,7 @@ describe('fleet-api attention', () => {
       now: () => new Date(now.getTime() + 121 * 60_000),
       healthz: GREEN,
     });
-    expect(later.notes.map((n) => n.key)).toEqual(['d1', 'task-stuck:1']);
+    expect(later.notes.map((n) => n.key)).toEqual(['d1', 'task:o/r#1:park:1']);
   });
 
   it('delivered：团队群那条送达记录有 delivered_at 才算送到；撤了的不再列', async () => {
@@ -77,7 +78,7 @@ describe('fleet-api attention', () => {
     ]);
   });
 
-  it('主线已恢复：之前没真推出去过主线红就不列', async () => {
+  it('主线已恢复：不在白名单，不列', async () => {
     await add('feishu:main-recovered:1', 'daily', '主线恢复了');
     const r = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
     expect(r.notes).toEqual([]);

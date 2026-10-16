@@ -4,7 +4,7 @@
 // 改这里之前必须知道：
 // - healthz：本机问一次驾驶舱的 /healthz（地址取 api.env 的 FLEET_COCKPIT_LISTEN）。code 0 = 连不上；red 是 ok:false 的检查名。
 // - notes：开着、而且按推送白名单该推的通知（到点了的）。白名单判法不在这里抄：用 @fleet-dao/db 的 feishuPushableSince（feishu-push.ts），
-//   「主线已恢复」要的「之前真推出去过主线红」由这里查送达记录喂给它。delivered 是飞书团队群那条送达记录有没有送到。
+//   delivered 是飞书团队群那条送达记录有没有送到。
 // - feishuPushProblem、dailyBriefProblem：就是 @fleet-dao/db 的 feishuPushProblem、dailyBriefProblem 的结论（通着、好着是 null）。
 // - 读不到就报没读成（ok:false，退出码 1），不拿空列表、null 顶。参数不对退出码 2。
 import {
@@ -12,8 +12,6 @@ import {
   type Db,
   dailyBriefProblem,
   dailyBriefStatus,
-  FEISHU_MAIN_RECOVERED_KEY_PREFIX,
-  FEISHU_MAIN_RED_KEY_PREFIX,
   FEISHU_PUSH_CHANNEL,
   FEISHU_PUSH_TARGET,
   FEISHU_PUSH_WINDOW_MS,
@@ -24,7 +22,7 @@ import {
   notifications,
 } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
-import { and, eq, gte, isNotNull, isNull, like } from 'drizzle-orm';
+import { and, eq, gte, isNull } from 'drizzle-orm';
 
 export const ATTENTION_USAGE =
   '用法：fleet-api attention --json（只读：healthz 状态码和红的项、开着且按推送白名单该推的通知、飞书推送不通的话、今天每日简报没送到的话；打一行 JSON）';
@@ -106,34 +104,9 @@ export async function pushableOpenNotes(db: Db, now: Date): Promise<AttentionNot
     )
     .where(and(isNull(notifications.resolvedAt), gte(notifications.createdAt, since)))
     .orderBy(notifications.createdAt, notifications.id);
-  // 主线已恢复：它之前 24 小时内有没有一条主线红真推出去了
-  const reds = rows.some((r) => r.key.startsWith(FEISHU_MAIN_RECOVERED_KEY_PREFIX))
-    ? await db
-        .select({ createdAt: notifications.createdAt })
-        .from(notifications)
-        .innerJoin(
-          notificationDeliveries,
-          and(
-            eq(notificationDeliveries.notificationId, notifications.id),
-            eq(notificationDeliveries.channel, FEISHU_PUSH_CHANNEL),
-            isNotNull(notificationDeliveries.deliveredAt),
-          ),
-        )
-        .where(like(notifications.dedupeKey, `${FEISHU_MAIN_RED_KEY_PREFIX}%`))
-    : [];
   const out: AttentionNote[] = [];
   for (const r of rows) {
-    const redPushedBefore = reds.some(
-      (red) =>
-        red.createdAt.getTime() < r.createdAt.getTime() &&
-        red.createdAt.getTime() >= r.createdAt.getTime() - FEISHU_PUSH_WINDOW_MS,
-    );
-    const due = feishuPushableSince({
-      level: r.level,
-      dedupeKey: r.key,
-      createdAt: r.createdAt,
-      redPushedBefore,
-    });
+    const due = feishuPushableSince({ level: r.level, dedupeKey: r.key, createdAt: r.createdAt });
     if (due === null || due.getTime() > now.getTime()) continue;
     out.push({
       key: r.key,
