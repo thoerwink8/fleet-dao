@@ -4,6 +4,7 @@ import { eq, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { flattenRoutingLayers, routingLayers } from '../routing-layers.ts';
 import { channels, models, pools, quotaWindows, routes } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 import type { Blocker, RouteCandidate } from './candidates.ts';
 
 /** 没有的话来 candidates.ts 已算好的比例，反过来（1 - 比例）会在超额（>100%）时把信息夹没，所以单独写一份。 */
@@ -96,7 +97,7 @@ export async function routeFactsForPurpose(
 
   const routeIds = sorted.map((c) => c.routeId);
   const poolIds = [...new Set(sorted.map((c) => c.poolId))];
-  const [detailRows, windowRows] = await Promise.all([
+  const [detailRows, windowRows] = await allSettledOrThrow([
     db
       .select({
         routeId: routes.id,

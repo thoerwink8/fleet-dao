@@ -186,8 +186,12 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       );
     }
     if (r.startedAt !== undefined) {
-      const model = (data.routes ?? []).find((x) => x.id === r.routeId)?.modelId;
-      if (model === undefined) throw new Error(`样例会话 ${r.id} 的路由 ${r.routeId} 不在样例路由里`);
+      // 样例自带路由时从样例里查；e2e 的路由由目录装进库、样例路由留空，这时查库
+      const model =
+        (data.routes ?? []).find((x) => x.id === r.routeId)?.modelId ??
+        (await db.select({ modelId: routes.modelId }).from(routes).where(sql`${routes.id} = ${r.routeId}`))[0]
+          ?.modelId;
+      if (model === undefined) throw new Error(`样例会话 ${r.id} 的路由 ${r.routeId} 样例和库里都没有`);
       await db.insert(runs).values({
         id: r.id,
         segment,

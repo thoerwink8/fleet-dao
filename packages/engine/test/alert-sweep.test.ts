@@ -12,7 +12,7 @@ import {
   FILE_LABELS,
   sweepAlerts,
 } from '../src/jobs/alert-sweep.ts';
-import { beijingDate, beijingDayStart, RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
+import { beijingDayStart, RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
 
 const HOUR = 60 * 60_000;
 const DAY = 24 * HOUR;
@@ -367,13 +367,7 @@ describe('卡住报警立案', () => {
       title: '合了的 PR 记账不全',
       createdAt: new Date(NOW.getTime() - 11 * DAY),
     });
-    const child = row({
-      id: 'child',
-      dedupeKey: 'remind:pr:2026-10-08',
-      title: '还没处理：机器人开的 PR 没经合并队列合',
-      body: '昨天推的',
-    });
-    const h = harness([origin, ledger, child], { prMergedAt: async () => mergedAt });
+    const h = harness([origin, ledger], { prMergedAt: async () => mergedAt });
     const part = await h.run();
     expect(part.unchecked).toEqual([]);
     expect(h.opened).toEqual([]);
@@ -382,9 +376,6 @@ describe('卡住报警立案', () => {
     expect(ledger.resolvedAt).toBeNull();
     expect(origin.body).not.toContain('已立案：');
     expect(ledger.body).not.toContain('已立案：');
-    expect(child.resolvedAt).not.toBeNull();
-    expect(child.body.startsWith('已撤：')).toBe(true);
-    expect(child.body).toContain('不再每天重推');
   });
 
   it('合并未满 7 天、刚好满 7 天的 reconcile:pr 仍立案', async () => {
@@ -406,7 +397,7 @@ describe('卡住报警立案', () => {
     expect(exact.body.startsWith('已立案：#')).toBe(true);
     expect(h.opened.every((o) => o.body.includes('- 这条提醒的条件不再成立（对账撤掉它）'))).toBe(true);
     expect(h.opened.every((o) => !o.body.includes('diff 里看得到'))).toBe(true);
-    expect(h.inserted).toHaveLength(2);
+    expect(h.inserted, '不再写再提醒').toEqual([]);
   });
 
   it('不是 reconcile 的提醒照常立案，也不去问 PR 的合并时刻', async () => {
@@ -555,7 +546,7 @@ describe('日报超过 48 小时由这一轮收掉', () => {
     const pushed = harness([hung]);
     const pushedPart = await pushed.run();
     expect(pushedPart.unchecked).toEqual([]);
-    expect(pushed.inserted.map((i) => i.dedupeKey)).toEqual([`remind:hung:${beijingDate(NOW)}`]);
+    expect(pushed.inserted, '不再写再提醒').toEqual([]);
     expect(pushed.opened.map((o) => o.key)).toEqual([`alert-file:${key}`]);
     expect(pushed.opened[0]?.body).toContain('第 1 天没人处理');
   });

@@ -36,12 +36,12 @@ test.describe('单子详情', () => {
   });
 
   test('在跑的单 #12：会话时间线和用量也来自库', async ({ page, stack, api, shot }) => {
-    const detail = (await api.get(`/api/tasks/${stack.facts.tasks.running}`)) as { runs: unknown[] };
-    expect(detail.runs.length).toBeGreaterThan(0);
+    const detail = (await api.get(`/api/tasks/${stack.facts.tasks.running}`)) as { segmentRuns: unknown[] };
+    expect(detail.segmentRuns.length).toBeGreaterThan(0);
     await page.goto(`/tasks/${stack.facts.tasks.running}`);
     await expect(page.getByRole('heading', { name: /#12 登录页加验证码/ })).toBeVisible();
-    // #12 既有三段流水（对题收了、动手在跑），又有老流程的会话：两块都要在
-    await expect(page.getByText('老流程的会话')).toBeVisible();
+    // #12 的三段流水（对题收了、动手在跑）来自 runs 表；老会话表 #2357 已删，那块不再出现
+    await expect(page.getByText('老流程的会话')).toHaveCount(0);
     await expect(page.getByText('动手').first()).toBeVisible();
     await shot(page, '03-单子详情-在跑的');
   });

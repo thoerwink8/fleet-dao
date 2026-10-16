@@ -1,13 +1,17 @@
 // 驾驶舱 e2e 的偶发统计（决定 0093，src/e2e-flaky.ts）：读 Playwright JSON 报告、数近 10 轮首跑红、拼单子和汇总。
 import { describe, expect, test } from 'vitest';
 import {
+  BROKEN_ROUND_TITLE,
   deadline,
   flakyTests,
+  globalErrorCount,
+  isBrokenRound,
   issueBody,
   issueTitle,
   type Outcomes,
   outcomesOf,
   parseQuarantine,
+  planIssues,
   runSummary,
 } from '../src/e2e-flaky.ts';
 
@@ -97,6 +101,85 @@ describe('flakyTests：近 10 轮首跑红 ≥2 次', () => {
   test('跳过的不算跑过；一条都没有时回空', () => {
     expect(flakyTests(runs([{ 甲: ['skipped'] }, { 甲: ['skipped'] }]))).toEqual([]);
     expect(flakyTests([])).toEqual([]);
+  });
+});
+
+describe('先判整轮（#2499）：整轮坏了不算每条用例偶发', () => {
+  const names = ['甲', '乙', '丙', '丁', '戊', '己'];
+  /** 一轮：names 里每条用例都是 status，extra 里的覆盖。 */
+  const round = (i: number, status: string, extra: Record<string, string> = {}, globalError = false) => ({
+    url: `https://ci/run/${i}`,
+    outcomes: outcomes(Object.fromEntries(names.map((n) => [n, [extra[n] ?? status]]))),
+    globalError,
+  });
+  const noQuarantine: never[] = [];
+
+  test('两轮整轮全红 + 八轮全绿：不算任何用例偶发，只开一张「整轮坏了」，不开偶发单', () => {
+    const runs = [
+      round(0, 'unexpected'),
+      round(1, 'unexpected'),
+      ...[2, 3, 4, 5, 6, 7, 8, 9].map((i) => round(i, 'expected')),
+    ];
+    expect(flakyTests(runs)).toEqual([]);
+    const actions = planIssues(runs, [], noQuarantine, '2026-10-22');
+    expect(actions).toHaveLength(1);
+    const a = actions[0];
+    expect(a).toMatchObject({ kind: 'create', title: BROKEN_ROUND_TITLE });
+    expect(BROKEN_ROUND_TITLE.startsWith('e2e 偶发')).toBe(false);
+    expect(a?.kind === 'create' && a.body).toContain('- https://ci/run/0\n- https://ci/run/1');
+  });
+
+  test('某条用例在两轮里各单独红一次、其余全绿：照旧开它的单', () => {
+    const runs = [
+      round(0, 'expected', { 甲: 'unexpected' }),
+      round(1, 'expected', { 甲: 'flaky' }),
+      round(2, 'expected'),
+    ];
+    const actions = planIssues(runs, [], noQuarantine, '2026-10-22');
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ kind: 'create', title: 'e2e 偶发：07c-nodes.e2e.ts › 甲' });
+  });
+
+  test('首跑红刚好一半不算整轮坏，超过一半才算；跳过的不进分母', () => {
+    expect(isBrokenRound(round(0, 'expected', { 甲: 'unexpected', 乙: 'unexpected', 丙: 'flaky' }))).toBe(
+      false,
+    );
+    expect(
+      isBrokenRound(round(0, 'expected', { 甲: 'unexpected', 乙: 'unexpected', 丙: 'flaky', 丁: 'flaky' })),
+    ).toBe(true);
+    expect(isBrokenRound(round(0, 'skipped', { 甲: 'unexpected' }))).toBe(true);
+  });
+
+  test('报告里有全局准备/备库的错：只红少数用例也算整轮坏了，且不计入偶发', () => {
+    const runs = [
+      round(0, 'expected', { 甲: 'unexpected' }, true),
+      round(1, 'expected', { 甲: 'unexpected' }),
+    ];
+    expect(runs.map(isBrokenRound)).toEqual([true, false]);
+    expect(flakyTests(runs)).toEqual([]);
+  });
+
+  test('globalErrorCount：读报告顶层 errors，认不出就抛', () => {
+    expect(globalErrorCount({ suites: [] })).toBe(0);
+    expect(globalErrorCount({ suites: [], errors: [{ message: '备库失败' }] })).toBe(1);
+    expect(() => globalErrorCount({ errors: 'x' })).toThrow('不是数组');
+  });
+
+  test('已有开着的「整轮坏了」单：只补没写过的轮链接，都写过了就不动；永远只一张', () => {
+    const runs = [round(0, 'unexpected'), round(1, 'unexpected')];
+    const open = [{ number: 7, title: BROKEN_ROUND_TITLE, body: '- https://ci/run/1' }];
+    const actions = planIssues(runs, open, noQuarantine, '2026-10-22');
+    expect(actions).toHaveLength(1);
+    expect(actions[0]).toMatchObject({ kind: 'comment', number: 7 });
+    expect(actions[0]?.kind === 'comment' && actions[0].body).toBe('又有整轮坏了的轮：\n- https://ci/run/0');
+    const done = [{ number: 7, title: BROKEN_ROUND_TITLE, body: 'https://ci/run/0 https://ci/run/1' }];
+    expect(planIssues(runs, done, noQuarantine, '2026-10-22').map((a) => a.kind)).toEqual(['exists']);
+  });
+
+  test('同一用例已有开着的偶发单就不重开', () => {
+    const runs = [round(0, 'expected', { 甲: 'unexpected' }), round(1, 'expected', { 甲: 'unexpected' })];
+    const open = [{ number: 3, title: 'e2e 偶发：07c-nodes.e2e.ts › 甲', body: '' }];
+    expect(planIssues(runs, open, noQuarantine, '2026-10-22').map((a) => a.kind)).toEqual(['exists']);
   });
 });
 

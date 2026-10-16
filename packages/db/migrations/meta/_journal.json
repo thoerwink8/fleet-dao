@@ -547,6 +547,13 @@
       "when": 1792160000001,
       "tag": "0077_dapper_scarecrow",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1792160000002,
+      "tag": "0078_close_release_remind_notes",
+      "breakpoints": true
     }
   ]
 }
