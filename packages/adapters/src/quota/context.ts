@@ -78,6 +78,11 @@ export interface QuotaDeps extends QuotaIo {
   /** 换掉某种读取器（测试用假的；以后某家换了读法也从这里接）。 */
   readers?: Partial<Record<ReaderType, Reader>>;
   /**
+   * mirasim-relay 本轮超时后再试一次之前等多久（毫秒）。不给就用读取层的默认短退避。
+   * 测试传 0：不等，免得把故意卡住的用例拖长。
+   */
+  retryDelayMs?: number;
+  /**
    * 这几种读取器的凭据在别的用户家里（引擎用户进不去会话用户的家）：它们读文件改用这里的 readFile（以那个用户的身份读），
    * 配置里的 ~ 展开到这里的 homeDir；其余读取器照旧用上面的 readFile、homeDir（例如拼车的 Key 文件引擎自己读得到）。
    * 读不到要抛错，不许回空串。
