@@ -22,6 +22,11 @@ export interface FailureInfo {
   message: string;
   /** 端口说能不能重试；null = 没说。 */
   retryable: boolean | null;
+  activity?: string | undefined;
+  startToCloseSeconds?: number | undefined;
+  engineStartedAt?: string | undefined;
+  currentEngineStartedAt?: string | undefined;
+  engineRestarted?: boolean | undefined;
 }
 
 /**
@@ -149,6 +154,11 @@ export function evidenceOf(input: FailureInput): FailureEvidence {
     code: input.failure.code,
     retryable: input.failure.retryable,
     message: input.failure.message,
+    ...set('activity', input.failure.activity),
+    ...set('startToCloseSeconds', input.failure.startToCloseSeconds),
+    ...set('engineStartedAt', input.failure.engineStartedAt),
+    ...set('currentEngineStartedAt', input.failure.currentEngineStartedAt),
+    ...set('engineRestarted', input.failure.engineRestarted),
     ...set('stage', c.stage),
     ...(r
       ? {

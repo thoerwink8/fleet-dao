@@ -281,7 +281,7 @@ export async function writeSession(
       }
       infra = error;
     }
-    const failure = infra
+    let failure = infra
       ? failureOf(infra, 'session:execute')
       : {
           source: 'session:execute',
@@ -289,6 +289,31 @@ export async function writeSession(
           message: evidence?.message ?? '会话没跑成',
           retryable: null,
         };
+    // Temporal 只凭 StartToClose timeout 不知道活动是不是被旧 worker 丢了。
+    // 有旧心跳时比较两个启动时刻；旧心跳被服务端丢掉时，用当前引擎启动时刻和这一段起跑时刻比较。
+    // 两种凭据都不足时保守地按真实超时。
+    if (patched('engine-restart-timeout') && failure.code.toLowerCase().startsWith('timeout_')) {
+      try {
+        const current = await rt.cancellable(() => rt.acts.engineStartedAt({ schemaVersion: 1 }));
+        const currentStartedAt = Date.parse(current.startedAt);
+        const changed =
+          failure.engineStartedAt !== undefined
+            ? current.startedAt !== failure.engineStartedAt
+            : Number.isFinite(currentStartedAt) && currentStartedAt > attemptAt;
+        if (changed) {
+          failure = {
+            ...failure,
+            currentEngineStartedAt: current.startedAt,
+            engineRestarted: true,
+          };
+        }
+      } catch (error) {
+        if (error instanceof Abandoned || isCancellation(error)) throw error;
+        log.warn('超时活动的引擎启动代次没查成，按真实超时处理', {
+          error: failureOf(error, 'engineStartedAt').message,
+        });
+      }
+    }
     // 切号停下的（失败分流 OS1：不算失败、不记账、马上接着干）：选路照常选到切过去的那个池，在原分支上重跑这一段
     if (failure.code === ORG_SWITCH_CODE) interrupted = failure.message;
     // 写在问分流之前：老历史重放时这一支为假，不多一次记 401 的活动，分流的入参也不带 priorBare401。

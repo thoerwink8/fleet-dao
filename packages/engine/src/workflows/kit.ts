@@ -81,25 +81,81 @@ export function iso(ms: number): string {
 }
 
 /** 活动失败 → 失败分流要的结构化信息。只做提取，不做判断。 */
-export function failureOf(error: unknown, source: string): FailureInfo {
+export function failureOf(error: unknown, source: string, limits?: Limits): FailureInfo {
   let cause: unknown = error;
+  const activity = cause instanceof ActivityFailure ? cause.activityType : undefined;
   if ((cause instanceof ActivityFailure || cause instanceof ChildWorkflowFailure) && cause.cause)
     cause = cause.cause;
   if (cause instanceof ApplicationFailure) {
     return { source, code: cause.type ?? 'Error', message: cause.message, retryable: !cause.nonRetryable };
   }
   if (cause instanceof TimeoutFailure) {
+    const engineStartedAt = heartbeatEngineStartedAt(cause.lastHeartbeatDetails);
+    const startToCloseSeconds = activity ? startToCloseFor(activity, limits) : undefined;
     return {
       source,
       code: `TIMEOUT_${cause.timeoutType ?? 'UNKNOWN'}`,
       message: cause.message,
       retryable: true,
+      ...(activity ? { activity } : {}),
+      ...(startToCloseSeconds === undefined ? {} : { startToCloseSeconds }),
+      ...(engineStartedAt ? { engineStartedAt } : {}),
     };
   }
   if (cause instanceof TemporalFailure || cause instanceof Error) {
     return { source, code: cause.name, message: cause.message, retryable: null };
   }
   return { source, code: 'UNKNOWN', message: String(cause), retryable: null };
+}
+
+/** 只收活动心跳里明确写下的启动时刻；没有凭据就不猜是不是换过引擎。 */
+function heartbeatEngineStartedAt(details: unknown): string | undefined {
+  if (!details || typeof details !== 'object') return undefined;
+  const value = (details as { engineStartedAt?: unknown }).engineStartedAt;
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+/** 固定活动的 StartToClose 配置，动态的 CI 时长没有证据时不伪造数字。 */
+function startToCloseFor(activity: string, limits?: Limits): number | undefined {
+  switch (activity) {
+    case 'runSegment':
+    case 'coldVerify':
+      return 75 * 60;
+    case 'createWorktree':
+    case 'selfCheck':
+      return 20 * 60;
+    case 'waitMerged':
+      return 20 * 60;
+    case 'probeAssignedRoute':
+      return 10 * 60;
+    case 'waitCi':
+      return (limits?.ciMinutes ?? 40) * 60;
+    case 'pickRoute':
+    case 'recordTiming':
+    case 'saveTaskState':
+    case 'recordRound':
+    case 'raiseAlert':
+    case 'releaseReservation':
+    case 'readCiPolicy':
+    case 'planSegmentResume':
+    case 'segmentSettled':
+    case 'taskSpend':
+      return 30;
+    case 'removeWorktree':
+    case 'pushBranch':
+    case 'openPr':
+    case 'updatePrBody':
+    case 'syncMainline':
+    case 'closeIssue':
+    case 'readTaskBrief':
+    case 'readDelivery':
+    case 'checkGuarded':
+    case 'armAutoMerge':
+    case 'mergeNow':
+      return 5 * 60;
+    default:
+      return undefined;
+  }
 }
 
 /** 活动失败里带的冲突文件名（PortError.details.conflictFiles）；没有就从原文「有冲突：a、b。」里拆。 */

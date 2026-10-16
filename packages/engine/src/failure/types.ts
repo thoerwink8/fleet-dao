@@ -43,6 +43,15 @@ export interface FailureEvidence {
   /** 出事的机器（给人看的名字，例如「法国」）和会话用户：只有人能修的（重新登录）要写清去哪台机器、以谁的身份修。 */
   machine?: string;
   runAsUser?: string;
+  /** Temporal 活动超时时记录的活动名和配置的 StartToClose 时长。 */
+  activity?: string;
+  startToCloseSeconds?: number;
+  /** 活动最后一次心跳来自哪个引擎进程；只在有确切心跳凭据时填写。 */
+  engineStartedAt?: string;
+  /** 当前接手失败判断的引擎进程启动时刻。 */
+  currentEngineStartedAt?: string;
+  /** 旧活动的心跳进程和当前引擎不同，才允许绕过重复原文短路。 */
+  engineRestarted?: boolean;
   /** 这一步跟路由绑不绑定（AI 会话绑定；建树、推分支、开 PR 不绑定）。不给：有 routeId 或 source 是 `session:` 就算绑定。 */
   routeBound?: boolean;
   /** 结构化错误码：插头判定的原因（quota_exhausted、model_mismatch……）、端口的 PortError.code、Temporal 的 TIMEOUT_*、mirasim 的结束码。 */
