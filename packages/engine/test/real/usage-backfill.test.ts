@@ -523,16 +523,18 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
     expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 1 });
   });
 
-  it('判成没调用但会话刚结束：先不记 0，写明在等账本落盘', async () => {
+  it('判成没调用但会话刚结束：先不记 0，写明在等账本落盘；算还在等，这一轮不记 partial', async () => {
     const { id } = await mirasimRun({ outputTokens: null });
-    await job(
+    const j = job(
       () => '',
       new Date(ENDED.getTime() + 3 * 60_000),
       () => '',
-    ).run();
+    );
+    await j.run();
     const row = await getRun(t.db, id);
     expect(row).toMatchObject({ inputTokens: null, outputTokens: null });
     expect(row?.usageNote).toContain('等 Mirasim 账本落盘再定');
+    expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
   });
 
   it('有调用但没对上（流量记录里有 2xx、用量账本里没有）：照旧留空，原因写清是哪种没对上，这一轮记 partial', async () => {

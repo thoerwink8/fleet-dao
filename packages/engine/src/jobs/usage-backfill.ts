@@ -296,7 +296,7 @@ async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
         }
         continue;
       }
-      if (reading.state === 'pending') waiting += 1;
+      if (reading.state === 'pending' || reading.state === 'none') waiting += 1;
       else unread.push(`${item.run.model}（${item.run.id}）：${reading.detail}`);
       await deps.note(item.run.id, meterNote(reading, item.run, now), now);
       continue;
