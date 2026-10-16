@@ -82,7 +82,9 @@ describe('spawnDetached 起的进程不跟着父进程树一起死', () => {
       // 对照组死了，说明这棵树确实被杀了
       expect(await until(() => !alive(pids.plain), 10_000)).toBe(true);
       if (win) expect(await until(() => !alive(pids.nodeDetached), 10_000)).toBe(true);
-      expect(alive(parent.pid)).toBe(false);
+      // 父进程被杀后要等 Node 收尸（没收之前是僵尸，kill(pid, 0) 照样成功），同步查一下会偶发判活
+      const parentPid = parent.pid;
+      expect(await until(() => !alive(parentPid), 10_000)).toBe(true);
       // spawnDetached 起的还活着，参数一个字不差
       expect(alive(detachedPid)).toBe(true);
       expect(JSON.parse(readFileSync(argvOut, 'utf8'))).toEqual(['a b', 'q"x', 'tail\\', '']);

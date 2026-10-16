@@ -67,9 +67,7 @@ function clockOf(iso: string, ref: number): string {
 
 /** 单子从开单到现在（结束了的算到最后一笔收场）。 */
 function wallMs(d: TaskDetail, now: number): number {
-  const ends = [...d.segmentRuns.map((r) => r.endedAt), ...d.runs.map((r) => r.endedAt)].filter(
-    (e): e is string => e !== undefined,
-  );
+  const ends = d.segmentRuns.map((r) => r.endedAt).filter((e): e is string => e !== undefined);
   const last = ends.sort().at(-1);
   return span(d.task.createdAt, isTaskFinished(d.task) ? last : undefined, now);
 }
