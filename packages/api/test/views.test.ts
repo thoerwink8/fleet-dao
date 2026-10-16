@@ -1,10 +1,4 @@
-import {
-  type Channel,
-  founderOnlyFor,
-  hardBanFor,
-  type Model,
-  type Route,
-} from '@fleet-dao/shared';
+import { type Channel, founderOnlyFor, hardBanFor, type Model, type Route } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import type { NotificationRecord, SegmentRunRecord } from '../src/ports.ts';
 import {

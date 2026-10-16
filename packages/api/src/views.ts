@@ -47,7 +47,6 @@ import type {
   SegmentRunRecord,
 } from './ports.ts';
 
-
 export const STAGE_WORDS: Record<StageKind, string> = {
   triage: '分诊',
   spec: '写需求文档',

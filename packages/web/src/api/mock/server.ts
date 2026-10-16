@@ -2740,10 +2740,9 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''));
           const usage = summarizeUsage(views).total;
           const cost = taskListCost(usage, views.filter((v) => !v.running).length);
-          const times = [
-            tv.task.createdAt,
-            ...views.flatMap((v) => [v.startedAt, v.endedAt]),
-          ].filter((x): x is string => x !== undefined);
+          const times = [tv.task.createdAt, ...views.flatMap((v) => [v.startedAt, v.endedAt])].filter(
+            (x): x is string => x !== undefined,
+          );
           const updatedAt = times.reduce((a, b) => (b > a ? b : a));
           return {
             id: tv.task.id,
