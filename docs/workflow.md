@@ -6,7 +6,7 @@
 
 ## 进度和单
 
-- 创始人的引导和决定当场 `pnpm progress directive` 记下，接手先 `pnpm progress read`；认领、办完、进度流水的全套见 `docs/directives/README.md`。
+- 创始人的引导和决定当场 `pnpm progress directive` 记下，接手先 `pnpm progress read`；每条引导挂一张单、单关了就算办完（没有认领、标已处理）；记法、进度流水的全套见 `docs/directives/README.md`。
 - 计划以 GitHub 为准，`pnpm plan` 现读。版本是一周一版的时间盒：永远只开一个 `v<N>`、带到期日，到期由 `github-audit.yml` 的收口任务自动开下一版、把开着的单滚过去、关旧版（决定 0100）。创始人开的单（含驾驶舱提需求）进当前版本，开单写 `--milestone 当前`，别写死 `v<N>`；AI 和机器人账号发现的不急的开小单进未排期，告诉他排第几。PR 不挂里程碑。
 - 需求写在单上，四节：场景、原话、已知的模块、怎么算做完；用 `pnpm issue:new` 开（参数见它报错里的用法，本机做的加 `--local`）。一个队列（GitHub 单）、一本账、两种执行者，默认开单给法国，开完顺手戳法国立刻接；只有讨论中的、急修、要本机资源的、改标准的这几种才贴 `--local` 留本机（决定 0096）。本机做活一律先开单（`pnpm issue:new --local`，开完自动领）或 `pnpm work claim <号>`，分支用 `local/<单号>-<短名>`（引擎用 `fleet/<单号>-`），PR 合并、单关掉后租约自动收，不用手动（没做成或放手才 `pnpm work done <号> --failed|--release`）；本机队列看 `pnpm work queue`（领者、心跳、开着的 PR、挂着的引导、能不能接）；`pnpm pr:open` 在 `local/<单号>-`、`fleet/<单号>-` 分支上需求栏没挂单就自动补 `Closes #<单号>`，且不收 `--no-issue`、挂的单和分支单号对不上也拒开。要写方案才写，放 `specs/<编号>-<短名>/`，不改已有的。
 - 引擎自己挑单、自己关单，不直写主线；单要写成什么样它才接，见 `packages/engine/AGENTS.md`。

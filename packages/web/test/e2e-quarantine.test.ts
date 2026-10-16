@@ -56,26 +56,23 @@ describe('quarantineFilter：E2E_QUARANTINE', () => {
     expect(() => quarantineFilter('all')).toThrow('只能是 skip 或 only');
   });
 
-  test('08-backend-down「用着用着后端断了」在隔离集（#2745，修根子 #2732）：skip 跳过它、only 只跑它，同文件别的用例照挡', () => {
+  test('08-backend-down「用着用着后端断了」已移出隔离集：主线 e2e 照跑，不再单跑隔离集', () => {
     const raw = JSON.parse(readFileSync(QUARANTINE_FILE, 'utf8')) as {
-      tests: { file: string; title: string; issue: number }[];
+      tests: { file: string; title: string }[];
     };
     const title =
       '用着用着后端断了：这一页写「没读成」和原因、有重试，不是空白也不是 0；后端好了点重试数据回来';
     const entry = raw.tests.find((t) => t.file === '08-backend-down.e2e.ts' && t.title === title);
-    expect(entry?.issue, '说明里写修根子的单').toBe(2732);
-    // 标题要和 spec 里一字不差，不然 grep 对不上、等于没隔离
+    expect(entry, '根子修好了，隔离集里不留这条').toBeUndefined();
+    // 用例还在 spec 里，标题一字不差，主线才能对上跑
     const spec = readFileSync(join(QUARANTINE_FILE, '..', 'specs', '08-backend-down.e2e.ts'), 'utf8');
     expect(spec).toContain(`test('${title}'`);
 
     const it = full('08-backend-down.e2e.ts', '后端不可用', title);
-    const sibling = full('08-backend-down.e2e.ts', '后端不可用', '后端回 500：同样写明没读成、给重试');
     const skip = quarantineFilter('skip');
     const only = quarantineFilter('only');
-    expect(skip.grepInvert?.test(it), 'ci 的 e2e（挡发版那一步）跳过它').toBe(true);
-    expect(skip.grepInvert?.test(sibling), '同文件别的用例照跑照挡').toBe(false);
-    expect(only.grep?.test(it), 'e2e-quarantine.yml 每天照跑它').toBe(true);
-    expect(only.grep?.test(sibling)).toBe(false);
+    expect(skip.grepInvert, 'ci 的 e2e（挡发版那一步）不再跳过它').toBeUndefined();
+    expect(only.grep?.test(it), 'e2e-quarantine.yml 不再单跑它').toBe(false);
   });
 
   test('【故意造出的失败】文件格式不对：报错，不当成空的', () => {

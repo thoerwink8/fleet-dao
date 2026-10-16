@@ -12,16 +12,17 @@ import { TooltipProvider } from '../components/ui/tooltip';
 
 export function renderApp<A extends FleetApi = MockApi>(
   ui: ReactElement,
-  opts: { api?: A; route?: string; retry?: false | 1 } = {},
+  opts: { api?: A; route?: string; retry?: false | 1; staleTime?: number } = {},
 ): RenderResult & { api: A; qc: QueryClient } {
   const api = opts.api ?? (createMockApi({ live: false }) as FleetApi as A);
   // retry 不传就关，传 1 才对齐 root.tsx 的全局默认。
   // 查询自己写了 retry（retryUnlessMissing）时不继承上面的开关，仍会再试一次。
   // 再试的等待如果留着 React Query 的默认 1 秒，findBy 也只等 1 秒，CI 一忙就停在骨架上
   // （法国页远程快照没读成，#1533 的 check 因此红了两次）。测试里再试不等待。生产的等待在 root.tsx。
+  // staleTime 默认 0（一拿到就算过期）。要对齐 root.tsx 的 5 秒缓存时显式传。
   const qc = new QueryClient({
     defaultOptions: {
-      queries: { retry: opts.retry ?? false, retryDelay: 0, staleTime: 0 },
+      queries: { retry: opts.retry ?? false, retryDelay: 0, staleTime: opts.staleTime ?? 0 },
     },
   });
   const view = render(

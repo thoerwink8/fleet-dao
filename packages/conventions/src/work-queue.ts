@@ -278,7 +278,7 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
   }
   let pending: Set<string> | null = null;
   try {
-    pending = new Set((await listPending(deps.git, MAIN)).map((d) => d.id));
+    pending = new Set((await listPending(deps.git, deps.gh, MAIN)).map((d) => d.id));
   } catch (e) {
     problems.push(`挂着的引导没读成（引导这一栏不全）：${msg(e)}`);
   }
