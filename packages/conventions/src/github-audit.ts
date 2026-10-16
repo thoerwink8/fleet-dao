@@ -1,6 +1,6 @@
 // GitHub 对账（#654）：每天一轮（.github/workflows/github-audit.yml），随时也能手跑 pnpm github:audit。
 // 查的是「GitHub 上的单子现在的样子有没有断」：开着的单没有类别标签、母单的子单都关了它还开着、子单挂在已关的母单下面、
-// 母单标签和子单对不上、版本里程碑说明里的先后和实际对不上、合并了的 PR 在「需求」栏 Refs 着它而它还开着（#995 拍 1 的 B，兜底：
+// 母单标签和子单对不上、版本里程碑说明里的先后认不出、合并了的 PR 在「需求」栏 Refs 着它而它还开着（#995 拍 1 的 B，兜底：
 // 合并时的自动收口 close-on-merge.ts 没收成、或当时还有别的 PR 挂着它的）。从前这些靠每天的关单对账、版本快照生成时顺带发现，那两样都删了
 // （单子是需求唯一的家，关单证据在 pnpm issue:close 那一步查），只留这一道定时的；查出来的每一条都是要有人去修的，不是通知。
 // 结果随单子开关、随时间变，所以不进 PR 的必过检查（#87），只在定时任务里跑，红了不挡任何 PR。
@@ -32,7 +32,7 @@ export interface AuditResult {
 
 /**
  * writer 给了才会改里程碑说明（清先后里已关或已挪走的号）；不给就只读，不改。
- * 开着的单读不到时不清（不拿读不到当成全关了），那一样已经记在 notQueried 里。
+ * 版本和先后读不到时不清（不拿读不到当成全关了），那一样已经记在 notQueried 里。
  */
 export async function auditGitHub(
   gh: GitHubReader,
@@ -72,44 +72,29 @@ export async function auditGitHub(
     }
   }
 
+  // 开着却没排进先后的单不报：拉单、发版车本来就把没排进先后的排在后面照样拉（#2683 删了那一条）
   let plan: Plan | undefined;
   try {
     plan = await readPlan(gh);
     checked.versions = plan.open.length + plan.closed.length;
-    for (const group of plan.loose) {
-      for (const i of group.issues) {
-        findings.push({
-          issue: i.number,
-          key: `loose:${i.number}:${group.milestone}`,
-          text: `#${i.number} 开着，挂在「${group.milestone}」里却没排进先后：把它写进这个版本里程碑说明里 fleet:order 那段（它是子单就挂到母单下面），不做了就关掉`,
-        });
-      }
-    }
   } catch (e) {
     if (e instanceof PlanProblem)
       findings.push({ issue: undefined, key: `plan:${e.message}`, text: e.message });
     else notQueried.push(`读不到版本和先后（${message(e)}），里程碑说明里的先后没核`);
   }
-  if (plan !== undefined && open !== undefined && writer !== undefined) {
-    await pruneClosedFromOrders(
-      plan,
-      new Set(open.map((i) => i.number)),
-      writer,
-      pruned,
-      findings,
-      notQueried,
-    );
+  if (plan !== undefined && writer !== undefined) {
+    await pruneClosedFromOrders(plan, writer, pruned, findings, notQueried);
   }
   return { findings, notQueried, checked, pruned };
 }
 
 /**
  * 开着的版本的先后里有已关或已挪走的号：直接改掉说明（#2393，开单那一步清得到的是开单时的，这里兜住中间关掉的）。
+ * 按「这个版本里开着的单」清（#2683）：挪去别的版本还开着的也清掉，不按全仓开着的单算。
  * 改回来的说明要再认一遍、先后恰好是我们要写的，不拿「接口回 200」当改好了。改不成记「没查成」；清光会留空先后的不动，出一条 finding。
  */
 async function pruneClosedFromOrders(
   plan: Plan,
-  open: ReadonlySet<number>,
   writer: GitHubMilestoneWriter,
   pruned: AuditResult['pruned'],
   findings: Finding[],
@@ -117,6 +102,7 @@ async function pruneClosedFromOrders(
 ): Promise<void> {
   for (const v of plan.open) {
     const m = v.milestone;
+    const open = new Set(v.issues.filter((i) => i.state === 'open').map((i) => i.number));
     const cut = pruneOrder(m.description, open);
     if (!cut.ok) {
       findings.push({

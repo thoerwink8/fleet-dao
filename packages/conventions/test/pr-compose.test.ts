@@ -136,9 +136,9 @@ describe('pnpm pr:open 自己生成正文', () => {
     expect(w.bodies[0]).not.toContain('改动 8');
   });
 
-  it('--new-issue：先开单（类别、里程碑用参数给，正文四节齐全）再 Closes 它，PR 挂上那张单的里程碑', async () => {
+  it('--new-issue：先开单（类别、里程碑用参数给，正文四节齐全）再 Closes 它；PR 自己不挂里程碑', async () => {
     const w = world({
-      replies: [CREATED, ok(), files('a.ts'), ok()],
+      replies: [CREATED, files('a.ts'), ok()],
       lookups: [ok('[false,"v4 统一与验收","open"]')],
       issueReplies: [{ code: 0, stdout: 'https://github.com/o/r/issues/55\n', stderr: '' }],
     });
@@ -159,14 +159,15 @@ describe('pnpm pr:open 自己生成正文', () => {
     );
     expect(w.text()).toContain('开了单 #55');
     expect(w.out.join('\n')).toContain('这张单随 PR 开出，已贴本机做，引擎不拉');
-    expect(w.calls[1]).toEqual(['pr', 'edit', '42', '--milestone', 'v4 统一与验收']);
+    expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
+    expect(w.calls.flat()).not.toContain('--milestone');
     // --local 仍可加：不报错，标签只贴一次
     expect(create.filter((x) => x === '本机做')).toEqual(['本机做']);
   });
 
   it('【故意造出的失败】--new-issue 不加 --local 也在同一次 gh issue create 里贴「本机做」；把自动贴标去掉这条就红', async () => {
     const w = world({
-      replies: [CREATED, ok(), files('a.ts'), ok()],
+      replies: [CREATED, files('a.ts'), ok()],
       lookups: [ok('[false,"v4 统一与验收","open"]')],
       issueReplies: [{ code: 0, stdout: 'https://github.com/o/r/issues/55\n', stderr: '' }],
     });

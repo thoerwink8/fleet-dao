@@ -50,7 +50,7 @@ export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-fil
      --no-issue "<理由>"  确实没有单：理由原样写进「需求」栏（「无：<理由>」）
      --founder-quote "<原话>" --at "<时间>"  改标准、创始人已经同意：在「需求」栏下面写「人闸：改标准」、再写一段「创始人原话」，
                           并挂自动合并（等价于 --founder-approved 加手写那一段）；也能配 --body-file，这两段追加到正文末尾
-  需求栏要能读到 Closes #号 / Refs #号：读不到、单不存在就不开；挂了单的 PR 顺手挂上那张单的里程碑。
+  需求栏要能读到 Closes #号 / Refs #号：读不到、单不存在就不开。PR 不挂里程碑（里程碑页只数单子）。
   --no-issue 在 --body-file 下也能用；需求栏已经挂了单就不能再带
   分支是 local/<单号>-、fleet/<单号>-：需求栏没挂单就自动补 Closes #<单号>；不能带 --no-issue，需求栏挂的单要含这张单
   --founder-approved  改标准、创始人已经同意（自己写正文时用）：正文里要有一行 **创始人原话**：「<原话>」（<时间>）
@@ -216,11 +216,10 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
   }
 }
 
-/** 查到的单：号、是不是 PR、挂的里程碑名（没挂是 undefined）。 */
+/** 查到的单：是不是 PR、开没开着。 */
 interface IssueInfo {
   isPr: boolean;
   open: boolean;
-  milestone: string | undefined;
 }
 
 /** 本仓这张单的样子；单不存在返回 'missing'；没查成（网络、认不出）抛错，不当成不存在。 */
@@ -248,7 +247,7 @@ function lookupIssue(gh: Gh, n: number): IssueInfo | 'missing' {
     typeof raw[2] !== 'string'
   )
     throw new Error(`没查成 #${n} 在不在：gh 回的认不出（${r.stdout.trim().slice(0, 120)}）`);
-  return { isPr: raw[0], milestone: raw[1] || undefined, open: raw[2] === 'open' };
+  return { isPr: raw[0], open: raw[2] === 'open' };
 }
 
 interface OpenPlan {
@@ -328,7 +327,6 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
   }
 
   // 挂的单要真在本仓：写错号、写到 PR 上去的不算（先查完再开 PR）
-  let milestone: string | undefined;
   for (const n of issueNumbers) {
     let info: IssueInfo | 'missing';
     try {
@@ -353,7 +351,6 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
       );
       return 1;
     }
-    if (n === issueNumbers[0]) milestone = info.milestone;
   }
 
   // 同一张单别有第二个 PR（决定 0096）：Closes 的单已经有别的开着的 PR 在做（「需求」栏 Closes 它，或分支是 fleet/<单号>-、local/<单号>-）
@@ -396,18 +393,7 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
     return 2;
   }
   out(`开了 PR #${pr}：${url}`);
-
-  // 里程碑页只数单子，PR 跟着单挂上去才看得出进展；没成只提醒（PR 已经开了，不因这个退出非 0）
-  if (milestone !== undefined) {
-    const edited = gh(['pr', 'edit', String(pr), '--milestone', milestone]);
-    if (edited.code === 0) out(`PR 挂上了里程碑「${milestone}」（跟着 #${issueNumbers[0]}）。`);
-    else
-      err(
-        `提醒：PR #${pr} 没挂上里程碑「${milestone}」（gh pr edit ${reasonOf(edited)}）：自己跑 gh pr edit ${pr} --milestone "${milestone}"`,
-      );
-  } else if (issueNumbers.length > 0) {
-    out(`#${issueNumbers[0]} 没挂里程碑，PR 也就没挂。`);
-  }
+  // PR 不挂里程碑（决定 0015 第 1 条）：里程碑页只数单子，进度才不虚
 
   const manual = `gh pr merge ${pr} --auto --squash`;
   let verdict: ReturnType<typeof judgePaths>;

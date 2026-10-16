@@ -41,7 +41,7 @@ export interface GroomIssueFacts {
   number: number;
   title: string;
   body: string;
-  /** 开单人是不是我们自己的机器人：milestonePlan 判「机器人开的」用它。 */
+  /** 开单人是不是机器人账号（GitHub 标 Bot 的都算）：milestonePlan 判「机器人开的」用它。 */
   authorIsBot: boolean;
   updatedAt: string;
   labels: readonly string[];

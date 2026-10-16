@@ -681,10 +681,28 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
       expect(r.order).toEqual({ position: 3, count: 3, removed: [11, 13, 15], openKnown: true });
       expect(parseOrder(api.description(8) ?? '')).toMatchObject({ ok: true, order: [12, 14, 36] });
       expect(api.description(8)).toBe(`目标。\n${order(12, 14, 36)}\n收尾。`);
-      expect(calls.map((c) => c.slice(0, 3))).toContainEqual(['issue', 'list', '--state']);
+      expect(calls.map((c) => c.slice(0, 6))).toContainEqual([
+        'issue',
+        'list',
+        '--state',
+        'open',
+        '--milestone',
+        V1_TITLE,
+      ]);
       expect(describeOrder(r.order as NonNullable<typeof r.order>)).toBe(
-        '排进先后第 3 位（开着的共 3 张），顺手清掉 3 张已关的',
+        '排进先后第 3 位（开着的共 3 张），顺手清掉 3 张已关或挪走的',
       );
+    });
+
+    it('先后里的单挪到别的版本还开着（#2683）：只按本版开着的单清，挪走的清掉', async () => {
+      // #13 还开着、只是挪去了 v2：本版开着的单列表里没有它（gh issue list --milestone 只回本版的）
+      const api = milestoneApi([{ number: 8, title: V1_TITLE, description: FIVE }], {
+        open: openList(11, 12, 14, 15, 36),
+      });
+      const { run } = setup({ route: api.route });
+      const r = await run(...v1);
+      expect(r.order).toMatchObject({ removed: [13], openKnown: true });
+      expect(parseOrder(api.description(8) ?? '')).toMatchObject({ ok: true, order: [11, 12, 14, 15, 36] });
     });
 
     it('--order-after 指到一张已关的号：按清之前的位置插，清完新单落在它原来的位置', async () => {
@@ -725,7 +743,7 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
         order: [11, 12, 13, 14, 15, 36],
       });
       expect(describeOrder(r.order as NonNullable<typeof r.order>)).toBe(
-        '排进先后第 6 位（没读到开着的单，没清已关的；先后里共 6 张，含已关的）',
+        '排进先后第 6 位（没读到本版开着的单，没清已关、挪走的；先后里共 6 张，含已关的）',
       );
     });
 
