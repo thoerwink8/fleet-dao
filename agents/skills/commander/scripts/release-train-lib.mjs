@@ -1029,7 +1029,7 @@ async function phaseList(io, state) {
   } catch (e) {
     return listFailed(io, state, `单子列表的回话不是 JSON（${e.message}）`);
   }
-  const { rows, missing } = rankIssues(issues, orderFromDescription(milestone.m.description));
+  const { rows } = rankIssues(issues, orderFromDescription(milestone.m.description));
   sayTo(
     io,
     `清单（${milestone.m.title}，开着 ${rows.length} 张）。先后段里写的在前，其余先挡路的、母单排最后、同级小号在前；先只打印，不自动派：`,
@@ -1038,11 +1038,6 @@ async function phaseList(io, state) {
     sayTo(
       io,
       `${t.rank}. #${t.number} ${t.title}${t.mother ? ' 〔母单：子单在它页面里排〕' : t.local ? ' 〔本机做〕' : ' 〔可交法国〕'}${t.listed ? '' : ' （先后段里没写）'}`,
-    );
-  if (missing.length > 0)
-    sayTo(
-      io,
-      `先后段里写了、但不在开着的单里：${missing.map((n) => `#${n}`).join(' ')}（已关或已挪走，该清出先后段）`,
     );
   state.result = { milestone: milestone.m.title, issues: rows.length };
   return { ok: true };

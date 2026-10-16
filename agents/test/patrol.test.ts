@@ -124,11 +124,11 @@ describe('巡查脚本：判法', () => {
         'note|alert|deploy-lag|发布落后',
         'note|daily|release:done:abc|【发版成功】法国已在用 abc',
         'note|daily|feishu:brief:2026-10-09|每日简报',
-        'note|decision|github-app-missing:o/r|o/r：先去 GitHub 把两个机器人装到这个仓',
+        'note|decision|github-app:o/r|o/r：先去 GitHub 把两个机器人装到这个仓',
       ],
     });
     const r = lib.judge({ raw: ok(raw), now: NOW, base });
-    expect(r.alerts).toEqual(['新通知 github-app-missing:o/r：o/r：先去 GitHub 把两个机器人装到这个仓']);
+    expect(r.alerts).toEqual(['新通知 github-app:o/r：o/r：先去 GitHub 把两个机器人装到这个仓']);
     expect(r.delta.join('\n')).not.toContain('release:');
     expect(r.delta.join('\n')).not.toContain('brief');
     expect(lib.render(r).join('\n')).not.toContain('【发版成功】');

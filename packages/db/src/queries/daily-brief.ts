@@ -1,5 +1,5 @@
 // 每日简报（引擎 jobs/daily-brief.ts，每天 08:30 北京时间一条）要读的库：上线的提交对应哪些 PR、开单时刻、开着的要你拍和卡住报警、
-// 昨天停下的单；以及看门狗、巡检判「今天的简报送到没」要的事实。只读。
+// 昨天停下的单；以及看门狗、fleet-api attention 判「今天的简报送到没」要的事实。只读。
 // 改这里之前必须知道：
 // - 简报是一行提醒（键 feishu:brief:<北京日期>，日报级），驾驶舱后端照推送规则马上推飞书（feishu-push.ts），送达记在 notification_deliveries。
 // - 开单时刻用 tasks.created_at（引擎拉单、本机 issue:new --local 登记时建），PR 正文 Closes 的单（pull_requests.issue_refs）里取最早的；
@@ -241,7 +241,7 @@ export function beijingDay(at: Date): { day: string; start: Date } {
 }
 
 /**
- * 今天的简报送到没（看门狗和指挥官巡检同一份判法；巡检脚本在仓外跑，它的 SQL 照这里写）。没到 09:00 不判；
+ * 今天的简报送到没（只此一份判法：看门狗用它，fleet-api attention 也用它，指挥官巡检读 attention 的结论）。没到 09:00 不判；
  * 没跑、没做成、没建、没推到飞书各回一句话；都好了回 null。
  */
 export function dailyBriefProblem(s: DailyBriefStatus, now: Date): string | null {

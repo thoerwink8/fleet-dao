@@ -186,6 +186,23 @@ describe('读 GitHub：单上的留言（欠账的定时任务用）', () => {
     await expect(gh.comment(30, 'x')).rejects.toThrow('在 #30 上留言，GitHub 回了 403');
   });
 
+  it('改里程碑说明：PATCH 只带 description，回改完的样子；GitHub 不让改就抛（#2393）', async () => {
+    const sent: { method: string | undefined; body: string | undefined }[] = [];
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      sent.push({ method: init?.method, body: init?.body as string | undefined });
+      if (url === `${API}/milestones/8`) {
+        return json({ number: 8, title: 'v1 接活', state: 'open', description: '新说明', closed_at: null });
+      }
+      if (url === `${API}/milestones/9`) return new Response('{}', { status: 403 });
+      throw new Error(`没料到的请求 ${url}`);
+    }) as typeof fetch;
+    const gh = liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl });
+    expect(await gh.setMilestoneDescription(8, '新说明')).toMatchObject({ number: 8, description: '新说明' });
+    expect(sent).toEqual([{ method: 'PATCH', body: JSON.stringify({ description: '新说明' }) }]);
+    await expect(gh.setMilestoneDescription(9, 'x')).rejects.toThrow('GitHub 回了 403');
+  });
+
   it('留言认不出：抛', async () => {
     const { impl } = fakeFetch({ [`${API}/issues/1/comments?per_page=100`]: () => json([{ id: 1 }]) });
     await expect(
