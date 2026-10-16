@@ -4,7 +4,8 @@
 // 改这里之前必须知道：
 // - 这是一次性会话：没人回答问题、没有 fleet 命令可用（不发通行证），所以不许让它「去问」「去汇报」；成败只认 stdout 的回答、
 //   退出状态和工作树里的提交。规矩里的每一条都对应引擎后面做的一步：只读提交（所以没提交的改动不算）、自己推分支开 PR（所以不许推、
-//   不许切分支）。需求在单子里、结果在 PR 里（#654）：不要求会话写 需求.md、结果.md。
+//   不许切分支）。需求在单子里、结果在 PR 里（#654）：不要求会话写 需求.md、结果.md。会话改不了 PR 正文：
+//   最后一条回复由引擎写进 PR 说明的「做了什么」（ANSWER_TO_PR，#2723），提示词照这个说，不叫它「写在 PR 正文里」。
 // - 返工意见原样带进来（CI 失败日志、验收问题表、没提交）：按条编号，每条超长截断（日志动辄几万字）；一条也没有就不出这一节。
 //   派前探测探通且没换路（「派前探测：某模型 通」）是状态，不是要改的，不进这一节（在途单的意见里可能还留着这句）。换路、探不通的仍带上。
 // - 上一次被切号、暂停停下的（#59、#820）多一节：树里留着它的提交和改动，告诉新会话接着干。
@@ -12,6 +13,7 @@
 //   （重述等于让它把整张单再读一遍，返工轮的缓存读和首轮一样多）。
 // - 新开的会话（不是续的）带「已给你的文件」一节（preload.ts，决定 0093）：单子「已知的模块」列的文件原文，引擎起会话前读好放进来，
 //   省掉会话自己熟悉仓库那一大段；续的会话里早有了，不再给。
+// - 不许把命令丢到后台再结束回答（NO_BACKGROUND_RULE，#2722）：一次性会话收不到后台回调，丢后台就收场的改动留在树里没提交。
 
 import { isDispatchProbePassOnly } from '../workflows/task-support.ts';
 import { type ManualBrief, renderBrief } from './brief.ts';
@@ -34,6 +36,15 @@ export interface SegmentPromptInput {
   /** 已废（子代理提示整条链路已删）：只为 task-segment.ts 还在传它而留，不读；等 #1972 合并后随那处一起删。 */
   subagentHint?: boolean;
 }
+
+/**
+ * 一次性会话回答一结束就收场，收不到后台任务跑完的通知（#2722：丢后台就收场的那一轮改动没提交）。新会话、续会话都写。
+ */
+export const NO_BACKGROUND_RULE =
+  '不许把命令放到后台再结束回答：这是一次性会话，回答一结束就收场，收不到后台任务跑完的通知。测试、检查都在前台跑完看到结果，提交了再结束。';
+
+/** 会话自己改不了 PR 正文：引擎把它最后一条回复写进 PR 说明的「做了什么」（#2723，workflows/task-support.ts 的 sessionDidLines）。 */
+export const ANSWER_TO_PR = '最后一条回复会写进 PR 的说明';
 
 function clip(text: string): string {
   const t = text.trim();
@@ -60,7 +71,8 @@ export function renderResumePrompt(input: { interrupted?: string; feedback: read
       : '接着这个会话往下做：分支和工作树都没变，单子和规矩照前面的。',
     ...feedbackSection(input.feedback, '## 这一轮要改的（照着改，改完才算做完）'),
     '',
-    '改完照旧 git add、git commit 提交，不推送、不开 PR；最后一条回复逐条一行回验收条，再加一行欠什么。',
+    NO_BACKGROUND_RULE,
+    `改完照旧 git add、git commit 提交，不推送、不开 PR；${ANSWER_TO_PR}：逐条一行回验收条，再加一行欠什么。`,
   ];
   return out.join('\n');
 }
@@ -85,8 +97,9 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     '- 不要用 `fleet` 命令（这次没有后端可连）。',
     '- AGENTS.md 里开 PR、进度单、开单的约定这次不适用，引擎替你做。',
     ...(specDir === undefined ? [] : [`- 需求文档 \`${specDir}/需求.md\` 已经在主线上，不要改它。`]),
-    '- 不要新建需求文档、结果文档：需求在单子里，做成了什么写在 PR 正文里（引擎开 PR）。',
+    `- 不要新建需求文档、结果文档：需求在单子里；${ANSWER_TO_PR}（引擎开 PR，你改不了 PR 正文），做成了什么、怎么验的写在那里。`,
     '- 家目录里装的通用技能（~/.agents/skills、~/.claude/skills 下的 SKILL.md）这次用不上，别去读：要做的、怎么算做完都在上面。',
+    `- ${NO_BACKGROUND_RULE}`,
     '- 最后一条回复逐条一行回验收条，再加一行欠什么。',
   ];
   const interrupted = input.interrupted?.trim();

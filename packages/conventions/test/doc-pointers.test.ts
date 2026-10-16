@@ -305,7 +305,7 @@ describe('文档指针：故意不查的', () => {
     [
       'AGENTS.md 里带尖括号的占位写法',
       'AGENTS.md',
-      ['要写方案才写，放 `specs/<编号>-<短名>/`；收尾 `pnpm progress done <评论号>`。'],
+      ['要写方案才写，放 `specs/<编号>-<短名>/`；收尾 `pnpm progress note <一句话>`。'],
     ],
     ['不是指针的「节」', 'docs/design.md', ['见 docs/ops.md 的 PX 一节；前面各节；验证环节；第一个里程碑。']],
   ];

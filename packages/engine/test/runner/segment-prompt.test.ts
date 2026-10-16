@@ -83,6 +83,18 @@ describe('动手会话的提示词', () => {
     expect(text.trimEnd().endsWith('再加一行欠什么。')).toBe(true);
   });
 
+  it('不许把命令放到后台再结束回答（#2722：一次性会话收不到后台回调，丢后台就收场的没提交）：新会话、续会话都写', () => {
+    expect(render()).toContain('不许把命令放到后台再结束回答');
+    expect(renderResumePrompt({ feedback: [] })).toContain('不许把命令放到后台再结束回答');
+  });
+
+  it('最后一条回复会写进 PR 的说明（#2723：引擎开 PR，会话自己改不了正文）：不再叫它「写在 PR 正文里」', () => {
+    const text = render();
+    expect(text).toContain('最后一条回复会写进 PR 的说明');
+    expect(text).not.toContain('写在 PR 正文里');
+    expect(renderResumePrompt({ feedback: [] })).toContain('最后一条回复会写进 PR 的说明');
+  });
+
   it('派前探测探通且没换路不进返工意见；换路、探不通的仍按条带上', () => {
     const onlyPass = render({ feedback: ['派前探测：grok-4.7 通'] });
     expect(onlyPass).not.toContain('派前探测');

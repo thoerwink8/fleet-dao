@@ -5,8 +5,8 @@
 // 发版不关引擎总开关（#2038、决定 0093）：release.sh 切版本前自己给在跑的任务发暂停（暂停人「发版」）、只等不可暂停的几段，
 // 发完对这批发「继续」（deploy/release.sh 的 pause_tasks/resume_tasks）。所以这里第 2 步只读开关记下发版前的样子、第 3 步不再等收尾，
 // 第 7 步只核对；只有老版本关过的（进度里 marker 为真、pausedMaster 不是 false）才把总开关开回。
-// 这是人工档（deploy/lib/human-tier.sh）：装一次要创始人在法国以 root 跑 france.sh。deploy/france.sh 把本目录装到
-// /usr/local/lib/fleet-dao/release-request/（装的是副本；这里依赖同级的 ../auto-release/lib.mjs 判 CI，它由自动档装在 /usr/local/lib/fleet-dao/auto-release/）。
+// 单元和请求目录是人工档（deploy/lib/human-tier.sh）：装一次要创始人在法国以 root 跑 france.sh。本目录的脚本由 france.sh（整套和 --auto-tier）
+// 装到 /usr/local/lib/fleet-dao/release-request/（装的是副本；这里依赖同级的 ../auto-release/lib.mjs 判 CI，它也由自动档装在 /usr/local/lib/fleet-dao/auto-release/）。
 // 改这里之前必须知道：
 // - 请求文件归 fleet（后端能写、被入侵了也能写），root 只当数据读：不是普通文件、是符号链接、超 MAX_REQUEST_BYTES、键不对、
 //   提交号不是完整 40 位小写十六进制，一律拒（safeReadRequest）。读完马上删掉请求文件，之后只用读到的值，不再回头开它。
@@ -21,12 +21,16 @@
 //   没有和这次发版有关的新异常（RELEASE_ALERT_PREFIXES；重启打断的几类 15 分钟内重试；无关的只列出不拦）、再跑一遍预检（已是最新）；
 //   第 7 步核引擎总开关和各仓接活开关和发版前一致（被人动过的照实报不一致，不替人改回）。
 //   结论写进 release-train.json 的 check 和 last-request.json；开始、成功、卡住、失败各记一条提醒进通知中心（notifications，键 release:…）：
-//   卡住、失败是「要你拍」，由驾驶舱后端用飞书应用机器人立刻推进团队群（packages/api/src/feishu-push.ts）；开始、成功等不写通知，只写进度记录（#2368）。
+//   卡住、失败是卡住报警级（alert，不是「要你拍」，#2728）；开始、成功等不写通知，只写进度记录（#2368）。
+// - 发版还没动手（第 0–3 步、release.sh 没起）就没成的，不挡自动发版：进度记录的 untouchedFails 记同一个提交连败几趟，
+//   自动发布下一轮照常再请求，满 UNTOUCHED_FAIL_LIMIT 趟才停、开急修单（auto-release/lib.mjs 的 gateVerdict、emergencyStep）。
+// - 失败原因用 reasonOf：保留认得出的关键行（Cannot find package '…' 这种），不只取尾几行（#2728）。
+// - 这个目录的脚本是自动档：发完版由 france.sh --auto-tier 照在用那一版换上；只有 fleet-release-request.{service,path} 和目录是人工档。
 // - 请求的种类（#2027，请求文件的 kind，没写就是 release 发布，老后端照常）：retry 从停在第 3 步「等收尾」的那一趟接着走（老版本留下的）、
 //   restore 从没成在第 7 步「恢复」的那一趟把引擎总开关开回（只认我们关过的：发版前开着、pausedMaster 不是 false）、abort 撤掉暂停（等价 release-train abort：
 //   我们关过的、还没动手发版就开回暂停前的样子，已动手发过版保持关）；不认识的 kind 拒绝并写原因，不当成发布。各种都落 last-request.json（kind、by）。
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
-import { ciVerdict } from '../auto-release/lib.mjs';
+import { ciVerdict, reasonOf, UNTOUCHED_FAIL_LIMIT, untouchedFails } from '../auto-release/lib.mjs';
 import { SESSION_WAIT_MS } from './session-wait.mjs';
 
 export const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
@@ -53,12 +57,14 @@ export const PHASES = ['预检', '暂停本机', '暂停法国', '等收尾', '�
 export const FOUNDER_WORD = '驾驶舱点击发布（创始人）';
 /** 各步上限（毫秒）；测试里整份换小。service 的 TimeoutStartSec 必须比这些加起来大（release-request.test.mjs 核对）。 */
 export const LIMITS = {
-  /** 老的「等收尾」上限：第 3 步已不再等（#2038），留着是因为发版确认框和 TimeoutStartSec 的核对还读同一个数。 */
+  /** 老的「等收尾」上限：第 3 步已不再等（#2038），留着是因为发版确认框还读同一个数（TimeoutStartSec 的核对不再算它）。 */
   sessionsMs: SESSION_WAIT_MS,
   pollMs: 30_000,
   releaseMs: 30 * 60_000,
   deployMs: 3 * 60_000,
   checkMs: 5 * 60_000,
+  /** release.sh --check 没过时退避再跑几次（间隔 pollMs、2×pollMs……；#2728：读远端的一次超时不判失败）。 */
+  checkRetries: 2,
   stepMs: 2 * 60_000,
   /** 发后体检里「发布重启必然打断、条件会自己消失」的那几类（VERIFY_RETRY_PREFIXES、/healthz、读主线）最多重试多久（#2026）。 */
   verifyMs: 15 * 60_000,
@@ -102,14 +108,8 @@ const FULL_SHA = /^[0-9a-f]{40}$/;
 const WHO = /^[\p{L}\p{N}_.@ -]{1,64}$/u;
 const AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
 
-const tail = (text, n = 3) =>
-  String(text ?? '')
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter(Boolean)
-    .slice(-n)
-    .join(' / ')
-    .slice(0, 400);
+/** 失败原因：认得出的关键行（缺哪个模块、哪个命令）加尾几行，不只取尾几行（#2728）。 */
+const tail = (text, n = 3) => reasonOf(text, n);
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 const minutes = (ms) => Math.round(ms / 60_000);
 
@@ -447,6 +447,11 @@ function newState(io, req) {
     check: null,
     /** 推过的飞书（开始、成功、卡住、失败）：{ kind, ok, why? }。 */
     pushes: [],
+    /**
+     * 同一个提交连着几趟「发版还没动手就没成」（第 0–3 步、release.sh 没起；#2728）：上一趟是同一个提交、也是这样没成的带过来，
+     * 这一趟也这样没成再加一。自动发布按它判下一轮重不重试（满 UNTOUCHED_FAIL_LIMIT 停、开急修单），不靠内存。
+     */
+    untouchedFails: 0,
     via: 'cockpit',
     requestedBy: req.by,
     requestedAt: req.at,
@@ -623,16 +628,37 @@ async function phaseDeploy(io, state) {
     }
     if (io.now().getTime() - started >= io.limits.deployMs) {
       return failed(
-        `等了 ${minutes(io.limits.deployMs)} 分钟，在用的还不是目标 ${sha.slice(0, 12)}（历史末行：${tail(h.line, 1)}）`,
+        `版本没切上：等了 ${minutes(io.limits.deployMs)} 分钟，在用的还不是目标 ${sha.slice(0, 12)}（历史末行：${tail(h.line, 1)}）`,
       );
     }
     await io.sleep(io.limits.pollMs);
   }
-  waitOn(io, state, 'release.sh --check 在跑');
-  const chk = await io.releaseCheck(io.limits.checkMs);
+  // 走到这里版本已经切上了（发布历史末行就是目标）。--check 里有读远端的项（经香港取 release.json、健康页），
+  // 一次网络超时不该判整趟失败（#2728，10-16 17:17 一次 curl 超时就判了失败）：没跑成、有红都退避再跑，最多 checkRetries 次，仍不过才算红，
+  // 原因写明「版本已切上、只是检查没过」，和「版本没切上」分开。
+  let chk;
+  for (let attempt = 0; ; attempt++) {
+    waitOn(
+      io,
+      state,
+      attempt === 0
+        ? 'release.sh --check 在跑'
+        : `release.sh --check 第 ${attempt + 1} 次（上一次没过，退避后重跑）`,
+    );
+    chk = await io.releaseCheck(io.limits.checkMs);
+    const bad = chk.error || chk.status === null || chk.status === 1;
+    if (!bad || attempt >= io.limits.checkRetries) break;
+    await io.sleep(io.limits.pollMs * 2 ** attempt);
+  }
+  const tries = `重试 ${io.limits.checkRetries} 次仍`;
   if (chk.error || chk.status === null)
-    return failed(`release.sh --check 没跑成：${tail(chk.error ?? chk.stderr)}`);
-  if (chk.status === 1) return failed(`release.sh --check 有红：${tail(chk.stderr || chk.stdout, 5)}`);
+    return failed(
+      `版本已切上（在用的就是 ${sha.slice(0, 12)}），只是 release.sh --check ${tries}没跑成：${tail(chk.error ?? chk.stderr)}`,
+    );
+  if (chk.status === 1)
+    return failed(
+      `版本已切上（在用的就是 ${sha.slice(0, 12)}），只是 release.sh --check ${tries}有红：${tail(chk.stderr || chk.stdout, 5)}`,
+    );
   return { ok: true };
 }
 
@@ -921,8 +947,18 @@ function buttonHint(state, kind) {
     return '版本已经发出去了，到驾驶舱「法国」页发版卡点「恢复引擎开关」';
   if (state.phase === 7)
     return '版本已经发出去了，到驾驶舱「法国」页看发版卡写的原因（这一趟没关过引擎总开关）';
-  if (state.phase <= 3) return '到驾驶舱「法国」页看发版卡写的原因，处理好再点「发布到法国」（版本还没发）';
+  if (kind === 'failed' && untouched(state)) {
+    const n = Number.isInteger(state.untouchedFails) ? state.untouchedFails : 1;
+    return n >= UNTOUCHED_FAIL_LIMIT
+      ? `版本还没发、什么都没动；同一个提交已连败 ${n} 趟，自动发版停下、开急修单修根因，修好的新提交合进主线后照常自动发`
+      : `版本还没发、什么都没动；自动发版下一轮自动重试（第 ${n} 趟，同一个提交连败 ${UNTOUCHED_FAIL_LIMIT} 趟才停、开急修单）`;
+  }
   return '到驾驶舱「法国」页看发版卡写的原因（版本可能已经发出去了）';
+}
+
+/** 这一趟是不是发版还没动手就没成（第 0–3 步、release.sh 没起；判法同 auto-release 的 untouchedFails）。 */
+function untouched(state) {
+  return untouchedFails({ ...state, untouchedFails: 1 }) > 0;
 }
 
 /**
@@ -946,18 +982,25 @@ export function releaseMessage(kind, state) {
   return `${text}。${buttonHint(state, kind)}。`.replace(/\s+/g, ' ').slice(0, 900);
 }
 
-/** 哪几种要人看：进「要你拍」，后端马上推飞书；其余（开始、成功、重试、恢复、撤暂停）不写通知（level 为 null），只写进度记录。 */
+/**
+ * 哪几种写进通知中心：卡住报警级（alert），驾驶舱上看得到；其余（开始、成功、重试、恢复、撤暂停）不写通知（level 为 null），只写进度记录。
+ * 不是「要你拍」（#2728）：发版没成不是掏新钱、删了找不回、只有人能做的事——还没动手的自动重试、连败了开急修单，动了手的按卡片上的按钮处理。
+ */
 export const RELEASE_ALERT_KINDS = ['check', 'blocked', 'failed'];
 /** 发版提醒的键前缀（简报按它认「发版」这一类）。 */
 export const RELEASE_NOTE_PREFIX = 'release:';
 
-/** 这一条提醒怎么记：级别、键（同一趟同一种只一行；不同趟时刻不同）、标题（第一句）。 */
+/**
+ * 这一条提醒怎么记：级别、键、标题（第一句）。键：同一趟同一种只一行，不同趟时刻不同；发版还没动手就没成的，同一个提交只一行
+ * （`release:failed:<前12位>:untouched`，自动重试每趟改这一行，不每 5 分钟多一条）。
+ */
 export function releaseNote(kind, state, text, now) {
   const sha = String(state.target?.value ?? '').slice(0, 12);
+  const tag = kind === 'failed' && untouched(state) ? 'untouched' : Math.floor(now.getTime() / 1000);
   return {
     kind,
-    level: RELEASE_ALERT_KINDS.includes(kind) ? 'decision' : null,
-    key: `${RELEASE_NOTE_PREFIX}${kind}:${sha}:${Math.floor(now.getTime() / 1000)}`,
+    level: RELEASE_ALERT_KINDS.includes(kind) ? 'alert' : null,
+    key: `${RELEASE_NOTE_PREFIX}${kind}:${sha}:${tag}`,
     title: text.split('。')[0].slice(0, 200),
   };
 }
@@ -1041,6 +1084,8 @@ export async function runRequest(io) {
   ) {
     state.before = prev.before;
   }
+  // 同一个提交上一趟发版还没动手就没成：连败趟数带过来（这一趟再这样没成就加一）
+  if (prev?.target?.value === req.sha) state.untouchedFails = untouchedFails(prev);
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
   say(io, `收到驾驶舱的发布请求：${req.sha.slice(0, 12)}，${req.by} 在 ${req.at} 点的`);
   await push(io, state, 'start');
@@ -1068,6 +1113,9 @@ async function runPhases(io, state, req, from) {
       state.why = r.why;
       state.laggards = r.laggards ?? [];
       state.waiting = null;
+      if (state.status === 'failed' && untouched(state)) {
+        state.untouchedFails = (Number.isInteger(state.untouchedFails) ? state.untouchedFails : 0) + 1;
+      }
       io.writeState(state);
       io.err(`第 ${p} 步「${PHASES[p]}」${r.kind === 'blocked' ? '卡住了' : '没成'}：${r.why}`);
       await push(io, state, state.status);

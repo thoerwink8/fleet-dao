@@ -106,7 +106,8 @@ export interface RoutingPolicy {
 /**
  * 按模型的强弱档（目录的 strength：strong / standard / light）排，决定 0099。三条：
  * 1. 重活先给强档：这一单的派工档在 strongFirstTiers 里、用途在 trackScore.stages 里时，强档的模型整体提到别的档前面，
- *    档内仍按战绩和人排的先后。强档某个模型的池超前时间进度不少于 yieldAhead，这个模型让位、回到原来的位置。
+ *    档内仍按战绩和人排的先后。强档某个模型没被硬挡的池都超前时间进度不少于 yieldAhead，这个模型让位：只让给不超前的强档，
+ *    强档都超前时照派强档、不让给别的档（#2724）。
  * 2. 探索：同样只在动手、给了派工档时，按单的编号算出的数小于 explore[档] 就把样本少于 trackScore.minTasks 的强档模型提到第一。
  * 3. 同档分流：任何用途里，强弱档相同、排在相邻位置的几个模型合成一组，组内所有渠道按池子消耗进度排（和同一模型的
  *    几个渠道之间同一套微调），不同档之间、没标档的照旧按模型先后。
@@ -120,7 +121,7 @@ export interface StrengthPolicy {
   strongFirstTiers: RouteTier[];
   /**
    * 强档的模型，它每条读成了额度的渠道都有一个窗口超前时间进度不少于这个数（shared 的 quotaPace，同 pace 那一套，5 小时窗不算），
-   * 这个模型就让位。0.3：比 pace.margin（0.1）宽得多，只在照这个速度清零前一定用完时才让，免得强档稍快一点就被挤回 grok。
+   * 这个模型就让位。0.3：比 pace.margin（0.1）宽得多，只在照这个速度清零前一定用完时才让，免得强档稍快一点就换。硬挡着的渠道不算（choose.ts 先算挡因交给 rank）。
    */
   yieldAhead: number;
   /**

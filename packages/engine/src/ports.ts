@@ -224,6 +224,13 @@ export interface OpenPrInput extends Scope {
   generation?: number;
 }
 
+/** 换掉已开着的 PR 的正文（#2723：第 2 轮起「做了什么」换成这一轮会话的回复）。 */
+export interface UpdatePrBodyInput extends Scope {
+  repo: Repo;
+  prNumber: number;
+  body: PrBody;
+}
+
 export interface PullRequestRef {
   prNumber: number;
   url?: string;
@@ -363,6 +370,7 @@ export interface EnginePorts {
    */
   pushBranch(input: PushBranchInput, ctx: PortContext): Promise<{ head: string; changedFiles?: string[] }>;
   openPr(input: OpenPrInput, ctx: PortContext): Promise<PullRequestRef>;
+  updatePrBody(input: UpdatePrBodyInput, ctx: PortContext): Promise<void>;
   waitCi(input: WaitCiInput, ctx: PortContext): Promise<CiResult>;
   syncMainline(input: SyncMainlineInput, ctx: PortContext): Promise<SyncResult>;
   saveTaskState(input: TaskStateSnapshot, ctx: PortContext): Promise<void>;

@@ -116,6 +116,30 @@ describe('派前探测', () => {
     }
   });
 
+  // #2700：定时这一轮不复探探通了的路由，在线结论可以停几十小时（法国 cursor 那几条停了 47 小时）。选路不信旧的「在线」：
+  // 派之前当场探，探不通写成不在线、不派这一条
+  it('在线、结论 47 小时前的路由：派前当场探；探不通写成 failed、不派', async () => {
+    const t = target({
+      hostId: 'cursor-agent',
+      previous: { state: 'ok', at: new Date(NOW.getTime() - 47 * 3_600_000), detail: '答上了：旧的' },
+    });
+    let probes = 0;
+    const h = harness([t], {
+      probers: {
+        'cursor-agent': async () => {
+          probes += 1;
+          return { kind: 'failed', detail: '连不上' };
+        },
+      },
+    });
+    const got = await probeAssignedRoute(h.deps, createProbeLock(), { routeId: t.routeId, label: t.modelId });
+    expect(probes).toBeGreaterThan(0);
+    expect(h.saved).toEqual([
+      { routeId: t.routeId, state: 'failed', detail: expect.stringContaining('连不上'), trigger: 'dispatch' },
+    ]);
+    expect(got).toMatchObject({ kind: 'fail' });
+  });
+
   // 原来的按需探测 on_demand 已删（#1843）：迁移把剩下的行改成 skipped、原文「改版后等下一轮探」，派前照样探一次。
   it('没探的路由（上一次结论 skipped、alive 为 false）：派前探一次，探通就派，写回通', async () => {
     const t = target({

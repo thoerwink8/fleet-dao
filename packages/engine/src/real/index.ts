@@ -191,6 +191,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     removeWorktree: github.removeWorktree,
     pushBranch: github.pushBranch,
     openPr: github.openPr,
+    updatePrBody: github.updatePrBody,
     waitCi: github.waitCi,
     syncMainline: github.syncMainline,
     closeIssue: github.closeIssue,

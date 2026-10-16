@@ -18,7 +18,7 @@ import {
   taskContinueSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { SELF_CHECK_RED_LINE } from '../src/workflows/task-support.ts';
+import { COMMIT_NUDGE_LINE, SELF_CHECK_RED_LINE } from '../src/workflows/task-support.ts';
 import { freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
 import { scripted } from './task-script.ts';
 
@@ -319,6 +319,82 @@ describe('会话收场后引擎自测（决定 0093）', { timeout: 60_000 }, ()
     expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), fakeHead(555)]);
     expect(calls.verify[0]?.testOutput).toContain('过了');
     expect(calls.verify[1]?.testOutput).toBeUndefined();
+  });
+});
+
+describe('交活时没提交：同一轮续一次会话补提交（#2722）', { timeout: 60_000 }, () => {
+  it('没提交、树里有剩：续同一个会话一次让它提交，提交了就推；轮数不加', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      resume: RESUME_ALWAYS,
+      delivery: (n) => ({
+        head: fakeHead(100 + n),
+        commits: n === 1 ? 0 : 1,
+        changedFiles: n === 1 ? [] : ['a.ts'],
+        leftover: n === 1 ? ['?? a.ts'] : [],
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[1]?.resumeSessionId).toBe('sess-1');
+    expect(calls.segment[1]?.worktreePath).toBe(calls.segment[0]?.worktreePath);
+    const fb = calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(fb).toContain(COMMIT_NUDGE_LINE);
+    expect(fb).toContain('?? a.ts');
+    expect(calls.order.slice(0, 4)).toEqual(['brief', 'segment', 'delivery', 'segment']);
+    expect(world.count('pushBranch')).toBe(1);
+    expect(world.states.some((s) => s.doing.includes('续进会话补提交'))).toBe(true);
+  });
+
+  it('续了还没提交：不再续第二次，照旧返工进下一轮', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      resume: RESUME_ALWAYS,
+      delivery: (n) => ({
+        head: fakeHead(100 + n),
+        commits: n <= 2 ? 0 : 1,
+        changedFiles: n <= 2 ? [] : ['a.ts'],
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    // 第 1 轮：动手 + 续一次补提交；第 2 轮：返工（续会话）一次就提交了
+    expect(calls.segment).toHaveLength(3);
+    expect(calls.segment[1]?.feedback.join('\n')).toContain(COMMIT_NUDGE_LINE);
+    expect(calls.segment[2]?.feedback.join('\n')).toContain('没有产生新的提交');
+    expect(world.count('pushBranch')).toBe(1);
+  });
+
+  it('续不上会话（换了执行方式）：不在这一轮另开会话，照旧返工', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      resume: () => ({ kind: 'new', reason: '换了执行方式' }),
+      delivery: (n) => ({
+        head: fakeHead(100 + n),
+        commits: n === 1 ? 0 : 1,
+        changedFiles: n === 1 ? [] : ['a.ts'],
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[1]?.feedback.join('\n')).not.toContain(COMMIT_NUDGE_LINE);
   });
 });
 

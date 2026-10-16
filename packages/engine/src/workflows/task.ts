@@ -68,13 +68,17 @@
 // - 自测（决定 0093，patched('self-check')）：会话交活、交付核对过了，推之前引擎在会话的树里跑仓的测试命令和 tsc（selfCheck）。
 //   红了把精炼输出续进同一个会话再改一次，再测一次就推（不论红绿，交给 CI）；没跑成照旧推。最近一次的输出交给冷验收
 //   （ColdVerifyInput.testOutput，只给和验收的头对得上的那一份）。
+// - PR 说明的「做了什么」取动手会话最后一条回复（#2723，taskPrDid / sessionDidLines，有截断上限）：开 PR 时写进去；
+//   第 2 轮起推上去后改 PR 正文换成这一轮的回复（patched('pr-body-from-session')，updatePrBody，没改成不挡原流程）。
+// - 交活没提交续一次（#2722，patched('commit-nudge-same-round')，nudgeCommit）：会话收场时没提交、或树里有剩（常见是把测试丢到后台就结束了），
+//   读完交付先续同一个会话一次让它提交，不算一轮；续不上（planResume 判开新会话）就不续。续了还没交干净，照旧返工进下一轮。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
 import type { Limits } from '../limits.ts';
-import type { Worktree } from '../ports.ts';
+import type { PrBody, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import {
@@ -91,12 +95,13 @@ import { activitiesFor, limitsFor } from './kit.ts';
 import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
 import { TaskRuntime } from './task-runtime.ts';
-import { writeSession } from './task-session.ts';
+import { planResume, writeSession } from './task-session.ts';
 import {
   Abandoned,
   AutoEscape,
   avoidableFamily,
   ConflictHandoff,
+  commitNudgeFeedback,
   conflictFilesForHandoff,
   conflictHandoffLine,
   EMPTY_DELIVERY_CODE,
@@ -425,6 +430,7 @@ class TaskFlow {
     await writeSession(rt, brief, tier, wt);
 
     let delivery = await this.readDelivery(wt);
+    delivery = await this.nudgeCommit(brief, tier, wt, delivery);
     // 自测：交付核对过了再跑（没提交、有冲突的照旧返工，不白跑测试）
     if (this.deliveredClean(delivery) && patched('self-check')) {
       const first = await this.selfCheck(wt, delivery.head);
@@ -525,23 +531,53 @@ class TaskFlow {
           branch: rt.branch,
           head: pushed.head,
           title: rt.input.title,
-          body: {
-            requirement: rt.input.issueNumber,
-            did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length),
-            verified: [
-              patched('repo-ci-policy') && this.ciMode === 'off'
-                ? SKIP_CI_PR_VERIFIED
-                : 'CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）',
-            ],
-          },
+          body: this.prBody(),
           ...(generation === undefined ? {} : { generation }),
         }),
       );
       rt.prNumber = pr.prNumber;
+    } else if (patched('pr-body-from-session')) {
+      // 第 2 轮起：PR 早开了，「做了什么」换成这一轮会话的回复（#2723）。老历史没有这个标记，不改
+      await this.updatePrBody(rt.prNumber);
     }
     await rt.advance('implement', `第 ${rt.round} 轮推上去了，PR #${rt.prNumber}`);
     rt.feedback = [];
     return true;
+  }
+
+  /** PR 正文的结构：「做了什么」带最近一次动手会话的最后一条回复（#2723，有截断上限）。 */
+  private prBody(): PrBody {
+    const rt = this.rt;
+    return {
+      requirement: rt.input.issueNumber,
+      did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length, rt.lastAnswer),
+      verified: [
+        patched('repo-ci-policy') && this.ciMode === 'off'
+          ? SKIP_CI_PR_VERIFIED
+          : 'CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）',
+      ],
+    };
+  }
+
+  /**
+   * 第 2 轮起推上去后改 PR 正文（#2723）。不抛、不停下：没改成只记日志，PR 和后面的 CI、验收照旧（说明旧一点不挡合并）。
+   * 放弃、叫停照常往外抛。
+   */
+  private async updatePrBody(prNumber: number): Promise<void> {
+    const rt = this.rt;
+    try {
+      await rt.cancellable(() =>
+        rt.acts.updatePrBody({
+          taskId: rt.input.taskId,
+          repo: rt.input.repo,
+          prNumber,
+          body: this.prBody(),
+        }),
+      );
+    } catch (error) {
+      if (error instanceof Abandoned || isCancellation(error)) throw error;
+      log.warn('PR 说明没改成，照旧往下走', { error: String(error) });
+    }
   }
 
   /**
@@ -599,6 +635,36 @@ class TaskFlow {
         baseSha: rt.since,
       }),
     );
+  }
+
+  /**
+   * 交活时没提交、或树里有剩（#2722，patched('commit-nudge-same-round')）：续刚收场的那个会话一次，让它把改动提交了。
+   * 不算一轮、不算连着续的次数，一轮只续一次；续了还没交干净，照旧走下面的返工。有冲突标记的不续（走冲突那条）。
+   * 先问续不续得上（planResume，按刚跑的那条路由）：续不上就不在这一轮另开会话，照旧返工。老历史没有这个标记，不续。
+   */
+  private async nudgeCommit(
+    brief: TaskBrief,
+    tier: TierDecision,
+    wt: Worktree,
+    delivery: DeliveryRead,
+  ): Promise<DeliveryRead> {
+    const rt = this.rt;
+    const leftover = delivery.leftover ?? [];
+    if (delivery.commits > 0 && leftover.length === 0) return delivery;
+    if ((delivery.conflicts ?? []).length > 0) return delivery;
+    const last = rt.lastSession;
+    const route = rt.lastImplementRoute;
+    if (!last || !route || !patched('commit-nudge-same-round')) return delivery;
+    const from = { previous: { runId: last.runId }, worktreePath: last.worktreePath };
+    const plan = await planResume(rt, from, route, wt.path);
+    if (plan.kind !== 'resume') return delivery;
+    const streak = rt.resumeStreak;
+    rt.feedback = [commitNudgeFeedback(delivery.commits, leftover)];
+    rt.resumeFrom = from;
+    await rt.advance('implement', `第 ${rt.round} 轮：会话交活时没提交完，续进会话补提交一次`);
+    await writeSession(rt, brief, tier, wt);
+    rt.resumeStreak = streak;
+    return this.readDelivery(wt);
   }
 
   /** 交付核对过得去：有新提交、树里没剩没提交的、没有冲突标记。 */

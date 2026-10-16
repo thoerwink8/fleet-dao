@@ -79,6 +79,20 @@ export function freshSessionFeedback(feedback: readonly string[]): string[] {
 /** 自测红了续进会话的那一句（第一行），后面跟精炼输出。 */
 export const SELF_CHECK_RED_LINE = '引擎在你交活之后跑了测试和类型检查，没过。改到它过再提交：';
 
+/**
+ * 交活时没提交、树里有剩：同一轮续进会话补提交的那一句（#2722）。后面跟树里剩的文件。
+ * 常见是会话把测试丢到后台就结束了回答：一次性会话收不到后台回调，改动就留在树里。
+ */
+export const COMMIT_NUDGE_LINE =
+  '你的回答结束了，但改动还没提交完（引擎只认提交）。不要把命令放到后台再结束回答：要跑的测试、检查在前台跑完看到结果，然后 git add、git commit 提交，工作树里别留没提交的文件。';
+
+/** 续进会话补提交的意见：那一句 + 树里剩的文件（最多 10 个）。 */
+export function commitNudgeFeedback(commits: number, leftover: readonly string[]): string {
+  const none = commits === 0 ? '这一轮一个提交都没有。' : '';
+  const left = leftover.length > 0 ? `工作树里还有没提交的改动：${leftover.slice(0, 10).join('、')}。` : '';
+  return `${COMMIT_NUDGE_LINE}${none || left ? `\n${none}${left}` : ''}`;
+}
+
 /** 自测的精炼输出合成一段（喂回会话、交给冷验收都用这一份）：每条命令一节，限 SELF_CHECK_DIGEST_MAX 字。 */
 export function selfCheckText(result: SelfCheckResult): string {
   const parts = result.steps.map((s) => {
@@ -659,9 +673,42 @@ export const MERGE_WAIT_RED_PR_NOTES = [
   '同一根子旁的路径：检查还在跑（pending）或一条都没有，仍等，和红不是同一件事，检查一直 pending 这次不改。PR 被关了本来就停下报人。和主线冲突已经并主线或交回返工；草稿被标成 mergeable=false 也会进冲突那条，这次不改分类。自动合并被撤掉就重新挂，挂不上停下；重新挂上之后红检查走上面的新路径。头被别人改了就停下，人点继续后重走 CI 和验收，不是一直等。落后主线但 mergeable=true 仍等（GitHub 还能合）；mergeable=false 走冲突那条。读检查失败抛错重试，不装成还在等；没接上读检查也抛，不默认 pending。不强制 CI 的直接合并 mergeNow 故意不看检查，另一条路，这次不改。每小时对账不推卡在 waitMerged 里的任务：红了由这条工作流自己返工，不加第二套看守。',
 ] as const;
 
-/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，其余单子仍是原来两句。 */
-export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
+/** PR 说明里放会话回复最多多少字（#2723）：超了截断并写明后面还有多少。 */
+export const PR_DID_ANSWER_MAX = 2000;
+/** 会话回复最多占「做了什么」几条：PR 正文整篇 14 行以内（github 包的 PR_BODY_MAX_LINES），多出的行并进最后一条。 */
+export const PR_DID_ANSWER_LINES = 7;
+
+/**
+ * 动手会话最后一条回复 → PR 说明「做了什么」里的几条（#2723：会话自己改不了 PR 正文，提示词叫它把做了什么写在最后一条回复里）。
+ * 按行拆、去掉列表记号和空行；超长截断；多出 PR_DID_ANSWER_LINES 的行并进最后一条，不丢。没有回复是空的。
+ */
+export function sessionDidLines(answer: string | null | undefined): string[] {
+  const text = (answer ?? '').trim();
+  if (!text) return [];
+  const clipped =
+    text.length <= PR_DID_ANSWER_MAX
+      ? text
+      : `${text.slice(0, PR_DID_ANSWER_MAX)}……（会话的回复后面还有 ${text.length - PR_DID_ANSWER_MAX} 个字，已截断）`;
+  const lines = clipped
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:[-*+]|\d+[.、)])\s+/, '').trim())
+    .filter(Boolean);
+  if (lines.length <= PR_DID_ANSWER_LINES) return lines;
+  return [...lines.slice(0, PR_DID_ANSWER_LINES - 1), lines.slice(PR_DID_ANSWER_LINES - 1).join('；')];
+}
+
+/**
+ * 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，其余单子仍是原来两句。
+ * 给了动手会话最后一条回复（#2723）就跟在后面（sessionDidLines）。
+ */
+export function taskPrDid(
+  issueNumber: number,
+  round: number,
+  fileCount: number,
+  answer?: string | null,
+): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];
+  did.push(...sessionDidLines(answer));
   if (issueNumber === 1303) did.push(CONFLICT_HANDOFF_CAUSE);
   if (issueNumber === 1406) did.push(...ALERT_FILING_PR_NOTES);
   if (issueNumber === 1733) did.push(...FOUNDERS_INBOX_PR_NOTES);

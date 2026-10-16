@@ -14,6 +14,7 @@ import {
   commitsSince,
   DISPOSABLE,
   disposableArgs,
+  ENVIRONMENT_FILES,
   fastForward,
   fetchBundle,
   hasMainline,
@@ -638,6 +639,25 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     expect(await treeLeftovers(u, [pushed])).toMatchObject({ dirtyCount: 0, unpushedCount: 0 });
     put(u.dir, 'dist/keep.js', 'v2\n');
     expect(await treeLeftovers(u, [pushed])).toMatchObject({ dirty: [' M dist/keep.js'], dirtyCount: 1 });
+  });
+
+  it('环境文件（开会话的钩子、引擎自己往树里写的设置）和交活核对是同一份名单：跟踪着的改了、没跟踪的新建了都不算剩着（#2721）', async () => {
+    expect(ENVIRONMENT_FILES.map((f) => f.path)).toEqual([
+      '.claude/settings.json',
+      '.claude/settings.local.json',
+    ]);
+    for (const f of ENVIRONMENT_FILES) expect(f.why, f.path).toMatch(/：/);
+    const { t } = await checkedOut();
+    put(t.dir, '.claude/settings.json', '{}\n');
+    runChildOk('git', ['add', '.'], { cwd: t.dir });
+    runChildOk('git', ['commit', '-q', '-m', 'project settings'], { cwd: t.dir, env: ENV });
+    const pushed = sh(t.dir, 'rev-parse', 'HEAD');
+    put(t.dir, '.claude/settings.json', '{ "hooks": {} }\n');
+    put(t.dir, '.claude/settings.local.json', '{}\n');
+    expect(await treeLeftovers(t, [pushed])).toMatchObject({ dirty: [], dirtyCount: 0 });
+    // 名单以外的照算，同一个目录里的也算
+    put(t.dir, '.claude/notes.md');
+    expect(await treeLeftovers(t, [pushed])).toMatchObject({ dirty: ['?? .claude/notes.md'], dirtyCount: 1 });
   });
 
   it('不算剩着的名单：每条写了为什么、都是单层名字、含会话的结论文件目录；认不出的写法明确拒，不当成名单是空的', () => {
