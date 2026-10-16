@@ -90,6 +90,22 @@ describe('等合并时读必过检查', () => {
     expect(got).toEqual({ overall: 'pending', failed: [] });
   });
 
+  it('cold-verify 还在跑时，merge-gate 的「等验收」也算 pending，不当成红', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [
+          { context: GATE_CONTEXT, state: 'failure', description: '等验收：cold-verify 还在跑' },
+          { context: COLD_VERIFY_CONTEXT, state: 'pending', description: '第 1 轮冷调用跑着' },
+        ],
+      ),
+      repo,
+      A,
+    );
+    expect(got).toEqual({ overall: 'pending', failed: [] });
+  });
+
   it('必过绿、合并闸和 cold-verify 还没出现：pending，不当红', async () => {
     const got = await readMergeWaitChecks(
       gh(['check'], [{ name: 'check', conclusion: 'success' }], []),

@@ -518,6 +518,43 @@ describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教�
     expect(r.code).toBe(1);
   });
 
+  it('带 --affected：要全跑时不拒，只跑受影响的包，退出码照 vitest 的；--all 仍盖过它', () => {
+    const api = run(['pnpm-lock.yaml', 'packages/api/src/cli.ts'], {
+      argv: ['--affected'],
+      vitest: () => ({ status: 1 }),
+    });
+    expect(api.code).toBe(1);
+    expect(api.vitestCalls).toHaveLength(1);
+    expect(api.vitestCalls[0]?.[0]).toBe('run');
+    expect(api.vitestCalls[0]).toContain('packages/api/');
+    expect(api.vitestCalls[0]).not.toEqual(['run']);
+    expect(api.out.join('\n')).toContain('受影响的包');
+    expect(api.err.join('\n')).not.toContain('vitest run');
+
+    // 只改 shared：跑 shared 自己，不把依赖它的包逐个拉上（那就是全跑）
+    const shared = run(['packages/shared/src/domain.ts'], { argv: ['--affected'] });
+    expect(shared.code).toBe(0);
+    expect(shared.vitestCalls[0]).toContain('packages/shared/');
+    expect(shared.vitestCalls[0]).not.toContain('packages/api/');
+
+    // 本来就不用全跑：--affected 不改变清单
+    const some = run(['packages/api/src/cli.ts'], { argv: ['--affected'] });
+    expect(some.vitestCalls[0]).toContain('packages/api/');
+    expect(some.vitestCalls[0]).not.toEqual(['run']);
+
+    // CI、引擎会话仍全跑；--all 和 --affected 一起带时 --all 赢
+    expect(run(['pnpm-lock.yaml'], { argv: ['--affected'], env: { CI: 'true' } }).vitestCalls).toEqual([
+      ['run'],
+    ]);
+    expect(
+      run(['packages/shared/src/domain.ts'], {
+        argv: ['--affected'],
+        env: { [ENGINE_SESSION_MARKER]: 'run-1' },
+      }).vitestCalls,
+    ).toEqual([['run']]);
+    expect(run(['pnpm-lock.yaml'], { argv: ['--all', '--affected'] }).vitestCalls).toEqual([['run']]);
+  });
+
   it('在 CI 里（CI=true）照旧全跑；CI 写成 false、0、空的不算在 CI 里', () => {
     expect(run(['pnpm-lock.yaml'], { env: { CI: 'true' } }).vitestCalls).toEqual([['run']]);
     for (const CI of ['false', '0', '']) {
