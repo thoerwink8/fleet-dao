@@ -280,8 +280,8 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | 路径 | 属主 权限 | 放什么 |
 |---|---|---|
 | `/etc/fleet-dao/hk.env` | root:fleet 640 | 域名、证书联系邮箱、法国的 WireGuard 公钥、法国的上传静态文件公钥。老文件里留着的 `FLEET_DEMO_PATH`（#1223）、`FLEET_GATEWAY_DEPLOY_PUBLIC_KEY`（飞书网关）是已删的键，`hk.sh` 认得、忽略 |
-| `/etc/fleet-dao/hk-probe.env` | root:root 600 | 香港探法国的推送地址，只有 `FLEET_HK_PROBE_WEBHOOK`。样例 `deploy/hk/hk-probe.env.example`。没配或留空：探活照常，只写状态和日志，不报错。地址不进仓；文件已经在，重跑 `deploy/hk.sh` 不覆盖 |
-| `/var/lib/fleet-hk-france-probe` | root:root 755 | 探活状态 `status.json`（644，nginx 读得了）。不放进 `/srv/fleet-dao-web`：发版 rsync `--delete` 会删掉。站点用 `/health/france-link.json` 指到它 |
+| `/etc/fleet-dao/hk-probe.env` | root:root 600 | 香港探法国的推送：飞书应用三项（`FLEET_HK_PROBE_FEISHU_APP_ID` / `_APP_SECRET` / `_CHAT_ID`），或群机器人 `FLEET_HK_PROBE_WEBHOOK`。样例 `deploy/hk/hk-probe.env.example`。没配或留空：探活照常，只写状态和日志，不报错。凭据不进仓；文件已经在，重跑 `deploy/hk.sh` 不覆盖 |
+| `/var/lib/fleet-hk-france-probe` | root:root 755 | 探活状态 `status.json`（644，nginx 读得了）；没推成待重推的一条 `push-pending`（600，站点不指它）。不放进 `/srv/fleet-dao-web`：发版 rsync `--delete` 会删掉。站点用 `/health/france-link.json` 指到它 |
 | `/usr/local/lib/fleet-dao/france-probe.sh` | root:root 755 | 探活脚本，`deploy/hk.sh` 从 `deploy/hk/france-probe.sh` 拷过来 |
 | `/etc/systemd/system/fleet-hk-france-probe.service`、`fleet-hk-france-probe.timer` | root 644 | 每分钟跑一次（oneshot，跑完就退出；只 enable timer） |
 | `/etc/fail2ban/jail.d/fleet-dao-sshd.local` | root:root 644 | 香港 fail2ban 的 sshd jail（#1784，仓里 `deploy/hk/fail2ban-sshd.jail`）：由 hk.sh 管（`fail2ban-client -t` 过了才 reload，没装 fail2ban 只记待配），放过隧道网段 `10.99.0.0/24`——法国在隧道里几次失败登录不会被封，发版链不会被卡死；读回查 `ignoreip` 含它，没有判红。原来手放的 `jail.d/sshd.local` 由 hk.sh 挪成 `sshd.local.bak-<日期>`，不删。法国那份（`deploy/france/fail2ban-sshd.jail`）同样带这段 `ignoreip` |
@@ -622,17 +622,56 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 状态写 `/var/lib/fleet-hk-france-probe/status.json`。驾驶舱健康页 `https://<驾驶舱域名>/health/` 另外读 `/health/france-link.json`（两份 nginx 模板都用 alias 指到这份文件，不在静态目录里）。失联时页顶写「法国失联自 xx:xx」，总灯改红，并多一行「法国隧道」。文件还没有、不是 JSON、或 `down` 不是 true：健康页不当成全站红，只显示 `/healthz` 自己的结果。
 
-推送只看香港本机 `/etc/fleet-dao/hk-probe.env` 的 `FLEET_HK_PROBE_WEBHOOK`（飞书群机器人那种地址）。`deploy/hk.sh` 第一次跑、文件还不在时，照 `deploy/hk/hk-probe.env.example` 建一份（root:root 600），之后不覆盖。没配、留空、读不到、地址不是 http(s)、POST 失败：只写状态和日志，这一轮仍退出 0，定时器不会因此停。地址不要写进仓，日志里也不打。飞书群机器人认的正文是 `{"msg_type":"text","content":{"text":"…"}}`。
+推送只看香港本机 `/etc/fleet-dao/hk-probe.env`，不经过法国（#2705）。两种通道，飞书应用优先：
+
+- **飞书应用**（香港在用的这一种）：`FLEET_HK_PROBE_FEISHU_APP_ID`、`FLEET_HK_PROBE_FEISHU_APP_SECRET`、`FLEET_HK_PROBE_FEISHU_CHAT_ID` 三项齐了就用。应用就是法国驾驶舱那一个（法国 `api.env` 的 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`），群就是驾驶舱推提醒的那个团队群（机器人只在这一个群里）。香港自己换 `tenant_access_token`、按 `chat_id` 发一条文本，法国断了照样发得出。每条带去重号（`hk-probe-down-<失联起点>` / `hk-probe-up-<失联起点>`），重试时飞书一小时内不会重复显示。
+- **飞书群机器人**：飞书应用三项一项都没配时，看 `FLEET_HK_PROBE_WEBHOOK`（http(s) 地址，正文 `{"msg_type":"text","content":{"text":"…"}}`）。
+
+为什么用应用不用群机器人：应用、凭据、团队群都已经在用，不用创始人再去群里加一个自定义机器人，消息也落在他平时收驾驶舱提醒的同一个群；接口是飞书开放平台的正式接口，不花钱（一次推送两次调用，失联、恢复各一次）。
+
+`deploy/hk.sh` 第一次跑、文件还不在时，照 `deploy/hk/hk-probe.env.example` 建一份（root:root 600：探活服务以 root 跑，别人读不了），之后不覆盖，老文件缺哪个键照样例手补。全空、读不到、应用配了一半、地址不是 http(s)：只写状态和日志，这一轮仍退出 0，定时器不会因此停（配了一半 `hk.sh` 读回判红）。凭据、群号、地址不要写进仓，日志里也不打。
+
+送不出去（连不上飞书、飞书回非 0 的 code）：日志写「推送没送成（down，app）：原因」，这一条存进 `/var/lib/fleet-hk-france-probe/push-pending`，之后每一轮先照常探、写状态，再重推这一条；推成了删掉。连试 60 次（约一小时）还不成就放弃并写日志，免得凭据错了每分钟一直打飞书。失联那条没推成、法国又恢复了：只推「恢复了」（正文里写着失联自几点）。推送不改退出码，不挡探活。
+
+群号（`oc_` 开头）这么取，在香港上以 root 跑，只印群号和群名：
+
+```
+set -a; . /etc/fleet-dao/hk-probe.env; set +a
+tok=$(jq -n --arg id "$FLEET_HK_PROBE_FEISHU_APP_ID" --arg s "$FLEET_HK_PROBE_FEISHU_APP_SECRET" '{app_id:$id,app_secret:$s}' \
+  | curl -sS -H 'Content-Type: application/json' --data-binary @- https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal | jq -r .tenant_access_token)
+curl -sS -H "Authorization: Bearer $tok" 'https://open.feishu.cn/open-apis/im/v1/chats?page_size=100' | jq -r '.data.items[] | "\(.chat_id) \(.name)"'
+```
 
 样例（和 `deploy/hk/hk-probe.env.example` 同一份）：
 
 ```
 # 香港探法国的推送。deploy/hk.sh 第一次跑时，若本机还没有 /etc/fleet-dao/hk-probe.env，就照这份建一份（root:root 600）。
-# 之后只改机器上的那份，不进 git，重跑 hk.sh 也不会覆盖。
-# FLEET_HK_PROBE_WEBHOOK：收 JSON 的地址（飞书群机器人 webhook 就是这种）。留空 = 不推，只写状态文件和日志，探活照常、不报错。
-# 飞书群机器人认的正文是 {"msg_type":"text","content":{"text":"…"}}，探活脚本就按这个发。地址不要写进仓。
+# 之后只改机器上的那份，不进 git，重跑 hk.sh 也不会覆盖（老文件缺哪个键照这份手补一行）。
+# 两种通道，飞书应用三项齐了就用它，一项都没配才看 FLEET_HK_PROBE_WEBHOOK。全空 = 不推，只写状态文件和日志，探活照常、不报错。
+# 飞书应用：和法国驾驶舱同一个应用（法国 /etc/fleet-dao/api.env 的 FEISHU_APP_ID / FEISHU_APP_SECRET），发到它所在的团队群
+#   （CHAT_ID 是 oc_ 开头的群号；怎么取见 ops「香港探法国」）。法国断了它照样能从香港直接调飞书。
+# FLEET_HK_PROBE_WEBHOOK：飞书群机器人地址，正文 {"msg_type":"text","content":{"text":"…"}}。
+# 凭据、地址都不要写进仓。
+FLEET_HK_PROBE_FEISHU_APP_ID=
+FLEET_HK_PROBE_FEISHU_APP_SECRET=
+FLEET_HK_PROBE_FEISHU_CHAT_ID=
 FLEET_HK_PROBE_WEBHOOK=
 ```
+
+演练（不碰法国）：用 drop-in 临时把探测指到本机一个没人听的口，正文前加「演练：」。
+
+```
+mkdir -p /etc/systemd/system/fleet-hk-france-probe.service.d
+printf '[Service]\nEnvironment=FLEET_PROBE_URL=http://127.0.0.1:9/healthz\nEnvironment=FLEET_PROBE_PREFIX=演练：\n' >/etc/systemd/system/fleet-hk-france-probe.service.d/drill.conf
+systemctl daemon-reload
+# 约 3 分钟后群里收到「演练：法国失联自 …」。然后只留前缀、把探测改回：
+printf '[Service]\nEnvironment=FLEET_PROBE_PREFIX=演练：\n' >/etc/systemd/system/fleet-hk-france-probe.service.d/drill.conf
+systemctl daemon-reload
+# 下一轮收到「演练：法国恢复了」。收尾：
+rm -r /etc/systemd/system/fleet-hk-france-probe.service.d && systemctl daemon-reload
+```
+
+演练期间健康页会显示「法国失联自 …」，收尾后下一轮就回到通。
 
 看：`systemctl status fleet-hk-france-probe.timer`、`journalctl -u fleet-hk-france-probe.service -n 20`、健康页。停：`systemctl disable --now fleet-hk-france-probe.timer`（健康页不再更新失联时刻）。法国在、只是某一项红：这里不推，看健康页和法国看门狗。失联之后要分清关机、断网还是隧道断了、要不要在 Contabo 重启，照 [outage-france.md](outage-france.md)。
 
