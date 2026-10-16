@@ -140,24 +140,14 @@ write_train() { # 状态 这一趟的提交
 cat >"$TMP/judge.mjs" <<'EOF'
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-const [mod, historyFile, trainFile, stateFile, current] = process.argv.slice(2);
-const { judgeReleaseAttention, lastHistoryEntry } = await import(pathToFileURL(mod).href);
+const [mod, trainFile] = process.argv.slice(2);
+const { judgeReleaseAttention } = await import(pathToFileURL(mod).href);
 const train = JSON.parse(readFileSync(trainFile, 'utf8'));
-let autoNote = null;
-try {
-  const st = JSON.parse(readFileSync(stateFile, 'utf8'));
-  if (st && st.auto && typeof st.auto.note === 'string') autoNote = st.auto.note;
-} catch {
-  autoNote = null;
-}
 const v = judgeReleaseAttention(
   {
-    last: lastHistoryEntry(readFileSync(historyFile, 'utf8')),
     trainStatus: typeof train.status === 'string' ? train.status : null,
     trainSince: typeof train.startedAt === 'string' ? train.startedAt : null,
     trainSha: train.target && typeof train.target.value === 'string' ? train.target.value : null,
-    currentSha: current || null,
-    autoNote,
   },
   new Date('2026-10-16T02:15:00.000Z'),
 );
@@ -166,7 +156,7 @@ EOF
 judge_watch() {
   "$NODE" --experimental-strip-types "$TMP/judge.mjs" \
     "$ROOT/packages/engine/src/jobs/release-watch.ts" \
-    "$HISTORY" "$RELEASES/.train/release-train.json" "$RELEASES/.auto/state.json" "$(current_sha)"
+    "$RELEASES/.train/release-train.json"
 }
 train_status() {
   "$NODE" -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).status)' \
@@ -223,7 +213,7 @@ src_train=$(train_status_for "$src_rc")
 write_train "$src_train" "$src_sha"
 check "改了源码、没重启：发版记录是 failed" "$(train_status)" failed
 src_watch=$(judge_watch)
-check "改了源码、没重启：看门狗看得到退回" "$(grep -c '新版没发成或退回了' <<<"$src_watch" || true)" 1
+check "改了源码、没重启：发版没成由接活脚本报，看门狗不再多报一条" "${src_watch%%$'\t'*}" fine
 
 printf '%s' "$RELEASES/$BASE" >"$TMP/proc"
 RUNTIME_UNCHANGED=1

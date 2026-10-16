@@ -1404,15 +1404,15 @@ describe('GitHub 机器人权限自检：受管的仓从库里列，缺的报进
 
     expect(await runHourlyReconcileJob(deps({ selfCheck }))).toMatchObject({ outcome: 'ok', found: 1 });
     expect(asked).toEqual([['acme/widgets']]);
-    const open = await alertByKey(t.db, 'github-app:engine:acme/widgets');
+    const open = await alertByKey(t.db, 'github-app:acme/widgets');
     expect(open).toMatchObject({ level: 'alert', resolvedAt: null });
     expect(open?.title).toBe('「引擎」机器人在 acme/widgets 上的权限不对：缺 statuses:write');
 
     engineHas = true;
     expect(await runHourlyReconcileJob(deps({ selfCheck }))).toMatchObject({ outcome: 'ok', found: 1 });
-    const closed = await alertByKey(t.db, 'github-app:engine:acme/widgets');
+    const closed = await alertByKey(t.db, 'github-app:acme/widgets');
     expect(closed?.resolvedBy).toBe(RECONCILE_ACTOR);
-    expect(closed?.body).toMatch(/^已撤：「引擎」机器人在 acme\/widgets 上的权限够了/);
+    expect(closed?.body).toMatch(/^已撤：acme\/widgets 的两个机器人都装上了、权限够了/);
   });
 });
 

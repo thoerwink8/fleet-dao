@@ -526,6 +526,13 @@
       "when": 1792173845051,
       "tag": "0074_resolve_release_notes_and_reminders",
       "breakpoints": true
+    },
+    {
+      "idx": 75,
+      "version": "7",
+      "when": 1792173845052,
+      "tag": "0075_merge_github_app_alert_keys",
+      "breakpoints": true
     }
   ]
 }

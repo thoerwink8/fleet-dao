@@ -161,7 +161,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   }
   // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会立案
   const retired = await retireWorkflowAlerts(deps);
-  // 已知没装机器人的仓（有开着的 github-app-missing 提醒）：读不了是意料之中，两处读 PR 的核对跳过，why 里交代一句
+  // 已知没装机器人的仓（有开着的 decision 级 github-app:<仓> 提醒）：读不了是意料之中，两处读 PR 的核对跳过，why 里交代一句
   const skip = await knownNotInstalled(deps);
   const skipping = { ...deps, repos: skipRepos(deps.repos, skip.slugs) };
   const skipPart: SweepPart = {

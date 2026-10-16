@@ -104,41 +104,82 @@ export type OrderAdd =
       description: string;
       /** 改好之后的先后。 */
       order: number[];
-      /** false：这张本来就在先后里，没动。 */
+      /** false：这张本来就在先后里、也没有要清的，没动。 */
       changed: boolean;
+      /** 顺手从先后里清掉的号（给了开着的单列表、先后里却是已关或已挪走的）；没清的是空。 */
+      removed: number[];
     }
   | { ok: false; problem: string };
+
+/** 标记之间整段按 order 重写，标记之外的原文一个字不动（原文用 CRLF 就照 CRLF 写）。 */
+function renderOrder(description: string, scan: Extract<OrderScan, { ok: true }>, order: number[]): string {
+  const eol = description.includes('\r\n') ? '\r\n' : '\n';
+  const rows = order.map(orderLine).join(eol);
+  return `${description.slice(0, scan.from)}${eol}${rows}${eol}${description.slice(scan.to)}`;
+}
 
 /**
  * 往先后里加一张（pnpm issue:new 开挂版本的母单、单独的单那一刻用，#807）：认法和 parseOrder 是同一份（scanOrder），写回的每行
  * 也是它认的样子，所以对账、pnpm plan 一定认得开单写的。标记之间整段按「<序号>. #<单号>」重写（序号从 1 起挨着排，空行去掉），
  * 标记之外的原文一个字不动（原文用 CRLF 就照 CRLF 写）。after 给了就插在那张后面、后面的序号顺延；没给排在末尾。
- * 已经在先后里的不再加（changed: false）。标记缺了、认不出、after 不在先后里：回 ok: false 和一句为什么，不猜着改。
+ * 已经在先后里的不再加。标记缺了、认不出、after 不在先后里：回 ok: false 和一句为什么，不猜着改。
+ * open 给了（同一次读到的开着的单号）：写的同时把先后里不在 open 里的号清掉（#2393），after 按清之前的位置找、清完再落；
+ * 没给（读不到开着的单）就一个也不清，照旧追加，不拿读不到当成全关了。
  */
-export function addToOrder(description: string, n: number, after?: number): OrderAdd {
+export function addToOrder(
+  description: string,
+  n: number,
+  after?: number,
+  open?: ReadonlySet<number>,
+): OrderAdd {
   const scan = scanOrder(description);
   if (!scan.ok) return scan;
-  if (scan.order.includes(n)) return { ok: true, description, order: scan.order, changed: false };
-  let at = scan.order.length;
-  if (after !== undefined) {
-    const i = scan.order.indexOf(after);
-    if (i < 0) {
-      const now = scan.order.length
-        ? `现在排的是 ${scan.order.map((x) => `#${x}`).join('、')}`
-        : '现在一张也没排';
-      return { ok: false, problem: `#${after} 不在先后里（${now}），插不到它后面` };
-    }
-    at = i + 1;
+  const removed = open === undefined ? [] : scan.order.filter((x) => x !== n && !open.has(x));
+  if (scan.order.includes(n) && removed.length === 0) {
+    return { ok: true, description, order: scan.order, changed: false, removed };
   }
-  const order = [...scan.order.slice(0, at), n, ...scan.order.slice(at)];
-  const eol = description.includes('\r\n') ? '\r\n' : '\n';
-  const rows = order.map(orderLine).join(eol);
-  return {
-    ok: true,
-    description: `${description.slice(0, scan.from)}${eol}${rows}${eol}${description.slice(scan.to)}`,
-    order,
-    changed: true,
-  };
+  let wide = scan.order;
+  if (!wide.includes(n)) {
+    let at = wide.length;
+    if (after !== undefined) {
+      const i = wide.indexOf(after);
+      if (i < 0) {
+        const now = wide.length ? `现在排的是 ${wide.map((x) => `#${x}`).join('、')}` : '现在一张也没排';
+        return { ok: false, problem: `#${after} 不在先后里（${now}），插不到它后面` };
+      }
+      at = i + 1;
+    }
+    wide = [...wide.slice(0, at), n, ...wide.slice(at)];
+  }
+  const order = wide.filter((x) => !removed.includes(x));
+  return { ok: true, description: renderOrder(description, scan, order), order, changed: true, removed };
+}
+
+export type OrderPrune =
+  | {
+      ok: true;
+      description: string;
+      order: number[];
+      /** 清掉的号；空 = 没有要清的，description 就是原文。 */
+      removed: number[];
+    }
+  | { ok: false; problem: string };
+
+/**
+ * 把先后里不在 open 里的号（已关或已挪走的）清掉（每天对账用，#2393）：认法和写法同 addToOrder。
+ * 全清光会留下一段空先后（pnpm plan 认作问题），所以清光时不动、回 ok: false 说清楚，不替人决定。
+ */
+export function pruneOrder(description: string, open: ReadonlySet<number>): OrderPrune {
+  const scan = scanOrder(description);
+  if (!scan.ok) return scan;
+  const removed = scan.order.filter((x) => !open.has(x));
+  if (removed.length === 0) return { ok: true, description, order: scan.order, removed };
+  const order = scan.order.filter((x) => open.has(x));
+  if (order.length === 0) {
+    const list = removed.map((x) => `#${x}`).join('、');
+    return { ok: false, problem: `先后里的 ${list} 都不是开着的单，清光会留下空先后，没动` };
+  }
+  return { ok: true, description: renderOrder(description, scan, order), order, removed };
 }
 
 export interface PlanVersion {

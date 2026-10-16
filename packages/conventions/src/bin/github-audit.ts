@@ -33,8 +33,13 @@ runMain(async () => {
     exitWith(2);
   }
   const gh = liveGitHub(name, process.env);
-  const r = await auditGitHub(gh, new Date());
+  const r = await auditGitHub(gh, new Date(), gh);
   const notQueried = [...r.notQueried];
+  for (const p of r.pruned) {
+    out(
+      `已从「${p.milestone}」的先后里清掉已关的 ${p.removed.length} 张：${p.removed.map((n) => `#${n}`).join('、')}。`,
+    );
+  }
 
   for (const f of r.findings) err(f.text);
   if (comment && r.findings.length) {
