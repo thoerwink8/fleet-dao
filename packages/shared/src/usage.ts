@@ -33,6 +33,16 @@ function tokens(v: number | undefined): number | undefined {
   return v !== undefined && Number.isSafeInteger(v) && v >= 0 ? v : undefined;
 }
 
+/** 四样 token 一个都没读到（结束了的一段才用这个数「读不到用量」）。 */
+function tokensUnread(run: TokenCounts): boolean {
+  return (
+    tokens(run.inputTokens) === undefined &&
+    tokens(run.outputTokens) === undefined &&
+    tokens(run.cacheReadTokens) === undefined &&
+    tokens(run.cacheWriteTokens) === undefined
+  );
+}
+
 /**
  * 一次会话折成的输入当量（四舍五入到整数）。四样缺一样就折不成，回 undefined——不拿 0 顶，
  * 不然缓存读写没存下来的会话会显得几乎不花额度（长会话的额度大头是缓存读）。
@@ -141,6 +151,11 @@ export interface UsageTotals {
   runMs: number;
   missingTime: number;
   noQueue: number;
+  /**
+   * 结束了的三段里，四样 token 一个都没读到的段数。老流程的会话不计，在跑的不计（用量还没出来）。
+   * 页面写「另有 N 段读不到用量」。缺了一两样、其余读到了的不算在这里（那是 missingTokens / 估不了）。
+   */
+  unreadSegments: number;
 }
 
 export interface CostEstimateTotals {
@@ -226,6 +241,7 @@ function emptyTotals(): UsageTotals {
     runMs: 0,
     missingTime: 0,
     noQueue: 0,
+    unreadSegments: 0,
   };
 }
 
@@ -271,6 +287,7 @@ function addSegment(t: UsageTotals, run: SegmentUsageFacts): void {
   }
   t.runs += 1;
   t.noQueue += 1;
+  if (tokensUnread(run)) t.unreadSegments += 1;
   if (run.outcome === 'spawn_failed' || run.outcome === 'admission_blocked') t.notStarted += 1;
   addReadings(t, run, run.estimate);
   const ms = run.durationMs;
@@ -388,5 +405,66 @@ export function summarizeUsage(
     bySegment: [...bySegment.values()]
       .sort((a, b) => segmentRank(a.segment) - segmentRank(b.segment))
       .map(({ models, ...seg }) => ({ ...seg, byModel: [...models.values()] })),
+  };
+}
+
+/** 任务列表一行的花费：实付和按 API 价折算分开。usd 跟实付同一个数，老页面只认这一栏。 */
+export interface ListedTaskCost {
+  /** 执行体报的实付合计。一笔都没报是 null，不当成 0。 */
+  actual: number | null;
+  /** 没报实付、token 读全、目录有单价的段，按 API 价折算的合计。一笔都没估成是 null，不当成 0。 */
+  estimated: number | null;
+  /** 和 actual 同一个数。 */
+  usd: number | null;
+  /** 结束了的三段笔数（在跑的不算）。调用方数好传进来。 */
+  segments: number;
+  /** 四样 token 都没读到的段数（usage.unreadSegments）。 */
+  unreadSegments: number;
+  /** 目录里没有单价、估不出的段数。 */
+  noPrice: number;
+  /** 没有要说的就不给这个键。 */
+  note?: string | undefined;
+}
+
+const round6 = (n: number) => Math.round(n * 1_000_000) / 1_000_000;
+
+/** 和驾驶舱 formatUsd 同一档：不到一分多写两位，再小的不写成 $0.00。 */
+function usdText(n: number): string {
+  if (n > 0 && n < 0.0001) return '<$0.0001';
+  if (n > 0 && n < 0.01) return `$${n.toFixed(4)}`;
+  return `$${n.toFixed(n >= 100 ? 0 : 2)}`;
+}
+
+/**
+ * 任务列表一行的花费。segments 是这张单结束了的三段笔数。
+ * 实付是执行体报的 cost_usd；报了的不再估。一笔都没报、但 token 和单价都齐的，estimated 给按 API 价折算的数。
+ * 订阅渠道因此不是 0 元。目录里没有单价的记 noPrice，不把估计写成 0。
+ */
+export function taskListCost(usage: UsageTotals, segments: number): ListedTaskCost {
+  const reported = usage.runs - usage.missingCost;
+  const actual = reported > 0 ? round6(usage.costUsd) : null;
+  const estimated = usage.estimate.runs > 0 ? round6(usage.estimate.usd) : null;
+  const notes: string[] = [];
+  if (usage.runs === 0) notes.push('还没有结束的会话记录，花费没得算');
+  else if (actual === null && estimated === null && usage.estimate.noPrice === 0) {
+    notes.push(`${usage.runs} 笔会话都没报花费`);
+  }
+  if (estimated !== null) notes.push(`按 API 价折算 ${usdText(estimated)}（订阅渠道，不是另花的钱）`);
+  if (usage.estimate.noPrice > 0) notes.push(`${usage.estimate.noPrice} 段没有单价`);
+  if (usage.unreadSegments > 0) notes.push(`另有 ${usage.unreadSegments} 段读不到用量`);
+  // 没报实付、又没估成的（token 没读全，或有实付时剩下的）才叫偏低。估成了的已经在「按 API 价折算」里。
+  const unestimated = usage.missingCost - usage.estimate.runs;
+  if (actual !== null && unestimated > 0) {
+    notes.push(`另有 ${unestimated} 笔没算进实付也没估出来，这个数偏低`);
+  }
+  const note = notes.join('；');
+  return {
+    actual,
+    estimated,
+    usd: actual,
+    segments,
+    unreadSegments: usage.unreadSegments,
+    noPrice: usage.estimate.noPrice,
+    ...(note ? { note } : {}),
   };
 }

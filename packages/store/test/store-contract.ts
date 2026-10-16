@@ -418,6 +418,20 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.listSegmentRunsForTasks(['task-13', OTHER_UUID])).toEqual([]);
       });
 
+      it('任务列表要各代：includeIssueMatch 把 task_id 没记、工作流对上的验收收进来并标明对上哪张单；默认不收', async () => {
+        const plain = await store.listSegmentRunsForTasks([IDS.task13]);
+        expect(plain.map((r) => r.id)).not.toContain(IDS.seg13verify);
+        const rows = await store.listSegmentRunsForTasks([IDS.task13], { includeIssueMatch: true });
+        expect(rows.find((r) => r.id === IDS.seg13verify)).toMatchObject({
+          matchedBy: 'issueNumber',
+          matchedTaskId: IDS.task13,
+        });
+        const ids = rows.map((r) => r.id);
+        expect(ids).not.toContain(OTHER_REPO_SEG);
+        expect(ids).not.toContain(ORPHAN_SEG);
+        expect(ids).toContain(IDS.seg13scope);
+      });
+
       it('三段流水的读数原样读回：派工档、起止、四样 token、花费、PR；没记的不给（不是 0、不是空字符串）', async () => {
         const rows = await store.listSegmentRuns(IDS.task13);
         const manual1 = rows.find((r) => r.id === IDS.seg13manual1);

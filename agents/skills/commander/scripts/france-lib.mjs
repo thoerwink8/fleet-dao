@@ -84,7 +84,7 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
  */
 /** @typedef {{ runs: number, usd: number, missing: number }} CostShare */
 /**
- * @typedef {{ runs: number, running: number, notStarted: number, inputTokens: number, outputTokens: number, missingTokens: number, cacheReadTokens: number, cacheWriteTokens: number, missingCache: number, inputEquivalent: number, missingEquivalent: number, costUsd: number, missingCost: number, cost: { metered: CostShare, subscription: CostShare, unknown: CostShare }, estimate: { runs: number, usd: number, noPrice: number, noTokens: number }, queueMs: number, runMs: number, missingTime: number, noQueue: number }} Totals
+ * @typedef {{ runs: number, running: number, notStarted: number, inputTokens: number, outputTokens: number, missingTokens: number, cacheReadTokens: number, cacheWriteTokens: number, missingCache: number, inputEquivalent: number, missingEquivalent: number, costUsd: number, missingCost: number, cost: { metered: CostShare, subscription: CostShare, unknown: CostShare }, estimate: { runs: number, usd: number, noPrice: number, noTokens: number }, queueMs: number, runMs: number, missingTime: number, noQueue: number, unreadSegments: number }} Totals
  */
 
 /**
@@ -907,6 +907,8 @@ export function emptyTotals() {
     missingTime: 0,
     // shared 的 usage.ts 给三段的 runs 记「没有排队」的笔数；这页只读会话（session_runs），恒为 0
     noQueue: 0,
+    // shared 的 usage.ts 给三段里四样 token 都没读到的段计数；这页只读会话（session_runs），恒为 0
+    unreadSegments: 0,
   };
 }
 

@@ -34,6 +34,13 @@ describe('花费一格两行', () => {
     expect(metered.nextElementSibling?.getAttribute('data-large')).toBe('true');
     expect(folded.parentElement?.hasAttribute('data-large')).toBe(false);
   });
+
+  test('四样 token 都没读到：写另有 N 段读不到用量', async () => {
+    const d = await createMockApi({ live: false }).task('t-12');
+    d.usage.total.unreadSegments = 3;
+    render(<SegmentStats d={d} now={Date.now()} />);
+    expect(screen.getByText('另有 3 段读不到用量')).toBeTruthy();
+  });
 });
 
 describe('三段表耗时列', () => {

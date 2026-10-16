@@ -1,0 +1,86 @@
+name: e2e-quarantine
+# 驾驶舱 e2e 的隔离集（决定 0093；2026-10-16 从 ci.yml 的 e2e job 挪来）：packages/web/e2e/quarantine.json 里的用例常偶发、已开单限期修，
+# 照跑照报、本来就不挡发版，所以不占每次合并的等待，改成每天跑一次，也可手动触发（gh workflow run e2e-quarantine.yml）。
+# 红了在这个 workflow 的运行页上看（报告 artifact 留 7 天）；ci.yml 的 e2e 那一步用 E2E_QUARANTINE=skip 跳过这些用例，不删任何用例。
+# 环境和 ci.yml 的 e2e job 一样（Postgres 容器、Chromium）；postgres 拉镜像那段与 ci.yml 同源，改一处两处一起改。
+on:
+  schedule:
+    - cron: '47 20 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: e2e-quarantine
+  cancel-in-progress: false
+jobs:
+  quarantine:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      E2E_PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
+      E2E_BROWSER_CHANNEL: chromium
+      E2E_QUARANTINE: only
+    steps:
+      - name: 起 postgres:16（后台）
+        run: |
+          set -euo pipefail
+          nohup bash -c '
+            for img in public.ecr.aws/docker/library/postgres:16-alpine public.ecr.aws/docker/library/postgres:16-alpine \
+              mirror.gcr.io/library/postgres:16-alpine mirror.gcr.io/library/postgres:16-alpine; do
+              if docker pull -q "$img"; then
+                exec docker run -d --name fleet-e2e-pg -p 5432:5432 \
+                  -e POSTGRES_USER=postgres -e POSTGRES_HOST_AUTH_METHOD=trust "$img"
+              fi
+              sleep 4
+            done
+            echo "postgres:16-alpine 在 public.ecr.aws 和 mirror.gcr.io 各试两次都没拉下来" >&2
+            exit 1
+          ' > "$RUNNER_TEMP/fleet-e2e-pg-start.log" 2>&1 &
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Playwright 版本
+        id: pw
+        run: |
+          set -euo pipefail
+          version=$(pnpm --filter @fleet-dao/web exec playwright --version | sed -n 's/^Version \([0-9][0-9.]*\)$/\1/p')
+          if [ -z "$version" ]; then
+            echo "读不到 Playwright 的版本" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
+      - name: 装 Chromium 和系统库
+        run: pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
+      - name: 等 postgres:16 起来
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 90); do
+            if docker exec fleet-e2e-pg pg_isready -h 127.0.0.1 -U postgres >/dev/null 2>&1; then exit 0; fi
+            sleep 1
+          done
+          if [ -f "$RUNNER_TEMP/fleet-e2e-pg-start.log" ]; then cat "$RUNNER_TEMP/fleet-e2e-pg-start.log" >&2; fi
+          if ! docker logs fleet-e2e-pg >&2; then echo "（拿不到容器日志）" >&2; fi
+          echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
+          exit 1
+      - name: 隔离集（全部隔离用例，不分片）
+        run: pnpm --filter @fleet-dao/web e2e --pass-with-no-tests
+      - name: 隔离集结局
+        if: always()
+        run: node packages/conventions/src/bin/e2e-flaky.ts summary _tmp/e2e/results-quarantine.json >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: e2e-quarantine-${{ github.run_id }}
+          path: _tmp/e2e/
+          retention-days: 7
+          if-no-files-found: warn

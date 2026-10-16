@@ -45,19 +45,12 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { lineageOf, ownerPresence, reconcile, relayedUpTo, sentByFounder } from './founder-inbox.mjs';
+import { lineageOf, markSeen, ownerPresence, readSeen, reconcileInbox, seenKey } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
-import { logDir } from './prompt-log.mjs';
 import { proxyEnvOf, writeProxyEnv } from './proxy-env.mjs';
 import { contractLines, DIRECTIVE_HEADING, pendingItems, scopeNote } from './repo-contract.mjs';
-import {
-  cleanId,
-  isMachineOpening,
-  isMachineSession,
-  stateDir,
-  sessionLines as unattendedLines,
-} from './unattended.mjs';
+import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
 export const SYNC_MS = 30_000;
 export const QUIET_MS = 3 * 60_000;
@@ -543,13 +536,12 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
  * Claude Code 从头没收到、prompt-log 里自然也没有。所以再拿 Mirasim 自己记的「发了的账」（founder-inbox.mjs）和这份「收到的账」对一遍，
  * 发了没收到的单独一行、放前面、叫会话先答。这一段在每一轮开头都跑（Mirasim 每轮都 --resume 起进程，SessionStart 每轮都触发），
  * 所以上一轮丢的引导下一轮一开头就补上了。对账范围是「上一轮（含）以来」不是固定 RECENT_MS（一轮能跑一个多小时），见 founder-inbox.mjs 开头；下面「列收到的话」仍只看 RECENT_MS。
+ * 一轮里的丢失由主线程每次工具调用时的 main-thread.mjs（inbox-tick.mjs，60 秒最多读一次账）当场塞给会话，不等到这里：
+ * 它塞过的记在「已见名单」（founder-inbox.mjs 的 readSeen / markSeen），这里读同一份，塞过的不再列成没收到；这里列出来的也记进去（markSeen: true，真开会话时才传），轮中不会再塞一遍。
  */
 export const RECENT_MS = 60 * 60_000;
 export const RECENT_CHARS = 200;
 export const RECENT_TOTAL_CHARS = 3000;
-/** 后台任务完成、系统提醒也会以「用户消息」的身份进 UserPromptSubmit，落盘时原样记，列的时候不算创始人的话 */
-const SYSTEM_PROMPT = /^\s*(?:<task-notification|<system-reminder|\[SYSTEM NOTIFICATION)/;
-
 export function recentPrompts({
   home,
   now = Date.now(),
@@ -557,71 +549,43 @@ export function recentPrompts({
   sessionId = null,
   env = process.env,
   lineage = null,
+  markSeen: remember = false,
 }) {
   // 只认本血缘（同一个 Mirasim 会话用过的原生会话号，founder-inbox.mjs 的 lineageOf）：别的 Mirasim 会话收到的话一概不列
   // 只列本血缘的：列所有会话的话，另一个项目的会话会把它当成自己的活办掉。
   // 无血缘（不是 Mirasim 起的、这台没装）两行都不出，不拿别的会话的话顶；没查成明说。
-  const line = lineage ?? lineageOf({ home, sessionId, env });
-  if (line.status === 'none') return [];
-  if (line.status === 'unchecked')
+  // 对账本身（发了的账对收到的账）在 founder-inbox.mjs 的 reconcileInbox：主线程每次工具调用后的 inbox-tick.mjs 也走它。
+  const rec = reconcileInbox({ home, now, sessionId, env, dir, lineage });
+  if (rec.status === 'none') return [];
+  if (rec.status === 'unchecked')
     return [
-      `创始人的话没核成：认不出本会话是哪个 Mirasim 会话（${line.why}）；本会话丢的话、换会话号之前收到的话这次没列。别拿别的会话的话当自己的活。`,
+      `创始人的话没核成：认不出本会话是哪个 Mirasim 会话（${rec.why}）；本会话丢的话、换会话号之前收到的话这次没列。别拿别的会话的话当自己的活。`,
     ];
-  const family = new Set(line.sessionIds);
-  // 落盘目录和写的那边（prompt-log.mjs 的 logDir）同一份：原来这里不认 FLEET_PROMPT_LOG_DIR（全仓审查第 4 路 R4）
-  const base = dir ?? logDir(process.env, home);
-  // 发了的账（本血缘那一个 Mirasim 会话目录）：对账范围是「上一轮（含）以来」，可能比 RECENT_MS 早得多（founder-inbox.mjs 开头），收到的账也读到那么早
-  const sent = sentByFounder({ home, now, env, only: line.dir });
-  const since = sent.absent ? now - RECENT_MS : Math.min(now - RECENT_MS, sent.since);
-  const days = new Set([beijingToday(now), beijingToday(since)]);
-  for (let t = since; t < now; t += 12 * 3_600_000) days.add(beijingToday(t));
-  /** 收到的账：本血缘里哪个原生会话号收到的都记，别的会话收到的不记 */
-  const received = [];
-  for (const day of days) {
-    const file = join(base, `${day}.jsonl`);
-    let text;
-    try {
-      text = readFileSync(file, 'utf8');
-    } catch (err) {
-      if (err?.code === 'ENOENT') continue;
-      return [`创始人落盘的话没读成：${file} 读不了（${err?.code ?? err}）；这个会话没送到的话可能在里面。`];
-    }
-    for (const row of text.split(/\r?\n/)) {
-      if (!row.trim()) continue;
-      try {
-        const e = JSON.parse(row);
-        const at = Date.parse(e?.at);
-        if (
-          typeof e?.prompt === 'string' &&
-          typeof e.sessionId === 'string' &&
-          family.has(e.sessionId) &&
-          !SYSTEM_PROMPT.test(e.prompt) &&
-          !isMachineOpening(e.prompt) &&
-          !isMachineSession({ env: {}, cwd: e.cwd }) &&
-          Number.isFinite(at) &&
-          at >= since &&
-          at <= now + 60_000
-        )
-          received.push({ at, text: e.prompt, sessionId: e.sessionId, line: line.dir });
-      } catch {
-        // 坏的一行跳过：别因为一行坏了就把别的话也藏起来
-      }
-    }
-  }
+  if (rec.readError) return [rec.readError];
+  const { line, sent, received } = rec;
   const lines = [];
   // 发了的账和收到的账对一遍：发了、没收到的就是丢在 Mirasim「引导」里的那种（founder-inbox.mjs 开头）。
   // 发了的只读了本血缘那个目录，收到的也只留本血缘的：换了原生会话号之前丢的也补回本会话；别的会话丢的不进来
   if (!sent.absent) {
     for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
-    // 现在不再往 steer-shown 写。旧记录还在：转过的仍算收到，免得开会话把已经转过的再列一遍
-    const relay = relayedUpTo({ home, sessionIds: line.sessionIds, env });
-    for (const p of relay.problems) lines.push(`旧的引导记录没核成：${p}；这次分不清哪些已经转过。`);
-    const { lost } = reconcile(sent.entries, received, { relayed: { line: line.dir, at: relay.at } });
+    for (const p of rec.relayProblems) lines.push(`旧的引导记录没核成：${p}；这次分不清哪些已经转过。`);
+    // 轮中已经由 inbox-tick.mjs 塞给会话的（本血缘的已见名单）不再列成没收到
+    const seen = readSeen({ home, env, lineDir: line.dir });
+    if (seen.problem) lines.push(`本会话的「已塞过的引导」名单没读成：${seen.problem}；塞过的可能再列一遍。`);
+    const lost = rec.lost.filter((s) => !seen.keys.has(seenKey(s)));
     if (lost.length > 0) {
       const shown = packNewestFirst(lost);
       lines.push(
         `创始人发了、但 Claude Code 没收到的话（Mirasim 的「引导」在那一轮被打断或出错时丢了，他以为你看到了；共 ${lost.length} 条${shown.omitted}）：${shown.items.join(' ')} 先答这些，答完再接着干。`,
       );
+      // 列过了就记进已见名单，轮中的 inbox-tick 不再把同一条塞第二遍
+      if (remember) {
+        try {
+          markSeen({ home, env, lineDir: line.dir, entries: lost, now });
+        } catch (err) {
+          lines.push(`已列出的引导没记进已见名单（${err?.code ?? err}）；这一轮里可能被再塞一遍。`);
+        }
+      }
     }
   }
   // 同一个 Mirasim 会话换原生会话号之前收到的（/compact、换模型）：当前这个号自己收到的它早见过，不列
@@ -1111,7 +1075,7 @@ export function sessionStart({
           mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
           lineage,
         })),
-    ...recentPrompts({ home, now, sessionId, env, lineage }),
+    ...recentPrompts({ home, now, sessionId, env, lineage, markSeen: true }),
     ...(quiet ? [] : sweepWorktrees(cwd, localGit, now, home)),
     ...(quiet
       ? []
@@ -1404,7 +1368,7 @@ export function fastSessionStart({
     );
   }
   lines.push(...failed('progress', PROGRESS_NOT_CHECKED.replace(/没查成$/, '')));
-  lines.push(...recentPrompts({ home, now, sessionId, env, lineage }));
+  lines.push(...recentPrompts({ home, now, sessionId, env, lineage, markSeen: true }));
   const sw = got('sweep');
   if (sw?.ok && Array.isArray(sw.value)) lines.push(...sw.value);
   lines.push(...failed('sweep', '清工作树'));
