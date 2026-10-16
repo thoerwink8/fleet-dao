@@ -124,10 +124,12 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(nextAction({ failure: failure('WEIRD', false), limits, routeBound: false }).action).toBe('park');
   });
 
-  it('账号池的事：封号直接挂起并报警、整池暂停；额度用满在 Claude 订阅池马上回去选路（等切号），别的池等到清零', () => {
+  it('账号池的事：封号整池暂停并报警，这张单换路由避开这个池；额度用满在 Claude 订阅池马上回去选路（等切号），别的池等到清零', () => {
     expect(nextAction({ failure: failure('account_banned'), limits, routeBound: true })).toMatchObject({
-      action: 'park',
+      action: 'swapRoute',
       alert: true,
+      authReroute: 'pool',
+      avoid: 'pool',
       shared: { scope: 'pool' },
     });
     // Claude 订阅池（带组织类型）：不原地睡到清零，马上回去选路续同一个会话（切了号选路就换池 fork 续上，#59）
@@ -162,7 +164,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(plain).toMatchObject({ action: 'retry', delaySeconds: 1200, wait: 'quota', resumeSame: true });
   });
 
-  it('设备被撤销：挂起（不换池、不等清零），整池暂停，写明去哪台机器、以谁的身份重新登录；人点继续后续同一个会话', () => {
+  it('设备被撤销：整池暂停并报警，这张单换路由避开这个池，写明去哪台机器、以谁的身份重新登录', () => {
     const next = nextAction({
       failure: { ...failure('agent_error'), message: 'API Error: 401 device_revoked' },
       limits,
@@ -179,9 +181,56 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
         runAsUser: 'fleet-agent-carpool',
       },
     });
-    expect(next).toMatchObject({ action: 'park', rule: 'DV1', resumeSame: true, alert: true });
+    expect(next).toMatchObject({
+      action: 'swapRoute',
+      rule: 'DV1',
+      resumeSame: false,
+      alert: true,
+      authReroute: 'pool',
+      avoid: 'pool',
+    });
     expect(next.shared).toEqual({ scope: 'pool' });
     expect(next.humanFix).toContain('在「法国」上以会话用户 fleet-agent-carpool 重跑');
+  });
+
+  it('一次 401 换路由、不暂停整池；同一个池短时间里第二次 401 才整池暂停并报警', () => {
+    const failure401 = {
+      source: 'session:execute',
+      code: 'agent_error',
+      message: 'HTTP 401 Unauthorized',
+      retryable: null,
+    };
+    const route = { routeId: 'r1', poolId: 'p1', modelId: 'opus', hostId: 'mirasim' as const };
+    const once = nextAction({
+      failure: failure401,
+      limits,
+      routeBound: true,
+      context: { httpStatus: 401, route },
+    });
+    expect(once).toMatchObject({
+      action: 'swapRoute',
+      authReroute: 'route',
+      avoid: 'route',
+      alert: false,
+      rule: 'AU2',
+    });
+    expect(once.shared).toBeUndefined();
+    expect(once.reason).toContain('第一次 401');
+    const twice = nextAction({
+      failure: failure401,
+      limits,
+      routeBound: true,
+      context: { httpStatus: 401, route, priorBare401: true },
+    });
+    expect(twice).toMatchObject({
+      action: 'swapRoute',
+      authReroute: 'pool',
+      avoid: 'pool',
+      alert: true,
+      shared: { scope: 'pool' },
+    });
+    expect(twice.reason).toContain('第二次 401');
+    expect(twice.reason).toContain('整池暂停，回去选路避开这个池');
   });
 
   it('要人的直接挂起并报警', () => {
@@ -315,7 +364,7 @@ describe('渠道运行中失败：分流判停下就停下报人，不再换同�
       routeBound: true,
       context: onChannel,
     });
-    expect(banned).toMatchObject({ action: 'park', alert: true });
+    expect(banned).toMatchObject({ action: 'swapRoute', alert: true, authReroute: 'pool', avoid: 'pool' });
     expect(banned).not.toHaveProperty('failChannel');
   });
 

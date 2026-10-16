@@ -43,7 +43,7 @@ function drive(evidence: FailureEvidence, policy?: Partial<FailurePolicy>, maxSt
 }
 
 describe('处置表：每一种打断原因怎么办、上限在哪', () => {
-  it('分流只给 retry 和 park 两种动作：没有换路由、换模型这一级，每条规则都归五种之一', () => {
+  it('每条规则都归五种之一；动作只有 retry、park，以及账号池停机时的换路由', () => {
     const kinds = new Set(RULES.map((r) => r.kind));
     expect([...kinds].sort()).toEqual(['resume', 'retry', 'rework', 'stop', 'wait']);
     const samples = JSON.parse(
@@ -54,7 +54,8 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
         (s) => classifyFailure({ source: 'session:execute', now: NOW, ...s.evidence }).action,
       ),
     );
-    expect([...actions].sort()).toEqual(['park', 'retry']);
+    // 登录失效、封号、设备被撤销（AU1、AU2、DV1）绑了路由就换路由，不挂起这张单。别的规则仍只有 retry 和 park。
+    expect([...actions].sort()).toEqual(['park', 'retry', 'swapRoute']);
   });
 
   it('retry 临时的（网络、上游出错、进程被杀……）：绑路由的原路重试两次，1 分钟起翻倍（决定 0093），再来就停下报警', () => {
@@ -213,12 +214,19 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     expect(repeat.action).toBe('retry');
   });
 
-  it('stop 只有人能修的：封号、登录失效、余额不够、配置不对……头一步就停下报警，不重试；整池的事让别的任务也别再派', () => {
-    const { trail, verdicts } = drive(BANNED);
-    expect(trail).toEqual(['park']);
-    expect(verdicts[0]).toMatchObject({ rule: 'AU1', alert: true, routeOutcome: 'neutral' });
-    expect(verdicts[0]?.shared).toEqual({ scope: 'pool', shared: true });
-    expect(verdicts[0]?.reason).toBe('账号被封（account_banned）：挂起并报警');
+  it('stop 只有人能修的：封号整池暂停并报警，这张单回去选路避开这个池；余额不够、配置不对仍挂起；不绑路由的登录失效仍挂起', () => {
+    const banned = classifyFailure(BANNED);
+    expect(banned).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU1',
+      alert: true,
+      routeOutcome: 'neutral',
+      authReroute: 'pool',
+      resumeSame: false,
+    });
+    expect(banned.shared).toEqual({ scope: 'pool', shared: true });
+    expect(banned.reason).toContain('整池暂停，回去选路避开这个池');
+    expect(banned.reason).toContain('并报警');
     // 路由自己的问题（配置不对、模型不存在）：停下报警，这条路由的失败记进熔断，不让整池暂停
     const model = classifyFailure(session({ code: 'model_not_found' }));
     expect({ action: model.action, alert: model.alert, routeOutcome: model.routeOutcome }).toEqual({
@@ -245,18 +253,19 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
       runAsUser: 'fleet-agent-carpool',
     });
     const v = classifyFailure(revoked);
-    expect({ rule: v.rule, action: v.action, alert: v.alert, resumeSame: v.resumeSame }).toEqual({
+    expect({ rule: v.rule, action: v.action, alert: v.alert, resumeSame: v.resumeSame, authReroute: v.authReroute }).toEqual({
       rule: 'DV1',
-      action: 'park',
+      action: 'swapRoute',
       alert: true,
-      resumeSame: true,
+      resumeSame: false,
+      authReroute: 'pool',
     });
     expect(v.shared).toEqual({ scope: 'pool', shared: true });
     expect(v.humanFix).toBe(
       '在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
     );
+    expect(v.reason).toContain('整池暂停，回去选路避开这个池');
     expect(v.reason).toContain('要人：在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login');
-    expect(drive(revoked).trail).toEqual(['park']);
     // 机器、会话用户没报：写明没报，不瞎猜。
     expect(classifyFailure(session({ message: '401 device_revoked' })).humanFix).toBe(
       '在机器（没报）上以会话用户（没报）重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
@@ -268,6 +277,37 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     ).toBe('DV1');
     expect(classifyFailure(session({ message: 'Not logged in · Please run /login' })).rule).toBe('AU2');
     expect(classifyFailure(BANNED).rule).toBe('AU1');
+  });
+
+  it('只凭 HTTP 401：第一次换路由、不暂停整池；同一个池第二次才整池暂停。明确的登录失效第一次就停池', () => {
+    const bare = session({ code: 'agent_error', message: 'HTTP 401 Unauthorized', httpStatus: 401 });
+    const once = classifyFailure(bare);
+    expect(once).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU2',
+      authReroute: 'route',
+      alert: false,
+      resumeSame: false,
+    });
+    expect(once.shared).toBeUndefined();
+    expect(once.reason).toContain('第一次 401');
+    expect(once.reason).not.toContain('并报警');
+    const twice = classifyFailure({ ...bare, priorBare401: true });
+    expect(twice).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU2',
+      authReroute: 'pool',
+      alert: true,
+    });
+    expect(twice.shared).toEqual({ scope: 'pool', shared: true });
+    expect(twice.reason).toContain('第二次 401');
+    expect(twice.reason).toContain('整池暂停');
+    const explicit = classifyFailure(session({ message: 'Not logged in · Please run /login' }));
+    expect(explicit).toMatchObject({ action: 'swapRoute', authReroute: 'pool', alert: true, rule: 'AU2' });
+    expect(explicit.reason).not.toContain('第一次 401');
+    const cursor = classifyFailure(session({ message: 'Your authentication is invalid.' }));
+    expect(cursor).toMatchObject({ action: 'park', rule: 'AU5', alert: true });
+    expect(cursor.authReroute).toBeUndefined();
   });
 
   it('rework 卫生检查拦下了要公开的内容：退回会话去掉再交；同一处连续被拦两次就停；卫生检查没扫成不推、直接停', () => {

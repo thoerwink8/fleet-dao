@@ -280,6 +280,34 @@ export const NO_OTHER_FAMILY = '没有别的模型族可换，只避开模型';
 /** 避让之后一条别的路由都没有：不死等，照旧派原来的。写进 lastProblem，驾驶舱看得见。 */
 export const NO_OTHER_ROUTE = '没有别的路由可换';
 
+/**
+ * 避开登录失效、封号、设备被撤销的池之后，一条能派的路由都没有（patched('auth-reroute')）。
+ * 驾驶舱「停下等人」读这一句。
+ */
+export const POOLS_ALL_HELD = '能派的池都停了';
+
+/** 只凭 HTTP 401：同一个池在这段时间里再来一次才暂停整池。10 分钟盖得住一次抖动，盖不住真登出。 */
+export const BARE_401_WINDOW_MS = 10 * 60 * 1000;
+
+/** 这个池上一次只凭 401 的时刻还在窗口里。没记过、或已经过了窗口，都不算第二次。 */
+export function bare401Repeats(previousAtMs: number | undefined, nowMs: number): boolean {
+  if (previousAtMs === undefined || !Number.isFinite(previousAtMs) || !Number.isFinite(nowMs)) return false;
+  const age = nowMs - previousAtMs;
+  return age >= 0 && age <= BARE_401_WINDOW_MS;
+}
+
+/** 整池暂停提醒的标题后半句。和规则表的白话名同一句；认不出的规则按登录失效写。 */
+export function poolAuthHoldTitle(rule: string | undefined): string {
+  if (rule === 'AU1') return '账号被封';
+  if (rule === 'DV1') return '这台机器的 reclaude 登录被撤销';
+  return '登录失效';
+}
+
+/** 和 real/pool-holds.ts 的 poolHoldKey 同一个键：选路见了没处理的这条就整池避开。 */
+export function poolHoldDedupeKey(poolId: string): string {
+  return `pool-hold:${poolId}`;
+}
+
 /** 整族避开之后剩下的都在等额度或空位：放掉整族避让再选。写进 lastProblem，驾驶舱看得见。 */
 export const RELEASE_FAMILY_WAIT = '剩下的路由在等额度或空位，先放掉整族避让再选';
 

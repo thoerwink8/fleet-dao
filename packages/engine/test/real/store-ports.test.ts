@@ -1337,6 +1337,26 @@ describe('报警、提问、人闸', () => {
     );
     expect(rows.find((r) => r.dedupeKey === 'wf:info')?.decisionOptions).toBeNull();
   });
+
+  it('pool-hold 去重键：整池暂停，不挂在这张单上，选项和探针同一份', async () => {
+    await world(t.db);
+    const { task } = await addTask(t.db);
+    const p = ports();
+    await p.raiseAlert(
+      {
+        taskId: task.id,
+        level: 'stuck',
+        title: '账号池 p1 整池暂停：登录失效',
+        detail: '第二次 401，整池暂停，回去选路避开这个池',
+        dedupeKey: poolHoldKey('p1'),
+      },
+      ctx,
+    );
+    const rows = await t.db.select().from(notifications);
+    const hold = rows.find((r) => r.dedupeKey === poolHoldKey('p1'));
+    expect(hold).toMatchObject({ level: 'decision', taskId: null });
+    expect(hold?.decisionOptions?.map((o) => o.id)).toEqual(['fixed', 'hold', 'retire']);
+  });
 });
 
 describe('计时、快照', () => {

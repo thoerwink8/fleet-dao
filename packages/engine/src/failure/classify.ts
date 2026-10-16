@@ -71,14 +71,51 @@ interface Ctx {
 type Cooldown = NonNullable<FailureVerdict['cooldown']>;
 
 interface Step {
-  action: 'retry' | 'park';
+  action: 'retry' | 'park' | 'swapRoute';
   delaySeconds: number;
   counter: keyof AttemptCounters | null;
   wait: boolean;
   /** 额度池回去选路等：不原地睡（原因里这么写）。 */
   reroute?: true;
+  /**
+   * 出在账号池上：不挂起这张单。pool = 整池暂停，回去选路避开这个池；
+   * route = 只凭一次 401，按临时失败换路由，不暂停整池。
+   */
+  authReroute?: 'pool' | 'route';
+  /** 只凭 401 的第二次：原因里写明是第二次才停池。 */
+  second401?: true;
   /** 原路再试前歇多久按哪一档定（决定 0093）。 */
   cooldown?: Cooldown;
+}
+
+/** 登录失效、封号、设备被撤销：停的是池，不是这张单。别的 stop（没权限、密钥没放好、余额不够）仍挂起。 */
+const POOL_AUTH_REROUTE = new Set(['AU1', 'AU2', 'DV1']);
+
+/**
+ * 只凭 HTTP 401，没有「要重新登录」的整句、也没有结构化的登录码。
+ * 原文里的 Unauthorized / 状态码 401 都算；not logged in、token expired、authentication failed 不算。
+ */
+function isBare401(plan: Plan, message: string | undefined): boolean {
+  if (plan.rule !== 'AU2' || plan.via === 'signal') return false;
+  const text = message ?? '';
+  if (
+    /not logged in|please run \/login|no valid login detected|重新登录|完成登录|token (?:has )?expired|invalid (?:x-)?api[ _-]?key|authentication (?:failed|required)/i.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  if (plan.via === 'generic' && plan.hit.startsWith('HTTP 401')) return true;
+  return /^(?:unauthori[sz]ed|unauthenticated)$/i.test(plan.hit);
+}
+
+/** 绑路由的会话撞上账号池的停：回去选路。不绑路由的（推送令牌过期）仍挂起。只凭 401 要第二次才停池。 */
+function poolAuthLeave(plan: Plan, ctx: Ctx): 'pool' | 'route' | undefined {
+  if (!ctx.routeBound || !POOL_AUTH_REROUTE.has(plan.rule)) return undefined;
+  if (isBare401(plan, ctx.evidence.message)) {
+    return ctx.evidence.priorBare401 === true ? 'pool' : 'route';
+  }
+  return plan.hold ? 'pool' : undefined;
 }
 
 const PARK: Step = { action: 'park', delaySeconds: 0, counter: null, wait: false };
@@ -147,7 +184,8 @@ export function classifyFailure(
   // 分流自己不能因为证据读坏了就失败（那样失败就没人处置了），但读坏的要写明，不当成没给。
   plan.notes.push(...unreadableFields(evidence));
   const step = decide(plan, ctx);
-  const alert = plan.kind === 'stop' || step.action === 'park';
+  // 只凭一次 401 不报警、也不整池暂停（decide 里把 hold 拿掉了）。停池的那一档仍报警。
+  const alert = step.authReroute === 'route' ? false : plan.kind === 'stop' || step.action === 'park';
   const how = plan.hint && step.action === 'retry' && !step.wait ? `，${plan.hint}` : '';
   const humanFix = plan.humanFix ? fillFix(plan.humanFix, evidence) : undefined;
   const reason = `${plan.title}（${plan.hit}）：${actionText(step, plan, ctx)}${how}${
@@ -161,13 +199,14 @@ export function classifyFailure(
     rule: plan.rule,
     title: plan.title,
     via: plan.via,
-    classifiedAs: plan.unknown ? 'unknown' : plan.kind === 'stop' ? 'park' : 'retry',
+    classifiedAs: plan.unknown ? 'unknown' : step.authReroute ? 'swapRoute' : plan.kind === 'stop' ? 'park' : 'retry',
     alert,
     counter: step.counter,
     ...(step.wait && step.action === 'retry'
       ? { wait: plan.quota ? ('quota' as const) : ('upstream' as const) }
       : {}),
     ...(shared ? { shared } : {}),
+    ...(step.authReroute ? { authReroute: step.authReroute } : {}),
     ...(humanFix ? { humanFix } : {}),
     // 原路再试（含等上游）续同一个会话；停下的只有规则写明「修的是机器或账号池」才续。
     resumeSame: step.action === 'retry' || (step.action === 'park' && plan.resumeAfterPark === true),
@@ -181,8 +220,25 @@ export function classifyFailure(
 function decide(plan: Plan, ctx: Ctx): Step {
   const { policy, used } = ctx;
   switch (plan.kind) {
-    case 'stop':
+    case 'stop': {
+      const leave = poolAuthLeave(plan, ctx);
+      if (leave === 'route') {
+        // 一次 401 不暂停整池：shared 不设，路由探针也不会因此停池。
+        plan.hold = false;
+        return { action: 'swapRoute', delaySeconds: 0, counter: null, wait: false, authReroute: 'route' };
+      }
+      if (leave === 'pool') {
+        return {
+          action: 'swapRoute',
+          delaySeconds: 0,
+          counter: null,
+          wait: false,
+          authReroute: 'pool',
+          ...(isBare401(plan, ctx.evidence.message) ? { second401: true as const } : {}),
+        };
+      }
       return PARK;
+    }
     case 'resume':
       // 不记账、不设上限、不看上一次原文（切号这种：停几次续几次）
       return { action: 'retry', delaySeconds: plan.retryBaseSeconds ?? 0, counter: null, wait: false };
@@ -266,6 +322,14 @@ function repeatSkip(plan: Plan, ctx: Ctx, usedSoFar: number): string | undefined
 
 function actionText(step: Step, plan: Plan, ctx: Ctx): string {
   const first = plan.unknown && step.action !== 'park' ? '先按能撤回的动作走，' : '';
+  if (step.authReroute === 'route') {
+    return `${first}第一次 401，按临时失败换一条路由重试，不暂停整池`;
+  }
+  if (step.authReroute === 'pool') {
+    return step.second401
+      ? `${first}同一个池短时间里第二次 401，整池暂停，回去选路避开这个池`
+      : `${first}整池暂停，回去选路避开这个池`;
+  }
   if (step.action === 'park') return '挂起并报警';
   if (step.counter === null) {
     return `${first}${step.delaySeconds === 0 ? '马上' : `${duration(step.delaySeconds)}后`}接着干（不算重试）`;

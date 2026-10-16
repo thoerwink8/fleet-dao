@@ -61,6 +61,11 @@ export interface FailureContext {
   transcriptTail?: string[] | undefined;
   /** 这一步上一次失败的原文：一字不差再犯，原路再试不会变。 */
   previousMessage?: string | undefined;
+  /**
+   * 这个池短时间里已经有过一次只凭 HTTP 401（工作流自己记的时刻）。
+   * 不给 = 没有。分流据此决定这次 401 是换路由，还是暂停整池。
+   */
+  priorBare401?: true | undefined;
   /** 出事的机器、会话用户：只有人能修的（重新登录）要写清去哪修。 */
   machine?: string | undefined;
   runAsUser?: string | undefined;
@@ -86,6 +91,11 @@ export interface NextAction {
   reason: string;
   /** 换路由、换模型时这个任务避开多大范围。 */
   avoid?: AvoidScope;
+  /**
+   * 出在账号池上，这张单不挂起（工作流只在 patched('auth-reroute') 里认；老历史没有）。
+   * pool = 整池暂停并报警，回去选路避开这个池；route = 只凭一次 401，换一条路由，不暂停整池。
+   */
+  authReroute?: 'pool' | 'route';
   // 下面几项是接上失败分流之后才有的；在途任务历史里的老判断没有，读的地方按缺省处理。
   /** 给哪个计数加一；挂起时是 null（挂起后清零重来）。缺 = 按动作猜（retry→retries……）。 */
   counter?: keyof LadderCounters | null;
@@ -157,6 +167,7 @@ export function evidenceOf(input: FailureInput): FailureEvidence {
     ...(c.signal === undefined ? {} : { signal: c.signal }),
     ...set('transcriptTail', c.transcriptTail),
     ...set('previousMessage', c.previousMessage),
+    ...set('priorBare401', c.priorBare401),
     ...set('machine', c.machine),
     ...set('runAsUser', c.runAsUser),
     ...set('now', c.now),
@@ -216,6 +227,7 @@ export function nextAction(input: FailureInput, triage: FailureTriage = classify
     alert: v.alert,
     rule: v.rule,
     ...(shared ? { shared } : {}),
+    ...(v.authReroute ? { authReroute: v.authReroute, avoid: v.authReroute } : {}),
     ...(v.humanFix ? { humanFix: v.humanFix } : {}),
     ...(isUpstreamBlip(v.rule) ? { transient: true as const } : {}),
     ...(v.cooldown ? { cooldown: v.cooldown } : {}),

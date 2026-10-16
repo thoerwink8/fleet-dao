@@ -85,7 +85,7 @@ import { SEGMENT_STAGE } from '../task-contract.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
-import { type HeldPools, loadHeldPools, POOL_HOLD_PREFIX, poolHoldKey } from './pool-holds.ts';
+import { type HeldPools, loadHeldPools, POOL_HOLD_PREFIX, poolHoldKey, poolHoldOptions } from './pool-holds.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { RESERVATION_TTL_MS } from './task-segment.ts';
 
@@ -938,15 +938,22 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     async raiseAlert(input) {
       // decision 进「要你拍的」。工作流这一路补不出具体动作，给两个只留言的选项（decision 没有选项写不进）。
       // stuck、info 仍进提醒：info 只在封号、事件数到线、全熔断这类事上发，量很小。
-      const level = input.level === 'decision' ? 'decision' : 'alert';
+      // pool-hold:<池> 是整池暂停（登录失效、封号、设备被撤销）：不挂在这一张单上，选项和探针同一份，选路见了就整池避开。
+      const poolHold = input.dedupeKey.startsWith(POOL_HOLD_PREFIX);
+      const poolId = poolHold ? input.dedupeKey.slice(POOL_HOLD_PREFIX.length) : '';
+      const level = input.level === 'decision' || poolHold ? 'decision' : 'alert';
       const { id } = await upsertAlert(db, {
         dedupeKey: input.dedupeKey,
         level,
-        // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。
-        taskId: UUID.test(input.taskId) ? input.taskId : null,
+        // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。整池暂停也不挂任务。
+        taskId: poolHold || !UUID.test(input.taskId) ? null : input.taskId,
         title: input.title.slice(0, 300),
         body: input.detail,
-        ...(level === 'decision' ? { options: noteOnlyOptions('continue') } : {}),
+        ...(poolHold && poolId
+          ? { options: poolHoldOptions(poolId) }
+          : level === 'decision'
+            ? { options: noteOnlyOptions('continue') }
+            : {}),
       });
       return { alertId: id };
     },

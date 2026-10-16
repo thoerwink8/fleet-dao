@@ -195,7 +195,8 @@ export const RULES: readonly FailureRule[] = [
   },
   // 这台机器的 reclaude 登录被撤销（reclaude 文档「设备被自动撤销」：同号多机同时高频用会触发风控，自动撤销设备，
   // 请求拿到 401 device_revoked；修法只有人在那台机器上、以那个用户重跑 reclaude login）。不是额度用满、也不是封号：
-  // 等清零都没用，这个池在这台机器上整池暂停，手上的会话挂起；重新登录后人点「继续」，续同一个会话。
+  // 等清零都没用，这个池在这台机器上整池暂停。这张单不挂起：回去选路避开这个池（classify 的 authReroute）；
+  // 只有避开之后一条能派的路由都没有，工作流才挂起。重新登录后再派到这个池。
   // 认的两句都有出处：401 device_revoked 是 reclaude 文档原文（夹具 X05），「此设备已被解绑」是旧系统生产记录（夹具 S05）；
   // 两句在会话流里真实长什么样（插头交来的 detail 怎么拼）还没有真样本。
   {
@@ -210,6 +211,7 @@ export const RULES: readonly FailureRule[] = [
     resumeAfterPark: true,
   },
   // 封号：原文还写着「请稍后重试」，照做只会在同一个池里反复撞（独享号被封，reclaude 实测）。
+  // 整池暂停，这张单回去选路避开这个池，不把整张单挂起。
   {
     id: 'AU1',
     title: '账号被封',
@@ -353,6 +355,9 @@ export const RULES: readonly FailureRule[] = [
     resumeAfterPark: true,
   },
   // 登录失效要人重新登录（设备被撤销单独归 DV1，Cursor 的归 AU5、AU6，Grok 的归 AU7）。
+  // 明确的登录失效（码、要重新登录的整句）：整池暂停，这张单回去选路避开这个池，不挂起。
+  // 只凭 HTTP 401（状态码，或原文里只有 Unauthorized）：一次不暂停整池，按临时失败换一条路由；
+  // 同一个池短时间里第二次（证据 priorBare401，工作流记时刻）才整池暂停。不绑路由的一步（推送令牌过期）仍挂起。
   {
     id: 'AU2',
     title: '登录失效',

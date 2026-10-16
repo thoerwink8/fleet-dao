@@ -42,6 +42,9 @@
 //   那一睡不写任务行，doing / updated_at 停在这一句，工作流仍 Running、没有新的 runs，拉单把它算进在干活。
 //   新跑的当场停下等人。已经睡在里面的老历史：这一标记重放时为假（不能插在已记下的定时器前面），
 //   叫醒之后走 patched('wall-clock-switch-wake')，下一轮再选不出就停下，不再睡第二觉。
+// - 出在账号池上的停（登录失效、封号、设备被撤销，patched('auth-reroute')）：池照旧暂停并报警，这张单马上回去选路避开这个池。
+//   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
+//   避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」。老历史没有这个标记，仍把这张单挂起。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -75,6 +78,10 @@ import {
   NO_AVOID,
   NO_OTHER_FAMILY,
   NO_OTHER_ROUTE,
+  POOLS_ALL_HELD,
+  bare401Repeats,
+  poolAuthHoldTitle,
+  poolHoldDedupeKey,
   PausedInterrupt,
   patienceStep,
   RELEASE_FAMILY_WAIT,
@@ -116,6 +123,14 @@ export async function writeSession(
   let patienceFrom: number | null = null;
   let patienceRounds = 0;
   let patienceWaited = 0;
+  // 账号池上的停（patched('auth-reroute')）：第一次失败才问标记，问过就记住。老历史这一支为假，仍挂起这张单。
+  let authOn = false;
+  /** 已经因登录失效、封号、设备被撤销避开了池：选路一条都没有才挂起。 */
+  let authPoolsDown = false;
+  /** 每个池上一次只凭 HTTP 401 的时刻（工作流时间）。窗口外的下一次仍算第一次。 */
+  let bare401At: Record<string, number> = {};
+  /** 这一次只凭 401 避开的路由：没有别的路由可换时，选路放它再试一次，好凑第二次。 */
+  let bare401RouteId: string | undefined;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
   // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
   const ui: UiJudgement | undefined = patched('ui-work-implement')
@@ -126,7 +141,16 @@ export async function writeSession(
   for (;;) {
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
     await holdForBudget(rt);
-    const picked = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
+    const picked = await pickRoute(
+      rt,
+      avoid,
+      stick,
+      failedChannel,
+      ui?.uiWork === true,
+      authOn && authPoolsDown,
+      authOn ? bare401RouteId : undefined,
+    );
+    bare401RouteId = undefined;
     failedChannel = undefined;
     const route = picked.route;
     if (picked.probeNote) {
@@ -253,6 +277,8 @@ export async function writeSession(
         };
     // 切号停下的（失败分流 OS1：不算失败、不记账、马上接着干）：选路照常选到切过去的那个池，在原分支上重跑这一段
     if (failure.code === ORG_SWITCH_CODE) interrupted = failure.message;
+    // 写在问分流之前：老历史重放时这一支为假，分流的入参不带 priorBare401，和原来一样。
+    authOn = patched('auth-reroute');
     const next = await rt.classify(failure, counters, true, {
       stage: SEGMENT_STAGE.manual,
       route: {
@@ -267,11 +293,42 @@ export async function writeSession(
       ...(evidence?.httpStatus !== undefined ? { httpStatus: evidence.httpStatus } : {}),
       ...(evidence?.exitCode !== undefined ? { exitCode: evidence.exitCode } : {}),
       previousMessage,
+      ...(authOn && bare401Repeats(bare401At[route.poolId], Date.now())
+        ? { priorBare401: true as const }
+        : {}),
     });
     // 切号停下的不是这一段的失败：不当「上一次的原文」——既不凑成「和上一次一字不差」，也不打断切号前后两次真失败的比对
     if (failure.code !== ORG_SWITCH_CODE) previousMessage = failure.message;
     rt.status.lastProblem = next.reason;
     counters = bump(counters, next);
+    // 出在账号池上（登录失效、封号、设备被撤销）：不挂起这张单。标记在问分流时已经记下（老历史为假，仍走下面的挂起）。
+    if (authOn && next.authReroute) {
+      stick = undefined;
+      avoid = widen(avoid, route, next.authReroute);
+      previousMessage = undefined;
+      if (next.authReroute === 'pool') {
+        bare401At = Object.fromEntries(Object.entries(bare401At).filter(([id]) => id !== route.poolId));
+        authPoolsDown = true;
+        bare401RouteId = undefined;
+        try {
+          await rt.acts.raiseAlert({
+            taskId: rt.input.taskId,
+            level: 'decision',
+            title: `账号池 ${route.poolId} 整池暂停：${poolAuthHoldTitle(next.rule)}`,
+            detail: next.reason,
+            dedupeKey: poolHoldDedupeKey(route.poolId),
+          });
+        } catch (error) {
+          if (error instanceof Abandoned || isCancellation(error)) throw error;
+          log.warn('整池暂停的提醒没发出去，这张单照旧换池', { poolId: route.poolId, error: String(error) });
+        }
+      } else {
+        bare401At = { ...bare401At, [route.poolId]: Date.now() };
+        bare401RouteId = route.routeId;
+      }
+      await rt.note(next.reason);
+      continue;
+    }
     // 老历史没有这个标记：不问上一段收场没有、不耐心等，照旧
     const patienceOn = patched('route-patience');
     if (next.action === 'retry') {
@@ -481,6 +538,10 @@ async function pickRoute(
   stick?: string,
   failedChannel?: FailedChannel,
   uiWork = false,
+  /** 已经因登录失效、封号、设备被撤销避开了池：一条能派的都没有就挂起，不改去等探针。 */
+  authPoolsDown = false,
+  /** 只凭一次 401 避开的路由。没有别的路由时放它再试一次，好让第二次 401 暂停整池。 */
+  bare401RouteId?: string,
 ): Promise<{ route: RouteChoice; probeNote: string | null }> {
   const stage = uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual;
   // 老历史重放时这一支为假：选路参数和原来一样，不多选一次。要写在派前探测那个标记之前，已有历史里的标记顺序才对得上。
@@ -494,6 +555,8 @@ async function pickRoute(
   let droppedFamilies = false;
   let holdForProbe = false;
   let lastStopDetail = '';
+  // 只凭 401 的那条路由已经放回去再试过一次：再派不出就不再放，免得来回选。
+  let releasedBare401 = false;
   // 这一轮已经记下「全都探不通」。再选到能派的，把上次停下的原因清掉，别留在任务状态里。
   const clearProbeStop = () => {
     if (holdForProbe || rt.status.lastProblem?.startsWith('派前探测：')) rt.status.lastProblem = null;
@@ -637,6 +700,24 @@ async function pickRoute(
           rt.fellBackToMissRoute = true;
           const chosen = await consider(missUsable, probeOn, mark);
           if (chosen) return chosen;
+          continue;
+        }
+        // 登录失效、封号、设备被撤销把能派的池都避开了：挂起这张单，不改去等探针（探针恢复不了要人重新登录的池）。
+        // 人点「继续」之后避让清掉再选：生产上池的提醒还在，选路仍是一条都没有，再挂起。
+        if (authPoolsDown) {
+          await rt.park(POOLS_ALL_HELD, got.detail);
+          avoid = NO_AVOID;
+          continue;
+        }
+        // 只凭一次 401、没有别的路由：放回这条再试一次。第二次仍是 401 才暂停整池。已经放过、或同时还避开了池，就不再放。
+        if (
+          bare401RouteId &&
+          !releasedBare401 &&
+          merged.poolIds.length === 0 &&
+          avoidRouteIds.includes(bare401RouteId)
+        ) {
+          releasedBare401 = true;
+          avoid = { ...avoid, routeIds: avoid.routeIds.filter((id) => id !== bare401RouteId) };
           continue;
         }
         // 还没探过、候选一开始就被挡，也走同一条停下：写出原因，沿用全熔断提醒，等探针恢复再继续。
