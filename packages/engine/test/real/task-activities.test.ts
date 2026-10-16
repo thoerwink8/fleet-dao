@@ -287,6 +287,46 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
     expect(got).toMatchObject({ commits: 1, changedFiles: ['a.ts'], leftover: ['?? forgot.ts'] });
   });
 
+  // #2721：近 7 天 55 轮只因开会话的钩子改了 .claude/settings.json 被判返工，会话其实提交了。
+  it('一次提交、加一个被钩子改过的 settings（跟踪着的改了、没跟踪的新建了）：先还原再剔除，核对结果没有剩的', async () => {
+    const { dir } = await tree();
+    mkdirSync(join(dir, '.claude'));
+    const original = '{\n  "env": {}\n}\n';
+    writeFileSync(join(dir, '.claude', 'settings.json'), original);
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'project settings');
+    const repinned = git(dir, 'rev-parse', 'HEAD');
+    writeFileSync(join(dir, 'a.ts'), 'export const a = 1;\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'add a');
+    // 钩子改了跟踪着的项目设置；引擎给 Mirasim 写的挡子代理设置（仓里没忽略）没跟踪
+    writeFileSync(join(dir, '.claude', 'settings.json'), '{\n  "hooks": {}\n}\n');
+    writeFileSync(join(dir, '.claude', 'settings.local.json'), '{}\n');
+    const got = await make({ gh: fakeGh().gh }).acts.readDelivery(input(dir, repinned), ctx());
+    expect(got).toMatchObject({ commits: 1, changedFiles: ['a.ts'], leftover: [] });
+    // 跟踪着的还原成 HEAD 的样子；没跟踪的留着（删了 Mirasim 会话就挡不住子代理）
+    // 换行按 git 的检出设置（Windows 上 autocrlf 检出成 CRLF），只比内容
+    expect(readFileSync(join(dir, '.claude', 'settings.json'), 'utf8').replaceAll('\r\n', '\n')).toBe(
+      original,
+    );
+    expect(existsSync(join(dir, '.claude', 'settings.local.json'))).toBe(true);
+    expect(git(dir, 'diff', '--ignore-cr-at-eol', '--name-only', 'HEAD')).toBe('');
+
+    // 仓里原来没有 .claude/（git 只报一行 ?? .claude/）：钩子新建的项目设置也不算；别的没提交的照算
+    const fresh = await tree('fresh');
+    writeFileSync(join(fresh.dir, 'b.ts'), 'export const b = 1;\n');
+    git(fresh.dir, 'add', '.');
+    git(fresh.dir, 'commit', '-q', '-m', 'add b');
+    mkdirSync(join(fresh.dir, '.claude'));
+    writeFileSync(join(fresh.dir, '.claude', 'settings.json'), '{}\n');
+    const clean = await make({ gh: fakeGh().gh }).acts.readDelivery(input(fresh.dir, fresh.base), ctx());
+    expect(clean.leftover).toEqual([]);
+    writeFileSync(join(fresh.dir, 'README.md'), '# changed\n');
+    writeFileSync(join(fresh.dir, '.claude', 'notes.md'), 'x\n');
+    const dirty = await make({ gh: fakeGh().gh }).acts.readDelivery(input(fresh.dir, fresh.base), ctx());
+    expect(dirty.leftover).toEqual([' M README.md', '?? .claude/notes.md']);
+  });
+
   it('【故意造出的失败】树没人认领（没建起来 / 已收）：WORKTREE_MISSING，不回「没有改动」', async () => {
     const { dir, base } = await tree();
     const { acts } = make({ gh: fakeGh().gh, trees: { ownerOf: async () => null } });
