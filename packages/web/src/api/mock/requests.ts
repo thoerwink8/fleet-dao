@@ -438,6 +438,36 @@ export function createMockRequests(opts: MockRequestsOptions): MockRequests {
     readAll(46, ME.id);
   }
   {
+    // 90：人说了三次，指挥官给出方案卡。草稿齐了，发起人能点「确认开单」。
+    // 号避开 47：假后端新建从 47 起，剧本③「接着这条提」认的就是 47。
+    const r = base(90, ME.id, '导出按钮按月出表', 2, repo0.id);
+    r.draftVersion = 2;
+    r.chat.turns = 3;
+    r.draft = {
+      title: '导出按钮按月出表',
+      kind: '需求',
+      scene: '财务月底要一张这个月的表，现在只能截图。',
+      modules: 'packages/web/src/routes/tasks.tsx',
+      want: '任务页加导出，按月出 CSV。',
+      done: ['任务页有「导出」按钮，点了下载当月 CSV'],
+      notDo: '不含改筛选。',
+      size: '小',
+    };
+    reqs.push(r);
+    say(90, 'human', 12, '任务页想按月导出。', ME.id);
+    say(90, 'human', 8, '给财务，CSV 就行。', ME.id);
+    say(90, 'human', 3, '这个月的，按完成时间。', ME.id);
+    say(90, 'commander', 2, '方案齐了，看一下就能开单。', undefined, {
+      card: {
+        type: 'proposal',
+        draftVersion: 2,
+        summary:
+          '标题：导出按钮按月出表\n场景：财务月底要一张这个月的表\n已知的模块：packages/web/src/routes/tasks.tsx\n要什么：任务页加导出，按月出 CSV\n怎么算做完：任务页有「导出」按钮，点了下载当月 CSV\n不做什么：不含改筛选\n规模建议：小\n要不要人拍：不用',
+      },
+    });
+    readAll(90, ME.id);
+  }
+  {
     // 30：合伙人提、我拍了「不做」：马上归档。
     const r = base(30, PARTNER.id, '暗色主题再调一档对比度', 6 * 1440, repo0.id);
     r.status = 'closed_drop';

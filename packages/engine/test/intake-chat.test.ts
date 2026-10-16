@@ -113,6 +113,25 @@ describe('一轮回话', () => {
     expect(s?.prompt.fresh).toContain('想要导出报表');
   });
 
+  it('方案卡原样交给写回（问题被解析丢掉）', async () => {
+    const text = reply('方案齐了，确认就能开单。', {
+      proposal: { summary: '标题：导出报表\n场景：月底对账' },
+      question: { text: '还问吗？', options: ['问', '不问'] },
+      patch: { want: '按月导出' },
+    });
+    const { deps, seen } = fake({ ok: true, text, session: ALIVE, modelId: 'm-opus' });
+    await runIntakeChatTurn(deps, chat());
+    expect(seen.replies).toEqual([
+      {
+        requestId: 'req-7',
+        reply: '方案齐了，确认就能开单。',
+        proposal: { summary: '标题：导出报表\n场景：月底对账' },
+        patch: { want: '按月导出' },
+        session: ALIVE,
+      },
+    ]);
+  });
+
   it('选了模型的需求只派那个模型', async () => {
     const { deps, seen } = fake({ ok: true, text: '好', session: ALIVE, modelId: 'm-gpt' });
     await runIntakeChatTurn(deps, chat({ modelChoice: 'm-gpt' }));
@@ -205,17 +224,43 @@ describe('让别家挑错', () => {
 });
 
 describe('提示词', () => {
-  it('重起的那份：只读检出、没有 GitHub 令牌、一次一个问题、人改过的栏点名', () => {
+  it('重起的那份：只读检出、没有 GitHub 令牌、先填草稿栏、写明第几次发言、人改过的栏点名', () => {
     const p = freshCommanderPrompt(chat());
     expect(p).toContain('只读检出');
     expect(p).toContain('没有 GitHub 令牌');
     expect(p).toContain('一次只问一个问题');
+    expect(p).toContain('每一轮先把能从代码和已有对话里推出来的草稿栏填上');
+    expect(p).toContain('当前是第 2 次发言之后');
+    expect(p).toContain('不回到逐条提问');
     expect(p).toMatch(/人改过的栏[\s\S]*scene/);
     expect(p).toContain('甲（人）：想要导出报表');
   });
 
-  it('续的那份没有新消息时，说接着问', () => {
-    expect(resumeCommanderPrompt(chat({ lastMessageId: 3 }))).toContain('让指挥官接着问');
+  it('人第 3 次发言之后：这一轮必须给 proposal，新信息也直接给更新后的方案', () => {
+    const third = chat({
+      messages: [
+        ...chat().messages,
+        { id: 4, kind: 'human', authorName: '甲', body: '按月，给财务', card: null, createdAt: T0 },
+      ],
+    });
+    const p = freshCommanderPrompt(third);
+    expect(p).toContain('当前是第 3 次发言之后');
+    expect(p).toContain('必须输出一张 proposal');
+    expect(p).toContain('不要再追问');
+    expect(p).toContain('确认开单');
+    expect(p).toContain('改某一栏');
+    expect(p).toContain(
+      '创始人要是又提了新信息：把新信息写进 patch，这一轮直接给更新后的 proposal，不回到逐条提问。',
+    );
+    expect(p).not.toContain('接着问下一个问题');
+  });
+
+  it('续的那份没有新消息时，还没给方案就给方案', () => {
+    const p = resumeCommanderPrompt(chat({ lastMessageId: 3 }));
+    expect(p).toContain('让指挥官接着问');
+    expect(p).toContain('还没给方案就给方案');
+    expect(p).not.toContain('接着问下一个问题');
+    expect(p).toContain('不回到逐条提问');
   });
 
   it('挑错的那份要求交回 fleet-review 那一块', () => {

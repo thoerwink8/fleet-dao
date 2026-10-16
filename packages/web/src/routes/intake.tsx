@@ -5,7 +5,7 @@
 // 接的是 A 片（#2049）的列表、详情、动作接口，B 片（#2060）的开单回显、进度卡、引擎提问回答，
 // C 片（#2061）的指挥官流式回话、选项、建议改、模型芯片、「让指挥官接着问」、让别家挑错。
 import { MessageSquarePlus } from 'lucide-react';
-import { useCallback, useRef } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useMe, useRequestDetail } from '../api/client';
@@ -43,6 +43,8 @@ export default function Intake() {
   );
   const collapsed = pickedCollapse ?? !wide;
   const [panelOpen, setPanelOpen] = useLocalState<boolean>(`${brand.storagePrefix}intake-panel`, false);
+  const editN = useRef(0);
+  const [draftEdit, setDraftEdit] = useState<{ field: RequestDraftField; n: number } | null>(null);
 
   const view = viewOf(params.get('view'));
   const filter = filterOf(params.get('filter'));
@@ -77,6 +79,8 @@ export default function Intake() {
   const openPanel = (open: boolean, field?: RequestDraftField) => {
     setPanelOpen(open);
     if (open && field) {
+      editN.current += 1;
+      setDraftEdit({ field, n: editN.current });
       window.setTimeout(
         () =>
           document.getElementById(`draft-${field}`)?.scrollIntoView({ block: 'center', behavior: 'smooth' }),
@@ -168,6 +172,7 @@ export default function Intake() {
           <DraftPanel
             d={detail.data}
             meId={meId}
+            edit={draftEdit}
             onClose={() => setPanelOpen(false)}
             onContinue={() => patch({ r: 'new', from: String(seq) })}
           />

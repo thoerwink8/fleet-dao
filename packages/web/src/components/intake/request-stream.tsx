@@ -2,7 +2,7 @@
 // 我说的在右边带气泡；别人在左边、小头像，连续几条只在第一条上面写名字；指挥官在左边、不加气泡；系统的话居中一行小字。
 // 拍板卡（待拍板时在最后）：只有拍板人能点「同意做 / 不做 / 再聊聊」，别人看到「等谁拍」。草稿齐了的一张紧凑卡带「提交拍板 / 确定，开单」。
 // 结案后最后一行是结案分隔线。B、C 片的消息（指挥官一问的选项、建议改、进度卡、引擎提问的回答、别家意见、换模型分隔线、
-// 暂停原因、指挥官正在回话）画法在 request-cards.tsx。
+// 暂停原因、方案卡、指挥官正在回话）画法在 request-cards.tsx。
 import { pausedWhy } from '@fleet-dao/shared';
 import { CornerDownRight } from 'lucide-react';
 import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react';
@@ -20,6 +20,7 @@ import { BotAvatar, PersonAvatar } from './people';
 import {
   CommanderLive,
   EngineAsk,
+  ProposalCard,
   progressCard,
   QuestionCard,
   ReviewCard,
@@ -97,6 +98,7 @@ function Message({
   meId,
   phone,
   liveQuestion,
+  liveProposal,
   onOpenPanel,
   onPick,
 }: {
@@ -107,6 +109,8 @@ function Message({
   phone: boolean;
   /** 最新那一问、还能发消息：它的选项能点。 */
   liveQuestion: boolean;
+  /** 最新那张方案、还能发消息：「确认开单」和「改」能点。 */
+  liveProposal: boolean;
   onOpenPanel: (field?: RequestDraftField) => void;
   onPick: (text: string) => Promise<boolean>;
 }) {
@@ -157,6 +161,9 @@ function Message({
           <MarkdownLite source={m.body} />
           {m.card?.type === 'question' ? (
             <QuestionCard card={m.card} live={liveQuestion} onPick={onPick} />
+          ) : null}
+          {m.card?.type === 'proposal' ? (
+            <ProposalCard card={m.card} d={d} live={liveProposal} onEdit={onOpenPanel} />
           ) : null}
           {m.card?.type === 'suggest' ? (
             <SuggestCard card={m.card} d={d} label={FIELD_LABELS[m.card.field]} phone={phone} />
@@ -483,6 +490,8 @@ export function MessageStream({
     lastQuestion !== undefined && d.messages.some((m) => m.id > lastQuestion.id && m.kind === 'human');
   const liveQuestionId =
     lastQuestion && !answered && d.actions.send.allowed && !d.commander.running ? lastQuestion.id : null;
+  const lastProposal = [...d.messages].reverse().find((m) => m.card?.type === 'proposal');
+  const liveProposalId = lastProposal && d.actions.send.allowed ? lastProposal.id : null;
   const endRef = useRef<HTMLDivElement>(null);
   const r = d.request;
   // 「以下是新消息」：按第一次打开这一条时读到的位置画，后面记了已读也不跳。
@@ -522,6 +531,7 @@ export function MessageStream({
               meId={meId}
               phone={phone}
               liveQuestion={m.id === liveQuestionId}
+              liveProposal={m.id === liveProposalId}
               onOpenPanel={onOpenPanel}
               onPick={onPick}
             />

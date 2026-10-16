@@ -141,6 +141,28 @@ describe('写回话：草稿补丁只改那九栏，人改过的转「建议改�
     });
   });
 
+  it('方案卡记下写回后的草稿版本（补丁让版本加 1），不再另挂问题卡', async () => {
+    const { r } = await fixture(t.db);
+    await queue(t.db, r.id);
+    await claimRequestChat(t.db, NOW);
+    const got = await finishCommanderReply(t.db, {
+      requestId: r.id,
+      reply: '方案齐了。',
+      proposal: { summary: '标题：订单导出\n场景：人写的场景' },
+      question: { text: '还问吗？', options: ['问', '不问'] },
+      patch: { title: '订单导出' },
+      session: NO_SESSION,
+      now: NOW,
+    });
+    expect(got).toMatchObject({ written: true, applied: ['title'], draftVersion: 2 });
+    const msgs = await t.db.select().from(requestMessages).where(eq(requestMessages.kind, 'commander'));
+    expect(msgs[0]?.card).toEqual({
+      type: 'proposal',
+      draftVersion: 2,
+      summary: '标题：订单导出\n场景：人写的场景',
+    });
+  });
+
   it('会话跑着时需求结案了：回话不写进去，记操作记录，会话回 idle、不算轮数', async () => {
     const { r } = await fixture(t.db);
     await queue(t.db, r.id);

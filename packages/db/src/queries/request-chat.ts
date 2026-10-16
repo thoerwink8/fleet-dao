@@ -7,6 +7,7 @@
 // - 读不了库就抛（调用方记这一轮没跑成），不当成「没有排着的」。
 import {
   pausedWhy,
+  proposalCard,
   REQUEST_DRAFT_FIELD_WORDS,
   type RequestCard,
   type RequestChatJob,
@@ -215,6 +216,8 @@ export interface FinishReplyInput {
   requestId: string;
   reply: string;
   question?: { text: string; options: string[] };
+  /** 方案卡的摘要。草稿版本号用这一笔补丁落库后的版本，不信模型自己写的。 */
+  proposal?: { summary: string };
   patch?: Record<string, unknown>;
   session: ChatSessionAfter;
   now: Date;
@@ -230,8 +233,8 @@ export interface FinishReplyResult {
 }
 
 /**
- * 回完一句：写指挥官的话（带问题卡和改了哪些栏）、草稿补丁能改的改进去（版本加 1）、碰到人改过的栏转「建议改」消息、
- * 白名单外的栏拒掉记进操作记录；会话回到 idle，轮数加 1，记下会话号、检出、看到哪一条。
+ * 回完一句：写指挥官的话（带问题卡或方案卡、改了哪些栏）、草稿补丁能改的改进去（版本加 1）、碰到人改过的栏转「建议改」消息、
+ * 白名单外的栏拒掉记进操作记录；方案卡的版本号是补丁落库后的那一版。会话回到 idle，轮数加 1，记下会话号、检出、看到哪一条。
  */
 export async function finishCommanderReply(db: Db, input: FinishReplyInput): Promise<FinishReplyResult> {
   return db.transaction(async (tx) => {
@@ -268,9 +271,16 @@ export async function finishCommanderReply(db: Db, input: FinishReplyInput): Pro
           })
           .where(eq(requests.id, r.id));
       }
-      const card: RequestCard | null = input.question
-        ? { type: 'question', question: input.question.text, options: input.question.options, allowOwn: true }
-        : null;
+      const card: RequestCard | null = input.proposal
+        ? proposalCard(version, input.proposal.summary)
+        : input.question
+          ? {
+              type: 'question',
+              question: input.question.text,
+              options: input.question.options,
+              allowOwn: true,
+            }
+          : null;
       await tx.insert(requestMessages).values({
         requestId: r.id,
         kind: 'commander',

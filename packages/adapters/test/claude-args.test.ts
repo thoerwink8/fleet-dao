@@ -188,9 +188,10 @@ describe('调工具前那条钩子经 --settings 带上', { timeout: 0 }, () => 
   it.skipIf(!hasSh)('真跑仓里这份：正常命令放行（0），规矩拦的拦下（2，原话给模型）', () => {
     const command = hookCommand(pretoolSettings());
     expect(runHook(command, bash('git status'))).toEqual({ status: 0, stderr: '' });
-    const blocked = runHook(command, bash('reclaude org use solo'));
+    // 反引号那条哪台机器都拦（切号那条要真查本机有没有 Claude 进程，CI 上没有会放行）
+    const blocked = runHook(command, bash('echo `date`'));
     expect(blocked.status).toBe(2);
-    expect(blocked.stderr).toContain('reclaude');
+    expect(blocked.stderr).toContain('反引号');
     expect(blocked.stderr).not.toContain('没跑成');
     // 读密钥文件：命令和 Read 都拦，指到安全查看脚本
     const device = `/home/u/.recl${'aude'}/device.json`;
