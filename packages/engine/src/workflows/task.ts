@@ -68,6 +68,8 @@
 // - 自测（决定 0093，patched('self-check')）：会话交活、交付核对过了，推之前引擎在会话的树里跑仓的测试命令和 tsc（selfCheck）。
 //   红了把精炼输出续进同一个会话再改一次，再测一次就推（不论红绿，交给 CI）；没跑成照旧推。最近一次的输出交给冷验收
 //   （ColdVerifyInput.testOutput，只给和验收的头对得上的那一份）。
+// - 交活没提交续一次（#2722，patched('commit-nudge-same-round')，nudgeCommit）：会话收场时没提交、或树里有剩（常见是把测试丢到后台就结束了），
+//   读完交付先续同一个会话一次让它提交，不算一轮；续不上（planResume 判开新会话）就不续。续了还没交干净，照旧返工进下一轮。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -91,12 +93,13 @@ import { activitiesFor, limitsFor } from './kit.ts';
 import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
 import { TaskRuntime } from './task-runtime.ts';
-import { writeSession } from './task-session.ts';
+import { planResume, writeSession } from './task-session.ts';
 import {
   Abandoned,
   AutoEscape,
   avoidableFamily,
   ConflictHandoff,
+  commitNudgeFeedback,
   conflictFilesForHandoff,
   conflictHandoffLine,
   EMPTY_DELIVERY_CODE,
@@ -425,6 +428,7 @@ class TaskFlow {
     await writeSession(rt, brief, tier, wt);
 
     let delivery = await this.readDelivery(wt);
+    delivery = await this.nudgeCommit(brief, tier, wt, delivery);
     // 自测：交付核对过了再跑（没提交、有冲突的照旧返工，不白跑测试）
     if (this.deliveredClean(delivery) && patched('self-check')) {
       const first = await this.selfCheck(wt, delivery.head);
@@ -599,6 +603,36 @@ class TaskFlow {
         baseSha: rt.since,
       }),
     );
+  }
+
+  /**
+   * 交活时没提交、或树里有剩（#2722，patched('commit-nudge-same-round')）：续刚收场的那个会话一次，让它把改动提交了。
+   * 不算一轮、不算连着续的次数，一轮只续一次；续了还没交干净，照旧走下面的返工。有冲突标记的不续（走冲突那条）。
+   * 先问续不续得上（planResume，按刚跑的那条路由）：续不上就不在这一轮另开会话，照旧返工。老历史没有这个标记，不续。
+   */
+  private async nudgeCommit(
+    brief: TaskBrief,
+    tier: TierDecision,
+    wt: Worktree,
+    delivery: DeliveryRead,
+  ): Promise<DeliveryRead> {
+    const rt = this.rt;
+    const leftover = delivery.leftover ?? [];
+    if (delivery.commits > 0 && leftover.length === 0) return delivery;
+    if ((delivery.conflicts ?? []).length > 0) return delivery;
+    const last = rt.lastSession;
+    const route = rt.lastImplementRoute;
+    if (!last || !route || !patched('commit-nudge-same-round')) return delivery;
+    const from = { previous: { runId: last.runId }, worktreePath: last.worktreePath };
+    const plan = await planResume(rt, from, route, wt.path);
+    if (plan.kind !== 'resume') return delivery;
+    const streak = rt.resumeStreak;
+    rt.feedback = [commitNudgeFeedback(delivery.commits, leftover)];
+    rt.resumeFrom = from;
+    await rt.advance('implement', `第 ${rt.round} 轮：会话交活时没提交完，续进会话补提交一次`);
+    await writeSession(rt, brief, tier, wt);
+    rt.resumeStreak = streak;
+    return this.readDelivery(wt);
   }
 
   /** 交付核对过得去：有新提交、树里没剩没提交的、没有冲突标记。 */
