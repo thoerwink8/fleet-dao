@@ -317,7 +317,7 @@ describe('看板与任务', () => {
 
 describe('发给工作流的信号', () => {
   // task12 在 example/canary 仓，issue 号 12（dev-fixtures.ts）：命令按任务发，编号查库拼成引擎起的那条任务工作流（task:<仓>#<号>）。
-  // 信号名只有引擎真有人听的三个（继续、放弃、暂停）；整条链的钉子在 signal-chain.test.ts。
+  // 继续再带一发路由叫醒（等选路不看 taskContinue）。整条链的钉子在 signal-chain.test.ts。
   const TASK12_WORKFLOW_ID = taskWorkflowId({ owner: 'example', name: 'canary' }, 12);
 
   it('继续、叫停：发给这个任务的任务工作流，并写操作记录', async () => {
@@ -329,10 +329,15 @@ describe('发给工作流的信号', () => {
     }
     expect(h.signals.map((x) => [x.workflowId, x.signal.name])).toEqual([
       [TASK12_WORKFLOW_ID, 'taskContinue'],
+      [TASK12_WORKFLOW_ID, 'taskRouteWake'],
       [TASK12_WORKFLOW_ID, 'taskAbandon'],
     ]);
     expect(h.signals[0]?.signal).toMatchObject({ by: DEV_USER_ID });
-    expect(h.store.data.audit.slice(-2).map((a) => a.action)).toEqual(['task.resume', 'task.stop']);
+    expect(h.store.data.audit.slice(-3).map((a) => a.action)).toEqual([
+      'task.resume',
+      'task.routeWake',
+      'task.stop',
+    ]);
   });
 
   it('换路由：引擎没有这个动作，409 action_not_supported，不写操作记录、不发信号', async () => {
@@ -427,7 +432,7 @@ describe('发给工作流的信号', () => {
       write('POST', s, { action: 'resume' }),
     );
     expect(resume.status).toBe(200);
-    expect(h.signals.map((x) => x.signal.name)).toEqual(['taskContinue']);
+    expect(h.signals.map((x) => x.signal.name)).toEqual(['taskContinue', 'taskRouteWake']);
   });
 
   it('任务已结束、工作流不在了：409；先记后做——发起那条在前，没做成再追加一条 ok=false', async () => {
