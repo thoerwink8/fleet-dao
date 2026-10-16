@@ -44,6 +44,7 @@ import {
   reservePoolSlot,
   resolveAlertWithReason,
   routeFactsForPurpose,
+  runCountOfTask,
   saveTaskSnapshot,
   setChannelFallback,
   type TaskRoutePin,
@@ -659,6 +660,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       // 验收这一段的派工档（#2725 能力下限）：工作流不带，按这张单最近一次动手记下的档（runs.tier）从库里读；
       // 读不到照抛，没记过档的（老单、还没动手）为空 = 不设下限
       let taskTier: RouteTier | undefined;
+      // 加权抽签的种子（决定 0104）：单号:段:第几次选。第几次 = 这一段已经起过几次会话加一：同一次重选结果不变，换路由重来换一个数
+      let allocateSeed: string | undefined;
       /** 读一遍事实、选一次。要预占时，选中的池在预占那一下被别的单占满了抛 SlotTaken（这一次的结论不作数）。 */
       const pickOnce = async (): Promise<PickRouteResult> => {
         const now = clock();
@@ -735,6 +738,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...orgFacts,
           ...(input.uiWork ? { uiWork: true } : {}),
           ...(tier ? { tier } : {}),
+          ...(allocateSeed ? { allocateSeed } : {}),
           // 人给这张单指定了模型：人的指令，不拿能力下限驳回（#2725）
           ...(pin ? { floorWaived: `人在驾驶舱给这张单指定了 ${pinLabel(pin)}` } : {}),
           ...(tracks.modelTracks ? { modelTracks: tracks.modelTracks } : {}),
@@ -879,6 +883,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         );
       }
       pin = pinnedOf(await readTaskRoutePin(db, input.taskId, reserve.segment));
+      allocateSeed = `${input.taskId}:${reserve.segment}:${(await runCountOfTask(db, { taskId: input.taskId, segment: reserve.segment })) + 1}`;
       if (input.stage === SEGMENT_STAGE.verify && !input.tier) {
         taskTier =
           (await latestRunOfTask(db, { taskId: input.taskId, segment: 'manual' }))?.tier ?? undefined;

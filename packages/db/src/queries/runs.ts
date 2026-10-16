@@ -201,6 +201,18 @@ export async function latestRunOfTask(
   return row ?? null;
 }
 
+/** 一张单某一段起过几次会话（加权抽签的「第几次选」用，决定 0104）：只认 task_id 对得上的。读不到照抛。 */
+export async function runCountOfTask(
+  db: Db,
+  input: { taskId: string; segment: 'scope' | 'manual' | 'verify' },
+): Promise<number> {
+  const [row] = await db
+    .select({ n: sql<string>`count(*)` })
+    .from(runs)
+    .where(and(eq(runs.taskId, input.taskId), eq(runs.segment, input.segment)));
+  return Number(row?.n ?? 0);
+}
+
 /**
  * 一张单到现在花掉的 token（单任务预算用，决定 0093）：task_id 对得上的动手、验收两段，输入、输出、缓存读、缓存写四样相加。
  * 四样都还空着的行（被引擎叫停、超时杀，或中转会话的用量稍后才补）算不出确数：按这张单已经记到用量的几行的每分钟速率（合并了

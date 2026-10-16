@@ -297,6 +297,11 @@ export interface ChooseRouteInput {
    * 探不探、探哪个由它定。不给 = 不探索（老输入、对账这类没有单的选路）。
    */
   exploreSeed?: string;
+  /**
+   * 加权抽签的种子（决定 0104）：「单号:段:第几次选」。按它算出 [0, 1) 里的数（rank.ts 的 seedDraw），同一单同一段同一次重算不变；
+   * 换路由重选算第几次加一。不给就用 draw，draw 也没有就取权重最大的。
+   */
+  allocateSeed?: string;
   now: string;
   /** 缺的项取默认。trackScore、pace 可以只给要改的那几项。 */
   policy?: RoutingPolicyInput;
