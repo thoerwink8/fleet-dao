@@ -774,6 +774,8 @@ export function useNotifications(status: 'open' | 'all' = 'open', limit: number 
       limit === NOTIFICATIONS_PAGE ? keys.notifications(status) : [...keys.notifications(status), limit],
     queryFn: () => api.notifications({ status, limit }),
     ...poll,
+    // 进页前外壳已把通知读进缓存，5 秒内仍算新鲜就不会再读；后端若刚断，页面拿旧数据当读成了，不写「没读成」，所以进页一律重读。
+    refetchOnMount: 'always',
     // 只有「多看几条」（同一状态、limit 变大）才留着上一份，切到另一个状态不拿旧列表顶。
     placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === status ? prev : undefined),
   });
