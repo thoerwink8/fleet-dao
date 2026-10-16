@@ -2,6 +2,7 @@
 // 没接上（内存版）写 unavailable，读不到回 503 写明没读成——都不回空列表冒充「都没配」。
 import {
   clearReservations,
+  models,
   poolReservations,
   pools,
   quotaWindows,
@@ -379,5 +380,23 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
     expect(catalogRoute).not.toHaveProperty('probeTier');
     expect(catalogRoute).not.toHaveProperty('probeNextAt');
     expect(catalogRoute).not.toHaveProperty('probeKind');
+  });
+
+  it('强弱档（#2691）：路由目录和路由两层的模型都带 strength；没标的不给', async () => {
+    const h = await pgHarness(t, { routingLayers: pgRoutingLayers(t.db) });
+    current = h;
+    await setLayers({ execute: ['opus-5.5', 'kimi-k3'] }, SAMPLE_MODELS);
+    await t.db.update(models).set({ strength: 'strong' }).where(eq(models.id, 'opus-5.5'));
+    const { cookie } = await h.login();
+
+    const catalog = RoutingResponse.parse(
+      await (await h.cockpit.request('/api/routing', { headers: { cookie } })).json(),
+    );
+    expect(catalog.models.find((m) => m.id === 'opus-5.5')?.strength).toBe('strong');
+    expect(catalog.models.find((m) => m.id === 'kimi-k3')).not.toHaveProperty('strength');
+
+    const execute = (await layers(h, cookie)).purposes.find((p) => p.purpose === 'execute');
+    expect(execute?.models.find((m) => m.modelId === 'opus-5.5')?.strength).toBe('strong');
+    expect(execute?.models.find((m) => m.modelId === 'kimi-k3')).not.toHaveProperty('strength');
   });
 });

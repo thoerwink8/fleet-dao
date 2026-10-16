@@ -54,6 +54,7 @@ import { SearchInput } from './layout/search-input';
 import { Section } from './layout/section';
 import { StatusBadge } from './layout/status-badge';
 import { Tag, type TagTone } from './layout/tag';
+import { ModelStrengthBadge } from './model-strength-badge';
 import { ChannelSwitch, FounderOnlyBadge, ModelSwitch } from './routing-edit';
 import { RouteEffortInline } from './routing-efforts';
 import { KindChip, KindDot, useKindEnv } from './routing-kinds';
@@ -590,7 +591,12 @@ function CatalogRow({
       name={e.displayName}
       quiet={kind === null || kind === 'retired'}
       className={cn(nested && 'pl-10')}
-      badges={<FounderOnlyBadge modelId={e.modelId} family={e.family} displayName={e.displayName} />}
+      badges={
+        <>
+          <ModelStrengthBadge strength={e.strength} />
+          <FounderOnlyBadge modelId={e.modelId} family={e.family} displayName={e.displayName} />
+        </>
+      }
       status={
         kind !== null ? (
           <KindChip kind={kind} variant="dot" />

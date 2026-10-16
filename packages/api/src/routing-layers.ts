@@ -84,6 +84,7 @@ export function routingLayersView(
         modelId: m.modelId,
         displayName: model?.displayName ?? m.modelId,
         ...(family ? { family } : {}),
+        ...(model?.strength ? { strength: model.strength } : {}),
         ...(m.effort ? { effort: m.effort } : {}),
         verdict: m.verdict,
         routes: m.routes.map((r) => routeView(r, channels)),
