@@ -1,6 +1,6 @@
 // GitHub 对账（#654）：每天一轮（.github/workflows/github-audit.yml），随时也能手跑 pnpm github:audit。
 // 查的是「GitHub 上的单子现在的样子有没有断」：开着的单没有类别标签、母单的子单都关了它还开着、子单挂在已关的母单下面、
-// 母单标签和子单对不上、版本里程碑说明里的先后和实际对不上、合并了的 PR 在「需求」栏 Refs 着它而它还开着（#995 拍 1 的 B，兜底：
+// 母单标签和子单对不上、版本里程碑说明里的先后认不出、合并了的 PR 在「需求」栏 Refs 着它而它还开着（#995 拍 1 的 B，兜底：
 // 合并时的自动收口 close-on-merge.ts 没收成、或当时还有别的 PR 挂着它的）。从前这些靠每天的关单对账、版本快照生成时顺带发现，那两样都删了
 // （单子是需求唯一的家，关单证据在 pnpm issue:close 那一步查），只留这一道定时的；查出来的每一条都是要有人去修的，不是通知。
 // 结果随单子开关、随时间变，所以不进 PR 的必过检查（#87），只在定时任务里跑，红了不挡任何 PR。
@@ -16,6 +16,7 @@ import type { GitHubMilestoneWriter, GitHubReader, PlanIssue, PullBody } from '.
 import { isKindLabel, MOTHER_LABEL } from './labels.ts';
 import { type Plan, PlanProblem, parseOrder, pruneOrder, readPlan } from './plan-view.ts';
 import { issueColumnLinks } from './pr-columns.ts';
+import { addDays, beijingDate, dueDateOf } from './version-cut.ts';
 
 /** 母单刚开、子单还没挂上的宽限：超过这么久还是空的才报。 */
 const EMPTY_MOTHER_GRACE_MS = 24 * 3_600_000;
@@ -28,11 +29,15 @@ export interface AuditResult {
   checked: { issues: number; versions: number };
   /** 这次顺手从版本先后里清掉的已关号（#2393）：哪个里程碑、清了哪几个。没清的版本不在里面。 */
   pruned: { milestone: string; removed: number[] }[];
+  /** 这一轮读到的开着的单（对账红了开单时找同名的那张用）；没读到是 undefined。 */
+  open: PlanIssue[] | undefined;
+  /** 恰好一个开着的版本时它的里程碑号；否则 undefined。 */
+  currentMilestone: number | undefined;
 }
 
 /**
  * writer 给了才会改里程碑说明（清先后里已关或已挪走的号）；不给就只读，不改。
- * 开着的单读不到时不清（不拿读不到当成全关了），那一样已经记在 notQueried 里。
+ * 版本和先后读不到时不清（不拿读不到当成全关了），那一样已经记在 notQueried 里。
  */
 export async function auditGitHub(
   gh: GitHubReader,
@@ -61,7 +66,8 @@ export async function auditGitHub(
       notQueried.push(`接口没给 ${what} 的子单数，母单和子单对不对没核`);
     }
     try {
-      findings.push(...mergedButOpenFindings(open, await gh.recentPulls()));
+      const pulls = await gh.recentPulls();
+      findings.push(...mergedButOpenFindings(open, pulls), ...pullMilestoneFindings(pulls));
     } catch (e) {
       notQueried.push(`读不到最近的 PR（${message(e)}），合并了却还开着的单没核`);
     }
@@ -72,44 +78,33 @@ export async function auditGitHub(
     }
   }
 
+  // 开着却没排进先后的单不报：拉单、发版车本来就把没排进先后的排在后面照样拉（#2683 删了那一条）
   let plan: Plan | undefined;
   try {
     plan = await readPlan(gh);
     checked.versions = plan.open.length + plan.closed.length;
-    for (const group of plan.loose) {
-      for (const i of group.issues) {
-        findings.push({
-          issue: i.number,
-          key: `loose:${i.number}:${group.milestone}`,
-          text: `#${i.number} 开着，挂在「${group.milestone}」里却没排进先后：把它写进这个版本里程碑说明里 fleet:order 那段（它是子单就挂到母单下面），不做了就关掉`,
-        });
-      }
-    }
+    const v = versionFindings(plan, now);
+    findings.push(...v.found);
+    notQueried.push(...v.unknown);
   } catch (e) {
     if (e instanceof PlanProblem)
       findings.push({ issue: undefined, key: `plan:${e.message}`, text: e.message });
     else notQueried.push(`读不到版本和先后（${message(e)}），里程碑说明里的先后没核`);
   }
-  if (plan !== undefined && open !== undefined && writer !== undefined) {
-    await pruneClosedFromOrders(
-      plan,
-      new Set(open.map((i) => i.number)),
-      writer,
-      pruned,
-      findings,
-      notQueried,
-    );
+  if (plan !== undefined && writer !== undefined) {
+    await pruneClosedFromOrders(plan, writer, pruned, findings, notQueried);
   }
-  return { findings, notQueried, checked, pruned };
+  const currentMilestone = plan?.open.length === 1 ? plan.open[0]?.milestone.number : undefined;
+  return { findings, notQueried, checked, pruned, open, currentMilestone };
 }
 
 /**
  * 开着的版本的先后里有已关或已挪走的号：直接改掉说明（#2393，开单那一步清得到的是开单时的，这里兜住中间关掉的）。
+ * 按「这个版本里开着的单」清（#2683）：挪去别的版本还开着的也清掉，不按全仓开着的单算。
  * 改回来的说明要再认一遍、先后恰好是我们要写的，不拿「接口回 200」当改好了。改不成记「没查成」；清光会留空先后的不动，出一条 finding。
  */
 async function pruneClosedFromOrders(
   plan: Plan,
-  open: ReadonlySet<number>,
   writer: GitHubMilestoneWriter,
   pruned: AuditResult['pruned'],
   findings: Finding[],
@@ -117,6 +112,7 @@ async function pruneClosedFromOrders(
 ): Promise<void> {
   for (const v of plan.open) {
     const m = v.milestone;
+    const open = new Set(v.issues.filter((i) => i.state === 'open').map((i) => i.number));
     const cut = pruneOrder(m.description, open);
     if (!cut.ok) {
       findings.push({
@@ -140,6 +136,63 @@ async function pruneClosedFromOrders(
       );
     }
   }
+}
+
+/**
+ * 版本一周一版、到期自动收口（version-cut.ts，#2683）的兜底：开着的 v<N> 恰好一个、带到期日、过了到期日超过一天还没收口、
+ * 已关的版本还挂着开着的单。收口任务没跑成、有人手工动了里程碑，这里每天报出来。
+ */
+function versionFindings(plan: Plan, now: Date): { found: Finding[]; unknown: string[] } {
+  const found: Finding[] = [];
+  const unknown: string[] = [];
+  if (plan.open.length !== 1) {
+    const list = plan.open.map((v) => `「${v.milestone.title}」`).join('') || '一个也没有';
+    found.push({
+      issue: undefined,
+      key: `versions-open:${plan.open.map((v) => v.milestone.number).join(',')}`,
+      text: `开着的 v<N> 版本该恰好一个，现在是 ${plan.open.length} 个（${list}）：多开的关掉（开着的单挪到留下的那个），一个都没有就等收口任务开一版或手动跑 .github/workflows/github-audit.yml 的 version-cut`,
+    });
+  }
+  const [current] = plan.open;
+  if (plan.open.length === 1 && current) {
+    const due = dueDateOf(current.milestone);
+    const title = current.milestone.title;
+    if (due === undefined) unknown.push(`接口没给「${title}」的到期日（due_on），到没到期没核`);
+    else if (due === null) {
+      found.push({
+        issue: undefined,
+        key: `version-no-due:${current.milestone.number}`,
+        text: `当前版本「${title}」没设到期日：在里程碑页上设一个（一周一版），不设就不会到期自动收口`,
+      });
+    } else if (beijingDate(now) > addDays(due, 1)) {
+      found.push({
+        issue: undefined,
+        key: `version-overdue:${current.milestone.number}`,
+        text: `当前版本「${title}」${due} 就到期了，过了一天多还没收口：看 .github/workflows/github-audit.yml 的 version-cut 任务为什么没收成，修好手动触发一次`,
+      });
+    }
+  }
+  for (const v of plan.closed) {
+    const left = v.issues.filter((i) => i.state === 'open');
+    if (left.length === 0) continue;
+    found.push({
+      issue: undefined,
+      key: `closed-version-open:${v.milestone.number}:${left.map((i) => i.number).join(',')}`,
+      text: `已关的版本「${v.milestone.title}」还挂着开着的单 ${left.map((i) => `#${i.number}`).join('、')}：收口任务每天会挪到当前版本；连着报就看它为什么没挪成`,
+    });
+  }
+  return { found, unknown };
+}
+
+/** 开着的 PR 挂了里程碑（决定 0015：PR 不挂，里程碑页只数单子）。 */
+function pullMilestoneFindings(pulls: readonly PullBody[]): Finding[] {
+  return pulls
+    .filter((p) => p.state === 'open' && typeof p.milestone === 'string')
+    .map((p) => ({
+      issue: undefined,
+      key: `pr-milestone:${p.number}`,
+      text: `开着的 PR #${p.number} 挂了里程碑「${p.milestone}」：PR 不挂里程碑（里程碑页只数单子），摘掉（gh pr edit ${p.number} --remove-milestone）`,
+    }));
 }
 
 /** 类别标签（需求、缺陷、杂项）恰好一个。 */

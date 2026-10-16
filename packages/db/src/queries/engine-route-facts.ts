@@ -1,5 +1,5 @@
 // 选路事实：按路由两层读一个用途下每条路由的池、模型、探针、额度窗、在途和占位、挡因。
-import type { HostId, OrgKind, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
+import type { HostId, ModelStrength, OrgKind, QuotaWindowKind, StageKind } from '@fleet-dao/shared';
 import { eq, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { flattenRoutingLayers, routingLayers } from '../routing-layers.ts';
@@ -40,6 +40,8 @@ export interface PurposeRouteFacts {
     poolOrgKind: OrgKind | null;
     modelId: string;
     modelName: string;
+    /** 模型的强弱档（models.strength，决定 0099）；没标为 null。 */
+    modelStrength: ModelStrength | null;
     family: string;
     hostId: HostId;
     upstreamModel: string | null;
@@ -107,6 +109,7 @@ export async function routeFactsForPurpose(
         poolRunAsUser: pools.runAsUser,
         poolOrgKind: pools.orgKind,
         modelName: models.displayName,
+        modelStrength: models.strength,
         channelName: channels.name,
       })
       .from(routes)
@@ -131,6 +134,7 @@ export async function routeFactsForPurpose(
       poolOrgKind: detail.poolOrgKind,
       modelId: c.modelId,
       modelName: detail.modelName,
+      modelStrength: detail.modelStrength,
       family: c.family,
       hostId: c.hostId,
       upstreamModel: detail.upstreamModel,

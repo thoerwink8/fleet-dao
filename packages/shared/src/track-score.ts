@@ -1,3 +1,11 @@
+/**
+ * 模型的强弱档（models.strength，目录 deploy/catalog.json 的 strength）：strong 强 / standard 标准 / light 轻。
+ * 和单子的派工档（fast / medium / heavyweight，runs.tier）是两回事：派工档说这张单多难，强弱档说这个模型多强。
+ * 没标（null）= 选路照以前（不按强弱档挪位、不同档分流）。
+ */
+export const MODEL_STRENGTHS = ['strong', 'standard', 'light'] as const;
+export type ModelStrength = (typeof MODEL_STRENGTHS)[number];
+
 /** 收缩用的先验强度：往本档平均拉这么多单。和引擎默认选路策略 trackScore.priorTasks 同一个数。 */
 export const TRACK_PRIOR_TASKS = 4;
 

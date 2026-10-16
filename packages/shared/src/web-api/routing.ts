@@ -2,6 +2,7 @@
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
 import { SESSION_EFFORTS } from '../effort.ts';
+import { MODEL_STRENGTHS } from '../track-score.ts';
 import {
   BillingKindSchema,
   HostIdSchema,
@@ -42,6 +43,8 @@ export const ModelSchema = z.object({
   family: z.string(),
   displayName: z.string(),
   retiredAt: Time.optional(),
+  /** 强弱档（目录独占）；没标不给。 */
+  strength: z.enum(MODEL_STRENGTHS).optional(),
 });
 
 /** 探针钟多久走一次（design 第九节「路由探针」：和对账补漏错开；真探间隔按活跃三档，见引擎 jobs/route-probe.ts）。 */
@@ -187,6 +190,8 @@ export const RoutingLayerModelSchema = z.object({
   displayName: z.string(),
   /** 目录里找不到、下面也没有路由时不给。 */
   family: z.string().optional(),
+  /** 强弱档（目录独占）；没标、目录里找不到不给。 */
+  strength: z.enum(MODEL_STRENGTHS).optional(),
   /** 下面有一条 live 就 live；没有 live、有 unknown 就 unknown；全 dead 或一条都没有就 dead。 */
   verdict: LivenessVerdictSchema,
   /** 按这个模型下路由的先后。空 = 一条都没有（用途的 problems 里写明）。 */

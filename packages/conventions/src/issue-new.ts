@@ -1,8 +1,8 @@
-// 开单脚本：pnpm issue:new --kind 需求 --milestone v1 --title "…" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]
+// 开单脚本：pnpm issue:new --kind 需求 --milestone 当前 --title "…" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]
 // [--allow-pr-body-acceptance "<理由>"]
 // 缺类别、里程碑，或正文里没有写了字的「## 怎么算做完」就不开（决定 0071：以后要做的事得是一张
 // 带怎么算做完和里程碑的 issue）。经 gh 开单时一次带上标签和里程碑（gh 先把名字换成编号再建单，对不上就一张也不建）。
-// 里程碑＝版本（替代 P 阶段）：--milestone 认全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
+// 里程碑＝版本（替代 P 阶段，一周一版、到期自动收口）：--milestone 认「当前」（开着的那个 v<N>）、全名、v<N> 简写、旧的 P<N> 简写，或「未排期」——
 // 未排期时不挂里程碑（建单不带 --milestone），结果里 milestone 记「未排期」。--mother 给这张单多贴「母单」标签
 // （一组能一起验收的子单，用 GitHub 自带子议题挂在它下面）。--parent 开的是子单：先不带里程碑建单、挂到母单下面，
 // 再挂里程碑——接活派的是独立单（design 第九节「在哪能做与接活开关」，母单、子单不派），带着当前版本先建、
@@ -90,9 +90,9 @@ export interface IssueNewResult {
 }
 
 export const USAGE =
-  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone v1 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]' +
+  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone 当前 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]' +
   ' [--allow-pr-body-acceptance "<理由>"]' +
-  '（--milestone 认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
+  '（--milestone 写「当前」挂开着的那个版本（一周一版、到期自动收口，别写死 v<N>），也认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
   '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
   '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派；' +
   '挂版本的母单、单独的单开完自动排进版本里程碑说明的先后末尾，--order-after 插在那张后面；子单、未排期不排；' +
@@ -101,6 +101,8 @@ export const USAGE =
 
 /** --milestone 写这个值：这张单没有版本（未排期）。不去查 GitHub 的里程碑列表，建单也不带 --milestone。 */
 const UNSCHEDULED = '未排期';
+/** --milestone 写这个值：挂开着的那个 v<N> 版本（一周一版、到期自动收口，写死 v<N> 过一周就关了）。 */
+const CURRENT = '当前';
 
 /** GitHub 一张单的正文最多 65536 字；留一点余量，超了在这里就拒开，不让 gh 回一句看不懂的错。 */
 const BODY_LIMIT = 65_000;
@@ -544,6 +546,16 @@ async function resolveMilestone(gh: Gh, want: string): Promise<Picked> {
   } catch (e) {
     throw new Error(`gh 读回来的里程碑认不出（${message(e)}），单没开。`);
   }
+  if (want === CURRENT) {
+    // 「当前」＝开着的那个 v<N>（一周一版、到期自动收口，#2683）：不是恰好一个就不猜
+    const versions = items.filter((m) => milestoneVersion(m.title) !== undefined);
+    const [only, ...more] = versions;
+    if (only !== undefined && more.length === 0) return only;
+    const list = versions.map((m) => m.title).join('、') || '一个也没有';
+    throw new Error(
+      `--milestone 当前：开着的 v<N> 版本该恰好一个，现在是 ${versions.length} 个（${list}），单没开。`,
+    );
+  }
   const exact = items.filter((m) => m.title === want);
   const phase = /^P\d+$/.test(want) ? Number(want.slice(1)) : undefined;
   const version = /^v\d+$/.test(want) ? Number(want.slice(1)) : undefined;
@@ -558,7 +570,11 @@ async function resolveMilestone(gh: Gh, want: string): Promise<Picked> {
   if (only !== undefined && more.length === 0) return only;
   if (only === undefined) {
     const open = items.map((m) => m.title).join('、') || '（一个也没有）';
-    throw new Error(`没有叫「${want}」的开放里程碑，单没开：开放的有 ${open}。`);
+    const hint =
+      version !== undefined
+        ? `v${version} 不是开着的版本（一周一版、到期自动收口关掉了）：要挂当前版本写 --milestone 当前。`
+        : '';
+    throw new Error(`没有叫「${want}」的开放里程碑，单没开：开放的有 ${open}。${hint}`);
   }
   throw new Error(
     `「${want}」对上了好几个里程碑（${matches.map((m) => m.title).join('、')}），单没开：写全名。`,
@@ -620,7 +636,7 @@ async function orderIntoVersion(
   } catch (e) {
     throw unordered(`gh 读回来的里程碑认不出（${message(e)}）`);
   }
-  const open = await openIssueNumbers(gh);
+  const open = await openIssueNumbers(gh, a.version.title);
   const added = addToOrder(description, a.number, a.after, open);
   if (!added.ok) throw unordered(added.problem);
   if (added.changed) {
@@ -647,9 +663,9 @@ async function orderIntoVersion(
 /** 开单回显里「排进先后」那一句：读到开着的单就只数开着的；没读到就明说没清、数里含已关的。 */
 export function describeOrder(o: NonNullable<IssueNewResult['order']>): string {
   if (!o.openKnown) {
-    return `排进先后第 ${o.position} 位（没读到开着的单，没清已关的；先后里共 ${o.count} 张，含已关的）`;
+    return `排进先后第 ${o.position} 位（没读到本版开着的单，没清已关、挪走的；先后里共 ${o.count} 张，含已关的）`;
   }
-  const cleared = o.removed.length > 0 ? `，顺手清掉 ${o.removed.length} 张已关的` : '';
+  const cleared = o.removed.length > 0 ? `，顺手清掉 ${o.removed.length} 张已关或挪走的` : '';
   return `排进先后第 ${o.position} 位（开着的共 ${o.count} 张）${cleared}`;
 }
 
@@ -657,15 +673,17 @@ export function describeOrder(o: NonNullable<IssueNewResult['order']>): string {
 const OPEN_LIST_LIMIT = 1000;
 
 /**
- * 开着的单号（不含 PR），用来清先后里已关的号（#2393）。读不到、认不出、空（刚开了一张，不可能一张都没有）、读满了都回
- * undefined：调用方照旧追加、一个号也不清，不拿「没读到」当成「全关了」。
+ * 这个版本里开着的单号（不含 PR），用来清先后里已关、已挪到别的版本的号（#2393、#2683：按全仓开着的清，挪走还开着的清不掉）。
+ * 读不到、认不出、空（刚开了一张，不可能一张都没有）、读满了都回 undefined：调用方照旧追加、一个号也不清，不拿「没读到」当成「全关了」。
  */
-async function openIssueNumbers(gh: Gh): Promise<Set<number> | undefined> {
+async function openIssueNumbers(gh: Gh, milestone: string): Promise<Set<number> | undefined> {
   const r = await gh([
     'issue',
     'list',
     '--state',
     'open',
+    '--milestone',
+    milestone,
     '--limit',
     String(OPEN_LIST_LIMIT),
     '--json',

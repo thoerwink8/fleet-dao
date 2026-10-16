@@ -977,6 +977,7 @@ export function realPortsFromEnv(
       db,
       user: sessionUser,
       meterDir: mirasim.meterDir,
+      trafficDir: mirasim.ledgerDir,
       meterFs: mirasim.meterFs,
     }),
     // 命令行工具版本（#1969）：probe 读在用版本，引擎进程拉官方最新。不升级。

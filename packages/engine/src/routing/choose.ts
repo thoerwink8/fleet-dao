@@ -10,7 +10,15 @@ import { blocksFor, type FilterContext, familyKey } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
-import { type ModelScore, type Ranked, rank, scoreOf, tierScores } from './rank.ts';
+import {
+  type ModelScore,
+  type Ranked,
+  rank,
+  type StrengthOptions,
+  scoreOf,
+  seedDraw,
+  tierScores,
+} from './rank.ts';
 import type {
   AllOpenCheck,
   Block,
@@ -59,13 +67,15 @@ function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
   const rows = [...input.order]
     .sort((a, b) => a.position - b.position)
     .map((entry) => ({ route: factsOf.get(entry.routeId) as RouteFacts, entry }));
+  const scores = scoresOf(input, ctx);
   const ranked = rank(
     rows,
     input.stagePinned,
     ctx.policy,
     ctx.now,
-    scoresOf(input, ctx),
+    scores,
     STAGE_NAMES[input.stage],
+    strengthOf(input, ctx, scores),
   );
   return ranked.map((item) => {
     const blocks = blocksFor(item.route, item.entry, ctx);
@@ -88,6 +98,30 @@ function scoresOf(input: ChooseRouteInput, ctx: FilterContext): Map<string, Mode
   }
   if (!input.modelTracks) return undefined;
   return new Map(input.modelTracks.map((t) => [t.modelId, scoreOf(t, ctx.policy)]));
+}
+
+/**
+ * 先给强档、探索（决定 0099）：只在动手（trackScore.stages）、给了派工档时。探索还要有单号做种子、读成了战绩
+ * （不知道谁样本少就不探）。同档分流不经这里（rank 按 policy.strength.pool 做，任何用途都做）。
+ */
+function strengthOf(
+  input: ChooseRouteInput,
+  ctx: FilterContext,
+  scores: ReadonlyMap<string, ModelScore> | undefined,
+): StrengthOptions | undefined {
+  const { trackScore: ts, strength: st } = ctx.policy;
+  const tier = input.tier;
+  if (!tier || !ts.stages.includes(input.stage)) return undefined;
+  const seed = input.exploreSeed;
+  const explore =
+    seed && scores && st.explore[tier] > 0
+      ? {
+          draw: seedDraw(seed),
+          ratio: st.explore[tier],
+          samples: new Map([...scores].map(([m, s]) => [m, s.track.tasks])),
+        }
+      : null;
+  return { tier, strongFirst: st.strongFirstTiers.includes(tier), explore };
 }
 
 const isPoor = (j: Judged) => j.item.nudges.some((n) => n.kind === 'poor-one-round');
@@ -216,6 +250,10 @@ function whyFirst(stageName: string, chosen: Judged, judged: Judged[]): string {
   }
   const note = quotaNote(item.route);
   if (note) parts.push(note);
+  // 因强弱档、探索、同档分流挪了位（决定 0099）：各写一句
+  for (const n of item.nudges) {
+    if (n.kind === 'explore' || n.kind === 'strength-first' || n.kind === 'strength-pool') parts.push(n.text);
+  }
   const track = item.nudges.find((n) => n.kind === 'track-score' || n.kind === 'poor-one-round');
   if (track)
     parts.push(track.kind === 'poor-one-round' ? `${track.text}；别的都派不了，这次兜底派它` : track.text);
@@ -235,6 +273,17 @@ function whyFirst(stageName: string, chosen: Judged, judged: Judged[]): string {
     const shown = notes.slice(0, 2).join('；');
     parts.push(notes.length > 2 ? `${shown}；另有 ${notes.length - 2} 条也没派` : shown);
   }
+  // 强档让位的模型人排在它后面时上面那段数不到：单写一句，每个模型一句
+  const yields = new Set(
+    judged
+      .filter((j) => j !== chosen && !passed.includes(j))
+      .flatMap((j) =>
+        j.item.nudges
+          .filter((n) => n.kind === 'strength-yield')
+          .map((n) => `${j.item.route.modelId}：${n.text}`),
+      ),
+  );
+  parts.push(...yields);
   return parts.join('；');
 }
 

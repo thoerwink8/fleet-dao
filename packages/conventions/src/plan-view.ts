@@ -209,15 +209,18 @@ export interface Plan {
   children: ReadonlyMap<number, PlanIssue[]>;
   /** 子单 → 母单。 */
   parents: ReadonlyMap<number, number>;
-  /** 开着的版本里开着、却没排进先后（也不在排了的单下面）的单，按版本。打印时当提醒，对账按单留言。 */
-  loose: { milestone: string; issues: PlanIssue[] }[];
+  /**
+   * 开着的版本先后里写着、却不是这个版本里的单（挪去了别的版本、未排期，或者是 PR）：读的时候跳过，不整个报错（#2683）；
+   * 每天对账按「这个版本里开着的单」把它们从说明里清掉。按版本，没有的版本不在里面。
+   */
+  dropped: { milestone: string; numbers: number[] }[];
 }
 
 /** 给人看的提醒（一个版本一句），不挡打印。 */
 export function planNotes(p: Plan): string[] {
-  return p.loose.map(
+  return p.dropped.map(
     (g) =>
-      `「${g.milestone}」里 ${g.issues.map((i) => `#${i.number}`).join('、')} 开着却没排进先后（列在「先后里没排的」）`,
+      `「${g.milestone}」的先后里写着 ${g.numbers.map((n) => `#${n}`).join('、')}，可它们不是这个版本里的单，已跳过（每天对账会从说明里清掉）`,
   );
 }
 
@@ -286,24 +289,22 @@ export async function readPlan(gh: GitHubReader): Promise<Plan> {
     }
   }
 
-  const looseByVersion: Plan['loose'] = [];
+  const dropped: Plan['dropped'] = [];
   const laidOut = versions.map((v): PlanVersion => {
     const issues = inVersion.get(v.milestone.number) ?? [];
     const order = orders.get(v.milestone.number) ?? [];
     const here = new Map(issues.map((i) => [i.number, i]));
     /** 这个版本里、排在它上面最近的那张（它会列在那张下面）；没有是 undefined。 */
     const nestedUnder = (n: number) => ancestors(parents, n).find((a) => here.has(a));
-    /** 已关闭的里程碑不校验先后：它关了就不会再动，让里面的旧单指到哪都算数；只有开着的版本才要求每张单都挂进来。 */
+    /** 已关闭的里程碑不校验先后：它关了就不会再动，让里面的旧单指到哪都算数。 */
     const checkOrder = v.milestone.state === 'open';
     const ordered: PlanIssue[] = [];
+    const away: number[] = [];
     for (const n of order) {
       const issue = here.get(n);
       if (issue === undefined) {
-        if (checkOrder) {
-          throw new PlanProblem(
-            `里程碑「${v.milestone.title}」的先后里有 #${n}，可它不是这个版本里的单（没挂这个里程碑，或者是 PR）：在 GitHub 上把它挂进来，或者从先后里删掉`,
-          );
-        }
+        // 挪去了别的版本还开着、或写的是 PR：跳过并记下，对账清掉；不让一张挪走的单拖垮整份计划
+        if (checkOrder) away.push(n);
         continue;
       }
       const under = nestedUnder(n);
@@ -318,10 +319,7 @@ export async function readPlan(gh: GitHubReader): Promise<Plan> {
       ordered.push(issue);
     }
     const unordered = issues.filter((i) => !order.includes(i.number) && nestedUnder(i.number) === undefined);
-    const loose = unordered.filter((i) => i.state === 'open');
-    if (v.milestone.state === 'open' && loose.length) {
-      looseByVersion.push({ milestone: v.milestone.title, issues: loose });
-    }
+    if (away.length) dropped.push({ milestone: v.milestone.title, numbers: away });
     return { ...v, issues, ordered, unordered };
   });
 
@@ -335,7 +333,7 @@ export async function readPlan(gh: GitHubReader): Promise<Plan> {
     unscheduledTotal: unscheduledAll.length,
     children,
     parents,
-    loose: looseByVersion,
+    dropped,
   };
 }
 

@@ -7,6 +7,7 @@ import {
   checkOpening,
   commentIdOf,
   composeIssueBody,
+  currentMilestoneOf,
   type IssueBodyInput,
   issueOfCommentRef,
   openingKey,
@@ -14,6 +15,19 @@ import {
   stamp,
   unquote,
 } from '../src/request-issue.ts';
+
+describe('提需求开的单挂当前版本（#2683）', () => {
+  it('挂开着的那个 v<N>（不是版本的里程碑不算）；一个都没有就不挂；读不到照抛', async () => {
+    const v5 = { number: 12, title: 'v5 10-19～10-25' };
+    expect(await currentMilestoneOf(async () => [{ number: 3, title: 'P1 旧阶段' }, v5])).toBe(12);
+    expect(await currentMilestoneOf(async () => [{ number: 3, title: 'P1 旧阶段' }])).toBeNull();
+    await expect(
+      currentMilestoneOf(async () => {
+        throw new Error('GitHub 回了 502');
+      }),
+    ).rejects.toThrow('502');
+  });
+});
 
 const base = (over: Partial<IssueBodyInput> = {}): IssueBodyInput => ({
   seq: 42,

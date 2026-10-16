@@ -1,7 +1,17 @@
 // 用量补记（#1935）连库跑一遍：经 Mirasim 起的会话结束时 runs 只有输出（快照的 turnOutputTokens），账本里先是全 0 的占位、
 // 过几分钟才回填。只给占位的那一轮不许写成 0（故意造的失败），回填了就把四样整套写对，再跑一遍不改第二次；读不成的写明原因。
 import type { MeterFs } from '@fleet-dao/adapters';
-import { getRun, pools, type RunInsert, routes, seed, startRun, USAGE_TAIL_MARKER } from '@fleet-dao/db';
+import {
+  getRun,
+  pools,
+  type RunInsert,
+  routes,
+  seed,
+  startRun,
+  USAGE_GAVE_UP_PREFIX,
+  USAGE_REREAD_MARK,
+  USAGE_TAIL_MARKER,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -61,13 +71,38 @@ function call(n: number, over: Record<string, unknown>): string {
   });
 }
 
-function meterFs(file: () => string): MeterFs {
+const TRAFFIC = '/home/fleet-agent-carpool/.mirasim/traffic';
+const TRAFFIC_FILE = `${TRAFFIC}/${SESSION}/index-0.ndjson`;
+
+/** 流量记录一行（每次上游调用一行，没有 token 数）。 */
+function hit(n: number, status: number): string {
+  return JSON.stringify({
+    ts: new Date(STARTED.getTime() + n * 60_000).toISOString(),
+    status,
+    model: 'claude-opus-5-5',
+    path: '/v1/messages',
+    method: 'POST',
+    upstreamHost: 'relay.mirasim.ai',
+    viaRelay: true,
+    sessionId: SESSION,
+  });
+}
+
+/** traffic 不给是这个会话没有流量目录。 */
+function meterFs(file: () => string, traffic?: () => string): MeterFs {
   return {
     async readdir(dir) {
-      if (dir !== DIR) throw Object.assign(new Error('no'), { code: 'ENOENT' });
-      return ['usage-2026-10.ndjson', 'session-usage-2026-10.ndjson'];
+      if (dir === DIR) return ['usage-2026-10.ndjson', 'session-usage-2026-10.ndjson'];
+      if (traffic && dir === `${TRAFFIC}/${SESSION}`) return ['index-0.ndjson', 'meta.local.json'];
+      throw Object.assign(new Error('no'), { code: 'ENOENT' });
     },
     async linesWith(needles, paths) {
+      if (paths.length === 1 && paths[0] === TRAFFIC_FILE) {
+        return (traffic?.() ?? '')
+          .split('\n')
+          .filter((l) => needles.some((n) => l.includes(n)))
+          .join('\n');
+      }
       expect(paths).toEqual([`${DIR}/usage-2026-10.ndjson`]);
       return file()
         .split('\n')
@@ -77,30 +112,35 @@ function meterFs(file: () => string): MeterFs {
   };
 }
 
-async function mirasimRun(over: Partial<RunInsert> = {}) {
-  return startRun(t.db, {
-    segment: 'verify',
-    issueNumber: 7,
-    model: 'opus-5.5',
-    channel: 'mirasim-cloud',
-    routeId: 'm-opus',
-    startedAt: STARTED,
-    endedAt: ENDED,
-    outcome: 'done',
-    // 会话结束时快照里只有本轮输出（近似值），输入、缓存照实留空
-    outputTokens: 4100,
-    sessionId: `claude:${SESSION}`,
-    ...over,
-  });
+async function mirasimRun(over: Partial<RunInsert> = {}, writtenAt?: Date) {
+  return startRun(
+    t.db,
+    {
+      segment: 'verify',
+      issueNumber: 7,
+      model: 'opus-5.5',
+      channel: 'mirasim-cloud',
+      routeId: 'm-opus',
+      startedAt: STARTED,
+      endedAt: ENDED,
+      outcome: 'done',
+      // 会话结束时快照里只有本轮输出（近似值），输入、缓存照实留空
+      outputTokens: 4100,
+      sessionId: `claude:${SESSION}`,
+      ...over,
+    },
+    writtenAt,
+  );
 }
 
-function job(file: () => string, now = new Date(ENDED.getTime() + 6 * 60_000)) {
+function job(file: () => string, now = new Date(ENDED.getTime() + 6 * 60_000), traffic?: () => string) {
   const finished: unknown[] = [];
   const deps = usageBackfillJob({
     db: t.db,
     user: 'fleet-agent-carpool',
     meterDir: () => DIR,
-    meterFs: () => meterFs(file),
+    trafficDir: () => TRAFFIC,
+    meterFs: () => meterFs(file, traffic),
     now: () => now,
     log: () => undefined,
   })();
@@ -399,6 +439,7 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
       db: t.db,
       user: 'fleet-agent-carpool',
       meterDir: () => '/nope',
+      trafficDir: () => TRAFFIC,
       meterFs: () => meterFs(() => ''),
       now: () => new Date(ENDED.getTime() + 6 * 60_000),
       log: () => undefined,
@@ -448,6 +489,176 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
     const done = await tick(now + 1000);
     expect(reads).toBe(6);
     expect(done.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
+  });
+
+  // #2675：「没调用」和「没对上」分开记，三种情形各一条
+  it('一次上游调用都没有（会话起不来、初始化超时）：四样和花费记 0，原因写明这一笔没有发出过模型调用', async () => {
+    const { id } = await mirasimRun({ outcome: 'failed', outputTokens: null });
+    // 流量目录在、一行都没有（codex app-server initialize 超时的真样子）；会话结束 11 分钟，过了等落盘的那几分钟
+    const j = job(
+      () => '',
+      new Date(ENDED.getTime() + 11 * 60_000),
+      () => '',
+    );
+    await j.run();
+    const row = await getRun(t.db, id);
+    expect(row).toMatchObject({
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+    });
+    expect(row?.usageNote).toContain('这一笔没有发出过模型调用');
+    expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 1 });
+  });
+
+  it('判成没调用但会话刚结束：先不记 0，写明在等账本落盘', async () => {
+    const { id } = await mirasimRun({ outputTokens: null });
+    await job(
+      () => '',
+      new Date(ENDED.getTime() + 3 * 60_000),
+      () => '',
+    ).run();
+    const row = await getRun(t.db, id);
+    expect(row).toMatchObject({ inputTokens: null, outputTokens: null });
+    expect(row?.usageNote).toContain('等 Mirasim 账本落盘再定');
+  });
+
+  it('有调用但没对上（流量记录里有 2xx、用量账本里没有）：照旧留空，原因写清是哪种没对上，这一轮记 partial', async () => {
+    const { id } = await mirasimRun();
+    const j = job(
+      () => '',
+      new Date(ENDED.getTime() + 11 * 60_000),
+      () => hit(1, 200),
+    );
+    await j.run();
+    const row = await getRun(t.db, id);
+    expect(row).toMatchObject({ inputTokens: null, cacheReadTokens: null, outputTokens: 4100 });
+    expect(row?.usageNote).toMatch(
+      /^用量没读成（第 1 次，还会再读）：没对上：Mirasim 流量记录里这一笔有 1 次上游调用回了 2xx/,
+    );
+    expect(j.finished.at(-1)).toMatchObject({ outcome: 'partial' });
+  });
+
+  it('对上了：账本行比这一笔起点早几秒的同一会话调用也算进这一笔', async () => {
+    const { id } = await mirasimRun();
+    const early = JSON.stringify({
+      ...JSON.parse(call(0, { input: 5, output: 6, cacheRead: 7, cacheWrite: 8, relayMetered: true })),
+      ts: new Date(STARTED.getTime() - 3_000).toISOString(),
+    });
+    const lines = [
+      early,
+      call(1, { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, relayMetered: true }),
+    ].join('\n');
+    await job(() => lines).run();
+    expect(await getRun(t.db, id)).toMatchObject({
+      inputTokens: 6,
+      outputTokens: 8,
+      cacheReadTokens: 10,
+      cacheWriteTokens: 12,
+      usageNote: meterWindowNote(),
+    });
+  });
+
+  it('同一会话续跑：起点往前放宽不越过上一笔的终点，上一笔的调用不算两遍', async () => {
+    // 上一笔 06:29:58 结束（已经齐了），这一笔 06:30:00 起；06:29:57 那次是上一笔的
+    await mirasimRun({
+      startedAt: new Date(STARTED.getTime() - 10 * 60_000),
+      endedAt: new Date(STARTED.getTime() - 2_000),
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 1,
+    });
+    const { id } = await mirasimRun();
+    const prev = JSON.stringify({
+      ...JSON.parse(call(0, { input: 900, output: 900, relayMetered: true })),
+      ts: new Date(STARTED.getTime() - 3_000).toISOString(),
+    });
+    const lines = [
+      prev,
+      call(1, { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, relayMetered: true }),
+    ].join('\n');
+    await job(() => lines).run();
+    expect(await getRun(t.db, id)).toMatchObject({ inputTokens: 1, outputTokens: 2, cacheReadTokens: 3 });
+  });
+
+  it('改读法之前定案不再补的老行：按新读法再读一次（只一次），读成就补上', async () => {
+    const gaveUp = `${USAGE_GAVE_UP_PREFIX}查了 6 次都读不成，不再补；这一笔的用量留空（不是 0）：Mirasim 用量账本里没有这个会话在这一笔起止之间的计费调用`;
+    // 三天前结束的：已经过了 24 小时的回看窗口，照样重读
+    const old = new Date(ENDED.getTime() - 3 * 24 * 60 * 60_000);
+    const now = new Date(ENDED.getTime() + 6 * 60_000);
+    const zero = await mirasimRun({
+      id: '11111111-1111-4111-8111-111111111111',
+      startedAt: new Date(old.getTime() - 60_000),
+      endedAt: old,
+      outputTokens: null,
+      usageNote: gaveUp,
+    });
+    const fill = await mirasimRun({ id: '22222222-2222-4222-8222-222222222222', usageNote: gaveUp });
+    const still = await mirasimRun({
+      id: '33333333-3333-4333-8333-333333333333',
+      startedAt: new Date(STARTED.getTime() + 20 * 60_000),
+      endedAt: new Date(STARTED.getTime() + 30 * 60_000),
+      usageNote: gaveUp,
+    });
+    let reads = 0;
+    // fill 那一笔的窗里有回填好的调用；still 那一笔的窗里流量记录有一次 2xx、用量账本里没有；zero 那一笔什么都没有
+    const lines = call(1, { input: 1, output: 2, cacheRead: 3, cacheWrite: 4, relayMetered: true });
+    const traffic = [hit(1, 200), hit(25, 200)].join('\n');
+    const run = () =>
+      job(
+        () => {
+          reads += 1;
+          return lines;
+        },
+        now,
+        () => traffic,
+      ).run();
+    await run();
+    expect(reads).toBe(1);
+    const z = await getRun(t.db, zero.id);
+    expect(z).toMatchObject({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+    expect(z?.usageNote).toContain('这一笔没有发出过模型调用');
+    expect(await getRun(t.db, fill.id)).toMatchObject({
+      inputTokens: 1,
+      outputTokens: 2,
+      usageNote: expect.stringContaining(meterWindowNote()),
+    });
+    const s = await getRun(t.db, still.id);
+    expect(s).toMatchObject({ inputTokens: null });
+    expect(s?.usageNote).toMatch(
+      new RegExp(`^${USAGE_GAVE_UP_PREFIX}改读法之前定案的这一笔按新读法重读了一次`),
+    );
+    expect(s?.usageNote).toContain('没对上');
+    expect(s?.usageNote?.endsWith(USAGE_REREAD_MARK)).toBe(true);
+    // 只一次：再跑一轮，重读过的不再是候选，不读账本
+    await run();
+    expect(reads).toBe(1);
+  });
+
+  it('按新读法读满次数定案的：带上读过的记号，不当成老行再重读', async () => {
+    // 第 5 次读不成已经是 3 小时前（过了第 5 档 160 分钟的退避）
+    const { id } = await mirasimRun(
+      { usageNote: '用量没读成（第 5 次，还会再读）：没对上：x' },
+      new Date(ENDED.getTime() - 3 * 60 * 60_000),
+    );
+    let reads = 0;
+    const run = () =>
+      job(
+        () => {
+          reads += 1;
+          return call(1, { noRelayRecord: true });
+        },
+        new Date(ENDED.getTime() + 6 * 60_000),
+      ).run();
+    await run();
+    const note = (await getRun(t.db, id))?.usageNote;
+    expect(note).toMatch(/^用量不再补：查了 6 次都读不成/);
+    expect(note?.endsWith(USAGE_REREAD_MARK)).toBe(true);
+    await run();
+    expect(reads).toBe(1);
   });
 
   it('登记的编号是 usage-backfill', () => {

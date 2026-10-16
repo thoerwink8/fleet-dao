@@ -6,7 +6,7 @@
 
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { type BanSubject, hardBanFor, type RunAsUser } from '@fleet-dao/shared';
+import { type BanSubject, hardBanFor, MODEL_STRENGTHS, type RunAsUser } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -74,7 +74,17 @@ export const CatalogSchema = z.strictObject({
         }),
     )
     .min(1),
-  models: z.array(z.strictObject({ id: Id, family: Id, displayName: Text })).default([]),
+  models: z
+    .array(
+      z.strictObject({
+        id: Id,
+        family: Id,
+        displayName: Text,
+        /** 强弱档（决定 0099）：目录独占，已有的模型每次按配置对齐；没写 = 没标（选路照以前）。 */
+        strength: z.enum(MODEL_STRENGTHS).optional(),
+      }),
+    )
+    .default([]),
   routes: z
     .array(
       z.strictObject({
@@ -461,12 +471,24 @@ export async function loadCatalog(
         wrote(
           await tx
             .insert(models)
-            .values(m)
+            .values({ ...m, strength: m.strength ?? null })
             .onConflictDoNothing({ target: models.id })
             .returning({ id: models.id }),
         ),
       ['family', 'displayName'],
     );
+    // strength 是目录独占（驾驶舱不改）：配置里列了的模型每次按配置对齐，没写的清成空（决定 0099）。目录外的模型（发现层建的）不动。
+    for (const m of config.models) {
+      const want = m.strength ?? null;
+      const ok = wrote(
+        await tx
+          .update(models)
+          .set({ strength: want })
+          .where(and(eq(models.id, m.id), sql`${models.strength} is distinct from ${want}`))
+          .returning({ id: models.id }),
+      );
+      if (ok) filled.push(`models.${m.id}.strength`);
+    }
     // 路由挂的渠道跟着池走（库里已有的池以库里为准）。
     const poolChannel = (poolId: string) =>
       stored.pools.get(poolId)?.channelId ?? config.pools.find((p) => p.id === poolId)?.channelId ?? '';

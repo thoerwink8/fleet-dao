@@ -12,6 +12,13 @@
 // - 不计费的不算：本地回的（leg: local、answeredLocally）、上游没回 2xx 的。
 // - 一次会话里有一次调用还没回填，整次算「还没齐」，不给部分数：部分数写进库会被当成全的。
 // - 月度文件几十 MB：读法（MeterFs）只取含会话 uuid 的行（生产以会话用户 grep -F），这里再按 sessionId 精确认一遍。
+// - 用量账本里这一笔一次计费调用都没有，分不出「没花钱」还是「漏记」（#2675，法国 10-14 到 10-16 的 19 笔查实）：要再看
+//   流量记录 ~/.mirasim/traffic/<会话 uuid>/index-*.ndjson（每次上游调用一行，有 ts、status，没有 token 数）。
+//   流量里这段时间一次都没有（会话起不来、codex app-server initialize 超时、桥接连不上、同一会话的调用都在前后几笔里）、
+//   或上游都回了 4xx/5xx 的，是真没有计费调用，读成 none（用量记 0）；流量里有 2xx、用量账本里却没有这几行的（Mirasim 没记进
+//   用量账本）、只有没等到回应就断了的（状态码 0），是没对上，照旧读不成，原因里写清是哪一种。
+// - 这一笔的起点放宽 METER_EARLY_MS 算：账本行比这一笔起点早几秒、同一会话的算进来；但不越过同一会话上一笔的终点
+//   （MeterWindow.notBefore），不把上一笔的调用算两遍。
 
 import { readdir, readFile } from 'node:fs/promises';
 // 路径照会话用户那台机器（Linux）拼：生产经 exec 以会话用户读，Windows 上的 node 也认斜杠
@@ -49,6 +56,17 @@ export interface MeterWindow {
   sessionKey: string;
   since: number;
   until: number;
+  /** 同一会话上一笔的终点（毫秒）：起点往前放宽时不越过它（这之前、含这一刻的调用是上一笔的）。没有上一笔不给。 */
+  notBefore?: number;
+}
+
+/** 账本行比这一笔起点早这么多以内、同一会话的，算进这一笔（不越过 notBefore）。 */
+export const METER_EARLY_MS = 5_000;
+
+/** 这一笔从什么时刻起的调用算它的。 */
+function windowStart(window: MeterWindow): number {
+  const early = window.since - METER_EARLY_MS;
+  return window.notBefore === undefined ? early : Math.max(early, window.notBefore + 1);
 }
 
 /** 叫停之后还在跑完的调用，最多再认这么久（没有下一笔把窗口封上时）。 */
@@ -77,19 +95,23 @@ export interface MeterUsage {
 }
 
 /**
- * 三态：读齐了 / 还在等回填（过一会儿再读）/ 读不成（中转没有这次调用的记录、行认不出、账本读不了、这段时间一次计费调用都没有）。
+ * 四态：读齐了 / 还在等回填（过一会儿再读）/ 这一笔没有计费调用（流量记录核实过：一次上游调用都没有，或上游都回了错；用量是 0）/
+ * 读不成（中转没有这次调用的记录、行认不出、有调用但用量账本里没对上）。
+ * unknown 带 noBilledCalls：用量账本里这段时间一次计费调用都没有、还没拿流量记录核过（meterReadingFrom 只看用量账本）。
  */
 export type MeterReading =
   | { state: 'settled'; usage: MeterUsage }
   | { state: 'pending'; pending: number; calls: number; detail: string }
-  | { state: 'unknown'; detail: string };
+  | { state: 'none'; detail: string }
+  | { state: 'unknown'; detail: string; noBilledCalls?: true };
+
+const NO_BILLED_CALLS = 'Mirasim 用量账本里没有这个会话在这一笔起止之间的计费调用';
+/** 兼容补记任务对「账本里没有调用」的固定文案引用。 */
+export const METER_NO_CALLS_DETAIL = NO_BILLED_CALLS;
 
 const USAGE_FILE = /^usage-(\d{4})-(\d{2})\.ndjson$/;
 const UUID = /^[0-9a-f-]{36}$/i;
 const DAY_MS = 24 * 60 * 60_000;
-
-/** 这段起止里一次计费调用都没有（不是行认不出、也不是中转没有记录）。 */
-export const METER_NO_CALLS_DETAIL = 'Mirasim 用量账本里没有这个会话在这一笔起止之间的计费调用';
 
 /** 会话号里的 uuid（<执行体>:<uuid>，没有冒号的整个当 uuid）；认不出是 undefined。 */
 export function meterSessionUuid(sessionKey: string): string | undefined {
@@ -186,7 +208,7 @@ export function meterReadingFrom(text: string, window: MeterWindow): MeterReadin
       unknown.push('有一次调用的时间认不出，判不了是不是这一笔的');
       continue;
     }
-    if (at < window.since || at > window.until) continue;
+    if (at < windowStart(window) || at > window.until) continue;
     const v = judgeCall(row);
     if (v.kind === 'skip') continue;
     if (v.kind === 'unknown') {
@@ -221,7 +243,7 @@ export function meterReadingFrom(text: string, window: MeterWindow): MeterReadin
     };
   }
   if (calls === 0) {
-    return { state: 'unknown', detail: METER_NO_CALLS_DETAIL };
+    return { state: 'unknown', detail: NO_BILLED_CALLS, noBilledCalls: true };
   }
   return {
     state: 'settled',
@@ -237,14 +259,82 @@ export function meterReadingFrom(text: string, window: MeterWindow): MeterReadin
   };
 }
 
+const TRAFFIC_FILE = /^index-.*\.ndjson$/;
+
+/**
+ * 用量账本里这一笔一次计费调用都没有时，拿这个会话的流量记录（已经筛出来的行；hasDir 是有没有这个会话的流量目录）判是没有计费
+ * 调用（none）还是没对上（unknown）。纯函数，测试直接喂行。
+ */
+export function trafficVerdict(text: string, window: MeterWindow, hasDir: boolean): MeterReading {
+  const uuid = meterSessionUuid(window.sessionKey);
+  if (!uuid) return { state: 'unknown', detail: `会话号认不出：${window.sessionKey}` };
+  if (!hasDir) {
+    return {
+      state: 'none',
+      detail: '这一笔没有发出过模型调用（Mirasim 没有这个会话的流量记录，会话没走到上游），用量记 0',
+    };
+  }
+  let ok = 0;
+  let cut = 0;
+  const failed: number[] = [];
+  for (const line of text.split('\n')) {
+    if (!line.trim() || !line.toLowerCase().includes(uuid)) continue;
+    let row: Record<string, unknown> | undefined;
+    try {
+      row = rec(JSON.parse(line));
+    } catch {
+      row = undefined;
+    }
+    if (!row || str(row.sessionId)?.toLowerCase() !== uuid) continue;
+    const at = typeof row.ts === 'string' ? Date.parse(row.ts) : Number.NaN;
+    if (!Number.isFinite(at)) {
+      return {
+        state: 'unknown',
+        detail: `${NO_BILLED_CALLS}；流量记录里有一次调用的时间认不出，判不了是不是这一笔的`,
+      };
+    }
+    if (at < windowStart(window) || at > window.until) continue;
+    const status = num(row.status);
+    if (status !== undefined && status >= 200 && status <= 299) ok += 1;
+    else if (status !== undefined && status >= 400) failed.push(status);
+    else cut += 1;
+  }
+  if (ok > 0) {
+    return {
+      state: 'unknown',
+      detail: `没对上：Mirasim 流量记录里这一笔有 ${ok} 次上游调用回了 2xx，用量账本里却没有这几次的计费行（Mirasim 没把它们记进用量账本）`,
+    };
+  }
+  if (cut > 0) {
+    return {
+      state: 'unknown',
+      detail: `没对上：这一笔有 ${cut} 次上游调用没等到回应就断了（状态码 0），中转计没计费查不到`,
+    };
+  }
+  if (failed.length > 0) {
+    const codes = [...new Set(failed)].sort((a, b) => a - b).join('、');
+    return {
+      state: 'none',
+      detail: `这一笔没有计费的模型调用：发出的 ${failed.length} 次上游调用都回了错（状态码 ${codes}），用量记 0`,
+    };
+  }
+  return {
+    state: 'none',
+    detail:
+      '这一笔没有发出过模型调用（Mirasim 流量记录里这个会话在这一笔起止之间一次上游调用都没有），用量记 0',
+  };
+}
+
 /**
  * 一次读几次会话（一轮补记一次 ls、一次筛行）。和 windows 一一对应地回读数。目录列不出、筛行失败照抛：整轮没查成，
- * 不回一串「没有调用」。
+ * 不回一串「没有调用」。给了 trafficDir（~/.mirasim/traffic）：用量账本里一次计费调用都没有的那几笔再拿流量记录核
+ * （trafficVerdict）；没给就照旧读不成，原因里说没核。
  */
 export async function readMirasimMeter(
   dir: string,
   windows: readonly MeterWindow[],
   fs: MeterFs = nodeMeterFs,
+  trafficDir?: string,
 ): Promise<MeterReading[]> {
   if (windows.length === 0) return [];
   const uuids = windows.map((w) => meterSessionUuid(w.sessionKey));
@@ -273,5 +363,38 @@ export async function readMirasimMeter(
         files.map((n) => posix.join(dir, n)),
       );
   }
-  return windows.map((w) => meterReadingFrom(text, w));
+  const readings = windows.map((w) => meterReadingFrom(text, w));
+  if (trafficDir === undefined) return readings;
+  // 用量账本里没有计费调用的那几个会话：各列一次流量目录，含它们 uuid 的行一次筛完
+  const empty = [
+    ...new Set(
+      windows.flatMap((w, i) => {
+        const r = readings[i];
+        const uuid = meterSessionUuid(w.sessionKey);
+        return r?.state === 'unknown' && r.noBilledCalls && uuid ? [uuid] : [];
+      }),
+    ),
+  ];
+  if (empty.length === 0) return readings;
+  const hasDir = new Set<string>();
+  const files: string[] = [];
+  for (const uuid of empty) {
+    const folder = posix.join(trafficDir, uuid);
+    let names: string[];
+    try {
+      names = await fs.readdir(folder);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw new Error(`列不出 Mirasim 流量记录目录 ${folder}：${(err as Error).message}`);
+    }
+    hasDir.add(uuid);
+    for (const n of names.filter((n) => TRAFFIC_FILE.test(n)).sort()) files.push(posix.join(folder, n));
+  }
+  const traffic = files.length > 0 ? await fs.linesWith(empty, files) : '';
+  return readings.map((r, i) => {
+    const w = windows[i] as MeterWindow;
+    const uuid = meterSessionUuid(w.sessionKey);
+    if (r.state !== 'unknown' || !r.noBilledCalls || !uuid) return r;
+    return trafficVerdict(traffic, w, hasDir.has(uuid));
+  });
 }

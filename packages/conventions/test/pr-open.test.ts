@@ -289,7 +289,7 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
   });
 });
 
-describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', () => {
+describe('pnpm pr:open：需求栏必挂单（#1052）、PR 不挂里程碑', () => {
   it('【故意造出的失败】需求栏读不到 Closes/Refs、也没带 --no-issue：退出码 1，一次 gh 都不跑（查单也不查）', () => {
     for (const body of [
       '**做了什么**：x\n',
@@ -337,8 +337,8 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
     expect(junk.text()).toContain('认不出');
   });
 
-  it('只写 Refs（母单分片）也认；Closes 的排前面，里程碑跟着它走', () => {
-    const w = world([CREATED, ok(), files('a.ts'), ok()], '**需求**：Refs #3\nCloses #9\n', [
+  it('只写 Refs（母单分片）也认；Closes 的排前面', () => {
+    const w = world([CREATED, files('a.ts'), ok()], '**需求**：Refs #3\nCloses #9\n', [
       ok('[false,"v4 统一与验收","open"]'),
       ok('[false,"v3","open"]'),
     ]);
@@ -347,34 +347,18 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、顺手挂里程碑', ()
       'repos/{owner}/{repo}/issues/9',
       'repos/{owner}/{repo}/issues/3',
     ]);
-    expect(w.calls[1]).toEqual(['pr', 'edit', '42', '--milestone', 'v4 统一与验收']);
 
     const only = world([CREATED, files('a.ts'), ok()], '**需求**：Refs #1016\n');
     expect(only.run()).toBe(0);
     expect(only.asked[0]?.[1]).toBe('repos/{owner}/{repo}/issues/1016');
   });
 
-  it('单挂了里程碑：PR 开出来就挂上同一个（在查文件、挂自动合并之前）；没挂的不挂、打一行说', () => {
-    const w = world([CREATED, ok(), files('a.ts'), ok()], BODY, [ok('[false,"v4 统一与验收","open"]')]);
+  it('PR 不挂里程碑（决定 0015）：单挂了里程碑也不给 PR 挂，gh 调用里没有 --milestone', () => {
+    const w = world([CREATED, files('a.ts'), ok()], BODY, [ok('[false,"v4 统一与验收","open"]')]);
     expect(w.run()).toBe(0);
-    expect(verbs(w.calls)).toEqual(['pr create', 'pr edit', 'api --paginate', 'pr merge']);
-    expect(w.calls[1]).toEqual(['pr', 'edit', '42', '--milestone', 'v4 统一与验收']);
-    expect(w.text()).toContain('PR 挂上了里程碑「v4 统一与验收」');
-
-    const none = world([CREATED, files('a.ts'), ok()]);
-    expect(none.run()).toBe(0);
-    expect(verbs(none.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
-    expect(none.text()).toContain('#7 没挂里程碑，PR 也就没挂');
-  });
-
-  it('【故意造出的失败】挂里程碑没成：打一行说没挂成，不算失败（照样挂自动合并、退出码 0）', () => {
-    const w = world([CREATED, bad('milestone not found'), files('a.ts'), ok()], BODY, [
-      ok('[false,"v4 统一与验收","open"]'),
-    ]);
-    expect(w.run()).toBe(0);
-    expect(w.text()).toContain('没挂上里程碑「v4 统一与验收」');
-    expect(w.text()).toContain('milestone not found');
-    expect(verbs(w.calls)).toContain('pr merge');
+    expect(verbs(w.calls)).toEqual(['pr create', 'api --paginate', 'pr merge']);
+    expect(w.calls.flat()).not.toContain('--milestone');
+    expect(w.text()).not.toContain('里程碑');
   });
 
   it('--no-issue "<理由>"：不查单，理由原样写进需求栏（换掉模板提示、别的栏不动），临时正文用完就删', () => {

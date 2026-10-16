@@ -16,9 +16,12 @@
 //   定案的数仍留空，不写成 0，原因留在 usage_note。
 // - 账本整个读不了（目录列不出、筛行失败）是这一轮没跑成，记 failed、看门狗报；单笔读不成是那一笔的事，这一轮记 partial。
 // - 不标 needsMaster：它不拉单、不起会话，总开关关着也要把已经跑完的会话的账补齐。
+// - 「没调用」和「没对上」分开记（#2675）：读法核过流量记录、判成这一笔没有计费调用（none：会话起不来、初始化超时、上游都回了错）
+//   的，会话结束过了 NONE_SETTLE_MS 就把四样和花费记 0，usage_note 写明为什么是 0；有调用没对上的照旧留空、退避着读，原因写清
+//   是哪种没对上。改读法之前就定案不再补的老行（回看 USAGE_REREAD_LOOKBACK_MS）按新读法再读一次，读完带 USAGE_REREAD_MARK，
+//   不再读第二次。
 
 import {
-  METER_NO_CALLS_DETAIL,
   METER_TAIL_GRACE_MS,
   type MeterReading,
   type MeterWindow,
@@ -30,6 +33,7 @@ import {
   type MeterUsageWrite,
   type ScheduleResult,
   USAGE_GAVE_UP_PREFIX,
+  USAGE_REREAD_MARK,
   USAGE_TAIL_MARKER,
   USAGE_TAIL_PREFIX,
 } from '@fleet-dao/db';
@@ -47,6 +51,10 @@ export const USAGE_TAIL_LOOKBACK_MS = 14 * 24 * 60 * 60_000;
 export const USAGE_BACKFILL_BATCH = 50;
 /** 会话结束过了这么久还没回填齐，原因里写「迟迟没回填」（正常几分钟就齐）。 */
 export const METER_LATE_MS = 30 * 60_000;
+/** 判成没有计费调用的，会话结束过了这么久才记 0：刚结束时流量记录、用量账本可能还没落盘，先等一等。 */
+export const NONE_SETTLE_MS = 10 * 60_000;
+/** 改读法之前定案不再补的老行，回看多久以内结束的（Mirasim 自己最多回填 14 天，账本按月留着）。 */
+export const USAGE_REREAD_LOOKBACK_MS = 14 * 24 * 60 * 60_000;
 
 /**
  * 读不成（账本里没有这一笔的计费调用、行认不出）的退避：第 n 次读不成之后等 UNREAD_BACKOFF_MS[n-1] 再读；读了 UNREAD_MAX_ATTEMPTS 次
@@ -90,13 +98,24 @@ function meterWindowClosed(run: { endedAt: Date; nextStartedAt: Date | null }, n
 }
 
 function meterWindowFor(
-  run: { sessionId: string; startedAt: Date; endedAt: Date; nextStartedAt: Date | null },
+  run: {
+    sessionId: string;
+    startedAt: Date;
+    endedAt: Date;
+    nextStartedAt: Date | null;
+    previousEndedAt?: Date | null;
+  },
   kind: 'full' | 'tail',
 ): MeterWindow | null {
   const until = meterWindowUntil(run.endedAt.getTime(), run.nextStartedAt?.getTime() ?? null);
   const since = kind === 'full' ? run.startedAt.getTime() : run.endedAt.getTime() + 1;
   if (since > until) return null;
-  return { sessionKey: run.sessionId, since, until };
+  return {
+    sessionKey: run.sessionId,
+    since,
+    until,
+    ...(kind === 'full' && run.previousEndedAt ? { notBefore: run.previousEndedAt.getTime() } : {}),
+  };
 }
 
 export interface UsageBackfillJobDeps {
@@ -104,12 +123,14 @@ export interface UsageBackfillJobDeps {
   pending(input: { endedAfter: Date; limit: number }): Promise<MeterPendingRun[]>;
   /** db 的 runsAwaitingMeterTail：四样已经齐、还没按新窗口补过尾巴的。 */
   tails(input: { endedAfter: Date; limit: number }): Promise<MeterTailRun[]>;
-  /** adapters 的 readMirasimMeter（以会话用户读他家里的账本）：和 windows 一一对应。读不了照抛。 */
-  readMeter(windows: readonly MeterWindow[]): Promise<MeterReading[]>;
-  /** db 的 fillRunUsageFromMeter：写了回 true，已经齐了回 false。 */
-  fill(runId: string, usage: MeterUsageWrite, at: Date): Promise<boolean>;
   /** db 的 fillRunMeterTail：补上终点之后的调用，或只写记号。写了回 true，已经带记号的回 false。 */
   fillTail(runId: string, add: MeterUsageWrite | null, note: string, at: Date): Promise<boolean>;
+  /** db 的 runsGaveUpAwaitingReread：改读法之前定案不再补、还没按新读法重读过的。 */
+  rereads(input: { endedAfter: Date; limit: number }): Promise<MeterPendingRun[]>;
+  /** adapters 的 readMirasimMeter（以会话用户读他家里的用量账本、流量记录）：和 windows 一一对应。读不了照抛。 */
+  readMeter(windows: readonly MeterWindow[]): Promise<MeterReading[]>;
+  /** db 的 fillRunUsageFromMeter：写了回 true，已经齐了回 false。给了 note 一起写进 usage_note（记 0 的写明为什么）。 */
+  fill(runId: string, usage: MeterUsageWrite, at: Date, note?: string): Promise<boolean>;
   /** db 的 noteRunUsage。 */
   note(runId: string, note: string, at: Date): Promise<boolean>;
   runs: ScheduleRunLog;
@@ -127,20 +148,23 @@ export class UsageBackfillFailedError extends Error {
   }
 }
 
-/** 没读齐的那一笔该写的原因。 */
+/** 没读齐的那一笔该写的原因（none 是还没到记 0 的时候：会话刚结束，等账本落盘）。 */
 export function meterNote(
   reading: Exclude<MeterReading, { state: 'settled' }>,
   run: MeterPendingRun,
   now: Date,
 ): string {
+  const waited = Math.floor((now.getTime() - run.endedAt.getTime()) / 60_000);
+  if (reading.state === 'none') {
+    return `会话结束 ${waited} 分钟，等 Mirasim 账本落盘再定：${reading.detail.replace(/，用量记 0$/, '')}`;
+  }
   if (reading.state === 'unknown') {
     const n = unreadAttempts(run.usageNote) + 1;
     if (n >= UNREAD_MAX_ATTEMPTS) {
-      return `${USAGE_GAVE_UP_PREFIX}查了 ${n} 次都读不成，不再补；这一笔的用量留空（不是 0）：${reading.detail}`;
+      return `${USAGE_GAVE_UP_PREFIX}查了 ${n} 次都读不成，不再补；这一笔的用量留空（不是 0）：${reading.detail}${USAGE_REREAD_MARK}`;
     }
     return `用量没读成（第 ${n} 次，还会再读）：${reading.detail}`;
   }
-  const waited = Math.floor((now.getTime() - run.endedAt.getTime()) / 60_000);
   if (now.getTime() - run.endedAt.getTime() > METER_LATE_MS) {
     return `会话结束 ${waited} 分钟了，中转计量还没回填齐（${reading.pending} / ${reading.calls} 次调用没填；正常几分钟就齐）`;
   }
@@ -149,7 +173,8 @@ export function meterNote(
 
 type MeterWork =
   | { kind: 'pending'; run: MeterPendingRun; window: MeterWindow | null }
-  | { kind: 'tail'; run: MeterTailRun; window: MeterWindow | null };
+  | { kind: 'tail'; run: MeterTailRun; window: MeterWindow | null }
+  | { kind: 'reread'; run: MeterPendingRun; window: MeterWindow | null };
 
 function tailAdd(run: MeterTailRun, usage: MeterReading & { state: 'settled' }): MeterUsageWrite {
   const u = usage.usage;
@@ -166,23 +191,37 @@ function tailAdd(run: MeterTailRun, usage: MeterReading & { state: 'settled' }):
 async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
   const now = deps.now();
   // 读不成过的还在退避里的这一轮不碰（它们的原因已经在 usage_note 里）。宽限还没走完的先不读。
-  const pending = (
+  const fresh = (
     await deps.pending({
       endedAfter: new Date(now.getTime() - USAGE_BACKFILL_LOOKBACK_MS),
       limit: USAGE_BACKFILL_BATCH,
     })
   ).filter((r) => dueForRead(r, now) && meterWindowClosed(r, now));
-  const tailRows = (
-    await deps.tails({
-      endedAfter: new Date(now.getTime() - USAGE_TAIL_LOOKBACK_MS),
-      limit: USAGE_BACKFILL_BATCH,
-    })
-  ).filter((r) => meterWindowClosed(r, now));
+  const roomForTails = Math.max(0, USAGE_BACKFILL_BATCH - fresh.length);
+  const tailRows =
+    roomForTails > 0
+      ? (
+          await deps.tails({
+            endedAfter: new Date(now.getTime() - USAGE_TAIL_LOOKBACK_MS),
+            limit: roomForTails,
+          })
+        ).filter((r) => meterWindowClosed(r, now))
+      : [];
+  const roomForRereads = Math.max(0, roomForTails - tailRows.length);
+  const rereads =
+    roomForRereads > 0
+      ? await deps.rereads({
+          endedAfter: new Date(now.getTime() - USAGE_REREAD_LOOKBACK_MS),
+          limit: roomForRereads,
+        })
+      : [];
+  const rereadIds = new Set(rereads.map((r) => r.id));
   const work: MeterWork[] = [
-    ...pending.map((run) => ({ kind: 'pending' as const, run, window: meterWindowFor(run, 'full') })),
+    ...fresh.map((run) => ({ kind: 'pending' as const, run, window: meterWindowFor(run, 'full') })),
     ...tailRows.map((run) => ({ kind: 'tail' as const, run, window: meterWindowFor(run, 'tail') })),
+    ...rereads.map((run) => ({ kind: 'reread' as const, run, window: meterWindowFor(run, 'full') })),
   ];
-  // 两段查询都空：扫过了（一次查询算一个），不是「一个都没扫到」。四样有缺的窗口可能还开着，滤掉之后也是这样。
+  // 三段查询都空：扫过了（一次查询算一个），不是「一个都没扫到」。窗口可能还开着，滤掉之后也是这样。
   if (work.length === 0) return { outcome: 'ok', scanned: 1, found: 0 };
   const readable = work.filter((item): item is MeterWork & { window: MeterWindow } => item.window !== null);
   const readings = readable.length > 0 ? await deps.readMeter(readable.map((item) => item.window)) : [];
@@ -195,6 +234,7 @@ async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
     if (reading) readingOf.set(`${item.kind}:${item.run.id}`, reading);
   });
   let filled = 0;
+  let zeroed = 0;
   let waiting = 0;
   const unread: string[] = [];
   for (const item of work) {
@@ -202,8 +242,20 @@ async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
       // 窗口是空的（下一笔和这一笔同一刻起）：没有能归到这一笔的调用
       const reading = item.window
         ? readingOf.get(`pending:${item.run.id}`)
-        : ({ state: 'unknown', detail: METER_NO_CALLS_DETAIL } as const);
+        : ({ state: 'unknown', detail: '这一笔的计费窗口为空' } as const);
       if (!reading) throw new Error(`没读到这一笔的账本：${item.run.id}`);
+      if (reading.state === 'none' && now.getTime() - item.run.endedAt.getTime() >= NONE_SETTLE_MS) {
+        if (
+          await deps.fill(
+            item.run.id,
+            { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 },
+            now,
+            `${meterWindowNote()}：${reading.detail}`,
+          )
+        )
+          zeroed += 1;
+        continue;
+      }
       if (reading.state === 'settled') {
         const u = reading.usage;
         if (
@@ -217,6 +269,7 @@ async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
               ...(u.costUsd !== undefined ? { costUsd: u.costUsd } : {}),
             },
             now,
+            meterWindowNote(),
           )
         ) {
           filled += 1;
@@ -228,6 +281,36 @@ async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
       await deps.note(item.run.id, meterNote(reading, item.run, now), now);
       continue;
     }
+    if (item.kind === 'reread') {
+      const reading = item.window ? readingOf.get(`reread:${item.run.id}`) : undefined;
+      if (!reading) throw new Error(`没读到这一笔的重读账本：${item.run.id}`);
+      if (reading.state === 'settled' || reading.state === 'none') {
+        const usage =
+          reading.state === 'settled'
+            ? {
+                inputTokens: reading.usage.inputTokens,
+                outputTokens: reading.usage.outputTokens,
+                cacheReadTokens: reading.usage.cacheReadTokens,
+                cacheWriteTokens: reading.usage.cacheWriteTokens,
+                ...(reading.usage.costUsd !== undefined ? { costUsd: reading.usage.costUsd } : {}),
+              }
+            : { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd: 0 };
+        const detail = reading.state === 'none' ? reading.detail : '改读法之前定案的这一笔已按新读法重读';
+        const note = `${meterWindowNote()}：${detail}${USAGE_REREAD_MARK}`;
+        if (await deps.fill(item.run.id, usage, now, note)) {
+          if (reading.state === 'none') zeroed += 1;
+          else filled += 1;
+        }
+        continue;
+      }
+      unread.push(`${item.run.model}（${item.run.id}）：${reading.detail}`);
+      await deps.note(
+        item.run.id,
+        `${USAGE_GAVE_UP_PREFIX}改读法之前定案的这一笔按新读法重读了一次，还是读不成，不再补；这一笔的用量留空（不是 0）：${reading.detail}${USAGE_REREAD_MARK}`,
+        now,
+      );
+      continue;
+    }
     const reading = item.window ? readingOf.get(`tail:${item.run.id}`) : undefined;
     if (item.window && !reading) throw new Error(`没读到这一笔的尾巴：${item.run.id}`);
     if (reading?.state === 'pending') {
@@ -236,15 +319,17 @@ async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
     }
     const add = reading?.state === 'settled' ? tailAdd(item.run, reading) : null;
     const note =
-      reading?.state === 'unknown' && reading.detail !== METER_NO_CALLS_DETAIL
+      reading?.state === 'unknown' && !reading.noBilledCalls
         ? `${USAGE_TAIL_PREFIX}没读成：${reading.detail}`
         : meterWindowNote();
     if (await deps.fillTail(item.run.id, add, note, now)) filled += 1;
   }
   deps.log('info', '用量补记这一轮', {
-    candidates: pending.length,
+    candidates: fresh.length,
     tails: tailRows.length,
+    rereads: rereadIds.size,
     filled,
+    zeroed,
     waiting,
     unread: unread.length,
   });
@@ -253,10 +338,10 @@ async function round(deps: UsageBackfillJobDeps): Promise<ScheduleResult> {
       outcome: 'partial',
       why: `${unread.length} 笔用量读不成（原因已写进这几笔）：${unread.slice(0, 5).join('；')}${unread.length > 5 ? '……' : ''}`,
       scanned: work.length,
-      found: filled,
+      found: filled + zeroed,
     };
   }
-  return { outcome: 'ok', scanned: work.length, found: filled };
+  return { outcome: 'ok', scanned: work.length, found: filled + zeroed };
 }
 
 /**

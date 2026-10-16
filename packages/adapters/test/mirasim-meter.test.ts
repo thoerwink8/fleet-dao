@@ -116,9 +116,11 @@ describe('meterReadingFrom：一次会话的中转计量', () => {
   it('带这个会话号的行认不出、token 数认不出、一次计费调用都没有：读不成', () => {
     expect(meterReadingFrom(`{"id":"${SESSION}:x",`, WINDOW).state).toBe('unknown');
     expect(meterReadingFrom(call({ input: -1 }), WINDOW).state).toBe('unknown');
+    // 只看用量账本分不出没调用还是没记上：带 noBilledCalls，readMirasimMeter 再拿流量记录核（#2675）
     expect(meterReadingFrom('', WINDOW)).toEqual({
       state: 'unknown',
       detail: 'Mirasim 用量账本里没有这个会话在这一笔起止之间的计费调用',
+      noBilledCalls: true,
     });
     expect(meterReadingFrom(call(), { ...WINDOW, sessionKey: 'claude:不是uuid' }).state).toBe('unknown');
   });

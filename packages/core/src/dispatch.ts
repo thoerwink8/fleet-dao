@@ -2,7 +2,7 @@
 // （familyGate）、没贴「本机做」（localGate）、本仓工作流用 GITHUB_TOKEN 开的单（isGithubActionsAuthor），加上认版本的几个纯函数
 // （milestoneVersion、currentVersion，排序、巡检、闲置清理在用）。
 // 「挂在当前版本上」和「未排期的不碰」#1336 起不再是拉单的准入闸（autoDispatchGate 删了）：引擎自己按依据挑单，挂不挂当前版本只影响
-// 排序（决定 0031 改写）；versionGate 留给点名派单（dispatch-issue.ts）当就绪度闸。原来还有「开关、开单时间」那一道
+// 排序（决定 0031 改写）；点名派单（dispatch-issue.ts）原来的「版本这一道」也删了（#2683）。原来还有「开关、开单时间」那一道
 // （dispatchDecision）和「人明说交给 fleet」（handoverDecision），随旧接活一起删了（#901 审查：只有测试在引用）。
 // 读库、读 GitHub、起工作流是外壳的事，这里只判。
 
@@ -36,55 +36,12 @@ export function currentVersion(
   return best;
 }
 
-/** 这张单此刻挂在哪个里程碑、仓里还开着哪些里程碑（GitHub 上现读：计划以 GitHub 为准）。 */
+/** 这张单此刻挂在哪个里程碑、仓里还开着哪些里程碑（GitHub 上现读：计划以 GitHub 为准）。拉单排序用。 */
 export interface IssueMilestones {
   /** 没挂（未排期）是 null。 */
   milestone: MilestoneRef | null;
   /** 仓里还开着的全部里程碑（不只 v 开头的）。 */
   openMilestones: readonly MilestoneRef[];
-}
-
-export type VersionGate =
-  | { ok: true; version: number; milestone: string }
-  | { ok: false; reason: 'unscheduled' | 'not_current_version' | 'version_unreadable'; why: string };
-
-/**
- * 版本这一道：这张单是不是挂在当前版本上。引擎拉单从 #1336 起不用它了（挂不挂当前版本只影响排序）；点名派单
- * （packages/engine/src/jobs/dispatch-issue.ts）还用它做就绪度闸，所以留着。
- * - 没挂里程碑：unscheduled；
- * - 挂在别的版本上、挂的里程碑已经关了：not_current_version；
- * - 挂的里程碑认不出版本号（不是 v<N> 开头）：version_unreadable，算没查成，不当成当前版本。
- * 按里程碑编号对上还开着的那份（标题以现读的为准），再比版本号：两个还开着的里程碑版本号一样（不该有），都算当前版本。
- */
-export function versionGate(plan: IssueMilestones): VersionGate {
-  const current = currentVersion(plan.openMilestones);
-  const now = current
-    ? `当前版本是「${current.milestone.title}」`
-    : '现在没有还开着的 v<N> 里程碑，没有当前版本';
-  const mine = plan.milestone;
-  if (mine === null) {
-    return { ok: false, reason: 'unscheduled', why: `没挂里程碑（未排期），引擎不碰；${now}` };
-  }
-  const open = plan.openMilestones.find((m) => m.number === mine.number);
-  if (!open) {
-    return {
-      ok: false,
-      reason: 'not_current_version',
-      why: `挂在已经关了的里程碑「${mine.title}」上，不是当前版本；${now}`,
-    };
-  }
-  const version = milestoneVersion(open.title);
-  if (version === undefined) {
-    return {
-      ok: false,
-      reason: 'version_unreadable',
-      why: `没查成：里程碑「${open.title}」认不出版本号（版本要写成「v<N> 一句目标」），不当成当前版本`,
-    };
-  }
-  if (!current || version !== current.version) {
-    return { ok: false, reason: 'not_current_version', why: `挂在「${open.title}」上，不是当前版本；${now}` };
-  }
-  return { ok: true, version, milestone: open.title };
 }
 
 // —— 母单、子单这一道 ——

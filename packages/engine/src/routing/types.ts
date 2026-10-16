@@ -1,6 +1,13 @@
 // 选路的输入与结果。输入由引擎的 pickRoute 端口从库里取齐（候选路由、熔断、战绩），结果只有三种：派、等、派不出。
 // 时刻一律 ISO 字符串（和熔断一样），认不出就抛 RoutingInputError，不当成「没有」。
-import type { HostId, OrgKind, QuotaWindowKind, RouteProbeState, StageKind } from '@fleet-dao/shared';
+import type {
+  HostId,
+  ModelStrength,
+  OrgKind,
+  QuotaWindowKind,
+  RouteProbeState,
+  StageKind,
+} from '@fleet-dao/shared';
 import type { RoutingPolicyInput } from './policy.ts';
 
 /**
@@ -111,6 +118,11 @@ export interface RouteFacts {
   /** 模型目录的显示名，例如 Opus 5.5（硬禁令也按它认 Fable）。 */
   modelName: string;
   family: string;
+  /**
+   * 模型的强弱档（models.strength，目录独占，决定 0099）。同一个模型的路由一定相同。不给或 null = 没标：
+   * 不按强弱档挪位、不参加同档分流，和以前一样。不是这张单的派工档（ChooseRouteInput.tier）。
+   */
+  strength?: ModelStrength | null;
   /**
    * 作者族（db 的 authorFamilyOf）：目录记成 unclassified、按模型 id 开头认得出的那一族（`cursor:gpt-…` 算 gpt）。
    * 「只派别家」的避让按它认；不给按 family 认（测试、老调用方）。
@@ -275,6 +287,11 @@ export interface ChooseRouteInput {
   modelTierTracks?: ModelTierTrackFacts[];
   /** [0, 1) 的随机数，试探用；由工作流经 decide 生成、记进历史。试探开着时必须给。 */
   draw?: number;
+  /**
+   * 探索的种子（决定 0099）：这张单的编号（tasks.id）。按它算出 [0, 1) 里的数，同一张单怎么重选都一样；
+   * 探不探、探哪个由它定。不给 = 不探索（老输入、对账这类没有单的选路）。
+   */
+  exploreSeed?: string;
   now: string;
   /** 缺的项取默认。trackScore、pace 可以只给要改的那几项。 */
   policy?: RoutingPolicyInput;
@@ -320,6 +337,10 @@ export interface Block {
  * track-score：这个模型的动手战绩分。按档排时是这一档的质量下界和每段分钟；byTier 关掉时是每单期望分钟和一轮做成率。
  *   按它在模型之间挪了位置也写在这里。
  * poor-one-round：一轮做成率明显差，不进这个用途（别的都派不了、也不是只差空位时兜底）。只在 byTier 关掉时有。
+ * strength-first：重活先给强档（强档的模型提到前面；别的档写「排在强档后面」）。
+ * strength-yield：强档这个模型的池超前时间进度够多，这一单让给下一档。
+ * explore：探索，把样本少的强档模型提到第一，攒战绩。
+ * strength-pool：同档分流，和同档相邻的模型合成一组按池子消耗进度排，挪到了同档别的模型前面。
  */
 export type Nudge =
   | 'fast-reset'
@@ -328,7 +349,11 @@ export type Nudge =
   | 'poor-record'
   | 'quota-unknown'
   | 'track-score'
-  | 'poor-one-round';
+  | 'poor-one-round'
+  | 'strength-first'
+  | 'strength-yield'
+  | 'explore'
+  | 'strength-pool';
 
 /** 每条路由的判定，按它写「这次为什么派 / 不派它」。 */
 export interface RouteVerdict {

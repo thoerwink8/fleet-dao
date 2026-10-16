@@ -173,6 +173,7 @@ export const toModel = (r: typeof models.$inferSelect): Model =>
     family: r.family,
     displayName: r.displayName,
     retiredAt: isoOpt(r.retiredAt),
+    strength: opt(r.strength),
   });
 
 export const toRoute = (r: typeof routes.$inferSelect): Route =>
