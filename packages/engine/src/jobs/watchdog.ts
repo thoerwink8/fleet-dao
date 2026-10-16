@@ -18,7 +18,7 @@
 //   最近一次跑全之后连着 3 次以上 partial / failed、且跨过 2 小时的报一张卡（键 watchdog:red:…），已经被上面「没跑成 / 停了」报过的任务不重复报。
 // - 同一轮还看「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来，对账只管和 GitHub 对账）：jobs/watchdog-quota.ts，
 //   键还是 reconcile:quota:<池>，只读库。
-// - 同一轮还看「发版要人看」「健康页（/healthz）非 200 持续 > 10 分钟」（jobs/release-watch.ts，法国 2026-10-14 发版失败后漏报）：
+// - 同一轮还看「发版卡住（进度停在 running 超过 70 分钟）」「健康页（/healthz）非 200 持续 > 10 分钟」（jobs/release-watch.ts，法国 2026-10-14 发版失败后漏报）：
 //   键 watchdog:release:…、watchdog:healthz:…，读法国的发布目录和 /healthz（real/watchdog.ts）；和上面「连着没跑全」互不相干。
 // - 同一轮还看「提醒真的推到飞书了」（jobs/watchdog-push.ts）：推送渠道自己坏了靠推送报不出来，键 watchdog:push:feishu、进「要你拍」。
 // - 也看「今天的每日简报送到了」（jobs/watchdog-brief.ts）：09:00 以后没送到报 watchdog:brief:<北京日期>（卡住报警），送到了自己撤。
@@ -494,7 +494,7 @@ async function retireOthers(
 }
 
 /**
- * 「发版要人看」「健康页非 200 持续 > 10 分钟」这一部分：报该报的、撤不用再报的。读不到记没查成，开着的一条都不撤。
+ * 「发版卡住」「健康页非 200 持续 > 10 分钟」这一部分：报该报的、撤不用再报的。读不到记没查成，开着的一条都不撤。
  * 这台不是法国（facts 回 null）整块不看，也不问 /healthz。
  */
 async function releaseWatchRound(
@@ -519,14 +519,14 @@ async function releaseWatchRound(
   if (rel.kind === 'alert') {
     found += 1;
     wantedRelease.add(rel.key);
-    await raise(rel, '发版要人看');
+    await raise(rel, '发版卡住');
   }
   await retireOthers(
     s,
     RELEASE_ATTENTION_ALERT_PREFIX,
     wantedRelease,
-    '发版现在不用人看了（最近一次发版成功，或进度记录收尾了）',
-    '发版要人看',
+    '发版现在没有卡住的了（进度记录收尾了；发版没成由发版接活脚本那一条报）',
+    '发版卡住',
   );
 
   // 健康页：问一次；非 200 记第一次的时刻，持续过了 HEALTHZ_DOWN_MS 才报；200 清掉记的时刻

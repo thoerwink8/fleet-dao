@@ -40,7 +40,7 @@ n AS (SELECT count(*)::int AS deleted FROM dropped)
 INSERT INTO "audit_log" ("actor_kind", "actor_id", "action", "target", "reason", "via", "after")
 SELECT
   'engine',
-  'migration:0074',
+  'migration:0075',
   'catalog.prune-routes',
   'routes',
   '删掉从没开过、没跑过、没被引用的路由',
