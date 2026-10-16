@@ -1103,7 +1103,7 @@ export async function invokeVerifier(
         ...verdicts.flatMap((v) => v.notes.slice(1).map((n) => `${v.family}：${n}`)),
       ].join('；'),
       round: parsed.round,
-      session: verdicts[1]!.session,
+      session: verdicts[1]?.session,
       ...extras(verdicts),
     };
   }
