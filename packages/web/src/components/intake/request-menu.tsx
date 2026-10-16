@@ -38,6 +38,7 @@ const DONE_WORDS: Partial<Record<MenuAction, string>> = {
   pin: '已置顶',
   unpin: '已取消置顶',
   withdraw: '已撤回到讨论中',
+  reopen: '已重开，回到讨论中',
   archive: '已归档',
   unarchive: '已取消归档',
   restore: '已恢复，回到原来的地方',
