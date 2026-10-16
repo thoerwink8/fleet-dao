@@ -6,7 +6,7 @@
 // 开单前先查同仓开着的单和最近合并的 PR 里有没有可能重复的（#995 拍 3，../issue-similar.ts）：列在开单结果后面，只提示、不影响退出码。
 // 带 --local 的开完当场领单（决定 0096，../work.ts 的 pnpm work claim）：登记进法国、带租约、打出分支名；没登记上退出码 1，照报的话补登。
 import { fileURLToPath } from 'node:url';
-import { ghRunner, issueNew } from '../issue-new.ts';
+import { describeOrder, ghRunner, issueNew } from '../issue-new.ts';
 import { pokeFrance } from '../issue-poke.ts';
 import { renderSimilar, similarIssues } from '../issue-similar.ts';
 import { describeOffDiff, OFF_DIFF_REWRITE } from '../off-diff-acceptance.ts';
@@ -25,7 +25,7 @@ try {
     r.milestone,
     ...(r.parent === undefined ? [] : [`挂在母单 #${r.parent} 下面`]),
     ...(r.local ? ['贴了「本机做」：接活不自动派'] : []),
-    ...(r.order === undefined ? [] : [`排进先后第 ${r.order.position} 位（共 ${r.order.count} 张）`]),
+    ...(r.order === undefined ? [] : [describeOrder(r.order)]),
   ];
   console.log(`开了 #${r.number}（${notes.join('，')}）：${r.url}`);
   if (r.offDiff) {

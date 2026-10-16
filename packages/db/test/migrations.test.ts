@@ -697,8 +697,8 @@ describe('0037：删八张没人读写的表（只放删表语句）', () => {
   });
 });
 
-describe('0074：删老流程的会话表 session_runs 和进度表 progress_events（#2357）', () => {
-  const target = ordered.findIndex((e) => e.tag.startsWith('0074_'));
+describe('0075：删老流程的会话表 session_runs 和进度表 progress_events（#2357）', () => {
+  const target = ordered.findIndex((e) => e.tag.startsWith('0075_'));
   const exists = async (pg: PGlite, name: string) =>
     (await pg.query<{ r: string | null }>(`select to_regclass('public.${name}')::text as r`)).rows[0]?.r !==
     null;
@@ -1111,4 +1111,74 @@ describe('0073：提醒这一次挂起的时刻回填成建立时刻', () => {
       await pg.close();
     }
   });
+});
+
+describe('0074：机器人权限提醒合成每个仓一个键', () => {
+  const tag = '0074_merge_github_app_alert_keys';
+
+  it(
+    '开着的老键（github-app-missing:、github-app:agent:、github-app:engine:）撤掉并记操作记录；新键、已撤的、别的提醒不动；重跑不再动',
+    async () => {
+      const target = ordered.findIndex((e) => e.tag === tag);
+      expect(target).toBeGreaterThanOrEqual(0);
+      const sqlText = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+      expect(sqlText.toLowerCase()).not.toContain('delete');
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(`
+          insert into notifications (level, dedupe_key, title, body) values
+            ('decision', 'github-app-missing:acme/widgets', '没装', '去装'),
+            ('alert', 'github-app:agent:acme/widgets', '干活的权限不对', ''),
+            ('alert', 'github-app:engine:acme/widgets', '引擎权限不对', '缺 statuses:write'),
+            ('alert', 'github-app:acme/gadgets', '新键', '别动'),
+            ('alert', 'github-app:agent/widgets', '仓主叫 agent', '别动'),
+            ('alert', 'watchdog:release:train:abc:running', '别的', '别动');
+          insert into notifications (level, dedupe_key, title, body, resolved_at, resolved_by) values
+            ('alert', 'github-app:engine:acme/old', '已经撤过', '原来的', '2026-08-03T00:00:00Z', 'someone');
+        `);
+        await runMigration(pg, tag);
+        const rows = await pg.query<{
+          dedupe_key: string;
+          body: string;
+          resolved_at: string | null;
+          resolved_by: string | null;
+        }>(`select dedupe_key, body, resolved_at, resolved_by from notifications order by dedupe_key`);
+        const byKey = new Map(rows.rows.map((r) => [r.dedupe_key, r]));
+        for (const key of [
+          'github-app-missing:acme/widgets',
+          'github-app:agent:acme/widgets',
+          'github-app:engine:acme/widgets',
+        ]) {
+          expect(byKey.get(key)?.resolved_by, key).toBe('migration:0074');
+          expect(byKey.get(key)?.resolved_at, key).not.toBeNull();
+          expect(byKey.get(key)?.body, key).toMatch(/^已撤：已合并成每个仓一条/);
+        }
+        expect(byKey.get('github-app:engine:acme/widgets')?.body).toContain('缺 statuses:write');
+        for (const key of [
+          'github-app:acme/gadgets',
+          'github-app:agent/widgets',
+          'watchdog:release:train:abc:running',
+        ]) {
+          expect(byKey.get(key)?.resolved_at, key).toBeNull();
+          expect(byKey.get(key)?.body, key).toBe('别动');
+        }
+        expect(byKey.get('github-app:engine:acme/old')).toMatchObject({
+          body: '原来的',
+          resolved_by: 'someone',
+        });
+        const audit = await pg.query<{ n: string }>(
+          `select count(*)::text as n from audit_log where actor_id = 'migration:0074' and action = 'notification.resolve'`,
+        );
+        expect(audit.rows[0]?.n).toBe('3');
+        await runMigration(pg, tag);
+        const again = await pg.query<{ n: string }>(
+          `select count(*)::text as n from audit_log where actor_id = 'migration:0074'`,
+        );
+        expect(again.rows[0]?.n).toBe('3');
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
 });

@@ -69,7 +69,6 @@ export function testConfig(overrides: Partial<Config> = {}): Config {
     feishuOff: false,
     nodeReport: null,
     nodeKeys: {},
-    edgeWatchId: null,
     ...overrides,
   };
 }

@@ -823,7 +823,9 @@ describe('整趟走完', () => {
     // 先后段（30、10）在前，其余：20 在母单 40 前
     const order = [...out.matchAll(/^(\d+)\. #(\d+)/gm)].map((m) => Number(m[2]));
     expect(order).toEqual([30, 10, 20, 40]);
-    expect(out).toContain('#99'); // 先后段里写了、但已不在开着的单里
+    // 先后段里写了、但已不在开着的单里（#99）：发版车不再提醒，开单和每天对账自动清（#2393）
+    expect(out).not.toContain('#99');
+    expect(out).not.toContain('该清出先后段');
     expect(out).toContain('创始人原话：「发版吧」');
   });
 
