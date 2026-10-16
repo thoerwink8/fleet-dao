@@ -22,9 +22,13 @@ mirasim_run_dir() { printf '%s' "${MIRASIM_RUN_DIR//\{user\}/$1}"; } # 会话用
 
 # check_mirasim_session_unit 等 /api/health 的次数（每次间隔 1 秒）。
 # 连接被拒（curl 退出 7，刚重启还没 listen）用满 MIRASIM_HEALTH_TRIES。
-# 连上了但不回（退出 28）只用 MIRASIM_HEALTH_TIMEOUT_TRIES：每次要等满 --max-time，试太多次会把装机读回拖很长。
-MIRASIM_HEALTH_TRIES=${MIRASIM_HEALTH_TRIES:-15}
+# 连上了但不回（退出 28）只用 MIRASIM_HEALTH_TIMEOUT_TRIES：每次要等满 MIRASIM_HEALTH_MAX_TIME，试太多次会把装机读回拖很长。
+# 90 次：法国上重启后要 60 多秒才 listen（起服务时 relay-ticket、目录登记几个外网请求超时才往下走，10-16 实测 66 秒），
+# 15 次时自动档刚装完就判「没装成」。连上就停，平常不多等。
+MIRASIM_HEALTH_TRIES=${MIRASIM_HEALTH_TRIES:-90}
 MIRASIM_HEALTH_TIMEOUT_TRIES=${MIRASIM_HEALTH_TIMEOUT_TRIES:-3}
+# 每次最多等几秒：/api/health 在法国平常 0.1 秒、忙时 6–7 秒才回（10-16 实测），5 秒会把「慢」判成「没回」。
+MIRASIM_HEALTH_MAX_TIME=${MIRASIM_HEALTH_MAX_TIME:-10}
 
 # 读回：这个会话用户自己的 Mirasim 服务在不在。只看 <目录>/local-<端口>.token 恰好有一份，不读令牌内容——认不认由路由
 # 探针判（真连一次、问一句 OK）。目录不在、一份都没有：待配（还没装，不是坏了）；不止一份：判红（认不出该用哪份，只该
@@ -112,7 +116,7 @@ check_mirasim_session_unit() { # 用户 单元名 端口 [pending]
   local health rc=0 tries timeouts=0
   for ((tries = 0; tries < MIRASIM_HEALTH_TRIES; tries++)); do
     rc=0
-    health=$(curl -fsS --noproxy '*' --max-time 5 "http://127.0.0.1:$port/api/health" 2>&1) || rc=$?
+    health=$(curl -fsS --noproxy '*' --max-time "$MIRASIM_HEALTH_MAX_TIME" "http://127.0.0.1:$port/api/health" 2>&1) || rc=$?
     if ((rc == 0)); then break; fi
     if ((rc == 7)); then
       sleep 1
