@@ -658,13 +658,13 @@
     return p;
   }
   function routesPanel(h, base) {
-    const p = panel("路由", "在线的结论过了「再探间隔 + 30 分钟」算旧");
+    const p = panel("路由", "排了下一次探测、过了 20 分钟还没探算探针停了；探通了的不复探，派之前再探");
     if (!h.routes.ok) return unread(p, h.routes.why);
     const org = { carpool: "拼车池", solo: "独享池" };
     const rows = h.routes.rows.map((r) =>
       row([
         { text: r.id, small: r.orgKind ? (org[r.orgKind] ?? r.orgKind) : null },
-        { node: pill(r.stale ? "bad" : r.alive ? "ok" : "idle", r.stale ? "在线（旧）" : r.alive ? "在线" : "不在线") },
+        { node: pill(r.stale ? "bad" : r.expired ? "idle" : r.alive ? "ok" : "idle", r.stale ? "在线（探针停了）" : r.expired ? "在线（旧结论）" : r.alive ? "在线" : "不在线") },
         { text: r.stateName },
         { text: r.probedAt ? agoFrom(r.probedAt, base) : "还没探过", cls: "nowrap" },
         { text: r.inUse ? "在用" : "没用", cls: "nowrap" },

@@ -2239,6 +2239,41 @@ export function longForeground(toolInput) {
   return typeof t === 'number' && t > FOREGROUND_MAX_MS && prop(toolInput, 'run_in_background') !== true;
 }
 
+// —— 主线程不手写轮询（单 #2730）——
+// 旧会话 709bd85a 主线程挂了 46 个「for/while … sleep」后台盯梢，44 个带 2>/dev/null；最后一个 jq 把 \( 当插值报错、错误进了
+// /dev/null，循环空跑 90 分钟，会话停在它上面。技能里写「出错就退」挡不住（#2711），这里在钩子上拦：
+// Claude Code 主线程（输入不带 agent_id）的后台命令（Bash、PowerShell 带 run_in_background 或会被改成后台跑的，Monitor 一律算）里
+// 同时出现循环（while、until、for、foreach、do）和 sleep（sleep、Start-Sleep），拦下，指向 wait.mjs。
+// 子代理照放：它前台等 CI 用 gh --watch，后台命令叫醒的是它自己。别家（Codex、Gemini、Kimi、Grok、Devin）没有这套后台命令，不管。
+
+const POLL_LOOP_RE = /(?<![\w$.-])(?:while|until|for|foreach|do)(?![\w-])/i;
+const POLL_SLEEP_RE = /(?<![\w$.-])(?:sleep|start-sleep)(?![\w-])/i;
+export const POLL_LOOP_WHY =
+  'fleet-guard：主线程不手写「循环 + sleep」轮询（单 #2730：手写轮询出错被 2>/dev/null 吞掉，空跑了 90 分钟）。' +
+  '等 PR、主线 CI、单到终态用 node ~/.claude/skills/commander/scripts/wait.mjs pr <号> | main-ci | issue <号>（run_in_background，到终态才写一行，gh 出错当场退出）；' +
+  '等一条本机命令就直接后台跑它本身，完成通知会叫醒你；法国的单不盯，只看巡检的 ALERT；本机工人用完成通知，不另起监视器。';
+
+/**
+ * 主线程的后台命令是不是「循环 + sleep」的手写轮询；是就拦。
+ * @param {Record<string, unknown>} input
+ * @param {unknown} tool
+ * @returns {Block | null}
+ */
+export function pollLoopVerdict(input, tool) {
+  if (!isClaudeCodeInput(input)) return null;
+  if (typeof input.agent_id === 'string' && input.agent_id.trim() !== '') return null;
+  const toolInput = prop(input, 'tool_input');
+  const command = prop(toolInput, 'command');
+  if (typeof command !== 'string') return null;
+  const background =
+    tool === 'Monitor' ||
+    ((tool === 'Bash' || tool === 'PowerShell') &&
+      (prop(toolInput, 'run_in_background') === true || longForeground(toolInput)));
+  if (!background) return null;
+  if (!POLL_LOOP_RE.test(command) || !POLL_SLEEP_RE.test(command)) return null;
+  return block(POLL_LOOP_WHY);
+}
+
 /** 判一条钩子输入（原文）：{ code: 0 } 放行，{ code: 2, message } 拦下。 */
 
 /**
@@ -2394,6 +2429,9 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
   /** @type {Record<string, unknown>} */
   const input = isObjectLike(parsed) ? parsed : {};
   const tool = input.tool_name ?? input.toolName;
+  // 主线程的后台命令不手写「循环 + sleep」（Monitor 也算，所以放在下面只放行那几样工具之前）
+  const poll = pollLoopVerdict(input, tool);
+  if (poll) return poll;
   // 只为放行才登记的工具：这里不判
   if (typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool)))
     return { code: 0 };
@@ -2666,8 +2704,11 @@ if (isMain()) {
     // 不再给无人值守记「调了工具」：Stop 钩子改看输入里的 background_tasks。
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
     if (typeof tool === 'string') timedTool = tool;
+    // Monitor 要过 decide：主线程挂「循环 + sleep」的监视器由 pollLoopVerdict 拦（单 #2730），别的照样放行
     backgroundOnly =
-      typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
+      typeof tool === 'string' &&
+      tool !== 'Monitor' &&
+      (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }

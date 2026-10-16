@@ -12,6 +12,7 @@
 //   （重述等于让它把整张单再读一遍，返工轮的缓存读和首轮一样多）。
 // - 新开的会话（不是续的）带「已给你的文件」一节（preload.ts，决定 0093）：单子「已知的模块」列的文件原文，引擎起会话前读好放进来，
 //   省掉会话自己熟悉仓库那一大段；续的会话里早有了，不再给。
+// - 不许把命令丢到后台再结束回答（NO_BACKGROUND_RULE，#2722）：一次性会话收不到后台回调，丢后台就收场的改动留在树里没提交。
 
 import { isDispatchProbePassOnly } from '../workflows/task-support.ts';
 import { type ManualBrief, renderBrief } from './brief.ts';
@@ -34,6 +35,12 @@ export interface SegmentPromptInput {
   /** 已废（子代理提示整条链路已删）：只为 task-segment.ts 还在传它而留，不读；等 #1972 合并后随那处一起删。 */
   subagentHint?: boolean;
 }
+
+/**
+ * 一次性会话回答一结束就收场，收不到后台任务跑完的通知（#2722：丢后台就收场的那一轮改动没提交）。新会话、续会话都写。
+ */
+export const NO_BACKGROUND_RULE =
+  '不许把命令放到后台再结束回答：这是一次性会话，回答一结束就收场，收不到后台任务跑完的通知。测试、检查都在前台跑完看到结果，提交了再结束。';
 
 function clip(text: string): string {
   const t = text.trim();
@@ -60,6 +67,7 @@ export function renderResumePrompt(input: { interrupted?: string; feedback: read
       : '接着这个会话往下做：分支和工作树都没变，单子和规矩照前面的。',
     ...feedbackSection(input.feedback, '## 这一轮要改的（照着改，改完才算做完）'),
     '',
+    NO_BACKGROUND_RULE,
     '改完照旧 git add、git commit 提交，不推送、不开 PR；最后一条回复逐条一行回验收条，再加一行欠什么。',
   ];
   return out.join('\n');
@@ -87,6 +95,7 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     ...(specDir === undefined ? [] : [`- 需求文档 \`${specDir}/需求.md\` 已经在主线上，不要改它。`]),
     '- 不要新建需求文档、结果文档：需求在单子里，做成了什么写在 PR 正文里（引擎开 PR）。',
     '- 家目录里装的通用技能（~/.agents/skills、~/.claude/skills 下的 SKILL.md）这次用不上，别去读：要做的、怎么算做完都在上面。',
+    `- ${NO_BACKGROUND_RULE}`,
     '- 最后一条回复逐条一行回验收条，再加一行欠什么。',
   ];
   const interrupted = input.interrupted?.trim();

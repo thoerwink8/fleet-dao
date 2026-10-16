@@ -36,6 +36,7 @@ import {
   stamp,
   withChange,
 } from '../directives.ts';
+import { gitRunner } from '../git-runner.ts';
 import { ghRunner } from '../issue-new.ts';
 import {
   inboxPending,
@@ -55,25 +56,7 @@ const root = fileURLToPath(new URL('../../../../', import.meta.url));
 /** 敲命令的地方（pnpm 把 cwd 换成仓根，原来的在 INIT_CWD）：done 在工作树里时改那里的文件 */
 const here = process.env.INIT_CWD ?? process.cwd();
 const gh = ghRunner(root);
-const git: Git = (args, opts = {}) =>
-  new Promise((done) => {
-    const child = execFile(
-      'git',
-      args,
-      {
-        cwd: root,
-        encoding: 'utf8',
-        maxBuffer: 16 * 1024 * 1024,
-        windowsHide: true,
-        env: { ...process.env, ...(opts.env ?? {}) },
-      },
-      (err, stdout, stderr) => {
-        if (!err) return done({ code: 0, stdout, stderr });
-        done({ code: typeof err.code === 'number' ? err.code : 1, stdout, stderr: stderr || err.message });
-      },
-    );
-    if (opts.input !== undefined) child.stdin?.end(opts.input);
-  });
+const git: Git = gitRunner(root);
 const gitHere: Git = (args) =>
   new Promise((done) =>
     execFile('git', args, { cwd: here, encoding: 'utf8', windowsHide: true }, (err, stdout, stderr) =>
