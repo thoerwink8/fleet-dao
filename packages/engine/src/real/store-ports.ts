@@ -89,7 +89,13 @@ import { SEGMENT_STAGE } from '../task-contract.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
-import { type HeldPools, loadHeldPools, POOL_HOLD_PREFIX, poolHoldKey } from './pool-holds.ts';
+import {
+  type HeldPools,
+  loadHeldPools,
+  POOL_HOLD_PREFIX,
+  poolHoldKey,
+  poolHoldOptions,
+} from './pool-holds.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { RESERVATION_TTL_MS } from './task-segment.ts';
 
@@ -958,14 +964,20 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
     async raiseAlert(input) {
       // 工作流这一路（任务挂起、封号、事件数到线、全熔断……）一律记卡住报警（#2729）：挂起由指挥官点继续、放弃、重做，
-      // 不是掏新钱、删了找不回、只有人能做的事，不进「要你拍」。工作流报的 decision 也按这一级记。
+      // 不是掏新钱、删了找不回、只有人能做的事，不进「要你拍」。整池暂停是唯一例外：它要让人处理账号池，必须保留「要你拍」的选项和原因。
+      const poolId = input.dedupeKey.startsWith(POOL_HOLD_PREFIX)
+        ? input.dedupeKey.slice(POOL_HOLD_PREFIX.length)
+        : '';
+      const poolHold = poolId.length > 0;
+      const level = poolHold ? 'decision' : 'alert';
       const { id } = await upsertAlert(db, {
         dedupeKey: input.dedupeKey,
-        level: 'alert',
-        // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。
-        taskId: UUID.test(input.taskId) ? input.taskId : null,
+        level,
+        // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。整池暂停也不挂任务。
+        taskId: poolHold || !UUID.test(input.taskId) ? null : input.taskId,
         title: input.title.slice(0, 300),
         body: input.detail,
+        ...(poolHold ? { options: poolHoldOptions(poolId), reason: 'human-only' } : {}),
       });
       return { alertId: id };
     },

@@ -42,10 +42,13 @@ import type {
   DecideFlowModeInput,
   DecideFlowModeResult,
   DeliveryRead,
+  EngineStartedAt,
   GuardedPaths,
   MergeNowInput,
   MergeNowResult,
   MergeWait,
+  NoteBare401Input,
+  NoteBare401Result,
   PlanSegmentResumeInput,
   PlanSegmentResumeResult,
   ProbeAssignedInput,
@@ -65,6 +68,9 @@ import type {
   TaskSpendResult,
   WaitMergedInput,
 } from './task-contract.ts';
+
+/** 进程级启动代次：模块随 worker 进程只初始化一次。 */
+const ENGINE_STARTED_AT = new Date().toISOString();
 
 /** 端口名的全集。写成 Record 让编译器保证一个不漏（windsurf-dao#1422：假活动表缺名字，生产卡在 activity not found）。 */
 const PORT_KEYS: Readonly<Record<PortName, true>> = {
@@ -87,11 +93,16 @@ export const PORT_NAMES = Object.keys(PORT_KEYS) as PortName[];
 /** 记计时本身失败不影响干活，最多等这么久。 */
 const TIMING_WRITE_BUDGET_MS = 5_000;
 
-function portContext(ctx: Context): PortContext {
+function portContext(ctx: Context, activity?: string): PortContext {
   const workflowId = ctx.info.workflowExecution?.workflowId;
   return {
     signal: ctx.cancellationSignal,
-    heartbeat: (details?: unknown) => ctx.heartbeat(details),
+    heartbeat: (details?: unknown) =>
+      ctx.heartbeat({
+        ...(details && typeof details === 'object' ? details : {}),
+        engineStartedAt: ENGINE_STARTED_AT,
+        ...(activity ? { activity } : {}),
+      }),
     attempt: ctx.info.attempt,
     lastHeartbeat: ctx.info.heartbeatDetails,
     ...(workflowId !== undefined ? { workflowId } : {}),
@@ -159,7 +170,7 @@ function timed(name: string, handler: Handler, record: EnginePorts['recordTiming
     let outcome: ActivityTiming['outcome'] = 'ok';
     let errorCode: string | undefined;
     try {
-      return await handler(input, portContext(ctx));
+      return await handler(input, portContext(ctx, name));
     } catch (error) {
       if (error instanceof CancelledFailure || ctx.cancellationSignal.aborted) {
         outcome = 'cancelled';
@@ -256,6 +267,8 @@ export interface EngineJobs {
  * 的活动明确报 TASK_NOT_CONFIGURED（不重试），不装作做过。
  */
 export interface EngineTasks {
+  /** 当前 worker 的进程启动时刻；只读、无业务副作用。 */
+  engineStartedAt?: (input: { schemaVersion: 1 }, ctx: PortContext) => Promise<EngineStartedAt>;
   readTaskBrief?: (input: ReadTaskBriefInput, ctx: PortContext) => Promise<TaskBriefResult>;
   runSegment?: (input: RunSegmentInput, ctx: PortContext) => Promise<RunSegmentResult>;
   readDelivery?: (input: ReadDeliveryInput, ctx: PortContext) => Promise<DeliveryRead>;
@@ -275,12 +288,15 @@ export interface EngineTasks {
   selfCheck?: (input: SelfCheckInput, ctx: PortContext) => Promise<SelfCheckResult>;
   /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
   taskSpend?: (input: TaskSpendInput, ctx: PortContext) => Promise<TaskSpendResult>;
+  /** 只凭 HTTP 401 的共享记号：所有任务一起数，短时间里第二次才停池。 */
+  noteBare401?: (input: NoteBare401Input, ctx: PortContext) => Promise<NoteBare401Result>;
   /** 定这张单走三段还是全程（#2826，flow-mode.ts）：读标签、开关、仓档案，写一次分组记录。读不到抛。 */
   decideFlowMode?: (input: DecideFlowModeInput, ctx: PortContext) => Promise<DecideFlowModeResult>;
 }
 
 /** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
 const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
+  engineStartedAt: true,
   readTaskBrief: true,
   runSegment: true,
   readDelivery: true,
@@ -294,6 +310,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   segmentSettled: true,
   selfCheck: true,
   taskSpend: true,
+  noteBare401: true,
   decideFlowMode: true,
 };
 export const TASK_ACTIVITY_NAMES = Object.keys(TASK_ACTIVITY_KEYS) as (keyof EngineTasks)[];
@@ -377,6 +394,10 @@ export function createActivities(
   out.probeAssignedRoute = timed('probeAssignedRoute', (input) => runProbeAssigned(jobs, input), record);
   out.releaseReservation = timed('releaseReservation', (input) => runReleaseReservation(jobs, input), record);
   for (const name of TASK_ACTIVITY_NAMES) {
+    if (name === 'engineStartedAt') {
+      out[name] = timed(name, async () => ({ schemaVersion: 1, startedAt: ENGINE_STARTED_AT }), record);
+      continue;
+    }
     out[name] = timed(
       name,
       async (input, ctx) => {

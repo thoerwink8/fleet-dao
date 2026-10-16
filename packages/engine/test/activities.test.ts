@@ -43,6 +43,14 @@ describe('活动外壳', () => {
     ).toEqual(Object.keys(ACTIVITY_PROFILE).sort());
   });
 
+  it('引擎启动代次是当前 worker 进程内稳定的时刻', async () => {
+    const activities = createActivities(createFakeWorld().ports);
+    const first = await envWith().run(activities.engineStartedAt, { schemaVersion: 1 as const });
+    const second = await envWith().run(activities.engineStartedAt, { schemaVersion: 1 as const });
+    expect(first).toMatchObject({ schemaVersion: 1, startedAt: expect.any(String) });
+    expect(second).toEqual(first);
+  });
+
   it('每次尝试记一笔：排队（排进队列 → 开始）和干活（开始 → 结束）分开', async () => {
     const world = createFakeWorld({ delayMs: { createWorktree: 60 } });
     const activities = createActivities(world.ports);

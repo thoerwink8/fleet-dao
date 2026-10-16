@@ -12,6 +12,7 @@ import (
 var transientRetryDelay = 50 * time.Millisecond
 
 // retrySleep 是重读前的等待；测试换掉它，在等待那一刻同步完成替换，不靠真睡。
+// 另起 goroutine 睡几十毫秒再替换会跟调度抢：150ms 的重试窗口耗尽时读到的仍是半截。
 var retrySleep = time.Sleep
 
 const transientRetries = 3

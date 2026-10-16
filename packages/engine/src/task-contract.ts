@@ -220,6 +220,12 @@ export type SegmentEvidence = Pick<
   'code' | 'message' | 'exitCode' | 'httpStatus' | 'resetsAt'
 > & { quotaExhausted: boolean };
 
+/** 当前活动所在的引擎进程启动时刻，用来核对超时活动是不是被重启丢掉。 */
+export interface EngineStartedAt {
+  schemaVersion: 1;
+  startedAt: string;
+}
+
 /**
  * 动手会话脱开引擎跑着、引擎要走了（停机信号：发版切版本、重启）时这一段的结局（#2238）：会话没停，接着在自己的 scope 里跑、往
  * 收发目录写；工作流隔一小会儿带上 attach 再调一次 runSegment，由下一个引擎从文件接回、等它收场。runs 那一行不收、不记账。
@@ -516,6 +522,21 @@ export interface TaskSpendInput {
   taskId: string;
   /** ISO 时刻。当前这一代的起算时间；不给就整张单累计。 */
   since?: string;
+}
+
+/**
+ * 记下这个池这一次只凭 HTTP 401，并回答窗口里是不是已经有过一次（别的任务记的也算）。
+ * claim 重试时不变：同一次活动重试不会把自己数成第二次。now 是工作流时间（ISO）。
+ */
+export interface NoteBare401Input {
+  schemaVersion: 1;
+  poolId: string;
+  now: string;
+  claim: string;
+}
+
+export interface NoteBare401Result {
+  repeated: boolean;
 }
 
 /** 单任务 token 预算的默认值见 limits.ts 的 DEFAULT_TASK_TOKEN_BUDGET。 */
