@@ -1630,6 +1630,17 @@
         "message": "引擎叫停（看门狗：会话 40 分钟没有心跳）"
       },
       "expect": { "action": "retry", "rule": "AB1", "routeOutcome": "fail" }
+    },
+    {
+      "id": "X114",
+      "provenance": "observed",
+      "origin": "法国引擎监督 2026-10-16 #2750/#2753：opus-5.5@mirasim 段以 failed 收场，原因含 API Error: 503 This model is temporarily unavailable。任务行仍 running、没有开着的会话。不是别的 503（S27 仍是 UP1）",
+      "evidence": {
+        "hostId": "mirasim",
+        "code": "agent_error",
+        "message": "API Error: 503 This model is temporarily unavailable"
+      },
+      "expect": { "action": "park", "rule": "MU1", "alert": true, "routeOutcome": "fail" }
     }
   ],
   "skipped": [
