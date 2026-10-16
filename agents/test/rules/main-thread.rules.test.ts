@@ -157,6 +157,56 @@ describe('引导先回', () => {
     expect(check(input(t))).toEqual({});
   });
 
+  it('引导随 tool_result 送达、随后一条 assistant 消息先 text 后 tool_use（同一行 content 两块）：算回了', () => {
+    const t = transcript([
+      ...turnStart(),
+      row.directive('先别动数据库'),
+      row.thinking('m2'),
+      {
+        type: 'assistant',
+        isSidechain: false,
+        message: {
+          id: 'm2',
+          role: 'assistant',
+          content: [
+            { type: 'text', text: '收到，改成只读。' },
+            { type: 'tool_use', id: 'toolu_now', name: 'Bash', input: { command: 'ls' } },
+          ],
+        },
+      },
+    ]);
+    expect(check(input(t))).toEqual({});
+  });
+
+  it('同一条引导只拦一次：上一次调用已被拒（工具结果里有拒的理由），这次放行', () => {
+    const t = transcript([
+      ...turnStart(),
+      row.directive('先别动数据库'),
+      row.thinking('m2'),
+      row.toolUse('m2', 't2'),
+      row.result('t2', 'PreToolUse:Bash hook error: 你刚收到创始人的引导『先别动数据库』：先用一句话回它'),
+      row.thinking('m3'),
+    ]);
+    expect(check(input(t))).toEqual({});
+    // 提醒过之后又来一条新引导：新的照拦
+    const t2 = transcript([
+      ...turnStart(),
+      row.directive('先别动数据库'),
+      row.toolUse('m2', 't2'),
+      row.result('t2', 'PreToolUse:Bash hook error: 你刚收到创始人的引导『先别动数据库』：先用一句话回它'),
+      row.directive('再换个做法'),
+    ]);
+    expect(check(input(t2)).deny).toContain('『再换个做法』');
+  });
+
+  it('这次的工具调用已落盘、前面没有文字：不再等落盘，直接拒', () => {
+    const t = transcript([...turnStart(), row.directive('先别动数据库'), row.toolUse('m2', 'toolu_now')]);
+    let sleeps = 0;
+    const v = lib.check(input(t), { settleMs: 1, mirasim: NO_MIRASIM, sleep: () => (sleeps += 1) });
+    expect(v.deny).toContain('『先别动数据库』');
+    expect(sleeps).toBe(0);
+  });
+
   it('没有引导：放行；后台任务的完成通知不算引导', () => {
     expect(check(input(transcript(turnStart())))).toEqual({});
     expect(check(input(transcript([...turnStart(), row.notification(), row.thinking('m2')])))).toEqual({});

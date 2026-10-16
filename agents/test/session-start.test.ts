@@ -2250,13 +2250,15 @@ describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个
   const check = (lineage: Lineage, out = rows) =>
     hook.checkProgressIssue({ cwd: fleetRepo(), git, run: run(out), mirror: HOOK, lineage });
 
-  it('本血缘的列全文叫它办；别的会话的只说条数、不列原文；无主的照列开头，写明先认领', () => {
+  it('本血缘的列编号和前 40 字叫它办（全文指到 pnpm progress read --pending）；别的会话的只说条数、不列原文；无主的照列开头，写明先认领', () => {
     const lines = check(mine);
     expect(lines).toHaveLength(3);
     expect(lines[0]).toMatch(
       /^创始人引导有 1 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 dir-a）/,
     );
-    expect(lines[0]).toContain(LONG);
+    expect(lines[0]).toContain(`32（2026-10-11 18:15）${Array.from(LONG).slice(0, 40).join('')}…`);
+    expect(lines[0]).not.toContain(LONG);
+    expect(lines[0]).toContain('pnpm progress read --pending');
     expect(lines[0]).toContain('pnpm progress done');
     expect(lines[1]).toMatch(
       /^无主的创始人引导 1 条.*33（2026-10-11 18:15）老的一条.*先认领再办：pnpm progress claim <评论号>/,
@@ -2283,7 +2285,7 @@ describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个
     const old = `32\t${H}\t〔主：dir-a〕 原话：${LONG}\n33\t${H}\t原话：老的一条\n`;
     const lines = check(mine, old);
     expect(lines[0]).toContain('归本会话');
-    expect(lines[0]).toContain(LONG);
+    expect(lines[0]).toContain(Array.from(LONG).slice(0, 40).join(''));
     expect(lines[0]).not.toContain('〔主：');
     expect(lines[1]).toMatch(/^无主的创始人引导 1 条/);
   });
