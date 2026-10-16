@@ -6,6 +6,8 @@
 //   平均轮数＝这一档窗口里合并的工作流，从开工到合并一共收场了几轮（含窗口之前的轮）。
 // - 重活 PR 新增行 p90：窗口里合并的 heavyweight 轮，收场时 PR 相对主线的新增行数的 p90；没有量到的行不算。
 // 读不到照抛，不拿空顶；窗口里一轮都没有时各占比是 null（调用方写「没有」），不是 0。
+
+import { FLOW_MODES, type FlowMode, VERIFY_REJECT_CLASSES, type VerifyRejectClass } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { ROUND_OUTCOMES, type RoundOutcome, taskRounds } from '../schema/work.ts';
@@ -22,12 +24,25 @@ export interface RoundRecord {
   firstModel?: string | null;
   addedLines?: number | null;
   endedAt?: Date;
+  /** 这一轮走的流程（#2823）；不给就是空。 */
+  flowMode?: FlowMode | null;
+  /** 冷验收拒绝的分类（#2823）：只在人工审过之后填，不给就是空。 */
+  verifyRejectClass?: VerifyRejectClass | null;
 }
 
 /** 记一轮怎么收场的。同一条工作流同一个 seq 已经记过就不动（活动重试不写第二行）。 */
 export async function recordTaskRound(db: Db, r: RoundRecord): Promise<void> {
   if (!(ROUND_OUTCOMES as readonly string[]).includes(r.outcome)) {
     throw new Error(`认不出的一轮结束类：${r.outcome}`);
+  }
+  if (r.flowMode != null && !(FLOW_MODES as readonly string[]).includes(r.flowMode)) {
+    throw new Error(`认不出的流程模式：${r.flowMode}`);
+  }
+  if (
+    r.verifyRejectClass != null &&
+    !(VERIFY_REJECT_CLASSES as readonly string[]).includes(r.verifyRejectClass)
+  ) {
+    throw new Error(`认不出的冷验收拒绝分类：${r.verifyRejectClass}`);
   }
   await db
     .insert(taskRounds)
@@ -40,6 +55,8 @@ export async function recordTaskRound(db: Db, r: RoundRecord): Promise<void> {
       tier: r.tier ?? null,
       firstModel: r.firstModel ?? null,
       addedLines: r.addedLines ?? null,
+      flowMode: r.flowMode ?? null,
+      verifyRejectClass: r.verifyRejectClass ?? null,
       ...(r.endedAt ? { endedAt: r.endedAt } : {}),
     })
     .onConflictDoNothing({ target: [taskRounds.workflowId, taskRounds.seq] });
