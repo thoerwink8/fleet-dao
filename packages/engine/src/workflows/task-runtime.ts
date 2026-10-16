@@ -144,6 +144,12 @@ export class TaskRuntime {
    */
   landSwitch = false;
   /**
+   * 上游 503 说模型暂时不可用、已经写了换路由还没派上新会话。
+   * 只在工作流内存里，不调活动。选路若只剩等、或只剩刚才那条，不进 pauseForRoute 的长睡，停下腾出名额。
+   * 派上会话或人点「继续」清掉没提交的避让时清掉。
+   */
+  modelDownLand = false;
+  /**
    * 已经在长睡里的老历史被叫醒之后置上（patched('wall-clock-switch-wake')）。
    * 下一轮再选不出就停下，不再睡第二觉。新跑的走 wall-clock-switch-lands，这一位保持假。
    */
@@ -554,6 +560,7 @@ export class TaskRuntime {
     this.infraModelIds = [];
     this.landSwitch = false;
     this.switchWake = false;
+    this.modelDownLand = false;
   }
 
   /**
