@@ -123,11 +123,8 @@ describe('现在的计划：从 GitHub 现读、打印出来', () => {
   it('版本、先后、母单和子单、未排期、已关的版本都打印出来；标题里的符号照原样，不加转义', async () => {
     const r = await run([]);
     expect(r.code).toBe(0);
-    expect(r.lines).toEqual([
-      BLOCK,
-      '',
-      '提醒：「v1 Fusion 接活」里 #48、#200 开着却没排进先后（列在「先后里没排的」）。',
-    ]);
+    // 没排进先后的照样列在「先后里没排的」，不再另出提醒（#2683）
+    expect(r.lines).toEqual([BLOCK]);
   });
 
   it('输出确定：同一份数据跑两遍、接口回的顺序打乱，一字不差', async () => {
@@ -146,6 +143,23 @@ describe('现在的计划：从 GitHub 现读、打印出来', () => {
     const r = await run(['--']);
     expect(r.code).toBe(0);
     expect(r.lines[0]).toBe(BLOCK);
+  });
+
+  it('先后里的单挪出了这个版本还开着（#2683）：跳过它照样打印，末尾提醒一句，不整个报错', async () => {
+    // #43 开着、在未排期（挪走了，或者本来就写错）：从前 readPlan 报「不是这个版本里的单」整个失败
+    const w = world();
+    const v1 = w.milestones.find((m) => m.title === V1);
+    if (v1) v1.description = v1.description.replace('3. #199', '3. #43\r\n4. #199');
+    const r = await run([], { w });
+    expect(r.code).toBe(0);
+    expect(r.lines).toEqual([
+      BLOCK,
+      '',
+      '提醒：「v1 Fusion 接活」的先后里写着 #43，可它们不是这个版本里的单，已跳过（每天对账会从说明里清掉）。',
+    ]);
+    const plan = await readPlan(fakeReader(w).reader);
+    expect(plan.dropped).toEqual([{ milestone: V1, numbers: [43] }]);
+    expect(plan.open[0]?.ordered.map((i) => i.number)).toEqual([169, 191, 199]);
   });
 
   it('没有开着的版本：写明上一个已关，照样打印', async () => {
@@ -219,13 +233,6 @@ describe('现在的计划：读不到、认不出一律退出码 2，不打印�
     const v0 = w.milestones.find((m) => m.title === V0);
     if (v0) v0.description = '试跑';
     refused(await run([], { w }), '里程碑「v0 试跑」：说明里没有先后标记');
-  });
-
-  it('先后里的单不在这个版本里（没挂这个里程碑，或者是 PR）', async () => {
-    const w = world();
-    const v1 = w.milestones.find((m) => m.title === V1);
-    if (v1) v1.description = order(169, 191, 199, 43);
-    refused(await run([], { w }), '里程碑「v1 Fusion 接活」的先后里有 #43，可它不是这个版本里的单');
   });
 
   it('先后里排了子单（它的母单也在这个版本里）', async () => {

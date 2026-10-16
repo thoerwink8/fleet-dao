@@ -620,7 +620,7 @@ async function orderIntoVersion(
   } catch (e) {
     throw unordered(`gh 读回来的里程碑认不出（${message(e)}）`);
   }
-  const open = await openIssueNumbers(gh);
+  const open = await openIssueNumbers(gh, a.version.title);
   const added = addToOrder(description, a.number, a.after, open);
   if (!added.ok) throw unordered(added.problem);
   if (added.changed) {
@@ -647,9 +647,9 @@ async function orderIntoVersion(
 /** 开单回显里「排进先后」那一句：读到开着的单就只数开着的；没读到就明说没清、数里含已关的。 */
 export function describeOrder(o: NonNullable<IssueNewResult['order']>): string {
   if (!o.openKnown) {
-    return `排进先后第 ${o.position} 位（没读到开着的单，没清已关的；先后里共 ${o.count} 张，含已关的）`;
+    return `排进先后第 ${o.position} 位（没读到本版开着的单，没清已关、挪走的；先后里共 ${o.count} 张，含已关的）`;
   }
-  const cleared = o.removed.length > 0 ? `，顺手清掉 ${o.removed.length} 张已关的` : '';
+  const cleared = o.removed.length > 0 ? `，顺手清掉 ${o.removed.length} 张已关或挪走的` : '';
   return `排进先后第 ${o.position} 位（开着的共 ${o.count} 张）${cleared}`;
 }
 
@@ -657,15 +657,17 @@ export function describeOrder(o: NonNullable<IssueNewResult['order']>): string {
 const OPEN_LIST_LIMIT = 1000;
 
 /**
- * 开着的单号（不含 PR），用来清先后里已关的号（#2393）。读不到、认不出、空（刚开了一张，不可能一张都没有）、读满了都回
- * undefined：调用方照旧追加、一个号也不清，不拿「没读到」当成「全关了」。
+ * 这个版本里开着的单号（不含 PR），用来清先后里已关、已挪到别的版本的号（#2393、#2683：按全仓开着的清，挪走还开着的清不掉）。
+ * 读不到、认不出、空（刚开了一张，不可能一张都没有）、读满了都回 undefined：调用方照旧追加、一个号也不清，不拿「没读到」当成「全关了」。
  */
-async function openIssueNumbers(gh: Gh): Promise<Set<number> | undefined> {
+async function openIssueNumbers(gh: Gh, milestone: string): Promise<Set<number> | undefined> {
   const r = await gh([
     'issue',
     'list',
     '--state',
     'open',
+    '--milestone',
+    milestone,
     '--limit',
     String(OPEN_LIST_LIMIT),
     '--json',

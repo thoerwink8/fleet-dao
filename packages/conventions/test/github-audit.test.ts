@@ -170,14 +170,14 @@ describe('GitHub 对账：版本里程碑说明里的先后', () => {
     expect(r.notQueried).toEqual([]);
   });
 
-  it('开着的单没排进先后：报', async () => {
+  it('开着的单没排进先后：不报（拉单、发版车把没排进先后的排后面照样拉，#2683 删了这条）', async () => {
     const r = await audit(
       editWorld((w) => {
         w.issues.push(issue(70, { milestone: V1 }));
       }),
     );
-    expect(r.findings).toEqual([expect.objectContaining({ issue: 70 })]);
-    expect(r.texts[0]).toContain('#70 开着，挂在「v1 Fusion 接活」里却没排进先后');
+    expect(r.findings).toEqual([]);
+    expect(r.notQueried).toEqual([]);
   });
 
   it('pnpm issue:new 开单那一刻写进先后的（addToOrder 写的样子，排末尾和 --order-after 各一张）：判已排进，不报（#807）', async () => {
@@ -197,14 +197,31 @@ describe('GitHub 对账：版本里程碑说明里的先后', () => {
     expect(r.notQueried).toEqual([]);
   });
 
-  it('先后里的单不在这个版本里：报', async () => {
-    const r = await audit(
+  it('先后里的单挪出了这个版本、还开着（#2683）：不整个报错，别的几条照核；给了 writer 就从先后里清掉', async () => {
+    // #30 开着、挂在未排期：从前 readPlan 报「不是这个版本里的单」整个失败，清理也跟着不跑
+    const moved = () =>
       editWorld((w) => {
         const v1 = w.milestones.find((m) => m.title === V1);
-        if (v1) v1.description = order(10, 20, 30);
-      }),
-    );
-    expect(r.texts[0]).toContain('先后里有 #30，可它不是这个版本里的单');
+        if (v1) v1.description = `目标：做完。\n\n${order(10, 30, 20)}`;
+      });
+    const r = await audit(moved());
+    expect(r.findings).toEqual([]);
+    expect(r.notQueried).toEqual([]);
+    expect(r.checked.versions).toBe(2);
+
+    const w = moved();
+    const { reader } = fakeReader(w);
+    const writer = {
+      async setMilestoneDescription(n: number, description: string) {
+        const m = w.milestones.find((x) => x.number === n);
+        if (!m) throw new Error(`假数据里没有里程碑 ${n}`);
+        m.description = description;
+        return { ...m };
+      },
+    };
+    const cleaned = await auditGitHub(reader, NOW, writer);
+    expect(cleaned.pruned).toEqual([{ milestone: V1, removed: [30] }]);
+    expect(w.milestones[0]?.description).toBe(`目标：做完。\n\n${order(10, 20)}`);
   });
 });
 
@@ -390,7 +407,7 @@ describe('GitHub 对账：先后里已关的号直接清掉（#2393）', () => {
     const { reader: broken } = fakeReader(w, { fail: { openIssues: new Error('连不上 GitHub') } });
     const r = await auditGitHub(broken, NOW, writer);
     expect(writes).toEqual([]);
-    expect(r.notQueried[0]).toContain('读不到开着的单');
+    expect(r.notQueried).toContainEqual(expect.stringContaining('读不到版本和先后'));
   });
 
   it('【故意造出的失败】改说明失败：记没查成、带原因，不当成清好了', async () => {
