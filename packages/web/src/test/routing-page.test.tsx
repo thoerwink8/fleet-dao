@@ -260,6 +260,7 @@ describe('路由页：每一层现在活着吗', () => {
     await pickModel('Opus 5');
     expect(routeItem('r-ca-opus5').textContent).toContain('模型已下架');
     await pickModel('Opus 5.5');
+    fireEvent.click(await screen.findByRole('button', { name: '显示全部' }));
     const off = routeItem('r-rl-opus');
     expect(off.textContent).toContain('关着');
     expect(off.textContent).toContain('开关关着（这条路由在它的模型下关着）');
