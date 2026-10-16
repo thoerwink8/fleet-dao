@@ -358,6 +358,16 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
     const lines = [
       call(1, { input: 10, output: 1, cacheRead: 2, cacheWrite: 3, relayMetered: true, relayUsd: 0.5 }),
       call(0, {
+        // 原来按旧窗口已经记进整笔的、结束前 1 秒调用，尾巴不能再加一次。
+        ts: new Date(ENDED.getTime() - 1_000).toISOString(),
+        input: 90,
+        output: 90,
+        cacheRead: 90,
+        cacheWrite: 90,
+        relayMetered: true,
+        relayUsd: 9,
+      }),
+      call(0, {
         ts: new Date(ENDED.getTime() + 30_000).toISOString(),
         input: 4,
         output: 5,

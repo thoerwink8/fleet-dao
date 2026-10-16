@@ -121,7 +121,11 @@ function meterWindowFor(
     sessionKey: run.sessionId,
     since,
     until,
-    ...(kind === 'full' && run.previousEndedAt ? { notBefore: run.previousEndedAt.getTime() } : {}),
+    ...(kind === 'full'
+      ? run.previousEndedAt
+        ? { notBefore: run.previousEndedAt.getTime() }
+        : {}
+      : { notBefore: run.endedAt.getTime() }),
   };
 }
 
