@@ -1,8 +1,8 @@
 // pnpm test:changed 的判法：这次改了哪些文件、跑哪些测试（入口 bin/test-changed.ts）。引擎的交活核对只认会话里跑过它、
 // 最后一次通过（specs/164-会话内存与交活测试/）。
 // 改动 = 和 origin/main 分叉以来提交了的 + 暂存的 + 没暂存的 + 没跟踪的：会话交活前测的是自己手上的这棵树。
-// 跑哪些测试和 CI 按改动跑同一套判法（ci-plan.ts 的 planCi：改到的包和依赖它们的包、测试读的包外文件；根配置、shared、夹具、
-// deploy/ 这类改到就全跑）；要全跑、本机又不全跑时先跑的那份也从同一份判法算（ci-plan.ts 的 fallbackUnits），这里不另写
+// 跑哪些测试和 CI 按改动跑同一套判法（ci-plan.ts 的 planCi：改到的包和依赖它们的包、测试读的包外文件；根配置、shared、
+// deploy/ 这类改到就全跑；夹具只测它所在的包，跨包读由 TEST_READS 带上）；要全跑、本机又不全跑时先跑的那份也从同一份判法算（ci-plan.ts 的 fallbackUnits），这里不另写
 // 「改动落在哪」。本机不带 CI 每个 PR 都跑的整个 agents/test/（ci-plan.ts 的 ALWAYS_TESTS，一百秒上下；决定 0093 改了 #740 的
 // 「本机每次都带上」）：agents/ 只在 planCi 判它受影响时带（改到 agents/、或它的测试读的包外文件，ci-plan.test.ts 扫测试源码兜着），
 // 另外每次带两份指针检查（LOCAL_ALWAYS_TESTS），改到文档时再带「源码里写着这些文档路径」的测试（doc-readers.ts），判不出谁读时
