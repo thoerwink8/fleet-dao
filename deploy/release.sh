@@ -722,6 +722,13 @@ RELEASE_PNPM_ENV=(pnpm_config_enable_global_virtual_store=false)
 RELEASE_PNPM_INSTALL=(install --frozen-lockfile --package-import-method=copy --reporter=append-only)
 RELEASE_PNPM_WEB_BUILD=(--filter ./packages/web run build)
 
+write_release_npmrc() { # 发布目录根
+  cat >"$1/.npmrc" <<'EOF'
+enable-global-virtual-store=false
+package-import-method=copy
+EOF
+}
+
 # 构建日志的末尾原样写进发布日志：红字那一行只放得下一句，真正的报错常在几十行之前
 log_tail() { # 日志 行数
   echo "  ── 构建日志末尾 $2 行（全文 $1）──"
@@ -784,6 +791,7 @@ build_release() { # 提交号
     red "pnpm install --frozen-lockfile 失败（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
     return 1
   fi
+  write_release_npmrc "$stage"
   build_web "$stage" "$log" || return 1
   # 装完、构建完一起查（构建里的 pnpm run 也可能重装一遍依赖）
   if ! links_inside "$stage"; then

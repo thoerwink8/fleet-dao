@@ -98,11 +98,11 @@ export const DeployLagState = z.object({
     })
     .nullable()
     .optional(),
-  /** 在用那一版依赖的指纹（#2728，lib.mjs 的 depsStep）：changed 由自动发布当场报过警；unchecked 这里报。 */
+  /** 在用那一版依赖的指纹（#2728，lib.mjs 的 depsStep）：repaired 只留日报，不让 deploy_lag 变红；changed、unchecked 这里报。 */
   deps: z
     .object({
       commit: Sha,
-      result: z.enum(['ok', 'changed', 'unchecked']),
+      result: z.enum(['ok', 'repaired', 'changed', 'unchecked']),
       detail: z.string(),
     })
     .nullable()
