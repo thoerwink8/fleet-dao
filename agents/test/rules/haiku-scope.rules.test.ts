@@ -78,7 +78,50 @@ function tierProblems(defs: Record<string, string>): string[] {
   return out;
 }
 
+/**
+ * 工人的档位（创始人 2026-10-16 19:24 更正，决定 0102「创始人确认」一节）：工人默认 Sonnet、effort medium，
+ * 描述里写着窄改动编码可降 Haiku；规矩里不许出现「本机工人默认 Opus」（被撤回的决定 0103 的说法）。
+ * 线性读 SKILL.md、shared-rules.md、两份子代理定义，毛病空数组才算对。
+ */
+function workerProblems(defs: Record<string, string>, rules: Record<string, string>): string[] {
+  const out: string[] = [];
+  const worker = defs['general-purpose'] ?? '';
+  if (frontmatter(worker, 'model') !== 'claude-sonnet-5-5')
+    out.push(
+      `工人 general-purpose 的 model 是「${frontmatter(worker, 'model') ?? '没写'}」，该是 claude-sonnet-5-5`,
+    );
+  if (frontmatter(worker, 'effort') !== 'medium')
+    out.push(`工人 general-purpose 的 effort 是「${frontmatter(worker, 'effort') ?? '没写'}」，该是 medium`);
+  const description = frontmatter(worker, 'description') ?? '';
+  if (!/窄改动/.test(description) || !/haiku/i.test(description))
+    out.push('工人 general-purpose 的描述里没写「窄改动……可传 haiku 降档」');
+  for (const [file, text] of Object.entries(rules)) {
+    if (/本机工人默认\s*Opus/.test(text)) out.push(`${file} 里有「本机工人默认 Opus」（决定 0103 已撤回）`);
+  }
+  return out;
+}
+
 describe('规矩：简单的活降到 Haiku 5.5，窄改动编码三条缺一不可，effort 不低于 medium', () => {
+  it('工人是 claude-sonnet-5-5、effort medium，描述写着窄改动降 Haiku；规矩里没有「本机工人默认 Opus」', () => {
+    const rules = {
+      'agents/skills/commander/SKILL.md': SKILL,
+      'agents/shared-rules.md': read('agents/shared-rules.md'),
+    };
+    expect(workerProblems(DEFS, rules)).toEqual([]);
+  });
+
+  it('【故意造出的失败】工人换成 Opus、effort 改 high、描述删了降档、规矩写回「本机工人默认 Opus」：都查得出来', () => {
+    const worker = DEFS['general-purpose'];
+    const opus = worker
+      .replace(/^model:.*$/m, 'model: claude-opus-5-5')
+      .replace(/^effort:.*$/m, 'effort: high');
+    expect(opus).not.toBe(worker);
+    expect(workerProblems({ ...DEFS, 'general-purpose': opus }, {})).toHaveLength(2);
+    const noDesc = worker.replace(/^description:.*$/m, 'description: 工人（Sonnet 5.5，可写）');
+    expect(workerProblems({ ...DEFS, 'general-purpose': noDesc }, {})).toHaveLength(1);
+    expect(workerProblems(DEFS, { 'x.md': '本机工人默认 Opus、照一轮做完' })).toHaveLength(1);
+  });
+
   it('指挥官技能里窄改动编码恰好三条：窄、机器核对、规矩写全', () => {
     expect(narrowProblems(narrowItems(SKILL))).toEqual([]);
   });
