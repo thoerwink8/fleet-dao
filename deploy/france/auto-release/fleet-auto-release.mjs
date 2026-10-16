@@ -9,13 +9,16 @@ import {
   existsSync,
   linkSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readLive } from './config.mjs';
 import {
@@ -71,6 +74,80 @@ function gitOk(args, what, opts) {
   const r = git(args, opts);
   if (r.code !== 0) throw new Error(`${what}失败（git 退出码 ${r.code}）：${tail(r.stderr || r.stdout)}`);
   return r.stdout;
+}
+
+/**
+ * 核对发布目录里的依赖树：node_modules 下的链接只能落在这一版目录里，
+ * 入口 package.json 还要由 fleet 用户读得到。读目录、解析链接或读回身份失败都不当成树完好。
+ */
+function checkDepsTree(current) {
+  const root = `${RELEASES}/${current}`;
+  let base;
+  try {
+    base = realpathSync(root);
+  } catch (e) {
+    return { result: 'unchecked', detail: `读不出发布目录：${e.message}` };
+  }
+  const entries = new Set([`${root}/packages/api/node_modules/drizzle-orm/package.json`]);
+  let bad = '';
+  try {
+    const walk = (dir, inNodeModules) => {
+      for (const ent of readdirSync(dir, { withFileTypes: true })) {
+        const file = `${dir}/${ent.name}`;
+        if (ent.isSymbolicLink()) {
+          if (!inNodeModules && ent.name !== 'node_modules') continue;
+          let target;
+          try {
+            target = realpathSync(file);
+          } catch (e) {
+            if (e.code === 'ENOENT') {
+              bad = `链接 ${file} 是断链`;
+              return;
+            }
+            throw e;
+          }
+          const outside = relative(base, target);
+          if (outside === '..' || outside.startsWith('../') || outside.startsWith('/')) {
+            bad = `链接 ${file} 指到发布目录外的 ${target}`;
+            return;
+          }
+          if (inNodeModules) entries.add(`${file}/package.json`);
+          continue;
+        }
+        if (ent.isDirectory()) {
+          const next = inNodeModules || ent.name === 'node_modules';
+          walk(file, next);
+        } else if (inNodeModules && ent.name === 'package.json') {
+          entries.add(file);
+        }
+      }
+    };
+    walk(base, false);
+  } catch (e) {
+    return { result: 'unchecked', detail: `依赖树读不出来：${e.message}` };
+  }
+  if (bad) return { result: 'bad', detail: bad };
+  const missing = [...entries].find((file) => !existsSync(file));
+  if (missing) return { result: 'bad', detail: `入口文件不存在：${missing}` };
+  const probe = run(
+    'runuser',
+    [
+      '-u',
+      'fleet',
+      '--',
+      NODE,
+      '-e',
+      'const fs = require("node:fs"); for (const file of process.argv.slice(1)) { try { fs.accessSync(file, fs.constants.R_OK); } catch { console.log(file); process.exit(1); } }',
+      ...entries,
+    ],
+    { timeoutMs: 30_000 },
+  );
+  if (probe.code === 0) return { result: 'ok', detail: 'fleet 用户读得了依赖入口文件' };
+  if (probe.code === 1) {
+    const file = probe.stdout.trim().split('\n').at(-1) || '依赖入口文件';
+    return { result: 'bad', detail: `fleet 用户读不了 ${file}` };
+  }
+  return { result: 'unchecked', detail: `fleet 用户读回失败：${tail(probe.stderr || probe.stdout)}` };
 }
 
 /** 以 fleet 经本机 socket 连库 fleet（peer 认证，和备份任务一样）；值一律用 -v 传、SQL 里写 :'名字'，由 psql 加引号。 */
@@ -348,6 +425,9 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
   async readDeps(current) {
     return readFileSync(`${RELEASES}/${current}/node_modules/.modules.yaml`, 'utf8');
   },
+  async checkDeps(current) {
+    return checkDepsTree(current);
+  },
   /** 主线上 ci.yml 最近 CI_RUNS_PAGE 次 push 触发的运行（新的在前）：一轮只问这一次。 */
   async ciRuns() {
     const workflow = CI_WORKFLOW.split('/').pop();
@@ -434,15 +514,11 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
    * 报警（卡住报警级）：走 current 那一版 fleet-api 的 notify raise（统一写入口 upsertAlert，#2729），不直写表；同键原地更新、
    * 处理过的重新打开。正文从标准输入喂。没记上抛（lib.mjs 记着没发的，下一轮再发）。
    */
-  async alert({ key, title, body }) {
-    const r = run(
-      'bash',
-      [FLEET_API, 'notify', 'raise', '--key', key, '--title', title, '--level', 'alert'],
-      {
-        input: body,
-        timeoutMs: 60_000,
-      },
-    );
+  async alert({ key, level = 'alert', title, body }) {
+    const r = run('bash', [FLEET_API, 'notify', 'raise', '--key', key, '--title', title, '--level', level], {
+      input: body,
+      timeoutMs: 60_000,
+    });
     if (r.code !== 0)
       throw new Error(`fleet-api notify raise 退出码 ${r.code}：${tail(r.stderr || r.stdout)}`);
   },
