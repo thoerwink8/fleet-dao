@@ -16,7 +16,7 @@
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动（整套，含人工档）
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
-#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、fleet-agents.slice、清掉老机器上已删的演示版单元和脚本（#1223）、
+#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、发版接活脚本副本（#2728）、fleet-agents.slice、清掉老机器上已删的演示版单元和脚本（#1223）、
 #                                   Mirasim 常驻单元（#1274；服务端本体不在记待配，单元文件内容变了才重启）
 #                                   （不碰防火墙、sudoers、用户、/etc/fleet-dao 里的钥匙和环境文件；幂等）。自动发布每发完一版以 root
 #                                   顺带跑它（docs/ops.md 第九节「装机层」）；规矩同步不在这里，由自动发布的规矩那一步做（同一条 agents-sync）。
@@ -207,8 +207,9 @@ RETIRED_UNIT_DIR=/etc/systemd/system # 只有测试会改（#1223）
 # 已退役组件留下的令牌文件，没人再读（#2226）：fleet 命令的令牌密钥、飞书网关通行证（服务单元早不读了）、往香港发飞书网关的钥匙
 # （香港网关已删，#2184）。不备份，装机时直接删，读回核对它们不在
 RETIRED_FILES=(/etc/fleet-dao/agent-token.env /etc/fleet-dao/gateway-token.env /etc/fleet-dao/gateway-deploy.key)
-# 驾驶舱「发布到法国」按钮的接活（人工档，lib/human-tier.sh 的 setup_release_request）：后端（fleet）写请求到 RELEASE_REQUEST_DIR，
-# root 的 path 单元接活、走一趟发版，进度写在 TRAIN_DIR（root 的，fleet 写不进）。脚本是 deploy/france/release-request 的副本
+# 驾驶舱「发布到法国」按钮的接活（单元和目录是人工档，lib/human-tier.sh 的 setup_release_request）：后端（fleet）写请求到 RELEASE_REQUEST_DIR，
+# root 的 path 单元接活、走一趟发版，进度写在 TRAIN_DIR（root 的，fleet 写不进）。脚本是 deploy/france/release-request 的副本，
+# 归自动档（setup_release_request_scripts，#2728）；文件清单和 auto-release/lib.mjs 的 INSTALLED_COPIES 一样（测试核对）
 RELEASE_REQUEST_DIR=/var/lib/fleet-dao/release-request
 TRAIN_DIR=$RELEASES_DIR/.train
 RELEASE_REQUEST_LIB=/usr/local/lib/fleet-dao/release-request
@@ -934,6 +935,28 @@ setup_auto_release() {
   ensure_unit_running fleet-auto-release.timer "$unit_changed"
 }
 
+# 驾驶舱「发布到法国」按钮的接活脚本副本（自动档，#2728）：单元和请求目录归人工档（lib/human-tier.sh 的 setup_release_request），
+# 脚本本身只是 root 跑的副本、不开新口子，发完版跟着在用那一版换，不再等人重跑整套。path 单元正接着一趟时换副本不碍事：node 起来时已读进内存。
+# 要在 setup_auto_release 之后装：接活脚本用同级的 ../auto-release/lib.mjs。
+setup_release_request_scripts() {
+  step "驾驶舱「发布到法国」按钮的接活脚本（副本在 $RELEASE_REQUEST_LIB，跟着在用的版本换）"
+  local f
+  ensure_dir /usr/local/lib/fleet-dao root:root 755
+  ensure_dir "$RELEASE_REQUEST_LIB" root:root 755
+  for f in "${RELEASE_REQUEST_FILES[@]}"; do
+    put_file "$RELEASE_REQUEST_LIB/$f" root:root 644 "$(<"$DEPLOY_DIR/france/release-request/$f")"
+  done
+}
+
+readback_release_request_scripts() {
+  local f
+  for f in "${RELEASE_REQUEST_FILES[@]}"; do
+    if ! cmp -s -- "$RELEASE_REQUEST_LIB/$f" "$DEPLOY_DIR/france/release-request/$f"; then
+      red "$RELEASE_REQUEST_LIB/$f 和仓里的不一样（或没装）：重跑 bash $0 --auto-tier"
+    fi
+  done
+}
+
 # 本脚本整套跑完没红：记下装到了哪个提交（检出的 HEAD）。自动发布拿它和主线比，数人工档那几个文件（HUMAN_TIER_PATHS：
 # 防火墙、sudoers、建用户）后来改过几次，后端的 /healthz 据此标「装机脚本落后」。只记整套跑（自动档 --auto-tier 不记）。同一个提交再跑不改
 record_applied() {
@@ -1567,6 +1590,7 @@ setup_auto_tier() {
   setup_slice
   retire_old_units
   setup_auto_release
+  setup_release_request_scripts
   # Mirasim 常驻单元（#1274：只在整套装机时装，后来改的单元文件一直落不到法国）：它只是个 systemd 单元，
   # 不碰权限和钥匙；服务端本体不在就记待配、不装（待配不算红）；单元文件内容真变了才重启，会话断开只此一次。
   # 放最后，它出问题不挡前面自动发布单元的装。
@@ -1588,6 +1612,7 @@ readback_auto_tier() {
   for u in "${AUTO_RELEASE_UNITS[@]}"; do
     if ! cmp -s -- "/etc/systemd/system/$u" "$DEPLOY_DIR/france/$u"; then red "/etc/systemd/system/$u 和仓里的不一样（或没装）"; fi
   done
+  readback_release_request_scripts
   readback_mirasim_session_unit
 }
 
@@ -1635,6 +1660,7 @@ main() {
     setup_web_upload
     retire_old_units
     setup_auto_release
+    setup_release_request_scripts
     setup_release_request
     setup_agent_rules
     setup_cli_tools

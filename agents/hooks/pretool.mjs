@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { judgeCapacity, readCapacity } from './capacity.mjs';
 import {
   freshBeforeSubagent,
   SUBAGENT_BUDGET_MS,
@@ -2659,6 +2660,42 @@ export function agentModelVerdict(raw) {
   );
 }
 
+// —— 派写码工人前判本机容量（单 #2731，决定 0094）——
+// 以前「能不能派」只是一段文字，自动记忆里「最多 4 个」的旧说法在 0094 之后还被注入、照着写进了报告。现在由代码判：
+// Claude Code 的 Agent 调用，subagent_type 不是只读的那几种（斥候、设计、问 CLI 的、配状态栏的），就读一次本机的空闲内存和负载
+// （capacity.mjs），空闲内存 < 4G 或 1 分钟负载 > 核数×0.8 拦下并附读数；读不到也拦（明说没查成，不当成够）。
+// 不数在跑几个工人：不设个数上限。别家没有 Agent 工具，不管。
+
+/** 只读的子代理：不改文件、不起重测试，不判容量 */
+export const READ_ONLY_AGENTS = new Set(['Explore', 'Plan', 'claude-code-guide', 'statusline-setup']);
+
+/**
+ * 派写码工人前本机容量够不够；不够、没查成都拦（附读数或原因），够、不是写码工人、认不出输入都返回 null。
+ * @param {string} raw 钩子的原始输入
+ * @param {{ read?: () => import('./capacity.mjs').Reading }} [deps] 测试换掉读数
+ * @returns {Block | null}
+ */
+export function capacityVerdict(raw, { read = readCapacity } = {}) {
+  /** @type {unknown} */
+  let input;
+  try {
+    input = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
+  } catch {
+    return null;
+  }
+  if (!isObjectLike(input) || !isClaudeCodeInput(input)) return null;
+  if (input.tool_name !== 'Agent' && input.tool_name !== 'Task') return null;
+  const type = prop(input.tool_input, 'subagent_type');
+  if (typeof type === 'string' && READ_ONLY_AGENTS.has(type)) return null;
+  const v = judgeCapacity(read());
+  if (v.enough === true) return null;
+  const tail =
+    v.enough === null
+      ? '读不到就不当成够：先查清读数为什么读不到，或先派只读的斥候（Explore）、设计（Plan）。'
+      : '先等一个在跑的工人收口、错开重测试再派；只读的斥候（Explore）、设计（Plan）不判容量。不设个数上限（决定 0094）。';
+  return block(`fleet-guard：派写码工人前判本机容量——${v.text}。${tail}`);
+}
+
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -2695,6 +2732,12 @@ if (isMain()) {
   if (fableBlock) {
     process.stderr.write(`${fableBlock.message}\n`);
     finish(fableBlock.code);
+  }
+  // 派写码工人前判本机容量（单 #2731）：同样要在 backgroundOnly 早退之前
+  const capBlock = capacityVerdict(raw);
+  if (capBlock) {
+    process.stderr.write(`${capBlock.message}\n`);
+    finish(capBlock.code);
   }
   let backgroundOnly = false;
   try {

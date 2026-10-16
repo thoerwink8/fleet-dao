@@ -34,6 +34,8 @@ const CHECKED = [
   'hooks/git-run.mjs',
   'hooks/proxy-env.mjs',
   'hooks/unattended.mjs',
+  'hooks/capacity.mjs',
+  'hooks/queue-stop.mjs',
   'local-sessions/lib.mjs',
   'local-sessions/heartbeat.mjs',
   'local-sessions/push.mjs',

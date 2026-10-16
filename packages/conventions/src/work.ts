@@ -5,6 +5,7 @@
 //        （引擎停下等人的 stalled / parked 后端一步接手，叫停它再登记；引擎还在跑、排队的回 409，停下不领）→ 贴「本机做」→ 打出要用的分支名 local/<单号>-<短名>。
 // renew：续租（会话在 local/<单号>- 分支上动着、或开着 PR 挂着这张单，法国自己会顺延，不用手动续；跑超过 2 小时的长测试前续一下）。
 // done：做完（PR 合了）记 done；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
+// queue [--json]：本机队列（单 #2731）——本机做的开着的单，领者、心跳、开着的 PR、挂着的引导、能不能接（work-queue.ts）。只读，不碰法国。
 //
 // 改这里之前必须知道：
 // - 写法国只用本机会话心跳同一个通行证（~/.fleet-dao/local-sessions/config.json 的 url、token，pnpm local-sessions install 写的），
@@ -18,6 +19,7 @@ import { localBranchPrefix } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { LOCAL_LABEL } from './labels.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
+import { buildQueue, type LeaseRecord, type QueueDeps, renderQueue } from './work-queue.ts';
 
 /** 和 agents/local-sessions/lib.mjs 的 TOKEN_HEADER 同一个头。 */
 const TOKEN_HEADER = 'X-Fleet-Node-Token';
@@ -38,7 +40,7 @@ export type LocalClaimRequest =
     };
 
 export const WORK_USAGE =
-  '用法：pnpm work claim <单号> | pnpm work renew <单号> | pnpm work done <单号> [--failed "原因" | --release "原因"]';
+  '用法：pnpm work claim <单号> | pnpm work renew <单号> | pnpm work done <单号> [--failed "原因" | --release "原因"] | pnpm work queue [--json]';
 
 export interface ClaimsEndpoint {
   url: string;
@@ -83,6 +85,40 @@ export interface WorkDeps {
   post: ClaimsPost;
   out: (line: string) => void;
   err: (line: string) => void;
+  /** pnpm work queue 要的另外几样（git、心跳、租约、时钟）；不给 queue 就报没接上 */
+  queue?: Omit<QueueDeps, 'gh'>;
+  /**
+   * 本机记下领单租约（work-queue.ts 的 writeLease / removeLease）：法国的租约本机读不到，claim / renew 成了记一份、done 删掉，
+   * 队列靠它认「在做」。不给就不记（测试）；记不成只提示，不算领单没成。
+   */
+  leases?: {
+    write: (rec: LeaseRecord) => void;
+    remove: (repo: string, issue: number) => void;
+  };
+}
+
+/** 记租约：没接上不记；记不成提示一句，不把领单算失败 */
+function noteLease(deps: WorkDeps, fn: (l: NonNullable<WorkDeps['leases']>) => void): void {
+  if (!deps.leases) return;
+  try {
+    fn(deps.leases);
+  } catch (e) {
+    deps.err(
+      `提示：法国那边登记成了，本机租约记录没写成（${e instanceof Error ? e.message : String(e)}）；pnpm work queue 可能把这张当成可接`,
+    );
+  }
+}
+
+/** pnpm work queue [--json]：退出码 0 列出来了（没查成的部分写在 problems / 末尾），1 单或 PR 没读成 */
+async function queueCmd(rest: readonly string[], deps: WorkDeps): Promise<number> {
+  const json = rest.includes('--json');
+  const extra = rest.filter((a) => a !== '--json');
+  if (extra.length > 0) throw new Error(`认不出的参数：${extra.join(' ')}。${WORK_USAGE}`);
+  if (!deps.queue) throw new Error('pnpm work queue 没接上读 git、心跳的那几样（入口的 bug）');
+  const report = await buildQueue({ gh: deps.gh, ...deps.queue });
+  if (json) deps.out(JSON.stringify(report));
+  else for (const line of renderQueue(report)) deps.out(line);
+  return 0;
 }
 
 interface Parsed {
@@ -204,6 +240,7 @@ async function send(
 
 export async function work(argv: readonly string[], deps: WorkDeps): Promise<number> {
   try {
+    if (argv[0] === 'queue') return await queueCmd(argv.slice(1), deps);
     const p = parse(argv);
     const repo = await repoSlug(deps.gh);
     if (p.action === 'claim') {
@@ -223,6 +260,8 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
         throw new Error(`#${p.issue} 已经有开着的 PR #${other} 在做，不再领、不重复做：先看 #${other}`);
       }
       const got = await send(deps, { action: 'claim', repo, issue: p.issue, title: title.slice(0, 300) });
+      const until = got.leaseUntil;
+      if (until !== null) noteLease(deps, (l) => l.write({ repo, issue: p.issue, leaseUntil: until }));
       const label = await deps.gh(['issue', 'edit', String(p.issue), '--add-label', LOCAL_LABEL]);
       if (label.code !== 0) {
         deps.err(
@@ -237,12 +276,15 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
     }
     if (p.action === 'renew') {
       const got = await send(deps, { action: 'renew', repo, issue: p.issue });
+      const until = got.leaseUntil;
+      if (until !== null) noteLease(deps, (l) => l.write({ repo, issue: p.issue, leaseUntil: until }));
       deps.out(`续上了 #${p.issue}（租约到 ${got.leaseUntil ?? '？'}）`);
       return 0;
     }
     const outcome = p.failed !== undefined ? 'failed' : p.release !== undefined ? 'released' : 'done';
     const reason = p.failed ?? p.release;
     await send(deps, { action: 'finish', repo, issue: p.issue, outcome, ...(reason ? { reason } : {}) });
+    noteLease(deps, (l) => l.remove(repo, p.issue));
     if (outcome === 'released') {
       const label = await deps.gh(['issue', 'edit', String(p.issue), '--remove-label', LOCAL_LABEL]);
       if (label.code !== 0) {

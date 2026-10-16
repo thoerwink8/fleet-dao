@@ -25,12 +25,14 @@ import {
   CI_RUNS_PAGE,
   CI_WORKFLOW,
   HUMAN_TIER_PATHS,
+  INSTALLED_COPIES,
   MAIN_HISTORY,
   NO_SKILLS_USERS,
   PAUSE_FILE,
   parseEngineStatus,
   RELEASES,
   REPO,
+  reasonOf,
   runRound,
   STATE_FILE,
   TRAIN_MARKER,
@@ -39,20 +41,15 @@ import {
 
 const NODE = '/usr/bin/node';
 const SHA = /^[0-9a-f]{40}$/;
-// 驾驶舱按钮的接活（deploy/france/release-request，人工档）：请求目录、接活单元的两个文件、进度和暂停标记。路径同 release-request/lib.mjs。
+// 驾驶舱按钮的接活（deploy/france/release-request；单元是人工档，脚本副本是自动档）：请求目录、接活单元的两个文件、进度和暂停标记。路径同 release-request/lib.mjs。
 const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
 const REQUEST_FILE = `${REQUEST_DIR}/request.json`;
 const RECEIVER_UNIT = '/etc/systemd/system/fleet-release-request.path';
 const RECEIVER_SCRIPT = '/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs';
 /** current 那一版的 fleet-api（release continue、engine on|status；同 release-request/lib.mjs 的 FLEET_API、release.sh 的 resume_tasks）。 */
 const FLEET_API = `${RELEASES}/current/packages/api/bin/fleet-api`;
-const tail = (text, n = 3) =>
-  String(text ?? '')
-    .trim()
-    .split('\n')
-    .slice(-n)
-    .join(' ')
-    .slice(0, 400);
+/** 失败原因：认得出的关键行加尾几行（lib.mjs 的 reasonOf，#2728）。 */
+const tail = (text, n = 3) => reasonOf(text, n);
 
 function run(cmd, args, { timeoutMs = 120_000, input } = {}) {
   const r = spawnSync(cmd, args, {
@@ -254,6 +251,52 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
     } finally {
       unlinkSync(tmp);
     }
+  },
+  /**
+   * 开急修单（lib.mjs 的 emergencyStep）：current 那一版的 fleet-api emergency-issue，正文从标准输入喂；它经「引擎」机器人开单、
+   * 过卫生检查、按 key 幂等，最后一行打 { number, url, created }。退出码不是 0、回话认不出都抛（lib.mjs 报警、下一轮再试）。
+   */
+  async fileIssue({ key, title, body }) {
+    const r = run('bash', [FLEET_API, 'emergency-issue', '--key', key, '--title', title, '--json'], {
+      input: body,
+      timeoutMs: 120_000,
+    });
+    if (r.code !== 0)
+      throw new Error(`fleet-api emergency-issue 退出码 ${r.code}：${tail(r.stderr || r.stdout)}`);
+    const line = r.stdout.trim().split('\n').at(-1) ?? '';
+    let got;
+    try {
+      got = JSON.parse(line);
+    } catch {
+      throw new Error(`fleet-api emergency-issue 的回话认不出：${tail(r.stdout)}`);
+    }
+    return got;
+  },
+  /** 脚本副本和在用那一版的原件（lib.mjs 的 installedStep）：没装、在用那一版里没有的给 null；别的读不了抛。 */
+  async readInstalled(current) {
+    const read = (file) => {
+      try {
+        return readFileSync(file, 'utf8');
+      } catch (e) {
+        if (e.code === 'ENOENT') return null;
+        throw new Error(`读不了 ${file}：${e.message}`);
+      }
+    };
+    return INSTALLED_COPIES.flatMap(({ dir, src, files }) =>
+      files.map((f) => ({
+        name: `${dir}/${f}`,
+        installed: read(`${dir}/${f}`),
+        release: read(`${RELEASES}/${current}/${src}/${f}`),
+      })),
+    );
+  },
+  /** 发版进度记录原文（lib.mjs 的 supersededStep）；不在回 null，别的读不了抛。 */
+  async readTrain() {
+    return readTrainText();
+  },
+  /** 在用那一版依赖的 .modules.yaml 原文（lib.mjs 的 depsStep）；读不了抛（不在也抛：发布目录里该有）。 */
+  async readDeps(current) {
+    return readFileSync(`${RELEASES}/${current}/node_modules/.modules.yaml`, 'utf8');
   },
   /** 主线上 ci.yml 最近 CI_RUNS_PAGE 次 push 触发的运行（新的在前）：一轮只问这一次。 */
   async ciRuns() {

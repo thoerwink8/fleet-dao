@@ -281,6 +281,11 @@ export interface ChooseRouteInput {
    */
   tier?: RouteTier;
   /**
+   * 不按能力下限挡的原因（#2725）：人在驾驶舱给这张单指定了模型（人的指令，不拿下限驳回）。不给 = 照下限挡。
+   * 任务点名的路由（taskRouteId）、整段钉住（stagePinned）、钉住的行本来就不按下限挡，不用给。
+   */
+  floorWaived?: string;
+  /**
    * 各模型各档的第一段动手战绩（决定 0098）。只在 trackScore.byTier 开着、又给了 tier 时用这一档的行。
    * 不给 = 没读；给了空数组 = 读成了、这一窗没有分档战绩，不退回 modelTracks。
    */
@@ -313,7 +318,9 @@ export type BlockCode =
   | 'carpool-registry'
   | 'org-not-live'
   /** Mirasim 认不出该起哪个执行体：硬挡，不落到默认执行体。 */
-  | 'executor-unknown';
+  | 'executor-unknown'
+  /** 够不上能力下限（#2725，floor.ts 的 STRENGTH_FLOOR）：用途和派工档要的强弱档比这个模型高，硬挡。 */
+  | 'below-floor';
 
 /**
  * 等什么：slot 空位 / quota 额度清零 / breaker 熔断到点 / org 引擎切号（会话用户挂的不是这个池的组织，引擎打算切过去）/
