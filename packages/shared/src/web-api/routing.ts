@@ -10,6 +10,7 @@ import {
   RouteProbeTierSchema,
   RouteProbeTriggerSchema,
   SegmentKindSchema,
+  SegmentTierSchema,
   StageKindSchema,
 } from './enums.ts';
 import { Id, Time } from './internal.ts';
@@ -273,6 +274,26 @@ export const ManualModelResponse = z.object({
   count: z.number().int().nonnegative(),
 });
 
+/**
+ * 动手战绩的一行：一个模型在一个派工档上的第一段（和 db 的 modelTierTracks、选路用的质量下界同一份）。
+ * 一段过、单数、下界、没做成、平均分钟是路由页那张表的五列。
+ */
+export const ManualTrackRowSchema = z.object({
+  modelId: Id,
+  modelName: z.string().min(1),
+  tier: SegmentTierSchema,
+  /** 一段就做成的单数。 */
+  onePass: z.number().int().nonnegative(),
+  /** 这一档第一段动手、已到终态的单数。 */
+  tasks: z.number().int().positive(),
+  /** 收缩后的质量下界（和选路 rank.ts 的 tierQuality 同一份）。 */
+  lower: z.number().finite(),
+  /** 没做成的单数。 */
+  notDone: z.number().int().nonnegative(),
+  /** 第一段平均分钟。 */
+  avgMinutes: z.number().nonnegative(),
+});
+
 export const RoutingLayersResponse = z.object({
   /** 现算的时刻。 */
   asOf: Time,
@@ -280,6 +301,12 @@ export const RoutingLayersResponse = z.object({
   purposes: z.array(RoutingLayerPurposeSchema),
   /** 这里读不了路由两层（开发环境的内存版没有这两张表）：写明为什么，不拿空列表冒充「都没配」。 */
   unavailable: z.string().optional(),
+  /**
+   * 近 14 天动手战绩（模型 × 档）。没给 = 这一层没接上，页面不画空表。给了空数组 = 读成了、这一窗没有分档战绩。
+   */
+  manualTracks: z.array(ManualTrackRowSchema).optional(),
+  /** 战绩这一下没读成。写明为什么，不拿空表冒充「都没战绩」。 */
+  manualTracksUnavailable: z.string().optional(),
   /** 渠道名册和目录的差。没给、或给了 modelRosterUnavailable，都不能当成「都对得上」。 */
   modelRoster: ModelRosterDiffSchema.optional(),
   /** 名册这一层没接上、或这一下没读成。写明为什么。 */

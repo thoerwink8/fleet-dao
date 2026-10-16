@@ -260,6 +260,8 @@ export type ChooseModelForFamily = (family: ModelFamily) => Promise<
       routeId?: string;
       runId?: string;
       reservationId?: string;
+      /** 选路那句「为什么派它」，开跑写进 runs.route_why。不给 = 没记。 */
+      routeWhy?: string;
     }
   | { wait: string }
   | undefined
@@ -754,6 +756,7 @@ export async function invokeVerifier(
       const oneShotInput: OneShotInput = {
         ...(m.runId !== undefined ? { runId: m.runId } : {}),
         ...(m.reservationId !== undefined ? { reservationId: m.reservationId } : {}),
+        ...(m.routeWhy?.trim() ? { routeWhy: m.routeWhy.trim() } : {}),
         segment: 'verify',
         modelId: picked.modelId,
         ...(picked.channel !== undefined ? { channel: picked.channel } : {}),
