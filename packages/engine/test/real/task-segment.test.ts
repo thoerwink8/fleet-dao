@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
 import type { ChannelAttemptWrite, RouteLaunchFacts } from '@fleet-dao/db';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createEngineDrain, waitDrained } from '../../src/drain.ts';
 import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
@@ -58,9 +58,12 @@ const report = (over: Partial<HostReport> = {}): HostReport => ({
 let root: string;
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fleet-task-segment-'));
-});
-afterEach(() => {
-  rmSync(root, { recursive: true, force: true });
+  // 删这一用例自己建的目录，不读模块上的 root：后一个用例的 beforeEach 会把 root 换掉，
+  // 前一个用例若还在收场，就会把别人正在用的目录删掉。
+  const mine = root;
+  onTestFinished(() => {
+    rmSync(mine, { recursive: true, force: true });
+  });
 });
 
 const ctx = (signal = new AbortController().signal, beats?: { n: number }): PortContext => ({
@@ -96,6 +99,8 @@ function rig(
     deps?: Partial<RunSegmentDeps>;
     /** 动手会话脱开引擎跑（#2238）。 */
     handoff?: SessionHandoff;
+    /** 备树时跑 git 的执行器；不给就用本机的。 */
+    exec?: ReturnType<typeof localExec>;
   } = {},
 ): Rig {
   // 一个用例里可以起几套（各有各的镜像、树、落盘目录）
@@ -127,7 +132,7 @@ function rig(
     tree: {
       gh: m.gh as never,
       trees: ft.trees,
-      exec: localExec(),
+      exec: opts.exec ?? localExec(),
       tmpDir: join(sub, 'engine-tmp'),
       gitBin: 'git',
       shBin: 'sh',
@@ -1152,6 +1157,14 @@ describe('落盘目录清理', () => {
   });
 });
 
+/**
+ * 等这一段的会话起来（驱动收到 spec）。vi.waitFor 默认只等 1 秒，盖不住备树：真 git 钉主线在忙的 CI 上
+ * 经常超过 1 秒。等到点用例就失败，收场把临时目录删了；钉主线的 spawn 撞上已经不在的工作目录，Node 把这
+ * 报成 `spawn git ENOENT`（和 PATH 里没有 git 是同一句）。#2716
+ */
+const sessionUp = (specs: HostRunSpec[]) =>
+  vi.waitFor(() => expect(specs).toHaveLength(1), { timeout: 30_000 });
+
 describe('脱开引擎跑、引擎重启后接回（#2238：发版不再停在跑的动手会话）', { timeout: 60_000 }, () => {
   const grok = route({ hostId: 'grok', channelId: 'xai', poolId: 'grok', modelId: 'grok-4.7' });
   /** 驱动跑着、直到被叫停；放手以后永远不落定（和 detached.ts 一样）。真驱动起会话前建好收发目录。 */
@@ -1161,6 +1174,29 @@ describe('脱开引擎跑、引擎重启后接回（#2238：发版不再停在�
     return report({ facts: okFacts({ exitCode: null, killed: 'aborted' }) });
   };
 
+  it('钉主线起 git 比等会话的默认 1 秒还慢时，工作目录还在，会话照样起来', async () => {
+    const real = localExec();
+    const r = rig({
+      exec: async (command) => {
+        // 钉 origin/main 这一下故意慢过 vi.waitFor 的默认 1 秒。以前等到点就收场删目录，
+        // 随后的 spawn 撞上不在的工作目录，报 spawn git ENOENT。
+        const pinning =
+          command.argv.includes('update-ref') &&
+          command.argv.some((arg) => arg.startsWith('refs/remotes/origin/'));
+        if (pinning) await new Promise((resolve) => setTimeout(resolve, 1_500));
+        return real(command);
+      },
+      driverRun: async (spec) => {
+        commitInTree(spec);
+        return report();
+      },
+    });
+    const pending = r.run(r.input(), ctx());
+    await sessionUp(r.specs);
+    expect((await pending).ok).toBe(true);
+    expect(git(r.dir, 'rev-parse', 'origin/main')).toBe(r.m.head);
+  });
+
   it('grok 上的动手会话：引擎要走了 → 不停会话，交回 detached（runs 编号、起的时刻），不记尝试、runs 那一行不收、不在排空清单里；新引擎带 attach 接回，不建树、不开跑，结局记到原来那一行', async () => {
     const ioRoot = join(root, 'io');
     const drain = createEngineDrain();
@@ -1168,7 +1204,7 @@ describe('脱开引擎跑、引擎重启后接回（#2238：发版不再停在�
     const oldEngine = sessionHandoff(ioRoot);
     const r = rig({ route: grok, handoff: oldEngine, driverRun: runsUntilStopped, deps: { sessions } });
     const pending = r.run(r.input(), ctx());
-    await vi.waitFor(() => expect(r.specs).toHaveLength(1));
+    await sessionUp(r.specs);
     // 脱开跑的不在发布排空的在途清单里：release.sh 不给它发暂停、排空不等它；到截止也不停它
     expect(drain.inFlight()).toEqual([]);
     expect(sessions.drainStop('到了发布宽限的截止')).toEqual([]);
@@ -1225,7 +1261,7 @@ describe('脱开引擎跑、引擎重启后接回（#2238：发版不再停在�
       deps: { sessions },
     });
     const pending = r.run(r.input(), ctx());
-    await vi.waitFor(() => expect(r.specs).toHaveLength(1));
+    await sessionUp(r.specs);
     expect(drain.inFlight()).toEqual([expect.objectContaining({ runId: 'run-0002' })]);
     expect(sessions.drainStop('到了发布宽限的截止')).toEqual(['run-0002']);
     expect(await pending).toMatchObject({ ok: false, outcome: 'org_switch' });
