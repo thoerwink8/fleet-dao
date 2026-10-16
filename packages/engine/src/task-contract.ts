@@ -522,7 +522,7 @@ export interface TaskSpendResult {
    */
   estimated: number;
   /**
-   * #2830：预算按折算 token 判。折算只在活动里算（toTaskSpendResult），工作流不重算：下面这几项都是可选的，
+   * #2859：预算按输入当量判。当量只在活动里算（toTaskSpendResult），工作流不重算：下面这几项都是可选的，
    * 新活动结果带全；老历史里记的结果没有它们，工作流退回用 tokens / estimated，重放判法和原来一样。
    */
   /** 原始四样（新输入、输出、缓存读、缓存写），缺的按 0 加。 */
@@ -530,12 +530,16 @@ export interface TaskSpendResult {
   outputTokens?: number;
   cacheReadTokens?: number;
   cacheWriteTokens?: number;
-  /** 折算 token：缓存读乘 cacheReadWeight，其余乘 1。预算判超没超看它。 */
+  /** 输入当量（shared 的 inputEquivalentOf）。预算判超没超看它；四样有读不到的折不成就不给。 */
+  inputEquivalent?: number;
+  /** estimated 按同一比例折成当量后的数。 */
+  inputEquivalentEstimated?: number;
+  /**
+   * 只读，不再写：#2830 的活动结果记在这两个名下（缓存读乘 0.1 的数）。在途单的历史里还有，重放要照原样读，
+   * 所以字段留着；新结果不带。
+   */
   weighted?: number;
-  /** estimated 按同一比例折算后的数。 */
   weightedEstimated?: number;
-  /** 折算时缓存读乘的权重（写进结果，老结果换了权重也看得出当时怎么算的）。 */
-  cacheReadWeight?: number;
 }
 
 /**

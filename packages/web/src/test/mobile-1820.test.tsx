@@ -143,7 +143,7 @@ describe('任务详情手机首屏一行摘要', () => {
     fireEvent.click(summary);
     expect(summary.getAttribute('aria-expanded')).toBe('true');
     const grid = document.querySelector('[data-segment-stats] .grid') as HTMLElement;
-    expect(grid.children.length).toBe(5); // 已用时、干活合计、折算 token、输入当量、花费
+    expect(grid.children.length).toBe(4); // 已用时、干活合计、输入当量、花费（#2859 去掉了折算 token）
     expect(screen.getByText('输入当量')).toBeTruthy();
   });
 

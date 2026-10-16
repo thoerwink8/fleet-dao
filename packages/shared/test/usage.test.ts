@@ -4,8 +4,6 @@ import { describe, expect, it } from 'vitest';
 import { runBelongsToTask } from '../src/issue-workflows.ts';
 import { readSegmentRun, type SegmentRunFacts } from '../src/segment-runs.ts';
 import {
-  BUDGET_CACHE_READ_WEIGHT,
-  budgetTokensOf,
   INPUT_EQUIVALENT_WEIGHTS,
   inputEquivalentOf,
   type RunUsageFacts,
@@ -656,24 +654,5 @@ describe('一张单的各代花费', () => {
     ]);
     expect(u.total.unreadSegments).toBe(0);
     expect(u.total.missingTokens).toBe(1);
-  });
-});
-
-describe('折算 token（#2830）：缓存读乘 0.1，其余照旧乘 1', () => {
-  it('四样折成一个数：缓存读打一折，输入、输出、缓存写原样', () => {
-    expect(
-      budgetTokensOf({
-        inputTokens: 1000,
-        outputTokens: 500,
-        cacheReadTokens: 30_000,
-        cacheWriteTokens: 2000,
-      }),
-    ).toBe(1000 + 500 + 2000 + 3000);
-    expect(BUDGET_CACHE_READ_WEIGHT).toBe(0.1);
-  });
-
-  it('缺一样当 0 加（调用方另记没读到）；结果是整数', () => {
-    expect(budgetTokensOf({ cacheReadTokens: 15 })).toBe(2);
-    expect(Number.isInteger(budgetTokensOf({ inputTokens: 1, cacheReadTokens: 7 }))).toBe(true);
   });
 });

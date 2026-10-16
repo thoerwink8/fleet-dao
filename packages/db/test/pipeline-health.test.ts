@@ -273,7 +273,7 @@ describe('flowModeHealth（决定 0105：两种流程对照）', () => {
       expect(g.wilson).toBeNull();
       expect(g.durationMedianMin).toBeNull();
       expect(g.durationP90Min).toBeNull();
-      expect(g.tokensPerMerged).toBeNull();
+      expect(g.equivalentPerMerged).toBeNull();
       expect(g.rawTokensPerMerged).toBeNull();
     }
     expect(h.enough).toBe(false);
@@ -296,8 +296,8 @@ describe('flowModeHealth（决定 0105：两种流程对照）', () => {
     expect(h.three.merged).toBe(9);
     expect(h.full.durationMedianMin).toBe(60);
     expect(h.full.durationP90Min).toBe(60);
-    // 10 张单 × 一条 run × 四样各 1000，除以 6 张合并的：折算按缓存读打一折（#2830），每条 3100；原始四样相加每条 4000
-    expect(h.full.tokensPerMerged).toBe(Math.round(31_000 / 6));
+    // 10 张单 × 一条 run × 四样各 1000，除以 6 张合并的：输入当量（输入 1、缓存写 1.25、缓存读 0.1、输出 5，#2859）每条 7350；原始四样相加每条 4000
+    expect(h.full.equivalentPerMerged).toBe(Math.round(73_500 / 6));
     expect(h.full.rawTokensPerMerged).toBe(Math.round(40_000 / 6));
     expect(h.full.runsTokenUnread).toBe(0);
     expect(h.enough).toBe(false);
