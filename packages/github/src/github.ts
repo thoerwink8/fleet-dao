@@ -61,6 +61,7 @@ import {
   renewInteractionLimit,
 } from './interaction.ts';
 import { type IssuePlan, type ReadIssuePlanInput, readIssuePlan, readOpenMilestones } from './issue-plan.ts';
+import { readIssueStates } from './issue-states.ts';
 import {
   type AppendIssueBodyInput,
   type AppendIssueBodyResult,
@@ -233,6 +234,15 @@ export interface GitHub {
     repo: RepoRef;
     signal?: AbortSignal | undefined;
   }): Promise<{ number: number; title: string }[]>;
+  /**
+   * 一批单号（issue 或 PR）此刻开没开着（「引擎」机器人一次 GraphQL 问一批，号很多才分批）：拉单查正文「前置：」里写的单。
+   * PR 合了、关了都算 closed。读不到、认不出、有号查不到抛错，不拿「关了」顶。没有号不发请求。
+   */
+  readIssueStates(input: {
+    repo: RepoRef;
+    numbers: readonly number[];
+    signal?: AbortSignal | undefined;
+  }): Promise<Map<number, 'open' | 'closed'>>;
   /** 一张单此刻开没开着、关的原因（completed、not_planned……；开着是 null）。读不到、是 PR 都抛错。 */
   readIssueState(input: {
     repo: RepoRef;
@@ -389,6 +399,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     async readOpenMilestones(input) {
       return readOpenMilestones(client, input);
     },
+    readIssueStates: (input) => readIssueStates(client, input),
     readGroomFacts: (input) => readGroomFacts(deps, input),
     readIssueLabelEvents: (input) => readIssueLabelEvents(deps, input),
     readIssueComments: (input) => readIssueComments(deps, input),

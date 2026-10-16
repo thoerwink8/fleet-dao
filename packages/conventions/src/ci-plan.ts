@@ -898,25 +898,35 @@ function testsProblem(plan: CiPlan): string | undefined {
  * 「本该跑 → success、本该不跑 → skipped」，changes、docs 必须 success；有一条不对、认不出，就不通过。
  * hygiene 不在这条判定里（红了不挡，见 ALWAYS_JOBS 的注释），但 ci.yml 仍然 needs 它，check 会等它跑完。
  */
-export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines: string[] } {
+export function ciVerdict(
+  needs: unknown,
+  event?: string,
+): { ok: boolean; lines: string[]; redJobs: string[] } {
   const lines: string[] = [];
+  // 不对的 job（job id，带它这次的结果）：入口把它打成一条 ::error，check 的检查输出里就有「哪几个 job 红了」，
+  // 引擎等 CI 时读到的失败摘要（packages/github 的 failureDigest）才不是一句空的「check：failure」（#2795）
+  const redJobs: string[] = [];
   if (typeof needs !== 'object' || needs === null)
-    return { ok: false, lines: ['读不出各 job 的结果（needs）'] };
+    return { ok: false, lines: ['读不出各 job 的结果（needs）'], redJobs };
   const n = needs as Record<string, { result?: unknown; outputs?: Record<string, unknown> } | undefined>;
   let ok = true;
-  const bad = (line: string) => {
+  const bad = (line: string, job?: string) => {
     ok = false;
     lines.push(`✗ ${line}`);
+    if (job !== undefined) {
+      const r = n[job]?.result;
+      redJobs.push(`${job}（${r === undefined ? '没有结果' : String(r)}）`);
+    }
   };
   for (const job of ALWAYS_JOBS) {
     const r = n[job]?.result;
     if (r === 'success') lines.push(`✓ ${job}：success`);
-    else bad(`${job}：${r === undefined ? '没有这个 job 的结果' : String(r)}（每次都得跑且绿）`);
+    else bad(`${job}：${r === undefined ? '没有这个 job 的结果' : String(r)}（每次都得跑且绿）`, job);
   }
   const plan = parsePlan(n.changes?.outputs?.plan);
   if (typeof plan === 'string') {
     bad(plan);
-    return { ok: false, lines };
+    return { ok: false, lines, redJobs };
   }
   // test job 的矩阵铺的是 outputs.tests：必须和 plan 里核过的那份是同一份
   if (n.changes?.outputs?.tests !== JSON.stringify(plan.tests))
@@ -960,7 +970,7 @@ export function ciVerdict(needs: unknown, event?: string): { ok: boolean; lines:
     const want = expected(plan, job) ? 'success' : 'skipped';
     const r = n[job]?.result;
     if (r === want) lines.push(`✓ ${job}：${r}`);
-    else bad(`${job}：${r === undefined ? '没有这个 job 的结果' : String(r)}，本该 ${want}`);
+    else bad(`${job}：${r === undefined ? '没有这个 job 的结果' : String(r)}，本该 ${want}`, job);
   }
-  return { ok, lines };
+  return { ok, lines, redJobs };
 }

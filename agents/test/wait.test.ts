@@ -14,6 +14,12 @@ interface Io {
 }
 interface WaitLib {
   run(argv: string[], io: Io): Promise<number>;
+  stepPr(
+    gh: Gh,
+    n: number,
+    repo: string[],
+    now?: number,
+  ): { done: false } | { done: true; ok: boolean; line: string };
   MAIN_CI_WORKFLOW: string;
 }
 
@@ -78,6 +84,107 @@ describe('wait.mjs pr', () => {
   it('被关掉没合：退出码 1', async () => {
     const f = fake([pr('CLOSED')]);
     expect(await lib.run(['pr', '7'], f.io)).toBe(1);
+  });
+});
+
+describe('wait.mjs pr 同名检查只看最新那条（#2818）', () => {
+  const NOW = Date.parse('2026-10-16T12:00:00Z');
+  /** 距现在 minAgo 分钟的时刻（ISO） */
+  const at = (minAgo: number) => new Date(NOW - minAgo * 60_000).toISOString();
+  const ask = (checks: unknown[]) => lib.stepPr(() => pr('OPEN', checks), 7, [], NOW);
+
+  it('改正文后 merge-gate 重跑：旧的 CANCELLED、新的 SUCCESS 同在，不判红，接着等', () => {
+    expect(
+      ask([
+        {
+          __typename: 'CheckRun',
+          name: 'merge-gate',
+          status: 'COMPLETED',
+          conclusion: 'CANCELLED',
+          startedAt: at(20),
+          completedAt: at(19),
+        },
+        {
+          __typename: 'CheckRun',
+          name: 'merge-gate',
+          status: 'COMPLETED',
+          conclusion: 'SUCCESS',
+          startedAt: at(2),
+          completedAt: at(1),
+        },
+        {
+          __typename: 'CheckRun',
+          name: 'ci',
+          status: 'COMPLETED',
+          conclusion: 'SUCCESS',
+          startedAt: at(20),
+          completedAt: at(18),
+        },
+      ]),
+    ).toEqual({ done: false });
+  });
+
+  it('最新那条是 CANCELLED 且刚结束（不到 3 分钟）：先不判红，接着等', () => {
+    expect(
+      ask([
+        {
+          __typename: 'CheckRun',
+          name: 'merge-gate',
+          status: 'COMPLETED',
+          conclusion: 'SUCCESS',
+          startedAt: at(20),
+          completedAt: at(19),
+        },
+        {
+          __typename: 'CheckRun',
+          name: 'merge-gate',
+          status: 'COMPLETED',
+          conclusion: 'CANCELLED',
+          startedAt: at(3),
+          completedAt: at(1),
+        },
+      ]),
+    ).toEqual({ done: false });
+  });
+
+  it('只有一条 CANCELLED 且结束已超过 3 分钟：判红，line 里有 merge-gate', () => {
+    const s = ask([
+      {
+        __typename: 'CheckRun',
+        name: 'merge-gate',
+        status: 'COMPLETED',
+        conclusion: 'CANCELLED',
+        startedAt: at(6),
+        completedAt: at(5),
+      },
+    ]);
+    expect(s.done).toBe(true);
+    expect(s).toMatchObject({ ok: false });
+    if (s.done) expect(s.line).toContain('merge-gate');
+  });
+
+  it('同名两条，最新那条是 FAILURE（数组里放在前面也照样按时间看）：判红', () => {
+    const s = ask([
+      {
+        __typename: 'CheckRun',
+        name: 'merge-gate',
+        status: 'COMPLETED',
+        conclusion: 'FAILURE',
+        startedAt: at(2),
+        completedAt: at(1),
+      },
+      {
+        __typename: 'CheckRun',
+        name: 'merge-gate',
+        status: 'COMPLETED',
+        conclusion: 'SUCCESS',
+        startedAt: at(20),
+        completedAt: at(19),
+      },
+    ]);
+    expect(s.done).toBe(true);
+    expect(s).toMatchObject({ ok: false });
+    if (s.done) expect(s.line).toContain('merge-gate');
   });
 });
 

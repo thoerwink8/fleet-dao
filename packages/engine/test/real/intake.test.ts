@@ -103,6 +103,8 @@ interface GhCalls {
   planned: number[];
   comments: { issueNumber: number; key: string; body: string }[];
   labeled: { issueNumber: number; label: string }[];
+  /** 问过前置单开没开着的几次，每次的单号。 */
+  stateReads: number[][];
 }
 
 function fakeGh(
@@ -111,13 +113,21 @@ function fakeGh(
     commentCreated?: boolean;
     pulls?: { number: number; body: string }[];
     pullsFail?: boolean;
+    /** 前置单的真状态（没写的算已关）；statesFail 是整批读不到。 */
+    states?: Record<number, 'open' | 'closed'>;
+    statesFail?: boolean;
   } = {},
 ): {
   gh: IntakeGitHub;
   calls: GhCalls;
 } {
-  const calls: GhCalls = { groomed: 0, planned: [], comments: [], labeled: [] };
+  const calls: GhCalls = { groomed: 0, planned: [], comments: [], labeled: [], stateReads: [] };
   const gh = {
+    async readIssueStates(input: { numbers: readonly number[] }) {
+      calls.stateReads.push([...input.numbers]);
+      if (over.statesFail) throw new Error('GraphQL 502');
+      return new Map(input.numbers.map((n) => [n, over.states?.[n] ?? 'closed'] as const));
+    },
     claims: {
       async openPulls() {
         if (over.pullsFail) throw new Error('PR 列表读不到');
@@ -290,6 +300,42 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     const runs = await t.db.select().from(scheduleRuns);
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ job: 'intake', outcome: 'ok' });
+  });
+
+  describe('正文里的「前置：」（#2783）：开着的单列表里没有的前置单走 GitHub 批量读', () => {
+    const PRE_BODY = BODY.replace('## 场景\n\n', '## 场景\n\n前置：#40、#41（先合）\n\n');
+
+    it('前置单还开着：不起工作流、不建任务行，这一轮结局里写「等前置 #40」；只问了一次', async () => {
+      await seedWorld(t.db);
+      const { gh, calls } = fakeGh({ issues: [groomIssue({ body: PRE_BODY })], states: { 40: 'open' } });
+      const { client, starts } = fakeClient({ running: 0 });
+      const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+      expect(starts).toEqual([]);
+      expect(await t.db.select().from(tasks)).toEqual([]);
+      expect(calls.stateReads).toEqual([[40, 41]]);
+      expect(run.outcome).toBe('ok');
+      expect(run.why).toContain('acme/demo#12 等前置 #40');
+    });
+
+    it('前置单都关了：照常起', async () => {
+      await seedWorld(t.db);
+      const { gh, calls } = fakeGh({ issues: [groomIssue({ body: PRE_BODY })] });
+      const { client, starts } = fakeClient({ running: 0 });
+      const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+      expect(starts).toHaveLength(1);
+      expect(calls.stateReads).toEqual([[40, 41]]);
+      expect(run.outcome).toBe('ok');
+    });
+
+    it('【故意造出的失败】前置单读不到：不起，这一轮记 partial、写明没查成', async () => {
+      await seedWorld(t.db);
+      const { gh } = fakeGh({ issues: [groomIssue({ body: PRE_BODY })], statesFail: true });
+      const { client, starts } = fakeClient({ running: 0 });
+      const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+      expect(starts).toEqual([]);
+      expect(run.outcome).toBe('partial');
+      expect(run.why).toContain('GraphQL 502');
+    });
   });
 
   describe('驾驶舱提需求开的单（母单 #2047 第 B 片）：谁要的认开单时写进库的提出人，不认 GitHub 上的作者', () => {

@@ -1,0 +1,58 @@
+﻿
+2026-10-16T10:35:10.6587760Z ##[group]Runner Image Provisioner
+2026-10-16T10:35:10.6591326Z ##[endgroup]
+2026-10-16T10:35:10.6592518Z ##[group]Operating System
+2026-10-16T10:35:10.6594004Z ##[endgroup]
+2026-10-16T10:35:10.6594396Z ##[group]Runner Image
+2026-10-16T10:35:10.6597577Z ##[endgroup]
+2026-10-16T10:35:10.6598311Z ##[group]GITHUB_TOKEN Permissions
+2026-10-16T10:35:10.6600611Z ##[endgroup]
+2026-10-16T10:35:11.4764091Z ##[group]Run actions/checkout@v4
+2026-10-16T10:35:11.4772777Z ##[endgroup]
+2026-10-16T10:35:11.5497062Z ##[group]Getting Git version info
+2026-10-16T10:35:11.5570015Z ##[endgroup]
+2026-10-16T10:35:11.5791220Z ##[group]Initializing the repository
+2026-10-16T10:35:11.7276209Z ##[endgroup]
+2026-10-16T10:35:11.7277233Z ##[group]Disabling automatic garbage collection
+2026-10-16T10:35:11.7691088Z ##[endgroup]
+2026-10-16T10:35:11.7691756Z ##[group]Setting up auth
+2026-10-16T10:35:11.9185653Z ##[endgroup]
+2026-10-16T10:35:11.9186603Z ##[group]Fetching the repository
+2026-10-16T10:35:12.7616360Z ##[endgroup]
+2026-10-16T10:35:12.7617360Z ##[group]Determining the checkout info
+2026-10-16T10:35:12.7618268Z ##[endgroup]
+2026-10-16T10:35:12.7619366Z ##[group]Setting up sparse checkout
+2026-10-16T10:35:12.7783166Z ##[endgroup]
+2026-10-16T10:35:12.7784666Z ##[group]Checking out the ref
+2026-10-16T10:35:13.6134818Z ##[endgroup]
+2026-10-16T10:35:13.6206425Z ##[group]Removing auth
+2026-10-16T10:35:13.6977818Z ##[endgroup]
+2026-10-16T10:35:13.7227297Z ##[group]Run set -euo pipefail
+    "outputs": {}
+  }
+}
+2026-10-16T10:35:13.7750443Z   CI_EVENT: pull_request
+2026-10-16T10:35:13.7750785Z ##[endgroup]
+2026-10-16T10:35:13.9440314Z v22.23.3
+2026-10-16T10:35:14.0184199Z ✓ changes：success
+2026-10-16T10:35:14.0185552Z ✓ lint：success
+2026-10-16T10:35:14.0186049Z ✗ test：failure，本该 success
+2026-10-16T10:35:14.0186491Z ✓ web：success
+2026-10-16T10:35:14.0186947Z ✓ e2e：success
+2026-10-16T10:35:14.0187355Z ✓ deploy：success
+2026-10-16T10:35:14.0206458Z ##[error]CI 没过：上面打 ✗ 的 job 不对
+2026-10-16T10:35:14.0275842Z ##[error]Process completed with exit code 1.
+2026-10-16T10:35:14.0387143Z Post job cleanup.
+2026-10-16T10:35:14.0959843Z [command]/usr/bin/git version
+2026-10-16T10:35:14.1003112Z git version 2.55.0
+2026-10-16T10:35:14.1020170Z Temporarily overriding HOME='/home/runner/work/_temp/3265a55a-d141-4124-a11e-6b4c3507ec47' before making global git config changes
+2026-10-16T10:35:14.1020986Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-16T10:35:14.1024296Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/fleet-dao/fleet-dao
+2026-10-16T10:35:14.1062760Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-16T10:35:14.1095918Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-16T10:35:14.1316170Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-16T10:35:14.1357116Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-16T10:35:14.1583143Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-16T10:35:14.1616544Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-16T10:35:14.1929157Z Cleaning up orphan processes
+2026-10-16T10:35:14.2135920Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/checkout@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

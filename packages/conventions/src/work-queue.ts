@@ -7,7 +7,8 @@
 // - mother 母单：贴了「母单」或下面挂着子单（GitHub 的 sub-issues）。母单是目录，不直接做。
 // - working 在做：有开着的 PR（pr-claims.ts 同一份认法）；或本机 git worktree list 里有分支 local/<单号>- 的工作树
 //   （子代理工人不报心跳，这是最可靠的信号）；或本机记下、还没到期的领单租约；或 LIVE_MINUTES 内有分支 local/<单号>- 的会话心跳。
-// - blocked 等前置：正文里有一行以「前置：」开头，提到的单号（#N）里还有开着的。前置的状态读不成也算等前置（不当成都关了）。
+// - blocked 等前置：正文里有一行以「前置：」开头，提到的单号（#N）里还有开着的；或写了日期（前置：2026-11-12 复查日）、北京时间还没到那天
+//   （「等到 2026-11-12」）。前置的状态读不成也算等前置（不当成都关了）。这一行怎么认只有一份：prerequisites.ts，引擎拉单也调它（#2783）。
 // - waiting-human 等人拍：贴了「要人拍」。
 // - takeable 可接：上面都不是。
 //
@@ -24,6 +25,7 @@ import { issueOfBranch } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { HUMAN_DECISION_LABEL, LOCAL_LABEL, MOTHER_LABEL } from './labels.ts';
 import { type OpenPullRef, prClaimedIssues } from './pr-claims.ts';
+import { parsePrerequisites, waitingUntil } from './prerequisites.ts';
 
 /** 心跳这么多分钟以内算领者还活着 */
 export const LIVE_MINUTES = 30;
@@ -61,6 +63,8 @@ export interface QueueItem {
   pr: number | null;
   /** 「前置：」里提到、还开着的单（前置状态没读成时是全部提到的） */
   blockedBy: number[];
+  /** 日期前置（「前置：2026-11-12 复查日」）还没到：等到哪天（YYYY-MM-DD，北京时间）；没写或到了是 null */
+  blockedUntil: string | null;
   /** 正文里写到、还没办完的引导编号 */
   directives: string[];
 }
@@ -187,19 +191,6 @@ export function directiveIdsIn(body: string): string[] {
   return [...new Set([...body.matchAll(DIRECTIVE_REF)].map((m) => m[1] ?? '').filter(Boolean))];
 }
 
-/** 正文里以「前置：」开头的那几行提到的单号（去重，按出现先后） */
-export function prerequisitesIn(body: string): number[] {
-  const out: number[] = [];
-  for (const line of body.split(/\r?\n/)) {
-    if (!/^\s*前置[：:]/.test(line)) continue;
-    for (const m of line.matchAll(/#(\d+)/g)) {
-      const n = Number(m[1]);
-      if (Number.isSafeInteger(n) && n > 0 && !out.includes(n)) out.push(n);
-    }
-  }
-  return out;
-}
-
 /** 一批单号（单或 PR）开没开着：一次 GraphQL 问完。读不成抛。 */
 async function openNumbers(gh: Gh, repo: string, numbers: readonly number[]): Promise<Set<number>> {
   if (numbers.length === 0) return new Set();
@@ -282,7 +273,7 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
   } catch (e) {
     problems.push(`挂着的引导没读成（引导这一栏不全）：${msg(e)}`);
   }
-  const allPre = [...new Set(issues.flatMap((i) => prerequisitesIn(i.body)))].sort((a, b) => a - b);
+  const allPre = [...new Set(issues.flatMap((i) => parsePrerequisites(i.body).issues))].sort((a, b) => a - b);
   let openPre: Set<number> | null = null;
   try {
     if (repo === null) throw new Error('不知道是哪个仓');
@@ -320,8 +311,9 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
       const first = heartbeats[0];
       const heartbeatMinutes = first?.kind === 'heartbeat' ? first.minutesAgo : null;
       const pr = claimed.get(i.number) ?? null;
-      const pre = prerequisitesIn(i.body);
-      const blockedBy = openPre === null ? pre : pre.filter((n) => openPre.has(n));
+      const parsed = parsePrerequisites(i.body);
+      const blockedBy = openPre === null ? parsed.issues : parsed.issues.filter((n) => openPre.has(n));
+      const blockedUntil = waitingUntil(parsed, deps.now());
       const directives = pending === null ? [] : directiveIdsIn(i.body).filter((id) => pending.has(id));
       const alive = heartbeatMinutes !== null && heartbeatMinutes <= LIVE_MINUTES;
 
@@ -341,12 +333,16 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
         for (const l of lease) if (l.kind === 'lease') how.push(`租约到 ${l.until}`);
         if (alive) how.push(`心跳 ${heartbeatMinutes} 分钟前`);
         why = `在做：${how.join('、')}`;
-      } else if (blockedBy.length > 0) {
+      } else if (blockedBy.length > 0 || blockedUntil !== null) {
         state = 'blocked';
-        why =
-          openPre === null
-            ? `等前置 ${blockedBy.map((n) => `#${n}`).join('、')}（前置状态没查成，按没关算）`
-            : `等前置 ${blockedBy.map((n) => `#${n}`).join('、')}（还开着）`;
+        const ids = blockedBy.map((n) => `#${n}`).join('、');
+        const parts: string[] = [];
+        if (blockedBy.length > 0)
+          parts.push(
+            openPre === null ? `等前置 ${ids}（前置状态没查成，按没关算）` : `等前置 ${ids}（还开着）`,
+          );
+        if (blockedUntil !== null) parts.push(`等到 ${blockedUntil}`);
+        why = parts.join('；');
       } else if (i.labels.includes(HUMAN_DECISION_LABEL)) {
         state = 'waiting-human';
         why = `等人拍：贴了「${HUMAN_DECISION_LABEL}」`;
@@ -364,6 +360,7 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
         heartbeatMinutes,
         pr,
         blockedBy,
+        blockedUntil,
         directives,
       };
     });
@@ -384,7 +381,12 @@ export function queueLine(i: QueueItem): string {
   const dir = i.directives.length === 0 ? '引导：无' : `引导 ${i.directives.join('、')}`;
   const tag =
     i.state === 'blocked'
-      ? `${STATE_WORDS.blocked} ${i.blockedBy.map((n) => `#${n}`).join('、')}`
+      ? [
+          ...(i.blockedBy.length > 0
+            ? [`${STATE_WORDS.blocked} ${i.blockedBy.map((n) => `#${n}`).join('、')}`]
+            : []),
+          ...(i.blockedUntil !== null ? [`等到 ${i.blockedUntil}`] : []),
+        ].join('、')
       : STATE_WORDS[i.state];
   return `[${tag}] #${i.issue} ${i.title} | ${i.why} | ${who} | ${beat} | ${pr} | ${dir}`;
 }

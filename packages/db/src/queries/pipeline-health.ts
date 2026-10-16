@@ -125,3 +125,50 @@ export async function pipelineHealth(db: Db, to: Date): Promise<PipelineHealth> 
     verifyRejectShare: share(byOutcome.get('verify_rejected') ?? 0),
   };
 }
+
+/**
+ * 发版叫停的动手会话（#2797）：窗口 [to - 7 天, to) 里收场的动手段（runs.segment = 'manual'）中，被发版停下的那几种：
+ * - outcome = 'org_switch'、failure_reason 以「发布排空：」开头：排空到了宽限的截止，引擎按切号那一套停下（drain.ts）；
+ * - outcome = 'killed'、failure_reason 里有「引擎叫停（发版暂停」：引擎按 StopReason('release-pause') 叫停（会话脱开交接、排空没起会话）；
+ * - outcome = 'killed'、failure_reason 里有「引擎叫停（其他：CANCELLED）」：引擎停机时 Temporal 取消了还在跑的活动（Mirasim 上的会话
+ *   不脱开，排空截止后就这样没的）。法国 10-10～10-16 这一种 47 段，结束时刻全落在某次发版前 20 分钟到后 5 分钟里（.history 对过）。
+ * 「引擎叫停（原因没传）」这类老记录不算（分不出是不是发版）。按北京时间的天数（7 天都列，没有的 0），另给被叫停的段一共跑了几小时。
+ */
+export interface ReleaseKills {
+  from: Date;
+  to: Date;
+  total: number;
+  /** 被叫停的段一共跑了多少小时（起到收场，一位小数）。 */
+  hours: number;
+  byDay: { day: string; n: number }[];
+}
+
+export async function releaseKilledSessions(db: Db, to: Date): Promise<ReleaseKills> {
+  if (Number.isNaN(to.getTime())) throw new Error('releaseKilledSessions: 时刻不是有效日期');
+  const from = new Date(to.getTime() - PIPELINE_HEALTH_DAYS * 86_400_000);
+  const rows = rowsOf(
+    await db.execute(sql`
+      select to_char((ended_at at time zone 'Asia/Shanghai')::date, 'MM-DD') as day, count(*)::int as n,
+             coalesce(sum(extract(epoch from (ended_at - started_at))), 0)::float8 as secs
+      from runs
+      where segment = 'manual'
+        and ended_at >= ${from.toISOString()}::timestamptz and ended_at < ${to.toISOString()}::timestamptz
+        and (
+          (outcome = 'org_switch' and starts_with(coalesce(failure_reason, ''), '发布排空：'))
+          or (outcome = 'killed' and (
+            strpos(coalesce(failure_reason, ''), '引擎叫停（发版暂停') > 0
+            or strpos(coalesce(failure_reason, ''), '引擎叫停（其他：CANCELLED）') > 0))
+        )
+      group by 1`),
+  );
+  const got = new Map(rows.map((r) => [String(r.day), Number(r.n)]));
+  const byDay: { day: string; n: number }[] = [];
+  for (let i = PIPELINE_HEALTH_DAYS; i >= 1; i--) {
+    const at = new Date(to.getTime() - i * 86_400_000 + 8 * 3_600_000);
+    const day = at.toISOString().slice(5, 10);
+    byDay.push({ day, n: got.get(day) ?? 0 });
+  }
+  const total = rows.reduce((a, r) => a + Number(r.n), 0);
+  const secs = rows.reduce((a, r) => a + Number(r.secs), 0);
+  return { from, to, total, hours: Math.round(secs / 360) / 10, byDay };
+}

@@ -19,8 +19,13 @@ runMain(() => {
     exitWith(2);
   }
   // CI_EVENT = 这一轮的事件名（github.event_name）：同树复用只有主线推送认；没给不报错（旧调用照旧判），但带复用记录的 plan 会判红
-  const { ok, lines } = ciVerdict(needs, process.env.CI_EVENT || undefined);
+  const { ok, lines, redJobs } = ciVerdict(needs, process.env.CI_EVENT || undefined);
   for (const line of lines) (ok ? console.log : console.error)(line);
-  if (!ok) console.error('::error::CI 没过：上面打 ✗ 的 job 不对');
+  if (!ok) {
+    // 引擎等 CI 只看必过检查 check，它的输出里要有「哪几个 job 红了」（#2795）；矩阵 job（test、e2e、deploy）具体红在哪一台，
+    // 要看各自的检查（test (3/8)、e2e (1/2)）：引擎同一个头上读得到
+    if (redJobs.length > 0) console.error(`::error title=红的 job::${redJobs.join('、')}`);
+    console.error('::error::CI 没过：上面打 ✗ 的 job 不对');
+  }
   return ok ? 0 : 1;
 });
