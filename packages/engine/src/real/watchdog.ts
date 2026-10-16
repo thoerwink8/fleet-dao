@@ -35,7 +35,6 @@ import {
   upsertAlert,
   writeHealthzBadSince,
 } from '@fleet-dao/db';
-import { noteOnlyOptions } from '@fleet-dao/shared';
 import { RELEASES_DIR } from '@fleet-dao/store';
 import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { type HealthzProbe, parseHealthzResponse, type ReleaseFacts } from '../jobs/release-watch.ts';
@@ -182,16 +181,16 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
       latestByPrefix: (prefix) => latestAlertByPrefix(w.db, prefix),
       byKey: (key) => alertByKey(w.db, key),
       async raise(x) {
-        const level = x.level ?? 'alert';
-        const options = x.options ?? (level === 'decision' ? noteOnlyOptions('continue') : undefined);
+        // 要你拍的选项、原因由报的那一处自己给（#2729：不再替它补只留言的选项凑数），缺了落库时照抛
         await upsertAlert(w.db, {
           dedupeKey: x.dedupeKey,
-          level,
+          level: x.level ?? 'alert',
           taskId: null,
           title: x.title,
           body: x.body,
           link: x.link,
-          ...(options ? { options } : {}),
+          ...(x.options ? { options: x.options } : {}),
+          ...(x.reason ? { reason: x.reason } : {}),
         });
       },
       resolve: (x) =>

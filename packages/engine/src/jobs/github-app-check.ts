@@ -175,6 +175,8 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
               problems.map((p) => p.role),
             ),
             options: githubAppMissingOptions(repo),
+            // 把机器人装到仓上要创始人在 GitHub 上点（#2729）
+            reason: 'human-only' as const,
           }
         : { level: 'alert' as const, ...githubAppRepoAlert(repo, problems) };
       await deps.alerts.raise({ dedupeKey: key, taskId: null, ...raise });

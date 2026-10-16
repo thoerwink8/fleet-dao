@@ -557,6 +557,7 @@ describe('【故意造出的失败】', () => {
       title: '账号池 claude-solo 整池暂停：登录失效',
       body: '占位',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
     await s.round();
@@ -753,6 +754,7 @@ describe('组织临时被切走又切回（#335）：选路、探针、切号按
       title: '账号池 claude-solo 整池暂停：法国暂时不用独享号',
       body: '创始人 2026-09-27 夜拍',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
 
   it('09-27 21:54 那次：人经帮手切到独享、两分钟内又切回——选路等着（不挂起），推一条带前后两次读数的提醒，切回来照常派拼车、提醒自己撤；独享暂停照旧', async () => {

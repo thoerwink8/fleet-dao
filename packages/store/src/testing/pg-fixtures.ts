@@ -268,6 +268,8 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       resolvedAt: dateOpt(n.resolvedAt),
       resolvedBy: n.resolvedBy ?? null,
       decisionOptions: n.options ?? null,
+      // 库里要你拍必须带原因（#2729，CHECK 约束）；样例数据里的要你拍都是人闸那种（审批）
+      decisionReason: n.level === 'decision' ? 'human-only' : null,
       answer: n.answer ?? null,
     });
     if (n.deliveries.length > 0) {

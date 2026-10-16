@@ -610,6 +610,7 @@ export function hourlyReconcileJob(
             body: x.body,
             ...(x.link ? { link: x.link } : {}),
             ...(x.options ? { options: x.options } : {}),
+            ...(x.reason ? { reason: x.reason } : {}),
           });
         },
         insertOnce: (x) => insertAlertOnce(w.db, x),

@@ -17,7 +17,7 @@ import { recordFeishuDelivery } from '../src/queries/feishu-push.ts';
 import { registerScheduledJobs } from '../src/queries/schedule.ts';
 import { notifications, pullRequests, scheduleRuns, stateChanges, tasks } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
-import { addRepo, addTask, ago, HOUR, MIN, NOW } from './helpers.ts';
+import { addRepo, addTask, ago, askFields, HOUR, MIN, NOW } from './helpers.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -35,7 +35,14 @@ async function note(
 ) {
   const [row] = await t.db
     .insert(notifications)
-    .values({ dedupeKey, level, title: `标题 ${dedupeKey}`, createdAt: ago(2 * HOUR), ...o })
+    .values({
+      dedupeKey,
+      level,
+      title: `标题 ${dedupeKey}`,
+      createdAt: ago(2 * HOUR),
+      ...askFields(level),
+      ...o,
+    })
     .returning({ id: notifications.id });
   if (!row) throw new Error('没插进去');
   return row.id;
