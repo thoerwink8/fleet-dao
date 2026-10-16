@@ -33,8 +33,6 @@ export interface SegmentPromptInput {
   resumed?: boolean;
   /** 引擎起会话前读好的「已知的模块」里的文件（preload.ts）；续会话不出这一节。 */
   preload?: readonly PreloadRead[];
-  /** 已废（子代理提示整条链路已删）：只为 task-segment.ts 还在传它而留，不读；等 #1972 合并后随那处一起删。 */
-  subagentHint?: boolean;
   /** 重活先出方案的那一段（#2755）：规矩照给，另说这一段只读、最后一条回复只回方案 JSON（planSection）。 */
   plan?: boolean;
 }

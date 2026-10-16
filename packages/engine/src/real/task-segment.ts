@@ -93,8 +93,6 @@ export interface RunSegmentDeps {
   subagentGuard?: () => Promise<SubagentGuard>;
   /** 测试用：会话用户的家目录（默认按账号库查）。 */
   subagentsHome?: string;
-  /** 设置 engine.subagentHint（默认关）：开着提示词多一句可以派哪些子代理。读不了记日志、按关，不挡会话。 */
-  readSubagentHint?: () => Promise<boolean>;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
   /**
@@ -288,14 +286,6 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       await writeSegmentLocalSettings(settingsTree, guard, sessionModel);
     }
     // 3. 提示词
-    let subagentHint = false;
-    if (deps.readSubagentHint) {
-      try {
-        subagentHint = await deps.readSubagentHint();
-      } catch (error) {
-        log('子代理提示的开关没读到，按关', { error: errMessage(error) });
-      }
-    }
     // 3.5 首轮预载：新开的会话把单子列的文件先读好放进提示词（续的会话里已经有了）
     const preload: PreloadRead[] = [];
     if (!input.resumeSessionId) {
@@ -321,7 +311,6 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       specDir: input.brief.specDir,
       feedback: input.feedback,
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
-      ...(subagentHint ? { subagentHint } : {}),
       ...(input.resumeSessionId ? { resumed: true } : {}),
       ...(preload.length > 0 ? { preload } : {}),
       ...(input.mode === 'plan' ? { plan: true } : {}),

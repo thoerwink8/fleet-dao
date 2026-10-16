@@ -7,6 +7,8 @@ import {
   type Channel,
   type ChannelStateRecord,
   ciPolicyOf,
+  type FlowAssignment,
+  FlowAssignmentExistsError,
   type Model,
   type Pool,
   type RealtimeTable,
@@ -159,6 +161,8 @@ export interface MemoryData {
   users: MemoryUser[];
   repos: RepoRecord[];
   tasks: Task[];
+  /** 全程模式的分组记录（task_flow_assignments，#2823），每张单最多一行。 */
+  flowAssignments: FlowAssignment[];
   subtasks: Subtask[];
   /**
    * 占着池名额的在途会话（库里 runs 表里带路由、没结束的行；stage 是这一段按 SEGMENT_STAGE 换的用途）：内存版的 poolOccupancy
@@ -206,6 +210,7 @@ export function emptyData(): MemoryData {
     users: [],
     repos: [],
     tasks: [],
+    flowAssignments: [],
     subtasks: [],
     runs: [],
     segmentRuns: [],
@@ -442,6 +447,25 @@ export function createMemoryStore(
     },
     async getTask(id) {
       return data.tasks.find((t) => t.id === id) ?? null;
+    },
+    async writeFlowAssignmentOnce(input) {
+      if (!data.tasks.some((t) => t.id === input.taskId)) throw new Error(`没有这张单：${input.taskId}`);
+      if (data.flowAssignments.some((a) => a.taskId === input.taskId))
+        throw new FlowAssignmentExistsError(input.taskId);
+      const row: FlowAssignment = {
+        taskId: input.taskId,
+        mode: input.mode,
+        source: input.source,
+        stratum: input.stratum,
+        assignedAt: now().toISOString(),
+        reason: input.reason ?? null,
+      };
+      data.flowAssignments.push(row);
+      return { ...row };
+    },
+    async getFlowAssignment(taskId) {
+      const found = data.flowAssignments.find((a) => a.taskId === taskId);
+      return found ? { ...found } : null;
     },
     async listTasks({ group, repoId, q, cursor: raw, limit }) {
       const matching = data.tasks.filter(
