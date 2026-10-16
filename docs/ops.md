@@ -116,10 +116,9 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /srv/fleet-dao-web | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao | root:root | 755 | deploy/france.sh |
 | /usr/local/lib/fleet-dao | root:root | 755 | deploy/hk.sh |
-| /usr/local/lib/fleet-dao | root:root | 755 | deploy/lib/human-tier.sh |
 | /usr/local/lib/fleet-dao/auto-release | root:root | 755 | deploy/france.sh |
 | /usr/local/lib/fleet-dao/backup | root:root | 755 | deploy/hk.sh |
-| /usr/local/lib/fleet-dao/release-request | root:root | 755 | deploy/lib/human-tier.sh |
+| /usr/local/lib/fleet-dao/release-request | root:root | 755 | deploy/france.sh |
 | /var/backups/fleet-dao/restic-copies | root:root | 700 | deploy/hk.sh |
 | /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-dao/engine | fleet:fleet | 750 | deploy/lib/human-tier.sh |

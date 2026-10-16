@@ -2,7 +2,6 @@
 // 走一趟的各步记进进度（和 release-train.json 同一个格式）、单元文件的路径和权限读回。
 // 用法：node --test deploy/test/release-request.test.mjs（run.sh 的 node-tests 里跑）。
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -41,6 +40,7 @@ import {
   safeReadRequest,
   TRAIN_DIR,
 } from '../france/release-request/lib.mjs';
+import { runChild } from './child.mjs';
 
 const SHA = 'a'.repeat(40);
 const T0 = Date.parse('2026-10-07T12:00:00Z');
@@ -1629,9 +1629,7 @@ test('【#2728】接活脚本是自动档：不在 HUMAN_TIER_PATHS，france.sh 
 
 test('【#2728】失败原因保留认得出的关键行：真 Node 的 ERR_MODULE_NOT_FOUND 输出，原因里有缺的包名，不只是尾三行', () => {
   const missing = 'fleet-missing-pkg-2728';
-  const r = spawnSync(process.execPath, ['--input-type=module', '-e', `import '${missing}';`], {
-    encoding: 'utf8',
-  });
+  const r = runChild(process.execPath, ['--input-type=module', '-e', `import '${missing}';`]);
   assert.notEqual(r.status, 0, '真的跑崩了');
   assert.match(r.stderr, /ERR_MODULE_NOT_FOUND/, '是真 Node 的 ERR_MODULE_NOT_FOUND 输出');
   const tail3 = r.stderr.trim().split('\n').slice(-3).join(' / ');
