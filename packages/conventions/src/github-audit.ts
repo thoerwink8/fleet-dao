@@ -4,6 +4,7 @@
 // 合并时的自动收口 close-on-merge.ts 没收成、或当时还有别的 PR 挂着它的）。从前这些靠每天的关单对账、版本快照生成时顺带发现，那两样都删了
 // （单子是需求唯一的家，关单证据在 pnpm issue:close 那一步查），只留这一道定时的；查出来的每一条都是要有人去修的，不是通知。
 // 结果随单子开关、随时间变，所以不进 PR 的必过检查（#87），只在定时任务里跑，红了不挡任何 PR。
+// 唯一会写的一处：开着的版本里程碑说明的先后段里有已关或已挪走的号，直接改掉（#2393，pnpm issue:new 开单时也清同一份）。
 // 改这里之前必须知道：
 // - 读不到 GitHub、读回来认不出：一律是「没查成」（退出码 2），不当成「没有断裂」。
 // - 每一条规则在 test/github-audit.test.ts 里有一个查得出的例子和一个不该报的例子。
@@ -11,9 +12,9 @@
 import { whyLeave } from './close-on-merge.ts';
 import type { Finding } from './findings.ts';
 import { isFlowBranch } from './flow-branch.ts';
-import type { GitHubReader, PlanIssue, PullBody } from './github-api.ts';
+import type { GitHubMilestoneWriter, GitHubReader, PlanIssue, PullBody } from './github-api.ts';
 import { isKindLabel, MOTHER_LABEL } from './labels.ts';
-import { PlanProblem, readPlan } from './plan-view.ts';
+import { type Plan, PlanProblem, parseOrder, pruneOrder, readPlan } from './plan-view.ts';
 import { issueColumnLinks } from './pr-columns.ts';
 
 /** 母单刚开、子单还没挂上的宽限：超过这么久还是空的才报。 */
@@ -25,12 +26,23 @@ export interface AuditResult {
   notQueried: string[];
   /** 这次查了多少：「0 条」才分得出是没问题还是根本没查。 */
   checked: { issues: number; versions: number };
+  /** 这次顺手从版本先后里清掉的已关号（#2393）：哪个里程碑、清了哪几个。没清的版本不在里面。 */
+  pruned: { milestone: string; removed: number[] }[];
 }
 
-export async function auditGitHub(gh: GitHubReader, now: Date): Promise<AuditResult> {
+/**
+ * writer 给了才会改里程碑说明（清先后里已关或已挪走的号）；不给就只读，不改。
+ * 开着的单读不到时不清（不拿读不到当成全关了），那一样已经记在 notQueried 里。
+ */
+export async function auditGitHub(
+  gh: GitHubReader,
+  now: Date,
+  writer?: GitHubMilestoneWriter,
+): Promise<AuditResult> {
   const findings: Finding[] = [];
   const notQueried: string[] = [];
   const checked = { issues: 0, versions: 0 };
+  const pruned: AuditResult['pruned'] = [];
 
   let open: PlanIssue[] | undefined;
   try {
@@ -60,8 +72,9 @@ export async function auditGitHub(gh: GitHubReader, now: Date): Promise<AuditRes
     }
   }
 
+  let plan: Plan | undefined;
   try {
-    const plan = await readPlan(gh);
+    plan = await readPlan(gh);
     checked.versions = plan.open.length + plan.closed.length;
     for (const group of plan.loose) {
       for (const i of group.issues) {
@@ -77,7 +90,56 @@ export async function auditGitHub(gh: GitHubReader, now: Date): Promise<AuditRes
       findings.push({ issue: undefined, key: `plan:${e.message}`, text: e.message });
     else notQueried.push(`读不到版本和先后（${message(e)}），里程碑说明里的先后没核`);
   }
-  return { findings, notQueried, checked };
+  if (plan !== undefined && open !== undefined && writer !== undefined) {
+    await pruneClosedFromOrders(
+      plan,
+      new Set(open.map((i) => i.number)),
+      writer,
+      pruned,
+      findings,
+      notQueried,
+    );
+  }
+  return { findings, notQueried, checked, pruned };
+}
+
+/**
+ * 开着的版本的先后里有已关或已挪走的号：直接改掉说明（#2393，开单那一步清得到的是开单时的，这里兜住中间关掉的）。
+ * 改回来的说明要再认一遍、先后恰好是我们要写的，不拿「接口回 200」当改好了。改不成记「没查成」；清光会留空先后的不动，出一条 finding。
+ */
+async function pruneClosedFromOrders(
+  plan: Plan,
+  open: ReadonlySet<number>,
+  writer: GitHubMilestoneWriter,
+  pruned: AuditResult['pruned'],
+  findings: Finding[],
+  notQueried: string[],
+): Promise<void> {
+  for (const v of plan.open) {
+    const m = v.milestone;
+    const cut = pruneOrder(m.description, open);
+    if (!cut.ok) {
+      findings.push({
+        issue: undefined,
+        key: `order-all-closed:${m.number}`,
+        text: `里程碑「${m.title}」：${cut.problem}`,
+      });
+      continue;
+    }
+    if (cut.removed.length === 0) continue;
+    try {
+      const back = await writer.setMilestoneDescription(m.number, cut.description);
+      const check = parseOrder(back.description);
+      if (!check.ok || check.order.join() !== cut.order.join()) {
+        throw new Error('改完回来的说明里先后和要写的对不上（可能改了一半），先打开看一眼');
+      }
+      pruned.push({ milestone: m.title, removed: cut.removed });
+    } catch (e) {
+      notQueried.push(
+        `没改成里程碑「${m.title}」先后里已关的号（${message(e)}），#${cut.removed.join('、#')} 还在里面`,
+      );
+    }
+  }
 }
 
 /** 类别标签（需求、缺陷、杂项）恰好一个。 */

@@ -331,6 +331,103 @@ describe('GitHub 对账：读不到一律是「没查成」，不当成没有断
   );
 });
 
+describe('GitHub 对账：先后里已关的号直接清掉（#2393）', () => {
+  /** v1 先后里排了 10、13、20：13 是关了的单独的单（子单不能写进先后，所以不用 12）。 */
+  const closed13 = () => issue(13, { milestone: V1, state: 'closed', stateReason: 'completed' });
+  const closedInOrder = (): World => {
+    const w = cleanWorld();
+    w.milestones[0] = milestone(8, V1, `目标：做完。\n\n${order(10, 13, 20)}\n\n收尾。`);
+    w.issues.push(closed13());
+    return w;
+  };
+  const withWriter = (w: World, fail?: Error) => {
+    const { reader } = fakeReader(w);
+    const writes: { milestone: number; description: string }[] = [];
+    const writer = {
+      async setMilestoneDescription(n: number, description: string) {
+        if (fail) throw fail;
+        writes.push({ milestone: n, description });
+        const m = w.milestones.find((x) => x.number === n);
+        if (!m) throw new Error(`假数据里没有里程碑 ${n}`);
+        m.description = description;
+        return { ...m };
+      },
+    };
+    return { reader, writer, writes };
+  };
+
+  it('对账跑一次后说明里不再有已关号，标记外的话不动；再跑一次什么都不改', async () => {
+    const w = closedInOrder();
+    const { reader, writer, writes } = withWriter(w);
+    const r = await auditGitHub(reader, NOW, writer);
+    expect(r.pruned).toEqual([{ milestone: V1, removed: [13] }]);
+    expect(r.notQueried).toEqual([]);
+    expect(writes).toHaveLength(1);
+    expect(w.milestones[0]?.description).toBe(`目标：做完。\n\n${order(10, 20)}\n\n收尾。`);
+    const again = await auditGitHub(reader, NOW, writer);
+    expect(again.pruned).toEqual([]);
+    expect(writes).toHaveLength(1);
+  });
+
+  it('干净的一份：一次也不写', async () => {
+    const { reader, writer, writes } = withWriter(cleanWorld());
+    const r = await auditGitHub(reader, NOW, writer);
+    expect(r.pruned).toEqual([]);
+    expect(writes).toEqual([]);
+  });
+
+  it('没给 writer：只读，不改说明', async () => {
+    const w = closedInOrder();
+    const { reader } = withWriter(w);
+    const r = await auditGitHub(reader, NOW);
+    expect(r.pruned).toEqual([]);
+    expect(w.milestones[0]?.description).toContain('2. #13');
+  });
+
+  it('【故意造出的失败】读不到开着的单：不清（不拿读不到当成全关了），已记没查成', async () => {
+    const w = closedInOrder();
+    const { writer, writes } = withWriter(w);
+    const { reader: broken } = fakeReader(w, { fail: { openIssues: new Error('连不上 GitHub') } });
+    const r = await auditGitHub(broken, NOW, writer);
+    expect(writes).toEqual([]);
+    expect(r.notQueried[0]).toContain('读不到开着的单');
+  });
+
+  it('【故意造出的失败】改说明失败：记没查成、带原因，不当成清好了', async () => {
+    const { reader, writer } = withWriter(closedInOrder(), new Error('在里程碑 8 上改说明，GitHub 回了 403'));
+    const r = await auditGitHub(reader, NOW, writer);
+    expect(r.pruned).toEqual([]);
+    expect(r.notQueried).toEqual([
+      '没改成里程碑「v1 Fusion 接活」先后里已关的号（在里程碑 8 上改说明，GitHub 回了 403），#13 还在里面',
+    ]);
+  });
+
+  it('【故意造出的失败】接口说改好了、回来的先后却对不上：不拿 200 当改好了', async () => {
+    const w = closedInOrder();
+    const { reader } = withWriter(w);
+    const stale = {
+      async setMilestoneDescription(n: number) {
+        const m = w.milestones.find((x) => x.number === n);
+        if (!m) throw new Error('没有');
+        return { ...m };
+      },
+    };
+    const r = await auditGitHub(reader, NOW, stale);
+    expect(r.pruned).toEqual([]);
+    expect(r.notQueried[0]).toContain('改完回来的说明里先后和要写的对不上');
+  });
+
+  it('先后里的全是已关的：清光会留空先后，不动，出一条 finding', async () => {
+    const w = cleanWorld();
+    w.milestones[0] = milestone(8, V1, order(13));
+    w.issues.push(closed13());
+    const { reader, writer, writes } = withWriter(w);
+    const r = await auditGitHub(reader, NOW, writer);
+    expect(writes).toEqual([]);
+    expect(r.findings.map((f) => f.text)).toContainEqual(expect.stringContaining('清光会留下空先后'));
+  });
+});
+
 describe('GitHub 对账：定时任务只报告、不挡 PR，也不进必过检查（#87）', () => {
   const read = (rel: string) => readFileSync(new URL(`../../../${rel}`, import.meta.url), 'utf8');
 

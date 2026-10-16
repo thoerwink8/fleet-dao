@@ -1,7 +1,15 @@
 // 现在的计划（#654，pnpm plan）：用假的 GitHub（内存里的里程碑、单子、子单）跑 planCommand，不打真接口。
 // 读不到、认不出的每一条都故意造出来，断言退出码 2、什么都没打印成计划。
 import { describe, expect, it } from 'vitest';
-import { addToOrder, formatAt, PlanProblem, parseOrder, planCommand, readPlan } from '../src/plan-view.ts';
+import {
+  addToOrder,
+  formatAt,
+  PlanProblem,
+  parseOrder,
+  planCommand,
+  pruneOrder,
+  readPlan,
+} from '../src/plan-view.ts';
 import { fakeReader, issue, type Method, milestone, order, V0, V1, type World } from './fake-github.ts';
 
 /** 和真仓差不多的一份：v1 开着（有母单、没排进先后的单），v0 关了，未排期里有母单、没贴标签的母单、空母单。 */
@@ -308,6 +316,42 @@ describe('现在的计划：小零件', () => {
 });
 
 // 往先后里加一张（pnpm issue:new 开版本单那一刻用，#807）：认法和 parseOrder 是同一份，写出来的 parseOrder 一定认得。
+describe('先后：清掉已关的号（pruneOrder，#2393）', () => {
+  const desc = `目标。\n\n${order(5, 3, 8)}\n\n尾巴`;
+
+  it('不在开着的单里的清掉，序号重新挨着排，标记之外不动', () => {
+    expect(pruneOrder(desc, new Set([3, 8]))).toEqual({
+      ok: true,
+      description: `目标。\n\n${order(3, 8)}\n\n尾巴`,
+      order: [3, 8],
+      removed: [5],
+    });
+  });
+
+  it('没有要清的：原文照回', () => {
+    expect(pruneOrder(desc, new Set([5, 3, 8, 99]))).toEqual({
+      ok: true,
+      description: desc,
+      order: [5, 3, 8],
+      removed: [],
+    });
+  });
+
+  it('【故意造出的失败】全是已关的：不动，说清为什么（不留空先后）', () => {
+    expect(pruneOrder(desc, new Set([99]))).toEqual({
+      ok: false,
+      problem: expect.stringContaining('清光会留下空先后'),
+    });
+  });
+
+  it('【故意造出的失败】标记缺了：不猜着改', () => {
+    expect(pruneOrder('只有目标', new Set([1]))).toEqual({
+      ok: false,
+      problem: expect.stringContaining('说明里没有先后标记'),
+    });
+  });
+});
+
 describe('先后：往里加一张（addToOrder）', () => {
   const desc = `目标：做完。\n\n${order(5, 3)}\n\n尾巴`;
 
@@ -318,6 +362,7 @@ describe('先后：往里加一张（addToOrder）', () => {
       description: `目标：做完。\n\n${order(5, 3, 9)}\n\n尾巴`,
       order: [5, 3, 9],
       changed: true,
+      removed: [],
     });
     if (r.ok)
       expect(parseOrder(r.description)).toEqual({
@@ -356,7 +401,32 @@ describe('先后：往里加一张（addToOrder）', () => {
   });
 
   it('已经在先后里：不再加，原文照回', () => {
-    expect(addToOrder(desc, 3)).toEqual({ ok: true, description: desc, order: [5, 3], changed: false });
+    expect(addToOrder(desc, 3)).toEqual({
+      ok: true,
+      description: desc,
+      order: [5, 3],
+      changed: false,
+      removed: [],
+    });
+  });
+
+  it('给了开着的单号：写的同时清掉不在里面的（after 按清之前的位置找）；没给就一个也不清', () => {
+    expect(addToOrder(desc, 9, 5, new Set([3]))).toMatchObject({
+      ok: true,
+      description: `目标：做完。\n\n${order(9, 3)}\n\n尾巴`,
+      order: [9, 3],
+      removed: [5],
+    });
+    expect(addToOrder(desc, 9, 5)).toMatchObject({ order: [5, 9, 3], removed: [] });
+  });
+
+  it('已经在先后里、开着的单号都在：原文照回；有已关的就只清不加', () => {
+    expect(addToOrder(desc, 3, undefined, new Set([5, 3]))).toMatchObject({ changed: false, removed: [] });
+    expect(addToOrder(desc, 3, undefined, new Set([3]))).toMatchObject({
+      changed: true,
+      order: [3],
+      removed: [5],
+    });
   });
 
   it.each([
