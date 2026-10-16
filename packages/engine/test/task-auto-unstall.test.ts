@@ -15,6 +15,7 @@ import {
   type TaskRun,
   type TaskStatus,
   type TaskWorkflowInput,
+  taskContinueSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
 import { CI_UNKNOWN_RECHECKS, wallClockSwitchLine } from '../src/workflows/task-support.ts';
@@ -282,6 +283,54 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     expect(picks[2]?.stickRouteId).toBeUndefined();
     expect(world.states.some((s) => s.doing.includes('带上进度续一次'))).toBe(true);
     expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
+  });
+
+  it('同一条路由第二次总时长到顶、换路由后续路只剩等额度：不睡 4 小时，停下等人；继续后再选得出就起会话', async () => {
+    // #2392：note 写完「带上进度续一次」之后，选路回等额度（retryAfter 4 小时）若走进 pauseForRoute，
+    // waiting 只改内存、不写任务行，工作流仍 running、没有新的 runs。这里必须在 pollQuery 的 20 秒里停下
+    // （pollQuery 不跳时钟；误睡进 4 小时那一档，这一条到不了 stalled）。
+    let holdQuota = true;
+    const world = createFakeWorld({
+      route: (picked) => {
+        if (holdQuota && picked.avoidRouteIds.length > 0) {
+          return {
+            ok: false,
+            waitFor: 'quota',
+            detail: '这条路由的 5 小时额度用完了，01:00 清零',
+            retryAfterSeconds: 4 * 60 * 60,
+          };
+        }
+        return undefined;
+      },
+    });
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) =>
+        n === 1 ? wallTimedOut(WALL_RUN) : n === 2 ? wallTimedOut('run-wall-2') : OK_SEGMENT,
+      resume: resumeWallSession,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input({ issueNumber: 2261 }));
+        // 第一次到顶仍原路重试，中间歇 60 秒。跳过这一档；4 小时的等额度睡不进这 70 秒。
+        await env.sleep('70 seconds');
+        const stalled = await statusUntil(h, parked, '换路由续不上，停下等人');
+        expect(stalled.doing).toContain('换路由续不上');
+        expect(calls.segment).toHaveLength(2);
+        // 两次动手各选一次，换路由那次选路只剩等就停：没有连着睡、醒、再选。
+        expect(world.callsOf('pickRoute')).toHaveLength(3);
+        expect(world.states.some((s) => s.doing.includes('带上进度续一次'))).toBe(true);
+        holdQuota = false;
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return (await h.result()) as TaskRun;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(3);
+    expect(calls.segment[2]?.resumeSessionId).toBeUndefined();
+    expect(calls.segment[2]?.interrupted).toContain('不再原路续');
   });
 
   it('被引擎在时限上叫停（aborted）两次判停下：先避开这条路由重派一次，不整族避开、不报警', async () => {

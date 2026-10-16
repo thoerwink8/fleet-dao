@@ -1,7 +1,7 @@
 // fleet-api task continue|abandon|redo（#1402）：卡死的单在命令行续、放弃、重做。
 // 继续、放弃发的信号名和驾驶舱按钮一样；重做走 taskRedo.redo，只在已叫停或挂起时允许。
 // 每条都写操作记录。找不到任务工作流时退出码不是 0，标准输出不打成功。
-import { TASK_SIGNAL_NAMES } from '@fleet-dao/shared';
+import { CONTINUE_ROUTE_WAKE_REASON, TASK_SIGNAL_NAMES } from '@fleet-dao/shared';
 import { createMemoryStore, devFixtures, IDS } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
 import type { CliDeps } from '../src/cli.ts';
@@ -84,14 +84,19 @@ describe('fleet-api task', () => {
     expect(h.out.join('\n')).not.toMatch(/已继续|已放弃|已重做/);
   });
 
-  it('continue：发给 taskContinue，和驾驶舱「继续」同一个信号名，写一条操作记录', async () => {
+  it('continue：发给 taskContinue，并带一发 taskRouteWake（等选路不看继续），写一条操作记录', async () => {
     const h = setup({ workflowId: 'task:example/canary#12:r3' });
     const code = await h.run(['continue', 'example/canary', '12', '--note', NOTE]);
     expect(code).toBe(0);
-    expect(h.out).toEqual(['已继续：example/canary#12（信号 taskContinue）']);
+    expect(h.out).toEqual(['已继续：example/canary#12（信号 taskContinue、taskRouteWake）']);
     expect(h.lookups()).toBe(1);
     expect(h.sent).toEqual([
       { workflowId: 'task:example/canary#12:r3', name: 'taskContinue', arg: { by: 'root' } },
+      {
+        workflowId: 'task:example/canary#12:r3',
+        name: 'taskRouteWake',
+        arg: { by: 'root', reason: CONTINUE_ROUTE_WAKE_REASON },
+      },
     ]);
     expect(TASK_SIGNAL_NAMES.continue).toBe('taskContinue');
     expect(h.redos).toEqual([]);
@@ -106,7 +111,7 @@ describe('fleet-api task', () => {
           who: 'root',
           issue: 'example/canary#12',
           note: NOTE,
-          result: '已继续：example/canary#12（信号 taskContinue）',
+          result: '已继续：example/canary#12（信号 taskContinue、taskRouteWake）',
         }),
       }),
     ]);
