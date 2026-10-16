@@ -6,17 +6,20 @@
 //   没人去发它，报警只会天天挂着。这里只报读数没查成（单元没报到、主线头读不到、在用的读不到、状态文件认不出）、规矩同步和装机自动档没成、
 //   装机脚本的人工档落后（要人跑）、root 跑的脚本副本和在用版本不一致（当轮就报）、在用版本的依赖发版后被动过（#2728）、
 //   current 已切但 fleet-engine / fleet-api 主进程还在旧目录（不是只改文档或测试，#2359）。
-//   驾驶舱「在用版本」和这里同一份 assessRunningRelease，进程还在旧目录时不把 current 链接标成已经切过去。
+//   驾驶舱「在用版本」、自动发版 journal 的 summary、发版卡「法国在用」和这里同一份 assessRunningRelease
+//   （deploy/france/auto-release/running-release.mjs），进程还在旧目录时不把 current 链接标成已经切过去。
 // - 状态文件的字段跟 deploy/france/auto-release/lib.mjs 走（STATE_SCHEMA）；test/deploy-lag.test.ts 拿那边真跑出来的状态核对。
 // - 这一项会随时间自己变红（单元停了），发布脚本只把它标待处理、不退回（deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 // - 公网看得到 /healthz：对外的话不带提交号、路径、内部名；细节只进日志和报警正文。报警只用不带时长的话，
 //   免得每 5 分钟改一次卡片（飞书免费版每月 1 万次接口调用，design 15.4）。
-import { spawnSync } from 'node:child_process';
 import { readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { type Db, openAlertsByPrefix, resolveAlertByKey, upsertAlert } from '@fleet-dao/db';
 import { z } from 'zod';
 import type { Logger } from './ports.ts';
+import { assessRunningRelease, diffIsDocsOnly, readRunningRelease } from './running-release.mjs';
+
+export { assessRunningRelease, diffIsDocsOnly };
 
 /** 法国上各版所在的目录（deploy/release.sh 的 RELEASES）。 */
 export const RELEASES_DIR = '/srv/fleet-dao-releases';
@@ -166,80 +169,6 @@ export interface DeployLagVerdict {
 }
 
 const short = (sha: string | null | undefined) => (sha ? sha.slice(0, 12) : '（没有）');
-
-/** 和 deploy/release.sh 的 runtime_unchanged 同一份白名单：只改这些不算要重启（#2359）。空列表 = 树一样，允许沿用。 */
-export function diffIsDocsOnly(paths: readonly string[]): boolean {
-  return paths.every((path) => {
-    if (path.endsWith('.md')) return true;
-    if (path.startsWith('docs/') || path.startsWith('specs/')) return true;
-    if (path.startsWith('agents/test/') || path.startsWith('deploy/test/')) return true;
-    return /^packages\/[^/]+\/test\//.test(path);
-  });
-}
-
-function lagDetail(lags: { unit: string; sha: string }[]): string {
-  const groups = new Map<string, string[]>();
-  for (const lag of lags) {
-    const units = groups.get(lag.sha);
-    if (units) units.push(lag.unit);
-    else groups.set(lag.sha, [lag.unit]);
-  }
-  return [...groups.entries()]
-    .map(([sha, units]) => `${units.join('、')} 的主进程还在 ${short(sha)}`)
-    .join('；');
-}
-
-/**
- * 进程 cwd 和 current 对得上没有。健康检查和「在用版本」都调这一份。
- * 对不上、又不是只改文档：sha 是进程所在的旧提交（盘面不要标成 current 链接上的新提交），problem 对外一句不带提交号。
- * 读不到进程目录：sha 为 null，不当成已经切过去。没给 running、或还没有 current：sha 仍是链接上的提交。
- */
-export function assessRunningRelease(input: DeployLagInput): {
-  sha: string | null;
-  problem: Omit<DeployLagProblem, 'alreadyAlerted'> | null;
-} {
-  const symlink = 'sha' in input.current ? input.current.sha : null;
-  const running = input.running;
-  if (!running || symlink === null) return { sha: symlink, problem: null };
-
-  const slots: { unit: string; proc: ProcRelease }[] = [{ unit: 'fleet-engine', proc: running.engine }];
-  if (running.api) slots.push({ unit: 'fleet-api', proc: running.api });
-  const lags: { unit: string; sha: string }[] = [];
-  const errors: string[] = [];
-  for (const slot of slots) {
-    if ('error' in slot.proc) {
-      errors.push(`${slot.unit}：${slot.proc.error}`);
-      continue;
-    }
-    if (slot.proc.sha === null || slot.proc.sha === symlink) continue;
-    const diff = running.diffs?.[slot.proc.sha];
-    if (diff && diffIsDocsOnly(diff)) continue;
-    lags.push({ unit: slot.unit, sha: slot.proc.sha });
-  }
-  if (lags.length > 0) {
-    return {
-      sha: lags[0]?.sha ?? null,
-      problem: {
-        code: 'process_cwd',
-        message: '进程还在旧 release 目录',
-        steady: '进程还在旧 release 目录',
-        detail: lagDetail(lags),
-      },
-    };
-  }
-  if (errors.length > 0) {
-    return {
-      sha: null,
-      problem: {
-        code: 'unchecked',
-        message: '没查成：读不到进程在哪一版',
-        steady: '读不到进程在哪一版',
-        detail: errors.join('；'),
-      },
-    };
-  }
-  return { sha: symlink, problem: null };
-}
 
 /** 对外说时长：「45 分钟」「2 小时 10 分钟」「3 天 4 小时」。 */
 export function spoken(ms: number): string {
@@ -396,103 +325,6 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
   const runningView = assessRunningRelease(input);
   if (runningView.problem) add(runningView.problem);
   return done();
-}
-
-/** 装机检出（fleet 可读）。裸仓读不到时再试发布目录里的 .repo.git（release.sh 的 CACHE）。 */
-const DEPLOY_CHECKOUT = '/srv/fleet-dao';
-
-function spawnText(
-  cmd: string,
-  args: string[],
-  timeout: number,
-): { ok: true; stdout: string } | { ok: false; error: string } {
-  try {
-    const r = spawnSync(cmd, args, {
-      encoding: 'utf8',
-      timeout,
-      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    if (r.error) return { ok: false, error: String(r.error) };
-    if (r.status !== 0) {
-      return { ok: false, error: (r.stderr || `${cmd} 退出 ${r.status}`).trim().slice(0, 240) };
-    }
-    return { ok: true, stdout: r.stdout };
-  } catch (err) {
-    return { ok: false, error: String(err) };
-  }
-}
-
-/** cwd 是「发布目录/提交号」才认出提交；子目录、别的路径认不出。 */
-function shaOfReleaseCwd(dir: string, cwd: string): string | null {
-  const root = dir.replace(/[\\/]+$/, '');
-  const normalized = cwd.replace(/[\\/]+$/, '');
-  const prefix = `${root}/`;
-  if (!normalized.startsWith(prefix)) return null;
-  const rest = normalized.slice(prefix.length);
-  if (rest.includes('/') || rest.includes('\\')) return null;
-  return SHA.test(rest) ? rest : null;
-}
-
-function defaultReadProc(dir: string, unit: 'fleet-engine.service' | 'fleet-api.service'): ProcRelease {
-  const got = spawnText('systemctl', ['show', '-p', 'MainPID', '--value', unit], 5_000);
-  if (!got.ok) return { error: got.error };
-  const pid = got.stdout.trim();
-  if (!/^[1-9][0-9]*$/.test(pid)) return { sha: null };
-  let cwd: string;
-  try {
-    cwd = readlinkSync(`/proc/${pid}/cwd`);
-  } catch (err) {
-    return { error: `读不了 /proc/${pid}/cwd：${String(err)}` };
-  }
-  const sha = shaOfReleaseCwd(dir, cwd);
-  if (!sha) return { error: `主进程目录不是发布目录下的提交（${cwd.slice(0, 80)}）` };
-  return { sha };
-}
-
-function defaultDiffNames(
-  dir: string,
-  oldSha: string,
-  newSha: string,
-): readonly string[] | { error: string } {
-  let last = '没有可用的检出';
-  for (const repo of [DEPLOY_CHECKOUT, join(dir, '.repo.git')]) {
-    const got = spawnText('git', ['-C', repo, 'diff', '--name-only', '--no-renames', oldSha, newSha], 20_000);
-    if (!got.ok) {
-      last = got.error;
-      continue;
-    }
-    return got.stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-  }
-  return { error: last };
-}
-
-function readRunningRelease(
-  dir: string,
-  current: DeployLagInput['current'],
-  io?: DeployLagReadIo,
-): RunningRelease {
-  const readProc = io?.readProc ?? ((unit) => defaultReadProc(dir, unit));
-  const engine = readProc('fleet-engine.service');
-  const api = readProc('fleet-api.service');
-  const running: RunningRelease = { engine, api };
-  const symlink = 'sha' in current ? current.sha : null;
-  if (!symlink) return running;
-  const olds = new Set<string>();
-  for (const proc of [engine, api]) {
-    if ('sha' in proc && proc.sha && proc.sha !== symlink) olds.add(proc.sha);
-  }
-  if (olds.size === 0) return running;
-  const diffNames = io?.diffNames ?? ((old, neu) => defaultDiffNames(dir, old, neu));
-  const diffs: Record<string, readonly string[]> = {};
-  for (const old of olds) {
-    const got = diffNames(old, symlink);
-    if (Array.isArray(got)) diffs[old] = got;
-  }
-  return { ...running, diffs };
 }
 
 /** 读法国上的现状：current 链接、状态文件、发布历史里在用那版切上去的时刻、主进程 cwd。读不到的照实带上原因。 */

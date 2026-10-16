@@ -21,6 +21,7 @@
 // - 读不到、认不出的一律记成「没查成」，不拿空、0 当没事（agents/shared-rules.md「底线」）。
 import { createHash } from 'node:crypto';
 import { DESIRED_FILE, judgeConfig } from './config.mjs';
+import { assessRunningRelease } from './running-release.mjs';
 
 export const STATE_SCHEMA = 1;
 export const RELEASES = '/srv/fleet-dao-releases';
@@ -182,7 +183,7 @@ export const INSTALLED_COPIES = [
   {
     dir: '/usr/local/lib/fleet-dao/auto-release',
     src: 'deploy/france/auto-release',
-    files: ['lib.mjs', 'fleet-auto-release.mjs', 'config.mjs'],
+    files: ['lib.mjs', 'fleet-auto-release.mjs', 'config.mjs', 'running-release.mjs'],
   },
   {
     dir: '/usr/local/lib/fleet-dao/release-request',
@@ -466,6 +467,14 @@ async function readStep(io, st, now) {
     return undefined;
   }
   st.current = current;
+  // 链接仍是发版闸用的 st.current。journal「在用」另看主进程 cwd（和 deploy_lag 同一份判定）；没接 readRunning 的老 io 不填。
+  if (typeof io.readRunning === 'function' && typeof current === 'string') {
+    try {
+      st.running = await io.readRunning(current);
+    } catch (e) {
+      st.running = { engine: { error: why(e) } };
+    }
+  }
   greenStep(st, now, commits, current, ci);
 
   const at = commits.findIndex((c) => c.sha === current);
@@ -1522,7 +1531,7 @@ async function flushAlerts(io, st) {
   }
 }
 
-/** 在用的相对主线在哪儿（和后端 versionFact、驾驶舱「落后主线 N 个提交」同一个口径：在用的在主线最近提交里排第几）。 */
+/** 链接上的提交相对主线在哪儿（落后几个不算毛病）。summary 的「在用」在进程 cwd 落后时改拿旧提交来数。 */
 function lagText(st) {
   if (!st.main) return '主线没读到，数不了落后几个';
   if (!st.current) return '还没发布过';
@@ -1533,8 +1542,32 @@ function lagText(st) {
 }
 
 /**
+ * journal「在用」那半句。没记下主进程 cwd 时仍写链接上的提交（老状态、测试里的假 io）。
+ * 记下了就和 deploy_lag 同一份 assessRunningRelease：进程还在旧目录时不把链接上的新提交写成在用。
+ */
+function inUseText(st) {
+  if (!st.running || typeof st.current !== 'string') return `在用 ${short(st.current)}，${lagText(st)}`;
+  const view = assessRunningRelease({ current: { sha: st.current }, running: st.running });
+  if (view.problem && view.sha == null) return view.problem.message;
+  const extra = view.problem ? `（${view.problem.message}）` : '';
+  return `在用 ${short(view.sha)}，${lagText({ ...st, current: view.sha })}${extra}`;
+}
+
+/** 这一轮记的是链接相对主线。进程还在别的提交上时，别把链接上的新提交再叫一遍「在用的」。 */
+function roundText(st) {
+  let detail = st.last.detail || '';
+  if (detail && st.running && typeof st.current === 'string') {
+    const view = assessRunningRelease({ current: { sha: st.current }, running: st.running });
+    if (view.sha && view.sha !== st.current) {
+      detail = detail.replaceAll(`在用的 ${short(st.current)}`, `链接 ${short(st.current)}`);
+    }
+  }
+  return `这轮：${st.last.action}${detail ? `（${detail}）` : ''}`;
+}
+
+/**
  * 一行人看的读数（进 journal、release.sh --check）：主线头和它的 CI、在用、落后几个、这一轮读到了什么、规矩和装机层到哪了。
- * 发布不归这个单元：发布走驾驶舱按钮。
+ * 发布不归这个单元：发布走驾驶舱按钮。发版闸仍看 st.current（链接）；「在用」看主进程 cwd。
  */
 export function summary(st) {
   const parts = [];
@@ -1544,10 +1577,10 @@ export function summary(st) {
   } else {
     parts.push('主线头没读到过');
   }
-  parts.push(`在用 ${short(st.current)}，${lagText(st)}`);
+  parts.push(inUseText(st));
   parts.push(`自动发版：${st.auto?.note ?? '这轮没判'}`);
   if (st.mainError) parts.push(`这轮主线没读到：${st.mainError}`);
-  if (st.last) parts.push(`这轮：${st.last.action}${st.last.detail ? `（${st.last.detail}）` : ''}`);
+  if (st.last) parts.push(roundText(st));
   parts.push(
     st.rules
       ? `规矩同步到 ${short(st.rules.commit)}（${st.rules.result}${st.rules.detail ? `：${st.rules.detail}` : ''}）`
