@@ -413,6 +413,19 @@ export const RULES: readonly FailureRule[] = [
     text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
     routeOutcome: 'fail',
   },
+  // 中转回 503、原文是这个模型暂时不可用（法国 2026-10-16 #2750/#2753：opus-5.5@mirasim 段已 failed，
+  // 任务行仍 running、没有开着的会话，看门狗只报 idle-running，名额一直被占着）。
+  // 不是 MD1：模型还在，只是这会儿上游不接。也不是 UP1：只凭状态码 503 的原路重试会钉在这条路由上睡，
+  // 任务行不刷新，open_runs=0 仍算在干活。这里判停下，由动手会话换一条能派的路由；没有就停下腾出名额
+  // （task-session.ts，patched('model-unavailable-redispatch')）。别的 503（没有这句）仍是 UP1。
+  // 也不是 MD3：点名和读回对不上是另一句，不靠这句 503。
+  {
+    id: 'MU1',
+    title: '模型暂时不可用',
+    kind: 'stop',
+    text: /model is temporarily unavailable|模型暂时不可用|模型暂不可用/i,
+    routeOutcome: 'fail',
+  },
   // 点名的模型和实际回话的不一样（#2742）。这一例是发版叫停后误续上一段 opus 会话，记进这条路由的失败
   // （routeOutcome fail）。当时法国在跑 0c35f93a，Mirasim 还不脱开：
   // - 前几段结局是「引擎叫停（其他：CANCELLED）」：引擎停机取消了还在跑的活动，会话收场（#2797 统计的那一种）。
@@ -426,6 +439,7 @@ export const RULES: readonly FailureRule[] = [
   //   起会话的阻塞（MS-08），第一份当前轮快照就已经是 opus。
   // - 不是 #1298。那一单是新会话、点名的型号不在中转名单里，服务端换成名单第一个（gpt-6-sol → gpt-6-astra）。
   //   sonnet 在名单里。读回的是上一段的 opus，不是名单替换。
+  // - 不是 MU1。那一单是上游 503「模型暂时不可用」，换路由或停下腾出名额，不是点名 sonnet 读回 opus。
   // 这里仍判停下：老历史重放读到的判断就是挂起。新历史由任务工作流 patched('model-mismatch-reroute')
   // 接住——停这一段，按点名路由开新会话重派一次（误续靠开新会话解开）。同一条开了新会话仍对不上，才是这条
   // 路由在换模，避开它。还有能派的就继续，一条都没有才挂起。发版排空和 Mirasim 接回不在这里改。

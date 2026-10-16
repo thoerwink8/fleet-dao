@@ -49,6 +49,10 @@
 //   （「已重试 1 次」或原文一字不差）。那一挂和第一次的原路重试都不起整单：停掉这一段，避开这条路由按点名再派；
 //   同一模型再撞上再避开模型，还撞上、或没有能派的路由，才停下等人。重派时 lastProblem 写成重派那一句，不留「挂起并报警」。
 //   老历史没有这个标记，重放时仍原路重试、次数用完再挂起。
+// - 上游 503 且原文是模型暂时不可用（MU1，patched('model-unavailable-redispatch')）：不原路重试、不钉在这条路由上睡。
+//   停掉这一段，避开这条路由再派；进度和 lastProblem 写成「因 503 换了一条路由」。没有别的能马上派的，或换了还是这一句，
+//   当场停下等人，任务行改成 stalled，写明是为了腾出名额。选路若只剩等，也不进 pauseForRoute 的长睡（那一睡
+//   任务仍是 running、没有开着的会话，占着名额）。老历史没有这个标记，仍按上游出错（UP1）原路重试。
 // - 出在账号池上的停（登录失效、封号、设备被撤销，patched('auth-reroute')）：池照旧暂停并报警，这张单马上回去选路避开这个池。
 //   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
 //   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
@@ -407,6 +411,8 @@ export async function writeSession(
     const patienceOn = patched('route-patience');
     // 桥接连 Mirasim 超时（#2838）：标记只在 MB1 上打，别的失败重放不多这一下。老历史为假，仍走原来的原路重试 / 挂起。
     const mb1Redispatch = next.rule === 'MB1' && patched('mb1-bridge-redispatch');
+    // 模型暂时不可用（MU1）：标记只在这条规则上打。老历史重放时记下的规则不是 MU1，不多一次标记。
+    const modelDown = next.rule === 'MU1' && patched('model-unavailable-redispatch');
     if (next.action === 'retry' && !mb1Redispatch) {
       // 原路再试：还是这条路由（额度要等的，等到清零再来，不算墙钟）
       stick = route.routeId;
@@ -482,10 +488,12 @@ export async function writeSession(
       // 引擎活动超时（#2824）：分流因原文一字不差判的挂起不挂整单。标记只对这几个码打，别的码重放不多这一下。
       // 写在 auto-redispatch-session 之前：老历史重放时这一支为假，listed 仍只看原来那张表。
       // MB1 用上面已经打过的标记，这里不再打一次（重放不多一个 marker）。
+      // MU1 同样用上面已经打过的标记。老历史这一支为假，listed 仍只看原来那张表。
       const listed =
         AUTO_REDISPATCH_CODES.includes(code) ||
         (EN1_ACTIVITY_TIMEOUT_CODES.includes(code) && patched('en1-timeout-redispatch')) ||
-        mb1Redispatch;
+        mb1Redispatch ||
+        modelDown;
       // 写在 auto-redispatch-session 之前、且 redispatched 为假时短路：老历史重派过一次之后不会多调这个标记。
       const escalate =
         redispatched && listed && patched('avoid-scope-by-cause') && rt.infraCanEscalate(route, code);
@@ -511,10 +519,14 @@ export async function writeSession(
         }
         const redispatchLine = carryProgress
           ? `第 ${rt.round} 轮：${route.modelId} 同一条路由第二次总时长到顶，换一条路由带上进度续一次，不停下等人`
-          : `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`;
-        // 桥接超时的挂起句（「挂起并报警（已重试 1 次）」）已经写进 lastProblem。重派不是挂起：落库前换成重派这一句。
+          : modelDown
+            ? `第 ${rt.round} 轮：${route.modelId} 上游 503 模型暂时不可用，换一条可用路由重派，不停下等人`
+            : `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`;
+        // 桥接超时、模型暂时不可用的挂起句（「挂起并报警」）已经写进 lastProblem。重派不是挂起：落库前换成重派这一句。
         // 老历史标记为假，不改 lastProblem，saveTaskState 的入参和原来一样。
-        if (mb1Redispatch) rt.status.lastProblem = redispatchLine;
+        if (mb1Redispatch || modelDown) rt.status.lastProblem = redispatchLine;
+        // 下一轮选路若只剩等、或只剩刚才那条：不睡，停下腾出名额。派上了由 landed 清掉。
+        if (modelDown) rt.modelDownLand = true;
         await rt.note(redispatchLine);
         continue;
       }
@@ -542,12 +554,14 @@ export async function writeSession(
         continue;
       }
       await rt.park(
-        mb1Redispatch && next.action !== 'park'
-          ? '桥接连 Mirasim 超时：同一原因连败到重派预算，停下等人'
-          : next.humanFix
-            ? `${next.reason}；要人：${next.humanFix}`
-            : next.reason,
-        failure.message,
+        modelDown
+          ? MODEL_UNAVAILABLE_STALL
+          : mb1Redispatch && next.action !== 'park'
+            ? '桥接连 Mirasim 超时：同一原因连败到重派预算，停下等人'
+            : next.humanFix
+              ? `${next.reason}；要人：${next.humanFix}`
+              : next.reason,
+        modelDown ? modelUnavailableStallDetail(failure.message) : failure.message,
       );
       counters = ZERO;
       avoid = NO_AVOID;
@@ -559,6 +573,25 @@ export async function writeSession(
 
 /** 动手会话脱开引擎跑着、引擎在换版本（#2238）：隔多久去接回一次（老引擎还在排空时接回会再交回 detached）。 */
 export const SEGMENT_REATTACH_SECONDS = 20;
+
+/** 上游 503 模型暂时不可用、换不了路由或换了还是这一句：停下等人，腾出 running 名额。写进 lastProblem。 */
+export const MODEL_UNAVAILABLE_STALL = '上游 503：模型暂时不可用，已停下腾出名额';
+
+/** 停下时写给人的原因：选路或上游的原话，加上为什么不能在这里接着睡。 */
+export function modelUnavailableStallDetail(detail: string): string {
+  const why = detail.trim() || '没有别的能马上派的路由';
+  return `${why}。上游回了 503，这个模型暂时不可用。不在这里接着睡：睡着时任务仍是 running、没有开着的会话，占着进单名额。点「继续」再选一次；不要了点「放弃」。`;
+}
+
+/**
+ * 模型暂时不可用、还没派上新会话（rt.modelDownLand）：停下等人，回 true。
+ * 标记为假时不调活动，回 false。调用方接着走原来的等路由。
+ */
+async function parkIfModelDown(rt: TaskRuntime, detail: string): Promise<boolean> {
+  if (!rt.modelDownLand) return false;
+  await rt.park(MODEL_UNAVAILABLE_STALL, modelUnavailableStallDetail(detail));
+  return true;
+}
 
 /**
  * 重试、重派之前确认上一段真停了（决定 0093）：没收场就停下等人、写明原因，回 false（调用方回循环头，人点继续后再选再起）；
@@ -736,12 +769,15 @@ async function pickRoute(
     droppedDry = false;
     droppedFamilies = false;
     rt.fellBackToMissRoute = false;
+    // 模型暂时不可用之后没有能探的路由：不在这里睡。睡着时任务仍是 running、没有开着的会话。
+    if (await parkIfModelDown(rt, lastStopDetail)) return;
     await rt.pauseForRoute('slot', lastStopDetail, ROUTE_RETRY_SECONDS, wakeMark);
   };
   // 派上了会话：换路由续这一记清掉，后面正常的等额度不再被当成「续不上」。
   const landed = (chosen: { route: RouteChoice; probeNote: string | null }) => {
     rt.landSwitch = false;
     rt.switchWake = false;
+    rt.modelDownLand = false;
     return chosen;
   };
   // 选定的这一条：老历史不探，直接派。探通才派；探不通记下来换下一条，到了 3 条就停下。
@@ -835,6 +871,8 @@ async function pickRoute(
         }
         const blocked = dry.routeIds.length + dry.poolIds.length + dry.modelIds.length > 0;
         if (useDry && blocked && missUsable) {
+          // 模型暂时不可用：别退回刚才那条。退回去还是这个模型，任务又会 running 着空转。
+          if (await parkIfModelDown(rt, got.detail)) continue;
           droppedDry = true;
           prefer = missUsable.routeId;
           rt.status.lastProblem = NO_OTHER_ROUTE;
@@ -843,7 +881,9 @@ async function pickRoute(
         }
         // 点名再选仍派不出：照旧用原来的路由。派之前照样探，探不通就不拿它起会话。
         // 模型对不上的不走这里：那条刚证实读回的不是点名的，再派回去还会挂。
+        // 模型暂时不可用也不退回刚才那条：退回去还是这个模型，任务又会 running 着空转。
         if (droppedDry && missUsable && !mismatchRoutesDown) {
+          if (await parkIfModelDown(rt, got.detail)) continue;
           rt.status.lastProblem = NO_OTHER_ROUTE;
           rt.fellBackToMissRoute = true;
           const chosen = await consider(missUsable, probeOn, mark);
@@ -893,6 +933,7 @@ async function pickRoute(
       }
       // 避让放空之后还是要等（额度、空位）：不死等，照旧用原来的路由，派之前照样探。
       if (droppedDry && missUsable) {
+        if (await parkIfModelDown(rt, got.detail)) continue;
         rt.status.lastProblem = NO_OTHER_ROUTE;
         rt.fellBackToMissRoute = true;
         const chosen = await consider(missUsable, probeOn, mark);
@@ -933,6 +974,9 @@ async function pickRoute(
         await rt.park(WALL_CLOCK_SWITCH_STALL, wallClockSwitchStallDetail(got.detail));
         continue;
       }
+      // 模型暂时不可用之后选路只剩等：不睡。这一睡可以到几小时，任务仍是 running、没有开着的会话，占着名额。
+      // 标记为假时这里不调活动，老历史重放的命令和原来一样。
+      if (await parkIfModelDown(rt, got.detail)) continue;
       // 睡到下一次选路。等额度且选路给了清零时刻：秒数按那个时刻（上限几小时），不是每 120 秒醒一次。
       // 等空位、熔断仍是短间隔。路由变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒。
       // 步序没变（秒数是选路活动的结果）：老历史重放不用新的 patched 标记。
