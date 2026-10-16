@@ -4,6 +4,7 @@ import {
   type BreakerPolicy,
   jitterOf,
   type RouteOutcome,
+  type RouteReply,
   routeBreaker,
   whenAllOpen,
 } from '../../src/failure/index.ts';
@@ -25,8 +26,16 @@ const neutral = (minutes: number): RouteOutcome => ({ at: at(minutes), result: '
 const judge = (
   outcomes: RouteOutcome[],
   nowMinutes: number,
-  more: { inFlight?: number; routeId?: string; policy?: Partial<BreakerPolicy> } = {},
+  more: {
+    inFlight?: number;
+    routeId?: string;
+    policy?: Partial<BreakerPolicy>;
+    replies?: RouteReply[];
+  } = {},
 ) => routeBreaker(outcomes, { now: at(nowMinutes), inFlight: 0, ...more });
+/** 在途会话在第几分钟回了话、报了错。 */
+const reply = (minutes: number): RouteReply => ({ at: at(minutes), kind: 'reply' });
+const replyError = (minutes: number): RouteReply => ({ at: at(minutes), kind: 'error' });
 
 describe('关着（正常派）', () => {
   it('没有结果、偶尔失败：照常派', () => {
@@ -161,6 +170,98 @@ describe('半开（放一个试探）', () => {
       outcomes.push(fail(t));
     }
     expect(judge(outcomes, t + 1).probeAt).toBe(at(t + 120));
+  });
+});
+
+describe('半开时在途会话的回话当试探证据（#2862）', () => {
+  /** 第 3 分钟熔断，冷却到第 13 分钟。 */
+  const tripped = [fail(1), fail(2), fail(3)];
+
+  it('回话够数（默认 3 次）：在第 3 条那一刻关上，trips、连败清零，原因写回话次数和恢复时刻；不用等会话收场', () => {
+    const s = judge(tripped, 20, { inFlight: 1, replies: [reply(14), reply(15), reply(16), reply(17)] });
+    expect(s).toMatchObject({ state: 'closed', admit: 'all', trips: 0, consecutiveFailures: 0 });
+    expect(s.reason).toContain('试探会话已正常回话 3 次，2026-09-25 00:16 UTC 恢复');
+    // 窗口从那一刻起重数：熔断前的失败不再算
+    expect(s.window).toEqual({ samples: 0, failures: 0, failureRate: null });
+  });
+
+  it('策略可调：trialReplies 给 2 就两次关上；给 0 报错', () => {
+    expect(judge(tripped, 20, { replies: [reply(14), reply(15)], policy: { trialReplies: 2 } }).state).toBe(
+      'closed',
+    );
+    expect(() => judge(tripped, 20, { policy: { trialReplies: 0 } })).toThrow('trialReplies 不对');
+  });
+
+  it('不够数：还半开，在途的还当试探，不放第二个', () => {
+    const s = judge(tripped, 20, { inFlight: 1, replies: [reply(14), reply(15)] });
+    expect(s).toMatchObject({ state: 'half_open', admit: 'none' });
+    expect(s.reason).toContain('已经有 1 个在途当试探');
+  });
+
+  it('中间夹了 error：从它之后重数', () => {
+    const replies = [reply(14), reply(15), replyError(16), reply(17), reply(18)];
+    expect(judge(tripped, 20, { inFlight: 1, replies }).state).toBe('half_open');
+    const s = judge(tripped, 25, { inFlight: 1, replies: [...replies, reply(19)] });
+    expect(s.state).toBe('closed');
+    expect(s.reason).toContain('00:19 UTC 恢复');
+  });
+
+  it('冷却中、关着时的回话不进计算：不清连败、不进失败率；冷却期间的回话也不算进半开的数', () => {
+    // 冷却中（到第 13 分钟）：回话不让它提前关上；到点后清零重数，冷却期间的 3 条不算
+    const cooling = [reply(10), reply(11), reply(12)];
+    expect(judge(tripped, 12.5, { replies: cooling })).toMatchObject({ state: 'open', admit: 'none' });
+    expect(judge(tripped, 15, { inFlight: 1, replies: [...cooling, reply(14)] }).state).toBe('half_open');
+    // 关着：回话、报错都不清连败、不进失败率
+    const closed = judge([ok(0), fail(1), fail(2)], 5, {
+      replies: [reply(3), replyError(3.5), reply(4)],
+    });
+    expect(closed).toMatchObject({ state: 'closed', consecutiveFailures: 2 });
+    expect(closed.window).toEqual({ samples: 3, failures: 2, failureRate: 2 / 3 });
+    // 连败没被回话清掉：再败一次照样熔断
+    expect(judge([ok(0), fail(1), fail(2), fail(5)], 6, { replies: [reply(3), reply(4)] }).state).toBe(
+      'open',
+    );
+  });
+
+  it('关上之后那个会话失败：按关着时的规则进连败和失败率（窗口从恢复那一刻起数）', () => {
+    const replies = [reply(14), reply(15), reply(16)];
+    const one = judge([...tripped, fail(30)], 31, { replies });
+    expect(one).toMatchObject({ state: 'closed', consecutiveFailures: 1, trips: 0 });
+    expect(one.window).toEqual({ samples: 1, failures: 1, failureRate: 1 });
+    // 连着失败到线就再熔断，是新的一轮（trips 从 0 数起）
+    const again = judge([...tripped, fail(30), fail(31), fail(32)], 33, { replies });
+    expect(again).toMatchObject({ state: 'open', trips: 1, openedAt: at(32) });
+  });
+
+  it('真实流量的结局和回话排在一条流里：回话够数前就收场成功，照样按真实流量试探成功关上', () => {
+    const s = judge([...tripped, ok(15)], 20, { replies: [reply(14)] });
+    expect(s.reason).toContain('真实流量试探成功');
+    // 回话够数在先、会话后来成功：关着时的成功，只是一次正常
+    expect(judge([...tripped, ok(30)], 31, { replies: [reply(14), reply(15), reply(16)] })).toMatchObject({
+      state: 'closed',
+      consecutiveFailures: 0,
+    });
+  });
+
+  it('10-16 那次：13:46 冷却到点、13:49:54 起回话，13:49:54 / 13:50:02 / 13:50:11 三条回话，13:50 就关上（以前要等会话收场，14:40 之后）', () => {
+    const iso = (hms: string) => `2026-10-16T${hms}.000Z`;
+    const fails: RouteOutcome[] = [
+      { at: iso('13:35:00'), result: 'fail' },
+      { at: iso('13:35:30'), result: 'fail' },
+      { at: iso('13:36:00'), result: 'fail' },
+    ];
+    const replies: RouteReply[] = [
+      { at: iso('13:47:59'), kind: 'error' },
+      { at: iso('13:49:54'), kind: 'reply' },
+      { at: iso('13:50:02'), kind: 'reply' },
+      { at: iso('13:50:11'), kind: 'reply' },
+      { at: iso('14:40:00'), kind: 'reply' },
+    ];
+    const at1350 = routeBreaker(fails, { now: iso('13:50:05'), inFlight: 1, replies });
+    expect(at1350).toMatchObject({ state: 'half_open', admit: 'none' });
+    const later = routeBreaker(fails, { now: iso('13:51:00'), inFlight: 1, replies });
+    expect(later).toMatchObject({ state: 'closed', admit: 'all' });
+    expect(later.reason).toContain('试探会话已正常回话 3 次，2026-10-16 13:50 UTC 恢复');
   });
 });
 

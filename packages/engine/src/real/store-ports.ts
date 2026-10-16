@@ -35,6 +35,7 @@ import {
   openAlertKeysOfTask,
   openAlertsByPrefix,
   openPoolRuns,
+  openRunTranscriptMarks,
   type RunSegment,
   readQuotaReserveSetting,
   readTaskRoutePin,
@@ -53,7 +54,7 @@ import {
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
-import { routeBreaker } from '../failure/breaker.ts';
+import { type RouteReply, routeBreaker } from '../failure/breaker.ts';
 import {
   isTaskParkAlertKey,
   TASK_DONE_PARK_ACTOR,
@@ -156,6 +157,9 @@ class SlotTaken extends Error {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+/** 熔断半开时拿在途会话的回话当证据，只看最近这么多小时的记录。 */
+const TRANSCRIPT_MARK_HOURS = 6;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface StorePortsDeps {
@@ -236,10 +240,11 @@ function breakerOf(
   now: Date,
   inFlight: number,
   routeId: string,
+  replies: readonly RouteReply[],
 ): BreakerFacts {
   const state = routeBreaker(
     outcomes.map((o) => ({ at: o.endedAt.toISOString(), result: o.routeOutcome ?? 'neutral' })),
-    { now: now.toISOString(), inFlight, routeId },
+    { now: now.toISOString(), inFlight, routeId, replies },
   );
   return {
     state: state.state,
@@ -393,11 +398,19 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
   async function loadStage(stage: StageKind, now: Date): Promise<StageFacts> {
     // 两种会话都读（db 的 pool-runs.ts）：哪张表读不了照抛，不当成没有三段的会话（熔断、战绩、试探数都会算少）
-    const [facts, outcomes, open] = await Promise.all([
+    // 第四条是在途会话的回话证据（#2862，熔断半开时用）：查不出也照抛，不当成没有回话、也不当成回话够了。
+    const [facts, outcomes, open, marks] = await Promise.all([
       routeFactsForPurpose(db, stage, { now }),
       endedPoolRuns(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS)),
       openPoolRuns(db, { now }),
+      openRunTranscriptMarks(db, { since: new Date(now.getTime() - TRANSCRIPT_MARK_HOURS * HOUR_MS) }),
     ]);
+    const repliesByRoute = new Map<string, RouteReply[]>();
+    for (const k of marks) {
+      const list = repliesByRoute.get(k.routeId) ?? [];
+      list.push({ at: k.at.toISOString(), kind: k.kind === 'error' ? 'error' : 'reply' });
+      repliesByRoute.set(k.routeId, list);
+    }
     const byRoute = new Map<string, EndedPoolRun[]>();
     for (const o of [...outcomes].sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime())) {
       const list = byRoute.get(o.routeId) ?? [];
@@ -450,7 +463,13 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       maxConcurrency: r.maxConcurrency,
       banReasons: r.banReasons,
       blockers: r.blockers,
-      breaker: breakerOf(byRoute.get(r.routeId) ?? [], now, running.get(r.routeId) ?? 0, r.routeId),
+      breaker: breakerOf(
+        byRoute.get(r.routeId) ?? [],
+        now,
+        running.get(r.routeId) ?? 0,
+        r.routeId,
+        repliesByRoute.get(r.routeId) ?? [],
+      ),
       record: recordOf(byRoute.get(r.routeId) ?? [], stage),
     }));
     const unwiredRoutes = all.filter((r) => !wired.includes(r.hostId));
@@ -576,6 +595,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       routeId: fact.routeId,
       reservedAt: now,
       expiresAt: new Date(now.getTime() + reservationTtlMs),
+      // 半开只放一个试探：同一把池锁里数这条路由在途的，已经有了就不占
+      ...(fact.breaker.admit === 'trial' ? { trial: true } : {}),
     });
     for (const e of got.expired) {
       log('收掉一个过期的预占：那一段选定路由后过了这么久还没开跑（多半卡在建树、等内存），名额让出来', {
@@ -586,6 +607,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       });
     }
     if (!got.reserved) {
+      if (got.trialTaken) throw new SlotTaken(`${routeLabel(fact)}：半开的试探已经被别的单占了`);
       throw new SlotTaken(`${routeLabel(fact)}：池刚被别的单占满（${got.occupied}/${got.maxConcurrency}）`);
     }
     return got.reservationId;

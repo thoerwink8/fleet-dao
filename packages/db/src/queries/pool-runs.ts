@@ -13,7 +13,7 @@
 // 4. 都没赶上的到 expires_at 自己不算（卡死了不一直占着），这一段要是后来又开跑，开跑时按当时的空位重新排、满了就不让起；
 // 5. 引擎重启时整表清掉（clearReservations）：上一轮的会话一个都起不来了。
 import { SEGMENT_STAGE, type StageKind } from '@fleet-dao/shared';
-import { and, eq, gt, gte, inArray, isNotNull, isNull, lte } from 'drizzle-orm';
+import { and, eq, gt, gte, inArray, isNotNull, isNull, lte, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
   poolReservations,
@@ -23,6 +23,7 @@ import {
   type RunSegment,
   routes,
   runs,
+  runTranscript,
 } from '../schema/index.ts';
 import { allSettledOrThrow } from './all-settled.ts';
 import { type RunInsert, startRun } from './runs.ts';
@@ -135,13 +136,28 @@ export interface PoolReservationRequest {
   reservedAt: Date;
   /** 占到什么时候。 */
   expiresAt: Date;
+  /**
+   * 这一单是熔断半开的试探（#2862）：在同一把池锁里先数这条路由在途的会话和没过期的预占，已经有了就不占（半开只放一个试探）。
+   * 不给 = 不是试探，只看池的并发上限。
+   */
+  trial?: boolean;
 }
 
 export type PoolReservationResult =
   | { reserved: true; reservationId: string; poolId: string; expired: PoolReservationRow[] }
+  /** 试探已经被别的单占了：这条路由上已经有在途的会话或没过期的预占（trial 的预占才会回这个）。 */
+  | {
+      reserved: false;
+      trialTaken: true;
+      poolId: string;
+      /** 这条路由上已经在途的会话加没过期的预占数。 */
+      routeOccupied: number;
+      expired: PoolReservationRow[];
+    }
   /** 池满了：选路读事实到预占之间，空位被别的单占走了。预占的人照当时的事实重新选。 */
   | {
       reserved: false;
+      trialTaken?: undefined;
       poolId: string;
       occupied: number;
       maxConcurrency: number;
@@ -176,6 +192,14 @@ export async function reservePoolSlot(db: Db, req: PoolReservationRequest): Prom
         ),
       )
       .returning(reservationColumns);
+    // 半开只放一个试探：这张单这一段自己的预占上面已经删了，不会和自己抢。
+    if (req.trial) {
+      const routeOccupied = (await openPoolRuns(tx, { now: req.reservedAt })).filter(
+        (r) => r.routeId === req.routeId,
+      ).length;
+      if (routeOccupied > 0)
+        return { reserved: false, trialTaken: true, poolId: pool.id, routeOccupied, expired };
+    }
     const occupied = await occupiedOn(tx, pool.id, req.reservedAt);
     if (occupied >= pool.maxConcurrency) {
       return { reserved: false, poolId: pool.id, occupied, maxConcurrency: pool.maxConcurrency, expired };
@@ -364,6 +388,60 @@ export async function endedPoolRuns(db: Db, since: Date): Promise<EndedPoolRun[]
       };
     }),
   ].sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime() || byId(a.runId, b.runId));
+}
+
+/** 在途会话在 run_transcript 里的一条回话证据：assistant、tool_call 是回话，error 是报错。 */
+export interface OpenRunTranscriptMark {
+  runId: string;
+  routeId: string;
+  at: Date;
+  kind: 'assistant' | 'tool_call' | 'error';
+}
+
+const TRANSCRIPT_MARK_KINDS = ['assistant', 'tool_call', 'error'] as const;
+
+/**
+ * 熔断半开时拿在途会话的回话当试探证据（#2862）：此刻还没收场（ended_at 为空、带路由）的会话在 run_transcript 里 kind 为
+ * assistant、tool_call、error 的记录，只取 since 之后的，每个会话只留最近 perRun 条（够判就行）；按时刻先后排。查不出照抛。
+ */
+export async function openRunTranscriptMarks(
+  db: Db,
+  options: { since: Date; perRun?: number },
+): Promise<OpenRunTranscriptMark[]> {
+  const perRun = options.perRun ?? 50;
+  const ranked = db
+    .select({
+      runId: runTranscript.runId,
+      routeId: sql<string>`${runs.routeId}`.as('route_id'),
+      at: runTranscript.at,
+      kind: runTranscript.kind,
+      rank: sql<number>`row_number() over (partition by ${runTranscript.runId} order by ${runTranscript.at} desc, ${runTranscript.seq} desc)`.as(
+        'rank',
+      ),
+    })
+    .from(runTranscript)
+    .innerJoin(runs, eq(runs.id, runTranscript.runId))
+    .where(
+      and(
+        isNull(runs.endedAt),
+        isNotNull(runs.routeId),
+        inArray(runTranscript.kind, [...TRANSCRIPT_MARK_KINDS]),
+        gte(runTranscript.at, options.since),
+      ),
+    )
+    .as('ranked');
+  const rows = await db
+    .select({ runId: ranked.runId, routeId: ranked.routeId, at: ranked.at, kind: ranked.kind })
+    .from(ranked)
+    .where(lte(ranked.rank, perRun));
+  return rows
+    .map((r) => {
+      if (r.kind !== 'assistant' && r.kind !== 'tool_call' && r.kind !== 'error') {
+        throw new Error(`会话 ${r.runId} 按回话类型查出来，记录类型却是 ${r.kind}`);
+      }
+      return { runId: r.runId, routeId: r.routeId, at: r.at, kind: r.kind };
+    })
+    .sort((a, b) => a.at.getTime() - b.at.getTime() || byId(a.runId, b.runId));
 }
 
 /** 估算类的池算用量用：这个池的路由在 [since, until] 内开始的会话，各自的 token、花费。 */
