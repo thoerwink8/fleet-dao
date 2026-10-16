@@ -15,6 +15,7 @@ import {
   toRoute,
   upsertAlert,
 } from '@fleet-dao/db';
+import { BRIDGE_CONNECT_TIMEOUT_TEXT, KILL_TEXT } from '@fleet-dao/adapters';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { noteOnlyOptions } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -1104,6 +1105,76 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
     expect(down?.probeDetail).toContain('没起来');
     expect(down?.probeDetail).toContain('ECONNREFUSED');
+  });
+
+  // 法国 mirasim-relay:sonnet-5.5（#2703）：第一次起来了没第一帧、第二次桥接连都没连上。两种超时各归各的类，
+  // 和「回答认不出 pong」（#2699）分开：detail 里写明是哪一种，退避照旧逐轮累加。
+  describe('超时两种：桥接连 Mirasim 超时、起来之后迟迟没有第一帧', () => {
+    it('文案钉死：分流规则和插头认的是同一句', () => {
+      expect(BRIDGE_CONNECT_TIMEOUT_TEXT).toBe('桥接连 Mirasim 超时');
+      expect(KILL_TEXT.startup_timeout).toBe('起来之后迟迟没有第一帧');
+    });
+
+    const bridgeTimeout = (): FakeMirasimScript => ({
+      noAccept: true,
+      report: { launchError: `${BRIDGE_CONNECT_TIMEOUT_TEXT}（100 秒）`, terminal: undefined, ledger: undefined },
+    });
+    const noFirstFrame = (): FakeMirasimScript => ({
+      report: {
+        killed: { reason: 'startup_timeout', at: NOW.toISOString() },
+        terminal: undefined,
+        ledger: undefined,
+      },
+    });
+
+    it('桥接连 Mirasim 超时：同一轮再探一次，还不通就离线，归「桥接连 Mirasim 超时」类，不是认不出、不是起不来', async () => {
+      const s = setup(answered, { mirasim: bridgeTimeout });
+      await s.round();
+      expect(s.mirasim.count()).toBe(2);
+      const down = await row(routeId);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 1 });
+      expect(down?.probeDetail).toContain('连探两次都没通');
+      expect(down?.probeDetail).toContain(`桥接连 Mirasim 超时：没起来：${BRIDGE_CONNECT_TIMEOUT_TEXT}（100 秒）`);
+      expect(down?.probeDetail).not.toContain('回答认不出');
+      expect(down?.probeDetail).not.toContain('会话起不来');
+      expect(await hold()).toBeUndefined();
+      // 上游一直不通：下一轮还是同一类，连着不通的次数累加
+      s.advance(24 * 60);
+      await s.round();
+      const again = await row(routeId);
+      expect(again).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 2 });
+      expect(again?.probeDetail).toContain(`桥接连 Mirasim 超时：没起来：${BRIDGE_CONNECT_TIMEOUT_TEXT}`);
+    });
+
+    it('起来之后迟迟没有第一帧：离线，归「会话起不来」类，不混进桥接超时', async () => {
+      const s = setup(answered, { mirasim: noFirstFrame });
+      await s.round();
+      expect(s.mirasim.count()).toBe(2);
+      const down = await row(routeId);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+      expect(down?.probeDetail).toContain(`会话起不来：${KILL_TEXT.startup_timeout}`);
+      expect(down?.probeDetail).not.toContain(BRIDGE_CONNECT_TIMEOUT_TEXT);
+      expect(down?.probeDetail).not.toContain('回答认不出');
+    });
+
+    it('线上那一次的顺序（先没第一帧、再桥接超时）：detail 两次各写各的类', async () => {
+      const s = setup(answered, { mirasim: (n) => (n === 1 ? noFirstFrame() : bridgeTimeout()) });
+      await s.round();
+      const detail = (await row(routeId))?.probeDetail ?? '';
+      expect(detail).toMatch(/^连探两次都没通：桥接连 Mirasim 超时：没起来：桥接连 Mirasim 超时（100 秒）/);
+      expect(detail).toContain(`（第一次：会话起不来：${KILL_TEXT.startup_timeout}`);
+    });
+
+    it('第一次桥接超时、隔一会儿再探按时连上收到回答：探通，在线', async () => {
+      const s = setup(answered, {
+        mirasim: (n) => (n === 1 ? bridgeTimeout() : { state: { text: REPLY } }),
+      });
+      await s.round();
+      expect(s.mirasim.count()).toBe(2);
+      const up = await row(routeId);
+      expect(up).toMatchObject({ alive: true, probeState: 'ok', probeFailStreak: 0 });
+      expect(up?.probeDetail).toMatch(/^答上了：pong/);
+    });
   });
 
   it('快照说 done，但账本没给目录：中转到底走没走上游没查成，不当成探通（DL3）', async () => {
