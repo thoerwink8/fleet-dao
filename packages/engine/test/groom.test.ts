@@ -14,7 +14,7 @@ import {
   AMEND_HEADING,
   executeGroomPlan,
   type GroomWrites,
-  humanDecisionReason,
+  localWorkReason,
   type PlanContext,
   parseGroomPlan,
   plainText,
@@ -286,30 +286,44 @@ describe('executeGroomPlan · 开新单', () => {
     expect(String(f.calls[0]?.args.body)).toContain('从 #5 拆出来的独立小单，不是子单');
   });
 
-  it('涉及改标准的路径或 workflows 的新单贴「要人拍」；会话自己标了删数据 / 花钱的也贴', async () => {
+  it('只涉及 CI 工作流文件的新单贴「本机做」并留原因，不贴「要人拍」；改标准同样；掏新钱 / 删了找不回仍贴「要人拍」', async () => {
     const f = fakeWrites();
     const out = await executeGroomPlan(
       plan({
         newIssues: [
           newItem(1, { modules: '改 `agents/skills/x/SKILL.md`' }),
           newItem(2, { modules: '改 `.github/workflows/ci.yml`' }),
-          newItem(3, { needsHuman: '要清理一批生产数据' }),
+          newItem(3, { needsHuman: '要清理一批生产数据，删了找不回又没备份' }),
           newItem(4),
+          newItem(5, { scene: '要把这一版对外发布到生产' }),
         ],
       }),
       ctxOf([]),
       f.writes,
     );
     const labels = f.calls.filter((c) => c.kind === 'openIssue').map((c) => c.args.labels);
-    expect(labels).toEqual([['需求', '要人拍'], ['需求', '要人拍'], ['需求', '要人拍'], ['需求']]);
-    expect(out.result.flagged).toHaveLength(3);
+    expect(labels).toEqual([
+      ['需求', '本机做'],
+      ['需求', '本机做'],
+      ['需求', '要人拍'],
+      ['需求'],
+      ['需求', '本机做'],
+    ]);
+    expect(out.result.flagged).toEqual([903]);
+    const workflow = f.calls.find(
+      (c) => c.kind === 'comment' && String(c.args.body).includes('.github/workflows/'),
+    );
+    expect(String(workflow?.args.body)).toContain('本机做');
+    expect(String(workflow?.args.body)).not.toContain('要人拍');
+    expect(labels[1]).toEqual(['需求', '本机做']);
   });
 
-  it('humanDecisionReason：认得出标准路径和 workflows，认不出的不乱判', () => {
+  it('localWorkReason：认得出标准路径、workflows 和对外发布，认不出的不乱判', () => {
     const rules = [{ path: 'agents/**/*.md', why: 'x' }];
-    expect(humanDecisionReason('改 agents/skills/a/SKILL.md', rules)).toContain('agents/skills/a/SKILL.md');
-    expect(humanDecisionReason('改 .github/workflows/ci.yml', rules)).toContain('workflows');
-    expect(humanDecisionReason('改 packages/web/src/a.ts', rules)).toBeNull();
+    expect(localWorkReason('改 agents/skills/a/SKILL.md', rules)).toContain('agents/skills/a/SKILL.md');
+    expect(localWorkReason('改 .github/workflows/ci.yml', rules)).toContain('workflows');
+    expect(localWorkReason('这一版要对外发布', rules)).toContain('对外发布');
+    expect(localWorkReason('改 packages/web/src/a.ts', rules)).toBeNull();
   });
 
   it('splitFrom 的新单标题缺「第 N 片」：整条被拒，不开', async () => {
@@ -477,7 +491,7 @@ describe('executeGroomPlan · 补老单：追加补充，不改原文', () => {
     expect(presentSections(amended.body).amended).toBe(true);
   });
 
-  it('补的是改标准路径的单 → 补完贴「要人拍」，不贴「整理过」', async () => {
+  it('补的是改标准路径的单 → 补完贴「本机做」并留原因，不贴「整理过」，也不贴「要人拍」', async () => {
     const old = issue(3, { body: THIN_BODY });
     const f = fakeWrites();
     const out = await executeGroomPlan(
@@ -487,8 +501,11 @@ describe('executeGroomPlan · 补老单：追加补充，不改原文', () => {
       ctxOf([old]),
       f.writes,
     );
-    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['要人拍']);
-    expect(out.result.flagged).toEqual([3]);
+    expect(f.calls.filter((c) => c.kind === 'addLabel').map((c) => c.args.label)).toEqual(['本机做']);
+    const comment = f.calls.find((c) => c.kind === 'comment');
+    expect(String(comment?.args.body)).toContain('agents/skills/x/SKILL.md');
+    expect(String(comment?.args.body)).toContain('本机做');
+    expect(out.result.flagged).toEqual([]);
     expect(out.result.groomed).toEqual([]);
   });
 });
@@ -587,6 +604,10 @@ describe('提示词', () => {
     expect(prompt).toContain('最多 5 张');
     expect(prompt).toContain('最多 10 张');
     expect(prompt).toContain('拿不准就不要判 sound');
+    expect(prompt).toContain('本机做');
+    expect(prompt).toContain('.github/workflows/');
+    expect(prompt).toContain('对外发布不要判 human');
+    expect(prompt).toContain('掏新钱');
     expect(prompt).toContain('#50 关掉的单');
     expect(prompt).toContain('#60 开着的 PR');
     expect(prompt.indexOf('### #1 ')).toBeLessThan(prompt.indexOf('### #2 '));

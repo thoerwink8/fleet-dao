@@ -48,7 +48,9 @@ import {
   addIssueLabel,
   type GroomFacts,
   type GroomLabelEvent,
+  type IssueComment,
   readGroomFacts,
+  readIssueComments,
   readIssueLabelEvents,
   removeIssueLabel,
   setIssueMilestone,
@@ -265,6 +267,12 @@ export interface GitHub {
     issueNumber: number;
     signal?: AbortSignal | undefined;
   }): Promise<GroomLabelEvent[]>;
+  /** 一张单上的评论（对账认「本机做」是谁、为什么贴的）。读不到、翻不完抛错。 */
+  readIssueComments(input: {
+    repo: RepoRef;
+    issueNumber: number;
+    signal?: AbortSignal | undefined;
+  }): Promise<IssueComment[]>;
   /** 给一张单加一个标签（#448，幂等）：返回加完之后单上的全部标签。 */
   addIssueLabel(
     input: { repo: RepoRef; issueNumber: number; label: string },
@@ -383,6 +391,7 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     readGroomFacts: (input) => readGroomFacts(deps, input),
     readIssueLabelEvents: (input) => readIssueLabelEvents(deps, input),
+    readIssueComments: (input) => readIssueComments(deps, input),
     async addIssueLabel(input, ctx = {}) {
       return addIssueLabel(deps, input, ctx);
     },

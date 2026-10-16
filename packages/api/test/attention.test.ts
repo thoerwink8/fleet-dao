@@ -1,6 +1,12 @@
 // fleet-api attention --json（#2370）：现在要人看的事一份结论。该推的通知用 feishu-push.ts 的 feishuPushableSince 判，
 // 推送不通、简报没到用 db 里的 feishuPushProblem、dailyBriefProblem；这里管命令这一层（真 Postgres：PGlite）。
-import { notificationDeliveries, upsertAlert } from '@fleet-dao/db';
+import {
+  LOCAL_ORPHANS_SETTING,
+  notificationDeliveries,
+  settings,
+  upsertAlert,
+  writeLocalOrphans,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
@@ -121,7 +127,31 @@ describe('fleet-api attention', () => {
     const r = await attentionJson({ db: t.db, now: () => new Date(), env: {} });
     expect(r.code).toBe(0);
     const j = JSON.parse(r.text);
-    expect(j).toMatchObject({ ok: true, healthz: { code: 0, red: [] }, notes: [] });
+    expect(j).toMatchObject({ ok: true, healthz: { code: 0, red: [] }, notes: [], localOrphans: [] });
+  });
+
+  it('localOrphans：没有这份名单是空数组；对账写了一条就原样在数组里，不另判', async () => {
+    const empty = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
+    expect(empty.localOrphans).toEqual([]);
+    const item = {
+      repo: 'acme/app',
+      issue: 12,
+      labeledForMs: 25 * 60 * 60_000,
+      labeledFor: '25 小时',
+      reason: 'fleet-engine[bot]：涉及 .github/workflows/ci.yml，留给本机做',
+    };
+    await writeLocalOrphans(t.db, [item], 'test');
+    const r = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
+    expect(r.localOrphans).toEqual([item]);
+  });
+
+  it('【故意造出的失败】名单形状认不出：退出码 1，不拿空数组顶', async () => {
+    await t.db
+      .insert(settings)
+      .values({ key: LOCAL_ORPHANS_SETTING, value: { nope: true }, updatedBy: 'test' });
+    const r = await attentionJson({ db: t.db, now: () => new Date(), env: {} });
+    expect(r.code).toBe(1);
+    expect(JSON.parse(r.text).ok).toBe(false);
   });
 
   it('【故意造出的失败】读库报错：ok:false、退出码 1，不拿空列表顶', async () => {

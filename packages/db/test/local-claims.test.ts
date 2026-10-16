@@ -11,6 +11,7 @@ import {
   tasksCreatedSince,
 } from '../src/queries/intake-history.ts';
 import {
+  activeLocalLeaseKeys,
   claimLocalTask,
   expiredLocalClaims,
   extendLocalLease,
@@ -367,6 +368,26 @@ describe('到期收回', () => {
     expect(await mergedPrForIssue(t.db, repo.id, 8)).toBe(11);
     expect(await mergedPrForIssue(t.db, repo.id, 9)).toBeNull();
     expect(await mergedPrForIssue(t.db, repo.id, 80)).toBeNull();
+  });
+});
+
+describe('activeLocalLeaseKeys：还没到期的本机租约', () => {
+  it('刚领的在里面；过了到期时刻的不在；做完的不在', async () => {
+    await addRepo(t.db, 'app');
+    await claimLocalTask(t.db, { repo: 'acme/app', issueNumber: 5, title: 'x', nodeId: NODE, now: NOW });
+    expect(await activeLocalLeaseKeys(t.db, NOW)).toEqual(new Set(['acme/app#5']));
+    expect(await activeLocalLeaseKeys(t.db, new Date(NOW.getTime() + LOCAL_LEASE_MS))).toEqual(
+      new Set(['acme/app#5']),
+    );
+    expect(await activeLocalLeaseKeys(t.db, new Date(NOW.getTime() + LOCAL_LEASE_MS + 1))).toEqual(new Set());
+    await finishLocalTask(t.db, {
+      repo: 'acme/app',
+      issueNumber: 5,
+      outcome: 'done',
+      nodeId: NODE,
+      now: NOW,
+    });
+    expect(await activeLocalLeaseKeys(t.db, NOW)).toEqual(new Set());
   });
 });
 

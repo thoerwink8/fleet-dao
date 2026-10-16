@@ -34,7 +34,8 @@ export const ENGINE_LABEL = '交给引擎';
 export const GROOMED_LABEL = '整理过';
 
 /**
- * 「要人拍」（同上）：临时指挥官整理待办时见到涉及改标准路径、删数据、花钱、`.github/workflows/` 的单，贴它。
+ * 「要人拍」（同上，决定 0097 收窄）：临时指挥官整理待办时，只有要掏新钱、或删了找不回又没备份，才贴它。
+ * 改标准路径、`.github/workflows/`、对外发布改贴「本机做」并留一句原因，不问创始人。
  * 贴着它的单引擎一律不拉（`intake.ts` 的 `needs_human`）；要交给引擎做，先让人看过、摘掉这个标签。
  */
 export const HUMAN_DECISION_LABEL = '要人拍';

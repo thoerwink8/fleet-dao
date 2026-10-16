@@ -25,6 +25,7 @@ export * from './queries/intake.ts';
 export * from './queries/intake-history.ts';
 export * from './queries/jev.ts';
 export * from './queries/local-claims.ts';
+export * from './queries/local-orphans.ts';
 export * from './queries/merge-stall.ts';
 export * from './queries/model-track.ts';
 export * from './queries/pool-holds.ts';

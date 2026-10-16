@@ -3,7 +3,7 @@
 //
 // 改这里之前必须知道：
 // - 动作只有四类：开独立小单（newIssues）、在老单正文末尾追加「## 引擎整理补充」（amendments）、对一张单下判断（reviews：仍成立 /
-//   过期 / 要人拍，对应贴「整理过」/ 留言加「待补」/ 留言加「要人拍」）。没有关单，没有改里程碑，没有推代码，没有改老单原文：
+//   过期 / 要人拍，对应贴「整理过」/ 留言加「待补」/ 留言加「要人拍」；改标准、改工作流、对外发布改贴「本机做」并留一句原因）。没有关单，没有改里程碑，没有推代码，没有改老单原文：
 //   GroomWrites 这个端口里压根没有这些方法（测试盯着它的键），清单里写 closeIssues 之类的项会进 rejected。
 // - 限额：每次最多开 5 张新单、补写 10 张老单、下 40 条判断；超出的进 rejected，不顺延。
 // - 开单的正文由引擎按四节模板自己拼（场景、原话、已知的模块、怎么算做完），会话只给各节的内容：「原话」一栏引擎写死「无（AI 发现）」，
@@ -18,7 +18,8 @@
 //   已知的模块列了超过 50 个不同路径的下一片也不开（和拉单的最重档同一条线）：开出来引擎不拉，这张单还开着，后面的片也开不了。
 // - 补老单只往末尾接，原文、原话一个字不动：老单里已有的节（场景、已知的模块、怎么算做完写了字的）不补，已经有整理补充的单不再补。
 // - 会话只看得到、也只能点到「作者在白名单里」的开着的单：陌生人开的单正文不进提示词（防提示词注入），清单点到它们也丢进 rejected。
-// - 涉及改标准路径、`.github/workflows/`（正文里认得出路径）或会话自己标了删数据 / 花钱的，贴「要人拍」，引擎不拉。
+// - 涉及改标准路径、`.github/workflows/`（正文里认得出路径）或对外发布，贴「本机做」并留一句原因，引擎不拉。
+//   「要人拍」只留给会话标了要掏新钱、或删了找不回又没备份的（needsHuman，或判断写成 human 而引擎认不出是上面三类）。
 // - 单条动作失败（GitHub 写不进）进 rejected，别的条照做；全部尝试的动作都失败，调用方当整理失败。
 
 import {
@@ -28,6 +29,7 @@ import {
   HUMAN_DECISION_LABEL,
   issueColumnRefs,
   KIND_LABELS,
+  LOCAL_LABEL,
   matchesStandardPath,
   modulePaths,
   parseMd,
@@ -181,17 +183,42 @@ export function plainText(text: string): string {
 }
 
 /**
- * 这段文字涉及什么要人拍的事：改标准的路径（清单在 standard-paths.json）、`.github/workflows/`。认得出回一句原因，认不出回 null。
- * 删数据、花钱引擎认不出，由会话在清单里自己标（needsHuman）。
+ * 这段文字该留给本机做的原因：改标准的路径（清单在 standard-paths.json）、`.github/workflows/`、对外发布。
+ * 认得出回一句原因，认不出回 null。掏新钱、删了找不回又没备份引擎认不出，由会话在清单里自己标（needsHuman）。
  */
-export function humanDecisionReason(text: string, rules: readonly StandardPath[]): string | null {
-  if (/\.github\/workflows\//.test(text))
-    return '涉及 .github/workflows/（引擎的令牌推不了，改工作流要人拍）';
+export function localWorkReason(text: string, rules: readonly StandardPath[]): string | null {
+  if (/\.github\/workflows\//.test(text)) return '涉及 .github/workflows/（引擎的令牌推不了，留给本机做）';
+  if (text.includes('对外发布')) return '涉及对外发布（决定 0097：自己拍、事后报，留给本机做）';
   for (const p of modulePaths(text)) {
     const rule = rules.find((r) => matchesStandardPath(p, r));
-    if (rule) return `涉及改标准的路径 ${p}（${rule.path}）`;
+    if (rule) return `涉及改标准的路径 ${p}（${rule.path}），留给本机做`;
   }
   return null;
+}
+
+/** 贴「本机做」时留在单上的那一句。 */
+export function localWorkComment(reason: string): string {
+  return [
+    `引擎的临时指挥官整理待办时把这张单留给本机做：${reason}`,
+    '',
+    `已贴「${LOCAL_LABEL}」，引擎不拉。要本机接着做，先用 \`pnpm work claim\` 领这张单。`,
+  ].join('\n');
+}
+
+/**
+ * 这张单该贴什么：改标准、改工作流、对外发布是「本机做」；会话标了要人拍、而那句话本身不是这三类，是「要人拍」
+ * （掏新钱、删了找不回又没备份）。都不是回 null。
+ */
+export function groomHold(
+  text: string,
+  needsHuman: string | undefined,
+  rules: readonly StandardPath[],
+): { kind: 'local'; reason: string } | { kind: 'human'; reason: string } | null {
+  if (needsHuman && localWorkReason(needsHuman, rules) === null) {
+    return { kind: 'human', reason: plainText(needsHuman) };
+  }
+  const local = localWorkReason(`${needsHuman ?? ''}\n${text}`, rules);
+  return local ? { kind: 'local', reason: local } : null;
 }
 
 /** 新单的正文：引擎按四节模板拼，原话一栏写死。 */
@@ -448,7 +475,18 @@ export async function executeGroomPlan(
       });
       if (ok) suggestedClose.push(item.issue);
     } else {
+      const hold = groomHold(reason, undefined, ctx.standardPaths);
+      const local = hold?.kind === 'local' ? hold : null;
       const ok = await act(what, async () => {
+        if (local) {
+          await writes.comment({
+            issueNumber: item.issue,
+            key: `groom-local:${ctx.requestId}:${item.issue}`,
+            body: localWorkComment(local.reason),
+          });
+          await label(item.issue, LOCAL_LABEL, issue);
+          return;
+        }
         await writes.comment({
           issueNumber: item.issue,
           key: `groom-human:${ctx.requestId}`,
@@ -460,7 +498,7 @@ export async function executeGroomPlan(
         });
         await label(item.issue, HUMAN_DECISION_LABEL, issue);
       });
-      if (ok) flagged.push(item.issue);
+      if (ok && !local) flagged.push(item.issue);
     }
   }
 
@@ -494,17 +532,25 @@ export async function executeGroomPlan(
     }
     amends += 1;
     const text = renderAmendment(item, include, date);
-    const reason = item.needsHuman ?? humanDecisionReason(text, ctx.standardPaths);
+    const hold = groomHold(text, item.needsHuman, ctx.standardPaths);
     const verdict = judged.get(item.issue);
     const ok = await act(what, async () => {
       await writes.appendBody({ issueNumber: item.issue, key: `groom-amend:${ctx.requestId}`, text });
-      if (reason !== null) await label(item.issue, HUMAN_DECISION_LABEL, issue);
-      else if (verdict === undefined || verdict === 'sound') await label(item.issue, GROOMED_LABEL, issue);
+      if (hold?.kind === 'human') await label(item.issue, HUMAN_DECISION_LABEL, issue);
+      else if (hold?.kind === 'local') {
+        await writes.comment({
+          issueNumber: item.issue,
+          key: `groom-local:${ctx.requestId}:${item.issue}`,
+          body: localWorkComment(hold.reason),
+        });
+        await label(item.issue, LOCAL_LABEL, issue);
+      } else if (verdict === undefined || verdict === 'sound') await label(item.issue, GROOMED_LABEL, issue);
     });
     if (ok) {
       amended.push(item.issue);
-      if (reason !== null) flagged.push(item.issue);
-      else if (verdict === undefined || verdict === 'sound') groomed.push(item.issue);
+      if (hold?.kind === 'human') flagged.push(item.issue);
+      else if (hold?.kind !== 'local' && (verdict === undefined || verdict === 'sound'))
+        groomed.push(item.issue);
     }
   }
 
@@ -569,21 +615,31 @@ export async function executeGroomPlan(
       });
       continue;
     }
-    const reason = item.needsHuman ?? humanDecisionReason(`${title}\n${body}`, ctx.standardPaths);
+    const hold = groomHold(`${title}\n${body}`, item.needsHuman, ctx.standardPaths);
     let number = 0;
     const ok = await act(what, async () => {
       const got = await writes.openIssue({
         key: `groom:${ctx.requestId}:${index}`,
         title,
         body,
-        labels: [item.kind, ...(reason === null ? [] : [HUMAN_DECISION_LABEL])],
+        labels: [
+          item.kind,
+          ...(hold === null ? [] : [hold.kind === 'local' ? LOCAL_LABEL : HUMAN_DECISION_LABEL]),
+        ],
       });
       number = got.number;
+      if (hold?.kind === 'local') {
+        await writes.comment({
+          issueNumber: number,
+          key: `groom-local:${ctx.requestId}:new:${index}`,
+          body: localWorkComment(hold.reason),
+        });
+      }
     });
     if (!ok) continue;
     opened.push({ number, title, ...(item.splitFrom === undefined ? {} : { splitFrom: item.splitFrom }) });
     if (parent !== undefined && isLedgerIssue(parent)) ledgerSlicesOpened += 1;
-    if (reason !== null) flagged.push(number);
+    if (hold?.kind === 'human') flagged.push(number);
     candidates.push({ number, title, body, kind: 'issue' });
     if (item.splitFrom !== undefined)
       splits.set(item.splitFrom, [...(splits.get(item.splitFrom) ?? []), number]);

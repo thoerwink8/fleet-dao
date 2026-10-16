@@ -1,6 +1,6 @@
 // 每小时对账（design 第六节「断链怎么被发现」第 4 层）：一轮 = 记下开始 → 工作树（jobs/worktree-sweep.ts：没有在跑的任务
 // 在用的树，什么都不剩的删掉，剩着没推的东西的报要人拍）→ 核对（jobs/reconcile-checks.ts：合了的
-// PR 都记了账、撤掉随 Fusion 删了的那一处核对留下的旧提醒；额度读数那处等 #76）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、卡住报警超过 24 小时没人处理的再推一次、同一条立案）
+// PR 都记了账、贴了「本机做」超过 24 小时又没租约的写成一份名单、撤掉随 Fusion 删了的那一处核对留下的旧提醒；额度读数那处等 #76）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、卡住报警超过 24 小时没人处理的再推一次、同一条立案）
 // → 单已关且停下等人的发放弃信号并撤挂起提醒（jobs/closed-issue-tasks.ts，#1198 / #1816）
 // → GitHub 两个机器人的权限自检（jobs/github-app-check.ts：缺的、没查成的报提醒，好了自己撤）
 // → 整池暂停到期的飞书（jobs/pool-hold-push.ts：没配、没推成记没查成，不当成推过；不给 poolHoldPush 的单测这一项跳过）
@@ -12,7 +12,7 @@
 // PR、撤掉的过时提醒、再推的提醒、立的单、权限不对的和撤掉的权限提醒）。一部分没跑成、只查了一部分，照实记 failed / partial，
 // 写明哪里没查成；不记成 ok（没跑成 ≠ 没问题）。
 
-import type { AlertRow, ScheduleResult } from '@fleet-dao/db';
+import type { AlertRow, LocalOrphan, ScheduleResult } from '@fleet-dao/db';
 import type { WorktreeInventory } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { HourlyReconcileRun } from '../contract.ts';
@@ -32,7 +32,9 @@ import {
 import type { ScheduleRunLog } from './github-reconcile.ts';
 import {
   checkLedgers,
+  checkLocalOrphans,
   checkMergedPrs,
+  type LocalLabeledIssue,
   type ReconcileCheckDeps,
   retireHistoricalFactAlerts,
   retireWorkflowAlerts,
@@ -80,6 +82,15 @@ export type HourlyReconcileJobDeps = WorktreeSweepDeps &
      * 存不进记进 unchecked，不许当成存了。
      */
     saveInventory?: (inventory: WorktreeInventory) => Promise<void>;
+    /**
+     * 贴着「本机做」的开着的单（含标签时间线和评论）。三个都给才核；一个都不给就跳过（单测外壳）。
+     * 只给了一部分记没查成，不当成「没有没人领的」。
+     */
+    localLabeled?: () => Promise<LocalLabeledIssue[]>;
+    /** 还没到期的本机租约，键是 `owner/name#单号`。 */
+    activeLeases?: () => Promise<Set<string>>;
+    /** 把没人领的名单整份换上。读不到单就不许调它。 */
+    saveLocalOrphans?: (items: readonly LocalOrphan[]) => Promise<void>;
   };
 
 /** 这一轮没跑成：结局已经记进 schedule_runs，活动照样报失败，Temporal 里也看得见。 */
@@ -134,6 +145,26 @@ async function knownNotInstalled(deps: HourlyReconcileJobDeps): Promise<{ slugs:
   }
 }
 
+/** 三个口子齐了才核没人领的「本机做」；一个都没接就跳过；只接了一部分记没查成。 */
+async function localOrphanPart(deps: HourlyReconcileJobDeps): Promise<SweepPart> {
+  const wired = [deps.localLabeled, deps.activeLeases, deps.saveLocalOrphans].filter(Boolean).length;
+  if (wired === 0) return { scanned: 0, found: 0, unchecked: [] };
+  if (wired < 3 || !deps.localLabeled || !deps.activeLeases || !deps.saveLocalOrphans) {
+    return {
+      scanned: 0,
+      found: 0,
+      unchecked: ['本机没人领的核对没接全（读单、租约、写名单要一起给）'],
+    };
+  }
+  return checkLocalOrphans({
+    now: deps.now,
+    log: deps.log,
+    localLabeled: deps.localLabeled,
+    activeLeases: deps.activeLeases,
+    saveLocalOrphans: deps.saveLocalOrphans,
+  });
+}
+
 function skipRepos<T extends { owner: string; name: string }>(
   repos: () => Promise<T[]>,
   skip: ReadonlySet<string>,
@@ -172,6 +203,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   };
   const merged = await checkMergedPrs(skipping);
   const ledgers = await checkLedgers(deps);
+  const localOrphans = await localOrphanPart(deps);
   const historical = await retireHistoricalFactAlerts(deps);
   const autoMerges = await checkAutoMerges(skipping);
   // 单已关且停下等人的撤掉（#1816）：当场发放弃并撤挂起提醒；放在提醒清扫之前
@@ -218,6 +250,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     retired,
     merged,
     ledgers,
+    localOrphans,
     historical,
     autoMerges,
     closedTasks,

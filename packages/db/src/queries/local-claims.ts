@@ -292,6 +292,19 @@ export async function expiredLocalClaims(db: Db, repoId: string, now: Date): Pro
   return rows.flatMap((r) => (r.leaseUntil ? [{ ...r, leaseUntil: r.leaseUntil }] : []));
 }
 
+/**
+ * 还没到期的本机租约，键是 `owner/name#单号`（仓名大小写不计）。
+ * 到期的、不是本机在做的、没有租约时刻的都不在里面。
+ */
+export async function activeLocalLeaseKeys(db: Db, now: Date): Promise<Set<string>> {
+  const rows = await db
+    .select({ owner: repos.owner, name: repos.name, issueNumber: tasks.issueNumber })
+    .from(tasks)
+    .innerJoin(repos, eq(repos.id, tasks.repoId))
+    .where(and(eq(tasks.executor, 'local'), eq(tasks.state, 'running'), gte(tasks.leaseUntil, now)));
+  return new Set(rows.map((r) => `${r.owner.toLowerCase()}/${r.name.toLowerCase()}#${r.issueNumber}`));
+}
+
 /** 这个仓里本机在做、租约还没到期的行（单关了就提前收的候选），按到期先后。 */
 export async function unexpiredLocalClaims(db: Db, repoId: string, now: Date): Promise<ExpiredLocalClaim[]> {
   const rows = await db

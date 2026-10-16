@@ -205,7 +205,9 @@ describe('readIssueLabelEvents：标签的加/摘事件', () => {
       ],
     });
     const got = await readIssueLabelEvents({ client, bots }, { repo, issueNumber: 12 });
-    expect(got).toEqual([{ label: '需求', action: 'labeled', bot: false, at: '2026-09-01T00:00:00Z' }]);
+    expect(got).toEqual([
+      { label: '需求', action: 'labeled', bot: false, at: '2026-09-01T00:00:00Z', actor: 'thoerwink8' },
+    ]);
   });
 
   it('机器人贴的、人摘的：bot 字段分得清', async () => {

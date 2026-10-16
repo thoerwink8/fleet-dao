@@ -5,7 +5,8 @@
 // 「开着的单都有着落」那一处（一张单一个需求工作流，要补拉接活）随 Fusion 一起删了（#556）：三段流程的单是任务工作流，
 // 状态只在 Temporal 一份，不靠这一处查；它留下的旧提醒由 retireWorkflowAlerts 撤掉。
 
-import type { LedgerSession, MergedPrLedger } from '@fleet-dao/db';
+import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import type { LedgerSession, LocalOrphan, MergedPrLedger } from '@fleet-dao/db';
 import {
   isEngineCiTimingsPr,
   type MergedPrAuditReport,
@@ -420,6 +421,149 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
       }
       await resolveOne(deps, part, alert.dedupeKey, '镜像里这条 PR 不再是已合并、或对不上单了');
     }
+  }
+  return part;
+}
+
+/** 贴了「本机做」超过这么久、又没有还没到期的本机租约，才算没人领。刚好 24 小时不算。 */
+export const LOCAL_ORPHAN_MS = 24 * 60 * 60_000;
+
+/** 一张贴着「本机做」的开着的单，加上标签时间线和评论（对账读来的，这里不自己去 GitHub）。 */
+export interface LocalLabeledIssue {
+  repo: { owner: string; name: string };
+  issue: number;
+  events: readonly { label: string; action: 'labeled' | 'unlabeled'; at: string; actor?: string | null }[];
+  comments: readonly { body: string; at: string }[];
+}
+
+/** 还没到期的本机租约用这个键对上单：`owner/name#单号`，仓名大小写不计。 */
+export function localLeaseKey(owner: string, name: string, issue: number): string {
+  return `${owner.toLowerCase()}/${name.toLowerCase()}#${issue}`;
+}
+
+/**
+ * 时间线里「本机做」现在还贴着的那一次（摘过再贴，认最后一次还贴着的）。
+ * 当前没贴着回 null。时刻认不出抛错，不当成没贴。
+ */
+export function localLabelApplied(
+  events: readonly { label: string; action: 'labeled' | 'unlabeled'; at: string; actor?: string | null }[],
+): { at: Date; actor: string | null } | null {
+  let applied: { at: Date; actor: string | null } | null = null;
+  for (const e of events) {
+    if (e.label !== LOCAL_LABEL) continue;
+    const at = new Date(e.at);
+    if (!Number.isFinite(at.getTime())) throw new Error(`「${LOCAL_LABEL}」的标签时刻认不出（${e.at}）`);
+    applied = e.action === 'labeled' ? { at, actor: e.actor ?? null } : null;
+  }
+  return applied;
+}
+
+function clipReason(text: string): string {
+  const t = text.replace(/\s+/g, ' ').trim();
+  return t.length <= 300 ? t : `${t.slice(0, 300)}…`;
+}
+
+/** 贴上时刻前 60 秒起、正文里有「本机做」的最后一条评论。没有回 null。时刻认不出的那条跳过。 */
+export function localReasonComment(
+  comments: readonly { body: string; at: string }[],
+  labeledAt: Date,
+): string | null {
+  const from = labeledAt.getTime() - 60_000;
+  let hit: { at: number; body: string } | null = null;
+  for (const c of comments) {
+    if (!c.body.includes(LOCAL_LABEL)) continue;
+    const at = Date.parse(c.at);
+    if (!Number.isFinite(at) || at < from) continue;
+    if (!hit || at >= hit.at) hit = { at, body: c.body };
+  }
+  return hit ? clipReason(hit.body) : null;
+}
+
+/** 谁贴的，以及留下的原因，合成巡检那一栏的一句话。 */
+export function localOrphanReason(actor: string | null, comment: string | null): string {
+  const who = actor?.trim() ? actor.trim() : '没认出发起人';
+  if (!comment) return `${who} 贴了「${LOCAL_LABEL}」，没有留下原因`;
+  return `${who}：${comment}`;
+}
+
+/** 贴上多久，给人看的说法。不到 48 小时按小时；再长按天，零头的小时也写上。 */
+export function labeledForText(ms: number): string {
+  const hours = Math.floor(ms / 3_600_000);
+  if (hours < 48) return `${hours} 小时`;
+  const days = Math.floor(hours / 24);
+  const rest = hours % 24;
+  return rest === 0 ? `${days} 天` : `${days} 天 ${rest} 小时`;
+}
+
+/**
+ * 贴着「本机做」、超过 24 小时、又没有还没到期的本机租约的单。
+ * 有租约的、不到（含刚好）24 小时的不列。单上有标签、时间线里却没有还贴着的那一次：抛错，不把这张丢掉。
+ */
+export function selectLocalOrphans(
+  issues: readonly LocalLabeledIssue[],
+  leases: ReadonlySet<string>,
+  now: Date,
+): LocalOrphan[] {
+  const out: LocalOrphan[] = [];
+  for (const issue of issues) {
+    const applied = localLabelApplied(issue.events);
+    if (!applied) {
+      throw new Error(
+        `${issue.repo.owner}/${issue.repo.name}#${issue.issue} 贴着「${LOCAL_LABEL}」，时间线里却没有还贴着的那一次`,
+      );
+    }
+    if (leases.has(localLeaseKey(issue.repo.owner, issue.repo.name, issue.issue))) continue;
+    const labeledForMs = now.getTime() - applied.at.getTime();
+    if (!(labeledForMs > LOCAL_ORPHAN_MS)) continue;
+    out.push({
+      repo: `${issue.repo.owner}/${issue.repo.name}`,
+      issue: issue.issue,
+      labeledForMs,
+      labeledFor: labeledForText(labeledForMs),
+      reason: localOrphanReason(applied.actor, localReasonComment(issue.comments, applied.at)),
+    });
+  }
+  return out;
+}
+
+/**
+ * 读贴着「本机做」的开着的单和还没到期的租约，把没人领的写成一份名单。
+ * 读不到、判不出都不写（上一份留着）。写成失败记没查成，found 不加。
+ */
+export async function checkLocalOrphans(
+  deps: Pick<ReconcileCheckDeps, 'now' | 'log'> & {
+    localLabeled(): Promise<LocalLabeledIssue[]>;
+    activeLeases(): Promise<Set<string>>;
+    saveLocalOrphans(items: LocalOrphan[]): Promise<void>;
+  },
+): Promise<SweepPart> {
+  const part = empty();
+  let issues: LocalLabeledIssue[];
+  let leases: Set<string>;
+  try {
+    [issues, leases] = await Promise.all([deps.localLabeled(), deps.activeLeases()]);
+  } catch (err) {
+    return { ...part, failed: `本机没人领的单没读成，上一份名单留着：${errMessage(err)}` };
+  }
+  part.scanned = issues.length;
+  let orphans: LocalOrphan[];
+  try {
+    orphans = selectLocalOrphans(issues, leases, deps.now());
+  } catch (err) {
+    return { ...part, failed: `本机没人领的单没判成，上一份名单留着：${errMessage(err)}` };
+  }
+  try {
+    await deps.saveLocalOrphans(orphans);
+  } catch (err) {
+    part.unchecked.push(`本机没人领的名单没写成，上一份留着：${errMessage(err)}`);
+    return part;
+  }
+  part.found = orphans.length;
+  if (orphans.length > 0) {
+    deps.log('info', '每小时对账：贴了「本机做」超过 24 小时还没人领', {
+      n: orphans.length,
+      issues: orphans.slice(0, 8).map((o) => `${o.repo}#${o.issue}`),
+    });
   }
   return part;
 }
