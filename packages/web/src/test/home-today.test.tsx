@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
-// 主页三块（决定 0093）：要你拍的、在跑的、上线了的，从上到下；要你拍的点选项就是拍板，看门狗的卡点「处理」。
+// 主页三块（决定 0093）：要你拍的、在跑的、上线了的，从上到下；要你拍的点选项就是拍板。
+// 看门狗的卡没有「处理」：写谁在修（引擎或指挥官会话）、修了多久、开了多久；还没人接就照实写。
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, test, vi } from 'vitest';
 import { ApiError } from '../api/client';
@@ -79,16 +80,66 @@ describe('主页三块', () => {
     await waitFor(() => expect(block('ask').textContent).not.toContain('发布 v2.3'));
   });
 
-  test('看门狗的卡点「处理」：调处理接口', async () => {
-    const { api } = renderApp(<HomePage />);
-    const resolve = vi.spyOn(api, 'resolveNotification');
+  test('看门狗的卡没有「处理」：首页上找不到这个按钮；还没人接写开了多久', async () => {
+    renderApp(<HomePage />);
     await ready();
+    expect(screen.queryByRole('button', { name: '处理' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '处理中' })).toBeNull();
+    const home = document.querySelector('[data-home]') as HTMLElement;
+    expect(within(home).queryByRole('button', { name: '处理' })).toBeNull();
     const dog = block('ask').querySelector('[data-ask-row="watchdog"]') as HTMLElement;
     expect(dog.textContent).toContain('主线 4 小时 12 分没合 PR');
-    await act(async () => {
-      fireEvent.click(within(dog).getByRole('button', { name: /处理/ }));
-    });
-    await waitFor(() => expect(resolve).toHaveBeenCalledWith('n-10'));
+    const repair = dog.querySelector('[data-ask-repair="waiting"]');
+    expect(repair?.textContent).toMatch(/^还没人接 · 开了 /);
+    expect(within(dog).queryByRole('button', { name: '处理' })).toBeNull();
+    expect(within(dog).getByRole('link', { name: /看看/ })).toBeTruthy();
+  });
+
+  test('看门狗的卡：有人在修时写引擎或指挥官会话、修了多久、开了多久', async () => {
+    const api = createMockApi({ live: false });
+    const real = api.notifications.bind(api);
+    api.notifications = async (q) => {
+      const page = await real(q);
+      const dog = page.items.find((n) => n.id === 'n-10');
+      if (!dog) throw new Error('假数据里没有看门狗的卡');
+      const handling = (who: string, since: string): NonNullable<(typeof dog)['handling']> => ({
+        stage: 'pr_open',
+        stageText: 'PR 开着',
+        since,
+        who,
+        line: `${who}在修`,
+        problems: [],
+      });
+      const engine = {
+        ...dog,
+        handling: handling('法国引擎', new Date(Date.parse(dog.createdAt) + 5 * 60_000).toISOString()),
+      };
+      const commander = {
+        ...dog,
+        id: 'n-10b',
+        title: '备份定时任务没跑成',
+        dedupeKey: 'watchdog:job:backup',
+        handling: handling('指挥官会话', dog.createdAt),
+      };
+      return {
+        ...page,
+        items: page.items.map((n) => (n.id === 'n-10' ? engine : n)).concat(commander),
+        counts: { ...page.counts, alert: page.counts.alert + 1 },
+      };
+    };
+    renderApp(<HomePage />, { api });
+    await ready();
+    const ask = block('ask');
+    expect(within(ask).queryByRole('button', { name: '处理' })).toBeNull();
+    const rows = [...ask.querySelectorAll('[data-ask-row="watchdog"]')] as HTMLElement[];
+    const engine = rows.find((r) => r.textContent?.includes('主线 4 小时')) as HTMLElement;
+    const commander = rows.find((r) => r.textContent?.includes('备份定时任务')) as HTMLElement;
+    expect(engine.querySelector('[data-ask-repair="fixing"]')?.textContent).toMatch(
+      /^法国引擎在修 · 修了 .+ · 开了 /,
+    );
+    expect(commander.querySelector('[data-ask-repair="fixing"]')?.textContent).toMatch(
+      /^指挥官会话在修 · 修了 .+ · 开了 /,
+    );
   });
 
   test('在跑的：引擎的单和本机会话都在，一行写谁在做和卡没卡', async () => {
