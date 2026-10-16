@@ -259,6 +259,11 @@ export function SegmentStats({ d, now }: { d: TaskDetail; now: number }) {
           {collapsed.join(' · ')}
         </p>
       ) : null}
+      {(t.unreadSegments ?? 0) > 0 ? (
+        <p className="mt-2 text-meta text-muted-foreground" data-unread-segments>
+          另有 {t.unreadSegments} 段读不到用量
+        </p>
+      ) : null}
     </div>
   );
 }

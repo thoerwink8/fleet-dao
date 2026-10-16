@@ -485,7 +485,7 @@ describe('为什么派给它：人看得懂', () => {
     );
     const r = chooseRoute(input([solo, carpool]));
     expect(r.kind === 'dispatch' && r.why).toBe(
-      '写码阶段第 2 条：拼车号 · Opus 5.5 · Claude Code；拼车号周额度 20 小时后清零、还剩 70%，提到最前；第 1 条 独享号 · Opus 5.5 · Claude Code：排到了后面',
+      '写码阶段第 2 条：拼车号 · Opus 5.5 · Claude Code；拼车号周额度按时间该用 88%、实际用了 30%，落后 58%、20 小时后清零，提到最前；第 1 条 独享号 · Opus 5.5 · Claude Code：排到了后面',
     );
   });
 

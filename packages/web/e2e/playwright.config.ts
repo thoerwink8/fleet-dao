@@ -12,7 +12,7 @@ import { quarantineFilter } from './support/quarantine.ts';
 import { VIEWPORT_ORDER, VIEWPORTS } from './support/viewports.ts';
 
 const channel = process.env.E2E_BROWSER_CHANNEL?.trim() || 'chrome';
-/** 单跑隔离集那一遍（CI 里接在正式那一遍后面）：结果、报告另放，不盖掉正式那一遍的（Playwright 开跑先清 outputDir）。 */
+/** 单跑隔离集那一遍（e2e-quarantine.yml 每天定时跑）：结果、报告另放，不盖掉正式那一遍的（Playwright 开跑先清 outputDir）。 */
 const suffix = process.env.E2E_QUARANTINE?.trim() === 'only' ? '-quarantine' : '';
 
 /**

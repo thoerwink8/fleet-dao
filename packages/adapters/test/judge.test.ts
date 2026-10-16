@@ -76,6 +76,23 @@ describe('judgeRun', () => {
     expect(judgeRun({ ...clean, killed: 'model_mismatch' }).outcome).toBe('failed');
   });
 
+  it('叫停带原因：detail 写种类和说明；没传写「原因没传」；看门狗、租约过期换原因码', () => {
+    const stopped = (stopCause?: RunFacts['stopCause']) =>
+      judgeRun({ ...clean, killed: 'aborted', ...(stopCause ? { stopCause } : {}) });
+    expect(stopped({ kind: 'release-pause', detail: '发布排空' })).toEqual({
+      outcome: 'stopped',
+      reason: 'aborted',
+      detail: '引擎叫停（发版暂停：发布排空）',
+    });
+    expect(stopped({ kind: 'route-swap', detail: '切号' }).detail).toBe('引擎叫停（换路由：切号）');
+    expect(stopped().detail).toBe('引擎叫停（原因没传）');
+    expect(stopped({ kind: 'watchdog', detail: '40 分钟没心跳' })).toMatchObject({
+      reason: 'aborted_watchdog',
+      detail: '引擎叫停（看门狗：40 分钟没心跳）',
+    });
+    expect(stopped({ kind: 'lease-lost', detail: '租约过期' }).reason).toBe('aborted_lease_lost');
+  });
+
   it('跑完才看出的模型 / 会话不一致：判失败，写明点名的和实际的；排在被杀之后、额度之前', () => {
     const facts: RunFacts = {
       ...clean,

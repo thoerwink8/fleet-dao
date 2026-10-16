@@ -57,7 +57,13 @@ import {
   users,
   worktreeInventory,
 } from '@fleet-dao/db';
-import { answerResolves, ciPolicyOf, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
+import {
+  answerResolves,
+  ciPolicyOf,
+  type ProgressKind,
+  runBelongsToTask,
+  taskWorkflowId,
+} from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
@@ -101,6 +107,7 @@ import type {
   PasswordCredentials,
   PullRequestRecord,
   RunPlan,
+  SegmentRunRecord,
   SettingRecord,
   Store,
   User,
@@ -504,15 +511,71 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         matchedBy: r.taskId === taskId ? ('task' as const) : ('issueNumber' as const),
       }));
     },
-    async listSegmentRunsForTasks(taskIds) {
+    async listSegmentRunsForTasks(taskIds, opts) {
       const ids = taskIds.filter(isUuid);
       if (ids.length === 0) return [];
-      const rows = await db
+      const order = [asc(runs.startedAt), asc(runs.createdAt), asc(runs.id)] as const;
+      const directRows = await db
         .select()
         .from(runs)
         .where(inArray(runs.taskId, ids))
-        .orderBy(asc(runs.startedAt), asc(runs.createdAt), asc(runs.id));
-      return rows.map((r) => ({ ...toSegmentRun(r), matchedBy: 'task' as const }));
+        .orderBy(...order);
+      // 主页流水线图走默认：不按单号兜底，顺序照 SQL。任务列表要重做各代才开 includeIssueMatch。
+      if (!opts?.includeIssueMatch) {
+        return directRows.map((r) => ({ ...toSegmentRun(r), matchedBy: 'task' as const }));
+      }
+      const taskRows = await db
+        .select({ id: tasks.id, issueNumber: tasks.issueNumber, owner: repos.owner, name: repos.name })
+        .from(tasks)
+        .innerJoin(repos, eq(repos.id, tasks.repoId))
+        .where(inArray(tasks.id, ids));
+      const issues = [...new Set(taskRows.map((t) => t.issueNumber))];
+      const looseRows =
+        issues.length === 0
+          ? []
+          : await db
+              .select()
+              .from(runs)
+              .where(and(isNull(runs.taskId), inArray(runs.issueNumber, issues)));
+      const loose: { at: Date; createdAt: Date; id: string; record: SegmentRunRecord }[] = [];
+      for (const row of looseRows) {
+        const run = toSegmentRun(row);
+        const task = taskRows.find(
+          (t) =>
+            runBelongsToTask(run, {
+              id: t.id,
+              issueNumber: t.issueNumber,
+              workflowId: taskWorkflowId(t, t.issueNumber),
+            }) === 'issueNumber',
+        );
+        if (!task) continue;
+        loose.push({
+          at: row.startedAt,
+          createdAt: row.createdAt,
+          id: row.id,
+          record: { ...run, matchedBy: 'issueNumber', matchedTaskId: task.id },
+        });
+      }
+      const merged = [
+        ...directRows.map((row) => ({
+          at: row.startedAt,
+          createdAt: row.createdAt,
+          id: row.id,
+          record: {
+            ...toSegmentRun(row),
+            matchedBy: 'task' as const,
+            ...(row.taskId ? { matchedTaskId: row.taskId } : {}),
+          },
+        })),
+        ...loose,
+      ];
+      merged.sort(
+        (a, b) =>
+          a.at.getTime() - b.at.getTime() ||
+          a.createdAt.getTime() - b.createdAt.getTime() ||
+          (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
+      );
+      return merged.map((m) => m.record);
     },
     async getPlans(runIds) {
       const ids = runIds.filter(isUuid);

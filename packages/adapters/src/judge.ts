@@ -2,6 +2,7 @@
 // → 额度用满 → 没有终帧 → 终帧报错 → 退出码 → 中转没查成 → 交付。各家插头把自己的记录整理成 RunFacts，判法只有这一份。
 import type { RunOutcome } from '@fleet-dao/shared';
 import type { DeliveryCheck } from './delivery.ts';
+import { STOP_KIND_TEXT, type StopCause } from './stop-reason.ts';
 import type { KillReason, RunUsage } from './types.ts';
 
 export interface RunFacts {
@@ -13,6 +14,8 @@ export interface RunFacts {
    */
   launchUnknown?: string;
   killed?: KillReason;
+  /** 被引擎叫停（killed=aborted）时，调用方在 signal.reason 里给的种类和说明；没传就没有。 */
+  stopCause?: StopCause;
   /** 进程退出码。不是进程的插头（Mirasim）不带。 */
   exitCode?: number | null;
   /**
@@ -57,6 +60,8 @@ export type VerdictReason =
   | 'launch_unknown' // 起没起来没查成：先对账，别重派
   | 'quota_exhausted'
   | 'relay_quota_exhausted' // 中转把额度用完 / 欠费的通知当回答回来：换一路，不挂起、不当成没交付
+  | 'aborted_watchdog' // 看门狗叫停：记账（失败分流 AB1）
+  | 'aborted_lease_lost' // 租约过期叫停：记账（失败分流 AB1）
   | 'no_result'
   | 'agent_error'
   | 'exit_nonzero'
@@ -93,7 +98,17 @@ export function judgeRun(facts: RunFacts, delivery?: DeliveryCheck): RunVerdict 
   });
   if (facts.spawnError) return failed('spawn_failed', `没起来：${facts.spawnError}`);
   if (facts.launchUnknown) return failed('launch_unknown', facts.launchUnknown);
-  if (facts.killed === 'aborted') return { outcome: 'stopped', reason: 'aborted', detail: KILL_TEXT.aborted };
+  if (facts.killed === 'aborted') {
+    const cause = facts.stopCause;
+    // 看门狗、租约过期不是「我们自己要停的」：单独的原因码，失败分流记账；其余照旧 aborted（不记账）
+    const reason: VerdictReason =
+      cause?.kind === 'watchdog'
+        ? 'aborted_watchdog'
+        : cause?.kind === 'lease-lost'
+          ? 'aborted_lease_lost'
+          : 'aborted';
+    return { outcome: 'stopped', reason, detail: abortedText(cause) };
+  }
   if (facts.killed === 'idle_timeout') {
     return { outcome: 'stalled', reason: 'idle_timeout', detail: KILL_TEXT.idle_timeout };
   }
@@ -137,4 +152,11 @@ export function judgeRun(facts: RunFacts, delivery?: DeliveryCheck): RunVerdict 
   if (delivery.state === 'delivered') return { outcome: 'ok', reason: 'delivered', detail: delivery.detail };
   if (delivery.state === 'not_delivered') return failed('not_delivered', `说做完了，但${delivery.detail}`);
   return failed('delivery_unknown', `交付没查成：${delivery.detail}`);
+}
+
+/** 「引擎叫停（<种类>：<说明>）」；调用方没传原因才写「原因没传」。 */
+export function abortedText(cause: StopCause | undefined): string {
+  if (!cause) return `${KILL_TEXT.aborted}（原因没传）`;
+  const detail = cause.detail.trim();
+  return `${KILL_TEXT.aborted}（${STOP_KIND_TEXT[cause.kind]}${detail ? `：${detail}` : ''}）`;
 }

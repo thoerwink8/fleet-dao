@@ -130,6 +130,17 @@ export const RULES: readonly FailureRule[] = [
     retryBaseSeconds: 0,
     routeOutcome: 'neutral',
   },
+  // 叫停时调用方给了原因（adapters 的 StopReason，#2366）：看门狗、租约过期不是「我们要停的」，是会话出了问题被收掉——
+  // 记账（进路由失败率、按退避重试、凑得上「同因连挂」）。发版暂停、换路由、人点停、时限这类仍是上面的 OU1。
+  {
+    id: 'AB1',
+    title: '看门狗或租约过期叫停',
+    kind: 'retry',
+    codes: ['aborted_watchdog', 'aborted_lease_lost'],
+    codeFieldOnly: true,
+    routeOutcome: 'fail',
+    hint: '被看门狗或租约过期收掉，原路重试',
+  },
   // 切号（#59）：会话用户要换组织，引擎先把手上的 Claude 会话停下、切过去，再接着干——三段的一次性会话在原分支上重跑这一段
   // （任务工作流，提示词里写着上一次为什么停），Fusion 的会话续同一个会话（换了池 fork 续上，上下文大了带接力任务书）。是我们
   // 要停的：不算失败、不进路由失败率、不记重试的账、不看上一次的原文（切几次接着干几次，不会因为切号挂起、凑成「同因连挂」），

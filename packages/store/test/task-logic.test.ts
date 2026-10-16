@@ -81,6 +81,14 @@ describe('任务共用判断', () => {
   it('segmentRunMatch：没记任务号的按 issue 号兜底，工作流编号不对、没记、任务那边算不出都不收', () => {
     const task = { id: 't1', issueNumber: 12, workflowId: 'task:a/b#12' };
     expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:a/b#12' }, task)).toBe('issueNumber');
+    expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:a/b#12:r2' }, task)).toBe('issueNumber');
+    expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:a/b#12:r10' }, task)).toBe('issueNumber');
+    expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:a/b#12:r02' }, task)).toBeUndefined();
+    expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:a/b#12:r2:extra' }, task)).toBeUndefined();
+    expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:a/b#12:park:1' }, task)).toBeUndefined();
+    expect(
+      segmentRunMatch({ taskId: 't2', issueNumber: 12, workflowId: 'task:a/b#12:r2' }, task),
+    ).toBeUndefined();
     expect(segmentRunMatch({ issueNumber: 13, workflowId: 'task:a/b#12' }, task)).toBeUndefined();
     expect(segmentRunMatch({ issueNumber: 12, workflowId: 'task:other/b#12' }, task)).toBeUndefined();
     expect(segmentRunMatch({ issueNumber: 12 }, task)).toBeUndefined();

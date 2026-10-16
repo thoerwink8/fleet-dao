@@ -24,6 +24,7 @@ import type {
   SpawnInfo,
 } from './process.ts';
 import { alive, reapSession, scopeProcCount, scopeUnit, stopScope } from './procs.ts';
+import { abortCause, stopCauseOf } from './stop-reason.ts';
 
 export interface DetachedIo {
   /** 这次会话的收发目录（引擎的）。 */
@@ -153,13 +154,13 @@ export function runDetached(
       touch: () => {
         lastActivity = Date.now();
       },
-      kill: (reason) => {
+      kill: (reason, cause) => {
         if (killed || exitCode !== undefined || exitLost || finished) return;
-        killed = { reason, at: now().toISOString() };
+        killed = { reason, at: now().toISOString(), ...(cause ? { cause } : {}) };
         void terminate();
       },
     };
-    const onAbort = () => control.kill('aborted');
+    const onAbort = () => control.kill('aborted', stopCauseOf(spec.signal?.reason));
 
     async function sessionPid(): Promise<number | undefined> {
       const text = await readFile(file(IO_FILES.pid), 'utf8').catch(() => '');
@@ -340,7 +341,7 @@ export function runDetached(
 
     async function start(): Promise<void> {
       if (spec.signal?.aborted) {
-        killed = { reason: 'aborted', at: now().toISOString() };
+        killed = { reason: 'aborted', at: now().toISOString(), ...abortCause(spec.signal) };
         if (io.attach) void terminate();
         else {
           resolve({

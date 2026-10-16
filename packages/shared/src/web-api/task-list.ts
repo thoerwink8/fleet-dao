@@ -2,9 +2,10 @@
 // 入口是 ../web-api.ts（只有 export *）。状态怎么分组见 ../task-list.ts。
 import { z } from 'zod';
 import { TASK_LIST_GROUPS } from '../task-list.ts';
+import type { ListedTaskCost } from '../usage.ts';
 import { PageQuery } from './common.ts';
 import { TaskExecutorSchema, TaskStateSchema } from './enums.ts';
-import { Cursor, Id, Time } from './internal.ts';
+import { Cursor, Id, type Same, Time } from './internal.ts';
 
 export const TaskListGroupSchema = z.enum(TASK_LIST_GROUPS);
 
@@ -20,11 +21,26 @@ export const TaskListQuery = PageQuery.extend({
   q: z.string().max(200).optional(),
 });
 
-/** 累计花费：读到了给美元数；一笔都没读到给 null 并写明原因，不拿 0 顶。部分笔没读到时给读到的合计，并在 note 里写明偏低。 */
+/**
+ * 累计花费。actual / usd 是执行体报的实付（一笔都没报是 null，不当成 0）。
+ * estimated 是没报实付时按目录单价折的「按 API 价折算」（没估成是 null，不当成 0）。
+ * 订阅渠道看 estimated，不看 0。没有单价的记 noPrice，页面写「没有单价」。
+ */
 export const TaskListCostSchema = z.object({
+  actual: z.number().min(0).nullable(),
+  estimated: z.number().min(0).nullable(),
+  /** 和 actual 同一个数：只认这一栏的老页面还能读。 */
   usd: z.number().min(0).nullable(),
+  /** 结束了的三段笔数。 */
+  segments: z.number().int().min(0),
+  /** 四样 token 都没读到的段数。 */
+  unreadSegments: z.number().int().min(0),
+  /** 目录里没有单价的段数。 */
+  noPrice: z.number().int().min(0),
   note: z.string().optional(),
 });
+/** 编译期闸：和 usage.ts 的 taskListCost 一字不差。 */
+export const LIST_COST_MATCHES: Same<z.infer<typeof TaskListCostSchema>, ListedTaskCost> = true;
 
 export const TaskListRowSchema = z.object({
   taskId: Id,

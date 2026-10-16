@@ -95,6 +95,8 @@ export const UsageTotalsSchema = z.object({
   missingTime: Count,
   /** 结束了的里没有排队记录的笔数（三段的 runs 不记排队）：排队合计要把它算作没读到。 */
   noQueue: Count,
+  /** 结束了的三段里四样 token 一个都没读到的段数。页面写「另有 N 段读不到用量」。 */
+  unreadSegments: Count,
 });
 const ModelUsageTotalsSchema = UsageTotalsSchema.extend({ model: z.string(), modelName: z.string() });
 export const TaskUsageSchema = z.object({
