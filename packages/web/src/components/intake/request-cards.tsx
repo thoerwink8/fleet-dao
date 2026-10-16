@@ -1,11 +1,12 @@
 // 对话里 B、C 片的几种消息（#2062 第二部分，方案第四节「对话流里的消息」）：
 // - 指挥官一问：2～4 个选项按钮 + 「我自己说」（只有最新的那一问、还能发消息时能点）；
+// - 方案卡：完整草稿摘要，「确认开单」走现有确定开单，「改」打开对应草稿栏的输入框；
 // - 建议改：指挥官想改人改过的栏，服务端没改，出一张卡，人点「采用」才改（电脑上）；
 // - 进度卡：开出的单到哪了（「#12 动手中 · 已合并 1/3 个子任务」），点了去 GitHub；
 // - 引擎提问：带「回答」，答复写回那条 GitHub 评论；写回失败照实写原因、给重试；
 // - 别家意见：每条能标采用或不用（电脑上）；
 // - 指挥官正在回话：流式显示写到哪了、「正在读代码……」，能停下。
-import { REQUEST_CHAT_PHASE_WORDS } from '@fleet-dao/shared';
+import { REQUEST_CHAT_PHASE_WORDS, REQUEST_DRAFT_FIELD_WORDS, REQUEST_DRAFT_FIELDS } from '@fleet-dao/shared';
 import { ChevronDown, CircleStop, ExternalLink, MessageSquareReply, RotateCcw, Sparkles } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { toast } from 'sonner';
@@ -19,7 +20,7 @@ import {
   useStopCommander,
   useUpdateRequestDraft,
 } from '../../api/client';
-import type { RequestCard, RequestDetail, RequestMessage } from '../../api/types';
+import type { RequestCard, RequestDetail, RequestDraftField, RequestMessage } from '../../api/types';
 import { cn } from '../../lib/utils';
 import { StatusDot } from '../layout/status-badge';
 import type { LayoutTone } from '../layout/tone';
@@ -34,10 +35,12 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { Textarea } from '../ui/textarea';
+import { useOpenIssueAction } from './open-issue';
 import { BotAvatar } from './people';
 import { issueStateWord } from './request-view';
 
 type Question = Extract<RequestCard, { type: 'question' }>;
+type Proposal = Extract<RequestCard, { type: 'proposal' }>;
 type Suggest = Extract<RequestCard, { type: 'suggest' }>;
 type Review = Extract<RequestCard, { type: 'review' }>;
 
@@ -94,6 +97,85 @@ export function QuestionCard({
           </Button>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+function draftValue(d: RequestDetail, field: RequestDraftField): string {
+  const v = d.request.draft[field];
+  if (Array.isArray(v)) return v.length > 0 ? v.join('\n') : '';
+  return typeof v === 'string' ? v : '';
+}
+
+/** 方案卡：完整草稿摘要。「确认开单」走现有 confirm（开单幂等键仍是需求号 + 草稿版本号）。「改」打开那一栏的输入框。 */
+export function ProposalCard({
+  card,
+  d,
+  live,
+  onEdit,
+}: {
+  card: Proposal;
+  d: RequestDetail;
+  /** 最新那一张、这条还能发消息：按钮能点。 */
+  live: boolean;
+  onEdit: (field: RequestDraftField) => void;
+}) {
+  const act = useOpenIssueAction();
+  const r = d.request;
+  const verdict = d.actions.confirm;
+  const stale = card.draftVersion !== r.draftVersion;
+  const go = () => act.run(r.seq, 'confirm', r.draftVersion);
+  return (
+    <div className="mt-1.5 rounded-lg border px-3 py-2" data-proposal-card={card.draftVersion}>
+      <div className="text-meta text-muted-foreground">
+        方案 · 草稿第 {card.draftVersion} 版
+        {stale ? `（现在是第 ${r.draftVersion} 版，确认开的是这一版）` : ''}
+      </div>
+      <p className="mt-1 text-body whitespace-pre-wrap">{card.summary}</p>
+      <ul className="mt-2 space-y-1">
+        {REQUEST_DRAFT_FIELDS.map((f) => {
+          const value = draftValue(d, f);
+          return (
+            <li key={f} className="flex items-start gap-2 text-body" data-proposal-field={f}>
+              <span className="shrink-0 text-meta text-muted-foreground">{REQUEST_DRAFT_FIELD_WORDS[f]}</span>
+              <span className="min-w-0 flex-1 whitespace-pre-wrap text-muted-foreground">
+                {value || '（还没写）'}
+              </span>
+              {live ? (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  className="shrink-0 max-md:h-11"
+                  onClick={() => onEdit(f)}
+                  aria-label={`改${REQUEST_DRAFT_FIELD_WORDS[f]}`}
+                  data-proposal-edit={f}
+                >
+                  改
+                </Button>
+              ) : null}
+            </li>
+          );
+        })}
+      </ul>
+      {live ? (
+        <div className="mt-2">
+          <Button
+            size="sm"
+            variant="brand"
+            className="max-md:h-11"
+            disabled={!verdict.allowed}
+            loading={act.isPending}
+            title={verdict.allowed ? `确定开单，开的是第 ${r.draftVersion} 版` : verdict.why}
+            onClick={go}
+            data-proposal-confirm
+          >
+            确认开单
+          </Button>
+          {!verdict.allowed && verdict.why ? (
+            <p className="mt-1 text-meta text-ink-stall">{verdict.why}</p>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
