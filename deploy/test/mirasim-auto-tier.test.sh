@@ -23,7 +23,7 @@ source "$HERE/../lib/mirasim.sh"
 FRANCE_SH=$HERE/../france.sh
 # 取函数原文（到行首的 } 为止），去掉 CR（Windows 检出可能带）
 fn_text() { tr -d '\r' <"$FRANCE_SH" | sed -n "/^$1() {/,/^}/p"; }
-for f in setup_auto_tier setup_mirasim_session readback_auto_tier readback_mirasim_session_unit install_mirasim_stream_guard; do
+for f in setup_auto_tier setup_mirasim_session readback_auto_tier readback_mirasim_session_unit install_mirasim_stream_guard mirasim_retired retire_mirasim_units; do
   if [[ -z "$(fn_text "$f")" ]]; then
     echo "mirasim-auto-tier：没跑成：在 deploy/france.sh 里没取到 $f"
     exit 2
@@ -57,6 +57,10 @@ CALLS=()
 SERVER_INSTALLED=0
 id() { return 0; }
 systemctl() { # is-active 一律答 active（读回里自动发布 timer 那一项不是这里要测的）；别的只记
+  if [[ "$1" == is-enabled ]]; then
+    echo enabled
+    return 0
+  fi
   if [[ "$1" == is-active ]]; then
     echo active
     return 0
@@ -82,12 +86,15 @@ setup_user_slice_cap() { CALLS+=(setup_user_slice_cap); }
 readback_user_slice_cap() { CALLS+=(readback_user_slice_cap); }
 retire_old_units() { CALLS+=(retire_old_units); }
 setup_auto_release() { CALLS+=(setup_auto_release); }
+setup_release_request_scripts() { CALLS+=(setup_release_request_scripts); }
 readback_slice() { CALLS+=(readback_slice); }
 readback_retired_units() { CALLS+=(readback_retired_units); }
 
 # 取进来的 france.sh 原文用到的变量
 SESSION_USERS=(fleet-mirasim-fake)
 MIRASIM_SESSION_PORT=54321
+MIRASIM_RETIRED_FILE=$TMP/mirasim-retired
+MIRASIM_LIVENESS_UNITS=(fleet-mirasim-liveness.service fleet-mirasim-liveness.timer)
 MIRASIM_SESSION_UNIT_FILE=$TMP/fleet-mirasim-session.service
 AUTO_RELEASE_FILES=()
 AUTO_RELEASE_UNITS=()
@@ -101,12 +108,15 @@ eval "$(fn_text setup_auto_tier)"
 eval "$(fn_text setup_mirasim_session)"
 eval "$(fn_text readback_auto_tier)"
 eval "$(fn_text readback_mirasim_session_unit)"
+eval "$(fn_text mirasim_retired)"
+eval "$(fn_text retire_mirasim_units)"
 
 echo "== 1. 自动档入口会装 Mirasim 常驻单元（在自动发布单元之后），读回也读它"
 fresh
 SERVER_INSTALLED=0
 setup_auto_tier >/dev/null
-check "setup_auto_tier 先走完自动发布那几步" "${CALLS[*]}" "setup_slice setup_user_slice_cap retire_old_units setup_auto_release"
+check "setup_auto_tier 先走完自动发布那几步" "${CALLS[*]}" \
+  "setup_slice setup_user_slice_cap retire_old_units setup_auto_release setup_release_request_scripts"
 has "setup_auto_tier 走到了 Mirasim 常驻单元这一步（本体不在，所以只记待配）" "${PENDING[*]}" "还没有 Mirasim 服务端本体"
 fresh
 readback_auto_tier >/dev/null 2>&1
@@ -123,6 +133,23 @@ check "记一笔待配、没有红" "${#PENDING[@]} ${#REDS[@]}" "1 0"
 check "没写单元文件" "$([[ -e "$MIRASIM_SESSION_UNIT_FILE" ]] && echo 有 || echo 没有)" "没有"
 check "没有 daemon-reload，没有 ensure_unit_running" "$(printf '%s\n' "${CALLS[@]}" | grep -cE 'daemon-reload|ensure_unit_running' || true)" "0"
 check "本体不在不装流守卫（--require 的文件还不该被单元指上）" "$(printf '%s\n' "${CALLS[@]}" | grep -c install_mirasim_stream_guard || true)" "0"
+
+echo "== 2b. 有退役标记：自动档停掉并取消自启，不写单元、不装健康检查"
+touch -- "$MIRASIM_RETIRED_FILE"
+fresh
+SERVER_INSTALLED=1
+rm -f -- "$MIRASIM_SESSION_UNIT_FILE"
+setup_mirasim_session >/dev/null
+check "有标记时不写 Mirasim 单元" "$([[ -e "$MIRASIM_SESSION_UNIT_FILE" ]] && echo 有 || echo 没有)" "没有"
+check "有标记时不拉起 Mirasim 单元" "$(printf '%s\n' "${CALLS[@]}" | grep -cE 'ensure_unit_running|daemon-reload' || true)" "0"
+check "有标记时停掉并取消两份 Mirasim 单元自启" \
+  "$(printf '%s\n' "${CALLS[@]}" | grep 'systemctl disable --now')" \
+  $'systemctl disable --now fleet-mirasim-session.service\nsystemctl disable --now fleet-mirasim-liveness.timer'
+check "有标记时不记待配或红" "${#PENDING[@]} ${#REDS[@]}" "0 0"
+fresh
+OUT=$(readback_auto_tier 2>&1)
+has "自动档读回对退役 Mirasim 写已退役、不查" "$OUT" "Mirasim 已退役，不查"
+rm -f -- "$MIRASIM_RETIRED_FILE"
 
 echo "== 3. 服务端本体在：首次装 → 写、重启；内容没变 → 不动、不重启；模板变了 → 重启"
 SERVER_INSTALLED=1

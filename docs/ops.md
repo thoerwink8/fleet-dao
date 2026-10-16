@@ -516,6 +516,8 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 会话用户的 Mirasim（#345 接上引擎、只开 DeepSeek Flash 一条路由，创始人 2026-09-27 拍「mirasim 额度不太够，先只用 DeepSeek 4.1 flash，接肯定还是要接」；本地模式常驻单元 #424 接上，france.sh 会装）：
 
+当前 Mirasim 渠道已退役：仓里的 `deploy/france/mirasim-retired` 存在时，法国装机脚本不再安装或拉起 `fleet-mirasim-session.service`，会停掉它并取消自启，也会停掉并取消自启 `fleet-mirasim-liveness.timer`；`--auto-tier` 和 `--check` 都只写「已退役，不查」，不把它算坏。自动发布也不为退役版本的 Mirasim 端口保留冷启动窗口。要恢复时从仓里删掉这个标记文件，随版本发到法国，再跑 `bash /srv/fleet-dao/deploy/france.sh --auto-tier`；这样做是为了避免每次发版把已经停用、会常驻吃 CPU 的 Mirasim 服务重新拉起来。
+
 和 grok、cursor-agent 不一样：Mirasim 没有能自动跑的无头安装脚本，服务端本体不是装机脚本装的——官方给的路是它自己的桌面端以 ssh 远程模式连上服务器现装、现登录，或者指挥官／创始人在本机用 `mirasim ssh connect` 命令行现装（两条路装出来是同一份东西，见下面第 1 步）。这一步装出来的只是「远程模式」：只听 unix socket、ssh 一断就退出，靠不住——要另外让它常驻在「本地模式」（第 2 步），这才是装机脚本管的那一层。引擎经它派 DeepSeek Flash 的活（`packages/adapters/src/mirasim/`，协议与坑见 `docs/reference/adapters.md` 第八节 MS-01…28），选路、失败分流、记账和别家执行方式同一套（`packages/engine/src/real/hosts.ts` 的 `mirasimDriver`）。
 
 1. 装服务端本体（指挥官或创始人做，一次；这条本身是「怎么装」的说明，不是装机脚本的一步）：

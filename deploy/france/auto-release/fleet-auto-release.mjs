@@ -478,6 +478,10 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
     const r = run('bash', [`${CHECKOUT}/deploy/france.sh`, '--auto-tier'], { timeoutMs: 600_000 });
     return { code: r.code, out: `${r.stdout}\n${r.stderr}` };
   },
+  /** 在用版本是否已标记 Mirasim 退役；自动发布不为退役渠道保留冷启动窗口。 */
+  async mirasimRetired(current) {
+    return SHA.test(current) && existsSync(`${RELEASES}/${current}/deploy/france/mirasim-retired`);
+  },
   /**
    * fleet-mirasim-session 这次进入 active 的时刻（毫秒）。冷启动窗口从这里起算（lib.mjs 的 TIER_BOOT_MS）：
    * 刚 ActiveEnter 时 4318 还没 listen，curl 退出 7 不是装机失败。读不到回 null，调用方改从第一次看见退出 7 起算。

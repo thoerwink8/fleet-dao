@@ -519,7 +519,9 @@ const MIRASIM_REFUSED = {
 function bootMachine(activeEnterOffset) {
   const m = machine();
   m.activeEnter = m.t + activeEnterOffset;
+  m.mirasimRetired = false;
   m.io.mirasimActiveEnter = async () => m.activeEnter;
+  m.io.mirasimRetired = async () => m.mirasimRetired;
   m.io.sleep = async (ms) => {
     m.t += ms;
   };
@@ -569,6 +571,21 @@ test('冷启动窗口：第一次探 4318 连不上、短时间后探通，最�
   st = await late.round();
   assert.equal(st.tier.result, 'failed');
   assert.equal(late.tierCalls, 1);
+});
+
+test('Mirasim 已退役时 4318 没 listen 不留冷启动窗口，立即按真实失败处理', async () => {
+  const m = bootMachine(0);
+  m.mirasimRetired = true;
+  m.io.applyAutoTier = async () => {
+    m.tierCalls += 1;
+    return MIRASIM_REFUSED;
+  };
+  const st = await m.round();
+  assert.equal(st.tier.result, 'failed');
+  assert.equal(m.tierCalls, 1, '退役后不为冷启动窗口再次探测');
+  assert.equal(m.t, T0, '退役后不等待冷启动窗口');
+  assert.match(st.tier.detail, /curl 退出 7/);
+  assert.ok(st.alerts.some((a) => a.key === `${TIER_PREFIX}${H0}`));
 });
 
 test('库连不上：报警留到下一轮再发，不丢', async () => {
@@ -814,6 +831,7 @@ const AUTO_TIER_FILES = [
   'deploy/france/fleet-auto-release.timer',
   // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
   'deploy/france/fleet-mirasim-session.service',
+  'deploy/france/mirasim-retired',
   'deploy/lib/mirasim.sh',
   // 它的健康检查（#1676）：setup_mirasim_session 顺带装，同属自动档
   'deploy/france/fleet-mirasim-liveness.service',
