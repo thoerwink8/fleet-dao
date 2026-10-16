@@ -23,6 +23,7 @@ describe('session_org', () => {
       title: '账号池整池暂停',
       body: '占位',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     await expect(sessionOrgHealthCheck(t.db)()).resolves.toBeUndefined();
   });

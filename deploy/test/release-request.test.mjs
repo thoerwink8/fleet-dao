@@ -22,6 +22,7 @@ import {
   LAST_FILE,
   LIMITS,
   MAX_REQUEST_BYTES,
+  notifyArgv,
   PHASES,
   parseAlerts,
   parseDrain,
@@ -30,6 +31,7 @@ import {
   parseRequest,
   RELEASE_ALERT_PREFIXES,
   RELEASE_SH,
+  RELEASES,
   REQUEST_DIR,
   REQUEST_FILE,
   releaseMessage,
@@ -1697,13 +1699,42 @@ test('接活脚本不碰符号链接目录之外的东西：state、last、marke
   assert.match(FLEET_API, /fleet-api$/);
 });
 
-test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的飞书 webhook，真实 notify 写 notifications（值走 psql -v）', () => {
+test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的飞书 webhook，真实 notify 走 fleet-api notify raise（统一写入口，#2729）', () => {
   const script = read('france/release-request/fleet-release-request.mjs');
   const lib = read('france/release-request/lib.mjs');
   assert.doesNotMatch(script + lib, /FEISHU_WEBHOOK/);
   assert.doesNotMatch(script, /open\.feishu\.cn|FEISHU_PREFIXES/);
-  assert.match(script, /insert into notifications \(level, dedupe_key, title, body, link\)/);
-  assert.match(script, /:'level'::notification_level, :'key', :'title', :'body'/);
+  // #2729：发版脚本（接活、自动发布）不直写 notifications，一律经 fleet-api notify raise → upsertAlert（库里约束和核对只一处）
+  const autoScript = read('france/auto-release/fleet-auto-release.mjs');
+  for (const [name, text] of [
+    ['fleet-release-request.mjs', script],
+    ['release-request/lib.mjs', lib],
+    ['fleet-auto-release.mjs', autoScript],
+  ]) {
+    assert.doesNotMatch(
+      text,
+      /insert\s+into\s+notifications/i,
+      `${name} 里不许直接 insert into notifications`,
+    );
+  }
+  assert.match(script, /notifyArgv\(note\)/);
+  assert.match(autoScript, /notify', 'raise'/);
+  assert.deepEqual(
+    notifyArgv({ key: 'release:failed:aaaaaaaaaaaa:1', title: '【发版失败】', level: 'alert' }),
+    [
+      `${RELEASES}/current/packages/api/bin/fleet-api`,
+      'notify',
+      'raise',
+      '--key',
+      'release:failed:aaaaaaaaaaaa:1',
+      '--title',
+      '【发版失败】',
+      '--level',
+      'alert',
+      '--link',
+      '/france',
+    ],
+  );
   assert.match(script, /resolved_by = 'release-request'/);
   assert.match(script, /note\.level !== null/, '开始、成功（level 为 null）不写通知');
   assert.doesNotMatch(script, /release:start:/);

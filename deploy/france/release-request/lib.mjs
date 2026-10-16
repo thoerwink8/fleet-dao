@@ -43,7 +43,8 @@ export const STATE_FILE = `${TRAIN_DIR}/release-train.json`;
 export const LAST_FILE = `${TRAIN_DIR}/last-request.json`;
 export const MARKER_FILE = `${TRAIN_DIR}/release-train.paused`;
 export const CHECKOUT = '/srv/fleet-dao';
-export const FLEET_API = `bash ${RELEASES}/current/packages/api/bin/fleet-api`;
+export const FLEET_API_BIN = `${RELEASES}/current/packages/api/bin/fleet-api`;
+export const FLEET_API = `bash ${FLEET_API_BIN}`;
 export const RELEASE_SH = `${CHECKOUT}/deploy/release.sh`;
 export const ENGINE_ENV = '/etc/fleet-dao/engine.env';
 /** 引擎写排空状态（drain.json）的地方：engine.env 的 FLEET_ENGINE_STATE_DIR，没写取它（同 release.sh 的 ENGINE_STATE_DEFAULT）。 */
@@ -989,6 +990,26 @@ export function releaseMessage(kind, state) {
 export const RELEASE_ALERT_KINDS = ['check', 'blocked', 'failed'];
 /** 发版提醒的键前缀（简报按它认「发版」这一类）。 */
 export const RELEASE_NOTE_PREFIX = 'release:';
+
+/**
+ * 记提醒的那条命令（真 io 的 notify 调；正文从标准输入喂）：走 current 那一版 fleet-api 的 notify raise——统一写入口 upsertAlert
+ * （#2729），脚本里不直写 notifications。参数逐个传、不拼 shell。
+ */
+export function notifyArgv(note) {
+  return [
+    FLEET_API_BIN,
+    'notify',
+    'raise',
+    '--key',
+    note.key,
+    '--title',
+    note.title,
+    '--level',
+    note.level,
+    '--link',
+    '/france',
+  ];
+}
 
 /**
  * 这一条提醒怎么记：级别、键、标题（第一句）。键：同一趟同一种只一行，不同趟时刻不同；发版还没动手就没成的，同一个提交只一行

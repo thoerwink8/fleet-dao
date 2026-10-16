@@ -25,6 +25,7 @@ import {
   HISTORY_FILE,
   LAST_FILE,
   MARKER_FILE,
+  notifyArgv,
   parseDrain,
   parseRepoSwitches,
   RELEASE_SH,
@@ -338,18 +339,17 @@ export const realIo = {
     return parseRepoSwitches(r.stdout);
   },
   /**
-   * 发版提醒：只有卡住、失败、体检没过（note.level = 'alert'，卡住报警级，不是要你拍）才写一行 notifications（重开已撤的同键行）；
-   * 开始、成功等（note.level 是 null）不写通知。发成功时把之前开着的 release: 提醒（含老版本记成要你拍的）收掉。值一律走 psql -v。
+   * 发版提醒：只有卡住、失败、体检没过（note.level = 'alert'，卡住报警级，不是要你拍）才记一条提醒（重开已撤的同键行）：走 fleet-api
+   * notify raise（统一写入口 upsertAlert，#2729），不直写表。开始、成功等（note.level 是 null）不写通知。
+   * 发成功时把之前开着的 release: 提醒（含老版本记成要你拍的）收掉（只改已有行的处理状态，值走 psql -v）。
    */
   async notify(text, note) {
     if (note.level !== null) {
-      sqlWrite(
-        `insert into notifications (level, dedupe_key, title, body, link)
-values (:'level'::notification_level, :'key', :'title', :'body', '/france')
-on conflict (dedupe_key) do update
-  set title = excluded.title, body = excluded.body, updated_at = now(), resolved_at = null, resolved_by = null;`,
-        { level: note.level, key: note.key, title: note.title, body: text },
-      );
+      const r = run('bash', notifyArgv(note), { input: text, timeoutMs: 60_000 });
+      if (r.error || r.status !== 0)
+        throw new Error(
+          `fleet-api notify raise 退出码 ${r.status}：${tail(r.error ?? (r.stderr || r.stdout))}`,
+        );
     }
     if (note.kind !== 'done') return;
     sqlWrite(

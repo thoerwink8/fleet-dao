@@ -117,6 +117,7 @@ describe('upsertAlert', () => {
       title: '要你拍',
       body: '批不批',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     await t.db
       .update(notifications)
@@ -129,6 +130,7 @@ describe('upsertAlert', () => {
       title: '要你拍',
       body: '又要批一次',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     const [row] = await t.db.select().from(notifications).where(eq(notifications.id, id));
     expect(row?.resolvedAt).toBeNull();
@@ -145,6 +147,7 @@ describe('resolveAlertByKey', () => {
       title: '账号池暂停',
       body: '要重新登录',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     expect(await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:carpool-1', by: 'engine', at: NOW })).toBe(
       'ok',
@@ -204,7 +207,8 @@ describe('人闸批准', () => {
       .select()
       .from(notifications)
       .where(eq(notifications.dedupeKey, `approval:${id}`));
-    expect(alert).toMatchObject({ level: 'decision', title: '发版' });
+    // 人闸批不批只有人能做（#2729）
+    expect(alert).toMatchObject({ level: 'decision', title: '发版', decisionReason: 'human-only' });
     // 「要你拍」带选项（#1915）：批、不批、先看 PR，恰好一项推荐
     expect(alert?.decisionOptions?.map((o) => o.id)).toEqual(['review', 'approve', 'reject']);
     expect(alert?.decisionOptions?.filter((o) => o.recommended)).toHaveLength(1);
@@ -227,6 +231,7 @@ describe('「要你拍」的选项落库（#1915）', () => {
       title: 't',
       body: 'b',
       options: two,
+      reason: 'new-money',
     });
     await t.db
       .update(notifications)
@@ -249,6 +254,7 @@ describe('「要你拍」的选项落库（#1915）', () => {
       title: 't',
       body: 'b',
       options: [...two].reverse(),
+      reason: 'new-money',
     });
     const [row] = await t.db.select().from(notifications).where(eq(notifications.id, id));
     expect(row?.decisionOptions?.map((o) => o.id)).toEqual(['b', 'a']);
@@ -258,13 +264,15 @@ describe('「要你拍」的选项落库（#1915）', () => {
 
   it('【故意造出的失败】不合规矩的选项、非要人拍的带选项：照抛，不悄悄存成没选项', async () => {
     const base = { dedupeKey: `decision-test:${randomUUID()}`, taskId: null, title: 't', body: 'b' };
-    await expect(upsertAlert(t.db, { ...base, level: 'decision' })).rejects.toThrow('至少给两个选项');
+    const why = { reason: 'human-only' as const };
+    await expect(upsertAlert(t.db, { ...base, ...why, level: 'decision' })).rejects.toThrow('至少给两个选项');
     await expect(
-      upsertAlert(t.db, { ...base, level: 'decision', options: [two[0] as (typeof two)[0]] }),
+      upsertAlert(t.db, { ...base, ...why, level: 'decision', options: [two[0] as (typeof two)[0]] }),
     ).rejects.toThrow('至少给两个选项');
     await expect(
       upsertAlert(t.db, {
         ...base,
+        ...why,
         level: 'decision',
         options: [{ ...two[0], action: { kind: 'nope' } }, two[1]] as never,
       }),
@@ -272,6 +280,7 @@ describe('「要你拍」的选项落库（#1915）', () => {
     await expect(
       upsertAlert(t.db, {
         ...base,
+        ...why,
         level: 'decision',
         options: two.map((o) => ({ ...o, recommended: undefined })),
       }),
@@ -279,6 +288,19 @@ describe('「要你拍」的选项落库（#1915）', () => {
     await expect(upsertAlert(t.db, { ...base, level: 'alert', options: two })).rejects.toThrow(
       '只有要人拍的才带选项',
     );
+    // 原因（#2729）：要你拍的必带三种之一，AI 自己能做的不许写成要你拍；别的级别不带原因
+    await expect(upsertAlert(t.db, { ...base, level: 'decision', options: two })).rejects.toThrow(
+      '要你拍却没写原因',
+    );
+    await expect(
+      upsertAlert(t.db, { ...base, level: 'decision', options: two, reason: 'ai-can-do' as never }),
+    ).rejects.toThrow('要你拍却没写原因');
+    await expect(upsertAlert(t.db, { ...base, ...why, level: 'alert' })).rejects.toThrow(
+      '只有要人拍的才带原因',
+    );
+    expect(
+      await t.db.select().from(notifications).where(eq(notifications.dedupeKey, base.dedupeKey)),
+    ).toEqual([]);
     // 库里的约束也拦：选项只给 decision 级
     await expectViolation(
       t.db.insert(notifications).values({ ...base, level: 'alert', decisionOptions: two }),

@@ -35,8 +35,8 @@ const add = (key: string, level: 'decision' | 'alert' | 'daily', title = key) =>
     title,
     body: '',
     link: '/x',
-    // decision 级没有至少两个选项写不进。
-    ...(level === 'decision' ? { options: noteOnlyOptions() } : {}),
+    // decision 级没有至少两个选项、没写原因写不进（#2729）。
+    ...(level === 'decision' ? { options: noteOnlyOptions(), reason: 'human-only' as const } : {}),
   });
 
 describe('fleet-api attention', () => {

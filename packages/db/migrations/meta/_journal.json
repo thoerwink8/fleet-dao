@@ -589,6 +589,13 @@
       "when": 1792160000007,
       "tag": "0083_living_rhodey",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1792160000008,
+      "tag": "0084_elite_nuke",
+      "breakpoints": true
     }
   ]
 }
