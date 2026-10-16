@@ -823,9 +823,10 @@ async function pickRoute(
       }
       // #2392 钉在这里：总时长第二次到顶、rt.note 写完「换一条路由带上进度续一次」之后 continue 回到本循环。
       // 上一段已经收场（不然走不到 note），holdForBudget 的 taskSpend 是 quick 档，撑不到十几个小时。
-      // 能冻住 tasks.doing / updated_at、又不插入 runs 的，就是下面这次 pauseForRoute：condition 睡着，
-      // waiting() 只改内存、不 mirror。等额度 retryAfterSeconds 封顶 4 小时，连睡几觉就是十几个小时；
-      // 等空位、熔断每档最多约 2 分钟，但同样不写任务行，看起来和定时器没醒一样。
+      // 能冻住 tasks.doing / updated_at、又不插入 runs 的，就是下面这次 pauseForRoute：condition 睡着。
+      // 等额度 retryAfterSeconds 封顶 4 小时，连睡几觉就是十几个小时。
+      // 现在睡之前先 mirrorRouteWait（#2863，patched('route-wait-mirror')）：把「等路由：<原因>」落库，
+      // 原因不变不重复写、变了再写一次；选到路由起会话时 advance 换回动手那一句。
       // taskContinue 不在这个条件里（在途重放不能改谓词）；叫醒靠 taskRouteWake。
       // 新跑的（wall-clock-switch-lands）：不睡，当场停下等人。已经睡在这一觉里的老历史重放时这一标记为假，
       // 仍睡原来那一觉；醒了（继续附带的叫醒、或定时器）再走 wall-clock-switch-wake，下一轮选不出就停下，不睡第二觉。
@@ -842,6 +843,7 @@ async function pickRoute(
       // 等空位、熔断仍是短间隔。路由变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒。
       // 步序没变（秒数是选路活动的结果）：老历史重放不用新的 patched 标记。
       // 多张单同时停在这里时，测试不要 await result()（会 unlockTimeSkipping，见 #1764）。
+      await rt.mirrorRouteWait(got.detail);
       await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
       if (rt.landSwitch && patched('wall-clock-switch-wake')) rt.switchWake = true;
       continue;
