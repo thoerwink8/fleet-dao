@@ -22,6 +22,7 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - 改了 `src/schema` 没生成迁移：`packages/db/test/schema-drift.test.ts` 当场红。
 - 迁移只进不退：发布时先迁移再切版本，退回上一版不撤迁移。新迁移要写成旧代码照样能跑（先加列、下一版再删旧的）。见 ops 第八节「改之前要知道的」。
 - 公开仓：种子（`src/seed.ts`）不放账号、池、路由、额度。种子只补缺，已有的行不跟着改值。
+- 并行几条库查询用 `src/queries/all-settled.ts` 的 `allSettledOrThrow`，不用 `Promise.all` / `race` / `any`：一条失败就返回，其余查询还占着连接和锁，真库会死锁（#2181）。`test/static.test.ts` 扫 `src/` 拦着。
 - 实时推送靠触发器 `NOTIFY fleet_changes`：表名单在 `packages/shared/src/realtime.ts`，只增不改，`packages/db/test/notify.test.ts` 逐表核对。
 
 ## 改它时要连带改

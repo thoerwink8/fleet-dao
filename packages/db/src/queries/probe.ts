@@ -21,6 +21,7 @@ import {
   routingPurposeModels,
   runs,
 } from '../schema/index.ts';
+import { allSettledOrThrow } from './all-settled.ts';
 import { noteRouteProbed } from './channel-fallback.ts';
 
 /** 每条路由留下的历史条数：和渠道状态页一条条带的格数是同一个数（shared 的 PROBE_HISTORY_SLOTS）。 */
@@ -163,7 +164,7 @@ async function openRankRows(db: Db): Promise<OpenRankRow[]> {
 
 export async function routeProbeTargets(db: Db): Promise<RouteProbeTarget[]> {
   const now = new Date();
-  const [rows, used, ranked, disabled, lastRuns] = await Promise.all([
+  const [rows, used, ranked, disabled, lastRuns] = await allSettledOrThrow([
     db
       .select({ route: routes, pool: pools, channel: channels, model: models })
       .from(routes)
