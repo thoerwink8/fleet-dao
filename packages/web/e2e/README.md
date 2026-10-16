@@ -27,7 +27,7 @@ E2E_PG_ADMIN_URL=postgres://postgres:<密码>@127.0.0.1:5432/postgres pnpm --fil
 ## 在 CI 里怎么跑（#930）
 
 `.github/workflows/ci.yml` 的 `e2e` job：Linux、容器里的 `postgres:16-alpine`（取自 `public.ecr.aws/docker/library/`，避开 Docker Hub 匿名限速）（`E2E_PG_ADMIN_URL` 指向它）、Playwright 的 Chromium（`E2E_BROWSER_CHANNEL=chromium`，`playwright install --with-deps chromium`，浏览器按 Playwright 版本缓存）。
-- 不在 PR 闸、在发版闸（决定 0093）：PR 上不跑；合并后主线推送那一轮按「上次真绿的头…这次」的累计改动跑映射到的 spec（判法 `packages/conventions/src/ci-plan.ts` 的 `e2eSpecsFor` 和 `deferE2eToMain`），改到夹具、playwright 配置、备库、`ci.yml`、映射表就全套；每夜一轮全套兜底。
+- 不在 PR 闸、在发版闸（决定 0093）：PR 上默认不跑（改到表结构、迁移、e2e 样例数据和用例、`deploy/catalog.json` 的 PR 例外，跑全套，清单见 `ci-plan.ts` 的 `E2E_PR_RISK_PATHS`，#2674）；合并后主线推送那一轮按「上次真绿的头…这次」的累计改动跑映射到的 spec（判法 `packages/conventions/src/ci-plan.ts` 的 `e2eSpecsFor` 和 `deferE2eToMain`），改到夹具、playwright 配置、备库、`ci.yml`、映射表就全套；每夜一轮全套兜底。
 - 红了这一轮主线 CI 就红（必过检查 `check` 等它，该跑的它必须绿，`ciVerdict`），法国的自动发版只发主线头 CI 全绿的提交，所以不发。不管成败，报告、截图、各进程日志都当 artifact 上传、留 7 天（`e2e-<运行号>-<分片号>`，#1061）。全套切 2 台各跑一半文件（`--shard`），每台 4 个 worker；只点改动页时 1 台。
 - 改了页面的 PR 想合前就点一遍：本机跑（`pnpm test:changed` 会列出该点哪几个 spec）；改 e2e 地基（夹具、配置、备库）的 PR 合前在 CI 上跑一轮全量：`gh workflow run ci.yml --ref <分支>`（手动触发一律全跑，发版不认它）。
 - 和本机的差别：本机是 Windows + 本机 Chrome + 自己起的 Windows 版 PG；CI 是 Linux + 下载的 Chromium + 容器 PG。库名、端口、用例顺序一样；CI 的 worker 多（核数）。
