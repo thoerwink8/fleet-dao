@@ -61,6 +61,7 @@ import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reco
 import { registerCiPolicyRoutes } from './ci-policy-routes.ts';
 import { registerCliToolsRoutes } from './cli-versions.ts';
 import { registerCredentialRoutes } from './credentials.ts';
+import { applyDecisionAnswer, liveDecisionPorts } from './decision-actions.ts';
 import { handOffDecision } from './decision-handoff.ts';
 import type { Deps } from './deps.ts';
 import { registerDispatchRoutes } from './dispatch-routes.ts';
@@ -839,8 +840,9 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     return reply(c, ResolveNotificationResponse, { ok: true });
   });
 
-  // 回答「要你拍」（#1915）：答案、转已处理、操作记录同一事务存下，再交给指挥官（进度单 #1055、任务单留言）。
-  // 交没交出去照实写在 handoff 里：存下了就回 200，交接没成不把已存的答案说成没存。
+  // 回答「要你拍」：先把答案存下（这一步不转已处理），再按选项的动作执行。
+  // 自己写的、没有具体动作的交给指挥官；点了会自己执行的不留言，回包里 handoff.ok=false、why 是执行结果
+  // （页面原来那句「没交给指挥官」就把结果说出来，不假装交过）。执行成功才标已处理；失败卡留着，上面写原因。
   app.post(WebRoutes.answerNotification.path, async (c) => {
     const id = c.req.param('notificationId');
     const body = await readJson(c, AnswerNotificationRequest);
@@ -866,15 +868,52 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
     const { notification } = result;
     if (!notification.answer) throw new Error(`通知 ${id} 存下答案后读回来没有答案`);
-    const handoff = await handOffDecision(
-      { store, commenter: deps.decisionCommenter },
+    const answer = notification.answer;
+    let handed: Awaited<ReturnType<typeof handOffDecision>> | undefined;
+    const applied = await applyDecisionAnswer({
       notification,
-      notification.answer,
-    );
-    for (const [where, r] of Object.entries(handoff)) {
-      if (r && !r.ok) deps.log.error('「要你拍」的答案没交给指挥官', { notification: id, where, why: r.why });
+      optionId: body.optionId,
+      ports: liveDecisionPorts({
+        store,
+        actor,
+        via: c.get('via'),
+        capabilities: deps.decisionCapabilities,
+        handOff: async () => {
+          const handoff = await handOffDecision(
+            { store, commenter: deps.decisionCommenter },
+            notification,
+            answer,
+          );
+          handed = handoff;
+          return handoff;
+        },
+      }),
+    });
+    const at = deps.now().toISOString();
+    const execution = { ok: applied.executed.ok, text: applied.executed.text, at };
+    const settled = await store.settleDecision({
+      id,
+      execution,
+      resolve: applied.resolve,
+      by: actor,
+    });
+    if (settled === 'not_found') throw new ApiError(404, 'notification_not_found', '没有这条通知');
+    if (settled === 'already_resolved') {
+      throw new ApiError(409, 'notification_already_resolved', '这条已经处理过了，执行结果没写上');
     }
-    return reply(c, AnswerNotificationResponse, { ok: true, answer: notification.answer, handoff });
+    const handoff = applied.noteOnly
+      ? (handed ?? { progress: { ok: false as const, why: applied.executed.text } })
+      : {
+          progress: { ok: false as const, why: applied.executed.text },
+          ...(notification.taskId ? { task: { ok: false as const, why: applied.executed.text } } : {}),
+        };
+    if (applied.noteOnly) {
+      for (const [where, r] of Object.entries(handoff)) {
+        if (r && !r.ok)
+          deps.log.error('「要你拍」的答案没交给指挥官', { notification: id, where, why: r.why });
+      }
+    }
+    return reply(c, AnswerNotificationResponse, { ok: true, answer, handoff, execution });
   });
 
   app.get(WebRoutes.audit.path, async (c) => {

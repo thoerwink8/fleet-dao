@@ -687,7 +687,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(stillOpen?.resolvedBy).toBeUndefined();
       });
 
-      it('「要你拍」（#1915）：列表带选项；点选项记下那一项、转已处理、留操作记录', async () => {
+      it('「要你拍」（#1915）：列表带选项；点选项先记下，settleDecision 才转已处理，执行结果不另记操作记录', async () => {
         const by = { kind: 'user' as const, id: DEV_USER_ID };
         const open = await store.listNotifications({ status: 'open', limit: 10 });
         const decision = open.items.find((n) => n.id === IDS.notification2);
@@ -709,15 +709,21 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           at: clock.now.toISOString(),
           by: DEV_USER_ID,
         };
-        expect(got.kind === 'ok' && got.notification).toMatchObject({
-          id: IDS.notification2,
+        expect(got.kind === 'ok' && got.notification).toMatchObject({ id: IDS.notification2, answer });
+        expect(got.kind === 'ok' && got.notification.resolvedAt).toBeUndefined();
+        expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore + 1);
+        const execution = { ok: true, text: '已转给指挥官', at: clock.now.toISOString() };
+        expect(await store.settleDecision({ id: IDS.notification2, execution, resolve: true, by })).toBe(
+          'ok',
+        );
+        expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore + 1);
+        const all = await store.listNotifications({ status: 'all', limit: 10 });
+        expect(all.items.find((n) => n.id === IDS.notification2)).toMatchObject({
           answer,
           resolvedAt: clock.now.toISOString(),
           resolvedBy: DEV_USER_ID,
+          execution,
         });
-        expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore + 1);
-        const all = await store.listNotifications({ status: 'all', limit: 10 });
-        expect(all.items.find((n) => n.id === IDS.notification2)?.answer).toEqual(answer);
         // 拍过的再拍：已处理，不盖掉前一个答案
         expect(
           await store.answerNotification({ id: IDS.notification2, by, text: '改主意了' }, audit()),
@@ -729,10 +735,14 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         ).toEqual(answer);
       });
 
-      it('「要你拍」（#1931）：选了要留着的项（keepsOpen）只记答案、通知照旧开着、能再拍；有这种项时自己输入也留着；选了结的项才转已处理', async () => {
+      it('「要你拍」（#1931）：答案先记下、不转已处理；keepsOpen 的 settle 留着、能再拍；了结的要 settleDecision 才转已处理', async () => {
         const by = { kind: 'user' as const, id: DEV_USER_ID };
         const openIds = async () =>
           (await store.listNotifications({ status: 'open', limit: 10 })).items.map((n) => n.id);
+        const row = async () =>
+          (await store.listNotifications({ status: 'all', limit: 10 })).items.find(
+            (n) => n.id === IDS.notification2,
+          );
         const review = await store.answerNotification(
           { id: IDS.notification2, by, optionId: 'review' },
           audit(),
@@ -742,20 +752,35 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         });
         expect(review.kind === 'ok' && review.notification.resolvedAt).toBeUndefined();
         expect(await openIds()).toContain(IDS.notification2);
+        const kept = { ok: true, text: '已转给指挥官', at: clock.now.toISOString() };
+        expect(
+          await store.settleDecision({ id: IDS.notification2, execution: kept, resolve: false, by }),
+        ).toBe('ok');
+        expect((await row())?.execution).toEqual(kept);
+        expect((await row())?.resolvedAt).toBeUndefined();
         const typed = await store.answerNotification(
           { id: IDS.notification2, by, text: '周一再说' },
           audit(),
         );
         expect(typed.kind === 'ok' && typed.notification.resolvedAt).toBeUndefined();
+        expect(typed.kind === 'ok' && typed.notification.execution).toBeUndefined();
         expect(await openIds()).toContain(IDS.notification2);
         const approve = await store.answerNotification(
           { id: IDS.notification2, by, optionId: 'approve' },
           audit(),
         );
-        expect(approve.kind === 'ok' && approve.notification).toMatchObject({
-          answer: { optionId: 'approve' },
-          resolvedAt: clock.now.toISOString(),
-        });
+        expect(approve.kind === 'ok' && approve.notification.resolvedAt).toBeUndefined();
+        expect(await openIds()).toContain(IDS.notification2);
+        const auditsBefore = (await store.listAudit({ limit: 200 })).items.length;
+        expect(
+          await store.settleDecision({
+            id: IDS.notification2,
+            execution: kept,
+            resolve: true,
+            by,
+          }),
+        ).toBe('ok');
+        expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore);
         expect(await openIds()).not.toContain(IDS.notification2);
       });
 

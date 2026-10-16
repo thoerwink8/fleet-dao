@@ -51,7 +51,7 @@ export interface AlertStore {
     title: string;
     body: string;
     link?: string | undefined;
-    /** 「要你拍」的选项（#1915）：只有 decision 级带；补不出的不带，页面写「没有选项，请直接回复」。 */
+    /** 「要你拍」的选项：decision 级至少两项（落库时核）；alert 不带。 */
     options?: readonly DecisionOption[] | undefined;
   }): Promise<void>;
   /** 只在这个键还没有时插一条；有了（开着、处理过都算）不动。 */

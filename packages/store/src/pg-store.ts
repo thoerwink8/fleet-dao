@@ -57,7 +57,7 @@ import {
   users,
   worktreeInventory,
 } from '@fleet-dao/db';
-import { answerResolves, ciPolicyOf, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
+import { ciPolicyOf, type ProgressKind, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
@@ -288,6 +288,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         dedupeKey: n.dedupeKey,
         options: opt(n.decisionOptions),
         answer: opt(n.answer),
+        execution: opt(n.execution),
         deliveries: deliveries
           .filter((d) => d.notificationId === n.id)
           .map((d) => ({
@@ -686,8 +687,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .update(notifications)
           .set({
             answer,
-            // 选了「留着」的项（keepsOpen）：答案记下，通知照旧开着（开着本身就起作用，如整池暂停）
-            ...(answerResolves(row.decisionOptions, optionId) ? { resolvedAt: at, resolvedBy: by.id } : {}),
+            // 执行结果等 settleDecision。再拍一次把上一次没做成的结果清掉。
+            execution: null,
             updatedAt: at,
           })
           .where(eq(notifications.id, id))
@@ -700,6 +701,25 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const [notification] = await notificationRecords([result.row]);
       if (!notification) throw new Error(`通知 ${id} 存下答案后读不回来`);
       return { kind: 'ok', notification };
+    },
+    async settleDecision({ id, execution, resolve, by }) {
+      if (!isUuid(id)) return 'not_found';
+      const at = now();
+      const [updated] = await db
+        .update(notifications)
+        .set({
+          execution,
+          updatedAt: at,
+          ...(resolve ? { resolvedAt: at, resolvedBy: by.id } : {}),
+        })
+        .where(and(eq(notifications.id, id), isNull(notifications.resolvedAt)))
+        .returning({ id: notifications.id });
+      if (updated) return 'ok';
+      const [exists] = await db
+        .select({ id: notifications.id })
+        .from(notifications)
+        .where(eq(notifications.id, id));
+      return exists ? 'already_resolved' : 'not_found';
     },
     async appendAudit(entry) {
       return insertAudit(db, entry);

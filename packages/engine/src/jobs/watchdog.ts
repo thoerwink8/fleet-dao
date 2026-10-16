@@ -27,6 +27,7 @@
 
 import type { JobHealth, MergeStallFacts, RedStreak, ScheduleResult } from '@fleet-dao/db';
 import { WATCHDOG_JOB_ID } from '@fleet-dao/db';
+import type { DecisionOption } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { WatchdogRun } from '../contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
@@ -95,6 +96,8 @@ export interface WatchdogAlerts {
     body: string;
     link: string;
     level?: 'alert' | 'decision';
+    /** decision 级带。不给时真装配补两个只留言的选项。 */
+    options?: readonly DecisionOption[];
   }): Promise<void>;
   /** 撤：处理人记 WATCHDOG_ACTOR，正文开头写「已撤：why」，进操作记录（resolveAlertWithReason）。 */
   resolve(input: { dedupeKey: string; why: string }): Promise<'ok' | 'already_resolved' | 'not_found'>;

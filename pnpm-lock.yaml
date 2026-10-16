@@ -48,6 +48,9 @@ importers:
 
   packages/api:
     dependencies:
+      '@fleet-dao/adapters':
+        specifier: workspace:*
+        version: link:../adapters
       '@fleet-dao/conventions':
         specifier: workspace:*
         version: link:../conventions

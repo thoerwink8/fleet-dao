@@ -17,6 +17,7 @@ import {
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { type AppCredentials, createGitHub } from '@fleet-dao/github';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { pgLedger } from '@fleet-dao/store';
 import { type Client, ScheduleNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -268,6 +269,7 @@ describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_00
       title: `${FRESH}：先去 GitHub 把两个机器人装到这个仓`,
       body: '正文',
       link: '/settings',
+      options: noteOnlyOptions(),
     });
     async function addFresh() {
       await t.db.insert(repos).values({ owner: OWNER, name: 'fresh', testCommand: 'pnpm check' });

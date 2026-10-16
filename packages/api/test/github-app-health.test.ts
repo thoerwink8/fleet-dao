@@ -7,6 +7,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { silentLogger } from '@fleet-dao/store';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { githubAppHealthCheck } from '../src/github-app-health.ts';
@@ -69,6 +70,7 @@ describe('github_app', () => {
       taskId: null,
       title: 'acme/gadgets：先去 GitHub 把两个机器人装到这个仓',
       body: '占位',
+      options: noteOnlyOptions(),
     });
     const err = await githubAppHealthCheck(t.db)().then(
       () => null,
@@ -107,6 +109,7 @@ describe('github_app', () => {
       taskId: null,
       title: '没装',
       body: '占位',
+      options: noteOnlyOptions(),
     });
     await upsertAlert(t.db, {
       dedupeKey: failKey,

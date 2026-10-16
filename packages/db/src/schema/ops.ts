@@ -1,6 +1,6 @@
 // 人与运维：成员、通知、操作记录、外部写操作的幂等键、收到的 GitHub 事件、Jev 判断记录、定时任务登记与每次跑的记录、设置。
 // 「谁做的」统一记成 actor_kind + actor_id（人是用户 id，会话里的 AI 是会话 id……），和驾驶舱接口的 Actor 同形。
-import type { DecisionAnswer, DecisionOption } from '@fleet-dao/shared';
+import type { DecisionAnswer, DecisionExecution, DecisionOption } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -111,6 +111,8 @@ export const notifications = pgTable(
     decisionOptions: jsonb('decision_options').$type<DecisionOption[]>(),
     /** 创始人拍了什么（选项编号或原文、时刻、谁）；没拍是空。再报（原地重开）时清空。 */
     answer: jsonb('answer').$type<DecisionAnswer>(),
+    /** 选完以后系统执行的结果（成没成、一句话、时刻）；没执行、再报重开是空。 */
+    execution: jsonb('execution').$type<DecisionExecution>(),
   },
   (t) => [
     check(

@@ -15,7 +15,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import type { StageKind } from '@fleet-dao/shared';
+import { noteOnlyOptions, type StageKind } from '@fleet-dao/shared';
 import { createPgStore } from '@fleet-dao/store';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fixedEngineMaster, MASTER_ROUTE_RETRY_SECONDS } from '../../src/engine-master.ts';
@@ -184,6 +184,7 @@ describe('选路', () => {
       taskId: null,
       title: '账号池 claude-solo 整池暂停',
       body: '在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login',
+      options: noteOnlyOptions(),
     });
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     const probe = await pick({ stickRouteId: 'solo' });
@@ -249,10 +250,15 @@ describe('选路', () => {
       const hold = (await alarms()).find((a) => a.dedupeKey === 'pool-hold:claude-solo');
       expect(hold).toMatchObject({ level: 'decision', title: '账号池 claude-solo 整池暂停：登录失效' });
       expect(hold?.decisionOptions?.map((o) => o.id)).toEqual(['fixed', 'hold', 'retire']);
+      expect(hold?.decisionOptions?.map((o) => o.action?.kind)).toEqual([
+        'resume-pool',
+        'pause-pool',
+        'note-only',
+      ]);
       expect(hold?.decisionOptions?.find((o) => o.recommended)?.id).toBe('fixed');
     });
 
-    it('整池暂停的每个选项真有说的效果（#1931）：「先停着」「不要了」只记答案、池子照旧避开；「修好了，放开」转已处理、池子当场回来', async () => {
+    it('整池暂停：「先停着」「不要了」只记答案、池子照旧避开；「修好了，放开」要 settleDecision 才转已处理、池子才回来', async () => {
       await world(t.db);
       await poolHoldAfterProbe(
         t.db,
@@ -282,6 +288,16 @@ describe('选路', () => {
         expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
       }
       expect((await answer('fixed')).kind).toBe('ok');
+      expect((await alarms()).find((a) => a.id === id)?.resolvedAt).toBeNull();
+      expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      expect(
+        await store.settleDecision({
+          id,
+          execution: { ok: true, text: '账号池 claude-solo 已放开', at: new Date().toISOString() },
+          resolve: true,
+          by,
+        }),
+      ).toBe('ok');
       expect((await alarms()).find((a) => a.id === id)?.resolvedAt).not.toBeNull();
       expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'solo' } });
     });
@@ -332,6 +348,7 @@ describe('选路', () => {
         taskId: null,
         title: '账号池 claude-solo 整池暂停',
         body: '占位',
+        options: noteOnlyOptions(),
       });
       expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
       expect(await pick({ stickRouteId: 'solo' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
@@ -808,6 +825,7 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
       taskId: null,
       title: '账号池 claude-carpool 整池暂停：登录失效',
       body: '要重新登录',
+      options: noteOnlyOptions(),
     });
     const none = await pick({ stage: 'execute', avoidRouteIds: ['solo'] }, p);
     expect(none).toMatchObject({ ok: false, waitFor: 'none' });
@@ -1019,6 +1037,7 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
       taskId: null,
       title: '账号池 claude-carpool 整池暂停：登录失效',
       body: '要重新登录',
+      options: noteOnlyOptions(),
     });
     rig.answer('solo');
     const r = await pick({ stage: 'execute' }, onRig());
@@ -1282,6 +1301,10 @@ describe('报警、提问、人闸', () => {
         ['wf:park:red', 'decision'],
       ].sort(),
     );
+    expect(rows.find((r) => r.dedupeKey === 'wf:park:red')?.decisionOptions?.length).toBeGreaterThanOrEqual(
+      2,
+    );
+    expect(rows.find((r) => r.dedupeKey === 'wf:info')?.decisionOptions).toBeNull();
   });
 });
 

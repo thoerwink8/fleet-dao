@@ -46,7 +46,7 @@ import {
   type TaskRoutePin,
   upsertAlert,
 } from '@fleet-dao/db';
-import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
+import { type HostId, noteOnlyOptions, type OrgKind, type StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { routeBreaker } from '../failure/breaker.ts';
@@ -905,14 +905,17 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     },
 
     async raiseAlert(input) {
-      // decision 进「要你拍的」。stuck、info 仍进提醒：info 只在封号、事件数到线、全熔断这类事上发，量很小。
+      // decision 进「要你拍的」。工作流这一路补不出具体动作，给两个只留言的选项（decision 没有选项写不进）。
+      // stuck、info 仍进提醒：info 只在封号、事件数到线、全熔断这类事上发，量很小。
+      const level = input.level === 'decision' ? 'decision' : 'alert';
       const { id } = await upsertAlert(db, {
         dedupeKey: input.dedupeKey,
-        level: input.level === 'decision' ? 'decision' : 'alert',
+        level,
         // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。
         taskId: UUID.test(input.taskId) ? input.taskId : null,
         title: input.title.slice(0, 300),
         body: input.detail,
+        ...(level === 'decision' ? { options: noteOnlyOptions('continue') } : {}),
       });
       return { alertId: id };
     },

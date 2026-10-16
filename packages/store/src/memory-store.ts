@@ -3,7 +3,6 @@
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
 import { randomUUID } from 'node:crypto';
 import {
-  answerResolves,
   type Ban,
   type Channel,
   type ChannelStateRecord,
@@ -676,10 +675,8 @@ export function createMemoryStore(
       if (answer === 'unknown_option') return { kind: 'unknown_option' };
       checkAudit(entry);
       n.answer = answer;
-      if (answerResolves(n.options, optionId)) {
-        n.resolvedAt = at;
-        n.resolvedBy = by.id;
-      }
+      // 执行结果等 settleDecision。再拍一次把上一次没做成的结果清掉。
+      n.execution = undefined;
       audit(entry);
       changed('notifications', id);
       // 送到哪（target）和列表一样不往外给
@@ -687,6 +684,18 @@ export function createMemoryStore(
         kind: 'ok',
         notification: { ...n, deliveries: n.deliveries.map(({ target: _target, ...d }) => d) },
       };
+    },
+    async settleDecision({ id, execution, resolve, by }) {
+      const n = data.notifications.find((x) => x.id === id);
+      if (!n) return 'not_found';
+      if (!isNotificationOpen(n)) return 'already_resolved';
+      n.execution = execution;
+      if (resolve) {
+        n.resolvedAt = now().toISOString();
+        n.resolvedBy = by.id;
+      }
+      changed('notifications', id);
+      return 'ok';
     },
     async appendAudit(entry) {
       return audit(entry);

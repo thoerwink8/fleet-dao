@@ -9,7 +9,7 @@
 
 import { GITHUB_APP_ALERT_PREFIX, GITHUB_APP_MISSING_ALERT_PREFIX } from '@fleet-dao/db';
 import type { RepoRef, SelfCheckItem } from '@fleet-dao/github';
-import { APPS_NOT_INSTALLED_HINT, githubInstallLinks } from '@fleet-dao/shared';
+import { APPS_NOT_INSTALLED_HINT, type DecisionOption, githubInstallLinks } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type AlertStore, RECONCILE_ACTOR, type SweepPart } from './reconcile-common.ts';
 
@@ -78,6 +78,30 @@ export function githubAppMissingAlert(
     ].join('\n'),
     link: '/settings',
   };
+}
+
+/** 「没装到这个仓」的两个选项：再查一次（推荐），或者把这个仓移出驾驶舱。 */
+export function githubAppMissingOptions(repo: string): DecisionOption[] {
+  const slash = repo.indexOf('/');
+  const owner = slash > 0 ? repo.slice(0, slash) : '';
+  const name = slash > 0 ? repo.slice(slash + 1) : '';
+  return [
+    {
+      id: 'recheck',
+      label: '我装好了，再查一次',
+      detail: `再查 ${repo} 上两个机器人装了没有；都装上了这条才转已处理`,
+      recommended: '装好再查，不用把仓移出驾驶舱',
+      action: { kind: 'recheck', what: 'github-app', repo },
+    },
+    {
+      id: 'drop',
+      label: '这个仓先不监控',
+      detail: name
+        ? `把 ${repo} 移出驾驶舱的受管仓；上面还有没做完的单就移不走，这条留着并写明原因`
+        : `仓名认不出（${repo}），这条记下交给指挥官`,
+      action: name ? { kind: 'drop-repo', owner, name } : { kind: 'note-only' },
+    },
+  ];
 }
 
 /** 一条提醒的标题和正文：缺什么、多了什么、没查成的原因；怎么改。 */
@@ -174,6 +198,7 @@ export async function checkGitHubApps(deps: GitHubAppCheckDeps): Promise<SweepPa
           level: 'decision',
           taskId: null,
           ...githubAppMissingAlert(repo, roles),
+          options: githubAppMissingOptions(repo),
         });
         found += 1;
         continue;
