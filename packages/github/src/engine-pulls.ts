@@ -12,7 +12,9 @@ import type { Deps } from './deps.ts';
 import { recordEcho } from './echo.ts';
 import { GitHubError } from './errors.ts';
 import { type CommentIssueResult, commentPull } from './issues.ts';
+import { assertPublishable } from './publish-check.ts';
 import { PullSchema } from './pulls.ts';
+import { assertBodySize, neutralizeCloseKeywords, type PrBodyInput, renderPrBody } from './text.ts';
 
 /** 引擎读 PR 要的样子。 */
 export interface PullFacts {
@@ -87,6 +89,11 @@ export interface ClaimsGitHub {
   enableAutoMerge(repo: RepoRef, pull: Pick<PullFacts, 'number' | 'nodeId'>): Promise<void>;
   /** 关掉 PR（分支不动）。已经关了的不报错。 */
   closePull(repo: RepoRef, number: number): Promise<void>;
+  /**
+   * 换掉 PR 的正文（#2723：第 2 轮起「做了什么」换成这一轮会话的回复）。给结构就按 PR 模板渲染（renderPrBody），
+   * 关单词中和成「关联」、超长和发布前检查照开 PR 那一套。标题、分支、状态都不动。
+   */
+  updatePullBody(repo: RepoRef, number: number, body: string | PrBodyInput): Promise<void>;
   /** 在 PR 上留一条评论（幂等，同一个 key 只发一次）。 */
   commentPull(repo: RepoRef, number: number, key: string, body: string): Promise<CommentIssueResult>;
 }
@@ -292,6 +299,32 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
       if (!parsed.success || parsed.data.state !== 'closed')
         throw unexpected(`关 PR #${number} 的回执`, res.data);
       // 自家关的：补收时认得出是回声，不当成外面关的
+      await recordEcho(
+        deps.ledger.idempotency,
+        { repo, kind: 'pull', number, updatedAt: parsed.data.updated_at, role: 'engine' },
+        client.now(),
+      );
+    },
+
+    async updatePullBody(repo, number, input) {
+      const body = neutralizeCloseKeywords(typeof input === 'string' ? input : renderPrBody(input));
+      assertBodySize('PR 正文', body);
+      assertPublishable(
+        repo,
+        `改 ${repoSlug(repo)} 上 PR #${number} 的正文`,
+        [{ path: 'PR 正文', text: body }],
+        deps.hygieneRepo,
+      );
+      const res = await client.request({
+        method: 'PATCH',
+        path: `${base(repo)}/pulls/${number}`,
+        auth: auth(repo),
+        body: { body },
+      });
+      const parsed = PullSchema.safeParse(res.data);
+      if (!parsed.success || parsed.data.number !== number)
+        throw unexpected(`改 PR #${number} 正文的回执`, res.data);
+      // 自家改的：补收时认得出是回声
       await recordEcho(
         deps.ledger.idempotency,
         { repo, kind: 'pull', number, updatedAt: parsed.data.updated_at, role: 'engine' },
