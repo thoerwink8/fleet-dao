@@ -13,6 +13,7 @@
 //   失败一律交回原因，不抛。
 
 import { randomUUID } from 'node:crypto';
+import { StopReason } from '@fleet-dao/adapters';
 import {
   type ChatSessionAfter,
   claimRequestChat,
@@ -172,7 +173,10 @@ export function intakeChatSession(
       }
       const timeoutMs = input.timeoutMinutes * 60_000;
       const timer = new AbortController();
-      const clock = setTimeout(() => timer.abort(new Error(`${input.timeoutMinutes} 分钟没回完`)), timeoutMs);
+      const clock = setTimeout(
+        () => timer.abort(new StopReason('wall-clock', `${input.timeoutMinutes} 分钟没回完`)),
+        timeoutMs,
+      );
       const stream = { text: '' };
       let out: Awaited<ReturnType<OneShotSpawner>>;
       try {

@@ -1593,6 +1593,17 @@
         "message": "工作树 /var/lib/fleet-work/thoerwink8_fleet-dao/2261-t01a13d6c 在 fcafa93 之后还有没推的提交（1f0f022），快进不到并好的 37cc634，也并不上：要人看"
       },
       "expect": { "action": "park", "rule": "MC4", "alert": true, "routeOutcome": "neutral" }
+    },
+    {
+      "id": "X112",
+      "provenance": "format",
+      "origin": "#2366：叫停时调用方给了种类（看门狗、租约过期），插头判定的原因码 aborted_watchdog；和发版暂停、换路由的 aborted（OU1）分开，记账",
+      "evidence": {
+        "hostId": "claude-code",
+        "code": "aborted_watchdog",
+        "message": "引擎叫停（看门狗：会话 40 分钟没有心跳）"
+      },
+      "expect": { "action": "retry", "rule": "AB1", "routeOutcome": "fail" }
     }
   ],
   "skipped": [

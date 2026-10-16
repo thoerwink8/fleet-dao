@@ -8,6 +8,7 @@
 // - 续会话（--resume）只喂上一轮之后的新消息；会话没了（检出删了、换了模型、换了路由）就按存下来的消息和草稿重起，整份喂。
 // - 停下有三种：人点停下（不算暂停）、切号或发布排空（算暂停，写原因）、超时或会话没成（算暂停）。
 // - 起会话那一下抛了、没选到路由：这一轮写暂停原因、会话回 idle，不卡在 running。
+import { StopReason } from '@fleet-dao/adapters';
 import type { ChatSessionAfter, ClaimedRequestChat } from '@fleet-dao/db';
 import {
   COMMANDER_BLOCK,
@@ -242,7 +243,7 @@ export async function runIntakeChatTurn(deps: IntakeChatDeps, c: ClaimedRequestC
       .then((s) => {
         if (s && !stop.signal.aborted) {
           humanStop = true;
-          stop.abort(new Error('有人点了停下'));
+          stop.abort(new StopReason('user-stop', '有人点了停下'));
         }
       })
       .catch((err: unknown) => deps.log('warn', '指挥官会话：停没停没查成', { error: errMessage(err) }));
@@ -255,7 +256,7 @@ export async function runIntakeChatTurn(deps: IntakeChatDeps, c: ClaimedRequestC
       .then((r) => {
         if (r.stop && !stop.signal.aborted) {
           humanStop = true;
-          stop.abort(new Error('有人点了停下'));
+          stop.abort(new StopReason('user-stop', '有人点了停下'));
         }
       })
       .catch((err: unknown) => deps.log('warn', '指挥官会话：写到哪了没写进去', { error: errMessage(err) }));

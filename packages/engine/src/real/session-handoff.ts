@@ -17,6 +17,7 @@
 
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { StopReason } from '@fleet-dao/adapters';
 
 /** 收发目录的根：france.sh 建的 /var/lib/fleet-sessions（fleet:fleet 711）下面一层，引擎第一次用时自己建。 */
 export const DEFAULT_SESSION_IO_ROOT = '/var/lib/fleet-sessions/io';
@@ -52,7 +53,7 @@ export function sessionHandoff(root: string = DEFAULT_SESSION_IO_ROOT): SessionH
     },
     leave(why) {
       const ids = [...live];
-      if (!ac.signal.aborted) ac.abort(new Error(why));
+      if (!ac.signal.aborted) ac.abort(new StopReason('release-pause', why));
       return ids;
     },
   };

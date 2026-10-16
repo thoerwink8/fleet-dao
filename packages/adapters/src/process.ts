@@ -21,6 +21,7 @@ import {
   signalProcs,
   stopScope,
 } from './procs.ts';
+import { abortCause, type StopCause, stopCauseOf } from './stop-reason.ts';
 import type { KillReason } from './types.ts';
 
 export interface ProcessLimits {
@@ -68,7 +69,7 @@ export interface ProcessControl {
   readonly seq: number;
   /** 解析方认定「在干活」时调用，停滞计时从这里重来。 */
   touch(): void;
-  kill(reason: KillReason): void;
+  kill(reason: KillReason, cause?: StopCause): void;
 }
 
 /** 起来之后交给引擎记下：引擎重启后按 runId / scope 调 reapSession 收掉旧会话。 */
@@ -92,7 +93,7 @@ export interface AgentProcessHooks {
 export interface AgentProcessResult {
   exitCode: number | null;
   signal: string | null;
-  killed?: { reason: KillReason; at: string };
+  killed?: { reason: KillReason; at: string; cause?: StopCause };
   spawnError?: string;
   /** 执行体退出时会话里还活着、被收掉的进程数（后台服务、脱离了进程组的测试……）。 */
   stragglers: number;
@@ -288,18 +289,18 @@ export function runAgentProcess(
       touch: () => {
         lastActivity = Date.now();
       },
-      kill: (reason) => {
+      kill: (reason, cause) => {
         if (killed || exitInfo || finished) return;
-        killed = { reason, at: now().toISOString() };
+        killed = { reason, at: now().toISOString(), ...(cause ? { cause } : {}) };
         if (posix && HAS_PROC && child.pid !== undefined) snapshot = sessionProcs(spec.runId, child.pid);
         terminate('SIGTERM');
         timers.push(setTimeout(() => terminate('SIGKILL'), spec.limits.killGraceMs));
       },
     };
-    const onAbort = () => control.kill('aborted');
+    const onAbort = () => control.kill('aborted', stopCauseOf(spec.signal?.reason));
 
     if (spec.signal?.aborted) {
-      killed = { reason: 'aborted', at: now().toISOString() };
+      killed = { reason: 'aborted', at: now().toISOString(), ...abortCause(spec.signal) };
       reaped = { stragglers: 0, leftovers: 0 };
       finish();
       return;

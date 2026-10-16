@@ -118,7 +118,9 @@ export function grokRunFacts(report: GrokRunReport): RunFacts {
     s.errors.length > 0 || s.maxTurnsReached || (end !== undefined && end.stopReason !== 'end_turn');
   return {
     ...(report.spawnError ? { spawnError: report.spawnError } : {}),
-    ...(report.killed ? { killed: report.killed.reason } : {}),
+    ...(report.killed
+      ? { killed: report.killed.reason, ...(report.killed.cause ? { stopCause: report.killed.cause } : {}) }
+      : {}),
     exitCode: report.exitCode,
     ...(report.exitLost ? { exitLost: report.exitLost } : {}),
     signal: report.signal,

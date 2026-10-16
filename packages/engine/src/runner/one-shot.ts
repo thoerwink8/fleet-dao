@@ -30,7 +30,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { redact, type TranscriptEntry } from '@fleet-dao/adapters';
+import { redact, StopReason, type TranscriptEntry } from '@fleet-dao/adapters';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { admitSessionMemory } from '../real/memory-admission.ts';
@@ -380,7 +380,7 @@ export async function runOneShot(input: OneShotInput, deps: OneShotDeps): Promis
   const killAfterMs = attach
     ? Math.max(0, timeoutMs - ((deps.now ?? (() => new Date()))().getTime() - Date.parse(startedAt)))
     : timeoutMs;
-  const killTimer = setTimeout(() => ac.abort(new Error('one-shot timeout')), killAfterMs);
+  const killTimer = setTimeout(() => ac.abort(new StopReason('wall-clock', 'one-shot timeout')), killAfterMs);
   // 切号停的（超时先到的算超时）
   const switched = () => deps.stop?.aborted === true && !ac.signal.aborted;
   let spawnResult: SpawnOutcome;
