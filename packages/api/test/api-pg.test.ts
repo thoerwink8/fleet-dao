@@ -2,7 +2,7 @@
 // 语义细节在契约测试（store-contract.ts）和各接口的测试里按内存版测过；这里只证明「换成真库，接起来照样通」。
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { auditLog, githubEvents, progressEvents, runs, tasks } from '@fleet-dao/db';
+import { auditLog, githubEvents, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { BoardResponse, TaskDetailResponse } from '@fleet-dao/shared';
 import { DEPLOY_LAG_NOT_HERE, devFixtures } from '@fleet-dao/store';
@@ -17,7 +17,7 @@ import { NODE_REPORT_NOT_WIRED, nodeReportPart } from '../src/node-reporter.ts';
 import { sessionOrgHealthCheck } from '../src/session-org-health.ts';
 import { notConnectedTemporal } from '../src/temporal.ts';
 import { WATCHDOG_NOT_HERE } from '../src/watchdog-health.ts';
-import { DEV_RUN_ID, deliverGithub, type HarnessOptions, IDS, pgHarness, T0 } from './harness.ts';
+import { deliverGithub, type HarnessOptions, IDS, pgHarness, T0 } from './harness.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -47,17 +47,9 @@ describe('接口跑在真库上', () => {
     const board = BoardResponse.parse(await get(`/api/repos/${IDS.repo}/board`));
     expect(board.tasks.map((task) => task.id)).toContain(IDS.task12);
     const detail = TaskDetailResponse.parse(await get(`/api/tasks/${IDS.task12}`));
-    expect(detail.runs.map((r) => r.id)).toContain(DEV_RUN_ID);
-    // 缓存读写从库里读回来、折进当量；花费没记的就是没读到
-    expect(detail.usage.total).toMatchObject({
-      cacheReadTokens: 1_450_000,
-      cacheWriteTokens: 64_000,
-      inputEquivalent: 385_000,
-      missingCost: 1,
-    });
-    // 计费方式从库里的渠道表读：Claude 订阅是套餐内，没记的花费记在套餐内那一栏的没读到
-    expect(detail.runs.find((r) => r.id === IDS.run0)?.billing).toBe('subscription');
-    expect(detail.usage.total.cost.subscription).toEqual({ runs: 1, usd: 0, missing: 1 });
+    // 老流程的会话表 09-29 起没人写、已删（#2357）：任务详情里老流程的会话、用量恒为空，三段的流水另有用例（下面 runs 表那一组）
+    expect(detail.runs).toEqual([]);
+    expect(detail.usage.total.runs).toBe(0);
     // 登录本身也落了库里的操作记录。
     expect(await t.db.select().from(auditLog).where(eq(auditLog.action, 'login'))).toHaveLength(1);
   });

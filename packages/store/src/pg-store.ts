@@ -24,7 +24,6 @@ import {
   notifications,
   openPoolRuns,
   pools,
-  progressEvents,
   pullRequests,
   quotaWindows,
   readChannelStates,
@@ -34,7 +33,6 @@ import {
   runsOfTask,
   scheduleHealth,
   searchSpecs,
-  sessionRuns,
   settings,
   stateChanges,
   subtaskDeps,
@@ -51,7 +49,6 @@ import {
   toRepo,
   toRoute,
   toSegmentRun,
-  toSessionRun,
   toSubtask,
   toTask,
   users,
@@ -91,7 +88,6 @@ import {
   readWorktreeInventoryPayload,
 } from './node-logic.ts';
 import { nextCursorOf } from './paging.ts';
-import { planSteps } from './plan-logic.ts';
 import type {
   AuditRecord,
   AutoDispatchChange,
@@ -106,7 +102,6 @@ import type {
   Page,
   PasswordCredentials,
   PullRequestRecord,
-  RunPlan,
   SegmentRunRecord,
   SettingRecord,
   Store,
@@ -232,10 +227,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       .returning({ id: auditLog.id });
     if (!row) throw new Error('操作记录没写进去');
     return String(row.id);
-  }
-
-  async function insertProgress(runId: string, kind: ProgressKind, payload: unknown): Promise<void> {
-    await db.insert(progressEvents).values({ runId, at: now(), kind, payload: payload ?? null });
   }
 
   /** 这几条投递带着的对象版本，按投递编号分好；每条里按对象排（和内存版一样）。 */
@@ -473,26 +464,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         ),
       );
     },
-    async listRuns({ taskIds, active }) {
-      const ids = taskIds?.filter(isUuid);
-      if (ids !== undefined && ids.length === 0) return [];
-      const rows = await db
-        .select()
-        .from(sessionRuns)
-        .where(
-          and(
-            ids ? inArray(sessionRuns.taskId, ids) : undefined,
-            active ? isNull(sessionRuns.endedAt) : undefined,
-          ),
-        )
-        .orderBy(asc(sessionRuns.queuedAt), asc(sessionRuns.id));
-      return rows.map(toSessionRun);
-    },
-    async getRun(id) {
-      if (!isUuid(id)) return null;
-      const [row] = await db.select().from(sessionRuns).where(eq(sessionRuns.id, id));
-      return row ? toSessionRun(row) : null;
-    },
     async listSegmentRuns(taskId) {
       if (!isUuid(taskId)) return [];
       const [task] = await db
@@ -576,33 +547,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           (a.id < b.id ? -1 : a.id > b.id ? 1 : 0),
       );
       return merged.map((m) => m.record);
-    },
-    async getPlans(runIds) {
-      const ids = runIds.filter(isUuid);
-      const out = new Map<string, RunPlan>();
-      if (ids.length === 0) return out;
-      const rows = await db
-        .selectDistinctOn([progressEvents.runId], {
-          runId: progressEvents.runId,
-          at: progressEvents.at,
-          payload: progressEvents.payload,
-        })
-        .from(progressEvents)
-        .where(and(inArray(progressEvents.runId, ids), eq(progressEvents.kind, 'plan')))
-        .orderBy(progressEvents.runId, desc(progressEvents.at), desc(progressEvents.id));
-      for (const r of rows) out.set(r.runId, { steps: planSteps(r.payload), updatedAt: iso(r.at) });
-      return out;
-    },
-    async lastSay(runId) {
-      if (!isUuid(runId)) return null;
-      const [row] = await db
-        .select({ at: progressEvents.at, payload: progressEvents.payload })
-        .from(progressEvents)
-        .where(and(eq(progressEvents.runId, runId), eq(progressEvents.kind, 'say')))
-        .orderBy(desc(progressEvents.at), desc(progressEvents.id))
-        .limit(1);
-      const text = (row?.payload as { text?: unknown } | null | undefined)?.text;
-      return row && typeof text === 'string' ? { text, at: iso(row.at) } : null;
     },
 
     // —— 调度台 ——
@@ -904,34 +848,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     },
 
     // —— fleet 命令 ——
-    async getAgentSession(runId) {
-      if (!isUuid(runId)) return null;
-      // 测试命令认起会话时记下的那条（session_runs.test_command），不读仓此刻的：开工后仓里改了命令也照旧
-      const [row] = await db
-        .select({ run: sessionRuns, task: tasks })
-        .from(sessionRuns)
-        .innerJoin(tasks, eq(tasks.id, sessionRuns.taskId))
-        .innerJoin(repos, eq(repos.id, tasks.repoId))
-        .where(eq(sessionRuns.id, runId));
-      if (!row) return null;
-      return {
-        runId: row.run.id,
-        taskId: row.task.id,
-        subtaskId: opt(row.run.subtaskId),
-        stage: row.run.stage,
-        repoId: row.task.repoId,
-        testCommand: opt(row.run.testCommand),
-        branch: opt(row.run.branch),
-        acceptance: row.task.acceptance,
-        endedAt: isoOpt(row.run.endedAt),
-      };
-    },
-    async savePlan(runId, steps) {
-      await insertProgress(runId, 'plan', { steps: steps.map(({ title, state }) => ({ title, state })) });
-    },
-    async appendProgress(runId, kind, payload) {
-      await insertProgress(runId, kind, payload);
-    },
     async searchHistory({ repoId, query, limit }) {
       if (!isUuid(repoId)) return [];
       return searchSpecs(db, { repoId, query, limit });
@@ -959,15 +875,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         )
         .limit(limit);
       return rows.map(toPullRequest);
-    },
-    async listTestRuns(runId) {
-      if (!isUuid(runId)) return [];
-      const rows = await db
-        .select({ at: progressEvents.at, payload: progressEvents.payload })
-        .from(progressEvents)
-        .where(and(eq(progressEvents.runId, runId), eq(progressEvents.kind, 'test')))
-        .orderBy(asc(progressEvents.at), asc(progressEvents.id));
-      return rows.map((r) => testRunOf(iso(r.at), r.payload));
     },
     async claimCommand({ runId, key, action, takeOverBefore }): Promise<CommandClaim> {
       const k = commandKey(runId, key);

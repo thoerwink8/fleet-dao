@@ -3,7 +3,7 @@
 // 哪些目录里还有没结束的会话（有就不碰那棵树）。
 import { and, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { pullRequests, repos, sessionRuns, subtasks, tasks } from '../schema/index.ts';
+import { pullRequests, type RunSegment, repos, runs, subtasks, tasks } from '../schema/index.ts';
 
 export interface IssueWorkFacts {
   taskId: string;
@@ -80,7 +80,8 @@ export async function subtaskTreeRefs(db: Db, ids: readonly string[]): Promise<S
 
 export interface OpenSessionTree {
   runId: string;
-  stage: (typeof sessionRuns.$inferSelect)['stage'];
+  /** 哪一段（runs.segment：scope | manual | verify）。 */
+  stage: RunSegment;
   queuedAt: Date;
   /** 会话起在哪个目录（子任务的树、检出副本），和引擎建树时拼的路径逐字一样。 */
   path: string;
@@ -93,13 +94,13 @@ export interface OpenSessionTree {
 export async function openSessionTrees(db: Db): Promise<OpenSessionTree[]> {
   const rows = await db
     .select({
-      runId: sessionRuns.id,
-      stage: sessionRuns.stage,
-      queuedAt: sessionRuns.queuedAt,
-      path: sessionRuns.worktreePath,
+      runId: runs.id,
+      stage: runs.segment,
+      queuedAt: runs.startedAt,
+      path: runs.worktreePath,
     })
-    .from(sessionRuns)
-    .where(and(isNull(sessionRuns.endedAt), isNotNull(sessionRuns.worktreePath)));
+    .from(runs)
+    .where(and(isNull(runs.endedAt), isNotNull(runs.worktreePath)));
   return rows.flatMap((r) => (r.path ? [{ ...r, path: r.path }] : []));
 }
 

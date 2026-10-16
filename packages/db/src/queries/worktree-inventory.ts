@@ -13,7 +13,7 @@ import {
 } from '@fleet-dao/shared';
 import { and, eq, gte, isNotNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog, sessionRuns, worktreeInventory } from '../schema/index.ts';
+import { auditLog, runs, worktreeInventory } from '../schema/index.ts';
 import { recordEngineAudit } from './session-org.ts';
 
 const LATEST = 'latest';
@@ -103,17 +103,17 @@ export function recordWorktreeCleanupRequest(
 }
 
 /**
- * 每个目录里最近一次会话的时刻：收场了取收场时刻，没收场取起的时刻（session_runs 按 worktree_path 取最新）。
+ * 每个目录里最近一次会话的时刻：收场了取收场时刻，没收场取起的时刻（runs 按 worktree_path 取最新）。
  * 清单上写「最近一次会话多久前」：判这棵树多久没人动过，比看目录的修改时间准（在树里改文件不动树根那一层）。
  */
 export async function lastSessionByTree(db: Db): Promise<Map<string, Date>> {
-  const at = sql<Date>`max(coalesce(${sessionRuns.endedAt}, ${sessionRuns.queuedAt}))`.mapWith(
+  const at = sql<Date>`max(coalesce(${runs.endedAt}, ${runs.startedAt}))`.mapWith(
     (v: string | Date) => new Date(v),
   );
   const rows = await db
-    .select({ path: sessionRuns.worktreePath, at })
-    .from(sessionRuns)
-    .where(isNotNull(sessionRuns.worktreePath))
-    .groupBy(sessionRuns.worktreePath);
+    .select({ path: runs.worktreePath, at })
+    .from(runs)
+    .where(isNotNull(runs.worktreePath))
+    .groupBy(runs.worktreePath);
   return new Map(rows.flatMap((r) => (r.path ? [[r.path, r.at] as const] : [])));
 }

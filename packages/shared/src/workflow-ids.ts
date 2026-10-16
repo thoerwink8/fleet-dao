@@ -51,7 +51,7 @@ export function requirementWorkflowId(repo: WorkflowRepoRef, issueNumber: number
 }
 
 /**
- * 子任务工作流编号 = `sub:<subtasks.id>`。后端手里有 session_runs.subtask_id 就拼得出来，不用查别的；
+ * 子任务工作流编号 = `sub:<subtasks.id>`。后端手里有子任务编号就拼得出来，不用查别的；
  * subtasks.id 每次拆方案新生成，需求重开也不会和上一轮已关闭的子任务撞编号。
  */
 export function subtaskWorkflowId(subtaskId: string): string {

@@ -659,16 +659,15 @@ describe('某个用途的候选路由', () => {
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
     // relay-b 上限 1：一场考新模型的会话（不属于任何需求、路由也不在本用途）占着。
-    await addRun(t.db, { taskId: null, stage: 'judge', routeId: 'b-k3', startedAt: ago(5 * MIN) });
+    await addRun(t.db, { taskId: null, routeId: 'b-k3', startedAt: ago(5 * MIN) });
     // relay-a 上限 2：只有一个在跑，一个已结束。
     await addRun(t.db, { taskId: task.id, routeId: 'a', startedAt: ago(5 * MIN) });
     await addRun(t.db, {
       taskId: task.id,
       routeId: 'a',
-      queuedAt: ago(60 * MIN),
       startedAt: ago(50 * MIN),
       endedAt: ago(40 * MIN),
-      outcome: 'ok',
+      outcome: 'done',
     });
     expect((await flat('execute')).map((c) => [c.routeId, c.inFlight, c.maxConcurrency, c.blockers])).toEqual(
       [
@@ -678,7 +677,7 @@ describe('某个用途的候选路由', () => {
     );
   });
 
-  it('三段的一次性会话（runs 里开着的行，#157）也占名额：拼车池上限 3，两行三段 + 一行 Fusion 的会话就没空位；收了一行又有', async () => {
+  it('三段的一次性会话（runs 里开着的行，#157）也占名额：拼车池上限 3，三行（动手、动手、验收）就没空位；收了一行又有', async () => {
     await t.db.insert(pools).values({
       id: 'claude-carpool',
       channelId: 'claude-subscription',

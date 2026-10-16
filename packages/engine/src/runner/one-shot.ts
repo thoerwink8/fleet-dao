@@ -538,6 +538,7 @@ function runFields(input: OneShotInput, runId: string, startedAt: string): RunSt
     ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
     ...(input.prNumber !== undefined ? { prNumber: input.prNumber } : {}),
     ...(input.branch !== undefined ? { branch: input.branch } : {}),
+    ...(input.cwd ? { worktreePath: input.cwd } : {}),
     startedAt,
   };
 }

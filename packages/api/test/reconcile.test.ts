@@ -317,7 +317,6 @@ describe('对账补漏', () => {
     data.tasks = [];
     data.subtasks = [];
     data.runs = [];
-    data.progress = [];
     data.notifications = [];
     data.specs = [];
     const { run } = setup({ repos: {} }, data);

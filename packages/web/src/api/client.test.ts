@@ -53,7 +53,6 @@ describe('推送到缓存：按表名决定重拉什么', () => {
       'notifications',
       'approvals',
       'runs',
-      'session_runs',
       'quota_windows',
       'channels',
     ] as const satisfies readonly RealtimeTable[];
@@ -68,7 +67,7 @@ describe('推送到缓存：按表名决定重拉什么', () => {
   test('三段流水 runs 变了：主页的流水线图、任务详情的流水、任务列表的段和花费跟着重拉', () => {
     const { qc, called } = spy();
     applyOne(qc, { type: 'change', table: 'runs', id: 'run-1' });
-    expect(called()).toEqual([keys.home.join('/'), 'task', 'task-list']);
+    expect(called()).toEqual([keys.home.join('/'), 'task', 'task-list', keys.pools.join('/')]);
   });
 
   test('额度窗、渠道变了：路由两层的活不活跟着重拉（额度够不够、渠道开没开都在三件事里）', () => {
@@ -141,7 +140,7 @@ describe('重拉不打断正在读的：打断了要从头再等一轮', () => {
     const qc = new QueryClient();
     const board = held(qc, ['board', 'r1']);
     for (const id of ['p1', 'p2', 'p3']) {
-      applyOne(qc, { type: 'change', table: 'progress_events', id });
+      applyOne(qc, { type: 'change', table: 'subtasks', id });
       await settle();
     }
     expect(board.reads).toHaveLength(1);
@@ -160,8 +159,8 @@ describe('推送攒一小会儿再作废', () => {
     try {
       const { qc, called } = spy();
       const b = createLiveBatcher(qc, 400);
-      b.push({ type: 'change', table: 'progress_events', id: 'p1' });
-      b.push({ type: 'change', table: 'progress_events', id: 'p2' });
+      b.push({ type: 'change', table: 'subtasks', id: 'p1' });
+      b.push({ type: 'change', table: 'subtasks', id: 'p2' });
       b.push({ type: 'change', table: 'notifications', id: 'n1' });
       expect(called()).toEqual([]);
       vi.advanceTimersByTime(400);
