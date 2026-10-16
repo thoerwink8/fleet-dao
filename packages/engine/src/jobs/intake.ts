@@ -524,6 +524,11 @@ export interface IntakeDeps {
    * 报警读它（jobs/merge-stall.ts）。写不进照抛：这一轮记没查成。不给（测试）就不记。
    */
   recordWaiting?(input: { at: Date; byRepo: Record<string, number> }): Promise<void>;
+  /**
+   * 开着接活的仓因档案没就绪不拉单（#2839）：why 是原因（缺哪几项，或形状不对的那句）时推报警，why 是 null（档案齐了）时撤掉。
+   * 写不进照抛，调用方只记日志、这一轮照常。不给（测试）就不报。
+   */
+  profileAlert?(input: { repo: IntakeRepo; why: string | null }): Promise<void>;
   /** 本机领单的租约（决定 0096，local-leases.ts）：每个仓准入之前先收到期的。不给（测试）就不收。 */
   localLeases?: LocalLeaseDeps;
   runs: ScheduleRunLog;
@@ -915,6 +920,18 @@ async function startCandidate(deps: IntakeDeps, repo: IntakeRepo, c: Candidate, 
   return true;
 }
 
+/** 仓档案没就绪的提醒（#2839）：写不成只记日志，这一轮照常（提醒不当成没跑成）。 */
+async function reportProfile(deps: IntakeDeps, repo: IntakeRepo, why: string | null): Promise<void> {
+  if (!deps.profileAlert) return;
+  try {
+    await deps.profileAlert({ repo, why });
+  } catch (err) {
+    deps.log('warn', `拉单：${repo.owner}/${repo.name} 仓档案的提醒没写成（这一轮照常）`, {
+      error: errMessage(err),
+    });
+  }
+}
+
 interface PreparedRepo {
   repo: IntakeRepo;
   admitted: Candidate[];
@@ -936,14 +953,17 @@ async function prepareRepo(
     if (gaps.length > 0) {
       t.notReady.push(`${slug}：缺 ${gaps.join('、')}`);
       deps.log('info', `拉单：${slug} 仓档案没就绪，不拉单`, { missing: gaps });
+      await reportProfile(deps, repo, `缺 ${gaps.join('、')}`);
       return null;
     }
     const parsed = safeParseRepoProfile(repo.profile);
     if (!parsed.ok) {
       t.notReady.push(`${slug}：${parsed.error}`);
       deps.log('info', `拉单：${slug} 仓档案没就绪，不拉单`, { error: parsed.error });
+      await reportProfile(deps, repo, parsed.error);
       return null;
     }
+    await reportProfile(deps, repo, null);
   }
   const profile = repo.profile === undefined ? undefined : parseRepoProfile(repo.profile);
   const skippedBefore = new Map(t.skipped);

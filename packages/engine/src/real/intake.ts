@@ -79,6 +79,30 @@ export async function readRepoStandardPaths(
   return standardPathsList(read.file.kind === 'text' ? read.file.text : null);
 }
 
+/**
+ * 开着接活的仓因档案没就绪不拉单（#2839）：why 是原因时推报警（同键原地更新），why 是 null（齐了）时撤掉。
+ * 没有这条、已撤的，resolveAlertWithReason 回 not_found / already_resolved，不算错。
+ */
+export async function reportIntakeProfile(
+  db: Db,
+  repo: { owner: string; name: string },
+  why: string | null,
+): Promise<void> {
+  const slug = `${repo.owner}/${repo.name}`;
+  const dedupeKey = `intake-profile:${slug}`;
+  if (why === null) {
+    await resolveAlertWithReason(db, { dedupeKey, by: 'engine', why: '仓档案齐了，拉单照常' });
+    return;
+  }
+  await upsertAlert(db, {
+    dedupeKey,
+    level: 'alert',
+    taskId: null,
+    title: `${slug} 仓档案没就绪，拉单不拉这个仓`,
+    body: `${why}\n\n补法：在法国跑 fleet-api project show ${slug} 看现状；把原有项和缺的项写成一整份 JSON，用 fleet-api project set-profile ${slug} --file - 写回（整份换掉，原有项要一起带上）。`,
+  });
+}
+
 export interface IntakeWiring {
   db: Db;
   gh: IntakeGitHub;
@@ -124,6 +148,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
       },
       standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
+      profileAlert: ({ repo, why }) => reportIntakeProfile(w.db, repo, why),
       // 本机领单的租约（决定 0096）：到期的行、心跳（本机会话推来的 node_sessions）、PR 镜像都从库里读，摘标签用「引擎」机器人
       localLeases: {
         expired: (repo, at) => expiredLocalClaims(w.db, repo.id, at),
