@@ -1,6 +1,8 @@
 // 调度台要的配置：族、渠道、账号池、模型、路由、每个用途的路由顺序（路由两层）、禁令，外加额度窗（机器写的现值）。
 
 import {
+  MODEL_STRENGTHS,
+  type ModelStrength,
   type OrgKind,
   ROUTE_PROBE_KINDS,
   ROUTE_PROBE_TIERS,
@@ -109,15 +111,30 @@ export const pools = pgTable(
   ],
 );
 
-export const models = pgTable('models', {
-  id: text('id').primaryKey(),
-  family: text('family')
-    .notNull()
-    .references(() => families.id),
-  displayName: text('display_name').notNull(),
-  /** 下架时间；过了这个时间，候选路由里它就被排除。 */
-  retiredAt: timestamp('retired_at', tz),
-});
+export const models = pgTable(
+  'models',
+  {
+    id: text('id').primaryKey(),
+    family: text('family')
+      .notNull()
+      .references(() => families.id),
+    displayName: text('display_name').notNull(),
+    /** 下架时间；过了这个时间，候选路由里它就被排除。 */
+    retiredAt: timestamp('retired_at', tz),
+    /**
+     * 模型的强弱档（strong / standard / light，shared 的 MODEL_STRENGTHS）：目录 deploy/catalog.json 独占，装载器每次对齐。
+     * 选路按它让重活先给强档、同档相邻的模型按池子消耗进度分流（决定 0099）。空 = 没标，选路照以前。
+     * 不是派工档（runs.tier 的 fast / medium / heavyweight）。
+     */
+    strength: text('strength').$type<ModelStrength>(),
+  },
+  (t) => [
+    check(
+      'models_strength_known',
+      sql`${t.strength} is null or ${t.strength} in (${sql.raw(MODEL_STRENGTHS.map((s) => `'${s}'`).join(', '))})`,
+    ),
+  ],
+);
 
 export const routes = pgTable(
   'routes',
