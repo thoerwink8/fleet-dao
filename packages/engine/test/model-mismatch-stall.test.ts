@@ -29,6 +29,9 @@ describe('isLegacyModelMismatchStall', () => {
     expect(isLegacyModelMismatchStall(LEGACY_MODEL_MISMATCH_STALL)).toBe(true);
     expect(isLegacyModelMismatchStall(`停下等人：${LEGACY_MODEL_MISMATCH_STALL}`)).toBe(true);
     expect(isLegacyModelMismatchStall(NO_ROUTE_MODEL_MISMATCH_STALL)).toBe(false);
+    expect(isLegacyModelMismatchStall('回话的模型不是点名的那个：换了一条同档路由仍对不上，停下等人')).toBe(
+      false,
+    );
     expect(isLegacyModelMismatchStall('停下等人：没有可用的路由')).toBe(false);
     expect(isLegacyModelMismatchStall(null)).toBe(false);
   });

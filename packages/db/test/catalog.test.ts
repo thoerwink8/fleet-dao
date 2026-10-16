@@ -159,6 +159,23 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
     await expect(load(example())).resolves.toBeTruthy();
   });
 
+  it('说明不描述运行时路由开关：开关只由驾驶舱和 routing_catalog 管理', () => {
+    const notes: string[] = [];
+    const collect = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        for (const item of value) collect(item);
+        return;
+      }
+      if (!value || typeof value !== 'object') return;
+      for (const [key, item] of Object.entries(value)) {
+        if (key === '_说明' && typeof item === 'string') notes.push(item);
+        else collect(item);
+      }
+    };
+    collect(JSON.parse(exampleText));
+    expect(notes.join('\n')).not.toMatch(/关着|开着|开关|打开|关闭|启用|停用|不挂|同\s*opus/);
+  });
+
   it('两个 Claude 池跑在同一个会话用户下、按组织类型分（法国只留一个会话用户，design 第十节）；同一时刻只有一个在跑，各 4', () => {
     const pool = (id: string) => example().pools.find((p) => p.id === id);
     const facts = (id: string) => [pool(id)?.runAsUser, pool(id)?.orgKind, pool(id)?.maxConcurrency];

@@ -440,12 +440,14 @@ export const RULES: readonly FailureRule[] = [
   // - 不是 #1298。那一单是新会话、点名的型号不在中转名单里，服务端换成名单第一个（gpt-6-sol → gpt-6-astra）。
   //   sonnet 在名单里。读回的是上一段的 opus，不是名单替换。
   // - 不是 MU1。那一单是上游 503「模型暂时不可用」，换路由或停下腾出名额，不是点名 sonnet 读回 opus。
-  // 这里仍判停下（kind stop）：分流的结论进历史，重放读到的还是挂起。动手会话不拿这个挂起整张单。
-  // 新失败由 patched('model-mismatch-reroute') 接住：停这一段，按点名路由开新会话重派一次（误续靠开新会话解开）。
-  // 同一条开了新会话仍对不上，才是这条路由在换模，避开它。还有能派的就继续，一条都没有才挂起。
-  // 已经按这句挂上的在途单，重放必须走进已经记下的挂起（跳过会 TMPRL1100，变僵尸，继续信号也送不进）。
-  // 看门狗认出「回话的模型不是点名的那个（model_mismatch）：挂起并报警」，发 taskContinue；
-  // 醒来后 patched('model-mismatch-wake-reroute') 按点名开新会话重派。有路由就不再停在 stalled。
+  // 这里仍判停下（kind stop）：分流的结论进历史，重放读到的还是挂起。动手会话不拿第一次就把整张单挂起。
+  // 新失败由 patched('model-mismatch-redispatch') 接住：停这一段，换同一模型的另一条路由、开新会话重派一次
+  // （不续上一段，误续靠开新会话解开）。又对不上才停下等人；这次的标题不沿用下面这句旧的「挂起并报警」，
+  // 看门狗不把它当成已经挂上的旧单叫醒。
+  // 已经按「回话的模型不是点名的那个（model_mismatch）：挂起并报警」挂上的在途单，重放必须走进已经记下的挂起
+  // （跳过会 TMPRL1100，变僵尸，继续信号也送不进）。看门狗认出这一句，发 taskContinue；
+  // 醒来后 patched('model-mismatch-wake-reroute') 按点名开新会话重派。
+  // 主线上先按点名路由重派的在途单（历史里已有 patched('model-mismatch-reroute')）重放仍走那一条，不改步序。
   // 发版排空和 Mirasim 接回不在这里改。
   {
     id: 'MD3',
@@ -529,8 +531,8 @@ export const RULES: readonly FailureRule[] = [
   // 归类：分类把可重试的活动超时当成「原路再试不会变」。不是另外三件：
   // - #2797 发版叫停：排空到点把会话停下，码是 engine_stop（KL3，kind resume），不记账、马上续，不进这张表。
   // - #2815 Mirasim 发版后接回：会话脱开引擎接着跑，活动交回 detached，工作流隔一会儿 attach，不以 timeout_start_to_close 收场。
-  // - #2811 model_mismatch：MD3，kind stop。分流仍判停下。动手会话停这一段、按点名开新会话重派
-  //   （patched('model-mismatch-reroute')）。已经挂上的由看门狗发继续再重派，不长期停在 stalled。
+  // - #2811 model_mismatch：MD3 仍是 kind stop、按路由记失败。动手会话先换同一模型的另一条路由自动重派一次
+  //   （patched('model-mismatch-redispatch')，开新会话），第二次才停下等人。已经按旧标题挂上的由看门狗发继续再重派。
   //   #2742 是发版叫停后误续上一段 opus，不是活动超时。
   // timeout_* 的原文是 Temporal 固定句（activity StartToClose timeout 等），第二次必然一字不差。runSegment 的
   // StartToClose 是 75 分钟；#2710 离新进程起来只有约 8 分钟，凑不齐一次在新进程上跑满的 StartToClose。
@@ -731,8 +733,8 @@ export const RULES: readonly FailureRule[] = [
   // - #2703 探针侧同一句：再探一次仍不通就判这条路由离线，不挂整单（已关）。
   // - #2815 引擎停时 Mirasim 动手会话：脱开再按交接单接回，不以这句收场。
   // - #2824 timeout_start_to_close：EN1，Temporal 活动超时，原文一字不差才挂起。
-  // - #2811 model_mismatch：MD3，kind stop。分流仍判停下。动手会话停这一段、按点名开新会话重派
-  //   （patched('model-mismatch-reroute')）。已经挂上的由看门狗发继续再重派，不长期停在 stalled。
+  // - #2811 model_mismatch：MD3，kind stop。分流仍判停下。动手会话先换同一模型的另一条路由自动重派一次
+  //   （patched('model-mismatch-redispatch')，开新会话），第二次才停下等人。已经按旧标题挂上的由看门狗发继续再重派。
   //   #2742 是发版叫停后误续上一段 opus，不是桥接超时。
   // 分流这里仍判「原路重试一次，再不行挂起」（探针认这句，改 kind 会把探针带偏）。动手会话不拿这个挂起整单：
   // 停掉这一段、按点名路由重派；没有能派的路由，或同一原因连败到重派预算（先避开这条路由，同一模型再避开模型，

@@ -231,7 +231,7 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
     });
   });
 
-  it('会话没跑成（模型对不上）：停这一段，按点名路由开新会话重派，不挂起', async () => {
+  it('会话没跑成（模型对不上）：先换同一派工档的下一条路由重派一次', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
       segment: async (_i, n) =>
@@ -250,15 +250,15 @@ describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
       async (q) => (await start(q, input())).result() as Promise<TaskRun>,
       { tasks },
     );
-    expect(run.outcome).toBe('merged');
-    // 第一次对不上：还是点名的 r1，开新会话（不续上一段），不换到 r2，也不挂起
-    expect(calls.segment.map((s) => s.route.routeId)).toEqual(['r1', 'r1']);
-    expect(calls.segment.every((s) => s.resumeSessionId === undefined)).toBe(true);
-    expect(calls.resume).toHaveLength(0);
-    expect(world.states.some((s) => s.phase === 'parked')).toBe(false);
-    expect(world.alerts.some((a) => a.level === 'stuck')).toBe(false);
-    // 动手轮数没多算：重派不是返工
-    expect(run.rounds).toBe(1);
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment.map((x) => x.route.routeId)).toEqual(['r1', 'r2']);
+    expect(calls.segment[1]?.tier).toEqual(calls.segment[0]?.tier);
+    expect(calls.segment[1]?.resumeSessionId).toBeUndefined();
+    expect(world.callsOf('pickRoute')[1]?.input).toMatchObject({
+      avoidRouteIds: ['r1'],
+      avoidModelIds: [],
+    });
+    expect(world.alerts).toEqual([]);
   });
 
   it('PR 已经被 GitHub 自己合了（CI 等到的是 merged）：不再验收、不再挂，直接关单', async () => {
@@ -1320,7 +1320,7 @@ describe('任务工作流 · 切号停下动手那一段（org_switch，#59）',
   });
 });
 
-describe('任务工作流 · 渠道运行中失败停下报人，不再换同一个模型的下一个渠道', { timeout: 60_000 }, () => {
+describe('任务工作流 · model_mismatch 自动换同模型路由，第二次才停下报人', { timeout: 60_000 }, () => {
   const via = (channelId: string): RouteChoice => ({
     routeId: `r-${channelId}`,
     poolId: `p-${channelId}`,
@@ -1337,22 +1337,83 @@ describe('任务工作流 · 渠道运行中失败停下报人，不再换同一
     evidence: { code: 'model_mismatch', message: '回话的不是点名的模型', quotaExhausted: false },
   };
   /** 真选路的样子：按顺序派第一个没被避开的渠道；都用尽就派不出（waitFor none）。 */
-  const channelWorld = (channels: string[], picks: PickRouteInput[]) =>
+  const channelWorld = (
+    channels: string[],
+    picks: PickRouteInput[],
+    modelByChannel: Record<string, string> = {},
+  ) =>
     createFakeWorld({
       route: (i) => {
         picks.push(i);
-        const route = channels.map(via).find((r) => !i.avoidRouteIds.includes(r.routeId));
+        const route = channels
+          .map((channel) => ({ ...via(channel), modelId: modelByChannel[channel] ?? 'm1' }))
+          .find((r) => !i.avoidRouteIds.includes(r.routeId) && (!i.models || i.models.includes(r.modelId)));
         return route
           ? { ok: true, route, why: '测试' }
-          : { ok: false, waitFor: 'none', detail: '这个模型的渠道都用尽了' };
+          : {
+              ok: false,
+              waitFor: 'none',
+              detail: i.models ? `模型 ${i.models.join('、')} 的渠道都用尽了` : '这个模型的渠道都用尽了',
+            };
       },
     });
 
-  it('model_mismatch 先按点名路由重派一次；再对不上就避开这条，还有别的路由就不挂起', async () => {
+  it('【故意造出的失败】连续两次 model_mismatch 才停下报人：只自动换路一次，不换第三条渠道', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = channelWorld(['c1', 'c2', 'c3', 'c4', 'c5'], picks);
+    const { tasks, calls } = scripted({ segment: async () => REJECTED });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '第二次模型对不上，停下等人');
+        expect(s.lastProblem).toBe('回话的模型不是点名的那个：换了一条同档路由仍对不上，停下等人');
+        expect(s.lastProblem).not.toContain('挂起并报警');
+        expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c2']);
+        expect(calls.segment[1]?.resumeSessionId).toBeUndefined();
+        expect(picks).toHaveLength(2);
+        expect(picks[0]?.failedChannel).toBeUndefined();
+        expect(picks[1]?.avoidRouteIds).toEqual(['r-c1']);
+        expect(picks[1]?.models).toEqual(['m1']);
+        expect(picks[1]?.tier).toEqual(picks[0]?.tier);
+        expect(world.alerts[0]).toMatchObject({ level: 'stuck' });
+        expect(calls.segment).toHaveLength(2);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测完了' });
+        return h.result().catch(() => undefined);
+      },
+      { tasks },
+    );
+    expect(calls.segment).toHaveLength(2);
+    expect(world.count('createWorktree')).toBe(1);
+  });
+
+  it('model_mismatch 自动重派成功后不需要点「继续」：不标记 failedChannel', async () => {
     const picks: PickRouteInput[] = [];
     const world = channelWorld(['c1', 'c2'], picks);
     const { tasks, calls } = scripted({
-      segment: async (_i, n) => (n <= 2 ? REJECTED : OK_SEGMENT),
+      segment: async (_i, n) => (n === 1 ? REJECTED : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c2']);
+    expect(calls.segment[1]?.resumeSessionId).toBeUndefined();
+    expect(picks[1]?.failedChannel).toBeUndefined();
+    expect(picks[1]?.avoidRouteIds).toEqual(['r-c1']);
+    expect(picks[1]?.stickRouteId).toBeUndefined();
+    expect(world.count('createWorktree')).toBe(1);
+  });
+
+  it('model_mismatch 重派只找同一个模型的另一条路由，不误派到下一模型', async () => {
+    const picks: PickRouteInput[] = [];
+    const world = channelWorld(['c1', 'c2', 'c3'], picks, { c2: 'm2' });
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 ? REJECTED : OK_SEGMENT),
     });
     const run = await withWorker(
       env,
@@ -1361,62 +1422,11 @@ describe('任务工作流 · 渠道运行中失败停下报人，不再换同一
       { tasks },
     );
     expect(run.outcome).toBe('merged');
-    // c1 对不上两次：第二次仍是点名的 c1（开新会话），第三次才避开 c1 派 c2
-    expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c1', 'c2']);
-    expect(calls.segment.every((s) => s.resumeSessionId === undefined)).toBe(true);
-    // 动手这三次选路：先点名 c1，对不上再钉住 c1 开新会话，再对不上才避开 c1。后面验收选路不在这三下里。
-    expect(picks.slice(0, 3).map((p) => [p.stickRouteId ?? null, p.avoidRouteIds])).toEqual([
-      [null, []],
-      ['r-c1', []],
-      [null, ['r-c1']],
+    expect(calls.segment.map((x) => [x.route.channelId, x.route.modelId])).toEqual([
+      ['c1', 'm1'],
+      ['c3', 'm1'],
     ]);
-    expect(picks.slice(0, 3).every((p) => p.failedChannel === undefined)).toBe(true);
-    expect(world.states.some((s) => s.phase === 'parked')).toBe(false);
-    expect(world.alerts.some((a) => a.level === 'stuck')).toBe(false);
-    expect(world.count('createWorktree')).toBe(1);
-  });
-
-  it('对不上的路由重派过一次、没有别的可派时才挂起；点「继续」后再选，仍不带 failedChannel', async () => {
-    const picks: PickRouteInput[] = [];
-    const world = channelWorld(['c1'], picks);
-    const { tasks, calls } = scripted({
-      segment: async (_i, n) => (n <= 2 ? REJECTED : OK_SEGMENT),
-    });
-    const run = await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, input());
-        const s = await statusUntil(h, parked, '没有还能派的路由，停下等人');
-        expect(s.lastProblem).toContain('没有还能派的路由');
-        expect(s.lastProblem).not.toContain('换同一个模型');
-        expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c1']);
-        expect(calls.segment.every((seg) => seg.resumeSessionId === undefined)).toBe(true);
-        expect(picks.map((p) => [p.stickRouteId ?? null, p.avoidRouteIds])).toEqual([
-          [null, []],
-          ['r-c1', []],
-          [null, ['r-c1']],
-        ]);
-        expect(picks.every((p) => p.failedChannel === undefined)).toBe(true);
-        expect(world.alerts[0]).toMatchObject({
-          level: 'stuck',
-          title: expect.stringContaining('没有还能派的路由'),
-        });
-        const pickCount = picks.length;
-        await new Promise((r) => setTimeout(r, 300));
-        expect(picks).toHaveLength(pickCount);
-        await h.signal(taskContinueSignal, { by: 'frank' });
-        return h.result() as Promise<TaskRun>;
-      },
-      { tasks },
-    );
-    expect(run.outcome).toBe('merged');
-    expect(calls.segment.map((x) => x.route.channelId)).toEqual(['c1', 'c1', 'c1']);
-    const blocked = picks.findIndex((p) => p.avoidRouteIds.includes('r-c1'));
-    expect(picks[blocked + 1]?.failedChannel).toBeUndefined();
-    expect(picks[blocked + 1]?.avoidRouteIds).toEqual([]);
-    expect(picks[blocked + 1]?.stickRouteId).toBeUndefined();
-    expect(world.count('createWorktree')).toBe(1);
+    expect(picks[1]?.models).toEqual(['m1']);
   });
 });
 
