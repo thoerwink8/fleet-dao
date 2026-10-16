@@ -116,6 +116,207 @@ function deliveredKeys(tail, keyOf) {
   return keys;
 }
 
+const INTERRUPTED_BACKGROUND_RE = /did(?:n['’]?t| not) finish before the previous session ended/i;
+const MAX_BACKGROUND_TEXT = 1200;
+
+/** @param {unknown} v */
+function textOf(v) {
+  if (typeof v === 'string') return v;
+  if (!Array.isArray(v)) return '';
+  return v.map((b) => (isObj(b) && b.type === 'text' ? String(b.text ?? '') : '')).join('');
+}
+
+/** @param {string} text */
+function shortBackgroundText(text) {
+  const clean = String(text).replace(/\s+/g, ' ').trim();
+  return clean.length > MAX_BACKGROUND_TEXT ? `${clean.slice(0, MAX_BACKGROUND_TEXT)}……` : clean;
+}
+
+/**
+ * 从 transcript 里找上一会话收场时仍在跑的后台任务。
+ * Claude Code 的任务启动、启动回执和重启通知不是固定一种 JSON 形状，所以这里同时认
+ * Agent/Task/Bash 的 tool_use、回执里的 agentId，以及通知里的 task-id；认不出编号时
+ * 退回 tool_use id，至少给会话一个能定位原调用的编号。
+ * @param {string} tail
+ * @param {unknown} input
+ */
+function interruptedBackgroundTasks(tail, input) {
+  const rawInput = isObj(input) ? JSON.stringify(input) : '';
+  const raw = `${tail}\n${rawInput}`;
+  if (!INTERRUPTED_BACKGROUND_RE.test(raw)) return null;
+
+  /** @type {{ kind: 'agent' | 'command', id: string, ref: string, taskId?: string, description: string, line: number }[]} */
+  const launched = [];
+  const completed = new Set();
+  const stoppedIds = new Set();
+  /** @type {string[]} */
+  const notificationTexts = [];
+  const lines = tail.split('\n');
+
+  /** @param {unknown} value @param {number} line */
+  const inspect = (value, line) => {
+    if (!isObj(value)) return;
+    const content = isObj(value.message) ? value.message.content : undefined;
+    const blocks = Array.isArray(content) ? content : [];
+    for (const block of blocks) {
+      if (!isObj(block) || block.type !== 'tool_use' || !isObj(block.input)) continue;
+      const name = String(block.name ?? '');
+      const spec = block.input;
+      if (spec.run_in_background !== true) continue;
+      const ref = typeof block.id === 'string' && block.id ? block.id : `tool-${line + 1}`;
+      if (name === 'Agent' || name === 'Task') {
+        launched.push({
+          kind: 'agent',
+          id: ref,
+          ref,
+          description: shortBackgroundText(
+            [String(spec.description ?? ''), textOf(spec.prompt)].filter((s) => s.trim() !== '').join('；') ||
+              '（没有任务说明）',
+          ),
+          line,
+        });
+      } else if (name === 'Bash' || name === 'PowerShell' || name === 'Shell') {
+        launched.push({
+          kind: 'command',
+          id: ref,
+          ref,
+          description: shortBackgroundText(
+            String(spec.command ?? spec.script ?? '') || String(spec.description ?? '') || '（没有命令说明）',
+          ),
+          line,
+        });
+      }
+    }
+    const attachment = value.attachment;
+    const attachedText = isObj(attachment) ? textOf(attachment.prompt) : '';
+    const messageText = textOf(content);
+    const notification = `${attachedText}\n${messageText}`;
+    const interrupted = INTERRUPTED_BACKGROUND_RE.test(notification);
+    if (interrupted) notificationTexts.push(notification);
+    const status = notification.match(/<status>\s*([^<]+?)\s*<\/status>/i)?.[1]?.toLowerCase();
+    const taskId = notification.match(/<task-id>\s*([^<]+?)\s*<\/task-id>/i)?.[1]?.trim();
+    if (taskId) {
+      if (interrupted || status === 'stopped' || status === 'canceled' || status === 'cancelled')
+        stoppedIds.add(taskId);
+      else if (status === 'completed' || status === 'succeeded' || status === 'failed' || status === 'error')
+        completed.add(taskId);
+    }
+    if (interrupted)
+      for (const m of notification.matchAll(
+        /(?:agentId|agent_id|taskId|task_id)\s*[:=]\s*["']?([A-Za-z0-9_.-]+)/gi,
+      ))
+        if (m[1]) stoppedIds.add(m[1]);
+  };
+
+  for (let line = 0; line < lines.length; line++) {
+    const text = lines[line] ?? '';
+    let value;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      value = null;
+    }
+    inspect(value, line);
+    // 启动回执通常紧跟 Agent tool_use；把真实 agentId 绑回最近一个尚未编号的代理。
+    const taskId = text.match(/(?:agentId|agent_id|taskId|task_id)\s*[:=]\s*["']?([A-Za-z0-9_.-]+)/i)?.[1];
+    if (taskId) {
+      const pending = [...launched].reverse().find((t) => !t.taskId && t.line <= line);
+      if (pending) pending.taskId = taskId;
+    }
+  }
+
+  if (isObj(input) && Array.isArray(input.background_tasks)) {
+    for (const task of input.background_tasks) {
+      if (!isObj(task)) continue;
+      const kind = task.type === 'shell' || task.type === 'command' ? 'command' : 'agent';
+      const id = String(task.id ?? task.task_id ?? task.agent_id ?? '').trim();
+      if (!id) continue;
+      launched.push({
+        kind,
+        id,
+        ref: id,
+        ...(typeof task.agent_id === 'string' ? { taskId: task.agent_id } : {}),
+        description:
+          shortBackgroundText(
+            kind === 'command'
+              ? [String(task.command ?? ''), String(task.description ?? '')]
+                  .filter((s) => s.trim() !== '')
+                  .join('；')
+              : [String(task.description ?? ''), String(task.prompt ?? '')]
+                  .filter((s) => s.trim() !== '')
+                  .join('；'),
+          ) || '（没有任务说明）',
+        line: Number.MAX_SAFE_INTEGER,
+      });
+    }
+  }
+
+  // 通知若明确列了编号，只保留这些；没有列编号时取未见完成通知的后台启动项。
+  const selected =
+    stoppedIds.size > 0
+      ? launched.filter((t) => stoppedIds.has(t.id) || (t.taskId && stoppedIds.has(t.taskId)))
+      : launched.filter((t) => !t.taskId || !completed.has(t.taskId));
+  const unique = [];
+  const seen = new Set();
+  for (const task of selected) {
+    const id = task.taskId ?? task.id;
+    if (seen.has(`${task.kind}:${id}`)) continue;
+    seen.add(`${task.kind}:${id}`);
+    unique.push({ ...task, id });
+  }
+  if (stoppedIds.size > 0) {
+    const notice = notificationTexts.join('\n');
+    const summary =
+      notice
+        .match(/<summary>\s*([\s\S]*?)\s*<\/summary>/i)?.[1]
+        ?.replace(/\s+/g, ' ')
+        .trim() ?? '（通知里没有找到当时的任务说明）';
+    const kind = /\b(?:Bash|PowerShell|Shell|command)\b/i.test(summary) ? 'command' : 'agent';
+    for (const id of stoppedIds) {
+      if (launched.some((task) => task.id === id || task.taskId === id)) continue;
+      unique.push({ kind, id, ref: id, description: shortBackgroundText(summary), line: 0 });
+    }
+  }
+  const key = JSON.stringify({
+    stopped: [...stoppedIds].sort(),
+    tasks: unique.map((t) => [t.kind, t.id, t.description]),
+    notification: notificationTexts.join('\n').slice(0, 2000),
+  });
+  return { key, tasks: unique };
+}
+
+/**
+ * 重启后 Claude Code 会告诉会话「didn't finish before the previous session ended」。
+ * 把它变成能直接接手的上下文；同一批只提醒一次。
+ * @param {unknown} input
+ * @param {string} tail
+ * @param {Record<string, unknown>} state
+ */
+function interruptedBackgroundContext(input, tail, state) {
+  const found = interruptedBackgroundTasks(tail, input);
+  if (!found || found.key === state.backgroundRestartKey) return null;
+  const agents = found.tasks.filter((t) => t.kind === 'agent');
+  const commands = found.tasks.filter((t) => t.kind === 'command');
+  if (agents.length === 0 && commands.length === 0) {
+    return {
+      key: found.key,
+      text: '上一会话结束时有后台任务没跑完，但没从记录里认出代理编号或命令；请先查看重启通知和 transcript，再决定怎么续。',
+    };
+  }
+  const lines = [
+    '上一会话结束时没跑完、被停掉的后台任务（Claude Code 提示 “didn’t finish before the previous session ended”）：',
+  ];
+  if (agents.length > 0) {
+    lines.push(...agents.map((t) => `子代理编号 ${t.id}：任务说明：${t.description}`));
+    lines.push('请逐个用 SendMessage 按子代理编号续上；不要把已经有的任务凭空再派一遍。');
+  }
+  if (commands.length > 0) {
+    lines.push(...commands.map((t) => `后台命令 ${t.id}：${t.description}`));
+    lines.push('这些后台命令要不要重跑，由本会话判断。');
+  }
+  return { key: found.key, text: lines.join('\n') };
+}
+
 /** 会话号的样子；认不出的不查（Grok 等借道读设置的几家是 camelCase、没有 session_id） @param {unknown} id */
 export const cleanSessionId = (id) => (typeof id === 'string' && /^[\w-]{1,128}$/.test(id) ? id : null);
 
@@ -253,14 +454,33 @@ export async function tick(
   /** @param {Record<string, unknown>} next */
   const save = (next) => saveTickState(dir, sessionId, next);
   // 先记「这次读过」再读：读账慢或半路崩了，也不会每次工具调用都重读
-  save({ checkedAt: now, lastNotice: state.lastNotice, noticeAt: state.noticeAt });
+  save({
+    checkedAt: now,
+    lastNotice: state.lastNotice,
+    noticeAt: state.noticeAt,
+    ...(state.backgroundRestartKey ? { backgroundRestartKey: state.backgroundRestartKey } : {}),
+  });
 
   const r = await pendingSteers({ sessionId, transcriptPath: input.transcript_path, home, env, now, load });
   const shown = r.status === 'checked' ? r.shown : [];
   const noticeText = r.status === 'checked' ? r.notices.join('；') : '';
   const repeated = toldRecently(state, noticeText, now);
-  if (noticeText === '') save({ checkedAt: now });
-  else if (!repeated) save({ checkedAt: now, lastNotice: noticeText, noticeAt: now });
+  const restart =
+    r.status === 'checked'
+      ? interruptedBackgroundContext(
+          input,
+          typeof input.transcript_path === 'string' ? transcriptTail(input.transcript_path) : '',
+          state,
+        )
+      : null;
+  const nextState = {
+    checkedAt: now,
+    ...(state.lastNotice ? { lastNotice: state.lastNotice, noticeAt: state.noticeAt } : {}),
+    ...(noticeText === '' || repeated ? {} : { lastNotice: noticeText, noticeAt: now }),
+    ...(state.backgroundRestartKey ? { backgroundRestartKey: state.backgroundRestartKey } : {}),
+    ...(restart ? { backgroundRestartKey: restart.key } : {}),
+  };
+  save(nextState);
 
   /** @type {string[]} */
   const out = [];
@@ -271,5 +491,6 @@ export async function tick(
     );
   }
   if (noticeText !== '' && !repeated) out.push(noticeText);
+  if (restart) out.push(restart.text);
   return out.length > 0 ? out.join('\n') : null;
 }

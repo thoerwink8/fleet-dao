@@ -204,6 +204,112 @@ describe('轮中发的引导在下一次工具调用后进会话（#2382）', ()
     expect(await tick({ tool_name: 'Bash' }, { home: w.home, env: w.env, now: NOW })).toBeNull();
     expect(await tick('不是对象', { home: w.home, env: w.env, now: NOW })).toBeNull();
   });
+
+  it('上一会话结束时停掉了后台代理：列代理编号和原任务，提示按编号用 SendMessage 续上', async () => {
+    const w = world();
+    const transcript = join(w.home, 'restart.jsonl');
+    writeFileSync(
+      transcript,
+      [
+        {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_agent',
+                name: 'Agent',
+                input: {
+                  description: '查门禁根因',
+                  prompt: '检查 CI 为什么红，并给出修复建议',
+                  run_in_background: true,
+                },
+              },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          message: {
+            content: [
+              { type: 'tool_result', content: 'Async agent launched successfully.\nagentId: agent-42' },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'text',
+                text: "Some background tasks didn't finish before the previous session ended.",
+              },
+            ],
+          },
+        },
+      ]
+        .map((r) => `${JSON.stringify(r)}\n`)
+        .join(''),
+    );
+    const first = await tick(w.input({ transcript_path: transcript }), {
+      home: w.home,
+      env: w.env,
+      now: NOW,
+    });
+    expect(first).toContain('agent-42');
+    expect(first).toContain('检查 CI 为什么红，并给出修复建议');
+    expect(first).toContain('SendMessage');
+    expect(
+      await tick(w.input({ transcript_path: transcript }), { home: w.home, env: w.env, now: NOW + 61_000 }),
+    ).toBeNull();
+  });
+
+  it('上一会话结束时只有后台命令：列出命令，是否重跑留给会话判断', async () => {
+    const w = world();
+    const transcript = join(w.home, 'restart-command.jsonl');
+    writeFileSync(
+      transcript,
+      [
+        {
+          type: 'assistant',
+          message: {
+            content: [
+              {
+                type: 'tool_use',
+                id: 'toolu_bash',
+                name: 'Bash',
+                input: { command: 'pnpm check', description: '跑全套检查', run_in_background: true },
+              },
+            ],
+          },
+        },
+        {
+          type: 'user',
+          message: {
+            content: [{ type: 'tool_result', content: 'Background task started; taskId: cmd-7' }],
+          },
+        },
+        {
+          type: 'user',
+          message: {
+            content: [
+              {
+                type: 'text',
+                text: "Some background tasks didn't finish before the previous session ended.",
+              },
+            ],
+          },
+        },
+      ]
+        .map((r) => `${JSON.stringify(r)}\n`)
+        .join(''),
+    );
+    const out = await tick(w.input({ transcript_path: transcript }), { home: w.home, env: w.env, now: NOW });
+    expect(out).toContain('后台命令 cmd-7');
+    expect(out).toContain('pnpm check');
+    expect(out).toContain('要不要重跑，由本会话判断');
+    expect(out).not.toContain('SendMessage');
+  });
 });
 
 describe('main-thread.mjs 的输出带 additionalContext', () => {
