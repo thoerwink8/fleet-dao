@@ -1,7 +1,7 @@
 // 引擎自测（selfCheck，决定 0093）：以树主人的身份跑仓的测试命令和 tsc；精炼输出；没跑成回 skipped 不抛。
 // test:changed 退出 3（要全跑）时不把测试推给 CI：在整机锁下改跑受影响的包，超时记没过。
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
@@ -287,7 +287,7 @@ describe('受影响包的整机锁', () => {
     try {
       const lockDir = join(dir, 'affected.lock');
       mkdirSync(lockDir);
-      writeFileSync(join(lockDir, 'holder'), `2147483646\n${Date.now()}\n`);
+      writeFileSync(join(lockDir, 'deadbeefdeadbeef'), `2147483646\n${Date.now()}\n`);
       const lock = createAffectedLock(dir, { pollMs: 20, staleMs: 60_000 });
       const release = await lock.acquire(new AbortController().signal);
       await release();
@@ -295,6 +295,66 @@ describe('受影响包的整机锁', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('两个等待者都判定锁过期后，后拆的那个删不掉新锁', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'self-check-lock-'));
+    try {
+      const lockDir = join(dir, 'affected.lock');
+      mkdirSync(lockDir);
+      writeFileSync(join(lockDir, 'deadbeefdeadbeef'), `2147483646\n${Date.now()}\n`);
+      let entered = 0;
+      let releaseBoth = (): void => {};
+      const bothEntered = new Promise<void>((resolve) => {
+        releaseBoth = resolve;
+      });
+      let releaseSecond = (): void => {};
+      const firstHeld = new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      });
+      let removed = 0;
+      let markSecond = (): void => {};
+      const secondRemoved = new Promise<void>((resolve) => {
+        markSecond = resolve;
+      });
+      const lock = createAffectedLock(dir, {
+        pollMs: 10,
+        staleMs: 60_000,
+        beforeRemove: async () => {
+          entered += 1;
+          const mine = entered;
+          if (mine === 2) releaseBoth();
+          if (mine === 1) await bothEntered;
+          else await firstHeld;
+        },
+        afterRemove: () => {
+          removed += 1;
+          if (removed === 2) markSecond();
+        },
+      });
+      const signal = new AbortController().signal;
+      let secondGot = false;
+      const firstP = lock.acquire(signal);
+      const secondP = lock.acquire(signal).then((rel) => {
+        secondGot = true;
+        return rel;
+      });
+      const firstRel = await firstP;
+      releaseSecond();
+      await secondRemoved;
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(secondGot).toBe(false);
+      const name = readdirSync(lockDir)[0];
+      if (name === undefined) throw new Error('新锁被拆掉了');
+      expect(name).not.toBe('deadbeefdeadbeef');
+      expect(readFileSync(join(lockDir, name), 'utf8').startsWith(`${process.pid}\n`)).toBe(true);
+      await firstRel();
+      const secondRel = await secondP;
+      expect(secondGot).toBe(true);
+      await secondRel();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 4_000);
 });
 
 describe('digestOutput', () => {

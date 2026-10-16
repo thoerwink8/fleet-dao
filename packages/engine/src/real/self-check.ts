@@ -12,7 +12,8 @@
 //   要全跑之后改跑受影响包的那次超了记「自测超时」，算没过。
 // - 精炼输出：挑出像失败的行（FAIL、error、×、AssertionError、TSxxxx）再加末尾一段，限 SELF_CHECK_DIGEST_MAX 字。
 
-import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+import { mkdir, readdir, readFile, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
@@ -97,19 +98,15 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-/** 锁目录还算不算被占着。没有 holder、进程已死、或持有超过上限，都当可以拆。 */
-async function lockStale(lockDir: string, staleMs: number): Promise<boolean> {
-  let text: string;
-  try {
-    text = await readFile(join(lockDir, 'holder'), 'utf8');
-  } catch {
-    try {
-      const s = await stat(lockDir);
-      return Date.now() - s.mtimeMs > staleMs;
-    } catch {
-      return true;
-    }
-  }
+function codeOf(e: unknown): string | undefined {
+  return (e as NodeJS.ErrnoException).code;
+}
+
+/** 一代锁的文件名：16 位十六进制。拆锁只删这个名字，不按目录路径整棵删。 */
+const TOKEN_NAME = /^[0-9a-f]{16}$/;
+const PENDING_PREFIX = 'pending-';
+
+function holderStale(text: string, staleMs: number): boolean {
   const [pidRaw, startedRaw] = text.split('\n');
   const pid = Number(pidRaw);
   const started = Number(startedRaw);
@@ -118,50 +115,208 @@ async function lockStale(lockDir: string, staleMs: number): Promise<boolean> {
   return false;
 }
 
+/** 丢掉还没公布的那一代。改名成功之后目录已经不在这个路径上，删不掉别人的锁。 */
+async function discardPending(pending: string, token: string): Promise<void> {
+  try {
+    await unlink(join(pending, token));
+  } catch {
+    // 文件还没写出来，或已经跟着目录改名走了
+  }
+  try {
+    await rmdir(pending);
+  } catch {
+    // 目录已经不在
+  }
+}
+
 /**
- * 整机一把锁：目录 mkdir 是原子的，占着就隔一会儿再试（排队），不跳过。
- * 死进程或持有太久的锁拆掉再占。signal 中止时抛 LockAbort，已经占上的会放掉。
+ * 放掉自己这一代。先删自己的令牌文件：删不到（被人收走了）就不动目录，
+ * 避免把后拿到的新锁整棵删掉。目录空了才 rmdir；里面有下一代的文件时 rmdir 会失败，留下。
+ */
+async function releaseGeneration(lockDir: string, token: string): Promise<void> {
+  try {
+    await unlink(join(lockDir, token));
+  } catch (e) {
+    if (codeOf(e) === 'ENOENT') return;
+    throw e;
+  }
+  try {
+    await rmdir(lockDir);
+  } catch {
+    // 下一代已经放进文件，或目录已经被拆掉
+  }
+}
+
+/** 崩溃留下的 pending-*：过了时限才收。正在公布的那一代是新的，不会被收走。 */
+async function sweepPending(dir: string, staleMs: number): Promise<void> {
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return;
+  }
+  const now = Date.now();
+  for (const name of names) {
+    if (!name.startsWith(PENDING_PREFIX)) continue;
+    const pending = join(dir, name);
+    try {
+      const s = await stat(pending);
+      if (now - s.mtimeMs <= staleMs) continue;
+      for (const child of await readdir(pending)) {
+        await unlink(join(pending, child)).catch(() => undefined);
+      }
+      await rmdir(pending).catch(() => undefined);
+    } catch {
+      // 刚好被主人公布或自己收掉了
+    }
+  }
+}
+
+/**
+ * 过期的那一代拆掉，好让调用方再公布。只 unlink 当时看见的令牌文件名，再 rmdir。
+ * 不 rm 整棵目录：几个等待者都判定过期之后，先拿到新锁的人已经换成了另一个文件名，
+ * 后动手的 unlink 对不上那个名字，删不掉新锁。一次 unlink 都没成功就不 rmdir。
+ */
+async function stealStale(
+  lockDir: string,
+  staleMs: number,
+  hooks: { beforeRemove?: () => Promise<void> | void; afterRemove?: () => Promise<void> | void },
+): Promise<boolean> {
+  let names: string[];
+  try {
+    names = await readdir(lockDir);
+  } catch (e) {
+    if (codeOf(e) === 'ENOENT') return true;
+    throw e;
+  }
+  const tokens = names.filter((name) => TOKEN_NAME.test(name));
+  if (tokens.length === 0) {
+    let s: Awaited<ReturnType<typeof stat>> | undefined;
+    try {
+      s = await stat(lockDir);
+    } catch (e) {
+      if (codeOf(e) === 'ENOENT') return true;
+      throw e;
+    }
+    if (s === undefined || Date.now() - s.mtimeMs <= staleMs) return false;
+    await hooks.beforeRemove?.();
+    try {
+      await rmdir(lockDir);
+    } catch {
+      // 新锁已经放进令牌文件（非空目录删不掉），或目录没了
+      return false;
+    }
+    await hooks.afterRemove?.();
+    return true;
+  }
+  const staleNames: string[] = [];
+  for (const name of tokens) {
+    let text: string;
+    try {
+      text = await readFile(join(lockDir, name), 'utf8');
+    } catch (e) {
+      if (codeOf(e) === 'ENOENT') continue;
+      throw e;
+    }
+    if (holderStale(text, staleMs)) staleNames.push(name);
+  }
+  if (staleNames.length === 0 || staleNames.length !== tokens.length) return false;
+  await hooks.beforeRemove?.();
+  let unlinked = 0;
+  for (const name of staleNames) {
+    try {
+      await unlink(join(lockDir, name));
+      unlinked += 1;
+    } catch (e) {
+      if (codeOf(e) !== 'ENOENT') throw e;
+    }
+  }
+  await hooks.afterRemove?.();
+  if (unlinked === 0) return false;
+  try {
+    await rmdir(lockDir);
+  } catch {
+    // 下一代的令牌文件已经在里面，rmdir 失败就留下
+  }
+  return true;
+}
+
+/**
+ * 把已经写好令牌的私有目录改名成锁目录。改名是原子的：目标里已经有别人的令牌文件时会失败，
+ * 不会盖掉那一把。失败只丢掉自己的 pending，不动锁目录。
+ */
+async function publish(dir: string, lockDir: string, token: string, signal: AbortSignal): Promise<boolean> {
+  try {
+    await stat(lockDir);
+    return false;
+  } catch (e) {
+    if (codeOf(e) !== 'ENOENT') throw e;
+  }
+  const pending = join(dir, `${PENDING_PREFIX}${token}`);
+  let published = false;
+  try {
+    await discardPending(pending, token);
+    await mkdir(pending);
+    await writeFile(join(pending, token), `${process.pid}\n${Date.now()}\n`, { flag: 'wx' });
+    if (signal.aborted) throw new LockAbort();
+    try {
+      await rename(pending, lockDir);
+      published = true;
+      return true;
+    } catch (e) {
+      const code = codeOf(e);
+      if (code === 'EEXIST' || code === 'ENOTEMPTY' || code === 'ENOENT') return false;
+      throw e;
+    }
+  } finally {
+    if (!published) await discardPending(pending, token);
+  }
+}
+
+/**
+ * 整机一把锁：同一时刻只有一个公布成功的目录。占着就隔一会儿再试（排队），不跳过。
+ * 死进程或持有太久的那一代，只按当时看见的令牌文件名拆；signal 中止时抛 LockAbort。
+ * beforeRemove / afterRemove 只给测试把「判定过期」和「真删」拆开。
  */
 export function createAffectedLock(
   dir: string,
-  opts?: { pollMs?: number; staleMs?: number },
+  opts?: {
+    pollMs?: number;
+    staleMs?: number;
+    beforeRemove?: () => Promise<void> | void;
+    afterRemove?: () => Promise<void> | void;
+  },
 ): SelfCheckFullLock {
   const pollMs = opts?.pollMs ?? LOCK_POLL_MS;
   const staleMs = opts?.staleMs ?? LOCK_STALE_MS;
+  const hooks: {
+    beforeRemove?: () => Promise<void> | void;
+    afterRemove?: () => Promise<void> | void;
+  } = {};
+  if (opts?.beforeRemove !== undefined) hooks.beforeRemove = opts.beforeRemove;
+  if (opts?.afterRemove !== undefined) hooks.afterRemove = opts.afterRemove;
   const lockDir = join(dir, 'affected.lock');
   return {
     async acquire(signal: AbortSignal): Promise<() => Promise<void>> {
+      const token = randomBytes(8).toString('hex');
       await mkdir(dir, { recursive: true });
+      await sweepPending(dir, staleMs);
       for (;;) {
         if (signal.aborted) throw new LockAbort();
-        try {
-          await mkdir(lockDir);
-        } catch (e) {
-          const code = (e as NodeJS.ErrnoException).code;
-          if (code !== 'EEXIST') throw e;
-          if (await lockStale(lockDir, staleMs)) {
-            await rm(lockDir, { recursive: true, force: true });
-            continue;
+        if (await publish(dir, lockDir, token, signal)) {
+          if (signal.aborted) {
+            await releaseGeneration(lockDir, token);
+            throw new LockAbort();
           }
-          await sleep(pollMs, signal);
-          continue;
+          let released = false;
+          return async () => {
+            if (released) return;
+            released = true;
+            await releaseGeneration(lockDir, token);
+          };
         }
-        if (signal.aborted) {
-          await rm(lockDir, { recursive: true, force: true });
-          throw new LockAbort();
-        }
-        try {
-          await writeFile(join(lockDir, 'holder'), `${process.pid}\n${Date.now()}\n`);
-        } catch (e) {
-          await rm(lockDir, { recursive: true, force: true });
-          throw e;
-        }
-        let released = false;
-        return async () => {
-          if (released) return;
-          released = true;
-          await rm(lockDir, { recursive: true, force: true });
-        };
+        const stole = await stealStale(lockDir, staleMs, hooks);
+        if (!stole) await sleep(pollMs, signal);
       }
     },
   };
