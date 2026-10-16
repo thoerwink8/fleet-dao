@@ -155,6 +155,8 @@ export interface HarnessOptions {
   releaseRequest?: Deps['releaseRequest'];
   /** 「要你拍」拍完往进度单、任务单留言的替身（#1915）；不给就是没接上。 */
   decisionCommenter?: Deps['decisionCommenter'];
+  /** 「要你拍」选完要本机做的事；不给时删树、重查回「没接上」。 */
+  decisionCapabilities?: Deps['decisionCapabilities'];
   /** 本人 GitHub 身份那一套（#1989）的替身；不给就是没接上（那几个接口回 503）。 */
   githubUser?: Deps['githubUser'];
   /**
@@ -210,6 +212,7 @@ function wire<S extends Store>(
     ...(options.releaseCard ? { releaseCard: options.releaseCard } : {}),
     ...(options.releaseRequest ? { releaseRequest: options.releaseRequest } : {}),
     ...(options.decisionCommenter ? { decisionCommenter: options.decisionCommenter } : {}),
+    ...(options.decisionCapabilities ? { decisionCapabilities: options.decisionCapabilities } : {}),
     ...(options.githubUser ? { githubUser: options.githubUser } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {

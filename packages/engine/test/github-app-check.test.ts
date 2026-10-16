@@ -40,7 +40,14 @@ const openAlert = (dedupeKey: string): AlertRow => ({
 
 interface World {
   deps: GitHubAppCheckDeps;
-  raised: { dedupeKey: string; level: string; title: string; body: string; link?: string | undefined }[];
+  raised: {
+    dedupeKey: string;
+    level: string;
+    title: string;
+    body: string;
+    link?: string | undefined;
+    options?: readonly { action?: { kind: string } | undefined }[] | undefined;
+  }[];
   resolved: { dedupeKey: string; by: string; why: string }[];
   asked: RepoRef[][];
 }
@@ -71,6 +78,7 @@ function world(
           title: input.title,
           body: input.body,
           link: input.link,
+          options: input.options,
         });
       },
       async resolve(input) {
@@ -256,6 +264,8 @@ describe('GitHub 机器人权限自检（每小时对账的一项）', () => {
         link: '/settings',
       });
       expect(w.raised[0]?.title).toContain('先去 GitHub 把两个机器人装到这个仓');
+      expect(w.raised[0]?.options?.length).toBeGreaterThanOrEqual(2);
+      expect(w.raised[0]?.options?.every((o) => o.action !== undefined)).toBe(true);
       const body = w.raised[0]?.body ?? '';
       expect(body).toContain('https://github.com/apps/fleet-dao-agent/installations/new');
       expect(body).toContain('https://github.com/apps/fleet-dao-engine/installations/new');

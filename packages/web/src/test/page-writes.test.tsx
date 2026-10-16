@@ -122,7 +122,8 @@ describe('通知中心：处理了', () => {
     const api = createMockApi({ live: false });
     const resolve = vi.spyOn(api, 'resolveNotification');
     const open = (await api.notifications()).items;
-    const first = open[0];
+    // 要你拍的没有「处理了」（#2353）：挑第一条不是要你拍的
+    const first = open.find((n) => n.level !== 'decision');
     if (!first) throw new Error('假数据里没有待处理的提醒');
     renderApp(<NotificationsPage />, { api });
     await screen.findByText(first.title);
@@ -141,7 +142,7 @@ describe('通知中心：处理了', () => {
     vi.spyOn(api, 'resolveNotification').mockRejectedValueOnce(
       new ApiError(404, 'notification_not_found', '没有这条通知'),
     );
-    const first = (await api.notifications()).items[0];
+    const first = (await api.notifications()).items.find((n) => n.level !== 'decision');
     if (!first) throw new Error('假数据里没有待处理的提醒');
     renderApp(<NotificationsPage />, { api });
     await screen.findByText(first.title);
@@ -157,10 +158,11 @@ describe('通知中心：处理了', () => {
     expect(screen.getByText(first.title)).toBeTruthy();
   });
 
-  test('已经处理过的（含已处理的列表）没有「处理了」按钮：按钮数 == 还没处理的条数', async () => {
+  test('已经处理过的（含已处理的列表）、要你拍的没有「处理了」按钮：按钮数 == 还没处理的非「要你拍」条数', async () => {
     const api = createMockApi({ live: false });
     const all = (await api.notifications({ status: 'all' })).items;
-    const unresolved = all.filter((n) => !n.resolvedAt).length;
+    // 要你拍的只能选一个或写一句（#2353），不给「处理了」
+    const unresolved = all.filter((n) => !n.resolvedAt && n.level !== 'decision').length;
     expect(all.length).toBeGreaterThan(unresolved); // 假数据里确有已处理的，否则这条测不出东西
     renderApp(<NotificationsPage />, { api, route: '/notifications?status=all' });
     await screen.findAllByRole('button', { name: '处理了' });
