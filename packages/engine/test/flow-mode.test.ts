@@ -7,6 +7,7 @@ import {
   createDecideFlowMode,
   type FlowFacts,
   flowBucket,
+  flowStratum,
   isFullFlowModel,
 } from '../src/flow-mode.ts';
 import type { PortContext } from '../src/ports.ts';
@@ -40,18 +41,43 @@ describe('分组边界（chooseFlowMode）', () => {
     expect(got.reason).toContain('flowEligible');
   });
 
-  it('第一期只走 Claude Sonnet 5.5（决定 0105）：别的模型（含 Opus 5.5）三段并写明模型', () => {
-    expect(isFullFlowModel('claude-sonnet-5-5')).toBe(true);
-    expect(isFullFlowModel('claude-sonnet-5-5[1m]')).toBe(true);
-    expect(isFullFlowModel('claude-opus-5-5')).toBe(false);
-    expect(isFullFlowModel('claude-haiku-5-5')).toBe(false);
-    expect(isFullFlowModel('claude-sonnet-5-55')).toBe(false);
-    expect(isFullFlowModel('claude-sonnet-4-7')).toBe(false);
-    expect(isFullFlowModel('gpt-5.5')).toBe(false);
-    const got = chooseFlowMode({ ...base, modelId: 'gpt-5.5' });
-    expect(got).toMatchObject({ mode: 'three', source: 'ineligible' });
-    expect(got.reason).toContain('gpt-5.5');
-    expect(chooseFlowMode({ ...base, modelId: 'claude-opus-5-5' }).mode).toBe('three');
+  it('第一期只走 Claude 5.5（Sonnet 或 Opus，决定 0105）：别的模型三段并写明模型', () => {
+    for (const ok of [
+      'claude-sonnet-5-5',
+      'claude-sonnet-5-5[1m]',
+      'claude-opus-5-5',
+      'claude-opus-5-5[1m]',
+      'Claude-Opus-5-5',
+      ' CLAUDE-SONNET-5-5[1M] ',
+    ]) {
+      expect(isFullFlowModel(ok), ok).toBe(true);
+    }
+    for (const bad of [
+      'claude-sonnet-5',
+      'claude-opus-5',
+      'claude-haiku-5-5',
+      'claude-sonnet-5-55',
+      'claude-opus-5-55',
+      'claude-sonnet-4-7',
+      'gpt-5.5',
+      'grok-5',
+    ]) {
+      expect(isFullFlowModel(bad), bad).toBe(false);
+    }
+    for (const bad of ['gpt-5.5', 'claude-sonnet-5', 'grok-5']) {
+      const got = chooseFlowMode({ ...base, modelId: bad });
+      expect(got).toMatchObject({ mode: 'three', source: 'ineligible' });
+      expect(got.reason).toContain(bad);
+    }
+    expect(chooseFlowMode({ ...base, modelId: 'claude-opus-5-5' }).mode).toBe('full');
+    expect(chooseFlowMode({ ...base, modelId: 'claude-opus-5-5[1m]' }).mode).toBe('full');
+  });
+
+  it('分层字符串是「档位/模型」：strong/opus-5.5，[1m] 不分开，大小写不分', () => {
+    expect(flowStratum('strong', 'claude-opus-5-5')).toBe('strong/opus-5.5');
+    expect(flowStratum('strong', 'claude-opus-5-5[1m]')).toBe('strong/opus-5.5');
+    expect(flowStratum('standard', 'Claude-Sonnet-5-5')).toBe('standard/sonnet-5.5');
+    expect(flowStratum('light', 'gpt-5.5')).toBe('light/gpt-5.5');
   });
 
   it.each([
@@ -115,6 +141,18 @@ describe('分组边界（chooseFlowMode）', () => {
     expect(at(100)).toBe('full');
   });
 
+  it('split：同一层（档位/模型）里按哈希分，split:0 全三段、split:100 全全程', () => {
+    const stratum = flowStratum('strong', 'claude-opus-5-5');
+    for (let i = 0; i < 50; i++) {
+      const f = { ...base, modelId: 'claude-opus-5-5', stratum, issueKey: `acme/widgets#${i}` };
+      expect(chooseFlowMode({ ...f, setting: { kind: 'split', percent: 0 } }).mode).toBe('three');
+      expect(chooseFlowMode({ ...f, setting: { kind: 'split', percent: 100 } }).mode).toBe('full');
+      const bucket = flowBucket(`${stratum}:${f.issueKey}`);
+      expect(chooseFlowMode({ ...f, setting: { kind: 'split', percent: bucket } }).mode).toBe('three');
+      expect(chooseFlowMode({ ...f, setting: { kind: 'split', percent: bucket + 1 } }).mode).toBe('full');
+    }
+  });
+
   it('split：同一张单哈希稳定；换档位分层后桶号跟着变（分层分组）', () => {
     expect(flowBucket('standard:acme/widgets#12')).toBe(flowBucket('standard:acme/widgets#12'));
     const buckets = new Set(
@@ -159,11 +197,17 @@ function world(over: { labels?: string[]; setting?: unknown; profile?: unknown; 
 }
 
 describe('定模式的活动（createDecideFlowMode）', () => {
-  it('开关 full、仓开了：回全程，写一次分组记录（分层是档位）', async () => {
+  it('开关 full、仓开了：回全程，写一次分组记录（分层是档位/模型）', async () => {
     const { decide, written } = world({ setting: 'full' });
     expect(await decide(input, ctx)).toEqual({ mode: 'full', source: 'hash', reason: null });
     expect(written).toEqual([
-      { taskId: input.taskId, mode: 'full', source: 'hash', stratum: 'standard', reason: null },
+      {
+        taskId: input.taskId,
+        mode: 'full',
+        source: 'hash',
+        stratum: 'standard/sonnet-5.5',
+        reason: null,
+      },
     ]);
   });
 
