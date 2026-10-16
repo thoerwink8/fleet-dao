@@ -53,16 +53,31 @@ export interface FastReset {
   minRemaining: number;
 }
 
-export interface RoutingPolicy {
+/**
+ * 按消耗进度排同一模型的几个渠道（#2363，参考广告预算「按进度花」）：每个窗口算落后量 = 已过比例 − 已用比例（shared 的 quotaPace）。
+ */
+export interface PacePolicy {
+  /** 总开关。关掉就回到「快清零往前提」（fastReset）的老排法。 */
+  enabled: boolean;
   /**
-   * 快清零提前：只看这些窗口。周窗、按月 / 按账期的窗口清零时没用完的就作废，所以要赶在清零前用掉。
+   * 落后不少于这个数往前提（剩的反正要作废，越早清零越前），超前不少于这个数往后放（照这个速度清零前就会用完）。
+   * 0.1：创始人给的线；差得不多照人排的，免得读数一抖顺序就翻。
+   */
+  margin: number;
+}
+
+export interface RoutingPolicy {
+  /** 按消耗进度排（开着时代替 fastReset）。5 小时窗不参与排序（它几小时就轮一次），只挡：见 othersMinRemaining。 */
+  pace: PacePolicy;
+  /**
+   * 快清零提前（pace 关着时才用）：只看这些窗口。周窗、按月 / 按账期的窗口清零时没用完的就作废，所以要赶在清零前用掉。
    * 不看 5 小时窗：它几小时就轮一次，真正卡人的是周窗；拿 5 小时窗提前会让顺序每小时抖一次，还会替周窗多烧额度。
    * 周窗 24 小时 / 剩 30%：24 小时是创始人举的例子；剩 30% 以上才值得插队，少于这个数的快清零池本来就会被自然用完。
    * 月窗 / 账期 48 小时 / 剩 20%：账期长，剩两成就是不小的一笔钱。
    */
   fastReset: Partial<Record<QuotaWindowKind, FastReset>>;
   /**
-   * 快清零提前还要求：这条路由的其余适用窗口都还剩不少于这个比例、而且都读成了。
+   * 快清零提前（按进度落后往前提同样）还要求：这条路由的其余适用窗口都还剩不少于这个比例、而且都读成了。
    * 这是「不会把快用满的池顶到最前」的保证：周窗快清零、但 5 小时窗已经用了九成的池不提前（派过去也跑不完）。
    */
   othersMinRemaining: number;
@@ -118,6 +133,7 @@ export interface TrackScorePolicy {
 }
 
 export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<RoutingPolicy>({
+  pace: { enabled: true, margin: 0.1 },
   fastReset: {
     '7d': { withinHours: 24, minRemaining: 0.3 },
     '7d_model': { withinHours: 24, minRemaining: 0.3 },
@@ -149,10 +165,11 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
 
 /** 缺的取默认值，给了但不对的报错。 */
 export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingPolicy {
-  // fastReset 整张换（换了就能去掉某种窗口）；needPerTask 按项合并，只改给了的那几项。
+  // fastReset 整张换（换了就能去掉某种窗口）；needPerTask、pace 按项合并，只改给了的那几项。
   const p: RoutingPolicy = {
     ...DEFAULT_ROUTING_POLICY,
     ...(partial ?? {}),
+    pace: { ...DEFAULT_ROUTING_POLICY.pace, ...partial?.pace },
     needPerTask: { ...DEFAULT_ROUTING_POLICY.needPerTask, ...partial?.needPerTask },
   };
   const bad = (key: string, want: string, got: unknown) =>
@@ -162,6 +179,8 @@ export function resolveRoutingPolicy(partial?: Partial<RoutingPolicy>): RoutingP
       throw bad(key, zeroOk ? ' 0 到 1 之间的数' : '大于 0、不超过 1 的数', v);
     }
   };
+  if (typeof p.pace.enabled !== 'boolean') throw bad('pace.enabled', ' true 或 false', p.pace.enabled);
+  ratio('pace.margin', p.pace.margin, { zeroOk: false });
   for (const [kind, f] of Object.entries(p.fastReset)) {
     if (f === undefined) continue;
     if (typeof f.withinHours !== 'number' || !Number.isFinite(f.withinHours) || f.withinHours <= 0) {

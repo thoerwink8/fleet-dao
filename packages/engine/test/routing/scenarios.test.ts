@@ -25,10 +25,11 @@ describe('两个 Claude 池：一个快清零，一个刚清零', () => {
     ],
   });
 
-  it('先用快清零的拼车号，理由写清几点清零、还剩多少', () => {
+  it('先用快清零的拼车号，理由写清按时间该用、实际用了多少、几点清零（#2363 按消耗进度）', () => {
     const r = chooseRoute(input([soloFresh, carpoolSoon], { stage: 'triage' }));
     expect(r).toMatchObject({ kind: 'dispatch', routeId: 'carpool-opus' });
-    if (r.kind === 'dispatch') expect(r.why).toContain('拼车号周额度 20 小时后清零、还剩 60%，提到最前');
+    if (r.kind === 'dispatch')
+      expect(r.why).toContain('拼车号周额度按时间该用 88%、实际用了 40%，落后 48%、20 小时后清零，提到最前');
   });
 
   it('不分轻活重活：写码、审查也先用快清零的拼车号（#59 删掉了「拼车号是备池、只接轻活」）', () => {

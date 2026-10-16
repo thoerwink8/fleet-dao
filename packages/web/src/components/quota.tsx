@@ -1,3 +1,4 @@
+import { type QuotaPace, quotaPace } from '@fleet-dao/shared';
 import type { QuotaWindowView } from '../api/types';
 import {
   formatUtil,
@@ -265,6 +266,21 @@ export function QuotaCell({ w, now }: { w: QuotaWindowView; now: number }) {
 }
 
 /**
+ * 这个窗口的消耗进度（#2363，和选路同一份算法 shared 的 quotaPace）：读数过期、上游没报、用量或清零时刻没读到时算不出，返回 undefined。
+ */
+export function paceOf(w: QuotaWindowView, now: number): QuotaPace | undefined {
+  if (w.stale || w.staleSince) return undefined;
+  return (
+    quotaPace({ window: w.window, label: w.label, used: utilOf(w), resetsAt: w.resetsAt }, now) ?? undefined
+  );
+}
+
+/** 「按时间该用 62%，实际 75%」；窗口长度推不出、按 30 天估的补「（按 30 天估）」。 */
+export function paceText(p: QuotaPace): string {
+  return `按时间该用 ${formatPercent(p.elapsed)}，实际 ${formatPercent(p.used)}${p.estimated ? '（按 30 天估）' : ''}`;
+}
+
+/**
  * 额度页账号池里一个窗口的一格（#1805）：一行字（已用 / 上限 · 几时清零 · 来源）加一根细进度条，数字等宽。
  * 比 QuotaCell 少的说明（先用它、快用完、读数过期、上游状态……）收进悬停提示，颜色和小标记照样在：
  * 先用它铺淡底、清零时刻加粗，快用完红字，读数过期换「读数过期」牌。窗口名只在窄屏（表头藏起来的时候）或有额外信息（模型组、上游自报名）时写。
@@ -278,6 +294,7 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
   const pair =
     w.used !== undefined && w.limit !== undefined ? amountPair(w, w.used, w.limit).split(' / ') : null;
   const extraLabel = Boolean(w.scope) || w.window === 'other';
+  const pace = paceOf(w, now);
   const notes = [
     hot && util !== undefined ? `快清零还剩 ${formatPercent(1 - util)}，先用它` : null,
     full ? '快用完了，调度会先绕开' : null,
@@ -294,6 +311,9 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
   // 点一下弹出这一格的说明（#1820）：原来只挂在悬停提示（title）上，手机没有悬停所以看不到。电脑上悬停提示照旧。
   const popNotes = [
     ...notes,
+    pace && w.window !== '5h'
+      ? `${paceText(pace)}：同一模型的几个渠道里，用得比时间慢 10% 以上的调度先用，快 10% 以上的往后放`
+      : null,
     `读法：${w.source}（${w.reading === 'measured' ? '从官方或网页接口读到的' : '读不到，按我们自己的用量估的'}）`,
     windowRawNote(w),
     w.statusRaw && w.upstreamStatus && w.upstreamStatus !== 'allowed' ? `上游原话：${w.statusRaw}` : null,
@@ -374,6 +394,18 @@ export function QuotaLine({ w, now }: { w: QuotaWindowView; now: number }) {
               <span className="shrink-0 text-meta text-muted-foreground">按本机用量估算</span>
             ) : null}
           </div>
+          {/* 消耗进度一行（#2363）：和选路同一份算法；超出时间进度 10% 以上的标黄（选路往后放；5 小时窗不参与排序，不标）。 */}
+          {pace ? (
+            <div
+              data-quota-pace
+              className={cn(
+                'num mt-0.5 min-w-0 break-words text-meta text-muted-foreground',
+                w.window !== '5h' && pace.behind <= -0.1 && 'text-ink-stall',
+              )}
+            >
+              {paceText(pace)}
+            </div>
+          ) : null}
         </button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-auto max-w-xs space-y-1.5 text-body" data-quota-notes>

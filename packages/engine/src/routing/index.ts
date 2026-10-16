@@ -8,9 +8,10 @@ export {
   DEFAULT_ROUTING_POLICY,
   type FastReset,
   HOST_ABILITIES,
+  type PacePolicy,
   type RoutingPolicy,
   resolveRoutingPolicy,
   STAGE_NEEDS,
 } from './policy.ts';
-export { fastResetHit, poorRecord } from './rank.ts';
+export { fastResetHit, type PaceHit, paceHit, poorRecord } from './rank.ts';
 export * from './types.ts';
