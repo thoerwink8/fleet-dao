@@ -1,7 +1,8 @@
 // 发版命令行薄壳（release-train-lib.mjs）：往法国递一份和驾驶舱同格式的请求，再跟着进度读到结束。
 // 九步在法国接活脚本里，这里不再测。ssh、睡眠是假的（sleep 只把时间往前拨）。
 // 法国在跑会话数的只读查询仍在这个文件里测（france-sessions-query.mjs / france-sessions-lib.mjs）。
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -277,6 +278,49 @@ describe('薄壳：递请求、跟着法国进度', () => {
     expect(w.out.join('\n')).not.toContain('发后体检通过');
   });
 
+  it('孤立暂停标记的撤销只改 last-request：进度文件还是上一趟也算做完，退出码 0，不等到超时', async () => {
+    const prev = {
+      schema: 1,
+      status: 'done',
+      phase: 8,
+      waiting: null,
+      why: '上一趟做完了',
+      check: { ok: true, items: [], at: '2026-10-16T04:00:00.000Z' },
+    };
+    const why = '没有在走的一趟：暂停标记是留下来的，已清；引擎总开关没动';
+    const { w, io } = world({
+      frames: [
+        frame(prev, { v: 1, outcome: 'done', sha: SHA, by: 'cockpit', why: '上一趟做完了' }),
+        frame(prev, { v: 1, outcome: 'accepted', sha: null, by: 'commander', kind: 'abort', why: null }),
+        frame(prev, { v: 1, outcome: 'aborted', sha: null, by: 'commander', kind: 'abort', why }),
+      ],
+    });
+    const code = await train.runTrain(['abort'], io());
+    expect(code).toBe(0);
+    expect(w.out.join('\n')).toContain(why);
+    expect(w.err.join('\n')).not.toContain('还没看到这一趟结束');
+    expect(w.out.join('\n')).not.toContain('发后体检通过');
+    expect(w.t - T0).toBeLessThan(60_000);
+  });
+
+  it('刚写上 accepted、进度还是上一趟的做完了：不当成这次成功', async () => {
+    const prev = {
+      schema: 1,
+      status: 'done',
+      phase: 8,
+      waiting: null,
+      why: null,
+      check: { ok: true, items: [], at: '2026-10-16T04:00:00.000Z' },
+    };
+    const { w, io } = world({
+      frames: [frame(prev, null), frame(prev, accepted)],
+    });
+    const code = await train.runTrain(start, io());
+    expect(code).toBe(2);
+    expect(w.err.join('\n')).toContain('还没看到这一趟结束');
+    expect(w.out.join('\n')).not.toContain('做完了');
+  });
+
   it('ssh 失败照实报没成：退出码 2，不说做完了', async () => {
     const { w, io } = world({
       ssh: () => ({
@@ -292,6 +336,74 @@ describe('薄壳：递请求、跟着法国进度', () => {
     expect(err).toContain('Connection reset by peer');
     expect(w.out.join('\n')).not.toContain('做完了');
     expect(w.out.join('\n')).not.toContain('已写到法国');
+  });
+
+  it('status：进度文件读失败回 2，不说没有发版在走', async () => {
+    const { w, io } = world({
+      ssh: () => ({ status: 1, stdout: '---TRAIN---\n', stderr: 'cat: Permission denied' }),
+    });
+    const code = await train.runTrain(['status'], io());
+    expect(code).toBe(2);
+    expect(w.err.join('\n')).toContain('Permission denied');
+    expect(w.out.join('\n')).not.toContain('没有发版在走');
+  });
+});
+
+/** 把读进度命令里的两份绝对路径换成临时目录，真的用 sh 跑一遍。 */
+function runReadCommand(dir: string): CmdResult {
+  const cmd = train
+    .readProgressCommand()
+    .replaceAll(train.TRAIN_FILE, join(dir, 'release-train.json'))
+    .replaceAll(train.LAST_FILE, join(dir, 'last-request.json'));
+  const r = spawnSync('sh', ['-c', cmd], { encoding: 'utf8' });
+  return { status: r.status, stdout: r.stdout ?? '', stderr: r.stderr ?? '' };
+}
+
+describe('读进度命令：没有文件是空，读不了照实失败', () => {
+  it('命令不吞 cat 的错误；缺文件退出码 0 且两份都是空；在但读不了退出码不是 0', () => {
+    expect(train.readProgressCommand()).not.toContain('2>/dev/null');
+    expect(train.readProgressCommand()).not.toContain('|| true');
+
+    const empty = freshHome();
+    const missing = runReadCommand(empty);
+    expect(missing.status).toBe(0);
+    expect(missing.stderr).toBe('');
+    expect(train.parseProgressReply(missing.stdout)).toMatchObject({ ok: true, train: null, last: null });
+
+    const okDir = freshHome();
+    writeFileSync(
+      join(okDir, 'release-train.json'),
+      `${JSON.stringify({ schema: 1, status: 'running', phase: 0 })}\n`,
+    );
+    writeFileSync(
+      join(okDir, 'last-request.json'),
+      `${JSON.stringify({ v: 1, outcome: 'accepted', by: 'commander' })}`,
+    );
+    const present = runReadCommand(okDir);
+    expect(present.status).toBe(0);
+    expect(train.parseProgressReply(present.stdout)).toMatchObject({
+      ok: true,
+      train: { status: 'running', phase: 0 },
+      last: { outcome: 'accepted' },
+    });
+
+    const denied = freshHome();
+    const blocked = join(denied, 'release-train.json');
+    writeFileSync(blocked, '{}\n');
+    chmodSync(blocked, 0o000);
+    const unreadable = runReadCommand(denied);
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      expect(unreadable.status).toBe(0);
+    } else {
+      expect(unreadable.status).not.toBe(0);
+      expect(unreadable.stderr).toMatch(/Permission denied|权限不够/);
+    }
+
+    const dirFile = freshHome();
+    mkdirSync(join(dirFile, 'release-train.json'));
+    const notAFile = runReadCommand(dirFile);
+    expect(notAFile.status).not.toBe(0);
+    expect(notAFile.stderr).toMatch(/Is a directory|是目录/);
   });
 });
 

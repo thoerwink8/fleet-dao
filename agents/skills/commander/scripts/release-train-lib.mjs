@@ -9,8 +9,10 @@
 //   法国 parseRequest 才认：发布不带 kind（缺省就是 release），retry 带提交号，restore / abort 不带。
 //   by 固定写 commander。先写临时文件再 ln 到 request.json，已经有一份就失败，不盖掉。
 // - 进度以法国那两份文件为准，不在本机记一趟。上一份还在文件里时，要看到 last-request.json 变了、
-//   而且对得上这一次的种类和提交，才算这一趟；release-train.json 也得变过，才信里面的状态
-//   （刚写上 accepted、进度文件还是上一趟时，不把上一趟的「做完了」当成这次的）。
+//   而且对得上这一次的种类和提交，才算这一趟。release-train.json 没变时，不拿里面上一趟的状态当这次的
+//   （刚写上 accepted 时，不把上一趟的「做完了」当成这次的）。例外：撤孤立的暂停标记时法国只写
+//   last-request.json（outcome aborted），故意不写进度文件，这时以这份结局为准。
+// - 读进度：文件不存在当成空；文件在但读不了（权限不够等）整条命令失败，不当成没有发版。
 // - 退出码和法国接活脚本一致：0 做完了（发后体检通过，或 abort 做完了）；1 用法不对或被拒；
 //   2 没做成（ssh 失败、读不到、命令失败）；3 卡住（进度是 blocked，或做完了但发后体检没通过）。
 // - 打出来的字过 scrubText。提交号只印前 12 位（整串 40 位会被抹成「长串」）。ssh 的名字不进输出。
@@ -101,16 +103,12 @@ export function writeRequestCommand(text) {
   ].join('; ');
 }
 
-/** 一次 ssh 把两份进度文件都读回来。缺文件当成空，不当成失败。 */
+/** 一次 ssh 把两份进度文件都读回来。没有这份文件当成空；在、但读不了就让整条命令失败。 */
 export function readProgressCommand() {
   // 两份文件中间多打一个空行：文件本身不以换行结尾时，---LAST--- 也独占一行，解析才切得开。
-  return [
-    "echo '---TRAIN---'",
-    `cat ${shq(TRAIN_FILE)} 2>/dev/null || true`,
-    'echo',
-    "echo '---LAST---'",
-    `cat ${shq(LAST_FILE)} 2>/dev/null || true`,
-  ].join('; ');
+  // 不把 cat 的错误丢掉：权限不够和文件不存在都是退出码 1，丢掉 stderr 就会被 status 当成没有发版。
+  const read = (file) => `if [ -e ${shq(file)} ]; then cat ${shq(file)} || exit 1; fi`;
+  return ["echo '---TRAIN---'", read(TRAIN_FILE), 'echo', "echo '---LAST---'", read(LAST_FILE)].join('; ');
 }
 
 function parseJsonObject(text) {
@@ -232,8 +230,11 @@ async function follow(io, kind, sha, base) {
     const trainChanged = view.trainText !== base.trainText;
     if (lastChanged && matchesRequest(view.last, kind, sha)) {
       if (view.last.outcome === 'refused') return report(io, { code: 1, why: view.last.why || '被拒' });
-      // 进度文件还是上一趟的：先不信。等法国把这一趟写进去。
-      if (trainChanged) {
+      // 进度文件还是上一趟的：不拿它的状态当这次的。孤立暂停标记的撤销只写 last-request
+      // （outcome aborted，runAbort 里 push 的 persist 是 false），进度文件故意不动，这里就算做完。
+      if (!trainChanged) {
+        if (view.last.outcome === 'aborted') return report(io, { code: 0, why: view.last.why || '已撤销' });
+      } else {
         const line = describeProgress(view.train);
         if (line && line !== lastLine) {
           sayTo(io, line);
