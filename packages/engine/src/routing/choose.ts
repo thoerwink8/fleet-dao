@@ -67,6 +67,11 @@ function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
   const rows = [...input.order]
     .sort((a, b) => a.position - b.position)
     .map((entry) => ({ route: factsOf.get(entry.routeId) as RouteFacts, entry }));
+  // 挡因先算（只看路由自己和这一单，不看排序）：强档让不让位只看没被硬挡的渠道（#2724：人关掉的路由持平不能拦住让位）
+  const blocksOf = new Map(rows.map(({ route, entry }) => [route.routeId, blocksFor(route, entry, ctx)]));
+  const hardBlocked = new Set(
+    [...blocksOf].flatMap(([id, blocks]) => (groupOf(blocks).kind === 'hard' ? [id] : [])),
+  );
   const scores = scoresOf(input, ctx);
   const ranked = rank(
     rows,
@@ -75,10 +80,10 @@ function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
     ctx.now,
     scores,
     STAGE_NAMES[input.stage],
-    strengthOf(input, ctx, scores),
+    strengthOf(input, ctx, scores, hardBlocked),
   );
   return ranked.map((item) => {
-    const blocks = blocksFor(item.route, item.entry, ctx);
+    const blocks = blocksOf.get(item.route.routeId) ?? [];
     return { item, blocks, group: groupOf(blocks) };
   });
 }
@@ -108,6 +113,7 @@ function strengthOf(
   input: ChooseRouteInput,
   ctx: FilterContext,
   scores: ReadonlyMap<string, ModelScore> | undefined,
+  hardBlocked: ReadonlySet<string>,
 ): StrengthOptions | undefined {
   const { trackScore: ts, strength: st } = ctx.policy;
   const tier = input.tier;
@@ -121,7 +127,7 @@ function strengthOf(
           samples: new Map([...scores].map(([m, s]) => [m, s.track.tasks])),
         }
       : null;
-  return { tier, strongFirst: st.strongFirstTiers.includes(tier), explore };
+  return { tier, strongFirst: st.strongFirstTiers.includes(tier), explore, hardBlocked };
 }
 
 const isPoor = (j: Judged) => j.item.nudges.some((n) => n.kind === 'poor-one-round');

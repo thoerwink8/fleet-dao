@@ -48,7 +48,10 @@ export const nodeMeterFs: MeterFs = {
   },
 };
 
-/** 要读的一次会话：会话号（<执行体>:<uuid>）和这一笔的起止（毫秒）。续跑的会话号会在别的笔里再出现，只认这段时间里发出的调用。 */
+/**
+ * 要读的一次会话：会话号（<执行体>:<uuid>）和这一笔的起止（毫秒，两头都含）。续跑的会话号会在别的笔里再出现，只认这段时间里发出的调用。
+ * 终点由调用方定：同一会话下一笔的起点，和这一笔 ended_at 加宽限，取更早的那个（meterWindowUntil）。会话被叫停后还在跑完的调用落在这段里。
+ */
 export interface MeterWindow {
   sessionKey: string;
   since: number;
@@ -64,6 +67,19 @@ export const METER_EARLY_MS = 5_000;
 function windowStart(window: MeterWindow): number {
   const early = window.since - METER_EARLY_MS;
   return window.notBefore === undefined ? early : Math.max(early, window.notBefore + 1);
+}
+
+/** 叫停之后还在跑完的调用，最多再认这么久（没有下一笔把窗口封上时）。 */
+export const METER_TAIL_GRACE_MS = 2 * 60_000;
+
+/**
+ * 一笔计费窗口的终点（含这一毫秒）：同一会话下一笔的起点，和 endedAt 加宽限，取更早的那个。
+ * 下一笔从它的起点算起（含这一毫秒），所以这一笔收到它之前，同一刻不进两笔。没有下一笔、或下一笔比宽限还晚：终点是 endedAt 加宽限。
+ */
+export function meterWindowUntil(endedAt: number, nextStartedAt: number | null): number {
+  const graceEnd = endedAt + METER_TAIL_GRACE_MS;
+  if (nextStartedAt === null || !Number.isFinite(nextStartedAt) || nextStartedAt > graceEnd) return graceEnd;
+  return nextStartedAt - 1;
 }
 
 /** 读齐了的一次会话的用量。 */
@@ -90,6 +106,8 @@ export type MeterReading =
   | { state: 'unknown'; detail: string; noBilledCalls?: true };
 
 const NO_BILLED_CALLS = 'Mirasim 用量账本里没有这个会话在这一笔起止之间的计费调用';
+/** 兼容补记任务对「账本里没有调用」的固定文案引用。 */
+export const METER_NO_CALLS_DETAIL = NO_BILLED_CALLS;
 
 const USAGE_FILE = /^usage-(\d{4})-(\d{2})\.ndjson$/;
 const UUID = /^[0-9a-f-]{36}$/i;

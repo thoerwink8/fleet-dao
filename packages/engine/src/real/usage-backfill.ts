@@ -8,10 +8,12 @@ import { type MeterFs, readMirasimMeter, type SessionUser } from '@fleet-dao/ada
 import {
   annotateSessionlessRuns,
   type Db,
+  fillRunMeterTail,
   fillRunUsageFromMeter,
   finishScheduleRun,
   noteRunUsage,
   runsAwaitingMeter,
+  runsAwaitingMeterTail,
   runsGaveUpAwaitingReread,
   startScheduleRun,
 } from '@fleet-dao/db';
@@ -40,11 +42,13 @@ export function usageBackfillJob(w: UsageBackfillWiring): () => UsageBackfillJob
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   return () => ({
     pending: (input) => runsAwaitingMeter(w.db, input),
+    tails: (input) => runsAwaitingMeterTail(w.db, input),
     rereads: (input) => runsGaveUpAwaitingReread(w.db, input),
     readMeter: (windows) =>
       readMirasimMeter(w.meterDir(w.user), windows, w.meterFs(w.user), w.trafficDir(w.user)),
     fill: (runId, usage, at, note) =>
       fillRunUsageFromMeter(w.db, { runId, usage, at, ...(note !== undefined ? { note } : {}) }),
+    fillTail: (runId, add, note, at) => fillRunMeterTail(w.db, { runId, at, note, ...(add ? { add } : {}) }),
     note: (runId, note, at) => noteRunUsage(w.db, { runId, note, at }),
     annotateSessionless: (endedAfter, at) => annotateSessionlessRuns(w.db, { endedAfter, at }),
     runs: {
