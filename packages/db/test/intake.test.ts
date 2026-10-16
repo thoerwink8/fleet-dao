@@ -1,7 +1,13 @@
 // 引擎拉单从库里读的两样（queries/intake.ts）：受管的仓带开关、一张单的任务行状态。
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { findRepoProfile, listIntakeRepos, setRepoProfile, taskStateByIssue } from '../src/queries/intake.ts';
+import {
+  findRepoProfile,
+  listIntakeRepos,
+  registerRepo,
+  setRepoProfile,
+  taskStateByIssue,
+} from '../src/queries/intake.ts';
 import { auditLog, repos } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, ago, DAY } from './helpers.ts';
@@ -123,5 +129,44 @@ describe('仓档案（findRepoProfile、setRepoProfile，#2738）', () => {
         reason: 'x',
       }),
     ).toBe('not_found');
+  });
+});
+
+describe('登记仓（registerRepo，#2749）', () => {
+  const actor = { kind: 'ops', id: 'ops:project' } as const;
+  const reg = (over: Partial<Parameters<typeof registerRepo>[1]> = {}) =>
+    registerRepo(t.db, {
+      owner: 'acme',
+      name: 'flux',
+      githubId: 1418484822,
+      defaultBranch: 'main',
+      actor,
+      reason: 'x',
+      ...over,
+    });
+
+  it('没有就建一行（接活关着、档案空、带仓号），记操作记录；再登记一遍不改不记', async () => {
+    expect(await reg()).toMatchObject({ outcome: 'created' });
+    const row = await findRepoProfile(t.db, 'acme', 'flux');
+    expect(row).toMatchObject({
+      githubId: 1418484822,
+      autoDispatchSince: null,
+      profile: {},
+      defaultBranch: 'main',
+    });
+    expect(await reg()).toMatchObject({ outcome: 'unchanged' });
+    const audits = await t.db.select().from(auditLog).where(eq(auditLog.action, 'repo.register'));
+    expect(audits).toHaveLength(1);
+  });
+
+  it('老行没有仓号：补上仓号；仓号对不上、或这个号已经在别的名字上（改名了）：拒，什么都不改', async () => {
+    await addRepo(t.db, 'flux');
+    expect(await reg()).toMatchObject({ outcome: 'updated' });
+    expect((await findRepoProfile(t.db, 'acme', 'flux'))?.githubId).toBe(1418484822);
+    expect(await reg({ githubId: 5 })).toMatchObject({ outcome: 'conflict' });
+    const renamed = await reg({ name: 'flux-new' });
+    expect(renamed).toMatchObject({ outcome: 'conflict' });
+    if (renamed.outcome === 'conflict') expect(renamed.why).toContain('acme/flux');
+    expect(await findRepoProfile(t.db, 'acme', 'flux-new')).toBeNull();
   });
 });

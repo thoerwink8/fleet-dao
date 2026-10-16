@@ -13,7 +13,22 @@ name: merge-gate
 #   判法收紧了，旧的 success 不会自己变——所以把开着的 PR 全重算一遍（第二意见 #656 第 2 轮）。
 #   paths 要盖住判法 import 到的每一个文件，packages/conventions/test/merge-gate-inputs.test.ts 钉着：以后给闸多引一个文件却忘了列在这里会红。
 # 用 GITHUB_TOKEN 写的状态不会再触发 status 事件，不会自己转圈。也能在 Actions 页手动跑（填 PR 号，留空算所有开着的）。
+# 可复用（#2749，design 15.7 第 9 条「CI 用可复用工作流，引用 fleet-dao 里的那份」）：别的仓用 workflow_call 引它，
+# 触发、权限由引用方写（pnpm project add 开的补齐 PR 里那份）。要算的仓一律取 github.repository（被引用时就是引用方的仓）；
+# 判法的代码从 standard-repo 检出（引用方填判法所在的仓，本仓自己跑时留空＝本仓），所以这里不写死哪个仓。
 on:
+  workflow_call:
+    inputs:
+      standard-repo:
+        description: 判法所在的仓（owner/名字）；留空＝就是本仓
+        type: string
+        required: false
+        default: ''
+      standard-ref:
+        description: 判法检出哪个分支；留空＝那个仓的默认分支
+        type: string
+        required: false
+        default: ''
   pull_request_target:
     # 头变了（opened、reopened、synchronize）、正文改了（edited：改标准的 PR 补上创始人原话要重算，不然闸一直红）时重算；
     # 草稿、冲突、标签、里程碑不是输入（#654），它们变了触发的运行多半被下面的排队组顶掉（70 次里 43 次），白占一个检查位。
@@ -54,8 +69,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      # 默认检出触发分支（pull_request_target 也是主线），判法和改标准的路径清单都用主线上的：PR 改不了自己的门槛
+      # 默认检出触发分支（pull_request_target 也是主线），判法和改标准的路径清单都用主线上的：PR 改不了自己的门槛。
+      # 被别的仓引用时检出判法所在的仓（standard-repo），不检出引用方的代码
       - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.standard-repo || github.repository }}
+          ref: ${{ inputs.standard-ref }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22

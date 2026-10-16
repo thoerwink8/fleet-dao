@@ -942,6 +942,8 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
   ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'cd /tmp && sudo bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api project set-profile <owner>/<仓名> --file -' < profile.json   # 整份换掉；- 读标准输入
   ```
   形状不对（不是 JSON、认不出的键、值不对）就拒、库不动，退出码 2；库里只存显式写了的项，缺的项由读的人补默认值。写了 `testCommand` 的，`repos.test_command` 一起改。改了就在同一个事务里记一条操作记录（`repo.profile.set`，target `repo:<仓的 id>`，来源 ops，before / after 是档案原文），改完读回对得上才打印「已改」；和库里一样不改不记。退出码：0 做成了或本来就是；1 库里没这个仓、库出错、读回对不上；2 参数或档案形状不对。
+  `fleet-api project register <owner>/<仓名> --github-id <仓号> [--default-branch <分支>]`（#2749）登记一个仓：认仓认 GitHub 仓号，没有就建一行（接活关着、档案空），老行没仓号就补上，一样的不改不记；仓号对不上或这个号已经登记在别的名字上（改名、转主人）拒，退出码 1。操作记录 `repo.register`。
+- **加新项目**（#2749）：在本机 `pnpm project add <owner>/<仓>` 一条命令做到底，七步每步先查、再补、再核，可重复跑：登记（经 ssh 调上面的 `project register`）→ 本机 gh 令牌走单仓接口 `PUT /user/installations/{安装号}/repositories/{仓号}` 装两个 App（安装号按 owner 记在 `packages/conventions/github-apps.json`；owner 下还没装过的先在网页装一次再补进去）→ 照本仓 GitHub 上的标签同步流程标签 → 探测并写入仓档案（只补没写的项）→ 开补齐 PR（AGENTS.md、四节单模板、引用本仓可复用的 `merge-gate.yml`、`close-on-merge.yml`）→ 跑 `pnpm project check`，全绿才 `fleet-api dispatch <仓> on` → 开冒烟单「冒烟：fleet-dao 接活打通」。补齐 PR 没合时停在第 6 步、接活不开，合了再跑一遍。`pnpm project check <owner>/<仓>` 只读，前五项各查一遍：退出码 0 全绿，1 有没过的，2 没查成（法国、GitHub 读不到）。
 - **关着开关时点名派单**（`fleet-api dispatch-issue`，母单 #1335 第 2 片、#1337；创始人 2026-10-08：「如果按钮不开，可以本机操纵vps派单」「按推荐」）：项目的「让 AI 接活」关着时，本机（指挥官）把某一张单立刻交给法国引擎，不用先把开关打开（打开会让引擎同时去拉别的单）。
 
   ```

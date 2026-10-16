@@ -3,13 +3,15 @@
 //   project set-profile <owner/仓名> --file <json 文件|->：整份换掉档案。- 读标准输入（本机经 ssh 调时用它，文件不用先传到法国）。
 //     形状不对（不是 JSON、认不出的键、值不对）就拒、库不动；存显式写了的项（去掉首尾空白），和操作记录同一事务；
 //     和库里一样就不改不记；改完读回对得上才算改好。
-// 退出码：0 做成了（或本来就是）；1 没做成（库里没有这个仓、库出错、读回对不上）；2 参数、档案形状不对。
-import type { RepoProfileRow } from '@fleet-dao/db';
+//   project register <owner/仓名> --github-id <仓号> [--default-branch <分支>]（#2749，pnpm project add 第一步调）：登记一个仓。
+//     认仓认仓号：没有就建一行（接活关着、档案空）；老行没仓号就补上；一样的不改不记；仓号对不上或已在别的名字上（改名）拒。
+// 退出码：0 做成了（或本来就是）；1 没做成（库里没有这个仓、库出错、读回对不上、登记冲突）；2 参数、档案形状不对。
+import type { RegisterRepoResult, RepoProfileRow } from '@fleet-dao/db';
 import { RepoProfileSchema, repoProfileGaps, safeParseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 
 export const PROJECT_USAGE =
-  '用法：fleet-api project show <owner/仓名>（打印仓号、档案原文、补了默认值的档案、缺哪几项，JSON）；fleet-api project set-profile <owner/仓名> --file <json 文件|->（整份换掉档案，形状不对就拒；- 读标准输入，经 ssh 调时用它）';
+  '用法：fleet-api project show <owner/仓名>（打印仓号、档案原文、补了默认值的档案、缺哪几项，JSON）；fleet-api project set-profile <owner/仓名> --file <json 文件|->（整份换掉档案，形状不对就拒；- 读标准输入，经 ssh 调时用它）；fleet-api project register <owner/仓名> --github-id <仓号> [--default-branch <分支>]（登记一个仓，认仓号；已登记的不改）';
 
 export class ProjectCliError extends Error {
   readonly exitCode: 1 | 2;
@@ -20,8 +22,16 @@ export class ProjectCliError extends Error {
   }
 }
 
-/** 命令要碰库的两下（真的是 db 的 findRepoProfile、setRepoProfile）。 */
+/** 命令要碰库的几下（真的是 db 的 findRepoProfile、setRepoProfile、registerRepo）。 */
 export interface ProjectPort {
+  register(input: {
+    owner: string;
+    name: string;
+    githubId: number;
+    defaultBranch: string;
+    actor: { kind: 'ops'; id: string };
+    reason: string;
+  }): Promise<RegisterRepoResult>;
   find(owner: string, name: string): Promise<RepoProfileRow | null>;
   setProfile(input: {
     repoId: string;
@@ -33,7 +43,32 @@ export interface ProjectPort {
 
 export type ProjectArgs =
   | { action: 'show'; owner: string; name: string }
-  | { action: 'set-profile'; owner: string; name: string; file: string };
+  | { action: 'set-profile'; owner: string; name: string; file: string }
+  | { action: 'register'; owner: string; name: string; githubId: number; defaultBranch: string };
+
+/** 分支名：git 认的常见写法，不收空格和以 - 开头的。 */
+const BRANCH_ARG = /^[A-Za-z0-9._/-]+$/;
+
+function parseRegister(repo: string | undefined, rest: readonly string[]): ProjectArgs {
+  const target = repoArg(repo);
+  const usage = `register 要写成 register <owner/仓名> --github-id <仓号> [--default-branch <分支>]。${PROJECT_USAGE}`;
+  let githubId: number | undefined;
+  let defaultBranch = 'main';
+  for (let i = 0; i < rest.length; i += 2) {
+    const flag = rest[i];
+    const value = rest[i + 1];
+    if (value === undefined || value.startsWith('-')) throw new ProjectCliError(usage, 2);
+    if (flag === '--github-id' && githubId === undefined) {
+      githubId = /^\d+$/.test(value) ? Number(value) : Number.NaN;
+      if (!Number.isSafeInteger(githubId) || githubId <= 0)
+        throw new ProjectCliError(`--github-id 要正整数（GitHub REST 的仓 id）：${value}`, 2);
+    } else if (flag === '--default-branch' && BRANCH_ARG.test(value)) {
+      defaultBranch = value;
+    } else throw new ProjectCliError(usage, 2);
+  }
+  if (githubId === undefined) throw new ProjectCliError(usage, 2);
+  return { action: 'register', ...target, githubId, defaultBranch };
+}
 
 /** GitHub 的写法：owner 是字母、数字、连字符，仓名再加 . 和 _。网址、只写仓名、多一段都认不出（和 dispatch 同一个）。 */
 const REPO_ARG = /^([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)$/;
@@ -61,7 +96,11 @@ export function parseProjectArgs(argv: readonly string[]): ProjectArgs {
       );
     return { action, ...target, file: rest[1] };
   }
-  throw new ProjectCliError(`认不出「${action ?? ''}」：只收 show、set-profile。${PROJECT_USAGE}`, 2);
+  if (action === 'register') return parseRegister(repo, rest);
+  throw new ProjectCliError(
+    `认不出「${action ?? ''}」：只收 show、set-profile、register。${PROJECT_USAGE}`,
+    2,
+  );
 }
 
 /** 操作记录里的「谁」：服务器上的管理命令记成 ops 这一类。 */
@@ -128,6 +167,26 @@ export async function runProject(
     const row = await deps.port.find(args.owner, args.name);
     if (!row) throw new ProjectCliError(`没查成：库里没有仓 ${asked}（受管的仓就是 repos 表的行）`);
     return JSON.stringify(describeRow(row), null, 2);
+  }
+  if (args.action === 'register') {
+    const r = await deps.port.register({
+      owner: args.owner,
+      name: args.name,
+      githubId: args.githubId,
+      defaultBranch: args.defaultBranch,
+      actor: OPS_PROJECT,
+      reason: `服务器上 ${deps.operator} 跑的 fleet-api project register ${asked} --github-id ${args.githubId}`,
+    });
+    if (r.outcome === 'conflict') throw new ProjectCliError(`没登记（什么都没改）：${r.why}`);
+    if (r.outcome === 'unchanged') return `没改：${asked} 已经登记，仓号 ${args.githubId}`;
+    const back = await deps.port.find(args.owner, args.name);
+    if (back?.githubId !== args.githubId)
+      throw new ProjectCliError(
+        `已经写了（操作记录 ${r.auditId}），但读回来仓号对不上：跑 project show 核对`,
+      );
+    return r.outcome === 'created'
+      ? `已登记：${asked}，仓号 ${args.githubId}，默认分支 ${args.defaultBranch}，让 AI 接活关着（操作记录 ${r.auditId}）`
+      : `已登记：${asked} 补上了仓号 ${args.githubId}（操作记录 ${r.auditId}）`;
   }
 
   // 先认档案再连库：形状不对的不碰库
