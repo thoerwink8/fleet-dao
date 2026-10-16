@@ -80,7 +80,7 @@ describe('「要你拍」选项直接摆在卡上（#2353）', () => {
     const row = rowOf(APP);
     const result = within(row).getByTestId('decision-answer');
     expect(result.getAttribute('data-result')).toBe('failed');
-    expect(result.textContent).toContain('没做成：');
+    expect(result.textContent).toContain('没做成 · 我选了：');
     expect(result.textContent).toContain('我装好了，再查一次');
     expect(within(row).getByTestId('decision-result').textContent).toContain(
       '「干活的」机器人 还没装到 acme/fluxwatch',

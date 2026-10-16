@@ -282,7 +282,7 @@ function DecisionPicker({
                 data-option={o.id}
                 className="group flex min-h-10 w-full flex-col gap-0.5 px-3 py-2 text-left outline-none first:rounded-t-md last:rounded-b-md hover:bg-st-human-soft focus-visible:ring-focus focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 max-md:min-h-11 md:flex-row md:items-baseline md:gap-4"
               >
-                <span className="flex shrink-0 items-center gap-1.5 text-body font-medium md:w-40">
+                <span className="flex shrink-0 flex-wrap items-center gap-1.5 text-body font-medium md:w-56">
                   {o.label}
                   {o.recommended ? <Tag tone="brand">推荐</Tag> : null}
                   {last === o.id ? <Tag tone="stop">上次选的</Tag> : null}
@@ -380,7 +380,7 @@ function DecisionAnswerLine({
       title={
         <span data-testid="decision-answer" data-result={res.kind} className="flex min-w-0 flex-wrap gap-x-2">
           <span>
-            {RESULT_HEAD[res.kind]}：{who}
+            {RESULT_HEAD[res.kind]} · {who}
             {a.text}
           </span>
           <span className="num font-normal opacity-80" title={formatDateTime(a.at)}>
@@ -494,9 +494,12 @@ function NotificationRow({
                 <>
                   {/* 第二行：推荐哪项（或没有选项）加时间、送没送到，一行不折 */}
                   <div className="mt-1 flex min-w-0 items-center gap-x-3 overflow-hidden whitespace-nowrap">
-                    <div className="min-w-0 [&>p]:mt-0">
-                      <DecisionHint n={n} />
-                    </div>
+                    {/* 拍过了不写推荐（结果框顶上），这一格不占位，免得时间前面空一截 */}
+                    {n.answer && (n.options?.length ?? 0) > 0 ? null : (
+                      <div className="min-w-0 [&>p]:mt-0">
+                        <DecisionHint n={n} />
+                      </div>
+                    )}
                     {meta}
                   </div>
                   <ClampedBody text={n.body} />
