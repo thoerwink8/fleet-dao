@@ -12,11 +12,11 @@
 //   每个提交第一次上线的时刻取昨天第一个包含它的版本切过去的时刻。
 //   「昨天上线了什么」按 PR 关的单归并成每单一行、没挂单的合成一行计数，整节不超过 SHIPPED_MAX_LINES 行（一天几十个 PR 也一屏读完），见 shippedByIssue。
 // - 某一块读不到：那一块写「没查成：原因」，照样发，这一轮记 partial；提醒写不进库、#1055 评论没发成：记 failed 再抛（看门狗、巡检按
-//   @fleet-dao/db 的 dailyBriefProblem 报「今天的简报没送到」；GitHub Actions 的 daily-brief-guard 08:45 再独立查一次 #1055）。
+//   @fleet-dao/db 的 dailyBriefProblem 报「今天的简报没送到」，只此一处判）。
 // - 公开仓：#1055 的评论里不写驾驶舱的地址（私有值），只写「驾驶舱里看」；单子、PR 写 GitHub 链接。飞书那条后端会接上驾驶舱链接。
 // - 零点到 08:30 之间起来、定时器补的是昨天那一格：不发、记 unscanned（发了就占了今天的键，08:30 那一轮只能原地更新、不再推）。
 // - 同一天再跑（重启补跑、手动触发）：定时那条键不变，提醒原地更新、不再推第二次，#1055 同一个键只发一条；手动触发（fleet-api daily-brief）
-//   用另一个键和另一个标题，不冒充当天定时那一条（看门狗、看守只认定时那一条）。
+//   用另一个键和另一个标题，不冒充当天定时那一条（看门狗只认定时那一条）。
 import {
   type BriefNote,
   type BriefPull,
@@ -55,9 +55,9 @@ const SHIPPED_MAX_LINES = 10;
 /** 其余几块每块最多列几条（多的写「另 N 条」）。 */
 const LIST_MAX = { decisions: 15, alerts: 10, stopped: 10, dailies: 15 } as const;
 
-/** 定时那一条的标题（看守 .github/workflows/daily-brief-guard.yml 按这几个字认 #1055 上今天的简报）。 */
+/** 定时那一条的标题（#1055 上今天的简报按这几个字认）。 */
 export const briefTitle = (day: string): string => `【每日简报】${day}`;
-/** 手动触发那一条的标题：不和定时那条同名，看守不把它当成定时的送到了。 */
+/** 手动触发那一条的标题：不和定时那条同名，不冒充定时的送到了。 */
 export const manualBriefTitle = (day: string): string => `【每日简报·手动触发】${day}`;
 
 /** 发布历史的一条切版本。 */

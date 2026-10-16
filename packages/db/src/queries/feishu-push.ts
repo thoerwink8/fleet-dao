@@ -1,7 +1,7 @@
 // 提醒推飞书（决定 0090「飞书只留登录和手机通知」）：驾驶舱后端每半分钟把该推的提醒用飞书应用机器人发进团队群，
 // 每条推的结局记进 notification_deliveries（去处 feishu / team，拿到 message_id 才算送到）。
 // 2026-10-05 #1022 删旧飞书流程时把「推送 outbox → 网关发卡 → 回执写送达记录」整条删了、没有接替，推送断了 9 天没人发现；
-// 这里是接替，看门狗（引擎 jobs/watchdog-push.ts）和指挥官巡检按同一份判据看它通不通。
+// 这里是接替，看门狗（引擎 jobs/watchdog-push.ts）按这份判据看它通不通；指挥官巡检不抄判法，读 fleet-api attention 的结论（#2370）。
 // 改这里之前必须知道：
 // - 推送分级（创始人规矩：只为四类人闸和 AI 判定要他的事打扰他，AI 自己能修的不打扰）。该推的（pushable）：没处理、24 小时内建的，而且是
 //   ① 要你拍（decision，四类人闸和 AI 明确判定要他的都是这一级）：马上推；
@@ -15,7 +15,7 @@
 //   开满多久按 created_at 算：同一个键撤了又重开，created_at 不变，重开那一刻若已过线、之前又没推过，会马上推（反复冒出来不算自愈）。
 // - 看门狗判「推送不通」用 feishuPushFacts：有该推的过了 1 小时还没送到，而且这 1 小时里一条都没送成；或者后端记下的推送状态是「没配」。
 // - 推送状态（设置表 feishu.push）由后端写：configured=false 时 why 写清缺什么。没这一行 = 后端还没跑过推送（不单独当成坏了）。
-// - 指挥官巡检（agents/skills/commander/scripts/patrol-lib.mjs 的 PUSHABLE_SINCE）照这里写了一份 SQL，改判法两边一起改。
+// - 指挥官巡检不再抄这里的判法：它只读 fleet-api attention（packages/api/src/attention-cli.ts）出的结论，改判法只改这里。
 import { and, eq, gte, isNotNull, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { notificationDeliveries, notifications, settings } from '../schema/index.ts';
@@ -317,7 +317,7 @@ export async function feishuPushFacts(db: Db, now: Date): Promise<FeishuPushFact
 }
 
 /**
- * 推送不通的判法（看门狗和指挥官巡检同一份；巡检脚本在仓外跑不了这里的代码，它的 SQL 照这里写）：
+ * 推送不通的判法（只此一份：看门狗用它，fleet-api attention 也用它，指挥官巡检读 attention 的结论）：
  * 后端记下「没配」；或者有该推的到点超过 1 小时没送到、而且最近 1 小时一条都没送成。回给人看的一句话，通着回 null。
  */
 export function feishuPushProblem(f: FeishuPushFacts, now: Date): string | null {

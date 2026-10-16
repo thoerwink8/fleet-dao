@@ -1,10 +1,10 @@
 // 看门狗的「今天的每日简报送到了」（简报 jobs/daily-brief.ts，每天 08:30 推飞书 + 在 #1055 发评论）。判法是 @fleet-dao/db 的
-// dailyBriefProblem（指挥官巡检 patrol-lib.mjs 的 brief 那一块照它写 SQL）：09:00 以后，今天一轮都没起、没做成（#1055 评论没发成也算）、
+// dailyBriefProblem（fleet-api attention 用的也是它，指挥官巡检只读 attention 的结论）：09:00 以后，今天一轮都没起、没做成（#1055 评论没发成也算）、
 // 那一行提醒没建、没推到飞书，报一条卡住报警进驾驶舱（键 watchdog:brief:<北京日期>）；好了自己撤。
 // 改这里之前必须知道：
 // - 一天一条：同一天里人点了「处理」不再打开；过了一天，昨天那条还开着就撤（「看今天的」），不让旧的堆着。
 // - 读不到事实：这一轮这一步记没查成（看门狗这一轮记没跑成），开着的不撤，不当成送到了。
-// - 推送渠道整个坏了还有 watchdog:push:feishu（要你拍）；法国整个挂了靠 GitHub Actions 的 daily-brief-guard 在 #1055 提醒。
+// - 推送渠道整个坏了还有 watchdog:push:feishu（要你拍）；法国整个挂了由香港探活（每分钟探法国 healthz）报，香港由本机巡检看；简报没到只有这一处判（GitHub Actions 的 daily-brief-guard 已删，#2369）。
 import { beijingDay, type DailyBriefStatus, dailyBriefProblem } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import { clip } from './reconcile-common.ts';
