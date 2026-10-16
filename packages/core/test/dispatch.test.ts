@@ -6,7 +6,9 @@ import { describe, expect, it } from 'vitest';
 import {
   currentVersion,
   familyGate,
+  GITHUB_ACTIONS_BOT_LOGIN,
   type IssueFamily,
+  isGithubActionsAuthor,
   localGate,
   type MilestoneRef,
   milestoneVersion,
@@ -138,5 +140,20 @@ describe('本机做这一道（#299 止血：帅位留给本机做的，认领�
     expect(got.why).toBe(
       '帅位留给本机做（贴着「本机做」）；要交给引擎，重开一张新单，不贴「本机做」、不是母单也不是子单',
     );
+  });
+});
+
+describe('工作流开的单：作者 github-actions[bot] 算可信，其余陌生人不算', () => {
+  it('作者 github-actions[bot]（本仓工作流用 GITHUB_TOKEN）过作者门', () => {
+    expect(GITHUB_ACTIONS_BOT_LOGIN).toBe('github-actions[bot]');
+    expect(isGithubActionsAuthor({ login: 'github-actions[bot]' })).toBe(true);
+  });
+
+  it('作者 random-user 和其他机器人不过', () => {
+    expect(isGithubActionsAuthor({ login: 'random-user' })).toBe(false);
+    expect(isGithubActionsAuthor({ login: 'GitHub-Actions[bot]' })).toBe(false);
+    expect(isGithubActionsAuthor({ login: 'fleet[bot]' })).toBe(false);
+    expect(isGithubActionsAuthor(null)).toBe(false);
+    expect(isGithubActionsAuthor(undefined)).toBe(false);
   });
 });

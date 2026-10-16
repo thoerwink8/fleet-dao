@@ -1,5 +1,6 @@
 // 引擎拉单（packages/engine/src/jobs/intake.ts）派不派一张单，这里放不用读库、不用读 GitHub 就能判的那几道：不是母单也不是子单
-// （familyGate）、没贴「本机做」（localGate），加上认版本的几个纯函数（milestoneVersion、currentVersion，排序、巡检、闲置清理在用）。
+// （familyGate）、没贴「本机做」（localGate）、本仓工作流用 GITHUB_TOKEN 开的单（isGithubActionsAuthor），加上认版本的几个纯函数
+// （milestoneVersion、currentVersion，排序、巡检、闲置清理在用）。
 // 「挂在当前版本上」和「未排期的不碰」#1336 起不再是拉单的准入闸（autoDispatchGate 删了）：引擎自己按依据挑单，挂不挂当前版本只影响
 // 排序（决定 0031 改写）；versionGate 留给点名派单（dispatch-issue.ts）当就绪度闸。原来还有「开关、开单时间」那一道
 // （dispatchDecision）和「人明说交给 fleet」（handoverDecision），随旧接活一起删了（#901 审查：只有测试在引用）。
@@ -152,4 +153,20 @@ export function localGate(issue: Pick<IssueFamily, 'labels'>): LocalGate {
     reason: 'reserved_local',
     why: `帅位留给本机做（贴着「${LOCAL_LABEL}」）；要交给引擎，重开一张新单，不贴「${LOCAL_LABEL}」、不是母单也不是子单`,
   };
+}
+
+// —— 工作流开的单 ——
+
+/**
+ * 本仓 GitHub Actions 用 GITHUB_TOKEN 开单时，GitHub 记的作者登录名。
+ * 不在法国库 users 表白名单里（白名单只有人登记过的账号）；偶发 E2E、对账自动开的单作者就是它。
+ */
+export const GITHUB_ACTIONS_BOT_LOGIN = 'github-actions[bot]';
+
+/**
+ * 作者是不是本仓工作流（GITHUB_TOKEN）。只认这一个登录名：别的机器人、陌生人都不算。
+ * 登录名按 GitHub 返回的原样比，不按大小写放宽。
+ */
+export function isGithubActionsAuthor(author: { login: string } | null | undefined): boolean {
+  return author?.login === GITHUB_ACTIONS_BOT_LOGIN;
 }
