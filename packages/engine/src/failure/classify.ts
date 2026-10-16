@@ -150,7 +150,9 @@ export function classifyFailure(
   const alert = plan.kind === 'stop' || step.action === 'park';
   const how = plan.hint && step.action === 'retry' && !step.wait ? `，${plan.hint}` : '';
   const humanFix = plan.humanFix ? fillFix(plan.humanFix, evidence) : undefined;
-  const reason = `${plan.title}（${plan.hit}）：${actionText(step, plan, ctx)}${how}${
+  const reason = `${plan.title}（${plan.hit}）：${actionText(step, plan, ctx)}${how}${evidenceDetail(
+    evidence,
+  )}${
     alert && step.action !== 'park' ? '，并报警' : ''
   }${humanFix ? `；要人：${humanFix}` : ''}${plan.notes.length > 0 ? `（${plan.notes.join('；')}）` : ''}`;
   const shared: Avoid | undefined = plan.hold ? { scope: 'pool', shared: true } : undefined;
@@ -257,11 +259,39 @@ function stopWith(plan: Plan, why: string): Step {
 function repeatSkip(plan: Plan, ctx: Ctx, usedSoFar: number): string | undefined {
   const { evidence } = ctx;
   const message = evidence.message?.trim();
+  // 超时发生在旧引擎、当前已是新引擎时，原文相同不代表原路再试不会变：
+  // 这次重试是在修复基础设施中断，不是在盲撞同一个上游错误。
+  if (plan.rule === 'EN1' && evidence.engineRestarted === true) return undefined;
   if (usedSoFar >= 1 && message && evidence.previousMessage?.trim() === message) {
     return '和上一次的原文一字不差，原路再试不会变';
   }
   if (plan.unknown && evidence.retryable === false) return '端口说重试没用';
   return undefined;
+}
+
+function evidenceDetail(evidence: FailureEvidence): string {
+  const timeout = evidence.startToCloseSeconds;
+  const isTimeout = evidence.code?.toLowerCase().startsWith('timeout_') === true;
+  if (!isTimeout && evidence.engineRestarted !== true) return '';
+  const details: string[] = [];
+  if (evidence.activity) details.push(`活动 ${evidence.activity}`);
+  if (typeof timeout === 'number' && Number.isFinite(timeout) && timeout >= 0) {
+    details.push(`startToClose ${timeoutText(timeout)}`);
+  }
+  if (evidence.engineRestarted === true) {
+    details.push(
+      `这一段期间引擎进程换过（旧启动 ${evidence.engineStartedAt ?? '没报'}，现启动 ${
+        evidence.currentEngineStartedAt ?? '没报'
+      }）`,
+    );
+  }
+  return details.length > 0 ? `；${details.join('，')}` : '';
+}
+
+function timeoutText(seconds: number): string {
+  const rounded = Math.round(seconds);
+  if (rounded % 60 === 0) return `${rounded / 60} 分钟`;
+  return duration(rounded);
 }
 
 function actionText(step: Step, plan: Plan, ctx: Ctx): string {

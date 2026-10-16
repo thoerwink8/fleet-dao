@@ -190,6 +190,12 @@ export type SegmentEvidence = Pick<
   'code' | 'message' | 'exitCode' | 'httpStatus' | 'resetsAt'
 > & { quotaExhausted: boolean };
 
+/** 当前活动所在的引擎进程启动时刻，用来核对超时活动是不是被重启丢掉。 */
+export interface EngineStartedAt {
+  schemaVersion: 1;
+  startedAt: string;
+}
+
 /**
  * 动手会话脱开引擎跑着、引擎要走了（停机信号：发版切版本、重启）时这一段的结局（#2238）：会话没停，接着在自己的 scope 里跑、往
  * 收发目录写；工作流隔一小会儿带上 attach 再调一次 runSegment，由下一个引擎从文件接回、等它收场。runs 那一行不收、不记账。

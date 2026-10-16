@@ -153,6 +153,21 @@
       "expect": { "action": "retry", "rule": "EN1" }
     },
     {
+      "id": "R2710",
+      "provenance": "observed",
+      "origin": "2026-10-16 #2710、#2750：发版重启引擎后活动丢失，旧活动心跳和新引擎启动时刻不同",
+      "evidence": {
+        "code": "timeout_start_to_close",
+        "message": "activity StartToClose timeout",
+        "activity": "runSegment",
+        "startToCloseSeconds": 4500,
+        "engineStartedAt": "2026-10-16T12:00:00.000Z",
+        "currentEngineStartedAt": "2026-10-16T12:01:00.000Z",
+        "engineRestarted": true
+      },
+      "expect": { "action": "retry", "rule": "EN1", "routeOutcome": "neutral" }
+    },
+    {
       "id": "S17",
       "provenance": "test-only",
       "origin": "形态取自旧仓 packages/fleet/test/activities.test.mjs；生产上 fleet 任务 #1748 g2 的原文被 160 字上限切在「! [rejected]」",

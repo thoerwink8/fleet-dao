@@ -77,6 +77,33 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     expect(verdicts.every((v) => v.rule === 'ST1')).toBe(true);
   });
 
+  it('活动期间引擎换过进程：同一原文也继续同一段，并写出活动和 StartToClose；没换过仍按 EN1 的重复失败挂起', () => {
+    const restarted = session({
+      code: 'timeout_start_to_close',
+      message: 'activity StartToClose timeout',
+      activity: 'runSegment',
+      startToCloseSeconds: 4500,
+      engineStartedAt: '2026-10-16T12:00:00.000Z',
+      currentEngineStartedAt: '2026-10-16T12:01:00.000Z',
+      engineRestarted: true,
+      attempts: { retries: 1 },
+      previousMessage: 'activity StartToClose timeout',
+    });
+    const resumed = classifyFailure(restarted);
+    expect(resumed).toMatchObject({ rule: 'EN1', action: 'retry', resumeSame: true, alert: false });
+    expect(resumed.reason).toContain('活动 runSegment');
+    expect(resumed.reason).toContain('startToClose 75 分钟');
+    expect(resumed.reason).toContain('引擎进程换过');
+
+    const realTimeout = classifyFailure({
+      ...restarted,
+      engineRestarted: false,
+      currentEngineStartedAt: '2026-10-16T12:00:00.000Z',
+    });
+    expect(realTimeout).toMatchObject({ rule: 'EN1', action: 'park', alert: true });
+    expect(realTimeout.reason).toContain('和上一次的原文一字不差');
+  });
+
   it('retry 认不出的：同样按临时的办，不无限重试；绑不绑路由都一样', () => {
     const { trail, last } = drive(UNKNOWN);
     expect(trail).toEqual(['retry', 'retry', 'park']);

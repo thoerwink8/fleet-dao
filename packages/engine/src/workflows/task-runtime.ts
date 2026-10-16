@@ -629,7 +629,7 @@ export class TaskRuntime {
       } catch (error) {
         if (error instanceof Abandoned) throw error;
         if (isCancellation(error)) throw error;
-        const failure = failureOf(error, source);
+        const failure = failureOf(error, source, this.limits);
         // 合并冲突不在这一步里原地重试：第二次原文必一字不差，会直接挂起，会话根本看不到冲突。
         // 老历史没有这个标记，照旧交给失败分流（重试这一步，再不行挂起）。
         if (failure.code.toLowerCase() === 'merge_conflict' && patched('conflict-handoff-keeps-tree')) {
@@ -681,7 +681,17 @@ export class TaskRuntime {
   }
 
   classify(
-    failure: { source: string; code: string; message: string; retryable: boolean | null },
+    failure: {
+      source: string;
+      code: string;
+      message: string;
+      retryable: boolean | null;
+      activity?: string | undefined;
+      startToCloseSeconds?: number | undefined;
+      engineStartedAt?: string | undefined;
+      currentEngineStartedAt?: string | undefined;
+      engineRestarted?: boolean | undefined;
+    },
     counters: LadderCounters,
     routeBound: boolean,
     context: FailureContext,

@@ -12,6 +12,7 @@ import {
   type ColdVerifyInput,
   type ColdVerifyResult,
   type DeliveryRead,
+  type EngineStartedAt,
   type GuardedPaths,
   MERGE_POLL_MINUTES,
   type MergeNowInput,
@@ -45,6 +46,8 @@ type PortActivities = {
 
 /** 工作流看到的活动：端口（EnginePorts）里的，加上引擎自己的。 */
 export type EngineActivities = PortActivities & {
+  /** 当前 worker 进程的启动时刻；超时分流用它和旧活动最后一次心跳作严格比较。 */
+  engineStartedAt(input: { schemaVersion: 1 }): Promise<EngineStartedAt>;
   // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
   /** 现读单子和它指着的需求文档，拼出动手的交代（runner/task-brief.ts）。单子读不到抛错；缺栏回 problems。 */
   readTaskBrief(input: ReadTaskBriefInput): Promise<TaskBriefResult>;
@@ -94,6 +97,7 @@ export type ActivityName = keyof EngineActivities;
 export type Profile = 'quick' | 'git' | 'setup' | 'ci' | 'job' | 'segment' | 'poll';
 
 export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
+  engineStartedAt: 'quick',
   pickRoute: 'quick',
   recordTiming: 'quick',
   saveTaskState: 'quick',
