@@ -49,7 +49,13 @@ async function start(q: string, i: TaskWorkflowInput): Promise<WorkflowHandle> {
 const statusOf = (h: WorkflowHandle): Promise<TaskStatus> => h.query(taskStatusQuery);
 const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
 
-const R1: RouteChoice = { routeId: 'r1', poolId: 'p1', modelId: 'm1', family: 'claude', hostId: 'claude-code' };
+const R1: RouteChoice = {
+  routeId: 'r1',
+  poolId: 'p1',
+  modelId: 'm1',
+  family: 'claude',
+  hostId: 'claude-code',
+};
 const R1B: RouteChoice = { routeId: 'r1b', poolId: 'p1', modelId: 'm1', family: 'claude', hostId: 'mirasim' };
 const R2: RouteChoice = { routeId: 'r2', poolId: 'p2', modelId: 'm2', family: 'kimi', hostId: 'api-shell' };
 

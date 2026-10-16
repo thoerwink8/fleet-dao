@@ -49,8 +49,6 @@ import {
   WIRED_HOSTS,
 } from './hosts.ts';
 import { loadHeldPools, poolHoldOptions } from './pool-holds.ts';
-
-export { poolHoldOptions };
 import {
   expectedNewAnswers,
   expectedOldAnswers,
@@ -64,6 +62,8 @@ import {
 import type { SessionOrgControl, SessionOrgReader } from './session-org.ts';
 import { poolHoldKey } from './store-ports.ts';
 import type { WorkTrees } from './worktrees.ts';
+
+export { poolHoldOptions };
 
 /** 近多久开跑过算活跃（和方案 3.2、片 3 的 ROUTE_PROBE_ACTIVE_RECENT_HOURS 同一档）。 */
 const ACTIVE_RECENT_MS = 6 * 60 * 60_000;

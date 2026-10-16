@@ -253,7 +253,13 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
       runAsUser: 'fleet-agent-carpool',
     });
     const v = classifyFailure(revoked);
-    expect({ rule: v.rule, action: v.action, alert: v.alert, resumeSame: v.resumeSame, authReroute: v.authReroute }).toEqual({
+    expect({
+      rule: v.rule,
+      action: v.action,
+      alert: v.alert,
+      resumeSame: v.resumeSame,
+      authReroute: v.authReroute,
+    }).toEqual({
       rule: 'DV1',
       action: 'swapRoute',
       alert: true,

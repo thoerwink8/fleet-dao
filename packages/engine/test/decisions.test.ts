@@ -2,7 +2,7 @@
 // #556-2：Fusion 的判断（简报、验收、验证结论、状态机、Lead 检查、PR 正文、关单评论）和库主键（newIds）随 Fusion 删了，
 // 只留 task.ts（#632）用的两样：上限（limits）和失败分流（failure）。
 import { describe, expect, it } from 'vitest';
-import { createDecide, evidenceOf, nextAction, retryDelaySeconds } from '../src/decisions/index.ts';
+import { createDecide, nextAction, retryDelaySeconds } from '../src/decisions/index.ts';
 import type { FailureVerdict } from '../src/failure/index.ts';
 import {
   assertSessionFitsSlice,

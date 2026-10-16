@@ -199,7 +199,13 @@ export function classifyFailure(
     rule: plan.rule,
     title: plan.title,
     via: plan.via,
-    classifiedAs: plan.unknown ? 'unknown' : step.authReroute ? 'swapRoute' : plan.kind === 'stop' ? 'park' : 'retry',
+    classifiedAs: plan.unknown
+      ? 'unknown'
+      : step.authReroute
+        ? 'swapRoute'
+        : plan.kind === 'stop'
+          ? 'park'
+          : 'retry',
     alert,
     counter: step.counter,
     ...(step.wait && step.action === 'retry'

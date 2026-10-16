@@ -87,7 +87,13 @@ import { SEGMENT_STAGE } from '../task-contract.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
-import { type HeldPools, loadHeldPools, POOL_HOLD_PREFIX, poolHoldKey, poolHoldOptions } from './pool-holds.ts';
+import {
+  type HeldPools,
+  loadHeldPools,
+  POOL_HOLD_PREFIX,
+  poolHoldKey,
+  poolHoldOptions,
+} from './pool-holds.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { RESERVATION_TTL_MS } from './task-segment.ts';
 
