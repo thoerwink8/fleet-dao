@@ -489,6 +489,22 @@ export const RULES: readonly FailureRule[] = [
     routeOutcome: 'fail',
   },
   // 活动超时、工人重启丢了活动：从检查点重跑，不交人（旧系统落成 UNKNOWN → 没查成 → 等人，fleet 任务 #1608 g1）。
+  //
+  // #2710（2026-10-16 约 20:29 CST，发版列车刚切过，进程 20:21 起在新提交上）：整单从 running/implement
+  // 变成 stalled/parked，doing 是「引擎这边丢了这一步（timeout_start_to_close）：挂起并报警（和上一次的原文一字不差，
+  // 原路再试不会变）」。这句只在本规则、且证据没标 engineRestarted 时，由「原文一字不差」打出来。
+  // 归类：分类把可重试的活动超时当成「原路再试不会变」。不是另外三件：
+  // - #2797 发版叫停：排空到点把会话停下，码是 engine_stop（KL3，kind resume），不记账、马上续，不进这张表。
+  // - #2815 Mirasim 发版后接回：会话脱开引擎接着跑，活动交回 detached，工作流隔一会儿 attach，不以 timeout_start_to_close 收场。
+  // - #2811 model_mismatch 挂整单：MD3，kind stop，第一次就停下等人，不重派。
+  // timeout_* 的原文是 Temporal 固定句（activity StartToClose timeout 等），第二次必然一字不差。runSegment 的
+  // StartToClose 是 75 分钟；#2710 离新进程起来只有约 8 分钟，凑不齐一次在新进程上跑满的 StartToClose。
+  // 心跳还在才会落成 start_to_close，工人一死先是 timeout_heartbeat。这次没标上 engineRestarted（心跳里的启动时刻
+  // 和当前进程相同，或两种凭据都不足），于是第二次原文一样就把整单挂起。
+  // 分流这里仍判 park：动手会话不拿这个 park 挂整单，停掉这一段、按点名路由重派；标了 engineRestarted 的仍原路重试
+  // 并续可接回的会话（task-session.ts，patched('en1-timeout-redispatch')）。没有能派的路由，或同一原因连败到重派预算
+  // （先避开这条路由，同一模型再避开模型，再撞上才挂起），才 parked。
+  // session_lost、exit_lost 不在这条例外里：那两句可以是真的同一处再犯，仍按一字不差挂起。
   {
     id: 'EN1',
     title: '引擎这边丢了这一步',
