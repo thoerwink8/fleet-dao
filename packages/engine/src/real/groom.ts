@@ -67,6 +67,7 @@ const toRepo = (r: Awaited<ReturnType<typeof listIntakeRepos>>[number]): IntakeR
   defaultBranch: r.defaultBranch,
   testCommand: r.testCommand,
   autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
+  profile: r.profile,
 });
 
 export interface GroomWiring {

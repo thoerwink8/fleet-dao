@@ -26,7 +26,10 @@ import {
   DAILY_BRIEF_JOB_ID,
   dailyBriefKey,
   type ExecutorLineStat,
+  type FlowGroupStat,
+  type FlowModeHealth,
   type PipelineHealth,
+  type ReleaseKills,
   type RoundOutcome,
   type ScheduleResult,
 } from '@fleet-dao/db';
@@ -117,6 +120,10 @@ export interface DailyBriefDeps {
   lineStats(now: Date): Promise<ExecutorLineStat[]>;
   /** 截至 to 的 7 天流程健康（@fleet-dao/db 的 pipelineHealth，#2762）。读不到照抛。 */
   pipelineHealth(to: Date): Promise<PipelineHealth>;
+  /** 截至 to 的 7 天里发版叫停的动手会话（@fleet-dao/db 的 releaseKilledSessions，#2797）。读不到照抛；没接上的不写这一行。 */
+  releaseKills?(to: Date): Promise<ReleaseKills>;
+  /** 截至 to 两种流程（全程 / 三段）的对照（@fleet-dao/db 的 flowModeHealth，决定 0105，#2827）。读不到照抛；没接上的不写这一栏。 */
+  flowModeHealth?(to: Date): Promise<FlowModeHealth>;
   /** 写那一行提醒（有就原地更新）。写不进照抛。 */
   publish(input: { dedupeKey: string; title: string; body: string; link: string }): Promise<void>;
   /** 在 #1055 发评论（幂等：同一个 key 只发一条）。没发成照抛。 */
@@ -429,15 +436,31 @@ function numVs(now: number | null, before: number | null | undefined, unit = '')
  * 五、流程健康（#2762）：近 7 天每轮怎么收场的（task_rounds），和再往前 7 天比。
  * 这周读不到整节写「没查成」；上周读不到只写这周、注明对比没查成。窗口里一轮都没有写「没有」，不写 0%。
  */
-export function healthSection(now: PipelineHealth | string, before: PipelineHealth | string): BriefSection {
+export function healthSection(
+  now: PipelineHealth | string,
+  before: PipelineHealth | string,
+  kills?: { now: ReleaseKills | string; before: ReleaseKills | string },
+  flow?: FlowModeHealth | string,
+): BriefSection {
   const heading = '五、流程健康（近 7 天，和再往前 7 天比）';
-  if (typeof now === 'string') return { heading, lines: [`没查成：${now}`], unread: now };
+  const killLine = kills ? releaseKillsLine(kills.now, kills.before) : null;
+  const flowLines = flow === undefined ? [] : flowModeLines(flow);
+  // 这一行没查成也算这一节没查全（这一轮记 partial）
+  const killUnread = typeof kills?.now === 'string' ? kills.now : undefined;
+  const flowUnread = typeof flow === 'string' ? flow : undefined;
+  const withKills = (s: BriefSection): BriefSection => {
+    const extra = [...(killLine ? [killLine] : []), ...flowLines];
+    if (extra.length === 0) return s;
+    const unread = s.unread ?? killUnread ?? flowUnread;
+    return { ...s, lines: [...s.lines, ...extra], ...(unread !== undefined ? { unread } : {}) };
+  };
+  if (typeof now === 'string') return withKills({ heading, lines: [`没查成：${now}`], unread: now });
   const prev = typeof before === 'string' ? undefined : before;
   const lines: string[] = [];
   if (typeof before === 'string') lines.push(`7 天前那一周没查成（${before}），只列这一周`);
   if (now.rounds === 0) {
     lines.push(`近 7 天没有收场的轮${prev ? `（7 天前 ${prev.rounds} 轮）` : ''}。`);
-    return { heading, lines };
+    return withKills({ heading, lines });
   }
   lines.push(`收场 ${numVs(now.rounds, prev ? prev.rounds : undefined, ' 轮')}`);
   const shown = now.outcomes.filter(
@@ -460,7 +483,63 @@ export function healthSection(now: PipelineHealth | string, before: PipelineHeal
   lines.push(
     `重活 PR 新增行 p90：${now.heavyAddedP90 === null ? '这周没有量到行数的重活合并' : numVs(now.heavyAddedP90, prev ? prev.heavyAddedP90 : undefined, ' 行')}`,
   );
-  return { heading, lines };
+  return withKills({ heading, lines });
+}
+
+const groupWord = (m: FlowGroupStat['mode']) => (m === 'full' ? '全程' : '三段');
+const tokenWord = (n: number) => (n >= 10_000 ? `${(n / 1000).toFixed(0)}k` : String(n));
+
+/** 一组一行：单数、合并数、成功率（Wilson 95% 区间）、时长中位和 p90、每合并单 token。没有的写「—」，不写 0。 */
+function flowGroupLine(g: FlowGroupStat): string {
+  const rate =
+    g.successRate === null || g.wilson === null
+      ? '—'
+      : `${pct(g.successRate)}（Wilson 95% 区间 ${pct(g.wilson.low)}–${pct(g.wilson.high)}）`;
+  const unread = g.runsTokenUnread > 0 ? `，另有 ${g.runsTokenUnread} 段 token 没读全` : '';
+  return `· ${groupWord(g.mode)}：${g.tasks} 单，合并 ${g.merged}；成功率 ${rate}；时长中位 ${mins(g.durationMedianMin)}、p90 ${mins(g.durationP90Min)}；每合并单 ${g.tokensPerMerged === null ? '—' : `${tokenWord(g.tokensPerMerged)} token`}${unread}`;
+}
+
+/**
+ * 「两种流程对照」几行（决定 0105，#2827）：每组一行；两组都满 30 单才出结论，不够只写「还不够判（全程 N / 三段 M）」。
+ * 成功率这里按合并算，合并后 7 天有没有被修、被回退库里读不到，由人核。读不到写「没查成」。
+ */
+export function flowModeLines(flow: FlowModeHealth | string): string[] {
+  const head = '两种流程对照（决定 0105，自开跑累计）';
+  if (typeof flow === 'string') return [`${head}：没查成（${flow}）`];
+  const lines = [
+    `${head}（成功率按合并算，合并后 7 天被修、被回退由人核）`,
+    flowGroupLine(flow.full),
+    flowGroupLine(flow.three),
+  ];
+  if (!flow.enough || !flow.verdict) {
+    lines.push(`还不够判（全程 ${flow.full.tasks} / 三段 ${flow.three.tasks}）`);
+    return lines;
+  }
+  const v = flow.verdict;
+  const pp = (x: number) => `${x >= 0 ? '+' : ''}${(x * 100).toFixed(1)} 点`;
+  lines.push(
+    `成功率差（全程减三段）${pp(v.diff.diff)}，95% 区间 ${pp(v.diff.low)} 到 ${pp(v.diff.high)}：${v.noninferior ? '下界高于 −5 点，非劣效成立' : '下界没过 −5 点，非劣效还没成立'}`,
+  );
+  lines.push(
+    v.costRatio === null
+      ? '每合并单 token 对比：缺合并的单，算不出'
+      : `全程每合并单 token 是三段的 ${v.costRatio.toFixed(2)} 倍${v.costStop ? '，超过 2 倍，触发成本类止损' : ''}`,
+  );
+  if (v.effectStop) lines.push('触发效果类止损：全程更差的把握超过 95%');
+  return lines;
+}
+
+/**
+ * 「发版叫停的动手会话」一行（#2797）：近 7 天一共几段（和再往前 7 天比）、一共跑了几小时、按天的数。
+ * 这周读不到写「没查成」；上周读不到只写这周、注明对比没查成。
+ */
+export function releaseKillsLine(now: ReleaseKills | string, before: ReleaseKills | string): string {
+  const head = '发版叫停的动手会话';
+  if (typeof now === 'string') return `${head}：没查成（${now}）`;
+  const vs = typeof before === 'string' ? `（7 天前没查成：${before}）` : '';
+  const total = typeof before === 'string' ? `${now.total} 段` : numVs(now.total, before.total, ' 段');
+  const days = now.byDay.map((d) => `${d.day} ${d.n}`).join('，');
+  return `${head}：${total}${vs}，被叫停的段一共跑了 ${now.hours} 小时；按天：${days}`;
 }
 
 /** 收齐的简报。 */
@@ -488,6 +567,17 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
   const healthBefore = await guard('读 7 天前的流程健康', () =>
     deps.pipelineHealth(new Date(today.getTime() - 7 * 24 * 3_600_000)),
   );
+  const releaseKills = deps.releaseKills;
+  const kills = releaseKills
+    ? {
+        now: await guard('读发版叫停的动手会话', () => releaseKills(today)),
+        before: await guard('读 7 天前发版叫停的动手会话', () =>
+          releaseKills(new Date(today.getTime() - 7 * 24 * 3_600_000)),
+        ),
+      }
+    : undefined;
+  const flowModeHealth = deps.flowModeHealth;
+  const flow = flowModeHealth ? await guard('读两种流程对照', () => flowModeHealth(today)) : undefined;
   const unread = (heading: string, why: string): BriefSection => ({
     heading,
     lines: [`没查成：${why}`],
@@ -501,7 +591,7 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
         ? unread('三、失败了要你看的', [alerts, stopped].filter((x) => typeof x === 'string').join('；'))
         : failuresSection(alerts, stopped, now),
       metricsSection(typeof shipped === 'string' ? null : shipped.leadMinutes, stats),
-      healthSection(health, healthBefore),
+      healthSection(health, healthBefore, kills, flow),
     ],
   };
 }

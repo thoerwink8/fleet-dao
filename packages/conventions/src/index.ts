@@ -102,6 +102,7 @@ export {
   currentVersion,
   ENGINE_LABEL,
   FROZEN_LABEL,
+  FULL_FLOW_LABEL,
   GROOM_PENDING_LABEL,
   GROOMED_LABEL,
   HUMAN_DECISION_LABEL,
@@ -114,6 +115,7 @@ export {
   MOTHER_LABEL,
   milestonePhase,
   milestoneVersion,
+  THREE_FLOW_LABEL,
 } from './labels.ts';
 export { type MdDoc, parseMd } from './markdown.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
@@ -184,6 +186,7 @@ export {
 } from './pr-columns.ts';
 export { annotation } from './pr-fields.ts';
 export { FIX_ALERT_COLUMN, fixAlertRefs, prLinks } from './pr-links.ts';
+export { type Prerequisites, parsePrerequisites, waitingUntil } from './prerequisites.ts';
 export {
   kindOf as progressKindOf,
   NO_OWNER,

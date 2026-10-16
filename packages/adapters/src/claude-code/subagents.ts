@@ -2,7 +2,7 @@
 //
 // 改这里之前必须知道：
 // - 只有一份原件（决定 0087）：agents/subagents/ 下恰好三份，名字就是 Claude Code 内置的 Explore（斥候 Haiku）、
-//   general-purpose（工人 Opus，决定 0103）、Plan（设计 Opus）。同一份既由 agents-sync 装到每台机器的 ~/.claude/agents/，也由这里转成
+//   general-purpose（工人 Sonnet）、Plan（设计 Opus）。同一份既由 agents-sync 装到每台机器的 ~/.claude/agents/，也由这里转成
 //   --agents 传给引擎的会话；--agents 的优先级高于项目级、用户级，同名条目压住内置的（本机 2.1.296 实测）。
 // - 为什么要转：法国上引擎经 reclaude 起的会话带 `--setting-sources project`，不读用户级 ~/.claude/agents/；转成 --agents 以后
 //   发哪一版就用哪一版（方案 specs/1641-子代理分档/法国实装.md 第一节第 4 条）。
@@ -163,11 +163,14 @@ export function parseSubagent(file: string, text: string): { name: string; defin
   return { name, definition: { ...fields, prompt: body } as unknown as SubagentDefinition };
 }
 
-/** 读一个目录里所有 *.md，转成 --agents 要的对象（按名字排序，同样的输入出同样的字节）。目录读不了、一个都没有也抛错。 */
+/** 目录里哪些是子代理定义：*.md，但 README.md 是规范说明（agents/subagents/README.md），不是定义。 */
+const isDefinitionFile = (n: string) => n.endsWith('.md') && n !== 'README.md';
+
+/** 读一个目录里所有定义（*.md，不含 README.md），转成 --agents 要的对象（按名字排序，同样的输入出同样的字节）。目录读不了、一个都没有也抛错。 */
 export async function loadSubagents(dir: string = SUBAGENTS_DIR): Promise<SubagentDefinitions> {
   let names: string[];
   try {
-    names = (await readdir(dir)).filter((n) => n.endsWith('.md')).sort();
+    names = (await readdir(dir)).filter(isDefinitionFile).sort();
   } catch (error) {
     throw new Error(
       `子代理定义的目录读不了：${dir}（${error instanceof Error ? error.message : String(error)}）`,
@@ -189,7 +192,7 @@ export async function loadSubagents(dir: string = SUBAGENTS_DIR): Promise<Subage
 
 /** 带 isolation: worktree 的那几个子代理的名字（引擎写 settings.local.json 时用它们拼 deny）。 */
 export async function isolatedSubagentNames(dir: string = SUBAGENTS_DIR): Promise<string[]> {
-  const names = (await readdir(dir)).filter((n) => n.endsWith('.md')).sort();
+  const names = (await readdir(dir)).filter(isDefinitionFile).sort();
   const out: string[] = [];
   for (const file of names) {
     const text = await readFile(join(dir, file), 'utf8');

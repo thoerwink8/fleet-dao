@@ -1,0 +1,185 @@
+﻿
+2026-10-16T11:13:47.5451387Z ##[group]Runner Image Provisioner
+2026-10-16T11:13:47.5455077Z ##[endgroup]
+2026-10-16T11:13:47.5456026Z ##[group]Operating System
+2026-10-16T11:13:47.5457321Z ##[endgroup]
+2026-10-16T11:13:47.5457633Z ##[group]Runner Image
+2026-10-16T11:13:47.5460952Z ##[endgroup]
+2026-10-16T11:13:47.5461780Z ##[group]GITHUB_TOKEN Permissions
+2026-10-16T11:13:47.5464027Z ##[endgroup]
+2026-10-16T11:13:49.4102560Z ##[group]Run set -euo pipefail
+2026-10-16T11:13:49.4265208Z ##[endgroup]
+2026-10-16T11:13:49.7355676Z ##[group]Run actions/checkout@v4
+2026-10-16T11:13:49.7376030Z ##[endgroup]
+2026-10-16T11:13:49.8236268Z ##[group]Getting Git version info
+2026-10-16T11:13:49.8323736Z ##[endgroup]
+2026-10-16T11:13:49.8392548Z ##[group]Initializing the repository
+2026-10-16T11:13:49.8561427Z ##[endgroup]
+2026-10-16T11:13:49.8562476Z ##[group]Disabling automatic garbage collection
+2026-10-16T11:13:49.8589082Z ##[endgroup]
+2026-10-16T11:13:49.8589738Z ##[group]Setting up auth
+2026-10-16T11:13:49.9361923Z ##[endgroup]
+2026-10-16T11:13:49.9362960Z ##[group]Fetching the repository
+2026-10-16T11:13:51.1002987Z ##[endgroup]
+2026-10-16T11:13:51.1003960Z ##[group]Determining the checkout info
+2026-10-16T11:13:51.1005701Z ##[endgroup]
+2026-10-16T11:13:51.1119516Z ##[group]Checking out the ref
+2026-10-16T11:13:51.3901485Z ##[endgroup]
+2026-10-16T11:13:51.3967987Z ##[group]Removing auth
+2026-10-16T11:13:51.4816192Z ##[endgroup]
+2026-10-16T11:13:51.7887896Z ##[group]Run pnpm/action-setup@v4
+2026-10-16T11:13:51.7891370Z ##[endgroup]
+2026-10-16T11:13:51.9321531Z ##[group]Running self-installer...
+2026-10-16T11:13:53.2208014Z ##[endgroup]
+2026-10-16T11:13:53.3748101Z ##[group]Run actions/setup-node@v4
+2026-10-16T11:13:53.3751982Z ##[endgroup]
+2026-10-16T11:13:53.4900589Z ##[group]Environment details
+2026-10-16T11:13:53.8518097Z ##[endgroup]
+2026-10-16T11:13:57.6000056Z ##[group]Run pnpm install --frozen-lockfile
+2026-10-16T11:13:57.6048107Z ##[endgroup]
+2026-10-16T11:14:01.1491649Z ##[group]Run set -euo pipefail
+2026-10-16T11:14:01.1531822Z ##[endgroup]
+2026-10-16T11:14:01.9619277Z ##[group]Run actions/cache@v4
+2026-10-16T11:14:01.9621880Z ##[endgroup]
+2026-10-16T11:14:05.3440897Z ##[group]Run pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
+2026-10-16T11:14:05.3479680Z ##[endgroup]
+2026-10-16T11:14:17.8524682Z ##[group]Run set -euo pipefail
+2026-10-16T11:14:17.8567533Z ##[endgroup]
+2026-10-16T11:14:17.9461570Z ##[group]Run pnpm --filter @fleet-dao/web e2e --shard="$SHARD" --pass-with-no-tests
+2026-10-16T11:14:17.9495641Z ##[endgroup]
+2026-10-16T11:17:46.8785956Z     [laptop-1366] › e2e/specs/01-login.e2e.ts:100:3 › 登录 › 后端说账密登录是开着的（/auth/config） ───────────────
+2026-10-16T11:17:46.8786239Z     [laptop-1366] › e2e/specs/01-login.e2e.ts:106:3 › 登录 › 密码输错：后端回明确的错误，不给会话 ──────────────────────
+2026-10-16T11:17:46.8786506Z     [laptop-1366] › e2e/specs/01-login.e2e.ts:118:3 › 登录 › 账密登录成功：拿到会话，主页认得出是谁 ─────────────────────
+2026-10-16T11:17:46.8786784Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:51:3 › 画布（原主页） › 三块都显示真库里的东西，条数和后端 /api/home 一致 ───────
+2026-10-16T11:17:46.8787071Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:81:3 › 画布（原主页） › 流水线图：每张单落在它真所在的那一段（段来自 runs 表里引擎写的流水） 
+2026-10-16T11:17:46.8787360Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:102:3 › 画布（原主页） › 单击看板上的单：右边滑出详情；点「打开单子详情」进到那张单的详情页 ───
+2026-10-16T11:17:46.8787646Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:114:3 › 画布（原主页） › 画布占满正文区、一进来就在首屏里；要你拍的、做完的在右上角抽屉里 ────
+2026-10-16T11:17:46.8787921Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:132:3 › 画布（原主页） › 停滞的单在图上画成出问题、写明原因，不装作在好好跑 ───────────
+2026-10-16T11:17:46.8788233Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:140:3 › 画布（原主页） › 看板：排完版整张图收进画布里（中心、三段、每张单都在画布框里，不被截掉） 
+2026-10-16T11:17:46.8788555Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:167:3 › 画布（原主页） › 看板的交互照初版：「只看卡住的」只剩出问题的，不含等你拍；键盘 ? 打开快捷键说明 
+2026-10-16T11:17:46.8788870Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:196:3 › 画布（原主页） › 引擎那一格读真实健康：没有引擎在跑就写「引擎进程没连上」并标红，不写正常 
+2026-10-16T11:17:46.8789335Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:216:3 › 画布（原主页） › react-flow 右下角的水印保留着（MIT 不强制，隐藏它要订阅 Pro，不擅自花钱） 
+2026-10-16T11:17:46.8789647Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:225:3 › 主页：深色主题和手机宽度 › 深色主题：跟随系统是深色时页面真换成深色，流水线图、卡片都看得清 
+2026-10-16T11:17:46.8790087Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:239:3 › 主页：深色主题和手机宽度 › 手机宽度（390×844）：底部导航、不出现横向滚动条、要你拍的在顶上横条里、看板一屏里就有 
+2026-10-16T11:17:46.8790407Z     [laptop-1366] › e2e/specs/02-home.e2e.ts:287:3 › 主页：深色主题和手机宽度 › 手机宽度：看板是树形列表，三段一段一组、卡都在屏幕里；没有画布、没有缩放按钮 
+2026-10-16T11:17:46.8790696Z     [laptop-1366] › e2e/specs/02b-home-today.e2e.ts:13:3 › 主页三块 › 三块从上到下；要你拍的只放人闸和看门狗的卡，在跑的条数和 /api/home 一致 
+2026-10-16T11:17:46.8790970Z     [laptop-1366] › e2e/specs/02b-home-today.e2e.ts:53:3 › 主页三块 › 导航降级：侧栏只常驻主页，画布和别的页在「更多」里 ────────
+2026-10-16T11:17:46.8791233Z     [laptop-1366] › e2e/specs/03-task.e2e.ts:8:3 › 单子详情 › 做完的单 #13：总耗时、干活合计、每段耗时、每一笔都对得上库里的流水 ──────
+2026-10-16T11:17:46.8791495Z     [laptop-1366] › e2e/specs/03-task.e2e.ts:38:3 › 单子详情 › 在跑的单 #12：会话时间线和用量也来自库 ───────────────────
+2026-10-16T11:17:46.8791787Z     [laptop-1366] › e2e/specs/03-task.e2e.ts:49:3 › 单子详情 › 在跑的单 #12：「用哪个模型」能指定、写进库、能回到自动（驾驶舱改版 2026-10-07） 
+2026-10-16T11:17:46.8792102Z     [laptop-1366] › e2e/specs/03-task.e2e.ts:80:3 › 单子详情 › 没报花费、缓存读写也没读到的一笔（#14 动手的 Kimi，有单价但 token 不全）：花费写「估不了」和原因，不写 $0 
+2026-10-16T11:17:46.8792363Z     [laptop-1366] › e2e/specs/03-task.e2e.ts:88:3 › 单子详情 › 从没跑过的单 #16：明说「还没跑过」，不是空白 ────────────────
+2026-10-16T11:17:46.8792621Z     [laptop-1366] › e2e/specs/03-task.e2e.ts:94:3 › 单子详情 › 不存在的单：明确写「没有这张单」，正文里给回主页的路，不停在加载骨架 ──────
+2026-10-16T11:17:46.8792889Z     [laptop-1366] › e2e/specs/04-quota.e2e.ts:17:3 › 额度页 › 拼车池和独享池的额度读数、切号现状、烧速估计都显示出来 ─────────────
+2026-10-16T11:17:46.8793159Z     [laptop-1366] › e2e/specs/04-quota.e2e.ts:51:3 › 额度页 › 额度快用完的池进「快用完」，不在「先用它」里 ──────────────────
+2026-10-16T11:17:46.8793460Z     [laptop-1366] › e2e/specs/05-settings.e2e.ts:26:3 › 设置页 › 版面：留量线按池列出（拼车池、独享池分开写），种子装的线是 80% / 70% 
+2026-10-16T11:17:46.8793792Z     [laptop-1366] › e2e/specs/05-settings.e2e.ts:45:3 › 设置页 › 「引擎暂不用独享」：拨开 → 落库第 1 版、进操作记录、刷新还在、额度页也跟着说 
+2026-10-16T11:17:46.8794275Z     [laptop-1366] › e2e/specs/05-settings.e2e.ts:80:3 › 设置页 › 仓库一节「让 AI 接活」：原来关着 → 点开启（二次确认）→ 落库、进操作记录、刷新还开着 → 再点关闭回到关着 
+2026-10-16T11:17:46.8794853Z     [laptop-1366] › e2e/specs/05-settings.e2e.ts:131:3 › 设置页 › 【故意造出的失败】没有这个仓：PUT 回 404 repo_not_found 
+2026-10-16T11:17:46.8795181Z     [laptop-1366] › e2e/specs/05-settings.e2e.ts:138:3 › 设置页 › 带过期的版本号保存：后端回 409，不悄悄盖掉 ─────────────
+2026-10-16T11:17:46.8795504Z     [laptop-1366] › e2e/specs/05-settings.e2e.ts:151:3 › 设置页 › 同时跑的会话上限 6 → 8：保存后版本 +1，刷新还是 8；填 99 当场拦住 
+2026-10-16T11:17:46.8795874Z     [laptop-1366] › e2e/specs/05-settings.e2e.ts:176:3 › 设置页 › 独享 5 小时留量线 80% → 50%（独享已用 55%，到线了）：落库（整份换、版本 +1）、改成「人改过」、刷新还在、额度页的线跟着变 
+2026-10-16T11:17:46.8796197Z     [laptop-1366] › e2e/specs/06-notifications.e2e.ts:10:3 › 通知中心 › 库里的提醒按级别分开数：要你拍 2、卡住报警 2、日报 1；未处理的在前 
+2026-10-16T11:17:46.8796476Z     [laptop-1366] › e2e/specs/06-notifications.e2e.ts:24:3 › 通知中心 › 按级别筛选：点「卡住报警」只剩那两条 ─────────────
+2026-10-16T11:17:46.8796804Z     [laptop-1366] › e2e/specs/06-notifications.e2e.ts:31:3 › 通知中心 › 整页没有追问入口：没有「回答」按钮、没有旧追问区块 ──────
+2026-10-16T11:17:46.8797138Z     [laptop-1366] › e2e/specs/06-notifications.e2e.ts:39:3 › 通知中心 › 点「处理了」：这条从待处理里消失、「全部」里留着并写明谁处理的；落库、进操作记录 
+2026-10-16T11:17:46.8797489Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:9:3 › 其余页面 › 路由：在用的用途都排了模型，在线的路由写「活」、没探过的写「不知道」，不是空白 
+2026-10-16T11:17:46.8797824Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:32:3 › 其余页面 › 路由：动手里把 Sonnet 5.5 聚焦后按 Alt+上键 → 直接落库；再挪回去 
+2026-10-16T11:17:46.8798151Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:83:3 › 其余页面 › 渠道状态：目录里的渠道都显示出来，探得久的渠道变「检测中断」，刚探过的不受影响 
+2026-10-16T11:17:46.8798462Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:116:3 › 其余页面 › 思考档位：每个模型的每条路都列出来，来自库里的路由两层（并进路由页的页签） 
+2026-10-16T11:17:46.8798759Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:131:3 › 其余页面 › 定时任务：额度读取跑成了、每小时对账上次没查全且已过期，分开显示 
+2026-10-16T11:17:46.8799027Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:142:3 › 其余页面 › 操作记录：登录、设账密这些真发生过的动作都在，谁做的写清楚 ───
+2026-10-16T11:17:46.8799321Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:159:3 › 其余页面 › 更新日志：已发布的提交读不到时明说原因，不是空白，也没有「发布 v」 
+2026-10-16T11:17:46.8799629Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:176:3 › 其余页面 › 不存在的页面：404 页给回主页的路 ──────────────
+2026-10-16T11:17:46.8799927Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:181:3 › 其余页面 › 没做的页不占侧栏：账单仍写「还没做」；模型目录在路由页 ─────
+2026-10-16T11:17:46.8800252Z     [laptop-1366] › e2e/specs/07-other-pages.e2e.ts:199:3 › 其余页面 › 外壳尺寸生效：顶栏 52、侧栏 232（收起 60）乘根字号倍数（尺寸 token 放错命名空间时类名会静默失效） 
+2026-10-16T11:17:46.8800510Z     [laptop-1366] › e2e/specs/07b-env.e2e.ts:24:3 › 法国页 › 这一台一页看全：侧栏只有法国，本台六格和后端 /api/env 对得上 ──────
+2026-10-16T11:17:46.8800787Z     [laptop-1366] › e2e/specs/07b-env.e2e.ts:47:3 › 法国页 › 读不到的格子明说「没查成 + 原因」，不拿空或 0 顶（版本那一项在开发环境读不到发布目录） 
+2026-10-16T11:17:46.8801108Z     [laptop-1366] › e2e/specs/07b-env.e2e.ts:60:3 › 法国页 › 顶栏常驻环境切换器（本台的名字跟着 /api/me 来，不在别的页拉整份 /api/env），下拉里能进法国页 
+2026-10-16T11:17:46.8801566Z     [laptop-1366] › e2e/specs/07b-env.e2e.ts:78:3 › 法国页 › 引擎总开关（#1086）：顶栏常驻状态，法国页点开（二次确认）→ 落库、进操作记录、刷新还开着 → 再点关；默认是关 
+2026-10-16T11:17:46.8801961Z     [laptop-1366] › e2e/specs/07b-env.e2e.ts:130:3 › 法国页 › 【故意造出的失败】未登录写总开关：PUT /api/settings/engine.master 回 401（登录门挡住，不是任何人都能点） 
+2026-10-16T11:17:46.8802349Z     [laptop-1366] › e2e/specs/07c-nodes.e2e.ts:42:3 › 看板多机 › 顶栏切换器：默认是本台；下拉里有本台、演练 WSL（刚报的）、idle（从没收到过）；选 WSL 记进网址 
+2026-10-16T11:17:46.8802667Z     [laptop-1366] › e2e/specs/07c-nodes.e2e.ts:68:3 › 看板多机 › 切到远程：主页三块只读——要你拍的去答置灰，在跑的没有站内链接，上线记录写只在本台看 
+2026-10-16T11:17:46.8803006Z     [laptop-1366] › e2e/specs/07c-nodes.e2e.ts:81:3 › 看板多机 › 切到远程：画布渲染它的快照，顶上写「报的，只读」；单子链接是 GitHub 链接，去答置灰；铃铛不露出来 
+2026-10-16T11:17:46.8803384Z     [laptop-1366] › e2e/specs/07c-nodes.e2e.ts:112:3 › 看板多机 › 失联：浏览器的钟快进 10 分钟，横幅写「失联 10 分钟」、说不是现在的，顶栏标「失联」，下拉里那一项变灰 
+2026-10-16T11:17:46.8803720Z     [laptop-1366] › e2e/specs/07c-nodes.e2e.ts:136:3 › 看板多机 › 配了钥匙却从没收到过快照的环境（404）：写「没有这个环境」和回主页，不画空数据、不给重试 
+2026-10-16T11:17:46.8804031Z     [laptop-1366] › e2e/specs/07c-nodes.e2e.ts:149:3 › 看板多机 › 其余页（额度）选了远程环境：整页说明只看得到本台，页面本体不显示；点「切回本机」回到本台的额度页 
+2026-10-16T11:17:46.8804435Z     [laptop-1366] › e2e/specs/07c-nodes.e2e.ts:165:3 › 看板多机 › 法国页：本台、演练 WSL、idle 三列并排；WSL 那列写上报于，idle 那列写从没收到过 
+2026-10-16T11:17:46.8804777Z     [laptop-1366] › e2e/specs/08-backend-down.e2e.ts:24:3 › 后端不可用 › 一打开就连不上后端：整页写「没能确认登录」和原因、有重试，后端好了点重试就进去 
+2026-10-16T11:17:46.8805081Z     [laptop-1366] › e2e/specs/08-backend-down.e2e.ts:41:3 › 后端不可用 › 用着用着后端断了：这一页写「没读成」和原因、有重试，不是空白也不是 0；后端好了点重试数据回来 
+2026-10-16T11:17:46.8805346Z     [laptop-1366] › e2e/specs/08-backend-down.e2e.ts:67:3 › 后端不可用 › 后端回 500：同样写明没读成、给重试 ────────────
+2026-10-16T11:17:46.8805626Z     [laptop-1366] › e2e/specs/08-backend-down.e2e.ts:82:3 › 后端不可用 › 主页读不到：写「主页没读成」和原因、有重试，不是空白流水线；好了点重试就回来 
+2026-10-16T11:17:46.8805895Z     [laptop-1366] › e2e/specs/08-backend-down.e2e.ts:102:3 › 后端不可用 › 改设置时后端断了：保存失败要弹明确的话，设置没有被当成改成功 
+2026-10-16T11:17:46.8806179Z     [laptop-1366] › e2e/specs/09-logout.e2e.ts:5:3 › 退出 › 退出：回登录页、旧会话作废、再打开任何页面又被带去登录 ──────────────
+2026-10-16T11:17:46.8806642Z     [laptop-1366] › e2e/specs/10-credentials.e2e.ts:11:3 › 设置页：账密登录 › 版面：现状写用户名，改账密表单有当前密码、用户名、新密码、再输一遍，栏的 autocomplete 对 
+2026-10-16T11:17:46.8807045Z     [laptop-1366] › e2e/specs/10-credentials.e2e.ts:32:3 › 设置页：账密登录 › 当前密码输错：话落在「当前密码」那一栏、还留在设置页、登录没掉 
+2026-10-16T11:17:46.8807439Z     [laptop-1366] › e2e/specs/10-credentials.e2e.ts:60:3 › 设置页：账密登录 › 改密码：这个浏览器不掉线、说明别处登录作废、旧密码不能登新密码能登、操作记录里有 credentials.change；最后改回去 
+2026-10-16T11:17:46.8807760Z     [laptop-1366] › e2e/specs/11-mobile-overflow.e2e.ts:19:3 › 手机宽度：三页不横滚 › 路由：用途条在页内横滑，页头状态胶囊换行，主区不比屏幕宽 
+2026-10-16T11:17:46.8808177Z     [laptop-1366] › e2e/specs/11-mobile-overflow.e2e.ts:26:3 › 手机宽度：三页不横滚 › 路由：用途标题块三行各不折行，结论和状态标签在同一行（320、390，每个用途） 
+2026-10-16T11:17:46.8808540Z     [laptop-1366] › e2e/specs/11-mobile-overflow.e2e.ts:81:3 › 手机宽度：三页不横滚 › 路由：模型目录、渠道、思考档位三个页签每行名字一行、小字一行，主区不横滚（320、390，#1916） 
+2026-10-16T11:17:46.8808867Z     [laptop-1366] › e2e/specs/11-mobile-overflow.e2e.ts:128:3 › 手机宽度：三页不横滚 › 路由：用途下路由行的「顺位第一条活的」标签在小字行开头，不被截掉（390） 
+2026-10-16T11:17:46.8809204Z     [laptop-1366] › e2e/specs/11-mobile-overflow.e2e.ts:144:3 › 手机宽度：三页不横滚 › 路由：每行的操作收进「⋯」菜单，菜单项不低于 40px 
+2026-10-16T11:17:46.8809509Z     [laptop-1366] › e2e/specs/11-mobile-overflow.e2e.ts:158:3 › 手机宽度：三页不横滚 › 渠道状态：只画列表，点一行从底部开详情抽屉，不横滚 
+2026-10-16T11:17:46.8809771Z     [laptop-1366] › e2e/specs/11-mobile-overflow.e2e.ts:172:3 › 手机宽度：三页不横滚 › 操作记录：主区不比屏幕宽 ──────────
+2026-10-16T11:17:46.8810029Z     [laptop-1366] › e2e/specs/12-intake.e2e.ts:20:3 › 提需求 › 列表三处都读真库：待拍板的在「等我的」里；甲乙头像各写名字最后一个字 ─────
+2026-10-16T11:17:46.8810331Z     [laptop-1366] › e2e/specs/12-intake.e2e.ts:47:3 › 提需求 › 已结案的锁住：没有输入框，写「已结案，内容不再改」，能「接着这条提」 ─────
+2026-10-16T11:17:46.8810650Z     [laptop-1366] › e2e/specs/12-intake.e2e.ts:64:3 › 提需求 › 别人也说过话的不能删：菜单里没有「删除」 ───────────────────
+2026-10-16T11:17:46.8810980Z     [laptop-1366] › e2e/specs/12-intake.e2e.ts:75:3 › 提需求 › 拍板「同意做」：e2e 没接 GitHub，照实写开不了单，需求还在待拍板 ──
+2026-10-16T11:17:46.8811359Z     [laptop-1366] › e2e/specs/12-intake.e2e.ts:91:3 › 提需求 › 新提一条 → 删除（确认框写 30 天）→ 最近删除里点开 → 恢复回进行中 ─
+2026-10-16T11:17:46.8811652Z     [laptop-1366] › e2e/specs/12-intake.e2e.ts:138:3 › 提需求 › 接着这条提：新的一条挂在原条下面，详情里记着接的是哪条 ───────────
+2026-10-16T11:17:46.8811900Z /home/runner/work/fleet-dao/fleet-dao/packages/web:
+2026-10-16T11:17:46.8812317Z [ERR_PNPM_RECURSIVE_RUN_FIRST_FAIL] @fleet-dao/web@0.0.0 e2e: `playwright test -c e2e/playwright.config.ts --shard=1/2 --pass-with-no-tests`
+2026-10-16T11:17:46.8812399Z Exit status 1
+2026-10-16T11:17:46.8822662Z ##[error]Process completed with exit code 1.
+2026-10-16T11:17:46.9148757Z ##[group]Run node packages/conventions/src/bin/e2e-flaky.ts summary _tmp/e2e/results.json >> "$GITHUB_STEP_SUMMARY"
+2026-10-16T11:17:46.9149093Z [36;1mnode packages/conventions/src/bin/e2e-flaky.ts summary _tmp/e2e/results.json >> "$GITHUB_STEP_SUMMARY"[0m
+2026-10-16T11:17:46.9186913Z shell: /usr/bin/bash -e {0}
+2026-10-16T11:17:46.9187001Z env:
+2026-10-16T11:17:46.9187183Z   E2E_PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
+2026-10-16T11:17:46.9187270Z   E2E_BROWSER_CHANNEL: chromium
+2026-10-16T11:17:46.9187396Z   PNPM_HOME: /home/runner/setup-pnpm/node_modules/.bin
+2026-10-16T11:17:46.9187496Z ##[endgroup]
+2026-10-16T11:17:47.0462379Z ##[group]Run actions/upload-artifact@v4
+2026-10-16T11:17:47.0462463Z with:
+2026-10-16T11:17:47.0462549Z   name: e2e-38892249992-1-1
+2026-10-16T11:17:47.0462621Z   path: _tmp/e2e/
+2026-10-16T11:17:47.0462688Z   retention-days: 7
+2026-10-16T11:17:47.0462770Z   if-no-files-found: warn
+2026-10-16T11:17:47.0462849Z   compression-level: 6
+2026-10-16T11:17:47.0462924Z   overwrite: false
+2026-10-16T11:17:47.0462999Z   include-hidden-files: false
+2026-10-16T11:17:47.0463069Z env:
+2026-10-16T11:17:47.0463211Z   E2E_PG_ADMIN_URL: postgres://postgres@127.0.0.1:5432/postgres
+2026-10-16T11:17:47.0463283Z   E2E_BROWSER_CHANNEL: chromium
+2026-10-16T11:17:47.0463396Z   PNPM_HOME: /home/runner/setup-pnpm/node_modules/.bin
+2026-10-16T11:17:47.0463467Z ##[endgroup]
+2026-10-16T11:17:47.1808596Z (node:8835) [DEP0040] DeprecationWarning: The `punycode` module is deprecated. Please use a userland alternative instead.
+2026-10-16T11:17:47.1810000Z (Use `node --trace-deprecation ...` to show where the warning was created)
+2026-10-16T11:17:47.2812816Z With the provided path, there will be 356 files uploaded
+2026-10-16T11:17:47.2813320Z Artifact name is valid!
+2026-10-16T11:17:47.2813566Z Root directory input is valid!
+2026-10-16T11:17:47.5421860Z Beginning upload of artifact content to blob storage
+2026-10-16T11:17:47.8499935Z (node:8835) [DEP0169] DeprecationWarning: `url.parse()` behavior is not standardized and prone to errors that have security implications. Use the WHATWG URL API instead. CVEs are not issued for `url.parse()` vulnerabilities.
+2026-10-16T11:17:48.3270833Z Uploaded bytes 3868543
+2026-10-16T11:17:48.3706883Z Finished uploading artifact content to blob storage!
+2026-10-16T11:17:48.3707668Z SHA256 digest of uploaded artifact zip is 4769015733599250fc2f2d60bc11a7d36c87614f6a427201f006e2a07bb54265
+2026-10-16T11:17:48.3708803Z Finalizing artifact upload
+2026-10-16T11:17:48.6635286Z Artifact e2e-38892249992-1-1.zip successfully finalized. Artifact ID 12041624395
+2026-10-16T11:17:48.6636017Z Artifact e2e-38892249992-1-1 has been successfully uploaded! Final size is 3868543 bytes. Artifact ID is 12041624395
+2026-10-16T11:17:48.6641314Z Artifact download URL: https://github.com/thoerwink8/fleet-dao/actions/runs/38892249992/artifacts/12041624395
+2026-10-16T11:17:48.7438537Z Post job cleanup.
+2026-10-16T11:17:48.8528555Z Pruning is unnecessary.
+2026-10-16T11:17:48.9806407Z Post job cleanup.
+2026-10-16T11:17:49.0426695Z [command]/usr/bin/git version
+2026-10-16T11:17:49.0458047Z git version 2.55.0
+2026-10-16T11:17:49.0485159Z Temporarily overriding HOME='/home/runner/work/_temp/079764d3-07c1-4f01-b28f-515be50becea' before making global git config changes
+2026-10-16T11:17:49.0486062Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-16T11:17:49.0495357Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/fleet-dao/fleet-dao
+2026-10-16T11:17:49.0526485Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-16T11:17:49.0549763Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-16T11:17:49.0732434Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-16T11:17:49.0758113Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-16T11:17:49.0966718Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-16T11:17:49.0995485Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-16T11:17:49.1305132Z Cleaning up orphan processes
+2026-10-16T11:17:49.1592599Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache@v4, actions/checkout@v4, actions/setup-node@v4, actions/upload-artifact@v4, pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

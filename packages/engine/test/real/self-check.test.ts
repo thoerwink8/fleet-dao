@@ -247,6 +247,7 @@ describe('selfCheck', () => {
         mergeSignals: [],
         standardPathsFile: 'packages/conventions/standard-paths.json',
         weight: 1,
+        flowEligible: false,
       }),
       ctx(),
     );

@@ -87,14 +87,48 @@ const RED_CONCLUSIONS = new Set([
 /** StatusContext 的这几种状态算红 */
 const RED_STATES = new Set(['FAILURE', 'ERROR']);
 
+/** CANCELLED 的最新一条：结束不到这么久（毫秒）先不判红，等它的新一次 */
+const CANCEL_GRACE_MS = 3 * 60_000;
+
+/**
+ * 每个检查名只留最新那一条：CheckRun 按 name 比 startedAt，StatusContext 按 context 比 createdAt。
+ * 时间读不到（或两边有一边读不到），就按数组里的先后，排在后面的算新。
+ * @param {unknown[]} checks
+ * @param {string} what
+ * @returns {Record<string, unknown>[]}
+ */
+function latestPerName(checks, what) {
+  /** @type {Map<string, { c: Record<string, unknown>, t: number }>} */
+  const latest = new Map();
+  checks.forEach((item, i) => {
+    if (!isObj(item)) throw new WaitError(`${what} 的 statusCheckRollup 里有一项不是对象`);
+    const named = typeof item.name === 'string';
+    const key = named
+      ? `check:${item.name}`
+      : typeof item.context === 'string'
+        ? `status:${item.context}`
+        : `anon:${i}`;
+    const raw = named ? item.startedAt : item.createdAt;
+    const t = typeof raw === 'string' ? Date.parse(raw) : NaN;
+    const prev = latest.get(key);
+    if (!prev || !Number.isFinite(t) || !Number.isFinite(prev.t) || t >= prev.t)
+      latest.set(key, { c: item, t });
+  });
+  return [...latest.values()].map((v) => v.c);
+}
+
 /**
  * PR 问一次：合并了 → 绿；关了没合 → 红；有检查红 → 红；别的接着等。
+ * 只看每个同名检查最新的那一条：改了 PR 正文，merge-gate 会重跑，旧的那次（常是 CANCELLED）还留在
+ * statusCheckRollup 里，拿它判红就会在新的那次绿了之前提前退出（#2818）。最新那条是 CANCELLED 且刚结束
+ * （不到 3 分钟）时先不判红，接着等它的新一次。
  * @param {Gh} gh
  * @param {number} n
  * @param {string[]} repo
+ * @param {number} [now] 现在的毫秒时刻，测试用；不传就是 Date.now()
  * @returns {Step}
  */
-export function stepPr(gh, n, repo) {
+export function stepPr(gh, n, repo, now = Date.now()) {
   const what = `gh pr view ${n}`;
   const o = parseJson(gh(['pr', 'view', String(n), ...repo, '--json', 'state,url,statusCheckRollup']), what);
   if (!isObj(o)) throw new WaitError(`${what} 的输出不是一个对象`);
@@ -107,16 +141,26 @@ export function stepPr(gh, n, repo) {
   if (!Array.isArray(checks)) throw new WaitError(`${what} 的 statusCheckRollup 不是数组`);
   /** @type {string[]} */
   const red = [];
-  for (const c of checks) {
-    if (!isObj(c)) throw new WaitError(`${what} 的 statusCheckRollup 里有一项不是对象`);
+  for (const c of latestPerName(checks, what)) {
     const conclusion = typeof c.conclusion === 'string' ? c.conclusion.toUpperCase() : '';
     const st = typeof c.state === 'string' ? c.state.toUpperCase() : '';
+    if (conclusion === 'CANCELLED' && cancelledJustNow(c, now)) continue;
     if (RED_CONCLUSIONS.has(conclusion) || RED_STATES.has(st)) {
       red.push(String(c.name ?? c.context ?? '（没名字的检查）'));
     }
   }
   if (red.length > 0) return { done: true, ok: false, line: `PR #${n} 检查红了：${red.join('、')} ${url}` };
   return { done: false };
+}
+
+/**
+ * 最新那条 CANCELLED 是不是刚结束（completedAt 离现在不到 CANCEL_GRACE_MS）。读不到 completedAt 就不算刚结束。
+ * @param {Record<string, unknown>} c
+ * @param {number} now
+ */
+function cancelledJustNow(c, now) {
+  const t = typeof c.completedAt === 'string' ? Date.parse(c.completedAt) : NaN;
+  return Number.isFinite(t) && now - t < CANCEL_GRACE_MS;
 }
 
 /**

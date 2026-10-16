@@ -9,6 +9,8 @@ import type {
   ArmAutoMergeResult,
   ColdVerifyInput,
   ColdVerifyResult,
+  DecideFlowModeInput,
+  DecideFlowModeResult,
   DeliveryRead,
   GuardedPaths,
   MergeNowInput,
@@ -82,6 +84,8 @@ export interface Script {
   spend: (n: number, input: TaskSpendInput) => TaskSpendResult;
   /** 上一段收场了没有（决定 0093）；默认收场了。 */
   settled: (input: SegmentSettledInput, n: number) => SegmentSettledResult;
+  /** 定这张单走三段还是全程（#2826）。默认三段：老用例照旧。 */
+  flow: (input: DecideFlowModeInput, n: number) => DecideFlowModeResult;
 }
 
 export interface Calls {
@@ -109,6 +113,10 @@ export interface Calls {
   /** 查花费收到的入参（起算时间在不在里面）。不进 order。 */
   spendInputs: TaskSpendInput[];
   settled: SegmentSettledInput[];
+  /** 定模式收到的入参。不进 order（老用例比 order 一字不差）。 */
+  flow: DecideFlowModeInput[];
+  /** 每次定模式时已经起过几段会话（第一段动手之前定＝0）。 */
+  flowAfterSegments: number[];
 }
 
 export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: '已提交' };
@@ -132,6 +140,8 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     spend: 0,
     spendInputs: [],
     settled: [],
+    flow: [],
+    flowAfterSegments: [],
   };
   const script: Script = {
     brief: () => ({ ok: true, brief: goodBrief() }),
@@ -151,6 +161,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     selfCheck: () => ({ state: 'skipped', reason: '测试默认不跑', steps: [] }),
     spend: () => ({ tokens: 0, runs: 0, unmetered: 0, estimated: 0 }),
     settled: () => ({ settled: true }),
+    flow: () => ({ mode: 'three', source: 'ineligible', reason: '测试默认三段' }),
     ...over,
   };
   const tasks: EngineTasks = {
@@ -226,6 +237,11 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.spend += 1;
       calls.spendInputs.push(input);
       return script.spend(calls.spend, input);
+    },
+    async decideFlowMode(input) {
+      calls.flowAfterSegments.push(calls.segment.length);
+      calls.flow.push(input);
+      return script.flow(input, calls.flow.length);
     },
   };
   return { tasks, calls };

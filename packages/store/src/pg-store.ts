@@ -12,6 +12,7 @@ import {
   channels,
   countTaskGroups,
   type Db,
+  getFlowAssignment,
   githubEvents,
   githubEventVersions,
   githubTokens,
@@ -28,6 +29,7 @@ import {
   quotaSamplesSince,
   quotaWindows,
   readChannelStates,
+  recordFlowAssignment,
   repos,
   routes,
   runs,
@@ -425,6 +427,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(id)) return null;
       const [row] = await db.select().from(tasks).where(eq(tasks.id, id));
       return row ? toTask(row) : null;
+    },
+    async writeFlowAssignmentOnce(input) {
+      return recordFlowAssignment(db, { ...input, assignedAt: now() });
+    },
+    async getFlowAssignment(taskId) {
+      return getFlowAssignment(db, taskId);
     },
     async listTasks({ group, repoId, q, cursor: raw, limit }) {
       const cursor = parseCursor(raw, isUuid);

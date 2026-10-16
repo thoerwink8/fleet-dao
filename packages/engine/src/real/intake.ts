@@ -15,7 +15,7 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { promisify } from 'node:util';
-import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import { LOCAL_LABEL, type StandardPath } from '@fleet-dao/conventions';
 import {
   type Db,
   expiredLocalClaims,
@@ -41,7 +41,7 @@ import {
   writeIntakeWaiting,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
-import type { RepoWithProfile } from '@fleet-dao/shared';
+import { parseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
@@ -49,10 +49,11 @@ import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundErro
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../jobs/dispatch-standing.ts';
 import { requestGroom } from '../jobs/groom-request.ts';
-import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
+import { type IntakeDeps, type IntakeRepo, prClaimedIssues } from '../jobs/intake.ts';
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
 import { liveLocalIssues } from '../jobs/local-leases.ts';
 import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
+import { standardPathsList } from '../standard-paths-list.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
 
@@ -63,8 +64,8 @@ function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-async function missingToolchain(repo: RepoWithProfile): Promise<readonly string[]> {
-  const tools = repo.profile?.toolchain ?? [];
+async function missingToolchain(repo: IntakeRepo): Promise<readonly string[]> {
+  const tools = parseRepoProfile(repo.profile).toolchain;
   if (tools.length === 0) return [];
   const script = `for tool in ${tools.map(shQuote).join(' ')}; do command -v "$tool" >/dev/null 2>&1 || printf '%s\\n' "$tool"; done`;
   try {
@@ -82,8 +83,50 @@ async function missingToolchain(repo: RepoWithProfile): Promise<readonly string[
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
 export type IntakeGitHub = Pick<
   GitHub,
-  'readGroomFacts' | 'readIssuePlan' | 'readSpecDoc' | 'commentIssue' | 'addIssueLabel' | 'removeIssueLabel'
+  | 'readGroomFacts'
+  | 'readIssuePlan'
+  | 'readIssueStates'
+  | 'readSpecDoc'
+  | 'commentIssue'
+  | 'addIssueLabel'
+  | 'removeIssueLabel'
+  | 'readRepoFile'
 > & { claims: Pick<GitHub['claims'], 'openPulls'> };
+
+/** 读这个仓档案里那份改标准清单。文件不在＝空清单；认不出、读不出内容照抛。 */
+export async function readRepoStandardPaths(
+  gh: Pick<GitHub, 'readRepoFile'>,
+  repo: Pick<IntakeRepo, 'owner' | 'name' | 'profile'>,
+): Promise<StandardPath[]> {
+  const path = parseRepoProfile(repo.profile).standardPathsFile;
+  const read = await gh.readRepoFile({ repo: { owner: repo.owner, name: repo.name }, path });
+  if (read.file.kind === 'not_file') throw new Error(`读 ${path} 没成（${read.file.why}）`);
+  return standardPathsList(read.file.kind === 'text' ? read.file.text : null);
+}
+
+/**
+ * 开着接活的仓因档案没就绪不拉单（#2839）：why 是原因时推报警（同键原地更新），why 是 null（齐了）时撤掉。
+ * 没有这条、已撤的，resolveAlertWithReason 回 not_found / already_resolved，不算错。
+ */
+export async function reportIntakeProfile(
+  db: Db,
+  repo: { owner: string; name: string },
+  why: string | null,
+): Promise<void> {
+  const slug = `${repo.owner}/${repo.name}`;
+  const dedupeKey = `intake-profile:${slug}`;
+  if (why === null) {
+    await resolveAlertWithReason(db, { dedupeKey, by: 'engine', why: '仓档案齐了，拉单照常' });
+    return;
+  }
+  await upsertAlert(db, {
+    dedupeKey,
+    level: 'alert',
+    taskId: null,
+    title: `${slug} 仓档案没就绪，拉单不拉这个仓`,
+    body: `${why}\n\n补法：在法国跑 fleet-api project show ${slug} 看现状；把原有项和缺的项写成一整份 JSON，用 fleet-api project set-profile ${slug} --file - 写回（整份换掉，原有项要一起带上）。`,
+  });
+}
 
 export interface IntakeWiring {
   db: Db;
@@ -131,7 +174,9 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         }));
       },
       toolchainReady: w.toolchainReady ?? missingToolchain,
+      standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
+      profileAlert: ({ repo, why }) => reportIntakeProfile(w.db, repo, why),
       // 本机领单的租约（决定 0096）：到期的行、心跳（本机会话推来的 node_sessions）、PR 镜像都从库里读，摘标签用「引擎」机器人
       localLeases: {
         expired: (repo, at) => expiredLocalClaims(w.db, repo.id, at),
@@ -205,6 +250,9 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         const pulls = await w.gh.claims.openPulls({ owner: repo.owner, name: repo.name });
         return prClaimedIssues(pulls);
       },
+      // 前置单（正文「前置：」里写的）开没开着：一批一次问，读不到、有号查不到都抛，拉单按「等前置」算
+      prerequisiteStates: (repo, numbers) =>
+        w.gh.readIssueStates({ repo: { owner: repo.owner, name: repo.name }, numbers }),
       async markLocal({ repo, issueNumber }) {
         await w.gh.addIssueLabel({
           repo: { owner: repo.owner, name: repo.name },

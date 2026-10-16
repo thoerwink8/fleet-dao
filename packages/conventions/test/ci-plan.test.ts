@@ -747,6 +747,16 @@ describe('汇总（必过检查 check）：一律全套（决定 0101），该�
     }
   });
 
+  it('红的 job 单列出来（#2795）：lint、test 红了就说 lint（failure）、test（failure）；全绿是空的', () => {
+    expect(ciVerdict(needs()).redJobs).toEqual([]);
+    const v = ciVerdict(needs({ lint: { result: 'failure' }, test: { result: 'failure' } }));
+    expect(v.redJobs).toEqual(['lint（failure）', 'test（failure）']);
+    // 本该跳过的却跑了、本该跑的没有结果，也算不对的 job
+    expect(ciVerdict(needs({ e2e: { result: 'cancelled' } })).redJobs).toEqual(['e2e（cancelled）']);
+    const { deploy: _, ...rest } = needs();
+    expect(ciVerdict(rest).redJobs).toEqual(['deploy（没有结果）']);
+  });
+
   it('lint（biome/tsc/docs/hygiene 并成的那个）红了：不过，报的是这一项', () => {
     const v = ciVerdict(needs({ lint: { result: 'failure' } }));
     expect(v.ok).toBe(false);
@@ -914,6 +924,24 @@ describe('入口', { timeout: 0 }, () => {
     expect(
       run(verdict, [], { CI_NEEDS: JSON.stringify({ ...base, lint: { result: 'failure' } }) }).status,
     ).toBe(1);
+  });
+
+  it('红了：汇总入口打一条 ::error title=红的 job，写明哪几个 job 红了（引擎等 CI 读得到，#2795）；全绿没有这一条', () => {
+    const p = planOutputs(assigned(ciFullPlan()));
+    const base = {
+      changes: { result: 'success', outputs: p },
+      lint: { result: 'success' },
+      test: { result: 'success' },
+      web: { result: 'success' },
+      e2e: { result: 'success' },
+      deploy: { result: 'success' },
+    };
+    const red = run(verdict, [], {
+      CI_NEEDS: JSON.stringify({ ...base, lint: { result: 'failure' }, test: { result: 'failure' } }),
+    });
+    expect(red.status).toBe(1);
+    expect(red.stderr).toContain('::error title=红的 job::lint（failure）、test（failure）');
+    expect(run(verdict, [], { CI_NEEDS: JSON.stringify(base) }).stderr).not.toContain('红的 job');
   });
 });
 

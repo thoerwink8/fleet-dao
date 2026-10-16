@@ -23,6 +23,8 @@ const REQUIRED = [
   'task-paused',
   'task-reworked',
   'task-repinned',
+  'task-full-merged',
+  'task-full-reworked',
 ];
 
 const HOW =
@@ -114,6 +116,22 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
       const plain = readFileSync(`${DIR}${old}.json`, 'utf8');
       expect(plain).not.toContain('taskRepin');
       expect(plain).not.toContain(marker);
+    }
+  });
+
+  it('全程两份夹具（#2826）真走过定模式：带 flow-mode 标记和 decideFlowMode；全程返工只有一轮却起了三段会话；老夹具里都没有', () => {
+    const marker = Buffer.from(JSON.stringify({ id: 'flow-mode', deprecated: false })).toString('base64');
+    for (const name of ['task-full-merged', 'task-full-reworked']) {
+      const text = readFileSync(`${DIR}${name}.json`, 'utf8');
+      expect(text).toContain(marker);
+      expect(scheduledActivities(load(`${name}.json`).history)).toContain('decideFlowMode');
+    }
+    const reworked = scheduledActivities(load('task-full-reworked.json').history);
+    expect(reworked.filter((n) => n === 'runSegment').length).toBe(3);
+    for (const old of ['task-merged', 'task-reworked', 'task-merge-conflict']) {
+      const text = readFileSync(`${DIR}${old}.json`, 'utf8');
+      expect(text).not.toContain(marker);
+      expect(scheduledActivities(load(`${old}.json`).history)).not.toContain('decideFlowMode');
     }
   });
 

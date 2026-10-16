@@ -3,8 +3,8 @@
 // 钉这几处：
 // 1. 名单：agents/subagents/ 下恰好三份，文件名和 name 就是 Claude Code 内置的 Explore、general-purpose、Plan（同名才压得住内置的）；
 //    多一份、少一份、换名、大小写不对都红。
-// 2. 模型：三份各钉自己那一档的完整 id（claude-haiku-5-5 / claude-opus-5-5 / claude-opus-5-5，决定 0103 起工人也是 Opus）。别名（网关下会落到旧版）、
-//    inherit、Fable、旧版、换档、没写都红；effort 也钉死（medium / high / high）。
+// 2. 模型：三份各钉自己那一档的完整 id（claude-haiku-5-5 / claude-sonnet-5-5 / claude-opus-5-5）。别名（网关下会落到旧版）、
+//    inherit、Fable、旧版、换档、没写都红；effort 也钉死（medium / medium / high）。
 // 3. 权限：斥候 Explore 和设计 Plan 只读——disallowedTools 带 Edit、Write，tools 白名单里也不许有它们；三份都不写 isolation
 //    （工作树由派活时选；写了引擎会话里会整个挡掉）。
 // 4. 三份都限回合数、都写 omitClaudeMd: true（主对话的回合、等待、报进度规矩不进子代理）。
@@ -23,7 +23,7 @@ const read = (path: string) => readFileSync(path, 'utf8').replace(/\r\n/g, '\n')
 /** 三个角色：内置名 → 该钉的完整 id、effort、是不是只读。加减角色要改这里（走改标准） */
 const ROLES: Record<string, { model: string; effort: string; readOnly: boolean }> = {
   Explore: { model: 'claude-haiku-5-5', effort: 'medium', readOnly: true },
-  'general-purpose': { model: 'claude-opus-5-5', effort: 'high', readOnly: false },
+  'general-purpose': { model: 'claude-sonnet-5-5', effort: 'medium', readOnly: false },
   Plan: { model: 'claude-opus-5-5', effort: 'high', readOnly: true },
 };
 const WANT_FILES = Object.keys(ROLES)
@@ -150,7 +150,7 @@ function engineDir(src: string): string {
 
 const files = existsSync(DIR)
   ? readdirSync(DIR)
-      .filter((f) => !f.startsWith('.'))
+      .filter((f) => !f.startsWith('.') && f !== 'README.md') // README.md 是规范说明（subagent-readme.rules.test.ts 钉它）
       .sort()
   : [];
 const texts = Object.fromEntries(files.map((f) => [f, read(`${DIR}${f}`)]));

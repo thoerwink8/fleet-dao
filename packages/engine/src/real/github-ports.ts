@@ -179,6 +179,8 @@ export function ciResultOf(r: Awaited<ReturnType<EngineGitHub['waitCi']>>): CiRe
         head: r.head,
         failedChecks: r.failedChecks,
         ...(r.digest ? { digest: r.digest } : {}),
+        // 红的 job 名和日志尾巴（或「日志没取到：原因」）：task-ci 把它原样拼进返工意见（#2795）
+        ...(r.detail ? { detail: r.detail } : {}),
       };
     case 'conflict':
       return {
