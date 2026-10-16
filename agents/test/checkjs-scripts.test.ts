@@ -36,6 +36,7 @@ const CHECKED = [
   'hooks/unattended.mjs',
   'hooks/capacity.mjs',
   'hooks/queue-stop.mjs',
+  'hooks/subagent-ledger.mjs',
   'hooks/work-watch.mjs',
   'local-sessions/lib.mjs',
   'local-sessions/heartbeat.mjs',
