@@ -12,11 +12,13 @@ import {
   DeployLagState,
   type DeployLagVerdict,
   judgeDeployLag,
+  type RunningRelease,
   readDeployLagInput,
   watchOnce,
 } from '@fleet-dao/store';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { deployLagCheck } from '../src/deploy-lag-check.ts';
+import { versionFact } from '../src/env-view.ts';
 
 // 别的包、仓里 deploy/ 下的文件：路径放变量里动态取（写成字面量 tsc 会把它们拉进本包的工程里查）
 const SCAN = '../../web/src/build/scan.ts';
@@ -57,10 +59,16 @@ function state(over: Partial<State> = {}): State {
 }
 /** 同一份主线读数，只换「什么时候读到的」。 */
 const mainAt = (checkedAt: string) => ({ ...(state().main as NonNullable<State['main']>), checkedAt });
-const input = (current: string | null, st: State | { error: string } = state()) =>
-  ({ current: { sha: current }, state: st }) satisfies DeployLagInput;
+/** 装机脚本副本和在用的这一版对得上（#2728 的绿）。 */
+const installedOk = (): State =>
+  state({
+    installed: { commit: H2, checkedAt: ago(2 * MIN), result: 'ok', drift: [], detail: '' },
+  });
+const input = (current: string | null, st: State | { error: string } = state(), running?: RunningRelease) =>
+  ({ current: { sha: current }, state: st, ...(running ? { running } : {}) }) satisfies DeployLagInput;
 const codes = (v: DeployLagVerdict) => v.problems.map((p) => p.code);
 const judge = (i: DeployLagInput) => judgeDeployLag(i, NOW);
+const said = (v: DeployLagVerdict) => v.problems.map((p) => `${p.message}\n${p.detail}`).join('\n');
 
 describe('判定：读的时候现算', () => {
   it('跟上了：绿', () => {
@@ -177,6 +185,89 @@ describe('判定：读的时候现算', () => {
     expect(deps.problems[0]?.alreadyAlerted).toBe(true);
     // 老状态没有这两个字段：绿
     expect(judge(input(H2, state())).ok).toBe(true);
+    // 进程 cwd 已经在这一版，也盖不住脚本副本不一致
+    expect(
+      judge(input(H2, state({ installed: installed() }), { engine: { sha: H2 }, api: { sha: H2 } })).ok,
+    ).toBe(false);
+  });
+
+  it('current 与装机脚本一致、进程 cwd 也等于 current：照绿', () => {
+    const aligned = input(H2, installedOk(), { engine: { sha: H2 }, api: { sha: H2 } });
+    expect(judge(aligned)).toEqual({ ok: true, problems: [] });
+    const fact = versionFact(aligned, NOW);
+    expect(fact.current).toBe(H2);
+    expect(fact.detail).toContain(`在用 ${H2.slice(0, 12)}`);
+    expect(fact.problems).toEqual([]);
+  });
+
+  it('【故意造出的失败】current 已切、进程 cwd 还在旧 release 目录：不绿，文案含旧提交；在用版本不标成新提交', async () => {
+    const lagging = input(H2, installedOk(), {
+      engine: { sha: H1 },
+      api: { sha: H1 },
+      diffs: { [H1]: ['docs/only.md', 'packages/store/src/deploy-lag.ts'] },
+    });
+    const v = judge(lagging);
+    expect(v.ok).toBe(false);
+    expect(said(v)).toContain('进程还在旧 release 目录');
+    expect(said(v)).toContain(H1.slice(0, 12));
+    expect(v.problems.map((p) => p.message).join('')).not.toMatch(/[0-9a-f]{7,40}/);
+    const fact = versionFact(lagging, NOW);
+    expect(fact.current).toBe(H1);
+    expect(fact.detail).toContain(`在用 ${H1.slice(0, 12)}`);
+    expect(fact.detail).not.toContain(H2.slice(0, 12));
+    expect(fact.problems.join('\n')).toContain('进程还在旧 release 目录');
+    await expect(
+      deployLagCheck(
+        () => lagging,
+        () => NOW,
+      )(),
+    ).rejects.toMatchObject({
+      code: 'process_cwd',
+      message: '进程还在旧 release 目录',
+      detail: expect.stringContaining(H1.slice(0, 12)),
+    });
+    // 没拿到 diff：不能当成只改了文档
+    expect(judge(input(H2, installedOk(), { engine: { sha: H1 }, api: { sha: H1 } })).ok).toBe(false);
+  });
+
+  it('【#2359】只改文档不重启：current 已切、进程留在旧目录，不算失败，在用版本仍是新提交', () => {
+    const docs = input(H2, installedOk(), {
+      engine: { sha: H1 },
+      api: { sha: H1 },
+      diffs: {
+        [H1]: [
+          'docs/only.md',
+          'README.md',
+          'specs/2359/需求.md',
+          'packages/api/test/deploy-lag.test.ts',
+          'agents/test/x.ts',
+          'deploy/test/runtime-unchanged.test.sh',
+        ],
+      },
+    });
+    expect(judge(docs)).toEqual({ ok: true, problems: [] });
+    const fact = versionFact(docs, NOW);
+    expect(fact.current).toBe(H2);
+    expect(fact.detail).toContain(`在用 ${H2.slice(0, 12)}`);
+    expect(fact.problems).toEqual([]);
+    // 两边树一样（空 diff）：runtime_unchanged 也当没改运行内容
+    const sameTree = input(H2, installedOk(), {
+      engine: { sha: H1 },
+      api: { sha: H1 },
+      diffs: { [H1]: [] },
+    });
+    expect(judge(sameTree)).toEqual({ ok: true, problems: [] });
+    expect(versionFact(sameTree, NOW).current).toBe(H2);
+  });
+
+  it('进程目录读不到：不绿，也不把 current 标成已切过去', () => {
+    const blind = input(H2, installedOk(), { engine: { error: 'EACCES' }, api: { sha: H2 } });
+    const v = judge(blind);
+    expect(v.ok).toBe(false);
+    expect(v.problems[0]?.message).toBe('没查成：读不到进程在哪一版');
+    const fact = versionFact(blind, NOW);
+    expect(fact.current).toBeNull();
+    expect(fact.detail).not.toContain(H2.slice(0, 12));
   });
 
   it('对外的话：不带提交号、路径；和公开页禁用词名单扫', async () => {
@@ -203,6 +294,12 @@ describe('判定：读的时候现算', () => {
       input(H2, state({ rules: { at: ago(MIN), result: 'unchecked', detail: 'x' } })),
       input(H2, state({ system: { error: '/srv/fleet-dao-releases/.auto/france-applied' } })),
       input(H2, state({ system: { appliedSha: H0, behind: 3, oldestAt: ago(30 * 60 * MIN) } })),
+      input(H2, state(), {
+        engine: { sha: H1 },
+        api: { sha: H1 },
+        diffs: { [H1]: ['packages/store/src/deploy-lag.ts'] },
+      }),
+      input(H2, state(), { engine: { error: 'EACCES' } }),
     ];
     const seen = new Set<string>();
     for (const c of cases) {
@@ -217,7 +314,16 @@ describe('判定：读的时候现算', () => {
     }
     // 每一种代码都造到了：新加一种要补进上面
     expect([...seen].sort()).toEqual(
-      ['not_released', 'rules', 'rules_failed', 'stale', 'system', 'tier_failed', 'unchecked'].sort(),
+      [
+        'not_released',
+        'process_cwd',
+        'rules',
+        'rules_failed',
+        'stale',
+        'system',
+        'tier_failed',
+        'unchecked',
+      ].sort(),
     );
   });
 
@@ -387,6 +493,29 @@ describe('读法国上的现状', () => {
       expect(readDeployLagInput(d).current).toEqual({ error: expect.stringContaining('认不出') });
     },
   );
+
+  it.runIf(canLink)('读出来的进程目录交给同一份判定：cwd 旧则不绿，只改文档则仍标新提交', () => {
+    const d = join(dir, 'cwd');
+    mkdirSync(join(d, '.auto'), { recursive: true });
+    mkdirSync(join(d, H2));
+    writeFileSync(join(d, '.auto', 'state.json'), JSON.stringify(installedOk()));
+    symlinkSync(H2, join(d, 'current'));
+    const read = (diff: readonly string[]) =>
+      readDeployLagInput(d, {
+        readProc: () => ({ sha: H1 }),
+        diffNames: () => diff,
+      });
+    const bad = judge(read(['packages/store/src/deploy-lag.ts']));
+    expect(bad.ok).toBe(false);
+    expect(said(bad)).toContain('进程还在旧 release 目录');
+    expect(said(bad)).toContain(H1.slice(0, 12));
+    expect(versionFact(read(['packages/store/src/deploy-lag.ts']), NOW).current).toBe(H1);
+    expect(judge(read(['docs/only.md'])).ok).toBe(true);
+    expect(versionFact(read(['docs/only.md']), NOW).current).toBe(H2);
+    const aligned = readDeployLagInput(d, { readProc: () => ({ sha: H2 }) });
+    expect(judge(aligned).ok).toBe(true);
+    expect(versionFact(aligned, NOW).current).toBe(H2);
+  });
 });
 
 describe('「跟不上主线」报警', () => {
