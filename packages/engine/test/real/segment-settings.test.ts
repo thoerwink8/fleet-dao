@@ -3,11 +3,12 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionUser } from '@fleet-dao/adapters';
+import { type SessionUser, SUBAGENTS_DIR } from '@fleet-dao/adapters';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import {
+  assertSubagentsInstalled,
   denyRules,
   isClaudeModel,
   LOCAL_SETTINGS_PATH,
@@ -138,5 +139,68 @@ describe('writeSegmentLocalSettings（真 shell、临时目录）', () => {
     const t = { ...tree(), dir: join(dir, '不在') };
     await expect(writeSegmentLocalSettings(t, GUARD, 'claude-opus-5-5')).rejects.toBeInstanceOf(Error);
     expect(existsSync(join(dir, '不在'))).toBe(false);
+  });
+});
+
+describe('会话用户家里装着的子代理定义和仓里是不是同一份（#2820）', () => {
+  const SRC = SUBAGENTS_DIR;
+  let home: string;
+  beforeEach(() => {
+    home = mkdtempSync(join(tmpdir(), 'fleet-segment-home-'));
+  });
+  afterEach(() => {
+    rmSync(home, { recursive: true, force: true });
+  });
+  const install = (names: string[]) => {
+    mkdirSync(join(home, '.claude', 'agents'), { recursive: true });
+    for (const n of names)
+      writeFileSync(join(home, '.claude', 'agents', n), readFileSync(join(SRC, n), 'utf8'));
+  };
+  const guard = async () => {
+    const { readSubagentGuard } = await import('../../src/real/subagents-file.ts');
+    return readSubagentGuard(SRC);
+  };
+
+  it('readSubagentGuard 带上仓里的定义（和 claude-code 主机 --agents 用的同一个 loadSubagents）', async () => {
+    const g = await guard();
+    expect(Object.keys(g.definitions ?? {}).sort()).toEqual([...g.names].sort());
+  });
+
+  it('Claude 模型、三份都装着且一样：不报', async () => {
+    install(['Explore.md', 'general-purpose.md', 'Plan.md']);
+    await expect(assertSubagentsInstalled(tree(), await guard(), 'claude-opus-5-5', home)).resolves.toBe(
+      undefined,
+    );
+  });
+
+  it('【故意造出的失败】Claude 模型、缺一份：抛可重试的 PortError，说清缺哪份', async () => {
+    install(['Explore.md', 'Plan.md']);
+    const err = await assertSubagentsInstalled(tree(), await guard(), 'claude-opus-5-5', home).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'SEGMENT_SUBAGENT_DEFS', retryable: true });
+    expect((err as Error).message).toContain('general-purpose');
+  });
+
+  it('【故意造出的失败】Claude 模型、有一份被改过（模型换了）：抛 PortError，说清哪份不一样', async () => {
+    install(['Explore.md', 'general-purpose.md', 'Plan.md']);
+    const p = join(home, '.claude', 'agents', 'Explore.md');
+    writeFileSync(p, readFileSync(p, 'utf8').replace('claude-haiku-5-5', 'claude-opus-5-5'));
+    const err = await assertSubagentsInstalled(tree(), await guard(), 'claude-sonnet-5-5', home).catch(
+      (e: unknown) => e,
+    );
+    expect(err).toMatchObject({ code: 'SEGMENT_SUBAGENT_DEFS' });
+    expect((err as Error).message).toContain('Explore');
+  });
+
+  it('非 Claude 模型：不查（全部子代理本来就挡掉了），家里什么都没有也不报', async () => {
+    await expect(assertSubagentsInstalled(tree(), await guard(), 'deepseek-flash', home)).resolves.toBe(
+      undefined,
+    );
+  });
+
+  it('清单里没带定义（老调用方、测试）：不查', async () => {
+    await expect(assertSubagentsInstalled(tree(), GUARD, 'claude-opus-5-5', home)).resolves.toBe(undefined);
   });
 });
