@@ -714,8 +714,15 @@ describe('分支体检：整轮', () => {
       expect(ops[0]).toMatchObject({ op: 'createTag', sha: head });
     }
     expect(archiveTagName('fleet/292-f3f3472d3', sha('8'))).toBe(
-      `archive/fleet-->292-f3f3472d3-${sha('8').slice(0, 7)}`,
+      `archive/fleet--292-f3f3472d3-${sha('8').slice(0, 7)}`,
     );
+    expect(archiveTagName('fleet/292-f3f3472d3', sha('8'))).toBe(
+      archiveTagName('fleet/292-f3f3472d3', sha('8')),
+    );
+    for (const name of ['feat/554-3-tier', 'notes/requirements-2026-09-30', 'w/hook-delete', 'a/b/c']) {
+      expect(archiveTagName(name, sha('a'))).not.toMatch(/[<>:"\\|?*]/);
+      expect(archiveTagName(name, sha('a')).split('/')).toHaveLength(2);
+    }
     expect(calls.ops.some((o) => o.op === 'createTag' && o.name.includes('empty-old'))).toBe(false);
     expect(calls.ops.some((o) => o.op === 'createTag' && o.name.includes('merged'))).toBe(false);
   });
