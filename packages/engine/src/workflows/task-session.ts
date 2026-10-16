@@ -42,6 +42,9 @@
 //   那一睡不写任务行，doing / updated_at 停在这一句，工作流仍 Running、没有新的 runs，拉单把它算进在干活。
 //   新跑的当场停下等人。已经睡在里面的老历史：这一标记重放时为假（不能插在已记下的定时器前面），
 //   叫醒之后走 patched('wall-clock-switch-wake')，下一轮再选不出就停下，不再睡第二觉。
+// - 引擎活动超时（timeout_start_to_close 等，#2824，patched('en1-timeout-redispatch')）：失败分流 EN1 第二次原文一字不差会判挂起。
+//   那一挂不起整单：停掉这一段，避开这条路由按点名再派；同一模型再撞上再避开模型，还撞上才停下等人。没有能派的路由仍挂起。
+//   标了 engineRestarted 的仍原路重试，并按起跑时刻续可接回的会话。老历史没有这个标记，重放时仍把这一挂挂起。
 // - 出在账号池上的停（登录失效、封号、设备被撤销，patched('auth-reroute')）：池照旧暂停并报警，这张单马上回去选路避开这个池。
 //   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
 //   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
@@ -69,6 +72,7 @@ import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
   AUTO_REDISPATCH_CODES,
+  EN1_ACTIVITY_TIMEOUT_CODES,
   type Avoid,
   afterDispatchProbe,
   bump,
@@ -393,6 +397,19 @@ export async function writeSession(
       if (failure.code.toLowerCase() === 'wall_clock_timeout' && patched('wall-clock-resume-session')) {
         if (failedRunId) rt.resumeFrom = { previous: { runId: failedRunId }, worktreePath: wt.path };
       }
+      // 活动超时发生在旧引擎（#2824）：原路再试时按起跑时刻续可接回的会话。续不上就开新会话。
+      // 写在 wall-clock 那个标记之后：超时码走不到上面那一支，老历史重放不会多打 wall-clock 的标记。
+      // 没标 engineRestarted 的不在这里续，同因挂起走下面的重派。
+      if (
+        failure.engineRestarted === true &&
+        EN1_ACTIVITY_TIMEOUT_CODES.includes(failure.code.toLowerCase()) &&
+        patched('en1-timeout-redispatch')
+      ) {
+        rt.resumeFrom = {
+          previous: { startedAfter: iso(attemptAt - RESUME_STARTED_SLACK_MS) },
+          worktreePath: wt.path,
+        };
+      }
       if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
       await rt.pause(next.wait === 'quota' ? 'quota' : 'retry', next.reason, next.delaySeconds);
     } else if (next.action === 'swapRoute' || next.action === 'swapModel') {
@@ -437,11 +454,16 @@ export async function writeSession(
         continue;
       }
       // 被引擎在时限上叫停、总时长到顶、起不来（决定 0093）：先自动换一条路由重派一次，进度里写一行，不停下等人。
+      // 引擎活动超时（EN1 的 timeout_*，#2824）同一条：分流判挂起也不挂整单，停掉这一段再派。
       // 超时、起不来只避开这条路由，同一模型第二次再避开模型；中转欠费避开那个池。都不整族避开（#2261）。
       // 第一次按路由避开之后，同一模型再撞上还可以再自动一次（升到避开模型）。除此之外这一段里只自动一次，再撞上照旧停下。
       // 只有人能修的码不在名单里。老历史没有 auto-redispatch-session，照旧停下；没有 avoid-scope-by-cause，仍避开模型和它那一族。
       const code = failure.code.toLowerCase();
-      const listed = AUTO_REDISPATCH_CODES.includes(code);
+      // 引擎活动超时（#2824）：分流因原文一字不差判的挂起不挂整单。标记只对这几个码打，别的码重放不多这一下。
+      // 写在 auto-redispatch-session 之前：老历史重放时这一支为假，listed 仍只看原来那张表。
+      const listed =
+        AUTO_REDISPATCH_CODES.includes(code) ||
+        (EN1_ACTIVITY_TIMEOUT_CODES.includes(code) && patched('en1-timeout-redispatch'));
       // 写在 auto-redispatch-session 之前、且 redispatched 为假时短路：老历史重派过一次之后不会多调这个标记。
       const escalate =
         redispatched && listed && patched('avoid-scope-by-cause') && rt.infraCanEscalate(route, code);
