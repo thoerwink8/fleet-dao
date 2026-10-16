@@ -57,7 +57,7 @@ import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import type { ChannelAttempts, SegmentReservations } from './runs-writer.ts';
 import {
-  assertSubagentsInstalled,
+  checkSubagentsInstalled,
   type SubagentGuard,
   writeSegmentLocalSettings,
 } from './segment-settings.ts';
@@ -93,6 +93,8 @@ export interface RunSegmentDeps {
   subagentGuard?: () => Promise<SubagentGuard>;
   /** 测试用：会话用户的家目录（默认按账号库查）。 */
   subagentsHome?: string;
+  /** Mirasim 的 Claude 会话核对完家里的子代理定义后调（#2834）：problems 非空报提醒、空的撤掉。报不成只记日志，不挡会话。不给 = 不报（测试）。 */
+  reportSubagentDefs?: (user: string, problems: readonly string[]) => Promise<void>;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
   /**
@@ -281,8 +283,16 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
         ...(deps.tree.shBin ? { sh: deps.tree.shBin } : {}),
       };
       const sessionModel = routeInfo.route.upstreamModel ?? routeInfo.route.modelId;
-      // Claude 模型：定义靠会话用户家里的 ~/.claude/agents（agents-sync 装的），开跑前核对和仓里是同一份（#2820）
-      await assertSubagentsInstalled(settingsTree, guard, sessionModel, deps.subagentsHome);
+      // Claude 模型：定义靠会话用户家里的 ~/.claude/agents（agents-sync 装的），开跑前核对和仓里是同一份（#2820）；
+      // 对不上照常起会话，只报一条提醒（#2834）
+      const problems = await checkSubagentsInstalled(settingsTree, guard, sessionModel, deps.subagentsHome);
+      if (problems !== null && deps.reportSubagentDefs) {
+        try {
+          await deps.reportSubagentDefs(routeInfo.user, problems);
+        } catch (error) {
+          log('子代理定义对不上的提醒没报成（不挡会话）', { user: routeInfo.user, error: errMessage(error) });
+        }
+      }
       await writeSegmentLocalSettings(settingsTree, guard, sessionModel);
     }
     // 3. 提示词

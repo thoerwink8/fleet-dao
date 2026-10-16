@@ -18,6 +18,7 @@ export * from './queries/engine.ts';
 export * from './queries/engine-master.ts';
 export * from './queries/executor-line-stats.ts';
 export * from './queries/feishu-push.ts';
+export * from './queries/flow-assignments.ts';
 export * from './queries/groom.ts';
 export * from './queries/healthz-watch.ts';
 export * from './queries/history.ts';
