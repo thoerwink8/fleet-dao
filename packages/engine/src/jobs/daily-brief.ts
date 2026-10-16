@@ -1,5 +1,6 @@
 // 每日简报（决定 0096：放法国引擎定时任务；创始人规矩：只为四类事和 AI 判定要他的事即时打扰他，其余每天早上看一条）。
 // 每天 08:30（北京时间）一轮：昨天上线了什么（版本 + 一句话）、要你拍的（带链接）、失败了要你看的、关键指标（开单→上线中位、一轮做成率）、
+// 流程健康（#2762：近 7 天每轮怎么收场的、按档一轮做成率和平均轮数、重活 PR 新增行 p90、冷验收拒绝占比，和再往前 7 天比），
 // 写成一行提醒（键 feishu:brief:<北京日期>，驾驶舱后端马上推飞书团队群），
 // 同时用引擎机器人在置顶进度单 #1055 发一条评论（GitHub 会通知创始人）。
 // 一节最多列 15 条，多出来的只写「另 N 条」。发版开始、成功不再写通知（#2368），简报没有「日报」一节。
@@ -25,6 +26,8 @@ import {
   DAILY_BRIEF_JOB_ID,
   dailyBriefKey,
   type ExecutorLineStat,
+  type PipelineHealth,
+  type RoundOutcome,
   type ScheduleResult,
 } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -112,6 +115,8 @@ export interface DailyBriefDeps {
   stopped(from: Date, to: Date): Promise<BriefStoppedTask[]>;
   /** pnpm line:stats 同一条查询（@fleet-dao/db 的 executorLineStats）。 */
   lineStats(now: Date): Promise<ExecutorLineStat[]>;
+  /** 截至 to 的 7 天流程健康（@fleet-dao/db 的 pipelineHealth，#2762）。读不到照抛。 */
+  pipelineHealth(to: Date): Promise<PipelineHealth>;
   /** 写那一行提醒（有就原地更新）。写不进照抛。 */
   publish(input: { dedupeKey: string; title: string; body: string; link: string }): Promise<void>;
   /** 在 #1055 发评论（幂等：同一个 key 只发一条）。没发成照抛。 */
@@ -387,6 +392,77 @@ function metricsSection(
   return { heading, lines };
 }
 
+/** 一轮结束类的白话（流程健康一节）。 */
+const OUTCOME_WORDS: Record<RoundOutcome, string> = {
+  merged: '做成',
+  verify_rejected: '冷验收拒',
+  ci_red: 'CI 红',
+  leftover: '交活有剩',
+  no_commit: '没提交',
+  push_conflict: '推分支冲突',
+  merge_conflict: '等合并冲突',
+  timeout: '超时',
+  stopped: '叫停',
+  other: '别的',
+};
+const TIER_WORDS: Record<string, string> = { fast: '快活', medium: '中活', heavyweight: '重活' };
+
+/** 占比和 7 天前比：涨跌按百分点说；哪边没有就写明。 */
+function shareVs(now: number | null, before: number | null | undefined): string {
+  if (now === null) return '—';
+  if (before === undefined) return pct(now);
+  if (before === null) return `${pct(now)}（7 天前没有）`;
+  const d = Math.round((now - before) * 100);
+  return `${pct(now)}（7 天前 ${pct(before)}，${d === 0 ? '持平' : d > 0 ? `涨 ${d} 点` : `跌 ${-d} 点`}）`;
+}
+
+/** 数和 7 天前比。 */
+function numVs(now: number | null, before: number | null | undefined, unit = ''): string {
+  if (now === null) return '—';
+  if (before === undefined) return `${now}${unit}`;
+  if (before === null) return `${now}${unit}（7 天前没有）`;
+  const d = Math.round((now - before) * 100) / 100;
+  return `${now}${unit}（7 天前 ${before}${unit}，${d === 0 ? '持平' : d > 0 ? `涨 ${d}` : `跌 ${-d}`}）`;
+}
+
+/**
+ * 五、流程健康（#2762）：近 7 天每轮怎么收场的（task_rounds），和再往前 7 天比。
+ * 这周读不到整节写「没查成」；上周读不到只写这周、注明对比没查成。窗口里一轮都没有写「没有」，不写 0%。
+ */
+export function healthSection(now: PipelineHealth | string, before: PipelineHealth | string): BriefSection {
+  const heading = '五、流程健康（近 7 天，和再往前 7 天比）';
+  if (typeof now === 'string') return { heading, lines: [`没查成：${now}`], unread: now };
+  const prev = typeof before === 'string' ? undefined : before;
+  const lines: string[] = [];
+  if (typeof before === 'string') lines.push(`7 天前那一周没查成（${before}），只列这一周`);
+  if (now.rounds === 0) {
+    lines.push(`近 7 天没有收场的轮${prev ? `（7 天前 ${prev.rounds} 轮）` : ''}。`);
+    return { heading, lines };
+  }
+  lines.push(`收场 ${numVs(now.rounds, prev ? prev.rounds : undefined, ' 轮')}`);
+  const shown = now.outcomes.filter(
+    (o) => o.n > 0 || (prev?.outcomes.find((p) => p.outcome === o.outcome)?.n ?? 0) > 0,
+  );
+  for (const o of shown) {
+    const p = prev?.outcomes.find((x) => x.outcome === o.outcome);
+    lines.push(
+      `· ${OUTCOME_WORDS[o.outcome]} ${o.n} 轮，占 ${shareVs(o.share, prev ? (p?.share ?? null) : undefined)}`,
+    );
+  }
+  lines.push(`冷验收拒绝占比：${shareVs(now.verifyRejectShare, prev ? prev.verifyRejectShare : undefined)}`);
+  for (const t of now.byTier) {
+    const p = prev?.byTier.find((x) => x.tier === t.tier);
+    const name = TIER_WORDS[t.tier] ?? t.tier;
+    lines.push(
+      `· ${name}（${t.rounds} 轮）：一轮做成率 ${shareVs(t.oneRoundRate, prev ? (p?.oneRoundRate ?? null) : undefined)}，合并的平均 ${t.avgRounds === null ? '—（这周没有合并的）' : numVs(t.avgRounds, prev ? (p?.avgRounds ?? null) : undefined, ' 轮')}`,
+    );
+  }
+  lines.push(
+    `重活 PR 新增行 p90：${now.heavyAddedP90 === null ? '这周没有量到行数的重活合并' : numVs(now.heavyAddedP90, prev ? prev.heavyAddedP90 : undefined, ' 行')}`,
+  );
+  return { heading, lines };
+}
+
 /** 收齐的简报。 */
 export interface CollectedBrief {
   sections: BriefSection[];
@@ -408,6 +484,10 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
   const alerts = await guard('读卡住报警', () => deps.alerts());
   const stopped = await guard('读昨天停下的单', () => deps.stopped(yesterday, today));
   const stats = await guard('读交付指标', () => deps.lineStats(now));
+  const health = await guard('读流程健康', () => deps.pipelineHealth(today));
+  const healthBefore = await guard('读 7 天前的流程健康', () =>
+    deps.pipelineHealth(new Date(today.getTime() - 7 * 24 * 3_600_000)),
+  );
   const unread = (heading: string, why: string): BriefSection => ({
     heading,
     lines: [`没查成：${why}`],
@@ -421,6 +501,7 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
         ? unread('三、失败了要你看的', [alerts, stopped].filter((x) => typeof x === 'string').join('；'))
         : failuresSection(alerts, stopped, now),
       metricsSection(typeof shipped === 'string' ? null : shipped.leadMinutes, stats),
+      healthSection(health, healthBefore),
     ],
   };
 }

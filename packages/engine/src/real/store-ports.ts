@@ -39,6 +39,7 @@ import {
   readQuotaReserveSetting,
   readTaskRoutePin,
   recordStepTiming,
+  recordTaskRound,
   releaseTaskReservation,
   reservePoolSlot,
   resolveAlertWithReason,
@@ -202,7 +203,10 @@ export interface StorePortsDeps {
   reservationTtlMs?: number;
 }
 
-type StorePorts = Pick<EnginePorts, 'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState'> & {
+type StorePorts = Pick<
+  EnginePorts,
+  'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState' | 'recordRound'
+> & {
   /**
    * 这个阶段现在是不是全熔断。和 pickRoute 同一个 loadStage、同一套熔断判定；暂停的账号池同样避开。
    * 不带某一步的模型过滤（提醒是整个阶段的），不调 allOpenAlarm、不写任何表。读不了就抛。
@@ -984,6 +988,20 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         runMs: input.runMs,
         outcome: input.outcome,
         ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+      });
+    },
+
+    async recordRound(input) {
+      // 一轮怎么收场的（#2762）：同一条工作流同一个 seq 只记一行，活动重试不重复
+      await recordTaskRound(db, {
+        taskId: input.taskId,
+        workflowId: input.workflowId,
+        seq: input.seq,
+        round: input.round,
+        outcome: input.outcome,
+        tier: input.tier ?? null,
+        firstModel: input.firstModel ?? null,
+        addedLines: input.addedLines ?? null,
       });
     },
 

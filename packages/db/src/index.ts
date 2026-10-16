@@ -29,6 +29,7 @@ export * from './queries/local-claims.ts';
 export * from './queries/local-orphans.ts';
 export * from './queries/merge-stall.ts';
 export * from './queries/model-track.ts';
+export * from './queries/pipeline-health.ts';
 export * from './queries/pool-holds.ts';
 export * from './queries/pool-runs.ts';
 export * from './queries/probe.ts';
