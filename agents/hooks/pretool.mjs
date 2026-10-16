@@ -20,6 +20,7 @@ import {
 } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy, readFallbackProxy } from './git-run.mjs';
 import { hookTimer } from './hook-timing.mjs';
+import { shellEditVerdict } from './shell-edit.mjs';
 import { haikuVerdict, recordHaikuDispatch } from './subagent-ledger.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
@@ -2474,6 +2475,11 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
     return block(
       "这条 bash 命令里有会被当成命令执行的反引号（在双引号里、没加引号、或 <<EOF 不带引号的 heredoc 里）：bash 会先把反引号里的内容当命令跑掉。Markdown 的 `代码` 写法放进单引号里、用 <<'EOF' 的 heredoc，或者先用 Write 写进文件再用 --body-file / -F / 读文件；真要取命令输出用 $(…)。",
     );
+  }
+  // 改仓里的文件只用 Edit/Write（单 #2844）：Bash 里 sed -i、node -e / python 写文件、> >> tee 写进仓里的，当场拦；只管 Bash 工具，认不清的放行
+  if (tool === 'Bash') {
+    const edit = shellEditVerdict(cmd, rawCwd);
+    if (edit) return edit;
   }
   // -R/--repo 指到 fleet-dao 以外的仓（比如巡检仓 fleet-dao-canary 的验收单）不归 issue:new 管，放行
   const repoFlag = /(?:^|\s)(?:-R|--repo)[\s=]+['"]?([^\s'"]+)/.exec(cmd)?.[1];
