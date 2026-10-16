@@ -21,6 +21,8 @@
 
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { mkdir, mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CATALOG_NAMED_FAMILIES } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -63,6 +65,11 @@ export interface ColdVerifySpec {
   specDir?: string;
   /** 引擎在会话收场后自己跑过的测试输出（有才给）：原样放进验收材料（决定 0093）。 */
   testOutput?: string;
+  /**
+   * 第 2 轮复核：上一轮没过的验收条编号和问题原话。有它时，调用方喂进来的 diff 应是这一轮的增量。
+   * 老调用方不给。
+   */
+  recheck?: { failedCriteria: number[]; priorProblems: string[] };
 }
 
 /**
@@ -233,6 +240,7 @@ export async function runColdVerifyForPr(
     ...(spec.testOutput !== undefined && spec.testOutput.trim() !== ''
       ? { testOutput: spec.testOutput }
       : {}),
+    ...(spec.recheck !== undefined ? { recheck: spec.recheck } : {}),
   };
   const invokeDeps: ColdVerifyInvokeDeps = {
     oneShot: deps.oneShot,
@@ -307,7 +315,7 @@ function gitReadEnv(): NodeJS.ProcessEnv {
   };
 }
 
-function runGit(cwd: string, args: string[]): Promise<GitText> {
+function runGit(cwd: string, args: string[], timeout = 15_000): Promise<GitText> {
   return new Promise((resolve) => {
     execFile(
       'git',
@@ -315,7 +323,7 @@ function runGit(cwd: string, args: string[]): Promise<GitText> {
       {
         cwd,
         encoding: 'buffer',
-        timeout: 15_000,
+        timeout,
         maxBuffer: 8 * 1024 * 1024,
         windowsHide: true,
         env: gitReadEnv(),
@@ -433,6 +441,63 @@ function readNamedFilesAtHead(args: { head: string; workflowId: string | undefin
     }
     return out;
   };
+}
+
+/**
+ * 第 2 轮的增量 diff：镜像里 `since..head`（上一轮验收的头到现在的头）。
+ * 读不到抛错，调用方写成「读不到 diff」，不许退回整张 PR 的 diff 再从头判一遍。
+ */
+export async function incrementalDiffAtHead(args: {
+  workflowId: string | undefined;
+  sinceSha: string;
+  headSha: string;
+}): Promise<{ diffText: string; changedFiles: string[] }> {
+  if (!SHA40.test(args.sinceSha) || !SHA40.test(args.headSha)) {
+    throw new Error('增量 diff 的两头要是完整提交号');
+  }
+  const mirror = mirrorDir(args.workflowId);
+  if (!mirror.ok) throw new Error(mirror.reason);
+  if (!existsSync(mirror.dir)) throw new Error('引擎镜像里没有这个仓，读不了增量 diff');
+  const range = `${args.sinceSha}..${args.headSha}`;
+  const names = await runGit(mirror.dir, ['diff', '--name-only', '--no-ext-diff', range]);
+  if (names.code !== 0) throw new Error(`读不到增量 diff：${oneLine(names.stderr)}`);
+  const patch = await runGit(mirror.dir, ['diff', '--no-color', '--no-ext-diff', range]);
+  if (patch.code !== 0) throw new Error(`读不到增量 diff：${oneLine(patch.stderr)}`);
+  const changedFiles = names.stdout
+    .toString('utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line !== '');
+  return { diffText: patch.stdout.toString('utf8'), changedFiles };
+}
+
+/**
+ * 把 PR 头的完整检出放进目录（git archive，不带 .git）。镜像没有、提交不在就抛，调用方自己决定要不要因此停下。
+ */
+export async function checkoutPrHead(
+  dir: string,
+  head: string,
+  workflowId: string | undefined,
+): Promise<void> {
+  if (!SHA40.test(head)) throw new Error('PR 的头不是完整的提交号');
+  const mirror = mirrorDir(workflowId);
+  if (!mirror.ok) throw new Error(mirror.reason);
+  if (!existsSync(mirror.dir)) throw new Error('引擎镜像里没有这个仓，放不了 PR 头的完整检出');
+  await mkdir(dir, { recursive: true });
+  const scratch = await mkdtemp(join(tmpdir(), 'fleet-verify-head-'));
+  const tarPath = join(scratch, 'head.tar');
+  try {
+    const archived = await runGit(mirror.dir, ['archive', '--format=tar', '-o', tarPath, head], 120_000);
+    if (archived.code !== 0) throw new Error(oneLine(archived.stderr));
+    await new Promise<void>((resolve, reject) => {
+      execFile('tar', ['-xf', tarPath, '-C', dir], { timeout: 120_000 }, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
 }
 
 function isSourceProblem(problem: string | undefined): boolean {

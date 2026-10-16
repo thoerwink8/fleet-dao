@@ -157,8 +157,8 @@ export interface HarnessOptions {
   decisionCommenter?: Deps['decisionCommenter'];
   /** 「要你拍」选完要本机做的事；不给时删树、重查回「没接上」。 */
   decisionCapabilities?: Deps['decisionCapabilities'];
-  /** 本人 GitHub 身份那一套（#1989）的替身；不给就是没接上（那几个接口回 503）。 */
-  githubUser?: Deps['githubUser'];
+  /** 两个机器人已经装上的仓；不给就是没接上（导入列表回原因，不拿空列表冒充没有仓）。 */
+  installationRepos?: Deps['installationRepos'];
   /**
    * 新哈希用的 scrypt 参数。不传用 TEST_SCRYPT_PARAMS。
    * 传 null：不设到 Deps 上，跟生产 main.ts 一样走 SCRYPT_PARAMS（慢，一条测试里最多用一次）。
@@ -213,7 +213,7 @@ function wire<S extends Store>(
     ...(options.releaseRequest ? { releaseRequest: options.releaseRequest } : {}),
     ...(options.decisionCommenter ? { decisionCommenter: options.decisionCommenter } : {}),
     ...(options.decisionCapabilities ? { decisionCapabilities: options.decisionCapabilities } : {}),
-    ...(options.githubUser ? { githubUser: options.githubUser } : {}),
+    ...(options.installationRepos ? { installationRepos: options.installationRepos } : {}),
     feishu: options.feishu === null ? null : feishu.auth,
     workflows: options.workflows ?? {
       async signal(workflowId, signal) {

@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { FlowMode, FlowSource, Repo } from '@fleet-dao/shared';
+import type { FlowMode, FlowSource, Repo, RepoWithProfile } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
@@ -86,7 +86,7 @@ export interface TaskWorkflowInput {
   schemaVersion: 1;
   /** 库里的 tasks.id。 */
   taskId: string;
-  repo: Repo;
+  repo: RepoWithProfile;
   issueNumber: number;
   title: string;
 }
@@ -297,6 +297,15 @@ export interface ColdVerifyInput {
   /** 引擎在会话收场后自己跑过的测试输出（有才给）：放进验收材料（决定 0093）。老历史里没有这个字段。 */
   testOutput?: string;
   /**
+   * 第 2 轮复核（patched('verify-recheck')）。sinceSha 是上一轮验收时的头，这一轮 diff 用 sinceSha..headSha。
+   * failedCriteria 是上轮问题里的验收条编号（从 1 起）。priorProblems 是上轮问题原话。老历史没有。
+   */
+  recheck?: {
+    failedCriteria: number[];
+    sinceSha: string;
+    priorProblems: string[];
+  };
+  /**
    * 接回（#2848，和动手段的 RunSegmentInput.attach 同一个意思）：上一次 coldVerify 交回 detached，验收会话还在跑。
    * 给了就不选路、不拼提示词、不起会话，接回那一次会话、等它收场，结论照常贴、结局记到原来那一行 runs。老历史里没有这个字段。
    */
@@ -479,7 +488,7 @@ export type ProbeAssignedResult =
 export interface SelfCheckInput {
   schemaVersion: 1;
   taskId: string;
-  repo: Repo;
+  repo: RepoWithProfile;
   worktreePath: string;
 }
 

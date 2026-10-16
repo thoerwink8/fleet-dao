@@ -1,3 +1,4 @@
+import type { AppRole, InstallationListedRepo } from '@fleet-dao/github';
 import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
@@ -8,7 +9,6 @@ import type { DecisionCommenter } from './decision-handoff.ts';
 import type { CockpitAlerts } from './feishu-alerts.ts';
 import type { PreflightReaders } from './france-preflight.ts';
 import type { FranceReleasePort } from './france-release.ts';
-import type { GitHubUserPort } from './github-user.ts';
 import type { HostResourceSampler } from './host-resources.ts';
 import type { LocalClaimsPort } from './local-claims.ts';
 import type { ManualTracksPort } from './manual-tracks.ts';
@@ -45,17 +45,21 @@ export interface TaskRedoPort {
   }): Promise<{ ok: true; workflowId: string; generation: number } | { ok: false; why: string }>;
 }
 
+/** 两个机器人已经装上的仓：安装令牌读 GET /installation/repositories。 */
+export interface InstallationReposPort {
+  list(role: AppRole): Promise<InstallationListedRepo[]>;
+}
+
 /** 后端的全部外部依赖。生产由 main.ts 装配，测试各自换成假的。 */
 export interface Deps {
   config: Config;
   store: Store;
   workflows: WorkflowControl;
   /**
-   * 本人 GitHub 身份那一套（#1989，设置页「导入仓库」）：列「我 GitHub 上能看到的仓」、把 App 装到某个仓。
-   * 走 OAuth 用户令牌，和 App 机器人令牌那条路分开。没给（开发、测试没有机器人凭据）时那几个接口回 503
-   * 写明「这台没接上 GitHub」，不拿空列表冒充「你没有仓」。
+   * 两个机器人已经装上的仓（安装令牌读 /installation/repositories）。
+   * 没给（开发、测试没有机器人凭据）时导入列表回 200 写明「这台没接上 GitHub」，不拿空列表冒充「没有仓」。
    */
-  githubUser?: GitHubUserPort | undefined;
+  installationRepos?: InstallationReposPort | undefined;
   /**
    * 被撤或挂起的任务重做（shared/task-redo.ts）：同一张单另起一代。没给（开发环境没有 Temporal）时重做回 503，不假装起了。
    */

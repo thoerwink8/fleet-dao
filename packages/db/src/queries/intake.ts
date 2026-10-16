@@ -11,12 +11,12 @@ export interface IntakeRepoRow {
   name: string;
   defaultBranch: string;
   testCommand: string;
+  /** 仓档案原文（只存显式写了的项）；缺项、补默认值由引擎接活时判。 */
+  profile: unknown;
   /** 「让 AI 接活」打开的时刻；null＝关着。 */
   autoDispatchSince: Date | null;
   /** 合并方式。库的默认是强制；列出来的是库里的原文，认不认由调用方用 ciPolicyOf。 */
   ciPolicy: CiPolicy;
-  /** 仓档案原文（只存显式写了的项）。缺项、补默认值由调用方用 shared 的 repoProfileGaps / parseRepoProfile。 */
-  profile: unknown;
 }
 
 /** 受管的所有仓（开关关着的也列：全关是正常的空闲，不是没扫到东西）。 */
@@ -28,9 +28,9 @@ export async function listIntakeRepos(db: Db): Promise<IntakeRepoRow[]> {
       name: repos.name,
       defaultBranch: repos.defaultBranch,
       testCommand: repos.testCommand,
+      profile: repos.profile,
       autoDispatchSince: repos.autoDispatchSince,
       ciPolicy: repos.ciPolicy,
-      profile: repos.profile,
     })
     .from(repos)
     .orderBy(asc(repos.owner), asc(repos.name));

@@ -58,8 +58,18 @@ describe('契约 ↔ 后端注册的路由', () => {
 // 看板删除（#556）后留下的、没有任何页面用的三条（D6，#928）从契约、后端、前端三处一起删了：
 // 谁把它们加回来（只加后端不加契约、或只加契约），上面的对账会红；这里再钉一次「契约里没有、后端真的不认」。
 describe('已删的接口不会悄悄回来', () => {
-  it('契约里没有这三条', () => {
-    for (const name of ['timeline', 'runSteps', 'updateChannel']) {
+  it('契约里没有这三条，也没有 OAuth 装仓那几条', () => {
+    for (const name of [
+      'timeline',
+      'runSteps',
+      'updateChannel',
+      'installAppOnRepo',
+      'disconnectGitHub',
+      'githubConnect',
+      'githubCallback',
+      'githubAuthorize',
+      'githubSetup',
+    ]) {
       expect(Object.keys(WebRoutes), name).not.toContain(name);
     }
   });
