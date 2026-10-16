@@ -1,7 +1,15 @@
 // @vitest-environment happy-dom
 // 任务页（#216）：三段的单按段、按模型显示耗时、token、花费，每一笔逐个列；读不到的写「没读到」和原因，不写 0。
 // 老流程的单照旧是会话时间线加「时间与用量」。每条读不到的路径都故意造一次。
-import { readSegmentRun, type SegmentRunFacts, summarizeUsage, TaskDetailResponse } from '@fleet-dao/shared';
+import {
+  readSegmentRun,
+  type SegmentRunFacts,
+  summarizeUsage,
+  TaskDetailResponse,
+  USAGE_BOARD_UNREAD,
+  USAGE_NOTE_MASTER_OFF,
+  USAGE_SESSION_UNREAD,
+} from '@fleet-dao/shared';
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
 import { afterEach, describe, expect, test } from 'vitest';
@@ -193,6 +201,49 @@ describe('【失败】读不到的都写明，不写 0', () => {
     const box = await panel('三段');
     expect(segmentRow(box, 'manual').querySelectorAll('[data-unread]').length).toBeGreaterThan(0);
     expect(box.querySelector('[data-unread-notice]')?.textContent).toMatch(/没读到：耗时/);
+  });
+
+  test('会话号没拿到：这一笔写「读不到」，用量那一行不是空的', async () => {
+    const blank = {
+      ...base,
+      id: 'x-unread',
+      outcome: 'killed' as const,
+      usageNote: USAGE_SESSION_UNREAD,
+      failureReason: '引擎重启时这一段还没收场',
+      inputTokens: undefined,
+      outputTokens: undefined,
+      cacheReadTokens: undefined,
+      cacheWriteTokens: undefined,
+      costUsd: undefined,
+    };
+    open('/tasks/t-x', apiWith(detailWith([blank])));
+    const row = runRow(await panel('每一笔'), 'x-unread');
+    expect(row.querySelector('[data-usage-unread]')?.textContent).toBe(USAGE_BOARD_UNREAD);
+    expect(within(row).getByText(USAGE_BOARD_UNREAD)).toBeTruthy();
+    const notes = [...row.querySelectorAll('[data-unread-item]')].map((n) => n.textContent);
+    expect(notes).toEqual([`token · ${USAGE_BOARD_UNREAD}`, `花费 · ${USAGE_BOARD_UNREAD}`]);
+    expect(row.textContent).not.toContain('四样 token 都没记到');
+  });
+
+  test('确定没跑起来、记了 0：这一笔写 0，不写「读不到」、也不留空', async () => {
+    const zero = {
+      ...base,
+      id: 'x-zero',
+      outcome: 'org_switch' as const,
+      usageNote: USAGE_NOTE_MASTER_OFF,
+      failureReason: '引擎总开关：总开关关着；这一段没起会话（还没起会话）',
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
+      costUsd: 0,
+    };
+    open('/tasks/t-x', apiWith(detailWith([zero])));
+    const row = runRow(await panel('每一笔'), 'x-zero');
+    expect(within(row).getByText('输入 0')).toBeTruthy();
+    expect(within(row).getByText('输出 0')).toBeTruthy();
+    expect(row.querySelector('[data-usage-unread]')).toBeNull();
+    expect(row.querySelector('[data-unread-item="tokens"]')).toBeNull();
   });
 
   test('token、花费一样都没记到：格子里写「没读到」，合计那格也写「没读到」，不写 0', async () => {

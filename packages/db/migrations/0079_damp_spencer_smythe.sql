@@ -1,2 +1,0 @@
-ALTER TABLE "models" ADD COLUMN "strength" text;--> statement-breakpoint
-ALTER TABLE "models" ADD CONSTRAINT "models_strength_known" CHECK ("models"."strength" is null or "models"."strength" in ('strong', 'standard', 'light'));
