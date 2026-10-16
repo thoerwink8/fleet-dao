@@ -27,6 +27,15 @@ export const LOCAL_LABEL = '本机做';
 export const ENGINE_LABEL = '交给引擎';
 
 /**
+ * 「全程」「三段」（#2826，决定 0105；docs/workflow.md 照字面写的就是这两个名字）：引擎这张单走哪种流程，照标签走，不看开关 engine.flowMode。
+ * 「全程」也要过决定 0105 的边界：仓档案开了 flowEligible（第一期只 fleet-dao）、选中的路由是 Claude Sonnet 5.5、已知的模块不碰
+ * 迁移、合并闸、凭据、权限、任务工作流、发布脚本、改标准路径、跨仓，不过就退回三段并写明原因
+ * （`packages/engine/src/flow-mode.ts` 的 chooseFlowMode）。两个都贴按三段。
+ */
+export const FULL_FLOW_LABEL = '全程';
+export const THREE_FLOW_LABEL = '三段';
+
+/**
  * 「整理过」（母单 #1335 第 3 片，#1338；指挥官补：#1342 发到法国后引擎拉了两张前提已过期的老单）：临时指挥官整理待办时，
  * 判为「仍成立、适合引擎」的单贴它。开单时间早于「让 AI 接活」打开那一刻的老单，只有贴了它（或「交给引擎」）才进拉单候选
  * （`packages/engine/src/jobs/intake.ts` 的 `not_groomed`）；开关之后新开的单不需要。

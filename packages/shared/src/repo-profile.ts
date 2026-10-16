@@ -29,13 +29,24 @@ export const RepoProfileSchema = z.strictObject({
   standardPathsFile: RelPath.default('packages/conventions/standard-paths.json'),
   /** 权重：几个项目一起接活时，这个项目分到的份量（相对值，正整数）。 */
   weight: z.number().int().min(1).max(100).default(1),
+  /**
+   * 这个仓的单能不能分进全程模式（#2826）：开关 engine.flowMode 是 split / full 时只对开了的仓生效，贴了「全程」标签的不看它。
+   * 默认关（先只开 fleet-dao）。不算「档案齐没齐」的一项：不写不挡拉单（repoProfileGaps 不报它）。
+   */
+  flowEligible: z.boolean().default(false),
 });
 
 export type RepoProfile = z.infer<typeof RepoProfileSchema>;
 /** 写进库的原文：每项都可以不写。 */
 export type RepoProfileInput = z.input<typeof RepoProfileSchema>;
 
-export const REPO_PROFILE_KEYS = Object.keys(RepoProfileSchema.shape) as (keyof RepoProfile)[];
+/** 不写也算档案齐了的项（默认值就是安全的那一边）：拉单不因为它们没写就不拉，接入新仓时也不探测、不补。 */
+export const REPO_PROFILE_OPTIONAL_KEYS: readonly (keyof RepoProfile)[] = ['flowEligible'];
+
+/** 档案要写齐的项（不含 REPO_PROFILE_OPTIONAL_KEYS）。 */
+export const REPO_PROFILE_KEYS = (Object.keys(RepoProfileSchema.shape) as (keyof RepoProfile)[]).filter(
+  (k) => !REPO_PROFILE_OPTIONAL_KEYS.includes(k),
+);
 
 export const DEFAULT_REPO_PROFILE: RepoProfile = Object.freeze(RepoProfileSchema.parse({})) as RepoProfile;
 
@@ -64,7 +75,7 @@ export function parseRepoProfile(raw: unknown): RepoProfile {
   return r.profile;
 }
 
-/** 档案里没显式写的项（按 REPO_PROFILE_KEYS 的顺序）。只看写没写，不校验值。 */
+/** 档案里没显式写的项（按 REPO_PROFILE_KEYS 的顺序，可选项不算）。只看写没写，不校验值。 */
 export function repoProfileGaps(raw: unknown): (keyof RepoProfile)[] {
   const obj =
     raw !== null && typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};

@@ -171,6 +171,13 @@ export class TaskRuntime {
   roundSeq = 0;
   /** 连着几次跑成的动手会话是续起来的：到 RESUME_STREAK_LIMIT 下一轮开新会话。 */
   resumeStreak = 0;
+  /**
+   * 这张单走哪种流程（#2826，patched('flow-mode')，task-flow.ts）：第一次选路之后、第一段动手之前定一次，之后不变。
+   * null＝老历史（没定过，按三段）。只来自活动结果（进了历史），重放不再读配置。
+   */
+  flowMode: 'three' | 'full' | null = null;
+  /** 全程的单回到动手几次了（MAX_FULL_PUSHES 兜底）：到了停下，人点「继续」清零。 */
+  fullPushes = 0;
   /** 最近一次自测（决定 0093）的精炼输出：交给冷验收当材料（ColdVerifyInput.testOutput）。没跑过、头换了就是 null。 */
   selfCheckOutput: { head: string; text: string } | null = null;
   /** 单任务 token 预算给了几份（决定 0093）：超了停下，点「继续」再给。 */

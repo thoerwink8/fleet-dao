@@ -26,10 +26,13 @@ import {
   type Db,
   findRepoProfile,
   finishScheduleRun,
+  getFlowAssignment,
   getRun,
   latestRunOfTask,
   listIntakeRepos,
   readEngineMasterRow,
+  readFlowModeSettingRaw,
+  recordFlowAssignment,
   recordRouteProbeDone,
   recordRouteProbeStart,
   routeProbeAuditRows,
@@ -46,6 +49,7 @@ import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
+import { createDecideFlowMode } from '../flow-mode.ts';
 import { probeAssignedRoute } from '../jobs/dispatch-probe.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
@@ -1086,6 +1090,22 @@ export function realPortsFromEnv(
       }
       return { mode: row.ciPolicy };
     },
+    // 定这张单走三段还是全程（#2826）：读标签、开关、仓档案，写一次分组记录（顺带 tasks.flow_mode）
+    decideFlowMode: createDecideFlowMode({
+      readLabels: async (repo, issueNumber, signal) => {
+        const issue = await gh.readIssue({ repo, issueNumber, signal });
+        if (!issue.labels) throw new Error(`读 ${repo.owner}/${repo.name}#${issueNumber} 没带回标签`);
+        return issue.labels;
+      },
+      readSetting: () => readFlowModeSettingRaw(db),
+      readProfile: async (repo) => {
+        const row = await findRepoProfile(db, repo.owner, repo.name);
+        if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);
+        return row.profile;
+      },
+      record: (assignment) => recordFlowAssignment(db, assignment),
+      existing: (taskId) => getFlowAssignment(db, taskId),
+    }),
     runSegment: createRunSegment({
       tree: { gh, trees, exec, tmpDir: join(config.stateDir, 'tmp') },
       spawner: segmentSpawner,

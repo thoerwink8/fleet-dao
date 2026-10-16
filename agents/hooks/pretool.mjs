@@ -20,6 +20,7 @@ import {
 } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy, readFallbackProxy } from './git-run.mjs';
 import { hookTimer } from './hook-timing.mjs';
+import { haikuVerdict, recordHaikuDispatch } from './subagent-ledger.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -2660,6 +2661,17 @@ export function agentModelVerdict(raw) {
   );
 }
 
+/**
+ * Haiku 改代码的护栏（单 #2821）：「general-purpose 加 model haiku」的派工，本机策略收回了、或这张单已经派过一次 Haiku 就拦下，
+ * 提示改派 Sonnet。只读 ~/.fleet-dao/ 下两个本机文件、不联网（判法见 subagent-ledger.mjs，规矩见 agents/subagents/README.md「护栏」）。
+ * @param {string} raw 钩子的原始输入
+ * @param {{ home?: string }} [deps] 测试换掉状态目录
+ * @returns {Block | null}
+ */
+export function haikuGuardVerdict(raw, deps) {
+  return haikuVerdict(raw, deps);
+}
+
 // —— 派写码工人前判本机容量（单 #2731，决定 0094）——
 // 以前「能不能派」只是一段文字，自动记忆里「最多 4 个」的旧说法在 0094 之后还被注入、照着写进了报告。现在由代码判：
 // Claude Code 的 Agent 调用，subagent_type 不是只读的那几种（斥候、设计、问 CLI 的、配状态栏的），就读一次本机的空闲内存和负载
@@ -2733,11 +2745,22 @@ if (isMain()) {
     process.stderr.write(`${fableBlock.message}\n`);
     finish(fableBlock.code);
   }
+  // Haiku 改代码的护栏（单 #2821）：收回了、同一张单第二次派 Haiku 就拦；只读本机文件
+  const haikuBlock = haikuGuardVerdict(raw);
+  if (haikuBlock) {
+    process.stderr.write(`${haikuBlock.message}\n`);
+    finish(haikuBlock.code);
+  }
   // 派写码工人前判本机容量（单 #2731）：同样要在 backgroundOnly 早退之前
   const capBlock = capacityVerdict(raw);
   if (capBlock) {
     process.stderr.write(`${capBlock.message}\n`);
     finish(capBlock.code);
+  }
+  // 两道闸都放行了才记账本：被容量拦下的派工没起，不算派过
+  const ledgerRow = recordHaikuDispatch(raw);
+  if (!ledgerRow.recorded && ledgerRow.issue !== undefined) {
+    process.stderr.write(`fleet-guard：Haiku 派工没记进账本：${ledgerRow.why}\n`);
   }
   let backgroundOnly = false;
   try {

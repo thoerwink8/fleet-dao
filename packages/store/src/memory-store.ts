@@ -461,6 +461,9 @@ export function createMemoryStore(
         reason: input.reason ?? null,
       };
       data.flowAssignments.push(row);
+      // 和库里一样：分组记录和 tasks.flow_mode 一起写（#2826）
+      const task = data.tasks.find((t) => t.id === input.taskId);
+      if (task) task.flowMode = input.mode;
       return { ...row };
     },
     async getFlowAssignment(taskId) {

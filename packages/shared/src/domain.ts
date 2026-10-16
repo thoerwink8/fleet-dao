@@ -116,6 +116,8 @@ export interface Task {
   claimedBy?: string;
   /** 本机领的单：租约到期时刻（tasks.lease_until，ISO）。 */
   leaseUntil?: string;
+  /** 这张单走的流程（tasks.flow_mode，#2826）：引擎分组时和 task_flow_assignments 一起写。还没分组没有这个键。 */
+  flowMode?: 'three' | 'full';
   createdAt: string;
 }
 
