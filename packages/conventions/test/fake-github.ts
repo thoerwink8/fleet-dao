@@ -26,7 +26,8 @@ export function milestone(
   description: string,
   extra: Partial<MilestoneDetail> = {},
 ): MilestoneDetail {
-  return { number, title, state: 'open', description, closedAt: null, ...extra };
+  // 到期日默认设在很远的以后：一周一版的兜底（#2683）不该在别的用例里报
+  return { number, title, state: 'open', description, closedAt: null, dueOn: '2099-12-31T07:00:00Z', ...extra };
 }
 
 /** 版本里程碑说明里的先后段。 */

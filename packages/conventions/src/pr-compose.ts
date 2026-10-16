@@ -289,7 +289,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
       ...(!newIssue ? ['--new-issue 后面的标题'] : []),
       ...(typeof values.kind !== 'string' || !values.kind.trim() ? ['--kind（需求、缺陷、杂项）'] : []),
       ...(typeof values.milestone !== 'string' || !values.milestone.trim()
-        ? ['--milestone（版本全名、v<N> 或 未排期）']
+        ? ['--milestone（当前、版本全名、v<N> 或 未排期）']
         : []),
     ];
     if (missing.length > 0) {

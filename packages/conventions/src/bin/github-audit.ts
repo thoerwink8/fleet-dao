@@ -1,9 +1,11 @@
 // GitHub 对账入口（见 ../github-audit.ts）：node packages/conventions/src/bin/github-audit.ts [--comment]
 // pnpm github:audit：只打印查出来的。--comment：再把挂得到单上的留言到那张单上（同一条只留一次）。
+// --alarm：红了开（或更新）同一张「GitHub 对账没过」单，绿了关掉（../audit-alarm.ts，#2683）。
 // 只给 .github/workflows/github-audit.yml 的定时任务和人手跑用，别接进 PR 的必过检查（#87：必过检查必须确定）。
 // 退出码 0 = 没有断裂；1 = 有断裂（逐条列出；留言留过了也一样红，修好才绿）；2 = 没查成（读不到 GitHub、留言没留成），同样是红。
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { ALARM_TITLE, followAlarm } from '../audit-alarm.ts';
 import { exitWith, runMain } from '../exit.ts';
 import { reportFindings } from '../findings.ts';
 import { liveGitHub, repoName } from '../github-api.ts';
@@ -12,16 +14,21 @@ import { annotation } from '../pr-fields.ts';
 
 // 退出不用 process.exit（Windows 上偶发崩成 3221226505，../exit.ts）：提前退出用 exitWith，runMain 接住设退出码。
 runMain(async () => {
-  const USAGE = '用法：github-audit.ts [--comment]';
+  const USAGE = '用法：github-audit.ts [--comment] [--alarm]';
   const root = fileURLToPath(new URL('../../../../', import.meta.url));
   const inActions = process.env.GITHUB_ACTIONS === 'true';
   const out = (line: string) => console.log(line);
   const err = (line: string) => console.error(inActions ? annotation(line) : line);
 
   let comment = false;
+  let alarm = false;
   try {
-    const { values } = parseArgs({ options: { comment: { type: 'boolean' } }, strict: true });
+    const { values } = parseArgs({
+      options: { comment: { type: 'boolean' }, alarm: { type: 'boolean' } },
+      strict: true,
+    });
     comment = values.comment === true;
+    alarm = values.alarm === true;
   } catch (e) {
     console.error(`参数不对（${e instanceof Error ? e.message : String(e)}）。${USAGE}`);
     exitWith(2);
@@ -51,6 +58,27 @@ runMain(async () => {
     if (rep.posted.length) out(`留言了：${rep.posted.map((n) => `#${n}`).join('、')}。`);
     if (rep.already) out(`${rep.already} 条以前留过言，这次没再留。`);
     notQueried.push(...rep.errors);
+  }
+  if (alarm) {
+    // 对账红了有人接（#2683）：开（或更新）同一张「GitHub 对账没过」单，绿了自动关
+    const env = process.env;
+    const runUrl =
+      env.GITHUB_SERVER_URL && env.GITHUB_REPOSITORY && env.GITHUB_RUN_ID
+        ? `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`
+        : undefined;
+    const followed = await followAlarm(gh, {
+      red: notQueried.length > 0 || r.findings.length > 0,
+      lines: [...r.findings.map((f) => f.text), ...notQueried.map((w) => `没查成：${w}`)],
+      open: r.open,
+      milestone: r.currentMilestone,
+      runUrl,
+      at: new Date(),
+    });
+    if (followed.action === 'failed') notQueried.push(followed.why);
+    else if (followed.action !== 'none') {
+      const verb = { opened: '开了', updated: '更新了', closed: '关了' }[followed.action];
+      out(`${verb}「${ALARM_TITLE}」那张单 #${followed.issue}。`);
+    }
   }
   for (const w of notQueried) err(`没查成：${w}。`);
 

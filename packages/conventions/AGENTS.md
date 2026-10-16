@@ -6,7 +6,7 @@
 
 - `packages/conventions/src/bin/`：每个命令一个入口文件，逻辑在 `packages/conventions/src/` 同名模块里。仓根 `package.json` 的 `check`、`test:changed`、`pr:open`、`issue:new`、`issue:close`、`progress`、`plan`、`intents`、`debt:check`、`github:audit`、`branch:hygiene`、`ci:timings`、`ci:stats`、`flow:stats` 都指到这里。
 - `check.ts`：`pnpm check` = biome 格式 + `tsc -b` + 改到的测试（`--all` 才全量）+ 卫生检查，四样跑完再判红。
-- 只给 CI 用的（`.github/workflows/` 里调）：`ci-plan.ts`、`ci-box.ts`、`ci-cache.ts`、`ci-verdict.ts`、`main-base.ts`、`main-reuse.ts`、`merge-gate.ts`、`close-on-merge.ts`、`debt-check.ts`、`github-audit.ts`。
+- 只给 CI 用的（`.github/workflows/` 里调）：`ci-plan.ts`、`ci-box.ts`、`ci-cache.ts`、`ci-verdict.ts`、`main-base.ts`、`main-reuse.ts`、`merge-gate.ts`、`close-on-merge.ts`、`debt-check.ts`、`github-audit.ts`（`--alarm` 红了开同一张「GitHub 对账没过」单，`audit-alarm.ts`）、`version-cut.ts`（版本一周一版、到期自动收口，`github-audit.yml` 的 version-cut 任务每天跑）。
 - `packages/conventions/standard-paths.json`：改标准的路径清单（人闸第四类），**改它本身就是改标准**。
 - `packages/conventions/test-timings.json`：CI 测试按耗时分台的耗时表，用 `pnpm ci:timings` 从 CI 日志刷新，别手改。
 

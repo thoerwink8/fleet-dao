@@ -16,6 +16,7 @@ import type { GitHubMilestoneWriter, GitHubReader, PlanIssue, PullBody } from '.
 import { isKindLabel, MOTHER_LABEL } from './labels.ts';
 import { type Plan, PlanProblem, parseOrder, pruneOrder, readPlan } from './plan-view.ts';
 import { issueColumnLinks } from './pr-columns.ts';
+import { addDays, beijingDate, dueDateOf } from './version-cut.ts';
 
 /** 母单刚开、子单还没挂上的宽限：超过这么久还是空的才报。 */
 const EMPTY_MOTHER_GRACE_MS = 24 * 3_600_000;
@@ -28,6 +29,10 @@ export interface AuditResult {
   checked: { issues: number; versions: number };
   /** 这次顺手从版本先后里清掉的已关号（#2393）：哪个里程碑、清了哪几个。没清的版本不在里面。 */
   pruned: { milestone: string; removed: number[] }[];
+  /** 这一轮读到的开着的单（对账红了开单时找同名的那张用）；没读到是 undefined。 */
+  open: PlanIssue[] | undefined;
+  /** 恰好一个开着的版本时它的里程碑号；否则 undefined。 */
+  currentMilestone: number | undefined;
 }
 
 /**
@@ -61,7 +66,8 @@ export async function auditGitHub(
       notQueried.push(`接口没给 ${what} 的子单数，母单和子单对不对没核`);
     }
     try {
-      findings.push(...mergedButOpenFindings(open, await gh.recentPulls()));
+      const pulls = await gh.recentPulls();
+      findings.push(...mergedButOpenFindings(open, pulls), ...pullMilestoneFindings(pulls));
     } catch (e) {
       notQueried.push(`读不到最近的 PR（${message(e)}），合并了却还开着的单没核`);
     }
@@ -77,6 +83,9 @@ export async function auditGitHub(
   try {
     plan = await readPlan(gh);
     checked.versions = plan.open.length + plan.closed.length;
+    const v = versionFindings(plan, now);
+    findings.push(...v.found);
+    notQueried.push(...v.unknown);
   } catch (e) {
     if (e instanceof PlanProblem)
       findings.push({ issue: undefined, key: `plan:${e.message}`, text: e.message });
@@ -85,7 +94,8 @@ export async function auditGitHub(
   if (plan !== undefined && writer !== undefined) {
     await pruneClosedFromOrders(plan, writer, pruned, findings, notQueried);
   }
-  return { findings, notQueried, checked, pruned };
+  const currentMilestone = plan?.open.length === 1 ? plan.open[0]?.milestone.number : undefined;
+  return { findings, notQueried, checked, pruned, open, currentMilestone };
 }
 
 /**
@@ -126,6 +136,63 @@ async function pruneClosedFromOrders(
       );
     }
   }
+}
+
+/**
+ * 版本一周一版、到期自动收口（version-cut.ts，#2683）的兜底：开着的 v<N> 恰好一个、带到期日、过了到期日超过一天还没收口、
+ * 已关的版本还挂着开着的单。收口任务没跑成、有人手工动了里程碑，这里每天报出来。
+ */
+function versionFindings(plan: Plan, now: Date): { found: Finding[]; unknown: string[] } {
+  const found: Finding[] = [];
+  const unknown: string[] = [];
+  if (plan.open.length !== 1) {
+    const list = plan.open.map((v) => `「${v.milestone.title}」`).join('') || '一个也没有';
+    found.push({
+      issue: undefined,
+      key: `versions-open:${plan.open.map((v) => v.milestone.number).join(',')}`,
+      text: `开着的 v<N> 版本该恰好一个，现在是 ${plan.open.length} 个（${list}）：多开的关掉（开着的单挪到留下的那个），一个都没有就等收口任务开一版或手动跑 .github/workflows/github-audit.yml 的 version-cut`,
+    });
+  }
+  const [current] = plan.open;
+  if (plan.open.length === 1 && current) {
+    const due = dueDateOf(current.milestone);
+    const title = current.milestone.title;
+    if (due === undefined) unknown.push(`接口没给「${title}」的到期日（due_on），到没到期没核`);
+    else if (due === null) {
+      found.push({
+        issue: undefined,
+        key: `version-no-due:${current.milestone.number}`,
+        text: `当前版本「${title}」没设到期日：在里程碑页上设一个（一周一版），不设就不会到期自动收口`,
+      });
+    } else if (beijingDate(now) > addDays(due, 1)) {
+      found.push({
+        issue: undefined,
+        key: `version-overdue:${current.milestone.number}`,
+        text: `当前版本「${title}」${due} 就到期了，过了一天多还没收口：看 .github/workflows/github-audit.yml 的 version-cut 任务为什么没收成，修好手动触发一次`,
+      });
+    }
+  }
+  for (const v of plan.closed) {
+    const left = v.issues.filter((i) => i.state === 'open');
+    if (left.length === 0) continue;
+    found.push({
+      issue: undefined,
+      key: `closed-version-open:${v.milestone.number}:${left.map((i) => i.number).join(',')}`,
+      text: `已关的版本「${v.milestone.title}」还挂着开着的单 ${left.map((i) => `#${i.number}`).join('、')}：收口任务每天会挪到当前版本；连着报就看它为什么没挪成`,
+    });
+  }
+  return { found, unknown };
+}
+
+/** 开着的 PR 挂了里程碑（决定 0015：PR 不挂，里程碑页只数单子）。 */
+function pullMilestoneFindings(pulls: readonly PullBody[]): Finding[] {
+  return pulls
+    .filter((p) => p.state === 'open' && typeof p.milestone === 'string')
+    .map((p) => ({
+      issue: undefined,
+      key: `pr-milestone:${p.number}`,
+      text: `开着的 PR #${p.number} 挂了里程碑「${p.milestone}」：PR 不挂里程碑（里程碑页只数单子），摘掉（gh pr edit ${p.number} --remove-milestone）`,
+    }));
 }
 
 /** 类别标签（需求、缺陷、杂项）恰好一个。 */
