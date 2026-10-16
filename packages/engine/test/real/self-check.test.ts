@@ -87,6 +87,7 @@ describe('selfCheck', () => {
     expect(test).toMatchObject({ user: USER, cwd: '/work/t-1' });
     expect(test?.argv.slice(0, 2)).toEqual(['/bin/sh', '-c']);
     expect(test?.argv[2]).toContain('PATH=/usr/local/bin:/usr/bin:/bin');
+    expect(test?.argv[2]).toContain('unset FLEET_RUN_ID');
     expect(test?.argv[2]).toContain('2>&1');
     expect(JSON.stringify(commands.map((c) => c.env ?? {}))).not.toContain('FLEET_RUN_ID');
   });

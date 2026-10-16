@@ -450,7 +450,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         deps.exec({
           user: owner,
           cwd: input.worktreePath,
-          argv: [SH, '-c', `PATH=${PATH}; export PATH; ${script} 2>&1`],
+          argv: [SH, '-c', `PATH=${PATH}; export PATH; unset FLEET_RUN_ID; ${script} 2>&1`],
           timeoutMs,
           signal: ctx.signal,
           scopeId: scopeId(input.taskId, what),
