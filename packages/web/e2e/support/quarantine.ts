@@ -1,5 +1,5 @@
 // 隔离集（决定 0093）：常偶发的用例放进 e2e/quarantine.json，照跑、照报，不挡这一轮。
-// CI 的 e2e job 分两步：先跑隔离集以外的（E2E_QUARANTINE=skip，红了这一轮就红），再单跑隔离集（E2E_QUARANTINE=only，那一步红了不挡）。
+// CI 的 e2e job 跑隔离集以外的（E2E_QUARANTINE=skip，红了这一轮就红）；隔离集（E2E_QUARANTINE=only）由 e2e-quarantine.yml 每天定时单跑，不挡。
 // 本机不设 E2E_QUARANTINE，全跑。哪条该进隔离集、开单、限期：packages/conventions/src/e2e-flaky.ts（那边也校验这个文件的格式）。
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
