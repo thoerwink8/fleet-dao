@@ -720,7 +720,6 @@ describe('0075：删老流程的会话表 session_runs 和进度表 progress_eve
       values ('${RUN_NEW}', 'manual', 'bbbbbbbb-0000-4000-8000-000000000001', 'opus', 'r1', now());
     insert into asks (task_id, run_id, question) values
       ('bbbbbbbb-0000-4000-8000-000000000001', '${RUN_OLD}', '老会话问的'),
-      ('bbbbbbbb-0000-4000-8000-000000000001', '${RUN_NEW}', '三段会话问的'),
       ('bbbbbbbb-0000-4000-8000-000000000001', null, '没挂会话的');
   `;
 
@@ -739,10 +738,13 @@ describe('0075：删老流程的会话表 session_runs 和进度表 progress_eve
         expect(await exists(pg, 'session_runs')).toBe(false);
         expect(await exists(pg, 'progress_events')).toBe(false);
         expect((await pg.query(`select question, run_id from asks order by question`)).rows).toEqual([
-          { question: '三段会话问的', run_id: RUN_NEW },
           { question: '没挂会话的', run_id: null },
           { question: '老会话问的', run_id: null },
         ]);
+        // 新外键指 runs：挂在同一张单的三段会话上可以
+        await pg.exec(
+          `insert into asks (task_id, run_id, question) values ('bbbbbbbb-0000-4000-8000-000000000001', '${RUN_NEW}', '三段会话问的')`,
+        );
         // 追问挂的会话必须属于追问的那张单：新外键指 runs 的 (task_id, id)
         await expect(
           pg.exec(
