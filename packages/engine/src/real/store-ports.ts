@@ -213,11 +213,10 @@ export function poolNameOf(channelName: string, orgKind: OrgKind | null): string
 }
 
 /**
- * 一次结束了的会话按哪个用途算战绩：Fusion 的会话是它选路时的阶段；三段的一次性会话按这一段选路的用途（SEGMENT_STAGE），
+ * 一次结束了的会话按哪个用途算战绩：按这一段选路的用途（SEGMENT_STAGE），
  * 不经选路的段（对题）不算哪个用途的。
  */
 function stageOf(run: EndedPoolRun): StageKind | null {
-  if (run.kind === 'session') return run.stage;
   const stages: Partial<Record<RunSegment, StageKind>> = SEGMENT_STAGE;
   return stages[run.segment] ?? null;
 }

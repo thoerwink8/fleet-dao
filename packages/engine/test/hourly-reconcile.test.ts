@@ -404,12 +404,12 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
   it('【故意造出的失败】读合了的 PR 的记账没成：这一轮不记 ok，写明是记账那部分', async () => {
     const h = harness({
       ledgers: async () => {
-        throw new Error('关系 session_runs 不存在');
+        throw new Error('关系 runs 不存在');
       },
     });
     const run = await runHourlyReconcileJob(h.deps);
     expect(run.outcome).toBe('partial');
-    expect(run.why).toContain('读合了的 PR 和会话记账没成：关系 session_runs 不存在');
+    expect(run.why).toContain('读合了的 PR 和会话记账没成：关系 runs 不存在');
   });
 
   it('GitHub 机器人权限自检是这一轮的最后一项：缺权限的报提醒、算发现一个；自检没跑成记 partial，不记 ok', async () => {

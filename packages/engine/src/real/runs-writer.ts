@@ -127,6 +127,7 @@ function columns(run: RunStart): RunInsert {
     workflowId: run.workflowId,
     prNumber: run.prNumber,
     branch: run.branch,
+    worktreePath: run.worktreePath,
     startedAt: new Date(run.startedAt),
   };
 }

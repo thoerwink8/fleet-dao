@@ -20,7 +20,7 @@ import {
   scheduleFact,
   versionFact,
 } from './env-view.ts';
-import { buildHome, buildPools } from './views.ts';
+import { buildHome, buildPools, NO_OLD_FLOW_RUNS } from './views.ts';
 
 type EngineHealth = z.input<typeof HomeHealthSchema>['engine'];
 
@@ -68,7 +68,6 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
   const taskIds = tasks.map((t) => t.id);
   const [
     notifications,
-    activeRuns,
     pools,
     channels,
     windows,
@@ -80,7 +79,6 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
     resources,
   ] = await Promise.all([
     store.listNotifications({ status: 'open', limit: 200 }),
-    store.listRuns({ taskIds, active: true }),
     store.listPools(),
     store.listChannels(),
     store.listQuotaWindows(),
@@ -100,7 +98,7 @@ export async function readHomeSnapshot(deps: SnapshotDeps): Promise<z.input<type
   return buildHome({
     notifications: notifications.items,
     tasks,
-    activeRuns,
+    activeRuns: NO_OLD_FLOW_RUNS,
     merged,
     repos,
     pools: poolViews,

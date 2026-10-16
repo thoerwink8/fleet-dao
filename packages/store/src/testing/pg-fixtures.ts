@@ -16,8 +16,8 @@ import {
   nodeSessions,
   notificationDeliveries,
   notifications,
+  poolReservations,
   pools,
-  progressEvents,
   pullRequests,
   quotaWindows,
   repos,
@@ -25,7 +25,6 @@ import {
   runs,
   scheduledJobs,
   scheduleRuns,
-  sessionRuns,
   settings,
   specs,
   tasks,
@@ -177,29 +176,35 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       (data.subtasks ?? []).filter((s) => s.taskId === taskId).map(({ taskId: _t, ...s }) => s),
     );
   }
-  if (data.runs?.length) {
-    await db.insert(sessionRuns).values(
-      data.runs.map((r) => ({
+  // 内存版 data.runs 只管池占用：开工了没结束的 = runs 里一行没结束的（不挂单，免得混进任务详情的三段流水），
+  // 选定了还没开工的 = 一条预占（pool_reservations）；结束了的内存版也不数，这里不写。
+  for (const r of (data.runs ?? []).filter((x) => x.endedAt === undefined)) {
+    const segment = r.stage === 'execute' ? 'manual' : r.stage === 'verify' ? 'verify' : undefined;
+    if (segment === undefined) {
+      throw new Error(`样例会话 ${r.id} 的阶段 ${r.stage}：库里只有动手（execute）、验收（verify）两段会选路占池`);
+    }
+    if (r.startedAt !== undefined) {
+      const model = (data.routes ?? []).find((x) => x.id === r.routeId)?.modelId;
+      if (model === undefined) throw new Error(`样例会话 ${r.id} 的路由 ${r.routeId} 不在样例路由里`);
+      await db.insert(runs).values({
         id: r.id,
-        taskId: r.taskId ?? null,
-        subtaskId: r.subtaskId ?? null,
-        stage: r.stage,
+        segment,
+        model,
         routeId: r.routeId,
-        whyRoute: r.whyRoute,
+        startedAt: date(r.startedAt),
         branch: r.branch ?? null,
-        queuedAt: date(r.queuedAt),
-        startedAt: dateOpt(r.startedAt),
-        endedAt: dateOpt(r.endedAt),
-        outcome: r.outcome ?? null,
-        actualModel: r.actualModel ?? null,
-        inputTokens: r.inputTokens ?? null,
-        outputTokens: r.outputTokens ?? null,
-        cacheReadTokens: r.cacheReadTokens ?? null,
-        cacheWriteTokens: r.cacheWriteTokens ?? null,
-        costUsd: r.costUsd ?? null,
-        testCommand: r.testCommand ?? null,
-      })),
-    );
+      });
+    } else {
+      if (r.taskId === undefined) throw new Error(`样例的预占 ${r.id} 没给单子`);
+      await db.insert(poolReservations).values({
+        id: r.id,
+        taskId: r.taskId,
+        segment,
+        routeId: r.routeId,
+        reservedAt: date(r.queuedAt),
+        expiresAt: new Date('2100-01-01T00:00:00Z'),
+      });
+    }
   }
   if (data.segmentRuns?.length) {
     await db.insert(runs).values(
@@ -225,16 +230,6 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         prNumber: r.prNumber ?? null,
         branch: r.branch ?? null,
         workflowId: r.workflowId ?? null,
-      })),
-    );
-  }
-  if (data.progress?.length) {
-    await db.insert(progressEvents).values(
-      data.progress.map((p) => ({
-        runId: p.runId,
-        at: date(p.at),
-        kind: p.kind,
-        payload: p.payload ?? null,
       })),
     );
   }

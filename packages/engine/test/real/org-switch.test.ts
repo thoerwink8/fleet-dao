@@ -12,11 +12,11 @@ import { readingsFromRateLimit } from '@fleet-dao/adapters/quota';
 import {
   auditLog,
   notifications,
+  poolReservations,
   routes,
   runs,
   saveOrgState,
   savePoolQuota,
-  sessionRuns,
   settings,
   takeOrgLock,
   upsertAlert,
@@ -116,6 +116,7 @@ function setup(
     duringGrace?: () => Promise<void>;
     /** 会话端口的切号那两样（#59）：给了就是有会话在跑也照切，先停下。 */
     sessions?: OrgSwitchSessions;
+    oneShots?: OrgSwitchSessions;
   } = {},
 ) {
   const rig = orgListRig();
@@ -153,6 +154,7 @@ function setup(
     // 当场触发的切号切完当场探切过去的池（和真装配一样用同一份路由探针）
     probeNow: (to) => probeOrgNow(job(), to),
     ...(over.sessions ? { sessions: over.sessions } : {}),
+    ...(over.oneShots ? { oneShots: over.oneShots } : {}),
     now,
     sleep: async () => {
       await over.duringGrace?.();
@@ -212,27 +214,44 @@ async function rejected(poolId: string, at: Date, resetsAt: Date | null) {
   await savePoolQuota(t.db, { poolId, readAt: at.toISOString(), complete: false, windows }, { now: at });
 }
 
-/** 一个还没结束的会话（登记了、在跑），交回让它结束的函数。 */
+/**
+ * 一个还没结束的会话，交回让它结束的函数：started = 开跑那一行（runs 里没结束的行）；没开工的是选路时预占着的名额
+ * （pool_reservations，还在建树、等内存），结束 = 放掉。
+ */
 async function running(routeId: string, at: Date, options: { started?: boolean } = {}) {
   const { task } = await addTask(t.db);
   const id = randomUUID();
-  await t.db.insert(sessionRuns).values({
-    id,
-    taskId: task.id,
-    stage: 'execute',
-    routeId,
-    whyRoute: '占位',
-    queuedAt: at,
-    runAsUser: 'fleet-agent-carpool',
-    ...(options.started ? { startedAt: at, sessionId: randomUUID() } : {}),
-  });
+  if (options.started) {
+    await t.db.insert(runs).values({
+      id,
+      taskId: task.id,
+      segment: 'manual',
+      model: 'opus-5.5',
+      routeId,
+      startedAt: at,
+      sessionId: randomUUID(),
+    });
+  } else {
+    await t.db.insert(poolReservations).values({
+      id,
+      taskId: task.id,
+      segment: 'manual',
+      routeId,
+      reservedAt: at,
+      expiresAt: new Date(at.getTime() + 60 * MIN),
+    });
+  }
   return Object.assign(
     async (endedAt: Date) => {
-      // 引擎包不直接依赖 drizzle-orm：收场直接写 SQL（收的时刻不早于开工、排队的时刻）。
-      await t.client.query(
-        'update session_runs set outcome = $1, ended_at = greatest($2::timestamptz, coalesce(started_at, queued_at)) where id = $3',
-        ['ok', endedAt.toISOString(), id],
-      );
+      // 引擎包不直接依赖 drizzle-orm：收场直接写 SQL（收的时刻不早于开工）。
+      if (options.started) {
+        await t.client.query(
+          `update runs set outcome = 'done', route_outcome = 'ok', ended_at = greatest($1::timestamptz, started_at) where id = $2`,
+          [endedAt.toISOString(), id],
+        );
+      } else {
+        await t.client.query('delete from pool_reservations where id = $1', [id]);
+      }
     },
     { id },
   );
@@ -555,7 +574,7 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
       { id: a.id, poolId: 'claude-carpool' },
       { id: b.id, poolId: 'claude-carpool' },
     ]);
-    const s = setup({ sessions: fake.sessions });
+    const s = setup({ oneShots:fake.sessions });
     await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
     await s.round();
     expect(s.helperCalls).toEqual(['solo']);
@@ -582,7 +601,7 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
   it('【故意造出的失败】停下的会话一直不收场：这一轮不切（不在会话还在跑的时候切），记没成、报「要人看」', async () => {
     const a = await running('carpool', NOW, { started: true });
     const fake = fakeSessions([{ id: a.id, poolId: 'claude-carpool' }], Number.POSITIVE_INFINITY);
-    const s = setup({ sessions: fake.sessions });
+    const s = setup({ oneShots:fake.sessions });
     await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
     await s.round();
     expect(s.helperCalls).toEqual([]);
@@ -601,7 +620,7 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
   it('登记了、进程还没起来的（还在建树）：等它；排队很久还没起来的、库里开着可手上没有的（上一轮工人留下的），不等', async () => {
     // 刚登记、还没起来：等不到它起来，这一轮不切
     await running('carpool', NOW);
-    const s = setup({ sessions: fakeSessions([]).sessions });
+    const s = setup({ oneShots:fakeSessions([]).sessions });
     await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
     await s.round();
     expect(s.helperCalls).toEqual([]);
@@ -609,10 +628,11 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
 
     // 排队 20 分钟还没起来的、起来了可手上没有的：不是在跑的进程，照切
     await t.client.query('delete from audit_log');
-    await t.client.query('delete from session_runs');
+    await t.client.query('delete from runs');
+    await t.client.query('delete from pool_reservations');
     await running('carpool', new Date(NOW.getTime() - 20 * MIN));
     await running('carpool', NOW, { started: true });
-    const t2 = setup({ sessions: fakeSessions([]).sessions });
+    const t2 = setup({ oneShots:fakeSessions([]).sessions });
     await t2.round();
     expect(t2.helperCalls).toEqual(['solo']);
   });
@@ -620,7 +640,7 @@ describe('手上有会话在跑也照切：先停下、等收场、再切（#59�
   it('到恢复时刻、手上的独享会话在跑：照样停下、切回拼车', async () => {
     const a = await running('solo', NOW, { started: true });
     const fake = fakeSessions([{ id: a.id, poolId: 'claude-solo' }]);
-    const s = setup({ sessions: fake.sessions });
+    const s = setup({ oneShots:fake.sessions });
     s.rig.answer('solo');
     await rejected('claude-carpool', new Date(NOW.getTime() - 3 * H), new Date(NOW.getTime() - MIN));
     await s.round();
@@ -656,7 +676,7 @@ describe('三段的一次性会话也算在跑（#157）：开跑就在 runs 留
   }
 
   it('一次性 Claude 会话在跑、拼车用满：不切、等（会话端口接着也不切）；它跑完了下一轮切独享', async () => {
-    const s = setup({ sessions: fakeSessions([]).sessions });
+    const s = setup({ oneShots:fakeSessions([]).sessions });
     const job = oneShotOnCarpool(s.now);
     await job.spawned;
     await rejected('claude-carpool', s.now(), new Date(NOW.getTime() + 2 * H));
@@ -1287,7 +1307,7 @@ describe('拼车用不了，当场切（#194）：不等路由探针那一轮，
       { id: old.id, poolId: 'claude-solo' },
       { id: young.id, poolId: 'claude-solo' },
     ]);
-    const s = setup({ sessions: fake.sessions });
+    const s = setup({ oneShots:fake.sessions });
     s.rig.answer('solo');
     // 第一次新读数说恢复了：还要隔一分钟的第二次确认，不切、不停
     expect(await s.orgSwitch.now({ by: '定时读接口' })).toBeNull();
@@ -1333,7 +1353,7 @@ describe('拼车用不了，当场切（#194）：不等路由探针那一轮，
     );
     const old = await running('solo', new Date(NOW.getTime() - 20 * MIN), { started: true });
     const fake = fakeSessions([{ id: old.id, poolId: 'claude-solo' }]);
-    const s = setup({ sessions: fake.sessions });
+    const s = setup({ oneShots:fake.sessions });
     s.rig.answer('solo');
     await s.orgSwitch.now({ by: '定时读接口' });
     s.advance(2 * MIN);

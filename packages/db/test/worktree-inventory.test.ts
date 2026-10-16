@@ -112,23 +112,23 @@ describe('每棵树最近一次会话', () => {
       taskId: task.id,
       routeId: 'r1',
       worktreePath: a,
-      queuedAt: new Date('2026-10-10T07:00:00.000Z'),
+      startedAt: new Date('2026-10-10T07:00:00.000Z'),
       endedAt: new Date('2026-10-10T08:00:00.000Z'),
-      outcome: 'ok',
+      outcome: 'done',
     });
     await addRun(t.db, {
       taskId: task.id,
       routeId: 'r1',
       worktreePath: a,
-      queuedAt: new Date('2026-10-11T07:00:00.000Z'),
+      startedAt: new Date('2026-10-11T07:00:00.000Z'),
       endedAt: new Date('2026-10-11T09:00:00.000Z'),
-      outcome: 'ok',
+      outcome: 'done',
     });
     await addRun(t.db, {
       taskId: task.id,
       routeId: 'r1',
       worktreePath: b,
-      queuedAt: new Date('2026-10-12T07:00:00.000Z'),
+      startedAt: new Date('2026-10-12T07:00:00.000Z'),
     });
     const got = await lastSessionByTree(t.db);
     expect(got.get(a)?.toISOString()).toBe('2026-10-11T09:00:00.000Z');

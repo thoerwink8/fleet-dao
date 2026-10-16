@@ -8,12 +8,10 @@ import type {
   Family,
   Model,
   Pool,
-  ProgressEvent,
   QuotaWindow,
   Repo,
   Route,
   SegmentRun,
-  SessionRun,
   Subtask,
   Task,
 } from '@fleet-dao/shared';
@@ -26,12 +24,10 @@ import type {
   githubTokens,
   models,
   pools,
-  progressEvents,
   quotaWindows,
   repos,
   routes,
   runs,
-  sessionRuns,
   subtasks,
   tasks,
 } from './schema/index.ts';
@@ -231,28 +227,6 @@ export const toBan = (r: typeof bans.$inferSelect): Ban =>
     reason: r.reason,
   });
 
-export const toSessionRun = (r: typeof sessionRuns.$inferSelect): SessionRun =>
-  build<SessionRun>({
-    id: r.id,
-    taskId: opt(r.taskId),
-    subtaskId: opt(r.subtaskId),
-    stage: r.stage,
-    routeId: r.routeId,
-    whyRoute: r.whyRoute,
-    branch: opt(r.branch),
-    queuedAt: r.queuedAt.toISOString(),
-    startedAt: isoOpt(r.startedAt),
-    endedAt: isoOpt(r.endedAt),
-    outcome: opt(r.outcome),
-    actualModel: opt(r.actualModel),
-    inputTokens: opt(r.inputTokens),
-    outputTokens: opt(r.outputTokens),
-    cacheReadTokens: opt(r.cacheReadTokens),
-    cacheWriteTokens: opt(r.cacheWriteTokens),
-    costUsd: opt(r.costUsd),
-    testCommand: opt(r.testCommand),
-  });
-
 export const toSegmentRun = (r: typeof runs.$inferSelect): SegmentRun =>
   build<SegmentRun>({
     id: r.id,
@@ -280,10 +254,3 @@ export const toSegmentRun = (r: typeof runs.$inferSelect): SegmentRun =>
     sessionId: opt(r.sessionId),
   });
 
-export const toProgressEvent = (r: typeof progressEvents.$inferSelect): ProgressEvent =>
-  build<ProgressEvent>({
-    runId: r.runId,
-    at: r.at.toISOString(),
-    kind: r.kind,
-    payload: r.payload,
-  });

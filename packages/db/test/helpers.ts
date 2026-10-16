@@ -13,7 +13,7 @@ import {
   routes,
   routingCatalog,
   routingPurposeModels,
-  sessionRuns,
+  runs,
   subtasks,
   tasks,
 } from '../src/schema/index.ts';
@@ -150,13 +150,19 @@ export async function addSubtask(db: Db, taskId: string, over: Partial<typeof su
   return row;
 }
 
+/**
+ * 在 runs 里写一行三段的会话（默认：动手段、30 分钟前开跑、还没结束）。模型取路由的，路由得先建。
+ * runs 的开跑时刻不许空：「排着还没开工」在库里是一条预占（pool_reservations），不是 runs 的行。
+ */
 export async function addRun(
   db: Db,
-  over: Partial<typeof sessionRuns.$inferInsert> & { taskId: string | null; routeId: string },
+  over: Partial<typeof runs.$inferInsert> & { taskId: string | null; routeId: string },
 ) {
+  const [route] = await db.select({ modelId: routes.modelId }).from(routes).where(eq(routes.id, over.routeId));
+  if (!route) throw new Error(`路由 ${over.routeId} 还没建，addRun 取不到模型`);
   const [row] = await db
-    .insert(sessionRuns)
-    .values({ stage: 'execute', whyRoute: '写码阶段首选', queuedAt: ago(30 * MIN), ...over })
+    .insert(runs)
+    .values({ segment: 'manual', model: route.modelId, startedAt: ago(30 * MIN), ...over })
     .returning();
   if (!row) throw new Error('run 没写进去');
   return row;

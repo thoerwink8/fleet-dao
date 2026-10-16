@@ -1,5 +1,5 @@
 // 干活的记录：仓、需求、子任务、会话、叫停请求、进度、追问、人闸批准、状态变化、PR 镜像、需求文档索引。
-import type { RunAsUser, TaskExecutor } from '@fleet-dao/shared';
+import type { TaskExecutor } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -8,7 +8,6 @@ import {
   index,
   integer,
   jsonb,
-  numeric,
   pgTable,
   primaryKey,
   text,
@@ -17,20 +16,8 @@ import {
   uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
-import { routes } from './catalog.ts';
-import {
-  prChecks,
-  progressKind,
-  prState,
-  RETIRED_RUN_AS_USERS,
-  type RetiredRunAsUser,
-  RUN_AS_USERS,
-  runOutcome,
-  stageKind,
-  stateEntity,
-  subtaskState,
-  taskState,
-} from './enums.ts';
+import { prChecks, prState, stateEntity, subtaskState, taskState } from './enums.ts';
+import { runs } from './runs.ts';
 
 const tz = { withTimezone: true, mode: 'date' } as const;
 
@@ -130,13 +117,13 @@ export const subtasks = pgTable(
     workflowId: text('workflow_id'),
     /** 人闸标记（release / spend / delete……）；非空 = 合并前要人批。 */
     holds: text('holds').array().notNull().default(sql`'{}'::text[]`),
-    /** 重拆方案时旧子任务标这个时刻，不删（已有 session_runs 引用删不掉）；非空 = 已作废，读的地方要跳过。 */
+    /** 重拆方案时旧子任务标这个时刻，不删（留着看历史）；非空 = 已作废，读的地方要跳过。 */
     supersededAt: timestamp('superseded_at', tz),
   },
   (t) => [
     // 部分唯一：重拆方案时新子任务会和旧的撞 index，旧子任务标了作废就不算数了。
     uniqueIndex('subtasks_task_index_unique').on(t.taskId, t.index).where(sql`${t.supersededAt} is null`),
-    // 给组合外键用：依赖和会话引用的子任务必须属于同一个需求。
+    // 给组合外键用：依赖引用的子任务必须属于同一个需求。
     unique('subtasks_task_id_id_unique').on(t.taskId, t.id),
   ],
 );
@@ -162,139 +149,6 @@ export const subtaskDeps = pgTable(
       foreignColumns: [subtasks.taskId, subtasks.id],
     }).onDelete('cascade'),
     check('subtask_deps_not_self', sql`${t.subtaskId} <> ${t.dependsOnId}`),
-  ],
-);
-
-/**
- * 一次 AI 会话。排队和干活分开计时：queue_ms = 开始干活（没开始就被叫停则取结束）− 排进队列，run_ms = 结束 − 开始干活。
- * 两个时长由库算，不许写。token、花费不知道就是空，不记 0。
- * 帅位会话、考新模型的会话不属于任何需求（task_id 为空），照样记、照样占账号池并发。
- */
-export const sessionRuns = pgTable(
-  'session_runs',
-  {
-    id: uuid('id').primaryKey().defaultRandom(),
-    taskId: uuid('task_id').references(() => tasks.id),
-    subtaskId: uuid('subtask_id'),
-    stage: stageKind('stage').notNull(),
-    routeId: text('route_id')
-      .notNull()
-      .references(() => routes.id),
-    whyRoute: text('why_route').notNull(),
-    /** 会话干活的分支。 */
-    branch: text('branch'),
-    queuedAt: timestamp('queued_at', tz).notNull().defaultNow(),
-    startedAt: timestamp('started_at', tz),
-    endedAt: timestamp('ended_at', tz),
-    outcome: runOutcome('outcome'),
-    actualModel: text('actual_model'),
-    inputTokens: bigint('input_tokens', { mode: 'number' }),
-    outputTokens: bigint('output_tokens', { mode: 'number' }),
-    /**
-     * 这一轮的缓存读、缓存写（执行体终帧报的，Claude、cursor 都报）：折额度当量要用（shared 的 usage.ts）。
-     * 空 = 没读到，不是 0；加这两列之前的会话全是空。
-     */
-    cacheReadTokens: bigint('cache_read_tokens', { mode: 'number' }),
-    cacheWriteTokens: bigint('cache_write_tokens', { mode: 'number' }),
-    costUsd: numeric('cost_usd', { precision: 14, scale: 6, mode: 'number' }),
-    queueMs: bigint('queue_ms', { mode: 'number' }).generatedAlwaysAs(
-      sql`(extract(epoch from (coalesce(started_at, ended_at) - queued_at)) * 1000)::bigint`,
-    ),
-    runMs: bigint('run_ms', { mode: 'number' }).generatedAlwaysAs(
-      sql`(extract(epoch from (ended_at - started_at)) * 1000)::bigint`,
-    ),
-    /** 执行体自己的会话编号（续会话用）。 */
-    sessionId: text('session_id'),
-    workflowId: text('workflow_id'),
-    /** 这次会话跑在哪个系统用户下。历史行可能是已停用的 fleet-agent-dedicated（RETIRED_RUN_AS_USERS）。 */
-    runAsUser: text('run_as_user').$type<RunAsUser | RetiredRunAsUser>(),
-    worktreePath: text('worktree_path'),
-    /** 起出来的会话进程在哪（插头的 onSpawn 报上来的），工人重启后看守和收尾靠它找回旧会话。 */
-    handle: jsonb('handle').$type<{ pid?: number; scope?: string }>(),
-    /** 插头判定的失败原因（quota_exhausted、model_mismatch……）或 SESSION_LOST 之类的结构化码。 */
-    failureCode: text('failure_code'),
-    /** 白话失败详情，写入时截到 2000 字。 */
-    failureMessage: text('failure_message'),
-    /** 这次会话对选路账本算胜负：ok 记一胜、fail 记一败、neutral 不进战绩（叫停、环境问题）。 */
-    routeOutcome: text('route_outcome').$type<'ok' | 'fail' | 'neutral'>(),
-    /** 执行体报的会话累计花费（续会话时含前几轮），对账用；不知道就是空，不记 0。 */
-    sessionCostUsd: numeric('session_cost_usd', { precision: 14, scale: 6, mode: 'number' }),
-    contextTokens: bigint('context_tokens', { mode: 'number' }),
-    /**
-     * 起会话时交代给它的测试命令（当时副本里的）：交活核对只认这一条。开工后仓里改了命令，这次会话照旧按开工时的交活，
-     * 不会被新命令退回。空 = 开工时项目没写测试命令（只有不写码的阶段起得来），或是加这一列之前开的会话。
-     */
-    testCommand: text('test_command'),
-    /**
-     * 会话输出（写在引擎收发目录的文件里，一行一个序号，从 0 起）处理到哪一行、副作用（进度事件）已经进库：引擎重启后接回
-     * 在跑的会话，从头重读输出重建状态，这一行及以前的不再写库（去重），之后的照常写。空 = 一行都还没确认。
-     */
-    outputSeq: integer('output_seq'),
-  },
-  (t) => [
-    foreignKey({
-      name: 'session_runs_subtask_in_task_fk',
-      columns: [t.taskId, t.subtaskId],
-      foreignColumns: [subtasks.taskId, subtasks.id],
-    }),
-    // 给组合外键用：追问挂的会话必须属于同一个需求。
-    unique('session_runs_task_id_id_unique').on(t.taskId, t.id),
-    // 组合外键遇到空值不查，所以要单独拦：写了子任务就必须写它所属的需求。
-    check('session_runs_subtask_needs_task', sql`${t.subtaskId} is null or ${t.taskId} is not null`),
-    // 结束了就必须有结局，有结局就必须已结束：不许出现「结束了但不知道怎么样」的行。
-    check('session_runs_outcome_iff_ended', sql`(${t.endedAt} is null) = (${t.outcome} is null)`),
-    check(
-      'session_runs_started_after_queued',
-      sql`${t.startedAt} is null or ${t.startedAt} >= ${t.queuedAt}`,
-    ),
-    check(
-      'session_runs_ended_after_start',
-      sql`${t.endedAt} is null or ${t.endedAt} >= coalesce(${t.startedAt}, ${t.queuedAt})`,
-    ),
-    check(
-      'session_runs_usage_nonneg',
-      sql`coalesce(${t.inputTokens}, 0) >= 0 and coalesce(${t.outputTokens}, 0) >= 0 and coalesce(${t.costUsd}, 0) >= 0 and coalesce(${t.sessionCostUsd}, 0) >= 0 and coalesce(${t.contextTokens}, 0) >= 0`,
-    ),
-    // 缓存读写单起一条：并进上面那条要删了重建，迁移就不是只加不改了。
-    check(
-      'session_runs_cache_nonneg',
-      sql`coalesce(${t.cacheReadTokens}, 0) >= 0 and coalesce(${t.cacheWriteTokens}, 0) >= 0`,
-    ),
-    check(
-      'session_runs_run_as_user_known',
-      sql`${t.runAsUser} is null or ${t.runAsUser} in (${sql.raw([...RETIRED_RUN_AS_USERS, ...RUN_AS_USERS].map((u) => `'${u}'`).join(', '))})`,
-    ),
-    check(
-      'session_runs_route_outcome_known',
-      sql`${t.routeOutcome} is null or ${t.routeOutcome} in ('ok', 'fail', 'neutral')`,
-    ),
-    check('session_runs_test_command_not_blank', sql`${t.testCommand} is null or ${t.testCommand} <> ''`),
-    index('session_runs_task_idx').on(t.taskId, t.queuedAt),
-    // 在途会话（还没结束的）按路由查，算账号池的并发。
-    index('session_runs_open_idx').on(t.routeId).where(sql`${t.endedAt} is null`),
-    index('session_runs_session_id_idx').on(t.sessionId),
-  ],
-);
-
-/** 会话过程中的一条进度或动作。只追加。 */
-export const progressEvents = pgTable(
-  'progress_events',
-  {
-    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
-    runId: uuid('run_id')
-      .notNull()
-      .references(() => sessionRuns.id),
-    at: timestamp('at', tz).notNull().defaultNow(),
-    kind: progressKind('kind').notNull(),
-    payload: jsonb('payload'),
-  },
-  (t) => [
-    index('progress_events_run_at_idx').on(t.runId, t.at),
-    // plan 的 payload 是 { steps: Step[] }（和 fleet plan 的请求体同形）：写成别的形状，看板的进度条会静默变成 0/0。
-    check(
-      'progress_events_plan_has_steps',
-      sql`${t.kind} <> 'plan' or coalesce(jsonb_typeof(${t.payload} -> 'steps') = 'array', false)`,
-    ),
   ],
 );
 
@@ -334,7 +188,7 @@ export const asks = pgTable(
     foreignKey({
       name: 'asks_run_in_task_fk',
       columns: [t.taskId, t.runId],
-      foreignColumns: [sessionRuns.taskId, sessionRuns.id],
+      foreignColumns: [runs.taskId, runs.id],
     }),
     // 按问题的摘要去重，不直接在长文本上建唯一：一行索引放不下 900 多个汉字。
     uniqueIndex('asks_run_question_unique').on(t.runId, sql`md5(${t.question})`),
