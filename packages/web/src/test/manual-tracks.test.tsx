@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 路由页「动手战绩」：表头五列，一行样本数据都渲染出来。
+// 路由页「动手战绩」：表头（含「派工档」，不和模型强弱档混）和一行样本数据都渲染出来。
 import { cleanup, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, test } from 'vitest';
 import { createMockApi } from '../api/mock/server';
@@ -8,10 +8,10 @@ import { renderApp } from './harness';
 
 afterEach(cleanup);
 
-const HEADS = ['一段过', '单数', '下界', '没做成', '平均分钟'] as const;
+const HEADS = ['派工档', '一段过', '单数', '下界', '没做成', '平均分钟'] as const;
 
 describe('路由页动手战绩', () => {
-  test('表头五列和一行样本都渲染出来', async () => {
+  test('表头和一行样本都渲染出来', async () => {
     const api = createMockApi({ live: false });
     const layers = await api.routingLayers();
     api.routingLayers = async () => ({
