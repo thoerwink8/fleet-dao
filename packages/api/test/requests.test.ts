@@ -425,7 +425,7 @@ describe('讨论中闲置满 3 天收口，收口的能重开', () => {
     expect(swept.idleClosed).toEqual([stale]);
 
     const closed = await get(h, a, stale);
-    expect(closed.request.status).toBe('idle_closed');
+    expect(closed.request.status).toBe('closed_drop');
     expect(closed.request.closeReason).toBe('闲置 3 天没动静，自动收口；最后一句是创始人甲说的');
     expect(closed.request.archivedAt).toBeDefined();
     expect(closed.actions.reopen.allowed).toBe(true);

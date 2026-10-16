@@ -234,6 +234,7 @@ export function pgRequests(db: Db, now: () => Date, options: RequestsOptions = {
       draftMissing: draftMissing(r.draftJson),
       pinned: (state?.pinnedAt ?? null) !== null,
       commanderRunning: await commanderRunning(tx, r.id),
+      closeReason: r.closeReason,
     };
     return { facts, viewer: await viewerOf(tx, viewerId), decider, state };
   }

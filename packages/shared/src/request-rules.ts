@@ -7,8 +7,8 @@
 // - 删除只给「还没留下任何决定、也没牵扯别人」的：讨论中、只有发起人说过话（指挥官的话不算）、从没提交过拍板，且只有发起人能删；
 //   指挥官会话排着队或正在回话时也删不了，要先停（C 片，#2061）。
 // - 讨论中不能手动归档：要么接着聊，要么「放下」（写理由）。
-// - 讨论中闲置满 3 天由定时任务自动收口（写原因、归档）。收口不算结案：不锁死、不能「接着这条提」，谁都能「重开」回讨论中；
-//   收口时不能发消息、改草稿，要先重开（免得说了话却没人知道它已经收了）。
+// - 讨论中闲置满 3 天由定时任务自动收口：记成已结案·不做、写原因、归档。原因以「闲置 N 天没动静，自动收口」开头，靠这句认。
+//   收口时不能发消息、改草稿，谁都能「重开」回讨论中。故意写下的「不做」不是这句，不能重开。
 import {
   REQUEST_ACTIONS,
   REQUEST_ARCHIVE_AFTER_SETTLED_DAYS,
@@ -47,6 +47,8 @@ export interface RequestFacts {
   pinned: boolean;
   /** 指挥官会话排着队或正在回话（C 片，#2061）：这时删除不可用，要先停。 */
   commanderRunning: boolean;
+  /** 放下、不做、收口的理由。没有可以不给。收口认 idleCloseReason 写出来的那句。 */
+  closeReason?: string | null;
 }
 
 export const COMMANDER_RUNNING_DELETE_WHY = '指挥官正在回话，停下后才能删';
@@ -124,6 +126,11 @@ export function idleCloseReason(days: number, lastSpeaker: string | null): strin
   return `闲置 ${days} 天没动静，自动收口；${who}`;
 }
 
+/** 这句是自动收口写的（不是人写下的「不做」）。重开、页面上的「收口」都只认它。 */
+export function isIdleCloseReason(reason: string | null | undefined): reason is string {
+  return typeof reason === 'string' && /^闲置 \d+ 天没动静，自动收口；/.test(reason);
+}
+
 /**
  * 该不该自动归档：已结案·不做的马上归档；已结案·做的，开出的单全部上线或关掉、最后一张满 3 天才归档。
  * 没开出单（B 片还没接上开单）的已结案·做不归档：它还在「进行中」等单子。
@@ -178,10 +185,10 @@ export function requestActions(
     return out;
   }
 
-  const closed = isClosed(r.status);
   const discussing = r.status === 'discussing';
   const pending = r.status === 'pending_decision';
-  const idleClosed = r.status === 'idle_closed';
+  const idleClosed = r.status === 'closed_drop' && isIdleCloseReason(r.closeReason);
+  const closed = isClosed(r.status) && !idleClosed;
   const missing = r.draftMissing.length > 0 ? `草稿还缺：${r.draftMissing.join('、')}` : null;
 
   out.send = closed ? no(CLOSED_LOCKED_WHY) : idleClosed ? no(IDLE_CLOSED_WHY) : yes;

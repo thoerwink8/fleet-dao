@@ -178,7 +178,7 @@ export async function sweepRequests(db: Db, now: Date): Promise<RequestSweepResu
         await tx
           .update(requests)
           .set({
-            status: 'idle_closed',
+            status: 'closed_drop',
             closedAt: now,
             closeReason: reason,
             archivedAt: now,
@@ -199,7 +199,7 @@ export async function sweepRequests(db: Db, now: Date): Promise<RequestSweepResu
           action: 'request.idle_close',
           target: `request:${r.seq}`,
           before: { status: r.status, closeReason: null, archivedAt: null },
-          after: { status: 'idle_closed', closeReason: reason, archivedAt: now.toISOString() },
+          after: { status: 'closed_drop', closeReason: reason, archivedAt: now.toISOString() },
           reason,
           via: 'engine',
         });

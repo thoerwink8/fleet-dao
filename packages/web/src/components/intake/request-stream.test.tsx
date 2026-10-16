@@ -17,7 +17,7 @@ function actions(): RequestActions {
   return out;
 }
 
-function detail(status: 'discussing' | 'idle_closed', closeReason?: string): RequestDetail {
+function detail(status: 'discussing' | 'closed_drop', closeReason?: string): RequestDetail {
   return {
     asOf: '2026-10-16T00:00:00.000Z',
     request: {
@@ -39,7 +39,7 @@ function detail(status: 'discussing' | 'idle_closed', closeReason?: string): Req
       needsDecision: false,
       createdAt: '2026-10-10T00:00:00.000Z',
       continuedBy: [],
-      ...(status === 'idle_closed'
+      ...(status === 'closed_drop'
         ? { closedAt: '2026-10-16T00:00:00.000Z', ...(closeReason ? { closeReason } : {}) }
         : {}),
     },
@@ -76,7 +76,7 @@ function stream(d: RequestDetail) {
 
 describe('需求页上看收口原因', () => {
   test('收口的分隔线写出闲置几天、最后一句是谁说的', () => {
-    stream(detail('idle_closed', REASON));
+    stream(detail('closed_drop', REASON));
     const line = document.querySelector('[data-close-reason]');
     expect(line?.textContent).toContain(REASON);
     expect(line?.getAttribute('data-close-reason')).toBe(REASON);

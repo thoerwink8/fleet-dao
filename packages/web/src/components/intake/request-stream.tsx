@@ -3,7 +3,7 @@
 // 拍板卡（待拍板时在最后）：只有拍板人能点「同意做 / 不做 / 再聊聊」，别人看到「等谁拍」。草稿齐了的一张紧凑卡带「提交拍板 / 确定，开单」。
 // 结案后最后一行是结案分隔线。B、C 片的消息（指挥官一问的选项、建议改、进度卡、引擎提问的回答、别家意见、换模型分隔线、
 // 暂停原因、方案卡、指挥官正在回话）画法在 request-cards.tsx。
-import { pausedWhy } from '@fleet-dao/shared';
+import { isIdleCloseReason, pausedWhy } from '@fleet-dao/shared';
 import { CornerDownRight } from 'lucide-react';
 import { Fragment, type ReactNode, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
@@ -465,8 +465,8 @@ function DraftGist({ d, phone, onOpenPanel }: { d: RequestDetail; phone: boolean
 function closedLine(d: RequestDetail): string {
   const r = d.request;
   const at = r.closedAt ? formatDateTime(r.closedAt) : '';
-  if (r.status === 'idle_closed') {
-    return `收口${at ? ` · ${at}` : ''}${r.closeReason ? ` · ${r.closeReason}` : ''}`;
+  if (r.status === 'closed_drop' && isIdleCloseReason(r.closeReason)) {
+    return `收口${at ? ` · ${at}` : ''} · ${r.closeReason}`;
   }
   if (r.status === 'closed_drop') return `已结案 · ${at} · 不做${r.closeReason ? `：${r.closeReason}` : ''}`;
   const refs = r.issueRefs.map((i) => `#${i.number}`).join('、');
@@ -509,7 +509,7 @@ export function MessageStream({
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' });
   }, [d.messages.length, r.status, r.seq]);
-  const closed = r.status === 'closed_do' || r.status === 'closed_drop' || r.status === 'idle_closed';
+  const closed = r.status === 'closed_do' || r.status === 'closed_drop';
   return (
     <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-intake-stream>
       <div className="mx-auto flex max-w-chat flex-col gap-3 px-4 py-4">
@@ -550,7 +550,7 @@ export function MessageStream({
           <div
             className="flex items-center gap-3 text-meta text-muted-foreground"
             data-closed-line
-            {...(r.status === 'idle_closed' ? { 'data-close-reason': r.closeReason ?? '' } : {})}
+            {...(isIdleCloseReason(r.closeReason) ? { 'data-close-reason': r.closeReason } : {})}
           >
             <span className="h-px flex-1 bg-border" />
             <span className="min-w-0 text-center">{closedLine(d)}</span>

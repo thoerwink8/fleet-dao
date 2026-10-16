@@ -192,7 +192,7 @@ describe('sweepRequests：讨论中闲置满 3 天收口', () => {
     const rows = await t.db.select().from(requests);
     const bySeq = new Map(rows.map((r) => [r.seq, r]));
     expect(bySeq.get(stale.seq)).toMatchObject({
-      status: 'idle_closed',
+      status: 'closed_drop',
       closeReason: '闲置 3 天没动静，自动收口；最后一句是创始人说的',
     });
     expect(bySeq.get(stale.seq)?.archivedAt).toEqual(NOW);
@@ -261,10 +261,6 @@ describe('表上的约束', () => {
     await expectViolation(addRequest(t.db, f, { archivedAt: NOW }), 'requests_archive_only_closed');
     await expectViolation(
       addRequest(t.db, f, { status: 'closed_drop', closedAt: NOW }),
-      'requests_drop_has_reason',
-    );
-    await expectViolation(
-      addRequest(t.db, f, { status: 'idle_closed', closedAt: NOW }),
       'requests_drop_has_reason',
     );
     const r = await addRequest(t.db, f);

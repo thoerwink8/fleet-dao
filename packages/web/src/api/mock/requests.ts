@@ -588,6 +588,7 @@ export function createMockRequests(opts: MockRequestsOptions): MockRequests {
         draftMissing: draftMissing(r.draft),
         pinned: stateOf(r.seq, viewer).pinnedAt !== null,
         commanderRunning: r.chat.state !== 'idle',
+        closeReason: r.closeReason ?? null,
       },
       { id: v.id, decidesRequests: v.decides },
       { now: new Date(now()), deciderAvailable: deciderAvailable() },
