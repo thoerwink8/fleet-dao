@@ -2,19 +2,19 @@
 // 本机也能手跑 pnpm branch:hygiene。判远端每条分支「删 / 留 / 等人定」，写明理由：
 //   结构上不能碰的（默认分支、受保护、开着的 PR 的头或目标分支）→ 留；巡检单上人勾了删 / 留（勾的就是现在的头）→ 照勾的办；
 //   开着的单或 PR 提到 → 留；有已合并 PR、头就是合并时的 PR 头 → 删（决定 0009）；
-//   其余看有没有产出（branch-git.ts）：没产出、满 14 天没动静 → 删（不满 → 留）；有产出、满 3 天没动静 → 列到巡检单上等人勾
-//   （不满 → 留：还在做）。
-// 有产出里有两类不用再列给人：关掉（没合）的 PR 留下的分支、名字里那张单已经关了的 —— 都满 14 天机器自己删
-// （「3选推荐b」：前者删了能在 PR 页面点 Restore 恢复、后者那件事已经结束了）。见 autoReason。
+//   其余看有没有产出（branch-git.ts）：没产出、满 14 天没动静 → 删（不满 → 留）；有产出、满 14 天没动静 → 先存档成
+//   archive/ 轻量标签再删（决定 0097：有备份就能删）；有产出不满 14 天 → 留，不列给人（不满 3 天写「还在做」）。
+//   和主线没有共同祖先、判不了有没有产出的仍是等人定，但不再开新的巡检单。
+// 关掉（没合）的 PR 留下的分支、名字里那张单已经关了的，理由更具体（autoReason），删法一样是先存档再删。
 // 改这里之前必须知道：
-// - 删数据是人闸：机器不经人只删「内容全在主线（或已合并 PR）里」的分支。有产出的，人在巡检单上勾了「删」、勾的那个头
-//   就是现在的头才删；判完到删之间头变了也不删（删之前再读一次）。
-// - 自动删的那两类一律先过 ①②③ 三关（ruleVerdict 里开着的 PR / 巡检单勾了留 / 开着的单或 PR 提到 → 留），再过满 14 天：
-//   判法只在 contentVerdict 里这一处，别在调用方另判一套。
+// - 有产出、满 14 天、没被 ①②③ 三关留下（ruleVerdict 里开着的 PR / 巡检单勾了留 / 开着的单或 PR 提到）的，判法只在
+//   contentVerdict 里这一处（带 archive），别在调用方另判一套。真删在下面的删除循环：先在同一个提交上建轻量标签，
+//   回读指向这个头才删；建不成或回读不对就改判「没查成」、不删。人勾了删的照勾的办，不强制先建标签。
+// - 判完到删之间头变了也不删（删之前再读一次，变了的不建标签）。
 // - 读不到、认不出一律「没查成」：整份清单（分支、PR、开着的单）读不到这一轮一条不判、一条不删；一条分支的内容或动态读不到，
 //   这一条判「没查成」、不删，别的照判。不拿空冒充「没有」。每条路径在 test/branch-hygiene.test.ts 里有故意造出的失败。
-// - 巡检单正文是人和机器的共用状态（勾选框）：只有带记号的那几行算数，正文每轮按这一轮的判决重写，人勾过的照抄过去。
-//   只认仓里的人或 Actions 开的那张（trustedBoard）：公开仓谁都能开一张带记号、勾好删的单。
+// - 巡检单不再新开。没有等人定的、也没有还要记住的勾（勾了留，或勾了删还没删成），正文写明不再需要人勾，关成 not planned。
+//   勾了留的单子继续开着：勾存在正文里，关了下一轮就忘，会把人留下的分支删掉。只认仓里的人或 Actions 开的那张（trustedBoard）。
 import { type ContentFacts, type FactsReader, type GitExec, gitFacts, type MainIndex } from './branch-git.ts';
 import { FLOW_BRANCH_PATTERN } from './flow-branch.ts';
 import type {
@@ -30,8 +30,8 @@ import type {
 /** 没产出的分支满这么多天没动静（最后一次提交、最后一次推送取晚的）才删：删了不丢东西，等这么久只为不打断刚建了分支的人。 */
 export const STALE_DAYS = 14;
 /**
- * 有产出的分支满这么多天没动静才列给人定：本仓的会话按小时算、至少 20 分钟推一次，几天没动的就是放下了；
- * 再短会把还在做的列出来打扰人。
+ * 有产出的分支不满这么多天算还在做。满了、但不满 STALE_DAYS：留着，不列给人。
+ * 本仓的会话按小时算、至少 20 分钟推一次，几天没动的就是放下了；再短会把还在做的当成放下了。
  */
 export const ASK_DAYS = 3;
 const DAY_MS = 24 * 3_600_000;
@@ -39,17 +39,27 @@ const DAY_MS = 24 * 3_600_000;
 export const MARK = 'fleet:branch-hygiene';
 /** 巡检单正文里的记号：带它的那张开着的单就是巡检单。 */
 export const BOARD_MARKER = `<!-- ${MARK} board -->`;
-export const BOARD_TITLE = '分支体检：有产出的远端分支，等你勾删还是留（机器人维护）';
-/** 巡检单贴的类别标签（GitHub 对账要求开着的单恰好一个类别）。 */
-export const BOARD_LABELS = ['杂项'];
+/** 没有要等人定的分支时，巡检单正文写这一句，然后关成 not planned。不再开新的巡检单。 */
+export const BOARD_RETIRED = `不再需要人勾：有产出的分支满 ${STALE_DAYS} 天先存档成 archive/ 标签再删`;
 /** GitHub 单子正文最长 65536 个字，留点余量。 */
 const BODY_LIMIT = 60_000;
 
 export type Verdict =
   | { kind: 'keep'; why: string }
-  | { kind: 'delete'; why: string; byFounder: boolean }
+  | {
+      kind: 'delete';
+      why: string;
+      byFounder: boolean;
+      /** 先建 archive/ 轻量标签、回读指向这个头，才删。人勾了删的不带这个。 */
+      archive?: boolean;
+    }
   | { kind: 'ask'; why: string }
   | { kind: 'unknown'; why: string };
+
+/** 存档标签：`archive/<分支名里的 / 换成 -->-<头的前 7 位>`。同一个头重复跑，名字不变。 */
+export function archiveTagName(branch: string, sha: string): string {
+  return `archive/${branch.replaceAll('/', '--')}-${sha.slice(0, 7)}`;
+}
 
 /** 巡检单上人勾的：对哪个头勾的、勾的是删还是留。 */
 export interface Decision {
@@ -77,7 +87,7 @@ export interface BranchCase {
   decision: Decision | undefined;
   content?: ContentFacts | { error: string } | undefined;
   activity?: BranchActivity[] | { error: string } | undefined;
-  /** 分支名里那个号对应的单：关了的会让判决变成「机器自己删」（#784），所以有产出的分支都要读一次。 */
+  /** 分支名里那个号对应的单：写进理由。有产出满 14 天照样存档再删，不因为这张单还开着就留下。 */
   linked?: LinkedIssue | undefined;
 }
 
@@ -179,13 +189,13 @@ function prStory(c: BranchCase): string {
 }
 
 /**
- * 「有产出」里不必再列给人的两类（「3选推荐b」：关掉没合的 PR 留下的分支、名字里那张单已经关了的
- * 远端分支，满 14 天让机器自己删、不再问他）：是这两类就回一句理由（写进判决），都不是回 undefined。
- * - 关掉（没合）的 PR 留下的分支：分支头就是那个 PR 最后的头，删了能在 PR 页面点 Restore branch 恢复。头变了就不算
- *   （和「有已合并 PR、头＝合并时的头」同一个严格度），重新判。
+ * 「有产出」里理由更具体的两类（关掉没合的 PR 留下的分支、名字里那张单已经关了的）：是这两类就回一句理由
+ * （写进判决），都不是回 undefined。删不删不由这里定——有产出满 14 天一律先存档再删，这里只让理由说清是哪一类。
+ * - 关掉（没合）的 PR 留下的分支：分支头就是那个 PR 最后的头，删了还能在 PR 页面点 Restore branch 恢复。头变了就不算
+ *   （和「有已合并 PR、头＝合并时的头」同一个严格度）。
  * - 名字里的那张单已经关了：那件事已经结束了，分支是它剩下的。
  * 读不到、认不出一律不算这一类：单没查成、查不到这个号、号其实是个 PR，都回 undefined（不拿「没查成」当「已关」，底线）。
- * 只对真正有产出（output.kind === 'some'）的用：和主线没有共同祖先的判不了有没有产出，照旧交给人勾。
+ * 只对真正有产出（output.kind === 'some'）的用：和主线没有共同祖先的判不了有没有产出，照旧是等人定。
  */
 export function autoReason(c: BranchCase): string | undefined {
   const closed = c.closedPrs.find((p) => p.headSha === c.branch.sha);
@@ -200,8 +210,9 @@ export function autoReason(c: BranchCase): string | undefined {
 }
 
 /**
- * 要看内容的那几条：没产出满 14 天删；有产出里有两类（autoReason）满 14 天也机器自己删；有产出其余满 3 天等人定；
- * 还新的留；读不到没查成。
+ * 要看内容的那几条：没产出满 14 天删；有产出满 14 天先存档再删（archive，执行在删除循环）；
+ * 有产出满 3 天不满 14 天留着、不列给人；还新的留；和主线没有共同祖先的等人定；读不到没查成。
+ * 有产出这条判法只在这里，别在调用方再判一次。
  */
 export function contentVerdict(c: BranchCase, now: Date): Verdict {
   const { content, activity } = c;
@@ -238,27 +249,33 @@ export function contentVerdict(c: BranchCase, now: Date): Verdict {
           .map((f) => `\`${f}\``)
           .join('、')}${out.files.length > 3 ? ' 等' : ''}）`;
   const wip = /\bwip\b/i.test(content.headSubject) ? '；最后一次提交写着 WIP，可能是半成品' : '';
-  const auto = out.kind === 'some' ? autoReason(c) : undefined;
-  if (auto && days >= STALE_DAYS) {
-    return {
-      kind: 'delete',
-      why: `${auto}；${produced}；满 ${STALE_DAYS} 天没动静，机器自己删（创始人 2026-10-04 拍）；${when}${restale}`,
-      byFounder: false,
-    };
-  }
   if (days < ASK_DAYS) {
     return { kind: 'keep', why: `还在做（${produced}），不满 ${ASK_DAYS} 天：${when}${restale}` };
   }
-  if (auto) {
-    // 这两类不用列给人：不满天数就留着（理由写明到天数自己删，别让人以为漏了）
+  // 判不了有没有产出：不存档、不删。巡检单不再新开，已有的单上还列着。
+  if (out.kind === 'unrelated') {
     return {
-      kind: 'keep',
-      why: `${auto}，但不满 ${STALE_DAYS} 天：${when}；满 ${STALE_DAYS} 天机器自己删，不列给人${restale}`,
+      kind: 'ask',
+      why: `${produced}；${prStory(c)}${linkedStory(c.linked)}；${when}；最后一次提交「${content.headSubject}」${wip}${restale}`,
     };
   }
+  const auto = autoReason(c);
+  const detail = auto
+    ? `${auto}；${produced}`
+    : `${produced}；${prStory(c)}${linkedStory(c.linked)}；最后一次提交「${content.headSubject}」${wip}`;
+  if (days >= STALE_DAYS) {
+    return {
+      kind: 'delete',
+      why: `${detail}；满 ${STALE_DAYS} 天没动静，先存档成 archive/ 标签再删（决定 0097）；${when}${restale}`,
+      byFounder: false,
+      archive: true,
+    };
+  }
+  // 满 3 天、不满 14 天：留着，不列给人（理由写明到天数自己存档再删，别让人以为漏了）
+  const held = auto ? `${auto}，但` : `${detail}；`;
   return {
-    kind: 'ask',
-    why: `${produced}；${prStory(c)}${linkedStory(c.linked)}；${when}；最后一次提交「${content.headSubject}」${wip}${restale}`,
+    kind: 'keep',
+    why: `${held}不满 ${STALE_DAYS} 天：${when}；满 ${STALE_DAYS} 天先存档成 archive/ 标签再删，不列给人${restale}`,
   };
 }
 
@@ -415,7 +432,9 @@ export function renderBoard(input: BoardInput): string {
     REMIND_TRACKING,
     '这张单由「分支体检」机器人维护（#769；每天一轮，`.github/workflows/github-audit.yml` 的 branches，判法在 `packages/conventions/src/branch-hygiene.ts`），正文每轮重写，只有勾选框算数。',
     '',
-    `**要你定的**：下面每条分支都有主线上没有的改动，满 ${ASK_DAYS} 天没动静，也没有开着的 PR 或单子提到它。勾「删」：下一轮照删（分支头变了就不删、重新列）；勾「留，不再问」：以后不再问（分支头变了才重新判）。想马上执行就在 Actions 里手动跑一次 github-audit。没产出的（改动主线上都有）、关掉没合的 PR 留下的、名字里那张单已经关了的：机器满 ${STALE_DAYS} 天自己删，不列在这里。`,
+    asks.length === 0
+      ? BOARD_RETIRED
+      : `**要你定的**：下面这几条和主线没有共同祖先，判不了有没有产出。有产出的不满 ${STALE_DAYS} 天留着、满了先存档成 archive/ 标签再删，都不列在这里。勾「删」：下一轮照删（分支头变了就不删）；勾「留，不再问」：以后不再问（分支头变了才重新判）。`,
     '',
     `上次跑：${bj(input.now)}（北京时间）。远端 ${reports.length} 条分支：这一轮删了 ${input.deleted.length}、留着 ${count('keep')}、等你定 ${asks.length}、没查成 ${unknown.length}。`,
   ];
@@ -502,7 +521,7 @@ export interface HygieneResult {
   notQueried: string[];
   /** 不算毛病、要告诉人的。 */
   notes: string[];
-  board?: { number: number; created: boolean; newAsks: string[] } | undefined;
+  board?: { number: number; created: boolean; newAsks: string[]; closed: boolean } | undefined;
 }
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -624,9 +643,9 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
       }
       verdict = contentVerdict(c, now);
       const n = issueNumberIn(b.name);
-      // 名字里那个号：只有「等人定」这一档会因为它改判——已关 → 归「机器自己删」（#784），还开着 → 写进给人看的理由。
-      // 判删或判留的档不用读（读了也改不了判决，白花一次 API）。读不到照实写「没查成」，不改判决。
-      if (verdict.kind === 'ask' && n !== undefined) {
+      // 名字里那个号写进理由：已关的更具体，还开着、没查成、号其实是 PR 都不改删还是留
+      // （有产出满 14 天照样存档再删，不拿「没查成」当「已关」）。判留的档不读，读了也改不了判决。
+      if ((verdict.kind === 'ask' || (verdict.kind === 'delete' && verdict.archive)) && n !== undefined) {
         try {
           const i = await gh.issue(n);
           c.linked =
@@ -667,6 +686,31 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
           });
           continue;
         }
+        if (r.verdict.archive) {
+          const tag = archiveTagName(r.name, r.sha);
+          const missed = (why: string) => {
+            r.verdict = { kind: 'unknown', why };
+            result.notQueried.push(`${r.name}：${why}`);
+          };
+          try {
+            await gh.createLightweightTag(tag, r.sha);
+          } catch (e) {
+            missed(`存档标签 ${tag} 没建成（${errText(e)}），没删`);
+            continue;
+          }
+          let pointed: string | undefined;
+          try {
+            pointed = await gh.tagSha(tag);
+          } catch (e) {
+            missed(`存档标签 ${tag} 回读没查成（${errText(e)}），没删`);
+            continue;
+          }
+          if (pointed !== r.sha) {
+            const got = pointed === undefined ? '没有这个标签' : short(pointed);
+            missed(`存档标签 ${tag} 回读指向 ${got}，不是分支头 ${short(r.sha)}，没删`);
+            continue;
+          }
+        }
         if (await gh.deleteBranch(r.name)) result.deleted.push(r.name);
         else result.gone.push(r.name);
       } catch (e) {
@@ -677,33 +721,52 @@ export async function branchHygiene(deps: HygieneDeps, opts: HygieneOptions): Pr
 
   if (opts.board) {
     const asks = result.reports.filter((r) => r.verdict.kind === 'ask');
-    const pending = result.reports.some((r) => r.decision !== undefined);
-    if (board || asks.length || pending) {
+    // 勾存在巡检单正文里。勾了留、或勾了删还没删成的，单子得继续开着，否则下一轮忘了勾。
+    const remembered = result.reports.some((r) => {
+      if (!r.decision) return false;
+      if (r.decision.action === 'keep') return true;
+      return !result.deleted.includes(r.name) && !result.gone.includes(r.name);
+    });
+    const render = (reminded: ReadonlySet<string>) =>
+      renderBoard({
+        reports: result.reports,
+        // 删的时候已经不在了的也算删掉了：巡检单上不再列它
+        deleted: [...result.deleted, ...result.gone],
+        failed: result.failed,
+        skipped: result.skipped,
+        conflicts: parsed.conflicts,
+        reminded,
+        now,
+      });
+    if (!board) {
+      // 以后也不再开新的巡检单。判不了的仍记在这一轮的表里。
+      if (asks.length) {
+        result.notes.push(
+          `有 ${asks.length} 条判不了有没有产出（${asks.map((a) => a.name).join('、')}），不再开新的巡检单`,
+        );
+      }
+    } else if (asks.length === 0 && !remembered) {
+      const body = render(new Set());
+      try {
+        await gh.closeIssue(board.number, 'not_planned', body);
+        result.board = { number: board.number, created: false, newAsks: [], closed: true };
+      } catch (e) {
+        result.notQueried.push(`巡检单没关成（${errText(e)}）`);
+        return result;
+      }
+    } else {
       // 提醒过没有只认正文里的「提醒过」记号（留言成功才记），不看「列没列过」：留言失败的下一轮照样算新列的（#805）。
       // 旧正文（没有 REMIND_TRACKING）是这个记号出现之前写的，那时列过的就当提醒过，别一次性全部再提醒一遍。
       const isReminded = (r: BranchReport) =>
         parsed.reminded.has(remindKey(r.name, r.sha)) || (!parsed.tracked && parsed.listed.has(r.name));
       const newAskReports = asks.filter((r) => !isReminded(r));
       const newAsks = newAskReports.map((r) => r.name);
-      const render = (reminded: ReadonlySet<string>) =>
-        renderBoard({
-          reports: result.reports,
-          // 删的时候已经不在了的也算删掉了：巡检单上不再列它
-          deleted: [...result.deleted, ...result.gone],
-          failed: result.failed,
-          skipped: result.skipped,
-          conflicts: parsed.conflicts,
-          reminded,
-          now,
-        });
       const remindedNow = new Set(asks.filter(isReminded).map((r) => remindKey(r.name, r.sha)));
       const body = render(remindedNow);
-      let number = board?.number;
+      const number = board.number;
       try {
-        const created = number === undefined;
-        if (number === undefined) number = await gh.createIssue(BOARD_TITLE, body, BOARD_LABELS);
-        else if (board?.body !== body) await gh.updateIssueBody(number, body);
-        result.board = { number, created, newAsks };
+        if (board.body !== body) await gh.updateIssueBody(number, body);
+        result.board = { number, created: false, newAsks, closed: false };
       } catch (e) {
         result.notQueried.push(`巡检单没写成（${errText(e)}）`);
         return result;

@@ -79,9 +79,12 @@ runMain(async () => {
     out('只判没删（带 --delete 才删）。');
   }
   if (r.board) {
-    out(
-      `巡检单 #${r.board.number}${r.board.created ? '（这次新开的）' : ''}${r.board.newAsks.length ? `：新列了 ${r.board.newAsks.length} 条等人定` : ''}。`,
-    );
+    const what = r.board.closed
+      ? '：关掉了（不再需要人勾）'
+      : r.board.newAsks.length
+        ? `：新列了 ${r.board.newAsks.length} 条等人定`
+        : '';
+    out(`巡检单 #${r.board.number}${what}。`);
   }
   for (const n of r.notes) out(n);
   for (const f of r.failed) err(`删失败：${f.name}：${f.why}`);
