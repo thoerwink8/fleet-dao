@@ -10,8 +10,10 @@ import type {
   DecisionAnswer,
   DecisionExecution,
   DecisionOption,
+  FlowAssignment,
   LocalSessionsReport,
   Model,
+  NewFlowAssignment,
   NodeReport,
   NodeSnapshot,
   Pool,
@@ -303,6 +305,13 @@ export interface BoardStore {
   /** 看板上的需求：没结束的，加上进入终态不到 7 天的。按优先级、再按建单先后排。 */
   listBoardTasks(repoId: string): Promise<Task[]>;
   getTask(id: string): Promise<Task | null>;
+  /**
+   * 全程模式的分组记录（#2823，task_flow_assignments）：每张单最多一行，写一次。分组时刻用 Store 的钟。
+   * 同一张单写第二次抛 FlowAssignmentExistsError，不覆盖；没有这张单抛普通错。
+   */
+  writeFlowAssignmentOnce(input: NewFlowAssignment): Promise<FlowAssignment>;
+  /** 读一张单的分组记录；没分过组、编号不是 uuid 都是 null。 */
+  getFlowAssignment(taskId: string): Promise<FlowAssignment | null>;
   /**
    * 任务列表页（#1639）：所有仓的需求（不限 7 天窗口，做完、失败、叫停的都在），按最近更新（开单、快照写入、状态最近一次变化三者最晚）倒序翻页，
    * 同一毫秒的按编号倒序。分组规则在 shared 的 taskListGroupOf。仓编号不是 uuid（库版）或不存在，回空页、各组都是 0。

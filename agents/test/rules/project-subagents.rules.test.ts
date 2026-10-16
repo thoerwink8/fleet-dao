@@ -150,7 +150,7 @@ function engineDir(src: string): string {
 
 const files = existsSync(DIR)
   ? readdirSync(DIR)
-      .filter((f) => !f.startsWith('.'))
+      .filter((f) => !f.startsWith('.') && f !== 'README.md') // README.md 是规范说明（subagent-readme.rules.test.ts 钉它）
       .sort()
   : [];
 const texts = Object.fromEntries(files.map((f) => [f, read(`${DIR}${f}`)]));

@@ -2,7 +2,9 @@
 // 选路预占着的名额。只在 worker.ts 的 createEngineWorker 里调一次（真端口才有）。
 //
 // 改这里之前必须知道：
-// - 走管道的一次性会话（验收、整理、Mirasim 上的动手）上一轮引擎一退就断了：scope 要收、临时目录要清、库里没收场的 runs 行要收成
+// - 放手的 Mirasim 会话（#2815）没有本机 scope：到了 TTL 没人接回，凭交接单（mirasim.json）给服务端发 stop，再收临时目录、
+//   交接目录、runs 那一行；刚放手的和命令行那几家一样不碰。
+// - 走管道的一次性会话（验收、整理）上一轮引擎一退就断了：scope 要收、临时目录要清、库里没收场的 runs 行要收成
 //   没跑完——不收，切号就一直以为它们在跑、一直等（#157）；预占的名额不清，选路就一直当池占着（#757）。
 //   所以这几步只能在接活之前跑：这时进程里没有任何会话，清的时候不会碰到这一轮刚起的。
 // - 脱开引擎跑的动手会话（#2238，session-handoff.ts）：上一个引擎走时放了手、收发目录里有放手标记、还没过 HANDOFF_TTL_MS 的，
@@ -14,7 +16,14 @@
 import { listAgentScopes, SESSION_USERS, stopScope } from '@fleet-dao/adapters';
 import { clearReservations, closeOpenRuns, type Db, resolveAlertWithReason } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
-import { awaitingAttach, HANDOFF_TTL_MS, type IoEntry, listIo, removeIo } from './session-handoff.ts';
+import {
+  awaitingAttach,
+  HANDOFF_TTL_MS,
+  type IoEntry,
+  listIo,
+  type MirasimHandle,
+  removeIo,
+} from './session-handoff.ts';
 import type { WorkTrees } from './worktrees.ts';
 
 /** 工人起来时收掉上一轮引擎留下、还开着的 runs 行（#157）写的原因。 */
@@ -36,6 +45,12 @@ export interface OrphanReapDeps {
   ioRoot?: string;
   /** 放手以后等人接回多久（默认 HANDOFF_TTL_MS）。 */
   handoffTtlMs?: number;
+  /**
+   * 给服务端的 Mirasim 会话发 stop、等它翻终态（#2815，adapters 的 stopMirasimSession）。放手的 Mirasim 会话没有本机 scope，
+   * 过了时限没人接回时靠它收。不给 = 只收本机的东西，服务端的会话留着（测试、没装 Mirasim 的开发机）。
+   * 抛了或没确认只记日志，不挡收别的。
+   */
+  stopMirasim?: (handle: MirasimHandle) => Promise<{ confirmed: boolean; detail: string }>;
   /** 起来以后过多久清扫一次没人接回的（默认 = handoffTtlMs）；测试换掉。 */
   later?: (fn: () => void, ms: number) => void;
   /** 经 sudo 调的帮手（fleet-agent-scope）；测试里换成假的。 */
@@ -73,6 +88,34 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     }
   }
 
+  /**
+   * Mirasim 的会话在服务端跑、没有本机 scope：凭交接单给服务端发 stop。不抛，没发成只记日志（本机的东西照收）。
+   * 没装 stopMirasim 时服务端的会话留着，明说。
+   */
+  async function stopMirasimSession(handle: MirasimHandle): Promise<void> {
+    if (!deps.stopMirasim) {
+      log('Mirasim 会话没人接回，可这个引擎没装停 Mirasim 会话的手段：服务端的会话留着', {
+        runId: handle.runId,
+        sessionKey: handle.sessionKey,
+      });
+      return;
+    }
+    try {
+      const stopped = await deps.stopMirasim(handle);
+      log(
+        stopped.confirmed
+          ? `没人接回的 Mirasim 会话 ${handle.sessionKey} 已发 stop 收掉`
+          : `没人接回的 Mirasim 会话 ${handle.sessionKey} 发了 stop，没看到它翻终态（停没停没查成）`,
+        { runId: handle.runId, detail: stopped.detail },
+      );
+    } catch (error) {
+      log(`没人接回的 Mirasim 会话 ${handle.sessionKey} 的 stop 没发成（服务端的会话可能还在跑）`, {
+        runId: handle.runId,
+        error: errMessage(error),
+      });
+    }
+  }
+
   /** 到了 TTL 还没人接回的：scope、收发目录、临时目录、runs 那一行照孤儿收。不抛，收不掉的记日志。 */
   async function sweepUnclaimed(ids: readonly string[]): Promise<void> {
     const left = new Map((await readIo()).map((e) => [e.runId, e]));
@@ -80,8 +123,12 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     if (unclaimed.length === 0) return;
     for (const id of unclaimed) {
       log(`脱开跑的会话 ${id} 放手后 ${Math.round(ttlMs / 60_000)} 分钟没人接回，照孤儿收掉`);
-      const error = await stopScope({ id, user: SESSION_USERS[0], ...helperOpts });
-      if (error) log(`没人接回的会话 ${id} 收不掉`, { error });
+      const mirasim = left.get(id)?.mirasim;
+      if (mirasim) await stopMirasimSession(mirasim);
+      else {
+        const error = await stopScope({ id, user: SESSION_USERS[0], ...helperOpts });
+        if (error) log(`没人接回的会话 ${id} 收不掉`, { error });
+      }
       const dir = left.get(id)?.dir;
       if (dir)
         await removeIo(dir).catch((e: unknown) => log('收发目录没删掉', { dir, error: errMessage(e) }));
@@ -148,6 +195,9 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     // 收发目录：等人接回的留着，别的（收过场、被叫停、过了时限的）删掉
     for (const e of io) {
       if (keep.has(e.runId)) continue;
+      // Mirasim 的会话不在本机 scope 里、上面收不到：交接单还在说明它没收过场（收过场的连目录一起删了），服务端的会话
+      // 可能还在跑（放手过了时限、或引擎没走完优雅停机就退了），这时发 stop
+      if (e.mirasim) await stopMirasimSession(e.mirasim);
       await removeIo(e.dir).catch((error: unknown) =>
         log('上一轮会话留下的收发目录没删掉（下次起来再清）', { dir: e.dir, error: errMessage(error) }),
       );

@@ -89,7 +89,9 @@ describe('prepareSubagents', () => {
 
 describe('readSubagentGuard、subagentsOnce、lazyOnSuccess', () => {
   it('readSubagentGuard 只读不落盘；读不到抛错', async () => {
-    expect(await readSubagentGuard(src)).toEqual({ names: ['fleet-a', 'fleet-b'], isolated: ['fleet-b'] });
+    const guard = await readSubagentGuard(src);
+    expect(guard).toMatchObject({ names: ['fleet-a', 'fleet-b'], isolated: ['fleet-b'] });
+    expect(Object.keys(guard.definitions)).toEqual(['fleet-a', 'fleet-b']);
     await expect(readSubagentGuard(join(root, '不在'))).rejects.toThrow('子代理定义读不到');
   });
 

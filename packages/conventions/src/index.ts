@@ -102,6 +102,7 @@ export {
   currentVersion,
   ENGINE_LABEL,
   FROZEN_LABEL,
+  FULL_FLOW_LABEL,
   GROOM_PENDING_LABEL,
   GROOMED_LABEL,
   HUMAN_DECISION_LABEL,
@@ -114,6 +115,7 @@ export {
   MOTHER_LABEL,
   milestonePhase,
   milestoneVersion,
+  THREE_FLOW_LABEL,
 } from './labels.ts';
 export { type MdDoc, parseMd } from './markdown.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';

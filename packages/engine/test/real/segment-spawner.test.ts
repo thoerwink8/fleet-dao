@@ -29,7 +29,13 @@ import {
   outcomeOfReport,
   SEGMENT_WALL_MARGIN_MS,
 } from '../../src/real/segment-spawner.ts';
-import { DETACHED_MARK, type SessionHandoff, sessionHandoff } from '../../src/real/session-handoff.ts';
+import {
+  DETACHED_MARK,
+  readMirasimHandle,
+  type SessionHandoff,
+  sessionHandoff,
+  writeMirasimHandle,
+} from '../../src/real/session-handoff.ts';
 import type { RunRecord } from '../../src/runner/not-wired.ts';
 import { OneShotDetached, OneShotError, type OneShotInput, runOneShot } from '../../src/runner/one-shot.ts';
 
@@ -1099,14 +1105,133 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
     expect(h.removed).toEqual([`/var/lib/fleet-work/_tmp/${RUN_ID}`]);
   });
 
-  it('没给 detach（验收、整理、指挥官会话）、Mirasim 上的动手段：照旧走管道，不交收发目录', async () => {
+  it('没给 detach（验收、整理、指挥官会话）：照旧走管道，不交收发目录，Mirasim 上的也一样', async () => {
     const handoff = sessionHandoff(join(tmp, 'io'));
     const plain = harness({ handoff });
     await plain.run();
     expect(plain.calls[0]?.hooks).not.toHaveProperty('io');
     const relay = harness({ handoff, route: route({ hostId: 'mirasim' }) });
-    await relay.run({ detach: {} });
+    await relay.run();
     expect(relay.calls[0]?.hooks).not.toHaveProperty('io');
+  });
+
+  describe('Mirasim 上的动手段（#2815）', () => {
+    const mirasimRoute = () => route({ hostId: 'mirasim' });
+    /** 假的 Mirasim 驱动：会话在服务端跑着，直到放手信号响了才交回「放手」的报告（真插头断开连接、不发 stop）。 */
+    const untilReleased = (_spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport> =>
+      new Promise((resolve) => {
+        if (hooks.io && !hooks.io.attach) mkdirSync(hooks.io.dir, { recursive: true });
+        const letGo = () => resolve(report({ hostId: 'mirasim', detached: true }));
+        if (hooks.io?.release?.aborted) letGo();
+        hooks.io?.release?.addEventListener('abort', letGo, { once: true });
+      });
+
+    it('给了 detach：收发目录和放手信号交给驱动（和命令行那几家同一套），正常收场连目录一起删', async () => {
+      const handoff = sessionHandoff(join(tmp, 'io'));
+      const h = harness({ handoff, route: mirasimRoute() });
+      const got = await h.run({ detach: {} });
+      expect(got.outcome).toBe('done');
+      const io = h.calls[0]?.hooks.io;
+      expect(io).toMatchObject({ dir: join(tmp, 'io', RUN_ID) });
+      expect(io?.release).toBe(handoff.signal);
+      expect(io).not.toHaveProperty('attach');
+      expect(existsSync(join(tmp, 'io', RUN_ID))).toBe(false);
+    });
+
+    it('引擎停机（放手信号）：驱动只放手不停会话，写上放手标记、临时目录和收发目录留着，交回 OneShotDetached，runs 那一行不收', async () => {
+      const handoff = sessionHandoff(join(tmp, 'io'));
+      const h = harness({ handoff, route: mirasimRoute(), driverRun: untilReleased });
+      const running = h.run({ detach: {} });
+      await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+      expect(handoff.leave('收到 SIGTERM')).toEqual([RUN_ID]);
+      const err = await running.catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(OneShotDetached);
+      expect(err).toMatchObject({ runId: RUN_ID, startedAt: expect.any(String) });
+      // 没叫停：驱动的信号没响（叫停才会让插头发 stop）
+      expect(h.calls[0]?.hooks.signal?.aborted).toBe(false);
+      expect(existsSync(join(tmp, 'io', RUN_ID, DETACHED_MARK))).toBe(true);
+      expect(h.removed).toEqual([]);
+      expect(h.recorded).toEqual([]);
+    });
+
+    it('【故意造出的失败】叫停（总时长到顶这类，信号响）不走放手：驱动收到的是叫停信号，结局照旧是超时，不是放手', async () => {
+      const handoff = sessionHandoff(join(tmp, 'io'));
+      const stopped = (_spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport> =>
+        new Promise((resolve) => {
+          const done = () =>
+            resolve(report({ hostId: 'mirasim', facts: okFacts({ exitCode: null, killed: 'aborted' }) }));
+          if (hooks.signal?.aborted) done();
+          hooks.signal?.addEventListener('abort', done);
+        });
+      const h = harness({ handoff, route: mirasimRoute(), driverRun: stopped });
+      const startedAt = new Date(Date.now() - 61 * 60_000).toISOString();
+      const got = await h.run({ detach: { attach: { startedAt } } }, 60);
+      expect(got.outcome).toBe('timeout');
+      expect(h.calls[0]?.hooks.signal?.aborted).toBe(true);
+    });
+
+    it('过程记录：放手时把写到第几条记进交接单；接回的记录员从那里接着编，订阅回的旧内容（replay）不重记', async () => {
+      const handoff = sessionHandoff(join(tmp, 'io'));
+      const dir = join(tmp, 'io', RUN_ID);
+      const rows: { seq: number; text: string }[] = [];
+      const transcriptWrite = async (_id: string, batch: TranscriptRow[]) => {
+        for (const r of batch) rows.push({ seq: r.seq, text: r.text });
+      };
+      const entry = (text: string) => ({ at: '2026-10-16T09:00:00.000Z', kind: 'assistant' as const, text });
+      const first = harness({
+        handoff,
+        route: mirasimRoute(),
+        transcriptWrite,
+        driverRun: async (spec, hooks) => {
+          // 服务端接下：驱动写交接单（这里的假驱动替它写）
+          writeMirasimHandle(dir, {
+            runId: RUN_ID,
+            sessionKey: 'claude:s1',
+            acceptedAt: '2026-10-16T09:00:00Z',
+          });
+          hooks.onTranscript?.(entry('放手前的话'), { seq: 0, replay: false });
+          return untilReleased(spec, hooks);
+        },
+      });
+      const running = first.run({ detach: {} });
+      await vi.waitFor(() => expect(first.calls).toHaveLength(1));
+      handoff.leave('收到 SIGTERM');
+      await running.catch(() => undefined);
+      expect(rows.map((r) => [r.seq, r.text])).toEqual([
+        [0, '干这件事'],
+        [1, '放手前的话'],
+      ]);
+      expect(await readMirasimHandle(dir)).toMatchObject({ sessionKey: 'claude:s1', transcriptNext: 2 });
+
+      const second = harness({
+        handoff: sessionHandoff(join(tmp, 'io')),
+        route: mirasimRoute(),
+        transcriptWrite,
+        driverRun: async (_spec, hooks) => {
+          hooks.onTranscript?.(entry('放手前的话（重读）'), { seq: 0, replay: true });
+          hooks.onTranscript?.(entry('接回后新长出来的'), { seq: 1, replay: false });
+          return report({ hostId: 'mirasim' });
+        },
+      });
+      const startedAt = new Date().toISOString();
+      await second.run({ detach: { attach: { startedAt } } });
+      expect(rows.slice(2).map((r) => [r.seq, r.text])).toEqual([[2, '接回后新长出来的']]);
+    });
+
+    it('接回：不交接临时目录，删掉放手标记，驱动按 attach 读交接目录，结局记回原来那一行', async () => {
+      const handoff = sessionHandoff(join(tmp, 'io'));
+      const dir = join(tmp, 'io', RUN_ID);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, DETACHED_MARK), 'x');
+      const h = harness({ handoff, route: mirasimRoute() });
+      const startedAt = new Date(Date.now() - 5 * 60_000).toISOString();
+      const got = await h.run({ detach: { attach: { startedAt } } });
+      expect(got).toMatchObject({ outcome: 'done', startedAt });
+      expect(h.calls[0]?.hooks.io).toMatchObject({ dir, attach: true });
+      expect(h.adopted).toEqual([]);
+      expect(h.recorded).toEqual([expect.objectContaining({ runId: RUN_ID, outcome: 'done', startedAt })]);
+      expect(existsSync(dir)).toBe(false);
+    });
   });
 
   it('引擎要走了（停机信号）：会话不停，写上放手标记、临时目录和收发目录都留着，one-shot 抛 OneShotDetached，runs 那一行不收', async () => {
@@ -1149,7 +1274,7 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
     expect(got.outcome).toBe('timeout');
   });
 
-  it('【故意造出的失败】要接回、可这个引擎没装收发目录（或路由换成了 Mirasim）：明确报起不来，不当成起了新会话', async () => {
+  it('【故意造出的失败】要接回、可这个引擎没装收发目录：明确报起不来，不当成起了新会话', async () => {
     const h = harness();
     await expect(h.run({ detach: { attach: { startedAt: new Date().toISOString() } } })).rejects.toThrow(
       /接回会话 .* 没接成：这个引擎没装收发目录/,
