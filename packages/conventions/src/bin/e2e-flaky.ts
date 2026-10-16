@@ -3,7 +3,8 @@
 //     一轮的汇总（偶发的、隔离集里的结局、过了限期的），打到标准输出；ci.yml 的 e2e job 接进 job 摘要。
 //   node packages/conventions/src/bin/e2e-flaky.ts scan <runs.json> <报告目录>
 //     runs.json 是 `gh run list --json databaseId,url` 的输出（新的在前），报告目录下 <运行号>/results*.json 是那一轮下载下来的报告；
-//     取有报告的近 10 轮，数每条用例首跑红的次数，达阈值的开单（同标题已有开着的单就不开）。要 GITHUB_TOKEN、GITHUB_REPOSITORY。
+//     取有报告的近 10 轮，数每条用例首跑红的次数，达阈值的开单（同标题已有开着的单就不开）；
+//     最新一轮整轮坏了开「整轮坏了」单，最新一轮好了就把开着的那张留言关掉。要 GITHUB_TOKEN、GITHUB_REPOSITORY。
 // 读不到、认不出就退出码 1 并明说，不把「没查成」当「没有偶发」。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -11,7 +12,6 @@ import {
   BROKEN_ROUND_TITLE,
   deadline,
   FLAKY_WINDOW,
-  flakyTests,
   globalErrorCount,
   isBrokenRound,
   type OpenIssue,
@@ -71,9 +71,8 @@ runMain(async () => {
     console.log(`近 ${window.length} 轮有报告的主线 e2e（最多看 ${FLAKY_WINDOW} 轮）`);
     const brokenCount = window.filter(isBrokenRound).length;
     if (brokenCount > 0) console.log(`其中 ${brokenCount} 轮整轮坏了，不计入用例的偶发次数`);
-    if (brokenCount === 0 && flakyTests(window).length === 0) {
-      console.log('没有达到偶发阈值的用例');
-    } else {
+    // 开着的「整轮坏了」单要核对最新一轮（好了就关），所以每次都读开着的单，不再「没偶发就不读」。
+    {
       const api = ghApi(process.env);
       const open: OpenIssue[] = [];
       for (let page = 1; page <= 5; page++) {
@@ -88,10 +87,16 @@ runMain(async () => {
         }[];
         broken.body = [broken.body ?? '', ...comments.map((c) => c.body ?? '')].join('\n');
       }
-      for (const a of planIssues(window, open, quarantine, deadline(new Date()))) {
+      const actions = planIssues(window, open, quarantine, deadline(new Date()));
+      if (actions.length === 0) console.log('没有达到偶发阈值的用例，也没有要处理的「整轮坏了」单');
+      for (const a of actions) {
         if (a.kind === 'create')
           await api.post('/issues', { title: a.title, body: a.body, labels: a.labels });
         else if (a.kind === 'comment') await api.post(`/issues/${a.number}/comments`, { body: a.body });
+        else if (a.kind === 'close') {
+          await api.post(`/issues/${a.number}/comments`, { body: a.body });
+          await api.patch(`/issues/${a.number}`, { state: 'closed', state_reason: 'completed' });
+        }
         console.log(a.label);
       }
     }
