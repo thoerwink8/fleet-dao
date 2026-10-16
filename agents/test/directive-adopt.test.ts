@@ -98,6 +98,23 @@ describe('自动认领和交给创始人拍', () => {
     expect(ask).not.toContain('老的自己的');
     expect(ask).not.toContain('新的别人的');
   });
+
+  it('开场注入不重复：进了「要你拍的」的无主引导不在无主那行再列；每条只带前 40 字，全文指到 pnpm progress read --pending', () => {
+    const long = `${'长'.repeat(40)}后面的全文不该注入`;
+    const lines = hook.progressLines(
+      run([`1\t${H}\t原话：${long}\t无主\t${iso(30)}`, `2\t${H}\t原话：新的无主\t无主\t${iso(1)}`]),
+      A,
+      { now: NOW, presence: () => ({ state: 'here', why: '' }), adopt: () => ({ ok: true }) },
+    );
+    const text = lines.join('\n');
+    expect(text.split('长'.repeat(40)).length - 1).toBe(1);
+    expect(text).not.toContain('后面的全文不该注入');
+    expect(text).toContain('pnpm progress read --pending');
+    const unowned = lines.find((l) => l.startsWith('无主的创始人引导')) ?? '';
+    expect(unowned).toContain('无主的创始人引导 1 条');
+    expect(unowned).toContain('新的无主');
+    expect(unowned).not.toContain('长长');
+  });
 });
 
 describe('ownerPresence：主人会话在不在', () => {
