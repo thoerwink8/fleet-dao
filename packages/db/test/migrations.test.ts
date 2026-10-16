@@ -1151,7 +1151,7 @@ describe('0078：开着的发版开始、成功和再提醒标成已撤', () => 
   );
 });
 
-describe('0073：提醒这一次挂起的时刻回填成建立时刻', () => {
+describe('0073：提醒这一次挂起的时刻回填成建立时刻', { timeout: TEST_DB_TIMEOUT_MS }, () => {
   const tag = '0073_notification_raised_at';
 
   it('已有行的 raised_at 等于 created_at，不写成迁移时刻', async () => {
