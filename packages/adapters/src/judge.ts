@@ -77,7 +77,8 @@ export interface RunVerdict {
   detail: string;
 }
 
-const KILL_TEXT: Record<KillReason, string> = {
+/** 插头强杀的原因各一句白话；失败分流（engine 的 failure/rules.ts）、路由探针的 detail 都认这几句，改字两头一起改。 */
+export const KILL_TEXT: Readonly<Record<KillReason, string>> = {
   startup_timeout: '起来之后迟迟没有第一帧',
   wall_clock_timeout: '总时长到顶，已强杀',
   idle_timeout: '没有工具在跑，却长时间没有动静',
