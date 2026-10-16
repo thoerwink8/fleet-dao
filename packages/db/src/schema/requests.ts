@@ -44,6 +44,7 @@ export const REQUEST_STATUS_VALUES = valuesOf<RequestStatus>()([
   'pending_decision',
   'closed_do',
   'closed_drop',
+  'idle_closed',
 ]);
 export const REQUEST_MESSAGE_KIND_VALUES = valuesOf<RequestMessageKind>()([
   'human',
@@ -89,7 +90,7 @@ export const requests = pgTable(
     }),
     /** 第一次提交拍板的时刻：提交过的（哪怕被「再聊聊」退回）不能删。 */
     firstSubmittedAt: timestamp('first_submitted_at', tz),
-    /** 结案的时刻和放下、不做的理由。 */
+    /** 结案（或收口）的时刻和放下、不做的理由、收口的原因。 */
     closedAt: timestamp('closed_at', tz),
     closeReason: text('close_reason'),
     archivedAt: timestamp('archived_at', tz),
@@ -107,22 +108,25 @@ export const requests = pgTable(
     check('requests_draft_object', sql`jsonb_typeof(${t.draftJson}) = 'object'`),
     check('requests_human_edited_array', sql`jsonb_typeof(${t.humanEditedFields}) = 'array'`),
     check('requests_issue_refs_array', sql`jsonb_typeof(${t.issueRefs}) = 'array'`),
-    // 结案的一定有结案时刻；没结案的没有
+    // 结案、收口的一定有那一刻；别的没有
     check(
       'requests_closed_shape',
-      sql`(${t.status} in ('closed_do', 'closed_drop')) = (${t.closedAt} is not null)`,
+      sql`(${t.status} in ('closed_do', 'closed_drop', 'idle_closed')) = (${t.closedAt} is not null)`,
     ),
-    // 放下、不做一定写了理由
-    check('requests_drop_has_reason', sql`${t.status} <> 'closed_drop' or ${t.closeReason} is not null`),
+    // 放下、不做、收口一定写了理由
+    check(
+      'requests_drop_has_reason',
+      sql`${t.status} not in ('closed_drop', 'idle_closed') or ${t.closeReason} is not null`,
+    ),
     // 待拍板、已结案·做一定有拍板人
     check(
       'requests_decider_when_decided',
       sql`${t.status} not in ('pending_decision', 'closed_do') or ${t.deciderId} is not null`,
     ),
-    // 只有已结案的能归档
+    // 只有已结案、收口的能归档
     check(
       'requests_archive_only_closed',
-      sql`${t.archivedAt} is null or ${t.status} in ('closed_do', 'closed_drop')`,
+      sql`${t.archivedAt} is null or ${t.status} in ('closed_do', 'closed_drop', 'idle_closed')`,
     ),
     check(
       'requests_close_reason_length',

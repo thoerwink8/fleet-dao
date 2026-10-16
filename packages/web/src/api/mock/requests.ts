@@ -143,6 +143,7 @@ const ACTION_WORDS: Record<RequestActionRequest['action'], string> = {
   reject: '不做',
   rediscuss: '再聊聊',
   withdraw: '撤回到讨论中',
+  reopen: '重开',
   drop: '放下',
   archive: '归档',
   unarchive: '取消归档',
@@ -920,6 +921,14 @@ export function createMockRequests(opts: MockRequestsOptions): MockRequests {
         case 'withdraw':
           Object.assign(r, { status: 'discussing', lastActivityAt: at });
           sys(`${who} 撤回到讨论中`);
+          break;
+        case 'reopen':
+          r.status = 'discussing';
+          r.closedAt = null;
+          r.archivedAt = null;
+          r.lastActivityAt = at;
+          delete r.closeReason;
+          sys(`${who} 重开了这条需求，回到讨论中`);
           break;
         case 'drop':
           Object.assign(r, {

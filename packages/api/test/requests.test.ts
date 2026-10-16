@@ -1,7 +1,7 @@
 // 提需求接口（#2049）：真库（PGlite）+ 真登录会话走一遍。创始人甲是拍板人（users.decides_requests），创始人乙是合伙人。
 // 钉住：身份只取登录会话（请求里写别人的编号没用）、状态机、不合法动作 409 + 中文原因、能不能删的每种情况、列表三处和搜索、
 // 详情里每个动作的能不能、只能给已导入的项目建、没接上时列表写原因不冒充空。
-import { auditLog, requestMessages, requests, users } from '@fleet-dao/db';
+import { auditLog, requestMessages, requests, sweepRequests, users } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import {
   type RequestDetailResponse,
@@ -402,6 +402,62 @@ describe('详情里每个动作的能不能', () => {
     const forA = await get(h, a, d.request.seq);
     expect(forA.actions.delete).toEqual({ allowed: false, why: '只有发起人能删' });
     expect(forA.actions.drop.allowed).toBe(true);
+  });
+});
+
+describe('讨论中闲置满 3 天收口，收口的能重开', () => {
+  it('满 3 天收口并写原因（闲置几天、最后一句是谁说的）；不满 3 天不动；收口后不能发消息', async () => {
+    const { h, a, b } = await setup();
+    const young = (await json(await create(h, a, { body: '还在聊' }))).request.seq;
+    const stale = (await json(await create(h, b, { body: '想要一个导出按钮' }))).request.seq;
+    await json(await say(h, a, stale, { body: '我补一句' }));
+    const at = h.clock.now.getTime();
+    await t.db
+      .update(requests)
+      .set({ lastActivityAt: new Date(at - 3 * DAY) })
+      .where(eq(requests.seq, stale));
+    await t.db
+      .update(requests)
+      .set({ lastActivityAt: new Date(at - 2 * DAY) })
+      .where(eq(requests.seq, young));
+
+    const swept = await sweepRequests(t.db, h.clock.now);
+    expect(swept.idleClosed).toEqual([stale]);
+
+    const closed = await get(h, a, stale);
+    expect(closed.request.status).toBe('idle_closed');
+    expect(closed.request.closeReason).toBe('闲置 3 天没动静，自动收口；最后一句是创始人甲说的');
+    expect(closed.request.archivedAt).toBeDefined();
+    expect(closed.actions.reopen.allowed).toBe(true);
+    expect(closed.actions.send.allowed).toBe(false);
+    expect((await get(h, a, young)).request.status).toBe('discussing');
+    expect((await list(h, a)).items.map((r) => r.seq)).not.toContain(stale);
+    expect((await list(h, a, '?view=archived')).items.map((r) => r.seq)).toContain(stale);
+    await expect409(await say(h, b, stale, { body: '再补一句' }), /已收口/);
+    await expect409(await act(h, a, young, { action: 'reopen' }), /只有收口/);
+  });
+
+  it('收口的重开后回到讨论中，能接着发消息', async () => {
+    const { h, a, b } = await setup();
+    const stale = (await json(await create(h, b, { body: '想要一个导出按钮' }))).request.seq;
+    await t.db
+      .update(requests)
+      .set({ lastActivityAt: new Date(h.clock.now.getTime() - 3 * DAY) })
+      .where(eq(requests.seq, stale));
+    await sweepRequests(t.db, h.clock.now);
+
+    const back = await json(await act(h, a, stale, { action: 'reopen' }));
+    expect(back.request.status).toBe('discussing');
+    expect(back.request.closeReason).toBeUndefined();
+    expect(back.request.archivedAt).toBeUndefined();
+    expect(back.request.closedAt).toBeUndefined();
+    expect(back.actions.reopen.allowed).toBe(false);
+    expect(back.actions.send.allowed).toBe(true);
+    expect(back.messages.at(-1)?.body).toContain('重开了这条需求');
+    expect((await list(h, b)).items.map((r) => r.seq)).toContain(stale);
+    const said = await json(await say(h, b, stale, { body: '接着聊' }));
+    expect(said.request.status).toBe('discussing');
+    expect(said.messages.at(-1)?.body).toBe('接着聊');
   });
 });
 

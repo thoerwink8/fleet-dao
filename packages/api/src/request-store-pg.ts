@@ -160,6 +160,7 @@ const ACTION_WORDS: Record<RequestActionRequest['action'], string> = {
   reject: '不做',
   rediscuss: '再聊聊',
   withdraw: '撤回到讨论中',
+  reopen: '重开',
   drop: '放下',
   archive: '归档',
   unarchive: '取消归档',
@@ -1014,6 +1015,16 @@ export function pgRequests(db: Db, now: () => Date, options: RequestsOptions = {
           case 'withdraw':
             await set({ status: 'discussing', lastActivityAt: at });
             await systemMessage(tx, r.id, `${who} 撤回到讨论中`);
+            break;
+          case 'reopen':
+            await set({
+              status: 'discussing',
+              closedAt: null,
+              closeReason: null,
+              archivedAt: null,
+              lastActivityAt: at,
+            });
+            await systemMessage(tx, r.id, `${who} 重开了这条需求，回到讨论中`);
             break;
           case 'drop':
             reason = input.reason;

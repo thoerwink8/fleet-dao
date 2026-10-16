@@ -465,6 +465,9 @@ function DraftGist({ d, phone, onOpenPanel }: { d: RequestDetail; phone: boolean
 function closedLine(d: RequestDetail): string {
   const r = d.request;
   const at = r.closedAt ? formatDateTime(r.closedAt) : '';
+  if (r.status === 'idle_closed') {
+    return `收口${at ? ` · ${at}` : ''}${r.closeReason ? ` · ${r.closeReason}` : ''}`;
+  }
   if (r.status === 'closed_drop') return `已结案 · ${at} · 不做${r.closeReason ? `：${r.closeReason}` : ''}`;
   const refs = r.issueRefs.map((i) => `#${i.number}`).join('、');
   return `已结案 · ${at} · ${r.decider ? `${r.decider.name} ` : ''}同意做${refs ? ` · 开成 ${refs}` : ''}`;
@@ -506,7 +509,7 @@ export function MessageStream({
   useEffect(() => {
     endRef.current?.scrollIntoView({ block: 'end' });
   }, [d.messages.length, r.status, r.seq]);
-  const closed = r.status === 'closed_do' || r.status === 'closed_drop';
+  const closed = r.status === 'closed_do' || r.status === 'closed_drop' || r.status === 'idle_closed';
   return (
     <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin" data-intake-stream>
       <div className="mx-auto flex max-w-chat flex-col gap-3 px-4 py-4">
@@ -544,7 +547,11 @@ export function MessageStream({
           <ReadyCard d={d} meId={meId} phone={phone} onOpenPanel={() => onOpenPanel()} />
         ) : null}
         {closed ? (
-          <div className="flex items-center gap-3 text-meta text-muted-foreground" data-closed-line>
+          <div
+            className="flex items-center gap-3 text-meta text-muted-foreground"
+            data-closed-line
+            {...(r.status === 'idle_closed' ? { 'data-close-reason': r.closeReason ?? '' } : {})}
+          >
             <span className="h-px flex-1 bg-border" />
             <span className="min-w-0 text-center">{closedLine(d)}</span>
             <span className="h-px flex-1 bg-border" />

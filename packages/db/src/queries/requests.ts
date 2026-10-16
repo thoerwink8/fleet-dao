@@ -1,10 +1,14 @@
 // 需求（#2049）的两件后台事：引擎定时任务 request-sweep 每轮调 sweepRequests；单子状态由 B 片调 recordRequestIssueState 写进来。
-// 判据只有一份（@fleet-dao/shared 的 request-rules.ts）：删了满 30 天硬删、已结案·不做马上归档、已结案·做的单子上线或关掉满 3 天归档。
+// 判据只有一份（@fleet-dao/shared 的 request-rules.ts）：删了满 30 天硬删、讨论中闲置满 3 天收口（写原因并归档）、
+// 已结案·不做马上归档、已结案·做的单子上线或关掉满 3 天归档。
 // 改这里之前必须知道：
 // - 硬删连消息、个人状态一起删（外键级联），每删一条写一条操作记录（engine 做的，via=engine），记下删的是哪条、几点删的、有几条消息。
-// - 每条在自己的事务里锁住再判一次：判的那一刻和删的那一刻之间，人可能点了「恢复」。
+// - 收口写进 close_reason（闲置几天、最后一句是谁说的），同时归档；人点「重开」由接口做，不在这里。
+// - 每条在自己的事务里锁住再判一次：判的那一刻和删的那一刻之间，人可能点了「恢复」或又说了一句。
 import {
   autoArchiveDue,
+  idleCloseDue,
+  idleCloseReason,
   purgeDue,
   type RequestDraft,
   type RequestIssueRef,
@@ -12,9 +16,9 @@ import {
   type RequestStatus,
   type TaskState,
 } from '@fleet-dao/shared';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog } from '../schema/ops.ts';
+import { auditLog, users } from '../schema/ops.ts';
 import { requestIssueOpenings, requestMessages, requests } from '../schema/requests.ts';
 import { asks, repos, stateChanges, subtasks, tasks } from '../schema/work.ts';
 
@@ -26,8 +30,16 @@ export interface RequestSweepResult {
   scanned: number;
   /** 硬删了的需求号。 */
   purged: number[];
-  /** 自动归档了的需求号。 */
+  /**
+   * 自动归档了的需求号。讨论中闲置满 3 天收口的也在这里（收口同时归档）：
+   * 引擎每小时任务只数这一列和 purged，不单列收口。
+   */
   archived: number[];
+  /**
+   * 讨论中闲置满 3 天收口的需求号（这些号也在 archived 里）。
+   * 可选：引擎测试里的假结果可以不带这一列。真跑一轮一定有。
+   */
+  idleClosed?: number[];
 }
 
 interface SweepRow {
@@ -36,18 +48,44 @@ interface SweepRow {
   status: RequestStatus;
   archivedAt: Date | null;
   deletedAt: Date | null;
+  lastActivityAt: Date;
   issueRefs: RequestIssueRef[];
 }
 
 const iso = (d: Date | null) => (d === null ? null : d.toISOString());
 
-function due(r: SweepRow, now: Date): 'purge' | 'archive' | null {
+function due(r: SweepRow, now: Date): 'purge' | 'idle_close' | 'archive' | null {
   if (purgeDue(iso(r.deletedAt), now)) return 'purge';
+  if (
+    idleCloseDue(
+      { status: r.status, lastActivityAt: r.lastActivityAt.toISOString(), deletedAt: iso(r.deletedAt) },
+      now,
+    ) !== null
+  ) {
+    return 'idle_close';
+  }
   const archive = autoArchiveDue(
     { status: r.status, archivedAt: iso(r.archivedAt), deletedAt: iso(r.deletedAt), issueRefs: r.issueRefs },
     now,
   );
   return archive ? 'archive' : null;
+}
+
+/** 最后一句是谁说的：人的话取显示名，指挥官就写「指挥官」。系统、引擎提问不算「说的」。没有是 null。 */
+async function lastSpeaker(tx: Db, requestId: string): Promise<string | null> {
+  const [m] = await tx
+    .select({ kind: requestMessages.kind, name: users.displayName })
+    .from(requestMessages)
+    .leftJoin(users, eq(users.id, requestMessages.authorId))
+    .where(
+      and(eq(requestMessages.requestId, requestId), inArray(requestMessages.kind, ['human', 'commander'])),
+    )
+    .orderBy(desc(requestMessages.id))
+    .limit(1);
+  if (!m) return null;
+  if (m.kind === 'commander') return '指挥官';
+  const name = m.name?.trim();
+  return name ? name : '（已不在的用户）';
 }
 
 const sweepColumns = {
@@ -56,16 +94,19 @@ const sweepColumns = {
   status: requests.status,
   archivedAt: requests.archivedAt,
   deletedAt: requests.deletedAt,
+  lastActivityAt: requests.lastActivityAt,
   issueRefs: requests.issueRefs,
 };
 
 /**
- * 一轮：删了满 30 天的硬删，该归档的归档。读不了库就抛（调用方记没跑成），不当成「没有要做的」。
+ * 一轮：删了满 30 天的硬删，讨论中闲置满 3 天的收口（写原因、归档），该归档的归档。
+ * 读不了库就抛（调用方记没跑成），不当成「没有要做的」。
  */
 export async function sweepRequests(db: Db, now: Date): Promise<RequestSweepResult> {
   const rows: SweepRow[] = await db.select(sweepColumns).from(requests);
   const purged: number[] = [];
   const archived: number[] = [];
+  const idleClosed: number[] = [];
   for (const candidate of rows) {
     if (due(candidate, now) === null) continue;
     const done = await db.transaction(async (tx) => {
@@ -127,12 +168,50 @@ export async function sweepRequests(db: Db, now: Date): Promise<RequestSweepResu
         });
         return { what, seq: r.seq } as const;
       }
+      if (what === 'idle_close') {
+        const days = idleCloseDue(
+          { status: r.status, lastActivityAt: r.lastActivityAt.toISOString(), deletedAt: iso(r.deletedAt) },
+          now,
+        );
+        if (days === null) return null;
+        const reason = idleCloseReason(days, await lastSpeaker(tx, r.id));
+        await tx
+          .update(requests)
+          .set({
+            status: 'idle_closed',
+            closedAt: now,
+            closeReason: reason,
+            archivedAt: now,
+            lastActivityAt: now,
+            updatedAt: now,
+          })
+          .where(eq(requests.id, r.id));
+        await tx.insert(requestMessages).values({
+          requestId: r.id,
+          kind: 'system',
+          body: reason,
+          createdAt: now,
+        });
+        await tx.insert(auditLog).values({
+          at: now,
+          actorKind: 'engine',
+          actorId: REQUEST_SWEEP_ACTOR,
+          action: 'request.idle_close',
+          target: `request:${r.seq}`,
+          before: { status: r.status, closeReason: null, archivedAt: null },
+          after: { status: 'idle_closed', closeReason: reason, archivedAt: now.toISOString() },
+          reason,
+          via: 'engine',
+        });
+        return { what, seq: r.seq } as const;
+      }
       return null;
     });
     if (done?.what === 'purge') purged.push(done.seq);
-    if (done?.what === 'archive') archived.push(done.seq);
+    if (done?.what === 'archive' || done?.what === 'idle_close') archived.push(done.seq);
+    if (done?.what === 'idle_close') idleClosed.push(done.seq);
   }
-  return { scanned: rows.length, purged, archived };
+  return { scanned: rows.length, purged, archived, idleClosed };
 }
 
 /**
