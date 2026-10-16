@@ -44,6 +44,7 @@ import {
 import { clip, stamp } from './reconcile-common.ts';
 import { jobIdOfRedKey, judgeRedStreak, RED_STREAK_ALERT_PREFIX, RED_STREAK_LINK } from './red-streak.ts';
 import {
+  failedTrainAlertCleared,
   HEALTHZ_ALERT_PREFIX,
   type HealthzProbe,
   judgeHealthz,
@@ -492,6 +493,27 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
   return { outcome: 'ok', scanned, found };
 }
 
+/**
+ * 旧的 watchdog:release:train:<sha>:failed：进度已不是 failed，或 current 已新于该提交，撤掉。
+ * 判据在 failedTrainAlertCleared。列不了、撤不掉记没查成，不当成已经好了。
+ */
+async function clearStaleFailedTrainAlerts(s: RoundState, facts: ReleaseFacts): Promise<void> {
+  const open = await attempt(s, '列不了旧的发版 failed 提醒（追上了的这一轮撤不了）', () =>
+    s.deps.alerts.openByPrefix(RELEASE_ATTENTION_ALERT_PREFIX),
+  );
+  for (const a of open.ok ? open.value : []) {
+    if (!failedTrainAlertCleared(a.dedupeKey, facts)) continue;
+    const done = await attempt(s, `提醒 ${a.dedupeKey} 没撤掉`, () =>
+      s.deps.alerts.resolve({
+        dedupeKey: a.dedupeKey,
+        why: '发版进度已不是 failed，或 current 已新于这条提醒上的提交',
+      }),
+    );
+    if (done.ok)
+      s.deps.log('info', '看门狗：撤了一条', { dedupeKey: a.dedupeKey, why: '旧的 failed 已过时' });
+  }
+}
+
 /** 撤掉前缀下不在 wanted 里的提醒，写明为什么；列不了、撤不掉记没查成。 */
 async function retireOthers(
   s: RoundState,
@@ -540,6 +562,8 @@ async function releaseWatchRound(
     wantedRelease.add(rel.key);
     await raise(rel, '发版卡住');
   }
+  // watchdog:release:train:<sha>:failed：进度已不是 failed，或 current 已等于/新于该提交，先撤掉（判据 failedTrainAlertCleared）。
+  await clearStaleFailedTrainAlerts(s, facts.value);
   await retireOthers(
     s,
     RELEASE_ATTENTION_ALERT_PREFIX,

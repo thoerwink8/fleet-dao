@@ -25,7 +25,12 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { CARPOOL_WATCH_JOB } from '../src/jobs/carpool-watch.ts';
-import { judgeReleaseAttention, parseHealthzResponse, TRAIN_STUCK_MS } from '../src/jobs/release-watch.ts';
+import {
+  failedTrainAlertCleared,
+  judgeReleaseAttention,
+  parseHealthzResponse,
+  TRAIN_STUCK_MS,
+} from '../src/jobs/release-watch.ts';
 import {
   jobIdOfKey,
   runWatchdogJob,
@@ -854,6 +859,60 @@ describe('发版卡住、健康页非 200 持续 > 10 分钟（2026-10-14 法国
     for (const k of legacy) expect((await alertOf(k))?.body).toContain('已撤：发版现在没有卡住的了');
   });
 
+  it('watchdog:release:train:<sha>:failed：进度已不是 failed，或 current 已新于该提交时，开着的这条撤掉', async () => {
+    const OLD = 'b0ef012b26a1aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+    const CUR = '6999045b1d66bbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+    const key = `watchdog:release:train:${OLD.slice(0, 12)}:failed`;
+    const openFailed = () =>
+      upsertAlert(t.db, {
+        dedupeKey: key,
+        level: 'alert',
+        taskId: null,
+        title: `发版要人看：${OLD.slice(0, 12)} 这一趟停在 failed，自动发版停着`,
+        body: '发版进度记录停在「failed」',
+      });
+
+    writeFileSync(
+      join(dir, '.train', 'release-train.json'),
+      JSON.stringify({ schema: 1, status: 'done', phase: 8, target: { kind: 'sha', value: CUR } }),
+    );
+    symlinkSync(CUR, join(dir, 'current'));
+    await openFailed();
+    await runWatchdogJob(wd());
+    const cleared = await alertOf(key);
+    expect(cleared?.resolvedAt).not.toBeNull();
+    expect(cleared?.body).toMatch(/^已撤：/);
+
+    writeFileSync(
+      join(dir, '.train', 'release-train.json'),
+      JSON.stringify({
+        schema: 1,
+        status: 'failed',
+        phase: 4,
+        target: { kind: 'sha', value: OLD },
+        why: '主进程跑的不是这一版',
+      }),
+    );
+    writeFileSync(
+      join(dir, '.auto', 'state.json'),
+      JSON.stringify({
+        main: {
+          commits: [
+            [CUR, '2026-10-16T03:29:00Z'],
+            [OLD, '2026-10-16T02:00:00Z'],
+          ],
+        },
+      }),
+    );
+    clock = at(5);
+    await openFailed();
+    await runWatchdogJob(wd());
+    const again = await alertOf(key);
+    expect(again?.resolvedAt).not.toBeNull();
+    expect(again?.body).toMatch(/^已撤：/);
+    expect(await openKeys()).not.toContain(key);
+  });
+
   it('重放 2026-10-14 22:58Z：一趟正常自动发版在走（真格式进度记录 running）不报，挂在上一版身上的旧误报撤掉；超过阈值才报、键写正在发的；发完撤', async () => {
     const PREV = 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e';
     history(`2026-10-14T22:49:55Z ${PREV} release`);
@@ -1007,6 +1066,36 @@ describe('发版卡住和健康页的判法（纯函数）', () => {
         expect(judgeReleaseAttention(running({ trainStatus }), after(500)), String(trainStatus)).toEqual({
           kind: 'fine',
         });
+    });
+
+    it('watchdog:release:train:<sha>:failed：进度已不是 failed，或 current 已等于、新于该提交，判该撤', () => {
+      const oldSha = 'b0ef012b26a1aaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+      const newSha = '6999045b1d66bbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+      const older = '1478b87a15f7cccccccccccccccccccccccccccc';
+      const key = `watchdog:release:train:${oldSha.slice(0, 12)}:failed`;
+      expect(failedTrainAlertCleared(key, { trainStatus: 'done', trainSha: newSha })).toBe(true);
+      expect(failedTrainAlertCleared(key, { trainStatus: null })).toBe(true);
+      expect(
+        failedTrainAlertCleared(key, {
+          trainStatus: 'failed',
+          currentSha: newSha,
+          mainline: [newSha, oldSha, older],
+        }),
+      ).toBe(true);
+      expect(
+        failedTrainAlertCleared(key, { trainStatus: 'failed', currentSha: oldSha, mainline: [oldSha] }),
+      ).toBe(true);
+      expect(
+        failedTrainAlertCleared(key, {
+          trainStatus: 'failed',
+          currentSha: older,
+          mainline: [oldSha, older],
+        }),
+      ).toBe(false);
+      expect(failedTrainAlertCleared(key, { trainStatus: 'failed' })).toBe(false);
+      expect(failedTrainAlertCleared('watchdog:release:train:abcd:running', { trainStatus: 'done' })).toBe(
+        false,
+      );
     });
 
     it('旧格式（只有 status，没有起点时间）：running 判不了多久，照旧报，写明老格式', () => {

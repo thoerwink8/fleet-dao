@@ -1805,6 +1805,49 @@ check_chain() {
   esac
 }
 
+# 健康检查过了、current 已切到这一趟的提交：把发版进度写成非 failed。
+# 发版车（fleet-train-release）只跑 release.sh，不经过接活单元，不会改 .train/release-train.json。
+# 更早一趟留下的 status=failed 会一直让自动发版说「要人看」。这里盖成 done（驾驶舱和自动发版闸都认 done 为做完）。
+# 写不进不挡这次发版：版本已经切过去了，闸还会用「current 已等于或新于旧目标」放行。
+# 法国的 node 在 /usr/bin/node。CI 用 sudo 跑，PATH 收成安全路径，/usr/bin/node 没有，
+# node 在 /usr/local/bin 或 actions/setup-node 的缓存里（和 lib/session-proxy.sh 找的是同一串）。
+# 不读 $NODE：装目录那几段测试会把 NODE 换成装载器的桩。
+real_node() {
+  local n
+  for n in "$(command -v node 2>/dev/null || true)" /usr/local/bin/node /usr/bin/node /opt/hostedtoolcache/node/*/x64/bin/node; do
+    [[ -n "$n" && -x "$n" ]] || continue
+    printf '%s\n' "$n"
+    return 0
+  done
+  return 1
+}
+
+settle_train_succeeded() { # 提交号
+  local sha=$1 file now node_bin
+  [[ "$(current_sha)" == "$sha" ]] || return 0
+  node_bin=$(real_node) || return 0
+  file=$RELEASES/.train/release-train.json
+  install -d -m 755 -- "$RELEASES/.train" || return 0
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  # shellcheck disable=SC2016 # 单引号里是给 node 的 JS，不归 shell 展开
+  "$node_bin" -e '
+    const fs = require("fs");
+    const [file, sha, now] = process.argv.slice(1);
+    const next = {
+      schema: 1,
+      phase: 8,
+      startedAt: now,
+      updatedAt: now,
+      target: { kind: "sha", value: sha },
+      why: null,
+    };
+    next.status = "done";
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(next) + "\n");
+    fs.renameSync(tmp, file);
+  ' "$file" "$sha" "$now" || true
+}
+
 # 这一版健不健康：起了的服务起稳了、各自该通的通了、香港在发这一版。不过返回 1（原因已记成红）
 health_gate() { # 提交号 切之前后端的逐项结果
   local sha=$1 before=${2:-} bad=0
@@ -1984,6 +2027,7 @@ do_release() { # 要发的提交（空 = 主线最新）
       changed "历史里把 ${SHA:0:12} 记回健康（之前判过不健康，这次健康检查过了）"
     fi
     ok "发布完成：在用 ${SHA:0:12}"
+    settle_train_succeeded "$SHA"
     # 发版前后都不碰引擎总开关和各项目的「让 AI 接活」（决定 0093）：停接新活只靠切版本这一段的排空请求，
     # 发版暂停的任务在收尾（finish_hook → resume_tasks）只对名单里这一批发「继续」。
   elif [[ "$(current_sha)" != "$SHA" ]]; then
