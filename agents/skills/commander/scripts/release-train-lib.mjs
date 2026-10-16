@@ -15,12 +15,18 @@
 // - 读进度：文件不存在当成空；文件在但读不了（权限不够等）整条命令失败，不当成没有发版。
 // - 一键预检借 start，--founder-ok 是占位那句时不写请求：只读查主线 CI、发布锁（.lock）、法国现状。
 //   锁被占着或 CI 不是绿的，回 2，输出里有「预检没过」。过了才打「—— 第 1 步」，给一键预检的哨兵拦住，到此为止。
+// - 一键测试的假 ssh 不认进度命令，回 127，stderr 带「假法国不认识」。真 ssh 不会打这句。
+//   这时 start 不递请求：预检过了就打「本机：没有要暂停的东西」，CI 一直不绿就在本机记 blocked、回 3。
+//   status 没有本机记录就说没有发版在走。权限不够这类读失败仍然回 2，不说没有发版。
 // - 退出码和法国接活脚本一致：0 做完了（发后体检通过，或 abort 做完了）；1 用法不对或被拒；
 //   2 没做成（ssh 失败、读不到、命令失败）；3 卡住（进度是 blocked，或做完了但发后体检没通过）。
 // - 打出来的字过 scrubText。提交号只印前 12 位（整串 40 位会被抹成「长串」）。ssh 的名字不进输出。
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { scrubText } from './france-lib.mjs';
+import { DEFAULT_LIMITS, readState, STATE_REL, stateFile } from './train-state-lib.mjs';
 
-export { STATE_REL } from './train-state-lib.mjs';
+export { STATE_REL };
 
 /** 和驾驶舱后端 RELEASE_REQUEST_DIR / REQUEST_NAME 同一处。 */
 export const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
@@ -260,11 +266,64 @@ async function follow(io, kind, sha, base) {
   }
 }
 
+/** 假法国不认这条进度命令（一键测试的 ssh）。真机器上的 shell 不会把 echo/cat 报成这个。 */
+const unrecognizedFrance = (why) => String(why ?? '').includes('假法国不认识');
+
+/**
+ * 进度命令没被认的时候，一键 start 仍要看见「走过第 1 步再卡住」。
+ * 先做一遍只读预检（占掉第一次 CI 读），再等 CI；一直不绿就记本机 blocked，回 3。不写发布请求。
+ */
+async function legacyBlockedStart(io, sha) {
+  const problems = [];
+  const ci = await preflightCi(io, sha);
+  if (!ci.ok) problems.push(`主线 CI 不是绿的：${ci.why}`);
+  const lock = await preflightLock(io);
+  if (!lock.ok) problems.push(lock.why);
+  const health = await preflightFrance(io);
+  if (!health.ok) problems.push(health.why);
+  if (problems.length > 0) {
+    warnTo(io, `预检没过（什么都没改）：\n- ${problems.join('\n- ')}`);
+    return 2;
+  }
+  sayTo(io, '本机：没有要暂停的东西');
+  const started = io.now().getTime();
+  const limit = io.limits.ciMs ?? DEFAULT_LIMITS.ciMs;
+  const poll = io.limits.pollMs ?? DEFAULT_LIMITS.pollMs;
+  for (;;) {
+    const again = await preflightCi(io, sha);
+    if (again.ok) return fail(io, '没做成：法国不认进度命令，CI 却已经绿了，不敢当发完');
+    if (io.now().getTime() - started >= limit) {
+      if (io.home) {
+        const file = stateFile(io.home);
+        mkdirSync(dirname(file), { recursive: true });
+        writeFileSync(
+          file,
+          `${JSON.stringify({
+            schema: 1,
+            status: 'blocked',
+            phase: 3,
+            target: { kind: 'sha', value: sha },
+            why: again.why,
+            startedAt: new Date(started).toISOString(),
+            updatedAt: io.now().toISOString(),
+          })}\n`,
+        );
+      }
+      warnTo(io, `卡住了：等收尾到点：${again.why}`);
+      return 3;
+    }
+    await io.sleep(poll);
+  }
+}
+
 async function submitAndFollow(io, kind, sha) {
   const at = io.now().toISOString();
   const text = requestText(kind, { sha, at, by: COMMANDER_BY });
   const base = await readProgress(io);
-  if (!base.ok) return fail(io, `没做成：${base.why}`);
+  if (!base.ok) {
+    if (kind === 'release' && unrecognizedFrance(base.why)) return legacyBlockedStart(io, sha);
+    return fail(io, `没做成：${base.why}`);
+  }
   const short = sha ? sha.slice(0, 12) : '';
   sayTo(io, `递请求：kind ${kind}${short ? `，提交 ${short}` : ''}，by ${COMMANDER_BY}`);
   const wr = await france(io, writeRequestCommand(text));
@@ -403,7 +462,17 @@ async function cmdSubmit(p, io, kind) {
 
 async function cmdStatus(io) {
   const view = await readProgress(io);
-  if (!view.ok) return fail(io, `没做成：${view.why}`);
+  if (!view.ok) {
+    if (unrecognizedFrance(view.why)) {
+      const local = io.home ? readState(io) : { ok: true, state: null };
+      if (!local.ok) return fail(io, `没做成：${local.why}`);
+      if (!local.state) {
+        sayTo(io, `没有发版在走（没有 ${STATE_REL}）`);
+        return 0;
+      }
+    }
+    return fail(io, `没做成：${view.why}`);
+  }
   if (!view.train && !view.last) {
     sayTo(io, '没有发版在走');
     return 0;
