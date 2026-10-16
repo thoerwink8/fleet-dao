@@ -942,14 +942,14 @@ test('飞书：开始、成功各推一条，一句话里有目标提交、结�
   );
 });
 
-test('发版提醒分级：开始、成功只进 daily（简报读，不推）；卡住、失败进「要你拍」（decision，后端立刻推）；键以 release: 开头、每趟每种不重名', async () => {
+test('发版提醒分级：开始、成功不写通知（level 为 null，只写进度记录）；卡住、失败进「要你拍」（decision，后端立刻推）；键以 release: 开头、每趟每种不重名', async () => {
   const { io, log } = fakeIo();
   assert.equal(await runRequest(io), EXIT.done);
   assert.deepEqual(
     log.notes.map((n) => [n.kind, n.level]),
     [
-      ['start', 'daily'],
-      ['done', 'daily'],
+      ['start', null],
+      ['done', null],
     ],
   );
   assert.ok(log.notes.every((n) => /^release:[a-z]+:aaaaaaaaaaaa:\d+$/.test(n.key)));
@@ -961,7 +961,7 @@ test('发版提醒分级：开始、成功只进 daily（简报读，不推）�
     assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, 'decision', kind);
   }
   for (const kind of ['start', 'done', 'retry', 'restore', 'aborted']) {
-    assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, 'daily', kind);
+    assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, null, kind);
   }
 });
 
@@ -1550,6 +1550,6 @@ test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的
   assert.match(script, /insert into notifications \(level, dedupe_key, title, body, link\)/);
   assert.match(script, /:'level'::notification_level, :'key', :'title', :'body'/);
   assert.match(script, /resolved_by = 'release-request'/);
-  assert.match(script, /release:start:/);
-  assert.match(script, /已撤：同一提交已发版成功/);
+  assert.match(script, /note\.level !== null/, '开始、成功（level 为 null）不写通知');
+  assert.doesNotMatch(script, /release:start:/);
 });

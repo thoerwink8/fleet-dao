@@ -1089,6 +1089,68 @@ describe('0072：已删功能留下的开着的提醒标成已撤', () => {
   );
 });
 
+describe('0078：开着的发版开始、成功和再提醒标成已撤', () => {
+  const tag = '0078_close_release_remind_notes';
+
+  it(
+    '三种前缀还开着的标成已撤、不删行；别的键和已经撤的不动；再跑一遍无副作用',
+    async () => {
+      const target = ordered.findIndex((e) => e.tag === tag);
+      expect(target).toBeGreaterThanOrEqual(0);
+      const sqlText = readFileSync(join(MIGRATIONS_FOLDER, `${tag}.sql`), 'utf8');
+      expect(sqlText.toLowerCase()).not.toContain('delete');
+      const pg = await migratedBefore(target);
+      try {
+        await pg.exec(`
+          insert into notifications (level, dedupe_key, title, body) values
+            ('daily', 'release:start:aaaaaaaaaaaa:1', '发版开始', '开始正文'),
+            ('daily', 'release:done:aaaaaaaaaaaa:2', '发版成功', ''),
+            ('alert', 'remind:n1:2026-10-14', '还没处理', '再提醒正文'),
+            ('decision', 'release:blocked:aaaaaaaaaaaa:3', '发版卡住', '要人看'),
+            ('alert', 'task:o/r#1:park:1', '挂起', '别动'),
+            ('daily', 'release:done:old:4', '已经撤过', '原来的正文');
+          update notifications set resolved_at = '2026-10-01T00:00:00Z', resolved_by = 'someone'
+           where dedupe_key = 'release:done:old:4';
+        `);
+        await runMigration(pg, tag);
+        const rows = async () =>
+          (
+            await pg.query<{ dedupe_key: string; body: string; resolved_by: string | null }>(
+              `select dedupe_key, body, resolved_by from notifications order by dedupe_key`,
+            )
+          ).rows;
+        const once = await rows();
+        const byKey = new Map(once.map((r) => [r.dedupe_key, r]));
+        expect(byKey.get('release:start:aaaaaaaaaaaa:1')).toMatchObject({
+          body: '已撤：不再写这类通知\n\n开始正文',
+          resolved_by: 'migration:0078',
+        });
+        expect(byKey.get('release:done:aaaaaaaaaaaa:2')).toMatchObject({
+          body: '已撤：不再写这类通知',
+          resolved_by: 'migration:0078',
+        });
+        expect(byKey.get('remind:n1:2026-10-14')?.resolved_by).toBe('migration:0078');
+        expect(byKey.get('release:blocked:aaaaaaaaaaaa:3')).toMatchObject({
+          body: '要人看',
+          resolved_by: null,
+        });
+        expect(byKey.get('task:o/r#1:park:1')).toMatchObject({ body: '别动', resolved_by: null });
+        expect(byKey.get('release:done:old:4')).toMatchObject({ body: '原来的正文', resolved_by: 'someone' });
+        const audit = await pg.query(`select 1 from audit_log where actor_id = 'migration:0078'`);
+        expect(audit.rows).toHaveLength(3);
+
+        await runMigration(pg, tag);
+        expect(await rows()).toEqual(once);
+        const again = await pg.query(`select 1 from audit_log where actor_id = 'migration:0078'`);
+        expect(again.rows).toHaveLength(3);
+      } finally {
+        await pg.close();
+      }
+    },
+    TEST_DB_TIMEOUT_MS,
+  );
+});
+
 describe('0073：提醒这一次挂起的时刻回填成建立时刻', () => {
   const tag = '0073_notification_raised_at';
 

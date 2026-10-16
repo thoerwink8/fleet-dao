@@ -346,7 +346,6 @@
     "packages/engine/test/cold-verify-status.test.ts": 14,
     "packages/engine/test/conflict-handoff.test.ts": 9,
     "packages/engine/test/daily-brief.test.ts": 30,
-    "packages/engine/test/daily-notes.test.ts": 1696,
     "packages/engine/test/decisions.test.ts": 33,
     "packages/engine/test/dispatch-issue.test.ts": 54,
     "packages/engine/test/dispatch-probe.test.ts": 47,
