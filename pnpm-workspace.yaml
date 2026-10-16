@@ -20,7 +20,15 @@ overrides:
 enableGlobalVirtualStore: true
 # 全局虚拟仓里包的真实路径在 .pnpm-store 下，往上找不到 @types/react，react-router 的类型里 React 变 any（NavLink 的 isActive 报隐式 any）。
 # 把 @types/react 声明成它的可选对等依赖，pnpm 就把本工程那份链到它旁边。
+# 同理 drizzle-kit 的 api.mjs（迁移测试 import 它）直接 import 'drizzle-orm'，却没声明；全局虚拟仓里它只看得见自己声明过的依赖，
+# 在 pnpm 之外起的 node（npx vitest）会报找不到 drizzle-orm。声明成可选对等依赖，pnpm 就把本工程那份链到它旁边。
 packageExtensions:
+  drizzle-kit:
+    peerDependencies:
+      drizzle-orm: '*'
+    peerDependenciesMeta:
+      drizzle-orm:
+        optional: true
   react-router:
     peerDependencies:
       '@types/react': '*'

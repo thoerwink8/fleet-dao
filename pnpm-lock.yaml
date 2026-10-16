@@ -7,7 +7,7 @@ settings:
 overrides:
   '@esbuild-kit/core-utils>esbuild': 0.25.4
 
-packageExtensionsChecksum: sha256-xHmnrcq8IKEv5KW4RTALsifgug1r6qW6DqxXirzQsrs=
+packageExtensionsChecksum: sha256-sHTI5tTZus91H0LIeFFjpUN6dF03wo45G39DP/PJHSQ=
 
 importers:
 
@@ -123,7 +123,7 @@ importers:
         version: 0.5.8
       drizzle-kit:
         specifier: ^0.31.11
-        version: 0.31.11
+        version: 0.31.11(drizzle-orm@0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9))
 
   packages/engine:
     dependencies:
@@ -2560,6 +2560,11 @@ packages:
   drizzle-kit@0.31.11:
     resolution: {integrity: sha512-YCYqxTLIB2OCqf6w9/Vef13baBVbwQIPcbT4Y56AfO6B9ajZhDhD8Jkveg/hJvT/iuMloKD/IYYkyMMNhr7Kqg==}
     hasBin: true
+    peerDependencies:
+      drizzle-orm: '*'
+    peerDependenciesMeta:
+      drizzle-orm:
+        optional: true
 
   drizzle-orm@0.45.3:
     resolution: {integrity: sha512-CAloER21cDdcgZ1OmjrZX82EeRNsdP+y0onX/eyoYDaYzki/adrAa91lzM5jWh7zZPK4qUbw/6LGv9J+A+uizA==}
@@ -5668,12 +5673,14 @@ snapshots:
 
   dom-accessibility-api@0.5.16: {}
 
-  drizzle-kit@0.31.11:
+  drizzle-kit@0.31.11(drizzle-orm@0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)):
     dependencies:
       '@drizzle-team/brocli': 0.10.2
       '@esbuild-kit/esm-loader': 2.6.5
       esbuild: 0.25.4
       tsx: 4.23.15
+    optionalDependencies:
+      drizzle-orm: 0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)
 
   drizzle-orm@0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9):
     optionalDependencies:
