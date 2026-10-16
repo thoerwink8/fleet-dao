@@ -1,8 +1,8 @@
 ---
 name: general-purpose
-description: 工人（Sonnet 5.5，可写）：写代码、改文件、改文档、修 bug、部署、开 PR；界面活也归它（照仓里的界面规范做，本机装了 playwright-cli 就真点页面，PR 带截图）。难的活派它时传 model 升档；窄改动、派前定好机器核对、规矩写全的编码可传 haiku 降档。
-model: claude-sonnet-5-5
-effort: medium
+description: 工人（Opus 5.5，可写）：写代码、改文件、改文档、修 bug、部署、开 PR；界面活也归它（照仓里的界面规范做，本机装了 playwright-cli 就真点页面，PR 带截图）。本机的活照一轮做完来交代，不按难易降档。
+model: claude-opus-5-5
+effort: high
 maxTurns: 200
 omitClaudeMd: true
 color: blue
