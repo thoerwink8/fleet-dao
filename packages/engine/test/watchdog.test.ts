@@ -2,7 +2,7 @@
 // 真 Temporal 测试服务端上的工作流。需求里的每一种都故意造一次：停了（stale）、连着失败（failing）、从没跑过（never）、
 // 恢复了自动撤（写清为什么）、读不到登记表算没查成、推送没写进去记没跑成下一轮重推。看门狗自己停了由后端现算，
 // 在 packages/api 的 watchdog-health.test.ts。
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -25,13 +25,7 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { CARPOOL_WATCH_JOB } from '../src/jobs/carpool-watch.ts';
-import {
-  judgeReleaseAttention,
-  lastHistoryEntry,
-  parseHealthzResponse,
-  releaseAttentionReasons,
-  TRAIN_STUCK_MS,
-} from '../src/jobs/release-watch.ts';
+import { judgeReleaseAttention, parseHealthzResponse, TRAIN_STUCK_MS } from '../src/jobs/release-watch.ts';
 import {
   jobIdOfKey,
   runWatchdogJob,
@@ -709,7 +703,7 @@ describe('总开关关着的跳过不算「连着没跑全」', () => {
   });
 });
 
-describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法国发版失败后漏报）', () => {
+describe('发版卡住、健康页非 200 持续 > 10 分钟（2026-10-14 法国发版失败后漏报；发版没成由接活脚本报，这里只报卡住，#2369）', () => {
   const SHA = 'abcd1234'.padEnd(40, '0');
   let dir: string;
   let health: { status: number; body: unknown } | 'down';
@@ -735,6 +729,20 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
       checks: { db: { ok: true }, temporal: { ok: false, code: 'down', message: '连不上 Temporal' } },
     },
   };
+  const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
+  /** 真格式的进度记录（deploy/france/release-request/lib.mjs 写的那个形状）。 */
+  const train = (status: string, startedMinAgo = 5) =>
+    writeFileSync(
+      join(dir, '.train', 'release-train.json'),
+      JSON.stringify({
+        schema: 1,
+        status,
+        phase: 4,
+        startedAt: at(-startedMinAgo).toISOString(),
+        updatedAt: at(-startedMinAgo).toISOString(),
+        target: { kind: 'sha', value: NEW },
+      }),
+    );
 
   // 这一组只看发版和健康页：发布目录在（像法国）时看门狗还会看「今天的每日简报送到没」，那一条在 daily-brief.test.ts 测，这里摘掉
   const wd = (): WatchdogDeps => {
@@ -760,35 +768,31 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
   afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   const openKeys = async () => (await openAlerts()).map((a) => a.dedupeKey);
+  const releaseRows = async () =>
+    (await allAlerts()).filter((a) => a.dedupeKey.startsWith('watchdog:release:'));
 
-  it('【故意造出的失败】重放那次事故：发布历史最近一条 unhealthy、进度记录 failed、自动发布说要人看 → 一张「发版要人看」卡；/healthz 503 满 10 分钟才报，写红的检查；恢复后两张都自己撤', async () => {
+  it('【故意造出的失败】重放那次事故：发布历史 unhealthy、进度 failed、自动发布说要人看：看门狗一行发版的提醒都不写（接活脚本、自动发布各自已报）；/healthz 503 满 10 分钟才报，写红的检查；恢复后自己撤', async () => {
     history(...BAD_HISTORY);
-    writeFileSync(join(dir, '.train', 'release-train.json'), JSON.stringify({ status: 'failed' }));
+    train('failed');
     writeFileSync(
       join(dir, '.auto', 'state.json'),
       JSON.stringify({ auto: { note: '现在不发：上一趟发版是「failed」状态，要人看，不自动再发' } }),
     );
     health = RED_503;
 
-    // 第 0 分钟：发版那张立刻报；健康页刚发现，不到 10 分钟不报
-    expect(await runWatchdogJob(wd())).toMatchObject({ outcome: 'ok', found: 1 });
-    expect(await openKeys()).toEqual([`watchdog:release:1111aaaa2222:unhealthy`]);
-    const rel = (await openAlerts())[0];
-    expect(rel?.title).toBe('发版要人看：新版没发成或退回了，自动发版停着');
-    expect(rel?.body).toContain('发布历史最近一条是「健康检查没过」');
-    expect(rel?.body).toContain('发版进度记录停在「failed」');
-    expect(rel?.body).toContain('自动发布说：现在不发：上一趟发版是「failed」状态，要人看');
-    expect(rel?.link).toBe('/france');
+    // 第 0 分钟：发版的事一行不写；健康页刚发现，不到 10 分钟不报
+    expect(await runWatchdogJob(wd())).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(await allAlerts()).toHaveLength(0);
 
     clock = at(9);
     await runWatchdogJob(wd());
-    expect(await openKeys()).toHaveLength(1);
+    expect(await allAlerts()).toHaveLength(0);
 
     // 第 10 分钟起：健康页那张报出来，写从几点起、红的检查
     clock = at(10);
-    expect(await runWatchdogJob(wd())).toMatchObject({ outcome: 'ok', found: 2 });
-    expect(await openKeys()).toContain(`watchdog:healthz:since-${T0.getTime()}`);
-    const hz = (await openAlerts()).find((a) => a.dedupeKey.startsWith('watchdog:healthz:'));
+    expect(await runWatchdogJob(wd())).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(await openKeys()).toEqual([`watchdog:healthz:since-${T0.getTime()}`]);
+    const hz = (await openAlerts())[0];
     expect(hz?.title).toBe('健康页（/healthz）非 200，已持续超过 10 分钟');
     expect(hz?.body).toContain('HTTP 503');
     expect(hz?.body).toContain('temporal：连不上 Temporal');
@@ -800,90 +804,64 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     await runWatchdogJob(wd());
     expect((await alertOf(hz?.dedupeKey ?? ''))?.updatedAt).toEqual(before);
 
-    // 恢复：/healthz 回 200、发布历史最近一条是 release、进度记录收尾 → 两张都撤，写明为什么
+    // 恢复：/healthz 回 200 → 撤，写明为什么
     health = { status: 200, body: { ok: true, checks: {} } };
-    history(...BAD_HISTORY, `2026-10-14T18:00:00Z ${'9'.repeat(40)} release`);
-    writeFileSync(join(dir, '.train', 'release-train.json'), JSON.stringify({ status: 'done' }));
-    writeFileSync(join(dir, '.auto', 'state.json'), JSON.stringify({ auto: { note: '在用的就是主线头' } }));
     clock = at(20);
     await runWatchdogJob(wd());
     expect(await openKeys()).toEqual([]);
     expect((await alertOf(hz?.dedupeKey ?? ''))?.body).toContain('已撤：/healthz 回 200 了');
-    expect((await alertOf(rel?.dedupeKey ?? ''))?.body).toContain('已撤：发版现在不用人看了');
   });
 
-  it('【故意造出的失败】release.sh 没退回、末行记「健康检查没过」，接活脚本发后体检过了（进度 done、current 就是目标）：不报，旧卡撤掉；current 不是目标照报（#2207）', async () => {
-    const PREV = 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e';
-    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
-    history(
-      `2026-10-14T22:49:55Z ${PREV} release`,
-      `2026-10-14T23:04:53Z ${NEW} release`,
-      `2026-10-14T23:05:30Z ${NEW} unhealthy`,
-    );
-    writeFileSync(
-      join(dir, '.train', 'release-train.json'),
-      JSON.stringify({
-        schema: 1,
-        status: 'done',
-        phase: 8,
-        startedAt: at(-10).toISOString(),
-        target: { kind: 'sha', value: NEW },
-      }),
-    );
-    writeFileSync(
-      join(dir, '.auto', 'state.json'),
-      JSON.stringify({ auto: { note: '在用的就是主线头，没有要发的' } }),
-    );
-    // 旧版看门狗当时开的那条
-    await upsertAlert(t.db, {
-      dedupeKey: `watchdog:release:${NEW.slice(0, 12)}:unhealthy`,
-      level: 'alert',
-      taskId: null,
-      title: '发版要人看：新版没发成或退回了，自动发版停着',
-      body: '发布历史最近一条是「健康检查没过」',
-    });
-    symlinkSync(NEW, join(dir, 'current'));
+  it('发布历史最近一条是 auto-rollback / unhealthy：看门狗不写新行（发版没成由接活脚本的 release:failed 报）；其它事件也不报', async () => {
+    history(`2026-10-14T17:03:00Z ${SHA} release`, '2026-10-14T17:06:00Z 1111aaaa2222 auto-rollback');
+    await runWatchdogJob(wd());
+    expect(await allAlerts()).toHaveLength(0);
+    for (const event of ['unhealthy', 'recovered', 'rollback', 'release']) {
+      history(`2026-10-14T17:03:00Z ${SHA} ${event}`);
+      clock = new Date(clock.getTime() + 5 * MIN);
+      await runWatchdogJob(wd());
+      expect(await allAlerts(), event).toHaveLength(0);
+    }
+  });
+
+  it('进度记录收了尾却没成（failed、blocked）：同样不写新行；done、aborted 也不报', async () => {
+    for (const status of ['failed', 'blocked', 'done', 'aborted']) {
+      train(status);
+      clock = new Date(clock.getTime() + 5 * MIN);
+      await runWatchdogJob(wd());
+      expect(await allAlerts(), status).toHaveLength(0);
+    }
+  });
+
+  it('旧版本开着的 watchdog:release:… 行（unhealthy、auto-rollback、failed 那几种）：这一轮自己撤，写明发版没成由接活脚本那一条报', async () => {
+    history(...BAD_HISTORY);
+    train('failed');
+    const legacy = [
+      `watchdog:release:${NEW.slice(0, 12)}:unhealthy`,
+      'watchdog:release:1111aaaa2222:auto-rollback',
+      `watchdog:release:train:${NEW.slice(0, 12)}:failed`,
+    ];
+    for (const dedupeKey of legacy)
+      await upsertAlert(t.db, {
+        dedupeKey,
+        level: 'alert',
+        taskId: null,
+        title: '发版要人看：新版没发成或退回了，自动发版停着',
+        body: '发布历史最近一条是「健康检查没过」',
+      });
     await runWatchdogJob(wd());
     expect(await openKeys()).toEqual([]);
-    expect((await alertOf(`watchdog:release:${NEW.slice(0, 12)}:unhealthy`))?.body).toContain(
-      '已撤：发版现在不用人看了',
-    );
-
-    // current 还是上一版（没切过去 / 退回了）：照报；自动发版没停（进度 done），标题不说「停着」
-    rmSync(join(dir, 'current'));
-    symlinkSync(PREV, join(dir, 'current'));
-    clock = at(1);
-    await runWatchdogJob(wd());
-    expect(await openKeys()).toEqual([`watchdog:release:${NEW.slice(0, 12)}:unhealthy`]);
-    const card = (await openAlerts())[0];
-    expect(card?.title).toBe('发版要人看：新版没发成或退回了');
-    expect(card?.body).toContain('自动发版没停');
-    expect(card?.body).not.toContain('不会再发');
+    for (const k of legacy) expect((await alertOf(k))?.body).toContain('已撤：发版现在没有卡住的了');
   });
 
-  it('重放 2026-10-14 22:58Z：一趟正常自动发版在走（真格式进度记录 running）不报，挂在上一版身上的误报撤掉；超过阈值才报、键写正在发的；发完撤', async () => {
+  it('重放 2026-10-14 22:58Z：一趟正常自动发版在走（真格式进度记录 running）不报，挂在上一版身上的旧误报撤掉；超过阈值才报、键写正在发的；发完撤', async () => {
     const PREV = 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e';
-    const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
     history(`2026-10-14T22:49:55Z ${PREV} release`);
-    const train = (status: string) =>
-      writeFileSync(
-        join(dir, '.train', 'release-train.json'),
-        JSON.stringify({
-          schema: 1,
-          status,
-          phase: 4,
-          startedAt: at(-5).toISOString(),
-          updatedAt: at(-5).toISOString(),
-          target: { kind: 'sha', value: NEW },
-          waiting: 'release.sh 2f5dc42f4636 在跑（最多 30 分钟）',
-        }),
-      );
     train('running');
     writeFileSync(
       join(dir, '.auto', 'state.json'),
       JSON.stringify({ auto: { note: '现在不发：有一趟发版在跑（2f5dc42f4636），等它收尾' } }),
     );
-    // 旧版看门狗开的那条误报（键挂在上一版身上）
     await upsertAlert(t.db, {
       dedupeKey: 'watchdog:release:df3692b292a7:release',
       level: 'alert',
@@ -896,16 +874,18 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     await runWatchdogJob(wd());
     expect(await openKeys()).toEqual([]);
     expect((await alertOf('watchdog:release:df3692b292a7:release'))?.body).toContain(
-      '已撤：发版现在不用人看了',
+      '已撤：发版现在没有卡住的了',
     );
 
-    // 过了阈值还 running：报，键是正在发的这一趟
+    // 过了阈值还 running：报，键是正在发的这一趟，标题写发版卡住
     clock = at(TRAIN_STUCK_MS / MIN - 4);
     await runWatchdogJob(wd());
     expect(await openKeys()).toEqual(['watchdog:release:train:2f5dc42f4636:running']);
+    const card = (await openAlerts())[0];
+    expect(card?.title).toBe('发版卡住：2f5dc42f4636 这一趟超过 70 分钟没收尾，自动发版停着');
+    expect(card?.link).toBe('/france');
 
-    // 发完（历史多一条 release、进度 done）：自己撤
-    history(`2026-10-14T22:49:55Z ${PREV} release`, `2026-10-14T23:04:53Z ${NEW} release`);
+    // 发完（进度 done）：自己撤
     train('done');
     clock = at(TRAIN_STUCK_MS / MIN);
     await runWatchdogJob(wd());
@@ -913,7 +893,6 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
   });
 
   it('非 200 没满 10 分钟就恢复：从不报，也清掉记的时刻（下次重新数）', async () => {
-    history(`2026-10-14T17:03:00Z ${SHA} release`);
     health = RED_503;
     await runWatchdogJob(wd());
     clock = at(8);
@@ -935,7 +914,6 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
   });
 
   it('【故意造出的失败】后端连不上（fetch 抛）也算非 200：满 10 分钟报，写连不上', async () => {
-    history(`2026-10-14T17:03:00Z ${SHA} release`);
     health = 'down';
     await runWatchdogJob(wd());
     clock = at(10);
@@ -943,18 +921,6 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     const [a] = await openAlerts();
     expect(a?.dedupeKey).toBe(`watchdog:healthz:since-${T0.getTime()}`);
     expect(a?.body).toContain('连不上');
-  });
-
-  it('发布历史最近一条是 auto-rollback 也要人看；最近一条是 recovered / rollback / release 不报', async () => {
-    history(`2026-10-14T17:03:00Z ${SHA} release`, '2026-10-14T17:06:00Z 1111aaaa2222 auto-rollback');
-    await runWatchdogJob(wd());
-    expect(await openKeys()).toEqual(['watchdog:release:1111aaaa2222:auto-rollback']);
-    for (const event of ['recovered', 'rollback', 'release']) {
-      history(`2026-10-14T17:03:00Z ${SHA} ${event}`);
-      clock = new Date(clock.getTime() + 5 * MIN);
-      await runWatchdogJob(wd());
-      expect(await openKeys(), event).toEqual([]);
-    }
   });
 
   it('不是法国（没有发布目录）：这两项不看，也不去问 /healthz', async () => {
@@ -972,35 +938,31 @@ describe('发版要人看、健康页非 200 持续 > 10 分钟（2026-10-14 法
     expect(await allAlerts()).toHaveLength(0);
   });
 
-  it('【故意造出的失败】目录在、发布历史读不到：这一轮记没跑成（不当成发版没事），开着的发版提醒不撤', async () => {
-    history(...BAD_HISTORY);
+  it('【故意造出的失败】进度记录不是 JSON：这一轮记没跑成（不当成发版没事），开着的卡住提醒不撤', async () => {
+    train('running', TRAIN_STUCK_MS / MIN + 1);
     await runWatchdogJob(wd());
     expect(await openKeys()).toHaveLength(1);
-    rmSync(join(dir, '.history'));
+    writeFileSync(join(dir, '.train', 'release-train.json'), '{坏了');
     clock = at(5);
     await expect(runWatchdogJob(wd())).rejects.toThrow(WatchdogFailedError);
     expect(await openKeys()).toHaveLength(1);
-    expect((await watchdogRuns()).at(-1)?.why).toContain('发布历史读不到');
   });
 
-  it('和「连着没跑全」互不相干：发版出事不会多出 watchdog:red: 的卡', async () => {
-    history(...BAD_HISTORY);
+  it('发布历史不在也不影响：看门狗不再读它', async () => {
+    train('done');
+    await expect(runWatchdogJob(wd())).resolves.toMatchObject({ outcome: 'ok' });
+  });
+
+  it('和「连着没跑全」互不相干：发版卡住不会多出 watchdog:red: 的卡', async () => {
+    train('running', TRAIN_STUCK_MS / MIN + 1);
     await runWatchdogJob(wd());
+    expect(await openKeys()).toHaveLength(1);
     expect((await allAlerts()).every((a) => !a.dedupeKey.startsWith('watchdog:red:'))).toBe(true);
+    expect(await releaseRows()).toHaveLength(1);
   });
 });
 
-describe('发版和健康页的判法（纯函数）', () => {
-  it('发布历史最后一行认不出抛，不当成没事；空的是 null', () => {
-    expect(lastHistoryEntry('')).toBeNull();
-    expect(lastHistoryEntry('2026-10-14T17:03:00Z abc release unmerged\n')).toEqual({
-      at: '2026-10-14T17:03:00Z',
-      sha: 'abc',
-      event: 'release',
-    });
-    expect(() => lastHistoryEntry('乱七八糟')).toThrow('认不出');
-  });
-
+describe('发版卡住和健康页的判法（纯函数）', () => {
   it('/healthz 的回应：200 好；503 列红的检查；不是健康报告的正文（502 页面）只报状态码', () => {
     expect(parseHealthzResponse(200, '{}')).toEqual({ ok: true });
     expect(
@@ -1016,103 +978,42 @@ describe('发版和健康页的判法（纯函数）', () => {
     });
   });
 
-  it('进度记录 done、aborted 不算要人看，其他状态算；自动发布没说「要人看」不算', () => {
-    const f = (trainStatus: string | null, autoNote: string | null = null) => ({
-      last: null,
-      trainStatus,
-      autoNote,
-    });
-    expect(releaseAttentionReasons(f('done'), T0)).toEqual([]);
-    expect(releaseAttentionReasons(f('aborted'), T0)).toEqual([]);
-    expect(releaseAttentionReasons(f(null, '主线头 CI 不是绿的，等绿'), T0)).toEqual([]);
-    expect(releaseAttentionReasons(f('deploying'), T0)).toHaveLength(1);
-    expect(releaseAttentionReasons(f('failed'), T0)).toHaveLength(1);
-  });
-
   describe('进度记录 running：正常在走不报，超过 TRAIN_STUCK_MS 才算卡住（2026-10-14 22:58Z 每趟自动发版都误报）', () => {
     const NEW = '2f5dc42f4636fe0a68264eb11ecc39a723e36b7d';
-    const LAST = `2026-10-14T22:49:55Z df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e release`;
     const START = new Date('2026-10-14T22:57:55.841Z');
     const running = (over: Record<string, unknown> = {}) => ({
-      last: lastHistoryEntry(LAST),
       trainStatus: 'running',
       trainSince: START.toISOString(),
       trainSha: NEW,
-      autoNote: '现在不发：有一趟发版在跑（2f5dc42f4636），等它收尾',
       ...over,
     });
     const after = (min: number) => new Date(START.getTime() + min * MIN);
 
-    it('进行中 5 分钟：不报；自动发布写的是在跑，不含「要人看」', () => {
-      expect(running().autoNote).not.toContain('要人看');
-      expect(releaseAttentionReasons(running(), after(5))).toEqual([]);
+    it('进行中：不报，到阈值那一刻也不报', () => {
       expect(judgeReleaseAttention(running(), after(1))).toEqual({ kind: 'fine' });
       expect(judgeReleaseAttention(running(), after(TRAIN_STUCK_MS / MIN))).toEqual({ kind: 'fine' });
     });
 
-    it('【故意造出的失败】超过阈值：报，键和正文写正在发的提交，不挂在上一版（df3692b2）身上', () => {
+    it('【故意造出的失败】超过阈值：报，键和正文写正在发的提交', () => {
       const v = judgeReleaseAttention(running(), after(TRAIN_STUCK_MS / MIN + 1));
       expect(v).toMatchObject({ kind: 'alert', key: 'watchdog:release:train:2f5dc42f4636:running' });
       if (v.kind !== 'alert') throw new Error('应当报');
-      expect(v.key).not.toContain('df3692b292a7');
       expect(v.title).toBe('发版卡住：2f5dc42f4636 这一趟超过 70 分钟没收尾，自动发版停着');
       expect(v.body).toContain('正在发 2f5dc42f4636 的这一趟从 10-15 06:57 起停在「running」');
-      // 进行中的话不含「要人看」，不另写一条自动发布
-      expect(v.body).not.toContain('自动发布说');
     });
 
-    it('done 不报（上一版、这一版都不报）', () => {
-      expect(judgeReleaseAttention(running({ trainStatus: 'done' }), after(500))).toEqual({ kind: 'fine' });
+    it('其它状态一律不报（done、aborted、没有进度记录；failed、blocked 由接活脚本那一条报）', () => {
+      for (const trainStatus of ['done', 'aborted', 'failed', 'blocked', 'deploying', null])
+        expect(judgeReleaseAttention(running({ trainStatus }), after(500)), String(trainStatus)).toEqual({
+          kind: 'fine',
+        });
     });
 
     it('旧格式（只有 status，没有起点时间）：running 判不了多久，照旧报，写明老格式', () => {
-      const v = judgeReleaseAttention(
-        { last: lastHistoryEntry(LAST), trainStatus: 'running', autoNote: null },
-        after(1),
-      );
+      const v = judgeReleaseAttention({ trainStatus: 'running' }, after(1));
       expect(v).toMatchObject({ kind: 'alert', key: 'watchdog:release:train:unknown:running' });
       if (v.kind !== 'alert') throw new Error('应当报');
       expect(v.body).toContain('没有起止时间（老格式）');
-    });
-
-    it('收了尾却没成（failed）：立刻报，键认这一趟的提交', () => {
-      const v = judgeReleaseAttention(running({ trainStatus: 'failed' }), after(3));
-      expect(v).toMatchObject({
-        kind: 'alert',
-        key: 'watchdog:release:train:2f5dc42f4636:failed',
-        title: '发版要人看：2f5dc42f4636 这一趟停在「failed」，自动发版停着',
-      });
-    });
-
-    it('这一趟落地了（done、current 就是目标），末行「健康检查没过」说的是它：不报；说的是别的提交、或 current 不是目标：报（#2207）', () => {
-      const landed = {
-        last: lastHistoryEntry(`2026-10-14T23:05:30Z ${NEW} unhealthy`),
-        trainStatus: 'done',
-        trainSince: START.toISOString(),
-        trainSha: NEW,
-        currentSha: NEW,
-        autoNote: null,
-      };
-      expect(judgeReleaseAttention(landed, after(10))).toEqual({ kind: 'fine' });
-      expect(judgeReleaseAttention({ ...landed, currentSha: null }, after(10))).toMatchObject({
-        kind: 'alert',
-      });
-      expect(
-        judgeReleaseAttention(
-          { ...landed, currentSha: 'df3692b292a74d8f0394dcf2238f1e7d9e9d7d4e' },
-          after(10),
-        ),
-      ).toMatchObject({ kind: 'alert', key: 'watchdog:release:2f5dc42f4636:unhealthy' });
-      // 退回了：末行是 auto-rollback（上一版），照报
-      expect(
-        judgeReleaseAttention(
-          { ...landed, last: lastHistoryEntry(`2026-10-14T23:05:31Z ${NEW} auto-rollback`) },
-          after(10),
-        ),
-      ).toMatchObject({ kind: 'alert' });
-      // 进度没成（failed）：照报，而且自动发版真停着
-      const v = judgeReleaseAttention({ ...landed, trainStatus: 'failed' }, after(10));
-      expect(v).toMatchObject({ kind: 'alert', title: '发版要人看：新版没发成或退回了，自动发版停着' });
     });
 
     it('阈值不小于发版接活脚本各步上限加起来（到上限它自己写成没成；没到的一律当正常在走）', async () => {

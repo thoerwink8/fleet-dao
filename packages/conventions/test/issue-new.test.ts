@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   checkIssueBody,
+  describeOrder,
   type GhResult,
   ghRunner,
   issueBodyTooLong,
@@ -41,10 +42,12 @@ function milestoneApi(
     { number: 1, title: 'P1 核心闭环', description: null },
     { number: 8, title: V1_TITLE, description: V1_DESC },
   ],
-  f: { read?: GhResult; patch?: GhResult; patchBody?: string } = {},
+  f: { read?: GhResult; patch?: GhResult; patchBody?: string; open?: GhResult } = {},
 ) {
   const store = new Map(list.map((m) => [m.number, { ...m }]));
   const route = (args: string[]): GhResult | undefined => {
+    // 开着的单号（gh issue list --json number）：不给就回不了 JSON 的话，等于读不到
+    if (args[0] === 'issue' && args[1] === 'list') return f.open;
     if (args[0] !== 'api') return undefined;
     if (args[1] === LIST) return ok(JSON.stringify([...store.values()].map(msJson)));
     const read = /^repos\/\{owner\}\/\{repo\}\/milestones\/(\d+)$/.exec(args[1] ?? '');
@@ -427,7 +430,7 @@ describe('开单脚本：--local 多贴「本机做」（#299 止血：帅位留
       url: URL36,
       milestone: 'v1 Fusion 接活',
       local: true,
-      order: { position: 3, count: 3 },
+      order: { position: 3, count: 3, removed: [], openKnown: false },
     });
     expect(calls.slice(0, 2)).toEqual([
       ['api', 'repos/{owner}/{repo}/milestones?state=open&per_page=100'],
@@ -602,13 +605,14 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
       number: 36,
       url: URL36,
       milestone: V1_TITLE,
-      order: { position: 3, count: 3 },
+      order: { position: 3, count: 3, removed: [], openKnown: false },
     });
     expect(api.description(8)).toBe(V1_DESC.replace('2. #30\n', '2. #30\n3. #36\n'));
     expect(calls.map((c) => c.slice(0, 4))).toEqual([
       ['api', LIST],
       ['issue', 'create', '--title', '登录页加验证码'],
       ['api', MS8],
+      ['issue', 'list', '--state', 'open'],
       ['api', '-X', 'PATCH', MS8],
     ]);
     expect(calls.at(-1)?.slice(4)).toEqual(['-f', `description=${api.description(8)}`]);
@@ -630,7 +634,7 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
     const api = milestoneApi();
     const { run } = setup({ route: api.route });
     await expect(run(...v1, '--order-after', '#20')).resolves.toMatchObject({
-      order: { position: 2, count: 3 },
+      order: { position: 2, count: 3, removed: [], openKnown: false },
     });
     expect(api.description(8)).toBe(V1_DESC.replace('1. #20\n2. #30\n', '1. #20\n2. #36\n3. #30\n'));
   });
@@ -639,7 +643,7 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
     const api = milestoneApi();
     const { run } = setup({ route: api.route });
     await expect(run(...base.slice(0, 3), V1_TITLE, ...base.slice(4), '--mother')).resolves.toMatchObject({
-      order: { position: 3, count: 3 },
+      order: { position: 3, count: 3, removed: [], openKnown: false },
     });
     expect(parseOrder(api.description(8) ?? '')).toMatchObject({ ok: true, order: [20, 30, 36] });
   });
@@ -648,16 +652,89 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
     const empty = '目标。\n<!-- fleet:order -->\n<!-- /fleet:order -->';
     const api = milestoneApi([{ number: 8, title: V1_TITLE, description: empty }]);
     const { run } = setup({ route: api.route });
-    await expect(run(...v1)).resolves.toMatchObject({ order: { position: 1, count: 1 } });
+    await expect(run(...v1)).resolves.toMatchObject({
+      order: { position: 1, count: 1, removed: [], openKnown: false },
+    });
     expect(api.description(8)).toBe('目标。\n<!-- fleet:order -->\n1. #36\n<!-- /fleet:order -->');
   });
 
   it('先后里已经有它（开单和改说明之间有人抢先补了）：不再写一遍，不改说明', async () => {
     const api = milestoneApi([{ number: 8, title: V1_TITLE, description: order(20, 36) }]);
     const { calls, run } = setup({ route: api.route });
-    await expect(run(...v1)).resolves.toMatchObject({ order: { position: 2, count: 2 } });
+    await expect(run(...v1)).resolves.toMatchObject({
+      order: { position: 2, count: 2, removed: [], openKnown: false },
+    });
     expect(api.description(8)).toBe(order(20, 36));
     expect(patched(calls)).toBe(false);
+  });
+
+  describe('顺手清掉先后里已关的号（#2393）', () => {
+    const FIVE = `目标。\n${order(11, 12, 13, 14, 15)}\n收尾。`;
+    const openList = (...ns: number[]) => ok(JSON.stringify(ns.map((number) => ({ number }))));
+
+    it('段里 3 个已关号、2 个开着的号：开一张新单后只剩 2 个开着的号加新号，回显只数开着的', async () => {
+      const api = milestoneApi([{ number: 8, title: V1_TITLE, description: FIVE }], {
+        open: openList(12, 14, 36, 99),
+      });
+      const { calls, run } = setup({ route: api.route });
+      const r = await run(...v1);
+      expect(r.order).toEqual({ position: 3, count: 3, removed: [11, 13, 15], openKnown: true });
+      expect(parseOrder(api.description(8) ?? '')).toMatchObject({ ok: true, order: [12, 14, 36] });
+      expect(api.description(8)).toBe(`目标。\n${order(12, 14, 36)}\n收尾。`);
+      expect(calls.map((c) => c.slice(0, 3))).toContainEqual(['issue', 'list', '--state']);
+      expect(describeOrder(r.order as NonNullable<typeof r.order>)).toBe(
+        '排进先后第 3 位（开着的共 3 张），顺手清掉 3 张已关的',
+      );
+    });
+
+    it('--order-after 指到一张已关的号：按清之前的位置插，清完新单落在它原来的位置', async () => {
+      const api = milestoneApi([{ number: 8, title: V1_TITLE, description: FIVE }], {
+        open: openList(12, 14, 15, 36),
+      });
+      const { run } = setup({ route: api.route });
+      await run(...v1, '--order-after', '13');
+      expect(parseOrder(api.description(8) ?? '')).toMatchObject({ ok: true, order: [12, 36, 14, 15] });
+    });
+
+    it('先后里已经有它、却还留着已关的号：只清不加', async () => {
+      const api = milestoneApi([{ number: 8, title: V1_TITLE, description: order(11, 36) }], {
+        open: openList(36),
+      });
+      const { run } = setup({ route: api.route });
+      const r = await run(...v1);
+      expect(r.order).toEqual({ position: 1, count: 1, removed: [11], openKnown: true });
+      expect(api.description(8)).toBe(order(36));
+    });
+
+    it.each([
+      ['gh 读失败', fail('HTTP 502: Bad Gateway')],
+      ['读回来不是 JSON', ok('<html>')],
+      ['读回来是空列表（刚开了一张，不可能一张都没有）', ok('[]')],
+      [
+        '读满了上限（可能还有没读到的）',
+        ok(JSON.stringify(Array.from({ length: 1000 }, (_, i) => ({ number: i + 1 })))),
+      ],
+      ['有一项认不出号', ok('[{"number":12},{"id":3}]')],
+    ])('【故意造出的失败】开着的单%s：一个号也不清、照旧追加，回显明说没清', async (_name, open) => {
+      const api = milestoneApi([{ number: 8, title: V1_TITLE, description: FIVE }], { open });
+      const { run } = setup({ route: api.route });
+      const r = await run(...v1);
+      expect(r.order).toEqual({ position: 6, count: 6, removed: [], openKnown: false });
+      expect(parseOrder(api.description(8) ?? '')).toMatchObject({
+        ok: true,
+        order: [11, 12, 13, 14, 15, 36],
+      });
+      expect(describeOrder(r.order as NonNullable<typeof r.order>)).toBe(
+        '排进先后第 6 位（没读到开着的单，没清已关的；先后里共 6 张，含已关的）',
+      );
+    });
+
+    it('没有要清的：回显「开着的共 M 张」，没有「清掉」', async () => {
+      const api = milestoneApi(undefined, { open: openList(20, 30, 36) });
+      const { run } = setup({ route: api.route });
+      const r = await run(...v1);
+      expect(describeOrder(r.order as NonNullable<typeof r.order>)).toBe('排进先后第 3 位（开着的共 3 张）');
+    });
   });
 
   it('子单（--parent）不排：子单在母单页面上排，不读、不改里程碑说明', async () => {
@@ -714,6 +791,7 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
       ['api', LIST],
       ['issue', 'create'],
       ['api', MS8],
+      ['issue', 'list'],
     ]);
   });
 

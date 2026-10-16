@@ -297,9 +297,9 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     expect(run.why).toContain('acme/widgets：列合并的 PR 失败：403');
   });
 
-  describe('已知没装机器人的仓（有开着的 github-app-missing 提醒）', () => {
-    const missingKey = 'github-app-missing:acme/new';
-    const openAlert = { resolvedAt: null } as never;
+  describe('已知没装机器人的仓（有开着的 decision 级 github-app:<仓> 提醒）', () => {
+    const missingKey = 'github-app:acme/new';
+    const openAlert = { resolvedAt: null, level: 'decision' } as never;
     const okAudit = {
       outcome: 'ok' as const,
       scanned: 1,
@@ -432,7 +432,7 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     });
     // 探针目录 1 个 + 两个机器人 2 个
     expect(await runHourlyReconcileJob(h.deps)).toEqual({ runId: 7, outcome: 'ok', scanned: 3, found: 1 });
-    expect(raised).toEqual(['github-app:engine:acme/widgets']);
+    expect(raised).toEqual(['github-app:acme/widgets']);
 
     const broken = harness({
       apps: {

@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 import {
   type Db,
   GITHUB_APP_ALERT_PREFIX,
-  GITHUB_APP_MISSING_ALERT_PREFIX,
   type PgListen,
   resolveAlertByKey,
   SESSION_ORG_ALERT_PREFIX,
@@ -194,7 +193,7 @@ async function publicFailures(log: Logger) {
     await run('session-org', true, sessionOrgHealthCheck(judgeDb.db));
     // 机器人权限的提醒开着：标题（带仓名、缺哪样权限）只进日志
     await upsertAlert(judgeDb.db, {
-      dedupeKey: `${GITHUB_APP_ALERT_PREFIX}engine:acme/fleet-dao`,
+      dedupeKey: `${GITHUB_APP_ALERT_PREFIX}acme/fleet-dao`,
       level: 'alert',
       taskId: null,
       title: '「引擎」机器人在 acme/fleet-dao 上的权限不对：缺 statuses:write',
@@ -203,11 +202,11 @@ async function publicFailures(log: Logger) {
     await run('github-app', true, githubAppHealthCheck(judgeDb.db));
     // 没装到某个仓的警告（PublicHealthWarning，不是 new PublicHealthError，不计入 sites）：同样不带仓名
     await resolveAlertByKey(judgeDb.db, {
-      dedupeKey: `${GITHUB_APP_ALERT_PREFIX}engine:acme/fleet-dao`,
+      dedupeKey: `${GITHUB_APP_ALERT_PREFIX}acme/fleet-dao`,
       by: 'test',
     });
     await upsertAlert(judgeDb.db, {
-      dedupeKey: `${GITHUB_APP_MISSING_ALERT_PREFIX}acme/fleet-dao`,
+      dedupeKey: `${GITHUB_APP_ALERT_PREFIX}acme/fleet-dao`,
       level: 'decision',
       taskId: null,
       title: 'acme/fleet-dao：先去 GitHub 把两个机器人装到这个仓',

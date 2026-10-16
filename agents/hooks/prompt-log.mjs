@@ -28,7 +28,10 @@ export function logDir(env = process.env, home = homedir()) {
   return typeof o === 'string' && o ? o : join(home, '.fleet-dao', 'prompt-log');
 }
 
-/** 北京时间的那一天，形如 2026-10-04（文件名用）。 */
+/**
+ * 北京时间的那一天，形如 2026-10-04（文件名用）。
+ * @param {number} now
+ */
 export function dayOf(now) {
   const t = new Date(now + 8 * 60 * 60 * 1000); // 存的是 UTC 毫秒，拨到北京
   return t.toISOString().slice(0, 10);
@@ -37,16 +40,19 @@ export function dayOf(now) {
 /**
  * 从钩子入参里取出要落盘的那条。
  * 认不出（没有 prompt、不是对象、prompt 是空的）返回 null——不编一条空的进去。
+ * @param {unknown} input
+ * @param {number} [now]
  */
 export function entryFrom(input, now = Date.now()) {
   if (!input || typeof input !== 'object') return null;
-  const prompt = input.prompt;
+  const o = /** @type {Record<string, unknown>} */ (input);
+  const prompt = o.prompt;
   if (typeof prompt !== 'string' || prompt === '') return null;
   return {
     at: new Date(now).toISOString(),
-    sessionId: typeof input.session_id === 'string' ? input.session_id : null,
-    promptId: typeof input.prompt_id === 'string' ? input.prompt_id : null,
-    cwd: typeof input.cwd === 'string' ? input.cwd : null,
+    sessionId: typeof o.session_id === 'string' ? o.session_id : null,
+    promptId: typeof o.prompt_id === 'string' ? o.prompt_id : null,
+    cwd: typeof o.cwd === 'string' ? o.cwd : null,
     prompt,
   };
 }
@@ -54,6 +60,8 @@ export function entryFrom(input, now = Date.now()) {
 /**
  * 落盘一条。返回 { ok: true, file, deduped } 或 { ok: false, why }。
  * 同一个 prompt_id 已经在这份文件里出现过就当重复、跳过（钩子被重放、开会话补捞都可能撞上）。
+ * @param {ReturnType<typeof entryFrom>} entry
+ * @param {{ dir?: string, now?: number }} [opts]
  */
 export function appendEntry(entry, { dir = logDir(), now = Date.now() } = {}) {
   if (!entry) return { ok: false, why: '没有可落盘的内容' };
@@ -71,7 +79,11 @@ export function appendEntry(entry, { dir = logDir(), now = Date.now() } = {}) {
   }
 }
 
-/** 这份文件里有没有这个 prompt_id。读不了当没有（宁可重复一条，也不丢）。 */
+/**
+ * 这份文件里有没有这个 prompt_id。读不了当没有（宁可重复一条，也不丢）。
+ * @param {string} file
+ * @param {string} promptId
+ */
 function alreadyLogged(file, promptId) {
   let text;
   try {
