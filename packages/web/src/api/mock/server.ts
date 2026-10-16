@@ -1353,7 +1353,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
     const l: MLog = { id: nextId('log'), at: iso(), taskId: tv.task.id, ...entry };
     st.logs.push(l);
     if (st.logs.length > 3000) st.logs.splice(0, st.logs.length - 3000);
-    emit('progress_events', l.id);
+    emit('subtasks', l.id);
   }
 
   function findTask(taskId: string): MTask {

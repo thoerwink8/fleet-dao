@@ -9,7 +9,6 @@ import {
   ciPolicyOf,
   type Model,
   type Pool,
-  type ProgressKind,
   type RealtimeTable,
   type Repo,
   type Route,
@@ -59,9 +58,7 @@ import {
   readWorktreeInventoryPayload,
 } from './node-logic.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
-import { planSteps } from './plan-logic.ts';
 import type {
-  AgentSession,
   AuditRecord,
   CommandClaim,
   GitHubAppRole,
@@ -104,14 +101,6 @@ import {
   removeRepoAudit,
   segmentRunMatch,
 } from './task-logic.ts';
-
-export interface ProgressRecord {
-  id: string;
-  runId: string;
-  at: string;
-  kind: ProgressKind;
-  payload: unknown;
-}
 
 export interface StateChangeRecord {
   id: string;
@@ -170,12 +159,13 @@ export interface MemoryData {
   repos: RepoRecord[];
   tasks: Task[];
   subtasks: Subtask[];
-  /** 老流程的会话（库里的 session_runs）。 */
+  /**
+   * 占着池名额的在途会话（库里 runs 表里带路由、没结束的行；stage 是这一段按 SEGMENT_STAGE 换的用途）：内存版的 poolOccupancy
+   * 只读它，没有预占表。
+   */
   runs: SessionRun[];
   /** 三段的流水（库里的 runs 表，名字撞了：这里叫 segmentRuns）。 */
   segmentRuns: SegmentRun[];
-  /** 会话进度：fleet plan 的步骤清单、测试结果都在这里（最近一条 plan 就是现行清单，kind=test 就是测试记录）。 */
-  progress: ProgressRecord[];
   /** 需求和子任务的状态变化（库里由触发器写）；建库时没给的，按建单时刻补一条初始状态。 */
   stateChanges: StateChangeRecord[];
   channels: Channel[];
@@ -216,7 +206,6 @@ export function emptyData(): MemoryData {
     subtasks: [],
     runs: [],
     segmentRuns: [],
-    progress: [],
     stateChanges: [],
     channels: [],
     channelStates: [],
@@ -282,7 +271,7 @@ export function createMemoryStore(
   const now = options.now ?? (() => new Date());
   const changed = (table: RealtimeTable, id: string) => options.onChange?.(table, id);
   let seq = 0;
-  for (const list of [data.progress, data.audit, data.stateChanges]) {
+  for (const list of [data.audit, data.stateChanges]) {
     for (const item of list) if (/^\d+$/.test(item.id)) seq = Math.max(seq, Number(item.id));
   }
   const nextId = () => String(++seq);
@@ -347,28 +336,6 @@ export function createMemoryStore(
     });
     changed('audit_log', id);
     return id;
-  }
-
-  function progress(runId: string, kind: ProgressKind, payload: unknown): void {
-    if (!data.runs.some((r) => r.id === runId))
-      throw new Error(`progress_events_run_id_fk：没有会话 ${runId}`);
-    if (kind === 'plan' && !Array.isArray((payload as { steps?: unknown } | null)?.steps)) {
-      throw new Error('progress_events_plan_has_steps：plan 的载荷必须是 { steps: [...] }');
-    }
-    const id = nextId();
-    data.progress.push({ id, runId, at: now().toISOString(), kind, payload });
-    changed('progress_events', id);
-  }
-
-  function latestProgress(runId: string, kind: ProgressKind): ProgressRecord | undefined {
-    return data.progress
-      .filter((p) => p.runId === runId && p.kind === kind)
-      .sort(byAtThenId)
-      .at(-1);
-  }
-
-  function planOf(record: ProgressRecord): RunPlan {
-    return { steps: planSteps(record.payload), updatedAt: record.at };
   }
 
   /** 占用凭据就是这次占用的时刻（和库里的 claimed_at 一样）：接管会把它改新，旧凭据就对不上了。 */
@@ -497,18 +464,6 @@ export function createMemoryStore(
         .filter((s) => taskIds.includes(s.taskId))
         .sort((a, b) => a.taskId.localeCompare(b.taskId) || a.index - b.index);
     },
-    async listRuns({ taskIds, active }) {
-      return data.runs
-        .filter(
-          (r) =>
-            (!taskIds || (r.taskId !== undefined && taskIds.includes(r.taskId))) &&
-            (!active || r.endedAt === undefined),
-        )
-        .sort((a, b) => a.queuedAt.localeCompare(b.queuedAt) || compareIds(a.id, b.id));
-    },
-    async getRun(id) {
-      return data.runs.find((r) => r.id === id) ?? null;
-    },
     async listSegmentRuns(taskId) {
       const task = data.tasks.find((t) => t.id === taskId);
       if (!task) return [];
@@ -555,19 +510,6 @@ export function createMemoryStore(
       }
       return [...direct, ...loose].sort(byStart);
     },
-    async getPlans(runIds) {
-      const out = new Map<string, RunPlan>();
-      for (const id of runIds) {
-        const latest = latestProgress(id, 'plan');
-        if (latest) out.set(id, planOf(latest));
-      }
-      return out;
-    },
-    async lastSay(runId) {
-      const say = latestProgress(runId, 'say');
-      const text = (say?.payload as { text?: unknown } | undefined)?.text;
-      return say && typeof text === 'string' ? { text, at: say.at } : null;
-    },
     async listPullRequests(input = {}) {
       const limit = input.limit ?? 50;
       const rows = data.pullRequests.filter((p) => input.state === undefined || p.state === input.state);
@@ -590,7 +532,7 @@ export function createMemoryStore(
     async listChannelStates() {
       return [...data.channelStates].sort((a, b) => a.channelId.localeCompare(b.channelId));
     },
-    // 内存版只有老流程会话（没有三段的 runs 表和预占表）：开工的算在跑，排着的算已选定还没开跑。
+    // 内存版只有在途会话（没有预占表）：开工的算在跑，没开工的算已选定还没开跑。
     async poolOccupancy() {
       const poolOf = new Map(data.routes.map((r) => [r.id, r.poolId]));
       const byPool = new Map<string, { poolId: string; inFlight: number; reserved: number }>();
@@ -798,32 +740,6 @@ export function createMemoryStore(
     },
 
     // —— fleet 命令 ——
-    async getAgentSession(runId) {
-      const run = data.runs.find((r) => r.id === runId);
-      const task = run?.taskId === undefined ? undefined : data.tasks.find((t) => t.id === run.taskId);
-      // 和库里一样：任务挂的仓不在就当没有这个会话（库里是 inner join）
-      const repo = task ? data.repos.find((r) => r.id === task.repoId) : undefined;
-      if (!run || !task || !repo) return null;
-      const session: AgentSession = {
-        runId: run.id,
-        taskId: task.id,
-        subtaskId: run.subtaskId,
-        stage: run.stage,
-        repoId: task.repoId,
-        // 和库里一样认起会话时记下的那条，不读仓此刻的
-        testCommand: run.testCommand,
-        branch: run.branch,
-        acceptance: task.acceptance ?? [],
-        endedAt: run.endedAt,
-      };
-      return session;
-    },
-    async savePlan(runId, steps) {
-      progress(runId, 'plan', { steps: steps.map(({ title, state }) => ({ title, state })) });
-    },
-    async appendProgress(runId, kind, payload) {
-      progress(runId, kind, payload);
-    },
     async searchHistory({ repoId, query, limit }) {
       const terms = query
         .split(/\s+/)
@@ -865,12 +781,6 @@ export function createMemoryStore(
     },
     async getPullRequest(repoId, number) {
       return data.pullRequests.find((p) => p.repoId === repoId && p.number === number) ?? null;
-    },
-    async listTestRuns(runId) {
-      return data.progress
-        .filter((p) => p.runId === runId && p.kind === 'test')
-        .sort(byAtThenId)
-        .map((p) => testRunOf(p.at, p.payload));
     },
     async claimCommand({ runId, key, action, takeOverBefore }): Promise<CommandClaim> {
       const k = commandKey(runId, key);

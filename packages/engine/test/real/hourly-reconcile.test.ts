@@ -15,8 +15,8 @@ import {
   pullRequests,
   repos,
   resolveAlertByKey,
+  runs,
   scheduleRuns,
-  sessionRuns,
   subtasks,
   tasks,
   upsertAlert,
@@ -612,13 +612,13 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     probeDir();
     await alert(`sub:${sub.id}:worktree`);
     const [run] = await t.db
-      .insert(sessionRuns)
+      .insert(runs)
       .values({
         taskId: task.id,
-        subtaskId: sub.id,
-        stage: 'execute',
+        segment: 'manual',
+        model: 'opus-5.5',
         routeId: 'solo',
-        whyRoute: '写码阶段首选',
+        startedAt: new Date(Date.now() - HOUR),
         worktreePath: tree.dir,
       })
       .returning();
@@ -626,12 +626,12 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
 
     const first = await runHourlyReconcileJob(deps());
     expect(first.outcome).toBe('partial');
-    expect(first.why).toContain(`acme_widgets/160-login 里还有没结束的会话（execute 阶段`);
+    expect(first.why).toContain(`acme_widgets/160-login 里还有没结束的会话（动手段`);
     expect(first.why).toContain(`会话 ${run.id.slice(0, 8)}`);
     expect(existsSync(tree.dir)).toBe(true);
     expect((await alertByKey(t.db, `sub:${sub.id}:worktree`))?.resolvedAt).toBeNull();
 
-    await sql("update session_runs set ended_at = now(), outcome = 'stopped' where id = $1", [run.id]);
+    await sql("update runs set ended_at = now(), outcome = 'killed' where id = $1", [run.id]);
     expect(await runHourlyReconcileJob(deps())).toMatchObject({ outcome: 'ok' });
     expect(existsSync(tree.dir)).toBe(false);
   });
@@ -644,11 +644,11 @@ describe('工作树：残留的删掉、有东西的交人拍', { timeout: 120_0
     const run = await runHourlyReconcileJob({
       ...wiring,
       openSessions: async () => {
-        throw new Error('session_runs 读超时（故意造的）');
+        throw new Error('runs 读超时（故意造的）');
       },
     });
     expect(run.outcome).toBe('partial');
-    expect(run.why).toContain('里有没有没结束的会话没查成（没碰）：session_runs 读超时');
+    expect(run.why).toContain('里有没有没结束的会话没查成（没碰）：runs 读超时');
     expect(existsSync(tree.dir)).toBe(true);
   });
 
@@ -1454,38 +1454,36 @@ describe('核对接到真库', { timeout: 60_000 }, () => {
       updatedAt: merged,
     });
     const [run] = await t.db
-      .insert(sessionRuns)
+      .insert(runs)
       .values({
         taskId: task.id,
-        stage: 'execute',
+        segment: 'manual',
+        model: 'opus-5.5',
         routeId: 'solo',
-        whyRoute: '写码阶段首选',
         branch: 'fleet/160-abc',
-        queuedAt: new Date(Date.now() - 5 * HOUR),
         startedAt: new Date(Date.now() - 5 * HOUR),
       })
       .returning();
     if (!run) throw new Error('run 没写进去');
     // 更早一轮（被强行终止、会话没收，#247）在另一条分支上：不算进这条 PR 的账
-    await t.db.insert(sessionRuns).values({
+    await t.db.insert(runs).values({
       taskId: task.id,
-      stage: 'execute',
+      segment: 'manual',
+      model: 'opus-5.5',
       routeId: 'solo',
-      whyRoute: '写码阶段首选',
       branch: 'fleet/160-old',
-      queuedAt: new Date(Date.now() - 9 * HOUR),
       startedAt: new Date(Date.now() - 9 * HOUR),
     });
     const first = await runHourlyReconcileJob(deps());
     expect(first).toMatchObject({ outcome: 'ok', found: 1 });
     const row = await alertByKey(t.db, 'reconcile:ledger:acme/widgets#9');
     expect(row).toMatchObject({ level: 'alert', taskId: task.id, resolvedAt: null });
-    expect(row?.body).toContain('单 #160：1 次会话没有结局（execute）');
+    expect(row?.body).toContain('单 #160：1 次会话没有结局（manual）');
     expect(row?.body).toContain('单 #160：合并关单那一步没写完：库里这张单是「在合并」');
     expect(row?.link).toBe('https://github.com/acme/widgets/pull/9');
 
     await sql(
-      `update session_runs set ended_at = now(), outcome = 'ok', input_tokens = 10, output_tokens = 5 where id = $1`,
+      `update runs set ended_at = now(), outcome = 'done', route_outcome = 'ok', input_tokens = 10, output_tokens = 5 where id = $1`,
       [run.id],
     );
     await sql(`update tasks set state = 'done' where id = $1`, [task.id]);

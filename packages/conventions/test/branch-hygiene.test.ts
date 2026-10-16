@@ -5,7 +5,9 @@ import { describe, expect, it } from 'vitest';
 import type { ContentFacts, MainIndex } from '../src/branch-git.ts';
 import {
   ASK_DAYS,
+  archiveTagName,
   BOARD_MARKER,
+  BOARD_RETIRED,
   type BranchCase,
   branchHygiene,
   type HygieneDeps,
@@ -88,8 +90,18 @@ describe('分支体检：判法（一条分支从上往下，命中就停）', (
 
   it('勾的是旧的头（分支后来又动过）：不算数，重新判，理由里写明', () => {
     const v = judge(bcase({ decision: { action: 'delete', sha: sha('b') } }), NOW);
-    expect(v.kind).toBe('ask');
+    // 默认这份内容满 14 天、有产出：旧勾不算，按现在的头存档再删
+    expect(v.kind).toBe('delete');
     expect(v.why).toContain('巡检单上勾过删，那时的头是 bbbbbbb，后来分支又动过，重新判');
+    const mid = judge(
+      bcase({
+        decision: { action: 'delete', sha: sha('b') },
+        content: facts({ headDate: ago(ASK_DAYS) }),
+      }),
+      NOW,
+    );
+    expect(mid.kind).toBe('keep');
+    expect(mid.why).toContain('后来分支又动过，重新判');
   });
 
   it('巡检单上勾了留：留，不再问', () => {
@@ -140,14 +152,20 @@ describe('分支体检：判法（一条分支从上往下，命中就停）', (
     expect(judge(bcase({ content: facts({ output: none }), activity: deleted }), NOW).kind).toBe('delete');
   });
 
-  it(`有产出、满 ${ASK_DAYS} 天：等人定，理由带产出、PR、最后一次提交；不满：留（还在做）`, () => {
-    // 头对不上的关掉 PR（#784 那两类不算）：照旧等人勾
+  it(`有产出、满 ${STALE_DAYS} 天：先存档再删；满 ${ASK_DAYS} 天不满 ${STALE_DAYS}：留着不列给人；不满 ${ASK_DAYS}：还在做`, () => {
     const v = judge(bcase({ closedPrs: [{ number: 4, headSha: sha('b') }] }), NOW);
-    expect(v.kind).toBe('ask');
+    expect(v.kind).toBe('delete');
+    if (v.kind === 'delete') expect(v.archive).toBe(true);
     expect(v.why).toContain('主线上没有的改动 1 个文件（`x.ts`）');
     expect(v.why).toContain('关掉没合的 PR #4');
     expect(v.why).toContain('最后一次提交「做了点事」');
-    expect(judge(bcase({ content: facts({ headDate: ago(ASK_DAYS - 1) }) }), NOW).kind).toBe('keep');
+    expect(v.why).toContain('先存档成 archive/ 标签再删');
+    const mid = judge(bcase({ content: facts({ headDate: ago(ASK_DAYS) }) }), NOW);
+    expect(mid.kind).toBe('keep');
+    expect(mid.why).toContain('不列给人');
+    const fresh = judge(bcase({ content: facts({ headDate: ago(ASK_DAYS - 1) }) }), NOW);
+    expect(fresh.kind).toBe('keep');
+    expect(fresh.why).toContain('还在做');
   });
 
   it('和主线没有共同祖先：等人定（判不了），不当成没产出', () => {
@@ -184,14 +202,22 @@ describe('分支体检：满 14 天机器自己删的两类（#784）', () => {
     expect(v.why).toContain('关掉（没合）的 PR #41 留下的分支');
     expect(v.why).toContain(`就是那个 PR 的头 ${sha('a').slice(0, 7)}`);
     expect(v.why).toContain('删了能在 #41 页面点 Restore branch 恢复');
-    expect(v.why).toContain(`满 ${STALE_DAYS} 天没动静，机器自己删`);
+    expect(v.why).toContain(`满 ${STALE_DAYS} 天没动静，先存档成 archive/ 标签再删`);
+    if (v.kind === 'delete') expect(v.archive).toBe(true);
   });
 
-  it('同样但头变了（PR 之后分支又动过）：不删，照旧等人勾', () => {
+  it('关掉的 PR 头对不上：不按 Restore 那类，满 14 天仍先存档再删；不满 14 天留着不列给人', () => {
     const v = judge(bcase({ closedPrs: closed(41, sha('b')) }), NOW);
-    expect(v.kind).toBe('ask');
+    expect(v.kind).toBe('delete');
     expect(v.why).toContain('关掉没合的 PR #41');
     expect(v.why).not.toContain('Restore branch');
+    expect(v.why).toContain('先存档成 archive/ 标签再删');
+    const mid = judge(
+      bcase({ closedPrs: closed(41, sha('b')), content: facts({ headDate: ago(STALE_DAYS - 1) }) }),
+      NOW,
+    );
+    expect(mid.kind).toBe('keep');
+    expect(mid.why).toContain('不列给人');
   });
 
   it('分支名里的单已关、有产出、满 14 天：删（机器自己），理由写明是哪个单', () => {
@@ -206,16 +232,18 @@ describe('分支体检：满 14 天机器自己删的两类（#784）', () => {
     ).toContain('已关（不做了）');
   });
 
-  it('名字里的单还开着：不删，走原来「等人勾」', () => {
+  it('名字里的单还开着：不因此留下，满 14 天仍先存档再删，理由里写明还开着', () => {
     const v = judge(
       bcase({ branch: { name: 'feat/784-x', sha: sha('a'), protected: false }, linked: issue('open') }),
       NOW,
     );
-    expect(v.kind).toBe('ask');
+    expect(v.kind).toBe('delete');
     expect(v.why).toContain('1 个文件');
+    expect(v.why).toContain('还开着');
+    expect(v.why).not.toContain('那件事已经结束了');
   });
 
-  it('单没查成、查不到这个号、号其实是 PR：都不算「已关」，不删', () => {
+  it('单没查成、查不到这个号、号其实是 PR：都不拿来当「已关」，仍按满 14 天有产出存档再删', () => {
     const name = 'feat/784-x';
     const b = { name, sha: sha('a'), protected: false };
     for (const linked of [
@@ -224,7 +252,8 @@ describe('分支体检：满 14 天机器自己删的两类（#784）', () => {
       issue('closed', { isPr: true }) as LinkedIssue,
     ]) {
       const v = judge(bcase({ branch: b, linked }), NOW);
-      expect(v.kind).toBe('ask');
+      expect(v.kind).toBe('delete');
+      expect(v.why).not.toContain('那件事已经结束了');
       if ('error' in linked) expect(v.why).toContain('没查成（GitHub 回了 502）');
     }
   });
@@ -254,7 +283,7 @@ describe('分支体检：满 14 天机器自己删的两类（#784）', () => {
     const fresh = { closedPrs: closed(41, sha('a')), content: facts({ headDate: ago(STALE_DAYS - 1) }) };
     const v = judge(bcase(fresh), NOW);
     expect(v.kind).toBe('keep');
-    expect(v.why).toContain(`满 ${STALE_DAYS} 天机器自己删，不列给人`);
+    expect(v.why).toContain(`满 ${STALE_DAYS} 天先存档成 archive/ 标签再删，不列给人`);
     // 刚动过的（不满 3 天）说「还在做」，不说「到天数自己删」
     const doing = judge(bcase({ ...fresh, content: facts({ headDate: ago(ASK_DAYS - 1) }) }), NOW);
     expect(doing.kind).toBe('keep');
@@ -372,6 +401,8 @@ interface World {
   content: Record<string, ContentFacts>;
   /** 列开着的 PR 时还没有、按分支查时已经开了的 PR（两次读之间刚开的）。 */
   openListMisses?: number[];
+  /** 回读标签时强制返回的提交；键在、值是 undefined = 读回来没有这个标签。没写这个键就回刚建成时指向的。 */
+  tagReads?: Record<string, string | undefined>;
 }
 
 type FailKey =
@@ -383,6 +414,9 @@ type FailKey =
   | 'activity'
   | 'branchHead'
   | 'deleteBranch'
+  | 'createTag'
+  | 'tagSha'
+  | 'closeIssue'
   | 'createIssue'
   | 'updateIssueBody'
   | 'comment'
@@ -390,7 +424,13 @@ type FailKey =
 
 function run(
   w: World,
-  opts: { delete?: boolean; board?: boolean; fail?: Partial<Record<FailKey, Error>> } = {},
+  opts: {
+    delete?: boolean;
+    board?: boolean;
+    fail?: Partial<Record<FailKey, Error>>;
+    /** updateIssueBody 先成功这么多次，之后才抛 fail.updateIssueBody。不写就是一上来就抛。 */
+    updateOk?: number;
+  } = {},
 ) {
   const calls = {
     deleted: [] as string[],
@@ -398,7 +438,11 @@ function run(
     updated: [] as { n: number; body: string }[],
     comments: [] as { n: number; body: string }[],
     pullsForHead: [] as string[],
+    ops: [] as { op: 'createTag' | 'tagSha' | 'deleteBranch'; name: string; sha?: string }[],
+    tags: new Map<string, string>(),
+    closed: [] as { n: number; reason: string; body: string }[],
   };
+  let updates = 0;
   const fail = opts.fail ?? {};
   const boom = (k: FailKey) => {
     const e = fail[k];
@@ -439,7 +483,23 @@ function run(
     async deleteBranch(b) {
       boom('deleteBranch');
       calls.deleted.push(b);
+      calls.ops.push({ op: 'deleteBranch', name: b });
       return true;
+    },
+    async createLightweightTag(name, sha) {
+      boom('createTag');
+      calls.ops.push({ op: 'createTag', name, sha });
+      calls.tags.set(name, sha);
+    },
+    async tagSha(name) {
+      boom('tagSha');
+      calls.ops.push({ op: 'tagSha', name });
+      if (w.tagReads && Object.hasOwn(w.tagReads, name)) return w.tagReads[name];
+      return calls.tags.get(name);
+    },
+    async closeIssue(n, reason, body) {
+      boom('closeIssue');
+      calls.closed.push({ n, reason, body });
     },
     async createIssue(title, body, labels) {
       boom('createIssue');
@@ -447,7 +507,8 @@ function run(
       return 900;
     },
     async updateIssueBody(n, body) {
-      boom('updateIssueBody');
+      updates++;
+      if (fail.updateIssueBody && updates > (opts.updateOk ?? 0)) throw fail.updateIssueBody;
       calls.updated.push({ n, body });
     },
     async comments() {
@@ -592,27 +653,40 @@ function world(): World {
 const kinds = (r: Awaited<ReturnType<typeof run>['promise']>) =>
   Object.fromEntries(r.reports.map((x) => [x.name, x.verdict.kind]));
 
+/** world() 里判删的：有产出满 14 天的要先建标签，没产出的和已合并的直接删。 */
+const ARCHIVED = ['closed-pr', 'closed-pr-moved', 'docs/311-guide', 'fleet/292-f3f3472d3', 'output-old'];
+const ALL_DELETED = [...ARCHIVED, 'empty-old', 'merged'].sort();
+
+/** 和主线没有共同祖先的一条：仍是等人定，用来测「不再开新的巡检单」和旧单上的提醒。 */
+function worldWithAsk(): World {
+  const w = world();
+  w.branches.push({ name: 'no-ancestor', sha: sha('b'), protected: false });
+  w.content['no-ancestor'] = facts({ output: { kind: 'unrelated' } });
+  return w;
+}
+
 describe('分支体检：整轮', () => {
   it('每一档各判进来；不带 --delete 一条不删、不带 --board 不碰单子', async () => {
     const { promise, calls } = run(world());
     const r = await promise;
     expect(kinds(r)).toEqual({
       'closed-pr': 'delete',
-      'closed-pr-moved': 'ask',
+      'closed-pr-moved': 'delete',
       'docs/311-guide': 'delete',
       'empty-new': 'keep',
       'empty-old': 'delete',
-      'fleet/292-f3f3472d3': 'ask',
+      'fleet/292-f3f3472d3': 'delete',
       'feat/311-x': 'keep',
       main: 'keep',
       mentioned: 'keep',
       merged: 'delete',
       'open-pr': 'keep',
       'output-new': 'keep',
-      'output-old': 'ask',
+      'output-old': 'delete',
     });
     expect(r.notQueried).toEqual([]);
     expect(calls.deleted).toEqual([]);
+    expect(calls.ops.filter((o) => o.op === 'createTag')).toEqual([]);
     expect(calls.created).toEqual([]);
     const fleet = r.reports.find((x) => x.name === 'fleet/292-f3f3472d3');
     expect(fleet?.verdict.why).toContain('名字里的 #292 是单「外部看门狗」，还开着');
@@ -626,11 +700,24 @@ describe('分支体检：整轮', () => {
     );
   });
 
-  it('--delete：只删判了删的；删之前再读一次头', async () => {
-    const { promise, calls } = run(world(), { delete: true });
+  it('--delete：只删判了删的；有产出的先建标签、回读再删；删之前再读一次头', async () => {
+    const w = world();
+    const { promise, calls } = run(w, { delete: true });
     const r = await promise;
-    expect(calls.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
-    expect(r.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
+    expect(calls.deleted.sort()).toEqual(ALL_DELETED);
+    expect(r.deleted.sort()).toEqual(ALL_DELETED);
+    for (const name of ARCHIVED) {
+      const head = w.branches.find((b) => b.name === name)?.sha ?? '';
+      const tag = archiveTagName(name, head);
+      const ops = calls.ops.filter((o) => o.name === tag || (o.op === 'deleteBranch' && o.name === name));
+      expect(ops.map((o) => o.op)).toEqual(['createTag', 'tagSha', 'deleteBranch']);
+      expect(ops[0]).toMatchObject({ op: 'createTag', sha: head });
+    }
+    expect(archiveTagName('fleet/292-f3f3472d3', sha('8'))).toBe(
+      `archive/fleet-->292-f3f3472d3-${sha('8').slice(0, 7)}`,
+    );
+    expect(calls.ops.some((o) => o.op === 'createTag' && o.name.includes('empty-old'))).toBe(false);
+    expect(calls.ops.some((o) => o.op === 'createTag' && o.name.includes('merged'))).toBe(false);
   });
 
   it('判完到删之间头变了：不删，下一轮重判；删的时候已经不在了：记「已不在」', async () => {
@@ -638,10 +725,15 @@ describe('分支体检：整轮', () => {
     w.heads = { merged: sha('9'), 'empty-old': undefined };
     const { promise, calls } = run(w, { delete: true });
     const r = await promise;
-    // closed-pr、docs/311-guide 这一轮照删（头没变）
-    expect(calls.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide']);
+    // 头没变的照删（有产出的先建标签）；头变了的不建标签
+    expect(calls.deleted.sort()).toEqual(
+      ['closed-pr', 'closed-pr-moved', 'docs/311-guide', 'fleet/292-f3f3472d3', 'output-old'].sort(),
+    );
     expect(r.skipped).toEqual([{ name: 'merged', why: expect.stringContaining('没删，下一轮重判') }]);
     expect(r.gone).toEqual(['empty-old']);
+    expect(calls.ops.some((o) => o.op === 'createTag' && o.name === archiveTagName('merged', sha('1')))).toBe(
+      false,
+    );
   });
 
   it('判完到删之间头变了：#784 那两类也不删（和别的档同一个严格度）', async () => {
@@ -649,20 +741,27 @@ describe('分支体检：整轮', () => {
     w.heads = { 'closed-pr': sha('9'), 'docs/311-guide': sha('9') };
     const { promise, calls } = run(w, { delete: true });
     const r = await promise;
-    expect(calls.deleted.sort()).toEqual(['empty-old', 'merged']);
+    expect(calls.deleted.sort()).toEqual([
+      'closed-pr-moved',
+      'empty-old',
+      'fleet/292-f3f3472d3',
+      'merged',
+      'output-old',
+    ]);
     expect(r.skipped.map((s) => s.name).sort()).toEqual(['closed-pr', 'docs/311-guide']);
+    expect(
+      calls.ops.some((o) => o.op === 'createTag' && o.name === archiveTagName('closed-pr', sha('c'))),
+    ).toBe(false);
+    expect(
+      calls.ops.some((o) => o.op === 'createTag' && o.name === archiveTagName('docs/311-guide', sha('f'))),
+    ).toBe(false);
   });
 
   it('一条删失败：记下来、接着删别的，不当成删了', async () => {
     const { promise } = run(world(), { delete: true, fail: { deleteBranch: new Error('GitHub 回了 500') } });
     const r = await promise;
     expect(r.deleted).toEqual([]);
-    expect(r.failed.map((f) => f.name).sort()).toEqual([
-      'closed-pr',
-      'docs/311-guide',
-      'empty-old',
-      'merged',
-    ]);
+    expect(r.failed.map((f) => f.name).sort()).toEqual(ALL_DELETED);
   });
 
   for (const key of ['defaultBranch', 'branches', 'openPulls', 'openThreads'] as const) {
@@ -755,111 +854,139 @@ describe('分支体检：整轮', () => {
     });
   });
 
-  it('--board，还没有巡检单：开一张（贴杂项），正文里有等人定的勾选框；新列的另留一条言（带体检记号）', async () => {
-    const { promise, calls } = run(world(), { board: true });
-    const r = await promise;
-    expect(calls.created).toHaveLength(1);
-    const made = calls.created[0];
-    expect(made?.labels).toEqual(['杂项']);
-    expect(made?.body).toContain(BOARD_MARKER);
-    // 说给人看的天数就是判法用的那两个（改了天数正文跟着变）
-    expect(made?.body).toContain(`满 ${ASK_DAYS} 天没动静`);
-    expect(made?.body).toContain(`机器满 ${STALE_DAYS} 天自己删`);
-    expect([...parseBoard(made?.body ?? '').listed].sort()).toEqual([
-      'closed-pr-moved',
-      'fleet/292-f3f3472d3',
-      'output-old',
-    ]);
-    expect(r.board).toEqual({
-      number: 900,
-      created: true,
-      newAsks: ['closed-pr-moved', 'fleet/292-f3f3472d3', 'output-old'],
-    });
-    expect(calls.comments).toHaveLength(1);
-    expect(calls.comments[0]?.body).toContain(`<!-- ${MARK} -->`);
-  });
+  it('没有要等人定的：不开新巡检单；已有的写明不再需要人勾并关成 not planned。不满 14 天的留着、不进勾选', async () => {
+    const none = run(world(), { board: true });
+    const r0 = await none.promise;
+    expect(none.calls.created).toEqual([]);
+    expect(none.calls.closed).toEqual([]);
+    expect(r0.board).toBeUndefined();
 
-  it('巡检单上勾了删（就是现在的头）：下一轮照删；勾了留：留着、不再列进等你定；巡检单本身提到的不算提到', async () => {
     const w = world();
-    const first = run(w, { board: true });
-    await first.promise;
-    // 留言留成后正文又写了一遍（带「提醒过」记号）：下一轮读到的是最后这份
-    const body = first.calls.updated.at(-1)?.body ?? first.calls.created[0]?.body ?? '';
-    const ticked = body
-      .split('\n')
-      .map((l) =>
-        l.includes(`${MARK} delete output-old `) ||
-        l.includes(`${MARK} keep ${encodeURIComponent('fleet/292-f3f3472d3')} `)
-          ? l.replace('[ ]', '[x]')
-          : l,
-      )
-      .join('\n');
-    w.threads.push(thread(900, ticked));
-    const second = run(w, { delete: true, board: true });
-    const r = await second.promise;
-    expect(kinds(r)['output-old']).toBe('delete');
-    expect(r.reports.find((x) => x.name === 'output-old')?.verdict).toMatchObject({ byFounder: true });
-    expect(kinds(r)['fleet/292-f3f3472d3']).toBe('keep');
-    expect(second.calls.deleted.sort()).toEqual([
-      'closed-pr',
-      'docs/311-guide',
-      'empty-old',
-      'merged',
-      'output-old',
-    ]);
-    expect(second.calls.created).toEqual([]);
-    const updated = second.calls.updated[0]?.body ?? '';
-    expect(parseBoard(updated).decisions.get('fleet/292-f3f3472d3')).toEqual({
-      action: 'keep',
-      sha: sha('8'),
-    });
-    expect(updated).toContain('## 这一轮删掉的');
-    // #784 那两类不再进「等你定」（只出现在「这一轮删掉的」里）；剩下的（头变过的关掉 PR）照旧列着等人勾
-    expect(updated).toContain('## 等你定（1 条）');
-    expect(updated).toContain('`closed-pr-moved`（头');
-    expect(updated).not.toContain('[ ] 删 <!-- fleet:branch-hygiene delete docs/311-guide');
-    // 没有新列的：不再留言
-    expect(second.calls.comments).toEqual([]);
+    w.content['output-old'] = facts({ headDate: ago(STALE_DAYS - 1) });
+    w.threads.push(thread(784, `${BOARD_MARKER}\n旧的勾选说明`));
+    const { promise, calls } = run(w, { delete: true, board: true });
+    const r = await promise;
+    expect(kinds(r)['output-old']).toBe('keep');
+    expect(r.reports.find((x) => x.name === 'output-old')?.verdict.why).toContain('不列给人');
+    expect(calls.deleted).not.toContain('output-old');
+    expect(calls.ops.some((o) => o.name === archiveTagName('output-old', sha('6')))).toBe(false);
+    expect(calls.created).toEqual([]);
+    expect(calls.closed).toEqual([expect.objectContaining({ n: 784, reason: 'not_planned' })]);
+    const body = calls.closed[0]?.body ?? '';
+    expect(body).toContain(BOARD_RETIRED);
+    expect(body).toContain('不再需要人勾：有产出的分支满 14 天先存档成 archive/ 标签再删');
+    expect(parseBoard(body).listed.has('output-old')).toBe(false);
+    expect(body).not.toContain('## 等你定');
+    expect(r.board).toEqual({ number: 784, created: false, newAsks: [], closed: true });
   });
 
-  it('巡检单没写成：记没查成（红），删照删', async () => {
-    const { promise } = run(world(), {
+  it('和主线没有共同祖先的仍是等人定，但不再开新的巡检单', async () => {
+    const { promise, calls } = run(worldWithAsk(), { board: true });
+    const r = await promise;
+    expect(kinds(r)['no-ancestor']).toBe('ask');
+    expect(calls.created).toEqual([]);
+    expect(r.board).toBeUndefined();
+    expect(r.notes).toEqual([expect.stringContaining('no-ancestor')]);
+    expect(r.notes).toEqual([expect.stringContaining('不再开新的巡检单')]);
+  });
+
+  it('建标签失败不删、判没查成；回读指向别的提交也不删。别的分支照旧', async () => {
+    const failed = run(world(), { delete: true, fail: { createTag: new Error('GitHub 回了 403') } });
+    const r1 = await failed.promise;
+    expect(failed.calls.deleted.sort()).toEqual(['empty-old', 'merged']);
+    expect(kinds(r1)['output-old']).toBe('unknown');
+    expect(r1.notQueried.some((x) => x.startsWith('output-old：') && x.includes('没建成'))).toBe(true);
+    expect(failed.calls.ops.some((o) => o.op === 'deleteBranch' && o.name === 'output-old')).toBe(false);
+
+    const w = world();
+    const tag = archiveTagName('output-old', sha('6'));
+    w.tagReads = { [tag]: sha('z') };
+    const mismatch = run(w, { delete: true });
+    const r2 = await mismatch.promise;
+    expect(kinds(r2)['output-old']).toBe('unknown');
+    expect(mismatch.calls.deleted).not.toContain('output-old');
+    expect(
+      mismatch.calls.ops.filter((o) => o.name === tag || o.name === 'output-old').map((o) => o.op),
+    ).toEqual(['createTag', 'tagSha']);
+    expect(r2.notQueried.some((x) => x.startsWith('output-old：') && x.includes('回读指向'))).toBe(true);
+    expect(mismatch.calls.deleted).toContain('closed-pr');
+  });
+
+  it('勾了留，不再问：不建标签不删，单子留着开；勾了删的照删、不建标签。巡检单本身提到的不算提到', async () => {
+    const w = world();
+    w.threads.push(
+      thread(
+        784,
+        [
+          BOARD_MARKER,
+          REMIND_TRACKING,
+          `  - [x] 留，不再问 <!-- ${MARK} keep ${encodeURIComponent('output-old')} ${sha('6')} -->`,
+          `  - [x] 删 <!-- ${MARK} delete ${encodeURIComponent('fleet/292-f3f3472d3')} ${sha('8')} -->`,
+          '正文里写了 closed-pr 也不算提到（这张就是巡检单）',
+        ].join('\n'),
+      ),
+    );
+    const { promise, calls } = run(w, { delete: true, board: true });
+    const r = await promise;
+    expect(kinds(r)['output-old']).toBe('keep');
+    expect(r.reports.find((x) => x.name === 'output-old')?.verdict.why).toContain('勾了留');
+    expect(calls.deleted).not.toContain('output-old');
+    expect(calls.ops.some((o) => o.name === archiveTagName('output-old', sha('6')))).toBe(false);
+    expect(kinds(r)['fleet/292-f3f3472d3']).toBe('delete');
+    expect(r.reports.find((x) => x.name === 'fleet/292-f3f3472d3')?.verdict).toMatchObject({
+      byFounder: true,
+    });
+    expect(calls.deleted).toContain('fleet/292-f3f3472d3');
+    expect(calls.ops.some((o) => o.name === archiveTagName('fleet/292-f3f3472d3', sha('8')))).toBe(false);
+    expect(kinds(r)['closed-pr']).toBe('delete');
+    expect(calls.closed).toEqual([]);
+    expect(calls.created).toEqual([]);
+    const updated = calls.updated.at(-1)?.body ?? '';
+    expect(updated).toContain(BOARD_RETIRED);
+    expect(parseBoard(updated).decisions.get('output-old')).toEqual({ action: 'keep', sha: sha('6') });
+    expect(updated).not.toContain('## 等你定');
+    expect(calls.comments).toEqual([]);
+  });
+
+  it('巡检单没关成：记没查成（红），删照删', async () => {
+    const w = world();
+    w.threads.push(thread(784, `${BOARD_MARKER}\n旧`));
+    const { promise, calls } = run(w, {
       delete: true,
       board: true,
-      fail: { createIssue: new Error('GitHub 回了 403') },
+      fail: { closeIssue: new Error('GitHub 回了 403') },
     });
     const r = await promise;
-    expect(r.notQueried).toEqual([expect.stringContaining('巡检单没写成（GitHub 回了 403）')]);
-    expect(r.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
+    expect(r.notQueried).toEqual([expect.stringContaining('巡检单没关成（GitHub 回了 403）')]);
+    expect(r.deleted.sort()).toEqual(ALL_DELETED);
+    expect(calls.created).toEqual([]);
   });
 
-  it('【故意造出的失败】#805 正文写成了、提醒留言失败：报没查成、不记「提醒过」；下一轮留言成功，留言里有这几条分支，再下一轮不重复留', async () => {
-    const w = world();
+  it('【故意造出的失败】#805 正文写成了、提醒留言失败：报没查成、不记「提醒过」；下一轮留言成功，再下一轮不重复留', async () => {
+    const w = worldWithAsk();
+    w.threads.push(thread(784, `${BOARD_MARKER}\n${REMIND_TRACKING}\n`));
     const first = run(w, { board: true, fail: { comment: new Error('GitHub 回了 502') } });
     const r1 = await first.promise;
     expect(r1.notQueried).toEqual([expect.stringContaining('提醒留言没留成（GitHub 回了 502）')]);
     expect(first.calls.comments).toEqual([]);
-    const body1 = first.calls.created[0]?.body ?? '';
-    // 正文已经列了这几条（旧办法下一轮就会当成提醒过），但没有「提醒过」记号
-    expect(parseBoard(body1).listed.size).toBe(3);
+    expect(first.calls.created).toEqual([]);
+    const body1 = first.calls.updated.at(-1)?.body ?? '';
+    expect(parseBoard(body1).listed.has('no-ancestor')).toBe(true);
     expect(parseBoard(body1).reminded.size).toBe(0);
-    expect(first.calls.updated).toEqual([]);
 
-    w.threads.push(thread(900, body1));
+    w.threads = w.threads.filter((t) => t.number !== 784);
+    w.threads.push(thread(784, body1));
     const second = run(w, { board: true });
     const r2 = await second.promise;
     expect(r2.notQueried).toEqual([]);
-    expect(r2.board?.newAsks).toEqual(['closed-pr-moved', 'fleet/292-f3f3472d3', 'output-old']);
+    expect(r2.board?.newAsks).toEqual(['no-ancestor']);
     expect(second.calls.comments).toHaveLength(1);
-    for (const name of ['closed-pr-moved', 'fleet/292-f3f3472d3', 'output-old']) {
-      expect(second.calls.comments[0]?.body).toContain(`\`${name}\``);
-    }
-    // 留言成了才记上：最后一份正文里三条都带「提醒过」记号
+    expect(second.calls.comments[0]?.body).toContain('`no-ancestor`');
     const body2 = second.calls.updated.at(-1)?.body ?? '';
-    expect(parseBoard(body2).reminded.size).toBe(3);
+    expect([...parseBoard(body2).reminded]).toEqual([remindKey('no-ancestor', sha('b'))]);
 
-    const w3 = world();
-    w3.threads.push(thread(900, body2));
+    const w3 = worldWithAsk();
+    w3.threads.push(thread(784, body2));
     const third = run(w3, { board: true });
     const r3 = await third.promise;
     expect(r3.board?.newAsks).toEqual([]);
@@ -867,19 +994,30 @@ describe('分支体检：整轮', () => {
   });
 
   it('【故意造出的失败】#805 留言发了、「提醒过」记号没写上：报出来，下一轮会再留一次（多留不漏留）', async () => {
-    const w = world();
+    const prepWorld = worldWithAsk();
+    prepWorld.threads.push(thread(784, `${BOARD_MARKER}\n${REMIND_TRACKING}\n`));
+    const prep = run(prepWorld, { board: true, fail: { comment: new Error('先拿到没记号的正文') } });
+    await prep.promise;
+    const bodyWithout = prep.calls.updated.at(-1)?.body ?? '';
+    expect(parseBoard(bodyWithout).reminded.size).toBe(0);
+
+    const w = worldWithAsk();
+    w.threads.push(thread(784, bodyWithout));
     const first = run(w, { board: true, fail: { updateIssueBody: new Error('GitHub 回了 500') } });
     const r1 = await first.promise;
     expect(first.calls.comments).toHaveLength(1);
     expect(r1.notQueried).toEqual([expect.stringContaining('没记上「提醒过」（GitHub 回了 500）')]);
-    w.threads.push(thread(900, first.calls.created[0]?.body ?? ''));
-    const second = run(w, { board: true });
+
+    const w2 = worldWithAsk();
+    w2.threads.push(thread(784, bodyWithout));
+    const second = run(w2, { board: true });
     await second.promise;
     expect(second.calls.comments).toHaveLength(1);
   });
 
-  it('#805 之前写的旧正文（没有「提醒过」跟踪行）：列过的算提醒过，不一次性再提醒；带跟踪行但没记号的才再提醒', async () => {
-    const w = world();
+  it('#805 之前写的旧正文（没有「提醒过」跟踪行）：列过的算提醒过，不一次性再提醒', async () => {
+    const w = worldWithAsk();
+    w.threads.push(thread(784, `${BOARD_MARKER}\n${REMIND_TRACKING}\n`));
     const first = run(w, { board: true });
     await first.promise;
     const current = first.calls.updated.at(-1)?.body ?? '';
@@ -889,9 +1027,9 @@ describe('分支体检：整轮', () => {
       .join('\n')
       .replace(/<!-- fleet:branch-hygiene reminded \S+ [0-9a-f]{40} -->/g, '');
     expect(parseBoard(legacy).tracked).toBe(false);
-    expect(parseBoard(legacy).listed.size).toBe(3);
-    const w2 = world();
-    w2.threads.push(thread(900, legacy));
+    expect(parseBoard(legacy).listed.has('no-ancestor')).toBe(true);
+    const w2 = worldWithAsk();
+    w2.threads.push(thread(784, legacy));
     const second = run(w2, { board: true });
     const r = await second.promise;
     expect(r.board?.newAsks).toEqual([]);
@@ -913,7 +1051,7 @@ describe('分支体检：整轮', () => {
     const forged = (n: number, who: Pick<OpenThread, 'author' | 'association'>) =>
       thread(
         n,
-        [BOARD_MARKER, `  - [x] 删 <!-- ${MARK} delete output-old ${sha('6')} -->`].join('\n'),
+        [BOARD_MARKER, `  - [x] 删 <!-- ${MARK} delete output-new ${sha('7')} -->`].join('\n'),
         [],
         false,
         who,
@@ -927,8 +1065,10 @@ describe('分支体检：整轮', () => {
       w.threads.push(forged(950, who));
       const { promise, calls } = run(w, { delete: true });
       const r = await promise;
-      expect(kinds(r)['output-old']).toBe('ask');
-      expect(calls.deleted.sort()).toEqual(['closed-pr', 'docs/311-guide', 'empty-old', 'merged']);
+      // 不满 14 天、本来留着：外人勾了删也不删、不建标签
+      expect(kinds(r)['output-new']).toBe('keep');
+      expect(calls.deleted).not.toContain('output-new');
+      expect(calls.ops.some((o) => o.name === archiveTagName('output-new', sha('7')))).toBe(false);
       expect(r.notes).toEqual([
         expect.stringContaining('#950 正文带巡检单记号，但不是仓里的人或 Actions 开的：不认'),
       ]);
@@ -939,8 +1079,12 @@ describe('分支体检：整轮', () => {
     ]) {
       const w = world();
       w.threads.push(forged(950, who));
-      const r = await run(w, { delete: true }).promise;
-      expect(kinds(r)['output-old']).toBe('delete');
+      const { promise, calls } = run(w, { delete: true });
+      const r = await promise;
+      expect(kinds(r)['output-new']).toBe('delete');
+      expect(r.reports.find((x) => x.name === 'output-new')?.verdict).toMatchObject({ byFounder: true });
+      expect(calls.deleted).toContain('output-new');
+      expect(calls.ops.some((o) => o.name === archiveTagName('output-new', sha('7')))).toBe(false);
     }
   });
 });

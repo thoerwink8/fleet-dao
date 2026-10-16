@@ -98,6 +98,12 @@ export function routeLookup(
   };
 }
 
+/**
+ * 老流程（Fusion）的会话：09-29 起没人写的会话表、进度表在 #2357 删了，库里没有老流程会话可读（三段的流水走 segmentRuns）。
+ * 看板、任务详情、任务列表里老流程的那几块照旧收这个入参，恒为空。
+ */
+export const NO_OLD_FLOW_RUNS: SessionRun[] = Object.freeze([]) as unknown as SessionRun[];
+
 export function progressOf(plan: RunPlan | undefined): Progress | undefined {
   if (!plan || plan.steps.length === 0) return undefined;
   return { done: plan.steps.filter((s) => s.state === 'done').length, total: plan.steps.length };

@@ -6,7 +6,7 @@
 // 都一样；还剩没推的提交、没提交的改动、stash、名单以外的文件就不删，报「要人拍」（删数据要人拍），列出前几个、写明
 // 一共几个。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
 // 改之前必须知道：「在用」只认任务工作流（task:，含重做后的 :rN）和旧子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
-// 里一起认。认漏了还有一道：树里有没结束的会话（session_runs）就不碰。
+// 里一起认。认漏了还有一道：树里有没结束的会话（runs.worktree_path）就不碰。
 // 顺带撤提醒：子任务报的「工作树没收掉」（sub:<子任务>:worktree）、Fusion 报的（req:<仓>#<号>:worktree，按这张需求的
 // Fusion 树认）树不在了、被删了、改成要人拍了就撤；
 // 这里报的「要人拍」（worktree:<仓>/<树>）树没了、清干净删了、又被在跑的任务用上了就撤。
@@ -14,7 +14,13 @@
 
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { AlertRow, IssueWorkFacts, OpenSessionTree, SubtaskTreeRef } from '@fleet-dao/db';
-import type { DecisionOption, SizeRead, StageKind, WorktreeRow } from '@fleet-dao/shared';
+import {
+  type DecisionOption,
+  SEGMENT_LABELS,
+  type SizeRead,
+  type StageKind,
+  type WorktreeRow,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { subtaskBranch } from '../contract.ts';
@@ -84,7 +90,7 @@ export interface WorktreeSweepDeps {
   issue(ref: { owner: string; name: string; issueNumber: number }): Promise<IssueWorkFacts | null>;
   prHeads(ref: { owner: string; name: string; branch: string }): Promise<string[]>;
   subtaskTrees(ids: string[]): Promise<SubtaskTreeRef[]>;
-  /** 还没结束的会话起在哪些目录里（session_runs，@fleet-dao/db 的 openSessionTrees）。 */
+  /** 还没结束的会话起在哪些目录里（runs.worktree_path，@fleet-dao/db 的 openSessionTrees）。 */
   openSessions(): Promise<OpenSessionTree[]>;
   workflows: Pick<WorkflowReader, 'state'>;
   alerts: AlertStore;
@@ -93,7 +99,7 @@ export interface WorktreeSweepDeps {
   // —— 清单（#1993）：下面几样不给，清单里对应那一项写「这一轮没量」，删不删的判据不受影响 ——
   /** 以会话用户的身份量这棵树多大（字节，du）。抛 = 没量成。 */
   size?(dir: string, user: SessionUser): Promise<number>;
-  /** 每个目录里最近一次会话的时刻（收场的时刻，没收场是起的时刻）：session_runs 按 worktree_path 取最新。 */
+  /** 每个目录里最近一次会话的时刻（收场的时刻，没收场是起的时刻）：runs 按 worktree_path 取最新。 */
   lastSessions?(): Promise<Map<string, Date>>;
   /** 受管的仓（没有树的仓也列一行）。 */
   repos?(): Promise<{ owner: string; name: string }[]>;
@@ -374,7 +380,7 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
   if (live) {
     return {
       kind: 'session',
-      why: `${rel} 里还有没结束的会话（${live.stage} 阶段，北京时间 ${stamp(live.queuedAt)} 起，会话 ${live.runId.slice(0, 8)}）：需求和子任务的工作流都不在跑了，会话可能还活着（没收的会话见 #247），没碰`,
+      why: `${rel} 里还有没结束的会话（${SEGMENT_LABELS[live.stage]}段，北京时间 ${stamp(live.queuedAt)} 起，会话 ${live.runId.slice(0, 8)}）：需求和子任务的工作流都不在跑了，会话可能还活着（没收的会话见 #247），没碰`,
     };
   }
   if (s.inspected >= (deps.inspectMax ?? INSPECT_MAX)) {

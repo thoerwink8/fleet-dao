@@ -223,7 +223,7 @@ export const TaskDetailResponse = z.object({
   task: TaskSchema,
   repo: RepoSchema,
   subtasks: z.array(BoardSubtaskSchema),
-  /** 老流程的会话（session_runs）。 */
+  /** 老流程的会话（老会话表 09-29 起没人写、#2357 已删，现在恒为空）。 */
   runs: z.array(RunSchema),
   /** 三段（runs 表）的流水，按起跑先后：task_id 对上的，加上 task_id 没记、按单号兜底的（matchedBy 标明）。 */
   segmentRuns: z.array(SegmentRunSchema),

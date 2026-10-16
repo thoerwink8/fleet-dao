@@ -69,7 +69,7 @@ type OptionalFact =
   | 'costUsd';
 
 /**
- * 一次会话的用量事实（session_runs 一行，和 SessionRun 同名同义）：读不到的字段不给，给 undefined 也一样——
+ * 一次会话的用量事实（老流程一次会话，和 SessionRun 同名同义）：读不到的字段不给，给 undefined 也一样——
  * 网页拿接口返回的会话（zod 推出来的，可选字段带 undefined）直接算，不另抄一份。
  */
 export type RunUsageFacts = Pick<SessionRun, 'stage' | 'queuedAt'> & {
@@ -190,7 +190,7 @@ export interface TaskUsage {
   total: UsageTotals;
   /** 按第一次出现的先后：会话按排队时刻、三段按起跑时刻排好传进来，就是先用上的在前。 */
   byModel: ModelUsageTotals[];
-  /** 老流程（session_runs）的会话按阶段。 */
+  /** 老流程的会话按阶段。 */
   byStage: StageUsageTotals[];
   /** 三段（runs）按段：对题、动手、验收的固定先后，段名认不出的一组排最后。只列有过一笔的段。 */
   bySegment: SegmentUsageTotals[];
@@ -252,7 +252,7 @@ function shareOf(cost: CostByBilling, billing: string | undefined): CostShare {
   return cost.unknown;
 }
 
-/** 排队 = (开工 ?? 结束) − 排队，干活 = 结束 − 开工（没开工就是 0）：和 session_runs 的两个生成列一样。 */
+/** 排队 = (开工 ?? 结束) − 排队，干活 = 结束 − 开工（没开工就是 0）：老流程会话表（已删）的两个生成列也是这样算。 */
 function durations(run: RunUsageFacts, endedAt: string): { queueMs: number; runMs: number } | undefined {
   const queued = Date.parse(run.queuedAt);
   const ended = Date.parse(endedAt);
