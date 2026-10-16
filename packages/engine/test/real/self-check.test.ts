@@ -1,10 +1,20 @@
 // 引擎自测（selfCheck，决定 0093）：以树主人的身份跑仓的测试命令和 tsc；精炼输出；没跑成回 skipped 不抛。
+// test:changed 退出 3（要全跑）时不把测试推给 CI：在整机锁下改跑受影响的包，超时记没过。
 
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { describe, expect, it } from 'vitest';
 import type { PortContext } from '../../src/ports.ts';
 import type { UserCommand, UserCommandResult } from '../../src/real/exec.ts';
-import { createSelfCheck, digestOutput } from '../../src/real/self-check.ts';
+import {
+  createAffectedLock,
+  createSelfCheck,
+  digestOutput,
+  SELF_CHECK_TEST_MS,
+  type SelfCheckFullLock,
+} from '../../src/real/self-check.ts';
 import { SELF_CHECK_DIGEST_MAX, type SelfCheckInput } from '../../src/task-contract.ts';
 import { freshRepo } from '../helpers.ts';
 
@@ -27,27 +37,40 @@ function input(testCommand = 'pnpm test:changed'): SelfCheckInput {
   };
 }
 
-/** 按脚本里的那一段（node_modules 探测 / tsc 探测 / 测试 / tsc）回结果，记下每条命令。 */
+const openLock: SelfCheckFullLock = { acquire: async () => () => {} };
+
+/** 按脚本里的那一段（node_modules 探测 / tsc 探测 / 测试 / 受影响包 / tsc）回结果，记下每条命令。 */
 function rig(over: {
   deps?: string;
   hasTsc?: string;
   test?: () => UserCommandResult;
+  /** test:changed --affected。不给就跟 test 同一条。 */
+  affected?: () => UserCommandResult;
   tsc?: () => UserCommandResult;
   owner?: SessionUser | null;
+  lock?: SelfCheckFullLock;
+  testMs?: number;
 }) {
   const commands: UserCommand[] = [];
   const check = createSelfCheck({
     trees: { ownerOf: async () => (over.owner === undefined ? USER : over.owner) },
+    ...(over.testMs === undefined ? {} : { testMs: over.testMs }),
+    fullLock: over.lock ?? openLock,
     exec: async (command) => {
       commands.push(command);
       const script = command.argv[2] ?? '';
       if (script.includes('test -d node_modules')) return result(0, over.deps ?? 'yes\n');
       if (script.includes('test -f tsconfig.json')) return result(0, over.hasTsc ?? 'yes\n');
       if (script.includes('tsc -b')) return (over.tsc ?? (() => result(0, '')))();
+      if (script.includes('--affected')) return (over.affected ?? over.test ?? (() => result(0, '')))();
       return (over.test ?? (() => result(0, 'Tests  3 passed (3)')))();
     },
   });
   return { check, commands };
+}
+
+function scriptOf(command: UserCommand): string {
+  return command.argv[2] ?? '';
 }
 
 describe('selfCheck', () => {
@@ -88,13 +111,116 @@ describe('selfCheck', () => {
     expect(got.steps[1]?.digest).toContain('TS2322');
   });
 
-  it('test:changed 退出 3（要全跑交给 CI）、退出 2（没算成）：记没跑，不算红', async () => {
-    for (const code of [2, 3]) {
-      const { check } = rig({ test: () => result(code, '要全跑') });
-      const got = await check(input(), ctx());
-      expect(got.steps[0]).toMatchObject({ outcome: 'skipped', exitCode: code });
-      expect(got.state).toBe('green'); // tsc 过了
-    }
+  it('test:changed 退出 2（没算成）：记没跑，不算红，也不改跑受影响的包', async () => {
+    const { check, commands } = rig({ test: () => result(2, '没算成') });
+    const got = await check(input(), ctx());
+    expect(got.steps[0]).toMatchObject({ outcome: 'skipped', exitCode: 2 });
+    expect(got.state).toBe('green'); // tsc 过了
+    expect(commands.some((c) => scriptOf(c).includes('--affected'))).toBe(false);
+  });
+
+  it('test:changed 退出 3（要全跑）：在锁下跑受影响的包，不再只跑 tsc', async () => {
+    let acquired = 0;
+    const { check, commands } = rig({
+      test: () => result(3, '要全跑'),
+      affected: () => result(0, 'Tests  4 passed (4)'),
+      lock: {
+        async acquire() {
+          acquired += 1;
+          return () => {};
+        },
+      },
+    });
+    const got = await check(input(), ctx());
+    expect(acquired).toBe(1);
+    const affected = commands.find((c) => scriptOf(c).includes('--affected'));
+    expect(affected).toBeDefined();
+    if (affected === undefined) return;
+    expect(scriptOf(affected)).toContain('pnpm test:changed --affected');
+    expect(affected).toMatchObject({ user: USER, cwd: '/work/t-1' });
+    expect(affected?.timeoutMs).toBeLessThanOrEqual(SELF_CHECK_TEST_MS);
+    expect(affected?.timeoutMs).toBeGreaterThan(SELF_CHECK_TEST_MS - 5_000);
+    expect(got.steps.map((s) => s.outcome)).toEqual(['skipped', 'pass', 'pass']);
+    expect(got.steps[0]).toMatchObject({ exitCode: 3 });
+    expect(got.steps[1]?.command).toContain('--affected');
+    expect(got.state).toBe('green');
+  });
+
+  it('要全跑之后受影响的包没过：red', async () => {
+    const { check } = rig({
+      test: () => result(3, '要全跑'),
+      affected: () => result(1, 'FAIL pkg.test.ts > 坏了\nTests  1 failed (2)'),
+    });
+    const got = await check(input(), ctx());
+    expect(got.state).toBe('red');
+    expect(got.steps[1]).toMatchObject({ outcome: 'fail', exitCode: 1 });
+    expect(got.steps[1]?.digest).toContain('FAIL pkg.test.ts > 坏了');
+  });
+
+  it('锁被占时排队而不是跳过，拿到锁才跑受影响的包', async () => {
+    let releaseHold: () => void = () => {};
+    const hold = new Promise<void>((resolve) => {
+      releaseHold = resolve;
+    });
+    let waiting = false;
+    const { check, commands } = rig({
+      test: () => result(3, '要全跑'),
+      affected: () => result(0, 'Tests  1 passed (1)'),
+      testMs: 5_000,
+      lock: {
+        async acquire(signal) {
+          waiting = true;
+          await hold;
+          if (signal.aborted) throw new Error('aborted');
+          return () => {};
+        },
+      },
+    });
+    let settled = false;
+    const pending = check(input(), ctx()).then((got) => {
+      settled = true;
+      return got;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(waiting).toBe(true);
+    expect(settled).toBe(false);
+    expect(commands.some((c) => scriptOf(c).includes('--affected'))).toBe(false);
+    releaseHold();
+    const got = await pending;
+    expect(settled).toBe(true);
+    const affected = commands.find((c) => scriptOf(c).includes('--affected'));
+    expect(affected).toBeTruthy();
+    expect(affected?.timeoutMs).toBeLessThan(5_000);
+    expect(got.steps[1]).toMatchObject({ outcome: 'pass' });
+    expect(got.state).toBe('green');
+  });
+
+  it('要全跑之后受影响的包超时：记自测超时，没过', async () => {
+    const ran = rig({
+      test: () => result(3, '要全跑'),
+      affected: () => result(null, '还在跑', { timedOut: true }),
+    });
+    const ranOut = await ran.check(input(), ctx());
+    expect(ranOut.steps[1]).toMatchObject({ outcome: 'fail', exitCode: null, digest: '自测超时' });
+    expect(ranOut.state).toBe('red');
+
+    // 锁一直被占，排队到时限：同样记没过，不跳过、也不当成过了
+    const queued = rig({
+      test: () => result(3, '要全跑'),
+      testMs: 80,
+      lock: {
+        acquire: (signal) =>
+          new Promise((_resolve, reject) => {
+            const fail = () => reject(new Error('aborted'));
+            if (signal.aborted) fail();
+            else signal.addEventListener('abort', fail, { once: true });
+          }),
+      },
+    });
+    const waited = await queued.check(input(), ctx());
+    expect(waited.steps[1]).toMatchObject({ outcome: 'fail', digest: '自测超时' });
+    expect(waited.state).toBe('red');
+    expect(queued.commands.some((c) => scriptOf(c).includes('--affected'))).toBe(false);
   });
 
   it('超时：记没跑（慢不等于错），不算红', async () => {
@@ -131,6 +257,43 @@ describe('selfCheck', () => {
       reason: expect.stringContaining('sudo 起不来'),
     });
     await expect(check({ schemaVersion: 1 } as SelfCheckInput, ctx())).rejects.toThrow('自测');
+  });
+});
+
+describe('受影响包的整机锁', () => {
+  it('被占时后来者排队，放开才拿到', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'self-check-lock-'));
+    try {
+      const lock = createAffectedLock(dir, { pollMs: 20, staleMs: 60_000 });
+      const release = await lock.acquire(new AbortController().signal);
+      let second = false;
+      const pending = lock.acquire(new AbortController().signal).then((rel) => {
+        second = true;
+        return rel;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(second).toBe(false);
+      await release();
+      const release2 = await pending;
+      expect(second).toBe(true);
+      await release2();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('死进程占的锁拆掉再占，不一直排着', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'self-check-lock-'));
+    try {
+      const lockDir = join(dir, 'affected.lock');
+      mkdirSync(lockDir);
+      writeFileSync(join(lockDir, 'holder'), `2147483646\n${Date.now()}\n`);
+      const lock = createAffectedLock(dir, { pollMs: 20, staleMs: 60_000 });
+      const release = await lock.acquire(new AbortController().signal);
+      await release();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

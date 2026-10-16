@@ -83,7 +83,13 @@ export const SELF_CHECK_RED_LINE = '引擎在你交活之后跑了测试和类�
 export function selfCheckText(result: SelfCheckResult): string {
   const parts = result.steps.map((s) => {
     const mark =
-      s.outcome === 'pass' ? '过了' : s.outcome === 'fail' ? `没过（退出码 ${s.exitCode}）` : '没跑';
+      s.outcome === 'pass'
+        ? '过了'
+        : s.outcome === 'fail'
+          ? s.exitCode === null
+            ? '没过（自测超时）'
+            : `没过（退出码 ${s.exitCode}）`
+          : '没跑';
     return `$ ${s.command}：${mark}\n${s.digest}`;
   });
   if (result.state === 'skipped' && parts.length === 0) parts.push(`没跑成：${result.reason}`);
