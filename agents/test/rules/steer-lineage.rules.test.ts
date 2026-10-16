@@ -3,7 +3,7 @@
 // ① 开会话钩子把「所有别的会话最近 60 分钟收到的话」列给每个会话：fleet-dao 会话 17:49 问的话，被另一个项目的会话当成自己的活答了；
 // ② 开会话叫每个会话办进度单上全部待处理引导：18:15 发给指挥官的引导，另一个 fleet-dao 会话也办了，开出重复 PR #1884。
 // 修法：一个 Mirasim 会话用过的全部原生会话号算一家（agents/hooks/founder-inbox.mjs 的 lineageOf），他的话只给同一家；
-// 引导记主人（pnpm progress directive 写〔主：…〕，pnpm progress claim 认领、撞主拒绝），开会话只叫主人办，别家的只计数。
+// 引导记主人（pnpm progress directive 写〔主：…〕，主人记下后不再改），开会话只叫主人办，别家的只计数。
 // 下面用钩子真跑一遍：脚本改回「谁都看得见、谁见了都办」，这里会红。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -106,12 +106,13 @@ describe('规矩：待处理的引导只叫主人那个会话办', () => {
     hook.checkProgressIssue({ cwd: '/r', git, run, mirror: SESSION_START, lineage }).join('\n');
   const A: Lineage = { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] };
 
-  it('A 只被叫去办自己的；B 的只说条数、不给原文；无主的要先 pnpm progress claim', () => {
+  it('A 只被叫去办自己的；B 的只说条数、不给原文；无主的直接办、办完关挂的单（没有认领）', () => {
     const said = check(A);
     expect(said).toContain('A 的引导');
     expect(said).not.toContain('B 的引导');
     expect(said).toContain('别的会话还有 1 条创始人引导在办');
-    expect(said).toMatch(/旧引导.*先认领再办：pnpm progress claim/);
+    expect(said).toMatch(/旧引导.*直接接着办，办完把挂的单关掉/);
+    expect(said).not.toContain('progress claim');
   });
 
   it('【故意造出的失败】换成 B 开场：A 的引导原文不给 B——上面的断言查得出撞车', () => {

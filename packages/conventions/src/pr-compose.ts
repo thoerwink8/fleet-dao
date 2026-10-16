@@ -15,7 +15,6 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { DIRECTIVES_DIR, PENDING, parseDirective } from './directives.ts';
 import { type Gh as IssueGh, issueNew } from './issue-new.ts';
 import { type Gh, loadPathLists } from './pr-arm.ts';
 import { founderQuoteLine, GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
@@ -43,8 +42,6 @@ export interface BodyParts {
   founder?: { quote: string; at: string } | undefined;
   /** --new-issue：需求栏写明这张单已贴本机做、引擎不拉。 */
   withNewIssue?: boolean;
-  /** --directive：本 PR 里标了办完的创始人引导编号（正文写「引导 <编号>」） */
-  directives?: readonly string[];
 }
 
 /** 拼正文：栏的写法和 .github/pull_request_template.md 一样（测试里对着模板查）。 */
@@ -65,9 +62,6 @@ export function composeBody(p: BodyParts): string {
   ];
   const lines = [
     `**做了什么**：${p.did.length === 1 ? did : `\n${did}`}`,
-    ...(p.directives?.length
-      ? ['', `${p.directives.map((id) => `引导 ${id}`).join('、')}：本 PR 里标了办完，合进主线就算办完。`]
-      : []),
     '',
     `**${ISSUE_COLUMN}**：`,
     ...need,
@@ -109,21 +103,6 @@ const issueNumber = (s: string): number | undefined => {
   return m?.[1] ? Number(m[1]) : undefined;
 };
 
-/** 这条分支（HEAD）上的引导 id 是不是已办完（已处理或作废） */
-function directiveStatus(git: Gh, id: string): 'done' | 'pending' | 'missing' {
-  const tree = git(['ls-tree', '-r', '--name-only', 'HEAD', '--', `${DIRECTIVES_DIR}/`]);
-  const path =
-    tree.code === 0 ? tree.stdout.split('\n').find((l) => l.trim().endsWith(`/${id}.md`)) : undefined;
-  if (!path) return 'missing';
-  const shown = git(['show', `HEAD:${path.trim()}`]);
-  if (shown.code !== 0) return 'missing';
-  try {
-    return parseDirective(shown.stdout, path).status === PENDING ? 'pending' : 'done';
-  } catch {
-    return 'missing';
-  }
-}
-
 export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> {
   const { out, err } = deps;
   let values: Record<string, string | boolean | string[] | undefined>;
@@ -144,7 +123,6 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         kind: { type: 'string' },
         milestone: { type: 'string' },
         local: { type: 'boolean' },
-        directive: { type: 'string', multiple: true },
         'founder-quote': { type: 'string' },
         at: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
@@ -173,11 +151,10 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
       values['new-issue'] !== undefined ||
       values.kind !== undefined ||
       values.milestone !== undefined ||
-      values.local !== undefined ||
-      values.directive !== undefined;
+      values.local !== undefined;
     if (generatingBody) {
       err(
-        '--closes / --refs / --new-issue / --kind / --milestone / --local / --directive 是让命令生成正文用的，' +
+        '--closes / --refs / --new-issue / --kind / --milestone / --local 是让命令生成正文用的，' +
           '不能和 --body-file 一起用：要么去掉 --body-file 让它生成，要么把这些写进你自己的正文。什么也没做。',
       );
       return 1;
@@ -325,16 +302,6 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
     return 2;
   }
 
-  // --directive：引导要在这条分支上已标办完（pnpm progress done <编号> 改的文件随活一起提交），合进主线才算办完
-  const directiveIds = strs(values.directive).map((s) => s.trim());
-  const notDone = directiveIds.find((id) => directiveStatus(deps.git, id) !== 'done');
-  if (notDone !== undefined) {
-    err(
-      `--directive ${notDone}：这条分支上的这条引导不是已办完（或没有这个文件）。先在这棵工作树里 pnpm progress done ${notDone} --note "<做成了什么>"，提交推送后再开。什么也没做。`,
-    );
-    return 1;
-  }
-
   const dir = mkdtempSync(join(tmpdir(), 'pr-open-gen-'));
   try {
     let closeNumbers = closes.filter((n): n is number => n !== undefined);
@@ -382,7 +349,6 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         refs: refs.filter((n): n is number => n !== undefined),
         founder: quote && at ? { quote, at } : undefined,
         withNewIssue: newIssue !== undefined,
-        directives: directiveIds,
       }),
     );
     return prOpen(

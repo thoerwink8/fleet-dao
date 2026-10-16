@@ -14,7 +14,7 @@
 
 - 单测：`npx vitest run packages/web/src/<文件>`（测试和源码放一起，界面行为的回归在 `packages/web/src/test/`）。
 - 界面检查：`packages/web/src/test/lint-design.test.ts` 跑 `packages/web/scripts/lint-design.ts`（严格模式，CI 必过）；本机在 `packages/web` 下 `node scripts/lint-design.ts --list` 看每一处违规。
-- e2e（真库 + 真后端 + 真前端 + 真浏览器）：`packages/web/e2e/`，先 `pnpm pg:local start`，再 `E2E_PG_ADMIN_URL=... pnpm --filter @fleet-dao/web e2e`；没设这个变量直接失败。全套跑法见 `packages/web/e2e/README.md`。PR 上默认不跑 e2e（改表结构、迁移、e2e 样例数据和用例的 PR 例外，跑全套），合并后主线和每夜跑（决定 0093）。
+- e2e（真库 + 真后端 + 真前端 + 真浏览器）：`packages/web/e2e/`，先 `pnpm pg:local start`，再 `E2E_PG_ADMIN_URL=... pnpm --filter @fleet-dao/web e2e`；没设这个变量直接失败。全套跑法见 `packages/web/e2e/README.md`。CI 一律全套：每个 PR 和主线推送都跑 e2e 全套（两种屏宽，决定 0101）。
 
 ## 常见坑
 

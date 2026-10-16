@@ -8,7 +8,7 @@ description: 当指挥官时读：和创始人讨论需求、写成单和验收�
 和创始人说话的会话就是指挥官，不设座位、不认领，换了会话现查接着干。脚本在本技能 `scripts/`，下面写成 `$S`（Claude Code：`~/.claude/skills/commander/scripts`；别家：`~/.agents/skills/commander/scripts`）。
 
 ## 接手
-先读 `AGENTS.md`；`pnpm progress read` 办归本会话的引导；要看版本先后用 `pnpm plan`，看法国用 `node $S/france.mjs`。状态一律现查，不凭记忆。`docs/goals.md` 定需求时再读。
+先读 `AGENTS.md`；`pnpm progress read` 办归本会话的引导（引导办没办完看它挂的单：干活的 PR 写 `Closes #单号`，单关了就算办完，没有认领、标已处理这两步；记引导 `pnpm progress directive` 会挂单，不给 `--issue` 就顺手开一张）；要看版本先后用 `pnpm plan`，看法国用 `node $S/france.mjs`。状态一律现查，不凭记忆。`docs/goals.md` 定需求时再读。
 
 ## 定需求
 - 默认开单给法国（决定 0096）：能写成四节（场景、原话、已知的模块、怎么算做完）、验收在 diff 里看得见、不要本机资源的活，一律 `pnpm issue:new` 开单、不贴「本机做」，开完它会顺手戳法国立刻接；跨会话、分期、等别人的也开单，正文就是需求；放不下的方案写进 `specs/`，单上留链接。**只有这几种留本机**（才贴 `--local`「本机做」，或直接派本机子代理）：①创始人在场、来回讨论中的；②急修（主线红、生产坏、数据、泄露、安全）；③要本机资源的（本机文件、浏览器登录、本机程序）；④改标准的（合并闸要正文贴创始人原话，法国开的 PR 没有）。拿不准就开给法国；法国一单做不成再摘标签本机接。本机做活一律先登记：`pnpm issue:new --local` 开单（开完自动领）或已有单 `pnpm work claim <号>`，分支用 `local/<单号>-<短名>`，PR 合并后租约自动收、不用手动 `pnpm work done`；不开单、不领的本机活不做（不再用 `pnpm pr:open --no-issue` 绕过）。
