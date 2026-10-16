@@ -12,17 +12,14 @@
 // - 等合并是长轮询（心跳不断）：叫停时休眠被打断，活动抛取消，不吞。
 
 import type { SessionUser } from '@fleet-dao/adapters';
-import {
-  type ChangedFile,
-  parseStandardPaths,
-  STANDARD_PATHS_FILE,
-  standardFiles,
-} from '@fleet-dao/conventions';
+import { type ChangedFile, STANDARD_PATHS_FILE, standardFiles } from '@fleet-dao/conventions';
 import type { RepoRef } from '@fleet-dao/github';
+import { parseRepoProfile, type RepoProfile } from '@fleet-dao/shared';
 import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
 import { readTaskBrief } from '../runner/task-brief.ts';
+import { standardPathsList } from '../standard-paths-list.ts';
 import type {
   ArmAutoMergeInput,
   ArmAutoMergeResult,
@@ -79,6 +76,8 @@ export interface TaskActivitiesDeps {
    */
   readChecks?: ((repo: RepoRef, sha: string, signal: AbortSignal) => Promise<MergeWaitChecks>) | undefined;
   log?: (message: string, fields?: Record<string, unknown>) => void;
+  /** 这个仓的档案（库里的原文，补默认值）。不给就按 fleet-dao 的清单路径和 packages/* 分档（旧测试）。真装配必给。 */
+  profileOf?: (repo: RepoRef) => Promise<unknown>;
   /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
   gitBin?: string;
   shBin?: string;
@@ -128,6 +127,11 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     ...(deps.gitBin ? { git: deps.gitBin } : {}),
     ...(deps.shBin ? { sh: deps.shBin } : {}),
   });
+
+  const profileOf = async (repo: RepoRef): Promise<RepoProfile | undefined> => {
+    if (!deps.profileOf) return undefined;
+    return parseRepoProfile(await deps.profileOf(repo));
+  };
 
   /** 仓里声明的清单文件：文件不在＝这个仓没声明，回 null；在却读不出内容、读失败都抛。 */
   const readList = async (repo: RepoRef, path: string, ctx: PortContext): Promise<string | null> => {
@@ -208,16 +212,22 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
 
   return {
     async readTaskBrief(input: ReadTaskBriefInput, ctx: PortContext) {
+      const repo = refOf(input.repo);
+      const profile = await profileOf(repo);
       return readTaskBrief(
         {
-          readIssue: ({ repo, issueNumber }) =>
-            mapped(() => gh.readIssue({ repo, issueNumber, signal: ctx.signal })),
-          readSpecDoc: async ({ repo, path }) => {
-            const doc = await mapped(() => gh.readSpecDoc({ repo, path, signal: ctx.signal }, ctx));
+          readIssue: ({ repo: issueRepo, issueNumber }) =>
+            mapped(() => gh.readIssue({ repo: issueRepo, issueNumber, signal: ctx.signal })),
+          readSpecDoc: async ({ repo: docRepo, path }) => {
+            const doc = await mapped(() => gh.readSpecDoc({ repo: docRepo, path, signal: ctx.signal }, ctx));
             return doc ? { content: doc.content } : null;
           },
         },
-        { repo: refOf(input.repo), issueNumber: input.issueNumber },
+        {
+          repo,
+          issueNumber: input.issueNumber,
+          ...(profile ? { moduleRoots: profile.moduleRoots } : {}),
+        },
       );
     },
 
@@ -265,19 +275,20 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const files: ChangedFile[] = await mapped(() =>
         gh.pullFiles({ repo, prNumber: input.prNumber, signal: ctx.signal }),
       );
-      const standardText = await readList(repo, STANDARD_PATHS_FILE, ctx);
-      let standards: string[] = [];
-      if (standardText !== null) {
-        const list = parseStandardPaths(standardText);
-        if (typeof list === 'string') {
-          throw new PortError('GUARD_LIST_INVALID', `${STANDARD_PATHS_FILE} 认不出：${list}`, {
-            retryable: false,
-          });
-        }
-        standards = standardFiles(files, list).map(
-          (h) => `${h.file}（${h.rule}${h.section ? `，只有「${h.section}」这一段算标准` : ''}）`,
-        );
+      const profile = await profileOf(repo);
+      const listFile = profile?.standardPathsFile ?? STANDARD_PATHS_FILE;
+      const standardText = await readList(repo, listFile, ctx);
+      let list: ReturnType<typeof standardPathsList>;
+      try {
+        list = standardPathsList(standardText);
+      } catch (error) {
+        throw new PortError('GUARD_LIST_INVALID', `${listFile} 认不出：${errMessage(error)}`, {
+          retryable: false,
+        });
       }
+      const standards = standardFiles(files, list).map(
+        (h) => `${h.file}（${h.rule}${h.section ? `，只有「${h.section}」这一段算标准` : ''}）`,
+      );
       // 人批过的（原样条目对得上）不再拦；没批过的、批了之后才多出来的照拦。
       const approvedStandards = new Set(input.approved?.standards ?? []);
       return { standards: standards.filter((s) => !approvedStandards.has(s)) };

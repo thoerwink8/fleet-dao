@@ -17,6 +17,8 @@ export interface IntakeRepoRow {
   ciPolicy: CiPolicy;
   /** 仓之间分名额的相对份额；旧档案按 shared 的默认值 1。 */
   weight: number;
+  /** 仓档案原文（只存显式写了的项）。缺项、补默认值由调用方用 shared 的 repoProfileGaps / parseRepoProfile。 */
+  profile: unknown;
 }
 
 /** 受管的所有仓（开关关着的也列：全关是正常的空闲，不是没扫到东西）。 */

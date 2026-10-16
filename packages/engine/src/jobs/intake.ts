@@ -16,9 +16,10 @@
 //   前置单开没开着：先看这一轮读到的开着的单列表，不在里面的（关了的、PR）整个仓一次批量读，不一张单一次请求）→
 //   正文没写 .github/workflows/ 路径（#1194：引擎的令牌推不了改工作流的提交，写了的贴一次「本机做」、
 //   留一句话。有「已知的模块」一节时只看这一节列出的路径，其余段落里提到的不算；没有这一节的老单仍看场景、已知的模块、怎么算做完）→
-//   没写改标准的路径（有「已知的模块」时同样只看这一节；没有这一节的老单仍看「已知的模块」和「怎么算做完」。清单在
-//   packages/conventions/standard-paths.json，决定 0093：引擎的 PR 正文没有创始人原话，合并闸会永远判红；写了的同样贴一次「本机做」、
-//   留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→ 交代齐不齐（四节齐，「怎么算做完」至少一条；
+//   没写改标准的路径（有「已知的模块」时同样只看这一节；没有这一节的老单仍看「已知的模块」和「怎么算做完」。清单是这个仓
+//   档案里 standardPathsFile 指的那份，文件不在＝没有改标准路径；决定 0093：引擎的 PR 正文没有创始人原话，合并闸会永远判红；
+//   写了的同样贴一次「本机做」、留一句话）→ 没被开着的 PR 的「需求」栏挂着（#1197：已经有人在做，同样贴一次「本机做」）→
+//   交代齐不齐（四节齐，「怎么算做完」至少一条；
 //   缺则留一次言，不拉）→「怎么算做完」没有要 diff 外证据的条目（截图、线上、现场、审计、看日志、飞书收到……，判据是 conventions 的
 //   offDiffItems，和 pnpm issue:new、驾驶舱开单同一份，决定 0093：不是用 issue:new 开的单也在这里挡住；有就留一次言、不拉）→
 //   改动规模不是最重档（单子列的路径超过 50 个）。
@@ -82,6 +83,7 @@ import {
 } from '@fleet-dao/core';
 import type { ScheduleResult } from '@fleet-dao/db';
 import { humanPart } from '@fleet-dao/github';
+import { parseRepoProfile, repoProfileGaps, safeParseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { GithubWhitelist } from '@fleet-dao/store';
 import { isTrusted } from '@fleet-dao/store';
@@ -159,6 +161,11 @@ export interface IntakeRepo {
   weight?: number;
   /** 「让 AI 接活」打开的时刻（ISO）；null＝关着。现在只当开关用：不再拿它和开单时间比（#1336）。 */
   autoDispatchSince: string | null;
+  /**
+   * 库里的仓档案原文（只存显式写了的项）。给了就按缺项判就绪：缺一项就不拉，原因写明缺哪几项。
+   * 不给是没接档案的旧调用（测试），不在这里挡。真装配总会带上。
+   */
+  profile?: unknown;
 }
 
 /** 仓里还开着的一个里程碑；description 是说明原文（版本里的先后写在 <!-- fleet:order --> 之间）。 */
@@ -391,7 +398,7 @@ function refTouches(ref: { path: string; kind: 'file' | 'dir' }, rule: StandardP
 }
 
 /**
- * 单正文里写到的第一个改标准的路径（清单在 packages/conventions/standard-paths.json）；没写回 null。
+ * 单正文里写到的第一个改标准的路径（清单是这个仓自己的那份）；没写回 null。
  * 有「已知的模块」时只看这一节列出的路径，怎么算做完、场景、原话里提到的不算。没有这一节的老单仍看「已知的模块」和「怎么算做完」。
  * 引擎开的 PR 正文里没有创始人原话，合并闸（merge-gate）碰了标准路径就判红，拉了只会做完卡在合并（决定 0093）。
  * 正文不是文字（读不到）就抛：不当成「没写」。
@@ -420,9 +427,10 @@ export function standardPathIn(
 }
 
 /** 单子要改标准、引擎不拉时留在单子上的话。 */
-export function standardPathComment(path: string, rule: StandardPath): string {
+export function standardPathComment(path: string, rule: StandardPath, listFile?: string): string {
+  const where = listFile ?? '这个仓的改标准路径清单';
   return [
-    `引擎想拉起这张单，可正文里要动的 \`${path}\` 是改标准的路径（清单 packages/conventions/standard-paths.json 的 \`${rule.path}\`：${rule.why}）。`,
+    `引擎想拉起这张单，可正文里要动的 \`${path}\` 是改标准的路径（${where} 的 \`${rule.path}\`：${rule.why}）。`,
     '改标准要创始人同意：PR 正文里得有他的原话，引擎开的 PR 没有，合并闸会一直判红，拉了只会做完卡在合并，先没派。',
     '',
     `已给这张单贴了「${LOCAL_LABEL}」，留给本机做（\`pnpm pr:open --founder-quote\` 带上原话），引擎以后不再拉它。`,
@@ -468,12 +476,15 @@ export interface IntakeDeps {
   /** 这个仓开着的 PR 的「需求」栏挂着的单（单号 → PR 号，见 prClaimedIssues）。读不到（含 PR 列表翻不完）照抛：不当成「没有 PR」。 */
   openPrClaims(repo: IntakeRepo): Promise<Map<number, number>>;
   /**
+   * 这个仓自己的改标准路径清单。不给就读引擎自己带的那一份（只给没接装配的测试；真装配按档案去读目标仓）。
+   * 读不到、认不出照抛：不当成「没有标准路径」。文件不在由装配收成空清单再传进来。
+   */
+  standardPaths?(repo: IntakeRepo): Promise<StandardPath[]>;
+  /**
    * 一批单号（前置单，可能是 issue 也可能是 PR）此刻开没开着：一次批量读（整个仓每轮最多一次，只问不在「开着的单」列表里的）。
    * 读不到照抛；回来的结果里缺了哪个单号，那个单号按读不到算。都不当成「已经关了」。
    */
   prerequisiteStates(repo: IntakeRepo, numbers: readonly number[]): Promise<Map<number, 'open' | 'closed'>>;
-  /** 改标准的路径清单（standard-paths.json）；不给读引擎自己带的那一份。读不到、认不出照抛：不当成「没有标准路径」。 */
-  standardPaths?(): Promise<StandardPath[]>;
   /** 给单子贴「本机做」标签（幂等）。 */
   markLocal(input: { repo: IntakeRepo; issueNumber: number }): Promise<void>;
   /** 读主线上的需求文档；文件不在回 null，读失败照抛。 */
@@ -565,6 +576,8 @@ interface Tally {
   waiting: Map<string, number>;
   /** 按仓留一份跳过原因，避免公平交错后把别的仓的原因算进整理触发。 */
   skippedByRepo: Map<string, Map<IntakeSkipReason, number>>;
+  /** 档案缺项、这一轮不拉的仓（「仓：缺哪几项」）。不是没查成。 */
+  notReady: string[];
   /** 这一轮在等前置的单：「仓#单号 等前置 #N」或「仓#单号 等到 <日期>」（写进结局和日志，驾驶舱里看得到是哪张等哪张）。 */
   blocked: string[];
 }
@@ -681,6 +694,8 @@ async function admitIssue(
     current: number | undefined;
     book: OrderBook;
     rules: () => Promise<StandardPath[]>;
+    moduleRoots?: readonly string[] | undefined;
+    listFile?: string | undefined;
     prereqStates: (numbers: readonly number[]) => Promise<Map<number, 'open' | 'closed'>>;
   },
   whitelist: GithubWhitelist,
@@ -732,7 +747,7 @@ async function admitIssue(
       reason: 'touches_standard',
       why: `正文要动改标准的路径 ${standard.path}，引擎的 PR 过不了合并闸`,
       key: 'intake-touches-standard',
-      comment: standardPathComment(standard.path, standard.rule),
+      comment: standardPathComment(standard.path, standard.rule, ctx.listFile),
     });
     return null;
   }
@@ -760,7 +775,11 @@ async function admitIssue(
       }),
       readSpecDoc: ({ path }) => deps.readSpecDoc({ repo, path }),
     },
-    { repo: { owner: repo.owner, name: repo.name }, issueNumber: issue.number },
+    {
+      repo: { owner: repo.owner, name: repo.name },
+      issueNumber: issue.number,
+      ...(ctx.moduleRoots ? { moduleRoots: ctx.moduleRoots } : {}),
+    },
   );
   if (!brief.ok) {
     const posted = await deps.comment({
@@ -930,6 +949,22 @@ async function prepareRepo(
   const slug = `${repo.owner}/${repo.name}`;
   if (repo.autoDispatchSince === null) return null;
   t.reposOn += 1;
+  let profile: ReturnType<typeof parseRepoProfile> | undefined;
+  if (repo.profile !== undefined) {
+    const gaps = repoProfileGaps(repo.profile);
+    if (gaps.length > 0) {
+      t.notReady.push(`${slug}：缺 ${gaps.join('、')}`);
+      deps.log('info', `拉单：${slug} 仓档案没就绪，不拉单`, { missing: gaps });
+      return null;
+    }
+    const parsed = safeParseRepoProfile(repo.profile);
+    if (!parsed.ok) {
+      t.notReady.push(`${slug}：${parsed.error}`);
+      deps.log('info', `拉单：${slug} 仓档案没就绪，不拉单`, { error: parsed.error });
+      return null;
+    }
+    profile = parsed.profile;
+  }
   const skippedBefore = new Map(t.skippedByRepo.get(slug) ?? []);
   let listed: Awaited<ReturnType<IntakeDeps['openIssues']>>;
   try {
@@ -992,9 +1027,10 @@ async function prepareRepo(
     current: currentVersion(listed.openMilestones)?.milestone.number,
     book,
     rules: () => {
-      rules ??= (deps.standardPaths ?? loadStandardPaths)();
+      rules ??= deps.standardPaths ? deps.standardPaths(repo) : loadStandardPaths();
       return rules;
     },
+    ...(profile ? { moduleRoots: profile.moduleRoots, listFile: profile.standardPathsFile } : {}),
     prereqStates: async (numbers: readonly number[]) => {
       const out = new Map<number, 'open' | 'closed'>();
       for (const n of numbers) if (openNow.has(n)) out.set(n, 'open');
@@ -1165,13 +1201,14 @@ function milestoneNeedsOrder(m: MilestoneRef, issues: readonly IntakeIssue[]): b
 
 function summarize(t: Tally): string {
   const skipped = [...t.skipped].map(([reason, n]) => `${reason}×${n}`).join('、') || '无';
+  const ready = t.notReady.length > 0 ? `；没就绪：${t.notReady.join('、')}` : '';
   // 等前置的单：写明是哪张等哪张（结局和日志里看得到，不用翻每张单）；太多了截断，总数在上面 waiting_prerequisite×N
   const shown = t.blocked.slice(0, BLOCKED_SHOWN);
   const blocked =
     shown.length === 0
       ? ''
       : `；等前置的单：${shown.join('、')}${t.blocked.length > shown.length ? `……（共 ${t.blocked.length} 张）` : ''}`;
-  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}${blocked}`;
+  return `起了 ${t.started} 条，留言 ${t.commented} 条；开头在干活 ${t.workingAtStart} 条、停下等人 ${t.stalled} 条（不占名额）；没派的：${skipped}${ready}${blocked}`;
 }
 
 async function round(deps: IntakeDeps): Promise<ScheduleResult> {
@@ -1198,6 +1235,7 @@ async function round(deps: IntakeDeps): Promise<ScheduleResult> {
     breakerWhy: new Map(),
     waiting: new Map(),
     skippedByRepo: new Map(),
+    notReady: [],
     blocked: [],
   };
   if (repos.some((r) => r.autoDispatchSince !== null)) {

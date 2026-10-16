@@ -23,6 +23,7 @@ import {
   closeInterruptedScheduleRuns as closeInterruptedScheduleRunsInDb,
   createDb,
   type Db,
+  findRepoProfile,
   finishScheduleRun,
   getRun,
   latestRunOfTask,
@@ -36,7 +37,7 @@ import {
   taskTokenSpend,
 } from '@fleet-dao/db';
 import { createGitHub } from '@fleet-dao/github';
-import { intakeChatLimitsFrom } from '@fleet-dao/shared';
+import { intakeChatLimitsFrom, parseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
@@ -1050,7 +1051,16 @@ export function realPortsFromEnv(
       trees,
       exec,
       log: taskLog,
-      readChecks: (repo, head, signal) => readMergeWaitChecks(gh, repo, head, signal),
+      profileOf: async (repo) => {
+        const row = await findRepoProfile(db, repo.owner, repo.name);
+        if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);
+        return row.profile;
+      },
+      readChecks: async (repo, head, signal) => {
+        const row = await findRepoProfile(db, repo.owner, repo.name);
+        if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，不知道合并要等哪些检查`);
+        return readMergeWaitChecks(gh, repo, head, parseRepoProfile(row.profile).mergeSignals, signal);
+      },
     }),
     async readCiPolicy(input) {
       if (input?.schemaVersion !== 1 || !input.repo?.owner || !input.repo?.name) {

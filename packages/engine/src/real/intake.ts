@@ -13,7 +13,7 @@
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
 import { randomUUID } from 'node:crypto';
-import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import { LOCAL_LABEL, type StandardPath } from '@fleet-dao/conventions';
 import {
   type Db,
   expiredLocalClaims,
@@ -41,6 +41,7 @@ import {
   writeIntakeWaiting,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
+import { parseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
@@ -48,10 +49,11 @@ import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundErro
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../jobs/dispatch-standing.ts';
 import { requestGroom } from '../jobs/groom-request.ts';
-import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
+import { type IntakeDeps, type IntakeRepo, prClaimedIssues } from '../jobs/intake.ts';
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
 import { liveLocalIssues } from '../jobs/local-leases.ts';
 import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
+import { standardPathsList } from '../standard-paths-list.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
 
@@ -65,7 +67,19 @@ export type IntakeGitHub = Pick<
   | 'commentIssue'
   | 'addIssueLabel'
   | 'removeIssueLabel'
+  | 'readRepoFile'
 > & { claims: Pick<GitHub['claims'], 'openPulls'> };
+
+/** 读这个仓档案里那份改标准清单。文件不在＝空清单；认不出、读不出内容照抛。 */
+export async function readRepoStandardPaths(
+  gh: Pick<GitHub, 'readRepoFile'>,
+  repo: Pick<IntakeRepo, 'owner' | 'name' | 'profile'>,
+): Promise<StandardPath[]> {
+  const path = parseRepoProfile(repo.profile).standardPathsFile;
+  const read = await gh.readRepoFile({ repo: { owner: repo.owner, name: repo.name }, path });
+  if (read.file.kind === 'not_file') throw new Error(`读 ${path} 没成（${read.file.why}）`);
+  return standardPathsList(read.file.kind === 'text' ? read.file.text : null);
+}
 
 export interface IntakeWiring {
   db: Db;
@@ -108,8 +122,10 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           testCommand: r.testCommand,
           weight: r.weight,
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
+          profile: r.profile,
         }));
       },
+      standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
       // 本机领单的租约（决定 0096）：到期的行、心跳（本机会话推来的 node_sessions）、PR 镜像都从库里读，摘标签用「引擎」机器人
       localLeases: {
