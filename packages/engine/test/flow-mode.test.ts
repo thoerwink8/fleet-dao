@@ -7,7 +7,7 @@ import {
   createDecideFlowMode,
   type FlowFacts,
   flowBucket,
-  isClaude55,
+  isFullFlowModel,
 } from '../src/flow-mode.ts';
 import type { PortContext } from '../src/ports.ts';
 import type { DecideFlowModeInput } from '../src/task-contract.ts';
@@ -16,7 +16,7 @@ const base: FlowFacts = {
   labels: [],
   setting: { kind: 'full' },
   repoEligible: true,
-  modelId: 'claude-opus-5-5',
+  modelId: 'claude-sonnet-5-5',
   touches: ['`packages/web/src/pages/`：驾驶舱页面'],
   stratum: 'standard',
   issueKey: 'acme/widgets#12',
@@ -40,17 +40,18 @@ describe('分组边界（chooseFlowMode）', () => {
     expect(got.reason).toContain('flowEligible');
   });
 
-  it('只有 Claude 5.5（Sonnet、Opus）才进全程：别的模型三段并写明模型', () => {
-    expect(isClaude55('claude-opus-5-5')).toBe(true);
-    expect(isClaude55('claude-sonnet-5-5')).toBe(true);
-    expect(isClaude55('claude-sonnet-5-5[1m]')).toBe(true);
-    expect(isClaude55('claude-haiku-5-5')).toBe(false);
-    expect(isClaude55('claude-opus-5-55')).toBe(false);
-    expect(isClaude55('claude-opus-4-7')).toBe(false);
-    expect(isClaude55('gpt-5.5')).toBe(false);
+  it('第一期只走 Claude Sonnet 5.5（决定 0105）：别的模型（含 Opus 5.5）三段并写明模型', () => {
+    expect(isFullFlowModel('claude-sonnet-5-5')).toBe(true);
+    expect(isFullFlowModel('claude-sonnet-5-5[1m]')).toBe(true);
+    expect(isFullFlowModel('claude-opus-5-5')).toBe(false);
+    expect(isFullFlowModel('claude-haiku-5-5')).toBe(false);
+    expect(isFullFlowModel('claude-sonnet-5-55')).toBe(false);
+    expect(isFullFlowModel('claude-sonnet-4-7')).toBe(false);
+    expect(isFullFlowModel('gpt-5.5')).toBe(false);
     const got = chooseFlowMode({ ...base, modelId: 'gpt-5.5' });
     expect(got).toMatchObject({ mode: 'three', source: 'ineligible' });
     expect(got.reason).toContain('gpt-5.5');
+    expect(chooseFlowMode({ ...base, modelId: 'claude-opus-5-5' }).mode).toBe('three');
   });
 
   it.each([
@@ -60,6 +61,9 @@ describe('分组边界（chooseFlowMode）', () => {
     ['权限', '`deploy/sudoers.d/fleet`：权限'],
     ['任务工作流', '`packages/engine/src/workflows/task.ts`'],
     ['发布脚本', '`deploy/release.sh`'],
+    ['任务工作流', '`packages/engine/src/runner/segment-prompt.ts`'],
+    ['改标准路径', '`packages/conventions/standard-paths.json`'],
+    ['跨仓', '跨仓：fleet-dao 和 windsurf-dao 一起改'],
   ])('已知的模块碰到%s：一律三段，原因点名', (what, touch) => {
     const got = chooseFlowMode({ ...base, touches: ['`packages/web/src/a.ts`', touch] });
     expect(got).toMatchObject({ mode: 'three', source: 'ineligible' });
@@ -74,10 +78,15 @@ describe('分组边界（chooseFlowMode）', () => {
     });
   });
 
-  it('贴了「全程」：开关是 three、仓没开也走全程；两个都贴按三段', () => {
-    expect(
-      chooseFlowMode({ ...base, labels: [FULL_FLOW_LABEL], setting: { kind: 'three' }, repoEligible: false }),
-    ).toEqual({ mode: 'full', source: 'label', reason: null });
+  it('贴了「全程」：开关是 three 也走全程；仓没开（第一期只 fleet-dao）照样退回三段；两个都贴按三段', () => {
+    expect(chooseFlowMode({ ...base, labels: [FULL_FLOW_LABEL], setting: { kind: 'three' } })).toEqual({
+      mode: 'full',
+      source: 'label',
+      reason: null,
+    });
+    const offRepo = chooseFlowMode({ ...base, labels: [FULL_FLOW_LABEL], repoEligible: false });
+    expect(offRepo).toMatchObject({ mode: 'three', source: 'ineligible' });
+    expect(offRepo.reason).toContain('flowEligible');
     const both = chooseFlowMode({ ...base, labels: [FULL_FLOW_LABEL, THREE_FLOW_LABEL] });
     expect(both).toMatchObject({ mode: 'three', source: 'label' });
     expect(both.reason).toContain('两个标签');

@@ -1,10 +1,11 @@
 // 全程模式第一期（#2826，单 #2807）：一张单走三段还是全程，在第一次选路之后、第一段动手之前定一次（工作流经活动 decideFlowMode 问，
 // 结果进历史，重放不再读配置）。这里是判法（纯函数，chooseFlowMode）和那个活动的实现（读标签、开关、仓档案，写一次分组记录）。
 //
-// 判法（先后有讲究，原因写进 task_flow_assignments.reason）：
+// 判法照决定 0105「第一期的边界」「哪些单不进全程」「分组」（先后有讲究，原因写进 task_flow_assignments.reason）：
 // 1. 贴了「三段」（或两个都贴）→ 三段；
-// 2. 没贴「全程」：开关 engine.flowMode 是 three、仓档案没开 flowEligible → 三段；
-// 3. 选中的路由不是 Claude 5.5（Sonnet 或 Opus）、已知的模块碰到迁移、合并闸、凭据、权限、任务工作流、发布脚本 → 三段（贴了「全程」也一样）；
+// 2. 没贴「全程」：开关 engine.flowMode 是 three → 三段；
+// 3. 仓档案没开 flowEligible（第一期只开 fleet-dao）、选中的路由不是 Claude Sonnet 5.5、已知的模块碰到迁移、合并闸、凭据、权限、
+//    任务工作流、发布脚本、改标准路径、跨仓 → 三段（贴了「全程」也一样，source = ineligible）；
 // 4. 贴了「全程」→ 全程；开关 full → 全程；split:N → 同一档位里按单号哈希，桶号小于 N 走全程。
 //
 // 改这里之前必须知道：
@@ -24,19 +25,27 @@ import {
 import type { PortContext } from './ports.ts';
 import type { DecideFlowModeInput, DecideFlowModeResult } from './task-contract.ts';
 
-/** 选中的路由是不是 Claude 5.5（Sonnet 或 Opus）：模型 id 形如 claude-opus-5-5、claude-sonnet-5-5[1m]。 */
-export function isClaude55(modelId: string): boolean {
-  return /^claude-(?:opus|sonnet)-5-5(?![0-9])/.test(modelId.trim().toLowerCase());
+/**
+ * 选中的路由能不能进全程：决定 0105 第一期只走 Claude Sonnet 5.5 这一条路由（两组同一个模型，才比得出流程的差别）。
+ * 模型 id 形如 claude-sonnet-5-5、claude-sonnet-5-5[1m]。
+ */
+export function isFullFlowModel(modelId: string): boolean {
+  return /^claude-sonnet-5-5(?![0-9])/.test(modelId.trim().toLowerCase());
 }
 
-/** 已知的模块碰到这些一律三段：出了错代价大、或改的就是这套流程本身。 */
+/** 已知的模块碰到这些一律三段（决定 0105「哪些单不进全程」）：出了错代价大、或改的就是这套流程本身。 */
 export const FULL_FLOW_BLOCKED_MODULES: readonly { what: string; pattern: RegExp }[] = [
   { what: '迁移', pattern: /migrations?\b|迁移|drizzle/i },
   { what: '合并闸', pattern: /merge-gate|合并闸/i },
   { what: '凭据', pattern: /credential|凭据|secret|密钥/i },
   { what: '权限', pattern: /permission|权限|sudoers|polkit/i },
-  { what: '任务工作流', pattern: /packages\/engine\/src\/workflows\/|任务工作流/i },
+  {
+    what: '任务工作流',
+    pattern: /packages\/engine\/src\/workflows\/|workflows\/task|segment-prompt|任务工作流/i,
+  },
   { what: '发布脚本', pattern: /deploy\/|release\.sh|release-train|发布脚本|发版脚本/i },
+  { what: '改标准路径', pattern: /standard-paths|改标准/i },
+  { what: '跨仓', pattern: /跨仓|别的仓|其他仓/ },
 ];
 
 export interface FlowFacts {
@@ -80,10 +89,10 @@ export function chooseFlowMode(f: FlowFacts): DecideFlowModeResult {
     if (f.setting.kind === 'split' && f.setting.percent === 0) {
       return three('hash', null);
     }
-    if (!f.repoEligible) return three('ineligible', '仓档案没开 flowEligible：这个仓的单先都走三段');
   }
-  if (!isClaude55(f.modelId)) {
-    return three('ineligible', `选中的路由是 ${f.modelId}，不是 Claude 5.5（Sonnet 或 Opus）`);
+  if (!f.repoEligible) return three('ineligible', '仓档案没开 flowEligible：这个仓的单先都走三段');
+  if (!isFullFlowModel(f.modelId)) {
+    return three('ineligible', `选中的路由是 ${f.modelId}，第一期全程只走 Claude Sonnet 5.5`);
   }
   const hits = FULL_FLOW_BLOCKED_MODULES.filter((m) => f.touches.some((t) => m.pattern.test(t)));
   if (hits.length > 0) {

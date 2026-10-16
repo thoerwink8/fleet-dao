@@ -39,7 +39,7 @@ export interface DecideFlowModeInput {
   taskId: string;
   repo: Repo;
   issueNumber: number;
-  /** 第一次选中的路由的模型：只有 Claude 5.5（Sonnet 或 Opus）才可能进全程。 */
+  /** 第一次选中的路由的模型：第一期只有 Claude Sonnet 5.5 才可能进全程（决定 0105）。 */
   modelId: string;
   /** 单子「已知的模块」每一项的原文：碰到迁移、合并闸、凭据、权限、任务工作流、发布脚本的一律三段。 */
   touches: string[];

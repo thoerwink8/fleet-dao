@@ -163,6 +163,33 @@ const SCENARIOS: Record<string, Scenario> = {
       return { 'task-merge-conflict': handle };
     },
   },
+  // 全程（#2826）最顺的一条：第一段动手前定模式（分到全程），一段会话交付、CI 绿、验收过、合上。历史里带 patched('flow-mode') 和 decideFlowMode。
+  'task-full-merged': {
+    tasks: scripted({ flow: () => ({ mode: 'full', source: 'hash', reason: null }) }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-full-merged': handle };
+    },
+  },
+  // 全程返工（#2826）：CI 红、冷验收被拒都续同一个会话修（不算新的一轮），再合上。
+  'task-full-reworked': {
+    script: {
+      ci: (_input, n) => (n === 1 ? { state: 'red', failedChecks: ['check'], digest: 'FAIL x' } : undefined),
+    },
+    tasks: scripted({
+      flow: () => ({ mode: 'full', source: 'label', reason: null }),
+      resume: () => ({ kind: 'resume', sessionId: 'sess-1', runId: 'run-1' }),
+      // 第 1 次和 CI 同时起、CI 红了被取消；第 2 次（修完 CI 后）被拒；第 3 次过
+      verify: (_i, n) =>
+        n === 2 ? { pass: false, problems: ['少了状态'], round: 1 } : { pass: true, problems: [], round: 2 },
+    }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-full-reworked': handle };
+    },
+  },
   // 自动合并挂上了，在等 GitHub 把它合进主线（一直在长轮询）。
   'task-merging': {
     tasks: scripted({ merged: () => ({ state: 'waiting', detail: '必过检查还没齐' }) }).tasks,
