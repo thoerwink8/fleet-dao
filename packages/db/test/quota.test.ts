@@ -288,22 +288,20 @@ describe('额度写入与额度表', () => {
     ]);
   });
 
-  it('在跑的会话按账号池计：排队的、已结束的都不占名额，不属于任何需求的会话照样占', async () => {
+  it('在跑的会话按账号池计：已结束的不占名额，不属于任何需求的会话照样占', async () => {
     await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
     await addRoute(t.db, { id: 'a-k3', poolId: 'relay-a', modelId: 'kimi-k3', hostId: 'mirasim' });
     await addRoute(t.db, { id: 'b-opus', poolId: 'relay-b', modelId: 'opus-5.5' });
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
     await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(10 * MIN) });
-    await addRun(t.db, { taskId: null, stage: 'research', routeId: 'a-k3', startedAt: ago(5 * MIN) }); // 帅位
-    await addRun(t.db, { taskId: task.id, routeId: 'b-opus' }); // 还在排队
+    await addRun(t.db, { taskId: null, routeId: 'a-k3', startedAt: ago(5 * MIN) }); // 不属于任何需求
     await addRun(t.db, {
       taskId: task.id,
       routeId: 'b-opus',
-      queuedAt: ago(30 * MIN),
       startedAt: ago(20 * MIN),
       endedAt: ago(MIN),
-      outcome: 'stopped',
+      outcome: 'killed',
     });
     const counts = await inFlightByPool(t.db);
     expect(Object.fromEntries(counts)).toEqual({ 'relay-a': 2 });
@@ -314,7 +312,7 @@ describe('额度写入与额度表', () => {
     ]);
   });
 
-  it('三段的一次性会话（runs 里开跑就留的那一行，#157）也占名额：拼车池上两行三段 + 一行 Fusion 的会话是 3，收了一行是 2；收了场的、没写路由的不算', async () => {
+  it('三段的一次性会话（runs 里开跑就留的那一行，#157）也占名额：拼车池上三行（动手、动手、验收）是 3，收了一行是 2；收了场的、没写路由的不算', async () => {
     await t.db.insert(pools).values({
       id: 'claude-carpool',
       channelId: 'claude-subscription',
@@ -376,7 +374,6 @@ describe('额度写入与额度表', () => {
     await addRoute(t.db, { id: 'a-opus', poolId: 'relay-a', modelId: 'opus-5.5' });
     const repo = await addRepo(t.db);
     const task = await addTask(t.db, repo.id);
-    // Fusion 那一半读得到：不能拿它的数顶
     await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(10 * MIN) });
     await t.client.exec('alter table runs rename to runs_unreadable');
     try {
@@ -388,9 +385,9 @@ describe('额度写入与额度表', () => {
   });
 
   // #2181 根因复现：openPoolRuns（inFlightByPool / quotaTable 都走它）三条查询并行，以前用 Promise.all，查 runs 的那条一失败
-  // 就返回，另外两条还在别的连接上跑。查询按 FROM 顺序锁表（session_runs 再 routes 再 pools），resetTestDb 的 TRUNCATE 按
-  // pg_tables 的顺序先排他锁 pools 再等 session_runs。上面那条把 runs 挪开后，残留查询和下一条用例的清表交叉等锁，真
-  // Postgres 偶发 deadlock detected。这里把偶发造成必然：先独占 routes，让残留查询停在「占着 session_runs、等 routes」，
+  // 就返回，另外两条还在别的连接上跑。查询按 FROM 顺序锁表（pool_reservations 再 routes 再 pools），resetTestDb 的 TRUNCATE 按
+  // pg_tables 的顺序先排他锁 pools 再等 pool_reservations。上面那条把 runs 挪开后，残留查询和下一条用例的清表交叉等锁，真
+  // Postgres 偶发 deadlock detected。这里把偶发造成必然：先独占 routes，让残留查询停在「占着 pool_reservations、等 routes」，
   // 等读报完错再照清表的顺序 TRUNCATE，然后放开 routes。修之前读立刻报错、清表死锁；修后读要等三条都落地才报错，清表时没人占锁。
   // PGlite 只有一条连接，构不出两笔交叉等锁，这条只在真库跑。
   it.skipIf(!realTestPgUrl())(
@@ -456,8 +453,8 @@ describe('额度写入与额度表', () => {
         expect(messagesOf(readR.e)).toContain('relation "runs" does not exist');
         const leftWaiting = await lockWaits();
 
-        // 下一条用例的 resetTestDb：按 pg_tables 的顺序，pools 在 session_runs 前面。
-        const resetR = await settle(t.client.exec('truncate pools, session_runs, routes cascade'));
+        // 下一条用例的 resetTestDb：按 pg_tables 的顺序，pools 在 pool_reservations 前面。
+        const resetR = await settle(t.client.exec('truncate pools, pool_reservations, routes cascade'));
         expect(resetR.ok, resetR.ok ? '' : messagesOf(resetR.e)).toBe(true);
         expect(leftWaiting, '在跑数报错返回时，还有它的查询挂在锁上').toBe(0);
       } finally {

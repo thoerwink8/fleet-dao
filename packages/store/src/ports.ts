@@ -14,15 +14,12 @@ import type {
   NodeReport,
   NodeSnapshot,
   Pool,
-  ProgressKind,
   QuotaWindow,
   Repo,
   Route,
   ScheduleOutcome,
   SegmentMatch,
   SegmentRun,
-  SessionRun,
-  StageKind,
   Step,
   Subtask,
   Task,
@@ -197,28 +194,6 @@ export interface SettingRecord {
 }
 
 /**
- * 一次会话在 fleet 命令眼里的样子（由会话、需求、仓拼出来）。令牌只对它有效；endedAt 有值后令牌作废。
- * 不属于任何需求的会话（帅位、考新模型）没有这个样子，拿不到 fleet 令牌。
- */
-export interface AgentSession {
-  runId: string;
-  taskId: string;
-  subtaskId?: string | undefined;
-  stage: StageKind;
-  repoId: string;
-  /**
-   * 起会话时交代给它的测试命令（session_runs.test_command，当时的流程配置副本里的）：交活核对只认会话里跑过它，
-   * 退回时写明要跑哪一条。没有 = 开工时项目没写（只有不写码的阶段起得来），或加这一列之前开的会话。
-   */
-  testCommand?: string | undefined;
-  /** 引擎给这次会话建了分支才有。 */
-  branch?: string | undefined;
-  /** 做完标准（需求上的 acceptance）。 */
-  acceptance: string[];
-  endedAt?: string | undefined;
-}
-
-/**
  * GitHub 镜像里的 PR。checks = 当前 head 上 CI 的汇总。
  * openedAt / mergedAt / issueRefs：主页「做完的」要按合并时刻排、要反查挂的单；「没读到过」还是 undefined，
  * 不拿「没有打开时刻」冒充「没合并」。
@@ -240,7 +215,7 @@ export interface PullRequestRecord {
 }
 
 /**
- * 会话里跑过的一次测试：从 kind=test 的进度里读出来的。passed 为 null 是结果认不出（接了管道、放了后台……，
+ * 会话里跑过的一次测试（checkDone 的输入）。passed 为 null 是结果认不出（接了管道、放了后台……，
  * 插头写明了原因），照样列出来：交活核对以最后一次为准，认不出的那一次不能被它前面一次「通过」顶掉。
  */
 export interface TestRunRecord {
@@ -329,12 +304,6 @@ export interface BoardStore {
     } & PageRequest,
   ): Promise<TaskListPage>;
   listSubtasks(taskIds: readonly string[]): Promise<Subtask[]>;
-  /** taskIds 给了就只要这些需求的会话（不属于任何需求的会话不在其中）；active=true 只要没结束的。 */
-  listRuns(filter: {
-    taskIds?: readonly string[] | undefined;
-    active?: boolean | undefined;
-  }): Promise<SessionRun[]>;
-  getRun(id: string): Promise<SessionRun | null>;
   /**
    * 一张单的三段流水（runs 表），按起跑先后：task_id 是这张单的（matchedBy = task），加上 task_id 没记、单号对得上、
    * 工作流是这张单第一代或重做下一代（:r2、:r3）的老行（matchedBy = issueNumber）。工作流对不上、或没记的不收
@@ -351,9 +320,6 @@ export interface BoardStore {
     taskIds: readonly string[],
     opts?: { includeIssueMatch?: boolean },
   ): Promise<SegmentRunRecord[]>;
-  /** 每个会话最近一次 fleet plan 的步骤清单；没报过的会话不在结果里。 */
-  getPlans(runIds: readonly string[]): Promise<Map<string, RunPlan>>;
-  lastSay(runId: string): Promise<{ text: string; at: string } | null>;
   /**
    * PR 镜像（新主页「做完的」、将来「在跑的」判合并段用）：state 给了只要那个状态；merged 按 mergedAt 倒序、
    * 其余按 updatedAt 倒序，最多 limit 条（默认 50）。镜像里没有的就给不出——不直接查 GitHub。
@@ -424,16 +390,9 @@ export interface OpsStore {
 }
 
 export interface AgentStore {
-  getAgentSession(runId: string): Promise<AgentSession | null>;
-  /** fleet plan：记一条 kind=plan 的进度，载荷 { steps: [{ title, state }] }（和命令的请求体同形）；最近一条就是现行清单。 */
-  savePlan(runId: string, steps: Step[]): Promise<void>;
-  /** 会话主动报的进度（say / done / blocked）或插头读出来的（test / file / tool），进 progress_events。 */
-  appendProgress(runId: string, kind: ProgressKind, payload: unknown): Promise<void>;
   /** 空格分开的每个词都要在标题、原话、需求目录、摘要、结果摘要或改动位置里出现；只找有需求文档索引的需求。 */
   searchHistory(input: { repoId: string; query: string; limit: number }): Promise<HistoryItem[]>;
   getPullRequest(repoId: string, number: number): Promise<PullRequestRecord | null>;
-  /** 按时间正序。 */
-  listTestRuns(runId: string): Promise<TestRunRecord[]>;
   /**
    * fleet 命令的幂等键（同一会话内）：占键。键被占着没做完、而且是 takeOverBefore 之前占的（那一次多半已经死了）：
    * 原子地接过来——两个请求同时来接，只有一个接得到，另一个看到 in-flight。键用在别的命令上：other-action，不回旧结果。

@@ -37,6 +37,8 @@ const RunRecordFields = z.object({
   prNumber: z.number().int().positive().optional(),
   /** 会话干活的分支。 */
   branch: z.string().min(1).optional(),
+  /** 会话起在哪个目录（工作树路径，写进 runs.worktree_path）：每小时对账删树前认树里有没有没结束的会话。 */
+  worktreePath: z.string().min(1).optional(),
   /** 起止（ISO 8601）。 */
   startedAt: z.string().min(1),
   endedAt: z.string().min(1),
@@ -106,6 +108,7 @@ export const RunStartSchema = RunRecordFields.pick({
   workflowId: true,
   prNumber: true,
   branch: true,
+  worktreePath: true,
   startedAt: true,
 }).superRefine(onlyManualTiered);
 export type RunStart = z.infer<typeof RunStartSchema>;

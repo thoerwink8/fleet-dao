@@ -3,14 +3,12 @@ import type {
   BillingKind,
   HostId,
   OrgKind,
-  ProgressKind,
   QuotaStatus,
   QuotaUnit,
   QuotaWindowKind,
   ReadingKind,
   RouteProbeState,
   RunAsUser,
-  RunOutcome,
   ScheduleOutcome,
   StageKind,
   SubtaskState,
@@ -88,26 +86,15 @@ export const HOST_IDS = valuesOf<HostId>()([
 /** 会话能跑在哪些系统用户下：pools.run_as_user 的检查约束用它（不是 pg 枚举，值表写在约束里）。法国只有一个会话用户。 */
 export const RUN_AS_USERS = valuesOf<RunAsUser>()(['fleet-agent-carpool']);
 /**
- * 停用的会话用户（reclaude 设备上限，法国只留一个会话用户；机器上已删）。只留在 session_runs
- * 的检查约束里认历史行，新写入一律不收（引擎只按 RUN_AS_USERS 起会话，目录配置里填它装载器明确报错）。
+ * 停用的会话用户（reclaude 设备上限，法国只留一个会话用户；机器上已删）。目录配置里填它，装载器明确报错
+ * （引擎只按 RUN_AS_USERS 起会话）。
  */
 export const RETIRED_RUN_AS_USERS = ['fleet-agent-dedicated'] as const;
 export type RetiredRunAsUser = (typeof RETIRED_RUN_AS_USERS)[number];
 export const ORG_KINDS = valuesOf<OrgKind>()(['solo', 'carpool']);
-export const RUN_OUTCOMES = valuesOf<RunOutcome>()(['ok', 'failed', 'stopped', 'stalled']);
 export const SCHEDULE_OUTCOMES = valuesOf<ScheduleOutcome>()(['ok', 'partial', 'unscanned', 'failed']);
 /** 路由探针的结论（domain.ts 的 RouteProbeState）：只有 ok 让路由在线。按需探测 on_demand 已删（#1843）。 */
 export const ROUTE_PROBE_STATES = valuesOf<RouteProbeState>()(['ok', 'failed', 'not_wired', 'skipped']);
-export const PROGRESS_KINDS = valuesOf<ProgressKind>()([
-  'plan',
-  'say',
-  'tool',
-  'file',
-  'test',
-  'ask',
-  'done',
-  'blocked',
-]);
 
 /** 终态：任务不会再往前走。 */
 export const TERMINAL_TASK_STATES = ['done', 'stopped', 'failed'] as const satisfies readonly TaskState[];
@@ -156,8 +143,6 @@ export const quotaWindowKind = pgEnum('quota_window_kind', QUOTA_WINDOW_KINDS);
 export const quotaUnit = pgEnum('quota_unit', QUOTA_UNITS);
 export const quotaStatus = pgEnum('quota_status', QUOTA_STATUSES);
 export const hostId = pgEnum('host_id', HOST_IDS);
-export const runOutcome = pgEnum('run_outcome', RUN_OUTCOMES);
-export const progressKind = pgEnum('progress_kind', PROGRESS_KINDS);
 /** 还在跑时为空。 */
 export const scheduleOutcome = pgEnum('schedule_outcome', SCHEDULE_OUTCOMES);
 /** 探针还没看过的路由为空。 */

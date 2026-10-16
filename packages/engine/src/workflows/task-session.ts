@@ -9,6 +9,8 @@
 //   滤光了候选就不再避开，点名原来的路由再选一次；还派不出就照旧用它，不死等。老历史没有这个标记，选路参数和原来一样。
 // - patched('prefer-author-families')：曾让写码返工优先本单已有作者族，现在选路只按用途顺序、不再带这个字段；
 //   调用留着只为带这个标记的老历史重放不报非确定性。
+// - patched('route-by-tier')：动手选路带上这一单的派工档（rt.status.tier），按这一档的质量下界排模型（决定 0098）。
+//   老历史没有这个标记，选路参数不带档，仍按整单战绩排。
 // - 派之前再探一次选定的那条（#1409，patched('dispatch-probe')）：不通就先放掉这次预占（patched('dispatch-probe-release')，
 //   没进起会话，不能占着池），再换下一条，每轮最多探 3 条；都探不通或都被挡就停下，不起会话。
 //   没提交避让滤光之后改派原来的那条，也先探再派。老历史没有这个标记，不探、不改选路之后的那一步。
@@ -589,6 +591,9 @@ async function pickRoute(
     for (const id of probeAvoid) if (!avoidRouteIds.includes(id)) avoidRouteIds.push(id);
     // 选路不再带「优先本单已有作者族」（选路只按用途顺序）。调用留着、不加字段：带这个标记的老历史重放时命令序列不变。
     patched('prefer-author-families');
+    // 紧挨在上一个标记后面：老历史重放时这里为假，选路参数不带档，后面的活动入参和原来一样。
+    const routeByTier = patched('route-by-tier');
+    const tierName = routeByTier ? rt.status.tier?.tier : undefined;
     const got: PickRouteResult = await rt.step('pickRoute', () =>
       rt.acts.pickRoute({
         taskId: rt.input.taskId,
@@ -603,6 +608,7 @@ async function pickRoute(
         ...(stickTo ? { stickRouteId: stickTo } : {}),
         ...(prefer ? { preferRouteId: prefer } : {}),
         ...(failedChannel ? { failedChannel } : {}),
+        ...(tierName ? { tier: tierName } : {}),
         reserve: { segment: 'manual' },
       }),
     );

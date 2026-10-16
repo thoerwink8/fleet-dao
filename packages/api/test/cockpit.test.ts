@@ -97,10 +97,11 @@ describe('看板与任务', () => {
     );
     const task = board.tasks.find((t) => t.id === IDS.task12);
     const sub = task?.subtasks.find((s) => s.id === IDS.sub12a);
-    expect(sub?.activity?.text).toBe('Opus 5.5 正在写验证码过期的测试');
-    expect(sub?.progress).toEqual({ done: 1, total: 3 });
+    // 老流程的会话表和进度表在 #2357 删了：看板上不再有「此刻」、一句话状态、步骤进度（三段的单看 segmentRuns）
+    expect(sub?.activity).toBeUndefined();
+    expect(sub?.progress).toBeUndefined();
     expect(task?.progress).toEqual({ done: 0, total: 2 });
-    expect(board.now.map((n) => [n.taskId, n.runId])).toEqual([[IDS.task12, DEV_RUN_ID]]);
+    expect(board.now).toEqual([]);
     expect((await h.cockpit.request('/api/repos/nope/board', { headers: { cookie } })).status).toBe(404);
   });
 
@@ -110,13 +111,8 @@ describe('看板与任务', () => {
     const detail = TaskDetailResponse.parse(
       await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie } })).json(),
     );
-    expect(detail.runs.map((r) => r.id).sort()).toEqual([IDS.run0, DEV_RUN_ID]);
-    expect(detail.runs.find((r) => r.id === IDS.run0)?.modelName).toBe('Opus 5.5');
-    expect(detail.runs.find((r) => r.id === IDS.run0)).toMatchObject({
-      cacheReadTokens: 1_450_000,
-      cacheWriteTokens: 64_000,
-      billing: 'subscription',
-    });
+    // 老流程会话表 #2357 删了，任务详情的老会话恒为空（三段的流水在 segmentRuns）
+    expect(detail.runs).toEqual([]);
   });
 
   it('任务详情带用量汇总：按模型、按阶段、整张合计；没读到的花费记次数，不当成 0；还在跑的只记在跑', async () => {
@@ -125,35 +121,17 @@ describe('看板与任务', () => {
     const { usage } = TaskDetailResponse.parse(
       await (await h.cockpit.request(`/api/tasks/${IDS.task12}`, { headers: { cookie } })).json(),
     );
-    // 结束的那次：120000 + 64000×1.25 + 1450000×0.1 + 8000×5 = 120000 + 80000 + 145000 + 40000
+    // 这张单只有老流程的会话，而老会话表 #2357 删了：没有可汇总的用量，一律是 0 次（三段的单用量见下面的用例）
     expect(usage.total).toMatchObject({
-      runs: 1,
-      running: 1,
-      inputTokens: 120_000,
-      outputTokens: 8_000,
+      runs: 0,
+      running: 0,
+      inputTokens: 0,
+      outputTokens: 0,
       missingTokens: 0,
-      cacheReadTokens: 1_450_000,
-      cacheWriteTokens: 64_000,
-      missingCache: 0,
-      inputEquivalent: 385_000,
-      missingEquivalent: 0,
-      costUsd: 0,
-      missingCost: 1,
-      // 走的是 Claude 订阅（套餐内），花费没记：记在套餐内那一栏的没读到，不当成按量花了 $0
-      cost: {
-        metered: { runs: 0, usd: 0, missing: 0 },
-        subscription: { runs: 1, usd: 0, missing: 1 },
-        unknown: { runs: 0, usd: 0, missing: 0 },
-      },
-      missingTime: 0,
+      missingCost: 0,
     });
-    expect(usage.byModel.map((m) => [m.model, m.modelName, m.runs, m.running])).toEqual([
-      ['opus-5.5', 'Opus 5.5', 1, 1],
-    ]);
-    expect(usage.byStage.map((s) => [s.stage, s.runs, s.running, s.inputEquivalent])).toEqual([
-      ['plan', 1, 0, 385_000],
-      ['execute', 0, 1, 0],
-    ]);
+    expect(usage.byModel).toEqual([]);
+    expect(usage.byStage).toEqual([]);
   });
 
   describe('三段的单（runs 表）：任务详情按段、按模型，读不到的逐笔写明原因', () => {
@@ -277,8 +255,8 @@ describe('看板与任务', () => {
       expect(d.usage.bySegment).toEqual([
         expect.objectContaining({ segment: 'manual', runs: 0, running: 1 }),
       ]);
-      // 老流程的会话照旧按阶段算，和三段一起进整张合计
-      expect(d.usage.total).toMatchObject({ runs: 1, running: 2 });
+      // 老流程的会话 #2357 删了，整张合计只剩三段这一笔在跑
+      expect(d.usage.total).toMatchObject({ runs: 0, running: 1 });
     });
 
     it('【失败】token 一样都没记到：写明「四样 token 都没记到」，当量、token 记没读到，不当 0', async () => {

@@ -1,7 +1,7 @@
 // 选路的输入与结果。输入由引擎的 pickRoute 端口从库里取齐（候选路由、熔断、战绩），结果只有三种：派、等、派不出。
 // 时刻一律 ISO 字符串（和熔断一样），认不出就抛 RoutingInputError，不当成「没有」。
 import type { HostId, OrgKind, QuotaWindowKind, RouteProbeState, StageKind } from '@fleet-dao/shared';
-import type { RoutingPolicy } from './policy.ts';
+import type { RoutingPolicyInput } from './policy.ts';
 
 /**
  * 和 packages/db 的 queries/candidates.ts 的 Blocker 同一套取值（候选查询已经算好的被挡原因）。
@@ -57,15 +57,15 @@ export interface BreakerFacts {
   probeAt?: string;
 }
 
-/** 这条路由在这个阶段类型上最近的战绩（引擎按近 7 天真实结局算，只数算路由账的失败）。 */
+/** 这条路由在这个阶段类型上最近的战绩（引擎按近 14 天真实结局算，只数算路由账的失败）。 */
 export interface RouteRecord {
   samples: number;
   successes: number;
 }
 
 /**
- * 一个模型的动手战绩（db 的 ModelTrack 同形，engine 不依赖 db 各写一份）：近 7 天第一段动手是它、到了终态的单。
- * 选路按它算每单期望成本和一轮做成率（rank.ts 的 modelOrder，PLAN 3f）。
+ * 一个模型的动手战绩（db 的 ModelTrack 同形，engine 不依赖 db 各写一份）：近 14 天第一段动手是它、到了终态的单，
+ * 后面的段也算它的。byTier 关掉时选路按它算每单期望成本和一轮做成率（rank.ts 的 modelOrder，决定 0095）。
  */
 export interface ModelTrackFacts {
   modelId: string;
@@ -74,6 +74,24 @@ export interface ModelTrackFacts {
   oneRound: number;
   segments: number;
   segmentMinutes: number;
+}
+
+/** 派工档：和 runner/tier.ts 的 Tier、runs.tier 同一套（快档 / 中档 / 主力档）。 */
+export type RouteTier = 'fast' | 'medium' | 'heavyweight';
+
+/**
+ * 一个模型在一个派工档上的第一段动手战绩（db 的 ModelTierTrack 同形）。四个结局互斥，加起来等于 firstSegs。
+ * 选路只取和这一单同一档的行，按收缩后的质量下界排（决定 0098）。
+ */
+export interface ModelTierTrackFacts {
+  modelId: string;
+  tier: RouteTier;
+  firstSegs: number;
+  onePass: number;
+  sentBack: number;
+  noDeliver: number;
+  notDone: number;
+  minutes: number;
 }
 
 /** 一条路由的全部事实：候选查询的一行 + 给人看的名字 + 熔断 + 战绩。 */
@@ -139,7 +157,7 @@ export interface RouteFacts {
   /** 这个池此刻在跑的会话数（按池算：已开工、没结束）。 */
   inFlight: number;
   /**
-   * 这个池已选定、还没开工的会话数（按池算：session_runs 里没开工、没结束的行）。并发上限把它算进去：
+   * 这个池已选定、还没开工的会话数（按池算：预占着名额、runs 里没开工的）。并发上限把它算进去：
    * 一批任务同时来选路时，只数已开工的，每个任务都会看到 0 个在跑。
    */
   reserved: number;
@@ -241,14 +259,25 @@ export interface ChooseRouteInput {
    */
   carpoolRegistry?: CarpoolRegistryView;
   /**
-   * 各模型的动手战绩（PLAN 3f）：只在用途列在 policy.trackScore.stages 里时用。不给 = 没读（或没读成），模型之间照人排的先后，
-   * 和以前一样；给了空数组 = 读成了、近期一单都没有，同样不动。
+   * 各模型的动手战绩（PLAN 3f）：只在用途列在 policy.trackScore.stages 里、又没按档排时用。不给 = 没读（或没读成），
+   * 模型之间照人排的先后，和以前一样；给了空数组 = 读成了、近期一单都没有，同样不动。
    */
   modelTracks?: ModelTrackFacts[];
+  /**
+   * 这一单的派工档（快档 / 中档 / 主力档）。不给 = 不知道档（老历史、冷验收、还没分档），动手不按档排。
+   * 工作流只在 patched('route-by-tier') 下才带。
+   */
+  tier?: RouteTier;
+  /**
+   * 各模型各档的第一段动手战绩（决定 0098）。只在 trackScore.byTier 开着、又给了 tier 时用这一档的行。
+   * 不给 = 没读；给了空数组 = 读成了、这一窗没有分档战绩，不退回 modelTracks。
+   */
+  modelTierTracks?: ModelTierTrackFacts[];
   /** [0, 1) 的随机数，试探用；由工作流经 decide 生成、记进历史。试探开着时必须给。 */
   draw?: number;
   now: string;
-  policy?: Partial<RoutingPolicy>;
+  /** 缺的项取默认。trackScore、pace 可以只给要改的那几项。 */
+  policy?: RoutingPolicyInput;
 }
 
 /**
@@ -288,8 +317,9 @@ export interface Block {
 /**
  * pace-behind / pace-ahead：按消耗进度（#2363）落后够多往前提 / 超前够多往后放，文案里写按时间该用和实际用了几成；
  * fast-reset：pace 关着时的老排法，快清零还没用完往前提。
- * track-score：这个模型的动手战绩分（每单期望分钟、一轮做成率），按它在模型之间挪了位置也写在这里；
- * poor-one-round：一轮做成率明显差，不进这个用途（别的都派不了、也不是只差空位时兜底）。
+ * track-score：这个模型的动手战绩分。按档排时是这一档的质量下界和每段分钟；byTier 关掉时是每单期望分钟和一轮做成率。
+ *   按它在模型之间挪了位置也写在这里。
+ * poor-one-round：一轮做成率明显差，不进这个用途（别的都派不了、也不是只差空位时兜底）。只在 byTier 关掉时有。
  */
 export type Nudge =
   | 'fast-reset'

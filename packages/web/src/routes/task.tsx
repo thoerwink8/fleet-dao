@@ -102,7 +102,7 @@ function TaskActionBar({ d }: { d: TaskDetail }) {
   );
 }
 
-/** 老流程（会话 session_runs）的那几块：会话时间线、时间与用量。 */
+/** 老流程会话的那几块：会话时间线、时间与用量。 */
 function SessionPart({ d, now, mixed }: { d: TaskDetail; now: number; mixed: boolean }) {
   const { data: routing } = useRouting();
   if (mixed) {

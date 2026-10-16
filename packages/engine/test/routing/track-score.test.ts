@@ -3,11 +3,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   chooseRoute,
+  type ModelTierTrackFacts,
   type ModelTrackFacts,
   type RouteFacts,
   resolveRoutingPolicy,
 } from '../../src/routing/index.ts';
-import { modelOrder, scoreOf } from '../../src/routing/rank.ts';
+import { modelOrder, scoreOf, tierQuality } from '../../src/routing/rank.ts';
 import { entry, input, route } from './helpers.ts';
 
 const track = (
@@ -19,7 +20,7 @@ const track = (
   segmentMinutes: number,
 ): ModelTrackFacts => ({ modelId, tasks, done, oneRound, segments, segmentMinutes });
 
-/** 法国库近 7 天（按第一段动手的模型记）。 */
+/** 法国库 10-14 查的近 7 天快照（按第一段动手的模型记）。byTier 关掉时仍用这组数排，顺序不随窗口从 7 天改成 14 天变。 */
 const FRANCE: ModelTrackFacts[] = [
   track('grok-4.7', 157, 138, 80, 300, 4320),
   track('cursor-auto', 35, 29, 6, 100, 710),
@@ -42,6 +43,25 @@ const MODELS = [
 ];
 const routesOf = (over: Record<string, Partial<RouteFacts>> = {}) =>
   MODELS.map((m) => route(m, { modelId: m, modelName: m, ...over[m] }));
+
+const row = (
+  modelId: string,
+  tier: ModelTierTrackFacts['tier'],
+  firstSegs: number,
+  onePass: number,
+  sentBack: number,
+  noDeliver: number,
+  notDone: number,
+  minutes: number,
+): ModelTierTrackFacts => ({ modelId, tier, firstSegs, onePass, sentBack, noDeliver, notDone, minutes });
+
+/** 同一模型快档 25/35、主力档 24/109；对照模型快档弱、主力档强。 */
+const SPLIT: ModelTierTrackFacts[] = [
+  row('cursor-auto', 'fast', 35, 25, 10, 0, 0, 350),
+  row('cursor-auto', 'heavyweight', 109, 24, 50, 10, 25, 2180),
+  row('grok-4.7', 'fast', 30, 5, 10, 5, 10, 300),
+  row('grok-4.7', 'heavyweight', 50, 40, 8, 1, 1, 1500),
+];
 
 const policy = resolveRoutingPolicy();
 
@@ -94,7 +114,7 @@ describe('选路：动手按战绩', () => {
     const r = chooseRoute(input(routesOf(), { modelTracks: FRANCE }));
     if (r.kind !== 'dispatch') throw new Error(`没派出去：${JSON.stringify(r)}`);
     expect(r.routeId).toBe('grok-4.7');
-    expect(r.why).toContain('动手战绩：近 7 天 157 单成 138、一轮成 80（51%）');
+    expect(r.why).toContain('动手战绩：近 14 天 157 单成 138、一轮成 80（51%）');
     expect(r.verdicts.map((v) => v.routeId)).toEqual([
       'grok-4.7',
       'sonnet-5.5',
@@ -183,5 +203,137 @@ describe('选路：动手按战绩', () => {
         }),
       ),
     ).toThrow(/重复/);
+  });
+
+  it('byTier 关掉：分档战绩就算会翻顺序，模型先后仍和改前一字不差', () => {
+    const off = resolveRoutingPolicy({ trackScore: { byTier: false } });
+    const scores = new Map(FRANCE.map((t) => [t.modelId, scoreOf(t, off)]));
+    expect(modelOrder(MODELS, scores, off)).toEqual([
+      'grok-4.7',
+      'sonnet-5.5',
+      'cursor-auto',
+      'glm-5.3-flash',
+      'opus-5.5',
+      'gpt-5.6-luna',
+      'deepseek-flash',
+    ]);
+    const r = chooseRoute(
+      input(routesOf(), {
+        policy: { trackScore: { byTier: false } },
+        tier: 'heavyweight',
+        modelTracks: FRANCE,
+        modelTierTracks: [
+          row('cursor-auto', 'heavyweight', 109, 24, 50, 10, 25, 2000),
+          row('grok-4.7', 'heavyweight', 50, 40, 8, 1, 1, 1500),
+        ],
+      }),
+    );
+    if (r.kind !== 'dispatch') throw new Error('没派出去');
+    expect(r.verdicts.map((v) => v.routeId)).toEqual([
+      'grok-4.7',
+      'sonnet-5.5',
+      'cursor-auto',
+      'glm-5.3-flash',
+      'opus-5.5',
+      'gpt-5.6-luna',
+      'deepseek-flash',
+    ]);
+    expect(r.why).toContain('近 14 天');
+  });
+});
+
+describe('选路：动手按派工档', () => {
+  const pair = [
+    route('cursor-auto', { modelId: 'cursor-auto', modelName: 'cursor' }),
+    route('grok-4.7', { modelId: 'grok-4.7', modelName: 'grok' }),
+  ];
+
+  it('本档只有它自己时，收缩后的 m 等于自己的一段过率', () => {
+    const m = 24 / 109;
+    const q = m - Math.sqrt((m * (1 - m)) / 113);
+    expect(tierQuality(24, 109, m, 4)).toBeCloseTo(q, 12);
+    expect(q).toBeCloseTo(0.181203, 5);
+  });
+
+  it('同一模型快档 25/35 仍排前面；主力档 24/109 排在这一档更好的模型后面', () => {
+    const heavy = chooseRoute(input(pair, { tier: 'heavyweight', modelTierTracks: SPLIT }));
+    if (heavy.kind !== 'dispatch') throw new Error('没派出去');
+    expect(heavy.verdicts.map((v) => v.routeId)).toEqual(['grok-4.7', 'cursor-auto']);
+    expect(heavy.verdicts[0]?.nudges[0]?.text).toContain('主力档');
+    expect(heavy.verdicts[0]?.nudges[0]?.text).toContain('按这一档排第 1 个模型（人排第 2 个）');
+    expect(heavy.why).toContain('cursor-auto');
+
+    const fast = chooseRoute(input(pair, { tier: 'fast', modelTierTracks: SPLIT }));
+    if (fast.kind !== 'dispatch') throw new Error('没派出去');
+    expect(fast.verdicts.map((v) => v.routeId)).toEqual(['cursor-auto', 'grok-4.7']);
+    expect(fast.verdicts[0]?.nudges[0]?.text).toContain('快档 35 单一段过 25');
+  });
+
+  it('8 单一段过 1 单不再被挪到最后', () => {
+    const routes = [
+      route('sonnet-5.5', { modelId: 'sonnet-5.5', modelName: 'sonnet' }),
+      route('grok-4.7', { modelId: 'grok-4.7', modelName: 'grok' }),
+      route('opus-5.5', { modelId: 'opus-5.5', modelName: 'opus' }),
+    ];
+    const r = chooseRoute(
+      input(routes, {
+        tier: 'heavyweight',
+        modelTierTracks: [
+          row('sonnet-5.5', 'heavyweight', 8, 1, 4, 1, 2, 200),
+          row('grok-4.7', 'heavyweight', 20, 10, 6, 2, 2, 400),
+        ],
+      }),
+    );
+    if (r.kind !== 'dispatch') throw new Error('没派出去');
+    expect(r.verdicts.map((v) => v.routeId)).toEqual(['grok-4.7', 'sonnet-5.5', 'opus-5.5']);
+    const sonnet = r.verdicts.find((v) => v.routeId === 'sonnet-5.5');
+    expect(sonnet?.nudges.some((n) => n.kind === 'poor-one-round')).toBe(false);
+  });
+
+  it('质量分相同才比每段分钟；差不到 0.08 不因分钟往前挪', () => {
+    const tie = chooseRoute(
+      input(pair, {
+        tier: 'medium',
+        modelTierTracks: [
+          row('cursor-auto', 'medium', 20, 10, 6, 2, 2, 400),
+          row('grok-4.7', 'medium', 20, 10, 6, 2, 2, 100),
+        ],
+      }),
+    );
+    if (tie.kind !== 'dispatch') throw new Error('没派出去');
+    expect(tie.verdicts.map((v) => v.routeId)).toEqual(['grok-4.7', 'cursor-auto']);
+
+    const close = chooseRoute(
+      input(pair, {
+        tier: 'medium',
+        modelTierTracks: [
+          row('cursor-auto', 'medium', 40, 20, 12, 4, 4, 800),
+          row('grok-4.7', 'medium', 40, 18, 12, 4, 6, 80),
+        ],
+      }),
+    );
+    if (close.kind !== 'dispatch') throw new Error('没派出去');
+    expect(close.verdicts.map((v) => v.routeId)).toEqual(['cursor-auto', 'grok-4.7']);
+  });
+
+  it('这一档没有行：留在人排的位置，不退回整单战绩', () => {
+    const r = chooseRoute(input(pair, { tier: 'medium', modelTracks: FRANCE, modelTierTracks: SPLIT }));
+    if (r.kind !== 'dispatch') throw new Error('没派出去');
+    expect(r.verdicts.map((v) => v.routeId)).toEqual(['cursor-auto', 'grok-4.7']);
+    expect(r.verdicts.flatMap((v) => v.nudges)).toEqual([]);
+  });
+
+  it('分档战绩认不出：选路报错', () => {
+    expect(() => chooseRoute(input(pair, { tier: 'nope' as 'fast', modelTierTracks: SPLIT }))).toThrow(
+      /派工档认不出/,
+    );
+    expect(() =>
+      chooseRoute(
+        input(pair, {
+          tier: 'fast',
+          modelTierTracks: [row('cursor-auto', 'fast', 3, 1, 1, 1, 1, 10)],
+        }),
+      ),
+    ).toThrow(/分档战绩对不上/);
   });
 });
