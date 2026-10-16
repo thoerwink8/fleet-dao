@@ -6,6 +6,7 @@
 import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { BRIDGE_CONNECT_TIMEOUT_TEXT, KILL_TEXT } from '@fleet-dao/adapters';
 import {
   notifications,
   quotaWindows,
@@ -15,7 +16,6 @@ import {
   toRoute,
   upsertAlert,
 } from '@fleet-dao/db';
-import { BRIDGE_CONNECT_TIMEOUT_TEXT, KILL_TEXT } from '@fleet-dao/adapters';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { noteOnlyOptions } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -1117,7 +1117,11 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
 
     const bridgeTimeout = (): FakeMirasimScript => ({
       noAccept: true,
-      report: { launchError: `${BRIDGE_CONNECT_TIMEOUT_TEXT}（100 秒）`, terminal: undefined, ledger: undefined },
+      report: {
+        launchError: `${BRIDGE_CONNECT_TIMEOUT_TEXT}（100 秒）`,
+        terminal: undefined,
+        ledger: undefined,
+      },
     });
     const noFirstFrame = (): FakeMirasimScript => ({
       report: {
@@ -1134,7 +1138,9 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
       const down = await row(routeId);
       expect(down).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 1 });
       expect(down?.probeDetail).toContain('连探两次都没通');
-      expect(down?.probeDetail).toContain(`桥接连 Mirasim 超时：没起来：${BRIDGE_CONNECT_TIMEOUT_TEXT}（100 秒）`);
+      expect(down?.probeDetail).toContain(
+        `桥接连 Mirasim 超时：没起来：${BRIDGE_CONNECT_TIMEOUT_TEXT}（100 秒）`,
+      );
       expect(down?.probeDetail).not.toContain('回答认不出');
       expect(down?.probeDetail).not.toContain('会话起不来');
       expect(await hold()).toBeUndefined();
