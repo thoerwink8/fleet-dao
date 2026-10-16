@@ -72,7 +72,6 @@ import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
   AUTO_REDISPATCH_CODES,
-  EN1_ACTIVITY_TIMEOUT_CODES,
   type Avoid,
   afterDispatchProbe,
   bump,
@@ -80,6 +79,7 @@ import {
   dispatchProbeLine,
   dispatchProbeStopText,
   EMPTY_DISPATCH_PROBE,
+  EN1_ACTIVITY_TIMEOUT_CODES,
   failureLooksLikeBare401,
   isDispatchProbePassOnly,
   mergeAvoid,
