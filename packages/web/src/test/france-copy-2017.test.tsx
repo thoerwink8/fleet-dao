@@ -67,9 +67,10 @@ test('发版卡的「最多 N 分钟」和发版上限读同一份 session-wait'
   const sh = readFileSync(path.join(repoRoot, 'deploy/france.sh'), 'utf8');
   expect(sh).toMatch(/RELEASE_REQUEST_FILES=\([^)]*session-wait\.mjs/);
   const auto = readFileSync(path.join(repoRoot, 'deploy/france/auto-release/lib.mjs'), 'utf8');
-  expect(auto).toContain("'deploy/france/release-request/session-wait.mjs'");
+  // 接活脚本归自动档（#2728）：自动发布每轮比副本哈希的清单（INSTALLED_COPIES）里有它，测试核对清单和 france.sh 一样
+  expect(auto).toMatch(/src: 'deploy\/france\/release-request',\s*files: \[[^\]]*'session-wait\.mjs'/);
   const listed = readFileSync(path.join(repoRoot, 'deploy/test/release-request.test.mjs'), 'utf8');
-  expect(listed).toContain("'deploy/france/release-request/session-wait.mjs'");
+  expect(listed).toContain("'session-wait.mjs'");
 
   // lib.mjs 会拉 auto-release；vitest 改写 import.meta.url 后 fileURLToPath 会炸，所以用 Node 自己对。
   const printed = execFileSync(

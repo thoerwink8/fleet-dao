@@ -4,7 +4,7 @@
 // 改这里之前必须知道：
 // - 发布只走驾驶舱按钮（决定 0032）：落后主线几个提交只是数（驾驶舱「落后主线 N 个提交」，env-view 的 versionFact 数），**不算毛病**——
 //   没人去发它，报警只会天天挂着。这里只报读数没查成（单元没报到、主线头读不到、在用的读不到、状态文件认不出）、规矩同步和装机自动档没成、
-//   装机脚本的人工档落后（要人跑）。
+//   装机脚本的人工档落后（要人跑）、root 跑的脚本副本和在用版本不一致（当轮就报）、在用版本的依赖发版后被动过（#2728）。
 // - 状态文件的字段跟 deploy/france/auto-release/lib.mjs 走（STATE_SCHEMA）；test/deploy-lag.test.ts 拿那边真跑出来的状态核对。
 // - 这一项会随时间自己变红（单元停了），发布脚本只把它标待处理、不退回（deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 // - 公网看得到 /healthz：对外的话不带提交号、路径、内部名；细节只进日志和报警正文。报警只用不带时长的话，
@@ -84,6 +84,29 @@ export const DeployLagState = z.object({
     ])
     .nullable(),
   last: z.object({ action: z.string(), detail: z.string(), at: Iso }).nullable(),
+  /**
+   * /usr/local/lib 下 root 跑的脚本副本和在用那一版的原件比哈希（#2728，lib.mjs 的 installedStep，每轮重算）；老版本没有这个字段。
+   * drift 当轮就报（不等 24 小时）：副本不对，修复合进去了在法国也不生效。
+   */
+  installed: z
+    .object({
+      commit: Sha,
+      checkedAt: Iso,
+      result: z.enum(['ok', 'drift', 'unchecked']),
+      drift: z.array(z.string()),
+      detail: z.string(),
+    })
+    .nullable()
+    .optional(),
+  /** 在用那一版依赖的指纹（#2728，lib.mjs 的 depsStep）：changed 由自动发布当场报过警；unchecked 这里报。 */
+  deps: z
+    .object({
+      commit: Sha,
+      result: z.enum(['ok', 'changed', 'unchecked']),
+      detail: z.string(),
+    })
+    .nullable()
+    .optional(),
 });
 export type DeployLagState = z.infer<typeof DeployLagState>;
 
@@ -207,6 +230,42 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
       steady: '装机的自动档没装成',
       detail: `装到 ${short(st.tier.commit)} 没成：${st.tier.detail}`,
       alreadyAlerted: true,
+    });
+  }
+
+  // 脚本副本和在用版本不一致：当轮就报（#2728；以前接活脚本归人工档，副本落后主线一天多、修复没生效，要等装机脚本落后 24 小时才报）。
+  // 只认这一轮对的就是在用的那一版（刚切了版本、自动发布还没跑到的那一轮不算）。
+  const installed = st.installed;
+  const currentSha = 'sha' in input.current ? input.current.sha : null;
+  if (installed && installed.commit === currentSha && installed.result === 'drift') {
+    add({
+      code: 'installed_drift',
+      message: '装着的发版脚本和在用版本不一致',
+      steady: '装着的发版脚本和在用版本不一致',
+      detail: `${installed.detail}：装机自动档（france.sh --auto-tier）没换上，看 journalctl -u fleet-auto-release -n 30`,
+    });
+  } else if (installed && installed.commit === currentSha && installed.result === 'unchecked') {
+    add({
+      code: 'installed',
+      message: '没查成：装着的发版脚本对不对得上在用版本',
+      steady: '装着的发版脚本对没对上没查成',
+      detail: installed.detail,
+    });
+  }
+  if (st.deps && st.deps.commit === currentSha && st.deps.result === 'changed') {
+    add({
+      code: 'deps_changed',
+      message: '在用版本的依赖发版后被动过',
+      steady: '在用版本的依赖发版后被动过',
+      detail: st.deps.detail,
+      alreadyAlerted: true,
+    });
+  } else if (st.deps && st.deps.commit === currentSha && st.deps.result === 'unchecked') {
+    add({
+      code: 'deps',
+      message: '没查成：在用版本的依赖指纹',
+      steady: '在用版本的依赖指纹没查成',
+      detail: st.deps.detail,
     });
   }
 
