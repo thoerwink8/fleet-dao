@@ -7,6 +7,7 @@
 // 但别的模型都派不了、又不只是在等空位时照样派它——打分绝不能把唯一能用的排没。
 
 import { blocksFor, type FilterContext, familyKey } from './filter.ts';
+import { applyFloor, floorOf } from './floor.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
@@ -62,13 +63,17 @@ function contextOf(
 }
 
 /** 排序 → 每条算被挡原因 → 分组。chooseRoute 和 stageAllOpen 共用这一段，熔断算不算挡着才不会两套。 */
-function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
+function judgeStage(
+  input: ChooseRouteInput,
+  ctx: FilterContext,
+): { judged: Judged[]; floorNote: string | null } {
   const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));
   const rows = [...input.order]
     .sort((a, b) => a.position - b.position)
     .map((entry) => ({ route: factsOf.get(entry.routeId) as RouteFacts, entry }));
   // 挡因先算（只看路由自己和这一单，不看排序）：强档让不让位只看没被硬挡的渠道（#2724：人关掉的路由持平不能拦住让位）
   const blocksOf = new Map(rows.map(({ route, entry }) => [route.routeId, blocksFor(route, entry, ctx)]));
+  const floorNote = floorStage(input, ctx, rows, blocksOf);
   const hardBlocked = new Set(
     [...blocksOf].flatMap(([id, blocks]) => (groupOf(blocks).kind === 'hard' ? [id] : [])),
   );
@@ -82,10 +87,45 @@ function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
     STAGE_NAMES[input.stage],
     strengthOf(input, ctx, scores, hardBlocked),
   );
-  return ranked.map((item) => {
+  const judged = ranked.map((item) => {
     const blocks = blocksOf.get(item.route.routeId) ?? [];
     return { item, blocks, group: groupOf(blocks) };
   });
+  return { judged, floorNote };
+}
+
+/**
+ * 能力下限（#2725，floor.ts）：排序之前把够不上的路由加一条硬挡，写明为什么没派它；降了档回那一句（写进派工理由）。
+ * 人的指令不驳：整段钉住、钉住的行、人给这张单指定了模型（floorWaived）都不挡。
+ * 判「够格的是不是全被挡」时不算「这一问只派别家」的换族挡因：冷验收按族一家家问，别家够格的问到它那一族时照样能派，
+ * 不能因为这一问避开了别家就提前降档。
+ */
+function floorStage(
+  input: ChooseRouteInput,
+  ctx: FilterContext,
+  rows: readonly { route: RouteFacts; entry: StageRouteEntry }[],
+  blocksOf: Map<string, Block[]>,
+): string | null {
+  const floor = floorOf(input.stage, input.tier);
+  if (!floor || !input.tier || input.stagePinned || input.floorWaived) return null;
+  const otherFamilies = ctx.avoid.families.size > 0;
+  const loose: FilterContext = otherFamilies
+    ? { ...ctx, avoid: { ...ctx.avoid, families: new Set<string>() } }
+    : ctx;
+  const candidates = rows.filter(({ entry }) => !entry.pinned);
+  const decision = applyFloor(
+    candidates.map(({ route, entry }) => ({
+      route,
+      blocks: blocksOf.get(route.routeId) ?? [],
+      ...(otherFamilies ? { judgeBlocks: blocksFor(route, entry, loose) } : {}),
+    })),
+    input.stage,
+    input.tier,
+    floor,
+    ctx.now,
+  );
+  for (const [id, block] of decision.below) blocksOf.get(id)?.push(block);
+  return decision.lowered;
 }
 
 /**
@@ -172,7 +212,7 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
     return { kind: 'none', reason: `${stageName}阶段一条路由都没配`, verdicts: [] };
   }
 
-  const judged = judgeStage(input, ctx);
+  const { judged, floorNote } = judgeStage(input, ctx);
   const verdicts = judged.map((j, i) => verdictOf(j, i));
 
   const ready = gatePoor(
@@ -193,7 +233,7 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
           breakerTrial ? BREAKER_TRIAL : null,
         )
       : withNotes(whyFirst(stageName, chosen, judged), breakerTrial ? BREAKER_TRIAL : null);
-    return dispatch(route, why, trial, null, verdicts);
+    return dispatch(route, withNotes(why, floorNote), trial, null, verdicts);
   }
 
   const allOpen = allOpenTrial(judged);
@@ -324,7 +364,7 @@ export function stageAllOpen(input: ChooseRouteInput): AllOpenCheck {
   if (input.order.length === 0) {
     return { allOpen: false, detail: `${stageName}阶段一条路由都没配` };
   }
-  const judged = judgeStage(input, contextOf(input, policy, now));
+  const { judged } = judgeStage(input, contextOf(input, policy, now));
   const ready = judged.filter((j) => j.group.kind === 'ready');
   // 有能派的就先派它，走不到全熔断那一支：这里和 chooseRoute 一样，ready 优先。
   if (ready.length === 0 && allOpenTrial(judged)) return { allOpen: true };

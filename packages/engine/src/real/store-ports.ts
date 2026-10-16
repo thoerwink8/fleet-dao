@@ -28,6 +28,7 @@ import {
   type Db,
   type EndedPoolRun,
   endedPoolRuns,
+  latestRunOfTask,
   markChannelDisabled,
   modelExecuteTracks,
   modelTierTracks,
@@ -75,6 +76,7 @@ import {
   type OrgPlanView,
   type RouteFacts,
   type RouteRecord,
+  type RouteTier,
   type RouteWaitKind,
   RoutingInputError,
   type RoutingPolicyInput,
@@ -650,6 +652,9 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const reserve = input.reserve;
       // 人给这张单这一段指定的模型（task_route_pins）：只有三段的一段来选路（带 reserve）才有；读不到照抛，不当成没指定
       let pin: PinnedModel | null = null;
+      // 验收这一段的派工档（#2725 能力下限）：工作流不带，按这张单最近一次动手记下的档（runs.tier）从库里读；
+      // 读不到照抛，没记过档的（老单、还没动手）为空 = 不设下限
+      let taskTier: RouteTier | undefined;
       /** 读一遍事实、选一次。要预占时，选中的池在预占那一下被别的单占满了抛 SlotTaken（这一次的结论不作数）。 */
       const pickOnce = async (): Promise<PickRouteResult> => {
         const now = clock();
@@ -711,7 +716,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(await carpoolRegistryFor(all.routes)),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
-        const tracks = await tracksFor(input.stage, now, input.tier);
+        const tier = input.tier ?? taskTier;
+        const tracks = await tracksFor(input.stage, now, tier);
         const base = {
           stage: input.stage,
           configured: facts.configured,
@@ -724,7 +730,9 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           exploreSeed: input.taskId,
           ...orgFacts,
           ...(input.uiWork ? { uiWork: true } : {}),
-          ...(input.tier ? { tier: input.tier } : {}),
+          ...(tier ? { tier } : {}),
+          // 人给这张单指定了模型：人的指令，不拿能力下限驳回（#2725）
+          ...(pin ? { floorWaived: `人在驾驶舱给这张单指定了 ${pinLabel(pin)}` } : {}),
           ...(tracks.modelTracks ? { modelTracks: tracks.modelTracks } : {}),
           ...(tracks.modelTierTracks ? { modelTierTracks: tracks.modelTierTracks } : {}),
           ...policy,
@@ -867,6 +875,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         );
       }
       pin = pinnedOf(await readTaskRoutePin(db, input.taskId, reserve.segment));
+      if (input.stage === SEGMENT_STAGE.verify && !input.tier) {
+        taskTier =
+          (await latestRunOfTask(db, { taskId: input.taskId, segment: 'manual' }))?.tier ?? undefined;
+      }
       const pinned = pin;
       const said = (r: PickRouteResult): PickRouteResult => {
         if (!pinned) return r;
