@@ -1133,12 +1133,16 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
     };
     const claudeRoute = () => mirasimRoute({ modelId: 'claude-opus-5-5', upstreamModel: 'claude-opus-5-5' });
 
-    it('Mirasim 的 Claude 会话：家里装着的和仓里一样，起会话', async () => {
+    it('Mirasim 的 Claude 会话：家里装着的和仓里一样，起会话，提醒报「没有问题」（空数组）', async () => {
+      const reported: [string, readonly string[]][] = [];
       const r = rig({
         route: claudeRoute(),
         deps: {
           subagentGuard: () => readSubagentGuard(),
           subagentsHome: installedHome(['Explore.md', 'general-purpose.md', 'Plan.md']),
+          reportSubagentDefs: async (user, problems) => {
+            reported.push([user, problems]);
+          },
         },
         driverRun: async (spec) => {
           commitInTree(spec);
@@ -1147,28 +1151,71 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
       });
       await r.run(r.input(), ctx());
       expect(r.specs).toHaveLength(1);
+      expect(reported).toEqual([[USER, []]]);
     });
 
-    it('【故意造出的失败】Mirasim 的 Claude 会话：家里缺一份，不起会话、可重试', async () => {
+    it('Mirasim 的 Claude 会话：家里缺一份，照常起会话（不挡），提醒收到这一份的问题（#2834）', async () => {
+      const reported: [string, readonly string[]][] = [];
       const r = rig({
         route: claudeRoute(),
         deps: {
           subagentGuard: () => readSubagentGuard(),
           subagentsHome: installedHome(['Explore.md', 'Plan.md']),
+          reportSubagentDefs: async (user, problems) => {
+            reported.push([user, problems]);
+          },
+        },
+        driverRun: async (spec) => {
+          commitInTree(spec);
+          return report({ hostId: 'mirasim' });
         },
       });
-      await expect(r.run(r.input(), ctx())).rejects.toMatchObject({
-        code: 'SEGMENT_SUBAGENT_DEFS',
-        retryable: true,
+      await r.run(r.input(), ctx());
+      expect(r.specs).toHaveLength(1);
+      expect(reported).toHaveLength(1);
+      expect(reported[0]?.[0]).toBe(USER);
+      expect(reported[0]?.[1]).toEqual([expect.stringContaining('general-purpose')]);
+    });
+
+    it('Mirasim 的 Claude 会话：报提醒的那一下抛错，只记日志，照常起会话', async () => {
+      const logs: { message: string; fields?: Record<string, unknown> | undefined }[] = [];
+      const r = rig({
+        route: claudeRoute(),
+        deps: {
+          subagentGuard: () => readSubagentGuard(),
+          subagentsHome: installedHome(['Explore.md', 'Plan.md']),
+          reportSubagentDefs: async () => {
+            throw new Error('库连不上');
+          },
+          log: (message, fields) => logs.push({ message, fields }),
+        },
+        driverRun: async (spec) => {
+          commitInTree(spec);
+          return report({ hostId: 'mirasim' });
+        },
       });
-      expect(r.specs).toHaveLength(0);
+      await r.run(r.input(), ctx());
+      expect(r.specs).toHaveLength(1);
+      expect(logs).toEqual([
+        {
+          message: '子代理定义对不上的提醒没报成（不挡会话）',
+          fields: { user: USER, error: '库连不上' },
+        },
+      ]);
     });
 
     it('Mirasim 的非 Claude 会话：不核对家里装的，照旧挡掉全部子代理', async () => {
       let seen: ReturnType<typeof settingsOf> | undefined;
+      const reported: unknown[] = [];
       const r = rig({
         route: mirasimRoute(),
-        deps: { subagentGuard: () => readSubagentGuard(), subagentsHome: installedHome([]) },
+        deps: {
+          subagentGuard: () => readSubagentGuard(),
+          subagentsHome: installedHome([]),
+          reportSubagentDefs: async (...args) => {
+            reported.push(args);
+          },
+        },
         driverRun: async (spec) => {
           seen = settingsOf(spec.cwd);
           commitInTree(spec);
@@ -1177,6 +1224,7 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
       });
       await r.run(r.input(), ctx());
       expect(seen?.permissions.deny).toEqual(['Agent(Explore)', 'Agent(Plan)', 'Agent(general-purpose)']);
+      expect(reported).toEqual([]);
     });
   });
 
