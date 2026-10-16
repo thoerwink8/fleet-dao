@@ -101,6 +101,8 @@ export async function openApproval(
       title: input.title,
       body: `请批 ${input.holds.join('、')}：PR #${input.prNumber}（${input.head}）。${input.summary}`,
       options: approvalOptions(input.prNumber),
+      // 人闸要人批（#2729）：批不批只有创始人能定
+      reason: 'human-only',
     });
     return { created: row !== undefined };
   });

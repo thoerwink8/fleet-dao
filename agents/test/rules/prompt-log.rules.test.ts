@@ -79,7 +79,7 @@ describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', { 
     expect(TARGETS).not.toContain('prompt-log.mjs');
   });
 
-  it('项目设置里前台钩子的 timeout 按秒写，不超过 600；后台叫醒的（asyncRewake，只有盯账那条）不超过 4 小时', () => {
+  it('项目设置里前台钩子的 timeout 按秒写，不超过 600；后台叫醒的（asyncRewake，只有盯账、工人终态两条）不超过 4 小时', () => {
     const settings = JSON.parse(
       readFileSync(fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)), 'utf8'),
     ) as {
@@ -92,6 +92,7 @@ describe('规矩：创始人每条消息一到就落盘（2026-10-04 补）', { 
     const background = all.filter((x) => x.asyncRewake === true);
     expect(background.map((h) => h.command)).toEqual([
       'node "$CLAUDE_PROJECT_DIR/agents/hooks/inbox-watch.mjs"',
+      'node "$CLAUDE_PROJECT_DIR/agents/hooks/work-watch.mjs"',
     ]);
     for (const h of background) expect(h.timeout ?? 0).toBeLessThanOrEqual(4 * 3600);
   });

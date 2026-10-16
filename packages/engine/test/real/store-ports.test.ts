@@ -223,6 +223,7 @@ describe('选路', () => {
       title: '账号池 claude-solo 整池暂停',
       body: '在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
     const probe = await pick({ stickRouteId: 'solo' });
@@ -286,7 +287,11 @@ describe('选路', () => {
         { kind: 'failed', detail: '登录失效', poolHold: { title: '登录失效', body: '要重新登录' } },
       );
       const hold = (await alarms()).find((a) => a.dedupeKey === 'pool-hold:claude-solo');
-      expect(hold).toMatchObject({ level: 'decision', title: '账号池 claude-solo 整池暂停：登录失效' });
+      expect(hold).toMatchObject({
+        level: 'decision',
+        title: '账号池 claude-solo 整池暂停：登录失效',
+        decisionReason: 'human-only',
+      });
       expect(hold?.decisionOptions?.map((o) => o.id)).toEqual(['fixed', 'hold', 'retire']);
       expect(hold?.decisionOptions?.map((o) => o.action?.kind)).toEqual([
         'resume-pool',
@@ -387,6 +392,7 @@ describe('选路', () => {
         title: '账号池 claude-solo 整池暂停',
         body: '占位',
         options: noteOnlyOptions(),
+        reason: 'human-only',
       });
       expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
       expect(await pick({ stickRouteId: 'solo' })).toMatchObject({ ok: true, route: { routeId: 'solo' } });
@@ -857,6 +863,7 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
       title: '账号池 claude-carpool 整池暂停：登录失效',
       body: '要重新登录',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     const none = await pick({ stage: 'execute', avoidRouteIds: ['solo'] }, p);
     expect(none).toMatchObject({ ok: false, waitFor: 'none' });
@@ -1069,6 +1076,7 @@ describe('会话用户挂的组织：选路前现读（以会话用户跑 reclau
       title: '账号池 claude-carpool 整池暂停：登录失效',
       body: '要重新登录',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     rig.answer('solo');
     const r = await pick({ stage: 'execute' }, onRig());
@@ -1307,7 +1315,7 @@ describe('报警、提问、人闸', () => {
     );
   });
 
-  it('decision 级报警进要你拍的；stuck、info 仍是 alert', async () => {
+  it('【#2729】工作流报的 decision 级（挂起、返工用完）也记卡住报警：不是掏钱、删东西、只有人能做的事，不进要你拍', async () => {
     await world(t.db);
     const { task } = await addTask(t.db);
     const p = ports();
@@ -1329,12 +1337,13 @@ describe('报警、提问、人闸', () => {
     expect(rows.map((r) => [r.dedupeKey, r.level]).sort()).toEqual(
       [
         ['wf:info', 'alert'],
-        ['wf:park:red', 'decision'],
+        ['wf:park:red', 'alert'],
       ].sort(),
     );
-    expect(rows.find((r) => r.dedupeKey === 'wf:park:red')?.decisionOptions?.length).toBeGreaterThanOrEqual(
-      2,
-    );
+    expect(rows.find((r) => r.dedupeKey === 'wf:park:red')).toMatchObject({
+      decisionOptions: null,
+      decisionReason: null,
+    });
     expect(rows.find((r) => r.dedupeKey === 'wf:info')?.decisionOptions).toBeNull();
   });
 
@@ -1354,7 +1363,7 @@ describe('报警、提问、人闸', () => {
     );
     const rows = await t.db.select().from(notifications);
     const hold = rows.find((r) => r.dedupeKey === poolHoldKey('p1'));
-    expect(hold).toMatchObject({ level: 'decision', taskId: null });
+    expect(hold).toMatchObject({ level: 'decision', taskId: null, decisionReason: 'human-only' });
     expect(hold?.decisionOptions?.map((o) => o.id)).toEqual(['fixed', 'hold', 'retire']);
   });
 });

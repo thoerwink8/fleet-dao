@@ -318,6 +318,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       ...(subagentHint ? { subagentHint } : {}),
       ...(input.resumeSessionId ? { resumed: true } : {}),
       ...(preload.length > 0 ? { preload } : {}),
+      ...(input.mode === 'plan' ? { plan: true } : {}),
     });
     return session(input, ctx, routeInfo, ticket, runId, prompt);
   }

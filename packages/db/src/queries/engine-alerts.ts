@@ -1,13 +1,44 @@
 // 引擎的报警：同一件事（dedupe_key）一条、再报原地更新，按 dedupe_key 标成已处理，按前缀列还没处理的。
-import { DecisionActionSchema, type DecisionOption, decisionOptionsProblem } from '@fleet-dao/shared';
+import {
+  DECISION_REASONS,
+  DecisionActionSchema,
+  type DecisionOption,
+  type DecisionReason,
+  DecisionReasonSchema,
+  decisionOptionsProblem,
+} from '@fleet-dao/shared';
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { notifications } from '../schema/index.ts';
 
 /**
- * 「要你拍」的选项落库前核一遍：decision 级必须带至少两项（编号不重、恰好一项推荐）；别的级别不能带。
- * 不合规矩的照抛，不悄悄存成没有选项。选项可以不带 action（老数据、只留言），带了就要是认得出的动作。
+ * 「要你拍」落库前核一遍（统一写入口，#1915、#2729）：decision 级必须带至少两项选项（编号不重、恰好一项推荐）和原因
+ * （DECISION_REASONS 之一：掏新钱、删了找不回、只有人能做）；别的级别两样都不能带。不合规矩的照抛，不悄悄存成没有选项、没有原因。
+ * 选项可以不带 action（老数据、只留言），带了就要是认得出的动作。库里同样的 CHECK 约束兜底（直写表也绕不过去）。
  */
+export function decisionFieldsFor(
+  dedupeKey: string,
+  level: 'alert' | 'decision' | 'daily',
+  options: readonly DecisionOption[] | undefined,
+  reason: DecisionReason | undefined,
+): { decisionOptions: DecisionOption[] | null; decisionReason: DecisionReason | null } {
+  if (level !== 'decision') {
+    if (options !== undefined) throw new Error(`报警 ${dedupeKey} 是 ${level} 级，只有要人拍的才带选项`);
+    if (reason !== undefined) throw new Error(`报警 ${dedupeKey} 是 ${level} 级，只有要人拍的才带原因`);
+    return { decisionOptions: null, decisionReason: null };
+  }
+  if (!DecisionReasonSchema.safeParse(reason).success) {
+    throw new Error(
+      `报警 ${dedupeKey} 要你拍却没写原因（只认 ${DECISION_REASONS.join('、')}：掏新钱、删了找不回、只有人能做）；AI 自己能做的写成卡住报警或直接做掉`,
+    );
+  }
+  return {
+    decisionOptions: decisionOptionsFor(dedupeKey, level, options),
+    decisionReason: reason as DecisionReason,
+  };
+}
+
+/** decision 级的选项核一遍（decisionFieldsFor 调）：至少两项、编号不重、恰好一项推荐、动作认得出。 */
 export function decisionOptionsFor(
   dedupeKey: string,
   level: 'alert' | 'decision' | 'daily',
@@ -47,10 +78,17 @@ export async function upsertAlert(
     link?: string;
     /** 「要你拍」的选项（#1915）：只有 decision 级带。 */
     options?: readonly DecisionOption[];
+    /** 为什么要创始人拍（#2729）：只有 decision 级带，且必须带。 */
+    reason?: DecisionReason;
   },
 ): Promise<{ id: string; created: boolean }> {
   const now = new Date();
-  const decisionOptions = decisionOptionsFor(input.dedupeKey, input.level, input.options);
+  const { decisionOptions, decisionReason } = decisionFieldsFor(
+    input.dedupeKey,
+    input.level,
+    input.options,
+    input.reason,
+  );
   const [row] = await db
     .insert(notifications)
     .values({
@@ -61,6 +99,7 @@ export async function upsertAlert(
       body: input.body,
       link: input.link ?? null,
       decisionOptions,
+      decisionReason,
       raisedAt: now,
     })
     .onConflictDoUpdate({
@@ -72,6 +111,7 @@ export async function upsertAlert(
         body: input.body,
         link: input.link ?? null,
         decisionOptions,
+        decisionReason,
         updatedAt: now,
         resolvedAt: null,
         resolvedBy: null,

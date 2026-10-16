@@ -49,7 +49,7 @@ import {
   type TaskRoutePin,
   upsertAlert,
 } from '@fleet-dao/db';
-import { type HostId, noteOnlyOptions, type OrgKind, type StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { routeBreaker } from '../failure/breaker.ts';
@@ -958,12 +958,13 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     },
 
     async raiseAlert(input) {
-      // decision 进「要你拍的」。工作流这一路补不出具体动作，给两个只留言的选项（decision 没有选项写不进）。
-      // stuck、info 仍进提醒：info 只在封号、事件数到线、全熔断这类事上发，量很小。
-      // pool-hold:<池> 是整池暂停（登录失效、封号、设备被撤销）：不挂在这一张单上，选项和探针同一份，选路见了就整池避开。
-      const poolHold = input.dedupeKey.startsWith(POOL_HOLD_PREFIX);
-      const poolId = poolHold ? input.dedupeKey.slice(POOL_HOLD_PREFIX.length) : '';
-      const level = input.level === 'decision' || poolHold ? 'decision' : 'alert';
+      // 工作流这一路（任务挂起、封号、事件数到线、全熔断……）一律记卡住报警（#2729）：挂起由指挥官点继续、放弃、重做，
+      // 不是掏新钱、删了找不回、只有人能做的事，不进「要你拍」。整池暂停是唯一例外：它要让人处理账号池，必须保留「要你拍」的选项和原因。
+      const poolId = input.dedupeKey.startsWith(POOL_HOLD_PREFIX)
+        ? input.dedupeKey.slice(POOL_HOLD_PREFIX.length)
+        : '';
+      const poolHold = poolId.length > 0;
+      const level = poolHold ? 'decision' : 'alert';
       const { id } = await upsertAlert(db, {
         dedupeKey: input.dedupeKey,
         level,
@@ -971,11 +972,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         taskId: poolHold || !UUID.test(input.taskId) ? null : input.taskId,
         title: input.title.slice(0, 300),
         body: input.detail,
-        ...(poolHold && poolId
-          ? { options: poolHoldOptions(poolId) }
-          : level === 'decision'
-            ? { options: noteOnlyOptions('continue') }
-            : {}),
+        ...(poolHold ? { options: poolHoldOptions(poolId), reason: 'human-only' } : {}),
       });
       return { alertId: id };
     },

@@ -8,7 +8,7 @@
 // - 读不到状态、送达记录：这一轮这一步记没查成（看门狗这一轮记没跑成），开着的不撤，不当成通着。
 import type { FeishuPushFacts } from '@fleet-dao/db';
 import { feishuPushProblem } from '@fleet-dao/db';
-import type { DecisionOption } from '@fleet-dao/shared';
+import type { DecisionOption, DecisionReason } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { clip } from './reconcile-common.ts';
 
@@ -35,6 +35,7 @@ export interface PushWatchDeps {
       link: string;
       level: 'decision';
       options?: readonly DecisionOption[];
+      reason?: DecisionReason;
     }): Promise<void>;
     resolve(input: { dedupeKey: string; why: string }): Promise<'ok' | 'already_resolved' | 'not_found'>;
   };
@@ -136,6 +137,8 @@ export async function watchFeishuPush(deps: PushWatchDeps, now: Date): Promise<P
       link: PUSH_ALERT_LINK,
       level: 'decision',
       options: pushWatchOptions(),
+      // 飞书应用、团队群是创始人的账号上配的，AI 修不了（#2729）
+      reason: 'human-only',
     });
     deps.log('warn', '看门狗：飞书推送不通', { problem });
   } catch (err) {
