@@ -1,7 +1,7 @@
 // 选路的参数与能力表。全是起步值：驾驶舱「战绩」「额度」攒够真实数据后再调，每个数的理由写在旁边。
 // 给了但不对的直接报错，不悄悄换成默认值。
 import { type HostId, type QuotaWindowKind, type StageKind, TRACK_PRIOR_TASKS } from '@fleet-dao/shared';
-import { RoutingInputError } from './types.ts';
+import { type RouteTier, RoutingInputError } from './types.ts';
 
 /** 执行方式能做的事。answer = 只答题；read = 读仓库；edit = 改文件；shell = 跑命令和测试。 */
 export type Ability = 'answer' | 'read' | 'edit' | 'shell';
@@ -99,6 +99,38 @@ export interface RoutingPolicy {
   needPerTask: Partial<Record<QuotaWindowKind, number>>;
   /** 动手按模型战绩排（PLAN 3f，决定 0093），见 TrackScorePolicy。 */
   trackScore: TrackScorePolicy;
+  /** 按模型强弱档排（决定 0099），见 StrengthPolicy。 */
+  strength: StrengthPolicy;
+}
+
+/**
+ * 按模型的强弱档（目录的 strength：strong / standard / light）排，决定 0099。三条：
+ * 1. 重活先给强档：这一单的派工档在 strongFirstTiers 里、用途在 trackScore.stages 里时，强档的模型整体提到别的档前面，
+ *    档内仍按战绩和人排的先后。强档某个模型的池超前时间进度不少于 yieldAhead，这个模型让位、回到原来的位置。
+ * 2. 探索：同样只在动手、给了派工档时，按单的编号算出的数小于 explore[档] 就把样本少于 trackScore.minTasks 的强档模型提到第一。
+ * 3. 同档分流：任何用途里，强弱档相同、排在相邻位置的几个模型合成一组，组内所有渠道按池子消耗进度排（和同一模型的
+ *    几个渠道之间同一套微调），不同档之间、没标档的照旧按模型先后。
+ * 被挡的照旧被挡：强档全被挡（没额度、熔断、钉住别的）时 choose.ts 往下派，这里只排先后。
+ */
+export interface StrengthPolicy {
+  /**
+   * 哪几个派工档先给强档。只放 heavyweight：近 14 天主力档 144 单里 127 单给了 grok-4.7，一段过 19%、平均 3.3 轮、
+   * 每单约 1650 万 token；中档 grok 一段过 54%、快档 71%，够用，不为它们多烧强档的额度。
+   */
+  strongFirstTiers: RouteTier[];
+  /**
+   * 强档的模型，它每条读成了额度的渠道都有一个窗口超前时间进度不少于这个数（shared 的 quotaPace，同 pace 那一套，5 小时窗不算），
+   * 这个模型就让位。0.3：比 pace.margin（0.1）宽得多，只在照这个速度清零前一定用完时才让，免得强档稍快一点就被挤回 grok。
+   */
+  yieldAhead: number;
+  /**
+   * 探索的比例（按派工档）：按单的编号算出的 [0, 1) 里的数小于它，就把样本少的强档模型提到第一。
+   * 主力档 0.2：强档在主力档上只有三四单样本，按 #2403 的收缩分永远挪不上来，要每五单探一单才攒得起来；
+   * 中档 0.1、快档 0.05：这两档 grok 够用，只少量攒强档在这两档上的数。置 0 = 这一档不探。
+   */
+  explore: Record<RouteTier, number>;
+  /** 同档分流的开关。关掉 = 模型之间仍按先后，只在同一个模型的几个渠道之间按进度排。 */
+  pool: boolean;
 }
 
 /**
@@ -178,9 +210,17 @@ export const DEFAULT_ROUTING_POLICY: Readonly<RoutingPolicy> = Object.freeze<Rou
     priorTasks: TRACK_PRIOR_TASKS,
     qualityMargin: 0.08,
   },
+  strength: {
+    strongFirstTiers: ['heavyweight'],
+    yieldAhead: 0.3,
+    explore: { heavyweight: 0.2, medium: 0.1, fast: 0.05 },
+    pool: true,
+  },
 });
 
-/** 缺的取默认值，给了但不对的报错。trackScore、pace 可以只给要改的那几项。 */
+const ROUTE_TIERS: readonly RouteTier[] = ['fast', 'medium', 'heavyweight'];
+
+/** 缺的取默认值，给了但不对的报错。trackScore、pace、strength 可以只给要改的那几项。 */
 export function resolveRoutingPolicy(partial?: RoutingPolicyInput): RoutingPolicy {
   // fastReset 整张换（换了就能去掉某种窗口）；needPerTask、pace、trackScore 按项合并，只改给了的那几项。
   const p: RoutingPolicy = {
@@ -189,6 +229,11 @@ export function resolveRoutingPolicy(partial?: RoutingPolicyInput): RoutingPolic
     pace: { ...DEFAULT_ROUTING_POLICY.pace, ...partial?.pace },
     needPerTask: { ...DEFAULT_ROUTING_POLICY.needPerTask, ...partial?.needPerTask },
     trackScore: { ...DEFAULT_ROUTING_POLICY.trackScore, ...partial?.trackScore },
+    strength: {
+      ...DEFAULT_ROUTING_POLICY.strength,
+      ...partial?.strength,
+      explore: { ...DEFAULT_ROUTING_POLICY.strength.explore, ...partial?.strength?.explore },
+    },
   };
   const bad = (key: string, want: string, got: unknown) =>
     new RoutingInputError(`选路策略的 ${key} 不对：要${want}，给的是 ${JSON.stringify(got)}`);
@@ -234,11 +279,30 @@ export function resolveRoutingPolicy(partial?: RoutingPolicyInput): RoutingPolic
   if (!Number.isInteger(ts.priorTasks) || ts.priorTasks < 1)
     throw bad('trackScore.priorTasks', '不小于 1 的整数', ts.priorTasks);
   ratio('trackScore.qualityMargin', ts.qualityMargin);
+  const st = p.strength;
+  if (
+    !Array.isArray(st.strongFirstTiers) ||
+    st.strongFirstTiers.some((t) => !(ROUTE_TIERS as readonly string[]).includes(t))
+  ) {
+    throw bad(
+      'strength.strongFirstTiers',
+      '派工档（fast / medium / heavyweight）的数组',
+      st.strongFirstTiers,
+    );
+  }
+  ratio('strength.yieldAhead', st.yieldAhead, { zeroOk: false });
+  for (const tier of ROUTE_TIERS) ratio(`strength.explore.${tier}`, st.explore[tier]);
+  for (const key of Object.keys(st.explore)) {
+    if (!(ROUTE_TIERS as readonly string[]).includes(key))
+      throw bad(`strength.explore.${key}`, '派工档名', key);
+  }
+  if (typeof st.pool !== 'boolean') throw bad('strength.pool', ' true 或 false', st.pool);
   return p;
 }
 
-/** 调用方可以只改 trackScore、pace 里的几项，没写的留默认。 */
-export type RoutingPolicyInput = Omit<Partial<RoutingPolicy>, 'trackScore' | 'pace'> & {
+/** 调用方可以只改 trackScore、pace、strength 里的几项，没写的留默认。 */
+export type RoutingPolicyInput = Omit<Partial<RoutingPolicy>, 'trackScore' | 'pace' | 'strength'> & {
   pace?: Partial<PacePolicy>;
   trackScore?: Partial<TrackScorePolicy>;
+  strength?: Partial<Omit<StrengthPolicy, 'explore'>> & { explore?: Partial<Record<RouteTier, number>> };
 };

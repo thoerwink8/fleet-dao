@@ -413,6 +413,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       orgKind: r.poolOrgKind,
       modelId: r.modelId,
       modelName: r.modelName,
+      strength: r.modelStrength,
       family: r.family,
       authorFamily: authorFamilyOf(r.family, r.modelId),
       hostId: r.hostId,
@@ -719,6 +720,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           routes: facts.routes,
           now: now.toISOString(),
           draw: drawn,
+          // 探索按单的编号定（决定 0099）：同一张单重选、换路由续都探同一个，不随每次选路的随机数抖
+          exploreSeed: input.taskId,
           ...orgFacts,
           ...(input.uiWork ? { uiWork: true } : {}),
           ...(input.tier ? { tier: input.tier } : {}),

@@ -4,13 +4,20 @@
 //      其余照人排；5 小时窗不参与排序、只挡。pace 关着时退回老的「快清零还没用完的往前提」；
 //   ② 战绩明显差的往后放，样本少不动；③ 额度未知的排在读到了的后面。
 // （原先还有一条「备池排在主池后面」：两个会话用户同时跑时拼车号是备池，法国只留一个会话用户后作废，#59 删掉。）
+// 强弱档（决定 0099，policy.strength）：重活先给强档（强档池超前时间进度 30% 以上的模型让位）、按单号探索样本少的强档模型、
+// 任何用途里强弱档相同又挨着的模型合成一组按池子消耗进度一起排。模型先后改在 models 那条线上，同一模型几个渠道之间的微调不变。
 // 模型之间默认严格按用途里排的先后（#1089）。例外是动手（policy.trackScore.stages，PLAN 3f，决定 0093、0095、0098）：
 // 拿到了这一档的第一段战绩、又开着 byTier 时，按收缩后的质量下界在它们自己占的位置之间重排（要比前一个高 qualityMargin
 // 才往前挪），分钟只在质量分打平手时才比；这一档没有行的留在人排的位置。不再把一轮做成率差的挪到最后。
 // byTier 关掉时仍按每单期望成本重排（要明显更省才挪到人排的前面），一轮做成率明显差的挪到最后、由 choose.ts 挡在动手外面
 // （别的都派不了时兜底）；样本不够的模型留在人排的位置。有钉住的行时整段不动。
 
-import { type QuotaPace, quotaPace, tierQuality as sharedTierQuality } from '@fleet-dao/shared';
+import {
+  type ModelStrength,
+  type QuotaPace,
+  quotaPace,
+  tierQuality as sharedTierQuality,
+} from '@fleet-dao/shared';
 import { duration, percent, remaining, windowName } from './names.ts';
 import type { RoutingPolicy } from './policy.ts';
 import type {
@@ -18,6 +25,7 @@ import type {
   ModelTrackFacts,
   Nudge,
   RouteFacts,
+  RouteTier,
   RouteWindow,
   StageRouteEntry,
 } from './types.ts';
@@ -282,6 +290,88 @@ export function modelOrder(
   return [...out, ...poor];
 }
 
+/** 派工档在「先给强档」「探索」理由里的叫法。 */
+const WORK_LABEL: Record<RouteTier, string> = { heavyweight: '重活', medium: '中档活', fast: '快档活' };
+const STRENGTH_LABEL: Record<ModelStrength, string> = { strong: '强档', standard: '标准档', light: '轻档' };
+
+/**
+ * 单的编号 → [0, 1) 里的数（FNV-1a 再过一遍 murmur3 的收尾混合）。同一个编号永远同一个数，探索才「同一单重算不变」；
+ * 编号挨着的单也散得开（不会连着几单都探或都不探）。
+ */
+export function seedDraw(seed: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < seed.length; i += 1) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 0x1_0000_0000;
+}
+
+/** 强弱档那几条要的输入（choose.ts 按用途、派工档、策略算好）。不给 = 只做同档分流（policy.strength.pool 开着时）。 */
+export interface StrengthOptions {
+  /** 这一单的派工档；只用来写理由。 */
+  tier: RouteTier;
+  /** 先给强档（派工档在 strongFirstTiers 里、用途在 trackScore.stages 里）。 */
+  strongFirst: boolean;
+  /**
+   * 探索：draw 是按单号算的数，ratio 是这一档的比例；samples 是各模型这一档（或整单）的样本数，没有的算 0。
+   * 战绩没读成（不知道谁样本少）为空，不探。
+   */
+  explore: { draw: number; ratio: number; samples: ReadonlyMap<string, number> } | null;
+}
+
+/** 一条路由读成了的窗口里超前最多的那个（5 小时窗、过期的、不扣它的不算）。没有能算进度的窗口为空。 */
+function mostAhead(route: RouteFacts, now: number): { window: RouteWindow; pace: QuotaPace } | null {
+  let best: { window: RouteWindow; pace: QuotaPace } | null = null;
+  for (const w of route.windows) {
+    const pace = paceOf(w, now);
+    if (pace && (!best || pace.behind < best.pace.behind)) best = { window: w, pace };
+  }
+  return best;
+}
+
+/**
+ * 强档的一个模型该不该让位：它额度读成了、能算进度的渠道里，每一条都有窗口超前不少于 yieldAhead。
+ * 一条能算的都没有（额度未知、只有 5 小时窗）不让位。命中时返回超前最少的那条（这一档最松的一条也已经超前这么多）。
+ */
+function yieldHit(
+  routes: readonly RouteFacts[],
+  policy: RoutingPolicy,
+  now: number,
+): { route: RouteFacts; window: RouteWindow; pace: QuotaPace } | null {
+  let least: { route: RouteFacts; window: RouteWindow; pace: QuotaPace } | null = null;
+  for (const route of routes) {
+    if (route.quota !== 'ok') continue;
+    const hit = mostAhead(route, now);
+    if (!hit) continue;
+    if (-hit.pace.behind < policy.strength.yieldAhead - 1e-9) return null;
+    if (!least || hit.pace.behind > least.pace.behind) least = { route, ...hit };
+  }
+  return least;
+}
+
+/** 同档分流：按模型先后，强弱档相同（都标了）、挨着的模型合成一组。alone 里的（这一单探索的那个）自己一组，不被进度挤下第一。 */
+function strengthGroups(
+  models: readonly string[],
+  strengthOf: ReadonlyMap<string, ModelStrength | null>,
+  alone: string | null,
+): string[][] {
+  const groups: string[][] = [];
+  for (const m of models) {
+    const s = strengthOf.get(m) ?? null;
+    const last = groups[groups.length - 1];
+    const lastStrength = last ? (strengthOf.get(last[0] as string) ?? null) : null;
+    if (last && s !== null && s === lastStrength && m !== alone && last[0] !== alone) last.push(m);
+    else groups.push([m]);
+  }
+  return groups;
+}
+
 export interface Ranked {
   route: RouteFacts;
   entry: StageRouteEntry;
@@ -304,6 +394,8 @@ export function rank(
   /** 动手按战绩排时给（choose.ts 只在用途在 trackScore.stages 里、拿到了战绩时给）；不给 = 模型之间照人排的。 */
   scores?: ReadonlyMap<string, ModelScore>,
   stageName = '这个用途',
+  /** 先给强档、探索（只在动手、给了派工档时由 choose.ts 给）。同档分流不靠它，看 policy.strength.pool。 */
+  strength?: StrengthOptions,
 ): Ranked[] {
   const items: Ranked[] = rows.map(({ route, entry }, humanIndex) => {
     const pinned = stagePinned || entry.pinned;
@@ -342,11 +434,14 @@ export function rank(
   });
 
   const has = (it: Ranked, kind: Nudge) => it.nudges.some((n) => n.kind === kind);
+  // 模型的名次在同档分流时才起作用（一组里几个模型的渠道一起排，进度打平手时按模型先后）；同一个模型里是同一个数
+  let modelRank = new Map<string, number>();
   const key = (it: Ranked): number[] => [
     has(it, 'quota-unknown') ? 1 : 0,
     it.fast ? 0 : it.pace?.side === 'ahead' ? 2 : 1,
     it.fast ? it.fast.resetAt : 0,
     has(it, 'poor-record') ? 1 : 0,
+    modelRank.get(it.route.modelId) ?? 0,
     it.humanIndex,
   ];
   const cmp = (a: Ranked, b: Ranked) => {
@@ -359,9 +454,10 @@ export function rank(
     return 0;
   };
   // 动手按战绩排模型（有钉住的行就整段不动：钉住就是人要它在那个位置）
-  const byScore = scores && scores.size > 0 && !items.some((it) => it.pinned) ? scores : null;
+  const anyPinned = items.some((it) => it.pinned);
+  const byScore = scores && scores.size > 0 && !anyPinned ? scores : null;
   const humanModels = [...new Set(items.map((it) => it.route.modelId))];
-  const models = byScore ? modelOrder(humanModels, byScore, policy) : humanModels;
+  let models = byScore ? modelOrder(humanModels, byScore, policy) : humanModels;
   if (byScore) {
     for (const it of items) {
       const s = byScore.get(it.route.modelId);
@@ -397,8 +493,74 @@ export function rank(
     }
   }
 
-  // 微调只在同一个模型的几个渠道之间排：模型之间严格按用途里排的先后，后面模型的渠道不能插到前面模型前面。
+  // 强弱档（决定 0099）：有钉住的行同样整段不动
+  const strengthOf = new Map<string, ModelStrength | null>();
+  for (const it of items) {
+    if (!strengthOf.has(it.route.modelId)) strengthOf.set(it.route.modelId, it.route.strength ?? null);
+  }
+  const itemsOf = (m: string) => items.filter((it) => it.route.modelId === m);
+  const say = (m: string, kind: Nudge, text: string) => {
+    for (const it of itemsOf(m)) it.nudges.push({ kind, text });
+  };
+  const yielded = new Set<string>();
+  let explored: string | null = null;
+  if (strength?.strongFirst && !anyPinned) {
+    const work = WORK_LABEL[strength.tier];
+    const strong = models.filter((m) => strengthOf.get(m) === 'strong');
+    const lifted: string[] = [];
+    for (const m of strong) {
+      const hit = yieldHit(
+        itemsOf(m).map((it) => it.route),
+        policy,
+        now,
+      );
+      if (!hit) {
+        lifted.push(m);
+        continue;
+      }
+      yielded.add(m);
+      const nextStrength = models.find((o) => o !== m && strengthOf.get(o) !== 'strong' && strengthOf.get(o));
+      const next = nextStrength ? STRENGTH_LABEL[strengthOf.get(nextStrength) as ModelStrength] : '下一档';
+      say(
+        m,
+        'strength-yield',
+        `强档池超前 ${percent(-hit.pace.behind)}（${hit.route.poolName}${windowName(hit.window)}按时间该用 ${percent(hit.pace.elapsed)}、实际用了 ${percent(hit.pace.used)}），让给${next}`,
+      );
+    }
+    const next = [...lifted, ...models.filter((m) => !lifted.includes(m))];
+    next.forEach((m, i) => {
+      const was = models.indexOf(m);
+      if (lifted.includes(m) && i < was) say(m, 'strength-first', `${work}先给强档：${m}`);
+      else if (!lifted.includes(m) && i > was) {
+        const s = strengthOf.get(m);
+        say(m, 'strength-first', `${work}先给强档，${s ? STRENGTH_LABEL[s] : '没标档的模型'}排在强档后面`);
+      }
+    });
+    models = next;
+  }
+  if (strength?.explore && !anyPinned) {
+    const { draw, ratio, samples } = strength.explore;
+    const min = policy.trackScore.minTasks;
+    const thin = models.filter(
+      (m) => strengthOf.get(m) === 'strong' && !yielded.has(m) && (samples.get(m) ?? 0) < min,
+    );
+    if (draw < ratio && thin.length > 0) {
+      // draw < ratio 时 draw / ratio 在 [0, 1) 里均匀：同一个数既决定探不探、又决定探哪个
+      const pick = thin[Math.min(thin.length - 1, Math.floor((draw / ratio) * thin.length))] as string;
+      say(
+        pick,
+        'explore',
+        `探索：${pick} ${WORK_LABEL[strength.tier]}样本 ${samples.get(pick) ?? 0} 单，少于 ${min}，这一单提到第一（约 ${Math.round(ratio * 100)}% 的${WORK_LABEL[strength.tier]}按单号探一次，攒战绩）`,
+      );
+      models = [pick, ...models.filter((m) => m !== pick)];
+      explored = pick;
+    }
+  }
+
+  // 微调只在同一个模型的几个渠道之间排：模型之间按上面定的先后，后面模型的渠道不能插到前面模型前面。
+  // 例外是同档分流：强弱档相同、挨着的几个模型合成一组，组内所有渠道一起按同一套微调排（policy.strength.pool）。
   // 钉住的留在原位，每个模型里没钉住的按微调后的先后填回这个模型自己剩下的位置。
+  modelRank = new Map(models.map((m, i) => [m, i]));
   const movableByModel = new Map<string, Ranked[]>();
   for (const it of items) {
     if (it.pinned) continue;
@@ -407,6 +569,47 @@ export function rank(
     movableByModel.set(it.route.modelId, list);
   }
   for (const list of movableByModel.values()) list.sort(cmp);
-  if (byScore) return models.flatMap((m) => movableByModel.get(m) ?? []);
-  return items.map((it) => (it.pinned ? it : (movableByModel.get(it.route.modelId)?.shift() as Ranked)));
+  const groups =
+    policy.strength.pool && !anyPinned
+      ? strengthGroups(models, strengthOf, explored)
+      : models.map((m) => [m]);
+  const reordered = models.some((m, i) => m !== humanModels[i]);
+  if (!byScore && !reordered && groups.every((g) => g.length === 1)) {
+    return items.map((it) => (it.pinned ? it : (movableByModel.get(it.route.modelId)?.shift() as Ranked)));
+  }
+  return groups.flatMap((g) => {
+    if (g.length === 1) return movableByModel.get(g[0] as string) ?? [];
+    const list = g.flatMap((m) => movableByModel.get(m) ?? []).sort(cmp);
+    poolNudges(list, modelRank, strengthOf);
+    return list;
+  });
+}
+
+/**
+ * 同档分流排完一组后：挪到了同档前面模型的渠道前面的，写一句为什么（「与 X 同档，X 的池超前 Y%，先用这条」）。
+ * 只写给第一次越过的那个模型（排得最前的那个）。
+ */
+function poolNudges(
+  list: Ranked[],
+  modelRank: ReadonlyMap<string, number>,
+  strengthOf: ReadonlyMap<string, ModelStrength | null>,
+): void {
+  const rankOf = (it: Ranked) => modelRank.get(it.route.modelId) ?? 0;
+  list.forEach((it, i) => {
+    const passed = list.slice(i + 1).filter((o) => rankOf(o) < rankOf(it));
+    if (passed.length === 0) return;
+    const first = passed.reduce((a, b) => (rankOf(b) < rankOf(a) ? b : a));
+    // 越过的那个模型排得最前的渠道（它自己最好的一条也排到了这条后面）
+    const best = list.find((o) => o.route.modelId === first.route.modelId) as Ranked;
+    const x = best.route.modelId;
+    const label = STRENGTH_LABEL[strengthOf.get(x) as ModelStrength];
+    const head = `与 ${x} 同档（${label}）`;
+    let why: string;
+    if (best.pace?.side === 'ahead') why = `${x} 的池超前 ${percent(-best.pace.pace.behind)}，先用这条`;
+    else if (it.pace?.side === 'behind') why = `这条的池落后 ${percent(it.pace.pace.behind)}，先用这条`;
+    else if (best.nudges.some((n) => n.kind === 'quota-unknown')) why = `${x} 额度未知，先用这条`;
+    else if (it.fast) why = `这条的池快清零还没用完，先用这条`;
+    else why = '按池子消耗进度先用这条';
+    it.nudges.push({ kind: 'strength-pool', text: `${head}，${why}` });
+  });
 }

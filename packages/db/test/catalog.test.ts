@@ -100,6 +100,38 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
     expect(mira?.identityCheck).toBe(true);
   });
 
+  it('目录写的强弱档装进库，库里改了或目录删了再装一次按目录对齐（决定 0099）', async () => {
+    await load();
+    const strengthOf = async () =>
+      Object.fromEntries(
+        (await t.db.select({ id: models.id, strength: models.strength }).from(models)).map((r) => [
+          r.id,
+          r.strength,
+        ]),
+      );
+    const byId = await strengthOf();
+    for (const id of ['opus-5.5', 'sonnet-5.5', 'gpt-5.6-luna', 'gpt-6-sol']) expect(byId[id]).toBe('strong');
+    for (const id of ['grok-4.7', 'kimi-k3']) expect(byId[id]).toBe('standard');
+    for (const id of ['cursor-auto', 'deepseek-flash', 'glm-5.3-flash', 'haiku-5.5'])
+      expect(byId[id]).toBe('light');
+    expect(byId['grok-4.6']).toBeNull();
+    await t.db.update(models).set({ strength: 'light' }).where(eq(models.id, 'opus-5.5'));
+    const again = await load();
+    expect(again.filled).toContain('models.opus-5.5.strength');
+    expect((await strengthOf())['opus-5.5']).toBe('strong');
+    const config = example();
+    const dropped = await load({
+      ...config,
+      models: config.models.map((m) => (m.id === 'grok-4.7' ? { ...m, strength: undefined } : m)),
+    });
+    expect(dropped.filled).toContain('models.grok-4.7.strength');
+    expect((await strengthOf())['grok-4.7']).toBeNull();
+    // 认不出的档：解析就报错
+    const bad = JSON.parse(exampleText);
+    bad.models[0].strength = 'mighty';
+    expect(() => parseCatalog(JSON.stringify(bad))).toThrow(CatalogError);
+  });
+
   it('装进空库，每张表的行数和样例对得上', async () => {
     const config = example();
     await load();

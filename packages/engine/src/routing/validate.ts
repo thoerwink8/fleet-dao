@@ -1,5 +1,6 @@
 // 输入先整体认一遍：时刻、随机数、重复的路由、缺的事实、认不出的被挡原因。认不出就抛 RoutingInputError，
 // 不把读坏的输入当成「没有被挡」「额度没问题」往下走。
+import { MODEL_STRENGTHS } from '@fleet-dao/shared';
 import { STAGE_NEEDS } from './policy.ts';
 import { CANDIDATE_BLOCKERS, type ChooseRouteInput, RoutingInputError } from './types.ts';
 
@@ -138,6 +139,21 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
     if (typeof d !== 'number' || !Number.isFinite(d) || d < 0 || d >= 1) {
       throw new RoutingInputError(`选路判不了：试探开着，随机数要在 [0, 1) 里，给的是 ${String(d)}`);
     }
+  }
+  if (input.exploreSeed !== undefined && (typeof input.exploreSeed !== 'string' || !input.exploreSeed)) {
+    throw new RoutingInputError(`选路判不了：探索的种子（单的编号）认不出（${String(input.exploreSeed)}）`);
+  }
+  // 强弱档认不出、同一个模型给了两样，就不往下判：拿坏的档会把弱模型当强档提到重活最前
+  const strengthByModel = new Map<string, unknown>();
+  for (const r of input.routes) {
+    const s: unknown = r.strength ?? null;
+    if (s !== null && !(MODEL_STRENGTHS as readonly unknown[]).includes(s)) {
+      throw new RoutingInputError(`选路判不了：路由 ${r.routeId} 的模型强弱档认不出（${String(s)}）`);
+    }
+    if (strengthByModel.has(r.modelId) && strengthByModel.get(r.modelId) !== s) {
+      throw new RoutingInputError(`选路判不了：模型 ${r.modelId} 的几条路由给的强弱档不一样`);
+    }
+    strengthByModel.set(r.modelId, s);
   }
   const seenOrder = new Set<string>();
   const seenPos = new Set<number>();
