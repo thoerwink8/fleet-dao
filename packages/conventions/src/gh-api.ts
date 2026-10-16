@@ -10,8 +10,14 @@ export interface GhApi {
   post(path: string, body: unknown): Promise<void>;
 }
 
-export function ghApi(env: Record<string, string | undefined>, fetchImpl: typeof fetch = fetch): GhApi {
-  const call = async (method: 'GET' | 'POST', path: string, body?: unknown): Promise<Response> => {
+/** 在 GhApi 之上多一个改（PATCH，关单用）；只有要写的脚本才用它，别的调用方和测试的假客户端仍只实现 GhApi。 */
+export interface GhApiWrite extends GhApi {
+  /** PATCH 仓内接口，body 发 JSON；非 2xx 抛。 */
+  patch(path: string, body: unknown): Promise<void>;
+}
+
+export function ghApi(env: Record<string, string | undefined>, fetchImpl: typeof fetch = fetch): GhApiWrite {
+  const call = async (method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<Response> => {
     const token = env.GITHUB_TOKEN;
     const repo = env.GITHUB_REPOSITORY;
     if (!token) throw new Error('没有 GITHUB_TOKEN');
@@ -47,6 +53,10 @@ export function ghApi(env: Record<string, string | undefined>, fetchImpl: typeof
     async post(path, body) {
       const res = await call('POST', path, body);
       if (!res.ok) throw failed(res, 'POST', path);
+    },
+    async patch(path, body) {
+      const res = await call('PATCH', path, body);
+      if (!res.ok) throw failed(res, 'PATCH', path);
     },
   };
 }

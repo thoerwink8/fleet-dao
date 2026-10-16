@@ -63,6 +63,24 @@ describe('前台等太久：改成后台跑', () => {
     expect(lib.decide(cc(tool, input))).toEqual({ code: 0 });
   });
 
+  it('子代理的调用（输入带 agent_id）：timeout 超过 60 秒也原样放行，不改后台', () => {
+    const raw = JSON.stringify({
+      ...JSON.parse(cc('Bash', { command: 'gh pr checks 12 --watch', timeout: 600_000 })),
+      agent_id: 'agent-abc123',
+      agent_type: 'general-purpose',
+    });
+    expect(lib.decide(raw)).toEqual({ code: 0 });
+  });
+
+  it('主线程的调用（没有 agent_id）：照旧改成后台', () => {
+    const v = lib.decide(cc('Bash', { command: 'gh pr checks 12 --watch', timeout: 600_000 }));
+    expect(v.updatedInput).toEqual({
+      command: 'gh pr checks 12 --watch',
+      timeout: 600_000,
+      run_in_background: true,
+    });
+  });
+
   it('别家的输入：不改写（不知道它认不认 updatedInput）', () => {
     expect(lib.decide(bare('Bash', { command: 'pnpm test', timeout: 420_000 }))).toEqual({ code: 0 });
   });

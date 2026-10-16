@@ -563,7 +563,8 @@ readback_fail2ban() {
 # 探法国：脚本、定时器、状态目录。推送没配只记待配，不判红（没配就只写状态）。
 setup_france_probe() {
   step "探法国 healthz（每分钟经隧道，连续 3 次失败才算失联）"
-  ensure_pkgs curl
+  # jq：探活脚本拼飞书请求、读飞书回应
+  ensure_pkgs curl jq
   ensure_dir /usr/local/lib/fleet-dao root:root 755
   ensure_dir "$PROBE_STATE_DIR" root:root 755
   if [[ -e "$PROBE_ENV" ]]; then
@@ -618,18 +619,32 @@ probe_env_value() {
   printf '%s' "$val"
 }
 
-# 推送配没配只看键在不在、等号后面有没有字，不把地址打出来（里面是凭据）
-probe_webhook_set() {
-  [[ -r "$PROBE_ENV" ]] || return 1
-  local line val
-  while IFS= read -r line || [[ -n "$line" ]]; do
-    [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
-    [[ "$line" =~ ^FLEET_HK_PROBE_WEBHOOK=(.*)$ ]] || continue
-    val=$(probe_env_value "${BASH_REMATCH[1]}")
-    [[ -n "$val" ]] && return 0
-    return 1
-  done <"$PROBE_ENV"
-  return 1
+# 推送配的是哪种：印 app（飞书应用三项齐）、half（应用配了一半）、webhook、none。只看等号后面有没有字，不把值打出来（里面是凭据）。
+# 和 france-probe.sh 的 probe_pick_channel 同一套判法。
+probe_push_channel() {
+  local line val app=0 webhook=0
+  if [[ -r "$PROBE_ENV" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+      [[ "$line" =~ ^(FLEET_HK_PROBE_[A-Z_]+)=(.*)$ ]] || continue
+      val=$(probe_env_value "${BASH_REMATCH[2]}")
+      [[ -n "$val" ]] || continue
+      case "${BASH_REMATCH[1]}" in
+      FLEET_HK_PROBE_FEISHU_APP_ID | FLEET_HK_PROBE_FEISHU_APP_SECRET | FLEET_HK_PROBE_FEISHU_CHAT_ID) app=$((app + 1)) ;;
+      FLEET_HK_PROBE_WEBHOOK) webhook=1 ;;
+      *) ;;
+      esac
+    done <"$PROBE_ENV"
+  fi
+  if ((app >= 3)); then
+    echo app
+  elif ((app > 0)); then
+    echo half
+  elif ((webhook)); then
+    echo webhook
+  else
+    echo none
+  fi
 }
 
 # systemd 把「没有」印成空、0、n/a 或 infinity。这四种都不算有下次时间或上次触发。
@@ -713,11 +728,12 @@ readback_france_probe() {
     red "站点没把 /health/france-link.json 指到 $PROBE_STATE_DIR/status.json：重跑 hk.sh"
   fi
   readback_timer_scheduled "$PROBE_TIMER" "法国关机时香港不会自己发现"
-  if probe_webhook_set; then
-    ok "法国探活配了推送（地址不在这里打印）"
-  else
-    pending "法国探活没配推送（$PROBE_ENV 的 FLEET_HK_PROBE_WEBHOOK）：只写状态文件和日志，健康页仍显示失联"
-  fi
+  case "$(probe_push_channel)" in
+  app) ok "法国探活推送走飞书应用（凭据不在这里打印）" ;;
+  webhook) ok "法国探活推送走飞书群机器人（地址不在这里打印）" ;;
+  half) red "法国探活的飞书应用配了一半（$PROBE_ENV 的 FLEET_HK_PROBE_FEISHU_APP_ID / _APP_SECRET / _CHAT_ID 要三项都有）：失联推不出去" ;;
+  *) pending "法国探活没配推送（$PROBE_ENV 的飞书应用三项或 FLEET_HK_PROBE_WEBHOOK）：只写状态文件和日志，健康页仍显示失联" ;;
+  esac
 }
 
 setup_backup_mirror() {

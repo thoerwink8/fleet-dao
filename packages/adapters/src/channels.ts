@@ -40,12 +40,15 @@ export {
   readMirasimLedger,
 } from './mirasim/ledger.ts';
 export {
+  METER_NO_CALLS_DETAIL,
+  METER_TAIL_GRACE_MS,
   type MeterFs,
   type MeterReading,
   type MeterUsage,
   type MeterWindow,
   meterReadingFrom,
   meterSessionUuid,
+  meterWindowUntil,
   nodeMeterFs,
   readMirasimMeter,
 } from './mirasim/meter.ts';
