@@ -489,14 +489,19 @@ export function healthSection(
 const groupWord = (m: FlowGroupStat['mode']) => (m === 'full' ? '全程' : '三段');
 const tokenWord = (n: number) => (n >= 10_000 ? `${(n / 1000).toFixed(0)}k` : String(n));
 
-/** 一组一行：单数、合并数、成功率（Wilson 95% 区间）、时长中位和 p90、每合并单 token。没有的写「—」，不写 0。 */
+/** 一组一行：单数、合并数、成功率（Wilson 95% 区间）、时长中位和 p90、每合并单输入当量。没有的写「—」，不写 0。 */
 function flowGroupLine(g: FlowGroupStat): string {
   const rate =
     g.successRate === null || g.wilson === null
       ? '—'
       : `${pct(g.successRate)}（Wilson 95% 区间 ${pct(g.wilson.low)}–${pct(g.wilson.high)}）`;
+  // #2859：按输入当量给（输入 1、缓存写 1.25、缓存读 0.1、输出 5），原始四样相加另列
+  const perMerged =
+    g.equivalentPerMerged === null
+      ? '—'
+      : `输入当量 ${tokenWord(g.equivalentPerMerged)}（原始四样相加 ${g.rawTokensPerMerged === null ? '—' : tokenWord(g.rawTokensPerMerged)}）`;
   const unread = g.runsTokenUnread > 0 ? `，另有 ${g.runsTokenUnread} 段 token 没读全` : '';
-  return `· ${groupWord(g.mode)}：${g.tasks} 单，合并 ${g.merged}；成功率 ${rate}；时长中位 ${mins(g.durationMedianMin)}、p90 ${mins(g.durationP90Min)}；每合并单 ${g.tokensPerMerged === null ? '—' : `${tokenWord(g.tokensPerMerged)} token`}${unread}`;
+  return `· ${groupWord(g.mode)}：${g.tasks} 单，合并 ${g.merged}；成功率 ${rate}；时长中位 ${mins(g.durationMedianMin)}、p90 ${mins(g.durationP90Min)}；每合并单 ${perMerged}${unread}`;
 }
 
 /**
@@ -522,8 +527,8 @@ export function flowModeLines(flow: FlowModeHealth | string): string[] {
   );
   lines.push(
     v.costRatio === null
-      ? '每合并单 token 对比：缺合并的单，算不出'
-      : `全程每合并单 token 是三段的 ${v.costRatio.toFixed(2)} 倍${v.costStop ? '，超过 2 倍，触发成本类止损' : ''}`,
+      ? '每合并单输入当量对比：缺合并的单，算不出'
+      : `全程每合并单输入当量是三段的 ${v.costRatio.toFixed(2)} 倍${v.costStop ? '，超过 2 倍，触发成本类止损' : ''}`,
   );
   if (v.effectStop) lines.push('触发效果类止损：全程更差的把握超过 95%');
   return lines;

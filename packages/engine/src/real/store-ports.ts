@@ -1017,6 +1017,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         tier: input.tier ?? null,
         firstModel: input.firstModel ?? null,
         addedLines: input.addedLines ?? null,
+        flowMode: input.flowMode ?? null,
       });
     },
 

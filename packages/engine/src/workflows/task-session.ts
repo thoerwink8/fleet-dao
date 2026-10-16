@@ -59,10 +59,12 @@ import {
   SEGMENT_MINUTES,
   SEGMENT_STAGE,
   type SegmentEvidence,
+  type TaskSpendResult,
   UI_PURPOSE,
 } from '../task-contract.ts';
 import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
 import { failureOf, iso } from './kit.ts';
+import { decideFlowOnce } from './task-flow.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
@@ -177,6 +179,8 @@ export async function writeSession(
         : route.family,
     );
     rt.attemptSeq += 1;
+    // 定模式（#2826）：第一次选路之后、第一段动手之前定一次，结果进历史（task-flow.ts）
+    await decideFlowOnce(rt, brief, tier, route);
     // 续会话（决定 0088）：上一段留了要续的记号才问；判一次就清掉
     let resumeSessionId: string | undefined;
     let resumeNote = '';
@@ -224,6 +228,8 @@ export async function writeSession(
         ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
         // 重活先出方案的那一段（#2755）：提示词另说只读、只回方案 JSON
         ...(opts.plan ? { mode: 'plan' as const } : {}),
+        // 全程的单（#2826）：提示词多一节「到合并都归你」。三段、老历史不带
+        ...(rt.flowMode === 'full' ? { flowMode: 'full' as const } : {}),
       };
       // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
       let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });
@@ -492,7 +498,7 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   if (!patched('task-token-budget')) return;
   // 写在查花费之前、估用量那个标记之前：老历史重放时这一支为假，不多一个字段，后面的标记顺序也对得上。
   const thisGeneration = patched('task-budget-this-generation');
-  let spent: { tokens: number; unmetered: number; estimated?: number };
+  let spent: TaskSpendResult;
   try {
     spent = await rt.cancellable(() =>
       rt.acts.taskSpend({
@@ -509,11 +515,23 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   }
   // 被叫停、超时杀掉的会话多半到不了 CLI 的收尾用量帧，用量就空着；按这张单别的行估出来的下限一起算进预算，
   // 不然一张单反复被叫停可以一直换会话、账面一次都不超。老历史没有这个字段，估出来的是 0，照旧（patched('task-budget-unmetered-estimate')）。
-  const counted = spent.tokens + (patched('task-budget-unmetered-estimate') ? (spent.estimated ?? 0) : 0);
+  // #2859：判超没超用活动算好的输入当量（inputEquivalent）；#2830 那一版记的是 weighted / weightedEstimated，照读；
+  // 再老的结果两样都没有，用原来的 tokens / estimated。当量不在这里重算：历史里记的是活动当时的结果，重放读到的数不变。
+  // 没动步序，所以不用新标记。
+  const equivalent = spent.inputEquivalent !== undefined;
+  const measured = spent.inputEquivalent ?? spent.weighted ?? spent.tokens;
+  const estimatedPart =
+    spent.inputEquivalent !== undefined
+      ? (spent.inputEquivalentEstimated ?? 0)
+      : spent.weighted !== undefined
+        ? (spent.weightedEstimated ?? 0)
+        : (spent.estimated ?? 0);
+  const counted = measured + (patched('task-budget-unmetered-estimate') ? estimatedPart : 0);
   if (counted <= budget * rt.budgetGrants) return;
   const stop = tokenBudgetStop({ tokens: counted, unmetered: spent.unmetered }, budget, rt.budgetGrants, {
-    measured: spent.tokens,
-    estimated: counted - spent.tokens,
+    measured,
+    estimated: counted - measured,
+    ...(equivalent ? { raw: spent } : {}),
   });
   await rt.park(stop.title, stop.detail);
   // 人看过、点了「继续」：再给到比花掉的多一份

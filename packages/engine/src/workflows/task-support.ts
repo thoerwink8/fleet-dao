@@ -115,12 +115,22 @@ export function selfCheckText(result: SelfCheckResult): string {
 /**
  * 单任务 token 预算超了停下时写给人的话（决定 0093）。tokens 是算进判断的合计（量到的 + 估的）；分不清的传 estimated: 0。
  * 估的那部分（被叫停的会话按量到的行推出来的下限）在人话里写明白是估的，别当成量到的。
+ * 给了 raw（活动算好的折算结果，#2830）就分开写：新输入多少、输出多少、缓存写多少、缓存读多少、折算后多少；老结果没有就照旧只写合计。
  */
 export function tokenBudgetStop(
   spent: { tokens: number; unmetered: number },
   budget: number,
   grants: number,
-  split: { measured: number; estimated: number } = { measured: spent.tokens, estimated: 0 },
+  split: {
+    measured: number;
+    estimated: number;
+    raw?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    };
+  } = { measured: spent.tokens, estimated: 0 },
 ): { title: string; detail: string } {
   const m = (n: number) => `${(n / 1_000_000).toFixed(1)}M`;
   const allowed = budget * grants;
@@ -129,10 +139,19 @@ export function tokenBudgetStop(
     split.estimated > 0
       ? `（其中 ${split.measured} 是量到的，另 ${split.estimated} 是拿这张单量到的行估出来的下限：被叫停的会话记不到用量）`
       : '';
+  const raw = split.raw;
+  const rawText = raw
+    ? `（原始四样：新输入 ${raw.inputTokens ?? 0}、输出 ${raw.outputTokens ?? 0}、缓存写 ${raw.cacheWriteTokens ?? 0}、缓存读 ${raw.cacheReadTokens ?? 0}）`
+    : '';
+  const spentText = raw
+    ? `动手和验收会话合计输入当量 ${split.measured}${rawText}${split.estimated > 0 ? `；加上估的下限，当量合计 ${spent.tokens}` : ''}${splitText}${unmetered}`
+    : `动手和验收会话合计花掉 ${spent.tokens} token${splitText}${unmetered}`;
   return {
-    title: `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
+    title: raw
+      ? `这张单花掉的额度超了预算（输入当量 ${m(spent.tokens)} / ${m(allowed)}）`
+      : `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
     detail:
-      `动手和验收会话合计花掉 ${spent.tokens} token${splitText}${unmetered}，超过 ${allowed}（单任务预算 ${budget}` +
+      `${spentText}，超过上限 ${allowed}（单任务预算 ${budget}` +
       `${grants > 1 ? ` × 已给 ${grants} 份` : ''}）。预算按近 14 天每张单花费的 p95 定（决定 0093）。` +
       '点「继续」再给一份同样多的接着干；不要了点「放弃」。',
   };

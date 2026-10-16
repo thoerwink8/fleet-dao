@@ -1358,19 +1358,65 @@ describe('脱开引擎跑、引擎重启后接回（#2238：发版不再停在�
     expect(r.recorded).toEqual([]);
   });
 
-  it('Mirasim 上的动手会话不脱开：照旧在排空清单里、到截止被停（发版暂停那一套）', async () => {
+  /** 假的 Mirasim 驱动（#2815）：放手信号响了交回「放手」的报告（不发 stop）；叫停信号响了交回被叫停的报告。 */
+  const mirasimUntilReleasedOrStopped = (_spec: HostRunSpec, hooks: HostRunHooks): Promise<HostReport> =>
+    new Promise((resolve) => {
+      if (hooks.io && !hooks.io.attach) mkdirSync(hooks.io.dir, { recursive: true });
+      hooks.io?.release?.addEventListener('abort', () =>
+        resolve(report({ hostId: 'mirasim', detached: true })),
+      );
+      hooks.signal?.addEventListener('abort', () =>
+        resolve(report({ hostId: 'mirasim', facts: okFacts({ exitCode: null, killed: 'aborted' }) })),
+      );
+    });
+
+  it('Mirasim 上的动手会话（#2815）：发版到截止不停它（不在排空清单里），引擎要走了放手、交回 detached，不发 stop；新引擎带 attach 接回，结局记到原来那一行', async () => {
+    const ioRoot = join(root, 'io');
     const drain = createEngineDrain();
     const sessions = oneShotSessions({ drain });
+    const oldEngine = sessionHandoff(ioRoot);
     const r = rig({
       route: route({ hostId: 'mirasim' }),
-      handoff: sessionHandoff(join(root, 'io')),
-      driverRun: runsUntilStopped,
+      handoff: oldEngine,
+      driverRun: mirasimUntilReleasedOrStopped,
       deps: { sessions },
     });
     const pending = r.run(r.input(), ctx());
     await sessionUp(r.specs);
-    expect(drain.inFlight()).toEqual([expect.objectContaining({ runId: 'run-0002' })]);
-    expect(sessions.drainStop('到了发布宽限的截止')).toEqual(['run-0002']);
+    expect(drain.inFlight()).toEqual([]);
+    expect(sessions.drainStop('到了发布宽限的截止')).toEqual([]);
+    expect(oldEngine.leave('收到 SIGTERM')).toEqual(['run-0002']);
+    const got = await pending;
+    expect(got).toMatchObject({ ok: false, outcome: SEGMENT_DETACHED, runId: 'run-0002' });
+    expect(r.recorded).toEqual([]);
+    expect(existsSync(join(ioRoot, 'run-0002', DETACHED_MARK))).toBe(true);
+
+    const r2 = rig({
+      route: route({ hostId: 'mirasim' }),
+      handoff: sessionHandoff(ioRoot),
+      driverRun: async () => report({ hostId: 'mirasim' }),
+    });
+    if (got.ok || !got.detached) throw new Error('上面没交回 detached');
+    const back = await r2.run(r2.input({ attach: got.detached }), ctx());
+    expect(back).toMatchObject({ ok: true, runId: 'run-0002' });
+    expect(r2.started).toEqual([]);
+    expect(r2.recorded).toEqual([
+      expect.objectContaining({ runId: 'run-0002', outcome: 'done', startedAt: got.detached.startedAt }),
+    ]);
+  });
+
+  it('Mirasim 上的动手会话：切号叫停照旧停（发 stop 那条路），不放手', async () => {
+    const sessions = oneShotSessions({ drain: createEngineDrain() });
+    const r = rig({
+      route: route({ hostId: 'mirasim' }),
+      handoff: sessionHandoff(join(root, 'io')),
+      driverRun: mirasimUntilReleasedOrStopped,
+      deps: { sessions },
+    });
+    const pending = r.run(r.input(), ctx());
+    await sessionUp(r.specs);
+    expect(sessions.stop(new Set([route({ hostId: 'mirasim' }).poolId]), '切号')).toEqual(['run-0002']);
     expect(await pending).toMatchObject({ ok: false, outcome: 'org_switch' });
+    expect(existsSync(join(root, 'io', 'run-0002', DETACHED_MARK))).toBe(false);
   });
 });

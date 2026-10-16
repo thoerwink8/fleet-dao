@@ -1127,6 +1127,122 @@ describe('Mirasim 起会话到判定（假服务端）', () => {
   });
 });
 
+describe('Mirasim 放手与接回（#2815：发版重启引擎不停会话）', () => {
+  it('放手（release）：只断开连接，不发 stop、不记成被叫停；报告带会话号和轮次号，服务端会话没动', async () => {
+    const release = new AbortController();
+    const stopSignal = new AbortController();
+    const server = new FakeMirasim({ reply: accepted(kimi), stream: kimi.stream.slice(0, 3) });
+    setTimeout(() => {
+      // 引擎停机时放手信号先响，随后活动被取消（signal 也响）：放手优先，不能走叫停那条发 stop 的路
+      release.abort();
+      stopSignal.abort();
+    }, 100);
+    const report = await runMirasim(spec(), {
+      connect: server.connect,
+      release: release.signal,
+      signal: stopSignal.signal,
+    });
+    expect(report.detached).toEqual({ sessionKey: kimi.sessionKey, taskId: kimi.taskId });
+    expect(report.killed).toBeUndefined();
+    expect(report.stop).toBeUndefined();
+    expect(report.terminal).toBeUndefined();
+    expect(server.framesOf('stop')).toEqual([]);
+  });
+
+  it('不放手（只有叫停：切号、人叫停、总时长、卡住）：照旧发 stop', async () => {
+    const controller = new AbortController();
+    const server = new FakeMirasim({
+      reply: accepted(kimi),
+      stream: kimi.stream.slice(0, 3),
+      afterStop: [
+        { type: 'snapshot', sessionKey: kimi.sessionKey, seq: 100, snapshot: { phase: 'stopped' } },
+      ],
+    });
+    setTimeout(() => controller.abort(), 100);
+    const report = await runMirasim(spec(), {
+      connect: server.connect,
+      release: new AbortController().signal,
+      signal: controller.signal,
+    });
+    expect(report.detached).toBeUndefined();
+    expect(report.killed?.reason).toBe('aborted');
+    expect(server.framesOf('stop')).toHaveLength(1);
+  });
+
+  it('接回：不握手发 prompt，按会话号重新订阅；重复的帧按序号去掉，读到收场', async () => {
+    const dup = [...kimi.stream.slice(0, 3), ...kimi.stream.slice(0, 3), ...kimi.stream.slice(3)];
+    const server = new FakeMirasim({ stream: dup });
+    const events: { kind: string; replay: boolean }[] = [];
+    const accepts: unknown[] = [];
+    const report = await runMirasim(spec({ prompt: '' }), {
+      connect: server.connect,
+      attach: { sessionKey: kimi.sessionKey, taskId: kimi.taskId },
+      onEvent: (e, meta) => void events.push({ kind: e.kind, replay: meta.replay }),
+      onAccepted: (a) => void accepts.push(a),
+      ledgerDir: okLedger(kimi.sessionKey),
+    });
+    expect(server.framesOf('prompt')).toEqual([]);
+    expect(server.framesOf('stop')).toEqual([]);
+    expect(server.framesOf('subscribe')[0]).toMatchObject({ sessionKey: kimi.sessionKey });
+    expect(report).toMatchObject({ sessionKey: kimi.sessionKey, taskId: kimi.taskId });
+    expect(report.terminal).toEqual(expect.objectContaining({ isError: false }));
+    expect(accepts).toEqual([expect.objectContaining({ sessionKey: kimi.sessionKey })]);
+    // 事件一个不多（重复的帧没重放出事件）：和一次不断线的完整跑一样
+    expect(events.map((e) => e.kind)).toEqual(['tool', 'tool', 'test', 'say']);
+    expect(judgeRun(mirasimRunSummary(report).facts)).toMatchObject({ outcome: 'ok' });
+  });
+
+  it('接回的会话已经收场（订阅回的第一份快照就是 done）：读到就收，不等总时长', async () => {
+    const server = new FakeMirasim({
+      stream: [
+        {
+          type: 'snapshot',
+          sessionKey: kimi.sessionKey,
+          seq: 9,
+          snapshot: { phase: 'done', taskId: kimi.taskId, text: '好了' },
+        },
+      ],
+    });
+    const report = await runMirasim(spec({ prompt: '' }), {
+      connect: server.connect,
+      attach: { sessionKey: kimi.sessionKey, taskId: kimi.taskId },
+    });
+    expect(report.terminal).toEqual({ isError: false, detail: 'done' });
+    expect(report.session.state.text).toBe('好了');
+  });
+
+  it('接回后再放手（发版连着发）：又只断开、不发 stop', async () => {
+    const release = new AbortController();
+    const server = new FakeMirasim({ stream: kimi.stream.slice(0, 3) });
+    setTimeout(() => release.abort(), 100);
+    const report = await runMirasim(spec({ prompt: '' }), {
+      connect: server.connect,
+      attach: { sessionKey: kimi.sessionKey, taskId: kimi.taskId },
+      release: release.signal,
+    });
+    expect(report.detached).toEqual({ sessionKey: kimi.sessionKey, taskId: kimi.taskId });
+    expect(server.framesOf('stop')).toEqual([]);
+  });
+
+  it('接回后被叫停（切号）：没有发起连接也能发出 stop', async () => {
+    const controller = new AbortController();
+    const server = new FakeMirasim({
+      stream: kimi.stream.slice(0, 3),
+      afterStop: [
+        { type: 'snapshot', sessionKey: kimi.sessionKey, seq: 100, snapshot: { phase: 'stopped' } },
+      ],
+    });
+    setTimeout(() => controller.abort(), 100);
+    const report = await runMirasim(spec({ prompt: '' }), {
+      connect: server.connect,
+      attach: { sessionKey: kimi.sessionKey, taskId: kimi.taskId },
+      signal: controller.signal,
+    });
+    expect(report.killed?.reason).toBe('aborted');
+    expect(server.framesOf('stop')).toHaveLength(1);
+  });
+});
+
 // #2675：法国 10-14 到 10-16 用量账本对不上的 19 笔逐笔查过（只读），每类根因一份最小样例。用量账本是
 // ~/.mirasim/insights/usage-<年-月>.ndjson（有 token 数），流量记录是 ~/.mirasim/traffic/<会话 uuid>/index-*.ndjson（每次上游调用
 // 一行，有 ts、status，没有 token 数）。字段照真行，去掉了账号、设备、仓这些和用量无关的。

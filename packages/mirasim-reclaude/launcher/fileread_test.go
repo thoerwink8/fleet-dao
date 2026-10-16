@@ -18,35 +18,37 @@ func replaceAtomically(tmp, path string) {
 	}
 }
 
-// 读到别的进程写一半的索引：解析失败后重读，换成完整文件就能拿到。
-// 替换发生在第一次解析失败、下一次重读之前，不跟 goroutine 调度抢重试窗口。
+// 读到别的进程写一半的索引：第一次重读前同步完成替换（不靠真睡），第二次读就拿到完整内容。
 func TestReadJSONFileRetriesHalfWrittenFile(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "index.json")
 	if err := os.WriteFile(p, []byte(`{"routes":{"claude:x":"lo`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	replaced := 0
-	beforeJSONRetry = func() {
-		replaced++
-		if replaced != 1 {
+	orig := retrySleep
+	t.Cleanup(func() { retrySleep = orig })
+	replaced := false
+	retrySleep = func(time.Duration) {
+		if replaced {
 			return
 		}
+		replaced = true
 		tmp := p + ".tmp"
 		if err := os.WriteFile(tmp, []byte(`{"routes":{"claude:x":"local"}}`), 0600); err != nil {
-			t.Errorf("写完整文件：%v", err)
-			return
+			t.Fatal(err)
 		}
-		replaceAtomically(tmp, p)
+		if err := os.Rename(tmp, p); err != nil {
+			t.Fatal(err)
+		}
 	}
-	t.Cleanup(func() { beforeJSONRetry = nil })
 	var d struct {
 		Routes map[string]string `json:"routes"`
 	}
-	if err := readJSONFile(p, &d); err != nil || d.Routes["claude:x"] != "local" {
+	err := readJSONFile(p, &d)
+	if err != nil || d.Routes["claude:x"] != "local" {
 		t.Fatalf("写一半时应重读拿到完整内容：%v %v", d, err)
 	}
-	if replaced < 1 {
-		t.Fatal("第一次应撞上半截并重读")
+	if !replaced {
+		t.Fatal("应先读到半截内容、重读前才替换")
 	}
 }
 

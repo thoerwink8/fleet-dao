@@ -11,12 +11,11 @@ import (
 // Windows 上是共享冲突，各平台都可能读到别的进程刚写一半的内容。隔 50ms 重读，最多 3 次，仍不行才明确失败。
 var transientRetryDelay = 50 * time.Millisecond
 
-const transientRetries = 3
+// retrySleep 是重读前的等待；测试换掉它，在等待那一刻同步完成替换，不靠真睡。
+// 另起 goroutine 睡几十毫秒再替换会跟调度抢：150ms 的重试窗口耗尽时读到的仍是半截。
+var retrySleep = time.Sleep
 
-// beforeJSONRetry 在解析失败、还要重读之前调用。生产环境保持 nil。
-// 测试在这里把半截文件换成完整的：不另起 goroutine 睡几十毫秒再替换，忙的时候那一下排不上，
-// 150ms 的重试窗口已经耗尽，读到的仍是半截（CI 上 TestReadJSONFileRetriesHalfWrittenFile 因此红过）。
-var beforeJSONRetry func()
+const transientRetries = 3
 
 type readFailure struct {
 	notExist bool
@@ -38,7 +37,7 @@ func readJSONFile(path string, v any) error {
 	var last *readFailure
 	for attempt := 0; attempt <= transientRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(transientRetryDelay)
+			retrySleep(transientRetryDelay)
 		}
 		b, err := readFileShared(path)
 		if err != nil {
@@ -53,9 +52,6 @@ func readJSONFile(path string, v any) error {
 		}
 		if json.Unmarshal(b, v) != nil {
 			last = &readFailure{parse: true}
-			if attempt < transientRetries && beforeJSONRetry != nil {
-				beforeJSONRetry()
-			}
 			continue
 		}
 		return nil

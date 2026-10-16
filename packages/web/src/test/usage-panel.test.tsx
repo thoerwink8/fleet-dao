@@ -95,6 +95,14 @@ describe('任务详情「时间与用量」：读到的照数写，没读到的�
     expect(figure('输入当量')).toContain('9,000');
   });
 
+  test('额度只有「输入当量」一格（#2859），没有「折算 token」；原始四样另列', () => {
+    render(<UsagePanel d={detail([run()])} now={NOW} />);
+    expect(screen.queryByText('折算 token')).toBeNull();
+    expect(shownValue('输入当量')).toBe('9,000');
+    expect(figure('token')).toContain('输入 1,000');
+    expect(figure('缓存')).toContain('读 3.0 万');
+  });
+
   test('token、缓存、当量一次都没读到：写「没读到」和几次，不写 0', () => {
     const blank = without(
       run(),

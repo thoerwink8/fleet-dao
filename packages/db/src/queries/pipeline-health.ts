@@ -7,7 +7,13 @@
 // - 重活 PR 新增行 p90：窗口里合并的 heavyweight 轮，收场时 PR 相对主线的新增行数的 p90；没有量到的行不算。
 // 读不到照抛，不拿空顶；窗口里一轮都没有时各占比是 null（调用方写「没有」），不是 0。
 
-import { FLOW_MODES, type FlowMode, VERIFY_REJECT_CLASSES, type VerifyRejectClass } from '@fleet-dao/shared';
+import {
+  FLOW_MODES,
+  type FlowMode,
+  INPUT_EQUIVALENT_WEIGHTS,
+  VERIFY_REJECT_CLASSES,
+  type VerifyRejectClass,
+} from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { ROUND_OUTCOMES, type RoundOutcome, taskRounds } from '../schema/work.ts';
@@ -195,7 +201,7 @@ export async function releaseKilledSessions(db: Db, to: Date): Promise<ReleaseKi
 // - 单数＝分到组的合格单（source ≠ ineligible）；合并数＝其中有一轮 outcome = merged 的单。
 // - 成功率这里按「合并数 / 单数」算，带 Wilson 95% 区间；0105 里「合并后 7 天没被修也没被回退」库里读不到，那一条由人核，不在这数里。
 // - 时长＝分到组到第一次 merged 收场的分钟数，只看已合并的单（没合的不进时长），中位和 p90。
-// - 每合并单 token＝这一组所有单的 runs 四样 token 之和 / 合并数（没合的单花的也算进来）；有 run 的 token 没读全，
+// - 每合并单输入当量＝这一组所有单的 runs 输入当量之和 / 合并数（没合的单花的也算进来；#2859，原始四样相加另给 rawTokensPerMerged）；有 run 的 token 没读全，
 //   数里按 0 加，同时报有几条 run 没读全，不当没有。
 // 读不到照抛；没有分组记录时每组都是 0 单、各个比率是 null，不是 0。
 
@@ -205,7 +211,7 @@ export const FLOW_VERDICT_MIN_TASKS = 30;
 export const FLOW_SAFETY_GATE_TASKS = 90;
 /** 非劣效边界：5 个百分点（决定 0105）。 */
 export const FLOW_NONINFERIORITY_MARGIN = 0.05;
-/** 成本类止损：全程每合并单 token 超过三段的这个倍数（决定 0105）。 */
+/** 成本类止损：全程每合并单输入当量超过三段的这个倍数（决定 0105）。 */
 export const FLOW_COST_STOP_RATIO = 2;
 
 /** Wilson 区间（z=1.96 即 95%）。n=0 回 null。 */
@@ -246,8 +252,10 @@ export interface FlowGroupStat {
   /** 分到组到合并的分钟数；没有合并的单是 null。 */
   durationMedianMin: number | null;
   durationP90Min: number | null;
-  /** 每合并单 token；没有合并的单是 null。 */
-  tokensPerMerged: number | null;
+  /** 每合并单输入当量（INPUT_EQUIVALENT_WEIGHTS：输入 1、缓存写 1.25、缓存读 0.1、输出 5，#2859）；没有合并的单是 null。成本对比按它算。 */
+  equivalentPerMerged: number | null;
+  /** 每合并单原始四样 token 相加（另列给人对照）；没有合并的单是 null。 */
+  rawTokensPerMerged: number | null;
   /** 这一组的 run 里 token 没读全的条数（数里按 0 加了）。 */
   runsTokenUnread: number;
 }
@@ -264,7 +272,7 @@ export interface FlowModeHealth {
     worse90: { diff: number; low: number; high: number };
     noninferior: boolean;
     effectStop: boolean;
-    /** 全程每合并单 token 是三段的几倍；任一边没有合并的单是 null。 */
+    /** 全程每合并单输入当量是三段的几倍；任一边没有合并的单是 null。 */
     costRatio: number | null;
     costStop: boolean;
   } | null;
@@ -296,6 +304,10 @@ export async function flowModeHealth(db: Db, to: Date): Promise<FlowModeHealth> 
       select a.mode,
              coalesce(sum(coalesce(u.input_tokens, 0) + coalesce(u.output_tokens, 0)
                         + coalesce(u.cache_read_tokens, 0) + coalesce(u.cache_write_tokens, 0)), 0)::float8 as total,
+             coalesce(sum(coalesce(u.input_tokens, 0) * ${INPUT_EQUIVALENT_WEIGHTS.input}::float8
+                        + coalesce(u.output_tokens, 0) * ${INPUT_EQUIVALENT_WEIGHTS.output}::float8
+                        + coalesce(u.cache_read_tokens, 0) * ${INPUT_EQUIVALENT_WEIGHTS.cacheRead}::float8
+                        + coalesce(u.cache_write_tokens, 0) * ${INPUT_EQUIVALENT_WEIGHTS.cacheWrite}::float8), 0)::float8 as equivalent,
              (count(*) filter (where u.input_tokens is null or u.output_tokens is null
                                  or u.cache_read_tokens is null or u.cache_write_tokens is null))::int as unread
       from task_flow_assignments a join runs u on u.task_id = a.task_id and u.started_at < ${at}::timestamptz
@@ -317,7 +329,8 @@ export async function flowModeHealth(db: Db, to: Date): Promise<FlowModeHealth> 
       wilson: wilsonInterval(merged, tasks),
       durationMedianMin: med === null ? null : Math.round(med),
       durationP90Min: p90 === null ? null : Math.round(p90),
-      tokensPerMerged: merged === 0 ? null : Math.round(Number(k?.total ?? 0) / merged),
+      equivalentPerMerged: merged === 0 ? null : Math.round(Number(k?.equivalent ?? 0) / merged),
+      rawTokensPerMerged: merged === 0 ? null : Math.round(Number(k?.total ?? 0) / merged),
       runsTokenUnread: k ? Number(k.unread) : 0,
     };
   };
@@ -332,9 +345,11 @@ export async function flowModeHealth(db: Db, to: Date): Promise<FlowModeHealth> 
     const worse90 = newcombeDiff(a, b, 1.645);
     if (!diff || !worse90) throw new Error('flowModeHealth: 够判的两组算不出差值');
     const costRatio =
-      full.tokensPerMerged === null || three.tokensPerMerged === null || three.tokensPerMerged === 0
+      full.equivalentPerMerged === null ||
+      three.equivalentPerMerged === null ||
+      three.equivalentPerMerged === 0
         ? null
-        : full.tokensPerMerged / three.tokensPerMerged;
+        : full.equivalentPerMerged / three.equivalentPerMerged;
     verdict = {
       diff,
       worse90,
