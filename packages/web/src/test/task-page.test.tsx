@@ -179,6 +179,32 @@ const base: SegmentRunFacts = {
   matchedBy: 'task',
 };
 
+describe('折算 token（#2830）：预算按它比，原始四样另列', () => {
+  test('顶上有「折算 token」一格：缓存读乘 0.1、其余乘 1，原始四样写在说明里，段表照旧列四样', async () => {
+    open('/tasks/t-x', apiWith(detailWith([base])));
+    const box = await panel('三段');
+    const figure = screen.getByText('折算 token').closest('[data-figure]') as HTMLElement;
+    // 1000 + 500 + 2000 + 30000 × 0.1 = 6,500
+    expect(figure.querySelector('.num')?.textContent).toBe('6,500');
+    const hint = figure.textContent ?? '';
+    expect(hint).toContain('缓存读乘 0.1');
+    expect(hint).toContain('输入 1,000');
+    expect(hint).toContain('输出 500');
+    expect(hint).toContain('缓存读 3.0 万');
+    expect(hint).toContain('缓存写 2,000');
+    // 原始的两格还在
+    expect(within(segmentRow(box, 'manual')).getByText('1,000 / 500')).toBeTruthy();
+  });
+
+  test('四样没读全：折算 token 收成一行灰字，不写 0', async () => {
+    const blank = { ...base, cacheReadTokens: undefined, cacheWriteTokens: undefined };
+    open('/tasks/t-x', apiWith(detailWith([blank])));
+    await panel('三段');
+    expect(screen.queryByText('折算 token')).toBeNull();
+    expect(document.querySelector('[data-stats-unread]')?.textContent).toMatch(/折算 token 没读到/);
+  });
+});
+
 describe('【失败】读不到的都写明，不写 0', () => {
   test('段名认不出：单列一组「段名认不出」，那一笔写明原样', async () => {
     open('/tasks/t-x', apiWith(detailWith([base, { ...base, id: 'x-2', segment: 'fusion-execute' }])));

@@ -586,12 +586,21 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       runs: 3,
       unmetered: 1,
       estimated: 519,
+      // 原始四样分开给（#2830：折算在活动里做，库只交原始的）
+      inputTokens: 11,
+      outputTokens: 22,
+      cacheReadTokens: 1000,
+      cacheWriteTokens: 5,
     });
     expect(await taskTokenSpend(t.db, randomUUID())).toEqual({
       tokens: 0,
       runs: 0,
       unmetered: 0,
       estimated: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
     });
   });
 
@@ -616,6 +625,10 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       runs: 0,
       unmetered: 0,
       estimated: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
     });
     expect((await taskTokenSpend(t.db, task.id)).tokens).toBe(83_500_000);
     await row({
@@ -627,6 +640,10 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       runs: 1,
       unmetered: 0,
       estimated: 0,
+      inputTokens: 38_000_000,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
     });
   });
 
@@ -641,6 +658,10 @@ describe('taskTokenSpend：单任务 token 预算（决定 0093）', () => {
       runs: 1,
       unmetered: 1,
       estimated: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 0,
     });
   });
 });

@@ -448,6 +448,72 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(world.alerts[0]?.detail).toContain('1 次会话用量还没补上');
   });
 
+  it('原始合计超了、折算后没超（缓存读占大头，#2830）：不停，照旧起会话', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      spend: () => ({
+        tokens: 37_800_000,
+        runs: 9,
+        unmetered: 0,
+        estimated: 0,
+        inputTokens: 600_000,
+        outputTokens: 100_000,
+        cacheReadTokens: 36_800_000,
+        cacheWriteTokens: 300_000,
+        weighted: 4_680_000,
+        weightedEstimated: 0,
+        cacheReadWeight: 0.1,
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+      },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(1);
+    expect(world.alerts).toHaveLength(0);
+  });
+
+  it('新输入占大头、折算后照旧超（#2830）：停下，原因里分开写新输入、缓存读、折算后', async () => {
+    const world = createFakeWorld();
+    const { tasks } = scripted({
+      spend: () => ({
+        tokens: 40_000_000,
+        runs: 9,
+        unmetered: 0,
+        estimated: 0,
+        inputTokens: 38_000_000,
+        outputTokens: 1_000_000,
+        cacheReadTokens: 1_000_000,
+        cacheWriteTokens: 0,
+        weighted: 39_100_000,
+        weightedEstimated: 0,
+        cacheReadWeight: 0.1,
+      }),
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await pollQuery(() => statusOf(h), parked, '折算后超了预算停下');
+        expect(s.lastProblem).toContain('超了预算');
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    const detail = world.alerts[0]?.detail ?? '';
+    expect(detail).toContain('新输入 38000000');
+    expect(detail).toContain('缓存读 1000000');
+    expect(detail).toContain('折算后 39100000');
+    expect(world.alerts[0]?.title).toContain('39.1M');
+  });
+
   it('量到的不多、被叫停那几行估出来的把预算顶超了：照样停下，写明哪部分是估的', async () => {
     const world = createFakeWorld();
     const measured = 1_000_000;

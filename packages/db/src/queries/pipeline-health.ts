@@ -7,7 +7,13 @@
 // - 重活 PR 新增行 p90：窗口里合并的 heavyweight 轮，收场时 PR 相对主线的新增行数的 p90；没有量到的行不算。
 // 读不到照抛，不拿空顶；窗口里一轮都没有时各占比是 null（调用方写「没有」），不是 0。
 
-import { FLOW_MODES, type FlowMode, VERIFY_REJECT_CLASSES, type VerifyRejectClass } from '@fleet-dao/shared';
+import {
+  BUDGET_CACHE_READ_WEIGHT,
+  FLOW_MODES,
+  type FlowMode,
+  VERIFY_REJECT_CLASSES,
+  type VerifyRejectClass,
+} from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { ROUND_OUTCOMES, type RoundOutcome, taskRounds } from '../schema/work.ts';
@@ -246,8 +252,10 @@ export interface FlowGroupStat {
   /** 分到组到合并的分钟数；没有合并的单是 null。 */
   durationMedianMin: number | null;
   durationP90Min: number | null;
-  /** 每合并单 token；没有合并的单是 null。 */
+  /** 每合并单折算 token（缓存读乘 BUDGET_CACHE_READ_WEIGHT，其余乘 1，#2830）；没有合并的单是 null。成本对比按它算。 */
   tokensPerMerged: number | null;
+  /** 每合并单原始四样 token 相加（另列给人对照）；没有合并的单是 null。 */
+  rawTokensPerMerged: number | null;
   /** 这一组的 run 里 token 没读全的条数（数里按 0 加了）。 */
   runsTokenUnread: number;
 }
@@ -296,6 +304,9 @@ export async function flowModeHealth(db: Db, to: Date): Promise<FlowModeHealth> 
       select a.mode,
              coalesce(sum(coalesce(u.input_tokens, 0) + coalesce(u.output_tokens, 0)
                         + coalesce(u.cache_read_tokens, 0) + coalesce(u.cache_write_tokens, 0)), 0)::float8 as total,
+             coalesce(sum(coalesce(u.input_tokens, 0) + coalesce(u.output_tokens, 0)
+                        + coalesce(u.cache_read_tokens, 0) * ${BUDGET_CACHE_READ_WEIGHT}::float8
+                        + coalesce(u.cache_write_tokens, 0)), 0)::float8 as weighted,
              (count(*) filter (where u.input_tokens is null or u.output_tokens is null
                                  or u.cache_read_tokens is null or u.cache_write_tokens is null))::int as unread
       from task_flow_assignments a join runs u on u.task_id = a.task_id and u.started_at < ${at}::timestamptz
@@ -317,7 +328,8 @@ export async function flowModeHealth(db: Db, to: Date): Promise<FlowModeHealth> 
       wilson: wilsonInterval(merged, tasks),
       durationMedianMin: med === null ? null : Math.round(med),
       durationP90Min: p90 === null ? null : Math.round(p90),
-      tokensPerMerged: merged === 0 ? null : Math.round(Number(k?.total ?? 0) / merged),
+      tokensPerMerged: merged === 0 ? null : Math.round(Number(k?.weighted ?? 0) / merged),
+      rawTokensPerMerged: merged === 0 ? null : Math.round(Number(k?.total ?? 0) / merged),
       runsTokenUnread: k ? Number(k.unread) : 0,
     };
   };

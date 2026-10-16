@@ -627,6 +627,7 @@ describe('流程健康：两种流程对照（决定 0105）', () => {
     durationMedianMin: null,
     durationP90Min: null,
     tokensPerMerged: null,
+    rawTokensPerMerged: null,
     runsTokenUnread: 0,
     ...over,
   });
@@ -657,6 +658,7 @@ describe('流程健康：两种流程对照（决定 0105）', () => {
           durationMedianMin: 42,
           durationP90Min: 120,
           tokensPerMerged: 12_000,
+          rawTokensPerMerged: 16_000,
         }),
         three: group('three', {
           tasks: 14,
@@ -670,6 +672,8 @@ describe('流程健康：两种流程对照（决定 0105）', () => {
     expect(text).toContain(
       '· 全程：10 单，合并 6；成功率 60%（Wilson 95% 区间 31%–83%）；时长中位 42 分钟、p90 120 分钟；每合并单 12k token',
     );
+    // #2830：每合并单 token 按折算口径给（缓存读乘 0.1），原始四样相加另列
+    expect(text).toContain('每合并单 12k token（折算，缓存读按 0.1；原始四样相加 16k）');
     expect(lines).toContain('还不够判（全程 10 / 三段 14）');
     expect(text).not.toContain('成功率差');
   });

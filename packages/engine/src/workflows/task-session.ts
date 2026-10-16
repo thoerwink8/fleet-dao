@@ -55,6 +55,7 @@ import {
   SEGMENT_MINUTES,
   SEGMENT_STAGE,
   type SegmentEvidence,
+  type TaskSpendResult,
   UI_PURPOSE,
 } from '../task-contract.ts';
 import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
@@ -424,7 +425,7 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   if (!patched('task-token-budget')) return;
   // 写在查花费之前、估用量那个标记之前：老历史重放时这一支为假，不多一个字段，后面的标记顺序也对得上。
   const thisGeneration = patched('task-budget-this-generation');
-  let spent: { tokens: number; unmetered: number; estimated?: number };
+  let spent: TaskSpendResult;
   try {
     spent = await rt.cancellable(() =>
       rt.acts.taskSpend({
@@ -441,11 +442,17 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   }
   // 被叫停、超时杀掉的会话多半到不了 CLI 的收尾用量帧，用量就空着；按这张单别的行估出来的下限一起算进预算，
   // 不然一张单反复被叫停可以一直换会话、账面一次都不超。老历史没有这个字段，估出来的是 0，照旧（patched('task-budget-unmetered-estimate')）。
-  const counted = spent.tokens + (patched('task-budget-unmetered-estimate') ? (spent.estimated ?? 0) : 0);
+  // #2830：判超没超用活动算好的折算数（缓存读乘 0.1）；老结果没有 weighted，用原来的 tokens / estimated。
+  // 折算不在这里重算：历史里记的是活动当时的结果，重放读到的数不变。没动步序，所以不用新标记。
+  const weighted = spent.weighted !== undefined;
+  const measured = spent.weighted ?? spent.tokens;
+  const estimatedPart = weighted ? (spent.weightedEstimated ?? 0) : (spent.estimated ?? 0);
+  const counted = measured + (patched('task-budget-unmetered-estimate') ? estimatedPart : 0);
   if (counted <= budget * rt.budgetGrants) return;
   const stop = tokenBudgetStop({ tokens: counted, unmetered: spent.unmetered }, budget, rt.budgetGrants, {
-    measured: spent.tokens,
-    estimated: counted - spent.tokens,
+    measured,
+    estimated: counted - measured,
+    ...(weighted ? { raw: spent } : {}),
   });
   await rt.park(stop.title, stop.detail);
   // 人看过、点了「继续」：再给到比花掉的多一份

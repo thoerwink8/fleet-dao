@@ -283,7 +283,17 @@ export async function taskTokenSpend(
   db: Db,
   taskId: string,
   opts?: { since?: Date },
-): Promise<{ tokens: number; runs: number; unmetered: number; estimated: number }> {
+): Promise<{
+  tokens: number;
+  runs: number;
+  unmetered: number;
+  estimated: number;
+  /** 原始四样分开给（缺的按 0 加）：折算在引擎的 taskSpend 活动里做（#2830），库只交原始的。 */
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}> {
   const perRun = sql`coalesce(${runs.inputTokens}, 0) + coalesce(${runs.outputTokens}, 0) + coalesce(${runs.cacheReadTokens}, 0) + coalesce(${runs.cacheWriteTokens}, 0)`;
   const blank = sql`${runs.inputTokens} is null and ${runs.outputTokens} is null and ${runs.cacheReadTokens} is null and ${runs.cacheWriteTokens} is null`;
   const seconds = sql`greatest(extract(epoch from (coalesce(${runs.endedAt}, now()) - ${runs.startedAt})), 0)`;
@@ -291,6 +301,10 @@ export async function taskTokenSpend(
     .select({
       tokens: sql<string>`coalesce(sum(case when ${blank} then 0 else ${perRun} end), 0)`,
       runs: sql<string>`count(*)`,
+      inputTokens: sql<string>`coalesce(sum(coalesce(${runs.inputTokens}, 0)), 0)`,
+      outputTokens: sql<string>`coalesce(sum(coalesce(${runs.outputTokens}, 0)), 0)`,
+      cacheReadTokens: sql<string>`coalesce(sum(coalesce(${runs.cacheReadTokens}, 0)), 0)`,
+      cacheWriteTokens: sql<string>`coalesce(sum(coalesce(${runs.cacheWriteTokens}, 0)), 0)`,
       unmetered: sql<string>`count(*) filter (where ${blank})`,
       measuredSeconds: sql<string>`coalesce(sum(case when ${blank} then 0 else ${seconds} end), 0)`,
       blankSeconds: sql<string>`coalesce(sum(case when ${blank} then ${seconds} else 0 end), 0)`,
@@ -315,6 +329,10 @@ export async function taskTokenSpend(
     runs: Number(row?.runs ?? 0),
     unmetered: Number(row?.unmetered ?? 0),
     estimated,
+    inputTokens: Number(row?.inputTokens ?? 0),
+    outputTokens: Number(row?.outputTokens ?? 0),
+    cacheReadTokens: Number(row?.cacheReadTokens ?? 0),
+    cacheWriteTokens: Number(row?.cacheWriteTokens ?? 0),
   };
 }
 

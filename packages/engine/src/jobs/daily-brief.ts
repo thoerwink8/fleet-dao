@@ -495,8 +495,13 @@ function flowGroupLine(g: FlowGroupStat): string {
     g.successRate === null || g.wilson === null
       ? '—'
       : `${pct(g.successRate)}（Wilson 95% 区间 ${pct(g.wilson.low)}–${pct(g.wilson.high)}）`;
+  // #2830：按折算口径给（缓存读乘 0.1，其余乘 1），原始四样相加另列
+  const perMerged =
+    g.tokensPerMerged === null
+      ? '—'
+      : `${tokenWord(g.tokensPerMerged)} token（折算，缓存读按 0.1；原始四样相加 ${g.rawTokensPerMerged === null ? '—' : tokenWord(g.rawTokensPerMerged)}）`;
   const unread = g.runsTokenUnread > 0 ? `，另有 ${g.runsTokenUnread} 段 token 没读全` : '';
-  return `· ${groupWord(g.mode)}：${g.tasks} 单，合并 ${g.merged}；成功率 ${rate}；时长中位 ${mins(g.durationMedianMin)}、p90 ${mins(g.durationP90Min)}；每合并单 ${g.tokensPerMerged === null ? '—' : `${tokenWord(g.tokensPerMerged)} token`}${unread}`;
+  return `· ${groupWord(g.mode)}：${g.tasks} 单，合并 ${g.merged}；成功率 ${rate}；时长中位 ${mins(g.durationMedianMin)}、p90 ${mins(g.durationP90Min)}；每合并单 ${perMerged}${unread}`;
 }
 
 /**

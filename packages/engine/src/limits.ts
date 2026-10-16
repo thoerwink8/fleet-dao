@@ -1,5 +1,6 @@
 // 一次运行用到的上限与超时。全部可配（驾驶舱设置 → 工作流输入）；缺的字段读时现算默认值，不写回输入。
 // 工作流开头经 decide 本地活动解析一次，结果进历史：以后改默认值，在途任务照旧用它开工时那一套（windsurf-dao#1813）。
+import { BUDGET_CACHE_READ_WEIGHT } from '@fleet-dao/shared';
 
 export interface Limits {
   /** 兜底梯：有界重试次数。 */
@@ -46,6 +47,15 @@ export const DEFAULT_PR_LINE_BUDGET = 3000;
  * 查法：_tmp/rethink/resume-q1.sql（runs 按 task_id 汇总 input+output+cache_read+cache_write）。
  */
 export const DEFAULT_TASK_TOKEN_BUDGET = 37_000_000;
+
+/**
+ * 预算按「折算 token」算（#2830）：缓存读乘这个权重，新输入、输出、缓存写照旧乘 1。
+ * 为什么是 0.1：缓存读的价钱大约是新输入的十分之一（Claude 缓存读 0.1×输入价，别家缓存命中也在一折上下）。
+ * 原先四样 1:1 相加，#2763 的 37.8M 里 36.8M（97%）是缓存读，折下来才约 4.7M；越是续会话省钱的单越早撞预算。
+ * 数值的单一出处在 shared（驾驶舱、每日简报也按它折），这里转出来并写明理由。
+ * 预算上限 37M 不跟着改：它是按四样 1:1 的 p95 取的，改口径后只会更宽松，要收紧另开单按折算后的数据重算。
+ */
+export const CACHE_READ_TOKEN_WEIGHT = BUDGET_CACHE_READ_WEIGHT;
 
 /** 法国 VPS 能分给会话的内存（MiB）：机器约 11.7G，给内核和系统留约 0.7G。 */
 export const FRANCE_USABLE_MB = 11 * 1024;

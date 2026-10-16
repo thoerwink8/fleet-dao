@@ -484,6 +484,7 @@ export interface TaskSpendInput {
 
 /** 单任务 token 预算的默认值见 limits.ts 的 DEFAULT_TASK_TOKEN_BUDGET。 */
 export interface TaskSpendResult {
+  /** 原始四样相加（老字段，老历史记的结果里只有这个）。 */
   tokens: number;
   runs: number;
   /** 用量还空着的行数（被叫停、超时杀，或中转会话的用量稍后才补）：花掉的只多不少。 */
@@ -493,6 +494,21 @@ export interface TaskSpendResult {
    * 页面上写明是估的。
    */
   estimated: number;
+  /**
+   * #2830：预算按折算 token 判。折算只在活动里算（toTaskSpendResult），工作流不重算：下面这几项都是可选的，
+   * 新活动结果带全；老历史里记的结果没有它们，工作流退回用 tokens / estimated，重放判法和原来一样。
+   */
+  /** 原始四样（新输入、输出、缓存读、缓存写），缺的按 0 加。 */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** 折算 token：缓存读乘 cacheReadWeight，其余乘 1。预算判超没超看它。 */
+  weighted?: number;
+  /** estimated 按同一比例折算后的数。 */
+  weightedEstimated?: number;
+  /** 折算时缓存读乘的权重（写进结果，老结果换了权重也看得出当时怎么算的）。 */
+  cacheReadWeight?: number;
 }
 
 /**

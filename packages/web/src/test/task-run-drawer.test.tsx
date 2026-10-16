@@ -94,14 +94,14 @@ describe('「看会话」抽屉', () => {
 });
 
 describe('手机端（#1802 点验补充）', () => {
-  test('四张统计卡手机上两列（2×2），宽屏才四列并排', async () => {
+  test('五张统计卡（#2830 加了折算 token）手机上两列，宽屏才五列并排', async () => {
     open('/tasks/t-c9');
     await screen.findByRole('heading', { name: '每一笔' });
     const grid = document.querySelector('[data-segment-stats] > div') as HTMLElement;
-    expect(grid.children.length).toBe(4);
+    expect(grid.children.length).toBe(5);
     expect(grid.className).toContain('grid-cols-2');
     expect(grid.className).not.toContain('grid-cols-1');
-    expect(grid.className).toContain('xl:grid-cols-4');
+    expect(grid.className).toContain('xl:grid-cols-5');
   });
 
   test('「三段」每段手机上一行摘要：段、模型、次数、耗时、token、花费；表格只在 md 以上', async () => {
