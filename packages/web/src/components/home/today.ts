@@ -139,6 +139,8 @@ export interface RunRow {
   href?: string | undefined;
   external?: boolean | undefined;
   source: 'engine' | 'local';
+  /** 这张引擎单走全程还是三段。没有这个值不标、不猜。本机会话没有。 */
+  flowMode?: HomeRunning['flowMode'];
 }
 
 const STEP: Record<NonNullable<HomeRunning['segment']>, string> = {
@@ -195,6 +197,7 @@ export function engineRow(
     href: link.href,
     external: link.external,
     source: 'engine',
+    ...(item.flowMode === 'full' || item.flowMode === 'three' ? { flowMode: item.flowMode } : {}),
   };
 }
 
@@ -221,6 +224,7 @@ function localTaskRow(
     href: link.href,
     external: link.external,
     source: 'engine',
+    ...(item.flowMode === 'full' || item.flowMode === 'three' ? { flowMode: item.flowMode } : {}),
   };
 }
 
