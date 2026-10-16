@@ -1809,12 +1809,23 @@ check_chain() {
 # 发版车（fleet-train-release）只跑 release.sh，不经过接活单元，不会改 .train/release-train.json。
 # 更早一趟留下的 status=failed 会一直让自动发版说「要人看」。这里盖成 done（驾驶舱和自动发版闸都认 done 为做完）。
 # 写不进不挡这次发版：版本已经切过去了，闸还会用「current 已等于或新于旧目标」放行。
+# 法国的 node 在 /usr/bin/node。CI 用 sudo 跑，PATH 收成安全路径，/usr/bin/node 没有，
+# node 在 /usr/local/bin 或 actions/setup-node 的缓存里（和 lib/session-proxy.sh 找的是同一串）。
+# 不读 $NODE：装目录那几段测试会把 NODE 换成装载器的桩。
+real_node() {
+  local n
+  for n in "$(command -v node 2>/dev/null || true)" /usr/local/bin/node /usr/bin/node /opt/hostedtoolcache/node/*/x64/bin/node; do
+    [[ -n "$n" && -x "$n" ]] || continue
+    printf '%s\n' "$n"
+    return 0
+  done
+  return 1
+}
+
 settle_train_succeeded() { # 提交号
-  local sha=$1 file now node_bin=/usr/bin/node
+  local sha=$1 file now node_bin
   [[ "$(current_sha)" == "$sha" ]] || return 0
-  # 不走 $NODE：装目录那几段测试会把 NODE 换成装载器的桩，桩会把这次写进度当成又装了一次目录
-  if [[ ! -x "$node_bin" ]]; then node_bin=$(command -v node || true); fi
-  [[ -n "$node_bin" && -x "$node_bin" ]] || return 0
+  node_bin=$(real_node) || return 0
   file=$RELEASES/.train/release-train.json
   install -d -m 755 -- "$RELEASES/.train" || return 0
   now=$(date -u +%Y-%m-%dT%H:%M:%SZ)

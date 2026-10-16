@@ -96,26 +96,35 @@ reset() {
 
 echo "== 头一版、第二版：健康，照常切过去"
 reset
-# 更早一趟的失败进度：健康检查过了、current 切到这一趟之后必须盖成非 failed
+# 更早一趟的失败进度：健康检查过了、current 切到这一趟之后必须盖成非 failed。
+# 不拿 $NODE：release.sh 把它钉在 /usr/bin/node，CI 的 sudo 下面那个路径没有。real_node 和写进度用的是同一串。
 OLD_FAILED=$(printf '1%.0s' {1..40})
 mkdir -p "$RELEASES/.train"
-"$NODE" -e '
-  const fs = require("fs");
-  const [file, sha] = process.argv.slice(1);
-  fs.writeFileSync(file, JSON.stringify({
-    schema: 1, status: "failed", phase: 4,
-    target: { kind: "sha", value: sha },
-    why: "主进程跑的不是这一版",
-  }) + "\n");
-' "$RELEASES/.train/release-train.json" "$OLD_FAILED"
+TRAIN_NODE=$(real_node) || TRAIN_NODE=""
+if [[ -z "$TRAIN_NODE" ]]; then
+  echo "  ✗ 没跑成：这台没有 node，写不了发版进度"
+  fail=1
+else
+  "$TRAIN_NODE" -e '
+    const fs = require("fs");
+    const [file, sha] = process.argv.slice(1);
+    fs.writeFileSync(file, JSON.stringify({
+      schema: 1, status: "failed", phase: 4,
+      target: { kind: "sha", value: sha },
+      why: "主进程跑的不是这一版",
+    }) + "\n");
+  ' "$RELEASES/.train/release-train.json" "$OLD_FAILED"
+fi
 do_release "$A" >/dev/null
 check "发 A 之后在用 A" "$(current_sha)" "$A"
-train_status=$("$NODE" -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).status)' \
-  "$RELEASES/.train/release-train.json")
-train_target=$("$NODE" -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).target.value)' \
-  "$RELEASES/.train/release-train.json")
-check "成功发版：进度不再是更早一趟的 failed" "$train_status" done
-check "成功发版：进度目标是这一趟" "$train_target" "$A"
+if [[ -n "$TRAIN_NODE" ]]; then
+  train_status=$("$TRAIN_NODE" -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).status)' \
+    "$RELEASES/.train/release-train.json")
+  train_target=$("$TRAIN_NODE" -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).target.value)' \
+    "$RELEASES/.train/release-train.json")
+  check "成功发版：进度不再是更早一趟的 failed" "$train_status" "done"
+  check "成功发版：进度目标是这一趟" "$train_target" "$A"
+fi
 check "发 A 没有红" "${#REDS[@]}" 0
 reset
 do_release "$B" >/dev/null
