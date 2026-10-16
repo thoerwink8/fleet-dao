@@ -1,7 +1,8 @@
-// 发版一键命令（release-onekey-lib.mjs）：预检只读，不递发布请求；start / status / abort 交给 release-train。
-// 假 ssh、假 gh、假时钟；home 用真临时目录。
-// 覆盖：preflight 成功（不关引擎、不写请求、中文摘要）、主线 CI 红、不带 --sha、
-// --founder-ok 缺失拒绝、--tag 已删（决定 0032）、已有旧状态文件时 preflight 拒、start 真的进 runTrain。
+// 发版一键命令（release-onekey-lib.mjs）：薄封装 release-train，只到预检。
+// 假 ssh、假 gh、假时钟；home 用真临时目录（状态文件是真文件）。
+// 覆盖：preflight 成功（哨兵拦在第 1 步前、状态文件删掉、后面的步没走）、preflight 失败、
+// --founder-ok 缺失拒绝、--tag 已删（决定 0032）、中文摘要（主线 CI / 自动合并的 PR / 法国在跑会话数）、
+// 已有一趟时 preflight 拒、start 透传 runTrain。
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -119,8 +120,6 @@ function makeWorld() {
       w.engineOn = true;
       return ok('已开');
     }
-    // status 读法国进度：没有文件就是没有一趟
-    if (cmd.includes('---TRAIN---')) return ok('---TRAIN---\n\n\n---LAST---\n\n');
     return { status: 127, stdout: '', stderr: `假法国不认识：${cmd}` };
   };
 
@@ -158,7 +157,7 @@ const stateFilePath = (home: string) => join(home, '.fleet-dao', 'release-train.
 const text = (lines: string[]) => lines.join('\n');
 
 describe('preflight：只读，什么都不改', () => {
-  it('全绿：回 0；不关引擎、不写发布请求；输出含中文摘要', async () => {
+  it('全绿：回 0；哨兵拦在第 1 步前（第 1 步和之后的步一步都没走）；临时状态文件删掉；输出含中文摘要', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
     w.prs = [
@@ -168,18 +167,21 @@ describe('preflight：只读，什么都不改', () => {
     w.sessions = async () => ({ ok: true, running: 3, rows: [] });
     const code = await onekey.runOnekey(['preflight', '--sha', SHA], io(home));
     expect(code).toBe(0);
+    // 拦截生效：第 1 步「本机」没过去——它和后面的暂停法国都没跑
     expect(w.sshCalls.some((c) => c.includes(' engine off '))).toBe(false);
-    expect(w.sshCalls.some((c) => c.includes('request.json'))).toBe(false);
+    // 临时状态文件删掉
     expect(existsSync(stateFilePath(home))).toBe(false);
     const o = text(w.out);
+    // 中文摘要（同一批只读接口问出来的）
     expect(o).toContain('预检摘要');
     expect(o).toContain('主线 CI：绿');
     expect(o).toContain('挂了自动合并的 PR：1 个（#11）');
     expect(o).toContain('法国在跑的会话：3 个');
+    // release-train 自己的预检输出原样带上
     expect(o).toContain('预检：法国现状');
+    // 过了
     expect(o).toContain('预检过了');
     expect(o).not.toContain('本机：没有要暂停的东西');
-    expect(o).not.toContain('递请求');
   });
 
   it('主线 CI 红：回 2；同样什么都没改（没状态）', async () => {
@@ -283,31 +285,34 @@ describe('start：先拦用法，过了照原样进 runTrain', () => {
     expect(text(w.err)).toContain('十六进制');
   });
 
-  it('过了检查的照原样进 runTrain：递了请求，法国进度卡住就回 3', async () => {
+  it('过了检查的照原样进 runTrain：走过了第 1 步（说明真走进了 runTrain）', async () => {
     const home = freshHome();
     const { w, io } = makeWorld();
+    // 预检那次要发的提交的 CI 是绿的，之后一直在跑：第 3 步（只等 CI，#2038）卡住，这趟不会走远但够看到「真在走 runTrain」
+    // （自动合并的 PR 只提示不等，卡不住它；法国会话第 3 步不再等）
     const base0 = io(home);
-    let reads = 0;
+    let checks = 0;
     const run0: OnekeyIo = {
       ...base0,
-      ssh: (cmd) => {
-        w.sshCalls.push(cmd);
-        if (cmd.includes('printf %s') && cmd.includes('request.json')) return ok('');
-        if (cmd.includes('---TRAIN---')) {
-          reads += 1;
-          if (reads === 1) return ok('---TRAIN---\n\n\n---LAST---\n\n');
-          const train = { schema: 1, status: 'blocked', phase: 3, why: '等收尾到点', waiting: null };
-          const last = { v: 1, outcome: 'blocked', sha: SHA, by: 'commander', why: '等收尾到点' };
-          return ok(`---TRAIN---\n${JSON.stringify(train)}\n\n---LAST---\n${JSON.stringify(last)}\n`);
+      run: (c, a) => {
+        if (c === 'gh' && a[0] === 'api' && a[1]?.includes('check-runs')) {
+          checks += 1;
+          if (checks >= 2)
+            return {
+              status: 0,
+              stdout: JSON.stringify({ total: 1, runs: [{ status: 'in_progress', conclusion: null }] }),
+              stderr: '',
+            };
         }
-        return { status: 127, stdout: '', stderr: `假法国不认识：${cmd}` };
+        return base0.run(c, a);
       },
     };
     const code = await onekey.runOnekey(['start', '--sha', SHA, '--founder-ok', FOUNDER], run0);
+    // 卡在等收尾（3），但第 1 步已经走过——证明 runTrain 真跑起来了
     expect(code).toBe(3);
-    expect(text(w.out)).toContain('递请求');
-    expect(text(w.err)).toContain('卡住了');
-    expect(existsSync(stateFilePath(home))).toBe(false);
+    expect(text(w.out)).toContain('本机：没有要暂停的东西');
+    const st = JSON.parse(readFileSync(stateFilePath(home), 'utf8')) as { status: string; phase: number };
+    expect(st.status).toBe('blocked');
   });
 });
 

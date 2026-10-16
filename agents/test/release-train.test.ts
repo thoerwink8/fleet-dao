@@ -23,10 +23,15 @@ interface TrainIo {
   out: (t: string) => void;
   err: (t: string) => void;
   limits?: { followMs?: number; pollMs?: number };
+  cwd?: () => string;
+  nodePath?: string;
+  scriptsDir?: string;
+  run?: (command: string, args: string[], opts?: unknown) => CmdResult | Promise<CmdResult>;
   ssh: (command: string, opts?: unknown) => CmdResult | Promise<CmdResult>;
 }
 interface Train {
   COMMANDER_BY: string;
+  ONEKEY_PREFLIGHT_FOUNDER_OK: string;
   REQUEST_FILE: string;
   TRAIN_FILE: string;
   LAST_FILE: string;
@@ -346,6 +351,67 @@ describe('薄壳：递请求、跟着法国进度', () => {
     expect(code).toBe(2);
     expect(w.err.join('\n')).toContain('Permission denied');
     expect(w.out.join('\n')).not.toContain('没有发版在走');
+  });
+});
+
+describe('一键预检借 start：只读，发布锁被占着就拒', () => {
+  const argv = () => ['start', '--sha', SHA, '--founder-ok', train.ONEKEY_PREFLIGHT_FOUNDER_OK];
+  function gate(opts: { lock: number; ci?: string }) {
+    const { w, io } = world({
+      ssh: (cmd) => {
+        if (cmd.startsWith('flock')) return { status: opts.lock, stdout: '', stderr: '' };
+        return { status: 127, stdout: '', stderr: `假法国不认识：${cmd}` };
+      },
+    });
+    const base = io();
+    const withRun: TrainIo = {
+      ...base,
+      cwd: () => '/tmp',
+      nodePath: 'node-fake',
+      scriptsDir: 'scripts',
+      run: (command, args) => {
+        if (command === 'gh') {
+          return {
+            status: 0,
+            stdout: JSON.stringify({
+              total: 1,
+              runs: [{ status: 'completed', conclusion: opts.ci ?? 'success' }],
+            }),
+            stderr: '',
+          };
+        }
+        if (String(args[0]).endsWith('france.mjs')) {
+          return {
+            status: 0,
+            stdout: JSON.stringify({ anomalies: [{ level: 'note', what: '留意', where: 'x' }] }),
+            stderr: '',
+          };
+        }
+        return { status: 127, stdout: '', stderr: '假世界不认识', error: null };
+      },
+    };
+    return { w, io: withRun };
+  }
+
+  it('锁被占、主线 CI 绿、法国现状是 JSON：回 2，含预检没过，不写请求，不说预检过了', async () => {
+    const { w, io } = gate({ lock: 75 });
+    const code = await train.runTrain(argv(), io);
+    expect(code).toBe(2);
+    const text = `${w.out.join('\n')}\n${w.err.join('\n')}`;
+    expect(text).toContain('预检没过');
+    expect(text).toContain('.lock 被占着');
+    expect(w.out.join('\n')).not.toContain('—— 第 1 步');
+    expect(w.out.join('\n')).not.toContain('预检过了');
+    expect(w.sshCalls.some((c) => c.includes('request.json'))).toBe(false);
+  });
+
+  it('锁空着、CI 绿、法国现状认得出：打出法国现状和第 1 步，不写请求', async () => {
+    const { w, io } = gate({ lock: 0 });
+    const code = await train.runTrain(argv(), io);
+    expect(code).toBe(0);
+    expect(w.out.join('\n')).toContain('预检：法国现状');
+    expect(w.out.join('\n')).toContain('—— 第 1 步');
+    expect(w.sshCalls.some((c) => c.includes('request.json'))).toBe(false);
   });
 });
 

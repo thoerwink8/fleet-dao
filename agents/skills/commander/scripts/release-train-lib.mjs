@@ -13,6 +13,8 @@
 //   （刚写上 accepted 时，不把上一趟的「做完了」当成这次的）。例外：撤孤立的暂停标记时法国只写
 //   last-request.json（outcome aborted），故意不写进度文件，这时以这份结局为准。
 // - 读进度：文件不存在当成空；文件在但读不了（权限不够等）整条命令失败，不当成没有发版。
+// - 一键预检借 start，--founder-ok 是占位那句时不写请求：只读查主线 CI、发布锁（.lock）、法国现状。
+//   锁被占着或 CI 不是绿的，回 2，输出里有「预检没过」。过了才打「—— 第 1 步」，给一键预检的哨兵拦住，到此为止。
 // - 退出码和法国接活脚本一致：0 做完了（发后体检通过，或 abort 做完了）；1 用法不对或被拒；
 //   2 没做成（ssh 失败、读不到、命令失败）；3 卡住（进度是 blocked，或做完了但发后体检没通过）。
 // - 打出来的字过 scrubText。提交号只印前 12 位（整串 40 位会被抹成「长串」）。ssh 的名字不进输出。
@@ -28,6 +30,14 @@ export const TRAIN_FILE = '/srv/fleet-dao-releases/.train/release-train.json';
 export const LAST_FILE = '/srv/fleet-dao-releases/.train/last-request.json';
 /** 请求里「谁点的」。法国 parseRequest 只收字母数字和 _.@ 空格 -。 */
 export const COMMANDER_BY = 'commander';
+/** 发布锁。flock -E 75：另一个发布占着时回这个码（release.sh 不用这个码）。 */
+const LOCK_FILE = '/srv/fleet-dao-releases/.lock';
+const LOCK_BUSY = 75;
+/**
+ * 一键命令的只读预检借 `start` 时带的占位原话（release-onekey-lib 写死的那句）。
+ * 见到它就不写请求，只做预检，打出「—— 第 1 步」让它的哨兵拦住。
+ */
+export const ONEKEY_PREFLIGHT_FOUNDER_OK = '（只读预检，到不了发版那一步）';
 
 /**
  * 法国接活脚本的九步名字（deploy/france/release-request/lib.mjs 的 PHASES）。
@@ -290,6 +300,88 @@ function parseArgs(argv, valueOptions, flagNames = []) {
   return { options, flags };
 }
 
+/** 一键只读预检：主线 CI、发布锁、法国现状。不写请求。过了打第 1 步字样后停下。 */
+async function readOnlyPreflight(io, sha) {
+  const problems = [];
+  const ci = await preflightCi(io, sha || 'main');
+  if (!ci.ok) problems.push(`主线 CI 不是绿的：${ci.why}`);
+  const lock = await preflightLock(io);
+  if (!lock.ok) problems.push(lock.why);
+  const health = await preflightFrance(io);
+  if (!health.ok) problems.push(health.why);
+  else
+    sayTo(
+      io,
+      `预检：法国现状 ${health.bad} 处异常、${health.unread} 处没读到、${health.note} 处留意（只读，不发版）`,
+    );
+  if (problems.length > 0) {
+    warnTo(io, `预检没过（什么都没改）：\n- ${problems.join('\n- ')}`);
+    return 2;
+  }
+  // 一键预检在这一行抛哨兵。没抛（直接调 runTrain）也不往下写请求。
+  sayTo(io, '—— 第 1 步「本机」——');
+  return 0;
+}
+
+async function preflightCi(io, ref) {
+  if (typeof io.run !== 'function') return { ok: false, why: '主线 CI 读不到' };
+  const r = await io.run(
+    'gh',
+    [
+      'api',
+      `repos/{owner}/{repo}/commits/${ref}/check-runs?check_name=check&per_page=100&page=1`,
+      '--jq',
+      '{total: .total_count, runs: [.check_runs[] | select(.name=="check") | {status,conclusion}]}',
+    ],
+    { cwd: typeof io.cwd === 'function' ? io.cwd() : undefined, timeoutMs: 60_000 },
+  );
+  if (didNotRun(r) || r.status !== 0) return { ok: false, why: `主线 CI 读不到：${tailOf(r)}` };
+  let body;
+  try {
+    body = JSON.parse(String(r.stdout ?? '').trim() || 'null');
+  } catch (e) {
+    return { ok: false, why: `主线 CI 的回话不是 JSON（${e instanceof Error ? e.message : String(e)}）` };
+  }
+  const runs = body && Array.isArray(body.runs) ? body.runs : null;
+  if (!runs) return { ok: false, why: '主线 CI 的回话认不出' };
+  if (runs.length === 0) return { ok: false, why: '还没有汇总检查（check）的结果' };
+  if (runs.some((x) => x.status !== 'completed')) return { ok: false, why: 'CI 还在跑' };
+  if (runs.every((x) => x.conclusion === 'success')) return { ok: true, why: '' };
+  return { ok: false, why: `CI 是红的（${runs.map((x) => x.conclusion).join('、')}）` };
+}
+
+async function preflightLock(io) {
+  const r = await io.ssh(`flock -n -E ${LOCK_BUSY} ${LOCK_FILE} -c true`, { timeoutMs: 60_000 });
+  if (didNotRun(r)) return { ok: false, why: `法国读不到（看发布锁）：${tailOf(r)}` };
+  if (r.status === LOCK_BUSY) return { ok: false, why: '法国上另一个发布正在跑（.lock 被占着）' };
+  if (r.status !== 0) return { ok: false, why: `看发布锁没成：${tailOf(r)}` };
+  return { ok: true };
+}
+
+async function preflightFrance(io) {
+  if (typeof io.run !== 'function' || typeof io.nodePath !== 'string' || typeof io.scriptsDir !== 'string')
+    return { ok: false, why: '法国现状读不到' };
+  const r = await io.run(io.nodePath, [`${io.scriptsDir}/france.mjs`, '--json'], {
+    cwd: typeof io.cwd === 'function' ? io.cwd() : undefined,
+    timeoutMs: 120_000,
+  });
+  if (didNotRun(r) || (r.status !== 0 && r.status !== 1))
+    return { ok: false, why: `法国现状读不到：${tailOf(r)}` };
+  let view;
+  try {
+    view = JSON.parse(String(r.stdout ?? ''));
+  } catch {
+    return { ok: false, why: '法国现状不是 JSON' };
+  }
+  if (!view || !Array.isArray(view.anomalies)) return { ok: false, why: '法国现状认不出' };
+  const count = { bad: 0, unread: 0, note: 0 };
+  for (const a of view.anomalies) {
+    if (a && (a.level === 'bad' || a.level === 'unread' || a.level === 'note')) count[a.level] += 1;
+    else return { ok: false, why: '法国现状有认不出的级别' };
+  }
+  return { ok: true, ...count };
+}
+
 async function cmdSubmit(p, io, kind) {
   let sha = null;
   if (kind === 'release' || kind === 'retry') {
@@ -304,6 +396,7 @@ async function cmdSubmit(p, io, kind) {
       warnTo(io, '发版是对外发布，必须带 --founder-ok "<创始人原话>"：没带，什么都没做');
       return 1;
     }
+    if (founderOk === ONEKEY_PREFLIGHT_FOUNDER_OK) return readOnlyPreflight(io, sha);
   }
   return submitAndFollow(io, kind, sha);
 }
