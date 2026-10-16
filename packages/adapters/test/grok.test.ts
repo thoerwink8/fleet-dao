@@ -420,6 +420,15 @@ describe('grok 起停', () => {
     expect(grokRunSummary(report).sessionId).toBeUndefined();
   });
 
+  it('终帧只用 session_id（蛇形）报号：照样记上，空串不算', () => {
+    const reader = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    reader.read(JSON.stringify({ type: 'end', stopReason: 'end_turn', session_id: SESSION }));
+    expect(reader.summary().end?.sessionId).toBe(SESSION);
+    const empty = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    empty.read(JSON.stringify({ type: 'end', stopReason: 'end_turn', sessionId: '' }));
+    expect(empty.summary().end?.sessionId).toBeUndefined();
+  });
+
   it('error 帧里的话 stderr 里没有：照旧拼上，不丢', () => {
     const reader = new GrokStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
     reader.read(JSON.stringify({ type: 'error', message: "Couldn't start session: 403" }));

@@ -345,7 +345,7 @@ export class GrokStreamReader {
     const usage = rec(frame.usage);
     this.#s.end = {
       ...optional('stopReason', str(frame.stopReason)),
-      ...optional('sessionId', str(frame.sessionId)),
+      ...optional('sessionId', str(frame.sessionId) ?? str(frame.session_id)),
       ...optional('numTurns', num(frame.num_turns)),
       ...optional('costUsd', num(frame.total_cost_usd)),
       ...(usage ? { usage: numbers(usage, USAGE_FIELDS) } : {}),

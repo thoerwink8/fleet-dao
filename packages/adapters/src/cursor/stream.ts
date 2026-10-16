@@ -91,6 +91,8 @@ export interface CursorStreamSummary {
 
 export interface CursorLineEffect extends LineEffect {
   init?: { sessionId?: string; model?: string };
+  /** 这一行第一次读到真会话号（init 或后面任一帧的 session_id / sessionId）。 */
+  sessionId?: string;
 }
 
 interface ToolKind {
@@ -179,16 +181,16 @@ export class CursorStreamReader {
       return effect;
     }
     this.#s.frames++;
+    this.#noteSession(frame, effect);
     const type = str(frame.type) ?? '(无 type)';
     switch (type) {
       case 'system':
         if (frame.subtype === 'init') {
           const init = {
-            ...optional('sessionId', str(frame.session_id)),
+            ...optional('sessionId', str(frame.session_id) ?? str(frame.sessionId)),
             ...optional('model', str(frame.model)),
           };
           effect.init = init;
-          if (init.sessionId) this.#s.sessionId = init.sessionId;
           if (init.model) this.#s.initModel = init.model;
         }
         break;
@@ -348,8 +350,15 @@ export class CursorStreamReader {
       done.text ?? [done.subtype, done.isError ? '报错' : ''].filter((x) => x).join(' · '),
       { ok: !done.isError },
     );
-    const sessionId = str(frame.session_id);
-    if (sessionId && !this.#s.sessionId) this.#s.sessionId = sessionId;
+  }
+
+  /** 真会话号在 init、终帧，或中间任一帧（session_id，也认 sessionId）。空串不算。先到的那个为准。 */
+  #noteSession(frame: Record<string, unknown>, effect: CursorLineEffect): void {
+    if (this.#s.sessionId) return;
+    const id = str(frame.session_id) ?? str(frame.sessionId);
+    if (!id) return;
+    this.#s.sessionId = id;
+    effect.sessionId = id;
   }
 }
 

@@ -174,6 +174,44 @@ describe('cursor 过程记录', () => {
     );
     expect(reader.summary()).toMatchObject({ toolErrors: 2, unknownTools: { brandNewToolCall: 2 } });
   });
+
+  it('读不出会话号时写明是哪一种，空串不算号、也不写进摘要', () => {
+    const blank = new CursorStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    expect(blank.summary()).not.toHaveProperty('sessionId');
+    expect(blank.summary().sessionIdWhy).toBe('Cursor 没有输出帧，没读到 session_id');
+
+    const junk = new CursorStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    junk.read('not json');
+    expect(junk.summary()).not.toHaveProperty('sessionId');
+    expect(junk.summary().sessionIdWhy).toBe('Cursor 输出没有可解析的 JSON 帧，没读到 session_id');
+
+    const noId = new CursorStreamReader({ runId: 'r1', cwd: '/w', now: () => NOW });
+    noId.read(JSON.stringify({ type: 'assistant', session_id: '' }));
+    expect(noId.summary()).not.toHaveProperty('sessionId');
+    expect(noId.summary().sessionIdWhy).toBe('Cursor 输出帧没有 session_id');
+  });
+
+  it('真跑记录里 init 和终帧都去掉会话号，只留中间一帧的 sessionId：照样读到，空的不抢先', () => {
+    const lines = fixtureLines('cursor-agent', 'cursor-edit-commit').map((line, i) => {
+      const frame = JSON.parse(line) as Record<string, unknown>;
+      delete frame.session_id;
+      if (i === 2) frame.sessionId = SESSION;
+      return JSON.stringify(frame);
+    });
+    const reader = new CursorStreamReader({
+      runId: 'r1',
+      cwd: fixtureMeta('cursor-agent', 'cursor-edit-commit').cwd,
+      now: () => NOW,
+    });
+    const seen: string[] = [];
+    for (const line of lines) {
+      const effect = reader.read(line);
+      if (effect.sessionId) seen.push(effect.sessionId);
+    }
+    expect(seen).toEqual([SESSION]);
+    expect(reader.summary().sessionId).toBe(SESSION);
+    expect(reader.summary().sessionIdWhy).toBeUndefined();
+  });
 });
 
 describe('cursor 起停', () => {
@@ -236,6 +274,24 @@ describe('cursor 起停', () => {
     expect(ids).toEqual([SESSION]);
     expect(report.stream.sessionId).toBe(SESSION);
     expect(report.hookError).toBeUndefined();
+  });
+
+  it('init 帧没有会话号、后面的真跑帧有：照样报给调用方，只报一次', async () => {
+    const lines = fixtureLines('cursor-agent', 'cursor-edit-commit').map((line, i) => {
+      const frame = JSON.parse(line) as Record<string, unknown>;
+      if (i === 0) delete frame.session_id;
+      return JSON.stringify(frame);
+    });
+    const file = join(tempDir(), 'replay.ndjson');
+    writeFileSync(file, `${lines.join('\n')}\n`);
+    const ids: string[] = [];
+    const report = await runCursorAgent(spec(tempDir()), {
+      command: fakeAgent({ replay: file }),
+      onSessionId: (id) => void ids.push(id),
+    });
+    expect(ids).toEqual([SESSION]);
+    expect(report.stream.sessionId).toBe(SESSION);
+    expect(report.stream).not.toHaveProperty('sessionIdWhy');
   });
 
   it('报会话号的回调抛了：记进 hookError，解析照常走完', async () => {

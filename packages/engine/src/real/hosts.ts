@@ -21,7 +21,7 @@
 //   --cwd 存在会话用户家里 ~/.grok/sessions/<编码后的工作树路径>/<号>/，所以续会话要同一棵树），终帧回同一个号和实际模型
 //   （grok-4.7-build 这种带渠道后缀的名字，插头认得）。但号是我们定的不等于会话建成了：没登录、起不来、点的型号不认时它在
 //   开会话之前就退出，拿这个号 -r 只会报「not found」——所以开新会话时这个号先不算数，见到它真开了会话（终帧，或报错以外的
-//   任何一帧）才交回工作流（grokReport），没开成就交空串、下次开新会话。没有我们用得上的 fork：换了账号池一律接力。终帧里
+//   任何一帧）才交回工作流（grokReport），没开成就不写会话号、记明原因，下次开新会话。没有我们用得上的 fork：换了账号池一律接力。终帧里
 //   没有回答正文，回答是插头攒的最后一段话。认证是会话用户家里的登录态（~/.grok/auth.json，官方安装脚本、device code 登录，
 //   普通文件、没有桌面也存得下，grok 自己续期）；没登录、过期了在 error 帧和 stderr 里说「Not signed in」「Run `grok login`」，
 //   失败分流按 AU7 认。和 Cursor 一样不绑会话用户、跑在法国唯一的会话用户下；装在他家里的 ~/.grok/bin/grok，由会话用户自己
@@ -806,25 +806,33 @@ function grokDriver(
 }
 
 /**
- * grok 的报告整理成同一个形状。会话号：终帧回的那个；没有终帧（半路被停、断了）但见到了报错以外的帧，就是我们给它的那个
- * （它开会话之后才出帧：头一帧是 available_commands，法国真跑记录）；一帧都没有、只有 error 帧（没登录、起不来、型号不认，
- * 法国实跑）就是没开成会话，不给——交回工作流的是空串，下次开新会话，不拿一个没建成的号去 -r（它报 not found）。
+ * grok 的报告整理成同一个形状。会话号：终帧回的那个（sessionId，也认 session_id）；没有终帧（半路被停、断了）但见到了
+ * 报错以外的帧，就是我们给它的那个（它开会话之后才出帧：头一帧是 available_commands，法国真跑记录）。一帧都没有、只有
+ * error 帧、终帧也没有号、又没有可沿用的号：不写会话号（不写空串），记明原因。没建成的号拿去 -r 会报 not found。
  */
 export function grokReport(report: GrokRunReport): HostReport {
   const s = report.stream;
   const end = s.end;
   const facts = grokRunFacts(report);
-  const sessionIdWhy = end?.sessionId
+  const fromEnd = end?.sessionId?.trim() ?? '';
+  const assigned = report.session.id.trim();
+  const opened = s.frames > s.errors.length;
+  const sessionId = fromEnd || (opened && assigned ? assigned : '');
+  const sessionIdWhy = sessionId
     ? undefined
     : end
       ? 'Grok end 帧没有 sessionId'
       : s.frames > 0 && s.frames === s.errors.length
         ? 'Grok 只有 error 帧，没有建立会话的 sessionId'
-        : 'Grok 没有 end 帧，输出没有报告 sessionId';
+        : s.frames === 0 && s.nonJsonLines > 0
+          ? 'Grok 输出没有可解析的 JSON 帧，没读到 sessionId'
+          : s.frames === 0
+            ? 'Grok 没有输出帧，没读到 sessionId'
+            : 'Grok 没有 end 帧，也没有可沿用的会话号';
   return {
     hostId: 'grok',
     facts,
-    ...defined('sessionId', end?.sessionId),
+    ...defined('sessionId', sessionId || undefined),
     ...defined('sessionIdWhy', sessionIdWhy),
     ...grokUsage(s),
     ...defined('actualModel', end?.models[0]),
