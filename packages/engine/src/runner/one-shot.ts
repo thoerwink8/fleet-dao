@@ -589,7 +589,7 @@ function usageFields(result: OneShotResult): Partial<RunRecord> {
     : {};
   const decision = sessionlessUsage({
     outcome: result.outcome,
-    failureReason: result.failureReason,
+    ...(result.failureReason !== undefined ? { failureReason: result.failureReason } : {}),
     hasSessionId: facts?.sessionId !== undefined,
     hasUsageWhy: Boolean(facts?.usageWhy?.trim()),
     hasToken:
