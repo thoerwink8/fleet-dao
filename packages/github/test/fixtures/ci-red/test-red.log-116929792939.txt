@@ -1,0 +1,189 @@
+﻿
+2026-10-16T10:31:51.6143500Z ##[group]Runner Image Provisioner
+2026-10-16T10:31:51.6147796Z ##[endgroup]
+2026-10-16T10:31:51.6149010Z ##[group]Operating System
+2026-10-16T10:31:51.6150625Z ##[endgroup]
+2026-10-16T10:31:51.6151038Z ##[group]Runner Image
+2026-10-16T10:31:51.6155073Z ##[endgroup]
+2026-10-16T10:31:51.6155971Z ##[group]GITHUB_TOKEN Permissions
+2026-10-16T10:31:51.6158753Z ##[endgroup]
+2026-10-16T10:31:53.3236988Z ##[group]Run actions/checkout@v4
+2026-10-16T10:31:53.3261343Z ##[endgroup]
+2026-10-16T10:31:53.4310458Z ##[group]Getting Git version info
+2026-10-16T10:31:53.4396603Z ##[endgroup]
+2026-10-16T10:31:53.4470615Z ##[group]Initializing the repository
+2026-10-16T10:31:53.4615355Z ##[endgroup]
+2026-10-16T10:31:53.4616796Z ##[group]Disabling automatic garbage collection
+2026-10-16T10:31:53.4647843Z ##[endgroup]
+2026-10-16T10:31:53.4649259Z ##[group]Setting up auth
+2026-10-16T10:31:53.5481708Z ##[endgroup]
+2026-10-16T10:31:53.5483264Z ##[group]Fetching the repository
+2026-10-16T10:31:55.9560327Z ##[endgroup]
+2026-10-16T10:31:55.9564147Z ##[group]Determining the checkout info
+2026-10-16T10:31:55.9565372Z ##[endgroup]
+2026-10-16T10:31:55.9642936Z ##[group]Checking out the ref
+2026-10-16T10:31:56.2074326Z ##[endgroup]
+2026-10-16T10:31:56.2146623Z ##[group]Removing auth
+2026-10-16T10:31:56.2798212Z ##[endgroup]
+2026-10-16T10:31:56.3009326Z ##[group]Run pnpm/action-setup@v4
+2026-10-16T10:31:56.3012047Z ##[endgroup]
+2026-10-16T10:31:56.4398111Z ##[group]Running self-installer...
+2026-10-16T10:31:57.5993963Z ##[endgroup]
+2026-10-16T10:31:57.6134437Z ##[group]Run actions/setup-node@v4
+2026-10-16T10:31:57.6139202Z ##[endgroup]
+2026-10-16T10:31:57.7499596Z ##[group]Environment details
+2026-10-16T10:31:58.0882335Z ##[endgroup]
+2026-10-16T10:32:03.8602061Z ##[group]Run pnpm install --frozen-lockfile
+2026-10-16T10:32:04.2460950Z ##[endgroup]
+2026-10-16T10:32:08.6933484Z ##[group]Run set -euo pipefail
+2026-10-16T10:32:08.6991251Z ##[endgroup]
+2026-10-16T10:32:08.7484404Z ##[group]Run actions/cache@v4
+2026-10-16T10:32:08.7488487Z ##[endgroup]
+2026-10-16T10:32:10.5704989Z ##[group]Run set -euo pipefail
+2026-10-16T10:32:10.5743402Z ##[endgroup]
+2026-10-16T10:32:10.6442789Z ##[group]Run set -euo pipefail
+2026-10-16T10:32:10.6518574Z ##[endgroup]
+2026-10-16T10:32:10.8066498Z ##[group]Run node packages/conventions/src/bin/ci-cache.ts key --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --box-file "$BOX_FILE" --label "$LABEL" --temporal "$TEMPORAL"
+2026-10-16T10:32:10.8108198Z ##[endgroup]
+2026-10-16T10:32:11.0791516Z ##[group]Run actions/cache/restore@v4
+2026-10-16T10:32:11.0795449Z ##[endgroup]
+2026-10-16T10:32:11.3995410Z ##[group]Run node packages/conventions/src/bin/ci-cache.ts plan --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP"
+2026-10-16T10:32:11.4034544Z ##[endgroup]
+2026-10-16T10:32:11.5523874Z ##[group]Run set -euo pipefail
+2026-10-16T10:32:11.5568826Z ##[endgroup]
+2026-10-16T10:33:10.3285059Z  [32m✓[39m packages/conventions/test/package-surface.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 14[2mms[22m[39m
+2026-10-16T10:33:10.7963590Z  [32m✓[39m packages/web/src/api/poll-backoff.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 10[2mms[22m[39m
+2026-10-16T10:33:11.0248756Z  [32m✓[39m packages/agent-eval/test/definitions.test.ts [2m([22m[2m17 tests[22m[2m)[22m[32m 16[2mms[22m[39m
+2026-10-16T10:33:11.2296766Z  [32m✓[39m packages/engine/test/real/memory-admission.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+2026-10-16T10:33:12.7202886Z  [32m✓[39m packages/engine/test/real/closed-issue-tasks.test.ts [2m([22m[2m4 tests[22m[2m)[22m[33m 2289[2mms[22m[39m
+2026-10-16T10:33:12.9648210Z  [32m✓[39m packages/web/src/lib/pwa/static-files.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 57[2mms[22m[39m
+2026-10-16T10:33:13.1145547Z  [32m✓[39m packages/api/test/task-redo.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 60[2mms[22m[39m
+2026-10-16T10:33:13.4457458Z [2m2026-10-16T10:33:13.444913Z[0m [33m WARN[0m [2mtemporalio_sdk_core::worker[0m[2m:[0m Temporal Server 1.16.0 or newer is required to guarantee that the latest heartbeat details are preserved when an activity fails; the server did not advertise the activity_failure_include_heartbeat capability, so heartbeat details may be lost on failure
+2026-10-16T10:33:13.5749378Z  [32m✓[39m packages/engine/test/real/worktrees.test.ts [2m([22m[2m8 tests[22m[2m)[22m[32m 15[2mms[22m[39m
+2026-10-16T10:33:14.1286421Z  [32m✓[39m packages/engine/test/idle-running.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 23[2mms[22m[39m
+2026-10-16T10:33:14.4452467Z  [32m✓[39m agents/test/pretool-background.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 73[2mms[22m[39m
+2026-10-16T10:33:14.5976475Z  [32m✓[39m packages/web/src/test/sheet-back-close.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[33m 416[2mms[22m[39m
+2026-10-16T10:33:14.7921999Z  [32m✓[39m packages/agents-sync/test/block.test.ts [2m([22m[2m10 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+2026-10-16T10:33:14.8178916Z  [32m✓[39m packages/engine/test/real/merge-wait-checks.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 38[2mms[22m[39m
+2026-10-16T10:33:14.9491686Z  [32m✓[39m packages/web/test/e2e-quarantine.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+2026-10-16T10:33:15.0506715Z  [32m✓[39m agents/test/rules/pretool-mention.rules.test.ts [2m([22m[2m21 tests[22m[2m)[22m[32m 29[2mms[22m[39m
+2026-10-16T10:33:17.0670586Z  [32m✓[39m packages/web/src/test/repo-switcher-1998.test.tsx [2m([22m[2m5 tests[22m[2m)[22m[33m 456[2mms[22m[39m
+2026-10-16T10:33:17.8807738Z  [32m✓[39m packages/web/src/test/leftovers-1910.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[33m 1435[2mms[22m[39m
+2026-10-16T10:33:17.8842433Z    [32m✓[39m #1910 片 7 [2m(4)[22m
+2026-10-16T10:33:17.8848523Z      [33m[2m✓[22m[39m 路由页左卡（模型先后）按内容高度：容器和栅格都没有固定高度类，左右不互相拉高[33m 595[2mms[22m[39m
+2026-10-16T10:33:17.8849859Z      [33m[2m✓[22m[39m 设置页运行设置不再分两栏（3 项分两栏会剩 1 项孤栏）[33m 445[2mms[22m[39m
+2026-10-16T10:33:17.8851011Z      [33m[2m✓[22m[39m 仓库行：「关闭/开启」和「整理」按钮同宽，同一行、挨着放在行尾[33m 387[2mms[22m[39m
+2026-10-16T10:33:19.3998418Z  [32m✓[39m packages/web/src/routes/routing-status-1854.test.tsx [2m([22m[2m3 tests[22m[2m)[22m[33m 553[2mms[22m[39m
+2026-10-16T10:33:19.4000274Z    [32m✓[39m 渠道状态页（#1854） [2m(3)[22m
+2026-10-16T10:33:19.4029707Z      [33m[2m✓[22m[39m 选中的渠道行：按钮带 aria-current 和完整的 aria-label，别的行没有[33m 319[2mms[22m[39m
+2026-10-16T10:33:19.7550035Z  [32m✓[39m packages/web/src/test/task-missing.test.tsx [2m([22m[2m2 tests[22m[2m)[22m[33m 306[2mms[22m[39m
+2026-10-16T10:33:19.9559584Z  [32m✓[39m packages/agents-sync/test/verify.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+2026-10-16T10:33:20.4686389Z  [32m✓[39m packages/jev/test/catalog-judge.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 24[2mms[22m[39m
+2026-10-16T10:33:21.1066353Z  [32m✓[39m packages/web/src/components/home/health-strip.test.tsx [2m([22m[2m5 tests[22m[2m)[22m[32m 123[2mms[22m[39m
+2026-10-16T10:33:21.2753925Z  [32m✓[39m packages/agents-sync/test/detect.test.ts [2m([22m[2m7 tests[22m[2m | [22m[33m1 skipped[39m[2m)[22m[32m 10[2mms[22m[39m
+2026-10-16T10:33:21.4515665Z  [32m✓[39m packages/shared/test/flow-purposes.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+2026-10-16T10:33:22.0746212Z  [32m✓[39m packages/api/test/manual-models.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 56[2mms[22m[39m
+2026-10-16T10:33:22.6156491Z  [32m✓[39m packages/web/src/components/layout/list.test.tsx [2m([22m[2m14 tests[22m[2m)[22m[32m 126[2mms[22m[39m
+2026-10-16T10:33:23.5596528Z  [32m✓[39m packages/engine/test/worker.test.ts [2m([22m[2m6 tests[22m[2m)[22m[33m 12964[2mms[22m[39m
+2026-10-16T10:33:23.5625523Z    [32m✓[39m worker 起来之前 [2m(1)[22m
+2026-10-16T10:33:23.5655626Z      [33m[2m✓[22m[39m 先收掉上一轮留下的会话（引擎被强杀时它们留在自己的 scope 里）[33m 2884[2mms[22m[39m
+2026-10-16T10:33:23.5656449Z    [32m✓[39m worker 进程 [2m(3)[22m
+2026-10-16T10:33:23.5657262Z      [33m[2m✓[22m[39m 没说用哪套端口就明说起不来，退出码 1，不假装在干活[33m 2260[2mms[22m[39m
+2026-10-16T10:33:23.5658093Z      [33m[2m✓[22m[39m 真端口缺配置（机器名、库）：一次列全，退出码 1，不连 Temporal[33m 2646[2mms[22m[39m
+2026-10-16T10:33:23.5659015Z      [33m[2m✓[22m[39m 按环境变量连上服务端，跑完一个 P0 验收（hello）工作流[33m 5164[2mms[22m[39m
+2026-10-16T10:33:23.9017454Z  [32m✓[39m packages/web/src/test/local-sessions-panel.test.tsx [2m([22m[2m3 tests[22m[2m)[22m[32m 112[2mms[22m[39m
+2026-10-16T10:33:24.0269752Z  [32m✓[39m packages/web/src/components/refresh-bar-dot.test.tsx [2m([22m[2m4 tests[22m[2m)[22m[32m 139[2mms[22m[39m
+2026-10-16T10:33:24.1711500Z  [32m✓[39m packages/api/test/static.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 12[2mms[22m[39m
+2026-10-16T10:33:24.4000450Z  [32m✓[39m packages/github/test/pull-files.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 149[2mms[22m[39m
+2026-10-16T10:33:24.5921608Z  [32m✓[39m packages/engine/test/real/issue-groom.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+2026-10-16T10:33:25.1741814Z  [32m✓[39m agents/test/pretool-n2.test.ts [2m([22m[2m13 tests[22m[2m)[22m[33m 857[2mms[22m[39m
+2026-10-16T10:33:25.7100609Z  [32m✓[39m packages/engine/test/route-retry-after.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+2026-10-16T10:33:25.9349072Z  [32m✓[39m packages/github/test/test-command.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+2026-10-16T10:33:26.2846622Z  [32m✓[39m packages/web/src/test/home-drawer-tap-2017.test.tsx [2m([22m[2m1 test[22m[2m)[22m[32m 161[2mms[22m[39m
+2026-10-16T10:33:26.8549055Z  [32m✓[39m packages/web/src/test/route-error-2017.test.tsx [2m([22m[2m2 tests[22m[2m)[22m[32m 80[2mms[22m[39m
+2026-10-16T10:33:27.0756733Z  [32m✓[39m packages/web/src/test/manual-tracks.test.tsx [2m([22m[2m1 test[22m[2m)[22m[33m 399[2mms[22m[39m
+2026-10-16T10:33:27.0785985Z    [32m✓[39m 路由页动手战绩 [2m(1)[22m
+2026-10-16T10:33:27.0788976Z      [33m[2m✓[22m[39m 表头和一行样本都渲染出来[33m 397[2mms[22m[39m
+2026-10-16T10:33:27.3146045Z  [32m✓[39m packages/web/src/test/checks-red-card.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+2026-10-16T10:33:27.3425239Z  [32m✓[39m packages/web/src/api/http-timeout.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 9[2mms[22m[39m
+2026-10-16T10:33:27.4848635Z  [32m✓[39m packages/web/src/lib/color-ratio.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 7[2mms[22m[39m
+2026-10-16T10:33:27.7504861Z  [32m✓[39m packages/web/src/lib/segments.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+2026-10-16T10:33:28.3429137Z  [32m✓[39m packages/store/test/store.memory.test.ts [2m([22m[2m109 tests[22m[2m)[22m[32m 159[2mms[22m[39m
+2026-10-16T10:33:28.5566006Z  [32m✓[39m packages/store/test/console-logic.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+2026-10-16T10:33:28.7177733Z  [32m✓[39m packages/core/test/names.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 7[2mms[22m[39m
+2026-10-16T10:33:29.0742949Z  [32m✓[39m packages/api/test/bearer-rejected.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 51[2mms[22m[39m
+2026-10-16T10:33:43.5636965Z  [32m✓[39m packages/store/test/store.pg.test.ts [2m([22m[2m109 tests[22m[2m)[22m[33m 15436[2mms[22m[39m
+2026-10-16T10:33:43.5638166Z    [32m✓[39m Store 契约：Postgres 版 [2m(78)[22m
+2026-10-16T10:33:43.5638822Z      [32m✓[39m GitHub 事件 [2m(19)[22m
+2026-10-16T10:33:43.5639789Z        [33m[2m✓[22m[39m 卡住的条数：出错到了上限的、处理中超过时限的；还能重放的、等着的、刚占的、处理完的不算[33m 309[2mms[22m[39m
+2026-10-16T10:33:43.5640579Z      [32m✓[39m 接活 [2m(25)[22m
+2026-10-16T10:33:43.5641390Z        [33m[2m✓[22m[39m 还在排队的任务直接记成叫停（状态变化照记）；不在排队的不动[33m 452[2mms[22m[39m
+2026-10-16T10:33:43.5642394Z        [33m[2m✓[22m[39m 接手排队的老行：改标题和原话，创建时刻、优先级、提出人不动，记下那句原因[33m 372[2mms[22m[39m
+2026-10-16T10:33:43.5643172Z        [32m✓[39m 「让 AI 接活」开关 [2m(3)[22m
+2026-10-16T10:33:43.5644072Z          [33m[2m✓[22m[39m 关着的打开：记下此刻、同一事务写一条带前后值的操作记录；开着再开不重设时刻、不记[33m 376[2mms[22m[39m
+2026-10-16T10:33:43.5645435Z          [33m[2m✓[22m[39m 开着的关上：设为空，操作记录记下原来的时刻；关着再关不记；没这个仓 not_found、不留记录[33m 375[2mms[22m[39m
+2026-10-16T10:33:54.3643210Z  [32m✓[39m packages/mirasim-reclaude/test/launcher.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 25463[2mms[22m[39m
+2026-10-16T10:33:54.3646380Z    [33m[2m✓[22m[39m 真实编译执行切换、权限、强杀收尾及失败路径测试[33m 25461[2mms[22m[39m
+2026-10-16T10:33:54.3724067Z 
+2026-10-16T10:33:54.3725142Z [31m⎯⎯⎯⎯⎯⎯⎯[39m[1m[41m Failed Tests 1 [49m[22m[31m⎯⎯⎯⎯⎯⎯⎯[39m
+2026-10-16T10:33:54.3725579Z 
+2026-10-16T10:33:54.3730075Z [41m[1m FAIL [22m[49m packages/engine/test/task-auth-reroute.test.ts[2m > [22m账号池上的停：停池、单换路（auth-reroute）[2m > [22m两个任务各打到同一个池一次 401：第二个任务按第二次处理，暂停整池
+2026-10-16T10:33:54.3736724Z [31m[1mAssertionError[22m: expected false to be true // Object.is equality[39m
+2026-10-16T10:33:54.3737293Z 
+2026-10-16T10:33:54.3737542Z [32m- Expected[39m
+2026-10-16T10:33:54.3738006Z [31m+ Received[39m
+2026-10-16T10:33:54.3738248Z 
+2026-10-16T10:33:54.3738432Z [32m- true[39m
+2026-10-16T10:33:54.3738828Z [31m+ false[39m
+2026-10-16T10:33:54.3739022Z 
+2026-10-16T10:33:54.3740111Z [36m [2m❯[22m tasks.tasks packages/engine/test/task-auth-reroute.test.ts:[2m151:72[22m[39m
+2026-10-16T10:33:54.3791976Z     [90m149|[39m         const later = world.callsOf('pickRoute').slice(picksBefore);
+2026-10-16T10:33:54.3793110Z     [90m150|[39m         expect(later[0]?.input.avoidPoolIds).not.toContain('p1');
+2026-10-16T10:33:54.3794441Z     [90m151|[39m         expect(later.some((p) => p.input.avoidPoolIds.includes('p1')))…
+2026-10-16T10:33:54.3795513Z     [90m   |[39m                                                                        [31m^[39m
+2026-10-16T10:33:54.3796388Z     [90m152|[39m         const holds = holdAlerts(world, 'p1');
+2026-10-16T10:33:54.3797154Z     [90m153|[39m         expect(holds).toHaveLength(1);
+2026-10-16T10:33:54.3799512Z [90m [2m❯[22m ../../../setup-pnpm/node_modules/.bin/store/v11/links/@temporalio/worker/1.24.0/4f13abe7d7602eb1228f1c4eb261e3a4919c53c576af1e25053908ae347e5f57/node_modules/@temporalio/worker/src/worker.ts:[2m2175:24[22m[39m
+2026-10-16T10:33:54.3801024Z 
+2026-10-16T10:33:54.3801054Z 
+2026-10-16T10:33:54.3804550Z [31m[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯[22m[39m
+2026-10-16T10:33:54.3804944Z 
+2026-10-16T10:33:54.3819661Z [2m Test Files [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m123 passed[39m[22m[90m (124)[39m
+2026-10-16T10:33:54.3834089Z [2m      Tests [22m [1m[31m1 failed[39m[22m[2m | [22m[1m[32m1947 passed[39m[22m[2m | [22m[33m1 skipped[39m[90m (1949)[39m
+2026-10-16T10:33:54.3834875Z [2m   Start at [22m 10:32:12
+2026-10-16T10:33:54.3841107Z [2m   Duration [22m 101.57s[2m (tests 67%, import 24%, transform 5%, environment 3%)[22m
+2026-10-16T10:33:54.3867256Z 
+2026-10-16T10:33:54.3868259Z [2m    Isolate [22m [33m124 workers spawned[39m[2m · ~205ms startup each (spawn + environment, per file)[22m
+2026-10-16T10:33:54.3870025Z [2m            [22m [2mat least ~8.28s faster with [22m[33misolate: false[39m[2m — reuses workers across files instead of one per file[22m
+2026-10-16T10:33:54.3870462Z 
+2026-10-16T10:33:54.3899701Z 
+2026-10-16T10:33:54.3924576Z ##[error]AssertionError: expected false to be true // Object.is equality
+
+- Expected
++ Received
+
+- true
++ false
+
+ ❯ tasks.tasks packages/engine/test/task-auth-reroute.test.ts:151:72
+ ❯ ../../../setup-pnpm/node_modules/.bin/store/v11/links/@temporalio/worker/1.24.0/4f13abe7d7602eb1228f1c4eb261e3a4919c53c576af1e25053908ae347e5f57/node_modules/@temporalio/worker/src/worker.ts:2175:24
+
+
+2026-10-16T10:33:54.4052206Z JSON report written to /home/runner/work/_temp/fleet-test-out/report.json
+2026-10-16T10:33:54.4371704Z ##[error]Process completed with exit code 1.
+2026-10-16T10:33:54.4481601Z Post job cleanup.
+2026-10-16T10:33:54.5844463Z Pruning is unnecessary.
+2026-10-16T10:33:54.5968616Z Post job cleanup.
+2026-10-16T10:33:54.6827422Z [command]/usr/bin/git version
+2026-10-16T10:33:54.6864448Z git version 2.55.0
+2026-10-16T10:33:54.6898847Z Temporarily overriding HOME='/home/runner/work/_temp/b4d425ff-0be0-4c17-bf77-0dc10542786d' before making global git config changes
+2026-10-16T10:33:54.6900541Z Adding repository directory to the temporary git global config as a safe directory
+2026-10-16T10:33:54.6904456Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/fleet-dao/fleet-dao
+2026-10-16T10:33:54.6939180Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-10-16T10:33:54.6968320Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-10-16T10:33:54.7178165Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-10-16T10:33:54.7206365Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-10-16T10:33:54.7415960Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-10-16T10:33:54.7464337Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-10-16T10:33:54.7805546Z Cleaning up orphan processes
+2026-10-16T10:33:54.8080946Z ##[warning]Node.js 20 is deprecated. The following actions target Node.js 20 but are being forced to run on Node.js 24: actions/cache/restore@v4, actions/cache@v4, actions/checkout@v4, actions/setup-node@v4, pnpm/action-setup@v4. For more information see: https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/

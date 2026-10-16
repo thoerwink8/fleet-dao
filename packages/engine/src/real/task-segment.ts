@@ -56,7 +56,11 @@ import {
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import type { ChannelAttempts, SegmentReservations } from './runs-writer.ts';
-import { type SubagentGuard, writeSegmentLocalSettings } from './segment-settings.ts';
+import {
+  assertSubagentsInstalled,
+  type SubagentGuard,
+  writeSegmentLocalSettings,
+} from './segment-settings.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
 import { prepareSegmentTree, type SegmentTreeDeps } from './segment-tree.ts';
 import { readTreeFile } from './user-git.ts';
@@ -87,8 +91,8 @@ export interface RunSegmentDeps {
    * 模型时 deny 全部）。给了而读不到清单，这一段不起会话（deny 写不上，不带着没挡的状态起）。不给 = 不写（测试）。
    */
   subagentGuard?: () => Promise<SubagentGuard>;
-  /** 设置 engine.subagentHint（默认关）：开着提示词多一句可以派哪些子代理。读不了记日志、按关，不挡会话。 */
-  readSubagentHint?: () => Promise<boolean>;
+  /** 测试用：会话用户的家目录（默认按账号库查）。 */
+  subagentsHome?: string;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
   /**
@@ -267,29 +271,21 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       } catch (error) {
         throw new PortError('SEGMENT_SUBAGENT_GUARD', errMessage(error), { retryable: true });
       }
-      await writeSegmentLocalSettings(
-        {
-          exec: deps.tree.exec,
-          user: routeInfo.user,
-          dir: input.worktreePath,
-          scopePrefix: `local-settings-${treeRunId}`,
-          signal: ctx.signal,
-          ...(deps.tree.gitBin ? { git: deps.tree.gitBin } : {}),
-          ...(deps.tree.shBin ? { sh: deps.tree.shBin } : {}),
-        },
-        guard,
-        routeInfo.route.upstreamModel ?? routeInfo.route.modelId,
-      );
+      const settingsTree = {
+        exec: deps.tree.exec,
+        user: routeInfo.user,
+        dir: input.worktreePath,
+        scopePrefix: `local-settings-${treeRunId}`,
+        signal: ctx.signal,
+        ...(deps.tree.gitBin ? { git: deps.tree.gitBin } : {}),
+        ...(deps.tree.shBin ? { sh: deps.tree.shBin } : {}),
+      };
+      const sessionModel = routeInfo.route.upstreamModel ?? routeInfo.route.modelId;
+      // Claude 模型：定义靠会话用户家里的 ~/.claude/agents（agents-sync 装的），开跑前核对和仓里是同一份（#2820）
+      await assertSubagentsInstalled(settingsTree, guard, sessionModel, deps.subagentsHome);
+      await writeSegmentLocalSettings(settingsTree, guard, sessionModel);
     }
     // 3. 提示词
-    let subagentHint = false;
-    if (deps.readSubagentHint) {
-      try {
-        subagentHint = await deps.readSubagentHint();
-      } catch (error) {
-        log('子代理提示的开关没读到，按关', { error: errMessage(error) });
-      }
-    }
     // 3.5 首轮预载：新开的会话把单子列的文件先读好放进提示词（续的会话里已经有了）
     const preload: PreloadRead[] = [];
     if (!input.resumeSessionId) {
@@ -315,7 +311,6 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       specDir: input.brief.specDir,
       feedback: input.feedback,
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
-      ...(subagentHint ? { subagentHint } : {}),
       ...(input.resumeSessionId ? { resumed: true } : {}),
       ...(preload.length > 0 ? { preload } : {}),
       ...(input.mode === 'plan' ? { plan: true } : {}),

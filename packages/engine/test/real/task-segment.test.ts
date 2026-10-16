@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
+import { type RunFacts, type SessionUser, SUBAGENTS_DIR } from '@fleet-dao/adapters';
 import type { ChannelAttemptWrite, RouteLaunchFacts } from '@fleet-dao/db';
 import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { createEngineDrain, waitDrained } from '../../src/drain.ts';
@@ -12,6 +12,7 @@ import { localExec } from '../../src/real/exec.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
 import { DETACHED_MARK, type SessionHandoff, sessionHandoff } from '../../src/real/session-handoff.ts';
+import { readSubagentGuard } from '../../src/real/subagents-file.ts';
 import { createRunSegment, type RunSegmentDeps, sweepRunDirs } from '../../src/real/task-segment.ts';
 import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not-wired.ts';
 import { type RunSegmentInput, SEGMENT_DETACHED } from '../../src/task-contract.ts';
@@ -1119,6 +1120,64 @@ describe('子代理（#1641）：树里的本地设置和提示词那一句', { 
     });
     await r.run(r.input(), ctx());
     expect(wrote).toBe(false);
+  });
+
+  describe('定义靠会话用户家里的 ~/.claude/agents（#2820）', () => {
+    const installedHome = (names: string[]) => {
+      const home = mkdtempSync(join(tmpdir(), 'fleet-seg-home-'));
+      onTestFinished(() => rmSync(home, { recursive: true, force: true }));
+      mkdirSync(join(home, '.claude', 'agents'), { recursive: true });
+      for (const n of names)
+        writeFileSync(join(home, '.claude', 'agents', n), readFileSync(join(SUBAGENTS_DIR, n), 'utf8'));
+      return home;
+    };
+    const claudeRoute = () => mirasimRoute({ modelId: 'claude-opus-5-5', upstreamModel: 'claude-opus-5-5' });
+
+    it('Mirasim 的 Claude 会话：家里装着的和仓里一样，起会话', async () => {
+      const r = rig({
+        route: claudeRoute(),
+        deps: {
+          subagentGuard: () => readSubagentGuard(),
+          subagentsHome: installedHome(['Explore.md', 'general-purpose.md', 'Plan.md']),
+        },
+        driverRun: async (spec) => {
+          commitInTree(spec);
+          return report({ hostId: 'mirasim' });
+        },
+      });
+      await r.run(r.input(), ctx());
+      expect(r.specs).toHaveLength(1);
+    });
+
+    it('【故意造出的失败】Mirasim 的 Claude 会话：家里缺一份，不起会话、可重试', async () => {
+      const r = rig({
+        route: claudeRoute(),
+        deps: {
+          subagentGuard: () => readSubagentGuard(),
+          subagentsHome: installedHome(['Explore.md', 'Plan.md']),
+        },
+      });
+      await expect(r.run(r.input(), ctx())).rejects.toMatchObject({
+        code: 'SEGMENT_SUBAGENT_DEFS',
+        retryable: true,
+      });
+      expect(r.specs).toHaveLength(0);
+    });
+
+    it('Mirasim 的非 Claude 会话：不核对家里装的，照旧挡掉全部子代理', async () => {
+      let seen: ReturnType<typeof settingsOf> | undefined;
+      const r = rig({
+        route: mirasimRoute(),
+        deps: { subagentGuard: () => readSubagentGuard(), subagentsHome: installedHome([]) },
+        driverRun: async (spec) => {
+          seen = settingsOf(spec.cwd);
+          commitInTree(spec);
+          return report({ hostId: 'mirasim' });
+        },
+      });
+      await r.run(r.input(), ctx());
+      expect(seen?.permissions.deny).toEqual(['Agent(Explore)', 'Agent(Plan)', 'Agent(general-purpose)']);
+    });
   });
 
   it('【故意造出的失败】Mirasim 的会话读不到子代理清单：这一段不起会话（deny 写不上，不带着没挡的状态起）', async () => {

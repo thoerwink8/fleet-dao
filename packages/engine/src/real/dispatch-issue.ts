@@ -17,7 +17,7 @@ import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import type { DispatchIssueDeps } from '../jobs/dispatch-issue.ts';
 import { DISPATCH_ISSUE_AUDIT } from '../jobs/dispatch-issue.ts';
 import type { IntakeRepo } from '../jobs/intake.ts';
-import { type IntakeGitHub, intakeJob } from './intake.ts';
+import { type IntakeGitHub, intakeJob, readRepoStandardPaths } from './intake.ts';
 
 export interface DispatchIssueWiring {
   db: Db;
@@ -61,6 +61,7 @@ export function dispatchIssueDeps(w: DispatchIssueWiring): DispatchIssueDeps {
     taskGenerations: (repo, issueNumber) => intake.taskGenerations(repo, issueNumber),
     openPrClaims: (repo) => intake.openPrClaims(repo),
     readSpecDoc: (input) => intake.readSpecDoc(input),
+    standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
     failedAttempts: (repo, issueNumber) => failedGenerations(w.client, repo, issueNumber),
     start: (input) => intake.start(input),
     async audit(entry) {

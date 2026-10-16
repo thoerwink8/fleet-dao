@@ -114,7 +114,7 @@ export function parseAgentDefinition(text: string, file: string): AgentDefinitio
 /** 读一个目录下所有 *.md 定义，按文件名排序；任何一份认不出就整个抛错。 */
 export function loadAgentDefinitions(dir: string): AgentDefinition[] {
   const files = readdirSync(dir)
-    .filter((f) => f.endsWith('.md'))
+    .filter((f) => f.endsWith('.md') && f !== 'README.md') // README.md 是规范说明，不是定义
     .sort();
   if (files.length === 0) throw new DefinitionError(dir, '目录里没有 .md 定义');
   return files.map((f) => parseAgentDefinition(readFileSync(join(dir, f), 'utf8'), join(dir, f)));

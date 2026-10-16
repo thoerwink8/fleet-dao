@@ -50,6 +50,8 @@ export interface BuildInput {
   issue: TaskIssue;
   /** 单子指着的需求文档（主线上读到的全文）；没有＝单子正文自己写全了需求。 */
   specDoc?: { dir: string; markdown: string } | undefined;
+  /** 仓档案的模块根。不给按 packages/*（旧调用）；空数组＝整个仓一个模块。 */
+  moduleRoots?: readonly string[] | undefined;
 }
 
 /** 单子里「已知的模块」写这些就是没写（「暂无」「（暂无）」「暂无（建单时没聊到）」）：不当成一项，也不当成「认不出」。 */
@@ -191,7 +193,7 @@ export function buildTaskBrief(input: BuildInput): TaskBriefResult {
       acceptance: criteria.ok,
       touches,
       ...(specDoc ? { specDir: specDoc.dir } : {}),
-      tier: decideTierFromModules(refs, unrecognized),
+      tier: decideTierFromModules(refs, unrecognized, input.moduleRoots),
     },
   };
 }
@@ -206,14 +208,14 @@ export interface TaskBriefPorts {
 /** 现读单子和它指着的需求文档，拼出交代。单子读不到、文档读失败：抛错；文档不在、栏缺了：回 problems。 */
 export async function readTaskBrief(
   ports: TaskBriefPorts,
-  input: { repo: RepoRef; issueNumber: number },
+  input: { repo: RepoRef; issueNumber: number; moduleRoots?: readonly string[] | undefined },
 ): Promise<TaskBriefResult> {
-  const { repo, issueNumber } = input;
+  const { repo, issueNumber, moduleRoots } = input;
   const issue = await ports.readIssue({ repo, issueNumber });
   if (issue.number !== issueNumber) {
     throw new Error(`读 #${issueNumber} 读回来的是 #${issue.number}：端口读错了单`);
   }
-  if (!hasSpecPointer(issue.body)) return buildTaskBrief({ issue });
+  if (!hasSpecPointer(issue.body)) return buildTaskBrief({ issue, ...(moduleRoots ? { moduleRoots } : {}) });
   const dir = specDirOf(issue.body, issueNumber);
   if ('error' in dir) return { ok: false, problems: [{ field: '需求文档', why: dir.error }] };
   const path = `${dir.ok}/${REQUIREMENT_FILE}`;
@@ -229,7 +231,11 @@ export async function readTaskBrief(
       ],
     };
   }
-  return buildTaskBrief({ issue, specDoc: { dir: dir.ok, markdown: doc.content } });
+  return buildTaskBrief({
+    issue,
+    specDoc: { dir: dir.ok, markdown: doc.content },
+    ...(moduleRoots ? { moduleRoots } : {}),
+  });
 }
 
 /** 交代加上建工作树时才有的分支和起点，成为动手那一段的 brief（过一遍 zod，形状不对当场红）。 */
