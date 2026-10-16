@@ -5,19 +5,39 @@
 //        （引擎停下等人的 stalled / parked 后端一步接手，叫停它再登记；引擎还在跑、排队的回 409，停下不领）→ 贴「本机做」→ 打出要用的分支名 local/<单号>-<短名>。
 // renew：续租（会话在 local/<单号>- 分支上动着、或开着 PR 挂着这张单，法国自己会顺延，不用手动续；跑超过 2 小时的长测试前续一下）。
 // done：做完（PR 合了）记 done；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
+// queue [--json]：本机队列（单 #2731）——本机做的开着的单，领者、心跳、开着的 PR、挂着的引导、能不能接（work-queue.ts）。只读，不碰法国。
+// run <单号> [--brief 文件] [--worktree 路径] [--again]：脱离聊天进程派一个无头工人（单 #2761，work-run.ts 开头有全貌）——先过本机容量，
+//        本机没租约才领单，建或复用工作树，经 detach.mjs 起看护进程；看护进程没了再跑一次就接着同一个会话续。runs：列 run 派过的工人。
 //
 // 改这里之前必须知道：
 // - 写法国只用本机会话心跳同一个通行证（~/.fleet-dao/local-sessions/config.json 的 url、token，pnpm local-sessions install 写的），
 //   本机不放机器人凭据。读不到配置、法国不回，照实报「没登记上」、退出码 1，不当成领到了。
 // - 通行证只放进请求头，不打印。
 // 退出码：0 成了；1 没成（原因打在 stderr）。
-import { readFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
+import type { Git } from './directives.ts';
 import { localBranchPrefix } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { LOCAL_LABEL } from './labels.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
+import { buildQueue, type LeaseRecord, type QueueDeps, renderQueue } from './work-queue.ts';
+import {
+  defaultBrief,
+  listRuns,
+  PASS_ENV,
+  prepareRunDir,
+  RUN_SCHEMA,
+  type RunResult,
+  type RunSpec,
+  readJson,
+  renderRuns,
+  runDir,
+  runFiles,
+  runPhase,
+  writeJson,
+} from './work-run.ts';
 
 /** 和 agents/local-sessions/lib.mjs 的 TOKEN_HEADER 同一个头。 */
 const TOKEN_HEADER = 'X-Fleet-Node-Token';
@@ -38,7 +58,8 @@ export type LocalClaimRequest =
     };
 
 export const WORK_USAGE =
-  '用法：pnpm work claim <单号> | pnpm work renew <单号> | pnpm work done <单号> [--failed "原因" | --release "原因"]';
+  '用法：pnpm work claim <单号> | pnpm work renew <单号> | pnpm work done <单号> [--failed "原因" | --release "原因"] | pnpm work queue [--json]' +
+  ' | pnpm work run <单号> [--brief <交代文件>] [--worktree <工作树>] [--again] | pnpm work runs';
 
 export interface ClaimsEndpoint {
   url: string;
@@ -83,6 +104,65 @@ export interface WorkDeps {
   post: ClaimsPost;
   out: (line: string) => void;
   err: (line: string) => void;
+  /** pnpm work queue 要的另外几样（git、心跳、租约、时钟）；不给 queue 就报没接上 */
+  queue?: Omit<QueueDeps, 'gh'>;
+  /**
+   * 本机记下领单租约（work-queue.ts 的 writeLease / removeLease）：法国的租约本机读不到，claim / renew 成了记一份、done 删掉，
+   * 队列靠它认「在做」。不给就不记（测试）；记不成只提示，不算领单没成。
+   */
+  leases?: {
+    write: (rec: LeaseRecord) => void;
+    remove: (repo: string, issue: number) => void;
+  };
+  /** pnpm work run / runs 要的（work-run.ts）：容量、起脱离的进程、git、环境。不给就报没接上 */
+  run?: {
+    /** agents/hooks/capacity.mjs 的读数和判法：enough 是 null 表示没查成 */
+    capacity: () => Promise<{ enough: boolean | null; text: string }>;
+    /** agents/local-sessions/detach.mjs 的 spawnDetached */
+    spawnDetached: (
+      file: string,
+      args: string[],
+      opts: { cwd?: string },
+    ) => { ok: true; pid: number; how: string } | { ok: false; why: string };
+    git: Git;
+    env: NodeJS.ProcessEnv;
+    now: () => Date;
+    runsRoot: string;
+    /** 跑这条命令的检出 */
+    repoRoot: string;
+    node: string;
+    /** 看护进程的入口（bin/work-supervisor.ts） */
+    supervisor: string;
+    findReclaude: () => string | null;
+    /** 本机记着这张单没到期的租约 */
+    hasLease: (repo: string, issue: number) => boolean;
+    exists: (path: string) => boolean;
+    readText: (path: string) => string;
+  };
+}
+
+/** 记租约：没接上不记；记不成提示一句，不把领单算失败 */
+function noteLease(deps: WorkDeps, fn: (l: NonNullable<WorkDeps['leases']>) => void): void {
+  if (!deps.leases) return;
+  try {
+    fn(deps.leases);
+  } catch (e) {
+    deps.err(
+      `提示：法国那边登记成了，本机租约记录没写成（${e instanceof Error ? e.message : String(e)}）；pnpm work queue 可能把这张当成可接`,
+    );
+  }
+}
+
+/** pnpm work queue [--json]：退出码 0 列出来了（没查成的部分写在 problems / 末尾），1 单或 PR 没读成 */
+async function queueCmd(rest: readonly string[], deps: WorkDeps): Promise<number> {
+  const json = rest.includes('--json');
+  const extra = rest.filter((a) => a !== '--json');
+  if (extra.length > 0) throw new Error(`认不出的参数：${extra.join(' ')}。${WORK_USAGE}`);
+  if (!deps.queue) throw new Error('pnpm work queue 没接上读 git、心跳的那几样（入口的 bug）');
+  const report = await buildQueue({ gh: deps.gh, ...deps.queue });
+  if (json) deps.out(JSON.stringify(report));
+  else for (const line of renderQueue(report)) deps.out(line);
+  return 0;
 }
 
 interface Parsed {
@@ -202,8 +282,200 @@ async function send(
   );
 }
 
+/** 单的标题：认不出就用 #单号；不是开着的单抛 */
+function issueTitle(issue: number, v: { title?: unknown; state?: unknown }): string {
+  if (v.state !== 'OPEN') throw new Error(`#${issue} 不是开着的单（${String(v.state)}），不领`);
+  return typeof v.title === 'string' && v.title.trim() ? v.title.trim() : `#${issue}`;
+}
+
+/** 领单（claim 和 run 共用）：有开着的 PR 不领 → 法国登记 → 本机记租约 → 贴「本机做」 */
+async function claimIssue(
+  deps: WorkDeps,
+  repo: string,
+  issue: number,
+  title: string,
+): Promise<{ leaseUntil: string | null }> {
+  const other = otherPrOnIssue(await openPulls(deps.gh), issue, null);
+  if (other !== null) {
+    throw new Error(`#${issue} 已经有开着的 PR #${other} 在做，不再领、不重复做：先看 #${other}`);
+  }
+  const got = await send(deps, { action: 'claim', repo, issue, title: title.slice(0, 300) });
+  const until = got.leaseUntil;
+  if (until !== null) noteLease(deps, (l) => l.write({ repo, issue, leaseUntil: until }));
+  const label = await deps.gh(['issue', 'edit', String(issue), '--add-label', LOCAL_LABEL]);
+  if (label.code !== 0) {
+    deps.err(
+      `提示：登记上了，可「${LOCAL_LABEL}」没贴上（${(label.stderr || label.stdout).trim()}）；法国照样不接（看的是登记），手动补贴即可`,
+    );
+  }
+  return got;
+}
+
+interface RunArgs {
+  issue: number;
+  brief?: string;
+  worktree?: string;
+  again: boolean;
+}
+
+function parseRun(rest: readonly string[]): RunArgs {
+  const [n, ...flags] = rest;
+  const issue = Number(n);
+  if (!Number.isSafeInteger(issue) || issue <= 0)
+    throw new Error(`单号要是正整数：${n ?? '（没给）'}。${WORK_USAGE}`);
+  const out: RunArgs = { issue, again: false };
+  for (let i = 0; i < flags.length; i += 1) {
+    const flag = flags[i];
+    const value = flags[i + 1];
+    if (flag === '--again') {
+      out.again = true;
+      continue;
+    }
+    if ((flag === '--brief' || flag === '--worktree') && value && !value.startsWith('--')) {
+      if (flag === '--brief') out.brief = value;
+      else out.worktree = value;
+      i += 1;
+      continue;
+    }
+    throw new Error(`认不出的参数：${flag}。${WORK_USAGE}`);
+  }
+  return out;
+}
+
+async function gitOk(git: Git, args: string[], what: string): Promise<string> {
+  const r = await git(args);
+  if (r.code !== 0) throw new Error(`${what}没成（git ${args.join(' ')}）：${(r.stderr || r.stdout).trim()}`);
+  return r.stdout.trim();
+}
+
+/** 建或复用这张单的工作树；回路径和分支 */
+async function ensureWorktree(
+  r: NonNullable<WorkDeps['run']>,
+  issue: number,
+  title: string,
+  given: string | undefined,
+): Promise<{ worktree: string; branch: string }> {
+  const prefix = localBranchPrefix(issue);
+  if (given !== undefined) {
+    const worktree = resolve(given);
+    if (!r.exists(worktree)) throw new Error(`--worktree ${worktree} 不在`);
+    const branch = await gitOk(
+      r.git,
+      ['-C', worktree, 'rev-parse', '--abbrev-ref', 'HEAD'],
+      '读工作树的分支',
+    );
+    if (!branch.startsWith(prefix))
+      throw new Error(`${worktree} 的分支是 ${branch}，不是 ${prefix}…：本机做单的分支要带单号`);
+    return { worktree, branch };
+  }
+  const common = await gitOk(r.git, ['rev-parse', '--path-format=absolute', '--git-common-dir'], '找主检出');
+  const branch = `${prefix}${branchSlug(title)}`;
+  const worktree = join(dirname(common), '.claude', 'worktrees', `${issue}-${branchSlug(title)}`);
+  if (r.exists(worktree)) return { worktree, branch };
+  const has = await r.git(['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+  if (has.code === 0) {
+    await gitOk(r.git, ['worktree', 'add', worktree, branch], '建工作树');
+  } else {
+    await gitOk(r.git, ['fetch', 'origin', 'main'], '拉 origin/main');
+    await gitOk(r.git, ['worktree', 'add', worktree, '-b', branch, 'origin/main'], '建工作树');
+  }
+  return { worktree, branch };
+}
+
+/** pnpm work run <单号>：脱离聊天进程派一个无头工人（work-run.ts 开头有全貌） */
+async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> {
+  const a = parseRun(rest);
+  const r = deps.run;
+  if (!r) throw new Error('pnpm work run 没接上容量、起进程的那几样（入口的 bug）');
+  const repo = await repoSlug(deps.gh);
+  const dir = runDir(r.runsRoot, repo, a.issue);
+  const files = runFiles(dir);
+  const phase = runPhase(dir, r.now());
+  if (phase === 'live') throw new Error(`#${a.issue} 已经有工人在跑（pnpm work runs 看），不再派第二个`);
+  if (phase === 'terminal' && !a.again) {
+    const done = readJson<RunResult>(files.result);
+    throw new Error(
+      `#${a.issue} 上次派的工人已经${done?.state === 'done' ? '做完' : '没做成'}（${files.result}）；要重来加 --again（旧记录改名留着）`,
+    );
+  }
+  const cap = await r.capacity();
+  if (cap.enough !== true) {
+    throw new Error(
+      cap.enough === null ? `${cap.text}——没查成不当成够，不派` : `${cap.text}——等一个工人收口再派`,
+    );
+  }
+  const resume = phase === 'lost' && !a.again;
+  // 「看护进程没了」叫醒过一次；接着续就要能再叫醒到终态
+  if (resume) rmSync(files.reported, { force: true });
+  if (!resume) {
+    const issue = (await ghJson(
+      deps.gh,
+      ['issue', 'view', String(a.issue), '--json', 'title,state'],
+      `#${a.issue}`,
+    )) as {
+      title?: unknown;
+      state?: unknown;
+    };
+    const title = issueTitle(a.issue, issue);
+    if (r.hasLease(repo, a.issue)) deps.out(`#${a.issue} 本机已经领着（租约没到期），不再领`);
+    else {
+      const got = await claimIssue(deps, repo, a.issue, title);
+      deps.out(`领了 #${a.issue}（租约到 ${got.leaseUntil ?? '？'}）`);
+    }
+    const reclaude = r.findReclaude();
+    if (reclaude === null) throw new Error('PATH 上找不到 reclaude（Claude 一律经 reclaude 起），不派');
+    const { worktree, branch } = await ensureWorktree(r, a.issue, title, a.worktree);
+    prepareRunDir(dir, r.now(), a.again);
+    const extra = a.brief === undefined ? '' : `\n\n## 另外的交代\n\n${r.readText(resolve(a.brief)).trim()}`;
+    writeFileSync(files.brief, `${defaultBrief({ issue: a.issue, title, worktree, branch })}${extra}\n`);
+    const env: Record<string, string> = {};
+    for (const k of PASS_ENV) {
+      const v = r.env[k];
+      if (typeof v === 'string' && v !== '') env[k] = v;
+    }
+    const spec: RunSpec = {
+      v: RUN_SCHEMA,
+      repo,
+      issue: a.issue,
+      title,
+      repoRoot: r.repoRoot,
+      worktree,
+      branch,
+      dispatcher: r.env.CLAUDE_CODE_SESSION_ID || null,
+      reclaude,
+      env,
+      createdAt: r.now().toISOString(),
+    };
+    writeJson(files.spec, spec);
+  }
+  const started = r.spawnDetached(r.node, [r.supervisor, dir], { cwd: r.repoRoot });
+  if (!started.ok) {
+    throw new Error(
+      `看护进程没起成：${started.why}（记录在 ${dir}，修好再跑一次 pnpm work run ${a.issue} 接着起）`,
+    );
+  }
+  const spec = readJson<RunSpec>(files.spec);
+  deps.out(
+    `${resume ? '接着上次的会话续' : '派出去了'} #${a.issue}：看护进程 ${started.pid}（${started.how === 'wmi' ? 'WMI 起，' : ''}不在聊天进程的进程树里），工作树 ${spec?.worktree ?? '？'}`,
+  );
+  deps.out(`状态 ${files.state}；做完写 ${files.result}。${cap.text}`);
+  deps.out(
+    spec?.dispatcher
+      ? '到终态（做完、没做成、看护进程没了）收尾钩子 work-watch.mjs 叫醒本会话；中间的心跳、重试不叫。看全部：pnpm work runs'
+      : '没读到 CLAUDE_CODE_SESSION_ID（不是在 Claude Code 里跑的）：到终态没有会话会被叫醒，用 pnpm work runs 看',
+  );
+  return 0;
+}
+
 export async function work(argv: readonly string[], deps: WorkDeps): Promise<number> {
   try {
+    if (argv[0] === 'queue') return await queueCmd(argv.slice(1), deps);
+    if (argv[0] === 'run') return await runCmd(argv.slice(1), deps);
+    if (argv[0] === 'runs') {
+      if (!deps.run) throw new Error('pnpm work runs 没接上（入口的 bug）');
+      for (const line of renderRuns(listRuns(deps.run.runsRoot), deps.run.now())) deps.out(line);
+      return 0;
+    }
     const p = parse(argv);
     const repo = await repoSlug(deps.gh);
     if (p.action === 'claim') {
@@ -215,20 +487,8 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
         title?: unknown;
         state?: unknown;
       };
-      if (issue.state !== 'OPEN') throw new Error(`#${p.issue} 不是开着的单（${String(issue.state)}），不领`);
-      const title =
-        typeof issue.title === 'string' && issue.title.trim() ? issue.title.trim() : `#${p.issue}`;
-      const other = otherPrOnIssue(await openPulls(deps.gh), p.issue, null);
-      if (other !== null) {
-        throw new Error(`#${p.issue} 已经有开着的 PR #${other} 在做，不再领、不重复做：先看 #${other}`);
-      }
-      const got = await send(deps, { action: 'claim', repo, issue: p.issue, title: title.slice(0, 300) });
-      const label = await deps.gh(['issue', 'edit', String(p.issue), '--add-label', LOCAL_LABEL]);
-      if (label.code !== 0) {
-        deps.err(
-          `提示：登记上了，可「${LOCAL_LABEL}」没贴上（${(label.stderr || label.stdout).trim()}）；法国照样不接（看的是登记），手动补贴即可`,
-        );
-      }
+      const title = issueTitle(p.issue, issue);
+      const got = await claimIssue(deps, repo, p.issue, title);
       deps.out(
         `领了 #${p.issue}（租约到 ${got.leaseUntil ?? '？'}）。分支用：${localBranchPrefix(p.issue)}${branchSlug(title)}`,
       );
@@ -237,12 +497,15 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
     }
     if (p.action === 'renew') {
       const got = await send(deps, { action: 'renew', repo, issue: p.issue });
+      const until = got.leaseUntil;
+      if (until !== null) noteLease(deps, (l) => l.write({ repo, issue: p.issue, leaseUntil: until }));
       deps.out(`续上了 #${p.issue}（租约到 ${got.leaseUntil ?? '？'}）`);
       return 0;
     }
     const outcome = p.failed !== undefined ? 'failed' : p.release !== undefined ? 'released' : 'done';
     const reason = p.failed ?? p.release;
     await send(deps, { action: 'finish', repo, issue: p.issue, outcome, ...(reason ? { reason } : {}) });
+    noteLease(deps, (l) => l.remove(repo, p.issue));
     if (outcome === 'released') {
       const label = await deps.gh(['issue', 'edit', String(p.issue), '--remove-label', LOCAL_LABEL]);
       if (label.code !== 0) {

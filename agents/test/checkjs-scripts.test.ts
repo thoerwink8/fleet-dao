@@ -16,6 +16,7 @@ const CHECKED = [
   'skills/commander/scripts/france-query.mjs',
   'skills/commander/scripts/patrol-lib.mjs',
   'skills/commander/scripts/patrol.mjs',
+  'skills/commander/scripts/wait.mjs',
   'skills/discuss/scripts/tools.mjs',
   'skills/discuss/scripts/walkthrough.mjs',
   'hooks/pretool.mjs',
@@ -33,11 +34,17 @@ const CHECKED = [
   'hooks/git-run.mjs',
   'hooks/proxy-env.mjs',
   'hooks/unattended.mjs',
+  'hooks/capacity.mjs',
+  'hooks/queue-stop.mjs',
+  'hooks/subagent-ledger.mjs',
+  'hooks/shell-edit.mjs',
+  'hooks/work-watch.mjs',
   'local-sessions/lib.mjs',
   'local-sessions/heartbeat.mjs',
   'local-sessions/push.mjs',
   'local-sessions/loop.mjs',
   'local-sessions/install.mjs',
+  'local-sessions/detach.mjs',
 ];
 
 /** 盖住类型检查的写法：@ts-nocheck、@ts-expect-error、@ts-expect-error，和 JSDoc 里写 any。回命中的那几处。 */

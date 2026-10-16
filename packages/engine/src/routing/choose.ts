@@ -6,7 +6,9 @@
 // 分钟只打平手，不再把一轮做成率差的挪到最后。byTier 关掉时仍是旧规则：一轮做成率明显差的模型不进动手，
 // 但别的模型都派不了、又不只是在等空位时照样派它——打分绝不能把唯一能用的排没。
 
+import { allocateWeights, weightedPick, weightText } from './allocate.ts';
 import { blocksFor, type FilterContext, familyKey } from './filter.ts';
+import { applyFloor, floorOf } from './floor.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
@@ -62,11 +64,20 @@ function contextOf(
 }
 
 /** 排序 → 每条算被挡原因 → 分组。chooseRoute 和 stageAllOpen 共用这一段，熔断算不算挡着才不会两套。 */
-function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
+function judgeStage(
+  input: ChooseRouteInput,
+  ctx: FilterContext,
+): { judged: Judged[]; floorNote: string | null; scores: Map<string, ModelScore> | undefined } {
   const factsOf = new Map(input.routes.map((r) => [r.routeId, r]));
   const rows = [...input.order]
     .sort((a, b) => a.position - b.position)
     .map((entry) => ({ route: factsOf.get(entry.routeId) as RouteFacts, entry }));
+  // 挡因先算（只看路由自己和这一单，不看排序）：强档让不让位只看没被硬挡的渠道（#2724：人关掉的路由持平不能拦住让位）
+  const blocksOf = new Map(rows.map(({ route, entry }) => [route.routeId, blocksFor(route, entry, ctx)]));
+  const floorNote = floorStage(input, ctx, rows, blocksOf);
+  const hardBlocked = new Set(
+    [...blocksOf].flatMap(([id, blocks]) => (groupOf(blocks).kind === 'hard' ? [id] : [])),
+  );
   const scores = scoresOf(input, ctx);
   const ranked = rank(
     rows,
@@ -75,12 +86,47 @@ function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
     ctx.now,
     scores,
     STAGE_NAMES[input.stage],
-    strengthOf(input, ctx, scores),
+    strengthOf(input, ctx, scores, hardBlocked),
   );
-  return ranked.map((item) => {
-    const blocks = blocksFor(item.route, item.entry, ctx);
+  const judged = ranked.map((item) => {
+    const blocks = blocksOf.get(item.route.routeId) ?? [];
     return { item, blocks, group: groupOf(blocks) };
   });
+  return { judged, floorNote, scores };
+}
+
+/**
+ * 能力下限（#2725，floor.ts）：排序之前把够不上的路由加一条硬挡，写明为什么没派它；降了档回那一句（写进派工理由）。
+ * 人的指令不驳：整段钉住、钉住的行、人给这张单指定了模型（floorWaived）都不挡。
+ * 判「够格的是不是全被挡」时不算「这一问只派别家」的换族挡因：冷验收按族一家家问，别家够格的问到它那一族时照样能派，
+ * 不能因为这一问避开了别家就提前降档。
+ */
+function floorStage(
+  input: ChooseRouteInput,
+  ctx: FilterContext,
+  rows: readonly { route: RouteFacts; entry: StageRouteEntry }[],
+  blocksOf: Map<string, Block[]>,
+): string | null {
+  const floor = floorOf(input.stage, input.tier);
+  if (!floor || !input.tier || input.stagePinned || input.floorWaived) return null;
+  const otherFamilies = ctx.avoid.families.size > 0;
+  const loose: FilterContext = otherFamilies
+    ? { ...ctx, avoid: { ...ctx.avoid, families: new Set<string>() } }
+    : ctx;
+  const candidates = rows.filter(({ entry }) => !entry.pinned);
+  const decision = applyFloor(
+    candidates.map(({ route, entry }) => ({
+      route,
+      blocks: blocksOf.get(route.routeId) ?? [],
+      ...(otherFamilies ? { judgeBlocks: blocksFor(route, entry, loose) } : {}),
+    })),
+    input.stage,
+    input.tier,
+    floor,
+    ctx.now,
+  );
+  for (const [id, block] of decision.below) blocksOf.get(id)?.push(block);
+  return decision.lowered;
 }
 
 /**
@@ -108,6 +154,7 @@ function strengthOf(
   input: ChooseRouteInput,
   ctx: FilterContext,
   scores: ReadonlyMap<string, ModelScore> | undefined,
+  hardBlocked: ReadonlySet<string>,
 ): StrengthOptions | undefined {
   const { trackScore: ts, strength: st } = ctx.policy;
   const tier = input.tier;
@@ -121,7 +168,7 @@ function strengthOf(
           samples: new Map([...scores].map(([m, s]) => [m, s.track.tasks])),
         }
       : null;
-  return { tier, strongFirst: st.strongFirstTiers.includes(tier), explore };
+  return { tier, strongFirst: st.strongFirstTiers.includes(tier), explore, hardBlocked };
 }
 
 const isPoor = (j: Judged) => j.item.nudges.some((n) => n.kind === 'poor-one-round');
@@ -166,7 +213,7 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
     return { kind: 'none', reason: `${stageName}阶段一条路由都没配`, verdicts: [] };
   }
 
-  const judged = judgeStage(input, ctx);
+  const { judged, floorNote, scores } = judgeStage(input, ctx);
   const verdicts = judged.map((j, i) => verdictOf(j, i));
 
   const ready = gatePoor(
@@ -174,8 +221,23 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
     judged.filter((j) => j.group.kind === 'ready'),
   );
   const first = ready[0];
+  // 按池压力加权抽签（决定 0104）：能派的里按权重抽；人钉住的照人排（钉住就是人要它）。权重全是 0 才落回下面照人排的先后
+  if (first && policy.allocate.mode === 'weighted' && !ready.some((j) => j.item.pinned)) {
+    const picked = weightedChoice(input, ctx, ready, judged, scores, stageName);
+    if (picked) {
+      const route = picked.item.route;
+      const breakerTrial = route.breaker.admit === 'trial';
+      return dispatch(
+        route,
+        withNotes(picked.why, quotaNote(route), breakerTrial ? BREAKER_TRIAL : null, floorNote),
+        breakerTrial ? 'breaker' : null,
+        null,
+        verdicts,
+      );
+    }
+  }
   if (first) {
-    const explore = pickTrial(input, ready, policy);
+    const explore = policy.allocate.mode === 'legacy' ? pickTrial(input, ready, policy) : null;
     const chosen = explore ?? first;
     const route = chosen.item.route;
     const breakerTrial = route.breaker.admit === 'trial';
@@ -187,7 +249,7 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
           breakerTrial ? BREAKER_TRIAL : null,
         )
       : withNotes(whyFirst(stageName, chosen, judged), breakerTrial ? BREAKER_TRIAL : null);
-    return dispatch(route, why, trial, null, verdicts);
+    return dispatch(route, withNotes(why, floorNote), trial, null, verdicts);
   }
 
   const allOpen = allOpenTrial(judged);
@@ -200,6 +262,83 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
   }
 
   return waitOrNone(stageName, judged, verdicts);
+}
+
+/**
+ * 按池压力加权抽一条（决定 0104，allocate.ts）。抽签的数：给了 allocateSeed（单号:段:第几次选）用 seedDraw 算，同一单同一段
+ * 重算不变；没给用工作流给的 draw；都没有就取权重最大的。权重全是 0 回 null（调用方照人排的先后，理由写明）。
+ */
+function weightedChoice(
+  input: ChooseRouteInput,
+  ctx: FilterContext,
+  ready: Judged[],
+  judged: Judged[],
+  scores: ReadonlyMap<string, ModelScore> | undefined,
+  stageName: string,
+): { item: Ranked; why: string } | null {
+  const al = ctx.policy.allocate;
+  const weights = allocateWeights(
+    ready.map((j) => j.item.route),
+    scores,
+    input.tier,
+    al,
+    ctx.now,
+  );
+  const seed = input.allocateSeed;
+  const u = seed !== undefined ? seedDraw(seed) : input.draw;
+  let idx: number | null;
+  if (u === undefined) {
+    const max = Math.max(...weights.map((w) => w.weight));
+    idx = max > 0 ? weights.findIndex((w) => w.weight === max) : null;
+  } else {
+    idx = weightedPick(weights, u);
+  }
+  if (idx === null) return null;
+  const chosen = ready[idx] as Judged;
+  const positive = weights.filter((w) => w.weight > 0);
+  const top = positive[0]?.weight ?? 0;
+  const tied = positive.every((w) => Math.abs(w.weight - top) <= 1e-12 * Math.max(1, top));
+  const how =
+    positive.length === 1
+      ? '只有它权重不是 0'
+      : tied
+        ? '权重平手，照人排的先后'
+        : u === undefined
+          ? '没有抽签的数，取权重最大的'
+          : `抽到 ${u.toFixed(3)}${seed !== undefined ? `（种子 ${seed}）` : ''}`;
+  const list = weights
+    .map((w, i) => weightText(routeLabel((ready[i] as Judged).item.route), w, al))
+    .join('；');
+  // 人排在它前面、这次没派的：各自为什么（被挡写挡因，能派的写抽签没抽到和它的权重，被闸掉的写闸的话）
+  const notes = judged
+    .filter((j) => j !== chosen && j.item.humanIndex < chosen.item.humanIndex)
+    .map((j) => {
+      const at = ready.indexOf(j);
+      const cause =
+        j.blocks.length > 0
+          ? j.blocks.map((b) => b.text).join('、')
+          : at >= 0 && !tied
+            ? `抽签没抽到（权重 ${(weights[at]?.weight ?? 0).toFixed(2)}${weights[at]?.excluded ? `，${weights[at]?.excluded}` : ''}）`
+            : j.item.nudges
+                .filter((n) => n.kind !== 'fast-reset' && n.kind !== 'pace-behind')
+                .map((n) => n.text)
+                .join('、') || (at >= 0 ? '权重平手，照先后排在后面' : '排到了后面');
+      return `第 ${j.item.humanIndex + 1} 条 ${routeLabel(j.item.route)}：${cause}`;
+    });
+  const passed =
+    notes.length === 0
+      ? null
+      : notes.length > 2
+        ? `${notes.slice(0, 2).join('；')}；另有 ${notes.length - 2} 条也没派`
+        : notes.join('；');
+  return {
+    item: chosen.item,
+    why: withNotes(
+      `${stageName}阶段第 ${chosen.item.humanIndex + 1} 条：${routeLabel(chosen.item.route)}；按池压力加权抽签（${how}）`,
+      `候选权重 = q × min(ρ, ${al.rhoCap})²：${list}`,
+      passed,
+    ),
+  };
 }
 
 /** 每条派出去的路径都经这里。理由不必再补「探针结论过期」那句（#1798 片 4）：派前 15 分钟探一次保证了结论新。 */
@@ -318,7 +457,7 @@ export function stageAllOpen(input: ChooseRouteInput): AllOpenCheck {
   if (input.order.length === 0) {
     return { allOpen: false, detail: `${stageName}阶段一条路由都没配` };
   }
-  const judged = judgeStage(input, contextOf(input, policy, now));
+  const { judged } = judgeStage(input, contextOf(input, policy, now));
   const ready = judged.filter((j) => j.group.kind === 'ready');
   // 有能派的就先派它，走不到全熔断那一支：这里和 chooseRoute 一样，ready 优先。
   if (ready.length === 0 && allOpenTrial(judged)) return { allOpen: true };

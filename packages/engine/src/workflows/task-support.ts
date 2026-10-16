@@ -2,7 +2,7 @@
 // 这里是工作流代码，会被重放：别加随机数、Date、Node 自带模块（test/structure.test.ts 会拦）。
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
-import type { RouteChoice } from '../ports.ts';
+import type { RoundOutcome, RouteChoice } from '../ports.ts';
 import {
   type AbandonCommand,
   type PauseCommand,
@@ -79,11 +79,31 @@ export function freshSessionFeedback(feedback: readonly string[]): string[] {
 /** 自测红了续进会话的那一句（第一行），后面跟精炼输出。 */
 export const SELF_CHECK_RED_LINE = '引擎在你交活之后跑了测试和类型检查，没过。改到它过再提交：';
 
+/**
+ * 交活时没提交、树里有剩：同一轮续进会话补提交的那一句（#2722）。后面跟树里剩的文件。
+ * 常见是会话把测试丢到后台就结束了回答：一次性会话收不到后台回调，改动就留在树里。
+ */
+export const COMMIT_NUDGE_LINE =
+  '你的回答结束了，但改动还没提交完（引擎只认提交）。不要把命令放到后台再结束回答：要跑的测试、检查在前台跑完看到结果，然后 git add、git commit 提交，工作树里别留没提交的文件。';
+
+/** 续进会话补提交的意见：那一句 + 树里剩的文件（最多 10 个）。 */
+export function commitNudgeFeedback(commits: number, leftover: readonly string[]): string {
+  const none = commits === 0 ? '这一轮一个提交都没有。' : '';
+  const left = leftover.length > 0 ? `工作树里还有没提交的改动：${leftover.slice(0, 10).join('、')}。` : '';
+  return `${COMMIT_NUDGE_LINE}${none || left ? `\n${none}${left}` : ''}`;
+}
+
 /** 自测的精炼输出合成一段（喂回会话、交给冷验收都用这一份）：每条命令一节，限 SELF_CHECK_DIGEST_MAX 字。 */
 export function selfCheckText(result: SelfCheckResult): string {
   const parts = result.steps.map((s) => {
     const mark =
-      s.outcome === 'pass' ? '过了' : s.outcome === 'fail' ? `没过（退出码 ${s.exitCode}）` : '没跑';
+      s.outcome === 'pass'
+        ? '过了'
+        : s.outcome === 'fail'
+          ? s.exitCode === null
+            ? '没过（自测超时）'
+            : `没过（退出码 ${s.exitCode}）`
+          : '没跑';
     return `$ ${s.command}：${mark}\n${s.digest}`;
   });
   if (result.state === 'skipped' && parts.length === 0) parts.push(`没跑成：${result.reason}`);
@@ -94,12 +114,22 @@ export function selfCheckText(result: SelfCheckResult): string {
 /**
  * 单任务 token 预算超了停下时写给人的话（决定 0093）。tokens 是算进判断的合计（量到的 + 估的）；分不清的传 estimated: 0。
  * 估的那部分（被叫停的会话按量到的行推出来的下限）在人话里写明白是估的，别当成量到的。
+ * 给了 raw（活动算好的折算结果，#2830）就分开写：新输入多少、输出多少、缓存写多少、缓存读多少、折算后多少；老结果没有就照旧只写合计。
  */
 export function tokenBudgetStop(
   spent: { tokens: number; unmetered: number },
   budget: number,
   grants: number,
-  split: { measured: number; estimated: number } = { measured: spent.tokens, estimated: 0 },
+  split: {
+    measured: number;
+    estimated: number;
+    raw?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    };
+  } = { measured: spent.tokens, estimated: 0 },
 ): { title: string; detail: string } {
   const m = (n: number) => `${(n / 1_000_000).toFixed(1)}M`;
   const allowed = budget * grants;
@@ -108,10 +138,19 @@ export function tokenBudgetStop(
     split.estimated > 0
       ? `（其中 ${split.measured} 是量到的，另 ${split.estimated} 是拿这张单量到的行估出来的下限：被叫停的会话记不到用量）`
       : '';
+  const raw = split.raw;
+  const rawText = raw
+    ? `（原始四样：新输入 ${raw.inputTokens ?? 0}、输出 ${raw.outputTokens ?? 0}、缓存写 ${raw.cacheWriteTokens ?? 0}、缓存读 ${raw.cacheReadTokens ?? 0}）`
+    : '';
+  const spentText = raw
+    ? `动手和验收会话合计输入当量 ${split.measured}${rawText}${split.estimated > 0 ? `；加上估的下限，当量合计 ${spent.tokens}` : ''}${splitText}${unmetered}`
+    : `动手和验收会话合计花掉 ${spent.tokens} token${splitText}${unmetered}`;
   return {
-    title: `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
+    title: raw
+      ? `这张单花掉的额度超了预算（输入当量 ${m(spent.tokens)} / ${m(allowed)}）`
+      : `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
     detail:
-      `动手和验收会话合计花掉 ${spent.tokens} token${splitText}${unmetered}，超过 ${allowed}（单任务预算 ${budget}` +
+      `${spentText}，超过上限 ${allowed}（单任务预算 ${budget}` +
       `${grants > 1 ? ` × 已给 ${grants} 份` : ''}）。预算按近 14 天每张单花费的 p95 定（决定 0093）。` +
       '点「继续」再给一份同样多的接着干；不要了点「放弃」。',
   };
@@ -521,7 +560,7 @@ export function conflictFilesForHandoff(current: readonly string[], previous: re
 }
 
 /**
- * #1303 的根因。引擎开的 PR 正文只收这里交给 openPr 的 did，不收会话最后一句，也不收代码注释。
+ * #1303 的根因：开 PR 时引擎写进「做了什么」（taskPrDid 按单号加进去，跟在会话最后一条回复后面，#2723）。
  * 只写进这张单：别的单的正文保持原来两句，免得每张 PR 都带上这件事。
  */
 export const CONFLICT_HANDOFF_CAUSE = [
@@ -629,7 +668,7 @@ export function withDispatchProbeNote(feedback: readonly string[], line: string)
 }
 
 /**
- * #1406 的 PR 说明。正文只收 taskPrDid，会话最后一句和代码注释都进不去。
+ * #1406 的 PR 说明：开 PR 时引擎写进「做了什么」（taskPrDid 按单号加进去，跟在会话最后一条回复后面，#2723）。
  * 三条陈年提醒按合并事实写：reconcile:pr 是「发生过」、对账不撤，还开着就立案；
  * 同号若是 ledger，记账齐了由核对在立案前撤掉。
  */
@@ -641,7 +680,7 @@ export const ALERT_FILING_PR_NOTES = [
 ] as const;
 
 /**
- * #1733 的 PR 说明。正文只收 taskPrDid，会话最后一句和代码注释都进不去。
+ * #1733 的 PR 说明：开 PR 时引擎写进「做了什么」（taskPrDid 按单号加进去，跟在会话最后一条回复后面，#2723）。
  * 验收要写清：别的会话丢话选不列；四条新用例各自改前红、改后绿怎么验的。
  */
 export const FOUNDERS_INBOX_PR_NOTES = [
@@ -650,7 +689,7 @@ export const FOUNDERS_INBOX_PR_NOTES = [
 ] as const;
 
 /**
- * #1983 的 PR 说明。正文只收 taskPrDid，会话最后一句和代码注释都进不去。
+ * #1983 的 PR 说明：开 PR 时引擎写进「做了什么」（taskPrDid 按单号加进去，跟在会话最后一条回复后面，#2723）。
  * 写清等合并时检查转红断在哪，以及同一个「一直等」还在哪些路径上、各怎么处理。
  */
 export const MERGE_WAIT_RED_PR_NOTES = [
@@ -659,12 +698,178 @@ export const MERGE_WAIT_RED_PR_NOTES = [
   '同一根子旁的路径：检查还在跑（pending）或一条都没有，仍等，和红不是同一件事，检查一直 pending 这次不改。PR 被关了本来就停下报人。和主线冲突已经并主线或交回返工；草稿被标成 mergeable=false 也会进冲突那条，这次不改分类。自动合并被撤掉就重新挂，挂不上停下；重新挂上之后红检查走上面的新路径。头被别人改了就停下，人点继续后重走 CI 和验收，不是一直等。落后主线但 mergeable=true 仍等（GitHub 还能合）；mergeable=false 走冲突那条。读检查失败抛错重试，不装成还在等；没接上读检查也抛，不默认 pending。不强制 CI 的直接合并 mergeNow 故意不看检查，另一条路，这次不改。每小时对账不推卡在 waitMerged 里的任务：红了由这条工作流自己返工，不加第二套看守。',
 ] as const;
 
-/** 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，其余单子仍是原来两句。 */
-export function taskPrDid(issueNumber: number, round: number, fileCount: number): string[] {
+/** PR 说明里放会话回复最多多少字（#2723）：超了截断并写明后面还有多少。 */
+export const PR_DID_ANSWER_MAX = 2000;
+/** 会话回复最多占「做了什么」几条：PR 正文整篇 14 行以内（github 包的 PR_BODY_MAX_LINES），多出的行并进最后一条。 */
+export const PR_DID_ANSWER_LINES = 7;
+
+/**
+ * 动手会话最后一条回复 → PR 说明「做了什么」里的几条（#2723：会话自己改不了 PR 正文，提示词叫它把做了什么写在最后一条回复里）。
+ * 按行拆、去掉列表记号和空行；超长截断；多出 PR_DID_ANSWER_LINES 的行并进最后一条，不丢。没有回复是空的。
+ */
+export function sessionDidLines(answer: string | null | undefined): string[] {
+  const text = (answer ?? '').trim();
+  if (!text) return [];
+  const clipped =
+    text.length <= PR_DID_ANSWER_MAX
+      ? text
+      : `${text.slice(0, PR_DID_ANSWER_MAX)}……（会话的回复后面还有 ${text.length - PR_DID_ANSWER_MAX} 个字，已截断）`;
+  const lines = clipped
+    .split('\n')
+    .map((line) => line.replace(/^\s*(?:[-*+]|\d+[.、)])\s+/, '').trim())
+    .filter(Boolean);
+  if (lines.length <= PR_DID_ANSWER_LINES) return lines;
+  return [...lines.slice(0, PR_DID_ANSWER_LINES - 1), lines.slice(PR_DID_ANSWER_LINES - 1).join('；')];
+}
+
+/**
+ * 引擎开 PR 的「做了什么」。#1303 多写根因，#1406 多写三条陈年提醒的处置，#1733 多写取舍和验法，#1983 多写等合并检查转红的断点和旁路，其余单子仍是原来两句。
+ * 给了动手会话最后一条回复（#2723）就跟在后面（sessionDidLines）。
+ */
+export function taskPrDid(
+  issueNumber: number,
+  round: number,
+  fileCount: number,
+  answer?: string | null,
+): string[] {
   const did = [`按 #${issueNumber} 的要求动手（第 ${round} 轮）`, `改了 ${fileCount} 个文件`];
+  did.push(...sessionDidLines(answer));
   if (issueNumber === 1303) did.push(CONFLICT_HANDOFF_CAUSE);
   if (issueNumber === 1406) did.push(...ALERT_FILING_PR_NOTES);
   if (issueNumber === 1733) did.push(...FOUNDERS_INBOX_PR_NOTES);
   if (issueNumber === 1983) did.push(...MERGE_WAIT_RED_PR_NOTES);
   return did;
+}
+
+/** 等合并时必过检查红了交回的意见、lastProblem 的开头（和 @fleet-dao/shared/checks-red 同一个字面）。 */
+const CHECKS_RED_LEAD = '检查红了：';
+
+/**
+ * 这一轮怎么收场的（#2762，记进 task_rounds 给每日简报「流程健康」算）：按返工那一刻写下的 lastProblem 认。
+ * implement＝动手那一段就返工了（没提交、树里有剩、推分支并主线冲突……）；deliver＝推上去以后返工（CI 红、验收没过、等合并冲突）。
+ * 认不出的记 other，不硬塞进某一类。
+ */
+export function roundOutcomeOf(
+  stage: 'implement' | 'deliver',
+  lastProblem: string | null,
+  feedback: readonly string[],
+): RoundOutcome {
+  const p = lastProblem ?? '';
+  if (p.startsWith(CHECKS_RED_LEAD) || feedback.some((line) => line.startsWith(CHECKS_RED_LEAD)))
+    return 'ci_red';
+  if (p === 'CI 红了') return 'ci_red';
+  if (p === '验收没过') return 'verify_rejected';
+  if (p === '和主线有冲突') return stage === 'implement' ? 'push_conflict' : 'merge_conflict';
+  if (p === '会话跑完没有提交' || p === '推的时候没有新提交') return 'no_commit';
+  if (p === '会话跑完工作树里还有没提交的改动') return 'leftover';
+  return 'other';
+}
+
+/** 放弃、叫停时这一轮怎么算：停下的原因是超时（会话总时长到顶、没在时限里跑完）记 timeout，其余记 stopped。 */
+export function stoppedOutcomeOf(lastProblem: string | null): RoundOutcome {
+  return /超时|时限|总时长|timeout/i.test(lastProblem ?? '') ? 'timeout' : 'stopped';
+}
+
+/** 重活先出的方案（#2755）：改哪些文件、预计新增几行、对应哪几条验收。 */
+export interface TaskPlan {
+  files: string[];
+  addedLines: number;
+  acceptance: (number | string)[];
+}
+
+/**
+ * 认方案 JSON（#2755）：取最后一个 ```json 代码块，没有就取第一个 { 到最后一个 } 之间。
+ * files 非空的字符串数组、addedLines 非负整数、acceptance 非空的数字或字符串数组，缺一样就认不出（why 写明哪一样）。
+ */
+export function parsePlan(answer: string | null): { ok: true; plan: TaskPlan } | { ok: false; why: string } {
+  const text = (answer ?? '').trim();
+  if (!text) return { ok: false, why: '最后一条回复是空的' };
+  const blocks = [...text.matchAll(/```(?:json)?[ \t]*\n([\s\S]*?)```/g)].map((m) => m[1] ?? '');
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  const raw = blocks.at(-1) ?? (start >= 0 && end > start ? text.slice(start, end + 1) : '');
+  if (!raw.trim()) return { ok: false, why: '没找到 JSON' };
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return { ok: false, why: 'JSON 解析不了' };
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return { ok: false, why: '不是一个 JSON 对象' };
+  const v = value as Record<string, unknown>;
+  const files = v.files;
+  if (!Array.isArray(files) || files.length === 0 || !files.every((f) => typeof f === 'string' && f.trim())) {
+    return { ok: false, why: 'files 要是非空的文件路径数组' };
+  }
+  const added = v.addedLines;
+  if (typeof added !== 'number' || !Number.isInteger(added) || added < 0) {
+    return { ok: false, why: 'addedLines 要是非负整数' };
+  }
+  const acceptance = v.acceptance;
+  if (
+    !Array.isArray(acceptance) ||
+    acceptance.length === 0 ||
+    !acceptance.every(
+      (a) => (typeof a === 'number' && Number.isFinite(a)) || (typeof a === 'string' && a.trim()),
+    )
+  ) {
+    return { ok: false, why: 'acceptance 要是非空的验收条编号数组' };
+  }
+  return {
+    ok: true,
+    plan: {
+      files: (files as string[]).map((f) => f.trim()),
+      addedLines: added,
+      acceptance: acceptance as (number | string)[],
+    },
+  };
+}
+
+/** 方案格式不对、续进会话重出一次的那句（#2755）。 */
+export function planRetryLine(why: string): string {
+  return `上一条回复不是要的方案 JSON（${why}）。这一段还是只读、不改文件：最后一条回复只回一个 JSON 代码块，含 files、addedLines、acceptance 三项。`;
+}
+
+/** 方案认下了，续进会话让它照方案动手的那句（#2755）。 */
+export function planGoLine(plan: TaskPlan, budget: number): string {
+  const files =
+    plan.files.slice(0, 30).join('、') + (plan.files.length > 30 ? ` 等 ${plan.files.length} 个` : '');
+  const cap = budget > 0 ? `体量预算是新增 ${budget} 行（含测试），超了会被打回收窄。` : '';
+  return `方案认下了：改 ${files}，预计新增 ${plan.addedLines} 行，对应验收第 ${plan.acceptance.join('、')} 条。现在照这个方案动手：只改方案里的文件，方案外的不碰。${cap}`;
+}
+
+/** 拆单建议（#2755 体量预算第二次超）：按 packages/<包>/ 或顶层目录分组，多的在前，最多列 8 组。 */
+export function splitSuggestion(files: readonly string[]): string {
+  const groups = new Map<string, number>();
+  for (const f of files) {
+    const m = /^packages\/([^/]+)\//.exec(f);
+    const key = m ? `packages/${m[1]}` : (f.split('/')[0] ?? f);
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  const ranked = [...groups.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+  if (ranked.length <= 1) {
+    return `改动都在 ${ranked[0]?.[0] ?? '同一处'}：按验收条拆，一条或几条验收一张单，每张单各自能合进主线。`;
+  }
+  const shown = ranked.slice(0, 8).map(([k, n]) => `${k}（${n} 个文件）`);
+  const more = ranked.length > 8 ? `，另 ${ranked.length - 8} 处` : '';
+  return `按改动面拆，一处一张单、各自带验收条，能先合的先合：${shown.join('、')}${more}。`;
+}
+
+/** 超体量预算第一次打回的意见（#2755）。 */
+export function overBudgetLine(
+  added: number,
+  budget: number,
+  plan: TaskPlan | null,
+  files: readonly string[],
+): string {
+  const planned = plan
+    ? `方案估的是 ${plan.addedLines} 行、${plan.files.length} 个文件；方案外改了：${
+        files
+          .filter((f) => !plan.files.includes(f))
+          .slice(0, 10)
+          .join('、') || '（没有）'
+      }。`
+    : '';
+  return `这一轮相对主线新增 ${added} 行，超过体量预算 ${budget} 行。${planned}收窄到预算以内：只留做到验收条必须的改动，删掉顺手的重构、范围外的文件和重复的测试，改完提交。再超就停下等人拆单。`;
 }

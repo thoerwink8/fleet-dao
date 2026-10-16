@@ -26,25 +26,31 @@ export { buildGrokArgs, type GrokArgsSpec, type GrokSession, grokModelMatches } 
 export { type GrokRunReport, type GrokRunSpec, grokRunFacts, grokRunSummary, runGrok } from './grok/run.ts';
 export { type GrokEnd, GrokStreamReader, type GrokStreamSummary, type GrokUsage } from './grok/stream.ts';
 export {
+  BRIDGE_CONNECT_TIMEOUT_TEXT,
   type BridgeConnectorOptions,
   type BridgeMirasimEndpoint,
   bridgeMirasimConnector,
 } from './mirasim/bridge-connect.ts';
 export {
+  LEDGERLESS_AGENTS,
   type LedgerFs,
   type LedgerReading,
   type LedgerRouting,
   type LedgerRow,
+  ledgerlessDetail,
   ledgerRouting,
   readMirasimLedger,
 } from './mirasim/ledger.ts';
 export {
+  METER_NO_CALLS_DETAIL,
+  METER_TAIL_GRACE_MS,
   type MeterFs,
   type MeterReading,
   type MeterUsage,
   type MeterWindow,
   meterReadingFrom,
   meterSessionUuid,
+  meterWindowUntil,
   nodeMeterFs,
   readMirasimMeter,
 } from './mirasim/meter.ts';

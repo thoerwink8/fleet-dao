@@ -3,7 +3,16 @@ import { describe, expect, test } from 'vitest';
 import type { LocalSessions, Notification } from '../../api/types';
 import { formatClock } from '../../lib/format';
 import { statusTextOf } from './running-card';
-import { askItems, askLine, engineRow, localRows, prOfTitle, shippedRows, sortRunRows } from './today';
+import {
+  askItems,
+  askLine,
+  engineRow,
+  localRows,
+  prOfTitle,
+  shippedRows,
+  sortRunRows,
+  watchdogRepair,
+} from './today';
 import type { HomeDone, HomeRunning } from './types';
 
 const T0 = Date.parse('2026-10-14T12:00:00Z');
@@ -50,6 +59,70 @@ describe('要你拍的', () => {
     });
     expect(askLine(n)).toEqual({ question: '对外发布到生产。', pick: '发布', why: 'CI 全绿' });
     expect(askLine(note({ body: '' }))).toEqual({ question: '标题', pick: null, why: null });
+  });
+
+  test('看门狗：有人在修写引擎或指挥官会话、修了多久、开了多久；还没人接只写开了多久', () => {
+    const engine = watchdogRepair(
+      note({
+        level: 'alert',
+        dedupeKey: 'watchdog:merge:acme/orbit:after-1',
+        createdAt: ago(20),
+        handling: {
+          stage: 'pr_open',
+          stageText: 'PR 开着',
+          since: ago(12),
+          who: '法国引擎',
+          line: '法国引擎在修',
+          problems: [],
+        },
+      }),
+      T0,
+    );
+    expect(engine).toMatchObject({
+      state: 'fixing',
+      who: '法国引擎',
+      text: '法国引擎在修 · 修了 12 分钟 · 开了 20 分钟',
+    });
+    const commander = watchdogRepair(
+      note({
+        level: 'alert',
+        dedupeKey: 'watchdog:job:backup',
+        createdAt: ago(8),
+        handling: {
+          stage: 'pr_open',
+          stageText: 'PR 开着',
+          since: ago(3),
+          who: '指挥官会话',
+          line: '指挥官会话在修',
+          problems: [],
+        },
+      }),
+      T0,
+    );
+    expect(commander.text).toBe('指挥官会话在修 · 修了 3 分钟 · 开了 8 分钟');
+    const waiting = watchdogRepair(
+      note({
+        level: 'alert',
+        dedupeKey: 'watchdog:merge:acme/orbit:after-2',
+        createdAt: ago(15),
+        handling: {
+          stage: 'unclaimed',
+          stageText: '没人在修',
+          since: ago(15),
+          line: '没人在修 · 15 分钟',
+          problems: [],
+        },
+      }),
+      T0,
+    );
+    expect(waiting).toMatchObject({ state: 'waiting', who: null, text: '还没人接 · 开了 15 分钟' });
+  });
+
+  test('谁在修没查成：不写成还没人接，开了多久照样写', () => {
+    const missed = watchdogRepair(note({ createdAt: ago(5) }), T0, '谁在处理没查成：statement timeout');
+    expect(missed.state).toBe('unknown');
+    expect(missed.text).toBe('谁在处理没查成：statement timeout · 开了 5 分钟');
+    expect(missed.text).not.toContain('还没人接');
   });
 });
 

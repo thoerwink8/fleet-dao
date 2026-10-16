@@ -1256,7 +1256,8 @@ export function createSeed(now: number): MockState {
       deliveries: delivered(-46),
     },
     {
-      // 看门狗报的卡（决定 0093：主线 N 小时没合 PR）：进主页「要你拍的」，没有选项，给「处理」和「看看」。键和正文照引擎真写的格式
+      // 看门狗报的卡（决定 0093：主线 N 小时没合 PR）：进主页「要你拍的」，没有选项、没有「处理」。
+      // 还没人接：首页写「还没人接 · 开了多久」，只留「看看」。键和正文照引擎真写的格式
       id: 'n-10',
       level: 'alert',
       title: 'acme/orbit 主线 4 小时 12 分没合 PR',
@@ -1264,6 +1265,13 @@ export function createSeed(now: number): MockState {
       link: '/tasks',
       dedupeKey: 'watchdog:merge:acme/orbit:after-1745',
       createdAt: at(-15),
+      handling: {
+        stage: 'unclaimed',
+        stageText: '没人在修',
+        since: at(-15),
+        line: '没人在修 · 15 分钟',
+        problems: [],
+      },
       deliveries: delivered(-15),
     },
     {
@@ -1544,6 +1552,7 @@ export function createSeed(now: number): MockState {
     },
     { key: 'judge.dailyCallLimit', value: null, version: 0 },
     { key: 'engine.soloPaused', value: null, version: 0 },
+    { key: 'engine.flowMode', value: null, version: 0 },
     {
       key: 'engine.quotaReserve',
       value: {},

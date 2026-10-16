@@ -7,6 +7,8 @@
 //   这张单一律贴「本机做」（--local 加了不报错，也不多贴一次）：随 PR 开出的单已经有人在做，不靠人记得加 --local（#1199）。
 // - 改标准：--founder-quote "<原话>" --at "<时间>" 在「需求」栏下面另起一行写「人闸：改标准」、再写一段「创始人原话」，并等价于
 //   --founder-approved（旧的 --founder-approved 加手写段落照旧能用）。
+// - 写码模型：分支上各提交带 Co-Authored-By: Claude … 尾注时，正文末尾写一行「**写码模型**：claude-haiku-5-5」（pnpm subagent:stats 靠它认 Haiku 开的 PR，#2821）；
+//   没有尾注不写；读不到尾注照开 PR、提示一句。
 // 给了 --body-file 就一字不动交给 prOpen（原有用法照旧）；生成用的参数和 --body-file 不能混着用，只有 --founder-quote 加 --at 例外：
 // 它们把「人闸：改标准」和「创始人原话」追加到自己写的正文末尾。
 // 退出码同 prOpen：0 开成了；1 用法不对、没单或单有问题（什么也没做，--new-issue 的单在 PR 之前开，PR 没开不回滚单，照报）；
@@ -15,11 +17,11 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { DIRECTIVES_DIR, PENDING, parseDirective } from './directives.ts';
 import { type Gh as IssueGh, issueNew } from './issue-new.ts';
 import { type Gh, loadPathLists } from './pr-arm.ts';
 import { founderQuoteLine, GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
 import { branchIssue, type OpenDeps, PR_OPEN_USAGE, prOpen } from './pr-open.ts';
+import { writerLine, writerModelsFromTrailers } from './subagent-stats.ts';
 
 export interface CliDeps extends OpenDeps {
   /** 跑 git（在敲命令的目录里）：读分支上的提交说明。 */
@@ -43,8 +45,8 @@ export interface BodyParts {
   founder?: { quote: string; at: string } | undefined;
   /** --new-issue：需求栏写明这张单已贴本机做、引擎不拉。 */
   withNewIssue?: boolean;
-  /** --directive：本 PR 里标了办完的创始人引导编号（正文写「引导 <编号>」） */
-  directives?: readonly string[];
+  /** 分支上各提交 Co-Authored-By 尾注里的写码模型（完整 id）：有就在正文末尾写一行「**写码模型**：…」，pnpm subagent:stats 靠它认 Haiku 开的 PR。 */
+  writers?: readonly string[];
 }
 
 /** 拼正文：栏的写法和 .github/pull_request_template.md 一样（测试里对着模板查）。 */
@@ -65,9 +67,6 @@ export function composeBody(p: BodyParts): string {
   ];
   const lines = [
     `**做了什么**：${p.did.length === 1 ? did : `\n${did}`}`,
-    ...(p.directives?.length
-      ? ['', `${p.directives.map((id) => `引导 ${id}`).join('、')}：本 PR 里标了办完，合进主线就算办完。`]
-      : []),
     '',
     `**${ISSUE_COLUMN}**：`,
     ...need,
@@ -75,6 +74,8 @@ export function composeBody(p: BodyParts): string {
   if (p.founder) {
     lines.push('', founderQuoteLine(p.founder.quote, p.founder.at));
   }
+  const writer = writerLine(p.writers ?? []);
+  if (writer) lines.push('', writer);
   return `${lines.join('\n')}\n`;
 }
 
@@ -109,21 +110,6 @@ const issueNumber = (s: string): number | undefined => {
   return m?.[1] ? Number(m[1]) : undefined;
 };
 
-/** 这条分支（HEAD）上的引导 id 是不是已办完（已处理或作废） */
-function directiveStatus(git: Gh, id: string): 'done' | 'pending' | 'missing' {
-  const tree = git(['ls-tree', '-r', '--name-only', 'HEAD', '--', `${DIRECTIVES_DIR}/`]);
-  const path =
-    tree.code === 0 ? tree.stdout.split('\n').find((l) => l.trim().endsWith(`/${id}.md`)) : undefined;
-  if (!path) return 'missing';
-  const shown = git(['show', `HEAD:${path.trim()}`]);
-  if (shown.code !== 0) return 'missing';
-  try {
-    return parseDirective(shown.stdout, path).status === PENDING ? 'pending' : 'done';
-  } catch {
-    return 'missing';
-  }
-}
-
 export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> {
   const { out, err } = deps;
   let values: Record<string, string | boolean | string[] | undefined>;
@@ -144,7 +130,6 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         kind: { type: 'string' },
         milestone: { type: 'string' },
         local: { type: 'boolean' },
-        directive: { type: 'string', multiple: true },
         'founder-quote': { type: 'string' },
         at: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
@@ -173,11 +158,10 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
       values['new-issue'] !== undefined ||
       values.kind !== undefined ||
       values.milestone !== undefined ||
-      values.local !== undefined ||
-      values.directive !== undefined;
+      values.local !== undefined;
     if (generatingBody) {
       err(
-        '--closes / --refs / --new-issue / --kind / --milestone / --local / --directive 是让命令生成正文用的，' +
+        '--closes / --refs / --new-issue / --kind / --milestone / --local 是让命令生成正文用的，' +
           '不能和 --body-file 一起用：要么去掉 --body-file 让它生成，要么把这些写进你自己的正文。什么也没做。',
       );
       return 1;
@@ -325,14 +309,15 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
     return 2;
   }
 
-  // --directive：引导要在这条分支上已标办完（pnpm progress done <编号> 改的文件随活一起提交），合进主线才算办完
-  const directiveIds = strs(values.directive).map((s) => s.trim());
-  const notDone = directiveIds.find((id) => directiveStatus(deps.git, id) !== 'done');
-  if (notDone !== undefined) {
+  // 写码模型：各提交的 Co-Authored-By: Claude … 尾注。读不到不拦开 PR（pnpm subagent:stats 还会认提交尾注），只提示一句
+  let writers: string[] = [];
+  const full = deps.git(['log', '--no-merges', '--format=%B%x1e', `origin/${base}..HEAD`]);
+  if (full.code === 0) writers = writerModelsFromTrailers(full.stdout);
+  else {
     err(
-      `--directive ${notDone}：这条分支上的这条引导不是已办完（或没有这个文件）。先在这棵工作树里 pnpm progress done ${notDone} --note "<做成了什么>"，提交推送后再开。什么也没做。`,
+      `没读到提交尾注（git log 退出码 ${full.code}：${(full.stderr.trim() || '（没说）').replace(/\s+/g, ' ').slice(0, 120)}），正文里没写「写码模型」；` +
+        'pnpm subagent:stats 还会认提交里的 Co-Authored-By 尾注。',
     );
-    return 1;
   }
 
   const dir = mkdtempSync(join(tmpdir(), 'pr-open-gen-'));
@@ -382,7 +367,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         refs: refs.filter((n): n is number => n !== undefined),
         founder: quote && at ? { quote, at } : undefined,
         withNewIssue: newIssue !== undefined,
-        directives: directiveIds,
+        writers,
       }),
     );
     return prOpen(

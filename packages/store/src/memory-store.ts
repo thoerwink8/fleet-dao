@@ -7,6 +7,8 @@ import {
   type Channel,
   type ChannelStateRecord,
   ciPolicyOf,
+  type FlowAssignment,
+  FlowAssignmentExistsError,
   type Model,
   type Pool,
   type RealtimeTable,
@@ -72,6 +74,7 @@ import type {
   PageRequest,
   PasswordCredentials,
   PullRequestRecord,
+  QuotaSampleRecord,
   QuotaWindowRecord,
   RunPlan,
   SegmentRunRecord,
@@ -158,6 +161,8 @@ export interface MemoryData {
   users: MemoryUser[];
   repos: RepoRecord[];
   tasks: Task[];
+  /** 全程模式的分组记录（task_flow_assignments，#2823），每张单最多一行。 */
+  flowAssignments: FlowAssignment[];
   subtasks: Subtask[];
   /**
    * 占着池名额的在途会话（库里 runs 表里带路由、没结束的行；stage 是这一段按 SEGMENT_STAGE 换的用途）：内存版的 poolOccupancy
@@ -176,6 +181,8 @@ export interface MemoryData {
   bans: Ban[];
   /** 按（池, 原名 label）一行，和库的主键一样。 */
   quotaWindows: QuotaWindowRecord[];
+  /** 额度窗历史（quota_window_samples），按（池, 原名, 读数时刻）一行。 */
+  quotaSamples: QuotaSampleRecord[];
   jobs: JobRegistration[];
   scheduleRuns: ScheduleRunRecord[];
   notifications: NotificationRecord[];
@@ -203,6 +210,7 @@ export function emptyData(): MemoryData {
     users: [],
     repos: [],
     tasks: [],
+    flowAssignments: [],
     subtasks: [],
     runs: [],
     segmentRuns: [],
@@ -214,6 +222,7 @@ export function emptyData(): MemoryData {
     routes: [],
     bans: [],
     quotaWindows: [],
+    quotaSamples: [],
     jobs: [],
     scheduleRuns: [],
     notifications: [],
@@ -439,6 +448,28 @@ export function createMemoryStore(
     async getTask(id) {
       return data.tasks.find((t) => t.id === id) ?? null;
     },
+    async writeFlowAssignmentOnce(input) {
+      if (!data.tasks.some((t) => t.id === input.taskId)) throw new Error(`没有这张单：${input.taskId}`);
+      if (data.flowAssignments.some((a) => a.taskId === input.taskId))
+        throw new FlowAssignmentExistsError(input.taskId);
+      const row: FlowAssignment = {
+        taskId: input.taskId,
+        mode: input.mode,
+        source: input.source,
+        stratum: input.stratum,
+        assignedAt: now().toISOString(),
+        reason: input.reason ?? null,
+      };
+      data.flowAssignments.push(row);
+      // 和库里一样：分组记录和 tasks.flow_mode 一起写（#2826）
+      const task = data.tasks.find((t) => t.id === input.taskId);
+      if (task) task.flowMode = input.mode;
+      return { ...row };
+    },
+    async getFlowAssignment(taskId) {
+      const found = data.flowAssignments.find((a) => a.taskId === taskId);
+      return found ? { ...found } : null;
+    },
     async listTasks({ group, repoId, q, cursor: raw, limit }) {
       const matching = data.tasks.filter(
         (t) => (repoId === undefined || t.repoId === repoId) && matchesTaskSearch(t, q),
@@ -566,6 +597,18 @@ export function createMemoryStore(
       return [...data.quotaWindows].sort(
         (a, b) => a.poolId.localeCompare(b.poolId) || a.label.localeCompare(b.label),
       );
+    },
+    async listQuotaSamples(since) {
+      const from = since.getTime();
+      return (data.quotaSamples ?? [])
+        .filter((s) => Date.parse(s.readAt) >= from)
+        .map((s) => ({ ...s }))
+        .sort(
+          (a, b) =>
+            a.poolId.localeCompare(b.poolId) ||
+            a.label.localeCompare(b.label) ||
+            Date.parse(a.readAt) - Date.parse(b.readAt),
+        );
     },
     async setChannelEnabled({ channelId, enabled }, entry) {
       const channel = data.channels.find((ch) => ch.id === channelId);

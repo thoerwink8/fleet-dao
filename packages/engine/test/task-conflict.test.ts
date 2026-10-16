@@ -119,9 +119,11 @@ describe('冲突交回会话（#1303）', { timeout: 60_000 }, () => {
     expect(feedback).toContain(RESOLVE);
     expect(feedback).not.toContain('上一轮没解');
     expect(calls.segment[0]?.feedback.join('\n') ?? '').not.toContain(RESOLVE);
+    // 第三条是这一轮会话的最后一条回复（脚本里的「已提交」，#2723）
     expect(world.callsOf('openPr')[0]?.input.body.did).toEqual([
       '按 #12 的要求动手（第 2 轮）',
       '改了 1 个文件',
+      '已提交',
     ]);
   });
 

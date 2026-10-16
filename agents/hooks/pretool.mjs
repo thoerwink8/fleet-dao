@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { judgeCapacity, readCapacity } from './capacity.mjs';
 import {
   freshBeforeSubagent,
   SUBAGENT_BUDGET_MS,
@@ -19,6 +20,8 @@ import {
 } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy, readFallbackProxy } from './git-run.mjs';
 import { hookTimer } from './hook-timing.mjs';
+import { shellEditVerdict } from './shell-edit.mjs';
+import { haikuVerdict, recordHaikuDispatch } from './subagent-ledger.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -2239,6 +2242,41 @@ export function longForeground(toolInput) {
   return typeof t === 'number' && t > FOREGROUND_MAX_MS && prop(toolInput, 'run_in_background') !== true;
 }
 
+// —— 主线程不手写轮询（单 #2730）——
+// 旧会话 709bd85a 主线程挂了 46 个「for/while … sleep」后台盯梢，44 个带 2>/dev/null；最后一个 jq 把 \( 当插值报错、错误进了
+// /dev/null，循环空跑 90 分钟，会话停在它上面。技能里写「出错就退」挡不住（#2711），这里在钩子上拦：
+// Claude Code 主线程（输入不带 agent_id）的后台命令（Bash、PowerShell 带 run_in_background 或会被改成后台跑的，Monitor 一律算）里
+// 同时出现循环（while、until、for、foreach、do）和 sleep（sleep、Start-Sleep），拦下，指向 wait.mjs。
+// 子代理照放：它前台等 CI 用 gh --watch，后台命令叫醒的是它自己。别家（Codex、Gemini、Kimi、Grok、Devin）没有这套后台命令，不管。
+
+const POLL_LOOP_RE = /(?<![\w$.-])(?:while|until|for|foreach|do)(?![\w-])/i;
+const POLL_SLEEP_RE = /(?<![\w$.-])(?:sleep|start-sleep)(?![\w-])/i;
+export const POLL_LOOP_WHY =
+  'fleet-guard：主线程不手写「循环 + sleep」轮询（单 #2730：手写轮询出错被 2>/dev/null 吞掉，空跑了 90 分钟）。' +
+  '等 PR、主线 CI、单到终态用 node ~/.claude/skills/commander/scripts/wait.mjs pr <号> | main-ci | issue <号>（run_in_background，到终态才写一行，gh 出错当场退出）；' +
+  '等一条本机命令就直接后台跑它本身，完成通知会叫醒你；法国的单不盯，只看巡检的 ALERT；本机工人用完成通知，不另起监视器。';
+
+/**
+ * 主线程的后台命令是不是「循环 + sleep」的手写轮询；是就拦。
+ * @param {Record<string, unknown>} input
+ * @param {unknown} tool
+ * @returns {Block | null}
+ */
+export function pollLoopVerdict(input, tool) {
+  if (!isClaudeCodeInput(input)) return null;
+  if (typeof input.agent_id === 'string' && input.agent_id.trim() !== '') return null;
+  const toolInput = prop(input, 'tool_input');
+  const command = prop(toolInput, 'command');
+  if (typeof command !== 'string') return null;
+  const background =
+    tool === 'Monitor' ||
+    ((tool === 'Bash' || tool === 'PowerShell') &&
+      (prop(toolInput, 'run_in_background') === true || longForeground(toolInput)));
+  if (!background) return null;
+  if (!POLL_LOOP_RE.test(command) || !POLL_SLEEP_RE.test(command)) return null;
+  return block(POLL_LOOP_WHY);
+}
+
 /** 判一条钩子输入（原文）：{ code: 0 } 放行，{ code: 2, message } 拦下。 */
 
 /**
@@ -2394,6 +2432,9 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
   /** @type {Record<string, unknown>} */
   const input = isObjectLike(parsed) ? parsed : {};
   const tool = input.tool_name ?? input.toolName;
+  // 主线程的后台命令不手写「循环 + sleep」（Monitor 也算，所以放在下面只放行那几样工具之前）
+  const poll = pollLoopVerdict(input, tool);
+  if (poll) return poll;
   // 只为放行才登记的工具：这里不判
   if (typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool)))
     return { code: 0 };
@@ -2434,6 +2475,11 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
     return block(
       "这条 bash 命令里有会被当成命令执行的反引号（在双引号里、没加引号、或 <<EOF 不带引号的 heredoc 里）：bash 会先把反引号里的内容当命令跑掉。Markdown 的 `代码` 写法放进单引号里、用 <<'EOF' 的 heredoc，或者先用 Write 写进文件再用 --body-file / -F / 读文件；真要取命令输出用 $(…)。",
     );
+  }
+  // 改仓里的文件只用 Edit/Write（单 #2844）：Bash 里 sed -i、node -e / python 写文件、> >> tee 写进仓里的，当场拦；只管 Bash 工具，认不清的放行
+  if (tool === 'Bash') {
+    const edit = shellEditVerdict(cmd, rawCwd);
+    if (edit) return edit;
   }
   // -R/--repo 指到 fleet-dao 以外的仓（比如巡检仓 fleet-dao-canary 的验收单）不归 issue:new 管，放行
   const repoFlag = /(?:^|\s)(?:-R|--repo)[\s=]+['"]?([^\s'"]+)/.exec(cmd)?.[1];
@@ -2621,6 +2667,53 @@ export function agentModelVerdict(raw) {
   );
 }
 
+/**
+ * Haiku 改代码的护栏（单 #2821）：「general-purpose 加 model haiku」的派工，本机策略收回了、或这张单已经派过一次 Haiku 就拦下，
+ * 提示改派 Sonnet。只读 ~/.fleet-dao/ 下两个本机文件、不联网（判法见 subagent-ledger.mjs，规矩见 agents/subagents/README.md「护栏」）。
+ * @param {string} raw 钩子的原始输入
+ * @param {{ home?: string }} [deps] 测试换掉状态目录
+ * @returns {Block | null}
+ */
+export function haikuGuardVerdict(raw, deps) {
+  return haikuVerdict(raw, deps);
+}
+
+// —— 派写码工人前判本机容量（单 #2731，决定 0094）——
+// 以前「能不能派」只是一段文字，自动记忆里「最多 4 个」的旧说法在 0094 之后还被注入、照着写进了报告。现在由代码判：
+// Claude Code 的 Agent 调用，subagent_type 不是只读的那几种（斥候、设计、问 CLI 的、配状态栏的），就读一次本机的空闲内存和负载
+// （capacity.mjs），空闲内存 < 4G 或 1 分钟负载 > 核数×0.8 拦下并附读数；读不到也拦（明说没查成，不当成够）。
+// 不数在跑几个工人：不设个数上限。别家没有 Agent 工具，不管。
+
+/** 只读的子代理：不改文件、不起重测试，不判容量 */
+export const READ_ONLY_AGENTS = new Set(['Explore', 'Plan', 'claude-code-guide', 'statusline-setup']);
+
+/**
+ * 派写码工人前本机容量够不够；不够、没查成都拦（附读数或原因），够、不是写码工人、认不出输入都返回 null。
+ * @param {string} raw 钩子的原始输入
+ * @param {{ read?: () => import('./capacity.mjs').Reading }} [deps] 测试换掉读数
+ * @returns {Block | null}
+ */
+export function capacityVerdict(raw, { read = readCapacity } = {}) {
+  /** @type {unknown} */
+  let input;
+  try {
+    input = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw);
+  } catch {
+    return null;
+  }
+  if (!isObjectLike(input) || !isClaudeCodeInput(input)) return null;
+  if (input.tool_name !== 'Agent' && input.tool_name !== 'Task') return null;
+  const type = prop(input.tool_input, 'subagent_type');
+  if (typeof type === 'string' && READ_ONLY_AGENTS.has(type)) return null;
+  const v = judgeCapacity(read());
+  if (v.enough === true) return null;
+  const tail =
+    v.enough === null
+      ? '读不到就不当成够：先查清读数为什么读不到，或先派只读的斥候（Explore）、设计（Plan）。'
+      : '先等一个在跑的工人收口、错开重测试再派；只读的斥候（Explore）、设计（Plan）不判容量。不设个数上限（决定 0094）。';
+  return block(`fleet-guard：派写码工人前判本机容量——${v.text}。${tail}`);
+}
+
 function isMain() {
   const entry = process.argv[1];
   if (!entry) return false;
@@ -2658,6 +2751,23 @@ if (isMain()) {
     process.stderr.write(`${fableBlock.message}\n`);
     finish(fableBlock.code);
   }
+  // Haiku 改代码的护栏（单 #2821）：收回了、同一张单第二次派 Haiku 就拦；只读本机文件
+  const haikuBlock = haikuGuardVerdict(raw);
+  if (haikuBlock) {
+    process.stderr.write(`${haikuBlock.message}\n`);
+    finish(haikuBlock.code);
+  }
+  // 派写码工人前判本机容量（单 #2731）：同样要在 backgroundOnly 早退之前
+  const capBlock = capacityVerdict(raw);
+  if (capBlock) {
+    process.stderr.write(`${capBlock.message}\n`);
+    finish(capBlock.code);
+  }
+  // 两道闸都放行了才记账本：被容量拦下的派工没起，不算派过
+  const ledgerRow = recordHaikuDispatch(raw);
+  if (!ledgerRow.recorded && ledgerRow.issue !== undefined) {
+    process.stderr.write(`fleet-guard：Haiku 派工没记进账本：${ledgerRow.why}\n`);
+  }
   let backgroundOnly = false;
   try {
     /** @type {unknown} */
@@ -2666,8 +2776,11 @@ if (isMain()) {
     // 不再给无人值守记「调了工具」：Stop 钩子改看输入里的 background_tasks。
     const tool = prop(input, 'tool_name') ?? prop(input, 'toolName');
     if (typeof tool === 'string') timedTool = tool;
+    // Monitor 要过 decide：主线程挂「循环 + sleep」的监视器由 pollLoopVerdict 拦（单 #2730），别的照样放行
     backgroundOnly =
-      typeof tool === 'string' && (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
+      typeof tool === 'string' &&
+      tool !== 'Monitor' &&
+      (BACKGROUND_ONLY_TOOLS.has(tool) || DELIVERY_TOOLS.has(tool));
   } catch {
     // 输入认不出由下面的 decide 按拦处理
   }

@@ -24,6 +24,7 @@ import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
 import { PoolHoldBanner, PoolSwitch, PoolSwitchForm, PoolSwitchProvider } from '../components/pool-switch';
 import { ExpiredQuotaLine, isExpiredWindow, QuotaLine, quotaValue, readingVerb } from '../components/quota';
 import { QuotaNotice } from '../components/quota-notice';
+import { QuotaPressure } from '../components/quota-pressure';
 import { Popover, PopoverContent, PopoverTrigger } from '../components/ui/popover';
 import {
   billingLabel,
@@ -416,6 +417,11 @@ export default function Quota() {
                 </PoolSwitchProvider>
               </>
             )}
+            {pools.length > 0 ? (
+              <div className="mt-6">
+                <QuotaPressure pools={pools} now={now} />
+              </div>
+            ) : null}
             {poolProblems.error ? (
               <p data-pool-problems="unreadable" className="mt-2 text-meta text-ink-stall">
                 账号池的毛病（额度读不到、凭据过期）没读成：{errorText(poolProblems.error)}

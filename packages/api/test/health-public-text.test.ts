@@ -212,6 +212,7 @@ async function publicFailures(log: Logger) {
       title: 'acme/fleet-dao：先去 GitHub 把两个机器人装到这个仓',
       body: '占位',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     warning = await runHealthChecks([{ name: 'item', check: githubAppHealthCheck(judgeDb.db) }], log);
     // 看门狗：只有一处 new PublicHealthError（说法有几种），这里造一种（还没登记）；每一种说法都在 watchdog-health.test.ts 用同一份名单扫

@@ -32,5 +32,15 @@ export const PROCESS_HOOKS = [
       '盯账钩子（inbox-watch.mjs）：下面是创始人在 Mirasim 发了、但 Mirasim 没送进来的话（你这一轮收尾后、后台子代理还在跑时他发的引导；带北京时间发出时间，原文照贴）。先回他一句，再接着干。只有一行「对账没查成」的是没核成账，不是他的话：',
     rewakeSummary: '创始人有话没送进来，已叫醒主线程',
   },
+  // pnpm work run 派出的工人到终态才叫醒派它的会话（单 #2761）：最多等 3 小时（work-watch.mjs 的 WATCH_MAX_MS），超时同上
+  {
+    event: 'Stop',
+    script: 'work-watch.mjs',
+    timeout: 11_400,
+    asyncRewake: true,
+    rewakeMessage:
+      '工人钩子（work-watch.mjs）：下面是 pnpm work run 派出去的本机工人到了终态（做完、没做成、或看护进程没了）。给创始人报一行，再按结果接着派下一件、或修、或 pnpm work run <单号> 续：',
+    rewakeSummary: '本机工人到终态，已叫醒主线程',
+  },
   { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30 },
 ];

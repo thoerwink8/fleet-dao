@@ -17,13 +17,19 @@ import {
 import {
   AUTO_RELEASE_BY,
   AUTO_REQUEST_KEY,
+  batchVerdict,
   CI_RUNS_PAGE,
   CI_WORKFLOW,
   CONFIG_PREFIX,
   CONFIG_UNCHECKED_KEY,
   ciVerdict,
+  DEPS_PREFIX,
+  EMERGENCY_KEY,
+  ENGINE_RESTART_GAP_MS,
+  emergencyIssue,
   gateVerdict,
   HUMAN_TIER_PATHS,
+  INSTALLED_COPIES,
   MARKER_CLEAR_ACTION,
   NO_SKILLS_USERS,
   PAUSE_FILE,
@@ -31,6 +37,7 @@ import {
   PAUSED_STALE_MS,
   parseEngineStatus,
   parseMainLog,
+  prunedAtOf,
   RETIRED_ALERT_PREFIXES,
   RULES_PREFIX,
   RULES_USERS,
@@ -46,6 +53,8 @@ import {
   TRAIN_RESTORE_REASON,
   TRAIN_RESTORED_KEY,
   TRAIN_STALE_MS,
+  UNTOUCHED_FAIL_LIMIT,
+  untouchedFails,
 } from '../france/auto-release/lib.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
@@ -796,6 +805,8 @@ test('规矩同步给的人和 france.sh 的 AGENT_RULES_USERS 一样', () => {
 // 不在两档里。新加一个被 france.sh 引用的仓里文件，必须在这里登记它属于哪一档，免得悄悄漏了。
 const AUTO_TIER_FILES = [
   'deploy/france/fleet-agents.slice',
+  // root 的 ssh 会话内存上限（#2842）
+  'deploy/france/user-0-slice-memory.conf',
   'deploy/france/fleet-auto-release.service',
   'deploy/france/fleet-auto-release.timer',
   // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
@@ -875,8 +886,10 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
   for (const fn of [
     'setup_auto_tier',
     'setup_slice',
+    'setup_user_slice_cap',
     'retire_old_units',
     'setup_auto_release',
+    'setup_release_request_scripts',
     'setup_mirasim_session',
   ]) {
     const text = body(fn);
@@ -887,10 +900,10 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
       `${fn} 不许碰防火墙、sudoers、建用户`,
     );
   }
-  // 自动档入口只调这四个（Mirasim 常驻单元放最后，#1274；注释行不算）
+  // 自动档入口只调这五个（接活脚本副本跟在自动发布之后，#2728；Mirasim 常驻单元放最后，#1274；注释行不算）
   assert.match(
     body('setup_auto_tier').replace(/^\s*#.*\n/gm, ''),
-    /^\s*setup_slice\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_mirasim_session\s*$/,
+    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*setup_mirasim_session\s*$/,
   );
   // 读回也读回它：缺了 MIRASIM_NO_AGENT_EGRESS=1 之类判红（check_mirasim_session_unit_file）
   const france2 = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
@@ -1767,4 +1780,350 @@ test('【故意造出的失败】删残留标记：操作记录写不进（先�
   assert.equal(stuck.markerCleared, 1);
   assert.equal(stuck.audits.length, 1);
   assert.deepEqual(stuck.resolvedKeys, [TRAIN_MARKER_KEY]);
+});
+
+// ── #2728：发版还没动手就没成的那一趟不挡自动发版；同一个提交连败 3 趟才停、开急修单 ──
+
+/** 接活单元写的进度：第 0 步预检没成（什么都还没动），同一个提交第 n 趟。 */
+const untouchedTrain = (sha, n, at = new Date(T0 - 2 * MIN).toISOString()) => ({
+  schema: 1,
+  status: 'failed',
+  phase: 0,
+  startedAt: at,
+  updatedAt: at,
+  target: { kind: 'sha', value: sha },
+  release: {},
+  why: "发版前异常基线读不到（什么都还没动）：fleet-api alert show 没跑成：Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'zod' imported from /x / Node.js v22",
+  untouchedFails: n,
+});
+
+test('【#2728】untouchedFails：只认 failed、release.sh 没起、第 0–3 步；老记录没有计数算 1 趟', () => {
+  assert.equal(untouchedFails(untouchedTrain(H1, 2)), 2);
+  assert.equal(untouchedFails({ ...untouchedTrain(H1, 2), untouchedFails: undefined }), 1);
+  assert.equal(untouchedFails({ ...untouchedTrain(H1, 2), phase: 4 }), 0);
+  assert.equal(untouchedFails({ ...untouchedTrain(H1, 2), release: { started: true } }), 0);
+  assert.equal(untouchedFails({ ...untouchedTrain(H1, 2), status: 'blocked' }), 0);
+  assert.equal(untouchedFails(null), 0);
+});
+
+test('【#2728 故意造出的失败】第 0 步没成的那一趟不挡：下一轮照常再请求同一个提交（不等 30 分钟去重），连败 3 趟才停、开一张急修单，开过不再开', async () => {
+  const m = autoMachine();
+  m.issues = [];
+  m.io.fileIssue = async (issue) => {
+    m.issues.push(issue);
+    return { number: 2799, url: 'https://github.com/o/r/issues/2799', created: true };
+  };
+  // 第 1 轮：请求发 H1
+  await m.round();
+  assert.equal(m.requests.length, 1);
+  // 接活单元接走、第 0 步没成（第 1 趟）：5 分钟后的下一轮照常再请求，不当成「刚请求过」
+  for (const n of [1, 2]) {
+    m.t += 5 * MIN;
+    m.gate = {
+      ...GOOD_GATE,
+      trainText: JSON.stringify(untouchedTrain(H1, n, new Date(m.t - MIN).toISOString())),
+    };
+    const st = await m.round();
+    assert.equal(m.requests.length, n + 1, `第 ${n} 趟没成后照常重试`);
+    assert.equal(st.last.action, 'auto-release-requested');
+  }
+  // 第 3 趟也没成：停下，开急修单
+  m.t += 5 * MIN;
+  m.gate = {
+    ...GOOD_GATE,
+    trainText: JSON.stringify(untouchedTrain(H1, 3, new Date(m.t - MIN).toISOString())),
+  };
+  let st = await m.round();
+  assert.equal(m.requests.length, 3, '连败 3 趟不再请求');
+  assert.match(st.auto.note, /发版还没动手就连败 3 趟.*Cannot find package 'zod'/);
+  assert.match(st.auto.note, /已开急修单 #2799/);
+  assert.equal(m.issues.length, 1);
+  const issue = m.issues[0];
+  assert.equal(issue.key, `release-untouched:${H1}`);
+  assert.match(issue.title, /^急修：法国自动发版 bbbbbbbbbbbb 在第 0 步「预检」连败 3 趟，已停$/);
+  for (const h of ['## 场景', '## 原话', '## 已知的模块', '## 怎么算做完'])
+    assert.ok(issue.body.includes(h), h);
+  assert.match(issue.body, /Cannot find package 'zod'/);
+  assert.doesNotMatch(issue.body, /要你拍|处理好再点/);
+  assert.deepEqual(st.emergency, {
+    sha: H1,
+    number: 2799,
+    url: 'https://github.com/o/r/issues/2799',
+    at: new Date(m.t).toISOString(),
+  });
+  assert.ok(!m.alerts.some((a) => a.key === EMERGENCY_KEY), '开成了不报「没开成」');
+  // 下一轮：还挡着，不再开第二张
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(m.issues.length, 1, '同一个提交只开一张');
+  assert.equal(m.requests.length, 3);
+  assert.match(st.auto.note, /已开急修单 #2799/);
+  // 修好的新提交合进来、绿了：换了要发的提交，不挡
+  m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.ci = runsBody(run(H2, 'completed', 'success'));
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(m.requests.at(-1).sha, H2, '修好的新提交照常发');
+  assert.equal(UNTOUCHED_FAIL_LIMIT, 3);
+});
+
+test('【#2728 故意造出的失败】急修单没开成（fleet-api 坏了）：报一条卡住报警，每轮再试，开成了撤', async () => {
+  const m = autoMachine();
+  let fail = true;
+  m.io.fileIssue = async () => {
+    if (fail)
+      throw new Error(
+        "fleet-api emergency-issue 退出码 1：Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'zod'",
+      );
+    return { number: 2800, url: 'u', created: true };
+  };
+  m.gate = { ...GOOD_GATE, trainText: JSON.stringify(untouchedTrain(H1, 3)) };
+  let st = await m.round();
+  assert.equal(m.requests.length, 0);
+  const a = m.alerts.find((x) => x.key === EMERGENCY_KEY);
+  assert.ok(a, '报了没开成');
+  assert.match(a.body, /Cannot find package 'zod'/);
+  assert.equal(st.emergency.number, null);
+  assert.match(st.auto.note, /急修单没开成/);
+  fail = false;
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.emergency.number, 2800);
+  assert.ok(m.resolvedKeys.includes(EMERGENCY_KEY), '开成了撤掉那一条');
+});
+
+test('【#2728】闸：还没动手的失败不足 3 趟放行；满 3 趟挡同一个提交，不挡别的提交；动了手的失败照旧要人看', () => {
+  const facts = (train, target = H1) => ({ ...GOOD_GATE, trainText: JSON.stringify(train), target });
+  assert.equal(gateVerdict(facts(untouchedTrain(H1, 1))), null);
+  assert.equal(gateVerdict(facts(untouchedTrain(H1, 2))), null);
+  assert.match(gateVerdict(facts(untouchedTrain(H1, 3))), /连败 3 趟/);
+  assert.equal(gateVerdict(facts(untouchedTrain(H1, 3), H2)), null, '换了要发的提交不挡');
+  assert.match(
+    gateVerdict({ ...facts(untouchedTrain(H1, 3)), target: undefined }),
+    /连败/,
+    '不知道要发哪个：挡',
+  );
+  assert.match(
+    gateVerdict(facts({ ...untouchedTrain(H1, 1), phase: 5, release: { started: true } })),
+    /要人看/,
+  );
+});
+
+// ── #2728：脚本副本和在用版本比哈希、依赖指纹 ──
+
+test('【#2728 故意造出的失败】装着的接活脚本和在用那一版不一样：状态里记 drift、列出哪个；一样记 ok；读不到记 unchecked', async () => {
+  const m = machine();
+  const files = (over = {}) =>
+    INSTALLED_COPIES.flatMap(({ dir, files: fs }) =>
+      fs.map((f) => ({ name: `${dir}/${f}`, installed: 'x', release: 'x', ...(over[`${dir}/${f}`] ?? {}) })),
+    );
+  m.io.readInstalled = async () => files();
+  let st = await m.round();
+  assert.deepEqual(
+    { commit: st.installed.commit, result: st.installed.result, drift: st.installed.drift },
+    { commit: H0, result: 'ok', drift: [] },
+  );
+  const stale = '/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs';
+  m.io.readInstalled = async () =>
+    files({
+      [stale]: { installed: '旧的' },
+      '/usr/local/lib/fleet-dao/release-request/lib.mjs': { installed: null },
+    });
+  st = await m.round();
+  assert.equal(st.installed.result, 'drift');
+  assert.deepEqual(st.installed.drift, ['/usr/local/lib/fleet-dao/release-request/lib.mjs（没装）', stale]);
+  assert.match(summary(st), /脚本副本和在用版本不一致/);
+  m.io.readInstalled = async () => {
+    throw new Error('EACCES');
+  };
+  st = await m.round();
+  assert.equal(st.installed.result, 'unchecked');
+  assert.match(st.installed.detail, /EACCES/);
+});
+
+const MODULES_YAML = (at) => `{\n  "hoistPattern": ["*"],\n  "prunedAt": "${at}",\n  "storeDir": "/x"\n}\n`;
+
+test('【#2728 故意造出的失败】发版后在用那一版的依赖被重装：第一轮记指纹，之后变了当轮报警、写出前后的 prunedAt；换了在用的提交重新记、撤掉旧的', async () => {
+  const m = machine();
+  let yaml = MODULES_YAML('Fri, 16 Oct 2026 08:20:00 GMT');
+  m.io.readDeps = async (sha) => {
+    assert.equal(sha, m.current);
+    return yaml;
+  };
+  let st = await m.round();
+  assert.equal(st.deps.commit, H0);
+  assert.equal(st.deps.prunedAt, 'Fri, 16 Oct 2026 08:20:00 GMT');
+  assert.equal(st.deps.result, 'ok');
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.alerts.length, 0, '没变不报');
+  yaml = MODULES_YAML('Fri, 16 Oct 2026 08:30:16 GMT');
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.deps.result, 'changed');
+  const a = m.alerts.find((x) => x.key === `${DEPS_PREFIX}${H0}`);
+  assert.ok(a, '当轮报警');
+  assert.match(a.body, /prunedAt Fri, 16 Oct 2026 08:20:00 GMT，现在 Fri, 16 Oct 2026 08:30:16 GMT/);
+  // 下一轮还是一样：不重发
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.alerts.filter((x) => x.key === `${DEPS_PREFIX}${H0}`).length, 1);
+  // 发了新版：重新记，撤掉旧的
+  buttonReleaseTo(m, H2, '2026-09-27T08:20:00Z');
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.deps.commit, H2);
+  assert.equal(st.deps.result, 'ok');
+  assert.ok(m.resolved.includes(DEPS_PREFIX));
+  // 读不到：记没查成，不当成没变
+  m.io.readDeps = async () => {
+    throw new Error('ENOENT');
+  };
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.deps.result, 'unchecked');
+  assert.equal(prunedAtOf('prunedAt: Fri, 16 Oct 2026 09:00:26 GMT\n'), 'Fri, 16 Oct 2026 09:00:26 GMT');
+});
+
+test('【#2728 故意造出的失败】一趟发版 --check 超时判了失败、后一趟发成功（在用的等于或新于失败那趟的目标）：自动撤掉那张 release:failed 卡，只撤一次；目标比在用的新不撤', async () => {
+  const failedTrain = (sha) =>
+    JSON.stringify({
+      schema: 1,
+      status: 'failed',
+      phase: 5,
+      target: { kind: 'sha', value: sha },
+      release: { started: true },
+    });
+  // 失败那趟的目标 H0 就是在用的（切上去了，只是检查没过）
+  const m = machine();
+  m.io.readTrain = async () => failedTrain(H0);
+  let st = await m.round();
+  assert.ok(m.resolved.includes(`release:failed:${H0.slice(0, 12)}:`), '撤了失败卡');
+  assert.equal(st.superseded, H0);
+  m.resolved = [];
+  m.t += 5 * MIN;
+  await m.round();
+  assert.deepEqual(m.resolved, [], '同一个只撤一次');
+  // 目标比在用的新（H1 没切上去）：不撤
+  const n = machine();
+  n.io.readTrain = async () => failedTrain(H1);
+  await n.round();
+  assert.ok(!n.resolved.some((p) => p.startsWith('release:failed:')), '没被取代的不撤');
+  // 读不到：不撤，记一笔
+  const r = machine();
+  r.io.readTrain = async () => {
+    throw new Error('EACCES');
+  };
+  st = await r.round();
+  assert.ok(!r.resolved.some((p) => p.startsWith('release:failed:')));
+});
+
+test('【#2728】急修单正文：四节齐、原话写明 AI 发现、只列 diff 里看得见的做完条件', () => {
+  const issue = emergencyIssue(untouchedTrain(H1, 3), 3);
+  assert.match(issue.body, /^## 场景\n/);
+  assert.match(issue.body, /## 原话\n\n无（AI 发现/);
+  assert.doesNotMatch(issue.body, /截图|线上看到/);
+});
+
+// ── 攒着发（#2797）：要停引擎的版本离上次停引擎不到 30 分钟先不发；不停引擎的马上发；上一版退回过照发 ──
+
+/** autoMachine 上再接「要不要停引擎」：restart 由用例定，记下问了几次；引擎 since 分钟前起来的。 */
+function batchMachine({ restart, sinceMin, historyLast = null }) {
+  const m = autoMachine();
+  m.asked = [];
+  m.restart = restart;
+  m.io.engineRestart = async (current, target) => {
+    m.asked.push([current, target]);
+    if (m.restart instanceof Error) throw m.restart;
+    return {
+      restart: m.restart,
+      why: m.restart
+        ? '改了 引擎运行要读的文件：packages/engine/src/a.ts'
+        : '改的 2 个文件都不在引擎的引用闭包里',
+    };
+  };
+  m.gate.engineSince = sinceMin === null ? null : T0 - sinceMin * MIN;
+  m.gate.historyLast = historyLast;
+  return m;
+}
+
+test('间隔是 30 分钟（常量钉住）', () => {
+  assert.equal(ENGINE_RESTART_GAP_MS, 30 * MIN);
+});
+
+test('要停引擎、上次停引擎才 10 分钟：先不发，写明攒到几点；到点发那时主线最新的绿提交（攒着的几版一次发）；同一对提交只判一次', async () => {
+  const m = batchMachine({ restart: true, sinceMin: 10 });
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(
+    st.auto.note,
+    /要停引擎（改了 引擎运行要读的文件：packages\/engine\/src\/a\.ts），上次停引擎才 10 分钟（不到 30 分钟），攒到 \d\d:\d\dZ 再发/,
+  );
+  m.t += 5 * MIN;
+  await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.equal(m.asked.length, 1, '同一对提交不重算闭包');
+  // 这期间又合了一版（也绿了）：到点发最新的 H2，不是 H1
+  m.main.unshift([H2, '2026-09-27T08:20:00Z']);
+  m.ci = runsBody(run(H2, 'completed', 'success'));
+  m.t += 16 * MIN; // 距引擎起来 31 分钟
+  const sent = await m.round();
+  assert.deepEqual(
+    m.requests.map((r) => r.sha),
+    [H2],
+  );
+  assert.equal(sent.last.action, 'auto-release-requested');
+});
+
+test('不停引擎的版本：上次停引擎才 2 分钟也马上发，写明不停引擎', async () => {
+  const m = batchMachine({ restart: false, sinceMin: 2 });
+  const st = await m.round();
+  assert.equal(m.requests.length, 1);
+  assert.equal(m.requests[0].sha, H1);
+  assert.match(st.auto.note, /不停引擎/);
+});
+
+test('例外照发：上一版没过健康检查、自动退回、手动退回过，要停引擎也不等', async () => {
+  for (const event of ['unhealthy', 'auto-rollback', 'rollback']) {
+    const m = batchMachine({
+      restart: true,
+      sinceMin: 3,
+      historyLast: `2026-09-27T07:58:00Z ${H0} ${event}`,
+    });
+    await m.round();
+    assert.equal(m.requests.length, 1, event);
+  }
+  // 上一版正常发完（release）：照样攒
+  const m = batchMachine({ restart: true, sinceMin: 3, historyLast: `2026-09-27T07:58:00Z ${H0} release` });
+  await m.round();
+  assert.equal(m.requests.length, 0);
+});
+
+test('【故意造出的失败】判不了要不要停引擎（闭包没算成）：当要停，照样攒；读不到引擎什么时候起的：不拦，照发', async () => {
+  const m = batchMachine({ restart: new Error('tsc 没跑成'), sinceMin: 5 });
+  const st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.match(st.auto.note, /要停引擎（判不了：tsc 没跑成）/);
+  const blind = batchMachine({ restart: true, sinceMin: null });
+  await blind.round();
+  assert.equal(blind.requests.length, 1);
+});
+
+test('batchVerdict：纯函数的边界', () => {
+  const now = T0;
+  assert.equal(batchVerdict({ restart: false, why: '', engineSince: now, historyLast: null, now }), null);
+  assert.equal(
+    batchVerdict({
+      restart: null,
+      why: '',
+      engineSince: now - ENGINE_RESTART_GAP_MS,
+      historyLast: null,
+      now,
+    }),
+    null,
+  );
+  assert.match(
+    String(batchVerdict({ restart: null, why: '', engineSince: now - 1, historyLast: null, now })),
+    /要停引擎/,
+  );
 });

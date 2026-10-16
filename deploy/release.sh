@@ -12,8 +12,9 @@
 # 要换引擎的版本时（#2038、决定 0093）：构建期间引擎照常干活。构建完才写排空请求（$DRAIN_REQUEST，引擎不起新会话），
 # 给引擎手上有会话的任务发 hard 暂停（暂停人「发版」，名单落 $PAUSE_FILE），等会话收掉（停不下来的最多再做 DRAIN_GRACE 秒，
 # 到点由引擎按切号那一套停下、按编号续上）就停引擎，再迁移、切版本；新引擎起来后只对名单里这一批发「继续」（续上原会话见 #2037）。
-# 相对在用版本只改了文档或测试（runtime_unchanged）时不暂停、不重启。健康检查这时核主进程所在版本和这一版运行内容一致，
-# 不要求它已经在新版目录里，也不把这一版记成不健康。
+# 相对在用版本没碰引擎的运行内容（service_unchanged：从引擎入口走 TypeScript 解析出的引用闭包、外加非代码的运行输入，
+# deploy/lib/runtime-closure.mjs，#2797）时不暂停、不重启引擎；后端按它自己的闭包判、不连带停引擎。健康检查这时核主进程
+# 所在版本和这一版运行内容一致，不要求它已经在新版目录里，也不把这一版记成不健康；在跑的进程所在的旧目录清旧版时留着。
 # 发版不碰引擎总开关和各仓「让 AI 接活」开关：停接新活只在切版本这一段，由排空请求管，脚本退了请求就撤。
 # 每一版在 /srv/fleet-dao-releases/<提交号>，current 指着在用的那版；留最近 5 版。目录、单元、本机配置、怎么看、
 # 怎么退：docs/ops.md 第九节。退出码同装机脚本：0 全绿，1 有红（含「没过健康检查、已退回」），2 没红但有待配。
@@ -76,7 +77,10 @@ DRAIN_WROTE=0    # 这次写了排空请求、还没撤
 DRAIN_UNTIL=0    # 请求里的截止（秒）
 ENGINE_DRAINS=0  # 在跑的引擎会排空（认了 drain.json）
 ENGINE_STOPPED=0 # 这次把引擎停下了、还没起回来：没走到切版本就失败，收尾时照原样起回来
-RUNTIME_UNCHANGED=0 # 这一版相对在用版本只改了文档或测试：不暂停、不重启 fleet-engine / fleet-api
+# 这一版相对在用版本没碰引擎 / 后端的运行内容（service_unchanged，#2797：按引用闭包判）：不暂停、不重启那一个服务
+ENGINE_UNCHANGED=0
+API_UNCHANGED=0
+declare -A UNCHANGED_RC=() UNCHANGED_WHY=() # service_unchanged 的结果按「服务 在用 目标」记下，一次发布里不重算
 # 照期望写本机配置（#323，docs/ops.md 第九节「配置进仓对账」）：切版本之前照这一版的期望写 engine.env、api.env、release.env 里
 # 公开的值，只写这一版的期望和上次写的不一样的键（上次写的记在 CONFIG_STATE），人手改的不改回（期望里 selfHeal 开了才改回）。
 # 怎么算、怎么写、写完读回都在 config.mjs（和自动发布对账同一份读法）；这里先让它算、用本脚本读 release.env 的办法核一遍，再写。
@@ -1455,8 +1459,8 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
       restart=1
     fi
     running=$(running_release "$u.service")
-    # 运行内容没变：主进程留在上一版目录。健康检查改核运行内容，不在这里重启。
-    if ((RUNTIME_UNCHANGED)) && [[ "$u" == fleet-engine || "$u" == fleet-api ]]; then
+    # 运行内容没变：主进程留在上一版目录。健康检查改核运行内容，不在这里重启。引擎、后端各按各的判（#2797）。
+    if { ((ENGINE_UNCHANGED)) && [[ "$u" == fleet-engine ]]; } || { ((API_UNCHANGED)) && [[ "$u" == fleet-api ]]; }; then
       restart=0
     elif [[ -n "$running" && "$running" != "$dir" ]]; then
       echo "  · $u 的主进程还在跑 ${running##*/}（不是这一版），要重启"
@@ -1576,7 +1580,7 @@ api_wait_up() {
   while ((SECONDS - start < API_UP_WAIT)); do
     if curl -s -o /dev/null --max-time 5 "http://$COCKPIT/healthz"; then
       waited=$((SECONDS - start))
-      if ((RUNTIME_UNCHANGED)); then
+      if ((API_UNCHANGED)); then
         ok "fleet-api 在驾驶舱接口上答话了（没重启，沿用上一版进程）"
       else
         ok "fleet-api 在驾驶舱接口上答话了（重启后 ${waited} 秒）"
@@ -1585,7 +1589,7 @@ api_wait_up() {
     fi
     sleep 1
   done
-  if ((RUNTIME_UNCHANGED)); then
+  if ((API_UNCHANGED)); then
     red "fleet-api 没重启，但 ${API_UP_WAIT} 秒还没在驾驶舱接口 http://$COCKPIT/healthz 上答话（起不来或反复崩，累计重启 $(unit_prop fleet-api.service NRestarts) 次）：journalctl -u fleet-api -n 50"
   else
     red "fleet-api 重启后 ${API_UP_WAIT} 秒还没在驾驶舱接口 http://$COCKPIT/healthz 上答话（起不来或反复崩，累计重启 $(unit_prop fleet-api.service NRestarts) 次）：journalctl -u fleet-api -n 50"
@@ -1634,26 +1638,30 @@ settle_services() {
   return "$bad"
 }
 
-# 主进程目录是某一版，且那一版相对要查的这一版只改了文档或测试（同一份 runtime_unchanged）。
-# 没在跑、目录不是某一版、运行内容不一样、清单读不出，都返回 1：调用方照旧判红（读不出不当成一致）。
-running_runtime_matches() { # 主进程当前目录 要查的提交
-  local running=$1 sha=$2 name
+# 主进程目录是某一版，且那一版相对要查的这一版没碰这个服务的运行内容（同一份 service_unchanged：引擎、后端按各自的引用闭包，
+# 别的服务只认只改了文档或测试）。没在跑、目录不是某一版、运行内容不一样、判不了，都返回 1：调用方照旧判红（读不出不当成一致）。
+running_runtime_matches() { # 主进程当前目录 要查的提交 单元名（fleet-engine / fleet-api / …）
+  local running=$1 sha=$2 unit=${3:-} name
   [[ "$running" == "$RELEASES/"* ]] || return 1
   name=${running#"$RELEASES/"}
   is_sha "$name" || return 1
-  runtime_unchanged "$name" "$sha"
+  case "$unit" in
+    fleet-engine) service_unchanged engine "$name" "$sha" ;;
+    fleet-api) service_unchanged api "$name" "$sha" ;;
+    *) runtime_unchanged "$name" "$sha" ;;
+  esac
 }
 
 # 起着的服务跑的真是这一版：主进程的当前目录就是这一版的目录（不是 current 指过去了、进程还是旧的）。
-# 只改了文档或测试、故意没重启时目录还是上一版：改核那一版和这一版运行内容一致，一致就认可沿用，不判红、不退回。
-# --check 是另一次进程，没有 RUNTIME_UNCHANGED，也走这一份核对，免得发完立刻被接活脚本的 --check 判红。
+# 没碰这个服务的运行内容、故意没重启时目录还是上一版：改核那一版和这一版运行内容一致，一致就认可沿用，不判红、不退回。
+# --check 是另一次进程，没有 ENGINE_UNCHANGED / API_UNCHANGED，也走这一份核对（现算），免得发完立刻被接活脚本的 --check 判红。
 check_running_release() { # 提交号
   local u running bad=0 sha=$1 short
   for u in $FLEET_SERVICES; do
     running=$(running_release "$u.service")
     if [[ "$running" == "$RELEASES/$sha" ]]; then
       ok "$u 的主进程跑的是这一版（${sha:0:12}）"
-    elif running_runtime_matches "$running" "$sha"; then
+    elif running_runtime_matches "$running" "$sha" "$u"; then
       short=${running##*/}
       ok "$u 的主进程沿用 ${short:0:12}（和 ${sha:0:12} 运行内容一致，没重启）"
     else
@@ -1747,11 +1755,13 @@ check_engine() {
 
 # 香港在发的对不对：经隧道连香港的 nginx（证书照常按域名校验）。发了 web 的，读 release.json 与健康页——
 # release.json 香港只给经隧道来的，别处来的是 404。
-# 没配 web 的不查根地址（根地址上是什么由人定）
+# 没配 web 的不查根地址（根地址上是什么由人定）。经香港、隧道读远端：一次网络超时不算红（#2728），curl 自己退避重试
+# （超时、连不上、5xx 算一时的；1、2、4 秒……最多 3 次、总共不超过 60 秒），仍不通才红
+WEB_CHECK_RETRY=(--retry 3 --retry-connrefused --retry-max-time 60)
 check_web() { # 提交号
   local body commit code
   if has_part web; then
-    if ! body=$(curl -sS -f --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/release.json" 2>&1); then
+    if ! body=$(curl -sS -f "${WEB_CHECK_RETRY[@]}" --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/release.json" 2>&1); then
       red "从香港取不到 https://$FLEET_DOMAIN/release.json：$(tail -1 <<<"$body")"
       return 1
     fi
@@ -1760,7 +1770,7 @@ check_web() { # 提交号
       red "香港在发的是「${commit:0:12}」，不是 ${1:0:12}"
       return 1
     fi
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/health/") || code=000
+    code=$(curl -s -o /dev/null -w '%{http_code}' "${WEB_CHECK_RETRY[@]}" --max-time 10 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/health/") || code=000
     if [[ "$code" != 200 ]]; then
       red "健康页 https://$FLEET_DOMAIN/health/ 返回「$code」"
       return 1
@@ -1877,9 +1887,16 @@ prune() {
   prev=$(previous_sha)
   if [[ -f "$HISTORY" ]]; then mapfile -t order < <(tac -- "$HISTORY" | awk '!seen[$2]++ { print $2 }'); fi
   while read -r _ d; do order+=("$d"); done < <(find "$RELEASES" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' | sort -rn)
-  for s in "$cur" "$prev" "${order[@]}"; do
+  # 服务没重启时主进程还在上一版的目录里跑（#2797 起只改工具、CI 的版本都不重启引擎，连着好几版都可能这样）：
+  # 那几版的目录一律留着，删了就是把在跑的进程脚下的文件抽掉
+  local u r running=()
+  for u in $FLEET_SERVICES; do
+    r=$(running_release "$u.service" 2>/dev/null || true)
+    if [[ "$r" == "$RELEASES/"* ]]; then running+=("${r#"$RELEASES/"}"); fi
+  done
+  for s in "$cur" "$prev" "${running[@]}" "${order[@]}"; do
     if ! is_sha "$s" || [[ ! -d "$RELEASES/$s" ]] || [[ " ${kept[*]} " == *" $s "* ]]; then continue; fi
-    if ((${#kept[@]} < KEEP)) || [[ "$s" == "$cur" || "$s" == "$prev" ]]; then kept+=("$s"); fi
+    if ((${#kept[@]} < KEEP)) || [[ "$s" == "$cur" || "$s" == "$prev" || " ${running[*]} " == *" $s "* ]]; then kept+=("$s"); fi
   done
   for d in "$RELEASES"/*; do
     s=${d##*/}
@@ -1971,8 +1988,8 @@ install_cli_upgrade_units() { # 这一版的目录
 
 # ── 三种用法 ──
 
-# 改动是否全落在绝不进引擎运行的路径里。用路径白名单，不解析 import：解析永远补不完（注释、转义都能绕开），
-# 路径判断宁多重启、不漏重启。对不上、清单读不出、在用版本取不到、和在用是同一个提交，都返回 1（照旧暂停重启）。
+# 快路径：改动全落在绝不进任何服务运行的路径里（不用起 node 算闭包）。对不上、清单读不出、在用版本取不到、和在用是同一个提交，
+# 都返回 1（再交给 service_unchanged 按闭包判；别的服务照旧暂停重启）。
 # 白名单：docs/**、specs/**、**/*.md、packages/*/test/**、agents/test/**、deploy/test/**。--no-renames：源码挪进 docs/ 时旧路径还在。
 runtime_unchanged() { # 在用提交 目标提交。0 = 全在白名单里
   local cur=$1 sha=$2 path list
@@ -1989,6 +2006,37 @@ runtime_unchanged() { # 在用提交 目标提交。0 = 全在白名单里
   return 0
 }
 
+# 这一版要不要重启引擎 / 后端（#2797）：按文件级的引用闭包判（deploy/lib/runtime-closure.mjs，自动发布判「要不要停引擎」
+# 调的也是它）。0 = 不用重启（原因记在 UNCHANGED_WHY），1 = 要重启或判不了。用目标那一版目录里的脚本和它的 typescript
+# （构建完才调；--check 时目标就是在用的那版）；脚本不在（这一版之前的版本）、算不出、超时都当要重启。
+service_unchanged() { # engine|api 在用提交 目标提交
+  local svc=$1 cur=$2 sha=$3 key script out rc
+  key="$svc $cur $sha"
+  if [[ -n "${UNCHANGED_RC[$key]:-}" ]]; then return "${UNCHANGED_RC[$key]}"; fi
+  [[ -n "$cur" && "$cur" != "$sha" ]] || return 1
+  if runtime_unchanged "$cur" "$sha"; then
+    UNCHANGED_RC[$key]=0
+    UNCHANGED_WHY[$key]="只改了文档或测试"
+    return 0
+  fi
+  script=$RELEASES/$sha/deploy/lib/runtime-closure.mjs
+  if [[ ! -f "$script" ]]; then
+    UNCHANGED_RC[$key]=1
+    UNCHANGED_WHY[$key]="${sha:0:12} 里没有引用闭包的脚本，照旧重启"
+    return 1
+  fi
+  if out=$(timeout 600 "$NODE" "$script" --git "$CACHE" --old "$cur" --new "$sha" --service "$svc" 2>&1); then rc=0; else rc=$?; fi
+  out=$(printf '%s' "$out" | tail -1)
+  if ((rc == 0)); then
+    UNCHANGED_RC[$key]=0
+  else
+    UNCHANGED_RC[$key]=1
+    if ((rc != 10)); then out="引用闭包没算成（退出码 $rc：${out:-没有输出}），照旧重启"; fi
+  fi
+  UNCHANGED_WHY[$key]=$out
+  return "${UNCHANGED_RC[$key]}"
+}
+
 do_release() { # 要发的提交（空 = 主线最新）
   local cur before=""
   fetch_code "$1"
@@ -1999,12 +2047,19 @@ do_release() { # 要发的提交（空 = 主线最新）
   # 直接发一个老提交也一样把关：库里的迁移比它带的多就不切（drizzle 碰到比代码新的迁移记录什么也不做、也不报错，
   # 光靠迁移那一步拦不住）。放在迁移之前：老版本的迁移程序连库都不碰
   schema_allows "$SHA" 切到 || return 1
-  # 只改了文档或测试就不停引擎；其余照旧暂停、排空再停（旧引擎不能对着新的库结构）。
-  RUNTIME_UNCHANGED=0
-  if runtime_unchanged "$cur" "$SHA"; then
-    RUNTIME_UNCHANGED=1
-    ok "只改了文档或测试，引擎运行内容没变，没重启"
+  # 没碰引擎的运行内容（引用闭包、非代码的运行输入都没碰，#2797）就不停引擎；其余照旧暂停、排空再停（旧引擎不能对着新的库结构）。
+  # 后端按它自己的闭包判，不连带停引擎；驾驶舱静态文件照旧发。
+  ENGINE_UNCHANGED=0
+  API_UNCHANGED=0
+  if service_unchanged api "$cur" "$SHA"; then
+    API_UNCHANGED=1
+    ok "后端运行内容没变，没重启（${UNCHANGED_WHY["api $cur $SHA"]}）"
+  fi
+  if service_unchanged engine "$cur" "$SHA"; then
+    ENGINE_UNCHANGED=1
+    ok "引擎运行内容没变，没重启（${UNCHANGED_WHY["engine $cur $SHA"]}）"
   else
+    if [[ -n "${UNCHANGED_WHY["engine $cur $SHA"]:-}" ]]; then echo "  · 要停引擎：${UNCHANGED_WHY["engine $cur $SHA"]}"; fi
     drain_request "$SHA" "$(drain_grace)"
     pause_tasks "$SHA"
     drain_engine || return 1
@@ -2041,7 +2096,8 @@ do_release() { # 要发的提交（空 = 主线最新）
   else
     mark_unhealthy "$SHA"
     step "自动退回上一版 ${cur:0:12}"
-    RUNTIME_UNCHANGED=0 # 退回要照旧停、照旧起，不沿用这次「没重启」
+    ENGINE_UNCHANGED=0 # 退回要照旧停、照旧起，不沿用这次「没重启」
+    API_UNCHANGED=0
     if ! schema_allows "$cur"; then
       red "${SHA:0:12} 没过健康检查，也没自动退回（库的迁移比上一版新，见上）：停在 ${SHA:0:12}，要人来看"
     elif
@@ -2065,7 +2121,8 @@ do_release() { # 要发的提交（空 = 主线最新）
 
 do_rollback() {
   local cur prev
-  RUNTIME_UNCHANGED=0
+  ENGINE_UNCHANGED=0
+  API_UNCHANGED=0
   cur=$(current_sha)
   prev=$(previous_sha)
   if [[ -z "$prev" ]]; then

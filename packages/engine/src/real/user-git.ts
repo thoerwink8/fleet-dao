@@ -243,9 +243,47 @@ export async function commitShasBetween(t: UserTree, base: string, head: string)
   return listed.filter((sha) => SHA.test(sha));
 }
 
-/** 工作树里所有没提交的改动（含新文件，不含忽略的）。 */
-export async function worktreeChanges(t: UserTree): Promise<string[]> {
-  return lines(await git(t, ['status', '--porcelain'], '看工作树里有没有没提交的改动'));
+/**
+ * 环境文件：开会话的钩子、引擎自己往树里写的设置，不是会话干的活（#2721：近 7 天 55 轮只因钩子改了 .claude/settings.json
+ * 被判返工）。交活核对（deliveryLeftover）和每小时对账看树里还剩什么（treeLeftovers）用的都是这一份，不各写一份。
+ * 改之前必须知道：只收真有人往树里写的（plugin-loader.mjs 改项目设置；segment-settings.ts 给 Mirasim 会话写挡子代理的
+ * 设置，删了就挡不住），路径相对仓根、写全。.fleet-plugins.json 只有人放、没有钩子写，不收。
+ */
+export const ENVIRONMENT_FILES: readonly { path: string; why: string }[] = [
+  {
+    path: '.claude/settings.json',
+    why: '项目设置：用户级开会话钩子 plugin-loader.mjs 按订阅改写过程钩子（Grok、Cursor、Mirasim 的会话不带 FLEET_HEADLESS）',
+  },
+  {
+    path: '.claude/settings.local.json',
+    why: '本地设置：引擎给 Mirasim 会话写的挡子代理设置（segment-settings.ts），仓里没忽略时显示成没跟踪的新文件',
+  },
+];
+
+const ENVIRONMENT_PATHS: ReadonlySet<string> = new Set(ENVIRONMENT_FILES.map((f) => f.path));
+
+/** git status --porcelain=v1 一行里的路径（改名、复制取新的那个）。 */
+function porcelainPath(line: string): string {
+  const path = line.slice(3);
+  const arrow = path.indexOf(' -> ');
+  return arrow >= 0 ? path.slice(arrow + 4) : path;
+}
+
+/**
+ * 交活核对：工作树里没提交的改动（含新文件，不含忽略的；没跟踪的目录逐个文件列），环境文件不算。先还原：跟踪着的环境文件
+ * 改了、删了，照 HEAD 拿回来（git checkout HEAD --），树真干净了，后面并主线、快进也不被它挡住；再剔除：没跟踪的环境文件
+ * 不删（Mirasim 会话靠 .claude/settings.local.json 挡子代理），只从清单里拿掉。git 没跑成照抛，不当成干净。
+ */
+export async function deliveryLeftover(t: UserTree): Promise<string[]> {
+  const paths = [...ENVIRONMENT_PATHS];
+  const changed = lines(
+    await git(t, ['diff', '--name-only', '--diff-filter=MDT', 'HEAD', '--', ...paths], '看环境文件改了没有'),
+  );
+  if (changed.length > 0) await git(t, ['checkout', 'HEAD', '--', ...changed], '还原环境文件');
+  const status = lines(
+    await git(t, ['status', '--porcelain=v1', '--untracked-files=all'], '看工作树里有没有没提交的改动'),
+  );
+  return status.filter((line) => !ENVIRONMENT_PATHS.has(porcelainPath(line)));
 }
 
 /** 没提交的已跟踪改动（交付判据：不许有）。 */
@@ -365,6 +403,29 @@ export async function readTreeFile(t: UserTree, rel: string): Promise<Buffer | n
   return r.stdout;
 }
 
+/**
+ * 以会话用户读他家目录里的一个文件（rel 相对家目录）；不在回 null，读不了抛 PortError。
+ * 家目录按系统账号库（getent）查，不信环境里的 HOME（引擎起的一次性会话进程不一定带它）；home 只给测试用。
+ */
+export async function readHomeFile(t: UserTree, rel: string, home?: string): Promise<Buffer | null> {
+  const r = await run(t, [
+    t.sh ?? SH,
+    '-c',
+    'h=$2; if [ -z "$h" ]; then h=$(getent passwd "$(id -un)" | cut -d: -f6); fi; if [ -z "$h" ]; then exit 4; fi; f="$h/$1"; if [ -e "$f" ]; then exec cat -- "$f"; else exit 3; fi',
+    'sh',
+    rel,
+    home ?? '',
+  ]);
+  if (r.code === 3) return null;
+  if (r.code !== 0) {
+    throw new PortError('GIT_FAILED', describeFailure(`读家目录里的 ${rel}`, r), {
+      retryable: !r.aborted,
+      details: { user: t.user },
+    });
+  }
+  return r.stdout;
+}
+
 /** 以会话用户把字节写进树里的一个文件（相对路径，上级目录不在就建）。写不成抛 PortError。 */
 export async function writeTreeFile(t: UserTree, rel: string, bytes: Buffer): Promise<void> {
   const r = await run(t, [t.sh ?? SH, '-c', 'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"', 'sh', rel], {
@@ -469,6 +530,28 @@ export async function changedFilesAgainst(t: UserTree, mainline: string, head: s
   assertSha(mainline, '主线');
   assertSha(head, '头');
   return lines(await git(t, ['diff', '--name-only', `${mainline}...${head}`], '列分支相对主线改了哪些文件'));
+}
+
+/**
+ * 分支相对主线新增了多少行（git diff --numstat 主线...头 第一列相加，和 PR 在 GitHub 上的 additions 同口径；二进制文件记 0）。
+ * 每日简报「流程健康」的重活 PR 新增行 p90 按它算（#2762）。输出认不出照抛，不拿 0 顶。
+ */
+export async function addedLinesAgainst(t: UserTree, mainline: string, head: string): Promise<number> {
+  assertSha(mainline, '主线');
+  assertSha(head, '头');
+  const out = lines(await git(t, ['diff', '--numstat', `${mainline}...${head}`], '数分支相对主线新增的行'));
+  let total = 0;
+  for (const line of out) {
+    const added = line.split('\t')[0] ?? '';
+    if (added === '-') continue;
+    if (!/^\d+$/.test(added)) {
+      throw new PortError('GIT_FAILED', `数新增行：numstat 有一行认不出（${line.slice(0, 80)}）`, {
+        retryable: false,
+      });
+    }
+    total += Number(added);
+  }
+  return total;
 }
 
 /** head 在不在 base 之后（base 是 head 的祖先）。 */
@@ -880,7 +963,13 @@ export async function treeLeftovers(
     ['ls-files', '-z', '--others', '--exclude-standard', ...skip.git],
     '列没跟踪的新文件',
   );
-  const dirty = [...lines(changed), ...nulSeparated(untracked).map((f) => `?? ${f}`)];
+  // 环境文件（ENVIRONMENT_FILES：钩子、引擎写的设置）不算剩着，和交活核对同一份名单
+  const dirty = [
+    ...lines(changed).filter((line) => !ENVIRONMENT_PATHS.has(porcelainPath(line))),
+    ...nulSeparated(untracked)
+      .filter((f) => !ENVIRONMENT_PATHS.has(f))
+      .map((f) => `?? ${f}`),
+  ];
   const stashes = lines(await git(t, ['stash', 'list'], '看有没有存着的 stash')).length;
   const checkouts =
     options.scratch && hasHead

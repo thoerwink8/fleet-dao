@@ -76,6 +76,11 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
         list.push(number);
         calls.closePull = list;
       },
+      updatePullBody: async (_repo: unknown, number: number, body: unknown) => {
+        const list = calls.updatePullBody ?? [];
+        list.push({ number, body });
+        calls.updatePullBody = list;
+      },
     },
     waitCi: record('waitCi', (input: { head: string }) => ({ state: 'green', head: input.head })),
     fetchBranchHead: record('fetchBranchHead', () => ({ head: m.head })),
@@ -294,6 +299,8 @@ describe('推分支', () => {
       head,
       // 推上去的头相对主线的净改动：工作流开 PR 前验证判界面、给验证方的清单按它
       changedFiles: ['src/login.ts'],
+      // 同口径的新增行数（#2762 流程健康记账）：commitIn 写了一行
+      addedLines: 1,
     });
     expect(calls.pushBranch).toHaveLength(1);
     expect(readdirSync(join(root, 'tmp')).filter((f) => f.startsWith('push-'))).toEqual([]);
@@ -382,7 +389,11 @@ describe('推之前把最新主线并进会话的树', () => {
     const input = { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head };
     await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED', retryable: true });
     const merged = git(dir, 'rev-parse', 'HEAD');
-    expect(await ports.pushBranch(input, ctx)).toEqual({ head: merged, changedFiles: ['src/login.ts'] });
+    expect(await ports.pushBranch(input, ctx)).toEqual({
+      head: merged,
+      changedFiles: ['src/login.ts'],
+      addedLines: 1,
+    });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([merged, merged]);
   });
 
@@ -479,7 +490,11 @@ describe('推之前把最新主线并进会话的树', () => {
     await expect(ports.pushBranch(input, ctx)).rejects.toMatchObject({ code: 'GIT_FAILED' });
     const second = git(dir, 'rev-parse', 'HEAD');
     expect(parentsOf(dir, second)).toEqual([first, main]);
-    expect(await ports.pushBranch(input, ctx)).toEqual({ head: second, changedFiles: ['src/login.ts'] });
+    expect(await ports.pushBranch(input, ctx)).toEqual({
+      head: second,
+      changedFiles: ['src/login.ts'],
+      addedLines: 1,
+    });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([first, second, second]);
   });
 
@@ -825,6 +840,14 @@ describe('开 PR、CI、合并', () => {
     }
   });
 
+  it('改 PR 正文（#2723）：同一份结构交给 github 包，按 PR 号改', async () => {
+    const { ports, calls } = setup();
+    await ports.updatePrBody({ taskId: 't1', repo, prNumber: 101, body }, ctx);
+    expect(calls.updatePullBody).toEqual([
+      { number: 101, body: expect.objectContaining({ requirement: 12, did: ['加了验证码'] }) },
+    ]);
+  });
+
   it('自己这条分支上已经开着的 PR 不算（重放幂等）', async () => {
     const { ports, calls } = setup({ claims: () => [{ number: 101, body: '', headRef: BRANCH }] });
     await ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
@@ -872,6 +895,30 @@ describe('CI 认了新头：工作树跟着并（#307/#389 那次真事补上的
     const { ports, calls } = setup();
     await ports.waitCi({ taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head }, ctx);
     expect(calls.waitCi?.[0]).toMatchObject({ prNumber: 101, excludeChecks: ['merge-gate'] });
+  });
+
+  it('CI 红了：github 包给的红 job 名（failedChecks）、摘要、日志尾巴原样交回，会话的返工意见靠它们（#2795）', async () => {
+    const { ports } = setup({
+      waitCi: (input: { head: string }) => ({
+        state: 'red',
+        head: input.head,
+        checks: [],
+        failedChecks: ['check', 'lint'],
+        digest: 'check：failure：红的 job：lint',
+        detail: '红的 job：lint、check\n\n【lint】failure\n日志尾巴：\nFound 6 errors.',
+      }),
+    });
+    const result = await ports.waitCi(
+      { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head },
+      ctx,
+    );
+    expect(result).toEqual({
+      state: 'red',
+      head: m.head,
+      failedChecks: ['check', 'lint'],
+      digest: 'check：failure：红的 job：lint',
+      detail: '红的 job：lint、check\n\n【lint】failure\n日志尾巴：\nFound 6 errors.',
+    });
   });
 
   it('没给工作树（合并队列没有工作树）：只回查 CI 的结论，不碰工作树、不抓分支', async () => {

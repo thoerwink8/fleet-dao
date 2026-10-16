@@ -1403,7 +1403,7 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
     expect(f.calls).toEqual([]);
   });
 
-  it('有待处理的（旧的、没写主的算无主）：一行写条数、评论号、原话开头，叫先认领；没有不出声', () => {
+  it('有待处理的（旧的、没写主的算无主）：一行写条数、评论号、原话开头，叫直接办、办完关挂的单；没有不出声', () => {
     const dir = fleetRepo();
     const f = fakeRun({
       stdout:
@@ -1418,9 +1418,10 @@ describe('fleet-dao 的创始人引导在进度单 #1055 上（开会话钩子�
       lineage: { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] },
     });
     expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('无主的创始人引导 2 条（进度单 #1055');
+    expect(lines[0]).toContain('无主的创始人引导 2 条（旧的');
     expect(lines[0]).toContain('11（2026-10-05 17:50）太慢了');
-    expect(lines[0]).toContain('pnpm progress claim');
+    expect(lines[0]).not.toContain('progress claim');
+    expect(lines[0]).toContain('把挂的单关掉');
     expect(f.calls.map(([script]) => script)).toEqual([SCRIPT]);
     expect(check(dir, fakeRun({ stdout: '' }).run)).toEqual([]);
   });
@@ -2253,17 +2254,16 @@ describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个
   it('本血缘的列编号和前 40 字叫它办（全文指到 pnpm progress read --pending）；别的会话的只说条数、不列原文；无主的照列开头，写明先认领', () => {
     const lines = check(mine);
     expect(lines).toHaveLength(3);
-    expect(lines[0]).toMatch(
-      /^创始人引导有 1 条归本会话、没处理（进度单 #1055；本会话是 Mirasim 会话 dir-a）/,
-    );
+    expect(lines[0]).toMatch(/^创始人引导有 1 条归本会话、没办完（本会话是 Mirasim 会话 dir-a）/);
     expect(lines[0]).toContain(`32（2026-10-11 18:15）${Array.from(LONG).slice(0, 40).join('')}…`);
     expect(lines[0]).not.toContain(LONG);
     expect(lines[0]).toContain('pnpm progress read --pending');
-    expect(lines[0]).toContain('pnpm progress done');
+    expect(lines[0]).not.toContain('progress done');
+    expect(lines[0]).toContain('把挂的单关掉');
     expect(lines[1]).toMatch(
-      /^无主的创始人引导 1 条.*33（2026-10-11 18:15）老的一条.*先认领再办：pnpm progress claim <评论号>/,
+      /^无主的创始人引导 1 条.*33（2026-10-11 18:15）老的一条.*直接接着办，办完把挂的单关掉/,
     );
-    expect(lines[2]).toBe('别的会话还有 1 条创始人引导在办（进度单 #1055），不归你，别动。');
+    expect(lines[2]).toBe('别的会话还有 1 条创始人引导在办，不归你，别动。');
     expect(lines.join('\n')).not.toContain('字号太大');
   });
 
@@ -2274,11 +2274,11 @@ describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个
     expect(lines).toContain('别的会话还有 1 条');
   });
 
-  it('无血缘的会话：有主的一律只计数；无主的说认领不了、不是自己记的别动', () => {
+  it('无血缘的会话：有主的一律只计数；无主的说认不出会话、不是自己记的别动', () => {
     const lines = check(none);
     expect(lines).toHaveLength(2);
-    expect(lines[0]).toMatch(/^无主的创始人引导 1 条.*认领不了.*不是就别动/);
-    expect(lines[1]).toBe('别的会话还有 2 条创始人引导在办（进度单 #1055），不归你，别动。');
+    expect(lines[0]).toMatch(/^无主的创始人引导 1 条.*认不出是哪个 Mirasim 会话.*不是就别动/);
+    expect(lines[1]).toBe('别的会话还有 2 条创始人引导在办，不归你，别动。');
   });
 
   it('旧版脚本只给三列：从正文里的〔主：…〕认主，没有标记的算无主', () => {

@@ -1,42 +1,37 @@
-// 进度和创始人引导的入口：pnpm progress note / progress directive / progress claim / progress done / progress read。
+// 进度和创始人引导的入口：pnpm progress note / progress directive / progress read。
 // 引导记在仓里 docs/directives/（../directives.ts），进度流水和驾驶舱来的引导收件箱在置顶单 #1055（../progress.ts）。
-// 退出码 0 = 成了；1 = 拒绝（参数不对、这条不是该办的那种、已归别的会话、取不到原话要手填）；2 = 没查成、没写成。
-// `read --pending` 给开会话钩子用：只列没处理的引导，一条一行（编号<TAB>第一行<TAB>原话压成一行<TAB>主人<TAB>记下的时刻 ISO）；
-// 读的是本地 origin/main（钩子后台刚 fetch 过）加 #1055 收件箱最近 30 天。
+// 引导办没办完看它挂的单（文件里「单：#N」）：开着就是没办完、关了就是办完；不再有认领、标已处理（#2727）。
+// 退出码 0 = 成了；1 = 拒绝（参数不对、挂的单不是开着的、取不到原话要手填）；2 = 没查成、没写成（含 gh 读不到单）。
+// `read --pending` 给开会话钩子用：只列没办完的引导，一条一行
+// （编号<TAB>第一行<TAB>原话压成一行<TAB>主人<TAB>记下的时刻 ISO<TAB>挂的单号，没挂单的空）；
+// 读的是本地 origin/main 加 gh 读开着的单，加 #1055 收件箱最近 30 天；没有就输出空、退出码 0。
 // 主人＝本会话的血缘：CLAUDE_CODE_SESSION_ID 所属的 Mirasim 会话目录名（agents/hooks/founder-inbox.mjs 的 lineageOf）。
-// `claim <编号> --auto --expect-owner <原主>`：开会话钩子替指挥官会话自动认领主人已不在的引导——这里再核一遍「本会话是指挥官会话、
-// 原主确定已不在（ownerPresence 判 gone）、主人还是原主」，哪条不满足都不认。
+// `directive --from-inbox <评论号>`：把驾驶舱答案收件箱（#1055）里的一条搬进仓（挂单同 directive），原评论改成已迁。
 
-import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import {
-  claimDirective,
-  type Directive,
+  checkIssueOpen,
   DirectiveRefused,
-  DONE,
-  DROPPED,
   directiveFromComment,
-  doneContent,
-  findById,
+  directiveIssueDraft,
+  formatDirective,
   type Git,
   type LineageInfo,
   listPaths,
   listPending,
   MAIN,
   mergeLogs,
-  parseDirective,
   proposeFile,
   readPromptLog,
   recordDirective,
   resolveDirective,
-  stamp,
-  withChange,
 } from '../directives.ts';
-import { ghRunner } from '../issue-new.ts';
+import { gitRunner } from '../git-runner.ts';
+import { ghRunner, issueNew } from '../issue-new.ts';
 import {
   inboxPending,
   markMigrated,
@@ -52,38 +47,11 @@ import {
 } from '../progress.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
-/** 敲命令的地方（pnpm 把 cwd 换成仓根，原来的在 INIT_CWD）：done 在工作树里时改那里的文件 */
-const here = process.env.INIT_CWD ?? process.cwd();
 const gh = ghRunner(root);
-const git: Git = (args, opts = {}) =>
-  new Promise((done) => {
-    const child = execFile(
-      'git',
-      args,
-      {
-        cwd: root,
-        encoding: 'utf8',
-        maxBuffer: 16 * 1024 * 1024,
-        windowsHide: true,
-        env: { ...process.env, ...(opts.env ?? {}) },
-      },
-      (err, stdout, stderr) => {
-        if (!err) return done({ code: 0, stdout, stderr });
-        done({ code: typeof err.code === 'number' ? err.code : 1, stdout, stderr: stderr || err.message });
-      },
-    );
-    if (opts.input !== undefined) child.stdin?.end(opts.input);
-  });
-const gitHere: Git = (args) =>
-  new Promise((done) =>
-    execFile('git', args, { cwd: here, encoding: 'utf8', windowsHide: true }, (err, stdout, stderr) =>
-      done({ code: err ? (typeof err.code === 'number' ? err.code : 1) : 0, stdout, stderr }),
-    ),
-  );
+const git: Git = gitRunner(root);
 
 interface Hooks {
   lineageOf(o: { home: string; sessionId: unknown }): LineageInfo;
-  ownerPresence(o: { home: string; owner: string }): { state: 'gone' | 'here' | 'unknown'; why: string };
   sentByFounder(o: {
     home: string;
     only: string;
@@ -101,120 +69,61 @@ const sessionId = (): string | null => {
 async function myLineage(): Promise<LineageInfo> {
   return (await hooks()).lineageOf({ home: homedir(), sessionId: sessionId() });
 }
-async function myOwner(): Promise<string> {
-  const line = await myLineage();
-  if (line.status !== 'found') throw new ProgressUnchecked(`本会话的主认不出（${line.why}），没改。`);
-  return line.dir;
-}
 const promptLogDir = () => process.env.FLEET_PROMPT_LOG_DIR || join(homedir(), '.fleet-dao', 'prompt-log');
-const deps = { git, gh };
 
-/** 收件箱里的一条搬进仓：content 由调用方给（认领的、办完的），开 PR，再把原评论改成「已迁」 */
-async function importFromInbox(id: number, change: (d: Directive) => string, what: string): Promise<string> {
+/** 没给 --issue 时顺手开的单：杂项、挂当前版本、本机做（正文四节由 directiveIssueDraft 写） */
+async function newIssue(draft: { title: string; body: string }): Promise<number> {
+  const dir = mkdtempSync(join(tmpdir(), 'progress-issue-'));
+  try {
+    const bodyFile = join(dir, 'issue.md');
+    writeFileSync(bodyFile, draft.body, 'utf8');
+    const r = await issueNew(
+      ['--kind', '杂项', '--milestone', '当前', '--title', draft.title, '--body-file', bodyFile, '--local'],
+      { gh, cwd: root },
+    );
+    console.log(`开了单 #${r.number}（${r.milestone}）：${r.url}`);
+    return r.number;
+  } catch (e) {
+    throw new ProgressUnchecked(`开单没成：${e instanceof Error ? e.message : String(e)}。引导没记。`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+const deps = { git, gh, newIssue };
+
+/** 收件箱里的一条搬进仓（挂 issue 这张单，没给就开一张），再把原评论改成「已迁」 */
+async function importFromInbox(
+  id: number,
+  issue: number | undefined,
+): Promise<{ url: string; issue: number }> {
   const c = await readInboxComment(id, { gh });
-  const d = directiveFromComment({ ...c, text: textOf(c) });
+  let n = issue;
+  if (n !== undefined) await checkIssueOpen(gh, n);
+  else
+    n = await newIssue(
+      directiveIssueDraft({
+        text: textOf(c),
+        at: c.head.replace(/^【[^】]*】/, ''),
+        source: `#${PROGRESS_ISSUE} 评论 ${id}`,
+      }),
+    );
+  const d = directiveFromComment({ ...c, text: textOf(c) }, n);
   const url = await proposeFile(deps, {
     id: d.id,
     path: d.path,
-    content: change(d),
-    title: `${what}创始人引导 ${d.id}（从 #1055 搬进仓）`,
-    did: `${what}，从 #${PROGRESS_ISSUE} 收件箱搬到 ${d.path}`,
+    content: formatDirective(d),
+    title: `搬创始人引导 ${d.id} 进仓（从 #${PROGRESS_ISSUE}，挂单 #${n}）`,
+    did: `搬到 ${d.path}，挂单 #${n}，从 #${PROGRESS_ISSUE} 收件箱`,
   });
   await markMigrated(c, `${d.path}（${url}）`, { gh });
-  return url;
+  return { url, issue: n };
 }
 
-/** 本检出（不是主线分支）里有这条引导的文件：办完那一笔就写在这里，随这个 PR 合进去 */
-async function worktreeFile(path: string): Promise<string | null> {
-  const branch = await gitHere(['rev-parse', '--abbrev-ref', 'HEAD']);
-  const top = await gitHere(['rev-parse', '--show-toplevel']);
-  if (branch.code !== 0 || top.code !== 0) return null;
-  const b = branch.stdout.trim();
-  if (b === 'main' || b === 'HEAD') return null;
-  const file = join(top.stdout.trim(), path);
-  return existsSync(file) ? file : null;
-}
-
-async function done(id: string, note: string | undefined, drop: boolean): Promise<void> {
-  const status = drop ? DROPPED : DONE;
-  const now = new Date();
-  await git(['fetch', '-q', 'origin', 'main']);
-  const d = await findById(git, MAIN, id);
-  if (d) {
-    const file = await worktreeFile(d.path);
-    if (file !== null) {
-      const local = parseDirective(readFileSync(file, 'utf8'), d.path);
-      writeFileSync(file, doneContent(local, note, now, status), 'utf8');
-      console.log(`标成${status}：改在当前检出的 ${d.path}，随这个 PR 提交，合进主线就算办完。`);
-      return;
-    }
-    const url = await proposeFile(deps, {
-      id,
-      path: d.path,
-      content: doneContent(d, note, now, status),
-      title: `创始人引导 ${id} 标${status}`,
-      did: `引导 ${id} 标${status}${note?.trim() ? `：${note.trim()}` : ''}`,
-    });
-    console.log(`标成${status}，开了 PR 已挂自动合并：${url}`);
-    return;
-  }
-  const url = await importFromInbox(Number(id), (x) => doneContent(x, note, now, status), `标${status}`);
-  console.log(`标成${status}（从 #${PROGRESS_ISSUE} 收件箱搬进仓），PR 已挂自动合并：${url}`);
-}
-
-async function claim(
-  id: string,
-  values: { force?: boolean; why?: string; auto?: boolean; 'expect-owner'?: string },
-) {
-  const owner = await myOwner();
-  let why = values.why;
-  if (values.auto) {
-    if (process.env.FLEET_WORKER === '1')
-      throw new ProgressRefused('机器派的会话不自动认领引导（只有指挥官会话认）。没改。');
-    const was = values['expect-owner'];
-    if (!was) throw new ProgressRefused('--auto 要带 --expect-owner <判断时看到的主人>。没改。');
-    const p = (await hooks()).ownerPresence({ home: homedir(), owner: was });
-    if (p.state !== 'gone')
-      throw new ProgressRefused(`原主 ${was} 不能确定已不在（${p.why}），不自动认领。没改。`);
-    why = `自动认领：${p.why}`;
-  }
-  const inMain = await (async () => {
-    await git(['fetch', '-q', 'origin', 'main']);
-    return (await listPaths(git, MAIN)).some((p) => p.endsWith(`/${id}.md`));
-  })();
-  if (inMain) {
-    const r = await claimDirective(
-      id,
-      owner,
-      { force: values.force || values.auto, why, expectOwner: values['expect-owner'] },
-      deps,
-    );
-    console.log(
-      r === null
-        ? `引导 ${id} 本来就归本会话（${owner}）。`
-        : `认领了引导 ${id}（主：${owner}），PR 已挂自动合并：${r.url}`,
-    );
-    return;
-  }
-  const c = await readInboxComment(Number(id), { gh });
-  if (values['expect-owner'] !== undefined && c.owner !== values['expect-owner'])
-    throw new ProgressRefused(`评论 ${id} 的主人已不是 ${values['expect-owner']}，没改。`);
-  if (c.owner !== '无主' && c.owner !== owner && !(values.force || values.auto))
-    throw new ProgressRefused(
-      `评论 ${id} 已归别的会话（${c.owner}），没改。原会话确实没了才 --force --why。`,
-    );
-  const log = `${stamp(new Date())} 改主：${c.owner} → ${owner}${why?.trim() ? `（${why.trim()}）` : ''}`;
-  const url = await importFromInbox(Number(id), (d) => withChange(d, { owner, log }), '认领');
-  console.log(
-    `认领了引导 ${id}（主：${owner}，从 #${PROGRESS_ISSUE} 收件箱搬进仓），PR 已挂自动合并：${url}`,
-  );
-}
-
-/** 待处理的：仓里主线上的，加收件箱里还没搬进仓的 */
+/** 没办完的：仓里主线上挂的单还开着的（旧文件按状态行），加收件箱里还没搬进仓的 */
 async function pendingRows(): Promise<
-  Array<{ id: string; head: string; text: string; owner: string; created: string }>
+  Array<{ id: string; head: string; text: string; owner: string; created: string; issue: string }>
 > {
-  const repo = await listPending(git, MAIN);
+  const repo = await listPending(git, gh, MAIN);
   const known = new Set((await listPaths(git, MAIN)).map((p) => p.replace(/^.*\//, '').replace(/\.md$/, '')));
   const rows = repo.map((d) => ({
     id: d.id,
@@ -225,10 +134,18 @@ async function pendingRows(): Promise<
       const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})/.exec(d.at);
       return m ? new Date(`${m[1]}T${m[2]}:00+08:00`).toISOString() : '';
     })(),
+    issue: d.issue === undefined ? '' : `#${d.issue}`,
   }));
   for (const c of await inboxPending({ gh })) {
     if (known.has(String(c.id))) continue;
-    rows.push({ id: String(c.id), head: c.head, text: textOf(c), owner: c.owner, created: c.createdAt });
+    rows.push({
+      id: String(c.id),
+      head: c.head,
+      text: textOf(c),
+      owner: c.owner,
+      created: c.createdAt,
+      issue: '',
+    });
   }
   return rows;
 }
@@ -241,19 +158,27 @@ try {
     options: {
       at: { type: 'string' },
       owner: { type: 'string' },
-      note: { type: 'string' },
-      drop: { type: 'boolean' },
       limit: { type: 'string' },
       pending: { type: 'boolean' },
-      force: { type: 'boolean' },
-      why: { type: 'string' },
-      auto: { type: 'boolean' },
-      'expect-owner': { type: 'string' },
+      issue: { type: 'string' },
+      'from-inbox': { type: 'string' },
     },
   });
+  const issueArg = (): number | undefined => {
+    if (values.issue === undefined) return undefined;
+    const m = /^#?([1-9]\d*)$/.exec(values.issue.trim());
+    if (!m?.[1]) throw new ProgressRefused(`--issue ${values.issue} 不对，要单号（如 2727）。`);
+    return Number(m[1]);
+  };
   if (cmd === 'note') {
     const c = await progressNote(positionals.join(' '), { gh });
     console.log(`贴到 #${PROGRESS_ISSUE} 了：${c.url}`);
+  } else if (cmd === 'directive' && values['from-inbox'] !== undefined) {
+    const cid = Number(values['from-inbox']);
+    if (!Number.isInteger(cid) || cid <= 0)
+      throw new ProgressRefused(`--from-inbox ${values['from-inbox']} 不对，要收件箱评论号。`);
+    const r = await importFromInbox(cid, issueArg());
+    console.log(`搬进仓了（评论 ${cid}，挂单 #${r.issue}），PR 已挂自动合并：${r.url}`);
   } else if (cmd === 'directive') {
     const text = positionals.join(' ');
     const line = await myLineage();
@@ -277,15 +202,11 @@ try {
       mergeLogs(readPromptLog(promptLogDir(), new Date()), mirasim),
       sessionId(),
     );
-    const made = await recordDirective(r, deps);
+    const made = await recordDirective(r, deps, issueArg());
     console.log(
-      `记下创始人引导 ${made.id}（待处理，主：${r.owner}，时间 ${r.at}，来源 ${r.source}）：${made.path}，PR 已挂自动合并 ${made.url}\n` +
-        `原话：${r.text.replace(/\s+/g, ' ').slice(0, 200)}\n办完在干活的工作树里 pnpm progress done ${made.id}（随那个 PR 合进去），PR 正文写「引导 ${made.id}」。`,
+      `记下创始人引导 ${made.id}（挂单 #${made.issue}，主：${r.owner}，时间 ${r.at}，来源 ${r.source}）：${made.path}，PR 已挂自动合并 ${made.url}\n` +
+        `原话：${r.text.replace(/\s+/g, ' ').slice(0, 200)}\n办完就是把单 #${made.issue} 关掉：干活的 PR 写 Closes #${made.issue}（合并自动关），这个文件不用再改。`,
     );
-  } else if (cmd === 'claim') {
-    await claim(String(positionals[0] ?? ''), values);
-  } else if (cmd === 'done') {
-    await done(String(positionals[0] ?? ''), values.note, values.drop === true);
   } else if (cmd === 'read') {
     const limit = values.limit === undefined ? 10 : Number(values.limit);
     if (!Number.isInteger(limit) || limit < 0)
@@ -294,14 +215,20 @@ try {
     const rows = await pendingRows();
     if (values.pending) {
       for (const r of rows)
-        console.log(`${r.id}\t${r.head}\t${r.text.replace(/\s+/g, ' ')}\t${r.owner}\t${r.created}`);
+        console.log(
+          `${r.id}\t${r.head}\t${r.text.replace(/\s+/g, ' ')}\t${r.owner}\t${r.created}\t${r.issue}`,
+        );
     } else {
       const recent = await recentComments(limit, { gh });
       console.log(`#${PROGRESS_ISSUE} 最近 ${recent.length} 条（旧到新）：`);
       for (const c of recent) console.log(`\n[${c.id}] ${c.body.trim()}`);
-      console.log(`\n没处理的创始人引导 ${rows.length} 条（docs/directives 和 #${PROGRESS_ISSUE} 收件箱）：`);
+      console.log(
+        `\n没办完的创始人引导 ${rows.length} 条（docs/directives 挂的单还开着，和 #${PROGRESS_ISSUE} 收件箱）：`,
+      );
       for (const r of rows)
-        console.log(`\n[${r.id}]（${r.head.replace(/^【[^】]*】/, '')}，主：${r.owner}）${r.text}`);
+        console.log(
+          `\n[${r.id}]（${r.head.replace(/^【[^】]*】/, '')}，主：${r.owner}${r.issue ? `，单 ${r.issue}` : ''}）${r.text}`,
+        );
     }
   } else {
     throw new ProgressRefused(PROGRESS_USAGE);

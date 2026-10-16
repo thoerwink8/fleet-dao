@@ -40,9 +40,22 @@ export function createRealEnv(): Promise<TestWorkflowEnvironment> {
       'CI 里没给 FLEET_TEST_TEMPORAL_CLI：Temporal 命令行没按法国的版本装上，这条真服务端的测试不算数',
     );
   }
-  return TestWorkflowEnvironment.createLocal(
-    cli ? { server: { executable: { type: 'existing-path', path: cli } } } : {},
-  );
+  const options = cli ? { server: { executable: { type: 'existing-path' as const, path: cli } } } : {};
+  if (cli) return TestWorkflowEnvironment.createLocal(options);
+
+  // 本地没有固定命令行时，SDK 会按需从网络下载；连接重置不应让整次验收直接抖红。
+  return (async () => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await TestWorkflowEnvironment.createLocal(options);
+      } catch (error) {
+        lastError = error;
+        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+      }
+    }
+    throw lastError;
+  })();
 }
 
 export interface WorkerOptions {

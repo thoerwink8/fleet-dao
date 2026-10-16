@@ -6,6 +6,7 @@
 import { chmodSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { BRIDGE_CONNECT_TIMEOUT_TEXT, KILL_TEXT, ledgerlessDetail } from '@fleet-dao/adapters';
 import {
   notifications,
   quotaWindows,
@@ -182,6 +183,7 @@ describe('探通：在线，结论和时刻写进库，定时任务页那一行�
       title: '拼车池登录失效',
       body: '会话那边报的整池问题',
       options: noteOnlyOptions(),
+      reason: 'human-only',
     });
     const s = setup(answered);
     await s.round();
@@ -1104,6 +1106,142 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
     expect(down?.probeDetail).toContain('没起来');
     expect(down?.probeDetail).toContain('ECONNREFUSED');
+  });
+
+  // 法国 mirasim-relay:sonnet-5.5（#2703）：第一次起来了没第一帧、第二次桥接连都没连上。两种超时各归各的类，
+  // 和「回答认不出 pong」（#2699）分开：detail 里写明是哪一种，退避照旧逐轮累加。
+  describe('超时两种：桥接连 Mirasim 超时、起来之后迟迟没有第一帧', () => {
+    it('文案钉死：分流规则和插头认的是同一句', () => {
+      expect(BRIDGE_CONNECT_TIMEOUT_TEXT).toBe('桥接连 Mirasim 超时');
+      expect(KILL_TEXT.startup_timeout).toBe('起来之后迟迟没有第一帧');
+    });
+
+    const bridgeTimeout = (): FakeMirasimScript => ({
+      noAccept: true,
+      report: {
+        launchError: `${BRIDGE_CONNECT_TIMEOUT_TEXT}（100 秒）`,
+        terminal: undefined,
+        ledger: undefined,
+      },
+    });
+    const noFirstFrame = (): FakeMirasimScript => ({
+      report: {
+        killed: { reason: 'startup_timeout', at: NOW.toISOString() },
+        terminal: undefined,
+        ledger: undefined,
+      },
+    });
+
+    it('桥接连 Mirasim 超时：同一轮再探一次，还不通就离线，归「桥接连 Mirasim 超时」类，不是认不出、不是起不来', async () => {
+      const s = setup(answered, { mirasim: bridgeTimeout });
+      await s.round();
+      expect(s.mirasim.count()).toBe(2);
+      const down = await row(routeId);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 1 });
+      expect(down?.probeDetail).toContain('连探两次都没通');
+      expect(down?.probeDetail).toContain(
+        `桥接连 Mirasim 超时：没起来：${BRIDGE_CONNECT_TIMEOUT_TEXT}（100 秒）`,
+      );
+      expect(down?.probeDetail).not.toContain('回答认不出');
+      expect(down?.probeDetail).not.toContain('会话起不来');
+      expect(await hold()).toBeUndefined();
+      // 上游一直不通：下一轮还是同一类，连着不通的次数累加
+      s.advance(24 * 60);
+      await s.round();
+      const again = await row(routeId);
+      expect(again).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 2 });
+      expect(again?.probeDetail).toContain(`桥接连 Mirasim 超时：没起来：${BRIDGE_CONNECT_TIMEOUT_TEXT}`);
+    });
+
+    it('起来之后迟迟没有第一帧：离线，归「会话起不来」类，不混进桥接超时', async () => {
+      const s = setup(answered, { mirasim: noFirstFrame });
+      await s.round();
+      expect(s.mirasim.count()).toBe(2);
+      const down = await row(routeId);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+      expect(down?.probeDetail).toContain(`会话起不来：${KILL_TEXT.startup_timeout}`);
+      expect(down?.probeDetail).not.toContain(BRIDGE_CONNECT_TIMEOUT_TEXT);
+      expect(down?.probeDetail).not.toContain('回答认不出');
+    });
+
+    it('线上那一次的顺序（先没第一帧、再桥接超时）：detail 两次各写各的类', async () => {
+      const s = setup(answered, { mirasim: (n) => (n === 1 ? noFirstFrame() : bridgeTimeout()) });
+      await s.round();
+      const detail = (await row(routeId))?.probeDetail ?? '';
+      expect(detail).toMatch(/^连探两次都没通：桥接连 Mirasim 超时：没起来：桥接连 Mirasim 超时（100 秒）/);
+      expect(detail).toContain(`（第一次：会话起不来：${KILL_TEXT.startup_timeout}`);
+    });
+
+    it('第一次桥接超时、隔一会儿再探按时连上收到回答：探通，在线', async () => {
+      const s = setup(answered, {
+        mirasim: (n) => (n === 1 ? bridgeTimeout() : { state: { text: REPLY } }),
+      });
+      await s.round();
+      expect(s.mirasim.count()).toBe(2);
+      const up = await row(routeId);
+      expect(up).toMatchObject({ alive: true, probeState: 'ok', probeFailStreak: 0 });
+      expect(up?.probeDetail).toMatch(/^答上了：pong/);
+    });
+  });
+
+  // 法国 auto:mirasim:grok-4.7（#2720）：Mirasim 的 grok 执行体不经中转、不写流量账本，每次都是「账本里没有这个会话的目录」。
+  // 归账本/中转没查成（DL3），detail 写明不写流量账本，和桥接超时（#2703）、认不出 pong（#2699）分开；账本齐全、答上 pong 照样探通。
+  describe('grok-4.7 走 Mirasim：账本缺目录、中转查不成、账本齐全', () => {
+    let grokRoute: string;
+    beforeEach(async () => {
+      ({ routeId: grokRoute } = await addMirasimRoute(t.db, { modelId: 'grok-4.7', stages: ['research'] }));
+      await t.client.query(
+        "update routes set alive = false, probe_state = 'skipped', probe_detail = '改版后等下一轮探', probed_at = $2::timestamptz where id = $1",
+        [grokRoute, new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString()],
+      );
+    });
+
+    it('账本缺目录：连探两次都离线，detail 归账本/中转类、写明不写流量账本，下一轮同一类、连着不通累加', async () => {
+      const s = setup(answered, {
+        mirasim: () => ({
+          state: { text: REPLY },
+          report: { ledger: { state: 'unknown', detail: ledgerlessDetail('grok') } },
+        }),
+      });
+      await s.round();
+      expect(s.mirasim.specs.find((spec) => spec.model === 'grok-4.7')).toMatchObject({
+        agent: 'grok',
+        route: 'cloud',
+      });
+      const down = await row(grokRoute);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 1 });
+      expect(down?.probeDetail).toContain('连探两次都没通');
+      expect(down?.probeDetail).toContain('中转没查成：账本没读成：');
+      expect(down?.probeDetail).toContain('不写流量账本');
+      expect(down?.probeDetail).not.toContain('回答认不出');
+      expect(down?.probeDetail).not.toContain(BRIDGE_CONNECT_TIMEOUT_TEXT);
+      s.advance(24 * 60);
+      await s.round();
+      const again = await row(grokRoute);
+      expect(again).toMatchObject({ alive: false, probeState: 'failed', probeFailStreak: 2 });
+      expect(again?.probeDetail).toContain('不写流量账本');
+    });
+
+    it('中转查不成（读不了账本）：离线，归同一类「中转没查成」', async () => {
+      const s = setup(answered, {
+        mirasim: () => ({
+          state: { text: REPLY },
+          report: { ledger: { state: 'unknown', detail: '读不了账本：EACCES' } },
+        }),
+      });
+      await s.round();
+      const down = await row(grokRoute);
+      expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+      expect(down?.probeDetail).toContain('中转没查成：账本没读成：读不了账本：EACCES');
+    });
+
+    it('账本齐全（起针之后有中转 2xx）、答上 pong：在线，probe_state=ok，连着不通清零', async () => {
+      const s = setup(answered, { mirasim: () => ({ state: { text: REPLY } }) });
+      await s.round();
+      const up = await row(grokRoute);
+      expect(up).toMatchObject({ alive: true, probeState: 'ok', probeFailStreak: 0 });
+      expect(up?.probeDetail).toMatch(/^答上了：pong · 用时 \d+ 秒$/);
+    });
   });
 
   it('快照说 done，但账本没给目录：中转到底走没走上游没查成，不当成探通（DL3）', async () => {

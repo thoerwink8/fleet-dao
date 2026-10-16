@@ -404,7 +404,7 @@ describe('通知', () => {
   it('没拿到飞书 message_id 不许记成已送到', async () => {
     const [n] = await t.db
       .insert(notifications)
-      .values({ level: 'decision', dedupeKey: 'gate:1', title: '要你拍' })
+      .values({ level: 'alert', dedupeKey: 'gate:1', title: '卡住了' })
       .returning();
     if (!n) throw new Error('通知没写进去');
     await expectViolation(
@@ -412,6 +412,47 @@ describe('通知', () => {
         .insert(notificationDeliveries)
         .values({ notificationId: n.id, channel: 'feishu', target: 'team', deliveredAt: NOW }),
       'notification_deliveries_delivered_needs_message_id',
+    );
+  });
+
+  // #2729：直写表也绕不过「要你拍」的规矩：至少两个选项、原因是三种之一；原因只给 decision 级
+  const two = [
+    { id: 'a', label: '甲', detail: '选甲', recommended: '甲稳' },
+    { id: 'b', label: '乙', detail: '选乙' },
+  ];
+  it('要你拍的没选项、只有一个选项、没写原因、原因认不出：都写不进', async () => {
+    const base = { level: 'decision' as const, dedupeKey: 'ask:1', title: '要你拍' };
+    await expectViolation(
+      t.db.insert(notifications).values({ ...base, decisionReason: 'human-only' }),
+      'notifications_decision_needs_options_reason',
+    );
+    await expectViolation(
+      t.db
+        .insert(notifications)
+        .values({ ...base, decisionReason: 'human-only', decisionOptions: [two[0] as never] }),
+      'notifications_decision_needs_options_reason',
+    );
+    await expectViolation(
+      t.db.insert(notifications).values({ ...base, decisionOptions: two }),
+      'notifications_decision_needs_options_reason',
+    );
+    await expect(
+      t.db
+        .insert(notifications)
+        .values({ ...base, decisionOptions: two, decisionReason: 'ai-can-do' as never }),
+    ).rejects.toThrow();
+    expect(await t.db.select().from(notifications)).toEqual([]);
+    await t.db
+      .insert(notifications)
+      .values({ ...base, decisionOptions: two, decisionReason: 'irreversible-delete' });
+  });
+
+  it('原因只给要你拍的：报警级带原因写不进', async () => {
+    await expectViolation(
+      t.db
+        .insert(notifications)
+        .values({ level: 'alert', dedupeKey: 'stuck:1', title: '卡住', decisionReason: 'new-money' }),
+      'notifications_reason_only_decision',
     );
   });
 });

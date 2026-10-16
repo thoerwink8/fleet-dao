@@ -281,6 +281,11 @@ export interface ChooseRouteInput {
    */
   tier?: RouteTier;
   /**
+   * 不按能力下限挡的原因（#2725）：人在驾驶舱给这张单指定了模型（人的指令，不拿下限驳回）。不给 = 照下限挡。
+   * 任务点名的路由（taskRouteId）、整段钉住（stagePinned）、钉住的行本来就不按下限挡，不用给。
+   */
+  floorWaived?: string;
+  /**
    * 各模型各档的第一段动手战绩（决定 0098）。只在 trackScore.byTier 开着、又给了 tier 时用这一档的行。
    * 不给 = 没读；给了空数组 = 读成了、这一窗没有分档战绩，不退回 modelTracks。
    */
@@ -292,6 +297,11 @@ export interface ChooseRouteInput {
    * 探不探、探哪个由它定。不给 = 不探索（老输入、对账这类没有单的选路）。
    */
   exploreSeed?: string;
+  /**
+   * 加权抽签的种子（决定 0104）：「单号:段:第几次选」。按它算出 [0, 1) 里的数（rank.ts 的 seedDraw），同一单同一段同一次重算不变；
+   * 换路由重选算第几次加一。不给就用 draw，draw 也没有就取权重最大的。
+   */
+  allocateSeed?: string;
   now: string;
   /** 缺的项取默认。trackScore、pace 可以只给要改的那几项。 */
   policy?: RoutingPolicyInput;
@@ -313,7 +323,9 @@ export type BlockCode =
   | 'carpool-registry'
   | 'org-not-live'
   /** Mirasim 认不出该起哪个执行体：硬挡，不落到默认执行体。 */
-  | 'executor-unknown';
+  | 'executor-unknown'
+  /** 够不上能力下限（#2725，floor.ts 的 STRENGTH_FLOOR）：用途和派工档要的强弱档比这个模型高，硬挡。 */
+  | 'below-floor';
 
 /**
  * 等什么：slot 空位 / quota 额度清零 / breaker 熔断到点 / org 引擎切号（会话用户挂的不是这个池的组织，引擎打算切过去）/
@@ -338,7 +350,7 @@ export interface Block {
  *   按它在模型之间挪了位置也写在这里。
  * poor-one-round：一轮做成率明显差，不进这个用途（别的都派不了、也不是只差空位时兜底）。只在 byTier 关掉时有。
  * strength-first：重活先给强档（强档的模型提到前面；别的档写「排在强档后面」）。
- * strength-yield：强档这个模型的池超前时间进度够多，这一单让给下一档。
+ * strength-yield：强档这个模型能派的池都超前时间进度够多，这一单让给不超前的强档；强档都超前时照派强档（#2724）。
  * explore：探索，把样本少的强档模型提到第一，攒战绩。
  * strength-pool：同档分流，和同档相邻的模型合成一组按池子消耗进度排，挪到了同档别的模型前面。
  */

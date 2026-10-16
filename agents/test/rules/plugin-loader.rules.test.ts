@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runChild } from '../child.ts';
+import { runChild, runChildOk } from '../child.ts';
 
 const LOADER = fileURLToPath(new URL('../../hooks/plugin-loader.mjs', import.meta.url));
 const HOOKS = 'C:/Users/ada/.fleet-dao/hooks';
@@ -107,6 +107,12 @@ const projectHooks = (): Settings => ({
             timeout: 11_400,
             asyncRewake: true,
           },
+          {
+            type: 'command',
+            command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/work-watch.mjs"',
+            timeout: 11_400,
+            asyncRewake: true,
+          },
         ],
       },
     ],
@@ -125,60 +131,71 @@ const projectHooks = (): Settings => ({
 });
 
 describe('订阅目录（决定 0085）', () => {
-  it('过程组就是这六条，超时和 fleet-dao 项目设置一致', () => {
+  it('过程组就是这七条，超时和 fleet-dao 项目设置一致', () => {
     expect(PROCESS_HOOKS.map((hook) => [hook.script, hook.event, hook.timeout])).toEqual([
       ['bootstrap.mjs', 'SessionStart', 120],
       ['session-start.mjs', 'SessionStart', 90],
       ['main-thread.mjs', 'PreToolUse', 10],
       ['stop.mjs', 'Stop', 10],
       ['inbox-watch.mjs', 'Stop', 11_400],
+      ['work-watch.mjs', 'Stop', 11_400],
       ['prompt-log.mjs', 'UserPromptSubmit', 30],
     ]);
   });
 
-  it('前台钩子超时按秒写，不超过 600（写成毫秒是 30000 这种数）；后台叫醒的盯账钩子超时比它最长等的 3 小时长、不超过 4 小时', async () => {
+  it('前台钩子超时按秒写，不超过 600（写成毫秒是 30000 这种数）；后台叫醒的两条（盯账、工人终态）超时比它们最长等的 3 小时长、不超过 4 小时', async () => {
     for (const hook of PROCESS_HOOKS)
       if (hook.asyncRewake !== true) expect(hook.timeout, hook.script).toBeLessThanOrEqual(600);
     const watch = PROCESS_HOOKS.filter((hook) => hook.asyncRewake === true);
-    expect(watch.map((hook) => hook.script)).toEqual(['inbox-watch.mjs']);
-    const { WATCH_MAX_MS } = (await import(
-      pathToFileURL(fileURLToPath(new URL('../../hooks/inbox-watch.mjs', import.meta.url))).href
-    )) as { WATCH_MAX_MS: number };
-    expect(WATCH_MAX_MS).toBe(3 * 3_600_000);
+    expect(watch.map((hook) => hook.script)).toEqual(['inbox-watch.mjs', 'work-watch.mjs']);
     for (const hook of watch) {
+      const { WATCH_MAX_MS } = (await import(
+        pathToFileURL(fileURLToPath(new URL(`../../hooks/${hook.script}`, import.meta.url))).href
+      )) as { WATCH_MAX_MS: number };
+      expect(WATCH_MAX_MS, hook.script).toBe(3 * 3_600_000);
       expect(hook.timeout * 1000).toBeGreaterThan(WATCH_MAX_MS);
       expect(hook.timeout).toBeLessThanOrEqual(4 * 3600);
     }
   });
 
-  it('盯账钩子写进设置时带 "asyncRewake": true 和叫醒提示（后台跑、退出码 2 叫醒主线程），别的钩子不带', () => {
+  it('盯账、工人终态两条钩子写进设置时带 "asyncRewake": true 和叫醒提示（后台跑、退出码 2 叫醒主线程），别的钩子不带', () => {
     const next = lib.applyCatalog({}, ['process'], HOOKS);
     const stop = next.hooks?.Stop?.flatMap((group) => group.hooks) ?? [];
     const watch = stop.find((handler) => lib.scriptOf(handler.command) === 'inbox-watch.mjs');
     expect(watch?.asyncRewake).toBe(true);
     expect(watch?.rewakeMessage).toContain('先回他一句');
     expect(watch?.rewakeSummary).toBeTruthy();
+    // 工人终态（单 #2761）：只在 pnpm work run 派的工人到终态时叫醒
+    const work = stop.find((handler) => lib.scriptOf(handler.command) === 'work-watch.mjs');
+    expect(work?.asyncRewake).toBe(true);
+    expect(work?.rewakeMessage).toContain('到了终态');
+    expect(work?.rewakeSummary).toBeTruthy();
     const others = Object.values(next.hooks ?? {})
       .flatMap((groups) => groups.flatMap((group) => group.hooks))
-      .filter((handler) => handler !== watch);
+      .filter((handler) => handler !== watch && handler !== work);
     for (const handler of others) {
       expect(handler).not.toHaveProperty('asyncRewake');
       expect(handler).not.toHaveProperty('async');
     }
-    // 本仓项目设置里那条也是后台叫醒的（本仓的会话读的是它，不是加载器写的那份）
+    // 本仓项目设置里那两条也是后台叫醒的（本仓的会话读的是它，不是加载器写的那份）
     const repo = JSON.parse(
       readFileSync(fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)), 'utf8'),
     ) as Settings;
-    const mine = (repo.hooks?.Stop ?? [])
-      .flatMap((group) => group.hooks)
-      .find((handler) => lib.scriptOf(handler.command) === 'inbox-watch.mjs');
-    expect(mine?.asyncRewake).toBe(true);
-    expect(mine?.timeout).toBe(watch?.timeout);
-    expect(mine?.rewakeMessage).toBe(watch?.rewakeMessage);
-    expect(mine?.rewakeSummary).toBe(watch?.rewakeSummary);
+    for (const [script, want] of [
+      ['inbox-watch.mjs', watch],
+      ['work-watch.mjs', work],
+    ] as const) {
+      const mine = (repo.hooks?.Stop ?? [])
+        .flatMap((group) => group.hooks)
+        .find((handler) => lib.scriptOf(handler.command) === script);
+      expect(mine?.asyncRewake, script).toBe(true);
+      expect(mine?.timeout, script).toBe(want?.timeout);
+      expect(mine?.rewakeMessage, script).toBe(want?.rewakeMessage);
+      expect(mine?.rewakeSummary, script).toBe(want?.rewakeSummary);
+    }
   });
 
-  it('空设置加上 process：六条命令都指向安装目录，不指向别的仓的 agents/hooks', () => {
+  it('空设置加上 process：七条命令都指向安装目录，不指向别的仓的 agents/hooks', () => {
     const next = lib.applyCatalog({}, ['process'], HOOKS);
     expect(scriptsOf(next)).toEqual(PROCESS_HOOKS.map((hook) => hook.script));
     const handlers = Object.values(next.hooks ?? {}).flatMap((groups) =>
@@ -310,7 +327,7 @@ describe('加载器真跑（决定 0085）', () => {
     return existsSync(file) ? readFileSync(file, 'utf8') : null;
   }
 
-  it('有标记才写出六条；没有标记、原来也没有项目设置：不建文件', () => {
+  it('有标记才写出七条；没有标记、原来也没有项目设置：不建文件', () => {
     const bare = temp();
     const none = run(bare);
     expect(none.status).toBe(0);
@@ -388,5 +405,29 @@ describe('加载器真跑（决定 0085）', () => {
     expect(stuck.status).toBe(0);
     expect(stuck.stderr).toContain('项目设置读不成，没改');
     expect(readSettings(broken)).toBe('{');
+  });
+
+  // #2721：Grok、Cursor、Mirasim 起的引擎会话不带 FLEET_HEADLESS，照样跑用户级的这个加载器，改了树里的项目设置，
+  // 交活核对看到 M .claude/settings.json 就判返工。引擎的树都是从 bundle 取的，一定有 refs/fleet/incoming（本机的检出没有）。
+  it('【故意造出的失败】引擎的树（有 refs/fleet/incoming）、没带 FLEET_HEADLESS：项目设置一个字节不改', () => {
+    const cwd = temp();
+    const git = (...args: string[]) =>
+      runChildOk('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { cwd });
+    git('init', '-q');
+    mkdirSync(join(cwd, '.claude'));
+    const original = '{\n  "env": {}\n}\n';
+    writeFileSync(join(cwd, '.claude', 'settings.json'), original);
+    writeFileSync(join(cwd, '.fleet-plugins.json'), '{"track":["process"]}\n');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'base');
+    git('update-ref', 'refs/fleet/incoming', 'HEAD');
+    const r = run(cwd, { FLEET_HEADLESS: '' });
+    expect(r.status, r.stderr).toBe(0);
+    expect(readSettings(cwd)).toBe(original);
+
+    // 同样的树没有这个引用（本机的检出）：照旧写
+    git('update-ref', '-d', 'refs/fleet/incoming');
+    expect(run(cwd, { FLEET_HEADLESS: '' }).status).toBe(0);
+    expect(readSettings(cwd)).not.toBe(original);
   });
 });

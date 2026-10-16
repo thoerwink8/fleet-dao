@@ -25,12 +25,14 @@ import {
   CI_RUNS_PAGE,
   CI_WORKFLOW,
   HUMAN_TIER_PATHS,
+  INSTALLED_COPIES,
   MAIN_HISTORY,
   NO_SKILLS_USERS,
   PAUSE_FILE,
   parseEngineStatus,
   RELEASES,
   REPO,
+  reasonOf,
   runRound,
   STATE_FILE,
   TRAIN_MARKER,
@@ -39,20 +41,15 @@ import {
 
 const NODE = '/usr/bin/node';
 const SHA = /^[0-9a-f]{40}$/;
-// 驾驶舱按钮的接活（deploy/france/release-request，人工档）：请求目录、接活单元的两个文件、进度和暂停标记。路径同 release-request/lib.mjs。
+// 驾驶舱按钮的接活（deploy/france/release-request；单元是人工档，脚本副本是自动档）：请求目录、接活单元的两个文件、进度和暂停标记。路径同 release-request/lib.mjs。
 const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
 const REQUEST_FILE = `${REQUEST_DIR}/request.json`;
 const RECEIVER_UNIT = '/etc/systemd/system/fleet-release-request.path';
 const RECEIVER_SCRIPT = '/usr/local/lib/fleet-dao/release-request/fleet-release-request.mjs';
 /** current 那一版的 fleet-api（release continue、engine on|status；同 release-request/lib.mjs 的 FLEET_API、release.sh 的 resume_tasks）。 */
 const FLEET_API = `${RELEASES}/current/packages/api/bin/fleet-api`;
-const tail = (text, n = 3) =>
-  String(text ?? '')
-    .trim()
-    .split('\n')
-    .slice(-n)
-    .join(' ')
-    .slice(0, 400);
+/** 失败原因：认得出的关键行加尾几行（lib.mjs 的 reasonOf，#2728）。 */
+const tail = (text, n = 3) => reasonOf(text, n);
 
 function run(cmd, args, { timeoutMs = 120_000, input } = {}) {
   const r = spawnSync(cmd, args, {
@@ -118,6 +115,32 @@ function lockBusy() {
   return lock.code === 1;
 }
 
+/** 一个单元这次进入 active 的时刻（毫秒）；读不到、没在跑回 null。`--timestamp=unix` 有时带 @ 前缀（同 mirasimActiveEnter）。 */
+function activeEnterMs(unit) {
+  let r;
+  try {
+    r = run('systemctl', ['show', '-p', 'ActiveEnterTimestamp', '--timestamp=unix', '--value', unit], {
+      timeoutMs: 10_000,
+    });
+  } catch {
+    return null;
+  }
+  if (r.code !== 0) return null;
+  const raw = String(r.stdout).trim().split('\n')[0]?.replace(/^@/, '') ?? '';
+  if (!/^[0-9]+$/.test(raw)) return null;
+  const sec = Number(raw);
+  return sec > 0 ? sec * 1000 : null;
+}
+
+/** 发版历史（release.sh 的 HISTORY）最后一行；不在、读不了回 null。 */
+function historyLastLine() {
+  try {
+    return readFileSync(`${RELEASES}/.history`, 'utf8').trim().split('\n').at(-1) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 /** 进程活没活：kill 0 不发信号只问；EPERM 是活着但不归我们（同 release-request 的 pidAlive）。 */
 function pidAlive(pid) {
   try {
@@ -177,7 +200,31 @@ export const realIo = {
       marker: existsSync(TRAIN_MARKER),
       trainText: readTrainText(),
       lockBusy: lockBusy(),
+      // 攒着发（lib.mjs 的 batchVerdict，#2797）：引擎这次起来的时刻、发版历史最后一行（上一版退回过就照发）
+      engineSince: activeEnterMs('fleet-engine.service'),
+      historyLast: historyLastLine(),
     };
+  },
+  /**
+   * 这一版要不要停引擎（lib.mjs 的 batchStep）：在用那一版的 deploy/lib/runtime-closure.mjs（和 release.sh 同一份判法），
+   * 两个提交从部署检出里取（readStep 刚 fetch 过主线）。退出码 0 不停、10 要停，别的（算不出、在用那版还没有这个脚本）是 null。
+   */
+  async engineRestart(current, target) {
+    const script = `${RELEASES}/${current}/deploy/lib/runtime-closure.mjs`;
+    if (!existsSync(script))
+      return { restart: null, why: `在用的 ${current.slice(0, 12)} 里还没有引用闭包的脚本` };
+    let r;
+    try {
+      r = run(NODE, [script, '--git', CHECKOUT, '--old', current, '--new', target, '--service', 'engine'], {
+        timeoutMs: 600_000,
+      });
+    } catch (e) {
+      return { restart: null, why: `引用闭包没算成：${e instanceof Error ? e.message : String(e)}` };
+    }
+    const line = String(r.stdout).trim().split('\n').at(-1) ?? '';
+    if (r.code === 0) return { restart: false, why: line };
+    if (r.code === 10) return { restart: true, why: line };
+    return { restart: null, why: `引用闭包没算成（退出码 ${r.code}）：${tail(line || r.stderr)}` };
   },
   /** release.sh 的暂停名单遗留（lib.mjs 的 recoverPaused 判）：在不在、放了多久（文件修改时间距今）、发布锁占没占。读不了的抛。 */
   async pausedLeftover() {
@@ -254,6 +301,52 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
     } finally {
       unlinkSync(tmp);
     }
+  },
+  /**
+   * 开急修单（lib.mjs 的 emergencyStep）：current 那一版的 fleet-api emergency-issue，正文从标准输入喂；它经「引擎」机器人开单、
+   * 过卫生检查、按 key 幂等，最后一行打 { number, url, created }。退出码不是 0、回话认不出都抛（lib.mjs 报警、下一轮再试）。
+   */
+  async fileIssue({ key, title, body }) {
+    const r = run('bash', [FLEET_API, 'emergency-issue', '--key', key, '--title', title, '--json'], {
+      input: body,
+      timeoutMs: 120_000,
+    });
+    if (r.code !== 0)
+      throw new Error(`fleet-api emergency-issue 退出码 ${r.code}：${tail(r.stderr || r.stdout)}`);
+    const line = r.stdout.trim().split('\n').at(-1) ?? '';
+    let got;
+    try {
+      got = JSON.parse(line);
+    } catch {
+      throw new Error(`fleet-api emergency-issue 的回话认不出：${tail(r.stdout)}`);
+    }
+    return got;
+  },
+  /** 脚本副本和在用那一版的原件（lib.mjs 的 installedStep）：没装、在用那一版里没有的给 null；别的读不了抛。 */
+  async readInstalled(current) {
+    const read = (file) => {
+      try {
+        return readFileSync(file, 'utf8');
+      } catch (e) {
+        if (e.code === 'ENOENT') return null;
+        throw new Error(`读不了 ${file}：${e.message}`);
+      }
+    };
+    return INSTALLED_COPIES.flatMap(({ dir, src, files }) =>
+      files.map((f) => ({
+        name: `${dir}/${f}`,
+        installed: read(`${dir}/${f}`),
+        release: read(`${RELEASES}/${current}/${src}/${f}`),
+      })),
+    );
+  },
+  /** 发版进度记录原文（lib.mjs 的 supersededStep）；不在回 null，别的读不了抛。 */
+  async readTrain() {
+    return readTrainText();
+  },
+  /** 在用那一版依赖的 .modules.yaml 原文（lib.mjs 的 depsStep）；读不了抛（不在也抛：发布目录里该有）。 */
+  async readDeps(current) {
+    return readFileSync(`${RELEASES}/${current}/node_modules/.modules.yaml`, 'utf8');
   },
   /** 主线上 ci.yml 最近 CI_RUNS_PAGE 次 push 触发的运行（新的在前）：一轮只问这一次。 */
   async ciRuns() {
@@ -337,14 +430,21 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
     );
     return { code: r.code, out: `${r.stdout}\n${r.stderr}` };
   },
+  /**
+   * 报警（卡住报警级）：走 current 那一版 fleet-api 的 notify raise（统一写入口 upsertAlert，#2729），不直写表；同键原地更新、
+   * 处理过的重新打开。正文从标准输入喂。没记上抛（lib.mjs 记着没发的，下一轮再发）。
+   */
   async alert({ key, title, body }) {
-    sql(
-      `insert into notifications (level, dedupe_key, title, body)
-values ('alert'::notification_level, :'key', :'title', :'body')
-on conflict (dedupe_key) do update
-  set title = excluded.title, body = excluded.body, updated_at = now(), resolved_at = null, resolved_by = null;`,
-      { key, title, body },
+    const r = run(
+      'bash',
+      [FLEET_API, 'notify', 'raise', '--key', key, '--title', title, '--level', 'alert'],
+      {
+        input: body,
+        timeoutMs: 60_000,
+      },
     );
+    if (r.code !== 0)
+      throw new Error(`fleet-api notify raise 退出码 ${r.code}：${tail(r.stderr || r.stdout)}`);
   },
   async resolve(prefix) {
     sql(

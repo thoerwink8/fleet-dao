@@ -1,7 +1,7 @@
 // 工作树清单和一键清理（#1993）：每小时对账那一轮把每棵树的去向记成清单；一键清理跑同一份判据，
-// 有没推的提交、没提交的改动、正被任务或会话用着的一律拒删并写明原因，只删干净、没人用的树。
-// 故意造出的失败：有没推的提交时拒删、有没提交的改动时拒删、正被会话用着时拒删、看不了归谁时拒删、清单存不进库时照实记没做成。
-import type { OpenSessionTree } from '@fleet-dao/db';
+// 正被任务或会话用着的、人以前点过留着的拒删并写明原因；没人用的树都删，有没推的提交、没提交的改动也删（AI 产生的树，决定 0097、#2729）。
+// 故意造出的失败：正被会话用着时拒删、看不了归谁时拒删、清单存不进库时照实记没做成。
+import type { AlertRow, OpenSessionTree } from '@fleet-dao/db';
 import {
   foldCleanupRequests,
   WORKTREE_ACTION,
@@ -113,7 +113,7 @@ function world(over: Partial<WorktreeSweepDeps> = {}) {
 const byTree = (inv: WorktreeInventory) => Object.fromEntries(inv.trees.map((t) => [t.tree, t]));
 
 describe('一轮的清单（sweepWorktrees 带出 inventory）', () => {
-  it('每棵树的去向：在跑、会话在用、拒删（没推、没提交）、认不出；干净没人用的删了、不在清单里', async () => {
+  it('每棵树的去向：在跑、会话在用、认不出的留着；没人用的删了（干净的、有没推提交的、有没提交改动的都删，#2729）、不在清单里', async () => {
     const { deps, removed } = world();
     const part = await sweepWorktrees(deps, null);
     const inv = inventoryOf(part, { trigger: 'hourly', at: NOW, root: ROOT });
@@ -127,20 +127,38 @@ describe('一轮的清单（sweepWorktrees 带出 inventory）', () => {
     expect(t['12-a']?.why).toContain('task:acme/web#12');
     expect(t['13-b']).toMatchObject({ state: 'session', lastSessionAt: session13() });
     expect(t['13-b']?.why).toContain('没结束的会话');
-    expect(t['14-c']).toMatchObject({ state: 'leftover', lastSessionAt: '2026-10-10T08:00:00.000Z' });
-    expect(t['14-c']?.why).toContain('没推的提交 1 个');
-    expect(t['15-d']?.state).toBe('leftover');
-    expect(t['15-d']?.why).toContain('没提交的改动 1 处');
     expect(t.notes).toMatchObject({ state: 'unchecked', what: '认不出' });
-    // 只删了干净、没人用的那一棵
-    expect(removed).toEqual([`${ROOT}/acme_web/16-e`]);
-    expect(inv.removed).toEqual(['acme_web/16-e']);
+    // 没人用的三棵都删了
+    expect([...removed].sort()).toEqual([
+      `${ROOT}/acme_web/14-c`,
+      `${ROOT}/acme_web/15-d`,
+      `${ROOT}/acme_web/16-e`,
+    ]);
+    expect(inv.removed).toEqual(['acme_web/14-c', 'acme_web/15-d', 'acme_web/16-e']);
+    expect(t['14-c']).toBeUndefined();
+    expect(t['15-d']).toBeUndefined();
     expect(t['16-e']).toBeUndefined();
     // 每个受管仓一行，镜像量了；没有镜像写明（不写 0）
     expect(inv.repos).toEqual([
       { repo: 'acme/api', mirror: { state: 'unread', why: '这个仓还没有镜像' } },
       { repo: 'acme/web', mirror: { state: 'ok', bytes: 120 * MIB } },
     ]);
+  });
+
+  it('人以前（#2729 之前）点过「留着」的那棵：照旧留着，清单上记 kept、写明剩什么', async () => {
+    const { deps, removed } = world({
+      alerts: {
+        ...world().deps.alerts,
+        byKey: async (key) =>
+          key === 'worktree:acme_web/14-c'
+            ? ({ dedupeKey: key, resolvedAt: NOW, resolvedBy: 'u_founder' } as unknown as AlertRow)
+            : null,
+      },
+    });
+    const inv = inventoryOf(await sweepWorktrees(deps, null), { trigger: 'hourly', at: NOW, root: ROOT });
+    expect(removed).not.toContain(`${ROOT}/acme_web/14-c`);
+    expect(byTree(inv)['14-c']).toMatchObject({ state: 'kept' });
+    expect(byTree(inv)['14-c']?.why).toContain('没推的提交 1 个');
   });
 
   it('【故意造出看不了归谁】拒删、写没查成，不当成干净的删', async () => {
@@ -151,7 +169,7 @@ describe('一轮的清单（sweepWorktrees 带出 inventory）', () => {
       },
     });
     const inv = inventoryOf(await sweepWorktrees(deps, null), { trigger: 'hourly', at: NOW, root: ROOT });
-    expect(removed).toEqual([]);
+    expect(removed).not.toContain(`${ROOT}/acme_web/16-e`);
     expect(byTree(inv)['16-e']).toMatchObject({ state: 'unchecked' });
     expect(byTree(inv)['16-e']?.why).toContain('看不了归谁');
   });
@@ -230,25 +248,25 @@ describe('一键清理（runWorktreeCleanupRequests）', () => {
     return { deps, audit, removed, saved };
   }
 
-  it('接手一次点击：只删干净没人用的；【故意造出】有没推的提交、没提交的改动、会话在用、任务在跑的一律拒删并写明原因；记操作记录', async () => {
+  it('接手一次点击：没人用的都删（有没推的提交、没提交的改动也删，#2729）；【故意造出】会话在用、任务在跑的拒删并写明原因；记操作记录', async () => {
     const { deps, audit, removed, saved } = cleanup();
     expect(await runWorktreeCleanupRequests(deps)).toBe('done');
-    expect(removed).toEqual([`${ROOT}/acme_web/16-e`]);
+    const gone = ['acme_web/14-c', 'acme_web/15-d', 'acme_web/16-e'];
+    expect([...removed].sort()).toEqual(gone.map((g) => `${ROOT}/${g}`));
     const view = foldCleanupRequests(audit, NOW).requests[0];
     expect(view?.status).toBe('done');
     expect(view?.by).toBe('u_founder');
-    expect(view?.result?.removed).toEqual(['acme_web/16-e']);
+    expect(view?.result?.removed).toEqual(gone);
     const refused = Object.fromEntries((view?.result?.refused ?? []).map((r) => [r.tree, r]));
-    expect(refused['acme_web/14-c']).toMatchObject({ state: 'leftover' });
-    expect(refused['acme_web/14-c']?.why).toContain('没推的提交');
-    expect(refused['acme_web/15-d']?.why).toContain('没提交的改动');
+    expect(refused['acme_web/14-c']).toBeUndefined();
+    expect(refused['acme_web/15-d']).toBeUndefined();
     expect(refused['acme_web/13-b']).toMatchObject({ state: 'session' });
     expect(refused['acme_web/12-a']).toMatchObject({ state: 'running' });
     expect(saved).toHaveLength(1);
     expect(saved[0]?.trigger).toBe('cleanup');
     // 同一次点击不接第二回
     expect(await runWorktreeCleanupRequests(deps)).toBe('idle');
-    expect(removed).toHaveLength(1);
+    expect(removed).toHaveLength(3);
   });
 
   it('没人点、点了太久没人接（作废）：不跑', async () => {
@@ -290,7 +308,7 @@ describe('一键清理（runWorktreeCleanupRequests）', () => {
     const view = foldCleanupRequests(audit, NOW).requests[0];
     expect(view?.status).toBe('failed');
     expect(view?.error).toContain('清单没存成');
-    expect(view?.result?.removed).toEqual(['acme_web/16-e']);
+    expect(view?.result?.removed).toEqual(['acme_web/14-c', 'acme_web/15-d', 'acme_web/16-e']);
   });
 
   it('工作树的根读不了：记没做成，原因原样', async () => {

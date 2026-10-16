@@ -10,10 +10,16 @@ import {
   startRun,
   USAGE_GAVE_UP_PREFIX,
   USAGE_REREAD_MARK,
+  USAGE_TAIL_MARKER,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { runUsageBackfillJob, USAGE_BACKFILL_JOB } from '../../src/jobs/usage-backfill.ts';
+import {
+  meterWindowNote,
+  runUsageBackfillJob,
+  USAGE_BACKFILL_JOB,
+  USAGE_TAIL_LOOKBACK_MS,
+} from '../../src/jobs/usage-backfill.ts';
 import { usageBackfillJob } from '../../src/real/usage-backfill.ts';
 
 let t: TestDb;
@@ -182,7 +188,7 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
       cacheReadTokens: 341543,
       cacheWriteTokens: 67436,
       costUsd: null,
-      usageNote: null,
+      usageNote: meterWindowNote(),
     });
     expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 1 });
     // 补齐了的不再是候选：再跑一遍一笔都不碰（扫的是那一次查询）
@@ -212,15 +218,229 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
     expect((await getRun(t.db, id))?.usageNote).toContain('中转计量还没回填齐');
   });
 
-  it('不补的：不是 Mirasim 路由的、没记会话号的、四样已经齐了的', async () => {
+  it('不补的：不是 Mirasim 路由的、没记会话号的、尾巴已经补过的', async () => {
     await mirasimRun({ routeId: 'c-opus', channel: 'claude-subscription' });
     await mirasimRun({ sessionId: null });
-    await mirasimRun({ inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 });
+    await mirasimRun({
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 3,
+      cacheWriteTokens: 4,
+      usageNote: `${USAGE_TAIL_MARKER}：测试`,
+    });
     const j = job(() => {
       throw new Error('不该读账本');
     });
     await j.run();
     expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
+  });
+
+  it('叫停后 30 秒的调用算进来；没有下一笔时，宽限外的不算。再跑一遍不把这 30 秒再加一次', async () => {
+    const { id } = await mirasimRun();
+    const lines = [
+      call(1, { input: 10, output: 1, cacheRead: 2, cacheWrite: 3, relayMetered: true }),
+      call(0, {
+        ts: new Date(ENDED.getTime() + 30_000).toISOString(),
+        input: 4,
+        output: 5,
+        cacheRead: 6,
+        cacheWrite: 7,
+        relayMetered: true,
+        relayUsd: 0.02,
+      }),
+      call(0, {
+        ts: new Date(ENDED.getTime() + 3 * 60_000).toISOString(),
+        input: 100,
+        output: 100,
+        cacheRead: 100,
+        cacheWrite: 100,
+        relayMetered: true,
+        relayUsd: 9,
+      }),
+    ].join('\n');
+    const j = job(() => lines);
+    await j.run();
+    const row = await getRun(t.db, id);
+    expect(row).toMatchObject({
+      inputTokens: 14,
+      outputTokens: 6,
+      cacheReadTokens: 8,
+      cacheWriteTokens: 10,
+      usageNote: meterWindowNote(),
+    });
+    expect(row?.usageNote?.startsWith(USAGE_TAIL_MARKER)).toBe(true);
+    await j.run();
+    expect(await getRun(t.db, id)).toMatchObject({ inputTokens: 14, outputTokens: 6 });
+    expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
+  });
+
+  it('宽限还没走完先不定案：账本里已经有叫停后 30 秒的调用也不写，宽限过了才算进来', async () => {
+    const { id } = await mirasimRun();
+    const lines = [
+      call(1, { input: 10, output: 1, cacheRead: 0, cacheWrite: 0, relayMetered: true }),
+      call(0, {
+        ts: new Date(ENDED.getTime() + 30_000).toISOString(),
+        input: 4,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        relayMetered: true,
+      }),
+    ].join('\n');
+    await job(() => lines, new Date(ENDED.getTime() + 60_000)).run();
+    expect(await getRun(t.db, id)).toMatchObject({ inputTokens: null, usageNote: null });
+    await job(() => lines, new Date(ENDED.getTime() + 6 * 60_000)).run();
+    expect(await getRun(t.db, id)).toMatchObject({
+      inputTokens: 14,
+      outputTokens: 2,
+      usageNote: meterWindowNote(),
+    });
+  });
+
+  it('下一笔起点之后的调用不算进这一笔（别的会话插在中间也不把窗口提前封上）', async () => {
+    const { id: a } = await mirasimRun();
+    const { id: b } = await mirasimRun({
+      startedAt: new Date(ENDED.getTime() + 20_000),
+      // 收到宽限（结束后 2 分钟）要落在这一轮的「现在」之前，这一轮才定案
+      endedAt: new Date(ENDED.getTime() + 90_000),
+    });
+    await mirasimRun({
+      sessionId: 'claude:11111111-1111-4111-8111-111111111111',
+      startedAt: new Date(ENDED.getTime() + 5_000),
+      endedAt: new Date(ENDED.getTime() + 15_000),
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 1,
+      usageNote: `${USAGE_TAIL_MARKER}：别的会话`,
+    });
+    const lines = [
+      call(1, { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, relayMetered: true }),
+      call(0, {
+        ts: new Date(ENDED.getTime() + 10_000).toISOString(),
+        input: 3,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        relayMetered: true,
+      }),
+      call(0, {
+        ts: new Date(ENDED.getTime() + 30_000).toISOString(),
+        input: 7,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        relayMetered: true,
+      }),
+      call(0, {
+        ts: new Date(ENDED.getTime() + 60_000).toISOString(),
+        input: 1,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        relayMetered: true,
+      }),
+    ].join('\n');
+    await job(() => lines).run();
+    expect(await getRun(t.db, a)).toMatchObject({ inputTokens: 13 });
+    expect(await getRun(t.db, b)).toMatchObject({ inputTokens: 8 });
+  });
+
+  it('已补齐的近 14 天老行按新窗口重读一次，补上尾巴；记号挡住第二次', async () => {
+    expect(USAGE_TAIL_LOOKBACK_MS).toBe(14 * 24 * 60 * 60_000);
+    const { id } = await mirasimRun({
+      inputTokens: 10,
+      outputTokens: 1,
+      cacheReadTokens: 2,
+      cacheWriteTokens: 3,
+      costUsd: 0.5,
+    });
+    const lines = [
+      call(1, { input: 10, output: 1, cacheRead: 2, cacheWrite: 3, relayMetered: true, relayUsd: 0.5 }),
+      call(0, {
+        // 原来按旧窗口已经记进整笔的、结束前 1 秒调用，尾巴不能再加一次。
+        ts: new Date(ENDED.getTime() - 1_000).toISOString(),
+        input: 90,
+        output: 90,
+        cacheRead: 90,
+        cacheWrite: 90,
+        relayMetered: true,
+        relayUsd: 9,
+      }),
+      call(0, {
+        ts: new Date(ENDED.getTime() + 30_000).toISOString(),
+        input: 4,
+        output: 5,
+        cacheRead: 6,
+        cacheWrite: 7,
+        relayMetered: true,
+        relayUsd: 0.25,
+      }),
+      call(0, {
+        ts: new Date(ENDED.getTime() + 3 * 60_000).toISOString(),
+        input: 100,
+        output: 100,
+        cacheRead: 100,
+        cacheWrite: 100,
+        relayMetered: true,
+        relayUsd: 9,
+      }),
+    ].join('\n');
+    const j = job(() => lines);
+    await j.run();
+    const row = await getRun(t.db, id);
+    expect(row).toMatchObject({
+      inputTokens: 14,
+      outputTokens: 6,
+      cacheReadTokens: 8,
+      cacheWriteTokens: 10,
+      costUsd: 0.75,
+    });
+    expect(row?.usageNote?.startsWith(USAGE_TAIL_MARKER)).toBe(true);
+    await j.run();
+    expect(await getRun(t.db, id)).toMatchObject({
+      inputTokens: 14,
+      costUsd: 0.75,
+      usageNote: row?.usageNote,
+    });
+    expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
+  });
+
+  it('尾巴还是占位：先不写记号，回填了再补；结束超过 14 天的已补齐行不再重读', async () => {
+    const { id } = await mirasimRun({
+      inputTokens: 10,
+      outputTokens: 1,
+      cacheReadTokens: 2,
+      cacheWriteTokens: 3,
+    });
+    const waiting = call(0, { ts: new Date(ENDED.getTime() + 30_000).toISOString() });
+    await job(() => waiting).run();
+    expect(await getRun(t.db, id)).toMatchObject({ inputTokens: 10, usageNote: null });
+    const filled = call(0, {
+      ts: new Date(ENDED.getTime() + 30_000).toISOString(),
+      input: 4,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      relayMetered: true,
+    });
+    await job(() => filled).run();
+    expect(await getRun(t.db, id)).toMatchObject({ inputTokens: 14, usageNote: meterWindowNote() });
+
+    const { id: old } = await mirasimRun({
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 1,
+      cacheWriteTokens: 1,
+      endedAt: new Date(ENDED.getTime() - 15 * 24 * 60 * 60_000),
+      startedAt: new Date(ENDED.getTime() - 15 * 24 * 60 * 60_000 - 60_000),
+    });
+    const late = job(() => {
+      throw new Error('不该读账本');
+    });
+    await late.run();
+    expect(await getRun(t.db, old)).toMatchObject({ inputTokens: 1, usageNote: null });
+    expect(late.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
   });
 
   it('账本目录读不了：这一轮没跑成（failed 再抛），不写数也不写原因', async () => {
@@ -303,16 +523,18 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
     expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 1 });
   });
 
-  it('判成没调用但会话刚结束：先不记 0，写明在等账本落盘', async () => {
+  it('判成没调用但会话刚结束：先不记 0，写明在等账本落盘；算还在等，这一轮不记 partial', async () => {
     const { id } = await mirasimRun({ outputTokens: null });
-    await job(
+    const j = job(
       () => '',
       new Date(ENDED.getTime() + 3 * 60_000),
       () => '',
-    ).run();
+    );
+    await j.run();
     const row = await getRun(t.db, id);
     expect(row).toMatchObject({ inputTokens: null, outputTokens: null });
     expect(row?.usageNote).toContain('等 Mirasim 账本落盘再定');
+    expect(j.finished.at(-1)).toEqual({ outcome: 'ok', scanned: 1, found: 0 });
   });
 
   it('有调用但没对上（流量记录里有 2xx、用量账本里没有）：照旧留空，原因写清是哪种没对上，这一轮记 partial', async () => {
@@ -347,7 +569,7 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
       outputTokens: 8,
       cacheReadTokens: 10,
       cacheWriteTokens: 12,
-      usageNote: null,
+      usageNote: meterWindowNote(),
     });
   });
 
@@ -411,7 +633,11 @@ describe('用量补记：经 Mirasim 起的会话按中转计量补齐', () => {
     const z = await getRun(t.db, zero.id);
     expect(z).toMatchObject({ inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
     expect(z?.usageNote).toContain('这一笔没有发出过模型调用');
-    expect(await getRun(t.db, fill.id)).toMatchObject({ inputTokens: 1, outputTokens: 2, usageNote: null });
+    expect(await getRun(t.db, fill.id)).toMatchObject({
+      inputTokens: 1,
+      outputTokens: 2,
+      usageNote: expect.stringContaining(meterWindowNote()),
+    });
     const s = await getRun(t.db, still.id);
     expect(s).toMatchObject({ inputTokens: null });
     expect(s?.usageNote).toMatch(

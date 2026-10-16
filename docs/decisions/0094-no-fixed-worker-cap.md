@@ -23,6 +23,10 @@
 3. **范围不重叠**：同时在跑的工人不改同一批文件。撞了就排队，或交给同一个工人连着做。
 4. **监控（巡检）不占工人名额**；它是脚本为主、只读，不计入上面两条的“工人”。
 
+## 落到代码（#2731，2026-10-16）
+
+第 2 条不再只是文字：派写码工人前由调工具前钩子判（`agents/hooks/capacity.mjs` 读数，`pretool.mjs` 的 `capacityVerdict` 拦，读不到也拦、明说没查成）；收轮前收尾钩子拿同一份读数和 `pnpm work queue` 对账（`agents/hooks/queue-stop.mjs`）。判法只看内存和负载，代码里没有个数上限（`agents/test/rules/pretool.rules.test.ts` 钉着）。
+
 ## 同一个 PR 改的
 
 `agents/hooks/unattended.mjs` 提示语、`agents/skills/commander/SKILL.md`「派活」、0034 头部和第 8 条、决定索引。`docs/design.md` 里讲旧 Fusion 副手的那条不在本次范围，没动。

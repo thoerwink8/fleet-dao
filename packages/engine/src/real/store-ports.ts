@@ -28,6 +28,7 @@ import {
   type Db,
   type EndedPoolRun,
   endedPoolRuns,
+  latestRunOfTask,
   markChannelDisabled,
   modelExecuteTracks,
   modelTierTracks,
@@ -38,16 +39,18 @@ import {
   readQuotaReserveSetting,
   readTaskRoutePin,
   recordStepTiming,
+  recordTaskRound,
   releaseTaskReservation,
   reservePoolSlot,
   resolveAlertWithReason,
   routeFactsForPurpose,
+  runCountOfTask,
   saveTaskSnapshot,
   setChannelFallback,
   type TaskRoutePin,
   upsertAlert,
 } from '@fleet-dao/db';
-import { type HostId, noteOnlyOptions, type OrgKind, type StageKind } from '@fleet-dao/shared';
+import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { routeBreaker } from '../failure/breaker.ts';
@@ -75,6 +78,7 @@ import {
   type OrgPlanView,
   type RouteFacts,
   type RouteRecord,
+  type RouteTier,
   type RouteWaitKind,
   RoutingInputError,
   type RoutingPolicyInput,
@@ -200,7 +204,10 @@ export interface StorePortsDeps {
   reservationTtlMs?: number;
 }
 
-type StorePorts = Pick<EnginePorts, 'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState'> & {
+type StorePorts = Pick<
+  EnginePorts,
+  'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState' | 'recordRound'
+> & {
   /**
    * 这个阶段现在是不是全熔断。和 pickRoute 同一个 loadStage、同一套熔断判定；暂停的账号池同样避开。
    * 不带某一步的模型过滤（提醒是整个阶段的），不调 allOpenAlarm、不写任何表。读不了就抛。
@@ -650,6 +657,11 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       const reserve = input.reserve;
       // 人给这张单这一段指定的模型（task_route_pins）：只有三段的一段来选路（带 reserve）才有；读不到照抛，不当成没指定
       let pin: PinnedModel | null = null;
+      // 验收这一段的派工档（#2725 能力下限）：工作流不带，按这张单最近一次动手记下的档（runs.tier）从库里读；
+      // 读不到照抛，没记过档的（老单、还没动手）为空 = 不设下限
+      let taskTier: RouteTier | undefined;
+      // 加权抽签的种子（决定 0104）：单号:段:第几次选。第几次 = 这一段已经起过几次会话加一：同一次重选结果不变，换路由重来换一个数
+      let allocateSeed: string | undefined;
       /** 读一遍事实、选一次。要预占时，选中的池在预占那一下被别的单占满了抛 SlotTaken（这一次的结论不作数）。 */
       const pickOnce = async (): Promise<PickRouteResult> => {
         const now = clock();
@@ -711,7 +723,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           ...(await carpoolRegistryFor(all.routes)),
         };
         const policy = deps.routingPolicy ? { policy: deps.routingPolicy } : {};
-        const tracks = await tracksFor(input.stage, now, input.tier);
+        const tier = input.tier ?? taskTier;
+        const tracks = await tracksFor(input.stage, now, tier);
         const base = {
           stage: input.stage,
           configured: facts.configured,
@@ -724,7 +737,10 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
           exploreSeed: input.taskId,
           ...orgFacts,
           ...(input.uiWork ? { uiWork: true } : {}),
-          ...(input.tier ? { tier: input.tier } : {}),
+          ...(tier ? { tier } : {}),
+          ...(allocateSeed ? { allocateSeed } : {}),
+          // 人给这张单指定了模型：人的指令，不拿能力下限驳回（#2725）
+          ...(pin ? { floorWaived: `人在驾驶舱给这张单指定了 ${pinLabel(pin)}` } : {}),
           ...(tracks.modelTracks ? { modelTracks: tracks.modelTracks } : {}),
           ...(tracks.modelTierTracks ? { modelTierTracks: tracks.modelTierTracks } : {}),
           ...policy,
@@ -867,6 +883,11 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         );
       }
       pin = pinnedOf(await readTaskRoutePin(db, input.taskId, reserve.segment));
+      allocateSeed = `${input.taskId}:${reserve.segment}:${(await runCountOfTask(db, { taskId: input.taskId, segment: reserve.segment })) + 1}`;
+      if (input.stage === SEGMENT_STAGE.verify && !input.tier) {
+        taskTier =
+          (await latestRunOfTask(db, { taskId: input.taskId, segment: 'manual' }))?.tier ?? undefined;
+      }
       const pinned = pin;
       const said = (r: PickRouteResult): PickRouteResult => {
         if (!pinned) return r;
@@ -936,17 +957,15 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
     },
 
     async raiseAlert(input) {
-      // decision 进「要你拍的」。工作流这一路补不出具体动作，给两个只留言的选项（decision 没有选项写不进）。
-      // stuck、info 仍进提醒：info 只在封号、事件数到线、全熔断这类事上发，量很小。
-      const level = input.level === 'decision' ? 'decision' : 'alert';
+      // 工作流这一路（任务挂起、封号、事件数到线、全熔断……）一律记卡住报警（#2729）：挂起由指挥官点继续、放弃、重做，
+      // 不是掏新钱、删了找不回、只有人能做的事，不进「要你拍」。工作流报的 decision 也按这一级记。
       const { id } = await upsertAlert(db, {
         dedupeKey: input.dedupeKey,
-        level,
+        level: 'alert',
         // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。
         taskId: UUID.test(input.taskId) ? input.taskId : null,
         title: input.title.slice(0, 300),
         body: input.detail,
-        ...(level === 'decision' ? { options: noteOnlyOptions('continue') } : {}),
       });
       return { alertId: id };
     },
@@ -972,6 +991,21 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         runMs: input.runMs,
         outcome: input.outcome,
         ...(input.errorCode ? { errorCode: input.errorCode } : {}),
+      });
+    },
+
+    async recordRound(input) {
+      // 一轮怎么收场的（#2762）：同一条工作流同一个 seq 只记一行，活动重试不重复
+      await recordTaskRound(db, {
+        taskId: input.taskId,
+        workflowId: input.workflowId,
+        seq: input.seq,
+        round: input.round,
+        outcome: input.outcome,
+        tier: input.tier ?? null,
+        firstModel: input.firstModel ?? null,
+        addedLines: input.addedLines ?? null,
+        flowMode: input.flowMode ?? null,
       });
     },
 

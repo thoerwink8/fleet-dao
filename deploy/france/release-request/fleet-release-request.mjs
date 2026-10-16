@@ -1,6 +1,6 @@
 // 驾驶舱「发布到法国」按钮的接活入口（法国，root）：fleet-release-request.path 盯着请求文件，一有就经 fleet-release-request.service 起这里。
 // 判断和流程都在 lib.mjs，这里只接真的 git、GitHub 接口、fleet-api、发布脚本、状态文件。
-// deploy/france.sh（人工档，deploy/lib/human-tier.sh）把本目录装到 /usr/local/lib/fleet-dao/release-request/，别在机器上手改。
+// deploy/france.sh（整套和自动档 --auto-tier 的 setup_release_request_scripts）把本目录装到 /usr/local/lib/fleet-dao/release-request/，别在机器上手改。
 // 手动看一趟：journalctl -u fleet-release-request -n 100；进度在 /srv/fleet-dao-releases/.train/release-train.json。
 import { spawnSync } from 'node:child_process';
 import {
@@ -15,6 +15,7 @@ import {
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
+import { reasonOf } from '../auto-release/lib.mjs';
 import {
   CHECKOUT,
   ENGINE_ENV,
@@ -24,6 +25,7 @@ import {
   HISTORY_FILE,
   LAST_FILE,
   MARKER_FILE,
+  notifyArgv,
   parseDrain,
   parseRepoSwitches,
   RELEASE_SH,
@@ -37,13 +39,8 @@ import {
 const REPO = 'thoerwink8/fleet-dao';
 const CI_WORKFLOW_FILE = 'ci.yml';
 
-const tail = (text, n = 3) =>
-  String(text ?? '')
-    .trim()
-    .split('\n')
-    .slice(-n)
-    .join(' ')
-    .slice(0, 400);
+/** 失败原因：认得出的关键行加尾几行（auto-release/lib.mjs 的 reasonOf，#2728）。 */
+const tail = (text, n = 3) => reasonOf(text, n);
 
 function run(cmd, args, { timeoutMs = 120_000, input } = {}) {
   const r = spawnSync(cmd, args, {
@@ -342,23 +339,22 @@ export const realIo = {
     return parseRepoSwitches(r.stdout);
   },
   /**
-   * 发版提醒：只有卡住、失败、体检没过（note.level = 'decision'）才写一行 notifications，由驾驶舱后端立刻推飞书；
-   * 开始、成功等（note.level 是 null）不写通知。发成功时把之前开着的 release: 要你拍收掉。值一律走 psql -v。
+   * 发版提醒：只有卡住、失败、体检没过（note.level = 'alert'，卡住报警级，不是要你拍）才记一条提醒（重开已撤的同键行）：走 fleet-api
+   * notify raise（统一写入口 upsertAlert，#2729），不直写表。开始、成功等（note.level 是 null）不写通知。
+   * 发成功时把之前开着的 release: 提醒（含老版本记成要你拍的）收掉（只改已有行的处理状态，值走 psql -v）。
    */
   async notify(text, note) {
     if (note.level !== null) {
-      sqlWrite(
-        `insert into notifications (level, dedupe_key, title, body, link)
-values (:'level'::notification_level, :'key', :'title', :'body', '/france')
-on conflict (dedupe_key) do update
-  set title = excluded.title, body = excluded.body, updated_at = now();`,
-        { level: note.level, key: note.key, title: note.title, body: text },
-      );
+      const r = run('bash', notifyArgv(note), { input: text, timeoutMs: 60_000 });
+      if (r.error || r.status !== 0)
+        throw new Error(
+          `fleet-api notify raise 退出码 ${r.status}：${tail(r.error ?? (r.stderr || r.stdout))}`,
+        );
     }
     if (note.kind !== 'done') return;
     sqlWrite(
       `update notifications set resolved_at = now(), resolved_by = 'release-request', updated_at = now()
-where starts_with(dedupe_key, 'release:') and level = 'decision' and resolved_at is null;`,
+where starts_with(dedupe_key, 'release:') and level in ('decision', 'alert') and resolved_at is null;`,
       {},
     );
   },

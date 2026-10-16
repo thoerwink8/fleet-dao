@@ -11,6 +11,8 @@ import {
   type CheckGuardedInput,
   type ColdVerifyInput,
   type ColdVerifyResult,
+  type DecideFlowModeInput,
+  type DecideFlowModeResult,
   type DeliveryRead,
   type GuardedPaths,
   MERGE_POLL_MINUTES,
@@ -72,6 +74,8 @@ export type EngineActivities = PortActivities & {
   selfCheck(input: SelfCheckInput): Promise<SelfCheckResult>;
   /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
   taskSpend(input: TaskSpendInput): Promise<TaskSpendResult>;
+  /** 定这张单走三段还是全程（#2826）：第一次选路之后、第一段动手之前问一次。读不到抛，工作流按三段走。 */
+  decideFlowMode(input: DecideFlowModeInput): Promise<DecideFlowModeResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
   probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
   /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
@@ -97,10 +101,12 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   pickRoute: 'quick',
   recordTiming: 'quick',
   saveTaskState: 'quick',
+  recordRound: 'quick',
   raiseAlert: 'quick',
   removeWorktree: 'git',
   pushBranch: 'git',
   openPr: 'git',
+  updatePrBody: 'git',
   syncMainline: 'git',
   closeIssue: 'git',
   createWorktree: 'setup',
@@ -120,6 +126,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   segmentSettled: 'quick',
   selfCheck: 'setup',
   taskSpend: 'quick',
+  decideFlowMode: 'git',
 };
 
 /** quick 一档一次尝试的限时。 */

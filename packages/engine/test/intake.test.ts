@@ -92,6 +92,26 @@ const bodyWith = (modules: string[], criteria: string[] = ['1. 页面上能看�
     '',
   ].join('\n');
 
+const ISSUE_2032_BODY = bodyWith(
+  ['`packages/api` healthz 的 `deploy_lag` 检查；`deploy/france.sh`'],
+  [
+    '1. 确认落后的是哪些「相关提交」（人工档路径），是否确需整套 `bash /srv/fleet-dao/deploy/france.sh`（或以 root 等价应用）。',
+    '2. 重跑/应用后 healthz `deploy_lag` 回到 `ok:true`（整体是否仍因 #2023 的 github_app 503 另论）。',
+    '3. 若属可接受的短暂窗口或已有意暂缓：在本单注明原因与可接受状态后关单，避免监督反复当新断链开单。',
+    '4. 顺带：恢复指挥官到法国机的 SSH（见 #1775），以便断链时能做最小恢复。',
+  ],
+);
+
+const ISSUE_2082_BODY = bodyWith(
+  ['`packages/api` healthz canary 检查；引擎 canary/全流程巡检'],
+  [
+    '1. 查清 10-14 08:40 那轮 canary 在「记账」失败的具体原因（日志、失败单号、台账写入结果）。',
+    '2. 修好后让 canary 再跑通一轮（或明确「无待验」且 healthz canary 不再因本断点报红）。',
+    '3. healthz 至少不再因 canary_broken「记账」报红（整体是否仍因 #2023/#2032 503 另论）。',
+    '4. 顺带：恢复指挥官到法国机的 SSH（见 #1775），以便断链时能做最小恢复。',
+  ],
+);
+
 /** 没有「已知的模块」一节的老单：场景、原话、怎么算做完。路径检查不因为缺这一节就放行。 */
 const bodyWithoutModules = (
   scene = '创始人要在驾驶舱看到每张单走到哪一步。',
@@ -158,6 +178,8 @@ interface Harness {
   localMarked: number[];
   /** 熔断状态变了推过的事件。 */
   breakerEvents: BreakerEvent[];
+  /** 问过前置单状态的几次，每次问的单号。 */
+  prereqReads: number[][];
 }
 
 /** 一个仓、一张齐全的好单、什么都没派过：改哪一项就能看那一道关。 */
@@ -180,8 +202,11 @@ function harness(
     /** v1 里程碑说明里的先后（单号，按先后）；不给就是没写先后标记。 */
     v1Order?: number[];
     breaker?: BreakerFacts;
+    /** 前置单（不在开着的单列表里的）的真状态；没写的算已关。 */
+    prereqStates?: Record<number, 'open' | 'closed'>;
   } = {},
 ): Harness {
+  const prereqReads: number[][] = [];
   const breakerEvents: BreakerEvent[] = [];
   const localMarked: number[] = [];
   const started: Harness['started'] = [];
@@ -230,6 +255,10 @@ function harness(
     async openPrClaims() {
       return new Map(Object.entries(data.prClaims ?? {}).map(([n, pr]) => [Number(n), pr]));
     },
+    async prerequisiteStates(_repo, numbers) {
+      prereqReads.push([...numbers]);
+      return new Map(numbers.map((n) => [n, data.prereqStates?.[n] ?? 'closed'] as const));
+    },
     async markLocal({ issueNumber }) {
       localMarked.push(issueNumber);
     },
@@ -265,7 +294,7 @@ function harness(
     },
     ...over,
   };
-  return { deps, started, comments, finished, logs, planReads, localMarked, breakerEvents };
+  return { deps, started, comments, finished, logs, planReads, localMarked, breakerEvents, prereqReads };
 }
 
 describe('screenListed · 列表里就能判的几道', () => {
@@ -802,6 +831,70 @@ describe('runIntakeJob · 一轮', () => {
     expect(() => standardPathIn(undefined, rules)).toThrow(/读不到/);
   });
 
+  it('拉单用这个仓自己的标准清单，不用 fleet-dao 本地那份', async () => {
+    const seen: string[] = [];
+    const own = [{ path: 'docs/own-standard.md', why: '这个仓自己的' }];
+    const localOnly = BODY.replace(
+      '- `packages/web/src/pages/`：驾驶舱页面',
+      '- `agents/shared-rules.md`：通用段',
+    );
+    const h = harness(
+      {
+        async standardPaths(repo) {
+          seen.push(`${repo.owner}/${repo.name}`);
+          return own;
+        },
+      },
+      { issues: [issue({ body: localOnly })] },
+    );
+    await runIntakeJob(h.deps);
+    expect(seen).toEqual(['acme/demo']);
+    // agents/shared-rules.md 在 fleet-dao 本地清单里；这个仓的清单没有它，照拉
+    expect(h.started).toHaveLength(1);
+    expect(h.localMarked).toEqual([]);
+
+    const blocked = harness(
+      {
+        async standardPaths(repo) {
+          seen.push(`${repo.owner}/${repo.name}`);
+          return own;
+        },
+      },
+      {
+        issues: [
+          issue({
+            body: BODY.replace('- `packages/web/src/pages/`：驾驶舱页面', '- `docs/own-standard.md`：标准'),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(blocked.deps);
+    expect(blocked.started).toEqual([]);
+    expect(blocked.localMarked).toEqual([12]);
+  });
+
+  it('仓档案缺项：没就绪，不拉单，原因写明缺哪几项', async () => {
+    let listed = 0;
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { language: 'go' } }];
+      },
+      async openIssues() {
+        listed += 1;
+        return { issues: [issue()], openMilestones: [V1, V2] };
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(listed).toBe(0);
+    expect(h.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+    expect(run.why).toContain('没就绪');
+    expect(run.why).toContain('moduleRoots');
+    expect(run.why).toContain('mergeSignals');
+    expect(run.why).toContain('standardPathsFile');
+    expect(run.why).not.toContain('language');
+  });
+
   it('改标准的清单读不到 → 这张单这一轮不拉、不贴标签不留言，记没查成（故意造出失败）', async () => {
     const h = harness({
       async standardPaths() {
@@ -999,6 +1092,21 @@ describe('runIntakeJob · 一轮', () => {
     expect(offDiffKey([{ item: 'a', words: ['截图'] }])).not.toBe(
       offDiffKey([{ item: 'b', words: ['截图'] }]),
     );
+  });
+
+  it.each([
+    ['#2032 真单原文', 2032, ISSUE_2032_BODY, ['healthz', '本单注明', 'SSH']],
+    ['#2082 真单原文', 2082, ISSUE_2082_BODY, ['日志', 'healthz', 'SSH']],
+  ] as const)('%s：换了说法也命中，交给整理会话改写，不起任务', async (_name, number, body, words) => {
+    const h = harness({}, { issues: [issue({ number, body })] });
+    const first = await runIntakeJob(h.deps);
+
+    expect(h.started).toEqual([]);
+    expect(h.comments).toHaveLength(1);
+    expect(h.comments[0]?.body).toContain('是哪一条');
+    for (const word of words) expect(h.comments[0]?.body).toContain(word);
+    expect(first.found).toBe(1);
+    expect(first.outcome).toBe('ok');
   });
 
   it('缺的内容变了 → 键变了，是另一条留言', async () => {
@@ -1418,6 +1526,165 @@ describe('准入 · 验收条、规模、历史失败（#1336）', () => {
   });
 });
 
+describe('准入 · 正文里的「前置：」（#2783）', () => {
+  /** BODY 的场景段开头加一行 */
+  const withPre = (line: string) => BODY.replace('## 场景\n\n', `## 场景\n\n${line}\n\n`);
+  const why = (h: Harness) => {
+    const r = h.finished[0]?.result;
+    return r && 'why' in r ? (r.why ?? '') : '';
+  };
+
+  it('前置单还开着（在开着的单列表里）→ 不拉，原因写「等前置 #N」；不留言、不贴「本机做」；一次也没为它读 GitHub', async () => {
+    const h = harness(
+      {},
+      {
+        issues: [issue({ number: 12, body: withPre('前置：#5（先做它）合并后再做') }), issue({ number: 5 })],
+      },
+    );
+    const run = await runIntakeJob(h.deps);
+    // 5 号自己没有前置，照拉；12 号等它
+    expect(h.started.map((s) => s.issueNumber)).toEqual([5]);
+    expect(h.comments).toEqual([]);
+    expect(h.localMarked).toEqual([]);
+    expect(h.prereqReads).toEqual([]);
+    expect(run.outcome).toBe('ok');
+    expect(why(h)).toContain('waiting_prerequisite×1');
+    expect(why(h)).toContain('#12 等前置 #5');
+    // 日志里也看得到是哪张等哪张
+    expect(h.logs.some((l) => l.text.includes('#12 等前置 #5'))).toBe(true);
+  });
+
+  it('前置单关了 → 照常拉；不在开着的单列表里的前置单一批问一次（几张单、几个前置单也只问一次，去重）', async () => {
+    const h = harness(
+      {},
+      {
+        issues: [
+          issue({ number: 12, body: withPre('前置：#5、#6') }),
+          issue({ number: 13, body: withPre('前置：#6 #7') }),
+        ],
+        prereqStates: { 5: 'closed', 6: 'closed', 7: 'closed' },
+      },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber).sort()).toEqual([12, 13]);
+    expect(h.prereqReads).toEqual([[5, 6, 7]]);
+  });
+
+  it('前置单是开着的 PR（不在开着的单列表里，批量读回 open）→ 不拉', async () => {
+    const h = harness(
+      {},
+      { issues: [issue({ number: 12, body: withPre('前置：#40') })], prereqStates: { 40: 'open' } },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.prereqReads).toEqual([[40]]);
+    expect(why(h)).toContain('#12 等前置 #40');
+  });
+
+  it('几个前置单只有一部分还开着：只写开着的；前置都关了的下一轮照常拉', async () => {
+    const states: Record<number, 'open' | 'closed'> = { 5: 'closed', 6: 'open' };
+    const h = harness(
+      {},
+      { issues: [issue({ number: 12, body: withPre('前置：#5、#6') })], prereqStates: states },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(why(h)).toContain('#12 等前置 #6');
+    expect(why(h)).not.toContain('等前置 #5');
+    states[6] = 'closed'; // 前置合了
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
+  it('【故意造出的失败】前置单开没开读不到 → 按「等前置」算、不拉，记进这一轮的没查成（partial），不当成都关了；没写前置的单照拉', async () => {
+    const h = harness(
+      {
+        async prerequisiteStates() {
+          throw new Error('GraphQL 502');
+        },
+      },
+      { issues: [issue({ number: 12, body: withPre('前置：#5') }), issue({ number: 13 })] },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([13]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#12');
+    expect(run.why).toContain('前置');
+    expect(run.why).toContain('GraphQL 502');
+    expect(h.comments).toEqual([]);
+    expect(h.localMarked).toEqual([]);
+  });
+
+  it('【故意造出的失败】问回来的结果里缺了某个前置单 → 同样算没查成、不拉', async () => {
+    const h = harness(
+      {
+        async prerequisiteStates() {
+          return new Map();
+        },
+      },
+      { issues: [issue({ number: 12, body: withPre('前置：#5') })] },
+    );
+    const run = await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('#5');
+  });
+
+  it('日期前置：北京时间到那天之前不拉，原因写「等到 2026-10-03」，不读 GitHub；到了那天照常拉', async () => {
+    const h = harness({}, { issues: [issue({ number: 12, body: withPre('前置：2026-10-03 复查日') })] });
+    await runIntakeJob(h.deps); // NOW = 2026-10-02 22:00（北京时间）
+    expect(h.started).toEqual([]);
+    expect(h.prereqReads).toEqual([]);
+    expect(why(h)).toContain('#12 等到 2026-10-03');
+    const later = harness(
+      { now: () => new Date('2026-10-02T16:00:00Z') }, // 北京时间 10-03 0 点
+      { issues: [issue({ number: 12, body: withPre('前置：2026-10-03 复查日') })] },
+    );
+    await runIntakeJob(later.deps);
+    expect(later.started.map((s) => s.issueNumber)).toEqual([12]);
+  });
+
+  it('单号和日期同写：前置单关了、日期没到仍不拉；原因两样都写', async () => {
+    const h = harness({}, { issues: [issue({ number: 12, body: withPre('前置：#5 且 2026-10-03') })] });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(why(h)).toContain('#12 等到 2026-10-03');
+  });
+
+  it('不是「前置：」开头的行里写的 #N、代码块里的例子都不算：照拉，不读前置单', async () => {
+    const body = BODY.replace(
+      '## 场景\n\n',
+      '## 场景\n\n顺带看 #5，和 #6 有关。\n\n```\n前置：#7\n```\n\n- 前置：#8\n\n',
+    );
+    const h = harness(
+      {},
+      { issues: [issue({ number: 12, body })], prereqStates: { 5: 'open', 7: 'open', 8: 'open' } },
+    );
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+    expect(h.prereqReads).toEqual([]);
+  });
+
+  it('已经派出过的单不看前置（原因仍是已经派出过）', async () => {
+    const h = harness(
+      {},
+      { issues: [issue({ number: 12, body: withPre('前置：#5') }), issue({ number: 5 })], dispatched: [12] },
+    );
+    await runIntakeJob(h.deps);
+    expect(why(h)).toContain('already_dispatched×1');
+    expect(why(h)).not.toContain('waiting_prerequisite');
+  });
+
+  it('前置排在改工作流、改标准、PR 挂单这些「贴本机做」的关前面：前置没合的单不被提前贴上「本机做」', async () => {
+    const body = withPre('前置：#5').replace('packages/web/src/pages/', '.github/workflows/ci.yml');
+    const h = harness({}, { issues: [issue({ number: 12, body })], prereqStates: { 5: 'open' } });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(h.localMarked).toEqual([]);
+    expect(h.comments).toEqual([]);
+  });
+});
+
 describe('排序 · 版本先后 → 当前版本 → 规模 → 交给引擎 → 失败 → 开单早', () => {
   const FAST = bodyWith(['`packages/web/src/a.ts`']);
   const MEDIUM = bodyWith(['`packages/web/src/`', '`packages/web/test/`']);
@@ -1662,6 +1929,94 @@ describe('熔断', () => {
     await runIntakeJob(h.deps);
     expect(h.breakerEvents).toEqual(['retrip']);
     expect(h.started).toEqual([]);
+  });
+});
+
+describe('仓档案没就绪的提醒（#2839）', () => {
+  const FULL_PROFILE = {
+    language: 'typescript',
+    toolchain: ['pnpm'],
+    testCommand: 'pnpm check',
+    moduleRoots: ['packages/*'],
+    mergeSignals: ['check'],
+    standardPathsFile: 'packages/conventions/standard-paths.json',
+    weight: 1,
+  };
+
+  it('开着接活、档案缺项 → 不拉，推提醒，why 写明缺哪几项（含 language）', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { toolchain: ['pnpm'] } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]?.why).toContain('缺 language');
+  });
+
+  it('档案形状不对（weight 写成 0）→ 不拉，推提醒，why 是 parse 的那句错', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { ...FULL_PROFILE, weight: 0 } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]?.why).toContain('weight');
+  });
+
+  it('开着接活、档案齐 → 照拉，推的是 why 为 null（撤掉）', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: FULL_PROFILE }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+    expect(alerts).toEqual([{ why: null }]);
+  });
+
+  it('「让 AI 接活」关着的仓：档案缺项也不拉、不推提醒', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, autoDispatchSince: null, profile: { toolchain: ['pnpm'] } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(alerts).toEqual([]);
+  });
+
+  it('提醒写不进去：只记 warn 日志，这一轮照常跑完（照起、结局 ok）', async () => {
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: FULL_PROFILE }];
+      },
+      async profileAlert() {
+        throw new Error('库断了');
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+    expect(run.outcome).toBe('ok');
+    expect(h.logs.some((l) => l.level === 'warn' && l.text.includes('仓档案的提醒没写成'))).toBe(true);
   });
 });
 

@@ -8,8 +8,18 @@ import { SEGMENT_KINDS, type SegmentRunView } from './segment-runs.ts';
 /**
  * 输入当量的折法（docs/design.md 第十节「一个 5 小时窗能干多少活」）：输入 1、缓存写 1.25、缓存读 0.1、输出 5。
  * 这是 Claude 的价格比例；别家的会话也按它折——只为拿同一把尺子比各步、各模型花了多少额度，不是钱。
+ * 单任务 token 预算、每日简报的「每合并单输入当量」、驾驶舱的「输入当量」都用这一把（#2859）。
  */
 export const INPUT_EQUIVALENT_WEIGHTS = { input: 1, cacheWrite: 1.25, cacheRead: 0.1, output: 5 } as const;
+
+/**
+ * 单任务 token 预算的默认值（决定 0093，#2859 改成按输入当量算）。查法：法国库 2026-10-16 查近 14 天 346 张单，
+ * 每张单所有会话（runs 按 task_id 汇总）的输入当量（inputEquivalentOf，上面的权重）相加，p95 是 6,715,274，取整到 7,000,000
+ * （p50 161 万、p99 1127 万）。超了停下等人；点「继续」再给一份同样多的。
+ * 此前的 37,000,000 是按四样直接相加的 p95（3899 万）定的；预算改按当量后它永远碰不到，等于关了。
+ * 在 shared 里是因为驾驶舱要写「上限」，和引擎读同一个数。
+ */
+export const DEFAULT_TASK_TOKEN_BUDGET = 7_000_000;
 
 /** 按二十分之一算成整数再除：直接乘 0.1、1.25 会带出 1996.8000000000002 这种尾巴，四舍五入时可能进错位。 */
 const SCALE = 20;

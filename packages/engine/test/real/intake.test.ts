@@ -1,6 +1,7 @@
 // 拉单的真装配（real/intake.ts，#632 S2-4b-3）：库是真的（PGlite 跑真迁移），GitHub 和 Temporal 客户端是假的。
 // 从受管的仓到起任务工作流走一遍：任务行、操作记录、谁要的、工作流编号和起法；重复起、不在白名单、在跑的数读不到各故意造一次。
 import {
+  alertByKey,
   auditLog,
   type Db,
   INTAKE_BREAKER_SETTING,
@@ -26,7 +27,7 @@ import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@te
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../../src/jobs/dispatch-standing.ts';
 import { INTAKE_JOB, runIntakeJob } from '../../src/jobs/intake.ts';
-import { type IntakeGitHub, intakeJob } from '../../src/real/intake.ts';
+import { type IntakeGitHub, intakeJob, reportIntakeProfile } from '../../src/real/intake.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -73,6 +74,15 @@ async function seedWorld(db: Db, over: Seed = {}) {
       name: over.name ?? 'demo',
       testCommand: 'pnpm check',
       autoDispatchSince: over.repoSwitch === undefined ? new Date('2026-09-30T00:00:00Z') : over.repoSwitch,
+      profile: {
+        language: 'typescript',
+        toolchain: ['pnpm'],
+        testCommand: 'pnpm check',
+        moduleRoots: ['packages/*'],
+        mergeSignals: ['merge-gate', 'cold-verify'],
+        standardPathsFile: 'packages/conventions/standard-paths.json',
+        weight: 1,
+      },
     })
     .returning();
   const [founder] = await db
@@ -103,6 +113,8 @@ interface GhCalls {
   planned: number[];
   comments: { issueNumber: number; key: string; body: string }[];
   labeled: { issueNumber: number; label: string }[];
+  /** 问过前置单开没开着的几次，每次的单号。 */
+  stateReads: number[][];
 }
 
 function fakeGh(
@@ -111,13 +123,21 @@ function fakeGh(
     commentCreated?: boolean;
     pulls?: { number: number; body: string }[];
     pullsFail?: boolean;
+    /** 前置单的真状态（没写的算已关）；statesFail 是整批读不到。 */
+    states?: Record<number, 'open' | 'closed'>;
+    statesFail?: boolean;
   } = {},
 ): {
   gh: IntakeGitHub;
   calls: GhCalls;
 } {
-  const calls: GhCalls = { groomed: 0, planned: [], comments: [], labeled: [] };
+  const calls: GhCalls = { groomed: 0, planned: [], comments: [], labeled: [], stateReads: [] };
   const gh = {
+    async readIssueStates(input: { numbers: readonly number[] }) {
+      calls.stateReads.push([...input.numbers]);
+      if (over.statesFail) throw new Error('GraphQL 502');
+      return new Map(input.numbers.map((n) => [n, over.states?.[n] ?? 'closed'] as const));
+    },
     claims: {
       async openPulls() {
         if (over.pullsFail) throw new Error('PR 列表读不到');
@@ -154,6 +174,9 @@ function fakeGh(
     },
     async readSpecDoc() {
       return null;
+    },
+    async readRepoFile() {
+      return { defaultBranch: 'main', commit: 'a'.repeat(40), file: { kind: 'missing' as const } };
     },
     async commentIssue(input: { issueNumber: number; key: string; body: string }) {
       calls.comments.push({ issueNumber: input.issueNumber, key: input.key, body: input.body });
@@ -290,6 +313,42 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     const runs = await t.db.select().from(scheduleRuns);
     expect(runs).toHaveLength(1);
     expect(runs[0]).toMatchObject({ job: 'intake', outcome: 'ok' });
+  });
+
+  describe('正文里的「前置：」（#2783）：开着的单列表里没有的前置单走 GitHub 批量读', () => {
+    const PRE_BODY = BODY.replace('## 场景\n\n', '## 场景\n\n前置：#40、#41（先合）\n\n');
+
+    it('前置单还开着：不起工作流、不建任务行，这一轮结局里写「等前置 #40」；只问了一次', async () => {
+      await seedWorld(t.db);
+      const { gh, calls } = fakeGh({ issues: [groomIssue({ body: PRE_BODY })], states: { 40: 'open' } });
+      const { client, starts } = fakeClient({ running: 0 });
+      const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+      expect(starts).toEqual([]);
+      expect(await t.db.select().from(tasks)).toEqual([]);
+      expect(calls.stateReads).toEqual([[40, 41]]);
+      expect(run.outcome).toBe('ok');
+      expect(run.why).toContain('acme/demo#12 等前置 #40');
+    });
+
+    it('前置单都关了：照常起', async () => {
+      await seedWorld(t.db);
+      const { gh, calls } = fakeGh({ issues: [groomIssue({ body: PRE_BODY })] });
+      const { client, starts } = fakeClient({ running: 0 });
+      const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+      expect(starts).toHaveLength(1);
+      expect(calls.stateReads).toEqual([[40, 41]]);
+      expect(run.outcome).toBe('ok');
+    });
+
+    it('【故意造出的失败】前置单读不到：不起，这一轮记 partial、写明没查成', async () => {
+      await seedWorld(t.db);
+      const { gh } = fakeGh({ issues: [groomIssue({ body: PRE_BODY })], statesFail: true });
+      const { client, starts } = fakeClient({ running: 0 });
+      const run = await runIntakeJob(wire(gh)(client, 'fleet'));
+      expect(starts).toEqual([]);
+      expect(run.outcome).toBe('partial');
+      expect(run.why).toContain('GraphQL 502');
+    });
   });
 
   describe('驾驶舱提需求开的单（母单 #2047 第 B 片）：谁要的认开单时写进库的提出人，不认 GitHub 上的作者', () => {
@@ -960,5 +1019,34 @@ describe('拉单的真装配 · 查工作流没查成（放最后）', { timeout
     expect((await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION)).toEqual(
       [],
     );
+  });
+});
+
+describe('reportIntakeProfile · 仓档案没就绪的提醒（#2839）', () => {
+  const KEY = 'intake-profile:acme/demo';
+  const repo = { owner: 'acme', name: 'demo' };
+
+  it('非空报两次 → 同一个键只有一行、没撤，正文是后一次的', async () => {
+    await reportIntakeProfile(t.db, repo, '缺 language');
+    await reportIntakeProfile(t.db, repo, '缺 language、weight');
+    const rows = (await t.db.select().from(notifications)).filter((r) => r.dedupeKey === KEY);
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.resolvedAt).toBeNull();
+    expect(rows[0]?.title).toBe('acme/demo 仓档案没就绪，拉单不拉这个仓');
+    expect(rows[0]?.body).toContain('缺 language、weight');
+    expect(rows[0]?.body).toContain('fleet-api project set-profile acme/demo --file -');
+  });
+
+  it('非空之后再报 null → resolved_at 有值（撤掉）', async () => {
+    await reportIntakeProfile(t.db, repo, '缺 language');
+    await reportIntakeProfile(t.db, repo, null);
+    const row = await alertByKey(t.db, KEY);
+    expect(row).not.toBeNull();
+    expect(row?.resolvedAt).not.toBeNull();
+  });
+
+  it('一上来就报 null → 不报错，表里没有这一行', async () => {
+    await expect(reportIntakeProfile(t.db, repo, null)).resolves.toBeUndefined();
+    expect(await alertByKey(t.db, KEY)).toBeNull();
   });
 });

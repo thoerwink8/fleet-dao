@@ -16,6 +16,7 @@ import {
   evaluateChecks,
   failureDigest,
 } from './checks.ts';
+import { describeRedJobs } from './ci-failures.ts';
 import { enc, encRef, type RepoRef, repoSlug, unexpected } from './client.ts';
 import type { ActivityContext, Deps } from './deps.ts';
 import { recordEcho } from './echo.ts';
@@ -343,6 +344,8 @@ export interface CiRead {
   evaluation: CiEvaluation;
   /** 这个头上有没有任何检查或工作流运行（判「根本没跑」用）。 */
   anyActivity: boolean;
+  /** 这个头上读到的全部检查（含不在必过名单里的 job）：红了要告诉会话哪几个 job 红了，靠它（#2795）。 */
+  checkRuns: CheckRun[];
 }
 
 export async function requiredChecksFor(
@@ -424,7 +427,7 @@ export async function readCi(
     if (!runs.success) throw unexpected(`读 ${sha.slice(0, 7)} 的工作流运行`, wf.data);
     anyActivity = runs.data.total_count > 0;
   }
-  return { evaluation, anyActivity };
+  return { evaluation, anyActivity, checkRuns };
 }
 
 // —— 等 CI ——
@@ -459,6 +462,8 @@ export type CiWaitResult =
       checks: CheckVerdict[];
       failedChecks: string[];
       digest?: string | undefined;
+      /** 红的 job 名和各自的日志尾巴（日志没取到时写明原因），#2795；给动手的会话当返工意见。 */
+      detail?: string | undefined;
     }
   /** 和主线冲突：GitHub 不给冲突的 PR 起 CI，要先同步主线（C1）。 */
   | { state: 'conflict'; head: string; detail: string }
@@ -621,7 +626,14 @@ export async function waitCi(
         await sleep(confirmRedMs);
         continue;
       }
-      return { state: 'red', head, checks: e.checks, failedChecks: e.failed, digest: failureDigest(e) };
+      return {
+        state: 'red',
+        head,
+        checks: e.checks,
+        failedChecks: [...e.failed, ...e.failedJobs],
+        digest: failureDigest(e),
+        detail: await describeRedJobs(deps, repo, ci.checkRuns, required, ctx.signal),
+      };
     }
     redSeenAt = null;
 

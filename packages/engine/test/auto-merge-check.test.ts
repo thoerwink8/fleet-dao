@@ -336,6 +336,17 @@ describe('开着的 PR 由对账兜底挂上自动合并', () => {
     expect(c.raised).toHaveLength(1);
   });
 
+  it('改标准清单文件不在：当成空清单，不抛错，照常挂', async () => {
+    const w = world({
+      listPrs: async () => [pr()],
+      readStandardPathsFile: async () => null,
+    });
+    const part = await checkAutoMerges(w.deps);
+    expect(part).toMatchObject({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.enabled).toEqual([{ repo: 'acme/widgets', number: 88, nodeId: 'PR_88' }]);
+    expect(w.raised).toEqual([]);
+  });
+
   it('清单认不出：整个仓记没查成（挂不成一张也不挂）、不拿认不出当「没碰改标准」', async () => {
     const w = world({
       listPrs: async () => [pr()],

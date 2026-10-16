@@ -14,7 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { HUMAN_TIER_PATHS } from '../france/auto-release/lib.mjs';
+import { HUMAN_TIER_PATHS, INSTALLED_COPIES, reasonOf } from '../france/auto-release/lib.mjs';
 import {
   EXIT,
   FLEET_API,
@@ -22,6 +22,7 @@ import {
   LAST_FILE,
   LIMITS,
   MAX_REQUEST_BYTES,
+  notifyArgv,
   PHASES,
   parseAlerts,
   parseDrain,
@@ -30,6 +31,7 @@ import {
   parseRequest,
   RELEASE_ALERT_PREFIXES,
   RELEASE_SH,
+  RELEASES,
   REQUEST_DIR,
   REQUEST_FILE,
   releaseMessage,
@@ -40,6 +42,7 @@ import {
   safeReadRequest,
   TRAIN_DIR,
 } from '../france/release-request/lib.mjs';
+import { runChild } from './child.mjs';
 
 const SHA = 'a'.repeat(40);
 const T0 = Date.parse('2026-10-07T12:00:00Z');
@@ -501,11 +504,59 @@ test('【故意造出的失败】发布历史末行是 unhealthy：没成；末�
 });
 
 test('【故意造出的失败】release.sh --check 有红：没成', async () => {
+  let checks = 0;
   const { io, log } = fakeIo({
-    releaseCheck: async () => ({ status: 1, stdout: '', stderr: 'fleet-api 没在跑' }),
+    releaseCheck: async () => {
+      checks += 1;
+      return { status: 1, stdout: '', stderr: 'fleet-api 没在跑' };
+    },
   });
   assert.equal(await runRequest(io), EXIT.failed);
-  assert.match(log.states.at(-1).why, /--check 有红/);
+  assert.match(log.states.at(-1).why, /--check 重试 2 次仍有红/);
+  assert.match(
+    log.states.at(-1).why,
+    /^版本已切上（在用的就是 aaaaaaaaaaaa），只是/,
+    '分清：版本切上了、只是检查没过',
+  );
+  assert.equal(checks, 3, '退避重跑了 2 次（一共 3 次）才判红');
+});
+
+test('【#2728 故意造出的失败】--check 一次读香港 release.json 网络超时：退避重跑，第二次过了就照常往下走，不判失败', async () => {
+  let n = 0;
+  const { io, log } = fakeIo({
+    releaseCheck: async () => {
+      n += 1;
+      return n === 1
+        ? {
+            status: 1,
+            stdout:
+              '红 1 项：\n- 从香港取不到 https://example.invalid/release.json：curl: (28) Connection timed out after 10001 milliseconds',
+            stderr: '',
+          }
+        : { status: 0, stdout: '', stderr: '' };
+    },
+  });
+  assert.equal(await runRequest(io), EXIT.done);
+  assert.equal(n, 2);
+  assert.ok(log.sleeps >= 1, '中间退避过');
+  assert.equal(log.states.at(-1).status, 'done');
+});
+
+test('【#2728】版本没切上的失败原因写明「版本没切上」，和「切上了、只是检查没过」分开', async () => {
+  const { io, log } = fakeIo({
+    historyLast: async () => ({ ok: true, line: `2026-10-07T12:10:00Z ${'b'.repeat(40)} release` }),
+  });
+  assert.equal(await runRequest(io), EXIT.failed);
+  assert.match(log.states.at(-1).why, /^版本没切上：/);
+});
+
+test('【#2728】发版成功收掉之前开着的 release: 失败卡（老版本记成要你拍的、新版本的卡住报警级都收）', () => {
+  const script = read('france/release-request/fleet-release-request.mjs');
+  assert.match(script, /if \(note\.kind !== 'done'\) return;/);
+  assert.match(
+    script,
+    /where starts_with\(dedupe_key, 'release:'\) and level in \('decision', 'alert'\) and resolved_at is null;/,
+  );
 });
 
 test('发版前就关着、发布过程中被人开了：不再关回去，也不再开（发完按发版前记的，关着的保持关，不盖人的操作）', async () => {
@@ -715,7 +766,7 @@ test('【故意造出的失败】发版后新出现一条和这次发版有关�
   assert.equal(engineOns(log).length, 0, '这一趟没关过总开关，不碰');
   assert.equal(log.states.at(-1).status, 'done');
   assert.match(log.pushes.at(-1), /【发版卡住】.*发后体检没通过：没有新异常/);
-  assert.equal(log.notes.at(-1).level, 'decision', '体检没过进「要你拍」');
+  assert.equal(log.notes.at(-1).level, 'alert', '体检没过是卡住报警，不是要你拍（#2728）');
   assert.match(log.pushes.at(-1), /aaaaaaaaaaaa/);
   assert.equal(log.lasts.at(-1).check.ok, false);
 });
@@ -845,8 +896,16 @@ test('【故意造出的失败】发版前异常基线读不到：第 0 步没�
   assert.equal(engineOffs(log).length, 0);
   assert.deepEqual(log.release, []);
   assert.match(log.pushes.at(-1), /【发版失败】aaaaaaaaaaaa 第 0 步「预检」没成/);
-  assert.equal(log.notes.at(-1).level, 'decision', '失败进「要你拍」');
+  assert.equal(log.notes.at(-1).level, 'alert', '失败是卡住报警，不是要你拍（#2728）');
   assert.match(log.pushes.at(-1), /版本还没发/);
+  assert.doesNotMatch(log.pushes.at(-1), /处理好再点/, '不叫人处理好再点：下一轮自动重试');
+  assert.match(log.pushes.at(-1), /下一轮自动重试/);
+  assert.equal(last.untouchedFails, 1, '进度记录里记下同一个提交还没动手就没成了 1 趟');
+  assert.equal(
+    log.notes.at(-1).key,
+    'release:failed:aaaaaaaaaaaa:untouched',
+    '同一个提交只一行，重试改这一行',
+  );
   assert.equal(log.lasts.at(-1).outcome, 'failed');
 });
 
@@ -954,7 +1013,7 @@ test('飞书：开始、成功各推一条，一句话里有目标提交、结�
   );
 });
 
-test('发版提醒分级：开始、成功不写通知（level 为 null，只写进度记录）；卡住、失败进「要你拍」（decision，后端立刻推）；键以 release: 开头、每趟每种不重名', async () => {
+test('发版提醒分级：开始、成功不写通知（level 为 null，只写进度记录）；卡住、失败是卡住报警（alert，不是要你拍，#2728）；键以 release: 开头、每趟每种不重名', async () => {
   const { io, log } = fakeIo();
   assert.equal(await runRequest(io), EXIT.done);
   assert.deepEqual(
@@ -970,7 +1029,7 @@ test('发版提醒分级：开始、成功不写通知（level 为 null，只写
   assert.doesNotMatch(log.notes[0].title, /。/);
   const st = { target: { value: SHA } };
   for (const kind of ['check', 'blocked', 'failed']) {
-    assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, 'decision', kind);
+    assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, 'alert', kind);
   }
   for (const kind of ['start', 'done', 'retry', 'restore', 'aborted']) {
     assert.equal(releaseNote(kind, st, '【x】y。z', new Date(0)).level, null, kind);
@@ -1495,14 +1554,11 @@ test('service 以 root 跑（不写 User=）、跑的是装机装进去的那份
 test('service 的 TimeoutStartSec 比脚本各步的上限加起来还长（不然 systemd 先把它杀了）', () => {
   const m = /^TimeoutStartSec=(\d+)min$/m.exec(read('france/fleet-release-request.service'));
   assert.ok(m, '写了 TimeoutStartSec=N min');
+  // 第 3 步已不再等收尾（#2038），sessionsMs 不占时间；--check 没过退避重跑（#2728）：(1 + checkRetries) 次加中间的退避
+  const checkBudget =
+    (1 + LIMITS.checkRetries) * LIMITS.checkMs + (2 ** LIMITS.checkRetries - 1) * LIMITS.pollMs;
   const need =
-    (LIMITS.sessionsMs +
-      LIMITS.releaseMs +
-      LIMITS.deployMs +
-      LIMITS.checkMs +
-      LIMITS.verifyMs +
-      8 * LIMITS.stepMs +
-      5 * 60_000) /
+    (LIMITS.releaseMs + LIMITS.deployMs + checkBudget + LIMITS.verifyMs + 8 * LIMITS.stepMs + 5 * 60_000) /
     60_000;
   assert.ok(Number(m[1]) >= need, `TimeoutStartSec=${m[1]}min 要不小于 ${need} 分钟`);
 });
@@ -1522,22 +1578,111 @@ test('装机：请求目录归 fleet、750；进度目录归 root、755；是人
   assert.match(france, /^ {2}readback_release_request$/m);
   const autoTier = /^setup_auto_tier\(\) \{\n([\s\S]*?)\n\}/m.exec(france)?.[1] ?? '';
   assert.ok(autoTier.length > 10);
-  assert.doesNotMatch(autoTier, /release_request/, '发布按钮的接活不进自动档');
+  assert.doesNotMatch(autoTier, /setup_release_request$/m, '接活的单元和目录不进自动档');
   // 读回查属主权限
   assert.match(human, /"\$RELEASE_REQUEST_DIR fleet:fleet 750" "\$TRAIN_DIR root:root 755"/);
 });
 
-test('人工档登记：接活的单元和脚本都在 HUMAN_TIER_PATHS 里（改了它，后端 /healthz 才标「装机脚本落后」）', () => {
+test('人工档登记：接活的单元在 HUMAN_TIER_PATHS 里（改了它，后端 /healthz 才标「装机脚本落后」）', () => {
   for (const f of [
     'deploy/france/fleet-release-request.service',
     'deploy/france/fleet-release-request.path',
-    'deploy/france/release-request/lib.mjs',
-    'deploy/france/release-request/session-wait.mjs',
-    'deploy/france/release-request/fleet-release-request.mjs',
   ]) {
     assert.ok(HUMAN_TIER_PATHS.includes(f), `${f} 不在 HUMAN_TIER_PATHS`);
     assert.ok(existsSync(repoFile(f)), `${f} 登记了、仓里却没有`);
   }
+});
+
+test('【#2728】接活脚本是自动档：不在 HUMAN_TIER_PATHS，france.sh --auto-tier 装它、读回它，整套也装；清单和自动发布对账的副本清单一样', () => {
+  const france = read('france.sh');
+  const human = read('lib/human-tier.sh');
+  const body = (text, name) =>
+    new RegExp(`^${name}\\(\\) \\{\\n([\\s\\S]*?)\\n\\}`, 'm').exec(text)?.[1] ?? '';
+  const files = /^RELEASE_REQUEST_FILES=\(([^)]*)\)$/m.exec(france)?.[1].trim().split(/\s+/) ?? [];
+  assert.deepEqual(files, ['lib.mjs', 'session-wait.mjs', 'fleet-release-request.mjs']);
+  for (const f of files) {
+    const path = `deploy/france/release-request/${f}`;
+    assert.ok(
+      !HUMAN_TIER_PATHS.includes(path),
+      `${path} 不该再是人工档（改了要等人重跑整套，修复在法国不生效）`,
+    );
+    assert.ok(existsSync(repoFile(path)), `${path} 仓里没有`);
+  }
+  // 自动档装它（setup_auto_release 之后：它 import ../auto-release/lib.mjs），读回比对它
+  assert.match(body(france, 'setup_auto_tier'), /setup_auto_release\n\s*setup_release_request_scripts\n/);
+  assert.match(body(france, 'readback_auto_tier'), /readback_release_request_scripts/);
+  assert.match(
+    body(france, 'setup_release_request_scripts'),
+    /put_file "\$RELEASE_REQUEST_LIB\/\$f" root:root 644 "\$\(<"\$DEPLOY_DIR\/france\/release-request\/\$f"\)"/,
+  );
+  // 整套里也装（在单元起来之前），人工档的 setup_release_request 不再自己拷脚本
+  assert.match(france, /^ {4}setup_release_request_scripts\n {4}setup_release_request$/m);
+  assert.doesNotMatch(
+    body(human, 'setup_release_request'),
+    /RELEASE_REQUEST_FILES|put_file "\$RELEASE_REQUEST_LIB/,
+  );
+  // 自动发布每轮拿副本和在用那一版比哈希：清单和 france.sh 的一样
+  const copies = INSTALLED_COPIES.find((c) => c.src === 'deploy/france/release-request');
+  assert.deepEqual(copies?.files, files);
+  assert.equal(copies?.dir, '/usr/local/lib/fleet-dao/release-request');
+  const auto = INSTALLED_COPIES.find((c) => c.src === 'deploy/france/auto-release');
+  assert.deepEqual(auto?.files, /^AUTO_RELEASE_FILES=\(([^)]*)\)$/m.exec(france)?.[1].trim().split(/\s+/));
+});
+
+test('【#2728】失败原因保留认得出的关键行：真 Node 的 ERR_MODULE_NOT_FOUND 输出，原因里有缺的包名，不只是尾三行', () => {
+  const missing = 'fleet-missing-pkg-2728';
+  const r = runChild(process.execPath, ['--input-type=module', '-e', `import '${missing}';`]);
+  assert.notEqual(r.status, 0, '真的跑崩了');
+  assert.match(r.stderr, /ERR_MODULE_NOT_FOUND/, '是真 Node 的 ERR_MODULE_NOT_FOUND 输出');
+  const tail3 = r.stderr.trim().split('\n').slice(-3).join(' / ');
+  assert.doesNotMatch(tail3, new RegExp(missing), '尾三行里本来就没有模块名（这正是丢原因的地方）');
+  const got = parseAlerts({ status: r.status, stdout: '', stderr: r.stderr });
+  assert.equal(got.ok, false);
+  assert.match(got.why, new RegExp(`Cannot find package '${missing}'`), got.why);
+  assert.match(got.why, /Node\.js v\d+/, '尾几行照旧带着');
+  assert.match(reasonOf(r.stderr), new RegExp(missing));
+});
+
+test('【#2728】同一个提交发版还没动手就没成：进度记录里连败趟数一趟趟加，换了提交从头数；第 3 趟的提醒写明停下、开急修单', async () => {
+  const broken = async (args) =>
+    args === 'alert show --json'
+      ? {
+          status: 1,
+          stdout: '',
+          stderr:
+            "Error [ERR_MODULE_NOT_FOUND]: Cannot find package 'zod' imported from /x/a.ts\n  code: 'ERR_MODULE_NOT_FOUND'\n}\n\nNode.js v22.23.2",
+        }
+      : { status: 0, stdout: '引擎总开关：开着\n', stderr: '' };
+  let prev = null;
+  const runOnce = async (req = goodRequest()) => {
+    const { io, log } = fakeIo({
+      fleetApi: broken,
+      readRequest: () => ({ kind: 'ok', text: req }),
+      readState: () => ({ ok: true, state: prev }),
+      ciRuns: async () => ({ status: 200, body: ciBody({ head_sha: JSON.parse(req).sha }) }),
+    });
+    assert.equal(await runRequest(io), EXIT.failed);
+    prev = log.states.at(-1);
+    return log;
+  };
+  for (const n of [1, 2, 3]) {
+    const log = await runOnce();
+    assert.equal(prev.untouchedFails, n, `第 ${n} 趟`);
+    assert.equal(prev.phase, 0);
+    assert.match(prev.why, /Cannot find package 'zod'/, '原因里有缺的包名');
+    assert.equal(log.notes.at(-1).key, 'release:failed:aaaaaaaaaaaa:untouched');
+    assert.doesNotMatch(log.pushes.at(-1), /处理好再点/);
+    if (n < 3) assert.match(log.pushes.at(-1), /下一轮自动重试（第 \d 趟/);
+    else assert.match(log.pushes.at(-1), /已连败 3 趟，自动发版停下、开急修单/);
+  }
+  // 换了提交：从头数
+  await runOnce(goodRequest({ sha: 'b'.repeat(40) }));
+  assert.equal(prev.untouchedFails, 1, '换了提交从 1 数起');
+  // 动了手（release.sh 起了）之后没成：不算「还没动手」
+  const { io, log } = fakeIo({ runRelease: async () => ({ status: 1, stdout: '', stderr: 'boom' }) });
+  assert.equal(await runRequest(io), EXIT.failed);
+  assert.equal(log.states.at(-1).untouchedFails, 0, 'release.sh 起了就不是还没动手');
+  assert.equal(log.notes.at(-1).level, 'alert');
 });
 
 test('驾驶舱后端的单元放行请求目录这一处可写，没有放行进度目录（它只读）', () => {
@@ -1554,13 +1699,42 @@ test('接活脚本不碰符号链接目录之外的东西：state、last、marke
   assert.match(FLEET_API, /fleet-api$/);
 });
 
-test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的飞书 webhook，真实 notify 写 notifications（值走 psql -v）', () => {
+test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的飞书 webhook，真实 notify 走 fleet-api notify raise（统一写入口，#2729）', () => {
   const script = read('france/release-request/fleet-release-request.mjs');
   const lib = read('france/release-request/lib.mjs');
   assert.doesNotMatch(script + lib, /FEISHU_WEBHOOK/);
   assert.doesNotMatch(script, /open\.feishu\.cn|FEISHU_PREFIXES/);
-  assert.match(script, /insert into notifications \(level, dedupe_key, title, body, link\)/);
-  assert.match(script, /:'level'::notification_level, :'key', :'title', :'body'/);
+  // #2729：发版脚本（接活、自动发布）不直写 notifications，一律经 fleet-api notify raise → upsertAlert（库里约束和核对只一处）
+  const autoScript = read('france/auto-release/fleet-auto-release.mjs');
+  for (const [name, text] of [
+    ['fleet-release-request.mjs', script],
+    ['release-request/lib.mjs', lib],
+    ['fleet-auto-release.mjs', autoScript],
+  ]) {
+    assert.doesNotMatch(
+      text,
+      /insert\s+into\s+notifications/i,
+      `${name} 里不许直接 insert into notifications`,
+    );
+  }
+  assert.match(script, /notifyArgv\(note\)/);
+  assert.match(autoScript, /notify', 'raise'/);
+  assert.deepEqual(
+    notifyArgv({ key: 'release:failed:aaaaaaaaaaaa:1', title: '【发版失败】', level: 'alert' }),
+    [
+      `${RELEASES}/current/packages/api/bin/fleet-api`,
+      'notify',
+      'raise',
+      '--key',
+      'release:failed:aaaaaaaaaaaa:1',
+      '--title',
+      '【发版失败】',
+      '--level',
+      'alert',
+      '--link',
+      '/france',
+    ],
+  );
   assert.match(script, /resolved_by = 'release-request'/);
   assert.match(script, /note\.level !== null/, '开始、成功（level 为 null）不写通知');
   assert.doesNotMatch(script, /release:start:/);

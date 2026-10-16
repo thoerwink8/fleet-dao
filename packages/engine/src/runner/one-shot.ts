@@ -20,7 +20,7 @@
 // 11. **开跑那一行就是占上池的名额（#757）**：选路时预占的名额（reservationId）交给 runs.start，同一下换成这一行；没预占着、
 //    池又满了，start 抛 NoSlotError，这里报 NO_SLOT、不起会话（不是库写不进，别当成 RUN_START_FAILED）。没开跑就收场的那几条路
 //    （内存放不下、切号停下）不碰预占：内存放不下的调用方隔一会儿再来，名额还给它占着；放不放由调用方收场时定。
-// 12. **脱开引擎跑（input.detach，#2238，只有动手段给）**：Spawner 交回 detached（引擎要走了、会话没停）就抛 OneShotDetached，
+// 12. **脱开引擎跑（input.detach，#2238，动手段和一家验的冷验收给（#2848））**：Spawner 交回 detached（引擎要走了、会话没停）就抛 OneShotDetached，
 //    开跑那一行不收、不落盘——会话还在跑，下一个引擎带上 attach（原来的 runId、起的时刻）再调一次接回：不过内存准入、不再开跑，
 //    时限只剩原来的减去已经跑掉的，结局照常记到原来那一行。
 //
@@ -101,7 +101,7 @@ export interface OneShotInput {
   /** 选路那句「为什么派它」（写进 runs.route_why）。不经选路的不给。 */
   routeWhy?: string;
   /**
-   * 交给 Spawner 的脱开引擎跑的那一套（#2238，SpawnCommand.detach 原样交下去）：只有动手段给。给了，引擎要走时 Spawner 交回
+   * 交给 Spawner 的脱开引擎跑的那一套（#2238，SpawnCommand.detach 原样交下去）：动手段和一家验的冷验收给（#2848）。给了，引擎要走时 Spawner 交回
    * detached，这里抛 OneShotDetached（开跑那一行不收、不落盘）。attach 时 runId 必给。
    */
   detach?: { attach?: { startedAt: string } };
@@ -217,8 +217,8 @@ export interface SpawnCommand {
   /** 会话过程每一条（指挥官会话流式推给页面用）：按流里的先后给，抛了只记日志、不影响会话。 */
   onTranscript?: (entry: TranscriptEntry) => void;
   /**
-   * 脱开引擎跑（#2238，只有动手段给）：执行方式支持的（命令行那几家），会话输入输出走收发目录、引擎要走时放手（交回 detached）；
-   * attach = 接回上一个引擎放手的那个会话，不起进程。Mirasim 不支持，照旧管道跑、引擎要走时照旧被停。
+   * 脱开引擎跑（#2238，动手段和一家验的冷验收给，#2848）：执行方式支持的（命令行那几家，和 Mirasim：#2815），会话输入输出走收发目录（Mirasim 只放交接单）、引擎要走时放手
+   * （交回 detached）；attach = 接回上一个引擎放手的那个会话，不起进程。
    * detachable 在定了「脱开跑」、交给驱动之前调：发布排空不再等它、不再停它。
    */
   detach?: { attach?: boolean; detachable?: () => void };

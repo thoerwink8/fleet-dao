@@ -1,5 +1,5 @@
 // 驾驶舱 e2e 的偶发失败（决定 0093）：首跑红、重试过了的用例 Playwright 标成 flaky，这一轮不算红（retries=1，packages/web/e2e/playwright.config.ts）。
-// 同一条用例在近 10 轮主线 e2e 里首跑红到 2 次就算「常偶发」：开一张单（限期修、带最近几次失败的链接），单里写明把它加进隔离集
+// 同一条用例在近 10 轮主线 e2e 里偶发（首跑红、同一次运行里重试才过）到 2 次就算「常偶发」；重试也红的是真红，不算（#2735）。常偶发的开一张单（限期修、带最近几次失败的链接），单里写明把它加进隔离集
 // （packages/web/e2e/quarantine.json：照跑、照报，不挡这一轮；ci.yml 的 e2e job 跳过它们、e2e-quarantine.yml 每天单跑，按它挑用例的是 packages/web/e2e/support/quarantine.ts）。
 // 先判整轮（#2499）：一轮里首跑红的用例超过这一轮用例数的一半、或报告里有全局准备/备库的错，这轮记「整轮坏了」，不计入任何用例的次数，
 // 只汇成一张固定标题的「主线 e2e 整轮坏了」单（同一时间只一张），免得环境坏一次就给每条用例各开一张偶发单。
@@ -99,20 +99,25 @@ export function isBrokenRound(run: RunOutcomes): boolean {
 
 export interface FlakyFinding {
   key: TestKey;
-  /** 窗口里首跑红（偶发或真红）的轮数。 */
+  /** 窗口里偶发（同一次运行里首跑红、重试才过）的轮数。 */
   bad: number;
   /** 窗口里跑了这条用例的轮数。 */
   ran: number;
-  /** 首跑红的那几轮的链接，新的在前。 */
+  /** 偶发的那几轮的链接，新的在前。 */
   urls: string[];
 }
 
 export const FLAKY_WINDOW = 10;
 export const FLAKY_THRESHOLD = 2;
+/** 一轮里达阈值的用例超过这么多条：只开一张汇总单，不逐条开（#2735）。 */
+export const FLAKY_SUMMARY_OVER = 5;
+/** 一次扫描最多新开几张单（整轮坏了、汇总、逐条偶发都算）：多出来的这次不开，下次扫描再说（#2735）。 */
+export const MAX_NEW_ISSUES = 3;
 
 /**
- * runs 是新的在前的若干轮（调用方给近 FLAKY_WINDOW 轮）。数每条用例首跑红的轮数（偶发和真红都算：真红是还没修的，
- * 偶发是重试才过的），达 threshold 的列出来。只真红过一次、其余都过的不算（那是改坏了又修好了）。
+ * runs 是新的在前的若干轮（调用方给近 FLAKY_WINDOW 轮）。数每条用例偶发的轮数，达 threshold 的列出来。
+ * 只数 `flaky`（同一次运行里首跑红、重试才过）：真红（`failed`，重试也红）是改坏了，红在主线 CI 上、由提交的人修，
+ * 不是偶发——原来把它也数进去，真坏一次就按用例逐条开单（10-15 起机器人开了 253 张，#2735）。
  */
 export function flakyTests(runs: readonly RunOutcomes[], threshold = FLAKY_THRESHOLD): FlakyFinding[] {
   const tally = new Map<string, FlakyFinding>();
@@ -122,7 +127,7 @@ export function flakyTests(runs: readonly RunOutcomes[], threshold = FLAKY_THRES
       if (outcome === 'skipped') continue;
       const f = tally.get(id) ?? { key, bad: 0, ran: 0, urls: [] };
       f.ran++;
-      if (outcome === 'flaky' || outcome === 'failed') {
+      if (outcome === 'flaky') {
         f.bad++;
         f.urls.push(run.url);
       }
@@ -174,6 +179,9 @@ export const issueTitle = (k: TestKey): string => `e2e 偶发：${keyText(k)}`;
  */
 export const BROKEN_ROUND_TITLE = '主线 e2e 整轮坏了';
 
+/** 一轮里达阈值的用例超过 FLAKY_SUMMARY_OVER 条时那张汇总单的标题：固定，同一时间只一张（认单靠它）。 */
+export const FLAKY_SUMMARY_TITLE = 'e2e 偶发：多条用例达阈值（汇总）';
+
 /** 自动开的单贴的类别：引擎拉单要类别标签（对账也查），e2e 坏了都是缺陷。 */
 export const ISSUE_KIND = '缺陷';
 
@@ -219,12 +227,31 @@ export function brokenRoundBody(urls: readonly string[]): string {
   });
 }
 
-/** 一件要做的事：开新单，或给已开着的单留言补新的轮链接，或留言后关单（整轮坏的已恢复），或已有单不用动。 */
+/** 汇总单的正文：达阈值的每条用例、偶发次数和最近一轮的链接。 */
+export function flakySummaryBody(findings: readonly FlakyFinding[], until: string): string {
+  return issueSections({
+    scene: [
+      `近 ${FLAKY_WINDOW} 轮主线 e2e 里有 ${findings.length} 条用例偶发（同一次运行里首跑红、重试才过）达到阈值（${FLAKY_THRESHOLD} 次）。超过 ${FLAKY_SUMMARY_OVER} 条一起出现多半是同一个根子（时序、夹具、环境），所以只开这一张汇总单，不逐条开。**限期 ${until} 前修掉。**`,
+      '',
+      ...findings.map(
+        (f) => `- \`${keyText(f.key)}\`：${f.bad}/${f.ran}，最近一次 ${f.urls[0] ?? '（没有链接）'}`,
+      ),
+    ],
+    modules: ['`packages/web/e2e/`', '`packages/web/e2e/quarantine.json`'],
+    done: [
+      '找到这批用例共同的偶发根子并修掉（改用例、夹具或页面，不为凑绿放宽断言）；修不完的放进隔离集并各自开单限期',
+      '下一次 `e2e-flaky.yml` 扫描达阈值的用例不超过 5 条',
+    ],
+  });
+}
+
+/** 一件要做的事：开新单，或给已开着的单留言补新的轮链接，或留言后关单（整轮坏的已恢复），或已有单不用动，或这次超了开单上限、下次再开。 */
 export type IssueAction =
   | { kind: 'create'; title: string; body: string; labels: string[]; label: string }
   | { kind: 'comment'; number: number; body: string; label: string }
   | { kind: 'close'; number: number; body: string; label: string }
-  | { kind: 'exists'; label: string };
+  | { kind: 'exists'; label: string }
+  | { kind: 'deferred'; title: string; label: string };
 
 export interface OpenIssue {
   number: number;
@@ -237,7 +264,8 @@ export interface OpenIssue {
  * 近几轮（新的在前）→ 要开/留言/关的单。「整轮坏了」只看最新一段：最新一轮是整轮坏的，才开那张固定标题的单
  * （已有开着的就只补没写过的轮链接），链接只列从最新往回连着坏的几轮；最新一轮是好的就不开，
  * 已有开着的「整轮坏了」单则留言关掉（再坏会重开）。没有任何一轮时不动（读不到不当成已恢复）。
- * 整轮坏了的轮不计入偶发；其余轮里首跑红达阈值的用例各开一张偶发单，同标题已有开着的就不重开（判法不变）。
+ * 整轮坏了的轮不计入偶发；其余轮里偶发达阈值的用例各开一张偶发单，同标题已有开着的就不重开；达阈值的超过
+ * FLAKY_SUMMARY_OVER 条只开（或补）一张汇总单。一次最多新开 MAX_NEW_ISSUES 张（capCreates），多的下次扫描再开（#2735）。
  */
 export function planIssues(
   runs: readonly RunOutcomes[],
@@ -282,22 +310,71 @@ export function planIssues(
       );
     }
   }
-  for (const f of flakyTests(runs)) {
-    const title = issueTitle(f.key);
-    if (open.some((i) => i.title === title)) {
-      actions.push({ kind: 'exists', label: `已有开着的单：${title}（${f.bad}/${f.ran}）` });
-      continue;
+  const findings = flakyTests(runs);
+  if (findings.length > FLAKY_SUMMARY_OVER) {
+    // 一轮里达阈值的太多：多半是同一个根子，只开（或补）一张汇总单，不逐条开
+    const summary = open.find((i) => i.title === FLAKY_SUMMARY_TITLE);
+    if (!summary) {
+      actions.push({
+        kind: 'create',
+        title: FLAKY_SUMMARY_TITLE,
+        body: flakySummaryBody(findings, until),
+        labels: [ISSUE_KIND],
+        label: `开了单：${FLAKY_SUMMARY_TITLE}（${findings.length} 条）`,
+      });
+    } else {
+      const fresh = findings.filter((f) => !(summary.body ?? '').includes(keyText(f.key)));
+      actions.push(
+        fresh.length > 0
+          ? {
+              kind: 'comment',
+              number: summary.number,
+              body: [
+                '又有用例达到偶发阈值：',
+                ...fresh.map(
+                  (f) => `- \`${keyText(f.key)}\`：${f.bad}/${f.ran}，最近一次 ${f.urls[0] ?? ''}`,
+                ),
+              ].join('\n'),
+              label: `${FLAKY_SUMMARY_TITLE}：补 ${fresh.length} 条到 #${summary.number}`,
+            }
+          : { kind: 'exists', label: `已有开着的单：${FLAKY_SUMMARY_TITLE}（#${summary.number}）` },
+      );
     }
-    const quarantined = quarantine.some((q) => keyText(q) === keyText(f.key));
-    actions.push({
-      kind: 'create',
-      title,
-      body: issueBody(f, until, quarantined),
-      labels: [ISSUE_KIND],
-      label: `开了单：${title}（${f.bad}/${f.ran}）`,
-    });
+  } else {
+    for (const f of findings) {
+      const title = issueTitle(f.key);
+      if (open.some((i) => i.title === title)) {
+        actions.push({ kind: 'exists', label: `已有开着的单：${title}（${f.bad}/${f.ran}）` });
+        continue;
+      }
+      const quarantined = quarantine.some((q) => keyText(q) === keyText(f.key));
+      actions.push({
+        kind: 'create',
+        title,
+        body: issueBody(f, until, quarantined),
+        labels: [ISSUE_KIND],
+        label: `开了单：${title}（${f.bad}/${f.ran}）`,
+      });
+    }
   }
-  return actions;
+  return capCreates(actions, MAX_NEW_ISSUES);
+}
+
+/** 一次最多新开 max 张单：按顺序（整轮坏了、汇总或逐条偶发在前的先开），多出来的改成「这次不开、下次再说」，留言、关单不受限。 */
+export function capCreates(actions: readonly IssueAction[], max = MAX_NEW_ISSUES): IssueAction[] {
+  let created = 0;
+  return actions.map((a) => {
+    if (a.kind !== 'create') return a;
+    if (created < max) {
+      created++;
+      return a;
+    }
+    return {
+      kind: 'deferred',
+      title: a.title,
+      label: `这次不开：${a.title}（一次扫描最多新开 ${max} 张，下次扫描还达阈值再开）`,
+    };
+  });
 }
 
 /** 限期：今天起 7 天。 */
@@ -309,13 +386,13 @@ export function issueBody(f: FlakyFinding, until: string, quarantined: boolean):
   const entry = JSON.stringify({ file: f.key.file, title: f.key.title, issue: 0, until });
   return issueSections({
     scene: [
-      `驾驶舱 e2e 的用例 \`${keyText(f.key)}\` 在近 ${FLAKY_WINDOW} 轮主线 e2e 里首跑红了 ${f.bad} 次（跑了 ${f.ran} 次），达到偶发阈值（${FLAKY_THRESHOLD} 次，决定 0093）。**限期 ${until} 前修掉。**`,
+      `驾驶舱 e2e 的用例 \`${keyText(f.key)}\` 在近 ${FLAKY_WINDOW} 轮主线 e2e 里偶发（首跑红、重试才过）${f.bad} 次（跑了 ${f.ran} 次），达到偶发阈值（${FLAKY_THRESHOLD} 次，决定 0093）。**限期 ${until} 前修掉。**`,
       '',
       quarantined
         ? '它已经在隔离集（`packages/web/e2e/quarantine.json`）里：照跑、照报，不挡发版。'
         : `先把它放进隔离集（\`packages/web/e2e/quarantine.json\` 的 tests 里加一条，issue 填本单号），放进去后照跑、照报，不挡发版：\n\n\`\`\`json\n${entry}\n\`\`\``,
       '',
-      '最近首跑红的几轮：',
+      '最近偶发的几轮：',
       ...f.urls.map((u) => `- ${u}`),
     ],
     modules: [`\`packages/web/e2e/specs/${f.key.file}\``, '`packages/web/e2e/quarantine.json`'],

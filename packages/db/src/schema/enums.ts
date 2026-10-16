@@ -1,6 +1,7 @@
 // 库里的枚举。值表和 @fleet-dao/shared 的联合类型逐一对齐：少写或多写一个值，tsc 当场报错。
 import type {
   BillingKind,
+  DecisionReason,
   HostId,
   OrgKind,
   QuotaStatus,
@@ -153,6 +154,13 @@ export const routeProbeState = pgEnum('route_probe_state', ROUTE_PROBE_STATES);
 export const userRole = pgEnum('user_role', ['founder', 'collaborator', 'bot']);
 /** 通知三级：要人拍 / 卡住报警 / 日报。 */
 export const notificationLevel = pgEnum('notification_level', ['decision', 'alert', 'daily']);
+/** 「要你拍」的原因（#2729）：掏新钱 / 删了找不回 / 只有人能做；只有 decision 级带，CHECK 钉着。 */
+export const DECISION_REASON_VALUES = valuesOf<DecisionReason>()([
+  'new-money',
+  'irreversible-delete',
+  'human-only',
+]);
+export const decisionReason = pgEnum('decision_reason', DECISION_REASON_VALUES);
 /** 谁做的：人 / AI 帅位 / 引擎 / 会话里的 AI / 服务器上的运维脚本（fleet-api 命令行）。 */
 export const actorKind = pgEnum('actor_kind', ['user', 'ai', 'engine', 'agent', 'ops']);
 /** 经哪里做的。 */

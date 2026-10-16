@@ -1,6 +1,8 @@
 // 主页三块（决定 0093）的数据怎么挑、怎么写成一行：要你拍的、在跑的、上线了的。全是现成接口拼的，不新造后端：
 // - 要你拍的：GET /notifications?status=open 里 decision 级（四类人闸）加看门狗报进来的卡住报警（去重键 watchdog: 开头）；
 //   拍过了、但这条要留着的（选了「先停着」这类 keepsOpen）不再摆出来——已经拍过，不是还要拍。
+//   看门狗的卡不给人点「处理」：报警自己修、自己撤。这一行只写谁在修（handling.who：引擎、指挥官会话，或后端写的「PR #号」）
+//   和开了多久、修了多久；阶段是没人在修就写「还没人接」。整页谁在修没算成时不编成没人接。
 // - 在跑的：GET /home 的 running（法国引擎的单）加 GET /nodes/sessions（本机会话，主会话一行，子代理并进它那一行）。
 // - 上线了的：GET /france/released-commits（法国切上去的主线提交，新的在前）加 GET /home 的 done（最近合并的 PR）。
 //   一个提交是一版；它的标题就是合进主线那个 PR 的标题（末尾「(#号)」），同一版还带了哪些 PR 按合并时刻落在上一版和这一版之间算。
@@ -62,6 +64,57 @@ export function askLine(n: Notification): { question: string; pick: string | nul
 }
 
 export { NO_OPTIONS_TEXT };
+
+/** 看门狗这一行：有人在修、还没人接，或谁在修没查成。 */
+export type WatchdogRepairState = 'fixing' | 'waiting' | 'unknown';
+
+export interface WatchdogRepair {
+  state: WatchdogRepairState;
+  /** 谁在修。还没人接、没查成是 null。 */
+  who: string | null;
+  /** 这条报警开了多久（从记下的时刻算）。 */
+  openFor: string;
+  /** 这一轮修了多久（从 handling.since 算）。还没人接、没查成没有。 */
+  fixingFor: string | null;
+  /** 一行给人看的。 */
+  text: string;
+  /** 悬停全文。 */
+  title: string;
+}
+
+/**
+ * 看门狗的卡写成一行：谁在修、修了多久、开了多久。
+ * who 照后端原文（法国引擎、指挥官会话，或「PR #号」）。阶段是没人在修：写「还没人接」。
+ * 有阶段但没有谁：照阶段原文，不编成没人接。这条没有 handling：整页没算成就写原因，否则写「谁在修没查到」。
+ */
+export function watchdogRepair(n: Notification, now: number, problem?: string): WatchdogRepair {
+  const openFor = formatDuration(Math.max(0, now - Date.parse(n.createdAt)));
+  const h = n.handling;
+  const titleOf = (text: string) => {
+    const extra = [h?.line, ...(h?.problems ?? [])].filter((s) => s && s !== text);
+    return extra.length > 0 ? `${text}（${extra.join(' · ')}）` : text;
+  };
+  if (!h) {
+    const why = problem ?? '谁在修没查到';
+    const text = `${why} · 开了 ${openFor}`;
+    return { state: 'unknown', who: null, openFor, fixingFor: null, text, title: text };
+  }
+  if (h.stage === 'silenced') {
+    const text = `${h.who ? `${h.who}已静默` : h.stageText} · 开了 ${openFor}`;
+    return { state: 'unknown', who: null, openFor, fixingFor: null, text, title: titleOf(text) };
+  }
+  if (h.stage === 'unclaimed' || h.stage === 'waiting_founder' || !h.who) {
+    if (h.stage === 'unclaimed' || h.stage === 'waiting_founder') {
+      const text = `还没人接 · 开了 ${openFor}`;
+      return { state: 'waiting', who: null, openFor, fixingFor: null, text, title: titleOf(text) };
+    }
+    const text = `${h.stageText} · 开了 ${openFor}`;
+    return { state: 'unknown', who: null, openFor, fixingFor: null, text, title: titleOf(text) };
+  }
+  const fixingFor = formatDuration(Math.max(0, now - Date.parse(h.since)));
+  const text = `${h.who}在修 · 修了 ${fixingFor} · 开了 ${openFor}`;
+  return { state: 'fixing', who: h.who, openFor, fixingFor, text, title: titleOf(text) };
+}
 
 function firstLine(text: string): string {
   return (text.split('\n').find((l) => l.trim() !== '') ?? '').trim();

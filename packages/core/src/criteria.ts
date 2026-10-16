@@ -64,7 +64,7 @@ interface Block {
 /**
  * 需求文档里「怎么算做完」那一节的逐条原文。一条 = 一个一级列表项连同它的续行（换行变一个空格，照 Markdown 显示出来的样子），
  * 没写成列表的一段话也算一条；一模一样的两条只留一条（验证模型逐条答，重复的会被判成「一条答了两遍」）。HTML 注释、
- * 节里的小标题不算一条。找标题的办法：去掉加粗、反引号后以「怎么算做完」开头的第一个标题，到下一个同级或更高的标题为止。
+ * 节里的小标题不算一条。找标题的办法：去掉加粗、反引号后以「怎么算做完」开头的最后一个标题，到下一个同级或更高的标题为止。
  */
 export function criteriaOf(markdown: string): { ok: string[] } | { error: string } {
   const text = markdown
@@ -81,10 +81,10 @@ export function criteriaOf(markdown: string): { ok: string[] } | { error: string
       continue;
     }
     const h = inFence ? null : HEADING.exec(line);
-    if (h?.[1] && titleKey(h[2] ?? '').startsWith('怎么算做完')) {
+    if (h?.[1] && titleKey(h[2] ?? '').startsWith('怎么算做完') && (start < 0 || h[1].length === level)) {
       start = i + 1;
       level = h[1].length;
-      break;
+      // 整理会话只能在正文末尾追加；最后一个「怎么算做完」是替代条。
     }
   }
   if (start < 0) return { error: '需求文档里没有「## 怎么算做完」一节' };

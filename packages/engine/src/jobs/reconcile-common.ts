@@ -1,7 +1,7 @@
 // 每小时对账（jobs/hourly-reconcile.ts）这几部分共用的：读 Temporal 的口子、读写提醒的口子、每部分的结局，
 // 写给人看的北京时间和时长。
 import type { AlertRow } from '@fleet-dao/db';
-import type { DecisionExecution, DecisionOption, StageKind } from '@fleet-dao/shared';
+import type { DecisionExecution, DecisionOption, DecisionReason, StageKind } from '@fleet-dao/shared';
 import { STAGE_NAMES } from '../routing/names.ts';
 
 /** 撤提醒、写再提醒时记的「谁」（notifications.resolved_by、操作记录的 actor_id）。 */
@@ -53,6 +53,8 @@ export interface AlertStore {
     link?: string | undefined;
     /** 「要你拍」的选项：decision 级至少两项（落库时核）；alert 不带。 */
     options?: readonly DecisionOption[] | undefined;
+    /** 「要你拍」的原因：decision 级必带（掏新钱、删了找不回、只有人能做，#2729；落库时核）；alert 不带。 */
+    reason?: DecisionReason | undefined;
   }): Promise<void>;
   /** 只在这个键还没有时插一条；有了（开着、处理过都算）不动。 */
   insertOnce(input: {

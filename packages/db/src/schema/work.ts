@@ -1,5 +1,5 @@
 // 干活的记录：仓、需求、子任务、会话、叫停请求、进度、追问、人闸批准、状态变化、PR 镜像、需求文档索引。
-import type { TaskExecutor } from '@fleet-dao/shared';
+import type { FlowMode, FlowSource, TaskExecutor, VerifyRejectClass } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -43,9 +43,17 @@ export const repos = pgTable(
      * 引擎开完 PR 直接合并。随时能改，工作流每次走到等 CI 之前现读，不在拉单时定死。
      */
     ciPolicy: text('ci_policy').notNull().default('force'),
+    /** GitHub 上这个仓的编号（REST 的 id）：仓改名、转主人照样认得（design 15.7 第 1 条）。老行没填是空。 */
+    githubId: bigint('github_id', { mode: 'number' }),
+    /**
+     * 仓档案（#2738）：语言和工具链、测试命令、模块根、合并要等的检查、标准清单在哪、权重。存显式写了的项，
+     * 形状和默认值见 shared 的 repo-profile.ts（读的人用 parseRepoProfile 补默认值）。经 fleet-api project set-profile 改。
+     */
+    profile: jsonb('profile').notNull().default(sql`'{}'::jsonb`),
   },
   (t) => [
     unique('repos_owner_name_unique').on(t.owner, t.name),
+    unique('repos_github_id_unique').on(t.githubId),
     check('repos_ci_policy_known', sql`${t.ciPolicy} in ('force', 'off')`),
   ],
 );
@@ -89,11 +97,14 @@ export const tasks = pgTable(
     leaseUntil: timestamp('lease_until', tz),
     /** 哪个环境领的（通行证认出的环境编号）；不是本机领的是空。 */
     claimedBy: text('claimed_by'),
+    /** 这张单走哪种流程（#2823）：three = 三步单，full = 模型全程；老单、还没分过组的是空。分组的来龙去脉在 task_flow_assignments。 */
+    flowMode: text('flow_mode').$type<FlowMode>(),
   },
   (t) => [
     unique('tasks_repo_issue_unique').on(t.repoId, t.issueNumber),
     check('tasks_issue_number_positive', sql`${t.issueNumber} > 0`),
     check('tasks_executor_known', sql`${t.executor} in ('engine', 'local')`),
+    check('tasks_flow_mode_known', sql`${t.flowMode} is null or ${t.flowMode} in ('three', 'full')`),
     index('tasks_local_lease_idx').on(t.leaseUntil).where(sql`${t.executor} = 'local'`),
   ],
 );
@@ -318,6 +329,95 @@ export const pullRequests = pgTable(
     check('pull_requests_merge_shape', sql`${t.mergeSha} is null or ${t.mergeSha} ~ '^[0-9a-f]{40}$'`),
     index('pull_requests_issue_refs_idx').using('gin', t.issueRefs),
     index('pull_requests_alert_refs_idx').using('gin', t.alertRefs),
+  ],
+);
+
+/**
+ * 一轮动手怎么结束的（#2762）：引擎任务工作流每一轮收场时写一行（patched('round-outcome')），每日简报的「流程健康」按它算。
+ * merged 做成；verify_rejected 冷验收拒；ci_red CI 红（含等合并时必过检查红）；leftover 交活树里有剩；no_commit 没提交（含推的时候空交付）；
+ * push_conflict 推分支并主线冲突；merge_conflict 等 CI、等合并时和主线冲突；timeout 超时停下后被放弃；stopped 放弃、叫停；other 别的（卫生检查拦下……）。
+ * 同一条工作流里第几次收场（seq）只记一行：活动重试不重复写。
+ */
+export const ROUND_OUTCOMES = [
+  'merged',
+  'verify_rejected',
+  'ci_red',
+  'leftover',
+  'no_commit',
+  'push_conflict',
+  'merge_conflict',
+  'timeout',
+  'stopped',
+  'other',
+] as const;
+export type RoundOutcome = (typeof ROUND_OUTCOMES)[number];
+
+export const taskRounds = pgTable(
+  'task_rounds',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    workflowId: text('workflow_id').notNull(),
+    /** 这条工作流里第几次收场（从 1 起）：「继续」后轮数会从 0 再计，round 会重复，seq 不会。 */
+    seq: integer('seq').notNull(),
+    /** 工作流里的轮数（动手第几轮；「继续」后从 0 再计）。 */
+    round: integer('round').notNull(),
+    outcome: text('outcome').$type<RoundOutcome>().notNull(),
+    /** 派工档（fast / medium / heavyweight）；判不出是空。 */
+    tier: text('tier'),
+    /** 这一轮第一个派上的模型；一个会话都没派上是空。 */
+    firstModel: text('first_model'),
+    /** 收场时 PR 相对主线的新增行数（最近一次推上去的头）；还没推过、没量成是空。 */
+    addedLines: integer('added_lines'),
+    endedAt: timestamp('ended_at', tz).notNull().defaultNow(),
+    /** 这一轮属于哪种流程（#2823）；还没记流程的老行、老写法是空。 */
+    flowMode: text('flow_mode').$type<FlowMode>(),
+    /**
+     * 冷验收拒绝的分类（#2823）：只在人工审过之后填，所以默认空。real_defect 真实缺陷、verifier_false_reject 验收误拒、
+     * incomplete_spec 需求不全、infra 基础设施。名单和 shared 的 VERIFY_REJECT_CLASSES 一字不差。
+     */
+    verifyRejectClass: text('verify_reject_class').$type<VerifyRejectClass>(),
+  },
+  (t) => [
+    unique('task_rounds_workflow_seq_unique').on(t.workflowId, t.seq),
+    check('task_rounds_flow_mode_known', sql`${t.flowMode} is null or ${t.flowMode} in ('three', 'full')`),
+    check(
+      'task_rounds_verify_reject_class_known',
+      sql`${t.verifyRejectClass} is null or ${t.verifyRejectClass} in ('real_defect', 'verifier_false_reject', 'incomplete_spec', 'infra')`,
+    ),
+    // 名单和 ROUND_OUTCOMES 一字不差（test/task-rounds.test.ts 核对）
+    check(
+      'task_rounds_outcome_known',
+      sql`${t.outcome} in ('merged', 'verify_rejected', 'ci_red', 'leftover', 'no_commit', 'push_conflict', 'merge_conflict', 'timeout', 'stopped', 'other')`,
+    ),
+    check('task_rounds_seq_positive', sql`${t.seq} > 0`),
+    check('task_rounds_round_nonneg', sql`${t.round} >= 0`),
+    check('task_rounds_added_lines_nonneg', sql`${t.addedLines} is null or ${t.addedLines} >= 0`),
+    index('task_rounds_ended_at_idx').on(t.endedAt),
+  ],
+);
+
+/**
+ * 全程模式的分组记录（#2823）：每张单最多一行，写一次不覆盖（task_id 是主键，再写直接撞唯一约束，由查询函数换成明确的错）。
+ * source：label 标签指定、hash 按单号哈希、ineligible 不合格退回三段（reason 写原因）。stratum 是分层用的档位。
+ */
+export const taskFlowAssignments = pgTable(
+  'task_flow_assignments',
+  {
+    taskId: uuid('task_id')
+      .primaryKey()
+      .references(() => tasks.id),
+    mode: text('mode').$type<FlowMode>().notNull(),
+    source: text('source').$type<FlowSource>().notNull(),
+    stratum: text('stratum').notNull(),
+    assignedAt: timestamp('assigned_at', tz).notNull().defaultNow(),
+    reason: text('reason'),
+  },
+  (t) => [
+    check('task_flow_assignments_mode_known', sql`${t.mode} in ('three', 'full')`),
+    check('task_flow_assignments_source_known', sql`${t.source} in ('label', 'hash', 'ineligible')`),
   ],
 );
 

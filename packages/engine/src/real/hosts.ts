@@ -98,6 +98,7 @@ import {
   routeEffortProblem,
 } from '@fleet-dao/shared';
 import { hostName } from '../routing/names.ts';
+import { MIRASIM_HANDLE_FILE, readMirasimHandle, writeMirasimHandle } from './session-handoff.ts';
 
 /** 引擎接上的执行方式。加一家：写它的驱动，探针跟着就能探、选路跟着就派。 */
 export const WIRED_HOSTS = [
@@ -253,7 +254,7 @@ export interface HostRunHooks {
   /** 会话过程记录（#1640，adapters 的 TranscriptEntry）：按流里出现的先后一条一条给。只记账，抛了也不影响会话。 */
   onTranscript?: (entry: TranscriptEntry, meta: LineMeta) => unknown;
   onSpawn?: (info: SpawnInfo) => unknown;
-  /** 执行体报出自己的会话号（cursor 的 init 帧）。同步调，别抛。 */
+  /** 流里确认了真会话号时调用（Claude/Cursor 的 init、Mirasim 的 accepted）。同步调，别抛。 */
   onSessionId?: (id: string) => void;
 }
 
@@ -283,6 +284,8 @@ export interface HostReport {
   usageWhy?: string;
   /** 只有 Claude 报：会话累计花费（续会话含前几轮）、会话结束时的上下文大小。 */
   sessionCostUsd?: number;
+  /** 这一轮执行体报告的折算花费（例如 Grok 终帧 total_cost_usd）；没有就不带，不拿 0 顶。 */
+  costUsd?: number;
   /** 实际回话的模型：Claude 流里的、grok 终帧 modelUsage 的键（grok-4.7-build）；cursor 没有。 */
   actualModel?: string;
   contextTokens?: number;
@@ -297,6 +300,11 @@ export interface HostReport {
    * 失败信息里没有就接上，失败分流靠它认出是哪一种。Claude 的报错在流里、已经在判定原因里，不给。
    */
   rawError?: string;
+  /**
+   * 放手了（只有 Mirasim，#2815）：引擎停机、插头只断开连接、没发 stop，会话在服务端接着跑；这份报告不是结局
+   * （facts 里没有终态），调用方（segment-spawner）写放手标记、交回 detached。
+   */
+  detached?: true;
   wallMs: number;
   stderrTail: string;
 }
@@ -423,7 +431,7 @@ function defined<K extends string, V>(key: K, value: V | null | undefined): Part
   return value === undefined || value === null ? {} : ({ [key]: value } as Record<K, V>);
 }
 
-/** 插头的公共回调（onSessionId 另给：只有 cursor 的插头认它）。不给的不带，不传 undefined 进去。 */
+/** 插头的公共回调（会话号由 Claude/Cursor 的流确认）。不给的不带，不传 undefined 进去。 */
 function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOptions {
   return {
     command,
@@ -435,6 +443,7 @@ function agentHooks(command: string[], hooks: HostRunHooks): ClaudeCodeRunOption
     ...(hooks.onRateLimit ? { onRateLimit: hooks.onRateLimit } : {}),
     ...(hooks.onTranscript ? { onTranscript: hooks.onTranscript } : {}),
     ...(hooks.onSpawn ? { onSpawn: hooks.onSpawn } : {}),
+    ...(hooks.onSessionId ? { onSessionId: hooks.onSessionId } : {}),
   };
 }
 
@@ -500,7 +509,9 @@ export function claudeReport(report: ClaudeCodeRunReport): HostReport {
     facts: claudeRunFacts(report),
     ...defined('sessionId', report.stream.sessionId),
     ...claudeUsage(report.stream),
-    ...defined('sessionCostUsd', r?.sessionCostUsd),
+    ...(report.session.mode === 'resume' || report.session.mode === 'fork'
+      ? {}
+      : defined('costUsd', r?.sessionCostUsd)),
     ...defined('actualModel', report.stream.observedModel),
     ...defined('contextTokens', report.stream.lastContextTokens),
     ...defined('resetsAt', resetsAt),
@@ -818,14 +829,19 @@ export function grokReport(report: GrokRunReport): HostReport {
  * grok 这一轮的用量：有终帧照终帧；没走到终帧（被叫停、超时杀）按过程里每次模型调用的 usage 帧加起来（真跑记录里逐帧加和
  * 终帧四样一个不差），最后一次没跑完的调用不在里面；一帧 usage 都没有就读不到。
  */
-function grokUsage(s: GrokRunReport['stream']): Pick<HostReport, 'usage' | 'usageWhy'> {
+function grokUsage(s: GrokRunReport['stream']): Pick<HostReport, 'usage' | 'usageWhy' | 'costUsd'> {
   const pick = (u: GrokRunReport['stream']['callUsage']): HostUsage => ({
     ...defined('inputTokens', u?.inputTokens),
     ...defined('outputTokens', u?.outputTokens),
     ...defined('cacheReadTokens', u?.cacheReadTokens),
     ...defined('cacheWriteTokens', u?.cacheWriteTokens),
   });
-  if (s.end?.usage) return { usage: pick(s.end.usage) };
+  if (s.end)
+    return {
+      usage: pick(s.end.usage),
+      ...(s.end.usage ? {} : { usageWhy: USAGE_UNREAD.grok }),
+      ...defined('costUsd', s.end.costUsd),
+    };
   if (!s.callUsage) return { usage: {}, usageWhy: USAGE_UNREAD.grok };
   return {
     usage: pick(s.callUsage),
@@ -872,6 +888,19 @@ function mirasimDriver(
       }
       const effort = applySessionEffort('mirasim', spec);
       const agent = mirasimAgentFor(effort.model, spec.executor);
+      // 脱开引擎跑（#2815）：收发目录里只放交接单。接回时凭它里的会话号、轮次号重新订阅；读不到就不能接，明说，
+      // 不当成起新会话（那会再烧一次额度、还把旧会话丢在服务端）
+      const io = hooks.io;
+      let attach: { sessionKey: string; taskId?: string } | undefined;
+      if (io?.attach) {
+        const handle = await readMirasimHandle(io.dir);
+        if (!handle) {
+          throw new Error(
+            `接回 Mirasim 会话 ${spec.runId} 没接成：收发目录 ${io.dir} 里没有交接单（${MIRASIM_HANDLE_FILE}），读不到会话号`,
+          );
+        }
+        attach = { sessionKey: handle.sessionKey, ...(handle.taskId ? { taskId: handle.taskId } : {}) };
+      }
       // spec.cgroup 这里不用：不在本机起 fleet-agent-<runId>.scope。用量不采，原因在 segment-spawner。
       const report = await run(
         {
@@ -900,10 +929,21 @@ function mirasimDriver(
           ...(hooks.now ? { now: hooks.now } : {}),
           ...(hooks.onEvent ? { onEvent: hooks.onEvent } : {}),
           ...(hooks.onTranscript ? { onTranscript: hooks.onTranscript } : {}),
+          ...(io?.release ? { release: io.release } : {}),
+          ...(attach ? { attach } : {}),
           // 服务端 accepted 帧才给真会话号（和 cursor 的 init 帧一个道理）。accepted 也就是「起来了」：引擎起会话
           // 要等 onSpawn，不报它等满 spawnTimeoutMs 一律判 SPAWN_TIMEOUT（09-28 上线后这条路由一个会话都没起成）。
           // 没有我们 spawn 的进程：pid 记 0（sessions.ts 认 0 是「没有根进程」，不拿它去杀）。
           onAccepted: (info) => {
+            // 交接单一接下就写（放手来得再快也有）；写不进抛出去，插头记进 hookError——不吞：没有它就接不回
+            if (io && !io.attach) {
+              writeMirasimHandle(io.dir, {
+                runId: spec.runId,
+                sessionKey: info.sessionKey,
+                ...(info.taskId ? { taskId: info.taskId } : {}),
+                acceptedAt: info.acceptedAt,
+              });
+            }
             hooks.onSpawn?.({ pid: 0, runId: spec.runId, startedAt: info.acceptedAt });
             hooks.onSessionId?.(info.sessionKey);
           },
@@ -932,6 +972,7 @@ export function mirasimReport(report: MirasimRunReport): HostReport {
     usage: summary.usage,
     ...defined('actualModel', summary.actualModel),
     ...defined('answer', text || undefined),
+    ...(report.detached ? { detached: true as const } : {}),
     wallMs: report.wallMs,
     stderrTail: '',
   };

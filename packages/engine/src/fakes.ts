@@ -31,6 +31,8 @@ export interface FakeScript {
    * 累计算。
    */
   pushed: (input: PushBranchInput, n: number) => string[] | undefined;
+  /** 推上去的头相对主线新增的行数（推分支交回的 addedLines，#2762）；n 同 push。不给就不交。 */
+  addedLines: (input: PushBranchInput, n: number) => number | undefined;
   /** 开 PR：给了就抛它（假的卫生检查拦下标题或正文……）；n = 第几次开（从 1 开始）。 */
   openPr: (input: OpenPrInput, n: number) => PortError | undefined;
   route: (input: PickRouteInput, n: number) => PickRouteResult | undefined;
@@ -181,7 +183,12 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       const refused = script.push?.(input, n);
       if (refused) throw refused;
       const changedFiles = script.pushed?.(input, n);
-      return { head: input.head, ...(changedFiles ? { changedFiles } : {}) };
+      const addedLines = script.addedLines?.(input, n);
+      return {
+        head: input.head,
+        ...(changedFiles ? { changedFiles } : {}),
+        ...(addedLines !== undefined ? { addedLines } : {}),
+      };
     },
     async openPr(input) {
       const refused = script.openPr?.(input, next('openPr'));
@@ -193,6 +200,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       }
       return { prNumber: pr };
     },
+    async updatePrBody() {},
     async waitCi(input) {
       return { state: 'green', head: input.head, failedChecks: [], ...script.ci?.(input, next('waitCi')) };
     },
@@ -211,6 +219,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       states.push(input);
     },
     async closeIssue() {},
+    async recordRound() {},
     async raiseAlert(input) {
       alerts.push(input);
       return { alertId: `alert-${next('alert')}` };

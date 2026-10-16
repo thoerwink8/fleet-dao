@@ -55,10 +55,12 @@ import {
   SEGMENT_MINUTES,
   SEGMENT_STAGE,
   type SegmentEvidence,
+  type TaskSpendResult,
   UI_PURPOSE,
 } from '../task-contract.ts';
 import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
 import { failureOf, iso } from './kit.ts';
+import { decideFlowOnce } from './task-flow.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
@@ -101,6 +103,7 @@ export async function writeSession(
   brief: TaskBrief,
   tier: TierDecision,
   wt: Worktree,
+  opts: { plan?: boolean } = {},
 ): Promise<void> {
   let counters = ZERO;
   let avoid: Avoid = NO_AVOID;
@@ -151,6 +154,8 @@ export async function writeSession(
         : route.family,
     );
     rt.attemptSeq += 1;
+    // 定模式（#2826）：第一次选路之后、第一段动手之前定一次，结果进历史（task-flow.ts）
+    await decideFlowOnce(rt, brief, tier, route);
     // 续会话（决定 0088）：上一段留了要续的记号才问；判一次就清掉
     let resumeSessionId: string | undefined;
     let resumeNote = '';
@@ -169,6 +174,8 @@ export async function writeSession(
       'implement',
       `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}${resumeNote}${picked.probeNote ? `；${picked.probeNote}` : ''}`,
     );
+    // 这一轮第一个派上的模型（#2762 流程健康记账，纯状态）
+    rt.roundFirstModel ??= route.modelId;
     // 这一段的起跑时刻：被暂停取消时拿不到执行编号，续会话凭它去库里找这一段
     const attemptAt = Date.now();
     let evidence: SegmentEvidence | null = null;
@@ -194,6 +201,10 @@ export async function writeSession(
         ...(resumeSessionId ? { resumeSessionId } : {}),
         // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
         ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
+        // 重活先出方案的那一段（#2755）：提示词另说只读、只回方案 JSON
+        ...(opts.plan ? { mode: 'plan' as const } : {}),
+        // 全程的单（#2826）：提示词多一节「到合并都归你」。三段、老历史不带
+        ...(rt.flowMode === 'full' ? { flowMode: 'full' as const } : {}),
       };
       // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
       let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });
@@ -212,6 +223,8 @@ export async function writeSession(
         rt.lastImplementRoute = route;
         const resumed = resumeSessionId !== undefined;
         rt.lastSession = { runId: res.runId, worktreePath: wt.path, resumed };
+        // 最后一条回复进 PR 说明（#2723）：纯状态，不多调活动。老版活动回的可能没带，当没有
+        rt.lastAnswer = typeof res.answer === 'string' ? res.answer : null;
         rt.resumeStreak = resumed ? rt.resumeStreak + 1 : 0;
         return;
       }
@@ -412,7 +425,7 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   if (!patched('task-token-budget')) return;
   // 写在查花费之前、估用量那个标记之前：老历史重放时这一支为假，不多一个字段，后面的标记顺序也对得上。
   const thisGeneration = patched('task-budget-this-generation');
-  let spent: { tokens: number; unmetered: number; estimated?: number };
+  let spent: TaskSpendResult;
   try {
     spent = await rt.cancellable(() =>
       rt.acts.taskSpend({
@@ -429,11 +442,23 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   }
   // 被叫停、超时杀掉的会话多半到不了 CLI 的收尾用量帧，用量就空着；按这张单别的行估出来的下限一起算进预算，
   // 不然一张单反复被叫停可以一直换会话、账面一次都不超。老历史没有这个字段，估出来的是 0，照旧（patched('task-budget-unmetered-estimate')）。
-  const counted = spent.tokens + (patched('task-budget-unmetered-estimate') ? (spent.estimated ?? 0) : 0);
+  // #2859：判超没超用活动算好的输入当量（inputEquivalent）；#2830 那一版记的是 weighted / weightedEstimated，照读；
+  // 再老的结果两样都没有，用原来的 tokens / estimated。当量不在这里重算：历史里记的是活动当时的结果，重放读到的数不变。
+  // 没动步序，所以不用新标记。
+  const equivalent = spent.inputEquivalent !== undefined;
+  const measured = spent.inputEquivalent ?? spent.weighted ?? spent.tokens;
+  const estimatedPart =
+    spent.inputEquivalent !== undefined
+      ? (spent.inputEquivalentEstimated ?? 0)
+      : spent.weighted !== undefined
+        ? (spent.weightedEstimated ?? 0)
+        : (spent.estimated ?? 0);
+  const counted = measured + (patched('task-budget-unmetered-estimate') ? estimatedPart : 0);
   if (counted <= budget * rt.budgetGrants) return;
   const stop = tokenBudgetStop({ tokens: counted, unmetered: spent.unmetered }, budget, rt.budgetGrants, {
-    measured: spent.tokens,
-    estimated: counted - spent.tokens,
+    measured,
+    estimated: counted - measured,
+    ...(equivalent ? { raw: spent } : {}),
   });
   await rt.park(stop.title, stop.detail);
   // 人看过、点了「继续」：再给到比花掉的多一份
@@ -443,8 +468,9 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
 /**
  * 这一段能不能续上一段的会话：换了工作树不续（会话记录按目录存）；别的交给 planSegmentResume 现查。
  * 查不成（活动没装、库一时不通）不挂起、不重试：退回开新会话，原因照写。放弃、叫停照常往外抛。
+ * task.ts 交活没提交续一次之前也先问它（#2722）：续不上就不在这一轮另开会话。
  */
-async function planResume(
+export async function planResume(
   rt: TaskRuntime,
   from: ResumeFrom,
   route: RouteChoice,

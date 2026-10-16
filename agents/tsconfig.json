@@ -9,6 +9,7 @@
     "skills/commander/scripts/patrol-lib.mjs",
     "skills/commander/scripts/patrol.mjs",
     "skills/commander/scripts/train-state-lib.mjs",
+    "skills/commander/scripts/wait.mjs",
     "skills/discuss/scripts/tools.mjs",
     "skills/discuss/scripts/walkthrough.mjs",
     "hooks/pretool.mjs",
@@ -28,10 +29,16 @@
     "hooks/git-run.mjs",
     "hooks/proxy-env.mjs",
     "hooks/unattended.mjs",
+    "hooks/capacity.mjs",
+    "hooks/queue-stop.mjs",
+    "hooks/subagent-ledger.mjs",
+    "hooks/shell-edit.mjs",
+    "hooks/work-watch.mjs",
     "local-sessions/lib.mjs",
     "local-sessions/heartbeat.mjs",
     "local-sessions/push.mjs",
     "local-sessions/loop.mjs",
-    "local-sessions/install.mjs"
+    "local-sessions/install.mjs",
+    "local-sessions/detach.mjs"
   ]
 }

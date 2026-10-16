@@ -13,6 +13,9 @@
 // 引擎总开关（设置 engine.master，#1086）：on 打开引擎接活，off 全停（不拉单、不派活、不起干活的会话；探针照跑），
 // status 只看。没设过是关。和按项目的「让 AI 接活」串联：总开关开着、项目的开关也开着才派。发版脚本每次发版成功后
 // 经 engine off 置关（#1050）；本机 WSL 的小版本更新不碰它。
+//   flow-mode status | set <three|split:<0-100>|full> --reason "<原因>"（#2823）
+// 全程模式开关（设置 engine.flowMode）：three 都走三步单，full 都走全程，split:N 约 N% 的单走全程。没设过是 three；库里的值认不出也按
+// three 并把原因打印出来。set 改的同时记一条操作记录（原因必填）。这一步只记账，引擎不读它。
 //   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
 //   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
 //   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
@@ -24,19 +27,38 @@
 //   feishu-push status|test（决定 0090）：提醒推飞书通不通；test 建一条测试提醒、等后端推出去、读回送达记录。见 feishu-push-cli.ts。
 //   attention --json（#2370）：现在要人看的事一份结论（healthz、该推的通知、推送不通、简报没到），指挥官巡检只读它。见 attention-cli.ts。
 //   release pause|continue（#2038）：release.sh 切版本前给手上有会话的任务发 hard 暂停、切完只继续这一批。见 release-pause.ts。
+//   project show|set-profile <owner/仓名>（#2738）：看、换一个仓的档案（repos.profile）。见 project-cli.ts。
+//   emergency-issue --key <键> --title <标题>（#2728）：开急修单（四节正文从标准输入读），法国自动发布在同一个提交发版连败时调。见 emergency-issue.ts。
+//   notify raise --key <键> --title <标题>（#2729）：法国上的发版脚本写卡住报警的统一入口（经 upsertAlert，正文从标准输入读）。见 notify-cli.ts。
 // 每条命令带 --help（或 -h）只打印用法。
 // 退出码（几条命令一样）：0 做成了（或本来就是）；1 没做成（被拒、库里没有、连不上库、读回来不对，一句话说原因）；2 参数不对或没带上库连接。
 
 import { createHash, randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { userInfo } from 'node:os';
 import { createInterface } from 'node:readline';
 import { ENGINE_LABEL, LOCAL_LABEL } from '@fleet-dao/conventions';
-import { AUTO_DISPATCH_DISABLE, AUTO_DISPATCH_ENABLE, NodeIdSchema } from '@fleet-dao/shared';
+import type { Db } from '@fleet-dao/db';
+import {
+  AUTO_DISPATCH_DISABLE,
+  AUTO_DISPATCH_ENABLE,
+  formatFlowModeSetting,
+  NodeIdSchema,
+  parseFlowModeSetting,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
 import { ATTENTION_USAGE, AttentionCliError, attentionJson, parseAttentionArgs } from './attention-cli.ts';
 import { type Config, loadConfig } from './config.ts';
+import {
+  EMERGENCY_ISSUE_USAGE,
+  type EmergencyIssueArgs,
+  EmergencyIssueError,
+  type EmergencyIssuePort,
+  fileEmergencyIssue,
+  parseEmergencyIssueArgs,
+} from './emergency-issue.ts';
 import { describeEngineMaster, readEngineMaster, setEngineMaster } from './engine-switch.ts';
 import {
   FEISHU_PUSH_USAGE,
@@ -44,9 +66,26 @@ import {
   parseFeishuPushArgs,
   runFeishuPush,
 } from './feishu-push-cli.ts';
+import { describeFlowMode, readFlowMode, setFlowMode } from './flow-mode-switch.ts';
+import {
+  NOTIFY_USAGE,
+  NotifyCliError,
+  type NotifyRaiseArgs,
+  parseNotifyArgs,
+  raiseNotify,
+} from './notify-cli.ts';
 import { checkNewPassword, checkUsername, hashPassword } from './password.ts';
 import type { AuditRecord, AutoDispatchChange, IntakeRepo, Store, User } from './ports.ts';
+import {
+  PROJECT_USAGE,
+  ProjectCliError,
+  type ProjectPort,
+  parseProjectArgs,
+  runProject,
+} from './project-cli.ts';
 import { RELEASE_USAGE, runReleaseCommand } from './release-pause.ts';
+import { currentMilestoneOf } from './request-issue.ts';
+import { findSelfRepo, SELF_REPO_NAME } from './self-repo.ts';
 import { cookieNames, isCockpitUser, signSessionClaims } from './session.ts';
 import {
   type OpenedTaskControl,
@@ -71,6 +110,8 @@ const USAGE =
   '用法：fleet-api set-password <飞书名或用户 id> [--username <用户名>]（密码从标准输入读，不收参数）';
 const ENGINE_USAGE =
   '用法：fleet-api engine on|off|status [--reason <原因>]（引擎总开关：on 打开，off 关上，status 只看；没设过是关。开关写进操作记录，本来就是要的状态就不改不记）';
+const FLOW_MODE_USAGE =
+  '用法：fleet-api flow-mode status | fleet-api flow-mode set <three|split:<0-100>|full> --reason "<原因>"（全程模式开关：three 都走三步单，full 都走全程，split:N 约 N% 的单走全程；没设过是 three，认不出的值也按 three 并报出来。set 的原因必填，改动写进操作记录，本来就是这个值就不改不记）';
 /** dispatch-issue（#1337）的本体在引擎包（packages/engine/src/bin/dispatch-issue.ts）：后端不依赖引擎包，由 bin/fleet-api 按命令名转过去。这里只管 --help 列得出来。 */
 const DISPATCH_ISSUE_POINTER =
   '用法：fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]（开关关着时点名把一张单交给引擎；本体在引擎包，经 packages/api/bin/fleet-api 转过去，完整说明跑 fleet-api dispatch-issue --help）';
@@ -736,6 +777,72 @@ export async function engine(input: { store: Store; args: EngineArgs; operator: 
   return `已${on ? '打开' : '关上'}：引擎总开关：${describeEngineMaster(change.state)}`;
 }
 
+// —— flow-mode：全程模式开关（#2823，设置 engine.flowMode）——
+
+export type FlowModeArgs = { action: 'status' } | { action: 'set'; value: string; reason: string };
+
+/** status，或 set <值> --reason <原因>（值要认得出、原因必填）；别的写法一律拒，不猜。 */
+export function parseFlowModeArgs(argv: readonly string[]): FlowModeArgs {
+  const [action = '', ...rest] = argv;
+  if (action === 'status') {
+    if (rest.length > 0) throw new CliError(`status 不带别的参数。${FLOW_MODE_USAGE}`, 2);
+    return { action };
+  }
+  if (action !== 'set') throw new CliError(`认不出「${action}」：只收 status、set。${FLOW_MODE_USAGE}`, 2);
+  const [value, flag, reason, ...extra] = rest;
+  if (
+    value === undefined ||
+    flag !== '--reason' ||
+    reason === undefined ||
+    reason.trim() === '' ||
+    extra.length > 0
+  )
+    throw new CliError(`set 要写成 set <值> --reason <原因>。${FLOW_MODE_USAGE}`, 2);
+  const parsed = parseFlowModeSetting(value);
+  if (!parsed.ok) throw new CliError(`${parsed.problem}。${FLOW_MODE_USAGE}`, 2);
+  const why = reason.trim();
+  if (why.length > MAX_REASON)
+    throw new CliError(`--reason 太长（最多 ${MAX_REASON} 个字）。${FLOW_MODE_USAGE}`, 2);
+  return { action: 'set', value: formatFlowModeSetting(parsed.setting), reason: why };
+}
+
+const OPS_FLOW_MODE = { kind: 'ops', id: 'ops:flow-mode' } as const;
+
+/** fleet-api flow-mode 本身（#2823）。status 只读打印；set 经 setFlowMode 改（开关和操作记录同一事务），版本冲突报出来让重跑。 */
+export async function flowMode(input: {
+  store: Store;
+  args: FlowModeArgs;
+  operator: string;
+}): Promise<string> {
+  const { store, args, operator } = input;
+  if (args.action === 'status') {
+    const reading = await dbStep('没查成：', () => readFlowMode(store));
+    return `全程模式开关：${describeFlowMode(reading)}`;
+  }
+  const change = await dbStep(
+    '没改成（什么都没改）：',
+    () =>
+      setFlowMode(
+        store,
+        { value: args.value, by: OPS_FLOW_MODE },
+        {
+          actor: OPS_FLOW_MODE,
+          reason: `${args.reason}（服务器上 ${operator} 跑的 fleet-api flow-mode set ${args.value}）`,
+          via: 'ops',
+          ok: true,
+        },
+      ),
+    '。开关和操作记录在同一个事务里，要么都改了、要么都没改：跑 status 看现在是哪样',
+  );
+  if ('conflict' in change)
+    throw new CliError(
+      `没改成：开关刚被别处改过（现在是「${describeFlowMode(change.reading)}」），再跑一遍或跑 status 核对`,
+    );
+  if (!change.changed)
+    return `没改：开关本来就是 ${args.value}（现在是「${describeFlowMode(change.reading)}」）`;
+  return `已改：全程模式开关：${describeFlowMode(change.reading)}`;
+}
+
 /**
  * 谁跑的。bin/fleet-api 换成 fleet 身份之前，把 root（经 sudo 跑的记 sudo 前的用户）放进 FLEET_OPS_OPERATOR；
  * 没经它、直接跑 node 的，记这个进程的用户并写明。
@@ -770,6 +877,118 @@ export interface CliDeps {
   newToken?: () => string;
   /** 任务工作流的信号和重做（task 命令用）。不给就是真的：懒连 Temporal，重做用 temporal.ts 的 taskRedo。 */
   openTaskControl?: (env: CliEnv) => Promise<OpenedTaskControl>;
+  /** 仓档案的读写（project 命令用）。不给就是真的：连库，用 db 的 findRepoProfile、setRepoProfile。 */
+  openProject?: (url: string) => Promise<{ port: ProjectPort; close(): Promise<void> }>;
+  /** 读一个文本文件（project set-profile --file 用）。不给就是真的 fs。 */
+  readFile?: (path: string) => Promise<string>;
+  /** 开急修单（emergency-issue 命令用，#2728）：「引擎」机器人的 GitHub，挂当前版本。不给就是真的：连库记幂等账、读机器人凭据。 */
+  openEmergencyIssues?: (url: string) => Promise<{ port: EmergencyIssuePort; close(): Promise<void> }>;
+  /** 连库给出 Db（notify 命令用，#2729）。不给就是真的 createDb。 */
+  openDb?: (url: string) => Promise<{ db: Db; close(): Promise<void> }>;
+}
+
+/** notify raise（#2729）：脚本写提醒的统一入口。参数不对不连库（退出 2）；记上了打编号（新建还是原地更新），没记上退出 1。 */
+async function runNotifyCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  let args: NotifyRaiseArgs;
+  try {
+    args = parseNotifyArgs(rest);
+  } catch (err) {
+    if (err instanceof NotifyCliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    throw err;
+  }
+  let opened: { db: Db; close(): Promise<void> } | undefined;
+  try {
+    const body = await (deps.readStdin ?? readAllStdin)();
+    const url = databaseUrl(deps.env);
+    const conn = deps.openDb
+      ? await deps.openDb(url)
+      : await import('@fleet-dao/db').then(({ createDb }) => createDb({ url }));
+    opened = conn;
+    const got = await raiseNotify(conn.db, args, body);
+    deps.out(`${got.created ? '记了' : '更新了'}提醒 ${args.key}（编号 ${got.id}）`);
+    return 0;
+  } catch (err) {
+    if (err instanceof CliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    deps.err(`提醒没记上：${errMessage(err)}`);
+    return 1;
+  } finally {
+    await opened?.close().catch(() => undefined);
+  }
+}
+
+async function openPgEmergencyIssues(
+  url: string,
+): Promise<{ port: EmergencyIssuePort; close(): Promise<void> }> {
+  const { createDb } = await import('@fleet-dao/db');
+  const { pgLedger, pgLocker, withStatementTimeout } = await import('@fleet-dao/store');
+  const { createGitHub } = await import('@fleet-dao/github');
+  const { db, close } = createDb({ url: withStatementTimeout(url) });
+  try {
+    const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db) });
+    return {
+      port: {
+        async openIssue(input) {
+          // 挂当前版本（同驾驶舱提需求，#2683）：急修进当前版本，不落未排期
+          const milestone = await currentMilestoneOf(() => gh.readOpenMilestones({ repo: input.repo }));
+          return gh.openIssue({ ...input, milestone });
+        },
+      },
+      close,
+    };
+  } catch (err) {
+    await close();
+    throw err;
+  }
+}
+
+/** emergency-issue（#2728）：参数不对不连库。开成了打单号和网址（--json 打一行 JSON）；没开成打一句原因、退出 1。 */
+async function runEmergencyIssueCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  let args: EmergencyIssueArgs;
+  try {
+    args = parseEmergencyIssueArgs(rest);
+  } catch (err) {
+    if (err instanceof EmergencyIssueError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    throw err;
+  }
+  let opened: { store: Store; close(): Promise<void> } | undefined;
+  let issues: { port: EmergencyIssuePort; close(): Promise<void> } | undefined;
+  try {
+    const body = await (deps.readStdin ?? readAllStdin)();
+    const url = databaseUrl(deps.env);
+    opened = await deps.openStore(url);
+    const self = await findSelfRepo(opened.store);
+    if (!self) throw new CliError(`受管的仓里没有 ${SELF_REPO_NAME}：不知道急修单开在哪，没开`, 1);
+    issues = await (deps.openEmergencyIssues ?? openPgEmergencyIssues)(url);
+    const got = await fileEmergencyIssue(args, body, {
+      port: issues.port,
+      repo: { owner: self.owner, name: self.name },
+    });
+    deps.out(
+      args.json
+        ? JSON.stringify(got)
+        : `${got.created ? '开了' : '以前开过'}急修单 #${got.number}：${got.url}`,
+    );
+    return 0;
+  } catch (err) {
+    if (err instanceof EmergencyIssueError || err instanceof CliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    deps.err(`急修单没开成：${errMessage(err)}`);
+    return 1;
+  } finally {
+    await issues?.close().catch(() => undefined);
+    await opened?.close().catch(() => undefined);
+  }
 }
 
 async function openPgStore(url: string): Promise<{ store: Store; close(): Promise<void> }> {
@@ -778,6 +997,20 @@ async function openPgStore(url: string): Promise<{ store: Store; close(): Promis
   const { createPgStore, withStatementTimeout } = await import('@fleet-dao/store');
   const { db, close } = createDb({ url: withStatementTimeout(url) });
   return { store: createPgStore(db), close };
+}
+
+async function openPgProject(url: string): Promise<{ port: ProjectPort; close(): Promise<void> }> {
+  const { createDb, findRepoProfile, registerRepo, setRepoProfile } = await import('@fleet-dao/db');
+  const { withStatementTimeout } = await import('@fleet-dao/store');
+  const { db, close } = createDb({ url: withStatementTimeout(url) });
+  return {
+    port: {
+      register: (input) => registerRepo(db, input),
+      find: (owner, name) => findRepoProfile(db, owner, name),
+      setProfile: (input) => setRepoProfile(db, input),
+    },
+    close,
+  };
 }
 
 async function openPgAlertWork(
@@ -806,6 +1039,8 @@ export function processDeps(): CliDeps {
     now: () => new Date(),
     readStdin: readAllStdin,
     openAlertWork: openPgAlertWork,
+    openProject: openPgProject,
+    readFile: (path) => readFile(path, 'utf8'),
   };
 }
 
@@ -834,6 +1069,7 @@ const USAGES: Record<string, string> = {
   'usage-backfill-once': USAGE_BACKFILL_ONCE_POINTER,
   'daily-brief': DAILY_BRIEF_POINTER,
   engine: ENGINE_USAGE,
+  'flow-mode': FLOW_MODE_USAGE,
   'node-key': NODE_KEY_USAGE,
   'session-mint': SESSION_MINT_USAGE,
   alert: ALERT_USAGE,
@@ -841,6 +1077,9 @@ const USAGES: Record<string, string> = {
   release: RELEASE_USAGE,
   'feishu-push': FEISHU_PUSH_USAGE,
   attention: ATTENTION_USAGE,
+  project: PROJECT_USAGE,
+  'emergency-issue': EMERGENCY_ISSUE_USAGE,
+  notify: NOTIFY_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -900,6 +1139,16 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
       await close();
     }
   }
+  if (command === 'flow-mode') {
+    const args = parseFlowModeArgs(rest);
+    const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    try {
+      deps.out(await flowMode({ store, args, operator: operatorName(deps.env) }));
+      return 0;
+    } finally {
+      await close();
+    }
+  }
   if (command === 'node-key') {
     const args = parseNodeKeyArgs(rest);
     const { store, close } = await deps.openStore(databaseUrl(deps.env));
@@ -953,6 +1202,9 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'release') return runReleaseCli(rest, deps);
   if (command === 'feishu-push') return runFeishuPushCommand(rest, deps);
   if (command === 'attention') return runAttentionCommand(rest, deps);
+  if (command === 'project') return runProjectCommand(rest, deps);
+  if (command === 'emergency-issue') return runEmergencyIssueCommand(rest, deps);
+  if (command === 'notify') return runNotifyCommand(rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
 }
@@ -1133,6 +1385,43 @@ async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<n
     return 1;
   } finally {
     await control?.close().catch(() => undefined);
+    await opened?.close().catch(() => undefined);
+  }
+}
+
+/** project（#2738）：参数、档案形状不对不连库（退出码 2）；没做成只打标准错误。 */
+async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  let opened: { port: ProjectPort; close(): Promise<void> } | undefined;
+  try {
+    const args = parseProjectArgs(rest);
+    const url = databaseUrl(deps.env);
+    let port: ProjectPort | undefined;
+    const connect = async () => {
+      opened ??= await (deps.openProject ?? openPgProject)(url);
+      port = opened.port;
+      return port;
+    };
+    deps.out(
+      await runProject(args, {
+        port: {
+          find: async (owner, name) => (port ?? (await connect())).find(owner, name),
+          setProfile: async (input) => (port ?? (await connect())).setProfile(input),
+          register: async (input) => (port ?? (await connect())).register(input),
+        },
+        operator: operatorName(deps.env),
+        readFile: deps.readFile ?? ((path) => readFile(path, 'utf8')),
+        readStdin: deps.readStdin ?? readAllStdin,
+      }),
+    );
+    return 0;
+  } catch (err) {
+    if (err instanceof ProjectCliError || err instanceof CliError) {
+      deps.err(err.message);
+      return err.exitCode;
+    }
+    deps.err(`没做成：${describeDbError(err)}`);
+    return 1;
+  } finally {
     await opened?.close().catch(() => undefined);
   }
 }

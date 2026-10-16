@@ -36,6 +36,7 @@ interface HookLib {
   bgCachePath(home: string, cwd: string, git: Git): string;
   fastSessionStart(
     o: Common & {
+      progress?: ScriptRun;
       sessionId?: string | null;
       spawnBackground?: (o: { cwd: string; home: string }) => { ok: boolean; why?: string };
     },
@@ -44,7 +45,6 @@ interface HookLib {
     o: Common & {
       sync: Sync;
       idlePr?: ScriptRun;
-      progress?: ScriptRun;
       poolHolds?: Holds;
       fallbackProxy?: string;
     },
@@ -191,6 +191,78 @@ describe('同步那半只读本地', SLOW, () => {
       spawnBackground,
     });
     expect(spawned).toHaveLength(1);
+  });
+
+  it('引导段同步跑本地查询，不吃后台缓存；用缓存的行都带「后台 N 分钟前」（#2726）', () => {
+    const w = world();
+    g(w.work, 'remote', 'set-url', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
+    const script = join(w.work, 'packages', 'conventions', 'src', 'bin', 'progress.ts');
+    mkdirSync(join(script, '..'), { recursive: true });
+    writeFileSync(script, '// stub\n');
+    // 后台缓存是 35 分钟前的：当时的引导还在，现在已经收掉了
+    hook.runBackground({
+      cwd: w.work,
+      home: w.home,
+      git: real,
+      sync: okSync().sync,
+      now: T0,
+      env: {},
+      poolHolds: overdueHold,
+    });
+    const cachePath = hook.bgCachePath(w.home, w.work, real);
+    const cached = JSON.parse(readFileSync(cachePath, 'utf8'));
+    cached.steps.progress = {
+      ok: true,
+      value: {
+        run: {
+          status: 0,
+          stdout:
+            '1\t【创始人引导·待处理】2026-10-14 16:00 +0800\t原话：旧缓存里的\t无主\t2026-10-14T08:00:00Z\n',
+          stderr: '',
+        },
+        script,
+        root: w.work,
+      },
+    };
+    writeFileSync(cachePath, JSON.stringify(cached));
+    const calls: string[] = [];
+    const lines = hook.fastSessionStart({
+      cwd: w.work,
+      home: w.home,
+      git: real,
+      now: T0 + 35 * 60_000,
+      env: {},
+      spawnBackground: () => ({ ok: true }),
+      progress: (s) => {
+        calls.push(s);
+        return { status: 0, stdout: '', stderr: '' };
+      },
+    });
+    const text = lines.join('\n');
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.replaceAll('\\', '/')).toMatch(/packages\/conventions\/src\/bin\/progress\.ts$/);
+    expect(text).not.toContain('旧缓存里的');
+    expect(text).not.toContain('要你拍');
+    const hold = lines.find((l) => l.includes('claude-max')) ?? '';
+    expect(hold).toMatch(/后台 35 分钟前/);
+  });
+
+  it('【故意造出失败】引导查询本身失败：照实说没查成，不当成没有', () => {
+    const w = world();
+    g(w.work, 'remote', 'set-url', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
+    const script = join(w.work, 'packages', 'conventions', 'src', 'bin', 'progress.ts');
+    mkdirSync(join(script, '..'), { recursive: true });
+    writeFileSync(script, '// stub\n');
+    const lines = hook.fastSessionStart({
+      cwd: w.work,
+      home: w.home,
+      git: real,
+      now: T0,
+      env: {},
+      spawnBackground: () => ({ ok: true }),
+      progress: () => ({ status: 1, stdout: '', stderr: 'git 找待处理的引导报错：boom' }),
+    });
+    expect(lines.join('\n')).toMatch(/创始人引导（进度单 #1055）没查成/);
   });
 
   it('不在 git 仓里也一样：同步、整池暂停照后台的结果说', () => {
