@@ -140,6 +140,7 @@ SSHD_SESSION_USER_DROPIN=/etc/ssh/sshd_config.d/51-fleet-dao-session-user.conf
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
 MIRASIM_SESSION_PORT=4318
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
+MIRASIM_RETIRED_FILE=$DEPLOY_DIR/france/mirasim-retired
 # 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
 # 有会话在跑且这一下是超时：只记不重启（#2186，忙的时候超时会把正在跑的会话杀掉）。
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑
@@ -715,9 +716,29 @@ install_mirasim_stream_guard() {
   put_file "$MIRASIM_STREAM_GUARD" root:root 644 "$(<"$DEPLOY_DIR/lib/mirasim-stream-guard.cjs")"
 }
 
+mirasim_retired() { [[ -e "$MIRASIM_RETIRED_FILE" ]]; }
+
+retire_mirasim_units() {
+  local unit enabled active
+  for unit in fleet-mirasim-session.service fleet-mirasim-liveness.timer; do
+    enabled=$(systemctl is-enabled "$unit" 2>/dev/null) || enabled=""
+    active=$(systemctl is-active "$unit" 2>/dev/null) || active=""
+    if [[ "$enabled" != enabled && "$active" != active ]]; then continue; fi
+    if systemctl disable --now "$unit" >/dev/null 2>&1; then
+      changed "停掉并取消自启 $unit（Mirasim 已退役）"
+    else
+      red "$unit 停不掉或取消自启没成（Mirasim 已退役）：systemctl status $unit 看现场"
+    fi
+  done
+}
+
 setup_mirasim_session() {
   step "会话用户 ${SESSION_USERS[0]} 的 Mirasim 服务（本地模式常驻，端口 $MIRASIM_SESSION_PORT；deploy/france/fleet-mirasim-session.service）"
   local u=${SESSION_USERS[0]} unit_changed guard_changed=0
+  if mirasim_retired; then
+    retire_mirasim_units
+    return 0
+  fi
   if ! id "$u" >/dev/null 2>&1; then
     pending "$u 这个用户还没有，Mirasim 常驻单元没装（建了再跑一遍）"
     return 0
@@ -744,6 +765,10 @@ setup_mirasim_session() {
 # 会话 Mirasim 没装时这两个单元也不装。
 setup_mirasim_liveness() { # 会话用户
   local u=$1 f unit_changed=0
+  if mirasim_retired; then
+    retire_mirasim_units
+    return 0
+  fi
   ensure_dir /usr/local/lib/fleet-dao root:root 755
   put_file "$MIRASIM_LIVENESS_SCRIPT" root:root 755 "$(<"$DEPLOY_DIR/lib/mirasim-liveness.sh")"
   for f in "${MIRASIM_LIVENESS_UNITS[@]}"; do
@@ -1550,6 +1575,10 @@ readback_grok() {
 # check_mirasim 认（引擎连哪个端口看的是这份令牌，不是这个单元）。
 readback_mirasim() {
   local u
+  if mirasim_retired; then
+    ok "Mirasim 已退役，不查"
+    return 0
+  fi
   for u in "${SESSION_USERS[@]}"; do
     if ! id "$u" >/dev/null 2>&1; then
       pending "$u 这个用户还没有，Mirasim 服务没查"
@@ -1566,6 +1595,10 @@ readback_mirasim() {
 # 不然 deploy_lag 会报 tier_failed，整份 /healthz 跟着 503。一直不回话由 fleet-mirasim-liveness 重启。
 readback_mirasim_session_unit() {
   local u=${SESSION_USERS[0]}
+  if mirasim_retired; then
+    ok "Mirasim 已退役，不查"
+    return 0
+  fi
   if ! id "$u" >/dev/null 2>&1; then
     pending "$u 这个用户还没有，Mirasim 常驻单元没查"
     return 0

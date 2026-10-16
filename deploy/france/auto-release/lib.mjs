@@ -406,10 +406,10 @@ function act(st, now, action, detail = '') {
   st.last = { action, detail, at: iso(now) };
 }
 
-/** 记一条要发的报警（同一个 key 只留最新的一条）；真发在 flushAlerts，发不成下一轮再发。 */
-function raise(st, key, title, body) {
+/** 记一条要发的提醒（同一个 key 只留最新的一条）；真发在 flushAlerts，发不成下一轮再发。 */
+function raise(st, key, title, body, level = 'alert') {
   st.alerts = st.alerts.filter((a) => a.key !== key);
-  st.alerts.push({ key, title, body, raised: false });
+  st.alerts.push({ key, level, title, body, raised: false });
 }
 
 /** 事情好了：这个前缀下还没发出去的不发了；发出去了的记下来解除（没发过的不去碰库）。 */
@@ -420,11 +420,11 @@ function resolveLater(st, prefix) {
   if (mine.some((a) => a.raised) && !st.resolve.includes(prefix)) st.resolve.push(prefix);
 }
 
-/** 一直在的报警（配置对账那种，每一轮都判一次）：和上一轮一模一样就不动（不每 5 分钟重发一次），变了才重发。 */
-function keepRaised(st, key, title, body) {
+/** 一直在的提醒（配置对账那种，每一轮都判一次）：和上一轮一模一样就不动（不每 5 分钟重发一次），变了才重发。 */
+function keepRaised(st, key, title, body, level = 'alert') {
   const had = st.alerts.find((a) => a.key === key);
-  if (had && had.title === title && had.body === body) return;
-  raise(st, key, title, body);
+  if (had && (had.level ?? 'alert') === level && had.title === title && had.body === body) return;
+  raise(st, key, title, body, level);
 }
 
 /** 按整个键解除一条（配置对账一项一条，键之间可能是前缀关系，不能按前缀解除）。 */
@@ -1230,6 +1230,15 @@ async function tierStep(io, st, now, current) {
     );
     return;
   }
+  let mirasimRetired = false;
+  if (typeof io.mirasimRetired === 'function') {
+    try {
+      mirasimRetired = (await io.mirasimRetired(current)) === true;
+    } catch (e) {
+      tierFailed(st, io.now(), current, `读 Mirasim 退役标记没成：${why(e)}`);
+      return;
+    }
+  }
   for (let polls = 0; ; polls++) {
     let r;
     try {
@@ -1244,7 +1253,7 @@ async function tierStep(io, st, now, current) {
     }
     const detail = tierDetail(r);
     // 不是「刚重启、4318 还没 listen」：立刻落 failed，之后隔 TIER_RETRY_MS 再试。
-    if (!isMirasimBootRace(r.out)) {
+    if (!isMirasimBootRace(r.out) || mirasimRetired) {
       tierFailed(st, io.now(), current, detail);
       return;
     }
@@ -1400,8 +1409,9 @@ export function prunedAtOf(text) {
 
 /**
  * 依赖指纹（#2728）：在用那一版的 node_modules/.modules.yaml（pnpm 每装一次都重写，含 prunedAt）。发版后第一轮记下指纹，
- * 之后每轮核对；变了（有人在发布目录里重装过依赖）当轮报警，正文写出前后两次的 prunedAt。换了在用的提交重新记、撤掉旧的报警。
- * 读不到记 unchecked（不当成没变）。io.readDeps(current) 回原文，读不了抛。
+ * 之后每轮核对；变了（有人在发布目录里重装过依赖）先核对依赖树。树完好就重记指纹、留 daily 提醒，
+ * 树坏就照旧 alert，读不出来记 unchecked（不当成完好）。io.readDeps(current) 回原文，读不了抛；
+ * io.checkDeps(current) 回 { result: 'ok' | 'bad' | 'unchecked', detail }。
  */
 async function depsStep(io, st, now, current) {
   if (typeof io.readDeps !== 'function') return;
@@ -1439,14 +1449,56 @@ async function depsStep(io, st, now, current) {
     st.deps = { ...st.deps, result: 'ok', detail: '', checkedAt: iso(now) };
     return;
   }
-  const detail = `在用的 ${short(current)} 的依赖发版后被重装过：记下时 prunedAt ${st.deps.prunedAt ?? '（没有）'}，现在 ${prunedAt ?? '（没有）'}`;
-  st.deps = { ...st.deps, result: 'changed', detail, checkedAt: iso(now) };
+  const changed = `在用的 ${short(current)} 的依赖发版后被重装过：记下时 prunedAt ${st.deps.prunedAt ?? '（没有）'}，现在 ${prunedAt ?? '（没有）'}`;
+  let tree;
+  try {
+    if (typeof io.checkDeps !== 'function') throw new Error('没有依赖树核对口子');
+    tree = await io.checkDeps(current);
+    if (!tree || !['ok', 'bad', 'unchecked'].includes(tree.result) || typeof tree.detail !== 'string') {
+      throw new Error('依赖树核对回话认不出');
+    }
+  } catch (e) {
+    const detail = `${changed}；依赖树核对没查成：${why(e)}`;
+    st.deps = { ...st.deps, result: 'unchecked', detail, checkedAt: iso(now) };
+    keepRaised(
+      st,
+      key,
+      `在用版本的依赖发版后被动过（${short(current)}）`,
+      `${detail}（${RELEASES}/${current}/node_modules/.modules.yaml，指纹 ${st.deps.fingerprint.slice(0, 12)} → ${fingerprint.slice(0, 12)}）。` +
+        '没查成不当成树完好，先查发布目录和 fleet 用户权限。',
+    );
+    return;
+  }
+  if (tree.result === 'ok') {
+    const detail = '重装过但树完好';
+    st.deps = { ...st.deps, fingerprint, prunedAt, result: 'repaired', detail, checkedAt: iso(now) };
+    keepRaised(
+      st,
+      key,
+      `在用版本的依赖发版后被动过（${short(current)}）`,
+      `${changed}；${detail}：${tree.detail}（${RELEASES}/${current}/node_modules/.modules.yaml，指纹 ${st.deps.fingerprint.slice(0, 12)} → ${fingerprint.slice(0, 12)}）。`,
+      'daily',
+    );
+    return;
+  }
+  const detail =
+    tree.result === 'bad'
+      ? `${changed}；依赖树不完好：${tree.detail}`
+      : `${changed}；依赖树核对没查成：${tree.detail}`;
+  st.deps = {
+    ...st.deps,
+    result: tree.result === 'bad' ? 'changed' : 'unchecked',
+    detail,
+    checkedAt: iso(now),
+  };
   keepRaised(
     st,
     key,
     `在用版本的依赖发版后被动过（${short(current)}）`,
     `${detail}（${RELEASES}/${current}/node_modules/.modules.yaml，指纹 ${st.deps.fingerprint.slice(0, 12)} → ${fingerprint.slice(0, 12)}）。` +
-      '发布目录归 root、发完只读，不该有人再装；查是谁装的（journalctl、last、各会话的命令记录），下一次发版换了提交这条自己撤。',
+      (tree.result === 'bad'
+        ? '发布目录归 root、发完只读，不该有人再装；查是谁装的（journalctl、last、各会话的命令记录），修好后再让自动发布复核。'
+        : '没查成不当成树完好，先查发布目录和 fleet 用户权限。'),
   );
 }
 
@@ -1571,7 +1623,9 @@ export function summary(st) {
     );
   }
   if (st.deps && st.deps.result !== 'ok') {
-    parts.push(`依赖指纹${st.deps.result === 'changed' ? '变了' : '没查成'}：${st.deps.detail}`);
+    const label =
+      st.deps.result === 'changed' ? '变了' : st.deps.result === 'repaired' ? '重装过但树完好' : '没查成';
+    parts.push(`依赖指纹${label}：${st.deps.detail}`);
   }
   parts.push(configSummary(st.config));
   return parts.join('；');
