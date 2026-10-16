@@ -37,8 +37,15 @@ export const IssueSchema = z.object({
   user: User.nullable(),
   pull_request: z.unknown().optional(),
   updated_at: z.string(),
+  /** 贴着的标签（GitHub 回的是对象，也可能是字符串）。老的假端口不带。 */
+  labels: z.array(z.union([z.string(), z.object({ name: z.string() })])).optional(),
 });
 export type Issue = z.infer<typeof IssueSchema>;
+
+/** issue 上贴着的标签名。 */
+export function issueLabelNames(issue: Pick<Issue, 'labels'>): string[] {
+  return (issue.labels ?? []).map((l) => (typeof l === 'string' ? l : l.name));
+}
 
 export const CommentSchema = z.object({
   id: z.number(),

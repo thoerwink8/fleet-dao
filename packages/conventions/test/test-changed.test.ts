@@ -542,16 +542,17 @@ describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教�
     expect(some.vitestCalls[0]).toContain('packages/api/');
     expect(some.vitestCalls[0]).not.toEqual(['run']);
 
-    // CI、引擎会话仍全跑；--all 和 --affected 一起带时 --all 赢
+    // CI 仍全跑；引擎会话里的显式 --affected 改跑受影响的包；--all 和 --affected 一起带时 --all 赢
     expect(run(['pnpm-lock.yaml'], { argv: ['--affected'], env: { CI: 'true' } }).vitestCalls).toEqual([
       ['run'],
     ]);
-    expect(
-      run(['packages/shared/src/domain.ts'], {
-        argv: ['--affected'],
-        env: { [ENGINE_SESSION_MARKER]: 'run-1' },
-      }).vitestCalls,
-    ).toEqual([['run']]);
+    const engineAffected = run(['packages/shared/src/domain.ts'], {
+      argv: ['--affected'],
+      env: { [ENGINE_SESSION_MARKER]: 'run-1' },
+    });
+    expect(engineAffected.vitestCalls[0]).toContain('packages/shared/');
+    expect(engineAffected.vitestCalls[0]).toContain(DOC_POINTERS_TEST);
+    expect(engineAffected.vitestCalls[0]).toContain(SKILL_POINTERS_TEST);
     expect(run(['pnpm-lock.yaml'], { argv: ['--all', '--affected'] }).vitestCalls).toEqual([['run']]);
   });
 
@@ -652,7 +653,7 @@ describe('CI 每次都跑的测试：ci.yml 和 ALWAYS_TESTS 对得上；本机�
     expect(ciAlwaysTests(more).sort()).toEqual([...ALWAYS_TESTS, 'packages/hygiene/test/'].sort());
   });
 
-  // 每种走法各一个：没改动、只改文档、改一个包、改 skill（只跑选中的）；shared、锁文件、CI 工作流、deploy/、夹具、
+  // 每种走法各一个：没改动、只改文档、改一个包、改 skill、改夹具（只跑选中的）；shared、锁文件、CI 工作流、deploy/、
   // 认不出的路径、shared 和别的包一起改、依赖图读不出（拒跑：一个测试都不跑，CI 全跑）。agents 一栏：本机清单带不带整个 agents/test/。
   const CASES: { changed: string[]; graph?: string; code: number; agents?: boolean }[] = [
     { changed: [], code: 0, agents: false },
@@ -663,7 +664,11 @@ describe('CI 每次都跑的测试：ci.yml 和 ALWAYS_TESTS 对得上；本机�
     { changed: ['pnpm-lock.yaml'], code: REFUSED_FULL_RUN },
     { changed: ['.github/workflows/ci.yml'], code: REFUSED_FULL_RUN },
     { changed: ['deploy/france.sh'], code: REFUSED_FULL_RUN },
-    { changed: ['packages/adapters/test/fixtures/claude-code/x.ndjson'], code: REFUSED_FULL_RUN },
+    {
+      changed: ['packages/adapters/test/fixtures/claude-code/cc-haiku-read.ndjson'],
+      code: 0,
+      agents: false,
+    },
     { changed: ['LICENSE'], code: REFUSED_FULL_RUN },
     { changed: ['packages/shared/src/domain.ts', 'packages/db/src/schema/index.ts'], code: REFUSED_FULL_RUN },
     {

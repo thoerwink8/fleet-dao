@@ -4,7 +4,10 @@
 // - 失败率只数真实流量；
 // - 探针失败和真实流量失败一样计连败，探针成功不清零真实流量的连败；
 // - 半开时只有真实流量的试探成功才关上、才清零熔断次数；探针成功不算恢复（探针只能拦，不能放）；
-// - neutral（我们自己停的、断流、账号池的事、任务自己的问题）不进分母（#1386：断流进了分母，一条真干出活的路由被判死）。
+// - neutral（我们自己停的、断流、账号池的事、任务自己的问题）不进分母（#1386：断流进了分母，一条真干出活的路由被判死）；
+// - 半开时在途会话正常回话够数（trialReplies 次）也算真实流量试探成功，不等会话收场（#2862）：试探是整轮动手会话，一跑一个多小时，
+//   而路由早在第一轮回话时就证明好了（10-16 opus-5.5 13:50 就好了，三张单干等了 50 分钟）。回话 = assistant、tool_call 记录，
+//   error 记录清零重数；只在半开时算，关着、冷却中的回话不清连败、不进失败率。
 
 import { type Bound, count, fraction, positive, resolvePolicy } from './policy.ts';
 import { parseTime } from './scan.ts';
@@ -15,6 +18,13 @@ export interface RouteOutcome {
   result: 'ok' | 'fail' | 'neutral';
   /** 不给 = 真实流量。 */
   source?: 'traffic' | 'probe';
+}
+
+/** 这条路由上在途会话的一条过程记录：reply = 正常回话（assistant、tool_call），error = 报错（error）。 */
+export interface RouteReply {
+  /** 记下的时刻，ISO。 */
+  at: string;
+  kind: 'reply' | 'error';
 }
 
 export interface BreakerPolicy {
@@ -29,6 +39,8 @@ export interface BreakerPolicy {
   maxCooldownMinutes: number;
   /** 冷却按路由编号确定性地错开 ±这个比例：同一次事件里一批路由一起熔断，解冻时刻不挤在一起（windsurf-dao#1230）。 */
   jitterRatio: number;
+  /** 半开时，试探会话在途里正常回话几次就算真实流量试探成功。 */
+  trialReplies: number;
 }
 
 const RESULTS: readonly RouteOutcome['result'][] = ['ok', 'fail', 'neutral'];
@@ -41,6 +53,7 @@ export const DEFAULT_BREAKER_POLICY: Readonly<BreakerPolicy> = Object.freeze({
   cooldownMinutes: 10,
   maxCooldownMinutes: 120,
   jitterRatio: 0.1,
+  trialReplies: 3,
 });
 
 export interface RouteBreakerState {
@@ -65,6 +78,8 @@ export interface RouteBreakerOptions {
   inFlight: number;
   routeId?: string;
   policy?: Partial<BreakerPolicy>;
+  /** 这条路由上在途会话的过程记录（回话、报错）。只在半开时起作用，不给 = 没有。 */
+  replies?: readonly RouteReply[];
 }
 
 /** 时刻、结果、在途数认不出就抛错（调用方按「熔断没查成」处理），不会把读坏的记录当成「没有失败」。 */
@@ -85,12 +100,22 @@ export function routeBreaker(
     if (!RESULTS.includes(o.result)) {
       throw new Error(`熔断判不了：第 ${index + 1} 条结果认不出（${String(o.result)}）`);
     }
-    return { ...o, t, index };
+    return { ...o, t, index, reply: undefined as RouteReply['kind'] | undefined };
+  });
+  // 在途会话的过程记录和结局排进同一条时间流（同一刻结局在前）。
+  (options.replies ?? []).forEach((r, i) => {
+    const t = parseTime(r.at);
+    if (t === undefined) throw new Error(`熔断判不了：第 ${i + 1} 条回话记录的时刻认不出（${String(r.at)}）`);
+    if (r.kind !== 'reply' && r.kind !== 'error') {
+      throw new Error(`熔断判不了：第 ${i + 1} 条回话记录认不出（${String(r.kind)}）`);
+    }
+    events.push({ at: r.at, result: 'neutral', t, index: outcomes.length + i, reply: r.kind });
   });
   events.sort((a, b) => a.t - b.t || a.index - b.index);
 
   const m: Machine = {
     state: 'closed',
+    replies: 0,
     streak: 0,
     trips: 0,
     openedAt: 0,
@@ -104,7 +129,27 @@ export function routeBreaker(
   for (const e of events) {
     // 还没发生的（时刻在现在之后）不算。
     if (e.t > now) continue;
-    if (m.state === 'open' && e.t >= m.openUntil) m.state = 'half_open';
+    if (m.state === 'open' && e.t >= m.openUntil) {
+      m.state = 'half_open';
+      m.replies = 0;
+    }
+    if (e.reply !== undefined) {
+      // 过程记录只在半开时算：关着、冷却中的不清连败、不进失败率。
+      if (m.state !== 'half_open') continue;
+      if (e.reply === 'error') {
+        m.replies = 0;
+        continue;
+      }
+      m.replies += 1;
+      if (m.replies >= policy.trialReplies) {
+        m.state = 'closed';
+        m.trips = 0;
+        m.streak = 0;
+        m.windowStart = e.t;
+        m.why = `试探会话已正常回话 ${m.replies} 次，${stamp(e.t)} 恢复`;
+      }
+      continue;
+    }
     if (e.result === 'neutral') continue;
     // 冷却期间结束的，是开闸前就派出去的，不算试探。
     if (m.state === 'open') continue;
@@ -141,7 +186,10 @@ export function routeBreaker(
       );
     }
   }
-  if (m.state === 'open' && now >= m.openUntil) m.state = 'half_open';
+  if (m.state === 'open' && now >= m.openUntil) {
+    m.state = 'half_open';
+    m.replies = 0;
+  }
 
   const w = windowStats(m, policy, now);
   const base = {
@@ -183,6 +231,8 @@ export function routeBreaker(
 
 interface Machine {
   state: RouteBreakerState['state'];
+  /** 半开时试探会话已经连着正常回话几次（进半开、碰到报错清零）。 */
+  replies: number;
   streak: number;
   trips: number;
   openedAt: number;
@@ -257,6 +307,7 @@ const BREAKER_POLICY_BOUNDS: { readonly [K in keyof BreakerPolicy]: Bound } = {
   maxCooldownMinutes: positive,
   // 到 1 的话冷却能被错开成 0，等于没熔断。
   jitterRatio: { ...fraction, maxExclusive: true },
+  trialReplies: count(1),
 };
 
 /** 缺的取默认值，给了但不对的报错。 */

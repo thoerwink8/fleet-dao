@@ -14,7 +14,9 @@
 // 验收意见也一定交到一轮会话手里，不在「动手 3 轮都没过」上停住。只多给这一次，第 2 轮验收再不过照旧停下。
 //
 // 停下等人（waiting.kind = human，驾驶舱点「继续」「放弃」发信号）只有这几处，而且每一处都写清卡在哪、要人干什么：
-// - 交代不全（缺栏）；没有可用的路由；失败分流判「挂起」（同因连着两次再犯、额度要等很久、登录失效……）；
+// - 交代不全（缺栏）；没有可用的路由；失败分流判「挂起」（同因连着两次再犯、额度要等很久、没权限……）；
+//   登录失效、封号、设备被撤销停的是池不是这张单（patched('auth-reroute')，task-session.ts）：池暂停，单回去选路；
+//   只有避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」；
 // - 动手 3 轮、验收 2 轮都没过；验收做不出来（读不到 diff、没有别家模型、会话没跑成）；
 // - 等合并时必过检查连着红、返工 3 轮用完（报警级别 decision，进「要你拍的」，不再等）；
 // - 改到了「改标准」的路径（人闸第四类，要创始人同意才挂自动合并）；
@@ -78,6 +80,10 @@
 //   （怎么结束的按 lastProblem 认，roundOutcomeOf；档位、首派模型、PR 新增行数），每日简报「流程健康」按它算。记不成不挡原流程。
 // - 交活没提交续一次（#2722，patched('commit-nudge-same-round')，nudgeCommit）：会话收场时没提交、或树里有剩（常见是把测试丢到后台就结束了），
 //   读完交付先续同一个会话一次让它提交，不算一轮；续不上（planResume 判开新会话）就不续。续了还没交干净，照旧返工进下一轮。
+// - 全程模式（#2826，patched('flow-mode')，task-flow.ts 定模式）：全程的单 CI 红、冲突、验收被拒都回到动手、续同一个会话
+//   （不按 RESUME_STREAK_LIMIT 清空；续不上开新会话带同样的意见），不算新的一轮（rt.round 停在 1）；上限换成交付 MAX_FULL_PUSHES 次、
+//   验收被拒 MAX_VERIFY_ROUNDS 次，到了停下等人（fullLimits，不走自动续）。推分支、开 PR、等 CI、冷验收、合并闸和三段一模一样。
+//   三段的单（和老历史 rt.flowMode 为 null）走原来的路，一步不差。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -90,6 +96,7 @@ import type { TierDecision } from '../runner/tier.ts';
 import {
   type AbandonCommand,
   type DeliveryRead,
+  MAX_FULL_PUSHES,
   MAX_IMPLEMENT_ROUNDS,
   MAX_MAIN_SYNCS,
   MAX_VERIFY_ROUNDS,
@@ -187,7 +194,11 @@ class TaskFlow {
       const verifyGrace =
         this.verifyRework && rt.verifyRound < MAX_VERIFY_ROUNDS && patched('verify-rework-own-round');
       this.verifyRework = false;
-      if (rt.round >= MAX_IMPLEMENT_ROUNDS && !verifyGrace) {
+      // 全程（#2826）：CI 红、冲突、验收被拒回来续同一个会话、不算新的一轮；上限是交付 MAX_FULL_PUSHES 次、验收被拒 2 次
+      const full = rt.flowMode === 'full';
+      if (full) {
+        await this.fullLimits();
+      } else if (rt.round >= MAX_IMPLEMENT_ROUNDS && !verifyGrace) {
         const problems = rt.feedback.join('；') || '（没有）';
         // 等合并检查红了交回的意见以「检查红了：」开头。轮数用完进「要你拍的」。
         // 前缀不在就不问 patched：CI 红了仍是「动手 N 轮都没过」，老历史重放不多一个标记。
@@ -219,9 +230,12 @@ class TaskFlow {
           continue;
         }
       }
-      rt.round += 1;
+      if (!full) rt.round += 1;
       this.startRound();
-      if (!(await this.implement(brief, tier))) {
+      const implemented = await this.implement(brief, tier);
+      // 全程的单（第一段里才定模式，所以在动手之后数）：回到动手一次算交付一次
+      if (rt.flowMode === 'full') rt.fullPushes += 1;
+      if (!implemented) {
         await this.endRound(roundOutcomeOf('implement', rt.status.lastProblem, rt.feedback));
         continue;
       }
@@ -233,6 +247,24 @@ class TaskFlow {
       }
       return this.finish(delivered.commit);
     }
+  }
+
+  /**
+   * 全程的单回来再修之前看上限（#2826）：冷验收被拒到 MAX_VERIFY_ROUNDS 次、或已经交付 MAX_FULL_PUSHES 次，停下等人（token 预算照旧在起会话前查）。
+   * 人点「继续」：两样都清零、重读单子，接着续同一个会话；不要了点「放弃」。没到上限什么都不做。
+   */
+  private async fullLimits(): Promise<void> {
+    const rt = this.rt;
+    const rejected = rt.status.lastProblem === '验收没过' && rt.verifyRound >= MAX_VERIFY_ROUNDS;
+    if (!rejected && rt.fullPushes < MAX_FULL_PUSHES) return;
+    const problems = rt.feedback.join('；') || '（没有）';
+    await rt.park(
+      rejected ? `全程：冷验收被拒 ${MAX_VERIFY_ROUNDS} 次` : `全程：推送 ${MAX_FULL_PUSHES} 次还没合`,
+      `最近的意见：${problems}。点「继续」两样都从 0 再计、重读单子，接着续同一个会话修；或「放弃」。`,
+    );
+    rt.fullPushes = 0;
+    rt.verifyRound = 0;
+    await rt.reloadBrief();
   }
 
   /** 一轮开始（#2762）：清掉上一轮的首派模型，记下有一轮没收场。纯状态。 */
@@ -260,6 +292,8 @@ class TaskFlow {
       ...(rt.status.tier ? { tier: rt.status.tier.tier } : {}),
       ...(rt.roundFirstModel ? { firstModel: rt.roundFirstModel } : {}),
       ...(rt.addedLines !== null ? { addedLines: rt.addedLines } : {}),
+      // 这张单走的流程（#2826）：定过模式才有（老历史没有）
+      ...(rt.flowMode !== null ? { flowMode: rt.flowMode } : {}),
     };
     try {
       await CancellationScope.nonCancellable(() => rt.acts.recordRound(input));
@@ -822,7 +856,8 @@ class TaskFlow {
     const rt = this.rt;
     const last = rt.lastSession;
     if (!last || rt.resumeFrom !== null || !patched('rework-resume')) return;
-    if (rt.resumeStreak >= RESUME_STREAK_LIMIT) {
+    // 全程的单（#2826）一直续同一个会话：不按「连着续两轮开新会话」清空；续不上由 writeSession 开新会话、带同样的意见
+    if (rt.resumeStreak >= RESUME_STREAK_LIMIT && rt.flowMode !== 'full') {
       rt.resumeStreak = 0;
       rt.feedback = freshSessionFeedback(rt.feedback);
       return;

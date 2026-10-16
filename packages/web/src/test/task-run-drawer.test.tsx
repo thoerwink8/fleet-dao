@@ -94,7 +94,7 @@ describe('「看会话」抽屉', () => {
 });
 
 describe('手机端（#1802 点验补充）', () => {
-  test('四张统计卡手机上两列（2×2），宽屏才四列并排', async () => {
+  test('四张统计卡（#2859 去掉了折算 token）手机上两列，宽屏四列并排', async () => {
     open('/tasks/t-c9');
     await screen.findByRole('heading', { name: '每一笔' });
     const grid = document.querySelector('[data-segment-stats] > div') as HTMLElement;

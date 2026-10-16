@@ -78,6 +78,8 @@ setup_mirasim_liveness() { CALLS+=(setup_mirasim_liveness); }
 # 真函数会写 /usr/local/lib（要 root）。这里只记调用顺序，并清掉 WROTE，免得守卫的「变了」被当成单元变了。
 install_mirasim_stream_guard() { CALLS+=(install_mirasim_stream_guard); WROTE=0; }
 setup_slice() { CALLS+=(setup_slice); }
+setup_user_slice_cap() { CALLS+=(setup_user_slice_cap); }
+readback_user_slice_cap() { CALLS+=(readback_user_slice_cap); }
 retire_old_units() { CALLS+=(retire_old_units); }
 setup_auto_release() { CALLS+=(setup_auto_release); }
 readback_slice() { CALLS+=(readback_slice); }
@@ -104,11 +106,11 @@ echo "== 1. 自动档入口会装 Mirasim 常驻单元（在自动发布单元�
 fresh
 SERVER_INSTALLED=0
 setup_auto_tier >/dev/null
-check "setup_auto_tier 先走完自动发布那几步" "${CALLS[*]}" "setup_slice retire_old_units setup_auto_release"
+check "setup_auto_tier 先走完自动发布那几步" "${CALLS[*]}" "setup_slice setup_user_slice_cap retire_old_units setup_auto_release"
 has "setup_auto_tier 走到了 Mirasim 常驻单元这一步（本体不在，所以只记待配）" "${PENDING[*]}" "还没有 Mirasim 服务端本体"
 fresh
 readback_auto_tier >/dev/null 2>&1
-has "readback_auto_tier 读回了 slice、老单元" "${CALLS[*]}" "readback_slice readback_retired_units"
+has "readback_auto_tier 读回了 slice、老单元" "${CALLS[*]}" "readback_slice readback_user_slice_cap readback_retired_units"
 has "readback_auto_tier 读回 Mirasim 常驻单元（本体不在：待配，不是红）" "${PENDING[*]}" "还没有 Mirasim 服务端本体"
 check "读回没有红" "${#REDS[@]}" "0"
 

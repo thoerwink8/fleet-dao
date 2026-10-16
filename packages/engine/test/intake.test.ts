@@ -2003,6 +2003,94 @@ describe('熔断', () => {
   });
 });
 
+describe('仓档案没就绪的提醒（#2839）', () => {
+  const FULL_PROFILE = {
+    language: 'typescript',
+    toolchain: ['pnpm'],
+    testCommand: 'pnpm check',
+    moduleRoots: ['packages/*'],
+    mergeSignals: ['check'],
+    standardPathsFile: 'packages/conventions/standard-paths.json',
+    weight: 1,
+  };
+
+  it('开着接活、档案缺项 → 不拉，推提醒，why 写明缺哪几项（含 language）', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { toolchain: ['pnpm'] } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]?.why).toContain('缺 language');
+  });
+
+  it('档案形状不对（weight 写成 0）→ 不拉，推提醒，why 是 parse 的那句错', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { ...FULL_PROFILE, weight: 0 } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]?.why).toContain('weight');
+  });
+
+  it('开着接活、档案齐 → 照拉，推的是 why 为 null（撤掉）', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: FULL_PROFILE }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+    expect(alerts).toEqual([{ why: null }]);
+  });
+
+  it('「让 AI 接活」关着的仓：档案缺项也不拉、不推提醒', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, autoDispatchSince: null, profile: { toolchain: ['pnpm'] } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(alerts).toEqual([]);
+  });
+
+  it('提醒写不进去：只记 warn 日志，这一轮照常跑完（照起、结局 ok）', async () => {
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: FULL_PROFILE }];
+      },
+      async profileAlert() {
+        throw new Error('库断了');
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+    expect(run.outcome).toBe('ok');
+    expect(h.logs.some((l) => l.level === 'warn' && l.text.includes('仓档案的提醒没写成'))).toBe(true);
+  });
+});
+
 describe('【故意造出的失败】旧的两道硬闸删掉之后', () => {
   it('整理过的老单不再被 opened_before_switch 拦：被拉起，拉单日志里也没有这个原因', async () => {
     const h = harness(

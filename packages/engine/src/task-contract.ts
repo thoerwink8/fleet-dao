@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { Repo } from '@fleet-dao/shared';
+import type { FlowMode, FlowSource, Repo } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
@@ -27,6 +27,32 @@ export const MAX_VERIFY_ROUNDS = 2;
  * 超过就停下交给指挥官，不再清零。同一次继续之内仍受上面两个上限约束。
  */
 export const MAX_ROUND_RESETS = 3;
+/**
+ * 全程模式（#2826）一张单最多交付几次：CI 红、冲突、冷验收被拒都续同一个会话、不算新的一轮，这个数兜底。
+ * 每回到动手一次算一次（推上去的、交活没提交被打回的都算），到了停下等人。冷验收被拒的上限仍是 MAX_VERIFY_ROUNDS。
+ */
+export const MAX_FULL_PUSHES = 6;
+
+/** 定这张单走三段还是全程（#2826）：第一次选路之后、第一段动手之前问一次，结果进历史，重放不再读配置。 */
+export interface DecideFlowModeInput {
+  schemaVersion: 1;
+  taskId: string;
+  repo: Repo;
+  issueNumber: number;
+  /** 第一次选中的路由的模型：第一期只有 Claude Sonnet 5.5 才可能进全程（决定 0105）。 */
+  modelId: string;
+  /** 单子「已知的模块」每一项的原文：碰到迁移、合并闸、凭据、权限、任务工作流、发布脚本的一律三段。 */
+  touches: string[];
+  /** 分层（档位）：split 在同一档位里按单号哈希分组。 */
+  stratum: string;
+}
+
+export interface DecideFlowModeResult {
+  mode: FlowMode;
+  source: FlowSource;
+  /** 退回三段的原因（写进 task_flow_assignments.reason）；别的是 null。 */
+  reason: string | null;
+}
 /** 一轮动手的会话最长多少分钟（one-shot 默认也是 60）。 */
 export const SEGMENT_MINUTES = 60;
 /** 等合并时每次长轮询多少分钟（工作流一直轮到合并、关闭或人放弃）。 */
@@ -170,6 +196,10 @@ export interface RunSegmentInput {
    * 不给就是照常动手。老历史里没有这个字段。
    */
   mode?: 'plan';
+  /**
+   * full＝这张单走全程（#2826）：提示词多一节「这张单到合并都归你」。三段的单、老历史里没有这个字段，提示词一字不变。
+   */
+  flowMode?: 'full';
 }
 
 /**
@@ -189,6 +219,12 @@ export type SegmentEvidence = Pick<
   FailureEvidence,
   'code' | 'message' | 'exitCode' | 'httpStatus' | 'resetsAt'
 > & { quotaExhausted: boolean };
+
+/** 当前活动所在的引擎进程启动时刻，用来核对超时活动是不是被重启丢掉。 */
+export interface EngineStartedAt {
+  schemaVersion: 1;
+  startedAt: string;
+}
 
 /**
  * 动手会话脱开引擎跑着、引擎要走了（停机信号：发版切版本、重启）时这一段的结局（#2238）：会话没停，接着在自己的 scope 里跑、往
@@ -260,6 +296,28 @@ export interface ColdVerifyInput {
   round: 1 | 2;
   /** 引擎在会话收场后自己跑过的测试输出（有才给）：放进验收材料（决定 0093）。老历史里没有这个字段。 */
   testOutput?: string;
+  /**
+   * 接回（#2848，和动手段的 RunSegmentInput.attach 同一个意思）：上一次 coldVerify 交回 detached，验收会话还在跑。
+   * 给了就不选路、不拼提示词、不起会话，接回那一次会话、等它收场，结论照常贴、结局记到原来那一行 runs。老历史里没有这个字段。
+   */
+  attach?: ColdVerifyAttach;
+}
+
+/** 脱开引擎跑着的那一次验收会话（#2848）：接回要的东西。 */
+export interface ColdVerifyAttach {
+  /** runs 编号（收发目录也按它）。 */
+  runId: string;
+  /** 起的时刻：接回后总时长照它算，结局记回那一行用同一个起点。 */
+  startedAt: string;
+  /** 验它的族、模型、路由、池：接回时登记切号、记账照原样。 */
+  family: string;
+  modelId: string;
+  routeId: string;
+  poolId: string;
+  /** 选路那句「为什么派它」：接回收场那一笔整行覆盖开跑那一行，带上原来的。选路没给就没有。 */
+  routeWhy?: string;
+  /** 会话的工作目录（验收的空目录，归会话用户）：放手时留着，接回收场后删。 */
+  cwd: string;
 }
 
 export interface ColdVerifyResult {
@@ -286,6 +344,11 @@ export interface ColdVerifyResult {
    * 老历史里没有这个字段。
    */
   outOfScope?: string[];
+  /**
+   * 引擎要走了（发版切版本、重启），验收会话没停、脱开引擎接着跑（#2848）：没有结论，不是没过、不算一轮。
+   * 工作流隔一会儿带上它再调 coldVerify（ColdVerifyInput.attach），由下一个引擎接回。老历史里没有这个字段。
+   */
+  detached?: ColdVerifyAttach;
 }
 
 /** 改到了哪些要人拍的路径。空＝除了 CI 和冷验收没有别的门。 */
@@ -452,8 +515,24 @@ export interface TaskSpendInput {
   since?: string;
 }
 
+/**
+ * 记下这个池这一次只凭 HTTP 401，并回答窗口里是不是已经有过一次（别的任务记的也算）。
+ * claim 重试时不变：同一次活动重试不会把自己数成第二次。now 是工作流时间（ISO）。
+ */
+export interface NoteBare401Input {
+  schemaVersion: 1;
+  poolId: string;
+  now: string;
+  claim: string;
+}
+
+export interface NoteBare401Result {
+  repeated: boolean;
+}
+
 /** 单任务 token 预算的默认值见 limits.ts 的 DEFAULT_TASK_TOKEN_BUDGET。 */
 export interface TaskSpendResult {
+  /** 原始四样相加（老字段，老历史记的结果里只有这个）。 */
   tokens: number;
   runs: number;
   /** 用量还空着的行数（被叫停、超时杀，或中转会话的用量稍后才补）：花掉的只多不少。 */
@@ -463,6 +542,25 @@ export interface TaskSpendResult {
    * 页面上写明是估的。
    */
   estimated: number;
+  /**
+   * #2859：预算按输入当量判。当量只在活动里算（toTaskSpendResult），工作流不重算：下面这几项都是可选的，
+   * 新活动结果带全；老历史里记的结果没有它们，工作流退回用 tokens / estimated，重放判法和原来一样。
+   */
+  /** 原始四样（新输入、输出、缓存读、缓存写），缺的按 0 加。 */
+  inputTokens?: number;
+  outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  /** 输入当量（shared 的 inputEquivalentOf）。预算判超没超看它；四样有读不到的折不成就不给。 */
+  inputEquivalent?: number;
+  /** estimated 按同一比例折成当量后的数。 */
+  inputEquivalentEstimated?: number;
+  /**
+   * 只读，不再写：#2830 的活动结果记在这两个名下（缓存读乘 0.1 的数）。在途单的历史里还有，重放要照原样读，
+   * 所以字段留着；新结果不带。
+   */
+  weighted?: number;
+  weightedEstimated?: number;
 }
 
 /**

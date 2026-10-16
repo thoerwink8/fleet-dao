@@ -35,6 +35,7 @@ import {
   openAlertKeysOfTask,
   openAlertsByPrefix,
   openPoolRuns,
+  openRunTranscriptMarks,
   type RunSegment,
   readQuotaReserveSetting,
   readTaskRoutePin,
@@ -53,7 +54,7 @@ import {
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
-import { routeBreaker } from '../failure/breaker.ts';
+import { type RouteReply, routeBreaker } from '../failure/breaker.ts';
 import {
   isTaskParkAlertKey,
   TASK_DONE_PARK_ACTOR,
@@ -89,7 +90,13 @@ import { SEGMENT_STAGE } from '../task-contract.ts';
 import { WIRED_HOSTS as WIRED_HOST_IDS } from './hosts.ts';
 import { admitSessionMemory, type MemoryAdmissionDeps } from './memory-admission.ts';
 import { orgPlanView } from './org-plan.ts';
-import { type HeldPools, loadHeldPools, POOL_HOLD_PREFIX, poolHoldKey } from './pool-holds.ts';
+import {
+  type HeldPools,
+  loadHeldPools,
+  POOL_HOLD_PREFIX,
+  poolHoldKey,
+  poolHoldOptions,
+} from './pool-holds.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { RESERVATION_TTL_MS } from './task-segment.ts';
 
@@ -156,6 +163,9 @@ class SlotTaken extends Error {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+/** 熔断半开时拿在途会话的回话当证据，只看最近这么多小时的记录。 */
+const TRANSCRIPT_MARK_HOURS = 6;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export interface StorePortsDeps {
@@ -236,10 +246,11 @@ function breakerOf(
   now: Date,
   inFlight: number,
   routeId: string,
+  replies: readonly RouteReply[],
 ): BreakerFacts {
   const state = routeBreaker(
     outcomes.map((o) => ({ at: o.endedAt.toISOString(), result: o.routeOutcome ?? 'neutral' })),
-    { now: now.toISOString(), inFlight, routeId },
+    { now: now.toISOString(), inFlight, routeId, replies },
   );
   return {
     state: state.state,
@@ -393,11 +404,19 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
   async function loadStage(stage: StageKind, now: Date): Promise<StageFacts> {
     // 两种会话都读（db 的 pool-runs.ts）：哪张表读不了照抛，不当成没有三段的会话（熔断、战绩、试探数都会算少）
-    const [facts, outcomes, open] = await Promise.all([
+    // 第四条是在途会话的回话证据（#2862，熔断半开时用）：查不出也照抛，不当成没有回话、也不当成回话够了。
+    const [facts, outcomes, open, marks] = await Promise.all([
       routeFactsForPurpose(db, stage, { now }),
       endedPoolRuns(db, new Date(now.getTime() - RECORD_DAYS * DAY_MS)),
       openPoolRuns(db, { now }),
+      openRunTranscriptMarks(db, { since: new Date(now.getTime() - TRANSCRIPT_MARK_HOURS * HOUR_MS) }),
     ]);
+    const repliesByRoute = new Map<string, RouteReply[]>();
+    for (const k of marks) {
+      const list = repliesByRoute.get(k.routeId) ?? [];
+      list.push({ at: k.at.toISOString(), kind: k.kind === 'error' ? 'error' : 'reply' });
+      repliesByRoute.set(k.routeId, list);
+    }
     const byRoute = new Map<string, EndedPoolRun[]>();
     for (const o of [...outcomes].sort((a, b) => a.endedAt.getTime() - b.endedAt.getTime())) {
       const list = byRoute.get(o.routeId) ?? [];
@@ -450,7 +469,13 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       maxConcurrency: r.maxConcurrency,
       banReasons: r.banReasons,
       blockers: r.blockers,
-      breaker: breakerOf(byRoute.get(r.routeId) ?? [], now, running.get(r.routeId) ?? 0, r.routeId),
+      breaker: breakerOf(
+        byRoute.get(r.routeId) ?? [],
+        now,
+        running.get(r.routeId) ?? 0,
+        r.routeId,
+        repliesByRoute.get(r.routeId) ?? [],
+      ),
       record: recordOf(byRoute.get(r.routeId) ?? [], stage),
     }));
     const unwiredRoutes = all.filter((r) => !wired.includes(r.hostId));
@@ -576,6 +601,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       routeId: fact.routeId,
       reservedAt: now,
       expiresAt: new Date(now.getTime() + reservationTtlMs),
+      // 半开只放一个试探：同一把池锁里数这条路由在途的，已经有了就不占
+      ...(fact.breaker.admit === 'trial' ? { trial: true } : {}),
     });
     for (const e of got.expired) {
       log('收掉一个过期的预占：那一段选定路由后过了这么久还没开跑（多半卡在建树、等内存），名额让出来', {
@@ -586,6 +613,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       });
     }
     if (!got.reserved) {
+      if (got.trialTaken) throw new SlotTaken(`${routeLabel(fact)}：半开的试探已经被别的单占了`);
       throw new SlotTaken(`${routeLabel(fact)}：池刚被别的单占满（${got.occupied}/${got.maxConcurrency}）`);
     }
     return got.reservationId;
@@ -958,14 +986,20 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
 
     async raiseAlert(input) {
       // 工作流这一路（任务挂起、封号、事件数到线、全熔断……）一律记卡住报警（#2729）：挂起由指挥官点继续、放弃、重做，
-      // 不是掏新钱、删了找不回、只有人能做的事，不进「要你拍」。工作流报的 decision 也按这一级记。
+      // 不是掏新钱、删了找不回、只有人能做的事，不进「要你拍」。整池暂停是唯一例外：它要让人处理账号池，必须保留「要你拍」的选项和原因。
+      const poolId = input.dedupeKey.startsWith(POOL_HOLD_PREFIX)
+        ? input.dedupeKey.slice(POOL_HOLD_PREFIX.length)
+        : '';
+      const poolHold = poolId.length > 0;
+      const level = poolHold ? 'decision' : 'alert';
       const { id } = await upsertAlert(db, {
         dedupeKey: input.dedupeKey,
-        level: 'alert',
-        // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。
-        taskId: UUID.test(input.taskId) ? input.taskId : null,
+        level,
+        // 合并队列这类不属于某个需求的报警 taskId 是空的：不挂任务。整池暂停也不挂任务。
+        taskId: poolHold || !UUID.test(input.taskId) ? null : input.taskId,
         title: input.title.slice(0, 300),
         body: input.detail,
+        ...(poolHold ? { options: poolHoldOptions(poolId), reason: 'human-only' } : {}),
       });
       return { alertId: id };
     },
@@ -1005,6 +1039,7 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         tier: input.tier ?? null,
         firstModel: input.firstModel ?? null,
         addedLines: input.addedLines ?? null,
+        flowMode: input.flowMode ?? null,
       });
     },
 

@@ -27,14 +27,22 @@ import {
 } from '../task-contract.ts';
 import type { UserCommandResult, UserExec } from './exec.ts';
 
-/** 测试命令最多跑多久（毫秒）。要全跑时，排队和改跑受影响包合起来也算在这一段里。 */
-export const SELF_CHECK_TEST_MS = 8 * 60_000;
+/**
+ * 测试命令最多跑多久（毫秒）。夹具一改就升成全跑，受影响的包在 2 个进程下墙钟约 17 分钟
+ * （2026-10-16 这张单实测 1024 秒），排队和这一跑合用，给 30 分钟才盖得住，12 分钟会记成自测超时。
+ */
+export const SELF_CHECK_TEST_MS = 30 * 60_000;
 /** tsc 最多跑多久（毫秒）。 */
 export const SELF_CHECK_TSC_MS = 5 * 60_000;
 /** 多久报一次心跳（活动的心跳超时是 limits.heartbeatSeconds，默认 120 秒）。 */
 const HEARTBEAT_MS = 30_000;
-/** 会话用户的 PATH：node、pnpm 在 /usr/bin 或 /usr/local/bin（法国 pnpm 在 /usr/local/bin）。 */
-const PATH = '/usr/local/bin:/usr/bin:/bin';
+/**
+ * 会话用户的 PATH：node、pnpm 在 /usr/bin 或 /usr/local/bin（法国 pnpm 在 /usr/local/bin）。
+ * Go 不在这三处：本机装在会话用户家里的 ~/.local/go/bin，官方包在 /usr/local/go/bin。
+ * mirasim-reclaude 的测试要起 go test；不带上的话 spawn 报 ENOENT，整段自测红。
+ * $HOME 由会话用户的 shell 展开。
+ */
+const PATH = '$HOME/.local/go/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin';
 const SH = '/bin/sh';
 const TSC = 'node_modules/.bin/tsc';
 /** 锁目录放哪（几个引擎进程共用）。测试和特殊机器用。 */

@@ -3,11 +3,11 @@
 // 用法：node packages/conventions/src/bin/prepare-push.ts（在仓根跑；.githooks/pre-push 调它）。
 // 退出码：0 过了；1 查出来没过；2 没查成（不推）。
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readGraph } from '../ci-plan.ts';
-import { preparePush } from '../prepare-push.ts';
+import { preparePush, pushedFiles } from '../prepare-push.ts';
 import { fsRepo } from '../repo.ts';
 import { changedFiles, type GitRun, TestChangedError } from '../test-changed.ts';
 
@@ -33,8 +33,13 @@ const bin = (name: string): string | null => {
   return null;
 };
 
+// 钩子把 git 给的「这次推哪些 ref」从 stdin 原样转进来（.githooks/pre-push 读一次、分别喂给两步）。手动跑（终端）没有
+// 管道就不读，当空处理——走老路。
+const stdin = process.stdin.isTTY ? '' : readFileSync(0, 'utf8');
+
 const result = preparePush({
   changed: () => changedFiles(git),
+  pushed: () => pushedFiles(stdin, git),
   repo,
   graph: () => readGraph(repo),
   run(name, args) {

@@ -1,6 +1,7 @@
 // 拉单的真装配（real/intake.ts，#632 S2-4b-3）：库是真的（PGlite 跑真迁移），GitHub 和 Temporal 客户端是假的。
 // 从受管的仓到起任务工作流走一遍：任务行、操作记录、谁要的、工作流编号和起法；重复起、不在白名单、在跑的数读不到各故意造一次。
 import {
+  alertByKey,
   auditLog,
   type Db,
   INTAKE_BREAKER_SETTING,
@@ -26,7 +27,7 @@ import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@te
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../../src/jobs/dispatch-standing.ts';
 import { INTAKE_JOB, runIntakeJob } from '../../src/jobs/intake.ts';
-import { type IntakeGitHub, intakeJob } from '../../src/real/intake.ts';
+import { type IntakeGitHub, intakeJob, reportIntakeProfile } from '../../src/real/intake.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -1059,5 +1060,34 @@ describe('拉单的真装配 · 查工作流没查成（放最后）', { timeout
     expect((await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION)).toEqual(
       [],
     );
+  });
+});
+
+describe('reportIntakeProfile · 仓档案没就绪的提醒（#2839）', () => {
+  const KEY = 'intake-profile:acme/demo';
+  const repo = { owner: 'acme', name: 'demo' };
+
+  it('非空报两次 → 同一个键只有一行、没撤，正文是后一次的', async () => {
+    await reportIntakeProfile(t.db, repo, '缺 language');
+    await reportIntakeProfile(t.db, repo, '缺 language、weight');
+    const rows = (await t.db.select().from(notifications)).filter((r) => r.dedupeKey === KEY);
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.resolvedAt).toBeNull();
+    expect(rows[0]?.title).toBe('acme/demo 仓档案没就绪，拉单不拉这个仓');
+    expect(rows[0]?.body).toContain('缺 language、weight');
+    expect(rows[0]?.body).toContain('fleet-api project set-profile acme/demo --file -');
+  });
+
+  it('非空之后再报 null → resolved_at 有值（撤掉）', async () => {
+    await reportIntakeProfile(t.db, repo, '缺 language');
+    await reportIntakeProfile(t.db, repo, null);
+    const row = await alertByKey(t.db, KEY);
+    expect(row).not.toBeNull();
+    expect(row?.resolvedAt).not.toBeNull();
+  });
+
+  it('一上来就报 null → 不报错，表里没有这一行', async () => {
+    await expect(reportIntakeProfile(t.db, repo, null)).resolves.toBeUndefined();
+    expect(await alertByKey(t.db, KEY)).toBeNull();
   });
 });

@@ -16,6 +16,7 @@ import {
   type SessionUser,
   StopReason,
   sessionProxyEnv,
+  stopMirasimSession,
   switchSessionOrg,
 } from '@fleet-dao/adapters';
 import type { RunCommand } from '@fleet-dao/adapters/quota';
@@ -25,10 +26,13 @@ import {
   type Db,
   findRepoProfile,
   finishScheduleRun,
+  getFlowAssignment,
   getRun,
   latestRunOfTask,
   listIntakeRepos,
   readEngineMasterRow,
+  readFlowModeSettingRaw,
+  recordFlowAssignment,
   recordRouteProbeDone,
   recordRouteProbeStart,
   routeProbeAuditRows,
@@ -45,6 +49,7 @@ import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
+import { createDecideFlowMode } from '../flow-mode.ts';
 import { probeAssignedRoute } from '../jobs/dispatch-probe.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
@@ -52,7 +57,9 @@ import type { InterruptedScheduleClose } from '../jobs/timers.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import { type EnginePorts, PortError } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
+import { toTaskSpendResult } from '../task-spend.ts';
 import { configFromEnv } from '../worker.ts';
+import { createNoteBare401 } from './bare-401.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
@@ -111,7 +118,7 @@ import { createPlanSegmentResume, createSegmentSettled } from './segment-resume.
 import { reportSubagentDefs } from './segment-settings.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { createSelfCheck } from './self-check.ts';
-import { DEFAULT_SESSION_IO_ROOT, sessionHandoff } from './session-handoff.ts';
+import { DEFAULT_SESSION_IO_ROOT, type MirasimHandle, sessionHandoff } from './session-handoff.ts';
 import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
 import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } from './subagents-file.ts';
@@ -150,6 +157,10 @@ export interface RealPortsDeps {
    * 动手会话收发目录的根（#2238，session-handoff.ts）：收孤儿时认放手标记，等人接回的不收。不给 = 不认（测试）。
    */
   sessionIoRoot?: string;
+  /**
+   * 放手的 Mirasim 会话过了时限没人接回时，给服务端发 stop（#2815，orphan-reap.ts）。不给 = 服务端的会话留着（测试）。
+   */
+  stopMirasim?: (handle: MirasimHandle) => Promise<{ confirmed: boolean; detail: string }>;
   /** 以下测试用。 */
   session?: Partial<{ helper: string; sudo: readonly string[]; gitBin: string; shBin: string }>;
   now?: () => Date;
@@ -207,6 +218,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
       ...(deps.session?.helper ? { helper: deps.session.helper } : {}),
       ...(deps.session?.sudo ? { sudo: deps.session.sudo } : {}),
       ...(deps.sessionIoRoot ? { ioRoot: deps.sessionIoRoot } : {}),
+      ...(deps.stopMirasim ? { stopMirasim: deps.stopMirasim } : {}),
       ...(deps.now ? { now: deps.now } : {}),
       ...(deps.log ? { log: deps.log } : {}),
     }),
@@ -840,6 +852,8 @@ export function realPortsFromEnv(
     exec,
     sessionOrg,
     sessionIoRoot: handoff.root,
+    // 放手的 Mirasim 会话过了时限没人接回：经桥接以会话用户的身份连服务端发 stop（法国只有一个会话用户）
+    stopMirasim: (handle) => stopMirasimSession(mirasim.connect(SESSION_USERS[0]), handle.sessionKey),
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     ...(extra.drain ? { drain: extra.drain } : {}),
@@ -1078,6 +1092,22 @@ export function realPortsFromEnv(
       }
       return { mode: row.ciPolicy };
     },
+    // 定这张单走三段还是全程（#2826）：读标签、开关、仓档案，写一次分组记录（顺带 tasks.flow_mode）
+    decideFlowMode: createDecideFlowMode({
+      readLabels: async (repo, issueNumber, signal) => {
+        const issue = await gh.readIssue({ repo, issueNumber, signal });
+        if (!issue.labels) throw new Error(`读 ${repo.owner}/${repo.name}#${issueNumber} 没带回标签`);
+        return issue.labels;
+      },
+      readSetting: () => readFlowModeSettingRaw(db),
+      readProfile: async (repo) => {
+        const row = await findRepoProfile(db, repo.owner, repo.name);
+        if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);
+        return row.profile;
+      },
+      record: (assignment) => recordFlowAssignment(db, assignment),
+      existing: (taskId) => getFlowAssignment(db, taskId),
+    }),
     runSegment: createRunSegment({
       tree: { gh, trees, exec, tmpDir: join(config.stateDir, 'tmp') },
       spawner: segmentSpawner,
@@ -1102,6 +1132,7 @@ export function realPortsFromEnv(
         latestRunOfTask(db, { taskId, segment: 'manual', startedAfter }),
     }),
     selfCheck: createSelfCheck({ trees, exec, log: taskLog }),
+    noteBare401: createNoteBare401(db),
     taskSpend: async (input) => {
       if (input?.schemaVersion !== 1 || !input.taskId) {
         throw new PortError('INVALID_INPUT', '查这张单花掉的 token：要有 taskId', { retryable: false });
@@ -1115,7 +1146,9 @@ export function realPortsFromEnv(
           });
         }
       }
-      return taskTokenSpend(db, input.taskId, since === undefined ? undefined : { since });
+      return toTaskSpendResult(
+        await taskTokenSpend(db, input.taskId, since === undefined ? undefined : { since }),
+      );
     },
     coldVerify: createColdVerify({
       gh,

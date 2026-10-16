@@ -2,7 +2,12 @@
 // 也拿它现算（runUsage），算法只有一份。每一项分四种说法：还没有数（没有结束了的会话，这不是没读到）、全读到、
 // 读到一部分（照数写，标「不全」、写明另有几次没读到）、全没读到（写「没读到」，不写 0）。
 // 花费分三种计费方式说：按量是真花的钱；套餐内是按 API 价折合、不另花钱；渠道查不到的分不清，不猜成套餐内。
-import { type CostShare, summarizeUsage, type UsageTotals } from '@fleet-dao/shared';
+import {
+  type CostShare,
+  DEFAULT_TASK_TOKEN_BUDGET,
+  summarizeUsage,
+  type UsageTotals,
+} from '@fleet-dao/shared';
 import type { Run } from '../api/types';
 import { formatCount, formatDuration, formatUsd } from './format';
 
@@ -46,6 +51,16 @@ export interface UsagePart {
 
 /** 输入当量的折法，写在悬停提示和面板说明里。 */
 export const EQUIVALENT_RULE = '输入 1、缓存写 1.25、缓存读 0.1、输出 5';
+
+/**
+ * 每单预算用了多少（#2859）：输入当量占上限的百分比。不封顶，超了照写（129%）；不到 1% 写「不到 1%」，不四舍五入成 0%。
+ * 上限是默认值（shared 的 DEFAULT_TASK_TOKEN_BUDGET）；单子自己的上限契约里没有，不猜。
+ */
+export function budgetUsedText(equivalent: number): string {
+  const share = (equivalent / DEFAULT_TASK_TOKEN_BUDGET) * 100;
+  const used = share > 0 && share < 1 ? '不到 1%' : `${Math.round(share)}%`;
+  return `预算用了 ${used}（上限 ${DEFAULT_TASK_TOKEN_BUDGET / 10_000} 万）`;
+}
 
 function tokenBreakdown(t: UsageTotals): string {
   return `输入 ${formatCount(t.inputTokens)} · 输出 ${formatCount(t.outputTokens)} · 缓存读 ${formatCount(t.cacheReadTokens)} · 缓存写 ${formatCount(t.cacheWriteTokens)}（只算读到的）`;

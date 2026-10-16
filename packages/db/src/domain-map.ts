@@ -101,6 +101,8 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
     executor: r.executor === 'local' ? 'local' : undefined,
     claimedBy: r.executor === 'local' ? opt(r.claimedBy) : undefined,
     leaseUntil: r.executor === 'local' ? isoOpt(r.leaseUntil) : undefined,
+    // 走的流程（#2826）：还没分组是 null，不给这个键（和内存版一致）
+    flowMode: r.flowMode ?? undefined,
     createdAt: r.createdAt.toISOString(),
   });
 
