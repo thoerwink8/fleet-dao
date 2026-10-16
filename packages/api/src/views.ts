@@ -564,6 +564,8 @@ export function homeRunning(input: {
         ...(t.executor === undefined ? {} : { executor: t.executor }),
         ...(t.claimedBy === undefined ? {} : { claimedBy: t.claimedBy }),
         ...(t.leaseUntil === undefined ? {} : { leaseUntil: t.leaseUntil }),
+        // 还没分组没有这个键：不补、不猜
+        ...(t.flowMode === undefined ? {} : { flowMode: t.flowMode }),
         link: `/tasks/${t.id}`,
         taskId: t.id,
         state: t.state,

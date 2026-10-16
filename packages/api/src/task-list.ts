@@ -110,6 +110,8 @@ export function taskListView(input: TaskListInput): Response {
       ...(task.executor === undefined ? {} : { executor: task.executor }),
       ...(task.claimedBy === undefined ? {} : { claimedBy: task.claimedBy }),
       ...(task.leaseUntil === undefined ? {} : { leaseUntil: task.leaseUntil }),
+      // 还没分组没有这个键：不补、不猜
+      ...(task.flowMode === undefined ? {} : { flowMode: task.flowMode }),
       group,
       segment: isTaskFinished(task) ? null : flow.segment,
       model,

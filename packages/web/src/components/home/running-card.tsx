@@ -26,6 +26,7 @@ import { formatAgo, formatClock, formatDuration } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
 import type { Tone } from '../../lib/status';
 import { cn } from '../../lib/utils';
+import { FlowModeTag } from '../flow-mode-tag';
 import { Section } from '../layout/section';
 import { StatusBadge } from '../layout/status-badge';
 import { inkClass } from '../layout/tone';
@@ -172,6 +173,7 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
           <div className="flex items-center gap-2">
             <span className="num text-meta font-semibold text-muted-foreground">#{item.issueNumber}</span>
             <span className="min-w-0 flex-1 truncate text-body font-medium">{item.title}</span>
+            <FlowModeTag mode={item.flowMode} />
             <StatusBadge tone={tone} label={statusText} />
             {founder ? <StatusBadge tone="human" label="等你" variant="dot" /> : null}
           </div>
