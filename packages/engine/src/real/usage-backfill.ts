@@ -5,13 +5,15 @@
 import { type MeterFs, readMirasimMeter, type SessionUser } from '@fleet-dao/adapters';
 import {
   type Db,
+  fillRunMeterTail,
   fillRunUsageFromMeter,
   finishScheduleRun,
   noteRunUsage,
   runsAwaitingMeter,
+  runsAwaitingMeterTail,
   startScheduleRun,
 } from '@fleet-dao/db';
-import type { UsageBackfillJobDeps } from '../jobs/usage-backfill.ts';
+import { meterWindowNote, type UsageBackfillJobDeps } from '../jobs/usage-backfill.ts';
 
 export interface UsageBackfillWiring {
   db: Db;
@@ -31,8 +33,10 @@ export function usageBackfillJob(w: UsageBackfillWiring): () => UsageBackfillJob
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   return () => ({
     pending: (input) => runsAwaitingMeter(w.db, input),
+    tails: (input) => runsAwaitingMeterTail(w.db, input),
     readMeter: (windows) => readMirasimMeter(w.meterDir(w.user), windows, w.meterFs(w.user)),
-    fill: (runId, usage, at) => fillRunUsageFromMeter(w.db, { runId, usage, at }),
+    fill: (runId, usage, at) => fillRunUsageFromMeter(w.db, { runId, usage, at, note: meterWindowNote() }),
+    fillTail: (runId, add, note, at) => fillRunMeterTail(w.db, { runId, at, note, ...(add ? { add } : {}) }),
     note: (runId, note, at) => noteRunUsage(w.db, { runId, note, at }),
     runs: {
       start: (job, at) => startScheduleRun(w.db, job, at),

@@ -41,11 +41,27 @@ export const nodeMeterFs: MeterFs = {
   },
 };
 
-/** 要读的一次会话：会话号（<执行体>:<uuid>）和这一笔的起止（毫秒）。续跑的会话号会在别的笔里再出现，只认这段时间里发出的调用。 */
+/**
+ * 要读的一次会话：会话号（<执行体>:<uuid>）和这一笔的起止（毫秒，两头都含）。续跑的会话号会在别的笔里再出现，只认这段时间里发出的调用。
+ * 终点由调用方定：同一会话下一笔的起点，和这一笔 ended_at 加宽限，取更早的那个（meterWindowUntil）。会话被叫停后还在跑完的调用落在这段里。
+ */
 export interface MeterWindow {
   sessionKey: string;
   since: number;
   until: number;
+}
+
+/** 叫停之后还在跑完的调用，最多再认这么久（没有下一笔把窗口封上时）。 */
+export const METER_TAIL_GRACE_MS = 2 * 60_000;
+
+/**
+ * 一笔计费窗口的终点（含这一毫秒）：同一会话下一笔的起点，和 endedAt 加宽限，取更早的那个。
+ * 下一笔从它的起点算起（含这一毫秒），所以这一笔收到它之前，同一刻不进两笔。没有下一笔、或下一笔比宽限还晚：终点是 endedAt 加宽限。
+ */
+export function meterWindowUntil(endedAt: number, nextStartedAt: number | null): number {
+  const graceEnd = endedAt + METER_TAIL_GRACE_MS;
+  if (nextStartedAt === null || !Number.isFinite(nextStartedAt) || nextStartedAt > graceEnd) return graceEnd;
+  return nextStartedAt - 1;
 }
 
 /** 读齐了的一次会话的用量。 */
@@ -71,6 +87,9 @@ export type MeterReading =
 const USAGE_FILE = /^usage-(\d{4})-(\d{2})\.ndjson$/;
 const UUID = /^[0-9a-f-]{36}$/i;
 const DAY_MS = 24 * 60 * 60_000;
+
+/** 这段起止里一次计费调用都没有（不是行认不出、也不是中转没有记录）。 */
+export const METER_NO_CALLS_DETAIL = 'Mirasim 用量账本里没有这个会话在这一笔起止之间的计费调用';
 
 /** 会话号里的 uuid（<执行体>:<uuid>，没有冒号的整个当 uuid）；认不出是 undefined。 */
 export function meterSessionUuid(sessionKey: string): string | undefined {
@@ -202,7 +221,7 @@ export function meterReadingFrom(text: string, window: MeterWindow): MeterReadin
     };
   }
   if (calls === 0) {
-    return { state: 'unknown', detail: 'Mirasim 用量账本里没有这个会话在这一笔起止之间的计费调用' };
+    return { state: 'unknown', detail: METER_NO_CALLS_DETAIL };
   }
   return {
     state: 'settled',

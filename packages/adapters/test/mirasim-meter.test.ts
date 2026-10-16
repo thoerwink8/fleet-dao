@@ -1,7 +1,13 @@
 // Mirasim 用量账本（中转计量）按会话读（#1935）：行的形状照法国会话用户 ~/.mirasim/insights/usage-2026-10.ndjson 的真行
 // （去掉了账号、仓这类和用量无关的字段）。全 0 的占位不许读成 0；回填了的读对；中转没有记录的、认不出的明说读不成。
 import { describe, expect, it } from 'vitest';
-import { type MeterFs, meterReadingFrom, readMirasimMeter } from '../src/mirasim/meter.ts';
+import {
+  METER_TAIL_GRACE_MS,
+  type MeterFs,
+  meterReadingFrom,
+  meterWindowUntil,
+  readMirasimMeter,
+} from '../src/mirasim/meter.ts';
 
 const SESSION = '900a810b-7b5f-4ad0-82a2-f46e3b05a6d5';
 const OTHER = '6030fb0e-69b7-497d-8119-b304941e3497';
@@ -115,6 +121,49 @@ describe('meterReadingFrom：一次会话的中转计量', () => {
       detail: 'Mirasim 用量账本里没有这个会话在这一笔起止之间的计费调用',
     });
     expect(meterReadingFrom(call(), { ...WINDOW, sessionKey: 'claude:不是uuid' }).state).toBe('unknown');
+  });
+});
+
+describe('计费窗口终点：叫停之后还在跑的调用', () => {
+  const ended = T0 + 10 * 60_000;
+  const settled = { input: 1, output: 1, cacheRead: 1, cacheWrite: 1, relayMetered: true };
+  const at = (ms: number) =>
+    meterReadingFrom(call({ ...settled, ts: new Date(ms).toISOString() }), {
+      sessionKey: KEY,
+      since: T0,
+      until: meterWindowUntil(ended, null),
+    });
+
+  it('叫停后 30 秒的调用算进来', () => {
+    const until = meterWindowUntil(ended, null);
+    expect(until).toBe(ended + METER_TAIL_GRACE_MS);
+    expect(
+      meterReadingFrom(call({ ...settled, ts: new Date(ended + 30_000).toISOString() }), {
+        sessionKey: KEY,
+        since: T0,
+        until,
+      }).state,
+    ).toBe('settled');
+  });
+
+  it('下一笔起点之后的不算（起点那一毫秒归下一笔）', () => {
+    const next = ended + 20_000;
+    const until = meterWindowUntil(ended, next);
+    const read = (ms: number) =>
+      meterReadingFrom(call({ ...settled, ts: new Date(ms).toISOString() }), {
+        sessionKey: KEY,
+        since: T0,
+        until,
+      });
+    expect(read(next - 1_000).state).toBe('settled');
+    expect(read(next).state).toBe('unknown');
+    expect(read(next + 1_000).state).toBe('unknown');
+  });
+
+  it('没有下一笔时，宽限外的不算，宽限那一毫秒还算', () => {
+    expect(at(ended + 30_000).state).toBe('settled');
+    expect(at(ended + METER_TAIL_GRACE_MS).state).toBe('settled');
+    expect(at(ended + METER_TAIL_GRACE_MS + 1_000).state).toBe('unknown');
   });
 });
 
