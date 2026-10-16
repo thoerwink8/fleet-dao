@@ -1202,7 +1202,6 @@ describe('ci.yml 和这里对得上', () => {
       BIOME_WANT: 'true',
       TSC_WANT: 'all',
       HYGIENE: 'success',
-      HYGIENE_HISTORY: 'success',
     };
     const run = (over: Record<string, string> = {}) =>
       runChild('bash', ['-c', script], { env: { ...process.env, ...base, ...over } });
@@ -1281,12 +1280,11 @@ describe('ci.yml 和这里对得上', () => {
       expect(r.stdout).toContain('biome（success，本该 skipped）');
     });
 
-    it('卫生检查红了：只打 ::warning::、不让 job 红（只报不挡）；两步都 skipped（push 事件）也不红', () => {
+    it('卫生检查红了：只打 ::warning::、不让 job 红（只报不挡）；skipped（push 事件）也不红', () => {
       const r = run({ HYGIENE: 'failure' });
       expect(r.status).toBe(0);
       expect(r.stdout).toContain('::warning::卫生检查没过');
-      expect(run({ HYGIENE_HISTORY: 'failure' }).status).toBe(0);
-      expect(run({ HYGIENE_HISTORY: 'skipped' }).status).toBe(0);
+      expect(run({ HYGIENE: 'skipped' }).status).toBe(0);
     });
   });
 
@@ -1337,8 +1335,8 @@ describe('ci.yml 和这里对得上', () => {
     expect(ids).toContain('lint');
     for (const id of ids) expect(job(id), id).not.toContain('secrets.');
     const lint = job('lint');
-    // 执行的是主线上的 trusted/ 那份代码：卫生检查两步都从 TRUSTED 取，PR 的文件只当数据扫。
-    expect((lint.match(/TRUSTED: \$\{\{ github\.workspace \}\}\/trusted\n/g) ?? []).length).toBe(2);
+    // 执行的是主线上的 trusted/ 那份代码：卫生检查（一步里的两遍）都从 TRUSTED 取，PR 的文件只当数据扫。
+    expect((lint.match(/TRUSTED: \$\{\{ github\.workspace \}\}\/trusted\n/g) ?? []).length).toBe(1);
     // PR 检出到 pr/（job 级 defaults.run.working-directory: pr，所有 run 步都在那里跑），主线的检出在并排的 trusted/，
     // 不在 PR 树里面：biome check . 和卫生检查扫文件树都碰不到它。
     expect(lint).toMatch(/defaults:\n\s+run:\n\s+working-directory: pr\n/);
@@ -1351,14 +1349,16 @@ describe('ci.yml 和这里对得上', () => {
     // 卫生检查代码、再让它放过自己（#115 的防线）。
     const at = (needle: string) => lint.indexOf(needle);
     expect(at('id: hygiene\n'), '找不到 hygiene 步').toBeGreaterThan(0);
-    expect(at('id: hygiene_history'), '找不到 hygiene_history 步').toBeGreaterThan(0);
+    // CI 里卫生检查只剩一处：文件树和历史两遍在同一步里，不再有第二步
+    expect(lint).not.toContain('hygiene_history');
+    expect(lint).toContain('packages/hygiene/src/bin/ci-history.ts');
+    expect((lint.match(/runCheck\(/g) ?? []).length).toBe(1);
     const install = at('pnpm install --frozen-lockfile');
     expect(install, '找不到装依赖那步').toBeGreaterThan(0);
     expect(at('id: hygiene\n')).toBeLessThan(install);
-    expect(at('id: hygiene_history')).toBeLessThan(install);
     // 算计划那步跑的也是 PR 里的代码（ci-plan.ts）：同样得排在卫生检查两步之后
     expect(at('id: plan\n'), '找不到算计划那步').toBeGreaterThan(0);
-    expect(at('id: hygiene_history')).toBeLessThan(at('id: plan\n'));
+    expect(at('id: hygiene\n')).toBeLessThan(at('id: plan\n'));
     // 动态 import 的只有 trusted/ 下的卫生检查
     const imports = [...lint.matchAll(/import\(([^)]*)\)/g)].map((m) => m[1]);
     expect(imports).toHaveLength(1);
@@ -1821,11 +1821,15 @@ describe('驾驶舱 e2e（#930；决定 0029：只点改动页；决定 0093：�
     expect(runs).toContain('pnpm --filter @fleet-dao/web e2e');
     expect(runs).toContain('playwright install --with-deps chromium');
     expect(runs).toContain('postgres:16');
-    // 红了不吞：没有 job 级 continue-on-error；步骤级的只有隔离集那一步（决定 0093：照跑照报不挡），它只跑 E2E_QUARANTINE=only；没有 || true
+    // 红了不吞：没有 job 级 continue-on-error，也没有步骤级的（隔离集 2026-10-16 起挪去 e2e-quarantine.yml 每天跑）；没有 || true
     expect(e2e).not.toHaveProperty('continue-on-error');
-    const lenient = steps.filter((s) => 'continue-on-error' in s);
-    expect(lenient.map((s) => s.name)).toEqual(['隔离集（只报不挡）']);
-    expect((lenient[0]?.env as Record<string, string> | undefined)?.E2E_QUARANTINE).toBe('only');
+    expect(steps.filter((s) => 'continue-on-error' in s)).toEqual([]);
+    expect(JSON.stringify(steps)).not.toContain('E2E_QUARANTINE: only');
+    const quarantineYml = readFileSync(join(ROOT, '.github/workflows/e2e-quarantine.yml'), 'utf8');
+    expect(quarantineYml).toMatch(/^ {2}schedule:/m);
+    expect(quarantineYml).toMatch(/^ {2}workflow_dispatch:/m);
+    expect(quarantineYml).toContain('E2E_QUARANTINE: only');
+    expect(doc.jobs.check?.needs).not.toContain('quarantine');
     expect(runs).not.toContain('|| true');
     // 跑 e2e 的那一步本身没有 if（该跑的 job 里它一定跑）
     const run = steps.find((s) => String(s.run ?? '').includes('pnpm --filter @fleet-dao/web e2e'));

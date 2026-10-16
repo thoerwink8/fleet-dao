@@ -116,7 +116,7 @@ jobs:
   # - tsc -b：跟着 biome；只查受影响的项目，全跑时查整棵树。
   # - doc_pointers、agents_test：文档里的路径、章节指针（doc-pointers 测试），和 agents/test（技能指针、规矩钉子）。每个 PR 都跑、不裁剪：挪文件会让指针指空。
   #   原来合成一步 docs，红了看不出是指针指空还是技能规矩红；拆成两样各自后台跑、各写各的结果，汇总点名红的是哪一样，墙钟不变（并行，最慢那样说了算）。
-  # - 卫生检查两步：每个 PR 都跑，只报不挡（不进汇总判红，也不进必过名单）。真挡的是推之前的 pre-push 钩子和引擎推分支时的扫描（创始人 2026-09-28 拍，
+  # - 卫生检查一步（文件树和历史两遍在同一步里）：每个 PR 都跑，只报不挡（不进汇总判红，也不进必过名单）。真挡的是推之前的 pre-push 钩子和引擎推分支时的扫描（创始人 2026-09-28 拍，
   #   specs/169-Fusion形态/需求.md）；这里是早一步看到、接住钩子没装的情况。
   #   PR 检出到 pr/ 只当数据扫，执行的是主线上的 packages/hygiene（检出到 trusted/），且排在 pnpm install 和一切跑 PR 代码的步骤之前：
   #   否则 PR 自己改宽规则、白名单就能放过自己（#115 第二意见）。除扫文件树，还按提交扫历史，只在 pull_request 上跑。
@@ -145,31 +145,30 @@ jobs:
         with:
           node-version: 22
 
-      # 和 packages/hygiene/src/bin/check.ts 做的一样，只是代码取 trusted/、扫的是 pr/。退出码 2 = 没扫全，同样是红
-      - name: 卫生检查（主线上的代码，扫 PR 的文件）
+      # 卫生检查在 CI 里只在这一处、这一步跑（2026-10-16 合成一步；本机 pnpm check 和 pre-push 钩子是推之前的快反馈，另算）。
+      # 先扫 PR 最终的文件树（和 packages/hygiene/src/bin/check.ts 做的一样，只是代码取 trusted/、扫的是 pr/；退出码 2 = 没扫全，同样是红），
+      # 再（只在 pull_request 上）按提交扫 base..head：先加后删的真密钥、提交说明里的真密钥，文件树那一遍看不见（和推送前的闸同一份判定）。两遍都跑完再判。
+      - name: 卫生检查（主线上的代码，扫 PR 的文件和历史）
         id: hygiene
         continue-on-error: true
         env:
           TRUSTED: ${{ github.workspace }}/trusted
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          rc=0
           node --input-type=module -e '
           import { pathToFileURL } from "node:url";
           const { runCheck } = await import(pathToFileURL(`${process.env.TRUSTED}/packages/hygiene/src/check.ts`).href);
           const { code, lines } = runCheck({ root: process.cwd(), mustInclude: "packages/hygiene/src/rules.ts" });
           for (const line of lines) (code === 0 ? console.log : console.error)(line);
           process.exitCode = code;
-          '
-      # 上面那步只看 PR 最终的文件树，先加后删的真密钥、提交说明里的真密钥它看不见。这步按提交扫 base..head，和推送前的闸同一份判定。
-      - name: 卫生检查（主线上的代码，按提交扫这个 PR 的历史）
-        id: hygiene_history
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
-        env:
-          TRUSTED: ${{ github.workspace }}/trusted
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          node "$TRUSTED/packages/hygiene/src/bin/ci-history.ts" --base "$BASE" --head "$HEAD"
+          ' || rc=1
+          if [ "$EVENT" = pull_request ]; then
+            node "$TRUSTED/packages/hygiene/src/bin/ci-history.ts" --base "$BASE" --head "$HEAD" || rc=1
+          fi
+          exit "$rc"
 
       # ——从这里往下才跑 PR 里的代码（算计划、装依赖都会跑 PR 的安装脚本）——
       # 算不成（base 拿不到、diff 失败）退出 2，这一步红、job 红，不静默少查。
@@ -229,7 +228,7 @@ jobs:
             if [ "$rc" = 0 ]; then echo "$name=success" >>"$GITHUB_OUTPUT"; else echo "::error::$name 没过（退出码 $rc）"; echo "$name=failure" >>"$GITHUB_OUTPUT"; fi
           done
 
-      # 汇总：该跑的必须 success、不该跑的必须 skipped，哪一样不对 job 就红、连名字一起报。卫生检查两步只报不挡，红了只打 ::warning::。
+      # 汇总：该跑的必须 success、不该跑的必须 skipped，哪一样不对 job 就红、连名字一起报。卫生检查只报不挡，红了只打 ::warning::。
       - name: 汇总（biome / tsc / doc_pointers / agents_test / deps / release_smoke 有一样不对这里就红）
         if: always()
         env:
@@ -242,7 +241,6 @@ jobs:
           BIOME_WANT: ${{ steps.plan.outputs.biome }}
           TSC_WANT: ${{ steps.plan.outputs.tsc }}
           HYGIENE: ${{ steps.hygiene.outcome }}
-          HYGIENE_HISTORY: ${{ steps.hygiene_history.outcome }}
         run: |
           set -euo pipefail
           bad=''
@@ -262,8 +260,8 @@ jobs:
           verify agents_test "$AGENTS_TEST" yes
           verify deps "$DEPS" yes
           verify release_smoke "$RELEASE_SMOKE" yes
-          if [ "$HYGIENE" = failure ] || [ "$HYGIENE_HISTORY" = failure ]; then
-            echo "::warning::卫生检查没过（只报不挡，看上面那两步的日志）"
+          if [ "$HYGIENE" = failure ]; then
+            echo "::warning::卫生检查没过（只报不挡，看上面那一步的日志）"
           fi
           if [ -n "$bad" ]; then
             echo "::error::lint 里有检查不对：$bad"
@@ -552,7 +550,7 @@ jobs:
         env:
           E2E_SPECS: ${{ needs.changes.outputs.e2e }}
           SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
-          # 隔离集（packages/web/e2e/quarantine.json）不在这一步跑：下一步单跑、只报不挡
+          # 隔离集（packages/web/e2e/quarantine.json）不在 ci 里跑：e2e-quarantine.yml 每天定时跑
           E2E_QUARANTINE: skip
         run: |
           set -euo pipefail
@@ -563,19 +561,11 @@ jobs:
             # shellcheck disable=SC2086  # 故意按空格拆成多个 spec 参数
             pnpm --filter @fleet-dao/web e2e $E2E_SPECS --shard="$SHARD" --pass-with-no-tests
           fi
-      # 隔离集（决定 0093）：常偶发、已开单限期修的用例照跑、照报，红了不挡这一轮（只这一步 continue-on-error，上一步红了照样红）。
-      # 只在第 1 台跑一遍全部隔离用例（不分片）；前一步红了也跑（always），结果、报告另放（results-quarantine.json、report-quarantine/）。
-      - name: 隔离集（只报不挡）
-        if: always() && matrix.shard == 1
-        continue-on-error: true
-        env:
-          E2E_QUARANTINE: only
-          E2E_SKIP_BUILD: '1'
-        run: pnpm --filter @fleet-dao/web e2e --pass-with-no-tests
+      # 隔离集不在这里跑（2026-10-16 挪走）：每天定时跑一次、可手动触发，见 e2e-quarantine.yml（照跑照报，本来也不挡）。
       # 偶发和隔离集的结局写进 job 摘要（判法 packages/conventions/src/e2e-flaky.ts）；近 10 轮统计、开单在 e2e-flaky.yml
       - name: 偶发与隔离集汇总
         if: always()
-        run: node packages/conventions/src/bin/e2e-flaky.ts summary _tmp/e2e/results.json _tmp/e2e/results-quarantine.json >> "$GITHUB_STEP_SUMMARY"
+        run: node packages/conventions/src/bin/e2e-flaky.ts summary _tmp/e2e/results.json >> "$GITHUB_STEP_SUMMARY"
       # 总是留：跑过页面的截图（support/fixtures.ts 的 shot 夹具存的）是界面 PR 的截图证据，红了还有报告和各进程日志。都在仓根 _tmp/e2e/（公开仓：只有 e2e 自己造的假数据）
       - uses: actions/upload-artifact@v4
         if: always()
