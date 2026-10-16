@@ -2,7 +2,7 @@
 // 第一段在窗口里开头的单；读不了照抛。
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { modelExecuteTracks } from '../src/queries/model-track.ts';
+import { modelExecuteTracks, modelTierTracks } from '../src/queries/model-track.ts';
 import { startRun } from '../src/queries/runs.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addRoute, addTask, ago, catalog, DAY, HOUR, MIN, NOW } from './helpers.ts';
@@ -28,6 +28,7 @@ async function seg(
   minutes: number,
   routeOutcome: 'ok' | 'fail' | 'neutral' = 'ok',
   segment: 'manual' | 'verify' = 'manual',
+  tier?: 'fast' | 'medium' | 'heavyweight',
 ) {
   await startRun(t.db, {
     id: randomUUID(),
@@ -39,6 +40,7 @@ async function seg(
     endedAt: ago(startAgo - minutes * MIN),
     outcome: routeOutcome === 'ok' ? 'done' : 'failed',
     routeOutcome,
+    ...(tier ? { tier } : {}),
   });
 }
 
@@ -83,6 +85,81 @@ describe('modelExecuteTracks', () => {
     await t.client.exec('alter table runs rename to runs_unreadable');
     try {
       await expect(modelExecuteTracks(t.db, since)).rejects.toThrow();
+    } finally {
+      await t.client.exec('alter table runs_unreadable rename to runs');
+    }
+  });
+});
+
+describe('modelTierTracks', () => {
+  it('只算第一段；接手返工不记在第一个模型名下；同一模型 fast 和 heavy 分两行', async () => {
+    const repo = await addRepo(t.db);
+    // grok 快档一段做成（neutral、验收段不算进段数，分钟只算第一段那 20）
+    const a = await addTask(t.db, repo.id, { state: 'done' });
+    await seg(a.id, 'a-grok', 10 * HOUR, 20, 'ok', 'manual', 'fast');
+    await seg(a.id, 'a-grok', 9 * HOUR, 5, 'neutral', 'manual', 'fast');
+    await seg(a.id, 'b-ds', 8 * HOUR, 10, 'ok', 'verify', 'fast');
+    // grok 主力档开头 20 分钟，deepseek 接手 30 分钟做成：只记 grok 第一段，deepseek 没有这一档
+    const b = await addTask(t.db, repo.id, { state: 'done' });
+    await seg(b.id, 'a-grok', 20 * HOUR, 20, 'fail', 'manual', 'heavyweight');
+    await seg(b.id, 'b-ds', 18 * HOUR, 30, 'ok', 'manual', 'heavyweight');
+    // grok 主力档一段失败
+    const c = await addTask(t.db, repo.id, { state: 'failed' });
+    await seg(c.id, 'a-grok', 6 * HOUR, 15, 'fail', 'manual', 'heavyweight');
+    // deepseek 中档一段收了场、单叫停、没有 PR：没交付
+    const d = await addTask(t.db, repo.id, { state: 'stopped' });
+    await seg(d.id, 'b-ds', 5 * HOUR, 12, 'ok', 'manual', 'medium');
+    // 没记档：整单不算
+    const e = await addTask(t.db, repo.id, { state: 'done' });
+    await seg(e.id, 'a-grok', 4 * HOUR, 10);
+    // 第一段在窗口外：整单不算（窗口里那段也不记到 grok 头上）
+    const f = await addTask(t.db, repo.id, { state: 'done' });
+    await seg(f.id, 'b-ds', 8 * DAY, 10, 'fail', 'manual', 'fast');
+    await seg(f.id, 'a-grok', 2 * DAY, 10, 'ok', 'manual', 'fast');
+
+    const got = await modelTierTracks(t.db, since);
+    expect(got).toEqual([
+      {
+        modelId: 'grok-4.7',
+        tier: 'heavyweight',
+        firstSegs: 2,
+        onePass: 0,
+        sentBack: 1,
+        noDeliver: 0,
+        notDone: 1,
+        minutes: 35,
+      },
+      {
+        modelId: 'deepseek-flash',
+        tier: 'medium',
+        firstSegs: 1,
+        onePass: 0,
+        sentBack: 0,
+        noDeliver: 1,
+        notDone: 0,
+        minutes: 12,
+      },
+      {
+        modelId: 'grok-4.7',
+        tier: 'fast',
+        firstSegs: 1,
+        onePass: 1,
+        sentBack: 0,
+        noDeliver: 0,
+        notDone: 0,
+        minutes: 20,
+      },
+    ]);
+  });
+
+  it('一段都没有：空表（不是读坏了）', async () => {
+    expect(await modelTierTracks(t.db, since)).toEqual([]);
+  });
+
+  it('runs 读不了照抛，不当成没有战绩', async () => {
+    await t.client.exec('alter table runs rename to runs_unreadable');
+    try {
+      await expect(modelTierTracks(t.db, since)).rejects.toThrow();
     } finally {
       await t.client.exec('alter table runs_unreadable rename to runs');
     }

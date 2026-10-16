@@ -1,5 +1,5 @@
-// 账号池上的会话两张表并起来读（pool-runs.ts）：近几天结束的（熔断、战绩）、花了多少（估算类池的用量）、还开着的带路由
-// （熔断半开数在途的试探）。Fusion 的会话（session_runs）和三段的一次性会话（runs）都要在；runs 读不了明确报错（#758）。
+// 账号池上的会话（pool-runs.ts）：近几天结束的（熔断、战绩）、花了多少（估算类池的用量）、还开着的带路由
+// （熔断半开数在途的试探）都读 runs；runs 读不了明确报错（#758）。老流程的会话表 09-29 起没人写、已删（#2357）。
 // 三段的一段选定路由、还没开跑时预占着的名额（pool_reservations，#757）：锁住池再数再占，开跑那一行写进去时同一个事务里交接，
 // 没开跑就放掉、过期不算；读不了、写不进去都明确报错。
 import { randomUUID } from 'node:crypto';
@@ -42,7 +42,7 @@ async function expectRunsUnreadable(read: Promise<unknown>): Promise<void> {
     () => null,
     (e: unknown) => e,
   );
-  expect(err, 'runs 读不了却照常回了结果（只剩 Fusion 那一半）').not.toBeNull();
+  expect(err, 'runs 读不了却照常回了结果').not.toBeNull();
   const messages: string[] = [];
   for (let e: unknown = err; e instanceof Error; e = e.cause) messages.push(e.message);
   expect(messages.join('\n')).toContain('relation "runs" does not exist');
@@ -58,13 +58,12 @@ async function withRunsUnreadable(read: () => Promise<unknown>): Promise<void> {
   }
 }
 
-describe('endedPoolRuns：近几天结束的会话，两张表都算（熔断、战绩）', () => {
-  it('Fusion 的会话带阶段、三段的一次性会话带是哪一段，各带算不算路由的账；按结束先后排；没结束的、太早的、runs 里没写路由的不算', async () => {
+describe('endedPoolRuns：近几天结束的会话（熔断、战绩）', () => {
+  it('带是哪一段、算不算路由的账；按结束先后排；没结束的、太早的、runs 里没写路由的不算', async () => {
     const task = await addTask(t.db, (await addRepo(t.db)).id);
-    const fusion = await addRun(t.db, {
+    const earlier = await addRun(t.db, {
       taskId: task.id,
       routeId: 'a-opus',
-      queuedAt: ago(55 * MIN),
       startedAt: ago(50 * MIN),
       endedAt: ago(40 * MIN),
       outcome: 'failed',
@@ -74,13 +73,12 @@ describe('endedPoolRuns：近几天结束的会话，两张表都算（熔断、
     await addRun(t.db, {
       taskId: task.id,
       routeId: 'a-opus',
-      queuedAt: ago(5 * HOUR),
       startedAt: ago(5 * HOUR),
       endedAt: ago(4 * HOUR),
-      outcome: 'ok',
+      outcome: 'done',
       routeOutcome: 'ok',
     });
-    // 还在跑的 Fusion 会话
+    // 还在跑的
     await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(10 * MIN) });
     const manual = randomUUID();
     await startRun(t.db, {
@@ -137,10 +135,10 @@ describe('endedPoolRuns：近几天结束的会话，两张表都算（熔断、
 
     expect(await endedPoolRuns(t.db, ago(HOUR))).toEqual([
       {
-        kind: 'session',
-        runId: fusion.id,
+        kind: 'oneShot',
+        runId: earlier.id,
         routeId: 'a-opus',
-        stage: 'execute',
+        segment: 'manual',
         endedAt: ago(40 * MIN),
         routeOutcome: 'fail',
       },
@@ -171,7 +169,7 @@ describe('endedPoolRuns：近几天结束的会话，两张表都算（熔断、
     ]);
   });
 
-  it('【故意造出的失败】runs 读不了：明确报错，不当成没有三段的会话、只交回 Fusion 那一半', async () => {
+  it('【故意造出的失败】runs 读不了：明确报错，不当成没有会话', async () => {
     const task = await addTask(t.db, (await addRepo(t.db)).id);
     await addRun(t.db, {
       taskId: task.id,
@@ -185,16 +183,15 @@ describe('endedPoolRuns：近几天结束的会话，两张表都算（熔断、
   });
 });
 
-describe('poolRunUsage：估算类的池的用量，两张表都算', () => {
-  it('只要这个池、时间范围内开始了的；三段会话记下的 token、花费在里面；花费为空的照样返回、字段为空，不拿 0 顶', async () => {
+describe('poolRunUsage：估算类的池的用量', () => {
+  it('只要这个池、时间范围内开始了的；会话记下的 token、花费在里面；花费为空的照样返回、字段为空，不拿 0 顶', async () => {
     const task = await addTask(t.db, (await addRepo(t.db)).id);
-    const fusion = (routeId: string, over: Record<string, unknown>) =>
+    const added = (routeId: string, over: Record<string, unknown>) =>
       addRun(t.db, { taskId: task.id, routeId, ...over });
-    await fusion('a-opus', { startedAt: ago(10 * MIN), inputTokens: 100, costUsd: 0.25 });
-    await fusion('a-opus', { startedAt: ago(5 * MIN) }); // 没记到花费
-    await fusion('a-opus', { queuedAt: ago(4 * HOUR), startedAt: ago(3 * HOUR), costUsd: 9 }); // 范围外
-    await fusion('a-opus', {}); // 还在排队、没开始
-    await fusion('b-opus', { startedAt: ago(10 * MIN), costUsd: 7 }); // 别的池
+    await added('a-opus', { startedAt: ago(10 * MIN), inputTokens: 100, costUsd: 0.25 });
+    await added('a-opus', { startedAt: ago(5 * MIN) }); // 没记到花费
+    await added('a-opus', { startedAt: ago(3 * HOUR), costUsd: 9 }); // 范围外
+    await added('b-opus', { startedAt: ago(10 * MIN), costUsd: 7 }); // 别的池
     await startRun(t.db, {
       ...oneShot,
       segment: 'manual',
@@ -248,13 +245,13 @@ describe('poolRunUsage：估算类的池的用量，两张表都算', () => {
     ).toEqual([
       ['oneShot', 'opus-5.5', 2000, 300, 50, 7, 1.5],
       ['oneShot', 'opus-5.5', 40, null, null, null, null],
-      ['session', 'opus-5.5', 100, null, null, null, 0.25],
-      ['session', 'opus-5.5', null, null, null, null, null],
+      ['oneShot', 'opus-5.5', 100, null, null, null, 0.25],
+      ['oneShot', 'opus-5.5', null, null, null, null, null],
     ]);
     expect(rows.map((r) => r.startedAt)).toEqual([ago(30 * MIN), ago(15 * MIN), ago(10 * MIN), ago(5 * MIN)]);
   });
 
-  it('【故意造出的失败】runs 读不了：明确报错，估算不拿 Fusion 那一半当全部', async () => {
+  it('【故意造出的失败】runs 读不了：明确报错，估算不拿空当没用过', async () => {
     const task = await addTask(t.db, (await addRepo(t.db)).id);
     await addRun(t.db, { taskId: task.id, routeId: 'a-opus', startedAt: ago(10 * MIN), costUsd: 0.25 });
     await withRunsUnreadable(() => poolRunUsage(t.db, { poolId: 'relay-a', since: ago(HOUR), until: NOW }));
@@ -262,9 +259,9 @@ describe('poolRunUsage：估算类的池的用量，两张表都算', () => {
 });
 
 describe('openPoolRuns：还开着的带上路由（熔断半开时按路由数在途的试探）', () => {
-  it('两种会话都带路由和池', async () => {
+  it('带路由和池', async () => {
     const task = await addTask(t.db, (await addRepo(t.db)).id);
-    const fusion = await addRun(t.db, { taskId: task.id, routeId: 'b-opus', startedAt: ago(10 * MIN) });
+    const earlier = await addRun(t.db, { taskId: task.id, routeId: 'b-opus', startedAt: ago(10 * MIN) });
     const manual = randomUUID();
     await startRun(t.db, {
       ...oneShot,
@@ -276,7 +273,7 @@ describe('openPoolRuns：还开着的带上路由（熔断半开时按路由数�
     expect(
       (await openPoolRuns(t.db)).map((r) => [r.kind, r.runId, r.routeId, r.poolId, r.startedAt]),
     ).toEqual([
-      ['session', fusion.id, 'b-opus', 'relay-b', ago(10 * MIN)],
+      ['oneShot', earlier.id, 'b-opus', 'relay-b', ago(10 * MIN)],
       ['oneShot', manual, 'a-opus', 'relay-a', ago(5 * MIN)],
     ]);
   });
@@ -344,7 +341,7 @@ describe('三段的一段选定路由、还没开跑时预占着的名额（pool
     ]);
   });
 
-  it('锁住池再数再占：上限 2 的池两张单占上，第三张占不上（reserved: false、写明数到几个）；在跑的、Fusion 排着的一样占名额；同一张单再选路是换掉自己的那个', async () => {
+  it('锁住池再数再占：上限 2 的池两张单占上，第三张占不上（reserved: false、写明数到几个）；在跑的一样占名额；同一张单再选路是换掉自己的那个', async () => {
     const [a, b, c] = await three();
     await reserved(req(a, 'a-opus'));
     await reserved(req(b, 'a-opus'));
@@ -360,7 +357,7 @@ describe('三段的一段选定路由、还没开跑时预占着的名额（pool
     expect(
       (await openPoolRuns(t.db, { now: later(MIN) })).filter((r) => r.poolId === 'relay-a'),
     ).toHaveLength(2);
-    // relay-b 上限 1：一行开着的一次性会话占满，占不上；那一行收了、换一个 Fusion 排着还没开工的会话，照样占满
+    // relay-b 上限 1：一行开着的一次性会话占满，占不上；那一行收了、换另一行开着的，照样占满
     const open = randomUUID();
     const opening = {
       ...oneShot,

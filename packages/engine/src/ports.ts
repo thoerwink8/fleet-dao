@@ -109,6 +109,11 @@ export interface PickRouteInput extends Scope {
   /** 这一步算界面类的活（改到了页面代码）：禁令按 UI 判，GPT 不派（含审界面）。 */
   uiWork?: boolean;
   /**
+   * 这一单的派工档（fast / medium / heavyweight，和 rt.status.tier.tier、runs.tier 同一套）。
+   * 不给 = 不按档排（老历史、还没分档、冷验收）。工作流只在 patched('route-by-tier') 下才带。
+   */
+  tier?: 'fast' | 'medium' | 'heavyweight';
+  /**
    * 流程配置里这一步的模型顺序（0003 第 9 条，目录里的模型 id）：只派这几个模型的路由，按这个先后；同一个模型的几条路由
    * 照路由两层的先后。给了空数组 = 这一步没配模型，派不出。不给 = 照路由两层（用途 → 模型 → 路由，#574；三段一条龙不给）。
    */

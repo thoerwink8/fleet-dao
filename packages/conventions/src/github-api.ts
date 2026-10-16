@@ -155,6 +155,15 @@ export interface GitHubBranches {
   branchHead(branch: string): Promise<string | undefined>;
   /** 删这条分支；回 false = 删的时候它已经不在了。 */
   deleteBranch(branch: string): Promise<boolean>;
+  /**
+   * 在这个提交上建轻量标签（refs/tags/<name> 直接指向提交，不建附注标签对象）。
+   * 同名标签已经有了（GitHub 回 422）不算失败：调用方再回读，指向同一个提交就能接着删分支。
+   */
+  createLightweightTag(name: string, sha: string): Promise<void>;
+  /** 这个标签的 object.sha；没有这个标签回 undefined。认不出就抛。 */
+  tagSha(name: string): Promise<string | undefined>;
+  /** 关掉这张单，state_reason 用 GitHub 的 not_planned，正文一起改。 */
+  closeIssue(n: number, stateReason: 'not_planned', body: string): Promise<void>;
   /** 开一张单，回号。 */
   createIssue(title: string, body: string, labels: string[]): Promise<number>;
   /** 改一张单的正文。 */
@@ -439,6 +448,32 @@ export function liveGitHub(
       // 422 也可能是「不让删」（规则集挡着）：回读一下，真不在了才算「本来就没了」，还在就照报没删成。
       if (res.status === 422 && (await branchHead(branch)) === undefined) return false;
       throw failed(res, `在删分支 ${branch} 时`);
+    },
+    async createLightweightTag(name, sha) {
+      const res = await get(`/repos/${repo}/git/refs`, {
+        method: 'POST',
+        body: JSON.stringify({ ref: `refs/tags/${name}`, sha }),
+      });
+      // 201 建成；422 多半是同名标签已经有了，不算失败，调用方回读再决定能不能删分支。
+      if (res.status === 201 || res.status === 422) return;
+      throw failed(res, `在建标签 ${name} 时`);
+    },
+    async tagSha(name) {
+      const what = `标签 ${name}`;
+      const res = await get(`/repos/${repo}/git/ref/tags/${encRef(name)}`);
+      if (res.status === 404) return undefined;
+      if (!res.ok) throw failed(res, what);
+      const data = await json(res, what);
+      const sha = isObject(data) && isObject(data.object) ? data.object.sha : undefined;
+      if (typeof sha !== 'string' || !SHA.test(sha)) throw new Error(`读${what}，认不出（object.sha）`);
+      return sha;
+    },
+    async closeIssue(n, stateReason, body) {
+      const res = await get(`/repos/${repo}/issues/${n}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ state: 'closed', state_reason: stateReason, body }),
+      });
+      if (!res.ok) throw failed(res, `在关 #${n} 时`);
     },
     async createIssue(title, body, labels) {
       const res = await get(`/repos/${repo}/issues`, {

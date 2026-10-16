@@ -6,16 +6,15 @@ import {
   finishRun,
   notifications,
   poolReservations,
+  runs,
   saveOrgState,
   savePoolQuota,
   saveRouteProbe,
-  sessionRuns,
   startRun,
   stepTimings,
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import type { StageKind } from '@fleet-dao/shared';
 import { createPgStore } from '@fleet-dao/store';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { fixedEngineMaster, MASTER_ROUTE_RETRY_SECONDS } from '../../src/engine-master.ts';
@@ -345,16 +344,14 @@ describe('选路', () => {
     // 独享池的空位占满：三个已开工、没结束的会话。
     const { task } = await addTask(t.db);
     for (let i = 0; i < 3; i++) {
-      await t.db.insert(sessionRuns).values({
+      await t.db.insert(runs).values({
         taskId: task.id,
-        stage: 'triage',
+        segment: 'manual',
+        model: 'opus-5.5',
         routeId: 'solo',
-        whyRoute: '占位',
-        queuedAt: new Date(NOW.getTime() - 10 * MIN),
-        runAsUser: 'fleet-agent-carpool',
+        startedAt: new Date(NOW.getTime() - 5 * MIN),
       });
     }
-    await t.db.update(sessionRuns).set({ startedAt: new Date(NOW.getTime() - 5 * MIN) });
     const r = await pick({ stickRouteId: 'solo' });
     expect(r).toMatchObject({ ok: false, waitFor: 'slot' });
     expect(!r.ok && r.detail).toContain('续同一个会话');
@@ -362,15 +359,14 @@ describe('选路', () => {
     expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
   });
 
-  it('三段的一次性会话（runs 里开着的行，#157）也占池的空位：两行三段 + 一行 Fusion 的会话占满上限 3，派下一个池；都满了等空位；收了一行又派得动', async () => {
+  it('三段的一次性会话（runs 里开着的行，#157）也占池的空位：三行（动手、动手、验收）占满上限 3，派下一个池；都满了等空位；收了一行又派得动', async () => {
     await world(t.db);
-    const { task } = await addTask(t.db);
-    /** 一行 Fusion 的会话 + 两行三段的一次性会话占满这条路由的池，交回动手那一行的编号。 */
+    /** 三行开着的一次性会话占满这条路由的池，交回第一行动手的编号。 */
     const fill = async (routeId: string) => {
-      await startedRun(task.id, routeId, 'execute');
       const manual = randomUUID();
       const at = new Date(NOW.getTime() - 5 * MIN);
       await startRun(t.db, { id: manual, segment: 'manual', model: 'opus-5.5', routeId, startedAt: at });
+      await startRun(t.db, { segment: 'manual', model: 'opus-5.5', routeId, startedAt: at });
       await startRun(t.db, { segment: 'verify', model: 'opus-5.5', routeId, startedAt: at });
       return manual;
     };
@@ -424,18 +420,16 @@ describe('选路', () => {
     expect(!r.ok && r.detail).toContain('路由两层的配置缺口：这个用途没有模型，派不了');
   });
 
-  it('近 7 天的会话结局喂熔断：连着失败三次，这条路由熔断，派给下一条', async () => {
+  it('近 14 天的会话结局喂熔断：连着失败三次，这条路由熔断，派给下一条', async () => {
     await world(t.db);
     const { task } = await addTask(t.db);
     for (let i = 0; i < 3; i++) {
       // 最后一次失败在一分钟前：还在冷却里（第一次熔断冷却 10 分钟），不是半开。
-      await t.db.insert(sessionRuns).values({
+      await t.db.insert(runs).values({
         taskId: task.id,
-        stage: 'execute',
+        segment: 'manual',
+        model: 'opus-5.5',
         routeId: 'solo',
-        whyRoute: 'x',
-        queuedAt: new Date(NOW.getTime() - (10 - i) * MIN),
-        runAsUser: 'fleet-agent-carpool',
         startedAt: new Date(NOW.getTime() - (9 - i) * MIN),
         sessionId: randomUUID(),
         outcome: 'failed',
@@ -654,13 +648,11 @@ describe('全熔断只读判定（stageAllOpen）：不写库、不报警', () =
   async function tripBreaker(routeId: string, taskId: string, lastEndedMinutesAgo: number) {
     for (let i = 0; i < 3; i++) {
       const ended = new Date(NOW.getTime() - (lastEndedMinutesAgo + (2 - i)) * MIN);
-      await t.db.insert(sessionRuns).values({
+      await t.db.insert(runs).values({
         taskId,
-        stage: 'execute',
+        segment: 'manual',
+        model: 'opus-5.5',
         routeId,
-        whyRoute: 'x',
-        queuedAt: new Date(ended.getTime() - 2 * MIN),
-        runAsUser: 'fleet-agent-carpool',
         startedAt: new Date(ended.getTime() - MIN),
         sessionId: randomUUID(),
         outcome: 'failed',
@@ -1509,23 +1501,6 @@ async function oneShotEnded(
     outcome: over.outcome ?? 'failed',
     routeOutcome: over.routeOutcome === undefined ? 'fail' : over.routeOutcome,
   });
-}
-
-/** 这张单上起过（有开工时刻）的一次会话。 */
-async function startedRun(taskId: string, routeId: string, stage: StageKind) {
-  const id = randomUUID();
-  await t.db.insert(sessionRuns).values({
-    id,
-    taskId,
-    stage,
-    routeId,
-    whyRoute: 'x',
-    queuedAt: NOW,
-    runAsUser: routeId.startsWith('cursor') ? null : 'fleet-agent-carpool',
-    startedAt: NOW,
-    sessionId: `s-${id}`,
-  });
-  return id;
 }
 
 describe('开 PR 前验证：只派别家、作者是哪几族、每一轮的记录', () => {

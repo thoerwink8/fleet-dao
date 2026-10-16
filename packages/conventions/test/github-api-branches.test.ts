@@ -232,6 +232,46 @@ describe('分支体检写 GitHub', () => {
     );
   });
 
+  it('建轻量标签：POST refs/tags 指向这个提交；422（已经有了）不当失败；别的状态照抛', async () => {
+    const tag = 'archive/feat--a b-aaaaaaa';
+    const post = `POST ${API}/git/refs`;
+    const { client, seen } = gh({
+      [post]: () =>
+        new Response(JSON.stringify({ ref: `refs/tags/${tag}`, object: { sha: SHA } }), { status: 201 }),
+    });
+    await client.createLightweightTag(tag, SHA);
+    expect(seen[0]?.body).toBe(JSON.stringify({ ref: `refs/tags/${tag}`, sha: SHA }));
+    const exists = gh({ [post]: () => new Response('already exists', { status: 422 }) });
+    await exists.client.createLightweightTag(tag, SHA);
+    const denied = gh({ [post]: () => new Response('', { status: 403 }) });
+    await expect(denied.client.createLightweightTag(tag, SHA)).rejects.toThrow(
+      /在建标签 archive\/feat--a b-aaaaaaa 时，GitHub 回了 403/,
+    );
+  });
+
+  it('回读标签：object.sha 就是它指向的提交；404 回 undefined；认不出抛。名字按段转义', async () => {
+    const tag = 'archive/feat--a b-aaaaaaa';
+    const url = `${API}/git/ref/tags/archive/${encodeURIComponent('feat--a b-aaaaaaa')}`;
+    const ok = gh({ [`GET ${url}`]: () => json({ object: { sha: SHA, type: 'commit' } }) });
+    expect(await ok.client.tagSha(tag)).toBe(SHA);
+    const gone = gh({ [`GET ${url}`]: () => new Response('', { status: 404 }) });
+    expect(await gone.client.tagSha(tag)).toBeUndefined();
+    const bad = gh({ [`GET ${url}`]: () => json({ object: { sha: 'zz' } }) });
+    await expect(bad.client.tagSha(tag)).rejects.toThrow(/认不出（object.sha）/);
+  });
+
+  it('关巡检单：not_planned，正文一起改；没关成抛', async () => {
+    const { client, seen } = gh({ [`PATCH ${API}/issues/784`]: () => json({}) });
+    await client.closeIssue(784, 'not_planned', '不再需要人勾');
+    expect(seen[0]?.body).toBe(
+      JSON.stringify({ state: 'closed', state_reason: 'not_planned', body: '不再需要人勾' }),
+    );
+    const denied = gh({ [`PATCH ${API}/issues/784`]: () => new Response('', { status: 403 }) });
+    await expect(denied.client.closeIssue(784, 'not_planned', 'x')).rejects.toThrow(
+      /在关 #784 时，GitHub 回了 403/,
+    );
+  });
+
   it('开单、改正文：发对内容；GitHub 没回成就抛', async () => {
     const { client, seen } = gh({
       [`POST ${API}/issues`]: () => new Response(JSON.stringify({ number: 77 }), { status: 201 }),

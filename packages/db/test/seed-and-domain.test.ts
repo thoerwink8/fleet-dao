@@ -5,11 +5,10 @@ import {
   toChannel,
   toModel,
   toPool,
-  toProgressEvent,
   toQuotaWindow,
   toRepo,
   toRoute,
-  toSessionRun,
+  toSegmentRun,
   toSubtask,
   toTask,
 } from '../src/domain-map.ts';
@@ -20,7 +19,6 @@ import {
   families,
   models,
   pools,
-  progressEvents,
   quotaWindows,
   repos,
   routes,
@@ -95,10 +93,9 @@ describe('库里的行 → 领域对象', () => {
     const run = await addRun(t.db, {
       taskId: task.id,
       routeId: 'opus',
-      queuedAt: ago(10 * MIN),
       startedAt: ago(9 * MIN),
       endedAt: ago(MIN),
-      outcome: 'ok',
+      outcome: 'done',
       costUsd: 0.0116,
     });
     await t.db.insert(quotaWindows).values([
@@ -131,10 +128,6 @@ describe('库里的行 → 领域对象', () => {
       .update(pools)
       .set({ scopeModels: { fable: { in: ['fable-5.1'] } }, lastReadOkAt: NOW })
       .where(eq(pools.id, 'relay-a'));
-    const [ev] = await t.db
-      .insert(progressEvents)
-      .values({ runId: run.id, at: NOW, kind: 'say', payload: '好了' })
-      .returning();
 
     expect(toRepo((await t.db.select().from(repos))[0] as typeof repos.$inferSelect)).toEqual({
       id: repo.id,
@@ -173,16 +166,14 @@ describe('库里的行 → 领域对象', () => {
     expect(toTask({ ...task, phase: 'implement', doing: '动手第 1 轮' })).not.toHaveProperty('paused');
     expect(toTask({ ...task, phase: 'merge', doing: '检查红了：merge-gate' }).redChecks).toBe('merge-gate');
     expect(toTask({ ...task, phase: 'merge', doing: '等 PR #7 合并' })).not.toHaveProperty('redChecks');
-    expect(toSessionRun(run)).toEqual({
+    expect(toSegmentRun(run)).toEqual({
       id: run.id,
+      segment: 'manual',
       taskId: task.id,
-      stage: 'execute',
-      routeId: 'opus',
-      whyRoute: '写码阶段首选',
-      queuedAt: ago(10 * MIN).toISOString(),
+      model: 'opus-5.5',
       startedAt: ago(9 * MIN).toISOString(),
       endedAt: ago(MIN).toISOString(),
-      outcome: 'ok',
+      outcome: 'done',
       costUsd: 0.0116,
     });
     const windows = (await t.db.select().from(quotaWindows)).map(toQuotaWindow);
@@ -214,12 +205,6 @@ describe('库里的行 → 领域对象', () => {
         },
       ]),
     );
-    expect(toProgressEvent(ev as typeof progressEvents.$inferSelect)).toEqual({
-      runId: run.id,
-      at: NOW.toISOString(),
-      kind: 'say',
-      payload: '好了',
-    });
     const [pool] = await t.db.select().from(pools).where(eq(pools.id, 'relay-a'));
     expect(toPool(pool as typeof pools.$inferSelect)).toEqual({
       id: 'relay-a',

@@ -2006,14 +2006,12 @@ describe('法国在跑会话数的只读查询', () => {
     expect(sessionsQuery.SQL).toContain('ended_at is null');
   });
 
-  // 2026-10-13：预检写「法国在跑的会话 0 个」，release.sh 排空却在等 execute 会话——三段一次性会话只写 runs，不写 session_runs（#1995）
-  it('查询两张表都数：session_runs（老 Fusion）和 runs（三段一次性会话，排空登记的就是它们）；只数前者会漏', () => {
+  // 2026-10-13：预检写「法国在跑的会话 0 个」，release.sh 排空却在等 execute 会话——三段一次性会话只写 runs，不写老会话表（#1995）
+  it('查询数 runs（三段一次性会话，排空登记的就是它们）；老 Fusion 的会话表已删（#2357），不许再读它，读了库里报「关系不存在」', () => {
     const sql = sessionsQuery.SQL;
-    expect(sql).toMatch(/from session_runs s/);
+    expect(sql).not.toMatch(/session_runs/);
     expect(sql).toMatch(/from runs r/);
-    expect(sql).toMatch(
-      /count\(\*\) from session_runs where ended_at is null\) \+ \(select count\(\*\) from runs where ended_at is null/,
-    );
+    expect(sql).toMatch(/'running', \(select count\(\*\) from runs where ended_at is null\)/);
     expect(sql).toContain("'segment:' || r.segment");
   });
 

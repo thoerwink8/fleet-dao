@@ -47,16 +47,6 @@ DROP TRIGGER IF EXISTS subtasks_notify ON subtasks;
 CREATE TRIGGER subtasks_notify AFTER INSERT OR UPDATE OR DELETE ON subtasks
   FOR EACH ROW EXECUTE FUNCTION fleet_notify_change('id');
 --> statement-breakpoint
-DROP TRIGGER IF EXISTS session_runs_notify ON session_runs;
---> statement-breakpoint
-CREATE TRIGGER session_runs_notify AFTER INSERT OR UPDATE OR DELETE ON session_runs
-  FOR EACH ROW EXECUTE FUNCTION fleet_notify_change('id');
---> statement-breakpoint
-DROP TRIGGER IF EXISTS progress_events_notify ON progress_events;
---> statement-breakpoint
-CREATE TRIGGER progress_events_notify AFTER INSERT OR UPDATE OR DELETE ON progress_events
-  FOR EACH ROW EXECUTE FUNCTION fleet_notify_change('id');
---> statement-breakpoint
 DROP TRIGGER IF EXISTS quota_windows_notify ON quota_windows;
 --> statement-breakpoint
 CREATE TRIGGER quota_windows_notify AFTER INSERT OR UPDATE OR DELETE ON quota_windows

@@ -82,7 +82,7 @@ export function checkDone(input: {
   /** 本会话的分支；引擎还没建分支时没有。 */
   branch?: string | undefined;
   /**
-   * 起会话时交代给它的测试命令（session_runs.test_command）：**fallback 路径**用——没带 PR 编号的写码阶段只认它。
+   * 起会话时交代给它的测试命令（老会话记下的那条）：**fallback 路径**用——没带 PR 编号的写码阶段只认它。
    * 带了 PR 编号这条不再参与判定（测试由 CI 跑，不在这里）。
    */
   testCommand?: string | undefined;

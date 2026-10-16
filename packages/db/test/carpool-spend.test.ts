@@ -65,12 +65,10 @@ describe('carpoolWindowSpend：窗口里本机记到的拼车花费', () => {
     await addRun(t.db, {
       taskId: task.id,
       routeId: 'a-opus',
-      queuedAt: ago(7 * HOUR),
       startedAt: ago(6 * HOUR),
       costUsd: 50,
     }); // 窗口外
     await addRun(t.db, { taskId: task.id, routeId: 'b-opus', startedAt: ago(10 * MIN), costUsd: 7 }); // 不是拼车池
-    await addRun(t.db, { taskId: task.id, routeId: 'a-opus' }); // 还在排队、没开始
     await startRun(t.db, {
       model: 'opus-5.5',
       segment: 'manual',

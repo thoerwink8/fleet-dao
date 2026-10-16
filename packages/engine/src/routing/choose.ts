@@ -2,14 +2,15 @@
 // 纯函数、确定性：同样输入同样输出；不取时钟、不随机——现在几点、试探用的随机数都由调用方给，引擎记进历史。
 // 模型之间严格按用途顺序：往后挑只因额度用完（含留量线）、人关了或钉住别的、报错（探测不通、熔断）；
 // 不因为作者族、不因为本单之前用过哪一家而改顺序（冷验收验不了由冷验收自己兜，见 verifier-invoke.ts 的两家都验）。
-// 唯一的例外是动手按模型战绩排（rank.ts 的 modelOrder，PLAN 3f，决定 0093）：一轮做成率明显差的模型不进动手，
+// 唯一的例外是动手按模型战绩排（rank.ts 的 modelOrder，PLAN 3f，决定 0093、0095、0098）：按档排时用收缩后的质量下界，
+// 分钟只打平手，不再把一轮做成率差的挪到最后。byTier 关掉时仍是旧规则：一轮做成率明显差的模型不进动手，
 // 但别的模型都派不了、又不只是在等空位时照样派它——打分绝不能把唯一能用的排没。
 
 import { blocksFor, type FilterContext, familyKey } from './filter.ts';
 import { type BlockGroup, groupOf } from './group.ts';
 import { routeLabel, STAGE_NAMES, stamp } from './names.ts';
 import { resolveRoutingPolicy } from './policy.ts';
-import { type ModelScore, type Ranked, rank, scoreOf } from './rank.ts';
+import { type ModelScore, type Ranked, rank, scoreOf, tierScores } from './rank.ts';
 import type {
   AllOpenCheck,
   Block,
@@ -72,9 +73,20 @@ function judgeStage(input: ChooseRouteInput, ctx: FilterContext): Judged[] {
   });
 }
 
-/** 这个用途按动手战绩排、又拿到了战绩：每个模型的分。否则为空（模型之间照人排的）。 */
+/**
+ * 这个用途按动手战绩排、又拿到了战绩：每个模型的分。否则为空（模型之间照人排的）。
+ * 按档排只看这一档的行；这一档是空的也不退回整单战绩。byTier 关掉时忽略分档战绩，仍用整单。
+ */
 function scoresOf(input: ChooseRouteInput, ctx: FilterContext): Map<string, ModelScore> | undefined {
-  if (!input.modelTracks || !ctx.policy.trackScore.stages.includes(input.stage)) return undefined;
+  const ts = ctx.policy.trackScore;
+  if (!ts.stages.includes(input.stage)) return undefined;
+  if (ts.byTier && input.tier && input.modelTierTracks) {
+    return tierScores(
+      input.modelTierTracks.filter((t) => t.tier === input.tier),
+      ctx.policy,
+    );
+  }
+  if (!input.modelTracks) return undefined;
   return new Map(input.modelTracks.map((t) => [t.modelId, scoreOf(t, ctx.policy)]));
 }
 

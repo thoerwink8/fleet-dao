@@ -1567,10 +1567,9 @@ export function useUpdateCredentials() {
 const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   tasks: [['board'], ['task'], ['task-list'], keys.home],
   subtasks: [['board'], ['task']],
-  session_runs: [['board'], ['task'], ['task-list'], ['pools'], keys.home],
-  // 三段流水（scope / manual / verify）：主页的流水线图、任务详情的流水、任务列表的段和花费都读它
-  runs: [keys.home, ['task'], ['task-list']],
-  progress_events: [['board'], ['task']],
+  // 三段流水（scope / manual / verify）：主页的流水线图、任务详情的流水、任务列表的段和花费都读它；
+  // 池的在跑数（额度页、路由页）也数它里面没结束的行
+  runs: [keys.home, ['task'], ['task-list'], ['pools']],
   // asks 表留着（删表要创始人点头，#939），没有读它的页面：变了不用重拉任何东西
   asks: [],
   // approvals 还没有专门的页面查询键；按它挂在任务 / 子任务上，先失效这两处，主页「要你拍的」也跟着重拉。
