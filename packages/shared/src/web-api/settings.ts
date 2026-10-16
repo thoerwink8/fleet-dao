@@ -2,6 +2,7 @@
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
 import type { QuotaWindowKind } from '../domain.ts';
+import { FLOW_MODE_FORMS, parseFlowModeSetting } from '../flow-mode.ts';
 import { type Same, Time } from './internal.ts';
 
 // —— 设置 ——
@@ -139,6 +140,11 @@ export const SETTING_SCHEMAS = {
    * 总开关关＝全停；总开关开＝只有接活开着的项目才派。没设过 = 关（默认关）；谁在什么时候改的看 settings 行的 updatedBy/updatedAt。
    */
   'engine.master': z.boolean(),
+  /**
+   * 全程模式开关（#2823）：three（都走三步单）/ split:<0-100>（约这个百分比的单走全程）/ full（都走全程）。没设过 = three；
+   * 库里的值认不出时引擎和命令行按 three 办并报出来（shared 的 readFlowModeSetting）。这一步只记账，引擎行为不看它。
+   */
+  'engine.flowMode': z.string().refine((v) => parseFlowModeSetting(v).ok, `只收 ${FLOW_MODE_FORMS}`),
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 

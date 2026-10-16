@@ -7,6 +7,7 @@ import { createPgStore } from '../src/pg-store.ts';
 import { seedPg } from '../src/testing/pg-fixtures.ts';
 import { describeStoreContract, type MakeStore } from './store-contract.ts';
 import { describeCredentialsStoreContract } from './store-contract-credentials.ts';
+import { describeFlowStoreContract } from './store-contract-flow.ts';
 import { describeNodeStoreContract } from './store-contract-nodes.ts';
 import { describeTaskListContract } from './store-contract-task-list.ts';
 
@@ -31,3 +32,4 @@ describeStoreContract('Postgres 版', make);
 describeCredentialsStoreContract('Postgres 版', make);
 describeNodeStoreContract('Postgres 版', make);
 describeTaskListContract('Postgres 版', make);
+describeFlowStoreContract('Postgres 版', make);
