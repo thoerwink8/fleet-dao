@@ -4,22 +4,28 @@
 // 合并时的自动收口 close-on-merge.ts 没收成、或当时还有别的 PR 挂着它的）。从前这些靠每天的关单对账、版本快照生成时顺带发现，那两样都删了
 // （单子是需求唯一的家，关单证据在 pnpm issue:close 那一步查），只留这一道定时的；查出来的每一条都是要有人去修的，不是通知。
 // 结果随单子开关、随时间变，所以不进 PR 的必过检查（#87），只在定时任务里跑，红了不挡任何 PR。
-// 唯一会写的一处：开着的版本里程碑说明的先后段里有已关或已挪走的号，直接改掉（#2393，pnpm issue:new 开单时也清同一份）。
+// 自动写两处：按唯一母单清单修复母子关系；清掉开着的版本里程碑先后段里已关或已挪走的号（#2393）。
 // 改这里之前必须知道：
 // - 读不到 GitHub、读回来认不出：一律是「没查成」（退出码 2），不当成「没有断裂」。
 // - 每一条规则在 test/github-audit.test.ts 里有一个查得出的例子和一个不该报的例子。
 
 import { whyLeave } from './close-on-merge.ts';
+import { reconcileFamily } from './family-manifest.ts';
 import type { Finding } from './findings.ts';
 import { isFlowBranch } from './flow-branch.ts';
-import type { GitHubMilestoneWriter, GitHubReader, PlanIssue, PullBody } from './github-api.ts';
+import type {
+  GitHubFamilyReader,
+  GitHubFamilyWriter,
+  GitHubMilestoneWriter,
+  GitHubReader,
+  PlanIssue,
+  PullBody,
+} from './github-api.ts';
 import { isKindLabel, MOTHER_LABEL } from './labels.ts';
+import { parentField } from './parent-field.ts';
 import { type Plan, PlanProblem, parseOrder, pruneOrder, readPlan } from './plan-view.ts';
 import { issueColumnLinks } from './pr-columns.ts';
 import { addDays, beijingDate, dueDateOf } from './version-cut.ts';
-
-/** 母单刚开、子单还没挂上的宽限：超过这么久还是空的才报。 */
-const EMPTY_MOTHER_GRACE_MS = 24 * 3_600_000;
 
 export interface AuditResult {
   findings: Finding[];
@@ -43,11 +49,17 @@ export async function auditGitHub(
   gh: GitHubReader,
   now: Date,
   writer?: GitHubMilestoneWriter,
+  family?: { reader: GitHubReader & GitHubFamilyReader; writer?: GitHubFamilyWriter },
 ): Promise<AuditResult> {
   const findings: Finding[] = [];
   const notQueried: string[] = [];
   const checked = { issues: 0, versions: 0 };
   const pruned: AuditResult['pruned'] = [];
+  if (family) {
+    const result = await reconcileFamily(family.reader, family.writer);
+    findings.push(...result.findings);
+    notQueried.push(...result.notQueried);
+  }
 
   let open: PlanIssue[] | undefined;
   try {
@@ -58,7 +70,10 @@ export async function auditGitHub(
   if (open !== undefined) {
     checked.issues = open.length;
     findings.push(...kindFindings(open));
-    const mothers = motherFindings(open, now);
+    const family = await bodyFamilyFindings(open, gh);
+    findings.push(...family.found);
+    notQueried.push(...family.unknown);
+    const mothers = motherFindings(open);
     findings.push(...mothers.found);
     if (mothers.unknown.length > 0) {
       const shown = mothers.unknown.slice(0, 10).map((n) => `#${n}`);
@@ -211,10 +226,10 @@ function kindFindings(open: readonly PlanIssue[]): Finding[] {
 }
 
 /**
- * 母单和子单对得上：子单都关了的母单该关；有子单要贴「母单」标签；贴了标签却一直没有子单的摘掉。
+ * 母单和子单对得上：子单都关了的母单该关；有子单要贴「母单」标签。
  * 接口没给子单数的单（unknown）核不了，交回去记成「没查成」：不猜，也不当成没有断裂。
  */
-function motherFindings(open: readonly PlanIssue[], now: Date): { found: Finding[]; unknown: number[] } {
+function motherFindings(open: readonly PlanIssue[]): { found: Finding[]; unknown: number[] } {
   const found: Finding[] = [];
   const unknown: number[] = [];
   for (const i of open) {
@@ -237,12 +252,83 @@ function motherFindings(open: readonly PlanIssue[], now: Date): { found: Finding
         text: `#${i.number} 下面有 ${i.subIssues} 张子单，却没贴「${MOTHER_LABEL}」标签：贴上`,
       });
     }
-    if (i.subIssues === 0 && isMother && now.getTime() - Date.parse(i.createdAt) > EMPTY_MOTHER_GRACE_MS) {
+  }
+  return { found, unknown };
+}
+
+/** 批量母子单按正文 parent 字段对账；原生关系仍然保留，不能拿字段覆盖掉冲突。 */
+async function bodyFamilyFindings(open: readonly PlanIssue[], gh: GitHubReader) {
+  const found: Finding[] = [];
+  const unknown: string[] = [];
+  const linked = new Set<number>();
+  const cached = new Map<number, PlanIssue | undefined>(open.map((i) => [i.number, i]));
+  let complete = true;
+  for (const i of open) {
+    if (i.parent !== undefined) linked.add(i.parent);
+    if (i.body === undefined) {
+      complete = false;
+      unknown.push(`接口没给 #${i.number} 的正文，parent 字段和空母单没核`);
+      continue;
+    }
+    const field = parentField(i.body);
+    if (field.kind === 'none') continue;
+    if (field.kind === 'invalid') {
+      complete = false;
       found.push({
         issue: i.number,
-        key: `mother-empty:${i.number}`,
-        text: `#${i.number} 贴了「${MOTHER_LABEL}」标签，却一直没有子单：该有子单就挂上（pnpm issue:new --parent ${i.number}），本来就不是母单就摘掉标签`,
+        key: `parent-invalid:${i.number}`,
+        text: `#${i.number} 的 parent 字段认不出：只留一行 parent: #<母单号>，号必须是正整数`,
       });
+      continue;
+    }
+    linked.add(field.number);
+    if (i.parent !== undefined && i.parent !== field.number) {
+      found.push({
+        issue: i.number,
+        key: `parent-conflict:${i.number}:${field.number}:${i.parent}`,
+        text: `#${i.number} 正文 parent 指向 #${field.number}，原生母单却是 #${i.parent}：核对后把两处关系改成同一张母单`,
+      });
+    }
+    try {
+      if (!cached.has(field.number)) cached.set(field.number, await gh.issue(field.number));
+      const mother = cached.get(field.number);
+      const problem =
+        mother === undefined
+          ? '在 GitHub 上查不到'
+          : mother.isPr
+            ? '是 PR，不是母单'
+            : !mother.labels.includes(MOTHER_LABEL)
+              ? `没有「${MOTHER_LABEL}」标签，不是母单`
+              : mother.state === 'closed'
+                ? '已经关了'
+                : undefined;
+      if (problem) {
+        found.push({
+          issue: i.number,
+          key: `parent-orphan:${i.number}:${field.number}`,
+          text: `#${i.number} 正文 parent 指向的 #${field.number} ${problem}：核对母单后修正 parent 字段和原生关系，或关掉不再做的子单`,
+        });
+      }
+    } catch (e) {
+      unknown.push(`读不到 #${i.number} 的 parent 母单 #${field.number}（${message(e)}），正文母子关系没核`);
+    }
+  }
+  // 只对批量能力管理的母单立即报空；目录母单允许空清单，不按创建时间报警。
+  if (complete) {
+    for (const i of open) {
+      if (
+        i.labels.includes(MOTHER_LABEL) &&
+        i.body !== undefined &&
+        /<!-- fleet:issue-batch:[^\s<>]+:mother -->/.test(i.body) &&
+        i.subIssues === 0 &&
+        !linked.has(i.number)
+      ) {
+        found.push({
+          issue: i.number,
+          key: `family-empty:${i.number}`,
+          text: `#${i.number} 是批量创建的母单，却没有任何子单：核对批量创建结果，补齐子单或关闭这张半截母单`,
+        });
+      }
     }
   }
   return { found, unknown };

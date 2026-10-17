@@ -141,6 +141,8 @@ export interface RunRow {
   source: 'engine' | 'local';
   /** 这张引擎单走全程还是三段。没有这个值不标、不猜。本机会话没有。 */
   flowMode?: HomeRunning['flowMode'];
+  /** 不合格退回三段的原因。没有就不标成退回。 */
+  flowFallback?: HomeRunning['flowFallback'];
 }
 
 const STEP: Record<NonNullable<HomeRunning['segment']>, string> = {
@@ -198,6 +200,7 @@ export function engineRow(
     external: link.external,
     source: 'engine',
     ...(item.flowMode === 'full' || item.flowMode === 'three' ? { flowMode: item.flowMode } : {}),
+    ...(item.flowFallback ? { flowFallback: item.flowFallback } : {}),
   };
 }
 
@@ -225,6 +228,7 @@ function localTaskRow(
     external: link.external,
     source: 'engine',
     ...(item.flowMode === 'full' || item.flowMode === 'three' ? { flowMode: item.flowMode } : {}),
+    ...(item.flowFallback ? { flowFallback: item.flowFallback } : {}),
   };
 }
 

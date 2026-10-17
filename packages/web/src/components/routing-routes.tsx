@@ -11,12 +11,14 @@ import { type HostId, routeEffortChoices } from '@fleet-dao/shared';
 import { ChevronRight, Hourglass } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { Link } from 'react-router';
-import { usePoolHolds, useRouting } from '../api/client';
+import { toast } from 'sonner';
+import { errorText, usePoolHolds, useRouting, useUpdateModelRoute } from '../api/client';
 import type { LivenessFact, RoutingLayerModel, RoutingLayerRoute } from '../api/types';
 import { formatAgo, formatIn } from '../lib/format';
 import { poolIsHeld } from '../lib/pool-holds';
 import { nextProbeLine } from '../lib/probe-pace-view';
 import { routeKind } from '../lib/route-kinds';
+import { shareBanners } from '../lib/route-share';
 import { probeInterrupted, routeStateLabel, routeStateTone } from '../lib/route-state';
 import { routeHost, routeSlots, routeTitle } from '../lib/routing';
 import { supportedPurposeEfforts } from '../lib/routing-browse';
@@ -32,7 +34,7 @@ import { type Tone, toneText } from '../lib/status';
 import { cn } from '../lib/utils';
 import { Code } from './layout/code';
 import { RowDetail, RowFrame } from './layout/list';
-import { RowMenu } from './layout/row-menu';
+import { RowMenu, RowMenuItem } from './layout/row-menu';
 import { StatusDot } from './layout/status-badge';
 import { Tag } from './layout/tag';
 import { PoolProblemLine, usePoolProblems } from './pool-problem';
@@ -147,8 +149,26 @@ export function ModelRoutes({
   showAllByDefault?: boolean;
 }) {
   const edit = useRoutingEdit();
+  const updateShare = useUpdateModelRoute();
   const env = useKindEnv();
   const [showAll, setShowAll] = useState(showAllByDefault);
+  const version = m.shareVersion ?? 0;
+  const onShare = async (
+    routeId: string,
+    body: { shareBand: number | null; shareWeight: number; expectedVersion: number },
+  ): Promise<number | null> => {
+    try {
+      const res = await updateShare.mutateAsync({
+        modelId: m.modelId,
+        routeId,
+        body: { op: 'share', ...body, reason: '同一档' },
+      });
+      return res.version ?? body.expectedVersion + 1;
+    } catch (err) {
+      toast.error(errorText(err));
+      return null;
+    }
+  };
   if (m.routes.length === 0) {
     return <p className="px-4 py-3 text-body text-ink-fail">这个模型下一条路由都没有：排了它也派不到它</p>;
   }
@@ -171,6 +191,24 @@ export function ModelRoutes({
           <OrderSummaryLine summary={summarizeOrder(states, '路由')} noun="路由" />
         </p>
       ) : null}
+      {shareBanners(
+        m.routes.flatMap((r) =>
+          r.shareBand === undefined
+            ? []
+            : [
+                {
+                  band: r.shareBand,
+                  label: routeTitle(r),
+                  weight: r.shareWeight ?? 1,
+                  recent: r.recentDispatches ?? 0,
+                },
+              ],
+        ),
+      ).map((text) => (
+        <p key={text} data-route-share className="px-4 pt-2 text-meta text-muted-foreground">
+          {text}
+        </p>
+      ))}
       {hidden > 0 ? (
         <div className="flex items-center gap-2 px-4 pt-2">
           <Toggle size="sm" pressed={showAll} onPressedChange={setShowAll} className="shrink-0">
@@ -208,6 +246,10 @@ export function ModelRoutes({
             now={now}
             firstLive={r.routeId === firstLiveRoute}
             {...(slotOf.has(r.routeId) ? { slot: slotOf.get(r.routeId) } : {})}
+            peers={m.routes}
+            shareVersion={version}
+            shareBusy={updateShare.isPending}
+            onShare={onShare}
           />
         )}
       </SortableList>
@@ -253,6 +295,10 @@ export function RouteItem({
   now,
   firstLive: isFirst,
   slot,
+  peers,
+  shareVersion,
+  shareBusy,
+  onShare,
 }: {
   route: RoutingLayerRoute;
   /** 在模型下的第几条（从 0 起）；不给就不写序号（渠道页里的路由不分先后）。 */
@@ -267,6 +313,14 @@ export function RouteItem({
   firstLive?: boolean;
   /** 在顺序里的实际顺位和是否被跳过（lib/routing-order.ts）；不给就不写（渠道页里的路由不分先后）。 */
   slot?: { state: SlotState; rank: number | null } | undefined;
+  /** 这个模型下的全部路由，用来「和上一条同一档」。渠道页不传，菜单里就没有这一档。 */
+  peers?: RoutingLayerRoute[];
+  shareVersion?: number;
+  shareBusy?: boolean;
+  onShare?: (
+    routeId: string,
+    body: { shareBand: number | null; shareWeight: number; expectedVersion: number },
+  ) => Promise<number | null>;
 }) {
   const [open, setOpen] = useState(false);
   const stale = r.probedAt !== undefined && probeInterrupted(r, now);
@@ -305,6 +359,30 @@ export function RouteItem({
   ]
     .filter(Boolean)
     .join(' · ');
+  const shareVersionNow = shareVersion ?? 0;
+  const prev = index !== undefined ? peers?.[index - 1] : undefined;
+  const shareOff = shareBusy || edit.busy;
+  const joinPrevious = async () => {
+    if (!onShare || !prev || index === undefined) return;
+    const mine = r.shareWeight ?? 1;
+    if (prev.shareBand !== undefined) {
+      await onShare(r.routeId, {
+        shareBand: prev.shareBand,
+        shareWeight: mine,
+        expectedVersion: shareVersionNow,
+      });
+      return;
+    }
+    const bands = (peers ?? []).flatMap((x) => (x.shareBand === undefined ? [] : [x.shareBand]));
+    const band = bands.length === 0 ? 0 : Math.max(...bands) + 1;
+    const next = await onShare(prev.routeId, {
+      shareBand: band,
+      shareWeight: prev.shareWeight ?? 1,
+      expectedVersion: shareVersionNow,
+    });
+    if (next === null) return;
+    await onShare(r.routeId, { shareBand: band, shareWeight: mine, expectedVersion: next });
+  };
   return (
     <>
       <RowFrame tall className="items-start">
@@ -412,6 +490,42 @@ export function RouteItem({
           {rowControls ? (
             <RowMenu label={`更多操作：${rowControls.moves.label}`} title={ROW_MENU_TITLE}>
               <RowMoveItems moves={rowControls.moves} />
+              {onShare && prev ? (
+                <RowMenuItem disabled={shareOff} onSelect={() => void joinPrevious()}>
+                  和上一条同一档
+                </RowMenuItem>
+              ) : null}
+              {onShare && r.shareBand !== undefined ? (
+                <RowMenuItem
+                  disabled={shareOff}
+                  onSelect={() =>
+                    void onShare(r.routeId, {
+                      shareBand: null,
+                      shareWeight: 1,
+                      expectedVersion: shareVersionNow,
+                    })
+                  }
+                >
+                  单独成档
+                </RowMenuItem>
+              ) : null}
+              {onShare && r.shareBand !== undefined
+                ? [1, 2, 3, 4].map((w) => (
+                    <RowMenuItem
+                      key={w}
+                      disabled={shareOff || r.shareWeight === w}
+                      onSelect={() =>
+                        void onShare(r.routeId, {
+                          shareBand: r.shareBand ?? 0,
+                          shareWeight: w,
+                          expectedVersion: shareVersionNow,
+                        })
+                      }
+                    >
+                      权重 {w}
+                    </RowMenuItem>
+                  ))
+                : null}
             </RowMenu>
           ) : null}
         </span>

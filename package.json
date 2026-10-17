@@ -25,6 +25,7 @@
     "ci:stats": "node packages/conventions/src/bin/ci-stats.ts",
     "flow:stats": "node packages/conventions/src/bin/flow-stats.ts",
     "issue:new": "node packages/conventions/src/bin/issue-new.ts",
+    "issue:batch": "node packages/conventions/src/bin/issue-batch.ts",
     "progress": "node packages/conventions/src/bin/progress.ts",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",

@@ -65,6 +65,11 @@ export const TaskListRowSchema = z.object({
    * 还没分组的老单没有这个键。页面不补、不猜。
    */
   flowMode: z.enum(FLOW_MODES).optional(),
+  /**
+   * 不合格、实际退回三段的原因（分组记录 source = ineligible，且不是「开关就是三步法」）。
+   * 没有这个键就不是退回。老后端没有，页面不猜。
+   */
+  flowFallback: z.string().min(1).optional(),
   /** 筛选分到哪一组。 */
   group: TaskListGroupSchema,
   /** 现在在哪一段（对题、动手、验收、验收还没起、合并）；三段流水推不出的是 null。 */

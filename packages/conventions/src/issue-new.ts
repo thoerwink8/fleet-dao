@@ -23,7 +23,7 @@
 // gh 出错原样报出来，退出码非 0。
 // 帅位座位整张删掉（#531）：开单时替帅位认领那一步（claimLocal）一并删——本机不再在库里认领。
 import { execFile } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -47,6 +47,7 @@ import {
   requireAxis,
 } from './labels.ts';
 import { type MdDoc, norm, parseMd, sectionRange } from './markdown.ts';
+import { readManifest, withManifest } from './mother-manifest.ts';
 import {
   describeOffDiff,
   OFF_DIFF_REWRITE,
@@ -54,6 +55,7 @@ import {
   offDiffAcceptanceItems,
   splitAcceptanceItems,
 } from './off-diff-acceptance.ts';
+import { withParentField } from './parent-field.ts';
 import { addToOrder, type OrderParse, parseOrder } from './plan-view.ts';
 
 export interface GhResult {
@@ -293,6 +295,12 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
   } catch (e) {
     throw new Error(`--body-file 读不到：${bodyPath}（${message(e)}），单没开。`);
   }
+  if (o.mother) {
+    const manifest = readManifest(body);
+    if (manifest.kind === 'invalid') throw new Error(`母单清单认不出：${manifest.why}，单没开。`);
+    if (manifest.kind === 'absent') body = withManifest(body, []);
+  }
+  if (o.parent !== undefined) body = withParentField(body, o.parent);
   const checked = checkIssueBody(body, {
     allowPrBodyAcceptance: o.allowPrBodyAcceptance !== undefined,
     local: o.local,
@@ -305,6 +313,12 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       `（开单时带了 --allow-pr-body-acceptance：${o.allowPrBodyAcceptance}）`,
     );
     createBodyPath = join(tmpdir(), `fleet-issue-new-body-${process.pid}-${Date.now()}.md`);
+    writeFileSync(createBodyPath, body, 'utf8');
+  }
+  if (o.mother || o.parent !== undefined) {
+    const temp = resolve(deps.cwd, '_tmp/issue-new');
+    mkdirSync(temp, { recursive: true });
+    createBodyPath = join(temp, `body-${process.pid}-${Date.now()}.md`);
     writeFileSync(createBodyPath, body, 'utf8');
   }
   const tooLong = issueBodyTooLong(body);
@@ -538,6 +552,13 @@ async function attachToParent(
     `sub_issue_id=${id}`,
   ]);
   if (link.code !== 0) throw unlinked(`gh 挂子议题报错（退出码 ${link.code}）：${detail(link)}`);
+  try {
+    await syncMotherManifest(gh, a.parent, a.number);
+  } catch (e) {
+    throw new Error(
+      `单开了、挂到 #${a.parent} 下面了（#${a.number} ${a.url}），可母单 manifest 清单没同步：${message(e)}。不要重开，运行 pnpm github:audit 修复。`,
+    );
+  }
   if (a.milestone === UNSCHEDULED) return;
   const edit = await gh(['issue', 'edit', String(a.number), '--milestone', a.milestone]);
   if (edit.code !== 0) {
@@ -546,6 +567,48 @@ async function attachToParent(
         `${detail(edit)}。手动补：gh issue edit ${a.number} --milestone "${a.milestone}"。`,
     );
   }
+}
+
+/** 子单挂好后立即维护完整清单，包含已关闭的原生子单和原清单；读不全就不写。 */
+async function syncMotherManifest(gh: Gh, parent: number, child: number): Promise<void> {
+  const list = await gh([
+    'api',
+    `repos/{owner}/{repo}/issues/${parent}/sub_issues?per_page=100`,
+    '--paginate',
+    '--slurp',
+  ]);
+  if (list.code !== 0) throw new Error(`读子单列表失败：${detail(list)}`);
+  const pages: unknown = JSON.parse(list.stdout);
+  if (!Array.isArray(pages) || pages.length === 0 || !pages.every(Array.isArray))
+    throw new Error('子单列表不是完整分页数组');
+  const numbers = pages.flat().map((i: { number?: unknown }) => i?.number);
+  if (!numbers.every((n): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n > 0))
+    throw new Error('子单列表的单号认不出');
+  if (!numbers.includes(child)) throw new Error(`原生子单列表没有 #${child}，不能确认已挂接`);
+  const read = await gh(['api', `repos/{owner}/{repo}/issues/${parent}`]);
+  if (read.code !== 0) throw new Error(`读母单正文失败：${detail(read)}`);
+  const current = JSON.parse(read.stdout) as { body?: unknown };
+  if (current?.body === null) current.body = '';
+  if (typeof current?.body !== 'string') throw new Error('接口没给母单正文');
+  const existing = readManifest(current.body);
+  if (existing.kind === 'invalid') throw new Error(existing.why);
+  const children = [...new Set([...(existing.kind === 'valid' ? existing.children : []), ...numbers])].sort(
+    (a, b) => a - b,
+  );
+  const body = withManifest(current.body, children);
+  const patch = await gh([
+    'api',
+    '-X',
+    'PATCH',
+    `repos/{owner}/{repo}/issues/${parent}`,
+    '-f',
+    `body=${body}`,
+  ]);
+  if (patch.code !== 0) throw new Error(`写母单清单失败：${detail(patch)}`);
+  const back = JSON.parse(patch.stdout) as { body?: unknown };
+  const manifest = typeof back?.body === 'string' ? readManifest(back.body) : undefined;
+  if (back.body !== body || manifest?.kind !== 'valid' || manifest.children.join() !== children.join())
+    throw new Error('写清单回包与全部子单不一致');
 }
 
 /** 选中的开放里程碑：全名，和接口回的那一项原样（要排先后的再按 toMilestoneDetail 认编号和说明，不排的不多挑）。 */

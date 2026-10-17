@@ -268,6 +268,7 @@ export function FarTicket({
   title,
   usage,
   flowMode,
+  flowFallback,
 }: {
   tone: Tone;
   id: string;
@@ -276,6 +277,8 @@ export function FarTicket({
   usage?: { text: string; title: string } | undefined;
   /** 这张单走全程还是三段。没有就不画。 */
   flowMode?: HomeRunning['flowMode'];
+  /** 不合格退回三段的原因。没有就不画成退回。 */
+  flowFallback?: HomeRunning['flowFallback'];
 }) {
   return (
     <div className={cn('flex h-full flex-col justify-center gap-1 overflow-hidden px-3', softClass[tone])}>
@@ -286,7 +289,7 @@ export function FarTicket({
       >
         {id}
       </div>
-      <FlowModeTag mode={flowMode} />
+      <FlowModeTag mode={flowMode} fallback={flowFallback} />
       <div
         className="line-clamp-2 min-h-0 leading-tight font-semibold break-words text-foreground"
         style={{ fontSize: FAR_TITLE_FONT }}
@@ -501,12 +504,13 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
           title={item.title}
           usage={{ text: usageShort(data.usage), title: usageTitle(data.usage) }}
           flowMode={item.flowMode}
+          flowFallback={item.flowFallback}
         />
       ) : (
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3 pl-4">
           <div className="flex shrink-0 items-center gap-x-2">
             <span className="num text-meta font-semibold text-muted-foreground">#{item.issueNumber}</span>
-            <FlowModeTag mode={item.flowMode} />
+            <FlowModeTag mode={item.flowMode} fallback={item.flowFallback} />
             <StatusBadge tone={tone} label={statusTextOf(item)} />
             {founder ? <StatusBadge tone="human" label="等你" variant="dot" /> : null}
             <CardLink

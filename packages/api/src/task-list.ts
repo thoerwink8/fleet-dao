@@ -38,6 +38,8 @@ export interface TaskListInput {
    */
   requestSeqs?: ReadonlyMap<string, number> | undefined;
   requestSeqUnavailable?: string | undefined;
+  /** 不合格退回三段的原因。不给就都不带这个键。 */
+  flowFallbackOf?: ((taskId: string) => string | undefined) | undefined;
 }
 
 const lastStarted = (views: readonly SegmentRunView[]): SegmentRunView | undefined =>
@@ -86,6 +88,7 @@ export function taskListView(input: TaskListInput): Response {
     const requestSeq = repo
       ? input.requestSeqs?.get(issueKey(`${repo.owner}/${repo.name}`, task.issueNumber))
       : undefined;
+    const flowFallback = input.flowFallbackOf?.(task.id);
     return {
       taskId: task.id,
       repoId: task.repoId,
@@ -99,6 +102,7 @@ export function taskListView(input: TaskListInput): Response {
       ...(task.leaseUntil === undefined ? {} : { leaseUntil: task.leaseUntil }),
       // 还没分组没有这个键：不补、不猜
       ...(task.flowMode === undefined ? {} : { flowMode: task.flowMode }),
+      ...(flowFallback ? { flowFallback } : {}),
       group,
       segment: isTaskFinished(task) ? null : flow.segment,
       model,

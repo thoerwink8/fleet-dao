@@ -296,7 +296,7 @@ function RunLine({ row }: { row: RunRow }) {
           <span className="min-w-0 truncate text-body font-medium" title={row.what}>
             {row.what}
           </span>
-          <FlowModeTag mode={row.flowMode} />
+          <FlowModeTag mode={row.flowMode} fallback={row.flowFallback} />
         </p>
         <p className="truncate text-meta text-muted-foreground" title={`${row.who} · ${row.progress}`}>
           {row.who} · {row.progress}

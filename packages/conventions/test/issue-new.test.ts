@@ -12,6 +12,8 @@ import {
   prBodyAcceptanceItems,
   USAGE,
 } from '../src/issue-new.ts';
+import { readManifest, withManifest } from '../src/mother-manifest.ts';
+import { parentField } from '../src/parent-field.ts';
 import { parseOrder } from '../src/plan-view.ts';
 import { order } from './fake-github.ts';
 
@@ -95,6 +97,68 @@ const BODY = [
   '- 测试：过期的验证码被拒。',
   '',
 ].join('\n');
+
+/** 原生关系与母单正文分开保存，只有 PATCH 成功才更新正文。 */
+function motherApi(
+  o: {
+    parent?: GhResult;
+    readAfter?: GhResult;
+    body?: string;
+    list?: GhResult;
+    link?: GhResult;
+    edit?: GhResult;
+    patch?: GhResult;
+    patchBody?: string;
+  } = {},
+) {
+  let body = o.body ?? BODY;
+  let linked = false;
+  const route = (args: string[]): GhResult | undefined => {
+    if (args[0] === 'api' && args[1] === 'repos/{owner}/{repo}/issues/192')
+      return (
+        (linked ? o.readAfter : o.parent) ??
+        ok(
+          JSON.stringify({
+            number: 192,
+            state: 'open',
+            labels: [{ name: '需求' }, { name: '母单' }],
+            body,
+          }),
+        )
+      );
+    if (args[0] === 'api' && args[1] === 'repos/{owner}/{repo}/issues/36')
+      return ok(JSON.stringify({ number: 36, id: 9036 }));
+    if (args[0] === 'api' && args[1] === 'repos/{owner}/{repo}/issues/192/sub_issues?per_page=100')
+      return o.list ?? ok(JSON.stringify([[{ number: 36, state: 'open' }]]));
+    if (args[0] === 'api' && args[1] === '-X' && args[2] === 'POST') {
+      if (o.link) return o.link;
+      linked = true;
+      return ok('{}');
+    }
+    if (
+      args[0] === 'api' &&
+      args[1] === '-X' &&
+      args[2] === 'PATCH' &&
+      args[3] === 'repos/{owner}/{repo}/issues/192'
+    ) {
+      if (o.patch) return o.patch;
+      if (args.length !== 6 || args[4] !== '-f' || !args[5]?.startsWith('body='))
+        return fail('假 GitHub 认不出这次母单正文更新');
+      body = args[5].slice('body='.length);
+      return ok(o.patchBody ?? JSON.stringify({ body }));
+    }
+    if (args[0] === 'issue' && args[1] === 'edit') return o.edit ?? ok(`${URL36}\n`);
+    return undefined;
+  };
+  return { route, body: () => body };
+}
+
+function createdBody(calls: string[][]): string {
+  const create = calls.find((c) => c[0] === 'issue' && c[1] === 'create');
+  const path = create?.[(create?.indexOf('--body-file') ?? -1) + 1];
+  if (!path) throw new Error('测试没读到建单正文路径');
+  return readFileSync(path, 'utf8');
+}
 
 /** 假 gh：记下每次调用；读里程碑、开单各按给的回；route 回了的按它（挂子单那几步用）。 */
 function setup(
@@ -497,7 +561,7 @@ describe('开单脚本：--milestone 未排期，不挂里程碑', () => {
 
 describe('开单脚本：--mother 多贴「母单」标签', () => {
   it('同一次 gh issue create 里多带 --label 母单；类别标签还是只有一个', async () => {
-    const { root, calls, run } = setup();
+    const { calls, run } = setup();
     await run(...base, '--mother');
     expect(calls[1]).toEqual([
       'issue',
@@ -505,7 +569,7 @@ describe('开单脚本：--mother 多贴「母单」标签', () => {
       '--title',
       '登录页加验证码',
       '--body-file',
-      join(root, 'body.md'),
+      expect.any(String),
       '--label',
       '需求',
       '--label',
@@ -517,6 +581,22 @@ describe('开单脚本：--mother 多贴「母单」标签', () => {
       '--milestone',
       'P1 核心闭环',
     ]);
+    expect(readManifest(createdBody(calls))).toMatchObject({ kind: 'valid', children: [] });
+    expect(createdBody(calls)).toContain(BODY);
+  });
+
+  it('正文已有完整 manifest 时保留原清单', async () => {
+    const body = withManifest(BODY, [15, 30]);
+    const { calls, run } = setup({ body });
+    await run(...base, '--mother');
+    expect(createdBody(calls)).toBe(body);
+  });
+
+  it('【故意造出的失败】母单已有损坏 manifest：开单前拒绝，gh 一次也不调', async () => {
+    const body = `${BODY}\n<!-- fleet:mother-manifest -->\n[15,]\n<!-- /fleet:mother-manifest -->`;
+    const { calls, run } = setup({ body });
+    await expect(run(...base, '--mother')).rejects.toThrow('母单清单认不出');
+    expect(calls).toEqual([]);
   });
 });
 
@@ -574,20 +654,11 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
   const sub = [...base.slice(0, 3), 'v1', ...base.slice(4), '--parent', '192'];
   const mother = (over: Record<string, unknown> = {}) =>
     ok(JSON.stringify({ number: 192, state: 'open', labels: [{ name: '需求' }, { name: '母单' }], ...over }));
-  /** 母单 #192、新开的 #36（id 9036）；挂子议题、挂里程碑按给的回。 */
-  const routes =
-    (o: { parent?: GhResult; link?: GhResult; edit?: GhResult } = {}) =>
-    (args: string[]): GhResult | undefined => {
-      if (args[0] === 'api' && args[1] === 'repos/{owner}/{repo}/issues/192') return o.parent ?? mother();
-      if (args[0] === 'api' && args[1] === 'repos/{owner}/{repo}/issues/36')
-        return ok(JSON.stringify({ number: 36, id: 9036 }));
-      if (args[0] === 'api' && args[1] === '-X') return o.link ?? ok('{}');
-      if (args[0] === 'issue' && args[1] === 'edit') return o.edit ?? ok(`${URL36}\n`);
-      return undefined;
-    };
+  const routes = (o: Parameters<typeof motherApi>[0] = {}) => motherApi(o).route;
 
   it('【故意造出的失败】建单不带里程碑 → 挂到母单下面 → 再挂里程碑：中间哪一下都不是挂在当前版本上的独立单', async () => {
-    const { root, calls, run } = setup({ milestones: V1, route: routes() });
+    const api = motherApi();
+    const { calls, run } = setup({ milestones: V1, route: api.route });
     await expect(run(...sub)).resolves.toEqual({
       number: 36,
       url: URL36,
@@ -603,7 +674,7 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
         '--title',
         '登录页加验证码',
         '--body-file',
-        join(root, 'body.md'),
+        expect.any(String),
         '--label',
         '需求',
         '--label',
@@ -613,19 +684,31 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
       ],
       ['api', 'repos/{owner}/{repo}/issues/36'],
       ['api', '-X', 'POST', 'repos/{owner}/{repo}/issues/192/sub_issues', '-F', 'sub_issue_id=9036'],
+      ['api', 'repos/{owner}/{repo}/issues/192/sub_issues?per_page=100', '--paginate', '--slurp'],
+      ['api', 'repos/{owner}/{repo}/issues/192'],
+      ['api', '-X', 'PATCH', 'repos/{owner}/{repo}/issues/192', '-f', `body=${api.body()}`],
       ['issue', 'edit', '36', '--milestone', 'v1 Fusion 接活'],
     ]);
+    expect(parentField(createdBody(calls))).toEqual({ kind: 'parent', number: 192 });
+    expect(createdBody(calls)).toContain(BODY);
+    expect(readManifest(api.body())).toMatchObject({ kind: 'valid', children: [36] });
   });
 
   it('写成 #192 也行；未排期的子单挂完就停，不挂里程碑', async () => {
-    const { calls, run } = setup({ route: routes() });
+    const api = motherApi();
+    const { calls, run } = setup({ route: api.route });
     await run(...base.slice(0, 3), '未排期', ...base.slice(4), '--parent', '#192');
     expect(calls.map((c) => c.slice(0, 3))).toEqual([
       ['api', 'repos/{owner}/{repo}/issues/192'],
       ['issue', 'create', '--title'],
       ['api', 'repos/{owner}/{repo}/issues/36'],
       ['api', '-X', 'POST'],
+      ['api', 'repos/{owner}/{repo}/issues/192/sub_issues?per_page=100', '--paginate'],
+      ['api', 'repos/{owner}/{repo}/issues/192'],
+      ['api', '-X', 'PATCH'],
     ]);
+    expect(readManifest(api.body())).toMatchObject({ kind: 'valid', children: [36] });
+    expect(parentField(createdBody(calls))).toEqual({ kind: 'parent', number: 192 });
   });
 
   it('子单带 --local：「本机做」在建单那一次就贴上，挂到母单下面、挂里程碑照旧', async () => {
@@ -701,6 +784,85 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
       `单开了、挂到 #192 下面了（#36 ${URL36}），可里程碑「v1 Fusion 接活」没挂上（退出码 1）：` +
         'could not add to milestone \'v1 Fusion 接活\'。手动补：gh issue edit 36 --milestone "v1 Fusion 接活"。',
     );
+  });
+
+  it('完整清单合并全部分页的原生子单、已关子单和旧清单，保留正文', async () => {
+    const api = motherApi({
+      body: withManifest(BODY, [9, 18]),
+      list: ok(JSON.stringify([[{ number: 25, state: 'closed' }], [{ number: 36, state: 'open' }]])),
+    });
+    const { run } = setup({ milestones: V1, route: api.route });
+    await run(...sub);
+    expect(readManifest(api.body())).toMatchObject({ kind: 'valid', children: [9, 18, 25, 36] });
+    expect(api.body()).toContain(BODY);
+  });
+
+  it('GitHub 明确返回母单 body: null 时按空正文补清单', async () => {
+    const api = motherApi({ readAfter: ok('{"body":null}') });
+    const { run } = setup({ milestones: V1, route: api.route });
+    await run(...sub);
+    expect(readManifest(api.body())).toMatchObject({ kind: 'valid', children: [36] });
+  });
+
+  it('已有 parent 字段也统一改成所选母单，示例 parent 保留', async () => {
+    const body = `parent: #7\nparent: #8\n\n> parent: #90\n\n${BODY}`;
+    const { calls, run } = setup({ body, milestones: V1, route: routes() });
+    await run(...sub);
+    expect(parentField(createdBody(calls))).toEqual({ kind: 'parent', number: 192 });
+    expect(createdBody(calls)).toContain('> parent: #90');
+    expect(createdBody(calls)).not.toContain('parent: #7');
+    expect(createdBody(calls)).not.toContain('parent: #8');
+  });
+
+  it('【故意造出的失败】PATCH 失败时明确单已开且已挂，不重开、不挂里程碑', async () => {
+    const original = withManifest(BODY, [9]);
+    const api = motherApi({ body: original, patch: fail('HTTP 403: Forbidden') });
+    const { calls, run } = setup({ milestones: V1, route: api.route });
+    const error = await run(...sub).catch((e: Error) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(String(error)).toContain(`单开了、挂到 #192 下面了（#36 ${URL36}）`);
+    expect(String(error)).toContain('母单 manifest 清单没同步');
+    expect(String(error)).toContain('HTTP 403: Forbidden');
+    expect(String(error)).toContain('不要重开');
+    expect(String(error)).not.toContain('单没开');
+    expect(calls.filter((c) => c[0] === 'issue' && c[1] === 'create')).toHaveLength(1);
+    expect(calls.some((c) => c[0] === 'issue' && c[1] === 'edit')).toBe(false);
+    expect(api.body()).toBe(original);
+  });
+
+  it.each([
+    ['原生子单读失败', { list: fail('HTTP 502') }],
+    ['原生子单不是 JSON', { list: ok('<html>') }],
+    ['原生子单没有完整分页', { list: ok('[{"number":36}]') }],
+    ['原生子单号认不出', { list: ok('[[{"id":36}]]') }],
+    ['原生子单列表为空，没读到刚挂上的单', { list: ok('[[]]') }],
+    ['原生子单只有已关闭旧单，没有刚挂上的新单', { list: ok('[[{"number":25,"state":"closed"}]]') }],
+    ['母单正文读失败', { readAfter: fail('HTTP 502') }],
+    ['母单正文不是 JSON', { readAfter: ok('<html>') }],
+    ['母单正文缺失', { readAfter: ok('{}') }],
+    ['母单清单已损坏', { body: `${BODY}\n<!-- fleet:mother-manifest -->\n[9]\n` }],
+  ])('【故意造出的失败】%s：读不全就不写、不挂里程碑', async (_name, options) => {
+    const api = motherApi(options);
+    const original = api.body();
+    const { calls, run } = setup({ milestones: V1, route: api.route });
+    await expect(run(...sub)).rejects.toThrow('母单 manifest 清单没同步');
+    expect(calls.some((c) => c.includes('PATCH'))).toBe(false);
+    expect(calls.some((c) => c[0] === 'issue' && c[1] === 'edit')).toBe(false);
+    expect(api.body()).toBe(original);
+  });
+
+  it.each([
+    ['不是 JSON', '<html>'],
+    ['没有正文', '{}'],
+    ['仍是旧清单', JSON.stringify({ body: withManifest(BODY, [9]) })],
+    ['清单缺新单', JSON.stringify({ body: BODY })],
+    ['清单正确但丢失需求正文', JSON.stringify({ body: withManifest('', [9, 36]) })],
+  ])('【故意造出的失败】PATCH 回包%s：不能声称同步成功、不挂里程碑', async (_name, patchBody) => {
+    const api = motherApi({ body: withManifest(BODY, [9]), patchBody });
+    const { calls, run } = setup({ milestones: V1, route: api.route });
+    await expect(run(...sub)).rejects.toThrow('母单 manifest 清单没同步');
+    expect(calls.filter((c) => c[0] === 'issue' && c[1] === 'create')).toHaveLength(1);
+    expect(calls.some((c) => c[0] === 'issue' && c[1] === 'edit')).toBe(false);
   });
 });
 
@@ -900,23 +1062,15 @@ describe('开单脚本：挂版本的母单、单独的单开完排进版本的�
 
   it('子单（--parent）不排：子单在母单页面上排，不读、不改里程碑说明', async () => {
     const api = milestoneApi();
-    const parentRoute = (args: string[]): GhResult | undefined => {
-      if (args[1] === 'repos/{owner}/{repo}/issues/192') {
-        return ok(
-          JSON.stringify({ number: 192, state: 'open', labels: [{ name: '需求' }, { name: '母单' }] }),
-        );
-      }
-      if (args[1] === 'repos/{owner}/{repo}/issues/36') return ok(JSON.stringify({ number: 36, id: 9036 }));
-      if (args[1] === '-X' && args[2] === 'POST') return ok('{}');
-      return undefined;
-    };
-    const { calls, run } = setup({ route: (args) => parentRoute(args) ?? api.route(args) });
+    const parent = motherApi();
+    const { calls, run } = setup({ route: (args) => parent.route(args) ?? api.route(args) });
     const r = await run(...v1, '--parent', '192');
     expect(r).toMatchObject({ parent: 192, milestone: V1_TITLE });
     expect(r.order).toBeUndefined();
     expect(api.description(8)).toBe(V1_DESC);
     expect(calls.some((c) => c[1] === MS8)).toBe(false);
-    expect(patched(calls)).toBe(false);
+    expect(calls.some((c) => c[2] === 'PATCH' && c[3] === MS8)).toBe(false);
+    expect(readManifest(parent.body())).toMatchObject({ kind: 'valid', children: [36] });
   });
 
   it('未排期不排：没有先后，里程碑一次也不读', async () => {

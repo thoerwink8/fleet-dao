@@ -21,6 +21,7 @@ import {
   seedDraw,
   tierScores,
 } from './rank.ts';
+import { shareRedirect } from './share.ts';
 import type {
   AllOpenCheck,
   Block,
@@ -225,11 +226,18 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
   if (first && policy.allocate.mode === 'weighted' && !ready.some((j) => j.item.pinned)) {
     const picked = weightedChoice(input, ctx, ready, judged, scores, stageName);
     if (picked) {
-      const route = picked.item.route;
+      const shared = shareOf(input, picked.item, ready, judged, stageName);
+      const item = shared?.item ?? picked.item;
+      const route = item.route;
       const breakerTrial = route.breaker.admit === 'trial';
       return dispatch(
         route,
-        withNotes(picked.why, quotaNote(route), breakerTrial ? BREAKER_TRIAL : null, floorNote),
+        withNotes(
+          shared?.why ?? picked.why,
+          quotaNote(route),
+          breakerTrial ? BREAKER_TRIAL : null,
+          floorNote,
+        ),
         breakerTrial ? 'breaker' : null,
         null,
         verdicts,
@@ -239,6 +247,19 @@ function chooseIn(input: ChooseRouteInput, ctx: FilterContext): ChooseRouteResul
   if (first) {
     const explore = policy.allocate.mode === 'legacy' ? pickTrial(input, ready, policy) : null;
     const chosen = explore ?? first;
+    // 试探要的就是非首选，不再按同一档改派。
+    const shared = explore ? null : shareOf(input, chosen.item, ready, judged, stageName);
+    if (shared) {
+      const route = shared.item.route;
+      const breakerTrial = route.breaker.admit === 'trial';
+      return dispatch(
+        route,
+        withNotes(shared.why, quotaNote(route), breakerTrial ? BREAKER_TRIAL : null, floorNote),
+        breakerTrial ? 'breaker' : null,
+        null,
+        verdicts,
+      );
+    }
     const route = chosen.item.route;
     const breakerTrial = route.breaker.admit === 'trial';
     const trial: TrialKind | null = explore ? 'explore' : breakerTrial ? 'breaker' : null;
@@ -339,6 +360,25 @@ function weightedChoice(
       passed,
     ),
   };
+}
+
+/** 同一档用的抽签数和加权抽签同一套：有种子用种子，否则用调用方给的 draw，都没有就取权重最大的。 */
+function shareOf(
+  input: ChooseRouteInput,
+  chosen: Ranked,
+  ready: Judged[],
+  judged: Judged[],
+  stageName: string,
+): { item: Ranked; why: string } | null {
+  const seed = input.allocateSeed;
+  if (seed !== undefined) {
+    const u = seedDraw(seed);
+    return shareRedirect(chosen, ready, judged, u, stageName, `抽到 ${u.toFixed(3)}（种子 ${seed}）`);
+  }
+  if (input.draw !== undefined) {
+    return shareRedirect(chosen, ready, judged, input.draw, stageName, `抽到 ${input.draw.toFixed(3)}`);
+  }
+  return shareRedirect(chosen, ready, judged, undefined, stageName, '没有抽签的数，取权重最大的');
 }
 
 /** 每条派出去的路径都经这里。理由不必再补「探针结论过期」那句（#1798 片 4）：派前 15 分钟探一次保证了结论新。 */

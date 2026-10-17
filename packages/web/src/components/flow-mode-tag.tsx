@@ -8,11 +8,25 @@ const TITLE: Record<FlowMode, string> = {
   three: '这张单走三段：对题、动手、验收各一段',
 };
 
-export function FlowModeTag({ mode }: { mode: FlowMode | null | undefined }) {
+export function FlowModeTag({
+  mode,
+  fallback,
+}: {
+  mode: FlowMode | null | undefined;
+  /** 不合格、实际退回三段的原因。有这句时标签写成「退回三步」，悬停看原因。 */
+  fallback?: string | null | undefined;
+}) {
   if (mode !== 'full' && mode !== 'three') return null;
+  const reason = mode === 'three' ? fallback?.trim() : undefined;
+  const sentBack = reason !== undefined && reason !== '';
   return (
-    <span data-flow-mode={mode} title={TITLE[mode]} className="inline-flex shrink-0">
-      <Tag>{LABEL[mode]}</Tag>
+    <span
+      data-flow-mode={mode}
+      {...(sentBack ? { 'data-flow-fallback': reason } : {})}
+      title={sentBack ? reason : TITLE[mode]}
+      className="inline-flex shrink-0"
+    >
+      <Tag>{sentBack ? '退回三步' : LABEL[mode]}</Tag>
     </span>
   );
 }
