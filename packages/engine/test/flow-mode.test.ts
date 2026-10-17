@@ -49,6 +49,12 @@ describe('分组边界（chooseFlowMode）', () => {
       'claude-opus-5-5[1m]',
       'Claude-Opus-5-5',
       ' CLAUDE-SONNET-5-5[1M] ',
+      'sonnet-5.5',
+      'opus-5.5',
+      'Sonnet-5.5',
+      ' OPUS-5.5 ',
+      'sonnet-5.5[1m]',
+      'opus-5.5[1M]',
     ]) {
       expect(isFullFlowModel(ok), ok).toBe(true);
     }
@@ -61,6 +67,11 @@ describe('分组边界（chooseFlowMode）', () => {
       'claude-sonnet-4-7',
       'gpt-5.5',
       'grok-5',
+      'sonnet-5',
+      'opus-5',
+      'sonnet-5.55',
+      'opus-5.55',
+      'haiku-5.5',
     ]) {
       expect(isFullFlowModel(bad), bad).toBe(false);
     }
@@ -71,12 +82,27 @@ describe('分组边界（chooseFlowMode）', () => {
     }
     expect(chooseFlowMode({ ...base, modelId: 'claude-opus-5-5' }).mode).toBe('full');
     expect(chooseFlowMode({ ...base, modelId: 'claude-opus-5-5[1m]' }).mode).toBe('full');
+    expect(chooseFlowMode({ ...base, modelId: 'sonnet-5.5' }).mode).toBe('full');
+    expect(chooseFlowMode({ ...base, modelId: 'opus-5.5' }).mode).toBe('full');
+    expect(
+      chooseFlowMode({
+        ...base,
+        labels: [FULL_FLOW_LABEL],
+        modelId: 'sonnet-5.5',
+        setting: { kind: 'three' },
+      }),
+    ).toEqual({ mode: 'full', source: 'label', reason: null });
   });
 
-  it('分层字符串是「档位/模型」：strong/opus-5.5，[1m] 不分开，大小写不分', () => {
+  it('分层字符串是「档位/模型」：目录 id 和上游名字收成同一层，[1m] 不分开，大小写不分', () => {
     expect(flowStratum('strong', 'claude-opus-5-5')).toBe('strong/opus-5.5');
     expect(flowStratum('strong', 'claude-opus-5-5[1m]')).toBe('strong/opus-5.5');
     expect(flowStratum('standard', 'Claude-Sonnet-5-5')).toBe('standard/sonnet-5.5');
+    expect(flowStratum('strong', 'opus-5.5')).toBe('strong/opus-5.5');
+    expect(flowStratum('standard', 'sonnet-5.5')).toBe('standard/sonnet-5.5');
+    expect(flowStratum('standard', ' Sonnet-5.5[1m] ')).toBe('standard/sonnet-5.5');
+    expect(flowStratum('strong', 'opus-5.5')).toBe(flowStratum('strong', 'claude-opus-5-5[1m]'));
+    expect(flowStratum('standard', 'sonnet-5.5')).toBe(flowStratum('standard', 'claude-sonnet-5-5'));
     expect(flowStratum('light', 'gpt-5.5')).toBe('light/gpt-5.5');
   });
 
@@ -209,6 +235,23 @@ describe('定模式的活动（createDecideFlowMode）', () => {
         reason: null,
       },
     ]);
+  });
+
+  it('选路交来目录 id：sonnet-5.5、opus-5.5 都合格，分层和上游名字同一串', async () => {
+    const sonnet = world({ setting: 'full' });
+    expect(await sonnet.decide({ ...input, modelId: 'sonnet-5.5' }, ctx)).toEqual({
+      mode: 'full',
+      source: 'hash',
+      reason: null,
+    });
+    expect(sonnet.written[0]?.stratum).toBe('standard/sonnet-5.5');
+    const opus = world({ setting: 'full' });
+    expect(await opus.decide({ ...input, stratum: 'strong', modelId: 'opus-5.5' }, ctx)).toEqual({
+      mode: 'full',
+      source: 'hash',
+      reason: null,
+    });
+    expect(opus.written[0]?.stratum).toBe('strong/opus-5.5');
   });
 
   it('没设过开关：按 three，照样写一行（原因写明开关）', async () => {
