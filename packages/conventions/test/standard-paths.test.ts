@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   type ChangedFile,
   matchesStandardPath,
+  parseSecurityBase,
   parseStandardPaths,
   type StandardPath,
   standardFiles,
@@ -19,6 +20,13 @@ const real = (): StandardPath[] => {
   const text = readFileSync(new URL('../standard-paths.json', import.meta.url), 'utf8');
   const parsed = parseStandardPaths(text);
   if (typeof parsed === 'string') throw new Error(`仓里真实的清单读不出：${parsed}`);
+  return parsed;
+};
+
+const realSecurityBase = (): StandardPath[] => {
+  const text = readFileSync(new URL('../standard-paths.json', import.meta.url), 'utf8');
+  const parsed = parseSecurityBase(text);
+  if (typeof parsed === 'string') throw new Error(`仓里真实的安全基清单读不出：${parsed}`);
   return parsed;
 };
 
@@ -62,6 +70,43 @@ describe('读清单', () => {
   });
 });
 
+describe('读安全基清单', () => {
+  it('仓里真实的 standard-paths.json 里 security-base 读得出来，每条都有 path 和 why', () => {
+    const base = realSecurityBase();
+    expect(base.length).toBeGreaterThanOrEqual(10);
+    for (const item of base) {
+      expect(item.path).toBeTruthy();
+      expect(item.why).toBeTruthy();
+      expect(typeof item.path).toBe('string');
+      expect(typeof item.why).toBe('string');
+    }
+  });
+
+  it('security-base 和 paths 是两个独立的清单：同一份文件里两份都读得出来', () => {
+    expect(real().map((r) => r.path)).toContain('packages/conventions/standard-paths.json');
+    expect(realSecurityBase().map((r) => r.path)).toContain('packages/conventions/');
+  });
+
+  it('security-base 为空或没有时返回空数组，不是错', () => {
+    expect(parseSecurityBase('{"paths":[{"path":"a","why":"w"}]}')).toEqual([]);
+    expect(parseSecurityBase('{"paths":[],"security-base":[]}')).toEqual([]);
+  });
+
+  it('security-base 认不出的也回一句为什么（不是空数组）', () => {
+    const bad: [string, RegExp][] = [
+      ['{', /不是合法的 JSON/],
+      ['{"security-base":{}}', /没有 security-base/],
+      ['{"security-base":[{"path":"a"}]}', /认不出/],
+      ['{"security-base":[{"path":"a","why":"  "}]}', /没写为什么/],
+    ];
+    for (const [text, why] of bad) {
+      const got = parseSecurityBase(text);
+      expect(typeof got, text).toBe('string');
+      expect(got as string, text).toMatch(why);
+    }
+  });
+});
+
 describe('匹配', () => {
   const m = (path: string, name: string) => matchesStandardPath(name, { path });
 
@@ -90,6 +135,14 @@ describe('匹配', () => {
     // 正则里的特殊字符按字面算
     expect(m('a.b/*.md', 'a.b/x.md')).toBe(true);
     expect(m('a.b/*.md', 'aXb/x.md')).toBe(false);
+  });
+
+  it('安全基清单里的条目也按同一套通配规矩匹配', () => {
+    const base = realSecurityBase();
+    const m = (name: string) => base.some((rule) => matchesStandardPath(name, rule));
+    expect(m('packages/conventions/src/merge-gate.ts')).toBe(true);
+    expect(m('.github/workflows/ci.yml')).toBe(true);
+    expect(m('packages/web/src/routes/settings.tsx')).toBe(false);
   });
 });
 
@@ -140,5 +193,20 @@ describe('改到的文件里落进清单的', () => {
   it('什么都没碰：空数组（调用方分得清「没碰到」和「清单读不出」，后者是 parseStandardPaths 返回字符串）', () => {
     expect(standardFiles([file('README.md')], real())).toEqual([]);
     expect(standardFiles([], real())).toEqual([]);
+  });
+
+  it('安全基清单：packages/conventions/、.github/workflows/ 命中，普通页面代码不命中', () => {
+    const hits = standardFiles(
+      [
+        file('packages/conventions/src/merge-gate.ts'),
+        file('.github/workflows/ci.yml'),
+        file('packages/web/src/routes/settings.tsx'),
+      ],
+      realSecurityBase(),
+    );
+    expect(hits.map((h) => h.file)).toEqual([
+      'packages/conventions/src/merge-gate.ts',
+      '.github/workflows/ci.yml',
+    ]);
   });
 });

@@ -52,9 +52,27 @@ export function parseStandardPaths(text: string): StandardPath[] | string {
   const paths = isObject(raw) ? raw.paths : undefined;
   if (!Array.isArray(paths)) return '没有 paths 列表';
   if (paths.length === 0) return 'paths 是空的（一条都没有等于什么都不拦）';
+  return parsePathItems(paths, 'paths');
+}
+
+/** 读「安全基」清单：顶层 "security-base" 字段，格式和 paths 一样（要有 path、why，可带 section）。空数组允许（还没有安全基）。 */
+export function parseSecurityBase(text: string): StandardPath[] | string {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    return `不是合法的 JSON（${e instanceof Error ? e.message : String(e)}）`;
+  }
+  const items = isObject(raw) ? raw['security-base'] : undefined;
+  if (items === undefined) return [];
+  if (!Array.isArray(items)) return '没有 security-base 列表';
+  return parsePathItems(items, 'security-base');
+}
+
+function parsePathItems(items: readonly unknown[], field: string): StandardPath[] | string {
   const out: StandardPath[] = [];
-  for (const [i, item] of paths.entries()) {
-    const at = `paths 第 ${i + 1} 条`;
+  for (const [i, item] of items.entries()) {
+    const at = `${field} 第 ${i + 1} 条`;
     if (!isObject(item) || typeof item.path !== 'string' || typeof item.why !== 'string') {
       return `${at} 认不出（要有 path、why 两个字符串）`;
     }

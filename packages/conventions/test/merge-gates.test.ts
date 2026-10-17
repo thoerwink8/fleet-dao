@@ -1,13 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
   checkColdVerify,
+  checkSecurityBase,
   coldVerifyFrom,
   coldVerifyNeed,
   DESCRIPTION_MAX,
+  SECURITY_BASE_CONTEXT,
+  securityBaseFrom,
   statusDescription,
 } from '../src/merge-gates.ts';
 
 const HEAD = 'a'.repeat(40);
+const NEXT = 'b'.repeat(40);
 
 describe('合前验收（cold-verify）状态', () => {
   const status = (state: string, description = '') => ({ context: 'cold-verify', state, description });
@@ -41,6 +45,48 @@ describe('合前验收（cold-verify）状态', () => {
       /^验收没过：.* 是 failure：有一条没做/,
     );
     expect(checkColdVerify(HEAD, { state: 'error', description: '' }, need)[0]).toMatch(/^验收没过/);
+  });
+});
+
+describe('安全基前置要你拍（security-base-approved，决定 0106）', () => {
+  const approve = (state: string, description = '') => ({
+    context: SECURITY_BASE_CONTEXT,
+    state,
+    description,
+  });
+
+  it('从当前头的状态里挑出这一条；没有就是 null', () => {
+    expect(
+      securityBaseFrom([{ context: 'cold-verify', state: 'success' }, approve('success', '拍了')]),
+    ).toEqual({ state: 'success', description: '拍了' });
+    expect(securityBaseFrom([{ context: 'cold-verify', state: 'success' }])).toBeNull();
+    expect(securityBaseFrom([{ context: 'second-opinion', state: 'success' }])).toBeNull();
+  });
+
+  it('故意认不出的：没有 context、state 不认得，说为什么', () => {
+    expect(securityBaseFrom([{ state: 'success' }])).toBe('提交状态里有一条认不出（没有 context）');
+    expect(securityBaseFrom([approve('ok')])).toBe('security-base-approved 的 state「ok」认不出');
+  });
+
+  it('判法只有三条：没拍（null）、拍成 success、拍成别的（pending / failure / error）', () => {
+    expect(checkSecurityBase(HEAD, null)[0]).toMatch(/^前置要你拍：/);
+    expect(checkSecurityBase(HEAD, null)[0]).toContain(SECURITY_BASE_CONTEXT);
+    expect(checkSecurityBase(HEAD, { state: 'success', description: '' })).toEqual([]);
+    expect(checkSecurityBase(HEAD, { state: 'pending', description: '' })[0]).toMatch(
+      /^前置要你拍：.*是 pending/,
+    );
+    expect(checkSecurityBase(HEAD, { state: 'failure', description: '' })[0]).toMatch(
+      /^前置要你拍：.*是 failure/,
+    );
+    expect(checkSecurityBase(HEAD, { state: 'error', description: '' })[0]).toMatch(
+      /^前置要你拍：.*是 error/,
+    );
+  });
+
+  it('SHA 换了旧 SHA 上拍过的不算：闸读的是当前头，看不到旧头上的状态，重新要拍', () => {
+    // 旧 HEAD 上有 success（解决了）；对当前 NEXT 上还是 null，闸看不到旧那条就判没拍
+    expect(checkSecurityBase(NEXT, null)[0]).toMatch(/推了新提交的/);
+    expect(checkSecurityBase(HEAD, { state: 'success', description: '' })).toEqual([]);
   });
 });
 
