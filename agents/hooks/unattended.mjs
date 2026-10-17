@@ -1,5 +1,5 @@
 // 无人值守：活由 Agent 子代理干、不脱离会话，这个会话等子代理的完成通知、收创始人的引导、汇报。
-// 两处用它：命令行（AI 按创始人的话开关）、Stop 钩子（stop.mjs：开着、又什么都没在跑时把「结束这一轮」挡回去）。
+// 命令行记录本会话开关；同步 Stop 把未完成工作交给下一轮；成功 PostToolUse 登记新进展。
 // 开会话钩子也读它，上下文被总结、会话重启之后还知道开着。
 //
 // 用法（创始人说「进入无人值守」「过夜」「我在睡觉」时跑 on，说「停」「退出无人值守」时跑 off）：
@@ -14,15 +14,13 @@
 //   CLAUDE_CODE_SESSION_ID、CODEX_THREAD_ID、CODEX_SESSION_ID 依次优先；钩子以这次事件的 session_id 为准，缺失才读环境。
 //   非法来源不借别的会话号兜底。别的会话、别的机器、工人和反方（机器派的会话，on 直接拒）都不受影响。
 //   起子代理、监视、后台命令不自动开。会话号拿不到，on 明确失败。
-// - 放行的几种：off；done / needs-you；开着满 12 小时；还有东西在跑（Stop 输入的 background_tasks 有子代理、后台命令、
-//   监视，或 session_crons 有定时唤醒：它们收口时会把会话叫回来，这一轮结束不丢活，挡回去只是多一轮重读上下文）；
-//   什么都没在跑、连着挡了 MAX_STREAK 次（放行一次、记一笔，状态仍开着；有通知或创始人说话再接上）；
-//   总次数上限；状态读不了 / 写不了（放行是为了不把人困住，但要说清楚是故障，不是正常收尾）。
-//   这几个数不要凭感觉改大——改大等于允许多烧额度。
-// - 输入里没有 background_tasks（别家、旧版 Claude Code）：判不出有没有在跑，按「什么都没在跑」算，靠 MAX_STREAK 兜住。
-// - 中间调没调工具不算数：以前按「挡回去之后调没调工具」判空转，模型 sleep 50 秒、查一次 PR 就算在干活，一个会话被挡了 247 次。
+// - 放行：off、done / needs-you、12 小时到期；无进展/总次数到上限明确 paused 故障，不再仍标 on 却结束。
+// - background_tasks/session_crons 只说明登记存在，不证明完成通知会送达；开着时先同步续轮，显式等待并消费结果。
+// - 只有成功 PostToolUse 的新写入、验证、提交、收工才重置连续无进展计数；重复动作、sleep 和查询状态不算。
+// - 数值上限不扩大；故障暂停保留未完成状态，避免无限循环烧额度。
 // - 钩子里任何一步出错一律放行（只提示），绝不抛、不拦：这里是兜底，不是新的故障点。
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -30,8 +28,8 @@ import { fileURLToPath } from 'node:url';
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 /**
  * 一个会话的无人值守状态（~/.fleet-dao/unattended/<会话号>.json）：readState 认过 state、expiresAt、totalBlocks 才当它是状态。
- * streak：什么都没在跑、连着挡了几次；streakReleases：连着挡到上限放行过几次。idle、toolSinceBlock 是旧版留下的字段，不再读。
- * @typedef {{ state: 'on' | 'paused' | 'done', expiresAt: string, totalBlocks: number, streak?: number, streakReleases?: number, lastStreakReleaseAt?: string, idle?: number, toolSinceBlock?: boolean, auto?: boolean, since?: string, note?: string, lastBlockAt?: string }} State
+ * streak：连续无实质进展的次数；streakReleases：到上限暂停过几次（兼容旧字段名）。idle、toolSinceBlock 不再读。
+ * @typedef {{ state: 'on' | 'paused' | 'done', expiresAt: string, totalBlocks: number, streak?: number, streakReleases?: number, lastStreakReleaseAt?: string, idle?: number, toolSinceBlock?: boolean, auto?: boolean, since?: string, note?: string, lastBlockAt?: string, consumedProgress?: number, deliveredResults?: string[] }} State
  */
 /**
  * Stop 输入里还有什么在跑：tasks 是 background_tasks 的条数，crons 是 session_crons 的条数；输入里没有这一项是 null（判不出）。
@@ -53,10 +51,84 @@ const messageOf = (e) => (typeof e === 'object' && e !== null && 'message' in e 
 export const DEFAULT_HOURS = 12;
 /** 开着最长这么久，到点自动放行。 */
 export const MAX_HOURS = 12;
-/** 什么都没在跑、连着挡了这么多次就放行一次（记一笔）：挡回去它也没起新东西，别空转。 */
+/** 连续接续这么多次却没有实质进展，就明确故障暂停。 */
 export const MAX_STREAK = 3;
 /** 一次无人值守最多挡这么多次，防别的原因造成的无限循环。 */
 export const MAX_TOTAL_BLOCKS = 200;
+
+/**
+ * 只记已成功完成的写入、验证、提交、派工/收工；重复命令、sleep、状态轮询不续命。
+ * PostToolUse 才调用，PreToolUse 不能把「打算做」当进展。
+ * @param {{ dir: string, sessionId: unknown, input: unknown }} opts
+ */
+export function recordProgress({ dir, sessionId, input }) {
+  const r = readState(dir, sessionId);
+  if (!r.ok || !r.state || r.state.state !== 'on') return;
+  const get = (/** @type {string} */ key) =>
+    typeof input === 'object' && input !== null ? Reflect.get(input, key) : undefined;
+  const name = get('tool_name');
+  const args = get('tool_input');
+  const response = get('tool_response');
+  if (args && typeof args === 'object' && Reflect.get(args, 'run_in_background') === true) return;
+  if (
+    response &&
+    typeof response === 'object' &&
+    (Reflect.get(response, 'is_error') === true ||
+      Reflect.get(response, 'success') === false ||
+      Reflect.get(response, 'interrupted') === true ||
+      typeof Reflect.get(response, 'session_id') === 'number' ||
+      Reflect.get(response, 'shell_id') !== undefined ||
+      ['running', 'in_progress'].includes(Reflect.get(response, 'status')) ||
+      (typeof Reflect.get(response, 'exit_code') === 'number' && Reflect.get(response, 'exit_code') !== 0))
+  )
+    return;
+  const command =
+    typeof args === 'object' && args !== null
+      ? (Reflect.get(args, 'command') ?? Reflect.get(args, 'cmd'))
+      : '';
+  const writing = typeof name === 'string' && /^(Write|Edit|MultiEdit|apply_patch)$/.test(name);
+  const validating =
+    typeof command === 'string' &&
+    !/\b(sleep|Start-Sleep)\b/i.test(command) &&
+    /\b(pnpm\s+([^\r\n]*\s)?(check|test|typecheck|hygiene|vitest|biome|build)|git\s+(commit|push)|gh\s+(pr\s+create|issue\s+create))\b/.test(
+      command,
+    );
+  const finished =
+    typeof name === 'string' &&
+    /^(Agent|Task|TaskOutput|SubagentHandback)$/.test(name) &&
+    response !== undefined &&
+    !/"(status|state)"\s*:\s*"(running|in_progress)"/.test(JSON.stringify(response));
+  const waited =
+    typeof name === 'string' &&
+    /^(wait|wait_agent|write_stdin)$/.test(name) &&
+    response &&
+    typeof response === 'object' &&
+    Reflect.get(response, 'timed_out') !== true &&
+    (Reflect.get(response, 'exit_code') === 0 || /"completed"\s*:/.test(JSON.stringify(response)));
+  if (!writing && !validating && !finished && !waited) return;
+  const hash = createHash('sha256')
+    .update(JSON.stringify([name, args]))
+    .digest('hex');
+  // 并行完成的工具各写独立凭据，不读改写同一状态，避免覆盖掉另一个工具的进展。
+  const receipts = join(dir, `${cleanId(sessionId)}.progress`);
+  mkdirSync(receipts, { recursive: true });
+  try {
+    writeFileSync(join(receipts, hash), '', { flag: 'wx' });
+  } catch (err) {
+    if (errCode(err) !== 'EEXIST') throw err;
+  }
+}
+
+/** @param {string} dir @param {unknown} sessionId */
+function countProgress(dir, sessionId) {
+  try {
+    return readdirSync(join(dir, `${cleanId(sessionId)}.progress`)).filter((n) => /^[a-f0-9]{64}$/.test(n))
+      .length;
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') return 0;
+    throw err;
+  }
+}
 
 const SCRIPT = '~/.fleet-dao/hooks/unattended.mjs';
 
@@ -140,7 +212,13 @@ export function readState(dir, id) {
       Number.isFinite(Date.parse(String(s.expiresAt))) &&
       'totalBlocks' in s &&
       Number.isInteger(s.totalBlocks);
-    if (!good) return { ok: false, why: '状态文件的内容认不出' };
+    if (
+      !good ||
+      ('deliveredResults' in s &&
+        (!Array.isArray(s.deliveredResults) || !s.deliveredResults.every((v) => typeof v === 'string'))) ||
+      ('consumedProgress' in s && (!Number.isInteger(s.consumedProgress) || Number(s.consumedProgress) < 0))
+    )
+      return { ok: false, why: '状态文件的内容认不出' };
     // 上面逐项核过 state、expiresAt、totalBlocks 才走到这里
     return { ok: true, state: /** @type {State} */ (s) };
   } catch {
@@ -155,7 +233,10 @@ export function readState(dir, id) {
  */
 function writeState(dir, id, state) {
   mkdirSync(dir, { recursive: true });
-  writeFileSync(fileFor(dir, id), `${JSON.stringify(state, null, 2)}\n`);
+  const target = fileFor(dir, id);
+  const temp = `${target}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(state, null, 2)}\n`);
+  renameSync(temp, target);
 }
 
 /**
@@ -164,6 +245,21 @@ function writeState(dir, id, state) {
  */
 function removeState(dir, id) {
   rmSync(fileFor(dir, id), { force: true });
+  rmSync(join(dir, `${cleanId(id)}.progress`), { recursive: true, force: true });
+}
+
+/** 显式 off 是会话级停止指令，优先于尚未开 on 时也会运行的队列对账。 */
+/** @param {string} dir @param {unknown} id */
+export function explicitlyOff(dir, id) {
+  if (!cleanId(id)) return false;
+  try {
+    const value = readFileSync(join(dir, `${cleanId(id)}.off`), 'utf8');
+    if (value !== 'off\n') throw new Error('会话停止记录内容认不出');
+    return true;
+  } catch (err) {
+    if (errCode(err) === 'ENOENT') return false;
+    throw err;
+  }
 }
 
 /** @param {string} iso */
@@ -203,14 +299,14 @@ export function sessionLines({ dir, sessionId, now = Date.now() }) {
   if (s === null || s.auto === true || now > Date.parse(s.expiresAt)) return [];
   if (s.state === 'on')
     return [
-      `无人值守开着（到 ${fmt(s.expiresAt)}）：有子代理、后台命令、监视在跑时这一轮可以结束，等它们的完成通知（不脱离会话）；什么都没在跑、队列还有活就派 Agent 子代理，不要空着收尾。有进展就 pnpm progress note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
+      `无人值守开着（到 ${fmt(s.expiresAt)}）：未完成工作必须接到下一轮；有后台任务先用本 CLI 的阻塞等待工具收结果，不能只凭任务存在就结束。有实质进展才重置防空转计数；连续无进展会明确故障暂停。有进展就 pnpm progress note 记一句；全做完 node ${SCRIPT} done "做完了什么"，要创始人拍板 needs-you，他说停 off。`,
     ];
   if (s.state === 'paused' && s.note) return [`无人值守暂停着（${s.note}）。这一轮可以结束。`];
   return [];
 }
 
 /**
- * 挡回去时给模型看的话：现在什么都没在跑，具体要它干什么（派子代理、起监视、有进展记进度、别空转），以及怎么合法地放行。
+ * 续轮提示：继续尚未完成的工作、显式等待并消费结果，以及正常结束与故障暂停的边界。
  * @param {State} state
  * @param {number} now
  * @param {number} [streak] 这是连着第几次挡
@@ -218,9 +314,9 @@ export function sessionLines({ dir, sessionId, now = Date.now() }) {
 export function blockReason(state, now, streak = 1) {
   const left = Math.max(0, Math.round((Date.parse(state.expiresAt) - now) / 60_000));
   const watching =
-    '现在没有在跑的子代理、后台命令、监视（有的话这一轮可以直接结束，它们的完成通知会叫醒你，不用轮询、不用 sleep 等）。队列里还有活就用 Agent 子代理派（三个角色，决定 0087：写代码的 subagent_type: "general-purpose"，能脚本核对的只读活先给 subagent_type: "Explore"，方案和疑难给 subagent_type: "Plan"，不传 model），派出去就可以结束这一轮；要盯法国就起 Monitor 跑 node ~/.claude/skills/commander/scripts/patrol.mjs（只在报 ALERT 且 DELTA 不为 0 时出一行），报了再叫一个短命的 Explore 子代理摘证据；子代理都收口、队列空了才跑 done 收尾。';
+    '接着做尚未完成的工作。后台任务存在不等于已经送达完成通知；用当前 CLI 的阻塞等待工具收结果（Claude TaskOutput、Codex wait_agent/等待后台命令），不要 sleep 或循环查状态。结果回来后实际消费、验收、再接下一件。需要派工就用本 CLI 支持的子代理；不支持等待或唤醒时明确报接续故障，不能声称持续运行。子代理都收口、队列空了才跑 done 收尾。';
   return (
-    `无人值守开着（还剩约 ${left} 分钟，什么都没在跑时连着第 ${streak} 次挡，到 ${MAX_STREAK} 次放行）：不要空着结束这一轮。${watching}` +
+    `无人值守开着（还剩约 ${left} 分钟，连续无实质进展第 ${streak} 次，到 ${MAX_STREAK} 次后故障暂停）：不要空着结束这一轮。${watching}` +
     `每次子代理有进展（PR 开了、做完、卡住）就 pnpm progress note 记一句、给创始人一行汇报，再接着盯；没有新结果就不写话、别空转、别重复上一句。` +
     `全做完（工人都收口、队列空了）：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的（掏新钱、删了找不回又没备份的）：` +
     `node ${SCRIPT} needs-you "要他拍什么"，再把问题放在最后一条；创始人说停：node ${SCRIPT} off。`
@@ -244,12 +340,18 @@ export function pendingOf(input) {
 
 /**
  * Stop 钩子要不要挡。返回 { block: true, reason } 或 { block: false, notice? }（notice 给 systemMessage，只在要说话时有）。
- * pending：Stop 输入里还有什么在跑（pendingOf）；有就放行，它们收口会把会话叫回来。不给按判不出算。
+ * pending 只用于提示，不凭任务条数放行；completions 是可消费的本会话工人终态。
  * 不抛：任何一步出错都放行并写明。
- * @param {{ dir: string, sessionId: unknown, now?: number, pending?: Pending }} opts
+ * @param {{ dir: string, sessionId: unknown, now?: number, pending?: Pending, completions?: { key: string, text: string }[] }} opts
  * @returns {{ block: true, reason: string } | { block: false, notice?: string }}
  */
-export function decideStop({ dir, sessionId, now = Date.now(), pending = { tasks: null, crons: null } }) {
+export function decideStop({
+  dir,
+  sessionId,
+  now = Date.now(),
+  pending = { tasks: null, crons: null },
+  completions = [],
+}) {
   try {
     if (!cleanId(sessionId)) return { block: false };
     const r = readState(dir, sessionId);
@@ -269,12 +371,10 @@ export function decideStop({ dir, sessionId, now = Date.now(), pending = { tasks
         notice: `无人值守过期了（到 ${fmt(s.expiresAt)}，最长 ${MAX_HOURS} 小时），已关。`,
       };
     }
-    const streak = Number.isInteger(s.streak) ? Number(s.streak) : 0;
-    // 还有东西在跑：它们收口时的完成通知会把会话叫回来，这一轮结束不丢活；挡回去只会让它 sleep、轮询，多一轮重读上下文
-    if ((pending.tasks ?? 0) > 0 || (pending.crons ?? 0) > 0) {
-      if (streak !== 0) writeState(dir, sessionId, { ...s, streak: 0 });
-      return { block: false };
-    }
+    const fresh = completions.filter((c) => !(s.deliveredResults ?? []).includes(c.key));
+    const progressCount = countProgress(dir, sessionId);
+    const advanced = progressCount > (s.consumedProgress ?? 0) || fresh.length > 0;
+    const streak = advanced ? 0 : Number.isInteger(s.streak) ? Number(s.streak) : 0;
     if (s.totalBlocks >= MAX_TOTAL_BLOCKS) {
       const why = `已经挡了 ${MAX_TOTAL_BLOCKS} 次，到上限`;
       writeState(dir, sessionId, { ...s, state: 'paused', note: why });
@@ -283,18 +383,19 @@ export function decideStop({ dir, sessionId, now = Date.now(), pending = { tasks
         notice: `无人值守自动暂停：${why}。有话要创始人定就放最后一条；要接着干请重新跑 node ${SCRIPT} on。`,
       };
     }
-    // 什么都没在跑，又已经连着挡了 MAX_STREAK 次：挡回去它也没起任何东西，放行一次、记一笔，状态仍开着
+    // 三次接续都无实质进展：明确停成故障，不能仍标 on 却悄悄收尾。
     if (streak >= MAX_STREAK) {
       const released = (Number.isInteger(s.streakReleases) ? Number(s.streakReleases) : 0) + 1;
       writeState(dir, sessionId, {
         ...s,
-        streak: 0,
+        state: 'paused',
+        note: `接续故障：连续 ${MAX_STREAK} 次没有实质进展`,
         streakReleases: released,
         lastStreakReleaseAt: new Date(now).toISOString(),
       });
       return {
         block: false,
-        notice: `无人值守：什么都没在跑、连着挡了 ${MAX_STREAK} 次也没起子代理、后台命令或监视，这一轮放行（第 ${released} 次，记在状态文件）；无人值守仍开着，有通知或创始人说话再接上。`,
+        notice: `无人值守接续失败：连着挡了 ${MAX_STREAK} 次没有实质进展，已暂停并保留未完成状态（第 ${released} 次）。这不是做完；检查接续链路后重新 on，不能用 sleep 或状态轮询续命。`,
       };
     }
     writeState(dir, sessionId, {
@@ -302,8 +403,18 @@ export function decideStop({ dir, sessionId, now = Date.now(), pending = { tasks
       streak: streak + 1,
       totalBlocks: s.totalBlocks + 1,
       lastBlockAt: new Date(now).toISOString(),
+      consumedProgress: progressCount,
+      deliveredResults: [...(s.deliveredResults ?? []), ...fresh.map((c) => c.key)],
     });
-    return { block: true, reason: blockReason(s, now, streak + 1) };
+    const waiting = (pending.tasks ?? 0) + (pending.crons ?? 0);
+    return {
+      block: true,
+      reason: [
+        blockReason(s, now, streak + 1),
+        ...(waiting > 0 ? [`后台任务/唤醒登记共 ${waiting} 项，先收结果，不能仅凭条数放行。`] : []),
+        ...fresh.map((c) => `后台完成结果（必须消费）：${c.text}`),
+      ].join('\n'),
+    };
   } catch (err) {
     return {
       block: false,
@@ -337,6 +448,10 @@ export function main(argv, io) {
   const id = session.id;
   try {
     if (cmd === 'status') {
+      if (explicitlyOff(dir, id)) {
+        io.out('无人值守：off（本会话已明确停止，队列不会再拉起；重新 on 才恢复）。');
+        return 0;
+      }
       const r = readState(dir, id);
       if (!r.ok) {
         io.err(`没查成：无人值守状态${r.why}`);
@@ -346,13 +461,16 @@ export function main(argv, io) {
       else {
         const s = r.state;
         io.out(
-          `无人值守：${s.state}，到 ${fmt(s.expiresAt)}，已挡 ${s.totalBlocks} 次（眼下连着挡了 ${s.streak ?? 0} 次，连着挡到上限放行过 ${s.streakReleases ?? 0} 次）${s.note ? `，${s.note}` : ''}`,
+          `无人值守：${s.state}，到 ${fmt(s.expiresAt)}，已挡 ${s.totalBlocks} 次（连续无进展 ${s.streak ?? 0} 次，接续故障暂停过 ${s.streakReleases ?? 0} 次）${s.note ? `，${s.note}` : ''}`,
         );
       }
       return 0;
     }
     if (cmd === 'off') {
       removeState(dir, id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${id}.off`), 'off\n');
+      rmSync(join(dir, `${id}.queue.json`), { force: true });
       io.out('无人值守已关。');
       return 0;
     }
@@ -370,6 +488,9 @@ export function main(argv, io) {
         return 2;
       }
       const expiresAt = new Date(now + hours * 3_600_000).toISOString();
+      const previous = readState(dir, id);
+      rmSync(join(dir, `${id}.off`), { force: true });
+      rmSync(join(dir, `${id}.progress`), { recursive: true, force: true });
       writeState(dir, id, {
         state: 'on',
         since: new Date(now).toISOString(),
@@ -377,9 +498,10 @@ export function main(argv, io) {
         totalBlocks: 0,
         streak: 0,
         note: '',
+        deliveredResults: previous.ok ? (previous.state?.deliveredResults ?? []) : [],
       });
       io.out(
-        `无人值守已开，到 ${fmt(expiresAt)}。活交给 Agent 子代理（写代码的 subagent_type: "general-purpose"，不设固定个数：派新工人前看空闲内存和 CPU（空闲内存 < 4G 或 1 分钟负载 > 核数×0.8 就先等一个收口），同时在跑的工人不改同一批文件（撞了就排队或交给同一个工人连着做），监控不占名额，见决定 0094；三个角色见决定 0087），不脱离会话；有子代理、后台命令、监视在跑时这一轮可以结束，完成通知会叫醒你；什么都没在跑时想结束会被挡回来（连着 ${MAX_STREAK} 次放行）；做完 done、要他拍板 needs-you、他说停就 off。`,
+        `无人值守状态已记 on，到 ${fmt(expiresAt)}；这只记录意图，不代表 Stop 已登记、信任或执行验证。Claude/Codex 未完成工作经同步 Stop 进入下一轮，后台任务先显式等待并消费结果，不能凭条数结束。成功的新工作重置计数，连续 ${MAX_STREAK} 次无实质进展明确故障暂停。其他 CLI 尚未接通时不得声称接续成功。做完 done、要他拍板 needs-you、他说停 off。`,
       );
       return 0;
     }

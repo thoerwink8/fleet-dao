@@ -247,6 +247,7 @@ describe('读 GitHub：认是哪个仓', () => {
     expect(origin('https://github.com/o/r.git\n')).toBe('o/r');
     expect(origin('git@github.com:o/r.git')).toBe('o/r');
     expect(origin('https://github.com/o/r')).toBe('o/r');
+    expect(origin('https://relay.mirasim.ai/v2/gateway/git/github.com/o/r.git')).toBe('o/r');
     expect(origin('https://gitlab.com/o/r.git')).toBeUndefined();
     expect(origin(undefined)).toBeUndefined();
   });

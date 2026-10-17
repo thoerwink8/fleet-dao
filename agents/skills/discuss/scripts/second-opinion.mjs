@@ -246,7 +246,13 @@ function selftest() {
    * @param {boolean} viaRelay
    * @param {string} [upstreamHost]
    */
-  const row = (ts, status, viaRelay, upstreamHost = 'relay') => ({ ts, status, viaRelay, upstreamHost });
+  const row = (ts, status, viaRelay, upstreamHost = 'relay') => ({
+    ts,
+    status,
+    viaRelay,
+    upstreamHost,
+    path: '/v1/responses',
+  });
   eq(judgeLedger([row('2026-09-25T10:00:05Z', 200, true)], t0, true).ok, true, '中继成功');
   eq(judgeLedger([row('2026-09-25T09:00:00Z', 200, true)], t0, true).ok, false, '只有起针前的行');
   eq(judgeLedger([row('2026-09-25T10:00:05Z', 200, false, 'api.example')], t0, true).ok, false, '没走中继');

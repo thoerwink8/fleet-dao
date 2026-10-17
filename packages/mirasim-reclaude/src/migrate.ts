@@ -34,7 +34,13 @@ export interface MigrationOptions {
   pollMs?: number;
   maxWaitMs?: number;
   replyMs?: number;
+  onWaiting?: (observation: WaitingObservation) => void;
   prepare?: (input: PreparedBinary) => Promise<string>;
+}
+export interface WaitingObservation {
+  state: 'busy' | 'unknown';
+  detail: string;
+  checkedAt: string;
 }
 export interface MigrationResult {
   state: 'migrated' | 'current' | 'restored' | 'waiting' | 'skipped' | 'drift';
@@ -243,10 +249,14 @@ async function liveLaunchOf(wire: MirasimWire, replyMs = 5_000): Promise<Launch>
   throw new Error('Mirasim 启动器列表回读超时');
 }
 
-async function connectInstances(home: string, replyMs: number): Promise<MirasimWire[]> {
+async function connectInstances(
+  home: string,
+  replyMs: number,
+): Promise<{ wires: MirasimWire[]; complete: boolean }> {
   const dir = join(home, '.mirasim', 'run');
-  if (!existsSync(dir)) return [];
+  if (!existsSync(dir)) return { wires: [], complete: false };
   const wires: MirasimWire[] = [];
+  let complete = true;
   for (const name of readdirSync(dir).sort()) {
     const match = /^local-(\d+)\.token$/.exec(name);
     if (!match) continue;
@@ -274,6 +284,7 @@ async function connectInstances(home: string, replyMs: number): Promise<MirasimW
       await configOf(wire, replyMs);
       wires.push(wire);
     } catch (error) {
+      complete = false;
       opened?.close();
       if (timedOut) void attempt.then((w) => w.close()).catch(() => {});
       if (opened) {
@@ -282,22 +293,129 @@ async function connectInstances(home: string, replyMs: number): Promise<MirasimW
       }
     }
   }
-  return wires;
+  return { wires, complete };
 }
 
 type Idleness = 'idle' | 'busy' | 'unknown';
 
-async function idle(home: string, wires: MirasimWire[], o: MigrationOptions): Promise<Idleness> {
+/** 只补核列表也不存在的历史目录；现存会话的 snapshot 不推测成空闲。 */
+async function orphanIdleness(
+  wire: MirasimWire,
+  ids: string[],
+  replyMs: number,
+): Promise<{ state: Idleness; detail: string }> {
+  const unknown = (detail: string) => ({ state: 'unknown' as const, detail });
+  const reqId = randomUUID();
+  wire.send({ type: 'listSessions', reqId, scope: 'global' });
+  let deadline = Date.now() + replyMs;
+  let listed = false;
+  while (Date.now() < deadline) {
+    const frame = await wire.next(Math.max(1, deadline - Date.now()));
+    if (typeof frame === 'string' || frame.type === 'error')
+      return unknown('原生全局列表超时、断开或请求失败');
+    if (frame.type !== 'sessions' || frame.reqId !== reqId) continue;
+    // reqId 的 global 请求不带 limit/query/source/workdir：服务器走未截断的全局列表。
+    if (frame.hasMore !== false || !Array.isArray(frame.sessions))
+      return unknown('原生全局列表不完整或格式错误');
+    const keys = new Set<string>();
+    for (const value of frame.sessions) {
+      const row = object(value);
+      if (typeof row?.agent !== 'string' || typeof row.sessionKey !== 'string')
+        return unknown('原生会话条目缺少来源或标识');
+      if (keys.has(row.sessionKey)) return unknown('原生全局列表有重复标识');
+      keys.add(row.sessionKey);
+      if (row.agent !== 'claude') continue;
+      if (!row.sessionKey.startsWith('claude:')) return unknown('原生 Claude 会话标识与来源不一致');
+      if (
+        row.runState === 'running' ||
+        row.runState === 'queued' ||
+        row.phase === 'streaming' ||
+        row.phase === 'queued' ||
+        row.awaiting === true
+      )
+        return { state: 'busy', detail: '原生全局列表仍有在途 Claude 回合' };
+      if (
+        !['completed', 'incomplete', 'failed', 'stopped', 'interrupted', 'idle'].includes(
+          String(row.runState),
+        )
+      )
+        return unknown('原生 Claude 会话状态缺失或不认识');
+      // 附带的后台活动字段若存在，必须明确为空，未知形状也不当空闲。
+      if (
+        row.backgroundJobs !== undefined &&
+        (!Array.isArray(row.backgroundJobs) || row.backgroundJobs.length)
+      )
+        return unknown('原生 Claude 会话的后台任务没有确认清空');
+    }
+    if (ids.some((id) => keys.has(`claude:${id}`)))
+      return unknown('原生全局列表仍有缺失磁盘记录的会话，不能认作历史残留');
+    listed = true;
+    break;
+  }
+  if (!listed) return unknown('原生全局列表没有按请求号回读成功');
+  for (const id of ids) {
+    const sessionKey = `claude:${id}`;
+    wire.send({ type: 'subscribe', sessionKey });
+    try {
+      deadline = Date.now() + replyMs;
+      let confirmed = false;
+      while (Date.now() < deadline) {
+        const frame = await wire.next(Math.max(1, deadline - Date.now()));
+        if (typeof frame === 'string' || frame.type === 'error')
+          return unknown('原生活动基线超时、断开或请求失败');
+        if (frame.sessionKey !== sessionKey) continue;
+        if (frame.type === 'snapshot') return unknown('原生仍有会话运行态，不能认作历史残留');
+        if (frame.type !== 'outbox' || frame.baseline !== true) continue;
+        // noRun 来自 snapshotFor 的明确 null（内存 map 和 loom IO 均无运行态），
+        // 不是把 snapshot 没回或队列为空当成没有运行态。
+        if (frame.noRun !== true || !Array.isArray(frame.items) || frame.items.length)
+          return unknown('原生活动基线没有明确确认 noRun 和空队列');
+        confirmed = true;
+        break;
+      }
+      if (!confirmed) return unknown('原生活动基线未回读成功');
+    } finally {
+      wire.send({ type: 'unsubscribe', sessionKey });
+    }
+  }
+  return { state: 'idle', detail: '' };
+}
+
+async function idle(
+  home: string,
+  wires: MirasimWire[],
+  o: MigrationOptions,
+  complete: boolean,
+): Promise<Idleness> {
   const deadline = Date.now() + (o.maxWaitMs ?? 6 * 60 * 60_000);
   let quiet = 0;
   for (;;) {
     const { running, unknown } = runningSessions(home);
     for (const w of wires) await configOf(w, o.replyMs);
     // 有会话记录没查成：判不了是否空闲，不当空闲（可能正写到一半，等着重查）。
-    const state: Idleness = running > 0 ? 'busy' : unknown.length ? 'unknown' : 'idle';
+    let state: Idleness = running > 0 ? 'busy' : unknown.length ? 'unknown' : 'idle';
+    let detail = running
+      ? `有在途 Claude 回合（磁盘记录 ${running} 个），等待空闲`
+      : `有 ${unknown.length} 个 Claude 会话记录没查成，存在未连接的原生实例，无法确认历史残留`;
+    if (!running && unknown.length && complete) {
+      for (const wire of wires) {
+        const native = await orphanIdleness(wire, unknown, o.replyMs ?? 5_000);
+        state = native.state;
+        detail = `有 ${unknown.length} 个 Claude 会话记录没查成；${native.detail}，等待重查`;
+        if (state !== 'idle') break;
+      }
+    }
+    if (state !== 'idle')
+      o.onWaiting?.({
+        state,
+        detail,
+        checkedAt: new Date().toISOString(),
+      });
     quiet = state === 'idle' ? quiet + 1 : 0;
     if (quiet >= 2) return 'idle';
     if (state !== 'idle' && !o.wait) return state;
+    // 原生基线无请求号；失败后由外层以新连接重查，不能在同连接认领迟到的旧基线。
+    if (state === 'unknown') return state;
     // 到期还没连续两次确认空闲：照旧按没空闲算。
     if (Date.now() >= deadline) return state === 'idle' ? 'busy' : state;
     await sleep(o.pollMs ?? 1_000);
@@ -423,13 +541,6 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
     throw new Error('当前启动器是自定义命令，自动迁移不会覆盖它');
   }
   const sourceHash = runtimeSourceHash(o.repo);
-  const destination = join(
-    root,
-    'releases',
-    sourceHash,
-    o.platform === 'win32' ? 'mirasim-reclaude.exe' : 'mirasim-reclaude',
-  );
-  const input: PreparedBinary = { ...o, sourceHash, destination };
   if (
     o.auto &&
     saved?.state === 'restored' &&
@@ -453,7 +564,7 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
     existsSync(before.command) &&
     binaryHash(before.command) === saved.binaryHash
   ) {
-    verifyBinary(before.command, input);
+    verifyBinary(before.command, { ...o, sourceHash, destination: before.command });
     verifyTarget(before.command, o.home);
     return result('current', before.command, '已经是当前新版，未重启会话');
   }
@@ -469,10 +580,10 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
   }
   if (o.rollback && (!saved || before.command !== saved.command))
     throw new Error('当前命令与迁移记录不一致，不能覆盖或撤回');
-  const wires = await connectInstances(o.home, o.replyMs ?? 5_000);
+  const { wires, complete } = await connectInstances(o.home, o.replyMs ?? 5_000);
   if (!wires.length) return result('waiting', before.command, 'Mirasim 配置连接还没就绪，未改启动命令');
   try {
-    const first = await idle(o.home, wires, o);
+    const first = await idle(o.home, wires, o, complete);
     if (first !== 'idle')
       return result(
         'waiting',
@@ -492,19 +603,28 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
       atomicJson(recordFile, { ...saved, state: 'restored', updatedAt: new Date().toISOString() });
       return result('restored', back.command, '已恢复迁移前的启动命令；新版文件仍保留');
     }
+    // 等待可能持续数小时，专用检出会同步主线：以判闲后的源码准备，准备后仍校验未变化。
+    const preparedHash = runtimeSourceHash(o.repo);
+    const destination = join(
+      root,
+      'releases',
+      preparedHash,
+      o.platform === 'win32' ? 'mirasim-reclaude.exe' : 'mirasim-reclaude',
+    );
+    const input: PreparedBinary = { ...o, sourceHash: preparedHash, destination };
     mkdirSync(dirname(destination), { recursive: true, mode: 0o700 });
     const executable = await (o.prepare ?? prepareBinary)(input);
     chmodSync(executable, 0o755);
     verifyBinary(executable, input);
     verifyTarget(executable, o.home);
-    const second = await idle(o.home, wires, o);
+    const second = await idle(o.home, wires, o, complete);
     if (second !== 'idle')
       return result(
         'waiting',
         before.command,
         second === 'unknown' ? UNKNOWN_IDLE : '准备版本期间有新回合开始，未切换',
       );
-    if (runtimeSourceHash(o.repo) !== sourceHash)
+    if (runtimeSourceHash(o.repo) !== preparedHash)
       throw new Error('准备期间源码已更新，未把过期版本设为启动器');
     if (!sameLaunch(launchOf(readJson(setting, 'Mirasim 设置')), before))
       throw new Error('准备期间启动配置被其他操作修改，未覆盖');
@@ -519,7 +639,7 @@ async function migrateUnlocked(o: MigrationOptions): Promise<MigrationResult> {
       schema: 1,
       previous,
       command: executable,
-      sourceHash,
+      sourceHash: preparedHash,
       binaryHash: binaryHash(executable),
       updatedAt: new Date().toISOString(),
       state: 'prepared',

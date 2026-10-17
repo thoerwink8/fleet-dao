@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
-import { type MilestoneDetail, toMilestoneDetail } from './github-api.ts';
+import { type MilestoneDetail, repoName, toMilestoneDetail } from './github-api.ts';
 import type { SimilarReport } from './issue-similar.ts';
 import {
   isKindLabel,
@@ -766,14 +766,21 @@ async function openIssueNumbers(gh: Gh, milestone: string): Promise<Set<number> 
   }
 }
 
-/** 真的 gh：不经 shell，参数原样传；gh 起不来（没装、不在 PATH）也回一个非 0 的结果，不抛。 */
+/**
+ * 真的 gh：不经 shell；relay origin 由共用解析器还原仓名，通过 GH_REPO 给 issue/pr/api 上下文。
+ * repo view 不认 GH_REPO，缺位置参数时显式补仓名；调用者写的仓和环境里的 GH_REPO 优先。
+ * 认不出 origin 就让 gh 照常报错，不猜目录名、不把读失败当空队列。
+ */
 export function ghRunner(root: string, command = 'gh'): Gh {
+  const env = { ...process.env };
+  const repo = env.GH_REPO?.trim() || repoName(env, root);
+  if (repo) env.GH_REPO = repo;
   return (args) =>
     new Promise((done) => {
       execFile(
         command,
-        args,
-        { cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+        repo && implicitRepoView(args) ? ['repo', 'view', repo, ...args.slice(2)] : args,
+        { cwd: root, env, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true },
         (err, stdout, stderr) => {
           if (!err) return done({ code: 0, stdout, stderr });
           if (err.code === 'ENOENT') {
@@ -783,6 +790,19 @@ export function ghRunner(root: string, command = 'gh'): Gh {
         },
       );
     });
+}
+
+/** repo view 唯一位置参数是仓名；值选项里的 json 字段、jq、模板、分支不算仓名。 */
+function implicitRepoView(args: readonly string[]): boolean {
+  if (args[0] !== 'repo' || args[1] !== 'view') return false;
+  const withValue = new Set(['--branch', '-b', '--json', '--jq', '-q', '--template', '-t']);
+  for (let i = 2; i < args.length; i++) {
+    const arg = args[i] ?? '';
+    if (arg === '-R' || arg === '--repo' || arg.startsWith('--repo=')) return false;
+    if (withValue.has(arg)) i++;
+    else if (!arg.startsWith('-')) return false;
+  }
+  return true;
 }
 
 function detail(r: GhResult): string {

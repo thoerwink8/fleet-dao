@@ -15,15 +15,13 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MODELS, readCursorModels, resolveModel } from './cursor-models.mjs';
+import { stopProcessTree } from './cursor-process.mjs';
 import { cursorAgentEnv, cursorAgentProblem, dataDir } from './tools.mjs';
 import { missingWalkthrough } from './walkthrough.mjs';
 
-export const MODELS = {
-  gpt: 'gpt-5.6-luna-high',
-  kimi: 'kimi-k3-low',
-  glm: 'glm-5.2-high',
-  grok: 'grok-4.7-low-fast',
-};
+export { MODELS };
+
 const MAX_PAR = 3;
 
 function args(argv) {
@@ -48,14 +46,29 @@ function args(argv) {
 // （实测 6KB 中文题面走 stdin 正常作答）。cursorAgentEnv() 留着一起用（不影响，多一层保险）。
 // 不管是哪种读不到的原因，都用同一招防蒙混：题面最前面塞一行随机核对码，要求原样抄进答案；输出里找不到这个
 // 核对码就一律判没答上，不会再被「退出码 0、有输出」当成答了。
-function askOne(key, model, prompt, limitSec, dir) {
+// 只处理本次讨论创建的子树。Windows 的 shell 子孙不受 child.kill() 管；
+// POSIX 用独立进程组，超时时一起终止，不能留下占工作区/管道的执行体。
+export function askOne(
+  key,
+  model,
+  prompt,
+  limitSec,
+  dir,
+  { spawnFn = spawn, stopTree = stopProcessTree } = {},
+) {
   const started = Date.now();
   return new Promise((resolveP) => {
     const nonce = randomUUID().slice(0, 8);
-    const child = spawn(
+    const child = spawnFn(
       'cursor-agent',
       ['-p', '--output-format', 'text', '--trust', '--mode', 'ask', '--workspace', dir, '--model', model],
-      { cwd: dir, windowsHide: true, shell: process.platform === 'win32', env: cursorAgentEnv() },
+      {
+        cwd: dir,
+        windowsHide: true,
+        shell: process.platform === 'win32',
+        detached: process.platform !== 'win32',
+        env: cursorAgentEnv(),
+      },
     );
     child.stdin.on('error', () => {
       // 执行体提前退出时写 stdin 会 EPIPE，结果以退出码和 stdout 为准
@@ -71,16 +84,41 @@ function askOne(key, model, prompt, limitSec, dir) {
     child.stderr.on('data', (d) => {
       err += d;
     });
-    const done = (ok, why, text = out.trim()) => {
+    let settled = false;
+    let timedOut = false;
+    let startError;
+    let closeTimer;
+    const done = (ok, why, text = out.trim(), cleanupFailed = false) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolveP({ key, model, ok, secs: (Date.now() - started) / 1000, text, why });
+      clearTimeout(closeTimer);
+      resolveP({ key, model, ok, secs: (Date.now() - started) / 1000, text, why, cleanupFailed });
+    };
+    const unconfirmed = (why) => {
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.unref();
+      done(false, `超过 ${limitSec} 秒；进程树收尾没查成：${why}`, out.trim(), true);
     };
     const timer = setTimeout(() => {
-      child.kill();
-      done(false, `超过 ${limitSec} 秒，停掉了`);
+      timedOut = true;
+      try {
+        stopTree(child);
+      } catch (e) {
+        unconfirmed(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      // taskkill 成功也要等 close：close 才表示执行体退出且继承的输出管道已关闭。
+      closeTimer = setTimeout(() => unconfirmed('终止后输出管道仍未关闭'), 2000);
     }, limitSec * 1000);
-    child.on('error', (e) => done(false, `起不来：${e.message}`));
+    child.on('error', (e) => {
+      startError = e.message;
+    });
     child.on('close', (code) => {
+      if (timedOut) return done(false, `超过 ${limitSec} 秒，已终止进程树并关闭输出`);
+      if (startError) return done(false, `起不来：${startError}`);
       if (code !== 0) return done(false, `退出码 ${code}：${(err || out).trim().slice(0, 200)}`);
       const trimmed = out.trim();
       if (!trimmed) return done(false, '退出码 0 但没有输出');
@@ -99,6 +137,8 @@ function askOne(key, model, prompt, limitSec, dir) {
 
 async function main() {
   const o = args(process.argv.slice(2));
+  if (!Number.isFinite(o.limit) || o.limit <= 0 || o.limit > 30)
+    throw new Error('--limit 必须大于 0 且不超过 30 秒');
   if (!o.text) throw new Error('要 --text 题面文件');
   const prompt = readFileSync(o.text, 'utf8');
   if (!prompt.trim()) throw new Error(`${o.text} 是空的`);
@@ -112,12 +152,14 @@ async function main() {
     .map((s) => s.trim())
     .filter(Boolean);
   for (const k of keys)
-    if (!MODELS[k]) throw new Error(`不认识的模型 ${k}（${Object.keys(MODELS).join(' / ')}）`);
+    if (!Object.hasOwn(MODELS, k)) throw new Error(`不认识的模型 ${k}（${Object.keys(MODELS).join(' / ')}）`);
   // 每家都走本机的 cursor-agent：没装、没登录就一家都不问（不然每家都报同一个错，还得等超时）
   const problem = cursorAgentProblem();
   if (problem) throw new Error(problem);
+  const available = await readCursorModels();
   // 题面放进自己建的临时目录（也是 cursor-agent 的工作区）：问完、中途出错都删掉，不在 /tmp 里越攒越多
   const dir = mkdtempSync(join(tmpdir(), 'ask-'));
+  let cleanupFailed = false;
   try {
     const results = [];
     const queue = [...keys];
@@ -125,7 +167,20 @@ async function main() {
       Array.from({ length: Math.min(MAX_PAR, queue.length) }, async () => {
         while (queue.length) {
           const k = queue.shift();
-          results.push(await askOne(k, MODELS[k], prompt, o.limit, dir));
+          const model = resolveModel(k, available);
+          if (!model) {
+            results.push({
+              key: k,
+              model: '无可用型号',
+              ok: false,
+              secs: 0,
+              why: `当前 Cursor 账号无可用 ${k} 型号，未调用其他厂商或 auto`,
+            });
+            continue;
+          }
+          const result = await askOne(k, model, prompt, o.limit, dir);
+          cleanupFailed ||= result.cleanupFailed;
+          results.push(result);
         }
       }),
     );
@@ -144,7 +199,8 @@ async function main() {
     console.error(outFile);
     process.exitCode = results.some((r) => r.ok) ? 0 : 2;
   } finally {
-    removeDir(dir);
+    if (cleanupFailed) console.error(`执行体收尾没查成，保留临时工作区：${dir}`);
+    else removeDir(dir);
   }
 }
 

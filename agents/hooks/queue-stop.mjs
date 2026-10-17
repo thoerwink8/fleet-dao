@@ -3,6 +3,7 @@
 // 只在无人值守时判，人在场时什么都不查。
 //
 // 判法（人在不在场都判，stop.mjs 在无人值守那一段之前调）：
+// 0. 本会话显式 off → 停止优先，不读队列、不再拉起；从未开启且未 off 的会话仍照常对账。
 // 1. 有子代理在跑（Stop 输入 background_tasks 里 type 不是 shell、monitor 的：subagent、workflow、teammate……）或有定时唤醒
 //    （session_crons）→ 放行，它们收口会把会话叫回来。只有后台命令、监视器在跑不算：照样往下判。
 // 2. 这个会话的无人值守是 done / needs-you（paused）→ 放行：它已经说了做完、或在等人拍。
@@ -14,20 +15,24 @@
 // 不当成没活、也不当成够。这里任何一步自己出错一律放行（只提示），不能把人困住。
 //
 // 对账时顺手跑一次 pnpm subagent:stats --enforce（单 #2821）：Haiku 改代码返工率超线或错进 PR 就把收回写进本机策略文件。
-// 它要读 GitHub、要几秒到几十秒，收尾钩子只有 10 秒，所以起一个脱离的后台进程去跑，不等它；6 小时内起过就不再起
+// 它要读 GitHub、要几秒到几十秒，收尾钩子只有 10 秒，所以起一个脱离的后台进程去跑，不等它；成功完成后 6 小时内不再起
 // （便条 ~/.fleet-dao/subagent-stats-stamp.json）。后台进程跑完把一句话写进便条，下一次对账说出来（收回了、或没跑成）。
 // 起不来、跑不成都只提示，不挡收轮。
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import { backgroundEnv, backgroundState, launchBackground } from './background-launch.mjs';
 import { judgeCapacity, readCapacityAsync } from './capacity.mjs';
 import { fleetHome, mergeStamp, readStamp } from './subagent-ledger.mjs';
-import { cleanId, MAX_STREAK, readState } from './unattended.mjs';
+import { cleanId, explicitlyOff, MAX_STREAK, readState } from './unattended.mjs';
 
 /** 仓里 subagent:stats 的相对路径 */
 export const STATS_BIN = join('packages', 'conventions', 'src', 'bin', 'subagent-stats.ts');
-/** 两次起后台 --enforce 至少隔多久（毫秒） */
+/** 成功完成 --enforce 后多久再查（毫秒） */
 export const ENFORCE_EVERY_MS = 6 * 3600 * 1000;
+export const ENFORCE_RETRY_MS = 60_000;
+export const ENFORCE_TIMEOUT_MS = 10 * 60_000;
 
 /** 队列命令最多等多久（毫秒）：两条 gh 并行，平常两三秒；收尾钩子整个只有 10 秒 */
 export const QUEUE_TIMEOUT_MS = 7000;
@@ -218,15 +223,21 @@ export function queueReason(takeable, capText, streak) {
 }
 
 /**
- * 顺手跑一次 pnpm subagent:stats --enforce：6 小时内起过就不再起；起一个脱离的后台进程，不等它。
+ * 顺手跑一次 pnpm subagent:stats --enforce：成功后限频 6 小时；运行中不重起，失败一分钟后可重试。
  * 上次后台跑完留在便条里的话（收回了、没跑成）在这里说出来、并清掉。
  * @param {string} root 仓根
- * @param {{ home?: string, now?: () => Date, spawnFn?: typeof spawn, everyMs?: number }} [deps] 测试换掉
+ * @param {{ home?: string, now?: () => Date, spawnFn?: typeof launchBackground, everyMs?: number, env?: NodeJS.ProcessEnv }} [deps] 测试换掉
  * @returns {EnforceResult}
  */
 export function startEnforce(
   root,
-  { home = fleetHome(), now = () => new Date(), spawnFn = spawn, everyMs = ENFORCE_EVERY_MS } = {},
+  {
+    home = fleetHome(),
+    now = () => new Date(),
+    spawnFn = launchBackground,
+    everyMs = ENFORCE_EVERY_MS,
+    env = process.env,
+  } = {},
 ) {
   const stamp = readStamp(home);
   /** @type {string | undefined} */
@@ -235,19 +246,33 @@ export function startEnforce(
     notice = stamp.report;
     mergeStamp(home, { report: null });
   }
-  const last = Date.parse(stamp.startedAt ?? '');
-  if (Number.isFinite(last) && now().getTime() - last < everyMs)
+  const time = now().getTime();
+  const runPath = join(home, 'subagent-stats-run.json');
+  const state = backgroundState(runPath, { now: time });
+  const last = state.kind === 'done' ? state.at : Date.parse(stamp.at ?? '');
+  if (
+    state.kind === 'running' ||
+    (state.kind === 'done' && time - last < everyMs) ||
+    (state.kind === 'none' && stamp.ok === true && Number.isFinite(last) && time - last < everyMs)
+  )
     return { ran: true, ...(notice ? { notice } : {}) };
+  if (state.kind === 'failed')
+    notice = [notice, `上次后台 --enforce 没跑成：${state.why}`].filter(Boolean).join('\n');
+  const attempted = Date.parse(stamp.attemptedAt ?? '');
+  if (Number.isFinite(attempted) && time - attempted < ENFORCE_RETRY_MS)
+    return { ran: false, why: '后台失败后一分钟内暂不重试', ...(notice ? { notice } : {}) };
   try {
-    const child = spawnFn(process.execPath, [join(root, STATS_BIN), '--enforce'], {
+    mergeStamp(home, { attemptedAt: new Date(time).toISOString() });
+    const r = spawnFn({
+      args: [join(root, STATS_BIN), '--enforce'],
       cwd: root,
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
+      env: backgroundEnv(env.USERPROFILE || env.HOME || homedir(), { env, stateHome: home }),
+      statePath: runPath,
+      timeoutMs: ENFORCE_TIMEOUT_MS,
+      now: time,
     });
-    child.on('error', () => {});
-    child.unref();
-    mergeStamp(home, { startedAt: now().toISOString() });
+    if (!r.ok) return { ran: false, why: r.why, ...(notice ? { notice } : {}) };
+    mergeStamp(home, { startedAt: new Date(time).toISOString(), pid: r.pid });
   } catch (e) {
     return { ran: false, why: `起不了后台进程（${why(e)}）`, ...(notice ? { notice } : {}) };
   }
@@ -289,6 +314,11 @@ function enforceNotice({ input, enforceStats = defaultEnforce }) {
  * @returns {Promise<{ block: true, reason: string } | { block: false, notice?: string }>}
  */
 export async function decideQueueStop(opts) {
+  try {
+    if (explicitlyOff(opts.dir, opts.sessionId)) return { block: false };
+  } catch (err) {
+    return { block: false, notice: `会话停止记录没查成：${why(err)}；不再拉起队列。` };
+  }
   const extra = enforceNotice(opts);
   const r = await decideQueue(opts);
   if (r.block || !extra) return r;

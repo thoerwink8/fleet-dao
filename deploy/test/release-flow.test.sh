@@ -18,6 +18,9 @@ export FLEET_RELEASES_DIR=$TMP/releases
 # shellcheck source=../release.sh
 source "$HERE/../release.sh"
 set +e # release.sh 开了 -e；这里自己判每一步
+# activate 会换帮手、改 _tmp。这里换成桩：不写 /usr/local/sbin，也不碰真的 /var/lib/fleet-work。
+install_scope_helper() { :; }
+fix_work_tmp() { :; }
 mkdir -p "$RELEASES"
 SCRIPT_HK_PARTS=$FLEET_HK_PARTS # release.env 里不写 FLEET_HK_PARTS 时用的默认值（后面各段会改这个变量）
 
@@ -1575,7 +1578,14 @@ prep_ver "$B" "$SVC_NEW" "$SOCK_BODY"
 reset_sc
 SC_ACTIVE[fleet-api.service]=active
 reset
-activate "$B" release >/dev/null 2>&1
+(
+  trap - EXIT
+  pending '独立的非阻断待配项'
+  activate "$B" release
+  finish
+) >"$TMP/activate-pending.out" 2>&1
+check "待配 exit 2 仍完成切版本和服务启动" "$?" 2
+check "待配 exit 2：current 指向目标" "$(current_sha)" "$B"
 check "已有 socket、和这一版一字不差：systemctl 一次都没碰它" "$(grep -c 'fleet-api.socket' "$SC" || true)" 0
 check "已有 socket、和这一版一字不差：文件没动" "$(cat -- "$FLEET_SYSTEMD_DIR/fleet-api.socket")" "$(printf '%s' "$SOCK_BODY")"
 check "已有 socket：服务照常重启" "$(($(sc_n "restart fleet-api.service") > 0))" 1

@@ -17,7 +17,7 @@ import { basename, dirname, join } from 'node:path';
 import type { Backups } from './backup.ts';
 import { type Line, line } from './report.ts';
 import { type Ctx, code, lstatOrNull, relOf, writeAtomic } from './sync.ts';
-import { CODEX_CONFIG, type HookSpec, slashed } from './targets.ts';
+import { CODEX_CONFIG, type HookSpec, type Place, slashed } from './targets.ts';
 import { linkTarget } from './tree.ts';
 
 type Obj = Record<string, unknown>;
@@ -71,18 +71,14 @@ export function codexHookHash(
 }
 
 /**
- * 键里那段 hooks.json 路径。Codex 把它规整成真实路径：Windows 上 8.3 短名（ADMINI~1）展开成长名、链接解开
- * （本机核过：家目录给短名时 Codex 报的键是长名）。本脚本跟着规整；文件、目录都还没有就原样用。
+ * 键里那段 hooks.json 路径。Codex 规整父目录（包括 Windows 8.3 短名），保留最终文件入口名。
+ * relay 的 hooks.json 即使链接到默认文件，hooks/list 仍以 relay 路径记信任；不能 realpath 整个文件。
  */
 export function codexSourcePath(abs: string): string {
   try {
-    return realpathSync.native(abs);
+    return join(realpathSync.native(dirname(abs)), basename(abs));
   } catch {
-    try {
-      return join(realpathSync.native(dirname(abs)), basename(abs));
-    } catch {
-      return abs;
-    }
+    return abs;
   }
 }
 
@@ -506,14 +502,19 @@ function summarize(
   };
 }
 
-export function trustKey(ctx: Ctx): string {
-  return `${relOf(ctx, CODEX_CONFIG).key}#hooks.state`;
+export function trustKey(ctx: Ctx, config: Place = CODEX_CONFIG): string {
+  return `${relOf(ctx, config).key}#hooks.state`;
 }
 
 /** 查：本脚本登记在 hooks.json 的那几条，Codex 信没信任 */
-export function checkCodexTrust(ctx: Ctx, needs: TrustNeed[], absent: string[]): Line {
-  const { abs } = relOf(ctx, CODEX_CONFIG);
-  const key = trustKey(ctx);
+export function checkCodexTrust(
+  ctx: Ctx,
+  needs: TrustNeed[],
+  absent: string[],
+  config: Place = CODEX_CONFIG,
+): Line {
+  const { abs } = relOf(ctx, config);
+  const key = trustKey(ctx, config);
   const tail = absent.length ? `；${absent.join('、')} 没登记，谈不上信任` : '';
   let read: ReadConfig;
   try {
@@ -530,9 +531,14 @@ export function checkCodexTrust(ctx: Ctx, needs: TrustNeed[], absent: string[]):
 }
 
 /** 写：给没信任、信任了旧版本的记上；人关掉的、整个关了的不动、报出来 */
-export function applyCodexTrust(ctx: Ctx, needs: TrustNeed[], backups: Backups): Line {
-  const { rel, abs } = relOf(ctx, CODEX_CONFIG);
-  const key = trustKey(ctx);
+export function applyCodexTrust(
+  ctx: Ctx,
+  needs: TrustNeed[],
+  backups: Backups,
+  config: Place = CODEX_CONFIG,
+): Line {
+  const { rel, abs } = relOf(ctx, config);
+  const key = trustKey(ctx, config);
   try {
     const read = readConfig(abs);
     if (read.kind === 'bad') return line('failed', key, `没动——${read.why}；要人看`);

@@ -505,6 +505,46 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 额度读取的配置（读哪些池、各池凭据文件在哪，只有池名和路径、不是密钥）写在仓里 `deploy/quota.json`（#1289），随发布的那一版带着：引擎的 `quota-read` 每 15 分钟读自己所在那一版的这份（`packages/adapters/src/quota/config.ts` 的默认路径，`FLEET_QUOTA_CONFIG` 只给命令行和测试换位置），读不到、认不出当场报 `quota-read:config`。不再有手放的 `/etc/fleet-dao/quota.json`（已删这一层）。池要读，得写在这份里：五个池（claude-solo、claude-carpool、mirasim-relay、cursor、grok）都要写上，池 id 要和目录配置里的账号池对上（`packages/db/test/catalog.test.ts` 钉着，多一个或少一个不是写明的例外就红）。目录里的 jev 不配在 `pools` 里，写在 `notRead`：新系统没有旧系统的日账（会话用户家里没有 `~/.dao/judge-spend`），花费记在库里的 `jev_answers`，每天花多少由 `packages/jev` 的 `dailyUsdCap` 自己停；配上那个目录每轮都报 `no_usage_source`。凭据在会话用户家里的，路径写 `/home/fleet-agent-carpool/` 下的绝对路径；密钥本身（Key 文件 `reclaude-api.key`、各家 auth.json）仍手放、不进仓，哪个缺了该池如实报 `no_credentials`（读不到），不会因此少读池。改配置走 PR，随下一次发版生效。额度读取里的 Cursor、Grok 两个池（#1195，#1129 第一步）：两家的登录文件都在会话用户家里（Grok 的 `~/.grok/` 下 auth.json、Cursor 的 `~/.config/cursor/` 下 auth.json），引擎用户进不去。`deploy/quota.json` 里这两种读取器（`cursor-dashboard`、`grok-billing`）读文件时，经 `fleet-agent-scope run` 以会话用户的身份 `cat`（`packages/engine/src/real/index.ts` 的 `catAsUser`、`quotaAsUser`），配置里的 `~` 展开到会话用户的家；值不上命令行、不进日志和提醒；读不到（文件不在 ENOENT、没权限 EACCES）如实报「读不到」、当场提醒，不当成 0 或 ok；一个池读不到不影响另一个。拼车的 Key 文件（引擎自己读得到）不经这条路。写法见 `deploy/quota.json` 里 `cursor`、`grok` 两条。独享组织的 reclaude（`claude-usage`，二进制在会话用户家里）也经同一条 `quotaAsUser`：`fleet-agent-scope run` 以会话用户起，工作目录是它家里的空目录 `~/.cache/fleet-dao/quota-cwd`；引擎用户直接 spawn 是 EACCES。起不来报明确原因（`spawnError`），不写成空读数。已知还欠：法国 Cursor 走 API 密钥文件（`~/.cursor/fleet-api-key`），额度读取器读的是 Cursor 的 auth.json（要有 `accessToken`），两者不是一个文件，法国上有没有那个 auth.json、Dashboard 认不认 API 密钥都没核实，要等法国真机验收；没有 auth.json 时 Cursor 池如实报「读不到」。Mirasim 池（`mirasim-relay`，#1284）：令牌在会话用户家里、回环口又只许会话用户连，引擎用户读令牌、直连都是 EACCES / 连不上；读取器改经桥接（`mirasimDepsFor` 的 `connect`，和账本、路由探针同一条路）以会话用户的身份连，端口、令牌文件由 `discoverMirasimEndpoint` 现找，配置里的 `port`、`tokenFile` 在这条路上不用。**池得写进 `deploy/quota.json` 才会读**：2026-10-06 16:34 起法国那份手放的配置只剩 `claude-carpool`、`jev` 两个池（`pools.last_read_ok_at` 里 `claude-solo`、`cursor`、`grok`、`mirasim-relay` 全空），这四个池没人读、旧提醒也不撤（#1284）；#1289 把配置搬进仓里、删了手放那一层，发版后当时这六个池每轮都读；后来 jev 从这份配置拿掉（没有日账，见上），剩下五个池每轮都读，读成了的 `quota-read:<池>` 自己撤，凭据缺的那个池如实报 `no_credentials`。写在 `notRead` 里的池（现在是 jev）读取器不读、看门狗不查读数过期；已经开着的 `quota-read:jev`、`reconcile:quota:jev` 下一轮自己撤，不再报 `no_usage_source`。
 
+### Jev 判断渠道：配置、凭据与持续观察
+
+机器配置是 `/etc/fleet-dao/jev.json`（`FLEET_JEV_CONFIG` 可指定别处），样例在 `packages/jev/config.example.json`；里面只写 TypeSafe 的 HTTPS 地址、`keyFile` 和可选超时，模型由路由两层的 `judge` 用途选择，不在配置里另写。专用 Key 放在 `keyFile` 指向的 `/etc/fleet-dao/typesafe.key`，一行；两份文件均为 root:fleet 640，目录 root:fleet 750，服务用户能读，会话用户不能读。不要为会话用户放宽权限，也不要把 Key 放进仓库、Issue、命令行参数或日志。
+
+换 Key 以 root 操作：先在 `/etc/fleet-dao/key-backups/` 留可恢复的旧副本（目录 700、副本 600），再从受限临时文件安装新值、读回属主权限和 SHA-256 指纹；共享记录只写路径、掩码和指纹。密钥与机器配置按本手册开头的既有机制存入私有 `fleet-dao-vault`，用该仓的 `refresh.sh` 加密归档并核对；专用 Key 的密文位于该私有仓的 `france/etc/fleet-dao/typesafe.key.age`，恢复照那个私有仓的 README，在受限位置解密并比对指纹，不把解密结果贴到公开记录。配置指向的文件已有时，后续调用会重新读配置和 Key；服务启动时因默认配置文件不存在而标成「未接」的，才需要补文件后按发布流程重启对应服务。
+
+渠道与路由是两层开关：通过已有的登录后渠道写入口，只改 `jev`，读回渠道状态和操作记录；`judge` 用途还必须有开着且可用的 Jev 模型路由。开关、路由、机器配置任一层不通都可能产生 `judge_config`，不能用「配置文件存在」当作启用验收。改凭据和开关后，要看一条经应用选路并写入 `jev_answers` 的真实业务判断，核对 `ok`、实际 `model_version`、耗时和用量，再核完整 `/healthz`；健康检查的绿灯只证明当前配置可用且最近一次上游调用成功，不会每次读健康页都重新调用上游。
+
+真实结果在 `jev_answers`，不是额度池的读取结果。法国上以有权查库的运维身份执行下面的只读查询；只取结果字段，不展开输入证据和私有配置：
+
+```sh
+sudo -n -u fleet psql -X -d "dbname=fleet options='-c default_transaction_read_only=on'" -c "
+select id, question_id, asked_at, ok, fail_reason, model_version,
+       latency_ms, input_tokens, sample->>'route' as route,
+       sample->>'costUsd' as estimated_usd, sample->>'detail' as detail
+from jev_answers
+order by asked_at desc, id desc limit 20;"
+```
+
+`fail_reason` 是稳定原因，`sample.detail` 保留脱敏截断的上游错误或未采用答案的原因；低于把握线也可能是 `ok=true`，表示上游成功作答，是否采用还要看这份原因和业务结果。`latency_ms`、`input_tokens` 和 `sample.costUsd` 是已记下的业务读数，花费是应用按单价算的估值；空值表示没有记录，不补成 0，不当成供应商账单。每日业务次数与花费上限由 `judge.dailyCallLimit`、`judge.dailyUsdCap` 控制，Jev 不参加 `quota-read`，不要为它再造日账文件。
+
+持续观察沿用现有链路：
+
+- `/healthz` 的 `judge` 检查当前配置和最近一次实际调用；配置错误报 `judge_config`，上游最近一次失败报 `judge_failing`。原原因查 `journalctl -u fleet-api`；业务装配与调用问题查 `journalctl -u fleet-engine`。`fleet-api attention --json` 和指挥官巡检读取同一份健康结论。
+- 引擎定时任务叫 `judge-self-check`，每小时 17、47 分运行，不依赖引擎接活总开关。最近一次上游调用失败且超过 30 分钟没有新调用才发固定小题；最近成功、还没调用过、失败未超过 30 分钟时，记这一轮检查成功但不发请求。因此定时任务 `ok` 不等于这一轮实际问过上游。
+- 自检题号是 `judge-probe`，同样写入 `jev_answers`，记录成功或真实失败、实际模型与耗时；它不走业务计量，不记录业务 token 和花费，不占每日业务次数与花费上限。上游仍收到请求，供应商是否扣费由供应商决定；这些空字段不能读作免费或零用量。
+- 定时任务登记与每轮结果在 `scheduled_jobs`、`schedule_runs`，驾驶舱「定时任务」与现有看门狗共用它们；自检没通过记 `partial` 和原因，写库失败记 `failed`，不把失败写成通过。登记期望间隔 90 分钟，漏跑、过期与持续只跑一半的报警沿用看门狗，不另起一份 Jev 监视器。
+- 香港探活只判断法国后端能否回答，200、503 都算链路通；它负责失联与恢复推送，不能替代 `judge` 组件检查。查 `/var/lib/fleet-hk-france-probe/status.json`、`fleet-hk-france-probe.timer` 和该服务日志；现有推送失败重试见「香港探法国」一节。
+
+核自检调度时仍用只读连接：
+
+```sh
+sudo -n -u fleet psql -X -d "dbname=fleet options='-c default_transaction_read_only=on'" -c "
+select id, schedule, expect_every_minutes, removed_at
+from scheduled_jobs where id='judge-self-check';
+select started_at, ended_at, outcome, scanned, found, why
+from schedule_runs where job='judge-self-check'
+order by started_at desc limit 6;"
+```
+
 ### 命令行工具版本（#1969）
 
 驾驶舱法国页有一块「命令行工具」：会话用户 `fleet-agent-carpool` 的 Claude Code、Codex、Grok、Cursor Agent、reclaude、Mirasim 服务端，`pilot` 的 Claude Code、Codex、reclaude（pilot 从没装过另外三样，名单在 `packages/shared/src/cli-versions.ts` 的 `cliUserToolsOf`，以后在 pilot 上装了新工具来那里加一行），以及 root 全局 npm 里的 Kimi（`@moonshot-ai/kimi-code`）、DeepSeek dsh（`@deepseek-ai/dsh`）、pi（`@earendil-works/pi-coding-agent`）。每一行是在用版本、官方最新版、状态（最新、落后几个版本、落后但数不出几个、读不到、没查成）和上次检查时间。
@@ -859,6 +899,7 @@ bash /srv/fleet-dao/deploy/release.sh --check      # 只读：在用哪版、自
 3. 先试通香港这次要发的那几样（`FLEET_HK_PARTS`，见本节末尾）：发静态文件（或老配置里还留着已删的演示版键、要清香港上的老目录）就 `rsync -n`（什么都不传）。不通就停，不切版本——不然健康检查必不过，新旧两版会一起被记成不健康。
 4. 迁移：以 fleet 跑 `packages/db` 的迁移（库 fleet，本机 socket）。在切版本之前跑，只进不退（第八节）。每一版带几个迁移记在它的 `.fleet-release`（`migrations=`）。跑之前先比库：库里跑过的比这一版带的多（直接发了个老提交），就停、不切——drizzle 碰到比代码新的迁移记录什么也不做、也不报错，光靠迁移这一步拦不住。迁移完装目录：以 fleet 跑这一版的目录装载器，把这一版自己带的 `deploy/catalog.json` 装进库（下面「目录配置」）；这一版没带它、装不成、装完读不回就停、不切。目录装完接着装路由两层：以 fleet 跑这一版的路由两层装载器，把这一版自己带的默认骨架 `packages/db/routing.default.json` 只补缺地装进库（下面「目录配置」末尾的「路由两层」）；装不成、读不回、装完是 0 行同样停、不切。
 5. 切版本：`current` 原子地指到这一版；`/etc/fleet-dao/release.env` 的 `FLEET_SERVICES` 里启用的服务装上这一版的单元、起来，没启用的停掉、撤掉单元。这一版带 `.socket` 的（`fleet-api.socket`），切 current 之前按「这一版带不带、机器上有没有」装上、留着或撤掉；装不上（停不掉正占着端口的旧服务、socket 起不来）就不切。socket 起不来时撤掉刚写上的单元，把刚停的旧服务拉回来，端口仍由旧服务自己听。要不要重启看服务的主进程在哪个目录（`/proc/<主进程>/cwd`）：不在这一版的目录里就重启——所以上次切完 `current`、还没重启完就被打断，重跑同一版照样会重启；单元或环境文件变了也重启。**要不要停引擎、重启后端按文件级的引用闭包判**（#2797，`deploy/lib/runtime-closure.mjs`，`release.sh` 的 `service_unchanged`；自动发布判「要不要停引擎」调的是同一份）：从服务的入口（引擎 `packages/engine/src/main.ts`、后端 `packages/api/src/main.ts`）出发，用 TypeScript 自己的模块解析（`tsc --listFilesOnly`；仓里的 typescript 是 7.x 原生版，没有 `preProcessFile` / `resolveModuleName` 的 JS 接口，走它的命令行拿同一套解析）走静态引用，再用 TypeScript 的词法扫描器补上按路径读的（`new URL('…', import.meta.url)`：Temporal 的 workflows、会话的 `agents/hooks/pretool.mjs` 和它 import 的、`agents/subagents/`、`deploy/quota.json`、`deploy/catalog.json`、迁移目录；`createRequire(…).resolve('@fleet-dao/…')`：Mirasim 的桥接脚本），补进来的再当入口走，直到不多出文件；拼出来的 `import(…)` 认不出走到哪，那个包整个算进去。新旧两版各算一次取并集（从 git 里取，删掉的被引用文件也算碰到）。改动和并集没有交集、也没碰非代码的运行输入（根和各包的 `package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`.npmrc`、迁移、`deploy/catalog.json`、`packages/db/routing.default.json`、`quota-reserve.default.json`、`deploy/france/desired-config.json`、服务自己的单元文件），就不暂停、不重启那个服务，主进程留在上一版目录；后端、引擎各判各的，不连带。只改文档或测试（`docs/`、`specs/`、`*.md`、`packages/*/test/`、`agents/test/`、`deploy/test/`）走快路径，不起 node。算不出、超时、这一版还没有这个脚本，都当要重启。发布日志里写「引擎运行内容没变，没重启（原因）」或「要停引擎：原因」。例：改 `agents/` 里引擎不用的钩子、`packages/conventions` 里引擎不引用的本机命令、`.github/`、`deploy/france/auto-release/` 不停引擎；改引擎引用的 conventions 文件、锁文件、加迁移要停。头一次装上 socket、或从带 socket 的版本退回到不带的，服务强制重启。启用了 `fleet-api` 的，切完先等它在驾驶舱接口上答话（回什么都算，平常 3 秒左右）；没重启就沿用上一版进程，日志不写「重启后」。30 秒还不答（起不来、反复崩）就不往下发香港、跑健康检查，马上判红自动退回：端口在 socket 手里排队，起不来期间 `/healthz` 连得上却挂着（#2186）。
+   免重启时，发布在切 `current` 前复用上述闭包判法，核实际进程提交到目标提交，在目标版本的 root 只写目录里原子记下 `.runtime-fleet-engine` / `.runtime-fleet-api`（目标提交、实际进程提交、服务名）。构建里预置的保留名先清掉，每次发布重新核算前也清旧凭据；`--check` 只读、不补凭据。健康接口和在用版本读数只认三项精确匹配、普通文件、root 属主且组/其他人不可写的凭据和目标目录，不同步重算 TypeScript 闭包；缺失仍按原来的严格目录/文档差异判断，坏凭据明确报没查成。这样合法沿用不会产生 `deploy_lag` 假红，已有待配项仍以退出码 2 如实保留。
 6. 发静态文件：经隧道用 rrsync 传到香港 `/srv/fleet-dao-web`，每处都是新文件先落临时名、最后一起换上，旧文件最后删（在香港属 root）；按内容比、不带修改时间：内容没变的文件不传、不算变化。香港的 rrsync 同一时刻只让一个进来、后到的直接被拒，所以法国这头往香港推（这一步、第 3 步的试通、france.sh 读回的试跑）都先拿同一把锁 `/run/lock/fleet-dao-hk-rsync.lock` 排队，等 2 分钟还轮不到就照实报红（2026-09-26 发布撞上过，没切版本）。
    - 明写了 `web`（默认不发）：驾驶舱静态文件连健康页、`release.json` 整套发到根地址，根上不是这一版的文件会被删掉。
    - 香港上老的 `/demo/` 目录（#1223）不再由发布删、不再读回：香港上已不在、站点对 `/demo` 一律回 404；当初那一步的 rsync 超时曾把整次发布连同自动退回一起打红（#2186）。

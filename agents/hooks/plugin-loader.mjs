@@ -10,7 +10,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitRunner } from './git-run.mjs';
-import { PROCESS_HOOKS } from './plugin-catalog.mjs';
+import { PROCESS_HOOKS, RETIRED_PROCESS_HOOKS } from './plugin-catalog.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
 
 const SCRIPT_RE = /(?:\/\.fleet-dao\/hooks\/|\/agents\/hooks\/)([\w.-]+\.mjs)(?![\w.-])/;
@@ -111,8 +111,9 @@ function plainObject(value) {
  * @param {unknown} settings
  * @param {string[]} track
  * @param {string} hooksDir
+ * @param {{ projectDir?: string | null }} [options]
  */
-export function applyCatalog(settings, track, hooksDir) {
+export function applyCatalog(settings, track, hooksDir, { projectDir = null } = {}) {
   const next = structuredClone(plainObject(settings) ? settings : {});
   const root = /** @type {{ hooks?: Record<string, unknown> }} */ (next);
   const subscribed = track.includes('process');
@@ -120,7 +121,9 @@ export function applyCatalog(settings, track, hooksDir) {
     if (!subscribed) return next;
     root.hooks = {};
   }
-  const catalog = new Set(PROCESS_HOOKS.map((hook) => hook.script));
+  const catalog = new Set([...PROCESS_HOOKS.map((hook) => hook.script), ...RETIRED_PROCESS_HOOKS]);
+  /** @type {Map<string, { command: string, args?: string[] }>} */
+  const commands = new Map();
   for (const event of Object.keys(root.hooks)) {
     const groups = root.hooks[event];
     if (!Array.isArray(groups)) continue;
@@ -132,9 +135,10 @@ export function applyCatalog(settings, track, hooksDir) {
         continue;
       }
       const hooks = list.filter((handler) => {
-        const script = handlerScript(handler);
-        if (script === null || !catalog.has(script)) return true;
-        return subscribed;
+        const managed = managedCommand(handler, hooksDir, projectDir);
+        if (managed === null || !catalog.has(managed.script)) return true;
+        if (!commands.has(managed.script)) commands.set(managed.script, managed.launch);
+        return false;
       });
       if (hooks.length > 0) kept.push({ ...group, hooks });
     }
@@ -146,7 +150,6 @@ export function applyCatalog(settings, track, hooksDir) {
     return next;
   }
   for (const spec of PROCESS_HOOKS) {
-    if (hasScript(root.hooks, spec.script)) continue;
     const groups = Array.isArray(root.hooks[spec.event]) ? root.hooks[spec.event] : [];
     let plain = groups.find(
       (group) =>
@@ -161,7 +164,7 @@ export function applyCatalog(settings, track, hooksDir) {
     }
     /** @type {{ hooks: unknown[] }} */ (plain).hooks.push({
       type: 'command',
-      command: commandFor(hooksDir, spec.script),
+      ...(commands.get(spec.script) ?? { command: commandFor(hooksDir, spec.script) }),
       timeout: spec.timeout,
       // 后台钩子的几项照目录写（没有的不写，不往别的钩子里塞 false）
       ...(spec.async === true ? { async: true } : {}),
@@ -175,21 +178,43 @@ export function applyCatalog(settings, track, hooksDir) {
 }
 
 /**
- * @param {Record<string, unknown>} hooks
- * @param {string} script
+ * 只接管完整的 node 单脚本命令，路径必须是本机安装目录或当前项目的原件。
+ * 同名脚本、shell 拼接命令、别的 executable 的参数里提到脚本，都不证明登记归我们。
+ * @param {unknown} handler
+ * @param {string} hooksDir
+ * @param {string | null} projectDir
+ * @returns {{ script: string, launch: { command: string, args?: string[] } } | null}
  */
-function hasScript(hooks, script) {
-  for (const groups of Object.values(hooks)) {
-    if (!Array.isArray(groups)) continue;
-    for (const group of groups) {
-      const list = /** @type {{ hooks?: unknown[] }} */ (group)?.hooks;
-      if (!Array.isArray(list)) continue;
-      for (const handler of list) {
-        if (handlerScript(handler) === script) return true;
-      }
-    }
+function managedCommand(handler, hooksDir, projectDir) {
+  if (!plainObject(handler) || handler.type !== 'command' || typeof handler.command !== 'string') return null;
+  const command = handler.command;
+  let path;
+  /** @type {{ command: string, args?: string[] }} */
+  let launch;
+  if (Array.isArray(handler.args)) {
+    const executable = command.replaceAll('\\', '/');
+    if (!/^(?:node(?:\.exe)?|(?:[A-Za-z]:\/|\/)[^\r\n]*\/node(?:\.exe)?)$/.test(executable)) return null;
+    if (handler.args.length !== 1 || typeof handler.args[0] !== 'string') return null;
+    path = handler.args[0];
+    launch = { command, args: [path] };
+  } else {
+    const m = /^node\s+(?:"([^"\r\n]+)"|'([^'\r\n]+)'|([^\s"';&|<>]+))$/.exec(command);
+    if (!m) return null;
+    path = m[1] ?? m[2] ?? m[3];
+    launch = { command };
   }
-  return false;
+  if (typeof path !== 'string') return null;
+  const script = path.replaceAll('\\', '/').split('/').at(-1);
+  if (!script || !/^[\w.-]+\.mjs$/.test(script)) return null;
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: Claude Code 在运行钩子时展开这个占位路径。
+  const dirs = [hooksDir, '$CLAUDE_PROJECT_DIR/agents/hooks', '${CLAUDE_PROJECT_DIR}/agents/hooks'];
+  if (projectDir) dirs.push(`${projectDir}/agents/hooks`);
+  const normalized = (/** @type {string} */ p) => {
+    const slash = p.replaceAll('\\', '/').replace(/\/$/, '');
+    return process.platform === 'win32' || /^[A-Za-z]:\//.test(slash) ? slash.toLowerCase() : slash;
+  };
+  if (!dirs.some((dir) => normalized(path) === normalized(`${dir}/${script}`))) return null;
+  return { script, launch };
 }
 
 /** 引擎建树时从 bundle 取进来的引用（packages/engine/src/real/user-git.ts 的 fetchBundle）：本机的检出没有它。 */
@@ -250,7 +275,7 @@ if (isMain()) {
         process.exit(0);
       }
     }
-    const next = applyCatalog(current, track, join(homedir(), '.fleet-dao', 'hooks'));
+    const next = applyCatalog(current, track, join(homedir(), '.fleet-dao', 'hooks'), { projectDir: cwd });
     // 内容等价就不写盘：不碰文件、不改排版
     if (JSON.stringify(current) !== JSON.stringify(next)) {
       mkdirSync(dirname(settingsPath), { recursive: true });

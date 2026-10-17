@@ -149,6 +149,20 @@ describe('WMI 没起成照实报，不冒充起成了', () => {
     if (!r.ok) expect(r.why).toContain(want);
   });
 
+  it('显式环境通过 WMI startup 传递，值中的等号、中文保持原样', () => {
+    let seen: Record<string, string> = {};
+    const r = spawnDetached('C:\\node.exe', [], {
+      platform: 'win32',
+      env: { HOME: 'D:\\用户', NO_PROXY: 'a=b' },
+      runPs: (env) => {
+        seen = env;
+        return { status: 0, stdout: '0 4242', stderr: '' };
+      },
+    });
+    expect(r.ok).toBe(true);
+    expect(JSON.parse(seen.FLEET_DETACH_ENV ?? 'null')).toEqual(['HOME=D:\\用户', 'NO_PROXY=a=b']);
+  });
+
   it('PowerShell 自己抛了也不抛出来', () => {
     const r = spawnDetached('node', [], {
       platform: 'win32',

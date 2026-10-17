@@ -89,15 +89,33 @@ function machine() {
   const sessionFresh = () => {
     const dir = join(home, '.fleet-dao', 'session-bg');
     rmSync(dir, { recursive: true, force: true });
-    session();
+    const first = session();
     const until = Date.now() + 120_000;
     const settled = () =>
       existsSync(dir) &&
       readdirSync(dir).some((n) => n.endsWith('.json')) &&
       !readdirSync(dir).some((n) => n.endsWith('.lock'));
-    while (!settled() && Date.now() < until)
+    const failure = () => {
+      if (!existsSync(dir)) return '';
+      for (const name of readdirSync(dir).filter((n) => n.endsWith('.run'))) {
+        const state = JSON.parse(readFileSync(join(dir, name), 'utf8')) as {
+          kind?: string;
+          why?: string;
+          receipt?: string;
+        };
+        if (state.kind === 'failed') return state.why ?? '启动没跑成';
+        if (state.receipt && existsSync(state.receipt)) {
+          const result = JSON.parse(readFileSync(state.receipt, 'utf8')) as { kind?: string; why?: string };
+          if (result.kind === 'failed') return result.why ?? '后台没跑成';
+        }
+      }
+      return '';
+    };
+    while (!settled() && Date.now() < until) {
+      if (failure()) throw new Error(`安装后的后台没跑成：${failure()}；开场：${first}`);
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
-    expect(settled(), '后台 120 秒内没写完结果').toBe(true);
+    }
+    expect(settled(), `后台 120 秒内没写完结果；开场：${first}`).toBe(true);
     return session();
   };
   /** 从另一份克隆往主线上推一个改了通用段原件（agents/shared-rules.md）的提交 */

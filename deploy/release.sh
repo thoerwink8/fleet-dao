@@ -24,6 +24,9 @@ umask 022
 DEPLOY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 source "$DEPLOY_DIR/lib/common.sh"
+# ensure_work_tmp：发版在引擎起来之前把 _tmp 改成引擎用户。只定义函数，ENGINE_USER=fleet。
+# shellcheck source=lib/human-tier.sh
+source "$DEPLOY_DIR/lib/human-tier.sh"
 # 期望里登记的会话代理（FLEET_SESSION_PROXY，#786）：发布取代码、装依赖经它出网，登记成空＝直连（法国就是这样）。
 # lib/session-proxy.sh 只管读期望（一律读 deploy/france/desired-config.json）。
 # shellcheck source=lib/session-proxy.sh
@@ -787,6 +790,10 @@ links_inside() { # 目录
 # 装成一版：构建沙箱里以 fleet 装依赖、构建前端（第三方代码不以 root 跑，也读不到密钥目录和本机库）；
 # 构建完整个目录换成 root 的、fleet 只读，再原子地挪到 <提交号>。root 要照着办事的东西（单元文件、完成标记）在换属主之后才由 root 从 git 里取、写，fleet 碰不到。
 # 沙箱建不成（没有 systemd-run / unshare、起不来、读回密钥目录仍然可见——含 /proc/<pid>/root 绕路）就红字停下：不切版本，也不退回 as_fleet_in
+clear_runtime_matches() { # 已由 root 接管的构建目录；只删发布流程的四个保留名，不跟随链接
+  rm -f -- "$1"/.runtime-fleet-{engine,api}{,.new}
+}
+
 build_release() { # 提交号
   local sha=$1 dir=$RELEASES/$1 stage=$RELEASES/.build-$1 log u odd n
   step "构建 ${sha:0:12}"
@@ -829,6 +836,11 @@ build_release() { # 提交号
   # 换属主：之后 fleet 只读。-h：符号链接只改它自己，不跟过去改别处
   chown -R -h root:root -- "$stage"
   chmod -R u+rwX,go+rX,go-w -- "$stage"
+  # 保留名只由持锁的发布流程生成，不能把 git/构建里预置的内容或链接当成闭包核算凭据。
+  if ! clear_runtime_matches "$stage"; then
+    red "清不了构建目录里的运行内容凭据保留名，没切版本"
+    return 1
+  fi
   # 静态文件要原样发到香港：不许有符号链接和特殊文件（rsync 不跟链接，也防借链接把本机文件带出去）
   odd=$(find "$stage/web" ! -type f ! -type d -print -quit)
   if [[ -n "$odd" ]]; then
@@ -1441,6 +1453,22 @@ socket_listening() { # 服务名（不带后缀）
   return 1
 }
 
+# 换上这一版的帮手脚本（sudoers 已放行这个路径）。内容一样就不动。测试把这个函数换成桩，免得写到真的 /usr/local/sbin。
+install_scope_helper() { # 这一版的目录
+  local src=$1/deploy/france/fleet-agent-scope.sh dest=/usr/local/sbin/fleet-agent-scope
+  if [[ ! -f "$src" ]]; then
+    red "这一版没有 $src，换不了 fleet-agent-scope"
+    return 1
+  fi
+  put_file "$dest" root:root 755 "$(<"$src")"
+}
+
+# 引擎起来之前：_tmp 归引擎用户，冷验收才能在下面 mkdir。测试换成桩，不碰真的 /var/lib/fleet-work。
+fix_work_tmp() {
+  local WORK_DIR=/var/lib/fleet-work
+  ensure_work_tmp
+}
+
 # 切到这一版：current 指过去；本机启用的服务装上这一版的单元、起来——主进程不在这一版的目录里（包括上次切完
 # current、还没重启完就被打断）、或单元、环境文件变了，就重启；没启用的停掉撤掉；静态文件发到香港。
 # 哪一步不成就记红、返回 1，退不退由调用方定。socket 单元先同步：装不上就不切 current。
@@ -1489,6 +1517,9 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
     red "systemctl daemon-reload 失败"
     return 1
   fi
+  # 先换帮手、再改 _tmp，然后才起引擎。自动档要等检出对齐才跑，新引擎一切进来就会验收。
+  install_scope_helper "$dir" || return 1
+  fix_work_tmp || return 1
   for u in $FLEET_SERVICES; do
     restart=0
     if [[ "${fresh[$u]:-0}" == 1 || "${socket_force[$u]:-0}" == 1 ]] || env_changed_since_start "$u.service"; then
@@ -1686,6 +1717,31 @@ running_runtime_matches() { # 主进程当前目录 要查的提交 单元名（
     fleet-api) service_unchanged api "$name" "$sha" ;;
     *) runtime_unchanged "$name" "$sha" ;;
   esac
+}
+
+# 健康接口不能同步跑几分钟的 TypeScript 闭包：发布在持锁、root 只写的版本目录里记下已经核实的精确三元组。
+# 切 current 前先记，避免新链接刚可见时健康接口还读不到凭据；--check 不写。
+# 用实际进程提交（不是上一轮 current），连续沿用多版也重新核到目标。
+record_runtime_matches() { # 目标提交
+  local sha=$1 u running old file
+  for u in $FLEET_SERVICES; do
+    case "$u" in fleet-engine | fleet-api) ;; *) continue ;; esac
+    file=$RELEASES/$sha/.runtime-$u
+    if ! rm -f -- "$file" "$file.new"; then
+      red "清不了 $u 的旧运行内容凭据，不沿用历史结论"
+      return 1
+    fi
+    running=$(running_release "$u.service")
+    [[ "$running" == "$RELEASES/$sha" ]] && continue
+    if running_runtime_matches "$running" "$sha" "$u"; then
+      old=${running#"$RELEASES/"}
+      if ! printf '%s %s %s\n' "$sha" "$old" "$u" >"$file.new" ||
+        ! chmod 644 -- "$file.new" || ! mv -f -- "$file.new" "$file"; then
+        red "写不了 $u 的运行内容一致凭据：健康接口不能确认沿用，不当成已通过"
+        return 1
+      fi
+    fi
+  done
 }
 
 # 起着的服务跑的真是这一版：主进程的当前目录就是这一版的目录（不是 current 指过去了、进程还是旧的）。
@@ -2111,7 +2167,7 @@ do_release() { # 要发的提交（空 = 主线最新）
   # 紧挨着切版本：写完到服务换上这一版之间，在跑的旧服务自己重启才会读到新配置，这段越短越好
   apply_config "$SHA" release || return 1
   step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"
-  if activate "$SHA" release && health_gate "$SHA" "$before"; then
+  if record_runtime_matches "$SHA" && activate "$SHA" release && health_gate "$SHA" "$before"; then
     # 之前判过不健康（比如那时本机配置没备齐）、这次过了：记回健康，它又能当退回的目标
     if [[ "$(last_event "$SHA")" == unhealthy ]]; then
       record "$SHA" recovered
@@ -2143,7 +2199,7 @@ do_release() { # 要发的提交（空 = 主线最新）
       ! drain_engine || ! apply_config "$cur" auto-rollback
     then
       red "${SHA:0:12} 没过健康检查，也没退回 ${cur:0:12}（退回之前停引擎、照它的期望写配置没成，见上）：停在 ${SHA:0:12}，要人来看"
-    elif activate "$cur" auto-rollback && health_gate "$cur" ""; then
+    elif record_runtime_matches "$cur" && activate "$cur" auto-rollback && health_gate "$cur" ""; then
       ok "已退回 ${cur:0:12}，健康检查过了"
       red "${SHA:0:12} 没过健康检查，已自动退回 ${cur:0:12}（原因见上面的红）"
     else
@@ -2172,7 +2228,7 @@ do_rollback() {
   pause_tasks "$prev"
   drain_engine || return 1
   apply_config "$prev" rollback || return 1
-  if activate "$prev" rollback && health_gate "$prev" ""; then
+  if record_runtime_matches "$prev" && activate "$prev" rollback && health_gate "$prev" ""; then
     ok "已退回 ${prev:0:12}"
   else
     mark_unhealthy "$prev"

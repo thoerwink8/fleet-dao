@@ -116,6 +116,10 @@ func fakeClaude() {
 	if sid == "" {
 		sid = "native-created"
 	}
+	if os.Getenv("MIRASIM_TEST_ROLE") == "steer" {
+		fakeSteerClaude(sid, mode)
+		return
+	}
 	if p := os.Getenv("MIRASIM_TEST_GRANDCHILD_PID"); p != "" {
 		self, _ := os.Executable()
 		c := exec.Command(self)
@@ -142,6 +146,9 @@ func fakeClaude() {
 				os.Exit(10)
 			}
 			if r["subtype"] == "initialize" {
+				if os.Getenv("MIRASIM_TEST_DELAY_REPLAY") == "1" && argValue(args, "--resume") != "" {
+					time.Sleep(100 * time.Millisecond)
+				}
 				initialized = true
 			}
 			_ = enc.Encode(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": f["request_id"], "response": map[string]any{}}})
@@ -461,29 +468,6 @@ func TestInitializationReplayedWithoutDuplicateHostReply(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("初始化响应重复泄漏给宿主：%d", n)
-	}
-}
-
-func TestBusySwitchWaitsForResultBeforeForwardingNextUser(t *testing.T) {
-	f := newFixture(t, "local")
-	release := filepath.Join(f.home, "release")
-	a := startApp(t, f)
-	a.user(t, "wait:"+release)
-	a.until(t, "system")
-	f.route(t, "cloud")
-	a.user(t, "next")
-	select {
-	case x := <-a.frames:
-		t.Fatalf("在途回合被提前推进：%v", x)
-	case <-time.After(100 * time.Millisecond):
-	}
-	_ = os.WriteFile(release, []byte("go"), 0600)
-	x := a.until(t, "assistant")["observed"].(map[string]any)
-	a.until(t, "result")
-	y := a.until(t, "assistant")["observed"].(map[string]any)
-	a.until(t, "result")
-	if x["route"] != "local" || y["route"] != "cloud" || x["pid"] == y["pid"] {
-		t.Fatalf("来源与回合边界不符：%v %v", x, y)
 	}
 }
 

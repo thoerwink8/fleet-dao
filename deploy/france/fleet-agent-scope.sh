@@ -14,6 +14,9 @@
 #                                    在就改属主。退出码：0 成功；64 校验不过；其余失败 1。
 #   sudo -n fleet-agent-scope remove <工作树>  删掉一棵工作树（不跟随符号链接、不跨文件系统）。本来就不在也返回 0；
 #                                    标准输出最后一行是 removed <路径> 或 gone <路径>。退出码同 adopt。
+#   sudo -n fleet-agent-scope ensure-tmp       把 WORK_BASE/_tmp 改成引擎用户 fleet、755（不递归，里面已有的会话目录不动）。
+#                                    冷验收要以引擎用户在这下面 mkdir verify-*。已经是这个属主和权限就什么都不改。
+#                                    改完以引擎用户 mkdir 再 rmdir，写不进就失败，原因里有目录路径。退出码同 adopt。
 #   sudo -n fleet-agent-scope org-use <carpool|solo> --user <会话用户>
 #                                    把会话用户挂的 reclaude 组织切到拼车（org list 里类型 team）或独享（personal）：以它的身份
 #                                    跑它家里的 reclaude，那一类的组织要恰好一个；已经挂着就不动。切完再读一遍 org list 核对
@@ -95,6 +98,8 @@ RECLAUDE_TIMEOUT=150
 # 两个测试专用开关，理由同上、故意不叫 FLEET_*。
 ORG_BUDGET=${AGENT_SCOPE_TEST_ORG_BUDGET:-270}
 ORG_VERIFY_RESERVE=${AGENT_SCOPE_TEST_ORG_RESERVE:-60}
+# ensure-tmp 把 _tmp 交给谁。默认跑 fleet-engine 的用户。测试专用，故意不叫 FLEET_*（理由同 WORK_BASE）。
+ENGINE_USER=${AGENT_SCOPE_TEST_ENGINE_USER:-fleet}
 # timeout 到点先发 TERM，这么多秒还不走再 KILL：算每一步给多少时间时一起扣掉。
 RECLAUDE_KILL_AFTER=5
 ORG_DEADLINE=0
@@ -312,6 +317,52 @@ adopt() {
   check_tree_path "$dir"
   ensure_tree "$dir" "$user"
   echo "已把 $dir 交给 $user"
+}
+
+# 冷验收的检出目录在 WORK_BASE/_tmp 下，引擎用户自己 mkdir。这一层要归它、755。
+# 不递归：里面已有的会话目录不动。已经对了就不再 chown（避免改时间、误报）。
+ensure_tmp() {
+  local path=$WORK_BASE/_tmp user=$ENGINE_USER have probe err rc
+  id -- "$user" >/dev/null 2>&1 || die "引擎用户 $user 不存在，改不了 $path"
+  [[ -d "$WORK_BASE" && ! -L "$WORK_BASE" ]] || die "工作树的根不在或是符号链接：$WORK_BASE"
+  if [[ -L "$path" ]]; then die "工作树的临时目录是符号链接：$path"; fi
+  if [[ -e "$path" && ! -d "$path" ]]; then die "工作树的临时目录不是目录：$path"; fi
+  if [[ ! -d "$path" ]]; then
+    install -d -o "$user" -g "$user" -m 755 -- "$path" || {
+      echo "fleet-agent-scope：建不了目录：$path" >&2
+      exit 1
+    }
+  else
+    have=$(stat -c '%U:%G %a' -- "$path")
+    if [[ "$have" != "$user:$user 755" ]]; then
+      chown "$user:$user" -- "$path" || {
+        echo "fleet-agent-scope：改属主失败：$path" >&2
+        exit 1
+      }
+      chmod 755 -- "$path" || {
+        echo "fleet-agent-scope：改权限失败：$path" >&2
+        exit 1
+      }
+    fi
+  fi
+  if ! command -v runuser >/dev/null 2>&1; then
+    echo "fleet-agent-scope：没有 runuser，查不了 $user 能不能在 $path 下 mkdir" >&2
+    exit 1
+  fi
+  probe=$path/verify-probe-$$
+  rc=0
+  err=$(runuser -u "$user" -- mkdir -- "$probe" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    echo "fleet-agent-scope：引擎用户 $user 在 $path 下 mkdir 失败（$probe）：${err:-退出 $rc}" >&2
+    exit 1
+  fi
+  rc=0
+  err=$(runuser -u "$user" -- rmdir -- "$probe" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    echo "fleet-agent-scope：引擎用户 $user 在 $path 下 rmdir 失败（$probe）：${err:-退出 $rc}" >&2
+    rm -rf -- "$probe"
+    exit 1
+  fi
 }
 
 # ---- org-use：切会话用户挂的 reclaude 组织（#157）。全程只认类型，组织编号只在这几个函数里过手，不打出来。
@@ -637,6 +688,11 @@ adopt)
   shift
   adopt "$@"
   ;;
+ensure-tmp)
+  shift
+  (($# == 0)) || die "ensure-tmp 不收参数"
+  ensure_tmp
+  ;;
 remove)
   shift
   remove "$@"
@@ -649,5 +705,5 @@ probe)
   shift
   probe "$@"
   ;;
-*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> | remove <工作树> | org-use <carpool|solo> --user <会话用户> | probe --user <fleet-agent-carpool|pilot> -- <工具> | probe --npm -- <kimi-code|dsh|pi>" ;;
+*) die "用法：fleet-agent-scope run <编号> --user <会话用户> [选项] -- /绝对路径/命令 参数… | stop <编号> | list | adopt <工作树> --user <会话用户> | remove <工作树> | ensure-tmp | org-use <carpool|solo> --user <会话用户> | probe --user <fleet-agent-carpool|pilot> -- <工具> | probe --npm -- <kimi-code|dsh|pi>" ;;
 esac

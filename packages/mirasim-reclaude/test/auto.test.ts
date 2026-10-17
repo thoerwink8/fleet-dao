@@ -49,6 +49,15 @@ describe('同步中的自动迁移', () => {
       pid = first.pid;
       expect(Number.isInteger(pid) && pid > 0).toBe(true);
       expect(() => process.kill(pid, 0)).not.toThrow();
+      let observed = JSON.parse(readFileSync(file, 'utf8'));
+      const observedUntil = Date.now() + 5_000;
+      while (!observed.checkedAt && Date.now() < observedUntil) {
+        await sleep(20);
+        observed = JSON.parse(readFileSync(file, 'utf8'));
+      }
+      expect(observed.idleState).toBe('busy');
+      expect(observed.detail).toContain('磁盘记录 1 个');
+      expect(Number.isFinite(Date.parse(observed.checkedAt))).toBe(true);
       expect((await automaticMigration(o)).state).toBe('waiting');
       expect(JSON.parse(readFileSync(file, 'utf8')).pid).toBe(pid);
       expect(JSON.parse(readFileSync(join(ms, 'setting.json'), 'utf8'))).toEqual(initial);

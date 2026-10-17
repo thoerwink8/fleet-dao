@@ -8,11 +8,12 @@
 // 别的平台用 spawn({ detached: true })：setsid 另开会话和进程组，杀父进程组摸不到它。
 //
 // 改这里之前必须知道：
-// - WMI 起的进程不继承调用方的环境变量（拿的是这个用户登录时的环境）：要传东西给它，写进文件、放在参数里，别靠环境变量。
+// - WMI 不继承调用方环境；需要传递时显式给 env，经 Win32_ProcessStartup.EnvironmentVariables 传，不写环境快照。
 // - 命令行按 CreateProcess 的规矩转义（quoteArg）；不经 cmd.exe，不用管 ^ & |。
 // - 纯 node、不起常驻进程；install.mjs 把它和 loop.mjs 一起拷进 ~/.fleet-dao/local-sessions/bin/。
 // - 不抛：起不成返回 { ok: false, why }，调用方照实说没起成。
 import { spawn, spawnSync } from 'node:child_process';
+import { join } from 'node:path';
 
 /** 起 PowerShell 跑 WMI 最多等多久（毫秒）：冷起 PowerShell 本身就要一两秒 */
 export const WMI_TIMEOUT_MS = 20_000;
@@ -21,6 +22,7 @@ export const WMI_TIMEOUT_MS = 20_000;
 /**
  * @typedef {{
  *   cwd?: string,
+ *   env?: Record<string, string>,
  *   platform?: NodeJS.Platform,
  *   runPs?: (env: Record<string, string>) => { status: number | null, stdout: string, stderr: string, error?: Error | undefined },
  * }} DetachOpts
@@ -28,7 +30,9 @@ export const WMI_TIMEOUT_MS = 20_000;
 
 const WMI_SCRIPT =
   '$ErrorActionPreference="Stop";' +
-  '$si=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0};' +
+  '$p=@{ShowWindow=[uint16]0};' +
+  'if($env:FLEET_DETACH_ENV){$p.EnvironmentVariables=[string[]](ConvertFrom-Json $env:FLEET_DETACH_ENV);$p.CreateFlags=[uint32]1024};' +
+  '$si=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property $p;' +
   '$a=@{CommandLine=$env:FLEET_DETACH_CMD;ProcessStartupInformation=$si};' +
   'if($env:FLEET_DETACH_CWD){$a.CurrentDirectory=$env:FLEET_DETACH_CWD};' +
   '$r=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments $a;' +
@@ -66,7 +70,11 @@ export const commandLine = (file, args) => [file, ...args].map(quoteArg).join(' 
 
 /** @param {Record<string, string>} extra */
 function realRunPs(extra) {
-  const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', WMI_SCRIPT], {
+  // 钩子的 PATH 可能只有 git；系统 PowerShell 不依赖会话把它的目录放进 PATH。
+  const ps = process.env.SystemRoot
+    ? join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
+    : 'powershell.exe';
+  const r = spawnSync(ps, ['-NoProfile', '-NonInteractive', '-Command', WMI_SCRIPT], {
     encoding: 'utf8',
     env: { ...process.env, ...extra },
     timeout: WMI_TIMEOUT_MS,
@@ -82,10 +90,16 @@ function realRunPs(extra) {
  * @param {DetachOpts} [opts]
  * @returns {Detached}
  */
-export function spawnDetached(file, args, { cwd, platform = process.platform, runPs = realRunPs } = {}) {
+export function spawnDetached(file, args, { cwd, env, platform = process.platform, runPs = realRunPs } = {}) {
   try {
     if (platform === 'win32') {
-      const r = runPs({ FLEET_DETACH_CMD: commandLine(file, args), FLEET_DETACH_CWD: cwd ?? '' });
+      const r = runPs({
+        FLEET_DETACH_CMD: commandLine(file, args),
+        FLEET_DETACH_CWD: cwd ?? '',
+        ...(env
+          ? { FLEET_DETACH_ENV: JSON.stringify(Object.entries(env).map(([k, v]) => `${k}=${v}`)) }
+          : {}),
+      });
       if (r.error) return { ok: false, why: `WMI 没起成（PowerShell 没跑起来：${r.error.message}）` };
       if (r.status !== 0) {
         return {
@@ -102,7 +116,7 @@ export function spawnDetached(file, args, { cwd, platform = process.platform, ru
       if (!(pid > 0)) return { ok: false, why: 'WMI 说起成了，可没给进程号' };
       return { ok: true, pid, how: 'wmi' };
     }
-    const child = spawn(file, [...args], { cwd, detached: true, stdio: 'ignore' });
+    const child = spawn(file, [...args], { cwd, env, detached: true, stdio: 'ignore' });
     child.on('error', () => {}); // 起不来时 pid 是 undefined，下面照实报；这里只免得没人接的 error 把调用方崩掉
     child.unref();
     if (typeof child.pid !== 'number') return { ok: false, why: `起不来：${file}` };
