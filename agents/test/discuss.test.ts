@@ -137,6 +137,9 @@ function fakeCursor(): string {
     [
       "if (process.argv.includes('status')) {",
       "  process.stdout.write(JSON.stringify({ status: 'x', isAuthenticated: process.env.FAKE_LOGGED === '1' }));",
+      "} else if (process.argv.includes('models')) {",
+      "  process.stdout.write(process.env.FAKE_MODELS ?? 'Available models\\ngpt-5.6-luna-high - GPT\\nkimi-k3-low - Kimi\\nglm-5.2-high - GLM\\ngrok-4.7-low-fast - Grok\\n');",
+      '  process.exitCode = Number(process.env.FAKE_MODELS_EXIT ?? 0);',
       '} else {',
       "  let stdinData = '';",
       "  process.stdin.on('data', (d) => {",
@@ -339,6 +342,62 @@ describe('ask.mjs：这台机器缺 cursor-agent', SLOW, () => {
     });
     expect(r.code).toBe(2);
     expect(r.out).toContain('没答上：退出码 0 但没有输出');
+  });
+});
+
+describe('ask.mjs：按当前 Cursor 账号能力选择，family 之间不冒充', SLOW, () => {
+  it('默认 GPT 整族缺失时明确失败，不让 auto/composer 显示名或其他 family 冒充', () => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: {
+        FAKE_LOGGED: '1',
+        FAKE_ANSWER: '不该调用模型',
+        FAKE_MODELS: 'Available models\nauto - GPT\ncomposer-2.5 - GPT\nkimi-k3-low - Kimi\n',
+      },
+    });
+    expect(r.code).toBe(2);
+    expect(r.out).toContain('当前 Cursor 账号无可用 gpt 型号');
+    expect(r.out).not.toContain('不该调用模型');
+  });
+
+  it('偏好 id 缺失时选择真实同族项；显式 GPT 失败不妨碍 Kimi 独立回答', () => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--models', 'gpt,kimi'], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: {
+        FAKE_LOGGED: '1',
+        FAKE_ANSWER: '合法同族答案',
+        FAKE_MODELS: 'Available models\nkimi-k9-low - Kimi\n',
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('当前 Cursor 账号无可用 gpt 型号');
+    expect(r.out).toContain('## kimi（kimi-k9-low');
+    expect(r.out).toContain('合法同族答案');
+    expect(r.out).not.toContain('kimi-k3-low');
+  });
+
+  it.each([
+    { FAKE_MODELS: 'Available models\ngpt-current-high - GPT\n', FAKE_MODELS_EXIT: '9' },
+    { FAKE_MODELS: '格式变了，不能认作空列表' },
+  ])('列表没读成时一家都不问，也不使用静态旧 id', (failure) => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1'], {
+      home: temp('home'),
+      path: fakeCursor(),
+      env: { FAKE_LOGGED: '1', FAKE_ANSWER: '不该调用模型', ...failure },
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toMatch(/型号列表.*(?:读取失败|格式认不出)/);
+    expect(r.out).not.toContain('不该调用模型');
+  });
+
+  it.each(['31', 'NaN', '0'])('limit %s 不得绕过30秒上限', (limit) => {
+    const r = run('ask.mjs', ['--text', topic(LONG), '--round', '1', '--limit', limit], {
+      home: temp('home'),
+    });
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('不超过 30 秒');
   });
 });
 

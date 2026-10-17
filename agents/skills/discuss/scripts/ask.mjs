@@ -9,21 +9,19 @@
 // 退出码：0 至少一家答上；2 一家都没答上、参数不对，或这台机器缺 cursor-agent。
 // 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；五家齐跑 + 工人把进程数顶满、宿主崩过）。
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MODELS, readCursorModels, resolveModel } from './cursor-models.mjs';
+import { stopProcessTree } from './cursor-process.mjs';
 import { cursorAgentEnv, cursorAgentProblem, dataDir } from './tools.mjs';
 import { missingWalkthrough } from './walkthrough.mjs';
 
-export const MODELS = {
-  gpt: 'gpt-5.6-luna-high',
-  kimi: 'kimi-k3-low',
-  glm: 'glm-5.2-high',
-  grok: 'grok-4.7-low-fast',
-};
+export { MODELS };
+
 const MAX_PAR = 3;
 
 function args(argv) {
@@ -50,26 +48,6 @@ function args(argv) {
 // 核对码就一律判没答上，不会再被「退出码 0、有输出」当成答了。
 // 只处理本次讨论创建的子树。Windows 的 shell 子孙不受 child.kill() 管；
 // POSIX 用独立进程组，超时时一起终止，不能留下占工作区/管道的执行体。
-function stopProcessTree(child) {
-  if (!(child.pid > 0)) throw new Error('执行体没有 PID，无法确认进程树');
-  if (process.platform === 'win32') {
-    const taskkill = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
-    const r = spawnSync(taskkill, ['/PID', String(child.pid), '/T', '/F'], {
-      encoding: 'utf8',
-      windowsHide: true,
-      timeout: 5000,
-    });
-    if (r.error || r.status !== 0)
-      throw new Error(r.error?.message ?? `taskkill 退出码 ${r.status}：${r.stderr.trim().slice(0, 200)}`);
-  } else {
-    try {
-      process.kill(-child.pid, 'SIGKILL');
-    } catch (e) {
-      if (e?.code !== 'ESRCH') throw e;
-    }
-  }
-}
-
 export function askOne(
   key,
   model,
@@ -159,6 +137,8 @@ export function askOne(
 
 async function main() {
   const o = args(process.argv.slice(2));
+  if (!Number.isFinite(o.limit) || o.limit <= 0 || o.limit > 30)
+    throw new Error('--limit 必须大于 0 且不超过 30 秒');
   if (!o.text) throw new Error('要 --text 题面文件');
   const prompt = readFileSync(o.text, 'utf8');
   if (!prompt.trim()) throw new Error(`${o.text} 是空的`);
@@ -172,10 +152,11 @@ async function main() {
     .map((s) => s.trim())
     .filter(Boolean);
   for (const k of keys)
-    if (!MODELS[k]) throw new Error(`不认识的模型 ${k}（${Object.keys(MODELS).join(' / ')}）`);
+    if (!Object.hasOwn(MODELS, k)) throw new Error(`不认识的模型 ${k}（${Object.keys(MODELS).join(' / ')}）`);
   // 每家都走本机的 cursor-agent：没装、没登录就一家都不问（不然每家都报同一个错，还得等超时）
   const problem = cursorAgentProblem();
   if (problem) throw new Error(problem);
+  const available = await readCursorModels();
   // 题面放进自己建的临时目录（也是 cursor-agent 的工作区）：问完、中途出错都删掉，不在 /tmp 里越攒越多
   const dir = mkdtempSync(join(tmpdir(), 'ask-'));
   let cleanupFailed = false;
@@ -186,7 +167,18 @@ async function main() {
       Array.from({ length: Math.min(MAX_PAR, queue.length) }, async () => {
         while (queue.length) {
           const k = queue.shift();
-          const result = await askOne(k, MODELS[k], prompt, o.limit, dir);
+          const model = resolveModel(k, available);
+          if (!model) {
+            results.push({
+              key: k,
+              model: '无可用型号',
+              ok: false,
+              secs: 0,
+              why: `当前 Cursor 账号无可用 ${k} 型号，未调用其他厂商或 auto`,
+            });
+            continue;
+          }
+          const result = await askOne(k, model, prompt, o.limit, dir);
           cleanupFailed ||= result.cleanupFailed;
           results.push(result);
         }
