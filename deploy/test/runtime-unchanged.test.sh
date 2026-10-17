@@ -126,7 +126,7 @@ UNCHANGED_RC=()
 # 改了源码却没重启仍判红。看门狗用真判法（judgeReleaseAttention），不在这里重写。
 eval "$saved_health_gate"
 settle_services() { :; }
-# shellcheck disable=SC2329 # health_gate 间接调用；后面的待配场景会换掉这份桩
+# shellcheck disable=SC2317,SC2329 # eval 还原的 health_gate 间接调用；后面的待配场景会换掉这份桩
 check_api() { :; }
 check_engine() { :; }
 check_web() { :; }
