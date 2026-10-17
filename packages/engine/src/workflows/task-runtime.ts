@@ -114,6 +114,11 @@ export class TaskRuntime {
    * 老历史重放不读它：patched() 为假时入参和原来一样。
    */
   verifyRecheck: { head: string; criteria: number[]; problems: string[] } | null = null;
+  /**
+   * 已经交给工人的正式「要求改」评审（#2991，task-verify.ts）：review-feedback.ts 的 reviewKey → 交出去时的头。
+   * 同一条（同 PR、同编号、同正文）再读到不再派工；纯状态，只在 patched('review-request-changes') 之后写。
+   */
+  readonly reviewsHanded = new Map<string, string>();
   /** 当前单子正文读出来的交代。点「继续」重读之后换掉，验收用这一份，不用起任务时的旧版。 */
   brief: TaskBrief | null = null;
   /** 轮数用尽、人点「继续」之后重读单子。由 TaskFlow 接上。 */

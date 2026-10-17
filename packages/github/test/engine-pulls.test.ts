@@ -181,6 +181,63 @@ describe('engine-pulls：提交状态', () => {
   });
 });
 
+describe('engine-pulls：读正式评审（#2991）', () => {
+  const reviewsOf = (reply: () => Response) => (req: { path: string }) =>
+    /\/pulls\/7\/reviews$/.test(req.path) ? reply() : undefined;
+
+  it('以引擎机器人读 PR 上全部评审：原文、review id、审的提交、作者原样带回；没写正文是空串', async () => {
+    const { gh, fake } = setup();
+    fake.before.push(
+      reviewsOf(
+        () =>
+          new Response(
+            JSON.stringify([
+              {
+                id: 5560285247,
+                user: { login: 'boss', id: 9, type: 'User' },
+                state: 'CHANGES_REQUESTED',
+                body: '来源认证有洞：别信 payload 里的 sender',
+                commit_id: sha('a'),
+                submitted_at: '2026-10-17T01:00:00Z',
+              },
+              { id: 2, user: null, state: 'COMMENTED', body: null, commit_id: null, submitted_at: null },
+            ]),
+            { status: 200 },
+          ),
+      ),
+    );
+    const got = await gh.claims.listReviews(repo, 7);
+    expect(got).toEqual([
+      {
+        id: 5560285247,
+        author: { login: 'boss', id: 9, type: 'User' },
+        state: 'CHANGES_REQUESTED',
+        body: '来源认证有洞：别信 payload 里的 sender',
+        commitId: sha('a'),
+        submittedAt: '2026-10-17T01:00:00Z',
+      },
+      { id: 2, author: null, state: 'COMMENTED', body: '', commitId: null, submittedAt: null },
+    ]);
+    const calls = fake.calls('GET', /\/pulls\/7\/reviews$/);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.as).toBe('engine');
+    expect(calls[0]?.query.get('per_page')).toBe('100');
+  });
+
+  it('【故意造出的失败】评审列表认不出、GitHub 回 5xx：抛错，不当成没有评审', async () => {
+    const bad = setup();
+    bad.fake.before.push(
+      reviewsOf(() => new Response(JSON.stringify([{ id: 'x', state: 'APPROVED' }]), { status: 200 })),
+    );
+    await expect(bad.gh.claims.listReviews(repo, 7)).rejects.toThrow();
+    const down = setup();
+    down.fake.before.push(
+      reviewsOf(() => new Response(JSON.stringify({ message: 'boom' }), { status: 500 })),
+    );
+    await expect(down.gh.claims.listReviews(repo, 7)).rejects.toThrow();
+  });
+});
+
 describe('engine-pulls：撤自动合并、关 PR、留言', () => {
   it('撤自动合并；关 PR 不删分支；在 PR 上留言同一个 key 只发一次', async () => {
     const { gh, fake } = setup();

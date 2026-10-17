@@ -48,8 +48,9 @@
 
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
-import type { GitHub, RepoRef } from '@fleet-dao/github';
+import type { ClaimsGitHub, GitHub, RepoRef } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
+import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
@@ -61,12 +62,14 @@ import {
 } from '../cold-verify-run.ts';
 import { createStatusMemo } from '../cold-verify-status.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
+import { outstandingChangeRequests } from '../review-feedback.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
 import { type OneShotDeps, OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
 import {
   type ColdVerifyAttach,
   type ColdVerifyInput,
   type ColdVerifyResult,
+  type ReviewChange,
   ROUTE_RETRY_SECONDS,
   SEGMENT_STAGE,
 } from '../task-contract.ts';
@@ -152,6 +155,11 @@ export interface ColdVerifyActivityDeps {
    */
   probe?: AssignedProber;
   memoryAdmission?: MemoryAdmissionDeps;
+  /**
+   * 读 PR 上还没解决的正式「要求改」评审（#2991，reviewChangesReader）：验收有结论时现读，带进结论的 reviewChanges，
+   * 工作流交给下一轮动手会话。读不成抛错（这一次验收按失败分流重试），不回空。不给 = 不读（结论里没有这个字段）。
+   */
+  reviewChanges?: (repo: RepoRef, prNumber: number) => Promise<ReviewChange[]>;
   /** one-shot 落盘的根（<引擎状态目录>/runs）。 */
   runsDir: string;
   /** 一次性会话的登记（#59，real/one-shot-sessions.ts）：切号照它停下这一次验收。不给 = 停不下，切号等它跑完。 */
@@ -909,13 +917,19 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const handoff =
       outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? []) : undefined;
     const notes = [verdict.notes, handoff].filter((n): n is string => n !== undefined && n !== '').join('；');
-    return withUiNote({
-      pass: verdict.pass,
-      problems: verdict.problems,
-      round: verdict.round,
-      ...(notes === '' ? {} : { notes }),
-      ...(outOfScope.length > 0 ? { outOfScope } : {}),
-    });
+    // 有结论了才读正式评审（#2991）：读在会话之后，会话跑着时新交的评审也赶得上这一次
+    return withReviewChanges(
+      withUiNote({
+        pass: verdict.pass,
+        problems: verdict.problems,
+        round: verdict.round,
+        ...(notes === '' ? {} : { notes }),
+        ...(outOfScope.length > 0 ? { outOfScope } : {}),
+      }),
+      deps.reviewChanges,
+      repo,
+      prNumber,
+    );
   };
 
   /**
@@ -947,6 +961,55 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       return `不归我验的 ${items.length} 条没留成言（${errMessage(error).slice(0, 200)}），要人看结论`;
     }
   }
+}
+
+/**
+ * 验收结论带上 PR 上还没解决的正式「要求改」评审（#2991）。没装读评审的口子就原样回（结论里没有 reviewChanges，工作流当没读）。
+ * 读不成抛 PortError（可重试）：这一次验收按失败分流重来，不回空数组冒充「没有评审」。
+ */
+export async function withReviewChanges(
+  result: ColdVerifyResult,
+  read: ((repo: RepoRef, prNumber: number) => Promise<ReviewChange[]>) | undefined,
+  repo: RepoRef,
+  prNumber: number,
+): Promise<ColdVerifyResult> {
+  if (read === undefined) return result;
+  let reviewChanges: ReviewChange[];
+  try {
+    reviewChanges = await read(repo, prNumber);
+  } catch (error) {
+    if (error instanceof PortError) throw error;
+    throw new PortError('REVIEW_READ_FAILED', `读 PR #${prNumber} 的正式评审没读成：${errMessage(error)}`, {
+      retryable: true,
+    });
+  }
+  return { ...result, reviewChanges };
+}
+
+/**
+ * 生产读评审（#2991）：引擎机器人列 PR 上全部评审（翻完页）；认可的审查者照开单白名单（成员表拼的 GithubWhitelist、
+ * isTrusted：人按编号认、自家机器人按编号且 type 是 Bot），挑出还没解决的要求改。两样哪样读不成都抛，不当成没有。
+ */
+export function reviewChangesReader(w: {
+  listReviews: ClaimsGitHub['listReviews'];
+  whitelist: () => Promise<GithubWhitelist>;
+}): (repo: RepoRef, prNumber: number) => Promise<ReviewChange[]> {
+  return async (repo, prNumber) => {
+    const reviews = await mapped(() => w.listReviews(repo, prNumber));
+    let list: GithubWhitelist;
+    try {
+      list = await w.whitelist();
+    } catch (error) {
+      throw new PortError(
+        'REVIEW_TRUST_UNREADABLE',
+        `读认可的审查者（成员白名单）没读成：${errMessage(error)}`,
+        {
+          retryable: true,
+        },
+      );
+    }
+    return outstandingChangeRequests(reviews, (author) => isTrusted(author, list));
+  };
 }
 
 /** 转给人验的留言正文：哪个 PR、哪个头、哪几条、为什么验收方验不了；建议附在后面（不挡）。 */

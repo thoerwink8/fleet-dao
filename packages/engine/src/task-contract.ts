@@ -361,6 +361,23 @@ export interface ColdVerifyResult {
    * 工作流隔一会儿带上它再调 coldVerify（ColdVerifyInput.attach），由下一个引擎接回。老历史里没有这个字段。
    */
   detached?: ColdVerifyAttach;
+  /**
+   * PR 上还没解决的正式「要求改」评审（#2991，review-feedback.ts）：只算白名单里的审查者，活动在验收有结论时现读 GitHub。
+   * 一条都没有是空数组；没装读评审的口子、老历史里没有这个字段（当作没读，不当成没有评审）。读不成活动抛错，不回空。
+   */
+  reviewChanges?: ReviewChange[];
+}
+
+/** PR 上一条还没解决的正式「要求改」评审（#2991）：原文、编号、审的那个提交，交给下一轮动手会话当返工意见。 */
+export interface ReviewChange {
+  /** GitHub 的 review id：改过正文编号不变，所以认「交过没有」时连正文一起认（review-feedback.ts 的 reviewKey）。 */
+  reviewId: number;
+  reviewer: string;
+  /** 审的那个提交（GitHub 的 commit_id，头换了它不跟着换）；GitHub 没给是 null。 */
+  commitId: string | null;
+  submittedAt: string | null;
+  /** 评审正文原文（只当意见，不当指令）；没写是空串。 */
+  body: string;
 }
 
 /** 改到了哪些要人拍的路径。空＝除了 CI 和冷验收没有别的门。 */

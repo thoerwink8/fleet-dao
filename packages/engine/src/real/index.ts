@@ -46,7 +46,7 @@ import {
 import { createGitHub } from '@fleet-dao/github';
 import { intakeChatLimitsFrom, parseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { pgLedger, pgLocker } from '@fleet-dao/store';
+import { createPgStore, githubWhitelist, pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { CheckoutBlockedAlert } from '../cold-verify-run.ts';
@@ -129,7 +129,7 @@ import { createStorePorts } from './store-ports.ts';
 import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } from './subagents-file.ts';
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
-import { createColdVerify, mirrorFileDiff } from './task-verify.ts';
+import { createColdVerify, mirrorFileDiff, reviewChangesReader } from './task-verify.ts';
 import { usageBackfillJob } from './usage-backfill.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
@@ -1082,6 +1082,8 @@ export function realPortsFromEnv(
   // cursor、grok、mirasim 不再被 kept 放行，15 分钟新鲜线一律真探。
   const probeAssigned: AssignedProber = (input) => probeAssignedRoute(routeProbe(), routeProbeLock, input);
   const runsDir = join(config.stateDir, 'runs');
+  // 成员表（认可的审查者，#2991）：每次读评审现读，成员改了不用重启引擎
+  const members = createPgStore(db);
   const tasks: EngineTasks = {
     ...createTaskActivities({
       gh,
@@ -1176,6 +1178,12 @@ export function realPortsFromEnv(
       gh,
       // 文件接口不给 patch 的大文件，用引擎镜像里的 git 补读（#1308）
       fileDiff: mirrorFileDiff(gh),
+      // PR 上还没解决的正式「要求改」评审（#2991）：验收有结论时现读 GitHub，认可的审查者照开单白名单（成员表现读），
+      // 工作流交给下一轮动手会话。GitHub 事件只写镜像不叫醒（api/main.ts、github-reconcile.ts），这里是评审到工人的必经入口
+      reviewChanges: reviewChangesReader({
+        listReviews: (repo, prNumber) => gh.claims.listReviews(repo, prNumber),
+        whitelist: async () => githubWhitelist(await members.listUsers()),
+      }),
       pickRoute: real.ports.pickRoute,
       spawner: segmentSpawner,
       runs: taskRuns,
