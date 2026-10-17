@@ -85,13 +85,15 @@
 //   （不按 RESUME_STREAK_LIMIT 清空；续不上开新会话带同样的意见），不算新的一轮（rt.round 停在 1）；上限换成交付 MAX_FULL_PUSHES 次、
 //   验收被拒 MAX_VERIFY_ROUNDS 次，到了停下等人（fullLimits，不走自动续）。推分支、开 PR、等 CI、冷验收、合并闸和三段一模一样。
 //   三段的单（和老历史 rt.flowMode 为 null）走原来的路，一步不差。
+// - 收树先核对界面截图（#2983，patched('shots-delivery')，cleanup 给 removeWorktree 带 shots）：远端 shots/<单号> 读不到就存进受限归档，
+//   存不成不删树。合并后 PR 说明代码、图片分开写（shotsPrLines，多一次 updatePrBody），有欠项进「还欠什么」。老历史不带 shots，不多调。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
 import type { Limits } from '../limits.ts';
-import type { PrBody, RecordRoundInput, RoundOutcome, Worktree } from '../ports.ts';
+import type { PrBody, RecordRoundInput, RemoveWorktreeResult, RoundOutcome, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import {
@@ -136,6 +138,7 @@ import {
   SKIP_CI_PR_VERIFIED,
   SKIP_CI_SELF_VERIFY,
   selfCheckText,
+  shotsPrLines,
   splitSuggestion,
   stoppedOutcomeOf,
   type TaskPlan,
@@ -653,9 +656,9 @@ class TaskFlow {
   }
 
   /** PR 正文的结构：「做了什么」带最近一次动手会话的最后一条回复（#2723，有截断上限）。 */
-  private prBody(): PrBody {
+  private prBody(shots?: { verified: string[]; owed: string[] }): PrBody {
     const rt = this.rt;
-    return {
+    const body: PrBody = {
       requirement: rt.input.issueNumber,
       did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length, rt.lastAnswer),
       verified: [
@@ -664,13 +667,19 @@ class TaskFlow {
           : 'CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）',
       ],
     };
+    // 合并收树后（#2983）：代码一句、图片一句分开写，图片有欠项进「还欠什么」
+    if (!shots) return body;
+    return { ...body, verified: shots.verified, ...(shots.owed.length > 0 ? { owed: shots.owed } : {}) };
   }
 
   /**
-   * 第 2 轮起推上去后改 PR 正文（#2723）。不抛、不停下：没改成只记日志，PR 和后面的 CI、验收照旧（说明旧一点不挡合并）。
-   * 放弃、叫停照常往外抛。
+   * 第 2 轮起推上去后改 PR 正文（#2723）；合并收树后写图片交付结局（#2983）。不抛、不停下：没改成只记日志，PR 和后面的 CI、
+   * 验收照旧（说明旧一点不挡合并）。放弃、叫停照常往外抛。
    */
-  private async updatePrBody(prNumber: number): Promise<void> {
+  private async updatePrBody(
+    prNumber: number,
+    shots?: { verified: string[]; owed: string[] },
+  ): Promise<void> {
     const rt = this.rt;
     try {
       await rt.cancellable(() =>
@@ -678,7 +687,7 @@ class TaskFlow {
           taskId: rt.input.taskId,
           repo: rt.input.repo,
           prNumber,
-          body: this.prBody(),
+          body: this.prBody(shots),
         }),
       );
     } catch (error) {
@@ -923,7 +932,14 @@ class TaskFlow {
         comment: `已合并：PR #${rt.prNumber}${commit ? `（${commit.slice(0, 7)}）` : ''}`,
       }),
     );
-    await this.cleanup(false);
+    const removed = await this.cleanup(false);
+    // 界面截图的交付结局写进 PR 说明（#2983）：代码合并和图片交付分开写，有欠项不写「无」。只有带了 shots 的新历史才有
+    const prNumber = rt.prNumber;
+    const shots = removed?.shots && prNumber !== null ? shotsPrLines(prNumber, commit, removed.shots) : null;
+    if (shots && prNumber !== null) {
+      if (shots.owed[0]) rt.set('done', `PR #${prNumber} 已合并；${shots.owed[0]}`);
+      await this.updatePrBody(prNumber, shots);
+    }
     await rt.mirror('done');
     return {
       outcome: 'merged',
@@ -934,24 +950,34 @@ class TaskFlow {
     };
   }
 
-  /** 收工作树。没合并就收（放弃、叫停）的先存档。收不掉只记日志：占盘，每小时对账的工作树清扫会收。 */
-  async cleanup(archive: boolean): Promise<void> {
+  /**
+   * 收工作树。没合并就收（放弃、叫停）的先存档。收不掉只记日志：占盘，每小时对账的工作树清扫会收。
+   * 推上去过的（有头）先核对界面截图（#2983，patched('shots-delivery')）：没交付也没存档成，端口不删树、kept 写原因。
+   */
+  async cleanup(archive: boolean): Promise<RemoveWorktreeResult | null> {
     const rt = this.rt;
     const wt = rt.worktree;
-    if (!wt) return;
+    if (!wt) return null;
+    const head = rt.head;
+    const shots =
+      head !== null && patched('shots-delivery') ? { issueNumber: rt.input.issueNumber, head } : null;
     try {
-      await CancellationScope.nonCancellable(() =>
+      const r = await CancellationScope.nonCancellable(() =>
         rt.acts.removeWorktree({
           taskId: rt.input.taskId,
           repo: rt.input.repo,
           path: wt.path,
           branch: rt.branch,
           archive,
+          ...(shots ? { shots } : {}),
         }),
       );
-      rt.worktree = null;
+      if (r.kept) log.warn('工作树留着没删', { kept: r.kept, path: wt.path });
+      else rt.worktree = null;
+      return r;
     } catch (error) {
       log.warn('工作树没收掉（每小时对账的工作树清扫会收）', { error: String(error) });
+      return null;
     }
   }
 
