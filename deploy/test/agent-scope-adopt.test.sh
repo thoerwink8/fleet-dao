@@ -193,6 +193,108 @@ else
   flunk "fs.protected_hardlinks 读不到应拒绝：退出码 $rc，输出「$out」"
 fi
 
+echo "== ensure-tmp：_tmp 是 root:root 755 时改成引擎用户，已经对了不改、不报"
+
+out=$(bash "$BIN" ensure-tmp extra 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *ensure-tmp* ]]; then
+  pass "ensure-tmp 多一个参数：退出码 64"
+else
+  flunk "ensure-tmp 多参数应 64：「$rc」「$out」"
+fi
+
+out=$(AGENT_SCOPE_TEST_ENGINE_USER=no-such-fleet-et bash "$BIN" ensure-tmp 2>&1)
+rc=$?
+if ((rc == 64)) && [[ "$out" == *"$WORK/_tmp"* ]]; then
+  pass "引擎用户不存在：退出码 64，信息里有目录路径"
+else
+  flunk "引擎用户不存在应 64 且带路径：「$rc」「$out」"
+fi
+
+EU=fleet-et-$$
+meta() { stat -c '%U:%G %a' -- "$1" 2>/dev/null || printf '不存在'; }
+roundtrip() { # 父目录
+  local name=$1/verify-assert-$$ err rc=0
+  err=$(runuser -u "$EU" -- mkdir -- "$name" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    flunk "引擎用户 $EU 在 $1 下 mkdir 失败（$name）：$err"
+    return 1
+  fi
+  rc=0
+  err=$(runuser -u "$EU" -- rmdir -- "$name" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    flunk "引擎用户 $EU 在 $1 下 rmdir 失败（$name）：$err"
+    rm -rf -- "$name"
+    return 1
+  fi
+  pass "引擎用户在 $1 下 mkdir 再 rmdir"
+}
+if ! command -v runuser >/dev/null || ! command -v useradd >/dev/null || ! command -v userdel >/dev/null; then
+  echo "  没跑成：没有 runuser/useradd/userdel，ensure-tmp 的属主测不了"
+  skipped=1
+elif ! useradd --system --user-group --home-dir "$WORK/eu-home" --create-home --shell /bin/bash "$EU" >/dev/null 2>&1; then
+  echo "  没跑成：建不了临时用户 $EU"
+  skipped=1
+else
+  chmod 755 "$WORK"
+  drop_eu() {
+    pkill -KILL -u "$EU" >/dev/null 2>&1 || true
+    userdel "$EU" >/dev/null 2>&1 || true
+    groupdel "$EU" >/dev/null 2>&1 || true
+  }
+  trap 'drop_eu; rm -rf -- "$WORK" "$OUTSIDE"; rm -f -- "$HARDLINKS_ON"' EXIT
+
+  echo "== ensure-tmp 1. 还没有 _tmp：建出来，引擎用户能 mkdir 再 rmdir"
+  rm -rf -- "$WORK/_tmp"
+  out=$(AGENT_SCOPE_TEST_ENGINE_USER=$EU bash "$BIN" ensure-tmp 2>&1)
+  rc=$?
+  if ((rc == 0)) && [[ -z "$out" ]] && [[ "$(meta "$WORK/_tmp")" == "$EU:$EU 755" ]]; then
+    pass "没有 _tmp：建出来归引擎用户 755，没有报错"
+  else
+    flunk "没有 _tmp 时应归 $EU 755、退出 0、无输出：「$rc」「$(meta "$WORK/_tmp")」「$out」"
+  fi
+  roundtrip "$WORK/_tmp"
+
+  echo "== ensure-tmp 2. 已是 root:root 755：只改这一层，里面的会话目录不动，修完能 mkdir"
+  rm -rf -- "$WORK/_tmp"
+  mkdir -m 755 "$WORK/_tmp"
+  mkdir -m 700 "$WORK/_tmp/sess-keep"
+  chown root:root "$WORK/_tmp" "$WORK/_tmp/sess-keep"
+  before_child=$(meta "$WORK/_tmp/sess-keep")
+  rc=0
+  err=$(runuser -u "$EU" -- mkdir -- "$WORK/_tmp/verify-before" 2>&1) || rc=$?
+  if ((rc == 0)); then
+    rm -rf -- "$WORK/_tmp/verify-before"
+    flunk "修之前不该建得成：$WORK/_tmp"
+  elif [[ "$err" != *"$WORK/_tmp"* ]]; then
+    flunk "修之前失败信息没有目录路径 $WORK/_tmp：「$err」"
+  else
+    pass "修之前 mkdir 失败，信息里有 $WORK/_tmp"
+  fi
+  out=$(AGENT_SCOPE_TEST_ENGINE_USER=$EU bash "$BIN" ensure-tmp 2>&1)
+  rc=$?
+  if ((rc == 0)) && [[ "$(meta "$WORK/_tmp")" == "$EU:$EU 755" ]] && [[ "$(meta "$WORK/_tmp/sess-keep")" == "$before_child" ]]; then
+    pass "修复后 _tmp 归引擎用户，里面的 sess-keep 属主没动"
+  else
+    flunk "修复没对（退出 $rc，_tmp「$(meta "$WORK/_tmp")」，子目录「$(meta "$WORK/_tmp/sess-keep")」应为「$before_child」）：$out"
+  fi
+  roundtrip "$WORK/_tmp"
+
+  echo "== ensure-tmp 3. 已经归引擎用户：再跑不改权限、不报错"
+  snap_tmp=$(meta "$WORK/_tmp")
+  snap_child=$(meta "$WORK/_tmp/sess-keep")
+  out=$(AGENT_SCOPE_TEST_ENGINE_USER=$EU bash "$BIN" ensure-tmp 2>&1)
+  rc=$?
+  if ((rc == 0)) && [[ -z "$out" ]] && [[ "$(meta "$WORK/_tmp")" == "$snap_tmp" ]] &&
+    [[ "$(meta "$WORK/_tmp/sess-keep")" == "$snap_child" ]]; then
+    pass "已经归引擎用户：权限没变、子目录没变、没有报错"
+  else
+    flunk "绿路径被改了或报错了（退出 $rc，_tmp「$(meta "$WORK/_tmp")」应为「$snap_tmp」，输出「$out」）"
+  fi
+  roundtrip "$WORK/_tmp"
+  drop_eu
+fi
+
 echo "== 正常路径（chown、建）"
 
 U=fleet-agent-carpool

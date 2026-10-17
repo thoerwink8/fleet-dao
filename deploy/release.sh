@@ -24,6 +24,9 @@ umask 022
 DEPLOY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 source "$DEPLOY_DIR/lib/common.sh"
+# ensure_work_tmp：发版在引擎起来之前把 _tmp 改成引擎用户。只定义函数，ENGINE_USER=fleet。
+# shellcheck source=lib/human-tier.sh
+source "$DEPLOY_DIR/lib/human-tier.sh"
 # 期望里登记的会话代理（FLEET_SESSION_PROXY，#786）：发布取代码、装依赖经它出网，登记成空＝直连（法国就是这样）。
 # lib/session-proxy.sh 只管读期望（一律读 deploy/france/desired-config.json）。
 # shellcheck source=lib/session-proxy.sh
@@ -1441,6 +1444,22 @@ socket_listening() { # 服务名（不带后缀）
   return 1
 }
 
+# 换上这一版的帮手脚本（sudoers 已放行这个路径）。内容一样就不动。测试把这个函数换成桩，免得写到真的 /usr/local/sbin。
+install_scope_helper() { # 这一版的目录
+  local src=$1/deploy/france/fleet-agent-scope.sh dest=/usr/local/sbin/fleet-agent-scope
+  if [[ ! -f "$src" ]]; then
+    red "这一版没有 $src，换不了 fleet-agent-scope"
+    return 1
+  fi
+  put_file "$dest" root:root 755 "$(<"$src")"
+}
+
+# 引擎起来之前：_tmp 归引擎用户，冷验收才能在下面 mkdir。测试换成桩，不碰真的 /var/lib/fleet-work。
+fix_work_tmp() {
+  local WORK_DIR=/var/lib/fleet-work
+  ensure_work_tmp
+}
+
 # 切到这一版：current 指过去；本机启用的服务装上这一版的单元、起来——主进程不在这一版的目录里（包括上次切完
 # current、还没重启完就被打断）、或单元、环境文件变了，就重启；没启用的停掉撤掉；静态文件发到香港。
 # 哪一步不成就记红、返回 1，退不退由调用方定。socket 单元先同步：装不上就不切 current。
@@ -1489,6 +1508,9 @@ activate() { # 提交号 事件（release / rollback / auto-rollback）
     red "systemctl daemon-reload 失败"
     return 1
   fi
+  # 先换帮手、再改 _tmp，然后才起引擎。自动档要等检出对齐才跑，新引擎一切进来就会验收。
+  install_scope_helper "$dir" || return 1
+  fix_work_tmp || return 1
   for u in $FLEET_SERVICES; do
     restart=0
     if [[ "${fresh[$u]:-0}" == 1 || "${socket_force[$u]:-0}" == 1 ]] || env_changed_since_start "$u.service"; then
