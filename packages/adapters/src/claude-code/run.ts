@@ -7,7 +7,8 @@ import { assertNoForbiddenEnv, buildSessionEnv, type SessionEnvInput } from '../
 import { judgeRun, type RunFacts, type RunSummary, type RunVerdict } from '../judge.ts';
 import type { AgentProcessResult, ProcessLimits } from '../process.ts';
 import type { CgroupScope } from '../procs.ts';
-import { lastLines, optional } from '../stream-kit.ts';
+import { redact } from '../quota/util.ts';
+import { lastLines, looksLikeQuotaExhausted, optional } from '../stream-kit.ts';
 import { buildClaudeArgs, type ClaudeArgsSpec, type ClaudeSession, PRETOOL_SCRIPT } from './args.ts';
 import {
   type ClaudeResult,
@@ -143,10 +144,34 @@ export async function runClaudeCode(
   };
 }
 
+/** 错误通道的原文单独保留：空终帧不能覆盖助手错误帧，成功重试不把旧报错当成本轮失败。 */
+export function claudeErrorText(report: ClaudeCodeRunReport): string | undefined {
+  const result = report.stream.result;
+  if (result && !result.isError) return undefined;
+  const parts = [report.stream.apiError?.text, result?.text, report.stderrTail]
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part));
+  const distinct = parts.filter(
+    (part, i) => !parts.some((other, j) => other.includes(part) && (other.length > part.length || j < i)),
+  );
+  const text = distinct
+    .map((part) =>
+      part
+        .split('\n')
+        .map((line) => redact(line, 4000))
+        .join('\n'),
+    )
+    .join('\n');
+  return text || undefined;
+}
+
 /** 把报告整理成通用的判定事实。 */
 export function claudeRunFacts(report: ClaudeCodeRunReport): RunFacts {
   const r = report.stream.result;
   const apiError = report.stream.apiError;
+  const errorText = claudeErrorText(report);
+  // 上游临时限流会说“not your usage limit”，这是否定额度故障，不能因此换池。
+  const quotaText = errorText?.replace(/\bnot (?:your |a |the )?usage limit/gi, '');
   return {
     ...(report.spawnError ? { spawnError: report.spawnError } : {}),
     ...(report.killed
@@ -163,15 +188,16 @@ export function claudeRunFacts(report: ClaudeCodeRunReport): RunFacts {
               r.terminalReason,
               apiError?.code,
               r.apiErrorStatus === undefined ? undefined : `HTTP ${r.apiErrorStatus}`,
-              r.text?.slice(0, 300),
+              errorText ?? r.text?.slice(0, 300),
             ]
               .filter((x) => x)
               .join(' · '),
           },
         }
       : {}),
-    quotaExhausted: report.stream.rateLimits.some((reading) => reading.exhausted),
-    ...optionalWords(lastLines(report.stderrTail)),
+    quotaExhausted:
+      report.stream.rateLimits.some((reading) => reading.exhausted) || looksLikeQuotaExhausted(quotaText),
+    ...optionalWords(errorText ?? lastLines(report.stderrTail)),
   };
 }
 

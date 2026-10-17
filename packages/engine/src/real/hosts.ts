@@ -56,6 +56,7 @@ import {
   type CursorRunOptions,
   type CursorRunReport,
   type CursorRunSpec,
+  claudeErrorText,
   claudeRunFacts,
   cursorRunFacts,
   type DetachedIo,
@@ -519,6 +520,7 @@ export function claudeReport(report: ClaudeCodeRunReport): HostReport {
     ...defined('resetsAt', resetsAt),
     ...defined('httpStatus', r?.apiErrorStatus),
     ...defined('answer', r?.text),
+    ...defined('rawError', claudeErrorText(report)),
     wallMs: report.wallMs,
     stderrTail: report.stderrTail,
   };

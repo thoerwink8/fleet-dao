@@ -38,6 +38,11 @@ export interface ProbeHistoryCell {
   result: ProbeHistoryResult;
   durationMs: number | null;
   failureReason: string | null;
+  /** 真实结论独立于连通结果；老行未写时不给，不能把额度耗尽画成普通成功。 */
+  detail?: string | null | undefined;
+  quotaExhausted?: boolean | undefined;
+  /** 上游明确给出的重置时间（ISO），未知不给。 */
+  resetsAt?: string | undefined;
   requestText: string | null;
   responseText: string | null;
   /** 身份题的五项；老行、没带题的探测都是 null，不当空串。 */

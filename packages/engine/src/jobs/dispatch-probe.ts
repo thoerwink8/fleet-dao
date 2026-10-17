@@ -57,6 +57,8 @@ async function writeConclusion(
     durationMs: number | null;
     requestText: string | null;
     responseText: string | null;
+    quotaExhausted?: boolean;
+    resetsAt?: Date | null;
     check?: ProbeCheck | null;
     tier?: Conclusion['tier'];
     nextAt?: Conclusion['nextAt'];

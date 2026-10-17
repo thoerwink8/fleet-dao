@@ -25,6 +25,34 @@ async function history(h: Pick<Harness, 'cockpit'>, cookie: string) {
 }
 
 describe('探针历史接口', () => {
+  it('连通但额度耗尽以结构化字段和原文返回，旧记录不伪造原因或重置时间', async () => {
+    current = await pgHarness(t, { probeHistory: pgProbeHistory(t.db) });
+    const { cookie } = await current.login();
+    const before = await history(current, cookie);
+    if (before.state !== 'ok') throw new Error('读不到历史');
+    const old = before.latestByRoute.find((r) => r.routeId === 'rt-claude-opus');
+    expect(old).not.toHaveProperty('quotaExhausted');
+    expect(old).not.toHaveProperty('resetsAt');
+    const detail = '额度用满被拒：拼车 5 小时额度已用完';
+    await saveRouteProbe(t.db, {
+      routeId: 'rt-claude-opus',
+      state: 'ok',
+      at: new Date(T0.getTime() + 1000),
+      detail,
+      quotaExhausted: true,
+      resetsAt: new Date(T0.getTime() + 60_000),
+      responseText: '拼车 5 小时额度已用完',
+    });
+    const body = await history(current, cookie);
+    if (body.state !== 'ok') throw new Error('读不到历史');
+    expect(body.latestByRoute.find((r) => r.routeId === 'rt-claude-opus')).toMatchObject({
+      result: 'passed',
+      failureReason: null,
+      quotaExhausted: true,
+      detail,
+      resetsAt: new Date(T0.getTime() + 60_000).toISOString(),
+    });
+  });
   it('没接上：写没查成，不回空的 channels 冒充没有历史', async () => {
     const h = harness();
     const { cookie } = await h.login();

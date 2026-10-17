@@ -244,6 +244,8 @@ export interface RouteProbeWrite {
   requestText?: string | null;
   /** 响应原文。没拿到不给或给 null。超长截断并标注。 */
   responseText?: string | null;
+  quotaExhausted?: boolean;
+  resetsAt?: Date | null;
   /** 降智检测（#1637）。没带题不给或给 null：五列都写空，不当空串。超长截断并标注。 */
   check?: ProbeCheck | null;
   /**
@@ -264,6 +266,9 @@ export interface RouteProbeHistoryRow {
   result: RouteProbeHistoryResult;
   durationMs: number | null;
   failureReason: string | null;
+  detail: string | null;
+  quotaExhausted: boolean | null;
+  resetsAt: Date | null;
   requestText: string | null;
   responseText: string | null;
   checkQuestion: string | null;
@@ -347,6 +352,9 @@ export async function saveRouteProbe(db: Db, w: RouteProbeWrite): Promise<'saved
       durationMs: w.durationMs ?? null,
       // 通过没有失败原因。不通、没探用这条结论的原因；超长同样截断。
       failureReason: result === 'passed' ? null : clipProbeText(w.detail),
+      detail: clipProbeText(w.detail),
+      quotaExhausted: w.quotaExhausted ?? null,
+      resetsAt: w.resetsAt ?? null,
       requestText: clipOrNull(w.requestText),
       responseText: clipOrNull(w.responseText),
       checkQuestion: clipOrNull(w.check?.question),
@@ -381,6 +389,9 @@ export interface ProbeHistoryJoined {
   result: RouteProbeHistoryResult;
   durationMs: number | null;
   failureReason: string | null;
+  detail: string | null;
+  quotaExhausted: boolean | null;
+  resetsAt: Date | null;
   requestText: string | null;
   responseText: string | null;
   checkQuestion: string | null;
@@ -453,6 +464,9 @@ export async function readProbeHistoryJoined(db: Db): Promise<ProbeHistoryJoined
         result: routeProbeHistory.result,
         durationMs: routeProbeHistory.durationMs,
         failureReason: routeProbeHistory.failureReason,
+        detail: routeProbeHistory.detail,
+        quotaExhausted: routeProbeHistory.quotaExhausted,
+        resetsAt: routeProbeHistory.resetsAt,
         requestText: routeProbeHistory.requestText,
         responseText: routeProbeHistory.responseText,
         checkQuestion: routeProbeHistory.checkQuestion,
@@ -494,6 +508,9 @@ export async function readRouteProbeHistory(
         result: routeProbeHistory.result,
         durationMs: routeProbeHistory.durationMs,
         failureReason: routeProbeHistory.failureReason,
+        detail: routeProbeHistory.detail,
+        quotaExhausted: routeProbeHistory.quotaExhausted,
+        resetsAt: routeProbeHistory.resetsAt,
         requestText: routeProbeHistory.requestText,
         responseText: routeProbeHistory.responseText,
         checkQuestion: routeProbeHistory.checkQuestion,
