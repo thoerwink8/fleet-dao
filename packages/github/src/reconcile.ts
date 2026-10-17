@@ -85,6 +85,11 @@ export interface MergedPrAuditReport extends AuditReport {
    * 没有「没经合并队列」那条发现，调用方仍要按这个把已经开着的 reconcile:pr 撤掉。
    */
   engineCiTimingsPrs?: number[];
+  /**
+   * 这一轮看到的、我们机器人开的、合并人是「引擎」、账上（这一轮之前）已有合并记录的 PR 号。自动合并是 GitHub 合的，
+   * 合并记录要等任务工作流看到合并后才记上，对账赶在中间看见就报了没有合并记录；调用方按这个撤掉已经开着的 reconcile:pr。
+   */
+  cleanPrs?: number[];
 }
 
 export interface ReconcilerOptions {
@@ -314,6 +319,7 @@ export async function auditMergedPrs(
   }
   const findings: MergedPrFinding[] = [];
   const engineCiTimingsPrs: number[] = [];
+  const cleanPrs: number[] = [];
   const note = (
     number: number,
     kind: MergedPrFinding['kind'],
@@ -328,6 +334,7 @@ export async function auditMergedPrs(
     problems: findings.map((f) => f.text),
     findings,
     engineCiTimingsPrs,
+    cleanPrs,
   });
   try {
     outer: for await (const page of client.pages({
@@ -394,6 +401,8 @@ export async function auditMergedPrs(
           // 耗时表（isEngineCiTimingsPr）不报这一条，只补账。别的引擎 PR（包括 fleet/ 任务分支）照报。
           const key = mergeKey(repo, item.number, pr.head.sha);
           const existing = await ledger.idempotency.peek(key);
+          // 「引擎」合的、账上已有合并记录：记下来给上面撤旧提醒（合并后记账晚了一步、先前一轮报了的）。
+          if (existing?.completedAt && mergedByEngine) cleanPrs.push(item.number);
           if (!existing?.completedAt) {
             if (!isEngineCiTimingsPr(who)) {
               note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录', who);
