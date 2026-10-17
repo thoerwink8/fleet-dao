@@ -72,7 +72,7 @@ mkdir -p "$RELEASES"
 ln -sfn "$BASE" "$RELEASES/current"
 echo 0 >"$TMP/pauses"
 fetch_code() { SHA=$1; ON_MAIN=1; }
-build_release() { :; }
+build_release() { mkdir -p "$RELEASES/$1"; }
 hk_reachable() { :; }
 schema_allows() { :; }
 drain_request() { :; }
@@ -126,6 +126,7 @@ UNCHANGED_RC=()
 # 改了源码却没重启仍判红。看门狗用真判法（judgeReleaseAttention），不在这里重写。
 eval "$saved_health_gate"
 settle_services() { :; }
+# shellcheck disable=SC2329 # health_gate 间接调用；后面的待配场景会换掉这份桩
 check_api() { :; }
 check_engine() { :; }
 check_web() { :; }
@@ -253,6 +254,50 @@ check_running_release "$docs_sha" >"$TMP/empty.out" 2>&1
 check "主进程没在跑：只改文档也判红" "$?" 1
 grep -qF '没在跑' "$TMP/empty.out"
 check "主进程没在跑：写明没在跑" "$?" 0
+
+build_fixture=$TMP/build-reserved
+mkdir -p "$build_fixture"
+printf '构建文件不可信\n' >"$build_fixture/.runtime-fleet-engine"
+printf '构建文件不可信\n' >"$build_fixture/.runtime-fleet-api.new"
+printf '保留目标\n' >"$TMP/build-protected"
+ln -s "$TMP/build-protected" "$build_fixture/.runtime-fleet-api"
+ln -s "$TMP/build-protected" "$build_fixture/.runtime-fleet-engine.new"
+clear_runtime_matches "$build_fixture"
+check "构建保留名的文件和链接全部清除" "$(find "$build_fixture" -mindepth 1 | wc -l)" 0
+check "清构建保留名不跟随链接" "$(cat "$TMP/build-protected")" 保留目标
+
+# 闭包免重启、带独立待配项的真发布：exit 2 不能让健康接口把合法沿用当成没切版本。
+# current 已前进一版而进程仍是 BASE：凭据必须核实际 BASE → src，不能只记 current → src。
+printf '%s' "$RELEASES/$BASE" >"$TMP/proc"
+ln -sfn "$docs_sha" "$RELEASES/current"
+mkdir -p "$RELEASES/$src_sha/deploy/lib"
+printf 'console.log("不在运行闭包里"); process.exit(0);\n' >"$RELEASES/$src_sha/deploy/lib/runtime-closure.mjs"
+UNCHANGED_RC=()
+check_api() { pending '独立的待配项'; }
+release_rc "$src_sha" "$TMP/pending.out"
+check "闭包免重启加独立待配：发布退出 2" "$?" 2
+check "闭包免重启加独立待配：current 已切目标" "$(current_sha)" "$src_sha"
+check "凭据绑定实际进程而非上一轮 current" "$(cat "$RELEASES/$src_sha/.runtime-fleet-engine")" "$src_sha $BASE fleet-engine"
+check "后端凭据独立绑定服务" "$(cat "$RELEASES/$src_sha/.runtime-fleet-api")" "$src_sha $BASE fleet-api"
+rm -f "$RELEASES/$src_sha/.runtime-fleet-engine"
+proof_before="$(sha256sum "$RELEASES/$src_sha/.runtime-fleet-api") $(stat -c %Y "$RELEASES/$src_sha/.runtime-fleet-api")"
+check_running_release "$src_sha" >/dev/null
+check "另一次只读检查认可闭包沿用" "$?" 0
+check "只读检查不生成凭据" "$([[ -e "$RELEASES/$src_sha/.runtime-fleet-engine" ]] && echo 有 || echo 无)" 无
+check "只读检查不改已有凭据字节或mtime" "$(sha256sum "$RELEASES/$src_sha/.runtime-fleet-api") $(stat -c %Y "$RELEASES/$src_sha/.runtime-fleet-api")" "$proof_before"
+# 旧凭据不能留到新的、不匹配的进程；预置 symlink 也只能被替换，不能沿链接写它的目标。
+printf '保留内容\n' >"$TMP/protected"
+ln -sfn "$TMP/protected" "$RELEASES/$src_sha/.runtime-fleet-engine"
+record_runtime_matches "$src_sha" >/dev/null
+check "预置凭据链接的目标未被改写" "$(cat "$TMP/protected")" 保留内容
+check "已核实的凭据是普通文件而非链接" "$([[ ! -L "$RELEASES/$src_sha/.runtime-fleet-engine" ]] && echo 是 || echo 否)" 是
+printf 'const i = process.argv.indexOf("--service"); process.exit(process.argv[i+1] === "engine" ? 0 : 10);\n' >"$RELEASES/$src_sha/deploy/lib/runtime-closure.mjs"
+UNCHANGED_RC=()
+record_runtime_matches "$src_sha" >/dev/null
+check "两服务分别核闭包：只给未变化的引擎记凭据" "$([[ -f "$RELEASES/$src_sha/.runtime-fleet-engine" && ! -e "$RELEASES/$src_sha/.runtime-fleet-api" ]] && echo 是 || echo 否)" 是
+printf '' >"$TMP/proc"
+record_runtime_matches "$src_sha" >/dev/null
+check "实际进程消失：旧凭据清掉" "$([[ -e "$RELEASES/$src_sha/.runtime-fleet-engine" ]] && echo 有 || echo 无)" 无
 
 if ((fail)); then echo "runtime-unchanged：不通过"; echo '--- docs ---'; cat "$TMP/docs.out"; echo '--- src ---'; cat "$TMP/src.out"; exit 1; fi
 echo "runtime-unchanged：通过"

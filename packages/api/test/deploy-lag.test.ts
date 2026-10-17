@@ -505,6 +505,7 @@ describe('读法国上的现状', () => {
     symlinkSync(H2, join(d, 'current'));
     const read = (diff: readonly string[]) =>
       readDeployLagInput(d, {
+        proofUid: process.getuid?.() ?? 0,
         readProc: () => ({ sha: H1 }),
         diffNames: () => diff,
       });
@@ -518,6 +519,14 @@ describe('读法国上的现状', () => {
     const aligned = readDeployLagInput(d, { readProc: () => ({ sha: H2 }) });
     expect(judge(aligned).ok).toBe(true);
     expect(versionFact(aligned, NOW).current).toBe(H2);
+    for (const unit of ['fleet-engine', 'fleet-api']) {
+      writeFileSync(join(d, H2, `.runtime-${unit}`), `${H2} ${H1} ${unit}\n`);
+    }
+    const retained = read(['agents/hooks/plugin-loader.mjs']);
+    expect(judge(retained).ok).toBe(true);
+    expect(versionFact(retained, NOW).current).toBe(H2);
+    writeFileSync(join(d, H2, '.runtime-fleet-api'), `${H2} ${H0} fleet-api\n`);
+    expect(judge(read(['agents/hooks/plugin-loader.mjs'])).ok).toBe(false);
   });
 });
 
