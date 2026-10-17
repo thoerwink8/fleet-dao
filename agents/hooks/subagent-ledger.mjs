@@ -143,10 +143,10 @@ export function liftPolicy(home, at) {
 export const stampPath = (home) => join(home, 'subagent-stats-stamp.json');
 
 /**
- * 收轮前对账顺手跑 --enforce 的便条（subagent-stats-stamp.json）：startedAt 是上次起后台进程的时刻（限频用），
+ * 收轮前对账顺手跑 --enforce 的便条（subagent-stats-stamp.json）：startedAt、pid 记录上次已创建的进程，attemptedAt 控制失败重试，
  * at 和 ok 是 --enforce 上次跑完的时刻和成没成，report 是还没给人看的一句话（看过就清成 null）。读不了、读不懂都当没有。
  * @param {string} home
- * @returns {{ startedAt?: string, at?: string, ok?: boolean, report?: string | null }}
+ * @returns {{ startedAt?: string, attemptedAt?: string, pid?: number, at?: string, ok?: boolean, report?: string | null }}
  */
 export function readStamp(home) {
   try {

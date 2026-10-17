@@ -313,7 +313,19 @@ describe('startEnforce：起后台进程、限频、把后台留的话说出来'
     (calls: unknown[][]) =>
     (...a: unknown[]) => {
       calls.push(a);
-      return { on: () => {}, unref: () => {} };
+      const opts = a[0] as { statePath: string; now: number; timeoutMs: number };
+      mkdirSync(join(opts.statePath, '..'), { recursive: true });
+      writeFileSync(
+        opts.statePath,
+        JSON.stringify({
+          startedAt: opts.now,
+          pid: process.pid,
+          receipt: `${opts.statePath}.result`,
+          timeoutMs: opts.timeoutMs,
+        }),
+      );
+      writeFileSync(`${opts.statePath}.result`, JSON.stringify({ kind: 'done', at: opts.now }));
+      return { ok: true, pid: process.pid, how: 'setsid' };
     };
 
   it('起一个脱离的 node 进程跑 subagent-stats.ts --enforce；6 小时内不再起', () => {
@@ -324,10 +336,10 @@ describe('startEnforce：起后台进程、限频、把后台留的话说出来'
       ran: true,
     });
     expect(calls).toHaveLength(1);
-    const args = (calls[0]?.[1] ?? []) as string[];
+    const args = ((calls[0]?.[0] ?? {}) as { args: string[] }).args;
     expect(String(args[0])).toMatch(/subagent-stats\.ts$/);
     expect(args[1]).toBe('--enforce');
-    expect(calls[0]?.[2]).toMatchObject({ detached: true, stdio: 'ignore' });
+    expect(calls[0]?.[0]).toMatchObject({ cwd: '/repo', timeoutMs: 600_000, env: { FLEET_DAO_HOME: home } });
     const soon = new Date(t0.getTime() + 3600 * 1000);
     start.startEnforce('/repo', { home, now: () => soon, spawnFn: fakeSpawn(calls) });
     expect(calls).toHaveLength(1);
@@ -358,5 +370,54 @@ describe('startEnforce：起后台进程、限频、把后台留的话说出来'
     const deps = { home, now: () => new Date(), spawnFn: fakeSpawn([]) };
     expect(start.startEnforce('/repo', deps).notice).toMatch(/已收回/);
     expect(start.startEnforce('/repo', deps).notice).toBeUndefined();
+  });
+
+  it('启动失败不写 startedAt，失败限频一分钟而非六小时', () => {
+    const home = tmp();
+    const t0 = new Date('2026-10-16T00:00:00.000Z');
+    let calls = 0;
+    const spawnFn = () => {
+      calls += 1;
+      return { ok: false, why: 'WMI denied' };
+    };
+    expect(start.startEnforce('/repo', { home, now: () => t0, spawnFn }).ran).toBe(false);
+    expect(
+      JSON.parse(readFileSync(join(home, 'subagent-stats-stamp.json'), 'utf8')).startedAt,
+    ).toBeUndefined();
+    start.startEnforce('/repo', { home, now: () => new Date(t0.getTime() + 30_000), spawnFn });
+    expect(calls).toBe(1);
+    start.startEnforce('/repo', { home, now: () => new Date(t0.getTime() + 61_000), spawnFn });
+    expect(calls).toBe(2);
+  });
+
+  it('只记了 startedAt 或后台已早退，都能在六小时内按证据重试', () => {
+    for (const dead of [false, true]) {
+      const home = tmp();
+      const t0 = Date.parse('2026-10-16T00:00:00.000Z');
+      mkdirSync(home, { recursive: true });
+      writeFileSync(
+        join(home, 'subagent-stats-stamp.json'),
+        JSON.stringify({ startedAt: new Date(t0).toISOString() }),
+      );
+      if (dead)
+        writeFileSync(
+          join(home, 'subagent-stats-run.json'),
+          JSON.stringify({
+            startedAt: t0,
+            pid: 2147483647,
+            receipt: join(home, 'absent'),
+            timeoutMs: 600_000,
+          }),
+        );
+      const calls: unknown[][] = [];
+      const result = start.startEnforce('/repo', {
+        home,
+        now: () => new Date(t0 + 120_000),
+        spawnFn: fakeSpawn(calls),
+      });
+      expect(result.ran).toBe(true);
+      expect(calls).toHaveLength(1);
+      if (dead) expect(result.notice).toMatch(/早退/);
+    }
   });
 });
