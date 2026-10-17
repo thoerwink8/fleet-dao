@@ -259,10 +259,11 @@ function ChannelRow({
   );
 }
 
-/** 手机上整条色条的读屏汇总：近几次里通过、不通、疑似换模型各几次。 */
+/** 手机上整条色条的读屏汇总：近几次里通过、不通、疑似换模型各几次；有连通但额度耗尽的才另报几次。 */
 function stripSummary(cells: readonly ProbeHistoryCell[]): string {
   const count = (k: ProbeKind) => cells.filter((c) => probeKind(c) === k).length;
-  return `近 ${cells.length} 次真探：通过 ${count('passed')}、连通但额度耗尽 ${count('quota')}、不通 ${count('failed')}、疑似换模型 ${count('doubt')}`;
+  const quota = count('quota');
+  return `近 ${cells.length} 次真探：通过 ${count('passed')}${quota > 0 ? `、连通但额度耗尽 ${quota}` : ''}、不通 ${count('failed')}、疑似换模型 ${count('doubt')}`;
 }
 
 /** 不够 60 格时左边的空位。键按「第几格」写死，不拿数组下标当键。 */

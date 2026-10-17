@@ -1255,6 +1255,37 @@ describe('渠道状态页：连通但额度耗尽（#2939）', () => {
     expect(document.body.textContent).not.toMatch(/sk-[A-Za-z0-9]{8,}|Bearer\s+\S+/);
   });
 
+  test('手机：色条读屏汇总单报连通但额度耗尽几次；没有额度记录的渠道不多这一项', async () => {
+    const real = window.matchMedia.bind(window);
+    const spy = vi.spyOn(window, 'matchMedia').mockImplementation((query: string) =>
+      query === '(max-width: 767px)'
+        ? ({
+            matches: true,
+            media: query,
+            onchange: null,
+            addEventListener() {},
+            removeEventListener() {},
+            addListener() {},
+            removeListener() {},
+            dispatchEvent: () => false,
+          } as MediaQueryList)
+        : real(query),
+    );
+    try {
+      show(createMockApi({ live: false }));
+      const display = await waitFor(() => {
+        const el = document.querySelector('[data-history="strip"] [data-strip-display]');
+        if (!(el instanceof HTMLElement)) throw new Error('还没有色条');
+        return el;
+      });
+      expect(display.getAttribute('aria-label')).toMatch(
+        /^近 \d+ 次真探：通过 \d+、连通但额度耗尽 1、不通 \d+、疑似换模型 \d+$/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   test('所有路都耗尽、上游没给重置时间：渠道说连通但额度耗尽，写重置时间上游没给，不编时刻', async () => {
     const api = createMockApi({ live: false });
     const h = await withLatest(api, (c) =>
