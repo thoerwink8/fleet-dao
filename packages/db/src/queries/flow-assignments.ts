@@ -6,7 +6,7 @@ import {
   FlowAssignmentExistsError,
   type NewFlowAssignment,
 } from '@fleet-dao/shared';
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { settings } from '../schema/index.ts';
 import { taskFlowAssignments, tasks } from '../schema/work.ts';
@@ -63,4 +63,12 @@ export async function getFlowAssignment(db: Db, taskId: string): Promise<FlowAss
   if (!UUID.test(taskId)) return null;
   const [row] = await db.select().from(taskFlowAssignments).where(eq(taskFlowAssignments.taskId, taskId));
   return row ? toAssignment(row) : null;
+}
+
+/** 一次读多张单的分组记录。编号不是 uuid 的跳过；没分过组的不在结果里。空列表不查库。 */
+export async function listFlowAssignments(db: Db, taskIds: readonly string[]): Promise<FlowAssignment[]> {
+  const ids = [...new Set(taskIds.filter((id) => UUID.test(id)))];
+  if (ids.length === 0) return [];
+  const rows = await db.select().from(taskFlowAssignments).where(inArray(taskFlowAssignments.taskId, ids));
+  return rows.map(toAssignment);
 }

@@ -465,6 +465,10 @@ export function createMemoryStore(
       const found = data.flowAssignments.find((a) => a.taskId === taskId);
       return found ? { ...found } : null;
     },
+    async listFlowAssignments(taskIds) {
+      const want = new Set(taskIds);
+      return data.flowAssignments.filter((a) => want.has(a.taskId)).map((a) => ({ ...a }));
+    },
     async listTasks({ group, repoId, q, cursor: raw, limit }) {
       const matching = data.tasks.filter(
         (t) => (repoId === undefined || t.repoId === repoId) && matchesTaskSearch(t, q),

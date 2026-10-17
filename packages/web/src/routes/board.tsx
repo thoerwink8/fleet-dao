@@ -9,6 +9,7 @@ import { CirclePlay } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { brand } from '#brand';
 import { isNotFound, useHome, useLiveState, useNodeHome } from '../api/client';
+import { FlowModeToggle } from '../components/flow-mode-toggle';
 import { HealthStrip } from '../components/home/health-strip';
 import { HomeDrawer } from '../components/home/home-drawer';
 import { MachineMeter } from '../components/home/machine-meter';
@@ -92,6 +93,8 @@ export default function Home() {
   const phone = usePhone();
   const push = useLiveState().status;
   const topbarRoom = useTopbarRoom();
+  const repo = useRepoIfAny()?.repo;
+  const slug = repo ? repoSlug(repo) : undefined;
   // 本台读 useHome，选了远程环境读那台的快照。刷新条跟眼下这一份主查询走。
   const main = nodeId === null ? local : remote;
   // 推送重读会把从没读成过的快照退回骨架：显示记住的那次失败
@@ -126,12 +129,18 @@ export default function Home() {
       />
     ) : null;
 
+  // 桌面画布自己的工具条上有开关。手机是树、或者这一仓没有在跑的单、画布还没出来时，开关放在这条细栏里，免得找不到。
+  const canvasUp =
+    !phone && state.status === 'data' && visibleForProject(state.data.running, slug).length > 0;
+  const flowSwitch = canvasUp ? null : <FlowModeToggle />;
+
   // 画布上方（顶栏放不下时）或手机上的一条细栏：状态摘要（带字的「状态」按钮）+ 刷新；手机上第二行是机器资源。
   // 机器资源写了具体数值（#1973），手机一行放不下三样：硬塞会把健康条（它自己是 flex-1 min-w-0、内容靠右）挤出左边、
   // 字被截，所以手机上机器资源整块另起一行（靠右，和第一行的状态 + 刷新对齐右边）；第一行照旧是状态 + 刷新、不换行（#1819）。
   // 手机上它排在「要你拍的」横条下面，首屏第一眼是要你拍的；还没读到数据时（读取中、出错）没有横条，它照旧在最上面。
   const statusbar = (
     <div className="shrink-0 border-b">
+      {flowSwitch ? <div className="flex px-3 py-1.5 sm:px-4">{flowSwitch}</div> : null}
       <div
         data-home-statusbar
         className="flex flex-nowrap items-center gap-x-3 px-3 sm:px-4 max-md:py-0 md:py-1.5"
@@ -154,6 +163,7 @@ export default function Home() {
       <h1 className="sr-only">{nodeId === null ? '画布' : `画布 · ${nodeName ?? nodeId}`}</h1>
       {/* 健康条 + 刷新条：顶栏放得下（≥1024）就进顶栏右段，放不下落在画布上方一条细栏里 */}
       <InTopbar enabled={topbarRoom} fallback={phoneUnderStrip ? null : statusbar}>
+        {flowSwitch}
         {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
         {refresh}
       </InTopbar>

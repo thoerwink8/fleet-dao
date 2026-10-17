@@ -16,6 +16,7 @@ import {
   useLocalSessions,
   useNodeHome,
 } from '../api/client';
+import { FlowModeToggle } from '../components/flow-mode-toggle';
 import { Headline } from '../components/home/headline';
 import { HealthStrip } from '../components/home/health-strip';
 import { MissingEnv } from '../components/home/missing-env';
@@ -67,7 +68,12 @@ export default function Home() {
   return (
     <Page
       title={nodeId === null ? '主页' : `主页 · ${machine}`}
-      actions={state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
+      actions={
+        <>
+          <FlowModeToggle />
+          {state.status === 'data' ? <HealthStrip health={state.data.health} /> : null}
+        </>
+      }
       refresh={{
         variant: 'dot',
         onRefresh: () => void main.refetch(),

@@ -77,4 +77,65 @@ describe('任务接口的 flowMode', () => {
     delete without.flowMode;
     expect(TaskSchema.parse(without)).not.toHaveProperty('flowMode');
   });
+
+  it('不合格退回三段才带 flowFallback；开关就是三步法、没分组、走全程都不带', async () => {
+    const h = harness();
+    const reason = '选中的路由是 grok-4，第一期全程只走 Claude 5.5（Sonnet 或 Opus）';
+    await h.store.writeFlowAssignmentOnce({
+      taskId: IDS.task12,
+      mode: 'three',
+      source: 'ineligible',
+      stratum: 'standard/grok-4',
+      reason,
+    });
+    const bySetting = extra(31);
+    const plain = extra(32, { flowMode: 'three' });
+    const full = extra(33);
+    h.store.data.tasks.push(bySetting, plain, full);
+    await h.store.writeFlowAssignmentOnce({
+      taskId: bySetting.id,
+      mode: 'three',
+      source: 'ineligible',
+      stratum: 'x',
+      reason: 'engine.flowMode 是 three：都走三段',
+    });
+    await h.store.writeFlowAssignmentOnce({
+      taskId: full.id,
+      mode: 'full',
+      source: 'hash',
+      stratum: 'x',
+    });
+    const { cookie } = await h.login();
+    const headers = { cookie };
+    const taskOf = async (id: string) =>
+      TaskDetailResponse.parse(await (await h.cockpit.request(`/api/tasks/${id}`, { headers })).json()).task;
+
+    const back = await taskOf(IDS.task12);
+    expect(back.flowMode).toBe('three');
+    expect(back.flowFallback).toBe(reason);
+    const settingThree = await taskOf(bySetting.id);
+    expect(settingThree.flowMode).toBe('three');
+    expect(settingThree).not.toHaveProperty('flowFallback');
+    const untouched = await taskOf(plain.id);
+    expect(untouched.flowMode).toBe('three');
+    expect(untouched).not.toHaveProperty('flowFallback');
+    const wentFull = await taskOf(full.id);
+    expect(wentFull.flowMode).toBe('full');
+    expect(wentFull).not.toHaveProperty('flowFallback');
+
+    const list = TaskListResponse.parse(
+      await (await h.cockpit.request('/api/tasks?limit=100', { headers })).json(),
+    );
+    expect(list.items.find((i) => i.issueNumber === 12)?.flowFallback).toBe(reason);
+    expect(list.items.find((i) => i.issueNumber === 31)).not.toHaveProperty('flowFallback');
+    expect(list.items.find((i) => i.issueNumber === 32)).not.toHaveProperty('flowFallback');
+    expect(list.items.find((i) => i.issueNumber === 33)?.flowMode).toBe('full');
+    expect(list.items.find((i) => i.issueNumber === 33)).not.toHaveProperty('flowFallback');
+
+    const home = HomeResponseSchema.parse(await (await h.cockpit.request('/api/home', { headers })).json());
+    expect(home.running.find((r) => r.issueNumber === 12)?.flowFallback).toBe(reason);
+    expect(home.running.find((r) => r.issueNumber === 31)).not.toHaveProperty('flowFallback');
+    expect(home.running.find((r) => r.issueNumber === 33)?.flowMode).toBe('full');
+    expect(home.running.find((r) => r.issueNumber === 33)).not.toHaveProperty('flowFallback');
+  });
 });

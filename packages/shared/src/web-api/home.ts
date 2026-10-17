@@ -93,6 +93,11 @@ export const HomeRunningSchema = z.object({
    * 还没分组的老单没有这个键。页面不补、不猜。
    */
   flowMode: z.enum(FLOW_MODES).optional(),
+  /**
+   * 不合格、实际退回三段的原因（分组记录 source = ineligible，且不是「开关就是三步法」）。
+   * 没有这个键就不是退回：老单、还没分组、本来就走三段或全程，都不猜。
+   */
+  flowFallback: z.string().min(1).optional(),
   /** 站内路径：任务详情。 */
   link: z.string(),
   /** 库里的任务编号：首页看板上「继续 / 叫停」这类快捷操作要它（POST /api/tasks/:taskId/actions）。老环境推来的快照里没有，没有就不画操作。 */

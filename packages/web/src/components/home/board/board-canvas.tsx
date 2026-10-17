@@ -49,6 +49,7 @@ import { useLocalState, useMediaQuery, useNow } from '../../../lib/hooks';
 import { useRootScale } from '../../../lib/root-scale';
 import { type Tone, toneLabel } from '../../../lib/status';
 import { cn } from '../../../lib/utils';
+import { FlowModeToggle } from '../../flow-mode-toggle';
 import { StatusDot } from '../../layout/status-badge';
 import { useRemoteView } from '../../node-notice';
 import { shortcutAction, useTaskActions } from '../../task-actions';
@@ -913,6 +914,7 @@ function Toolbar({
       // 右端让出主页右上角的抽屉按钮（外层给 --board-toolbar-end；没给就是 0.75rem，和左边一样）
       style={{ right: 'var(--board-toolbar-end, 0.75rem)' }}
     >
+      <FlowModeToggle />
       <div className="pointer-events-auto flex items-center gap-0.5 rounded-lg border bg-popover p-1 shadow-overlay">
         <ToolButton
           label="只看卡住的"

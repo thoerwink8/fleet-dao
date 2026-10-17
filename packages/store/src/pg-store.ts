@@ -16,6 +16,7 @@ import {
   githubEvents,
   githubEventVersions,
   idempotencyKeys,
+  listFlowAssignments as listFlowAssignmentRows,
   listTaskRows,
   models,
   nodeReports,
@@ -431,6 +432,9 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     },
     async getFlowAssignment(taskId) {
       return getFlowAssignment(db, taskId);
+    },
+    async listFlowAssignments(taskIds) {
+      return listFlowAssignmentRows(db, taskIds);
     },
     async listTasks({ group, repoId, q, cursor: raw, limit }) {
       const cursor = parseCursor(raw, isUuid);

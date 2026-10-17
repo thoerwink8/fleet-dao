@@ -12,6 +12,7 @@ import {
   continueExhausted,
   DEFAULT_SESSION_EFFORT,
   EnvResponseSchema,
+  flowFallbackReason,
   HARD_BANS,
   HomeResponseSchema,
   JobsResponse,
@@ -106,6 +107,7 @@ import { taskWorkflowIdForTask } from './temporal.ts';
 import {
   buildBoard,
   buildPools,
+  flowFallbackLookup,
   isTaskFinished,
   jobView,
   notificationView,
@@ -255,11 +257,12 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       limit: query.limit,
     });
     const taskIds = page.items.map((i) => i.task.id);
-    const [repos, segmentRuns, models, channels] = await Promise.all([
+    const [repos, segmentRuns, models, channels, assignments] = await Promise.all([
       store.listRepos(),
       store.listSegmentRunsForTasks(taskIds, { includeIssueMatch: true }),
       store.listModels(),
       store.listChannels(),
+      store.listFlowAssignments(taskIds),
     ]);
     // 「来自需求 N」（#2060）：这一页的单子里哪些是提需求开出来的。需求表读不到就明说原因，不当成「都不是」
     let requestSeqs: Map<string, number> | undefined;
@@ -288,6 +291,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
         channels,
         requestSeqs,
         requestSeqUnavailable,
+        flowFallbackOf: flowFallbackLookup(assignments),
       }),
     );
   });
@@ -309,9 +313,10 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       channels,
       taskFinished: isTaskFinished(task),
     });
+    const flowFallback = flowFallbackReason(await store.getFlowAssignment(task.id));
     return reply(c, TaskDetailResponse, {
       routePins: await readRoutePins(task.id),
-      task,
+      task: flowFallback ? { ...task, flowFallback } : task,
       repo,
       subtasks: subtaskViews(task.id, { tasks: [task], subtasks }),
       segmentRuns,

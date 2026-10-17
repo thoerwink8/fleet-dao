@@ -4,7 +4,7 @@
 import {
   FLOW_MODE_SETTING,
   type FlowModeReading,
-  flowModeLabel,
+  flowModeSwitchText,
   formatFlowModeSetting,
   readFlowModeSetting,
 } from '@fleet-dao/shared';
@@ -57,12 +57,6 @@ function selectedChoice(reading: FlowModeReading): ChoiceId | undefined {
   return isChoice(formatted) ? formatted : undefined;
 }
 
-function currentText(reading: FlowModeReading): string {
-  if (reading.state === 'never_set') return '还没设过，默认三段';
-  if (reading.state === 'unrecognized') return reading.problem;
-  return flowModeLabel(reading.setting);
-}
-
 export function FlowModeSetting({ s }: { s: Setting | undefined }) {
   const update = useUpdateSetting();
   const reading = readFlowModeSetting(s?.value);
@@ -110,7 +104,7 @@ export function FlowModeSetting({ s }: { s: Setting | undefined }) {
       hint={
         <>
           新开的单走哪一种。三段是对题、动手、验收各一段；对半分是大约一半走全程（split:50）；全程是一个会话自己走到合并。已经分过组的单保持分组时定下的模式。改的时候要写原因。
-          <p data-flow-mode-current>{currentText(reading)}</p>
+          <p data-flow-mode-current>{flowModeSwitchText(reading)}</p>
         </>
       }
     >

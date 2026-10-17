@@ -78,6 +78,15 @@ describe('FlowModeTag', () => {
     view.rerender(<FlowModeTag mode={null} />);
     expect(document.querySelector('[data-flow-mode]')).toBeNull();
   });
+
+  test('不合格退回三段：写成退回三步，原因在悬停里', () => {
+    const reason = '选中的路由是 grok-4，第一期全程只走 Claude 5.5（Sonnet 或 Opus）';
+    render(<FlowModeTag mode="three" fallback={reason} />);
+    const el = tag('three');
+    expect(el?.textContent).toBe('退回三步');
+    expect(el?.getAttribute('data-flow-fallback')).toBe(reason);
+    expect(el?.getAttribute('title')).toBe(reason);
+  });
 });
 
 describe('任务列表', () => {
@@ -87,9 +96,14 @@ describe('任务列表', () => {
       items: [
         row(1, { title: '全程单', flowMode: 'full' }),
         row(2, { title: '三段单', flowMode: 'three' }),
+        row(4, {
+          title: '退回单',
+          flowMode: 'three',
+          flowFallback: '选中的路由是 grok-4，第一期全程只走 Claude 5.5（Sonnet 或 Opus）',
+        }),
         row(3, { title: '老单' }),
       ],
-      counts: counts({ all: 3, running: 3 }),
+      counts: counts({ all: 4, running: 4 }),
     });
     renderApp(<TasksPage />, { api, route: '/tasks' });
     expect(
@@ -98,6 +112,9 @@ describe('任务列表', () => {
     expect(
       screen.getByText('三段单').closest('a')?.querySelector('[data-flow-mode="three"]')?.textContent,
     ).toBe('三段');
+    expect(screen.getByText('退回单').closest('a')?.querySelector('[data-flow-fallback]')?.textContent).toBe(
+      '退回三步',
+    );
     expect(screen.getByText('老单').closest('a')?.querySelector('[data-flow-mode]')).toBeNull();
   });
 });
@@ -136,6 +153,16 @@ describe('首页在跑卡片', () => {
     renderApp(<RunningCard item={card({ flowMode: 'three' })} />);
     expect(tag('three')?.textContent).toBe('三段');
     cleanup();
+    renderApp(
+      <RunningCard
+        item={card({
+          flowMode: 'three',
+          flowFallback: '选中的路由是 grok-4，第一期全程只走 Claude 5.5（Sonnet 或 Opus）',
+        })}
+      />,
+    );
+    expect(tag('three')?.textContent).toBe('退回三步');
+    cleanup();
     renderApp(<RunningCard item={card()} />);
     expect(document.querySelector('[data-flow-mode]')).toBeNull();
   });
@@ -146,6 +173,12 @@ describe('首页在跑卡片', () => {
         running={[
           card({ issueNumber: 1, title: '全程单', flowMode: 'full' }),
           card({ issueNumber: 2, title: '三段单', flowMode: 'three' }),
+          card({
+            issueNumber: 4,
+            title: '退回单',
+            flowMode: 'three',
+            flowFallback: '选中的路由是 grok-4，第一期全程只走 Claude 5.5（Sonnet 或 Opus）',
+          }),
           card({ issueNumber: 3, title: '老单' }),
         ]}
       />,
@@ -153,12 +186,23 @@ describe('首页在跑卡片', () => {
     const line = async (title: string) => (await screen.findByText(title)).closest('li');
     expect((await line('#1 全程单'))?.querySelector('[data-flow-mode="full"]')?.textContent).toBe('全程');
     expect((await line('#2 三段单'))?.querySelector('[data-flow-mode="three"]')?.textContent).toBe('三段');
+    expect((await line('#4 退回单'))?.querySelector('[data-flow-fallback]')?.textContent).toBe('退回三步');
     expect((await line('#3 老单'))?.querySelector('[data-flow-mode]')).toBeNull();
   });
 
   test('看板远档卡片：有值才标', () => {
     const view = render(<FarTicket tone="run" id="#12" title="登录页" flowMode="full" />);
     expect(tag('full')?.textContent).toBe('全程');
+    view.rerender(
+      <FarTicket
+        tone="run"
+        id="#14"
+        title="退回"
+        flowMode="three"
+        flowFallback="选中的路由是 grok-4，第一期全程只走 Claude 5.5（Sonnet 或 Opus）"
+      />,
+    );
+    expect(tag('three')?.textContent).toBe('退回三步');
     view.rerender(<FarTicket tone="run" id="#13" title="老单" />);
     expect(document.querySelector('[data-flow-mode]')).toBeNull();
   });
