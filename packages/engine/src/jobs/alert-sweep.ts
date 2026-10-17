@@ -97,8 +97,8 @@ const HISTORICAL_MERGED_AFTER_MS = 7 * 24 * 60 * 60_000;
 const HISTORICAL_FACT_PREFIXES = ['reconcile:pr:', 'reconcile:ledger:'] as const;
 const SKIP_FILING_NOTE = '没有可做的事，已跳过立案';
 const HISTORICAL_KEY = /^(?:reconcile:pr:|reconcile:ledger:)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)$/;
-/** 开出去的单只贴这一个类别。不贴「要人拍」「本机做」「待补」：拉不拉由现有准入决定。 */
-export const FILE_LABELS = ['缺陷'] as const;
+/** 开出去的单贴缺陷类别和引擎故障查询轴。不贴「要人拍」「本机做」「待补」：拉不拉由现有准入决定。 */
+export const FILE_LABELS = ['缺陷', '域:engine', '性质:bug'] as const;
 /**
  * 挂起报警是不是「现在挂着的这一次」：报警写进库（updated_at）在挂起那一刻（waiting.since）之后；早过它这么多的是
  * 之前那一次（人点继续以后又挂起了）。留一分钟余量：两个时刻一个是工作流的钟、一个是库的钟。

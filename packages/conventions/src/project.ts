@@ -639,7 +639,7 @@ export async function projectAdd(
           await ctx.world.createIssue(slug, {
             title: SMOKE_TITLE,
             body: smokeIssueBody(slug),
-            labels: ['需求'],
+            labels: ['需求', '域:engine', '性质:process'],
           });
         },
       };
