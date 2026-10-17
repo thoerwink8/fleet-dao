@@ -26,6 +26,11 @@ export const routeProbeHistory = pgTable(
     durationMs: integer('duration_ms'),
     /** 不通、没探的原因。通过必须为空：成功的那句话在路由的 probe_detail，不写成失败。 */
     failureReason: text('failure_reason'),
+    /** 每次真实结论，含“连通但额度耗尽”；与失败原因分开，保持原连通判据。 */
+    detail: text('detail'),
+    quotaExhausted: boolean('quota_exhausted'),
+    /** 仅存上游明确给出的重置时间，未知与老行为空。 */
+    resetsAt: timestamp('resets_at', tz),
     /** 发出去的请求原文。没发出去为空。超长由写入方截断并标注。 */
     requestText: text('request_text'),
     /** 响应原文。没拿到为空。超长由写入方截断并标注。 */

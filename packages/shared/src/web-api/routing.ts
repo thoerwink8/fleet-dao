@@ -615,6 +615,9 @@ export const ProbeHistoryCellSchema = z.object({
   durationMs: z.number().int().nonnegative().nullable(),
   /** 不通、没探的原因。通过是 null。 */
   failureReason: z.string().nullable(),
+  detail: z.string().nullable().optional(),
+  quotaExhausted: z.boolean().optional(),
+  resetsAt: Time.optional(),
   /** 发出去的请求原文。没发出去是 null。 */
   requestText: z.string().nullable(),
   /** 响应原文。没拿到是 null。 */

@@ -15,6 +15,7 @@ import {
   type LedgerFs,
   type MirasimConnect,
   type RateLimitReading,
+  redact,
   type SessionsFs,
   type SessionUser,
   type SwitchSessionOrgResult,
@@ -125,7 +126,13 @@ function responseTextOf(report: HostReport): string | null {
   const kept = parts.filter(
     (part, i) => !parts.some((other, j) => j !== i && other.length > part.length && other.includes(part)),
   );
-  return kept.length > 0 ? kept.join('\n') : null;
+  return kept.length > 0
+    ? kept
+        .join('\n')
+        .split('\n')
+        .map((line) => redact(line, 4000))
+        .join('\n')
+    : null;
 }
 
 /** 探针核对模型名：Mirasim 会给 Claude 模型附加 [1m]，Grok 的 build 名是目录允许的别名。 */
@@ -279,6 +286,7 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
   if (verdict.reason === 'quota_exhausted' || cls?.rule === 'QT1') {
     return {
       kind: 'quota',
+      ...(report.resetsAt ? { resetsAt: report.resetsAt } : {}),
       detail: withoutQueries(
         `额度用满被拒（登录、组织、上游都通，派不派按额度等清零）：${verdict.detail}${report.resetsAt ? ` · ${report.resetsAt} 清零` : ''}${said && !verdict.detail.includes(said) ? `（原文：${clip(said, 200)}）` : ''}`,
       ),
