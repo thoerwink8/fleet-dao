@@ -2,7 +2,16 @@
 // 改这里之前必须知道：
 // - 活不活只在 db 的 routing-liveness.ts 判（三件事、一层怎么合起来），这里只换成驾驶舱的形状，不再判一遍。
 // - 没接上（开发环境的内存版没有这两张表）由接口写 unavailable；读不到抛，接口回 503 写明没读成。两样都不回空列表冒充「都没配」。
-import { type Db, type RoutingLayers, type RoutingRouteView, routingLayers } from '@fleet-dao/db';
+import {
+  type Db,
+  type RoutingLayers,
+  type RoutingModelView,
+  type RoutingRouteView,
+  readRouteShare,
+  recentRouteDispatches,
+  routingLayers,
+  shareAnnotations,
+} from '@fleet-dao/db';
 import {
   type Channel,
   type Model,
@@ -17,10 +26,49 @@ export interface RoutingLayersPort {
   read(input: { now: Date; staleAfterMs: number }): Promise<RoutingLayers[]>;
 }
 
+type ShareRoute = RoutingRouteView & {
+  shareBand?: number;
+  shareWeight?: number;
+  recentDispatches?: number;
+};
+type ShareModel = RoutingModelView & { shareVersion?: number };
+
+/** 同一档标在读出来的对象上，视图再抄进驾驶舱的形状。版本 0 不标；单独一条不算档。 */
+function annotateShare(
+  layers: RoutingLayers[],
+  share: { version: number; map: Parameters<typeof shareAnnotations>[1] },
+  recent: ReadonlyMap<string, number>,
+): RoutingLayers[] {
+  for (const layer of layers) {
+    for (const model of layer.models) {
+      if (share.version > 0) (model as ShareModel).shareVersion = share.version;
+      const marks = shareAnnotations(
+        model.routes.map((r) => ({ routeId: r.candidate.routeId, modelId: model.modelId })),
+        share.map,
+      );
+      for (const route of model.routes) {
+        const mark = marks.get(route.candidate.routeId);
+        if (!mark) continue;
+        const extra = route as ShareRoute;
+        extra.shareBand = mark.shareBand;
+        extra.shareWeight = mark.shareWeight;
+        extra.recentDispatches = recent.get(route.candidate.routeId) ?? 0;
+      }
+    }
+  }
+  return layers;
+}
+
 export function pgRoutingLayers(db: Db): RoutingLayersPort {
   return {
-    read: ({ now, staleAfterMs }) =>
-      Promise.all(ROUTING_PURPOSE_IDS.map((purpose) => routingLayers(db, purpose, { now, staleAfterMs }))),
+    read: async ({ now, staleAfterMs }) => {
+      const layers = await Promise.all(
+        ROUTING_PURPOSE_IDS.map((purpose) => routingLayers(db, purpose, { now, staleAfterMs })),
+      );
+      const share = await readRouteShare(db);
+      const recent = await recentRouteDispatches(db, now);
+      return annotateShare(layers, share, recent);
+    },
   };
 }
 
@@ -62,7 +110,26 @@ function routeView(r: RoutingRouteView, channels: ReadonlyMap<string, Channel>) 
     inFlight: c.inFlight,
     reserved: c.reserved,
     maxConcurrency: c.maxConcurrency,
+    ...shareFields(r),
   } satisfies z.input<typeof RoutingLayerRouteSchema>;
+}
+
+function shareFields(r: RoutingRouteView): {
+  shareBand?: number;
+  shareWeight?: number;
+  recentDispatches?: number;
+} {
+  const extra = r as RoutingRouteView & {
+    shareBand?: number;
+    shareWeight?: number;
+    recentDispatches?: number;
+  };
+  if (extra.shareBand === undefined) return {};
+  return {
+    shareBand: extra.shareBand,
+    shareWeight: extra.shareWeight ?? 1,
+    recentDispatches: extra.recentDispatches ?? 0,
+  };
 }
 
 /** 换成驾驶舱的形状：模型、渠道的名字从目录里查，查不到就写编号（不丢这一行）。 */
@@ -86,6 +153,7 @@ export function routingLayersView(
         ...(family ? { family } : {}),
         ...(model?.strength ? { strength: model.strength } : {}),
         ...(m.effort ? { effort: m.effort } : {}),
+        ...((m as ShareModel).shareVersion ? { shareVersion: (m as ShareModel).shareVersion } : {}),
         verdict: m.verdict,
         routes: m.routes.map((r) => routeView(r, channels)),
       };

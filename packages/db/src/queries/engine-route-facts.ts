@@ -3,9 +3,10 @@ import type { HostId, ModelStrength, OrgKind, QuotaWindowKind, StageKind } from 
 import { eq, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { flattenRoutingLayers, routingLayers } from '../routing-layers.ts';
+import { readRouteShare } from '../routing-order.ts';
 import { channels, models, pools, quotaWindows, routes } from '../schema/index.ts';
 import { allSettledOrThrow } from './all-settled.ts';
-import type { Blocker, RouteCandidate } from './candidates.ts';
+import { type Blocker, type RouteCandidate, shareAnnotations } from './candidates.ts';
 
 /** 没有的话来 candidates.ts 已算好的比例，反过来（1 - 比例）会在超额（>100%）时把信息夹没，所以单独写一份。 */
 function usedRatio(w: {
@@ -26,7 +27,14 @@ export interface PurposeRouteFacts {
    * 选路的先后：用途下模型的先后、再是模型下路由的先后，摊平成一串，位置从 0 数（routing-layers.ts）。开关是那条路由在它的模型下
    * 开没开（routing_catalog.enabled，不分用途）；关着的照样排在里面，选路按 switched-off 挡。两层没有「钉住」：选路按没钉住算。
    */
-  order: { routeId: string; position: number; enabled: boolean }[];
+  order: {
+    routeId: string;
+    position: number;
+    enabled: boolean;
+    /** 同一档（至少两条才有）。没有 = 各走各的。 */
+    shareBand?: number;
+    shareWeight?: number;
+  }[];
   /** 配置上的缺口（用途没有模型、模型下一条路由都没有）：照实给出，派不出时写进原因，不当成「没有」。 */
   problems: string[];
   routes: {
@@ -90,11 +98,21 @@ export async function routeFactsForPurpose(
   const layers = await routingLayers(db, purpose, options);
   const configured = layers.models.length > 0;
   const sorted = flattenRoutingLayers(layers);
-  const order = sorted.map((c, position) => ({
-    routeId: c.routeId,
-    position,
-    enabled: !c.blockers.includes('switched-off'),
-  }));
+  // 认不出就抛：不能把配好的同一档当成没设，否则又总派第一条。
+  const share = await readRouteShare(db);
+  const marks = shareAnnotations(
+    sorted.map((c) => ({ routeId: c.routeId, modelId: c.modelId })),
+    share.map,
+  );
+  const order = sorted.map((c, position) => {
+    const mark = marks.get(c.routeId);
+    return {
+      routeId: c.routeId,
+      position,
+      enabled: !c.blockers.includes('switched-off'),
+      ...(mark ? { shareBand: mark.shareBand, shareWeight: mark.shareWeight } : {}),
+    };
+  });
   if (sorted.length === 0) return { purpose, configured, order, problems: layers.problems, routes: [] };
 
   const routeIds = sorted.map((c) => c.routeId);

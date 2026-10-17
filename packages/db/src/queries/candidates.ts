@@ -3,7 +3,15 @@
 import { hardBanFor, poolFull, type StageKind, windowAppliesTo } from '@fleet-dao/shared';
 import { asc, inArray } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { bans, type channels, type models, type pools, quotaWindows, type routes } from '../schema/index.ts';
+import {
+  bans,
+  type channels,
+  type models,
+  type pools,
+  quotaWindows,
+  type RouteShareMap,
+  type routes,
+} from '../schema/index.ts';
 import { readChannelStates } from './channel-fallback.ts';
 import { poolDataTimes, poolOccupancy, quotaReadOverdue, type WindowState, windowState } from './quota.ts';
 
@@ -228,4 +236,34 @@ export async function evaluateRoutes(
       eligible: blockers.length === 0,
     };
   });
+}
+
+export interface ShareMark {
+  shareBand: number;
+  shareWeight: number;
+}
+
+/**
+ * 同一档只标「这一档里至少两条」的路由。单独一条不算档，选路和页面都当没设。
+ * 键是路由编号（全局唯一）。
+ */
+export function shareAnnotations(
+  rows: readonly { routeId: string; modelId: string }[],
+  map: RouteShareMap,
+): Map<string, ShareMark> {
+  const hits = new Map<string, { routeId: string; band: number; weight: number }[]>();
+  for (const row of rows) {
+    const entry = map[row.modelId]?.[row.routeId];
+    if (!entry) continue;
+    const key = `${row.modelId}\0${entry.band}`;
+    const list = hits.get(key) ?? [];
+    list.push({ routeId: row.routeId, band: entry.band, weight: entry.weight });
+    hits.set(key, list);
+  }
+  const out = new Map<string, ShareMark>();
+  for (const list of hits.values()) {
+    if (list.length < 2) continue;
+    for (const hit of list) out.set(hit.routeId, { shareBand: hit.band, shareWeight: hit.weight });
+  }
+  return out;
 }

@@ -1,7 +1,7 @@
 // 驾驶舱「路由」页改先后和开关的接口（母单 #1089 第二片）：用途下的模型上移 / 下移、模型下的渠道上移 / 下移、渠道开关。
 // 真库上写路由两层那两张表（position、enabled），和操作记录同一个事务；改完 /routing/layers 读回来的就是新顺序（引擎选路也读这两张表）。
 // 没登录、没接上、别人先改了（看到的顺序对不上）、没有这一项、已在最上 / 最下、请求不合约定、网关通行证都拒，库里不动、不记操作记录。
-import { auditLog, channels, routes, routingCatalog, routingPurposeModels } from '@fleet-dao/db';
+import { auditLog, channels, routes, routingCatalog, routingPurposeModels, runs } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import {
   MovePurposeModelResponse,
@@ -868,5 +868,97 @@ describe('用途里加模型、移出、改档位（#1356）', () => {
       await t.db.select().from(routingPurposeModels).where(eq(routingPurposeModels.purpose, 'ui')),
     ).toEqual([]);
     expect(await purposeAudits()).toEqual([]);
+  });
+});
+
+describe('同一档', () => {
+  it('两条设成一档，版本加一；旧版本 409；路由两层能看见档、权重和近 14 天次数', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+    const since = new Date(T0.getTime() - 14 * 24 * 60 * 60 * 1000);
+    const prior = await t.db.select({ routeId: runs.routeId, startedAt: runs.startedAt }).from(runs);
+    const priorOf = (id: string) => prior.filter((r) => r.routeId === id && r.startedAt >= since).length;
+    await t.db.insert(runs).values([
+      {
+        segment: 'manual',
+        model: 'opus-5.5',
+        routeId: 'rt-claude-opus',
+        startedAt: new Date(T0.getTime() - 60_000),
+      },
+      {
+        segment: 'manual',
+        model: 'opus-5.5',
+        routeId: 'rt-claude-opus',
+        startedAt: new Date(T0.getTime() - 120_000),
+      },
+      {
+        segment: 'manual',
+        model: 'opus-5.5',
+        routeId: 'rt-mirasim-opus',
+        startedAt: new Date(T0.getTime() - 180_000),
+      },
+    ]);
+    const claudeRecent = priorOf('rt-claude-opus') + 2;
+    const mirasimRecent = priorOf('rt-mirasim-opus') + 1;
+
+    const first = await putRoute(current, s, 'opus-5.5/routes/rt-claude-opus', {
+      op: 'share',
+      shareBand: 0,
+      shareWeight: 1,
+      expectedVersion: 0,
+      reason: '和 Cursor 的 Grok 轮换',
+    });
+    expect(first.status).toBe(200);
+    expect(UpdateModelRouteResponse.parse(await first.json())).toMatchObject({
+      shareBand: 0,
+      shareWeight: 1,
+      version: 1,
+    });
+    const stale = await putRoute(current, s, 'opus-5.5/routes/rt-mirasim-opus', {
+      op: 'share',
+      shareBand: 0,
+      shareWeight: 2,
+      expectedVersion: 0,
+    });
+    expect(stale.status).toBe(409);
+    const second = await putRoute(current, s, 'opus-5.5/routes/rt-mirasim-opus', {
+      op: 'share',
+      shareBand: 0,
+      shareWeight: 2,
+      expectedVersion: 1,
+    });
+    expect(second.status).toBe(200);
+    expect(UpdateModelRouteResponse.parse(await second.json()).version).toBe(2);
+
+    const layers = RoutingLayersResponse.parse(
+      await (await current.cockpit.request('/api/routing/layers', { headers: { cookie: s.cookie } })).json(),
+    );
+    const execute = layers.purposes.find((p) => p.purpose === 'execute');
+    const opus = execute?.models.find((m) => m.modelId === 'opus-5.5');
+    const kimi = execute?.models.find((m) => m.modelId === 'kimi-k3');
+    expect(opus?.shareVersion).toBe(2);
+    expect(kimi?.shareVersion).toBe(2);
+    expect(opus?.routes.map((r) => [r.routeId, r.shareBand, r.shareWeight, r.recentDispatches])).toEqual([
+      ['rt-claude-opus', 0, 1, claudeRecent],
+      ['rt-mirasim-opus', 0, 2, mirasimRecent],
+    ]);
+    expect(kimi?.routes[0]?.shareBand).toBeUndefined();
+    const logged = await t.db.select().from(auditLog);
+    expect(logged.filter((a) => a.action === 'routing.route.share')).toHaveLength(2);
+  });
+
+  it('没有这条路由 404，不写版本', async () => {
+    current = await pgHarness(t, withPorts());
+    await hang();
+    const s = await current.login();
+    const res = await putRoute(current, s, 'opus-5.5/routes/missing', {
+      op: 'share',
+      shareBand: 0,
+      shareWeight: 1,
+      expectedVersion: 0,
+    });
+    expect(res.status).toBe(404);
+    expect(await errorCode(res)).toBe('route_not_found');
   });
 });

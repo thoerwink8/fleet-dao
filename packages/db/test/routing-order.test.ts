@@ -9,6 +9,8 @@ import {
   addPurposeModel,
   moveModelRoute,
   movePurposeModel,
+  readRouteShare,
+  recentRouteDispatches,
   removePurposeModel,
   reorderModelRoutes,
   reorderPurposeModels,
@@ -16,12 +18,16 @@ import {
   setModelEnabled,
   setPurposeModelEffort,
   setRouteEnabled,
+  setRouteShare,
 } from '../src/routing-order.ts';
 import {
   channels,
+  ROUTE_SHARE_SETTING,
   routingCatalog,
   routingPurposeModels,
   routingPurposeRevisions,
+  runs,
+  settings,
 } from '../src/schema/index.ts';
 import { createTestDb, realTestPgUrl, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRoute, catalog } from './helpers.ts';
@@ -630,5 +636,92 @@ describe('用途里加模型、移出、改档位（#1356）', () => {
     });
     expect(await purposeRows('ui')).toEqual([]);
     expect(await revisionOf('ui')).toBeUndefined();
+  });
+});
+
+describe('同一档', () => {
+  it('写成一档后选路事实只标成档的两条；版本对不上不写；单独一条不算档', async () => {
+    const missing = await setRouteShare(t.db, {
+      modelId: 'opus-4.9',
+      routeId: 'nope',
+      band: 0,
+      weight: 1,
+      expectedVersion: 0,
+    });
+    expect(missing).toMatchObject({ ok: false, kind: 'not_found' });
+
+    const first = await setRouteShare(t.db, {
+      modelId: 'opus-4.9',
+      routeId: 'a',
+      band: 0,
+      weight: 1,
+      expectedVersion: 0,
+    });
+    expect(first).toMatchObject({ ok: true, version: 1, after: { band: 0, weight: 1 } });
+    const second = await setRouteShare(t.db, {
+      modelId: 'opus-4.9',
+      routeId: 'b',
+      band: 0,
+      weight: 2,
+      expectedVersion: 1,
+    });
+    expect(second).toMatchObject({ ok: true, version: 2, after: { band: 0, weight: 2 } });
+    expect(
+      await setRouteShare(t.db, {
+        modelId: 'opus-4.9',
+        routeId: 'c',
+        band: 0,
+        weight: 1,
+        expectedVersion: 0,
+      }),
+    ).toEqual({ ok: false, kind: 'conflict', current: 2 });
+
+    const facts = await routeFactsForPurpose(t.db, 'execute');
+    const byId = new Map(facts.order.map((e) => [e.routeId, e]));
+    expect(byId.get('a')).toMatchObject({ shareBand: 0, shareWeight: 1 });
+    expect(byId.get('b')).toMatchObject({ shareBand: 0, shareWeight: 2 });
+    expect(byId.get('c')?.shareBand).toBeUndefined();
+
+    const cleared = await setRouteShare(t.db, {
+      modelId: 'opus-4.9',
+      routeId: 'a',
+      band: null,
+      weight: 1,
+      expectedVersion: 2,
+    });
+    expect(cleared).toMatchObject({ ok: true, version: 3, after: null });
+    const after = await routeFactsForPurpose(t.db, 'execute');
+    expect(after.order.every((e) => e.shareBand === undefined)).toBe(true);
+    expect(await readRouteShare(t.db)).toMatchObject({ version: 3 });
+  });
+
+  it('近 14 天按开工时刻计次；更早的不算', async () => {
+    const now = new Date('2026-10-01T00:00:00.000Z');
+    await t.db.insert(runs).values([
+      { segment: 'manual', model: 'opus-4.9', routeId: 'a', startedAt: new Date('2026-09-30T00:00:00.000Z') },
+      { segment: 'manual', model: 'opus-4.9', routeId: 'a', startedAt: new Date('2026-09-20T00:00:00.000Z') },
+      { segment: 'manual', model: 'opus-4.9', routeId: 'b', startedAt: new Date('2026-09-01T00:00:00.000Z') },
+    ]);
+    const counts = await recentRouteDispatches(t.db, now);
+    expect(counts.get('a')).toBe(2);
+    expect(counts.has('b')).toBe(false);
+  });
+
+  it('设置认不出就抛，不当成没设', async () => {
+    await t.db.insert(settings).values({
+      key: ROUTE_SHARE_SETTING,
+      value: { 'opus-4.9': { a: { band: -1, weight: 1 } } },
+      version: 1,
+    });
+    await expect(routeFactsForPurpose(t.db, 'execute')).rejects.toThrow(/routing\.routeShare/);
+    expect(
+      await setRouteShare(t.db, {
+        modelId: 'opus-4.9',
+        routeId: 'b',
+        band: 0,
+        weight: 1,
+        expectedVersion: 1,
+      }),
+    ).toMatchObject({ ok: false, kind: 'bad' });
   });
 });
