@@ -223,6 +223,9 @@ export const SCOPE_ENV_KEEP = /^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TE
  */
 export const SCOPE_ENV_ARGS: ReadonlySet<string> = new Set([
   'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC',
+  // 子代理同时几个。值是固定数字（claude-code/run.ts 写死 2），不是凭据。
+  // 引擎的会话带 --setting-sources project，读不到 settings.local.json 里的同一项，只能跟别的执行体开关一样写上命令行。
+  'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS',
   'BASH_DEFAULT_TIMEOUT_MS',
   'BASH_MAX_TIMEOUT_MS',
   'GROK_DISABLE_AUTOUPDATER',

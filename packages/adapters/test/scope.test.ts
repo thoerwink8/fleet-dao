@@ -125,6 +125,26 @@ describe('scope 的参数与环境', () => {
     expect(() => scopeLaunch({ GROK_SOMETHING: '1' })).toThrow('GROK_SOMETHING 进不了会话用户的会话');
   });
 
+  it('Claude 子代理并发上限在白名单里：不放行的话法国经帮手起 claude（含探针）当场拒', () => {
+    expect(
+      scopeLaunch({
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        BASH_DEFAULT_TIMEOUT_MS: '600000',
+        BASH_MAX_TIMEOUT_MS: '1800000',
+        CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS: '2',
+      }).envArgs,
+    ).toEqual([
+      'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1',
+      'BASH_DEFAULT_TIMEOUT_MS=600000',
+      'BASH_MAX_TIMEOUT_MS=1800000',
+      'CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS=2',
+    ]);
+    // 【故意造出的失败】不在白名单里的 CLAUDE_CODE_ 照样拒（OAUTH 会绕开 reclaude），白名单不是按前缀放行
+    expect(() => scopeLaunch({ CLAUDE_CODE_OAUTH_TOKEN: 'x' })).toThrow(
+      'CLAUDE_CODE_OAUTH_TOKEN 进不了会话用户的会话',
+    );
+  });
+
   it('出网的代理（buildSessionEnv 的 proxy 给的那几个）写上 /usr/bin/env 的参数：帮手脚本不放、命令行上照写', () => {
     const proxy = sessionProxyEnv('http://127.0.0.1:7890');
     const { sudoEnv, envArgs } = scopeLaunch({ PATH: '/usr/bin', ...proxy });
