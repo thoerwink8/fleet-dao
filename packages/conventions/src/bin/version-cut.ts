@@ -3,7 +3,7 @@
 // 退出码 0 = 收完了或没到期；1 = 要人看（开着的版本不止一个、当前版本没设到期日）；2 = 没做成（读不到、写不成、回读对不上，旧版没关）。
 import { fileURLToPath } from 'node:url';
 import { exitWith, runMain } from '../exit.ts';
-import { liveGitHub, repoName } from '../github-api.ts';
+import { liveGitHub, resolveRepo } from '../github-api.ts';
 import { annotation } from '../pr-fields.ts';
 import { cutVersions } from '../version-cut.ts';
 
@@ -17,11 +17,12 @@ runMain(async () => {
     err('用法：version-cut.ts（不带参数）');
     exitWith(2);
   }
-  const name = repoName(process.env, root);
-  if (!name) {
-    err('没做成：认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）。');
+  const resolved = resolveRepo(process.env, root);
+  if (!resolved.repo) {
+    err(resolved.error ?? '没做成：认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）。');
     exitWith(2);
   }
+  const name = resolved.repo;
   const gh = liveGitHub(name, process.env);
   const r = await cutVersions(
     {

@@ -13,7 +13,7 @@ import { parseArgs } from 'node:util';
 import type { GitExec } from '../branch-git.ts';
 import { branchHygiene, reportMarkdown } from '../branch-hygiene.ts';
 import { exitWith, runMain } from '../exit.ts';
-import { liveGitHub, repoName } from '../github-api.ts';
+import { liveGitHub, resolveRepo } from '../github-api.ts';
 import { annotation } from '../pr-fields.ts';
 
 // 退出不用 process.exit（Windows 上偶发崩成 3221226505，../exit.ts）：提前退出用 exitWith，runMain 接住设退出码。
@@ -35,11 +35,12 @@ runMain(async () => {
     exitWith(2);
   }
 
-  const name = repoName(process.env, root);
-  if (!name) {
-    err('没查成：认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）。');
+  const resolved = resolveRepo(process.env, root);
+  if (!resolved.repo) {
+    err(resolved.error ?? '没查成：认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）。');
     exitWith(2);
   }
+  const name = resolved.repo;
 
   const git: GitExec = (args, input) => {
     const r = spawnSync('git', ['-c', 'core.quotepath=false', ...args], {

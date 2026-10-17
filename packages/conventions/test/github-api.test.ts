@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { githubToken, liveGitHub, repoName, toIssue } from '../src/github-api.ts';
+import {
+  acceptViewedRepo,
+  explicitRepo,
+  githubToken,
+  liveGitHub,
+  repoName,
+  repoViewArgs,
+  resolveRepo,
+  toIssue,
+} from '../src/github-api.ts';
 
 const TOKEN = 'test-token-value';
 
@@ -250,6 +259,44 @@ describe('读 GitHub：认是哪个仓', () => {
     expect(origin('https://relay.mirasim.ai/v2/gateway/git/github.com/o/r.git')).toBe('o/r');
     expect(origin('https://gitlab.com/o/r.git')).toBeUndefined();
     expect(origin(undefined)).toBeUndefined();
+  });
+
+  it('显式 GH_REPO 优先于 Actions 和 origin；relay 嵌的仓名让路', () => {
+    const git = () => 'https://relay.mirasim.ai/v2/gateway/git/github.com/acme/app.git';
+    expect(resolveRepo({ GH_REPO: ' thoerwink8/fleet-dao ' }, '.', git)).toEqual({
+      repo: 'thoerwink8/fleet-dao',
+    });
+    expect(
+      resolveRepo({ GH_REPO: 'thoerwink8/fleet-dao', GITHUB_REPOSITORY: 'actions/repo' }, '.', git).repo,
+    ).toBe('thoerwink8/fleet-dao');
+    expect(resolveRepo({ GITHUB_REPOSITORY: 'actions/repo' }, '.', git).repo).toBe('actions/repo');
+    expect(resolveRepo({}, '.', git).repo).toBe('acme/app');
+  });
+
+  it('【故意造出的失败】GH_REPO 不是 owner/name：不退回 Actions，也不退回能认的 origin', () => {
+    const git = () => 'https://github.com/o/r.git';
+    const env = { GH_REPO: 'not a repo', GITHUB_REPOSITORY: 'o/r' };
+    expect(explicitRepo(env).error).toMatch(/不是 owner\/name/);
+    expect(explicitRepo(env).repo).toBeUndefined();
+    expect(resolveRepo(env, '.', git).repo).toBeUndefined();
+    expect(repoName(env, '.', git)).toBeUndefined();
+    expect(resolveRepo({ GH_REPO: 'o/r/extra' }, '.', git).error).toMatch(/不改认别的仓/);
+  });
+
+  it('问 gh 带上目标仓；回的仓对不上、或不是 owner/name，就不认', () => {
+    expect(repoViewArgs(undefined)).toEqual(['repo', 'view', '--json', 'nameWithOwner']);
+    expect(repoViewArgs('thoerwink8/fleet-dao')).toEqual([
+      'repo',
+      'view',
+      'thoerwink8/fleet-dao',
+      '--json',
+      'nameWithOwner',
+    ]);
+    expect(acceptViewedRepo('Thoerwink8/Fleet-DAO', 'thoerwink8/fleet-dao')).toBe('thoerwink8/fleet-dao');
+    expect(acceptViewedRepo(undefined, 'o/r')).toBe('o/r');
+    expect(() => acceptViewedRepo('thoerwink8/fleet-dao', 'acme/app')).toThrow(/不改记到回的那个仓/);
+    expect(() => acceptViewedRepo(undefined, '')).toThrow(/没给 nameWithOwner/);
+    expect(() => acceptViewedRepo('o/r', { nameWithOwner: 'o/r' })).toThrow(/没给 nameWithOwner/);
   });
 });
 

@@ -52,7 +52,16 @@ process.exitCode = await work(process.argv.slice(2), {
   post: liveClaimsPost(() => readClaimsEndpoint()),
   out: (line) => console.log(line),
   err: (line) => console.error(line),
-  queue: { git, readBeats: () => readLocalBeats(), readLeases: () => readLeases(), now: () => new Date() },
+  env: process.env,
+  root,
+  queue: {
+    git,
+    readBeats: () => readLocalBeats(),
+    readLeases: () => readLeases(),
+    now: () => new Date(),
+    env: process.env,
+    root,
+  },
   leases: { write: (rec) => writeLease(rec), remove: (repo, issue) => removeLease(repo, issue) },
   ...(detach && capacity
     ? {
