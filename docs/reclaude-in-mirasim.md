@@ -48,10 +48,12 @@ Node 须为 22.22 或以上。目标机器无需安装 Go：有 Go 时从本仓�
 
 迁移通过 Mirasim 的本地认证 WS `setAgentLaunch` 更新，从 `listClis` 返回的 `clis[].launch` 回读启动命令/参数，再核磁盘配置；`getConfig` 只返回功能设置，不含启动命令，不能拿它的缺字段当默认 claude。默认使用连续空闲确认：此 API 会重建 Claude driver，所以首次迁移等待所有在途 Claude 回合结束。Mirasim 未运行则后台等待它启动；最长等 6 小时，到期明确记 `expired`，后续同步可以重新安排。
 
+磁盘 `running`/`queued` 始终等待；坏记录或缺 `record.json` 不直接忽略。只有每个已连接实例的完整全局 `listSessions`（不带筛选或条数限制，关联请求号且 `hasMore:false`）均无该会话、所有 Claude 条目明确已结束，再由各实例的 `subscribe` 基线明确返回 `outbox` 的 `baseline:true,noRun:true,items:[]`，才认作历史残留。`noRun` 是原生同时查过内存与 IO 运行态后的明确结果；仅没有 snapshot 回包不算。原生列表不完整、字段损坏、仍有 snapshot、连接失败或超时均继续等待；不删挪历史文件。补核失败后用新连接重查，避免迟到基线被认作下一轮结果。连续两次确认空闲后重新读取当前源码版本进行准备；准备后源码再变仍拒绝切换。
+
 状态保存在 `~/.fleet-dao/mirasim-reclaude/`：
 
 - `migration.json`：迁移前命令/参数、源码和二进制校验，不复制账号或令牌。
-- `worker.json`：后台 PID、等待/完成/失败状态；Windows 的失败详情另见 `worker.err`。
+- `worker.json`：后台 PID、等待/完成/失败状态；等待时另有 `idleState`（`busy`/`unknown`）、具体 `detail` 和 `checkedAt` 核对时间。Windows 的失败详情另见 `worker.err`。
 - `releases/<源码 hash>/`：新版产物。旧封装和历史版本保留，撤回不删除会话或账号数据。
 
 主动撤回后，同一源码版本不会被自动同步重新装回；后续新版本或显式 `pnpm mirasim:migrate` 可以再次迁移。
