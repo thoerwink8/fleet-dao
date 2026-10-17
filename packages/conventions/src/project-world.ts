@@ -1,12 +1,13 @@
 // pnpm project 的真口子（见 ./project.ts 的 ProjectWorld）：GitHub 只经本机 gh（令牌留在 gh 里，不读出来），
 // 法国只经 ssh 以 root 调 fleet-api（ssh 名字同指挥官的 france.mjs：环境变量 FLEET_FRANCE_SSH，或 ~/.fleet-dao/france-ssh 第一行）。
 // 两个 App 装没装不读本机 gh 的 user/installations（本机身份缺 metadata 权限会 403，#2977），只经 fleet-api project installations。
+// 按标题找单、按单号读单都不走搜索索引（#2995：刚创建的单搜索会晚一步，空不等于没有）。
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { Gh } from './issue-new.ts';
-import type { FleetApiResult, ProjectWorld, RepoFacts, RepoLabel } from './project.ts';
+import type { FleetApiResult, IssueFact, ProjectWorld, RepoFacts, RepoLabel } from './project.ts';
 
 const FLEET_API = '/srv/fleet-dao-releases/current/packages/api/bin/fleet-api';
 
@@ -121,6 +122,62 @@ export function sshFleetApi(
       child.stdin.on('error', () => undefined);
       child.stdin.end(stdin ?? '');
     });
+}
+
+/** issues 列表一页最多这么多。仓库这个接口没有 filter（那是 GET /issues 的），多传可能 422。 */
+export const ISSUE_LIST_PAGE = 100;
+/**
+ * 页码翻页翻满还没见底：没读全，不能当成没有。
+ * 和本包别处「翻了 50 页还没完，不当成读完了」同一个上限。
+ */
+export const ISSUE_LIST_PAGES_MAX = 50;
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** 认一张 issues API 回的单。认不出抛；PR 标出来，调用方自己决定算不算。 */
+function parseIssueFact(raw: unknown, what: string): { fact: IssueFact; pull: boolean } {
+  if (!isRecord(raw)) throw new Error(`${what}：认不出`);
+  const number = raw.number;
+  const title = raw.title;
+  const state = raw.state;
+  if (typeof title !== 'string' || !Number.isSafeInteger(number) || (number as number) <= 0) {
+    throw new Error(`${what}：没有可信的单号或标题`);
+  }
+  if (typeof state !== 'string' || !state) throw new Error(`${what}：没有状态`);
+  return {
+    fact: { number: number as number, title, state },
+    pull: raw.pull_request !== undefined && raw.pull_request !== null,
+  };
+}
+
+/**
+ * GET /repos/{slug}/issues，不走搜索索引。
+ * 读全了没有这张完整标题回 null；没读成、没读全、有一条认不出抛错。
+ */
+async function issuesListedByTitle(gh: Gh, slug: string, title: string): Promise<IssueFact | null> {
+  const what = `直接列 ${slug} 的单`;
+  for (let page = 1; page <= ISSUE_LIST_PAGES_MAX; page++) {
+    const path = `repos/${slug}/issues?state=all&sort=created&direction=desc&per_page=${ISSUE_LIST_PAGE}&page=${page}`;
+    const list = await ghJson<unknown>(gh, ['api', path], `${what}第 ${page} 页`);
+    if (!Array.isArray(list)) throw new Error(`${what}：回的不是数组`);
+    for (const raw of list) {
+      const parsed = parseIssueFact(raw, `${what}里有一条`);
+      if (!parsed.pull && parsed.fact.title === title) return parsed.fact;
+    }
+    if (list.length < ISSUE_LIST_PAGE) return null;
+  }
+  throw new Error(`${what}：${ISSUE_LIST_PAGES_MAX} 页还没列完，不能当成没有「${title}」`);
+}
+
+/** GET /repos/{slug}/issues/{number}。没有这张单回 null；端口出错或认不出抛。 */
+async function issueReadByNumber(gh: Gh, slug: string, number: number): Promise<IssueFact | null> {
+  if (!Number.isSafeInteger(number) || number <= 0) throw new Error(`单号不可信：${String(number)}`);
+  const what = `直接读 ${slug} #${number}`;
+  const raw = await ghGetOrNull<unknown>(gh, `repos/${slug}/issues/${number}`, what);
+  if (raw === null) return null;
+  return parseIssueFact(raw, what).fact;
 }
 
 export function ghProjectWorld(gh: Gh, fleetApi: FleetApiRunner): ProjectWorld {
@@ -289,24 +346,14 @@ export function ghProjectWorld(gh: Gh, fleetApi: FleetApiRunner): ProjectWorld {
       return { number: numberFromUrl(url, '开补齐 PR'), url: url.trim() };
     },
     async findIssue(slug, title) {
-      const list = await ghJson<{ number: number; title: string; state: string }[]>(
-        gh,
-        [
-          'issue',
-          'list',
-          '-R',
-          slug,
-          '--state',
-          'all',
-          '--search',
-          `"${title}" in:title`,
-          '--json',
-          'number,title,state',
-        ],
-        `查 ${slug} 的单`,
-      );
-      const hit = list.find((i) => i.title === title);
-      return hit ? { number: hit.number, state: hit.state } : null;
+      // 和直接列单同一条路。以前这里走 gh issue list --search，索引延迟会把刚开的单说成没有。
+      return issuesListedByTitle(gh, slug, title);
+    },
+    async listIssueByTitle(slug, title) {
+      return issuesListedByTitle(gh, slug, title);
+    },
+    async readIssue(slug, number) {
+      return issueReadByNumber(gh, slug, number);
     },
     async createIssue(slug, input) {
       const url = await ghOk(
