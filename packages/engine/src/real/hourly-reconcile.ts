@@ -7,7 +7,7 @@
 
 import { lstat, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
-import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import { LOCAL_LABEL, parsePrerequisites } from '@fleet-dao/conventions';
 import {
   activeLocalLeaseKeys,
   alertByKey,
@@ -349,15 +349,16 @@ function temporalClosedIssueTasks(
 }
 
 /**
- * 三个 GitHub 读法都在才核「本机做」没人领。测试装配的假 GitHub 往往没有这三样，这时一个都不接，
+ * 四个 GitHub 读法都在才核「本机做」没人领：开着单的正文/标签、标签时间线和评论，以及前置单状态。
+ * 测试装配的假 GitHub 往往没有这些，这时一个都不接，
  * 对账那一轮跳过，不记没查成。
  */
 function localOrphanWiring(
   w: HourlyReconcileWiring,
   now: () => Date,
 ): Pick<HourlyReconcileJobDeps, 'localLabeled' | 'activeLeases' | 'saveLocalOrphans'> {
-  const { readGroomFacts, readIssueLabelEvents, readIssueComments } = w.gh;
-  if (!readGroomFacts || !readIssueLabelEvents || !readIssueComments) return {};
+  const { readGroomFacts, readIssueLabelEvents, readIssueComments, readIssueState } = w.gh;
+  if (!readGroomFacts || !readIssueLabelEvents || !readIssueComments || !readIssueState) return {};
   const gh = w.gh;
   return {
     async localLabeled() {
@@ -365,13 +366,36 @@ function localOrphanWiring(
       for (const repo of await listManagedRepos(w.db)) {
         const ref = { owner: repo.owner, name: repo.name };
         const facts = await readGroomFacts.call(gh, { repo: ref });
-        for (const issue of facts.issues) {
-          if (!issue.labels.includes(LOCAL_LABEL)) continue;
+        const localIssues = facts.issues.filter((issue) => issue.labels.includes(LOCAL_LABEL));
+        const prerequisiteNumbers = [
+          ...new Set(localIssues.flatMap((issue) => parsePrerequisites(issue.body).issues)),
+        ];
+        const prerequisiteStates = new Map<number, 'open' | 'closed'>();
+        await Promise.all(
+          prerequisiteNumbers.map(async (issueNumber) => {
+            const state = await readIssueState.call(gh, { repo: ref, issueNumber });
+            if (state.state !== 'open' && state.state !== 'closed') {
+              throw new Error(
+                `${repo.owner}/${repo.name}#${issueNumber} 的状态认不出：${String(state.state)}`,
+              );
+            }
+            prerequisiteStates.set(issueNumber, state.state);
+          }),
+        );
+        for (const issue of localIssues) {
           const [events, comments] = await Promise.all([
             readIssueLabelEvents.call(gh, { repo: ref, issueNumber: issue.number }),
             readIssueComments.call(gh, { repo: ref, issueNumber: issue.number }),
           ]);
-          out.push({ repo: ref, issue: issue.number, events, comments });
+          out.push({
+            repo: ref,
+            issue: issue.number,
+            body: issue.body,
+            labels: issue.labels,
+            prerequisiteStates,
+            events,
+            comments,
+          });
         }
       }
       return out;

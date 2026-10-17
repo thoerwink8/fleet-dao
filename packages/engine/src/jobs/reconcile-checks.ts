@@ -5,7 +5,7 @@
 // 「开着的单都有着落」那一处（一张单一个需求工作流，要补拉接活）随 Fusion 一起删了（#556）：三段流程的单是任务工作流，
 // 状态只在 Temporal 一份，不靠这一处查；它留下的旧提醒由 retireWorkflowAlerts 撤掉。
 
-import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import { HUMAN_DECISION_LABEL, LOCAL_LABEL, parsePrerequisites, waitingUntil } from '@fleet-dao/conventions';
 import type { LedgerSession, LocalOrphan, MergedPrLedger } from '@fleet-dao/db';
 import {
   isEngineCiTimingsPr,
@@ -425,13 +425,20 @@ export async function checkLedgers(deps: ReconcileCheckDeps): Promise<SweepPart>
   return part;
 }
 
-/** 贴了「本机做」超过这么久、又没有还没到期的本机租约，才算没人领。刚好 24 小时不算。 */
+/** 通过等待条件后，贴了「本机做」超过这么久、又没有还没到期的本机租约，才算没人领。刚好 24 小时不算。 */
 export const LOCAL_ORPHAN_MS = 24 * 60 * 60_000;
 
-/** 一张贴着「本机做」的开着的单，加上标签时间线和评论（对账读来的，这里不自己去 GitHub）。 */
+/**
+ * 一张贴着「本机做」的开着的单，加上 GitHub 正文、标签、前置单状态、标签时间线和评论
+ * （对账读来的，这里不自己去 GitHub）。
+ */
 export interface LocalLabeledIssue {
   repo: { owner: string; name: string };
   issue: number;
+  body: string;
+  labels: readonly string[];
+  /** 正文里「前置：」提到的单的现状；选择器发现缺号会整份判失败。 */
+  prerequisiteStates: ReadonlyMap<number, 'open' | 'closed'>;
   events: readonly { label: string; action: 'labeled' | 'unlabeled'; at: string; actor?: string | null }[];
   comments: readonly { body: string; at: string }[];
 }
@@ -496,7 +503,8 @@ export function labeledForText(ms: number): string {
 }
 
 /**
- * 贴着「本机做」、超过 24 小时、又没有还没到期的本机租约的单。
+ * 贴着「本机做」、没有明确等待条件、超过 24 小时、又没有还没到期的本机租约的单。
+ * 「要人拍」、日期未到、任一前置单开着的不列；前置状态缺号或认不出抛错，不把这张悄悄放行。
  * 有租约的、不到（含刚好）24 小时的不列。单上有标签、时间线里却没有还贴着的那一次：抛错，不把这张丢掉。
  */
 export function selectLocalOrphans(
@@ -506,6 +514,38 @@ export function selectLocalOrphans(
 ): LocalOrphan[] {
   const out: LocalOrphan[] = [];
   for (const issue of issues) {
+    if (typeof issue.body !== 'string' || !Array.isArray(issue.labels)) {
+      throw new Error(`${issue.repo.owner}/${issue.repo.name}#${issue.issue} 的正文或标签没读成`);
+    }
+    if (
+      issue.prerequisiteStates === null ||
+      issue.prerequisiteStates === undefined ||
+      typeof issue.prerequisiteStates.has !== 'function' ||
+      typeof issue.prerequisiteStates.get !== 'function'
+    ) {
+      throw new Error(`${issue.repo.owner}/${issue.repo.name}#${issue.issue} 的前置状态没读成`);
+    }
+    const pre = parsePrerequisites(issue.body);
+    for (const prerequisite of pre.issues) {
+      if (!issue.prerequisiteStates.has(prerequisite)) {
+        throw new Error(
+          `${issue.repo.owner}/${issue.repo.name}#${issue.issue} 的前置单 #${prerequisite} 状态缺号`,
+        );
+      }
+      const state = issue.prerequisiteStates.get(prerequisite);
+      if (state !== 'open' && state !== 'closed') {
+        throw new Error(
+          `${issue.repo.owner}/${issue.repo.name}#${issue.issue} 的前置单 #${prerequisite} 状态认不出：${String(state)}`,
+        );
+      }
+    }
+    const until = waitingUntil(pre, now);
+    if (
+      issue.labels.includes(HUMAN_DECISION_LABEL) ||
+      until !== null ||
+      pre.issues.some((prerequisite) => issue.prerequisiteStates.get(prerequisite) === 'open')
+    )
+      continue;
     const applied = localLabelApplied(issue.events);
     if (!applied) {
       throw new Error(
