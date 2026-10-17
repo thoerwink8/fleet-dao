@@ -183,6 +183,9 @@ describe('判定：读的时候现算', () => {
     );
     expect(codes(deps)).toEqual(['deps_changed']);
     expect(deps.problems[0]?.alreadyAlerted).toBe(true);
+    expect(
+      judge(input(H2, state({ deps: { commit: H2, result: 'repaired', detail: '重装过但树完好' } }))).ok,
+    ).toBe(true);
     // 老状态没有这两个字段：绿
     expect(judge(input(H2, state())).ok).toBe(true);
     // 进程 cwd 已经在这一版，也盖不住脚本副本不一致

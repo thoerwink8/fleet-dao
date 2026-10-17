@@ -82,6 +82,14 @@ export interface TemporalClientLike {
   };
 }
 
+interface TemporalRouteWakeClientLike {
+  connection: TemporalClientLike['connection'];
+  workflow: {
+    list(options: { query: string }): AsyncIterable<{ workflowId: string }>;
+    getHandle(workflowId: string): { signal(name: string, arg: unknown): Promise<void> };
+  };
+}
+
 /** 发一次信号多久没回应就当连不上（真客户端的 UNAVAILABLE / DEADLINE_EXCEEDED 也归到这一类）。 */
 const DEFAULT_SIGNAL_TIMEOUT_MS = 5_000;
 
@@ -102,6 +110,46 @@ export function createTemporalWorkflowControl(
         throw err;
       }
     },
+  };
+}
+
+/** 配置改完后叫醒所有在跑的任务工作流；工作流自己判断当前是否正在等路由。 */
+export function createTemporalRouteWake(
+  client: TemporalRouteWakeClientLike,
+  timeoutMs = DEFAULT_SIGNAL_TIMEOUT_MS,
+): (reason: string) => Promise<void> {
+  return async (reason) => {
+    const workflowIds: string[] = [];
+    for await (const info of client.workflow.list({
+      query: `WorkflowType = '${TASK_WORKFLOW_TYPE}' AND ExecutionStatus = 'Running'`,
+    })) {
+      workflowIds.push(info.workflowId);
+    }
+    const outcomes = await Promise.allSettled(
+      workflowIds.map(async (workflowId) => {
+        try {
+          await client.connection.withDeadline(Date.now() + timeoutMs, () =>
+            client.workflow.getHandle(workflowId).signal(TASK_SIGNAL_NAMES.routeWake, {
+              by: '驾驶舱路由配置',
+              reason,
+            }),
+          );
+        } catch (error) {
+          if (isGone(error)) return;
+          throw error;
+        }
+      }),
+    );
+    const failed = outcomes
+      .map((outcome, index) =>
+        outcome.status === 'rejected' ? `${workflowIds[index]}：${String(outcome.reason)}` : null,
+      )
+      .filter((failure): failure is string => failure !== null);
+    if (failed.length > 0) {
+      throw new Error(
+        `有 ${failed.length} 个任务工作流没收到 taskRouteWake：${failed.slice(0, 3).join('；')}`,
+      );
+    }
   };
 }
 
@@ -376,7 +424,7 @@ export function createTemporalTaskRedo(client: Client, taskQueue: string): TaskR
 
 export function connectTemporal(
   config: TemporalConnectionConfig,
-): TemporalConnection & { taskRedo: TaskRedoPort } {
+): TemporalConnection & { taskRedo: TaskRedoPort; routeWake: (reason: string) => Promise<void> } {
   const connection = Connection.lazy({ address: config.address });
   const client = new Client({ connection, namespace: config.namespace });
   const control = createTemporalWorkflowControl(client);
@@ -392,6 +440,7 @@ export function connectTemporal(
       },
     },
     taskRedo: createTemporalTaskRedo(client, config.taskQueue),
+    routeWake: createTemporalRouteWake(client),
     check: createNamespaceCheck(
       {
         async describeNamespace(namespace) {

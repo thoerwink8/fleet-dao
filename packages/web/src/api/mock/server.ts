@@ -2410,6 +2410,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             ...(t.task.executor === undefined ? {} : { executor: t.task.executor }),
             ...(t.task.claimedBy === undefined ? {} : { claimedBy: t.task.claimedBy }),
             ...(t.task.leaseUntil === undefined ? {} : { leaseUntil: t.task.leaseUntil }),
+            // 还没分组没有这个键：不补、不猜
+            ...(t.task.flowMode === undefined ? {} : { flowMode: t.task.flowMode }),
             link: `/tasks/${t.task.id}`,
             taskId: t.task.id,
             state: t.task.state,
@@ -2702,6 +2704,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
               title: tv.task.title,
               state: tv.task.state,
               ...(tv.task.paused === undefined ? {} : { paused: tv.task.paused }),
+              // 还没分组没有这个键：不补、不猜（详情那条直接把 task 交给 TaskSchema，有就留下）
+              ...(tv.task.flowMode === undefined ? {} : { flowMode: tv.task.flowMode }),
               group: taskListGroupOf(tv.task),
               segment: finished ? null : flow.segment,
               model: flow.worker ?? started.at(-1)?.modelName ?? null,

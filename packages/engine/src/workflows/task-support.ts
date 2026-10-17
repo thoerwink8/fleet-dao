@@ -410,6 +410,8 @@ export function infraAvoidScope(
   modelAlreadyRouteAvoided: boolean,
 ): 'route' | 'model' | 'pool' | null {
   const normalized = code.trim().toLowerCase();
+  // 模型串是路由配置的问题：只避开刚失败的路由，给同一派工档的下一条路由一次机会。
+  if (normalized === 'model_mismatch') return 'route';
   if (normalized === 'relay_quota_exhausted') return 'pool';
   if (
     normalized === 'aborted' ||
@@ -469,6 +471,7 @@ export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'spawn_timeout',
   'startup_timeout',
   'relay_quota_exhausted',
+  'model_mismatch',
 ];
 
 /**

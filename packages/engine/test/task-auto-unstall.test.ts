@@ -563,6 +563,95 @@ describe('动手会话没跑成：先换路由重派一次（决定 0093）', { 
     expect(world.states.some((s) => s.lastProblem?.includes('挂起并报警'))).toBe(false);
   });
 
+  const MODEL_DOWN = {
+    ok: false as const,
+    runId: null,
+    outcome: 'failed' as const,
+    evidence: {
+      code: 'agent_error',
+      message: 'API Error: 503 This model is temporarily unavailable',
+      quotaExhausted: false,
+    },
+  };
+
+  it('上游 503 模型暂时不可用：不原路睡，换一条路由重派，进度写明是因为 503', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async (_i, n) => (n === 1 ? MODEL_DOWN : OK_SEGMENT),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[0]?.route.routeId).toBe('r1');
+    expect(calls.segment[1]?.route.routeId).not.toBe('r1');
+    const picks = world.callsOf('pickRoute').map((c) => c.input);
+    expect(picks.some((p) => p.avoidRouteIds.includes('r1'))).toBe(true);
+    expect(world.states.some((s) => s.phase === 'parked')).toBe(false);
+    expect(world.states.some((s) => s.state === 'stalled')).toBe(false);
+    expect(world.states.some((s) => s.lastProblem?.includes('挂起并报警'))).toBe(false);
+    expect(
+      world.states.some(
+        (s) => s.doing.includes('上游 503 模型暂时不可用') && s.doing.includes('换一条可用路由'),
+      ),
+    ).toBe(true);
+    expect(world.states.some((s) => s.lastProblem?.includes('上游 503 模型暂时不可用'))).toBe(true);
+    expect(world.alerts.filter((a) => a.level !== 'info')).toEqual([]);
+  });
+
+  it('上游 503 模型暂时不可用、换了还是这一句：停下腾出名额，不再占 running', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      segment: async () => MODEL_DOWN,
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const stalled = await statusUntil(h, parked, '换了还是 503，停下腾出名额');
+        expect(stalled.lastProblem).toContain('已停下腾出名额');
+        expect(stalled.lastProblem).toContain('503');
+        expect(stalled.doing).toContain('已停下腾出名额');
+        expect(calls.segment.length).toBeGreaterThanOrEqual(2);
+        expect(world.states.some((s) => s.state === 'stalled')).toBe(true);
+        expect(world.states.some((s) => s.doing.includes('换一条可用路由'))).toBe(true);
+        expect(world.states.some((s) => s.lastProblem?.includes('挂起并报警'))).toBe(false);
+        await h.terminate('测完了');
+      },
+      { tasks },
+    );
+  });
+
+  it('上游 503 模型暂时不可用、没有别的路由：不退回刚才那条，当场停下腾出名额', async () => {
+    const world = createFakeWorld({
+      routes: [{ routeId: 'r1', poolId: 'p1', modelId: 'm1', family: 'claude', hostId: 'claude-code' }],
+    });
+    const { tasks, calls } = scripted({
+      segment: async () => MODEL_DOWN,
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const stalled = await statusUntil(h, parked, '没有别的路由，停下腾出名额');
+        expect(calls.segment).toHaveLength(1);
+        expect(stalled.phase).toBe('parked');
+        expect(stalled.lastProblem).toContain('已停下腾出名额');
+        expect(stalled.doing).toContain('503');
+        expect(world.states.some((s) => s.state === 'stalled' && s.phase === 'parked')).toBe(true);
+        expect(world.states.filter((s) => s.state === 'running').at(-1)?.doing).toContain('换一条可用路由');
+        await h.terminate('测完了');
+      },
+      { tasks },
+    );
+  });
+
   it('只有人能修的（没权限）：不自动重派，当场停下', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({

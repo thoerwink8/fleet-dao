@@ -21,18 +21,32 @@ export const OPEN_TIMEOUT_MS = 8_000;
  * 连上之后等 relay 帧的时限。getRelay 是本机一帧，服务空闲时远小于 1 秒。
  * 15 秒盖住高负载下的调度抖动。不再加长：Mirasim 单线程被会话堵住时要 40–58 秒（MS-08），
  * 耗在同一次连接上等不到。
- * 到点记「连上了等不到 relay 帧」，由读这一轮的那一层换一条连接再试一次。
- * 整体时限仍是池或 deploy/quota.json 的 timeoutMs（生产 30 秒），到点另记「整体 N 秒用完」。
+ * 到点记「连上了等不到 relay 帧」，由读这一轮的那一层先短退避、再换一条连接试一次。
+ * 整体时限是池上的 timeoutMs，没有才用 deploy/quota.json 顶层的。生产 mirasim-relay 单独给
+ * MIRASIM_QUOTA_ATTEMPT_MS（90 秒），对齐桥接建连重试；顶层 30 秒会先掐掉，写成「整体 30 秒用完」。
  * 池上的 relayWaitMs 可覆盖。
  */
 export const RELAY_WAIT_MS = 15_000;
+
+/**
+ * 额度读取这一次尝试要给够的整体预算，跟桥接建连重试同一条线（bridge.ts 的 CONNECT_BUDGET_MS，默认 90 秒）。
+ * MS-08：起一个 codex 会话会把 Mirasim 单线程堵 40–58 秒，建连要重试到大约 90 秒才跨得过。
+ * 2026-10-16 21:34 CST（#2854）连着两轮「整体 30 秒用完」：当时这个池没单独加长，顶层 30 秒先于桥接预算把连接掐掉，
+ * 本轮重试又是立刻再连，两次都落在同一次堵住里。上次读成 21:04，到 :34 同时跨过「连着两轮」和读数过期 30 分钟，
+ * quota-read 与 reconcile:quota 一起挂上，选路把整池当额度未知降权。排空约 21:35 才开始、重启 21:38，告警在那之前
+ * 已经写成，不是排空掐死读取；下一档要到 :49，所以 21:41 前读数不会自己刷新。
+ * 不是上游额度接口慢（getRelay 问的是本机，零次上游）。跟 #2838 分开：那是动手会话的桥接超时挂整单，不改额度读。
+ * 跟 #2307 分开：那是额度告警反复报撤；这里是连续整体超时后读数停在半小时前、卡一直挂着。
+ * deploy/quota.json 里这个池的 timeoutMs 必须不少于这个数。顶层 30 秒留给别的池，不要一起拉长。
+ */
+export const MIRASIM_QUOTA_ATTEMPT_MS = 90_000;
 
 /** 桥接没连上（进程没起来、握手失败、连上就断）。 */
 export const MIRASIM_BRIDGE_UNREACHABLE = '桥接连不上';
 /** 连接还在，等满了 relay 帧时限，没收到 relay / error 帧。 */
 export const MIRASIM_FRAME_TIMEOUT = '连上了等不到 relay 帧';
 
-/** 这一次尝试的整体时限用完（生产是 deploy/quota.json 的 30 秒 →「整体 30 秒用完」）。 */
+/** 这一次尝试的整体时限用完。生产 mirasim-relay 是 90 秒；短于桥接预算时才会写成「整体 30 秒用完」。 */
 export function mirasimOverallBudgetMessage(timeoutMs: number): string {
   const span = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} 秒` : `${timeoutMs} 毫秒`;
   return `整体 ${span}用完`;

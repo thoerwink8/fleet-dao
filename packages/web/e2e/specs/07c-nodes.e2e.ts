@@ -114,8 +114,10 @@ test.describe('看板多机', () => {
     shot,
     problems,
   }) => {
-    // 钟一快进，轮询一下子到期好几回，新一轮请求把还在路上的上一轮环境列表取消掉：被取消的不是失败
+    // 钟一快进，轮询一下子到期好几回，新一轮请求把还在路上的上一轮取消掉：被取消的不是失败。
+    // 环境列表（顶栏）和提醒（外壳）都在轮询，都会撞上。
     problems.allow('/api/nodes net::ERR_ABORTED');
+    problems.allow('/api/notifications net::ERR_ABORTED');
     // 钟从「推成快照那一刻」起走，不从现在：快照可能是 2 分半内前面用例推的（beforeEach 不重推），从现在起快进 10 分钟
     // 横幅会写 11、12 分钟（CI 上撞过）。从推成那一刻起，快进 10 分钟就正好失联 10 分钟。
     await page.clock.install({ time: new Date(pushedAt) });

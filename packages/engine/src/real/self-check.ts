@@ -8,6 +8,9 @@
 // - 不带 FLEET_RUN_ID：pnpm test:changed 见到它会全跑（会话里那套），这里只要跑改到的。退出 2（没算成要跑什么、
 //   排不上本机测试槽）不是测试没过，记 skipped。退出 3（要全跑）不再只跑 tsc：在整机同一时刻只跑一个的锁下
 //   再跑 `pnpm test:changed --affected`（受影响的包），锁被占就排队、不跳过。这一段和前面共用测试时限。
+// - 同一台机器同时只跑 SELF_CHECK_SLOTS 个自测（默认 2）。名额用锁目录里的 slot-0、slot-1 计数，不另引依赖。
+//   普通测试命令和 tsc 都先拿到名额再跑。名额满了排队，排队不占测试时限（SELF_CHECK_TEST_MS 从拿到名额起算），
+//   排队时每 SELF_CHECK_HEARTBEAT_MS 心跳。要全跑改跑受影响包的那把锁还在，那一段仍和前面的测试合用时限。
 // - 有时限（测试 SELF_CHECK_TEST_MS、tsc SELF_CHECK_TSC_MS）：普通那次超了记 skipped，不算红——慢不等于错，交给 CI。
 //   要全跑之后改跑受影响包的那次超了记「自测超时」，算没过。
 // - 精炼输出：挑出像失败的行（FAIL、error、×、AssertionError、TSxxxx）再加末尾一段，限 SELF_CHECK_DIGEST_MAX 字。
@@ -21,6 +24,12 @@ import type { RepoWithProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type PortContext, PortError } from '../ports.ts';
 import {
+  SELF_CHECK_PROBE_MS,
+  SELF_CHECK_SLOTS,
+  SELF_CHECK_TEST_MS,
+  SELF_CHECK_TSC_MS,
+} from '../self-check-budget.ts';
+import {
   SELF_CHECK_DIGEST_MAX,
   type SelfCheckInput,
   type SelfCheckResult,
@@ -28,15 +37,17 @@ import {
 } from '../task-contract.ts';
 import type { UserCommandResult, UserExec } from './exec.ts';
 
-/**
- * 测试命令最多跑多久（毫秒）。夹具一改就升成全跑，受影响的包在 2 个进程下墙钟约 17 分钟
- * （2026-10-16 这张单实测 1024 秒），排队和这一跑合用，给 30 分钟才盖得住，12 分钟会记成自测超时。
- */
-export const SELF_CHECK_TEST_MS = 30 * 60_000;
-/** tsc 最多跑多久（毫秒）。 */
-export const SELF_CHECK_TSC_MS = 5 * 60_000;
-/** 多久报一次心跳（活动的心跳超时是 limits.heartbeatSeconds，默认 120 秒）。 */
-const HEARTBEAT_MS = 30_000;
+export {
+  SELF_CHECK_ACTIVITY_MS,
+  SELF_CHECK_PROBE_MS,
+  SELF_CHECK_QUEUE_MARGIN_MS,
+  SELF_CHECK_SLOTS,
+  SELF_CHECK_TEST_MS,
+  SELF_CHECK_TSC_MS,
+} from '../self-check-budget.ts';
+
+/** 多久报一次心跳（活动的心跳超时是 limits.heartbeatSeconds，默认 120 秒）。排队等名额时也按这个间隔打。 */
+export const SELF_CHECK_HEARTBEAT_MS = 30_000;
 /**
  * 会话用户的 PATH：node、pnpm 在 /usr/bin 或 /usr/local/bin（法国 pnpm 在 /usr/local/bin）。
  * Go 不在这三处：本机装在会话用户家里的 ~/.local/go/bin，官方包在 /usr/local/go/bin。
@@ -50,8 +61,10 @@ const SH = '/bin/sh';
 const TSC = 'node_modules/.bin/tsc';
 /** 锁目录放哪（几个引擎进程共用）。测试和特殊机器用。 */
 const ENV_LOCK_DIR = 'FLEET_SELF_CHECK_LOCK_DIR';
-/** 一把锁最多算数多久：测试时限再加一分钟，超时当持有者已死。 */
+/** 受影响包那把锁最多算数多久：测试时限再加一分钟，超时当持有者已死。 */
 const LOCK_STALE_MS = SELF_CHECK_TEST_MS + 60_000;
+/** 一个名额最多算数多久：测试加 tsc 再加一分钟。活进程占着这么久才当它已死；死进程当下就拆。 */
+const SLOT_STALE_MS = SELF_CHECK_TEST_MS + SELF_CHECK_TSC_MS + 60_000;
 const LOCK_POLL_MS = 250;
 
 /** test:changed 的退出码 2：没算成要跑什么，不是测试没过（packages/conventions/src/bin/test-changed.ts）。 */
@@ -72,6 +85,11 @@ export interface SelfCheckDeps {
   tscMs?: number;
   /** 不给就用整机文件锁（排队）。测试换成可控的。 */
   fullLock?: SelfCheckFullLock;
+  /**
+   * 同时跑的名额（默认整机 SELF_CHECK_SLOTS 个）。测试换成一直有名额的，或换到临时目录。
+   * 普通测试命令和 tsc 先拿到名额再跑；等名额不占测试时限。
+   */
+  slots?: SelfCheckFullLock;
   log?: (message: string, fields?: Record<string, unknown>) => void;
 }
 
@@ -333,22 +351,82 @@ export function createAffectedLock(
   };
 }
 
+/**
+ * 同一目录里最多 slots 个名额（默认 SELF_CHECK_SLOTS）。每个名额是一把现成的目录锁
+ * （slot-0、slot-1……），和受影响包那把锁同一套公布、拆死进程，不另引依赖。
+ * 满了就隔一会儿再试，signal 中止抛错。
+ */
+export function createSelfCheckSlots(
+  dir: string,
+  opts?: { slots?: number; pollMs?: number; staleMs?: number },
+): SelfCheckFullLock {
+  const slots = opts?.slots ?? SELF_CHECK_SLOTS;
+  const pollMs = opts?.pollMs ?? LOCK_POLL_MS;
+  const staleMs = opts?.staleMs ?? SLOT_STALE_MS;
+  return {
+    async acquire(signal: AbortSignal): Promise<() => Promise<void>> {
+      const token = randomBytes(8).toString('hex');
+      await mkdir(dir, { recursive: true });
+      await sweepPending(dir, staleMs);
+      for (;;) {
+        if (signal.aborted) throw new LockAbort();
+        for (let i = 0; i < slots; i++) {
+          const lockDir = join(dir, `slot-${i}`);
+          await stealStale(lockDir, staleMs, {});
+          if (await publish(dir, lockDir, token, signal)) {
+            if (signal.aborted) {
+              await releaseGeneration(lockDir, token);
+              throw new LockAbort();
+            }
+            let released = false;
+            return async () => {
+              if (released) return;
+              released = true;
+              await releaseGeneration(lockDir, token);
+            };
+          }
+        }
+        await sleep(pollMs, signal);
+      }
+    },
+  };
+}
+
 let defaultLock: SelfCheckFullLock | undefined;
+let defaultSlots: SelfCheckFullLock | undefined;
+
+function selfCheckLockRoot(): string | null {
+  const given = process.env[ENV_LOCK_DIR]?.trim();
+  if (given) return given;
+  const home = homedir();
+  if (home === '') return null;
+  return join(home, '.fleet-dao', 'self-check-locks');
+}
+
+function missingLock(): SelfCheckFullLock {
+  return {
+    async acquire() {
+      throw new Error(`读不到用户目录，没法放自测锁（可设 ${ENV_LOCK_DIR}）`);
+    },
+  };
+}
 
 /** 引擎进程共用的那把锁。用户目录读不到就 acquire 抛错，调用方记没跑成，不当成过了。 */
 function machineAffectedLock(): SelfCheckFullLock {
   if (defaultLock) return defaultLock;
-  const given = process.env[ENV_LOCK_DIR]?.trim();
-  const home = homedir();
-  if ((given === undefined || given === '') && home === '') {
-    return {
-      async acquire() {
-        throw new Error(`读不到用户目录，没法放自测锁（可设 ${ENV_LOCK_DIR}）`);
-      },
-    };
-  }
-  defaultLock = createAffectedLock(given || join(home, '.fleet-dao', 'self-check-locks'));
+  const root = selfCheckLockRoot();
+  if (root === null) return missingLock();
+  defaultLock = createAffectedLock(root);
   return defaultLock;
+}
+
+/** 引擎进程共用的名额。和受影响包的锁放在同一棵目录下。 */
+function machineSelfCheckSlots(): SelfCheckFullLock {
+  if (defaultSlots) return defaultSlots;
+  const root = selfCheckLockRoot();
+  if (root === null) return missingLock();
+  defaultSlots = createSelfCheckSlots(join(root, 'slots'));
+  return defaultSlots;
 }
 
 let seq = 0;
@@ -441,12 +519,13 @@ export function createSelfCheck(deps: SelfCheckDeps) {
   const testMs = deps.testMs ?? SELF_CHECK_TEST_MS;
   const tscMs = deps.tscMs ?? SELF_CHECK_TSC_MS;
   const fullLock = deps.fullLock ?? machineAffectedLock();
+  const slots = deps.slots ?? machineSelfCheckSlots();
 
   return async (input: SelfCheckInput, ctx: PortContext): Promise<SelfCheckResult> => {
     if (input?.schemaVersion !== 1 || !input.taskId || !input.worktreePath || !input.repo) {
       throw new PortError('INVALID_INPUT', '自测：要有 taskId、仓和工作树', { retryable: false });
     }
-    const beat = setInterval(() => ctx.heartbeat({ selfCheck: input.taskId }), HEARTBEAT_MS);
+    const beat = setInterval(() => ctx.heartbeat({ selfCheck: input.taskId }), SELF_CHECK_HEARTBEAT_MS);
     try {
       let user: SessionUser | null;
       try {
@@ -503,7 +582,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         profile === undefined || profile.toolchain.some((tool) => NODE_TOOLS.has(tool));
       if (needsNodeModules) {
         // Node 仓没装依赖就什么都跑不起来：整个跳过，不算红；非 Node 仓不看 node_modules。
-        const probe = await sh('probe', 'test -d node_modules && echo yes || echo no', 30_000);
+        const probe = await sh('probe', 'test -d node_modules && echo yes || echo no', SELF_CHECK_PROBE_MS);
         if (probe.code !== 0) {
           return {
             state: 'skipped',
@@ -516,46 +595,79 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         }
       }
 
-      const steps: SelfCheckStep[] = [];
+      const settled = (steps: SelfCheckStep[]): SelfCheckResult => {
+        if (steps.some((s) => s.outcome === 'fail')) return { state: 'red', steps };
+        if (steps.some((s) => s.outcome === 'pass')) return { state: 'green', steps };
+        return {
+          state: 'skipped',
+          reason: steps.map((s) => `${s.command}：${s.digest}`).join('；'),
+          steps,
+        };
+      };
       const testCommand = (profile?.testCommand ?? input.repo.testCommand)?.trim() ?? '';
-      if (testCommand === '') {
-        steps.push(notRun('（测试命令）', '这个仓没配测试命令（repos.test_command）'));
-      } else {
-        const testStarted = Date.now();
-        const r = await sh('test', testCommand, testMs);
-        const changed = /\btest:changed\b/.test(testCommand);
-        if (changed && fullRunRefusal(r)) {
-          steps.push({
-            command: testCommand,
-            outcome: 'skipped',
-            exitCode: 3,
-            digest: '改动要全跑，本机不跑全量；改在锁下跑受影响的包',
-          });
-          const left = testMs - (Date.now() - testStarted);
-          const command = affectedCommand(testCommand);
-          steps.push(left <= 0 ? timeoutStep(command) : await runAffected(command, left));
-        } else {
-          steps.push(stepOf(testCommand, r, testMs, changed ? TEST_CHANGED_NOT_RUN : {}));
-        }
-      }
-      if (ctx.signal.aborted) return { state: 'skipped', reason: '被叫停了', steps };
-
       const tscCommand = `${TSC} -b --pretty false`;
+      // 看有没有 tsc 是轻的，不占名额。真正的测试命令和 tsc 才要名额。
       const has = await sh(
         'has-tsc',
         `test -f tsconfig.json && test -x ${shQuote(TSC)} && echo yes || echo no`,
-        30_000,
+        SELF_CHECK_PROBE_MS,
       );
-      if (has.code === 0 && has.stdout.toString('utf8').trim() === 'yes') {
-        const r = await sh('tsc', tscCommand, tscMs);
-        steps.push(stepOf(tscCommand, r, tscMs));
-      } else {
-        steps.push(notRun(tscCommand, '树里没有 tsconfig.json 或没装 tsc'));
+      const willTsc = has.code === 0 && has.stdout.toString('utf8').trim() === 'yes';
+      if (testCommand === '' && !willTsc) {
+        return settled([
+          notRun('（测试命令）', '这个仓没配测试命令（repos.test_command）'),
+          notRun(tscCommand, '树里没有 tsconfig.json 或没装 tsc'),
+        ]);
       }
 
-      if (steps.some((s) => s.outcome === 'fail')) return { state: 'red', steps };
-      if (steps.some((s) => s.outcome === 'pass')) return { state: 'green', steps };
-      return { state: 'skipped', reason: steps.map((s) => `${s.command}：${s.digest}`).join('；'), steps };
+      let releaseSlot: (() => void | Promise<void>) | undefined;
+      try {
+        releaseSlot = await slots.acquire(ctx.signal);
+      } catch (error) {
+        if (ctx.signal.aborted || error instanceof LockAbort) {
+          return { state: 'skipped', reason: '被叫停了', steps: [] };
+        }
+        return { state: 'skipped', reason: `自测名额没用上：${errMessage(error)}`, steps: [] };
+      }
+      try {
+        const steps: SelfCheckStep[] = [];
+        // 时限从拿到名额起算。等名额的时间已经过去了，不从测试预算里扣。
+        const budgetStarted = Date.now();
+        if (testCommand === '') {
+          steps.push(notRun('（测试命令）', '这个仓没配测试命令（repos.test_command）'));
+        } else {
+          const r = await sh('test', testCommand, testMs);
+          const changed = /\btest:changed\b/.test(testCommand);
+          if (changed && fullRunRefusal(r)) {
+            steps.push({
+              command: testCommand,
+              outcome: 'skipped',
+              exitCode: 3,
+              digest: '改动要全跑，本机不跑全量；改在锁下跑受影响的包',
+            });
+            const left = testMs - (Date.now() - budgetStarted);
+            const command = affectedCommand(testCommand);
+            steps.push(left <= 0 ? timeoutStep(command) : await runAffected(command, left));
+          } else {
+            steps.push(stepOf(testCommand, r, testMs, changed ? TEST_CHANGED_NOT_RUN : {}));
+          }
+        }
+        if (ctx.signal.aborted) return { state: 'skipped', reason: '被叫停了', steps };
+
+        if (willTsc) {
+          const r = await sh('tsc', tscCommand, tscMs);
+          steps.push(stepOf(tscCommand, r, tscMs));
+        } else {
+          steps.push(notRun(tscCommand, '树里没有 tsconfig.json 或没装 tsc'));
+        }
+        return settled(steps);
+      } finally {
+        try {
+          await releaseSlot?.();
+        } catch (error) {
+          deps.log?.('自测名额没放掉', { taskId: input.taskId, error: errMessage(error) });
+        }
+      }
     } catch (error) {
       deps.log?.('自测没跑成，照旧往下走', { taskId: input.taskId, error: errMessage(error) });
       return { state: 'skipped', reason: `自测没跑成：${errMessage(error)}`, steps: [] };

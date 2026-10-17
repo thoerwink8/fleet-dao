@@ -22,6 +22,7 @@ import {
   finishScheduleRun,
   latestAlertByPrefix,
   listRunningEngineTasks,
+  listStalledEngineTasks,
   mergeStallFacts,
   openAlertsByPrefix,
   poolRouteFacts,
@@ -36,11 +37,15 @@ import {
   writeHealthzBadSince,
 } from '@fleet-dao/db';
 import { RELEASES_DIR } from '@fleet-dao/store';
+import type { Client } from '@temporalio/client';
+import { isLegacyModelMismatchStall } from '../failure/model-mismatch-stall.ts';
 import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
 import { type HealthzProbe, parseHealthzResponse, type ReleaseFacts } from '../jobs/release-watch.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
 import { WATCHDOG_ACTOR, type WatchdogDeps } from '../jobs/watchdog.ts';
+import { taskContinueSignal, taskStatusQuery } from '../task-contract.ts';
 import { carpoolPoolsHeldReason } from './pool-holds.ts';
+import { isWorkflowGone } from './route-wake.ts';
 
 export interface WatchdogWiring {
   db: Db;
@@ -54,6 +59,13 @@ export interface WatchdogWiring {
   fetchImpl?: typeof fetch;
   now?: () => Date;
   log?: WatchdogDeps['log'];
+  /**
+   * 发 taskContinue 用的 Temporal 客户端。不给就不叫醒点名和读回不一致的旧挂起（单测）。
+   * 没这种挂起时不会去连。
+   */
+  temporal?: {
+    use<T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>): Promise<T>;
+  };
 }
 
 /** 法国驾驶舱接口的 /healthz（deploy/release.sh 的 COCKPIT、docs/ops.md 端口表的 8787）。 */
@@ -164,11 +176,58 @@ export async function probeHealthz(url: string, fetchImpl: typeof fetch = fetch)
   }
 }
 
+const MISMATCH_SIGNAL_TIMEOUT_MS = 5_000;
+const MISMATCH_CONTINUE_NOTE = '点名和读回的模型不一致，不再挂着等：按点名路由开新会话重派';
+
+/**
+ * 工作流还停在旧的 model_mismatch 挂起上才发继续，并撤掉这一挂的提醒。
+ * 库里的字过时、工作流已经在干别的：skipped，不把别人的挂起解开。
+ */
+async function releaseLegacyModelMismatch(
+  temporal: NonNullable<WatchdogWiring['temporal']>,
+  db: Db,
+  workflowId: string,
+  at: Date,
+): Promise<'sent' | 'gone' | 'skipped'> {
+  try {
+    const status = await temporal.use((client) =>
+      client.connection.withDeadline(Date.now() + MISMATCH_SIGNAL_TIMEOUT_MS, () =>
+        client.workflow.getHandle(workflowId).query(taskStatusQuery),
+      ),
+    );
+    const still =
+      status.phase === 'parked' &&
+      (isLegacyModelMismatchStall(status.lastProblem) || isLegacyModelMismatchStall(status.doing));
+    if (!still) return 'skipped';
+    await temporal.use((client) =>
+      client.connection.withDeadline(Date.now() + MISMATCH_SIGNAL_TIMEOUT_MS, () =>
+        client.workflow.getHandle(workflowId).signal(taskContinueSignal, {
+          by: WATCHDOG_ACTOR,
+          note: MISMATCH_CONTINUE_NOTE,
+        }),
+      ),
+    );
+  } catch (err) {
+    if (isWorkflowGone(err)) return 'gone';
+    throw err;
+  }
+  for (const row of await openAlertsByPrefix(db, `${workflowId}:park:`)) {
+    await resolveAlertWithReason(db, {
+      dedupeKey: row.dedupeKey,
+      by: WATCHDOG_ACTOR,
+      why: MISMATCH_CONTINUE_NOTE,
+      at,
+    });
+  }
+  return 'sent';
+}
+
 /** 给 EngineJobs.watchdog 用的工厂。 */
 export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
   const now = w.now ?? (() => new Date());
   const log: WatchdogDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
+  const temporal = w.temporal;
   return () => ({
     health: async (at) => (await scheduleHealth(w.db, at)).filter((h) => !RETIRED_SCHEDULE_IDS.has(h.job.id)),
     alerts: {
@@ -236,6 +295,15 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
           executor: 'engine' as const,
         })),
     },
+    // 点名和读回不一致的旧挂起（#2742）：只读库列 stalled，真要叫醒才连 Temporal。
+    ...(temporal
+      ? {
+          modelMismatch: {
+            tasks: () => listStalledEngineTasks(w.db),
+            release: (workflowId: string) => releaseLegacyModelMismatch(temporal, w.db, workflowId, now()),
+          },
+        }
+      : {}),
     // 拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉。读不到照抛（不当成没暂停）。
     pausedJobs: async () => {
       const why = await carpoolPoolsHeldReason(w.db, now());

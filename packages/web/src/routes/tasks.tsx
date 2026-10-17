@@ -12,6 +12,7 @@ import { useLocation, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { useRepos, useTaskList } from '../api/client';
 import type { TaskList, TaskListRow } from '../api/types';
+import { FlowModeTag } from '../components/flow-mode-tag';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { List, ListRow } from '../components/layout/list';
@@ -177,8 +178,11 @@ function Row({
       summary={
         <span className="flex w-full min-w-0 items-center gap-x-4">
           <span className="flex min-w-0 flex-1 flex-col">
-            <span className="truncate text-body font-medium" title={row.title}>
-              {row.title}
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="min-w-0 truncate text-body font-medium" title={row.title}>
+                {row.title}
+              </span>
+              <FlowModeTag mode={row.flowMode} />
             </span>
             <MetaLine
               items={[

@@ -128,6 +128,27 @@ function responseTextOf(report: HostReport): string | null {
   return kept.length > 0 ? kept.join('\n') : null;
 }
 
+/** 探针核对模型名：Mirasim 会给 Claude 模型附加 [1m]，Grok 的 build 名是目录允许的别名。 */
+function probeModelsMatch(hostId: HostId, expected: string, observed: string): boolean {
+  const stripContextSuffix = (value: string) =>
+    value
+      .trim()
+      .toLowerCase()
+      .replace(/\[[^\]]*\]$/, '');
+  const wanted = stripContextSuffix(expected);
+  const actual = stripContextSuffix(observed);
+  return actual === wanted || (hostId === 'grok' && actual.startsWith(`${wanted}-build`));
+}
+
+function modelMismatchOf(report: HostReport, t: ProbeTarget): { expected: string; observed: string } | null {
+  const fromFacts = report.facts.mismatch;
+  if (fromFacts?.kind === 'model') return { expected: fromFacts.expected, observed: fromFacts.observed };
+  const observed = report.actualModel?.trim();
+  if (!observed) return null;
+  const expected = (t.upstreamModel ?? t.modelId).trim();
+  return probeModelsMatch(t.hostId, expected, observed) ? null : { expected, observed };
+}
+
 /** 有报告才算真探过：耗时照插头量的（含 0），请求就是问出去的那一句，响应是原文。 */
 function probeCapture(
   report: HostReport,
@@ -157,6 +178,14 @@ export function probeVerdict(report: HostReport, t: ProbeTarget, ctx: ProbeConte
   const text = (report.answer ?? '').trim();
   const q = ctx.question;
   const captured = probeCapture(report, ctx.kind, q);
+  const mismatch = modelMismatchOf(report, t);
+  if (mismatch) {
+    return {
+      kind: 'failed',
+      detail: `模型不对：点名 ${mismatch.expected}、回话 ${mismatch.observed}`,
+      ...captured,
+    };
+  }
   if (verdict.outcome === 'ok') {
     const reply = parseProbeReply(text);
     if (!reply.pong) {
