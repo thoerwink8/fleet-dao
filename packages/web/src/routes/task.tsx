@@ -216,7 +216,7 @@ function TaskHero({ d, now }: { d: TaskDetail; now: number }) {
           {d.task.paused === undefined ? c.text : <span data-paused-note>{c.text}</span>}
         </span>
         <span className="flex shrink-0 items-center gap-1.5">
-          <FlowModeTag mode={d.task.flowMode} />
+          <FlowModeTag mode={d.task.flowMode} fallback={d.task.flowFallback} />
           <StatusBadge tone={c.tone} label={c.label} />
         </span>
       </p>

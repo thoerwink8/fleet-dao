@@ -49,6 +49,26 @@ export function describeFlowStoreContract(name: string, make: MakeStore): void {
       expect(await store.getTask(IDS.task13)).not.toHaveProperty('flowMode');
     });
 
+    it('一次读多张：没有的不在结果里；空列表、不是 uuid 的编号都不查出错', async () => {
+      await store.writeFlowAssignmentOnce({
+        taskId: IDS.task12,
+        mode: 'full',
+        source: 'hash',
+        stratum: 'a',
+      });
+      await store.writeFlowAssignmentOnce({
+        taskId: IDS.task13,
+        mode: 'three',
+        source: 'ineligible',
+        stratum: 'b',
+        reason: '选中的路由不是 Claude 5.5',
+      });
+      const rows = await store.listFlowAssignments([IDS.task12, IDS.task13, 'not-a-uuid']);
+      expect(rows).toHaveLength(2);
+      expect(rows.find((r) => r.taskId === IDS.task13)?.reason).toContain('Claude 5.5');
+      expect(await store.listFlowAssignments([])).toEqual([]);
+    });
+
     it('不合格退回三段：reason 原样留着', async () => {
       const written = await store.writeFlowAssignmentOnce({
         taskId: IDS.task13,

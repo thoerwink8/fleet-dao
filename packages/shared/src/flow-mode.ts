@@ -109,3 +109,40 @@ export function flowModeLabel(setting: FlowModeSetting): string {
   if (setting.kind === 'full') return 'full：都走全程';
   return `split:${setting.percent}：约 ${setting.percent}% 的单走全程，其余走三步单`;
 }
+
+/** 驾驶舱「全程 / 三步法」两个按钮上按下哪一个。没设过按下三步法。对半分、认不出的都不按下，免得看成已经选了。 */
+export function flowModeSwitchChoice(reading: FlowModeReading): 'three' | 'full' | undefined {
+  if (reading.state === 'unrecognized') return undefined;
+  if (reading.state === 'never_set' || reading.setting.kind === 'three') return 'three';
+  if (reading.setting.kind === 'full') return 'full';
+  return undefined;
+}
+
+/**
+ * 驾驶舱上和那两个按钮配套的一句。对半分只指 split:50；别的百分比照原样写，不叫对半分。
+ * 认不出时把原因原样给出去，不改成「当前是三步法」。
+ */
+export function flowModeSwitchText(reading: FlowModeReading): string {
+  if (reading.state === 'unrecognized') return reading.problem;
+  if (reading.state === 'never_set') return '还没设过，默认三步法';
+  if (reading.setting.kind === 'three') return '当前是三步法';
+  if (reading.setting.kind === 'full') return '当前是全程';
+  if (reading.setting.kind === 'split' && reading.setting.percent === 50) return '当前是对半分';
+  return flowModeLabel(reading.setting);
+}
+
+/** 开关写成 three 时分组原因的开头。这是默认就走三步法，不是单子不合格退回去的。 */
+const SETTING_IS_THREE = `${FLOW_MODE_SETTING} 是 three`;
+
+/**
+ * 单子不合格、实际退回三段时给人看的原因（比如没有 Claude 5.5 路由）。
+ * 没分组、走全程、按标签或哈希走三段、以及开关本来就是三步法，都回 undefined，页面不猜。
+ */
+export function flowFallbackReason(
+  assignment: Pick<FlowAssignment, 'mode' | 'source' | 'reason'> | null | undefined,
+): string | undefined {
+  if (!assignment || assignment.mode !== 'three' || assignment.source !== 'ineligible') return undefined;
+  const reason = assignment.reason?.trim() ?? '';
+  if (reason === '' || reason.startsWith(SETTING_IS_THREE)) return undefined;
+  return reason;
+}
