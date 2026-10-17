@@ -136,6 +136,8 @@ export class FakeGitHub {
     },
   };
   pulls = new Map<number, PullState>();
+  /** 仓上的标签名。POST /labels 第一次 201，再来 422（已经有了）。 */
+  repoLabels = new Set<string>();
   issues = new Map<number, IssueState>();
   /** 里程碑编号 → 标题：PATCH 里程碑只带编号，靠这张表把标题配回去。 */
   milestones = new Map<number, string>();
@@ -545,6 +547,19 @@ export class FakeGitHub {
         full_name: `${OWNER}/${REPO}`,
         private: false,
       });
+    }
+    if (rest === '/labels' && m === 'POST') {
+      const b = req.body as { name?: string; color?: string; description?: string };
+      const name = typeof b.name === 'string' ? b.name : '';
+      if (!name) return this.json(422, { message: 'Validation Failed' });
+      if (this.repoLabels.has(name)) {
+        return this.json(422, {
+          message: 'Validation Failed',
+          errors: [{ resource: 'Label', code: 'already_exists', field: 'name' }],
+        });
+      }
+      this.repoLabels.add(name);
+      return this.json(201, { name, color: b.color ?? 'ededed', description: b.description ?? null });
     }
     x = /^\/rules\/branches\/(.+)$/.exec(rest);
     if (x && m === 'GET') {

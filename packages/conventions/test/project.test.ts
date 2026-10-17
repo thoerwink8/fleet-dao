@@ -219,7 +219,9 @@ describe('project add', () => {
     expect(third.code).toBe(0);
     expect(statuses(third)).toMatchObject({ '6 打开让 AI 接活': 'fixed', '7 冒烟单': 'fixed' });
     expect(w.writes).toEqual(['dispatch', 'issue']);
-    expect(w.issues.map((i) => [i.title, i.labels])).toEqual([[SMOKE_TITLE, ['需求']]]);
+    expect(w.issues.map((i) => [i.title, i.labels])).toEqual([
+      [SMOKE_TITLE, ['需求', '域:engine', '性质:process']],
+    ]);
 
     // 第四遍：七步全是 ok，一次都不写
     w.writes = [];

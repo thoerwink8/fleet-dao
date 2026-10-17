@@ -22,6 +22,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 工作流里要确定：不取随机数、不生成编号（主键经 `decide('newIds')` 进历史），不碰活动实现、worker、客户端、Node 模块；判断只经本地活动 `decide`，工作流文件对 `decisions` 只许 `import type`。`packages/engine/test/structure.test.ts` 把这些写成了检查。
 - 活动的超时、心跳、重试只在 `packages/engine/src/activity-options.ts` 设，调用处不许另写；长活动要心跳。
 - 工作流对外的输入（`packages/engine/src/contract.ts`）加字段只许可选，不然在途任务的输入对不上。
+- PR 只继承需求单每轴唯一有效的「域:」「性质:」标签；拆分单同样继承来源单。缺轴、冲突或未知值只明报、不猜，不改变派工或开 PR 准入。报警立案已知是流水线故障，贴 engine/bug。
 - 引擎自己挑单，进队条件见 design 第九节。要它接：单的四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。
 
 ## 改它时要连带改

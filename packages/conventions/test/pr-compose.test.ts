@@ -36,6 +36,8 @@ interface Opts {
   branch?: string;
   /** 读提交全文（尾注）的回话：默认没有尾注。 */
   trailers?: RunResult;
+  /** false：不自动带查询轴，用来测缺轴拒开。 */
+  axes?: boolean;
 }
 
 function world(o: Opts = {}) {
@@ -52,7 +54,12 @@ function world(o: Opts = {}) {
   const replies = [...(o.replies ?? [])];
   const looks = [...(o.lookups ?? [ISSUE_7])];
   const issueReplies = [...(o.issueReplies ?? [])];
+  const labelCalls: string[][] = [];
   const gh: Gh = (args) => {
+    if (args[0] === 'label' && args[1] === 'create') {
+      labelCalls.push(args);
+      return ok('');
+    }
     if (args[0] === 'api' && args[1]?.includes('/issues/')) {
       const l = looks.shift();
       if (!l) throw new Error(`用例没给查单的回话：${args.join(' ')}`);
@@ -79,6 +86,10 @@ function world(o: Opts = {}) {
     return o.log ?? ok('加个东西\n');
   };
   const issueGh = (args: string[]): Promise<GhResult> => {
+    if (args[0] === 'label' && args[1] === 'create') {
+      labelCalls.push(args);
+      return Promise.resolve(ok(''));
+    }
     issueCalls.push(args);
     const file = args[args.indexOf('--body-file') + 1];
     if (args[1] === 'create' && file) issueBodies.push(readFileSync(file, 'utf8'));
@@ -86,8 +97,9 @@ function world(o: Opts = {}) {
     if (!r) throw new Error(`用例没给 issue-new 那边的 gh 回话：${args.join(' ')}`);
     return Promise.resolve(r);
   };
+  const axes = o.axes === false ? [] : ['--domain', 'engine', '--nature', 'process'];
   const run = (...args: string[]) =>
-    prOpenCli(['--title', '加个东西', ...args], {
+    prOpenCli(['--title', '加个东西', ...axes, ...args], {
       gh,
       git,
       issueGh,
@@ -106,6 +118,7 @@ function world(o: Opts = {}) {
     trailerCalls,
     issueCalls,
     issueBodies,
+    labelCalls,
     run,
     text: () => [...out, ...err].join('\n'),
   };
@@ -193,6 +206,22 @@ describe('pnpm pr:open 自己生成正文', () => {
     expect(create.slice(0, 2)).toEqual(['issue', 'create']);
     expect(create[create.indexOf('--title') + 1]).toBe('删掉没人用的残留');
     expect(create).toEqual(expect.arrayContaining(['--label', '杂项', '本机做']));
+    expect(create).toEqual(expect.arrayContaining(['--label', '域:engine', '--label', '性质:process']));
+    expect(w.labelCalls.map((c) => c[2])).toEqual([
+      '域:engine',
+      '域:api',
+      '域:mirasim',
+      '性质:bug',
+      '性质:perf',
+      '性质:process',
+      '域:engine',
+      '域:api',
+      '域:mirasim',
+      '性质:bug',
+      '性质:perf',
+      '性质:process',
+    ]);
+    expect(w.calls[0]).toEqual(expect.arrayContaining(['--label', '域:engine', '--label', '性质:process']));
     for (const h of ['## 场景', '## 原话', '## 已知的模块', '## 怎么算做完'])
       expect(w.issueBodies[0]).toContain(h);
     expect(w.issueBodies[0]).toContain('无（AI 发现）');
@@ -298,6 +327,22 @@ describe('pnpm pr:open 自己生成正文', () => {
 });
 
 describe('pnpm pr:open 生成正文：闸门（失败要真失败）', () => {
+  it('【故意造出的失败】缺查询轴：不开单、不开 PR', async () => {
+    const w = world({ axes: false });
+    expect(await w.run('--closes', '7')).toBe(1);
+    expect(w.gitCalls).toEqual([]);
+    expect(w.calls).toEqual([]);
+    expect(w.issueCalls).toEqual([]);
+    expect(w.text()).toContain('缺 --domain：从 engine、api、mirasim 里挑一个。');
+  });
+
+  it('【故意造出的失败】--domain 不在词汇表里：不开', async () => {
+    const w = world({ axes: false });
+    expect(await w.run('--closes', '7', '--domain', 'web', '--nature', 'perf')).toBe(1);
+    expect(w.calls).toEqual([]);
+    expect(w.text()).toContain('--domain 只能是 engine、api、mirasim，没有「web」。');
+  });
+
   it('【故意造出的失败】没单号也没理由：退出码 1，git 和 gh 一次都不跑', async () => {
     const w = world();
     expect(await w.run()).toBe(1);

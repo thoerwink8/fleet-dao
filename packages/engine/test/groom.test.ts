@@ -266,7 +266,7 @@ describe('executeGroomPlan · 开新单', () => {
   });
 
   it('拆大单：开独立小单（没有子单），在大单上留一条言列出小单；大单自己不动', async () => {
-    const big = issue(5, { title: '一张很大的单' });
+    const big = issue(5, { title: '一张很大的单', labels: ['需求', '域:api', '域:mirasim', '性质:bug'] });
     const f = fakeWrites();
     const out = await executeGroomPlan(
       plan({
@@ -279,6 +279,10 @@ describe('executeGroomPlan · 开新单', () => {
       f.writes,
     );
     expect(out.result.opened.map((o) => o.splitFrom)).toEqual([5, 5]);
+    expect(f.calls.filter((c) => c.kind === 'openIssue').map((c) => c.args.labels)).toEqual([
+      ['需求', '性质:bug'],
+      ['需求', '性质:bug'],
+    ]);
     const comment = f.calls.find((c) => c.kind === 'comment');
     expect(comment?.args.issueNumber).toBe(5);
     expect(String(comment?.args.body)).toMatch(/#901.*#902/);

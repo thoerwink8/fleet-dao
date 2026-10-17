@@ -60,7 +60,12 @@ function world(
   const out: string[] = [];
   const err: string[] = [];
   const looks = [...lookups];
+  const labelCalls: string[][] = [];
   const gh: Gh = (args) => {
+    if (args[0] === 'label' && args[1] === 'create') {
+      labelCalls.push(args);
+      return ok('');
+    }
     if (args[0] === 'api' && args[1]?.includes('/issues/')) {
       asked.push(args);
       const l = looks.shift();
@@ -79,26 +84,40 @@ function world(
     if (!r) throw new Error(`用例没给第 ${calls.length} 次 gh 的回话：${args.join(' ')}`);
     return r;
   };
-  const run = (...extra: string[]) =>
-    prOpen(['--title', '加个东西', '--body-file', 'body.md', ...extra], {
-      gh,
-      git,
-      root: ROOT,
-      cwd,
-      out: (l) => out.push(l),
-      err: (l) => err.push(l),
-    });
+  const open = (withAxes: boolean, extra: string[]) =>
+    prOpen(
+      [
+        '--title',
+        '加个东西',
+        '--body-file',
+        'body.md',
+        ...(withAxes ? ['--domain', 'engine', '--nature', 'process'] : []),
+        ...extra,
+      ],
+      {
+        gh,
+        git,
+        root: ROOT,
+        cwd,
+        out: (l) => out.push(l),
+        err: (l) => err.push(l),
+      },
+    );
+  const run = (...extra: string[]) => open(true, extra);
+  const runBare = (...extra: string[]) => open(false, extra);
   return {
     cwd,
     order,
     gitCalls,
     calls,
+    labelCalls,
     asked,
     listed,
     bodies,
     out,
     err,
     run,
+    runBare,
     text: () => [...out, ...err].join('\n'),
   };
 }
@@ -134,6 +153,23 @@ describe('parseCreatedPr：从 gh 输出认 PR 号', () => {
   });
 });
 
+describe('pnpm pr:open：查询轴', () => {
+  it('【故意造出的失败】缺 --domain：不开，git 和 gh 都不跑', () => {
+    const w = world([CREATED]);
+    expect(w.runBare()).toBe(1);
+    expect(w.calls).toEqual([]);
+    expect(w.gitCalls).toEqual([]);
+    expect(w.text()).toContain('缺 --domain：从 engine、api、mirasim 里挑一个。');
+  });
+
+  it('【故意造出的失败】--nature 不在词汇表里：不开', () => {
+    const w = world([CREATED]);
+    expect(w.runBare('--domain', 'mirasim', '--nature', 'feat')).toBe(1);
+    expect(w.calls).toEqual([]);
+    expect(w.text()).toContain('--nature 只能是 bug、perf、process，没有「feat」。');
+  });
+});
+
 describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
   it('没碰改标准路径：开 PR、查文件、当场挂自动合并（squash）', () => {
     const w = world([CREATED, files('packages/api/src/home.ts'), ok()]);
@@ -146,9 +182,21 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
       '加个东西',
       '--body-file',
       join(w.cwd, 'body.md'),
+      '--label',
+      '域:engine',
+      '--label',
+      '性质:process',
     ]);
     expect(w.calls[1]?.[2]).toBe('repos/{owner}/{repo}/pulls/42/files');
     expect(w.calls[2]).toEqual(['pr', 'merge', '42', '--auto', '--squash']);
+    expect(w.labelCalls.map((c) => c[2])).toEqual([
+      '域:engine',
+      '域:api',
+      '域:mirasim',
+      '性质:bug',
+      '性质:perf',
+      '性质:process',
+    ]);
     expect(w.text()).toContain('挂上了自动合并');
     expect(w.text()).not.toContain('第二意见');
   });
@@ -276,14 +324,17 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
     const w = world([]);
     const empty = mkdtempSync(join(tmpdir(), 'pr-open-root-'));
     dirs.push(empty);
-    const code = prOpen(['--title', 't', '--body-file', 'body.md'], {
-      gh: () => ok(),
-      git: () => ok(),
-      root: empty,
-      cwd: w.cwd,
-      out: () => {},
-      err: (l) => w.err.push(l),
-    });
+    const code = prOpen(
+      ['--title', 't', '--body-file', 'body.md', '--domain', 'engine', '--nature', 'process'],
+      {
+        gh: () => ok(),
+        git: () => ok(),
+        root: empty,
+        cwd: w.cwd,
+        out: () => {},
+        err: (l) => w.err.push(l),
+      },
+    );
     expect(code).toBe(2);
     expect(w.text()).toContain('standard-paths.json');
   });

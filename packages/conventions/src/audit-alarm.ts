@@ -2,10 +2,10 @@
 // 绿了自动关。从前 github-audit 定时那一轮连红 12 天没人看，红只在 Actions 页上，谁也不会去翻。
 // 只认这一个标题：同名开着的有就改它的正文，不再开第二张；读不到开着的单就不开（不拿「没读到」当「没有」，免得开出一堆重复）。
 import type { GitHubAlarmWriter, PlanIssue } from './github-api.ts';
-import { LOCAL_LABEL } from './labels.ts';
+import { domainLabel, LOCAL_LABEL, natureLabel } from './labels.ts';
 
 export const ALARM_TITLE = 'GitHub 对账没过';
-const ALARM_LABELS = ['缺陷', LOCAL_LABEL];
+const ALARM_LABELS = ['缺陷', LOCAL_LABEL, domainLabel('engine'), natureLabel('bug')];
 
 export interface AlarmInput {
   /** 这一轮红没红（有断裂或没查成）。 */
