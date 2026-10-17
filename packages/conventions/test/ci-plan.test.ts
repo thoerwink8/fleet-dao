@@ -1755,7 +1755,7 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     expect(v.lines.join('\n')).toContain('plan 不是全套');
   });
 
-  it('ci.yml 的 e2e job：只在 changes 给 all 时开、跑全套切 2 台、红了不吞（没有 continue-on-error / || true）、Postgres 和 Chromium 照 README 给，汇总 job 等它', () => {
+  it('ci.yml 的 e2e job：只在 changes 给 all 时开、跑全套分片、红了不吞（没有 continue-on-error / || true）、Postgres 和 Chromium 照 README 给，汇总 job 等它', () => {
     const yml = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
     const doc = parse(yml) as {
       jobs: Record<
@@ -1807,8 +1807,13 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
       'pnpm --filter @fleet-dao/web e2e --shard="$SHARD" --pass-with-no-tests',
     );
     expect(run?.env as Record<string, string> | undefined).not.toHaveProperty('E2E_SPECS');
-    // 全套切 2 台（决定 0093）；分片经环境变量给，空分片照绿
-    expect((e2e as { strategy?: { matrix?: { shard?: unknown } } })?.strategy?.matrix?.shard).toEqual([1, 2]);
+    // 分片连续且不重复：漏片或重复跑一片都会让全套覆盖不成立。
+    const strategy = (e2e as { strategy?: { 'fail-fast'?: boolean; matrix?: { shard?: number[] } } })
+      ?.strategy;
+    const shards = strategy?.matrix?.shard ?? [];
+    expect(shards.length).toBeGreaterThan(0);
+    expect(shards).toEqual(Array.from({ length: shards.length }, (_, i) => i + 1));
+    expect(strategy?.['fail-fast'], '一片失败不能取消其余片的验证').toBe(false);
     expect((run?.env as Record<string, string> | undefined)?.SHARD).toBe(
       '${{ matrix.shard }}/${{ strategy.job-total }}',
     );

@@ -1,6 +1,6 @@
 name: ci
 # 一律全套、并行跑（决定 0101，design 第五节「CI 一律全套」）：PR、主线推送、每夜、手动都跑全部测试（按耗时分台）、web 打包、
-# e2e 全套（两种屏宽，切 2 台）、deploy 全套（切 3 台），lint 每轮都跑；check 汇总核对「是全套（或主线同树复用）、该跑的跑了且绿」。
+# e2e 全套（两种屏宽，切 4 台）、deploy 全套（切 3 台），lint 每轮都跑；check 汇总核对「是全套（或主线同树复用）、该跑的跑了且绿」。
 # 原来按改动预测只跑一部分，漏的到主线才红（7 天 18 轮、234 分钟）；全套墙钟 3.4 分钟，只比选测多 1 分钟上下，公开仓 Actions 分钟不收钱。
 # 只剩两种省法，都是「输入完全相同、结果一样」：
 # - PR 上的测试缓存（packages/conventions/src/ci-cache.ts）：同一 PR 重推，某一台的输入没变、上一轮全绿，就不再跑 vitest。
@@ -434,8 +434,9 @@ jobs:
   # 决定 0101：PR 和主线都跑全套（playwright 配置里的两种屏宽都跑），是合并闸也是发版闸；只有主线同树复用 PR 的结果时跳过（changes 的 e2e 输出空串）。
   # 红了这一轮 check 红：主线头 CI 不绿就不发版（法国的自动发版只认主线头 ci.yml 这一轮 conclusion=success）。
   # 本机（Windows + 本机 Chrome + Windows 版 PG）和这里（Linux + Chromium + 容器 PG）的差别：浏览器走 E2E_BROWSER_CHANNEL=chromium，管理连接串指向容器；库名、端口、顺序和本机一样。
-  # 提速（决定 0093）：每台 4 个 worker、每个 worker 一整套环境（packages/web/e2e/support/fixtures.ts）；全套切成 2 台各跑一半文件
-  # （--shard，一台约 1.6 分钟）。分片空了照绿（--pass-with-no-tests）。
+  # 每台 4 个 worker、每个 worker 一整套环境（packages/web/e2e/support/fixtures.ts）；全套切成 4 台，缩短 e2e 关键路径。
+  # 保持 fullyParallel: false，同一文件里的用例按原顺序跑；每个屏宽的文件可落到不同台，不再让两台各扛一个屏宽。
+  # 分片经 --shard 传入；分片空了照绿（--pass-with-no-tests）。
   e2e:
     needs: changes
     if: needs.changes.outputs.e2e == 'all'
@@ -444,7 +445,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2]
+        shard: [1, 2, 3, 4]
     timeout-minutes: 15
     env:
       # 一次性 runner 上的一次性容器，只有本机回环连得到：用 trust 认证，连接串里不放密码
@@ -504,7 +505,7 @@ jobs:
           if ! docker logs fleet-e2e-pg >&2; then echo "（拿不到容器日志）" >&2; fi
           echo "postgres:16 起了 90 秒还没好（后台 docker run 的输出在上面）" >&2
           exit 1
-      # 全套：不给 spec 参数，playwright 配置里的全部 spec、全部屏宽（项目）都跑，按分片切一半
+      # 全套：不给 spec 参数，playwright 配置里的全部 spec、全部屏宽（项目）都跑，按完整文件切成四片、保留文件内顺序
       - name: 驾驶舱 e2e
         env:
           SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}

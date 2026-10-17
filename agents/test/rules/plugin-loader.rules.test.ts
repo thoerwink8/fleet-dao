@@ -30,19 +30,31 @@ interface Settings {
   env?: Record<string, string>;
 }
 interface Lib {
-  PROCESS_HOOKS: { event: string; script: string; timeout: number; asyncRewake?: boolean }[];
+  PROCESS_HOOKS: {
+    event: string;
+    script: string;
+    timeout: number;
+    asyncRewake?: boolean;
+    rewakeMessage?: string;
+    rewakeSummary?: string;
+  }[];
   scriptOf(command: unknown): string | null;
   handlerScript(handler: unknown): string | null;
   formatJson(value: unknown): string;
   trackOf(text: string): string[];
   commandFor(hooksDir: string, script: string): string;
-  applyCatalog(settings: unknown, track: string[], hooksDir: string): Settings;
+  applyCatalog(
+    settings: unknown,
+    track: string[],
+    hooksDir: string,
+    options?: { projectDir?: string },
+  ): Settings;
 }
 
 const lib = (await import(pathToFileURL(LOADER).href)) as Lib;
-const { PROCESS_HOOKS } = (await import(
+const { PROCESS_HOOKS, RETIRED_PROCESS_HOOKS } = (await import(
   pathToFileURL(fileURLToPath(new URL('../../hooks/plugin-catalog.mjs', import.meta.url))).href
-)) as { PROCESS_HOOKS: Lib['PROCESS_HOOKS'] };
+)) as { PROCESS_HOOKS: Lib['PROCESS_HOOKS']; RETIRED_PROCESS_HOOKS: string[] };
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -117,12 +129,16 @@ const projectHooks = (): Settings => ({
             command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/inbox-watch.mjs"',
             timeout: 11_400,
             asyncRewake: true,
+            rewakeMessage: PROCESS_HOOKS.find((h) => h.script === 'inbox-watch.mjs')?.rewakeMessage ?? '',
+            rewakeSummary: PROCESS_HOOKS.find((h) => h.script === 'inbox-watch.mjs')?.rewakeSummary ?? '',
           },
           {
             type: 'command',
             command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/work-watch.mjs"',
             timeout: 11_400,
             asyncRewake: true,
+            rewakeMessage: PROCESS_HOOKS.find((h) => h.script === 'work-watch.mjs')?.rewakeMessage ?? '',
+            rewakeSummary: PROCESS_HOOKS.find((h) => h.script === 'work-watch.mjs')?.rewakeSummary ?? '',
           },
         ],
       },
@@ -282,6 +298,120 @@ describe('订阅目录（决定 0085）', () => {
     expect(lib.applyCatalog(exec, ['process'], HOOKS)).toEqual(exec);
     // 【故意造出的失败】只看 command 字符串的旧判断：认不出，会再补一条安装目录的
     expect(lib.scriptOf('node')).toBeNull();
+  });
+
+  it('校准旧受管登记的事件、matcher、超时和后台唤醒字段，并合并重复登记', () => {
+    const command = lib.commandFor(HOOKS, 'inbox-watch.mjs');
+    const input = {
+      hooks: {
+        PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 10, async: true }] }],
+        Stop: [{ hooks: [{ type: 'command', command, timeout: 5, asyncRewake: false }] }],
+      },
+    };
+    const next = lib.applyCatalog(input, ['process'], HOOKS);
+    const matches = Object.entries(next.hooks ?? {}).flatMap(([event, groups]) =>
+      groups.flatMap((g) =>
+        g.hooks.filter((h) => h.command === command).map((h) => ({ event, group: g, h })),
+      ),
+    );
+    expect(matches).toHaveLength(1);
+    expect(matches[0]?.event).toBe('Stop');
+    expect(matches[0]?.group).not.toHaveProperty('matcher');
+    expect(matches[0]?.h).toMatchObject({ timeout: 11_400, asyncRewake: true });
+    expect(matches[0]?.h).not.toHaveProperty('async');
+    expect(matches[0]?.h.rewakeMessage).toContain('先回他一句');
+    expect(lib.applyCatalog(next, ['process'], HOOKS)).toEqual(next);
+    expect(input.hooks.PreToolUse[0]?.matcher).toBe('Bash');
+  });
+
+  it('普通前台钩子不保留旧的 async、asyncRewake、条件和唤醒提示', () => {
+    const command = lib.commandFor(HOOKS, 'main-thread.mjs');
+    const next = lib.applyCatalog(
+      {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Bash',
+              hooks: [
+                {
+                  type: 'command',
+                  command,
+                  timeout: 1,
+                  async: true,
+                  asyncRewake: true,
+                  rewakeMessage: 'old',
+                  rewakeSummary: 'old',
+                  if: 'Bash(git *)',
+                },
+              ],
+            },
+          ],
+        },
+      },
+      ['process'],
+      HOOKS,
+    );
+    const managed = next.hooks?.PreToolUse?.flatMap((g) => g.hooks).find((h) => h.command === command);
+    expect(managed).toEqual({ type: 'command', command, timeout: 10 });
+    expect(lib.applyCatalog(next, ['process'], HOOKS)).toEqual(next);
+  });
+
+  it('第三方同名、不同目录、带额外参数或shell操作的命令原样保留，也不压住受管登记', () => {
+    const path = `${HOOKS}/stop.mjs`;
+    const foreign = [
+      { type: 'command', command: 'node "D:/other/agents/hooks/stop.mjs"', timeout: 3 },
+      { type: 'command', command: `node "${path}" && node other.mjs`, timeout: 4 },
+      { type: 'command', command: 'echo', args: [path], timeout: 5 },
+      { type: 'command', command: 'node', args: [path, '--foreign-mode'], timeout: 6 },
+      { type: 'command', command: `node "${HOOKS}/never-managed.mjs"`, timeout: 7 },
+    ];
+    const input = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: foreign }] } };
+    const next = lib.applyCatalog(input, ['process'], HOOKS);
+    expect(next.hooks?.PreToolUse?.[0]).toEqual(input.hooks.PreToolUse[0]);
+    expect(
+      next.hooks?.Stop?.flatMap((g) => g.hooks).some((h) => h.command === lib.commandFor(HOOKS, 'stop.mjs')),
+    ).toBe(true);
+    expect(lib.applyCatalog(next, [], HOOKS)).toEqual(input);
+    expect(lib.applyCatalog(next, ['process'], HOOKS)).toEqual(next);
+  });
+
+  it('当前项目绝对路径的exec登记保留形式，其他项目同名登记不接管', () => {
+    const owned = {
+      type: 'command',
+      command: 'node',
+      args: ['D:/current/agents/hooks/main-thread.mjs'],
+      timeout: 1,
+    };
+    const foreign = { ...owned, args: ['D:/other/agents/hooks/main-thread.mjs'] };
+    const next = lib.applyCatalog({ hooks: { Stop: [{ hooks: [owned, foreign] }] } }, ['process'], HOOKS, {
+      projectDir: 'D:/current',
+    });
+    expect(next.hooks?.Stop?.[0]?.hooks[0]).toEqual(foreign);
+    expect(next.hooks?.PreToolUse?.[0]?.hooks).toEqual([{ ...owned, timeout: 10 }]);
+    expect(lib.applyCatalog(next, ['process'], HOOKS, { projectDir: 'D:/current' })).toEqual(next);
+  });
+
+  it('显式退役名在退订后仍清掉受管登记，不误删别的目录或未知名字', () => {
+    RETIRED_PROCESS_HOOKS.push('retired-synthetic.mjs');
+    try {
+      const owned = { type: 'command', command: `node "${HOOKS}/retired-synthetic.mjs"`, timeout: 5 };
+      const foreign = { ...owned, command: 'node "D:/other/agents/hooks/retired-synthetic.mjs"' };
+      const unknown = { ...owned, command: `node "${HOOKS}/never-managed.mjs"` };
+      const next = lib.applyCatalog({ hooks: { Stop: [{ hooks: [owned, foreign, unknown] }] } }, [], HOOKS);
+      expect(next.hooks?.Stop?.[0]?.hooks).toEqual([foreign, unknown]);
+      expect(lib.applyCatalog(next, [], HOOKS)).toEqual(next);
+    } finally {
+      RETIRED_PROCESS_HOOKS.pop();
+    }
+  });
+
+  it('绝对 node executable 的 exec 登记保持直接启动形式并校准目录字段', () => {
+    for (const command of ['C:/Program Files/nodejs/node.exe', '/usr/bin/node']) {
+      const owned = { type: 'command', command, args: [`${HOOKS}/stop.mjs`], timeout: 1 };
+      const next = lib.applyCatalog({ hooks: { Stop: [{ hooks: [owned] }] } }, ['process'], HOOKS);
+      expect(next.hooks?.Stop?.[0]?.hooks[0]).toEqual({ ...owned, timeout: 10 });
+      expect(lib.applyCatalog(next, ['process'], HOOKS)).toEqual(next);
+    }
   });
 
   it('写盘排版和 biome 一致：本仓的 .claude/settings.json 原样过一遍不变；只含标量的短数组写一行', () => {

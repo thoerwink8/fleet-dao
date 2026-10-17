@@ -45,3 +45,8 @@ export const PROCESS_HOOKS = [
   },
   { event: 'UserPromptSubmit', script: 'prompt-log.mjs', timeout: 30 },
 ];
+
+// 退役过程钩子时把脚本名留在这里，加载器才能清掉已经装过的登记；只删目录项会让旧登记失去归属。
+// 只清受管目录里的这些名字，不按文件名清别人的脚本。
+/** @type {string[]} */
+export const RETIRED_PROCESS_HOOKS = [];
