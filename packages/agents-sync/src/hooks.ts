@@ -6,8 +6,8 @@
 // 这里不再列出的登记，下次同步摘掉。
 // 调工具前那条照装：法国会话用户家里就有 reclaude 的设备密钥，借道读这份设置的 Grok、Cursor 起的会话也要拦。
 // HookSkip 仍可按事件名少登记一类（调用方传入）。
-import { existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readlinkSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import type { Backups } from './backup.ts';
 import { applyCodexTrust, checkCodexTrust, trustKey, trustNeeds } from './hooks-codex.ts';
 import { applyKimiHooks, checkKimiHooks, kimiKey } from './hooks-kimi.ts';
@@ -238,6 +238,37 @@ export function readSettings(abs: string): Read {
   }
 }
 
+/** Mirasim 固定共享入口只读默认文件；不让通用 JSON 读写器跟随任意链接。 */
+function hookSettings(ctx: Ctx, t: HookTarget): { read: Read; shared: boolean } {
+  const { abs } = relOf(ctx, t.settings);
+  const managedRelay =
+    t.format === 'codex' &&
+    MIRASIM_CODEX_HOMES.some((home) => abs === join(ctx.home, placeOn(home, ctx.platform), 'hooks.json'));
+  if (!managedRelay || !lstatOrNull(abs)?.isSymbolicLink()) return { read: readSettings(abs), shared: false };
+  const source = join(ctx.home, '.codex', 'hooks.json');
+  const parent = lstatOrNull(dirname(source));
+  const target = lstatOrNull(source);
+  const normalize = (path: string) => {
+    const normalized = resolve(path);
+    return ctx.platform === 'win32' ? normalized.toLowerCase() : normalized;
+  };
+  if (
+    !parent?.isDirectory() ||
+    parent.isSymbolicLink() ||
+    !target?.isFile() ||
+    target.isSymbolicLink() ||
+    normalize(resolve(dirname(abs), readlinkSync(abs))) !== normalize(source)
+  )
+    return {
+      read: {
+        kind: 'bad',
+        why: '共享链接只允许精确指向默认 .codex/hooks.json 普通文件，父目录也必须是实目录',
+      },
+      shared: true,
+    };
+  return { read: readSettings(source), shared: true };
+}
+
 /** 装了要钩子的哪几家 */
 function whoFor(ctx: Ctx, t: HookTarget): string {
   return `（给 ${agentNames(
@@ -262,8 +293,18 @@ function wanted(
   ctx: Ctx,
   skip?: HookSkip,
 ): { targets: HookTarget[]; problems: { key: string; why: string }[] } {
-  const all = [...HOOK_TARGETS];
+  let all = [...HOOK_TARGETS];
   const problems: { key: string; why: string }[] = [];
+  // 默认入口本身也不能借父目录链接写出受管家目录。
+  const defaultParent = ctx.installed.has('codex') ? lstatOrNull(join(ctx.home, '.codex')) : null;
+  if (
+    ctx.installed.has('codex') &&
+    defaultParent &&
+    (defaultParent.isSymbolicLink() || !defaultParent.isDirectory())
+  ) {
+    all = all.filter((t) => t.format !== 'codex');
+    problems.push({ key: '~/.codex', why: '默认 Codex 家目录不是实目录，不跟随链接' });
+  }
   const codex = HOOK_TARGETS.find((t) => t.format === 'codex');
   if (ctx.installed.has('codex') && codex) {
     for (const home of MIRASIM_CODEX_HOMES) {
@@ -430,11 +471,11 @@ function settingsKey(ctx: Ctx, t: HookTarget): string {
 function checkSettings(ctx: Ctx, t: HookTarget): Line {
   if (t.format === 'kimi')
     return checkKimiHooks(ctx, t, (script) => commandIn(t, ctx.home, ctx.platform, script));
-  const { abs, key } = relOf(ctx, t.settings);
+  const { key } = relOf(ctx, t.settings);
   const who = whoFor(ctx, t);
   let read: Read;
   try {
-    read = readSettings(abs);
+    read = hookSettings(ctx, t).read;
   } catch (err) {
     return line('unknown', key, `没查成——读不了（${code(err)}）`);
   }
@@ -473,7 +514,7 @@ function codexTrust(ctx: Ctx, t: HookTarget, backups: Backups | null): Line {
   const config = codexConfig(t);
   let read: Read;
   try {
-    read = readSettings(abs);
+    read = hookSettings(ctx, t).read;
   } catch (err) {
     return line(
       backups ? 'failed' : 'unknown',
@@ -613,7 +654,7 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
   const { rel, abs, key } = relOf(ctx, t.settings);
   const who = whoFor(ctx, t);
   try {
-    const read = readSettings(abs);
+    const { read, shared } = hookSettings(ctx, t);
     if (read.kind === 'bad') return line('failed', key, `没动——${read.why}；要人看`);
     const root: unknown = read.kind === 'none' ? {} : read.root;
     if (!isObj(root)) return line('failed', key, '没动——整份不是一个 JSON 对象；要人看');
@@ -626,6 +667,8 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
       if (off) return line('failed', key, `钩子登记着，可${off}（不是本脚本关的，没动它）；要人看`);
       return line('ok', key, `${describe(t)} 都登记了，别的 ${before.others} 条钩子不归本脚本管${who}`);
     }
+    if (shared)
+      return line('failed', key, '没动——共享默认 hooks 尚未登记齐全；只由默认入口更新，不写共享链接');
     const next = merged(root, t, ctx.home, ctx.platform);
     const eol = read.kind === 'ok' && read.text.includes('\r\n') ? '\r\n' : '\n';
     const text = `${JSON.stringify(next, null, 2)}\n`.replaceAll('\n', eol);
