@@ -1,16 +1,19 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DEFAULT_QUOTA_CONFIG_PATH,
   loadQuotaConfig,
+  MIRASIM_RETIRED_POOL_ID,
+  MIRASIM_RETIRED_WHY,
   parseQuotaConfig,
   QuotaConfigError,
   quotaConfigPath,
+  readAllQuotas,
 } from '../../src/quota/index.ts';
 import { MIRASIM_QUOTA_ATTEMPT_MS } from '../../src/quota/readers/mirasim.ts';
-import { FIXTURES } from './helpers.ts';
+import { FIXTURES, fakeDeps } from './helpers.ts';
 
 const REPO_QUOTA_CONFIG = join(FIXTURES, '..', '..', '..', '..', '..', 'deploy', 'quota.json');
 
@@ -39,25 +42,21 @@ describe('仓里的额度配置和校验同步', () => {
     expect(config.pools.length).toBeGreaterThan(0);
   });
 
-  it('deploy/quota.json 过得了校验；五个池在读，jev 写在 notRead（没有日账）', async () => {
+  it('退役标记把原始五个池中的 Mirasim 移到有效 notRead；jev 仍是不读的另一条', async () => {
     const config = await loadQuotaConfig(REPO_QUOTA_CONFIG);
-    expect(config.pools.map((p) => p.poolId)).toEqual([
-      'claude-solo',
-      'claude-carpool',
-      'mirasim-relay',
-      'cursor',
-      'grok',
-    ]);
-    expect(config.notRead?.map((p) => p.poolId)).toEqual(['jev']);
+    expect(config.pools.map((p) => p.poolId)).toEqual(['claude-solo', 'claude-carpool', 'cursor', 'grok']);
+    expect(config.notRead?.map((p) => p.poolId)).toEqual(['jev', MIRASIM_RETIRED_POOL_ID]);
     expect(config.notRead?.[0]?.why).toContain('没有旧系统的日账');
+    expect(config.notRead?.[1]?.why).toBe(MIRASIM_RETIRED_WHY);
     const text = await readFile(REPO_QUOTA_CONFIG, 'utf8');
     const raw = JSON.parse(text) as { pools: { usage?: unknown; poolId?: string }[] };
     expect(raw.pools.map((p) => p.poolId)).not.toContain('jev');
+    expect(raw.pools.map((p) => p.poolId)).toContain(MIRASIM_RETIRED_POOL_ID);
     expect(raw.pools.every((p) => p.usage === undefined)).toBe(true);
   });
 
   it('mirasim-relay 的整体时限盖住桥接建连预算，顶层 30 秒不拉长别的池', async () => {
-    const config = await loadQuotaConfig(REPO_QUOTA_CONFIG);
+    const config = parseQuotaConfig(JSON.parse(await readFile(REPO_QUOTA_CONFIG, 'utf8')));
     const mirasim = config.pools.find((p) => p.poolId === 'mirasim-relay');
     expect(mirasim?.timeoutMs).toBeGreaterThanOrEqual(MIRASIM_QUOTA_ATTEMPT_MS);
     expect(config.timeoutMs).toBe(30_000);
@@ -200,5 +199,55 @@ describe('读配置文件', () => {
     const path = join(dir, 'bad.json');
     await writeFile(path, '{ pools: [');
     await expect(loadQuotaConfig(path)).rejects.toBeInstanceOf(QuotaConfigError);
+  });
+
+  it('退役标记存在时不调用该池的读取语义，删掉标记后同一份配置恢复必读', async () => {
+    const path = join(dir, 'quota.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        pools: [{ poolId: 'mirasim-relay', channelId: 'mirasim', reader: 'mirasim-relay' }],
+      }),
+    );
+    const markerDir = join(dir, 'france');
+    await mkdir(markerDir, { recursive: true });
+    const marker = join(markerDir, 'mirasim-retired');
+    await writeFile(marker, 'Mirasim 已退役\n');
+
+    const retired = await loadQuotaConfig(path);
+    expect(retired.pools).toEqual([]);
+    expect(retired.notRead).toEqual([{ poolId: 'mirasim-relay', why: MIRASIM_RETIRED_WHY }]);
+    let readerCalls = 0;
+    const report = await readAllQuotas(
+      retired,
+      fakeDeps({
+        readers: {
+          'mirasim-relay': async () => {
+            readerCalls += 1;
+            return { windows: [] };
+          },
+        },
+      }),
+    );
+    expect(readerCalls).toBe(0);
+    expect(report.results).toEqual([]);
+
+    await rm(marker);
+    const restored = await loadQuotaConfig(path);
+    expect(restored.pools).toMatchObject([{ poolId: 'mirasim-relay' }]);
+    expect(restored.notRead).toBeUndefined();
+  });
+
+  it('退役标记不是缺失而是读失败：明确报错，不当成未退役', async () => {
+    const path = join(dir, 'quota.json');
+    await writeFile(
+      path,
+      JSON.stringify({
+        pools: [{ poolId: 'mirasim-relay', channelId: 'mirasim', reader: 'mirasim-relay' }],
+      }),
+    );
+    await mkdir(join(dir, 'france', 'mirasim-retired'), { recursive: true });
+    await expect(loadQuotaConfig(path)).rejects.toThrow(/读 Mirasim 退役标记[\s\S]*EISDIR/);
+    await rm(join(dir, 'france'), { recursive: true, force: true });
   });
 });
