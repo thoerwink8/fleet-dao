@@ -1,6 +1,7 @@
 // 读取器配置：哪些账号池存在、各池凭据文件在哪（只有池名和路径，不是密钥）。写在仓里 deploy/quota.json，随发布的那一版带着（#1289）；
 // 默认读代码所在那一版自带的这份，FLEET_QUOTA_CONFIG 只给命令行和测试换位置。密钥本身（Key 文件、auth.json）仍手放在机器上。
 import { readFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { QuotaConfig, ReaderType, ReadingWindowKind } from './types.ts';
 import { isForbiddenClaudeEnv, isRecord } from './util.ts';
@@ -8,6 +9,10 @@ import { isForbiddenClaudeEnv, isRecord } from './util.ts';
 export const DEFAULT_QUOTA_CONFIG_PATH = fileURLToPath(
   new URL('../../../../deploy/quota.json', import.meta.url),
 );
+export const MIRASIM_RETIRED_MARKER = 'france/mirasim-retired';
+export const MIRASIM_RETIRED_POOL_ID = 'mirasim-relay';
+export const MIRASIM_RETIRED_WHY =
+  'Mirasim 已退役：deploy/france/mirasim-retired 存在，额度读取不再读这个池；删除该标记后恢复读取';
 
 export function quotaConfigPath(env: Record<string, string | undefined> = process.env): string {
   return env.FLEET_QUOTA_CONFIG?.trim() || DEFAULT_QUOTA_CONFIG_PATH;
@@ -254,5 +259,32 @@ export async function loadQuotaConfig(path = quotaConfigPath()): Promise<QuotaCo
   } catch (e) {
     throw new QuotaConfigError([`配置文件 ${path} 不是合法 JSON：${(e as Error).message}`]);
   }
-  return parseQuotaConfig(raw);
+  const config = parseQuotaConfig(raw);
+  return applyRetiredMarkers(config, path);
+}
+
+/**
+ * 退役标记和额度配置跟着同一份发布版本走：配置在 deploy/quota.json，标记就在
+ * deploy/france/mirasim-retired。只把已经写在 pools 里的池移到有效 notRead，删掉标记
+ * 时同一份原始配置会自动恢复原来的必读语义。
+ */
+async function applyRetiredMarkers(config: QuotaConfig, configPath: string): Promise<QuotaConfig> {
+  const markerPath = join(dirname(configPath), MIRASIM_RETIRED_MARKER);
+  try {
+    await readFile(markerPath, 'utf8');
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return config;
+    const code = (e as NodeJS.ErrnoException).code ?? 'ERR';
+    throw new QuotaConfigError([
+      `读 Mirasim 退役标记 ${markerPath} 失败（${code}）：${e instanceof Error ? e.message : String(e)}`,
+    ]);
+  }
+
+  const retired = config.pools.find((pool) => pool.poolId === MIRASIM_RETIRED_POOL_ID);
+  if (!retired) return config;
+  return {
+    ...config,
+    pools: config.pools.filter((pool) => pool.poolId !== MIRASIM_RETIRED_POOL_ID),
+    notRead: [...(config.notRead ?? []), { poolId: retired.poolId, why: MIRASIM_RETIRED_WHY }],
+  };
 }
