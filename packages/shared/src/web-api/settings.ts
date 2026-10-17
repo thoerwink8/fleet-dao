@@ -142,7 +142,7 @@ export const SETTING_SCHEMAS = {
   'engine.master': z.boolean(),
   /**
    * 全程模式开关（#2823）：three（都走三步单）/ split:<0-100>（约这个百分比的单走全程）/ full（都走全程）。没设过 = three；
-   * 库里的值认不出时引擎和命令行按 three 办并报出来（shared 的 readFlowModeSetting）。这一步只记账，引擎行为不看它。
+   * 库里的值认不出时引擎和命令行按 three 办并报出来（shared 的 readFlowModeSetting）。引擎定模式时读这一次（decideFlowMode），结果进分组记录，之后改开关不影响已经分过组的单。
    */
   'engine.flowMode': z.string().refine((v) => parseFlowModeSetting(v).ok, `只收 ${FLOW_MODE_FORMS}`),
 } as const;
