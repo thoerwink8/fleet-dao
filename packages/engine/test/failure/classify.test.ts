@@ -103,7 +103,7 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     });
     expect(realTimeout).toMatchObject({ rule: 'EN1', action: 'park', alert: true });
     // #2710 的 doing 就是这句：分流把可重试的 timeout_start_to_close 当成「原路再试不会变」。
-    // 不是发版叫停（KL3 / #2797）、不是 Mirasim 接回（#2815）、不是 model_mismatch 挂整单（MD3 / #2811）。
+    // 不是发版叫停（KL3 / #2797）、不是 Mirasim 接回（#2815）、不是 model_mismatch（MD3 / #2811，分流仍判停下，动手会话另按点名重派）。
     // 动手会话见到这个 park 不挂整单，停掉这一段按点名路由重派（task-session.ts，patched en1-timeout-redispatch）。
     expect(realTimeout.reason).toContain('引擎这边丢了这一步（timeout_start_to_close）');
     expect(realTimeout.reason).toContain('挂起并报警');
@@ -601,6 +601,13 @@ describe('喂熔断：哪些算路由的失败', () => {
     expect(outcome({ message: 'socket hang up' })).toBe('fail');
     expect(outcome({ message: '503 status code (no body)' })).toBe('fail');
     expect(outcome({ code: 'agent_error', message: 'odd' })).toBe('fail');
+    // one-shot 到点强停（#2759）：原文里的 timeout 是我们的时限，不算路由的错。上游超时照旧算。
+    expect(outcome({ code: 'wall_clock_timeout', message: '引擎叫停（时限到了：one-shot timeout）' })).toBe(
+      'neutral',
+    );
+    expect(outcome({ httpStatus: 504, message: 'HTTP 504 Gateway Timeout' })).toBe('fail');
+    expect(outcome({ message: 'connect ETIMEDOUT 10.0.0.1:443' })).toBe('fail');
+    expect(outcome({ message: 'connection timed out' })).toBe('fail');
     expect(outcome({ code: 'interrupted' })).toBe('neutral');
     expect(outcome({ code: 'incomplete' })).toBe('neutral');
     expect(outcome({ message: 'weekly limit reached' })).toBe('neutral');

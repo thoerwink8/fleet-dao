@@ -141,6 +141,8 @@ describe('账号池上的停：停池、单换路（auth-reroute）', { timeout:
         const first = (await (await start(q, input())).result()) as TaskRun;
         expect(first).toMatchObject({ outcome: 'merged' });
         expect(holdAlerts(world, 'p1')).toHaveLength(0);
+        // 第一张单收场后再把测试时钟拨过 401 窗口。跳时间不该把共享记号冲掉（task-script 的 noteBare401 按真实时间）。
+        await env.sleep('15 minutes');
         const picksBefore = world.callsOf('pickRoute').length;
         const second = (await (
           await start(q, input({ issueNumber: 2711, title: '另一个任务再撞上 401' }))

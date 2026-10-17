@@ -413,7 +413,42 @@ export const RULES: readonly FailureRule[] = [
     text: /issue with the selected model|may not exist or you may not have access|absent from the ACP model catalog|model catalog has no match|cannot use this model|model[_ ]not[_ ]found|unknown model id|Couldn't set model '/i,
     routeOutcome: 'fail',
   },
-  // 点名的模型和实际回话的不一样：是这条路由的别名配错了（静默的）：停下报警，由人改这条路由。
+  // 中转回 503、原文是这个模型暂时不可用（法国 2026-10-16 #2750/#2753：opus-5.5@mirasim 段已 failed，
+  // 任务行仍 running、没有开着的会话，看门狗只报 idle-running，名额一直被占着）。
+  // 不是 MD1：模型还在，只是这会儿上游不接。也不是 UP1：只凭状态码 503 的原路重试会钉在这条路由上睡，
+  // 任务行不刷新，open_runs=0 仍算在干活。这里判停下，由动手会话换一条能派的路由；没有就停下腾出名额
+  // （task-session.ts，patched('model-unavailable-redispatch')）。别的 503（没有这句）仍是 UP1。
+  // 也不是 MD3：点名和读回对不上是另一句，不靠这句 503。
+  {
+    id: 'MU1',
+    title: '模型暂时不可用',
+    kind: 'stop',
+    text: /model is temporarily unavailable|模型暂时不可用|模型暂不可用/i,
+    routeOutcome: 'fail',
+  },
+  // 点名的模型和实际回话的不一样（#2742）。这一例是发版叫停后误续上一段 opus 会话，记进这条路由的失败
+  // （routeOutcome fail）。当时法国在跑 0c35f93a，Mirasim 还不脱开：
+  // - 前几段结局是「引擎叫停（其他：CANCELLED）」：引擎停机取消了还在跑的活动，会话收场（#2797 统计的那一种）。
+  //   叫停本身不是这种失败，也不改模型。
+  // - 继续时按决定 0088 续会话。resumeVerdict 只比执行方式、账号池、会话用户，不比模型；同池换模型照样续
+  //   （#2119）。mirasim-relay 上的 opus-5.5 和 sonnet-5.5 是同一个执行方式、同一个池、同一个会话用户。
+  //   发版后重新选路（决定 0104 已在上一版 b4686835）可以点到 sonnet，续的仍是上一段 opus。prompt 带上
+  //   model=claude-sonnet-5-5 和旧 sessionKey，快照 model 仍是这段会话自己的 claude-opus-5-5[1m]。
+  // - 不是比对串把 `[1m]` 剥错。modelMatches 已剥末尾方括号，剥完仍是 sonnet 对 opus。新会话若照点名起，
+  //   快照在出上游请求之前就是点名加 `[1m]`（MS-29）；sonnet 在名册里，对得上，不会停。约 56 秒是服务单线程
+  //   起会话的阻塞（MS-08），第一份当前轮快照就已经是 opus。
+  // - 不是 #1298。那一单是新会话、点名的型号不在中转名单里，服务端换成名单第一个（gpt-6-sol → gpt-6-astra）。
+  //   sonnet 在名单里。读回的是上一段的 opus，不是名单替换。
+  // - 不是 MU1。那一单是上游 503「模型暂时不可用」，换路由或停下腾出名额，不是点名 sonnet 读回 opus。
+  // 这里仍判停下（kind stop）：分流的结论进历史，重放读到的还是挂起。动手会话不拿第一次就把整张单挂起。
+  // 新失败由 patched('model-mismatch-redispatch') 接住：停这一段，换同一模型的另一条路由、开新会话重派一次
+  // （不续上一段，误续靠开新会话解开）。又对不上才停下等人；这次的标题不沿用下面这句旧的「挂起并报警」，
+  // 看门狗不把它当成已经挂上的旧单叫醒。
+  // 已经按「回话的模型不是点名的那个（model_mismatch）：挂起并报警」挂上的在途单，重放必须走进已经记下的挂起
+  // （跳过会 TMPRL1100，变僵尸，继续信号也送不进）。看门狗认出这一句，发 taskContinue；
+  // 醒来后 patched('model-mismatch-wake-reroute') 按点名开新会话重派。
+  // 主线上先按点名路由重派的在途单（历史里已有 patched('model-mismatch-reroute')）重放仍走那一条，不改步序。
+  // 发版排空和 Mirasim 接回不在这里改。
   {
     id: 'MD3',
     title: '回话的模型不是点名的那个',
@@ -496,7 +531,9 @@ export const RULES: readonly FailureRule[] = [
   // 归类：分类把可重试的活动超时当成「原路再试不会变」。不是另外三件：
   // - #2797 发版叫停：排空到点把会话停下，码是 engine_stop（KL3，kind resume），不记账、马上续，不进这张表。
   // - #2815 Mirasim 发版后接回：会话脱开引擎接着跑，活动交回 detached，工作流隔一会儿 attach，不以 timeout_start_to_close 收场。
-  // - #2811 model_mismatch 挂整单：MD3，kind stop，第一次就停下等人，不重派。
+  // - #2811 model_mismatch：MD3 仍是 kind stop、按路由记失败。动手会话先换同一模型的另一条路由自动重派一次
+  //   （patched('model-mismatch-redispatch')，开新会话），第二次才停下等人。已经按旧标题挂上的由看门狗发继续再重派。
+  //   #2742 是发版叫停后误续上一段 opus，不是活动超时。
   // timeout_* 的原文是 Temporal 固定句（activity StartToClose timeout 等），第二次必然一字不差。runSegment 的
   // StartToClose 是 75 分钟；#2710 离新进程起来只有约 8 分钟，凑不齐一次在新进程上跑满的 StartToClose。
   // 心跳还在才会落成 start_to_close，工人一死先是 timeout_heartbeat。这次没标上 engineRestarted（心跳里的启动时刻
@@ -696,7 +733,9 @@ export const RULES: readonly FailureRule[] = [
   // - #2703 探针侧同一句：再探一次仍不通就判这条路由离线，不挂整单（已关）。
   // - #2815 引擎停时 Mirasim 动手会话：脱开再按交接单接回，不以这句收场。
   // - #2824 timeout_start_to_close：EN1，Temporal 活动超时，原文一字不差才挂起。
-  // - #2811 model_mismatch：MD3，kind stop，第一次就停下等人，不重派。
+  // - #2811 model_mismatch：MD3，kind stop。分流仍判停下。动手会话先换同一模型的另一条路由自动重派一次
+  //   （patched('model-mismatch-redispatch')，开新会话），第二次才停下等人。已经按旧标题挂上的由看门狗发继续再重派。
+  //   #2742 是发版叫停后误续上一段 opus，不是桥接超时。
   // 分流这里仍判「原路重试一次，再不行挂起」（探针认这句，改 kind 会把探针带偏）。动手会话不拿这个挂起整单：
   // 停掉这一段、按点名路由重派；没有能派的路由，或同一原因连败到重派预算（先避开这条路由，同一模型再避开模型，
   // 再撞上才挂起），才 parked（task-session.ts，patched('mb1-bridge-redispatch')）。
@@ -723,11 +762,18 @@ export const RULES: readonly FailureRule[] = [
   // 带上会话号再起）。同一张单、同一条路由上第二次不再原路续：
   // 失败分流判停下后，工作流避开这个模型换一条路由，带上树上的进度续一次（task-session.ts，#2244）。
   // 这条路由在这张单上只是慢、会话还在出字，再原路续白烧额度；换过去的那条再在第二次到顶，交帅位去拆。
+  //
+  // 强码、只认证据的 code 字段（#2759）：one-shot 到点强停，插头把叫停写成「引擎叫停（时限到了：one-shot timeout）」。
+  // 句里的 timeout 是我们自己的时限，不是上游超时。这码若留在第 3 轮，第 2 轮 NT2 的 \btimeout\b 会先抢走，
+  // routeOutcome 落成 fail——会话干满还在回话，半开熔断却把这次试探判成又失败、冷却翻倍。时限是我们定的，
+  // 到点还在干活说明不了路由坏了，不进熔断、不进路由战绩。上游超时（HTTP 504、连接超时、ETIMEDOUT）没有这个码，
+  // 仍走 UP1 / NT1 / NT2，照旧算失败。
   {
     id: 'WT1',
     title: '会话总时长到顶',
     kind: 'retry',
-    weakCodes: ['wall_clock_timeout'],
+    codes: ['wall_clock_timeout'],
+    codeFieldOnly: true,
     maxRetries: 1,
     routeOutcome: 'neutral',
     hint: '接着上次的进度续一轮',
@@ -822,6 +868,7 @@ export const RULES: readonly FailureRule[] = [
     title: '超时',
     kind: 'retry',
     // \b 挡住 idle_timeout 这类码：它们是症状码，归第 3 轮。
+    // one-shot 的「时限到了：one-shot timeout」不在这里：证据码是 wall_clock_timeout，WT1 强码先拿走（#2759）。
     text: /\btimed out\b|\btimeout\b/i,
     routeOutcome: 'fail',
   },

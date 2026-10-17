@@ -1,6 +1,7 @@
 // 驾驶舱接口约定（web-api）：新主页（/）：一屏三块 + 持续状态条。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
+import { FLOW_MODES } from '../flow-mode.ts';
 import { TaskExecutorSchema, TaskStateSchema } from './enums.ts';
 import { Id, Time } from './internal.ts';
 
@@ -87,6 +88,11 @@ export const HomeRunningSchema = z.object({
   claimedBy: z.string().optional(),
   /** 本机领的单：租约到期的时刻（tasks.lease_until）；到点没续就退回法国队列。引擎的单没有这个键。 */
   leaseUntil: Time.optional(),
+  /**
+   * 这张单实际走的流程（tasks.flow_mode，#2828）：three 三段、full 全程。
+   * 还没分组的老单没有这个键。页面不补、不猜。
+   */
+  flowMode: z.enum(FLOW_MODES).optional(),
   /** 站内路径：任务详情。 */
   link: z.string(),
   /** 库里的任务编号：首页看板上「继续 / 叫停」这类快捷操作要它（POST /api/tasks/:taskId/actions）。老环境推来的快照里没有，没有就不画操作。 */

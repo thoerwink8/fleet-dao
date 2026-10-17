@@ -28,13 +28,14 @@
       "keyFile": "/etc/fleet-dao/reclaude-api.key"
     },
     {
-      "_说明": "引擎里经桥接以会话用户的身份连（#1284、#1288），端口、令牌文件现找，下面的 port、tokenFile 只给引擎之外的命令行读取用。Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。",
+      "_说明": "引擎里经桥接以会话用户的身份连（#1284、#1288），端口、令牌文件现找，下面的 port、tokenFile 只给引擎之外的命令行读取用。Mirasim 中转账号：Opus、GPT（codex）、Kimi、DeepSeek 等走中转的路由共扣这一份（5h、7d），另有只扣某一族的窗口（7d_claude…）。整体时限单独 90 秒，对齐桥接建连重试（单线程被会话堵住要 40–58 秒）。顶层 30 秒会先把这次读取掐成「整体 30 秒用完」（#2854）：不是上游慢，也不是发版排空。",
       "poolId": "mirasim-relay",
       "channelId": "mirasim",
       "name": "Mirasim 中转账号",
       "reader": "mirasim-relay",
       "port": 4316,
-      "tokenFile": "/home/fleet-agent-carpool/.mirasim/run/local-4316.token"
+      "tokenFile": "/home/fleet-agent-carpool/.mirasim/run/local-4316.token",
+      "timeoutMs": 90000
     },
     {
       "_说明": "Cursor 订阅（#1195、#1340）。读登录令牌（auth.json 里的 accessToken），被拒（401/403）时以会话用户跑 cursor-agent status 刷新一次、重读再调一次；仍被拒才报「登录失效」，原因写明刷新过一次仍被拒、要人在这台机器上 cursor-agent login，不当成 0。引擎读文件、跑刷新命令都以会话用户的身份（文件在会话用户家里，引擎用户进不去）。Dashboard 接口不认 cursor-agent 的 API 密钥，所以这里不读密钥。",

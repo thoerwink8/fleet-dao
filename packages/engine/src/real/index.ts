@@ -983,7 +983,8 @@ export function realPortsFromEnv(
     closedIssueEvents: closedIssueEventsJob(reconcileWiring),
     // 看门狗（#203）：按登记表看上面这些（和备份那几个）新不新鲜，没跑成、停了推提醒，恢复了自己撤；
     // 另看各项目主线多久没合 PR（决定 0093，jobs/merge-stall.ts），有待做的单还 N 小时没合就报，合了或没活了自己撤
-    watchdog: watchdogJob({ db }),
+    // 点名和读回不一致的旧挂起和叫醒等路由共用这一条 Temporal 连接（没这种挂起时不去连）
+    watchdog: watchdogJob({ db, temporal: wakeClient }),
     // 拉单（#632）：每 5 分钟读开着「让 AI 接活」的仓里该做的单、起任务工作流；开关全关时是正常的空闲。
     intake: intakeJob({ db, gh }),
     // 判断题自检（#1365）：最近一次调用失败超过 30 分钟，发一道不占额度的固定题。不看总开关。

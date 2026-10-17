@@ -1,10 +1,10 @@
 // 叫醒等路由的活（#194 方案 4.3）：切号切完、切过去的池探通以后，给所有在跑的任务工作流发 taskRouteWake 信号，
-// 让正在「等路由」的那几张单当场重新选一次，不睡满这一轮（real/store-ports.ts：等空位、熔断最多 MAX_ROUTE_WAIT_SECONDS；
+// 让正在「等路由」的那几张单当场重新选一次，不睡满这一轮（real/store-ports.ts：所有等待最多 10 分钟；
 // 等额度且清零时刻明确按 until 睡，上限 QUOTA_ROUTE_WAIT_CAP_SECONDS）。
 //
 // 改这里之前必须知道：
-// - 叫醒只是加速，不是正确性所在：信号丢了、没发出去，等路由的活照样会自己醒（空位、熔断最多再等
-//   MAX_ROUTE_WAIT_SECONDS；额度按清零时刻，不超过 QUOTA_ROUTE_WAIT_CAP_SECONDS）；所以这里绝不抛错、
+// - 叫醒只是加速，不是正确性所在：信号丢了、没发出去，等路由的活照样会自己醒（所有等待最多再等
+//   MAX_ROUTE_WAIT_SECONDS）；所以这里绝不抛错、
 //   不挡切号（切号流程在 real/org-switch.ts 的 probeNow 之后调它，抛错会把「切成了」报成出错）。
 // - 三种结局分得清，不混：收信人不在（没有这个编号、已经结束）是正常的、直接略过、不报；发成功了；收信失败（连不上、超时、别的错）
 //   和列不出在跑的工作流都要报警（`route-wake:signal`），全部成功了再撤。报警自己写不进去也不静默：记 error 日志并回在结果里。
@@ -18,7 +18,7 @@ import { Client, Connection, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import type { OrgSwitchRound, ProbedRoute } from '../jobs/org-switch.ts';
 import { type RouteWakeCommand, taskRouteWakeSignal } from '../task-contract.ts';
-import { MAX_ROUTE_WAIT_SECONDS, QUOTA_ROUTE_WAIT_CAP_SECONDS } from './store-ports.ts';
+import { MAX_ROUTE_WAIT_SECONDS } from './store-ports.ts';
 
 export const ROUTE_WAKE_ALERT_KEY = 'route-wake:signal';
 export const ROUTE_WAKE_ACTOR = 'engine:route-wake';
@@ -91,7 +91,7 @@ export function routeWaker(deps: RouteWakerDeps): RouteWaker {
         await deps.raise({
           key: ROUTE_WAKE_ALERT_KEY,
           title: '叫醒等路由的活没发成',
-          body: `${problem}。等路由的活不会丢（等空位、熔断最多再等 ${MAX_ROUTE_WAIT_SECONDS / 60} 分钟；等额度按清零时刻睡，最多 ${QUOTA_ROUTE_WAIT_CAP_SECONDS / 3600} 小时），只是没当场重新选；连不上 Temporal 或信号超时的话先看引擎和 Temporal 是否正常。`,
+          body: `${problem}。等路由的活不会丢（所有等待最多再等 ${MAX_ROUTE_WAIT_SECONDS / 60} 分钟），只是没当场重新选；连不上 Temporal 或信号超时的话先看引擎和 Temporal 是否正常。`,
         });
     } catch (err) {
       log('error', '叫醒等路由的活：报警/撤警没写进库', { error: message(err), problem });
@@ -217,14 +217,22 @@ export function lazyTemporalWakeClient(opts: {
   address: string;
   namespace: string;
   timeoutMs?: number;
-}): RouteWakeClient & { close(): Promise<void> } {
-  let connecting: Promise<{ connection: Connection; wake: RouteWakeClient }> | undefined;
+}): RouteWakeClient & {
+  close(): Promise<void>;
+  /** 第一次用到才连。看门狗发 taskContinue 和叫醒等路由共用这一条连接。 */
+  use<T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>): Promise<T>;
+} {
+  let connecting: Promise<{ connection: Connection; client: Client; wake: RouteWakeClient }> | undefined;
   const get = () => {
     connecting ??= Connection.connect({ address: opts.address }).then(
-      (connection) => ({
-        connection,
-        wake: temporalWakeClient(new Client({ connection, namespace: opts.namespace }), opts.timeoutMs),
-      }),
+      (connection) => {
+        const client = new Client({ connection, namespace: opts.namespace });
+        return {
+          connection,
+          client,
+          wake: temporalWakeClient(client, opts.timeoutMs),
+        };
+      },
       (err: unknown) => {
         connecting = undefined;
         throw err;
@@ -235,6 +243,7 @@ export function lazyTemporalWakeClient(opts: {
   return {
     runningTaskWorkflowIds: async () => (await get()).wake.runningTaskWorkflowIds(),
     signal: async (workflowId, command) => (await get()).wake.signal(workflowId, command),
+    use: async (fn) => fn((await get()).client),
     close: async () => {
       const c = connecting;
       connecting = undefined;

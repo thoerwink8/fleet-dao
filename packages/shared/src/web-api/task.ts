@@ -1,6 +1,7 @@
 // 驾驶舱接口约定（web-api）：任务详情，和发给工作流的信号。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
+import { FLOW_MODES, type FlowMode } from '../flow-mode.ts';
 import type { CostEstimate } from '../model-prices.ts';
 import type { SegmentRunView } from '../segment-runs.ts';
 import { TRANSCRIPT_KINDS, TRANSCRIPT_PAGE_DEFAULT, TRANSCRIPT_PAGE_MAX } from '../transcript.ts';
@@ -44,8 +45,18 @@ export const TaskSchema = z.object({
   claimedBy: z.string().optional(),
   /** 本机领的单：租约到期的时刻（tasks.lease_until）；到点没续就退回法国队列。引擎的单没有这个键。 */
   leaseUntil: Time.optional(),
+  /**
+   * 这张单实际走的流程（tasks.flow_mode，#2828）：three 三段、full 全程。
+   * 还没分组的老单没有这个键。页面不补、不猜。
+   */
+  flowMode: z.enum(FLOW_MODES).optional(),
   createdAt: Time,
 });
+/** 编译期闸：和 flow-mode.ts 的两种模式一字不差。 */
+export const TASK_FLOW_MODE_MATCHES: Same<
+  NonNullable<z.infer<typeof TaskSchema>['flowMode']>,
+  FlowMode
+> = true;
 
 // 用量汇总：算法和各栏的意思在 usage.ts。每一样只加读到的，没读到的次数在 missing* 里，不当成 0。
 const Count = z.number().int().min(0);

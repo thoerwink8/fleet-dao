@@ -971,7 +971,7 @@ describe('grok 的路由（#266）：和干活的会话同一个驱动探，判�
     await s.round();
     const down = await row(routeId);
     expect(down).toMatchObject({ alive: false, probeState: 'failed' });
-    expect(down?.probeDetail).toContain('点名 grok-4.7，实际 grok-4.6-build');
+    expect(down?.probeDetail).toContain('点名 grok-4.7、回话 grok-4.6-build');
     expect(await grokHold()).toBeUndefined();
   });
 
@@ -1041,6 +1041,24 @@ describe('Mirasim 的路由（#345）：和干活的会话同一个驱动探，�
     // 连接、账本、会话档案都是以唯一的会话用户读的（mirasimDepsFor 的生产装配；这里是假的，只核对传的是哪个会话用户）
     expect(s.mirasim.options[0]?.ledgerDir).toBe('/fake/fleet-agent-carpool/.mirasim/traffic');
     expect(s.mirasim.options[0]?.sessionsDir).toBe('/fake/fleet-agent-carpool/.mirasim/sessions');
+  });
+
+  it('回话模型和路由点名的不一样：探不通，原因写点名和回话的两个串，不派成在线', async () => {
+    await t.client.query(
+      "update routes set alive = false, probe_state = 'skipped', probe_detail = '改版后等下一轮探', probed_at = $2::timestamptz where id = $1",
+      [routeId, new Date(NOW.getTime() - 3 * 60 * 60_000).toISOString()],
+    );
+    await t.client.query("update routes set upstream_model = 'claude-sonnet-5-5' where id = $1", [routeId]);
+    const s = setup(answered, {
+      mirasim: () => ({
+        state: { text: REPLY, model: 'claude-opus-5-5[1m]' },
+      }),
+    });
+    await s.round();
+    const down = await row(routeId);
+    expect(down).toMatchObject({ alive: false, probeState: 'failed' });
+    expect(down?.probeDetail).toContain('点名 claude-sonnet-5-5、回话 claude-opus-5-5[1m]');
+    expect(down?.probeDetail).not.toContain('答上了：pong');
   });
 
   it('探通了：之后定时那几轮（15 分钟、60 分钟、一天）都不再真探、不重写，结论照旧（还在线），派之前由派前探测再探', async () => {

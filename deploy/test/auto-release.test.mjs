@@ -161,6 +161,9 @@ function machine() {
       if (m.currentThrow) throw new Error(m.currentThrow);
       return m.current;
     },
+    async checkDeps() {
+      return { result: 'ok', detail: 'fleet 用户读得了依赖入口文件' };
+    },
     // 主线最近那些次 ci.yml 的运行（一次一整份）
     async ciRuns() {
       m.calls.push('ci');
@@ -516,7 +519,9 @@ const MIRASIM_REFUSED = {
 function bootMachine(activeEnterOffset) {
   const m = machine();
   m.activeEnter = m.t + activeEnterOffset;
+  m.mirasimRetired = false;
   m.io.mirasimActiveEnter = async () => m.activeEnter;
+  m.io.mirasimRetired = async () => m.mirasimRetired;
   m.io.sleep = async (ms) => {
     m.t += ms;
   };
@@ -566,6 +571,21 @@ test('冷启动窗口：第一次探 4318 连不上、短时间后探通，最�
   st = await late.round();
   assert.equal(st.tier.result, 'failed');
   assert.equal(late.tierCalls, 1);
+});
+
+test('Mirasim 已退役时 4318 没 listen 不留冷启动窗口，立即按真实失败处理', async () => {
+  const m = bootMachine(0);
+  m.mirasimRetired = true;
+  m.io.applyAutoTier = async () => {
+    m.tierCalls += 1;
+    return MIRASIM_REFUSED;
+  };
+  const st = await m.round();
+  assert.equal(st.tier.result, 'failed');
+  assert.equal(m.tierCalls, 1, '退役后不为冷启动窗口再次探测');
+  assert.equal(m.t, T0, '退役后不等待冷启动窗口');
+  assert.match(st.tier.detail, /curl 退出 7/);
+  assert.ok(st.alerts.some((a) => a.key === `${TIER_PREFIX}${H0}`));
 });
 
 test('库连不上：报警留到下一轮再发，不丢', async () => {
@@ -811,6 +831,7 @@ const AUTO_TIER_FILES = [
   'deploy/france/fleet-auto-release.timer',
   // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
   'deploy/france/fleet-mirasim-session.service',
+  'deploy/france/mirasim-retired',
   'deploy/lib/mirasim.sh',
   // 它的健康检查（#1676）：setup_mirasim_session 顺带装，同属自动档
   'deploy/france/fleet-mirasim-liveness.service',
@@ -1943,7 +1964,7 @@ test('【#2728 故意造出的失败】装着的接活脚本和在用那一版�
 
 const MODULES_YAML = (at) => `{\n  "hoistPattern": ["*"],\n  "prunedAt": "${at}",\n  "storeDir": "/x"\n}\n`;
 
-test('【#2728 故意造出的失败】发版后在用那一版的依赖被重装：第一轮记指纹，之后变了当轮报警、写出前后的 prunedAt；换了在用的提交重新记、撤掉旧的', async () => {
+test('【#2728】发版后在用那一版的依赖被重装：树完好降日报，树坏报警，核对读不出记 unchecked；换提交重新记、撤旧提醒', async () => {
   const m = machine();
   let yaml = MODULES_YAML('Fri, 16 Oct 2026 08:20:00 GMT');
   m.io.readDeps = async (sha) => {
@@ -1960,14 +1981,35 @@ test('【#2728 故意造出的失败】发版后在用那一版的依赖被重�
   yaml = MODULES_YAML('Fri, 16 Oct 2026 08:30:16 GMT');
   m.t += 5 * MIN;
   st = await m.round();
-  assert.equal(st.deps.result, 'changed');
-  const a = m.alerts.find((x) => x.key === `${DEPS_PREFIX}${H0}`);
-  assert.ok(a, '当轮报警');
-  assert.match(a.body, /prunedAt Fri, 16 Oct 2026 08:20:00 GMT，现在 Fri, 16 Oct 2026 08:30:16 GMT/);
+  assert.equal(st.deps.result, 'repaired');
+  assert.equal(st.deps.detail, '重装过但树完好');
+  const repaired = m.alerts.at(-1);
+  assert.equal(repaired?.key, `${DEPS_PREFIX}${H0}`);
+  assert.equal(repaired?.level, 'daily');
+  assert.match(repaired?.body, /prunedAt Fri, 16 Oct 2026 08:20:00 GMT，现在 Fri, 16 Oct 2026 08:30:16 GMT/);
   // 下一轮还是一样：不重发
   m.t += 5 * MIN;
   await m.round();
   assert.equal(m.alerts.filter((x) => x.key === `${DEPS_PREFIX}${H0}`).length, 1);
+  yaml = MODULES_YAML('Fri, 16 Oct 2026 08:40:16 GMT');
+  m.io.checkDeps = async () => ({
+    result: 'bad',
+    detail: '链接 packages/api/node_modules/drizzle-orm 指到 /root',
+  });
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.deps.result, 'changed');
+  assert.match(st.deps.detail, /drizzle-orm 指到 \/root/);
+  const broken = m.alerts.at(-1);
+  assert.equal(broken?.level, 'alert');
+  assert.match(broken?.body, /哪个链接坏了|drizzle-orm 指到 \/root/);
+  yaml = MODULES_YAML('Fri, 16 Oct 2026 08:50:16 GMT');
+  m.io.checkDeps = async () => ({ result: 'unchecked', detail: 'EACCES' });
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(st.deps.result, 'unchecked');
+  assert.match(st.deps.detail, /EACCES/);
+  assert.equal(m.alerts.at(-1)?.level, 'alert');
   // 发了新版：重新记，撤掉旧的
   buttonReleaseTo(m, H2, '2026-09-27T08:20:00Z');
   m.t += 5 * MIN;
