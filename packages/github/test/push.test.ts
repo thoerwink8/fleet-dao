@@ -490,19 +490,20 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     ).rejects.toMatchObject({
       code: 'WORKFLOW_PERMISSION',
       retryable: false,
-      // 明确缺哪一项权限、为什么没给、谁来处理（#16）；不静默跳过，远端没有这个分支
-      message: expect.stringMatching(/workflows:write.*有意没给.*要人处理/s),
+      // 0106 起 workflow 推得上来、闸却拦得住：文案改成"安全基闸开，去 head SHA 前置批准"
+      message: expect.stringMatching(/安全基.*head SHA.*前置批准/s),
       details: { role: 'agent', missingPermission: 'workflows:write' },
     });
     expect(remoteHead('task/10-wf')).toBeNull();
   });
 
-  it('没有 workflows 权限不是随便什么推送失败都报：别的被拒不带 workflows:write 这句', () => {
+  it('0106 起 WORKFLOW_PERMISSION 文案带"安全基""前置批准"，别的错不带', () => {
     const msg = (kind: Parameters<typeof fromPushFailure>[0]) =>
       fromPushFailure(kind, 'acme/widgets', 'task/x', { code: 1, stdout: '', stderr: 'boom' }).message;
-    expect(msg('workflow_permission')).toContain('workflows:write');
+    expect(msg('workflow_permission')).toMatch(/安全基/);
+    expect(msg('workflow_permission')).toMatch(/前置批准/);
     for (const kind of ['rule_rejected', 'auth', 'unknown'] as const) {
-      expect(msg(kind)).not.toContain('workflows');
+      expect(msg(kind)).not.toMatch(/安全基/);
     }
   });
 
