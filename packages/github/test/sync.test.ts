@@ -71,11 +71,11 @@ describe('并主线', { timeout: 60_000 }, () => {
     const mainline = advanceMain('a.txt', 'main moves\n');
     const res = await gh.syncMainline({ repo, prNumber: 1, branch: 'task/1-clean', head: branch.head });
     if (res.state !== 'clean') throw new Error(`期望 clean，实际 ${res.state}`);
-    // 交给 git 的令牌（最后一枚）只有 contents 写：没有 administration，也没有别的（#11）
+    // 推分支的令牌带 contents/workflows 写；Administration 仍不交给 git 子进程（#2907）。
     const mints = fake.calls('POST', /access_tokens$/);
     expect(mints.at(-1)?.body).toEqual({
       repositories: ['widgets'],
-      permissions: { contents: 'write', metadata: 'read' },
+      permissions: { contents: 'write', workflows: 'write', metadata: 'read' },
     });
     for (const m of mints) {
       expect(JSON.stringify(m.body)).not.toContain('administration');

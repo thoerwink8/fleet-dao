@@ -15,7 +15,11 @@ describe('令牌用途表', () => {
     for (const scope of ['git', 'git-read'] as const) {
       expect(Object.keys(scopePermissions('agent', scope)).sort()).toContain('contents');
     }
-    expect(scopePermissions('agent', 'git')).toEqual({ contents: 'write', workflows: 'write', metadata: 'read' });
+    expect(scopePermissions('agent', 'git')).toEqual({
+      contents: 'write',
+      workflows: 'write',
+      metadata: 'read',
+    });
     expect(scopePermissions('agent', 'git-read')).toEqual({ contents: 'read', metadata: 'read' });
   });
 
