@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GhResult } from '../src/issue-new.ts';
 import { type LocalClaimRequest, work } from '../src/work.ts';
 import {
@@ -28,7 +28,12 @@ import {
 } from '../src/work-run.ts';
 
 const dirs: string[] = [];
+beforeEach(() => {
+  vi.stubEnv('GH_REPO', '');
+  vi.stubEnv('GITHUB_REPOSITORY', '');
+});
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 function temp(): string {

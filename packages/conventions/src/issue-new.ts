@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
-import { type MilestoneDetail, repoName, toMilestoneDetail } from './github-api.ts';
+import { type MilestoneDetail, resolveRepo, toMilestoneDetail } from './github-api.ts';
 import type { SimilarReport } from './issue-similar.ts';
 import {
   isKindLabel,
@@ -767,13 +767,18 @@ async function openIssueNumbers(gh: Gh, milestone: string): Promise<Set<number> 
 }
 
 /**
- * 真的 gh：不经 shell；relay origin 由共用解析器还原仓名，通过 GH_REPO 给 issue/pr/api 上下文。
- * repo view 不认 GH_REPO，缺位置参数时显式补仓名；调用者写的仓和环境里的 GH_REPO 优先。
- * 认不出 origin 就让 gh 照常报错，不猜目录名、不把读失败当空队列。
+ * 真的 gh：不经 shell。仓名只用 resolveRepo 这一份（显式 GH_REPO、GITHUB_REPOSITORY、github origin / relay）。
+ * 显式目标仓非法就不发 gh，也不改认 origin。repo view 不吃 GH_REPO，缺位置参数时补上仓名；
+ * 调用者已经写了仓名的不动。认不出 origin 就让 gh 照常报错，不猜目录名、不把读失败当空队列。
  */
 export function ghRunner(root: string, command = 'gh'): Gh {
   const env = { ...process.env };
-  const repo = env.GH_REPO?.trim() || repoName(env, root);
+  const resolved = resolveRepo(env, root);
+  if (resolved.error) {
+    const stderr = resolved.error;
+    return async () => ({ code: 1, stdout: '', stderr });
+  }
+  const repo = resolved.repo;
   if (repo) env.GH_REPO = repo;
   return (args) =>
     new Promise((done) => {
