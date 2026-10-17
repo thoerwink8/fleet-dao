@@ -1104,15 +1104,6 @@ function writeJsonAtomic(path, value) {
   renameSync(tmp, path);
 }
 
-/** 跑脚本的结果存进 JSON：error 只留 message、code（why() 只看这两样） */
-const plainRun = (r) => ({
-  status: r.status,
-  stdout: r.stdout ?? '',
-  stderr: r.stderr ?? '',
-  ...(r.timeoutMs ? { timeoutMs: r.timeoutMs } : {}),
-  ...(r.error ? { error: { message: r.error.message, code: r.error.code } } : {}),
-});
-
 /**
  * 后台那半：取远端、规矩同步、整池暂停、绿了没挂的 PR、扫工作树，结果写进 bgCachePath。每一步单独兜住，出错记 { ok: false, why }。
  * 另一个后台拿着新锁时什么都不做，返回 'busy'。
