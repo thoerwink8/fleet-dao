@@ -71,18 +71,14 @@ export function codexHookHash(
 }
 
 /**
- * 键里那段 hooks.json 路径。Codex 把它规整成真实路径：Windows 上 8.3 短名（ADMINI~1）展开成长名、链接解开
- * （本机核过：家目录给短名时 Codex 报的键是长名）。本脚本跟着规整；文件、目录都还没有就原样用。
+ * 键里那段 hooks.json 路径。Codex 规整父目录（包括 Windows 8.3 短名），保留最终文件入口名。
+ * relay 的 hooks.json 即使链接到默认文件，hooks/list 仍以 relay 路径记信任；不能 realpath 整个文件。
  */
 export function codexSourcePath(abs: string): string {
   try {
-    return realpathSync.native(abs);
+    return join(realpathSync.native(dirname(abs)), basename(abs));
   } catch {
-    try {
-      return join(realpathSync.native(dirname(abs)), basename(abs));
-    } catch {
-      return abs;
-    }
+    return abs;
   }
 }
 
