@@ -48,7 +48,7 @@
 - **认 Haiku 开的 PR**：两条路都认。工人的提交带 `Co-Authored-By: Claude Haiku …` 尾注；`pnpm pr:open` 不给 `--body-file` 时读分支上各提交的尾注，在 PR 正文末尾写一行 `**写码模型**：claude-haiku-5-5`。自己写正文（`--body-file`）的 PR 不自动写这一行，靠提交尾注认。所以 Haiku 工人的提交要保留尾注，不改掉。
 - **同一张单不给 Haiku 第二次**：调工具前钩子（`pretool.mjs`）放行一次「`general-purpose` 加 `model: "haiku"`」的派工，就往账本 `subagent-ledger.jsonl` 追加一行 `{"at":"<ISO 时刻>","issue":<单号>}`；同一张单再派 Haiku 就拦下，提示换 Sonnet。单号从派工交代里认：先认行首的「`## 活：#N`」，再认 `pnpm work claim N`；认不出单号就不记、不拦，所以交代里要写这两种之一。钩子只读本机文件、不联网。
 - **记结果**：`pnpm subagent:stats` 读近 30 天合并的 Haiku PR，逐个算：第一次 CI（工作流 `ci`，最早的一轮，被取消顶掉的不算）绿没绿；合并后 7 天内有没有 PR 正文写「修 #<PR号>」、或标题带 Revert 和它的号、或正文写 reverts 它的合并提交。返工 = 第一次 CI 没绿，或合并后被修、被 revert；错进 = 合并后被修、被 revert（CI 没拦住）；返工率 = 返工数 ÷ 查成了的样本。读不到的写「没查成」带原因：第一次 CI 没查成又没人修过的 PR 不进分母、也不当成绿或红；PR 列表读不到整份没查成，退出码 2，不改策略文件。
-- **谁来收回**：`pnpm subagent:stats --enforce` 在返工率超过 20%（样本不少于 5）或错进 PR 不少于 1 时，把收回写进策略文件 `subagent-policy.json`（`{"revoked":true,"reason":"…","at":"<ISO 时刻>"}`，已收回着不覆盖第一次的原因）。不用人想起来跑：收轮前对账（`queue-stop.mjs`）每次顺手起一个后台进程跑它，6 小时内起过就不再起；跑不成、起不来只提示，不挡收轮；收回了，下一次对账把原因说出来。
+- **谁来收回**：`pnpm subagent:stats --enforce` 在返工率超过 20%（样本不少于 5）或错进 PR 不少于 1 时，把收回写进策略文件 `subagent-policy.json`（`{"revoked":true,"reason":"…","at":"<ISO 时刻>"}`，已收回着不覆盖第一次的原因）。不用人想起来跑：收轮前对账（`queue-stop.mjs`）顺手起后台进程跑它，成功后 6 小时内不重起，运行中不重起，失败 1 分钟后可重试；跑不成、起不来只提示，不挡收轮；收回了，下一次对账把原因说出来。
 - **收回后**：钩子读到策略收回，就拦下所有「`general-purpose` 加 `model: "haiku"`」的派工，提示改派 Sonnet 并给出原因和时刻；策略文件读不懂也拦并明说，不当成没收回。只读的 `Explore` 不受影响。
 - **怎么恢复**：先看过原因（`pnpm subagent:stats` 看逐个 PR）、把问题修掉，再 `pnpm subagent:stats --lift`。恢复会记下时刻，之后 `--enforce` 只算这个时刻以后合并的 PR，旧的那批不会让它马上又收回。同一张单的账本不清，换 Sonnet 的单号不影响别的单。
 - 复查日看 `pnpm subagent:stats` 的数字；一次没过换 Sonnet 的评论照旧在 #1960 留。
