@@ -15,15 +15,22 @@ import {
   type SessionEffort,
   type StageKind,
 } from '@fleet-dao/shared';
-import { and, asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, gte, isNotNull, sql } from 'drizzle-orm';
 import type { Db } from './client.ts';
 import {
   channels,
   models,
+  parseRouteShare,
+  ROUTE_SHARE_SETTING,
+  ROUTE_SHARE_WINDOW_MS,
+  type RouteShareEntry,
+  type RouteShareMap,
   routes,
   routingCatalog,
   routingPurposeModels,
   routingPurposeRevisions,
+  runs,
+  settings,
 } from './schema/index.ts';
 
 export type MoveDirection = 'up' | 'down';
@@ -728,4 +735,111 @@ export async function setPurposeModelEffort(
     const version = await bumpPurposeVersion(tx, purpose, locked.version, locked.hasRevision);
     return { ok: true, version, beforeVersion: locked.version, before, order };
   });
+}
+
+export interface SetRouteShareInput {
+  modelId: string;
+  routeId: string;
+  /** null = 从档里拿出来，各走各的。 */
+  band: number | null;
+  weight: number;
+  /** 调用方看到的设置版本。没有这一行是 0。对不上整笔不写。 */
+  expectedVersion: number;
+}
+
+export type SetRouteShareResult =
+  | { ok: true; before: RouteShareEntry | null; after: RouteShareEntry | null; version: number }
+  | { ok: false; kind: 'not_found'; why: string }
+  | { ok: false; kind: 'conflict'; current: number }
+  | { ok: false; kind: 'bad'; why: string };
+
+function shareInputProblem(input: SetRouteShareInput): string | null {
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 0) return '看到的版本不是非负整数';
+  if (input.band !== null && (!Number.isInteger(input.band) || input.band < 0)) return '档不是非负整数';
+  if (!Number.isInteger(input.weight) || input.weight < 1 || input.weight > 100) return '权重要在 1 到 100';
+  return null;
+}
+
+function applyShareMap(
+  map: RouteShareMap,
+  input: SetRouteShareInput,
+): { before: RouteShareEntry | null; after: RouteShareEntry | null; map: RouteShareMap } {
+  const model = { ...(map[input.modelId] ?? {}) };
+  const before = model[input.routeId] ?? null;
+  if (input.band === null) delete model[input.routeId];
+  else model[input.routeId] = { band: input.band, weight: input.weight };
+  const next: RouteShareMap = { ...map };
+  if (Object.keys(model).length === 0) delete next[input.modelId];
+  else next[input.modelId] = model;
+  return {
+    before,
+    after: input.band === null ? null : { band: input.band, weight: input.weight },
+    map: next,
+  };
+}
+
+/** 读同一档。没有这一行是版本 0、空表。值认不出就抛。 */
+export async function readRouteShare(db: Db): Promise<{ version: number; map: RouteShareMap }> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, ROUTE_SHARE_SETTING));
+  if (!row) return { version: 0, map: {} };
+  return { version: row.version, map: parseRouteShare(row.value) };
+}
+
+/**
+ * 把一条路由放进同一档，或从档里拿出来。版本对不上不写。
+ * 先锁目录行再锁设置行：路由不在这个模型下就 not_found，不动版本。
+ */
+export async function setRouteShare(db: Db, input: SetRouteShareInput): Promise<SetRouteShareResult> {
+  const problem = shareInputProblem(input);
+  if (problem) return { ok: false, kind: 'bad', why: problem };
+  return db.transaction(async (tx) => {
+    const [catalog] = await tx
+      .select({ routeId: routingCatalog.routeId })
+      .from(routingCatalog)
+      .where(and(eq(routingCatalog.modelId, input.modelId), eq(routingCatalog.routeId, input.routeId)))
+      .for('update');
+    if (!catalog) {
+      return {
+        ok: false,
+        kind: 'not_found',
+        why: `模型 ${input.modelId} 下没有路由 ${input.routeId}（路由两层里没挂）`,
+      };
+    }
+    const [row] = await tx.select().from(settings).where(eq(settings.key, ROUTE_SHARE_SETTING)).for('update');
+    if (!row) {
+      if (input.expectedVersion !== 0) return { ok: false, kind: 'conflict', current: 0 };
+      const applied = applyShareMap({}, input);
+      await tx.insert(settings).values({ key: ROUTE_SHARE_SETTING, value: applied.map, version: 1 });
+      return { ok: true, before: applied.before, after: applied.after, version: 1 };
+    }
+    if (row.version !== input.expectedVersion) return { ok: false, kind: 'conflict', current: row.version };
+    let map: RouteShareMap;
+    try {
+      map = parseRouteShare(row.value);
+    } catch (err) {
+      return { ok: false, kind: 'bad', why: err instanceof Error ? err.message : String(err) };
+    }
+    const applied = applyShareMap(map, input);
+    const version = row.version + 1;
+    await tx
+      .update(settings)
+      .set({ value: applied.map, version })
+      .where(eq(settings.key, ROUTE_SHARE_SETTING));
+    return { ok: true, before: applied.before, after: applied.after, version };
+  });
+}
+
+/** 近 14 天每条路由开工了几次（runs.started_at）。没有的路由不在表里，调用方按 0。 */
+export async function recentRouteDispatches(db: Db, now: Date): Promise<Map<string, number>> {
+  const since = new Date(now.getTime() - ROUTE_SHARE_WINDOW_MS);
+  const rows = await db
+    .select({ routeId: runs.routeId, n: sql<number>`count(*)::int` })
+    .from(runs)
+    .where(and(gte(runs.startedAt, since), isNotNull(runs.routeId)))
+    .groupBy(runs.routeId);
+  const out = new Map<string, number>();
+  for (const row of rows) {
+    if (row.routeId) out.set(row.routeId, Number(row.n));
+  }
+  return out;
 }

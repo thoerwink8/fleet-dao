@@ -191,6 +191,13 @@ export interface StageRouteEntry {
   enabled: boolean;
   /** 钉住：不参与任何微调（不提前、不后置、不因额度未知挪后），也不拿来做试探的出发点。 */
   pinned: boolean;
+  /**
+   * 同一档（同一个模型、至少两条才有）。没有 = 各走各的，选路和原来一样。
+   * 选路已经选中这一档里的一条之后，再按 shareWeight 在还派得出去的成员里分。
+   */
+  shareBand?: number | null;
+  /** 同一档里的权重，至少 1。没给按 1。 */
+  shareWeight?: number;
 }
 
 /**

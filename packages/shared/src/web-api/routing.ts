@@ -182,6 +182,12 @@ export const RoutingLayerRouteSchema = z.object({
   inFlight: z.number().int().min(0),
   reserved: z.number().int().min(0),
   maxConcurrency: z.number().int().min(0),
+  /** 同一档（这个模型下至少两条才给）。没有 = 各走各的。 */
+  shareBand: z.number().int().nonnegative().optional(),
+  /** 同一档里的权重，至少 1。 */
+  shareWeight: z.number().int().min(1).max(100).optional(),
+  /** 近 14 天这条路由开工了几次。只跟同一档一起给。 */
+  recentDispatches: z.number().int().nonnegative().optional(),
 });
 
 export const RoutingLayerModelSchema = z.object({
@@ -198,6 +204,8 @@ export const RoutingLayerModelSchema = z.object({
   routes: z.array(RoutingLayerRouteSchema),
   /** 这个用途下另配的档位；没有 = 没另配（起会话仍看路由上的档）。 */
   effort: z.enum(SESSION_EFFORTS).nullable().optional(),
+  /** 同一档设置的版本。还没人改过不给（页面按 0）。改过之后每个模型都带，免得下次用 0 去写被拒。 */
+  shareVersion: z.number().int().nonnegative().optional(),
 });
 
 export const RoutingLayerPurposeSchema = z.object({
@@ -433,6 +441,15 @@ export const UpdateModelRouteRequest = z.discriminatedUnion('op', [
     expected: z.boolean(),
     reason: OrderReason,
   }),
+  z.object({
+    op: z.literal('share'),
+    /** null = 从档里拿出来。 */
+    shareBand: z.number().int().nonnegative().nullable(),
+    shareWeight: z.number().int().min(1).max(100),
+    /** 看到的同一档版本。还没人改过是 0。 */
+    expectedVersion: z.number().int().nonnegative(),
+    reason: OrderReason,
+  }),
 ]);
 export const UpdateModelRouteResponse = z.object({
   modelId: Id,
@@ -441,6 +458,11 @@ export const UpdateModelRouteResponse = z.object({
   order: z.array(Id).optional(),
   /** op=enable：改完的开关；换位置不给。 */
   enabled: z.boolean().optional(),
+  /** op=share：改完后这条路由的档；拿出来是 null。 */
+  shareBand: z.number().int().nonnegative().nullable().optional(),
+  shareWeight: z.number().int().min(1).max(100).nullable().optional(),
+  /** op=share：改完后的同一档版本。 */
+  version: z.number().int().nonnegative().optional(),
 });
 
 /**

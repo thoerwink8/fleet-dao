@@ -485,7 +485,14 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       stagePinned: false,
       order: facts.order
         .filter((e) => !unwiredIds.has(e.routeId))
-        .map((e) => ({ routeId: e.routeId, position: e.position, enabled: e.enabled, pinned: false })),
+        .map((e) => ({
+          routeId: e.routeId,
+          position: e.position,
+          enabled: e.enabled,
+          pinned: false,
+          // 同一档只在成档（至少两条）时才出现在事实上；没设的不带，选路当各走各的。
+          ...(e.shareBand === undefined ? {} : { shareBand: e.shareBand, shareWeight: e.shareWeight ?? 1 }),
+        })),
       routes: all.filter((r) => !unwiredIds.has(r.routeId)),
       unwired: unwiredRoutes.map((r) => routeLabel(r)),
       unwiredIds,

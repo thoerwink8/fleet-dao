@@ -335,6 +335,59 @@ export const routingCatalog = pgTable(
   ],
 );
 
+/**
+ * 同一档（近似渠道按权重轮换）放在设置表，不进 routing_catalog。
+ * 没有这一行 = 版本 0、空表：每条路由各走各的。认不出就抛，不当成空表——空表会让已经配好的轮换悄悄变回总用第一条。
+ */
+export const ROUTE_SHARE_SETTING = 'routing.routeShare';
+
+/** 驾驶舱看「最近用得均不均」的窗口。 */
+export const ROUTE_SHARE_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** 同一模型下的一条路由进了哪一档、权重多少。band 从 0 起；weight 至少 1。 */
+export interface RouteShareEntry {
+  band: number;
+  weight: number;
+}
+
+/** modelId → routeId → 档和权重。同一模型、同一个 band、至少两条，才算一档。 */
+export type RouteShareMap = Record<string, Record<string, RouteShareEntry>>;
+
+function shareInt(v: unknown, min: number): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= min;
+}
+
+/** 设置行的 value。不是对象、档或权重不合约定都抛。 */
+export function parseRouteShare(value: unknown): RouteShareMap {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('routing.routeShare 认不出：不是对象');
+  }
+  const out: RouteShareMap = {};
+  for (const [modelId, routes] of Object.entries(value)) {
+    if (!modelId) throw new Error('routing.routeShare 认不出：模型编号是空的');
+    if (routes === null || typeof routes !== 'object' || Array.isArray(routes)) {
+      throw new Error(`routing.routeShare 认不出：模型 ${modelId} 不是对象`);
+    }
+    const inner: Record<string, RouteShareEntry> = {};
+    for (const [routeId, entry] of Object.entries(routes)) {
+      if (!routeId || entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+        throw new Error(`routing.routeShare 认不出：路由 ${routeId || '（空）'} 不是对象`);
+      }
+      const band = (entry as { band?: unknown }).band;
+      const weight = (entry as { weight?: unknown }).weight;
+      if (!shareInt(band, 0)) {
+        throw new Error(`routing.routeShare 认不出：路由 ${routeId} 的档不是非负整数`);
+      }
+      if (!shareInt(weight, 1)) {
+        throw new Error(`routing.routeShare 认不出：路由 ${routeId} 的权重不是正整数`);
+      }
+      inner[routeId] = { band, weight };
+    }
+    out[modelId] = inner;
+  }
+  return out;
+}
+
 /** 全局禁令。family 和 modelId 至少填一个；stage 不填 = 所有阶段。 */
 export const bans = pgTable(
   'bans',
