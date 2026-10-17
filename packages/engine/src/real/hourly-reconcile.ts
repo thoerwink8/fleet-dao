@@ -239,7 +239,9 @@ export interface HourlyReconcileWiring {
   db: Db;
   /** 和对账补漏同一个：审最近合了的 PR（镜像、合并人、合并记录）；补拉经接活那道门时现读挂在哪个版本；自动合并兜底用它列 PR、读文件、挂自动合并。 */
   gh: Pick<GitHub, 'auditMergedPrs' | 'readIssueState' | 'openIssue'> &
-    Partial<Pick<GitHub, 'readGroomFacts' | 'readIssueLabelEvents' | 'readIssueComments'>> &
+    Partial<
+      Pick<GitHub, 'readGroomFacts' | 'readIssueLabelEvents' | 'readIssueComments' | 'readIssueStates'>
+    > &
     AutoMergeWiringGitHub;
   trees: WorkTrees;
   exec: UserExec;
@@ -350,6 +352,8 @@ function temporalClosedIssueTasks(
 
 /**
  * 四个 GitHub 读法都在才核「本机做」没人领：开着单的正文/标签、标签时间线和评论，以及前置单状态。
+ * 前置号（issue 或 PR）按仓去重，交给 readIssueStates 一批读；合了、关了都算 closed。
+ * 缺号、认不出的状态在这里抛，这一轮没读成，上一份名单留着。
  * 测试装配的假 GitHub 往往没有这些，这时一个都不接，
  * 对账那一轮跳过，不记没查成。
  */
@@ -357,8 +361,8 @@ function localOrphanWiring(
   w: HourlyReconcileWiring,
   now: () => Date,
 ): Pick<HourlyReconcileJobDeps, 'localLabeled' | 'activeLeases' | 'saveLocalOrphans'> {
-  const { readGroomFacts, readIssueLabelEvents, readIssueComments, readIssueState } = w.gh;
-  if (!readGroomFacts || !readIssueLabelEvents || !readIssueComments || !readIssueState) return {};
+  const { readGroomFacts, readIssueLabelEvents, readIssueComments, readIssueStates } = w.gh;
+  if (!readGroomFacts || !readIssueLabelEvents || !readIssueComments || !readIssueStates) return {};
   const gh = w.gh;
   return {
     async localLabeled() {
@@ -370,18 +374,18 @@ function localOrphanWiring(
         const prerequisiteNumbers = [
           ...new Set(localIssues.flatMap((issue) => parsePrerequisites(issue.body).issues)),
         ];
+        const states = await readIssueStates.call(gh, { repo: ref, numbers: prerequisiteNumbers });
         const prerequisiteStates = new Map<number, 'open' | 'closed'>();
-        await Promise.all(
-          prerequisiteNumbers.map(async (issueNumber) => {
-            const state = await readIssueState.call(gh, { repo: ref, issueNumber });
-            if (state.state !== 'open' && state.state !== 'closed') {
-              throw new Error(
-                `${repo.owner}/${repo.name}#${issueNumber} 的状态认不出：${String(state.state)}`,
-              );
-            }
-            prerequisiteStates.set(issueNumber, state.state);
-          }),
-        );
+        for (const issueNumber of prerequisiteNumbers) {
+          if (!states.has(issueNumber)) {
+            throw new Error(`${repo.owner}/${repo.name}#${issueNumber} 的状态缺号`);
+          }
+          const state = states.get(issueNumber);
+          if (state !== 'open' && state !== 'closed') {
+            throw new Error(`${repo.owner}/${repo.name}#${issueNumber} 的状态认不出：${String(state)}`);
+          }
+          prerequisiteStates.set(issueNumber, state);
+        }
         for (const issue of localIssues) {
           const [events, comments] = await Promise.all([
             readIssueLabelEvents.call(gh, { repo: ref, issueNumber: issue.number }),
