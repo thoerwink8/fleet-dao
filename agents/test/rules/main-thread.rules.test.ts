@@ -17,6 +17,7 @@ import { runChild } from '../child.ts';
 interface Verdict {
   deny?: string;
   notice?: string;
+  context?: string;
 }
 interface MainThreadLib {
   check(
@@ -457,5 +458,24 @@ describe('登记和真跑', () => {
       env: NO_MIRASIM_ENV,
     });
     expect([ok.status, ok.stdout]).toEqual([0, '']);
+  });
+});
+
+describe('后台恢复context序列化', () => {
+  it('只有塞的话：hookSpecificOutput 里只有 additionalContext，不带拒', () => {
+    const out = JSON.parse(lib.hookOutput({ context: '后台命令 cmd-7：pnpm check' }));
+    expect(out.hookSpecificOutput).toEqual({
+      hookEventName: 'PreToolUse',
+      additionalContext: '后台命令 cmd-7：pnpm check',
+    });
+  });
+
+  it('拒和塞的话同时有：两样都在', () => {
+    const out = JSON.parse(lib.hookOutput({ deny: '先回', context: '后台命令 cmd-7：pnpm check' }));
+    expect(out.hookSpecificOutput).toMatchObject({
+      permissionDecision: 'deny',
+      permissionDecisionReason: '先回',
+      additionalContext: '后台命令 cmd-7：pnpm check',
+    });
   });
 });

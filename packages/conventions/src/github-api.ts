@@ -206,13 +206,89 @@ export interface GitHubBranches {
 
 type Env = Record<string, string | undefined>;
 
-/** 仓名：GITHUB_REPOSITORY（Actions 里有），没有就从 origin 的地址认。认不出返回 undefined。 */
-export function repoName(env: Env, root: string, git = gitOrigin): string | undefined {
-  const fromEnv = env.GITHUB_REPOSITORY?.trim();
-  if (fromEnv) return /^[\w.-]+\/[\w.-]+$/.test(fromEnv) ? fromEnv : undefined;
-  const url = git(root);
-  const m = url && /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(url.trim());
-  return m?.[1];
+/** owner/name。显式目标仓、Actions 的 GITHUB_REPOSITORY、origin 里的 github 仓名，都只认这一种。 */
+const REPO_SLUG = /^[\w.-]+\/[\w.-]+$/;
+
+export interface RepoResolution {
+  /** 认出来的 owner/name。有 error 时没有。 */
+  repo?: string;
+  /**
+   * 显式目标仓不是 owner/name。有这句话就不能再改认别的仓（不当成没写，也不退回 origin）。
+   */
+  error?: string;
+}
+
+/** 远端地址里 github.com 后面的 owner/name。标准 origin、以及路径里嵌着这一段的 relay，都从这里认。认不出是 undefined。 */
+function githubRepoInUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  return /github\.com[:/]([\w.-]+\/[\w.-]+?)(?:\.git)?\/?$/.exec(url.trim())?.[1];
+}
+
+/**
+ * GH_REPO 去空白后非空才算写了显式目标仓。空的当没写。
+ * 不像 owner/name 就是非法：不退回 GITHUB_REPOSITORY，也不退回 origin。
+ */
+export function explicitRepo(env: Env): RepoResolution {
+  const raw = env.GH_REPO?.trim() ?? '';
+  if (raw === '') return {};
+  if (!REPO_SLUG.test(raw)) {
+    return { error: `显式目标仓 GH_REPO=${raw} 不是 owner/name，不改认别的仓` };
+  }
+  return { repo: raw };
+}
+
+/**
+ * 仓名只走这一份，先写的赢，不对就停、不挑下一个：
+ * 1. GH_REPO 非空就必须是 owner/name，否则 error。
+ * 2. 没写 GH_REPO：GITHUB_REPOSITORY 像 owner/name 就用它，不像就是认不出（不退回 origin）。
+ * 3. 再没有就从 origin 认（标准 github.com 的 https/ssh，或路径里嵌着 github.com/owner/name 的 relay）。
+ */
+export function resolveRepo(
+  env: Env,
+  root: string,
+  git: (root: string) => string | undefined = gitOrigin,
+): RepoResolution {
+  const ex = explicitRepo(env);
+  if (ex.error) return ex;
+  if (ex.repo) return ex;
+  const actions = env.GITHUB_REPOSITORY?.trim() ?? '';
+  if (actions !== '') return REPO_SLUG.test(actions) ? { repo: actions } : {};
+  const fromOrigin = githubRepoInUrl(git(root));
+  return fromOrigin === undefined ? {} : { repo: fromOrigin };
+}
+
+/** 仓名：见 resolveRepo。认不出、或显式目标仓非法时是 undefined（不挑另一个仓）。 */
+export function repoName(
+  env: Env,
+  root: string,
+  git: (root: string) => string | undefined = gitOrigin,
+): string | undefined {
+  return resolveRepo(env, root, git).repo;
+}
+
+/**
+ * `gh repo view` 的参数。有目标仓就放在位置参数上。
+ * 不带位置参数时 gh 按 origin 识仓，不吃 GH_REPO；origin 是 Git relay 时这一下会失败。
+ */
+export function repoViewArgs(repo: string | undefined): string[] {
+  return repo
+    ? ['repo', 'view', repo, '--json', 'nameWithOwner']
+    : ['repo', 'view', '--json', 'nameWithOwner'];
+}
+
+/**
+ * gh repo view 回的 nameWithOwner。不是 owner/name 就不认（不当成已经读到）。
+ * 问的时候带了目标仓，回的必须是同一个（忽略大小写）；对不上就是冲突，不改用回的那个仓。
+ * 回的大小写留着，那是 GitHub 的规范写法。
+ */
+export function acceptViewedRepo(expected: string | undefined, nameWithOwner: unknown): string {
+  if (typeof nameWithOwner !== 'string' || !REPO_SLUG.test(nameWithOwner)) {
+    throw new Error('当前仓认不出（gh repo view 没给 nameWithOwner）');
+  }
+  if (expected && nameWithOwner.toLowerCase() !== expected.toLowerCase()) {
+    throw new Error(`当前仓对不上：显式目标是 ${expected}，gh 回了 ${nameWithOwner}，不改记到回的那个仓`);
+  }
+  return nameWithOwner;
 }
 
 function gitOrigin(root: string): string | undefined {

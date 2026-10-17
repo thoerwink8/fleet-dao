@@ -3,9 +3,7 @@
 // 引导先回。创始人在一轮中途打的字叫「引导」：transcript 里是一行 attachment（type: queued_command，commandMode: prompt），
 // 附在下一次工具结果后面送进主对话。最后一条引导之后，主对话还没写过一段非空文字（和 tool_use 在同一条消息里的文字也算），就拒这次工具调用；
 // 同一条引导只拒一次（之后的工具结果里已有拒的理由，就放行）。
-// 顺带（单 #2382）：每次主线程工具调用也对一遍创始人「发了的账」和「收到的账」（inbox-tick.mjs，每个会话 60 秒最多读一次），
-// 轮中发的引导丢了的，当场作为 additionalContext 塞给会话，不等下一轮开头；和上面的拦是两件事，互不影响。
-// 不再读 diag、不再起 ui-cli。以前转过的记在 ~/.fleet-dao/steer-shown/，开会话对账还读，这边只留路径、不再写。
+// 原生重启通知中未结束的后台任务由 background-recovery.mjs 提示接手。
 // 引擎的无头会话（FLEET_HEADLESS=1）读得到项目级设置，进到这里直接退出。
 // 子代理里的调用（输入带 agent_id）不管。
 // 读不了 transcript：不拦（拦死所有工具代价太大），但用 systemMessage 明说「引导检查没查成：原因」，不当成没有引导静默过去。
@@ -14,12 +12,10 @@
 // 协议：stdin 一份 JSON；拒 = stdout 一份 hookSpecificOutput.permissionDecision: deny，退出码 0；没意见 = 什么都不写。
 // 规矩由 agents/test/rules/main-thread.rules.test.ts、mirasim-steer.rules.test.ts 钉住：改这里的判断就是改规矩，那边会红。
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { backgroundRecoveryContext } from './background-recovery.mjs';
 import { hookTimer } from './hook-timing.mjs';
-import { tick } from './inbox-tick.mjs';
-import { shownFile as shownFileIn, steerShownDir as steerShownDirIn } from './steer-shown.mjs';
 
 /** 拒的理由里最多带引导的前多少个字 */
 export const DIRECTIVE_SHOWN_CHARS = 200;
@@ -40,7 +36,7 @@ const SETTLE_TRIES = 4;
  */
 const REPLY_TOOLS = new Set(['SendMessage', 'mcp__mirasim__deliver_artifact', 'PushNotification']);
 
-/** @typedef {{ deny?: string, notice?: string, context?: string }} Verdict 拒（理由给模型看）、要明说的话（systemMessage，给创始人看）、轮中塞给模型的话（additionalContext，inbox-tick.mjs）；空对象是没意见 */
+/** @typedef {{ deny?: string, notice?: string, context?: string }} Verdict 拒（理由给模型看）、要明说的话（systemMessage，给创始人看）、后台任务恢复提示（additionalContext）；空对象是没意见 */
 /** @typedef {{ kind: 'pending', text: string, seenCall: boolean } | { kind: 'clear' } | { kind: 'sidechain' }} Tail 最后一条引导回了没有；seenCall：这次的工具调用已经落盘 */
 /** @typedef {{ settleMs?: number, sleep?: (ms: number) => void }} Opts 测试换掉等待 */
 
@@ -255,23 +251,6 @@ function isSubagentCall(input) {
   return typeof id === 'string' && id.trim() !== '';
 }
 
-// 旧的 steer-shown 记录的路径函数实现在 steer-shown.mjs（见那里的说明），这里留同名出口，老的引用和钉住它们的测试不变
-/**
- * @param {Record<string, string | undefined>} [env]
- * @param {string} [home]
- */
-export function steerShownDir(env = process.env, home = homedir()) {
-  return steerShownDirIn(env, home);
-}
-
-/**
- * @param {string} dir
- * @param {string} sessionId
- */
-export function shownFile(dir, sessionId) {
-  return shownFileIn(dir, sessionId);
-}
-
 /** @param {string} text */
 const replyFirst = (text) => {
   const shown = Array.from(text).slice(0, DIRECTIVE_SHOWN_CHARS).join('');
@@ -375,12 +354,14 @@ if (isMain()) {
       // 认不出由 check 处理
     }
     v = check(raw);
-    // 轮中发的引导：每次主线程工具调用都看一眼账（60 秒最多真读一次），丢了的当场塞进会话（inbox-tick.mjs，单 #2382）
+    // 只读本会话原生重启通知，恢复后台任务上下文。
     try {
-      const context = await tick(JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw));
+      const context = await backgroundRecoveryContext(
+        JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw),
+      );
       if (context !== null) v.context = context;
     } catch (e) {
-      v.context = `对账没查成：钩子自己出错了（${why(e)}）`;
+      v.context = `后台任务恢复没查成：钩子自己出错了（${why(e)}）`;
     }
   } catch (e) {
     v = { notice: `引导检查没查成：钩子自己出错了（${why(e)}）` };

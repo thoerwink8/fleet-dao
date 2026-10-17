@@ -22,7 +22,7 @@ import { localBranchPrefix } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { LOCAL_LABEL } from './labels.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
-import { buildQueue, type LeaseRecord, type QueueDeps, renderQueue } from './work-queue.ts';
+import { buildQueue, type LeaseRecord, type QueueDeps, readCurrentRepo, renderQueue } from './work-queue.ts';
 import {
   defaultBrief,
   listRuns,
@@ -114,6 +114,12 @@ export interface WorkDeps {
     write: (rec: LeaseRecord) => void;
     remove: (repo: string, issue: number) => void;
   };
+  /**
+   * 识仓用的环境和检出根。入口传 process.env 和仓根，claim / renew / queue 才用同一份规则
+   * （显式 GH_REPO、GITHUB_REPOSITORY、github origin）。不传 env 就用进程环境；没有 root 时只认 GH_REPO。
+   */
+  env?: NodeJS.ProcessEnv;
+  root?: string;
   /** pnpm work run / runs 要的（work-run.ts）：容量、起脱离的进程、git、环境。不给就报没接上 */
   run?: {
     /** agents/hooks/capacity.mjs 的读数和判法：enough 是 null 表示没查成 */
@@ -159,7 +165,14 @@ async function queueCmd(rest: readonly string[], deps: WorkDeps): Promise<number
   const extra = rest.filter((a) => a !== '--json');
   if (extra.length > 0) throw new Error(`认不出的参数：${extra.join(' ')}。${WORK_USAGE}`);
   if (!deps.queue) throw new Error('pnpm work queue 没接上读 git、心跳的那几样（入口的 bug）');
-  const report = await buildQueue({ gh: deps.gh, ...deps.queue });
+  const env = deps.queue.env ?? deps.env;
+  const root = deps.queue.root ?? deps.root;
+  const report = await buildQueue({
+    gh: deps.gh,
+    ...deps.queue,
+    ...(env !== undefined ? { env } : {}),
+    ...(root !== undefined ? { root } : {}),
+  });
   if (json) deps.out(JSON.stringify(report));
   else for (const line of renderQueue(report)) deps.out(line);
   return 0;
@@ -210,13 +223,12 @@ async function ghJson(gh: Gh, args: string[], what: string): Promise<unknown> {
   }
 }
 
-/** 这个仓的 owner/name（gh 认的当前仓）。 */
-async function repoSlug(gh: Gh): Promise<string> {
-  const v = (await ghJson(gh, ['repo', 'view', '--json', 'nameWithOwner'], '当前仓')) as {
-    nameWithOwner?: unknown;
-  };
-  if (typeof v.nameWithOwner !== 'string') throw new Error('当前仓认不出（gh repo view 没给 nameWithOwner）');
-  return v.nameWithOwner;
+/** 这个仓的 owner/name。queue、claim、renew、run 都走 readCurrentRepo，不另写一套。 */
+function currentRepo(deps: WorkDeps): Promise<string> {
+  return readCurrentRepo(deps.gh, {
+    ...(deps.env !== undefined ? { env: deps.env } : {}),
+    ...(deps.root !== undefined ? { root: deps.root } : {}),
+  });
 }
 
 /** 这个仓开着的 PR（号、正文、分支）。翻不全就抛：不当成没有。 */
@@ -387,7 +399,7 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
   const a = parseRun(rest);
   const r = deps.run;
   if (!r) throw new Error('pnpm work run 没接上容量、起进程的那几样（入口的 bug）');
-  const repo = await repoSlug(deps.gh);
+  const repo = await currentRepo(deps);
   const dir = runDir(r.runsRoot, repo, a.issue);
   const files = runFiles(dir);
   const phase = runPhase(dir, r.now());
@@ -477,7 +489,7 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
       return 0;
     }
     const p = parse(argv);
-    const repo = await repoSlug(deps.gh);
+    const repo = await currentRepo(deps);
     if (p.action === 'claim') {
       const issue = (await ghJson(
         deps.gh,
