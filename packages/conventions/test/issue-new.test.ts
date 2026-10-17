@@ -10,6 +10,7 @@ import {
   issueBodyTooLong,
   issueNew,
   prBodyAcceptanceItems,
+  USAGE,
 } from '../src/issue-new.ts';
 import { parseOrder } from '../src/plan-view.ts';
 import { order } from './fake-github.ts';
@@ -120,9 +121,27 @@ function setup(
   return { root, calls, run };
 }
 
-const base = ['--kind', '需求', '--milestone', 'P1', '--title', '登录页加验证码', '--body-file', 'body.md'];
+const base = [
+  '--kind',
+  '需求',
+  '--milestone',
+  'P1',
+  '--title',
+  '登录页加验证码',
+  '--body-file',
+  'body.md',
+  '--domain',
+  'engine',
+  '--nature',
+  'bug',
+];
 
 describe('开单脚本：缺类别或里程碑就不开', () => {
+  it('用法把查询轴接在原来的句子上，后半段还在', () => {
+    expect(USAGE).toContain('--domain engine|api|mirasim --nature bug|perf|process');
+    expect(USAGE).toContain('--order-after 插在那张后面');
+  });
+
   it.each([
     [
       '缺 --kind',
@@ -141,6 +160,52 @@ describe('开单脚本：缺类别或里程碑就不开', () => {
     ],
     ['缺 --title', ['--kind', '需求', '--milestone', 'P1', '--body-file', 'body.md'], '缺 --title'],
     ['缺 --body-file', ['--kind', '需求', '--milestone', 'P1', '--title', 't'], '缺 --body-file'],
+    [
+      '缺 --domain',
+      ['--kind', '需求', '--nature', 'bug', '--milestone', 'P1', '--title', 't', '--body-file', 'body.md'],
+      '缺 --domain：从 engine、api、mirasim 里挑一个。',
+    ],
+    [
+      '缺 --nature',
+      ['--kind', '需求', '--domain', 'engine', '--milestone', 'P1', '--title', 't', '--body-file', 'body.md'],
+      '缺 --nature：从 bug、perf、process 里挑一个。',
+    ],
+    [
+      '--domain 不是三个之一',
+      [
+        '--kind',
+        '需求',
+        '--domain',
+        'web',
+        '--nature',
+        'bug',
+        '--milestone',
+        'P1',
+        '--title',
+        't',
+        '--body-file',
+        'body.md',
+      ],
+      '--domain 只能是 engine、api、mirasim，没有「web」。',
+    ],
+    [
+      '--nature 不是三个之一',
+      [
+        '--kind',
+        '需求',
+        '--domain',
+        'api',
+        '--nature',
+        'feat',
+        '--milestone',
+        'P1',
+        '--title',
+        't',
+        '--body-file',
+        'body.md',
+      ],
+      '--nature 只能是 bug、perf、process，没有「feat」。',
+    ],
     ['不认得的参数', [...base, '--label', 'x'], '参数不对'],
     ['--specs 没有了（需求只在单子正文里，#654）', [...base, '--specs', 'x'], '参数不对'],
   ])('%s', async (_name, argv, message) => {
@@ -151,9 +216,9 @@ describe('开单脚本：缺类别或里程碑就不开', () => {
 
   it('正文文件读不到：不开', async () => {
     const { calls, run } = setup();
-    await expect(run(...base.slice(0, -1), 'nope.md')).rejects.toThrow(
-      /--body-file 读不到：.*nope\.md.*单没开/,
-    );
+    const argv = [...base];
+    argv[argv.indexOf('--body-file') + 1] = 'nope.md';
+    await expect(run(...argv)).rejects.toThrow(/--body-file 读不到：.*nope\.md.*单没开/);
     expect(calls).toEqual([]);
   });
 
@@ -319,6 +384,10 @@ describe('开单脚本：一次带上标签和里程碑', () => {
         join(root, 'body.md'),
         '--label',
         '需求',
+        '--label',
+        '域:engine',
+        '--label',
+        '性质:bug',
         '--milestone',
         'P1 核心闭环',
       ],
@@ -396,6 +465,10 @@ describe('开单脚本：--milestone 未排期，不挂里程碑', () => {
         join(root, 'body.md'),
         '--label',
         '需求',
+        '--label',
+        '域:engine',
+        '--label',
+        '性质:bug',
       ],
     ]);
   });
@@ -414,6 +487,10 @@ describe('开单脚本：--mother 多贴「母单」标签', () => {
       join(root, 'body.md'),
       '--label',
       '需求',
+      '--label',
+      '域:engine',
+      '--label',
+      '性质:bug',
       '--label',
       '母单',
       '--milestone',
@@ -443,6 +520,10 @@ describe('开单脚本：--local 多贴「本机做」（#299 止血：帅位留
         join(root, 'body.md'),
         '--label',
         '需求',
+        '--label',
+        '域:engine',
+        '--label',
+        '性质:bug',
         '--label',
         '本机做',
         '--milestone',
@@ -504,6 +585,10 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
         join(root, 'body.md'),
         '--label',
         '需求',
+        '--label',
+        '域:engine',
+        '--label',
+        '性质:bug',
       ],
       ['api', 'repos/{owner}/{repo}/issues/36'],
       ['api', '-X', 'POST', 'repos/{owner}/{repo}/issues/192/sub_issues', '-F', 'sub_issue_id=9036'],
@@ -526,7 +611,16 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
     const { calls, run } = setup({ milestones: V1, route: routes() });
     await expect(run(...sub, '--local')).resolves.toMatchObject({ number: 36, parent: 192, local: true });
     const create = calls.find((c) => c[0] === 'issue' && c[1] === 'create');
-    expect(create?.slice(-4)).toEqual(['--label', '需求', '--label', '本机做']);
+    expect(create?.slice(-8)).toEqual([
+      '--label',
+      '需求',
+      '--label',
+      '域:engine',
+      '--label',
+      '性质:bug',
+      '--label',
+      '本机做',
+    ]);
     expect(calls.at(-1)).toEqual(['issue', 'edit', '36', '--milestone', 'v1 Fusion 接活']);
   });
 

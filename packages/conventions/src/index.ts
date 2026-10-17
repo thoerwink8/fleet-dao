@@ -112,6 +112,10 @@ export {
 } from './issue-similar.ts';
 export {
   currentVersion,
+  DOMAIN_LABELS,
+  DOMAIN_VALUES,
+  type DomainValue,
+  domainLabel,
   ENGINE_LABEL,
   FROZEN_LABEL,
   FULL_FLOW_LABEL,
@@ -119,7 +123,9 @@ export {
   GROOMED_LABEL,
   HUMAN_DECISION_LABEL,
   IDLE_LABEL,
+  isDomainValue,
   isKindLabel,
+  isNatureValue,
   KIND_LABELS,
   type KindLabel,
   LOCAL_LABEL,
@@ -127,6 +133,12 @@ export {
   MOTHER_LABEL,
   milestonePhase,
   milestoneVersion,
+  NATURE_LABELS,
+  NATURE_VALUES,
+  type NatureValue,
+  natureLabel,
+  queryAxisLabels,
+  requireAxis,
   THREE_FLOW_LABEL,
 } from './labels.ts';
 export { type MdDoc, parseMd } from './markdown.ts';

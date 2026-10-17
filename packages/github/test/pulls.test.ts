@@ -44,6 +44,27 @@ describe('开 PR', () => {
       '**做了什么**：\n- 加了验证码输入框\n**怎么验证的**：\n- pnpm check 全绿\n**还欠什么**：无\n**需求**：#12 · 子任务 A 登录表单',
     );
     expect(pr?.base.ref).toBe('main');
+    expect(pr?.labels).toEqual([]);
+    expect(fake.calls('POST', /\/issues\/\d+\/labels$/)).toHaveLength(0);
+  });
+
+  it('给了查询轴：开完追加到这张 PR 上，重放再打一次也只加不摘', async () => {
+    const { gh, fake } = setup();
+    fake.refs.set('task/axis', A);
+    const input = {
+      repo,
+      branch: 'task/axis',
+      head: A,
+      title: 't',
+      body: 'b',
+      labels: ['域:api', '性质:perf'],
+    };
+    const res = await gh.openPr(input);
+    expect(fake.pulls.get(res.number)?.labels).toEqual(['域:api', '性质:perf']);
+    expect(fake.calls('POST', /\/issues\/\d+\/labels$/).map((r) => r.as)).toEqual(['agent']);
+    await gh.openPr(input);
+    expect(fake.pulls.get(res.number)?.labels).toEqual(['域:api', '性质:perf']);
+    expect(fake.calls('POST', /\/issues\/\d+\/labels$/)).toHaveLength(2);
   });
 
   it('B1：回执丢了，重试按分支找回那一张，不开第二张', async () => {

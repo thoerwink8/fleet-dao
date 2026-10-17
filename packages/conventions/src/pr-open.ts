@@ -21,6 +21,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { issueOfBranch } from './issue-branch.ts';
+import { domainLabel, natureLabel, requireAxis } from './labels.ts';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
 import { founderQuote, issueColumnRefs, withIssueColumn } from './pr-columns.ts';
@@ -38,8 +39,9 @@ export function parseCreatedPr(stdout: string): { pr: number; url: string } {
   return { pr: Number(m), url };
 }
 
-export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> [--body-file <正文文件> | 生成正文的参数] [--draft] [--base <分支>] [--no-automerge]
+export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> --domain <engine|api|mirasim> --nature <bug|perf|process> [--body-file <正文文件> | 生成正文的参数] [--draft] [--base <分支>] [--no-automerge]
   在要开 PR 的分支上跑（命令会先 git push 当前分支，已推过则无事发生）。开 PR，没碰改标准路径就当场挂自动合并（squash）。
+  --domain、--nature 是查询轴，每轴恰好一个，开的时候贴上（标签名「域:…」「性质:…」，只用来筛）。缺了不开。
   正文有两种来源：
   ① --body-file <正文文件>：自己写（只有「做了什么」「需求」两栏，见 .github/pull_request_template.md）
   ② 不给 --body-file：命令自己生成。「做了什么」取这条分支相对 origin/<base> 的提交说明（多条列成短列表）；「需求」栏写：
@@ -103,6 +105,8 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
         'founder-approved': { type: 'boolean' },
         'no-automerge': { type: 'boolean' },
         'no-issue': { type: 'string' },
+        domain: { type: 'string' },
+        nature: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
       },
       strict: true,
@@ -120,6 +124,14 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
   const bodyArg = typeof values['body-file'] === 'string' ? values['body-file'] : '';
   if (!title || !bodyArg) {
     err(`要带 --title 和 --body-file（不进交互）。\n${PR_OPEN_USAGE}`);
+    return 1;
+  }
+  const axis = requireAxis(
+    typeof values.domain === 'string' ? values.domain : undefined,
+    typeof values.nature === 'string' ? values.nature : undefined,
+  );
+  if ('error' in axis) {
+    err(`${axis.error}\n${PR_OPEN_USAGE}`);
     return 1;
   }
   const bodyFile = isAbsolute(bodyArg) ? bodyArg : resolve(deps.cwd, bodyArg);
@@ -210,6 +222,7 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
       issueNumbers,
       closes,
       autoIssue,
+      labels: [domainLabel(axis.domain), natureLabel(axis.nature)],
     });
   } finally {
     if (tmpBody) rmSync(join(tmpBody, '..'), { recursive: true, force: true });
@@ -264,6 +277,8 @@ interface OpenPlan {
   closes: number[];
   /** 分支对应的单、需求栏是自动补的：这张单必须还开着（手写挂的不查，老规矩）。 */
   autoIssue: number | undefined;
+  /** 查询轴标签（域、性质），和建 PR 同一次带上。 */
+  labels: readonly string[];
 }
 
 /** 开着的 PR 里有没有别的在做 closes 里的单。有回不开的原因和退出码；没有回 null。 */
@@ -375,6 +390,7 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
     title,
     '--body-file',
     sendBody,
+    ...plan.labels.flatMap((l) => ['--label', l]),
     ...(plan.draft ? ['--draft'] : []),
     ...(plan.base !== undefined ? ['--base', plan.base] : []),
   ]);
