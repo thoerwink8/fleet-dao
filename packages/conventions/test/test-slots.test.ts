@@ -19,6 +19,7 @@ import {
   type Holder,
   readSlotConfig,
   runInSlot,
+  SLOT_ACQUIRED_LINE,
   type SlotConfig,
   type SlotDeps,
   slotPolicy,
@@ -260,6 +261,19 @@ describe('acquireSlot / withTestSlot', () => {
     expect(waits[2]).toMatch(/已等 20 秒/);
     expect(waits).toHaveLength(3);
     expect(f.logs.some((l) => l.includes('拿到本机测试槽，共等了'))).toBe(true);
+  });
+
+  it('没排队也打「拿到本机测试槽」那一行（引擎自测靠它分开等槽和真跑）；没拿到不打', () => {
+    const dir = tmp();
+    const f = fakeDeps();
+    const h = acquireSlot(cfgIn(dir), f.deps);
+    expect(f.logs).toEqual([`${SLOT_ACQUIRED_LINE}，共等了 0 秒`]);
+    h.release();
+
+    putHolder(dir, 0, { pid: 31337 });
+    const busy = fakeDeps();
+    expect(() => acquireSlot(cfgIn(dir, { slots: 1, maxWaitMs: 2000 }), busy.deps)).toThrow(TestSlotError);
+    expect(busy.logs.some((l) => l.startsWith(SLOT_ACQUIRED_LINE))).toBe(false);
   });
 
   it('等过上限还满：抛 TestSlotError，说明占着的是谁、没跑测试', () => {

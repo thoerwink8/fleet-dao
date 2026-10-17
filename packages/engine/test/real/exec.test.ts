@@ -84,6 +84,26 @@ describe('以会话用户的身份跑命令', { timeout: 30_000 }, () => {
     expect(() => exec({ ...base, user: 'root' as never, cwd: '/x', scopeId: 'ok' })).toThrow('会话用户');
   });
 
+  it('onOutput：stdout、stderr 每来一段就报一次（自测靠它认阶段、记最后输出时刻）；里面抛了也不搅命令', async () => {
+    const run = localExec();
+    const chunks: string[] = [];
+    const r = await run({
+      user: 'fleet-agent-carpool',
+      cwd: dir,
+      argv: [process.execPath, '-e', "process.stdout.write('甲\\n'); process.stderr.write('乙\\n')"],
+      timeoutMs: 5000,
+      scopeId: 'o',
+      onOutput: (chunk) => {
+        chunks.push(chunk.toString('utf8'));
+        throw new Error('看输出的坏了');
+      },
+    });
+    expect(r.code).toBe(0);
+    expect(r.stdout.toString('utf8')).toBe('甲\n');
+    expect(chunks.join('')).toContain('甲');
+    expect(chunks.join('')).toContain('乙');
+  });
+
   it('起不来、超时：结果讲清楚是哪一种', async () => {
     const missing = scopeExec({ helper: join(dir, 'nope'), sudo: [join(dir, 'no-such-binary')] });
     const r = await missing({

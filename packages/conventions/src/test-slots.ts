@@ -349,7 +349,13 @@ function describeHolders(holders: readonly Holder[], now: number): string {
     .join('；');
 }
 
-/** 拿一个槽，满了就排队：每 reportMs 打一行；等过 maxWaitMs 抛 TestSlotError。 */
+/**
+ * 拿到槽时一定打的那一行的开头（没等也打，「共等了 0 秒」）。引擎自测认这一行分开「等槽」和「真跑测试」
+ * （packages/engine/src/real/self-check.ts 的 SLOT_ACQUIRED）：改字要两边一起改。
+ */
+export const SLOT_ACQUIRED_LINE = '拿到本机测试槽';
+
+/** 拿一个槽，满了就排队：每 reportMs 打一行；等过 maxWaitMs 抛 TestSlotError。拿到了打一行 SLOT_ACQUIRED_LINE。 */
 export function acquireSlot(cfg: SlotConfig, deps: SlotDeps): SlotHandle {
   const start = deps.now();
   let lastReport = Number.NEGATIVE_INFINITY;
@@ -357,7 +363,7 @@ export function acquireSlot(cfg: SlotConfig, deps: SlotDeps): SlotHandle {
   for (;;) {
     const r = tryAcquire(cfg, deps);
     if (r.kind === 'got') {
-      if (!first) deps.log(`拿到本机测试槽，共等了 ${Math.round((deps.now() - start) / 1000)} 秒`);
+      deps.log(`${SLOT_ACQUIRED_LINE}，共等了 ${Math.round((deps.now() - start) / 1000)} 秒`);
       return r.handle;
     }
     const now = deps.now();

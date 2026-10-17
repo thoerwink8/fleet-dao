@@ -94,7 +94,14 @@ export function commitNudgeFeedback(commits: number, leftover: readonly string[]
   return `${COMMIT_NUDGE_LINE}${none || left ? `\n${none}${left}` : ''}`;
 }
 
-/** 自测的精炼输出合成一段（喂回会话、交给冷验收都用这一份）：每条命令一节，限 SELF_CHECK_DIGEST_MAX 字。 */
+/** 自测里 tsc 那一条（real/self-check.ts 跑的是 node_modules/.bin/tsc -b）。别的都算测试。 */
+const TSC_STEP = /(^|\/)tsc\s/;
+
+/**
+ * 自测的精炼输出合成一段（喂回会话、交给冷验收都用这一份）：每条命令一节，限 SELF_CHECK_DIGEST_MAX 字。
+ * 测试一条都没出结果（没跑、没跑完）时开头先写一句：类型检查过了不等于测试过了，测试以完整 CI 为准。
+ * 已知没过的照样列在下面，不因为这句被盖掉。
+ */
 export function selfCheckText(result: SelfCheckResult): string {
   const parts = result.steps.map((s) => {
     const mark =
@@ -102,11 +109,18 @@ export function selfCheckText(result: SelfCheckResult): string {
         ? '过了'
         : s.outcome === 'fail'
           ? s.exitCode === null
-            ? '没过（自测超时）'
+            ? '没过（没跑完）'
             : `没过（退出码 ${s.exitCode}）`
-          : '没跑';
+          : '没跑或没跑完';
     return `$ ${s.command}：${mark}\n${s.digest}`;
   });
+  const tests = result.steps.filter((s) => !TSC_STEP.test(s.command));
+  const tsc = result.steps.find((s) => TSC_STEP.test(s.command));
+  if (tests.length > 0 && tests.every((s) => s.outcome === 'skipped')) {
+    const typed =
+      tsc?.outcome === 'pass' ? '类型检查过了；' : tsc?.outcome === 'fail' ? '类型检查没过；' : '';
+    parts.unshift(`${typed}测试没有结果（没跑或没跑完），不等于测试过了，以完整 CI 为准。`);
+  }
   if (result.state === 'skipped' && parts.length === 0) parts.push(`没跑成：${result.reason}`);
   const text = parts.join('\n\n');
   return text.length > SELF_CHECK_DIGEST_MAX ? `${text.slice(0, SELF_CHECK_DIGEST_MAX - 1)}…` : text;

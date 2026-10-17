@@ -7,24 +7,31 @@
 // - 以树主人（会话用户）的身份跑（经 exec，和读交付同一条路）：引擎不以自己的身份在会话的树里跑东西（design 十四）。
 // - 不带 FLEET_RUN_ID：pnpm test:changed 见到它会全跑（会话里那套），这里只要跑改到的。退出 2（没算成要跑什么、
 //   排不上本机测试槽）不是测试没过，记 skipped。退出 3（要全跑）不再只跑 tsc：在整机同一时刻只跑一个的锁下
-//   再跑 `pnpm test:changed --affected`（受影响的包），锁被占就排队、不跳过。这一段和前面共用测试时限。
-// - 同一台机器同时只跑 SELF_CHECK_SLOTS 个自测（默认 2）。名额用锁目录里的 slot-0、slot-1 计数，不另引依赖。
-//   普通测试命令和 tsc 都先拿到名额再跑。名额满了排队，排队不占测试时限（SELF_CHECK_TEST_MS 从拿到名额起算），
-//   排队时每 SELF_CHECK_HEARTBEAT_MS 心跳。要全跑改跑受影响包的那把锁还在，那一段仍和前面的测试合用时限。
-// - 有时限（测试 SELF_CHECK_TEST_MS、tsc SELF_CHECK_TSC_MS）：普通那次超了记 skipped，不算红——慢不等于错，交给 CI。
-//   要全跑之后改跑受影响包的那次超了记「自测超时」，算没过。
+//   再跑 `pnpm test:changed --affected`（受影响的包），锁被占就排队、不跳过。
+// - 同机测试容量各有一个主人，不叠两层：
+//   · vitest 的容量归 test:changed 自己的本机测试槽（packages/conventions/src/test-slots.ts）：会话里、人手跑的
+//     test:changed 和引擎自测在同一组槽上排队。测试命令是 test:changed 时引擎不另占名额，也不设「已持槽」的环境变量冒充拿着槽。
+//   · 自测名额（锁目录里的 slot-0、slot-1，SELF_CHECK_SLOTS 个）只管 tsc 和不走 test:changed 的测试命令（go test 这类）。
+// - 排队和真执行分开计时（数字在 self-check-budget.ts）：所有排队（本机测试槽、整机锁、自测名额）合起来 SELF_CHECK_QUEUE_MS；
+//   测试真执行 SELF_CHECK_TEST_MS 从 test:changed 打出「拿到本机测试槽」（老的树没排队时不打，认 vitest 开跑的 RUN 横幅）起算，
+//   别的命令从拿到名额起算；tsc SELF_CHECK_TSC_MS。排队超了、执行超了都杀掉命令，各记各的原因。
+// - 心跳带阶段：probe（看目录）、queue（等什么）、test、tsc、done，阶段起点和最后一次有输出的时刻；不编完成了几条。
+// - 普通那次超时记 skipped，不算红——慢不等于错，交给 CI；但超时前输出里已经有没过的（FAIL、×）记没过，不掩盖。
+//   超时、被叫停、没正常退出都把已有输出精炼、脱敏后留在摘要里，写明在哪个阶段、跑了多久。
 // - 精炼输出：挑出像失败的行（FAIL、error、×、AssertionError、TSxxxx）再加末尾一段，限 SELF_CHECK_DIGEST_MAX 字。
 
 import { randomBytes } from 'node:crypto';
 import { mkdir, readdir, readFile, rename, rmdir, stat, unlink, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { SessionUser } from '@fleet-dao/adapters';
+import { redact, type SessionUser } from '@fleet-dao/adapters';
 import type { RepoWithProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type PortContext, PortError } from '../ports.ts';
 import {
+  SELF_CHECK_CLEANUP_MS,
   SELF_CHECK_PROBE_MS,
+  SELF_CHECK_QUEUE_MS,
   SELF_CHECK_SLOTS,
   SELF_CHECK_TEST_MS,
   SELF_CHECK_TSC_MS,
@@ -39,14 +46,15 @@ import type { UserCommandResult, UserExec } from './exec.ts';
 
 export {
   SELF_CHECK_ACTIVITY_MS,
+  SELF_CHECK_CLEANUP_MS,
   SELF_CHECK_PROBE_MS,
-  SELF_CHECK_QUEUE_MARGIN_MS,
+  SELF_CHECK_QUEUE_MS,
   SELF_CHECK_SLOTS,
   SELF_CHECK_TEST_MS,
   SELF_CHECK_TSC_MS,
 } from '../self-check-budget.ts';
 
-/** 多久报一次心跳（活动的心跳超时是 limits.heartbeatSeconds，默认 120 秒）。排队等名额时也按这个间隔打。 */
+/** 多久报一次心跳（活动的心跳超时是 limits.heartbeatSeconds，默认 120 秒）。排队等名额时也按这个间隔打；换阶段时当下补一下。 */
 export const SELF_CHECK_HEARTBEAT_MS = 30_000;
 /**
  * 会话用户的 PATH：node、pnpm 在 /usr/bin 或 /usr/local/bin（法国 pnpm 在 /usr/local/bin）。
@@ -61,16 +69,24 @@ const SH = '/bin/sh';
 const TSC = 'node_modules/.bin/tsc';
 /** 锁目录放哪（几个引擎进程共用）。测试和特殊机器用。 */
 const ENV_LOCK_DIR = 'FLEET_SELF_CHECK_LOCK_DIR';
-/** 受影响包那把锁最多算数多久：测试时限再加一分钟，超时当持有者已死。 */
-const LOCK_STALE_MS = SELF_CHECK_TEST_MS + 60_000;
-/** 一个名额最多算数多久：测试加 tsc 再加一分钟。活进程占着这么久才当它已死；死进程当下就拆。 */
-const SLOT_STALE_MS = SELF_CHECK_TEST_MS + SELF_CHECK_TSC_MS + 60_000;
+/** 受影响包那把锁最多算数多久：持有期间要等本机测试槽、再跑测试、收尾，再加一分钟，超时当持有者已死。 */
+const LOCK_STALE_MS = SELF_CHECK_QUEUE_MS + SELF_CHECK_TEST_MS + SELF_CHECK_CLEANUP_MS + 60_000;
+/** 一个名额最多算数多久：测试加 tsc 加收尾再加一分钟。活进程占着这么久才当它已死；死进程当下就拆。 */
+const SLOT_STALE_MS = SELF_CHECK_TEST_MS + SELF_CHECK_TSC_MS + SELF_CHECK_CLEANUP_MS + 60_000;
 const LOCK_POLL_MS = 250;
 
 /** test:changed 的退出码 2：没算成要跑什么，不是测试没过（packages/conventions/src/bin/test-changed.ts）。 */
 const TEST_CHANGED_NOT_RUN: Readonly<Record<number, string>> = {
   2: '没算成要跑哪些测试（读不到主线、排不上本机测试槽……）',
 };
+
+/**
+ * test:changed 真开跑测试的标记：拿到本机测试槽时一定打的那一行（packages/conventions/src/test-slots.ts 的
+ * SLOT_ACQUIRED_LINE，改字两边一起改），或 vitest 开跑的 RUN 横幅（老的树没排队时不打那一行）。见到之前都算在排队。
+ */
+const SLOT_ACQUIRED = /拿到本机测试槽|^\s*RUN\s+v\d/m;
+/** 认标记时只看最近这么多字（标记可能被切在两段输出之间）。 */
+const MARKER_WINDOW = 2_000;
 
 /** 整机同一时刻只跑一个「要全跑时改跑受影响包」。acquire 在 signal 中止时抛错。 */
 export interface SelfCheckFullLock {
@@ -80,14 +96,15 @@ export interface SelfCheckFullLock {
 export interface SelfCheckDeps {
   trees: { ownerOf(dir: string): Promise<SessionUser | null> };
   exec: UserExec;
-  /** 测试里调短。 */
+  /** 测试里调短。testMs 是测试真执行的上限，queueMs 是一次自测所有排队合起来的上限。 */
   testMs?: number;
   tscMs?: number;
+  queueMs?: number;
   /** 不给就用整机文件锁（排队）。测试换成可控的。 */
   fullLock?: SelfCheckFullLock;
   /**
    * 同时跑的名额（默认整机 SELF_CHECK_SLOTS 个）。测试换成一直有名额的，或换到临时目录。
-   * 普通测试命令和 tsc 先拿到名额再跑；等名额不占测试时限。
+   * tsc 和不走 test:changed 的测试命令先拿到名额再跑（test:changed 在它自己的本机测试槽上排队）；等名额吃排队预算，不吃测试预算。
    */
   slots?: SelfCheckFullLock;
   log?: (message: string, fields?: Record<string, unknown>) => void;
@@ -448,9 +465,9 @@ const TAIL_LINES = 40;
  * 控制字符（颜色码）去掉。纯函数，测试直接调。
  */
 export function digestOutput(raw: string, max = SELF_CHECK_DIGEST_MAX): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: 去掉终端颜色码
-  const clean = raw.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '');
-  const lines = clean.split('\n').map((l) => l.trimEnd());
+  const lines = cleanText(raw)
+    .split('\n')
+    .map((l) => l.trimEnd());
   const tail = lines.filter((l) => l.trim() !== '').slice(-TAIL_LINES);
   const tailSet = new Set(tail);
   const picked: string[] = [];
@@ -478,23 +495,105 @@ function notRun(command: string, why: string): SelfCheckStep {
   return { command, outcome: 'skipped', exitCode: null, digest: why };
 }
 
-/** 要全跑之后那次没在时限里跑完：算没过，不当成跳过。 */
-function timeoutStep(command: string): SelfCheckStep {
-  return { command, outcome: 'fail', exitCode: null, digest: '自测超时' };
+/** 要全跑之后那次没在时限里跑完：算没过，不当成跳过。detail 写在哪一段超的、已有的输出。 */
+function timeoutStep(command: string, detail?: string): SelfCheckStep {
+  return { command, outcome: 'fail', exitCode: null, digest: detail ? `自测超时：${detail}` : '自测超时' };
 }
 
-/** 一条命令跑完怎么记：超时、被叫停、起不来记 skipped，不算红。要全跑之后那次的超时不走这里。 */
-function stepOf(
+/** 没跑完时留下的证据最多多少字（再加阶段、时刻那一行，不超过 SELF_CHECK_DIGEST_MAX）。 */
+const EVIDENCE_MAX = 2_500;
+/** 输出里已经有没过的：vitest 的 FAIL、×，go test 的 --- FAIL，AssertionError，「N failed」。 */
+const KNOWN_FAILURE = /^\s*(?:---\s+)?FAIL\b|^\s*[×✗]\s|AssertionError|\b\d+ failed\b/m;
+
+function cleanText(raw: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: 去掉终端颜色码
+  return raw.replace(/\u001b\[[0-9;]*[A-Za-z]/g, '').replace(/\r/g, '');
+}
+
+/** 没跑完时的已有输出：精炼、逐行脱敏（令牌、邮箱、IP、长串），限 EVIDENCE_MAX 字。没有输出就照实说。 */
+function evidence(output: string): string {
+  if (cleanText(output).trim() === '') return '没有任何输出。';
+  const lines = digestOutput(output, EVIDENCE_MAX)
+    .split('\n')
+    .map((line) => (line.trim() === '' ? '' : redact(line, 400)));
+  return `已有输出（精炼、脱敏）：\n${lines.join('\n')}`;
+}
+
+function iso(ms: number): string {
+  return new Date(ms).toISOString();
+}
+
+function duration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  const m = Math.floor(s / 60);
+  return m > 0 ? `${m} 分 ${s % 60} 秒` : `${s} 秒`;
+}
+
+/** 一条命令跑下来的样子：结果，加上排队、执行各从哪一刻起，最后一次有输出的时刻，是被哪一段的上限停掉的。 */
+interface Ran {
+  r: UserCommandResult;
+  output: string;
+  spawnedAt: number;
+  /** 真开跑的时刻；一直在排队（或没认出标记）是 null。 */
+  execStartedAt: number | null;
+  /** 跑完（或被停）的时刻。 */
+  endedAt: number;
+  lastOutputAt: number | null;
+  /** 被哪一段的上限停掉：queue = 排队超了，exec = 执行超了。 */
+  over?: 'queue' | 'exec';
+  /** 活动被叫停。 */
+  cancelled: boolean;
+  /** 等的是什么（在命令里排队时）。 */
+  waitingFor?: string;
+}
+
+/** 阶段、时刻那一行：每个时刻都是 ISO（UTC），能和日志对。 */
+function timingLine(ran: Ran): string {
+  const parts: string[] = [];
+  if (ran.waitingFor !== undefined) {
+    const queuedUntil = ran.execStartedAt ?? ran.endedAt;
+    parts.push(`等${ran.waitingFor} ${duration(queuedUntil - ran.spawnedAt)}（${iso(ran.spawnedAt)} 起）`);
+  }
+  parts.push(
+    ran.execStartedAt === null
+      ? '没开跑'
+      : `执行 ${duration(ran.endedAt - ran.execStartedAt)}（${iso(ran.execStartedAt)} 起）`,
+  );
+  parts.push(`最后一次输出 ${ran.lastOutputAt === null ? '没有' : iso(ran.lastOutputAt)}`);
+  return `${parts.join('；')}。`;
+}
+
+/**
+ * 一条命令跑完怎么记。没跑完的（超时、被叫停、没正常退出）一律带阶段、时刻和已有的输出：
+ * - 超时前输出里已经有没过的：记没过（exitCode null），不当成跳过。
+ * - strict（要全跑之后那次）：超时（排队或执行）记自测超时、没过。
+ * - 其余没跑完的、起不来的记 skipped，不算红——慢不等于错，交给 CI。
+ */
+function stepOfRun(
   command: string,
-  r: UserCommandResult,
-  timeoutMs: number,
-  notRunCodes: Readonly<Record<number, string>> = {},
+  ran: Ran,
+  limitMs: number,
+  notRunCodes: Readonly<Record<number, string>>,
+  strict: boolean,
 ): SelfCheckStep {
-  const output = `${r.stdout.toString('utf8')}${r.stderr ? `\n${r.stderr}` : ''}`;
+  const { r, output } = ran;
   if (r.spawnError) return notRun(command, `起不来：${r.spawnError}`);
-  if (r.timedOut) return notRun(command, `超过 ${Math.round(timeoutMs / 60_000)} 分钟没跑完，交给 CI`);
-  if (r.aborted) return notRun(command, '被叫停了');
-  if (r.code === null) return notRun(command, `没正常退出：${digestOutput(output, 500)}`);
+  const unfinished = (why: string) => `${why}\n${timingLine(ran)}\n${evidence(output)}`;
+  if (ran.cancelled) return notRun(command, unfinished('被叫停了，没跑完'));
+  // exec 自己的时限只是兜底，按段的计时器先到；兜底到了按执行超时记
+  const over = ran.over ?? (r.timedOut ? 'exec' : undefined);
+  if (over !== undefined) {
+    const why =
+      over === 'queue'
+        ? `排队超过剩下的排队预算（一次自测合计 ${Math.round(SELF_CHECK_QUEUE_MS / 60_000)} 分钟），没开跑`
+        : `执行超过 ${duration(limitMs)}，没跑完`;
+    if (KNOWN_FAILURE.test(cleanText(output))) {
+      return { command, outcome: 'fail', exitCode: null, digest: unfinished(`${why}；超时前已经有没过的`) };
+    }
+    if (strict) return timeoutStep(command, unfinished(why));
+    return notRun(command, unfinished(`${why}，交给 CI`));
+  }
+  if (r.aborted || r.code === null) return notRun(command, unfinished('没正常退出'));
   const why = notRunCodes[r.code];
   if (why !== undefined) return { command, outcome: 'skipped', exitCode: r.code, digest: why };
   return {
@@ -515,9 +614,19 @@ function affectedCommand(testCommand: string): string {
   return `${testCommand} --affected`;
 }
 
+type Phase = 'probe' | 'queue' | 'test' | 'tsc' | 'done';
+
+/** 在名额、锁上排队的结局。 */
+type Waited =
+  | { release: () => void | Promise<void> }
+  | { why: 'aborted' }
+  | { why: 'queue' }
+  | { why: 'error'; error: unknown };
+
 export function createSelfCheck(deps: SelfCheckDeps) {
   const testMs = deps.testMs ?? SELF_CHECK_TEST_MS;
   const tscMs = deps.tscMs ?? SELF_CHECK_TSC_MS;
+  const queueMs = deps.queueMs ?? SELF_CHECK_QUEUE_MS;
   const fullLock = deps.fullLock ?? machineAffectedLock();
   const slots = deps.slots ?? machineSelfCheckSlots();
 
@@ -525,7 +634,39 @@ export function createSelfCheck(deps: SelfCheckDeps) {
     if (input?.schemaVersion !== 1 || !input.taskId || !input.worktreePath || !input.repo) {
       throw new PortError('INVALID_INPUT', '自测：要有 taskId、仓和工作树', { retryable: false });
     }
-    const beat = setInterval(() => ctx.heartbeat({ selfCheck: input.taskId }), SELF_CHECK_HEARTBEAT_MS);
+    // 现在在哪一段、这一段从哪一刻起、最后一次有输出是什么时候：心跳带上，看得出在排队、在跑还是失联
+    const progress: {
+      phase: Phase;
+      phaseStartedAt: number;
+      lastOutputAt: number | null;
+      waitingFor?: string;
+    } = { phase: 'probe', phaseStartedAt: Date.now(), lastOutputAt: null };
+    const beatNow = () => {
+      try {
+        ctx.heartbeat({
+          selfCheck: input.taskId,
+          phase: progress.phase,
+          phaseStartedAt: iso(progress.phaseStartedAt),
+          lastOutputAt: progress.lastOutputAt === null ? null : iso(progress.lastOutputAt),
+          ...(progress.waitingFor === undefined ? {} : { waitingFor: progress.waitingFor }),
+        });
+      } catch {
+        // 心跳发不出去不搅自测本身（活动已被叫停时 Temporal 这边会拒）
+      }
+    };
+    const enter = (phase: Phase, waitingFor?: string) => {
+      progress.phase = phase;
+      progress.phaseStartedAt = Date.now();
+      if (waitingFor === undefined) delete progress.waitingFor;
+      else progress.waitingFor = waitingFor;
+      beatNow();
+    };
+    const beat = setInterval(beatNow, SELF_CHECK_HEARTBEAT_MS);
+    // 一次自测里所有排队合起来的预算：每段排队用掉多少扣多少
+    let queueLeft = queueMs;
+    const spendQueue = (ms: number) => {
+      queueLeft = Math.max(0, queueLeft - ms);
+    };
     try {
       let user: SessionUser | null;
       try {
@@ -535,41 +676,151 @@ export function createSelfCheck(deps: SelfCheckDeps) {
       }
       if (!user) return { state: 'skipped', reason: `工作树 ${input.worktreePath} 不在`, steps: [] };
       const owner = user;
-      const sh = async (what: string, script: string, timeoutMs: number) =>
+      const sh = async (
+        what: string,
+        script: string,
+        timeoutMs: number,
+        signal: AbortSignal = ctx.signal,
+        onOutput?: (chunk: Buffer) => void,
+      ) =>
         deps.exec({
           user: owner,
           cwd: input.worktreePath,
           argv: [SH, '-c', `PATH=${PATH}; export PATH; unset FLEET_RUN_ID; ${script} 2>&1`],
           timeoutMs,
-          signal: ctx.signal,
+          signal,
           scopeId: scopeId(input.taskId, what),
+          ...(onOutput === undefined ? {} : { onOutput }),
         });
-      /** 排队拿到锁再跑受影响的包。时限到了、或命令自己超时，都记自测超时、算没过。被叫停记没跑。 */
-      const runAffected = async (command: string, budgetMs: number): Promise<SelfCheckStep> => {
+
+      /** 在名额或锁上排队，最多等剩下的排队预算。等了多久都从排队预算里扣，不碰执行预算。 */
+      const waitFor = async (lock: SelfCheckFullLock, waitingFor: string): Promise<Waited> => {
+        if (ctx.signal.aborted) return { why: 'aborted' };
+        if (queueLeft <= 0) return { why: 'queue' };
+        enter('queue', waitingFor);
         const ac = new AbortController();
-        const timer = setTimeout(() => ac.abort(), budgetMs);
+        const timer = setTimeout(() => ac.abort(), queueLeft);
         const onAbort = () => ac.abort();
-        if (ctx.signal.aborted) ac.abort();
-        else ctx.signal.addEventListener('abort', onAbort, { once: true });
+        ctx.signal.addEventListener('abort', onAbort, { once: true });
         const started = Date.now();
-        let release: (() => void | Promise<void>) | undefined;
         try {
-          release = await fullLock.acquire(ac.signal);
-          if (ctx.signal.aborted) return notRun(command, '被叫停了');
-          const left = budgetMs - (Date.now() - started);
-          if (left <= 0) return timeoutStep(command);
-          const r = await sh('affected', command, left);
-          if (r.timedOut) return timeoutStep(command);
-          return stepOf(command, r, left, TEST_CHANGED_NOT_RUN);
+          const release = await lock.acquire(ac.signal);
+          if (ctx.signal.aborted) {
+            await release();
+            return { why: 'aborted' };
+          }
+          return { release };
         } catch (error) {
-          if (ctx.signal.aborted) return notRun(command, '被叫停了');
-          if (ac.signal.aborted) return timeoutStep(command);
-          return notRun(command, `整机测试锁没用上：${errMessage(error)}`);
+          if (ctx.signal.aborted) return { why: 'aborted' };
+          if (ac.signal.aborted) return { why: 'queue' };
+          return { why: 'error', error };
         } finally {
           clearTimeout(timer);
           ctx.signal.removeEventListener('abort', onAbort);
+          spendQueue(Date.now() - started);
+        }
+      };
+
+      /**
+       * 跑一条命令，排队和执行分开计时。slotInside：命令自己先在本机测试槽上排队（test:changed），
+       * 见到 SLOT_ACQUIRED 之前算排队（上限是剩下的排队预算），见到之后才开始算执行（上限 execMs）。
+       * 不是 slotInside 的从起来就算执行。哪一段超了就停掉命令、记下是哪一段。
+       */
+      const run = async (
+        what: string,
+        script: string,
+        opts: { execMs: number; phase: 'test' | 'tsc'; slotInside: boolean },
+      ): Promise<Ran> => {
+        const ac = new AbortController();
+        const onAbort = () => ac.abort();
+        if (ctx.signal.aborted) ac.abort();
+        else ctx.signal.addEventListener('abort', onAbort, { once: true });
+        const spawnedAt = Date.now();
+        let execStartedAt: number | null = null;
+        let lastOutputAt: number | null = null;
+        let over: 'queue' | 'exec' | undefined;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const stopAfter = (ms: number, which: 'queue' | 'exec') => {
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            over = which;
+            ac.abort();
+          }, ms);
+        };
+        const startExec = () => {
+          execStartedAt = Date.now();
+          stopAfter(opts.execMs, 'exec');
+          enter(opts.phase);
+          progress.lastOutputAt = lastOutputAt;
+        };
+        const waitingFor = opts.slotInside ? '本机测试槽（test:changed）' : undefined;
+        progress.lastOutputAt = null;
+        if (waitingFor !== undefined) {
+          enter('queue', waitingFor);
+          stopAfter(queueLeft, 'queue');
+        } else {
+          startExec();
+        }
+        let window = '';
+        const onOutput = (chunk: Buffer) => {
+          lastOutputAt = Date.now();
+          progress.lastOutputAt = lastOutputAt;
+          if (execStartedAt !== null) return;
+          window = (window + chunk.toString('utf8')).slice(-MARKER_WINDOW);
+          if (SLOT_ACQUIRED.test(window)) {
+            spendQueue(Date.now() - spawnedAt);
+            startExec();
+          }
+        };
+        try {
+          // exec 自己的时限只是兜底：真正按段停的是上面的计时器
+          const cap = (waitingFor === undefined ? 0 : queueLeft) + opts.execMs;
+          const r = await sh(what, script, cap, ac.signal, onOutput);
+          const endedAt = Date.now();
+          if (waitingFor !== undefined && execStartedAt === null) spendQueue(endedAt - spawnedAt);
+          return {
+            r,
+            output: `${r.stdout.toString('utf8')}${r.stderr ? `\n${r.stderr}` : ''}`,
+            spawnedAt,
+            execStartedAt,
+            endedAt,
+            lastOutputAt,
+            ...(over === undefined ? {} : { over }),
+            cancelled: ctx.signal.aborted,
+            ...(waitingFor === undefined ? {} : { waitingFor }),
+          };
+        } finally {
+          clearTimeout(timer);
+          ctx.signal.removeEventListener('abort', onAbort);
+        }
+      };
+
+      /** 执行用掉了多少：没开跑是 0。 */
+      const execUsed = (ran: Ran) => (ran.execStartedAt === null ? 0 : ran.endedAt - ran.execStartedAt);
+
+      /**
+       * 排队拿到整机锁再跑受影响的包。排队超了、执行超了，都记自测超时、算没过。被叫停记没跑。
+       * 等锁吃排队预算；执行只有 execMs（和前面那次合用的测试预算剩下的）。
+       */
+      const runAffected = async (command: string, execMs: number): Promise<SelfCheckStep> => {
+        if (execMs <= 0) return timeoutStep(command, `测试预算已经用完（${duration(testMs)}）`);
+        const got = await waitFor(fullLock, '整机锁（要全跑改跑受影响的包）');
+        if ('why' in got) {
+          if (got.why === 'aborted') return notRun(command, '被叫停了');
+          if (got.why === 'queue') {
+            return timeoutStep(
+              command,
+              `等整机锁超过剩下的排队预算（一次自测合计 ${Math.round(queueMs / 60_000)} 分钟），没开跑`,
+            );
+          }
+          return notRun(command, `整机测试锁没用上：${errMessage(got.error)}`);
+        }
+        try {
+          const ran = await run('affected', command, { execMs, phase: 'test', slotInside: true });
+          return stepOfRun(command, ran, execMs, TEST_CHANGED_NOT_RUN, true);
+        } finally {
           try {
-            await release?.();
+            await got.release();
           } catch (error) {
             deps.log?.('自测的整机锁没放掉', { taskId: input.taskId, error: errMessage(error) });
           }
@@ -620,46 +871,67 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         ]);
       }
 
+      // test:changed 自己在本机测试槽上排队（vitest 的容量归它），引擎不另占名额；别的测试命令和 tsc 占自测名额
+      const changed = /\btest:changed\b/.test(testCommand);
       let releaseSlot: (() => void | Promise<void>) | undefined;
       try {
-        releaseSlot = await slots.acquire(ctx.signal);
-      } catch (error) {
-        if (ctx.signal.aborted || error instanceof LockAbort) {
-          return { state: 'skipped', reason: '被叫停了', steps: [] };
-        }
-        return { state: 'skipped', reason: `自测名额没用上：${errMessage(error)}`, steps: [] };
-      }
-      try {
         const steps: SelfCheckStep[] = [];
-        // 时限从拿到名额起算。等名额的时间已经过去了，不从测试预算里扣。
-        const budgetStarted = Date.now();
         if (testCommand === '') {
           steps.push(notRun('（测试命令）', '这个仓没配测试命令（repos.test_command）'));
-        } else {
-          const r = await sh('test', testCommand, testMs);
-          const changed = /\btest:changed\b/.test(testCommand);
-          if (changed && fullRunRefusal(r)) {
+        } else if (changed) {
+          const first = await run('test', testCommand, { execMs: testMs, phase: 'test', slotInside: true });
+          if (fullRunRefusal(first.r)) {
             steps.push({
               command: testCommand,
               outcome: 'skipped',
               exitCode: 3,
               digest: '改动要全跑，本机不跑全量；改在锁下跑受影响的包',
             });
-            const left = testMs - (Date.now() - budgetStarted);
-            const command = affectedCommand(testCommand);
-            steps.push(left <= 0 ? timeoutStep(command) : await runAffected(command, left));
+            steps.push(await runAffected(affectedCommand(testCommand), testMs - execUsed(first)));
           } else {
-            steps.push(stepOf(testCommand, r, testMs, changed ? TEST_CHANGED_NOT_RUN : {}));
+            steps.push(stepOfRun(testCommand, first, testMs, TEST_CHANGED_NOT_RUN, false));
           }
+        } else {
+          const got = await waitFor(slots, '自测名额');
+          if ('why' in got) {
+            if (got.why === 'aborted') return { state: 'skipped', reason: '被叫停了', steps: [] };
+            if (got.why === 'queue') {
+              return {
+                state: 'skipped',
+                reason: `等自测名额超过排队预算（${Math.round(queueMs / 60_000)} 分钟），没跑`,
+                steps: [],
+              };
+            }
+            return { state: 'skipped', reason: `自测名额没用上：${errMessage(got.error)}`, steps: [] };
+          }
+          releaseSlot = got.release;
+          const ran = await run('test', testCommand, { execMs: testMs, phase: 'test', slotInside: false });
+          steps.push(stepOfRun(testCommand, ran, testMs, {}, false));
         }
         if (ctx.signal.aborted) return { state: 'skipped', reason: '被叫停了', steps };
 
-        if (willTsc) {
-          const r = await sh('tsc', tscCommand, tscMs);
-          steps.push(stepOf(tscCommand, r, tscMs));
-        } else {
+        if (!willTsc) {
           steps.push(notRun(tscCommand, '树里没有 tsconfig.json 或没装 tsc'));
+          return settled(steps);
         }
+        if (releaseSlot === undefined) {
+          const got = await waitFor(slots, '自测名额');
+          if ('why' in got) {
+            if (got.why === 'aborted') return { state: 'skipped', reason: '被叫停了', steps };
+            steps.push(
+              notRun(
+                tscCommand,
+                got.why === 'queue'
+                  ? `等自测名额超过剩下的排队预算（一次自测合计 ${Math.round(queueMs / 60_000)} 分钟），没跑`
+                  : `自测名额没用上：${errMessage(got.error)}`,
+              ),
+            );
+            return settled(steps);
+          }
+          releaseSlot = got.release;
+        }
+        const ran = await run('tsc', tscCommand, { execMs: tscMs, phase: 'tsc', slotInside: false });
+        steps.push(stepOfRun(tscCommand, ran, tscMs, {}, false));
         return settled(steps);
       } finally {
         try {
@@ -673,6 +945,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
       return { state: 'skipped', reason: `自测没跑成：${errMessage(error)}`, steps: [] };
     } finally {
       clearInterval(beat);
+      enter('done');
     }
   };
 }
