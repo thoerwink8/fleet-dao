@@ -2,16 +2,19 @@
 //
 // add 七步，每步「先查、再补、再核」，可重复跑（已经做到的步只查不写）：
 //   1 登记仓：经 ssh 调法国的 fleet-api project register（带 GitHub 仓号，认仓认号）
-//   2 装两个 App：本机 gh 令牌走单仓接口 PUT /user/installations/{安装号}/repositories/{仓号}（没有请求体）；
-//     安装号按 owner 记在 packages/conventions/github-apps.json，owner 下还没装过就停下，提示先在网页装一次
+//   2 装两个 App：读装没装经 ssh 调 fleet-api project installations（#2977：两个机器人的安装令牌只要 metadata:read，
+//     和驾驶舱导入列表同一份归并；不读本机 gh 的 user/installations，本机身份缺权限也不挡）；没查成就是没查成（退出码 2），
+//     不当成没装、不退回本机 gh 猜。读全了、明确缺哪个角色才补：本机 gh 令牌走单仓接口
+//     PUT /user/installations/{安装号}/repositories/{仓号}（没有请求体）；安装号按 owner 记在
+//     packages/conventions/github-apps.json，owner 下还没装过就停下，提示先在网页装一次
 //   3 同步流程标签：照标准仓（本仓）GitHub 上的标签，缺的建、颜色说明不一样的改，别的标签不动
 //   4 仓档案：探测语言、工具链、测试命令、模块根，只补档案里没写的项，经 fleet-api project set-profile 写
 //   5 补齐 PR：缺 AGENTS.md、四节单模板、引用本仓可复用合并闸和关单工作流的，开一个 PR 补上（开过还开着就不再开）
 //   6 跑 project check：全绿才打开「让 AI 接活」（fleet-api dispatch on）；有一项不过就停，接活不开
 //   7 开一张冒烟单（四节齐，标题固定，开过就不再开）
-// check 只读：1～5 各查一遍，全绿退出码 0，有不过的 1，没查成的 2。
+// check 只读：1～5 各查一遍，全绿退出码 0，有不过的 1，没查成的 2（别的步过了也不抵）。
 //
-// 碰 GitHub 只经本机 gh（令牌不读出来），碰法国只经 ssh 调 fleet-api；这两样都收在 ProjectWorld 里，测试换成假的。
+// 碰 GitHub 只经本机 gh（令牌不读出来；App 装没装例外，经法国的 fleet-api 读），碰法国只经 ssh 调 fleet-api；这两样都收在 ProjectWorld 里，测试换成假的。
 // 本包是零安装区（没装依赖也要能跑），不引别的包：档案形状的校验在法国那头（fleet-api project set-profile），这里读它回的 gaps。
 
 /** 标签：名字、颜色（不带 #）、说明。 */
@@ -39,8 +42,7 @@ export interface FleetApiResult {
 /** 这个命令碰外面的全部口子。真的见 bin/project.ts（gh + ssh），测试用内存里的假的。 */
 export interface ProjectWorld {
   repo(slug: string): Promise<RepoFacts>;
-  installationRepoIds(installationId: number): Promise<Set<number>>;
-  /** 单仓接口 PUT /user/installations/{id}/repositories/{repo}，没有请求体。 */
+  /** 单仓接口 PUT /user/installations/{id}/repositories/{repo}，没有请求体。只在 add 补装时调；读装没装走 fleetApi（#2977）。 */
   addToInstallation(installationId: number, repoId: number): Promise<void>;
   labels(slug: string): Promise<RepoLabel[]>;
   createLabel(slug: string, label: RepoLabel): Promise<void>;
@@ -345,10 +347,78 @@ async function probeRegister(ctx: ProjectContext, slug: string, facts: RepoFacts
   };
 }
 
-async function probeApps(ctx: ProjectContext, facts: RepoFacts): Promise<Probe> {
+/** 第二步读装没装的标准来源（#2977）：法国 fleet-api 的只读命令，不是本机 gh。 */
+export const INSTALLATIONS_COMMAND = 'fleet-api project installations';
+
+/** fleet-api project installations 打的那一份里，这一步要用的几样。 */
+export interface AppInstallFacts {
+  source: string;
+  readAt: string;
+  agentInstalled: boolean;
+  engineInstalled: boolean;
+}
+
+/**
+ * 认 fleet-api project installations 回的 JSON：每个字段都要在、类型对、仓名仓号对得上、reason 是 null。
+ * 有一样不对就抛 Unchecked（写清来源和原因），不当成空、false 或装了。
+ */
+export function parseInstallFacts(stdout: string, slug: string, githubId: number): AppInstallFacts {
+  const fail = (why: string) => new Unchecked(`没查成（来源 ${INSTALLATIONS_COMMAND}）：${why}`);
+  let raw: unknown;
+  try {
+    raw = JSON.parse(stdout);
+  } catch {
+    throw fail(`回的不是 JSON：${stdout.trim().slice(0, 200)}`);
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) throw fail('回的不是一个 JSON 对象');
+  const r = raw as Record<string, unknown>;
+  if (!('reason' in r)) throw fail('缺 reason');
+  if (r.reason !== null)
+    throw fail(`服务说没读全：${typeof r.reason === 'string' ? r.reason : JSON.stringify(r.reason)}`);
+  if (typeof r.source !== 'string' || !r.source) throw fail('source 缺了或不是字符串');
+  if (typeof r.readAt !== 'string' || Number.isNaN(Date.parse(r.readAt))) throw fail('readAt 缺了或不是时刻');
+  if (typeof r.repo !== 'string' || r.repo.toLowerCase() !== slug.toLowerCase())
+    throw fail(`回的仓是 ${JSON.stringify(r.repo)}，不是 ${slug}（身份对不上）`);
+  if (r.githubId !== githubId)
+    throw fail(`回的仓号是 ${JSON.stringify(r.githubId)}，不是 ${githubId}（身份对不上）`);
+  for (const k of ['agentInstalled', 'engineInstalled', 'fullyInstalled'] as const)
+    if (typeof r[k] !== 'boolean') throw fail(`${k} 缺了或不是 true/false`);
+  if (r.fullyInstalled !== (r.agentInstalled === true && r.engineInstalled === true))
+    throw fail('fullyInstalled 和两个角色对不上');
+  return {
+    source: r.source,
+    readAt: r.readAt,
+    agentInstalled: r.agentInstalled === true,
+    engineInstalled: r.engineInstalled === true,
+  };
+}
+
+/** 经法国读两个 App 装没装到这个仓（只读）。读不成、回的认不出都抛 Unchecked，不退回本机 gh。 */
+async function readInstallFacts(
+  ctx: ProjectContext,
+  slug: string,
+  facts: RepoFacts,
+): Promise<AppInstallFacts> {
+  const r = await ctx.world.fleetApi(['project', 'installations', slug, '--github-id', String(facts.id)]);
+  if (r.code === 0) return parseInstallFacts(r.stdout, slug, facts.id);
+  const said = (r.stderr || r.stdout).trim();
+  // 老版本的 fleet-api 回「认不出「installations」：只收 show、set-profile、register」
+  if (r.code === 2 && said.includes('认不出「installations」'))
+    throw new Unchecked(
+      `没查成（来源 ${INSTALLATIONS_COMMAND}）：法国的版本还没有这个命令（#2977 发版后才有）：${said}`,
+    );
+  throw new Unchecked(`没查成（来源 ${INSTALLATIONS_COMMAND}，退出码 ${r.code}）：${said || '没有输出'}`);
+}
+
+async function probeApps(ctx: ProjectContext, slug: string, facts: RepoFacts): Promise<Probe> {
+  const read = await readInstallFacts(ctx, slug, facts);
+  const from = `来源 ${read.source}，读于 ${read.readAt}`;
+  const installed = { agent: read.agentInstalled, engine: read.engineInstalled };
+  // 读全了、明确不含这个仓的角色才算没装
   const missing: { role: string; inst: number }[] = [];
   const notInstalled: string[] = [];
   for (const role of ['agent', 'engine'] as const) {
+    if (installed[role]) continue;
     const app = ctx.apps.apps[role];
     const inst = app.installations[facts.owner.toLowerCase()] ?? app.installations[facts.owner];
     if (inst === undefined) {
@@ -357,13 +427,13 @@ async function probeApps(ctx: ProjectContext, facts: RepoFacts): Promise<Probe> 
       );
       continue;
     }
-    if (!(await ctx.world.installationRepoIds(inst)).has(facts.id)) missing.push({ role: app.slug, inst });
+    missing.push({ role: app.slug, inst });
   }
-  if (notInstalled.length > 0) return { ok: false, why: notInstalled.join('；') };
-  if (missing.length === 0) return { ok: true, detail: '两个 App 都装到了这个仓' };
+  if (notInstalled.length > 0) return { ok: false, why: `${notInstalled.join('；')}（${from}）` };
+  if (missing.length === 0) return { ok: true, detail: `两个 App 都装到了这个仓（${from}）` };
   return {
     ok: false,
-    why: `${missing.map((m) => m.role).join('、')} 还没装到这个仓`,
+    why: `${missing.map((m) => m.role).join('、')} 还没装到这个仓（${from}）`,
     fix: async () => {
       for (const m of missing) await ctx.world.addToInstallation(m.inst, facts.id);
     },
@@ -552,7 +622,7 @@ async function steps(
     return r;
   };
   const registered = await run('1 登记仓', () => probeRegister(ctx, slug, f));
-  await run('2 装两个 App', () => probeApps(ctx, f));
+  await run('2 装两个 App', () => probeApps(ctx, slug, f));
   await run('3 流程标签', () => probeLabels(ctx, slug));
   if (registered.status === 'unchecked' || (mode === 'add' && registered.status === 'red'))
     out.push({ step: '4 仓档案', status: registered.status, detail: '登记没成，档案这一步没跑' });

@@ -1,6 +1,9 @@
 // pnpm project add|check（#2749）：七步各自先查、再补、再核，可重复跑；owner 下没装过 App 时提示先在网页装；
 // check 有一项不过就不打开接活；冒烟单四节齐。GitHub、法国都换成内存里的假世界，不打真接口。
-import { readFileSync } from 'node:fs';
+// 第二步读装没装只经 fleet-api project installations（#2977）：读不成、回的认不出一律没查成（退出码 2），不退回本机 gh。
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { REPO_PROFILE_KEYS } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
@@ -26,7 +29,7 @@ import {
   SMOKE_TITLE,
   smokeIssueBody,
 } from '../src/project.ts';
-import { ghProjectWorld } from '../src/project-world.ts';
+import { ghProjectWorld, sshFleetApi } from '../src/project-world.ts';
 
 const STD = 'acme/fleet';
 const SLUG = 'acme/flux';
@@ -41,6 +44,21 @@ const APPS: AppInstallConfig = {
     engine: { slug: 'fleet-dao-engine', installations: { acme: 22 } },
   },
 };
+
+/** fleet-api project installations 打的那一份。 */
+function installedJson(agent: boolean, engine: boolean, over: Record<string, unknown> = {}, slug = SLUG) {
+  return JSON.stringify({
+    source: 'fleet-api project installations（测试）',
+    readAt: '2026-10-17T20:38:47.036Z',
+    repo: slug,
+    githubId: REPO_ID,
+    agentInstalled: agent,
+    engineInstalled: engine,
+    fullyInstalled: agent && engine,
+    reason: null,
+    ...over,
+  });
+}
 
 /** 内存里的 GitHub + 法国。writes 记下每一次写（步名 → 次数），测「重跑不写」。 */
 class FakeWorld implements ProjectWorld {
@@ -61,6 +79,8 @@ class FakeWorld implements ProjectWorld {
   branchFiles = new Map<string, string>();
   openPr: { number: number; url: string } | null = null;
   issues: { number: number; title: string; body: string; labels: string[] }[] = [];
+  /** 给了就是 fleet-api project installations 原样回这个（测读不成、回的认不出）。 */
+  installationsReply: FleetApiResult | null = null;
   /** 法国库里的这一行；null＝没登记。 */
   row: {
     githubId: number | null;
@@ -71,9 +91,6 @@ class FakeWorld implements ProjectWorld {
   async repo(slug: string) {
     if (slug !== SLUG) throw new Error(`没有 ${slug}`);
     return { id: REPO_ID, owner: 'acme', name: 'flux', defaultBranch: 'main', archived: false };
-  }
-  async installationRepoIds(id: number) {
-    return new Set(this.installs.get(id) ?? []);
   }
   async addToInstallation(id: number, repoId: number) {
     this.writes.push('install');
@@ -140,6 +157,12 @@ class FakeWorld implements ProjectWorld {
       if (!this.row) return { code: 1, stdout: '', stderr: `没查成：库里没有仓 ${SLUG}` };
       const gaps = REPO_PROFILE_KEYS.filter((k) => !(k in (this.row?.profile ?? {})));
       return ok(JSON.stringify({ ...this.row, testCommand: 'pnpm check', gaps }));
+    }
+    if (cmd === 'project' && sub === 'installations') {
+      if (this.installationsReply) return this.installationsReply;
+      // 和法国的 fleet-api project installations 一个形状：安装号 11 是 agent、22 是 engine
+      const has = (inst: number) => this.installs.get(inst)?.has(REPO_ID) === true;
+      return ok(installedJson(has(11), has(22)));
     }
     if (cmd === 'project' && sub === 'register') {
       this.writes.push('register');
@@ -348,4 +371,220 @@ describe('真口子（gh）', () => {
       false,
     );
   });
+
+  it('fleet-api 跑超时：杀掉 ssh，回退出码 124 和「ssh 超时」，不挂住', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'project-ssh-'));
+    try {
+      const hang = join(dir, 'hang.mjs');
+      writeFileSync(hang, 'setTimeout(() => {}, 60_000);\n');
+      // 「ssh」换成 node：第一个参数（主机名）是这个一直不退的脚本
+      const run = sshFleetApi(() => hang, process.execPath, 300);
+      const r = await run(['project', 'installations', SLUG, '--github-id', String(REPO_ID)]);
+      expect(r.code).toBe(124);
+      expect(r.stderr).toContain('ssh 超时');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('第二步读装没装：经 fleet-api project installations，不读本机 gh 的 user/installations（#2977）', () => {
+  const FLUX = 'thoerwink8/fluxwatch';
+  const files: Record<string, string> = {
+    [REQUIRED_FILES.agents]: '# fluxwatch\n',
+    [REQUIRED_FILES.issueTemplate]: issueTemplate(),
+    [REQUIRED_FILES.mergeGate]: mergeGateCaller(STD),
+    [REQUIRED_FILES.closeOnMerge]: closeOnMergeCaller(STD),
+  };
+
+  /** 真口子（ghProjectWorld）+ 假 gh：本机身份读 user/installations 一律 403；默认分支上的文件 withFiles 决定。 */
+  function fluxWorld(withFiles: boolean, installations: FleetApiResult) {
+    const ghCalls: string[][] = [];
+    const fleetCalls: string[][] = [];
+    const gh: Gh = async (args) => {
+      ghCalls.push(args);
+      const joined = args.join(' ');
+      if (joined.includes('user/installations'))
+        return { code: 1, stdout: '', stderr: 'gh: Resource not accessible by integration (HTTP 403)' };
+      if (args[0] === 'api' && args[1] === `repos/${FLUX}`)
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            id: REPO_ID,
+            name: 'fluxwatch',
+            owner: { login: 'thoerwink8' },
+            default_branch: 'main',
+            archived: false,
+          }),
+          stderr: '',
+        };
+      if (args[0] === 'label' && args[1] === 'list')
+        return { code: 0, stdout: JSON.stringify(LABELS), stderr: '' };
+      const content = /^repos\/thoerwink8\/fluxwatch\/contents\/([^?]+)\?ref=main$/.exec(args[1] ?? '');
+      if (args[0] === 'api' && args.length === 2 && content?.[1]) {
+        const path = content[1].split('/').map(decodeURIComponent).join('/');
+        const text = withFiles ? files[path] : undefined;
+        if (text === undefined) return { code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' };
+        return {
+          code: 0,
+          stdout: JSON.stringify({ content: Buffer.from(text).toString('base64'), encoding: 'base64' }),
+          stderr: '',
+        };
+      }
+      if (args[0] === 'pr' && args[1] === 'list') return { code: 0, stdout: '[]', stderr: '' };
+      return { code: 1, stdout: '', stderr: `假 gh 不认：${joined}` };
+    };
+    const fleetApi = async (args: string[]): Promise<FleetApiResult> => {
+      fleetCalls.push(args);
+      if (args[0] === 'project' && args[1] === 'show')
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            githubId: REPO_ID,
+            testCommand: 'pnpm check',
+            autoDispatchSince: null,
+            profile: {},
+            gaps: [],
+          }),
+          stderr: '',
+        };
+      if (args[0] === 'project' && args[1] === 'installations') return installations;
+      return { code: 2, stdout: '', stderr: `假 fleet-api 不认：${args.join(' ')}` };
+    };
+    return { world: ghProjectWorld(gh, fleetApi), ghCalls, fleetCalls };
+  }
+  const fullyInstalled = (): FleetApiResult => ({
+    code: 0,
+    stdout: installedJson(true, true, {}, FLUX),
+    stderr: '',
+  });
+  const step2 = (r: { results: { step: string; status: string; detail: string }[] }) =>
+    r.results.find((x) => x.step === '2 装两个 App');
+
+  it('fluxwatch：服务读全了两个角色都在、本机 gh 读安装会 403 → 第二步过，不请求本机 user/installations，不写', async () => {
+    const f = fluxWorld(false, fullyInstalled());
+    // 安装号表里没有 thoerwink8 也不挡：读全了两边都在就不用补装
+    const r = await projectCheck(ctxOf(f.world), FLUX);
+    expect(step2(r)).toMatchObject({ status: 'ok' });
+    expect(step2(r)?.detail).toContain('2026-10-17T20:38:47.036Z');
+    expect(step2(r)?.detail).toContain('fleet-api project installations');
+    expect(f.ghCalls.some((a) => a.join(' ').includes('user/installations'))).toBe(false);
+    // 只读：gh 没有写（-X、建、改），fleet-api 只 show 和 installations
+    expect(f.ghCalls.some((a) => a.includes('-X') || a.includes('create') || a.includes('edit'))).toBe(false);
+    expect(new Set(f.fleetCalls.map((a) => a.slice(0, 2).join(' ')))).toEqual(
+      new Set(['project show', 'project installations']),
+    );
+    expect(f.fleetCalls.filter((a) => a[1] === 'installations')).toEqual([
+      ['project', 'installations', FLUX, '--github-id', String(REPO_ID)],
+    ]);
+    // 别的步还缺（默认分支上没有补齐的文件）：整体不因为 App 过了就全绿
+    expect(r.results.find((x) => x.step === '5 补齐 PR')).toMatchObject({ status: 'red' });
+    expect(r.code).toBe(1);
+  });
+
+  it('离线夹具五项全具备才退出 0', async () => {
+    const f = fluxWorld(true, fullyInstalled());
+    const r = await projectCheck(ctxOf(f.world), FLUX);
+    expect(r.results.map((x) => x.status)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok']);
+    expect(r.code).toBe(0);
+  });
+
+  it('读不成也不退回本机 gh 猜：第二步没查成、退出码 2', async () => {
+    const f = fluxWorld(true, {
+      code: 255,
+      stdout: '',
+      stderr: 'ssh: connect to host france: Connection timed out',
+    });
+    const r = await projectCheck(ctxOf(f.world), FLUX);
+    expect(step2(r)?.status).toBe('unchecked');
+    expect(r.code).toBe(2);
+    expect(f.ghCalls.some((a) => a.join(' ').includes('user/installations'))).toBe(false);
+  });
+
+  it.each([
+    ['两边都在', true, true, 'ok', []],
+    ['只有 agent 在', true, false, 'red', ['fleet-dao-engine']],
+    ['只有 engine 在', false, true, 'red', ['fleet-dao-agent']],
+    ['两边都不在', false, false, 'red', ['fleet-dao-agent', 'fleet-dao-engine']],
+  ] as const)('完整列表%s：第二步 %s，只报明确不含这个仓的角色', async (_n, agent, engine, status, roles) => {
+    const w = new FakeWorld();
+    w.installs = new Map([
+      [11, new Set(agent ? [REPO_ID] : [])],
+      [22, new Set(engine ? [REPO_ID] : [])],
+    ]);
+    const r = await projectCheck(ctxOf(w), SLUG);
+    expect(step2(r)?.status).toBe(status);
+    for (const role of ['fleet-dao-agent', 'fleet-dao-engine'])
+      expect(step2(r)?.detail.includes(`${role}`)).toBe((roles as readonly string[]).includes(role));
+    expect(w.writes).toEqual([]);
+  });
+
+  it('add 补装只补读全了明确缺的角色，补完再读一遍服务核对', async () => {
+    const w = new FakeWorld();
+    const r = await projectAdd(ctxOf(w), SLUG);
+    expect(step2(r)?.status).toBe('fixed');
+    expect(w.writes.filter((x) => x === 'install')).toEqual(['install']);
+    expect(w.installs.get(11)?.has(REPO_ID)).toBe(true);
+  });
+
+  const bad = (over: Record<string, unknown>): FleetApiResult => ({
+    code: 0,
+    stdout: installedJson(true, true, over),
+    stderr: '',
+  });
+  it.each([
+    [
+      '一个角色没列成（fleet-api 退出 1）',
+      {
+        code: 1,
+        stdout: '',
+        stderr: '没查成（来源 fleet-api project installations）：两个机器人的安装范围没读全：engine HTTP 502',
+      },
+      'engine HTTP 502',
+    ],
+    ['ssh 连不上', { code: 255, stdout: '', stderr: 'ssh: connect timed out' }, 'ssh: connect timed out'],
+    ['ssh 超时', { code: 124, stdout: '', stderr: 'ssh 超时：120000 毫秒没跑完' }, 'ssh 超时'],
+    [
+      '法国还是老版本',
+      { code: 2, stdout: '', stderr: '认不出「installations」：只收 show、set-profile、register。' },
+      '还没有这个命令',
+    ],
+    [
+      'HTTP 200 + repos 空 + reason',
+      {
+        code: 0,
+        stdout: JSON.stringify({ repos: [], reason: '没能列出两个机器人已经装上的仓：超时' }),
+        stderr: '',
+      },
+      '没能列出两个机器人已经装上的仓',
+    ],
+    ['reason 非空', bad({ reason: '凭据没读到' }), '凭据没读到'],
+    ['不是 JSON', { code: 0, stdout: 'ok', stderr: '' }, '不是 JSON'],
+    ['不是对象', { code: 0, stdout: '[]', stderr: '' }, '不是一个 JSON 对象'],
+    ['缺 engineInstalled', bad({ engineInstalled: undefined }), 'engineInstalled'],
+    ['agentInstalled 类型不对', bad({ agentInstalled: 'true' }), 'agentInstalled'],
+    ['缺 readAt', bad({ readAt: undefined }), 'readAt'],
+    ['缺 source', bad({ source: undefined }), 'source'],
+    ['fullyInstalled 对不上', bad({ engineInstalled: false }), 'fullyInstalled'],
+    ['仓号对不上', bad({ githubId: 7 }), '身份对不上'],
+    ['仓名对不上', bad({ repo: 'acme/other' }), '身份对不上'],
+  ] as const)(
+    '%s：第二步没查成（写明来源和原因），check 退出码 2，不当成没装、不补装',
+    async (_n, reply, why) => {
+      const w = new FakeWorld();
+      w.installationsReply = reply;
+      const r = await projectCheck(ctxOf(w), SLUG);
+      expect(step2(r)?.status).toBe('unchecked');
+      expect(step2(r)?.detail).toContain('fleet-api project installations');
+      expect(step2(r)?.detail).toContain(why);
+      expect(r.code).toBe(2);
+      expect(w.writes).toEqual([]);
+
+      // add 也不拿「没查成」去补装、不开接活
+      const added = await projectAdd(ctxOf(w), SLUG);
+      expect(step2(added)?.status).toBe('unchecked');
+      expect(w.writes).not.toContain('install');
+      expect(w.writes).not.toContain('dispatch');
+    },
+  );
 });
