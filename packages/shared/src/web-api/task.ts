@@ -50,6 +50,11 @@ export const TaskSchema = z.object({
    * 还没分组的老单没有这个键。页面不补、不猜。
    */
   flowMode: z.enum(FLOW_MODES).optional(),
+  /**
+   * 不合格、实际退回三段的原因（分组记录 source = ineligible，且不是「开关就是三步法」）。
+   * 没有这个键就不是退回。老后端没有，页面不猜。
+   */
+  flowFallback: z.string().min(1).optional(),
   createdAt: Time,
 });
 /** 编译期闸：和 flow-mode.ts 的两种模式一字不差。 */

@@ -182,7 +182,7 @@ function Row({
               <span className="min-w-0 truncate text-body font-medium" title={row.title}>
                 {row.title}
               </span>
-              <FlowModeTag mode={row.flowMode} />
+              <FlowModeTag mode={row.flowMode} fallback={row.flowFallback} />
             </span>
             <MetaLine
               items={[

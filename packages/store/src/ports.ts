@@ -312,6 +312,8 @@ export interface BoardStore {
   writeFlowAssignmentOnce(input: NewFlowAssignment): Promise<FlowAssignment>;
   /** 读一张单的分组记录；没分过组、编号不是 uuid 都是 null。 */
   getFlowAssignment(taskId: string): Promise<FlowAssignment | null>;
+  /** 一次读多张单的分组记录。编号不是 uuid 的跳过；没分过组的不在结果里。 */
+  listFlowAssignments(taskIds: readonly string[]): Promise<FlowAssignment[]>;
   /**
    * 任务列表页（#1639）：所有仓的需求（不限 7 天窗口，做完、失败、叫停的都在），按最近更新（开单、快照写入、状态最近一次变化三者最晚）倒序翻页，
    * 同一毫秒的按编号倒序。分组规则在 shared 的 taskListGroupOf。仓编号不是 uuid（库版）或不存在，回空页、各组都是 0。

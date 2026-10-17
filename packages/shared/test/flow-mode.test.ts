@@ -4,7 +4,10 @@ import {
   FLOW_MODE_SETTING,
   FLOW_SOURCES,
   FlowAssignmentExistsError,
+  flowFallbackReason,
   flowModeLabel,
+  flowModeSwitchChoice,
+  flowModeSwitchText,
   parseFlowModeSetting,
   readFlowModeSetting,
   VERIFY_REJECT_CLASSES,
@@ -72,6 +75,49 @@ describe('flowModeLabel', () => {
     expect(flowModeLabel({ kind: 'three' })).toContain('三步');
     expect(flowModeLabel({ kind: 'full' })).toContain('全程');
     expect(flowModeLabel({ kind: 'split', percent: 40 })).toContain('40%');
+  });
+});
+
+describe('驾驶舱上的全程 / 三步法', () => {
+  it('没设过按下三步法；全程按下全程；对半分和认不出的都不按下', () => {
+    expect(flowModeSwitchChoice(readFlowModeSetting(undefined))).toBe('three');
+    expect(flowModeSwitchChoice(readFlowModeSetting('three'))).toBe('three');
+    expect(flowModeSwitchChoice(readFlowModeSetting('full'))).toBe('full');
+    expect(flowModeSwitchChoice(readFlowModeSetting('split:50'))).toBeUndefined();
+    expect(flowModeSwitchChoice(readFlowModeSetting('split:40'))).toBeUndefined();
+    expect(flowModeSwitchChoice(readFlowModeSetting('nope'))).toBeUndefined();
+  });
+
+  it('短句：默认三步法，对半分只指 50%，别的百分比不叫对半分', () => {
+    expect(flowModeSwitchText(readFlowModeSetting(null))).toBe('还没设过，默认三步法');
+    expect(flowModeSwitchText(readFlowModeSetting('three'))).toBe('当前是三步法');
+    expect(flowModeSwitchText(readFlowModeSetting('full'))).toBe('当前是全程');
+    expect(flowModeSwitchText(readFlowModeSetting('split:50'))).toBe('当前是对半分');
+    const other = flowModeSwitchText(readFlowModeSetting('split:40'));
+    expect(other).toContain('split:40');
+    expect(other).not.toContain('对半分');
+    expect(flowModeSwitchText(readFlowModeSetting('nope'))).toContain('认不出');
+  });
+});
+
+describe('flowFallbackReason', () => {
+  it('不合格退回三段才给出原因；开关本来就是三步法、别的来源都不算退回', () => {
+    const back = '选中的路由是 grok-4，第一期全程只走 Claude 5.5（Sonnet 或 Opus）';
+    expect(flowFallbackReason({ mode: 'three', source: 'ineligible', reason: back })).toBe(back);
+    expect(
+      flowFallbackReason({
+        mode: 'three',
+        source: 'ineligible',
+        reason: 'engine.flowMode 是 three：都走三段',
+      }),
+    ).toBeUndefined();
+    expect(flowFallbackReason({ mode: 'three', source: 'ineligible', reason: '  ' })).toBeUndefined();
+    expect(flowFallbackReason({ mode: 'three', source: 'ineligible', reason: null })).toBeUndefined();
+    expect(flowFallbackReason({ mode: 'three', source: 'hash', reason: null })).toBeUndefined();
+    expect(flowFallbackReason({ mode: 'three', source: 'label', reason: null })).toBeUndefined();
+    expect(flowFallbackReason({ mode: 'full', source: 'hash', reason: null })).toBeUndefined();
+    expect(flowFallbackReason(null)).toBeUndefined();
+    expect(flowFallbackReason(undefined)).toBeUndefined();
   });
 });
 

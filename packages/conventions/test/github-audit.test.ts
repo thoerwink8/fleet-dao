@@ -4,8 +4,22 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { PlanIssue, PullBody } from '../src/github-api.ts';
 import { auditGitHub } from '../src/github-audit.ts';
+import { readManifest } from '../src/mother-manifest.ts';
+import { parentField } from '../src/parent-field.ts';
 import { addToOrder } from '../src/plan-view.ts';
-import { fakeReader, issue, type Method, milestone, order, V0, V1, type World } from './fake-github.ts';
+import {
+  issue as fakeIssue,
+  fakeReader,
+  type Method,
+  milestone,
+  order,
+  V0,
+  V1,
+  type World,
+} from './fake-github.ts';
+
+// GitHub 的正常回包带正文；只有显式 body: undefined 的失败用例才模拟缺字段。
+const issue = (number: number, extra: Partial<PlanIssue> = {}) => fakeIssue(number, { body: '', ...extra });
 
 const NOW = new Date('2026-10-03T00:00:00Z');
 const DAY = 24 * 3_600_000;
@@ -50,6 +64,29 @@ const patch = (w: World, n: number, extra: Partial<PlanIssue>) => {
 };
 
 describe('GitHub 对账：干净的一份什么都不报', () => {
+  it('实际入口启用 family 维护时先修复并保留本轮差异，第二轮一致才绿', async () => {
+    const w = cleanWorld();
+    const { reader } = fakeReader(w);
+    const gh = { ...reader, allIssues: async () => w.issues };
+    const writer = {
+      updateIssueBody: async (n: number, body: string) => {
+        patch(w, n, { body });
+      },
+      addSubIssue: async (mother: number, child: number) => {
+        patch(w, child, { parent: mother });
+      },
+    };
+    const first = await auditGitHub(gh, NOW, undefined, { reader: gh, writer });
+    expect(first.notQueried).toEqual([]);
+    expect(first.findings.some((f) => f.key.startsWith('manifest-drift:10'))).toBe(true);
+    expect(readManifest(w.issues.find((i) => i.number === 10)?.body ?? '')).toMatchObject({
+      kind: 'valid',
+      children: [11, 12],
+    });
+    const second = await auditGitHub(gh, NOW, undefined, { reader: gh, writer });
+    expect(second.notQueried).toEqual([]);
+    expect(second.findings).toEqual([]);
+  });
   it('没有断裂：findings 空、没有没查成的，说清查了几张单、几个版本', async () => {
     const r = await audit(cleanWorld());
     expect(r.findings).toEqual([]);
@@ -154,6 +191,155 @@ describe('GitHub 对账：开着的子单，母单已经关了', () => {
     const r = await audit(editWorld(withOrphans), { fail: { issue: new Error('GitHub 回了 502') } });
     expect(r.notQueried).toEqual(['读不到母单的状态（GitHub 回了 502），挂在已关母单下面的子单没核']);
     expect(r.findings.filter((f) => f.key.startsWith('orphan:'))).toEqual([]);
+  });
+});
+
+describe('parent 字段：只认独立的正文行', () => {
+  it('固定格式可读；未写字段的旧单仍可对账', () => {
+    expect(parentField('正文\nparent: #12\n')).toEqual({ kind: 'parent', number: 12 });
+    expect(parentField('正文里提到 parent: #12')).toEqual({ kind: 'none' });
+    expect(parentField('普通正文')).toEqual({ kind: 'none' });
+  });
+
+  it('引用、围栏、缩进代码和 HTML 注释里的例子不算关系', () => {
+    expect(
+      parentField(
+        [
+          '> parent: #1',
+          '```md',
+          'parent: #2',
+          '```',
+          '~~~',
+          'parent: #3',
+          '~~~',
+          '    parent: #4',
+          '\tparent: #5',
+          '<!--',
+          'parent: #6',
+          '-->',
+          'parent: #7',
+        ].join('\n'),
+      ),
+    ).toEqual({ kind: 'parent', number: 7 });
+  });
+
+  it.each([
+    'parent: nonsense',
+    'parent: #0',
+    'parent: #-1',
+    'parent: #1 extra',
+    'parent: #9007199254740992',
+    'parent: #1\nparent: #1',
+    'parent : #1',
+  ])('畸形或重复字段不是没写：%s', (body) => {
+    expect(parentField(body)).toEqual({ kind: 'invalid' });
+  });
+
+  it.each(['> -->', '    -->', '\t-->'])(
+    'HTML 注释结束行 %s 带引用或缩进时，后面的正文 parent 仍可读',
+    (end) => {
+      expect(parentField(`<!-- comment\nparent: #99\n${end}\nparent: #12`)).toEqual({
+        kind: 'parent',
+        number: 12,
+      });
+    },
+  );
+});
+
+describe('GitHub 对账：正文 parent 和批量母单', () => {
+  const batchMother = (n: number, extra: Partial<PlanIssue> = {}) =>
+    issue(n, { labels: MOTHER, body: '<!-- fleet:issue-batch:test:mother -->', ...extra });
+  const familyKeys = (r: { findings: { key: string }[] }) =>
+    r.findings.filter((f) => /^(?:parent-|family-)/.test(f.key)).map((f) => f.key);
+
+  it('字段指向不存在的单、PR、非母单或已关母单：各自报孤儿', async () => {
+    const w = cleanWorld();
+    w.issues.push(
+      issue(60, { body: 'parent: #99' }),
+      issue(61, { body: 'parent: #90' }),
+      issue(62, { body: 'parent: #20' }),
+      issue(63, { body: 'parent: #91' }),
+      issue(90, { isPr: true, state: 'closed' }),
+      issue(91, { labels: MOTHER, state: 'closed' }),
+    );
+    const r = await audit(w);
+    expect(familyKeys(r)).toEqual([
+      'parent-orphan:60:99',
+      'parent-orphan:61:90',
+      'parent-orphan:62:20',
+      'parent-orphan:63:91',
+    ]);
+    expect(r.texts.join('\n')).toContain('是 PR，不是母单');
+    expect(r.texts.join('\n')).toContain('没有「母单」标签');
+  });
+
+  it('原生有子单但没有母单标签，仍然不是合法 parent 目标', async () => {
+    const r = await audit(
+      editWorld((w) => {
+        patch(w, 10, { labels: ['需求'] });
+        patch(w, 11, { body: 'parent: #10' });
+      }),
+    );
+    expect(familyKeys(r)).toEqual(['parent-orphan:11:10']);
+  });
+
+  it('字段和原生关系一致不报；两者指向不同的单要报', async () => {
+    const good = await audit(editWorld((w) => patch(w, 11, { body: 'parent: #10' })));
+    expect(familyKeys(good)).toEqual([]);
+    const bad = await audit(
+      editWorld((w) => {
+        patch(w, 11, { body: 'parent: #40' });
+        w.issues.push(batchMother(40));
+      }),
+    );
+    expect(familyKeys(bad)).toEqual(['parent-conflict:11:40:10']);
+  });
+
+  it('批量母单无子单立即报空；字段关系和原生关系任意一种存在就不报空', async () => {
+    const w = cleanWorld();
+    w.issues.push(batchMother(40, { createdAt: ago(1_000) }));
+    expect(familyKeys(await audit(w))).toEqual(['family-empty:40']);
+    w.issues.push(issue(41, { body: 'parent: #40' }));
+    expect(familyKeys(await audit(w))).toEqual([]);
+    patch(w, 41, { body: '', parent: 40 });
+    expect(familyKeys(await audit(w))).toEqual([]);
+    patch(w, 41, { parent: undefined, state: 'closed' });
+    patch(w, 40, { subIssues: 1, subIssuesDone: 1 });
+    expect(familyKeys(await audit(w))).toEqual([]);
+  });
+
+  it('普通目录母单不触发新空母单警报；字段子单避免旧规则把母单误判为空', async () => {
+    const w = cleanWorld();
+    w.issues.push(issue(40, { labels: MOTHER, createdAt: ago(2 * DAY) }));
+    expect(familyKeys(await audit(w))).toEqual([]);
+    w.issues.push(issue(41, { body: 'parent: #40' }));
+    const r = await audit(w);
+    expect(r.findings.filter((f) => f.key === 'mother-empty:40')).toEqual([]);
+    expect(familyKeys(r)).toEqual([]);
+  });
+
+  it('畸形 parent 报错；读不到正文不能当作没有字段或空母单', async () => {
+    const r = await audit(
+      editWorld((w) => {
+        patch(w, 11, { body: 'parent: bad' });
+        const missing = w.issues.find((i) => i.number === 20);
+        if (!missing) throw new Error('测试单不存在');
+        delete missing.body;
+        w.issues.push(batchMother(40, { createdAt: ago(1_000) }));
+      }),
+    );
+    expect(familyKeys(r)).toEqual(['parent-invalid:11']);
+    expect(r.notQueried).toContain('接口没给 #20 的正文，parent 字段和空母单没核');
+  });
+
+  it('母单状态读失败报没查成，不能当成不存在；同一母单只读一次', async () => {
+    const w = cleanWorld();
+    w.issues.push(issue(60, { body: 'parent: #99' }), issue(61, { body: 'parent: #99' }));
+    const r = await audit(w);
+    expect(r.calls.filter((c) => c === 'issue')).toHaveLength(1);
+    const failed = await audit(w, { fail: { issue: new Error('GitHub 回了 502') } });
+    expect(familyKeys(failed)).toEqual([]);
+    expect(failed.notQueried).toContainEqual(expect.stringContaining('GitHub 回了 502'));
   });
 });
 

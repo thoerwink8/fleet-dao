@@ -64,6 +64,16 @@ export interface GitHubReader {
   recentPulls(): Promise<PullBody[]>;
 }
 
+/** 母子关系对账同时读开着和已关闭的单，清单不能漏掉已完成子单。 */
+export interface GitHubFamilyReader {
+  allIssues(): Promise<PlanIssue[]>;
+}
+
+export interface GitHubFamilyWriter {
+  updateIssueBody(n: number, body: string): Promise<void>;
+  addSubIssue(mother: number, child: number, replaceParent?: boolean): Promise<void>;
+}
+
 /** 对账看「需求」栏用的一张 PR：开着的、合并了的、关了没合的都在。 */
 export interface PullBody {
   number: number;
@@ -241,7 +251,13 @@ export function liveGitHub(
   repo: string,
   env: Env,
   opts: { fetchImpl?: typeof fetch; token?: () => string | undefined } = {},
-): GitHubReader & GitHubCommenter & GitHubBranches & GitHubVersionWriter & GitHubAlarmWriter {
+): GitHubReader &
+  GitHubCommenter &
+  GitHubBranches &
+  GitHubVersionWriter &
+  GitHubAlarmWriter &
+  GitHubFamilyReader &
+  GitHubFamilyWriter {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -319,6 +335,29 @@ export function liveGitHub(
   };
 
   return {
+    async allIssues() {
+      const rows = await pages(`/repos/${repo}/issues?state=all&per_page=100`, '全部 issue');
+      return rows.map((r) => toPlanIssue(r, '全部 issue')).filter((i) => !i.isPr);
+    },
+    async addSubIssue(mother, child, replaceParent) {
+      if (![mother, child].every((n) => Number.isSafeInteger(n) && n > 0) || mother === child)
+        throw new Error('母单和子单必须是不同的正安全整数。');
+      const res = await get(`/repos/${repo}/issues/${child}`);
+      if (!res.ok) throw failed(res, ` #${child} `);
+      const data = await json(res, ` #${child} `);
+      if (
+        !isObject(data) ||
+        !Number.isSafeInteger(data.id) ||
+        Number(data.id) <= 0 ||
+        data.pull_request != null
+      )
+        throw new Error(`读 #${child}，认不出子单 id 或实际是 PR。`);
+      const attached = await get(`/repos/${repo}/issues/${mother}/sub_issues`, {
+        method: 'POST',
+        body: JSON.stringify({ sub_issue_id: data.id, replace_parent: replaceParent === true }),
+      });
+      if (!attached.ok) throw failed(attached, `在给 #${child} 挂母单 #${mother} 时`);
+    },
     async openIssues() {
       const rows = await pages(`/repos/${repo}/issues?state=open&per_page=100`, '开着的 issue');
       return rows.map((r) => toPlanIssue(r, '开着的 issue')).filter((i) => !i.isPr);

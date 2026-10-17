@@ -8,6 +8,8 @@ import {
   type BoardSubtaskSchema,
   type BoardTaskSchema,
   type Channel,
+  type FlowAssignment,
+  flowFallbackReason,
   flowStages,
   type HomeDecisionSchema,
   type HomeDoneSchema,
@@ -392,11 +394,23 @@ export function pendingDecisionByTask(input: {
  * taskFlow），「还没验」不许按字段猜成失败；一笔流水都没记的老单 segment 是 null。waitingReason：被人暂停（#820 片 3，Task.paused）→ paused，排在最前（有 decision 级通知就从它的时刻起算，没有就不给起点）；动手收了验收还没起 → verify_round；
  * 在合并 → merge_queue；其余 nothing。额度、内存、CI 这几种等 segment 之外的信号才分得出，分不出时不猜。
  */
+/** 分组记录里「不合格退回三段」的原因，按任务编号查。没有退回的不在里面。 */
+export function flowFallbackLookup(rows: readonly FlowAssignment[]): (taskId: string) => string | undefined {
+  const byTask = new Map<string, string>();
+  for (const row of rows) {
+    const reason = flowFallbackReason(row);
+    if (reason !== undefined) byTask.set(row.taskId, reason);
+  }
+  return (taskId) => byTask.get(taskId);
+}
+
 export function homeRunning(input: {
   tasks: Task[];
   repoOf: (repoId: string) => { owner: string; name: string } | undefined;
   segmentRunsOf: (taskId: string) => SegmentRunView[];
   decisionOf: (taskId: string) => { title: string; since: string } | undefined;
+  /** 不合格退回三段的原因。不给就都不带这个键。 */
+  flowFallbackOf?: ((taskId: string) => string | undefined) | undefined;
 }): HomeRunning[] {
   return [...input.tasks]
     .sort((a, b) => a.priority - b.priority || a.createdAt.localeCompare(b.createdAt))
@@ -409,6 +423,7 @@ export function homeRunning(input: {
       const decision = input.decisionOf(t.id);
       // 引擎停下等人（state=stalled）排在三段推断前面：三段流水只看得出「验收收了」，看不出验收没过、开 PR 卡住（#1967、#1971）
       const stalled = t.state === 'stalled' ? t.stalled : undefined;
+      const flowFallback = input.flowFallbackOf?.(t.id);
       const waitingReason: HomeRunning['waitingReason'] = t.paused
         ? 'paused'
         : t.state === 'stalled'
@@ -446,6 +461,7 @@ export function homeRunning(input: {
         ...(t.leaseUntil === undefined ? {} : { leaseUntil: t.leaseUntil }),
         // 还没分组没有这个键：不补、不猜
         ...(t.flowMode === undefined ? {} : { flowMode: t.flowMode }),
+        ...(flowFallback ? { flowFallback } : {}),
         link: `/tasks/${t.id}`,
         taskId: t.id,
         state: t.state,
@@ -557,6 +573,8 @@ export function buildHome(input: {
   now: Date;
   /** 这台机器此刻的内存、CPU（#1973，host-resources.ts）；没装采样器就不带这一项。 */
   resources?: z.input<typeof HomeResourcesSchema> | undefined;
+  /** 不合格退回三段的原因。不给就都不带这个键。 */
+  flowFallbackOf?: ((taskId: string) => string | undefined) | undefined;
 }): z.input<typeof HomeResponseSchema> {
   const taskById = new Map(input.tasks.map((t) => [t.id, t]));
   const taskByIssue = new Map(input.tasks.map((t) => [`${t.repoId}#${t.issueNumber}`, t]));
@@ -585,6 +603,7 @@ export function buildHome(input: {
     repoOf: (repoId) => repoById.get(repoId),
     segmentRunsOf: (taskId) => runViews.get(taskId) ?? [],
     decisionOf: (taskId) => decisionByTask.get(taskId),
+    ...(input.flowFallbackOf ? { flowFallbackOf: input.flowFallbackOf } : {}),
   });
   return {
     decisions: homeDecisions({

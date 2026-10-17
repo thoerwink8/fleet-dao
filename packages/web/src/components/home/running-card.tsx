@@ -173,7 +173,7 @@ export function RunningCard({ item, className }: { item: HomeRunning; className?
           <div className="flex items-center gap-2">
             <span className="num text-meta font-semibold text-muted-foreground">#{item.issueNumber}</span>
             <span className="min-w-0 flex-1 truncate text-body font-medium">{item.title}</span>
-            <FlowModeTag mode={item.flowMode} />
+            <FlowModeTag mode={item.flowMode} fallback={item.flowFallback} />
             <StatusBadge tone={tone} label={statusText} />
             {founder ? <StatusBadge tone="human" label="等你" variant="dot" /> : null}
           </div>
