@@ -7,6 +7,7 @@
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
+import { assessRunningRelease as sharedJudge } from '../../packages/store/src/running-release.mjs';
 import {
   DESIRED_FILE,
   FINGERPRINT_ALGORITHM,
@@ -14,6 +15,7 @@ import {
   keyIdOf,
   parseFingerprintKey,
 } from '../france/auto-release/config.mjs';
+import { realIo } from '../france/auto-release/fleet-auto-release.mjs';
 import {
   AUTO_RELEASE_BY,
   AUTO_REQUEST_KEY,
@@ -56,6 +58,7 @@ import {
   UNTOUCHED_FAIL_LIMIT,
   untouchedFails,
 } from '../france/auto-release/lib.mjs';
+import { assessRunningRelease } from '../france/auto-release/running-release.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
 const H1 = 'b'.repeat(40); // 主线头
@@ -269,6 +272,57 @@ test('跟上了、不在主线最近的提交里、还没发布过：各写各�
   assert.equal(st.last.action, 'not-released');
   assert.match(summary(st), /还没发布过/);
   assert.deepEqual(m.forbidden, []);
+});
+
+/** 链接已是主线头，主进程 cwd 由 readRunning 给。发版闸仍看链接。 */
+function cwdMachine(running) {
+  const m = machine();
+  m.main = [
+    [H2, '2026-10-16T12:23:00Z'],
+    [H1, '2026-10-16T12:21:00Z'],
+  ];
+  m.current = H2;
+  m.ci = runsBody(run(H2, 'completed', 'success'));
+  m.io.readRunning = async () => running;
+  return m;
+}
+
+test('进程 cwd 落后 current：journal 的在用不标成新提交，和健康检查同一份判定', async () => {
+  assert.equal(assessRunningRelease, sharedJudge);
+  assert.equal(typeof realIo.readRunning, 'function');
+  const running = {
+    engine: { sha: H1 },
+    api: { sha: H1 },
+    diffs: { [H1]: ['packages/store/src/deploy-lag.ts'] },
+  };
+  const st = await cwdMachine(running).round();
+  assert.equal(st.current, H2, '发版闸仍看链接');
+  const line = summary(st);
+  const view = assessRunningRelease({ current: { sha: H2 }, running: st.running });
+  assert.equal(view.sha, H1);
+  assert.match(line, new RegExp(`在用 ${H1.slice(0, 12)}`));
+  assert.doesNotMatch(line, new RegExp(`在用 ${H2.slice(0, 12)}`));
+  assert.doesNotMatch(line, new RegExp(`在用的 ${H2.slice(0, 12)}`));
+  assert.match(line, new RegExp(`链接 ${H2.slice(0, 12)}`));
+  assert.match(line, /进程还在旧 release 目录/);
+
+  const docsLine = summary(
+    await cwdMachine({
+      engine: { sha: H1 },
+      api: { sha: H1 },
+      diffs: { [H1]: ['docs/only.md'] },
+    }).round(),
+  );
+  assert.match(docsLine, new RegExp(`在用 ${H2.slice(0, 12)}`));
+  assert.doesNotMatch(docsLine, /进程还在旧 release 目录/);
+
+  const alignedLine = summary(await cwdMachine({ engine: { sha: H2 }, api: { sha: H2 } }).round());
+  assert.match(alignedLine, new RegExp(`在用 ${H2.slice(0, 12)}`));
+  assert.doesNotMatch(alignedLine, /进程还在旧 release 目录/);
+
+  const blindLine = summary(await cwdMachine({ engine: { error: '读不了' } }).round());
+  assert.match(blindLine, /没查成：读不到进程在哪一版/);
+  assert.doesNotMatch(blindLine, new RegExp(`在用 ${H2.slice(0, 12)}`));
 });
 
 test('主线头 CI：绿记下，后面几轮不再问 GitHub；红、没跑完、读不到都只记结论，不拦谁、不报警', async () => {

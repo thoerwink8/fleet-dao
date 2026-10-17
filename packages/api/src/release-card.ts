@@ -4,7 +4,7 @@
 // - 四行各自读、各自带「查成了 / 没查成 + 原因」：读不到 GitHub、读不到法国在用的提交，那一行写没查成和原因；
 //   两个提交号有一个没读到，「差几个」算不出就写没查成，不拿 0、空列表或「法国已经是最新」顶。
 // - GitHub 现读（计划和提交以 GitHub 为准，库里没有副本），整张卡限时 READ_TIMEOUT_MS；到时没读完的行照「没查成」报。
-// - 提交号两边都是 40 位全号：法国在用的来自 current 链接，主线头来自 GitHub；比较用全号，不用短号。
+// - 提交号两边都是 40 位全号。法国在用和 deploy_lag 同一份 assessRunningRelease：进程 cwd 还在旧目录时不标成 current 链接上的新提交。主线头来自 GitHub；比较用全号，不用短号。
 // - 同一份文件里还有更新日志页「已发布的提交」（#1255，GET /api/france/released-commits）：读发布历史里切上去的几条，和发版卡共用同一个读口（ReleaseCardPort.history）。
 // - 「差几个」用 GitHub compare 的 ahead_by；最近 PR 从合并提交的说明（squash 合并末尾的 (#号)）里认，不是 PR 合并的提交只数个数。
 
@@ -21,7 +21,14 @@ import {
   type ReleaseRecover,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { deployedAtFromHistory, RELEASES_DIR, readDeployLagInput } from '@fleet-dao/store';
+import {
+  assessRunningRelease,
+  type DeployLagInput,
+  type DeployLagReadIo,
+  deployedAtFromHistory,
+  RELEASES_DIR,
+  readDeployLagInput,
+} from '@fleet-dao/store';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { readEngineMaster } from './engine-switch.ts';
@@ -59,7 +66,7 @@ export const CARD_PR_LIMIT = 5;
 /** 发版卡要的三样（main.ts 正式装配给真的；测试换替身）。 */
 export interface ReleaseCardPort {
   facts: ReleaseFactsReader;
-  /** 法国在用的提交（发布目录的 current 链接）：还没发布过是 sha null，读不到带原因。同 store 的 readDeployLagInput().current。 */
+  /** 法国在用的提交：还没发布过是 sha null，读不到带原因。生产装配用 inUseDeployed（进程 cwd，不是只看 current 链接）。 */
   deployed(): { sha: string | null } | { error: string };
   /** 这个提交最近一次切上去的时间（发布历史）；历史里没记这个提交回 null；读不了抛错。 */
   deployedAt(sha: string): Promise<string | null>;
@@ -657,10 +664,22 @@ export function registerReleaseCardRoutes(app: Hono<CockpitEnv>, deps: Deps): vo
 // deployedAtFromHistory 在 @fleet-dao/store（readDeployLagInput 也要读它）；这里照旧从本文件出口，调用方不用改
 export { deployedAtFromHistory };
 
-export function liveReleaseCardPort(facts: ReleaseFactsReader, dir: string = RELEASES_DIR): ReleaseCardPort {
+/** 法国在用的提交。和 deploy_lag、journal summary 同一份 assessRunningRelease：进程还在旧目录时返回旧提交，不返回链接上的新提交。 */
+export function inUseDeployed(input: DeployLagInput): { sha: string | null } | { error: string } {
+  const view = assessRunningRelease(input);
+  if (view.problem !== null && view.sha === null) return { error: view.problem.message };
+  if (view.sha === null && 'error' in input.current) return input.current;
+  return { sha: view.sha };
+}
+
+export function liveReleaseCardPort(
+  facts: ReleaseFactsReader,
+  dir: string = RELEASES_DIR,
+  io?: DeployLagReadIo,
+): ReleaseCardPort {
   return {
     facts,
-    deployed: () => readDeployLagInput(dir).current,
+    deployed: () => inUseDeployed(readDeployLagInput(dir, io)),
     deployedAt: async (sha) => deployedAtFromHistory(await readFile(join(dir, '.history'), 'utf8'), sha),
     history: () => readFile(join(dir, '.history'), 'utf8'),
   };

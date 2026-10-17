@@ -1,16 +1,21 @@
 // /api/france/release-card（#1231，「发版」卡）：主线最新提交和 CI、法国在用的提交、差几个、最近做完的一个任务。
 // 故意造出的失败（每条都核「没查成 + 原因」，不拿空、0、「已是最新」顶）：相差 0 个（写「已经是最新」）、相差多个、
 // 读不到 GitHub、读不到法国在用的提交、compare 回不是前后关系、最近合并的 PR 读不到、关的单读不到、读超时、没接上。
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { ReleaseFactsReader } from '@fleet-dao/github';
 import { ReleaseCardSchema, ReleasedCommitsSchema, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
-import type { MemoryData } from '@fleet-dao/store';
-import { devFixtures } from '@fleet-dao/store';
+import { assessRunningRelease, type DeployLagInput, devFixtures, type MemoryData } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
+import { assessRunningRelease as sharedJudge } from '../../store/src/running-release.mjs';
 import {
   buildReleaseCard,
   buildReleasedCommits,
   closesOf,
   deployedAtFromHistory,
+  inUseDeployed,
+  liveReleaseCardPort,
   prsFromTitles,
   type ReleaseCardPort,
   releasedFromHistory,
@@ -494,6 +499,60 @@ describe('GET /api/france/released-commits', () => {
     const res = await h.cockpit.request(RELEASED_PATH, { headers: { cookie } });
     expect(res.status).toBe(200);
     expect(ReleasedCommitsSchema.parse(await res.json()).state).toBe('unreadable');
+  });
+});
+
+describe('法国在用和进程目录同一份判定', () => {
+  const OLD = 'b'.repeat(40);
+  const NEW = 'c'.repeat(40);
+  const source = ['packages/store/src/deploy-lag.ts'] as const;
+
+  function lagging(diff: readonly string[]): DeployLagInput {
+    return {
+      current: { sha: NEW },
+      state: { error: '这行不看状态文件' },
+      running: { engine: { sha: OLD }, api: { sha: OLD }, diffs: { [OLD]: [...diff] } },
+    };
+  }
+
+  it('判定函数和自动发版那一份是同一个', () => {
+    expect(assessRunningRelease).toBe(sharedJudge);
+  });
+
+  it('cwd 还在旧目录：法国在用是旧提交', async () => {
+    const input = lagging(source);
+    expect(assessRunningRelease(input).sha).toBe(OLD);
+    expect(inUseDeployed(input)).toEqual({ sha: OLD });
+    const c = await card(port({ deployed: () => inUseDeployed(input) }));
+    expect(c.deployed).toMatchObject({ state: 'ok', sha: OLD, short: OLD.slice(0, 12) });
+  });
+
+  it('只改文档：法国在用仍是链接上的新提交', async () => {
+    const input = lagging(['docs/only.md']);
+    expect(inUseDeployed(input)).toEqual({ sha: NEW });
+    const c = await card(port({ deployed: () => inUseDeployed(input) }));
+    expect(c.deployed).toMatchObject({ state: 'ok', sha: NEW, short: NEW.slice(0, 12) });
+  });
+
+  it('生产口子读盘：current 已切、注入的 cwd 还在旧目录，法国在用是旧提交', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'release-card-cwd-'));
+    try {
+      symlinkSync(NEW, join(d, 'current'));
+      const live = liveReleaseCardPort(facts(), d, {
+        readProc: () => ({ sha: OLD }),
+        diffNames: () => source,
+      });
+      expect(live.deployed()).toEqual({ sha: OLD });
+      const docs = liveReleaseCardPort(facts(), d, {
+        readProc: () => ({ sha: OLD }),
+        diffNames: () => ['docs/only.md'],
+      });
+      expect(docs.deployed()).toEqual({ sha: NEW });
+      const c = await card(live);
+      expect(c.deployed).toMatchObject({ state: 'ok', sha: OLD, short: OLD.slice(0, 12) });
+    } finally {
+      rmSync(d, { recursive: true, force: true });
+    }
   });
 });
 

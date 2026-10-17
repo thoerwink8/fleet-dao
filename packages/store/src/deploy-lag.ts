@@ -4,7 +4,10 @@
 // 改这里之前必须知道：
 // - 发布只走驾驶舱按钮（决定 0032）：落后主线几个提交只是数（驾驶舱「落后主线 N 个提交」，env-view 的 versionFact 数），**不算毛病**——
 //   没人去发它，报警只会天天挂着。这里只报读数没查成（单元没报到、主线头读不到、在用的读不到、状态文件认不出）、规矩同步和装机自动档没成、
-//   装机脚本的人工档落后（要人跑）、root 跑的脚本副本和在用版本不一致（当轮就报）、在用版本的依赖发版后被动过（#2728）。
+//   装机脚本的人工档落后（要人跑）、root 跑的脚本副本和在用版本不一致（当轮就报）、在用版本的依赖发版后被动过（#2728）、
+//   current 已切但 fleet-engine / fleet-api 主进程还在旧目录（不是只改文档或测试，#2359）。
+//   驾驶舱「在用版本」、自动发版 journal 的 summary、发版卡「法国在用」和这里同一份 assessRunningRelease
+//   （deploy/france/auto-release/running-release.mjs），进程还在旧目录时不把 current 链接标成已经切过去。
 // - 状态文件的字段跟 deploy/france/auto-release/lib.mjs 走（STATE_SCHEMA）；test/deploy-lag.test.ts 拿那边真跑出来的状态核对。
 // - 这一项会随时间自己变红（单元停了），发布脚本只把它标待处理、不退回（deploy/release.sh 的 DRIFTING_HEALTH_ITEMS）。
 // - 公网看得到 /healthz：对外的话不带提交号、路径、内部名；细节只进日志和报警正文。报警只用不带时长的话，
@@ -14,6 +17,9 @@ import { join } from 'node:path';
 import { type Db, openAlertsByPrefix, resolveAlertByKey, upsertAlert } from '@fleet-dao/db';
 import { z } from 'zod';
 import type { Logger } from './ports.ts';
+import { assessRunningRelease, diffIsDocsOnly, readRunningRelease } from './running-release.mjs';
+
+export { assessRunningRelease, diffIsDocsOnly };
 
 /** 法国上各版所在的目录（deploy/release.sh 的 RELEASES）。 */
 export const RELEASES_DIR = '/srv/fleet-dao-releases';
@@ -110,12 +116,39 @@ export const DeployLagState = z.object({
 });
 export type DeployLagState = z.infer<typeof DeployLagState>;
 
+/** 一个服务主进程 cwd 解出的发布提交。没在跑是 sha null；读失败带原因。 */
+export type ProcRelease = { sha: string | null } | { error: string };
+
+/**
+ * 主进程实际所在的发布提交（systemd MainPID 的 /proc/pid/cwd），不是 current 链接。
+ * 不给这一项：不查（旧调用、单测里没造进程）。给了就查 fleet-engine，给了 api 也查后端。
+ */
+export interface RunningRelease {
+  engine: ProcRelease;
+  /** 不给就不查后端。生产读 fleet-api。 */
+  api?: ProcRelease;
+  /**
+   * 进程所在提交 → 相对 current 的路径（git diff --name-only --no-renames）。
+   * 每一条都落在文档/测试白名单（和 deploy/release.sh 的 runtime_unchanged 同一份，#2359）才允许留在旧目录。
+   * 没有这个键：对不上就报，不当成只改了文档。空数组是两边树一样，允许沿用。
+   */
+  diffs?: Readonly<Record<string, readonly string[]>>;
+}
+
+export interface DeployLagReadIo {
+  readProc?: (unit: 'fleet-engine.service' | 'fleet-api.service') => ProcRelease;
+  /** 返回 { error } 表示没比成，这一对提交不当成只改文档。 */
+  diffNames?: (oldSha: string, newSha: string) => readonly string[] | { error: string };
+}
+
 export interface DeployLagInput {
   /** 在用的提交号；还没发布过是 null。 */
   current: { sha: string | null } | { error: string };
   /** 在用的那版切上去的时刻（发布历史 .history 里它最近一次切上去）；没有记录、读不出是 null（拿不准，不猜）。 */
   deployedAt?: string | null;
   state: DeployLagState | { error: string };
+  /** 主进程 cwd。不给就不比（旧调用）。readDeployLagInput 会填。 */
+  running?: RunningRelease;
 }
 
 export interface DeployLagProblem {
@@ -289,11 +322,13 @@ export function judgeDeployLag(input: DeployLagInput, now: Date): DeployLagVerdi
       detail: `装到 ${short(st.system.appliedSha)}；防火墙、sudoers、建用户那几个文件（deploy/france/auto-release/lib.mjs 的 HUMAN_TIER_PATHS）之后改过：在法国以 root 跑 bash /srv/fleet-dao/deploy/france.sh（不自动跑；其余装机步骤发版时自动装）`,
     });
   }
+  const runningView = assessRunningRelease(input);
+  if (runningView.problem) add(runningView.problem);
   return done();
 }
 
-/** 读法国上的现状：current 链接、状态文件、发布历史里在用那版切上去的时刻。读不到的照实带上原因。 */
-export function readDeployLagInput(dir: string = RELEASES_DIR): DeployLagInput {
+/** 读法国上的现状：current 链接、状态文件、发布历史里在用那版切上去的时刻、主进程 cwd。读不到的照实带上原因。 */
+export function readDeployLagInput(dir: string = RELEASES_DIR, io?: DeployLagReadIo): DeployLagInput {
   let current: DeployLagInput['current'];
   try {
     const target = readlinkSync(join(dir, 'current'));
@@ -329,7 +364,7 @@ export function readDeployLagInput(dir: string = RELEASES_DIR): DeployLagInput {
       deployedAt = null;
     }
   }
-  return { current, deployedAt, state };
+  return { current, deployedAt, state, running: readRunningRelease(dir, current, io) };
 }
 
 /** 发布历史（release.sh 的 .history：每行 `时间 提交号 事件 [unmerged]`）里这个提交最近一次切上去的时间；没有记录回 null，时间认不出抛。 */
