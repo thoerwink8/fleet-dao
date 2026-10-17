@@ -18,8 +18,9 @@ describe('渠道状态页照路由页样板（#1922）', () => {
     });
     expect(hero.querySelector('h2')?.textContent).toBe('Claude 订阅');
     const line = hero.querySelector('[data-hero-line]') as HTMLElement;
-    expect(line.textContent).toMatch(/条路都在线/);
-    expect(line.textContent).toContain('在线');
+    // 假数据里 Claude 订阅有一条路连通但额度耗尽（#2939）：结论说清几条，不说成整个渠道不通
+    expect(line.textContent).toMatch(/在用的 \d+ 条路里 1 条额度耗尽，其余可用/);
+    expect(line.textContent).toContain('部分路额度耗尽');
     expect(line.className).toContain('whitespace-nowrap');
     const notes = hero.querySelector('[data-hero-notes]') as HTMLElement;
     expect(notes.className).toContain('truncate');

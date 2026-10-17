@@ -845,6 +845,15 @@ function mockProbeHistory(
           : result !== 'not_probed'
             ? { ...NO_CHECK, kind: 'ping' as const }
             : NO_CHECK),
+      // 假数据：Claude 订阅的 B 号连通但额度用完了（上游明说了重置时刻），其余路正常；可截图看「部分路额度耗尽」
+      ...(route.id === 'r-cb-opus' && result === 'passed'
+        ? {
+            quotaExhausted: true,
+            detail: '连通正常，但上游回复额度已用完：5 小时窗口额度耗尽（假数据）',
+            resetsAt: new Date(Date.parse(probe.at) + 2 * 3_600_000).toISOString(),
+            responseText: '{"error":{"type":"rate_limit_error","message":"5-hour usage limit reached"}}',
+          }
+        : {}),
       trigger: 'scheduled' as const,
     });
   }
