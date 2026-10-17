@@ -20,7 +20,7 @@ export async function seedRequests(db: Db, now: Date): Promise<SeededRequests> {
   const port = pgRequests(db, () => now);
   const draft = {
     scene: '任务列表几个仓混在一起，看不出哪张单是哪个仓的',
-    modules: 'packages/web/src/routes/tasks.tsx',
+    modules: 'packages/web/src/routes/tasks.tsx\n域: api\n性质: process',
     done: ['任务列表顶上能选仓，选了只剩那个仓的单'],
   };
 

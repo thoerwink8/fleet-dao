@@ -200,12 +200,12 @@ describe('先判整轮（#2499）：整轮坏了不算每条用例偶发', () =>
     expect(actions[0]).toMatchObject({ kind: 'create', title: 'e2e 偶发：07c-nodes.e2e.ts › 甲' });
   });
 
-  test('开的单（整轮坏了、偶发）都贴「缺陷」类别', () => {
+  test('开的单（整轮坏了、偶发）都贴「缺陷」类别和 engine/bug 两轴', () => {
     const broken = [round(0, 'unexpected'), round(1, 'expected', {}, true)];
     const flaky = [round(0, 'expected', { 甲: 'flaky' }), round(1, 'expected', { 甲: 'flaky' })];
     for (const runs of [broken, flaky]) {
       const [a] = planIssues(runs, [], noQuarantine, '2026-10-22');
-      expect(a).toMatchObject({ kind: 'create', labels: ['缺陷'] });
+      expect(a).toMatchObject({ kind: 'create', labels: ['缺陷', '域:engine', '性质:bug'] });
     }
   });
 
@@ -268,7 +268,11 @@ describe('开单限流（#2735）：超过 5 条只开一张汇总单，一次�
     expect(flakyTests(runs)).toHaveLength(6);
     const actions = planIssues(runs, [], [], '2026-10-22');
     expect(actions).toHaveLength(1);
-    expect(actions[0]).toMatchObject({ kind: 'create', title: FLAKY_SUMMARY_TITLE, labels: ['缺陷'] });
+    expect(actions[0]).toMatchObject({
+      kind: 'create',
+      title: FLAKY_SUMMARY_TITLE,
+      labels: ['缺陷', '域:engine', '性质:bug'],
+    });
     const body = actions[0]?.kind === 'create' ? actions[0].body : '';
     for (const n of six) expect(body).toContain(`07c-nodes.e2e.ts › ${n}`);
     expect(checkIssueBody(body)).toMatchObject({ ok: true });

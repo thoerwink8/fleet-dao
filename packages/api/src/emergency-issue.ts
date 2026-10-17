@@ -8,14 +8,14 @@
 // - 不贴「本机做」「要人拍」：拉不拉由引擎的准入决定（决定 0097：急修不问人）。
 // - 开在受管仓里叫 fleet-dao 的那个（self-repo.ts）；认不出不猜，退出 1。
 // - 退出码：0 开成了（或这个 key 以前开过）；1 没开成（正文不合格、仓认不出、GitHub 没成）；2 参数不对（不连库、不连 GitHub）。
-import { checkIssueBody, issueBodyTooLong } from '@fleet-dao/conventions';
+import { checkIssueBody, domainLabel, issueBodyTooLong, natureLabel } from '@fleet-dao/conventions';
 
 export const EMERGENCY_ISSUE_USAGE =
   '用法：fleet-api emergency-issue --key <幂等键> --title "<标题>" [--json] < 正文.md' +
   '（开急修单：四节正文从标准输入读，贴「缺陷」、进当前版本；同一个 key 只开一张。法国自动发布在同一个提交发版连败时调）';
 
-/** 急修单只贴这一个类别标签。 */
-export const EMERGENCY_LABELS = ['缺陷'] as const;
+/** 固定的发布故障立案：类别和两轴在创建时一起写入。 */
+export const EMERGENCY_LABELS = ['缺陷', domainLabel('engine'), natureLabel('bug')] as const;
 /** 幂等键的前缀（和提需求的 request: 分开）。 */
 export const EMERGENCY_KEY_PREFIX = 'emergency:';
 

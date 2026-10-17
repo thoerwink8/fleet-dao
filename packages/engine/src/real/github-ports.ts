@@ -9,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
-import { GATE_CONTEXT, issueOfBranch, pullsOnIssue, queryAxisLabels } from '@fleet-dao/conventions';
+import { GATE_CONTEXT, issueOfBranch, pullsOnIssue, resolveQueryAxes } from '@fleet-dao/conventions';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
@@ -672,7 +672,16 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       // 开之前查同一张单有没有别人开着的 PR（本机的 local/<单号>-、或「需求」栏挂着它，决定 0096）：有就不开，停下等人看。
       // 重做的新一代（generation ≥ 2）如果挡着的全是自己上一代的任务分支，先关掉并留一句「被第 N 代重做取代」，再开。
       // 有一张不是自己上一代的，一台都不关，照旧 ISSUE_CLAIMED。
-      const issue = input.body.requirement;
+      const issue = input.body.requirement ?? issueOfBranch(input.branch)?.issue;
+      const source =
+        issue === undefined
+          ? undefined
+          : await mapped(() => gh.readIssue({ repo: input.repo, issueNumber: issue, signal: ctx.signal }));
+      const axis = resolveQueryAxes(source?.labels ?? [], source?.body);
+      if (axis.problems.length > 0)
+        throw new PortError('INVALID_INPUT', `开 PR 前请补齐需求单查询轴：${axis.problems.join('；')}`, {
+          retryable: false,
+        });
       if (issue !== undefined) {
         const pulls = await mapped(() =>
           gh.claims.openPulls({ owner: input.repo.owner, name: input.repo.name }),
@@ -702,15 +711,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           }
         }
       }
-      // 查询轴从需求单照抄。某一轴不是恰好一个（老单没有、或贴了两个）就不抄那一轴，不挡开 PR。
-      const labels =
-        issue === undefined
-          ? []
-          : queryAxisLabels(
-              (await mapped(() => gh.readIssue({ repo: input.repo, issueNumber: issue, signal: ctx.signal })))
-                .labels,
-              (message) => console.warn(`#${issue}：${message}`),
-            );
+      const labels = axis.labels;
       const r = await mapped(() =>
         gh.openPr(
           {

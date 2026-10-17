@@ -25,7 +25,28 @@ import { isKindLabel, MOTHER_LABEL } from './labels.ts';
 import { parentField } from './parent-field.ts';
 import { type Plan, PlanProblem, parseOrder, pruneOrder, readPlan } from './plan-view.ts';
 import { issueColumnLinks } from './pr-columns.ts';
+import { queryAxisProblems } from './query-axis.ts';
 import { addDays, beijingDate, dueDateOf } from './version-cut.ts';
+
+/** #2986 两轴约定落地主线后的新对象；历史存量按明确修复清单补，不擅自批量重分类。 */
+const QUERY_AXIS_SINCE = Date.parse('2026-10-17T21:43:57Z');
+
+function axisFindings(item: {
+  number: number;
+  labels: string[];
+  createdAt: string;
+  body?: string;
+  milestone: string | null;
+  isPr: boolean;
+}): Finding[] {
+  if (Date.parse(item.createdAt) < QUERY_AXIS_SINCE) return [];
+  const problems = queryAxisProblems(item.labels);
+  return problems.map((text, i) => ({
+    issue: item.number,
+    key: `query-axis:${item.number}:${i}:${text}`,
+    text: `#${item.number} ${text}`,
+  }));
+}
 
 export interface AuditResult {
   findings: Finding[];
@@ -70,6 +91,7 @@ export async function auditGitHub(
   if (open !== undefined) {
     checked.issues = open.length;
     findings.push(...kindFindings(open));
+    for (const item of open) findings.push(...axisFindings(item));
     const family = await bodyFamilyFindings(open, gh);
     findings.push(...family.found);
     notQueried.push(...family.unknown);
@@ -83,6 +105,17 @@ export async function auditGitHub(
     try {
       const pulls = await gh.recentPulls();
       findings.push(...mergedButOpenFindings(open, pulls), ...pullMilestoneFindings(pulls));
+      if (now.getTime() >= QUERY_AXIS_SINCE) {
+        for (const pull of pulls.filter((p) => p.state === 'open')) {
+          try {
+            const item = await gh.issue(pull.number);
+            if (!item?.isPr) throw new Error('读不到 PR 标签或对象不是 PR');
+            findings.push(...axisFindings(item));
+          } catch (error) {
+            notQueried.push(`PR #${pull.number} 查询轴没核：${message(error)}`);
+          }
+        }
+      }
     } catch (e) {
       notQueried.push(`读不到最近的 PR（${message(e)}），合并了却还开着的单没核`);
     }
