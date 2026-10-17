@@ -722,11 +722,36 @@ RELEASE_PNPM_ENV=(pnpm_config_enable_global_virtual_store=false)
 RELEASE_PNPM_INSTALL=(install --frozen-lockfile --package-import-method=copy --reporter=append-only)
 RELEASE_PNPM_WEB_BUILD=(--filter ./packages/web run build)
 
-write_release_npmrc() { # 发布目录根
-  cat >"$1/.npmrc" <<'EOF'
-enable-global-virtual-store=false
-package-import-method=copy
-EOF
+# 把这一版目录自己的 pnpm 工作区文件改成「不用全局虚拟仓、依赖整份拷贝」，所以此后有人在这个目录里直接敲 pnpm（不带上面那组环境变量）
+# 也不会把 node_modules 重装成链到 /root 的全局虚拟仓。必须改 pnpm-workspace.yaml：pnpm 11 里工作区文件的设置压过 .npmrc
+# （.npmrc 只剩认证和源地址），仓里 pnpm-workspace.yaml 给本机开着 enableGlobalVirtualStore: true，往发布目录根写 .npmrc 管不住它。
+# 在 root 身份、解包完、装依赖之前调：此时没有 fleet 的进程在改这个目录；符号链接的工作区文件不碰，红字停下。
+# 没有 pnpm-workspace.yaml 的老提交没有要改的，算过。改完读回来核一遍，对不上返回 1。
+PIN_WORKSPACE_WHY=""
+pin_release_workspace() { # 解包出来的代码目录
+  local f=$1/pnpm-workspace.yaml
+  PIN_WORKSPACE_WHY=""
+  if [[ -L "$f" ]]; then
+    PIN_WORKSPACE_WHY="$f 是符号链接"
+    return 1
+  fi
+  [[ -f "$f" ]] || return 0
+  if ! sed -i -E '/^(enableGlobalVirtualStore|packageImportMethod)[[:space:]]*:/d' -- "$f"; then
+    PIN_WORKSPACE_WHY="改不了 $f"
+    return 1
+  fi
+  if [[ -s "$f" && -n "$(tail -c1 -- "$f")" ]]; then echo >>"$f"; fi
+  printf '%s\n' \
+    '# deploy/release.sh 发版时固定：发布目录不用全局虚拟仓、依赖整份拷贝（pnpm 11 里这里压过 .npmrc）' \
+    'enableGlobalVirtualStore: false' \
+    'packageImportMethod: copy' >>"$f"
+  local gvs copy
+  gvs=$(grep -cE '^enableGlobalVirtualStore:[[:space:]]*false[[:space:]]*$' -- "$f")
+  copy=$(grep -cE '^packageImportMethod:[[:space:]]*copy[[:space:]]*$' -- "$f")
+  if [[ "$gvs" != 1 || "$copy" != 1 ]]; then
+    PIN_WORKSPACE_WHY="改完读回来对不上"
+    return 1
+  fi
 }
 
 # 构建日志的末尾原样写进发布日志：红字那一行只放得下一句，真正的报错常在几十行之前
@@ -785,13 +810,16 @@ build_release() { # 提交号
     red "把 ${sha:0:12} 的代码解到 $stage 失败"
     return 1
   fi
+  if ! pin_release_workspace "$stage"; then
+    red "固定 $stage 的 pnpm 工作区设置失败（$PIN_WORKSPACE_WHY）：没切版本"
+    return 1
+  fi
   echo "  装依赖（pnpm ${RELEASE_PNPM_INSTALL[*]}，日志 $dir/.fleet-build.log）"
   if ! as_build_in "$stage" pnpm "${RELEASE_PNPM_INSTALL[@]}" >>"$log" 2>&1; then
     log_tail "$log" 60
     red "pnpm install --frozen-lockfile 失败（没切版本）：$(tail -5 "$log" | tr '\n' ' ')"
     return 1
   fi
-  write_release_npmrc "$stage"
   build_web "$stage" "$log" || return 1
   # 装完、构建完一起查（构建里的 pnpm run 也可能重装一遍依赖）
   if ! links_inside "$stage"; then

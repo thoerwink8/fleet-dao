@@ -94,14 +94,44 @@ reset() {
   PENDING=()
 }
 
-echo "== 构建完在发布目录根写 pnpm 配置"
-NPMRC_DIR=$TMP/npmrc-test
-mkdir -p "$NPMRC_DIR"
-write_release_npmrc "$NPMRC_DIR"
-check ".npmrc 的内容固定为关闭全局虚拟仓、依赖拷贝" "$(cat "$NPMRC_DIR/.npmrc")" \
-  $'enable-global-virtual-store=false\npackage-import-method=copy'
-check "构建流程确实写发布目录根的 .npmrc" \
-  "$(grep -cF "write_release_npmrc \"\$stage\"" "$HERE/../release.sh")" 1
+echo "== 解包后、装依赖前固定发布目录的 pnpm 工作区设置（#2901）"
+PIN_DIR=$TMP/pin-test
+mkdir -p "$PIN_DIR/on" "$PIN_DIR/off" "$PIN_DIR/absent" "$PIN_DIR/nonl" "$PIN_DIR/none" "$PIN_DIR/link"
+pin_count() { # 目录 键：这个顶格键在文件里出现几行
+  grep -cE "^$2[[:space:]]*:" "$1/pnpm-workspace.yaml"
+}
+printf 'packages:\n  - "packages/*"\nenableGlobalVirtualStore: true\noverrides:\n  a: 1\n' >"$PIN_DIR/on/pnpm-workspace.yaml"
+pin_release_workspace "$PIN_DIR/on"
+check "仓里开着全局虚拟仓：固定后返回 0" "$?" 0
+check "开着的那一行被改成 false，只剩一行" \
+  "$(grep -E '^enableGlobalVirtualStore:' "$PIN_DIR/on/pnpm-workspace.yaml")" "enableGlobalVirtualStore: false"
+check "packageImportMethod 固定成 copy，只有一行" \
+  "$(grep -E '^packageImportMethod:' "$PIN_DIR/on/pnpm-workspace.yaml") $(pin_count "$PIN_DIR/on" packageImportMethod)" "packageImportMethod: copy 1"
+check "别的设置原样保留" "$(grep -cE '^(packages:|overrides:|  a: 1)$' "$PIN_DIR/on/pnpm-workspace.yaml")" 3
+printf 'packages:\n  - "packages/*"\nenableGlobalVirtualStore: false\npackageImportMethod: hardlink\n' >"$PIN_DIR/off/pnpm-workspace.yaml"
+pin_release_workspace "$PIN_DIR/off"
+check "已经写着 false 又写了别的导入方式：固定后返回 0" "$?" 0
+check "导入方式被改成 copy，各只一行" \
+  "$(pin_count "$PIN_DIR/off" enableGlobalVirtualStore) $(pin_count "$PIN_DIR/off" packageImportMethod) $(grep -E '^packageImportMethod:' "$PIN_DIR/off/pnpm-workspace.yaml")" \
+  "1 1 packageImportMethod: copy"
+printf 'packages:\n  - "packages/*"\n' >"$PIN_DIR/absent/pnpm-workspace.yaml"
+pin_release_workspace "$PIN_DIR/absent"
+check "没写这两个键：补上，返回 0" \
+  "$? $(grep -E '^enableGlobalVirtualStore:' "$PIN_DIR/absent/pnpm-workspace.yaml")" "0 enableGlobalVirtualStore: false"
+printf 'packages:\n  - "packages/*"' >"$PIN_DIR/nonl/pnpm-workspace.yaml"
+pin_release_workspace "$PIN_DIR/nonl"
+check "末行没换行：补的设置不接在上一行后面" "$(sed -n 2p "$PIN_DIR/nonl/pnpm-workspace.yaml")" '  - "packages/*"'
+check "末行没换行：设置各占一行" "$(pin_count "$PIN_DIR/nonl" enableGlobalVirtualStore)" 1
+pin_release_workspace "$PIN_DIR/none"
+check "老提交没有 pnpm-workspace.yaml：没东西可固定，返回 0、不凭空建文件" "$? $([[ -e "$PIN_DIR/none/pnpm-workspace.yaml" ]] && echo 有 || echo 无)" "0 无"
+printf 'enableGlobalVirtualStore: true\n' >"$PIN_DIR/real.yaml"
+ln -s "$PIN_DIR/real.yaml" "$PIN_DIR/link/pnpm-workspace.yaml"
+pin_release_workspace "$PIN_DIR/link" 2>/dev/null
+check "工作区文件是符号链接：不碰、返回 1、说明原因" "$? $PIN_WORKSPACE_WHY" "1 $PIN_DIR/link/pnpm-workspace.yaml 是符号链接"
+check "符号链接指到的文件没被改" "$(cat "$PIN_DIR/real.yaml")" "enableGlobalVirtualStore: true"
+check "构建流程在装依赖之前固定设置，红字就不往下" \
+  "$(awk '/pin_release_workspace "\$stage"/ { p = NR } /as_build_in "\$stage" pnpm "\$\{RELEASE_PNPM_INSTALL/ { i = NR } END { print (p > 0 && i > p) ? "先固定" : "顺序不对" }' "$HERE/../release.sh")" 先固定
+check "发布目录根不再写没用的 .npmrc" "$(grep -c 'write_release_npmrc' "$HERE/../release.sh")" 0
 
 echo "== 头一版、第二版：健康，照常切过去"
 reset
