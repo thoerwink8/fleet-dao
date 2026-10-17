@@ -1,5 +1,5 @@
 // pnpm work run 派出的工人只在终态叫醒派它的会话（单 #2761）。挂在 Stop 上、asyncRewake（plugin-catalog.mjs）：Claude Code 让它在后台跑，
-// 收尾不等它；它以退出码 2 结束时，stderr 作为提示塞给主线程、把闲着的主线程叫醒（和 inbox-watch.mjs 同一个机制）。
+// 收尾不等它；它以退出码 2 结束时，stderr 作为提示塞给主线程、把闲着的主线程叫醒。
 // 为什么：工人脱离了聊天进程（packages/conventions/src/work-run.ts），不再是子代理，没有「子代理完成通知」叫回主线程；
 // 又不能让主线程手写轮询（钩子拦，#2730）。所以收尾时由这个钩子盯着，只在终态叫一次：中间的心跳、网关断了在续，都不叫。
 // 做法：
@@ -24,7 +24,7 @@ import {
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cleanSessionId } from './inbox-tick.mjs';
+import { cleanSessionId } from './session-id.mjs';
 import { isMachineSession } from './unattended.mjs';
 
 /** 多久看一次 */
@@ -74,7 +74,7 @@ function alive(pid) {
   }
 }
 
-/** 起它的 Claude Code 还在不在（同 inbox-watch.mjs 的 hostAlive：往它读着的 stdout 写一个换行） */
+/** 起它的 Claude Code 还在不在（往它读着的 stdout 写一个换行） */
 function hostAlive() {
   return new Promise((done) => {
     try {

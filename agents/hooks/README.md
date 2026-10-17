@@ -14,3 +14,7 @@
 pnpm exec vitest run agents/test/rules/plugin-loader.rules.test.ts
 pnpm typecheck
 ```
+
+原生消息链独占投递。main-thread 只检查原生queued_command后的先回规则，并由 background-recovery 读取本会话原生重启通知。恢复提示保留真实任务编号和原任务，兼容旧tick文件只保存backgroundRestartKey；不读创始人原文账、不轮询Mirasim、不标已读。session-id是它和work-watch共用的纯校验。
+
+session-start只列同血缘旧号实际prompt-log历史，保留时间/字数封顶与来源读取失败诊断。turns缺行不判断丢失，旧seen和steer-shown不参与投递。inbox-watch在退役目录中；inbox-tick和steer-shown也已移除，标准同步清理受管安装目录的旧脚本，不删除用户历史状态。Stop仍保留stop与work-watch，只有work-watch使用asyncRewake。

@@ -126,14 +126,6 @@ const projectHooks = (): Settings => ({
           { type: 'command', command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/stop.mjs"', timeout: 10 },
           {
             type: 'command',
-            command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/inbox-watch.mjs"',
-            timeout: 11_400,
-            asyncRewake: true,
-            rewakeMessage: PROCESS_HOOKS.find((h) => h.script === 'inbox-watch.mjs')?.rewakeMessage ?? '',
-            rewakeSummary: PROCESS_HOOKS.find((h) => h.script === 'inbox-watch.mjs')?.rewakeSummary ?? '',
-          },
-          {
-            type: 'command',
             command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/work-watch.mjs"',
             timeout: 11_400,
             asyncRewake: true,
@@ -165,17 +157,16 @@ describe('订阅目录（决定 0085）', () => {
       ['main-thread.mjs', 'PreToolUse', 10],
       ['continuation-progress.mjs', 'PostToolUse', 10],
       ['stop.mjs', 'Stop', 10],
-      ['inbox-watch.mjs', 'Stop', 11_400],
       ['work-watch.mjs', 'Stop', 11_400],
       ['prompt-log.mjs', 'UserPromptSubmit', 30],
     ]);
   });
 
-  it('前台钩子超时按秒写，不超过 600（写成毫秒是 30000 这种数）；后台叫醒的两条（盯账、工人终态）超时比它们最长等的 3 小时长、不超过 4 小时', async () => {
+  it('前台钩子超时按秒写，不超过 600（写成毫秒是 30000 这种数）；工人终态后台叫醒钩子超时比它们最长等的 3 小时长、不超过 4 小时', async () => {
     for (const hook of PROCESS_HOOKS)
       if (hook.asyncRewake !== true) expect(hook.timeout, hook.script).toBeLessThanOrEqual(600);
     const watch = PROCESS_HOOKS.filter((hook) => hook.asyncRewake === true);
-    expect(watch.map((hook) => hook.script)).toEqual(['inbox-watch.mjs', 'work-watch.mjs']);
+    expect(watch.map((hook) => hook.script)).toEqual(['work-watch.mjs']);
     for (const hook of watch) {
       const { WATCH_MAX_MS } = (await import(
         pathToFileURL(fileURLToPath(new URL(`../../hooks/${hook.script}`, import.meta.url))).href
@@ -186,13 +177,11 @@ describe('订阅目录（决定 0085）', () => {
     }
   });
 
-  it('盯账、工人终态两条钩子写进设置时带 "asyncRewake": true 和叫醒提示（后台跑、退出码 2 叫醒主线程），别的钩子不带', () => {
+  it('工人终态钩子写进设置时带 "asyncRewake": true 和叫醒提示（后台跑、退出码 2 叫醒主线程），别的钩子不带', () => {
     const next = lib.applyCatalog({}, ['process'], HOOKS);
     const stop = next.hooks?.Stop?.flatMap((group) => group.hooks) ?? [];
-    const watch = stop.find((handler) => lib.scriptOf(handler.command) === 'inbox-watch.mjs');
-    expect(watch?.asyncRewake).toBe(true);
-    expect(watch?.rewakeMessage).toContain('先回他一句');
-    expect(watch?.rewakeSummary).toBeTruthy();
+    expect(RETIRED_PROCESS_HOOKS).toContain('inbox-watch.mjs');
+    expect(stop.some((h) => lib.handlerScript(h) === 'inbox-watch.mjs')).toBe(false);
     // 工人终态（单 #2761）：只在 pnpm work run 派的工人到终态时叫醒
     const work = stop.find((handler) => lib.scriptOf(handler.command) === 'work-watch.mjs');
     expect(work?.asyncRewake).toBe(true);
@@ -200,19 +189,16 @@ describe('订阅目录（决定 0085）', () => {
     expect(work?.rewakeSummary).toBeTruthy();
     const others = Object.values(next.hooks ?? {})
       .flatMap((groups) => groups.flatMap((group) => group.hooks))
-      .filter((handler) => handler !== watch && handler !== work);
+      .filter((handler) => handler !== work);
     for (const handler of others) {
       expect(handler).not.toHaveProperty('asyncRewake');
       expect(handler).not.toHaveProperty('async');
     }
-    // 本仓项目设置里那两条也是后台叫醒的（本仓的会话读的是它，不是加载器写的那份）
+    // 本仓项目设置里的工人终态钩子也是后台叫醒的（本仓的会话读的是它，不是加载器写的那份）
     const repo = JSON.parse(
       readFileSync(fileURLToPath(new URL('../../../.claude/settings.json', import.meta.url)), 'utf8'),
     ) as Settings;
-    for (const [script, want] of [
-      ['inbox-watch.mjs', watch],
-      ['work-watch.mjs', work],
-    ] as const) {
+    for (const [script, want] of [['work-watch.mjs', work]] as const) {
       const mine = (repo.hooks?.Stop ?? [])
         .flatMap((group) => group.hooks)
         .find((handler) => lib.scriptOf(handler.command) === script);
@@ -301,7 +287,7 @@ describe('订阅目录（决定 0085）', () => {
   });
 
   it('校准旧受管登记的事件、matcher、超时和后台唤醒字段，并合并重复登记', () => {
-    const command = lib.commandFor(HOOKS, 'inbox-watch.mjs');
+    const command = lib.commandFor(HOOKS, 'work-watch.mjs');
     const input = {
       hooks: {
         PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command, timeout: 10, async: true }] }],
@@ -319,7 +305,7 @@ describe('订阅目录（决定 0085）', () => {
     expect(matches[0]?.group).not.toHaveProperty('matcher');
     expect(matches[0]?.h).toMatchObject({ timeout: 11_400, asyncRewake: true });
     expect(matches[0]?.h).not.toHaveProperty('async');
-    expect(matches[0]?.h.rewakeMessage).toContain('先回他一句');
+    expect(matches[0]?.h.rewakeMessage).toContain('到了终态');
     expect(lib.applyCatalog(next, ['process'], HOOKS)).toEqual(next);
     expect(input.hooks.PreToolUse[0]?.matcher).toBe('Bash');
   });
@@ -490,7 +476,7 @@ describe('加载器真跑（决定 0085）', () => {
     const written = JSON.parse(text) as Settings;
     const watch = (written.hooks?.Stop ?? [])
       .flatMap((group) => group.hooks)
-      .find((handler) => lib.scriptOf(handler.command) === 'inbox-watch.mjs');
+      .find((handler) => lib.scriptOf(handler.command) === 'work-watch.mjs');
     expect(watch?.asyncRewake).toBe(true);
     expect(text).toContain('"asyncRewake": true');
     expect(text).not.toContain('agents/hooks/');
@@ -572,4 +558,49 @@ describe('加载器真跑（决定 0085）', () => {
     expect(run(cwd, { FLEET_HEADLESS: '' }).status).toBe(0);
     expect(readSettings(cwd)).not.toBe(original);
   });
+});
+
+it('真实退役inbox-watch精确清受管登记，混组第三方原样保留且幂等', () => {
+  const name = 'inbox-watch.mjs';
+  const owned = [
+    { type: 'command', command: lib.commandFor(HOOKS, name), timeout: 1 },
+    { type: 'command', command: 'node "D:/current/agents/hooks/' + name + '"', timeout: 1 },
+    ...['$CLAUDE_PROJECT_DIR', '${CLAUDE_PROJECT_DIR}'].map((p) => ({
+      type: 'command',
+      command: 'node "' + p + '/agents/hooks/' + name + '"',
+      timeout: 1,
+    })),
+    ...['node', 'C:/Program Files/nodejs/node.exe'].map((command) => ({
+      type: 'command',
+      command,
+      args: [HOOKS + '/' + name],
+      timeout: 1,
+    })),
+  ];
+  const foreign = [
+    { type: 'command', command: 'node "D:/other/agents/hooks/' + name + '"', timeout: 2 },
+    { type: 'command', command: 'node "/thirdparty/' + name + '"', timeout: 3 },
+    { type: 'command', command: 'node', args: [HOOKS + '/' + name, '--foreign'], timeout: 4 },
+    { type: 'command', command: lib.commandFor(HOOKS, name) + ' && echo next', timeout: 5 },
+    { type: 'command', command: lib.commandFor(HOOKS, 'unknown.mjs'), timeout: 6 },
+    { type: 'command', command: 'echo thirdparty', timeout: 7 },
+  ];
+  const input = {
+    hooks: {
+      PreToolUse: [{ matcher: 'Bash', tag: 'keep', hooks: [...owned, ...foreign] }],
+      Stop: [{ hooks: owned }],
+    },
+  };
+  const before = structuredClone(input);
+  for (const track of [[], ['process']]) {
+    const next = lib.applyCatalog(input, track, HOOKS, { projectDir: 'D:/current' });
+    expect(next.hooks?.PreToolUse?.[0]).toEqual({ matcher: 'Bash', tag: 'keep', hooks: foreign });
+    expect(
+      Object.values(next.hooks ?? {})
+        .flatMap((gs) => gs.flatMap((g) => g.hooks))
+        .filter((h) => owned.some((o) => JSON.stringify(o) === JSON.stringify(h))),
+    ).toEqual([]);
+    expect(lib.applyCatalog(next, track, HOOKS, { projectDir: 'D:/current' })).toEqual(next);
+  }
+  expect(input).toEqual(before);
 });

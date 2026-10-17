@@ -49,14 +49,6 @@
           },
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/inbox-watch.mjs\"",
-            "timeout": 11400,
-            "asyncRewake": true,
-            "rewakeMessage": "盯账钩子（inbox-watch.mjs）：下面是创始人在 Mirasim 发了、但 Mirasim 没送进来的话（你这一轮收尾后、后台子代理还在跑时他发的引导；带北京时间发出时间，原文照贴）。先回他一句，再接着干。只有一行「对账没查成」的是没核成账，不是他的话：",
-            "rewakeSummary": "创始人有话没送进来，已叫醒主线程"
-          },
-          {
-            "type": "command",
             "command": "node \"$CLAUDE_PROJECT_DIR/agents/hooks/work-watch.mjs\"",
             "timeout": 11400,
             "asyncRewake": true,

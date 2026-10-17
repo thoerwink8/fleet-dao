@@ -23,16 +23,6 @@ export const PROCESS_HOOKS = [
   { event: 'PreToolUse', script: 'main-thread.mjs', timeout: 10 },
   { event: 'PostToolUse', script: 'continuation-progress.mjs', timeout: 10 },
   { event: 'Stop', script: 'stop.mjs', timeout: 10 },
-  // 收尾后盯账（单 #2488）：盯账进程最多等 3 小时（inbox-watch.mjs 的 WATCH_MAX_MS），超时给到 3 小时 10 分
-  {
-    event: 'Stop',
-    script: 'inbox-watch.mjs',
-    timeout: 11_400,
-    asyncRewake: true,
-    rewakeMessage:
-      '盯账钩子（inbox-watch.mjs）：下面是创始人在 Mirasim 发了、但 Mirasim 没送进来的话（你这一轮收尾后、后台子代理还在跑时他发的引导；带北京时间发出时间，原文照贴）。先回他一句，再接着干。只有一行「对账没查成」的是没核成账，不是他的话：',
-    rewakeSummary: '创始人有话没送进来，已叫醒主线程',
-  },
   // pnpm work run 派出的工人到终态才叫醒派它的会话（单 #2761）：最多等 3 小时（work-watch.mjs 的 WATCH_MAX_MS），超时同上
   {
     event: 'Stop',
@@ -49,4 +39,4 @@ export const PROCESS_HOOKS = [
 // 退役过程钩子时把脚本名留在这里，加载器才能清掉已经装过的登记；只删目录项会让旧登记失去归属。
 // 只清受管目录里的这些名字，不按文件名清别人的脚本。
 /** @type {string[]} */
-export const RETIRED_PROCESS_HOOKS = [];
+export const RETIRED_PROCESS_HOOKS = ['inbox-watch.mjs'];
