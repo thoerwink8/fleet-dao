@@ -5,7 +5,7 @@
 // - 发布只走驾驶舱按钮（决定 0032）：落后主线几个提交只是数（驾驶舱「落后主线 N 个提交」，env-view 的 versionFact 数），**不算毛病**——
 //   没人去发它，报警只会天天挂着。这里只报读数没查成（单元没报到、主线头读不到、在用的读不到、状态文件认不出）、规矩同步和装机自动档没成、
 //   装机脚本的人工档落后（要人跑）、root 跑的脚本副本和在用版本不一致（当轮就报）、在用版本的依赖发版后被动过（#2728）、
-//   current 已切但 fleet-engine / fleet-api 主进程还在旧目录（不是只改文档或测试，#2359）。
+//   current 已切但 fleet-engine / fleet-api 主进程还在旧目录（没有绑定实际进程与目标的运行等价凭据，也不只改文档/测试）。
 //   驾驶舱「在用版本」、自动发版 journal 的 summary、发版卡「法国在用」和这里同一份 assessRunningRelease
 //   （deploy/france/auto-release/running-release.mjs），进程还在旧目录时不把 current 链接标成已经切过去。
 // - 状态文件的字段跟 deploy/france/auto-release/lib.mjs 走（STATE_SCHEMA）；test/deploy-lag.test.ts 拿那边真跑出来的状态核对。
@@ -129,13 +129,17 @@ export interface RunningRelease {
   api?: ProcRelease;
   /**
    * 进程所在提交 → 相对 current 的路径（git diff --name-only --no-renames）。
-   * 每一条都落在文档/测试白名单（和 deploy/release.sh 的 runtime_unchanged 同一份，#2359）才允许留在旧目录。
+   * 没有精确运行等价凭据时，每一条都落在文档/测试白名单才允许留在旧目录（同 release.sh 的 runtime_unchanged）。
    * 没有这个键：对不上就报，不当成只改了文档。空数组是两边树一样，允许沿用。
    */
   diffs?: Readonly<Record<string, readonly string[]>>;
+  /** 发布持锁时按精确闭包核过：服务名 → 实际进程提交、目标提交。只认同时匹配的 root 发布凭据。 */
+  matches?: Readonly<Record<string, { from: string; to: string }>>;
 }
 
 export interface DeployLagReadIo {
+  /** 仅测试夹具覆盖文件属主；生产凭据和目标目录必须归 root。 */
+  proofUid?: number;
   readProc?: (unit: 'fleet-engine.service' | 'fleet-api.service') => ProcRelease;
   /** 返回 { error } 表示没比成，这一对提交不当成只改文档。 */
   diffNames?: (oldSha: string, newSha: string) => readonly string[] | { error: string };

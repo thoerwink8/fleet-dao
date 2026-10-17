@@ -5,7 +5,19 @@
 // git、GitHub、发布脚本、库都换成假的；真机上那一半（真定时器）合并后在法国装上验，记在引入本文件的 PR 里。
 // 跑法：node --test deploy/test/auto-release.test.mjs（deploy/test/run.sh 会跑）。
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { assessRunningRelease as sharedJudge } from '../../packages/store/src/running-release.mjs';
 import {
@@ -58,7 +70,7 @@ import {
   UNTOUCHED_FAIL_LIMIT,
   untouchedFails,
 } from '../france/auto-release/lib.mjs';
-import { assessRunningRelease } from '../france/auto-release/running-release.mjs';
+import { assessRunningRelease, readRunningRelease } from '../france/auto-release/running-release.mjs';
 
 const H0 = 'a'.repeat(40); // 在用的
 const H1 = 'b'.repeat(40); // 主线头
@@ -286,6 +298,84 @@ function cwdMachine(running) {
   m.io.readRunning = async () => running;
   return m;
 }
+
+test('引用闭包免重启：只认绑定实际进程、目标和服务的发布凭据，坏凭据照实失败', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-runtime-match-'));
+  try {
+    mkdirSync(join(dir, H2));
+    const file = join(dir, H2, '.runtime-fleet-engine');
+    let proc = { sha: H1 };
+    const read = () =>
+      readRunningRelease(
+        dir,
+        { sha: H2 },
+        {
+          proofUid: process.getuid?.() ?? 0,
+          readProc: (unit) => (unit === 'fleet-engine.service' ? proc : { sha: H2 }),
+          diffNames: () => ['agents/hooks/plugin-loader.mjs'],
+        },
+      );
+    assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, 'process_cwd');
+    writeFileSync(file, `${H2} ${H1} fleet-engine\n`);
+    const running = read();
+    assert.equal(assessRunningRelease({ current: { sha: H2 }, running }).problem, null);
+    proc = { sha: H0 };
+    assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, 'process_cwd');
+    proc = { error: '主进程目录读不到' };
+    assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, 'unchecked');
+    proc = { sha: H1 };
+    assert.equal(
+      assessRunningRelease({ current: { sha: H0 }, running }).problem.code,
+      'process_cwd',
+      '旧凭据不能给另一个目标用',
+    );
+    for (const [text, code] of [
+      [`${H2} ${H2} fleet-engine\n`, 'process_cwd'],
+      [`${H1} ${H1} fleet-engine\n`, 'unchecked'],
+      [`${H2} ${H1} fleet-api\n`, 'unchecked'],
+      ['broken', 'unchecked'],
+    ]) {
+      writeFileSync(file, text);
+      assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, code);
+    }
+    rmSync(file);
+    mkdirSync(file);
+    assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, 'unchecked');
+    rmSync(file, { recursive: true });
+    const valid = `${H2} ${H1} fleet-engine\n`;
+    writeFileSync(join(dir, 'other'), valid);
+    symlinkSync(join(dir, 'other'), file);
+    assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, 'unchecked');
+    rmSync(file);
+    writeFileSync(file, valid);
+    if (process.platform !== 'win32') {
+      chmodSync(file, 0o666);
+      assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, 'unchecked');
+      chmodSync(file, 0o644);
+      chmodSync(join(dir, H2), 0o777);
+      assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, 'unchecked');
+      chmodSync(join(dir, H2), 0o755);
+      const wrongOwner = readRunningRelease(
+        dir,
+        { sha: H2 },
+        {
+          proofUid: (process.getuid?.() ?? 0) + 1,
+          readProc: (unit) => (unit === 'fleet-engine.service' ? proc : { sha: H2 }),
+          diffNames: () => ['agents/hooks/plugin-loader.mjs'],
+        },
+      );
+      assert.equal(
+        assessRunningRelease({ current: { sha: H2 }, running: wrongOwner }).problem.code,
+        'unchecked',
+      );
+    }
+    renameSync(join(dir, H2), join(dir, 'real-target'));
+    symlinkSync(join(dir, 'real-target'), join(dir, H2), 'dir');
+    assert.equal(assessRunningRelease({ current: { sha: H2 }, running: read() }).problem.code, 'unchecked');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('进程 cwd 落后 current：journal 的在用不标成新提交，和健康检查同一份判定', async () => {
   assert.equal(assessRunningRelease, sharedJudge);

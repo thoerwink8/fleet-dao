@@ -14,7 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { HUMAN_TIER_PATHS, INSTALLED_COPIES, reasonOf } from '../france/auto-release/lib.mjs';
+import { gateVerdict, HUMAN_TIER_PATHS, INSTALLED_COPIES, reasonOf } from '../france/auto-release/lib.mjs';
 import {
   EXIT,
   FLEET_API,
@@ -868,6 +868,23 @@ test('【故意造出的失败】重启打断的那类过了窗口还没撤：�
   assert.equal(it.ok, false);
   assert.match(it.text, /发布重启打断的 1 条还没撤/);
   assert.ok(log.sleeps >= 4, '等满了窗口（verifyMs 4 秒、每轮 1 秒）');
+  const finished = log.states.at(-1);
+  assert.equal(finished.status, 'done', '体检超时收尾，不能一直占着 running');
+  assert.equal(finished.waiting, null);
+  assert.equal(
+    gateVerdict({
+      missing: [],
+      requestPending: false,
+      marker: false,
+      lockBusy: false,
+      trainText: JSON.stringify(finished),
+      current: SHA,
+      mainline: [SHA],
+      target: SHA,
+    }),
+    null,
+    '下一轮自动发布不被已收尾的体检超时永久挡住',
+  );
 });
 
 test('【故意造出的失败】开着的提醒读不到（发后）：体检那一项没通过，不当成没有异常', async () => {
