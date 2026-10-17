@@ -350,10 +350,11 @@ describe('删树的别的路共用的那一道（keepShotsBeforeRemove：清扫�
     const r = await keep({ issueNumber: 2969 });
     expect(r).toMatchObject({ outcome: 'archived', head: treeHead(), branch: 'shots/2969' });
     expect(r.reason).toContain('没核对远端');
-    expect(r.files.map((f) => f.path).sort()).toEqual([
-      '2969/after.png',
-      expect.stringMatching(/^[0-9a-f]{7}\/before\.png$/),
-    ]);
+    const paths = r.files.map((f) => f.path);
+    expect(paths).toHaveLength(2);
+    expect(paths).toEqual(
+      expect.arrayContaining(['2969/after.png', expect.stringMatching(/^[0-9a-f]{7}\/before\.png$/)]),
+    );
     const stored = shotsArchiveDir(archive, 'task-1', treeHead());
     expect(readFileSync(join(stored, `${sha256(png('before'))}.png`))).toEqual(png('before'));
     // 再来一次（清扫下一轮、端口重试）：清单对得上，不重写

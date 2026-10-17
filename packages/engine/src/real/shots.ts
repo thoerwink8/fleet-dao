@@ -423,12 +423,17 @@ export async function keepShotsBeforeRemove(t: UserTree, opts: KeepShotsOptions)
 
 /** 清点；没清点成回原因（不抛，叫停照抛）。 */
 async function collectOrFail(t: UserTree, limits: ShotsLimits): Promise<Collected | { reason: string }> {
+  // 叫停了不清点：不靠杀子进程抢在它跑完之前（小目录一眨眼就列完了）
+  t.signal?.throwIfAborted();
+  let collected: Collected;
   try {
-    return await collectShots(t, limits);
+    collected = await collectShots(t, limits);
   } catch (error) {
     if (aborted(t)) throw error;
     return { reason: `图片没清点成：${errMessage(error).slice(0, 200)}` };
   }
+  t.signal?.throwIfAborted();
+  return collected;
 }
 
 /** 树的 HEAD；不是 git 仓、或还没有提交回 null。 */
@@ -504,6 +509,7 @@ async function settleShots(
     return record({ ...base, ...extra, ...seen, outcome: 'delivered', files });
   }
   const pending: ShotsDelivery = { ...base, ...extra, ...seen, outcome: 'archived', files, missing, reason };
+  t.signal?.throwIfAborted();
   try {
     return await archiveShots(dir, input, deps, limits, collected.found, pending);
   } catch (error) {
