@@ -500,6 +500,88 @@ export async function checkoutPrHead(
   }
 }
 
+/** 日志里这一句表示没放进完整检出，会话只看提示词里的材料。 */
+export const VERIFY_CHECKOUT_FALLBACK = '验收会话没有放进 PR 头的完整检出（仍可看提示词里的材料）';
+
+/** 驾驶舱报警。同一个键只留一条；正文里有建不出的那个目录。 */
+export interface CheckoutBlockedAlert {
+  dedupeKey: string;
+  level: 'alert';
+  taskId: null;
+  title: string;
+  body: string;
+}
+
+export function checkoutBlockedAlert(dir: string, error: string): CheckoutBlockedAlert {
+  return {
+    dedupeKey: 'cold-verify:checkout-dir',
+    level: 'alert',
+    taskId: null,
+    title: '冷验收放不进 PR 头的完整检出',
+    body: `建不出 ${dir}：${error}。引擎用户要能在这一层下面 mkdir。`,
+  };
+}
+
+function errnoOf(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
+  const code = (error as { code: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+}
+
+export interface PlaceVerifyCheckoutInput {
+  dir: string;
+  head: string;
+  workflowId: string | undefined;
+  /** 不给就用 checkoutPrHead。测试换成先抛 EACCES、修好再真检出。 */
+  checkout?: (dir: string, head: string, workflowId: string | undefined) => Promise<void>;
+  /**
+   * mkdir 是 EACCES 时先调一次（生产：sudo fleet-agent-scope ensure-tmp，把 _tmp 改回引擎用户）。
+   * 不给就直接走退路。
+   */
+  repair?: (dir: string) => Promise<void>;
+  log?: (message: string, fields?: Record<string, unknown>) => void;
+  /** 退路：除了日志，把目录路径写进报警。写不进只记日志，不让验收因此停。 */
+  onBlocked?: (alert: CheckoutBlockedAlert) => Promise<void>;
+}
+
+/**
+ * 把 PR 头的完整检出放进 dir。_tmp 是 root:root 755、引擎用户建不了目录时先 repair 再试一次。
+ * 成功回 full。仍放不进回 blocked：记 VERIFY_CHECKOUT_FALLBACK，并 onBlocked（正文含 dir）。
+ */
+export async function placeVerifyCheckout(input: PlaceVerifyCheckoutInput): Promise<'full' | 'blocked'> {
+  const checkout = input.checkout ?? checkoutPrHead;
+  const log = input.log ?? (() => undefined);
+  const blocked = async (error: unknown): Promise<'blocked'> => {
+    const message = errMessage(error);
+    log(VERIFY_CHECKOUT_FALLBACK, { error: message, dir: input.dir });
+    if (input.onBlocked) {
+      try {
+        await input.onBlocked(checkoutBlockedAlert(input.dir, message));
+      } catch (alertError) {
+        log('冷验收检出目录的报警没写进库', { dir: input.dir, error: errMessage(alertError) });
+      }
+    }
+    return 'blocked';
+  };
+  try {
+    await checkout(input.dir, input.head, input.workflowId);
+    return 'full';
+  } catch (error) {
+    if (errnoOf(error) !== 'EACCES' || input.repair === undefined) return blocked(error);
+    try {
+      await input.repair(input.dir);
+    } catch (repairError) {
+      return blocked(repairError);
+    }
+    try {
+      await checkout(input.dir, input.head, input.workflowId);
+      return 'full';
+    } catch (again) {
+      return blocked(again);
+    }
+  }
+}
+
 function isSourceProblem(problem: string | undefined): boolean {
   return problem !== undefined && SOURCE_PREFIXES.some((p) => problem.startsWith(p));
 }

@@ -18,6 +18,9 @@ export FLEET_RELEASES_DIR=$TMP/releases
 # shellcheck source=../release.sh
 source "$HERE/../release.sh"
 set +e # release.sh 开了 -e；这里自己判每一步
+# activate 会换帮手、改 _tmp。这里换成桩：不写 /usr/local/sbin，也不碰真的 /var/lib/fleet-work。
+install_scope_helper() { :; }
+fix_work_tmp() { :; }
 mkdir -p "$RELEASES"
 SCRIPT_HK_PARTS=$FLEET_HK_PARTS # release.env 里不写 FLEET_HK_PARTS 时用的默认值（后面各段会改这个变量）
 

@@ -22,6 +22,8 @@
 //   才算有人推过（#2181：推完 0.1 秒就读到推之前的头，判成「头被别人改了」停下等人两个多小时）。
 // - 读 GitHub 先于一切、在 runColdVerifyForPr 外面做：GitHub 一时不通是 PortError（工作流按失败分流重试），不是「读不到 PR」那种要报人的结论。
 // - 验收会话的目录尽量放进 PR 头的完整检出（镜像里 git archive，放不进去就仍是空目录，不因此让验收失败）。
+//   _tmp 是 root:root 755 时先经 fleet-agent-scope ensure-tmp 把这一层改回引擎用户再试一次；仍放不进就记日志，
+//   并写一条驾驶舱报警（正文里有目录路径）。
 //   提示词允许在这个检出里读文件。diff 仍在提示词里。第 2 轮的 diff 是上一轮头到现在的头的增量，不是整张 PR。
 //   diff 超过 MAX_DIFF_CHARS：放不下的文件跳过并写明，不截断了假装看全。
 // - 有文本文件 GitHub 的文件接口没给 patch（大文件，#1308）：先用引擎镜像里的 git 补读（基线...头）；补出来超过
@@ -51,7 +53,12 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
-import { checkoutPrHead, incrementalDiffAtHead, runColdVerifyForPr } from '../cold-verify-run.ts';
+import {
+  type CheckoutBlockedAlert,
+  incrementalDiffAtHead,
+  placeVerifyCheckout,
+  runColdVerifyForPr,
+} from '../cold-verify-run.ts';
 import { createStatusMemo } from '../cold-verify-status.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
@@ -172,6 +179,13 @@ export interface ColdVerifyActivityDeps {
   newRunId?: () => string;
   heartbeatEveryMs?: number;
   log?: (message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * _tmp 不可写时先修再检出（生产：sudo fleet-agent-scope ensure-tmp）。
+   * 不给 = 建不了就直接退路，不试第二次。
+   */
+  repairWorkTmp?: (dir: string) => Promise<void>;
+  /** 退路时写驾驶舱报警（正文含目录）。不给 = 只记日志。写不进不让验收停。 */
+  onCheckoutBlocked?: (alert: CheckoutBlockedAlert) => Promise<void>;
 }
 
 /** 改到的文件，GitHub 给的样子（packages/github 的 PrFile）。 */
@@ -742,18 +756,15 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           }
           const { user } = await resolveSegmentRoute(deps.spawner, picked.routeId);
           const dir = deps.spawner.trees.tmpFor(`verify-${newRunId()}`);
-          // 放得进 PR 头的完整检出就放；镜像没有、提交不在，会话仍起，提示词里的材料还在。
-          try {
-            await checkoutPrHead(
-              dir,
-              input.headSha,
-              ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
-            );
-          } catch (error) {
-            log('验收会话没有放进 PR 头的完整检出（仍可看提示词里的材料）', {
-              error: errMessage(error),
-            });
-          }
+          // 放得进 PR 头的完整检出就放；镜像没有、提交不在、目录仍建不出，会话仍起，提示词里的材料还在。
+          await placeVerifyCheckout({
+            dir,
+            head: input.headSha,
+            workflowId: ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
+            ...(deps.repairWorkTmp ? { repair: deps.repairWorkTmp } : {}),
+            log,
+            ...(deps.onCheckoutBlocked ? { onBlocked: deps.onCheckoutBlocked } : {}),
+          });
           await deps.spawner.trees.adopt(dir, user);
           return {
             cwd: dir,

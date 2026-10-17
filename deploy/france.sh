@@ -17,7 +17,8 @@
 #   bash deploy/france.sh           装：缺的补上，已有的不动（整套，含人工档）
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
 #   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、发版接活脚本副本（#2728）、fleet-agents.slice、root ssh 会话的内存上限 user-0.slice（#2842）、清掉老机器上已删的演示版单元和脚本（#1223）、
-#                                   Mirasim 常驻单元（#1274；服务端本体不在记待配，单元文件内容变了才重启）
+#                                   Mirasim 常驻单元（#1274；服务端本体不在记待配，单元文件内容变了才重启）、
+#                                   换 fleet-agent-scope（sudoers 已放行这一个路径，只换文件）并把工作树 _tmp 改成引擎用户（冷验收要在下面 mkdir）
 #                                   （不碰防火墙、sudoers、用户、/etc/fleet-dao 里的钥匙和环境文件；幂等）。自动发布每发完一版以 root
 #                                   顺带跑它（docs/ops.md 第九节「装机层」）；规矩同步不在这里，由自动发布的规矩那一步做（同一条 agents-sync）。
 #                                   人工档（lib/human-tier.sh：建用户、防火墙、sudoers）只在整套跑时做。
@@ -1645,8 +1646,15 @@ readback_service_home() {
   fi
 }
 
+# 帮手脚本随自动档换：sudoers 已经放行这一个路径，这里只换文件内容（ensure-tmp）。
+# 整套装机的 setup_sudoers 也会写同一份；内容一样就什么都不改。
+install_scope_bin() {
+  put_file "$AGENT_SCOPE_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-agent-scope.sh")"
+}
+
 # 自动档（--auto-tier）：自动发布每发完一版以 root 顺带跑。只放不碰防火墙、sudoers、用户、机器上钥匙和环境文件的步骤
-# （例外只有 retire_old_units 删已退役、没人读的令牌文件和演示版的数据目录），
+# （例外只有 retire_old_units 删已退役、没人读的令牌文件和演示版的数据目录，以及 _tmp 这一层的属主：
+# 冷验收要能在下面 mkdir，不建用户、不改 sudoers），
 # 每一步都幂等（内容一样就什么都不动）。前提是整套装过一遍了（会话用户、/srv 下的目录都在）；没装过的机器这里判红。
 setup_auto_tier() {
   setup_slice
@@ -1654,6 +1662,9 @@ setup_auto_tier() {
   retire_old_units
   setup_auto_release
   setup_release_request_scripts
+  # 只把这段原文抽出来跑的测试里，下面两个函数不在作用域；整份 france.sh 里都在。
+  if declare -F install_scope_bin >/dev/null; then install_scope_bin; fi
+  if declare -F ensure_work_tmp >/dev/null; then ensure_work_tmp; fi
   # Mirasim 常驻单元（#1274：只在整套装机时装，后来改的单元文件一直落不到法国）：它只是个 systemd 单元，
   # 不碰权限和钥匙；服务端本体不在就记待配、不装（待配不算红）；单元文件内容真变了才重启，会话断开只此一次。
   # 放最后，它出问题不挡前面自动发布单元的装。
@@ -1678,6 +1689,8 @@ readback_auto_tier() {
   done
   readback_release_request_scripts
   readback_mirasim_session_unit
+  # 不对就红（句子里有目录路径），不在读回里改权限。抽出来跑的测试里这个函数不在。
+  if declare -F readback_work_tmp >/dev/null; then readback_work_tmp || true; fi
 }
 
 auto_tier_main() {

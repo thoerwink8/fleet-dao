@@ -975,11 +975,13 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
       `${fn} 不许碰防火墙、sudoers、建用户`,
     );
   }
-  // 自动档入口只调这五个（接活脚本副本跟在自动发布之后，#2728；Mirasim 常驻单元放最后，#1274；注释行不算）
+  // 自动档入口：接活脚本副本跟在自动发布之后（#2728）；_tmp 和帮手在 Mirasim 之前
+  // （Mirasim 常驻单元仍放最后，#1274）；注释行不算
   assert.match(
     body('setup_auto_tier').replace(/^\s*#.*\n/gm, ''),
-    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*setup_mirasim_session\s*$/,
+    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*if declare -F install_scope_bin >\/dev\/null; then install_scope_bin; fi\n\s*if declare -F ensure_work_tmp >\/dev\/null; then ensure_work_tmp; fi\n\s*setup_mirasim_session\s*$/,
   );
+  assert.match(body('readback_auto_tier'), /readback_work_tmp/);
   // 读回也读回它：缺了 MIRASIM_NO_AGENT_EGRESS=1 之类判红（check_mirasim_session_unit_file）
   const france2 = readFileSync(new URL('../france.sh', import.meta.url), 'utf8');
   assert.match(
@@ -990,6 +992,17 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
   for (const fn of ['setup_identity', 'setup_pilot', 'setup_sudoers', 'setup_firewall', 'render_firewall']) {
     assert.equal(body(fn), '', `${fn} 应当写在 deploy/lib/human-tier.sh`);
   }
+});
+
+test('发版在引擎起来之前换帮手并修好 _tmp', () => {
+  const release = readFileSync(new URL('../release.sh', import.meta.url), 'utf8');
+  assert.match(release, /source "\$DEPLOY_DIR\/lib\/human-tier\.sh"/);
+  assert.match(release, /fix_work_tmp\(\) \{[\s\S]*?ensure_work_tmp/);
+  const activate = /^activate\(\) \{.*\n([\s\S]*?)\n\}/m.exec(release)?.[1] ?? '';
+  const install = activate.indexOf('install_scope_helper');
+  const fix = activate.indexOf('fix_work_tmp');
+  const restart = activate.indexOf('ensure_unit_running');
+  assert.ok(install >= 0 && fix > install && restart > fix, `顺序不对：install=${install} fix=${fix} restart=${restart}`);
 });
 
 test('【故意造出的失败】状态文件读不出（不是 JSON、格式版本不对、不是对象、读不了）：这一轮什么都不做、不覆盖、报警；挪走后从空的起、报警自己撤（审查 S4）', async () => {

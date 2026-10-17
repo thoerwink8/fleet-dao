@@ -2,6 +2,7 @@
 // cursor-agent，real/hosts.ts）、工作树（fleet-agent-scope）各一份，拼成 EnginePorts。生产按环境变量装（realPortsFromEnv，
 // 见 deploy/france/desired-config.json 的 engine 段，env 样例 #747 删了）；缺了哪一项就不起，讲清楚缺什么，不带着半套配置接活。
 
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
@@ -11,6 +12,7 @@ import {
   type MeterFs,
   type MirasimConnect,
   parseSessionProxy,
+  SCOPE_HELPER,
   SESSION_USERS,
   type SessionsFs,
   type SessionUser,
@@ -28,6 +30,7 @@ import {
   finishScheduleRun,
   getFlowAssignment,
   getRun,
+  insertAlertOnce,
   latestRunOfTask,
   listIntakeRepos,
   readEngineMasterRow,
@@ -46,6 +49,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import type { EngineJobs, EngineTasks } from '../activities.ts';
+import { type CheckoutBlockedAlert } from '../cold-verify-run.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
@@ -172,6 +176,20 @@ export interface RealPorts {
   ports: EnginePorts;
   /** 工人起来接活之前收上一轮留下的会话 scope、临时目录、没收场的 runs 行、预占的名额（real/orphan-reap.ts）；回收了几个 scope。 */
   reapOrphanSessions(): Promise<number>;
+}
+
+/** _tmp 归了 root 时，冷验收自己 mkdir 会 EACCES。经已放行的帮手把这一层改回引擎用户（不递归）。 */
+function repairVerifyWorkTmp(): Promise<void> {
+  return new Promise((resolve, reject) => {
+    execFile('/usr/bin/sudo', ['-n', SCOPE_HELPER, 'ensure-tmp'], { timeout: 30_000 }, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+async function raiseCheckoutBlocked(db: Db, alert: CheckoutBlockedAlert): Promise<void> {
+  await insertAlertOnce(db, alert);
 }
 
 export function createRealPorts(deps: RealPortsDeps): RealPorts {
@@ -1167,6 +1185,8 @@ export function realPortsFromEnv(
       runsDir,
       sessions: oneShots,
       log: taskLog,
+      repairWorkTmp: () => repairVerifyWorkTmp(),
+      onCheckoutBlocked: (alert) => raiseCheckoutBlocked(db, alert),
     }),
   };
   // 临时指挥官整理待办（#1338，母单 #1335 第 3 片）：选路按用途 groom，会话和动手、验收会话同一份 Spawner 装配，登记进一次性会话的清单
