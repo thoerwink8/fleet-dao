@@ -12,6 +12,7 @@ import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { startWsServer, tempDir } from '@fleet-dao/adapters/testing';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runtimeSourceHash } from '../src/build.ts';
 import { DRIFT_NOTICE, type MigrationOptions, migrate, runningSessions } from '../src/migrate.ts';
 import { runChildOk } from './child.ts';
 
@@ -54,6 +55,7 @@ async function machine(
     badClis?: boolean;
     replyDelayMs?: number;
     silentClis?: boolean;
+    native?: (frame: Record<string, unknown>) => Record<string, unknown>[];
   } = {},
 ) {
   const home = tempDir();
@@ -99,6 +101,7 @@ async function machine(
     };
     peer.onMessage((f) => {
       frames.push(f);
+      for (const response of options.native?.(f) ?? []) send(response);
       // 实机 getConfig 是脱敏后的功能设置，不含 agentLaunch；启动器须从 listClis 回读。
       if (f.type === 'getConfig')
         send({
@@ -435,6 +438,277 @@ describe('旧接入迁移与回读', { timeout: 20_000 }, () => {
       expect((await migrate({ ...m.config, auto: true })).state).toBe('skipped');
       expect((await migrate({ ...m.config, auto: true, platform: 'linux' })).state).toBe('skipped');
       expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+});
+
+describe('残留会话的原生补核与等待源码更新', { timeout: 20_000 }, () => {
+  const noRun = (f: Record<string, unknown>): Record<string, unknown>[] =>
+    f.type === 'listSessions'
+      ? [{ type: 'sessions', reqId: f.reqId, sessions: [], hasMore: false }]
+      : f.type === 'subscribe'
+        ? [{ type: 'outbox', sessionKey: f.sessionKey, items: [], baseline: true, noRun: true }]
+        : [];
+
+  it('无 record 的历史目录必须经完整 global 列表和明确 noRun 基线核实，原文件保留', async () => {
+    const m = await machine({ native: noRun });
+    try {
+      rmSync(m.record);
+      const turns = join(resolve(m.record, '..'), 'turns.jsonl');
+      writeFileSync(turns, 'history\n');
+      expect((await migrate(m.config)).state).toBe('migrated');
+      expect(readFileSync(turns, 'utf8')).toBe('history\n');
+      expect(existsSync(m.record)).toBe(false);
+      const lists = m.frames.filter((f) => f.type === 'listSessions');
+      expect(lists.length).toBeGreaterThanOrEqual(4);
+      expect(
+        lists.every(
+          (f) => f.scope === 'global' && f.reqId && !('limit' in f) && !('query' in f) && !('source' in f),
+        ),
+      ).toBe(true);
+      expect(m.frames.filter((f) => f.type === 'unsubscribe')).toHaveLength(4);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it.each([
+    [
+      '列表仍有该会话',
+      (f: Record<string, unknown>) =>
+        f.type === 'listSessions'
+          ? [
+              {
+                type: 'sessions',
+                reqId: f.reqId,
+                sessions: [{ agent: 'claude', sessionKey: 'claude:managed-one', runState: 'completed' }],
+                hasMore: false,
+              },
+            ]
+          : noRun(f),
+    ],
+    [
+      '其他会话正在运行',
+      (f: Record<string, unknown>) =>
+        f.type === 'listSessions'
+          ? [
+              {
+                type: 'sessions',
+                reqId: f.reqId,
+                sessions: [{ agent: 'claude', sessionKey: 'claude:other', runState: 'running' }],
+                hasMore: false,
+              },
+            ]
+          : noRun(f),
+    ],
+    [
+      '列表缺状态字段',
+      (f: Record<string, unknown>) =>
+        f.type === 'listSessions'
+          ? [
+              {
+                type: 'sessions',
+                reqId: f.reqId,
+                sessions: [{ agent: 'claude', sessionKey: 'claude:other' }],
+                hasMore: false,
+              },
+            ]
+          : noRun(f),
+    ],
+    [
+      '列表不完整',
+      (f: Record<string, unknown>) =>
+        noRun(f).map((r) => (r.type === 'sessions' ? { ...r, hasMore: true } : r)),
+    ],
+    [
+      '列表缺完整标记',
+      (f: Record<string, unknown>) =>
+        noRun(f).map((r) => {
+          const copy = { ...r };
+          if (copy.type === 'sessions') delete copy.hasMore;
+          return copy;
+        }),
+    ],
+    [
+      '坏列表',
+      (f: Record<string, unknown>) =>
+        noRun(f).map((r) => (r.type === 'sessions' ? { ...r, sessions: null } : r)),
+    ],
+    [
+      '无 noRun',
+      (f: Record<string, unknown>) => noRun(f).map((r) => (r.type === 'outbox' ? { ...r, noRun: false } : r)),
+    ],
+    [
+      '有队列',
+      (f: Record<string, unknown>) => noRun(f).map((r) => (r.type === 'outbox' ? { ...r, items: [{}] } : r)),
+    ],
+    [
+      '仍有活动 snapshot',
+      (f: Record<string, unknown>) =>
+        f.type === 'subscribe'
+          ? [{ type: 'snapshot', sessionKey: f.sessionKey, snapshot: { phase: 'streaming' } }, ...noRun(f)]
+          : noRun(f),
+    ],
+    ['原生超时', () => []],
+  ])('%s：不把残留目录当空闲', async (_name, native) => {
+    const m = await machine({ native });
+    try {
+      rmSync(m.record);
+      const result = await migrate({ ...m.config, replyMs: 40 });
+      expect(result.state).toBe('waiting');
+      expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('磁盘 running 不被原生缺项覆盖', async () => {
+    const m = await machine({ busy: true, native: noRun });
+    try {
+      expect((await migrate(m.config)).state).toBe('waiting');
+      expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('一个实例确认残留，另一个实例仍有运行态：保持等待', async () => {
+    const m = await machine({ native: noRun });
+    const other = await startWsServer((peer) =>
+      peer.onMessage((f) => {
+        if (f.type === 'getConfig') peer.send({ type: 'config', config: {} });
+        if (f.type === 'listSessions')
+          peer.send({ type: 'sessions', reqId: f.reqId, sessions: [], hasMore: false });
+        if (f.type === 'subscribe')
+          peer.send({ type: 'snapshot', sessionKey: f.sessionKey, snapshot: { phase: 'streaming' } });
+      }),
+    );
+    try {
+      rmSync(m.record);
+      writeFileSync(join(m.home, '.mirasim', 'run', `local-${other.port}.token`), 'fixture-second');
+      expect((await migrate({ ...m.config, replyMs: 50 })).state).toBe('waiting');
+      expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
+    } finally {
+      await other.close();
+      await m.close();
+    }
+  });
+
+  it('任一实例的凭据存在但连接失败，其他实例确认缺项也不解除 unknown', async () => {
+    const m = await machine({ native: noRun });
+    const other = await startWsServer(() => {});
+    const port = other.port;
+    await other.close();
+    try {
+      rmSync(m.record);
+      writeFileSync(join(m.home, '.mirasim', 'run', `local-${port}.token`), 'fixture-unavailable');
+      expect((await migrate({ ...m.config, replyMs: 50 })).state).toBe('waiting');
+      expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('原生基线超时后以新连接重查，迟到旧基线不能使同轮等待放行', async () => {
+    const m = await machine({ native: (f) => (f.type === 'listSessions' ? noRun(f) : []) });
+    try {
+      rmSync(m.record);
+      expect((await migrate({ ...m.config, wait: true, replyMs: 30, maxWaitMs: 150 })).state).toBe('waiting');
+      expect(m.frames.filter((f) => f.type === 'subscribe')).toHaveLength(1);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('等待时报告原因和核对时间，判闲后采用等待期间更新的源码', async () => {
+    const m = await machine({ busy: true });
+    const observations: { state: string; detail: string; checkedAt: string }[] = [];
+    const source = join(m.repo, 'packages', 'mirasim-reclaude', 'launcher', 'main.go');
+    try {
+      const result = await migrate({
+        ...m.config,
+        wait: true,
+        onWaiting: (observation) => {
+          observations.push(observation);
+          writeFileSync(source, `${mini}\n// updated while waiting\n`);
+          writeFileSync(m.record, JSON.stringify({ runState: 'completed' }));
+        },
+        prepare: async ({ sourceHash, destination }) => {
+          expect(sourceHash).not.toBe(wantedHash);
+          expect(sourceHash).toBe(runtimeSourceHash(m.repo));
+          mkdirSync(resolve(destination, '..'), { recursive: true });
+          runChildOk(
+            'go',
+            ['build', '-o', destination, '-ldflags', `-X main.sourceHash=${sourceHash}`, '.'],
+            {
+              cwd: resolve(source, '..'),
+              limitMs: 60_000,
+            },
+          );
+          return destination;
+        },
+      });
+      expect(result.state).toBe('migrated');
+      expect(JSON.parse(readFileSync(result.recordFile, 'utf8')).sourceHash).toBe(runtimeSourceHash(m.repo));
+      expect(observations).toHaveLength(1);
+      expect(observations[0]?.state).toBe('busy');
+      expect(observations[0]?.detail).toContain('1');
+      expect(Number.isFinite(Date.parse(observations[0]?.checkedAt ?? ''))).toBe(true);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('准备后源码再变化：保留旧接入', async () => {
+    const m = await machine();
+    try {
+      const prepare = m.config.prepare;
+      if (!prepare) throw new Error('missing fixture prepare');
+      await expect(
+        migrate({
+          ...m.config,
+          prepare: async (input) => {
+            const result = await prepare(input);
+            writeFileSync(
+              join(m.repo, 'packages', 'mirasim-reclaude', 'launcher', 'main.go'),
+              `${mini}\n// changed during prepare\n`,
+            );
+            return result;
+          },
+        }),
+      ).rejects.toThrow('准备期间源码已更新');
+      expect(m.frames.some((f) => f.type === 'setAgentLaunch')).toBe(false);
+    } finally {
+      await m.close();
+    }
+  });
+
+  it('unknown 的具体等待原因也报告，不能只报 starting', async () => {
+    const m = await machine({ native: noRun });
+    try {
+      writeFileSync(m.record, '{broken');
+      const observations: { state: string; detail: string; checkedAt: string }[] = [];
+      // 原生列表仍有这个 ID，无法按历史残留解除。
+      const other = await startWsServer((peer) =>
+        peer.onMessage((f) => {
+          if (f.type === 'getConfig') peer.send({ type: 'config', config: {} });
+          if (f.type === 'listSessions')
+            peer.send({ type: 'sessions', reqId: f.reqId, sessions: [], hasMore: true });
+        }),
+      );
+      try {
+        writeFileSync(join(m.home, '.mirasim', 'run', `local-${other.port}.token`), 'fixture-second');
+        expect(
+          (await migrate({ ...m.config, replyMs: 30, onWaiting: (o) => observations.push(o) })).state,
+        ).toBe('waiting');
+        expect(observations[0]?.state).toBe('unknown');
+        expect(observations[0]?.detail).toContain('1 个');
+        expect(Number.isFinite(Date.parse(observations[0]?.checkedAt ?? ''))).toBe(true);
+      } finally {
+        await other.close();
+      }
     } finally {
       await m.close();
     }

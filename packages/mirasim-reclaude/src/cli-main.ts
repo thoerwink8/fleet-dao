@@ -63,6 +63,18 @@ try {
         rollback: args.includes('--rollback'),
         wait: !args.includes('--no-wait') && !args.includes('--check'),
         maxWaitMs: Math.max(0, until - Date.now()),
+        onWaiting: (observation) => {
+          if (worker)
+            atomicJson(workerFile(home), {
+              schema: 1,
+              pid: process.pid,
+              state: 'waiting',
+              idleState: observation.state,
+              detail: observation.detail,
+              checkedAt: observation.checkedAt,
+              updatedAt: observation.checkedAt,
+            });
+        },
       });
       say(result.detail);
       if (
