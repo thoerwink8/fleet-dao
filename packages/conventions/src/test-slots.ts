@@ -1,6 +1,8 @@
 // 本机「同时最多跑 N 个测试」的槽（pnpm test:changed 真起 vitest 之前拿一个，跑完还）。
 // 为什么：几个会话、几个代理各在自己的工作树里同时起 vitest，机器被拖垮、单次跑十几分钟甚至超时（实测）；
-// AGENTS.md 早就规定本机只跑 test:changed，但没人拦着「同时跑」，所以拦在这个必经的入口上。只管本机：CI 里不拿槽。
+// AGENTS.md 早就规定本机只跑 test:changed，但没人拦着「同时跑」，所以拦在这个必经的入口上。
+// 没有非空 FLEET_RUN_ID 的专用 CI 不拿槽（GitHub 一台跑一个任务）。引擎会话即使被写码 CLI 注入 CI=true/1 也拿：
+// 那不是专用 CI，同 test-run.ts 先认 ENGINE_SESSION_MARKER 再认 CI。外层已经拿着槽的嵌套 vitest 不再拿。
 //
 // 改这里之前必须知道：
 // - 纯 Node、跨平台（Windows、WSL、法国都要能跑，不用 flock）：槽 = 用户级目录（默认 ~/.fleet-dao/test-slots/，几个工作树共用同一把）
@@ -24,6 +26,7 @@ import {
 } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { join } from 'node:path';
+import { ENGINE_SESSION_MARKER } from './test-changed.ts';
 
 export class TestSlotError extends Error {
   constructor(message: string) {
@@ -100,10 +103,16 @@ export function readSlotConfig(env: Env, home: () => string = homedir): SlotConf
   };
 }
 
-/** 要不要拿槽：CI 里不拿（GitHub 的机器一台跑一个任务，不改 CI 怎么跑测试）；已经在拿着槽的 vitest 里（ENV_HELD）不再拿。 */
+/**
+ * 要不要拿槽。外层已经拿着（ENV_HELD 非空）不再拿，嵌套 vitest 不自己等自己。
+ * 然后先认引擎会话再认 CI：非空 ENGINE_SESSION_MARKER（FLEET_RUN_ID，同 test-run.ts 分核）一律拿槽。
+ * 写码 CLI 注入的 CI=true/1 不是专用 CI；没有这个标记时，CI 非空且不是 false/0 才跳过（GitHub 一台跑一个任务）。
+ * 空白标记、CI=false/0、普通本机都拿槽。
+ */
 export function slotPolicy(env: Env): { kind: 'lock' } | { kind: 'skip'; why: string } {
   const held = env[ENV_HELD]?.trim();
   if (held !== undefined && held !== '') return { kind: 'skip', why: '外层已经拿着本机测试槽' };
+  if (env[ENGINE_SESSION_MARKER]?.trim()) return { kind: 'lock' };
   const ci = env.CI?.trim().toLowerCase();
   if (ci !== undefined && ci !== '' && ci !== 'false' && ci !== '0') return { kind: 'skip', why: '在 CI 里' };
   return { kind: 'lock' };
@@ -388,9 +397,10 @@ export interface RunResult {
 }
 
 /**
- * pnpm test:changed 真起 vitest 的那一步：按 slotPolicy 决定拿不拿槽，拿了就带着 ENV_HELD 跑 run。
+ * pnpm test:changed 真起 vitest 的那一步：按 slotPolicy 决定拿不拿槽，拿了就带着真 token 跑 run。
+ * 引擎会话（非空 FLEET_RUN_ID）即使有 CI 也拿槽；跳过只发生在专用 CI 或外层已持槽，而且传下去的是 undefined，不写空 token。
  * 拿不到槽（满了等太久、槽目录用不了、环境变量写错）回 {status: null, error}——上游当「没跑成」（退出码 2），
- * 不是测试没过，更不会当成拿到了槽继续跑。
+ * 不是测试没过，更不会当成拿到了槽继续跑。run 被信号杀掉或自己抛错时，槽照样还，结果原样回去。
  */
 export function runInSlot(env: Env, deps: SlotDeps, run: (held: string | undefined) => RunResult): RunResult {
   if (slotPolicy(env).kind === 'skip') return run(undefined);
