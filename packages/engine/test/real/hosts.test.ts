@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import {
   buildClaudeArgs,
   buildSessionEnv,
+  type GrokRunReport,
   type GrokRunSpec,
+  type GrokStreamSummary,
   judgeRun,
   runGrok,
   SESSION_NO_PROXY,
@@ -882,6 +884,39 @@ describe('cursor-agent 的驱动', () => {
 });
 
 describe('grok 的驱动', () => {
+  function bareGrok(stream: Partial<GrokStreamSummary>, sessionId = '   '): ReturnType<typeof grokReport> {
+    const report: GrokRunReport = {
+      runId: 'r1',
+      requestedModel: 'grok-4.7',
+      session: { mode: 'new', id: sessionId },
+      stream: {
+        startedWork: false,
+        toolCalls: 0,
+        toolErrors: 0,
+        filesChanged: [],
+        testRuns: [],
+        errors: [],
+        maxTurnsReached: false,
+        modelCalls: 0,
+        frames: 0,
+        nonJsonLines: 0,
+        unknownFrames: {},
+        ...stream,
+      },
+      exitCode: 1,
+      signal: null,
+      stragglers: 0,
+      leftovers: 0,
+      stderrTail: '',
+      startedAt: '2026-10-01T00:00:00.000Z',
+      endedAt: '2026-10-01T00:00:01.000Z',
+      wallMs: 1,
+      lines: 0,
+      droppedLines: 0,
+    };
+    return grokReport(report);
+  }
+
   const grokWith = (script: FakeGrokScript) => {
     const fake = fakeGrokRun(() => script);
     return { fake, driver: drivers({ grok: fake.run }).grok };
@@ -900,7 +935,7 @@ describe('grok 的驱动', () => {
     expect(fake.options[0]?.command).toEqual(['/opt/fake/fleet-agent-carpool/grok']);
   });
 
-  it('开了会话、没到终帧就断了（半路被停、连不上）：会话号还是我们给它的那个（下次 -r 续得上）；一帧都没有就不给', async () => {
+  it('开了会话、没到终帧就断了（半路被停、连不上）：记下我们给它的号；一帧都没有就不写、并记明原因', async () => {
     const id = randomUUID();
     const cut = await grokWith({ replay: 'grok-edit-commit', replayLines: 30, exitCode: null }).driver.run(
       grokSpec({ session: { mode: 'new', id } }),
@@ -908,11 +943,44 @@ describe('grok 的驱动', () => {
     );
     expect(cut.facts).not.toHaveProperty('terminal');
     expect(cut.sessionId).toBe(id);
+    expect(cut).not.toHaveProperty('sessionIdWhy');
     const nothing = await grokWith({ stderr: 'Error: connection reset\n', exitCode: 1 }).driver.run(
       grokSpec({ session: { mode: 'new', id } }),
       {},
     );
     expect(nothing).not.toHaveProperty('sessionId');
+    expect(nothing.sessionIdWhy).toBe('Grok 没有输出帧，没读到 sessionId');
+  });
+
+  it('读不出会话号的几种情况各记一种原因，不写空串；读得出的记上', () => {
+    const unread = (stream: Partial<GrokStreamSummary>, why: string) => {
+      const report = bareGrok(stream);
+      expect(report).not.toHaveProperty('sessionId');
+      expect(report.sessionIdWhy).toBe(why);
+    };
+    unread({ frames: 0 }, 'Grok 没有输出帧，没读到 sessionId');
+    unread({ frames: 0, nonJsonLines: 2 }, 'Grok 输出没有可解析的 JSON 帧，没读到 sessionId');
+    unread({ frames: 1, errors: ['Not signed in'] }, 'Grok 只有 error 帧，没有建立会话的 sessionId');
+    unread({ frames: 1, end: { models: [], stopReason: 'end_turn' } }, 'Grok end 帧没有 sessionId');
+    unread({ frames: 2, errors: ['x'] }, 'Grok 没有 end 帧，也没有可沿用的会话号');
+    const kept = bareGrok({ frames: 2, errors: ['x'] }, '9cd315bc-0a1d-4025-8c11-e693d43ec1fb');
+    expect(kept.sessionId).toBe('9cd315bc-0a1d-4025-8c11-e693d43ec1fb');
+    expect(kept).not.toHaveProperty('sessionIdWhy');
+    const fromEnd = bareGrok({
+      frames: 1,
+      end: { models: [], sessionId: '973fa0d0-f0bc-4016-96a2-f318fa7a331c' },
+    });
+    expect(fromEnd.sessionId).toBe('973fa0d0-f0bc-4016-96a2-f318fa7a331c');
+  });
+
+  it('终帧只带 session_id：驱动记下这个号，不用我们起的那个顶替', async () => {
+    const id = '973fa0d0-f0bc-4016-96a2-f318fa7a331c';
+    const report = await grokWith({
+      keepSessionId: true,
+      frames: [{ type: 'end', stopReason: 'end_turn', session_id: id, modelUsage: {} }],
+    }).driver.run(grokSpec({ session: { mode: 'new', id: randomUUID() } }), {});
+    expect(report.sessionId).toBe(id);
+    expect(report).not.toHaveProperty('sessionIdWhy');
   });
 
   it('干活的会话放开命令（--always-approve），探针不放（要权限的工具一律被拒）；续会话照原号 -r；模型串照路由', async () => {
@@ -983,6 +1051,7 @@ describe('grok 的驱动', () => {
         'Alternatively, set the XAI_API_KEY environment variable or run `grok login` on a machine with a browser.',
     );
     expect(report).not.toHaveProperty('sessionId');
+    expect(report.sessionIdWhy).toBe('Grok 只有 error 帧，没有建立会话的 sessionId');
     expect(report.usage).toEqual({});
     expect(judgeRun(report.facts)).toMatchObject({ outcome: 'failed', reason: 'no_result' });
   });

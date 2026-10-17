@@ -9,7 +9,7 @@ import {
   releaseKilledSessions,
   wilsonInterval,
 } from '../src/queries/pipeline-health.ts';
-import { ROUND_OUTCOMES, taskFlowAssignments, taskRounds } from '../src/schema/index.ts';
+import { ROUND_OUTCOMES, runs, taskFlowAssignments, taskRounds } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import {
   addRepo,
@@ -89,6 +89,34 @@ describe('pipelineHealth', () => {
     // 快活 C：没提交、再合并
     await add('C', 'no_commit', ago(3 * DAY), 'fast');
     await add('C', 'merged', ago(3 * DAY - HOUR), 'fast', 5);
+    await t.db.insert(runs).values([
+      {
+        segment: 'manual',
+        model: 'm1',
+        startedAt: ago(2 * DAY + HOUR),
+        endedAt: ago(2 * DAY),
+        outcome: 'done',
+        resumeSessionId: 'session-1',
+        sessionId: 'session-1',
+      },
+      {
+        segment: 'manual',
+        model: 'm1',
+        startedAt: ago(2 * DAY + HOUR),
+        endedAt: ago(2 * DAY),
+        outcome: 'done',
+        resumeReason: '上一段没记下会话号',
+      },
+      {
+        segment: 'manual',
+        model: 'm1',
+        startedAt: ago(2 * DAY + HOUR),
+        endedAt: ago(2 * DAY),
+        outcome: 'done',
+        resumeSessionId: 'session-2',
+        sessionId: 'session-other',
+      },
+    ]);
     const h = await pipelineHealth(t.db, NOW);
     expect(h.rounds).toBe(5);
     const of = (o: string) => h.outcomes.find((x) => x.outcome === o);
@@ -106,6 +134,7 @@ describe('pipelineHealth', () => {
     });
     // p90 of [100, 1000] = 100 + 0.9 * 900
     expect(h.heavyAddedP90).toBe(910);
+    expect(h.resume).toEqual({ decisions: 3, resumed: 1, rate: 1 / 3 });
   });
 
   it('【故意造出的失败】窗口里一轮都没有：占比、p90 是 null，不拿 0 顶', async () => {
@@ -113,6 +142,7 @@ describe('pipelineHealth', () => {
     expect(h.rounds).toBe(0);
     expect(h.verifyRejectShare).toBeNull();
     expect(h.heavyAddedP90).toBeNull();
+    expect(h.resume).toEqual({ decisions: 0, resumed: 0, rate: null });
     expect(h.byTier).toEqual([]);
     expect(h.outcomes.every((o) => o.share === null)).toBe(true);
   });

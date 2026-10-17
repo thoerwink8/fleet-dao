@@ -151,6 +151,8 @@ export const SegmentRunSchema = z.object({
   memoryPeakMb: Count.optional(),
   /** 这一次会话的 CPU 秒数（大于 0）。没记不给，不当 0（#1980）。 */
   cpuSeconds: z.number().int().positive().optional(),
+  /** 判定不开上一段会话时的原因；页面原样显示。 */
+  resumeReason: z.string().min(1).optional(),
   failureReason: z.string().optional(),
   prNumber: z.number().int().positive().optional(),
   branch: z.string().optional(),

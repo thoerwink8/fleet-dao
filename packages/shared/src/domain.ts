@@ -412,6 +412,8 @@ export interface SegmentRun {
   workflowId?: string;
   /** 执行体报的会话号（库里 runs.session_id，收场时写；没开成会话、读不到不给）。发版暂停后「继续」的名单记它（#2038）。 */
   sessionId?: string;
+  /** 判定不开上一段会话时的原因；页面显示在这一段下面。 */
+  resumeReason?: string;
 }
 
 export type ProgressKind = 'plan' | 'say' | 'tool' | 'file' | 'test' | 'ask' | 'done' | 'blocked';

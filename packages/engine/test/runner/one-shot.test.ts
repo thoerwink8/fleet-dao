@@ -298,6 +298,32 @@ describe('one-shot.ts', () => {
     }
   });
 
+  it('把续会话判定写进 runs：续上的记期望会话号，没续上的记原因', async () => {
+    const { deps, recorded, cleanup } = await fakeDeps({
+      scripted: {
+        exitCode: 0,
+        stdout: 'x',
+        stderr: '',
+        killed: false,
+        facts: { sessionId: 'cursor:real-1' },
+      },
+    });
+    try {
+      await runOneShot(
+        { ...BASE_INPUT, runId: 'run-resume-recorded', resumeSessionId: 'cursor:previous-1' },
+        deps,
+      );
+      await runOneShot(
+        { ...BASE_INPUT, runId: 'run-new-recorded', resumeReason: '上一段没记下会话号' },
+        deps,
+      );
+      expect(recorded[0]).toMatchObject({ resumeSessionId: 'cursor:previous-1' });
+      expect(recorded[1]).toMatchObject({ resumeReason: '上一段没记下会话号' });
+    } finally {
+      await cleanup();
+    }
+  });
+
   it('落盘的 stdout/stderr/result.json 在 runId 目录下，TTL 24h 写在元数据里', async () => {
     const { deps, tmpDir, cleanup } = await fakeDeps({
       scripted: { exitCode: 0, stdout: 'x', stderr: '', killed: false },
@@ -587,6 +613,25 @@ describe('没会话号的用量（#2689）：确定没调用的记 0，读不准
       });
       expect(recorded[0]?.usageNote).toBeUndefined();
       expect(recorded[0]?.inputTokens).not.toBe(0);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('执行体明确说明没拿到会话号时，把具体原因接在用量说明里', async () => {
+    const { deps, recorded, cleanup } = await fakeDeps({
+      scripted: {
+        exitCode: 0,
+        stdout: '做完了',
+        stderr: '',
+        killed: false,
+        facts: { sessionIdWhy: 'Grok 没有 end 帧，输出没有报告 sessionId' },
+      },
+    });
+    try {
+      await runOneShot(BASE_INPUT, deps);
+      expect(recorded[0]?.usageNote).toContain('Grok 没有 end 帧');
+      expect(recorded[0]?.inputTokens).toBeUndefined();
     } finally {
       await cleanup();
     }

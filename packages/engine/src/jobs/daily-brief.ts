@@ -448,6 +448,16 @@ export function healthSection(
   // 这一行没查成也算这一节没查全（这一轮记 partial）
   const killUnread = typeof kills?.now === 'string' ? kills.now : undefined;
   const flowUnread = typeof flow === 'string' ? flow : undefined;
+  const resumeLine = (current: PipelineHealth, previous?: PipelineHealth): string => {
+    const beforeRate = previous?.resume.rate;
+    const ratio =
+      current.resume.rate === null
+        ? current.resume.decisions === 0
+          ? '这周没有明确判定'
+          : '—'
+        : shareVs(current.resume.rate, beforeRate);
+    return `返工续上会话：${current.resume.resumed}/${current.resume.decisions}，比例 ${ratio}`;
+  };
   const withKills = (s: BriefSection): BriefSection => {
     const extra = [...(killLine ? [killLine] : []), ...flowLines];
     if (extra.length === 0) return s;
@@ -460,6 +470,7 @@ export function healthSection(
   if (typeof before === 'string') lines.push(`7 天前那一周没查成（${before}），只列这一周`);
   if (now.rounds === 0) {
     lines.push(`近 7 天没有收场的轮${prev ? `（7 天前 ${prev.rounds} 轮）` : ''}。`);
+    lines.push(resumeLine(now, prev));
     return withKills({ heading, lines });
   }
   lines.push(`收场 ${numVs(now.rounds, prev ? prev.rounds : undefined, ' 轮')}`);
@@ -473,6 +484,7 @@ export function healthSection(
     );
   }
   lines.push(`冷验收拒绝占比：${shareVs(now.verifyRejectShare, prev ? prev.verifyRejectShare : undefined)}`);
+  lines.push(resumeLine(now, prev));
   for (const t of now.byTier) {
     const p = prev?.byTier.find((x) => x.tier === t.tier);
     const name = TIER_WORDS[t.tier] ?? t.tier;

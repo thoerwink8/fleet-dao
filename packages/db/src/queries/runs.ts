@@ -47,6 +47,10 @@ export interface RunInsert {
   costUsd?: number | null;
   /** 执行体报的会话号（收场才有）；没读到不给。 */
   sessionId?: string | null;
+  /** 判定这一段要续的上一段会话号；用于统计实际续上的比例。 */
+  resumeSessionId?: string | null;
+  /** 判定不开上一段会话、改开新会话的原因。 */
+  resumeReason?: string | null;
   /**
    * 用量没照终帧读到时记的「怎么来的、为什么缺」（白话）：会话被叫停、超时杀时各家插头给的那句写进 runs.usage_note。
    * 没读到就不写（交给「用量补记」按会话号补）。
@@ -970,6 +974,8 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     cacheWriteTokens: row.cacheWriteTokens ?? null,
     costUsd: row.costUsd ?? null,
     sessionId: row.sessionId ?? null,
+    resumeSessionId: row.resumeSessionId ?? null,
+    resumeReason: row.resumeReason ?? null,
     // 收场那一笔只在用量没照终帧读到时带（会话被叫停、超时杀：记的是怎么来的、缺的为什么读不到）；别的由「用量补记」和一次性回填写
     usageNote: row.usageNote ?? null,
     memoryPeakMb: row.memoryPeakMb ?? null,
@@ -995,6 +1001,8 @@ function pickRowWithoutId(r: RunRowSure) {
     routeWhy: sql`coalesce(${r.routeWhy}, ${runs.routeWhy})`,
     usageNote: sql`coalesce(${r.usageNote}, ${runs.usageNote})`,
     sessionId: sql`coalesce(${r.sessionId}, ${runs.sessionId})`,
+    resumeSessionId: sql`coalesce(${r.resumeSessionId}, ${runs.resumeSessionId})`,
+    resumeReason: sql`coalesce(${r.resumeReason}, ${runs.resumeReason})`,
     endedAt: sql`coalesce(${r.endedAt?.toISOString() ?? null}::timestamptz, ${runs.endedAt})`,
     outcome: sql`coalesce(${r.outcome}, ${runs.outcome})`,
     routeOutcome: sql`coalesce(${r.routeOutcome}, ${runs.routeOutcome})`,
