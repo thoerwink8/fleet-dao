@@ -57,6 +57,11 @@ describe('judgeIdleRunning：引擎自测那一段', () => {
     expect(v.body).not.toContain('换路由续之后');
   });
 
+  it('认的进度字样和改前工作流写进任务行的一字不差：在跑的老工作流、库里的老行照样认得出', () => {
+    expect(SELF_CHECK_DOING).toBe('引擎跑测试和类型检查');
+    expect(judgeIdleRunning(row({ doing: '第 3 轮：引擎跑测试和类型检查' }), NOW)).toEqual({ alert: false });
+  });
+
   it('别的进度照旧 20 分钟就报', () => {
     expect(judgeIdleRunning(row({ updatedAt: STALE }), NOW).alert).toBe(true);
   });
