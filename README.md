@@ -62,6 +62,7 @@
 - 计划：`pnpm plan` 从 GitHub 现读版本、先后、母单和子单打印出来，不写文件（#654 起仓里不存快照）；没登录、GitHub 读不到、先后标记认不出都报错、退出码 2。每天一轮 GitHub 对账（`.github/workflows/github-audit.yml`，随时也能 `pnpm github:audit`）查单子和先后有没有断，见 design 第七节「GitHub 对账」。
 - 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
 - 无人值守状态按真实会话号隔离：`unattended.mjs` 的命令依次读取 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`CODEX_SESSION_ID`；Stop 和 SessionStart 优先使用事件里的 `session_id`，缺失才读同一组环境变量。给出的来源不合法就明确报错，不借另一个会话号。
+- 无人值守接续：Claude/Codex 用同步 Stop 把未完成工作送到下一轮，成功 PostToolUse 登记实质进展；后台任务条数不证明完成通知送达。连续三次无进展明确暂停故障；on 只记意图，不代表已安装、信任、执行或通知验证。各入口能力与验法见 [CLI 无人值守接续](docs/design/CLI无人值守接续.md)。
 
 ### 批量开母子单
 

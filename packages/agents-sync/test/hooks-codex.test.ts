@@ -58,9 +58,12 @@ function state(text: string, key: string) {
 }
 
 describe('登记在哪、挂在哪', () => {
-  it('Codex 的目标：~/.codex/hooks.json，调工具前一条只挂 ^Bash$（Codex 跑命令一律叫 Bash，没有单独的读文件工具；决定 0083 不登记开会话）', () => {
+  it('Codex 登记安全检查及开场读回、完成进展、同步Stop接续，均由既有信任链管理', () => {
     expect(CODEX?.hooks).toEqual([
       { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
+      { event: 'SessionStart', script: 'continuation-start.mjs', timeout: 10 },
+      { event: 'PostToolUse', script: 'continuation-progress.mjs', timeout: 10 },
+      { event: 'Stop', script: 'stop.mjs', timeout: 10 },
     ]);
     expect(CODEX?.settings.linux).toBe('.codex/hooks.json');
     expect(HOOK_GAPS.codex).toBeUndefined();
@@ -89,7 +92,7 @@ describe('登记在哪、挂在哪', () => {
 });
 
 describe('装', () => {
-  it('新机器：hooks.json 登记一条、config.toml 记上一条信任；查全绿；第二遍零改动', () => {
+  it('新机器：完整登记并信任安全与接续四条；查全绿；第二遍零改动', () => {
     const m = machine();
     const lines = m.apply();
     expectKind(lines, HOOKS_JSON, 'changed');
@@ -98,6 +101,11 @@ describe('装', () => {
       PreToolUse: [
         { matcher: '^Bash$', hooks: [{ type: 'command', command: m.cmd('pretool-codex.mjs'), timeout: 10 }] },
       ],
+      SessionStart: [{ hooks: [{ type: 'command', command: m.cmd('continuation-start.mjs'), timeout: 10 }] }],
+      PostToolUse: [
+        { hooks: [{ type: 'command', command: m.cmd('continuation-progress.mjs'), timeout: 10 }] },
+      ],
+      Stop: [{ hooks: [{ type: 'command', command: m.cmd('stop.mjs'), timeout: 10 }] }],
     });
     const toml = m.config();
     expect(state(toml, m.key('pre_tool_use', 0)).trusted).toBe(
@@ -127,7 +135,7 @@ describe('装', () => {
     const s = scanCodexConfig(m.config());
     if (!s.ok) throw new Error(s.why);
     const keys = [...s.value.entries.keys()];
-    expect(keys).toHaveLength(1);
+    expect(keys).toHaveLength(4);
     const realJson = join(realpathSync.native(real), '.codex', 'hooks.json');
     for (const k of keys) expect(k.startsWith(`${realJson}:`)).toBe(true);
     // 故意造出的失败：按链接路径拼的键 Codex 不认
@@ -138,7 +146,7 @@ describe('装', () => {
   it('替别的用户写（法国装机）：开会话那条不登记，只登记、只信任调工具前那条', () => {
     const m = machine({ event: 'SessionStart', why: '开会话钩子要在那个用户自己能写的检出里快进' });
     m.apply();
-    expect(Object.keys(m.hooksJson().hooks)).toEqual(['PreToolUse']);
+    expect(Object.keys(m.hooksJson().hooks)).toEqual(['PreToolUse', 'PostToolUse', 'Stop']);
     expect(state(m.config(), m.key('pre_tool_use', 0)).trusted).toBe(
       m.hash('PreToolUse', '^Bash$', 'pretool-codex.mjs', 10),
     );
@@ -213,7 +221,13 @@ describe('别人的钩子、别的配置一条不碰', () => {
       'trusted_hash = "sha256:旧的"',
       '',
       `[hooks.state."${start.replaceAll('\\', '\\\\')}"]`,
-      `trusted_hash = "${m.hash('SessionStart', undefined, 'session-start.mjs', 90)}"`,
+      `trusted_hash = "${m.hash('SessionStart', undefined, 'continuation-start.mjs', 10)}"`,
+      '',
+      `[hooks.state."${m.key('post_tool_use', 0).replaceAll('\\', '\\\\')}"]`,
+      `trusted_hash = "${m.hash('PostToolUse', undefined, 'continuation-progress.mjs', 10)}"`,
+      '',
+      `[hooks.state."${m.key('stop', 0).replaceAll('\\', '\\\\')}"]`,
+      `trusted_hash = "${m.hash('Stop', undefined, 'stop.mjs', 10)}"`,
       '',
     ].join('\n');
     put(m.home, '.codex/config.toml', outside);

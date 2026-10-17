@@ -197,8 +197,8 @@ export interface HookTarget {
  * SessionStart 的输出进会话上下文；PreToolUse 退出码 2 拦下、stderr 给模型看；Stop 平时只提醒（systemMessage），
  * 退出码恒为 0（Stop 上 exit 2 是「不许停」）。没开无人值守时 Stop 不输出 decision:block；只有这个会话自己跑了 unattended.mjs on 才挡收尾（决定 0028，推翻 0026 的「收尾不拦」；起后台活不自动开仍是 0026）。
  * 开会话那条要取远端、快进、跑一遍同步，给足 90 秒。
- * 决定 0083：用户级只登记拦密钥（PreToolUse / BeforeTool）。开会话、收尾、落盘、主对话只在 fleet-dao 仓的项目设置
- * `.claude/settings.json`。下面写的事件语义是这些脚本自己的，不是用户级还在登记它们。
+ * Claude 过程钩子经订阅项目登记；Codex 的无人值守开场/完成进展/Stop 登记在用户 hooks.json，逐条信任。
+ * 两者只有会话自己开 on 才续轮，工具安全检查不依赖无人值守状态。
  * 借道读这份的：Grok 默认扫 ~/.claude/settings.json 的钩子（~/.grok/docs/user-guide/10-hooks.md「Hook Locations」，
  * 输入是 camelCase、终端工具叫 run_terminal_command，开会话钩子的输出不进上下文）；Devin CLI 默认 read_config_from.claude
  * （docs.devin.ai/cli/extensibility/hooks/overview，终端工具叫 exec）。Cursor 的命令行默认也读（cursor.com/docs/reference/third-party-hooks，
@@ -215,7 +215,7 @@ export interface HookTarget {
  * 第一组还挂了 Agent、Task、Monitor、Workflow：不是要判它们。决定 0026 删掉了「起后台活自动开无人值守」，
  * pretool.mjs 见到这几个名字记完就放行（decide 不认识它们的名字，不放行会被拦）。
  * mcp__mirasim__deliver_artifact、PushNotification 同理：decide 不认识这两个名字，不放行会被拦，所以登记上、见到就放行（pretool.mjs 的 DELIVERY_TOOLS，两边一起改）。决定 0027 起不再为它们记账。引擎经 --settings 自带的那条（adapters 的 PRETOOL_MATCHER）不加：引擎会话不靠这条放行。
- * Stop 事件借道的几家支不支持没一一核过：不支持就是从来不触发，装了也无害。
+ * 借道的几家未验证 Stop 接续能力，不登记未经支持的事件，不把安全钩子已装冒充接续可用。
  * 调工具前那条超时即拦、并且快（决定 0093 B1）：Claude Code 默认钩子超时就放行，等于安全检查空过（7 天 133 次，每次 7–40 秒）。
  * 根子是起进程的那两层：shell 形式在 Windows 上一律先起 Git Bash，再起 .NET 的启动器 quiet-*.exe，机器忙时这两层各自能卡十几秒；
  * node 本身满载时也在 250ms 内（2026-10-14 本机满载实测，数字见 docs/ops.md 那一条）。所以 Claude 那组登记成 exec 形式直接起 node（exec），
@@ -285,7 +285,12 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     settings: { win32: '.codex\\hooks.json', linux: '.codex/hooks.json' },
     format: 'codex',
     readers: ['codex'],
-    hooks: [{ event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 }],
+    hooks: [
+      { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
+      { event: 'SessionStart', script: 'continuation-start.mjs', timeout: 10 },
+      { event: 'PostToolUse', script: 'continuation-progress.mjs', timeout: 10 },
+      { event: 'Stop', script: 'stop.mjs', timeout: 10 },
+    ],
   },
   {
     settings: { win32: '.gemini\\settings.json', linux: '.gemini/settings.json' },

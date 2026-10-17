@@ -58,6 +58,8 @@ export const HOOK_FILES: Record<string, string> = {
   'session-start.mjs': '// 假的开会话钩子\n',
   'pretool.mjs': '// 假的调工具前钩子\n',
   'pretool-codex.mjs': '// 假的 Codex 调工具前钩子\n',
+  'continuation-start.mjs': '// 假的无人值守开场钩子\n',
+  'continuation-progress.mjs': '// 假的完成进展钩子\n',
   'pretool-gemini.mjs': '// 假的 Gemini CLI 调工具前钩子\n',
   'pretool-agy.mjs': '// 假的 Antigravity 调工具前钩子\n',
   'pretool-kimi.mjs': '// 假的 Kimi Code 调工具前钩子\n',
