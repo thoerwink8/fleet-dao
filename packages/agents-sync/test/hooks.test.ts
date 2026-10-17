@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Backups } from '../src/backup.ts';
 import { applyHooks, checkHooks, type HookSkip, handlerFor, hookCommand, ownedScript } from '../src/hooks.ts';
 import { exitCode } from '../src/report.ts';
+import { readSources } from '../src/sync.ts';
 import { type AgentId, HOOK_TARGETS } from '../src/targets.ts';
+import { runChild } from './child.ts';
 import {
   cleanup,
   ctxFor,
@@ -501,17 +503,24 @@ describe('读不懂、被人改坏：不当成空的重写，报出来', () => {
     expect(get(m.home, '.fleet-dao/hooks/pretool.mjs')).toBe(HOOK_FILES['pretool.mjs']);
   });
 
-  it('仓里删了的钩子脚本、机器上还留着（旧的 steer-recover.mjs，2026-10-04 去掉）：查判漂移（多了它），同步后必须被删，别的脚本在', () => {
-    const m = machine();
+  it('退役脚本查出漂移后清除，当前helper保留，二次apply不变', () => {
+    const scripts = {
+      ...HOOK_FILES,
+      'background-recovery.mjs': '// recovery',
+      'session-id.mjs': '// pure sid',
+    };
+    const m = machine(['claude'], scripts);
     m.apply();
-    put(m.home, '.fleet-dao/hooks/steer-recover.mjs', '// 以前装的补回钩子，仓里已经没有了\n');
+    for (const name of ['steer-recover.mjs', 'inbox-tick.mjs', 'inbox-watch.mjs', 'steer-shown.mjs'])
+      put(m.home, '.fleet-dao/hooks/' + name, '// retired');
     const drift = m.check();
     expectKind(drift, SCRIPTS, 'drift');
-    expect(drift.find((l) => l.key === SCRIPTS)?.text).toContain('多了 steer-recover.mjs');
+    for (const name of ['inbox-tick.mjs', 'inbox-watch.mjs', 'steer-shown.mjs'])
+      expect(drift.find((l) => l.key === SCRIPTS)?.text).toContain(name);
     expectKind(m.apply(), SCRIPTS, 'changed');
-    expect(existsSync(join(m.home, '.fleet-dao', 'hooks', 'steer-recover.mjs'))).toBe(false);
-    expect(readdirSync(join(m.home, '.fleet-dao', 'hooks')).sort()).toEqual(Object.keys(HOOK_FILES).sort());
+    expect(readdirSync(join(m.home, '.fleet-dao', 'hooks')).sort()).toEqual(Object.keys(scripts).sort());
     expect(exitCode(m.check())).toBe(0);
+    expectKind(m.apply(), SCRIPTS, 'ok');
   });
 
   it('仓里没有 agents/hooks/（检出太旧）：脚本查判没查成、登记照查（缺失），写报没做成，不登记指向空处的命令', () => {
@@ -592,4 +601,50 @@ describe('各家：装在哪、没装的说为什么', () => {
     expect(ownedScript('node /x/fleet-guard/pretool.mjs.bak')).toBeNull();
     expect(ownedScript(undefined)).toBeNull();
   });
+});
+
+it('完整源码readSources到临时安装，真实main-thread与session-start可加载新helper', async () => {
+  const repo = fileURLToPath(new URL('../../../', import.meta.url));
+  const read = readSources(repo);
+  expect(read.ok).toBe(true);
+  if (!read.ok) throw new Error(read.why);
+  const home = tempDir('full-source-hooks');
+  const ctx = ctxFor(home, ['claude']);
+  const src = read.value;
+  expectKind(applyHooks(ctx, src, new Backups(home, PLATFORM, NOW)), SCRIPTS, 'changed');
+  for (const name of ['session-id.mjs', 'background-recovery.mjs'])
+    expect(existsSync(join(home, '.fleet-dao', 'hooks', name))).toBe(true);
+  for (const name of ['inbox-tick.mjs', 'inbox-watch.mjs', 'steer-shown.mjs'])
+    expect(existsSync(join(home, '.fleet-dao', 'hooks', name))).toBe(false);
+  const installed = join(home, '.fleet-dao', 'hooks');
+  const transcript = put(
+    home,
+    'transcript.jsonl',
+    JSON.stringify({
+      type: 'user',
+      uuid: 'restart-full',
+      origin: { kind: 'task-notification' },
+      message: {
+        content:
+          '<task-notification><task-id>agent-full</task-id><summary>Agent check did not finish before the previous session ended</summary></task-notification>',
+      },
+    }),
+  );
+  const r = runChild(process.execPath, [join(installed, 'main-thread.mjs')], {
+    input: JSON.stringify({ session_id: 'full', tool_name: 'Bash', transcript_path: transcript }),
+    env: { ...process.env, FLEET_HEADLESS: '', FLEET_INBOX_SEEN_DIR: join(home, 'restart-state') },
+  });
+  expect(r.status, r.stderr).toBe(0);
+  expect(JSON.parse(r.stdout).hookSpecificOutput.additionalContext).toContain('agent-full');
+  const start = await import(pathToFileURL(join(installed, 'session-start.mjs')).href);
+  expect(
+    start.recentPrompts({
+      home,
+      now: NOW.getTime(),
+      sessionId: 'full',
+      env: { FLEET_MIRASIM_DIR: join(home, 'none') },
+    }),
+  ).toEqual([]);
+  expect(exitCode(checkHooks(ctx, src))).toBe(0);
+  expectKind(applyHooks(ctx, src, new Backups(home, PLATFORM, NOW)), SCRIPTS, 'ok');
 });

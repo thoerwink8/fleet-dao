@@ -118,6 +118,76 @@ describe('定时读额度', () => {
     expect(w.raised.map((a) => a.key)).not.toContain(poolAlertKey('jev'));
   });
 
+  it('退役池从有效配置移出：不读、不写旧额度，其他必读池失败仍是 partial', async () => {
+    const w = world([failed('p1', 'unreachable')], {
+      loadConfig: async () =>
+        ({
+          pools: [{ poolId: 'p1', channelId: 'disabled-channel', reader: 'reclaude-carpool' }],
+          notRead: [{ poolId: 'mirasim-relay', why: 'Mirasim 已退役' }],
+        }) as unknown as QuotaConfig,
+    });
+    const readPoolIds: string[][] = [];
+    w.deps.read = async (config) => {
+      readPoolIds.push(config.pools.map((p) => p.poolId));
+      return {
+        startedAt: NOW.toISOString(),
+        finishedAt: NOW.toISOString(),
+        results: [failed('p1', 'unreachable')],
+      };
+    };
+
+    const run = await runQuotaReadJob(w.deps);
+
+    expect(readPoolIds).toEqual([['p1']]);
+    expect(w.saved).toEqual([]);
+    expect(w.resolved).toContain(poolAlertKey('mirasim-relay'));
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('p1 没读成（unreachable）');
+  });
+
+  it('退役池不计入扫描结局：其他必读池都读成才是 ok', async () => {
+    const w = world([ok('p1')], {
+      loadConfig: async () =>
+        ({
+          pools: [{ poolId: 'p1', channelId: 'disabled-channel', reader: 'reclaude-carpool' }],
+          notRead: [{ poolId: 'mirasim-relay', why: 'Mirasim 已退役' }],
+        }) as unknown as QuotaConfig,
+    });
+    w.deps.read = async (config) => {
+      expect(config.pools.map((p) => p.poolId)).toEqual(['p1']);
+      return { startedAt: NOW.toISOString(), finishedAt: NOW.toISOString(), results: [ok('p1')] };
+    };
+
+    await expect(runQuotaReadJob(w.deps)).resolves.toMatchObject({ outcome: 'ok', scanned: 1 });
+    expect(w.saved.map((s) => s.poolId)).toEqual(['p1']);
+  });
+
+  it('没有退役标记时，渠道即使下架也不能替必读池免读；缺凭据仍是明确 partial', async () => {
+    const w = world([failed('mirasim-relay', 'no_credentials', '没有令牌')], {
+      loadConfig: async () =>
+        ({
+          pools: [{ poolId: 'mirasim-relay', channelId: 'mirasim-disabled', reader: 'mirasim-relay' }],
+        }) as unknown as QuotaConfig,
+    });
+    let read = 0;
+    w.deps.read = async (config) => {
+      read += 1;
+      expect(config.pools.map((p) => p.poolId)).toEqual(['mirasim-relay']);
+      return {
+        startedAt: NOW.toISOString(),
+        finishedAt: NOW.toISOString(),
+        results: [failed('mirasim-relay', 'no_credentials', '没有令牌')],
+      };
+    };
+
+    const run = await runQuotaReadJob(w.deps);
+
+    expect(read).toBe(1);
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('mirasim-relay 没读成（no_credentials）');
+    expect(w.raised.map((a) => a.key)).toEqual([poolAlertKey('mirasim-relay')]);
+  });
+
   it('读成：写库、撤掉这个池的旧提醒、这一轮记 ok', async () => {
     const w = world([ok('p1'), ok('p2')]);
     const run = await runQuotaReadJob(w.deps);

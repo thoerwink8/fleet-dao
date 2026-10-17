@@ -15,6 +15,15 @@ describe('StatusBadge', () => {
     expect(el.dataset.variant).toBe('soft');
   });
 
+  test('title 写在带 data-tone 的胶囊上，不另包一层', () => {
+    const { container } = render(<StatusBadge tone="stop" label="已下架" title="模型已下架" />);
+    const chip = container.querySelector('span');
+    expect(chip?.textContent).toContain('已下架');
+    expect(chip?.getAttribute('data-tone')).toBe('stop');
+    expect(chip?.getAttribute('title')).toBe('模型已下架');
+    expect(chip?.closest('[data-tone]')?.getAttribute('data-tone')).toBe('stop');
+  });
+
   test('soft 和 outline 带图标，在跑的用呼吸点；dot 只有点；icon=false 没有图标', () => {
     const { container, rerender } = render(<StatusBadge tone="fail" label="失败" />);
     expect(container.querySelector('svg')).not.toBeNull();

@@ -27,6 +27,7 @@ export function StatusBadge({
   variant = 'soft',
   icon = true,
   className,
+  title,
 }: {
   tone: LayoutTone;
   label: string;
@@ -35,12 +36,15 @@ export function StatusBadge({
   /** 是否画图标（soft、outline）。关掉就只剩字；在跑的用呼吸点。 */
   icon?: boolean;
   className?: string;
+  /** 悬停说明。写在胶囊自己身上，不再外包一层，目录行里第一层 span 仍是这颗带 data-tone 的胶囊。 */
+  title?: string;
 }) {
   const Icon = iconOf(tone);
   return (
     <span
       data-tone={tone}
       data-variant={variant}
+      {...(title !== undefined ? { title } : {})}
       className={cn(
         badgeShape,
         'gap-1',

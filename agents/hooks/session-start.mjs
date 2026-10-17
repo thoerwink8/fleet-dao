@@ -6,7 +6,7 @@
 //    Mirasim 每条消息都 --resume，这一钩子每轮都跑（Claude Code 要求 SessionStart 保持快：
 //    https://code.claude.com/docs/en/hooks ）。git fetch、问 GitHub、扫工作树和 QUIET_MS 共用一扇门，
 //    记在 ~/.fleet-dao/session-net/：三分钟内做过就跳过，失败也记上一笔，免得断网时每条消息都等满超时。
-//    跳过时仍用手里已有的 origin/main 做本地核对。引导对账、临时调整、仓里的创始人引导每轮都做。
+//    跳过时仍用手里已有的 origin/main 做本地核对。历史读取、临时调整、仓里的创始人引导每轮都做。
 //    工人（FLEET_WORKER=1）不走这扇门，起来就要当前的远端。
 // 2. 这台机器的规矩、技能、钩子、权限：同步脚本另有**一份只归它的检出**（~/.fleet-dao/origin-main，
 //    agents/hooks/sync-source.mjs），永远停在 origin/main 的分离头上，再跑一遍 agents-sync --apply；结论一句话。
@@ -46,7 +46,7 @@ import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { backgroundEnv, backgroundState, launchBackground, processAlive } from './background-launch.mjs';
-import { lineageOf, markSeen, readSeen, reconcileInbox, seenKey } from './founder-inbox.mjs';
+import { lineageOf, readFounderHistory } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
@@ -524,22 +524,7 @@ export function syncFleet({ home, git, sync, fetch = null, now = Date.now(), see
   }
 }
 
-/**
- * 创始人最近落盘的话（agents/hooks/prompt-log.mjs 在他每条消息一提交就写进 ~/.fleet-dao/prompt-log/<北京日期>.jsonl）。
- * 为什么开会话时列出来：他的话有两种丢法，一种是到了没处理，一种是排队时
- * 会话进程死了、从头没送到——钩子在提交那一刻就落了盘，新会话开场看一眼这份文件，上一个会话没来得及处理的话就在这里，不靠他重发。
- * 「上一个会话」只认同一条血缘：同一个 Mirasim 会话换了原生会话号（/compact、换模型）之前的那个号（founder-inbox.mjs 的 lineageOf）。
- * 别的 Mirasim 会话收到的话不列；无血缘的不列。
- * 列最近 RECENT_MS 以内、本会话还没见过的全部（当前这个号自己落盘的话它早见过，不列），每条截到 RECENT_CHARS 字，总字数到 RECENT_TOTAL_CHARS
- * 封顶（超了留最新的、写明更早的几条没列）；没有文件、没有最近的话都不出声；读不了文件（不是没有，是读不了）要说一句，不当成「没有」。
- * 机器派的会话（工人、反方）的提示现在不落盘（prompt-log.mjs）；这里再滤一遍，是为了 10-05 之前已经落盘的那些。
- * 第三种丢法：他在一轮跑着时打的字走 Mirasim 的「引导」，那一轮被打断、出错就丢了，
- * Claude Code 从头没收到、prompt-log 里自然也没有。所以再拿 Mirasim 自己记的「发了的账」（founder-inbox.mjs）和这份「收到的账」对一遍，
- * 发了没收到的单独一行、放前面、叫会话先答。这一段在每一轮开头都跑（Mirasim 每轮都 --resume 起进程，SessionStart 每轮都触发），
- * 所以上一轮丢的引导下一轮一开头就补上了。对账范围是「上一轮（含）以来」不是固定 RECENT_MS（一轮能跑一个多小时），见 founder-inbox.mjs 开头；下面「列收到的话」仍只看 RECENT_MS。
- * 一轮里的丢失由主线程每次工具调用时的 main-thread.mjs（inbox-tick.mjs，60 秒最多读一次账）当场塞给会话，不等到这里：
- * 它塞过的记在「已见名单」（founder-inbox.mjs 的 readSeen / markSeen），这里读同一份，塞过的不再列成没收到；这里列出来的也记进去（markSeen: true，真开会话时才传），轮中不会再塞一遍。
- */
+/** 同血缘旧号实际收到的历史，只读；当前号排除，时间与字数封顶，读取失败明确报告。 */
 export const RECENT_MS = 60 * 60_000;
 export const RECENT_CHARS = 200;
 export const RECENT_TOTAL_CHARS = 3000;
@@ -550,45 +535,19 @@ export function recentPrompts({
   sessionId = null,
   env = process.env,
   lineage = null,
-  markSeen: remember = false,
 }) {
-  // 只认本血缘（同一个 Mirasim 会话用过的原生会话号，founder-inbox.mjs 的 lineageOf）：别的 Mirasim 会话收到的话一概不列
-  // 只列本血缘的：列所有会话的话，另一个项目的会话会把它当成自己的活办掉。
-  // 无血缘（不是 Mirasim 起的、这台没装）两行都不出，不拿别的会话的话顶；没查成明说。
-  // 对账本身（发了的账对收到的账）在 founder-inbox.mjs 的 reconcileInbox：主线程每次工具调用后的 inbox-tick.mjs 也走它。
-  const rec = reconcileInbox({ home, now, sessionId, env, dir, lineage });
+  const rec = readFounderHistory({ home, now, sessionId, env, dir, lineage });
   if (rec.status === 'none') return [];
   if (rec.status === 'unchecked')
     return [
-      `创始人的话没核成：认不出本会话是哪个 Mirasim 会话（${rec.why}）；本会话丢的话、换会话号之前收到的话这次没列。别拿别的会话的话当自己的活。`,
+      '创始人历史没核成：认不出本会话是哪个 Mirasim 会话（' +
+        rec.why +
+        '）；换会话号之前的历史这次没列。别拿别的会话的话当自己的活。',
     ];
-  if (rec.readError) return [rec.readError];
-  const { line, sent, received } = rec;
+  const { sent, received } = rec;
   const lines = [];
-  // 发了的账和收到的账对一遍：发了、没收到的就是丢在 Mirasim「引导」里的那种（founder-inbox.mjs 开头）。
-  // 发了的只读了本血缘那个目录，收到的也只留本血缘的：换了原生会话号之前丢的也补回本会话；别的会话丢的不进来
-  if (!sent.absent) {
-    for (const p of sent.problems) lines.push(`创始人在 Mirasim 里发的话没读全：${p}；有没有丢的核不了。`);
-    for (const p of rec.relayProblems) lines.push(`旧的引导记录没核成：${p}；这次分不清哪些已经转过。`);
-    // 轮中已经由 inbox-tick.mjs 塞给会话的（本血缘的已见名单）不再列成没收到
-    const seen = readSeen({ home, env, lineDir: line.dir });
-    if (seen.problem) lines.push(`本会话的「已塞过的引导」名单没读成：${seen.problem}；塞过的可能再列一遍。`);
-    const lost = rec.lost.filter((s) => !seen.keys.has(seenKey(s)));
-    if (lost.length > 0) {
-      const shown = packNewestFirst(lost);
-      lines.push(
-        `创始人发了、但 Claude Code 没收到的话（Mirasim 的「引导」在那一轮被打断或出错时丢了，他以为你看到了；共 ${lost.length} 条${shown.omitted}）：${shown.items.join(' ')} 先答这些，答完再接着干。`,
-      );
-      // 列过了就记进已见名单，轮中的 inbox-tick 不再把同一条塞第二遍
-      if (remember) {
-        try {
-          markSeen({ home, env, lineDir: line.dir, entries: lost, now });
-        } catch (err) {
-          lines.push(`已列出的引导没记进已见名单（${err?.code ?? err}）；这一轮里可能被再塞一遍。`);
-        }
-      }
-    }
-  }
+  if (rec.readError) lines.push(rec.readError);
+  if (!sent.absent) for (const p of sent.problems) lines.push('创始人在 Mirasim 里的历史没读全：' + p);
   // 同一个 Mirasim 会话换原生会话号之前收到的（/compact、换模型）：当前这个号自己收到的它早见过，不列
   const earlier = received.filter((e) => now - e.at <= RECENT_MS && e.sessionId !== sessionId);
   if (earlier.length > 0) {
@@ -1066,7 +1025,7 @@ export function sessionStart({
           mirror: syncDir ? join(syncDir, PROGRESS_SCRIPT) : null,
           lineage,
         })),
-    ...recentPrompts({ home, now, sessionId, env, lineage, markSeen: true }),
+    ...recentPrompts({ home, now, sessionId, env, lineage }),
     ...(quiet ? [] : sweepWorktrees(cwd, localGit, now, home)),
     ...(quiet
       ? []
@@ -1144,15 +1103,6 @@ function writeJsonAtomic(path, value) {
   writeFileSync(tmp, JSON.stringify(value));
   renameSync(tmp, path);
 }
-
-/** 跑脚本的结果存进 JSON：error 只留 message、code（why() 只看这两样） */
-const plainRun = (r) => ({
-  status: r.status,
-  stdout: r.stdout ?? '',
-  stderr: r.stderr ?? '',
-  ...(r.timeoutMs ? { timeoutMs: r.timeoutMs } : {}),
-  ...(r.error ? { error: { message: r.error.message, code: r.error.code } } : {}),
-});
 
 /**
  * 后台那半：取远端、规矩同步、整池暂停、绿了没挂的 PR、扫工作树，结果写进 bgCachePath。每一步单独兜住，出错记 { ok: false, why }。
@@ -1306,7 +1256,7 @@ export function fastSessionStart({
       opts: { now },
     }),
   );
-  lines.push(...recentPrompts({ home, now, sessionId, env, lineage, markSeen: true }));
+  lines.push(...recentPrompts({ home, now, sessionId, env, lineage }));
   const sw = got('sweep');
   if (sw?.ok && Array.isArray(sw.value)) lines.push(...sw.value.map(aged));
   lines.push(...failed('sweep', '清工作树'));

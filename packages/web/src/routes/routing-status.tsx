@@ -61,13 +61,21 @@ import {
   buildChannelCards,
   type ChannelCard,
   channelMatchesFilter,
+  quotaCountText,
+  quotaResetLine,
   routeKindMap,
 } from '../lib/channel-status';
 import { formatAgo, formatClock, TIME } from '../lib/format';
 import { useMediaQuery, useNow } from '../lib/hooks';
 import { poolIsHeld } from '../lib/pool-holds';
 import type { PoolProblem } from '../lib/pool-problems';
-import { identityMismatchRoutes } from '../lib/probe-history-view';
+import {
+  currentQuotaCells,
+  identityMismatchRoutes,
+  isCurrentProbe,
+  PROBE_KIND_WORD,
+  quotaResetText,
+} from '../lib/probe-history-view';
 import { lastProbeLine, type NextProbeLine, nextProbeLine, PROBE_TIER_WORD } from '../lib/probe-pace-view';
 import {
   activeFor,
@@ -79,6 +87,7 @@ import {
 } from '../lib/route-probe';
 import {
   countsText,
+  quotaProbeWhy,
   type RouteStateKind,
   routeStateLabel,
   routeStateWhy,
@@ -190,12 +199,20 @@ export default function RoutingStatus() {
         : new Set<string>(),
     [historyQuery.data],
   );
+  // 连通但额度耗尽的路由（#2939）：只认和路由当前探针同一次的最新记录；历史读不到时没有（页面另写没读成）
+  const quotaCells = useMemo(
+    () =>
+      routing.data && historyQuery.data && historyQuery.data.state !== 'unreadable'
+        ? currentQuotaCells(historyQuery.data.latestByRoute, routing.data.routes)
+        : new Map<string, ProbeHistoryCell>(),
+    [routing.data, historyQuery.data],
+  );
   const cards = useMemo(
     () =>
       routing.data && layers.data
-        ? buildChannelCards(routing.data, layers.data, now, poolHeld, mismatch)
+        ? buildChannelCards(routing.data, layers.data, now, poolHeld, mismatch, quotaCells)
         : [],
-    [routing.data, layers.data, now, poolHeld, mismatch],
+    [routing.data, layers.data, now, poolHeld, mismatch, quotaCells],
   );
   const kinds = useMemo(
     () =>
@@ -650,8 +667,15 @@ function heroLineOf(card: ChannelCard): string {
       : '还没顺延出去：没有别的渠道可派，或还没有新的活';
   }
   if (card.interrupted) return '上次探测已过时，结论不再当现状';
+  const quota = card.quota;
   const said = conclusionOf(card);
-  if (said) return said;
+  // 连通但额度耗尽（#2939）：连接是通的；全部在用的路耗尽才说「都耗尽」，部分路耗尽说清几条
+  if (said) return quota ? `${said}；另有 ${quota.routes} 条连通但额度耗尽` : said;
+  if (quota && card.state === 'ok') {
+    return quota.routes === card.activeRoutes
+      ? `连通，但在用的 ${card.activeRoutes} 条路额度都耗尽了`
+      : `连通；在用的 ${card.activeRoutes} 条路里 ${quota.routes} 条额度耗尽，其余可用`;
+  }
   if (card.kind === 'off' || card.kind === 'retired' || card.kind === 'held') return '整个渠道关着，不派活';
   if (card.kind === 'unused') return '没有用途在用它，不主动探';
   if (card.state === 'ok') return `在用的 ${card.activeRoutes} 条路都在线`;
@@ -764,6 +788,9 @@ function ChannelDetail({
   const heroNotes = [
     `${billing} · ${routes.length} 条路由`,
     countsText(card.counts),
+    quotaCountText(card) ?? null,
+    card.quota ? quotaResetLine(card.quota) : null,
+    history.state === 'unreadable' ? '额度状态没读成（探针历史读不到）' : null,
     card.probedAt ? `${formatAgo(card.probedAt, now)}探的` : null,
   ]
     .filter((x): x is string => x !== null)
@@ -968,10 +995,16 @@ function RouteRow({
     ? (STATE_WORD[probe.state] ?? OLD_STATE_WORD)
     : { label: '还没探到', tone: 'stop' as Tone };
   // 上次那一句：触发者、种类优先读路由目录的 probeTrigger、probeKind；目录没给（老后端）才用探测记录里同一次的（相差不到 1 分钟）
-  const sameProbe =
-    probe !== undefined &&
-    lastCell !== undefined &&
-    Math.abs(Date.parse(lastCell.probedAt) - Date.parse(probe.at)) < TIME.MIN;
+  const sameProbe = isCurrentProbe(lastCell, probe);
+  // 连通但额度耗尽（#2939）：只认和当前探针同一次的那条记录，探针已经更新过的旧额度记录不作数
+  const quotaCell =
+    sameProbe &&
+    probe?.state === 'ok' &&
+    lastCell &&
+    lastCell.quotaExhausted === true &&
+    lastCell.result === 'passed'
+      ? lastCell
+      : undefined;
   const lastLine = probe
     ? lastProbeLine(
         probe.at,
@@ -986,6 +1019,17 @@ function RouteRow({
   const seconds = probeSeconds(r, requests);
   const name = model?.displayName ?? r.modelId;
   const bodyId = `route-body-${r.id}`;
+  // 同一次探针写明额度耗尽时，不再用「在线」那句里的「额度够」。分类仍是在线，这句话只改说法。
+  const why = quotaCell && kind === 'live' ? quotaProbeWhy(quotaCell) : routeStateWhy[kind];
+  const spoken = active
+    ? active.state === 'running'
+      ? '探测中'
+      : '排队中'
+    : quotaCell && kind === 'live'
+      ? why
+      : quotaCell
+        ? `${routeStateLabel[kind]}，${PROBE_KIND_WORD.quota.label}（${quotaResetText(quotaCell.resetsAt)}）`
+        : routeStateLabel[kind];
   const failed = kind === 'fault';
   const alarm = kind === 'fault' || kind === 'interrupted';
   const quietKind = kind === 'off' || kind === 'unused' || kind === 'retired';
@@ -1016,7 +1060,7 @@ function RouteRow({
           onClick={onToggle}
           aria-expanded={open}
           aria-controls={bodyId}
-          aria-label={`${name} ${r.id}：${active ? (active.state === 'running' ? '探测中' : '排队中') : routeStateLabel[kind]}`}
+          aria-label={`${name} ${r.id}：${spoken}`}
           className="flex min-w-0 flex-1 items-start gap-2 rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring"
         >
           <ChevronRight
@@ -1039,9 +1083,18 @@ function RouteRow({
                   label={active.state === 'running' ? '探测中' : '排队中'}
                   variant="dot"
                 />
-              ) : (
+              ) : quotaCell && kind === 'live' ? null : (
                 <KindChip kind={kind} variant="dot" />
               )}
+              {quotaCell && !active ? (
+                <span data-route-quota title={quotaProbeWhy(quotaCell)}>
+                  <StatusBadge
+                    tone={PROBE_KIND_WORD.quota.tone}
+                    label={PROBE_KIND_WORD.quota.label}
+                    variant="dot"
+                  />
+                </span>
+              ) : null}
             </span>
             {/* 小字一行不折：路由号、上次、下次（正常的）、没用途在用的探过结论；放不下截断，整句在悬停里 */}
             <span
@@ -1112,7 +1165,9 @@ function RouteRow({
       {open ? (
         <RowDetail id={bodyId} className="pb-3">
           <div className="rounded-lg bg-muted p-3">
-            <p className="mb-2 text-meta text-muted-foreground">{routeStateWhy[kind]}</p>
+            <p data-route-why title={why} className="mb-2 text-meta text-muted-foreground">
+              {why}
+            </p>
             {active ? (
               <p className={cn('mb-2 text-meta', active.why ? 'text-ink-stall' : 'text-ink-run')}>
                 {activityText(active, now)}
@@ -1128,7 +1183,21 @@ function RouteRow({
               layout="grid"
               cols={4}
               items={[
-                { label: '探针结论', value: word.label },
+                { label: '探针结论', value: quotaCell ? PROBE_KIND_WORD.quota.label : word.label },
+                ...(quotaCell
+                  ? [
+                      {
+                        label: '真实原因',
+                        value: (
+                          <span data-field="quota-detail">{quotaCell.detail ?? '（上游没写具体原因）'}</span>
+                        ),
+                      },
+                      {
+                        label: '额度重置',
+                        value: <span data-field="quota-resets">{quotaResetText(quotaCell.resetsAt)}</span>,
+                      },
+                    ]
+                  : []),
                 {
                   label: '最近一次',
                   value: probe ? (
@@ -1174,6 +1243,17 @@ function RouteRow({
                 {probe ? (probe.detail ?? '（探针没写原文）') : '（还没有结论）'}
               </pre>
             </div>
+            {quotaCell ? (
+              <div className="mt-2.5">
+                <div className="mb-1 text-meta text-muted-foreground">响应原文（RESPONSE）</div>
+                <pre
+                  data-field="quota-response"
+                  className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-background px-2.5 py-2 font-mono text-meta text-muted-foreground"
+                >
+                  {quotaCell.responseText ?? '（没拿到）'}
+                </pre>
+              </div>
+            ) : null}
             <div className="mt-2.5 flex flex-wrap items-center gap-2">
               <Button
                 size="xs"

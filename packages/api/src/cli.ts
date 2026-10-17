@@ -29,6 +29,7 @@
 //   attention --json（#2370）：现在要人看的事一份结论（healthz、该推的通知、推送不通、简报没到），指挥官巡检只读它。见 attention-cli.ts。
 //   release pause|continue（#2038）：release.sh 切版本前给手上有会话的任务发 hard 暂停、切完只继续这一批。见 release-pause.ts。
 //   project show|set-profile <owner/仓名>（#2738）：看、换一个仓的档案（repos.profile）。见 project-cli.ts。
+//   project installations <owner/仓名> --github-id <仓号>（#2977）：两个 App 装没装到这个仓（只读，和导入列表同一份归并）。见 project-cli.ts。
 //   emergency-issue --key <键> --title <标题>（#2728）：开急修单（四节正文从标准输入读），法国自动发布在同一个提交发版连败时调。见 emergency-issue.ts。
 //   notify raise --key <键> --title <标题>（#2729）：法国上的发版脚本写卡住报警的统一入口（经 upsertAlert，正文从标准输入读）。见 notify-cli.ts。
 // 每条命令带 --help（或 -h）只打印用法。
@@ -52,6 +53,7 @@ import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
 import { ATTENTION_USAGE, AttentionCliError, attentionJson, parseAttentionArgs } from './attention-cli.ts';
 import { type Config, loadConfig } from './config.ts';
+import type { InstallationReposPort } from './deps.ts';
 import {
   EMERGENCY_ISSUE_USAGE,
   type EmergencyIssueArgs,
@@ -880,6 +882,8 @@ export interface CliDeps {
   openTaskControl?: (env: CliEnv) => Promise<OpenedTaskControl>;
   /** 仓档案的读写（project 命令用）。不给就是真的：连库，用 db 的 findRepoProfile、setRepoProfile。 */
   openProject?: (url: string) => Promise<{ port: ProjectPort; close(): Promise<void> }>;
+  /** 两个机器人的安装范围（project installations 用，只列）。不给就是真的：读机器人凭据，和后端导入列表同一个 listInstallationRepositories。 */
+  openInstallationRepos?: (url: string) => Promise<{ source: InstallationReposPort; close(): Promise<void> }>;
   /** 读一个文本文件（project set-profile --file 用）。不给就是真的 fs。 */
   readFile?: (path: string) => Promise<string>;
   /** 开急修单（emergency-issue 命令用，#2728）：「引擎」机器人的 GitHub，挂当前版本。不给就是真的：连库记幂等账、读机器人凭据。 */
@@ -1014,6 +1018,23 @@ async function openPgProject(url: string): Promise<{ port: ProjectPort; close():
   };
 }
 
+async function openPgInstallationRepos(
+  url: string,
+): Promise<{ source: InstallationReposPort; close(): Promise<void> }> {
+  const { createDb } = await import('@fleet-dao/db');
+  const { pgLedger, pgLocker, withStatementTimeout } = await import('@fleet-dao/store');
+  const { createGitHub, listInstallationRepositories } = await import('@fleet-dao/github');
+  const { db, close } = createDb({ url: withStatementTimeout(url) });
+  try {
+    // 和后端 main.ts 的导入列表同一个装法：安装令牌只要 metadata:read，只 GET
+    const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db) });
+    return { source: { list: (role) => listInstallationRepositories(gh.client, role) }, close };
+  } catch (err) {
+    await close();
+    throw err;
+  }
+}
+
 async function openPgAlertWork(
   url: string,
   env: CliEnv,
@@ -1041,6 +1062,7 @@ export function processDeps(): CliDeps {
     readStdin: readAllStdin,
     openAlertWork: openPgAlertWork,
     openProject: openPgProject,
+    openInstallationRepos: openPgInstallationRepos,
     readFile: (path) => readFile(path, 'utf8'),
   };
 }
@@ -1393,6 +1415,7 @@ async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<n
 /** project（#2738）：参数、档案形状不对不连库（退出码 2）；没做成只打标准错误。 */
 async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
   let opened: { port: ProjectPort; close(): Promise<void> } | undefined;
+  let repos: { source: InstallationReposPort; close(): Promise<void> } | undefined;
   try {
     const args = parseProjectArgs(rest);
     const url = databaseUrl(deps.env);
@@ -1412,6 +1435,11 @@ async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promis
         operator: operatorName(deps.env),
         readFile: deps.readFile ?? ((path) => readFile(path, 'utf8')),
         readStdin: deps.readStdin ?? readAllStdin,
+        installations: async () => {
+          repos ??= await (deps.openInstallationRepos ?? openPgInstallationRepos)(url);
+          return repos.source;
+        },
+        now: deps.now,
       }),
     );
     return 0;
@@ -1423,6 +1451,7 @@ async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promis
     deps.err(`没做成：${describeDbError(err)}`);
     return 1;
   } finally {
+    await repos?.close().catch(() => undefined);
     await opened?.close().catch(() => undefined);
   }
 }

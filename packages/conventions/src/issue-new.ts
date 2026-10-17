@@ -31,12 +31,20 @@ import { doneSection } from './debt.ts';
 import { type MilestoneDetail, repoName, toMilestoneDetail } from './github-api.ts';
 import type { SimilarReport } from './issue-similar.ts';
 import {
+  type DomainValue,
+  domainLabel,
   isKindLabel,
   KIND_LABELS,
   LOCAL_LABEL,
+  labelCreateFailure,
   MOTHER_LABEL,
   milestonePhase,
   milestoneVersion,
+  type NatureValue,
+  natureLabel,
+  QUERY_LABEL_SPECS,
+  queryLabelCreateArgs,
+  requireAxis,
 } from './labels.ts';
 import { type MdDoc, norm, parseMd, sectionRange } from './markdown.ts';
 import { readManifest, withManifest } from './mother-manifest.ts';
@@ -92,9 +100,10 @@ export interface IssueNewResult {
 }
 
 export const USAGE =
-  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --milestone 当前 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]' +
+  '用法：pnpm issue:new --kind 需求|缺陷|杂项 --domain engine|api|mirasim --nature bug|perf|process --milestone 当前 --title "一句话" --body-file 正文.md [--mother] [--parent 母单号] [--local] [--order-after 单号]' +
   ' [--allow-pr-body-acceptance "<理由>"]' +
-  '（--milestone 写「当前」挂开着的那个版本（一周一版、到期自动收口，别写死 v<N>），也认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
+  '（--domain、--nature 每轴恰好一个，和类别同一次贴上：标签名是「域:…」「性质:…」，只用来筛，不参与派工和合并；' +
+  '--milestone 写「当前」挂开着的那个版本（一周一版、到期自动收口，别写死 v<N>），也认全名、v<N>、旧的 P<N>，或「未排期」；正文要带写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节，' +
   '涉及面一律不写（那是算出来的、不是知道的）；--mother 多贴「母单」标签；' +
   '--parent 开子单：先挂到那张母单下面再挂里程碑；--local 多贴「本机做」：帅位留给本机做，接活不自动派；' +
   '挂版本的母单、单独的单开完自动排进版本里程碑说明的先后末尾，--order-after 插在那张后面；子单、未排期不排；' +
@@ -327,6 +336,11 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       : undefined;
   if (o.orderAfter !== undefined) checkOrderAfter(o.orderAfter, milestone, version);
   if (o.parent !== undefined) await checkParent(deps.gh, o.parent);
+  // 仓上没有查询轴标签时，gh issue create --label 会直接拒。先把六个都建上（已有则 --force 只改说明）。
+  for (const spec of QUERY_LABEL_SPECS) {
+    const failed = labelCreateFailure(spec, await deps.gh(queryLabelCreateArgs(spec)));
+    if (failed) throw new Error(`${failed}单没开。`);
+  }
   const created = await deps.gh([
     'issue',
     'create',
@@ -336,6 +350,10 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
     createBodyPath,
     '--label',
     o.kind,
+    '--label',
+    domainLabel(o.domain),
+    '--label',
+    natureLabel(o.nature),
     ...(o.mother ? ['--label', MOTHER_LABEL] : []),
     // 「本机做」和建单同一次贴上：开单事件一到接活就判，事后补贴的已经被派走了
     ...(o.local ? ['--label', LOCAL_LABEL] : []),
@@ -370,6 +388,8 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
 
 interface Options {
   kind: string;
+  domain: DomainValue;
+  nature: NatureValue;
   milestone: string;
   title: string;
   bodyFile: string;
@@ -396,6 +416,8 @@ function parse(argv: readonly string[]): Options {
       args,
       options: {
         kind: { type: 'string' },
+        domain: { type: 'string' },
+        nature: { type: 'string' },
         milestone: { type: 'string' },
         title: { type: 'string' },
         'body-file': { type: 'string' },
@@ -431,6 +453,9 @@ function parse(argv: readonly string[]): Options {
   if (!title) throw new Error(`缺 --title：一句话写要什么。${USAGE}`);
   const bodyFile = str(values['body-file']);
   if (!bodyFile) throw new Error(`缺 --body-file：正文写进一个文件再指过来。${USAGE}`);
+  // 旧的必填先判：缺里程碑的报错别被查询轴盖住。两轴齐了才开。
+  const axis = requireAxis(str(values.domain), str(values.nature));
+  if ('error' in axis) throw new Error(`${axis.error}${USAGE}`);
   const mother = values.mother === true;
   const parent = issueArg('parent', '母单', 192);
   const orderAfter = issueArg('order-after', '先后里排在它前面的那张单', 450);
@@ -449,6 +474,8 @@ function parse(argv: readonly string[]): Options {
   }
   return {
     kind,
+    domain: axis.domain,
+    nature: axis.nature,
     milestone,
     title,
     bodyFile,

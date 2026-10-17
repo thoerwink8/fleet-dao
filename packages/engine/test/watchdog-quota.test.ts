@@ -154,6 +154,27 @@ describe('额度读数新不新鲜（看门狗，watchQuotaFreshness）', () => 
     ]);
   });
 
+  it('退役标记产生的有效 notRead：不把旧 Mirasim 读数当过期池，旧提醒照样撤', async () => {
+    const w = world({
+      open: [{ dedupeKey: quotaAlertKey('mirasim-relay'), title: 'x', body: 'x' }],
+      quotaPools: async () => [
+        quotaPool({ poolId: 'mirasim-relay', readOverdue: true, lastReadOkAt: null, dataAt: null }),
+      ],
+      quotaNotRead: async () => ['mirasim-relay'],
+    });
+
+    const r = await watchQuotaFreshness(w.deps, NOW);
+
+    expect(r).toEqual({ scanned: 0, found: 0, problems: [] });
+    expect(w.raised).toEqual([]);
+    expect(w.resolved).toEqual([
+      {
+        dedupeKey: quotaAlertKey('mirasim-relay'),
+        why: '额度配置写明不读这个池（没有这种数据），不再报读数过期',
+      },
+    ]);
+  });
+
   it('【故意造出的失败】不读名单读不出来：这一轮不查也不撤，旧提醒留着', async () => {
     const w = world({
       open: [{ dedupeKey: quotaAlertKey('jev'), title: 'x', body: 'x' }],

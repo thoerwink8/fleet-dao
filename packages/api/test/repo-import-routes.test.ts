@@ -2,6 +2,7 @@
 import type { InstallationListedRepo } from '@fleet-dao/github';
 import { WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
+import { mergedInstallations } from '../src/repo-import-routes.ts';
 import { errorCode, harness, write } from './harness.ts';
 
 const widget: InstallationListedRepo = {
@@ -137,6 +138,28 @@ describe('导入列表（安装令牌）', () => {
       engineInstalled: false,
     });
     expect(body).toHaveProperty('installLinks');
+  });
+});
+
+describe('两个机器人的归并（导入列表和 fleet-api project installations 共用，#2977）', () => {
+  it('按仓号并成一行：一边有、两边都有各一行，不重复', async () => {
+    const rows = await mergedInstallations(listed({ agent: [widget, notes], engine: [widget] }));
+    expect(rows.map((r) => [r.repo.id, r.agent, r.engine])).toEqual([
+      [4242, true, true],
+      [4243, true, false],
+    ]);
+    const engineOnly = await mergedInstallations(listed({ agent: [], engine: [notes] }));
+    expect(engineOnly.map((r) => [r.repo.id, r.agent, r.engine])).toEqual([[4243, false, true]]);
+  });
+
+  it('一边失败整次失败：原样抛，不拿缺了一边的表冒充全的', async () => {
+    const source = {
+      async list(role: 'agent' | 'engine') {
+        if (role === 'agent') throw new Error('agent HTTP 403');
+        return [widget];
+      },
+    };
+    await expect(mergedInstallations(source)).rejects.toThrow('agent HTTP 403');
   });
 });
 

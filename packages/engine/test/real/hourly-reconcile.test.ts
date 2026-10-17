@@ -13,6 +13,7 @@ import {
   auditLog,
   notifications,
   pullRequests,
+  readLocalOrphans,
   repos,
   resolveAlertByKey,
   runs,
@@ -1232,6 +1233,63 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
 });
 
 describe('核对接到真库', { timeout: 60_000 }, () => {
+  it('本机没人领：GitHub 正文、标签和前置状态一路传到选择器，等待单不报、普通单照报', async () => {
+    probeDir();
+    await work();
+    const now = new Date('2026-11-11T15:59:59.000Z');
+    const labeledAt = new Date(now.getTime() - 25 * HOUR).toISOString();
+    const issue = (number: number, body: string, labels: string[]) => ({
+      number,
+      title: `#${number}`,
+      body,
+      author: null,
+      authorId: null,
+      authorType: null,
+      authorIsBot: false,
+      createdAt: labeledAt,
+      updatedAt: labeledAt,
+      labels,
+      milestone: null,
+    });
+    const events = async () => [
+      { label: '本机做', action: 'labeled' as const, at: labeledAt, actor: 'fleet-engine[bot]', bot: true },
+    ];
+    const comments = async () => [{ body: '留给本机做', at: labeledAt }];
+    const seenStates: number[] = [];
+    const run = await runHourlyReconcileJob(
+      deps({
+        now: () => now,
+        gh: ghWith({
+          readGroomFacts: async () => ({
+            milestones: [],
+            issues: [
+              issue(1960, '前置：2026-11-12 复查日', ['本机做']),
+              issue(2088, '等创始人确认', ['本机做', '要人拍']),
+              issue(34, '前置：#35', ['本机做']),
+              issue(35, '前置：#36', ['本机做']),
+              issue(36, '普通超过 24 小时', ['本机做']),
+            ],
+          }),
+          readIssueLabelEvents: async () => events(),
+          readIssueComments: async () => comments(),
+          async readIssueState(input) {
+            seenStates.push(input.issueNumber);
+            return {
+              state: input.issueNumber === 35 ? ('open' as const) : ('closed' as const),
+              stateReason: null,
+            };
+          },
+        }),
+      }),
+    );
+    expect(run.outcome).toBe('ok');
+    expect(seenStates.sort((a, b) => a - b)).toEqual([35, 36]);
+    expect(await readLocalOrphans(t.db)).toEqual([
+      expect.objectContaining({ repo: 'acme/widgets', issue: 35 }),
+      expect.objectContaining({ repo: 'acme/widgets', issue: 36 }),
+    ]);
+  });
+
   it('合了的 PR：镜像补上算发现计数；机器人开的 PR 合并人不对报 reconcile:pr 提醒（#440 恢复：#431 就是这么漏的）；列不出来这个仓进原因、这一轮不记 ok', async () => {
     probeDir();
     await work();

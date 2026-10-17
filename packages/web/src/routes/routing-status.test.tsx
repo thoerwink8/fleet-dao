@@ -1169,3 +1169,324 @@ describe('渠道状态页重做（#1366）：折叠、手风琴、状态语义�
     expect(screen.queryByRole('list', { name: /的路由$/ })).toBeNull();
   });
 });
+
+describe('渠道状态页：连通但额度耗尽（#2939）', () => {
+  // 假数据里 ch-claude 有三条路：r-cb-opus 连通但额度耗尽（上游给了重置时刻），r-ca-opus、r-ca-sonnet 正常
+  const baseHistory = async (api: ReturnType<typeof createMockApi>) => {
+    const h = await api.routeProbeHistory();
+    if (h.state !== 'ok') throw new Error('假数据历史没读成');
+    return h;
+  };
+  const withLatest = async (
+    api: ReturnType<typeof createMockApi>,
+    patch: (c: ProbeHistoryCell) => ProbeHistoryCell,
+  ): Promise<RouteProbeHistory> => {
+    const h = await baseHistory(api);
+    const swap = (c: ProbeHistoryCell) => (c.channelId === 'ch-claude' ? patch(c) : c);
+    return {
+      ...h,
+      latestByRoute: h.latestByRoute.map(swap),
+      channels: h.channels.map((s) => ({ ...s, cells: s.cells.map(swap) })),
+    };
+  };
+  const show = (api: ReturnType<typeof createMockApi>) =>
+    renderApp(<RoutingStatus />, { route: '/routing/status?p=ch-claude', api });
+
+  test('部分路耗尽：渠道摘要、详情头部、路由行都写连通但额度耗尽和受影响路数，不说成整个渠道耗尽', async () => {
+    show(createMockApi({ live: false }));
+    await waitFor(() => expect(card('ch-claude').textContent).toContain('部分路额度耗尽'));
+    expect(card('ch-claude').textContent).toContain('额度耗尽 1/3 路');
+    expect(card('ch-claude').getAttribute('data-state')).toBe('ok');
+    expect(card('ch-claude').textContent).not.toContain('连通但额度耗尽');
+    const hero = document.querySelector('[data-channel-hero]');
+    expect(hero?.textContent).toContain('3 条路里 1 条额度耗尽，其余可用');
+    expect(hero?.textContent).toContain('额度耗尽 1/3 路');
+    expect(hero?.textContent).toMatch(/预计 .+ 重置/);
+    const hit = routeRow('r-cb-opus');
+    expect(hit.querySelector('[data-route-quota]')?.textContent).toBe('连通但额度耗尽');
+    expect(
+      hit.getAttribute('aria-label') ?? hit.querySelector('button')?.getAttribute('aria-label'),
+    ).toContain('连通但额度耗尽');
+    // 正常对照：同渠道的另外两条路没有这个标
+    expect(routeRow('r-ca-opus').querySelector('[data-route-quota]')).toBeNull();
+    expect(routeRow('r-ca-opus').textContent).toContain('在线');
+  });
+
+  test('路由行展开：真实原因、额度重置时刻、响应原文；正常的路没有这些', async () => {
+    show(createMockApi({ live: false }));
+    await waitFor(() => routeRow('r-cb-opus'));
+    const row = openRoute('r-cb-opus');
+    expect(row.querySelector('[data-field="quota-detail"]')?.textContent).toContain('5 小时窗口额度耗尽');
+    expect(row.querySelector('[data-field="quota-resets"]')?.textContent).toMatch(/^预计 .+ 重置$/);
+    expect(row.querySelector('[data-field="quota-response"]')?.textContent).toContain(
+      '5-hour usage limit reached',
+    );
+    expect(row.textContent).toContain('连通但额度耗尽');
+    // 同一次额度耗尽：展开说明不再写「额度够」（正常的路仍然写）
+    const why = row.querySelector('[data-route-why]');
+    expect(why?.textContent).toContain('连通但额度耗尽');
+    expect(why?.textContent).not.toContain('额度够');
+    const ok = openRoute('r-ca-opus');
+    expect(ok.querySelector('[data-field="quota-detail"]')).toBeNull();
+    expect(ok.textContent).toContain('通过');
+    expect(ok.querySelector('[data-route-why]')?.textContent).toContain('额度够');
+  });
+
+  test('探针历史：额度记录的格子单独一色，tooltip / 读屏带重置说明；展开能看 detail、重置时间和响应原文；普通成功对照没有', async () => {
+    show(createMockApi({ live: false }));
+    const strip = await waitFor(historyStrip);
+    const quotaCell = strip.querySelector('[data-result="quota"]');
+    if (!(quotaCell instanceof HTMLElement)) throw new Error('没有额度耗尽的格子');
+    expect(quotaCell.className).toContain('bg-st-wait');
+    expect(quotaCell.title).toMatch(/连通但额度耗尽（预计 .+ 重置）/);
+    expect(quotaCell.querySelector('.sr-only')?.textContent).toContain('连通但额度耗尽');
+    expect(strip.querySelector('[data-result="passed"]')?.className).toContain('bg-st-done');
+    const log = () => screen.getByRole('region', { name: '探测记录' });
+    expect(log().textContent).toContain('连通但额度耗尽：探通了，但上游说额度用完了');
+    fireEvent.click(quotaCell);
+    await waitFor(() => expect(log().querySelector('[data-field="quota"]')).toBeTruthy());
+    const q = log().querySelector('[data-field="quota"]') as HTMLElement;
+    expect(q.textContent).toContain('5 小时窗口额度耗尽');
+    expect(q.querySelector('[data-field="resets"]')?.textContent).toMatch(/^预计 .+ 重置$/);
+    expect(log().querySelector('[data-field="response"]')?.textContent).toContain(
+      '5-hour usage limit reached',
+    );
+    const row = log().querySelector('[data-probe-row][data-result="quota"]');
+    expect(row?.textContent).toContain('连通但额度耗尽');
+    // 对照：普通成功那行不带额度块
+    const normal = log().querySelector('[data-probe-row][data-result="passed"]');
+    expect(normal?.querySelector('[data-field="quota"]')).toBeNull();
+    // 凭据不外露
+    expect(document.body.textContent).not.toMatch(/sk-[A-Za-z0-9]{8,}|Bearer\s+\S+/);
+  });
+
+  test('手机：色条读屏汇总单报连通但额度耗尽几次；没有额度记录的渠道不多这一项', async () => {
+    const real = window.matchMedia.bind(window);
+    const spy = vi.spyOn(window, 'matchMedia').mockImplementation((query: string) =>
+      query === '(max-width: 767px)'
+        ? ({
+            matches: true,
+            media: query,
+            onchange: null,
+            addEventListener() {},
+            removeEventListener() {},
+            addListener() {},
+            removeListener() {},
+            dispatchEvent: () => false,
+          } as MediaQueryList)
+        : real(query),
+    );
+    try {
+      show(createMockApi({ live: false }));
+      const display = await waitFor(() => {
+        const el = document.querySelector('[data-history="strip"] [data-strip-display]');
+        if (!(el instanceof HTMLElement)) throw new Error('还没有色条');
+        return el;
+      });
+      expect(display.getAttribute('aria-label')).toMatch(
+        /^近 \d+ 次真探：通过 \d+、连通但额度耗尽 1、不通 \d+、疑似换模型 \d+$/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  test('所有路都耗尽、上游没给重置时间：渠道说连通但额度耗尽，写重置时间上游没给，不编时刻', async () => {
+    const api = createMockApi({ live: false });
+    const h = await withLatest(api, (c) =>
+      c.result === 'passed'
+        ? { ...c, quotaExhausted: true, detail: '额度用完', resetsAt: undefined, responseText: '额度用完' }
+        : c,
+    );
+    Object.assign(api, { routeProbeHistory: async () => h });
+    show(api);
+    await waitFor(() => expect(card('ch-claude').textContent).toContain('额度耗尽 3/3 路'));
+    expect(
+      card('ch-claude').getAttribute('aria-label') ??
+        card('ch-claude').querySelector('button')?.getAttribute('aria-label'),
+    ).toContain('连通但额度耗尽');
+    const hero = document.querySelector('[data-channel-hero]');
+    expect(hero?.textContent).toContain('3 条路额度都耗尽了');
+    expect(hero?.textContent).toContain('重置时间上游没给');
+    expect(hero?.textContent).not.toMatch(/预计 \d/);
+    expect(openRoute('r-cb-opus').querySelector('[data-field="quota-resets"]')?.textContent).toBe(
+      '重置时间上游没给',
+    );
+    const why = routeRow('r-cb-opus').querySelector('[data-route-why]');
+    expect(why?.textContent).toContain('重置时间上游没给');
+    expect(why?.textContent).not.toContain('额度够');
+    expect(why?.textContent).not.toMatch(/预计/);
+  });
+
+  test('旧额度记录已被更新的成功覆盖 / 老行缺字段：照旧显示在线，不认定额度耗尽', async () => {
+    const api = createMockApi({ live: false });
+    // 额度记录比路由当前探针早 30 分钟：探针已经有更新的结果
+    const stale = await withLatest(api, (c) =>
+      c.routeId === 'r-cb-opus'
+        ? { ...c, probedAt: new Date(Date.parse(c.probedAt) - 30 * 60_000).toISOString() }
+        : c,
+    );
+    Object.assign(api, { routeProbeHistory: async () => stale });
+    show(api);
+    await waitFor(() => routeRow('r-cb-opus'));
+    expect(card('ch-claude').textContent).not.toContain('额度耗尽');
+    expect(routeRow('r-cb-opus').querySelector('[data-route-quota]')).toBeNull();
+    // 旧额度已被更新的成功盖住：展开仍是在线那句，写额度够
+    expect(openRoute('r-cb-opus').querySelector('[data-route-why]')?.textContent).toContain('额度够');
+    cleanup();
+    // 老行：没有新增字段
+    const old = createMockApi({ live: false });
+    const legacy = await withLatest(old, ({ quotaExhausted: _q, detail: _d, resetsAt: _r, ...rest }) => rest);
+    Object.assign(old, { routeProbeHistory: async () => legacy });
+    show(old);
+    await waitFor(() => routeRow('r-cb-opus'));
+    expect(card('ch-claude').textContent).not.toContain('额度耗尽');
+    expect(document.querySelector('[data-result="quota"]')).toBeNull();
+  });
+
+  test('失败（认证 / 网络 / 临时 429）不画成额度耗尽；历史读不到明确报没读成', async () => {
+    const api = createMockApi({ live: false });
+    const failed = await withLatest(api, (c) =>
+      c.routeId === 'r-cb-opus'
+        ? { ...c, result: 'failed', failureReason: '429 临时限流，稍后重试', quotaExhausted: undefined }
+        : c,
+    );
+    Object.assign(api, { routeProbeHistory: async () => failed });
+    show(api);
+    await waitFor(() => routeRow('r-cb-opus'));
+    expect(card('ch-claude').textContent).not.toContain('额度耗尽');
+    expect(document.querySelector('[data-result="quota"]')).toBeNull();
+    cleanup();
+    const broken = createMockApi({ live: false });
+    Object.assign(broken, {
+      routeProbeHistory: async () => ({ state: 'unreadable' as const, why: '没查成：连不上库' }),
+    });
+    show(broken);
+    await waitFor(() => expect(document.querySelector('[data-history="unreadable"]')).toBeTruthy());
+    expect(document.querySelector('[data-hero-notes]')?.textContent).toContain('额度状态没读成');
+  });
+
+  /** 展开说明、悬停、读屏三处文案。额度耗尽的路不得出现「额度够」。 */
+  const copyOf = (row: HTMLElement) => {
+    const why = row.querySelector('[data-route-why]');
+    const toggle = row.querySelector('button[aria-expanded]');
+    const chip = row.querySelector('[data-route-quota]');
+    return {
+      why: why?.textContent ?? '',
+      whyTitle: why?.getAttribute('title') ?? '',
+      aria: toggle?.getAttribute('aria-label') ?? '',
+      badgeTitle: chip?.getAttribute('title') ?? '',
+    };
+  };
+
+  test('390 和 1366：额度耗尽的展开说明、悬停、读屏不说额度够；正常的路仍说', async () => {
+    const real = window.matchMedia.bind(window);
+    for (const width of [390, 1366]) {
+      const spy = vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => {
+        const widths = [...query.matchAll(/\((min|max)-width:\s*(\d+)px\)/g)];
+        if (widths.length === 0) return real(query);
+        const matches = widths.every(([, kind, px]) =>
+          kind === 'min' ? width >= Number(px) : width <= Number(px),
+        );
+        return {
+          matches,
+          media: query,
+          onchange: null,
+          addEventListener() {},
+          removeEventListener() {},
+          addListener() {},
+          removeListener() {},
+          dispatchEvent: () => false,
+        } as MediaQueryList;
+      });
+      try {
+        show(createMockApi({ live: false }));
+        await waitFor(() => routeRow('r-cb-opus'));
+        if (width === 390) {
+          const drawer = document.querySelector('[data-channel-drawer]');
+          expect(drawer, `${width} 宽详情应在抽屉里`).toBeTruthy();
+          expect(drawer?.contains(routeRow('r-cb-opus'))).toBe(true);
+        } else {
+          expect(document.querySelector('[data-channel-drawer]'), `${width} 宽不该开抽屉`).toBeNull();
+          expect(document.querySelector('[data-channel-detail]')).toBeTruthy();
+        }
+        const quota = openRoute('r-cb-opus');
+        // 分类不动：仍是探通的在线，不是故障、也不是改选路
+        expect(quota.getAttribute('data-kind')).toBe('live');
+        expect(quota.getAttribute('data-probe')).toBe('ok');
+        const q = copyOf(quota);
+        for (const text of [q.why, q.whyTitle, q.aria, q.badgeTitle]) {
+          expect(text, `${width} 宽`).toContain('连通但额度耗尽');
+          expect(text, `${width} 宽`).not.toContain('额度够');
+          expect(text, `${width} 宽`).toMatch(/预计 .+ 重置/);
+        }
+        expect(q.why).toContain('5 小时窗口额度耗尽（假数据）');
+        const quotaBits = [...quota.querySelectorAll('[title], [aria-label]')].map(
+          (el) => `${el.getAttribute('title') ?? ''}\n${el.getAttribute('aria-label') ?? ''}`,
+        );
+        expect(quotaBits.join('\n'), `${width} 宽悬停和读屏`).not.toContain('额度够');
+        const ok = openRoute('r-ca-opus');
+        const normal = copyOf(ok);
+        expect(normal.why, `${width} 宽正常对照`).toContain('额度够');
+        expect(normal.whyTitle, `${width} 宽正常对照`).toContain('额度够');
+        expect(
+          [...ok.querySelectorAll('span[title]')].some((el) => el.getAttribute('title')?.includes('额度够')),
+          `${width} 宽正常对照的状态悬停`,
+        ).toBe(true);
+        expect(normal.aria, `${width} 宽正常对照`).toContain('在线');
+        expect(normal.aria, `${width} 宽正常对照`).not.toContain('额度耗尽');
+        expect(ok.querySelector('[data-route-quota]')).toBeNull();
+        cleanup();
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+
+  test('390 和 1366：上游没给重置时间时，说明写没给，不编时刻，也不说额度够', async () => {
+    const real = window.matchMedia.bind(window);
+    for (const width of [390, 1366]) {
+      const spy = vi.spyOn(window, 'matchMedia').mockImplementation((query: string) => {
+        const widths = [...query.matchAll(/\((min|max)-width:\s*(\d+)px\)/g)];
+        if (widths.length === 0) return real(query);
+        const matches = widths.every(([, kind, px]) =>
+          kind === 'min' ? width >= Number(px) : width <= Number(px),
+        );
+        return {
+          matches,
+          media: query,
+          onchange: null,
+          addEventListener() {},
+          removeEventListener() {},
+          addListener() {},
+          removeListener() {},
+          dispatchEvent: () => false,
+        } as MediaQueryList;
+      });
+      try {
+        const api = createMockApi({ live: false });
+        // 同一条探测记录上改额度字段（假数据），不另造一条对不上的 pong
+        const h = await withLatest(api, (c) =>
+          c.routeId === 'r-cb-opus'
+            ? { ...c, quotaExhausted: true, detail: '额度用完（假数据）', resetsAt: undefined }
+            : c,
+        );
+        Object.assign(api, { routeProbeHistory: async () => h });
+        show(api);
+        await waitFor(() => routeRow('r-cb-opus'));
+        const quota = openRoute('r-cb-opus');
+        const q = copyOf(quota);
+        for (const text of [q.why, q.whyTitle, q.aria, q.badgeTitle]) {
+          expect(text, `${width}`).toContain('重置时间上游没给');
+          expect(text, `${width}`).toContain('额度用完（假数据）');
+          expect(text, `${width}`).not.toContain('额度够');
+          expect(text, `${width}`).not.toMatch(/预计/);
+        }
+        expect(quota.getAttribute('data-kind')).toBe('live');
+        cleanup();
+      } finally {
+        spy.mockRestore();
+      }
+    }
+  });
+});

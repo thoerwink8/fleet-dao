@@ -3,13 +3,27 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { checkIssueBody, type Gh, issueBodyTooLong } from './issue-new.ts';
-import { isKindLabel, LOCAL_LABEL, MOTHER_LABEL } from './labels.ts';
+import {
+  domainLabel,
+  isDomainValue,
+  isKindLabel,
+  isNatureValue,
+  LOCAL_LABEL,
+  labelCreateFailure,
+  MOTHER_LABEL,
+  natureLabel,
+  QUERY_LABEL_SPECS,
+  queryLabelCreateArgs,
+} from './labels.ts';
 import { readManifest, withManifest } from './mother-manifest.ts';
 
 export interface BatchIssue {
   title: string;
   body: string;
   kind: string;
+  /** 子单缺省时继承母单有效轴；旧 JSON 可省略，缺失只提示。 */
+  domain?: string;
+  nature?: string;
 }
 export interface BatchSpec {
   mother: BatchIssue;
@@ -37,6 +51,17 @@ interface Deps {
   gh: Gh;
   cwd: string;
   journal?: string;
+  warn?: (message: string) => void;
+}
+function batchAxis(issue: BatchIssue, mother: BatchIssue, warn: (message: string) => void): string[] {
+  const labels: string[] = [];
+  const domain = issue.domain ?? mother.domain;
+  const nature = issue.nature ?? mother.nature;
+  if (typeof domain === 'string' && isDomainValue(domain)) labels.push(domainLabel(domain));
+  else warn(`「${issue.title}」域缺失或无效；未贴域标签，继续建单。`);
+  if (typeof nature === 'string' && isNatureValue(nature)) labels.push(natureLabel(nature));
+  else warn(`「${issue.title}」性质缺失或无效；未贴性质标签，继续建单。`);
+  return labels;
 }
 const endpoint = 'repos/{owner}/{repo}/issues';
 const marker = (id: string) => `<!-- fleet:issue-batch:${id}:`;
@@ -164,6 +189,16 @@ export async function recoverIssueBatch(path: string, deps: Deps): Promise<void>
 /** 全部建好才返回；失败取消整批，取消失败明确报残留号及恢复命令。 */
 export async function issueBatchNew(spec: BatchSpec, deps: Deps): Promise<BatchResult> {
   validateBatch(spec);
+  const axes = [spec.mother, ...spec.subs].map((issue) =>
+    batchAxis(issue, spec.mother, deps.warn ?? console.warn),
+  );
+  // 旧 spec 没有查询轴时仍走原流程；显式轴先初始化，失败时尚未建单，不进入补偿。
+  if (axes.some((labels) => labels.length > 0)) {
+    for (const label of QUERY_LABEL_SPECS) {
+      const failed = labelCreateFailure(label, await deps.gh(queryLabelCreateArgs(label)));
+      if (failed) throw new Error(`${failed}整批单尚未创建。`);
+    }
+  }
   const journal: Journal = { version: 1, id: randomUUID(), status: 'building', issues: [], uncertain: false };
   const path = resolve(deps.cwd, deps.journal ?? `_tmp/issue-batch/${journal.id}.json`);
   // 不覆盖还没处理的批次记录。
@@ -179,7 +214,7 @@ export async function issueBatchNew(spec: BatchSpec, deps: Deps): Promise<BatchR
         JSON.stringify({
           title: issue.title,
           body,
-          labels: [issue.kind, LOCAL_LABEL, ...(index === 0 ? [MOTHER_LABEL] : [])],
+          labels: [issue.kind, LOCAL_LABEL, ...(index === 0 ? [MOTHER_LABEL] : []), ...(axes[index] ?? [])],
         }),
       );
       journal.uncertain = true;
