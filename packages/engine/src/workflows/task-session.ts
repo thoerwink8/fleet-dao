@@ -226,6 +226,18 @@ export async function writeSession(
         resumeNote = `；没续上会话（${plan.reason}），开新会话`;
       }
     }
+    // runSegment 的活动合约已经固定，不能把工作流判断塞进提示词后再猜；借 route.why 的内部标记把新会话原因
+    // 原样带到 one-shot，落库时再拆回真正的 routeWhy 和 resumeReason。
+    const segmentRoute =
+      resumeSessionId === undefined && resumeNote.startsWith('；没续上会话')
+        ? {
+            ...route,
+            why: `fleet-resume-new:${JSON.stringify({
+              reason: resumeNote.slice('；没续上会话（'.length, -'），开新会话'.length),
+              ...(route.why?.trim() ? { routeWhy: route.why } : {}),
+            })}`,
+          }
+        : route;
     await rt.advance(
       'implement',
       `第 ${rt.round} 轮：${route.modelId} 动手${unrecognized}${resumeNote}${picked.probeNote ? `；${picked.probeNote}` : ''}`,
@@ -244,7 +256,7 @@ export async function writeSession(
         taskId: rt.input.taskId,
         repo: rt.input.repo,
         issueNumber: rt.input.issueNumber,
-        route,
+        route: segmentRoute,
         worktreePath: wt.path,
         branch: rt.branch,
         baseSha: rt.since,

@@ -11,6 +11,61 @@
 # - 自动档的函数（setup_slice、setup_auto_release）留在 france.sh，不许碰防火墙、sudoers、建用户。
 # 要先 source common.sh，用到的变量和函数由 france.sh 设。
 
+# 跑 fleet-engine 的系统用户。冷验收在工作树根下的 _tmp 里自己 mkdir verify-*，这一层归它。
+ENGINE_USER=fleet
+
+# 工作树的根仍归 root、会话用户写不进（路径上塞不了符号链接）。只有 _tmp 归引擎用户、755：
+# 引擎能在下面建 verify-*（checkoutPrHead 先 mkdir 再交给 fleet-agent-scope）；会话用户不是属主，写不进这一层，
+# 自己的子目录仍是 700、按路径进得去。旧机器上 _tmp 已是 root:root 755 时只改这一层的属主和权限，不递归，
+# 里面已有的会话目录不动。fleet-agent-scope 只在上级缺失时按 root:root 755 补建，所以这一层要先在。
+ensure_work_tmp() {
+  local probe err rc
+  if [[ -z ${ENGINE_USER:-} ]]; then
+    red "没有 ENGINE_USER，建不了 $WORK_DIR/_tmp"
+    return 1
+  fi
+  if ! id -- "$ENGINE_USER" >/dev/null 2>&1; then
+    red "引擎用户 $ENGINE_USER 不存在，建不了 $WORK_DIR/_tmp"
+    return 1
+  fi
+  ensure_dir "$WORK_DIR" root:root 755 || return 1
+  ensure_dir "$WORK_DIR/_tmp" "$ENGINE_USER:$ENGINE_USER" 755 || return 1
+  if ! command -v runuser >/dev/null 2>&1; then
+    red "没有 runuser，查不了引擎用户 $ENGINE_USER 能不能在 $WORK_DIR/_tmp 下 mkdir"
+    return 1
+  fi
+  # 装的时候就以引擎用户建一个再删掉：属主对了仍写不进（不可变、访问控制表）时这里红，信息里带目录。
+  probe=$WORK_DIR/_tmp/verify-probe-$$
+  rc=0
+  err=$(runuser -u "$ENGINE_USER" -- mkdir -- "$probe" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    red "引擎用户 $ENGINE_USER 在 $WORK_DIR/_tmp 下 mkdir 失败（$probe）：${err:-退出 $rc}"
+    return 1
+  fi
+  rc=0
+  err=$(runuser -u "$ENGINE_USER" -- rmdir -- "$probe" 2>&1) || rc=$?
+  if ((rc != 0)); then
+    red "引擎用户 $ENGINE_USER 在 $WORK_DIR/_tmp 下 rmdir 失败（$probe）：${err:-退出 $rc}"
+    rm -rf -- "$probe"
+    return 1
+  fi
+}
+
+# 读回：只核对属主和权限，不改。对了不报；不对时报的句子里有目录路径。
+readback_work_tmp() {
+  local path=$WORK_DIR/_tmp want have
+  if [[ -z ${ENGINE_USER:-} ]]; then
+    red "没有 ENGINE_USER，核对不了 $path"
+    return 1
+  fi
+  want="$ENGINE_USER:$ENGINE_USER 755"
+  have=$(stat -c '%U:%G %a' -- "$path" 2>/dev/null) || have="不存在"
+  if [[ "$have" != "$want" ]]; then
+    red "$path 是「$have」，应为 $want（引擎用户要能在这下面 mkdir）"
+    return 1
+  fi
+}
+
 setup_identity() {
   step "用户与目录"
   ensure_service_user fleet /home/fleet
@@ -23,8 +78,8 @@ setup_identity() {
   # 引擎自己的临时目录（从镜像打的 bundle）和存档（没合并就收的树里没提交的改动）放在这下面，引擎自己建 tmp/、archive/
   ensure_dir "$ENGINE_STATE_DIR" fleet:fleet 750
   ensure_dir "$SESSION_IO_DIR" fleet:fleet 711
-  # AI 会话的工作树的根：归 root、别人写不进（会话用户没法在路径上塞符号链接）；每棵树由 fleet-agent-scope 建、归会话用户 700
-  ensure_dir "$WORK_DIR" root:root 755
+  # AI 会话的工作树的根归 root；_tmp 归引擎用户（ensure_work_tmp）。每棵树由 fleet-agent-scope 建、归会话用户 700
+  ensure_work_tmp
   ensure_dir /var/log/fleet-dao fleet:fleet 750
   ensure_dir /etc/fleet-dao root:fleet 750
   # 两个 GitHub 机器人的私钥放这里（root:fleet 640，手放，不进 git）：引擎读得到，会话用户和旧系统的用户读不到

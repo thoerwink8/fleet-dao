@@ -77,6 +77,8 @@ export interface PipelineHealth {
   byTier: { tier: string; rounds: number; oneRoundRate: number | null; avgRounds: number | null }[];
   heavyAddedP90: number | null;
   verifyRejectShare: number | null;
+  /** 近 7 天有明确续会话判定的动手段里，实际用上上一段会话的比例。 */
+  resume: { decisions: number; resumed: number; rate: number | null };
 }
 
 const rowsOf = (res: unknown) =>
@@ -137,6 +139,20 @@ export async function pipelineHealth(db: Db, to: Date): Promise<PipelineHealth> 
         and outcome = 'merged' and tier = 'heavyweight' and added_lines is not null`),
   );
   const heavy = num(p90[0]?.p90);
+  const resumeRows = rowsOf(
+    await db.execute(sql`
+      select count(*) filter (where resume_session_id is not null or resume_reason is not null)::int as decisions,
+             count(*) filter (
+               where resume_session_id is not null
+                 and session_id is not null
+                 and session_id = resume_session_id
+             )::int as resumed
+      from runs
+      where segment = 'manual'
+        and ended_at >= ${from.toISOString()}::timestamptz and ended_at < ${to.toISOString()}::timestamptz`),
+  );
+  const resumeDecisions = Number(resumeRows[0]?.decisions ?? 0);
+  const resumed = Number(resumeRows[0]?.resumed ?? 0);
 
   return {
     from,
@@ -146,6 +162,11 @@ export async function pipelineHealth(db: Db, to: Date): Promise<PipelineHealth> 
     byTier,
     heavyAddedP90: heavy === null ? null : Math.round(heavy),
     verifyRejectShare: share(byOutcome.get('verify_rejected') ?? 0),
+    resume: {
+      decisions: resumeDecisions,
+      resumed,
+      rate: resumeDecisions === 0 ? null : resumed / resumeDecisions,
+    },
   };
 }
 

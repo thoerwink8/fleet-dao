@@ -73,6 +73,57 @@ export function globalErrorCount(report: unknown): number {
   return errors.length;
 }
 
+/** 同一轮的几份报告（分片）合成一份：同一条用例取更坏的结局，不漏掉只出现在某一片里的用例。 */
+export function mergeRunReports(reports: readonly unknown[]): { outcomes: Outcomes; globalError: boolean } {
+  const outcomes: Outcomes = new Map();
+  let globalError = false;
+  for (const report of reports) {
+    if (globalErrorCount(report) > 0) globalError = true;
+    for (const [id, row] of outcomesOf(report)) {
+      const prev = outcomes.get(id);
+      if (!prev || RANK[row.outcome] > RANK[prev.outcome]) outcomes.set(id, row);
+    }
+  }
+  return { outcomes, globalError };
+}
+
+/**
+ * artifact 名是 `e2e-<运行号>-<第几次运行>-<分片>`（ci.yml）。主线红了只重跑失败的 job（ci-rerun.yml），
+ * 所以同一轮里有的分片有第二次、有的只有第一次。每一片取它自己最后一次运行的报告，再合成一轮：
+ * 重跑前的失败不重复算，没重跑的那一片也不漏。
+ * 名字里没有第几次运行（旧的平铺 results-N.json）就全部留下，当成分片。
+ */
+const ATTEMPT_NAME = /(?:^|\/)e2e-(\d+)-(\d+)-(\d+)(?:\/|$)/;
+
+export function reportsOfLastAttempt(files: readonly { name: string; report: unknown }[]): unknown[] {
+  const parsed: { attempt: number; shard: string; report: unknown }[] = [];
+  let named = false;
+  for (const file of files) {
+    const m = ATTEMPT_NAME.exec(file.name);
+    if (!m?.[2] || !m[3]) continue;
+    named = true;
+    parsed.push({ attempt: Number(m[2]), shard: m[3], report: file.report });
+  }
+  if (!named) return files.map((file) => file.report);
+  const maxByShard = new Map<string, number>();
+  for (const row of parsed) {
+    const prev = maxByShard.get(row.shard) ?? 0;
+    if (row.attempt > prev) maxByShard.set(row.shard, row.attempt);
+  }
+  return parsed.filter((row) => row.attempt === maxByShard.get(row.shard)).map((row) => row.report);
+}
+
+/** 一轮主线 e2e：同一运行号下只取最后一次运行，分片合成一条结局。没有报告就抛，不当成全过。 */
+export function runFromArtifacts(
+  url: string,
+  files: readonly { name: string; report: unknown }[],
+): RunOutcomes {
+  const reports = reportsOfLastAttempt(files);
+  if (reports.length === 0) throw new Error('这一轮没有 e2e 报告');
+  const merged = mergeRunReports(reports);
+  return { url, outcomes: merged.outcomes, ...(merged.globalError ? { globalError: true } : {}) };
+}
+
 /** 一轮主线 e2e：运行的链接和它的报告读出来的结局。 */
 export interface RunOutcomes {
   url: string;

@@ -129,6 +129,8 @@ export interface SegmentRunFacts {
   memoryPeakMb?: number | undefined;
   /** 这一次会话的 CPU 秒数。没记、0、认不出都不给（不当成 0）；主页 lastSession 据此写「CPU 没读到」。 */
   cpuSeconds?: number | undefined;
+  /** 判定不开上一段会话时的原因。 */
+  resumeReason?: string | undefined;
   failureReason?: string | undefined;
   prNumber?: number | undefined;
   branch?: string | undefined;
@@ -168,6 +170,8 @@ export interface SegmentRunView {
   memoryPeakMb?: number | undefined;
   /** 这一次会话的 CPU 秒数（大于 0）。没记的不给，不在 unread 里点名：老行本来就没有，主页用 lastSession 写「CPU 没读到」。 */
   cpuSeconds?: number | undefined;
+  /** 判定不开上一段会话时的原因；页面原样显示。 */
+  resumeReason?: string | undefined;
   failureReason?: string | undefined;
   prNumber?: number | undefined;
   branch?: string | undefined;
@@ -319,6 +323,7 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
     ...(estimate !== undefined ? { estimate } : {}),
     ...(isCount(run.memoryPeakMb) ? { memoryPeakMb: run.memoryPeakMb } : {}),
     ...(isCount(run.cpuSeconds) && run.cpuSeconds > 0 ? { cpuSeconds: run.cpuSeconds } : {}),
+    ...(run.resumeReason?.trim() ? { resumeReason: run.resumeReason.trim() } : {}),
     ...(run.failureReason !== undefined ? { failureReason: run.failureReason } : {}),
     ...(run.prNumber !== undefined && Number.isSafeInteger(run.prNumber) && run.prNumber > 0
       ? { prNumber: run.prNumber }

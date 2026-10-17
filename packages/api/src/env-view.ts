@@ -22,6 +22,7 @@ import type {
 import { describeEngineMaster, type EngineMasterState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import {
+  assessRunningRelease,
   type DeployLagInput,
   type JobRecord,
   judgeDeployLag,
@@ -158,10 +159,11 @@ export function scheduleFact(jobs: readonly JobRecord[], now: Date): EnvSchedule
 /**
  * 在用版本、落后主线没有（只正式环境读得到）。读不到发布目录 / 状态文件时 judgeDeployLag 会判「没查成」，
  * 那也照实带进 problems；current/behind 读不出就是 null，页面写「没查成」不写 0。
+ * 标成在用的提交和 deploy_lag 同一份 assessRunningRelease：进程还在旧目录时不把 current 链接写成已经切过去。
  */
 export function versionFact(input: DeployLagInput, now: Date): EnvVersion {
   const verdict = judgeDeployLag(input, now);
-  const current = 'error' in input.current ? null : input.current.sha;
+  const current = assessRunningRelease(input).sha;
   let behind: number | null = null;
   const st = input.state;
   if (current && !('error' in st) && st.main?.commits.some(([s]) => s === current)) {

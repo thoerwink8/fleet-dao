@@ -116,6 +116,10 @@ export const runs = pgTable(
      * 回填，定时任务「用量补记」（engine 的 jobs/usage-backfill.ts）凭它到 Mirasim 的用量账本按会话补读（#1935）。
      */
     sessionId: text('session_id'),
+    /** 判定这一段要续的上一段会话号；用于统计实际续上的比例。 */
+    resumeSessionId: text('resume_session_id'),
+    /** 判定不开上一段会话、改开新会话的原因；和 resume_session_id 二选一。 */
+    resumeReason: text('resume_reason'),
     /**
      * 用量为什么没记全（四样 token 有缺的时候才有）：还在等中转计量回填、中转没有这次调用的记录、账本读不了、老记录对不上会话……
      * 由「用量补记」或一次性回填（#1948）写。四样补齐之后这里留下「叫停后的调用已补」记号（按放宽后的窗口算过，只补一次）；

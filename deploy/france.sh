@@ -219,7 +219,7 @@ RELEASE_REQUEST_UNITS=(fleet-release-request.service fleet-release-request.path)
 # 自动发布单元（docs/ops.md 第九节「自动发布」）：读主线头、它的 CI、在用版本、落后几个，主线绿了请求发版（0088，写请求文件、由接活单元发）；发完版后顺带装自动档、同步规矩。装的是副本：
 # 主线上改了它，下一轮发完版自动换（--auto-tier）。它每一轮的读数、本脚本装到哪个提交（下面 APPLIED_FILE）都放在 AUTO_DIR，后端的 /healthz 读
 AUTO_RELEASE_LIB=/usr/local/lib/fleet-dao/auto-release
-AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs config.mjs)
+AUTO_RELEASE_FILES=(lib.mjs fleet-auto-release.mjs config.mjs running-release.mjs)
 # 配置对账（#323，docs/ops.md 第九节「配置进仓对账」）：私有值只把 HMAC 指纹写进仓里的期望，钥匙只在本机（root 600）。
 # 本脚本第一次跑时生成，之后不动；自动发布每一轮、本脚本的读回都拿它算线上私有值的指纹
 CONFIG_KEY=/etc/fleet-dao/config-fingerprint.key
@@ -1410,6 +1410,8 @@ readback_dirs() {
       bad=1
     fi
   done
+  # _tmp 归引擎用户：冷验收要在这下面 mkdir。只核对，不改权限。
+  readback_work_tmp || bad=1
   if ((bad == 0)); then ok "目录与配置文件的属主、权限都对"; fi
 }
 

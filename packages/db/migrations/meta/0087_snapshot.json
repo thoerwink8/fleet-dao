@@ -1,5 +1,5 @@
 {
-  "id": "0c4d345d-769e-4368-b2a3-73815db8cab2",
+  "id": "24ec7730-f81c-47b9-a3c5-146a2e14dafe",
   "prevId": "b8b9933f-cc75-4680-890c-13cd7b93eb84",
   "version": "7",
   "dialect": "postgresql",
@@ -2859,12 +2859,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "repo_id": {
-          "name": "repo_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
         "title": {
           "name": "title",
           "type": "text",
@@ -2953,21 +2947,6 @@
           "method": "btree",
           "with": {}
         },
-        "notifications_repo_idx": {
-          "name": "notifications_repo_idx",
-          "columns": [
-            {
-              "expression": "repo_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "notifications_open_idx": {
           "name": "notifications_open_idx",
           "columns": [
@@ -2991,15 +2970,6 @@
           "tableFrom": "notifications",
           "tableTo": "tasks",
           "columnsFrom": ["task_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "notifications_repo_id_repos_id_fk": {
-          "name": "notifications_repo_id_repos_id_fk",
-          "tableFrom": "notifications",
-          "tableTo": "repos",
-          "columnsFrom": ["repo_id"],
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
@@ -5104,6 +5074,18 @@
         },
         "session_id": {
           "name": "session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resume_session_id": {
+          "name": "resume_session_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "resume_reason": {
+          "name": "resume_reason",
           "type": "text",
           "primaryKey": false,
           "notNull": false

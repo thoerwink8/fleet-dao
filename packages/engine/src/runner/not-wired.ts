@@ -52,6 +52,9 @@ const RunRecordFields = z.object({
   costUsd: z.number().nonnegative().optional(),
   /** 执行体报的会话号（收场才有）；没开成会话、读不到不给。经 Mirasim 起的会话靠它事后补读用量（#1935）。 */
   sessionId: z.string().min(1).optional(),
+  /** 这一段起跑前判定要续的会话号；新会话判定则由 resumeReason 说明原因。 */
+  resumeSessionId: z.string().min(1).optional(),
+  resumeReason: z.string().min(1).optional(),
   /** 内存峰值（MiB）。只对挂在 cgroup 里的会话可读；本机不给。 */
   memoryPeakMb: z.number().int().nonnegative().optional(),
   /** 这一次会话的 CPU 秒数（大于 0）。读不到不给，不写 0（#1980）。 */
@@ -108,6 +111,8 @@ export const RunStartSchema = RunRecordFields.pick({
   routeId: true,
   tier: true,
   routeWhy: true,
+  resumeSessionId: true,
+  resumeReason: true,
   workflowId: true,
   prNumber: true,
   branch: true,

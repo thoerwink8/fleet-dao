@@ -76,7 +76,7 @@ export async function runCursorAgent(
       read: (line) => reader.read(line),
       busy: () => reader.toolsInFlight > 0,
       inspect(effect, control) {
-        const id = effect.init?.sessionId;
+        const id = effect.sessionId ?? effect.init?.sessionId;
         if (!id) return;
         if (resumeId && id !== resumeId) {
           control.kill('session_mismatch');

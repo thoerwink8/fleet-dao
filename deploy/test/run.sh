@@ -16,7 +16,7 @@
 # 自动档也装这个单元（mirasim-auto-tier，#1274：没变不重启、变了才重启、本体不在待配不算红、单元缺 MIRASIM_NO_AGENT_EGRESS=1 判红）、
 # 切会话用户挂的 reclaude 组织（agent-scope-org-use）、只读命令行工具版本（agent-scope-probe，#1969）、发布取代码、装依赖经期望里登记的会话代理、登记成空就直连（release-proxy，#786）、
 # 发布构建在沙箱里跑、读不到密钥目录和本机库 socket，沙箱建不成就不发、不退回用 fleet 直接构建（build-isolation，#79）、
-# node 的编译缓存目录归 root、别人放不进（node-cache）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
+# node 的编译缓存目录归 root、别人放不进（node-cache）、工作树 _tmp 归引擎用户、非 root 能在下面 mkdir 再 rmdir（work-tmp：已是 root:root 755 的改属主，已经归引擎用户的第二遍不改、读回不误报）、会话用户在本机开的口只许它自己和 root 连（session-ports，#35）、
 # 法国 sshd 抗扫描和 fail2ban 的 sshd jail（sshd-hardening，#1348：sshd -t 不过撤掉文件不重载、有效配置被盖掉判红、fail2ban 没装只记待配）、
 # 发版把会话口子里已有的公钥补进 root 的 authorized_keys，并让 sshd 的 Match User root 直接认同一份（root-ssh-login，#2138：没有才补、原行不删、不碰 authorized_keys2、sshd -t 不过就撤、口子没有不挡发版）、
 # 香港防火墙基线（hk-firewall：ufw 没开、命令失败或认不出、默认不是拒绝、多开的对公网端口都判红；只有出站 ALLOW OUT 不算已放行；第二遍不改 ufw；别家 8443 不动）、
@@ -59,7 +59,7 @@ SKIP_WHY=""
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
   'login-user session-user listen root-exec-check ops-only ports shards session-proxy session-ports release-proxy node-report-gate service-home sshd-hardening hk-firewall hk-retired-gateway hk-self-proxy-owner hk-france-probe'
-  'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier user-slice-cap node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
+  'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier user-slice-cap node-cache work-tmp agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
   'lint session-pnpm no-demo backup auto-release-state agents-sync agents-sync-account node-tests release-flow runtime-unchanged web-publish build-isolation'
 )
 NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child runtime-closure)

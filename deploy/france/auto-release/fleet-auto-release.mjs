@@ -41,6 +41,7 @@ import {
   TRAIN_MARKER,
   TRAIN_STATE,
 } from './lib.mjs';
+import { readRunningRelease } from './running-release.mjs';
 
 const NODE = '/usr/bin/node';
 const SHA = /^[0-9a-f]{40}$/;
@@ -267,6 +268,10 @@ export const realIo = {
     }
     if (!SHA.test(target)) throw new Error(`${RELEASES}/current 指着认不出的「${target.slice(0, 60)}」`);
     return target;
+  },
+  /** 主进程 cwd（journal「在用」用，和 deploy_lag 同一份读法）。链接仍由 readCurrent 给发版闸。 */
+  async readRunning(current) {
+    return readRunningRelease(RELEASES, { sha: current });
   },
   /** 自动发版的闸要的事实（lib.mjs 的 gateVerdict 判）：接活单元装了没有、有没有没被接走的请求、暂停标记、进度记录、发布锁。读不了的抛。 */
   async releaseGate() {

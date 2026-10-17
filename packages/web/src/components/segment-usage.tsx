@@ -812,6 +812,11 @@ function RunRow({
           为什么派它：{run.routeWhy ?? '没记'}
         </p>
       ) : null}
+      {run.resumeReason ? (
+        <p className="mt-1 text-meta text-muted-foreground" data-resume-reason>
+          为什么没续上：{run.resumeReason}
+        </p>
+      ) : null}
       {run.failureReason ? (
         <p className="mt-1 text-meta text-muted-foreground">为什么没成：{run.failureReason}</p>
       ) : null}

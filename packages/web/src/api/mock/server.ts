@@ -341,7 +341,7 @@ function decisionStillOpen(n: Notification): boolean {
 }
 
 /**
- * 通知归哪个仓：和迁移 0085 同一条规矩。挂了单的取那张单的仓；
+ * 通知归哪个仓：和迁移 0088 同一条规矩。挂了单的取那张单的仓；
  * 键是 github-app:<owner/name> 或 close-sweep:<owner/name>:… 的取那个仓。对不上是 null。
  */
 function notificationRepoId(
