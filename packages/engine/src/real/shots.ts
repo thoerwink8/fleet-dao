@@ -11,6 +11,8 @@
 // - 归档在 <归档>/<任务>/shots/<代码头>/：图片按 sha256 起名，manifest.json 记代码头、每张的路径、字节数、sha256、blob 号、
 //   结局。同一任务同一个头重试：清单对得上就不重写；换了头另起目录；别的任务的目录只在过期时删。
 // - 容量：所有任务的图片归档合计不超过 archiveMaxBytes；超过 keepDays 天的整目录删掉。删完还放不下就失败，树留着。
+// - 删树的路不止收树一条：每小时对账的清扫和一键清理、建树前删同一位置的旧树、不带 shots 的收树都先过 keepShotsBeforeRemove，
+//   回 failed 就不删。清扫不看远端，同一个头记过已交付才认，否则有图就归档。
 // - 读树里的东西一律以会话用户的身份（user-git.ts 的 runInTree / gitInTree）：引擎不以自己的身份进会话的目录。
 
 import { createHash, randomUUID } from 'node:crypto';
@@ -324,6 +326,9 @@ export interface PreserveShotsDeps {
   limits?: Partial<ShotsLimits>;
 }
 
+/** 存清单、存图用到的那几样（不含读远端）。 */
+type ArchiveDeps = Omit<PreserveShotsDeps, 'remote'>;
+
 interface Manifest {
   schemaVersion: 1;
   taskId: string;
@@ -349,49 +354,150 @@ export async function preserveShots(
   deps: PreserveShotsDeps,
 ): Promise<ShotsDelivery> {
   const limits = { ...SHOTS_LIMITS, ...deps.limits };
-  const branch = `shots/${input.issueNumber}`;
-  const base = { head: input.head, branch };
-  let dir: string;
+  const base = { head: input.head, branch: `shots/${input.issueNumber}` };
   try {
-    dir = shotsArchiveDir(deps.archiveDir, deps.taskId, input.head);
+    shotsArchiveDir(deps.archiveDir, deps.taskId, input.head);
   } catch (error) {
     return { ...base, outcome: 'failed', files: [], reason: errMessage(error) };
   }
-  const record = (delivery: ShotsDelivery) => writeRecord(dir, input, deps, delivery);
+  const collected = await collectOrFail(t, limits);
+  if ('reason' in collected) return { ...base, outcome: 'failed', files: [], reason: collected.reason };
+  return settleShots(t, collected, input, deps, limits, { recordNone: true, remote: deps.remote });
+}
 
-  let collected: Collected;
+export interface KeepShotsOptions extends ArchiveDeps {
+  /** 认不出是哪张单（分支名不是 fleet/<号>-…）就不带：不看远端，有图直接归档。 */
+  issueNumber?: number;
+  /** 固定的代码头；不给就读树的 HEAD，树不是仓（或还没有提交）就按图片内容起一个号。 */
+  head?: string;
+  /** 不给就不看远端：同一个头有「已交付」的核对记录、图一张不差才认交付，否则一律归档。 */
+  remote?: PreserveShotsDeps['remote'];
+}
+
+/**
+ * 删树的别的路（每小时对账的清扫和一键清理、建树前删同位置的旧树、不带 shots 的收树）共用的那一道：
+ * 树里没有受管图片就回 none、不记清单（清扫每棵树都过一遍，不留一堆空清单）；有图就和收树时一样核对远端 / 存进受限归档。
+ * 回 failed 时调用方不许删树。被叫停原样抛。
+ */
+export async function keepShotsBeforeRemove(t: UserTree, opts: KeepShotsOptions): Promise<ShotsDelivery> {
+  const limits = { ...SHOTS_LIMITS, ...opts.limits };
+  const branch = opts.issueNumber === undefined ? 'shots/?' : `shots/${opts.issueNumber}`;
+  const head0 = opts.head ?? '';
+  const collected = await collectOrFail(t, limits);
+  if ('reason' in collected) {
+    return { head: head0, branch, outcome: 'failed', files: [], reason: collected.reason };
+  }
+  if (collected.found.length === 0 && !collected.over) {
+    const rejected = collected.rejected.slice(0, REJECTED_MAX);
+    return { head: head0, branch, outcome: 'none', files: [], ...(rejected.length > 0 ? { rejected } : {}) };
+  }
+  const files = collected.found.map((f) => f.record);
+  let head = opts.head;
+  if (head === undefined) {
+    try {
+      head = (await treeHead(t)) ?? contentHead(collected.found);
+    } catch (error) {
+      if (aborted(t)) throw error;
+      return {
+        head: '',
+        branch,
+        outcome: 'failed',
+        files,
+        reason: `读不出树的头：${errMessage(error).slice(0, 200)}`,
+      };
+    }
+  }
   try {
-    collected = await collectShots(t, limits);
+    shotsArchiveDir(opts.archiveDir, opts.taskId, head);
+  } catch (error) {
+    return { head, branch, outcome: 'failed', files, reason: errMessage(error) };
+  }
+  const deps: ArchiveDeps = { archiveDir: opts.archiveDir, taskId: opts.taskId, now: opts.now };
+  const issueNumber = opts.issueNumber;
+  const settled = await settleShots(t, collected, { issueNumber: issueNumber ?? 0, head }, deps, limits, {
+    recordNone: false,
+    remote: issueNumber === undefined ? undefined : opts.remote,
+  });
+  return { ...settled, branch };
+}
+
+/** 清点；没清点成回原因（不抛，叫停照抛）。 */
+async function collectOrFail(t: UserTree, limits: ShotsLimits): Promise<Collected | { reason: string }> {
+  try {
+    return await collectShots(t, limits);
   } catch (error) {
     if (aborted(t)) throw error;
-    return {
-      ...base,
-      outcome: 'failed',
-      files: [],
-      reason: `图片没清点成：${errMessage(error).slice(0, 200)}`,
-    };
+    return { reason: `图片没清点成：${errMessage(error).slice(0, 200)}` };
   }
+}
+
+/** 树的 HEAD；不是 git 仓、或还没有提交回 null。 */
+async function treeHead(t: UserTree): Promise<string | null> {
+  const isRepo = await runInTree(t, [t.git ?? GIT, 'rev-parse', '--git-dir']);
+  if (isRepo.code !== 0) return null;
+  const r = await runInTree(t, [t.git ?? GIT, 'rev-parse', '--verify', '-q', 'HEAD^{commit}']);
+  const head = r.stdout.toString('utf8').trim();
+  return r.code === 0 && SHA.test(head) ? head : null;
+}
+
+/** 没有代码头时按图片内容起的号（40 位）：同样的一批图重试落进同一个目录。 */
+function contentHead(found: readonly Found[]): string {
+  const list = [...new Set(found.map((f) => f.record.sha256))].sort().join(',');
+  return createHash('sha1').update(`fleet-shots:${list}`).digest('hex');
+}
+
+/**
+ * 清点完的那一半：远端读得到就算交付，读不到就归档。recordNone＝没有图也记一份清单（收树时记，重试说得清结局）。
+ * 没给 remote（不看远端）：同一个头的核对记录说已交付、图一张不差才认交付，否则归档。
+ */
+async function settleShots(
+  t: UserTree,
+  collected: Collected,
+  input: ShotsInput,
+  deps: ArchiveDeps,
+  limits: ShotsLimits,
+  how: { recordNone: boolean; remote: PreserveShotsDeps['remote'] | undefined },
+): Promise<ShotsDelivery> {
+  const branch = `shots/${input.issueNumber}`;
+  const base = { head: input.head, branch };
+  const dir = shotsArchiveDir(deps.archiveDir, deps.taskId, input.head);
+  const record = (delivery: ShotsDelivery) => writeRecord(dir, input, deps, delivery);
   const files = collected.found.map((f) => f.record);
   const rejected = collected.rejected.slice(0, REJECTED_MAX);
   const extra = rejected.length > 0 ? { rejected } : {};
   if (collected.over) return { ...base, ...extra, outcome: 'failed', files, reason: collected.over };
-  if (files.length === 0) return record({ ...base, ...extra, outcome: 'none', files });
+  if (files.length === 0) {
+    const none: ShotsDelivery = { ...base, ...extra, outcome: 'none', files };
+    return how.recordNone ? record(none) : none;
+  }
 
   let remoteHead: string | null = null;
   let missing: string[];
   let reason: string;
-  try {
-    const remote = await deps.remote(branch);
-    remoteHead = remote.head;
-    missing = files.filter((f) => !remote.blobs.has(f.blob)).map((f) => f.path);
-    reason =
-      remote.head === null
-        ? `远端没有 ${branch}（404），图片没交付`
-        : `远端 ${branch} 缺 ${missing.length} 张`;
-  } catch (error) {
-    if (aborted(t)) throw error;
+  if (!how.remote) {
+    const before = await readManifest(dir);
+    if (before?.delivery.outcome === 'delivered') {
+      const delivered = new Set(before.delivery.files.map((f) => f.blob));
+      if (files.every((f) => delivered.has(f.blob))) {
+        return { ...before.delivery, archivedTo: join(dir, 'manifest.json') };
+      }
+    }
     missing = files.map((f) => f.path);
-    reason = `远端 ${branch} 没读成：${errMessage(error).slice(0, 200)}`;
+    reason = '删树前没核对远端，也没有已交付的核对记录：图片存进归档，待交付';
+  } else {
+    try {
+      const remote = await how.remote(branch);
+      remoteHead = remote.head;
+      missing = files.filter((f) => !remote.blobs.has(f.blob)).map((f) => f.path);
+      reason =
+        remote.head === null
+          ? `远端没有 ${branch}（404），图片没交付`
+          : `远端 ${branch} 缺 ${missing.length} 张`;
+    } catch (error) {
+      if (aborted(t)) throw error;
+      missing = files.map((f) => f.path);
+      reason = `远端 ${branch} 没读成：${errMessage(error).slice(0, 200)}`;
+    }
   }
   const seen = remoteHead ? { remoteHead } : {};
   if (remoteHead && missing.length === 0) {
@@ -414,7 +520,7 @@ export async function preserveShots(
 async function writeRecord(
   dir: string,
   input: ShotsInput,
-  deps: PreserveShotsDeps,
+  deps: ArchiveDeps,
   delivery: ShotsDelivery,
 ): Promise<ShotsDelivery> {
   const file = join(dir, 'manifest.json');
@@ -428,7 +534,7 @@ async function writeRecord(
   }
 }
 
-function manifestJson(input: ShotsInput, deps: PreserveShotsDeps, delivery: ShotsDelivery): string {
+function manifestJson(input: ShotsInput, deps: ArchiveDeps, delivery: ShotsDelivery): string {
   const m: Manifest = {
     schemaVersion: 1,
     taskId: deps.taskId,
@@ -503,7 +609,7 @@ async function archiveEntries(archiveDir: string): Promise<{ dir: string; bytes:
 async function archiveShots(
   dir: string,
   input: ShotsInput,
-  deps: PreserveShotsDeps,
+  deps: ArchiveDeps,
   limits: ShotsLimits,
   found: readonly Found[],
   pending: ShotsDelivery,

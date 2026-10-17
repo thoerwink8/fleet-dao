@@ -85,6 +85,7 @@ import { mainCiRuns } from './main-ci-runs.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
+import { keepShotsBeforeRemove } from './shots.ts';
 import { createStorePorts } from './store-ports.ts';
 import { treeBytes, treeLeftovers } from './user-git.ts';
 import { SESSION_TMP_DIR, type WorkTrees } from './worktrees.ts';
@@ -243,6 +244,8 @@ export interface HourlyReconcileWiring {
     AutoMergeWiringGitHub;
   trees: WorkTrees;
   exec: UserExec;
+  /** 和收树同一个归档目录（<FLEET_STATE_DIR>/archive）：清扫删树前把界面验收图片存进这里的受限归档（#2983）。 */
+  archiveDir: string;
   /** 会话用户此刻挂的组织（real/session-org.ts）：判阶段派不派得出去和选路同一套，也要它。 */
   sessionOrg: SessionOrgReader;
   /** 拼车并发登记的现核（real/carpool-cap.ts，#896）：判阶段派不派得出去和选路同一套，拼车池核对不上也不算派得出去。必填，漏接过不了类型检查。 */
@@ -558,6 +561,24 @@ export function hourlyReconcileJob(
       treeFor: (repo, branch) => w.trees.treeFor(repo, branch),
       ownerOf: (dir) => w.trees.ownerOf(dir),
       remove: (dir) => w.trees.remove(dir),
+      // 清扫不看远端（这一路没有镜像）：同一个头记过已交付才认，否则有图就存进受限归档，存不成不删
+      keepShots: (dir, user, at) =>
+        keepShotsBeforeRemove(
+          {
+            exec: w.exec,
+            user,
+            dir,
+            scopePrefix: 'reconcile-shots',
+            ...(w.gitBin ? { git: w.gitBin } : {}),
+            ...(w.shBin ? { sh: w.shBin } : {}),
+          },
+          {
+            archiveDir: w.archiveDir,
+            taskId: at.taskId ?? `sweep.${at.rel.replace(/\//g, '.')}`,
+            issueNumber: at.issueNumber,
+            now: now(),
+          },
+        ),
       leftovers: (dir, user, known, scratch) =>
         treeLeftovers(
           {

@@ -3,7 +3,16 @@
 // 残留的树删掉、提醒跟着撤（有没推的东西也删：AI 产生的树，决定 0097、#2729）；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
 // 条件还在的提醒不撤；卡住报警超过 24 小时再推一次、同一天不重复。每条失败路径都故意造一次。
 import { randomUUID } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -44,6 +53,7 @@ import {
   workflowViewOf,
 } from '../../src/real/hourly-reconcile.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
+import { runChildOk } from '../child.ts';
 import { fakeTrees, git, world } from './fixtures.ts';
 
 let t: TestDb;
@@ -64,7 +74,10 @@ beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'fleet-reconcile-'));
   ft = fakeTrees(root);
 });
-afterEach(() => rmSync(root, { recursive: true, force: true }));
+afterEach(() => {
+  rmSync(root, { recursive: true, force: true });
+  rmSync(`${root}-archive`, { recursive: true, force: true });
+});
 
 /** 一个仓（acme/widgets）、一张需求（#160）、一个子任务（key login）。 */
 async function work(state: (typeof tasks.$inferInsert)['state'] = 'failed') {
@@ -145,6 +158,7 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     db: t.db,
     trees: ft.trees,
     exec: localExec(),
+    archiveDir: `${root}-archive`,
     sessionOrg: async () => ({ ok: true, org: 'carpool' }),
     carpoolRegistry: async () => ({ ok: true }),
     machine: '法国',
@@ -330,6 +344,67 @@ describe('工作树：残留的删掉（有没推的东西也删，人以前点�
     expect(row?.body).toContain('照决定 0097 直接删');
     // 一棵树 + 探针目录；删了一棵、撤了一条
     expect(run).toMatchObject({ outcome: 'ok', found: 2 });
+  });
+
+  describe('删树前保全界面截图（#2983）', () => {
+    const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const png = (tag: string) => Buffer.concat([PNG, Buffer.from(tag)]);
+
+    /** 照 docs/design/驾驶舱界面.md 第七节做一个不挂引用的孤儿图片提交（原图删掉，提交是唯一副本）。 */
+    function orphanShot(dir: string, name: string, bytes: Buffer): string {
+      const work = `${root}-src`;
+      mkdirSync(work, { recursive: true });
+      writeFileSync(join(work, name), bytes);
+      // 提交身份放进环境：CI 的机器上没有全局的 user.name
+      const env = {
+        ...process.env,
+        GIT_INDEX_FILE: `${root}-orphan.idx`,
+        GIT_AUTHOR_NAME: 't',
+        GIT_AUTHOR_EMAIL: 'fleet-test@localhost',
+        GIT_COMMITTER_NAME: 't',
+        GIT_COMMITTER_EMAIL: 'fleet-test@localhost',
+      };
+      runChildOk('git', ['--work-tree', work, 'add', '-f', '.'], { cwd: dir, env });
+      const tree = runChildOk('git', ['write-tree'], { cwd: dir, env });
+      const commit = runChildOk('git', ['commit-tree', tree, '-m', '截图'], { cwd: dir, env });
+      rmSync(work, { recursive: true, force: true });
+      rmSync(`${root}-orphan.idx`, { force: true });
+      return commit;
+    }
+
+    it('复现：树里只剩没推的孤儿图片提交（treeLeftovers 看不到，以前照空树删）：先存进受限归档、记清单，再删', async () => {
+      const { task } = await work();
+      const tree = makeTree('acme_widgets/160-login');
+      orphanShot(tree.dir, 'home-before.png', png('before'));
+      probeDir();
+
+      const run = await runHourlyReconcileJob(deps());
+      expect(run.outcome).toBe('ok');
+      expect(existsSync(tree.dir)).toBe(false);
+      const manifest = join(`${root}-archive`, task.id, 'shots', tree.head, 'manifest.json');
+      const m = JSON.parse(readFileSync(manifest, 'utf8'));
+      expect(m.delivery).toMatchObject({ outcome: 'archived', head: tree.head, branch: 'shots/160' });
+      expect(m.delivery.files[0].path).toMatch(/\/home-before\.png$/);
+      expect(readdirSync(join(manifest, '..')).filter((f) => f.endsWith('.png'))).toHaveLength(1);
+    });
+
+    it('【故意造出的失败】归档写不进去：树留着、图还在，这一轮记没查成写明原因；修好了下一轮存上再删', async () => {
+      await work();
+      const tree = makeTree('acme_widgets/160-login', { extra: 1 });
+      mkdirSync(join(tree.dir, '_tmp', 'shots', '160'), { recursive: true });
+      writeFileSync(join(tree.dir, '_tmp', 'shots', '160', 'after.png'), png('after'));
+      probeDir();
+      writeFileSync(`${root}-archive`, '占住了');
+
+      const run = await runHourlyReconcileJob(deps());
+      expect(run.outcome).toBe('partial');
+      expect(run.why).toContain('acme_widgets/160-login 里的界面截图没交付也没存档成，树留着没删');
+      expect(existsSync(join(tree.dir, '_tmp', 'shots', '160', 'after.png'))).toBe(true);
+
+      rmSync(`${root}-archive`);
+      await runHourlyReconcileJob(deps());
+      expect(existsSync(tree.dir)).toBe(false);
+    });
   });
 
   it('以前（#2729 之前）报过的工作树要你拍、人点了留着：照人的意思留着，不删、不再报', async () => {

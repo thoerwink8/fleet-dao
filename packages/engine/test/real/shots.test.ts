@@ -20,6 +20,8 @@ import {
   collectShots,
   gitBlobId,
   imageKind,
+  type KeepShotsOptions,
+  keepShotsBeforeRemove,
   type PreserveShotsDeps,
   preserveShots,
   recordedShots,
@@ -328,5 +330,94 @@ describe('交付核对和受限归档', () => {
     shot('2969/a.png', png('a'));
     expect((await preserveShots(tree(), { ...input, head: '../x' }, deps())).outcome).toBe('failed');
     expect((await preserveShots(tree(), input, deps({ taskId: '../evil' }))).outcome).toBe('failed');
+  });
+});
+
+describe('删树的别的路共用的那一道（keepShotsBeforeRemove：清扫、建树前删旧树、不带 shots 的收树）', () => {
+  const keep = (over: Partial<KeepShotsOptions> = {}) =>
+    keepShotsBeforeRemove(tree(), { archiveDir: archive, taskId: 'task-1', now: NOW, ...over });
+  const treeHead = () => git('rev-parse', 'HEAD');
+
+  it('没有受管图片：none，不记清单（清扫每棵树都过一遍）', async () => {
+    const r = await keep({ issueNumber: 2969 });
+    expect(r).toMatchObject({ outcome: 'none', files: [] });
+    expect(existsSync(archive)).toBe(false);
+  });
+
+  it('复现清扫丢图：只剩孤儿图片提交（treeLeftovers 看不到）、树里还有没跟踪的图，不看远端：按树的 HEAD 存进归档、带原因', async () => {
+    shot('2969/after.png', png('after'));
+    orphanCommit({ 'before.png': png('before') });
+    const r = await keep({ issueNumber: 2969 });
+    expect(r).toMatchObject({ outcome: 'archived', head: treeHead(), branch: 'shots/2969' });
+    expect(r.reason).toContain('没核对远端');
+    expect(r.files.map((f) => f.path).sort()).toEqual([
+      '2969/after.png',
+      expect.stringMatching(/^[0-9a-f]{7}\/before\.png$/),
+    ]);
+    const stored = shotsArchiveDir(archive, 'task-1', treeHead());
+    expect(readFileSync(join(stored, `${sha256(png('before'))}.png`))).toEqual(png('before'));
+    // 再来一次（清扫下一轮、端口重试）：清单对得上，不重写
+    expect(await keep({ issueNumber: 2969 })).toEqual(r);
+  });
+
+  it('同一个头记过「已交付」、图一张不差：认交付，不再存图；多了一张没记过的照样归档', async () => {
+    shot('2969/a.png', png('a'));
+    const head = treeHead();
+    const delivered = await preserveShots(
+      tree(),
+      { issueNumber: 2969, head },
+      deps({ remote: async () => ({ head: OTHER_HEAD, blobs: new Set([gitBlobId(png('a'))]) }) }),
+    );
+    expect(delivered.outcome).toBe('delivered');
+    expect((await keep({ issueNumber: 2969 })).outcome).toBe('delivered');
+    shot('2969/b.png', png('b'));
+    expect(await keep({ issueNumber: 2969 })).toMatchObject({
+      outcome: 'archived',
+      missing: expect.arrayContaining(['2969/b.png']),
+    });
+  });
+
+  it('给了 remote 就按远端说：读得到是已交付，404 存进归档', async () => {
+    shot('2969/a.png', png('a'));
+    const blobs = new Set([gitBlobId(png('a'))]);
+    expect(
+      (await keep({ issueNumber: 2969, remote: async () => ({ head: OTHER_HEAD, blobs }) })).outcome,
+    ).toBe('delivered');
+    rmSync(archive, { recursive: true, force: true });
+    const r = await keep({ issueNumber: 2969, remote: async () => ({ head: null, blobs: new Set() }) });
+    expect(r.outcome).toBe('archived');
+    expect(r.reason).toContain('404');
+  });
+
+  it('不是 git 仓的树：按图片内容起号，同一批图落进同一个目录', async () => {
+    rmSync(join(dir, '.git'), { recursive: true, force: true });
+    shot('2969/a.png', png('a'));
+    const first = await keep({ issueNumber: 2969 });
+    expect(first.outcome).toBe('archived');
+    expect(first.head).toMatch(/^[0-9a-f]{40}$/);
+    expect((await keep({ issueNumber: 2969 })).head).toBe(first.head);
+  });
+
+  it('【故意造出的失败】归档写不进去：failed 带原因（调用方不删）；认不出单号照样归档、不看远端', async () => {
+    shot('2969/a.png', png('a'));
+    writeFileSync(archive, '占住了');
+    const failed = await keep({ issueNumber: 2969 });
+    expect(failed.outcome).toBe('failed');
+    expect(failed.reason).toContain('归档没成');
+    rmSync(archive);
+    const remote = vi.fn(async () => ({ head: null, blobs: new Set<string>() }));
+    const r = await keep({ remote });
+    expect(r).toMatchObject({ outcome: 'archived', branch: 'shots/?' });
+    expect(remote).not.toHaveBeenCalled();
+  });
+
+  it('【故意造出的失败】叫停：原样抛，不归档', async () => {
+    shot('2969/a.png', png('a'));
+    const abort = new AbortController();
+    abort.abort();
+    await expect(
+      keepShotsBeforeRemove(tree(abort.signal), { archiveDir: archive, taskId: 'task-1', now: NOW }),
+    ).rejects.toThrow();
+    expect(existsSync(archive)).toBe(false);
   });
 });

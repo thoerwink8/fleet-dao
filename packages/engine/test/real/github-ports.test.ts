@@ -414,6 +414,59 @@ describe('收树前核对界面截图（#2983）', () => {
     expect(existsSync(dir)).toBe(true);
   });
 
+  it('老历史、没推过的不带 shots：一样过这一道（按树的 HEAD、分支里的单号看远端），有图存进归档才删；没图结果和原来一样', async () => {
+    const { ports, trees, calls } = setup({ fetchBranchHead: remoteShots(null) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/a.png', png('a'));
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: true },
+      ctx,
+    );
+    expect(r).toMatchObject({ removed: true, shots: { outcome: 'archived', branch: 'shots/12' } });
+    expect(r.shots?.reason).toContain('404');
+    expect(calls.fetchBranchHead).toBeDefined();
+    expect(existsSync(dir)).toBe(false);
+
+    const plain = await seededTree(trees);
+    expect(
+      await ports.removeWorktree({ taskId: 't1', repo, path: plain, branch: BRANCH, archive: false }, ctx),
+    ).toEqual({ removed: true, gone: false });
+  });
+
+  it('【故意造出的失败】不带 shots、归档写不进去：一样不删树，kept 写原因', async () => {
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(null) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/a.png', png('a'));
+    writeFileSync(join(root, 'archive'), '占住了');
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: true },
+      ctx,
+    );
+    expect(r).toMatchObject({ removed: false, gone: false, shots: { outcome: 'failed' } });
+    expect(r.kept).toContain('归档没成');
+    expect(existsSync(join(dir, '_tmp', 'shots', '12', 'a.png'))).toBe(true);
+  });
+
+  it('建树前删同一位置的旧树：旧树里的图先存进归档再删；存不成不删、明确报 SHOTS_KEPT', async () => {
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(null) });
+    const stale = await seededTree(trees);
+    shotIn(stale, '12/a.png', png('a'));
+    writeFileSync(join(root, 'archive'), '占住了');
+    await expect(ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, ctx)).rejects.toMatchObject({
+      code: 'SHOTS_KEPT',
+      retryable: false,
+      message: expect.stringContaining('归档没成'),
+    });
+    expect(existsSync(join(stale, '_tmp', 'shots', '12', 'a.png'))).toBe(true);
+
+    rmSync(join(root, 'archive'));
+    const tree = await ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, ctx);
+    expect(tree.path).toBe(stale);
+    expect(trees.owners.has(stale)).toBe(false);
+    const archived = readdirSync(join(root, 'archive', 't1', 'shots'));
+    expect(archived).toHaveLength(1);
+  });
+
   it('没有受管图片：none，照常删树，不问远端', async () => {
     const { ports, calls, trees } = setup();
     const dir = await seededTree(trees);

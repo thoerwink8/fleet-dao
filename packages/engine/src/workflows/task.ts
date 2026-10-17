@@ -953,6 +953,7 @@ class TaskFlow {
   /**
    * 收工作树。没合并就收（放弃、叫停）的先存档。收不掉只记日志：占盘，每小时对账的工作树清扫会收。
    * 推上去过的（有头）先核对界面截图（#2983，patched('shots-delivery')）：没交付也没存档成，端口不删树、kept 写原因。
+   * 没带 shots 的（没推过、老历史）端口按树的 HEAD 过同一道；kept 的树清扫删之前也再存一次，存不成照旧留着。
    */
   async cleanup(archive: boolean): Promise<RemoveWorktreeResult | null> {
     const rt = this.rt;
