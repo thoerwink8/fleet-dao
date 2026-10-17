@@ -20,6 +20,8 @@ import {
 } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy, readFallbackProxy } from './git-run.mjs';
 import { hookTimer } from './hook-timing.mjs';
+import { shellEditVerdict } from './shell-edit.mjs';
+import { haikuVerdict, recordHaikuDispatch } from './subagent-ledger.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 // 只标类型、不改判断：改判断就是改规矩，由 agents/test/rules/pretool.rules.test.ts 钉着。
@@ -2474,6 +2476,11 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
       "这条 bash 命令里有会被当成命令执行的反引号（在双引号里、没加引号、或 <<EOF 不带引号的 heredoc 里）：bash 会先把反引号里的内容当命令跑掉。Markdown 的 `代码` 写法放进单引号里、用 <<'EOF' 的 heredoc，或者先用 Write 写进文件再用 --body-file / -F / 读文件；真要取命令输出用 $(…)。",
     );
   }
+  // 改仓里的文件只用 Edit/Write（单 #2844）：Bash 里 sed -i、node -e / python 写文件、> >> tee 写进仓里的，当场拦；只管 Bash 工具，认不清的放行
+  if (tool === 'Bash') {
+    const edit = shellEditVerdict(cmd, rawCwd);
+    if (edit) return edit;
+  }
   // -R/--repo 指到 fleet-dao 以外的仓（比如巡检仓 fleet-dao-canary 的验收单）不归 issue:new 管，放行
   const repoFlag = /(?:^|\s)(?:-R|--repo)[\s=]+['"]?([^\s'"]+)/.exec(cmd)?.[1];
   const otherRepo = repoFlag !== undefined && !/(?:^|\/)fleet-dao$/i.test(repoFlag);
@@ -2660,6 +2667,17 @@ export function agentModelVerdict(raw) {
   );
 }
 
+/**
+ * Haiku 改代码的护栏（单 #2821）：「general-purpose 加 model haiku」的派工，本机策略收回了、或这张单已经派过一次 Haiku 就拦下，
+ * 提示改派 Sonnet。只读 ~/.fleet-dao/ 下两个本机文件、不联网（判法见 subagent-ledger.mjs，规矩见 agents/subagents/README.md「护栏」）。
+ * @param {string} raw 钩子的原始输入
+ * @param {{ home?: string }} [deps] 测试换掉状态目录
+ * @returns {Block | null}
+ */
+export function haikuGuardVerdict(raw, deps) {
+  return haikuVerdict(raw, deps);
+}
+
 // —— 派写码工人前判本机容量（单 #2731，决定 0094）——
 // 以前「能不能派」只是一段文字，自动记忆里「最多 4 个」的旧说法在 0094 之后还被注入、照着写进了报告。现在由代码判：
 // Claude Code 的 Agent 调用，subagent_type 不是只读的那几种（斥候、设计、问 CLI 的、配状态栏的），就读一次本机的空闲内存和负载
@@ -2733,11 +2751,22 @@ if (isMain()) {
     process.stderr.write(`${fableBlock.message}\n`);
     finish(fableBlock.code);
   }
+  // Haiku 改代码的护栏（单 #2821）：收回了、同一张单第二次派 Haiku 就拦；只读本机文件
+  const haikuBlock = haikuGuardVerdict(raw);
+  if (haikuBlock) {
+    process.stderr.write(`${haikuBlock.message}\n`);
+    finish(haikuBlock.code);
+  }
   // 派写码工人前判本机容量（单 #2731）：同样要在 backgroundOnly 早退之前
   const capBlock = capacityVerdict(raw);
   if (capBlock) {
     process.stderr.write(`${capBlock.message}\n`);
     finish(capBlock.code);
+  }
+  // 两道闸都放行了才记账本：被容量拦下的派工没起，不算派过
+  const ledgerRow = recordHaikuDispatch(raw);
+  if (!ledgerRow.recorded && ledgerRow.issue !== undefined) {
+    process.stderr.write(`fleet-guard：Haiku 派工没记进账本：${ledgerRow.why}\n`);
   }
   let backgroundOnly = false;
   try {

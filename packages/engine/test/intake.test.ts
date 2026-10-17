@@ -421,6 +421,37 @@ describe('runIntakeJob · 合并闸还没认冷验收', () => {
 });
 
 describe('runIntakeJob · 一轮', () => {
+  it('仓档案工具链缺失：判没就绪、不读单也不拉单，原因写明缺哪个', async () => {
+    const h = harness({
+      async repos() {
+        return [
+          {
+            ...REPO,
+            profile: {
+              language: 'go',
+              toolchain: ['go'],
+              testCommand: 'go test ./...',
+              moduleRoots: [],
+              mergeSignals: [],
+              standardPathsFile: 'packages/conventions/standard-paths.json',
+              weight: 1,
+            },
+          },
+        ];
+      },
+      async toolchainReady() {
+        return ['go'];
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(run).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(h.started).toEqual([]);
+    expect(h.planReads).toEqual([]);
+    expect(h.logs.some((l) => l.text.includes('缺工具链：go'))).toBe(true);
+    expect(run.why).toContain('toolchain_unready×1');
+    expect(run.why).toContain('缺工具链：go');
+  });
+
   it('开关打开以前开的老单（没贴「整理过」「交给引擎」）→ 不拉，原因是 not_groomed', async () => {
     const h = harness({}, { issues: [issue({ createdAt: OLD })] });
     const run = await runIntakeJob(h.deps);
@@ -831,6 +862,70 @@ describe('runIntakeJob · 一轮', () => {
     expect(() => standardPathIn(undefined, rules)).toThrow(/读不到/);
   });
 
+  it('拉单用这个仓自己的标准清单，不用 fleet-dao 本地那份', async () => {
+    const seen: string[] = [];
+    const own = [{ path: 'docs/own-standard.md', why: '这个仓自己的' }];
+    const localOnly = BODY.replace(
+      '- `packages/web/src/pages/`：驾驶舱页面',
+      '- `agents/shared-rules.md`：通用段',
+    );
+    const h = harness(
+      {
+        async standardPaths(repo) {
+          seen.push(`${repo.owner}/${repo.name}`);
+          return own;
+        },
+      },
+      { issues: [issue({ body: localOnly })] },
+    );
+    await runIntakeJob(h.deps);
+    expect(seen).toEqual(['acme/demo']);
+    // agents/shared-rules.md 在 fleet-dao 本地清单里；这个仓的清单没有它，照拉
+    expect(h.started).toHaveLength(1);
+    expect(h.localMarked).toEqual([]);
+
+    const blocked = harness(
+      {
+        async standardPaths(repo) {
+          seen.push(`${repo.owner}/${repo.name}`);
+          return own;
+        },
+      },
+      {
+        issues: [
+          issue({
+            body: BODY.replace('- `packages/web/src/pages/`：驾驶舱页面', '- `docs/own-standard.md`：标准'),
+          }),
+        ],
+      },
+    );
+    await runIntakeJob(blocked.deps);
+    expect(blocked.started).toEqual([]);
+    expect(blocked.localMarked).toEqual([12]);
+  });
+
+  it('仓档案缺项：没就绪，不拉单，原因写明缺哪几项', async () => {
+    let listed = 0;
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { language: 'go' } }];
+      },
+      async openIssues() {
+        listed += 1;
+        return { issues: [issue()], openMilestones: [V1, V2] };
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(listed).toBe(0);
+    expect(h.started).toEqual([]);
+    expect(run.outcome).toBe('ok');
+    expect(run.why).toContain('没就绪');
+    expect(run.why).toContain('moduleRoots');
+    expect(run.why).toContain('mergeSignals');
+    expect(run.why).toContain('standardPathsFile');
+    expect(run.why).not.toContain('language');
+  });
+
   it('改标准的清单读不到 → 这张单这一轮不拉、不贴标签不留言，记没查成（故意造出失败）', async () => {
     const h = harness({
       async standardPaths() {
@@ -1085,6 +1180,77 @@ describe('runIntakeJob · 一轮', () => {
     const run = await runIntakeJob(h.deps);
     expect(h.started).toHaveLength(MAX_STARTS_PER_ROUND);
     expect(run.outcome).toBe('ok');
+  });
+
+  it('两个仓各 10 张候选、在跑上限 6：按仓轮转，各起 3 条；名单换序结果不变', async () => {
+    const a = { ...REPO, id: 'r1', owner: 'zeta', name: 'later' };
+    const b = { ...REPO, id: 'r2', owner: 'alpha', name: 'earlier' };
+    const runWith = async (repos: (typeof REPO)[]) => {
+      const h = harness({
+        limits: { maxStartsPerRound: 6, maxRunningTasks: 6, maxStartsPerHour: 99 },
+        async repos() {
+          return repos;
+        },
+        async openIssues(repo) {
+          const base = repo.id === 'r1' ? 100 : 200;
+          return {
+            issues: Array.from({ length: 10 }, (_, i) => issue({ number: base + i })),
+            openMilestones: [V1, V2],
+          };
+        },
+      });
+      await runIntakeJob(h.deps);
+      return h.started.map((s) => s.issueNumber);
+    };
+    const first = await runWith([a, b]);
+    const second = await runWith([b, a]);
+    expect(first).toEqual([100, 200, 101, 201, 102, 202]);
+    expect(second).toEqual(first);
+  });
+
+  it('一个仓没单时，另一个仓能吃满 6 个名额', async () => {
+    const empty = { ...REPO, id: 'r1', name: 'empty' };
+    const busy = { ...REPO, id: 'r2', name: 'busy' };
+    const h = harness({
+      limits: { maxStartsPerRound: 6, maxRunningTasks: 6, maxStartsPerHour: 99 },
+      async repos() {
+        return [empty, busy];
+      },
+      async openIssues(repo) {
+        return {
+          issues: repo.id === busy.id ? Array.from({ length: 10 }, (_, i) => issue({ number: 300 + i })) : [],
+          openMilestones: [V1, V2],
+        };
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toHaveLength(6);
+    expect(h.started.every((s) => s.issueNumber >= 300)).toBe(true);
+  });
+
+  it('A 仓熔断时只停 A，B 仓照样起单', async () => {
+    const a = { ...REPO, id: 'r1', name: 'a' };
+    const b = { ...REPO, id: 'r2', name: 'b' };
+    const h = harness({
+      limits: { maxStartsPerRound: 6, maxRunningTasks: 6, maxStartsPerHour: 99 },
+      async repos() {
+        return [a, b];
+      },
+      async openIssues(repo) {
+        return {
+          issues: [issue({ number: repo.id === a.id ? 401 : 501 })],
+          openMilestones: [V1, V2],
+        };
+      },
+      async breaker(repo) {
+        return repo.id === a.id
+          ? { open: { since: new Date(NOW.getTime() - 30 * 60_000), trial: null }, recent: [] }
+          : { open: null, recent: [] };
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([501]);
+    expect(h.logs.some((l) => l.text.includes('breaker_open×1'))).toBe(true);
   });
 
   it('在跑的任务已经到上限 → 一条都不起（不是丢，下一轮再来）', async () => {
@@ -1865,6 +2031,94 @@ describe('熔断', () => {
     await runIntakeJob(h.deps);
     expect(h.breakerEvents).toEqual(['retrip']);
     expect(h.started).toEqual([]);
+  });
+});
+
+describe('仓档案没就绪的提醒（#2839）', () => {
+  const FULL_PROFILE = {
+    language: 'typescript',
+    toolchain: ['pnpm'],
+    testCommand: 'pnpm check',
+    moduleRoots: ['packages/*'],
+    mergeSignals: ['check'],
+    standardPathsFile: 'packages/conventions/standard-paths.json',
+    weight: 1,
+  };
+
+  it('开着接活、档案缺项 → 不拉，推提醒，why 写明缺哪几项（含 language）', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { toolchain: ['pnpm'] } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]?.why).toContain('缺 language');
+  });
+
+  it('档案形状不对（weight 写成 0）→ 不拉，推提醒，why 是 parse 的那句错', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: { ...FULL_PROFILE, weight: 0 } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started).toEqual([]);
+    expect(alerts.length).toBe(1);
+    expect(alerts[0]?.why).toContain('weight');
+  });
+
+  it('开着接活、档案齐 → 照拉，推的是 why 为 null（撤掉）', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: FULL_PROFILE }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+    expect(alerts).toEqual([{ why: null }]);
+  });
+
+  it('「让 AI 接活」关着的仓：档案缺项也不拉、不推提醒', async () => {
+    const alerts: { why: string | null }[] = [];
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, autoDispatchSince: null, profile: { toolchain: ['pnpm'] } }];
+      },
+      async profileAlert(input) {
+        alerts.push({ why: input.why });
+      },
+    });
+    await runIntakeJob(h.deps);
+    expect(alerts).toEqual([]);
+  });
+
+  it('提醒写不进去：只记 warn 日志，这一轮照常跑完（照起、结局 ok）', async () => {
+    const h = harness({
+      async repos() {
+        return [{ ...REPO, profile: FULL_PROFILE }];
+      },
+      async profileAlert() {
+        throw new Error('库断了');
+      },
+    });
+    const run = await runIntakeJob(h.deps);
+    expect(h.started.map((s) => s.issueNumber)).toEqual([12]);
+    expect(run.outcome).toBe('ok');
+    expect(h.logs.some((l) => l.level === 'warn' && l.text.includes('仓档案的提醒没写成'))).toBe(true);
   });
 });
 

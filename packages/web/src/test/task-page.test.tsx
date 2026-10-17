@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
-// 任务页（#216）：三段的单按段、按模型显示耗时、token、花费，每一笔逐个列；读不到的写「没读到」和原因，不写 0。
-// 老流程的单照旧是会话时间线加「时间与用量」。每条读不到的路径都故意造一次。
+// 任务页（#216）：单子按段、按模型显示耗时、token、花费，每一笔逐个列；读不到的写「没读到」和原因，不写 0。
+// 每条读不到的路径都故意造一次。
 import {
   readSegmentRun,
   type SegmentRunFacts,
@@ -122,13 +122,13 @@ describe('页头：面包屑代替「回任务列表」按钮（#1903）', () =>
   });
 });
 
-describe('老流程的单', () => {
-  test('没有三段的流水：照旧是会话时间线和「时间与用量」', async () => {
-    // t-12 现在也带三段流水（主页流水线图的演示数据），老流程的样例换成 t-19（只有会话）
-    open('/tasks/t-19');
-    expect(await screen.findByRole('heading', { name: '时间与用量' })).toBeTruthy();
-    expect(screen.getByRole('heading', { name: '会话时间线' })).toBeTruthy();
-    expect(screen.queryByRole('heading', { name: '三段' })).toBeNull();
+describe('老流程的会话那一块已经不在', () => {
+  test('t-12 只剩三段：页面上没有「老流程的会话」，也没有「时间与用量」「会话时间线」', async () => {
+    open('/tasks/t-12');
+    expect(await screen.findByRole('heading', { name: '三段' })).toBeTruthy();
+    expect(screen.queryByText('老流程的会话')).toBeNull();
+    expect(screen.queryByRole('heading', { name: '时间与用量' })).toBeNull();
+    expect(screen.queryByRole('heading', { name: '会话时间线' })).toBeNull();
   });
 });
 
@@ -149,9 +149,8 @@ function detailWith(facts: SegmentRunFacts[], state: TaskDetail['task']['state']
     },
     repo: { id: 'r-1', owner: 'acme', name: 'orbit', defaultBranch: 'main' },
     subtasks: [],
-    runs: [],
     segmentRuns,
-    usage: summarizeUsage([], segmentRuns),
+    usage: summarizeUsage(segmentRuns),
     routePins: { pins: [] },
   });
 }
@@ -178,6 +177,53 @@ const base: SegmentRunFacts = {
   costUsd: 0.25,
   matchedBy: 'task',
 };
+
+describe('预算用量（#2859）：写在「输入当量」那一格的小字里，不另开一格', () => {
+  const big = { ...base, inputTokens: 2_000_000 };
+
+  test('统计卡四张：没有「折算 token」；输入当量的小字写预算用了百分之几和上限，不截断', async () => {
+    open('/tasks/t-x', apiWith(detailWith([big])));
+    const box = await panel('三段');
+    expect(screen.queryByText('折算 token')).toBeNull();
+    expect(document.querySelector('[data-segment-stats] .grid')?.children.length).toBe(4);
+    const figure = screen.getByText('输入当量').closest('[data-figure]') as HTMLElement;
+    // 2,000,000 + 500 × 5 + 2000 × 1.25 + 30000 × 0.1 = 2,008,000，占 700 万的 29%
+    expect(figure.querySelector('.num')?.textContent).toBe('200.8 万');
+    const hint = figure.querySelector('[data-figure-hint]') as HTMLElement;
+    expect(hint.textContent).toContain('预算用了 29%（上限 700 万）');
+    // 小字换行，不用省略号截断
+    expect(hint.className).not.toContain('truncate');
+    expect(hint.className).toContain('break-words');
+    // 原始的两格还在
+    expect(within(segmentRow(box, 'manual')).getByText('200.0 万 / 500')).toBeTruthy();
+  });
+
+  test('有一次没读到：「另有 N 次 token 没读到」那句照留，预算用量也写', async () => {
+    const unread = { ...big, id: 'x-2', inputTokens: undefined, outputTokens: undefined };
+    open('/tasks/t-x', apiWith(detailWith([big, unread])));
+    await panel('三段');
+    const figure = screen.getByText('输入当量').closest('[data-figure]') as HTMLElement;
+    const hint = figure.querySelector('[data-figure-hint]')?.textContent ?? '';
+    expect(hint).toContain('预算用了');
+    expect(hint).toContain('另有 1 次 token 没读到，没算进来');
+  });
+
+  test('超了上限：照写超过 100% 的数，不封顶', async () => {
+    open('/tasks/t-x', apiWith(detailWith([{ ...base, inputTokens: 9_000_000 }])));
+    await panel('三段');
+    const figure = screen.getByText('输入当量').closest('[data-figure]') as HTMLElement;
+    expect(figure.querySelector('[data-figure-hint]')?.textContent).toContain('预算用了 129%（上限 700 万）');
+  });
+
+  test('四样没读全：输入当量收成一行灰字，不写 0，也不出预算用量', async () => {
+    const blank = { ...base, cacheReadTokens: undefined, cacheWriteTokens: undefined };
+    open('/tasks/t-x', apiWith(detailWith([blank])));
+    await panel('三段');
+    expect(screen.queryByText('折算 token')).toBeNull();
+    expect(document.querySelector('[data-stats-unread]')?.textContent).toMatch(/输入当量没读到/);
+    expect(document.body.textContent).not.toContain('预算用了');
+  });
+});
 
 describe('【失败】读不到的都写明，不写 0', () => {
   test('段名认不出：单列一组「段名认不出」，那一笔写明原样', async () => {

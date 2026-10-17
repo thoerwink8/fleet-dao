@@ -5,18 +5,24 @@ import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
 import type { Limits } from './limits.ts';
 import type { EnginePorts } from './ports.ts';
 import type { TaskBriefResult } from './runner/task-brief.ts';
+import { SELF_CHECK_ACTIVITY_MS } from './self-check-budget.ts';
 import {
   type ArmAutoMergeInput,
   type ArmAutoMergeResult,
   type CheckGuardedInput,
   type ColdVerifyInput,
   type ColdVerifyResult,
+  type DecideFlowModeInput,
+  type DecideFlowModeResult,
   type DeliveryRead,
+  type EngineStartedAt,
   type GuardedPaths,
   MERGE_POLL_MINUTES,
   type MergeNowInput,
   type MergeNowResult,
   type MergeWait,
+  type NoteBare401Input,
+  type NoteBare401Result,
   type PlanSegmentResumeInput,
   type PlanSegmentResumeResult,
   type ProbeAssignedInput,
@@ -45,6 +51,8 @@ type PortActivities = {
 
 /** 工作流看到的活动：端口（EnginePorts）里的，加上引擎自己的。 */
 export type EngineActivities = PortActivities & {
+  /** 当前 worker 进程的启动时刻；超时分流用它和旧活动最后一次心跳作严格比较。 */
+  engineStartedAt(input: { schemaVersion: 1 }): Promise<EngineStartedAt>;
   // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
   /** 现读单子和它指着的需求文档，拼出动手的交代（runner/task-brief.ts）。单子读不到抛错；缺栏回 problems。 */
   readTaskBrief(input: ReadTaskBriefInput): Promise<TaskBriefResult>;
@@ -72,6 +80,12 @@ export type EngineActivities = PortActivities & {
   selfCheck(input: SelfCheckInput): Promise<SelfCheckResult>;
   /** 这张单到现在花掉多少 token（单任务预算，决定 0093）。 */
   taskSpend(input: TaskSpendInput): Promise<TaskSpendResult>;
+  /**
+   * 只凭 HTTP 401：记下这个池这一次，并回答短时间里是不是已经有过一次（所有任务共用，不单记在这张单里）。
+   */
+  noteBare401(input: NoteBare401Input): Promise<NoteBare401Result>;
+  /** 定这张单走三段还是全程（#2826）：第一次选路之后、第一段动手之前问一次。读不到抛，工作流按三段走。 */
+  decideFlowMode(input: DecideFlowModeInput): Promise<DecideFlowModeResult>;
   /** 派单前对选定的这一条路由探一次（#1409）。没装探针报 JOB_NOT_CONFIGURED，不当成探通。 */
   probeAssignedRoute(input: ProbeAssignedInput): Promise<ProbeAssignedResult>;
   /** 派前探测不通、这轮不用这条路由：放掉选路预占的名额。没装放名额报 JOB_NOT_CONFIGURED，不装作放过。 */
@@ -84,6 +98,10 @@ export type ActivityName = keyof EngineActivities;
  * quick：毫秒到秒级的记账、选路由、报警——30 秒，丢了 1 分钟内重来。
  * git：推分支、开 PR、合并这类几秒到几分钟的——5 分钟，幂等，重试 3 次。
  * setup / ci：长活动——限时按活来，必须心跳，心跳超时 = 工人丢了。
+ * selfCheck：动手之后的自测。不和建树（setup）同档：建树是装依赖，20 分钟、重试 3 次就够；
+ * 自测自己的预算是测试加 tsc，还要在机器名额上排队。挂在 setup 上时活动限时先到，Temporal 判 StartToClose
+ * 超时后整段重跑，三次都白等，什么也没测成。这一档限时把测试、tsc 和排队余量加在一起，必须心跳；只试一次，
+ * 限时到了交给工作流记 skipped，不再从头跑。
  * job：派单前探测——10 分钟，不重试。
  * 派前探测自己回通或不通，不靠这一层再探一遍（Claude 一次加上隔 20 秒重试，放不进选路那一档 30 秒）。
  * 别的定时任务（对账、探针、读额度、看门狗……）不是活动了（#1072）：引擎的定时器直接跑，一轮的限时在 jobs/engine-timers.ts。
@@ -91,9 +109,10 @@ export type ActivityName = keyof EngineActivities;
  * 活动失败怎么办（重试、换路由、挂起）由工作流按失败分流定，不在 Temporal 这一层自动再起一遍。
  * poll：长轮询（等合并）——一次最多 MERGE_POLL_MINUTES 分钟加余量，必须心跳；工人丢了重试没有副作用（只读）。
  */
-export type Profile = 'quick' | 'git' | 'setup' | 'ci' | 'job' | 'segment' | 'poll';
+export type Profile = 'quick' | 'git' | 'setup' | 'selfCheck' | 'ci' | 'job' | 'segment' | 'poll';
 
 export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
+  engineStartedAt: 'quick',
   pickRoute: 'quick',
   recordTiming: 'quick',
   saveTaskState: 'quick',
@@ -120,8 +139,10 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   mergeNow: 'git',
   planSegmentResume: 'quick',
   segmentSettled: 'quick',
-  selfCheck: 'setup',
+  selfCheck: 'selfCheck',
   taskSpend: 'quick',
+  noteBare401: 'quick',
+  decideFlowMode: 'git',
 };
 
 /** quick 一档一次尝试的限时。 */
@@ -156,11 +177,20 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
     case 'git':
       return { startToCloseTimeout: '5 minutes', retry: retry(3, '5 seconds', '1 minute') };
     case 'setup':
-      // 建树 + 装依赖。
+      // 建树 + 装依赖。自测不在这档：它的预算比 20 分钟长，见 selfCheck。
       return {
         startToCloseTimeout: '20 minutes',
         heartbeatTimeout,
         retry: retry(3, '5 seconds', '1 minute'),
+      };
+    case 'selfCheck':
+      // 不和建树同档。建树 20 分钟、重试 3 次；自测预算是测试加 tsc，还要排队等机器名额。
+      // 挂在 setup 上时限时先到，整段被判超时后从头再跑，三次都白等。这里限时是三项相加，必须心跳；
+      // 只试一次：限时到了交给工作流记 skipped，不再重跑。
+      return {
+        startToCloseTimeout: `${SELF_CHECK_ACTIVITY_MS / 1000} seconds`,
+        heartbeatTimeout,
+        retry: retry(1, '1 second', '1 second'),
       };
     case 'ci':
       return {

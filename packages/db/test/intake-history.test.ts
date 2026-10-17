@@ -1,13 +1,18 @@
 // 拉单挑单读的历史（queries/intake-history.ts，#1336）：失败几次、一小时内起了几条、最近结束的几条、熔断状态。
 // 读不出的形状照抛，不当成「正常」。
+import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   firstTaskCreatedSince,
   INTAKE_BREAKER_SETTING,
+  INTAKE_STARTS_SETTING,
   INTAKE_WAITING_SETTING,
+  intakeBreakerSetting,
+  intakeWorkloadSince,
   readIntakeBreaker,
   readIntakeWaiting,
   recentEndedTasks,
+  recordIntakeStart,
   TASK_ADOPT_AUDIT_ACTION,
   taskAdoptsSince,
   taskFailureCount,
@@ -15,7 +20,7 @@ import {
   writeIntakeBreaker,
   writeIntakeWaiting,
 } from '../src/queries/intake-history.ts';
-import { auditLog, settings, stateChanges } from '../src/schema/index.ts';
+import { auditLog, runs, settings, stateChanges } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
 import { addRepo, addTask, ago, HOUR, MIN, NOW } from './helpers.ts';
 
@@ -146,6 +151,78 @@ describe('熔断状态（设置表）', () => {
   it('【故意造出的失败】这一行的形状认不出：抛错，不当成正常', async () => {
     await t.db.insert(settings).values({ key: INTAKE_BREAKER_SETTING, value: { state: 'half', at: 'x' } });
     await expect(readIntakeBreaker(t.db)).rejects.toThrow(/认不出/);
+  });
+
+  it('状态键带仓号：A 仓写开不影响 B 仓；旧的无仓键仍可读', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    const b = await addRepo(t.db, 'bbb');
+    await writeIntakeBreaker(t.db, { state: 'open', at: ago(HOUR), by: 'engine:intake' }, a.id);
+    expect(await readIntakeBreaker(t.db, a.id)).toMatchObject({ state: 'open' });
+    expect(await readIntakeBreaker(t.db, b.id)).toBeNull();
+    expect(intakeBreakerSetting(a.id)).toBe(`${INTAKE_BREAKER_SETTING}:${a.id}`);
+  });
+});
+
+describe('近 24 小时各仓已起单的加权工作量', () => {
+  async function manual(taskId: string, tier: 'fast' | 'medium' | 'heavyweight', at: Date) {
+    await t.db.insert(runs).values({ segment: 'manual', model: 'test-model', taskId, tier, startedAt: at });
+  }
+
+  it('按窗口内已起的任务算档，不靠设置回填：快档 1、中档 2、主力档 4；窗口外和本机领的不算', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    const b = await addRepo(t.db, 'bbb');
+    const heavy = await addTask(t.db, a.id, { createdAt: ago(MIN) });
+    const fast = await addTask(t.db, a.id, { createdAt: ago(30 * MIN) });
+    const medium = await addTask(t.db, b.id, { createdAt: ago(MIN) });
+    const old = await addTask(t.db, a.id, { createdAt: ago(2 * HOUR) });
+    const local = await addTask(t.db, b.id, { createdAt: ago(MIN), executor: 'local' });
+    await manual(heavy.id, 'heavyweight', ago(MIN));
+    await manual(fast.id, 'fast', ago(30 * MIN));
+    await manual(medium.id, 'medium', ago(MIN));
+    await manual(old.id, 'heavyweight', ago(2 * HOUR));
+    await manual(local.id, 'heavyweight', ago(MIN));
+    expect(await intakeWorkloadSince(t.db, ago(HOUR))).toEqual({ [a.id]: 5, [b.id]: 2 });
+  });
+
+  it('动手段还没写下档时用起单记录里的档；只有设置、没有任务行的不算一条', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    const task = await addTask(t.db, a.id, { createdAt: ago(MIN) });
+    expect(await intakeWorkloadSince(t.db, ago(HOUR))).toEqual({ [a.id]: 1 });
+    await recordIntakeStart(t.db, {
+      repoId: a.id,
+      taskId: task.id,
+      at: ago(MIN),
+      tier: 'heavyweight',
+      by: 'test',
+    });
+    expect(await intakeWorkloadSince(t.db, ago(HOUR))).toEqual({ [a.id]: 4 });
+    await recordIntakeStart(t.db, {
+      repoId: a.id,
+      taskId: '00000000-0000-0000-0000-000000000099',
+      at: ago(MIN),
+      tier: 'medium',
+      by: 'test',
+    });
+    expect(await intakeWorkloadSince(t.db, ago(HOUR))).toEqual({ [a.id]: 4 });
+    const [row] = await t.db.select().from(settings).where(eq(settings.key, INTAKE_STARTS_SETTING));
+    expect(row?.value).toEqual(expect.any(Array));
+  });
+
+  it('接手窗口内的老行按接手时刻算，档从动手段读', async () => {
+    const a = await addRepo(t.db, 'aaa');
+    const task = await addTask(t.db, a.id, { createdAt: ago(48 * HOUR) });
+    await manual(task.id, 'medium', ago(MIN));
+    await t.db.insert(auditLog).values({
+      at: ago(MIN),
+      actorKind: 'engine',
+      actorId: 'engine:intake',
+      action: TASK_ADOPT_AUDIT_ACTION,
+      target: `task:${task.id}`,
+      via: 'github',
+      ok: true,
+      reason: '接手无工作流的老任务行',
+    });
+    expect(await intakeWorkloadSince(t.db, ago(HOUR))).toEqual({ [a.id]: 2 });
   });
 });
 

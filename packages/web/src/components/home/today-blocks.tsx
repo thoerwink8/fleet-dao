@@ -3,6 +3,7 @@
 //   看门狗的卡没有选项，也不给「处理」（报警自己修、自己撤）：一行写谁在修、修了多久、开了多久，右边只留「看看」。
 //   看远程环境时只读：按钮置灰、写去那台上答。
 // - 在跑的：法国引擎的单和本机会话混在一起排，卡着的、等你的在前；一行写事、谁在做、进度、卡没卡。
+//   引擎单有 flowMode 时标题旁标「全程」或「三段」；没有这个值不标。
 // - 上线了的：最近 5 次切到法国的提交，一行一句改了什么，带上同一版还带的 PR。
 import { ArrowRight, CheckCheck, CirclePlay, Rocket } from 'lucide-react';
 import type { ReactNode } from 'react';
@@ -20,6 +21,7 @@ import type { Notification } from '../../api/types';
 import { decisionToast } from '../../lib/decision-result';
 import { formatAgo, formatDateTime } from '../../lib/format';
 import { useNow } from '../../lib/hooks';
+import { FlowModeTag } from '../flow-mode-tag';
 import { EmptyState } from '../layout/empty-state';
 import { List } from '../layout/list';
 import { LoadError, LoadingRows } from '../layout/load-state';
@@ -290,8 +292,11 @@ function RunLine({ row }: { row: RunRow }) {
   const body = (
     <>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-body font-medium" title={row.what}>
-          {row.what}
+        <p className="flex min-w-0 items-center gap-2">
+          <span className="min-w-0 truncate text-body font-medium" title={row.what}>
+            {row.what}
+          </span>
+          <FlowModeTag mode={row.flowMode} />
         </p>
         <p className="truncate text-meta text-muted-foreground" title={`${row.who} · ${row.progress}`}>
           {row.who} · {row.progress}

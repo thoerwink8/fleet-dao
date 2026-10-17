@@ -25,6 +25,9 @@ export default defineConfig({
     env: {
       FLEET_UNATTENDED_DIR: join(tmpdir(), 'fleet-dao-test-unattended'),
       FLEET_WORKERS_DIR: join(tmpdir(), 'fleet-dao-test-workers'),
+      // Haiku 账本和收回策略（subagent-ledger.mjs）也读写 ~/.fleet-dao/：指到临时目录；收轮前对账不顺手起后台的 subagent:stats --enforce
+      FLEET_DAO_HOME: join(tmpdir(), 'fleet-dao-test-home'),
+      FLEET_SUBAGENT_ENFORCE: 'off',
     },
     // 不开 passWithNoTests：CI 按改动只跑几个包（packages/conventions/src/ci-plan.ts），路径一个测试都没匹配上要红，不能当通过。
     ...(workers.maxWorkers === undefined ? {} : { maxWorkers: workers.maxWorkers }),

@@ -12,6 +12,7 @@
 // - 只放确定的检查。要网络、要时间、会偶发不稳的（deploy 全套、Temporal、香港）都留给 CI，不在这里跑。
 import { type PackageGraph, planCi } from './ci-plan.ts';
 import type { RepoView } from './repo.ts';
+import { BASE, type GitRun } from './test-changed.ts';
 
 export interface CmdResult {
   status: number | null;
@@ -21,6 +22,13 @@ export interface CmdResult {
   error?: Error | undefined;
 }
 
+/**
+ * `pushedFiles` 读出来的这次推送。null 不在这个类型里：那是「读不出来」，调用方走老路，不能和「全是删分支」混成一个空结果。
+ * - `files`：删分支以外、实际推上去的提交改到的文件（可能为空，空不算「只有图片」）。
+ * - `delete-only`：ref 行非空，且每一行都是删分支（本地 sha 全 0）。没有新内容。
+ */
+export type PushedFilesResult = { kind: 'files'; files: string[] } | { kind: 'delete-only' };
+
 export interface PreparePushDeps {
   /** 这次改了哪些文件（仓内相对路径）。读不成抛，由调用方记「没查成」。 */
   changed: () => string[];
@@ -28,6 +36,8 @@ export interface PreparePushDeps {
   graph: () => PackageGraph | string;
   /** 跑一条命令（cwd 是仓根），同步。 */
   run: (cmd: string, args: readonly string[]) => CmdResult;
+  /** 这次推送的内容（`pushedFiles`）。读不出来返回 null；不给就一律走老路。 */
+  pushed?: () => PushedFilesResult | null;
 }
 
 export interface PreparePushResult {
@@ -54,6 +64,21 @@ const BIOME_RAN = /Checked [1-9]\d* files? in /;
 const TSC_RAN = /error TS\d+/;
 
 export function preparePush(deps: PreparePushDeps): PreparePushResult {
+  // 只删远端分支：不往公开仓推任何新内容（卫生检查那边也是零个提交）。跑格式和类型检查只是在查当前检出。
+  // 只推图片（截图分支）同样没意义。拿不准（读不出、混了非图片、没有 ref、夹着解析不了的行）一律照查，不放行。
+  // 删分支和推新内容混在一次里：删的那几行丢掉，只按推上去的内容判。
+  let pushed: PushedFilesResult | null = null;
+  try {
+    pushed = deps.pushed?.() ?? null;
+  } catch {
+    pushed = null;
+  }
+  if (pushed?.kind === 'delete-only') {
+    return { code: 0, lines: ['推送前预检：只删分支，没有新内容，跳过格式和类型检查'] };
+  }
+  if (pushed?.kind === 'files' && allImages(pushed.files)) {
+    return { code: 0, lines: ['推送前预检：只推了图片，跳过格式和类型检查'] };
+  }
   let changed: string[];
   try {
     changed = deps.changed();
@@ -134,4 +159,64 @@ export function preparePush(deps: PreparePushDeps): PreparePushResult {
     lines.push(`${step.name} 过了`);
   }
   return { code: 0, lines };
+}
+
+const IMAGE_EXT = /\.(png|jpe?g|webp|gif)$/i;
+const isZeroOid = (oid: string) => /^0+$/.test(oid);
+
+/** 非空且全是图片（png、jpg、jpeg、webp、gif，大小写不分）。 */
+export const allImages = (files: readonly string[]): boolean =>
+  files.length > 0 && files.every((f) => IMAGE_EXT.test(f));
+
+/**
+ * 这次推送实际推上去的提交改到了哪些文件（不是当前检出对主线的差）。stdin 是 git 给钩子的行：
+ * `<本地 ref> <本地 sha> <远端 ref> <远端 sha>`。本地 sha 全 0 是删分支。
+ * ref 行非空、且每一行都是删分支 → `{ kind: 'delete-only' }`，不读 git（没有新内容可查）。
+ * 删分支和推新内容混在一次里：删的那几行丢掉，只看推上去的。
+ * 远端已有这个分支 → 从远端 sha 比到本地 sha；新分支 → 和主线有共同祖先就从祖先比，没有（孤儿分支）就是整棵树。
+ * 一切读不出来（没有 ref 行、全是删分支却夹着解析不了的行、git 报错、认不出共同祖先）返回 null，调用方照老路全查，不放行。
+ */
+export function pushedFiles(stdin: string, git: GitRun, base = BASE): PushedFilesResult | null {
+  const parsed = stdin
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+    .map((line) => line.split(/\s+/));
+  const refs = parsed
+    .filter((p) => p.length === 4)
+    .map(([, localOid = '', , remoteOid = '']) => ({ localOid, remoteOid }));
+  if (refs.length === 0) return null;
+  const content = refs.filter((r) => !isZeroOid(r.localOid));
+  if (content.length === 0) {
+    // 非空行里夹着解析不了的：拿不准是不是还有别的推送，不当成「只删分支」放行。
+    if (parsed.some((p) => p.length !== 4)) return null;
+    return { kind: 'delete-only' };
+  }
+  const files = new Set<string>();
+  const names = (args: readonly string[]): string[] | null => {
+    const r = git(args);
+    if (r.error || r.status !== 0) return null;
+    return r.stdout.split('\0').filter((f) => f !== '');
+  };
+  for (const { localOid, remoteOid } of content) {
+    let from: string;
+    if (!isZeroOid(remoteOid)) {
+      from = remoteOid;
+    } else {
+      const mb = git(['merge-base', base, localOid]);
+      if (mb.error) return null;
+      if (mb.status === 0) from = mb.stdout.trim();
+      else if (mb.status === 1 && mb.stderr.trim() === '')
+        from = ''; // 没有共同祖先：孤儿分支
+      else return null;
+      if (mb.status === 0 && from === '') return null;
+    }
+    const got =
+      from === ''
+        ? names(['ls-tree', '-r', '-z', '--name-only', localOid])
+        : names(['diff', '--name-only', '-z', '--no-renames', from, localOid]);
+    if (got === null) return null;
+    for (const f of got) files.add(f);
+  }
+  return { kind: 'files', files: [...files] };
 }

@@ -21,7 +21,6 @@ import type {
   channelStates,
   channels,
   families,
-  githubTokens,
   models,
   pools,
   quotaWindows,
@@ -61,18 +60,6 @@ export const toIntakeRepo = (r: typeof repos.$inferSelect) => ({
   ciPolicy: ciPolicyOf(r.ciPolicy),
 });
 
-/** 各人自己的 GitHub 授权那一行（#1989）；密文原样带出，解密在 api 层。 */
-export const toGitHubToken = (r: typeof githubTokens.$inferSelect) => ({
-  userId: r.userId,
-  githubId: r.githubId,
-  login: r.login,
-  role: r.role === 'engine' ? ('engine' as const) : ('agent' as const),
-  accessTokenCipher: r.accessTokenCipher,
-  scopes: r.scopes,
-  expiresAt: isoOpt(r.expiresAt) ?? null,
-  updatedAt: r.updatedAt.toISOString(),
-});
-
 export const toTask = (r: typeof tasks.$inferSelect): Task =>
   build<Task>({
     id: r.id,
@@ -101,6 +88,8 @@ export const toTask = (r: typeof tasks.$inferSelect): Task =>
     executor: r.executor === 'local' ? 'local' : undefined,
     claimedBy: r.executor === 'local' ? opt(r.claimedBy) : undefined,
     leaseUntil: r.executor === 'local' ? isoOpt(r.leaseUntil) : undefined,
+    // 走的流程（#2826）：还没分组是 null，不给这个键（和内存版一致）
+    flowMode: r.flowMode ?? undefined,
     createdAt: r.createdAt.toISOString(),
   });
 

@@ -12,18 +12,22 @@
 // - 在跑的任务数查 Temporal 的可见性（WorkflowType 加 ExecutionStatus），读不到就让这一轮记没跑成：不拿 0 顶。
 // - 白名单、成员名单每一轮读一次（拉单工厂每轮造一份新的），不跨轮缓存：停用一个人，下一轮就不再认他开的单。
 
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { LOCAL_LABEL } from '@fleet-dao/conventions';
+import { promisify } from 'node:util';
+import { LOCAL_LABEL, type StandardPath } from '@fleet-dao/conventions';
 import {
   type Db,
   expiredLocalClaims,
   extendLocalLease,
   finishScheduleRun,
   firstTaskCreatedSince,
+  intakeWorkloadSince,
   listIntakeRepos,
   mergedPrForIssue,
   readIntakeBreaker,
   recentEndedTasks,
+  recordIntakeStart,
   requesterForRequestIssue,
   resolveAlertWithReason,
   settleExpiredLocalClaim,
@@ -39,6 +43,7 @@ import {
   writeIntakeWaiting,
 } from '@fleet-dao/db';
 import type { GitHub } from '@fleet-dao/github';
+import { parseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { actorFor, createPgStore, githubWhitelist, memberFor, type User } from '@fleet-dao/store';
@@ -46,12 +51,41 @@ import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundErro
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../jobs/dispatch-standing.ts';
 import { requestGroom } from '../jobs/groom-request.ts';
-import { type IntakeDeps, prClaimedIssues } from '../jobs/intake.ts';
+import { type IntakeDeps, type IntakeRepo, prClaimedIssues } from '../jobs/intake.ts';
 import { BREAKER_WINDOW } from '../jobs/intake-pick.ts';
 import { liveLocalIssues } from '../jobs/local-leases.ts';
 import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
+import { standardPathsList } from '../standard-paths-list.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
+
+const execFileAsync = promisify(execFile);
+/**
+ * 法国装机的固定位置，不跟引擎进程当时的 PATH 走：CI 的 pnpm 在动作装出来的目录里，
+ * 不能据此说法国装好了。Go 官方包在 /usr/local/go/bin，期望里的入口是 /usr/local/bin/go。
+ * 真装配的测试要换掉 toolchainReady，别拿这台机器有没有 pnpm 决定拉不拉单。
+ */
+const TOOLCHAIN_PATH = '/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin';
+
+function shQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+async function missingToolchain(repo: IntakeRepo): Promise<readonly string[]> {
+  const tools = parseRepoProfile(repo.profile).toolchain;
+  if (tools.length === 0) return [];
+  const script = `for tool in ${tools.map(shQuote).join(' ')}; do command -v "$tool" >/dev/null 2>&1 || printf '%s\\n' "$tool"; done`;
+  try {
+    const { stdout } = await execFileAsync('/bin/sh', ['-c', script], {
+      env: { ...process.env, PATH: TOOLCHAIN_PATH },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    return stdout.trim() === '' ? [] : stdout.trim().split(/\s+/);
+  } catch (error) {
+    throw new Error(`检查工具链起不来：${errMessage(error)}`);
+  }
+}
 
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
 export type IntakeGitHub = Pick<
@@ -63,7 +97,43 @@ export type IntakeGitHub = Pick<
   | 'commentIssue'
   | 'addIssueLabel'
   | 'removeIssueLabel'
+  | 'readRepoFile'
 > & { claims: Pick<GitHub['claims'], 'openPulls'> };
+
+/** 读这个仓档案里那份改标准清单。文件不在＝空清单；认不出、读不出内容照抛。 */
+export async function readRepoStandardPaths(
+  gh: Pick<GitHub, 'readRepoFile'>,
+  repo: Pick<IntakeRepo, 'owner' | 'name' | 'profile'>,
+): Promise<StandardPath[]> {
+  const path = parseRepoProfile(repo.profile).standardPathsFile;
+  const read = await gh.readRepoFile({ repo: { owner: repo.owner, name: repo.name }, path });
+  if (read.file.kind === 'not_file') throw new Error(`读 ${path} 没成（${read.file.why}）`);
+  return standardPathsList(read.file.kind === 'text' ? read.file.text : null);
+}
+
+/**
+ * 开着接活的仓因档案没就绪不拉单（#2839）：why 是原因时推报警（同键原地更新），why 是 null（齐了）时撤掉。
+ * 没有这条、已撤的，resolveAlertWithReason 回 not_found / already_resolved，不算错。
+ */
+export async function reportIntakeProfile(
+  db: Db,
+  repo: { owner: string; name: string },
+  why: string | null,
+): Promise<void> {
+  const slug = `${repo.owner}/${repo.name}`;
+  const dedupeKey = `intake-profile:${slug}`;
+  if (why === null) {
+    await resolveAlertWithReason(db, { dedupeKey, by: 'engine', why: '仓档案齐了，拉单照常' });
+    return;
+  }
+  await upsertAlert(db, {
+    dedupeKey,
+    level: 'alert',
+    taskId: null,
+    title: `${slug} 仓档案没就绪，拉单不拉这个仓`,
+    body: `${why}\n\n补法：在法国跑 fleet-api project show ${slug} 看现状；把原有项和缺的项写成一整份 JSON，用 fleet-api project set-profile ${slug} --file - 写回（整份换掉，原有项要一起带上）。`,
+  });
+}
 
 export interface IntakeWiring {
   db: Db;
@@ -74,6 +144,8 @@ export interface IntakeWiring {
   startTimeoutMs?: number;
   /** 测试用：换掉「合并闸认冷验收了没有」（jobs/intake.ts 的 MERGE_GATE_REQUIRES_COLD_VERIFY）。 */
   gateLive?: boolean;
+  /** 测试用：替换法国本机的工具链探测。 */
+  toolchainReady?: IntakeDeps['toolchainReady'];
 }
 
 const DEFAULT_START_TIMEOUT_MS = 15_000;
@@ -103,11 +175,16 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           owner: r.owner,
           name: r.name,
           defaultBranch: r.defaultBranch,
+          profile: r.profile,
           testCommand: r.testCommand,
+          weight: r.weight,
           autoDispatchSince: r.autoDispatchSince ? r.autoDispatchSince.toISOString() : null,
         }));
       },
+      toolchainReady: w.toolchainReady ?? missingToolchain,
+      standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
       recordWaiting: ({ at, byRepo }) => writeIntakeWaiting(w.db, { at, byRepo, by: BREAKER_ACTOR }),
+      profileAlert: ({ repo, why }) => reportIntakeProfile(w.db, repo, why),
       // 本机领单的租约（决定 0096）：到期的行、心跳（本机会话推来的 node_sessions）、PR 镜像都从库里读，摘标签用「引擎」机器人
       localLeases: {
         expired: (repo, at) => expiredLocalClaims(w.db, repo.id, at),
@@ -224,10 +301,11 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         ]);
         return created + adopted;
       },
-      async breaker() {
-        const row = await readIntakeBreaker(w.db);
+      repoWorkload: (since) => intakeWorkloadSince(w.db, since),
+      async breaker(repo) {
+        const row = await readIntakeBreaker(w.db, repo.id);
         if (row?.state === 'open') {
-          const trial = await firstTaskCreatedSince(w.db, row.at);
+          const trial = await firstTaskCreatedSince(w.db, row.at, repo.id);
           const state = trial?.state;
           return {
             open: {
@@ -246,15 +324,20 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
         }
         return {
           open: null,
-          recent: await recentEndedTasks(w.db, { limit: BREAKER_WINDOW, after: row?.at ?? null }),
+          recent: await recentEndedTasks(w.db, {
+            limit: BREAKER_WINDOW,
+            after: row?.at ?? null,
+            repoId: repo.id,
+          }),
         };
       },
-      async breakerChanged({ event, at, why }) {
+      async breakerChanged({ repo, event, at, why }) {
         if (event === 'recover') {
-          await writeIntakeBreaker(w.db, { state: 'closed', at, by: BREAKER_ACTOR });
-          await resolveAlertWithReason(w.db, { dedupeKey: BREAKER_ALERT_KEY, by: BREAKER_ACTOR, why, at });
+          const alertKey = `${BREAKER_ALERT_KEY}:${repo.id}`;
+          await writeIntakeBreaker(w.db, { state: 'closed', at, by: BREAKER_ACTOR }, repo.id);
+          await resolveAlertWithReason(w.db, { dedupeKey: alertKey, by: BREAKER_ACTOR, why, at });
           await upsertAlert(w.db, {
-            dedupeKey: `${BREAKER_ALERT_KEY}:recovered:${at.toISOString()}`,
+            dedupeKey: `${alertKey}:recovered:${at.toISOString()}`,
             level: 'daily',
             taskId: null,
             title: '引擎恢复拉单',
@@ -262,11 +345,11 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           });
           return;
         }
-        await writeIntakeBreaker(w.db, { state: 'open', at, by: BREAKER_ACTOR });
+        await writeIntakeBreaker(w.db, { state: 'open', at, by: BREAKER_ACTOR }, repo.id);
         // 试探失败重新计冷却（retrip）不再推第二条：原来那条还开着
         if (event === 'trip') {
           await upsertAlert(w.db, {
-            dedupeKey: BREAKER_ALERT_KEY,
+            dedupeKey: `${BREAKER_ALERT_KEY}:${repo.id}`,
             level: 'alert',
             taskId: null,
             title: '引擎停拉单：最近的任务失败过半',
@@ -274,7 +357,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           });
         }
       },
-      async start({ repo, issueNumber, title, body, author }) {
+      async start({ repo, issueNumber, title, body, author, tier }) {
         const member = memberFor(await usersOnce(), author);
         // 驾驶舱「提需求」开的单是「引擎」机器人开的，GitHub 上的作者认不出是谁（母单 #2047 第 B 片）：
         // 提出人以开单那一刻写进库的 requested_by 为准（按正文末尾「来自驾驶舱 需求 N」找）。只认自家机器人开的单。
@@ -331,6 +414,7 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
             name: repo.name,
             defaultBranch: repo.defaultBranch,
             testCommand: repo.testCommand,
+            ...(repo.profile === undefined ? {} : { profile: parseRepoProfile(repo.profile) }),
           },
           issueNumber,
           title,
@@ -404,6 +488,15 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
               `任务 ${created.task.id} 的工作流已经起了，接手的操作记录写不进（${errMessage(err)}）`,
             );
           }
+        }
+        if (tier !== undefined) {
+          await recordIntakeStart(w.db, {
+            repoId: repo.id,
+            taskId: created.task.id,
+            at: now(),
+            tier,
+            by: BREAKER_ACTOR,
+          });
         }
         return 'started';
       },

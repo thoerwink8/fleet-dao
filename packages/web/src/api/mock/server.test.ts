@@ -21,43 +21,22 @@ async function rejects(p: Promise<unknown>): Promise<ApiError> {
 }
 
 describe('假后端：任务详情的用量汇总', () => {
-  test('和真后端同一个算法：结束的会话进 runs、在跑的进 running，按模型、按阶段各数一遍都对得上', async () => {
+  test('和真后端同一个算法：只算三段的流水，结束的进 runs、在跑的进 running，按模型、按段各数一遍都对得上', async () => {
     const d = await fresh().task('t-12');
-    const { total, byModel, byStage } = d.usage;
-    // t-12 也有三段流水（主页流水线图的演示数据）：合计 = 老式会话 + 三段各一笔
-    const all = d.runs.length + d.segmentRuns.length;
+    const { total, byModel, bySegment } = d.usage;
+    const all = d.segmentRuns.length;
+    expect(all).toBeGreaterThan(0);
     expect(total.runs + total.running).toBe(all);
-    expect(total.running).toBe(
-      d.runs.filter((r) => !r.endedAt).length + d.segmentRuns.filter((r) => r.running).length,
-    );
+    expect(total.running).toBe(d.segmentRuns.filter((r) => r.running).length);
     expect(byModel.reduce((n, m) => n + m.runs + m.running, 0)).toBe(all);
-    expect(byStage.reduce((n, s) => n + s.runs + s.running, 0)).toBe(d.runs.length);
+    expect(bySegment.reduce((n, s) => n + s.runs + s.running, 0)).toBe(all);
     expect(byModel.every((m) => m.modelName !== '')).toBe(true);
-  });
-
-  test('演示数据看得到「没读到」长什么样：没交终帧的会话、缓存没存下来的会话、不报花费的 Grok；花费分得出按量和套餐内', async () => {
-    const d = await fresh().task('t-12');
-    const { total } = d.usage;
-    expect(total).toMatchObject({
-      runs: 7,
-      running: 2,
-      missingTokens: 1,
-      missingCache: 2,
-      missingEquivalent: 2,
-    });
-    expect(total.cost).toEqual({
-      metered: expect.objectContaining({ runs: 1, missing: 0 }),
-      subscription: expect.objectContaining({ runs: 6, missing: 2 }),
-      unknown: { runs: 0, usd: 0, missing: 0 },
-    });
-    // 会话也带着计费方式（和真后端一样从渠道表读）
-    expect(d.runs.find((r) => r.routeId === 'r-ds')?.billing).toBe('metered');
-    expect(d.runs.find((r) => r.routeId === 'r-grok')?.billing).toBe('subscription');
+    // 老流程的会话表 #2357 删了：任务详情不再带老会话
+    expect(d).not.toHaveProperty('runs');
   });
 
   test('三段的演示单 t-c9：每一笔过 readSegmentRun，按单号兜底的、没记缓存和花费的都看得到', async () => {
     const d = await fresh().task('t-c9');
-    expect(d.runs).toEqual([]);
     expect(d.segmentRuns.map((r) => [r.id, r.segment, r.matchedBy])).toEqual([
       ['seg-c9-1', 'scope', 'task'],
       ['seg-c9-2', 'manual', 'task'],
@@ -73,7 +52,6 @@ describe('假后端：任务详情的用量汇总', () => {
       running: 0,
       missingTokens: 0,
       missingCache: 1,
-      noQueue: 4,
     });
     expect(d.usage.total.cost.subscription).toMatchObject({ runs: 4, missing: 2 });
     expect(d.usage.bySegment.map((s) => [s.segment, s.byModel.map((m) => m.model)])).toEqual([
@@ -137,17 +115,6 @@ describe('假数据的用量：照各家终帧实际报什么编', () => {
 });
 
 describe('假后端：发给工作流的信号', () => {
-  test('换子任务的路由：旧会话停下，新会话写明是谁手动换的', async () => {
-    const api = fresh();
-    await api.taskAction('t-12', { action: 'reroute', routeId: 'r-rl-opus', subtaskId: 't-12-b' });
-    const d = await api.task('t-12');
-    const runs = d.runs.filter((r) => r.subtaskId === 't-12-b');
-    const active = runs.filter((r) => !r.endedAt);
-    expect(active.map((r) => r.routeId)).toEqual(['r-rl-opus']);
-    expect(active[0]?.whyRoute).toBe('阿岚手动换成 Opus 5.5');
-    expect(runs.find((r) => r.routeId === 'r-cb-opus')?.outcome).toBe('stopped');
-  });
-
   test('换到不在线的路由：422 route_offline。Fable 不再是硬禁令（决定 0033），这条 Fable 路由挡在「没开、不在线」上，不是禁令', async () => {
     const api = fresh();
     const e = await rejects(

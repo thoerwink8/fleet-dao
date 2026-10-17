@@ -10,8 +10,10 @@ import type {
   DecisionAnswer,
   DecisionExecution,
   DecisionOption,
+  FlowAssignment,
   LocalSessionsReport,
   Model,
+  NewFlowAssignment,
   NodeReport,
   NodeSnapshot,
   Pool,
@@ -303,6 +305,13 @@ export interface BoardStore {
   /** 看板上的需求：没结束的，加上进入终态不到 7 天的。按优先级、再按建单先后排。 */
   listBoardTasks(repoId: string): Promise<Task[]>;
   getTask(id: string): Promise<Task | null>;
+  /**
+   * 全程模式的分组记录（#2823，task_flow_assignments）：每张单最多一行，写一次。分组时刻用 Store 的钟。
+   * 同一张单写第二次抛 FlowAssignmentExistsError，不覆盖；没有这张单抛普通错。
+   */
+  writeFlowAssignmentOnce(input: NewFlowAssignment): Promise<FlowAssignment>;
+  /** 读一张单的分组记录；没分过组、编号不是 uuid 都是 null。 */
+  getFlowAssignment(taskId: string): Promise<FlowAssignment | null>;
   /**
    * 任务列表页（#1639）：所有仓的需求（不限 7 天窗口，做完、失败、叫停的都在），按最近更新（开单、快照写入、状态最近一次变化三者最晚）倒序翻页，
    * 同一毫秒的按编号倒序。分组规则在 shared 的 taskListGroupOf。仓编号不是 uuid（库版）或不存在，回空页、各组都是 0。
@@ -675,44 +684,6 @@ export interface IntakeStore {
   ): Promise<'removed' | 'has_tasks' | 'not_found'>;
 }
 
-/** 用户令牌是哪个 App 换来的。一边一份：GitHub 只让这份令牌看见签发它的那个 App。 */
-export type GitHubAppRole = 'agent' | 'engine';
-
-/** 各人自己的 GitHub 授权（#1989）。令牌密文进、密文出：明文只在 api 层过一下。 */
-export interface GitHubTokenStore {
-  /** 这个人存着的某一边 App 的授权；没授权过回 null。 */
-  getGitHubToken(userId: string, role: GitHubAppRole): Promise<GitHubTokenRecord | null>;
-  /** 这个人存着的两边（没有的那边不在里面）。 */
-  listGitHubTokens(userId: string): Promise<GitHubTokenRecord[]>;
-  /** 授权回来换到令牌：一个人每个 App 一行，再授权覆盖那一行。 */
-  putGitHubToken(input: PutGitHubTokenInput): Promise<void>;
-  /** 授权被 GitHub 撤了（401）、或人自己断开。不给 role 就两边都删。本来就没有也当成功。 */
-  deleteGitHubToken(userId: string, role?: GitHubAppRole): Promise<void>;
-}
-
-/** 库里 github_tokens 的一行（密文原样带出，解密在 api 层）。 */
-export interface GitHubTokenRecord {
-  userId: string;
-  githubId: number;
-  login: string;
-  role: GitHubAppRole;
-  /** 密文（v1.<iv>.<tag>.<密文>）；解密失败由 api 层如实报，不在这里判死。 */
-  accessTokenCipher: string;
-  scopes: string;
-  expiresAt: string | null;
-  updatedAt: string;
-}
-
-export interface PutGitHubTokenInput {
-  userId: string;
-  githubId: number;
-  login: string;
-  role: GitHubAppRole;
-  accessTokenCipher: string;
-  scopes: string;
-  expiresAt: string | null;
-}
-
 /** 别的环境推来的快照（node_reports 表一行），不带快照本体：列环境用。 */
 export interface NodeReportSummary {
   /** 收的一方按对上的通行证认定，不取载荷自报的名字。 */
@@ -767,7 +738,6 @@ export type Store = UserStore &
   AgentStore &
   GitHubStore &
   IntakeStore &
-  GitHubTokenStore &
   NodeStore;
 
 /** 翻页游标看不懂：接口回 400（http.ts），不装成空页。判法在 ids.ts 的 parseCursor。 */

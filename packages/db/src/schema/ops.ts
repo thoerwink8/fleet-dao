@@ -92,7 +92,7 @@ export const notifications = pgTable(
     taskId: uuid('task_id').references(() => tasks.id),
     /**
      * 哪个项目（仓）的事：首页按项目出卡靠它。挂单的取那张单的仓；键里带 owner/name 的（github-app:<仓>、close-sweep:<仓>:…）取那个仓；
-     * 都对不上是空（整机的事，不藏）。迁移 0085 按这两条回填老行。
+     * 都对不上是空（整机的事，不藏）。迁移 0087 按这两条回填老行。
      */
     repoId: uuid('repo_id').references(() => repos.id),
     title: text('title').notNull(),

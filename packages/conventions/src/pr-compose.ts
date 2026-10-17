@@ -7,6 +7,8 @@
 //   这张单一律贴「本机做」（--local 加了不报错，也不多贴一次）：随 PR 开出的单已经有人在做，不靠人记得加 --local（#1199）。
 // - 改标准：--founder-quote "<原话>" --at "<时间>" 在「需求」栏下面另起一行写「人闸：改标准」、再写一段「创始人原话」，并等价于
 //   --founder-approved（旧的 --founder-approved 加手写段落照旧能用）。
+// - 写码模型：分支上各提交带 Co-Authored-By: Claude … 尾注时，正文末尾写一行「**写码模型**：claude-haiku-5-5」（pnpm subagent:stats 靠它认 Haiku 开的 PR，#2821）；
+//   没有尾注不写；读不到尾注照开 PR、提示一句。
 // 给了 --body-file 就一字不动交给 prOpen（原有用法照旧）；生成用的参数和 --body-file 不能混着用，只有 --founder-quote 加 --at 例外：
 // 它们把「人闸：改标准」和「创始人原话」追加到自己写的正文末尾。
 // 退出码同 prOpen：0 开成了；1 用法不对、没单或单有问题（什么也没做，--new-issue 的单在 PR 之前开，PR 没开不回滚单，照报）；
@@ -19,6 +21,7 @@ import { type Gh as IssueGh, issueNew } from './issue-new.ts';
 import { type Gh, loadPathLists } from './pr-arm.ts';
 import { founderQuoteLine, GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
 import { branchIssue, type OpenDeps, PR_OPEN_USAGE, prOpen } from './pr-open.ts';
+import { writerLine, writerModelsFromTrailers } from './subagent-stats.ts';
 
 export interface CliDeps extends OpenDeps {
   /** 跑 git（在敲命令的目录里）：读分支上的提交说明。 */
@@ -42,6 +45,8 @@ export interface BodyParts {
   founder?: { quote: string; at: string } | undefined;
   /** --new-issue：需求栏写明这张单已贴本机做、引擎不拉。 */
   withNewIssue?: boolean;
+  /** 分支上各提交 Co-Authored-By 尾注里的写码模型（完整 id）：有就在正文末尾写一行「**写码模型**：…」，pnpm subagent:stats 靠它认 Haiku 开的 PR。 */
+  writers?: readonly string[];
 }
 
 /** 拼正文：栏的写法和 .github/pull_request_template.md 一样（测试里对着模板查）。 */
@@ -69,6 +74,8 @@ export function composeBody(p: BodyParts): string {
   if (p.founder) {
     lines.push('', founderQuoteLine(p.founder.quote, p.founder.at));
   }
+  const writer = writerLine(p.writers ?? []);
+  if (writer) lines.push('', writer);
   return `${lines.join('\n')}\n`;
 }
 
@@ -302,6 +309,17 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
     return 2;
   }
 
+  // 写码模型：各提交的 Co-Authored-By: Claude … 尾注。读不到不拦开 PR（pnpm subagent:stats 还会认提交尾注），只提示一句
+  let writers: string[] = [];
+  const full = deps.git(['log', '--no-merges', '--format=%B%x1e', `origin/${base}..HEAD`]);
+  if (full.code === 0) writers = writerModelsFromTrailers(full.stdout);
+  else {
+    err(
+      `没读到提交尾注（git log 退出码 ${full.code}：${(full.stderr.trim() || '（没说）').replace(/\s+/g, ' ').slice(0, 120)}），正文里没写「写码模型」；` +
+        'pnpm subagent:stats 还会认提交里的 Co-Authored-By 尾注。',
+    );
+  }
+
   const dir = mkdtempSync(join(tmpdir(), 'pr-open-gen-'));
   try {
     let closeNumbers = closes.filter((n): n is number => n !== undefined);
@@ -349,6 +367,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         refs: refs.filter((n): n is number => n !== undefined),
         founder: quote && at ? { quote, at } : undefined,
         withNewIssue: newIssue !== undefined,
+        writers,
       }),
     );
     return prOpen(

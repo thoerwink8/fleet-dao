@@ -12,11 +12,22 @@
 // <状态目录>/<会话号>.queue.json（状态目录和无人值守同一个，FLEET_UNATTENDED_DIR 可改）。
 // 读不成：会话目录不在 fleet-dao 的检出里（找不到 work.ts）→ 不管、不出声；队列命令跑不成、容量读不到 → 不挡，明说「没查成」，
 // 不当成没活、也不当成够。这里任何一步自己出错一律放行（只提示），不能把人困住。
-import { execFile } from 'node:child_process';
+//
+// 对账时顺手跑一次 pnpm subagent:stats --enforce（单 #2821）：Haiku 改代码返工率超线或错进 PR 就把收回写进本机策略文件。
+// 它要读 GitHub、要几秒到几十秒，收尾钩子只有 10 秒，所以起一个脱离的后台进程去跑，不等它；6 小时内起过就不再起
+// （便条 ~/.fleet-dao/subagent-stats-stamp.json）。后台进程跑完把一句话写进便条，下一次对账说出来（收回了、或没跑成）。
+// 起不来、跑不成都只提示，不挡收轮。
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { judgeCapacity, readCapacityAsync } from './capacity.mjs';
+import { fleetHome, mergeStamp, readStamp } from './subagent-ledger.mjs';
 import { cleanId, MAX_STREAK, readState } from './unattended.mjs';
+
+/** 仓里 subagent:stats 的相对路径 */
+export const STATS_BIN = join('packages', 'conventions', 'src', 'bin', 'subagent-stats.ts');
+/** 两次起后台 --enforce 至少隔多久（毫秒） */
+export const ENFORCE_EVERY_MS = 6 * 3600 * 1000;
 
 /** 队列命令最多等多久（毫秒）：两条 gh 并行，平常两三秒；收尾钩子整个只有 10 秒 */
 export const QUEUE_TIMEOUT_MS = 7000;
@@ -34,8 +45,10 @@ const NOT_AGENT_TASKS = new Set(['shell', 'monitor']);
  *   sessionId: string,
  *   readQueue?: (root: string) => Promise<QueueRead>,
  *   readCap?: () => Promise<import('./capacity.mjs').Reading>,
+ *   enforceStats?: (root: string) => EnforceResult,
  * }} QueueStopOpts
  */
+/** @typedef {{ ran: boolean, why?: string, notice?: string }} EnforceResult 顺手跑 --enforce：起成了（或限频没起）ran 为真；notice 是上次后台跑完留下的话 */
 
 /**
  * @param {unknown} o
@@ -205,11 +218,89 @@ export function queueReason(takeable, capText, streak) {
 }
 
 /**
- * 收轮前对账：要不要挡。不抛。
+ * 顺手跑一次 pnpm subagent:stats --enforce：6 小时内起过就不再起；起一个脱离的后台进程，不等它。
+ * 上次后台跑完留在便条里的话（收回了、没跑成）在这里说出来、并清掉。
+ * @param {string} root 仓根
+ * @param {{ home?: string, now?: () => Date, spawnFn?: typeof spawn, everyMs?: number }} [deps] 测试换掉
+ * @returns {EnforceResult}
+ */
+export function startEnforce(
+  root,
+  { home = fleetHome(), now = () => new Date(), spawnFn = spawn, everyMs = ENFORCE_EVERY_MS } = {},
+) {
+  const stamp = readStamp(home);
+  /** @type {string | undefined} */
+  let notice;
+  if (typeof stamp.report === 'string' && stamp.report !== '') {
+    notice = stamp.report;
+    mergeStamp(home, { report: null });
+  }
+  const last = Date.parse(stamp.startedAt ?? '');
+  if (Number.isFinite(last) && now().getTime() - last < everyMs)
+    return { ran: true, ...(notice ? { notice } : {}) };
+  try {
+    const child = spawnFn(process.execPath, [join(root, STATS_BIN), '--enforce'], {
+      cwd: root,
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    child.on('error', () => {});
+    child.unref();
+    mergeStamp(home, { startedAt: now().toISOString() });
+  } catch (e) {
+    return { ran: false, why: `起不了后台进程（${why(e)}）`, ...(notice ? { notice } : {}) };
+  }
+  return { ran: true, ...(notice ? { notice } : {}) };
+}
+
+/**
+ * 默认怎么顺手跑：环境变量 FLEET_SUBAGENT_ENFORCE=off 关掉（测试的 vitest.config.ts 设了，免得测试起真的后台进程去读 GitHub），否则 startEnforce。
+ * @param {string} root
+ * @returns {EnforceResult}
+ */
+function defaultEnforce(root) {
+  return process.env.FLEET_SUBAGENT_ENFORCE === 'off' ? { ran: true } : startEnforce(root);
+}
+
+/**
+ * 收轮前对账里顺手跑 --enforce：只返回要说的一句话（没有就 undefined），不抛、不挡。
+ * @param {QueueStopOpts} opts
+ * @returns {string | undefined}
+ */
+function enforceNotice({ input, enforceStats = defaultEnforce }) {
+  try {
+    const cwdRaw = prop(input, 'cwd');
+    const root = repoRootOf(typeof cwdRaw === 'string' && cwdRaw !== '' ? cwdRaw : process.cwd());
+    if (root === null) return undefined;
+    const r = enforceStats(root);
+    const tail = r.ran
+      ? undefined
+      : `收轮前对账顺手跑 pnpm subagent:stats --enforce 没跑成：${r.why ?? '没说原因'}（不挡收轮）`;
+    return [tail, r.notice].filter(Boolean).join('\n') || undefined;
+  } catch (e) {
+    return `收轮前对账顺手跑 pnpm subagent:stats --enforce 自己出错了（${why(e)}）：不挡收轮。`;
+  }
+}
+
+/**
+ * 收轮前对账：要不要挡；顺手起一次 subagent:stats --enforce。不抛。
  * @param {QueueStopOpts} opts
  * @returns {Promise<{ block: true, reason: string } | { block: false, notice?: string }>}
  */
-export async function decideQueueStop({
+export async function decideQueueStop(opts) {
+  const extra = enforceNotice(opts);
+  const r = await decideQueue(opts);
+  if (r.block || !extra) return r;
+  return { block: false, notice: [r.notice, extra].filter(Boolean).join('\n') };
+}
+
+/**
+ * 收轮前对账：要不要挡（队列和容量那一段）。不抛。
+ * @param {QueueStopOpts} opts
+ * @returns {Promise<{ block: true, reason: string } | { block: false, notice?: string }>}
+ */
+async function decideQueue({
   input,
   dir,
   sessionId,

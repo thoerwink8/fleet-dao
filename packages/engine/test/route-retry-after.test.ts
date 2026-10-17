@@ -1,4 +1,4 @@
-// 等路由该睡几秒（real/store-ports.ts 的 routeRetryAfterSeconds）：等额度按清零时刻，别的仍是短间隔。
+// 等路由该睡几秒（real/store-ports.ts 的 routeRetryAfterSeconds）：所有等待都按清零/到点时刻，统一封顶 10 分钟。
 import { describe, expect, it } from 'vitest';
 import {
   MAX_ROUTE_WAIT_SECONDS,
@@ -10,13 +10,14 @@ const NOW = Date.parse('2026-10-15T15:00:00.000Z');
 const at = (seconds: number) => new Date(NOW + seconds * 1000).toISOString();
 
 describe('routeRetryAfterSeconds', () => {
-  it('等额度、until 在 28 小时后：封顶，不压成 120 秒', () => {
+  it('等额度、until 在 28 小时后：封顶 10 分钟', () => {
     expect(routeRetryAfterSeconds('quota', at(28 * 60 * 60), NOW)).toBe(QUOTA_ROUTE_WAIT_CAP_SECONDS);
-    expect(QUOTA_ROUTE_WAIT_CAP_SECONDS).toBeGreaterThan(MAX_ROUTE_WAIT_SECONDS);
+    expect(QUOTA_ROUTE_WAIT_CAP_SECONDS).toBe(10 * 60);
+    expect(QUOTA_ROUTE_WAIT_CAP_SECONDS).toBe(MAX_ROUTE_WAIT_SECONDS);
   });
 
-  it('等额度、until 在上限之内：按 until，短于 120 秒的也不拉长', () => {
-    expect(routeRetryAfterSeconds('quota', at(45 * 60), NOW)).toBe(45 * 60);
+  it('等额度、until 在上限之内：按 until，不拉长', () => {
+    expect(routeRetryAfterSeconds('quota', at(5 * 60), NOW)).toBe(5 * 60);
     expect(routeRetryAfterSeconds('quota', at(30), NOW)).toBe(30);
   });
 
@@ -35,7 +36,7 @@ describe('routeRetryAfterSeconds', () => {
     expect(routeRetryAfterSeconds('quota', '不是时刻', NOW)).toBeUndefined();
   });
 
-  it('等空位、熔断、切号、探针：28 小时后也最多 120 秒', () => {
+  it('等空位、熔断、切号、探针：28 小时后也最多 10 分钟', () => {
     const far = at(28 * 60 * 60);
     for (const waitFor of ['slot', 'breaker', 'org', 'probe'] as const) {
       expect(routeRetryAfterSeconds(waitFor, far, NOW)).toBe(MAX_ROUTE_WAIT_SECONDS);

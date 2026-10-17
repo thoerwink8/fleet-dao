@@ -1137,30 +1137,46 @@ describe('额度汇总和驾驶舱（packages/shared/src/usage.ts）算出来一
     expect(task?.usage).toBeTruthy();
     const mine = rows(data.sections.runs as RawSection).filter((r) => r.n === 12);
     const drop = (v: unknown) => (v === null ? undefined : v);
-    const sharedRuns = mine.map((r) =>
-      Object.fromEntries(
-        Object.entries({
-          stage: r.stage,
-          queuedAt: r.queued_at,
-          startedAt: drop(r.started_at),
-          endedAt: drop(r.ended_at),
-          inputTokens: drop(r.input_tokens),
-          outputTokens: drop(r.output_tokens),
-          cacheReadTokens: drop(r.cache_read_tokens),
-          cacheWriteTokens: drop(r.cache_write_tokens),
-          costUsd: drop(r.cost_usd),
-          model: r.model,
-          modelName: r.model_name,
-          billing: drop(r.billing),
-        }).filter(([, v]) => v !== undefined),
-      ),
-    );
+    // 驾驶舱的 summarizeUsage 只收三段流水（要有 unread），不再收老流程会话、也不再按阶段汇总。
+    // 这里把同一批行换成三段能算的那几样，核对 token 和花费；排队时长、按环节是法国页自己留的。
+    const sharedRuns = mine.map((r) => ({
+      segment: null,
+      model: r.model,
+      modelName: r.model_name,
+      billing: drop(r.billing),
+      running: r.ended_at == null,
+      unread: [],
+      inputTokens: drop(r.input_tokens),
+      outputTokens: drop(r.output_tokens),
+      cacheReadTokens: drop(r.cache_read_tokens),
+      cacheWriteTokens: drop(r.cache_write_tokens),
+      costUsd: drop(r.cost_usd),
+    }));
     const want = sharedUsage.summarizeUsage(sharedRuns);
     const got = task?.usage as Usage;
+    const money = (t: Totals) => ({
+      runs: t.runs,
+      running: t.running,
+      inputTokens: t.inputTokens,
+      outputTokens: t.outputTokens,
+      missingTokens: t.missingTokens,
+      cacheReadTokens: t.cacheReadTokens,
+      cacheWriteTokens: t.cacheWriteTokens,
+      missingCache: t.missingCache,
+      inputEquivalent: t.inputEquivalent,
+      missingEquivalent: t.missingEquivalent,
+      costUsd: t.costUsd,
+      missingCost: t.missingCost,
+      cost: t.cost,
+      estimate: t.estimate,
+    });
     expect(got.total.runs + got.total.running).toBe(5);
-    expect(got.total).toEqual(want.total);
-    expect(got.byModel).toEqual(want.byModel);
-    expect(got.byStage.map(({ stageName: _n, ...rest }) => rest)).toEqual(want.byStage);
+    expect(money(got.total)).toEqual(money(want.total));
+    expect(got.byModel.map((m) => ({ model: m.model, modelName: m.modelName, ...money(m) }))).toEqual(
+      want.byModel.map((m) => ({ model: m.model, modelName: m.modelName, ...money(m) })),
+    );
+    expect(got.byStage.map((s) => s.stage)).toEqual(['plan', 'execute', 'verify']);
+    expect(got.byStage.reduce((n, s) => n + s.runs + s.running, 0)).toBe(5);
   });
 
   it('探针过期线、探针停了的线和 shared 的 routeProbeStaleMinutes、ROUTE_PROBE_OVERDUE_MINUTES 一样', () => {

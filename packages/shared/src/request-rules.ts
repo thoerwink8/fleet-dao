@@ -7,9 +7,12 @@
 // - 删除只给「还没留下任何决定、也没牵扯别人」的：讨论中、只有发起人说过话（指挥官的话不算）、从没提交过拍板，且只有发起人能删；
 //   指挥官会话排着队或正在回话时也删不了，要先停（C 片，#2061）。
 // - 讨论中不能手动归档：要么接着聊，要么「放下」（写理由）。
+// - 讨论中闲置满 3 天由定时任务自动收口：记成已结案·不做、写原因、归档。原因以「闲置 N 天没动静，自动收口」开头，靠这句认。
+//   收口时不能发消息、改草稿，谁都能「重开」回讨论中。故意写下的「不做」不是这句，不能重开。
 import {
   REQUEST_ACTIONS,
   REQUEST_ARCHIVE_AFTER_SETTLED_DAYS,
+  REQUEST_IDLE_CLOSE_DAYS,
   REQUEST_IDLE_DAYS,
   REQUEST_KINDS,
   REQUEST_PURGE_AFTER_DAYS,
@@ -44,6 +47,8 @@ export interface RequestFacts {
   pinned: boolean;
   /** 指挥官会话排着队或正在回话（C 片，#2061）：这时删除不可用，要先停。 */
   commanderRunning: boolean;
+  /** 放下、不做、收口的理由。没有可以不给。收口认 idleCloseReason 写出来的那句。 */
+  closeReason?: string | null;
 }
 
 export const COMMANDER_RUNNING_DELETE_WHY = '指挥官正在回话，停下后才能删';
@@ -65,6 +70,7 @@ const no = (why: string): RequestVerdict => ({ allowed: false, why });
 
 export const CLOSED_LOCKED_WHY = '已结案，内容不再改：要改请在电脑上点「接着这条提」另开一条';
 export const DELETED_WHY = '这条需求已经删了：先在「最近删除」里恢复';
+export const IDLE_CLOSED_WHY = '已收口（闲置太久没动静）：点「重开」回到讨论中再接着聊';
 
 export function isClosed(status: RequestStatus): boolean {
   return status === 'closed_do' || status === 'closed_drop';
@@ -102,6 +108,27 @@ export function idleDays(
   if (r.status !== 'discussing' || r.deletedAt !== null) return null;
   const days = Math.floor((now.getTime() - new Date(r.lastActivityAt).getTime()) / DAY_MS);
   return days >= REQUEST_IDLE_DAYS ? days : null;
+}
+
+/** 讨论中闲置满 3 天该自动收口：回闲置了几天；不该收口是 null（不在讨论中、删了的、不满 3 天）。 */
+export function idleCloseDue(
+  r: { status: RequestStatus; lastActivityAt: string; deletedAt: string | null },
+  now: Date,
+): number | null {
+  if (r.status !== 'discussing' || r.deletedAt !== null) return null;
+  const days = Math.floor((now.getTime() - new Date(r.lastActivityAt).getTime()) / DAY_MS);
+  return days >= REQUEST_IDLE_CLOSE_DAYS ? days : null;
+}
+
+/** 收口的原因（写进 close_reason，页面原样显示）：闲置几天、最后一句是谁说的。 */
+export function idleCloseReason(days: number, lastSpeaker: string | null): string {
+  const who = lastSpeaker === null ? '还没有人说过话' : `最后一句是${lastSpeaker}说的`;
+  return `闲置 ${days} 天没动静，自动收口；${who}`;
+}
+
+/** 这句是自动收口写的（不是人写下的「不做」）。重开、页面上的「收口」都只认它。 */
+export function isIdleCloseReason(reason: string | null | undefined): reason is string {
+  return typeof reason === 'string' && /^闲置 \d+ 天没动静，自动收口；/.test(reason);
 }
 
 /**
@@ -158,21 +185,26 @@ export function requestActions(
     return out;
   }
 
-  const closed = isClosed(r.status);
   const discussing = r.status === 'discussing';
   const pending = r.status === 'pending_decision';
+  const idleClosed = r.status === 'closed_drop' && isIdleCloseReason(r.closeReason);
+  const closed = isClosed(r.status) && !idleClosed;
   const missing = r.draftMissing.length > 0 ? `草稿还缺：${r.draftMissing.join('、')}` : null;
 
-  out.send = closed ? no(CLOSED_LOCKED_WHY) : yes;
+  out.send = closed ? no(CLOSED_LOCKED_WHY) : idleClosed ? no(IDLE_CLOSED_WHY) : yes;
   out.editDraft = closed
     ? no(CLOSED_LOCKED_WHY)
-    : pending
-      ? no('待拍板时草稿锁着：拍板人点「再聊聊」或发起人撤回后再改')
-      : yes;
-  out.rename = discussing ? yes : no(closed ? CLOSED_LOCKED_WHY : '只有讨论中的需求能改名');
+    : idleClosed
+      ? no(IDLE_CLOSED_WHY)
+      : pending
+        ? no('待拍板时草稿锁着：拍板人点「再聊聊」或发起人撤回后再改')
+        : yes;
+  out.rename = discussing
+    ? yes
+    : no(closed ? CLOSED_LOCKED_WHY : idleClosed ? IDLE_CLOSED_WHY : '只有讨论中的需求能改名');
 
   if (!discussing) {
-    const why = closed ? CLOSED_LOCKED_WHY : '已经提交拍板了，等拍板人拍';
+    const why = closed ? CLOSED_LOCKED_WHY : idleClosed ? IDLE_CLOSED_WHY : '已经提交拍板了，等拍板人拍';
     out.submit = no(why);
     out.confirm = no(why);
   } else if (!isInitiator) {
@@ -193,7 +225,9 @@ export function requestActions(
   const decideWhy = !pending
     ? closed
       ? '已结案，不能再拍板'
-      : '还没提交拍板'
+      : idleClosed
+        ? IDLE_CLOSED_WHY
+        : '还没提交拍板'
     : viewer.id !== r.deciderId
       ? '只有拍板人能拍板'
       : null;
@@ -202,8 +236,9 @@ export function requestActions(
   out.rediscuss = decideWhy ? no(decideWhy) : yes;
 
   out.withdraw = !pending ? no('只有待拍板的需求能撤回') : isInitiator ? yes : no('只有发起人能撤回');
+  out.reopen = idleClosed ? yes : no('只有收口的需求能重开');
 
-  out.drop = !discussing
+  out.drop = !(discussing || idleClosed)
     ? no(closed ? '已经结案了' : '待拍板时不能放下：拍板人点「不做」，或发起人先撤回')
     : isInitiator || viewer.decidesRequests
       ? yes
@@ -211,7 +246,7 @@ export function requestActions(
 
   out.archive = r.archived
     ? no('已经归档了')
-    : closed
+    : closed || idleClosed
       ? yes
       : no(
           discussing

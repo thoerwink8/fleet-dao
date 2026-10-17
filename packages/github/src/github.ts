@@ -74,6 +74,7 @@ import {
   closeIssue,
   commentIssue,
   commentPull as commentOnPull,
+  issueLabelNames,
   listClosedIssues,
   type OpenIssueInput,
   type OpenIssueResult,
@@ -112,7 +113,6 @@ import { createReleaseFacts, type ReleaseFactsReader } from './release-facts.ts'
 import { RepoFactsCache } from './repos.ts';
 import { type SyncMainlineInput, type SyncMainlineResult, syncMainline } from './sync.ts';
 import { requiredPermissions } from './token-scopes.ts';
-import { createGitHubUserApi, type GitHubUserApi } from './user-repos.ts';
 
 export interface GitHubOptions {
   /** 防重复写的账、PR 镜像：生产用 pgLedger(db)。 */
@@ -171,12 +171,6 @@ export interface SelfCheckItem {
 export interface GitHub {
   client: GitHubClient;
   deps: Deps;
-  /**
-   * 本人身份那一套（#1989）：列「我 GitHub 上能看到的仓」、把 App 装到某个仓。走 OAuth 用户令牌，
-   * 和 App 机器人令牌那条路分开（GitHub 只认本人令牌）。两个 App 的凭据里缺 client_id/client_secret 时，
-   * 调用它的那一刻如实抛 BAD_CONFIG，不在建对象时就炸（别的功能照用）。
-   */
-  userApi: GitHubUserApi;
   pushBranch(input: PushBranchInput, ctx?: ActivityContext): Promise<PushBranchResult>;
   /** 把最新主线并进 PR 分支、推上去（干净或本来就最新都算 clean；冲突、分支头对不上分别回 conflict / head_moved）。 */
   syncMainline(input: SyncMainlineInput, ctx?: ActivityContext): Promise<SyncMainlineResult>;
@@ -253,11 +247,14 @@ export interface GitHub {
    * 一张单的标题、正文（原样，带引擎写的进度段）、开没开着（「引擎」机器人现读）：拼动手的交代用。是 PR 抛 NOT_AN_ISSUE，
    * 读不到、认不出抛错；正文是空的回空串（空正文是单子的事实，由交代那一侧报「没有可做的需求」）。
    */
-  readIssue(input: {
-    repo: RepoRef;
-    issueNumber: number;
-    signal?: AbortSignal | undefined;
-  }): Promise<{ number: number; title: string; body: string; state: 'open' | 'closed' }>;
+  readIssue(input: { repo: RepoRef; issueNumber: number; signal?: AbortSignal | undefined }): Promise<{
+    number: number;
+    title: string;
+    body: string;
+    state: 'open' | 'closed';
+    /** 贴着的标签名（定全程还是三段要看，#2826）。 */
+    labels?: string[];
+  }>;
   /** 会话提交用的身份（「干活的」机器人）：引擎建工作树时写进 user.name / user.email。 */
   commitIdentity(repo: RepoRef): Promise<BotIdentity>;
   /** 引擎的通用 GitHub 读写口（「引擎」机器人）：现读 PR、读贴提交状态、撤自动合并、关 PR、在 PR 上留言（名字沿用 #348 的「claims」）。 */
@@ -351,21 +348,6 @@ export function createGitHub(options: GitHubOptions): GitHub {
   return {
     client,
     deps,
-    userApi: createGitHubUserApi(client, {
-      appCredentials: {
-        agent: {
-          clientId: apps.agent.clientId,
-          clientSecret: apps.agent.clientSecret,
-          slug: apps.agent.slug,
-        },
-        engine: {
-          clientId: apps.engine.clientId,
-          clientSecret: apps.engine.clientSecret,
-          slug: apps.engine.slug,
-        },
-      },
-      ...(options.log ? { log: options.log } : {}),
-    }),
     async pushBranch(input, ctx = {}) {
       return pushBranch(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
     },
@@ -420,7 +402,13 @@ export function createGitHub(options: GitHubOptions): GitHub {
           `${repoSlug(input.repo)} #${input.issueNumber} 是 PR，不是 issue`,
         );
       }
-      return { number: issue.number, title: issue.title, body: issue.body ?? '', state: issue.state };
+      return {
+        number: issue.number,
+        title: issue.title,
+        body: issue.body ?? '',
+        state: issue.state,
+        labels: issueLabelNames(issue),
+      };
     },
     async readIssueState(input) {
       const issue = await readIssue(deps, input.repo, input.issueNumber, input.signal);

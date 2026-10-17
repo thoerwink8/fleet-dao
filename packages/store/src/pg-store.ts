@@ -12,9 +12,9 @@ import {
   channels,
   countTaskGroups,
   type Db,
+  getFlowAssignment,
   githubEvents,
   githubEventVersions,
-  githubTokens,
   idempotencyKeys,
   listTaskRows,
   models,
@@ -28,6 +28,7 @@ import {
   quotaSamplesSince,
   quotaWindows,
   readChannelStates,
+  recordFlowAssignment,
   repos,
   routes,
   runs,
@@ -42,7 +43,6 @@ import {
   toBan,
   toChannel,
   toChannelState,
-  toGitHubToken,
   toIntakeRepo,
   toModel,
   toPool,
@@ -425,6 +425,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!isUuid(id)) return null;
       const [row] = await db.select().from(tasks).where(eq(tasks.id, id));
       return row ? toTask(row) : null;
+    },
+    async writeFlowAssignmentOnce(input) {
+      return recordFlowAssignment(db, { ...input, assignedAt: now() });
+    },
+    async getFlowAssignment(taskId) {
+      return getFlowAssignment(db, taskId);
     },
     async listTasks({ group, repoId, q, cursor: raw, limit }) {
       const cursor = parseCursor(raw, isUuid);
@@ -1348,53 +1354,6 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         await insertAudit(tx, removeRepoAudit(entry, { owner: row.owner, name: row.name }));
         return 'removed';
       });
-    },
-    async getGitHubToken(userId, role) {
-      if (!isUuid(userId)) return null;
-      const [row] = await db
-        .select()
-        .from(githubTokens)
-        .where(and(eq(githubTokens.userId, userId), eq(githubTokens.role, role)));
-      return row ? toGitHubToken(row) : null;
-    },
-    async listGitHubTokens(userId) {
-      if (!isUuid(userId)) return [];
-      const rows = await db.select().from(githubTokens).where(eq(githubTokens.userId, userId));
-      return rows.map(toGitHubToken);
-    },
-    async putGitHubToken(input) {
-      await db
-        .insert(githubTokens)
-        .values({
-          userId: input.userId,
-          githubId: input.githubId,
-          login: input.login,
-          role: input.role,
-          accessTokenCipher: input.accessTokenCipher,
-          scopes: input.scopes,
-          expiresAt: input.expiresAt === null ? null : new Date(input.expiresAt),
-        })
-        .onConflictDoUpdate({
-          target: [githubTokens.userId, githubTokens.role],
-          set: {
-            githubId: input.githubId,
-            login: input.login,
-            accessTokenCipher: input.accessTokenCipher,
-            scopes: input.scopes,
-            expiresAt: input.expiresAt === null ? null : new Date(input.expiresAt),
-            updatedAt: now(),
-          },
-        });
-    },
-    async deleteGitHubToken(userId, role) {
-      if (!isUuid(userId)) return;
-      await db
-        .delete(githubTokens)
-        .where(
-          role
-            ? and(eq(githubTokens.userId, userId), eq(githubTokens.role, role))
-            : eq(githubTokens.userId, userId),
-        );
     },
   };
 }

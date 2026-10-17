@@ -1,6 +1,6 @@
 // 任务工作流的冷验收（real/task-verify.ts，#632 S2-5b）：读 PR 和文件（假 GitHub）→ 选路（假选路，按族）→ 一次性会话
 // （假驱动，不起真执行体）→ 贴 cold-verify 状态 → 结局整理成工作流要的形状。每条做不出来、要等、被叫停、贴不上的路径故意造一次。
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
@@ -12,6 +12,7 @@ import { createEngineDrain, waitDrained } from '../../src/drain.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../../src/ports.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
+import { DETACHED_MARK, type SessionHandoff, sessionHandoff } from '../../src/real/session-handoff.ts';
 import {
   backedOffSeconds,
   type ColdVerifyActivityDeps,
@@ -43,7 +44,9 @@ const HEAD = 'a'.repeat(40);
 const BASE = 'b'.repeat(40);
 
 const MODEL_PASS = ['看过了。', '', '## 问题', '', 'verdict: pass'].join('\n');
-const MODEL_FAIL = ['## 问题', '- 没做到验收条：单子要状态栏，代码里没有', '', 'verdict: fail'].join('\n');
+const MODEL_FAIL = ['## 问题', '- 没做到验收条：第 1 条：单子要状态栏，代码里没有', '', 'verdict: fail'].join(
+  '\n',
+);
 
 const routeFacts = (routeId: string, over: Partial<RouteLaunchFacts> = {}): RouteLaunchFacts => ({
   routeId,
@@ -152,6 +155,8 @@ function rig(
     pickRouteError?: Error;
     /** 给了就接上留言口（「不归我验」转人用）；comments 记下每次留的言。 */
     commentIssue?: (input: { issueNumber: number; key: string; body: string }) => Promise<void>;
+    /** 收发目录和「引擎要走了」的信号（#2848）：给了，执行方式支持的验收会话脱开引擎跑。 */
+    handoff?: SessionHandoff;
     deps?: Partial<ColdVerifyActivityDeps>;
   } = {},
 ) {
@@ -243,6 +248,7 @@ function rig(
       trees: ft.trees,
       baseEnv: { PATH: '/usr/bin' },
       resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
+      ...(opts.handoff ? { handoff: opts.handoff } : {}),
     },
     runs: {
       async start(r, options) {
@@ -333,7 +339,7 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     const r = rig({ driverRun: async () => report(MODEL_FAIL) });
     const got = await r.run(r.input(), ctx());
     expect(got.pass).toBe(false);
-    expect(got.problems).toEqual(['没做到验收条：单子要状态栏，代码里没有']);
+    expect(got.problems).toEqual(['没做到验收条：第 1 条：单子要状态栏，代码里没有']);
     expect(got.unavailable).toBeUndefined();
     expect(got.retry).toBeUndefined();
     expect(r.posted.at(-1)).toMatchObject({ sha: HEAD, state: 'failure' });
@@ -763,6 +769,164 @@ describe('发布排空看得见验收会话（#957）', { timeout: 30_000 }, () 
     });
     await r.run(r.input(), ctx()).catch(() => undefined);
     expect(drain.inFlight()).toEqual([]);
+  });
+});
+
+describe('冷验收会话脱开引擎跑、引擎重启后接回（#2848：和动手段同一套）', { timeout: 30_000 }, () => {
+  const mirasimRoute = (id: string) =>
+    routeFacts(id, { modelId: `${id}-model`, hostId: 'mirasim', poolId: 'pool-gpt' });
+  const killed = (over: Partial<HostReport> = {}) =>
+    report('', { facts: { exitCode: null, killed: 'aborted', quotaExhausted: false } as RunFacts, ...over });
+  /** 假的 Mirasim 驱动（和动手段的一样）：放手信号响了交回「放手」的报告（不发 stop）；叫停信号响了交回被叫停的报告。 */
+  const releasedOrStopped = (hooks: HostRunHooks): Promise<HostReport> =>
+    new Promise((resolve) => {
+      if (hooks.io && !hooks.io.attach) mkdirSync(hooks.io.dir, { recursive: true });
+      hooks.io?.release?.addEventListener('abort', () =>
+        resolve(report('', { hostId: 'mirasim', detached: true })),
+      );
+      hooks.signal?.addEventListener('abort', () => resolve(killed({ hostId: 'mirasim' })));
+    });
+
+  it('Mirasim 上的验收会话：发版到截止不停它；引擎要走了放手、交回 detached（不贴 failure、runs 那一行不收、目录留着）；新引擎带 attach 接回，结论照常贴、结局记到原来那一行', async () => {
+    const ioRoot = join(root, 'io');
+    const drain = createEngineDrain();
+    const sessions = oneShotSessions({ drain });
+    const oldEngine = sessionHandoff(ioRoot);
+    let up: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      up = resolve;
+    });
+    const r = rig({
+      routeFor: mirasimRoute,
+      handoff: oldEngine,
+      deps: { sessions },
+      driverRun: async (_spec, hooks) => {
+        up();
+        return releasedOrStopped(hooks);
+      },
+    });
+    const pending = r.run(r.input(), ctx());
+    await started;
+    // 脱开跑的不在发布排空的在途清单里，到截止也不停它
+    expect(drain.inFlight()).toEqual([]);
+    expect(sessions.drainStop('到了发布宽限的截止')).toEqual([]);
+    expect(oldEngine.leave('收到 SIGTERM')).toHaveLength(1);
+    const got = await pending;
+    expect(got).toMatchObject({
+      pass: false,
+      problems: [],
+      round: 1,
+      detached: {
+        runId: expect.any(String),
+        startedAt: expect.any(String),
+        family: 'gpt',
+        modelId: 'gpt-model',
+        routeId: 'route-gpt',
+        poolId: 'pool-gpt',
+        cwd: expect.stringContaining('verify-'),
+      },
+    });
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toBeUndefined();
+    expect(r.posted.map((p) => p.state)).not.toContain('failure');
+    expect(r.recorded).toEqual([]);
+    const d = got.detached;
+    if (!d) throw new Error('上面没交回 detached');
+    expect(existsSync(join(ioRoot, d.runId, DETACHED_MARK))).toBe(true);
+    expect(r.ft.removes).not.toContain(d.cwd);
+
+    // 新引擎：同一个收发目录的根，驱动凭交接单接回（这里直接交回跑完的报告）
+    const r2 = rig({
+      routeFor: mirasimRoute,
+      handoff: sessionHandoff(ioRoot),
+      driverRun: async () => report(MODEL_PASS, { hostId: 'mirasim' }),
+    });
+    const back = await r2.run(r2.input({ attach: d }), ctx());
+    expect(back).toMatchObject({ pass: true, problems: [], round: 1 });
+    expect(back.detached).toBeUndefined();
+    // 不重新选路、不再开跑：结局记到原来那一行（同一个编号、同一个起的时刻）
+    expect(r2.asked).toEqual([]);
+    expect(r2.started).toEqual([]);
+    expect(r2.recorded).toEqual([
+      expect.objectContaining({ runId: d.runId, segment: 'verify', outcome: 'done', startedAt: d.startedAt }),
+    ]);
+    expect(r2.posted.at(-1)).toMatchObject({ sha: HEAD, state: 'success' });
+    // 收场：验收的空目录、收发目录都删掉
+    expect(r2.ft.removes).toContain(d.cwd);
+    expect(existsSync(join(ioRoot, d.runId))).toBe(false);
+  });
+
+  it('接回时引擎又在走（发版连着发）：不碰会话、不读 GitHub，当场再交回 detached 等下一个引擎', async () => {
+    const leaving = sessionHandoff(join(root, 'io'));
+    leaving.leave('收到 SIGTERM');
+    const r = rig({ routeFor: mirasimRoute, handoff: leaving });
+    const attach = {
+      runId: 'run-0009',
+      startedAt: new Date().toISOString(),
+      family: 'gpt',
+      modelId: 'gpt-model',
+      routeId: 'route-gpt',
+      poolId: 'pool-gpt',
+      cwd: join(root, 'verify-run-0009'),
+    };
+    const got = await r.run(r.input({ attach }), ctx());
+    expect(got).toMatchObject({ pass: false, problems: [], detached: attach });
+    expect(r.specs).toEqual([]);
+    expect(r.reads).toEqual([]);
+    expect(r.posted).toEqual([]);
+    expect(r.recorded).toEqual([]);
+  });
+
+  it('【故意造出的失败】接回没接成（会话被发版叫停、又没接回）：回 retry 重验一次，不是没过、不是做不出来；不贴 failure，结局记回原来那一行', async () => {
+    const ioRoot = join(root, 'io');
+    const r = rig({
+      routeFor: mirasimRoute,
+      handoff: sessionHandoff(ioRoot),
+      driverRun: async () => killed({ hostId: 'mirasim' }),
+    });
+    const attach = {
+      runId: 'run-0007',
+      startedAt: new Date().toISOString(),
+      family: 'gpt',
+      modelId: 'gpt-model',
+      routeId: 'route-gpt',
+      poolId: 'pool-gpt',
+      cwd: join(root, 'verify-run-0007'),
+    };
+    const got = await r.run(r.input({ attach }), ctx());
+    expect(got).toMatchObject({ pass: false, problems: [], retry: { wait: 'slot' } });
+    expect(got.retry?.reason).toContain('接回');
+    expect(got.unavailable).toBeUndefined();
+    expect(got.detached).toBeUndefined();
+    expect(r.posted.map((p) => p.state)).not.toContain('failure');
+    expect(r.recorded).toEqual([expect.objectContaining({ runId: 'run-0007', startedAt: attach.startedAt })]);
+    expect(r.recorded[0]?.outcome).not.toBe('done');
+  });
+
+  it('【故意造出的失败】没脱开的验收会话（两家都验）在引擎要走时被停了：回 retry 重验一次，不当成「冷调用没跑成」、不换下一个候选', async () => {
+    const oldEngine = sessionHandoff(join(root, 'io'));
+    let ups = 0;
+    const r = rig({
+      picks: { gpt: okRoute('gpt'), grok: okRoute('grok') },
+      handoff: oldEngine,
+      driverRun: async (_spec, hooks) => {
+        ups += 1;
+        if (ups === 2) oldEngine.leave('收到 SIGTERM');
+        // 两家都验不脱开：引擎要走了，会话在宽限截止时被停下（这里直接交回被叫停的报告）
+        await new Promise<void>((resolve) => {
+          if (oldEngine.signal.aborted) resolve();
+          else oldEngine.signal.addEventListener('abort', () => resolve(), { once: true });
+        });
+        expect(hooks.io).toBeUndefined();
+        return killed();
+      },
+    });
+    const got = await r.run(r.input({ authorFamilies: ['cursor'] }), ctx());
+    expect(got).toMatchObject({ pass: false, problems: [], retry: { wait: 'slot' } });
+    expect(got.unavailable).toBeUndefined();
+    expect(r.posted.map((p) => p.state)).not.toContain('failure');
+    // 两家各起一次，没有换下一个候选再起
+    expect(r.specs).toHaveLength(2);
   });
 });
 
@@ -1595,6 +1759,69 @@ describe('材料带 PR 正文和测试输出；「不归我验」留言到单上
     expect(prompt).toContain('加了状态栏，截图在评论里。');
     expect(prompt).toContain('## 引擎跑过的测试输出');
     expect(prompt).toContain('Tests  12 passed (12)');
+    expect(prompt).toContain('你可以在 PR 头的完整检出里读文件');
+  });
+
+  it('第 2 轮用增量 diff，提示词带上轮没过的条和只复核那一句', async () => {
+    const r = rig({
+      deps: {
+        rangeDiff: async () => ({ diffText: 'INCREMENTAL-DIFF-MARKER', changedFiles: ['src/status.ts'] }),
+      },
+    });
+    await r.run(
+      r.input({
+        round: 2,
+        recheck: {
+          failedCriteria: [1],
+          sinceSha: 'c'.repeat(40),
+          priorProblems: ['没做到验收条：第 1 条：没有状态栏'],
+        },
+      }),
+      ctx(),
+    );
+    const prompt = r.specs[0]?.prompt ?? '';
+    expect(prompt).toContain('INCREMENTAL-DIFF-MARKER');
+    expect(prompt).not.toContain('export const Status = 1');
+    expect(prompt).toContain('## 上一轮没过的条');
+    expect(prompt).toContain('没做到验收条：第 1 条：没有状态栏');
+    expect(prompt).toContain('只复核上轮没过的条和增量里的改动，新提出的、不在增量里的问题只记备注、不拒');
+    expect(prompt).toContain('你可以在 PR 头的完整检出里读文件');
+  });
+
+  it('第 2 轮真实装配只留下上一轮问题和能对上增量文件的问题', async () => {
+    const oldProblem = '没做到验收条：第 1 条：上一轮的问题还没修好';
+    const newProblem = '弄坏了原有功能：第 2 条：增量文件：`src/status.ts`，把状态导出删了';
+    const unrelated = '弄坏了原有功能：第 2 条：增量里顺手发现的旧问题，但不在本轮改动';
+    const stdout = [
+      '## 问题',
+      `- ${oldProblem}`,
+      `- ${newProblem}`,
+      `- ${unrelated}`,
+      '',
+      'verdict: fail',
+    ].join('\n');
+    const r = rig({
+      deps: {
+        rangeDiff: async () => ({ diffText: 'INCREMENTAL-DIFF-MARKER', changedFiles: ['src/status.ts'] }),
+      },
+      driverRun: async () => report(stdout),
+    });
+    const got = await r.run(
+      r.input({
+        round: 2,
+        howToFinish: ['第一条', '第二条'],
+        recheck: {
+          failedCriteria: [1],
+          sinceSha: 'c'.repeat(40),
+          priorProblems: [oldProblem],
+        },
+      }),
+      ctx(),
+    );
+    expect(got.pass).toBe(false);
+    expect(got.problems).toEqual([oldProblem, newProblem]);
+    expect(got.notes).toContain('只记备注、不拒');
+    expect(got.problems).not.toContain(unrelated);
   });
 
   it('「不归我验」：结论 pass、状态 success，outOfScope 带出，并留言到单上（幂等键带 PR 号和头）', async () => {

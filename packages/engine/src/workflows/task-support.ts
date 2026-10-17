@@ -2,6 +2,7 @@
 // 这里是工作流代码，会被重放：别加随机数、Date、Node 自带模块（test/structure.test.ts 会拦）。
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
+import { classifyFailure } from '../failure/classify.ts';
 import type { RoundOutcome, RouteChoice } from '../ports.ts';
 import {
   type AbandonCommand,
@@ -114,12 +115,22 @@ export function selfCheckText(result: SelfCheckResult): string {
 /**
  * 单任务 token 预算超了停下时写给人的话（决定 0093）。tokens 是算进判断的合计（量到的 + 估的）；分不清的传 estimated: 0。
  * 估的那部分（被叫停的会话按量到的行推出来的下限）在人话里写明白是估的，别当成量到的。
+ * 给了 raw（活动算好的折算结果，#2830）就分开写：新输入多少、输出多少、缓存写多少、缓存读多少、折算后多少；老结果没有就照旧只写合计。
  */
 export function tokenBudgetStop(
   spent: { tokens: number; unmetered: number },
   budget: number,
   grants: number,
-  split: { measured: number; estimated: number } = { measured: spent.tokens, estimated: 0 },
+  split: {
+    measured: number;
+    estimated: number;
+    raw?: {
+      inputTokens?: number;
+      outputTokens?: number;
+      cacheReadTokens?: number;
+      cacheWriteTokens?: number;
+    };
+  } = { measured: spent.tokens, estimated: 0 },
 ): { title: string; detail: string } {
   const m = (n: number) => `${(n / 1_000_000).toFixed(1)}M`;
   const allowed = budget * grants;
@@ -128,10 +139,19 @@ export function tokenBudgetStop(
     split.estimated > 0
       ? `（其中 ${split.measured} 是量到的，另 ${split.estimated} 是拿这张单量到的行估出来的下限：被叫停的会话记不到用量）`
       : '';
+  const raw = split.raw;
+  const rawText = raw
+    ? `（原始四样：新输入 ${raw.inputTokens ?? 0}、输出 ${raw.outputTokens ?? 0}、缓存写 ${raw.cacheWriteTokens ?? 0}、缓存读 ${raw.cacheReadTokens ?? 0}）`
+    : '';
+  const spentText = raw
+    ? `动手和验收会话合计输入当量 ${split.measured}${rawText}${split.estimated > 0 ? `；加上估的下限，当量合计 ${spent.tokens}` : ''}${splitText}${unmetered}`
+    : `动手和验收会话合计花掉 ${spent.tokens} token${splitText}${unmetered}`;
   return {
-    title: `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
+    title: raw
+      ? `这张单花掉的额度超了预算（输入当量 ${m(spent.tokens)} / ${m(allowed)}）`
+      : `这张单花掉的 token 超了预算（${m(spent.tokens)} / ${m(allowed)}）`,
     detail:
-      `动手和验收会话合计花掉 ${spent.tokens} token${splitText}${unmetered}，超过 ${allowed}（单任务预算 ${budget}` +
+      `${spentText}，超过上限 ${allowed}（单任务预算 ${budget}` +
       `${grants > 1 ? ` × 已给 ${grants} 份` : ''}）。预算按近 14 天每张单花费的 p95 定（决定 0093）。` +
       '点「继续」再给一份同样多的接着干；不要了点「放弃」。',
   };
@@ -286,6 +306,96 @@ export const NO_OTHER_FAMILY = '没有别的模型族可换，只避开模型';
 /** 避让之后一条别的路由都没有：不死等，照旧派原来的。写进 lastProblem，驾驶舱看得见。 */
 export const NO_OTHER_ROUTE = '没有别的路由可换';
 
+/**
+ * 避开登录失效、封号、设备被撤销的池之后，一条能派的路由都没有（patched('auth-reroute')）。
+ * 驾驶舱「停下等人」读这一句。
+ */
+export const POOLS_ALL_HELD = '能派的池都停了';
+
+/** 只凭 HTTP 401：同一个池在这段时间里再来一次才暂停整池。10 分钟盖得住一次抖动，盖不住真登出。 */
+export const BARE_401_WINDOW_MS = 10 * 60 * 1000;
+
+/** 这个池上一次只凭 401 的时刻还在窗口里。没记过、或已经过了窗口，都不算第二次。 */
+export function bare401Repeats(previousAtMs: number | undefined, nowMs: number): boolean {
+  if (previousAtMs === undefined || !Number.isFinite(previousAtMs) || !Number.isFinite(nowMs)) return false;
+  const age = nowMs - previousAtMs;
+  return age >= 0 && age <= BARE_401_WINDOW_MS;
+}
+
+/**
+ * 一个池上「只凭 401」的共享记号（设置表 engine.bare401，所有任务一起看）。
+ * claim 是这一次记下的身份：活动重试带同一个 claim，仍算同一次，不会把自己数成第二次。
+ */
+export interface Bare401Stamp {
+  at: string;
+  claim: string;
+  repeated: boolean;
+}
+
+/**
+ * 记下这一次只凭 401。同一个 claim 再来（活动重试）原样交回；别的 claim 落在窗口里就是第二次。
+ * 过了窗口、或还没有记号，这一次算第一次，时刻改成现在。
+ */
+export function nextBare401Stamp(
+  existing: Bare401Stamp | undefined,
+  input: { now: string; claim: string },
+): { stamp: Bare401Stamp; repeated: boolean } {
+  if (existing && existing.claim === input.claim) return { stamp: existing, repeated: existing.repeated };
+  const nowMs = Date.parse(input.now);
+  const prevMs = existing === undefined ? undefined : Date.parse(existing.at);
+  if (existing && bare401Repeats(prevMs, nowMs)) {
+    const stamp: Bare401Stamp = { at: existing.at, claim: input.claim, repeated: true };
+    return { stamp, repeated: true };
+  }
+  const stamp: Bare401Stamp = { at: input.now, claim: input.claim, repeated: false };
+  return { stamp, repeated: false };
+}
+
+/**
+ * 这次失败是不是「只凭 HTTP 401」（还没算是不是第二次）。明确的登录失效、封号不算。
+ * 工作流用它决定要不要去读共享记号；真正算不算第二次仍交给失败分流。
+ */
+export function failureLooksLikeBare401(input: {
+  code: string;
+  message: string;
+  httpStatus?: number;
+}): boolean {
+  const verdict = classifyFailure({
+    source: 'session:execute',
+    routeBound: true,
+    code: input.code,
+    message: input.message,
+    retryable: null,
+    ...(input.httpStatus !== undefined ? { httpStatus: input.httpStatus } : {}),
+  });
+  return verdict.authReroute === 'route';
+}
+
+/** 整池暂停提醒的标题后半句。和规则表的白话名同一句；认不出的规则按登录失效写。 */
+export function poolAuthHoldTitle(rule: string | undefined): string {
+  if (rule === 'AU1') return '账号被封';
+  if (rule === 'DV1') return '这台机器的 reclaude 登录被撤销';
+  return '登录失效';
+}
+
+/** 和 real/pool-holds.ts 的 poolHoldKey 同一个键：选路见了没处理的这条就整池避开。 */
+export function poolHoldDedupeKey(poolId: string): string {
+  return `pool-hold:${poolId}`;
+}
+
+/**
+ * 引擎活动超时（EN1 的 timeout_*，#2824）。失败分流第二次原文一字不差仍判挂起；动手会话不拿这个挂起整单，
+ * 停掉这一段再按点名路由重派（task-session.ts，patched('en1-timeout-redispatch')）。
+ * 不放进 AUTO_REDISPATCH_CODES：这些码老历史里出现过，那张表一真，重放会把已经挂起的判断改道。
+ * session_lost、exit_lost 不在这里：那两句可以是真的同一处再犯。
+ */
+export const EN1_ACTIVITY_TIMEOUT_CODES: readonly string[] = [
+  'timeout_start_to_close',
+  'timeout_heartbeat',
+  'timeout_schedule_to_close',
+  'timeout_schedule_to_start',
+];
+
 /** 整族避开之后剩下的都在等额度或空位：放掉整族避让再选。写进 lastProblem，驾驶舱看得见。 */
 export const RELEASE_FAMILY_WAIT = '剩下的路由在等额度或空位，先放掉整族避让再选';
 
@@ -300,13 +410,16 @@ export function infraAvoidScope(
   modelAlreadyRouteAvoided: boolean,
 ): 'route' | 'model' | 'pool' | null {
   const normalized = code.trim().toLowerCase();
+  // 模型串是路由配置的问题：只避开刚失败的路由，给同一派工档的下一条路由一次机会。
+  if (normalized === 'model_mismatch') return 'route';
   if (normalized === 'relay_quota_exhausted') return 'pool';
   if (
     normalized === 'aborted' ||
     normalized === 'wall_clock_timeout' ||
     normalized === 'spawn_failed' ||
     normalized === 'spawn_timeout' ||
-    normalized === 'startup_timeout'
+    normalized === 'startup_timeout' ||
+    EN1_ACTIVITY_TIMEOUT_CODES.includes(normalized)
   ) {
     return modelAlreadyRouteAvoided ? 'model' : 'route';
   }
@@ -358,6 +471,7 @@ export const AUTO_REDISPATCH_CODES: readonly string[] = [
   'spawn_timeout',
   'startup_timeout',
   'relay_quota_exhausted',
+  'model_mismatch',
 ];
 
 /**

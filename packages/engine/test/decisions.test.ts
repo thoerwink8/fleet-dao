@@ -2,8 +2,9 @@
 // #556-2：Fusion 的判断（简报、验收、验证结论、状态机、Lead 检查、PR 正文、关单评论）和库主键（newIds）随 Fusion 删了，
 // 只留 task.ts（#632）用的两样：上限（limits）和失败分流（failure）。
 import { describe, expect, it } from 'vitest';
-import { createDecide, evidenceOf, nextAction, retryDelaySeconds } from '../src/decisions/index.ts';
+import { createDecide, nextAction, retryDelaySeconds } from '../src/decisions/index.ts';
 import type { FailureVerdict } from '../src/failure/index.ts';
+import { LEGACY_MODEL_MISMATCH_STALL } from '../src/failure/model-mismatch-stall.ts';
 import {
   assertSessionFitsSlice,
   DEFAULT_LIMITS,
@@ -124,10 +125,12 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(nextAction({ failure: failure('WEIRD', false), limits, routeBound: false }).action).toBe('park');
   });
 
-  it('账号池的事：封号直接挂起并报警、整池暂停；额度用满在 Claude 订阅池马上回去选路（等切号），别的池等到清零', () => {
+  it('账号池的事：封号整池暂停并报警，这张单换路由避开这个池；额度用满在 Claude 订阅池马上回去选路（等切号），别的池等到清零', () => {
     expect(nextAction({ failure: failure('account_banned'), limits, routeBound: true })).toMatchObject({
-      action: 'park',
+      action: 'swapRoute',
       alert: true,
+      authReroute: 'pool',
+      avoid: 'pool',
       shared: { scope: 'pool' },
     });
     // Claude 订阅池（带组织类型）：不原地睡到清零，马上回去选路续同一个会话（切了号选路就换池 fork 续上，#59）
@@ -162,7 +165,7 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
     expect(plain).toMatchObject({ action: 'retry', delaySeconds: 1200, wait: 'quota', resumeSame: true });
   });
 
-  it('设备被撤销：挂起（不换池、不等清零），整池暂停，写明去哪台机器、以谁的身份重新登录；人点继续后续同一个会话', () => {
+  it('设备被撤销：整池暂停并报警，这张单换路由避开这个池，写明去哪台机器、以谁的身份重新登录', () => {
     const next = nextAction({
       failure: { ...failure('agent_error'), message: 'API Error: 401 device_revoked' },
       limits,
@@ -179,9 +182,83 @@ describe('失败分流：接的是规则表（failure/classify.ts），认不出
         runAsUser: 'fleet-agent-carpool',
       },
     });
-    expect(next).toMatchObject({ action: 'park', rule: 'DV1', resumeSame: true, alert: true });
+    expect(next).toMatchObject({
+      action: 'swapRoute',
+      rule: 'DV1',
+      resumeSame: false,
+      alert: true,
+      authReroute: 'pool',
+      avoid: 'pool',
+    });
     expect(next.shared).toEqual({ scope: 'pool' });
     expect(next.humanFix).toContain('在「法国」上以会话用户 fleet-agent-carpool 重跑');
+  });
+
+  it('一次 401 换路由、不暂停整池；同一个池短时间里第二次 401 才整池暂停并报警', () => {
+    const failure401 = {
+      source: 'session:execute',
+      code: 'agent_error',
+      message: 'HTTP 401 Unauthorized',
+      retryable: null,
+    };
+    const route = { routeId: 'r1', poolId: 'p1', modelId: 'opus', hostId: 'mirasim' as const };
+    const once = nextAction({
+      failure: failure401,
+      limits,
+      routeBound: true,
+      context: { httpStatus: 401, route },
+    });
+    expect(once).toMatchObject({
+      action: 'swapRoute',
+      authReroute: 'route',
+      avoid: 'route',
+      alert: false,
+      rule: 'AU2',
+    });
+    expect(once.shared).toBeUndefined();
+    expect(once.reason).toContain('第一次 401');
+    const twice = nextAction({
+      failure: failure401,
+      limits,
+      routeBound: true,
+      context: { httpStatus: 401, route, priorBare401: true },
+    });
+    expect(twice).toMatchObject({
+      action: 'swapRoute',
+      authReroute: 'pool',
+      avoid: 'pool',
+      alert: true,
+      shared: { scope: 'pool' },
+    });
+    expect(twice.reason).toContain('第二次 401');
+    expect(twice.reason).toContain('整池暂停，回去选路避开这个池');
+  });
+
+  it('只有结构化 httpStatus=401 时也识别为裸 401，不因消息没有 Unauthorized 而首次停池', () => {
+    const route = {
+      routeId: 'r-structured',
+      poolId: 'p-structured',
+      modelId: 'opus',
+      hostId: 'mirasim' as const,
+    };
+    const next = nextAction({
+      failure: {
+        source: 'session:execute',
+        code: 'agent_error',
+        message: '上游返回了未注明原因的认证响应',
+        retryable: null,
+      },
+      limits,
+      routeBound: true,
+      context: { httpStatus: 401, route },
+    });
+    expect(next).toMatchObject({
+      action: 'swapRoute',
+      authReroute: 'route',
+      avoid: 'route',
+      alert: false,
+      rule: 'AU2',
+    });
   });
 
   it('要人的直接挂起并报警', () => {
@@ -258,6 +335,8 @@ describe('渠道运行中失败：分流判停下就停下报人，不再换同�
       delaySeconds: 0,
       counter: null,
     });
+    // 看门狗靠这一句认已经挂上的在途单。改标题必须连那一处一起改。
+    expect(next.reason).toBe(LEGACY_MODEL_MISMATCH_STALL);
     expect(next).not.toHaveProperty('failChannel');
     expect(next.reason).not.toContain('换同一个模型');
     expect(next.reason).not.toContain('已换过');
@@ -315,7 +394,7 @@ describe('渠道运行中失败：分流判停下就停下报人，不再换同�
       routeBound: true,
       context: onChannel,
     });
-    expect(banned).toMatchObject({ action: 'park', alert: true });
+    expect(banned).toMatchObject({ action: 'swapRoute', alert: true, authReroute: 'pool', avoid: 'pool' });
     expect(banned).not.toHaveProperty('failChannel');
   });
 

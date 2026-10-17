@@ -1,6 +1,7 @@
 // 拉单的真装配（real/intake.ts，#632 S2-4b-3）：库是真的（PGlite 跑真迁移），GitHub 和 Temporal 客户端是假的。
 // 从受管的仓到起任务工作流走一遍：任务行、操作记录、谁要的、工作流编号和起法；重复起、不在白名单、在跑的数读不到各故意造一次。
 import {
+  alertByKey,
   auditLog,
   type Db,
   INTAKE_BREAKER_SETTING,
@@ -26,7 +27,7 @@ import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@te
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../../src/jobs/dispatch-standing.ts';
 import { INTAKE_JOB, runIntakeJob } from '../../src/jobs/intake.ts';
-import { type IntakeGitHub, intakeJob } from '../../src/real/intake.ts';
+import { type IntakeGitHub, intakeJob, reportIntakeProfile } from '../../src/real/intake.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -63,6 +64,8 @@ interface Seed {
   repoSwitch?: Date | null;
   /** 仓名；不给是 demo。 */
   name?: string;
+  /** 换掉档案里的工具链。不给仍是 pnpm。 */
+  toolchain?: string[];
 }
 
 async function seedWorld(db: Db, over: Seed = {}) {
@@ -73,6 +76,15 @@ async function seedWorld(db: Db, over: Seed = {}) {
       name: over.name ?? 'demo',
       testCommand: 'pnpm check',
       autoDispatchSince: over.repoSwitch === undefined ? new Date('2026-09-30T00:00:00Z') : over.repoSwitch,
+      profile: {
+        language: 'typescript',
+        toolchain: over.toolchain ?? ['pnpm'],
+        testCommand: 'pnpm check',
+        moduleRoots: ['packages/*'],
+        mergeSignals: ['merge-gate', 'cold-verify'],
+        standardPathsFile: 'packages/conventions/standard-paths.json',
+        weight: 1,
+      },
     })
     .returning();
   const [founder] = await db
@@ -165,6 +177,9 @@ function fakeGh(
     async readSpecDoc() {
       return null;
     },
+    async readRepoFile() {
+      return { defaultBranch: 'main', commit: 'a'.repeat(40), file: { kind: 'missing' as const } };
+    },
     async commentIssue(input: { issueNumber: number; key: string; body: string }) {
       calls.comments.push({ issueNumber: input.issueNumber, key: input.key, body: input.body });
       return { commentId: 1, url: 'u', created: over.commentCreated ?? true };
@@ -237,7 +252,21 @@ function fakeClient(
 }
 
 const logs: string[] = [];
+/**
+ * 真装配默认换掉法国本机的工具链探测：CI 的 pnpm 不在 /usr/local/bin，
+ * 真探测会把这仓判成没就绪、一张单都不拉。要测真探测的用例走 wireLive。
+ */
 const wire = (gh: IntakeGitHub) =>
+  intakeJob({
+    db: t.db,
+    gh,
+    now: () => NOW,
+    log: (_l, text) => logs.push(text),
+    gateLive: true,
+    toolchainReady: async () => [],
+  });
+/** 不换探测：command -v 看这台机器的固定安装位置。 */
+const wireLive = (gh: IntakeGitHub) =>
   intakeJob({
     db: t.db,
     gh,
@@ -909,26 +938,65 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     const first = fakeClient();
     await runIntakeJob(wire(gh)(first.client, 'fleet'));
     expect(first.starts).toEqual([]);
-    const row = await readIntakeBreaker(t.db);
+    const row = await readIntakeBreaker(t.db, repo.id);
     expect(row).toMatchObject({ state: 'open' });
     const alerts = await t.db.select().from(notifications);
-    expect(alerts.filter((a) => a.dedupeKey === 'intake-breaker' && a.resolvedAt === null)).toHaveLength(1);
+    expect(
+      alerts.filter((a) => a.dedupeKey === `intake-breaker:${repo.id}` && a.resolvedAt === null),
+    ).toHaveLength(1);
 
     const again = fakeClient();
     await runIntakeJob(wire(gh)(again.client, 'fleet'));
     expect(again.starts).toEqual([]);
     expect(
-      (await t.db.select().from(notifications)).filter((a) => a.dedupeKey.startsWith('intake-breaker')),
+      (await t.db.select().from(notifications)).filter((a) =>
+        a.dedupeKey.startsWith(`intake-breaker:${repo.id}`),
+      ),
     ).toHaveLength(1);
   });
 
+  it('A 仓的熔断状态带仓号：A 停拉时 B 仓仍能起工作流', async () => {
+    const { repo: a } = await seedWorld(t.db, { name: 'aaa' });
+    const [b] = await t.db
+      .insert(repos)
+      .values({
+        owner: 'acme',
+        name: 'bbb',
+        testCommand: 'pnpm check',
+        autoDispatchSince: new Date('2026-09-30T00:00:00Z'),
+        profile: {
+          language: 'typescript',
+          toolchain: ['pnpm'],
+          testCommand: 'pnpm check',
+          moduleRoots: ['packages/*'],
+          mergeSignals: ['merge-gate', 'cold-verify'],
+          standardPathsFile: 'packages/conventions/standard-paths.json',
+          weight: 1,
+        },
+      })
+      .returning();
+    if (!b) throw new Error('B 仓没写进去');
+    await writeIntakeBreaker(
+      t.db,
+      { state: 'open', at: new Date(NOW.getTime() - 30 * 60_000), by: 'test' },
+      a.id,
+    );
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    await runIntakeJob(wire(gh)(client, 'fleet'));
+    expect(starts).toHaveLength(1);
+    expect(starts[0]?.options.workflowId).toContain('acme/bbb#12');
+    expect(await readIntakeBreaker(t.db, a.id)).toMatchObject({ state: 'open' });
+    expect(await readIntakeBreaker(t.db, b.id)).toBeNull();
+  });
+
   it('熔断着、冷却完了：只放 1 条试探；试探那条做成了，下一轮恢复——设置表记 closed、撤掉报警、推一条恢复通知', async () => {
-    await seedWorld(t.db);
+    const { repo } = await seedWorld(t.db);
     // 3 小时前进入熔断（报警还开着）
     const openedAt = new Date(NOW.getTime() - 3 * HOURS);
-    await writeIntakeBreaker(t.db, { state: 'open', at: openedAt, by: 'test' });
+    await writeIntakeBreaker(t.db, { state: 'open', at: openedAt, by: 'test' }, repo.id);
     await upsertAlert(t.db, {
-      dedupeKey: 'intake-breaker',
+      dedupeKey: `intake-breaker:${repo.id}`,
       level: 'alert',
       taskId: null,
       title: '停拉',
@@ -955,17 +1023,19 @@ describe('拉单的真装配 · 每小时限速和熔断（读真库）', { time
     });
     const next = fakeClient();
     await runIntakeJob(wire(gh)(next.client, 'fleet'));
-    expect(await readIntakeBreaker(t.db)).toMatchObject({ state: 'closed' });
+    expect(await readIntakeBreaker(t.db, repo.id)).toMatchObject({ state: 'closed' });
     const all = await t.db.select().from(notifications);
-    expect(all.find((a) => a.dedupeKey === 'intake-breaker')?.resolvedAt).not.toBeNull();
-    expect(all.filter((a) => a.dedupeKey.startsWith('intake-breaker:recovered'))).toHaveLength(1);
+    expect(all.find((a) => a.dedupeKey === `intake-breaker:${repo.id}`)?.resolvedAt).not.toBeNull();
+    expect(all.filter((a) => a.dedupeKey.startsWith(`intake-breaker:${repo.id}:recovered`))).toHaveLength(1);
     // 恢复的这一轮照常拉：试探用掉了 #11，没派过的 #12 这一轮起来
     expect(next.starts).toHaveLength(1);
   });
 
   it('【故意造出的失败】熔断状态那一行的值认不出：这一轮记没跑成，一张都不起，不当成正常', async () => {
-    await seedWorld(t.db);
-    await t.db.insert(settings).values({ key: INTAKE_BREAKER_SETTING, value: { state: '半开' } });
+    const { repo } = await seedWorld(t.db);
+    await t.db
+      .insert(settings)
+      .values({ key: `${INTAKE_BREAKER_SETTING}:${repo.id}`, value: { state: '半开' } });
     const { gh } = fakeGh();
     const { client, starts } = fakeClient();
     await expect(runIntakeJob(wire(gh)(client, 'fleet'))).rejects.toThrow(/认不出/);
@@ -1006,5 +1076,58 @@ describe('拉单的真装配 · 查工作流没查成（放最后）', { timeout
     expect((await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION)).toEqual(
       [],
     );
+  });
+});
+
+describe('reportIntakeProfile · 仓档案没就绪的提醒（#2839）', () => {
+  const KEY = 'intake-profile:acme/demo';
+  const repo = { owner: 'acme', name: 'demo' };
+
+  it('非空报两次 → 同一个键只有一行、没撤，正文是后一次的', async () => {
+    await reportIntakeProfile(t.db, repo, '缺 language');
+    await reportIntakeProfile(t.db, repo, '缺 language、weight');
+    const rows = (await t.db.select().from(notifications)).filter((r) => r.dedupeKey === KEY);
+    expect(rows.length).toBe(1);
+    expect(rows[0]?.resolvedAt).toBeNull();
+    expect(rows[0]?.title).toBe('acme/demo 仓档案没就绪，拉单不拉这个仓');
+    expect(rows[0]?.body).toContain('缺 language、weight');
+    expect(rows[0]?.body).toContain('fleet-api project set-profile acme/demo --file -');
+  });
+
+  it('非空之后再报 null → resolved_at 有值（撤掉）', async () => {
+    await reportIntakeProfile(t.db, repo, '缺 language');
+    await reportIntakeProfile(t.db, repo, null);
+    const row = await alertByKey(t.db, KEY);
+    expect(row).not.toBeNull();
+    expect(row?.resolvedAt).not.toBeNull();
+  });
+
+  it('一上来就报 null → 不报错，表里没有这一行', async () => {
+    await expect(reportIntakeProfile(t.db, repo, null)).resolves.toBeUndefined();
+    expect(await alertByKey(t.db, KEY)).toBeNull();
+  });
+});
+
+describe('拉单的真装配 · 法国本机的工具链', () => {
+  it('档案里的工具这台没有：不读单、不拉，原因写明缺哪个', async () => {
+    await seedWorld(t.db, { toolchain: ['sh', 'fleet-dao-no-such-go'] });
+    const { gh, calls } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wireLive(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 0 });
+    expect(starts).toEqual([]);
+    expect(calls.groomed).toBe(0);
+    expect(run.why).toContain('toolchain_unready×1');
+    expect(run.why).toContain('缺工具链：fleet-dao-no-such-go');
+    expect(run.why).not.toContain('缺工具链：sh');
+  });
+
+  it('档案里的工具这台有：照常拉单', async () => {
+    await seedWorld(t.db, { toolchain: ['sh'] });
+    const { gh } = fakeGh();
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wireLive(gh)(client, 'fleet'));
+    expect(run).toMatchObject({ outcome: 'ok', found: 1 });
+    expect(starts).toHaveLength(1);
   });
 });

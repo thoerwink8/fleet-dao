@@ -1,10 +1,9 @@
-// 用量说给人听（#216）。数一律出自 shared 的 summarizeUsage：任务详情用后端算好的 usage，会话时间线的一次会话
-// 也拿它现算（runUsage），算法只有一份。每一项分四种说法：还没有数（没有结束了的会话，这不是没读到）、全读到、
+// 用量说给人听（#216）。数一律出自 shared 的 summarizeUsage（任务详情用后端算好的 usage），算法只有一份。
+// 每一项分四种说法：还没有数（没有结束了的会话，这不是没读到）、全读到、
 // 读到一部分（照数写，标「不全」、写明另有几次没读到）、全没读到（写「没读到」，不写 0）。
 // 花费分三种计费方式说：按量是真花的钱；套餐内是按 API 价折合、不另花钱；渠道查不到的分不清，不猜成套餐内。
-import { type CostShare, summarizeUsage, type UsageTotals } from '@fleet-dao/shared';
-import type { Run } from '../api/types';
-import { formatCount, formatDuration, formatUsd } from './format';
+import { type CostShare, DEFAULT_TASK_TOKEN_BUDGET, type UsageTotals } from '@fleet-dao/shared';
+import { formatCount, formatUsd } from './format';
 
 /** 一项合计的读数：value 是读到的那几次加起来的，missing 是没读到的次数。 */
 export type Reading =
@@ -19,11 +18,6 @@ export function reading(value: number, missing: number, runs: number): Reading {
   if (missing >= runs) return { kind: 'missing', missing };
   if (missing > 0) return { kind: 'partial', value, missing };
   return { kind: 'full', value };
-}
-
-/** 一次会话的用量，照任务合计同一个算法算：还在跑的只记 running，结束了的缺哪样记哪样没读到。 */
-export function runUsage(run: Run): UsageTotals {
-  return summarizeUsage([{ ...run, model: run.routeId, modelName: run.modelName }]).total;
 }
 
 /**
@@ -46,6 +40,16 @@ export interface UsagePart {
 
 /** 输入当量的折法，写在悬停提示和面板说明里。 */
 export const EQUIVALENT_RULE = '输入 1、缓存写 1.25、缓存读 0.1、输出 5';
+
+/**
+ * 每单预算用了多少（#2859）：输入当量占上限的百分比。不封顶，超了照写（129%）；不到 1% 写「不到 1%」，不四舍五入成 0%。
+ * 上限是默认值（shared 的 DEFAULT_TASK_TOKEN_BUDGET）；单子自己的上限契约里没有，不猜。
+ */
+export function budgetUsedText(equivalent: number): string {
+  const share = (equivalent / DEFAULT_TASK_TOKEN_BUDGET) * 100;
+  const used = share > 0 && share < 1 ? '不到 1%' : `${Math.round(share)}%`;
+  return `预算用了 ${used}（上限 ${DEFAULT_TASK_TOKEN_BUDGET / 10_000} 万）`;
+}
 
 function tokenBreakdown(t: UsageTotals): string {
   return `输入 ${formatCount(t.inputTokens)} · 输出 ${formatCount(t.outputTokens)} · 缓存读 ${formatCount(t.cacheReadTokens)} · 缓存写 ${formatCount(t.cacheWriteTokens)}（只算读到的）`;
@@ -181,19 +185,4 @@ export function costParts(t: UsageTotals): UsagePart[] {
   const reported = BILLINGS.flatMap((b) => sharePart(b, t.cost[b]));
   if (!t.estimate.runs) return [...reported, ...estimated];
   return [...reported.filter((p) => p.missing === undefined), ...estimated];
-}
-
-/** 干活时长那一段（按模型、按阶段的一行用）：时刻认不出的另记，不当成 0 秒。 */
-export function workParts(t: UsageTotals): UsagePart[] {
-  const r = reading(t.runMs, t.missingTime, t.runs);
-  if (r.kind === 'none') return [];
-  if (r.kind === 'missing') return [{ key: 'work', missing: '时刻认不出，时长没读到' }];
-  const p: UsagePart = { key: 'work', label: '干活', value: formatDuration(r.value) };
-  if (r.kind === 'partial') p.incomplete = r.missing;
-  return [p];
-}
-
-/** 一组会话（一个模型、一个阶段）的一行：干活时长、当量、花费；只有在跑的会话时什么都还没有。 */
-export function groupParts(t: UsageTotals): UsagePart[] {
-  return [...workParts(t), ...tokenParts(t), ...costParts(t)];
 }

@@ -20,6 +20,7 @@ import {
 import type { Me, Setting, SettingKey } from '../api/types';
 import { CredentialsSection } from '../components/credentials-section';
 import { EngineMasterRelation } from '../components/engine-master';
+import { FlowModeSetting } from '../components/flow-mode-setting';
 import { EmptyState } from '../components/layout/empty-state';
 import { FieldGroup, FieldRow } from '../components/layout/field-row';
 import { FilterTabs } from '../components/layout/filter-tabs';
@@ -655,11 +656,12 @@ export default function Settings() {
               </Section>
             ) : null}
 
-            {/* 从自己的 GitHub 加仓 / 移仓（#1989）：列本人能看到的仓，勾选接进派单，一键装 App。 */}
+            {/* 两个机器人已经装上的仓：接进或移出驾驶舱。新项目走本机 pnpm project add。 */}
             <div className="mt-4 border-t pt-4">
               <h3 className="text-heading">导入仓库</h3>
               <p className="mt-1 mb-3 text-meta text-muted-foreground">
-                连上你自己的 GitHub，这里列出你能看到的所有仓；接进来的仓「让 AI 接活」默认关着，要另外打开。
+                这里只列两个机器人已经装上的仓。新项目在本机跑 pnpm project add 做到底；接进来的仓「让 AI
+                接活」默认关着，要另外打开。
               </p>
               <RepoImportSection />
             </div>
@@ -674,7 +676,7 @@ export default function Settings() {
             {/* 读失败后再重拉会先清掉 error、回到 pending。已经读过就不再画骨架。 */}
             {settings.data ? (
               <div className="space-y-3">
-                {/* 单栏：只有 3 项，分两栏会剩 1 项孤零零（#1910 第 11 条） */}
+                {/* 单栏：项数不多，分两栏会有一边空着（#1910 第 11 条） */}
                 <FieldGroup>
                   <NumberSetting
                     k="sessions.maxConcurrent"
@@ -691,6 +693,7 @@ export default function Settings() {
                     placeholder="没设"
                   />
                   <SoloPaused s={find('engine.soloPaused')} />
+                  <FlowModeSetting s={find('engine.flowMode')} />
                 </FieldGroup>
                 <QuotaReserve s={find('engine.quotaReserve')} />
               </div>

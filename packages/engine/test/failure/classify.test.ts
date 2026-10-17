@@ -43,7 +43,7 @@ function drive(evidence: FailureEvidence, policy?: Partial<FailurePolicy>, maxSt
 }
 
 describe('处置表：每一种打断原因怎么办、上限在哪', () => {
-  it('分流只给 retry 和 park 两种动作：没有换路由、换模型这一级，每条规则都归五种之一', () => {
+  it('每条规则都归五种之一；动作只有 retry、park，以及账号池停机时的换路由', () => {
     const kinds = new Set(RULES.map((r) => r.kind));
     expect([...kinds].sort()).toEqual(['resume', 'retry', 'rework', 'stop', 'wait']);
     const samples = JSON.parse(
@@ -54,7 +54,8 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
         (s) => classifyFailure({ source: 'session:execute', now: NOW, ...s.evidence }).action,
       ),
     );
-    expect([...actions].sort()).toEqual(['park', 'retry']);
+    // 登录失效、封号、设备被撤销（AU1、AU2、DV1）绑了路由就换路由，不挂起这张单。别的规则仍只有 retry 和 park。
+    expect([...actions].sort()).toEqual(['park', 'retry', 'swapRoute']);
   });
 
   it('retry 临时的（网络、上游出错、进程被杀……）：绑路由的原路重试两次，1 分钟起翻倍（决定 0093），再来就停下报警', () => {
@@ -75,6 +76,61 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     const { trail, verdicts } = drive(session({ code: 'SPAWN_TIMEOUT', message: '等了 45 秒进程还没起来' }));
     expect(trail).toEqual(['retry', 'park']);
     expect(verdicts.every((v) => v.rule === 'ST1')).toBe(true);
+  });
+
+  it('活动超时原文一字不差：引擎换过进程就原路续；没换过分流仍判挂起（#2710 就是这句）', () => {
+    const restarted = session({
+      code: 'timeout_start_to_close',
+      message: 'activity StartToClose timeout',
+      activity: 'runSegment',
+      startToCloseSeconds: 4500,
+      engineStartedAt: '2026-10-16T12:00:00.000Z',
+      currentEngineStartedAt: '2026-10-16T12:01:00.000Z',
+      engineRestarted: true,
+      attempts: { retries: 1 },
+      previousMessage: 'activity StartToClose timeout',
+    });
+    const resumed = classifyFailure(restarted);
+    expect(resumed).toMatchObject({ rule: 'EN1', action: 'retry', resumeSame: true, alert: false });
+    expect(resumed.reason).toContain('活动 runSegment');
+    expect(resumed.reason).toContain('startToClose 75 分钟');
+    expect(resumed.reason).toContain('引擎进程换过');
+
+    const realTimeout = classifyFailure({
+      ...restarted,
+      engineRestarted: false,
+      currentEngineStartedAt: '2026-10-16T12:00:00.000Z',
+    });
+    expect(realTimeout).toMatchObject({ rule: 'EN1', action: 'park', alert: true });
+    // #2710 的 doing 就是这句：分流把可重试的 timeout_start_to_close 当成「原路再试不会变」。
+    // 不是发版叫停（KL3 / #2797）、不是 Mirasim 接回（#2815）、不是 model_mismatch（MD3 / #2811，分流仍判停下，动手会话另按点名重派）。
+    // 动手会话见到这个 park 不挂整单，停掉这一段按点名路由重派（task-session.ts，patched en1-timeout-redispatch）。
+    expect(realTimeout.reason).toContain('引擎这边丢了这一步（timeout_start_to_close）');
+    expect(realTimeout.reason).toContain('挂起并报警');
+    expect(realTimeout.reason).toContain('和上一次的原文一字不差，原路再试不会变');
+  });
+
+  it('桥接连 Mirasim 超时：分流仍重试一次再挂起（#2710/#2742 的那句）', () => {
+    const message = '没起来：桥接连 Mirasim 超时（100 秒）';
+    const { trail, verdicts } = drive(session({ code: 'spawn_failed', message }));
+    expect(trail).toEqual(['retry', 'park']);
+    expect(verdicts.every((v) => v.rule === 'MB1')).toBe(true);
+    // 第二次原文略有差别，凑不成「一字不差」，落到 maxRetries：这就是库里那句 last_problem。
+    // 归类是「可重试的桥接连接超时被判成挂起」，不是探针离线（#2703）、不是引擎停时接回（#2815）、
+    // 不是 timeout_start_to_close（#2824 / EN1）、不是 model_mismatch（#2811 / MD3）。
+    // 动手会话不拿这个 park 挂整单（task-session.ts，patched mb1-bridge-redispatch）。
+    const parked = classifyFailure(
+      session({
+        code: 'spawn_failed',
+        message,
+        attempts: { retries: 1 },
+        previousMessage: '没起来：桥接连 Mirasim 超时（90 秒）',
+      }),
+    );
+    expect(parked).toMatchObject({ rule: 'MB1', action: 'park', alert: true });
+    expect(parked.reason).toBe('桥接连 Mirasim 超时（桥接连 Mirasim 超时）：挂起并报警（已重试 1 次）');
+    // 码不是 spawn_failed 也认这句：认的是原文，不是起不来那个码。
+    expect(classifyFailure(session({ code: 'failed', message })).rule).toBe('MB1');
   });
 
   it('retry 认不出的：同样按临时的办，不无限重试；绑不绑路由都一样', () => {
@@ -213,12 +269,19 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     expect(repeat.action).toBe('retry');
   });
 
-  it('stop 只有人能修的：封号、登录失效、余额不够、配置不对……头一步就停下报警，不重试；整池的事让别的任务也别再派', () => {
-    const { trail, verdicts } = drive(BANNED);
-    expect(trail).toEqual(['park']);
-    expect(verdicts[0]).toMatchObject({ rule: 'AU1', alert: true, routeOutcome: 'neutral' });
-    expect(verdicts[0]?.shared).toEqual({ scope: 'pool', shared: true });
-    expect(verdicts[0]?.reason).toBe('账号被封（account_banned）：挂起并报警');
+  it('stop 只有人能修的：封号整池暂停并报警，这张单回去选路避开这个池；余额不够、配置不对仍挂起；不绑路由的登录失效仍挂起', () => {
+    const banned = classifyFailure(BANNED);
+    expect(banned).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU1',
+      alert: true,
+      routeOutcome: 'neutral',
+      authReroute: 'pool',
+      resumeSame: false,
+    });
+    expect(banned.shared).toEqual({ scope: 'pool', shared: true });
+    expect(banned.reason).toContain('整池暂停，回去选路避开这个池');
+    expect(banned.reason).toContain('并报警');
     // 路由自己的问题（配置不对、模型不存在）：停下报警，这条路由的失败记进熔断，不让整池暂停
     const model = classifyFailure(session({ code: 'model_not_found' }));
     expect({ action: model.action, alert: model.alert, routeOutcome: model.routeOutcome }).toEqual({
@@ -245,18 +308,25 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
       runAsUser: 'fleet-agent-carpool',
     });
     const v = classifyFailure(revoked);
-    expect({ rule: v.rule, action: v.action, alert: v.alert, resumeSame: v.resumeSame }).toEqual({
+    expect({
+      rule: v.rule,
+      action: v.action,
+      alert: v.alert,
+      resumeSame: v.resumeSame,
+      authReroute: v.authReroute,
+    }).toEqual({
       rule: 'DV1',
-      action: 'park',
+      action: 'swapRoute',
       alert: true,
-      resumeSame: true,
+      resumeSame: false,
+      authReroute: 'pool',
     });
     expect(v.shared).toEqual({ scope: 'pool', shared: true });
     expect(v.humanFix).toBe(
       '在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
     );
+    expect(v.reason).toContain('整池暂停，回去选路避开这个池');
     expect(v.reason).toContain('要人：在「法国」上以会话用户 fleet-agent-carpool 重跑 reclaude login');
-    expect(drive(revoked).trail).toEqual(['park']);
     // 机器、会话用户没报：写明没报，不瞎猜。
     expect(classifyFailure(session({ message: '401 device_revoked' })).humanFix).toBe(
       '在机器（没报）上以会话用户（没报）重跑 reclaude login，按登录流程在浏览器里批准；然后在驾驶舱点「继续」',
@@ -268,6 +338,57 @@ describe('处置表：每一种打断原因怎么办、上限在哪', () => {
     ).toBe('DV1');
     expect(classifyFailure(session({ message: 'Not logged in · Please run /login' })).rule).toBe('AU2');
     expect(classifyFailure(BANNED).rule).toBe('AU1');
+  });
+
+  it('只凭 HTTP 401：第一次换路由、不暂停整池；同一个池第二次才整池暂停。明确的登录失效第一次就停池', () => {
+    const bare = session({ code: 'agent_error', message: 'HTTP 401 Unauthorized', httpStatus: 401 });
+    const once = classifyFailure(bare);
+    expect(once).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU2',
+      authReroute: 'route',
+      alert: false,
+      resumeSame: false,
+    });
+    expect(once.shared).toBeUndefined();
+    expect(once.reason).toContain('第一次 401');
+    expect(once.reason).not.toContain('并报警');
+    const twice = classifyFailure({ ...bare, priorBare401: true });
+    expect(twice).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU2',
+      authReroute: 'pool',
+      alert: true,
+    });
+    expect(twice.shared).toEqual({ scope: 'pool', shared: true });
+    expect(twice.reason).toContain('第二次 401');
+    expect(twice.reason).toContain('整池暂停');
+    const explicit = classifyFailure(session({ message: 'Not logged in · Please run /login' }));
+    expect(explicit).toMatchObject({ action: 'swapRoute', authReroute: 'pool', alert: true, rule: 'AU2' });
+    expect(explicit.reason).not.toContain('第一次 401');
+    const cursor = classifyFailure(session({ message: 'Your authentication is invalid.' }));
+    expect(cursor).toMatchObject({ action: 'park', rule: 'AU5', alert: true });
+    expect(cursor.authReroute).toBeUndefined();
+  });
+
+  it('只给结构化 httpStatus=401、原文没有登录语义：也按第一次临时失败换路由，第二次才停池', () => {
+    const structured = session({
+      code: 'agent_error',
+      message: '上游返回了未注明原因的认证响应',
+      httpStatus: 401,
+    });
+    expect(classifyFailure(structured)).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU2',
+      authReroute: 'route',
+      alert: false,
+    });
+    expect(classifyFailure({ ...structured, priorBare401: true })).toMatchObject({
+      action: 'swapRoute',
+      rule: 'AU2',
+      authReroute: 'pool',
+      alert: true,
+    });
   });
 
   it('rework 卫生检查拦下了要公开的内容：退回会话去掉再交；同一处连续被拦两次就停；卫生检查没扫成不推、直接停', () => {
@@ -480,6 +601,13 @@ describe('喂熔断：哪些算路由的失败', () => {
     expect(outcome({ message: 'socket hang up' })).toBe('fail');
     expect(outcome({ message: '503 status code (no body)' })).toBe('fail');
     expect(outcome({ code: 'agent_error', message: 'odd' })).toBe('fail');
+    // one-shot 到点强停（#2759）：原文里的 timeout 是我们的时限，不算路由的错。上游超时照旧算。
+    expect(outcome({ code: 'wall_clock_timeout', message: '引擎叫停（时限到了：one-shot timeout）' })).toBe(
+      'neutral',
+    );
+    expect(outcome({ httpStatus: 504, message: 'HTTP 504 Gateway Timeout' })).toBe('fail');
+    expect(outcome({ message: 'connect ETIMEDOUT 10.0.0.1:443' })).toBe('fail');
+    expect(outcome({ message: 'connection timed out' })).toBe('fail');
     expect(outcome({ code: 'interrupted' })).toBe('neutral');
     expect(outcome({ code: 'incomplete' })).toBe('neutral');
     expect(outcome({ message: 'weekly limit reached' })).toBe('neutral');

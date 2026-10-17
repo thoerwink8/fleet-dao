@@ -21,7 +21,8 @@
 //   GitHub 改 PR 的头是异步的、比推送晚一两秒：读到的头对不上先隔 HEAD_SETTLE_WAIT_MS 再读，读满 HEAD_SETTLE_READS 次还对不上
 //   才算有人推过（#2181：推完 0.1 秒就读到推之前的头，判成「头被别人改了」停下等人两个多小时）。
 // - 读 GitHub 先于一切、在 runColdVerifyForPr 外面做：GitHub 一时不通是 PortError（工作流按失败分流重试），不是「读不到 PR」那种要报人的结论。
-// - 验收会话手上没有仓库的检出：只给一个空的临时目录（归那条路由的会话用户，会话收场就删），diff 全在提示词里。
+// - 验收会话的目录尽量放进 PR 头的完整检出（镜像里 git archive，放不进去就仍是空目录，不因此让验收失败）。
+//   提示词允许在这个检出里读文件。diff 仍在提示词里。第 2 轮的 diff 是上一轮头到现在的头的增量，不是整张 PR。
 //   diff 超过 MAX_DIFF_CHARS：放不下的文件跳过并写明，不截断了假装看全。
 // - 有文本文件 GitHub 的文件接口没给 patch（大文件，#1308）：先用引擎镜像里的 git 补读（基线...头）；补出来超过
 //   MAX_FILE_DIFF_LINES 行就只给摘要（行数、头尾各几十行），diff 里明说「这个文件太大，只给了摘要」；接口和 git 两条路都读不到、
@@ -32,6 +33,11 @@
 // - 叫停（工作流放弃、活动被取消）：ctx.signal 接进会话的看守，会话被杀；随后把取消原样抛出去。
 // - 切号叫停（#59）不是叫停：起会话前（prepareCwd 那一下）登记（sessions.enter），切号把这一次验收停下，回 retry（不贴 failure、不算一轮），
 //   工作流隔一会儿再验，选路照常选到切过去的那个池。
+// - 发版重启引擎（#2848，和动手段 #2238、#2815 同一套，session-handoff.ts）：装了收发目录，一家验的会话交 detach 给 one-shot，
+//   执行方式支持的（命令行那几家、Mirasim）引擎要走时放手（Mirasim 只断 ws、不发 stop），这里交回 detached（贴「在等」不贴 failure、
+//   runs 那一行不收、空目录留着）；工作流带 attach 再调，接回原来那一次、读它的结论照常贴，结局记回原来那一行，空目录这时才删。
+//   接回时引擎又在走：不读 GitHub，当场再交回。接回没给出结论、或没脱开的会话（两家都验）在引擎要走时被停了：不是没过、
+//   不换候选，回 retry 重验一次（VERIFY_RELEASE_RETRY_SECONDS），不算一轮。放手 HANDOFF_TTL_MS 没人接回的照孤儿收（orphan-reap.ts）。
 // - runs 里这一次验收记到这张单名下（#216）：tasks.id、单号、工作流编号经单子那一样（spec）交给 invokeVerifier，PR 号、分支
 //   它本来就有；验收不分档，不带派工档。
 // - 按族选路时给这一次验收预占池的名额（#757，pickRoute 的 reserve）：开跑那一行写进去时换掉；挑中了又没用上的（选路交回的
@@ -45,19 +51,25 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
-import { runColdVerifyForPr } from '../cold-verify-run.ts';
+import { checkoutPrHead, incrementalDiffAtHead, runColdVerifyForPr } from '../cold-verify-run.ts';
 import { createStatusMemo } from '../cold-verify-status.ts';
 import { type PickRouteInput, type PickRouteResult, type PortContext, PortError } from '../ports.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
 import { type OneShotDeps, OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
 import {
+  type ColdVerifyAttach,
   type ColdVerifyInput,
   type ColdVerifyResult,
   ROUTE_RETRY_SECONDS,
   SEGMENT_STAGE,
 } from '../task-contract.ts';
 import { judgeUiWork, UI_UNRECOGNIZED_NOTE } from '../ui-work.ts';
-import { FAMILY_ORDER, invokeVerifier } from '../verifier-invoke.ts';
+import {
+  attachVerifier,
+  FAMILY_ORDER,
+  invokeVerifier,
+  type VerifierInvokeOutput,
+} from '../verifier-invoke.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import { mapped } from './mirror.ts';
@@ -89,6 +101,11 @@ export const HEAD_SETTLE_WAIT_MS = 2_000;
 export const VERIFY_ADMISSION_RETRY_SECONDS = 60;
 /** 切号停下了这一次验收（#59），隔多久再验（秒）：切号停派十几秒、切完下一轮探针探过才派得到切过去的池。 */
 export const VERIFY_ORG_SWITCH_RETRY_SECONDS = 30;
+/**
+ * 发版叫停了这一次验收、又没接回（#2848），隔多久重验（秒）：新引擎起来、老引擎排空走掉一般一两分钟，
+ * 早来了选路会回「在停机」再等，不白起会话。
+ */
+export const VERIFY_RELEASE_RETRY_SECONDS = 60;
 /**
  * 同一个 PR 因同一个原因（总开关关着 / 选路在等 / 内存放不下）连续等待时，重试间隔每次翻倍，封顶这么多秒（#2007）。
  * 为什么要涨：总开关关着一关几小时，固定 30 秒一圈就是一小时 120 次；每圈都动工作流、读 GitHub、占选路，白耗。
@@ -139,6 +156,15 @@ export interface ColdVerifyActivityDeps {
    * 不给 = 补不了，这样的文件照旧回 unavailable。
    */
   fileDiff?: FileDiffReader;
+  /**
+   * 第 2 轮的增量 diff（sinceSha..headSha）。不给就用引擎镜像（incrementalDiffAtHead）。
+   * 读不到抛错，这一轮验收失败，不退回整张 PR 的 diff。
+   */
+  rangeDiff?: (args: {
+    sinceSha: string;
+    headSha: string;
+    workflowId: string | undefined;
+  }) => Promise<{ diffText: string; changedFiles: string[] }>;
   now?: () => Date;
   /** 以下测试用。 */
   /** 头对不上时两次读之间怎么等（默认真等 HEAD_SETTLE_WAIT_MS）。 */
@@ -348,6 +374,41 @@ interface Seen {
   orgSwitch?: boolean;
   /** 一个验收模型都派不出（#1731）：过一会儿重来。 */
   noModel?: boolean;
+  /** 引擎要走了，验收会话脱开接着跑（#2848）：接回要的东西。 */
+  detached?: NonNullable<VerifierInvokeOutput['detached']>;
+  /** 发版叫停了这一次验收、又没接回（#2848）：原因。重验一次，不算没过。 */
+  lost?: string;
+}
+
+/** 工作流交来的接回单 → verifier-invoke 认的形状（族认不出就抛：交回时就是从那里来的，对不上是状态乱了）。 */
+function verifierAttachOf(a: ColdVerifyAttach): NonNullable<VerifierInvokeOutput['detached']> {
+  const family = FAMILY_ORDER.find((f) => f === a.family);
+  if (family === undefined) throw new Error(`接回的验收会话的族认不出：${a.family}`);
+  return {
+    runId: a.runId,
+    startedAt: a.startedAt,
+    family,
+    modelId: a.modelId,
+    routeId: a.routeId,
+    channel: a.poolId,
+    ...(a.routeWhy !== undefined ? { routeWhy: a.routeWhy } : {}),
+    cwd: a.cwd,
+  };
+}
+
+/** verifier-invoke 交回的放手 → 交给工作流的接回单（这里的 channel 就是池，见 chooseModelForFamily）。路由、池没有就接不回。 */
+function coldVerifyAttachOf(d: NonNullable<VerifierInvokeOutput['detached']>): ColdVerifyAttach | undefined {
+  if (d.routeId === undefined || d.channel === undefined) return undefined;
+  return {
+    runId: d.runId,
+    startedAt: d.startedAt,
+    family: d.family,
+    modelId: d.modelId,
+    routeId: d.routeId,
+    poolId: d.channel,
+    ...(d.routeWhy !== undefined ? { routeWhy: d.routeWhy } : {}),
+    cwd: d.cwd,
+  };
 }
 
 export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<EngineTasks['coldVerify']> {
@@ -384,6 +445,14 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const repo = refOf(input.repo);
     const { prNumber, round } = input;
     const prKey = `${repo.owner}/${repo.name}#${prNumber}`.toLowerCase();
+    const sessionIo = deps.spawner.handoff;
+    // 接回时引擎又在走（发版连着发）：不碰会话、不读 GitHub，当场再交回，等下一个引擎（#2848，和动手段一样）
+    if (input.attach && sessionIo?.signal.aborted) {
+      return { pass: false, problems: [], round, detached: input.attach };
+    }
+    // 引擎要走了（收到停机信号）：这时没跑完的验收会话是发版叫停的，不是没验成（#2848）
+    const released = (): string | undefined =>
+      sessionIo?.signal.aborted ? '发版叫停了这一次验收（引擎要走了）' : undefined;
 
     // 1. 读 GitHub（先于一切、在 runColdVerifyForPr 外面）：不通是 PortError，工作流按失败分流重试。
     // 头对不上先等 GitHub 把刚推的头换上去再读（见文件头）；文件也要在头对上之后读，不然拿到的是推之前的 diff。
@@ -473,7 +542,12 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     const oneShotFor = (ticket?: OneShotTicket): OneShotDeps => ({
       spawn: (cmd) => {
         ticket?.running();
-        return spawn({ ...cmd, signal: AbortSignal.any([cmd.signal, ctx.signal]) });
+        return spawn({
+          ...cmd,
+          signal: AbortSignal.any([cmd.signal, ctx.signal]),
+          // 脱开引擎跑的（#2848）：交给驱动之前从发布排空的在途清单里撤掉，到截止也不停它（引擎走时放手）
+          ...(cmd.detach ? { detach: { ...cmd.detach, detachable: () => ticket?.detachable() } } : {}),
+        });
       },
       ...(deps.memoryAdmission ? { memoryAdmission: deps.memoryAdmission } : {}),
       tmpDir: deps.runsDir,
@@ -482,6 +556,19 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       ...(ticket ? { stop: ticket.signal } : {}),
     });
     const oneShot = oneShotFor();
+    // 接回（#2848）：登记照原来那一次的池（切号照样停得下它），带 attach（排空、总开关关着都不预先叫停，会话早就在跑）
+    const attach = input.attach;
+    let attachTicket: OneShotTicket | undefined;
+    if (attach && deps.sessions) {
+      attachTicket = deps.sessions.enter({
+        poolId: attach.poolId,
+        stage: SEGMENT_STAGE.verify,
+        taskId: input.taskId,
+        attach: true,
+      });
+      attachTicket.attempt(attach.runId);
+      tickets.set(attach.family, attachTicket);
+    }
 
     const retryFor = (reason: string): NonNullable<ColdVerifyResult['retry']> => {
       // 切号只停十几秒，不涨间隔（也不动连续次数的记账）
@@ -526,6 +613,15 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             return { head: input.headSha, baseSha: input.baseSha, branch: input.branch, body: pull.body };
           },
           diff: async () => {
+            if (input.recheck) {
+              const workflowId = ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber);
+              const read = deps.rangeDiff ?? incrementalDiffAtHead;
+              return read({
+                sinceSha: input.recheck.sinceSha,
+                headSha: input.headSha,
+                workflowId,
+              });
+            }
             const { fileDiff } = deps;
             const complete = await fillMissingPatches(
               files,
@@ -554,13 +650,47 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               what: input.what,
               howToFinish: input.howToFinish,
               ...(input.testOutput === undefined ? {} : { testOutput: input.testOutput }),
+              ...(input.recheck === undefined
+                ? {}
+                : {
+                    recheck: {
+                      failedCriteria: input.recheck.failedCriteria,
+                      priorProblems: input.recheck.priorProblems,
+                    },
+                  }),
             };
           },
           authorFamilies: async () => input.authorFamilies,
         },
         invoke: async (verifierInput, verifierDeps) => {
           try {
-            return await invokeVerifier(verifierInput, verifierDeps);
+            if (attach) {
+              // 接回（#2848）：不拉 diff、不选路、不起会话，接回原来那一次、读它的结论
+              return await attachVerifier(
+                {
+                  attach: verifierAttachOf(attach),
+                  round,
+                  taskId: verifierInput.taskId,
+                  issueNumber: verifierInput.issueNumber,
+                  ...(verifierInput.workflowId !== undefined ? { workflowId: verifierInput.workflowId } : {}),
+                  prNumber,
+                  branch: input.branch,
+                },
+                {
+                  oneShot: oneShotFor(attachTicket),
+                  ...(verifierDeps.timeoutMinutes !== undefined
+                    ? { timeoutMinutes: verifierDeps.timeoutMinutes }
+                    : {}),
+                  released,
+                },
+              );
+            }
+            // 装了收发目录（生产）：一家验的会话脱开引擎跑，执行方式支持的发版时放手、新引擎接回（#2848）
+            return await invokeVerifier(verifierInput, {
+              ...verifierDeps,
+              ...(sessionIo ? { detach: true } : {}),
+              released,
+            });
           } catch (error) {
             if (error instanceof PortError && error.retryable) seen.transient = error;
             // 开跑那一行写不进 runs（#157）：会话没起，库一时不通，过一会儿再验（不是「验收做不出来」）
@@ -612,6 +742,18 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           }
           const { user } = await resolveSegmentRoute(deps.spawner, picked.routeId);
           const dir = deps.spawner.trees.tmpFor(`verify-${newRunId()}`);
+          // 放得进 PR 头的完整检出就放；镜像没有、提交不在，会话仍起，提示词里的材料还在。
+          try {
+            await checkoutPrHead(
+              dir,
+              input.headSha,
+              ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
+            );
+          } catch (error) {
+            log('验收会话没有放进 PR 头的完整检出（仍可看提示词里的材料）', {
+              error: errMessage(error),
+            });
+          }
           await deps.spawner.trees.adopt(dir, user);
           return {
             cwd: dir,
@@ -636,6 +778,16 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
         round,
         timeoutMinutes: deps.timeoutMinutes ?? VERIFY_MINUTES,
         waitReason: (verdict) => {
+          // 脱开引擎跑着（#2848）：没有结论，贴「在等」不贴 failure，交回工作流带 attach 再来
+          if (verdict.detached) {
+            seen.detached = verdict.detached;
+            return '引擎在换版本：验收会话脱开引擎接着跑，等新引擎接回';
+          }
+          // 发版叫停了、又没接回（#2848）：不是没过，重验一次
+          if (verdict.lostOnRelease) {
+            seen.lost = verdict.lostOnRelease;
+            return `${verdict.lostOnRelease.slice(0, 200)}；没接回，重验一次`;
+          }
           if (verdict.session?.outcome === 'org_switch') {
             seen.orgSwitch = true;
             return '切号：这一次验收先停下，切完重验';
@@ -660,6 +812,15 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     } finally {
       clearInterval(beat);
       for (const t of tickets.values()) t.leave();
+      // 接回的会话收场了（没再放手）：它的空目录这时才删（放手时留给接回的那个引擎）
+      if (attach && !seen.detached) {
+        await deps.spawner.trees.remove(attach.cwd).catch((error: unknown) => {
+          log('接回的验收会话的空目录没删掉（引擎下次起来时的清理会收）', {
+            dir: attach.cwd,
+            error: errMessage(error),
+          });
+        });
+      }
       for (const reservationId of reservations) {
         await deps.reservations.release(reservationId).catch((error: unknown) => {
           log('选路时给验收预占的池的名额没放掉（最多占到预占过期，到点自己不算）', {
@@ -678,6 +839,24 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     if (run.wait === undefined || run.verdict?.upstreamRetry !== undefined) backoff.delete(prKey);
 
     // 2. 把结局整理成工作流要的形状
+    // 脱开引擎跑着（#2848）：交回接回要的东西；路由、池记不全的接不回，按「发版叫停又没接回」重验一次
+    if (seen.detached) {
+      const back = coldVerifyAttachOf(seen.detached);
+      if (back) return { pass: false, problems: [], round, detached: back };
+      seen.lost = '验收会话脱开了，可路由或池没记下、接不回';
+    }
+    if (seen.lost !== undefined) {
+      return {
+        pass: false,
+        problems: [],
+        round,
+        retry: {
+          wait: 'slot',
+          reason: run.wait ?? `${seen.lost}；没接回，重验一次`,
+          afterSeconds: VERIFY_RELEASE_RETRY_SECONDS,
+        },
+      };
+    }
     if (run.sourceProblem !== undefined) {
       if (seen.headMoved !== undefined)
         return { pass: false, problems: [], round, headMoved: seen.headMoved };

@@ -4,7 +4,7 @@
 // 少了任何一条（尤其「机器核对」）Haiku 改错了没人发现，整个放宽的前提就没了；钉的是「恰好三条、各管一件」这个结构，
 // 不钉措辞，三条里换说法不红。
 // 钉这几处：
-// 1. agents/skills/commander/SKILL.md 里写着给工人传 model: "haiku" 的那一段，下面紧跟的编号条目恰好三条，
+// 1. agents/subagents/README.md 里写着给工人传 model: "haiku" 的那一段，下面紧跟的编号条目恰好三条，
 //    分别管：窄（改动范围）、机器核对（派前定好的测试或命令）、规矩写全（规则和边界写进交代）。多一条、少一条、
 //    两条管同一件、哪条拿掉都红。
 // 2. Haiku 档的两个角色：斥候 Explore 钉 claude-haiku-5-5；它和窄改动时降到 Haiku 的工人 general-purpose，effort 都不低于
@@ -17,6 +17,8 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const read = (rel: string) => readFileSync(`${ROOT}${rel}`, 'utf8').replace(/\r\n/g, '\n');
 
 const SKILL = read('agents/skills/commander/SKILL.md');
+// 三条的出处是 agents/subagents/README.md（技能里不再抄一份，见 subagent-readme.rules.test.ts）
+const README = read('agents/subagents/README.md');
 const DEFS = {
   Explore: read('agents/subagents/Explore.md'),
   'general-purpose': read('agents/subagents/general-purpose.md'),
@@ -29,11 +31,11 @@ const CONDITIONS: ReadonlyArray<readonly [string, RegExp]> = [
   ['规矩写全', /写全/],
 ];
 
-/** 从 SKILL.md 里找给工人传 model: "haiku" 的那一行，取它下面紧跟的编号条目（缩进的 `1. …`）；找不到明确报错 */
+/** 从 README.md 里找给工人传 model: "haiku" 的那一行，取它下面紧跟的编号条目（缩进的 `1. …`）；找不到明确报错 */
 function narrowItems(text: string): string[] {
   const lines = text.split('\n');
   const at = lines.findIndex((l) => l.includes('model: "haiku"') && l.includes('缺一不可'));
-  if (at < 0) throw new Error('SKILL.md 里找不到写着 model: "haiku" 和「缺一不可」的那一行');
+  if (at < 0) throw new Error('README.md 里找不到写着 model: "haiku" 和「缺一不可」的那一行');
   const items: string[] = [];
   for (const line of lines.slice(at + 1)) {
     const m = /^\s+\d+\.\s+(.*)$/.exec(line);
@@ -123,7 +125,7 @@ describe('规矩：简单的活降到 Haiku 5.5，窄改动编码三条缺一不
   });
 
   it('指挥官技能里窄改动编码恰好三条：窄、机器核对、规矩写全', () => {
-    expect(narrowProblems(narrowItems(SKILL))).toEqual([]);
+    expect(narrowProblems(narrowItems(README))).toEqual([]);
   });
 
   it('Haiku 档：Explore 钉 claude-haiku-5-5；Explore 和降档的 general-purpose 的 effort 都不低于 medium', () => {
@@ -131,22 +133,22 @@ describe('规矩：简单的活降到 Haiku 5.5，窄改动编码三条缺一不
   });
 
   it('【故意造出的失败】拿掉「机器核对」那条：查得出来', () => {
-    const items = narrowItems(SKILL);
+    const items = narrowItems(README);
     const without = items.filter((t) => !/机器核对/.test(t));
-    expect(without.length, 'SKILL.md 里没有「机器核对」那条，这条失败造不出来').toBe(items.length - 1);
+    expect(without.length, 'README.md 里没有「机器核对」那条，这条失败造不出来').toBe(items.length - 1);
     expect(narrowProblems(without)).toContain('缺「机器核对」那一条');
     // 整段文字里删掉那一行，也要红
-    const line = SKILL.split('\n').find((l) => /^\s+\d+\.\s/.test(l) && /机器核对/.test(l));
+    const line = README.split('\n').find((l) => /^\s+\d+\.\s/.test(l) && /机器核对/.test(l));
     expect(line).toBeDefined();
-    expect(narrowProblems(narrowItems(SKILL.replace(`${line}\n`, '')))).not.toEqual([]);
+    expect(narrowProblems(narrowItems(README.replace(`${line}\n`, '')))).not.toEqual([]);
   });
 
   it('【故意造出的失败】多一条、两条管同一件、一条管几件、整段没了：都查得出来', () => {
-    const items = narrowItems(SKILL);
+    const items = narrowItems(README);
     expect(narrowProblems([...items, '再加一条：跑得快'])).not.toEqual([]);
     expect(narrowProblems([items[0] ?? '', items[0] ?? '', items[2] ?? ''])).not.toEqual([]);
     expect(narrowProblems(['窄、机器核对、规矩写全都要'])).not.toEqual([]);
-    expect(() => narrowItems(SKILL.replaceAll('缺一不可', ''))).toThrow(/找不到/);
+    expect(() => narrowItems(README.replaceAll('缺一不可', ''))).toThrow(/找不到/);
   });
 
   it('【故意造出的失败】effort 写成 low、没写，Explore 换成别名或旧版：都查得出来', () => {

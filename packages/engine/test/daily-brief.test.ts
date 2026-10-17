@@ -5,6 +5,8 @@ import {
   type BriefPull,
   type DailyBriefStatus,
   type ExecutorLineStat,
+  type FlowGroupStat,
+  type FlowModeHealth,
   type PipelineHealth,
   ROUND_OUTCOMES,
   type ScheduleResult,
@@ -16,6 +18,7 @@ import {
   DAILY_BRIEF_JOB,
   type DailyBriefDeps,
   DailyBriefFailedError,
+  flowModeLines,
   liveAt,
   liveSwitches,
   median,
@@ -611,5 +614,125 @@ describe('watchDailyBrief（看门狗：今天的简报送到没）', () => {
     expect(r.problems[0]).toContain('connection refused');
     expect(a.resolved).toEqual([]);
     expect(a.raised).toEqual([]);
+  });
+});
+
+describe('流程健康：两种流程对照（决定 0105）', () => {
+  const group = (mode: 'full' | 'three', over: Partial<FlowGroupStat> = {}): FlowGroupStat => ({
+    mode,
+    tasks: 0,
+    merged: 0,
+    successRate: null,
+    wilson: null,
+    durationMedianMin: null,
+    durationP90Min: null,
+    equivalentPerMerged: null,
+    rawTokensPerMerged: null,
+    runsTokenUnread: 0,
+    ...over,
+  });
+  const health = (over: Partial<FlowModeHealth> = {}): FlowModeHealth => ({
+    to: new Date('2026-10-14T16:00:00Z'),
+    full: group('full'),
+    three: group('three'),
+    enough: false,
+    verdict: null,
+    ...over,
+  });
+
+  it('没数：两栏写「—」不写 0，写「还不够判（全程 0 / 三段 0）」', () => {
+    const lines = flowModeLines(health());
+    expect(lines).toContain('还不够判（全程 0 / 三段 0）');
+    expect(lines.join('\n')).toContain('· 全程：0 单，合并 0；成功率 —；时长中位 —、p90 —；每合并单 —');
+    expect(lines.join('\n')).not.toContain('非劣效');
+  });
+
+  it('样本不够：数照写，不出差值和止损，写「还不够判（全程 N / 三段 M）」', () => {
+    const lines = flowModeLines(
+      health({
+        full: group('full', {
+          tasks: 10,
+          merged: 6,
+          successRate: 0.6,
+          wilson: { low: 0.31, high: 0.83 },
+          durationMedianMin: 42,
+          durationP90Min: 120,
+          equivalentPerMerged: 12_000,
+          rawTokensPerMerged: 16_000,
+        }),
+        three: group('three', {
+          tasks: 14,
+          merged: 9,
+          successRate: 9 / 14,
+          wilson: { low: 0.39, high: 0.84 },
+        }),
+      }),
+    );
+    const text = lines.join('\n');
+    expect(text).toContain(
+      '· 全程：10 单，合并 6；成功率 60%（Wilson 95% 区间 31%–83%）；时长中位 42 分钟、p90 120 分钟；每合并单 输入当量 12k',
+    );
+    // #2859：每合并单按输入当量给，原始四样相加另列
+    expect(text).toContain('每合并单 输入当量 12k（原始四样相加 16k）');
+    expect(text).not.toContain('折算');
+    expect(lines).toContain('还不够判（全程 10 / 三段 14）');
+    expect(text).not.toContain('成功率差');
+  });
+
+  it('够判：写差值、非劣效、成本倍数和止损', () => {
+    const lines = flowModeLines(
+      health({
+        enough: true,
+        full: group('full', {
+          tasks: 30,
+          merged: 12,
+          successRate: 0.4,
+          wilson: { low: 0.25, high: 0.58 },
+          equivalentPerMerged: 50_000,
+        }),
+        three: group('three', {
+          tasks: 30,
+          merged: 24,
+          successRate: 0.8,
+          wilson: { low: 0.63, high: 0.9 },
+          equivalentPerMerged: 5000,
+        }),
+        verdict: {
+          diff: { diff: -0.4, low: -0.6, high: -0.17 },
+          worse90: { diff: -0.4, low: -0.57, high: -0.2 },
+          noninferior: false,
+          effectStop: true,
+          costRatio: 10,
+          costStop: true,
+        },
+      }),
+    );
+    const text = lines.join('\n');
+    expect(text).not.toContain('还不够判');
+    expect(text).toContain(
+      '成功率差（全程减三段）-40.0 点，95% 区间 -60.0 点 到 -17.0 点：下界没过 −5 点，非劣效还没成立',
+    );
+    expect(text).toContain('全程每合并单输入当量是三段的 10.00 倍，超过 2 倍，触发成本类止损');
+    expect(text).toContain('触发效果类止损');
+  });
+
+  it('接进简报：没接这一栏的不写；读不到写「没查成」、这一轮记 partial', async () => {
+    const plain = makeDeps();
+    await runDailyBriefJob(plain.deps);
+    expect(plain.published[0]?.body ?? '').not.toContain('两种流程对照');
+    const shown = makeDeps({ flowModeHealth: async () => health() });
+    const ok = await runDailyBriefJob(shown.deps);
+    expect(ok.outcome).toBe('ok');
+    expect(shown.published[0]?.body ?? '').toContain('还不够判（全程 0 / 三段 0）');
+    const broken = makeDeps({
+      flowModeHealth: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    const bad = await runDailyBriefJob(broken.deps);
+    expect(bad.outcome).toBe('partial');
+    expect(broken.published[0]?.body ?? '').toContain(
+      '两种流程对照（决定 0105，自开跑累计）：没查成（读两种流程对照：库连不上）',
+    );
   });
 });

@@ -16,7 +16,7 @@
 # 旧系统的服务、端口、文件一概不动。端口表、怎么跑、怎么看健康、怎么回滚：docs/ops.md。
 #   bash deploy/france.sh           装：缺的补上，已有的不动（整套，含人工档）
 #   bash deploy/france.sh --check   只读回和自检，不改任何东西
-#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、发版接活脚本副本（#2728）、fleet-agents.slice、清掉老机器上已删的演示版单元和脚本（#1223）、
+#   bash deploy/france.sh --auto-tier  只装「自动档」：自动发布脚本副本和单元、发版接活脚本副本（#2728）、fleet-agents.slice、root ssh 会话的内存上限 user-0.slice（#2842）、清掉老机器上已删的演示版单元和脚本（#1223）、
 #                                   Mirasim 常驻单元（#1274；服务端本体不在记待配，单元文件内容变了才重启）
 #                                   （不碰防火墙、sudoers、用户、/etc/fleet-dao 里的钥匙和环境文件；幂等）。自动发布每发完一版以 root
 #                                   顺带跑它（docs/ops.md 第九节「装机层」）；规矩同步不在这里，由自动发布的规矩那一步做（同一条 agents-sync）。
@@ -140,6 +140,7 @@ SSHD_SESSION_USER_DROPIN=/etc/ssh/sshd_config.d/51-fleet-dao-session-user.conf
 # 4315、4317（docs/reference/deploy.md §1.2）。引擎自己认端口靠现读 local-<端口>.token 的文件名，不认这个常量。
 MIRASIM_SESSION_PORT=4318
 MIRASIM_SESSION_UNIT_FILE=/etc/systemd/system/fleet-mirasim-session.service
+MIRASIM_RETIRED_FILE=$DEPLOY_DIR/france/mirasim-retired
 # 它的健康检查（#1676）：定时器每 2 分钟读 /api/health，连续 3 次不是 ok:true 就重启它（deploy/lib/mirasim-liveness.sh）。
 # 有会话在跑且这一下是超时：只记不重启（#2186，忙的时候超时会把正在跑的会话杀掉）。
 # 脚本放 /usr/local/lib 下的副本（全链归 root），不从检出直接跑
@@ -619,6 +620,17 @@ setup_slice() {
   ensure_unit_running fleet-agents.slice 0
 }
 
+# root 的 ssh 会话（user-0.slice）的内存上限（#2842）：内容在 deploy/france/user-0-slice-memory.conf（MemoryHigh=2G、MemoryMax=3G）。
+# 自动档装；内容一样不写、不 daemon-reload。发版和自动发布都跑在 systemd 单元里（不在这个 slice 里），不受它限。
+USER_SLICE_DROPIN_DIR=/etc/systemd/system/user-0.slice.d
+USER_SLICE_DROPIN=$USER_SLICE_DROPIN_DIR/50-fleet-dao-memory.conf
+setup_user_slice_cap() {
+  step "root 的 ssh 会话内存上限 user-0.slice（MemoryHigh=2G、MemoryMax=3G）"
+  ensure_dir "$USER_SLICE_DROPIN_DIR" root:root 755 || return 0
+  put_file "$USER_SLICE_DROPIN" root:root 644 "$(<"$DEPLOY_DIR/france/user-0-slice-memory.conf")"
+  if ((WROTE)); then systemctl daemon-reload; fi
+}
+
 pnpm_want() { /usr/bin/node -p 'require(process.argv[1]).packageManager' "$DEPLOY_DIR/../package.json"; }
 pnpm_have() { as_user fleet env COREPACK_ENABLE_DOWNLOAD_PROMPT=0 pnpm --version 2>/dev/null || true; }
 
@@ -704,9 +716,29 @@ install_mirasim_stream_guard() {
   put_file "$MIRASIM_STREAM_GUARD" root:root 644 "$(<"$DEPLOY_DIR/lib/mirasim-stream-guard.cjs")"
 }
 
+mirasim_retired() { [[ -e "$MIRASIM_RETIRED_FILE" ]]; }
+
+retire_mirasim_units() {
+  local unit enabled active
+  for unit in fleet-mirasim-session.service fleet-mirasim-liveness.timer; do
+    enabled=$(systemctl is-enabled "$unit" 2>/dev/null) || enabled=""
+    active=$(systemctl is-active "$unit" 2>/dev/null) || active=""
+    if [[ "$enabled" != enabled && "$active" != active ]]; then continue; fi
+    if systemctl disable --now "$unit" >/dev/null 2>&1; then
+      changed "停掉并取消自启 $unit（Mirasim 已退役）"
+    else
+      red "$unit 停不掉或取消自启没成（Mirasim 已退役）：systemctl status $unit 看现场"
+    fi
+  done
+}
+
 setup_mirasim_session() {
   step "会话用户 ${SESSION_USERS[0]} 的 Mirasim 服务（本地模式常驻，端口 $MIRASIM_SESSION_PORT；deploy/france/fleet-mirasim-session.service）"
   local u=${SESSION_USERS[0]} unit_changed guard_changed=0
+  if mirasim_retired; then
+    retire_mirasim_units
+    return 0
+  fi
   if ! id "$u" >/dev/null 2>&1; then
     pending "$u 这个用户还没有，Mirasim 常驻单元没装（建了再跑一遍）"
     return 0
@@ -733,6 +765,10 @@ setup_mirasim_session() {
 # 会话 Mirasim 没装时这两个单元也不装。
 setup_mirasim_liveness() { # 会话用户
   local u=$1 f unit_changed=0
+  if mirasim_retired; then
+    retire_mirasim_units
+    return 0
+  fi
   ensure_dir /usr/local/lib/fleet-dao root:root 755
   put_file "$MIRASIM_LIVENESS_SCRIPT" root:root 755 "$(<"$DEPLOY_DIR/lib/mirasim-liveness.sh")"
   for f in "${MIRASIM_LIVENESS_UNITS[@]}"; do
@@ -1031,6 +1067,7 @@ readback() {
   readback_postgres
   readback_temporal
   readback_slice
+  readback_user_slice_cap
   readback_session_users
   readback_pilot
   readback_agent_rules
@@ -1449,6 +1486,21 @@ readback_slice() {
   fi
 }
 
+readback_user_slice_cap() {
+  local props
+  if ! cmp -s -- "$USER_SLICE_DROPIN" "$DEPLOY_DIR/france/user-0-slice-memory.conf"; then
+    red "$USER_SLICE_DROPIN 和仓里的不一样（或没装）"
+    return 0
+  fi
+  props=$(systemctl show user-0.slice -p MemoryHigh,MemoryMax 2>/dev/null | sort | tr '\n' ' ')
+  # 2G = 2147483648，3G = 3221225472
+  if [[ "$props" == "MemoryHigh=2147483648 MemoryMax=3221225472 " ]]; then
+    ok "user-0.slice：MemoryHigh=2G MemoryMax=3G"
+  else
+    red "user-0.slice 生效的上限不对：${props:-读不到}"
+  fi
+}
+
 readback_pnpm() {
   local want have
   want=$(pnpm_want)
@@ -1523,6 +1575,10 @@ readback_grok() {
 # check_mirasim 认（引擎连哪个端口看的是这份令牌，不是这个单元）。
 readback_mirasim() {
   local u
+  if mirasim_retired; then
+    ok "Mirasim 已退役，不查"
+    return 0
+  fi
   for u in "${SESSION_USERS[@]}"; do
     if ! id "$u" >/dev/null 2>&1; then
       pending "$u 这个用户还没有，Mirasim 服务没查"
@@ -1539,6 +1595,10 @@ readback_mirasim() {
 # 不然 deploy_lag 会报 tier_failed，整份 /healthz 跟着 503。一直不回话由 fleet-mirasim-liveness 重启。
 readback_mirasim_session_unit() {
   local u=${SESSION_USERS[0]}
+  if mirasim_retired; then
+    ok "Mirasim 已退役，不查"
+    return 0
+  fi
   if ! id "$u" >/dev/null 2>&1; then
     pending "$u 这个用户还没有，Mirasim 常驻单元没查"
     return 0
@@ -1588,6 +1648,7 @@ readback_service_home() {
 # 每一步都幂等（内容一样就什么都不动）。前提是整套装过一遍了（会话用户、/srv 下的目录都在）；没装过的机器这里判红。
 setup_auto_tier() {
   setup_slice
+  setup_user_slice_cap
   retire_old_units
   setup_auto_release
   setup_release_request_scripts
@@ -1601,6 +1662,7 @@ setup_auto_tier() {
 readback_auto_tier() {
   step "读回（自动档）"
   readback_slice
+  readback_user_slice_cap
   readback_retired_units
   local u f
   if [[ "$(systemctl is-active fleet-auto-release.timer 2>/dev/null)" != active ]]; then red "fleet-auto-release.timer 没在跑"; fi
@@ -1646,6 +1708,7 @@ main() {
     setup_postgres
     setup_temporal
     setup_slice
+    setup_user_slice_cap
     setup_sudoers
     setup_firewall
     setup_sshd_hardening

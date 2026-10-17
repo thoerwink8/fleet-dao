@@ -7,7 +7,8 @@ import {
   readingsFromRelayFrame,
   windowsForModel,
 } from '../../src/quota/index.ts';
-import { mirasimTimeoutKind } from '../../src/quota/readers/mirasim.ts';
+import { MIRASIM_RETRY_BACKOFF_MS } from '../../src/quota/read-all.ts';
+import { MIRASIM_QUOTA_ATTEMPT_MS, mirasimTimeoutKind } from '../../src/quota/readers/mirasim.ts';
 import { blockNetwork, FakeSocket, fakeDeps, fakeFiles, fixtureJson } from './helpers.ts';
 
 blockNetwork();
@@ -262,6 +263,7 @@ describe('Mirasim 中转读取器：回环 WebSocket', () => {
     const report = await readAllQuotas(
       { pools: [{ ...pool, timeoutMs: 50 }] },
       fakeDeps({
+        retryDelayMs: 0,
         readFile: fakeFiles({ [tokenPath]: 'tok' }),
         openWebSocket: (url) => new FakeSocket(url, () => []),
       }),
@@ -304,8 +306,9 @@ function bridgeHangs(): Promise<MirasimWire> {
   });
 }
 
-function bridgeDeps(connectMirasim: () => Promise<MirasimWire>): QuotaDeps {
+function bridgeDeps(connectMirasim: () => Promise<MirasimWire>, retryDelayMs = 0): QuotaDeps {
   return fakeDeps({
+    retryDelayMs,
     asUser: {
       readers: ['mirasim-relay'],
       readFile: async () => {
@@ -394,6 +397,45 @@ describe('Mirasim 中转：经桥接读，超时本轮重试一次，失败原�
       }),
     );
     expect(connects).toBe(2);
+    const r = report.results[0];
+    expect(r?.ok).toBe(true);
+    expect(r?.ok && r.notes.join()).toContain('本轮重试一次读成');
+  });
+
+  it('堵住比这一次的整体时限短：一次就读成，不写成整体时限用完', async () => {
+    let connects = 0;
+    const report = await readAllQuotas(
+      { pools: [{ ...bridgePool, timeoutMs: 80, relayWaitMs: 40 }] },
+      bridgeDeps(
+        () =>
+          new Promise((resolve) => {
+            connects += 1;
+            setTimeout(() => resolve(frameNow(frame0924())), 30);
+          }),
+      ),
+    );
+    expect(connects).toBe(1);
+    const r = report.results[0];
+    expect(r?.ok).toBe(true);
+    expect(r?.ok && r.notes.join()).not.toContain('本轮重试');
+    expect(MIRASIM_QUOTA_ATTEMPT_MS).toBe(90_000);
+  });
+
+  it('整体时限用完后先短退避再重试：第二次连接不跟第一次贴在一起', async () => {
+    const delayMs = 60;
+    const starts: number[] = [];
+    let connects = 0;
+    const report = await readAllQuotas(
+      { pools: [{ ...bridgePool, timeoutMs: 40, relayWaitMs: 20 }] },
+      bridgeDeps(() => {
+        starts.push(Date.now());
+        connects += 1;
+        return connects === 1 ? bridgeHangs() : Promise.resolve(frameNow(frame0924()));
+      }, delayMs),
+    );
+    expect(starts).toHaveLength(2);
+    expect((starts[1] ?? 0) - (starts[0] ?? 0)).toBeGreaterThanOrEqual(delayMs);
+    expect(MIRASIM_RETRY_BACKOFF_MS).toBe(3_000);
     const r = report.results[0];
     expect(r?.ok).toBe(true);
     expect(r?.ok && r.notes.join()).toContain('本轮重试一次读成');

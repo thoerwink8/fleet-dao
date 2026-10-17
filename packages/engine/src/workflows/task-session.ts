@@ -42,6 +42,31 @@
 //   那一睡不写任务行，doing / updated_at 停在这一句，工作流仍 Running、没有新的 runs，拉单把它算进在干活。
 //   新跑的当场停下等人。已经睡在里面的老历史：这一标记重放时为假（不能插在已记下的定时器前面），
 //   叫醒之后走 patched('wall-clock-switch-wake')，下一轮再选不出就停下，不再睡第二觉。
+// - 引擎活动超时（timeout_start_to_close 等，#2824，patched('en1-timeout-redispatch')）：失败分流 EN1 第二次原文一字不差会判挂起。
+//   那一挂不起整单：停掉这一段，避开这条路由按点名再派；同一模型再撞上再避开模型，还撞上才停下等人。没有能派的路由仍挂起。
+//   标了 engineRestarted 的仍原路重试，并按起跑时刻续可接回的会话。老历史没有这个标记，重放时仍把这一挂挂起。
+// - 桥接连 Mirasim 超时（MB1，#2838，patched('mb1-bridge-redispatch')）：失败分流第一次原路重试、第二次判挂起
+//   （「已重试 1 次」或原文一字不差）。那一挂和第一次的原路重试都不起整单：停掉这一段，避开这条路由按点名再派；
+//   同一模型再撞上再避开模型，还撞上、或没有能派的路由，才停下等人。重派时 lastProblem 写成重派那一句，不留「挂起并报警」。
+//   老历史没有这个标记，重放时仍原路重试、次数用完再挂起。
+// - 上游 503 且原文是模型暂时不可用（MU1，patched('model-unavailable-redispatch')）：不原路重试、不钉在这条路由上睡。
+//   停掉这一段，避开这条路由再派；进度和 lastProblem 写成「因 503 换了一条路由」。没有别的能马上派的，或换了还是这一句，
+//   当场停下等人，任务行改成 stalled，写明是为了腾出名额。选路若只剩等，也不进 pauseForRoute 的长睡（那一睡
+//   任务仍是 running、没有开着的会话，占着名额）。老历史没有这个标记，仍按上游出错（UP1）原路重试。
+// - 出在账号池上的停（登录失效、封号、设备被撤销，patched('auth-reroute')）：池照旧暂停并报警，这张单马上回去选路避开这个池。
+//   只凭一次 HTTP 401 不暂停整池，按临时失败换一条路由；同一个池短时间里（BARE_401_WINDOW_MS）第二次 401 才暂停整池。
+//   第一次的时刻记在设置表里，别的任务再撞上同一次窗口也算第二次，不单记在这张单的内存里。
+//   避开之后一条能派的路由都没有，才挂起，原因写「能派的池都停了」。老历史没有这个标记，仍把这张单挂起。
+// - 点名和读回不是同一个模型（#2742）：失败分流 MD3 仍判停下。
+//   #2742 是发版叫停后误续上一段 opus：续会话不比模型，同一 mirasim-relay 池点名 sonnet 仍续上 opus，快照还是
+//   opus[1m]。不是比对串剥错 `[1m]`，不是 #1298 那种名单里没有才换模，也不是 #2797 的叫停本身。
+//   新失败（patched('model-mismatch-redispatch')）不把整张单挂起：停这一段，换同一模型的另一条路由、开新会话
+//   重派一次（清掉 resumeFrom，误续靠开新会话解开）。又对不上才停下等人。这次标题不沿用旧的「挂起并报警」，
+//   看门狗不把它当成旧单叫醒。
+//   已经按旧标题走进挂起的在途单：重放时 model-mismatch-redispatch 为假，必须再走进已经记下的 park
+//   （跳过会 TMPRL1100）。看门狗发 taskContinue 之后，patched('model-mismatch-wake-reroute') 为真，按点名开新会话重派。
+//   主线上先按点名路由重派、历史里已有 patched('model-mismatch-reroute') 的在途单：重放仍走那一条，不改步序。
+//   这一版之前就已经点过继续、并且已经记下后面的选路：醒来这个标记为假，仍清零再选。
 
 import { isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { FailedChannel, PickRouteResult, RouteChoice, Worktree } from '../ports.ts';
@@ -55,10 +80,12 @@ import {
   SEGMENT_MINUTES,
   SEGMENT_STAGE,
   type SegmentEvidence,
+  type TaskSpendResult,
   UI_PURPOSE,
 } from '../task-contract.ts';
 import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
 import { failureOf, iso } from './kit.ts';
+import { decideFlowOnce } from './task-flow.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
@@ -70,13 +97,18 @@ import {
   dispatchProbeLine,
   dispatchProbeStopText,
   EMPTY_DISPATCH_PROBE,
+  EN1_ACTIVITY_TIMEOUT_CODES,
+  failureLooksLikeBare401,
   isDispatchProbePassOnly,
   mergeAvoid,
   NO_AVOID,
   NO_OTHER_FAMILY,
   NO_OTHER_ROUTE,
   PausedInterrupt,
+  POOLS_ALL_HELD,
   patienceStep,
+  poolAuthHoldTitle,
+  poolHoldDedupeKey,
   RELEASE_FAMILY_WAIT,
   RESUME_STARTED_SLACK_MS,
   RepinInterrupt,
@@ -113,10 +145,24 @@ export async function writeSession(
   let failedChannel: FailedChannel | undefined;
   // 这一段已经自动换路由重派过一次（决定 0093）：再判停下就真停下
   let redispatched = false;
+  // model_mismatch 的第一次重派只在同一个模型下找另一条路由，不能因该路由失效而悄悄换成别的模型。
+  let mismatchModel: string | undefined;
   // 有界耐心（决定 0093）：第一次该停下的时刻、歇了几次、一共歇了多少秒（从会话时限里扣）
   let patienceFrom: number | null = null;
   let patienceRounds = 0;
   let patienceWaited = 0;
+  // 账号池上的停（patched('auth-reroute')）：第一次失败才问标记，问过就记住。老历史这一支为假，仍挂起这张单。
+  let authOn = false;
+  /** 已经因登录失效、封号、设备被撤销避开了池：选路一条都没有才挂起。 */
+  let authPoolsDown = false;
+  /** 这张单记下只凭 401 的次数：活动重试用同一个身份，不会把自己数成第二次。 */
+  let bare401Seq = 0;
+  /** 这一次只凭 401 避开的路由：没有别的路由可换时，选路放它再试一次，好凑第二次。 */
+  let bare401RouteId: string | undefined;
+  /** 点名和读回对不上、已经按点名重派过一次的路由（#2742）。同一条再对不上就避开，不在原会话上续。 */
+  const mismatchRetried = new Set<string>();
+  /** 已经因模型对不上避开了路由：选路一条都没有才挂起，不改去等探针。 */
+  let mismatchRoutesDown = false;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
   // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
   const ui: UiJudgement | undefined = patched('ui-work-implement')
@@ -127,7 +173,19 @@ export async function writeSession(
   for (;;) {
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
     await holdForBudget(rt);
-    const picked = await pickRoute(rt, avoid, stick, failedChannel, ui?.uiWork === true);
+    const picked = await pickRoute(
+      rt,
+      avoid,
+      stick,
+      failedChannel,
+      ui?.uiWork === true,
+      authOn && authPoolsDown,
+      authOn ? bare401RouteId : undefined,
+      mismatchModel,
+      mismatchRoutesDown,
+    );
+    mismatchRoutesDown = false;
+    bare401RouteId = undefined;
     failedChannel = undefined;
     const route = picked.route;
     if (picked.probeNote) {
@@ -152,6 +210,8 @@ export async function writeSession(
         : route.family,
     );
     rt.attemptSeq += 1;
+    // 定模式（#2826）：第一次选路之后、第一段动手之前定一次，结果进历史（task-flow.ts）
+    await decideFlowOnce(rt, brief, tier, route);
     // 续会话（决定 0088）：上一段留了要续的记号才问；判一次就清掉
     let resumeSessionId: string | undefined;
     let resumeNote = '';
@@ -199,6 +259,8 @@ export async function writeSession(
         ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
         // 重活先出方案的那一段（#2755）：提示词另说只读、只回方案 JSON
         ...(opts.plan ? { mode: 'plan' as const } : {}),
+        // 全程的单（#2826）：提示词多一节「到合并都归你」。三段、老历史不带
+        ...(rt.flowMode === 'full' ? { flowMode: 'full' as const } : {}),
       };
       // pausable：hard 暂停（#820 片 3）能把这一段取消掉；取消后回到循环头，停在检查点等「继续」，继续了在原树原分支上重跑
       let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });
@@ -250,7 +312,7 @@ export async function writeSession(
       }
       infra = error;
     }
-    const failure = infra
+    let failure = infra
       ? failureOf(infra, 'session:execute')
       : {
           source: 'session:execute',
@@ -258,8 +320,54 @@ export async function writeSession(
           message: evidence?.message ?? '会话没跑成',
           retryable: null,
         };
+    // Temporal 只凭 StartToClose timeout 不知道活动是不是被旧 worker 丢了。
+    // 有旧心跳时比较两个启动时刻；旧心跳被服务端丢掉时，用当前引擎启动时刻和这一段起跑时刻比较。
+    // 两种凭据都不足时保守地按真实超时。
+    if (patched('engine-restart-timeout') && failure.code.toLowerCase().startsWith('timeout_')) {
+      try {
+        const current = await rt.cancellable(() => rt.acts.engineStartedAt({ schemaVersion: 1 }));
+        const currentStartedAt = Date.parse(current.startedAt);
+        const changed =
+          failure.engineStartedAt !== undefined
+            ? current.startedAt !== failure.engineStartedAt
+            : Number.isFinite(currentStartedAt) && currentStartedAt > attemptAt;
+        if (changed) {
+          failure = {
+            ...failure,
+            currentEngineStartedAt: current.startedAt,
+            engineRestarted: true,
+          };
+        }
+      } catch (error) {
+        if (error instanceof Abandoned || isCancellation(error)) throw error;
+        log.warn('超时活动的引擎启动代次没查成，按真实超时处理', {
+          error: failureOf(error, 'engineStartedAt').message,
+        });
+      }
+    }
     // 切号停下的（失败分流 OS1：不算失败、不记账、马上接着干）：选路照常选到切过去的那个池，在原分支上重跑这一段
     if (failure.code === ORG_SWITCH_CODE) interrupted = failure.message;
+    // 写在问分流之前：老历史重放时这一支为假，不多一次记 401 的活动，分流的入参也不带 priorBare401。
+    authOn = patched('auth-reroute');
+    let priorBare401 = false;
+    if (
+      authOn &&
+      failureLooksLikeBare401({
+        code: failure.code,
+        message: failure.message,
+        ...(evidence?.httpStatus !== undefined ? { httpStatus: evidence.httpStatus } : {}),
+      })
+    ) {
+      const seq = bare401Seq;
+      bare401Seq += 1;
+      const noted = await rt.acts.noteBare401({
+        schemaVersion: 1,
+        poolId: route.poolId,
+        now: iso(Date.now()),
+        claim: `${workflowInfo().workflowId}:${route.poolId}:${seq}`,
+      });
+      priorBare401 = noted.repeated;
+    }
     const next = await rt.classify(failure, counters, true, {
       stage: SEGMENT_STAGE.manual,
       route: {
@@ -274,20 +382,64 @@ export async function writeSession(
       ...(evidence?.httpStatus !== undefined ? { httpStatus: evidence.httpStatus } : {}),
       ...(evidence?.exitCode !== undefined ? { exitCode: evidence.exitCode } : {}),
       previousMessage,
+      ...(priorBare401 ? { priorBare401: true as const } : {}),
     });
     // 切号停下的不是这一段的失败：不当「上一次的原文」——既不凑成「和上一次一字不差」，也不打断切号前后两次真失败的比对
     if (failure.code !== ORG_SWITCH_CODE) previousMessage = failure.message;
     rt.status.lastProblem = next.reason;
     counters = bump(counters, next);
+    // 出在账号池上（登录失效、封号、设备被撤销）：不挂起这张单。标记在问分流时已经记下（老历史为假，仍走下面的挂起）。
+    if (authOn && next.authReroute) {
+      stick = undefined;
+      avoid = widen(avoid, route, next.authReroute);
+      previousMessage = undefined;
+      if (next.authReroute === 'pool') {
+        authPoolsDown = true;
+        bare401RouteId = undefined;
+        try {
+          await rt.acts.raiseAlert({
+            taskId: rt.input.taskId,
+            level: 'decision',
+            title: `账号池 ${route.poolId} 整池暂停：${poolAuthHoldTitle(next.rule)}`,
+            detail: next.reason,
+            dedupeKey: poolHoldDedupeKey(route.poolId),
+          });
+        } catch (error) {
+          if (error instanceof Abandoned || isCancellation(error)) throw error;
+          log.warn('整池暂停的提醒没发出去，这张单照旧换池', { poolId: route.poolId, error: String(error) });
+        }
+      } else {
+        bare401RouteId = route.routeId;
+      }
+      await rt.note(next.reason);
+      continue;
+    }
     // 老历史没有这个标记：不问上一段收场没有、不耐心等，照旧
     const patienceOn = patched('route-patience');
-    if (next.action === 'retry') {
+    // 桥接连 Mirasim 超时（#2838）：标记只在 MB1 上打，别的失败重放不多这一下。老历史为假，仍走原来的原路重试 / 挂起。
+    const mb1Redispatch = next.rule === 'MB1' && patched('mb1-bridge-redispatch');
+    // 模型暂时不可用（MU1）：标记只在这条规则上打。老历史重放时记下的规则不是 MU1，不多一次标记。
+    const modelDown = next.rule === 'MU1' && patched('model-unavailable-redispatch');
+    if (next.action === 'retry' && !mb1Redispatch) {
       // 原路再试：还是这条路由（额度要等的，等到清零再来，不算墙钟）
       stick = route.routeId;
       // 总时长到顶第一次：原路续同一个会话（#2244）。有执行编号才问续不续；会话没起成就没有编号，照旧开新会话。
       // 老历史没有这个标记：重放时为假，只钉原路由，不多一次 planSegmentResume。
       if (failure.code.toLowerCase() === 'wall_clock_timeout' && patched('wall-clock-resume-session')) {
         if (failedRunId) rt.resumeFrom = { previous: { runId: failedRunId }, worktreePath: wt.path };
+      }
+      // 活动超时发生在旧引擎（#2824）：原路再试时按起跑时刻续可接回的会话。续不上就开新会话。
+      // 写在 wall-clock 那个标记之后：超时码走不到上面那一支，老历史重放不会多打 wall-clock 的标记。
+      // 没标 engineRestarted 的不在这里续，同因挂起走下面的重派。
+      if (
+        failure.engineRestarted === true &&
+        EN1_ACTIVITY_TIMEOUT_CODES.includes(failure.code.toLowerCase()) &&
+        patched('en1-timeout-redispatch')
+      ) {
+        rt.resumeFrom = {
+          previous: { startedAfter: iso(attemptAt - RESUME_STARTED_SLACK_MS) },
+          worktreePath: wt.path,
+        };
       }
       if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
       await rt.pause(next.wait === 'quota' ? 'quota' : 'retry', next.reason, next.delaySeconds);
@@ -333,18 +485,37 @@ export async function writeSession(
         continue;
       }
       // 被引擎在时限上叫停、总时长到顶、起不来（决定 0093）：先自动换一条路由重派一次，进度里写一行，不停下等人。
+      // 引擎活动超时（EN1 的 timeout_*，#2824）同一条：分流判挂起也不挂整单，停掉这一段再派。
+      // 桥接连 Mirasim 超时（MB1，#2838）也进这里：第一次的原路重试和第二次的挂起都不挂整单。上面的 mb1 标记为真时，
+      // retry 分支被跳过，第一次失败直接落到这一支。
       // 超时、起不来只避开这条路由，同一模型第二次再避开模型；中转欠费避开那个池。都不整族避开（#2261）。
       // 第一次按路由避开之后，同一模型再撞上还可以再自动一次（升到避开模型）。除此之外这一段里只自动一次，再撞上照旧停下。
       // 只有人能修的码不在名单里。老历史没有 auto-redispatch-session，照旧停下；没有 avoid-scope-by-cause，仍避开模型和它那一族。
       const code = failure.code.toLowerCase();
-      const listed = AUTO_REDISPATCH_CODES.includes(code);
+      // 引擎活动超时（#2824）：分流因原文一字不差判的挂起不挂整单。标记只对这几个码打，别的码重放不多这一下。
+      // 写在 auto-redispatch-session 之前：老历史重放时这一支为假，listed 仍只看原来那张表。
+      // MB1 用上面已经打过的标记，这里不再打一次（重放不多一个 marker）。
+      // MU1 同样用上面已经打过的标记。老历史这一支为假，listed 仍只看原来那张表。
+      const listed =
+        AUTO_REDISPATCH_CODES.includes(code) ||
+        (EN1_ACTIVITY_TIMEOUT_CODES.includes(code) && patched('en1-timeout-redispatch')) ||
+        mb1Redispatch ||
+        modelDown;
+      // model_mismatch 是新增的自动换路行为；单独加标记，避免在途任务重放时把原本要报人的失败改成重派。
+      const modelMismatchRedispatch = code === 'model_mismatch' && patched('model-mismatch-redispatch');
+      const eligible = listed && (code !== 'model_mismatch' || modelMismatchRedispatch);
       // 写在 auto-redispatch-session 之前、且 redispatched 为假时短路：老历史重派过一次之后不会多调这个标记。
       const escalate =
-        redispatched && listed && patched('avoid-scope-by-cause') && rt.infraCanEscalate(route, code);
-      if ((escalate || !redispatched) && listed && patched('auto-redispatch-session')) {
+        redispatched && eligible && patched('avoid-scope-by-cause') && rt.infraCanEscalate(route, code);
+      if ((escalate || !redispatched) && eligible && patched('auto-redispatch-session')) {
         if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
         redispatched = true;
         stick = undefined;
+        if (code === 'model_mismatch') {
+          mismatchModel = route.modelId;
+          // 不续上一段。#2742 就是续会话不比模型，同池点名 sonnet 仍接回 opus。
+          rt.resumeFrom = null;
+        }
         // 避让记在这张单上（没提交的避让那一处）：没有别的候选时选路照旧派原来那条，不死等。
         // 老历史没有 avoid-scope-by-cause：重放时为假，仍避开模型（认得出族的连这一族），活动入参和原来一样。
         if (patched('avoid-scope-by-cause')) rt.avoidInfra(route, code);
@@ -361,17 +532,86 @@ export async function writeSession(
           // 只记在内存里，不调活动：下一轮选路若只剩等，不进长睡。已经写过这行、正睡着的老历史重放时也会置上。
           rt.landSwitch = true;
         }
-        await rt.note(
-          carryProgress
-            ? `第 ${rt.round} 轮：${route.modelId} 同一条路由第二次总时长到顶，换一条路由带上进度续一次，不停下等人`
-            : `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`,
-        );
+        const redispatchLine = carryProgress
+          ? `第 ${rt.round} 轮：${route.modelId} 同一条路由第二次总时长到顶，换一条路由带上进度续一次，不停下等人`
+          : modelDown
+            ? `第 ${rt.round} 轮：${route.modelId} 上游 503 模型暂时不可用，换一条可用路由重派，不停下等人`
+            : `第 ${rt.round} 轮：${route.modelId} ${next.reason}（${failure.code}），自动换一条路由重派一次，不停下等人`;
+        // 桥接超时、模型暂时不可用的挂起句（「挂起并报警」）已经写进 lastProblem。重派不是挂起：落库前换成重派这一句。
+        // 老历史标记为假，不改 lastProblem，saveTaskState 的入参和原来一样。
+        if (mb1Redispatch || modelDown) rt.status.lastProblem = redispatchLine;
+        // 下一轮选路若只剩等、或只剩刚才那条：不睡，停下腾出名额。派上了由 landed 清掉。
+        if (modelDown) rt.modelDownLand = true;
+        await rt.note(redispatchLine);
         continue;
       }
-      await rt.park(next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason, failure.message);
+      // 写在挂起之前：已经走进挂起的老历史重放时这一支为假，下一步仍是原来的 park，活动序列不变。
+      // 只在 model_mismatch 上打标记。MB1 走上面的重派，到不了这里，重放不多一个 marker。
+      // 新失败已经由 model-mismatch-redispatch 换过同一模型的另一条路由：这里不再打标记，第二次直接挂起。
+      // 主线上已经记下 model-mismatch-reroute 的在途单，重放时上一支为假，仍走下面这一条。
+      if (code === 'model_mismatch' && !modelMismatchRedispatch && patched('model-mismatch-reroute')) {
+        if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
+        counters = ZERO;
+        previousMessage = undefined;
+        if (!mismatchRetried.has(route.routeId)) {
+          mismatchRetried.add(route.routeId);
+          // 钉住点名的这条，开新会话。不写 resumeFrom：#2742 就是续会话不比模型，把上一段 opus 接了回来。
+          stick = route.routeId;
+          const line = `第 ${rt.round} 轮：${route.modelId} 回话的模型不是点名的，停掉这一段，按点名路由重派一次（开新会话，不续上一段），不停下等人`;
+          rt.status.lastProblem = line;
+          await rt.note(line);
+          continue;
+        }
+        stick = undefined;
+        avoid = widen(avoid, route, 'route');
+        mismatchRoutesDown = true;
+        const line = `第 ${rt.round} 轮：${route.modelId} 这条路由再次读回的不是点名的模型，避开它再选；还有能派的就继续`;
+        rt.status.lastProblem = line;
+        await rt.note(line);
+        continue;
+      }
+      await rt.park(
+        code === 'model_mismatch' && modelMismatchRedispatch
+          ? MODEL_MISMATCH_AGAIN_STALL
+          : modelDown
+            ? MODEL_UNAVAILABLE_STALL
+            : mb1Redispatch && next.action !== 'park'
+              ? '桥接连 Mirasim 超时：同一原因连败到重派预算，停下等人'
+              : next.humanFix
+                ? `${next.reason}；要人：${next.humanFix}`
+                : next.reason,
+        modelDown ? modelUnavailableStallDetail(failure.message) : failure.message,
+      );
+      // 已经按旧标题挂上的在途单：上面两支重放都为假，所以走进了这次 park。
+      // 人点「继续」或看门狗发 taskContinue 之后才到这里。这一支是新执行（标记为真）：按点名开新会话重派。
+      // 新失败换过同档路由之后的第二次挂起不走这里（model-mismatch-redispatch 已为真）：点「继续」仍清零再选。
+      // 这一版之前就已经点过继续、历史里已经有后面的选路：标记为假，仍清零再选，不多一次 note。
+      if (code === 'model_mismatch' && !modelMismatchRedispatch && patched('model-mismatch-wake-reroute')) {
+        rt.resumeFrom = null;
+        counters = ZERO;
+        previousMessage = undefined;
+        failedChannel = undefined;
+        if (!mismatchRetried.has(route.routeId)) {
+          mismatchRetried.add(route.routeId);
+          avoid = NO_AVOID;
+          stick = route.routeId;
+          const line = `第 ${rt.round} 轮：${route.modelId} 回话的模型不是点名的，这次挂起已解开，按点名路由重派一次（开新会话，不续上一段），不停下等人`;
+          rt.status.lastProblem = line;
+          await rt.note(line);
+          continue;
+        }
+        stick = undefined;
+        avoid = widen(avoid, route, 'route');
+        mismatchRoutesDown = true;
+        const line = `第 ${rt.round} 轮：${route.modelId} 这条路由再次读回的不是点名的模型，避开它再选；还有能派的就继续`;
+        rt.status.lastProblem = line;
+        await rt.note(line);
+        continue;
+      }
       counters = ZERO;
       avoid = NO_AVOID;
       stick = undefined;
+      mismatchModel = undefined;
       previousMessage = undefined;
     }
   }
@@ -379,6 +619,32 @@ export async function writeSession(
 
 /** 动手会话脱开引擎跑着、引擎在换版本（#2238）：隔多久去接回一次（老引擎还在排空时接回会再交回 detached）。 */
 export const SEGMENT_REATTACH_SECONDS = 20;
+
+/** 上游 503 模型暂时不可用、换不了路由或换了还是这一句：停下等人，腾出 running 名额。写进 lastProblem。 */
+export const MODEL_UNAVAILABLE_STALL = '上游 503：模型暂时不可用，已停下腾出名额';
+
+/**
+ * 同一模型已经换过一条路由，回话仍不是点名的那个。
+ * 不沿用「回话的模型不是点名的那个（model_mismatch）：挂起并报警」：看门狗靠那一句叫醒已经挂上的旧单，
+ * 新的这次停下不该被马上解开。
+ */
+export const MODEL_MISMATCH_AGAIN_STALL = '回话的模型不是点名的那个：换了一条同档路由仍对不上，停下等人';
+
+/** 停下时写给人的原因：选路或上游的原话，加上为什么不能在这里接着睡。 */
+export function modelUnavailableStallDetail(detail: string): string {
+  const why = detail.trim() || '没有别的能马上派的路由';
+  return `${why}。上游回了 503，这个模型暂时不可用。不在这里接着睡：睡着时任务仍是 running、没有开着的会话，占着进单名额。点「继续」再选一次；不要了点「放弃」。`;
+}
+
+/**
+ * 模型暂时不可用、还没派上新会话（rt.modelDownLand）：停下等人，回 true。
+ * 标记为假时不调活动，回 false。调用方接着走原来的等路由。
+ */
+async function parkIfModelDown(rt: TaskRuntime, detail: string): Promise<boolean> {
+  if (!rt.modelDownLand) return false;
+  await rt.park(MODEL_UNAVAILABLE_STALL, modelUnavailableStallDetail(detail));
+  return true;
+}
 
 /**
  * 重试、重派之前确认上一段真停了（决定 0093）：没收场就停下等人、写明原因，回 false（调用方回循环头，人点继续后再选再起）；
@@ -419,7 +685,7 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   if (!patched('task-token-budget')) return;
   // 写在查花费之前、估用量那个标记之前：老历史重放时这一支为假，不多一个字段，后面的标记顺序也对得上。
   const thisGeneration = patched('task-budget-this-generation');
-  let spent: { tokens: number; unmetered: number; estimated?: number };
+  let spent: TaskSpendResult;
   try {
     spent = await rt.cancellable(() =>
       rt.acts.taskSpend({
@@ -436,11 +702,23 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   }
   // 被叫停、超时杀掉的会话多半到不了 CLI 的收尾用量帧，用量就空着；按这张单别的行估出来的下限一起算进预算，
   // 不然一张单反复被叫停可以一直换会话、账面一次都不超。老历史没有这个字段，估出来的是 0，照旧（patched('task-budget-unmetered-estimate')）。
-  const counted = spent.tokens + (patched('task-budget-unmetered-estimate') ? (spent.estimated ?? 0) : 0);
+  // #2859：判超没超用活动算好的输入当量（inputEquivalent）；#2830 那一版记的是 weighted / weightedEstimated，照读；
+  // 再老的结果两样都没有，用原来的 tokens / estimated。当量不在这里重算：历史里记的是活动当时的结果，重放读到的数不变。
+  // 没动步序，所以不用新标记。
+  const equivalent = spent.inputEquivalent !== undefined;
+  const measured = spent.inputEquivalent ?? spent.weighted ?? spent.tokens;
+  const estimatedPart =
+    spent.inputEquivalent !== undefined
+      ? (spent.inputEquivalentEstimated ?? 0)
+      : spent.weighted !== undefined
+        ? (spent.weightedEstimated ?? 0)
+        : (spent.estimated ?? 0);
+  const counted = measured + (patched('task-budget-unmetered-estimate') ? estimatedPart : 0);
   if (counted <= budget * rt.budgetGrants) return;
   const stop = tokenBudgetStop({ tokens: counted, unmetered: spent.unmetered }, budget, rt.budgetGrants, {
-    measured: spent.tokens,
-    estimated: counted - spent.tokens,
+    measured,
+    estimated: counted - measured,
+    ...(equivalent ? { raw: spent } : {}),
   });
   await rt.park(stop.title, stop.detail);
   // 人看过、点了「继续」：再给到比花掉的多一份
@@ -488,6 +766,17 @@ async function pickRoute(
   stick?: string,
   failedChannel?: FailedChannel,
   uiWork = false,
+  /** 已经因登录失效、封号、设备被撤销避开了池：一条能派的都没有就挂起，不改去等探针。 */
+  authPoolsDown = false,
+  /** 只凭一次 401 避开的路由。没有别的路由时放它再试一次，好让第二次 401 暂停整池。 */
+  bare401RouteId?: string,
+  /** model_mismatch 的第一次自动重派只允许同一个模型的其他路由。 */
+  mismatchModel?: string,
+  /**
+   * 点名和读回的模型对不上，能派的都避开了（主线上已经记下的重派）。一条都没有就挂起，不改去等探针，
+   * 也不把刚证实会换模的那条再派出去。不给 = 照旧。新失败的同档重派不置这个标志。
+   */
+  mismatchRoutesDown = false,
 ): Promise<{ route: RouteChoice; probeNote: string | null }> {
   const stage = uiWork ? UI_PURPOSE : SEGMENT_STAGE.manual;
   // 老历史重放时这一支为假：选路参数和原来一样，不多选一次。要写在派前探测那个标记之前，已有历史里的标记顺序才对得上。
@@ -501,6 +790,8 @@ async function pickRoute(
   let droppedFamilies = false;
   let holdForProbe = false;
   let lastStopDetail = '';
+  // 只凭 401 的那条路由已经放回去再试过一次：再派不出就不再放，免得来回选。
+  let releasedBare401 = false;
   // 这一轮已经记下「全都探不通」。再选到能派的，把上次停下的原因清掉，别留在任务状态里。
   const clearProbeStop = () => {
     if (holdForProbe || rt.status.lastProblem?.startsWith('派前探测：')) rt.status.lastProblem = null;
@@ -533,12 +824,15 @@ async function pickRoute(
     droppedDry = false;
     droppedFamilies = false;
     rt.fellBackToMissRoute = false;
+    // 模型暂时不可用之后没有能探的路由：不在这里睡。睡着时任务仍是 running、没有开着的会话。
+    if (await parkIfModelDown(rt, lastStopDetail)) return;
     await rt.pauseForRoute('slot', lastStopDetail, ROUTE_RETRY_SECONDS, wakeMark);
   };
   // 派上了会话：换路由续这一记清掉，后面正常的等额度不再被当成「续不上」。
   const landed = (chosen: { route: RouteChoice; probeNote: string | null }) => {
     rt.landSwitch = false;
     rt.switchWake = false;
+    rt.modelDownLand = false;
     return chosen;
   };
   // 选定的这一条：老历史不探，直接派。探通才派；探不通记下来换下一条，到了 3 条就停下。
@@ -615,6 +909,7 @@ async function pickRoute(
         ...(merged.families && merged.families.length > 0 ? { avoidFamilies: merged.families } : {}),
         ...(stickTo ? { stickRouteId: stickTo } : {}),
         ...(prefer ? { preferRouteId: prefer } : {}),
+        ...(mismatchModel ? { models: [mismatchModel] } : {}),
         ...(failedChannel ? { failedChannel } : {}),
         ...(tierName ? { tier: tierName } : {}),
         reserve: { segment: 'manual' },
@@ -632,6 +927,8 @@ async function pickRoute(
         }
         const blocked = dry.routeIds.length + dry.poolIds.length + dry.modelIds.length > 0;
         if (useDry && blocked && missUsable) {
+          // 模型暂时不可用：别退回刚才那条。退回去还是这个模型，任务又会 running 着空转。
+          if (await parkIfModelDown(rt, got.detail)) continue;
           droppedDry = true;
           prefer = missUsable.routeId;
           rt.status.lastProblem = NO_OTHER_ROUTE;
@@ -639,11 +936,44 @@ async function pickRoute(
           continue;
         }
         // 点名再选仍派不出：照旧用原来的路由。派之前照样探，探不通就不拿它起会话。
-        if (droppedDry && missUsable) {
+        // 模型对不上的不走这里：那条刚证实读回的不是点名的，再派回去还会挂。
+        // 模型暂时不可用也不退回刚才那条：退回去还是这个模型，任务又会 running 着空转。
+        if (droppedDry && missUsable && !mismatchRoutesDown) {
+          if (await parkIfModelDown(rt, got.detail)) continue;
           rt.status.lastProblem = NO_OTHER_ROUTE;
           rt.fellBackToMissRoute = true;
           const chosen = await consider(missUsable, probeOn, mark);
           if (chosen) return chosen;
+          continue;
+        }
+        // 登录失效、封号、设备被撤销把能派的池都避开了：挂起这张单，不改去等探针（探针恢复不了要人重新登录的池）。
+        // 人点「继续」之后避让清掉再选：生产上池的提醒还在，选路仍是一条都没有，再挂起。
+        if (authPoolsDown) {
+          await rt.park(POOLS_ALL_HELD, got.detail);
+          avoid = NO_AVOID;
+          continue;
+        }
+        // 只凭一次 401、没有别的路由：放回这条再试一次。第二次仍是 401 才暂停整池。已经放过、或同时还避开了池，就不再放。
+        if (
+          bare401RouteId &&
+          !releasedBare401 &&
+          merged.poolIds.length === 0 &&
+          avoidRouteIds.includes(bare401RouteId)
+        ) {
+          releasedBare401 = true;
+          avoid = { ...avoid, routeIds: avoid.routeIds.filter((id) => id !== bare401RouteId) };
+          continue;
+        }
+        // 模型对不上把能派的路由都避开了：挂起。探针恢复不了「读回的不是点名的」。
+        // 人点「继续」之后这一轮的避让清掉再选。不给这个标志时，下面两步和原来一样。
+        if (mismatchRoutesDown) {
+          await rt.park(
+            '没有还能派的路由：点名和读回的模型对不上',
+            `${got.detail}。这一段已停。按点名路由重派过一次仍对不上，避开这些路由之后没有还能派的。点「继续」再选一次；不要了点「放弃」。`,
+          );
+          avoid = NO_AVOID;
+          prefer = undefined;
+          droppedDry = false;
           continue;
         }
         // 还没探过、候选一开始就被挡，也走同一条停下：写出原因，沿用全熔断提醒，等探针恢复再继续。
@@ -659,6 +989,7 @@ async function pickRoute(
       }
       // 避让放空之后还是要等（额度、空位）：不死等，照旧用原来的路由，派之前照样探。
       if (droppedDry && missUsable) {
+        if (await parkIfModelDown(rt, got.detail)) continue;
         rt.status.lastProblem = NO_OTHER_ROUTE;
         rt.fellBackToMissRoute = true;
         const chosen = await consider(missUsable, probeOn, mark);
@@ -683,9 +1014,10 @@ async function pickRoute(
       }
       // #2392 钉在这里：总时长第二次到顶、rt.note 写完「换一条路由带上进度续一次」之后 continue 回到本循环。
       // 上一段已经收场（不然走不到 note），holdForBudget 的 taskSpend 是 quick 档，撑不到十几个小时。
-      // 能冻住 tasks.doing / updated_at、又不插入 runs 的，就是下面这次 pauseForRoute：condition 睡着，
-      // waiting() 只改内存、不 mirror。等额度 retryAfterSeconds 封顶 4 小时，连睡几觉就是十几个小时；
-      // 等空位、熔断每档最多约 2 分钟，但同样不写任务行，看起来和定时器没醒一样。
+      // 能冻住 tasks.doing / updated_at、又不插入 runs 的，就是下面这次 pauseForRoute：condition 睡着。
+      // 等额度 retryAfterSeconds 封顶 4 小时，连睡几觉就是十几个小时。
+      // 现在睡之前先 mirrorRouteWait（#2863，patched('route-wait-mirror')）：把「等路由：<原因>」落库，
+      // 原因不变不重复写、变了再写一次；选到路由起会话时 advance 换回动手那一句。
       // taskContinue 不在这个条件里（在途重放不能改谓词）；叫醒靠 taskRouteWake。
       // 新跑的（wall-clock-switch-lands）：不睡，当场停下等人。已经睡在这一觉里的老历史重放时这一标记为假，
       // 仍睡原来那一觉；醒了（继续附带的叫醒、或定时器）再走 wall-clock-switch-wake，下一轮选不出就停下，不睡第二觉。
@@ -698,10 +1030,14 @@ async function pickRoute(
         await rt.park(WALL_CLOCK_SWITCH_STALL, wallClockSwitchStallDetail(got.detail));
         continue;
       }
+      // 模型暂时不可用之后选路只剩等：不睡。这一睡可以到几小时，任务仍是 running、没有开着的会话，占着名额。
+      // 标记为假时这里不调活动，老历史重放的命令和原来一样。
+      if (await parkIfModelDown(rt, got.detail)) continue;
       // 睡到下一次选路。等额度且选路给了清零时刻：秒数按那个时刻（上限几小时），不是每 120 秒醒一次。
       // 等空位、熔断仍是短间隔。路由变了（切号切完、切过去的池探通了）会被叫醒当场再选；信号丢了照样按这个时长醒。
       // 步序没变（秒数是选路活动的结果）：老历史重放不用新的 patched 标记。
       // 多张单同时停在这里时，测试不要 await result()（会 unlockTimeSkipping，见 #1764）。
+      await rt.mirrorRouteWait(got.detail);
       await rt.pauseForRoute(got.waitFor, got.detail, got.retryAfterSeconds ?? ROUTE_RETRY_SECONDS, mark);
       if (rt.landSwitch && patched('wall-clock-switch-wake')) rt.switchWake = true;
       continue;

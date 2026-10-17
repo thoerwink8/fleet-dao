@@ -1,6 +1,7 @@
 // 驾驶舱接口约定（web-api）：任务详情，和发给工作流的信号。
 // 入口是 ../web-api.ts（只有 export *），拆分说明见 specs/901-项目瘦身与提速/重构方案.md 第 2 节；内容是从原来一个文件里原样搬来的。
 import { z } from 'zod';
+import { FLOW_MODES, type FlowMode } from '../flow-mode.ts';
 import type { CostEstimate } from '../model-prices.ts';
 import type { SegmentRunView } from '../segment-runs.ts';
 import { TRANSCRIPT_KINDS, TRANSCRIPT_PAGE_DEFAULT, TRANSCRIPT_PAGE_MAX } from '../transcript.ts';
@@ -44,30 +45,18 @@ export const TaskSchema = z.object({
   claimedBy: z.string().optional(),
   /** 本机领的单：租约到期的时刻（tasks.lease_until）；到点没续就退回法国队列。引擎的单没有这个键。 */
   leaseUntil: Time.optional(),
+  /**
+   * 这张单实际走的流程（tasks.flow_mode，#2828）：three 三段、full 全程。
+   * 还没分组的老单没有这个键。页面不补、不猜。
+   */
+  flowMode: z.enum(FLOW_MODES).optional(),
   createdAt: Time,
 });
-
-export const RunSchema = z.object({
-  id: Id,
-  subtaskId: Id.optional(),
-  stage: StageKindSchema,
-  routeId: Id,
-  modelName: z.string(),
-  hostId: HostIdSchema.optional(),
-  /** 一句话「为什么派给它」。 */
-  whyRoute: z.string(),
-  queuedAt: Time,
-  startedAt: Time.optional(),
-  endedAt: Time.optional(),
-  outcome: RunOutcomeSchema.optional(),
-  inputTokens: z.number().int().min(0).optional(),
-  outputTokens: z.number().int().min(0).optional(),
-  cacheReadTokens: z.number().int().min(0).optional(),
-  cacheWriteTokens: z.number().int().min(0).optional(),
-  costUsd: z.number().min(0).optional(),
-  /** 路由所在渠道的计费方式：按量的花费是真花的钱，套餐内的只是按 API 价折合。渠道查不到就没有（不猜成套餐内）。 */
-  billing: BillingKindSchema.optional(),
-});
+/** 编译期闸：和 flow-mode.ts 的两种模式一字不差。 */
+export const TASK_FLOW_MODE_MATCHES: Same<
+  NonNullable<z.infer<typeof TaskSchema>['flowMode']>,
+  FlowMode
+> = true;
 
 // 用量汇总：算法和各栏的意思在 usage.ts。每一样只加读到的，没读到的次数在 missing* 里，不当成 0。
 const Count = z.number().int().min(0);
@@ -90,11 +79,8 @@ export const UsageTotalsSchema = z.object({
   cost: z.object({ metered: CostShareSchema, subscription: CostShareSchema, unknown: CostShareSchema }),
   /** 没报花费的那几笔按模型目录的单价估（model-prices.ts）：估成了几笔、合计；没有单价几笔；token 没读全几笔。 */
   estimate: z.object({ runs: Count, usd: z.number().min(0), noPrice: Count, noTokens: Count }),
-  queueMs: Count,
   runMs: Count,
   missingTime: Count,
-  /** 结束了的里没有排队记录的笔数（三段的 runs 不记排队）：排队合计要把它算作没读到。 */
-  noQueue: Count,
   /** 结束了的三段里四样 token 一个都没读到的段数。页面写「另有 N 段读不到用量」。 */
   unreadSegments: Count,
 });
@@ -102,7 +88,6 @@ const ModelUsageTotalsSchema = UsageTotalsSchema.extend({ model: z.string(), mod
 export const TaskUsageSchema = z.object({
   total: UsageTotalsSchema,
   byModel: z.array(ModelUsageTotalsSchema),
-  byStage: z.array(UsageTotalsSchema.extend({ stage: StageKindSchema })),
   /** 三段按段（对题、动手、验收；段名认不出的 segment 为 null，排最后），每段再按模型分。 */
   bySegment: z.array(
     UsageTotalsSchema.extend({
@@ -225,11 +210,9 @@ export const TaskDetailResponse = z.object({
   task: TaskSchema,
   repo: RepoSchema,
   subtasks: z.array(BoardSubtaskSchema),
-  /** 老流程的会话（老会话表 09-29 起没人写、#2357 已删，现在恒为空）。 */
-  runs: z.array(RunSchema),
   /** 三段（runs 表）的流水，按起跑先后：task_id 对上的，加上 task_id 没记、按单号兜底的（matchedBy 标明）。 */
   segmentRuns: z.array(SegmentRunSchema),
-  /** 用量：老流程的会话加三段的流水整张合计、按模型；会话按阶段、三段按段（每段再按模型）。 */
+  /** 用量：三段的流水整张合计、按模型、按段（每段再按模型）。 */
   usage: TaskUsageSchema,
   /** 这张单每段指定的模型（动手、验收）。 */
   routePins: TaskRoutePinsSchema,

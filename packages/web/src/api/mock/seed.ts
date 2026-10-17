@@ -1552,6 +1552,7 @@ export function createSeed(now: number): MockState {
     },
     { key: 'judge.dailyCallLimit', value: null, version: 0 },
     { key: 'engine.soloPaused', value: null, version: 0 },
+    { key: 'engine.flowMode', value: null, version: 0 },
     {
       key: 'engine.quotaReserve',
       value: {},

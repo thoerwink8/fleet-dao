@@ -1,6 +1,7 @@
 // 领域对象：引擎、数据库、驾驶舱、fleet 命令、飞书网关共用的一份定义。
 // 改这里之前：数据库表结构（packages/db）以本文件为准；字段增删要同时改表和迁移。
 import type { SessionEffort } from './effort.ts';
+import type { RepoProfile } from './repo-profile.ts';
 import type { ModelStrength } from './track-score.ts';
 
 /** 流程里的一种活（库里的枚举，只增不删）。路由页和选路现在用哪些，见 flow-purposes.ts。 */
@@ -80,6 +81,9 @@ export interface Repo {
   testCommand: string;
 }
 
+/** 带仓档案的仓对象；任务输入保留老 Repo 形状，接活路径按需附带这份档案。 */
+export type RepoWithProfile = Repo & { profile?: RepoProfile };
+
 export interface Task {
   id: string;
   repoId: string;
@@ -116,6 +120,8 @@ export interface Task {
   claimedBy?: string;
   /** 本机领的单：租约到期时刻（tasks.lease_until，ISO）。 */
   leaseUntil?: string;
+  /** 这张单走的流程（tasks.flow_mode，#2826）：引擎分组时和 task_flow_assignments 一起写。还没分组没有这个键。 */
+  flowMode?: 'three' | 'full';
   createdAt: string;
 }
 

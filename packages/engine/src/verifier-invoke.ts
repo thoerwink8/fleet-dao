@@ -37,13 +37,16 @@
 // - 会话失败且失败分流认成上游临时故障（规则表上标了 blip）→ problems 空、upstreamRetry，调用方等一会儿再验
 // - 内存放不下没派出去（admission_blocked）、切号停下（org_switch）→ 照旧回这一次的结局，调用方认结局过一会儿重来
 // - 结论写 pass 但问题清单里还有算挡的 → pass: false（自相矛盾的结论不放行）
+// - 发版重启引擎（#2848）：deps.detach 给了，一家验的会话脱开引擎跑，引擎要走时交回 detached（不换候选、不算没过），
+//   下一个引擎用 attachVerifier 接回、同一份判法读结论；没脱开的会话在引擎要走时（deps.released）没跑完、接回的会话没给出结论，
+//   回 lostOnRelease（调用方重验一次）。
 
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import { classifyFailure, isUpstreamBlip } from './failure/index.ts';
 import { segmentEvidence } from './runner/evidence.ts';
 import type { OneShotDeps, OneShotInput, OneShotResult } from './runner/one-shot.ts';
-import { ONE_SHOT_OUTCOMES, runOneShot, sessionErrorTail } from './runner/one-shot.ts';
+import { ONE_SHOT_OUTCOMES, OneShotDetached, runOneShot, sessionErrorTail } from './runner/one-shot.ts';
 import type { SegmentVerdict } from './runner/verdict.ts';
 import { judgeVerify } from './runner/verdict.ts';
 
@@ -85,6 +88,16 @@ export const VerifierInvokeInputSchema = z
     otherAuthorFamilies: z.array(z.string().min(1)).optional(),
     /** 这是第几轮：默认 1 轮、最多 2 轮（specs/555 第 3 条）；本模块不判上限，只透传。 */
     round: z.union([z.literal(1), z.literal(2)]),
+    /**
+     * 第 2 轮复核（工作流在 patched('verify-recheck') 下才给）：上一轮没过的验收条编号（从 1 起，对得上
+     * howToFinish），和上轮问题原话。有它时，喂进来的 diff 是这一轮的增量，判法只复核这些条和增量里的改动。
+     */
+    recheck: z
+      .object({
+        failedCriteria: z.array(z.number().int().positive()),
+        priorProblems: z.array(z.string()),
+      })
+      .optional(),
     /**
      * 要求两家都验（两个不同的族各验一遍，都过才算过）：作者族认不出时由调用方设为 true。
      * 为 true 时 modelFamiliesAvoid 和 otherAuthorFamilies 可以都为空。不为 true 时，别家一家都派不出也会改成两家都验。
@@ -158,6 +171,28 @@ export const VerifierInvokeOutputSchema = z.object({
       reason: z.string().min(1),
     })
     .optional(),
+  /**
+   * 引擎要走了，验收会话脱开引擎接着跑（#2848，deps.detach 给了才会有）：没有结论。调用方交回给工作流，下一个引擎拿它接回
+   * （attachVerifier）。会话的工作目录（cwd）没还：接回收场后由调用方删。
+   */
+  detached: z
+    .object({
+      runId: z.string(),
+      startedAt: z.string(),
+      family: ModelFamilySchema,
+      modelId: z.string(),
+      routeId: z.string().optional(),
+      channel: z.string().optional(),
+      /** 选路那句「为什么派它」：接回收场那一笔整行覆盖开跑那一行，带上原来的，免得冲成空。 */
+      routeWhy: z.string().optional(),
+      cwd: z.string(),
+    })
+    .optional(),
+  /**
+   * 发版叫停了这一次验收、又没接回（#2848）：引擎要走时被停下的会话（没脱开的那几种），或接回时会话已经没给出结论。
+   * 不是没过、也不是做不出来：调用方重验一次（不算一轮）。写的是白话原因。
+   */
+  lostOnRelease: z.string().optional(),
 });
 export type VerifierInvokeOutput = z.infer<typeof VerifierInvokeOutputSchema>;
 
@@ -302,6 +337,13 @@ export interface VerifierInvokeDeps {
   /** 超时（分钟），默认 60。 */
   timeoutMinutes?: number;
   /**
+   * 脱开引擎跑（#2848，和动手段同一套）：给 true，一家验的会话交 detach 给 one-shot，执行方式支持的引擎要走时放手、交回
+   * detached。两家都验的两个会话并行跑，交回只带得了一个，不脱开（引擎要走时被停下，按 lostOnRelease 重验一次）。
+   */
+  detach?: boolean;
+  /** 引擎要走了（发版切版本、重启）就回一句原因：这时没跑完的会话不换下一个候选，回 lostOnRelease 重验一次。 */
+  released?: () => string | undefined;
+  /**
    * 单子点名、这次 diff 没改的文件，按 PR 头读当前内容。不给就不加那一节（没有这份依赖的调用方照旧只看 diff）。
    * 读不到、或者这一步抛错，都不让验收失败：提示词里标「读不到」。
    */
@@ -310,6 +352,58 @@ export interface VerifierInvokeDeps {
 
 /** 三种能挡的问题前缀（specs/555 第 3 条）。problems 里每条必须以这三种之一开头；风格意见不许进。 */
 export const BLOCKER_KINDS = ['没做到验收条', '弄坏了原有功能', '安全或丢数据'] as const;
+
+/** 提示词里这一句：验收会话可以读 PR 头的完整检出，不只好看 diff。 */
+export const VERIFY_MAY_READ_HEAD = '你可以在 PR 头的完整检出里读文件';
+
+/**
+ * 第 2 轮的判法原句。新提出的、不在增量里的问题只记备注、不拒。
+ * 增量里新出现的问题，模型要在正文里写上能对上本轮 changedFiles 的「增量文件：`路径`」证据，
+ * 否则和「不在上轮没过的条里」一样改记备注。
+ */
+export const VERIFY_RECHECK_RULE =
+  '只复核上轮没过的条和增量里的改动，新提出的、不在增量里的问题只记备注、不拒';
+
+/** 问题正文里的验收条编号（从 1 起）。认不出就空。 */
+export function criterionNumbersIn(problem: string): number[] {
+  return [...problem.matchAll(/第\s*(\d+)\s*条/g)]
+    .map((m) => Number(m[1]))
+    .filter((n) => Number.isInteger(n) && n >= 1);
+}
+
+/** 每条问题都要有一个落在「怎么算做完」里的编号。没有、或编号对不上，算格式错。 */
+export function missingCriterionNumbers(problems: readonly string[], criterionCount: number): boolean {
+  if (problems.length === 0) return false;
+  return problems.some((problem) => {
+    const nums = criterionNumbersIn(problem);
+    return !nums.some((n) => n <= criterionCount);
+  });
+}
+
+/**
+ * 第 2 轮：编号在上轮没过的条里，或正文写了「增量」（模型标明这是增量里的新问题），才继续挡。
+ * 增量里的新问题必须带能对上本轮 changedFiles 的「增量文件：`路径`」证据；其余新提出的改记备注。
+ */
+export function splitRecheckProblems(
+  problems: readonly string[],
+  failedCriteria: ReadonlySet<number>,
+  changedFiles: readonly string[] = [],
+): { keep: string[]; noted: string[] } {
+  const changed = new Set(changedFiles);
+  const incrementalEvidence = (problem: string): boolean =>
+    [...problem.matchAll(/增量文件\s*[:：]\s*`([^`\n]+)`/g)].some((match) => {
+      const path = match[1]?.trim();
+      return path !== undefined && changed.has(path);
+    });
+  const keep: string[] = [];
+  const noted: string[] = [];
+  for (const problem of problems) {
+    const cited = criterionNumbersIn(problem).some((n) => failedCriteria.has(n));
+    if (cited || incrementalEvidence(problem)) keep.push(problem);
+    else noted.push(problem);
+  }
+  return { keep, noted };
+}
 export type BlockerKind = (typeof BLOCKER_KINDS)[number];
 
 /** 行数按人看到的行算：文件末尾那个换行不算多出来的一行。 */
@@ -419,13 +513,32 @@ function renderPrompt(
 ): string {
   const prBody = input.prBody?.trim() ?? '';
   const testOutput = input.testOutput?.trim() ?? '';
+  const recheck = input.round === 2 ? input.recheck : undefined;
   const materials = [
     '上面的需求原文',
     ...(prBody !== '' ? ['下面的 PR 正文'] : []),
     ...(testOutput !== '' ? ['引擎跑过的测试输出'] : []),
-    'diff',
+    recheck ? '这一轮的增量 diff' : 'diff',
     ...(named.length > 0 ? ['「单子点名但这次没改的文件」里的当前内容'] : []),
+    'PR 头的完整检出',
   ];
+  const recheckLines =
+    recheck === undefined
+      ? []
+      : [
+          '',
+          '## 上一轮没过的条',
+          '这一轮只复核下面这些，再加这一轮增量 diff 里的改动。',
+          ...(recheck.failedCriteria.length === 0
+            ? ['（上轮问题里没有认得出的验收条编号，按下面对原话复核。）']
+            : recheck.failedCriteria.map((n) => {
+                const text = input.howToFinish[n - 1];
+                return text ? `- 第 ${n} 条：${text}` : `- 第 ${n} 条`;
+              })),
+          ...(recheck.priorProblems.length > 0
+            ? ['', '上轮写的问题：', ...recheck.priorProblems.map((p) => `- ${p}`)]
+            : []),
+        ];
   return [
     `# 任务：验收 PR #${input.prNumber}（第 ${input.round} 轮）`,
     '',
@@ -435,11 +548,12 @@ function renderPrompt(
     '## 怎么算做完（逐条都要回）',
     ...input.howToFinish.map((a, i) => `${i + 1}. ${a}`),
     ...(specDir !== undefined ? ['', `## 需求文档出处`, `\`${specDir}\`（对照这份，不要凭印象）。`] : []),
+    ...recheckLines,
     '',
     '## 验什么',
     `PR：#${input.prNumber}`,
     `分支：\`${input.branch}\`  基线：\`${input.baseSha}\``,
-    `你手上没有仓库的检出（当前目录是空的）。能看的材料：${materials.join('、')}。`,
+    `${VERIFY_MAY_READ_HEAD}。能看的材料：${materials.join('、')}。当前目录是 PR 头的完整检出时，直接读文件；某个文件读不到，只根据下面这些材料判，不要因为读不到就当成没做到。`,
     '你只做一件事：逐条判「怎么算做完」在这些材料里成不成立。',
     `- 材料里看得出做到了：成立。材料里看得出没做到，或这一条本该在 diff 里看得见却找不到：写进「## 问题」（${BLOCKER_KINDS[0]}），不要凭想象放行。这一句只管 diff 能看见的内容，不包括只要求测试、检查、构建或类型检查通过的条目。`,
     '- 这一条要 diff 以外的证据才判得了（截图、页面现场、线上或法国的数据、审计结果、人手操作的结果），或只靠标了「跳过」的文件才判得了：',
@@ -457,7 +571,8 @@ function renderPrompt(
     ...renderTextBlock('PR 正文（写代码的会话写的，只当线索）', prBody, PR_BODY_MAX_CHARS, 'head'),
     ...renderTextBlock('引擎跑过的测试输出', testOutput, TEST_OUTPUT_MAX_CHARS, 'tail'),
     '',
-    '## diff（unified patch）',
+    recheck ? '## 这一轮的增量 diff（unified patch）' : '## diff（unified patch）',
+    ...(recheck ? ['下面只是上一轮验收之后、这一轮新推上来的增量，不是整张 PR 从基线起的全部 diff。'] : []),
     '```diff',
     diff.diffText,
     '```',
@@ -468,9 +583,16 @@ function renderPrompt(
     `- ${BLOCKER_KINDS[1]}：diff 里有证据显示这次改动弄坏了原有功能`,
     `- ${BLOCKER_KINDS[2]}：diff 里有证据显示安全或丢数据的问题`,
     '风格、命名、设计好不好、「最好再加个……」**不许写**进「## 问题」，放「## 建议」，不影响结论。',
+    '每条问题都要带验收条编号，写成「第 N 条」（N 是上面「怎么算做完」的序号，从 1 起）。没有编号算格式错。',
+    ...(recheck
+      ? [
+          VERIFY_RECHECK_RULE,
+          '上轮没过的条没修好：写进「## 问题」，带第 N 条。增量 diff 里新改坏的：也写进「## 问题」，带第 N 条，并且正文写「增量文件：`本轮 diff 中的实际路径`」。新提出的、不在增量里的：写进「## 建议」。增量文件路径对不上本轮 diff、或没有这句证据，且编号也不在上轮没过的条里的，引擎会改记备注、不拒。',
+        ]
+      : []),
     '',
     '## 输出形状',
-    `先写一段「## 问题」（每行一条，以 \`- ${BLOCKER_KINDS[0]}：\`、\`- ${BLOCKER_KINDS[1]}：\` 或 \`- ${BLOCKER_KINDS[2]}：\` 开头；没有问题就留空）；`,
+    `先写一段「## 问题」（每行一条，以 \`- ${BLOCKER_KINDS[0]}：第 N 条：\`、\`- ${BLOCKER_KINDS[1]}：第 N 条：\` 或 \`- ${BLOCKER_KINDS[2]}：第 N 条：\` 开头，N 是「怎么算做完」的序号；没有编号算格式错；没有问题就留空）；`,
     '再写「## 不归我验」（每行一条，`- 第 N 条：要什么证据、为什么 diff 里看不出`；没有就留空）；',
     '可以写「## 建议」段（不挡，不影响结论）；',
     '**最后一行写** `verdict: pass` 或 `verdict: fail`（不许别的话、不许两个都写）。只有「## 问题」里有条目才写 fail；',
@@ -614,6 +736,226 @@ function classOfFailed(result: OneShotResult): SessionClass {
   return { kind: 'known' };
 }
 
+type VerifierSession = NonNullable<VerifierInvokeOutput['session']>;
+
+/** 一次验收会话收场后的判法（新起的、接回的同一份）：终局直接交回、没验成换下一个候选、有结论。 */
+type SessionJudgement =
+  | { kind: 'final'; out: VerifierInvokeOutput }
+  | { kind: 'miss'; why: string }
+  | {
+      kind: 'verdict';
+      passed: boolean;
+      problems: string[];
+      outOfScope: string[];
+      suggestions: string[];
+      notes: string[];
+      session: VerifierSession;
+    };
+
+function sessionOf(result: OneShotResult, picked: PickedVerifier): VerifierSession {
+  return {
+    runId: result.runId,
+    outcome: result.outcome,
+    family: picked.family,
+    modelId: picked.modelId,
+    ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
+  };
+}
+
+/**
+ * 读一次验收会话的结局（#2848 从 runFamily 拆出来，接回的会话 attachVerifier 用同一份）。
+ * 内存放不下、切号停下、上游临时故障、发版叫停（released 回了原因）是终局：原样交回，调用方过一会儿再验；
+ * 别的没跑成、结论行写法不对、写 fail 却没有算挡的问题是 miss（换下一个候选）；其余是结论。
+ */
+function judgeVerifierSession(
+  result: OneShotResult,
+  picked: PickedVerifier,
+  round: 1 | 2,
+  released?: () => string | undefined,
+): SessionJudgement {
+  const session = sessionOf(result, picked);
+  const who = `家族 ${picked.family}（model ${picked.modelId}）`;
+  // verdict 行 = stdout 最后一行非空（judgeVerify 按这一行判 pass / fail）。
+  const lastLineOfStdout =
+    result.stdout
+      .trim()
+      .split('\n')
+      .filter((l) => l.trim() !== '')
+      .at(-1) ?? '';
+  const verdict: SegmentVerdict = judgeVerify(result, { verdictLine: lastLineOfStdout });
+
+  if (verdict.kind !== 'ok') {
+    // 内存放不下没派出去、切号停下：这一次的结局原样回去，调用方认结局过一会儿重来，不换路由
+    if (result.outcome === 'admission_blocked' || result.outcome === 'org_switch') {
+      return {
+        kind: 'final',
+        out: { pass: false, problems: [coldCallFailed(verdict, result)], notes: who, round, session },
+      };
+    }
+    // 引擎要走了（发版切版本、重启）时没跑完的：是发版叫停的，不是这条路由没验成，不换候选、不算没过，重验一次（#2848）
+    const lost = released?.();
+    if (lost !== undefined) {
+      return {
+        kind: 'final',
+        out: {
+          pass: false,
+          problems: [],
+          notes: who,
+          round,
+          session,
+          lostOnRelease: `${lost}：${coldCallFailed(verdict, result).replace(/^冷调用没跑成：/, '')}`,
+        },
+      };
+    }
+    // 跑了、退出失败的看分流：上游临时故障等一会儿再验，不换家
+    let why = coldCallFailed(verdict, result).replace(/^冷调用没跑成：/, '');
+    if (result.outcome === 'failed') {
+      const klass = classOfFailed(result);
+      if (klass.kind === 'blip') {
+        return {
+          kind: 'final',
+          out: {
+            pass: false,
+            problems: [],
+            notes: who,
+            round,
+            session,
+            upstreamRetry: { reason: klass.reason, afterSeconds: klass.afterSeconds },
+          },
+        };
+      }
+      if (klass.kind === 'unknown') why = `认不出原因：${klass.tail}`;
+    }
+    // 其余（超时、被杀、起不来、认得出的失败）：记下，换下一个候选
+    return { kind: 'miss', why };
+  }
+
+  const stdoutPieces = parseStdout(result.stdout);
+  const word = readVerdict(stdoutPieces.verdictLine);
+  if (word === null) {
+    return {
+      kind: 'miss',
+      why: `结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`,
+    };
+  }
+  const notes: string[] = [who];
+  if (stdoutPieces.droppedStyleNotes > 0) {
+    notes.push(
+      `模型另外在「## 问题」里写了 ${stdoutPieces.droppedStyleNotes} 条不属于三种能挡的意见，按 specs/555 不许算挡，已挪进建议`,
+    );
+  }
+  const { outOfScope, suggestions } = stdoutPieces;
+  if (outOfScope.length > 0) notes.push(`不归我验 ${outOfScope.length} 条（要 diff 以外的证据，转给人）`);
+  if (word === 'fail' && stdoutPieces.problems.length === 0 && outOfScope.length > 0) {
+    // 只写了「不归我验」却给了 fail：那几条不算没做到（决定 0093），按过算，那几条转给人
+    notes.push('模型写了 verdict: fail，但只有「不归我验」、没有算挡的问题：按过算');
+    return { kind: 'verdict', passed: true, problems: [], outOfScope, suggestions, notes, session };
+  }
+  if (word === 'fail' && stdoutPieces.problems.length === 0) {
+    // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——算这一条没验成，换下一个候选
+    return {
+      kind: 'miss',
+      why: `结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
+        stdoutPieces.droppedStyleNotes > 0
+          ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
+          : '它一条都没写'
+      }）`,
+    };
+  }
+  if (word === 'pass' && stdoutPieces.problems.length > 0) {
+    notes.push(
+      `模型写了 verdict: pass，但问题清单里还有 ${stdoutPieces.problems.length} 条算挡的：自相矛盾，按没过处理`,
+    );
+  }
+  return {
+    kind: 'verdict',
+    passed: word === 'pass' && stdoutPieces.problems.length === 0,
+    problems: stdoutPieces.problems,
+    outOfScope,
+    suggestions,
+    notes,
+    session,
+  };
+}
+
+/** 接回脱开跑着的那一次验收会话（#2848）：要的是原来那一次的编号、族、路由和这张单的记账字段。 */
+export interface VerifierAttachInput {
+  attach: NonNullable<VerifierInvokeOutput['detached']>;
+  round: 1 | 2;
+  taskId: string;
+  issueNumber: number;
+  workflowId?: string;
+  prNumber: number;
+  branch: string;
+}
+
+/**
+ * 接回上一个引擎放手的那一次验收会话（#2848）：不拉 diff、不选路、不起会话，one-shot 带 attach 从收发目录接回、等它收场，
+ * 结论照 invokeVerifier 的判法读，结局记回原来那一行 runs。
+ * - 接回时引擎又要走了：再交回 detached（等下一个引擎）。
+ * - 会话没给出结论（被发版叫停了、接回时已经没了、结论认不出）：不换候选、不算没过，回 lostOnRelease，调用方重验一次。
+ */
+export async function attachVerifier(
+  input: VerifierAttachInput,
+  deps: Pick<VerifierInvokeDeps, 'oneShot' | 'timeoutMinutes' | 'released'>,
+): Promise<VerifierInvokeOutput> {
+  const { attach, round } = input;
+  const picked: PickedVerifier = {
+    family: attach.family,
+    modelId: attach.modelId,
+    ...(attach.channel !== undefined ? { channel: attach.channel } : {}),
+    ...(attach.routeId !== undefined ? { routeId: attach.routeId } : {}),
+    runId: attach.runId,
+  };
+  let result: OneShotResult;
+  try {
+    result = await runOneShot(
+      {
+        runId: attach.runId,
+        segment: 'verify',
+        modelId: attach.modelId,
+        ...(attach.channel !== undefined ? { channel: attach.channel } : {}),
+        ...(attach.routeId !== undefined ? { routeId: attach.routeId } : {}),
+        ...(attach.routeWhy?.trim() ? { routeWhy: attach.routeWhy.trim() } : {}),
+        taskId: input.taskId,
+        issueNumber: input.issueNumber,
+        ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
+        prNumber: input.prNumber,
+        branch: input.branch,
+        prompt: '',
+        cwd: attach.cwd,
+        ...(deps.timeoutMinutes !== undefined ? { timeoutMinutes: deps.timeoutMinutes } : {}),
+        detach: { attach: { startedAt: attach.startedAt } },
+      },
+      deps.oneShot,
+    );
+  } catch (error) {
+    if (error instanceof OneShotDetached) return { pass: false, problems: [], round, detached: attach };
+    throw error;
+  }
+  const judged = judgeVerifierSession(result, picked, round, deps.released);
+  if (judged.kind === 'final') return judged.out;
+  if (judged.kind === 'miss') {
+    return {
+      pass: false,
+      problems: [],
+      notes: `家族 ${picked.family}（model ${picked.modelId}）`,
+      round,
+      session: sessionOf(result, picked),
+      lostOnRelease: `接回的验收会话没给出结论（${judged.why}）`,
+    };
+  }
+  return {
+    pass: judged.passed,
+    problems: judged.problems,
+    notes: judged.notes.join('；'),
+    round,
+    session: judged.session,
+    ...(judged.outOfScope.length > 0 ? { outOfScope: judged.outOfScope } : {}),
+    ...(judged.suggestions.length > 0 ? { suggestions: judged.suggestions } : {}),
+  };
+}
+
 /**
  * 跑 #555-1 一轮冷调用。
  *
@@ -646,7 +988,7 @@ export async function invokeVerifier(
       round: parsed.round,
     };
   }
-  if (diff.diffText.trim() === '') {
+  if (parsed.round === 1 && diff.diffText.trim() === '') {
     return {
       pass: false,
       problems: ['读不到 diff：fetchDiff 返回了空 diff（不许拿空当「没改动所以没挡的」）'],
@@ -654,7 +996,7 @@ export async function invokeVerifier(
       round: parsed.round,
     };
   }
-  if (diff.changedFiles.length === 0) {
+  if (parsed.round === 1 && diff.changedFiles.length === 0) {
     return {
       pass: false,
       problems: ['读不到 diff：fetchDiff 返回了空 changedFiles（没改任何文件就是没干活）'],
@@ -684,6 +1026,8 @@ export async function invokeVerifier(
   const seenRoutes = new Set<string>();
   const misses: { route: string; tail: string }[] = [];
   let lastSession: VerifierInvokeOutput['session'];
+  /** 问题没带验收条编号：整次验收只重跑一次，跨家族也不能再重跑。 */
+  let formatRetried = false;
   const named = await loadNamedFiles(parsed, diff.changedFiles, deps.fetchNamedFiles);
   const prompt = renderPrompt(parsed, diff, spec.specDir, named);
 
@@ -730,7 +1074,11 @@ export async function invokeVerifier(
    * 换这一族的下一条路由再验；换的那一下挑不出、或在等，这一族就算没验成（none），调用方换下一族（#1731）。
    * 上游临时故障、内存放不下、切号是「过一会儿再来」，原样回给调用方（final），不换。
    */
-  const runFamily = async (family: ModelFamily, first: ChosenModel): Promise<FamilyOutcome> => {
+  const runFamily = async (
+    family: ModelFamily,
+    first: ChosenModel,
+    detachable = false,
+  ): Promise<FamilyOutcome> => {
     let m = first;
     /** 这一条路由没验成：记下，换这一族的下一条路由；换不出就回 none。 */
     const missAndNext = async (route: string, why: string): Promise<boolean> => {
@@ -753,6 +1101,7 @@ export async function invokeVerifier(
       seenRoutes.add(label);
 
       const prepared = deps.prepareCwd ? await deps.prepareCwd(picked) : undefined;
+      const cwd = prepared ? prepared.cwd : deps.cwd;
       const oneShotInput: OneShotInput = {
         ...(m.runId !== undefined ? { runId: m.runId } : {}),
         ...(m.reservationId !== undefined ? { reservationId: m.reservationId } : {}),
@@ -768,132 +1117,94 @@ export async function invokeVerifier(
         prNumber: parsed.prNumber,
         branch: parsed.branch,
         prompt,
-        cwd: prepared ? prepared.cwd : deps.cwd,
+        cwd,
         ...(deps.timeoutMinutes !== undefined ? { timeoutMinutes: deps.timeoutMinutes } : {}),
+        // 一家验的会话可以脱开引擎跑（#2848）：执行方式支持的，引擎要走时放手、交回 detached
+        ...(detachable && deps.detach ? { detach: {} } : {}),
       };
       let oneShotResult: OneShotResult;
       try {
         oneShotResult = await runOneShot(oneShotInput, prepared?.oneShot ?? deps.oneShot);
-      } finally {
-        // 备的目录会话收场后就还回去（成败都还）；还不掉不改结论，备目录的那一侧自己记日志
-        await prepared?.release().catch(() => undefined);
-      }
-      const session = {
-        runId: oneShotResult.runId,
-        outcome: oneShotResult.outcome,
-        family: picked.family,
-        modelId: picked.modelId,
-        ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
-      };
-      lastSession = session;
-      const who = `家族 ${picked.family}（model ${picked.modelId}）`;
-
-      // verdict 行 = stdout 最后一行非空（judgeVerify 按这一行判 pass / fail）。
-      const lastLineOfStdout =
-        oneShotResult.stdout
-          .trim()
-          .split('\n')
-          .filter((l) => l.trim() !== '')
-          .at(-1) ?? '';
-      const verdict: SegmentVerdict = judgeVerify(oneShotResult, { verdictLine: lastLineOfStdout });
-
-      if (verdict.kind !== 'ok') {
-        // 内存放不下没派出去、切号停下：这一次的结局原样回去，调用方认结局过一会儿重来，不换路由
-        if (oneShotResult.outcome === 'admission_blocked' || oneShotResult.outcome === 'org_switch') {
+      } catch (error) {
+        // 引擎要走了、会话脱开接着跑：备的目录还归会话在用，不还；交回接回要的东西（#2848）
+        if (error instanceof OneShotDetached) {
           return {
             kind: 'final',
             out: {
               pass: false,
-              problems: [coldCallFailed(verdict, oneShotResult)],
-              notes: who,
+              problems: [],
+              notes: `家族 ${picked.family}（model ${picked.modelId}）：引擎要走了，验收会话脱开接着跑，等下一个引擎接回`,
               round: parsed.round,
-              session,
+              detached: {
+                runId: error.runId,
+                startedAt: error.startedAt,
+                family: picked.family,
+                modelId: picked.modelId,
+                ...(picked.routeId !== undefined ? { routeId: picked.routeId } : {}),
+                ...(picked.channel !== undefined ? { channel: picked.channel } : {}),
+                ...(oneShotInput.routeWhy !== undefined ? { routeWhy: oneShotInput.routeWhy } : {}),
+                cwd,
+              },
             },
           };
         }
-        // 跑了、退出失败的看分流：上游临时故障等一会儿再验，不换家
-        let why = coldCallFailed(verdict, oneShotResult).replace(/^冷调用没跑成：/, '');
-        if (oneShotResult.outcome === 'failed') {
-          const klass = classOfFailed(oneShotResult);
-          if (klass.kind === 'blip') {
-            return {
-              kind: 'final',
-              out: {
-                pass: false,
-                problems: [],
-                notes: who,
-                round: parsed.round,
-                session,
-                upstreamRetry: { reason: klass.reason, afterSeconds: klass.afterSeconds },
-              },
-            };
+        await prepared?.release().catch(() => undefined);
+        throw error;
+      }
+      // 备的目录会话收场后就还回去（成败都还）；还不掉不改结论，备目录的那一侧自己记日志
+      await prepared?.release().catch(() => undefined);
+      lastSession = sessionOf(oneShotResult, picked);
+      const judged = judgeVerifierSession(oneShotResult, picked, parsed.round, deps.released);
+      if (judged.kind === 'final') return judged;
+      if (judged.kind === 'miss') {
+        if (await missAndNext(label, judged.why)) continue;
+        return { kind: 'none' };
+      }
+      let problems = judged.problems;
+      let suggestions = judged.suggestions;
+      if (missingCriterionNumbers(problems, parsed.howToFinish.length)) {
+        // 没有验收条编号：格式错，只重跑一次。下一条路由还是刚才这条时，拿掉「已经试过」再跑这一次。
+        const why = '问题没带验收条编号（格式错）';
+        misses.push({ route: label, tail: why });
+        if (!formatRetried) {
+          formatRetried = true;
+          const next = await pickFor(family);
+          if (next.kind === 'model') {
+            const nextLabel = next.m.routeId ?? `${family}/${next.m.modelId}`;
+            if (seenRoutes.has(nextLabel)) seenRoutes.delete(nextLabel);
+            m = next.m;
+          } else {
+            seenRoutes.delete(label);
           }
-          if (klass.kind === 'unknown') why = `认不出原因：${klass.tail}`;
+          continue;
         }
-        // 其余（超时、被杀、起不来、认得出的失败）：记下，换下一个候选
-        if (await missAndNext(label, why)) continue;
         return { kind: 'none' };
       }
-
-      const stdoutPieces = parseStdout(oneShotResult.stdout);
-      const word = readVerdict(stdoutPieces.verdictLine);
-      if (word === null) {
-        const why = `结论行不是固定写法「verdict: pass」或「verdict: fail」（最后一行是：${stdoutPieces.verdictLine.slice(0, 120)}）`;
-        if (await missAndNext(label, why)) continue;
-        return { kind: 'none' };
+      const recheck = parsed.round === 2 ? parsed.recheck : undefined;
+      const notes = [...judged.notes];
+      if (recheck !== undefined) {
+        const split = splitRecheckProblems(problems, new Set(recheck.failedCriteria), diff.changedFiles);
+        problems = split.keep;
+        if (split.noted.length > 0) {
+          suggestions = [...suggestions, ...split.noted];
+          notes.push(`新提出的、不在增量里的 ${split.noted.length} 条只记备注、不拒`);
+        }
       }
-      const notes: string[] = [who];
-      if (stdoutPieces.droppedStyleNotes > 0) {
-        notes.push(
-          `模型另外在「## 问题」里写了 ${stdoutPieces.droppedStyleNotes} 条不属于三种能挡的意见，按 specs/555 不许算挡，已挪进建议`,
-        );
-      }
-      const { outOfScope, suggestions } = stdoutPieces;
-      if (outOfScope.length > 0) notes.push(`不归我验 ${outOfScope.length} 条（要 diff 以外的证据，转给人）`);
-      if (word === 'fail' && stdoutPieces.problems.length === 0 && outOfScope.length > 0) {
-        // 只写了「不归我验」却给了 fail：那几条不算没做到（决定 0093），按过算，那几条转给人
-        notes.push('模型写了 verdict: fail，但只有「不归我验」、没有算挡的问题：按过算');
-        return {
-          kind: 'verdict',
-          family: picked.family,
-          modelId: picked.modelId,
-          passed: true,
-          problems: [],
-          outOfScope,
-          suggestions,
-          notes,
-          session,
-        };
-      }
-      if (word === 'fail' && stdoutPieces.problems.length === 0) {
-        // 说没过却一条算挡的都没写：不当成过（模型明明说了不行），也不能把空问题表丢回给写代码的会话白改——算这一条没验成，换下一个候选
-        const why = `结论写了 fail，但「## 问题」里没有一条以「${BLOCKER_KINDS.join('」「')}」开头的（${
-          stdoutPieces.droppedStyleNotes > 0
-            ? `它写了 ${stdoutPieces.droppedStyleNotes} 条不算挡的意见`
-            : '它一条都没写'
-        }）`;
-        if (await missAndNext(label, why)) continue;
-        return { kind: 'none' };
-      }
-      if (word === 'pass' && stdoutPieces.problems.length > 0) {
-        notes.push(
-          `模型写了 verdict: pass，但问题清单里还有 ${stdoutPieces.problems.length} 条算挡的：自相矛盾，按没过处理`,
-        );
+      if (formatRetried) notes.push('上一次问题没带验收条编号，按格式错重跑了一次');
+      if (!judged.passed && problems.length === 0 && recheck !== undefined) {
+        notes.push('模型写了不通过，但保留下来的问题为空：新问题只记备注、不拒，按过算');
       }
       return {
-        kind: 'verdict',
+        ...judged,
         family: picked.family,
         modelId: picked.modelId,
-        passed: word === 'pass' && stdoutPieces.problems.length === 0,
-        problems: stdoutPieces.problems,
-        outOfScope,
+        passed: problems.length === 0,
+        problems,
         suggestions,
         notes,
-        session,
       };
     }
   };
-
   /** 各家的「不归我验」「建议」合起来（去重，两家时带上族名）；空的不带。 */
   const extras = (
     vs: readonly Extract<FamilyOutcome, { kind: 'verdict' }>[],
@@ -914,7 +1225,8 @@ export async function invokeVerifier(
       const p = await pickFor(family);
       if (p.kind === 'wait') waiting.push({ family, detail: p.detail });
       if (p.kind !== 'model') continue;
-      const r = await runFamily(family, p.m);
+      // 一家验：一次只跑一个会话，可以脱开引擎跑（#2848）
+      const r = await runFamily(family, p.m, true);
       if (r.kind === 'final') return r.out;
       if (r.kind === 'verdict') {
         return {
@@ -986,7 +1298,7 @@ export async function invokeVerifier(
         ...verdicts.flatMap((v) => v.notes.slice(1).map((n) => `${v.family}：${n}`)),
       ].join('；'),
       round: parsed.round,
-      session: verdicts[1]!.session,
+      session: verdicts[1]?.session,
       ...extras(verdicts),
     };
   }

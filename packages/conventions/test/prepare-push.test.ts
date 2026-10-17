@@ -3,7 +3,7 @@
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { readGraph } from '../src/ci-plan.ts';
-import { preparePush } from '../src/prepare-push.ts';
+import { allImages, preparePush, pushedFiles } from '../src/prepare-push.ts';
 import { fsRepo } from '../src/repo.ts';
 
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
@@ -174,5 +174,120 @@ describe('推送前预检', () => {
     });
     expect(r.code).toBe(0);
     expect(ran[1]?.args).toEqual(['-b']);
+  });
+});
+
+describe('按这次推的 ref 放行（只推图片、只删分支）', () => {
+  const ZERO = '0'.repeat(40);
+  const SHA = 'a'.repeat(40);
+  const OLD = 'b'.repeat(40);
+  const line = (remote = ZERO, local = SHA) => `refs/heads/shots/1 ${local} refs/heads/shots/1 ${remote}\n`;
+  const deleting = (name: string) => `refs/heads/${name} ${ZERO} refs/heads/${name} ${OLD}\n`;
+  type G = { status: number | null; stdout: string; stderr: string; error?: Error };
+  const ok = (stdout: string): G => ({ status: 0, stdout, stderr: '' });
+  const bad: G = { status: 128, stdout: '', stderr: 'fatal' };
+
+  /** 假 git：按命令名答；老路的 changedFiles 用到的命令一律答「改了 .ts」。 */
+  function push(stdin: string, answers: { mergeBase?: G; lsTree?: G; diff?: G }) {
+    const ran: Ran[] = [];
+    const r = preparePush({
+      changed: () => ['packages/conventions/src/plan.ts'],
+      pushed: () =>
+        pushedFiles(stdin, (args) => {
+          // 删分支的 sha 是一串 0。实现去问 git 这个 sha，就是没把删的那几行丢掉。
+          if (args.some((a) => /^0+$/.test(a))) return bad;
+          if (args[0] === 'merge-base') return answers.mergeBase ?? bad;
+          if (args[0] === 'ls-tree') return answers.lsTree ?? bad;
+          if (args[0] === 'diff') return answers.diff ?? bad;
+          return bad;
+        }),
+      repo: fsRepo(ROOT),
+      graph: () => GRAPH,
+      run(cmd, args) {
+        ran.push({ cmd, args: [...args] });
+        return { status: 0, stdout: 'Checked 3 files in 5ms.', stderr: '' };
+      },
+    });
+    return { ...r, ran };
+  }
+
+  it('新分支、孤儿、只有图片：放行，不跑 biome 和 tsc', () => {
+    const r = push(line(), {
+      mergeBase: { status: 1, stdout: '', stderr: '' },
+      lsTree: ok('a.png\0b.JPG\0'),
+    });
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+    expect(r.lines.join('\n')).toContain('只推了图片，跳过格式和类型检查');
+  });
+
+  it('新分支、有共同祖先、只有图片：放行', () => {
+    const r = push(line(), {
+      mergeBase: ok(`${OLD}\n`),
+      diff: ok('shots/1/x.webp\0shots/1/y.gif\0z.jpeg\0'),
+    });
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+  });
+
+  it('已有分支追加提交、混了一个 .ts：走老路', () => {
+    const r = push(line(OLD), { diff: ok('a.png\0src/x.ts\0') });
+    expect(r.ran.map((x) => x.cmd)).toEqual(['biome', 'tsc']);
+  });
+
+  it('已有分支追加提交、全是图片：放行', () => {
+    const r = push(line(OLD), { diff: ok('a.png\0') });
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+  });
+
+  it('stdin 是空的：走老路', () => {
+    const r = push('', {});
+    expect(r.ran.map((x) => x.cmd)).toEqual(['biome', 'tsc']);
+  });
+
+  it('git 读不出（diff 失败、ls-tree 失败、merge-base 出错）：走老路，不放行', () => {
+    expect(push(line(OLD), { diff: bad }).ran.length).toBe(2);
+    expect(push(line(), { mergeBase: { status: 1, stdout: '', stderr: '' }, lsTree: bad }).ran.length).toBe(
+      2,
+    );
+    expect(push(line(), { mergeBase: bad }).ran.length).toBe(2);
+  });
+
+  it('只删一个分支：放行，不跑检查', () => {
+    const r = push(deleting('gone'), {});
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+    expect(r.lines.join('\n')).toContain('只删分支，没有新内容，跳过格式和类型检查');
+  });
+
+  it('只删两个分支：放行', () => {
+    const r = push(`${deleting('gone')}${deleting('also-gone')}`, {});
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+    expect(r.lines.join('\n')).toContain('只删分支，没有新内容，跳过格式和类型检查');
+  });
+
+  it('删一个、再推一个带 .ts 的：走老路', () => {
+    const r = push(`${deleting('gone')}${line(OLD)}`, { diff: ok('a.png\0src/x.ts\0') });
+    expect(r.ran.map((x) => x.cmd)).toEqual(['biome', 'tsc']);
+    expect(r.lines.join('\n')).not.toContain('只删分支');
+  });
+
+  it('删一个、再推一个只有图片的：放行', () => {
+    const r = push(`${deleting('gone')}${line(OLD)}`, { diff: ok('a.png\0b.jpg\0') });
+    expect(r.code).toBe(0);
+    expect(r.ran).toEqual([]);
+    expect(r.lines.join('\n')).toContain('只推了图片，跳过格式和类型检查');
+  });
+
+  it('夹着解析不了的行、又只有删分支：拿不准，走老路', () => {
+    const r = push(`不是 ref 行\n${deleting('gone')}`, {});
+    expect(r.ran.map((x) => x.cmd)).toEqual(['biome', 'tsc']);
+  });
+
+  it('改动列表是空的：不算只有图片', () => {
+    expect(allImages([])).toBe(false);
+    expect(allImages(['a.png', 'README.md'])).toBe(false);
   });
 });

@@ -19,7 +19,12 @@
 
 import { loadStandardPaths, type StandardPath } from '@fleet-dao/conventions';
 import { familyGate, isGithubActionsAuthor, localGate } from '@fleet-dao/core';
-import { type EngineMasterState, engineMasterOf, type MasterSettingRow } from '@fleet-dao/shared';
+import {
+  type EngineMasterState,
+  engineMasterOf,
+  type MasterSettingRow,
+  parseRepoProfile,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
 import { masterOffNote } from '../engine-master.ts';
@@ -109,8 +114,8 @@ export interface DispatchIssueDeps {
   taskGenerations: IntakeDeps['taskGenerations'];
   openPrClaims: IntakeDeps['openPrClaims'];
   readSpecDoc: IntakeDeps['readSpecDoc'];
-  /** 改标准的路径清单；不给读引擎自己带的那一份。读不到、认不出照抛：不当成「没有标准路径」。 */
-  standardPaths?(): Promise<StandardPath[]>;
+  /** 这个仓自己的改标准路径清单；不给读引擎自己带的那一份（只给没接装配的测试）。读不到、认不出照抛。 */
+  standardPaths?(repo: IntakeRepo): Promise<StandardPath[]>;
   /** 这张单以前的任务工作流里失败收场的有几条。读不到照抛：不当成 0。 */
   failedAttempts(repo: IntakeRepo, issueNumber: number): Promise<number>;
   start: IntakeDeps['start'];
@@ -191,7 +196,10 @@ async function hardFailure(
       ),
     };
   }
-  const standard = standardPathIn(issue.body, await (deps.standardPaths ?? loadStandardPaths)());
+  const standard = standardPathIn(
+    issue.body,
+    deps.standardPaths ? await deps.standardPaths(repo) : await loadStandardPaths(),
+  );
   if (standard !== null) {
     return {
       failure: fail(
@@ -205,12 +213,17 @@ async function hardFailure(
     return { failure: fail('pr_claimed', `已有 PR #${prNumber} 在做，别并行再写一遍`) };
   }
 
+  const moduleRoots = repo.profile === undefined ? undefined : parseRepoProfile(repo.profile).moduleRoots;
   const brief = await readTaskBrief(
     {
       readIssue: async () => ({ number: issue.number, title: issue.title, body: issue.body, state: 'open' }),
       readSpecDoc: ({ path }) => deps.readSpecDoc({ repo, path }),
     },
-    { repo: { owner: repo.owner, name: repo.name }, issueNumber },
+    {
+      repo: { owner: repo.owner, name: repo.name },
+      issueNumber,
+      ...(moduleRoots ? { moduleRoots } : {}),
+    },
   );
   if (!brief.ok) {
     const what = brief.problems.map((p) => `【${p.field}】${p.why}`).join('；');

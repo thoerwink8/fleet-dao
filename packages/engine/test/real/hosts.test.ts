@@ -44,6 +44,7 @@ import {
   wiredHostNames,
 } from '../../src/real/hosts.ts';
 import { agentCommands, realPortsConfigFromEnv } from '../../src/real/index.ts';
+import { readMirasimHandle, writeMirasimHandle } from '../../src/real/session-handoff.ts';
 import { runChild } from '../child.ts';
 import {
   CURSOR_NO_LOGIN,
@@ -1152,6 +1153,61 @@ describe('Mirasim 的驱动（#345）', () => {
     );
     expect(fake.specs[0]?.limits).toEqual({ wallClockMs: 59 * 60_000 });
     expect(fake.specs[1]?.limits).toEqual({ startupMs: 150_000, wallClockMs: 200_000, idleMs: 90_000 });
+  });
+
+  describe('放手与接回（#2815）', () => {
+    let ioDir: string;
+    beforeEach(() => {
+      ioDir = join(mkdtempSync(join(tmpdir(), 'fleet-mira-io-')), 'run-h1');
+    });
+    afterEach(() => rmSync(dirname(ioDir), { recursive: true, force: true }));
+
+    it('给了收发目录：放手信号交给插头；服务端接下一刻就把会话号、轮次号、run 号写进交接目录（放手时才来不及写）', async () => {
+      const { fake, driver } = mirasimWith({ state: { text: 'OK' }, sessionKey: 'dsh:abc-1' });
+      const release = new AbortController();
+      await driver.run(mirasimSpec({ runId: 'run-h1' }), { io: { dir: ioDir, release: release.signal } });
+      expect(fake.options[0]?.release).toBe(release.signal);
+      expect(fake.options[0]).not.toHaveProperty('attach');
+      expect(await readMirasimHandle(ioDir)).toMatchObject({ runId: 'run-h1', sessionKey: 'dsh:abc-1' });
+    });
+
+    it('没给收发目录（验收、整理、指挥官会话）：不放手、不写交接文件', async () => {
+      const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+      await driver.run(mirasimSpec(), {});
+      expect(fake.options[0]).not.toHaveProperty('release');
+      expect(fake.options[0]).not.toHaveProperty('attach');
+      expect(await readMirasimHandle(ioDir)).toBeUndefined();
+    });
+
+    it('接回：照交接目录里的会话号和轮次号交给插头，提示词给空（不重发）', async () => {
+      writeMirasimHandle(ioDir, {
+        runId: 'run-h1',
+        sessionKey: 'dsh:abc-1',
+        taskId: 'task-9',
+        acceptedAt: '2026-10-16T08:00:00.000Z',
+      });
+      const { fake, driver } = mirasimWith({ state: { text: 'OK' }, sessionKey: 'dsh:abc-1' });
+      await driver.run(mirasimSpec({ runId: 'run-h1', prompt: '' }), { io: { dir: ioDir, attach: true } });
+      expect(fake.options[0]?.attach).toEqual({ sessionKey: 'dsh:abc-1', taskId: 'task-9' });
+      expect(fake.specs[0]?.prompt).toBe('');
+    });
+
+    it('【故意造出的失败】接回时交接目录里没有会话号：明确报接不回，不当成起新会话', async () => {
+      const { fake, driver } = mirasimWith({ state: { text: 'OK' } });
+      await expect(
+        driver.run(mirasimSpec({ runId: 'run-h1' }), { io: { dir: ioDir, attach: true } }),
+      ).rejects.toThrow(/接回 Mirasim 会话 run-h1 没接成.*会话号/);
+      expect(fake.count()).toBe(0);
+    });
+
+    it('插头报了放手：整理成 HostReport 的 detached，不是一份失败的报告', async () => {
+      const { driver } = mirasimWith({
+        report: { terminal: undefined, detached: { sessionKey: 'dsh:abc-1' } },
+        sessionKey: 'dsh:abc-1',
+      });
+      const report = await driver.run(mirasimSpec(), { io: { dir: ioDir } });
+      expect(report.detached).toBe(true);
+    });
   });
 
   it('只留「中继额度」这一种路由：route 永远是 cloud（决定 0049、MS-28：不许反代）', async () => {

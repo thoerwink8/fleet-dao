@@ -122,7 +122,7 @@ describe('判续会话', () => {
     expect(p.reads).toEqual([`latest:${TASK}:2026-10-14T07:49:55.000Z`]);
   });
 
-  it('续上：跑完了的那一段按编号找；同池换了模型照样续', async () => {
+  it('续上：跑完了的那一段按编号找；同池换了模型照样续（#2742：opus 会话被发版叫停后，点名 sonnet 仍续上它）', async () => {
     const p = plan([row()]);
     await expect(
       p.run(input({ routeId: 'r1b', previous: { runId: 'run-0007' } }), ctx),

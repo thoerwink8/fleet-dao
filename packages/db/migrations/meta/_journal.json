@@ -600,8 +600,22 @@
     {
       "idx": 85,
       "version": "7",
-      "when": 1792160142208,
-      "tag": "0085_notification_repo",
+      "when": 1792160000009,
+      "tag": "0085_yellow_barracuda",
+      "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1792174947089,
+      "tag": "0086_drop_github_tokens",
+      "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1792242555369,
+      "tag": "0087_notification_repo",
       "breakpoints": true
     }
   ]

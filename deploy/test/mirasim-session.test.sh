@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # shellcheck source-path=SCRIPTDIR
+# shellcheck disable=SC2034,SC2317
 # deploy/lib/mirasim.sh 的会话用户 Mirasim 常驻单元这一层（mirasim_server_installed、check_mirasim_session_unit，
 # #424）；和 mirasim.test.sh（认令牌）分开测——那份管「引擎连哪个端口」，这份管「该不该有常驻单元、单元活没活」。
 #   0. deploy/france/fleet-mirasim-session.service 渲染出来的样子钉住：User、Group、端口、--host 127.0.0.1、
@@ -27,6 +28,13 @@ HERE=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/../lib/common.sh"
 # shellcheck source=../lib/mirasim.sh
 source "$HERE/../lib/mirasim.sh"
+
+FRANCE_SH=$HERE/../france.sh
+fn_text() { tr -d '\r' <"$FRANCE_SH" | sed -n "/^$1() {/,/^}/p"; }
+eval "$(fn_text mirasim_retired)"
+eval "$(fn_text retire_mirasim_units)"
+eval "$(fn_text setup_mirasim_session)"
+eval "$(fn_text setup_mirasim_liveness)"
 
 fail=0
 check() { # 说明 实际 期望
@@ -142,6 +150,35 @@ node --require "$GUARD" -e 'throw new Error("boom-not-stream")' >"$GOUT" 2>"$GOU
 check "别的未捕获异常照旧退出" "$GRC" "1"
 has "别的异常的原文还在" "$(<"$GOUT.err")" 'boom-not-stream'
 rm -f -- "$GF" "$GOUT" "$GOUT.err"
+
+echo "== 0c. 退役标记：停掉并取消自启，不装常驻单元和健康检查"
+MIRASIM_RETIRED_FILE=$(mktemp)
+SESSION_USERS=(fleet-mirasim-fake)
+MIRASIM_SESSION_PORT=54321
+MIRASIM_LIVENESS_UNITS=(fleet-mirasim-liveness.service fleet-mirasim-liveness.timer)
+RETIRE_CALLS=()
+systemctl() {
+  case "$1" in
+  is-enabled) echo enabled ;;
+  is-active) echo active ;;
+  *) RETIRE_CALLS+=("systemctl $*") ;;
+  esac
+}
+fresh
+setup_mirasim_session >/dev/null
+check "setup_mirasim_session 停掉并取消两份 Mirasim 单元自启" \
+  "$(printf '%s\n' "${RETIRE_CALLS[@]}")" \
+  $'systemctl disable --now fleet-mirasim-session.service\nsystemctl disable --now fleet-mirasim-liveness.timer'
+check "退役时不记待配或红" "${#PENDING[@]} ${#REDS[@]}" "0 0"
+RETIRE_CALLS=()
+fresh
+setup_mirasim_liveness fleet-mirasim-fake >/dev/null
+check "setup_mirasim_liveness 退役时同样只停用、不安装" \
+  "$(printf '%s\n' "${RETIRE_CALLS[@]}")" \
+  $'systemctl disable --now fleet-mirasim-session.service\nsystemctl disable --now fleet-mirasim-liveness.timer'
+check "健康检查退役时不记待配或红" "${#PENDING[@]} ${#REDS[@]}" "0 0"
+rm -f -- "$MIRASIM_RETIRED_FILE"
+unset -f systemctl
 
 echo "== 5. 健康检查脚本 deploy/lib/mirasim-liveness.sh（#1676）：curl、systemctl、logger 换成桩"
 LIVE=$HERE/../lib/mirasim-liveness.sh

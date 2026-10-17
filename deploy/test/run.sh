@@ -59,7 +59,7 @@ SKIP_WHY=""
 # 估三台各 80–100 秒。第二轮实测三台 101 / 84 / 95 秒，再把 release-flow、web-publish 从第一台挪去第三台。挪完看下一轮 CI 的「⏱」行，不匀了再挪。每一项的秒数都看日志里的「⏱」行。
 SHARDS=(
   'login-user session-user listen root-exec-check ops-only ports shards session-proxy session-ports release-proxy node-report-gate service-home sshd-hardening hk-firewall hk-retired-gateway hk-self-proxy-owner hk-france-probe'
-  'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
+  'cli-tools cursor-agent cursor-key mirasim mirasim-session mirasim-auto-tier user-slice-cap node-cache agent-scope-adopt app-config grok public-site agent-scope-org-use agent-scope-probe temporal-schema root-ssh-login'
   'lint session-pnpm no-demo backup auto-release-state agents-sync agents-sync-account node-tests release-flow runtime-unchanged web-publish build-isolation'
 )
 NODE_TESTS=(health-page reclaude-old-account-clean auto-release config release-request static-child runtime-closure)

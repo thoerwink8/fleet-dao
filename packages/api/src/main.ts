@@ -15,8 +15,7 @@ import {
 } from '@fleet-dao/db';
 import {
   createGitHub,
-  GITHUB_AUTHORIZE_URL,
-  type GitHubUserApi,
+  listInstallationRepositories,
   type ReleaseFactsReader,
   type RepoRef,
   type SelfCheckItem,
@@ -63,7 +62,6 @@ import { productionPreflightReaders } from './france-preflight.ts';
 import { liveFranceReleasePort } from './france-release.ts';
 import { githubAppMissing, githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
-import type { GitHubUserPort } from './github-user.ts';
 import { serviceHealthChecks } from './health.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { createHostResourceSampler, realHostReader } from './host-resources.ts';
@@ -100,40 +98,6 @@ const log = jsonLogger();
  * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起，
  * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
  */
-/**
- * 把 @fleet-dao/github 的 userApi 收成后端用的 GitHubUserPort（#1989）。差别只有一处：那边 authorizeUrl 不带
- * redirect_uri（GitHub 认 App 上登记的，我们每个环境不同），这里补上；configured() 看两个 App 有没有 client_secret。
- */
-function adaptUserApi(api: GitHubUserApi): GitHubUserPort {
-  return {
-    configured: () => api.configured(),
-    exchangeCode: (input) => api.exchangeCode(input),
-    viewer: (token) => api.viewer(token),
-    listRepos: (token) => api.listRepos(token),
-    readTestCommand: (token, repo) => api.readTestCommand(token, repo),
-    installationsForApp: (role, token) => api.installationsForApp(role, token),
-    installationRepoIds: (token, id) => api.installationRepoIds(token, id),
-    addReposToInstallation: (token, id, repos) => api.addReposToInstallation(token, id, repos),
-    removeReposFromInstallation: (token, id, repos) => api.removeReposFromInstallation(token, id, repos),
-    authorizeUrl: ({ redirectUri, state, role = 'agent' }) => {
-      const url = new URL(GITHUB_AUTHORIZE_URL);
-      url.searchParams.set('client_id', api.clientIdFor(role));
-      url.searchParams.set('redirect_uri', redirectUri);
-      url.searchParams.set('state', state);
-      // 读仓列表、读安装、改安装这几样要的权限；不申请写代码的（令牌泄漏也能在 GitHub 上撤、影响面小）。
-      url.searchParams.set('scope', 'read:org repo');
-      return url.toString();
-    },
-    appInstallUrl: ({ role, ownerId, repositoryId, state }) => {
-      const url = new URL(`https://github.com/apps/${api.slugFor(role)}/installations/new/permissions`);
-      if (ownerId > 0) url.searchParams.set('target_id', String(ownerId));
-      url.searchParams.append('repository_ids[]', String(repositoryId));
-      url.searchParams.set('state', state);
-      return url.toString();
-    },
-  };
-}
-
 /** 机器人凭据没读到：发版卡读 GitHub 的每一样都如实抛这个原因（卡上各行写没查成 + 原因）。 */ function credentialsMissingFacts(
   why: string,
 ): ReleaseFactsReader {
@@ -154,14 +118,14 @@ function githubMirror(db: Db): {
   sink: GitHubEventSink;
   credentialsMissing?: () => Promise<void>;
   releaseFacts: ReleaseFactsReader;
-  /** 本人身份那一套（#1989，设置页「导入仓库」）：列仓、装 App。凭据没读到就没有，那几个接口回 503。 */
-  userHit?: GitHubUserPort;
   /** 「要你拍」拍完往进度单、任务单留言（#1915）；凭据没读到就没有，答案照存、回包写没接上。 */
   decisionCommenter?: DecisionCommenter;
   /** 重查 GitHub App。凭据没读到就没有，重查报「凭据没读到」。 */
   selfCheck?: (repos: RepoRef[]) => Promise<SelfCheckItem[]>;
   /** 提需求（#2060）开单、写回评论、读单子状态，都用「引擎」机器人；凭据没读到就没有，开单回 503，不假装开了。 */
   requestIssues?: RequestIssuePort;
+  /** 导入列表：两个机器人的安装令牌。凭据没读到就没有，列表回「没接上」。 */
+  installationRepos?: Deps['installationRepos'];
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
@@ -169,7 +133,6 @@ function githubMirror(db: Db): {
     return {
       sink: gh.eventSink({ async wake() {} }),
       releaseFacts: gh.releaseFacts,
-      userHit: adaptUserApi(gh.userApi),
       decisionCommenter: {
         async comment(input) {
           const got = await gh.commentIssue(input);
@@ -177,6 +140,9 @@ function githubMirror(db: Db): {
         },
       },
       selfCheck: (repos) => gh.selfCheck(repos),
+      installationRepos: {
+        list: (role) => listInstallationRepositories(gh.client, role),
+      },
       requestIssues: {
         // 不走发件箱，同步调（母单 #2047 方案第六节）；正文过卫生检查、幂等都在 @fleet-dao/github 的 openIssue / commentIssue 里
         async openIssue(input) {
@@ -342,7 +308,7 @@ async function assemble(): Promise<{
     workflows: temporal.control,
     taskRedo: temporal.taskRedo,
     github: github.sink,
-    ...(github.userHit ? { githubUser: github.userHit } : {}),
+    ...(github.installationRepos ? { installationRepos: github.installationRepos } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     decisionCapabilities: {
       recheckGitHubApp: (repo) => runGitHubAppRecheck(github.selfCheck, repo),
@@ -371,7 +337,10 @@ async function assemble(): Promise<{
     // 每条路由的思考档位（#470）：引擎起会话时现读的就是这一列，改了下一个会话照新的
     routingEfforts: pgRoutingEfforts(db, now),
     // 路由两层的先后和开关（母单 #1089）：驾驶舱「路由」页改的就是选路读的那两张表的 position、enabled
-    routingOrder: pgRoutingOrder(db, now),
+    routingOrder: pgRoutingOrder(db, now, {
+      routeWake: { wake: temporal.routeWake },
+      log,
+    }),
     // 按单指定模型：引擎给这张单的一段选路时现读的就是这张表，改了下一次选路照新的
     taskRoutePins: pgTaskRoutePins(db, now),
     // 本机领单（决定 0096）：本机会话经通行证写 tasks 那一行（executor = local、带租约），法国拉单按它不接、到期收回

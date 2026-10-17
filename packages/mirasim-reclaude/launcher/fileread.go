@@ -11,6 +11,10 @@ import (
 // Windows 上是共享冲突，各平台都可能读到别的进程刚写一半的内容。隔 50ms 重读，最多 3 次，仍不行才明确失败。
 var transientRetryDelay = 50 * time.Millisecond
 
+// retrySleep 是重读前的等待；测试换掉它，在等待那一刻同步完成替换，不靠真睡。
+// 另起 goroutine 睡几十毫秒再替换会跟调度抢：150ms 的重试窗口耗尽时读到的仍是半截。
+var retrySleep = time.Sleep
+
 const transientRetries = 3
 
 type readFailure struct {
@@ -33,7 +37,7 @@ func readJSONFile(path string, v any) error {
 	var last *readFailure
 	for attempt := 0; attempt <= transientRetries; attempt++ {
 		if attempt > 0 {
-			time.Sleep(transientRetryDelay)
+			retrySleep(transientRetryDelay)
 		}
 		b, err := readFileShared(path)
 		if err != nil {

@@ -8,8 +8,10 @@ import {
   decideBreaker,
   hasVisibleSignal,
   hourlyRemaining,
+  intakeTierCost,
   MAX_STARTS_PER_HOUR,
   type PickKey,
+  pickDeficitRoundRobin,
   readOrderBook,
   serialOf,
   sortCandidates,
@@ -58,6 +60,54 @@ describe('comparePick · 一档一档比', () => {
     ];
     expect(sortCandidates(items, (x) => x.k).map((x) => x.n)).toEqual([2, 1]);
     expect(items.map((x) => x.n)).toEqual([1, 2]);
+  });
+});
+
+describe('pickDeficitRoundRobin · 按仓公平吃全局名额', () => {
+  const queue = (
+    repoId: string,
+    candidates: number[],
+    over: Partial<{ weight: number; used: number }> = {},
+  ) => ({
+    repoId,
+    weight: over.weight ?? 1,
+    used: over.used ?? 0,
+    candidates,
+  });
+
+  it('两个仓各有 10 张快单、空位 6：各起 3 张', () => {
+    const picked = pickDeficitRoundRobin(
+      [
+        queue(
+          'r1',
+          Array.from({ length: 10 }, (_, i) => i),
+        ),
+        queue(
+          'r2',
+          Array.from({ length: 10 }, (_, i) => i),
+        ),
+      ],
+      6,
+      () => intakeTierCost('fast'),
+    );
+    expect(picked.map((p) => p.repoId)).toEqual(['r1', 'r2', 'r1', 'r2', 'r1', 'r2']);
+  });
+
+  it('一个仓没有候选：另一个仓吃满 6 个名额', () => {
+    const picked = pickDeficitRoundRobin(
+      [queue('empty', []), queue('busy', [1, 2, 3, 4, 5, 6, 7])],
+      6,
+      () => 1,
+    );
+    expect(picked).toHaveLength(6);
+    expect(picked.every((p) => p.repoId === 'busy')).toBe(true);
+  });
+
+  it('仓队列换顺序，结果不变；历史工作量会让已吃多的仓后让', () => {
+    const a = [queue('r2', [2, 3, 4], { used: 2 }), queue('r1', [1, 5, 6])];
+    const b = [...a].reverse();
+    expect(pickDeficitRoundRobin(a, 4, () => 1)).toEqual(pickDeficitRoundRobin(b, 4, () => 1));
+    expect(pickDeficitRoundRobin(a, 4, () => 1).map((p) => p.repoId)).toEqual(['r1', 'r1', 'r1', 'r2']);
   });
 });
 

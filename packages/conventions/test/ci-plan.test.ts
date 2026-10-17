@@ -139,7 +139,7 @@ describe('按改动算要跑什么', () => {
     }
   });
 
-  it('根配置、锁文件、CI 工作流、shared、测试夹具、deploy/：全跑', () => {
+  it('根配置、锁文件、CI 工作流、shared、deploy/：全跑', () => {
     for (const f of [
       'pnpm-lock.yaml',
       'package.json',
@@ -150,12 +150,19 @@ describe('按改动算要跑什么', () => {
       'vitest.config.ts',
       '.github/workflows/ci.yml',
       'packages/shared/src/domain.ts',
-      'packages/adapters/test/fixtures/claude-code/x.ndjson',
-      'packages/adapters/test/quota/fixtures/y.json',
       'deploy/lib/common.sh',
     ]) {
       expect(pr(f).full, f).toBe(true);
     }
+  });
+
+  it('测试夹具不升全跑：只测它所在的包，加上测试读这个包的；不把依赖它的整串拉进来', () => {
+    const f = 'packages/adapters/test/fixtures/claude-code/cc-haiku-read.ndjson';
+    const p = pr(f);
+    expect(p.full).toBe(false);
+    // db 的测试读 adapters 的夹具（TEST_READS）。engine 依赖 adapters，但夹具在面以外，不连带。
+    expect(units(p)).toEqual(['adapters', 'db']);
+    expect(units(p)).not.toContain('engine');
   });
 
   it('纯文档（docs、specs、README、开单表单）：什么都裁掉，lint 里只剩 docs、hygiene 两步', () => {
@@ -448,13 +455,7 @@ describe('要全跑、本机又不全跑时先跑哪些（fallbackUnits，给 te
     });
   });
 
-  it('测试夹具、不在依赖图里的包目录：算那个包自己，依赖它的放进 dependents', () => {
-    expect(fb('packages/adapters/test/fixtures/claude-code/x.ndjson')).toEqual({
-      units: ['adapters'],
-      hubs: ['adapters'],
-      // db 读 adapters 的夹具（TEST_READS），不在 package.json 的依赖闭包里，也要留给 CI
-      dependents: [...usersOf('adapters'), AGENTS_UNIT, 'db'].sort(),
-    });
+  it('不在依赖图里的包目录：算那个包自己', () => {
     expect(fb('packages/nope/src/x.ts')).toEqual({ units: ['nope'], hubs: ['nope'], dependents: [] });
   });
 

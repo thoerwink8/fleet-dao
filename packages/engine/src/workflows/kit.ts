@@ -10,6 +10,7 @@ import {
   ChildWorkflowFailure,
   isCancellation,
   log,
+  patched,
   proxyActivities,
   proxyLocalActivities,
   sleep,
@@ -21,10 +22,12 @@ import {
   type ActivityName,
   activityOptions,
   type EngineActivities,
+  profileOptions,
 } from '../activity-options.ts';
 import type { FailureInfo } from '../decisions/failure.ts';
 import type { Decide, DecisionKind, DecisionMap } from '../decisions/index.ts';
 import type { Limits } from '../limits.ts';
+import { SELF_CHECK_ACTIVITY_MS } from '../self-check-budget.ts';
 
 /** 流程判断：本地活动，结果进历史，重放时不重算。自己带几次重试；再不行由调用方按兜底梯走，不判死。 */
 const { decide } = proxyLocalActivities<{ decide: Decide }>({
@@ -70,8 +73,16 @@ export function limitsFor(partial: Partial<Limits> | undefined): Promise<Limits>
 /** 给每个活动配上它自己的选项（那一档的超时与重试、叫停时等不等它收场），见 activity-options.ts。 */
 export function activitiesFor(limits: Limits): EngineActivities {
   const out: Partial<Record<ActivityName, unknown>> = {};
+  // 自测原来和建树同一档（20 分钟、重试 3 次）。预算比这档长，限时先到就整段重跑。
+  // 新历史用自己的档。老历史重放仍用建树那档，调度出去的超时和重试才和历史对得上。
+  // 只在造代理时问一次：问过档就定了，同一条历史里不会一会儿旧档一会儿新档。
+  const selfCheckOwnTimeout = patched('self-check-own-timeout');
   for (const name of Object.keys(ACTIVITY_PROFILE) as ActivityName[]) {
-    out[name] = proxyActivities<EngineActivities>(activityOptions(name, limits))[name];
+    const options =
+      name === 'selfCheck' && !selfCheckOwnTimeout
+        ? profileOptions('setup', limits)
+        : activityOptions(name, limits);
+    out[name] = proxyActivities<EngineActivities>(options)[name];
   }
   return out as EngineActivities;
 }
@@ -81,25 +92,82 @@ export function iso(ms: number): string {
 }
 
 /** 活动失败 → 失败分流要的结构化信息。只做提取，不做判断。 */
-export function failureOf(error: unknown, source: string): FailureInfo {
+export function failureOf(error: unknown, source: string, limits?: Limits): FailureInfo {
   let cause: unknown = error;
+  const activity = cause instanceof ActivityFailure ? cause.activityType : undefined;
   if ((cause instanceof ActivityFailure || cause instanceof ChildWorkflowFailure) && cause.cause)
     cause = cause.cause;
   if (cause instanceof ApplicationFailure) {
     return { source, code: cause.type ?? 'Error', message: cause.message, retryable: !cause.nonRetryable };
   }
   if (cause instanceof TimeoutFailure) {
+    const engineStartedAt = heartbeatEngineStartedAt(cause.lastHeartbeatDetails);
+    const startToCloseSeconds = activity ? startToCloseFor(activity, limits) : undefined;
     return {
       source,
       code: `TIMEOUT_${cause.timeoutType ?? 'UNKNOWN'}`,
       message: cause.message,
       retryable: true,
+      ...(activity ? { activity } : {}),
+      ...(startToCloseSeconds === undefined ? {} : { startToCloseSeconds }),
+      ...(engineStartedAt ? { engineStartedAt } : {}),
     };
   }
   if (cause instanceof TemporalFailure || cause instanceof Error) {
     return { source, code: cause.name, message: cause.message, retryable: null };
   }
   return { source, code: 'UNKNOWN', message: String(cause), retryable: null };
+}
+
+/** 只收活动心跳里明确写下的启动时刻；没有凭据就不猜是不是换过引擎。 */
+function heartbeatEngineStartedAt(details: unknown): string | undefined {
+  if (!details || typeof details !== 'object') return undefined;
+  const value = (details as { engineStartedAt?: unknown }).engineStartedAt;
+  return typeof value === 'string' && value.trim() !== '' ? value : undefined;
+}
+
+/** 固定活动的 StartToClose 配置，动态的 CI 时长没有证据时不伪造数字。 */
+function startToCloseFor(activity: string, limits?: Limits): number | undefined {
+  switch (activity) {
+    case 'runSegment':
+    case 'coldVerify':
+      return 75 * 60;
+    case 'createWorktree':
+      return 20 * 60;
+    case 'selfCheck':
+      return SELF_CHECK_ACTIVITY_MS / 1000;
+    case 'waitMerged':
+      return 20 * 60;
+    case 'probeAssignedRoute':
+      return 10 * 60;
+    case 'waitCi':
+      return (limits?.ciMinutes ?? 40) * 60;
+    case 'pickRoute':
+    case 'recordTiming':
+    case 'saveTaskState':
+    case 'recordRound':
+    case 'raiseAlert':
+    case 'releaseReservation':
+    case 'readCiPolicy':
+    case 'planSegmentResume':
+    case 'segmentSettled':
+    case 'taskSpend':
+      return 30;
+    case 'removeWorktree':
+    case 'pushBranch':
+    case 'openPr':
+    case 'updatePrBody':
+    case 'syncMainline':
+    case 'closeIssue':
+    case 'readTaskBrief':
+    case 'readDelivery':
+    case 'checkGuarded':
+    case 'armAutoMerge':
+    case 'mergeNow':
+      return 5 * 60;
+    default:
+      return undefined;
+  }
 }
 
 /** 活动失败里带的冲突文件名（PortError.details.conflictFiles）；没有就从原文「有冲突：a、b。」里拆。 */

@@ -7,6 +7,8 @@ import {
   type Channel,
   type ChannelStateRecord,
   ciPolicyOf,
+  type FlowAssignment,
+  FlowAssignmentExistsError,
   type Model,
   type Pool,
   type RealtimeTable,
@@ -61,9 +63,7 @@ import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import type {
   AuditRecord,
   CommandClaim,
-  GitHubAppRole,
   GitHubDelivery,
-  GitHubTokenRecord,
   JobRecord,
   NewAuditEntry,
   NodeReportRecord,
@@ -159,6 +159,8 @@ export interface MemoryData {
   users: MemoryUser[];
   repos: RepoRecord[];
   tasks: Task[];
+  /** 全程模式的分组记录（task_flow_assignments，#2823），每张单最多一行。 */
+  flowAssignments: FlowAssignment[];
   subtasks: Subtask[];
   /**
    * 占着池名额的在途会话（库里 runs 表里带路由、没结束的行；stage 是这一段按 SEGMENT_STAGE 换的用途）：内存版的 poolOccupancy
@@ -191,8 +193,6 @@ export interface MemoryData {
   githubEvents: Map<string, GitHubDelivery>;
   /** 账密登录的几列（库里是 users 表上的列），按用户编号；没设过的人不在里面。 */
   credentials: Map<string, PasswordCredentials>;
-  /** 各人自己的 GitHub 授权（#1989，库里是 github_tokens），按用户编号；没授权过的人不在里面。 */
-  githubTokens: Map<string, GitHubTokenRecord>;
   /** 别的环境推来的快照（node_reports），一个环境一行。 */
   nodeReports: NodeReportRecord[];
   /** 本机会话（node_sessions，#1991），一个环境一行；report 原样放（读回来再认一遍）。 */
@@ -206,6 +206,7 @@ export function emptyData(): MemoryData {
     users: [],
     repos: [],
     tasks: [],
+    flowAssignments: [],
     subtasks: [],
     runs: [],
     segmentRuns: [],
@@ -228,7 +229,6 @@ export function emptyData(): MemoryData {
     idempotency: new Map(),
     githubEvents: new Map(),
     credentials: new Map(),
-    githubTokens: new Map(),
     nodeReports: [],
     nodeSessions: [],
     worktreeInventory: null,
@@ -442,6 +442,28 @@ export function createMemoryStore(
     },
     async getTask(id) {
       return data.tasks.find((t) => t.id === id) ?? null;
+    },
+    async writeFlowAssignmentOnce(input) {
+      if (!data.tasks.some((t) => t.id === input.taskId)) throw new Error(`没有这张单：${input.taskId}`);
+      if (data.flowAssignments.some((a) => a.taskId === input.taskId))
+        throw new FlowAssignmentExistsError(input.taskId);
+      const row: FlowAssignment = {
+        taskId: input.taskId,
+        mode: input.mode,
+        source: input.source,
+        stratum: input.stratum,
+        assignedAt: now().toISOString(),
+        reason: input.reason ?? null,
+      };
+      data.flowAssignments.push(row);
+      // 和库里一样：分组记录和 tasks.flow_mode 一起写（#2826）
+      const task = data.tasks.find((t) => t.id === input.taskId);
+      if (task) task.flowMode = input.mode;
+      return { ...row };
+    },
+    async getFlowAssignment(taskId) {
+      const found = data.flowAssignments.find((a) => a.taskId === taskId);
+      return found ? { ...found } : null;
     },
     async listTasks({ group, repoId, q, cursor: raw, limit }) {
       const matching = data.tasks.filter(
@@ -1134,38 +1156,5 @@ export function createMemoryStore(
       data.repos = data.repos.filter((r) => r.id !== repoId);
       return 'removed';
     },
-    async getGitHubToken(userId, role) {
-      const row = data.githubTokens.get(githubTokenKey(userId, role));
-      return row ? { ...row } : null;
-    },
-    async listGitHubTokens(userId) {
-      const out: GitHubTokenRecord[] = [];
-      for (const role of ['agent', 'engine'] as const) {
-        const row = data.githubTokens.get(githubTokenKey(userId, role));
-        if (row) out.push({ ...row });
-      }
-      return out;
-    },
-    async putGitHubToken(input) {
-      data.githubTokens.set(githubTokenKey(input.userId, input.role), {
-        userId: input.userId,
-        githubId: input.githubId,
-        login: input.login,
-        role: input.role,
-        accessTokenCipher: input.accessTokenCipher,
-        scopes: input.scopes,
-        expiresAt: input.expiresAt,
-        updatedAt: now().toISOString(),
-      });
-    },
-    async deleteGitHubToken(userId, role) {
-      const roles: GitHubAppRole[] = role ? [role] : ['agent', 'engine'];
-      for (const item of roles) data.githubTokens.delete(githubTokenKey(userId, item));
-    },
   };
-}
-
-/** 一个人每个 App 一行。键把两边分开，断开时按人删光。 */
-function githubTokenKey(userId: string, role: GitHubAppRole): string {
-  return `${userId}:${role}`;
 }
