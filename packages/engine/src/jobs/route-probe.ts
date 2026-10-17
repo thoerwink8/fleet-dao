@@ -108,7 +108,7 @@ interface ProbeCapture {
 
 export type ProbeAttempt =
   | ({ kind: 'answered'; detail: string } & ProbeCapture)
-  | ({ kind: 'quota'; detail: string } & ProbeCapture)
+  | ({ kind: 'quota'; detail: string; resetsAt?: string } & ProbeCapture)
   | ({
       kind: 'failed';
       detail: string;
@@ -151,6 +151,8 @@ export interface RouteProbeJobDeps {
     requestText: string | null;
     /** 没拿到响应为 null。 */
     responseText: string | null;
+    quotaExhausted?: boolean;
+    resetsAt?: Date | null;
     /** 身份题的题和判的结果；没带题为空。 */
     check?: ProbeCheck | null;
     /** 节奏档、下次探测、连着不通几次、触发者（与 @fleet-dao/db 的 RouteProbeWrite 对齐，#1798 片 3）。 */
@@ -464,6 +466,8 @@ export interface Conclusion {
   durationMs: number | null;
   requestText: string | null;
   responseText: string | null;
+  quotaExhausted?: boolean;
+  resetsAt?: Date | null;
   check?: ProbeCheck | null;
   /** 真探时的种类；没真探为空。 */
   kind?: RouteProbeKind | null;
@@ -477,6 +481,8 @@ function captureOf(attempt: ProbeAttempt): {
   responseText: string | null;
   check: ProbeCheck | null;
   kind: RouteProbeKind | null;
+  quotaExhausted: boolean;
+  resetsAt: Date | null;
 } {
   return {
     durationMs: attempt.durationMs ?? null,
@@ -484,6 +490,11 @@ function captureOf(attempt: ProbeAttempt): {
     responseText: attempt.responseText ?? null,
     check: attempt.check ?? null,
     kind: attempt.probeKind ?? null,
+    quotaExhausted: attempt.kind === 'quota',
+    resetsAt:
+      attempt.kind === 'quota' && attempt.resetsAt && Number.isFinite(Date.parse(attempt.resetsAt))
+        ? new Date(attempt.resetsAt)
+        : null,
   };
 }
 
@@ -826,6 +837,8 @@ async function probeRound(deps: RouteProbeJobDeps): Promise<{ result: ScheduleRe
         durationMs: c.durationMs,
         requestText: c.requestText,
         responseText: c.responseText,
+        ...(c.quotaExhausted !== undefined ? { quotaExhausted: c.quotaExhausted } : {}),
+        ...(c.resetsAt !== undefined ? { resetsAt: c.resetsAt } : {}),
         check: c.check ?? null,
         tier: c.tier,
         nextAt: c.nextAt,
@@ -932,6 +945,8 @@ export async function probeOrgNow(deps: RouteProbeJobDeps, kind: OrgKind): Promi
         durationMs: c.durationMs,
         requestText: c.requestText,
         responseText: c.responseText,
+        ...(c.quotaExhausted !== undefined ? { quotaExhausted: c.quotaExhausted } : {}),
+        ...(c.resetsAt !== undefined ? { resetsAt: c.resetsAt } : {}),
         tier: c.tier,
         nextAt: c.nextAt,
         failStreak: c.failStreak,
