@@ -1,6 +1,6 @@
 # hooks / Agent 全量审计
 
-本稿记录现行职责和 #2954 撤层边界。当前 agents/hooks 下实有 35 个 .mjs 模块；过程入口按 plugin-catalog 的现行目录登记，库模块不另起过程入口。
+本稿覆盖 #2937 的 hooks、Agent、本机会话心跳、同步、脱离工人及 Mirasim 接入机制，记录现行职责和已完成的撤层边界。当前 agents/hooks 下实有 35 个 .mjs 模块；过程入口按 plugin-catalog 的现行目录登记，库模块不另起过程入口。
 
 结论：原生消息链应成为唯一投递通道。在役宿主的忙时、连续多条与异常恢复验收通过，现撤“读未落盘账猜丢失，再从 hook 补原文”的第二条投递链；仓约定、安全、同步、容量、无人值守、队列与外部工人终态通知仍有独立业务职责。没有单独 hook 登记的库模块不因此成为死代码。
 
@@ -68,6 +68,21 @@
 
 Explore / Plan 未列 tools allowlist，省略 tools 时仍继承 Bash / PowerShell / MCP 等能力；“只读”是职责和禁直接编辑约束，不是 OS 沙箱。本轮无真实越权证据，不顺手删合法检索 / 测试工具；严格只读应另单定义。maxTurns 触顶也不表示任务完成。角色模型、权限或分档不属于 #2954 范围。
 
+## 本机会话、同步、脱离工人与接入
+
+这些模块不会因为宿主已有 Agent / hooks / steer 就自动失去业务职责。下表按实际入口覆盖总单其余目录；测试链接说明已有回归覆盖，不能据此声称本轮重新执行过真实安装或生产生命周期。
+
+| 机制与源码 | 目的、写方 / 存储 / 读方 | 原生能力与去留 | 已合修复与验收证据 |
+|---|---|---|---|
+| [local-sessions/lib.mjs](../../agents/local-sessions/lib.mjs)、[heartbeat.mjs](../../agents/local-sessions/heartbeat.mjs) | SessionStart / Stop / SubagentStop / SessionEnd 异步写本机 sessions 元信息；推送时结合 transcript 修改时间及有限尾读判断活动。不记录 prompt、代码、命令参数或完整路径 | 宿主会话列表不提供本仓多机上报。保留；心跳失败不阻会话，也不作为模型已读凭据；没有 PreToolUse 登记 | [#2053](https://github.com/thoerwink8/fleet-dao/pull/2053) 摘掉工具前心跳、减少重复起进程；[local-sessions 回归](../../agents/test/local-sessions.test.ts) 覆盖隐私字段、会话归属、过期与事件合同 |
+| [local-sessions/push.mjs](../../agents/local-sessions/push.mjs)、[loop.mjs](../../agents/local-sessions/loop.mjs)、[install.mjs](../../agents/local-sessions/install.mjs) | 安装器只改自有心跳登记并备份设置；计划任务或登录循环每2分钟推元信息，写 last-push.json；心跳可复活已有死循环，驾驶舱读取上报及新鲜度 | 宿主不会替本仓上传多机进展。保留；计划任务与自启只留一路，推送失败退出非0并留原因。循环锁不是消息投递账，不用它补创始人原文 | [#2785](https://github.com/thoerwink8/fleet-dao/pull/2785) 修脱离聊天父树；[回归](../../agents/test/local-sessions.test.ts) 覆盖失败、重装、两路互斥和循环恢复；不把源码测试扩成所有重启组合实测 |
+| [local-sessions/detach.mjs](../../agents/local-sessions/detach.mjs) | 共用脱离原语：Windows 经 WMI，Linux 经 setsid；供会话循环、work-run 与同步生成的 hooks/_detach.mjs 调用 | Windows detached 进程组仍可能被父树终止，原生 Agent 不能代替这个边界。保留一份原件；生成副本不是第二份业务实现 | [#2785](https://github.com/thoerwink8/fleet-dao/pull/2785)、[#2965](https://github.com/thoerwink8/fleet-dao/pull/2965)；已安装后台 WMI success / exit7 回执和受限 PATH / 超时回归的范围见上文 |
+| [agents-sync/sync.ts](../../packages/agents-sync/src/sync.ts)、[hooks.ts](../../packages/agents-sync/src/hooks.ts)、[main.ts](../../packages/agents-sync/src/main.ts)、[targets.ts](../../packages/agents-sync/src/targets.ts) | readSources 从受管源码读通用段、skills、hooks、权限和角色；按目标与 manifest 精确安装 / 退役，写前备份、写后读回；只 refresh 已安装的 local-sessions。宿主随后读取各家登记 | 各家原生配置不维护本仓原件和升级归属。保留；读不到不拿空目录触发退役；保留第三方配置、混组、禁用与自定义入口 | [#2945](https://github.com/thoerwink8/fleet-dao/pull/2945) 精确登记 / 墓碑、[#2958](https://github.com/thoerwink8/fleet-dao/pull/2958) / [#2964](https://github.com/thoerwink8/fleet-dao/pull/2964) 共享 Codex hooks、[#2996](https://github.com/thoerwink8/fleet-dao/pull/2996) 真实 readSources→临时安装→main-thread / session-start 集成；本机正常同步 readback 另见下表 |
+| [work-run.ts](../../packages/conventions/src/work-run.ts)、[work.ts](../../packages/conventions/src/work.ts)、[work-queue.ts](../../packages/conventions/src/work-queue.ts) | 派工前核容量、按原 work 入口领单，从 origin/main 建独立树；经 reclaude 起 general-purpose 无头工人。spec / state / result 记 dispatcher、会话、心跳和终态；30秒心跳、20分钟续租，失败明记 lastRenewOk；网关断后有界退避并 resume 原会话 | 原生 Agent 生命周期受宿主影响，也不维护跨会话租约。保留隔离、租约与进展；不能把心跳当成功，不能把退出0但错误结果当完成；身份 / 权限错误失败，重试有上限 | [#2788](https://github.com/thoerwink8/fleet-dao/pull/2788)；[work-run 回归](../../packages/conventions/test/work-run.test.ts) 覆盖容量失败、重复派工、工作树、续租失败、恢复和重试上限 |
+| [continuation-progress.mjs](../../agents/hooks/continuation-progress.mjs)、[continuation-results.mjs](../../agents/hooks/continuation-results.mjs)、[work-watch.mjs](../../agents/hooks/work-watch.mjs) | 成功新动作给本 sid 写 progress receipt；正常 Stop 读取同 dispatcher 工人终态并按结果去重。work-watch 只等终态 / 看护失联后唤醒派工会话；无人值守上限仍由 unattended 控制 | 原生 Agent 完成通知不覆盖外部 supervisor，原生 Stop 只给续轮原语。保留；重复查询 / sleep 不续命，off、done、needs-you 优先；不自动开启无人值守 | [#2951](https://github.com/thoerwink8/fleet-dao/pull/2951) 含真实 Claude / Codex 正常 Stop 同会话 phase1→phase2→done；[#2996](https://github.com/thoerwink8/fleet-dao/pull/2996) 保留这些活入口，未再造投递账 |
+| [mirasim-reclaude/migrate.ts](../../packages/mirasim-reclaude/src/migrate.ts)、[auto.ts](../../packages/mirasim-reclaude/src/auto.ts)、[launches.ts](../../packages/mirasim-reclaude/src/launches.ts) | 锁保护迁移，保存原启动命令和制品哈希；所有原生实例完整列表及明确 noRun / 空队列确认闲，判闲后重读源码，写启动入口再回读。单会话裸 claude 覆盖另报；自定义或主动撤回不自动盖回 | 原生启动设置不保证经 reclaude，也不核仓内制品。保留；busy / unknown 等待，不能删历史目录伪造空闲，不能只看版本号当制品正确 | [#2962](https://github.com/thoerwink8/fleet-dao/pull/2962) / [迁移回归](../../packages/mirasim-reclaude/test/migrate.test.ts)；真实安装 sourceHash / binaryHash / --fleet-version 与投递链见下文本地探针、在役宿主恢复证据 |
+| [mirasim-reclaude/launcher/main.go](../../packages/mirasim-reclaude/launcher/main.go) 及 launcher 同目录实现 | 启动器守护 stream-json 与 reclaude 子进程，stdout 保留宿主协议，诊断写 stderr / 无凭据日志；忙时 user 直接透传，EOF 后继续读输出，直到真实结果 | 宿主原生 steer 需要完整到达 CLI，接入层仍负责进程 / 协议边界。保留修复后的透传，不能因 hook 撤层撤掉启动器，也不在此补消息历史 | [#2946](https://github.com/thoerwink8/fleet-dao/pull/2946)；installed busy / sequence / resume 与 v7e 真实模型链分别覆盖正常忙时和异常恢复，不据此声称所有 cloud / control / 图文场景通过 |
+
 ## #2954 精确实现边界
 
 实际在役 Mirasim 0.0.545 的忙时单条、连续4条（重复短文/包含关系）及WS重连、精确自有CLI异常后的held恢复均有模型处理链独验。local/cloud共用活动user转送路径，补话hook也不能修平台额度拒绝，因此不再增加“必须cloud成功一次”的门槛；两次cloud429继续保留红。
@@ -82,7 +97,7 @@ Explore / Plan 未列 tools allowlist，省略 tools 时仍继承 Bash / PowerSh
 
 StopFailure 不能直接挂普通 stop：官方定义它为 API 错误结束，且没有 decision control。普通 stop 的 block / 进展消费 / 完成消费不能原样搬过去，否则会记“接续”但宿主不续。若真实失败用例需要，另做失败诊断 / 未完成状态，不消费 completion，也不假设 asyncRewake 在该组合上有效。跨宿主 teardown 的后台工作生命周期另验。
 
-低优先项不扩大本单：session-start 的 plainRun 在本基线仍只有定义无调用，后续清理归 #2937；纯 node 过程入口可另片评估 exec 减 shell；bootstrap / session-start 合并要先有重复耗时证据；prompt-log 日文件去重成本尚未证明是主阻塞。
+session-start 未导出且无调用的 plainRun 已删除。纯 node 过程入口的 exec 减 shell、bootstrap / session-start 合并及 prompt-log 日文件去重成本，没有足够证据证明应改；本轮不据名称或猜测重写，也不把它们设为审计收口门槛。
 
 ## 本机原生 schema 与 installed 探针
 
@@ -124,11 +139,12 @@ Claude CLI 2.1.302 本轮忙时输入的真实保存形式：
 
 旧临时 launcher 探针曾以随机反转证明模型处理，但字面 ACK 多空格，strict=false 保留 false；它不是实际安装验收。当前 v2 真 installed 探针补足了本地 launcher 的实证，仍不能替代 cloud 路由入口。
 
-## 验收状态与待补
+## 验收状态与覆盖边界
 
 | 项目 | 状态与边界 |
 |---|---|
 | 现行模块 / 三角色职责审计 | 当前 35 个模块逐项覆盖；退役投递模块不计入 |
+| local-sessions / agents-sync / work-run / mirasim-reclaude | 上表按原总单范围补齐源码、写存读链、原生边界、去留及已合修复 / 回归证据；隔离、权限、租约、进展与正常 Stop 接续保留 |
 | 精确登记与退役墓碑 | #2945 已合，不能重复列未修 |
 | Claude 正常 Stop 同 session 自动续轮 | 已有真实 2.1.302 隔离 phase1 → phase2 → done 证据；不扩成所有失败 / vendor 组合均通过 |
 | Codex 共享 hooks 布局 | #2958 已合；真实安装 readback 以根代理证据为准 |
@@ -136,7 +152,11 @@ Claude CLI 2.1.302 本轮忙时输入的真实保存形式：
 | installed 本地 stream busy / sequence / resume | v2 三例全通过；旧 v1 两例 false 保留 |
 | 真实 Mirasim cloud 忙时 steer / 计费来源 | 已执行但红：两次真实模型请求 viaRelay:true / HTTP429 / credit_exhausted_30d，fixture 未启动；无 retryAt，不声称cloud成功，也不再增加撤层门槛 |
 | 图文帧、权限 / control 未结束、主线程死亡后的完成交付 | 不以本轮三个文本探针代替，按实际需求另列验收，不作已通过承诺 |
-| #2954 代码撤除 | 本实现撤重复投递三模块；相关业务回归和完整CI通过后交付，不因此关闭全量审计母项 #2937 |
+| #2954 代码撤除 | [#2996](https://github.com/thoerwink8/fleet-dao/pull/2996) 已合：退役重复投递三模块，保留原生历史与后台恢复；302项定向业务回归和完整CI 19 jobs通过；不将本机全量选择器退出3称作 pnpm check 整体通过 |
+
+正常 `pnpm agents:sync --offline` 已退出0，受管专用检出的 origin/main 为 `b73dfd539c57c28e4aee1f968dd9950c4f2a7baf`；installed 中三个退役模块已移除，background-recovery / session-id 两个 helper 到位，Codex 四事件及信任、local-sessions 同步成功，未重启 Mirasim。这只核受管安装与最新主线项目登记：用户主检出仍在旧 main、保留原有四项草稿，其旧项目登记仍指向该检出的 agents 源码；正常同步不改用户开发检出，不能声称所有旧检出或已开会话都已换成新版。
+
+根代理独立 readback 核实受管源干净、35个 .mjs 与 installed 逐个 SHA256 匹配、三退役脚本缺席、两 helper 存在；过程目录7入口且保留 inbox-watch 墓碑，用户 Claude 设置和最新 main 项目均无退役登记，Codex 默认与 Mirasim relay 均有4事件。随后 `pnpm agents:sync --check` 退出0，改动0 / 一致29 / 漂移0 / 缺失0 / 失败0 / 未知0。安全摘要 `2954-installed-readback.json` 的 SHA256 为 `621c647a1a8d3910509f4452d274a6731c8aee920c928399a03c9b3b172dab55`；原始用户配置不入仓。旧脏主检出仍有1条旧项目登记，按上述版本边界保留，不计作受管安装漂移，也不改草稿或现场启动配置。
 
 ## 公开参考
 
