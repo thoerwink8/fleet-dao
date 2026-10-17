@@ -43,6 +43,8 @@ fi
 
 # 假的 claude、codex 放进他家的 .local/bin：同步脚本按它判这台装了哪几家
 install -d -o "$U" -g "$U" -m 755 "$H/.local" "$H/.local/bin" "$H/.codex"
+# Mirasim 已安装的平台入口；必须以该用户身份写入相邻配置，不能漏到默认入口。
+install -d -o "$U" -g "$U" -m 755 "$H/.mirasim" "$H/.mirasim/agent-homes" "$H/.mirasim/agent-homes/codex-relay"
 for b in claude codex; do
   printf '#!/bin/sh\n' >"$H/.local/bin/$b"
   chmod 755 "$H/.local/bin/$b"
@@ -72,6 +74,8 @@ printf -- '---\nname: demo\n---\n演示用的 skill\n' >"$R/agents/skills/demo/S
 printf '// 假的订阅加载器\n' >"$R/agents/hooks/plugin-loader.mjs"
 printf '// 假的调工具前钩子\n' >"$R/agents/hooks/pretool.mjs"
 printf '// 假的 Codex 调工具前钩子\n' >"$R/agents/hooks/pretool-codex.mjs"
+printf '// 假的无人值守开场钩子\n' >"$R/agents/hooks/continuation-start.mjs"
+printf '// 假的完成进展钩子\n' >"$R/agents/hooks/continuation-progress.mjs"
 printf '// 假的开会话钩子\n' >"$R/agents/hooks/session-start.mjs"
 printf '// 假的收尾提醒钩子\n' >"$R/agents/hooks/stop.mjs"
 printf '// 假的落盘钩子\n' >"$R/agents/hooks/prompt-log.mjs"
@@ -111,7 +115,7 @@ check "Mirasim 写的那份 Explore.md 先整份备份了" "$(grep -c '^model: s
 check "上一版同步装的 fleet-scout.md 撤掉了" "$(test -e "$H/.claude/agents/fleet-scout.md" && echo 还在 || echo 撤了)" 撤了
 check "撤之前也备份了" "$(grep -c '^旧的$' "$H"/.fleet-dao/backups/*/.claude/agents/fleet-scout.md)" 1
 check "手写的 my-own.md 没碰" "$(grep -c '^手写的$' "$H/.claude/agents/my-own.md")" 1
-# 决定 0083：用户级只登记拦密钥。脚本仍整份拷进家里，设置里不再登记开会话、收尾、落盘。
+# Claude 过程钩子走项目订阅；Codex 用户入口登记安全和无人值守接续，脚本整份拷进家里。
 check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "// 假的调工具前钩子"
 check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs")" "// 假的收尾提醒钩子"
 check "主对话钩子脚本也拷进了他家（决定 0078）" "$(cat "$H/.fleet-dao/hooks/main-thread.mjs")" \
@@ -119,10 +123,21 @@ check "主对话钩子脚本也拷进了他家（决定 0078）" "$(cat "$H/.fle
 check "Claude 的设置里登记了订阅加载器和调工具前" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.claude/settings.json")" \
   "SessionStart,PreToolUse"
-check "Codex 的 hooks.json 也只登记了调工具前那条（#232）" \
+check "Codex 的 hooks.json 登记安全及开场、进展、Stop 四事件" \
   "$("$NODE" -e 'const s = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); console.log(Object.keys(s.hooks).join(","))' "$H/.codex/hooks.json")" \
-  PreToolUse
-check "Codex 的 config.toml 替那一条记上了信任" "$(grep -c '^trusted_hash = "sha256:' "$H/.codex/config.toml")" 1
+  "PreToolUse,SessionStart,PostToolUse,Stop"
+check "Codex 的 config.toml 替四条逐项记上信任" "$(grep -c '^trusted_hash = "sha256:' "$H/.codex/config.toml")" 4
+check "四条信任的事件键完整，不能重复一条凑数量" \
+  "$(grep '^\[hooks.state.' "$H/.codex/config.toml" | sed -E 's/.*hooks.json:([^:]+):0:0.*$/\1/' | sort | paste -sd , -)" \
+  "post_tool_use,pre_tool_use,session_start,stop"
+check "Mirasim 平台入口登记同一份四事件钩子" \
+  "$(cmp -s "$H/.codex/hooks.json" "$H/.mirasim/agent-homes/codex-relay/hooks.json" && echo 一样)" 一样
+check "Mirasim 平台入口在自己的 config.toml 信任四条" \
+  "$(grep -c '^trusted_hash = "sha256:' "$H/.mirasim/agent-homes/codex-relay/config.toml")" 4
+check "平台信任键使用平台 hooks.json 的路径，不混进默认入口" \
+  "$(grep -cF "$H/.mirasim/agent-homes/codex-relay/hooks.json:" "$H/.mirasim/agent-homes/codex-relay/config.toml")" 4
+check "默认入口不含平台信任键" \
+  "$(grep -cF 'codex-relay/hooks.json:' "$H/.codex/config.toml")" 0
 check "不再为 --user 单独说不登记开会话" "$(grep -c 'SessionStart：替别的用户写（--user）时不登记开会话钩子' <<<"$OUT")" 0
 # 全局 git 忽略：换完身份之后才起的 git 子进程，cwd 还是原来那个仓目录（$U 摸不到）——踩过一次
 # 「fatal: failed to stat '<仓目录>': Permission denied」，git-excludes.ts 加了 -C "$home" 才好

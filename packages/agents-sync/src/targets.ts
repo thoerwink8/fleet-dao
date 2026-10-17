@@ -2,6 +2,7 @@
 // 依据：各家的官方文档或源码（下面逐条注明）；改之前先查那一家现在的读法，别凭印象加落点。
 // 环境变量改过位置的（CODEX_HOME、PI_CODING_AGENT_DIR、KIMI_CODE_HOME、DSH_HOME、CLAUDE_CONFIG_DIR 等）一概不跟：
 // 跟了就会随调用者的环境写到别处（测试拿临时家目录跑，也会被带到真家目录去）。
+// Codex 另覆盖明确列出的 Mirasim 受管目录，只在目录已存在时装，不追任意 CODEX_HOME。
 
 export type Platform = 'win32' | 'linux';
 
@@ -334,6 +335,11 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
 
 /** Codex 记钩子信任的地方：~/.codex/config.toml 的 [hooks.state."…"]（hooks-codex.ts） */
 export const CODEX_CONFIG: Place = { win32: '.codex\\config.toml', linux: '.codex/config.toml' };
+
+/** Mirasim 0.0.547 的平台 Codex 家目录；自有 Codex 仍用默认 ~/.codex。只发现现存实目录，不创建入口。 */
+export const MIRASIM_CODEX_HOMES: readonly Place[] = [
+  { win32: '.mirasim\\agent-homes\\codex-relay', linux: '.mirasim/agent-homes/codex-relay' },
+];
 
 /**
  * 权限装到哪：Claude Code 的用户级权限在 ~/.claude/settings.json 的 permissions 里（code.claude.com/docs/en/permissions），

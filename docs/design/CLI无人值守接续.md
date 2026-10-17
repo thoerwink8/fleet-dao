@@ -9,7 +9,7 @@
 | Claude 原生 | 订阅项目的 process 组：同步 Stop、PostToolUse；SessionStart 读回状态；项目/用户 hooks 不得禁用 | 未完成时 Stop 返回 block + reason 续轮；用 TaskOutput 收任务结果。脱离聊天的工人由已有 asyncRewake 叫醒，Stop 也直接读终态并一次性注入续轮 |
 | Claude 经 Mirasim | 仍依赖 Claude CLI 的项目钩子；加载器安装、Mirasim 指向的家目录和项目路径需读回 | 同上；网关切断/会话被停止不能靠「后台任务还在」证明叫醒，不能把 Mirasim 界面开关当作验证 |
 | Codex 原生 | 用户 hooks.json 登记 SessionStart、PostToolUse、Stop；config.toml 对每条命令的当前哈希逐项信任，保留人关闭的设置 | 同步 Stop 的 block + reason 创建下一轮提示；原生后台任务用等待工具收结果；工人 result.json 按 dispatcher 归属直接注入一次 |
-| Codex 经 Mirasim | 仍依赖 Codex CLI hooks 及其实际 CODEX_HOME/用户家目录；不是另一套私有钩子 | 同上。Codex async 钩子完成不会启动新轮，不能登记 Claude asyncRewake 冒充支持 |
+| Codex 经 Mirasim | 同步覆盖默认 `~/.codex` 和已存在的 `~/.mirasim/agent-homes/codex-relay`，每个入口独立登记四事件并在相邻 config.toml 逐项信任；不追任意 CODEX_HOME、不创建未安装入口、拒绝链接越界 | 同上。保留第三方钩子和用户关闭设置；Codex async 钩子完成不会启动新轮，不能登记 Claude asyncRewake 冒充支持 |
 | Grok、Devin | 借读 Claude 用户配置不证明支持相同 Stop/唤醒语义；本仓未验证接续能力 | 不登记未经支持的接续事件；不能声称无人值守已接通 |
 | Gemini、Antigravity、Kimi、pi、dsh | 现有安全工具钩子/扩展不证明可创建新轮；本仓未验证接续能力 | 不登记未经支持的接续事件；没有 Claude/Codex 真实会话来源时 on 明确失败 |
 
