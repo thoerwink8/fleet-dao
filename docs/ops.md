@@ -505,6 +505,46 @@ grok 装在会话用户自己家里：官方安装脚本把二进制放在 `~/.g
 
 额度读取的配置（读哪些池、各池凭据文件在哪，只有池名和路径、不是密钥）写在仓里 `deploy/quota.json`（#1289），随发布的那一版带着：引擎的 `quota-read` 每 15 分钟读自己所在那一版的这份（`packages/adapters/src/quota/config.ts` 的默认路径，`FLEET_QUOTA_CONFIG` 只给命令行和测试换位置），读不到、认不出当场报 `quota-read:config`。不再有手放的 `/etc/fleet-dao/quota.json`（已删这一层）。池要读，得写在这份里：五个池（claude-solo、claude-carpool、mirasim-relay、cursor、grok）都要写上，池 id 要和目录配置里的账号池对上（`packages/db/test/catalog.test.ts` 钉着，多一个或少一个不是写明的例外就红）。目录里的 jev 不配在 `pools` 里，写在 `notRead`：新系统没有旧系统的日账（会话用户家里没有 `~/.dao/judge-spend`），花费记在库里的 `jev_answers`，每天花多少由 `packages/jev` 的 `dailyUsdCap` 自己停；配上那个目录每轮都报 `no_usage_source`。凭据在会话用户家里的，路径写 `/home/fleet-agent-carpool/` 下的绝对路径；密钥本身（Key 文件 `reclaude-api.key`、各家 auth.json）仍手放、不进仓，哪个缺了该池如实报 `no_credentials`（读不到），不会因此少读池。改配置走 PR，随下一次发版生效。额度读取里的 Cursor、Grok 两个池（#1195，#1129 第一步）：两家的登录文件都在会话用户家里（Grok 的 `~/.grok/` 下 auth.json、Cursor 的 `~/.config/cursor/` 下 auth.json），引擎用户进不去。`deploy/quota.json` 里这两种读取器（`cursor-dashboard`、`grok-billing`）读文件时，经 `fleet-agent-scope run` 以会话用户的身份 `cat`（`packages/engine/src/real/index.ts` 的 `catAsUser`、`quotaAsUser`），配置里的 `~` 展开到会话用户的家；值不上命令行、不进日志和提醒；读不到（文件不在 ENOENT、没权限 EACCES）如实报「读不到」、当场提醒，不当成 0 或 ok；一个池读不到不影响另一个。拼车的 Key 文件（引擎自己读得到）不经这条路。写法见 `deploy/quota.json` 里 `cursor`、`grok` 两条。独享组织的 reclaude（`claude-usage`，二进制在会话用户家里）也经同一条 `quotaAsUser`：`fleet-agent-scope run` 以会话用户起，工作目录是它家里的空目录 `~/.cache/fleet-dao/quota-cwd`；引擎用户直接 spawn 是 EACCES。起不来报明确原因（`spawnError`），不写成空读数。已知还欠：法国 Cursor 走 API 密钥文件（`~/.cursor/fleet-api-key`），额度读取器读的是 Cursor 的 auth.json（要有 `accessToken`），两者不是一个文件，法国上有没有那个 auth.json、Dashboard 认不认 API 密钥都没核实，要等法国真机验收；没有 auth.json 时 Cursor 池如实报「读不到」。Mirasim 池（`mirasim-relay`，#1284）：令牌在会话用户家里、回环口又只许会话用户连，引擎用户读令牌、直连都是 EACCES / 连不上；读取器改经桥接（`mirasimDepsFor` 的 `connect`，和账本、路由探针同一条路）以会话用户的身份连，端口、令牌文件由 `discoverMirasimEndpoint` 现找，配置里的 `port`、`tokenFile` 在这条路上不用。**池得写进 `deploy/quota.json` 才会读**：2026-10-06 16:34 起法国那份手放的配置只剩 `claude-carpool`、`jev` 两个池（`pools.last_read_ok_at` 里 `claude-solo`、`cursor`、`grok`、`mirasim-relay` 全空），这四个池没人读、旧提醒也不撤（#1284）；#1289 把配置搬进仓里、删了手放那一层，发版后当时这六个池每轮都读；后来 jev 从这份配置拿掉（没有日账，见上），剩下五个池每轮都读，读成了的 `quota-read:<池>` 自己撤，凭据缺的那个池如实报 `no_credentials`。写在 `notRead` 里的池（现在是 jev）读取器不读、看门狗不查读数过期；已经开着的 `quota-read:jev`、`reconcile:quota:jev` 下一轮自己撤，不再报 `no_usage_source`。
 
+### Jev 判断渠道：配置、凭据与持续观察
+
+机器配置是 `/etc/fleet-dao/jev.json`（`FLEET_JEV_CONFIG` 可指定别处），样例在 `packages/jev/config.example.json`；里面只写 TypeSafe 的 HTTPS 地址、`keyFile` 和可选超时，模型由路由两层的 `judge` 用途选择，不在配置里另写。专用 Key 放在 `keyFile` 指向的 `/etc/fleet-dao/typesafe.key`，一行；两份文件均为 root:fleet 640，目录 root:fleet 750，服务用户能读，会话用户不能读。不要为会话用户放宽权限，也不要把 Key 放进仓库、Issue、命令行参数或日志。
+
+换 Key 以 root 操作：先在 `/etc/fleet-dao/key-backups/` 留可恢复的旧副本（目录 700、副本 600），再从受限临时文件安装新值、读回属主权限和 SHA-256 指纹；共享记录只写路径、掩码和指纹。密钥与机器配置按本手册开头的既有机制存入私有 `fleet-dao-vault`，用该仓的 `refresh.sh` 加密归档并核对；专用 Key 的密文位于该私有仓的 `france/etc/fleet-dao/typesafe.key.age`，恢复照那个私有仓的 README，在受限位置解密并比对指纹，不把解密结果贴到公开记录。配置指向的文件已有时，后续调用会重新读配置和 Key；服务启动时因默认配置文件不存在而标成「未接」的，才需要补文件后按发布流程重启对应服务。
+
+渠道与路由是两层开关：通过已有的登录后渠道写入口，只改 `jev`，读回渠道状态和操作记录；`judge` 用途还必须有开着且可用的 Jev 模型路由。开关、路由、机器配置任一层不通都可能产生 `judge_config`，不能用「配置文件存在」当作启用验收。改凭据和开关后，要看一条经应用选路并写入 `jev_answers` 的真实业务判断，核对 `ok`、实际 `model_version`、耗时和用量，再核完整 `/healthz`；健康检查的绿灯只证明当前配置可用且最近一次上游调用成功，不会每次读健康页都重新调用上游。
+
+真实结果在 `jev_answers`，不是额度池的读取结果。法国上以有权查库的运维身份执行下面的只读查询；只取结果字段，不展开输入证据和私有配置：
+
+```sh
+sudo -n -u fleet psql -X -d "dbname=fleet options='-c default_transaction_read_only=on'" -c "
+select id, question_id, asked_at, ok, fail_reason, model_version,
+       latency_ms, input_tokens, sample->>'route' as route,
+       sample->>'costUsd' as estimated_usd, sample->>'detail' as detail
+from jev_answers
+order by asked_at desc, id desc limit 20;"
+```
+
+`fail_reason` 是稳定原因，`sample.detail` 保留脱敏截断的上游错误或未采用答案的原因；低于把握线也可能是 `ok=true`，表示上游成功作答，是否采用还要看这份原因和业务结果。`latency_ms`、`input_tokens` 和 `sample.costUsd` 是已记下的业务读数，花费是应用按单价算的估值；空值表示没有记录，不补成 0，不当成供应商账单。每日业务次数与花费上限由 `judge.dailyCallLimit`、`judge.dailyUsdCap` 控制，Jev 不参加 `quota-read`，不要为它再造日账文件。
+
+持续观察沿用现有链路：
+
+- `/healthz` 的 `judge` 检查当前配置和最近一次实际调用；配置错误报 `judge_config`，上游最近一次失败报 `judge_failing`。原原因查 `journalctl -u fleet-api`；业务装配与调用问题查 `journalctl -u fleet-engine`。`fleet-api attention --json` 和指挥官巡检读取同一份健康结论。
+- 引擎定时任务叫 `judge-self-check`，每小时 17、47 分运行，不依赖引擎接活总开关。最近一次上游调用失败且超过 30 分钟没有新调用才发固定小题；最近成功、还没调用过、失败未超过 30 分钟时，记这一轮检查成功但不发请求。因此定时任务 `ok` 不等于这一轮实际问过上游。
+- 自检题号是 `judge-probe`，同样写入 `jev_answers`，记录成功或真实失败、实际模型与耗时；它不走业务计量，不记录业务 token 和花费，不占每日业务次数与花费上限。上游仍收到请求，供应商是否扣费由供应商决定；这些空字段不能读作免费或零用量。
+- 定时任务登记与每轮结果在 `scheduled_jobs`、`schedule_runs`，驾驶舱「定时任务」与现有看门狗共用它们；自检没通过记 `partial` 和原因，写库失败记 `failed`，不把失败写成通过。登记期望间隔 90 分钟，漏跑、过期与持续只跑一半的报警沿用看门狗，不另起一份 Jev 监视器。
+- 香港探活只判断法国后端能否回答，200、503 都算链路通；它负责失联与恢复推送，不能替代 `judge` 组件检查。查 `/var/lib/fleet-hk-france-probe/status.json`、`fleet-hk-france-probe.timer` 和该服务日志；现有推送失败重试见「香港探法国」一节。
+
+核自检调度时仍用只读连接：
+
+```sh
+sudo -n -u fleet psql -X -d "dbname=fleet options='-c default_transaction_read_only=on'" -c "
+select id, schedule, expect_every_minutes, removed_at
+from scheduled_jobs where id='judge-self-check';
+select started_at, ended_at, outcome, scanned, found, why
+from schedule_runs where job='judge-self-check'
+order by started_at desc limit 6;"
+```
+
 ### 命令行工具版本（#1969）
 
 驾驶舱法国页有一块「命令行工具」：会话用户 `fleet-agent-carpool` 的 Claude Code、Codex、Grok、Cursor Agent、reclaude、Mirasim 服务端，`pilot` 的 Claude Code、Codex、reclaude（pilot 从没装过另外三样，名单在 `packages/shared/src/cli-versions.ts` 的 `cliUserToolsOf`，以后在 pilot 上装了新工具来那里加一行），以及 root 全局 npm 里的 Kimi（`@moonshot-ai/kimi-code`）、DeepSeek dsh（`@deepseek-ai/dsh`）、pi（`@earendil-works/pi-coding-agent`）。每一行是在用版本、官方最新版、状态（最新、落后几个版本、落后但数不出几个、读不到、没查成）和上次检查时间。
