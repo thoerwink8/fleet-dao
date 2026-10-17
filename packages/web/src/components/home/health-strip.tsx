@@ -215,7 +215,7 @@ export function HealthStrip({ health, className }: { health: HomeHealth; classNa
   const wanted = wide && !phone;
   const { box, strip, fits } = useStripRoom(items, wanted);
   return (
-    <div ref={box} className="flex min-w-0 flex-1 items-center justify-end">
+    <div ref={box} data-health-strip-box className="flex min-w-0 flex-1 items-center justify-end">
       {wanted && fits ? (
         <div
           ref={strip}

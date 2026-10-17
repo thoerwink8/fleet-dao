@@ -52,6 +52,7 @@ export function Page({
   children,
   className,
   keepDescription,
+  stackActions,
 }: {
   title: ReactNode;
   /** 标题下的一行说明。超过 DESCRIPTION_LINE_MAX 个字（字符串时）自动收进 ⓘ。 */
@@ -70,6 +71,11 @@ export function Page({
   className?: string;
   /** 一行说明在手机上、字多时也直接写出，不收成「ⓘ」：说明里放的是这页的关键信息（任务页的状态行），不是介绍。 */
   keepDescription?: boolean;
+  /**
+   * 手机上操作区改到标题下面、占满这一行（首页 #2969）。
+   * 流程开关、状态和刷新并排会挤出屏幕、叠在一起；桌面仍是标题左、操作右。
+   */
+  stackActions?: boolean;
 }) {
   const phone = usePhone();
   const tooLong = typeof description === 'string' && description.length > DESCRIPTION_LINE_MAX;
@@ -95,10 +101,23 @@ export function Page({
         </nav>
       ) : null}
       {/* 标题行：标题（后面跟 ⓘ）在左，操作和刷新在右。两边都从顶对齐、各自至少一个控件高并垂直居中，
-          所以刷新和标题在同一行上对齐，不会被下面的说明拉低；说明在标题下面，最多一行。 */}
-      <header className="mb-section-gap flex flex-wrap items-start justify-between gap-x-stack gap-y-2 max-md:mb-4 lg:flex-nowrap">
+          所以刷新和标题在同一行上对齐，不会被下面的说明拉低；说明在标题下面，最多一行。
+          stackActions（首页）在手机上把操作区放到标题下面，不再跟标题挤一行。 */}
+      <header
+        className={cn(
+          'mb-section-gap flex flex-wrap items-start justify-between gap-x-stack gap-y-2 max-md:mb-4 lg:flex-nowrap',
+          // 手机上标题自己一行，操作区在下面占满宽（具体怎么排在 app.css 的 data-actions-layout=stack）
+          stackActions && 'max-md:flex-col max-md:items-stretch max-md:gap-3',
+        )}
+      >
         {/* grow：中间宽度（md）也吃满右边操作剩下的宽，一行说明不被挤成两行（#1914 第 5 轮，768 宽量到折行） */}
-        <div className="min-w-0 grow basis-52 lg:flex-1" data-page-titlebar>
+        <div
+          className={cn(
+            'min-w-0 grow basis-52 lg:flex-1',
+            stackActions && 'max-md:w-full max-md:grow-0 max-md:basis-auto',
+          )}
+          data-page-titlebar
+        >
           <h1 className="inline align-middle text-title">{title}</h1>
           {hint}
           {description && !fold ? (
@@ -109,8 +128,12 @@ export function Page({
         </div>
         {actions || refresh ? (
           <div
-            className="flex min-h-8 max-w-full flex-wrap items-center gap-2 max-md:min-h-10 lg:shrink-0"
+            className={cn(
+              'flex min-h-8 max-w-full flex-wrap items-center gap-2 max-md:min-h-10 lg:shrink-0',
+              stackActions && 'max-md:w-full max-md:max-w-full max-md:shrink-0',
+            )}
             data-page-actions
+            {...(stackActions ? { 'data-actions-layout': 'stack' } : {})}
           >
             {actions}
             {refresh ? <RefreshBar {...refresh} /> : null}
