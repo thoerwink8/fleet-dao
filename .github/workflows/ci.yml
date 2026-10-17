@@ -489,6 +489,9 @@ jobs:
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
+        env:
+          # 可选浏览器缓存下载停滞时及时按 miss 回退；下面仍安装 Chromium 和系统库。
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1'
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
