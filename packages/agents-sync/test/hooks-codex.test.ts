@@ -302,6 +302,152 @@ describe('Mirasim 明确受管的 Codex 家目录', () => {
   const trustKey = `~/${relay}/config.toml#hooks.state`;
 
   it.each(['absolute', 'relative'])(
+    '双共享链接（%s）将两个入口八条信任合并进同一普通配置，复跑零变更',
+    (form) => {
+      const m = machine();
+      const dir = join(m.home, relay);
+      mkdirSync(dir, { recursive: true });
+      const original =
+        'model = "keep-model"\nmodel_provider = "keep-provider"\n\n[model_providers.keep-provider]\nname = "keep-provider"\n';
+      put(m.home, '.codex/config.toml', original);
+      for (const file of ['hooks.json', 'config.toml']) {
+        const source = join(m.home, '.codex', file);
+        symlinkSync(form === 'absolute' ? source : relative(dir, source), join(dir, file), 'file');
+      }
+      const targetBefore = ['hooks.json', 'config.toml'].map((file) => readlinkSync(join(dir, file)));
+      const applied = m.apply();
+      expectKind(applied, TRUST, 'changed');
+      expectKind(applied, trustKey, 'ok');
+      expect(exitCode(m.check())).toBe(0);
+      const config = m.config();
+      expect(config).toContain(original);
+      const scan = scanCodexConfig(config);
+      if (!scan.ok) throw new Error(scan.why);
+      expect(scan.value.entries.size).toBe(8);
+      for (const root of [join(m.home, '.codex'), dir]) {
+        for (const spec of CODEX?.hooks ?? []) {
+          const event = spec.event.replace(/[A-Z]/g, (s, i) => `${i ? '_' : ''}${s.toLowerCase()}`);
+          const key = `${join(realpathSync.native(root), 'hooks.json')}:${event}:0:0`;
+          expect(state(config, key).trusted).toBe(
+            m.hash(spec.event, spec.matcher, spec.script, spec.timeout),
+          );
+        }
+      }
+      expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
+      expect(m.config()).toBe(config);
+      expect(['hooks.json', 'config.toml'].map((file) => readlinkSync(join(dir, file)))).toEqual(
+        targetBefore,
+      );
+      expect(['hooks.json', 'config.toml'].every((file) => lstatSync(join(dir, file)).isSymbolicLink())).toBe(
+        true,
+      );
+    },
+  );
+
+  it('只共享配置、hooks各自普通文件时也合并两入口，第三方与关闭状态保留', () => {
+    const m = machine();
+    const dir = join(m.home, relay);
+    mkdirSync(dir, { recursive: true });
+    const original =
+      'model = "keep-model"\n\n[hooks.state."third-party"]\nenabled = false\ntrusted_hash = "keep"\n';
+    put(m.home, '.codex/config.toml', original);
+    symlinkSync(join(m.home, '.codex/config.toml'), join(dir, 'config.toml'), 'file');
+    put(
+      m.home,
+      `${relay}/hooks.json`,
+      JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo third-party' }] }] } }),
+    );
+    m.apply();
+    const config = m
+      .config()
+      .replace(/(\[hooks\.state\."[^\n]*codex-relay[^\n]*stop:1:0"\]\n)/, '$1enabled = false\n');
+    expect(config).toContain('stop:1:0"');
+    expect(config).not.toBe(m.config());
+    put(m.home, '.codex/config.toml', config);
+    expectKind(m.apply(), trustKey, 'failed');
+    expectKind(m.check(), trustKey, 'drift');
+    expect(m.config()).toContain(original);
+    expect(m.config()).toContain('enabled = false');
+    expect((getJson(m.home, `${relay}/hooks.json`) as { hooks: { Stop: unknown[] } }).hooks.Stop[0]).toEqual({
+      hooks: [{ type: 'command', command: 'echo third-party' }],
+    });
+    put(m.home, '.codex/config.toml', `${m.config()}\n[features]\nhooks = false\n`);
+    expectKind(m.apply(), TRUST, 'failed');
+    expectKind(m.check(), trustKey, 'drift');
+    expect(m.config()).toContain('hooks = false');
+  });
+
+  it('从默认入口四条旧托管块迁移到双共享八条，保留默认单条关闭', () => {
+    const m = machine();
+    m.apply();
+    const before = m.config().replace(/(\[hooks\.state\."[^\n]*stop:0:0"\]\n)/, '$1enabled = false\n');
+    expect(before).not.toBe(m.config());
+    put(m.home, '.codex/config.toml', before);
+    const dir = join(m.home, relay);
+    mkdirSync(dir, { recursive: true });
+    for (const file of ['hooks.json', 'config.toml'])
+      symlinkSync(join(m.home, '.codex', file), join(dir, file), 'file');
+    expectKind(m.apply(), TRUST, 'failed');
+    const config = m.config();
+    const scan = scanCodexConfig(config);
+    if (!scan.ok) throw new Error(scan.why);
+    expect(scan.value.entries.size).toBe(8);
+    expect(state(config, m.key('stop', 0)).enabled).toBe(false);
+    expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
+    expect(m.config()).toBe(config);
+  });
+
+  it('共享配置组中一个hooks读不懂，整组不重写信任块，不悄悄删已有键', () => {
+    const m = machine();
+    m.apply();
+    const before = m.config();
+    const dir = join(m.home, relay);
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(join(m.home, '.codex/config.toml'), join(dir, 'config.toml'), 'file');
+    put(m.home, `${relay}/hooks.json`, '{ broken');
+    expectKind(m.apply(), TRUST, 'failed');
+    expectKind(m.check(), trustKey, 'unknown');
+    expect(m.config()).toBe(before);
+  });
+
+  it.each(['outside', 'chain', 'directory', 'default-directory'])(
+    '共享config不接受 %s，禁止写穿且保留原链接',
+    (kind) => {
+      const m = machine();
+      const dir = join(m.home, relay);
+      mkdirSync(dir, { recursive: true });
+      const outside = tempDir('outside-shared-config');
+      const original = 'model = "never-write"\n';
+      put(outside, 'config.toml', original);
+      if (kind === 'default-directory') linkDir(outside, join(m.home, '.codex'));
+      else if (kind === 'chain') {
+        mkdirSync(join(m.home, '.codex'), { recursive: true });
+        symlinkSync(join(outside, 'config.toml'), join(m.home, '.codex/config.toml'), 'file');
+      } else if (kind === 'directory') mkdirSync(join(m.home, '.codex/config.toml'), { recursive: true });
+      const target = kind === 'outside' ? join(outside, 'config.toml') : join(m.home, '.codex/config.toml');
+      symlinkSync(target, join(dir, 'config.toml'), 'file');
+      expectKind(m.apply(), trustKey, 'failed');
+      expectKind(m.check(), trustKey, 'unknown');
+      expect(get(outside, 'config.toml')).toBe(original);
+      expect(readlinkSync(join(dir, 'config.toml'))).toBe(target);
+    },
+  );
+
+  it.each(['.mirasim', '.mirasim/agent-homes', relay])('共享config的父路径%s是链接时仍拒绝', (linked) => {
+    const m = machine();
+    const outside = tempDir('shared-config-parent');
+    const target = put(m.home, '.codex/config.toml', 'model = "keep"\n');
+    linkDir(outside, join(m.home, linked));
+    const dir = join(m.home, relay);
+    mkdirSync(dir, { recursive: true });
+    symlinkSync(target, join(dir, 'config.toml'), 'file');
+    expectKind(m.apply(), `~/${relay}`, 'failed');
+    expectKind(m.check(), `~/${relay}`, 'unknown');
+    expect(readlinkSync(join(dir, 'config.toml'))).toBe(target);
+    expect(m.config()).not.toContain('codex-relay');
+  });
+
+  it.each(['absolute', 'relative'])(
     '固定共享链接（%s）保留原链接，relay 独立信任入口路径且复跑零改动',
     (form) => {
       const m = machine();

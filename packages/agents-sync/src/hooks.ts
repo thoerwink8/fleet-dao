@@ -17,6 +17,7 @@ import { type Ctx, code, lstatOrNull, relOf, type Sources, writeAtomic } from '.
 import {
   AGENTS,
   agentNames,
+  CODEX_CONFIG,
   HOOK_GAPS,
   HOOK_TARGETS,
   HOOKS_DIR,
@@ -239,13 +240,17 @@ export function readSettings(abs: string): Read {
 }
 
 /** Mirasim 固定共享入口只读默认文件；不让通用 JSON 读写器跟随任意链接。 */
-function hookSettings(ctx: Ctx, t: HookTarget): { read: Read; shared: boolean } {
-  const { abs } = relOf(ctx, t.settings);
+function codexFile(
+  ctx: Ctx,
+  t: HookTarget,
+  file: 'hooks.json' | 'config.toml',
+): { abs: string; shared: boolean } {
+  const { abs } = relOf(ctx, file === 'hooks.json' ? t.settings : codexConfig(t));
   const managedRelay =
     t.format === 'codex' &&
-    MIRASIM_CODEX_HOMES.some((home) => abs === join(ctx.home, placeOn(home, ctx.platform), 'hooks.json'));
-  if (!managedRelay || !lstatOrNull(abs)?.isSymbolicLink()) return { read: readSettings(abs), shared: false };
-  const source = join(ctx.home, '.codex', 'hooks.json');
+    MIRASIM_CODEX_HOMES.some((home) => abs === join(ctx.home, placeOn(home, ctx.platform), file));
+  if (!managedRelay || !lstatOrNull(abs)?.isSymbolicLink()) return { abs, shared: false };
+  const source = join(ctx.home, '.codex', file);
   const parent = lstatOrNull(dirname(source));
   const target = lstatOrNull(source);
   const normalize = (path: string) => {
@@ -259,14 +264,22 @@ function hookSettings(ctx: Ctx, t: HookTarget): { read: Read; shared: boolean } 
     target.isSymbolicLink() ||
     normalize(resolve(dirname(abs), readlinkSync(abs))) !== normalize(source)
   )
-    return {
-      read: {
-        kind: 'bad',
-        why: '共享链接只允许精确指向默认 .codex/hooks.json 普通文件，父目录也必须是实目录',
-      },
-      shared: true,
-    };
-  return { read: readSettings(source), shared: true };
+    throw new Error(`共享链接只允许精确指向默认 .codex/${file} 普通文件，父目录也必须是实目录`);
+  return { abs: source, shared: true };
+}
+
+function hookSettings(ctx: Ctx, t: HookTarget): { read: Read; shared: boolean } {
+  try {
+    const { abs, shared } = codexFile(ctx, t, 'hooks.json');
+    return { read: readSettings(abs), shared };
+  } catch (err) {
+    return { read: { kind: 'bad', why: code(err) }, shared: false };
+  }
+}
+
+/** 只通过已经核准的默认普通路径写共享配置，不经 relay 链接写穿。 */
+function trustConfig(ctx: Ctx, t: HookTarget): Place {
+  return codexFile(ctx, t, 'config.toml').shared ? CODEX_CONFIG : codexConfig(t);
 }
 
 /** 装了要钩子的哪几家 */
@@ -499,7 +512,7 @@ export function checkHooks(ctx: Ctx, src: Sources, skip?: HookSkip): Line[] {
     if (launchers) out.push(launchers);
     for (const t of targets) {
       out.push(checkSettings(ctx, t), ...lackLines(t));
-      if (t.format === 'codex') out.push(codexTrust(ctx, t, null));
+      if (t.format === 'codex') out.push(codexTrust(ctx, t, null, targets));
     }
   }
   return [...out, ...skipLines(skip), ...gapLines(ctx)];
@@ -509,36 +522,43 @@ export function checkHooks(ctx: Ctx, src: Sources, skip?: HookSkip): Line[] {
  * Codex 的信任（hooks-codex.ts）：按 hooks.json 现在的内容算本脚本那几条的键和哈希，再查或记。
  * hooks.json 读不懂：查报没查成、写报没做成（设置那一行已经说了为什么）。
  */
-function codexTrust(ctx: Ctx, t: HookTarget, backups: Backups | null): Line {
-  const { abs } = relOf(ctx, t.settings);
-  const config = codexConfig(t);
-  let read: Read;
+function codexTrust(ctx: Ctx, t: HookTarget, backups: Backups | null, targets: HookTarget[]): Line {
+  const key = trustKey(ctx, codexConfig(t));
   try {
-    read = hookSettings(ctx, t).read;
+    const config = trustConfig(ctx, t);
+    const storage = relOf(ctx, config).abs;
+    const needs: ReturnType<typeof trustNeeds>['needs'] = [];
+    const absent: string[] = [];
+    // 同一配置的托管块必须一起规划；逐入口重建会互相删掉对方的信任键。
+    for (const other of targets.filter((candidate) => candidate.format === 'codex')) {
+      let otherStorage: string;
+      try {
+        otherStorage = relOf(ctx, trustConfig(ctx, other)).abs;
+      } catch {
+        // 非本组的无效入口由它自己的检查明确报错，不阻止独立配置更新。
+        continue;
+      }
+      if (storage !== otherStorage) continue;
+      const read = hookSettings(ctx, other).read;
+      if (read.kind === 'bad') throw new Error(`hooks.json ${read.why}`);
+      const root = read.kind === 'ok' ? read.root : {};
+      const want = trustNeeds(relOf(ctx, other.settings).abs, root, other.hooks, (script) =>
+        commandIn(other, ctx.home, ctx.platform, script),
+      );
+      needs.push(...want.needs);
+      absent.push(...want.absent);
+    }
+    if (backups && absent.length) return line('failed', key, `没动——${absent.join('、')} 没登记上，不记信任`);
+    const result = backups
+      ? applyCodexTrust(ctx, needs, backups, config)
+      : checkCodexTrust(ctx, needs, absent, config);
+    return result.key === key ? result : line(result.kind, key, `共享配置 ${result.text}`);
   } catch (err) {
-    return line(
-      backups ? 'failed' : 'unknown',
-      trustKey(ctx, config),
-      `${backups ? '没做成' : '没查成'}——hooks.json 读不了（${code(err)}）`,
-    );
+    return line(backups ? 'failed' : 'unknown', key, `${backups ? '没做成' : '没查成'}——${code(err)}`);
   }
-  if (read.kind === 'bad')
-    return line(
-      backups ? 'failed' : 'unknown',
-      trustKey(ctx, config),
-      `${backups ? '没动' : '没查成'}——hooks.json ${read.why}`,
-    );
-  const root = read.kind === 'ok' ? read.root : {};
-  const { needs, absent } = trustNeeds(abs, root, t.hooks, (script) =>
-    commandIn(t, ctx.home, ctx.platform, script),
-  );
-  if (!backups) return checkCodexTrust(ctx, needs, absent, config);
-  if (absent.length)
-    return line('failed', trustKey(ctx, config), `没动——${absent.join('、')} 没登记上，不记信任`);
-  return applyCodexTrust(ctx, needs, backups, config);
 }
 
-/** 信任必须写在该 hooks.json 同一个 Codex 家目录，不能把隔离入口的键写进默认配置。 */
+/** 通常信任写相邻配置；固定共享链接由 trustConfig 核准后合并进默认配置。 */
 function codexConfig(t: HookTarget): Place {
   return {
     win32: t.settings.win32.replace(/hooks\.json$/, 'config.toml'),
@@ -701,6 +721,7 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
   out.push(scripts);
   const launchers = scripts.kind === 'failed' ? null : installLaunchers(ctx, targets);
   if (launchers) out.push(launchers);
+  const registered = new Map<HookTarget, Line>();
   for (const t of targets) {
     if (scripts.kind === 'failed') {
       out.push(line('failed', settingsKey(ctx, t), '没动——钩子脚本没装上，不登记指向空处的命令'));
@@ -720,11 +741,15 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
     }
     const settings = applySettings(ctx, t, backups);
     out.push(settings, ...lackLines(t));
+    registered.set(t, settings);
+  }
+  // 先更新所有 hooks.json，再合并同一配置的信任需求。
+  for (const [t, settings] of registered) {
     if (t.format === 'codex')
       out.push(
         settings.kind === 'failed'
           ? line('failed', trustKey(ctx, codexConfig(t)), '没动——钩子没登记上，不记信任')
-          : codexTrust(ctx, t, backups),
+          : codexTrust(ctx, t, backups, targets),
       );
   }
   return [...out, ...skipLines(skip), ...gapLines(ctx)];
