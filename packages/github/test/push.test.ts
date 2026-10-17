@@ -122,13 +122,13 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     // 用的是「干活的」机器人的令牌
     const mints = fake.calls('POST', /access_tokens$/);
     expect(mints.map((r) => r.as)).toEqual(['app:agent', 'app:agent']);
-    // 读仓信息的 api 令牌 + 交给 git 的令牌：后者只有 contents 写，没有 administration 也没有别的（#11）
+    // 读仓信息的 api 令牌 + 交给 git 的令牌：后者 contents 写 + workflows 写（0106），没有 administration 也没有别的
     expect(mints.map((r) => r.body)).toEqual([
       {
         repositories: ['widgets'],
         permissions: { contents: 'read', pull_requests: 'write', metadata: 'read' },
       },
-      { repositories: ['widgets'], permissions: { contents: 'write', metadata: 'read' } },
+      { repositories: ['widgets'], permissions: { contents: 'write', workflows: 'write', metadata: 'read' } },
     ]);
     const pushCall = calls.find((c) => c.args[0] === 'push');
     expect(pushCall).toBeDefined();
@@ -490,19 +490,20 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     ).rejects.toMatchObject({
       code: 'WORKFLOW_PERMISSION',
       retryable: false,
-      // 明确缺哪一项权限、为什么没给、谁来处理（#16）；不静默跳过，远端没有这个分支
-      message: expect.stringMatching(/workflows:write.*有意没给.*要人处理/s),
+      // 0106 起 workflow 推得上来、闸却拦得住：文案改成"安全基闸开，前置批准（head SHA 绑定）"
+      message: expect.stringMatching(/安全基.*前置批准.*head SHA/s),
       details: { role: 'agent', missingPermission: 'workflows:write' },
     });
     expect(remoteHead('task/10-wf')).toBeNull();
   });
 
-  it('没有 workflows 权限不是随便什么推送失败都报：别的被拒不带 workflows:write 这句', () => {
+  it('0106 起 WORKFLOW_PERMISSION 文案带"安全基""前置批准"，别的错不带', () => {
     const msg = (kind: Parameters<typeof fromPushFailure>[0]) =>
       fromPushFailure(kind, 'acme/widgets', 'task/x', { code: 1, stdout: '', stderr: 'boom' }).message;
-    expect(msg('workflow_permission')).toContain('workflows:write');
+    expect(msg('workflow_permission')).toMatch(/安全基/);
+    expect(msg('workflow_permission')).toMatch(/前置批准/);
     for (const kind of ['rule_rejected', 'auth', 'unknown'] as const) {
-      expect(msg(kind)).not.toContain('workflows');
+      expect(msg(kind)).not.toMatch(/安全基/);
     }
   });
 

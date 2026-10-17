@@ -3,7 +3,9 @@
 // 改这里之前必须知道：
 // - 每一项都有依据（GitHub REST 文档里该接口要的权限）；拿不准的不缩。缩错的后果是线上对应的调用 403。
 // - 只许往小里改：「引擎」的 administration:write 只有续互动限制要（interaction.ts），所以单独成 'admin'，
-//   不和日常的 'api' 令牌混用；git 子进程拿到的令牌（'git' / 'git-read'）只有 contents，别的一概不带。
+//   不和日常的 'api' 令牌混用；git 子进程拿到的令牌（'git' / 'git-read'）从前只有 contents。0106 起把「干活的」的
+//   git scope 加 workflows——以前只要 push 碰 workflows 就拒，把整类改动拦到「本机做」，防线实际上由「创始人推」变成
+//   「机器自己不能做/推动 workflow」，换成独立的「安全基清单」前置闸（段落 packages/conventions/standard-paths.json）。
 // - REQUIRED_PERMISSIONS（github.ts，自检用）由这里各用途的并集算出，两边不会漂；加新用途时先在这里写清依据。
 import type { AppRole } from './credentials.ts';
 import { GitHubError } from './errors.ts';
@@ -21,8 +23,9 @@ export const TOKEN_SCOPES: Record<AppRole, Partial<Record<TokenScope, Permission
   agent: {
     // 开 PR、找分支上的 PR、读 PR、读仓信息：pull_requests（写）+ metadata（读）；contents 只读是给读提交留的余量，不给写
     api: { contents: 'read', pull_requests: 'write', metadata: 'read' },
-    // 推分支、并主线后推回：只要 contents 写
-    git: { contents: 'write', metadata: 'read' },
+    // 推分支、并主线后推回：contents 写（App 已有 workflows 权限，从 0106 起也发给 git 子进程；
+    // 以前只放 contents，push 碰 .github/workflows 的 PR 直接被拒成 WORKFLOW_PERMISSION，机器会拉下来变"本机做"，不再是真防线）
+    git: { contents: 'write', workflows: 'write', metadata: 'read' },
     // 抓主线 / 分支头进镜像：只读
     'git-read': { contents: 'read', metadata: 'read' },
   },
