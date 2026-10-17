@@ -17,10 +17,12 @@
 // ~/.fleet-dao/local-claims/ 记一份（单号、仓、租约到期），done 删掉；队列只认没到期的。法国自己顺延的租约（会话在动、PR 挂着）
 // 本机看不到，那两种情况由工作树、PR 两个信号兜住。改这之前领的单本机没有底，要靠工作树、PR。
 // 读不成的部分记进 problems 照实报；单和 PR 读不成整条命令失败，退出码 1。
+// 当前仓或本机租约没读成时，本来会判成可接的改为不可接：没对上仓的租约不能当成没有。
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DIRECTIVE_REF, type Git, listPending, MAIN } from './directives.ts';
+import { acceptViewedRepo, explicitRepo, repoViewArgs, resolveRepo } from './github-api.ts';
 import { issueOfBranch } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { HUMAN_DECISION_LABEL, LOCAL_LABEL, MOTHER_LABEL } from './labels.ts';
@@ -100,6 +102,12 @@ export interface QueueDeps {
   /** 本机记下的领单租约；读不成抛 */
   readLeases: () => LeaseRecord[];
   now: () => Date;
+  /**
+   * 识仓。不传 env 用进程环境；传了 root 才把 origin（含 relay 路径里的 github 仓名）和显式 GH_REPO 放在同一份规则里判。
+   * 入口要传，这样队列和 claim/renew 认的是同一个仓。
+   */
+  env?: Record<string, string | undefined>;
+  root?: string;
 }
 
 async function ghJson(gh: Gh, args: string[], what: string): Promise<unknown> {
@@ -176,14 +184,19 @@ async function openPullRefs(gh: Gh): Promise<OpenPullRef[]> {
   });
 }
 
-/** 这个仓的 owner/name */
-async function repoSlug(gh: Gh): Promise<string> {
-  const v = (await ghJson(gh, ['repo', 'view', '--json', 'nameWithOwner'], '当前仓')) as {
-    nameWithOwner?: unknown;
-  };
-  if (typeof v.nameWithOwner !== 'string' || !v.nameWithOwner.includes('/'))
-    throw new Error('当前仓认不出（gh repo view 没给 nameWithOwner）');
-  return v.nameWithOwner;
+/**
+ * 这个仓的 owner/name。显式 GH_REPO、GITHUB_REPOSITORY、github origin 只走 resolveRepo 这一份；
+ * 问 gh 时带上目标仓（repo view 不吃 GH_REPO），回的仓对不上就不认。
+ */
+export async function readCurrentRepo(
+  gh: Gh,
+  opts: { env?: Record<string, string | undefined>; root?: string } = {},
+): Promise<string> {
+  const env = opts.env ?? process.env;
+  const resolved = opts.root === undefined ? explicitRepo(env) : resolveRepo(env, opts.root);
+  if (resolved.error) throw new Error(resolved.error);
+  const v = (await ghJson(gh, repoViewArgs(resolved.repo), '当前仓')) as { nameWithOwner?: unknown };
+  return acceptViewedRepo(resolved.repo, v.nameWithOwner);
 }
 
 /** 正文里写到的引导编号（去重，按出现先后） */
@@ -257,16 +270,22 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
   }
   let repo: string | null = null;
   try {
-    repo = await repoSlug(deps.gh);
+    repo = await readCurrentRepo(deps.gh, {
+      ...(deps.env !== undefined ? { env: deps.env } : {}),
+      ...(deps.root !== undefined ? { root: deps.root } : {}),
+    });
   } catch (e) {
-    problems.push(`当前仓没认出（租约、前置这两项不全）：${msg(e)}`);
+    problems.push(`当前仓没认出（租约、前置没查成，不当成可接）：${msg(e)}`);
   }
+  let leaseFailed = false;
   let leases: LeaseRecord[] = [];
   try {
     leases = deps.readLeases().filter((l) => repo !== null && l.repo.toLowerCase() === repo.toLowerCase());
   } catch (e) {
-    problems.push(`本机记下的领单租约没读成（在做的可能被当成可接）：${msg(e)}`);
+    leaseFailed = true;
+    problems.push(`本机记下的领单租约没读成（不当成没有，也不当成可接）：${msg(e)}`);
   }
+  const leaseUnchecked = repo === null || leaseFailed;
   let pending: Set<string> | null = null;
   try {
     pending = new Set((await listPending(deps.git, deps.gh, MAIN)).map((d) => d.id));
@@ -346,6 +365,9 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
       } else if (i.labels.includes(HUMAN_DECISION_LABEL)) {
         state = 'waiting-human';
         why = `等人拍：贴了「${HUMAN_DECISION_LABEL}」`;
+      } else if (leaseUnchecked) {
+        state = 'blocked';
+        why = '租约没查成，不当成可接、也不当成没有';
       } else {
         state = 'takeable';
         why = '可接：没有 PR、工作树、租约、活着的心跳，没有没关的前置';
@@ -379,15 +401,13 @@ export function queueLine(i: QueueItem): string {
   const beat = i.heartbeatMinutes === null ? '心跳：无' : `心跳 ${i.heartbeatMinutes} 分钟前`;
   const pr = i.pr === null ? 'PR：无' : `PR #${i.pr}`;
   const dir = i.directives.length === 0 ? '引导：无' : `引导 ${i.directives.join('、')}`;
-  const tag =
-    i.state === 'blocked'
-      ? [
-          ...(i.blockedBy.length > 0
-            ? [`${STATE_WORDS.blocked} ${i.blockedBy.map((n) => `#${n}`).join('、')}`]
-            : []),
-          ...(i.blockedUntil !== null ? [`等到 ${i.blockedUntil}`] : []),
-        ].join('、')
-      : STATE_WORDS[i.state];
+  const blockedTag = [
+    ...(i.blockedBy.length > 0
+      ? [`${STATE_WORDS.blocked} ${i.blockedBy.map((n) => `#${n}`).join('、')}`]
+      : []),
+    ...(i.blockedUntil !== null ? [`等到 ${i.blockedUntil}`] : []),
+  ].join('、');
+  const tag = i.state === 'blocked' ? blockedTag || '没查成' : STATE_WORDS[i.state];
   return `[${tag}] #${i.issue} ${i.title} | ${i.why} | ${who} | ${beat} | ${pr} | ${dir}`;
 }
 

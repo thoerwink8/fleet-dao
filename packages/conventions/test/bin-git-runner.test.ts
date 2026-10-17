@@ -5,7 +5,7 @@
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { gitRunner } from '../src/git-runner.ts';
 import { buildQueue } from '../src/work-queue.ts';
 import { runChild } from './child.ts';
@@ -31,7 +31,12 @@ describe('入口脚本不许自己拼 git 执行器', () => {
 
 describe('pnpm work queue 走到「git grep 没匹配」那条路径', () => {
   const dirs: string[] = [];
+  beforeEach(() => {
+    vi.stubEnv('GH_REPO', '');
+    vi.stubEnv('GITHUB_REPOSITORY', '');
+  });
   afterEach(() => {
+    vi.unstubAllEnvs();
     for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
   });
 
