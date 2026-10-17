@@ -2,6 +2,9 @@
 export {
   DEFAULT_QUOTA_CONFIG_PATH,
   loadQuotaConfig,
+  MIRASIM_RETIRED_MARKER,
+  MIRASIM_RETIRED_POOL_ID,
+  MIRASIM_RETIRED_WHY,
   parseQuotaConfig,
   QuotaConfigError,
   quotaConfigPath,

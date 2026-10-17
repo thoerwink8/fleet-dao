@@ -21,6 +21,7 @@ import {
   probeCellSource,
   probeKind,
   probeLogRows,
+  quotaResetText,
   splitProbeRows,
 } from '../lib/probe-history-view';
 import { cn } from '../lib/utils';
@@ -37,6 +38,7 @@ export const PROBE_LOG_STEP = 20;
 
 const LEGEND: readonly (readonly [ProbeKind, string])[] = [
   ['passed', '探通了'],
+  ['quota', '探通了，但上游说额度用完了'],
   ['failed', '没探通'],
   ['doubt', '身份题说出了旧答案'],
   ['not_probed', '这轮没真探'],
@@ -243,7 +245,7 @@ function ProbeLogRow({
         title={`${formatDateTime(cell.probedAt)} ${modelName ?? cell.routeId} ${cell.routeId}${source ? ` ${source}` : ''}`}
         className="flex min-h-10 w-full items-center gap-2 whitespace-nowrap px-2 py-1.5 text-left hover:bg-accent max-md:min-h-11"
       >
-        <span className="w-22 shrink-0">
+        <span className="w-36 shrink-0">
           <StatusBadge tone={PROBE_KIND_WORD[kind].tone} label={PROBE_KIND_WORD[kind].label} variant="dot" />
         </span>
         <span className="num shrink-0 text-meta text-muted-foreground">{formatDateTime(cell.probedAt)}</span>
@@ -281,6 +283,20 @@ function ProbeLogRow({
             <div data-field="check" className="mb-3">
               <KeyValue layout="grid" cols={2} items={checkItems(cell)} />
             </div>
+          ) : null}
+          {kind === 'quota' ? (
+            <div data-field="quota" className="break-words">
+              <Notice tone="stall">
+                连通但额度耗尽：{cell.detail ?? '（上游没写具体原因）'}
+                <span data-field="resets" className="num block">
+                  {quotaResetText(cell.resetsAt)}
+                </span>
+              </Notice>
+            </div>
+          ) : kind === 'passed' && cell.detail ? (
+            <p data-field="detail" className="break-words text-meta text-muted-foreground">
+              {cell.detail}
+            </p>
           ) : null}
           {kind === 'failed' ? (
             <div data-field="failure" className="break-words">

@@ -68,6 +68,7 @@ export default function Home() {
   return (
     <Page
       title={nodeId === null ? '主页' : `主页 · ${machine}`}
+      stackActions
       actions={
         <>
           <FlowModeToggle />

@@ -10,6 +10,7 @@ import {
   issueBodyTooLong,
   issueNew,
   prBodyAcceptanceItems,
+  USAGE,
 } from '../src/issue-new.ts';
 import { readManifest, withManifest } from '../src/mother-manifest.ts';
 import { parentField } from '../src/parent-field.ts';
@@ -172,7 +173,13 @@ function setup(
   const root = mkdtempSync(join(tmpdir(), 'fleet-issue-new-'));
   writeFileSync(join(root, 'body.md'), opts.body ?? BODY);
   const calls: string[][] = [];
+  const labelCalls: string[][] = [];
   const gh = async (args: string[]): Promise<GhResult> => {
+    // 开单前先 gh label create 把六个查询轴标签建上；不混进 calls，免得每条「建单参数」断言都要带着它们
+    if (args[0] === 'label' && args[1] === 'create') {
+      labelCalls.push(args);
+      return ok('');
+    }
     calls.push(args);
     const routed = opts.route?.(args);
     if (routed) return routed;
@@ -181,12 +188,45 @@ function setup(
   };
   const deps = { gh, cwd: root, similar: opts.similar };
   const run = (...argv: string[]) => issueNew(argv, deps);
-  return { root, calls, run };
+  return { root, calls, labelCalls, run };
 }
 
-const base = ['--kind', '需求', '--milestone', 'P1', '--title', '登录页加验证码', '--body-file', 'body.md'];
+const base = [
+  '--kind',
+  '需求',
+  '--milestone',
+  'P1',
+  '--title',
+  '登录页加验证码',
+  '--body-file',
+  'body.md',
+  '--domain',
+  'engine',
+  '--nature',
+  'bug',
+];
 
 describe('开单脚本：缺类别或里程碑就不开', () => {
+  it('开成之前先把六个查询轴标签建上（已有则 --force）', async () => {
+    const { calls, labelCalls, run } = setup();
+    await run(...base);
+    expect(labelCalls.map((c) => c[2])).toEqual([
+      '域:engine',
+      '域:api',
+      '域:mirasim',
+      '性质:bug',
+      '性质:perf',
+      '性质:process',
+    ]);
+    expect(labelCalls.every((c) => c.includes('--force'))).toBe(true);
+    expect(calls.some((c) => c[0] === 'issue' && c[1] === 'create')).toBe(true);
+  });
+
+  it('用法把查询轴接在原来的句子上，后半段还在', () => {
+    expect(USAGE).toContain('--domain engine|api|mirasim --nature bug|perf|process');
+    expect(USAGE).toContain('--order-after 插在那张后面');
+  });
+
   it.each([
     [
       '缺 --kind',
@@ -205,6 +245,52 @@ describe('开单脚本：缺类别或里程碑就不开', () => {
     ],
     ['缺 --title', ['--kind', '需求', '--milestone', 'P1', '--body-file', 'body.md'], '缺 --title'],
     ['缺 --body-file', ['--kind', '需求', '--milestone', 'P1', '--title', 't'], '缺 --body-file'],
+    [
+      '缺 --domain',
+      ['--kind', '需求', '--nature', 'bug', '--milestone', 'P1', '--title', 't', '--body-file', 'body.md'],
+      '缺 --domain：从 engine、api、mirasim 里挑一个。',
+    ],
+    [
+      '缺 --nature',
+      ['--kind', '需求', '--domain', 'engine', '--milestone', 'P1', '--title', 't', '--body-file', 'body.md'],
+      '缺 --nature：从 bug、perf、process 里挑一个。',
+    ],
+    [
+      '--domain 不是三个之一',
+      [
+        '--kind',
+        '需求',
+        '--domain',
+        'web',
+        '--nature',
+        'bug',
+        '--milestone',
+        'P1',
+        '--title',
+        't',
+        '--body-file',
+        'body.md',
+      ],
+      '--domain 只能是 engine、api、mirasim，没有「web」。',
+    ],
+    [
+      '--nature 不是三个之一',
+      [
+        '--kind',
+        '需求',
+        '--domain',
+        'api',
+        '--nature',
+        'feat',
+        '--milestone',
+        'P1',
+        '--title',
+        't',
+        '--body-file',
+        'body.md',
+      ],
+      '--nature 只能是 bug、perf、process，没有「feat」。',
+    ],
     ['不认得的参数', [...base, '--label', 'x'], '参数不对'],
     ['--specs 没有了（需求只在单子正文里，#654）', [...base, '--specs', 'x'], '参数不对'],
   ])('%s', async (_name, argv, message) => {
@@ -215,9 +301,9 @@ describe('开单脚本：缺类别或里程碑就不开', () => {
 
   it('正文文件读不到：不开', async () => {
     const { calls, run } = setup();
-    await expect(run(...base.slice(0, -1), 'nope.md')).rejects.toThrow(
-      /--body-file 读不到：.*nope\.md.*单没开/,
-    );
+    const argv = [...base];
+    argv[argv.indexOf('--body-file') + 1] = 'nope.md';
+    await expect(run(...argv)).rejects.toThrow(/--body-file 读不到：.*nope\.md.*单没开/);
     expect(calls).toEqual([]);
   });
 
@@ -383,6 +469,10 @@ describe('开单脚本：一次带上标签和里程碑', () => {
         join(root, 'body.md'),
         '--label',
         '需求',
+        '--label',
+        '域:engine',
+        '--label',
+        '性质:bug',
         '--milestone',
         'P1 核心闭环',
       ],
@@ -460,6 +550,10 @@ describe('开单脚本：--milestone 未排期，不挂里程碑', () => {
         join(root, 'body.md'),
         '--label',
         '需求',
+        '--label',
+        '域:engine',
+        '--label',
+        '性质:bug',
       ],
     ]);
   });
@@ -478,6 +572,10 @@ describe('开单脚本：--mother 多贴「母单」标签', () => {
       expect.any(String),
       '--label',
       '需求',
+      '--label',
+      '域:engine',
+      '--label',
+      '性质:bug',
       '--label',
       '母单',
       '--milestone',
@@ -524,6 +622,10 @@ describe('开单脚本：--local 多贴「本机做」（#299 止血：帅位留
         '--label',
         '需求',
         '--label',
+        '域:engine',
+        '--label',
+        '性质:bug',
+        '--label',
         '本机做',
         '--milestone',
         'v1 Fusion 接活',
@@ -566,7 +668,20 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
     expect(calls).toEqual([
       ['api', 'repos/{owner}/{repo}/milestones?state=open&per_page=100'],
       ['api', 'repos/{owner}/{repo}/issues/192'],
-      ['issue', 'create', '--title', '登录页加验证码', '--body-file', expect.any(String), '--label', '需求'],
+      [
+        'issue',
+        'create',
+        '--title',
+        '登录页加验证码',
+        '--body-file',
+        expect.any(String),
+        '--label',
+        '需求',
+        '--label',
+        '域:engine',
+        '--label',
+        '性质:bug',
+      ],
       ['api', 'repos/{owner}/{repo}/issues/36'],
       ['api', '-X', 'POST', 'repos/{owner}/{repo}/issues/192/sub_issues', '-F', 'sub_issue_id=9036'],
       ['api', 'repos/{owner}/{repo}/issues/192/sub_issues?per_page=100', '--paginate', '--slurp'],
@@ -600,7 +715,16 @@ describe('开单脚本：--parent 开子单，先挂到母单下面再挂里程�
     const { calls, run } = setup({ milestones: V1, route: routes() });
     await expect(run(...sub, '--local')).resolves.toMatchObject({ number: 36, parent: 192, local: true });
     const create = calls.find((c) => c[0] === 'issue' && c[1] === 'create');
-    expect(create?.slice(-4)).toEqual(['--label', '需求', '--label', '本机做']);
+    expect(create?.slice(-8)).toEqual([
+      '--label',
+      '需求',
+      '--label',
+      '域:engine',
+      '--label',
+      '性质:bug',
+      '--label',
+      '本机做',
+    ]);
     expect(calls.at(-1)).toEqual(['issue', 'edit', '36', '--milestone', 'v1 Fusion 接活']);
   });
 

@@ -12,16 +12,16 @@
 import { PROBE_HISTORY_SLOTS } from '@fleet-dao/shared';
 import { ChevronRight, LoaderCircle } from 'lucide-react';
 import type { ProbeHistoryCell, ProbeHistoryChannel } from '../api/types';
-import type { ChannelCard } from '../lib/channel-status';
+import { type ChannelCard, quotaCountText } from '../lib/channel-status';
 import { formatAgo, formatClock, formatIn } from '../lib/format';
 import type { PoolProblem } from '../lib/pool-problems';
 import {
   formatAvailability,
   formatProbeMs,
   PROBE_KIND_BG,
-  PROBE_KIND_WORD,
   type ProbeKind,
   probeKind,
+  probeWord,
 } from '../lib/probe-history-view';
 import type { Failover } from '../lib/provider-status';
 import { countsText, STATE_FILTERS, type StateFilter } from '../lib/route-state';
@@ -197,6 +197,7 @@ function ChannelRow({
           : '额度读不到，要人处理';
   const summary = [
     countsText(c.counts),
+    quotaCountText(c),
     c.probedAt ? `${formatAgo(c.probedAt, now)}探的` : quiet ? undefined : '探针还没看过',
     quotaLine,
   ].filter((x): x is string => x !== undefined);
@@ -258,10 +259,11 @@ function ChannelRow({
   );
 }
 
-/** 手机上整条色条的读屏汇总：近几次里通过、不通、疑似换模型各几次。 */
+/** 手机上整条色条的读屏汇总：近几次里通过、不通、疑似换模型各几次；有连通但额度耗尽的才另报几次。 */
 function stripSummary(cells: readonly ProbeHistoryCell[]): string {
   const count = (k: ProbeKind) => cells.filter((c) => probeKind(c) === k).length;
-  return `近 ${cells.length} 次真探：通过 ${count('passed')}、不通 ${count('failed')}、疑似换模型 ${count('doubt')}`;
+  const quota = count('quota');
+  return `近 ${cells.length} 次真探：通过 ${count('passed')}${quota > 0 ? `、连通但额度耗尽 ${quota}` : ''}、不通 ${count('failed')}、疑似换模型 ${count('doubt')}`;
 }
 
 /** 不够 60 格时左边的空位。键按「第几格」写死，不拿数组下标当键。 */
@@ -327,7 +329,7 @@ export function HistoryStrip({
         ))}
         {cells.map((cell) => {
           const kind = probeKind(cell);
-          const word = PROBE_KIND_WORD[kind];
+          const word = probeWord(cell);
           const on = cell.id === activeCellId;
           // 手机上 60 格只做展示：每格 3px 宽点不准，定位靠下面的探测记录行
           if (phone) {
@@ -352,7 +354,7 @@ export function HistoryStrip({
               data-result={kind}
               data-cell={cell.id}
               aria-pressed={on}
-              title={`${formatClock(cell.probedAt)} ${cell.routeId} ${word.label} ${formatProbeMs(cell.durationMs, cell.result)}`}
+              title={`${formatClock(cell.probedAt)} ${cell.routeId} ${word} ${formatProbeMs(cell.durationMs, cell.result)}`}
               onClick={() => onPickCell(channelId, cell.id)}
               className={cn(
                 'h-full min-w-0 flex-1 rounded-sm', // 原圆角 2px，rounded-sm
@@ -361,7 +363,7 @@ export function HistoryStrip({
               )}
             >
               <span className="sr-only">
-                {formatClock(cell.probedAt)} {cell.routeId} {word.label}
+                {formatClock(cell.probedAt)} {cell.routeId} {word}
               </span>
             </button>
           );

@@ -1,8 +1,23 @@
 // 渠道状态（#1087）：顺位怎么排、探针报错的渠道怎么写「暂不可用、顺延到下一个」、干粉渠道照列、晚于下次探测时刻 20 分钟改成「检测中断」（#1798 片 7）。
 import { describe, expect, test } from 'vitest';
-import type { Channel, LivenessVerdict, Route, RoutingLayerRoute, RoutingLayers } from '../api/types';
-import { buildChannelCards, probeLatency } from './channel-status';
-import { TIME } from './format';
+import type {
+  Channel,
+  LivenessVerdict,
+  ProbeHistoryCell,
+  Route,
+  RoutingLayerRoute,
+  RoutingLayers,
+} from '../api/types';
+import {
+  buildChannelCards,
+  type ChannelCard,
+  type ChannelQuota,
+  probeLatency,
+  quotaCountText,
+  quotaResetLine,
+} from './channel-status';
+import { formatDateTime, TIME } from './format';
+import { currentQuotaCells, probeKind, probeWord, quotaResetText } from './probe-history-view';
 
 const NOW = Date.parse('2026-10-05T12:00:00Z');
 const ago = (min: number) => new Date(NOW - min * TIME.MIN).toISOString();
@@ -429,5 +444,150 @@ describe('检测中断：晚于 probeNextAt 加 20 分钟就不当现状', () =>
       new Set(['a2']),
     );
     expect(byId(cards, 'a').counts).toMatchObject({ interrupted: 1, degraded: 1, live: 1, fault: 0 });
+  });
+});
+
+describe('连通但额度耗尽（#2939）：只改说法，不改连通统计和选路', () => {
+  const cell = (routeId: string, over: Partial<ProbeHistoryCell> = {}): ProbeHistoryCell => ({
+    id: 1,
+    routeId,
+    channelId: 'a',
+    probedAt: ago(4),
+    result: 'passed',
+    durationMs: 1200,
+    failureReason: null,
+    requestText: null,
+    responseText: null,
+    checkQuestion: null,
+    checkExpected: null,
+    checkAnswer: null,
+    checkPassed: null,
+    selfIdentity: null,
+    ...over,
+  });
+  const RESET = '2026-10-05T14:30:00Z';
+  const quotaCell = (routeId: string, over: Partial<ProbeHistoryCell> = {}) =>
+    cell(routeId, { quotaExhausted: true, detail: '5 小时额度用完了', resetsAt: RESET, ...over });
+  const catalog = [rawRoute('a1', 'a', '通'), rawRoute('a2', 'a', '通'), rawRoute('a3', 'a', '通')];
+  const build = (
+    quotaOf: ProbeHistoryCell[],
+    routes: Route[] = catalog,
+    verdict2: LivenessVerdict = 'live',
+  ) =>
+    buildChannelCards(
+      { channels: [channel('a')], routes, models: [] },
+      layers([
+        {
+          m1: [layerRoute('a1', 'a', 'live'), layerRoute('a2', 'a', verdict2), layerRoute('a3', 'a', 'live')],
+        },
+      ]),
+      NOW,
+      () => false,
+      new Set(),
+      currentQuotaCells(quotaOf, routes),
+    );
+
+  test('probeKind：只有 passed 且明说 quotaExhausted 才是额度耗尽；老行缺字段、认证失败、网络失败、临时 429 都不是', () => {
+    expect(probeKind(quotaCell('a1'))).toBe('quota');
+    expect(probeKind(cell('a1'))).toBe('passed');
+    expect(probeKind(cell('a1', { quotaExhausted: false }))).toBe('passed');
+    expect(probeKind(cell('a1', { result: 'failed', failureReason: '401 认证失败' }))).toBe('failed');
+    expect(probeKind(cell('a1', { result: 'failed', failureReason: 'ECONNRESET 网络断了' }))).toBe('failed');
+    expect(probeKind(cell('a1', { result: 'failed', failureReason: '429 临时限流，稍后重试' }))).toBe(
+      'failed',
+    );
+    // 就算失败行带了 quotaExhausted 也不当额度耗尽（它是「连通」的前提）
+    expect(probeKind(cell('a1', { result: 'failed', quotaExhausted: true }))).toBe('failed');
+  });
+
+  test('重置时间：上游给了写明确时刻；没给写没给，不从别处推算', () => {
+    expect(quotaResetText(RESET)).toBe(`预计 ${formatDateTime(RESET)} 重置`);
+    expect(quotaResetText(undefined)).toBe('重置时间上游没给');
+    expect(probeWord(quotaCell('a1'))).toBe(`连通但额度耗尽（预计 ${formatDateTime(RESET)} 重置）`);
+    expect(probeWord(quotaCell('a1', { resetsAt: undefined }))).toBe('连通但额度耗尽（重置时间上游没给）');
+    expect(probeWord(cell('a1'))).toBe('通过');
+  });
+
+  test('所有在用的路都耗尽：渠道说「连通但额度耗尽」，状态仍是在线（ok），连通统计不变', () => {
+    const [c] = build([quotaCell('a1'), quotaCell('a2'), quotaCell('a3')]);
+    expect(c).toMatchObject({
+      state: 'ok',
+      label: '连通但额度耗尽',
+      kind: 'live',
+      hasFault: false,
+      deadRoutes: 0,
+    });
+    expect(c?.counts.live).toBe(3);
+    expect(c?.quota).toMatchObject({
+      routes: 3,
+      resetUnknown: 0,
+      resetsAt: RESET,
+      detail: '5 小时额度用完了',
+    });
+    expect(quotaCountText(c as ChannelCard)).toBe('额度耗尽 3/3 路');
+    expect(quotaResetLine(c?.quota as ChannelQuota)).toBe(`预计 ${formatDateTime(RESET)} 重置`);
+  });
+
+  test('混合路由：只有部分路耗尽，不说成整个渠道都耗尽', () => {
+    const [c] = build([quotaCell('a2'), cell('a1'), cell('a3')]);
+    expect(c).toMatchObject({ state: 'ok', label: '部分路额度耗尽' });
+    expect(c?.quota?.routes).toBe(1);
+    expect(quotaCountText(c as ChannelCard)).toBe('额度耗尽 1/3 路');
+  });
+
+  test('额度耗尽但重置时间没给：写没给；有的给有的没给，写最早的并说明另有几路没给', () => {
+    const [none] = build([quotaCell('a1', { resetsAt: undefined })]);
+    expect(none?.quota).not.toHaveProperty('resetsAt');
+    expect(quotaResetLine(none?.quota as ChannelQuota)).toBe('重置时间上游没给');
+    const [some] = build([quotaCell('a1'), quotaCell('a2', { resetsAt: undefined })]);
+    expect(quotaResetLine(some?.quota as ChannelQuota)).toBe(
+      `最早预计 ${formatDateTime(RESET)} 重置（另有 1 路没给）`,
+    );
+  });
+
+  test('普通成功、老行（缺字段）、失败行：卡片照旧说在线，不带 quota', () => {
+    for (const rows of [
+      [cell('a1'), cell('a2'), cell('a3')],
+      [cell('a1', { quotaExhausted: undefined }), cell('a2', { detail: null })],
+      [cell('a1', { result: 'failed', failureReason: '429 临时限流' })],
+    ]) {
+      const [c] = build(rows);
+      expect(c?.label).toBe('在线');
+      expect(c?.quota).toBeUndefined();
+    }
+  });
+
+  test('旧的额度记录已被更新的成功覆盖：路由当前探针比它新，就不算额度耗尽', () => {
+    const fresh = [rawRoute('a1', 'a', '通', ago(1)), rawRoute('a2', 'a', '通'), rawRoute('a3', 'a', '通')];
+    // a1 的额度记录是 30 分钟前的，目录里的探针已经是 1 分钟前的新成功
+    const stale = quotaCell('a1', { probedAt: ago(30) });
+    expect(currentQuotaCells([stale], fresh).size).toBe(0);
+    const [c] = build([stale], fresh);
+    expect(c?.label).toBe('在线');
+    expect(c?.quota).toBeUndefined();
+    // 目录里探针不是通（失败）也不认
+    const failedRoute: Route[] = [
+      { ...rawRoute('a1', 'a', '不通'), probe: { state: 'failed', at: ago(4), detail: 'x' } },
+    ];
+    expect(currentQuotaCells([quotaCell('a1')], failedRoute).size).toBe(0);
+  });
+
+  test('渠道里有路不通：状态仍是部分路故障（不被额度盖掉），quota 另带', () => {
+    const [c] = build([quotaCell('a1')], catalog, 'dead');
+    expect(c).toMatchObject({ state: 'partial', label: '部分路故障', deadRoutes: 1, hasFault: true });
+    expect(c?.quota?.routes).toBe(1);
+  });
+
+  test('检测中断时仍说检测中断', () => {
+    const [c] = buildChannelCards(
+      { channels: [channel('a')], routes: catalog, models: [] },
+      layers([{ m1: [layerRoute('a1', 'a', 'live', { probeTier: 'active', probeNextAt: ago(60) })] }]),
+      NOW,
+      () => false,
+      new Set(),
+      currentQuotaCells([quotaCell('a1')], catalog),
+    );
+    expect(c?.interrupted).toBe(true);
+    expect(c?.label).toBe('检测中断');
   });
 });

@@ -110,8 +110,9 @@ describe('需求栏挂单（#1052：pr:open 据此拒开没挂单的 PR）', () 
     expect(issueColumnRefs(TEMPLATE)).toEqual({ closes: [], refs: [] });
   });
 
-  it('模板的说明里讲清了必须挂单、没单怎么写（#1052）：不再是「没有写无」', () => {
-    expect(TEMPLATE).toContain('--no-issue');
+  it('模板明确每个 PR 必须挂单，不再推荐已失效的无单入口', () => {
+    expect(TEMPLATE).not.toContain('--no-issue');
+    expect(TEMPLATE).toContain('每个 PR 必须挂单');
     expect(TEMPLATE).toContain('Refs #号');
     expect(TEMPLATE).not.toContain('单号，如 #12；没有写「无」');
   });
