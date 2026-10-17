@@ -3,9 +3,11 @@
 # CI 里照法国发版的样子装一版、看服务入口的模块都找得到（.github/workflows/ci.yml 的 lint 里跑）。
 # 为什么：CI 自己的 pnpm install 被 pnpm 认成 CI（全局虚拟仓自动关、布局和法国不同），在那上面跑测试绿了，法国照样可能起不来
 # （065445a4：法国的构建沙箱是 env -i，不算 CI，依赖链到家目录里，fleet-api 报 ERR_MODULE_NOT_FOUND）。
-# 这里和 release.sh 的 build_release 同一套：git archive 出这一版的文件 → env -i 下带 RELEASE_PNPM_ENV 用 RELEASE_PNPM_INSTALL 装 →
-# 用 RELEASE_PNPM_WEB_BUILD 构建驾驶舱前端 → links_inside 查符号链接没指到目录外 → packages/conventions/src/bin/release-smoke.ts 从 fleet-api、fleet-engine 的入口把
-# 每条 import 用 node 解析一遍（只解析、不执行）。
+# 这里和 release.sh 的 build_release 同一套：git archive 出这一版的文件 → pin_release_workspace 固定工作区设置 →
+# env -i 下带 RELEASE_PNPM_ENV 用 RELEASE_PNPM_INSTALL 装 →
+# 用 RELEASE_PNPM_WEB_BUILD 构建驾驶舱前端 → links_inside 查符号链接没指到目录外 →
+# 再模拟事后有人在发布目录里直接敲 pnpm install（不带 RELEASE_PNPM_ENV、另一个家目录，#2901）：不许 Recreating、链接不许越界 →
+# packages/conventions/src/bin/release-smoke.ts 从 fleet-api、fleet-engine 的入口把每条 import 用 node 解析一遍（只解析、不执行）。
 # 唯一不同：pnpm 仓库用 CI 缓存的那份（pnpm_config_store_dir），不从零下载；仓库在目录外不要紧，链到它的会被 links_inside 拦下。
 # 用法：bash deploy/release-smoke.sh [提交，默认 HEAD]。退出码：0 过；1 没过；2 没查成。
 set -uo pipefail
@@ -24,6 +26,10 @@ mkdir -p "$REL" "$TMP/home"
 if ! git -C "$REPO" archive --format=tar "$REV" | tar -x -f - -C "$REL"; then
   echo "没查成：git archive $REV 解不出来" >&2
   exit 2
+fi
+if ! pin_release_workspace "$REL"; then
+  echo "没过：固定 pnpm 工作区设置失败（$PIN_WORKSPACE_WHY）：发版会在这一步停下、不切版本" >&2
+  exit 1
 fi
 if ! store=$(cd -- "$REPO" && pnpm store path 2>/dev/null) || [[ -z "$store" ]]; then
   echo "没查成：读不出 pnpm store path" >&2
@@ -72,6 +78,31 @@ if ! links_inside "$REL"; then
   exit 1
 fi
 echo "前端构建过了；符号链接都在这一版目录里"
+# 发布目录里事后有人直接敲 pnpm（不带 RELEASE_PNPM_ENV，另一个家目录和仓库，如 root）：依赖不能被重装、链接不能指到目录外（#2901）。
+# 出现 Recreating（pnpm 认为设置变了、要整棵重装）或符号链接越界都算没过
+run_bare_pnpm() { # 日志 参数…
+  local log=$1
+  shift
+  mkdir -p "$TMP/home-bare"
+  (cd -- "$REL" && env -i HOME="$TMP/home-bare" PATH="$(dirname -- "$pnpm_bin"):$(dirname -- "$node_bin"):/usr/bin:/bin" \
+    LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "pnpm_config_store_dir=$store" "$pnpm_bin" "$@" >"$log" 2>&1)
+}
+echo "照事后有人直接敲 pnpm：不带 RELEASE_PNPM_ENV，pnpm ${RELEASE_PNPM_INSTALL[*]}"
+if ! run_bare_pnpm "$TMP/bare.log" "${RELEASE_PNPM_INSTALL[@]}"; then
+  grep -av '^Progress: ' "$TMP/bare.log" | tail -40 >&2
+  echo "没过：发布目录里不带设置直接 pnpm install 失败" >&2
+  exit 1
+fi
+if grep -aq 'Recreating ' "$TMP/bare.log"; then
+  grep -a 'Recreating ' "$TMP/bare.log" >&2
+  echo "没过：发布目录里不带设置直接敲 pnpm，依赖被重装了一遍（pnpm-workspace.yaml 没固定住）" >&2
+  exit 1
+fi
+if ! links_inside "$REL"; then
+  echo "没过：不带设置直接敲 pnpm 之后有符号链接指到这一版目录外（$LINKS_OUTSIDE_WHY）" >&2
+  exit 1
+fi
+echo "不带设置直接 pnpm install：没重装、链接都在这一版目录里"
 # 解析器用 PR 检出里的那份（不在被查的目录里跑代码），解析的是 $REL 里的文件
 (cd -- "$REL" && env -i HOME="$TMP/home" PATH="$(dirname -- "$node_bin"):/usr/bin:/bin" \
   "$node_bin" --experimental-import-meta-resolve "$REPO/packages/conventions/src/bin/release-smoke.ts" "$REL")
