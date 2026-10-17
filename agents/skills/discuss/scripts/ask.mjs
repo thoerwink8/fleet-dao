@@ -9,7 +9,7 @@
 // 退出码：0 至少一家答上；2 一家都没答上、参数不对，或这台机器缺 cursor-agent。
 // 并发上限：同一时刻最多 MAX_PAR 个 cursor-agent（design 第九节起步值 3；五家齐跑 + 工人把进程数顶满、宿主崩过）。
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -48,14 +48,49 @@ function args(argv) {
 // （实测 6KB 中文题面走 stdin 正常作答）。cursorAgentEnv() 留着一起用（不影响，多一层保险）。
 // 不管是哪种读不到的原因，都用同一招防蒙混：题面最前面塞一行随机核对码，要求原样抄进答案；输出里找不到这个
 // 核对码就一律判没答上，不会再被「退出码 0、有输出」当成答了。
-function askOne(key, model, prompt, limitSec, dir) {
+// 只处理本次讨论创建的子树。Windows 的 shell 子孙不受 child.kill() 管；
+// POSIX 用独立进程组，超时时一起终止，不能留下占工作区/管道的执行体。
+function stopProcessTree(child) {
+  if (!(child.pid > 0)) throw new Error('执行体没有 PID，无法确认进程树');
+  if (process.platform === 'win32') {
+    const taskkill = join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'taskkill.exe');
+    const r = spawnSync(taskkill, ['/PID', String(child.pid), '/T', '/F'], {
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5000,
+    });
+    if (r.error || r.status !== 0)
+      throw new Error(r.error?.message ?? `taskkill 退出码 ${r.status}：${r.stderr.trim().slice(0, 200)}`);
+  } else {
+    try {
+      process.kill(-child.pid, 'SIGKILL');
+    } catch (e) {
+      if (e?.code !== 'ESRCH') throw e;
+    }
+  }
+}
+
+export function askOne(
+  key,
+  model,
+  prompt,
+  limitSec,
+  dir,
+  { spawnFn = spawn, stopTree = stopProcessTree } = {},
+) {
   const started = Date.now();
   return new Promise((resolveP) => {
     const nonce = randomUUID().slice(0, 8);
-    const child = spawn(
+    const child = spawnFn(
       'cursor-agent',
       ['-p', '--output-format', 'text', '--trust', '--mode', 'ask', '--workspace', dir, '--model', model],
-      { cwd: dir, windowsHide: true, shell: process.platform === 'win32', env: cursorAgentEnv() },
+      {
+        cwd: dir,
+        windowsHide: true,
+        shell: process.platform === 'win32',
+        detached: process.platform !== 'win32',
+        env: cursorAgentEnv(),
+      },
     );
     child.stdin.on('error', () => {
       // 执行体提前退出时写 stdin 会 EPIPE，结果以退出码和 stdout 为准
@@ -71,16 +106,41 @@ function askOne(key, model, prompt, limitSec, dir) {
     child.stderr.on('data', (d) => {
       err += d;
     });
-    const done = (ok, why, text = out.trim()) => {
+    let settled = false;
+    let timedOut = false;
+    let startError;
+    let closeTimer;
+    const done = (ok, why, text = out.trim(), cleanupFailed = false) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
-      resolveP({ key, model, ok, secs: (Date.now() - started) / 1000, text, why });
+      clearTimeout(closeTimer);
+      resolveP({ key, model, ok, secs: (Date.now() - started) / 1000, text, why, cleanupFailed });
+    };
+    const unconfirmed = (why) => {
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      child.unref();
+      done(false, `超过 ${limitSec} 秒；进程树收尾没查成：${why}`, out.trim(), true);
     };
     const timer = setTimeout(() => {
-      child.kill();
-      done(false, `超过 ${limitSec} 秒，停掉了`);
+      timedOut = true;
+      try {
+        stopTree(child);
+      } catch (e) {
+        unconfirmed(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      // taskkill 成功也要等 close：close 才表示执行体退出且继承的输出管道已关闭。
+      closeTimer = setTimeout(() => unconfirmed('终止后输出管道仍未关闭'), 2000);
     }, limitSec * 1000);
-    child.on('error', (e) => done(false, `起不来：${e.message}`));
+    child.on('error', (e) => {
+      startError = e.message;
+    });
     child.on('close', (code) => {
+      if (timedOut) return done(false, `超过 ${limitSec} 秒，已终止进程树并关闭输出`);
+      if (startError) return done(false, `起不来：${startError}`);
       if (code !== 0) return done(false, `退出码 ${code}：${(err || out).trim().slice(0, 200)}`);
       const trimmed = out.trim();
       if (!trimmed) return done(false, '退出码 0 但没有输出');
@@ -118,6 +178,7 @@ async function main() {
   if (problem) throw new Error(problem);
   // 题面放进自己建的临时目录（也是 cursor-agent 的工作区）：问完、中途出错都删掉，不在 /tmp 里越攒越多
   const dir = mkdtempSync(join(tmpdir(), 'ask-'));
+  let cleanupFailed = false;
   try {
     const results = [];
     const queue = [...keys];
@@ -125,7 +186,9 @@ async function main() {
       Array.from({ length: Math.min(MAX_PAR, queue.length) }, async () => {
         while (queue.length) {
           const k = queue.shift();
-          results.push(await askOne(k, MODELS[k], prompt, o.limit, dir));
+          const result = await askOne(k, MODELS[k], prompt, o.limit, dir);
+          cleanupFailed ||= result.cleanupFailed;
+          results.push(result);
         }
       }),
     );
@@ -144,7 +207,8 @@ async function main() {
     console.error(outFile);
     process.exitCode = results.some((r) => r.ok) ? 0 : 2;
   } finally {
-    removeDir(dir);
+    if (cleanupFailed) console.error(`执行体收尾没查成，保留临时工作区：${dir}`);
+    else removeDir(dir);
   }
 }
 
