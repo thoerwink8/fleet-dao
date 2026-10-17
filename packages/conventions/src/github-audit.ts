@@ -4,15 +4,23 @@
 // 合并时的自动收口 close-on-merge.ts 没收成、或当时还有别的 PR 挂着它的）。从前这些靠每天的关单对账、版本快照生成时顺带发现，那两样都删了
 // （单子是需求唯一的家，关单证据在 pnpm issue:close 那一步查），只留这一道定时的；查出来的每一条都是要有人去修的，不是通知。
 // 结果随单子开关、随时间变，所以不进 PR 的必过检查（#87），只在定时任务里跑，红了不挡任何 PR。
-// 唯一会写的一处：开着的版本里程碑说明的先后段里有已关或已挪走的号，直接改掉（#2393，pnpm issue:new 开单时也清同一份）。
+// 自动写两处：按唯一母单清单修复母子关系；清掉开着的版本里程碑先后段里已关或已挪走的号（#2393）。
 // 改这里之前必须知道：
 // - 读不到 GitHub、读回来认不出：一律是「没查成」（退出码 2），不当成「没有断裂」。
 // - 每一条规则在 test/github-audit.test.ts 里有一个查得出的例子和一个不该报的例子。
 
 import { whyLeave } from './close-on-merge.ts';
+import { reconcileFamily } from './family-manifest.ts';
 import type { Finding } from './findings.ts';
 import { isFlowBranch } from './flow-branch.ts';
-import type { GitHubMilestoneWriter, GitHubReader, PlanIssue, PullBody } from './github-api.ts';
+import type {
+  GitHubFamilyReader,
+  GitHubFamilyWriter,
+  GitHubMilestoneWriter,
+  GitHubReader,
+  PlanIssue,
+  PullBody,
+} from './github-api.ts';
 import { isKindLabel, MOTHER_LABEL } from './labels.ts';
 import { parentField } from './parent-field.ts';
 import { type Plan, PlanProblem, parseOrder, pruneOrder, readPlan } from './plan-view.ts';
@@ -44,11 +52,17 @@ export async function auditGitHub(
   gh: GitHubReader,
   now: Date,
   writer?: GitHubMilestoneWriter,
+  family?: { reader: GitHubReader & GitHubFamilyReader; writer?: GitHubFamilyWriter },
 ): Promise<AuditResult> {
   const findings: Finding[] = [];
   const notQueried: string[] = [];
   const checked = { issues: 0, versions: 0 };
   const pruned: AuditResult['pruned'] = [];
+  if (family) {
+    const result = await reconcileFamily(family.reader, family.writer);
+    findings.push(...result.findings);
+    notQueried.push(...result.notQueried);
+  }
 
   let open: PlanIssue[] | undefined;
   try {

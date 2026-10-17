@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import type { PlanIssue, PullBody } from '../src/github-api.ts';
 import { auditGitHub } from '../src/github-audit.ts';
+import { readManifest } from '../src/mother-manifest.ts';
 import { parentField } from '../src/parent-field.ts';
 import { addToOrder } from '../src/plan-view.ts';
 import {
@@ -63,6 +64,29 @@ const patch = (w: World, n: number, extra: Partial<PlanIssue>) => {
 };
 
 describe('GitHub 对账：干净的一份什么都不报', () => {
+  it('实际入口启用 family 维护时先修复并保留本轮差异，第二轮一致才绿', async () => {
+    const w = cleanWorld();
+    const { reader } = fakeReader(w);
+    const gh = { ...reader, allIssues: async () => w.issues };
+    const writer = {
+      updateIssueBody: async (n: number, body: string) => {
+        patch(w, n, { body });
+      },
+      addSubIssue: async (mother: number, child: number) => {
+        patch(w, child, { parent: mother });
+      },
+    };
+    const first = await auditGitHub(gh, NOW, undefined, { reader: gh, writer });
+    expect(first.notQueried).toEqual([]);
+    expect(first.findings.some((f) => f.key.startsWith('manifest-drift:10'))).toBe(true);
+    expect(readManifest(w.issues.find((i) => i.number === 10)?.body ?? '')).toMatchObject({
+      kind: 'valid',
+      children: [11, 12],
+    });
+    const second = await auditGitHub(gh, NOW, undefined, { reader: gh, writer });
+    expect(second.notQueried).toEqual([]);
+    expect(second.findings).toEqual([]);
+  });
   it('没有断裂：findings 空、没有没查成的，说清查了几张单、几个版本', async () => {
     const r = await audit(cleanWorld());
     expect(r.findings).toEqual([]);

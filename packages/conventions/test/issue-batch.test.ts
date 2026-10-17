@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { type BatchSpec, issueBatchNew, recoverIssueBatch } from '../src/issue-batch.ts';
 import type { Gh, GhResult } from '../src/issue-new.ts';
+import { readManifest } from '../src/mother-manifest.ts';
 import { parentField } from '../src/parent-field.ts';
 
 const ok = (value: unknown): GhResult => ({
@@ -47,6 +48,8 @@ interface FakeOptions {
   failRelease?: number;
   failList?: boolean;
   malformedList?: boolean;
+  failManifest?: boolean;
+  staleManifest?: boolean;
 }
 
 /** GitHub 假端保存真实状态：断连也可能已经建单，关闭回包也可能没有关闭。 */
@@ -98,6 +101,16 @@ function setup(options: FakeOptions = {}) {
     }
     if (args[0] === 'api' && args[1] === '-X' && args[2] === 'PATCH') {
       const number = Number(/issues\/(\d+)$/.exec(args[3] ?? '')?.[1]);
+      if (args.includes('--input')) {
+        if (options.failManifest) return fail('manifest-failed');
+        const issue = issues.find((entry) => entry.number === number);
+        if (!issue) return fail('HTTP 404');
+        const input = JSON.parse(readFileSync(args[args.indexOf('--input') + 1] ?? '', 'utf8')) as {
+          body: string;
+        };
+        if (!options.staleManifest) issue.body = input.body;
+        return ok(issue);
+      }
       closeAttempts.push(number);
       if (options.failClose === number) return fail(`close-failed-${number}`);
       const issue = issues.find((entry) => entry.number === number);
@@ -115,6 +128,9 @@ function setup(options: FakeOptions = {}) {
       if (options.malformedList) return ok({ unexpected: true });
       // 故意两页，确保不会只收第一页。
       return ok([issues.slice(0, 1), issues.slice(1)]);
+    }
+    if (args[0] === 'api' && /^repos\/\{owner\}\/\{repo\}\/issues\/\d+$/.test(args[1] ?? '')) {
+      return ok(issues.find((i) => i.number === Number(args[1]?.split('/').at(-1))));
     }
     if (args[0] === 'issue' && args[1] === 'edit') {
       const number = Number(args[2]);
@@ -157,7 +173,22 @@ describe('母单与子单原子批量创建', () => {
     const firstRelease = fake.calls.findIndex((args) => args[0] === 'issue' && args[1] === 'edit');
     expect(firstRelease).toBeGreaterThan(lastAttach);
     expect(fake.readJournal()).toMatchObject({ status: 'complete', uncertain: false });
+    expect(readManifest(fake.issues[0]?.body ?? '')).toMatchObject({ kind: 'valid', children: [102, 103] });
+    const manifestWrite = fake.calls.findIndex((args) => args[2] === 'PATCH' && args.includes('--input'));
+    expect(manifestWrite).toBeGreaterThan(lastAttach);
+    expect(firstRelease).toBeGreaterThan(manifestWrite);
   });
+
+  it.each([{ failManifest: true }, { staleManifest: true }])(
+    'manifest 写不成或回包未确认时整批撤销：%j',
+    async (options) => {
+      const fake = setup(options);
+      await expect(fake.run()).rejects.toThrow(/manifest|清单/);
+      expect(fake.issues.every((i) => i.state === 'closed')).toBe(true);
+      expect(fake.readJournal().status).toBe('rolled_back');
+      expect(fake.calls.some((args) => args[0] === 'issue' && args[1] === 'edit')).toBe(false);
+    },
+  );
 
   it('本机批次全程保留本机做，不能意外释放给引擎', async () => {
     const fake = setup();
@@ -177,7 +208,7 @@ describe('母单与子单原子批量创建', () => {
         expect(parentField(issue.body)).toEqual({ kind: 'parent', number: 101 });
         expect(issue.body).toMatch(/^<!-- fleet:issue-batch:[^\n]+:sub -->\nparent: #101\n/);
       }
-      expect(successful.issues[0]?.body).toMatch(/^<!-- fleet:issue-batch:[^\n]+:mother -->\n/);
+      expect(successful.issues[0]?.body).toMatch(/^<!-- fleet:issue-batch:[^\n]+:mother -->\n/m);
       const ambiguous = setup({ ambiguousCreate: 3 });
       await expect(ambiguous.run(input)).rejects.toThrow();
       expect(ambiguous.issues).toHaveLength(3);
