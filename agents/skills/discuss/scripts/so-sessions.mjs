@@ -15,6 +15,7 @@ import {
   RetryableStart,
   Stalled,
 } from './so-common.mjs';
+import { requireCloudCapability } from './so-profiles.mjs';
 import { judgeLedger, judgeSnapshot } from './so-verdict.mjs';
 import { cursorAgentEnv, cursorAgentProblem, findBin, NotInstalled } from './tools.mjs';
 
@@ -218,26 +219,37 @@ async function relayUsage(url) {
 
 /**
  * @param {string} uuid
+ * @param {string} [root]
  * @returns {{ readable: true, rows: LedgerRow[] } | { readable: false, why: string }}
  */
-function readLedger(uuid) {
-  const dir = join(MIRA, 'traffic', uuid);
+export function readLedger(uuid, root = MIRA) {
+  const dir = join(root, 'traffic', uuid);
   /** @type {string[]} */
   let files;
   try {
     files = readdirSync(dir).filter((f) => /^index-.*\.ndjson$/.test(f));
   } catch (e) {
-    return { readable: false, why: `读不到账本目录（${errCode(e) ?? messageOf(e)}）` };
+    return { readable: false, why: `读不到账本目录 ${dir}（${errCode(e) ?? 'UNKNOWN'}）` };
   }
+  if (files.length === 0) return { readable: false, why: `账本目录 ${dir} 没有 index 文件` };
   /** @type {LedgerRow[]} */
   const rows = [];
-  for (const f of files) {
-    for (const line of readFileSync(join(dir, f), 'utf8').split('\n')) {
+  for (const f of files.sort()) {
+    let text;
+    try {
+      text = readFileSync(join(dir, f), 'utf8');
+    } catch (e) {
+      return { readable: false, why: `读不到账本文件 ${join(dir, f)}（${errCode(e) ?? 'UNKNOWN'}）` };
+    }
+    for (const [at, line] of text.split('\n').entries()) {
       if (!line.trim()) continue;
       try {
-        rows.push(JSON.parse(line));
+        const row = JSON.parse(line);
+        if (!isObjectLike(row) || Array.isArray(row))
+          return { readable: false, why: `账本 ${f} 第 ${at + 1} 行不是对象` };
+        rows.push(row);
       } catch {
-        return { readable: false, why: `账本 ${f} 有一行不是 JSON` };
+        return { readable: false, why: `账本 ${f} 第 ${at + 1} 行不是 JSON` };
       }
     }
   }
@@ -471,6 +483,7 @@ export async function runSession({
   effort,
   discussion = false,
 }) {
+  requireCloudCapability(profile);
   if (profile.agent === 'reclaude') return runClaude({ prompt, workdir, timeoutMin, log });
   if (profile.agent === 'cursor-cli') return runCursor({ prompt, profile, workdir, timeoutMin, log });
   const { url, wire, state } = await connect();
@@ -533,7 +546,7 @@ export async function runSession({
 
 /**
  * 等的那几步（读快照、发停止、读用量、睡一下、看钟）：测试换成假的，用假钟不真等几分钟。
- * @typedef {{ readView: (url: string, sessionKey: string) => Promise<SessionView | null>, stop: (url: string, sessionKey: string) => Promise<void>, relayUsage: (url: string) => Promise<number | null>, sleep: (ms: number) => Promise<void>, now: () => number }} PollIo
+ * @typedef {{ readView: (url: string, sessionKey: string) => Promise<SessionView | null>, stop: (url: string, sessionKey: string) => Promise<void>, relayUsage: (url: string) => Promise<number | null>, sleep: (ms: number) => Promise<void>, now: () => number, readLedger?: typeof readLedger }} PollIo
  */
 /** @type {PollIo} */
 const REAL_IO = {
@@ -611,18 +624,19 @@ export async function pollSession({
   }
   const uuid = sessionKey.split(':').slice(1).join(':');
   // 账本比快照的 done 晚一两秒落盘（实测）：没读到起针后的成功行就等一等再读，最多 10 秒
-  let ledger = readLedger(uuid);
+  const loadLedger = io.readLedger ?? readLedger;
+  let ledger = loadLedger(uuid);
   for (
     let i = 0;
     i < 10 && profile.route === 'cloud' && !(ledger.readable && judgeLedger(ledger.rows, since, true).ok);
     i++
   ) {
     await io.sleep(1_000);
-    ledger = readLedger(uuid);
+    ledger = loadLedger(uuid);
   }
   let ledgerNote;
   if (profile.route === 'cloud') {
-    if (!ledger.readable) throw new NotChecked(`快照说完工，但${ledger.why}——没核成`);
+    if (!ledger.readable) throw new NotChecked(`会话 ${sessionKey} 快照说完工，但${ledger.why}——没核成`);
     const j = judgeLedger(ledger.rows, since, true);
     if (!j.ok) throw new NotChecked(j.why);
     ledgerNote = j.why;

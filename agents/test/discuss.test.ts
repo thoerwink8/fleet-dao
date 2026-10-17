@@ -58,7 +58,9 @@ interface PollIo {
   relayUsage(url: string): Promise<number | null>;
   sleep(ms: number): Promise<void>;
   now(): number;
+  readLedger?(uuid: string): LedgerReading;
 }
+type LedgerReading = { readable: true; rows: Record<string, unknown>[] } | { readable: false; why: string };
 interface ProfilesLib {
   FAMILY_ORDER: string[];
   PROFILES: Record<string, FakeProfile>;
@@ -70,6 +72,14 @@ interface ProfilesLib {
   ): Promise<{ text: string; profile: FakeProfile }>;
 }
 interface SessionsLib {
+  readLedger(uuid: string, root?: string): LedgerReading;
+  runSession(o: {
+    prompt: string;
+    profile: FakeProfile;
+    workdir: string;
+    timeoutMin: number;
+    log: (s: string) => void;
+  }): Promise<{ text: string }>;
   pollSession(o: {
     profile: FakeProfile;
     url: string;
@@ -619,6 +629,7 @@ describe('second-opinion.mjs 的纯判断（原来 --selftest 的那几条）', 
       status,
       viaRelay,
       upstreamHost,
+      path: '/v1/responses',
     });
     expect(so.judgeLedger([row('2026-09-25T10:00:05Z', 200, true)], t0, true).ok).toBe(true);
     expect(so.judgeLedger([row('2026-09-25T09:00:00Z', 200, true)], t0, true).ok).toBe(false);
@@ -630,6 +641,162 @@ describe('second-opinion.mjs 的纯判断（原来 --selftest 的那几条）', 
   it('模型满载算连不上、换下一家；认不出结论不换人', () => {
     expect(so.UNAVAILABLE.test('快照报 done 但带着 incomplete：Selected model is at capacity.')).toBe(true);
     expect(so.UNAVAILABLE.test('结论认不出')).toBe(false);
+  });
+});
+
+describe('cloud 能力和本次计费账本', () => {
+  const since = Date.parse('2026-10-17T19:00:00Z');
+  const row = (overrides: Record<string, unknown> = {}) => ({
+    ts: since + 100,
+    status: 200,
+    path: '/v1/responses',
+    viaRelay: true,
+    upstreamHost: 'relay.example',
+    ...overrides,
+  });
+
+  it('原生 Grok 请求 cloud 时在连接 Mirasim 前拒绝，不静默改用 local', async () => {
+    const home = temp('cloud-grok');
+    const r = run(
+      'second-opinion.mjs',
+      ['--text', topic(LONG), '--name', 'grok-no-cloud', '--author-family', 'gpt', '--agent', 'grok'],
+      { home },
+    );
+    expect(r.code).toBe(2);
+    expect(r.err).toContain('grok 执行体不支持 cloud');
+    expect(r.err).toContain('未发出模型调用');
+    expect(r.err).not.toContain('没装 Mirasim');
+    expect(existsSync(join(home, '.mirasim'))).toBe(false);
+  });
+
+  it('能力拒绝沿原候选链继续，收到异议后不再换家，同族始终排除', async () => {
+    const chain = so.discussionProfiles({ authorFamily: 'gpt' }) as FakeProfile[];
+    const called: string[] = [];
+    const logs: string[] = [];
+    const result = await profilesLib.withFallback(
+      chain,
+      (line) => logs.push(line),
+      async (profile) => {
+        called.push(profile.agent);
+        if (profile.agent === 'grok')
+          return sessionsLib.runSession({
+            profile,
+            prompt: 'unused',
+            workdir: temp('cloud-cwd'),
+            timeoutMin: 1,
+            log: () => {},
+          });
+        return { text: '结论：有异议 2 条' };
+      },
+    );
+    expect(called).toEqual(['grok', 'reclaude']);
+    expect(so.parseCritique(result.text)).toEqual({ agree: false, objections: 2 });
+    expect(chain.every((profile) => profile.family !== 'gpt')).toBe(true);
+    expect(logs.join('\n')).toContain('未发出模型调用');
+  });
+
+  it.each(['/v1/messages', '/v1/responses', '/chat/completions', '/v1/chat/completions?stream=true'])(
+    '本次 2xx 计费请求 %s 且 viaRelay 才能通过',
+    (path) => {
+      expect(so.judgeLedger([row({ path })], since, true).ok).toBe(true);
+      expect(so.judgeLedger([row({ path, ts: new Date(since + 100).toISOString() })], since, true).ok).toBe(
+        true,
+      );
+      expect(so.judgeLedger([row({ path, viaRelay: false })], since, true).ok).toBe(false);
+      expect(so.judgeLedger([row({ path, viaRelay: undefined })], since, true).ok).toBe(false);
+    },
+  );
+
+  it.each(['/v1/models', '/models?limit=1', '/v1/models/gpt-6-luna', '/v1/messages/count_tokens?beta=1'])(
+    '辅助请求 %s 不能凑绿，也不把本地辅助请求当直连计费',
+    (path) => {
+      expect(so.judgeLedger([row({ path })], since, true).ok).toBe(false);
+      expect(so.judgeLedger([row({ path }), row({ status: 503 })], since, true).ok).toBe(false);
+      expect(so.judgeLedger([row({ path, viaRelay: false }), row()], since, true).ok).toBe(true);
+    },
+  );
+
+  it('坏格式、未知路径、旧调用和失败计费不能混进一次成功', () => {
+    for (const bad of [row({ path: undefined }), row({ path: '/health' }), row({ ts: 'bad' }), null, []])
+      expect(so.judgeLedger([row(), bad], since, true).ok).toBe(false);
+    expect(so.judgeLedger([row({ ts: since - 1 })], since, true).ok).toBe(false);
+    expect(so.judgeLedger([row({ status: 429 })], since, true).ok).toBe(false);
+    expect(so.judgeLedger([row(), row({ status: 503, viaRelay: false })], since, true).ok).toBe(false);
+  });
+
+  it('缺目录、缺 index、坏 JSON、非对象行、文件读失败都有无密钥诊断', () => {
+    const root = temp('ledger');
+    const dir = join(root, 'traffic', 'session');
+    expect(sessionsLib.readLedger('session', root)).toMatchObject({
+      readable: false,
+      why: expect.stringContaining('ENOENT'),
+    });
+    mkdirSync(dir, { recursive: true });
+    expect(sessionsLib.readLedger('session', root)).toMatchObject({
+      readable: false,
+      why: expect.stringContaining('没有 index'),
+    });
+    const index = join(dir, 'index-test.ndjson');
+    writeFileSync(index, `${JSON.stringify(row())}\n`);
+    expect(sessionsLib.readLedger('session', root)).toMatchObject({ readable: true, rows: [row()] });
+    for (const malformed of ['{secret-do-not-print', 'null', '[]', '42']) {
+      writeFileSync(index, `${JSON.stringify(row())}\n${malformed}`);
+      const reading = sessionsLib.readLedger('session', root);
+      expect(reading).toMatchObject({ readable: false, why: expect.stringContaining('第 2 行') });
+      expect(JSON.stringify(reading)).not.toContain('secret-do-not-print');
+    }
+    rmSync(index);
+    mkdirSync(index);
+    expect(sessionsLib.readLedger('session', root)).toMatchObject({
+      readable: false,
+      why: expect.stringContaining('读不到账本文件'),
+    });
+  });
+
+  it('done 后读取本次账本：正常 cloud 可交付，缺账本或辅助请求不靠累计额度变化凑绿', async () => {
+    const execute = (reading: LedgerReading) => {
+      let now = since;
+      return sessionsLib.pollSession({
+        profile: profilesLib.PROFILES.code as FakeProfile,
+        url: 'unused',
+        sessionKey: 'codex:fixture',
+        since,
+        timeoutMin: 1,
+        pollMs: 1,
+        log: () => {},
+        before: 10,
+        secs: () => '0s',
+        io: {
+          now: () => now,
+          sleep: async (ms) => {
+            now += ms;
+          },
+          stop: async () => {},
+          relayUsage: async () => 20,
+          readLedger: () => reading,
+          readView: async () => ({
+            phase: 'done',
+            text: '结论：有异议 1 条',
+            model: 'gpt-6-luna',
+            toolCalls: 0,
+            error: null,
+            incomplete: false,
+            interactions: [],
+            updatedAt: now,
+          }),
+        },
+      });
+    };
+    await expect(execute({ readable: true, rows: [row()] })).resolves.toMatchObject({
+      text: '结论：有异议 1 条',
+    });
+    await expect(execute({ readable: false, why: '读不到账本目录 fixture（ENOENT）' })).rejects.toThrow(
+      'codex:fixture',
+    );
+    await expect(execute({ readable: true, rows: [row({ path: '/v1/models' })] })).rejects.toThrow(
+      '没有起针后的成功计费',
+    );
+    await expect(execute({ readable: true, rows: [row({ viaRelay: false })] })).rejects.toThrow('没走中继');
   });
 });
 

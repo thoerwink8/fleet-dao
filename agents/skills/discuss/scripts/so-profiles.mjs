@@ -21,7 +21,7 @@ export const PROFILES = {
   claude: { family: 'claude', agent: 'reclaude', model: null, route: 'local' },
   // Mirasim modelRosterCache：dsh/deepseek-flash。若这台 Mirasim 没有 dsh，照实换下一家。
   deepseek: { family: 'deepseek', agent: 'dsh', model: 'deepseek-flash', route: 'cloud' },
-  // Mirasim 的 grok 执行体不点名模型；本机未登录时会明确报不可用。
+  // 保留 cloud 请求；原生 Grok 不支持中继，由 requireCloudCapability 在调用前明确拒绝，候选链继续。
   grok: { family: 'grok', agent: 'grok', model: null, route: 'cloud' },
   // Mirasim modelRosterCache：kimi/kimi-code/k3。
   kimi: { family: 'kimi', agent: 'kimi', model: 'kimi-code/k3', route: 'cloud' },
@@ -47,6 +47,19 @@ const PROFILE_BY_FAMILY = {
 // 「模型满载」也算连不上（codex 快照报 done 带 incomplete「Selected model is at capacity」，没换人直接判没查成）。
 export const UNAVAILABLE =
   /\b(502|503|529)\b|no upstream available|Service Unavailable|overloaded|at capacity|try a different model/i;
+
+/**
+ * 原生 Grok 没有代理 baseUrlEnv，不接中继；本机 CLI 两条路径也不提供 cloud。
+ * 不能把调用方选的 cloud 偷换成自有额度。调用前检查，不靠模型跑完后缺账本来发现。
+ * @param {Profile} profile
+ */
+export function requireCloudCapability(profile) {
+  if (profile.route !== 'cloud') return;
+  if (['grok', 'reclaude', 'cursor-cli'].includes(profile.agent))
+    throw new NotChecked(
+      `${profile.agent} 执行体不支持 cloud 中继核账，未发出模型调用；保留 cloud 选路，不改用自有额度`,
+    );
+}
 /** @param {string} name */
 function pickProfile(name) {
   const p = /** @type {Record<string, Profile | undefined>} */ (PROFILES)[name];

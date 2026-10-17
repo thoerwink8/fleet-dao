@@ -49,18 +49,30 @@ export function judgeSnapshot(view) {
 /** @typedef {Record<string, unknown>} LedgerRow Mirasim 账本里的一行（读回来的 JSON，字段按用到的几个核） */
 
 /**
- * 账本行 → 起针后有没有成功调用、有没有没走中继的调用。
+ * 账本行 → 本次有没有成功的计费模型调用，计费调用有没有绕过中继。
  * @param {LedgerRow[]} rows
  * @param {number} since
  * @param {boolean} mustRelay
  * @returns {{ ok: boolean, why: string }}
  */
 export function judgeLedger(rows, since, mustRelay) {
-  const fresh = rows.filter(
-    (r) => Number.isFinite(Date.parse(String(r?.ts ?? ''))) && Date.parse(String(r.ts)) >= since - 1000,
-  );
-  const served = fresh.filter((r) => Number(r.status) >= 200 && Number(r.status) < 300);
-  const offRelay = mustRelay ? fresh.filter((r) => r.viaRelay !== true) : [];
+  if (!Number.isFinite(since)) return { ok: false, why: '起针时间认不出，无法核本次调用' };
+  const at = (/** @type {LedgerRow} */ r) =>
+    typeof r.ts === 'number' ? r.ts : Date.parse(String(r.ts ?? ''));
+  if (rows.some((r) => !r || typeof r !== 'object' || Array.isArray(r) || !Number.isFinite(at(r))))
+    return { ok: false, why: '账本有格式或时间认不出的行，无法确认属于本次调用' };
+  const fresh = rows.filter((r) => at(r) >= since);
+  const calls = [];
+  for (const row of fresh) {
+    const path = typeof row.path === 'string' ? row.path.split('?')[0] : '';
+    // 本地辅助请求即使 2xx 也不证明模型消耗了云端额度。
+    if (/^\/(?:v1\/)?(?:models(?:\/[^/]+)?|messages\/count_tokens)$/.test(path ?? '')) continue;
+    if (!/^\/(?:v1\/)?(?:messages|responses|chat\/completions)$/.test(path ?? ''))
+      return { ok: false, why: '账本有计费路径认不出的请求，不能核成本次模型调用' };
+    calls.push(row);
+  }
+  const served = calls.filter((r) => typeof r.status === 'number' && r.status >= 200 && r.status < 300);
+  const offRelay = mustRelay ? calls.filter((r) => r.viaRelay !== true) : [];
   if (offRelay.length > 0) {
     const hosts = [...new Set(offRelay.map((r) => String(r.upstreamHost ?? '?')))].join('、');
     return {
@@ -71,12 +83,12 @@ export function judgeLedger(rows, since, mustRelay) {
   if (served.length === 0)
     return {
       ok: false,
-      why: `账本里没有起针后的成功调用（共 ${rows.length} 行，起针后 ${fresh.length} 行）`,
+      why: `账本里没有起针后的成功计费模型调用（共 ${rows.length} 行，起针后 ${fresh.length} 行，计费 ${calls.length} 行）`,
     };
   const hosts = [...new Set(served.map((r) => String(r.upstreamHost ?? '?')))].join('、');
   return {
     ok: true,
-    why: `起针后 ${served.length} 次成功调用（上游 ${hosts}）${mustRelay ? '，全走中继' : ''}`,
+    why: `起针后 ${served.length} 次成功计费模型调用（上游 ${hosts}）${mustRelay ? '，全走中继' : ''}`,
   };
 }
 
