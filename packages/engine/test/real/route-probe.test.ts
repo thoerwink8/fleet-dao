@@ -346,6 +346,74 @@ describe('登录失效、设备被撤销：离线写明原因，整池暂停报�
 });
 
 describe('额度用满被拒：算通（在线），额度读数记账，派不派交给额度那一套', () => {
+  it.each(['assistant', 'stderr'] as const)(
+    '%s 独有的额度拒绝透传到路由和历史，不编造清零时间',
+    async (source) => {
+      const text = '拼车 5 小时额度已用完';
+      const s = setup(() => ({
+        result: source === 'assistant' ? { isError: true, terminalReason: 'api_error', text: '' } : null,
+        exitCode: 1,
+        ...(source === 'assistant' ? { apiError: { code: 'api_error', text } } : { stderrTail: text }),
+      }));
+      const run = await s.round();
+      expect(run.online).toContain('carpool');
+      expect(await row('carpool')).toMatchObject({
+        alive: true,
+        probeState: 'ok',
+        probeDetail: expect.stringContaining(text),
+      });
+      const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+      expect(h).toMatchObject({
+        result: 'passed',
+        failureReason: null,
+        quotaExhausted: true,
+        resetsAt: null,
+        detail: expect.stringContaining(text),
+        responseText: expect.stringContaining(text),
+      });
+      expect(s.fake.count()).toBe(1);
+    },
+  );
+
+  it.each([
+    'authentication failed: please login',
+    'ECONNRESET: upstream unavailable',
+    '429 rate limited (not your usage limit)',
+  ])('对照：%s 仍是探测失败，历史不能标额度耗尽', async (text) => {
+    const s = setup(() => ({
+      result: { isError: true, terminalReason: 'api_error', text: '' },
+      apiError: { code: 'api_error', text },
+      exitCode: 1,
+    }));
+    await s.round();
+    expect(await row('carpool')).toMatchObject({
+      alive: false,
+      probeState: 'failed',
+      probeDetail: expect.stringContaining(text),
+    });
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h).toMatchObject({
+      result: 'failed',
+      quotaExhausted: false,
+      resetsAt: null,
+      responseText: expect.stringContaining(text),
+    });
+  });
+
+  it('错误诊断原文中敏感凭据不会经响应历史或结论公开', async () => {
+    const text = '拼车 5 小时额度已用完 Authorization: Bearer secret-value-for-test';
+    const s = setup(() => ({
+      result: { isError: true, terminalReason: 'api_error', text: '' },
+      apiError: { code: 'api_error', text },
+      stderrTail: 'Bearer another-secret-value',
+      exitCode: 1,
+    }));
+    await s.round();
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(JSON.stringify(h)).not.toContain('secret-value');
+    expect((await row('carpool'))?.probeDetail).not.toContain('secret-value');
+  });
+
   it('拼车 5 小时额度用完：路由在线、原因写额度用满，额度窗记成用满', async () => {
     const resetsAt = new Date(NOW.getTime() + 20 * 60_000).toISOString();
     const s = setup(() => ({
@@ -378,6 +446,13 @@ describe('额度用满被拒：算通（在线），额度读数记账，派不�
       )
       .toMatchObject({ upstreamStatus: 'limit_reached' });
     expect(await hold()).toBeUndefined();
+    const [h] = await readRouteProbeHistory(t.db, 'carpool', 1);
+    expect(h).toMatchObject({
+      result: 'passed',
+      quotaExhausted: true,
+      resetsAt: new Date(resetsAt),
+      detail: expect.stringContaining('额度用满'),
+    });
   });
 });
 
