@@ -2,7 +2,8 @@
 // 读：listSettings 里找那一行，没设过按 three、认不出也按 three 但把原因带出来（readFlowModeSetting），不悄悄吞。
 // 写：putSetting（同一事务记操作记录、带版本防两人同时改）。已经是这个值（且是人写过的、认得出的值）就不改不记；
 // 库里是认不出的值，写 three 也照写（不拿「认不出」当「已经是 three」）。
-// 这一步只记账：引擎不读这个开关，调用方只有命令行 fleet-api flow-mode。
+// 本文件的读写给命令行 fleet-api flow-mode 用。引擎另从设置表读同一行（decideFlowMode，#2826）：没贴标签的单按它分组，
+// 结果进历史，之后改开关不影响已经分过组的单。
 
 import {
   FLOW_MODE_SET,
