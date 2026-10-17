@@ -32,6 +32,18 @@ const PRETOOL_MATCHERS = HOOK_TARGETS.flatMap((t) => t.hooks)
   .filter((h) => h.script === 'pretool.mjs')
   .map((h) => h.matcher ?? '没写 matcher');
 
+it('后台脱离原语随钩子安装，缺依赖时报真实路径', () => {
+  const repo = makeRepo({}, undefined, { ...HOOK_FILES, 'background-launch.mjs': '// launcher' });
+  const missing = sources(repo).hooks;
+  expect(missing.ok).toBe(false);
+  if (!missing.ok) expect(missing.why).toContain('agents/local-sessions/detach.mjs');
+  put(repo, 'agents/local-sessions/detach.mjs', 'export const spawnDetached = () => {};');
+  const complete = sources(repo).hooks;
+  expect(complete.ok).toBe(true);
+  if (complete.ok)
+    expect(complete.tree.get('_detach.mjs')?.toString()).toBe('export const spawnDetached = () => {};');
+});
+
 /**
  * 装好以后 PreToolUse 下该有的几组：照 Claude 那份登记的顺序一条一组（决定 0083：用户级只留拦密钥）。
  * cmd 把脚本名换成这台机器上登记的命令。

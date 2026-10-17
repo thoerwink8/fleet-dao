@@ -30,7 +30,7 @@
 // 环境变量 FLEET_WORKER=1（机器派的会话设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -45,10 +45,11 @@ import {
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { backgroundEnv, backgroundState, launchBackground, processAlive } from './background-launch.mjs';
 import { lineageOf, markSeen, readSeen, reconcileInbox, seenKey } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
-import { proxyEnvOf, writeProxyEnv } from './proxy-env.mjs';
+import { writeProxyEnv } from './proxy-env.mjs';
 import { contractLines, DIRECTIVE_HEADING, pendingItems, scopeNote } from './repo-contract.mjs';
 import { selectSessionId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
@@ -1116,9 +1117,9 @@ export function bgCachePath(home, cwd, git) {
 /** 锁里记的时刻还在 BG_LOCK_MS 以内 */
 function lockFresh(lock, now) {
   try {
-    const at = JSON.parse(readFileSync(lock, 'utf8'))?.at;
+    const { at, pid } = JSON.parse(readFileSync(lock, 'utf8'));
     const age = now - Number(at);
-    return Number.isFinite(age) && age > -5_000 && age < BG_LOCK_MS;
+    return Number.isFinite(age) && age > -5_000 && age < BG_LOCK_MS && processAlive(pid);
   } catch {
     return false;
   }
@@ -1246,26 +1247,6 @@ const agoText = (ms) => {
   return n < 1 ? '后台刚' : `后台 ${n} 分钟前`;
 };
 
-/** 起脱离的后台：不继承输出（钩子的 stdout 一关 Claude Code 就往下走），备用代理换进它的环境 */
-function spawnDetached({ cwd, home }) {
-  try {
-    const fb = readFallbackProxy(home);
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--background', cwd], {
-      // 工作目录放系统临时目录：继承会话目录的话，Windows 上后台跑着时那个目录（常是工作树）删不掉；git 一律 -C 指目录，用不着它
-      cwd: tmpdir(),
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-      env: fb.proxy ? proxyEnvOf(process.env, fb.proxy) : process.env,
-    });
-    child.on('error', () => {});
-    child.unref();
-    return { ok: true };
-  } catch (err) {
-    return { ok: false, why: err?.message ?? String(err) };
-  }
-}
-
 /**
  * 同步那半（真开会话走这个）：只跑本地的，联网的几项读后台上一次的结果；该刷新就起一个后台。返回要说的几行。
  * spawnBackground 测试换成假的；git 只跑本地命令（GREP_MS 那份就够）。
@@ -1281,7 +1262,7 @@ export function fastSessionStart({
   env = process.env,
   repoContract = null,
   progress = progressRunner(),
-  spawnBackground = spawnDetached,
+  spawnBackground = null,
 }) {
   const here = checkHere(cwd, localGit, { network: false });
   const path = cachePathOf(home, here.fetch?.common ?? null);
@@ -1336,17 +1317,30 @@ export function fastSessionStart({
   if (s?.ok && typeof s.value === 'string') lines.push(`${s.value.replace(/。$/, '')}（${ago}跑的）。`);
   else if (s && !s.ok) lines.push(`规矩同步没查成：后台出错（${s.why}）；${READ_MAIN}。`);
 
-  if (cache.kind === 'none') lines.push(`${BG_WHAT}还没出结果：已在后台起查，下次开会话再报；${READ_MAIN}。`);
+  if (cache.kind === 'none') lines.push(`${BG_WHAT}还没出结果；${READ_MAIN}。`);
   else if (cache.kind === 'bad')
-    lines.push(`${BG_WHAT}没查成：后台的结果读不懂（${cache.why}），已重新在后台起查；${READ_MAIN}。`);
+    lines.push(`${BG_WHAT}没查成：后台的结果读不懂（${cache.why}）；${READ_MAIN}。`);
   else if (c?.crashed) lines.push(`${BG_WHAT}没查成：后台出错（${c.crashed}，${ago}）；${READ_MAIN}。`);
-  else if (age !== null && age > BG_STALE_MS)
-    lines.push(`${BG_WHAT}是${ago}查的，之后没刷新成；这次已重新起查。`);
+  else if (age !== null && age > BG_STALE_MS) lines.push(`${BG_WHAT}是${ago}查的，之后没刷新成。`);
 
+  const running = backgroundState(`${path}.run`, { now });
+  if (running.kind === 'failed') lines.push(`${BG_WHAT}上次后台没跑成（${running.why}）。`);
   const due = c === null || age === null || !(age > -5_000 && age < QUIET_MS);
-  if (due && !lockFresh(`${path}.lock`, now)) {
-    const r = spawnBackground({ cwd, home });
+  const failedRecently =
+    running.kind === 'failed' && typeof running.at === 'number' && now - running.at < 60_000;
+  if (due && !failedRecently && running.kind !== 'running' && !lockFresh(`${path}.lock`, now)) {
+    const r = spawnBackground
+      ? spawnBackground({ cwd, home })
+      : launchBackground({
+          args: [fileURLToPath(import.meta.url), '--background', cwd, home],
+          cwd: tmpdir(),
+          env: backgroundEnv(home, { env }),
+          statePath: `${path}.run`,
+          timeoutMs: BG_LOCK_MS,
+          now,
+        });
     if (!r.ok) lines.push(`${BG_WHAT}后台起不来（${r.why}），这次没查；${READ_MAIN}。`);
+    else lines.push(`${BG_WHAT}已在后台起查，下次开会话再报。`);
   }
   return lines;
 }
@@ -1700,7 +1694,7 @@ function isMain() {
 
 if (isMain() && process.argv[2] === '--background') {
   // 后台那半（fastSessionStart 起的脱离子进程）：输出没人看，结果全写进结果文件；整个崩了也写一笔 crashed，下次开场照实说
-  const home = homedir();
+  const home = process.argv[4] || homedir();
   const cwd = process.argv[3] || process.cwd();
   const localGit = gitRunner(GREP_MS);
   try {

@@ -145,7 +145,8 @@ describe('同步那半只读本地', SLOW, () => {
     });
     expect(seen.fetch).toBe(0);
     expect(spawned).toEqual([{ cwd: w.work, home: w.home }]);
-    expect(lines.join('\n')).toMatch(/还没出结果.*后台/);
+    expect(lines.join('\n')).toMatch(/还没出结果/);
+    expect(lines.join('\n')).toMatch(/已在后台起查/);
     expect(lines.join('\n')).not.toMatch(/规矩同步：/);
   });
 
@@ -377,13 +378,14 @@ describe('【故意造出的失败】后台没成：下次如实说没查成和�
       })
       .join('\n');
     expect(text).toMatch(/后台起不来（spawn EPERM）/);
+    expect(text).not.toMatch(/已在后台起查/);
   });
 
   it('后台正在跑（锁是新的）：不起第二个；锁过期了照起', () => {
     const w = world();
     const lock = `${hook.bgCachePath(w.home, w.work, real)}.lock`;
     mkdirSync(join(lock, '..'), { recursive: true });
-    writeFileSync(lock, JSON.stringify({ pid: 1, at: T0 }));
+    writeFileSync(lock, JSON.stringify({ pid: process.pid, at: T0 }));
     const spawned: unknown[] = [];
     const spawnBackground = (o: unknown) => {
       spawned.push(o);

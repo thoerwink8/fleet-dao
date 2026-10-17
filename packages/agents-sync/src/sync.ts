@@ -187,7 +187,15 @@ function readHooks(repo: string): Sources['hooks'] {
   const dir = join(repo, 'agents', 'hooks');
   try {
     if (!statSync(dir).isDirectory()) return { ok: false, why: '仓里的 agents/hooks 不是目录' };
-    return { ok: true, tree: readTree(dir).files };
+    const tree = readTree(dir).files;
+    if (tree.has('background-launch.mjs')) {
+      try {
+        tree.set('_detach.mjs', readFileSync(join(repo, 'agents', 'local-sessions', 'detach.mjs')));
+      } catch (err) {
+        return { ok: false, why: `后台钩子依赖 agents/local-sessions/detach.mjs 读不了（${code(err)}）` };
+      }
+    }
+    return { ok: true, tree };
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT')
       return { ok: false, why: '仓里没有 agents/hooks/（检出太旧或不全，或 --repo 指错了）' };
