@@ -2,7 +2,9 @@
 //   node packages/conventions/src/bin/e2e-flaky.ts summary <Playwright JSON 报告>...
 //     一轮的汇总（偶发的、隔离集里的结局、过了限期的），打到标准输出；ci.yml 的 e2e job 接进 job 摘要。
 //   node packages/conventions/src/bin/e2e-flaky.ts scan <runs.json> <报告目录>
-//     runs.json 是 `gh run list --json databaseId,url` 的输出（新的在前），报告目录下 <运行号>/results*.json 是那一轮下载下来的报告；
+//     runs.json 是 `gh run list --json databaseId,url` 的输出（新的在前）。报告目录下 <运行号>/<artifact 名>/results*.json
+//     是那一轮下载下来的报告（artifact 名 e2e-<运行号>-<第几次运行>-<分片>）。主线红了只重跑失败的分片：每一片取它最后一次，
+//     再合成一轮，不把两次运行当成两轮，也别漏掉没重跑的那一片。旧的平铺 results*.json 仍当成分片合在一起。
 //     取有报告的近 10 轮，数每条用例偶发（重试才过）的次数，达阈值的开单（同标题已有开着的单就不开；超过 5 条只开一张汇总单；
 //     一次最多新开 3 张，多的下次再开）；
 //     最新一轮整轮坏了开「整轮坏了」单，最新一轮好了就把开着的那张留言关掉。要 GITHUB_TOKEN、GITHUB_REPOSITORY。
@@ -13,7 +15,6 @@ import {
   BROKEN_ROUND_TITLE,
   deadline,
   FLAKY_WINDOW,
-  globalErrorCount,
   isBrokenRound,
   type OpenIssue,
   type Outcomes,
@@ -21,6 +22,7 @@ import {
   parseQuarantine,
   planIssues,
   type RunOutcomes,
+  runFromArtifacts,
   runSummary,
 } from '../e2e-flaky.ts';
 import { exitWith, runMain } from '../exit.ts';
@@ -56,18 +58,9 @@ runMain(async () => {
       if (window.length >= FLAKY_WINDOW) break;
       const runDir = join(dir, String(run.databaseId));
       if (!existsSync(runDir)) continue;
-      const files = readdirSync(runDir)
-        .filter((f) => /^results.*\.json$/.test(f))
-        .map((f) => join(runDir, f));
+      const files = collectReports(runDir);
       if (files.length === 0) continue;
-      const reports = files.map((f) => JSON.parse(readFileSync(f, 'utf8')) as unknown);
-      const all: Outcomes = new Map();
-      for (const r of reports) for (const [k, v] of outcomesOf(r)) all.set(k, v);
-      window.push({
-        url: run.url,
-        outcomes: all,
-        globalError: reports.some((r) => globalErrorCount(r) > 0),
-      });
+      window.push(runFromArtifacts(run.url, files));
     }
     console.log(`近 ${window.length} 轮有报告的主线 e2e（最多看 ${FLAKY_WINDOW} 轮）`);
     const brokenCount = window.filter(isBrokenRound).length;
@@ -107,3 +100,22 @@ runMain(async () => {
   }
   return undefined;
 });
+
+/** 一轮目录里的报告：子目录名是 artifact 名（带第几次运行），根上的 results*.json 是旧的平铺。 */
+function collectReports(runDir: string): { name: string; report: unknown }[] {
+  const out: { name: string; report: unknown }[] = [];
+  const push = (name: string, file: string) => {
+    out.push({ name, report: JSON.parse(readFileSync(file, 'utf8')) as unknown });
+  };
+  for (const entry of readdirSync(runDir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      const sub = join(runDir, entry.name);
+      for (const name of readdirSync(sub)) {
+        if (/^results.*\.json$/.test(name)) push(`${entry.name}/${name}`, join(sub, name));
+      }
+    } else if (/^results.*\.json$/.test(entry.name)) {
+      push(entry.name, join(runDir, entry.name));
+    }
+  }
+  return out;
+}

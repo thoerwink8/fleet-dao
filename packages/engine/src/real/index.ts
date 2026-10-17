@@ -69,6 +69,7 @@ import { cliVersionsJob } from './cli-versions.ts';
 import { productionCpuUsage } from './cpu-usage.ts';
 import { dailyBriefJob } from './daily-brief.ts';
 import { drainNotifier } from './drain-alerts.ts';
+import { e2eQuarantineJob } from './e2e-quarantine.ts';
 import { describeFailure, scopeExec, type UserExec } from './exec.ts';
 import { gitNetworkEnv } from './git-env.ts';
 import { createGitHubPorts, type EngineGitHub } from './github-ports.ts';
@@ -1005,6 +1006,8 @@ export function realPortsFromEnv(
     requestSweep: requestSweepJob({ db }),
     // 每日简报（决定 0096）：读发布历史、库、GitHub，写一行提醒（后端推飞书）、用引擎机器人在 #1055 发评论。不看总开关。
     dailyBrief: dailyBriefJob({ db, gh }),
+    // 隔离集进出（决定 0093）：偶发单改 quarantine.json，连续 7 天全过的移出并关单。不看总开关、不调模型。
+    e2eQuarantine: e2eQuarantineJob({ db, github: gh }),
     // 命令行工具升级（#1971）：空闲时排空、写请求。引擎没有 root，不在这里装。不看总开关。
     cliUpgrade: cliUpgradeJob({
       db,

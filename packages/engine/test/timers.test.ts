@@ -332,7 +332,7 @@ describe('进程内定时器（startTimers）', () => {
   });
 });
 
-describe('13 个定时任务的登记（engineTimerJobs）', () => {
+describe('14 个定时任务的登记（engineTimerJobs）', () => {
   const never = () => {
     throw new Error('这里不该被叫');
   };
@@ -351,6 +351,7 @@ describe('13 个定时任务的登记（engineTimerJobs）', () => {
     cliUpgrade: never,
     requestSweep: never,
     dailyBrief: never,
+    e2eQuarantine: never,
   });
   const client = {} as never;
   const jobs = () => engineTimerJobs({ jobs: fakeJobs(), client, taskQueue: 'fleet' });
@@ -359,7 +360,7 @@ describe('13 个定时任务的登记（engineTimerJobs）', () => {
     expect(jobs().map((j) => j.id)).toEqual(ENGINE_JOBS.map((j) => j.id));
   });
 
-  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每天 06:00（北京时间）、用量补记 5 错 2、命令行工具版本 60 错 11、命令行工具升级 30 错 6、需求整理 60 错 23、每日简报每天 08:30（北京时间）', () => {
+  it('格子：对账 15、探针 15 错 7、读额度 15 错 4、拼车盯读每分钟、每小时对账 60 错 41、看门狗 5 错 4、拉单 5 错 3、判断题自检 30 错 17、耗时表每天 06:00（北京时间）、用量补记 5 错 2、命令行工具版本 60 错 11、命令行工具升级 30 错 6、需求整理 60 错 23、每日简报每天 08:30（北京时间）、隔离集进出每天 05:20（北京时间）', () => {
     expect(jobs().map((j) => [j.id, j.everyMinutes, j.offsetMinutes ?? 0])).toEqual([
       ['github-reconcile', 15, 0],
       ['route-probe', 15, 7],
@@ -375,6 +376,7 @@ describe('13 个定时任务的登记（engineTimerJobs）', () => {
       ['cli-upgrade', 30, 6],
       ['request-sweep', 60, 23],
       ['daily-brief', 24 * 60, 30],
+      ['e2e-quarantine', 24 * 60, 21 * 60 + 20],
     ]);
   });
 

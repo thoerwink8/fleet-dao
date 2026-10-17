@@ -35,6 +35,18 @@ export {
   type Problem,
   type Report,
 } from './doc-pointers.ts';
+export { type Outcomes, outcomesOf } from './e2e-flaky.ts';
+export {
+  beijingDate,
+  mentionsIssue,
+  planQuarantineSync,
+  QUARANTINE_PASS_DAYS,
+  QUARANTINE_PATH,
+  type QuarantineDay,
+  type QuarantineMove,
+  quarantineAfter,
+  shiftDay,
+} from './e2e-quarantine-sync.ts';
 export { FLOW_BRANCH_PATTERN, isFlowBranch } from './flow-branch.ts';
 export {
   type GitHubCommenter,

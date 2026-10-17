@@ -519,7 +519,7 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
       .map((s) => s.id)
       .sort();
     // 当初在 Temporal 上的 8 个摘出来之后，canary 又被决定 0093 删了，剩 7 个。少一个，老 Schedule 就留着和进程内定时器各跑一轮。
-    // ci-timings（#921）、judge-self-check（#1365）、usage-backfill（#1935）、cli-versions（#1969）、cli-upgrade（#1971）、request-sweep（#2049）、daily-brief（决定 0096）从没进过 Temporal，只在登记表上，不进这份删除名单。
+    // ci-timings（#921）、judge-self-check（#1365）、usage-backfill（#1935）、cli-versions（#1969）、cli-upgrade（#1971）、request-sweep（#2049）、daily-brief（决定 0096）、e2e-quarantine（决定 0093）从没进过 Temporal，只在登记表上，不进这份删除名单。
     expect(moved).toHaveLength(7);
     expect(
       [
@@ -531,6 +531,7 @@ describe('退役的定时任务：Temporal 上还在的删掉（断链修复：#
         'cli-upgrade',
         'request-sweep',
         'daily-brief',
+        'e2e-quarantine',
       ].sort(),
     ).toEqual(ENGINE_JOBS.map((j) => j.id).sort());
     expect(RETIRED_SCHEDULES.filter((s) => s.moved).every((s) => s.retiredBy === '#1072')).toBe(true);

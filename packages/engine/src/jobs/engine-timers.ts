@@ -31,6 +31,12 @@ import {
   runDailyBriefJob,
 } from './daily-brief.ts';
 import {
+  E2E_QUARANTINE_EVERY_MINUTES,
+  E2E_QUARANTINE_JOB,
+  E2E_QUARANTINE_OFFSET_MINUTES,
+  runE2eQuarantineJob,
+} from './e2e-quarantine.ts';
+import {
   GITHUB_RECONCILE_EVERY_MINUTES,
   GITHUB_RECONCILE_JOB,
   runGitHubReconcileJob,
@@ -104,6 +110,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const cliUpgrade = need(jobs, 'cliUpgrade');
   const requestSweep = need(jobs, 'requestSweep');
   const dailyBrief = need(jobs, 'dailyBrief');
+  const e2eQuarantine = need(jobs, 'e2eQuarantine');
   return [
     {
       id: GITHUB_RECONCILE_JOB.id,
@@ -217,6 +224,15 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       catchupMinutes: DAILY_BRIEF_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
       run: () => runDailyBriefJob(dailyBrief()),
+    },
+    {
+      // 隔离集进出（决定 0093）：开着的偶发单放进 quarantine.json，连续 7 天全过的移出并关单。不调模型，不标 needsMaster。
+      id: E2E_QUARANTINE_JOB.id,
+      everyMinutes: E2E_QUARANTINE_EVERY_MINUTES,
+      offsetMinutes: E2E_QUARANTINE_OFFSET_MINUTES,
+      catchupMinutes: E2E_QUARANTINE_EVERY_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
+      run: () => runE2eQuarantineJob(e2eQuarantine()),
     },
   ];
 }

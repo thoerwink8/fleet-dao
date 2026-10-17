@@ -11,6 +11,7 @@ import type { CliVersionsJobDeps } from './jobs/cli-versions.ts';
 import type { ClosedIssueEventDeps } from './jobs/closed-issue-events.ts';
 import type { DailyBriefDeps } from './jobs/daily-brief.ts';
 import { probeAssignedRoute } from './jobs/dispatch-probe.ts';
+import type { E2eQuarantineJobDeps } from './jobs/e2e-quarantine.ts';
 import type { GitHubReconcileJobDeps } from './jobs/github-reconcile.ts';
 import type { GroomRunDeps } from './jobs/groom.ts';
 import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
@@ -260,6 +261,8 @@ export interface EngineJobs {
   requestSweep?: () => RequestSweepJobDeps;
   /** 每日简报（决定 0096）：每天 08:30 推飞书、在 #1055 发评论。不拉单。 */
   dailyBrief?: () => DailyBriefDeps;
+  /** 隔离集进出（决定 0093）：偶发单放进 quarantine.json，连续 7 天全过的移出并关单。不拉单、不调模型。 */
+  e2eQuarantine?: () => E2eQuarantineJobDeps;
 }
 
 /**

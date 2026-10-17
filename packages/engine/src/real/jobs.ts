@@ -10,6 +10,7 @@ import { CI_TIMINGS_JOB } from '../jobs/ci-timings.ts';
 import { CLI_UPGRADE_JOB } from '../jobs/cli-upgrade.ts';
 import { CLI_VERSIONS_JOB } from '../jobs/cli-versions.ts';
 import { DAILY_BRIEF_JOB } from '../jobs/daily-brief.ts';
+import { E2E_QUARANTINE_JOB } from '../jobs/e2e-quarantine.ts';
 import { GITHUB_RECONCILE_JOB } from '../jobs/github-reconcile.ts';
 import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
 import { INTAKE_JOB } from '../jobs/intake.ts';
@@ -37,6 +38,7 @@ export const ENGINE_JOBS = [
   CLI_UPGRADE_JOB,
   REQUEST_SWEEP_JOB,
   DAILY_BRIEF_JOB,
+  E2E_QUARANTINE_JOB,
 ] as const;
 
 export async function registerEngineJobs(db: Db): Promise<void> {
