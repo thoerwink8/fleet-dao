@@ -1,6 +1,5 @@
 // 界面验收图片收树前的交付核对和受限归档（#2983）：临时仓 + 本地 git 复现「代码合并了、图片只在树里或没推的孤儿提交里」，
 // 核对只认受管图片、远端按 blob 号说话、归档有清单和 hash、幂等、换头不覆盖、容量和过期、叫停。
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -28,6 +27,7 @@ import {
   shotsArchiveDir,
 } from '../../src/real/shots.ts';
 import type { UserTree } from '../../src/real/user-git.ts';
+import { runChildOk } from '../child.ts';
 
 vi.setConfig({ testTimeout: 60_000 });
 
@@ -53,7 +53,7 @@ beforeEach(() => {
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
 function git(...args: string[]): string {
-  return execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+  return runChildOk('git', args, { cwd: dir });
 }
 
 function tree(signal?: AbortSignal): UserTree {
@@ -85,9 +85,9 @@ function orphanCommit(files: Record<string, Buffer>): string {
   mkdirSync(work, { recursive: true });
   for (const [name, bytes] of Object.entries(files)) writeFileSync(join(work, name), bytes);
   const env = { ...process.env, GIT_INDEX_FILE: join(root, 'orphan.idx') };
-  execFileSync('git', ['--work-tree', work, 'add', '-f', '.'], { cwd: dir, env });
-  const t = execFileSync('git', ['write-tree'], { cwd: dir, env, encoding: 'utf8' }).trim();
-  const c = execFileSync('git', ['commit-tree', t, '-m', '截图'], { cwd: dir, env, encoding: 'utf8' }).trim();
+  runChildOk('git', ['--work-tree', work, 'add', '-f', '.'], { cwd: dir, env });
+  const t = runChildOk('git', ['write-tree'], { cwd: dir, env });
+  const c = runChildOk('git', ['commit-tree', t, '-m', '截图'], { cwd: dir, env });
   rmSync(work, { recursive: true, force: true });
   rmSync(join(root, 'orphan.idx'), { force: true });
   return c;

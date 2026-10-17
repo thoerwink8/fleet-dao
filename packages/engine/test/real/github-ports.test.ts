@@ -1,7 +1,6 @@
 // 引擎端口 → github 包：推分支（会话用户打 bundle）、开 PR（照抄需求 issue 的标签和里程碑）、并主线后快进会话的树、
 // 在新头上跑测试（= 等 CI）、收树先存档；GitHubError 换成 PortError。github 包本身换成假的（记下每次调用），
 // 会话用户的 git 用本地 git。
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -311,14 +310,18 @@ describe('收树前核对界面截图（#2983）', () => {
     const work = join(root, 'shots-src');
     mkdirSync(work, { recursive: true });
     for (const [name, bytes] of Object.entries(files)) writeFileSync(join(work, name), bytes);
-    const env = { ...process.env, GIT_INDEX_FILE: join(root, 'shots.idx') };
-    execFileSync('git', ['--work-tree', work, 'add', '-f', '.'], { cwd: m.dir, env });
-    const t = execFileSync('git', ['write-tree'], { cwd: m.dir, env, encoding: 'utf8' }).trim();
-    const c = execFileSync('git', ['commit-tree', t, '-m', '截图'], {
-      cwd: m.dir,
-      env,
-      encoding: 'utf8',
-    }).trim();
+    // 提交身份放进环境：CI 的机器上没有全局的 user.name
+    const env = {
+      ...process.env,
+      GIT_INDEX_FILE: join(root, 'shots.idx'),
+      GIT_AUTHOR_NAME: 't',
+      GIT_AUTHOR_EMAIL: 'fleet-test@localhost',
+      GIT_COMMITTER_NAME: 't',
+      GIT_COMMITTER_EMAIL: 'fleet-test@localhost',
+    };
+    runChildOk('git', ['--work-tree', work, 'add', '-f', '.'], { cwd: m.dir, env });
+    const t = runChildOk('git', ['write-tree'], { cwd: m.dir, env });
+    const c = runChildOk('git', ['commit-tree', t, '-m', '截图'], { cwd: m.dir, env });
     rmSync(work, { recursive: true, force: true });
     rmSync(join(root, 'shots.idx'), { force: true });
     return c;
