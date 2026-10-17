@@ -1,5 +1,6 @@
 // pnpm project 的真口子（见 ./project.ts 的 ProjectWorld）：GitHub 只经本机 gh（令牌留在 gh 里，不读出来），
 // 法国只经 ssh 以 root 调 fleet-api（ssh 名字同指挥官的 france.mjs：环境变量 FLEET_FRANCE_SSH，或 ~/.fleet-dao/france-ssh 第一行）。
+// 两个 App 装没装不读本机 gh 的 user/installations（本机身份缺 metadata 权限会 403，#2977），只经 fleet-api project installations。
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -62,8 +63,15 @@ export function franceSshHost(env: NodeJS.ProcessEnv = process.env, home = homed
   );
 }
 
-/** 经 ssh 在法国以 root 跑 fleet-api（它自己换成 fleet 身份）。 */
-export function sshFleetApi(host: () => string, command = 'ssh'): FleetApiRunner {
+/** 一条 fleet-api 最多等多久：到点杀掉 ssh，回退出码 124，调用方当没查成。 */
+export const FLEET_API_TIMEOUT_MS = 120_000;
+
+/** 经 ssh 在法国以 root 跑 fleet-api（它自己换成 fleet 身份）。超过 timeoutMs 杀掉、回退出码 124。 */
+export function sshFleetApi(
+  host: () => string,
+  command = 'ssh',
+  timeoutMs = FLEET_API_TIMEOUT_MS,
+): FleetApiRunner {
   return (args, stdin) =>
     new Promise((done) => {
       const bad = args.find((a) => !SAFE_ARG.test(a));
@@ -84,14 +92,33 @@ export function sshFleetApi(host: () => string, command = 'ssh'): FleetApiRunner
       });
       let stdout = '';
       let stderr = '';
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill('SIGKILL');
+      }, timeoutMs);
       child.stdout.on('data', (c) => {
         stdout += String(c);
       });
       child.stderr.on('data', (c) => {
         stderr += String(c);
       });
-      child.on('error', (err) => done({ code: 127, stdout, stderr: `ssh 没起来：${err.message}` }));
-      child.on('close', (code) => done({ code: code ?? 1, stdout, stderr }));
+      child.on('error', (err) => {
+        clearTimeout(timer);
+        done({ code: 127, stdout, stderr: `ssh 没起来：${err.message}` });
+      });
+      child.on('close', (code) => {
+        clearTimeout(timer);
+        if (timedOut)
+          done({
+            code: 124,
+            stdout,
+            stderr: `ssh 超时：${timeoutMs} 毫秒没跑完 fleet-api ${args.slice(0, 2).join(' ')}`,
+          });
+        else done({ code: code ?? 1, stdout, stderr });
+      });
+      // 子进程先退了（超时被杀）时写标准输入会 EPIPE：不当成崩
+      child.stdin.on('error', () => undefined);
       child.stdin.end(stdin ?? '');
     });
 }
@@ -116,25 +143,6 @@ export function ghProjectWorld(gh: Gh, fleetApi: FleetApiRunner): ProjectWorld {
         archived: r.archived === true,
       };
       return facts;
-    },
-    async installationRepoIds(id) {
-      const text = await ghOk(
-        gh,
-        [
-          'api',
-          '--paginate',
-          `user/installations/${id}/repositories?per_page=100`,
-          '--jq',
-          '.repositories[].id',
-        ],
-        `读安装 ${id} 里的仓`,
-      );
-      return new Set(
-        text
-          .split(/\s+/)
-          .filter(Boolean)
-          .map((s) => Number(s)),
-      );
     },
     async addToInstallation(installationId, repoId) {
       // GitHub 只有单仓接口，没有请求体（#2749）
