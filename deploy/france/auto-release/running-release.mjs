@@ -3,7 +3,7 @@
 // 放在自动发版目录里：装到 /usr/local/lib/fleet-dao/auto-release/ 的副本没有 node_modules，不能引 @fleet-dao/store。
 // store 从 packages/store/src/running-release.mjs 再导出这一份，不要在别的文件里再写一份判法。
 import { spawnSync } from 'node:child_process';
-import { readlinkSync } from 'node:fs';
+import { lstatSync, readFileSync, readlinkSync } from 'node:fs';
 import { join } from 'node:path';
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -53,6 +53,8 @@ export function assessRunningRelease(input) {
       continue;
     }
     if (slot.proc.sha === null || slot.proc.sha === symlink) continue;
+    const match = running.matches?.[slot.unit];
+    if (match?.from === slot.proc.sha && match.to === symlink) continue;
     const diff = running.diffs?.[slot.proc.sha];
     if (diff && diffIsDocsOnly(diff)) continue;
     lags.push({ unit: slot.unit, sha: slot.proc.sha });
@@ -162,5 +164,40 @@ export function readRunningRelease(dir, current, io) {
     const got = diffNames(old, symlink);
     if (Array.isArray(got)) diffs[old] = got;
   }
-  return { ...running, diffs };
+  // 发布已用精确闭包核过的结果由 root 写在目标版本的只读目录里；健康读取不再同步重跑 TypeScript。
+  const matches = {};
+  if (SHA.test(symlink)) {
+    for (const [unit, proc] of [
+      ['fleet-engine', engine],
+      ['fleet-api', api],
+    ]) {
+      if (!('sha' in proc) || !proc.sha || proc.sha === symlink) continue;
+      const file = join(dir, symlink, `.runtime-${unit}`);
+      try {
+        const metadata = lstatSync(file);
+        const target = lstatSync(join(dir, symlink));
+        if (!metadata.isFile() || !target.isDirectory())
+          throw new Error('凭据或目标目录类型不对（不跟随符号链接）');
+        if (
+          process.platform !== 'win32' &&
+          (metadata.uid !== (io?.proofUid ?? 0) ||
+            target.uid !== (io?.proofUid ?? 0) ||
+            metadata.mode & 0o022 ||
+            target.mode & 0o022)
+        )
+          throw new Error('凭据或目标目录属主/写权限不可信');
+        const fields = readFileSync(file, 'utf8').trim().split(/\s+/);
+        if (fields.length !== 3 || fields[0] !== symlink || !SHA.test(fields[1]) || fields[2] !== unit)
+          throw new Error('凭据格式或目标/服务不匹配');
+        matches[unit] = { from: fields[1], to: fields[0] };
+      } catch (err) {
+        if (err?.code !== 'ENOENT') {
+          running[unit === 'fleet-engine' ? 'engine' : 'api'] = {
+            error: `运行内容一致凭据读不了：${String(err).slice(0, 200)}`,
+          };
+        }
+      }
+    }
+  }
+  return { ...running, diffs, matches };
 }
