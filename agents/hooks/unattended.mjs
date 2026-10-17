@@ -10,8 +10,9 @@
 //   node ~/.fleet-dao/hooks/unattended.mjs status
 //
 // 改这里之前必须知道（规矩由 agents/test/rules/stop.rules.test.ts 钉住）：
-// - 只有这个会话自己跑了 on 才挡：状态按会话号存（~/.fleet-dao/unattended/<会话号>.json，会话号来自环境变量 CLAUDE_CODE_SESSION_ID，
-//   Stop、PreToolUse 的输入里同一个号），别的会话、别的机器、工人和反方（机器派的会话，on 直接拒）都不受影响。
+// - 只有这个会话自己跑了 on 才挡：状态按会话号存（~/.fleet-dao/unattended/<会话号>.json）；命令和钩子统一识别真实会话号：
+//   CLAUDE_CODE_SESSION_ID、CODEX_THREAD_ID、CODEX_SESSION_ID 依次优先；钩子以这次事件的 session_id 为准，缺失才读环境。
+//   非法来源不借别的会话号兜底。别的会话、别的机器、工人和反方（机器派的会话，on 直接拒）都不受影响。
 //   起子代理、监视、后台命令不自动开。会话号拿不到，on 明确失败。
 // - 放行的几种：off；done / needs-you；开着满 12 小时；还有东西在跑（Stop 输入的 background_tasks 有子代理、后台命令、
 //   监视，或 session_crons 有定时唤醒：它们收口时会把会话叫回来，这一轮结束不丢活，挡回去只是多一轮重读上下文）；
@@ -75,6 +76,31 @@ export function stateDir(env = process.env, home = homedir()) {
  */
 export function cleanId(id) {
   return typeof id === 'string' && /^[\w-]{4,128}$/.test(id) ? id : null;
+}
+
+/**
+ * 命令与状态消费者只在这里选号；已给出的高优先级来源非法时不能落到别的会话。
+ * 钩子事件号优先于可能继承自父会话的环境号；无事件号时与命令走同一环境选择。
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {unknown} [hookId]
+ * @returns {{ ok: true, id: string } | { ok: false, missing: boolean, why: string }}
+ */
+export function selectSessionId(env = process.env, hookId = null) {
+  if (hookId !== null && hookId !== undefined && hookId !== '') {
+    const id = cleanId(hookId);
+    return id ? { ok: true, id } : { ok: false, missing: false, why: '钩子输入 session_id 不合法' };
+  }
+  for (const source of ['CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID', 'CODEX_SESSION_ID']) {
+    const value = env[source];
+    if (value === undefined || value === '') continue;
+    const id = cleanId(value);
+    return id ? { ok: true, id } : { ok: false, missing: false, why: `环境变量 ${source} 的会话号不合法` };
+  }
+  return {
+    ok: false,
+    missing: true,
+    why: '拿不到会话号（CLAUDE_CODE_SESSION_ID、CODEX_THREAD_ID、CODEX_SESSION_ID 都没有，钩子也没给 session_id）',
+  };
 }
 
 /**
@@ -299,17 +325,16 @@ export function main(argv, io) {
   const now = io.now ?? Date.now();
   const dir = stateDir(env);
   const [cmd, ...rest] = argv;
-  const id = cleanId(env.CLAUDE_CODE_SESSION_ID);
+  const session = selectSessionId(env);
   if (!['on', 'done', 'needs-you', 'off', 'status'].includes(cmd ?? '')) {
     io.err(`没做成：${cmd ? `不认识的命令 ${cmd}` : '没给命令'}。${USAGE}`);
     return 2;
   }
-  if (!id) {
-    io.err(
-      '没做成：拿不到会话号（环境变量 CLAUDE_CODE_SESSION_ID 没有或不合法），不知道这个状态该记在哪个会话上。',
-    );
+  if (!session.ok) {
+    io.err(`没做成：${session.why}，不知道这个状态该记在哪个会话上。`);
     return 2;
   }
+  const id = session.id;
   try {
     if (cmd === 'status') {
       const r = readState(dir, id);

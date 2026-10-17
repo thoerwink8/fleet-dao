@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decideQueueStop } from './queue-stop.mjs';
-import { cleanId, decideStop, isMachineSession, pendingOf, stateDir } from './unattended.mjs';
+import { decideStop, isMachineSession, pendingOf, selectSessionId, stateDir } from './unattended.mjs';
 
 function isMain() {
   const entry = process.argv[1];
@@ -33,8 +33,10 @@ if (isMain()) {
   // （我们自己挡回去之后那个标志就一直是真的）。机器派的会话（工人、反方）不挡。
   const notes = [];
   try {
-    const sessionId = cleanId(input?.session_id) ?? cleanId(process.env.CLAUDE_CODE_SESSION_ID);
-    if (sessionId && !isMachineSession({ env: process.env })) {
+    const session = selectSessionId(process.env, input?.session_id);
+    if (!session.ok && !session.missing) notes.push(`无人值守状态没查成：${session.why}，这一轮不拦。`);
+    if (session.ok && !isMachineSession({ env: process.env })) {
+      const sessionId = session.id;
       const dir = stateDir();
       // 收轮前对账（单 #2731，人在不在场都判）：有可接的活、容量够、没有子代理在跑就挡回（queue-stop.mjs）
       const q = await decideQueueStop({ input, dir, sessionId });
