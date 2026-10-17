@@ -1,5 +1,5 @@
 // 决定 0083：引导中继删了。不再读 diag 的 turn.steer，不再起 ui-cli，不再为 Mirasim 引导拒工具或挡收尾。
-// 先回、后台子代理还在 main-thread.mjs。历史 steer-shown 只留路径给开会话对账读，不再写。
+// 先回规则和原生后台重启提示保留，重复投递模块退役。
 // 引擎无头会话设 FLEET_HEADLESS=1，项目级流程钩子直接退出。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -24,8 +24,13 @@ describe('引导中继已删（决定 0083）', () => {
       expect(code, rel).not.toMatch(/steerRelay/);
       expect(code, rel).not.toMatch(/takeSteers/);
     }
-    expect(read('../../hooks/main-thread.mjs')).toMatch(/export function steerShownDir/);
-    expect(read('../../hooks/main-thread.mjs')).toMatch(/export function shownFile/);
+    for (const rel of [
+      '../../hooks/main-thread.mjs',
+      '../../hooks/session-start.mjs',
+      '../../hooks/founder-inbox.mjs',
+      '../../hooks/work-watch.mjs',
+    ])
+      expect(codeOf(rel)).not.toMatch(/from ['"][^'"]*(?:inbox-tick|inbox-watch|steer-shown)/);
   });
 
   it('【故意造出的失败】把取原文写回去：上一条查得出', () => {

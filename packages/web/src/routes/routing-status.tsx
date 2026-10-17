@@ -87,6 +87,7 @@ import {
 } from '../lib/route-probe';
 import {
   countsText,
+  quotaProbeWhy,
   type RouteStateKind,
   routeStateLabel,
   routeStateWhy,
@@ -1018,6 +1019,17 @@ function RouteRow({
   const seconds = probeSeconds(r, requests);
   const name = model?.displayName ?? r.modelId;
   const bodyId = `route-body-${r.id}`;
+  // 同一次探针写明额度耗尽时，不再用「在线」那句里的「额度够」。分类仍是在线，这句话只改说法。
+  const why = quotaCell && kind === 'live' ? quotaProbeWhy(quotaCell) : routeStateWhy[kind];
+  const spoken = active
+    ? active.state === 'running'
+      ? '探测中'
+      : '排队中'
+    : quotaCell && kind === 'live'
+      ? why
+      : quotaCell
+        ? `${routeStateLabel[kind]}，${PROBE_KIND_WORD.quota.label}（${quotaResetText(quotaCell.resetsAt)}）`
+        : routeStateLabel[kind];
   const failed = kind === 'fault';
   const alarm = kind === 'fault' || kind === 'interrupted';
   const quietKind = kind === 'off' || kind === 'unused' || kind === 'retired';
@@ -1048,7 +1060,7 @@ function RouteRow({
           onClick={onToggle}
           aria-expanded={open}
           aria-controls={bodyId}
-          aria-label={`${name} ${r.id}：${active ? (active.state === 'running' ? '探测中' : '排队中') : quotaCell ? `${routeStateLabel[kind]}，${PROBE_KIND_WORD.quota.label}（${quotaResetText(quotaCell.resetsAt)}）` : routeStateLabel[kind]}`}
+          aria-label={`${name} ${r.id}：${spoken}`}
           className="flex min-w-0 flex-1 items-start gap-2 rounded-md text-left outline-none focus-visible:ring-focus focus-visible:ring-ring"
         >
           <ChevronRight
@@ -1075,7 +1087,7 @@ function RouteRow({
                 <KindChip kind={kind} variant="dot" />
               )}
               {quotaCell && !active ? (
-                <span data-route-quota>
+                <span data-route-quota title={quotaProbeWhy(quotaCell)}>
                   <StatusBadge
                     tone={PROBE_KIND_WORD.quota.tone}
                     label={PROBE_KIND_WORD.quota.label}
@@ -1153,7 +1165,9 @@ function RouteRow({
       {open ? (
         <RowDetail id={bodyId} className="pb-3">
           <div className="rounded-lg bg-muted p-3">
-            <p className="mb-2 text-meta text-muted-foreground">{routeStateWhy[kind]}</p>
+            <p data-route-why title={why} className="mb-2 text-meta text-muted-foreground">
+              {why}
+            </p>
             {active ? (
               <p className={cn('mb-2 text-meta', active.why ? 'text-ink-stall' : 'text-ink-run')}>
                 {activityText(active, now)}

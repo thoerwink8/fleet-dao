@@ -9,10 +9,12 @@ import {
   isAlert,
   matchesFilter,
   probeInterrupted,
+  quotaProbeWhy,
   type RouteStateKind,
   rollupKind,
   routeStateLabel,
   routeStateTone,
+  routeStateWhy,
 } from './route-state';
 
 const live: LivenessFact = { verdict: 'live', reason: '好' };
@@ -20,6 +22,25 @@ const dead: LivenessFact = { verdict: 'dead', reason: '探针判不在线：没�
 const unknown: LivenessFact = { verdict: 'unknown', reason: '没看过' };
 
 const base = { enabled: true, verdict: 'live' as const, connect: live, quota: live, ban: live };
+
+describe('quotaProbeWhy', () => {
+  test('同一次额度耗尽：不说额度够；有重置时刻就复述，没给就写没给', () => {
+    const said = quotaProbeWhy({
+      detail: '5 小时窗口额度耗尽（假数据）',
+      resetsAt: '2026-10-18T12:00:00.000Z',
+    });
+    expect(said).toContain('连通但额度耗尽');
+    expect(said).toContain('5 小时窗口额度耗尽（假数据）');
+    expect(said).toContain('预计');
+    expect(said).not.toContain('额度够');
+    const unknown = quotaProbeWhy({ detail: '额度用完', resetsAt: undefined });
+    expect(unknown).toContain('重置时间上游没给');
+    expect(unknown).not.toMatch(/预计/);
+    expect(unknown).not.toContain('额度够');
+    // 没有这条事实时，在线说明仍写额度够
+    expect(routeStateWhy.live).toContain('额度够');
+  });
+});
 
 describe('classifyRoute', () => {
   test('开着、三件都过 = 在线', () => {
