@@ -3,7 +3,7 @@
 // - 先后和开关是运行时配置、留在库里（决定 0011 第 7 条）：改了直接写库，引擎下一次选路就照新的，不开 PR。库里的写法在 db 的
 //   routing-order.ts（带「我看到的旧值」防两个人同时改、换位置先挪到临时位置躲唯一约束），这里只管同一个事务里记操作记录：记不下就不改。
 // - 没接上（开发环境的内存版没有路由两层那两张表）由接口回 503；写不进抛，接口回 503 写明原因。不当改成了。
-// - 操作记录：routing.order.move（模型或渠道换位置，对象 stage:<用途> 或 model:<模型>）、routing.route.enable（一条路由的开关）、routing.model.enable（模型开关）、channel.enable / channel.disable（渠道开关）、routing.purpose.add / routing.purpose.remove / routing.purpose.effort（加进用途、移出、改这个用途下的档位，对象 stage:<用途>）。
+// - 操作记录：routing.order.move（模型或渠道换位置，对象 stage:<用途> 或 model:<模型>）、routing.route.enable（一条路由的开关）、routing.route.share（一条路由的同一档，对象 route:<路由>）、routing.model.enable（模型开关）、channel.enable / channel.disable（渠道开关）、routing.purpose.add / routing.purpose.remove / routing.purpose.effort（加进用途、移出、改这个用途下的档位，对象 stage:<用途>）。
 import {
   type AddPurposeModelInput,
   addPurposeModel,
@@ -30,10 +30,13 @@ import {
   type SetPurposeModelEffortInput,
   type SetRouteEnabledInput,
   type SetRouteEnabledResult,
+  type SetRouteShareInput,
+  type SetRouteShareResult,
   setChannelEnabledFlag,
   setModelEnabled,
   setPurposeModelEffort,
   setRouteEnabled,
+  setRouteShare,
 } from '@fleet-dao/db';
 import {
   AddPurposeModelRequest,
@@ -69,6 +72,10 @@ export interface RoutingOrderPort {
   moveModelRoute(input: MoveModelRouteInput, audit: OrderAudit): Promise<MoveResult>;
   /** 开 / 关模型下的一条路由；同上。 */
   setRouteEnabled(input: SetRouteEnabledInput, audit: OrderAudit): Promise<SetRouteEnabledResult>;
+  /**
+   * 把一条路由放进同一档或拿出来。可选：旧的内存桩没有这一步，接口回没接上，不要求每份桩都补。
+   */
+  setRouteShare?(input: SetRouteShareInput, audit: OrderAudit): Promise<SetRouteShareResult>;
   /** 用途下的模型拖到新先后（整段重排）；改成了就在同一个事务里记操作记录。 */
   reorderPurposeModels(input: ReorderPurposeModelsInput, audit: OrderAudit): Promise<MoveResult>;
   /** 模型下的路由拖到新先后；同上。 */
@@ -190,6 +197,21 @@ export function pgRoutingOrder(
         result.ok && result.before !== result.after,
         '路由配置开关变更：单条路由',
       );
+    },
+    setRouteShare: async (input, audit) => {
+      const result = await db.transaction(async (tx) => {
+        const result = await setRouteShare(tx, input);
+        if (!result.ok) return result;
+        await record(
+          tx,
+          audit,
+          { modelId: input.modelId, share: result.before, version: input.expectedVersion },
+          { modelId: input.modelId, share: result.after, version: result.version },
+        );
+        return result;
+      });
+      const changed = result.ok && JSON.stringify(result.before) !== JSON.stringify(result.after);
+      return wakeAfterCommit(result, changed, '路由配置同一档变更');
     },
     reorderPurposeModels: async (input, audit) => {
       const result = await db.transaction(async (tx) => {
@@ -416,6 +438,37 @@ export function registerRoutingOrderRoutes(
               );
         if (!result.ok) throw moveProblem(result, '这个模型下渠道', 'route_not_found');
         return reply(c, UpdateModelRouteResponse, { modelId, routeId, order: result.after });
+      }
+      if (body.op === 'share') {
+        if (!deps.routingOrder.setRouteShare) {
+          throw new ApiError(503, 'route_share_unreadable', '同一档没接上');
+        }
+        const result = await deps.routingOrder.setRouteShare(
+          {
+            modelId,
+            routeId,
+            band: body.shareBand,
+            weight: body.shareWeight,
+            expectedVersion: body.expectedVersion,
+          },
+          audit('routing.route.share', `route:${routeId}`),
+        );
+        if (!result.ok) {
+          if (result.kind === 'not_found') throw new ApiError(404, 'route_not_found', result.why);
+          if (result.kind === 'conflict') {
+            throw new ApiError(409, 'conflict', '同一档刚被别人改过，刷新后再改', {
+              current: result.current,
+            });
+          }
+          throw new ApiError(503, 'route_share_unreadable', result.why);
+        }
+        return reply(c, UpdateModelRouteResponse, {
+          modelId,
+          routeId,
+          shareBand: result.after?.band ?? null,
+          shareWeight: result.after?.weight ?? null,
+          version: result.version,
+        });
       }
       const result = await deps.routingOrder.setRouteEnabled(
         { modelId, routeId, enabled: body.enabled, expected: body.expected },

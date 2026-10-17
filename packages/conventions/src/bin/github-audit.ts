@@ -1,5 +1,5 @@
 // GitHub 对账入口（见 ../github-audit.ts）：node packages/conventions/src/bin/github-audit.ts [--comment]
-// pnpm github:audit：只打印查出来的。--comment：再把挂得到单上的留言到那张单上（同一条只留一次）。
+// pnpm github:audit：核对并修复母子清单、清理里程碑先后，再打印差异。--comment：再把挂得到单上的留言到那张单上（同一条只留一次）。
 // --alarm：红了开（或更新）同一张「GitHub 对账没过」单，绿了关掉（../audit-alarm.ts，#2683）。
 // 只给 .github/workflows/github-audit.yml 的定时任务和人手跑用，别接进 PR 的必过检查（#87：必过检查必须确定）。
 // 退出码 0 = 没有断裂；1 = 有断裂（逐条列出；留言留过了也一样红，修好才绿）；2 = 没查成（读不到 GitHub、留言没留成），同样是红。
@@ -40,7 +40,7 @@ runMain(async () => {
     exitWith(2);
   }
   const gh = liveGitHub(name, process.env);
-  const r = await auditGitHub(gh, new Date(), gh);
+  const r = await auditGitHub(gh, new Date(), gh, { reader: gh, writer: gh });
   const notQueried = [...r.notQueried];
   for (const p of r.pruned) {
     out(

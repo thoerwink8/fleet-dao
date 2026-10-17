@@ -1010,6 +1010,10 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
   const slotKey = (purpose: string, modelId: string) => `${purpose}\0${modelId}`;
   /** 在它的模型下关着的路由（母单 #1089 起页面能开关，所以是这个假后端自己的一份）。 */
   const switchedOff = new Set(MOCK_SWITCHED_OFF_AT_START);
+  /** 同一档：版本 0、空表 = 各走各的。键是「模型编号\\0路由编号」。 */
+  let routeShareVersion = 0;
+  const routeShare = new Map<string, { band: number; weight: number }>();
+  const shareKey = (modelId: string, routeId: string) => `${modelId}\0${routeId}`;
   /** 每个项目「让 AI 接活」打开的时刻：没有就是关着。种子里 orbit 开着、另两个关着，页面上两种样子都能看到。 */
   const mockDispatch = new Map<string, string>([['r-orbit', new Date(now() - 3 * 86_400_000).toISOString()]]);
   /** 没写过的仓是强制。切换记录新的在前，最多留 5 条。 */
@@ -3082,9 +3086,28 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         }
         const models = modelIds.map((modelId) => {
           const model = st.models.find((m) => m.id === modelId);
-          const routes = (st.routing[modelId] ?? [])
+          const ids = st.routing[modelId] ?? [];
+          const byBand = new Map<number, string[]>();
+          for (const id of ids) {
+            const entry = routeShare.get(shareKey(modelId, id));
+            if (!entry) continue;
+            const list = byBand.get(entry.band) ?? [];
+            list.push(id);
+            byBand.set(entry.band, list);
+          }
+          const grouped = new Set<string>();
+          for (const list of byBand.values()) {
+            if (list.length < 2) continue;
+            for (const id of list) grouped.add(id);
+          }
+          const routes = ids
             .flatMap((routeId) => st.routes.find((r) => r.id === routeId) ?? [])
-            .map((r) => mockRouteLiveness(r, purpose, t));
+            .map((r) => {
+              const live = mockRouteLiveness(r, purpose, t);
+              const entry = routeShare.get(shareKey(modelId, r.id));
+              if (!entry || !grouped.has(r.id)) return live;
+              return { ...live, shareBand: entry.band, shareWeight: entry.weight, recentDispatches: 0 };
+            });
           const effort = purposeEffort.get(slotKey(purpose, modelId));
           return {
             modelId,
@@ -3094,6 +3117,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
             verdict: layerVerdict(routes.map((r) => r.verdict)),
             routes,
             ...(effort ? { effort } : {}),
+            ...(routeShareVersion > 0 ? { shareVersion: routeShareVersion } : {}),
           };
         });
         return {
@@ -3382,6 +3406,37 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           ...(body.reason ? { reason: body.reason } : {}),
         });
         return UpdateModelRouteResponse.parse({ modelId, routeId, enabled: body.enabled });
+      }
+      if (body.op === 'share') {
+        if (body.expectedVersion !== routeShareVersion) {
+          throw new ApiError(409, 'conflict', '同一档刚被别人改过，刷新后再改', {
+            current: routeShareVersion,
+          });
+        }
+        const key = shareKey(modelId, routeId);
+        if (body.shareBand === null) routeShare.delete(key);
+        else routeShare.set(key, { band: body.shareBand, weight: body.shareWeight });
+        routeShareVersion += 1;
+        audit({
+          actor: meActor(),
+          action: 'routing.route.share',
+          target: `route:${routeId}`,
+          after: {
+            modelId,
+            shareBand: body.shareBand,
+            shareWeight: body.shareWeight,
+            version: routeShareVersion,
+          },
+          via: 'cockpit',
+          ...(body.reason ? { reason: body.reason } : {}),
+        });
+        return UpdateModelRouteResponse.parse({
+          modelId,
+          routeId,
+          shareBand: body.shareBand,
+          shareWeight: body.shareBand === null ? null : body.shareWeight,
+          version: routeShareVersion,
+        });
       }
       const order =
         body.op === 'reorder'

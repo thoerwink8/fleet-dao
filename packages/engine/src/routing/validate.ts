@@ -164,6 +164,15 @@ export function validateInput(input: ChooseRouteInput, trialEnabled: boolean): n
     count(e.position, `路由 ${e.routeId} 的位置`);
     if (seenPos.has(e.position)) throw new RoutingInputError(`选路判不了：位置 ${e.position} 上有两条路由`);
     seenPos.add(e.position);
+    if (e.shareBand !== undefined && e.shareBand !== null) count(e.shareBand, `路由 ${e.routeId} 的同一档`);
+    if (
+      e.shareWeight !== undefined &&
+      (typeof e.shareWeight !== 'number' || !Number.isInteger(e.shareWeight) || e.shareWeight < 1)
+    ) {
+      throw new RoutingInputError(
+        `选路判不了：路由 ${e.routeId} 的同一档权重不是正整数（${String(e.shareWeight)}）`,
+      );
+    }
   }
   const facts = new Set<string>();
   for (const r of input.routes) {

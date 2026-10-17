@@ -421,7 +421,16 @@ describe('命令行外壳：同步那半起脱离的后台，后台写完下次�
       runChild(process.execPath, [HOOK], {
         input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }),
         cwd: temp('cwd'),
-        env: { ...process.env, HOME: home, USERPROFILE: home, FLEET_FRANCE_SSH: '', CLAUDE_ENV_FILE: '' },
+        env: {
+          ...process.env,
+          HOME: home,
+          USERPROFILE: home,
+          FLEET_FRANCE_SSH: '',
+          CLAUDE_ENV_FILE: '',
+          CLAUDE_CODE_SESSION_ID: '',
+          CODEX_THREAD_ID: '',
+          CODEX_SESSION_ID: '',
+        },
       });
     const first = run();
     expect(first.status).toBe(0);

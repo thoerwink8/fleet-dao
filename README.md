@@ -61,12 +61,15 @@
 - 加新项目：`pnpm project add <owner/仓>` 一条命令做到底（登记、装两个 App、流程标签、仓档案、补齐 PR、全绿才开接活、冒烟单），可重复跑；`pnpm project check <owner/仓>` 只查（退出码 0 全绿、1 有没过的、2 没查成）。见 ops 第九节「加新项目」。
 - 计划：`pnpm plan` 从 GitHub 现读版本、先后、母单和子单打印出来，不写文件（#654 起仓里不存快照）；没登录、GitHub 读不到、先后标记认不出都报错、退出码 2。每天一轮 GitHub 对账（`.github/workflows/github-audit.yml`，随时也能 `pnpm github:audit`）查单子和先后有没有断，见 design 第七节「GitHub 对账」。
 - 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
+- 无人值守状态按真实会话号隔离：`unattended.mjs` 的命令依次读取 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`CODEX_SESSION_ID`；Stop 和 SessionStart 优先使用事件里的 `session_id`，缺失才读同一组环境变量。给出的来源不合法就明确报错，不借另一个会话号。
 
 ### 批量开母子单
 
-`pnpm issue:batch --spec _tmp/batch.json` 一次返回母单号、全部子单号和恢复记录路径。JSON 的 `mother` 和非空 `subs` 列表中每项都要有 `title`、`body`、`kind`（需求/缺陷/杂项）；正文沿用开单四节校验。整批不挂里程碑（未排期）；`local: true` 表示保留「本机做」。
+`pnpm issue:batch --spec <JSON文件>` 一次返回母单号、全部子单号和恢复记录路径。JSON 的 `mother` 和非空 `subs` 列表中每项都要有 `title`、`body`、`kind`（需求/缺陷/杂项）；正文沿用开单四节校验。整批不挂里程碑（未排期）；`local: true` 表示保留「本机做」。
 
-子单自动写 `parent: #母单号` 并挂原生子议题。整批先暂贴「本机做」，挂好全部关系后再撤暂存标签。失败会把本批单关闭为 `not_planned`（保留撤销记录）；创建回包不明时按批次标记分页找回。进程中断或撤销失败时跑 `pnpm issue:batch --recover <恢复记录路径>` 继续清理；未核清或关闭失败会明确报错，不报成功。GitHub 不提供跨单事务，断网时无法保证立即清完，恢复记录在 `_tmp/issue-batch/`，处理完之前不要删。
+子单自动写 `parent: #母单号` 并挂原生子议题。整批先暂贴「本机做」，挂好全部关系后再撤暂存标签。失败会把本批单关闭为 `not_planned`（保留撤销记录）；创建回包不明时按批次标记分页找回。进程中断或撤销失败时跑 `pnpm issue:batch --recover <恢复记录路径>` 继续清理；未核清或关闭失败会明确报错，不报成功。GitHub 不提供跨单事务，断网时无法保证立即清完，恢复记录会生成在仓根临时目录的 issue-batch 子目录，处理完之前不要删。
+
+母单正文的 `<!-- fleet:mother-manifest -->` / `<!-- /fleet:mother-manifest -->` 之间存 JSON 子单号数组（含已关闭的）。批量创建在成功返回前写全；单独 `pnpm issue:new --mother` 初始化空清单，`--parent` 挂好子单后立即合并清单。每日对账补齐旧母单清单，并据唯一 manifest 自动修复子单正文与原生关系；两份清单争抢同一子单时报告冲突，读不全、坏清单不自动写。修复当轮仍报出不一致，下一轮核对一致才绿。
 
 ## 文档各管什么
 

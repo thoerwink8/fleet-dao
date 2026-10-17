@@ -51,6 +51,8 @@ function isolatedEnv(stateDir: string, sessionId = ''): NodeJS.ProcessEnv {
     FLEET_UNATTENDED_DIR: stateDir,
     FLEET_WORKER: '',
     CLAUDE_CODE_SESSION_ID: sessionId,
+    CODEX_THREAD_ID: '',
+    CODEX_SESSION_ID: '',
     // Mirasim 的引导那一条（#1743）在 mirasim-steer.rules.test.ts 钉；这里指到不在的目录，不读这台机器上的真 diag
     FLEET_MIRASIM_DIR: join(stateDir, 'no-mirasim'),
   };
@@ -191,6 +193,34 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     const dir = temp('state');
     expect(cli(['on'], isolatedEnv(dir, 'other-session-0002')).status).toBe(0);
     expect(blocked(stop(isolatedEnv(dir, SID)).stdout)).toBe(false);
+  });
+
+  it.each(['CODEX_THREAD_ID', 'CODEX_SESSION_ID'])(
+    'Stop 没有事件号时与 CLI 同读 %s，不借别的会话',
+    (source) => {
+      const dir = temp('state');
+      const env = { ...isolatedEnv(dir), [source]: SID };
+      expect(cli(['on'], env).status).toBe(0);
+      expect(blocked(stop(env, { session_id: undefined }).stdout)).toBe(true);
+      const before = readFileSync(stateFile(dir), 'utf8');
+      expect(blocked(stop(env, { session_id: 'child-session-0002' }).stdout)).toBe(false);
+      expect(readFileSync(stateFile(dir), 'utf8')).toBe(before);
+      const invalid = stop(env, { session_id: '../bad' });
+      expect(blocked(invalid.stdout)).toBe(false);
+      expect(invalid.stdout).toContain('session_id 不合法');
+      expect(readFileSync(stateFile(dir), 'utf8')).toBe(before);
+    },
+  );
+
+  it('Stop 没有事件号、最高环境来源非法时放行并明说，不借低优先级 Codex 状态', () => {
+    const dir = temp('state');
+    seed(dir, {});
+    const env = { ...isolatedEnv(dir, '../bad'), CODEX_THREAD_ID: SID };
+    const before = readFileSync(stateFile(dir), 'utf8');
+    const result = stop(env, { session_id: undefined });
+    expect(blocked(result.stdout)).toBe(false);
+    expect(result.stdout).toContain('CLAUDE_CODE_SESSION_ID 的会话号不合法');
+    expect(readFileSync(stateFile(dir), 'utf8')).toBe(before);
   });
 
   it('起子代理、监视、后台命令不自动开：调完 Agent / Monitor / 后台 Bash 之后没有状态文件，Stop 不挡（0026 第 2 条保留）', () => {

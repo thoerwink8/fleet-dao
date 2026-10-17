@@ -4,6 +4,7 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node
 import { dirname, resolve } from 'node:path';
 import { checkIssueBody, type Gh, issueBodyTooLong } from './issue-new.ts';
 import { isKindLabel, LOCAL_LABEL, MOTHER_LABEL } from './labels.ts';
+import { readManifest, withManifest } from './mother-manifest.ts';
 
 export interface BatchIssue {
   title: string;
@@ -200,6 +201,30 @@ export async function issueBatchNew(spec: BatchSpec, deps: Deps): Promise<BatchR
         if (link.code !== 0) throw new Error(`#${item.number} 挂母单失败：${link.stderr || link.stdout}`);
       }
     }
+    if (!mother) throw new Error('没有创建母单。');
+    const current = (await api(deps, ['api', `${endpoint}/${mother.number}`])) as { body?: unknown };
+    if (typeof current?.body !== 'string') throw new Error('母单正文读不到，清单没有写入。');
+    const numbers = journal.issues
+      .slice(1)
+      .map((i) => i.number)
+      .sort((a, b) => a - b);
+    const motherBody = withManifest(current.body, numbers);
+    writeFileSync(input, JSON.stringify({ body: motherBody }));
+    const patched = (await api(deps, [
+      'api',
+      '-X',
+      'PATCH',
+      `${endpoint}/${mother.number}`,
+      '--input',
+      input,
+    ])) as { body?: unknown };
+    const manifest = typeof patched?.body === 'string' ? readManifest(patched.body) : undefined;
+    if (
+      patched.body !== motherBody ||
+      manifest?.kind !== 'valid' ||
+      manifest.children.join() !== numbers.join()
+    )
+      throw new Error('母单清单写入回包与全部子单不一致。');
     if (!spec.local) {
       for (const i of journal.issues) {
         const edit = await deps.gh(['issue', 'edit', String(i.number), '--remove-label', LOCAL_LABEL]);
@@ -208,7 +233,6 @@ export async function issueBatchNew(spec: BatchSpec, deps: Deps): Promise<BatchR
     }
     journal.status = 'complete';
     save(path, journal);
-    if (!mother) throw new Error('没有创建母单。');
     return { mother, subs: journal.issues.slice(1), journal: path };
   } catch (e) {
     try {

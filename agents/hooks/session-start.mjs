@@ -50,7 +50,7 @@ import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fr
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
 import { proxyEnvOf, writeProxyEnv } from './proxy-env.mjs';
 import { contractLines, DIRECTIVE_HEADING, pendingItems, scopeNote } from './repo-contract.mjs';
-import { cleanId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
+import { selectSessionId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
 export const SYNC_MS = 30_000;
 export const QUIET_MS = 3 * 60_000;
@@ -1002,6 +1002,12 @@ export function poolHoldPromptLines(read, today) {
   return lines;
 }
 
+function unattendedSessionLines({ dir, sessionId, env, now }) {
+  const session = selectSessionId(env, sessionId);
+  if (!session.ok) return session.missing ? [] : [`无人值守状态没查成：${session.why}。`];
+  return unattendedLines({ dir: dir ?? stateDir(env), sessionId: session.id, now });
+}
+
 /** localGit 只跑本地命令（找临时调整表），限时比取远端短 */
 export function sessionStart({
   cwd,
@@ -1011,7 +1017,7 @@ export function sessionStart({
   localGit = git,
   now = Date.now(),
   sessionId = null,
-  unattendedDir = stateDir(),
+  unattendedDir = null,
   idlePr = idlePrRunner(),
   progress = progressRunner(),
   env = process.env,
@@ -1045,7 +1051,7 @@ export function sessionStart({
   const lineage = lineageOf({ home, sessionId, env });
   return [
     ...(here.line ? [here.line] : []),
-    ...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }),
+    ...unattendedSessionLines({ dir: unattendedDir, sessionId, env, now }),
     ...checkTemporary(cwd, localGit, now),
     ...poolHoldPromptLines(holdRead, beijingToday(now)),
     ...checkDirectives(cwd, localGit, lineage),
@@ -1271,7 +1277,7 @@ export function fastSessionStart({
   localGit = git,
   now = Date.now(),
   sessionId = null,
-  unattendedDir = stateDir(),
+  unattendedDir = null,
   env = process.env,
   repoContract = null,
   progress = progressRunner(),
@@ -1300,7 +1306,7 @@ export function fastSessionStart({
       `开场核规矩没查成：后台 git fetch 失败（${f.value.why}，${ago}）。规矩以 origin/main 为准，动手前用 git show origin/main:AGENTS.md 读一遍。`,
     );
   lines.push(...failed('fetch', '开场核规矩（取远端）'));
-  lines.push(...unattendedLines({ dir: unattendedDir, sessionId: cleanId(sessionId), now }));
+  lines.push(...unattendedSessionLines({ dir: unattendedDir, sessionId, env, now }));
   lines.push(...checkTemporary(cwd, localGit, now));
   const h = got('holds');
   if (h?.ok) lines.push(...poolHoldPromptLines(h.value, beijingToday(now)).map(aged));
@@ -1732,10 +1738,11 @@ if (isMain() && process.argv[2] === '--background') {
     } catch {
       // 输入读不懂不要紧：会话目录退回到钩子自己的工作目录
     }
+    const session = selectSessionId(process.env, input?.session_id);
     const shared = {
       cwd: pickCwd(input),
       home,
-      sessionId: input?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID,
+      sessionId: session.ok ? session.id : input?.session_id,
       repoContract: (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
     };
     lines =
