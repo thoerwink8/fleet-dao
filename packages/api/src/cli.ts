@@ -15,7 +15,8 @@
 // 经 engine off 置关（#1050）；本机 WSL 的小版本更新不碰它。
 //   flow-mode status | set <three|split:<0-100>|full> --reason "<原因>"（#2823）
 // 全程模式开关（设置 engine.flowMode）：three 都走三步单，full 都走全程，split:N 约 N% 的单走全程。没设过是 three；库里的值认不出也按
-// three 并把原因打印出来。set 改的同时记一条操作记录（原因必填）。这一步只记账，引擎不读它。
+// three 并把原因打印出来。set 改的同时记一条操作记录（原因必填）。引擎在每张单第一次选路之后读一次
+// （decideFlowMode），写进分组记录；之后改开关不影响已经分过组的单。
 //   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
 //   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
 //   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。

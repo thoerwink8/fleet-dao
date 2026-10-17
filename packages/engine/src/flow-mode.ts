@@ -27,20 +27,27 @@ import type { DecideFlowModeInput, DecideFlowModeResult } from './task-contract.
 
 /**
  * 选中的路由能不能进全程：决定 0105 第一期只走 Claude 5.5 路由（Sonnet 或 Opus；分层带上模型，同一层里两组的模型一样）。
- * 模型 id 形如 claude-sonnet-5-5、claude-opus-5-5[1m]，大小写不分；claude-sonnet-5（不是 5.5）不认。
+ * 选路交来的 RouteChoice.modelId 是目录 id（sonnet-5.5、opus-5.5）；也可能是上游名字（claude-sonnet-5-5、claude-opus-5-5，可带 [1m]）。
+ * 两种都认，大小写不分。sonnet-5、claude-sonnet-5（不是 5.5）、haiku-5.5 不认。
  */
 export function isFullFlowModel(modelId: string): boolean {
-  return /^claude-(?:sonnet|opus)-5-5(?![0-9])/.test(modelId.trim().toLowerCase());
+  const id = modelId.trim().toLowerCase();
+  return /^(?:sonnet|opus)-5\.5(?![0-9])/.test(id) || /^claude-(?:sonnet|opus)-5-5(?![0-9])/.test(id);
 }
 
-/** 分层：档位/模型，如 strong/opus-5.5。模型用路由的 modelId（去掉 claude- 前缀和 [1m]，5-5 写成 5.5）。 */
+/**
+ * 分层：档位/模型，如 strong/opus-5.5。
+ * 目录 id（sonnet-5.5）和上游名字（claude-opus-5-5、带 [1m] 的也一样）收成同一个模型串，同一层里才按同一个桶哈希。
+ */
 export function flowStratum(tier: string, modelId: string): string {
-  const model = modelId
+  const raw = modelId
     .trim()
     .toLowerCase()
-    .replace(/\[[^\]]*\]$/, '')
-    .replace(/^claude-/, '')
-    .replace(/-(\d+)-(\d+)$/, '-$1.$2');
+    .replace(/\[[^\]]*\]$/, '');
+  // 正好是 Claude 5.5 的目录 id 或上游名字：收成 sonnet-5.5 / opus-5.5。带别的尾巴的不在这里收，免得把不相干的型号并进这一层。
+  const claude55 = /^(?:claude-)?(sonnet|opus)-5[.-]5$/.exec(raw);
+  if (claude55?.[1]) return `${tier}/${claude55[1]}-5.5`;
+  const model = raw.replace(/^claude-/, '').replace(/-(\d+)-(\d+)$/, '-$1.$2');
   return `${tier}/${model}`;
 }
 
