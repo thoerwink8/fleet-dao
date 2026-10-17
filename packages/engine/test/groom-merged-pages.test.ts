@@ -113,7 +113,7 @@ describe('整理待办 · closed PR 超过 10 页仍在窗口内', () => {
       body: FULL_BODY,
       author: { login: 'frank', id: 1, type: 'User' },
       createdAt: '2026-09-20T00:00:00.000Z',
-      labels: ['需求'],
+      labels: ['需求', '域:engine', '性质:process'],
       milestone: null,
     };
     const facts: GroomFacts = {
@@ -128,7 +128,7 @@ describe('整理待办 · closed PR 超过 10 页仍在窗口内', () => {
     const notices: GroomNotice[] = [];
     const prompts: string[] = [];
     const dones: { ok: boolean; result?: GroomResult; error?: string }[] = [];
-    const opened: { title: string; body: string }[] = [];
+    const opened: { title: string; body: string; labels: readonly string[] }[] = [];
     const deps: GroomRunDeps = {
       rows: async () => [
         {
@@ -184,7 +184,7 @@ describe('整理待办 · closed PR 超过 10 页仍在窗口内', () => {
       },
       writes: () => ({
         openIssue: async (i) => {
-          opened.push({ title: i.title, body: i.body });
+          opened.push({ title: i.title, body: i.body, labels: i.labels });
           return { number: 1500, url: 'https://x/1500', created: true };
         },
         comment: async () => ({ created: true }),
@@ -222,6 +222,7 @@ describe('整理待办 · closed PR 超过 10 页仍在窗口内', () => {
     ]);
     expect(dones[0]?.result?.rejected ?? []).toEqual([]);
     expect(opened).toHaveLength(1);
+    expect(opened[0]?.labels).toEqual(['需求', '域:engine', '性质:process']);
 
     const prompt = prompts[0] ?? '';
     expect(prompt).toContain('开出下一片');
