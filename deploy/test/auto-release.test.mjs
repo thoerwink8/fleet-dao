@@ -1002,7 +1002,10 @@ test('发版在引擎起来之前换帮手并修好 _tmp', () => {
   const install = activate.indexOf('install_scope_helper');
   const fix = activate.indexOf('fix_work_tmp');
   const restart = activate.indexOf('ensure_unit_running');
-  assert.ok(install >= 0 && fix > install && restart > fix, `顺序不对：install=${install} fix=${fix} restart=${restart}`);
+  assert.ok(
+    install >= 0 && fix > install && restart > fix,
+    `顺序不对：install=${install} fix=${fix} restart=${restart}`,
+  );
 });
 
 test('【故意造出的失败】状态文件读不出（不是 JSON、格式版本不对、不是对象、读不了）：这一轮什么都不做、不覆盖、报警；挪走后从空的起、报警自己撤（审查 S4）', async () => {
