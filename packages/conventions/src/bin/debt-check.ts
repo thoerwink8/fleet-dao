@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { checkDebtDocs, DEBT_REPORT_HEADER, liveDebt } from '../debt.ts';
 import { exitWith, runMain } from '../exit.ts';
 import { reportFindings } from '../findings.ts';
-import { liveGitHub, repoName } from '../github-api.ts';
+import { liveGitHub, resolveRepo } from '../github-api.ts';
 import { annotation } from '../pr-fields.ts';
 import { fsRepo } from '../repo.ts';
 
@@ -42,11 +42,12 @@ runMain(async () => {
     for (const line of lines) (code === 0 ? out : err)(line);
     process.exitCode = code;
   } else {
-    const name = repoName(process.env, root);
-    if (!name) {
-      err('没查成：认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）。');
+    const resolved = resolveRepo(process.env, root);
+    if (!resolved.repo) {
+      err(resolved.error ?? '没查成：认不出是哪个仓（没有 GITHUB_REPOSITORY，origin 也不是 GitHub 地址）。');
       exitWith(2);
     }
+    const name = resolved.repo;
     const gh = liveGitHub(name, process.env);
     const r = await liveDebt({ repo, gh });
     for (const line of r.docs.lines) (r.docs.code === 0 ? out : err)(line);
