@@ -351,7 +351,7 @@ function describeHolders(holders: readonly Holder[], now: number): string {
 
 /**
  * 拿到槽时一定打的那一行的开头（没等也打，「共等了 0 秒」）。引擎自测认这一行分开「等槽」和「真跑测试」
- * （packages/engine/src/real/self-check.ts 的 SLOT_ACQUIRED）：改字要两边一起改。
+ * （packages/engine/src/real/self-check.ts 的 SLOT_ACQUIRED 从包的入口引这个常量）。
  */
 export const SLOT_ACQUIRED_LINE = '拿到本机测试槽';
 

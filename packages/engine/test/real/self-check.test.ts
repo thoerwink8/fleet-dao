@@ -1,11 +1,12 @@
 // 引擎自测（selfCheck，决定 0093）：以树主人的身份跑仓的测试命令和 tsc；精炼输出；没跑成回 skipped 不抛。
 // test:changed 退出 3（要全跑）时不把测试推给 CI：在整机锁下改跑受影响的包，超时记没过。
 
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { pathToFileURL } from 'node:url';
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { RepoWithProfile } from '@fleet-dao/shared';
 import { describe, expect, it, vi } from 'vitest';
@@ -24,6 +25,7 @@ import {
   type SelfCheckFullLock,
 } from '../../src/real/self-check.ts';
 import { SELF_CHECK_DIGEST_MAX, type SelfCheckInput } from '../../src/task-contract.ts';
+import { runChild } from '../child.ts';
 import { freshRepo } from '../helpers.ts';
 
 const USER = 'fleet-agent-1' as SessionUser;
@@ -856,7 +858,10 @@ describe('排队和执行分开计时（假时钟）', () => {
  * 在同一组槽上排队。槽目录指到临时目录；不设「已持槽」的环境变量。子进程 exec 成 node，杀掉它就是持槽进程死了。
  */
 describe('和普通 test:changed 共用本机测试槽（真进程）', () => {
-  const slotsSrc = fileURLToPath(new URL('../../../conventions/src/test-slots.ts', import.meta.url));
+  // 经包的入口拿（槽的那几样在 @fleet-dao/conventions 的面上），子进程和引擎认的是同一份
+  const conventionsEntry = pathToFileURL(
+    createRequire(import.meta.url).resolve('@fleet-dao/conventions'),
+  ).href;
 
   function setup() {
     const dir = mkdtempSync(join(tmpdir(), 'self-check-shared-slots-'));
@@ -868,7 +873,7 @@ describe('和普通 test:changed 共用本机测试槽（真进程）', () => {
     writeFileSync(
       script,
       [
-        `import { acquireSlot, readSlotConfig, realSlotDeps } from ${JSON.stringify(pathToFileURL(slotsSrc).href)};`,
+        `import { acquireSlot, readSlotConfig, realSlotDeps } from ${JSON.stringify(conventionsEntry)};`,
         'const h = acquireSlot(readSlotConfig(process.env), realSlotDeps((l) => console.log(l)));',
         "console.log(' RUN  v3 fake');",
         "Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.HOLD_MS ?? '0'));",
@@ -995,10 +1000,7 @@ describe('和普通 test:changed 共用本机测试槽（真进程）', () => {
       expect(got.steps[0]?.digest).toContain('执行超过');
       expect(got.steps[0]?.digest).toContain('拿到本机测试槽');
       expect(s.slotFiles()).toHaveLength(1);
-      const next = spawnSync(process.execPath, [s.script], {
-        env: { ...s.env, HOLD_MS: '0' },
-        encoding: 'utf8',
-      });
+      const next = runChild(process.execPath, [s.script], { env: { ...s.env, HOLD_MS: '0' } });
       expect(next.stdout).toMatch(/回收本机测试槽 slot-0\.json：持有者进程 \d+ 已经不在/);
       expect(next.stdout).toContain('拿到本机测试槽，共等了 0 秒');
       expect(s.slotFiles()).toHaveLength(0);

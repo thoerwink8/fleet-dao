@@ -25,6 +25,7 @@ import { mkdir, readdir, readFile, rename, rmdir, stat, unlink, writeFile } from
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { redact, type SessionUser } from '@fleet-dao/adapters';
+import { SLOT_ACQUIRED_LINE } from '@fleet-dao/conventions';
 import type { RepoWithProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type PortContext, PortError } from '../ports.ts';
@@ -81,10 +82,10 @@ const TEST_CHANGED_NOT_RUN: Readonly<Record<number, string>> = {
 };
 
 /**
- * test:changed 真开跑测试的标记：拿到本机测试槽时一定打的那一行（packages/conventions/src/test-slots.ts 的
- * SLOT_ACQUIRED_LINE，改字两边一起改），或 vitest 开跑的 RUN 横幅（老的树没排队时不打那一行）。见到之前都算在排队。
+ * test:changed 真开跑测试的标记：拿到本机测试槽时一定打的那一行（SLOT_ACQUIRED_LINE，packages/conventions/src/test-slots.ts），
+ * 或 vitest 开跑的 RUN 横幅（老的树没排队时不打那一行）。见到之前都算在排队。
  */
-const SLOT_ACQUIRED = /拿到本机测试槽|^\s*RUN\s+v\d/m;
+const SLOT_ACQUIRED = new RegExp(`${SLOT_ACQUIRED_LINE}|^\\s*RUN\\s+v\\d`, 'm');
 /** 认标记时只看最近这么多字（标记可能被切在两段输出之间）。 */
 const MARKER_WINDOW = 2_000;
 
@@ -503,7 +504,7 @@ function timeoutStep(command: string, detail?: string): SelfCheckStep {
 /** 没跑完时留下的证据最多多少字（再加阶段、时刻那一行，不超过 SELF_CHECK_DIGEST_MAX）。 */
 const EVIDENCE_MAX = 2_500;
 /** 输出里已经有没过的：vitest 的 FAIL、×，go test 的 --- FAIL，AssertionError，「N failed」。 */
-const KNOWN_FAILURE = /^\s*(?:---\s+)?FAIL\b|^\s*[×✗]\s|AssertionError|\b\d+ failed\b/m;
+const KNOWN_FAILURE = /^\s*(?:---\s+)?FAIL\b|^\s*[×✗]\s|AssertionError|\b[1-9]\d* failed\b/m;
 
 function cleanText(raw: string): string {
   // biome-ignore lint/suspicious/noControlCharactersInRegex: 去掉终端颜色码
