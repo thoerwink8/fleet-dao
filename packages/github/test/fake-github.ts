@@ -123,7 +123,7 @@ export class FakeGitHub {
   /** 哪些身份装到了这个仓上。 */
   installed: Record<AppRole, boolean> = { agent: true, engine: true };
   permissions: Record<AppRole, Record<string, string>> = {
-    agent: { contents: 'write', pull_requests: 'write', metadata: 'read', checks: 'read' },
+    agent: { contents: 'write', pull_requests: 'write', metadata: 'read', checks: 'read', workflows: 'write' },
     engine: {
       contents: 'write',
       pull_requests: 'write',

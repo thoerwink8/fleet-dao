@@ -183,8 +183,8 @@ describe('并主线', { timeout: 60_000 }, () => {
     ).rejects.toMatchObject({
       code: 'WORKFLOW_PERMISSION',
       retryable: false,
-      // 0106 起 workflow 推得上来、闸却拦得住：文案改成"安全基闸开，去 head SHA 前置批准"
-      message: expect.stringMatching(/安全基.*head SHA.*前置批准/s),
+      // 0106 起 workflow 推得上来、闸却拦得住：文案改成"安全基闸开，前置批准（head SHA 绑定）"
+      message: expect.stringMatching(/安全基.*前置批准.*head SHA/s),
       details: { role: 'agent', missingPermission: 'workflows:write' },
     });
     expect(remoteHead('task/7-wf')).toBe(branch.head);

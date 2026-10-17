@@ -122,13 +122,13 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     // 用的是「干活的」机器人的令牌
     const mints = fake.calls('POST', /access_tokens$/);
     expect(mints.map((r) => r.as)).toEqual(['app:agent', 'app:agent']);
-    // 读仓信息的 api 令牌 + 交给 git 的令牌：后者只有 contents 写，没有 administration 也没有别的（#11）
+    // 读仓信息的 api 令牌 + 交给 git 的令牌：后者 contents 写 + workflows 写（0106），没有 administration 也没有别的
     expect(mints.map((r) => r.body)).toEqual([
       {
         repositories: ['widgets'],
         permissions: { contents: 'read', pull_requests: 'write', metadata: 'read' },
       },
-      { repositories: ['widgets'], permissions: { contents: 'write', metadata: 'read' } },
+      { repositories: ['widgets'], permissions: { contents: 'write', workflows: 'write', metadata: 'read' } },
     ]);
     const pushCall = calls.find((c) => c.args[0] === 'push');
     expect(pushCall).toBeDefined();
@@ -490,8 +490,8 @@ describe('会话外推分支', { timeout: 60_000 }, () => {
     ).rejects.toMatchObject({
       code: 'WORKFLOW_PERMISSION',
       retryable: false,
-      // 0106 起 workflow 推得上来、闸却拦得住：文案改成"安全基闸开，去 head SHA 前置批准"
-      message: expect.stringMatching(/安全基.*head SHA.*前置批准/s),
+      // 0106 起 workflow 推得上来、闸却拦得住：文案改成"安全基闸开，前置批准（head SHA 绑定）"
+      message: expect.stringMatching(/安全基.*前置批准.*head SHA/s),
       details: { role: 'agent', missingPermission: 'workflows:write' },
     });
     expect(remoteHead('task/10-wf')).toBeNull();
