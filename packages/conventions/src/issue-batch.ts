@@ -172,7 +172,7 @@ export async function issueBatchNew(spec: BatchSpec, deps: Deps): Promise<BatchR
   try {
     let mother: Created | undefined;
     for (const [index, issue] of [spec.mother, ...spec.subs].entries()) {
-      const body = `${issue.body.trimEnd()}\n\n${index === 0 ? '' : `parent: #${mother?.number}\n\n`}${marker(journal.id)}${index === 0 ? 'mother' : 'sub'} -->\n`;
+      const body = `${marker(journal.id)}${index === 0 ? 'mother' : 'sub'} -->\n${index === 0 ? '' : `parent: #${mother?.number}\n`}\n${issue.body.trimEnd()}\n`;
       writeFileSync(
         input,
         JSON.stringify({

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { type BatchSpec, issueBatchNew, recoverIssueBatch } from '../src/issue-batch.ts';
 import type { Gh, GhResult } from '../src/issue-new.ts';
+import { parentField } from '../src/parent-field.ts';
 
 const ok = (value: unknown): GhResult => ({
   code: 0,
@@ -164,6 +165,26 @@ describe('母单与子单原子批量创建', () => {
     expect(fake.issues.every((issue) => issue.labels.includes('本机做'))).toBe(true);
     expect(fake.calls.some((args) => args[0] === 'issue' && args[1] === 'edit')).toBe(false);
   });
+
+  it.each(['<!-- 未闭合注释', '```md\n未闭合围栏'])(
+    '用户正文以 %s 结尾时，生成关系仍可读，创建响应模糊也能恢复整批',
+    async (suffix) => {
+      const input = spec();
+      for (const issue of [input.mother, ...input.subs]) issue.body += `\n${suffix}`;
+      const successful = setup();
+      await successful.run(input);
+      for (const issue of successful.issues.slice(1)) {
+        expect(parentField(issue.body)).toEqual({ kind: 'parent', number: 101 });
+        expect(issue.body).toMatch(/^<!-- fleet:issue-batch:[^\n]+:sub -->\nparent: #101\n/);
+      }
+      expect(successful.issues[0]?.body).toMatch(/^<!-- fleet:issue-batch:[^\n]+:mother -->\n/);
+      const ambiguous = setup({ ambiguousCreate: 3 });
+      await expect(ambiguous.run(input)).rejects.toThrow();
+      expect(ambiguous.issues).toHaveLength(3);
+      expect(ambiguous.issues.every((issue) => issue.state === 'closed')).toBe(true);
+      expect(ambiguous.readJournal().status).toBe('rolled_back');
+    },
+  );
 
   it.each([
     [

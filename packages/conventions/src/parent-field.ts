@@ -6,11 +6,11 @@ export function parentField(body: string): ParentField {
   let comment = false;
   const fields: string[] = [];
   for (const line of body.split(/\r?\n/)) {
-    if (/^ {0,3}>/.test(line) || /^(?: {4}|\t)/.test(line)) continue;
     if (comment) {
       if (line.includes('-->')) comment = false;
       continue;
     }
+    if (/^ {0,3}>/.test(line) || /^(?: {4}|\t)/.test(line)) continue;
     if (fence) {
       const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line)?.[1];
       if (close?.[0] === fence.char && close.length >= fence.length) fence = undefined;

@@ -210,6 +210,16 @@ describe('parent 字段：只认独立的正文行', () => {
   ])('畸形或重复字段不是没写：%s', (body) => {
     expect(parentField(body)).toEqual({ kind: 'invalid' });
   });
+
+  it.each(['> -->', '    -->', '\t-->'])(
+    'HTML 注释结束行 %s 带引用或缩进时，后面的正文 parent 仍可读',
+    (end) => {
+      expect(parentField(`<!-- comment\nparent: #99\n${end}\nparent: #12`)).toEqual({
+        kind: 'parent',
+        number: 12,
+      });
+    },
+  );
 });
 
 describe('GitHub 对账：正文 parent 和批量母单', () => {
