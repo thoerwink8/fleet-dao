@@ -126,7 +126,7 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
       title: '登录',
       body: '',
       state: 'open' as const,
-      labels: ['缺陷'],
+      labels: ['缺陷', '域:engine', '性质:bug'],
     })),
   } as unknown as EngineGitHub;
   return { gh, calls };
@@ -765,8 +765,7 @@ describe('开 PR、CI、合并', () => {
       url: 'https://github.com/acme/widgets/pull/101',
     });
     expect(calls.openPr?.[0]).toMatchObject({ body: { requirement: 12, did: ['加了验证码'] } });
-    // 【故意造出的失败】不抄类别、不挂里程碑（里程碑页的进度只数单子）。单上只有「缺陷」、没有查询轴，PR 不贴标签。
-    expect(calls.openPr?.[0]).not.toHaveProperty('labels');
+    expect(calls.openPr?.[0]).toMatchObject({ labels: ['域:engine', '性质:bug'] });
     expect(calls.openPr?.[0]).not.toHaveProperty('inheritFrom');
     expect(calls.readSpecDoc).toBeUndefined();
     expect(calls.readIssuePlan).toBeUndefined();
@@ -874,15 +873,14 @@ describe('开 PR、CI、合并', () => {
     await one.ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
     expect(one.calls.openPr?.[0]).toMatchObject({ labels: ['域:mirasim', '性质:bug'] });
 
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const both = setup({ readIssue: read(['域:engine', '域:api', '性质:perf']) });
-    await both.ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
-    expect(both.calls.openPr?.[0]).toMatchObject({ labels: ['性质:perf'] });
-    expect(warning).toHaveBeenCalledWith(expect.stringContaining('域」冲突'));
-    warning.mockRestore();
+    await expect(
+      both.ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT', retryable: false });
+    expect(both.calls.openPr).toBeUndefined();
   });
 
-  it('没有需求号的杂活也一样开', async () => {
+  it('正文无需求号时从任务分支现读来源；无来源的杂活拒开漏轴 PR', async () => {
     const { ports, calls } = setup();
     const { requirement: _dropped, ...noIssue } = body;
     await ports.openPr(
@@ -890,7 +888,14 @@ describe('开 PR、CI、合并', () => {
       ctx,
     );
     expect(calls.openPr?.[0]).toMatchObject({ body: { did: ['加了验证码'] } });
-    expect(calls.readIssue).toBeUndefined();
+    expect(calls.readIssue).toBeDefined();
+    await expect(
+      ports.openPr(
+        { taskId: 't1', repo, branch: 'chore/unknown', head: m.head, title: '杂活', body: noIssue },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(calls.openPr).toHaveLength(1);
   });
 
   it('「按推荐先做了」（#259）照传给正文生成：漏传了 PR 正文里就没有那一栏', async () => {

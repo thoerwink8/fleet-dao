@@ -123,9 +123,34 @@ const TITLES = [
 const newItem = (n: number, over: Record<string, unknown> = {}) => ({
   title: TITLES[n] ?? `独一无二的标题 ${n}`,
   kind: '需求',
+  domain: 'engine',
+  nature: 'process',
   scene: `场景 ${n}`,
   done: [`页面上多出「按钮${n}」`],
   ...over,
+});
+
+it('独立新单缺轴、拆分来源冲突时拒开；不按 kind 猜分类', async () => {
+  const f = fakeWrites();
+  const out = await executeGroomPlan(
+    plan({
+      newIssues: [
+        newItem(1, { domain: undefined, nature: undefined }),
+        newItem(2, {
+          title: '增加深色主题开关（#5 第 2 片）',
+          splitFrom: 5,
+          domain: undefined,
+          nature: undefined,
+        }),
+      ],
+    }),
+    ctxOf([issue(5, { title: '一张很大的单', labels: ['需求', '域:api', '域:engine', '性质:bug'] })]),
+    f.writes,
+  );
+  expect(out.result.opened).toEqual([]);
+  expect(out.result.rejected).toHaveLength(2);
+  expect(out.result.rejected.every((item) => item.why.includes('查询轴'))).toBe(true);
+  expect(f.calls).toEqual([]);
 });
 
 describe('parseGroomPlan · 回答 → 清单', () => {
@@ -205,7 +230,7 @@ describe('executeGroomPlan · 开新单', () => {
     const body = String(call?.args.body);
     for (const h of ['## 场景', '## 原话', '## 已知的模块', '## 怎么算做完']) expect(body).toContain(h);
     expect(body).toContain('无（AI 发现');
-    expect(call?.args.labels).toEqual(['需求']);
+    expect(call?.args.labels).toEqual(['需求', '域:engine', '性质:process']);
     expect(call?.args).not.toHaveProperty('milestone');
   });
 
@@ -266,13 +291,23 @@ describe('executeGroomPlan · 开新单', () => {
   });
 
   it('拆大单：开独立小单（没有子单），在大单上留一条言列出小单；大单自己不动', async () => {
-    const big = issue(5, { title: '一张很大的单', labels: ['需求', '域:api', '域:mirasim', '性质:bug'] });
+    const big = issue(5, { title: '一张很大的单', labels: ['需求', '域:api', '性质:bug'] });
     const f = fakeWrites();
     const out = await executeGroomPlan(
       plan({
         newIssues: [
-          newItem(1, { title: '重构日志轮转策略（#5 第 1 片）', splitFrom: 5 }),
-          newItem(2, { title: '增加深色主题开关（#5 第 2 片）', splitFrom: 5 }),
+          newItem(1, {
+            title: '重构日志轮转策略（#5 第 1 片）',
+            splitFrom: 5,
+            domain: undefined,
+            nature: undefined,
+          }),
+          newItem(2, {
+            title: '增加深色主题开关（#5 第 2 片）',
+            splitFrom: 5,
+            domain: undefined,
+            nature: undefined,
+          }),
         ],
       }),
       ctxOf([big]),
@@ -280,8 +315,8 @@ describe('executeGroomPlan · 开新单', () => {
     );
     expect(out.result.opened.map((o) => o.splitFrom)).toEqual([5, 5]);
     expect(f.calls.filter((c) => c.kind === 'openIssue').map((c) => c.args.labels)).toEqual([
-      ['需求', '性质:bug'],
-      ['需求', '性质:bug'],
+      ['需求', '域:api', '性质:bug'],
+      ['需求', '域:api', '性质:bug'],
     ]);
     const comment = f.calls.find((c) => c.kind === 'comment');
     expect(comment?.args.issueNumber).toBe(5);
@@ -307,11 +342,11 @@ describe('executeGroomPlan · 开新单', () => {
     );
     const labels = f.calls.filter((c) => c.kind === 'openIssue').map((c) => c.args.labels);
     expect(labels).toEqual([
-      ['需求', '本机做'],
-      ['需求', '本机做'],
-      ['需求', '要人拍'],
-      ['需求'],
-      ['需求', '本机做'],
+      ['需求', '域:engine', '性质:process', '本机做'],
+      ['需求', '域:engine', '性质:process', '本机做'],
+      ['需求', '域:engine', '性质:process', '要人拍'],
+      ['需求', '域:engine', '性质:process'],
+      ['需求', '域:engine', '性质:process', '本机做'],
     ]);
     expect(out.result.flagged).toEqual([903]);
     const workflow = f.calls.find(
@@ -319,7 +354,7 @@ describe('executeGroomPlan · 开新单', () => {
     );
     expect(String(workflow?.args.body)).toContain('本机做');
     expect(String(workflow?.args.body)).not.toContain('要人拍');
-    expect(labels[1]).toEqual(['需求', '本机做']);
+    expect(labels[1]).toEqual(['需求', '域:engine', '性质:process', '本机做']);
   });
 
   it('needsHuman 里既写按量计费又写了工作流路径 → 贴「要人拍」，不因路径改判「本机做」', async () => {
@@ -332,7 +367,7 @@ describe('executeGroomPlan · 开新单', () => {
       f.writes,
     );
     expect(f.calls.filter((c) => c.kind === 'openIssue').map((c) => c.args.labels)).toEqual([
-      ['需求', '要人拍'],
+      ['需求', '域:engine', '性质:process', '要人拍'],
     ]);
     expect(f.calls.filter((c) => c.kind === 'comment')).toEqual([]);
     expect(out.result.flagged).toEqual([901]);

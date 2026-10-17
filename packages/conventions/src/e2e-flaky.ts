@@ -5,6 +5,8 @@
 // 只汇成一张固定标题的「主线 e2e 整轮坏了」单（同一时间只一张），免得环境坏一次就给每条用例各开一张偶发单。
 // 这里只有纯函数：读 Playwright 的 JSON 报告、数次数、拼单子；取报告（gh run download）和开单在 .github/workflows/e2e-flaky.yml 和 bin/e2e-flaky.ts。
 
+import { domainLabel, natureLabel } from './labels.ts';
+
 /** 一条用例在一轮里的结局（多个视口里取最坏的：有一个红就是红，否则有一个偶发就是偶发）。 */
 export type Outcome = 'passed' | 'flaky' | 'failed' | 'skipped';
 
@@ -235,6 +237,7 @@ export const FLAKY_SUMMARY_TITLE = 'e2e 偶发：多条用例达阈值（汇总�
 
 /** 自动开的单贴的类别：引擎拉单要类别标签（对账也查），e2e 坏了都是缺陷。 */
 export const ISSUE_KIND = '缺陷';
+const ISSUE_LABELS = [ISSUE_KIND, domainLabel('engine'), natureLabel('bug')];
 
 /** 正文的四节（场景、原话、已知的模块、怎么算做完）和 pnpm issue:new 开的单一样，不然引擎不拉、对账报缺。 */
 function issueSections(s: { scene: string[]; modules: string[]; done: string[] }): string {
@@ -344,7 +347,7 @@ export function planIssues(
         kind: 'create',
         title: BROKEN_ROUND_TITLE,
         body: brokenRoundBody(broken),
-        labels: [ISSUE_KIND],
+        labels: [...ISSUE_LABELS],
         label: `${BROKEN_ROUND_TITLE}（${broken.length} 轮）`,
       });
     } else {
@@ -370,7 +373,7 @@ export function planIssues(
         kind: 'create',
         title: FLAKY_SUMMARY_TITLE,
         body: flakySummaryBody(findings, until),
-        labels: [ISSUE_KIND],
+        labels: [...ISSUE_LABELS],
         label: `开了单：${FLAKY_SUMMARY_TITLE}（${findings.length} 条）`,
       });
     } else {
@@ -403,7 +406,7 @@ export function planIssues(
         kind: 'create',
         title,
         body: issueBody(f, until, quarantined),
-        labels: [ISSUE_KIND],
+        labels: [...ISSUE_LABELS],
         label: `开了单：${title}（${f.bad}/${f.ran}）`,
       });
     }

@@ -25,6 +25,7 @@ function world(handlers: {
 }) {
   const calls: Call[] = [];
   const merged: { number: number; nodeId: string }[] = [];
+  let labels: string[] = [];
   const api: CiTimingsApi = {
     client: {
       async request<T = unknown>(req: GhRequest): Promise<GhResponse<T>> {
@@ -32,6 +33,10 @@ function world(handlers: {
         if (req.body !== undefined) call.body = req.body;
         if (req.query !== undefined) call.query = req.query;
         calls.push(call);
+        if (call.path.endsWith('/labels')) {
+          if (call.method === 'POST') labels = (call.body as { labels: string[] }).labels;
+          return { status: 200, data: labels.map((name) => ({ name })) as T, headers: new Headers() };
+        }
         const res = handlers.request?.(call) ?? { status: 200, data: null };
         return { status: res.status, data: res.data as T, headers: new Headers() };
       },
@@ -183,6 +188,11 @@ describe('耗时表的 GitHub 接线', () => {
     });
     expect(pr).toEqual({ number: 321, url: 'https://github.com/thoerwink8/fleet-dao/pull/321' });
     expect(merged).toEqual([{ number: 321, nodeId: 'PR_node' }]);
+    expect(calls).toContainEqual({
+      method: 'POST',
+      path: '/repos/thoerwink8/fleet-dao/issues/321/labels',
+      body: { labels: ['域:engine', '性质:process'] },
+    });
     expect(calls.some((c) => c.method === 'PUT')).toBe(true);
     expect(calls.some((c) => c.path.includes(STANDARD_PATHS_FILE) || c.path.includes(TIMINGS_FILE))).toBe(
       true,

@@ -15,6 +15,7 @@ import {
   isKindLabel,
   issueBodyTooLong,
   KIND_LABELS,
+  resolveQueryAxes,
 } from '@fleet-dao/conventions';
 import { currentVersion } from '@fleet-dao/core';
 import type { RequestChannel, RequestDraft, RequestDraftField } from '@fleet-dao/shared';
@@ -164,7 +165,13 @@ export function checkOpening(input: IssueBodyInput): OpenCheck {
   if (!checked.ok) return { ok: false, why: checked.why };
   const tooLong = issueBodyTooLong(body);
   if (tooLong) return { ok: false, why: tooLong };
-  const labels: string[] = [kind];
+  const axis = resolveQueryAxes([], input.draft.modules);
+  if (axis.problems.length > 0)
+    return {
+      ok: false,
+      why: `已知的模块中还需明确两轴（独立声明行：域: engine|api|mirasim；性质: bug|perf|process）：${axis.problems.join('；')}`,
+    };
+  const labels: string[] = [kind, ...axis.labels];
   // 草稿里「要不要人拍」有内容（碰发布、花钱、删数据、改标准）：贴「要人拍」，引擎不自己拉
   if (input.draft.needsHuman?.trim()) labels.push(HUMAN_DECISION_LABEL);
   return { ok: true, title: input.draft.title, body, labels };
