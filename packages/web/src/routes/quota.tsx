@@ -21,7 +21,14 @@ import { StatusBadge } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
 import type { LayoutTone } from '../components/layout/tone';
 import { PoolProblemLine, usePoolProblems } from '../components/pool-problem';
-import { PoolHoldBanner, PoolSwitch, PoolSwitchForm, PoolSwitchProvider } from '../components/pool-switch';
+import {
+  ChannelHoldControls,
+  ChannelHoldForm,
+  PoolHoldBanner,
+  PoolSwitch,
+  PoolSwitchForm,
+  PoolSwitchProvider,
+} from '../components/pool-switch';
 import { ExpiredQuotaLine, isExpiredWindow, QuotaLine, quotaValue, readingVerb } from '../components/quota';
 import { QuotaNotice } from '../components/quota-notice';
 import { QuotaPressure } from '../components/quota-pressure';
@@ -64,6 +71,9 @@ const DESCRIPTION = (
     <p>点表里任何一格，弹出这一格的说明（读法、上游原话、读数新不新）。</p>
     <p>
       每个池那一行的开关是停用：关掉只写一句原因，复查日期可不填。引擎探到封号或登录失效时，这一行写「封号」，开关不跟着动。
+    </p>
+    <p>
+      每个渠道的标题行右边有「全部暂停」「全部放开」：一次动这个渠道下所有池，同样要写原因。一部分池已停时变成「暂停其余」「放开已停」，各只动自己那一半；认不出的暂停和封号提醒不会被放开。
     </p>
   </div>
 );
@@ -522,13 +532,19 @@ function Matrix({
               <tbody key={ch.channelId}>
                 <tr>
                   <th scope="colgroup" className="border-b bg-background px-4 py-1 text-meta font-normal">
-                    <span className="flex items-center gap-2">
-                      <span className="font-semibold">{ch.channelName}</span>
+                    <span className="flex flex-wrap items-center gap-2">
+                      <span className="min-w-0 truncate font-semibold">{ch.channelName}</span>
                       <Tag>{ch.billing ? billingLabel[ch.billing] : '计费未知'}</Tag>
                       {ch.channelEnabled ? null : <StatusBadge tone="stop" label="已下架" variant="dot" />}
+                      <ChannelHoldControls channelId={ch.channelId} poolIds={list.map((p) => p.id)} />
                     </span>
                   </th>
                 </tr>
+                <ChannelHoldForm
+                  channelId={ch.channelId}
+                  channelName={ch.channelName}
+                  poolIds={list.map((p) => p.id)}
+                />
                 {list.map((p) => (
                   <tr
                     key={p.id}

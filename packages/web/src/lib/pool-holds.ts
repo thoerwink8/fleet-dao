@@ -58,16 +58,75 @@ export function withPause(
   input: { reason: string; reviewBy: string },
   opaque: Readonly<Record<string, unknown>> = {},
 ): Record<string, unknown> {
+  return withPauseMany(holds, [poolId], input, opaque);
+}
+
+/**
+ * 整渠道暂停：给一串池一起写同一条暂停，写法同 withPause。只写传进来的池；
+ * 别的池认得出的暂停、认不出的原值（opaque）都原样留下，不重写、不放开。
+ */
+export function withPauseMany(
+  holds: readonly PoolHoldFactView[],
+  poolIds: readonly string[],
+  input: { reason: string; reviewBy: string },
+  opaque: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
   const reviewBy = input.reviewBy.trim();
+  const entry: HoldEntry = {
+    reason: input.reason.trim(),
+    decidedBy: SWITCH_DECIDED_BY,
+    revokeWhen: SWITCH_REVOKE_WHEN,
+    ...(reviewBy ? { reviewBy } : {}),
+  };
+  const next: Record<string, unknown> = { ...opaque, ...entriesOf(holds) };
+  for (const id of poolIds) next[id] = { ...entry };
+  return next;
+}
+
+/**
+ * 整渠道放开：只撤传进来的、而且是认得出的暂停。认不出的原值（opaque）一律原样留下——
+ * 看不懂的东西不替人解除；封号这类只在旧提醒里的状态根本不在这份设置里，也碰不到。
+ */
+export function withoutHolds(
+  holds: readonly PoolHoldFactView[],
+  poolIds: readonly string[],
+  opaque: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  const drop = new Set(poolIds);
+  return { ...opaque, ...entriesOf(holds.filter((h) => !drop.has(h.poolId))) };
+}
+
+/** 额度页一个渠道下各池的暂停分布：整渠道暂停 / 放开能动哪几个、哪几个只能原样留着。 */
+export interface ChannelHoldSummary {
+  /** 渠道下全部池。 */
+  poolIds: string[];
+  /** 设置里没有条目：整渠道暂停会写这些。 */
+  free: string[];
+  /** 认得出的暂停：整渠道放开会撤这些。 */
+  held: string[];
+  /** 认不出的那一项：两个操作都原样留着，引擎仍按暂停办。 */
+  opaque: string[];
+  /** 还挂着引擎自己的封号、登录失效等提醒：不在设置里，两个操作都碰不到。 */
+  legacy: string[];
+  /** on = 一个都没停；paused = 每个池都停着（含认不出的）；mixed = 部分。 */
+  state: 'on' | 'paused' | 'mixed';
+}
+
+export function channelHoldSummary(v: PoolHolds, poolIds: readonly string[]): ChannelHoldSummary {
+  const heldIds = new Set(v.holds.map((h) => h.poolId));
+  const opaqueIds = new Set(v.problems.flatMap((p) => (p.poolId ? [p.poolId] : [])));
+  const legacyIds = new Set(v.legacy.map((l) => l.poolId));
+  const held = poolIds.filter((id) => heldIds.has(id));
+  const opaque = poolIds.filter((id) => !heldIds.has(id) && opaqueIds.has(id));
+  const free = poolIds.filter((id) => !heldIds.has(id) && !opaqueIds.has(id));
+  const stopped = held.length + opaque.length;
   return {
-    ...opaque,
-    ...entriesOf(holds),
-    [poolId]: {
-      reason: input.reason.trim(),
-      decidedBy: SWITCH_DECIDED_BY,
-      revokeWhen: SWITCH_REVOKE_WHEN,
-      ...(reviewBy ? { reviewBy } : {}),
-    },
+    poolIds: [...poolIds],
+    free,
+    held,
+    opaque,
+    legacy: poolIds.filter((id) => legacyIds.has(id)),
+    state: stopped === 0 ? 'on' : stopped === poolIds.length ? 'paused' : 'mixed',
   };
 }
 
