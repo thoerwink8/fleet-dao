@@ -17,16 +17,19 @@ const gates = src('merge-gates.ts');
 /** 合并闸从 GitHub 读、往 GitHub 写的口子（merge-gate.ts 的 GitHubReads），一样一行写清看的是什么。 */
 const ALLOWED_READS: Record<string, string> = {
   pr: 'PR 本身：当前头、分支名、开着还是关了、正文里的创始人原话（草稿、冲突 GitHub 自己拦，必填栏没有了，#654）',
-  files: 'PR 改了哪些文件：判碰没碰改标准路径（standard-paths.json，决定 0093）',
-  statuses: '当前头上的提交状态（逐条的）：合前一次冷调用的结论（#555-2）',
-  openPrs: '冷调用写上来时逐个重算开着的 PR：挑要算哪几个，不参与判',
+  files: 'PR 改了哪些文件：判碰没碰改标准路径（决定 0093）和碰没碰安全基路径（决定 0106）',
+  statuses:
+    '当前头上的提交状态（逐条的）：合前一次冷调用的结论（#555-2）、安全基批下的 security-base-approved（决定 0106）',
+  openPrs:
+    '冷调用写上来时逐个重算开着的 PR、security-base-approved 写上来时同样逐个重算：挑要算哪几个，不参与判',
   writeStatus: '写 merge-gate 这一个状态',
 };
 
-/** 合并闸认得的提交状态名：自己写的 merge-gate、合前一次冷调用的结论（#555-2：验收那一遍的 verdict，装配侧贴、闸只读，不许闸里起模型调用）。 */
+/** 合并闸认得的提交状态名：自己写的 merge-gate、合前一次冷调用的结论（#555-2：验收那一遍的 verdict，装配侧贴、闸只读，不许闸里起模型调用）、决定 0106 的安全基批准（创始人拍了贴上、闸只读）。 */
 const ALLOWED_CONTEXTS: Record<string, string> = {
   GATE_CONTEXT: 'merge-gate',
   COLD_VERIFY_CONTEXT: 'cold-verify',
+  SECURITY_BASE_CONTEXT: 'security-base-approved',
 };
 
 // 换行统一成 \n：Windows 检出（autocrlf）是 \r\n，下面的字符串替换按 \n 写
@@ -188,6 +191,12 @@ describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () =
     expect(ALLOWED_CONTEXTS.COLD_VERIFY_CONTEXT).toBe('cold-verify');
     const narrowed = withoutTrigger(workflow, 'cold-verify');
     expect(missingTriggers(narrowed)).toEqual(['cold-verify']);
+  });
+
+  it('【故意造出的失败】merge-gate.yml 不放行 security-base-approved：「要你拍」批拍下来不重算，查得出来', () => {
+    expect(ALLOWED_CONTEXTS.SECURITY_BASE_CONTEXT).toBe('security-base-approved');
+    const narrowed = withoutTrigger(workflow, 'security-base-approved');
+    expect(missingTriggers(narrowed)).toEqual(['security-base-approved']);
   });
 
   it('【故意造出的失败】往读写口子里多加一个（比如读单子开没开）：上面那条就红', () => {
