@@ -3,7 +3,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LOCAL_CLAIMS_PATH, TASK_EXECUTORS, WEB_API_PREFIX } from '@fleet-dao/shared';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type BranchExecutor, issueOfBranch, localBranchPrefix } from '../src/issue-branch.ts';
 import type { GhResult } from '../src/issue-new.ts';
 import { otherPrOnIssue, prClaimedIssues } from '../src/pr-claims.ts';
@@ -74,7 +74,12 @@ describe('branchSlug：分支名里的短名', () => {
 });
 
 const dirs: string[] = [];
+beforeEach(() => {
+  vi.stubEnv('GH_REPO', '');
+  vi.stubEnv('GITHUB_REPOSITORY', '');
+});
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 
@@ -229,5 +234,91 @@ describe('pnpm work：本机领单、续租、结束', () => {
       expect(await w.run(...argv)).toBe(1);
       expect(w.sent).toEqual([]);
     }
+  });
+});
+
+describe('显式目标仓：work 识仓带上 GH_REPO，对不上就不登记', () => {
+  const lease = {
+    ok: true,
+    taskId: 't1',
+    state: 'running',
+    executor: 'local',
+    leaseUntil: '2026-10-14T12:00:00.000Z',
+  };
+  async function run(
+    argv: string[],
+    gh: (args: string[]) => Promise<GhResult>,
+    env: Record<string, string | undefined>,
+  ) {
+    const sent: LocalClaimRequest[] = [];
+    const calls: string[][] = [];
+    const err: string[] = [];
+    const code = await work(argv, {
+      env,
+      gh: async (args) => {
+        calls.push(args);
+        return gh(args);
+      },
+      post: async (body) => {
+        sent.push(body);
+        return { status: 200, text: JSON.stringify(lease) };
+      },
+      out: () => {},
+      err: (l) => err.push(l),
+    });
+    return { code, sent, calls, text: () => err.join('\n') };
+  }
+
+  it('relay 上显式 GH_REPO：repo view 带位置仓名，claim / renew 登记这一个仓', async () => {
+    const gh = async (args: string[]) => {
+      if (args[0] === 'repo') return ok(JSON.stringify({ nameWithOwner: 'thoerwink8/fleet-dao' }));
+      if (args[1] === 'view') return ok(JSON.stringify({ title: 'Add captcha', state: 'OPEN' }));
+      if (args[0] === 'pr') return ok('[]');
+      if (args[1] === 'edit') return ok();
+      return bad(`没想到的 gh：${args.join(' ')}`);
+    };
+    const env = { GH_REPO: 'thoerwink8/fleet-dao' };
+    const claim = await run(['claim', '42'], gh, env);
+    expect(claim.code).toBe(0);
+    expect(claim.calls[0]).toEqual(['repo', 'view', 'thoerwink8/fleet-dao', '--json', 'nameWithOwner']);
+    expect(claim.sent).toEqual([
+      { action: 'claim', repo: 'thoerwink8/fleet-dao', issue: 42, title: 'Add captcha' },
+    ]);
+    const renew = await run(['renew', '42'], gh, env);
+    expect(renew.code).toBe(0);
+    expect(renew.sent).toEqual([{ action: 'renew', repo: 'thoerwink8/fleet-dao', issue: 42 }]);
+  });
+
+  it('【故意造出的失败】回了另一个仓、gh 没读成、目标仓非法：不登记，也不把没读到当成这个仓', async () => {
+    const mismatch = await run(
+      ['claim', '42'],
+      async (args) =>
+        args[0] === 'repo' ? ok(JSON.stringify({ nameWithOwner: 'acme/app' })) : bad('不该问到'),
+      { GH_REPO: 'thoerwink8/fleet-dao' },
+    );
+    expect(mismatch.code).toBe(1);
+    expect(mismatch.sent).toEqual([]);
+    expect(mismatch.text()).toContain('不改记到回的那个仓');
+    expect(mismatch.text()).not.toContain('acme/app 已');
+
+    const unread = await run(['renew', '42'], async () => bad('HTTP 502'), {
+      GH_REPO: 'thoerwink8/fleet-dao',
+    });
+    expect(unread.code).toBe(1);
+    expect(unread.sent).toEqual([]);
+    expect(unread.text()).toContain('没读成');
+
+    const empty = await run(['claim', '42'], async () => ok('{}'), { GH_REPO: 'thoerwink8/fleet-dao' });
+    expect(empty.code).toBe(1);
+    expect(empty.sent).toEqual([]);
+    expect(empty.text()).toContain('认不出');
+
+    const illegal = await run(['claim', '42'], async () => ok(JSON.stringify({ nameWithOwner: 'o/r' })), {
+      GH_REPO: 'not a repo',
+    });
+    expect(illegal.code).toBe(1);
+    expect(illegal.sent).toEqual([]);
+    expect(illegal.calls).toEqual([]);
+    expect(illegal.text()).toContain('不是 owner/name');
   });
 });
