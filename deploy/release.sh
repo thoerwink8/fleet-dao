@@ -724,8 +724,7 @@ RELEASE_PNPM_WEB_BUILD=(--filter ./packages/web run build)
 
 # 把这一版目录自己的 pnpm 工作区文件改成「不用全局虚拟仓、依赖整份拷贝」，所以此后有人在这个目录里直接敲 pnpm（不带上面那组环境变量）
 # 也不会把 node_modules 重装成链到 /root 的全局虚拟仓。必须改 pnpm-workspace.yaml：pnpm 11 里工作区文件的设置压过 .npmrc
-# （.npmrc 只剩认证和源地址），仓里 pnpm-workspace.yaml 给本机开着 enableGlobalVirtualStore: true，往发布目录根写 .npmrc 管不住它
-# （#2901：10-17 在用版本被 root 的 pnpm 重装，链到 /root/.local/share/pnpm/store/v11/links）。
+# （.npmrc 只剩认证和源地址），仓里 pnpm-workspace.yaml 给本机开着 enableGlobalVirtualStore: true，往发布目录根写 .npmrc 管不住它。
 # 在 root 身份、解包完、装依赖之前调：此时没有 fleet 的进程在改这个目录；符号链接的工作区文件不碰，红字停下。
 # 没有 pnpm-workspace.yaml 的老提交没有要改的，算过。改完读回来核一遍，对不上返回 1。
 PIN_WORKSPACE_WHY=""

@@ -87,8 +87,8 @@ run_bare_pnpm() { # 日志 参数…
   (cd -- "$REL" && env -i HOME="$TMP/home-bare" PATH="$(dirname -- "$pnpm_bin"):$(dirname -- "$node_bin"):/usr/bin:/bin" \
     LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "pnpm_config_store_dir=$store" "$pnpm_bin" "$@" >"$log" 2>&1)
 }
-echo "照事后有人直接敲 pnpm：不带 RELEASE_PNPM_ENV，pnpm ${RELEASE_PNPM_INSTALL[*]}"
-if ! run_bare_pnpm "$TMP/bare.log" "${RELEASE_PNPM_INSTALL[@]}"; then
+echo "照事后有人直接敲 pnpm：不带 RELEASE_PNPM_ENV，pnpm install --frozen-lockfile"
+if ! run_bare_pnpm "$TMP/bare.log" install --frozen-lockfile --reporter=append-only; then
   grep -av '^Progress: ' "$TMP/bare.log" | tail -40 >&2
   echo "没过：发布目录里不带设置直接 pnpm install 失败" >&2
   exit 1
