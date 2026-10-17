@@ -40,11 +40,16 @@ export const LEDGER_ALERT_PREFIX = 'reconcile:ledger:';
  * 我们机器人开的 PR 合并人不是「引擎」、或账上没有合并队列的合并记录——合并前那几道核对（不落后主线、CI 全绿、人闸）
  * 可能没走。后面是 <owner>/<name>#<PR 号>。条件就是「发生过」，只报一次、不自动撤，要人在驾驶舱点「处理」。
  * 例外：引擎自己的耗时表 PR（isEngineCiTimingsPr）本来就不走队列，不报；已经开着的下一轮撤掉。
+ * 例外：合并人是「引擎」、合并记录后来记上了的（cleanPrs：自动合并是 GitHub 合的，记录要等任务工作流看到合并才写，
+ * 对账赶在中间看见就报了，#2813），撤掉；为复查它，回看窗口往回延到最老那条开着的提醒，最多 7 天。
  * （#445 删过、#440 又办回来：合并队列其实已开，删掉的判断「没开」不准。）
  */
 export const PR_ALERT_PREFIX = 'reconcile:pr:';
 /** 撤耗时表误报时写的原因（处理人是对账，RECONCILE_ACTOR）。 */
 export const CI_TIMINGS_SKIP_WHY = '引擎自己的耗时表 PR，不走合并队列';
+/** 撤「合并记录晚记」那种时写的原因。 */
+export const MERGE_RECORD_LANDED_WHY =
+  '合并人是「引擎」，账上已经有合并记录：合并后记账晚了一步，条件不再成立';
 /**
  * 已经开着、下一轮可能已经出了 26 小时回看的误报：对账按键撤，不靠再看见那张 PR。
  * #2175 是引擎机器人自己开、自己合的耗时表。
@@ -168,10 +173,43 @@ async function retireOpenCiTimingsAlert(deps: ReconcileCheckDeps, part: SweepPar
 }
 
 /**
+ * 开着的 reconcile:pr 提醒，按仓分：PR 号 → 开的时刻。列不出、列不全照实记没查成，这一轮只按 26 小时回看、不撤看不到的。
+ */
+async function openPrAlertsByRepo(
+  deps: ReconcileCheckDeps,
+  part: SweepPart,
+): Promise<Map<string, Map<number, Date>>> {
+  const byRepo = new Map<string, Map<number, Date>>();
+  let listed: Awaited<ReturnType<ReconcileCheckDeps['alerts']['listOpen']>>;
+  try {
+    listed = await deps.alerts.listOpen(ALERT_LIST_LIMIT);
+  } catch (err) {
+    part.unchecked.push(
+      `列没处理的提醒没成，合并记录后来记上了的 reconcile:pr 这一轮不撤：${errMessage(err)}`,
+    );
+    return byRepo;
+  }
+  if (listed.truncated) {
+    part.unchecked.push(`没处理的提醒太多，只看了前 ${listed.alerts.length} 条，没看到的 reconcile:pr 不撤`);
+  }
+  for (const alert of listed.alerts) {
+    if (!alert.dedupeKey.startsWith(PR_ALERT_PREFIX)) continue;
+    const pr = parsePrKey(alert.dedupeKey, PR_ALERT_PREFIX);
+    if (!pr) continue;
+    const slug = `${pr.owner}/${pr.name}`;
+    const numbers = byRepo.get(slug) ?? new Map<number, Date>();
+    numbers.set(pr.number, alert.createdAt);
+    byRepo.set(slug, numbers);
+  }
+  return byRepo;
+}
+
+/**
  * 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现（记账那一部分靠镜像认合了的 PR，放在它前面跑）。我们机器人开的
  * PR 合并人不是「引擎」、或没有合并队列的合并记录按 PR 报一条（#431 就是这么漏的：合并前那几道核对——不落后主线、CI
  * 全绿、人闸——可能没走）。条件就是「发生过」，只报一次、不自动撤，要人在驾驶舱点「处理」。
  * 引擎自己的耗时表 PR 不报；这一轮看见的、以及已经开着的 #2175，撤掉。
+ * 「引擎」合的、合并记录后来记上了的（cleanPrs），开着的撤掉；回看窗口往回延到这个仓最老那条开着的提醒，好复查到它。
  */
 export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
@@ -184,9 +222,21 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
   } catch (err) {
     return { ...part, failed: `列受管的仓没成：${errMessage(err)}` };
   }
-  const since = new Date(deps.now().getTime() - MERGED_PR_LOOKBACK_MS);
+  const now = deps.now().getTime();
+  const baseSince = now - MERGED_PR_LOOKBACK_MS;
+  const openPrAlerts = await openPrAlertsByRepo(deps, part);
   for (const repo of repos) {
     const slug = `${repo.owner}/${repo.name}`;
+    const open = openPrAlerts.get(slug) ?? new Map<number, Date>();
+    // 提醒是 PR 还在回看窗口里时开的：从它开的时刻再往回一个窗口，一定看得见那张 PR。合并超过 7 天的由历史事实那一处收。
+    let sinceMs = baseSince;
+    for (const createdAt of open.values()) {
+      sinceMs = Math.min(
+        sinceMs,
+        Math.max(createdAt.getTime() - MERGED_PR_LOOKBACK_MS, now - HISTORICAL_FACT_MS),
+      );
+    }
+    const since = new Date(sinceMs);
     let report: MergedPrAuditReport;
     try {
       report = await deps.auditMergedPrs(slug, since);
@@ -216,6 +266,10 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
     for (const number of timingsNumbers) {
       await retireOpenCiTimingsAlert(deps, part, prAlertKey(repo.owner, repo.name, number));
     }
+    for (const number of new Set(report.cleanPrs ?? [])) {
+      if (!open.has(number) || planned.problems.has(number) || timingsNumbers.has(number)) continue;
+      await resolveOne(deps, part, prAlertKey(repo.owner, repo.name, number), MERGE_RECORD_LANDED_WHY);
+    }
     for (const [number, lines] of planned.problems) {
       const dedupeKey = prAlertKey(repo.owner, repo.name, number);
       try {
@@ -227,7 +281,7 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
           body: [
             ...lines,
             '我们机器人开的 PR 该由合并队列以「引擎」机器人合、账上留合并记录；不是这样合的，合并前那几道核对（不落后主线、' +
-              'CI 全绿、人闸）可能没走。这条不会自己撤，看过点「处理」。',
+              'CI 全绿、人闸）可能没走。「引擎」合的、合并记录后来记上了，对账自己撤；别的不会自己撤，看过点「处理」。',
           ].join('\n'),
           link: `https://github.com/${slug}/pull/${number}`,
         });

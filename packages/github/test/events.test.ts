@@ -459,6 +459,57 @@ describe('对账与补漏', () => {
     });
   });
 
+  it('「引擎」合的、账上已有合并记录的进 cleanPrs；人合的、这一轮才补账的不进（#2813）', async () => {
+    const { gh, fake, ledger } = setup();
+    const C = sha('e');
+    const landed = fake.addPull({
+      head: { ref: 'fleet/2813-abcd1234', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.bots.engine,
+    });
+    const byHand = fake.addPull({
+      head: { ref: 'fleet/2-abcd1234', sha: B },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:10:00Z',
+      merge_commit_sha: sha('d'),
+      merged_by: fake.human,
+    });
+    const missing = fake.addPull({
+      head: { ref: 'fleet/3-abcd1234', sha: C },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:20:00Z',
+      merge_commit_sha: sha('f'),
+      merged_by: fake.bots.engine,
+    });
+    // 前两张账上已有合并记录（人合的那张是上一轮补的账）；第三张没有
+    for (const [number, head] of [
+      [landed.number, A],
+      [byHand.number, B],
+    ] as const) {
+      const key = mergeKey(repo, number, head);
+      await ledger.idempotency.claim({ key, action: 'github.merge_pr' }, new Date());
+      await ledger.idempotency.complete(key, { number }, new Date());
+    }
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(report.cleanPrs).toEqual([landed.number]);
+    expect(report.findings.some((f) => f.number === missing.number && f.kind === 'no_merge_record')).toBe(
+      true,
+    );
+    // 下一轮：第三张这一轮补了账、合并人是「引擎」，进 cleanPrs
+    const again = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect([...(again.cleanPrs ?? [])].sort()).toEqual([landed.number, missing.number].sort());
+  });
+
   it('「引擎」自己开、自己合的 PR（定时任务的数据 PR）：不报没有合并记录，只补账（#2175）', async () => {
     const { gh, fake, ledger } = setup();
     const own = fake.addPull({

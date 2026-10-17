@@ -15,6 +15,7 @@ import {
   type LocalLabeledIssue,
   labeledForText,
   ledgerAlertKey,
+  MERGE_RECORD_LANDED_WHY,
   MERGED_PR_LOOKBACK_MS,
   prAlertKey,
   type ReconcileCheckDeps,
@@ -348,6 +349,78 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(seenAgain.resolvedBy).toBe(RECONCILE_ACTOR);
     expect(old.resolvedAt).not.toBeNull();
     expect(old.body.startsWith(`已撤：${CI_TIMINGS_SKIP_WHY}`)).toBe(true);
+  });
+
+  it('「引擎」合的、合并记录后来记上了（#2813）：开着的 reconcile:pr 撤掉；回看往回延到最老那条开着的提醒；还报着的、人合的不撤', async () => {
+    const DAY = 24 * 60 * 60_000;
+    const late = openAlert('reconcile:pr:acme/widgets#13', { createdAt: new Date(NOW.getTime() - DAY) });
+    const still = openAlert('reconcile:pr:acme/widgets#15', { createdAt: new Date(NOW.getTime() - 2 * DAY) });
+    const other = openAlert('reconcile:pr:acme/other#13', { createdAt: new Date(NOW.getTime() - 3 * DAY) });
+    const seen: { repo: string; since: Date }[] = [];
+    const w = world({
+      open: [late, still, other],
+      repos: [{ owner: 'acme', name: 'widgets' }],
+      audit: async (repo, since) => {
+        seen.push({ repo, since });
+        return audit(
+          [{ number: 15, kind: 'no_merge_record', text: '#15 合并了，但账上没有合并队列的合并记录' }],
+          // #14 没有开着的提醒；#15 这一轮还报着：都不撤
+          { cleanPrs: [13, 14, 15] },
+        );
+      },
+    });
+    const part = await checkMergedPrs(w.deps);
+    // 最老那条（2 天前开的 #15）再往回一个窗口；别的仓的提醒不算
+    expect(seen).toEqual([
+      { repo: 'acme/widgets', since: new Date(NOW.getTime() - 2 * DAY - MERGED_PR_LOOKBACK_MS) },
+    ]);
+    expect(w.resolved).toEqual([{ dedupeKey: 'reconcile:pr:acme/widgets#13', why: MERGE_RECORD_LANDED_WHY }]);
+    expect(late.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(late.body.startsWith(`已撤：${MERGE_RECORD_LANDED_WHY}`)).toBe(true);
+    expect(still.resolvedAt).toBeNull();
+    expect(other.resolvedAt).toBeNull();
+    expect(part.unchecked).toEqual([]);
+  });
+
+  it('开着的 reconcile:pr 开了超过 7 天：回看最多往回 7 天（再老的由历史事实那一处收）', async () => {
+    const old = openAlert('reconcile:pr:acme/widgets#3', {
+      createdAt: new Date(NOW.getTime() - 10 * 24 * 60 * 60_000),
+    });
+    const seen: Date[] = [];
+    const w = world({
+      open: [old],
+      repos: [{ owner: 'acme', name: 'widgets' }],
+      audit: async (_repo, since) => {
+        seen.push(since);
+        return audit([]);
+      },
+    });
+    await checkMergedPrs(w.deps);
+    expect(seen).toEqual([new Date(NOW.getTime() - 7 * 24 * 60 * 60_000)]);
+  });
+
+  it('【故意造出的失败】列提醒抛错：照样按 26 小时审、照样报，记没查成，不撤', async () => {
+    const w = world({
+      repos: [{ owner: 'acme', name: 'widgets' }],
+      listOpen: async () => {
+        throw new Error('库连不上');
+      },
+      audit: async (_repo, since) => {
+        expect(since).toEqual(sinceOf(NOW));
+        return audit(
+          [{ number: 7, kind: 'no_merge_record', text: '#7 合并了，但账上没有合并队列的合并记录' }],
+          {
+            cleanPrs: [8],
+          },
+        );
+      },
+    });
+    const part = await checkMergedPrs(w.deps);
+    expect(part.unchecked).toEqual([
+      '列没处理的提醒没成，合并记录后来记上了的 reconcile:pr 这一轮不撤：库连不上',
+    ]);
+    expect(w.inserted.map((i) => i.dedupeKey)).toEqual(['reconcile:pr:acme/widgets#7']);
+    expect(w.resolved).toEqual([]);
   });
 
   it('【故意造出的失败】机器人开的 PR 合并人对、账上有合并记录：不报', async () => {
