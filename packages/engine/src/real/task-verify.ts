@@ -50,8 +50,8 @@ import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
 import type { ClaimsGitHub, GitHub, RepoRef } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
-import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
 import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
 import {
