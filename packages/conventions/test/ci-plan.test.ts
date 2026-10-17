@@ -1520,6 +1520,8 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     expect(pr('packages/web/src/routes/login.tsx').e2e).toEqual([`${SPECS}01-login.e2e.ts`]);
     // 页面私有的组件跟着它的页面走；目录前缀整个认
     expect(pr('packages/web/src/components/home/flow-board.tsx').e2e).toContain(`${SPECS}02-home.e2e.ts`);
+    // 首页窄屏页头（#2969）挂在主页这条上：只落在 specs/ 里、没有页面指向，映射表自检会红
+    expect(pr('packages/web/src/routes/home.tsx').e2e).toContain(`${SPECS}02c-home-narrow.e2e.ts`);
     expect(pr('packages/web/src/components/home/flow-board.tsx').e2e).not.toContain(
       `${SPECS}06-notifications.e2e.ts`,
     );
