@@ -12,6 +12,7 @@
 
 import type { RouteProbeTier } from '@fleet-dao/shared';
 import type { RoutingLayerRoute } from '../api/types';
+import { quotaResetText } from './probe-history-view';
 import type { Tone } from './status';
 
 export type RouteStateKind =
@@ -81,7 +82,10 @@ export const routeStateTone: Record<RouteStateKind, Tone> = {
   unknown: 'stall',
 };
 
-/** 一句话说清这一种是什么意思（详情里写，也给悬停提示用）。 */
+/**
+ * 一句话说清这一种是什么意思（详情里写，也给悬停提示用）。
+ * 「在线」这句里的「额度够」只在同一次探针没有写明额度耗尽时用；写明了改用 quotaProbeWhy，分类仍是在线。
+ */
 export const routeStateWhy: Record<RouteStateKind, string> = {
   live: '开着、探针探通、额度够、没被禁令挡',
   fault: '该在线却探不通：要人修',
@@ -95,6 +99,20 @@ export const routeStateWhy: Record<RouteStateKind, string> = {
   blocked: '额度用满、命中禁令或引擎暂不往它派：不是坏了',
   unknown: '探针这一轮没探它，或额度没读成：不当活，也不当坏',
 };
+
+/**
+ * 同一次探针已经写明连通但额度耗尽时，展开说明、悬停和读屏用这句。
+ * 不说「额度够」。重置时刻只复述上游给的，没给就写没给，不从别的字面推算。
+ * 开着、探通、没被禁令挡仍是这条路的分类事实；额度这一段改用探针记录里的原文。
+ */
+export function quotaProbeWhy(cell: {
+  detail?: string | null | undefined;
+  resetsAt?: string | undefined;
+}): string {
+  const detail = cell.detail?.trim();
+  const fact = detail ? `连通但额度耗尽：${detail}` : '连通但额度耗尽';
+  return `开着、探针探通，${fact}。${quotaResetText(cell.resetsAt)}。没被禁令挡`;
+}
 
 /** 进告警口径的：故障和检测中断。 */
 export const isAlert = (kind: RouteStateKind): boolean => kind === 'fault' || kind === 'interrupted';

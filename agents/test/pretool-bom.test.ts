@@ -57,6 +57,10 @@ describe('拦下 gh issue create 时给的开单用法跟得上 pnpm issue:new �
     for (const part of [
       'pnpm issue:new',
       '--kind',
+      '--domain',
+      '--nature',
+      'mirasim',
+      'perf',
       '--milestone',
       '--title',
       '--body-file',

@@ -1,0 +1,33 @@
+name: label-sync
+# 查询轴标签同步（packages/conventions/src/labels.ts 的 QUERY_LABEL_SPECS，design 第七节「标签与里程碑」）：
+# 主线上标签词汇有改动时、手动触发时，把六个标签（域:engine / 域:api / 域:mirasim / 性质:bug / 性质:perf / 性质:process）建到仓上，
+# 已有的只改颜色和说明。标签建好之后，pnpm issue:new、pnpm pr:open 才有得贴。只写标签，不碰单子和代码；红了不挡任何事。
+on:
+  push:
+    branches: [main]
+    paths:
+      - packages/conventions/src/labels.ts
+      - packages/conventions/src/bin/label-sync.ts
+      - .github/workflows/label-sync.yml
+  workflow_dispatch:
+concurrency:
+  group: label-sync
+  cancel-in-progress: false
+permissions:
+  contents: read
+  issues: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node packages/conventions/src/bin/label-sync.ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}

@@ -39,6 +39,7 @@ import {
   type OffDiffItem,
   offDiffAcceptanceItems,
   parseMd,
+  queryAxisLabels,
   rankSimilar,
   requiredSectionProblems,
   type SimilarCandidate,
@@ -702,6 +703,7 @@ export async function executeGroomPlan(
         body,
         labels: [
           item.kind,
+          ...queryAxisLabels(parent?.labels, (message) => console.warn(`${what}：${message}`)),
           ...(hold === null ? [] : [hold.kind === 'local' ? LOCAL_LABEL : HUMAN_DECISION_LABEL]),
         ],
       });

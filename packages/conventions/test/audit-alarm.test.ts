@@ -41,7 +41,7 @@ describe('对账红了开同一张单', () => {
   it('红了、还没有那张单：开一张（贴缺陷和本机做），挂当前版本', async () => {
     const { gh, calls } = writer();
     expect(await followAlarm(gh, input())).toEqual({ action: 'opened', issue: 900 });
-    expect(calls).toEqual([`create ${ALARM_TITLE} [缺陷,本机做]`, 'milestone #900 → 11']);
+    expect(calls).toEqual([`create ${ALARM_TITLE} [缺陷,本机做,域:engine,性质:bug]`, 'milestone #900 → 11']);
   });
 
   it('红了、那张单已经开着：只更新它，不开第二张；没挂版本的补挂', async () => {

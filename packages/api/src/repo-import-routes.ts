@@ -17,7 +17,7 @@ import {
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { Context, Hono } from 'hono';
-import type { Deps } from './deps.ts';
+import type { Deps, InstallationReposPort } from './deps.ts';
 import { ApiError, readJson, reply } from './http.ts';
 import type { Actor } from './ports.ts';
 import type { CockpitEnv } from './session.ts';
@@ -47,18 +47,20 @@ function toImportable(
   };
 }
 
-interface Merged {
+/** 两个机器人的安装范围按 GitHub 仓号并成的一行。 */
+export interface MergedInstallation {
   repo: InstallationListedRepo;
   agent: boolean;
   engine: boolean;
 }
 
-/** 两个机器人各列一遍，按 GitHub 仓号并成一行。一边失败就整次失败，不拿缺了一边的表冒充全的。 */
-async function mergedInstallations(deps: Deps): Promise<Merged[]> {
-  const source = deps.installationRepos;
-  if (!source) throw new ApiError(503, 'github_unavailable', NOT_WIRED);
+/**
+ * 两个机器人各列一遍，按 GitHub 仓号并成一行。一边失败就整次失败（原样抛），不拿缺了一边的表冒充全的。
+ * 导入列表和 fleet-api project installations（pnpm project check 第二步经 ssh 调）共用这一份判法。
+ */
+export async function mergedInstallations(source: InstallationReposPort): Promise<MergedInstallation[]> {
   const [agent, engine] = await Promise.all([source.list('agent'), source.list('engine')]);
-  const byId = new Map<number, Merged>();
+  const byId = new Map<number, MergedInstallation>();
   for (const repo of agent) byId.set(repo.id, { repo, agent: true, engine: false });
   for (const repo of engine) {
     const hit = byId.get(repo.id);
@@ -66,6 +68,11 @@ async function mergedInstallations(deps: Deps): Promise<Merged[]> {
     else byId.set(repo.id, { repo, agent: false, engine: true });
   }
   return [...byId.values()];
+}
+
+function wiredSource(deps: Deps): InstallationReposPort {
+  if (!deps.installationRepos) throw new ApiError(503, 'github_unavailable', NOT_WIRED);
+  return deps.installationRepos;
 }
 
 export function registerRepoImportRoutes(
@@ -79,9 +86,9 @@ export function registerRepoImportRoutes(
     if (!deps.installationRepos) {
       return reply(c, ImportableReposResponse, { repos: [], reason: NOT_WIRED });
     }
-    let rows: Merged[];
+    let rows: MergedInstallation[];
     try {
-      rows = await mergedInstallations(deps);
+      rows = await mergedInstallations(deps.installationRepos);
     } catch (err) {
       if (err instanceof ApiError) throw err;
       return reply(c, ImportableReposResponse, {
@@ -107,7 +114,7 @@ export function registerRepoImportRoutes(
 
   app.post(WebRoutes.importRepo.path, async (c) => {
     const body = await readJson(c, ImportRepoRequest);
-    const rows = await mergedInstallations(deps);
+    const rows = await mergedInstallations(wiredSource(deps));
     const hit = rows.find((r) => r.repo.id === body.githubId);
     if (!hit) throw new ApiError(404, 'repo_not_visible', '这个仓不在两个机器人已经装上的范围里');
     const repo = hit.repo;

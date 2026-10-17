@@ -165,7 +165,7 @@ describe('卡住报警立案', () => {
       labels: [...FILE_LABELS],
       milestone: null,
     });
-    expect(opened?.labels).toEqual(['缺陷']);
+    expect(opened?.labels).toEqual(['缺陷', '域:engine', '性质:bug']);
     const doc = parseMd('body.md', opened?.body ?? '');
     expect(requiredSectionProblems(doc)).toEqual([]);
     expect(doneSection(doc)).toBe('ok');
@@ -283,7 +283,7 @@ describe('卡住报警立案', () => {
     expect(part.unchecked).toEqual([]);
     expect(h.opened.map((o) => o.key)).toEqual(['alert-file:reconcile:pr:acme/widgets#9']);
     expect(h.opened[0]?.body).toContain('无（AI 发现：提醒 reconcile:pr:acme/widgets#9 第 1 天没人处理）');
-    expect(h.opened[0]?.labels).toEqual(['缺陷']);
+    expect(h.opened[0]?.labels).toEqual(['缺陷', '域:engine', '性质:bug']);
     expect(reconcile.body.startsWith('已立案：#')).toBe(true);
     for (const kept of [silenced, fixing, waiting, fresh, decision, stall, missing]) {
       expect(kept.body, kept.dedupeKey).not.toContain('已立案：');
