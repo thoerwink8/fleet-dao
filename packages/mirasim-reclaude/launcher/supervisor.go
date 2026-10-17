@@ -40,7 +40,7 @@ type event struct {
 }
 type managedChild struct {
 	cmd        *exec.Cmd
-	in         io.WriteCloser
+	in         *controlWriter
 	done       chan struct{}
 	temps      []string
 	generation int
@@ -49,6 +49,8 @@ type managedChild struct {
 	exitCode   int
 	startedAt  time.Time
 	sawOutput  bool
+	sawUser    bool
+	stdinEnded bool
 }
 
 func scanFrames(r io.Reader, generation int, kind string, events chan<- event) {
@@ -342,6 +344,23 @@ func supervise(cfg configuration) error {
 			}
 			hostQueue = nil
 		}
+		// 运行中或仍有后台任务、权限、控制请求的 user 交给当前执行体，不能等 result 或重选路。
+		// 恢复 SDK 时仍排队；恢复完成、首条 user 发出后，按收到的顺序透传后续帧。
+		active := busy || len(background) > 0 || len(permissions) > 0 || len(pendingHost) > 0
+		if active && child != nil && child.sawUser && waitingReplay == "" && len(replay) == 0 && len(queue) > 0 {
+			select {
+			case <-child.done:
+				return fmt.Errorf("执行体提前退出，状态 %d", child.exitCode)
+			default:
+			}
+			for _, f := range queue {
+				if err := writeFrame(child.in, f); err != nil {
+					return err
+				}
+			}
+			queue = nil
+			busy = true
+		}
 		if len(queue) > 0 && ready() {
 			if turnAt.IsZero() {
 				turnAt, turnFirst = time.Now(), false
@@ -408,6 +427,7 @@ func supervise(cfg configuration) error {
 					return err
 				}
 				busy = true
+				child.sawUser = true
 			}
 		}
 		if len(replay) > 0 && waitingReplay == "" {
@@ -422,8 +442,17 @@ func supervise(cfg configuration) error {
 				return err
 			}
 		}
-		if closed && ready() && len(queue) == 0 {
-			return nil
+		if closed && len(queue) == 0 && len(hostQueue) == 0 && len(replay) == 0 && waitingReplay == "" {
+			if child == nil {
+				return nil
+			}
+			// EOF 只结束输入；已经透传的引导可能产生后续输出，须读到执行体退出。
+			if !child.stdinEnded {
+				if err := child.in.endInput(); err != nil {
+					return fmt.Errorf("执行体 stdin EOF 发送失败")
+				}
+				child.stdinEnded = true
+			}
 		}
 		var timeout <-chan time.Time
 		if waitingReplay != "" {
