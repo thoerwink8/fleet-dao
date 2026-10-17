@@ -652,7 +652,16 @@ describe('命令行外壳：一律退出 0，输出是各家都认的开会话 J
     runChild(process.execPath, [HOOK], {
       input: stdin,
       cwd: temp('cwd'),
-      env: { ...process.env, HOME: home, USERPROFILE: home, FLEET_FRANCE_SSH: '', CLAUDE_ENV_FILE: '' },
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        FLEET_FRANCE_SSH: '',
+        CLAUDE_ENV_FILE: '',
+        CLAUDE_CODE_SESSION_ID: '',
+        CODEX_THREAD_ID: '',
+        CODEX_SESSION_ID: '',
+      },
     });
   const waitBackground = (home: string) => {
     const dir = join(home, '.fleet-dao', 'session-bg');
