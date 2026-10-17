@@ -33,6 +33,92 @@ const API = 'https://api.github.com/repos/o/r';
 const json = (data: unknown, init: ResponseInit = {}) =>
   new Response(JSON.stringify(data), { status: 200, ...init });
 
+describe('母子关系读写 GitHub', () => {
+  it('allIssues 翻完全部状态的所有页，保留已关闭子单并过滤 PR', async () => {
+    const page2 = `${API}/issues?state=all&per_page=100&page=2`;
+    const { impl, seen } = fakeFetch({
+      [`${API}/issues?state=all&per_page=100`]: () =>
+        json(
+          [
+            row(1, { body: '母单', sub_issues_summary: { total: 1, completed: 1 } }),
+            row(2, { pull_request: {} }),
+          ],
+          { headers: { link: `<${page2}>; rel="next"` } },
+        ),
+      [page2]: () => json([row(3, { state: 'closed', body: 'parent: #1', state_reason: 'completed' })]),
+    });
+    const result = await liveGitHub('o/r', { GITHUB_TOKEN: TOKEN }, { fetchImpl: impl }).allIssues();
+    expect(result).toMatchObject([
+      { number: 1, subIssues: 1, subIssuesDone: 1 },
+      { number: 3, state: 'closed', stateReason: 'completed', body: 'parent: #1' },
+    ]);
+    expect(seen).toHaveLength(2);
+  });
+
+  it.each([
+    () => new Response('{}', { status: 502 }),
+    () => json({ unexpected: true }),
+    () => json([row(1, { body: 42 })]),
+  ])('allIssues 没读成或认不出明确失败，不当成空清单', async (route) => {
+    const { impl } = fakeFetch({ [`${API}/issues?state=all&per_page=100`]: route });
+    await expect(
+      liveGitHub('o/r', {}, { fetchImpl: impl, token: () => undefined }).allIssues(),
+    ).rejects.toThrow();
+  });
+
+  it.each([undefined, false, true])(
+    '原生挂接先读子单 id，replace_parent=%s 原样明确发送',
+    async (replaceParent) => {
+      const seen: { url: string; method: string | undefined; body: unknown }[] = [];
+      const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        seen.push({
+          url,
+          method: init?.method,
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        });
+        if (url === `${API}/issues/7`) return json(row(7, { id: 9007 }));
+        if (url === `${API}/issues/1/sub_issues`) return json(row(7), { status: 201 });
+        throw new Error(`没料到 ${url}`);
+      }) as typeof fetch;
+      await liveGitHub('o/r', {}, { fetchImpl: impl, token: () => undefined }).addSubIssue(
+        1,
+        7,
+        replaceParent,
+      );
+      expect(seen).toEqual([
+        { url: `${API}/issues/7`, method: undefined, body: undefined },
+        {
+          url: `${API}/issues/1/sub_issues`,
+          method: 'POST',
+          body: { sub_issue_id: 9007, replace_parent: replaceParent === true },
+        },
+      ]);
+    },
+  );
+
+  it.each([{ id: undefined }, { id: 0 }, { id: 1.5 }, { id: '9007' }, { id: 9007, pull_request: {} }])(
+    '子单 id 无效或实际是 PR 时不做 POST：%j',
+    async (extra) => {
+      const { impl, seen } = fakeFetch({ [`${API}/issues/7`]: () => json(row(7, extra)) });
+      await expect(
+        liveGitHub('o/r', {}, { fetchImpl: impl, token: () => undefined }).addSubIssue(1, 7),
+      ).rejects.toThrow();
+      expect(seen).toHaveLength(1);
+    },
+  );
+
+  it('挂接接口失败原样报状态，不能当关系已修复', async () => {
+    const { impl } = fakeFetch({
+      [`${API}/issues/7`]: () => json(row(7, { id: 9007 })),
+      [`${API}/issues/1/sub_issues`]: () => new Response('{}', { status: 422 }),
+    });
+    await expect(
+      liveGitHub('o/r', {}, { fetchImpl: impl, token: () => undefined }).addSubIssue(1, 7, true),
+    ).rejects.toThrow('422');
+  });
+});
+
 describe('读 GitHub：开着的 issue', () => {
   it('按 Link 头翻页读完，去掉 PR；令牌放在请求头里', async () => {
     const page2 = `${API}/issues?state=open&per_page=100&page=2`;
