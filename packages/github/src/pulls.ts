@@ -4,6 +4,7 @@
 //   「CI 根本没跑」和「跑了没跑完（超时）」分开报；读不到算没查成，不当零条检查（C16）。
 // - 合并前再核一遍：头没变（C8）、基于最新主线、CI 在这个头上是绿的、能合（UNKNOWN 就重读，C10）；
 //   squash 带 sha 头约束、显式的提交标题与正文（不让 GitHub 用默认拼出关单词，C13）；失败不看文案，重读 mergeable 再分类（C11）。
+import { QUERY_LABEL_SPECS } from '@fleet-dao/conventions';
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import {
@@ -271,6 +272,19 @@ export async function openPr(
   if (!replay && value.updatedAt) await pullEcho(deps, repo, pr.number, value.updatedAt, 'agent');
   if (pr.head.sha === input.head) await pullEcho(deps, repo, pr.number, pr.updated_at, 'agent');
   if (input.labels !== undefined && input.labels.length > 0) {
+    // 标签不在仓上时，往 PR 上贴会被拒。Issues 写或 Pull requests 写都能建标签；没有就建，已有则 422 接着贴。
+    const specs = new Map(QUERY_LABEL_SPECS.map((spec) => [spec.name, spec]));
+    for (const name of input.labels) {
+      const spec = specs.get(name);
+      await deps.client.request({
+        method: 'POST',
+        path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/labels`,
+        auth: { as: 'agent', repo },
+        body: spec ? { name: spec.name, color: spec.color, description: spec.description } : { name },
+        allow: [422],
+        signal: ctx.signal,
+      });
+    }
     await deps.client.request({
       method: 'POST',
       path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/issues/${pr.number}/labels`,

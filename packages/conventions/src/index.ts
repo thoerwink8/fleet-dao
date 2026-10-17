@@ -129,6 +129,7 @@ export {
   KIND_LABELS,
   type KindLabel,
   LOCAL_LABEL,
+  labelCreateFailure,
   type MilestoneRef,
   MOTHER_LABEL,
   milestonePhase,
@@ -137,7 +138,10 @@ export {
   NATURE_VALUES,
   type NatureValue,
   natureLabel,
+  QUERY_LABEL_SPECS,
+  type QueryLabelSpec,
   queryAxisLabels,
+  queryLabelCreateArgs,
   requireAxis,
   THREE_FLOW_LABEL,
 } from './labels.ts';

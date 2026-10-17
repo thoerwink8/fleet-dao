@@ -109,7 +109,13 @@ function setup(
   const root = mkdtempSync(join(tmpdir(), 'fleet-issue-new-'));
   writeFileSync(join(root, 'body.md'), opts.body ?? BODY);
   const calls: string[][] = [];
+  const labelCalls: string[][] = [];
   const gh = async (args: string[]): Promise<GhResult> => {
+    // 开单前先 gh label create 把六个查询轴标签建上；不混进 calls，免得每条「建单参数」断言都要带着它们
+    if (args[0] === 'label' && args[1] === 'create') {
+      labelCalls.push(args);
+      return ok('');
+    }
     calls.push(args);
     const routed = opts.route?.(args);
     if (routed) return routed;
@@ -118,7 +124,7 @@ function setup(
   };
   const deps = { gh, cwd: root, similar: opts.similar };
   const run = (...argv: string[]) => issueNew(argv, deps);
-  return { root, calls, run };
+  return { root, calls, labelCalls, run };
 }
 
 const base = [
@@ -137,6 +143,21 @@ const base = [
 ];
 
 describe('开单脚本：缺类别或里程碑就不开', () => {
+  it('开成之前先把六个查询轴标签建上（已有则 --force）', async () => {
+    const { calls, labelCalls, run } = setup();
+    await run(...base);
+    expect(labelCalls.map((c) => c[2])).toEqual([
+      '域:engine',
+      '域:api',
+      '域:mirasim',
+      '性质:bug',
+      '性质:perf',
+      '性质:process',
+    ]);
+    expect(labelCalls.every((c) => c.includes('--force'))).toBe(true);
+    expect(calls.some((c) => c[0] === 'issue' && c[1] === 'create')).toBe(true);
+  });
+
   it('用法把查询轴接在原来的句子上，后半段还在', () => {
     expect(USAGE).toContain('--domain engine|api|mirasim --nature bug|perf|process');
     expect(USAGE).toContain('--order-after 插在那张后面');

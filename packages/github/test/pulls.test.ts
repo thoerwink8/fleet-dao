@@ -61,6 +61,11 @@ describe('开 PR', () => {
     };
     const res = await gh.openPr(input);
     expect(fake.pulls.get(res.number)?.labels).toEqual(['域:api', '性质:perf']);
+    expect([...fake.repoLabels]).toEqual(['域:api', '性质:perf']);
+    expect(fake.calls('POST', /\/repos\/acme\/widgets\/labels$/).map((r) => r.as)).toEqual([
+      'agent',
+      'agent',
+    ]);
     expect(fake.calls('POST', /\/issues\/\d+\/labels$/).map((r) => r.as)).toEqual(['agent']);
     await gh.openPr(input);
     expect(fake.pulls.get(res.number)?.labels).toEqual(['域:api', '性质:perf']);

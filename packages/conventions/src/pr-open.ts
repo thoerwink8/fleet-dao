@@ -21,7 +21,14 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { issueOfBranch } from './issue-branch.ts';
-import { domainLabel, natureLabel, requireAxis } from './labels.ts';
+import {
+  domainLabel,
+  labelCreateFailure,
+  natureLabel,
+  QUERY_LABEL_SPECS,
+  queryLabelCreateArgs,
+  requireAxis,
+} from './labels.ts';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
 import { founderQuote, issueColumnRefs, withIssueColumn } from './pr-columns.ts';
@@ -381,6 +388,15 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
   if (pushed.code !== 0) {
     err(`git push 当前分支没成（${reasonOf(pushed)}）：没开 PR。查明原因（权限、网络、远端拒绝）后重跑。`);
     return 2;
+  }
+
+  // 仓上没有查询轴标签时，gh pr create --label 会直接拒。先把六个都建上（已有则 --force 只改说明）。
+  for (const spec of QUERY_LABEL_SPECS) {
+    const failed = labelCreateFailure(spec, gh(queryLabelCreateArgs(spec)));
+    if (failed) {
+      err(`${failed}没开 PR。`);
+      return 2;
+    }
   }
 
   const created = gh([

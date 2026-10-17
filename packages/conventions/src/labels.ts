@@ -38,6 +38,38 @@ export function natureLabel(value: NatureValue): string {
 export const DOMAIN_LABELS = DOMAIN_VALUES.map(domainLabel);
 export const NATURE_LABELS = NATURE_VALUES.map(natureLabel);
 
+/** 查询轴标签在 GitHub 上的颜色和说明。名字以这里为准；仓上没有就建，有了只更新颜色和说明。 */
+export interface QueryLabelSpec {
+  name: string;
+  /** 6 位十六进制，不带 #。 */
+  color: string;
+  description: string;
+}
+
+export const QUERY_LABEL_SPECS: readonly QueryLabelSpec[] = [
+  { name: domainLabel('engine'), color: '1D76DB', description: '查询轴·域：法国引擎。只用来筛。' },
+  { name: domainLabel('api'), color: '0E8A16', description: '查询轴·域：驾驶舱后端。只用来筛。' },
+  { name: domainLabel('mirasim'), color: '5319E7', description: '查询轴·域：Mirasim。只用来筛。' },
+  { name: natureLabel('bug'), color: 'D73A4A', description: '查询轴·性质：出错。只用来筛，不代替「缺陷」。' },
+  { name: natureLabel('perf'), color: 'FBCA04', description: '查询轴·性质：性能。只用来筛。' },
+  { name: natureLabel('process'), color: '0075CA', description: '查询轴·性质：流程。只用来筛。' },
+];
+
+/** `gh label create` 的参数。`--force`：已经有就改颜色和说明，退出码仍是 0。 */
+export function queryLabelCreateArgs(spec: QueryLabelSpec): string[] {
+  return ['label', 'create', spec.name, '--color', spec.color, '--description', spec.description, '--force'];
+}
+
+/** 建标签没成时的一句人话；成了（含 --force 更新已有标签）回 undefined。 */
+export function labelCreateFailure(
+  spec: QueryLabelSpec,
+  r: { code: number; stdout: string; stderr: string },
+): string | undefined {
+  if (r.code === 0) return undefined;
+  const detail = (r.stderr || r.stdout).trim().replace(/\s+/g, ' ').slice(0, 300);
+  return `查询轴标签「${spec.name}」没建上（退出码 ${r.code}：${detail || 'gh 什么也没说'}）。仓上没有这个标签，贴上去会被 GitHub 拒。`;
+}
+
 export function parseDomain(name: string): DomainValue | undefined {
   if (!name.startsWith(DOMAIN_PREFIX)) return undefined;
   const value = name.slice(DOMAIN_PREFIX.length);

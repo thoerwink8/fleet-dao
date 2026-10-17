@@ -36,11 +36,14 @@ import {
   isKindLabel,
   KIND_LABELS,
   LOCAL_LABEL,
+  labelCreateFailure,
   MOTHER_LABEL,
   milestonePhase,
   milestoneVersion,
   type NatureValue,
   natureLabel,
+  QUERY_LABEL_SPECS,
+  queryLabelCreateArgs,
   requireAxis,
 } from './labels.ts';
 import { type MdDoc, norm, parseMd, sectionRange } from './markdown.ts';
@@ -319,6 +322,11 @@ export async function issueNew(argv: readonly string[], deps: IssueNewDeps): Pro
       : undefined;
   if (o.orderAfter !== undefined) checkOrderAfter(o.orderAfter, milestone, version);
   if (o.parent !== undefined) await checkParent(deps.gh, o.parent);
+  // 仓上没有查询轴标签时，gh issue create --label 会直接拒。先把六个都建上（已有则 --force 只改说明）。
+  for (const spec of QUERY_LABEL_SPECS) {
+    const failed = labelCreateFailure(spec, await deps.gh(queryLabelCreateArgs(spec)));
+    if (failed) throw new Error(`${failed}单没开。`);
+  }
   const created = await deps.gh([
     'issue',
     'create',

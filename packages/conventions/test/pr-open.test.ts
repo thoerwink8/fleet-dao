@@ -60,7 +60,12 @@ function world(
   const out: string[] = [];
   const err: string[] = [];
   const looks = [...lookups];
+  const labelCalls: string[][] = [];
   const gh: Gh = (args) => {
+    if (args[0] === 'label' && args[1] === 'create') {
+      labelCalls.push(args);
+      return ok('');
+    }
     if (args[0] === 'api' && args[1]?.includes('/issues/')) {
       asked.push(args);
       const l = looks.shift();
@@ -105,6 +110,7 @@ function world(
     order,
     gitCalls,
     calls,
+    labelCalls,
     asked,
     listed,
     bodies,
@@ -183,6 +189,14 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
     ]);
     expect(w.calls[1]?.[2]).toBe('repos/{owner}/{repo}/pulls/42/files');
     expect(w.calls[2]).toEqual(['pr', 'merge', '42', '--auto', '--squash']);
+    expect(w.labelCalls.map((c) => c[2])).toEqual([
+      '域:engine',
+      '域:api',
+      '域:mirasim',
+      '性质:bug',
+      '性质:perf',
+      '性质:process',
+    ]);
     expect(w.text()).toContain('挂上了自动合并');
     expect(w.text()).not.toContain('第二意见');
   });
