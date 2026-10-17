@@ -23,6 +23,7 @@ import {
   type E2eQuarantineJobDeps,
   QUARANTINE_BRANCH,
 } from '../jobs/e2e-quarantine.ts';
+import { ensurePullQueryLabels } from './pull-query-labels.ts';
 
 export interface E2eQuarantineWiring {
   db: Db;
@@ -280,7 +281,10 @@ export function e2eQuarantineGitHub(api: {
         { path: '分支名', text: QUARANTINE_BRANCH },
       ]);
       const existing = await findPull();
-      if (existing) return existing;
+      if (existing) {
+        await ensurePullQueryLabels(client, repo, existing.number, 'engine', 'bug');
+        return existing;
+      }
       await client.request({
         method: 'DELETE',
         path: `${base}/git/refs/heads/${QUARANTINE_BRANCH}`,
@@ -384,7 +388,9 @@ export function e2eQuarantineGitHub(api: {
       auth,
       body: { title: input.title, head: QUARANTINE_BRANCH, base: input.base, body: input.body },
     });
-    return pullOf(opened.data, '开隔离集 PR');
+    const pull = pullOf(opened.data, '开隔离集 PR');
+    await ensurePullQueryLabels(client, repo, pull.number, 'engine', 'bug');
+    return pull;
   }
 
   function pullOf(data: unknown, what: string): { number: number; url: string; nodeId: string } {

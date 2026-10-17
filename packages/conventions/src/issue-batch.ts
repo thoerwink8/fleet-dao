@@ -1,19 +1,18 @@
 // GitHub 没有跨 issue 的事务：批量创建先暂贴本机做，失败关闭整批，恢复记录留在 _tmp。
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { checkIssueBody, type Gh, issueBodyTooLong } from './issue-new.ts';
 import {
   domainLabel,
-  isDomainValue,
   isKindLabel,
-  isNatureValue,
   LOCAL_LABEL,
   labelCreateFailure,
   MOTHER_LABEL,
   natureLabel,
   QUERY_LABEL_SPECS,
   queryLabelCreateArgs,
+  requireAxis,
 } from './labels.ts';
 import { readManifest, withManifest } from './mother-manifest.ts';
 
@@ -21,7 +20,7 @@ export interface BatchIssue {
   title: string;
   body: string;
   kind: string;
-  /** 子单缺省时继承母单有效轴；旧 JSON 可省略，缺失只提示。 */
+  /** 子单缺省时继承母单有效轴；母单两轴必填，全批预检后才写 GitHub。 */
   domain?: string;
   nature?: string;
 }
@@ -53,15 +52,10 @@ interface Deps {
   journal?: string;
   warn?: (message: string) => void;
 }
-function batchAxis(issue: BatchIssue, mother: BatchIssue, warn: (message: string) => void): string[] {
-  const labels: string[] = [];
-  const domain = issue.domain ?? mother.domain;
-  const nature = issue.nature ?? mother.nature;
-  if (typeof domain === 'string' && isDomainValue(domain)) labels.push(domainLabel(domain));
-  else warn(`「${issue.title}」域缺失或无效；未贴域标签，继续建单。`);
-  if (typeof nature === 'string' && isNatureValue(nature)) labels.push(natureLabel(nature));
-  else warn(`「${issue.title}」性质缺失或无效；未贴性质标签，继续建单。`);
-  return labels;
+function batchAxis(issue: BatchIssue, mother: BatchIssue): string[] {
+  const axis = requireAxis(issue.domain ?? mother.domain, issue.nature ?? mother.nature);
+  if ('error' in axis) throw new Error(`「${issue.title}」：${axis.error}`);
+  return [domainLabel(axis.domain), natureLabel(axis.nature)];
 }
 const endpoint = 'repos/{owner}/{repo}/issues';
 const marker = (id: string) => `<!-- fleet:issue-batch:${id}:`;
@@ -82,6 +76,7 @@ export function validateBatch(spec: BatchSpec): void {
       throw new Error(`第 ${index} 张缺 title。`);
     if (typeof issue.body !== 'string' || !isKindLabel(issue.kind))
       throw new Error(`第 ${index} 张需要 body 和 kind（需求/缺陷/杂项）。`);
+    batchAxis(issue, spec.mother);
     const check = checkIssueBody(issue.body, { local: spec.local === true });
     if (!check.ok) throw new Error(`第 ${index} 张：${check.why}`);
     const long = issueBodyTooLong(
@@ -189,18 +184,17 @@ export async function recoverIssueBatch(path: string, deps: Deps): Promise<void>
 /** 全部建好才返回；失败取消整批，取消失败明确报残留号及恢复命令。 */
 export async function issueBatchNew(spec: BatchSpec, deps: Deps): Promise<BatchResult> {
   validateBatch(spec);
-  const axes = [spec.mother, ...spec.subs].map((issue) =>
-    batchAxis(issue, spec.mother, deps.warn ?? console.warn),
-  );
-  // 旧 spec 没有查询轴时仍走原流程；显式轴先初始化，失败时尚未建单，不进入补偿。
+  const journal: Journal = { version: 1, id: randomUUID(), status: 'building', issues: [], uncertain: false };
+  const path = resolve(deps.cwd, deps.journal ?? `_tmp/issue-batch/${journal.id}.json`);
+  if (existsSync(path)) throw new Error('已有恢复记录，未操作 GitHub；请先恢复这一批。');
+  const axes = [spec.mother, ...spec.subs].map((issue) => batchAxis(issue, spec.mother));
+  // 先初始化查询轴，失败时尚未建单，不进入补偿。
   if (axes.some((labels) => labels.length > 0)) {
     for (const label of QUERY_LABEL_SPECS) {
       const failed = labelCreateFailure(label, await deps.gh(queryLabelCreateArgs(label)));
       if (failed) throw new Error(`${failed}整批单尚未创建。`);
     }
   }
-  const journal: Journal = { version: 1, id: randomUUID(), status: 'building', issues: [], uncertain: false };
-  const path = resolve(deps.cwd, deps.journal ?? `_tmp/issue-batch/${journal.id}.json`);
   // 不覆盖还没处理的批次记录。
   mkdirSync(dirname(path), { recursive: true });
   writeFileSync(path, JSON.stringify(journal), { flag: 'wx' });

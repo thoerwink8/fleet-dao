@@ -25,6 +25,7 @@
 // - 单条动作失败（GitHub 写不进）进 rejected，别的条照做；全部尝试的动作都失败，调用方当整理失败。
 
 import {
+  DOMAIN_VALUES,
   describeOffDiff,
   doneSection,
   GROOM_PENDING_LABEL,
@@ -35,13 +36,14 @@ import {
   LOCAL_LABEL,
   matchesStandardPath,
   modulePaths,
+  NATURE_VALUES,
   OFF_DIFF_REWRITE,
   type OffDiffItem,
   offDiffAcceptanceItems,
   parseMd,
-  queryAxisLabels,
   rankSimilar,
   requiredSectionProblems,
+  resolveQueryAxes,
   type SimilarCandidate,
   type StandardPath,
   sectionText,
@@ -67,6 +69,8 @@ const Text = (max: number) => z.string().trim().min(1).max(max);
 const NewIssueItem = z.object({
   title: Text(100),
   kind: z.enum(KIND_LABELS),
+  domain: z.enum(DOMAIN_VALUES).optional(),
+  nature: z.enum(NATURE_VALUES).optional(),
   scene: Text(3000),
   modules: Text(2000).optional(),
   done: z.array(Text(500)).min(1).max(12),
@@ -695,6 +699,15 @@ export async function executeGroomPlan(
       continue;
     }
     const hold = groomHold(`${title}\n${body}`, item.needsHuman, ctx.standardPaths);
+    const axis = resolveQueryAxes(
+      [...(item.domain ? [`域:${item.domain}`] : []), ...(item.nature ? [`性质:${item.nature}`] : [])],
+      body,
+      parent?.labels,
+    );
+    if (axis.problems.length > 0) {
+      rejected.push({ what, why: axis.problems.join('；') });
+      continue;
+    }
     let number = 0;
     const ok = await act(what, async () => {
       const got = await writes.openIssue({
@@ -703,7 +716,7 @@ export async function executeGroomPlan(
         body,
         labels: [
           item.kind,
-          ...queryAxisLabels(parent?.labels, (message) => console.warn(`${what}：${message}`)),
+          ...axis.labels,
           ...(hold === null ? [] : [hold.kind === 'local' ? LOCAL_LABEL : HUMAN_DECISION_LABEL]),
         ],
       });

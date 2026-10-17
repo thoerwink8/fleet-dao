@@ -85,7 +85,11 @@ async function fillDraft(h: H, s: S, seq: number, baseVersion: number) {
   const d = await json(
     await draft(h, s, seq, {
       baseVersion,
-      patch: { scene: '导出要给财务', modules: 'packages/web', done: ['页面上有导出按钮'] },
+      patch: {
+        scene: '导出要给财务',
+        modules: 'packages/web\n域: api\n性质: process',
+        done: ['页面上有导出按钮'],
+      },
     }),
   );
   return d.request.draftVersion;
