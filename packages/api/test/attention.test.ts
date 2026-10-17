@@ -141,19 +141,28 @@ describe('fleet-api attention', () => {
     expect(j).toMatchObject({ ok: true, healthz: { code: 0, red: [] }, notes: [], localOrphans: [] });
   });
 
-  it('localOrphans：没有这份名单是空数组；对账写了一条就原样在数组里，不另判', async () => {
+  it('localOrphans：没有这份名单是空数组；对账写入的名单原样给 attention，不在消费者重判', async () => {
     const empty = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
     expect(empty.localOrphans).toEqual([]);
-    const item = {
-      repo: 'acme/app',
-      issue: 12,
-      labeledForMs: 25 * 60 * 60_000,
-      labeledFor: '25 小时',
-      reason: 'fleet-engine[bot]：涉及 .github/workflows/ci.yml，留给本机做',
-    };
-    await writeLocalOrphans(t.db, [item], 'test');
+    const items = [
+      {
+        repo: 'acme/app',
+        issue: 12,
+        labeledForMs: 25 * 60 * 60_000,
+        labeledFor: '25 小时',
+        reason: 'fleet-engine[bot]：涉及 .github/workflows/ci.yml，留给本机做',
+      },
+      {
+        repo: 'acme/app',
+        issue: 13,
+        labeledForMs: 26 * 60 * 60_000,
+        labeledFor: '26 小时',
+        reason: '普通超过 24 小时，条件已由对账选择器确认',
+      },
+    ];
+    await writeLocalOrphans(t.db, items, 'test');
     const r = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
-    expect(r.localOrphans).toEqual([item]);
+    expect(r.localOrphans).toEqual(items);
   });
 
   it('【故意造出的失败】名单形状认不出：退出码 1，不拿空数组顶', async () => {
