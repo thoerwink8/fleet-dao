@@ -2488,7 +2488,7 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
   // 开单脚本的参数一改，这里跟着改——#654 删了 --specs 这里漏改过，照着做被拒（agents/test/pretool-bom.test.ts 钉着）。
   if (inFleet && /\bgh\s+issue\s+create\b/.test(outer) && !otherRepo) {
     return block(
-      'fleet-dao 开单一律用 `pnpm issue:new --kind <需求|缺陷|杂项> --milestone <当前|未排期> --title "一句话" --body-file 正文.md`（正文要有写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节；母单加 --mother，子单加 --parent <母单号>，留给本机做的加 --local、开单那一刻就贴），不直接 gh issue create（会漏类别标签、里程碑和正文四节的检查）。',
+      'fleet-dao 开单一律用 `pnpm issue:new --kind <需求|缺陷|杂项> --domain <engine|api|mirasim> --nature <bug|perf|process> --milestone <当前|未排期> --title "一句话" --body-file 正文.md`（正文要有写了字的「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」四节；--domain 和 --nature 每轴恰好一个，开单时贴「域:…」「性质:…」，只用来筛；母单加 --mother，子单加 --parent <母单号>，留给本机做的加 --local、开单那一刻就贴），不直接 gh issue create（会漏类别标签、查询轴、里程碑和正文四节的检查）。',
     );
   }
   // 本机有 Claude 会话在跑时，在本机切号、登录、退出会让所有会话当场断掉（全局规矩「我的机器与模型」）。

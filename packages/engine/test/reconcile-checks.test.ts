@@ -719,6 +719,9 @@ const HOUR = 60 * 60_000;
 const labeled = (over: Partial<LocalLabeledIssue> = {}): LocalLabeledIssue => ({
   repo: { owner: 'Acme', name: 'App' },
   issue: 12,
+  body: '正文',
+  labels: ['本机做'],
+  prerequisiteStates: new Map(),
   events: [
     {
       label: '本机做',
@@ -753,6 +756,75 @@ describe('selectLocalOrphans：贴了「本机做」超过 24 小时、又没有
 
   it('有还没到期的租约的不列', () => {
     expect(selectLocalOrphans([labeled()], new Set(['acme/app#12']), NOW)).toEqual([]);
+  });
+
+  it('要人拍、日期未到、任一前置单开着的不列；前置单全关后恢复 24 小时和租约判据', () => {
+    const human = labeled({ labels: ['本机做', '要人拍'] });
+    const date = labeled({ body: '前置：2026-11-12 复查日' });
+    const openPre = labeled({
+      body: '前置：#34',
+      prerequisiteStates: new Map([[34, 'open']]),
+    });
+    const closedPre = labeled({
+      body: '前置：#34、#35',
+      prerequisiteStates: new Map([
+        [34, 'closed'],
+        [35, 'closed'],
+      ]),
+    });
+    const ordinary = labeled({ issue: 99 });
+    expect(selectLocalOrphans([human, date, openPre], new Set(), NOW)).toEqual([]);
+    expect(selectLocalOrphans([closedPre, ordinary], new Set(), NOW).map((i) => i.issue)).toEqual([12, 99]);
+    expect(selectLocalOrphans([closedPre], new Set(['acme/app#12']), NOW)).toEqual([]);
+  });
+
+  it('日期前置边界按北京时间零点解除', () => {
+    const issue = labeled({ body: '前置：2026-11-12 复查日' });
+    expect(selectLocalOrphans([issue], new Set(), new Date('2026-11-11T15:59:59Z'))).toEqual([]);
+    expect(selectLocalOrphans([issue], new Set(), new Date('2026-11-11T16:00:00Z'))).toHaveLength(1);
+  });
+
+  it('前置状态读取失败或缺号不按已关闭放行', () => {
+    const missing = labeled({ body: '前置：#34', prerequisiteStates: new Map() });
+    expect(() => selectLocalOrphans([missing], new Set(), NOW)).toThrow('状态缺号');
+    const unreadable = labeled({
+      body: '前置：#34',
+      prerequisiteStates: new Map([[34, 'unknown' as 'open']]),
+    });
+    expect(() => selectLocalOrphans([unreadable], new Set(), NOW)).toThrow('状态认不出');
+  });
+
+  it('前置状态读取失败时整份名单失败，上一份不被空成功覆盖', async () => {
+    const saved: unknown[] = [];
+    const part = await checkLocalOrphans({
+      now: () => NOW,
+      log: () => {},
+      localLabeled: async () => {
+        throw new Error('前置单 #34 读取失败');
+      },
+      activeLeases: async () => new Set(),
+      saveLocalOrphans: async (items) => {
+        saved.push(items);
+      },
+    });
+    expect(part.failed).toContain('前置单 #34 读取失败');
+    expect(saved).toEqual([]);
+  });
+
+  it('正文、标签或前置状态缺字段时失败，不把它当普通无人认领单', () => {
+    expect(() =>
+      selectLocalOrphans([labeled({ body: undefined as unknown as string })], new Set(), NOW),
+    ).toThrow('正文或标签没读成');
+    expect(() =>
+      selectLocalOrphans([labeled({ labels: undefined as unknown as string[] })], new Set(), NOW),
+    ).toThrow('正文或标签没读成');
+    expect(() =>
+      selectLocalOrphans(
+        [labeled({ prerequisiteStates: undefined as unknown as ReadonlyMap<number, 'open' | 'closed'> })],
+        new Set(),
+        NOW,
+      ),
+    ).toThrow('前置状态没读成');
   });
 
   it('不到 24 小时的不列；刚好 24 小时的也不列', () => {

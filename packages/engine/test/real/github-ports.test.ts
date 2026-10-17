@@ -121,6 +121,13 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
       parent: null,
       subIssues: 0,
     })),
+    readIssue: record('readIssue', () => ({
+      number: 12,
+      title: '登录',
+      body: '',
+      state: 'open' as const,
+      labels: ['缺陷'],
+    })),
   } as unknown as EngineGitHub;
   return { gh, calls };
 }
@@ -758,7 +765,8 @@ describe('开 PR、CI、合并', () => {
       url: 'https://github.com/acme/widgets/pull/101',
     });
     expect(calls.openPr?.[0]).toMatchObject({ body: { requirement: 12, did: ['加了验证码'] } });
-    // 【故意造出的失败】PR 上不挂里程碑、不贴标签（里程碑页的进度只数单子）；开 PR 也不再读需求文档和单子的版本
+    // 【故意造出的失败】不抄类别、不挂里程碑（里程碑页的进度只数单子）。单上只有「缺陷」、没有查询轴，PR 不贴标签。
+    expect(calls.openPr?.[0]).not.toHaveProperty('labels');
     expect(calls.openPr?.[0]).not.toHaveProperty('inheritFrom');
     expect(calls.readSpecDoc).toBeUndefined();
     expect(calls.readIssuePlan).toBeUndefined();
@@ -854,6 +862,26 @@ describe('开 PR、CI、合并', () => {
     expect(calls.openPr).toHaveLength(1);
   });
 
+  it('单上的查询轴照抄到 PR：恰好一个域、一个性质；类别不抄。两个域就这一轴不抄', async () => {
+    const read = (labels: string[]) => () => ({
+      number: 12,
+      title: '登录',
+      body: '',
+      state: 'open' as const,
+      labels,
+    });
+    const one = setup({ readIssue: read(['缺陷', '性质:bug', '域:mirasim', '母单']) });
+    await one.ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
+    expect(one.calls.openPr?.[0]).toMatchObject({ labels: ['域:mirasim', '性质:bug'] });
+
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const both = setup({ readIssue: read(['域:engine', '域:api', '性质:perf']) });
+    await both.ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
+    expect(both.calls.openPr?.[0]).toMatchObject({ labels: ['性质:perf'] });
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('域」冲突'));
+    warning.mockRestore();
+  });
+
   it('没有需求号的杂活也一样开', async () => {
     const { ports, calls } = setup();
     const { requirement: _dropped, ...noIssue } = body;
@@ -862,6 +890,7 @@ describe('开 PR、CI、合并', () => {
       ctx,
     );
     expect(calls.openPr?.[0]).toMatchObject({ body: { did: ['加了验证码'] } });
+    expect(calls.readIssue).toBeUndefined();
   });
 
   it('「按推荐先做了」（#259）照传给正文生成：漏传了 PR 正文里就没有那一栏', async () => {

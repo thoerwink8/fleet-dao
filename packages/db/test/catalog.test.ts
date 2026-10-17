@@ -43,10 +43,22 @@ function quotaOnlyAndCatalogOnly(
   };
 }
 
+function unexplainedCatalogPools(
+  catalogPools: { id: string }[],
+  quota: { pools: { poolId: string }[]; notRead?: { poolId: string; why: string }[] },
+): string[] {
+  const declared = new Set([
+    ...quota.pools.map((p) => p.poolId),
+    ...(quota.notRead ?? []).filter((p) => p.why.trim() !== '').map((p) => p.poolId),
+  ]);
+  return catalogPools
+    .map((p) => p.id)
+    .filter((id) => !declared.has(id))
+    .sort();
+}
+
 const CLAUDE_ROUTES = ['claude-solo:opus-5.5:claude-code', 'claude-carpool:opus-5.5:claude-code'];
 const GROK_ROUTE = 'grok:grok-4.7:grok';
-/** Mirasim 中转的 DeepSeek Flash（#345，创始人 2026-09-27 拍「mirasim 额度不够，先只开这一条」）。 */
-const DEEPSEEK_ROUTE = 'mirasim-relay:deepseek-flash:mirasim';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -186,14 +198,16 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
   it('账号池和额度配置对得上；只有 jev 不进额度配置（没有日账，花费在 jev_answers，不写按日文件）', () => {
     const quota = JSON.parse(repoFile('deploy/quota.json')) as {
       pools: { poolId: string; channelId: string }[];
+      notRead?: { poolId: string; why: string }[];
     };
     expect(quotaOnlyAndCatalogOnly(example().pools, quota.pools)).toEqual({
       quotaOnly: [],
       catalogOnly: ['jev@jev'],
     });
-    const notRead = (quota as { notRead?: { poolId: string; why: string }[] }).notRead ?? [];
+    const notRead = quota.notRead ?? [];
     expect(notRead.map((p) => p.poolId)).toEqual(['jev']);
     expect(notRead[0]?.why).toContain('没有旧系统的日账');
+    expect(unexplainedCatalogPools(example().pools, quota)).toEqual([]);
   });
 
   it('【故意造出失败】额度配置少一个目录里有的池（或多一个目录里没有的池），对照就判红', () => {
@@ -210,6 +224,21 @@ describe('目录配置 deploy/catalog.json（发布时装进库的真文件）',
       quotaOnly: ['ghost@x'],
       catalogOnly: ['jev@jev'],
     });
+    expect(
+      unexplainedCatalogPools(example().pools, {
+        pools: missing,
+        notRead: [{ poolId: 'jev', why: '没有旧系统的日账' }],
+      }),
+    ).toEqual(['grok']);
+    expect(
+      unexplainedCatalogPools(example().pools, {
+        pools: missing,
+        notRead: [
+          { poolId: 'jev', why: '没有旧系统的日账' },
+          { poolId: 'grok', why: '测试明确说明暂不读' },
+        ],
+      }),
+    ).toEqual([]);
   });
 
   it('上游名字和插头、额度读取器的真夹具对得上', () => {

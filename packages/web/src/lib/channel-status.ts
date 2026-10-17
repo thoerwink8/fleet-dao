@@ -7,10 +7,12 @@ import type {
   Channel,
   ChannelState as ChannelStateRow,
   Model,
+  ProbeHistoryCell,
   Route,
   RoutingLayerRoute,
   RoutingLayers,
 } from '../api/types';
+import { quotaResetText } from './probe-history-view';
 import { type Failover, failoverOf } from './provider-status';
 import {
   classifyProbe,
@@ -42,6 +44,32 @@ export type ChannelState =
   /** 渠道在目录里下架了。 */
   | 'off';
 
+/** 连通但额度耗尽的路（#2939）：来自和路由当前探针同一次的最新探测记录，只是显示，不改连通统计和选路。 */
+export interface ChannelQuota {
+  /** 额度耗尽的在用路数（占 ChannelCard.activeRoutes）。 */
+  routes: number;
+  /** 上游明确给了重置时间的路里最早的一个；一条都没给就没有。 */
+  resetsAt?: string;
+  /** 没给重置时间的路数。 */
+  resetUnknown: number;
+  /** 第一条的真实原因（探针 detail）。 */
+  detail?: string;
+}
+
+/** 受影响路数一句：「额度耗尽 1/3 路」。 */
+export function quotaCountText(card: Pick<ChannelCard, 'quota' | 'activeRoutes'>): string | undefined {
+  return card.quota ? `额度耗尽 ${card.quota.routes}/${card.activeRoutes} 路` : undefined;
+}
+
+/** 重置时间一句：有明确时刻写时刻，没给写没给；部分路没给时说明。 */
+export function quotaResetLine(quota: ChannelQuota): string {
+  const base = quotaResetText(quota.resetsAt);
+  if (!quota.resetsAt) return base;
+  return quota.resetUnknown > 0
+    ? `${base.replace('预计 ', '最早预计 ')}（另有 ${quota.resetUnknown} 路没给）`
+    : base;
+}
+
 export interface ChannelCard {
   channel: Channel;
   /** 顺位，从 1 起；干粉和下架的渠道没有。 */
@@ -66,6 +94,8 @@ export interface ChannelCard {
   fallback?: string;
   /** 运行中失败被标不可用（#1118）：为什么、顺延到谁、下次探测；没出过事或已恢复没有。 */
   failover?: Failover;
+  /** 在用的路里连通但额度耗尽的；没有就没有。状态仍按连通算（ok / partial），不是 down。 */
+  quota?: ChannelQuota;
   /** 这个渠道整体是哪一种（#1366，lib/route-state.ts）：故障、已关、未被用途使用……「死」不再把它们混在一起。 */
   kind: RouteStateKind;
   /** 渠道下每条路由各是哪一种，数出来的。 */
@@ -210,6 +240,8 @@ export function buildChannelCards(
   poolHeld: (poolId: string) => boolean = () => false,
   /** 最近一次身份题说出旧答案的路由；不给当没有。 */
   identityMismatch: ReadonlySet<string> = NO_ROUTES,
+  /** 此刻额度耗尽的路由（probe-history-view 的 currentQuotaCells：只认和当前探针同一次的最新记录）；不给当没有。 */
+  quotaCells: ReadonlyMap<string, ProbeHistoryCell> = new Map(),
 ): ChannelCard[] {
   const retired = retiredModelIds(routing.models, now);
   const { seen, routes: active } = collect(layers, retired);
@@ -324,6 +356,27 @@ export function buildChannelCards(
       label = routeStateLabel.interrupted;
       tone = routeStateTone.interrupted;
     }
+    // 连通但额度耗尽（#2939）：在用且探通的路里，最新探测明说额度用完了。只改说法，state / kind / 连通统计照旧；
+    // 部分路耗尽不说成整个渠道耗尽。渠道故障、运行中失败、检测中断时仍照原来的标签说。
+    const quotaRoutes = live.filter((r) => quotaCells.has(r.routeId));
+    let quota: ChannelQuota | undefined;
+    if (quotaRoutes.length > 0 && !failover) {
+      const cells = quotaRoutes.map((r) => quotaCells.get(r.routeId) as ProbeHistoryCell);
+      const resets = cells
+        .flatMap((c) => (c.resetsAt ? [c.resetsAt] : []))
+        .sort((a, b) => Date.parse(a) - Date.parse(b));
+      const detail = cells.find((c) => c.detail)?.detail;
+      quota = {
+        routes: quotaRoutes.length,
+        ...(resets[0] ? { resetsAt: resets[0] } : {}),
+        resetUnknown: cells.length - resets.length,
+        ...(detail ? { detail } : {}),
+      };
+      if (state === 'ok' && !interrupted) {
+        label = quotaRoutes.length === mine.length ? '连通但额度耗尽' : '部分路额度耗尽';
+        tone = 'wait';
+      }
+    }
     const kind: RouteStateKind =
       state === 'down'
         ? 'fault'
@@ -334,6 +387,7 @@ export function buildChannelCards(
           : 'live';
     return {
       ...(failover ? { failover } : {}),
+      ...(quota ? { quota } : {}),
       kind,
       counts,
       hasFault: state === 'down' || state === 'partial' || counts.fault > 0,

@@ -101,17 +101,26 @@ describe('巡查脚本：判法', () => {
     expect(lines.some((l) => l.startsWith('本机没人领 0 张'))).toBe(true);
   });
 
-  it('贴了「本机做」没人领：ALERT 写出单号、贴了多久和原因；没有或旧版没这栏是空的，不报', () => {
-    const one = {
-      repo: 'acme/app',
-      issue: 12,
-      labeledFor: '25 小时',
-      reason: 'fleet-engine[bot]：涉及 .github/workflows/ci.yml',
-    };
-    const hit = lib.judge({ raw: ok(lib.sampleRaw({ at: NOW, localOrphans: [one] })), now: NOW, base: null });
+  it('贴了「本机做」没人领：消费者原样报对账确认过的名单；没有或旧版没这栏是空的，不报', () => {
+    const items = [
+      {
+        repo: 'acme/app',
+        issue: 12,
+        labeledFor: '25 小时',
+        reason: 'fleet-engine[bot]：涉及 .github/workflows/ci.yml',
+      },
+      {
+        repo: 'acme/app',
+        issue: 13,
+        labeledFor: '26 小时',
+        reason: '普通超过 24 小时，条件已由对账选择器确认',
+      },
+    ];
+    const hit = lib.judge({ raw: ok(lib.sampleRaw({ at: NOW, localOrphans: items })), now: NOW, base: null });
     expect(hit.verdict).toBe('ALERT');
     expect(hit.alerts).toEqual([
       '本机没人领 #12（acme/app）贴了「本机做」25 小时：fleet-engine[bot]：涉及 .github/workflows/ci.yml',
+      '本机没人领 #13（acme/app）贴了「本机做」26 小时：普通超过 24 小时，条件已由对账选择器确认',
     ]);
     const none = lib.judge({ raw: ok(good()), now: NOW, base: baseOf(good()) });
     expect(none.alerts.filter((a) => a.startsWith('本机没人领'))).toEqual([]);

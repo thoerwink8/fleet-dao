@@ -1,10 +1,20 @@
 // fleet-api project show / set-profile（#2738）：看、换一个仓的档案。形状不对就拒（退出码 2），库里没有这个仓退出码 1；
 // 写和操作记录同一事务（db 的 setRepoProfile，真库那一面在 packages/db/test/intake.test.ts），这里用内存的假端口。
+// project installations（#2977）：两个 App 装没装，只读，和导入列表同一份归并；没查成退出 1，不当成没装。
 import type { RepoProfileRow } from '@fleet-dao/db';
+import type { InstallationListedRepo } from '@fleet-dao/github';
 import { DEFAULT_REPO_PROFILE } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { type CliDeps, main } from '../src/cli.ts';
-import { ProjectCliError, type ProjectPort, parseProjectArgs } from '../src/project-cli.ts';
+import type { InstallationReposPort } from '../src/deps.ts';
+import {
+  INSTALLATIONS_SOURCE,
+  installationFacts,
+  ProjectCliError,
+  type ProjectPort,
+  parseProjectArgs,
+} from '../src/project-cli.ts';
+import { mergedInstallations } from '../src/repo-import-routes.ts';
 
 const T0 = new Date('2026-10-16T09:00:00.000Z');
 
@@ -261,5 +271,172 @@ describe('project register（#2749）', () => {
     expect(s.audits).toHaveLength(2);
     expect(await s.run(['register', 'acme/renamed', '--github-id', '42'])).toBe(1);
     expect(s.err.at(-1)).toContain('acme/new');
+  });
+});
+
+describe('project installations（#2977）', () => {
+  const flux: InstallationListedRepo = {
+    id: 1418484822,
+    owner: 'thoerwink8',
+    name: 'fluxwatch',
+    fullName: 'thoerwink8/fluxwatch',
+    private: true,
+    defaultBranch: 'main',
+    ownerType: 'User',
+    archived: false,
+    empty: false,
+  };
+  const other: InstallationListedRepo = {
+    ...flux,
+    id: 999,
+    name: 'secret-other',
+    fullName: 'thoerwink8/secret-other',
+  };
+  const ARGS = ['installations', 'thoerwink8/fluxwatch', '--github-id', '1418484822'];
+
+  /** 只给 list：真的那份（listInstallationRepositories）只 GET，令牌只要 metadata:read，见 github 的 installation-repos 测试。 */
+  function withSource(list: InstallationReposPort['list']) {
+    const out: string[] = [];
+    const err: string[] = [];
+    const calls: string[] = [];
+    const counts = { opened: 0, closed: 0 };
+    const deps: CliDeps = {
+      env: { DATABASE_URL: 'postgres:///fleet', FLEET_OPS_OPERATOR: 'root' },
+      out: (t) => out.push(t),
+      err: (t) => err.push(t),
+      now: () => T0,
+      openStore: async () => {
+        throw new Error('installations 不该开 Store');
+      },
+      openProject: async () => {
+        throw new Error('installations 不该连 repos 表（登记、档案不是安装事实）');
+      },
+      readFile: async () => {
+        throw new Error('installations 不该读文件');
+      },
+      openInstallationRepos: async () => {
+        counts.opened += 1;
+        return {
+          source: {
+            list: async (role) => {
+              calls.push(role);
+              return list(role);
+            },
+          },
+          close: async () => {
+            counts.closed += 1;
+          },
+        };
+      },
+    };
+    return { out, err, calls, counts, run: (args: string[]) => main(['project', ...args], deps) };
+  }
+
+  it('参数：要 owner/仓名 和 --github-id 正整数；别的写法拒（退出码 2）', () => {
+    expect(parseProjectArgs(ARGS)).toEqual({
+      action: 'installations',
+      owner: 'thoerwink8',
+      name: 'fluxwatch',
+      githubId: 1418484822,
+    });
+    for (const argv of [
+      ['installations', 'thoerwink8/fluxwatch'],
+      ['installations', 'thoerwink8/fluxwatch', '--github-id', '0'],
+      ['installations', 'thoerwink8/fluxwatch', '--github-id', 'x'],
+      ['installations', 'thoerwink8/fluxwatch', '--github-id', '1', '--force'],
+      ['installations', 'fluxwatch', '--github-id', '1'],
+    ]) {
+      expect(() => parseProjectArgs(argv)).toThrow(ProjectCliError);
+      try {
+        parseProjectArgs(argv);
+      } catch (e) {
+        expect((e as ProjectCliError).exitCode).toBe(2);
+      }
+    }
+  });
+
+  it.each([
+    ['两边都在', [flux, other], [flux], true, true],
+    ['只有 agent 在', [flux, other], [other], true, false],
+    ['只有 engine 在', [other], [flux], false, true],
+    ['两边都不在', [other], [other], false, false],
+  ] as const)('完整列表%s：退出码 0，只打目标仓的事实', async (_n, agent, engine, a, e) => {
+    const s = withSource(async (role) => (role === 'agent' ? [...agent] : [...engine]));
+    expect(await s.run(ARGS)).toBe(0);
+    const text = s.out.join('\n');
+    expect(JSON.parse(text)).toEqual({
+      source: INSTALLATIONS_SOURCE,
+      readAt: T0.toISOString(),
+      repo: 'thoerwink8/fluxwatch',
+      githubId: 1418484822,
+      agentInstalled: a,
+      engineInstalled: e,
+      fullyInstalled: a && e,
+      reason: null,
+    });
+    // 别的仓、令牌一样都不打
+    expect(text).not.toContain('secret-other');
+    expect(text).not.toMatch(/token|ghs_|PRIVATE KEY|cookie/i);
+    // 两个角色各列一次（只列，端口上没有写口），用完就关
+    expect([...s.calls].sort()).toEqual(['agent', 'engine']);
+    expect(s.counts).toEqual({ opened: 1, closed: 1 });
+  });
+
+  it('和导入列表同一份归并：结果就是 mergedInstallations 里这个仓号那一行', async () => {
+    const source: InstallationReposPort = {
+      list: async (role) => (role === 'agent' ? [flux, other] : [other]),
+    };
+    const merged = (await mergedInstallations(source)).find((r) => r.repo.id === flux.id);
+    const facts = await installationFacts(
+      { owner: 'thoerwink8', name: 'fluxwatch', githubId: flux.id },
+      { installations: async () => source, now: () => T0 },
+    );
+    expect({ agent: facts.agentInstalled, engine: facts.engineInstalled }).toEqual({
+      agent: merged?.agent,
+      engine: merged?.engine,
+    });
+  });
+
+  it('一个角色没列成：没查成退出 1，写明来源和原因，不打半份', async () => {
+    const s = withSource(async (role) => {
+      if (role === 'engine') throw new Error('engine 换安装令牌 HTTP 502');
+      return [flux];
+    });
+    expect(await s.run(ARGS)).toBe(1);
+    expect(s.out).toEqual([]);
+    expect(s.err.join('\n')).toContain(INSTALLATIONS_SOURCE);
+    expect(s.err.join('\n')).toContain('engine 换安装令牌 HTTP 502');
+    expect(s.counts.closed).toBe(1);
+  });
+
+  it('机器人凭据没读到：没查成退出 1', async () => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const code = await main(['project', ...ARGS], {
+      env: { DATABASE_URL: 'postgres:///fleet' },
+      out: (t) => out.push(t),
+      err: (t) => err.push(t),
+      now: () => T0,
+      openStore: async () => {
+        throw new Error('不该开');
+      },
+      openInstallationRepos: async () => {
+        throw new Error('读不到 /etc/fleet-dao/github/agent.pem');
+      },
+    });
+    expect(code).toBe(1);
+    expect(out).toEqual([]);
+    expect(err.join('\n')).toMatch(/没查成.*agent\.pem/);
+  });
+
+  it('仓号和名字对不上（改名、写错号）：没查成退出 1，不当成没装', async () => {
+    const renamed = { ...flux, name: 'fluxwatch-old', fullName: 'thoerwink8/fluxwatch-old' };
+    const s1 = withSource(async () => [renamed]);
+    expect(await s1.run(ARGS)).toBe(1);
+    expect(s1.err.join('\n')).toContain('身份对不上');
+    const s2 = withSource(async () => [{ ...flux, id: 7 }]);
+    expect(await s2.run(ARGS)).toBe(1);
+    expect(s2.err.join('\n')).toContain('身份对不上');
+    expect(s2.out).toEqual([]);
   });
 });

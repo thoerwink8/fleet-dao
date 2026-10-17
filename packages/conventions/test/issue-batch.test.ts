@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -40,6 +40,7 @@ interface Journal {
 }
 interface FakeOptions {
   failCreate?: number;
+  failLabel?: boolean;
   ambiguousCreate?: number;
   malformedCreate?: number;
   failAttach?: number;
@@ -64,6 +65,8 @@ function setup(options: FakeOptions = {}) {
   let creates = 0;
   const gh: Gh = async (args) => {
     calls.push(args);
+    if (args[0] === 'label' && args[1] === 'create')
+      return options.failLabel ? fail('label-forbidden') : ok('');
     if (args[0] === 'api' && args[1] === '-X' && args[2] === 'POST') {
       if (args[3] === 'repos/{owner}/{repo}/issues') {
         creates += 1;
@@ -143,11 +146,52 @@ function setup(options: FakeOptions = {}) {
     }
     throw new Error(`假 GitHub 不认识调用：${JSON.stringify(args)}`);
   };
-  const run = (input = spec()) => issueBatchNew(input, { gh, cwd, journal });
+  const run = (input = spec()) => issueBatchNew(input, { gh, cwd, journal, warn: () => {} });
   return { cwd, journal, issues, calls, attached, closeAttempts, gh, readJournal, run };
 }
 
 describe('母单与子单原子批量创建', () => {
+  it('母子可显式查询轴，子单逐轴继承母单有效值，旧 spec 不因缺轴回滚', async () => {
+    const input = spec();
+    input.mother.domain = 'api';
+    input.mother.nature = 'process';
+    input.subs = input.subs.map((issue, index) => ({
+      ...issue,
+      ...(index === 0 ? { nature: 'bug' } : { domain: 'mirasim' }),
+    }));
+    const fake = setup();
+    await fake.run(input);
+    expect(
+      fake.issues.map((i) => i.labels.filter((l) => l.startsWith('域:') || l.startsWith('性质:'))),
+    ).toEqual([
+      ['域:api', '性质:process'],
+      ['域:api', '性质:bug'],
+      ['域:mirasim', '性质:process'],
+    ]);
+    expect(fake.calls.filter((args) => args[0] === 'label')).toHaveLength(6);
+    const old = setup();
+    const warnings: string[] = [];
+    await issueBatchNew(spec(), {
+      gh: old.gh,
+      cwd: old.cwd,
+      journal: old.journal,
+      warn: (message) => warnings.push(message),
+    });
+    expect(old.readJournal().status).toBe('complete');
+    expect(warnings).toHaveLength(6);
+    expect(old.closeAttempts).toEqual([]);
+    expect(old.calls.some((args) => args[0] === 'label')).toBe(false);
+  });
+  it('显式轴标签初始化失败时明确报错，尚未创建或补偿任何单', async () => {
+    const input = spec();
+    input.mother.domain = 'engine';
+    const fake = setup({ failLabel: true });
+    await expect(fake.run(input)).rejects.toThrow('整批单尚未创建');
+    expect(fake.issues).toEqual([]);
+    expect(fake.closeAttempts).toEqual([]);
+    expect(existsSync(fake.journal)).toBe(false);
+  });
+
   it('一次返回整批，子单创建时就有 parent 独立行，原生挂接完成才解除暂存标签', async () => {
     const fake = setup();
     const result = await fake.run();

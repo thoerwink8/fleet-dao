@@ -71,14 +71,28 @@ async function myLineage(): Promise<LineageInfo> {
 }
 const promptLogDir = () => process.env.FLEET_PROMPT_LOG_DIR || join(homedir(), '.fleet-dao', 'prompt-log');
 
-/** 没给 --issue 时顺手开的单：杂项、挂当前版本、本机做（正文四节由 directiveIssueDraft 写） */
+/** 没给 --issue 时顺手开的单：杂项、当前版本、本机做。查询轴记 engine / process（引导是流水线自己的流程账）。 */
 async function newIssue(draft: { title: string; body: string }): Promise<number> {
   const dir = mkdtempSync(join(tmpdir(), 'progress-issue-'));
   try {
     const bodyFile = join(dir, 'issue.md');
     writeFileSync(bodyFile, draft.body, 'utf8');
     const r = await issueNew(
-      ['--kind', '杂项', '--milestone', '当前', '--title', draft.title, '--body-file', bodyFile, '--local'],
+      [
+        '--kind',
+        '杂项',
+        '--domain',
+        'engine',
+        '--nature',
+        'process',
+        '--milestone',
+        '当前',
+        '--title',
+        draft.title,
+        '--body-file',
+        bodyFile,
+        '--local',
+      ],
       { gh, cwd: root },
     );
     console.log(`开了单 #${r.number}（${r.milestone}）：${r.url}`);

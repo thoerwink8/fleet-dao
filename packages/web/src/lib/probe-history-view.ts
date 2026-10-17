@@ -1,18 +1,26 @@
 // 渠道状态页上探针历史怎么说（#1139、#1638、#1798 片 7）。格子的颜色和这几句在页面上对得上：
-// 绿通过、红不通、橙疑似换模型、黄没探。
+// 绿通过、红不通、橙疑似换模型、「在等」色连通但额度耗尽（#2939）、黄没探。
 import type {
   ProbeHistoryCell,
   ProbeHistoryResult,
   RouteProbeKind,
   RouteProbeTrigger,
 } from '@fleet-dao/shared';
+import type { Route } from '../api/types';
+import { formatDateTime } from './format';
 import type { Tone } from './status';
 
-/** 一次探测的结论。疑似换模型 = 身份题说出了旧答案（checkPassed === false）；它不是普通不通，颜色单独一种。 */
-export type ProbeKind = ProbeHistoryResult | 'doubt';
+/**
+ * 一次探测的结论。疑似换模型 = 身份题说出了旧答案（checkPassed === false）；它不是普通不通，颜色单独一种。
+ * 额度耗尽 = 连通（passed）但后端明说 quotaExhausted === true：连接是通的，只是此刻额度用完了；缺字段的老行不算。
+ */
+export type ProbeKind = ProbeHistoryResult | 'doubt' | 'quota';
 
-export function probeKind(cell: Pick<ProbeHistoryCell, 'result' | 'checkPassed'>): ProbeKind {
+export function probeKind(
+  cell: Pick<ProbeHistoryCell, 'result' | 'checkPassed'> & { quotaExhausted?: boolean | undefined },
+): ProbeKind {
   if (cell.result === 'failed' && cell.checkPassed === false) return 'doubt';
+  if (cell.result === 'passed' && cell.quotaExhausted === true) return 'quota';
   return cell.result;
 }
 
@@ -21,6 +29,7 @@ export const PROBE_KIND_WORD: Record<ProbeKind, { label: string; tone: Tone | 'd
   passed: { label: '通过', tone: 'done' },
   failed: { label: '不通', tone: 'fail' },
   doubt: { label: '疑似换模型', tone: 'doubt' },
+  quota: { label: '连通但额度耗尽', tone: 'wait' },
   not_probed: { label: '没探', tone: 'stall' },
 };
 
@@ -29,8 +38,56 @@ export const PROBE_KIND_BG: Record<ProbeKind, string> = {
   passed: 'bg-st-done',
   failed: 'bg-st-fail',
   doubt: 'bg-st-doubt',
+  quota: 'bg-st-wait',
   not_probed: 'bg-st-stall',
 };
+
+/** 额度耗尽的重置时间：上游明确给了才写时刻，没给就写没给（不从「约 20 分钟」之类推算）。 */
+export function quotaResetText(resetsAt: string | undefined): string {
+  return resetsAt ? `预计 ${formatDateTime(resetsAt)} 重置` : '重置时间上游没给';
+}
+
+/** 格子、记录行共用的结论词：额度耗尽的带上重置说明，其余照 PROBE_KIND_WORD。 */
+export function probeWord(cell: Parameters<typeof probeKind>[0] & { resetsAt?: string | undefined }): string {
+  const kind = probeKind(cell);
+  return kind === 'quota'
+    ? `${PROBE_KIND_WORD.quota.label}（${quotaResetText(cell.resetsAt)}）`
+    : PROBE_KIND_WORD[kind].label;
+}
+
+/** 这一格就是路由目录里「当前探针」那一次吗（相差不到 1 分钟算同一次）。 */
+export function isCurrentProbe(
+  cell: Pick<ProbeHistoryCell, 'probedAt'> | undefined,
+  probe: Route['probe'],
+): boolean {
+  return (
+    cell !== undefined &&
+    probe !== undefined &&
+    Math.abs(Date.parse(cell.probedAt) - Date.parse(probe.at)) < 60_000
+  );
+}
+
+/**
+ * 此刻额度耗尽的路由：只认和路由当前探针同一次的最新记录（latestByRoute），探针已经有更新的结果了，
+ * 旧的额度记录不再作数。目录里探针不是「通」的路由也不算（额度记录只会出在连通的探测上）。
+ */
+export function currentQuotaCells(
+  latestByRoute: readonly ProbeHistoryCell[],
+  routes: readonly Pick<Route, 'id' | 'probe'>[],
+): Map<string, ProbeHistoryCell> {
+  const out = new Map<string, ProbeHistoryCell>();
+  for (const route of routes) {
+    const cell = latestByRoute.find((c) => c.routeId === route.id);
+    if (
+      cell &&
+      probeKind(cell) === 'quota' &&
+      route.probe?.state === 'ok' &&
+      isCurrentProbe(cell, route.probe)
+    )
+      out.set(route.id, cell);
+  }
+  return out;
+}
 
 /** 探测种类的白话：连通（只回 pong）/ 身份题（pong 加一道知识截止期附近的事实题）。 */
 export const PROBE_TYPE_NAME: Record<RouteProbeKind, string> = { ping: '连通', identity: '身份题' };
