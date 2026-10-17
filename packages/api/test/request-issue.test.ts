@@ -1,6 +1,12 @@
 // 提需求开单的正文（#2060）：原话由系统按时间逐字拼、AI 归纳另起一段、末尾写提出人拍板人和驾驶舱链接、
 // 四节检查和 `pnpm issue:new` 是同一个函数、「要不要人拍」决定标签。纯函数，不碰数据库和 GitHub。
-import { checkIssueBody, HUMAN_DECISION_LABEL, KIND_LABELS } from '@fleet-dao/conventions';
+import {
+  checkIssueBody,
+  HUMAN_DECISION_LABEL,
+  KIND_LABELS,
+  parseMd,
+  sectionText,
+} from '@fleet-dao/conventions';
 import { REQUEST_KINDS } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import {
@@ -111,8 +117,24 @@ describe('末尾：提出人、拍板人、来自驾驶舱 需求 N 和链接', 
 });
 
 describe('checkOpening：四节检查调的是 issue:new 同一个函数', () => {
+  it('分类声明移到独立节，模块节保持原范围，避免被当成未知路径影响派工规模', () => {
+    const modules = '`packages/api/src/request-issue.ts`';
+    const classified = checkOpening(
+      base({ draft: { ...base().draft, modules: `${modules}\n域: api\n性质: process` } }),
+    );
+    expect(classified.ok).toBe(true);
+    if (!classified.ok) return;
+    expect(sectionText(parseMd('issue', classified.body), '已知的模块')?.trim()).toBe(modules);
+    expect(sectionText(parseMd('issue', classified.body), '查询分类')?.trim()).toBe('域:api\n性质:process');
+    const quoted = checkOpening(
+      base({ draft: { ...base().draft, modules: `${modules}\n> 域: mirasim\n域: api\n性质: process` } }),
+    );
+    expect(quoted.ok).toBe(true);
+    if (quoted.ok)
+      expect(sectionText(parseMd('issue', quoted.body), '已知的模块')).toContain('> 域: mirasim');
+  });
   it('模块中的明确分类写成两轴；缺失或冲突时拒开，不从 kind 猜', () => {
-    for (const modules of ['packages/api', '域: api\n域: engine\n性质: bug']) {
+    for (const modules of ['packages/api', 'packages/api\n域: api\n域: engine\n性质: bug']) {
       const result = checkOpening(base({ draft: { ...base().draft, modules, kind: '缺陷' } }));
       expect(result).toMatchObject({ ok: false });
       if (!result.ok) expect(result.why).toContain('查询轴');

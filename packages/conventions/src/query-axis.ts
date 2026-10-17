@@ -18,8 +18,15 @@ export function queryAxisProblems(labels: readonly string[]): string[] {
 
 /** 只认独立声明行或 GitHub issue form 的字段；正文提到某标签不等于选择了它。 */
 export function declaredQueryAxes(body: string): string[] {
+  return extractQueryAxes(body).labels;
+}
+
+/** 声明可另列为元数据，不能混进「已知的模块」参与路径和规模判定。原话、示例与其它文本保留原样。 */
+export function extractQueryAxes(body: string): { labels: string[]; withoutDeclarations: string } {
+  const original = body;
   // 示例、引用和注释里的分类不是声明。
-  body = body.replace(/<!--[\s\S]*?-->/g, '');
+  // 屏蔽时保持字符偏移，才能只从原文移走真声明。
+  body = body.replace(/<!--[\s\S]*?-->/g, (text) => text.replace(/[^\r\n]/g, ' '));
   let fence: string | undefined;
   body = body
     .split('\n')
@@ -28,17 +35,27 @@ export function declaredQueryAxes(body: string): string[] {
       if (mark) {
         if (!fence) fence = mark;
         else if (mark[0] === fence[0] && mark.length >= fence.length) fence = undefined;
-        return '';
+        return ' '.repeat(line.length);
       }
-      return fence || /^\s*>/.test(line) ? '' : line;
+      return fence || /^\s*>/.test(line) ? ' '.repeat(line.length) : line;
     })
     .join('\n');
   const out: string[] = [];
-  const declaration = /^\s*(?:[-*]\s+)?(域|性质)\s*[:：]\s*`?([^\s`]+)`?\s*$/gm;
-  for (const match of body.matchAll(declaration)) out.push(`${match[1]}:${match[2]}`);
-  const field = /^### (域|性质)\s*\r?\n\s*\r?\n([^\r\n]+)\s*$/gm;
-  for (const match of body.matchAll(field)) out.push(`${match[1]}:${match[2]?.trim()}`);
-  return out;
+  const spans: { start: number; end: number }[] = [];
+  const declaration = /^[ \t]*(?:[-*][ \t]+)?(域|性质)[ \t]*[:：][ \t]*`?([^\s`]+)`?[ \t]*\r?$/gm;
+  for (const match of body.matchAll(declaration)) {
+    out.push(`${match[1]}:${match[2]}`);
+    spans.push({ start: match.index, end: match.index + match[0].length });
+  }
+  const field = /^### (域|性质)[ \t]*\r?\n[ \t]*\r?\n([^\r\n]+)[ \t]*\r?$/gm;
+  for (const match of body.matchAll(field)) {
+    out.push(`${match[1]}:${match[2]?.trim()}`);
+    spans.push({ start: match.index, end: match.index + match[0].length });
+  }
+  let withoutDeclarations = original;
+  for (const { start, end } of spans.sort((a, b) => b.start - a.start))
+    withoutDeclarations = withoutDeclarations.slice(0, start) + withoutDeclarations.slice(end);
+  return { labels: out, withoutDeclarations };
 }
 
 /** 缺轴可从明确来源继承；已有冲突、未知值不覆盖，也不按标题/类别猜性质。 */

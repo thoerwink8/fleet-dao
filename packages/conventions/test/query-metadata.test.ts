@@ -2,7 +2,12 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 import { type IssueInfo, liveGitHub } from '../src/github-api.ts';
-import { declaredQueryAxes, queryAxisProblems, resolveQueryAxes } from '../src/query-axis.ts';
+import {
+  declaredQueryAxes,
+  extractQueryAxes,
+  queryAxisProblems,
+  resolveQueryAxes,
+} from '../src/query-axis.ts';
 import { type QueryMetadataPort, reconcileQueryMetadata } from '../src/query-metadata.ts';
 
 const AXES = ['域:engine', '性质:bug'];
@@ -43,6 +48,11 @@ describe('两轴的明确来源', () => {
       expect(queryAxisProblems(labels).length).toBeGreaterThan(0);
   });
   it('独立声明和表单可读；引用、围栏、注释、行内提及不算选择', () => {
+    const original =
+      '`packages/api/src/request-issue.ts`\n> 域: mirasim\n```\n性质: bug\n```\n<!--\n域: engine\n-->\n域: api\n性质: process';
+    const extracted = extractQueryAxes(original);
+    expect(extracted.labels).toEqual(['域:api', '性质:process']);
+    expect(extracted.withoutDeclarations).toBe(original.replace('域: api', '').replace('性质: process', ''));
     expect(declaredQueryAxes('### 域\n\napi\n\n### 性质\n\nperf')).toEqual(['域:api', '性质:perf']);
     expect(
       declaredQueryAxes(

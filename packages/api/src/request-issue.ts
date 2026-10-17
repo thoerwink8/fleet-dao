@@ -11,6 +11,7 @@
 // - 正文写进 GitHub 前过卫生检查：openIssue / commentIssue 自己会过（packages/github 的 assertPublishable），这里把它的拒绝翻成 409 + 原因。
 import {
   checkIssueBody,
+  extractQueryAxes,
   HUMAN_DECISION_LABEL,
   isKindLabel,
   issueBodyTooLong,
@@ -133,7 +134,9 @@ export function composeIssueBody(input: IssueBodyInput): string {
   }
   section('原话', parts.filter(Boolean).join('\n\n'));
 
-  section('已知的模块', draft.modules ?? '');
+  const classification = extractQueryAxes(draft.modules ?? '');
+  section('已知的模块', classification.withoutDeclarations);
+  if (classification.labels.length > 0) section('查询分类', classification.labels.join('\n'));
   if (draft.notDo?.trim()) section('不做什么', draft.notDo);
   if (draft.size?.trim()) section('规模建议', draft.size);
   section('怎么算做完', (draft.done ?? []).map((d) => `- ${d}`).join('\n'));

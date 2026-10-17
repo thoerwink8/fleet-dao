@@ -224,7 +224,7 @@ export {
   PROGRESS_ISSUE,
   stamp as progressStamp,
 } from './progress.ts';
-export { declaredQueryAxes, queryAxisProblems, resolveQueryAxes } from './query-axis.ts';
+export { declaredQueryAxes, extractQueryAxes, queryAxisProblems, resolveQueryAxes } from './query-axis.ts';
 export { fsRepo, type RepoView } from './repo.ts';
 export {
   type ChangedFile,
