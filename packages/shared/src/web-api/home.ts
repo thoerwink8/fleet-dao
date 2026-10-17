@@ -352,6 +352,64 @@ export const HomeHealthSchema = z.object({
   }),
 });
 
+/**
+ * 一个仓现在的里程碑。none = 没排；unread = 读不到（页面写「没记」，不写 0/0）；
+ * ok 的 done/total 是这个里程碑里做完的单 / 一共几张。
+ */
+export const HomeProjectMilestoneSchema = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('none') }),
+  z.object({ state: z.literal('unread'), why: z.string().min(1) }),
+  z.object({
+    state: z.literal('ok'),
+    title: z.string().min(1),
+    done: z.number().int().nonnegative(),
+    total: z.number().int().positive(),
+  }),
+]);
+
+/**
+ * 首页一张项目卡（#2759）：一个仓一行数。本周上线读不到是 null（页面写「没记」，不写 0）。
+ * decisions 是还要创始人拍的、归到这个仓的件数；卡住或还有要拍的，卡排前面。
+ */
+export const HomeProjectSchema = z.object({
+  id: Id,
+  /** owner/name。 */
+  repo: z.string().min(1),
+  shippedThisWeek: z.number().int().nonnegative().nullable(),
+  running: z.number().int().nonnegative(),
+  stuck: z.number().int().nonnegative(),
+  decisions: z.number().int().nonnegative(),
+  milestone: HomeProjectMilestoneSchema,
+});
+
+/**
+ * 合并到发版这条线（顶部一句话）。moving = 在走；stuck = 卡在某一步。
+ * who / since 都空 = 还没人接。老后端没有这一块：页面写「没查成」，不写成在走。
+ */
+export const HomePipelineSchema = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('moving') }),
+  z.object({
+    state: z.literal('stuck'),
+    /** 卡在哪一步，例如「合并」「发版」。 */
+    step: z.string().min(1),
+    /** 谁在修。还没人接是 null。 */
+    who: z.string().min(1).nullable(),
+    /** 这一轮从什么时候开始修。没有是 null，页面不编时长。 */
+    since: Time.nullable(),
+  }),
+]);
+
+/**
+ * 顶部「额度和钱」里的钱：本期估算花费。读不到是 unread（页面写「没记」，不写 $0）。
+ * 额度那半边仍用 health.quota，不在这里再抄一份。
+ */
+export const HomeSpendSchema = z.object({
+  estimated: z.discriminatedUnion('state', [
+    z.object({ state: z.literal('ok'), usd: z.number().nonnegative() }),
+    z.object({ state: z.literal('unread'), why: z.string().min(1) }),
+  ]),
+});
+
 export const HomeResponseSchema = z.object({
   decisions: z.array(HomeDecisionSchema),
   running: z.array(HomeRunningSchema),
@@ -359,6 +417,12 @@ export const HomeResponseSchema = z.object({
   health: HomeHealthSchema,
   /** 三段流水线图头上的数：固定对题 → 动手 → 验收三项，按这个先后。 */
   flow: z.array(HomeFlowStageSchema).length(3),
+  /** 每个仓一张。老后端没有：页面写「没给」，不画空卡冒充没有项目。 */
+  projects: z.array(HomeProjectSchema).optional(),
+  /** 合并到发版这条线。老后端没有。 */
+  pipeline: HomePipelineSchema.optional(),
+  /** 本期估算花费。老后端没有：页面写「没记」。 */
+  spend: HomeSpendSchema.optional(),
   /** 此刻在跑的会话数、已选定还没开跑的数：和法国页、额度页、路由页同一个来源（池占用）。老后端没有这一项。 */
   slots: z.object({ running: z.number().int().min(0), reserved: z.number().int().min(0) }).optional(),
   /** 这台机器此刻的内存、CPU（#1973）。老后端、老环境推来的快照没有：页面写明「没给资源读数」，不画 0。 */

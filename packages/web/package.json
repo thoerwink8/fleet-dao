@@ -12,6 +12,7 @@
     "dev:mock": "react-router dev --mode mock",
     "build": "react-router build",
     "preview": "vite preview --outDir dist/client",
+    "lint:design": "node scripts/lint-design.ts",
     "e2e": "playwright test -c e2e/playwright.config.ts",
     "e2e:serve": "node e2e/support/serve.ts",
     "gen:palettes": "node scripts/gen-palettes.ts"

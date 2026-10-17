@@ -1,4 +1,6 @@
-// 主页（/）：创始人一打开就看到三件事（决定 0093），按重要度从上到下：
+// 主页（/）：创始人一打开就看到现在怎样（#2759 在三块之上加了三样）：
+// 0. 一句话：有几件要你定 / 流水线卡在哪一步、谁在修了多久 / 在走；旁边一行额度和本期估算（读不到写「没记」）。
+//    再按仓出卡：本周上线几版、在跑几张、卡住几张、当前里程碑，有问题的排前面。
 // 1. 要你拍的：只放真要他拍的（四类人闸 + 看门狗进来的卡），一条一行；人闸的选项就是按钮，看门狗只写谁在修、开了多久；
 // 2. 在跑的：法国引擎和本机在做的，一件一行：事、谁在做、进度、卡没卡；
 // 3. 上线了的：最近切到法国的版本，一句话说清改了什么，带上它带的 PR。
@@ -14,8 +16,11 @@ import {
   useLocalSessions,
   useNodeHome,
 } from '../api/client';
+import { Headline } from '../components/home/headline';
 import { HealthStrip } from '../components/home/health-strip';
 import { MissingEnv } from '../components/home/missing-env';
+import { ProjectCards } from '../components/home/project-cards';
+import { SpendLine } from '../components/home/spend-line';
 import {
   AskBlock,
   RemoteAskBlock,
@@ -80,6 +85,12 @@ export default function Home() {
             reportedAt={remote.node.reportedAt}
           />
         ) : null}
+        {state.status === 'data' ? (
+          <>
+            <Headline decisions={state.data.decisions.length} pipeline={state.data.pipeline} />
+            <SpendLine quota={state.data.health.quota} spend={state.data.spend} />
+          </>
+        ) : null}
         {/* 要你拍的只读通知，不等主页那份聚合：主页没读成也照样能拍 */}
         {nodeId === null ? <AskBlock /> : null}
         {nodeId !== null && state.status === 'error' && isNotFound(state.error) ? (
@@ -92,11 +103,13 @@ export default function Home() {
           <NotBuilt notWired={state.notWired} />
         ) : nodeId === null ? (
           <>
+            <ProjectCards projects={state.data.projects} />
             <RunBlock running={state.data.running} />
             <ShippedBlock done={state.data.done} />
           </>
         ) : (
           <>
+            <ProjectCards projects={state.data.projects} />
             <RemoteAskBlock decisions={state.data.decisions} machine={machine} />
             <RemoteRunBlock running={state.data.running} />
             <RemoteShippedBlock />

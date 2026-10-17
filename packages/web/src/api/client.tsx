@@ -933,6 +933,9 @@ function homeDataOf(data: HomeResponse): HomeData {
     flow: data.flow,
     slots: data.slots,
     resources: data.resources,
+    projects: data.projects,
+    pipeline: data.pipeline,
+    spend: data.spend,
   };
 }
 

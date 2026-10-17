@@ -11,9 +11,12 @@ import type {
   HomeDoneSchema,
   HomeFlowStageSchema,
   HomeHealthSchema,
+  HomePipelineSchema,
+  HomeProjectSchema,
   HomeResourcesSchema,
   HomeResponseSchema,
   HomeRunningSchema,
+  HomeSpendSchema,
   NotWired,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
@@ -39,6 +42,15 @@ export type HomeHealth = z.infer<typeof HomeHealthSchema>;
 /** 这台机器此刻的内存、CPU 和各会话的占用（#1973）。 */
 export type HomeResources = z.infer<typeof HomeResourcesSchema>;
 
+/** 首页一张项目卡。 */
+export type HomeProject = z.infer<typeof HomeProjectSchema>;
+
+/** 合并到发版这条线：在走，或卡在某一步。 */
+export type HomePipeline = z.infer<typeof HomePipelineSchema>;
+
+/** 本期估算花费。读不到是 unread。 */
+export type HomeSpend = z.infer<typeof HomeSpendSchema>;
+
 /** 一屏三块 + 状态条的整份数据。 */
 export interface HomeData {
   decisions: HomeDecision[];
@@ -51,6 +63,12 @@ export interface HomeData {
   slots?: HomeSlots | undefined;
   /** 这台机器此刻的资源；老后端、老快照没有（页面写明没给，不画 0）。推送的 resources 事件直接换掉它。 */
   resources?: HomeResources | undefined;
+  /** 每个仓一张。老后端没有。 */
+  projects?: HomeProject[] | undefined;
+  /** 合并到发版这条线。老后端没有。 */
+  pipeline?: HomePipeline | undefined;
+  /** 本期估算花费。老后端没有。 */
+  spend?: HomeSpend | undefined;
 }
 
 /**
