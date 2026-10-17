@@ -3,6 +3,7 @@
 // 只在无人值守时判，人在场时什么都不查。
 //
 // 判法（人在不在场都判，stop.mjs 在无人值守那一段之前调）：
+// 0. 本会话显式 off → 停止优先，不读队列、不再拉起；从未开启且未 off 的会话仍照常对账。
 // 1. 有子代理在跑（Stop 输入 background_tasks 里 type 不是 shell、monitor 的：subagent、workflow、teammate……）或有定时唤醒
 //    （session_crons）→ 放行，它们收口会把会话叫回来。只有后台命令、监视器在跑不算：照样往下判。
 // 2. 这个会话的无人值守是 done / needs-you（paused）→ 放行：它已经说了做完、或在等人拍。
@@ -22,7 +23,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { judgeCapacity, readCapacityAsync } from './capacity.mjs';
 import { fleetHome, mergeStamp, readStamp } from './subagent-ledger.mjs';
-import { cleanId, MAX_STREAK, readState } from './unattended.mjs';
+import { cleanId, explicitlyOff, MAX_STREAK, readState } from './unattended.mjs';
 
 /** 仓里 subagent:stats 的相对路径 */
 export const STATS_BIN = join('packages', 'conventions', 'src', 'bin', 'subagent-stats.ts');
@@ -289,6 +290,11 @@ function enforceNotice({ input, enforceStats = defaultEnforce }) {
  * @returns {Promise<{ block: true, reason: string } | { block: false, notice?: string }>}
  */
 export async function decideQueueStop(opts) {
+  try {
+    if (explicitlyOff(opts.dir, opts.sessionId)) return { block: false };
+  } catch (err) {
+    return { block: false, notice: `会话停止记录没查成：${why(err)}；不再拉起队列。` };
+  }
   const extra = enforceNotice(opts);
   const r = await decideQueue(opts);
   if (r.block || !extra) return r;

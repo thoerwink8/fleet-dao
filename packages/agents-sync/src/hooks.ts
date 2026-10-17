@@ -22,8 +22,11 @@ import {
   HOOKS_DIR,
   type HookSpec,
   type HookTarget,
+  MIRASIM_CODEX_HOMES,
+  type Place,
   type Platform,
   placeOn,
+  slashed,
 } from './targets.ts';
 import { linkTarget, readTree, removeEntry, sameTree, treeDiff, writeTree } from './tree.ts';
 
@@ -255,10 +258,45 @@ export interface HookSkip {
 }
 
 /** 这台装了的那几家要的钩子；skip 那类去掉（去掉后一条不剩的设置文件整份不管） */
-function wanted(ctx: Ctx, skip?: HookSkip): HookTarget[] {
-  return HOOK_TARGETS.filter((t) => t.readers.some((r) => ctx.installed.has(r)))
+function wanted(
+  ctx: Ctx,
+  skip?: HookSkip,
+): { targets: HookTarget[]; problems: { key: string; why: string }[] } {
+  const all = [...HOOK_TARGETS];
+  const problems: { key: string; why: string }[] = [];
+  const codex = HOOK_TARGETS.find((t) => t.format === 'codex');
+  if (ctx.installed.has('codex') && codex) {
+    for (const home of MIRASIM_CODEX_HOMES) {
+      const rel = placeOn(home, ctx.platform);
+      try {
+        let dir = ctx.home;
+        let present = true;
+        // 逐层拒绝链接，不能通过受管路径里的 junction/symlink 写到用户指定的其他目录。
+        for (const part of rel.split(/[\\/]/)) {
+          dir = join(dir, part);
+          const st = lstatOrNull(dir);
+          if (st === null) {
+            present = false;
+            break;
+          }
+          if (st.isSymbolicLink() || !st.isDirectory())
+            throw new Error('受管家目录或其上级不是实目录，不跟随链接');
+        }
+        if (present)
+          all.push({
+            ...codex,
+            settings: { win32: `${home.win32}\\hooks.json`, linux: `${home.linux}/hooks.json` },
+          });
+      } catch (err) {
+        problems.push({ key: `~/${slashed(rel)}`, why: code(err) });
+      }
+    }
+  }
+  const targets = all
+    .filter((t) => t.readers.some((r) => ctx.installed.has(r)))
     .map((t) => (skip ? { ...t, hooks: t.hooks.filter((h) => h.event !== skip.event) } : t))
     .filter((t) => t.hooks.length > 0);
+  return { targets, problems };
 }
 
 /** 这家有、但没登记的那类钩子（targets.ts 的 lacks）：每次都报一行 */
@@ -410,8 +448,8 @@ function checkSettings(ctx: Ctx, t: HookTarget): Line {
 }
 
 export function checkHooks(ctx: Ctx, src: Sources, skip?: HookSkip): Line[] {
-  const targets = wanted(ctx, skip);
-  const out: Line[] = [];
+  const { targets, problems } = wanted(ctx, skip);
+  const out: Line[] = problems.map((p) => line('unknown', p.key, `没查成——${p.why}`));
   if (targets.length === 0) {
     out.push(line('skip', scriptsKey(ctx).key, noneLine()));
   } else {
@@ -432,29 +470,39 @@ export function checkHooks(ctx: Ctx, src: Sources, skip?: HookSkip): Line[] {
  */
 function codexTrust(ctx: Ctx, t: HookTarget, backups: Backups | null): Line {
   const { abs } = relOf(ctx, t.settings);
+  const config = codexConfig(t);
   let read: Read;
   try {
     read = readSettings(abs);
   } catch (err) {
     return line(
       backups ? 'failed' : 'unknown',
-      trustKey(ctx),
+      trustKey(ctx, config),
       `${backups ? '没做成' : '没查成'}——hooks.json 读不了（${code(err)}）`,
     );
   }
   if (read.kind === 'bad')
     return line(
       backups ? 'failed' : 'unknown',
-      trustKey(ctx),
+      trustKey(ctx, config),
       `${backups ? '没动' : '没查成'}——hooks.json ${read.why}`,
     );
   const root = read.kind === 'ok' ? read.root : {};
   const { needs, absent } = trustNeeds(abs, root, t.hooks, (script) =>
     commandIn(t, ctx.home, ctx.platform, script),
   );
-  if (!backups) return checkCodexTrust(ctx, needs, absent);
-  if (absent.length) return line('failed', trustKey(ctx), `没动——${absent.join('、')} 没登记上，不记信任`);
-  return applyCodexTrust(ctx, needs, backups);
+  if (!backups) return checkCodexTrust(ctx, needs, absent, config);
+  if (absent.length)
+    return line('failed', trustKey(ctx, config), `没动——${absent.join('、')} 没登记上，不记信任`);
+  return applyCodexTrust(ctx, needs, backups, config);
+}
+
+/** 信任必须写在该 hooks.json 同一个 Codex 家目录，不能把隔离入口的键写进默认配置。 */
+function codexConfig(t: HookTarget): Place {
+  return {
+    win32: t.settings.win32.replace(/hooks\.json$/, 'config.toml'),
+    linux: t.settings.linux.replace(/hooks\.json$/, 'config.toml'),
+  };
 }
 
 function applyScripts(ctx: Ctx, src: Sources): Line {
@@ -600,8 +648,8 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
 }
 
 export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: HookSkip): Line[] {
-  const targets = wanted(ctx, skip);
-  const out: Line[] = [];
+  const { targets, problems } = wanted(ctx, skip);
+  const out: Line[] = problems.map((p) => line('failed', p.key, `没做成——${p.why}`));
   if (targets.length === 0) {
     out.push(line('skip', scriptsKey(ctx).key, noneLine()));
     return [...out, ...skipLines(skip), ...gapLines(ctx)];
@@ -632,7 +680,7 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
     if (t.format === 'codex')
       out.push(
         settings.kind === 'failed'
-          ? line('failed', trustKey(ctx), '没动——钩子没登记上，不记信任')
+          ? line('failed', trustKey(ctx, codexConfig(t)), '没动——钩子没登记上，不记信任')
           : codexTrust(ctx, t, backups),
       );
   }

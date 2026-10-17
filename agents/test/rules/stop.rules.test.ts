@@ -4,9 +4,7 @@
 //    退出码恒为 0，输出里不许有 decision（会拦下 Stop）、不许有 hookSpecificOutput（additionalContext 会让对话接着走）。
 // 2. 决定 0028（创始人 2026-10-07 约 02:27 推翻 0026 的「这一轮结束、收尾不拦」）：只有这个会话自己跑了 `on` 才挡；
 //    起子代理、监视、后台命令不自动开；off、done / needs-you、满 12 小时、总次数到上限都放行。
-// 3. 决定 0093（创始人 2026-10-14 16:30「我都同意……」）：还有东西在跑（Stop 输入的 background_tasks、session_crons
-//    不空）就放行，它们的完成通知会叫醒会话；什么都没在跑才挡，连着挡 3 次放行一次并记进状态文件（无人值守仍开着）。
-//    中间调没调工具不再算数（一个会话 sleep 轮询着被挡了 247 次）。
+// 3. 无人值守未完成工作同步续轮；后台条数不能证明送达。成功新工作重置无进展计数，三次无进展明确暂停故障。
 // 命令行外壳：真 spawn 这个文件，喂 stdin，看退出码和 stdout——测的是钩子实际接到 Claude Code 输入时的样子，不是内部函数。
 // 这份文件每条都要起真的 node 子进程（本机实测一条 0.4 秒上下；满载并行跑时更慢），默认 5 秒的超时会误红（#718：13 个子进程 6057ms）。
 // 子进程一律经 ../child.ts 的 runChild 起：每个子进程自带上限，卡死由它杀掉并抛出；用例不设 vitest 的超时（#264）。
@@ -165,7 +163,7 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     const env = isolatedEnv(temp('state'), SID);
     const turned = cli(['on'], env);
     expect(turned.status).toBe(0);
-    expect(turned.stdout).toContain('Agent 子代理');
+    expect(turned.stdout).toContain('不代表 Stop 已登记、信任或执行验证');
     for (const active of [false, true]) {
       const r = stop(env, { stop_hook_active: active });
       expect(r.status).toBe(0);
@@ -178,9 +176,9 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     const env = isolatedEnv(temp('state'), SID);
     cli(['on'], env);
     const reason: string = JSON.parse(stop(env).stdout.trim()).reason;
-    expect(reason).toContain('Agent 子代理');
+    expect(reason).toContain('CLI 支持的子代理');
     expect(reason).toContain('完成通知');
-    expect(reason).toContain('patrol.mjs');
+    expect(reason).toContain('阻塞等待工具');
     expect(reason).toContain('progress note');
     expect(reason).toContain('别空转');
     for (const k of ['done', 'needs-you', 'off']) expect(reason).toContain(`unattended.mjs ${k}`);
@@ -277,7 +275,7 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(existsSync(stateFile(dir))).toBe(false);
   });
 
-  it('放行三（防死循环）：什么都没在跑、连着挡了 3 次，第 4 次放行一次、写明原因、记进状态文件；无人值守仍开着，下一次又从头挡', () => {
+  it('防死循环：连续三次无实质进展，第四次明确故障暂停，不能仍标 on 假装接续', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
     seed(dir, { totalBlocks: 1 });
@@ -288,30 +286,31 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(blocked(r.stdout)).toBe(false);
     expect(r.stdout).toContain('连着挡了 3 次');
     const s = readS(dir);
-    expect(s.state).toBe('on');
-    expect(s.streak).toBe(0);
+    expect(s.state).toBe('paused');
+    expect(s.note).toContain('接续故障');
     expect(s.streakReleases).toBe(1);
     expect(typeof s.lastStreakReleaseAt).toBe('string');
-    expect(blocked(stop(env, none).stdout)).toBe(true);
+    expect(blocked(stop(env, none).stdout)).toBe(false);
   });
 
-  it('放行四：还有东西在跑（background_tasks 有子代理、后台命令、监视，或 session_crons 有定时唤醒）——放行、不说话、连着挡的计数清零', () => {
+  it('后台任务/定时唤醒条数不能证明通知送达，仍续轮并要求显式收结果', () => {
     const dir = temp('state');
     const env = isolatedEnv(dir, SID);
-    seed(dir, { totalBlocks: 5, streak: 2 });
+    seed(dir, { totalBlocks: 5, streak: 0 });
     const task = { id: 'b1', type: 'subagent', status: 'running', description: '写代码' };
     const r = stop(env, { background_tasks: [task], session_crons: [] });
     expect(r.status).toBe(0);
-    expect(r.stdout.trim()).toBe('');
-    expect(readS(dir).streak).toBe(0);
-    expect(readS(dir).totalBlocks).toBe(5);
+    expect(blocked(r.stdout)).toBe(true);
+    expect(r.stdout).toContain('先收结果');
+    expect(readS(dir).streak).toBe(1);
+    expect(readS(dir).totalBlocks).toBe(6);
     const shell = { id: 'b2', type: 'shell', status: 'running', command: 'pnpm test' };
-    expect(blocked(stop(env, { background_tasks: [shell] }).stdout)).toBe(false);
+    expect(blocked(stop(env, { background_tasks: [shell] }).stdout)).toBe(true);
     expect(
       blocked(
         stop(env, { background_tasks: [], session_crons: [{ id: 'c1', cron: '*/10 * * * *' }] }).stdout,
       ),
-    ).toBe(false);
+    ).toBe(true);
     expect(readS(dir).state).toBe('on');
   });
 
@@ -444,8 +443,8 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     expect(lines()).toEqual([]);
     cli(['on'], env);
     expect(lines().join('')).toContain('无人值守开着');
-    expect(lines().join('')).toContain('不要空着收尾');
-    expect(lines().join('')).toContain('完成通知');
+    expect(lines().join('')).toContain('必须接到下一轮');
+    expect(lines().join('')).toContain('不能只凭任务存在就结束');
     cli(['needs-you', '要花钱'], env);
     expect(lines().join('')).toContain('暂停着（要花钱）');
   });
@@ -545,6 +544,27 @@ describe('规矩：收轮前对账——有可接的活、容量够、没有子�
     expect(reason).not.toContain('#12');
     expect(reason).toContain('空闲内存 16.0G');
     expect(reason).toContain('pnpm work queue');
+  });
+
+  it('显式off优先于队列，不再拉起本会话；另一个从未开启的会话仍照常对账，重新on才恢复', async () => {
+    const dir = temp('state');
+    const env = isolatedEnv(dir, SID);
+    expect(cli(['on'], env).status).toBe(0);
+    expect(cli(['off'], env).status).toBe(0);
+    const stopped = decide({ dir });
+    expect(await stopped.p).toEqual({ block: false });
+    expect(stopped.calls).toEqual({ queue: 0, cap: 0 });
+    const root = fakeRepo("throw new Error('off queue must not run')");
+    expect(
+      run(
+        JSON.stringify({ hook_event_name: 'Stop', session_id: SID, cwd: root }),
+        undefined,
+        env,
+      ).stdout.trim(),
+    ).toBe('');
+    expect((await decide().p).block).toBe(true);
+    expect(cli(['on'], env).status).toBe(0);
+    expect((await decide({ dir }).p).block).toBe(true);
   });
 
   it('只有后台命令、监视器在跑：不算有人在干活，照挡', async () => {

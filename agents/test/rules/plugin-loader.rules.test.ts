@@ -109,6 +109,17 @@ const projectHooks = (): Settings => ({
         ],
       },
     ],
+    PostToolUse: [
+      {
+        hooks: [
+          {
+            type: 'command',
+            command: 'node "$CLAUDE_PROJECT_DIR/agents/hooks/continuation-progress.mjs"',
+            timeout: 10,
+          },
+        ],
+      },
+    ],
     Stop: [
       {
         hooks: [
@@ -147,11 +158,12 @@ const projectHooks = (): Settings => ({
 });
 
 describe('订阅目录（决定 0085）', () => {
-  it('过程组就是这七条，超时和 fleet-dao 项目设置一致', () => {
+  it('过程组包含完成进展登记，超时和 fleet-dao 项目设置一致', () => {
     expect(PROCESS_HOOKS.map((hook) => [hook.script, hook.event, hook.timeout])).toEqual([
       ['bootstrap.mjs', 'SessionStart', 120],
       ['session-start.mjs', 'SessionStart', 90],
       ['main-thread.mjs', 'PreToolUse', 10],
+      ['continuation-progress.mjs', 'PostToolUse', 10],
       ['stop.mjs', 'Stop', 10],
       ['inbox-watch.mjs', 'Stop', 11_400],
       ['work-watch.mjs', 'Stop', 11_400],

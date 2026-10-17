@@ -21,6 +21,7 @@ export const PROCESS_HOOKS = [
   { event: 'SessionStart', script: 'bootstrap.mjs', timeout: 120 },
   { event: 'SessionStart', script: 'session-start.mjs', timeout: 90 },
   { event: 'PreToolUse', script: 'main-thread.mjs', timeout: 10 },
+  { event: 'PostToolUse', script: 'continuation-progress.mjs', timeout: 10 },
   { event: 'Stop', script: 'stop.mjs', timeout: 10 },
   // 收尾后盯账（单 #2488）：盯账进程最多等 3 小时（inbox-watch.mjs 的 WATCH_MAX_MS），超时给到 3 小时 10 分
   {
