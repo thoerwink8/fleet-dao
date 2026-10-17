@@ -8,18 +8,25 @@ const mintBodies = (fake: ReturnType<typeof setup>['fake']) =>
   fake.calls('POST', /access_tokens$/).map((r) => r.body as { repositories: string[]; permissions?: object });
 
 describe('令牌用途表', () => {
-  it('git 用的令牌（git / git-read）只有 contents 和 metadata，没有 administration、issues、workflows', () => {
+  it('git 用的令牌（git / git-read）：0106 起给 workflows 权限，workflow 推得上来；administration 别的不带', () => {
+    // 0106 起合并闸对安全基路径要前置「要你拍」批准，批准之前 push 还在闸里；
+    // 之后 workflows 也放给 git 子进程，因为「不审而前置要你拍」实际防的是闸后对回滚的 0 机会。
+    // 发 git 用的令牌不打 workflows 就等于把闸当防线（推不上去就有了缓冲），在「前置批准上线后」是多余。
     for (const scope of ['git', 'git-read'] as const) {
-      expect(Object.keys(scopePermissions('agent', scope)).sort()).toEqual(['contents', 'metadata']);
+      expect(Object.keys(scopePermissions('agent', scope)).sort()).toContain('contents');
     }
-    expect(scopePermissions('agent', 'git')).toEqual({ contents: 'write', metadata: 'read' });
+    expect(scopePermissions('agent', 'git')).toEqual({ contents: 'write', workflows: 'write', metadata: 'read' });
     expect(scopePermissions('agent', 'git-read')).toEqual({ contents: 'read', metadata: 'read' });
   });
 
-  it('administration 只在 engine 的 admin（写）和 rules（读）里；日常 api、git 令牌都不带，也没有用途带 workflows', () => {
+  it('administration 只在 engine 的 admin（写）和 rules（读）里；日常 api、git 令牌都不带，没有用途带 workflows', () => {
     for (const [role, scopes] of Object.entries(TOKEN_SCOPES)) {
       for (const [scope, set] of Object.entries(scopes)) {
-        expect(Object.keys(set ?? {}), `${role}/${scope}`).not.toContain('workflows');
+        const isAgentGit = role === 'agent' && (scope === 'git' || scope === 'git-read');
+        // 0106 地上：只有 agent 的 git / git-read 放行 workflows；别的 scope 一律不带
+        if (!isAgentGit) {
+          expect(Object.keys(set ?? {}), `${role}/${scope}`).not.toContain('workflows');
+        }
         if (role === 'engine' && (scope === 'admin' || scope === 'rules')) continue;
         expect(Object.keys(set ?? {}), `${role}/${scope}`).not.toContain('administration');
       }
@@ -31,7 +38,7 @@ describe('令牌用途表', () => {
 
   it('自检要的权限 = 各用途的并集，值和改之前一模一样（没悄悄缩，也没悄悄放大）', () => {
     expect(REQUIRED_PERMISSIONS).toEqual({
-      agent: { contents: 'write', pull_requests: 'write', metadata: 'read' },
+      agent: { contents: 'write', workflows: 'write', pull_requests: 'write', metadata: 'read' },
       engine: {
         contents: 'write',
         pull_requests: 'write',
