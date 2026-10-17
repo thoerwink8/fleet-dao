@@ -1,8 +1,9 @@
 name: e2e-flaky
 # 驾驶舱 e2e 的偶发统计（决定 0093）：每一轮主线 ci 跑完，取近 10 轮跑了 e2e 的主线推送的报告（artifact e2e-<运行号>-<第几次运行>-<分片>
-# 里的 results*.json），同一条用例偶发（首跑红、重试才过；真红不算）达 2 次的开一张单（超过 5 条只开一张汇总单，一次最多新开 3 张，#2735）：限期 7 天修、带最近失败的链接、写明怎么放进隔离集
+# 里的 results*.json）。主线红了会重跑，同一运行号下有两次报告：只取最后一次运行，那一次的分片都算，不把两次当成两轮。
+# 同一条用例偶发（首跑红、重试才过；真红不算）达 2 次的开一张单（超过 5 条只开一张汇总单，一次最多新开 3 张，#2735）：限期 7 天修、带最近失败的链接、写明怎么放进隔离集
 # （packages/web/e2e/quarantine.json，照跑照报不挡）。同标题已有开着的单就不再开。判法在 packages/conventions/src/e2e-flaky.ts。
-# 隔离集只认仓里的文件（必过检查只看检出的文件，#87），所以这里只开单、不改仓：放进隔离集是跟单的人开 PR 做。
+# 隔离集只认仓里的文件（必过检查只看检出的文件，#87），所以这里只开单、不改仓：放进、移出由引擎定时任务 e2e-quarantine 开 PR。
 # 只读主线上的代码和 GitHub 的运行记录，不跑 PR 的代码。
 on:
   workflow_run:
@@ -40,15 +41,13 @@ jobs:
           got=0
           for id in $(jq -r '.[].databaseId' "$RUNNER_TEMP/runs.json"); do
             [ "$got" -ge 10 ] && break
-            # 没跑 e2e 的轮没有这个 artifact，跳过；下载失败（过期、网络）同样跳过，少一轮不冒充「没偶发」：见下一步打出的轮数
-            if gh run download -R "$GITHUB_REPOSITORY" "$id" -p 'e2e-*' -D "$RUNNER_TEMP/reports/$id-dl" >/dev/null 2>&1; then
-              mkdir -p "$RUNNER_TEMP/reports/$id"
-              i=0
-              while IFS= read -r f; do
-                i=$((i + 1))
-                cp "$f" "$RUNNER_TEMP/reports/$id/results-$i.json"
-              done < <(find "$RUNNER_TEMP/reports/$id-dl" -name 'results*.json')
-              [ "$i" -gt 0 ] && got=$((got + 1))
+            # 没跑 e2e 的轮没有这个 artifact，跳过；下载失败（过期、网络）同样跳过，少一轮不冒充「没偶发」：见下一步打出的轮数。
+            # -p 'e2e-*'：多个 artifact 时 gh 按名字建子目录（e2e-<运行号>-<第几次运行>-<分片>），扫描按分片取最后一次。
+            # 只下到一个时文件摊平在根上，这一轮也就这一份，没有另一次可混。
+            if gh run download -R "$GITHUB_REPOSITORY" "$id" -p 'e2e-*' -D "$RUNNER_TEMP/reports/$id" >/dev/null 2>&1; then
+              if [ -n "$(find "$RUNNER_TEMP/reports/$id" -name 'results*.json' -print -quit)" ]; then
+                got=$((got + 1))
+              fi
             fi
           done
           echo "取到 $got 轮有报告的主线 e2e"

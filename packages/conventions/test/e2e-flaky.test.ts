@@ -16,6 +16,7 @@ import {
   outcomesOf,
   parseQuarantine,
   planIssues,
+  runFromArtifacts,
   runSummary,
 } from '../src/e2e-flaky.ts';
 import { checkIssueBody } from '../src/issue-new.ts';
@@ -401,5 +402,77 @@ describe('单子和汇总', () => {
     expect(text).toContain('- 07c-nodes.e2e.ts › 乙：failed（#5，限期 2026-10-10，**过了限期**）');
     expect(text).toContain('- 07c-nodes.e2e.ts › 戊：这一轮没跑（#6，限期 2026-10-30）');
     expect(runSummary(outcomes({ 丙: ['expected'] }), [], '2026-10-14')).toContain('没有偶发');
+  });
+});
+
+describe('同一轮重跑（artifact 名带 run_attempt）：每一片取最后一次', () => {
+  test('第一次偶发或真红、第二次才过：只算第二次，不把这一轮算成两次；没重跑的那一片仍算上', () => {
+    const run = runFromArtifacts('https://ci/9', [
+      {
+        name: 'e2e-9-1-1/results.json',
+        report: report([{ file: 'a.e2e.ts', title: '甲', statuses: ['flaky'] }]),
+      },
+      {
+        name: 'e2e-9-1-2/results.json',
+        report: report([{ file: 'b.e2e.ts', title: '乙', statuses: ['unexpected'] }]),
+      },
+      {
+        name: 'e2e-9-2-1/results.json',
+        report: report([{ file: 'a.e2e.ts', title: '甲', statuses: ['expected'] }]),
+      },
+      {
+        name: 'e2e-9-2-2/results.json',
+        report: report([{ file: 'b.e2e.ts', title: '乙', statuses: ['flaky'] }]),
+      },
+    ]);
+    expect(run.outcomes.get('a.e2e.ts › 甲')?.outcome).toBe('passed');
+    expect(run.outcomes.get('b.e2e.ts › 乙')?.outcome).toBe('flaky');
+    // 阈值降到 1：乙只记 1 轮。若把第一次运行也算成一轮，乙会是 2。
+    expect(flakyTests([run], 1)).toEqual([
+      { key: { file: 'b.e2e.ts', title: '乙' }, bad: 1, ran: 1, urls: ['https://ci/9'] },
+    ]);
+    // 只重跑了失败的第 1 片：第 2 片没有第二次，仍用第一次，不漏
+    const partial = runFromArtifacts('https://ci/8', [
+      {
+        name: 'e2e-8-1-1/results.json',
+        report: report([{ file: 'a.e2e.ts', title: '甲', statuses: ['flaky'] }]),
+      },
+      {
+        name: 'e2e-8-1-2/results.json',
+        report: report([{ file: 'b.e2e.ts', title: '乙', statuses: ['expected'] }]),
+      },
+      {
+        name: 'e2e-8-2-1/results.json',
+        report: report([{ file: 'a.e2e.ts', title: '甲', statuses: ['expected'] }]),
+      },
+    ]);
+    expect(partial.outcomes.get('a.e2e.ts › 甲')?.outcome).toBe('passed');
+    expect(partial.outcomes.get('b.e2e.ts › 乙')?.outcome).toBe('passed');
+    expect(flakyTests([partial], 1)).toEqual([]);
+  });
+
+  test('重跑前的全局错不算；最后一次没有全局错，这一轮不是整轮坏了', () => {
+    const bad = report([{ file: 'a.e2e.ts', title: '甲', statuses: ['unexpected'] }]) as {
+      errors?: unknown[];
+    };
+    bad.errors = [{}];
+    const run = runFromArtifacts('https://ci/4', [
+      { name: 'e2e-4-1-1/results.json', report: bad },
+      {
+        name: 'e2e-4-2-1/results.json',
+        report: report([{ file: 'a.e2e.ts', title: '甲', statuses: ['expected'] }]),
+      },
+    ]);
+    expect(run.globalError).toBeUndefined();
+    expect(isBrokenRound(run)).toBe(false);
+    expect(run.outcomes.get('a.e2e.ts › 甲')?.outcome).toBe('passed');
+  });
+
+  test('名字里没有第几次运行：平铺的分片都留下，不漏', () => {
+    const run = runFromArtifacts('https://ci/3', [
+      { name: 'results-1.json', report: report([{ file: 'a.e2e.ts', title: '甲', statuses: ['expected'] }]) },
+      { name: 'results-2.json', report: report([{ file: 'b.e2e.ts', title: '乙', statuses: ['flaky'] }]) },
+    ]);
+    expect([...run.outcomes.keys()].sort()).toEqual(['a.e2e.ts › 甲', 'b.e2e.ts › 乙']);
   });
 });
