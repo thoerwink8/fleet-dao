@@ -6,7 +6,8 @@
 // 永远判成「停了」——它不会再跑，也没人能去处理，只会白占一条卡住报警。#1140 起引擎起来时还会把它们的登记行从
 // scheduled_jobs 里摘掉（real/jobs.ts），这里的筛选是引擎还没来得及起新版本时的兑底。
 // 「主线 N 小时没合 PR」（决定 0093）读同一个库的 mergeStallFacts（PR 镜像、任务、拉单记下的等空位单数）。
-// 「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来）读同一个库的 quotaTable，加额度配置（deploy/quota.json）里写明不读的池。
+// 「在用的账号池额度读数不超过 30 分钟」（决定 0093 从每小时对账搬来）读同一个库的 quotaTable，加当前版本额度配置
+// 加载后有效 notRead 里的池（包括 deploy/france/mirasim-retired 触发的退役池）。
 // 「提醒真的推到飞书了」读同一个库的 feishuPushFacts（后端写的推送状态、送达记录）。
 // 拼车池整池暂停时 carpool-watch 不要求新鲜（和盯读、引擎起来时的登记同一句，pool-holds.ts 的 carpoolPoolsHeldReason）：
 // 摘登记行挡不住启动时 registerEngineJobs 把它写回来，单看登记行会误报「停了」。暂停读不到照抛，看门狗这一轮不当成暂停。
@@ -228,88 +229,98 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
   const log: WatchdogDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   const temporal = w.temporal;
-  return () => ({
-    health: async (at) => (await scheduleHealth(w.db, at)).filter((h) => !RETIRED_SCHEDULE_IDS.has(h.job.id)),
-    alerts: {
-      openByPrefix: async (prefix) =>
-        (await openAlertsByPrefix(w.db, prefix)).map((a) => ({
-          dedupeKey: a.dedupeKey,
-          title: a.title,
-          body: a.body,
-        })),
-      latestByPrefix: (prefix) => latestAlertByPrefix(w.db, prefix),
-      byKey: (key) => alertByKey(w.db, key),
-      async raise(x) {
-        // 要你拍的选项、原因由报的那一处自己给（#2729：不再替它补只留言的选项凑数），缺了落库时照抛
-        await upsertAlert(w.db, {
-          dedupeKey: x.dedupeKey,
-          level: x.level ?? 'alert',
-          taskId: null,
-          title: x.title,
-          body: x.body,
-          link: x.link,
-          ...(x.options ? { options: x.options } : {}),
-          ...(x.reason ? { reason: x.reason } : {}),
-        });
+  return () => {
+    // 同一轮的 freshness 和 waste 共用这次加载出的有效 notRead，避免两个监控各读一遍、看到不同版本。
+    let effectiveNotRead: Promise<readonly string[]> | undefined;
+    const quotaNotRead =
+      w.quotaNotRead ??
+      (() => {
+        effectiveNotRead ??= loadQuotaConfig().then((config) => config.notRead?.map((p) => p.poolId) ?? []);
+        return effectiveNotRead;
+      });
+    return {
+      health: async (at) =>
+        (await scheduleHealth(w.db, at)).filter((h) => !RETIRED_SCHEDULE_IDS.has(h.job.id)),
+      alerts: {
+        openByPrefix: async (prefix) =>
+          (await openAlertsByPrefix(w.db, prefix)).map((a) => ({
+            dedupeKey: a.dedupeKey,
+            title: a.title,
+            body: a.body,
+          })),
+        latestByPrefix: (prefix) => latestAlertByPrefix(w.db, prefix),
+        byKey: (key) => alertByKey(w.db, key),
+        async raise(x) {
+          // 要你拍的选项、原因由报的那一处自己给（#2729：不再替它补只留言的选项凑数），缺了落库时照抛
+          await upsertAlert(w.db, {
+            dedupeKey: x.dedupeKey,
+            level: x.level ?? 'alert',
+            taskId: null,
+            title: x.title,
+            body: x.body,
+            link: x.link,
+            ...(x.options ? { options: x.options } : {}),
+            ...(x.reason ? { reason: x.reason } : {}),
+          });
+        },
+        resolve: (x) =>
+          resolveAlertWithReason(w.db, { dedupeKey: x.dedupeKey, by: WATCHDOG_ACTOR, why: x.why, at: now() }),
       },
-      resolve: (x) =>
-        resolveAlertWithReason(w.db, { dedupeKey: x.dedupeKey, by: WATCHDOG_ACTOR, why: x.why, at: now() }),
-    },
-    runs: {
-      start: (job, at) => startScheduleRun(w.db, job, at),
-      finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
-    },
-    mergeStall: () => mergeStallFacts(w.db),
-    redStreaks: (at) => scheduleRedStreaks(w.db, at),
-    quota: {
-      quotaPools: (at) => quotaTable(w.db, { now: at }),
-      // 额度快作废（#2737）：额度历史算速度，路由列「接得住的」（关着的也列）
-      quotaSamples: (since) => quotaSamplesSince(w.db, since),
-      poolRoutes: () => poolRouteFacts(w.db),
-      // 配置写明不读的池（现在是 jev：没有日账）。读不到配置要抛，不许当成「都要读」。
-      quotaNotRead:
-        w.quotaNotRead ?? (async () => (await loadQuotaConfig()).notRead?.map((p) => p.poolId) ?? []),
-    },
-    releaseWatch: {
-      facts: () => readReleaseFacts(w.releasesDir ?? RELEASES_DIR),
-      probe: () => probeHealthz(w.healthzUrl ?? DEFAULT_HEALTHZ_URL, w.fetchImpl),
-      badSince: {
-        read: () => readHealthzBadSince(w.db),
-        write: (since) => writeHealthzBadSince(w.db, { since, by: WATCHDOG_ACTOR }),
-        clear: () => clearHealthzBadSince(w.db),
+      runs: {
+        start: (job, at) => startScheduleRun(w.db, job, at),
+        finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
       },
-    },
-    // 「提醒真的推到飞书了」：后端记的推送状态和送达记录，同一个库
-    push: { facts: (at) => feishuPushFacts(w.db, at) },
-    // 「今天的每日简报送到了」：简报那一行提醒、它的送达记录和定时任务这一轮的结局，同一个库
-    brief: {
-      status: (day, since) => dailyBriefStatus(w.db, day, since),
-      here: () => releasesDirExists(w.releasesDir ?? RELEASES_DIR),
-    },
-    // 「在干活但没有开着的会话」（#2392）：只读库。过期判据在 jobs/idle-running.ts，这里不另写一个阈值。
-    idleRunning: {
-      tasks: async () =>
-        (await listRunningEngineTasks(w.db)).map((row) => ({
-          ...row,
-          state: 'running' as const,
-          executor: 'engine' as const,
-        })),
-    },
-    // 点名和读回不一致的旧挂起（#2742）：只读库列 stalled，真要叫醒才连 Temporal。
-    ...(temporal
-      ? {
-          modelMismatch: {
-            tasks: () => listStalledEngineTasks(w.db),
-            release: (workflowId: string) => releaseLegacyModelMismatch(temporal, w.db, workflowId, now()),
-          },
-        }
-      : {}),
-    // 拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉。读不到照抛（不当成没暂停）。
-    pausedJobs: async () => {
-      const why = await carpoolPoolsHeldReason(w.db, now());
-      return why ? new Map([[CARPOOL_WATCH_JOB.id, why]]) : new Map();
-    },
-    now,
-    log,
-  });
+      mergeStall: () => mergeStallFacts(w.db),
+      redStreaks: (at) => scheduleRedStreaks(w.db, at),
+      quota: {
+        quotaPools: (at) => quotaTable(w.db, { now: at }),
+        // 额度快作废（#2737）：额度历史算速度，路由列「接得住的」（关着的也列）
+        quotaSamples: (since) => quotaSamplesSince(w.db, since),
+        poolRoutes: () => poolRouteFacts(w.db),
+        // 配置写明不读的池（jev 没有日账，退役标记也会在这里生效）。读不到配置要抛，不许当成「都要读」。
+        quotaNotRead,
+      },
+      releaseWatch: {
+        facts: () => readReleaseFacts(w.releasesDir ?? RELEASES_DIR),
+        probe: () => probeHealthz(w.healthzUrl ?? DEFAULT_HEALTHZ_URL, w.fetchImpl),
+        badSince: {
+          read: () => readHealthzBadSince(w.db),
+          write: (since) => writeHealthzBadSince(w.db, { since, by: WATCHDOG_ACTOR }),
+          clear: () => clearHealthzBadSince(w.db),
+        },
+      },
+      // 「提醒真的推到飞书了」：后端记的推送状态和送达记录，同一个库
+      push: { facts: (at) => feishuPushFacts(w.db, at) },
+      // 「今天的每日简报送到了」：简报那一行提醒、它的送达记录和定时任务这一轮的结局，同一个库
+      brief: {
+        status: (day, since) => dailyBriefStatus(w.db, day, since),
+        here: () => releasesDirExists(w.releasesDir ?? RELEASES_DIR),
+      },
+      // 「在干活但没有开着的会话」（#2392）：只读库。过期判据在 jobs/idle-running.ts，这里不另写一个阈值。
+      idleRunning: {
+        tasks: async () =>
+          (await listRunningEngineTasks(w.db)).map((row) => ({
+            ...row,
+            state: 'running' as const,
+            executor: 'engine' as const,
+          })),
+      },
+      // 点名和读回不一致的旧挂起（#2742）：只读库列 stalled，真要叫醒才连 Temporal。
+      ...(temporal
+        ? {
+            modelMismatch: {
+              tasks: () => listStalledEngineTasks(w.db),
+              release: (workflowId: string) => releaseLegacyModelMismatch(temporal, w.db, workflowId, now()),
+            },
+          }
+        : {}),
+      // 拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉。读不到照抛（不当成没暂停）。
+      pausedJobs: async () => {
+        const why = await carpoolPoolsHeldReason(w.db, now());
+        return why ? new Map([[CARPOOL_WATCH_JOB.id, why]]) : new Map();
+      },
+      now,
+      log,
+    };
+  };
 }

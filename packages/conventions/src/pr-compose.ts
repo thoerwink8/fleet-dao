@@ -18,6 +18,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { type Gh as IssueGh, issueNew } from './issue-new.ts';
+import { requireAxis } from './labels.ts';
 import { type Gh, loadPathLists } from './pr-arm.ts';
 import { founderQuoteLine, GATE_LINE, ISSUE_COLUMN } from './pr-columns.ts';
 import { branchIssue, type OpenDeps, PR_OPEN_USAGE, prOpen } from './pr-open.ts';
@@ -130,6 +131,8 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         kind: { type: 'string' },
         milestone: { type: 'string' },
         local: { type: 'boolean' },
+        domain: { type: 'string' },
+        nature: { type: 'string' },
         'founder-quote': { type: 'string' },
         at: { type: 'string' },
         help: { type: 'boolean', short: 'h' },
@@ -145,6 +148,15 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
     out(PR_OPEN_USAGE);
     return 0;
   }
+  const axis = requireAxis(
+    typeof values.domain === 'string' ? values.domain : undefined,
+    typeof values.nature === 'string' ? values.nature : undefined,
+  );
+  if ('error' in axis) {
+    err(`${axis.error}\n${PR_OPEN_USAGE}`);
+    return 1;
+  }
+  const axisArgs = ['--domain', axis.domain, '--nature', axis.nature];
   const strs = (v: unknown): string[] => (Array.isArray(v) ? v.map(String) : []);
   const closesRaw = strs(values.closes);
   const refsRaw = strs(values.refs);
@@ -200,6 +212,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
           '--body-file',
           merged,
           '--founder-approved',
+          ...axisArgs,
           ...(values.draft === true ? ['--draft'] : []),
           ...(typeof values.base === 'string' ? ['--base', values.base] : []),
           ...(values['no-automerge'] === true ? ['--no-automerge'] : []),
@@ -343,6 +356,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
             newIssue,
             '--body-file',
             issueBody,
+            ...axisArgs,
             // 一律贴「本机做」，和建单同一次；人再加 --local 也只传一次，不报错
             '--local',
           ],
@@ -376,6 +390,7 @@ export async function prOpenCli(argv: string[], deps: CliDeps): Promise<number> 
         title,
         '--body-file',
         bodyFile,
+        ...axisArgs,
         ...(values.draft === true ? ['--draft'] : []),
         ...(typeof values.base === 'string' ? ['--base', values.base] : []),
         ...(values['founder-approved'] === true || quote ? ['--founder-approved'] : []),

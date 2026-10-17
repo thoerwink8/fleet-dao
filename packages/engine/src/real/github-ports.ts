@@ -1,5 +1,6 @@
 // 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；PR 不抄单子的类别标签、
-// 里程碑，#654）、第 2 轮起改 PR 正文（#2723）、等 CI、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
+// 里程碑，#654；查询轴「域:」「性质:」从单上照抄，某一轴不是恰好一个就不抄那一轴，没有需求号或单上没有也不挡）、
+// 第 2 轮起改 PR 正文（#2723）、等 CI、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
 // 并不上才停下留言）、关单，以及建树（记下主线的头；树等起会话时由会话
 // 自己建，见 sessions.ts）、收树（先存档没提交的改动；界面验收图片先核对远端、没交付存进受限归档，存不成不删树，见 shots.ts）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
@@ -8,7 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
-import { GATE_CONTEXT, issueOfBranch, pullsOnIssue } from '@fleet-dao/conventions';
+import { GATE_CONTEXT, issueOfBranch, pullsOnIssue, queryAxisLabels } from '@fleet-dao/conventions';
 import type { GitHub, PrBodyInput } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
@@ -747,6 +748,15 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           }
         }
       }
+      // 查询轴从需求单照抄。某一轴不是恰好一个（老单没有、或贴了两个）就不抄那一轴，不挡开 PR。
+      const labels =
+        issue === undefined
+          ? []
+          : queryAxisLabels(
+              (await mapped(() => gh.readIssue({ repo: input.repo, issueNumber: issue, signal: ctx.signal })))
+                .labels,
+              (message) => console.warn(`#${issue}：${message}`),
+            );
       const r = await mapped(() =>
         gh.openPr(
           {
@@ -755,6 +765,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             head: input.head,
             title: input.title,
             body: prBody(input.body),
+            ...(labels.length > 0 ? { labels } : {}),
           },
           ctx,
         ),
