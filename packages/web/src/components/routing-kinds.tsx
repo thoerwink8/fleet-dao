@@ -30,17 +30,19 @@ export function useKindEnv(): KindEnv {
   );
 }
 
-/** 状态词的芯片。 */
+/** 状态词的芯片。悬停是这一种的说明（routeStateWhy）；额度耗尽的路由不走这颗芯片。 */
 export function KindChip({ kind, variant }: { kind: RouteStateKind; variant?: StatusBadgeVariant }) {
+  const why = routeStateWhy[kind];
   // 疑似换模型和探测记录里的「疑似换模型」同一个橙色，和不通的红分开（#1748、#1798）
-  if (kind === 'degraded')
-    return <DoubtChip label={routeStateLabel[kind]} title={routeStateWhy[kind]} variant={variant} />;
+  if (kind === 'degraded') return <DoubtChip label={routeStateLabel[kind]} title={why} variant={variant} />;
   return (
-    <StatusBadge
-      tone={routeStateTone[kind]}
-      label={routeStateLabel[kind]}
-      {...(variant ? { variant } : {})}
-    />
+    <span title={why} className="inline-flex shrink-0">
+      <StatusBadge
+        tone={routeStateTone[kind]}
+        label={routeStateLabel[kind]}
+        {...(variant ? { variant } : {})}
+      />
+    </span>
   );
 }
 
