@@ -1520,6 +1520,8 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     expect(pr('packages/web/src/routes/login.tsx').e2e).toEqual([`${SPECS}01-login.e2e.ts`]);
     // 页面私有的组件跟着它的页面走；目录前缀整个认
     expect(pr('packages/web/src/components/home/flow-board.tsx').e2e).toContain(`${SPECS}02-home.e2e.ts`);
+    // 首页窄屏页头（#2969）挂在主页这条上：只落在 specs/ 里、没有页面指向，映射表自检会红
+    expect(pr('packages/web/src/routes/home.tsx').e2e).toContain(`${SPECS}02c-home-narrow.e2e.ts`);
     expect(pr('packages/web/src/components/home/flow-board.tsx').e2e).not.toContain(
       `${SPECS}06-notifications.e2e.ts`,
     );
@@ -1783,6 +1785,17 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     const runs = steps.map((s) => String(s.run ?? '')).join('\n');
     expect(runs).toContain('pnpm --filter @fleet-dao/web e2e');
     expect(runs).toContain('playwright install --with-deps chromium');
+    const browserCache = steps.find(
+      (s) => (s.with as Record<string, unknown> | undefined)?.path === '~/.cache/ms-playwright',
+    );
+    expect(browserCache?.uses).toBe('actions/cache@v4');
+    expect(browserCache?.env).toEqual({ SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1' });
+    const browserInstall = steps.find((s) =>
+      String(s.run ?? '').includes('playwright install --with-deps chromium'),
+    );
+    expect(browserInstall, '缓存未恢复也要真的安装浏览器和系统库').toBeDefined();
+    expect(browserInstall).not.toHaveProperty('if');
+    expect(steps.indexOf(browserInstall!)).toBeGreaterThan(steps.indexOf(browserCache!));
     expect(runs).toContain('postgres:16');
     // 红了不吞：没有 job 级 continue-on-error，也没有步骤级的（隔离集 2026-10-16 起挪去 e2e-quarantine.yml 每天跑）；没有 || true
     expect(e2e).not.toHaveProperty('continue-on-error');

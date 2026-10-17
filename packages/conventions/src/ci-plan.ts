@@ -203,7 +203,8 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   // 登录页（01）。password-field 登录页和设置页「账密登录」共用
   { files: [`${W}routes/login.tsx`], specs: [spec('01-login')] },
   { files: [`${W}components/password-field.tsx`], specs: [spec('01-login'), spec('10-credentials')] },
-  // 主页三块（02b）、画布（02，原来的主页，决定 0093 挪到 /board）；07c 在主页、画布上切环境，08 从别页点回主页
+  // 主页三块（02b）、画布（02，原来的主页，决定 0093 挪到 /board）；
+  // 02c 量首页窄屏页头（#2969）不重叠；07c 在主页、画布上切环境，08 从别页点回主页
   {
     files: [
       `${W}routes/home.tsx`,
@@ -211,7 +212,13 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
       `${W}components/home/`,
       `${W}components/not-built.tsx`,
     ],
-    specs: [spec('02-home'), spec('02b-home-today'), spec('07c-nodes'), spec('08-backend-down')],
+    specs: [
+      spec('02-home'),
+      spec('02b-home-today'),
+      spec('02c-home-narrow'),
+      spec('07c-nodes'),
+      spec('08-backend-down'),
+    ],
   },
   // 主页和单子详情共用
   { files: [`${W}lib/segments.ts`], specs: [spec('02-home'), spec('03-task')] },
