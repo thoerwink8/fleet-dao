@@ -1785,6 +1785,17 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     const runs = steps.map((s) => String(s.run ?? '')).join('\n');
     expect(runs).toContain('pnpm --filter @fleet-dao/web e2e');
     expect(runs).toContain('playwright install --with-deps chromium');
+    const browserCache = steps.find(
+      (s) => (s.with as Record<string, unknown> | undefined)?.path === '~/.cache/ms-playwright',
+    );
+    expect(browserCache?.uses).toBe('actions/cache@v4');
+    expect(browserCache?.env).toEqual({ SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1' });
+    const browserInstall = steps.find((s) =>
+      String(s.run ?? '').includes('playwright install --with-deps chromium'),
+    );
+    expect(browserInstall, '缓存未恢复也要真的安装浏览器和系统库').toBeDefined();
+    expect(browserInstall).not.toHaveProperty('if');
+    expect(steps.indexOf(browserInstall!)).toBeGreaterThan(steps.indexOf(browserCache!));
     expect(runs).toContain('postgres:16');
     // 红了不吞：没有 job 级 continue-on-error，也没有步骤级的（隔离集 2026-10-16 起挪去 e2e-quarantine.yml 每天跑）；没有 || true
     expect(e2e).not.toHaveProperty('continue-on-error');
