@@ -737,6 +737,51 @@ html {
   outline-offset: -2px;
 }
 
+/*
+ * 首页手机页头（#2969）：流程开关、状态、刷新原来和标题挤在一行。
+ * 健康条自己是 flex-1、min-w-0、内容靠右，开关被压到比内容窄，字就盖住旁边的状态。
+ * 手机（<48rem，和 md 断点同一道）上：标题单独一行（Page 的 max-md:flex-col）；
+ * 操作区里开关占满下一行，状态和刷新靠右。放得下并排，放不下就换行，谁也不缩到比内容窄。
+ * 写在层外：要压过健康条上的 flex-1 / min-w-0。只在 [data-actions-layout=stack] 上生效，画布细栏不动。
+ * 桌面不进这条，仍是标题左、开关和状态、刷新在右。
+ */
+@media (width < 48rem) {
+  [data-actions-layout="stack"] {
+    display: flex;
+    flex-flow: row wrap;
+    align-items: center;
+    justify-content: flex-end;
+    width: 100%;
+    max-width: 100%;
+    gap: var(--stack-gap);
+  }
+  [data-actions-layout="stack"] [data-flow-mode-switch] {
+    flex: 0 0 100%;
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+  }
+  [data-actions-layout="stack"] [data-flow-mode-current] {
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  [data-actions-layout="stack"] [data-flow-mode-switch] > fieldset {
+    min-width: 0;
+    max-width: 100%;
+  }
+  [data-actions-layout="stack"] [data-health-strip-box] {
+    flex: 0 0 auto;
+    width: auto;
+    min-width: min-content;
+    max-width: 100%;
+  }
+  [data-actions-layout="stack"] [data-refresh-bar] {
+    flex: 0 0 auto;
+    width: auto;
+    max-width: 100%;
+  }
+}
+
 /* ---------- 看板画布（React Flow）跟随主题 ---------- */
 .react-flow {
   --xy-background-color: var(--canvas);
