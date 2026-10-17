@@ -66,6 +66,7 @@ const patch = (w: World, n: number, extra: Partial<PlanIssue>) => {
 describe('GitHub 对账：干净的一份什么都不报', () => {
   it('实际入口启用 family 维护时先修复并保留本轮差异，第二轮一致才绿', async () => {
     const w = cleanWorld();
+    w.issues.push(issue(40, { labels: MOTHER, createdAt: ago(90 * DAY) }));
     const { reader } = fakeReader(w);
     const gh = { ...reader, allIssues: async () => w.issues };
     const writer = {
@@ -82,6 +83,10 @@ describe('GitHub 对账：干净的一份什么都不报', () => {
     expect(readManifest(w.issues.find((i) => i.number === 10)?.body ?? '')).toMatchObject({
       kind: 'valid',
       children: [11, 12],
+    });
+    expect(readManifest(w.issues.find((i) => i.number === 40)?.body ?? '')).toMatchObject({
+      kind: 'valid',
+      children: [],
     });
     const second = await auditGitHub(gh, NOW, undefined, { reader: gh, writer });
     expect(second.notQueried).toEqual([]);
@@ -127,17 +132,18 @@ describe('GitHub 对账：母单和子单对得上', () => {
     expect(r.texts).toEqual(['#10 下面有 2 张子单，却没贴「母单」标签：贴上']);
   });
 
-  it('贴了「母单」却没有子单：超过一天才报（刚开的母单子单还没挂上）', async () => {
-    const empty = (createdAt: string) =>
-      editWorld((w) => {
-        w.issues.push(issue(40, { labels: MOTHER, createdAt }));
-      });
-    const old = await audit(empty(ago(2 * DAY)));
-    expect(old.findings).toEqual([expect.objectContaining({ issue: 40 })]);
-    expect(old.texts[0]).toContain('#40 贴了「母单」标签，却一直没有子单');
-    const fresh = await audit(empty(ago(3_600_000)));
-    expect(fresh.findings).toEqual([]);
-  });
+  it.each([3_600_000, DAY, 2 * DAY, 90 * DAY])(
+    '目录母单没有子单不按创建时间报警（已开 %i ms）',
+    async (age) => {
+      const r = await audit(
+        editWorld((w) => {
+          w.issues.push(issue(40, { labels: MOTHER, createdAt: ago(age) }));
+        }),
+      );
+      expect(r.findings).toEqual([]);
+      expect(r.notQueried).toEqual([]);
+    },
+  );
 
   it('【故意造出的失败】接口没给子单数：记成「没查成」，不当成没有断裂，也不猜', async () => {
     const r = await audit(
@@ -295,9 +301,9 @@ describe('GitHub 对账：正文 parent 和批量母单', () => {
     expect(familyKeys(bad)).toEqual(['parent-conflict:11:40:10']);
   });
 
-  it('批量母单无子单立即报空；字段关系和原生关系任意一种存在就不报空', async () => {
+  it.each([1_000, 2 * DAY])('批量母单无子单仍报空（已开 %i ms）；正文或原生关系可证明有子单', async (age) => {
     const w = cleanWorld();
-    w.issues.push(batchMother(40, { createdAt: ago(1_000) }));
+    w.issues.push(batchMother(40, { createdAt: ago(age) }));
     expect(familyKeys(await audit(w))).toEqual(['family-empty:40']);
     w.issues.push(issue(41, { body: 'parent: #40' }));
     expect(familyKeys(await audit(w))).toEqual([]);
@@ -308,14 +314,13 @@ describe('GitHub 对账：正文 parent 和批量母单', () => {
     expect(familyKeys(await audit(w))).toEqual([]);
   });
 
-  it('普通目录母单不触发新空母单警报；字段子单避免旧规则把母单误判为空', async () => {
+  it('普通目录母单及正文关系的母单都不误报空母单', async () => {
     const w = cleanWorld();
     w.issues.push(issue(40, { labels: MOTHER, createdAt: ago(2 * DAY) }));
-    expect(familyKeys(await audit(w))).toEqual([]);
+    expect((await audit(w)).findings).toEqual([]);
     w.issues.push(issue(41, { body: 'parent: #40' }));
     const r = await audit(w);
-    expect(r.findings.filter((f) => f.key === 'mother-empty:40')).toEqual([]);
-    expect(familyKeys(r)).toEqual([]);
+    expect(r.findings).toEqual([]);
   });
 
   it('畸形 parent 报错；读不到正文不能当作没有字段或空母单', async () => {

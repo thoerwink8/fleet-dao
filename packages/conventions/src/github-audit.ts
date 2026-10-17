@@ -27,9 +27,6 @@ import { type Plan, PlanProblem, parseOrder, pruneOrder, readPlan } from './plan
 import { issueColumnLinks } from './pr-columns.ts';
 import { addDays, beijingDate, dueDateOf } from './version-cut.ts';
 
-/** 母单刚开、子单还没挂上的宽限：超过这么久还是空的才报。 */
-const EMPTY_MOTHER_GRACE_MS = 24 * 3_600_000;
-
 export interface AuditResult {
   findings: Finding[];
   /** 没查成的几样（读不到 GitHub 等）：照样判红，不当成没有断裂。 */
@@ -76,7 +73,7 @@ export async function auditGitHub(
     const family = await bodyFamilyFindings(open, gh);
     findings.push(...family.found);
     notQueried.push(...family.unknown);
-    const mothers = motherFindings(open, now, family.linked);
+    const mothers = motherFindings(open);
     findings.push(...mothers.found);
     if (mothers.unknown.length > 0) {
       const shown = mothers.unknown.slice(0, 10).map((n) => `#${n}`);
@@ -229,14 +226,10 @@ function kindFindings(open: readonly PlanIssue[]): Finding[] {
 }
 
 /**
- * 母单和子单对得上：子单都关了的母单该关；有子单要贴「母单」标签；贴了标签却一直没有子单的摘掉。
+ * 母单和子单对得上：子单都关了的母单该关；有子单要贴「母单」标签。
  * 接口没给子单数的单（unknown）核不了，交回去记成「没查成」：不猜，也不当成没有断裂。
  */
-function motherFindings(
-  open: readonly PlanIssue[],
-  now: Date,
-  linked: ReadonlySet<number>,
-): { found: Finding[]; unknown: number[] } {
+function motherFindings(open: readonly PlanIssue[]): { found: Finding[]; unknown: number[] } {
   const found: Finding[] = [];
   const unknown: number[] = [];
   for (const i of open) {
@@ -257,18 +250,6 @@ function motherFindings(
         issue: i.number,
         key: `mother-label:${i.number}`,
         text: `#${i.number} 下面有 ${i.subIssues} 张子单，却没贴「${MOTHER_LABEL}」标签：贴上`,
-      });
-    }
-    if (
-      i.subIssues === 0 &&
-      isMother &&
-      !linked.has(i.number) &&
-      now.getTime() - Date.parse(i.createdAt) > EMPTY_MOTHER_GRACE_MS
-    ) {
-      found.push({
-        issue: i.number,
-        key: `mother-empty:${i.number}`,
-        text: `#${i.number} 贴了「${MOTHER_LABEL}」标签，却一直没有子单：该有子单就挂上（pnpm issue:new --parent ${i.number}），本来就不是母单就摘掉标签`,
       });
     }
   }
@@ -332,7 +313,7 @@ async function bodyFamilyFindings(open: readonly PlanIssue[], gh: GitHubReader) 
       unknown.push(`读不到 #${i.number} 的 parent 母单 #${field.number}（${message(e)}），正文母子关系没核`);
     }
   }
-  // 只对批量能力管理的母单立即报空；普通目录母单仍由旧规则处理，随后单独退役旧规则。
+  // 只对批量能力管理的母单立即报空；目录母单允许空清单，不按创建时间报警。
   if (complete) {
     for (const i of open) {
       if (
@@ -350,7 +331,7 @@ async function bodyFamilyFindings(open: readonly PlanIssue[], gh: GitHubReader) 
       }
     }
   }
-  return { found, unknown, linked };
+  return { found, unknown };
 }
 
 /**
