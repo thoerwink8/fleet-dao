@@ -302,6 +302,29 @@ describe('定时读额度', () => {
     expect(w.raised[0]?.body).toContain('auth——');
   });
 
+  it('账单可读但用量未报告：按既有连续失败边界提醒，自然重试不误导重新登录', async () => {
+    const result = failed(
+      'grok',
+      'usage_unreported',
+      '账单已读，但上游未报告当前用量；用量未知',
+      'grok-billing',
+    );
+    const recent = world([result], { lastOk: { grok: minutesAgo(15) } });
+    await expect(runQuotaReadJob(recent.deps)).resolves.toMatchObject({ outcome: 'partial' });
+    expect(recent.saved).toEqual([]);
+    expect(recent.raised).toEqual([]);
+    expect(recent.resolved).not.toContain(poolAlertKey('grok'));
+
+    const stale = world([result], { lastOk: { grok: minutesAgo(31) } });
+    await runQuotaReadJob(stale.deps);
+    expect(stale.raised).toHaveLength(1);
+    expect(stale.raised[0]?.body).toContain('下一轮定时读取自然重试');
+    expect(stale.raised[0]?.body).not.toContain('不会自己好');
+    expect(stale.raised[0]?.body).not.toContain('要人动手');
+    expect(stale.saved).toEqual([]);
+    expect(stale.resolved).not.toContain(poolAlertKey('grok'));
+  });
+
   it('「当前没挂着这个组织」不报警，也不写库，但这一轮记 partial 写明是哪几个池', async () => {
     const w = world([ok('p1'), failed('solo', 'not_current')]);
     const run = await runQuotaReadJob(w.deps);
