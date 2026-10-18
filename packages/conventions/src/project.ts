@@ -231,7 +231,7 @@ export function agentsMd(slug: string, standardRepo: string, testCommand: string
 
 | 事 | 读 |
 |---|---|
-| 进度、创始人引导 | \`docs/PROGRESS.md\` |
+| 需求方的确认、业务和技术决定（谁、哪天、定了什么、为什么） | \`docs/decisions.md\` |
 
 ## 常用
 

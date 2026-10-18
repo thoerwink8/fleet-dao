@@ -10,6 +10,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { attributionVerdict } from './ai-attribution.mjs';
 import { judgeCapacity, readCapacity } from './capacity.mjs';
 import {
   freshBeforeSubagent,
@@ -2469,6 +2470,14 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
   const { outer } = splitHeredocs(cmd);
   const del = recursiveDeleteVerdict(outer, kind, rawCwd);
   if (del) return del;
+  // 项目仓的提交、推送、PR/MR 不带 AI 署名（ai-attribution.mjs）。只看清楚的 bash 写法；没查成的那句话跟着放行带出去
+  /** @type {string} */
+  let attributionNote = '';
+  if (kind === 'bash' && rawCwd) {
+    const attr = attributionVerdict(cmd, outer, rawCwd);
+    if (attr && attr.code === 2) return block(attr.message);
+    if (attr) attributionNote = attr.context;
+  }
   // 子代理拼命令时反引号误跑了切号登录；总指挥 node -e "…`specs/…/需求.md`…" 把整份需求文档当脚本执行了。
   // PowerShell 里反引号是转义符，不归这条管；别家的终端是不是 bash 说不准，也不管。不分仓，全机都拦。
   if (kind === 'bash' && bashBacktickSubst(cmd)) {
@@ -2540,6 +2549,7 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
       'fleet-dao 里不用 git reset --hard：会把工作区覆盖掉，把主检出里还没提交、没验证的活一并丢掉。要回滚某个提交：先把当前进度 `git commit` 到分支或工作树，要丢弃改动先 `git diff > _tmp/xxx.patch` 留底，或提交到自己分支，再决定要不要真扔。',
     );
   }
+  if (attributionNote) switchNote = [switchNote, attributionNote].filter(Boolean).join('\n');
   // 子代理的调用（输入带 agent_id）不改：创始人的话不会送到子代理，前台等没有卡插话的问题；
   // 改成后台反而让工人没法前台等 CI，只能收一轮轮叫醒指挥官。
   const inSubagent =
