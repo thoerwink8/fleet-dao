@@ -1,6 +1,6 @@
 // 引擎端口 → packages/github：推分支（会话用户打的 bundle）、开 PR（正文给结构，renderPrBody 生成；PR 不抄单子的类别标签、
 // 里程碑，#654；查询轴「域:」「性质:」从单上照抄，某一轴不是恰好一个就不抄那一轴，没有需求号或单上没有也不挡）、
-// 第 2 轮起改 PR 正文（#2723）、等 CI、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
+// 第 2 轮起改 PR 正文（#2723）、等 CI（等着时 PR 已合并：现读核实、记合并回执再回，merge-receipt.ts，#3018）、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
 // 并不上才停下留言）、关单，以及建树（记下主线的头；树等起会话时由会话
 // 自己建，见 sessions.ts）、收树（先存档没提交的改动）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
@@ -24,6 +24,7 @@ import {
 } from '../ports.ts';
 import { isTaskBranch } from '../task-branch.ts';
 import type { UserExec } from './exec.ts';
+import { type MergeLog, settleMergedCi } from './merge-receipt.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
 import {
   addedLinesAgainst,
@@ -94,6 +95,8 @@ export interface GitHubPortsDeps {
   /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
   gitBin?: string;
   shBin?: string;
+  /** 等 CI 看到已合并、核实或记合并回执没成时写的日志；不给就打到控制台。 */
+  log?: MergeLog;
 }
 
 /** 远小于心跳超时（limits.heartbeatSeconds 默认 120 秒）：漏一两次也不判工人丢了。 */
@@ -381,6 +384,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
   const { gh, trees } = deps;
   const now = deps.now ?? (() => new Date());
   const heartbeatEveryMs = deps.heartbeatEveryMs ?? HEARTBEAT_EVERY_MS;
+  const log: MergeLog = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
 
   const treeAs = (dir: string, user: SessionUser, prefix: string, ctx: PortContext): UserTree => ({
     exec: deps.exec,
@@ -736,7 +740,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     async waitCi(input, ctx) {
       // 等 CI 不等合并闸：引擎任务 PR 的合并闸要冷验收贴了 cold-verify 才绿，而冷验收排在这一步之后——
       // 把它算进来，验收前它必红，会被误判成「CI 红了」白返工一轮。合并闸由合并那一步（GitHub 自动合并）等。
-      const result = ciResultOf(
+      const observed = ciResultOf(
         await mapped(() =>
           gh.waitCi(
             { repo: input.repo, prNumber: input.prNumber, head: input.head, excludeChecks: [GATE_CONTEXT] },
@@ -744,6 +748,12 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           ),
         ),
       );
+      // 等的时候 PR 已经合了（#3018）：先现读核实、记合并回执（和等合并那一步同一个 mergePr），记上了才回 merged；
+      // 不直接把 GitHub 的「合了」交回去收尾，否则账上只剩每小时对账补的 backfill。
+      const result =
+        observed.state === 'merged'
+          ? await settleMergedCi(gh, input, { ...observed, state: 'merged' }, ctx, log)
+          : observed;
       // CI 认了新头（新头含着老头，github 包的 waitCi 已经用 compare API 核过）：顺手把工作树也快进过去，
       // 别让「CI 查到的头」和「工作树实际的头」分家（#307/#389 那次真事：认了新头查 CI，工作树没跟上，后面
       // 并主线、推分支都从旧头算起，最后推送被拒）。diverged 是新头不含老头的情形，交回去要人看，不在这适用。
