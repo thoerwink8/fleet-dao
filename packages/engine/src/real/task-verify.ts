@@ -56,6 +56,7 @@ import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
 import {
   type CheckoutBlockedAlert,
+  type CheckoutRecovered,
   incrementalDiffAtHead,
   placeVerifyCheckout,
   runColdVerifyForPr,
@@ -194,6 +195,8 @@ export interface ColdVerifyActivityDeps {
   repairWorkTmp?: (dir: string) => Promise<void>;
   /** 退路时写驾驶舱报警（正文含目录）。不给 = 只记日志。写不进不让验收停。 */
   onCheckoutBlocked?: (alert: CheckoutBlockedAlert) => Promise<void>;
+  /** 这个目标真放进了完整检出：撤它开跑之前报的检出报警（#3036）。不给 = 不撤。撤不成不让验收停。 */
+  onCheckoutRecovered?: (recovered: CheckoutRecovered) => Promise<void>;
 }
 
 /** 改到的文件，GitHub 给的样子（packages/github 的 PrFile）。 */
@@ -772,6 +775,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             ...(deps.repairWorkTmp ? { repair: deps.repairWorkTmp } : {}),
             log,
             ...(deps.onCheckoutBlocked ? { onBlocked: deps.onCheckoutBlocked } : {}),
+            ...(deps.onCheckoutRecovered ? { onRecovered: deps.onCheckoutRecovered } : {}),
           });
           await deps.spawner.trees.adopt(dir, user);
           return {

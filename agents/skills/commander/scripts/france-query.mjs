@@ -82,7 +82,7 @@ export const SQL = {
   db: `select jsonb_build_object('now', now(), 'readOnly', current_setting('transaction_read_only'))`,
 
   tasks: `select coalesce(jsonb_agg(x order by x.touched desc), '[]'::jsonb) from (
-    select r.owner || '/' || r.name as repo, t.issue_number as n, left(t.title, 200) as title, t.state, t.phase,
+    select r.owner || '/' || r.name as repo, t.issue_number as n, left(t.title, 200) as title, t.state, t.executor, t.phase,
            left(t.doing, 300) as doing, left(t.last_problem, 600) as last_problem, t.created_at, t.updated_at,
            coalesce(t.updated_at, t.created_at) as touched
     from tasks t join repos r on r.id = t.repo_id

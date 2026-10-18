@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runChild } from '../child.ts';
+import { interactiveHookEnv } from '../hook-env.ts';
 
 const HOOK = fileURLToPath(new URL('../../hooks/prompt-log.mjs', import.meta.url));
 const SRC = readFileSync(HOOK, 'utf8');
@@ -36,7 +37,12 @@ afterEach(() => {
 function feed(input: string, env: Record<string, string> = {}) {
   const r = runChild(process.execPath, [HOOK], {
     input,
-    env: { ...process.env, FLEET_PROMPT_LOG_DIR: dir, FLEET_UNATTENDED_DIR: join(dir, 'unattended'), ...env },
+    env: {
+      ...interactiveHookEnv(),
+      FLEET_PROMPT_LOG_DIR: dir,
+      FLEET_UNATTENDED_DIR: join(dir, 'unattended'),
+      ...env,
+    },
   });
   return { code: r.status, out: r.stdout ?? '', err: r.stderr ?? '' };
 }

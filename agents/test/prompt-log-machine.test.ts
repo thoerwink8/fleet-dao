@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runChild } from './child.ts';
+import { interactiveHookEnv } from './hook-env.ts';
 
 const HOOK = fileURLToPath(new URL('../hooks/prompt-log.mjs', import.meta.url));
 const SO_SESSIONS = fileURLToPath(new URL('../skills/discuss/scripts/so-sessions.mjs', import.meta.url));
@@ -27,7 +28,7 @@ afterEach(() => {
 
 /** 像 Claude Code 那样喂一条消息进去；env 里没有的 FLEET_WORKER 一律去掉，免得这台机器自己的环境串进来。 */
 function feed(input: Record<string, unknown>, env: Record<string, string> = {}) {
-  const { FLEET_WORKER: _drop, ...base } = process.env;
+  const { FLEET_WORKER: _drop, ...base } = interactiveHookEnv();
   const r = runChild(process.execPath, [HOOK], {
     input: JSON.stringify(input),
     env: { ...base, FLEET_PROMPT_LOG_DIR: dir, FLEET_UNATTENDED_DIR: join(dir, 'unattended'), ...env },

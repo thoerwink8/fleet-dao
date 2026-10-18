@@ -80,6 +80,11 @@ interface TaskView {
   key: string;
   n: number;
   state: string;
+  executor: string | null;
+  executorName: string;
+  doing: string | null;
+  lastProblem: string | null;
+  updatedAt: string | null;
   openRuns: number;
   usage: Usage | null;
   runs: { stage: string; queueMs: number; runMs: number; inputEquivalent: number | null }[] | null;
@@ -204,8 +209,9 @@ const ago = (min: number) => new Date(Date.parse(AT) - min * 60_000).toISOString
 const SHA = 'aaaaaaaaaaaa';
 
 function run(o: {
+  repo?: string | null;
   n?: number | null;
-  stage: string;
+  stage?: string;
   queued: number;
   started?: number | null;
   ended?: number | null;
@@ -225,9 +231,9 @@ function run(o: {
 }) {
   const ended = o.ended === undefined ? o.queued - 5 : o.ended;
   return {
-    repo: o.n === null ? null : 'o/fleet-dao',
+    repo: o.n === null ? null : o.repo === undefined ? 'o/fleet-dao' : o.repo,
     n: o.n === undefined ? 12 : o.n,
-    stage: o.stage,
+    stage: o.stage ?? 'execute',
     route_id: o.route ?? 'claude-carpool:opus-5.5:claude-code',
     model: o.model ?? 'opus-5.5',
     model_name: o.modelName ?? 'Opus 5.5',
@@ -1470,7 +1476,8 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     expect(find(v1, '别的挂起')?.kind).toBe('task-park');
     expect(find(v1, '规矩同步没成')?.kind).toBeUndefined();
     expect(find(v1, '#21 卡住了')?.kind).toBe('task-park');
-    expect(find(v1, '#26 最近的问题')?.kind).toBe('task-park');
+    expect(find(v1, '#26 最近的问题')?.kind).toBeUndefined();
+    expect(find(v1, '#26 最近的问题（未关联信息')?.what).toContain('无法判断是否已重试');
     expect(find(v1, '#21 卡住了')?.key).toBe('task:o/fleet-dao#21:stalled');
     expect(find(v1, '#26 最近的问题')?.key).toBe('task:o/fleet-dao#26:problem');
     expect(find(v1, '验收 2 轮都没过')?.key).toBe('task:o/fleet-dao#1707:review-fail');
@@ -1479,6 +1486,99 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     const keys = (v: ReturnType<typeof build>) => (v.anomalies as A[]).map((a) => a.key).sort();
     expect(find(v1, '验收 2 轮都没过')?.what).not.toBe(find(v2, '验收 2 轮都没过')?.what);
     expect(keys(v1)).toEqual(keys(v2));
+  });
+
+  describe('lastProblem 和新会话的诊断关联', () => {
+    const task = (repo: string, n: number, updated: string | null, problem = '第1次重试，60秒后') => ({
+      repo,
+      n,
+      title: `单 ${n}`,
+      state: 'running',
+      phase: 'execute',
+      doing: null,
+      last_problem: problem,
+      created_at: ago(500),
+      updated_at: updated,
+    });
+    const problemOf = (v: View, repo: string, n: number) =>
+      v.tasks.active.find((t) => t.key === `${repo}#${n}`)?.lastProblem ?? '';
+
+    it('只把同仓同号、且晚于任务更新时间的会话关联为当前重试', () => {
+      const v = viewOf((s) => {
+        s.tasks = {
+          ok: true,
+          rows: [
+            task('o/fleet-dao', 3033, ago(10)),
+            task('other/fleet-dao', 3033, ago(10)),
+            task('o/fleet-dao', 3037, ago(10)),
+          ],
+        };
+        s.runs = {
+          ok: true,
+          rows: [run({ n: 3033, queued: 5, ended: null })],
+        };
+      });
+      expect(problemOf(v, 'o/fleet-dao', 3033)).toContain('当前重试运行中');
+      expect(problemOf(v, 'other/fleet-dao', 3033)).toContain('未关联信息');
+      expect(problemOf(v, 'o/fleet-dao', 3037)).toContain('未关联信息');
+      expect(whats(v).some((w) => w.includes('other/fleet-dao'))).toBe(false);
+    });
+
+    it('并发新会话只报运行中、结果待核实；再次失败仍明确报失败，不报成功', () => {
+      const running = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3037, ago(10))] };
+        s.runs = {
+          ok: true,
+          rows: [
+            run({ n: 3037, queued: 5, ended: null }),
+            run({ n: 3037, queued: 4, ended: null, outcome: null, message: '连接失败' }),
+          ],
+        };
+      });
+      expect(problemOf(running, 'o/fleet-dao', 3037)).toContain('当前重试运行中（2 个会话）');
+      expect(problemOf(running, 'o/fleet-dao', 3037)).toContain('结果待核实');
+      expect(problemOf(running, 'o/fleet-dao', 3037)).not.toContain('成功');
+
+      const failed = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3037, ago(10))] };
+        s.runs = { ok: true, rows: [run({ n: 3037, queued: 5, ended: 1, outcome: 'failed' })] };
+      });
+      expect(problemOf(failed, 'o/fleet-dao', 3037)).toContain('当前重试再次失败');
+    });
+
+    it('没有新会话或历史超出回看范围时保留未关联问题，不冒充当前状态', () => {
+      const v = viewOf((s) => {
+        s.tasks = {
+          ok: true,
+          rows: [task('o/fleet-dao', 3033, ago(5000)), task('o/fleet-dao', 3037, ago(10))],
+        };
+        // 查询只回近三天的 runs；更早的历史不在快照里，不能当成「没有重试」。
+        s.runs = { ok: true, rows: [] };
+      });
+      expect(problemOf(v, 'o/fleet-dao', 3033)).toContain('未关联信息');
+      expect(problemOf(v, 'o/fleet-dao', 3033)).not.toContain('当前重试');
+      expect(problemOf(v, 'o/fleet-dao', 3037)).toContain('未关联信息');
+    });
+
+    it('会话读取失败、身份不全或任务更新时间缺失时明确说无法判断', () => {
+      const unread = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3033, ago(10))] };
+        s.runs = { ok: false, why: '库查询出错：runs' };
+      });
+      expect(problemOf(unread, 'o/fleet-dao', 3033)).toContain('会话没读到，无法判断');
+
+      const unknownIdentity = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3033, ago(10))] };
+        s.runs = { ok: true, rows: [run({ repo: null, n: 3033, queued: 5 })] };
+      });
+      expect(problemOf(unknownIdentity, 'o/fleet-dao', 3033)).toContain('会话身份不全');
+
+      const unknownTime = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3033, null)] };
+        s.runs = { ok: true, rows: [run({ n: 3033, queued: 5, ended: null })] };
+      });
+      expect(problemOf(unknownTime, 'o/fleet-dao', 3033)).toContain('任务更新时间没读到，无法判断');
+    });
   });
 
   it('定时任务：从没跑过、最近一轮没跑成、一个都没扫到、过期了；只查了一部分是留意', () => {
@@ -1616,6 +1716,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       n,
       title: `单 ${n}`,
       state: st,
+      executor: 'engine',
       phase: 'fusion:x',
       doing: null,
       last_problem: problem,
@@ -1650,6 +1751,146 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
         whats(v).some((w) => w.startsWith(quiet)),
         quiet,
       ).toBe(false);
+  });
+
+  describe('单的执行者：引擎空闲只对引擎派的单报（口径同 jobs/idle-running.ts）', () => {
+    const task = (n: number, st: string, updated: number, executor?: unknown) => ({
+      repo: 'o/fleet-dao',
+      n,
+      title: `单 ${n}`,
+      state: st,
+      ...(executor === undefined ? {} : { executor }),
+      phase: 'brief',
+      doing: `本机在做 ${n}`,
+      last_problem: `等人批准 ${n}`,
+      created_at: ago(900),
+      updated_at: ago(updated),
+    });
+    const idleOf = (v: View, n: number) =>
+      whats(v).filter((w) => w.startsWith(`#${n} `) && w.includes('手上也没有会话'));
+    const taskOf = (v: View, n: number) => v.tasks.active.find((t) => t.n === n);
+
+    it('查询带回 executor，解码后保留；runs 查询没动', () => {
+      expect(query.SQL.tasks).toMatch(/t\.executor/);
+      const v = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task(31, 'running', 766, 'local'), task(32, 'running', 766, 'engine')] };
+      });
+      expect(taskOf(v, 31)).toMatchObject({ executor: 'local', executorName: '本机' });
+      expect(taskOf(v, 32)).toMatchObject({ executor: 'engine', executorName: '引擎' });
+    });
+
+    it('engine + running + 无开着的会话 + 超阈值：仍报原来的空闲问题', () => {
+      const v = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task(31, 'running', 766, 'engine')] };
+      });
+      has(v, 'bad', '#31 766 分钟没动，手上也没有会话（在干活 · brief）：多半停在等人或等一个派不出的路由');
+    });
+
+    it('同样时长的 local + running 不报引擎空闲，盘面仍留本机执行者、原 doing、问题和更新时刻', () => {
+      const raw = task(31, 'running', 766, 'local');
+      const v = viewOf((s) => {
+        s.tasks = { ok: true, rows: [raw] };
+      });
+      expect(idleOf(v, 31)).toEqual([]);
+      expect(whats(v).filter((w) => w.startsWith('#31 '))).toEqual([
+        '#31 最近的问题（未关联信息，无法判断是否已重试）：等人批准 31',
+      ]);
+      expect(taskOf(v, 31)).toMatchObject({
+        executor: 'local',
+        executorName: '本机',
+        state: 'running',
+        doing: '本机在做 31',
+        lastProblem: '最近的问题（未关联信息，无法判断是否已重试）：等人批准 31',
+        updatedAt: raw.updated_at,
+      });
+    });
+
+    it('local + 别的在跑状态也不报「手上没有会话」；asking 一向不报', () => {
+      const v = viewOf((s) => {
+        s.tasks = {
+          ok: true,
+          rows: [
+            task(41, 'planning', 300, 'local'),
+            task(42, 'planning', 300, 'engine'),
+            task(43, 'asking', 300, 'local'),
+          ],
+        };
+      });
+      expect(idleOf(v, 41)).toEqual([]);
+      expect(idleOf(v, 42)).toHaveLength(1);
+      expect(idleOf(v, 43)).toEqual([]);
+    });
+
+    it('阈值边界：正好 20 分钟不报，21 分钟报；有开着的会话不报', () => {
+      const v = viewOf((s) => {
+        s.tasks = {
+          ok: true,
+          rows: [
+            task(51, 'running', 20, 'engine'),
+            task(52, 'running', 21, 'engine'),
+            task(53, 'running', 21, 'engine'),
+          ],
+        };
+        s.runs = { ok: true, rows: [run({ n: 53, stage: 'execute', queued: 5, ended: null })] };
+      });
+      expect(idleOf(v, 51)).toEqual([]);
+      expect(idleOf(v, 52)).toHaveLength(1);
+      expect(idleOf(v, 53)).toEqual([]);
+      const local = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task(54, 'running', 21, 'local')] };
+      });
+      expect(idleOf(local, 54)).toEqual([]);
+    });
+
+    it('runs 读失败：不推断没有会话，engine 也不报空闲', () => {
+      const v = viewOf((s) => {
+        s.tasks = {
+          ok: true,
+          rows: [task(61, 'running', 766, 'engine'), task(62, 'planning', 766, 'engine')],
+        };
+        s.runs = { ok: false, why: '库查询出错：x' };
+      });
+      expect(whats(v).filter((w) => w.includes('没动'))).toEqual([]);
+      expect(taskOf(v, 61)).toMatchObject({ openRuns: 0, runs: null, runsWhy: '库查询出错：x' });
+    });
+
+    it('执行者缺了、空、不认得：标未知并留一句判不了，不按引擎报也不当健康', () => {
+      const v = viewOf((s) => {
+        s.tasks = {
+          ok: true,
+          rows: [
+            task(71, 'running', 766),
+            task(72, 'running', 766, null),
+            task(73, 'running', 766, 'remote'),
+            task(74, 'running', 10),
+          ],
+        };
+      });
+      for (const n of [71, 72, 73]) {
+        expect(taskOf(v, n)).toMatchObject({ executor: null, executorName: '未知' });
+        expect(idleOf(v, n)).toEqual([]);
+        has(
+          v,
+          'note',
+          `#${n} 在干活、766 分钟没动、没有会话，但执行者没读到（缺了或认不得），判不了是不是引擎空闲`,
+        );
+      }
+      expect(whats(v).some((w) => w.startsWith('#74 在干活'))).toBe(false);
+      expect(executorKinds(v)).toEqual(['task-park', 'task-park', 'task-park']);
+    });
+
+    it('执行者不是字符串：这一块形状认不出，当没查成，不拿默认顶', () => {
+      const raw = healthy();
+      raw.sections.tasks = { ok: true, rows: [task(81, 'running', 5, 7)] };
+      const r = lib.parseSnapshot(JSON.stringify(raw));
+      expect(r.ok).toBe(true);
+      expect(JSON.stringify(r)).toContain('形状认不出');
+    });
+
+    const executorKinds = (v: View) =>
+      (v.anomalies as { what: string; kind?: string }[])
+        .filter((a) => a.what.includes('执行者没读到'))
+        .map((a) => a.kind);
   });
 
   it('任务工作流的会话（runs 表，阶段写成 segment:manual）在跑：算手上有会话、不报「多半停在等人」，阶段认成写码', () => {

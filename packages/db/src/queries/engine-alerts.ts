@@ -7,7 +7,7 @@ import {
   DecisionReasonSchema,
   decisionOptionsProblem,
 } from '@fleet-dao/shared';
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull, lt, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { notifications } from '../schema/index.ts';
 
@@ -147,6 +147,36 @@ export async function resolveAlertByKey(
     .from(notifications)
     .where(eq(notifications.dedupeKey, input.dedupeKey));
   return existing ? 'already_resolved' : 'not_found';
+}
+
+/**
+ * 只在这条报警从 since 以来没再报过时标成已处理（#3036，冷验收检出恢复撤卡）：一次检出 since 开跑、成功了，
+ * 它只能证明 since 之前报的那次故障好了；since 之后又报（updated_at 拨到更晚）的是新故障，不许被这张旧回执撤掉，回 changed。
+ * 已处理的不动回 already_resolved；没有这条回 not_found。
+ */
+export async function resolveAlertIfUnchangedSince(
+  db: Db,
+  input: { dedupeKey: string; by: string; since: Date; at?: Date },
+): Promise<'ok' | 'changed' | 'already_resolved' | 'not_found'> {
+  const at = input.at ?? new Date();
+  const [row] = await db
+    .update(notifications)
+    .set({ resolvedAt: at, resolvedBy: input.by, updatedAt: at })
+    .where(
+      and(
+        eq(notifications.dedupeKey, input.dedupeKey),
+        isNull(notifications.resolvedAt),
+        lt(notifications.updatedAt, input.since),
+      ),
+    )
+    .returning({ id: notifications.id });
+  if (row) return 'ok';
+  const [existing] = await db
+    .select({ resolvedAt: notifications.resolvedAt })
+    .from(notifications)
+    .where(eq(notifications.dedupeKey, input.dedupeKey));
+  if (!existing) return 'not_found';
+  return existing.resolvedAt === null ? 'changed' : 'already_resolved';
 }
 
 export interface OpenAlert {
