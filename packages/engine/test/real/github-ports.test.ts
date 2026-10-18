@@ -15,7 +15,7 @@ import { join } from 'node:path';
 import { GitHubError } from '@fleet-dao/github';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type PortContext, PortError } from '../../src/ports.ts';
-import { localExec } from '../../src/real/exec.ts';
+import { localExec, type UserExec } from '../../src/real/exec.ts';
 import { createGitHubPorts, type EngineGitHub, toPortError } from '../../src/real/github-ports.ts';
 import { checkoutBranch, fetchBundle } from '../../src/real/user-git.ts';
 import { runChildOk } from '../child.ts';
@@ -132,7 +132,10 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
   return { gh, calls };
 }
 
-function setup(over: Parameters<typeof fakeGh>[0] = {}, opts: { heartbeatEveryMs?: number } = {}) {
+function setup(
+  over: Parameters<typeof fakeGh>[0] = {},
+  opts: { heartbeatEveryMs?: number; exec?: UserExec } = {},
+) {
   const { gh, calls } = fakeGh(over);
   const trees = fakeTrees(join(root, 'work'));
   const ports = createGitHubPorts({
@@ -278,20 +281,72 @@ describe('建树、收树', () => {
     expect(trees.owners.has(stale)).toBe(false);
   });
 
-  it('没合并就收：没提交的改动存档成补丁再删；本来就不在的正常返回', async () => {
+  it('没合并就收：复杂未提交成果留原树；清理后本来就不在的正常返回', async () => {
     const { ports, trees } = setup();
     const dir = await seededTree(trees);
     writeFileSync(join(dir, 'README.md'), '# 改了没提交\n');
-    const r = await ports.removeWorktree(
-      { taskId: 't1', subtaskKey: 'login', repo, path: dir, branch: BRANCH, archive: true },
-      ctx,
-    );
-    expect(r).toMatchObject({ removed: true, gone: false });
-    expect(r.archivedTo && readFileSync(r.archivedTo, 'utf8')).toContain('改了没提交');
-    expect(existsSync(dir)).toBe(false);
+    await expect(
+      ports.removeWorktree(
+        { taskId: 't1', subtaskKey: 'login', repo, path: dir, branch: BRANCH, archive: true },
+        ctx,
+      ),
+    ).rejects.toMatchObject({ code: 'WORKTREE_PRESERVED' });
+    expect(readFileSync(join(dir, 'README.md'), 'utf8')).toContain('改了没提交');
+    expect(existsSync(dir)).toBe(true);
+    await trees.trees.remove(dir);
     expect(
       await ports.removeWorktree({ taskId: 't1', repo, path: dir, branch: BRANCH, archive: true }, ctx),
     ).toEqual({ removed: false, gone: true });
+  });
+
+  it('干净但未发布的提交在删树前独立恢复验真，最终包可以找回原HEAD和内容', async () => {
+    const { ports, trees } = setup();
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'unpublished.ts');
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: true },
+      ctx,
+    );
+    expect(r).toMatchObject({ removed: true });
+    expect(existsSync(dir)).toBe(false);
+    const restored = join(root, 'restored');
+    git(root, 'clone', '-q', join(r.archivedTo as string, 'recovery.bundle'), restored);
+    git(restored, 'checkout', '-q', '--detach', head);
+    expect(git(restored, 'rev-parse', 'HEAD')).toBe(head);
+    expect(readFileSync(join(restored, 'src', 'unpublished.ts'), 'utf8')).toBe('export const x = 1;\n');
+  });
+
+  it('同位置建树也不能绕过复杂成果保全', async () => {
+    const { ports, trees } = setup();
+    const dir = await seededTree(trees);
+    writeFileSync(join(dir, 'untracked.bin'), Buffer.from([0, 255]));
+    await expect(ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, ctx)).rejects.toMatchObject({
+      code: 'WORKTREE_PRESERVED',
+    });
+    expect(readFileSync(join(dir, 'untracked.bin'))).toEqual(Buffer.from([0, 255]));
+  });
+
+  it('成果包恢复核验失败，标准任务收树入口不能调用物理删除', async () => {
+    const exec = localExec();
+    const failing: UserExec = async (c) =>
+      c.argv.some((a) => a.includes('bundle verify'))
+        ? {
+            code: 128,
+            stdout: Buffer.alloc(0),
+            stderr: 'injected recovery failure',
+            timedOut: false,
+            aborted: false,
+          }
+        : exec(c);
+    const { ports, trees } = setup({}, { exec: failing });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'keep.ts');
+    await expect(
+      ports.removeWorktree({ taskId: 't1', repo, path: dir, branch: BRANCH, archive: true }, ctx),
+    ).rejects.toMatchObject({ code: 'ARCHIVE_FAILED' });
+    expect(trees.owners.has(dir)).toBe(true);
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(head);
+    expect(readFileSync(join(dir, 'src', 'keep.ts'), 'utf8')).toContain('export const x');
   });
 });
 
