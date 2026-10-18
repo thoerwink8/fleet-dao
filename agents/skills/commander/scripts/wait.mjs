@@ -88,6 +88,11 @@ const RED_CONCLUSIONS = new Set([
 /** StatusContext 的这几种状态算红 */
 const RED_STATES = new Set(['FAILURE', 'ERROR']);
 
+/** 合并闸写的提交状态名（packages/conventions/src/merge-gates.ts 的 GATE_CONTEXT） */
+const GATE_CONTEXT = 'merge-gate';
+/** 合并闸只因冷验收还在跑而 fail 时，description 的开头（merge-gates.ts 的 checkColdVerify） */
+const GATE_AWAITING_VERIFY = '等验收：';
+
 /** CANCELLED 的最新一条：结束不到这么久（毫秒）先不判红，等它的新一次 */
 const CANCEL_GRACE_MS = 3 * 60_000;
 
@@ -122,7 +127,8 @@ function latestPerName(checks, what) {
  * PR 问一次：合并了 → 绿；关了没合 → 红；有检查红 → 红；别的接着等。
  * 只看每个同名检查最新的那一条：改了 PR 正文，merge-gate 会重跑，旧的那次（常是 CANCELLED）还留在
  * statusCheckRollup 里，拿它判红就会在新的那次绿了之前提前退出（#2818）。最新那条是 CANCELLED 且刚结束
- * （不到 3 分钟）时先不判红，接着等它的新一次。
+ * （不到 3 分钟）时先不判红，接着等它的新一次。合并闸只因「等验收」（当前头上的 cold-verify 还在跑）fail 时也不判红：
+ * 验收跑完合并闸会重算（#3173）。
  * @param {Gh} gh
  * @param {number} n
  * @param {string[]} repo
@@ -146,6 +152,7 @@ export function stepPr(gh, n, repo, now = Date.now()) {
     const conclusion = typeof c.conclusion === 'string' ? c.conclusion.toUpperCase() : '';
     const st = typeof c.state === 'string' ? c.state.toUpperCase() : '';
     if (conclusion === 'CANCELLED' && cancelledJustNow(c, now)) continue;
+    if (gateAwaitingVerify(c)) continue;
     if (RED_CONCLUSIONS.has(conclusion) || RED_STATES.has(st)) {
       red.push(String(c.name ?? c.context ?? '（没名字的检查）'));
     }
@@ -177,6 +184,19 @@ function stepPrHead(gh, n, repo, after) {
   if (state !== 'OPEN') throw new WaitError(`${what} 的 state 认不出：${state}`);
   if (head !== after) return { done: true, ok: true, line: `PR #${n} 头已变化：${after} → ${head} ${url}` };
   return { done: false };
+}
+
+/**
+ * 合并闸那条提交状态是不是只因等验收而 fail：description 以「等验收：」开头，且没有「另有 N 条」（有就是还有别的理由不能合，
+ * merge-gates.ts 的 statusDescription 只放第一条）。读不到 description 不算，照常判红。
+ * @param {Record<string, unknown>} c
+ */
+function gateAwaitingVerify(c) {
+  if (c.context !== GATE_CONTEXT || typeof c.description !== 'string') return false;
+  const st = typeof c.state === 'string' ? c.state.toUpperCase() : '';
+  return (
+    st === 'FAILURE' && c.description.startsWith(GATE_AWAITING_VERIFY) && !c.description.includes('（另有 ')
+  );
 }
 
 /**
