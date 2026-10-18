@@ -36,6 +36,7 @@
 - 只改一个包「对外面」以外的文件只测这个包自己（`packages/conventions/src/package-surface.ts`）；认不出面就当整个包都是面。
 - 文档指针检查误报了就收窄 `packages/conventions/src/doc-pointers.ts` 的规则，不往文档里加豁免；章节别光写「第 X 节」，写明是 design 还是 ops 的。
 - CI 里的检查必须确定、只看检出来的文件；看外部状态（GitHub）的放定时任务，只留言不挡 PR。
+- 合并闸的策略 reader 只在核准仓身份、PR 号和精确 head 后返回结构化 closed；初算和发表前都跳过这种终态，不覆写已合旧头。换头、串仓、策略变化或读取失败仍报错。GitHub 的读取与写状态是分开的 API，最终读取后仍有非原子窗口。
 - CI 由这几块组成（减法，2026-10-16）：`ci.yml` 的 `lint`（biome、tsc、文档指针、技能测试、deps、release_smoke 并行，加卫生检查——CI 里只在 lint 的这一步跑一处，文件树和 PR 历史两遍；本机 `pnpm check` 和 pre-push 钩子另有一份，是推之前的快反馈）、`test`、`web`、`e2e`（合并闸和发版闸，两种屏宽全套，不含隔离集）、`deploy`，PR 和主线都全跑，汇总 job `check` 的 needs 就是这几个。只报不挡或随时间变的挪去定时：`debt.yml`（欠账报告）和 `e2e-quarantine.yml`（隔离集 E2E）每天跑一次、可手动触发，都不再跟 push；`e2e-flaky.yml` 仍跟主线 ci 跑完统计偶发；`ci-rerun.yml` 在主线 ci 第一次运行（run_attempt=1）红了时重跑失败的 job 一次（#2747，`test/ci-rerun.test.ts` 钉着只认 ci、只重跑一次）。
 
 ## 改它时要连带改
