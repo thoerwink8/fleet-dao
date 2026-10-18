@@ -458,8 +458,8 @@ describe('期望里的渠道', () => {
     expect(byId.grok).toMatchObject({ channel: 'latest+3d', via: 'self-update' });
     expect(byId['cursor-agent']?.channel).toBeUndefined();
     expect(byId.reclaude?.channel).toBeUndefined();
-    // Go 钉死版本，不跟渠道升：via tar 升级器不认，没写 channel 就跳过
-    expect(byId.go).toMatchObject({ name: 'Go', bin: '/usr/local/bin/go', via: null });
+    // Go 由同一升级入口按固定版本管理，不跟浮动渠道。
+    expect(byId.go).toMatchObject({ name: 'Go', bin: '/usr/local/bin/go', via: 'tar', version: '1.25.1' });
     expect(byId.go?.channel).toBeUndefined();
   });
 
@@ -487,5 +487,46 @@ describe('发版窗口的位置', () => {
     expect(fn).toContain('wanted.json');
     expect(fn).toContain('--release-window');
     expect(fn).not.toContain('red ');
+  });
+});
+describe('固定版本 tar 走同一个排空与失败锁', () => {
+  const go: CliToolSpec = { id: 'go', name: 'Go', via: 'tar', version: '1.25.1', bin: '/usr/local/bin/go' };
+  it('无channel也会安装，不能误归入self-update', async () => {
+    let calls = 0;
+    const io = fake({
+      installTar: async () => {
+        calls++;
+        return { code: 0, stdout: '验真通过', stderr: '' };
+      },
+    });
+    const state = await run([go], io);
+    expect(state.tools.go).toMatchObject({ outcome: 'ok', version: '1.25.1' });
+    expect(calls).toBe(1);
+    expect(io.selfs).toBe(0);
+    expect(io.installs).toEqual([]);
+  });
+  it('安装失败锁住重试，有会话时不能安装', async () => {
+    let calls = 0;
+    const io = fake({
+      installTar: async () => {
+        calls++;
+        return { code: 1, stdout: '', stderr: 'SHA256错误' };
+      },
+    });
+    const state = await run([go], io);
+    expect(state.tools.go?.failure?.reason).toContain('SHA256');
+    await run([go], io, state);
+    expect(calls).toBe(1);
+    io.sessions = () => 1;
+    expect((await run([go], io)).tools.go?.outcome).toBe('refused');
+    expect(calls).toBe(1);
+  });
+  it('拒绝未知tar工具和非固定版本', () => {
+    for (const value of [
+      { ...go, version: 'latest' },
+      { ...go, bin: '/usr/bin/go' },
+    ]) {
+      expect(readCliToolsConfig({ cliTools: { tools: { go: value } } }).ok).toBe(false);
+    }
   });
 });

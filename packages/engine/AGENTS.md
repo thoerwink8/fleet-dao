@@ -43,3 +43,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 改读写的表：表结构在 `packages/db`（生成迁移），共用的读写在 `packages/store`（两套实现一起改）。
 - 改派工、选路：同步 design 第九节「自由组合的派工模型」。
 - 改了法国上的单元、环境变量：同步 ops 第五节「AI 会话」或第九节「发布应用（deploy/release.sh）」。
+
+## 固定版本宿主工具
+
+- Go 的 `via: tar` 和固定 `version` 由现有 `cli-upgrade-main.ts` 管理，只在发布/空闲排空窗口运行；实现位于 `cli-upgrade-go.ts`。仅 Linux amd64/arm64，官方精确版本清单与 SHA256 校验，完整新树暂存、实际 `go version` 验真，最后原子替换 `/usr/local/bin/go`。
+- 必须核对 intake 固定 PATH 的实际入口和版本；`/usr/local/go/bin/go` 遮住受管入口时明确失败，保留现有安装，不放宽 readiness。旧树和入口备份保留，失败不记健康、不自动重试。
