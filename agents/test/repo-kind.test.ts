@@ -1,12 +1,12 @@
-// 仓是哪一种（agents/hooks/repo-kind.mjs，决定 0107）：自用仓靠仓根 AGENTS.md 一行标记（旧的私人仓写法照认），fleet-dao 认两份文件，
-// 其余一律对外仓；没标记、远端又全在创始人 GitHub 下的仓开会话提醒一句，每仓每天一次。
-// 真文件、真 git（临时目录里 init）。
+// 仓是哪一种（agents/hooks/repo-kind.mjs，决定 0108）：本机 .git/config 说过的最先；fleet-dao、AGENTS.md 自用仓标记是自用仓；
+// 再看远端，有一个不在创始人 GitHub 下就是对外仓，全在就是自用仓；没远端（不在 GitHub 上）照对外仓办，不问。
+// pnpm repo:kind self|external 记进本机，有不在他 GitHub 下的远端却记成自用仓时提醒后果。真文件、真 git（临时目录里 init）。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { runChildOk } from './child.ts';
+import { runChild, runChildOk } from './child.ts';
 
 interface Result {
   status: number | null;
@@ -15,23 +15,36 @@ interface Result {
   error?: Error;
 }
 type Git = (cwd: string, args: string[]) => Result;
+interface Info {
+  kind: 'self' | 'external';
+  source: string;
+  why: string;
+  remotes: string[];
+}
 interface Lib {
   SELF_MARK: string;
   LEGACY_SELF_MARKS: string[];
-  repoKind(root: string): 'self' | 'external';
-  hasSelfMark(root: string): boolean;
+  CONFIG_KEY: string;
+  repoKind(root: string, deps?: { git?: Git }): 'self' | 'external';
+  repoKindInfo(root: string, deps?: { git?: Git }): Info;
   githubOwnerOf(url: string): string | null;
-  allFounderRemotes(urls: string[], owners?: string[]): boolean;
-  kindReminderLines(o: { cwd: string; git: Git; home: string; now?: number }): string[];
+  isFounderRemote(url: string, owners?: string[]): boolean;
+  setRepoKind(
+    root: string,
+    kind: 'self' | 'external',
+    git: Git,
+  ): { ok: true; lines: string[] } | { ok: false; why: string };
 }
 
-const lib = (await import(
-  pathToFileURL(fileURLToPath(new URL('../hooks/repo-kind.mjs', import.meta.url))).href
-)) as Lib;
+const LIB = fileURLToPath(new URL('../hooks/repo-kind.mjs', import.meta.url));
+const lib = (await import(pathToFileURL(LIB).href)) as Lib;
 const { gitRunner } = (await import(
   pathToFileURL(fileURLToPath(new URL('../hooks/session-start.mjs', import.meta.url))).href
 )) as { gitRunner(ms?: number): Git };
 const git = gitRunner();
+
+const MINE = 'git@github.com:thoerwink8/mine.git';
+const COMPANY = 'git@gitlab.corp.example:group/app.git';
 
 const made: string[] = [];
 afterEach(() => {
@@ -53,85 +66,66 @@ function gitRepo(files: Record<string, string>, remotes: Record<string, string>)
     runChildOk('git', ['remote', 'add', name, url], { cwd: d });
   return d;
 }
+const kindOf = (root: string) => lib.repoKind(root, { git });
 
-describe('repoKind：自用仓靠标记，其余都是对外仓', () => {
-  it('新写法、旧的私人仓写法（两头有空白也认）都是自用仓', () => {
-    expect(lib.repoKind(dir({ 'AGENTS.md': `# x\n\n  ${lib.SELF_MARK}  \n` }))).toBe('self');
+describe('看远端：有一个不在创始人 GitHub 下就是对外仓，全在就是自用仓', () => {
+  it('远端全在他 GitHub 下：自用仓；不用标记', () => {
+    expect(lib.repoKindInfo(gitRepo({}, { origin: MINE }), { git })).toMatchObject({
+      kind: 'self',
+      source: 'remote',
+    });
+  });
+
+  it('公司 GitLab、内网地址、别人的 GitHub，哪怕另有一个他 GitHub 的远端：对外仓', () => {
+    expect(kindOf(gitRepo({}, { origin: COMPANY, github: MINE }))).toBe('external');
+    expect(kindOf(gitRepo({}, { origin: 'http://192.168.0.10:8848/biz/app.git' }))).toBe('external');
+    expect(kindOf(gitRepo({}, { origin: 'git@github.com:someone/x.git' }))).toBe('external');
+  });
+
+  it('没有远端：判不出来，照对外仓办（source 是 no-remote）', () => {
+    expect(lib.repoKindInfo(gitRepo({}, {}), { git })).toMatchObject({
+      kind: 'external',
+      source: 'no-remote',
+    });
+  });
+
+  it('不是 git 仓、目录不在：照对外仓办', () => {
+    expect(kindOf(dir())).toBe('external');
+    expect(kindOf(join(dir(), '不存在'))).toBe('external');
+  });
+});
+
+describe('例外：本机说过的最先，其次 fleet-dao 和自用仓标记', () => {
+  it('本机 .git/config 记着 self / external：盖过远端；认不出的值不算', () => {
+    const company = gitRepo({}, { origin: COMPANY });
+    runChildOk('git', ['config', lib.CONFIG_KEY, 'self'], { cwd: company });
+    expect(lib.repoKindInfo(company, { git })).toMatchObject({ kind: 'self', source: 'config' });
+    const mine = gitRepo({}, { origin: MINE });
+    runChildOk('git', ['config', lib.CONFIG_KEY, 'external'], { cwd: mine });
+    expect(kindOf(mine)).toBe('external');
+    const odd = gitRepo({}, { origin: MINE });
+    runChildOk('git', ['config', lib.CONFIG_KEY, 'company'], { cwd: odd });
+    expect(lib.repoKindInfo(odd, { git }).source).toBe('remote');
+  });
+
+  it('AGENTS.md 自用仓标记（新写法、旧的私人仓写法，两头空白也认）：没远端也是自用仓；写在句子里的不算', () => {
+    expect(kindOf(gitRepo({ 'AGENTS.md': `# x\n\n  ${lib.SELF_MARK}  \n` }, {}))).toBe('self');
     for (const old of lib.LEGACY_SELF_MARKS)
-      expect(lib.repoKind(dir({ 'AGENTS.md': `# x\n${old}\n` }))).toBe('self');
+      expect(kindOf(gitRepo({ 'AGENTS.md': `# x\n${old}\n` }, {}))).toBe('self');
+    expect(kindOf(gitRepo({ 'AGENTS.md': `说明里提到 ${lib.SELF_MARK} 不算\n` }, {}))).toBe('external');
   });
 
-  it('fleet-dao 认两份文件，不靠标记', () => {
+  it('fleet-dao 认两份文件', () => {
     expect(
-      lib.repoKind(dir({ 'agents/shared-rules.md': 'x', 'packages/conventions/standard-paths.json': '{}' })),
+      kindOf(dir({ 'agents/shared-rules.md': 'x', 'packages/conventions/standard-paths.json': '{}' })),
     ).toBe('self');
-    expect(lib.repoKind(dir({ 'agents/shared-rules.md': 'x' }))).toBe('external');
-  });
-
-  it('标记只写在一行里的说明中、没 AGENTS.md、空目录：对外仓（严的一边）', () => {
-    expect(lib.repoKind(dir({ 'AGENTS.md': `说明里提到 ${lib.SELF_MARK} 不算\n` }))).toBe('external');
-    expect(lib.repoKind(dir({ 'README.md': lib.SELF_MARK }))).toBe('external');
-    expect(lib.repoKind(dir())).toBe('external');
-    expect(lib.repoKind(join(dir(), '不存在'))).toBe('external');
   });
 });
 
-describe('远端是不是创始人自己的 GitHub', () => {
-  it('认 scp 写法、https、ssh://、github 开头的 ssh 别名；GitLab、别的账号不算', () => {
-    expect(lib.githubOwnerOf('git@github.com:thoerwink8/fleet-dao.git')).toBe('thoerwink8');
-    expect(lib.githubOwnerOf('https://github.com/thoerwink8/x')).toBe('thoerwink8');
-    expect(lib.githubOwnerOf('ssh://git@github.com/thoerwink8/x.git')).toBe('thoerwink8');
-    expect(lib.githubOwnerOf('github-work:thoerwink8/x.git')).toBe('thoerwink8');
-    expect(lib.githubOwnerOf('git@gitlab.example.com:group/x.git')).toBeNull();
-    expect(lib.githubOwnerOf('/srv/git/x.git')).toBeNull();
-  });
-
-  it('要至少一个远端、而且全在他的账号下；有一个是公司 GitLab 或别人的就不算', () => {
-    expect(lib.allFounderRemotes(['git@github.com:thoerwink8/a.git'])).toBe(true);
-    expect(lib.allFounderRemotes(['https://github.com/THOERWINK8/a'])).toBe(true);
-    expect(lib.allFounderRemotes([])).toBe(false);
-    expect(
-      lib.allFounderRemotes(['git@github.com:thoerwink8/a.git', 'git@gitlab.corp.example:g/a.git']),
-    ).toBe(false);
-    expect(lib.allFounderRemotes(['git@github.com:someone/a.git'])).toBe(false);
-  });
-});
-
-describe('开会话的提醒（kindReminderLines）', () => {
-  const NOW = Date.parse('2026-10-18T04:00:00Z');
-  const DAY = 24 * 3_600_000;
-
-  it('没标记、远端全在他 GitHub 下：提醒问他要不要加标记，同一天不再说，第二天再说', () => {
-    const root = gitRepo({ 'AGENTS.md': '# x\n' }, { origin: 'git@github.com:thoerwink8/mine.git' });
-    const home = dir();
-    const first = lib.kindReminderLines({ cwd: root, git, home, now: NOW });
-    expect(first).toHaveLength(1);
-    expect(first[0]).toMatch(/像是自用仓/);
-    expect(first[0]).toContain(lib.SELF_MARK);
-    expect(first[0]).toMatch(/没说就照对外仓办/);
-    expect(lib.kindReminderLines({ cwd: root, git, home, now: NOW + 3_600_000 })).toEqual([]);
-    expect(lib.kindReminderLines({ cwd: root, git, home, now: NOW + DAY })).toHaveLength(1);
-  });
-
-  it('打了标记的、远端有公司 GitLab 的、没有远端的、不是 git 仓的：不出声', () => {
-    const home = dir();
-    const marked = gitRepo(
-      { 'AGENTS.md': `${lib.SELF_MARK}\n` },
-      { origin: 'git@github.com:thoerwink8/a.git' },
-    );
-    const company = gitRepo(
-      {},
-      { origin: 'git@gitlab.corp.example:g/a.git', github: 'git@github.com:thoerwink8/a.git' },
-    );
-    const bare = gitRepo({}, {});
-    for (const cwd of [marked, company, bare, dir()])
-      expect(lib.kindReminderLines({ cwd, git, home, now: NOW })).toEqual([]);
-  });
-
-  it('insteadOf 只改传输地址：原始 GitHub 身份仍首次提醒、同日节流、次日再提醒', () => {
+describe('读原始远端配置：insteadOf 只改传输地址，pushurl 也算，读失败不当成没有远端', () => {
+  it('原始地址在他 GitHub、传输被改写成中转：照原始地址判自用仓', () => {
     const url = 'https://github.com/thoerwink8/mine.git';
     const root = gitRepo({}, { origin: url });
-    const home = dir();
     const rewritten: Git = (cwd, args) =>
       git(cwd, [
         '-c',
@@ -139,49 +133,75 @@ describe('开会话的提醒（kindReminderLines）', () => {
         ...args,
       ]);
     expect(rewritten(root, ['remote', '-v']).stdout).toContain('https://relay.fixture.invalid/mine.git');
-    const first = lib.kindReminderLines({ cwd: root, git: rewritten, home, now: NOW });
-    expect(first).toHaveLength(1);
-    expect(first[0]).toContain(url);
-    expect(first[0]).not.toContain('relay.fixture.invalid');
-    expect(lib.kindReminderLines({ cwd: root, git: rewritten, home, now: NOW + 3_600_000 })).toEqual([]);
-    expect(lib.kindReminderLines({ cwd: root, git: rewritten, home, now: NOW + DAY })).toHaveLength(1);
+    expect(lib.repoKindInfo(root, { git: rewritten })).toMatchObject({ kind: 'self', remotes: [url] });
   });
 
-  it('陌生原始地址即使传输改成创始人 GitHub 也不提醒，显式非创始人 pushurl 也不漏', () => {
+  it('陌生原始地址被改写成他 GitHub：照原始地址判对外仓；显式非他的 pushurl：对外仓', () => {
     const stranger = 'https://unknown.fixture.invalid/repo.git';
     const root = gitRepo({}, { origin: stranger });
-    const home = dir();
     const rewritten: Git = (cwd, args) =>
       git(cwd, ['-c', `url.https://github.com/thoerwink8/mine.git.insteadOf=${stranger}`, ...args]);
-    expect(rewritten(root, ['remote', '-v']).stdout).not.toContain(stranger);
-    expect(lib.repoKind(root)).toBe('external');
-    expect(lib.kindReminderLines({ cwd: root, git: rewritten, home, now: NOW })).toEqual([]);
-    const mixed = gitRepo({}, { origin: 'git@github.com:thoerwink8/mine.git' });
+    expect(lib.repoKind(root, { git: rewritten })).toBe('external');
+    const mixed = gitRepo({}, { origin: MINE });
     runChildOk('git', ['config', 'remote.origin.pushurl', 'git@github.com:someone/other.git'], {
       cwd: mixed,
     });
-    expect(lib.kindReminderLines({ cwd: mixed, git, home, now: NOW })).toEqual([]);
+    expect(kindOf(mixed)).toBe('external');
   });
 
-  it('读取远端配置失败明确说没查成，不当成没有远端', () => {
-    const root = gitRepo({}, { origin: 'git@github.com:thoerwink8/mine.git' });
-    const home = dir();
+  it('【故意造出的失败】读远端配置失败、超时：source 是 unchecked，照对外仓办，不当成没有远端', () => {
+    const root = gitRepo({}, { origin: MINE });
     for (const failed of [
       { status: 128, stdout: '', stderr: 'cannot read config' },
       { status: null, stdout: '', stderr: '', error: new Error('timed out') },
+      { status: 0, stdout: 'garbage', stderr: '' },
     ]) {
-      const broken: Git = (cwd, args) => (args[0] === 'rev-parse' ? git(cwd, args) : failed);
-      expect(lib.kindReminderLines({ cwd: root, git: broken, home, now: NOW }).join('')).toMatch(
-        /仓类型没查成/,
-      );
+      const broken: Git = (cwd, args) => (args.includes('--get-regexp') ? failed : git(cwd, args));
+      expect(lib.repoKindInfo(root, { git: broken })).toMatchObject({
+        kind: 'external',
+        source: 'unchecked',
+      });
     }
   });
+});
 
-  it('【故意造出的失败】git 抛错：不抛，说一句没查成、照对外仓办', () => {
-    const throwing: Git = () => {
-      throw new Error('炸了');
-    };
-    const out = lib.kindReminderLines({ cwd: dir(), git: throwing, home: dir(), now: NOW });
-    expect(out.join('')).toMatch(/仓类型没查成.*照对外仓办/);
+describe('远端地址认法', () => {
+  it('认 scp 写法、https、ssh://、github 开头的 ssh 别名；GitLab、本地路径不算 GitHub', () => {
+    expect(lib.githubOwnerOf('git@github.com:thoerwink8/fleet-dao.git')).toBe('thoerwink8');
+    expect(lib.githubOwnerOf('https://github.com/thoerwink8/x')).toBe('thoerwink8');
+    expect(lib.githubOwnerOf('ssh://git@github.com/thoerwink8/x.git')).toBe('thoerwink8');
+    expect(lib.githubOwnerOf('github-work:thoerwink8/x.git')).toBe('thoerwink8');
+    expect(lib.githubOwnerOf(COMPANY)).toBeNull();
+    expect(lib.githubOwnerOf('/srv/git/x.git')).toBeNull();
+    expect(lib.isFounderRemote('https://github.com/THOERWINK8/a')).toBe(true);
+    expect(lib.isFounderRemote('git@github.com:someone/a.git')).toBe(false);
+  });
+});
+
+describe('一句话改类型：repo:kind self|external', () => {
+  it('记进本机 .git/config，不碰仓里的文件；有公司远端却记成自用仓：照记，提醒后果', () => {
+    const root = gitRepo({ 'AGENTS.md': '# 公司仓\n' }, { origin: COMPANY });
+    const r = lib.setRepoKind(root, 'self', git);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.lines.join('\n')).toMatch(/记下了.*自用仓/);
+    expect(r.lines.join('\n')).toMatch(/能拉代码的人都看得到/);
+    expect(kindOf(root)).toBe('self');
+    expect(runChildOk('git', ['status', '--porcelain', '--', 'AGENTS.md'], { cwd: root })).toBe(
+      '?? AGENTS.md',
+    );
+    const back = lib.setRepoKind(root, 'external', git);
+    expect(back.ok && back.lines).toHaveLength(1);
+    expect(kindOf(root)).toBe('external');
+  });
+
+  it('命令行：show 说是哪种和凭什么；self 记下；不是 git 仓退出 2', () => {
+    const cli = (args: string[]) =>
+      runChild(process.execPath, [LIB, ...args], { env: { ...process.env, INIT_CWD: '' } });
+    const root = gitRepo({}, {});
+    expect(cli(['show', root]).stdout).toMatch(/对外仓（没有远端/);
+    expect(cli(['self', root]).status).toBe(0);
+    expect(cli(['show', root]).stdout).toMatch(/自用仓（本机 \.git\/config/);
+    expect(cli(['show', dir()]).status).toBe(2);
   });
 });
