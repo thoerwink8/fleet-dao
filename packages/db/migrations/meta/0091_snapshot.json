@@ -1,5 +1,5 @@
 {
-  "id": "840d37b2-c6a3-42c4-9575-23809bda7b9d",
+  "id": "d53c0328-5e83-4a35-85be-1470bdce4c2b",
   "prevId": "0c9d9d56-5a0d-4a8c-91c7-2697f11ecb02",
   "version": "7",
   "dialect": "postgresql",
@@ -5198,6 +5198,30 @@
           "primaryKey": false,
           "notNull": false
         },
+        "cause": {
+          "name": "cause",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "cause_summary": {
+          "name": "cause_summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "round_seq": {
+          "name": "round_seq",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "verdict": {
+          "name": "verdict",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "timestamp with time zone",
@@ -5389,6 +5413,18 @@
         "runs_cpu_seconds_positive": {
           "name": "runs_cpu_seconds_positive",
           "value": "\"runs\".\"cpu_seconds\" is null or \"runs\".\"cpu_seconds\" > 0"
+        },
+        "runs_cause_known": {
+          "name": "runs_cause_known",
+          "value": "\"runs\".\"cause\" is null or \"runs\".\"cause\" in ('plan', 'main', 'commit_nudge', 'self_check_fix', 'rework_ci', 'rework_verify', 'rework_review', 'rework_conflict', 'rework_no_commit', 'rework_other', 'retry', 'reroute', 'org_switch', 'pause_resume', 'repin', 'human_continue')"
+        },
+        "runs_cause_summary_short": {
+          "name": "runs_cause_summary_short",
+          "value": "\"runs\".\"cause_summary\" is null or char_length(\"runs\".\"cause_summary\") <= 500"
+        },
+        "runs_round_seq_positive": {
+          "name": "runs_round_seq_positive",
+          "value": "\"runs\".\"round_seq\" is null or \"runs\".\"round_seq\" > 0"
         }
       },
       "isRLSEnabled": false
@@ -5642,42 +5678,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "superseded_at": {
-          "name": "superseded_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "superseded_by": {
-          "name": "superseded_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "supersede_evidence": {
-          "name": "supersede_evidence",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "successor_id": {
-          "name": "successor_id",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "successor_generation": {
-          "name": "successor_generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "supersede_coverage": {
-          "name": "supersede_coverage",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -5707,15 +5707,6 @@
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
-        },
-        "acceptance_duties_successor_fk": {
-          "name": "acceptance_duties_successor_fk",
-          "tableFrom": "acceptance_duties",
-          "tableTo": "acceptance_duties",
-          "columnsFrom": ["successor_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5728,10 +5719,6 @@
       },
       "policies": {},
       "checkConstraints": {
-        "acceptance_duties_superseded_complete": {
-          "name": "acceptance_duties_superseded_complete",
-          "value": "(\"acceptance_duties\".\"superseded_at\" is null and \"acceptance_duties\".\"superseded_by\" is null and \"acceptance_duties\".\"supersede_evidence\" is null and \"acceptance_duties\".\"successor_id\" is null and \"acceptance_duties\".\"successor_generation\" is null and \"acceptance_duties\".\"supersede_coverage\" is null) or (\"acceptance_duties\".\"superseded_at\" is not null and \"acceptance_duties\".\"superseded_by\" is not null and \"acceptance_duties\".\"supersede_evidence\" is not null and length(\"acceptance_duties\".\"supersede_evidence\") > 0 and \"acceptance_duties\".\"successor_id\" is not null and \"acceptance_duties\".\"successor_id\" <> \"acceptance_duties\".\"id\" and \"acceptance_duties\".\"successor_generation\" is not null and \"acceptance_duties\".\"successor_generation\" > 0 and \"acceptance_duties\".\"supersede_coverage\" is not null and jsonb_typeof(\"acceptance_duties\".\"supersede_coverage\") = 'array')"
-        },
         "acceptance_duties_issue_positive": {
           "name": "acceptance_duties_issue_positive",
           "value": "\"acceptance_duties\".\"issue_number\" > 0"
@@ -5751,165 +5738,6 @@
         "acceptance_duties_settled_complete": {
           "name": "acceptance_duties_settled_complete",
           "value": "(\"acceptance_duties\".\"settled_at\" is null and \"acceptance_duties\".\"settled_by\" is null and \"acceptance_duties\".\"settle_evidence\" is null) or (\"acceptance_duties\".\"settled_at\" is not null and \"acceptance_duties\".\"settled_by\" is not null and length(\"acceptance_duties\".\"settle_evidence\") > 0)"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.acceptance_duty_supersessions": {
-      "name": "acceptance_duty_supersessions",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "bigint",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "acceptance_duty_supersessions_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "9223372036854775807",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "source_id": {
-          "name": "source_id",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source_generation": {
-          "name": "source_generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source_head": {
-          "name": "source_head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_id": {
-          "name": "target_id",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_generation": {
-          "name": "target_generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_head": {
-          "name": "target_head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_merge_commit": {
-          "name": "target_merge_commit",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repo": {
-          "name": "repo",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "issue_number": {
-          "name": "issue_number",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "pr_number": {
-          "name": "pr_number",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "by": {
-          "name": "by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "evidence": {
-          "name": "evidence",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "coverage": {
-          "name": "coverage",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "acceptance_duty_supersessions_source_idx": {
-          "name": "acceptance_duty_supersessions_source_idx",
-          "columns": [
-            {
-              "expression": "source_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "acceptance_duty_supersessions_source_id_acceptance_duties_id_fk": {
-          "name": "acceptance_duty_supersessions_source_id_acceptance_duties_id_fk",
-          "tableFrom": "acceptance_duty_supersessions",
-          "tableTo": "acceptance_duties",
-          "columnsFrom": ["source_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "acceptance_duty_supersessions_target_id_acceptance_duties_id_fk": {
-          "name": "acceptance_duty_supersessions_target_id_acceptance_duties_id_fk",
-          "tableFrom": "acceptance_duty_supersessions",
-          "tableTo": "acceptance_duties",
-          "columnsFrom": ["target_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "acceptance_duty_supersessions_distinct": {
-          "name": "acceptance_duty_supersessions_distinct",
-          "value": "\"acceptance_duty_supersessions\".\"source_id\" <> \"acceptance_duty_supersessions\".\"target_id\""
-        },
-        "acceptance_duty_supersessions_signed": {
-          "name": "acceptance_duty_supersessions_signed",
-          "value": "length(\"acceptance_duty_supersessions\".\"by\") > 0 and length(\"acceptance_duty_supersessions\".\"evidence\") > 0"
         }
       },
       "isRLSEnabled": false
@@ -6226,6 +6054,123 @@
         "asks_follow_up_positive": {
           "name": "asks_follow_up_positive",
           "value": "\"asks\".\"follow_up_issue\" is null or \"asks\".\"follow_up_issue\" > 0"
+        }
+      },
+      "isRLSEnabled": false
+    },
+    "public.pr_head_files": {
+      "name": "pr_head_files",
+      "schema": "",
+      "columns": {
+        "repo_id": {
+          "name": "repo_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "pr_number": {
+          "name": "pr_number",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "head_sha": {
+          "name": "head_sha",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "path": {
+          "name": "path",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "added": {
+          "name": "added",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "removed": {
+          "name": "removed",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "binary": {
+          "name": "binary",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": false
+        },
+        "recorded_at": {
+          "name": "recorded_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "pr_head_files_pr_idx": {
+          "name": "pr_head_files_pr_idx",
+          "columns": [
+            {
+              "expression": "repo_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "pr_number",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "pr_head_files_repo_id_repos_id_fk": {
+          "name": "pr_head_files_repo_id_repos_id_fk",
+          "tableFrom": "pr_head_files",
+          "tableTo": "repos",
+          "columnsFrom": ["repo_id"],
+          "columnsTo": ["id"],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "pr_head_files_pk": {
+          "name": "pr_head_files_pk",
+          "columns": ["repo_id", "pr_number", "head_sha", "path"]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {
+        "pr_head_files_head_sha_shape": {
+          "name": "pr_head_files_head_sha_shape",
+          "value": "\"pr_head_files\".\"head_sha\" ~ '^[0-9a-f]{40}$'"
+        },
+        "pr_head_files_number_positive": {
+          "name": "pr_head_files_number_positive",
+          "value": "\"pr_head_files\".\"pr_number\" > 0"
+        },
+        "pr_head_files_lines_nonneg": {
+          "name": "pr_head_files_lines_nonneg",
+          "value": "(\"pr_head_files\".\"added\" is null or \"pr_head_files\".\"added\" >= 0) and (\"pr_head_files\".\"removed\" is null or \"pr_head_files\".\"removed\" >= 0)"
+        },
+        "pr_head_files_binary_shape": {
+          "name": "pr_head_files_binary_shape",
+          "value": "(\"pr_head_files\".\"binary\" and \"pr_head_files\".\"added\" is null and \"pr_head_files\".\"removed\" is null) or (not \"pr_head_files\".\"binary\" and \"pr_head_files\".\"added\" is not null and \"pr_head_files\".\"removed\" is not null)"
         }
       },
       "isRLSEnabled": false
@@ -6995,6 +6940,18 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
+        },
+        "started_at": {
+          "name": "started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "rework_summary": {
+          "name": "rework_summary",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -7035,6 +6992,10 @@
       },
       "policies": {},
       "checkConstraints": {
+        "task_rounds_rework_summary_short": {
+          "name": "task_rounds_rework_summary_short",
+          "value": "\"task_rounds\".\"rework_summary\" is null or char_length(\"task_rounds\".\"rework_summary\") <= 500"
+        },
         "task_rounds_flow_mode_known": {
           "name": "task_rounds_flow_mode_known",
           "value": "\"task_rounds\".\"flow_mode\" is null or \"task_rounds\".\"flow_mode\" in ('three', 'full')"

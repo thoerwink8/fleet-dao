@@ -20,6 +20,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 ## 常见坑
 
+- 冷验收完整检出：archive 前经 GitHub 的受管镜像入口补齐既定完整 head，复用镜像锁、只读凭据、取消和超时；已有对象不联网，不拿分支最新头替换待验头。获取或检出失败保留真实降级和报警，只有精确头完整检出成功才撤旧报警。
+
 - 重启收孤儿（`real/orphan-reap.ts`）：脱开会话的真实临时 cwd 从原 `runs.worktree_path` 读，冷验收的目录名不等于 runId。交接或账读不到先报错，不把未知当空清掉；延迟回收前重读 detached 标记及 TTL，已经接回的不碰。
 
 - 正式评审先按原白名单选尚未解决的要求改，再翻全该 review 的行内原文，核仓/PR/review 与原审查者数字身份。总述与行内编辑都进消费键，新完整原文按code point安全分段、带引用尾界保住末空白，旧历史缺行内字段时保留原键和反馈。读不全明确未送达，合前已挂的 autoMerge 尝试撤掉，撤失败一并报明；三个合并入口及waitCi确认已合后共用review-audit补读留账，补读失败记未读，写账失败抛重试。CI 红返工入口走同一读取（readCiReviews，patched('ci-red-review-context')），和失败证据一起交下一轮；读失败不当成没有评审。
@@ -44,6 +46,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 ## 改它时要连带改
 
 - 改工作流：加 `patched()` + 必要时录一个新重放场景；改了步序、停在哪等人，同步 design 第五节对应条。
+- 给任务页「过程」记的账（#3140）：动手会话入参的 `cause` / `causeSummary` / `roundSeq` / `resumeReason`、冷验收入参的 `roundSeq`、推分支的 `prNumber`、开 PR 的 `numstat` 都是可选字段，只在 `patched('run-cause-fields')`、`patched('pr-head-files')` 为真时给，只记账不改步序；加新的起因先改 shared 的 `RUN_CAUSES`（库里 `runs_cause_known` 约束同一份，`packages/db/test/run-cause.test.ts` 核对）并在 `task-session.ts` 的 `nextCause` 赋值处点名它为什么起。
 - 改活动超时：只改 `activity-options.ts`。改定时任务：`src/jobs/` 加任务，`real/jobs.ts` 的 `ENGINE_JOBS` 登记。
 - 改读写的表：表结构在 `packages/db`（生成迁移），共用的读写在 `packages/store`（两套实现一起改）。
 - 改派工、选路：同步 design 第九节「自由组合的派工模型」。

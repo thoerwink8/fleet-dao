@@ -9,6 +9,7 @@ import type {
 import { sql } from 'drizzle-orm';
 import {
   bigint,
+  boolean,
   check,
   foreignKey,
   index,
@@ -339,6 +340,45 @@ export const pullRequests = pgTable(
 );
 
 /**
+ * PR 的头改了哪些文件、各增删几行（#3140）：引擎推分支成功后，按推上去的头现算 `git diff --numstat <主线>...<头>` 写进来
+ * （键是仓、PR、头、路径）。任务页「已编辑 N 个文件 +x −y」读最新那个头的这几行，不拿每次编辑的行数加起来。
+ * 二进制文件 git 不给行数：binary 为真、added / removed 为空。一个头一次写全（同键冲突跳过，重放不重复）；
+ * 单个头最多记 500 个文件，超了 truncated 那一行不另建，页面按「记了 N 个」写（引擎写之前截断并在日志里说明）。
+ * 推的时候没数成不写这张表：页面写「没读到」，不拿 0 顶。
+ */
+export const prHeadFiles = pgTable(
+  'pr_head_files',
+  {
+    repoId: uuid('repo_id')
+      .notNull()
+      .references(() => repos.id),
+    prNumber: integer('pr_number').notNull(),
+    headSha: text('head_sha').notNull(),
+    path: text('path').notNull(),
+    /** 新增、删除的行数；二进制文件为空。 */
+    added: integer('added'),
+    removed: integer('removed'),
+    binary: boolean('binary').notNull().default(false),
+    recordedAt: timestamp('recorded_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ name: 'pr_head_files_pk', columns: [t.repoId, t.prNumber, t.headSha, t.path] }),
+    check('pr_head_files_head_sha_shape', sql`${t.headSha} ~ '^[0-9a-f]{40}$'`),
+    check('pr_head_files_number_positive', sql`${t.prNumber} > 0`),
+    check(
+      'pr_head_files_lines_nonneg',
+      sql`(${t.added} is null or ${t.added} >= 0) and (${t.removed} is null or ${t.removed} >= 0)`,
+    ),
+    // 二进制没有行数、文本一定有
+    check(
+      'pr_head_files_binary_shape',
+      sql`(${t.binary} and ${t.added} is null and ${t.removed} is null) or (not ${t.binary} and ${t.added} is not null and ${t.removed} is not null)`,
+    ),
+    index('pr_head_files_pr_idx').on(t.repoId, t.prNumber),
+  ],
+);
+
+/**
  * 一轮动手怎么结束的（#2762）：引擎任务工作流每一轮收场时写一行（patched('round-outcome')），每日简报的「流程健康」按它算。
  * merged 做成；verify_rejected 冷验收拒；ci_red CI 红（含等合并时必过检查红）；leftover 交活树里有剩；no_commit 没提交（含推的时候空交付）；
  * push_conflict 推分支并主线冲突；merge_conflict 等 CI、等合并时和主线冲突；timeout 超时停下后被放弃；stopped 放弃、叫停；other 别的（卫生检查拦下……）。
@@ -385,9 +425,22 @@ export const taskRounds = pgTable(
      * incomplete_spec 需求不全、infra 基础设施。名单和 shared 的 VERIFY_REJECT_CLASSES 一字不差。
      */
     verifyRejectClass: text('verify_reject_class').$type<VerifyRejectClass>(),
+    /**
+     * 这一轮开始的时刻（#3140，工作流的时钟）：回合视图的起点。老行为空，页面退回这一轮第一笔会话的起跑时刻。
+     */
+    startedAt: timestamp('started_at', tz),
+    /**
+     * 这一轮为什么返工、下一轮要改什么（#3140，≤500 字）：返工意见的头一截（CI 失败摘要、验收问题、没提交……）。
+     * 做成了（merged）、放弃叫停、老行为空。页面在下一回合顶上写它。
+     */
+    reworkSummary: text('rework_summary'),
   },
   (t) => [
     unique('task_rounds_workflow_seq_unique').on(t.workflowId, t.seq),
+    check(
+      'task_rounds_rework_summary_short',
+      sql`${t.reworkSummary} is null or char_length(${t.reworkSummary}) <= 500`,
+    ),
     check('task_rounds_flow_mode_known', sql`${t.flowMode} is null or ${t.flowMode} in ('three', 'full')`),
     check(
       'task_rounds_verify_reject_class_known',

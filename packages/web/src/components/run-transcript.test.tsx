@@ -245,6 +245,38 @@ describe('会话内容：各种条目', () => {
       expect(document.querySelector('[data-subagent-tag]')?.textContent).toBe('子代理 fleet-scout');
     });
   });
+
+  test('引擎实际写的子代理标记是派它的那次 Agent 调用的编号（字符串）：照样缩进、标类型（#3140，不修时线上一条子代理都认不出）', async () => {
+    const sub = { meta: { subagent: 'toolu_A', subagentType: 'fleet-scout' } };
+    const entries = [
+      entry(0, 'tool_call', '找文件', { tool: 'Task', meta: { callId: 'toolu_A' } }),
+      entry(1, 'assistant', '子代理说的话', sub),
+      entry(2, 'tool_call', 'UTC @ scripts', { tool: 'Grep', meta: { callId: 'toolu_B', ...sub.meta } }),
+      entry(3, 'tool_result', 'a.ts:1', { tool: 'Grep', ok: true, meta: { callId: 'toolu_B', ...sub.meta } }),
+      entry(4, 'tool_result', '找到了', { tool: 'Task', ok: true, meta: { callId: 'toolu_A' } }),
+    ];
+    show(async () => page(entries), true);
+    await screen.findByText('子代理说的话');
+    expect(document.querySelectorAll('[data-subagent]')).toHaveLength(2);
+    expect(document.querySelector('[data-subagent-tag]')?.textContent).toBe('子代理 fleet-scout');
+  });
+
+  test('带调用号的调用和结果按调用号对：并行的同名调用、结果倒序回来也不错配；没有调用号的老记录照旧按顺序对', () => {
+    const entries = [
+      entry(0, 'tool_call', 'a.ts', { tool: 'Edit', meta: { callId: 'ea' } }),
+      entry(1, 'tool_call', 'b.ts', { tool: 'Edit', meta: { callId: 'eb' } }),
+      entry(2, 'tool_result', 'b 成了', { tool: 'Edit', ok: true, meta: { callId: 'eb' } }),
+      entry(3, 'tool_result', 'a 没成', { tool: 'Edit', ok: false, meta: { callId: 'ea' } }),
+      entry(4, 'tool_call', 'old-1', { tool: 'Bash' }),
+      entry(5, 'tool_result', 'old-1 的结果', { tool: 'Bash', ok: true }),
+    ];
+    const items = groupEntries(entries);
+    expect(items.map((i) => (i.kind === 'call' ? [i.call.text, i.result?.text] : ['entry']))).toEqual([
+      ['a.ts', 'a 没成'],
+      ['b.ts', 'b 成了'],
+      ['old-1', 'old-1 的结果'],
+    ]);
+  });
 });
 
 describe('会话内容：没记录、读失败', () => {

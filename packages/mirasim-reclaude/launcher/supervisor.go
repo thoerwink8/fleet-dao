@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -77,8 +78,8 @@ func writeFrame(w io.Writer, f frame) error {
 	if err != nil {
 		return fmt.Errorf("stdio 协议帧编码失败")
 	}
-	_, err = w.Write(append(b, '\n'))
-	if err != nil {
+	n, err := w.Write(append(b, '\n'))
+	if err != nil || n != len(b)+1 {
 		return fmt.Errorf("执行体 stdio 写失败")
 	}
 	return nil
@@ -249,7 +250,7 @@ func supervise(cfg configuration) error {
 	generation := 0
 	started := false
 	busy, closed := false, false
-	queue := []frame{}
+	queue := []queuedUser{}
 	hostQueue := []frame{}
 	permissions := map[string]string{}
 	requestAliases := map[string]string{}
@@ -263,7 +264,11 @@ func supervise(cfg configuration) error {
 	turnFirst := false
 	background := map[string]bool{}
 	model := flagValue(cfg.args, "--model")
-	sent := newDeliveries(cfg.args)
+	sent, err := newDeliveries(cfg.args)
+	if err != nil {
+		return err
+	}
+	recoveryPending := true
 	// 没带会话参数（如 Mirasim 的用量探测）就没有用户可选的路由：跟 Mirasim 的注入走，和 runOnce 一致。
 	hasSession := native != ""
 	selectRoute := func() (selection, error) {
@@ -355,11 +360,10 @@ func supervise(cfg configuration) error {
 			default:
 			}
 			idle := !busy
-			for _, f := range queue {
-				if err := writeFrame(child.in, f); err != nil {
+			for _, q := range queue {
+				if err := sent.send(q, child.in, "active", idle); err != nil {
 					return err
 				}
-				sent.forwarded(f, "active", idle)
 			}
 			queue = nil
 			busy = true
@@ -386,6 +390,9 @@ func supervise(cfg configuration) error {
 			// 以报错结果退回给 Mirasim，进程和当前额度原样保留（首次启动仍按原规矩硬失败）。
 			if started && sel.mode == "cloud" && verifyGatewaySettings(cfg.args, cfg.env) != nil {
 				logLine("event=refuse-switch route=cloud sid=" + sel.sessionID + " reason=no-gateway-in-live-args")
+				if err := sent.reject(queue[0]); err != nil {
+					return err
+				}
 				queue = queue[1:]
 				refusal := frame{}
 				refusal.set("type", "result")
@@ -417,7 +424,9 @@ func supervise(cfg configuration) error {
 			// 和 launch 行的 gateway 词同一口径：保留了且确实有回环网关才算 kept。
 			if keep = keep && gatewayPresence(cfg.args, cfg.env) == "kept"; child.keep != keep {
 				stopManaged(child)
-				sent.lost("switch")
+				if err := sent.lost("switch", native); err != nil {
+					return err
+				}
 				if err = start(sel, true); err != nil {
 					return err
 				}
@@ -425,12 +434,11 @@ func supervise(cfg configuration) error {
 				logLine("event=switch route=" + sel.mode + " sid=" + sel.sessionID)
 			}
 			if len(replay) == 0 {
-				f := queue[0]
+				q := queue[0]
 				queue = queue[1:]
-				if err := writeFrame(child.in, f); err != nil {
+				if err := sent.send(q, child.in, "turn", true); err != nil {
 					return err
 				}
-				sent.forwarded(f, "turn", true)
 				busy = true
 				child.sawUser = true
 			}
@@ -471,7 +479,9 @@ func supervise(cfg configuration) error {
 			// Mirasim 正常回收空闲进程就是发停止信号：优雅停掉执行体，正常退出，不记成会话失败。
 			stopManaged(child)
 			child = nil
-			sent.lost("stopped")
+			if err := sent.lost("stopped", native); err != nil {
+				return err
+			}
 			logLine("event=stopped sid=" + native)
 			return nil
 		case <-stall:
@@ -496,7 +506,9 @@ func supervise(cfg configuration) error {
 			case "eof":
 				closed = true
 			case "exit":
-				sent.lost("exit")
+				if err := sent.lost("exit", native); err != nil {
+					return err
+				}
 				if busy || waitingReplay != "" || len(pendingHost) > 0 || len(permissions) > 0 || len(background) > 0 {
 					return fmt.Errorf("执行体提前退出，状态 %d", e.code)
 				}
@@ -510,10 +522,44 @@ func supervise(cfg configuration) error {
 			case "input":
 				f := e.data
 				if f.text("type") == "user" {
+					// SDK 初始化/控制消息仍走原路径；收到下一条 user 后才恢复确定未发出的队列。
+					if recoveryPending {
+						queue = append(queue, sent.queued()...)
+						recoveryPending = false
+					}
 					if len(queue) >= 64 {
 						return fmt.Errorf("待处理回合过多，未继续发送")
 					}
-					queue = append(queue, f)
+					q, _, err := sent.enqueue(f)
+					if err != nil {
+						var unknown *unknownDeliveryReplay
+						if errors.As(err, &unknown) {
+							refusal := stallResult(native)
+							refusal.set("result", unknown.Error())
+							if err := writeFrame(os.Stdout, refusal); err != nil {
+								return err
+							}
+							fmt.Fprintln(os.Stderr, "mirasim-reclaude: user_replay_refused", unknown.Error())
+							continue
+						}
+						return err
+					}
+					duplicate := false
+					for _, existing := range queue {
+						if q.id != "" && existing.id == q.id {
+							duplicate = true
+							break
+						}
+					}
+					if !duplicate {
+						queue = append(queue, q)
+					}
+					// 先保存本条，再报告旧 unknown，避免宿主因告警回收进程时本条尚无责任账。
+					if notice := sent.recoveryNotice(); notice != nil {
+						if err := writeFrame(os.Stdout, notice); err != nil {
+							return err
+						}
+					}
 					continue
 				}
 				if child == nil {
@@ -603,6 +649,9 @@ func supervise(cfg configuration) error {
 						if !safeID(sid) {
 							return fmt.Errorf("执行体会话 ID 格式错误")
 						}
+						if err := sent.rekey(sid); err != nil {
+							return err
+						}
 						native = sid
 					}
 				}
@@ -623,7 +672,9 @@ func supervise(cfg configuration) error {
 						turnAt = time.Time{}
 					}
 				}
-				sent.observe(f)
+				if err := sent.observe(f); err != nil {
+					return err
+				}
 				if err := writeFrame(os.Stdout, f); err != nil {
 					return err
 				}
