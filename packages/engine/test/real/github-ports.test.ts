@@ -139,8 +139,8 @@ function setup(
   opts: {
     heartbeatEveryMs?: number;
     exec?: UserExec;
-    recordHeadFiles?: Parameters<typeof createGitHubPorts>[0]['recordHeadFiles'];
-    log?: Parameters<typeof createGitHubPorts>[0]['log'];
+    recordHeadFiles?: NonNullable<Parameters<typeof createGitHubPorts>[0]['recordHeadFiles']>;
+    log?: NonNullable<Parameters<typeof createGitHubPorts>[0]['log']>;
   } = {},
 ) {
   const { gh, calls } = fakeGh(over);
