@@ -2,14 +2,19 @@
 // 后端起的时候带了两把通行证（support/node-keys.ts）：wsl 推过快照；idle 配了钥匙从不推（看板上是「从没收到过」）。
 // 快照是用例自己经公开的写口（POST /api/nodes/report，头 X-Fleet-Node-Token）推的：内容取这台后端自己的 /api/home、/api/env，
 // 只把环境名换成「演练 WSL」，和真的 WSL 推来的是同一个形状（后端按 shared 的 NodeReportSchema 校验，形状不对会回 400、这里当场红）。
-// 失联靠浏览器的钟快进 10 分钟：新不新鲜按「收到快照的时刻」和页面的钟现算（lib/node.ts），不等下一次重拉。
+// 失联靠把浏览器的钟拨到收到快照之后 10 分钟：新不新鲜按「收到快照的时刻」和页面的钟现算（lib/node.ts），不等下一次重拉。
 import type { APIRequestContext } from '@playwright/test';
 import { expect, test } from '../support/fixtures.ts';
 import { NODE_TOKEN_WSL } from '../support/node-keys.ts';
 
 const WSL = '演练 WSL';
-/** 上次推成的时刻：同一个环境 20 秒内只收一次，快照 3 分钟内算新鲜，所以 2 分半以内不重推。 */
+/** 上次推成的时刻（客户端）：同一个环境 20 秒内只收一次，快照 3 分钟内算新鲜，所以 2 分半以内不重推。 */
 let pushedAt = 0;
+/**
+ * 服务端收下那份快照的时刻（响应里的 receivedAt，和页面上用来算新鲜度的是同一个）。
+ * 失联用例把浏览器的 Date 钉在这上面，再拨正好 10 分钟，横幅才稳定是「失联 10 分钟」。
+ */
+let receivedAtMs = Number.NaN;
 
 test.describe('看板多机', () => {
   test.beforeEach(async ({ login, api, stack, context }) => {
@@ -26,7 +31,9 @@ test.describe('看板多机', () => {
     for (let attempt = 0; attempt < 3; attempt++) {
       const res = await postReport(context.request, `${stack.webOrigin}/api/nodes/report`, body);
       if (res.status === 200) {
+        if (!Number.isFinite(res.receivedAt)) throw new Error(`推快照没带回 receivedAt：${res.text}`);
         pushedAt = Date.now();
+        receivedAtMs = res.receivedAt;
         return;
       }
       // 别的视口那一遍刚推过：按它说的等一会儿再推
@@ -113,20 +120,25 @@ test.describe('看板多机', () => {
     page,
     shot,
   }) => {
-    // 钟从「推成快照那一刻」起走，不从现在：快照可能是 2 分半内前面用例推的（beforeEach 不重推），从现在起拨 10 分钟
-    // 横幅会写 11、12 分钟（CI 上撞过）。从推成那一刻起，拨到它之后 10 分钟就正好失联 10 分钟。
-    await page.clock.install({ time: new Date(pushedAt) });
+    // 新鲜度按「收到快照的时刻」和页面的钟现算（useNow 每秒读一次 Date），不等下一次重拉。
+    // 钟钉死在服务端的 receivedAt 上，再拨正好 10 分钟：横幅按整分钟向下取，多出来的零头仍写「10 分钟」。
+    // setFixedTime 只钉 Date，定时器仍按真实时间走，不会把到期的定时器放掉。
+    // 以前 fastForward('10:00') 会把这 10 分钟里到期的定时器放一次，包括每个请求上 90 秒的超时（src/api/http.ts）：
+    // 横幅已经新鲜时环境列表往往还在飞，被掐掉的请求页面当成超时（ERR_ABORTED）。冷的首跑在飞的多、热的重试已经回来了，所以偶发。
+    // 快进还会把「进页面已经过去的时间」再加 10 分钟，慢的首跑横幅写成 11、12 分钟。
+    // 横幅读的是这一份快照，顶栏读的是环境列表。拨之前先等顶栏写成「只读」，两边都到了再拨。
+    if (!Number.isFinite(receivedAtMs)) throw new Error('没有收到时刻，没法对钟');
+    const at = receivedAtMs;
+    const trigger = page.locator('[data-env-switcher]');
+    await page.clock.setFixedTime(new Date(at));
     await page.goto('/?node=wsl');
     const banner = page.locator('[data-snapshot-banner]');
     await expect(banner).toHaveAttribute('data-snapshot-banner', 'fresh');
-    // 只拨墙上的钟（setSystemTime），不快进定时器（fastForward）：每个请求都挂着 90 秒的超时 abort（src/api/http.ts），
-    // 快进 10 分钟会把那一刻还在路上的请求全掐掉（ERR_ABORTED，页面还当它超时），掐到哪几个看当时谁在飞，首跑偶发红（#3064）。
-    // 新鲜度本来就按页面的钟现算、不等重拉，拨钟不触发任何轮询，正好验这一点。
-    await page.clock.setSystemTime(new Date(pushedAt + 10 * 60_000));
+    await expect(trigger).toContainText('只读');
+    await page.clock.setFixedTime(new Date(at + 10 * 60_000));
     await expect(banner).toHaveAttribute('data-snapshot-banner', 'stale');
     await expect(banner).toContainText('失联 10 分钟');
     await expect(banner).toContainText('不是现在的');
-    const trigger = page.locator('[data-env-switcher]');
     await expect(trigger).toContainText('失联');
     await trigger.click();
     await expect(page.locator('[data-node-item="wsl"]')).toHaveAttribute('data-node-state', 'stale');
@@ -192,11 +204,22 @@ async function postReport(
   req: APIRequestContext,
   url: string,
   body: unknown,
-): Promise<{ status: number; retryAfter: number; text: string }> {
+): Promise<{ status: number; retryAfter: number; text: string; receivedAt: number }> {
   const res = await req.post(url, { headers: { 'X-Fleet-Node-Token': NODE_TOKEN_WSL }, data: body });
+  const text = await res.text();
+  let receivedAt = Number.NaN;
+  if (res.status() === 200) {
+    try {
+      const parsed = JSON.parse(text) as { receivedAt?: unknown };
+      receivedAt = typeof parsed.receivedAt === 'string' ? Date.parse(parsed.receivedAt) : Number.NaN;
+    } catch {
+      receivedAt = Number.NaN;
+    }
+  }
   return {
     status: res.status(),
     retryAfter: Number(res.headers()['retry-after'] ?? 20),
-    text: (await res.text()).slice(0, 300),
+    text: text.slice(0, 300),
+    receivedAt,
   };
 }
