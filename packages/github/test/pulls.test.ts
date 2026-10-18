@@ -588,13 +588,15 @@ describe('合并', () => {
     });
   });
 
-  it('合并前再确认一次 CI：红的、没跑完的、没出现的都不合', async () => {
+  it('合并前再确认一次 CI：红的、没跑完的、没出现的都不合；只有没跑完的才标 ciPendingOnly（#3165）', async () => {
     for (const conclusion of ['failure', null, 'none'] as const) {
       const { gh, fake } = setup();
       const pr = fake.addPull({ head: { ref: 'task/1', sha: A } });
       if (conclusion !== 'none') fake.addCheck(A, 'check', conclusion);
       const res = await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A });
       expect(res).toMatchObject({ merged: false, reason: 'ci_not_green' });
+      const pendingOnly = 'ciPendingOnly' in res ? res.ciPendingOnly : undefined;
+      expect(pendingOnly).toBe(conclusion === null ? true : undefined);
     }
   });
 
