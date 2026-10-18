@@ -781,6 +781,11 @@ export function createSeed(now: number): MockState {
           model: 'kimi-k3',
           channel: 'ch-relay',
           tier: 'fast',
+          // 第 1 回合的主写：新会话，超时收了
+          cause: 'main',
+          causeSummary: '按单子写 README 里那行北京时间的改动',
+          roundSeq: 1,
+          resumeReason: '第一次开跑，没有可接的会话',
           startedAt: at(-174),
           endedAt: at(-144),
           outcome: 'timeout',
@@ -798,6 +803,11 @@ export function createSeed(now: number): MockState {
           model: 'opus-5.5',
           channel: 'ch-claude',
           tier: 'fast',
+          // 第 2 回合：上一回合超时，换了路由重派（新会话）
+          cause: 'reroute',
+          causeSummary: '上一笔超时，换 opus 重来，接着分支上已有的改动做',
+          roundSeq: 2,
+          resumeReason: '换了模型，不能接上一笔的会话',
           startedAt: at(-142),
           endedAt: at(-119),
           outcome: 'done',
@@ -816,6 +826,13 @@ export function createSeed(now: number): MockState {
           issueNumber: 9,
           model: 'gpt-5.6-luna',
           channel: 'ch-relay',
+          roundSeq: 2,
+          verdict: {
+            pass: true,
+            problems: [],
+            failedCriteria: [],
+            handedOver: [],
+          },
           startedAt: at(-110),
           endedAt: at(-103),
           outcome: 'done',
@@ -844,6 +861,11 @@ export function createSeed(now: number): MockState {
       tier?: 'fast' | 'medium' | 'heavyweight';
       /** 收场写进 runs.memory_peak_mb 的峰值（MiB）；不给 = 没读到。 */
       peakMb?: number;
+      /** 为什么起这一笔、所属回合（#3140）；不给 = 老记录没记。 */
+      cause?: 'main' | 'rework_ci';
+      causeSummary?: string;
+      roundSeq?: number;
+      resumed?: boolean;
     } = {},
   ): NonNullable<MTask['segmentRuns']>[number] {
     const channel =
@@ -860,6 +882,11 @@ export function createSeed(now: number): MockState {
       model,
       ...(channel ? { channel } : {}),
       ...(extra.tier ? { tier: extra.tier } : {}),
+      ...(extra.cause ? { cause: extra.cause } : {}),
+      ...(extra.causeSummary ? { causeSummary: extra.causeSummary } : {}),
+      ...(extra.roundSeq !== undefined ? { roundSeq: extra.roundSeq } : {}),
+      ...(extra.resumed === true ? { resumeSessionId: `session-${taskId}-${Math.abs(start)}` } : {}),
+      ...(extra.resumed === false ? { resumeReason: '第一次开跑，没有可接的会话' } : {}),
       startedAt: at(start),
       ...(end === undefined
         ? {}
@@ -882,7 +909,20 @@ export function createSeed(now: number): MockState {
   };
   addSeg('t-12', [
     seg('t-12', 12, 'scope', 'opus-5.5', -188, -176),
-    seg('t-12', 12, 'manual', 'opus-5.5', -40, undefined, { tier: 'heavyweight' }),
+    seg('t-12', 12, 'manual', 'opus-5.5', -120, -62, {
+      tier: 'heavyweight',
+      cause: 'main',
+      causeSummary: '按单子加 schema 迁移和读接口',
+      roundSeq: 1,
+      resumed: false,
+    }),
+    seg('t-12', 12, 'manual', 'opus-5.5', -40, undefined, {
+      tier: 'heavyweight',
+      cause: 'rework_ci',
+      causeSummary: 'CI 红了：schema 测试里的字段名对不上，接着上一回合的会话改',
+      roundSeq: 2,
+      resumed: true,
+    }),
   ]);
   addSeg('t-14', [
     seg('t-14', 14, 'scope', 'opus-5.5', -150, -141),
