@@ -33,7 +33,11 @@ export interface WorkflowControl {
    * 发给这条工作流（编号已经算好：调用方按 taskWorkflowIdForTask 查库拼，见 temporal.ts）。
    * 工作流不存在或已结束时抛 WorkflowGoneError；Temporal 连不上、超时时抛 WorkflowUnavailableError。
    */
-  signal(workflowId: string, signal: TaskSignal): Promise<void>;
+  signal(workflowId: string, signal: TaskSignal, runId?: string): Promise<void>;
+  /** 当前具体运行身份与状态；查不到抛错，不猜最新 run。 */
+  taskWorkflowExecution?(
+    workflowId: string,
+  ): Promise<{ workflowId: string; runId: string; running: boolean }>;
   /**
    * 这张单的信号该打到哪一代（在跑的，或都结束了就最高的那一代）。没给就用第一代编号。
    * 问不清抛 WorkflowUnavailableError，不假装打到第一代。

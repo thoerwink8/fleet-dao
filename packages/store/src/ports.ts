@@ -180,6 +180,8 @@ export interface NotificationRecord {
   link?: string | undefined;
   taskId?: string | undefined;
   createdAt: string;
+  /** 同 key 撤卡重开时才变化；开放期间重复报警不变，区分事故代次。 */
+  raisedAt?: string | undefined;
   resolvedAt?: string | undefined;
   resolvedBy?: string | undefined;
   deliveries: DeliveryRecord[];
@@ -443,7 +445,14 @@ export interface OpsStore {
   listSettings(): Promise<SettingRecord[]>;
   /** expectedVersion 对不上就不改、返回 conflict（0 = 预期还没设过）。和操作记录同一事务。 */
   putSetting(
-    input: { key: string; value: unknown; expectedVersion: number; by: Actor },
+    input: {
+      key: string;
+      value: unknown;
+      expectedVersion: number;
+      by: Actor;
+      /** 修复结果结算同时锁住原通知代次，禁止旧核验写进已重开的事故。 */
+      expectedNotification?: { id: string; raisedAt: string; requireOpen?: boolean };
+    },
     audit: NewAuditEntry,
   ): Promise<'ok' | 'conflict'>;
 }

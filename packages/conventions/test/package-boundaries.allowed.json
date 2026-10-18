@@ -41,6 +41,11 @@
       "file": "packages/agents-sync/src/main.ts",
       "spec": "../../mirasim-reclaude/bin/health",
       "why": "同上，不装依赖；用路径起 mirasim-reclaude 的 bin/health 当后台脱离子进程，没有 import"
+    },
+    {
+      "file": "packages/api/src/repair-dispatch.ts",
+      "spec": "../../engine/src/bin/dispatch-issue.ts",
+      "why": "看门狗交修复用固定路径启动同身份的现成 CLI 子进程，复用完整准入和审计；不是 import，不能用包 exports 代替可执行脚本路径；api 的 engine 开发依赖保留 CI 变更边"
     }
   ]
 }
