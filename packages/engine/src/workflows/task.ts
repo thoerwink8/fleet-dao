@@ -520,6 +520,8 @@ class TaskFlow {
         if (r.headMoved !== undefined) rt.head = r.headMoved;
         return 'head_moved';
       }
+      if (await rt.parkMainSyncBudget(r.mainSyncBudgetExhausted, r.detail ?? '同步主线次数已到上限'))
+        continue;
       await rt.park('直接合并没成', r.detail ?? 'GitHub 没说为什么');
     }
   }
@@ -699,6 +701,9 @@ class TaskFlow {
           body: this.prBody(),
           ...(generation === undefined ? {} : { generation }),
           ...(recordHeadFiles && pushed.numstat !== undefined ? { numstat: pushed.numstat } : {}),
+          ...(recordHeadFiles && pushed.numstatSnapshot !== undefined
+            ? { numstatSnapshot: pushed.numstatSnapshot }
+            : {}),
         }),
       );
       rt.prNumber = pr.prNumber;

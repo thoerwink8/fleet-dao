@@ -435,6 +435,10 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
   out(`开了 PR #${pr}：${url}`);
   // PR 不挂里程碑（决定 0015 第 1 条）：里程碑页只数单子，进度才不虚
 
+  if (process.env.FLEET_WORKER === '1') {
+    out(`受管工人PR已建立；先 pnpm work feedback <单号> 核实退回，再 pnpm work deliver <单号>。`);
+    return 0;
+  }
   const manual = `gh pr merge ${pr} --auto --squash`;
   let verdict: ReturnType<typeof judgePaths>;
   try {

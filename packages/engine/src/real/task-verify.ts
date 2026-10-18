@@ -49,7 +49,6 @@
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
 import type { ClaimsGitHub, GitHub, RepoRef } from '@fleet-dao/github';
-import { verdictOf } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
@@ -57,6 +56,7 @@ import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
 import {
   type CheckoutBlockedAlert,
+  type CheckoutReceipt,
   type CheckoutRecovered,
   incrementalDiffAtHead,
   placeVerifyCheckout,
@@ -209,6 +209,8 @@ export interface ColdVerifyActivityDeps {
   onCheckoutBlocked?: (alert: CheckoutBlockedAlert) => Promise<void>;
   /** 这个目标真放进了完整检出：撤它开跑之前报的检出报警（#3036）。不给 = 不撤。撤不成不让验收停。 */
   onCheckoutRecovered?: (recovered: CheckoutRecovered) => Promise<void>;
+  /** 成功完整检出的独立持久回执，不依赖旧卡是否存在。 */
+  onCheckoutCompleted?: (receipt: CheckoutReceipt) => Promise<void>;
 }
 
 /** 改到的文件，GitHub 给的样子（packages/github 的 PrFile）。 */
@@ -713,9 +715,11 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
                   ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
                   prNumber,
                   branch: input.branch,
+                  headSha: input.headSha,
                 },
                 {
                   oneShot: oneShotFor(attachTicket),
+                  log,
                   ...(verifierDeps.timeoutMinutes !== undefined
                     ? { timeoutMinutes: verifierDeps.timeoutMinutes }
                     : {}),
@@ -728,6 +732,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               input.roundSeq === undefined ? verifierInput : { ...verifierInput, roundSeq: input.roundSeq },
               {
                 ...verifierDeps,
+                log,
                 ...(sessionIo ? { detach: true } : {}),
                 released,
               },
@@ -786,6 +791,10 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           // 放得进 PR 头的完整检出就放；镜像没有、提交不在、目录仍建不出，会话仍起，提示词里的材料还在。
           const fetchHead = deps.gh.fetchCommitHead;
           await placeVerifyCheckout({
+            taskId: input.taskId,
+            runId: picked.runId,
+            ...(deps.now ? { now: deps.now } : {}),
+            ...(deps.onCheckoutCompleted ? { onCompleted: deps.onCheckoutCompleted } : {}),
             signal: ctx.signal,
             ...(fetchHead
               ? { ensureHead: () => fetchHead({ repo, headSha: input.headSha, signal: ctx.signal }) }
@@ -939,15 +948,6 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       });
     }
     const outOfScope = verdict.outOfScope ?? [];
-    // 结论记在验收那一笔上（#3140，runs.verdict）：过没过、哪几条没过、转给人的。记不成只写日志，结论照常交回工作流
-    const verdictRunId = verdict.session?.runId;
-    if (verdictRunId !== undefined && deps.runs.noteVerdict !== undefined) {
-      try {
-        await deps.runs.noteVerdict(verdictRunId, verdictOf(verdict));
-      } catch (error) {
-        log('验收结论没记进 runs（结论照常交回工作流）', { runId: verdictRunId, error: errMessage(error) });
-      }
-    }
     const handoff =
       outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? [], ctx) : undefined;
     const notes = [verdict.notes, handoff].filter((n): n is string => n !== undefined && n !== '').join('；');

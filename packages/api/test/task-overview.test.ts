@@ -255,15 +255,12 @@ describe('任务详情的概览：真库', () => {
     const stale = (await getDetail(current, s.cookie)).overview?.prs;
     expect(stale).toHaveLength(1);
     expect(stale?.[0]).toMatchObject({ number: 7, branch: 'fleet/12-x', state: 'failed', headSha: H2 });
-    expect(stale?.[0]?.files).toEqual({
-      state: 'ok',
-      headSha: H1,
-      current: false,
-      items: [
-        { path: 'a.ts', added: 3, removed: 1, binary: false },
-        { path: 'logo.png', added: null, removed: null, binary: true },
-      ],
+    expect(stale?.[0]?.files).toMatchObject({
+      state: 'unavailable',
+      reason: expect.stringContaining('只有旧头'),
+      snapshot: { headSha: H1, status: 'complete', total: 2 },
     });
+    expect(stale?.[0]?.files).not.toHaveProperty('items');
     // 推了新头、也记了：最新那个头，current 为真
     await t.db.update(prHeadFiles).set({ recordedAt: ago(100) });
     await recordPrHeadFiles(t.db, {
@@ -280,7 +277,10 @@ describe('任务详情的概览：真库', () => {
     const bare = (await getDetail(current, s.cookie)).overview?.prs[0];
     expect(bare?.state).toBe('unknown');
     expect(bare?.note).toContain('没有这个 PR 的镜像');
-    expect(bare?.files).toMatchObject({ state: 'none' });
+    expect(bare?.files).toMatchObject({
+      state: 'unavailable',
+      reason: expect.stringContaining('当前完整头没读到'),
+    });
   });
 
   it('一笔都没有动手：汇报写 none 和原因；回合、引擎步骤是空的但读到了（不是读不到）', async () => {
@@ -291,6 +291,56 @@ describe('任务详情的概览：真库', () => {
     expect(o?.rounds).toEqual({ state: 'ok', items: [] });
     expect(o?.engineSteps).toEqual({ state: 'ok', items: [] });
     expect(o?.tally).toMatchObject({ state: 'ok' });
+  });
+
+  it('精确头的截断、成功零文件、采集失败和历史无 metadata 分别如实返回', async () => {
+    current = await pgHarness(t, { runTranscript: pgRunTranscript(t.db) });
+    const s = await current.login();
+    await seedRuns();
+    await t.db.insert(pullRequests).values({
+      repoId: IDS.repo,
+      number: 7,
+      state: 'open',
+      headRef: 'fleet/12-x',
+      headSha: H1,
+      updatedAt: T0,
+    });
+    await recordPrHeadFiles(t.db, {
+      repoId: IDS.repo,
+      prNumber: 7,
+      headSha: H1,
+      total: 501,
+      files: Array.from({ length: 500 }, (_, n) => ({ path: `f${n}`, added: 1, removed: 0, binary: false })),
+    });
+    const truncated = (await getDetail(current, s.cookie)).overview?.prs[0]?.files;
+    expect(truncated).toMatchObject({
+      state: 'unavailable',
+      snapshot: { status: 'truncated', total: 501, kept: 500 },
+    });
+    expect(truncated).not.toHaveProperty('items');
+    await t.db.update(pullRequests).set({ headSha: H2 });
+    await recordPrHeadFiles(t.db, { repoId: IDS.repo, prNumber: 7, headSha: H2, files: [] });
+    expect((await getDetail(current, s.cookie)).overview?.prs[0]?.files).toMatchObject({
+      state: 'ok',
+      current: true,
+      headSha: H2,
+      items: [],
+      snapshot: { status: 'complete', total: 0, kept: 0 },
+    });
+    const h3 = '3'.repeat(40);
+    await t.db.update(pullRequests).set({ headSha: h3 });
+    await recordPrHeadFiles(t.db, {
+      repoId: IDS.repo,
+      prNumber: 7,
+      headSha: h3,
+      files: [],
+      reason: 'git failed',
+    });
+    expect((await getDetail(current, s.cookie)).overview?.prs[0]?.files).toMatchObject({
+      state: 'unavailable',
+      reason: 'git failed',
+      snapshot: { status: 'unavailable', total: null },
+    });
   });
 });
 

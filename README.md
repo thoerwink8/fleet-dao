@@ -65,6 +65,26 @@
 - 无人值守接续：Claude/Codex 用同步 Stop 把未完成工作送到下一轮，成功 PostToolUse 登记实质进展；后台任务条数不证明完成通知送达。连续三次无进展明确暂停故障；on 只记意图，不代表已安装、信任、执行或通知验证。各入口能力与验法见 [CLI 无人值守接续](docs/design/CLI无人值守接续.md)。
 - `pnpm work run <单号>` 登记真实 Claude session / Codex thread，开启无人值守后由同步 Stop 一次性消费本会话终态；Codex 后台完成不主动开新轮。只有 `CODEX_SESSION_ID` 的 root-session 不代替 thread；缺归属及旧 `dispatcher=null` 记录用 `pnpm work runs` 手工读取，续跑不改原归属。
 
+- 本机受管工人的审查退回：`pnpm work return <单号> --body-file <完整意见文件>` 交由退回专用工作流与既有合并闸按同一 PR 串行登记；先核实 PR 级 PREPARE，再写当前头阻合状态和正式 review 回执，未结 PREPARE 跨换头/强推继续阻合；只有核实真实状态与正式回执才报 `registered/blocked`，`queued/unconfirmed` 不代表已阻止合并。`pnpm work feedback <单号> [--wait|--retry]` 读取完整意见、等 Actions 结果或按原请求重试，取消、超时和断线保留本机意图。工人用 `pnpm work ack <单号> --return <编号>` 确认收到；审查方用 `pnpm work resolve <单号> --return <编号> --body-file <核验依据>` 对精确候选 head 解除责任；ack、CI 绿和新 head 都不代替 resolve。交付用 `pnpm work deliver <单号>`，不会擅自解除手工草稿。当前显式退回事务只允许个人仓 owner 发起，工人不能替审查方 resolve；普通组织仓和没有退回协议的本机 PR 保留原判法。
+
+### Windows 上的 Linux 安全测试
+
+`pnpm check`（含 `--all`）和 `pnpm test:changed` 选到安全归档测试时，会将它们交给显式配置的本机 Linux 普通用户；其余测试仍在 Windows 跑。单独验这组测试用 `pnpm test:linux`。不配置或环境不可用会明确失败，不跳过、不自动安装或启动新发行版、不改默认发行版。
+
+将 `FLEET_TEST_LINUX_RUNNER` 设置为本机 JSON 配置文件的绝对路径，配置不进仓。例如已安装 WSL 的配置结构：
+
+```json
+{
+  "command": "C:/Windows/System32/wsl.exe",
+  "args": ["--distribution", "<已配置的发行版>", "--user", "<普通用户>", "--exec", "/usr/bin/env", "-i", "HOME=/home/<用户>", "TMPDIR=/home/<用户>/tmp", "PATH=/usr/local/bin:/usr/bin:/bin", "/usr/local/bin/node"],
+  "dependencyRoot": "/home/<用户>/fleet-test-dependencies"
+}
+```
+
+`command` 和 `args` 合起来必须启动 Linux Node（符合仓根 Node 版本要求），检查器在末尾加执行参数，JSON 快照从 stdin 传入；支持已有的其他本机 Linux 启动器。不要将 SSH/VPS 命令当本机 runner。`dependencyRoot` 是该 Linux 中已用 `pnpm install --frozen-lockfile` 安装依赖的仓目录，锁文件、workspace 设置和各包依赖声明须与本次工作树一致。运行时把当前已跟踪和未忽略的新文件复制到独立 Linux 临时目录，包含未提交改动，已删的文件不复活；workspace 依赖链接指向本次快照，第三方依赖复用已安装目录。源码摘要、普通用户、测试清单和 JSON 结果逐项核对后才算通过。Linux 本机和 CI 直接跑原测试。
+
+实现依据：[Node 的真实路径解析](https://github.com/nodejs/node/blob/main/doc/api/cli.md#--preserve-symlinks)要求防止依赖链接回到旧源码；[WSL 显式发行版和用户参数](https://learn.microsoft.com/windows/wsl/basic-commands)允许使用现有环境而不修改默认设置。Windows 不提供 `/proc/self/fd` 上逐级固定目录句柄的归档语义，不能以普通路径操作替代安全断言。
+
 ### 批量开母子单
 
 `pnpm issue:batch --spec <JSON文件>` 一次返回母单号、全部子单号和恢复记录路径。JSON 的 `mother` 和非空 `subs` 列表中每项都要有 `title`、`body`、`kind`（需求/缺陷/杂项）；母单还要有 `domain`、`nature`，子单可逐轴继承母单的有效值；整批写前校验，缺轴或无效值拒开。正文沿用开单四节校验。整批不挂里程碑（未排期）；`local: true` 表示保留「本机做」。

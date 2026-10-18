@@ -281,6 +281,160 @@ describe('wait.mjs pr 同名检查只看最新那条（#2818）', () => {
   });
 });
 
+describe('wait.mjs pr 合并闸真实运输（#3173）', () => {
+  const url = 'https://github.com/acme/demo/pull/7';
+  // 真 gh StatusContext 没有 description，不能从 fake 凭空补给等待器。
+  const cliGate = {
+    __typename: 'StatusContext',
+    context: 'merge-gate',
+    state: 'FAILURE',
+    startedAt: '2026-10-18T22:00:00Z',
+    targetUrl: 'https://github.com/acme/demo/actions/runs/1',
+  };
+  const job = { __typename: 'CheckRun', name: 'merge-gate (7)', status: 'COMPLETED', conclusion: 'SUCCESS' };
+  const view = (checks: unknown[] = [cliGate, job]) =>
+    JSON.stringify({ state: 'OPEN', url, headRefOid: SHA, statusCheckRollup: checks });
+  const again = (extra = {}) => JSON.stringify({ state: 'OPEN', url, headRefOid: SHA, ...extra });
+  const waiting = '等验收：当前头 aaaaaaa 上的 cold-verify 还在跑（pending），当前头上要有通过状态';
+  const status = (description: string | null = waiting, extra = {}) => ({
+    context: 'merge-gate',
+    state: 'failure',
+    description,
+    ...extra,
+  });
+  const page = (statuses: unknown[] = [status()], extra = {}) => ({
+    sha: SHA,
+    repository: { id: 123, full_name: 'acme/demo' },
+    total_count: statuses.length,
+    statuses,
+    ...extra,
+  });
+  const snapshot = (description: string | null = waiting, checks: unknown[] = [cliGate, job]) => [
+    view(checks),
+    JSON.stringify([page([status(description)])]),
+    again(),
+  ];
+
+  it('真实CLI无description + writer成功成对存在，等验收→继续→合并', async () => {
+    const f = fake([...snapshot(), ...snapshot(), JSON.stringify({ state: 'MERGED', url })]);
+    expect(await lib.run(['pr', '7', '-R', 'acme/demo', '--interval', '1'], f.io)).toBe(0);
+    expect(f.sleeps()).toBe(2);
+    expect(f.out).toEqual([`PR #7 合并了 ${url}`]);
+    expect(f.calls[0]).toEqual([
+      'pr',
+      'view',
+      '7',
+      '-R',
+      'acme/demo',
+      '--json',
+      'state,url,headRefOid,statusCheckRollup',
+    ]);
+    expect(f.calls[1]).toEqual([
+      'api',
+      `repos/acme/demo/commits/${SHA}/status?per_page=100`,
+      '--paginate',
+      '--slurp',
+    ]);
+    expect(f.calls[2]).toEqual(['pr', 'view', '7', '-R', 'acme/demo', '--json', 'state,url,headRefOid']);
+  });
+
+  it.each([
+    '验收没过：cold-verify 是 failure',
+    '改标准缺创始人原话：docs/design.md',
+    '等验收：cold-verify pending（另有 1 条，点详情看）',
+    null,
+  ])('真实拒绝或多理由仍红：%s', (description) => {
+    const f = fake(snapshot(description));
+    expect(lib.stepPr(f.io.gh, 7, [])).toMatchObject({ done: true, ok: false });
+  });
+
+  it.each(['merge-gate', 'merge-gate (7)', 'ci'])('等验收不能掩盖真的失败CheckRun：%s', (name) => {
+    const f = fake(snapshot(waiting, [cliGate, { ...job, name, conclusion: 'FAILURE' }]));
+    const result = lib.stepPr(f.io.gh, 7, []);
+    expect(result).toMatchObject({ done: true, ok: false });
+    if (result.done) expect(result.line).toContain(`检查红了：${name} `);
+  });
+
+  it('别的StatusContext伪装等验收也仍红', () => {
+    const f = fake(
+      snapshot(waiting, [cliGate, job, { context: 'other', state: 'FAILURE', description: waiting }]),
+    );
+    const result = lib.stepPr(f.io.gh, 7, []);
+    expect(result).toMatchObject({ done: true, ok: false });
+    if (result.done) expect(result.line).toContain('检查红了：other ');
+  });
+
+  it('完整分页后才判等验收，不把第一页没看见当没有', () => {
+    const pages = [
+      page([{ context: 'other', state: 'success' }], { total_count: 2 }),
+      page([status()], { total_count: 2 }),
+    ];
+    const f = fake([view(), JSON.stringify(pages), again()]);
+    expect(lib.stepPr(f.io.gh, 7, [])).toEqual({ done: false });
+  });
+
+  it.each([
+    ['API失败', new Error('HTTP 502')],
+    ['坏JSON', '{'],
+    ['非分页', JSON.stringify(page())],
+    ['空分页', '[]'],
+    ['错头', JSON.stringify([page(undefined, { sha: 'b'.repeat(40) })])],
+    ['错仓', JSON.stringify([page(undefined, { repository: { id: 123, full_name: 'wrong/repo' } })])],
+    ['缺仓ID', JSON.stringify([page(undefined, { repository: { full_name: 'acme/demo' } })])],
+    ['分页没读全', JSON.stringify([page(undefined, { total_count: 2 })])],
+    [
+      '跨页串身份',
+      JSON.stringify([
+        page(undefined, { total_count: 2 }),
+        page(undefined, { total_count: 2, repository: { id: 456, full_name: 'acme/demo' } }),
+      ]),
+    ],
+    ['缺闸状态', JSON.stringify([page([])])],
+    ['闸重复', JSON.stringify([page([status(), status()])])],
+    ['缺description', JSON.stringify([page([{ context: 'merge-gate', state: 'failure' }])])],
+    ['状态坏', JSON.stringify([page([status(waiting, { state: 'weird' })])])],
+  ])('%s 明确退出2，不当成等待/成功/真红', async (_name, response) => {
+    const f = fake([view(), response, again()]);
+    expect(await lib.run(['pr', '7'], f.io)).toBe(2);
+    expect(f.out).toEqual([]);
+    expect(f.err[0]).toContain('出错');
+    expect(f.sleeps()).toBe(0);
+  });
+
+  it.each([{ headRefOid: 'b'.repeat(40) }, { url: 'https://github.com/wrong/repo/pull/7' }])(
+    '复读身份变化明确错误：%j',
+    async (extra) => {
+      const f = fake([view(), JSON.stringify([page()]), again(extra)]);
+      expect(await lib.run(['pr', '7'], f.io)).toBe(2);
+      expect(f.err[0]).toContain('改变');
+    },
+  );
+
+  it.each(['success', 'pending'])('同头REST已推进至%s，继续等且其他失败仍拦', (state) => {
+    const values = [view(), JSON.stringify([page([status(null, { state })])]), again()];
+    expect(lib.stepPr(fake([...values]).io.gh, 7, [])).toEqual({ done: false });
+    const otherFailed = [
+      view([cliGate, { ...job, name: 'ci', conclusion: 'FAILURE' }]),
+      values[1] ?? '',
+      again(),
+    ];
+    expect(lib.stepPr(fake(otherFailed).io.gh, 7, [])).toMatchObject({ done: true, ok: false });
+  });
+  it.each(['MERGED', 'CLOSED'])('读REST期间同头PR成为%s，正确返回终态', (state) => {
+    const f = fake([view(), JSON.stringify([page()]), again({ state })]);
+    expect(lib.stepPr(f.io.gh, 7, [])).toMatchObject({ done: true, ok: state === 'MERGED' });
+  });
+
+  it('最初完整head缺失或-R串仓不去读状态', async () => {
+    const noHead = fake([JSON.stringify({ state: 'OPEN', url, statusCheckRollup: [cliGate] })]);
+    expect(await lib.run(['pr', '7'], noHead.io)).toBe(2);
+    expect(noHead.calls).toHaveLength(1);
+    const wrongRepo = fake([view()]);
+    expect(await lib.run(['pr', '7', '-R', 'wrong/repo'], wrongRepo.io)).toBe(2);
+    expect(wrongRepo.err[0]).toContain('-R 不符');
+  });
+});
+
 describe('wait.mjs main-ci', () => {
   it('先取 main 头上的提交，等它的 ci.yml：还没起跑、在跑都接着等，成功退出码 0', async () => {
     const f = fake([

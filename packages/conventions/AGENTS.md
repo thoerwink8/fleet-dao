@@ -7,6 +7,7 @@
 - `packages/conventions/src/bin/`：每个命令一个入口文件，逻辑在 `packages/conventions/src/` 同名模块里。仓根 `package.json` 的 `check`、`test:changed`、`pr:open`、`issue:new`、`issue:close`、`progress`、`plan`、`intents`、`debt:check`、`github:audit`、`branch:hygiene`、`ci:timings`、`ci:stats`、`flow:stats`、`subagent:stats` 都指到这里。
 - `pr-open` 的同步 GitHub 运输用 `pr-arm.ts` 的 `livePrGh`：复用 `github-api.ts` 的仓身份识别，显式传 canonical repo；创建 PR 明确已推送当前分支，避免 Git relay 改写 remote 后让 gh 猜错仓。
 - `check.ts`：`pnpm check` = biome 格式 + `tsc -b` + 改到的测试（`--all` 才全量）+ 卫生检查，四样跑完再判红。
+- `local-vitest.ts`：Windows 的 `check`（含 `--all`）、`test:changed`、`test:linux` 共用执行入口。四个需要 Linux FD/进程语义的保全测试只能转交显式配置的本机 Linux 普通用户；当前工作树字节快照包含未提交/新文件，删除不复活。Linux 依赖须与当前锁文件和依赖声明一致，workspace 链接重指快照。无配置、摘要/测试清单对不上、报告缺失或跳过都明确失败；CI/Linux 仍直接跑原测试。
 - `work.ts` 的派工归属复用入口动态加载的 `unattended.mjs/selectSessionId`；Claude session / Codex thread 接同步 Stop，只有 Codex root-session 不冒充 thread，缺归属仍保留结果供 `pnpm work runs` 读取。续跑不重绑原 spec（包括旧的 null），Codex 后台完成不主动开启新轮。
 - `issue-batch.ts`：`pnpm issue:batch --spec <JSON>`，整批校验后建母子单、写 parent 并挂原生关系；失败关闭本批，创建结果不明按唯一标记找回。`--recover <记录>` 清理中断产物，记录生成在仓根临时目录的 issue-batch 子目录。GitHub 无跨单事务，撤销失败必须保留记录并报错。
 - 只给 CI 用的（`.github/workflows/` 里调）：`ci-plan.ts`、`ci-box.ts`、`ci-cache.ts`、`ci-verdict.ts`、`main-reuse.ts`、`merge-gate.ts`、`close-on-merge.ts`、`debt-check.ts`、`github-audit.ts`（`--alarm` 红了开同一张「GitHub 对账没过」单，`audit-alarm.ts`）、`version-cut.ts`（版本一周一版、到期自动收口，`github-audit.yml` 的 version-cut 任务每天跑）。
@@ -52,3 +53,7 @@
 - `issue:close` 和 `close-on-merge` 收尾都现读数据库最终验收责任；`--note`、Bot 评论不能替代结清。Actions 从可信 engine App 的精确 PR/head policy-source 找只读口，本机复用已安装的 local-sessions 地址。没读成明确退出 2、不关单。
 
 - 对外仓引导（#3109）由 repo-kind 按 INIT_CWD 判，原话只从 prompt-log/stdin 进私有待传目录和 quote 管理链，公开文件、开单及收件箱迁移回写只用 meaning；缺 meaning 先拒绝。同编号回执精确确认才删待传，后台失败留明确提醒。协议在 shared 的 private-quotes.ts 零依赖叶子，conventions 相对导入保持同步检出零安装可用。
+
+- 本机显式退回协议在 `managed-feedback.ts`，GitHub事务装配在 `managed-feedback-github.ts`，work入口在 `managed-work.ts`；只接受可信 Actions Bot 的 COMMENTED 明确协议，普通评论、法国正式 CR、coldVerify 和验收责任账互相独立。普通重算由 `merge-gate.yml` 执行，退回事务由 `managed-feedback.yml` 执行；两份工作流的写者必须共用 `merge-gate-${{ github.repository }}-pr-${{ matrix.pr }}` 精确 PR concurrency group，保持 `queue: max`、`cancel-in-progress: false`。批量入口只由 plan 列出 PR、交给 matrix 逐 PR 写，不能另开 all 写者或让本机直接写状态。排队不算阻合，ack不算resolve，读取失败保留未知责任。
+
+- `runMergeGate` 写模式的退出码表达是否算成并成功发表（0/2），不重复表达 required status 的准合裁决；等验收仍发表 failure，writer 成功。独立 `--no-write` probe 保持 0/1/2，等待工具不能忽略失败的同名 CheckRun。

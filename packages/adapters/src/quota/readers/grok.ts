@@ -46,6 +46,30 @@ const billingFieldProblem = (field: string, value: unknown, detail: string): Quo
     `Grok 账单字段 ${field} 类型 ${jsonShape(value)}：${detail}（仅保留字段名和类型）`,
   );
 
+/** 只识别完整的 credits 账期；空对象、错误体和坏字段不能冒充「账单已读」。 */
+function hasReadableBillingPeriod(config: Record<string, unknown>): boolean {
+  const period = config.currentPeriod;
+  if (!isRecord(period)) return false;
+  if (
+    typeof period.type !== 'string' ||
+    !['USAGE_PERIOD_TYPE_WEEKLY', 'USAGE_PERIOD_TYPE_MONTHLY'].includes(period.type)
+  )
+    return false;
+  if (typeof period.start !== 'string' || typeof period.end !== 'string') return false;
+  const start = Date.parse(period.start);
+  const end = Date.parse(period.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+  if (typeof config.isUnifiedBillingUser !== 'boolean') return false;
+  for (const field of ['onDemandCap', 'onDemandUsed', 'prepaidBalance']) {
+    const amount = config[field];
+    if (!isRecord(amount)) return false;
+    // 官方 Cent 的 val 可按 proto3 省略；这里只核结构，不据此产生任何用量读数。
+    if (amount.val !== undefined && (typeof amount.val !== 'number' || !Number.isFinite(amount.val)))
+      return false;
+  }
+  return true;
+}
+
 /**
  * billing?format=credits → 窗口读数。creditUsagePercent 是账号这一期的总用量（百分比），账号级；
  * 分产品的百分比（productUsage）只进说明——我们只用 Grok Build 一个产品，拆成模型组窗口会对不上路由。
@@ -66,6 +90,12 @@ export function readingsFromGrokBilling(
   }
   const rawPercent = config.creditUsagePercent;
   if (rawPercent === undefined) {
+    if (hasReadableBillingPeriod(config)) {
+      throw new QuotaReadError(
+        'usage_unreported',
+        'Grok 账单已读，但上游未报告当前用量；用量未知（字段 config.creditUsagePercent 类型 missing）',
+      );
+    }
     throw billingFieldProblem('config.creditUsagePercent', rawPercent, '缺少字段');
   }
   const percent = num(rawPercent);
