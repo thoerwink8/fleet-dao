@@ -203,6 +203,7 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
     const immediate = IMMEDIATE_CODES.has(r.error.code);
     // 还能由 CLI 续的：不写「不会自己好」。多久没好再找人和看门狗的 30 分钟是同一条线。
     const selfHealing = r.error.code === 'auth_refreshable';
+    const unreported = r.error.code === 'usage_unreported';
     const since = last ? `上次读成是 ${last.toISOString()}。` : '库里从没读成过这个池。';
     problems.push(`${r.poolId} 没读成（${r.error.code}）：${r.error.message}`);
     if (immediate || repeated) {
@@ -211,13 +212,15 @@ async function round(deps: QuotaReadJobDeps): Promise<Round> {
         key: poolAlertKey(r.poolId),
         title: `额度读不到：${r.poolId}`,
         body: `${r.poolId}（${r.reader}）这一轮没读成：${r.error.code}——${r.error.message}。${
-          immediate
-            ? '这种要人动手（补凭据、重新登录、改配置），不会自己好。'
-            : selfHealing
-              ? `${since}这种会在 grok 下次运行后自己好；超过 ${GROK_TOKEN_SELF_HEAL_MINUTES} 分钟还没好再找人。`
-              : last
-                ? `上次读成是 ${last.toISOString()}，连着两轮没读成了。`
-                : '库里从没读成过这个池。'
+          unreported
+            ? `${since}账单请求已成功，上游没有报告当前用量；这不表示登录失效、额度耗尽或用量为 0。等下一轮定时读取自然重试；持续未报告时核查上游用量接口，不要据此重新登录或补凭据。`
+            : immediate
+              ? '这种要人动手（补凭据、重新登录、改配置），不会自己好。'
+              : selfHealing
+                ? `${since}这种会在 grok 下次运行后自己好；超过 ${GROK_TOKEN_SELF_HEAL_MINUTES} 分钟还没好再找人。`
+                : last
+                  ? `上次读成是 ${last.toISOString()}，连着两轮没读成了。`
+                  : '库里从没读成过这个池。'
         }旧读数留着、没改；读不到的池选路按「额度没读成」排在后面。`,
       });
     }
