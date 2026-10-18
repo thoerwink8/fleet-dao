@@ -19,14 +19,17 @@
 //   patched('merge-arm-pending-deadline')）：活动交回 checksPending（绑精确头、还在跑的检查名、原始原因）。这里把状态写成等检查，
 //   截止时刻按工作流时间（Date.now，重放确定）记一次：第一次读到还在跑的那一下挂合并开调前加 ARM_PENDING_CHECKS_MINUTES。
 //   之后每隔 ARM_PENDING_POLL_SECONDS 再走一次 armAutoMerge，这一下的排队、尝试、重试受剩余期限约束（scheduleToClose），
-//   状态落库、休眠、红的确认也都算在同一份期限里，睡不越过它；不按次数算，也不每次重开。同头变绿后仍由那一入口挂上或 squash，
+//   不按次数算，也不每次重开。状态落库和红的确认以前只在做完之后看还剩多少秒，慢的那一下本身不受期限约束，
+//   确认那一觉还用着落库前记下的秒数。patched('merge-arm-pending-bounded-waits') 把这两下也放进同一份截止：
+//   落库的 scheduleToClose 是当下剩余秒数，回来再算，确认那一觉不越过；到点就停下。标记不在历史里就按老步序重放。
+//   同头变绿后仍由那一入口挂上或 squash，
 //   合并账和回执不另开路。真红（checksRed）走下面同一套确认 / 返工。权限、认证、正式要求改、没查成没有这两个字段，照旧停下，
 //   不因 why 里写了 ci_not_green 就重试。必过检查没出现也是没查成：活动不交 checksPending，哪怕旁边还有在跑的。
 //   等到点仍没跑完：停下，写明 PR、头、检查名和原始原因。头变了回 head_moved，调用方重走
 //   CI、冷验收、批准，不沿用旧头。老历史的活动结果没有这两个字段；标记不在历史里就当没有，照旧停下。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
-import { isCancellation, patched } from '@temporalio/workflow';
+import { CancellationScope, isCancellation, log, patched } from '@temporalio/workflow';
 import {
   ARM_PENDING_CHECKS_MINUTES,
   ARM_PENDING_POLL_SECONDS,
@@ -78,20 +81,77 @@ function secondsLeft(wait: PendingWait): number {
 }
 
 /**
+ * 等检查这段里的状态落库：和 mirror 同一份内容，但 scheduleToClose 是当下剩余秒数。
+ * 慢的那一下本身有界；回来再算，不足 1 秒就是到期。写不进去只记日志（和 mirror 一样不挡），期限没了仍当到期。
+ * 只在 patched('merge-arm-pending-bounded-waits') 为真时走；老历史仍用 rt.advance。
+ */
+async function advanceWithin(
+  rt: TaskRuntime,
+  phase: 'merge',
+  doing: string,
+  wait: PendingWait,
+): Promise<'ok' | 'expired'> {
+  rt.set(phase, doing);
+  if (!patched('mirror-phase')) return secondsLeft(wait) < 1 ? 'expired' : 'ok';
+  const left = secondsLeft(wait);
+  if (left < 1) return 'expired';
+  const save = activityWithin('saveTaskState', rt.limits, left);
+  try {
+    await CancellationScope.nonCancellable(() =>
+      save({
+        taskId: rt.input.taskId,
+        repoId: rt.input.repo.id,
+        issueNumber: rt.input.issueNumber,
+        state: 'running',
+        phase: rt.status.phase,
+        doing: rt.status.doing,
+        lastProblem: rt.status.lastProblem,
+        subtasks: [],
+      }),
+    );
+  } catch (error) {
+    if (isCancellation(error)) throw error;
+    const failure = failureOf(error, 'saveTaskState', rt.limits);
+    if (
+      failure.code === 'TIMEOUT_SCHEDULE_TO_CLOSE' ||
+      failure.code === 'TIMEOUT_START_TO_CLOSE' ||
+      secondsLeft(wait) < 1
+    ) {
+      return 'expired';
+    }
+    log.warn('任务状态没写进库（驾驶舱晚一会儿才看到）', { error: String(error) });
+  }
+  return secondsLeft(wait) < 1 ? 'expired' : 'ok';
+}
+
+/**
  * 必过检查红了：第一次记下并隔 MERGE_RED_CONFIRM_SECONDS 再看，仍红才返工。
- * 等合并的 waitMerged 和挂自动合并时现读到的红共用这一套。maxSeconds 是等检查剩下的期限，确认那一觉不越过它。
+ * 等合并的 waitMerged 和挂自动合并时现读到的红共用这一套。
+ * maxSeconds 是老步序用的：调用方在落库之前就算好的剩余秒数。等检查这段在新标记下改传 wait，
+ * 落库受剩余期限约束，确认那一觉在落库之后重算，不睡越过截止。到期回 expired，由调用方停下。
  */
 async function confirmChecksRed(
   rt: TaskRuntime,
   failedChecks: readonly string[],
   detail: string,
   maxSeconds?: number,
-): Promise<'confirming' | 'rework'> {
+  wait?: PendingWait,
+): Promise<'confirming' | 'rework' | 'expired'> {
   const names = failedChecks.length > 0 ? failedChecks.join('、') : '（没写是哪项）';
   const line = `${CHECKS_RED_PREFIX}${names}`;
   if (!rt.mergeRedNoted) {
     rt.mergeRedNoted = true;
     rt.status.lastProblem = line;
+    // 老历史、以及不在等检查期限里的红：步序和以前一样（先落库，再按调用方事先算好的秒数睡）。
+    if (wait !== undefined && patched('merge-arm-pending-bounded-waits')) {
+      const noted = await advanceWithin(rt, 'merge', line, wait);
+      if (noted === 'expired' || secondsLeft(wait) < 1) {
+        rt.mergeRedNoted = false;
+        return 'expired';
+      }
+      await rt.pause('merge', detail || line, Math.min(MERGE_RED_CONFIRM_SECONDS, secondsLeft(wait)));
+      return 'confirming';
+    }
     await rt.advance('merge', line);
     const seconds =
       maxSeconds === undefined ? MERGE_RED_CONFIRM_SECONDS : Math.min(MERGE_RED_CONFIRM_SECONDS, maxSeconds);
@@ -146,16 +206,17 @@ async function armWithinDeadline(
     if (isCancellation(error)) throw error;
     const failure = failureOf(error, 'armAutoMerge', rt.limits);
     const where = `PR #${prNumber} 头 ${wait.head}，在等：${wait.names.join('、')}。原始原因：${wait.detail}`;
-    if (failure.retryable === false) {
-      await rt.park(`挂自动合并没跑成（${failure.code}）`, `${failure.message}。${where}`);
-      return { kind: 'parked' };
-    }
     const after = secondsLeft(wait);
-    if (failure.code === 'TIMEOUT_SCHEDULE_TO_CLOSE' || after < 1) {
+    // 活动自己拒绝再写（期限已过、不重试）和调度超时一样：停下，不另开一次挂合并。
+    if (failure.code === 'TIMEOUT_SCHEDULE_TO_CLOSE' || failure.code === 'ARM_DEADLINE_PASSED' || after < 1) {
       await rt.park(
         '等检查超时',
         pendingExhaustedDetail(prNumber, wait, `${failure.code}：${failure.message}`),
       );
+      return { kind: 'parked' };
+    }
+    if (failure.retryable === false) {
+      await rt.park(`挂自动合并没跑成（${failure.code}）`, `${failure.message}。${where}`);
       return { kind: 'parked' };
     }
     rt.status.lastProblem = `等检查时挂合并没跑成，再来一次：${failure.message}`;
@@ -282,7 +343,14 @@ export async function armAndWaitMerged(
             red.failedChecks,
             red.detail,
             pending === null ? undefined : secondsLeft(pending),
+            pending ?? undefined,
           );
+          if (outcome === 'expired' && pending !== null) {
+            const detail = pendingExhaustedDetail(prNumber, pending);
+            pending = null;
+            await rt.park('等检查超时', detail);
+            continue;
+          }
           if (outcome === 'rework') return { kind: 'rework' };
           continue;
         }
@@ -312,7 +380,19 @@ export async function armAndWaitMerged(
           const names = running.names.join('、');
           const line = `等检查：${names}`;
           rt.status.lastProblem = line;
-          if (rt.status.phase !== 'merge' || rt.status.doing !== line) await rt.advance('merge', line);
+          if (rt.status.phase !== 'merge' || rt.status.doing !== line) {
+            if (patched('merge-arm-pending-bounded-waits')) {
+              const noted = await advanceWithin(rt, 'merge', line, pending);
+              if (noted === 'expired') {
+                const detail = pendingExhaustedDetail(prNumber, pending);
+                pending = null;
+                await rt.park('等检查超时', detail);
+                continue;
+              }
+            } else {
+              await rt.advance('merge', line);
+            }
+          }
           // 落库那一下也花了时间：睡之前再算一次剩下多少，睡不越过期限。
           const sleepFor = Math.min(ARM_PENDING_POLL_SECONDS, secondsLeft(pending));
           if (sleepFor >= 1) {

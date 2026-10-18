@@ -1186,6 +1186,22 @@ function durationSeconds(d: ProtoDuration): number {
   return seconds + nanos / 1e9;
 }
 
+/** 历史里每一次调度 saveTaskState 的 scheduleToClose（秒）。没设是 0。 */
+function saveScheduleToClose(events: readonly unknown[]): number[] {
+  const out: number[] = [];
+  for (const e of events as {
+    activityTaskScheduledEventAttributes?: {
+      activityType?: { name?: string | null } | null;
+      scheduleToCloseTimeout?: ProtoDuration;
+    } | null;
+  }[]) {
+    const a = e.activityTaskScheduledEventAttributes;
+    if (a?.activityType?.name !== 'saveTaskState') continue;
+    out.push(durationSeconds(a.scheduleToCloseTimeout));
+  }
+  return out;
+}
+
 /** 历史里每一次调度 armAutoMerge 的期限（秒），按调度先后。 */
 function armBudgets(events: readonly unknown[]): { scheduleToClose: number; startToClose: number }[] {
   const out: { scheduleToClose: number; startToClose: number }[] = [];
@@ -1506,6 +1522,77 @@ describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gat
     expect(run).toMatchObject({ outcome: 'merged', rounds: 1, head });
     expect(calls.armInputs.every((i) => i.expectedHead === head)).toBe(true);
     expect(world.alerts).toHaveLength(1);
+    expect(calls.merge).toBe(0);
+  });
+
+  it('【故意造出的失败】等检查快到点读到红、状态落库比剩余期限还慢：落库和红确认都算进同一份 15 分钟，不再按落库前的剩余秒数多睡', async () => {
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const armAt: number[] = [];
+    const { tasks, calls } = scripted({
+      arm: (_n, armInput) => waitingCheck(armInput, ['merge-gate']),
+    });
+    const scriptedArm = tasks.armAutoMerge;
+    if (!scriptedArm) throw new Error('脚本没装 armAutoMerge');
+    tasks.armAutoMerge = async (armInput, ctx) => {
+      const now = await env.currentTimeMs();
+      armAt.push(now);
+      const first = armAt[0] ?? now;
+      // 剩大约 20 秒时转红：慢落库 25 秒，比 quick 档单次 30 秒短，比剩余期限长。
+      if (armAt.length > 1 && now - first >= 880_000) return redCheck(armInput);
+      return scriptedArm(armInput, ctx);
+    };
+    let slowStarted = 0;
+    let sawRedSave = false;
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await env.sleep('16 minutes');
+        const s = await pollQuery(() => statusOf(h), parked, '慢落库耗尽期限', 90_000);
+        const parkedAt = Date.parse(s.waiting?.since ?? '');
+        const first = armAt[0] ?? Number.NaN;
+        expect(s.lastProblem).toBe('等检查超时');
+        expect(slowStarted).toBeGreaterThan(0);
+        // 从第一次挂合并开调起算，不晚于 15 分钟。慢落库自己也被剩余期限截断，不是跑完 25 秒再睡原先剩下的 20 秒。
+        expect(parkedAt - first).toBeLessThanOrEqual(ARM_PENDING_CHECKS_MINUTES * 60_000 + 5_000);
+        expect(parkedAt - first).toBeGreaterThanOrEqual(870_000);
+        expect(parkedAt - slowStarted).toBeLessThanOrEqual(23_000);
+        expect(parkedAt - slowStarted).toBeGreaterThan(0);
+        const saves = saveScheduleToClose((await h.fetchHistory()).events ?? []).filter(
+          (s) => s > 0 && s < 3_600,
+        );
+        expect(Math.min(...saves)).toBeGreaterThan(0);
+        expect(Math.min(...saves)).toBeLessThanOrEqual(30);
+        const detail = world.alerts[0]?.detail ?? '';
+        expect(world.alerts).toHaveLength(1);
+        expect(world.alerts[0]?.title).toBe('等检查超时');
+        expect(detail).toContain(`PR #${s.prNumber}`);
+        expect(detail).toContain(head);
+        expect(detail).toContain('merge-gate');
+        expect(detail).toContain(`原始原因：${ORIGIN}`);
+        expect(calls.merge).toBe(0);
+        expect(sawRedSave).toBe(true);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '收工' });
+        return h.result() as Promise<TaskRun>;
+      },
+      {
+        tasks,
+        wrapActivities: (acts) => ({
+          ...acts,
+          async saveTaskState(snapshot) {
+            if (String(snapshot.doing).startsWith('检查红了')) {
+              sawRedSave = true;
+              slowStarted = await env.currentTimeMs();
+              await new Promise((resolve) => setTimeout(resolve, 25_000));
+            }
+            return acts.saveTaskState(snapshot);
+          },
+        }),
+      },
+    );
+    expect(run.outcome).toBe('abandoned');
     expect(calls.merge).toBe(0);
   });
 

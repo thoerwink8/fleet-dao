@@ -95,6 +95,25 @@ export const PORT_NAMES = Object.keys(PORT_KEYS) as PortName[];
 /** 记计时本身失败不影响干活，最多等这么久。 */
 const TIMING_WRITE_BUDGET_MS = 5_000;
 
+/** 服务端写在这次活动上的两个截止。没设的（0）不填，免得把「没有总期限」当成已经到期。 */
+function activityDeadlines(info: Context['info']): {
+  attemptDeadlineMs?: number;
+  scheduleDeadlineMs?: number;
+} {
+  const attemptDeadlineMs =
+    info.currentAttemptScheduledTimestampMs > 0 && info.startToCloseTimeoutMs > 0
+      ? info.currentAttemptScheduledTimestampMs + info.startToCloseTimeoutMs
+      : undefined;
+  const scheduleDeadlineMs =
+    info.scheduledTimestampMs > 0 && info.scheduleToCloseTimeoutMs > 0
+      ? info.scheduledTimestampMs + info.scheduleToCloseTimeoutMs
+      : undefined;
+  return {
+    ...(attemptDeadlineMs === undefined ? {} : { attemptDeadlineMs }),
+    ...(scheduleDeadlineMs === undefined ? {} : { scheduleDeadlineMs }),
+  };
+}
+
 function portContext(ctx: Context, activity?: string): PortContext {
   const workflowId = ctx.info.workflowExecution?.workflowId;
   return {
@@ -108,6 +127,7 @@ function portContext(ctx: Context, activity?: string): PortContext {
     attempt: ctx.info.attempt,
     lastHeartbeat: ctx.info.heartbeatDetails,
     ...(workflowId !== undefined ? { workflowId } : {}),
+    ...activityDeadlines(ctx.info),
   };
 }
 

@@ -44,6 +44,17 @@ export interface PortContext {
    * 活动测试不经 Temporal，上下文里没有这一项。
    */
   readonly workflowId?: string;
+  /**
+   * 这一次尝试必须在这之前结束（这次开跑时刻 + startToClose，毫秒）。
+   * 不心跳的活动收不到取消信号，服务端判了超时之后进程里的代码还会往下走；写外部副作用之前用它拦。
+   * 活动测试不经 Temporal 时不填，当没有这一限。
+   */
+  readonly attemptDeadlineMs?: number;
+  /**
+   * 这一次调度（含排队、重试、退避）必须在这之前结束（第一次调度时刻 + scheduleToClose，毫秒）。
+   * 没设 scheduleToClose（0）就不填，不当成已经到期。
+   */
+  readonly scheduleDeadlineMs?: number;
 }
 
 /** 端口抛这个，错误码和「能不能重试」原样过 Temporal 边界，失败分流按错误码判。 */

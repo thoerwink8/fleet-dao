@@ -604,6 +604,59 @@ describe('挂自动合并', () => {
     expect(f.calls).toEqual(['readPull']);
   });
 
+  it('期限已过：先读 PR，不再向 GitHub 发起新的挂合并', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => undefined,
+      mergePr: async () => mergedOk(),
+    });
+    const { acts } = make({ gh: f.gh });
+    const past = Date.now() - 1_000;
+    await expect(
+      acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx({ attemptDeadlineMs: past, scheduleDeadlineMs: past }),
+      ),
+    ).rejects.toMatchObject({ code: 'ARM_DEADLINE_PASSED', retryable: false });
+    expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('期限已过但读到已经挂上：当挂上了，不再写一次', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true }),
+      enableAutoMerge: async () => undefined,
+    });
+    const { acts } = make({ gh: f.gh });
+    const past = Date.now() - 1_000;
+    expect(
+      await acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx({ scheduleDeadlineMs: past }),
+      ),
+    ).toEqual({ armed: true, merged: false });
+    expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('挂合并那一下把期限用完、GitHub 说已经是 clean：不再直接合', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        throw new GitHubError('GRAPHQL_ERROR', 'Pull request is in clean status');
+      },
+      mergePr: async () => mergedOk('e'.repeat(40), false),
+    });
+    const { acts } = make({ gh: f.gh });
+    const deadline = Date.now() + 30;
+    await expect(
+      acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx({ attemptDeadlineMs: deadline, scheduleDeadlineMs: deadline }),
+      ),
+    ).rejects.toMatchObject({ code: 'ARM_DEADLINE_PASSED', retryable: false });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge']);
+  });
+
   it('【故意造出的失败】PR 关了 / 头被别人改了：不挂，说清楚为什么', async () => {
     const closed = fakeGh({ readPull: async () => pullFacts({ state: 'closed' }) });
     expect(await run(closed.gh)).toMatchObject({

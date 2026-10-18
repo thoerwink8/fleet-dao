@@ -1442,6 +1442,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     const withTemporal = p.tests.filter((b) => b.temporal);
     expect(withTemporal).toHaveLength(1);
     expect(withTemporal[0]?.files).toContain('packages/engine/test/github-reconcile.test.ts');
+    expect(withTemporal[0]?.files).toContain('packages/engine/test/arm-deadline-real.test.ts');
     for (const b of p.tests.filter((x) => !x.temporal)) expect(b.temporal).toBe(false);
   });
 
