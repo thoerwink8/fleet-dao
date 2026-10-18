@@ -4,7 +4,8 @@
 // claim：先查这张单有没有开着的 PR（「需求」栏挂着、或分支是 fleet/<单号>-、local/<单号>-）→ 有就停下不领；再经 /api/nodes/claims 登记
 //        （引擎停下等人的 stalled / parked 后端一步接手，叫停它再登记；引擎还在跑、排队的回 409，停下不领）→ 贴「本机做」→ 打出要用的分支名 local/<单号>-<短名>。
 // renew：续租（会话在 local/<单号>- 分支上动着、或开着 PR 挂着这张单，法国自己会顺延，不用手动续；跑超过 2 小时的长测试前续一下）。
-// done：做完（PR 合了）记 done；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
+// done：无 PR 的运维成功，凭真实验证先 issue:close --note 再记 done；有 PR 合并且单已关会自动收账。
+// 未完成的验收责任仍保留，done 不等于结清验收；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
 // queue [--json]：本机队列（单 #2731）——本机做的开着的单，领者、心跳、开着的 PR、挂着的引导、能不能接（work-queue.ts）。只读，不碰法国。
 // run <单号> [--brief 文件] [--worktree 路径] [--again]：脱离聊天进程派一个无头工人（单 #2761，work-run.ts 开头有全貌）——先过本机容量，
 //        本机没租约才领单，建或复用工作树，经 detach.mjs 起看护进程；看护进程没了再跑一次就接着同一个会话续。runs：列 run 派过的工人。
@@ -504,7 +505,9 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
       deps.out(
         `领了 #${p.issue}（租约到 ${got.leaseUntil ?? '？'}）。分支用：${localBranchPrefix(p.issue)}${branchSlug(title)}`,
       );
-      deps.out(`做完 pnpm work done ${p.issue}；放手 pnpm work done ${p.issue} --release "原因"`);
+      deps.out(
+        `PR 合并且单已关会自动收账；无 PR 运维成功凭真实验证先 pnpm issue:close ${p.issue} --note "验证结果"，再 pnpm work done ${p.issue}；未完成验收责任保留，不用 done 代替结清。放手 pnpm work done ${p.issue} --release "原因"`,
+      );
       return 0;
     }
     if (p.action === 'renew') {
