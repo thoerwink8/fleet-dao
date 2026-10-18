@@ -49,6 +49,7 @@ import { backgroundEnv, backgroundState, launchBackground, processAlive } from '
 import { lineageOf, readFounderHistory } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
+import { isMainModule } from './is-main.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
 import { contractLines } from './repo-contract.mjs';
 import { kindReminderLines } from './repo-kind.mjs';
@@ -1557,12 +1558,7 @@ export function pickCwd(input) {
   return process.cwd();
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
+const isMain = () => isMainModule(import.meta);
 
 if (isMain() && process.argv[2] === '--background') {
   // 后台那半（fastSessionStart 起的脱离子进程）：输出没人看，结果全写进结果文件；整个崩了也写一笔 crashed，下次开场照实说

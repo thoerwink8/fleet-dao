@@ -8,8 +8,6 @@
 // 规矩本身由 agents/test/rules/pretool.rules.test.ts 钉住：改这里的判断改了规矩，那边会红。
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { attributionVerdict } from './ai-attribution.mjs';
 import { judgeCapacity, readCapacity } from './capacity.mjs';
 import {
@@ -21,6 +19,7 @@ import {
 } from './fresh-main.mjs';
 import { gitOk, gitRunner, gitWhy, readFallbackProxy } from './git-run.mjs';
 import { hookTimer } from './hook-timing.mjs';
+import { isMainModule } from './is-main.mjs';
 import { shellEditVerdict } from './shell-edit.mjs';
 import { haikuVerdict, recordHaikuDispatch } from './subagent-ledger.mjs';
 
@@ -2726,14 +2725,7 @@ export function capacityVerdict(raw, { read = readCapacity } = {}) {
   return block(`fleet-guard：派写码工人前判本机容量——${v.text}。${tail}`);
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   // 各阶段耗时记进 ~/.fleet-dao/logs/hook-timing.jsonl（hook-timing.mjs），查超时用
   const timer = hookTimer('pretool.mjs');
   /** @type {string | undefined} */

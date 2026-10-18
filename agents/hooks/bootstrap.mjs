@@ -14,8 +14,9 @@
 // 规矩由 agents/test/bootstrap.test.ts 钉住（含故意造出的失败）。
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { isMainModule } from './is-main.mjs';
 import { SYNC_DIR as SYNC_REL } from './sync-source.mjs';
 
 const HOOKS_REL = join('.fleet-dao', 'hooks');
@@ -150,14 +151,7 @@ export function bootstrap(deps) {
   return [said, `${result}${still}`];
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   let lines;
   try {
