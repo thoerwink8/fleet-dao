@@ -12,6 +12,7 @@ import {
   activeLocalLeaseKeys,
   alertByKey,
   countAlertFilings,
+  countOpenRunsForIssue,
   type Db,
   findRepoProfile,
   finishScheduleRun,
@@ -49,7 +50,11 @@ import {
 } from '@fleet-dao/db';
 import { type GitHub, type RepoRef, readCi, readPull, requiredChecksFor } from '@fleet-dao/github';
 import { parseRepoProfile } from '@fleet-dao/shared';
-import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import {
+  parseTaskWorkflowId,
+  requirementWorkflowId,
+  subtaskWorkflowId,
+} from '@fleet-dao/shared/workflow-ids';
 import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
@@ -79,7 +84,7 @@ import type { WorktreeCleanupDeps } from '../jobs/worktree-cleanup.ts';
 import type { PortContext } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
-import { taskAbandonSignal, taskStatusQuery } from '../task-contract.ts';
+import { type ClosedIssueHoldToken, taskCloseClosedIssueUpdate, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { mainCiRuns } from './main-ci-runs.ts';
 import { PROBE_DIR } from './route-probe.ts';
@@ -188,6 +193,18 @@ export function taskViewOf(raw: unknown, workflowId: string): WorkflowView {
   };
 }
 
+/**
+ * 关单收尾专用（#3002）：停着等人（phase=parked），或已在检查点软暂停（phase=paused 且 waiting.kind=paused）。
+ * 别的阶段都是还在跑，包括暂停了但等待还不是 paused、以及别的阶段碰巧 waiting.kind=paused。
+ * taskViewOf.parked 仍只认 phase=parked，对账别的读法不跟着放宽。认不出照抛，不当成还在跑。
+ */
+export function closedIssueHoldOf(raw: unknown, workflowId: string): 'parked' | 'paused-checkpoint' | 'busy' {
+  const view = taskViewOf(raw, workflowId);
+  if (view.parked) return 'parked';
+  if (asRecord(raw)?.phase === 'paused' && view.waiting?.kind === 'paused') return 'paused-checkpoint';
+  return 'busy';
+}
+
 /** 问 Temporal：没有这条工作流是 missing；别的查不了（连不上、没权限）照抛。 */
 export function temporalWorkflows(client: Pick<Client, 'workflow'>): WorkflowReader {
   return {
@@ -276,8 +293,8 @@ export interface HourlyReconcileWiring {
   closedIssueTasks?: HourlyReconcileJobDeps['closedIssueTasks'];
 }
 
-/** 发「放弃」信号最多等多久（毫秒）：到点由连接取消调用，不在本地空等。 */
-const ABANDON_SIGNAL_TIMEOUT_MS = 5_000;
+/** 等工作流消费回执的 RPC 上限；到点不代表 Update 未执行，保留未核实，重试同一 updateId。 */
+const CLOSED_ISSUE_UPDATE_TIMEOUT_MS = 5_000;
 
 /**
  * 撤掉这个任务工作流还开着的挂起提醒（task:…:park:N）：标已处理，同一事务写操作记录（reason = why）。
@@ -304,8 +321,12 @@ export async function resolveClosedIssueParkAlerts(
   return n;
 }
 
-/** 「单已关且停下等人就撤任务」的真口子（#1816）：在跑的问 Temporal，停没停着问 taskStatus，单状态现读，放弃走 taskAbandonSignal，挂起提醒当场撤。 */
-function temporalClosedIssueTasks(
+/**
+ * 「单已关就撤任务」的真口子（#1816 / #3002）：在跑的问 Temporal。
+ * isParked 仍只认 phase=parked（别的读法不放宽）。关单收尾问 holdForClose：parked，或检查点软暂停再数开着的会话。
+ * 单状态现读，Update 绑精确 run 与停法凭据，只有 accepted 回执才撤挂起提醒。
+ */
+export function temporalClosedIssueTasks(
   client: Pick<Client, 'workflow' | 'connection'>,
   gh: Pick<GitHub, 'readIssueState'> & Partial<Pick<GitHub, 'readGroomFacts'>>,
   db: Db,
@@ -326,6 +347,34 @@ function temporalClosedIssueTasks(
       const handle = client.workflow.getHandle(workflowId);
       return taskViewOf(await handle.query(taskStatusQuery), workflowId).parked;
     },
+    async holdForClose(workflowId) {
+      const handle = client.workflow.getHandle(workflowId);
+      const raw = await handle.query(taskStatusQuery);
+      const kind = closedIssueHoldOf(raw, workflowId);
+      if (kind === 'busy') return { kind: 'busy' };
+      const capability = asRecord(asRecord(raw)?.closedIssueClose);
+      if (capability?.version !== 1)
+        throw new Error(`${workflowId} 没有受支持的关单收尾能力，不发无条件放弃`);
+      if (capability.token === null) return { kind: 'busy' };
+      const token = capability.token as ClosedIssueHoldToken | undefined;
+      if (
+        token?.version !== 1 ||
+        typeof token.runId !== 'string' ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(token.runId) ||
+        token.kind !== (kind === 'parked' ? 'parked' : 'paused') ||
+        !Number.isSafeInteger(token.generation) ||
+        token.generation < 1 ||
+        !Number.isSafeInteger(token.continued) ||
+        token.continued < 0
+      ) {
+        throw new Error(`${workflowId} 关单停法凭据认不出，不动`);
+      }
+      if (kind === 'parked') return { kind: 'parked', token };
+      const ref = parseTaskWorkflowId(workflowId);
+      if (!ref) throw new Error(`${workflowId} 认不出是哪张单，开着的会话数没查成`);
+      const openSessions = await countOpenRunsForIssue(db, ref.repo, ref.issueNumber, workflowId);
+      return { kind: 'paused', openSessions, token };
+    },
     resolveParkAlerts: (workflowId, why, by) =>
       resolveClosedIssueParkAlerts(db, workflowId, why, { at: now(), ...(by ? { by } : {}) }),
     openTaskRows: () => listOpenTaskRows(db),
@@ -339,12 +388,18 @@ function temporalClosedIssueTasks(
         return new Map(facts.issues.map((i) => [i.number, i.labels] as const));
       },
     }),
-    async abandon(workflowId, command) {
+    async abandon(workflowId, command, token) {
+      if (!token) throw new Error(`${workflowId} 缺少关单停法凭据，不发无条件放弃`);
       try {
-        await client.connection.withDeadline(Date.now() + ABANDON_SIGNAL_TIMEOUT_MS, () =>
-          client.workflow.getHandle(workflowId).signal(taskAbandonSignal, command),
+        const result = await client.connection.withDeadline(Date.now() + CLOSED_ISSUE_UPDATE_TIMEOUT_MS, () =>
+          client.workflow.getHandle(workflowId, token.runId).executeUpdate(taskCloseClosedIssueUpdate, {
+            args: [{ token, command }],
+            updateId: `closed-issue:${token.runId}:${token.kind}:${token.generation}:${token.continued}`,
+          }),
         );
-        return 'sent';
+        if (result !== 'accepted' && result !== 'stale' && result !== 'busy')
+          throw new Error('关单收尾消费回执认不出');
+        return result;
       } catch (err) {
         if (isWorkflowGone(err)) return 'gone';
         throw err;

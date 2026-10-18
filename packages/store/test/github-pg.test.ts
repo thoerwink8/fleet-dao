@@ -39,6 +39,49 @@ describe('Postgres 版（store）', () => {
   });
 
   describe('防重复写（idempotency_keys）', () => {
+    it('peek 现读原始 action/target：冲突占用和完成不能把 backfill 升级成真实队列来源', async () => {
+      const key = 'gh:merge_pr:acme/widgets#1:head';
+      await ledger.idempotency.claim(
+        { key, action: 'github.merge_pr_backfill', target: 'acme/widgets#1' },
+        now,
+      );
+      expect(await ledger.idempotency.peek(key)).toMatchObject({
+        action: 'github.merge_pr_backfill',
+        target: 'acme/widgets#1',
+        completedAt: null,
+      });
+      expect(
+        await ledger.idempotency.claim({ key, action: 'github.merge_pr', target: 'other/repo#2' }, now),
+      ).toMatchObject({ status: 'in-flight' });
+      const receipt = {
+        number: 1,
+        head: 'a'.repeat(40),
+        mergeCommit: 'b'.repeat(40),
+        mergedBy: 'engine[bot]',
+      };
+      await ledger.idempotency.complete(key, receipt, now);
+      expect(await ledger.idempotency.peek(key)).toEqual({
+        action: 'github.merge_pr_backfill',
+        target: 'acme/widgets#1',
+        claimedAt: now,
+        completedAt: now,
+        result: receipt,
+      });
+      expect(
+        await ledger.idempotency.claim({ key, action: 'github.merge_pr', target: 'other/repo#2' }, now),
+      ).toMatchObject({ status: 'done' });
+      expect(await ledger.idempotency.peek(key)).toMatchObject({
+        action: 'github.merge_pr_backfill',
+        target: 'acme/widgets#1',
+        result: receipt,
+      });
+      await ledger.idempotency.claim({ key: 'without-target', action: 'github.test' }, now);
+      expect(await ledger.idempotency.peek('without-target')).toMatchObject({
+        action: 'github.test',
+        target: null,
+      });
+    });
+
     const spec = (over: Partial<Parameters<typeof once<{ n: number }>>[1]> = {}) => ({
       key: 'gh:test:acme/widgets#1',
       action: 'github.test',

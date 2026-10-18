@@ -34,21 +34,33 @@ export interface IdempotencyStore {
   release(key: string, heldClaimedAt: Date): Promise<boolean>;
   /** 占着的人大概死了：把占用抢过来。只有 claimedAt 还是看到的那个时才成功（两个重试同时来只有一个抢得到）。 */
   takeOver(key: string, seenClaimedAt: Date, now: Date): Promise<boolean>;
-  /** 只读：这个键的账（对账、认回声用）；没有返回 null。 */
-  peek(key: string): Promise<{ claimedAt: Date; completedAt: Date | null; result: unknown } | null>;
+  /** 只读：这个键的账（对账、认回声用）；action/target 保留原始写入来源，不从键推算；没有返回 null。 */
+  peek(key: string): Promise<{
+    action: string;
+    target: string | null;
+    claimedAt: Date;
+    completedAt: Date | null;
+    result: unknown;
+  } | null>;
 }
 
 /** 只给测试和不连库的场合用：进程一退账就没了。 */
 export function memoryIdempotencyStore(): IdempotencyStore & {
-  rows: Map<string, { action: string; claimedAt: Date; completedAt?: Date; result?: unknown }>;
+  rows: Map<
+    string,
+    { action: string; target: string | null; claimedAt: Date; completedAt?: Date; result?: unknown }
+  >;
 } {
-  const rows = new Map<string, { action: string; claimedAt: Date; completedAt?: Date; result?: unknown }>();
+  const rows = new Map<
+    string,
+    { action: string; target: string | null; claimedAt: Date; completedAt?: Date; result?: unknown }
+  >();
   return {
     rows,
     async claim(input, now) {
       const row = rows.get(input.key);
       if (!row) {
-        rows.set(input.key, { action: input.action, claimedAt: now });
+        rows.set(input.key, { action: input.action, target: input.target ?? null, claimedAt: now });
         return { status: 'claimed' };
       }
       if (row.completedAt) return { status: 'done', result: row.result, completedAt: row.completedAt };
@@ -75,7 +87,13 @@ export function memoryIdempotencyStore(): IdempotencyStore & {
     async peek(key) {
       const row = rows.get(key);
       return row
-        ? { claimedAt: row.claimedAt, completedAt: row.completedAt ?? null, result: row.result }
+        ? {
+            action: row.action,
+            target: row.target,
+            claimedAt: row.claimedAt,
+            completedAt: row.completedAt ?? null,
+            result: row.result,
+          }
         : null;
     },
   };
