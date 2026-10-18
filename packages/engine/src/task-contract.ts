@@ -1,6 +1,6 @@
 // 任务工作流（#632 S2-4；specs/632-三段总调度/方案.md §五）对外的约定：输入输出、信号、查询、新增活动的入参和结果。
 // 驾驶舱后端（发「继续」「放弃」、读状态）和引擎共用这一份；工作流和活动都从这里拿类型。
-// 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的 defineSignal / defineQuery，别的一律只写类型。
+// 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的消息定义函数，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
 import type { FlowMode, FlowSource, Repo, RepoWithProfile } from '@fleet-dao/shared';
@@ -12,7 +12,7 @@ import {
   type RouteWakeCommand,
   TASK_SIGNAL_NAMES,
 } from '@fleet-dao/shared/task-signals';
-import { defineQuery, defineSignal } from '@temporalio/workflow';
+import { defineQuery, defineSignal, defineUpdate } from '@temporalio/workflow';
 import type { FailureEvidence } from './failure/types.ts';
 import type { RouteChoice } from './ports.ts';
 import type { TaskBrief } from './runner/task-brief.ts';
@@ -125,7 +125,29 @@ export interface TaskStatus {
   /** 最近一次卡住的原因；顺利推进时是 null。 */
   lastProblem: string | null;
   tier: TierDecision | null;
+  /** 关单收尾能力。旧 worker 缺此字段，调用方必须保留未核实，不能回退无条件放弃。 */
+  closedIssueClose?: { version: 1; token: ClosedIssueHoldToken | null };
 }
+
+/** 只在这一 run 的这一次停法有效；继续信号收到时立即失效，不等公开 phase 回写。 */
+export interface ClosedIssueHoldToken {
+  version: 1;
+  runId: string;
+  kind: 'parked' | 'paused';
+  generation: number;
+  continued: number;
+}
+
+export type ClosedIssueCloseResult = 'accepted' | 'stale' | 'busy';
+export interface ClosedIssueCloseCommand {
+  token: ClosedIssueHoldToken;
+  command: AbandonCommand;
+}
+
+/** 同步处理并回执：发请求成功不能冒充工作流已经消费。 */
+export const taskCloseClosedIssueUpdate = defineUpdate<ClosedIssueCloseResult, [ClosedIssueCloseCommand]>(
+  'taskCloseClosedIssue',
+);
 
 export interface TaskRun {
   outcome: 'merged' | 'abandoned';
