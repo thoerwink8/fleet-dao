@@ -48,12 +48,14 @@ import {
   taskPauseSignal,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { createRealEnv, engineBundle, pollQuery, waitUntil, withWorker } from './helpers.ts';
+import { createEnv, engineBundle, pollQuery, waitUntil, withWorker } from './helpers.ts';
 import { OK_SEGMENT, scripted } from './task-script.ts';
 
-// 时间跳跃测试服务端没实现 ListWorkflowExecutions，关单收尾的真口子要列在跑的任务，所以用真开发服务端。
+// 时间跳跃测试服务端没实现 ListWorkflowExecutions：列在跑的任务换成对本用例起过的工作流逐个 describe（只认 RUNNING），
+// 别的（taskStatus 查询、会话数、放弃信号、撤提醒）都走真口子。真开发服务端只给 github-reconcile.test.ts（CI 分台约定）。
 let env: TestWorkflowEnvironment;
 let t: TestDb;
+const started = new Set<string>();
 
 beforeAll(async () => {
   t = await createTestDb();
@@ -61,7 +63,8 @@ beforeAll(async () => {
 }, 120_000);
 afterAll(() => t.close());
 beforeEach(async () => {
-  env = await createRealEnv();
+  env = await createEnv();
+  started.clear();
   await resetTestDb(t);
 }, 60_000);
 afterEach(async () => {
@@ -162,7 +165,7 @@ function watching() {
   const client = {
     connection: raw.connection,
     workflow: {
-      list: (query: { query: string }) => raw.workflow.list(query),
+      list: (query: { query: string }) => listRunning(query.query),
       getHandle: (workflowId: string, runId?: string) => {
         const handle = raw.workflow.getHandle(workflowId, runId);
         return {
@@ -212,6 +215,7 @@ const delivery = (deliveryId: string): ClosedIssueDelivery => ({
 });
 
 async function start(q: string, i: TaskWorkflowInput): Promise<WorkflowHandle> {
+  started.add(taskWorkflowId(i.repo, i.issueNumber));
   return env.client.workflow.start(WORKFLOW_TYPES.task, {
     taskQueue: q,
     workflowId: taskWorkflowId(i.repo, i.issueNumber),
@@ -222,11 +226,20 @@ async function start(q: string, i: TaskWorkflowInput): Promise<WorkflowHandle> {
 const statusUntil = (h: WorkflowHandle, check: (s: TaskStatus) => boolean, what: string) =>
   pollQuery(() => h.query(taskStatusQuery), check, what);
 
+const RUNNING_TASKS = `WorkflowType = '${WORKFLOW_TYPES.task}' AND ExecutionStatus = 'Running'`;
+
+/** 代替 workflow.list：只答真口子问的那一句，回本用例起过、还在 RUNNING 的工作流。 */
+async function* listRunning(query: string): AsyncGenerator<{ workflowId: string }> {
+  if (query !== RUNNING_TASKS) throw new Error(`列工作流的查询认不出：${query}`);
+  for (const workflowId of started) {
+    const d = await env.client.workflow.getHandle(workflowId).describe();
+    if (d.status.name === 'RUNNING') yield { workflowId };
+  }
+}
+
 async function waitListed(workflowId: string): Promise<void> {
   await waitUntil(async () => {
-    for await (const info of env.client.workflow.list({
-      query: `WorkflowType = '${WORKFLOW_TYPES.task}' AND ExecutionStatus = 'Running'`,
-    })) {
+    for await (const info of listRunning(RUNNING_TASKS)) {
       if (info.workflowId === workflowId) return true;
     }
     return false;
