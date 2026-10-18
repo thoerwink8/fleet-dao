@@ -1,6 +1,7 @@
-// 钉住「项目仓的提交和 PR/MR 不带 AI 署名」（通用段「项目仓记什么」，agents/hooks/ai-attribution.mjs，经 pretool.mjs 的 decide 拦）：
-// 项目仓里 git commit 的说明（-m、heredoc、-F 文件）、gh pr / glab mr 的正文带 AI 署名就拦；git push 时要推的提交里带就拦；
-// 人名的 Co-Authored-By 放行；fleet-dao（靠 Haiku 署名统计）和标了私人仓的放行；git 跑不起来放行并说没查成。
+// 钉住「对外仓的提交和 PR/MR 不带 AI 署名」（通用段「对外仓和对外内容怎么写」，agents/hooks/ai-attribution.mjs，经 pretool.mjs 的 decide 拦）：
+// 对外仓里 git commit 的说明（-m、heredoc、-F 文件）、gh pr / glab mr 的正文带 AI 署名就拦；git push 时要推的提交里带就拦；
+// 人名的 Co-Authored-By 放行；自用仓（fleet-dao 靠 Haiku 署名统计、打了自用仓标记的）放行；git 跑不起来放行并说没查成。
+// 仓是哪一种的判法本身钉在 agents/test/repo-kind.test.ts。
 // 用真的临时 git 仓跑。命令里的 git 子命令拆开拼，免得本机护栏认错。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -18,9 +19,7 @@ interface PretoolLib {
   decide(raw: string, fallbackCwd?: string, opts?: { claudeRunning?: () => number }): Verdict;
 }
 interface AttrLib {
-  PRIVATE_MARK: string;
   hasAiAttribution(text: string): boolean;
-  repoKind(root: string): 'fleet-dao' | 'private' | 'project';
   attributionVerdict(
     command: string,
     outer: string,
@@ -95,27 +94,12 @@ describe('认 AI 署名', () => {
   });
 });
 
-describe('仓分三类', () => {
-  it('fleet-dao 认两份文件；私人仓认 AGENTS.md 里一字不差的标记行；其余都是项目仓', () => {
-    expect(
-      attr.repoKind(
-        repo({ 'agents/shared-rules.md': 'x', 'packages/conventions/standard-paths.json': '{}' }),
-      ),
-    ).toBe('fleet-dao');
-    expect(attr.repoKind(repo({ 'AGENTS.md': `# x\n\n  ${attr.PRIVATE_MARK}  \n` }))).toBe('private');
-    expect(attr.repoKind(repo({ 'AGENTS.md': `# x\n\n说明里提到 ${attr.PRIVATE_MARK} 不算\n` }))).toBe(
-      'project',
-    );
-    expect(attr.repoKind(repo())).toBe('project');
-  });
-});
-
-describe('项目仓：带 AI 署名的提交、推送、PR/MR 拦下', () => {
+describe('对外仓（没有自用仓标记）：带 AI 署名的提交、推送、PR/MR 拦下', () => {
   it('git commit -m 带署名：拦，说明规矩出处', () => {
     const work = repo();
     const v = bash(`${COMMIT} -am "修 bug\n\n${CLAUDE}"`, work);
     expect(v.code).toBe(2);
-    expect(v.message).toContain('项目仓记什么');
+    expect(v.message).toContain('对外仓和对外内容怎么写');
   });
 
   it('heredoc 正文里带署名：拦', () => {
@@ -175,7 +159,7 @@ describe('项目仓：带 AI 署名的提交、推送、PR/MR 拦下', () => {
   });
 });
 
-describe('fleet-dao、私人仓放行', () => {
+describe('自用仓放行：fleet-dao、打了自用仓标记的（旧的私人仓写法照认）', () => {
   it('fleet-dao 形态的仓：带 Claude 署名的提交和推送都放行', () => {
     const work = repo({ 'agents/shared-rules.md': 'x', 'packages/conventions/standard-paths.json': '{}' });
     expect(bash(`${COMMIT} -am "x\n\n${CLAUDE}"`, work).code).toBe(0);
@@ -183,10 +167,12 @@ describe('fleet-dao、私人仓放行', () => {
     expect(bash(`${PUSH} origin HEAD`, work).code).toBe(0);
   });
 
-  it('标了私人仓的：放行', () => {
-    const work = repo({ 'AGENTS.md': `# x\n\n${attr.PRIVATE_MARK}\n` });
-    localCommit(work, `x\n\n${CLAUDE}`);
-    expect(bash(`${PUSH} origin HEAD`, work).code).toBe(0);
+  it('标了自用仓的、旧写法标了私人仓的：放行', () => {
+    for (const mark of ['<!-- repo-kind: 自用仓 -->', '<!-- repo-kind: 私人仓 -->']) {
+      const work = repo({ 'AGENTS.md': `# x\n\n${mark}\n` });
+      localCommit(work, `x\n\n${CLAUDE}`);
+      expect(bash(`${PUSH} origin HEAD`, work).code).toBe(0);
+    }
   });
 });
 

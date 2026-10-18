@@ -85,10 +85,12 @@ function put(root: string, files: Record<string, string>): string {
   return root;
 }
 const g = (cwd: string, ...a: string[]) => runChildOk('git', a, { cwd });
+/** 仓合同只管自用仓（决定 0107）：造的仓默认打上自用仓标记 */
+const SELF_AGENTS = '# AGENTS.md\n\n<!-- repo-kind: 自用仓 -->\n';
 function gitRepo(files: Record<string, string> = {}, commit = true): string {
   const dir = temp('git');
   g(dir, 'init', '-q', '-b', 'main');
-  put(dir, { 'README.md': '# 仓\n', ...files });
+  put(dir, { 'README.md': '# 仓\n', 'AGENTS.md': SELF_AGENTS, ...files });
   if (commit) {
     g(dir, 'add', '-A');
     g(dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init');
@@ -101,7 +103,7 @@ const PKG_OK = JSON.stringify({
 });
 const GOOD: Record<string, string> = {
   'package.json': PKG_OK,
-  'AGENTS.md': '# AGENTS.md\n',
+  'AGENTS.md': SELF_AGENTS,
   '.gitignore': 'node_modules/\n_tmp/\n',
 };
 const byId = (rs: Checked[]) => Object.fromEntries(rs.map((r) => [r.id, r]));
@@ -111,11 +113,12 @@ describe('合同本身', () => {
     expect(ITEMS.map((i) => i.id)).toEqual(['entry', 'agents-md', 'gitignore-tmp']);
   });
 
-  it('补给新仓的 AGENTS.md 只写项目本身的记法，不提 AI、fleet-dao、原话（通用段「项目仓记什么」）', () => {
+  it('补给新自用仓的 AGENTS.md 带自用仓标记、只写项目本身的记法，不提 AI、fleet-dao、原话', () => {
     const root = temp('tmpl');
     lib.applyInit(root, lib.planInit(root, ITEMS));
     const text = readFileSync(join(root, 'AGENTS.md'), 'utf8');
     expect(text).toContain('docs/decisions.md');
+    expect(text.split('\n')).toContain('<!-- repo-kind: 自用仓 -->');
     expect(text).not.toMatch(/fleet-dao|AI|Claude|原话|引导|临时调整/);
   });
 
@@ -289,7 +292,7 @@ describe('命令行：node agents/hooks/repo-contract.mjs check|init', SLOW, () 
 
   it('check：全过 0、缺 1、认不出 2，并说原因', () => {
     expect(cli(['check', put(temp('c0'), GOOD)]).status).toBe(0);
-    const miss = cli(['check', temp('c1')]);
+    const miss = cli(['check', put(temp('c1'), { 'AGENTS.md': SELF_AGENTS })]);
     expect(miss.status).toBe(1);
     expect(miss.stdout).toContain('entry');
     const bad = cli(['check', put(temp('c2'), { ...GOOD, 'package.json': '{坏' })]);
@@ -309,7 +312,7 @@ describe('命令行：node agents/hooks/repo-contract.mjs check|init', SLOW, () 
 
   it('init --dry-run：打印要做什么，一个文件都不写', () => {
     const root = temp('dry');
-    const r = cli(['init', root, '--dry-run']);
+    const r = cli(['init', root, '--self', '--dry-run']);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('package.json');
     expect(r.stdout).toContain('AGENTS.md');
@@ -319,11 +322,35 @@ describe('命令行：node agents/hooks/repo-contract.mjs check|init', SLOW, () 
 
   it('init：补完提示入口是占位，要填上真正的启动方式才算 entry 通过', () => {
     const root = temp('real');
-    const r = cli(['init', root]);
+    const r = cli(['init', root, '--self']);
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/占位/);
-    expect(existsSync(join(root, 'AGENTS.md'))).toBe(true);
+    expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toContain('<!-- repo-kind: 自用仓 -->');
     expect(existsSync(join(root, 'docs', 'PROGRESS.md'))).toBe(false);
+  });
+
+  it('对外仓（没有自用仓标记）：check 说不管、退出 0；init 拒绝、一个文件都不写（决定 0107）', () => {
+    const root = put(temp('ext'), { 'AGENTS.md': '# 公司仓自己的规矩\n' });
+    const c = cli(['check', root]);
+    expect(c.status).toBe(0);
+    expect(c.stdout).toMatch(/对外仓/);
+    expect(c.stdout).not.toContain('entry');
+    const i = cli(['init', root]);
+    expect(i.status).toBe(1);
+    expect(i.stdout).toMatch(/对外仓.*什么都没动/);
+    expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toBe('# 公司仓自己的规矩\n');
+    expect(existsSync(join(root, 'package.json'))).toBe(false);
+    expect(existsSync(join(root, '.gitignore'))).toBe(false);
+  });
+
+  it('init --self：已有的 AGENTS.md 原样保留、往后补一行标记；旧的私人仓写法算已标、不重复补', () => {
+    const root = put(temp('mark'), { 'AGENTS.md': '# 我的\n' });
+    expect(cli(['init', root, '--self']).status).toBe(0);
+    expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toBe('# 我的\n\n<!-- repo-kind: 自用仓 -->\n');
+    const legacy = put(temp('legacy'), { 'AGENTS.md': '# 我的\n<!-- repo-kind: 私人仓 -->\n' });
+    expect(cli(['init', legacy, '--self']).status).toBe(0);
+    expect(readFileSync(join(legacy, 'AGENTS.md'), 'utf8')).toBe('# 我的\n<!-- repo-kind: 私人仓 -->\n');
+    expect(cli(['check', legacy]).stdout).not.toMatch(/对外仓/);
   });
 
   it('【故意造出的失败】不认识的子命令、路径不存在：退出码 2', () => {
@@ -367,6 +394,13 @@ describe('开会话的提醒（contractLines）：每仓每天最多一次，全
     expect(lib.contractLines({ cwd: root, git, home: temp('home'), now: NOW, hookDir: HOOK_DIR })).toEqual(
       [],
     );
+  });
+
+  it('对外仓（AGENTS.md 没有自用仓标记）：缺什么都不提醒，也不记一天一次的记号', () => {
+    const root = gitRepo({ 'AGENTS.md': '# 公司仓\n' });
+    const home = temp('home');
+    expect(lib.contractLines({ cwd: root, git, home, now: NOW, hookDir: HOOK_DIR })).toEqual([]);
+    expect(existsSync(join(home, '.fleet-dao', 'repo-contract'))).toBe(false);
   });
 
   it('不是 git 仓：不出声', () => {

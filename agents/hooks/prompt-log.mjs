@@ -18,8 +18,8 @@
 // - 一天一个文件：~/.fleet-dao/prompt-log/<YYYY-MM-DD>.jsonl，一行一条，只追加。
 import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { isMainModule } from './is-main.mjs';
 import { isMachineOpening, isMachineSession } from './unattended.mjs';
 
 /** 落盘目录；测试给 FLEET_PROMPT_LOG_DIR 覆盖。 */
@@ -109,17 +109,7 @@ export function run({ stdin = '', env = process.env, now = Date.now() } = {}) {
 }
 
 // 被当脚本跑（钩子就是这么跑的）：读 stdin，做完就退，绝不出声、绝不非 0。
-// 判「是不是被当脚本跑」要比路径：Windows 上 import.meta.url 是 file:///D:/…（三个斜杠）、盘符还带冒号，
-// 自己拼 `file://${argv[1]}` 永远对不上——那样脚本一声不响地什么都不做，钩子装了等于没装
-// 用 fileURLToPath 比，两边都归成同一种写法。
-const isMain = (() => {
-  if (!process.argv[1]) return false;
-  try {
-    return resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1]);
-  } catch {
-    return false;
-  }
-})();
+const isMain = isMainModule(import.meta);
 
 if (isMain) {
   if (process.env.FLEET_HEADLESS === '1') process.exit(0);

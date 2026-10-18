@@ -178,6 +178,7 @@ function startToCloseFor(activity: string, limits?: Limits): number | undefined 
     case 'checkGuarded':
     case 'armAutoMerge':
     case 'mergeNow':
+    case 'readCiReviews':
       return 5 * 60;
     default:
       return undefined;

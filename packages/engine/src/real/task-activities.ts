@@ -17,6 +17,7 @@
 // - 合并记录：这个仓的对账（github 包 auditMergedPrs）要求引擎开的 PR 账上有合并记录。自动合并是 GitHub 自己合的，没有记录，
 //   所以等到合并之后再调一次 mergePr——它对「已经合了」的 PR 只补记录、删分支，不再合一次。补不成只记日志，不拦任务往下走。
 // - 等合并是长轮询（心跳不断）：叫停时休眠被打断，活动抛取消，不吞。
+// - CI 红返工现读正式评审（readCiReviews）：读失败、身份不符、分页不全、读期间换头一律抛错或回未交付，不回空数组，不用旧快照。
 
 import type { SessionUser } from '@fleet-dao/adapters';
 import { type ChangedFile, STANDARD_PATHS_FILE, standardFiles } from '@fleet-dao/conventions';
@@ -36,6 +37,8 @@ import type {
   MergeNowInput,
   MergeNowResult,
   MergeWait,
+  ReadCiReviewsInput,
+  ReadCiReviewsResult,
   ReadDeliveryInput,
   ReadTaskBriefInput,
   ReviewChange,
@@ -105,7 +108,13 @@ export interface TaskActivitiesDeps extends ReviewAuditDeps {
 type TaskActivities = Required<
   Pick<
     EngineTasks,
-    'readTaskBrief' | 'readDelivery' | 'checkGuarded' | 'armAutoMerge' | 'waitMerged' | 'mergeNow'
+    | 'readTaskBrief'
+    | 'readDelivery'
+    | 'checkGuarded'
+    | 'armAutoMerge'
+    | 'waitMerged'
+    | 'mergeNow'
+    | 'readCiReviews'
   >
 >;
 
@@ -171,6 +180,182 @@ function inProgressNames(checks: MergeWaitChecks): string[] {
     names.push(name);
   }
   return names;
+}
+
+/** CI 返工读评审时看到的 PR 身份。owner/name 由调用方填上它实际读的那个仓。 */
+export interface CiReviewPull {
+  owner: string;
+  name: string;
+  number: number;
+  headSha: string;
+  headRef: string;
+}
+
+const REVIEW_SHA = /^[0-9a-f]{40}$/;
+
+function sameRepoName(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/** 读失败一律带上「未交付」。已经是带这句的 PortError 就原样抛，保留错误码和能不能重试。 */
+function undelivered(error: unknown, prNumber: number): PortError {
+  if (error instanceof PortError && error.message.includes('未交付')) return error;
+  const message = errMessage(error);
+  const text = message.includes('未交付')
+    ? message
+    : `读 PR #${prNumber} 的正式评审没读成，未核实、未交付：${message}`;
+  if (error instanceof PortError) {
+    return new PortError(error.code, text, { retryable: error.retryable, details: error.details });
+  }
+  if (/403|permission|权限/i.test(message)) {
+    return new PortError('PERMISSION_DENIED', text, { retryable: false });
+  }
+  return new PortError('REVIEW_READ_FAILED', text, { retryable: true });
+}
+
+function pullIdentity(pull: CiReviewPull, prNumber: number): CiReviewPull {
+  if (
+    pull === null ||
+    pull === undefined ||
+    typeof pull.owner !== 'string' ||
+    pull.owner.length === 0 ||
+    typeof pull.name !== 'string' ||
+    pull.name.length === 0 ||
+    typeof pull.headRef !== 'string' ||
+    pull.headRef.length === 0 ||
+    typeof pull.headSha !== 'string' ||
+    !Number.isInteger(pull.number)
+  ) {
+    throw new PortError('CI_REVIEW_INCOMPLETE', `读 PR #${prNumber} 的身份不完整，未核实、未交付`, {
+      retryable: true,
+    });
+  }
+  return pull;
+}
+
+/** 行内意见必须钉在这一仓这一张 PR 上。解析失败、带查询串或指向别的仓，都不算读全。 */
+function inlineBelongs(url: string, repo: { owner: string; name: string }, prNumber: number): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.search || parsed.hash || parsed.username || parsed.password) return false;
+  const expected = `/repos/${repo.owner}/${repo.name}/pulls/${prNumber}`;
+  return parsed.pathname.toLowerCase() === expected.toLowerCase();
+}
+
+function pullMismatch(input: ReadCiReviewsInput, pull: CiReviewPull): PortError | null {
+  if (!sameRepoName(pull.owner, input.repo.owner) || !sameRepoName(pull.name, input.repo.name)) {
+    return new PortError(
+      'CI_REVIEW_REPO_MISMATCH',
+      `读到的 PR 属于 ${pull.owner}/${pull.name}，不是 ${input.repo.owner}/${input.repo.name}，未核实、未交付`,
+      { retryable: false },
+    );
+  }
+  if (pull.number !== input.prNumber || pull.headRef !== input.branch) {
+    return new PortError(
+      'CI_REVIEW_PR_MISMATCH',
+      `读到的是 ${pull.headRef} #${pull.number}，不是 ${input.branch} #${input.prNumber}，未核实、未交付`,
+      { retryable: false },
+    );
+  }
+  return null;
+}
+
+/**
+ * CI 红返工要用的正式评审快照。和冷验收、合并入口共用 reviewChanges（白名单、原作者、分页行内）。
+ * 读之前和读完各对一次 PR 身份；头变了丢弃已读内容。任何失败都不回空数组。
+ */
+export async function readCiReviewSnapshot(
+  deps: {
+    reviewChanges?: (repo: RepoRef, prNumber: number) => Promise<ReviewChange[]>;
+    readPull: (repo: RepoRef, prNumber: number) => Promise<CiReviewPull>;
+  },
+  input: ReadCiReviewsInput,
+): Promise<ReadCiReviewsResult> {
+  if (
+    input?.schemaVersion !== 1 ||
+    typeof input.taskId !== 'string' ||
+    input.taskId.length === 0 ||
+    !input.repo?.owner ||
+    !input.repo?.name ||
+    typeof input.branch !== 'string' ||
+    input.branch.length === 0 ||
+    !Number.isInteger(input.prNumber) ||
+    input.prNumber <= 0 ||
+    !REVIEW_SHA.test(input.expectedHead)
+  ) {
+    throw new PortError('INVALID_INPUT', '读 CI 返工时的正式评审：仓、PR、分支、头不齐，未核实、未交付', {
+      retryable: false,
+    });
+  }
+  if (deps.reviewChanges === undefined) {
+    throw new PortError('REVIEW_READ_UNWIRED', '正式评审读取未装配，未核实、未交付，不能当作没有评审', {
+      retryable: false,
+    });
+  }
+  const repo = { owner: input.repo.owner, name: input.repo.name };
+  const loadPull = async (): Promise<CiReviewPull> => {
+    try {
+      return pullIdentity(await deps.readPull(repo, input.prNumber), input.prNumber);
+    } catch (error) {
+      throw undelivered(error, input.prNumber);
+    }
+  };
+  const before = await loadPull();
+  const beforeMismatch = pullMismatch(input, before);
+  if (beforeMismatch) throw beforeMismatch;
+  if (before.headSha !== input.expectedHead) {
+    return {
+      delivered: false,
+      reason: `读正式评审前 PR #${input.prNumber} 的头已是 ${before.headSha}，不是 CI 红的 ${input.expectedHead}，未核实、未交付`,
+      headMoved: before.headSha,
+    };
+  }
+  let reviews: ReviewChange[];
+  try {
+    reviews = await deps.reviewChanges(repo, input.prNumber);
+  } catch (error) {
+    throw undelivered(error, input.prNumber);
+  }
+  if (!Array.isArray(reviews)) {
+    throw new PortError(
+      'CI_REVIEW_INCOMPLETE',
+      `读 PR #${input.prNumber} 的正式评审不是完整名单，未核实、未交付`,
+      { retryable: true },
+    );
+  }
+  for (const review of reviews) {
+    if (!Array.isArray(review.inlineComments)) {
+      throw new PortError(
+        'CI_REVIEW_INCOMPLETE',
+        `review ${review.reviewId} 的行内原文未读全，未核实、未交付，不能当作没有行内意见`,
+        { retryable: true },
+      );
+    }
+    for (const comment of review.inlineComments) {
+      if (!inlineBelongs(comment.pullRequestUrl, repo, input.prNumber)) {
+        throw new PortError(
+          'CI_REVIEW_REPO_MISMATCH',
+          `review ${review.reviewId} comment ${comment.id} 的行内地址不属于 ${repo.owner}/${repo.name}#${input.prNumber}，未核实、未交付`,
+          { retryable: false },
+        );
+      }
+    }
+  }
+  const after = await loadPull();
+  const afterMismatch = pullMismatch(input, after);
+  if (afterMismatch) throw afterMismatch;
+  if (after.headSha !== input.expectedHead) {
+    return {
+      delivered: false,
+      reason: `读正式评审期间 PR #${input.prNumber} 的头换成了 ${after.headSha}，这次读到的内容作废，未核实、未交付`,
+      headMoved: after.headSha,
+    };
+  }
+  return { delivered: true, head: input.expectedHead, reviews };
 }
 
 export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
@@ -656,6 +841,27 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         await sleep(pollEveryMs, ctx.signal);
       }
+    },
+
+    async readCiReviews(input: ReadCiReviewsInput, ctx: PortContext): Promise<ReadCiReviewsResult> {
+      ctx.heartbeat();
+      const reviewChanges = deps.reviewChanges;
+      return readCiReviewSnapshot(
+        {
+          ...(reviewChanges === undefined ? {} : { reviewChanges }),
+          readPull: async (repo, prNumber) => {
+            const pull = await mapped(() => gh.claims.readPull(repo, prNumber));
+            return {
+              owner: repo.owner,
+              name: repo.name,
+              number: pull.number,
+              headSha: pull.headSha,
+              headRef: pull.headRef,
+            };
+          },
+        },
+        input,
+      );
     },
   };
 }

@@ -3,7 +3,9 @@
 // 所以只用 node 自带的模块和同目录的钩子脚本，不依赖仓里的 TS。
 // - 合同文件：在仓里是 agents/repo-contract.json（本文件的上一层）；装到机器上之后从同步专用检出 ~/.fleet-dao/origin-main 读
 //   （永远停在 origin/main，开会话钩子每次都把它切到最新），所以合同一合进主线，各台机器下次开会话就按新的查。
-// - 命令行：node repo-contract.mjs check [仓路径]｜init [仓路径] [--dry-run]（fleet-dao 里是 pnpm repo:check / repo:init）。
+// - 只管自用仓（repo-kind.mjs 判，决定 0107）：对外仓照它自己的规矩走，开会话不提醒，check 说一句不管、退出 0，init 拒绝、不写。
+//   init --self 先在仓根 AGENTS.md 打上自用仓标记再补（没有 AGENTS.md 的由 agents-md 那项新建，模板里带标记）。
+// - 命令行：node repo-contract.mjs check [仓路径]｜init [仓路径] [--self] [--dry-run]（fleet-dao 里是 pnpm repo:check / repo:init）。
 //   不给路径就是当前目录；pnpm 跑的时候工作目录被换成 fleet-dao，认 INIT_CWD。check 退出码：全过 0、有缺 1、读不了或认不出 2。
 //   init 只补缺的、绝不覆盖已有内容；入口脚本放占位（一跑就报 TODO、退出 1），占位不算 entry 通过。
 // - 开会话（session-start.mjs）：contractLines，每个仓每天（北京时间）最多说一次缺项，全过一个字不说；读不了说一句没查成。
@@ -15,6 +17,8 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitBroken, gitOk as ok } from './git-run.mjs';
+import { isMainModule } from './is-main.mjs';
+import { hasSelfMark, repoKind, repoKindInfo, SELF_MARK } from './repo-kind.mjs';
 
 /** 按 git 公共目录分仓的记号名：和 fresh-main.mjs 的 repoStampKey 同一种算法（测试钉着两边一致） */
 export function stampKeyOf(commonDir) {
@@ -279,6 +283,23 @@ export function planInit(root, items, fs = realFs) {
   return { actions, blocked };
 }
 
+/**
+ * repo:init --self：仓根 AGENTS.md 在、没有自用仓标记时往后补一行标记；没有 AGENTS.md 的由 agents-md 那项新建（模板里带标记）。
+ * 已经标了的回 null。
+ */
+export function selfMarkAction(root, fs = realFs) {
+  const path = join(root, 'AGENTS.md');
+  const text = fs.read(path);
+  if (text === null || hasSelfMark(root, () => text)) return null;
+  return {
+    id: 'repo-kind',
+    path,
+    kind: 'append',
+    text: `${withNewline(text)}\n${SELF_MARK}\n`,
+    what: `往后补 AGENTS.md：自用仓标记 ${SELF_MARK}`,
+  };
+}
+
 export function applyInit(_root, plan, fs = realFs) {
   for (const a of plan.actions) fs.write(a.path, a.text);
 }
@@ -307,7 +328,8 @@ export function contractLines({ cwd, git, home, now = Date.now(), hookDir = HERE
     const top = git(cwd, ['rev-parse', '--show-toplevel', '--path-format=absolute', '--git-common-dir']);
     if (gitBroken(top) || !ok(top)) return [];
     const [root, common] = top.stdout.split(/\r?\n/).map((s) => s.trim());
-    if (!root) return [];
+    // 对外仓照它自己的规矩走，仓合同不提醒（决定 0107）；判不出来的那句提醒归 repo-kind.mjs
+    if (!root || repoKind(root, { git }) === 'external') return [];
     const key = common && isAbsolute(common) ? stampKeyOf(common) : null;
     const stamp = key ? join(home, '.fleet-dao', 'repo-contract', key) : null;
     const today = beijingDay(now);
@@ -346,20 +368,15 @@ export function contractLines({ cwd, git, home, now = Date.now(), hookDir = HERE
   }
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   const [cmd, ...rest] = process.argv.slice(2);
   const dryRun = rest.includes('--dry-run');
+  const markSelf = rest.includes('--self');
   const arg = rest.find((a) => !a.startsWith('--'));
   const base = process.env.INIT_CWD || process.cwd();
   const root = arg ? (isAbsolute(arg) ? arg : resolve(base, arg)) : base;
-  const usage = '用法：repo:check [仓路径]｜repo:init [仓路径] [--dry-run]（不给路径就是当前目录）';
+  const usage =
+    '用法：repo:check [仓路径]｜repo:init [仓路径] [--self] [--dry-run]（不给路径就是当前目录；--self 先标成自用仓，创始人说了是自用仓才加）';
   if (cmd !== 'check' && cmd !== 'init') {
     console.error(usage);
     process.exit(2);
@@ -375,12 +392,23 @@ if (isMain()) {
     console.error(`仓合同没查成：${contract.why}`);
     process.exit(2);
   }
+  // 对外仓照它自己的规矩走：仓合同不查、不补（决定 0107）。check 退出 0（没有要查的），init 拒绝、一个字不写
+  const kind = markSelf && cmd === 'init' ? null : repoKindInfo(root);
+  if (kind && kind.kind === 'external') {
+    console.log(
+      `${root} 是对外仓（${kind.why}）：仓合同不管对外仓，照那个仓自己的规矩走，什么都没动。` +
+        '创始人说了它是自用仓，先 pnpm repo:kind self 记下（或 repo:init <仓路径> --self 在 AGENTS.md 打标记）再补。',
+    );
+    process.exit(cmd === 'check' ? 0 : 1);
+  }
   if (cmd === 'check') {
     const rs = checkRepo(root, contract.items);
     console.log(formatReport(root, rs));
     process.exit(exitCodeOf(rs));
   }
   const plan = planInit(root, contract.items);
+  const mark = markSelf ? selfMarkAction(root) : null;
+  if (mark) plan.actions.unshift(mark);
   if (!dryRun) applyInit(root, plan);
   console.log(formatPlan(root, plan, dryRun));
   const after = dryRun ? null : checkRepo(root, contract.items).find((r) => r.id === 'entry');

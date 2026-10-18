@@ -2,7 +2,7 @@
 import { execFile } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
@@ -71,9 +71,27 @@ describe('PR 头的完整检出和增量 diff', () => {
 
   it('检出里能读到 PR 头上的文件', async () => {
     const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
-    const dest = join(state, 'checkout');
+    const dest = join(state, 'checkout with spaces');
     await checkoutPrHead(dest, head, 'task:acme/demo#12');
     expect(readFileSync(join(dest, 'hello.txt'), 'utf8')).toBe('hello\n');
+  });
+
+  it('相对且含空格的目标目录仍相对调用方 cwd，真实解包到该目录', async () => {
+    const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+    const tmpRoot = join(process.cwd(), '_tmp');
+    mkdirSync(tmpRoot, { recursive: true });
+    const local = mkdtempSync(join(tmpRoot, 'verify-relative-'));
+    // 本次创建的私有目录在当前检出的 _tmp 下，清理只针对它。
+    expect(relative(tmpRoot, local)).toMatch(/^verify-relative-[^/\\]+$/);
+    const absolute = join(local, 'checkout with spaces');
+    const target = relative(process.cwd(), absolute);
+    expect(isAbsolute(target)).toBe(false);
+    try {
+      await checkoutPrHead(target, head, 'task:acme/demo#12');
+      expect(readFileSync(join(absolute, 'hello.txt'), 'utf8')).toBe('hello\n');
+    } finally {
+      rmSync(local, { recursive: true, force: true });
+    }
   });
 
   it('增量 diff 只含上一轮头之后的改动', async () => {
@@ -154,8 +172,13 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(blocked).toEqual([]);
   });
 
-  /** 真检出一遍，数 checkout 调了几次、repair 调了几次，收下报警。 */
-  async function placeReal(dest: string, head: string, workflowId: string | undefined) {
+  /** 默认真检出；Windows 权限用例显式注入阶段错误。数 checkout / repair 次数并收下报警。 */
+  async function placeReal(
+    dest: string,
+    head: string,
+    workflowId: string | undefined,
+    checkout = checkoutPrHead,
+  ) {
     const calls: string[] = [];
     const repairs: string[] = [];
     const alerts: CheckoutBlockedAlert[] = [];
@@ -165,7 +188,7 @@ describe('PR 头的完整检出和增量 diff', () => {
       workflowId,
       checkout: async (dir, headSha, flow) => {
         calls.push(dir);
-        await checkoutPrHead(dir, headSha, flow);
+        await checkout(dir, headSha, flow);
       },
       repair: async (dir) => {
         repairs.push(dir);
@@ -215,36 +238,52 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(alerts[0]?.body).not.toContain('mkdir');
   });
 
-  it.skipIf(process.getuid?.() === 0)('解包失败：归到解包那一步，原错保留，不修不重试', async () => {
-    const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
-    const dest = join(state, 'co-extract');
-    mkdirSync(dest, { recursive: true });
-    chmodSync(dest, 0o555);
-    try {
-      const { placed, calls, repairs, alerts } = await placeReal(dest, head, 'task:acme/demo#12');
-      expect(placed).toBe('blocked');
-      expect(calls).toHaveLength(1);
-      expect(repairs).toEqual([]);
-      expect(alerts[0]?.stage).toBe('extract');
-      expect(alerts[0]?.body).toContain('hello.txt');
-      expect(alerts[0]?.body).not.toContain('mkdir');
-    } finally {
-      chmodSync(dest, 0o755);
-    }
-  });
+  it.skipIf(process.getuid?.() === 0)(
+    `解包失败（${process.platform === 'win32' ? 'Windows tar 权限失败夹具' : 'POSIX 真权限'}）：原错保留，不修不重试`,
+    async () => {
+      const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+      const dest = join(state, 'co-extract');
+      mkdirSync(dest, { recursive: true });
+      if (process.platform !== 'win32') chmodSync(dest, 0o555);
+      try {
+        // Windows chmod 没有 POSIX 目录写权限语义：明示注入阶段错；Linux 仍跑 chmod + 真 tar。
+        const extract =
+          process.platform === 'win32'
+            ? async () => {
+                // tar 的权限失败是非零退出 + stderr，不是 spawn 的 EACCES errno。
+                throw new CheckoutStageError('extract', 'tar: hello.txt: Cannot open: Permission denied');
+              }
+            : checkoutPrHead;
+        const { placed, calls, repairs, alerts } = await placeReal(dest, head, 'task:acme/demo#12', extract);
+        expect(placed).toBe('blocked');
+        expect(calls).toHaveLength(1);
+        expect(repairs).toEqual([]);
+        expect(alerts[0]?.stage).toBe('extract');
+        expect(alerts[0]?.body).toContain('hello.txt');
+        expect(alerts[0]?.body).not.toContain('mkdir');
+      } finally {
+        if (process.platform !== 'win32') chmodSync(dest, 0o755);
+      }
+    },
+  );
 
   it.skipIf(process.getuid?.() === 0)(
-    '真 EACCES（上一层 555）：归到建目录，走既有修复，建议 mkdir',
+    `建目录 EACCES（${process.platform === 'win32' ? 'Windows 端口夹具' : 'POSIX 上一层 555 真权限'}）：走既有修复，建议 mkdir`,
     async () => {
       const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
       const parent = join(state, '_tmp');
       mkdirSync(parent, { recursive: true });
-      chmodSync(parent, 0o555);
+      if (process.platform !== 'win32') chmodSync(parent, 0o555);
       try {
         const { placed, calls, repairs, alerts } = await placeReal(
           join(parent, 'verify-x'),
           head,
           'task:acme/demo#12',
+          process.platform === 'win32'
+            ? async () => {
+                throw new CheckoutStageError('mkdir', 'EACCES: permission denied, mkdir', { code: 'EACCES' });
+              }
+            : checkoutPrHead,
         );
         expect(placed).toBe('blocked');
         expect(repairs).toEqual([join(parent, 'verify-x')]);
@@ -253,7 +292,7 @@ describe('PR 头的完整检出和增量 diff', () => {
         expect(alerts[0]?.body).toContain('EACCES');
         expect(alerts[0]?.body).toContain('引擎用户要能在这一层下面 mkdir');
       } finally {
-        chmodSync(parent, 0o755);
+        if (process.platform !== 'win32') chmodSync(parent, 0o755);
       }
     },
   );

@@ -21,6 +21,7 @@ import type {
   PlanSegmentResumeInput,
   PlanSegmentResumeResult,
   ReadCiPolicyResult,
+  ReadCiReviewsInput,
   ReadDeliveryInput,
   RunSegmentInput,
   RunSegmentResult,
@@ -107,6 +108,8 @@ export interface Calls {
   merged: number;
   /** 读 CI 模式的次数。不进 order。 */
   ciPolicy: number;
+  /** CI 红返工读评审的入参。不进 order（老用例比 order 一字不差）。默认成功且没有评审。 */
+  ciReviews: ReadCiReviewsInput[];
   /** 直接合并的次数。不进 order。 */
   merge: number;
   /** 判续会话收到的入参。不进 order。 */
@@ -140,6 +143,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     armInputs: [],
     merged: 0,
     ciPolicy: 0,
+    ciReviews: [],
     merge: 0,
     resume: [],
     selfCheck: [],
@@ -224,6 +228,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     async readCiPolicy() {
       calls.ciPolicy += 1;
       return script.ciPolicy();
+    },
+    async readCiReviews(input) {
+      calls.ciReviews.push(input);
+      return { delivered: true as const, head: input.expectedHead, reviews: [] };
     },
     async mergeNow(input) {
       calls.merge += 1;

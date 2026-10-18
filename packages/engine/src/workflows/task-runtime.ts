@@ -119,8 +119,8 @@ export class TaskRuntime {
    */
   verifyRecheck: { head: string; criteria: number[]; problems: string[] } | null = null;
   /**
-   * 已经交给工人的正式「要求改」评审（#2991，task-verify.ts）：review-feedback.ts 的 reviewKey → 交出去时的头。
-   * 同一条（同 PR、同编号、同完整意见）再读到不再派工；纯状态，只在 patched('review-request-changes') 之后写。
+   * 已经交给工人的正式「要求改」评审（#2991，task-verify.ts；CI 红返工也写这里）：reviewKey → 交出去时的头。
+   * 同一条（同 PR、同编号、同完整意见）再读到不再为它多起一轮；CI 红本身的那一轮仍把它当上下文带上。
    */
   readonly reviewsHanded = new Map<string, string>();
   /**
