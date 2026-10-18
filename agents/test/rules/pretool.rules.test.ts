@@ -488,6 +488,17 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
       lib.capacityVerdict(agent({ subagent_type: 'general-purpose' }), { read: () => reading(8, 4) }),
     ).toBeNull();
     expect(lib.capacityVerdict(agent({}), { read: () => reading(2, 1) })?.code).toBe(2);
+    // 派到云上的不占本机：容量再紧也放行；本机工作树隔离照样判
+    expect(
+      lib.capacityVerdict(agent({ subagent_type: 'general-purpose', isolation: 'remote' }), {
+        read: () => reading(2, 1),
+      }),
+    ).toBeNull();
+    expect(
+      lib.capacityVerdict(agent({ subagent_type: 'general-purpose', isolation: 'worktree' }), {
+        read: () => reading(2, 1),
+      })?.code,
+    ).toBe(2);
   });
 
   it('只读的斥候、设计不判：容量再紧也放行，也不去读', () => {
