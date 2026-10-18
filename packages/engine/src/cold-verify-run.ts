@@ -20,6 +20,7 @@
 // 抛了会变成「冷调用没跑起来」，写代码的会话改不出能过的 diff。
 
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -680,7 +681,24 @@ export interface CheckoutRecovered {
   workflowId: string | undefined;
 }
 
+/** 每次物理检出的独立成功证据；重送同一 receiptId 幂等，重做检出生成新 ID。 */
+export interface CheckoutReceipt {
+  receiptId: string;
+  taskId?: string | undefined;
+  runId?: string | undefined;
+  workflowId: string | undefined;
+  head: string;
+  dir: string;
+  startedAt: Date;
+  completedAt: Date;
+  type: 'full';
+}
+
 export interface PlaceVerifyCheckoutInput {
+  taskId?: string | undefined;
+  runId?: string | undefined;
+  /** 独立于撤卡；写失败只诊断，证据保持未知，不改变验收。 */
+  onCompleted?: (receipt: CheckoutReceipt) => Promise<void>;
   /** 生产经受管镜像的凭据和锁补齐既定头；失败保持 blocked，绝不改用分支最新头。 */
   ensureHead?: () => Promise<void>;
   signal?: AbortSignal;
@@ -714,7 +732,9 @@ export interface PlaceVerifyCheckoutInput {
 export async function placeVerifyCheckout(input: PlaceVerifyCheckoutInput): Promise<'full' | 'blocked'> {
   const checkout = input.checkout ?? checkoutPrHead;
   const log = input.log ?? (() => undefined);
-  const startedAt = (input.now ?? (() => new Date()))();
+  const now = input.now ?? (() => new Date());
+  const startedAt = now();
+  const receiptId = randomUUID();
   const dedupeKey = checkoutAlertKey(input.workflowId, input.head);
   const blocked = async (error: unknown, repairError?: unknown): Promise<'blocked'> => {
     const alert = checkoutBlockedAlert({
@@ -741,6 +761,27 @@ export async function placeVerifyCheckout(input: PlaceVerifyCheckoutInput): Prom
     return 'blocked';
   };
   const full = async (): Promise<'full'> => {
+    const receipt: CheckoutReceipt = {
+      receiptId,
+      taskId: input.taskId,
+      runId: input.runId,
+      workflowId: input.workflowId,
+      head: input.head,
+      dir: input.dir,
+      startedAt,
+      completedAt: now(),
+      type: 'full',
+    };
+    if (input.onCompleted) {
+      try {
+        await input.onCompleted(receipt);
+      } catch (error) {
+        log('冷验收完整检出成功回执没写进库（证据未知）', {
+          ...receipt,
+          error: errMessage(error),
+        });
+      }
+    }
     if (input.onRecovered) {
       try {
         await input.onRecovered({
