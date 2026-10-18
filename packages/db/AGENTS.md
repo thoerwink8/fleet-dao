@@ -31,3 +31,5 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - 新表要实时推送：加进 `REALTIME_TABLES`，迁移里建触发器。
 - 用到新列、新表的读写：`packages/store` 两套实现（见 `packages/store/AGENTS.md`）和 engine 的查询一起改。
 - 改了库、用户、备份相关的部署：同步 ops 第三节「用户、目录、库」、第十一节「备份与恢复」。
+
+- `settleQueuedDecision` 仅结算精确 `answerId`、`claimId`、`answeredAt` 且仍 queued 的答案。历史无代次不授权；失败/未知不能 resolve，不能靠同毫秒时间相等认定同一次回答。

@@ -30,10 +30,12 @@ import {
   tookOverResult,
 } from './command-logic.ts';
 import {
-  decisionAnswerOf,
+  claimDecisionAnswer,
   isNotificationOpen,
   isSettingConflict,
   nextSettingVersion,
+  prepareDecisionAnswer,
+  settledDecisionAnswer,
 } from './console-logic.ts';
 import { clearedFailures, isLockedAt, nextFailureState, passwordNeedsUsername } from './credentials-logic.ts';
 import {
@@ -676,30 +678,53 @@ export function createMemoryStore(
       changed('notifications', id);
       return 'ok';
     },
-    async answerNotification({ id, by, optionId, text }, entry) {
+    async answerNotification({ id, by, ...input }, entry) {
       const n = data.notifications.find((x) => x.id === id);
       if (!n) return { kind: 'not_found' };
       if (n.level !== 'decision') return { kind: 'not_decision' };
-      if (!isNotificationOpen(n)) return { kind: 'already_resolved' };
+      const replay = input.requestId && n.answer?.requestId === input.requestId;
+      if (!isNotificationOpen(n) && !replay) return { kind: 'already_resolved' };
       const at = now().toISOString();
-      const answer = decisionAnswerOf(n.options, { optionId, text }, by.id, at);
-      if (answer === 'unknown_option') return { kind: 'unknown_option' };
-      checkAudit(entry);
-      // 只记答案，转不转已处理等照着做完（settleDecision）。再拍一次连上一次的结果一起换掉
-      n.answer = answer;
-      audit(entry);
-      changed('notifications', id);
+      const answer = prepareDecisionAnswer(n.answer, n.options, input, by.id, at);
+      if (typeof answer === 'string') return { kind: answer };
+      if (answer !== n.answer) {
+        checkAudit(entry);
+        n.answer = answer;
+        audit(entry);
+        changed('notifications', id);
+      }
       // 送到哪（target）和列表一样不往外给
       return {
         kind: 'ok',
         notification: { ...n, deliveries: n.deliveries.map(({ target: _target, ...d }) => d) },
       };
     },
-    async settleDecision({ id, execution, resolve, by }) {
+    async claimDecision({ id, answerId }) {
+      const n = data.notifications.find((x) => x.id === id);
+      if (!n || (!isNotificationOpen(n) && n.answer?.attempt?.state !== 'succeeded'))
+        return { kind: 'stale' };
+      const claim = claimDecisionAnswer(n.answer, answerId, now().toISOString());
+      if (claim.kind === 'claimed') {
+        n.answer = claim.answer;
+        changed('notifications', id);
+      }
+      return claim;
+    },
+    async settleDecision({ id, answerId, claimId, execution, resolve, by }) {
+      if (resolve && (!execution.ok || execution.queued || execution.unknown))
+        throw new Error('未核实成功，不能处理通知');
       const n = data.notifications.find((x) => x.id === id);
       if (!n) return 'not_found';
       if (!isNotificationOpen(n) || !n.answer) return 'already_resolved';
-      n.answer = { ...n.answer, execution };
+      if (
+        !answerId ||
+        !claimId ||
+        n.answer.id !== answerId ||
+        n.answer.attempt?.id !== claimId ||
+        n.answer.attempt.state !== 'executing'
+      )
+        return 'stale';
+      n.answer = settledDecisionAnswer(n.answer, execution);
       if (resolve) {
         n.resolvedAt = now().toISOString();
         n.resolvedBy = by.id;

@@ -195,11 +195,24 @@ export const DecisionExecutionSchema = z.object({
   text: z.string().min(1).max(500),
   at: Time,
   queued: z.literal(true).optional(),
+  /** 写操作抛错，无法确认是否已提交；保持未处理，禁止盲重试。 */
+  unknown: z.literal(true).optional(),
 });
 export type DecisionExecution = z.infer<typeof DecisionExecutionSchema>;
 
 /** 创始人拍了什么：点了哪个选项（optionId）或自己写的原文（没有 optionId），连同时刻和谁；系统照着做的结果。 */
 export const DecisionAnswerSchema = z.object({
+  /** 不可变答案代次；历史数据没有，不得据此恢复执行。 */
+  id: z.string().uuid().optional(),
+  requestId: z.string().uuid().optional(),
+  /** 原子接活的持久回执；executing 中断后结果未知，不能自动重放。 */
+  attempt: z
+    .object({
+      id: z.string().uuid(),
+      state: z.enum(['executing', 'queued', 'succeeded', 'failed', 'unknown']),
+      at: Time,
+    })
+    .optional(),
   /** 点的那个选项；自己输入的没有这一项。 */
   optionId: z.string().optional(),
   /** 点选项时是那一项的字；自己输入时是原文。 */
@@ -215,11 +228,18 @@ export type DecisionAnswer = z.infer<typeof DecisionAnswerSchema>;
 /** 回答一条「要你拍」：点一个选项（optionId）或自己输入（text），二选一。 */
 export const AnswerNotificationRequest = z
   .object({
+    /** 同一 HTTP 请求重试复用；新决定使用新编号。 */
+    requestId: z.string().uuid().optional(),
+    /** 绑定作答时看到的答案；null 表示尚未回答。 */
+    expectedAnswerId: z.string().uuid().nullable().optional(),
     optionId: z.string().min(1).max(40).optional(),
     text: z.string().trim().min(1).max(2000).optional(),
   })
   .refine((b) => (b.optionId === undefined) !== (b.text === undefined), {
     message: '点一个选项或自己输入一段话，二选一',
+  })
+  .refine((b) => b.requestId === undefined || b.expectedAnswerId !== undefined, {
+    message: '带 requestId 时必须带 expectedAnswerId，首答用 null，防止迟到请求重复执行',
   });
 
 /** 答案交给指挥官那一步（进度单留言、任务单留言）：成了给评论地址，没成写为什么——不拿没报错冒充记上了。 */

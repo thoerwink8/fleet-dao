@@ -12,6 +12,7 @@ import {
   listOpenAlerts,
   recordAlertFiling,
   resolveAlertWithReason,
+  settleQueuedDecision,
   updateOpenAlert,
 } from '../src/queries/alerts.ts';
 import { upsertAlert } from '../src/queries/engine.ts';
@@ -36,6 +37,82 @@ beforeEach(() => resetTestDb(t));
 
 const alert = (dedupeKey: string, body = '原来的正文') =>
   upsertAlert(t.db, { dedupeKey, level: 'alert', taskId: null, title: dedupeKey, body });
+
+describe('queued 答案代次结算', () => {
+  it('queued执行回执未知保持unknown，不降成可自动重试的failed', async () => {
+    const { id } = await alert('worktree:unknown');
+    const answerId = randomUUID();
+    const claimId = randomUUID();
+    await t.db
+      .update(notifications)
+      .set({
+        answer: {
+          id: answerId,
+          text: '删',
+          at: NOW.toISOString(),
+          by: 'founder',
+          attempt: { id: claimId, state: 'queued', at: NOW.toISOString() },
+          execution: { ok: true, queued: true, text: '排队', at: NOW.toISOString() },
+        },
+      })
+      .where(eq(notifications.id, id));
+    const input = {
+      dedupeKey: 'worktree:unknown',
+      answeredAt: NOW.toISOString(),
+      answerId,
+      claimId,
+      execution: {
+        ok: false,
+        unknown: true as const,
+        text: '执行后回读断连，结果未知',
+        at: NOW.toISOString(),
+      },
+      resolve: false,
+      auditActor: 'engine',
+      at: NOW,
+    };
+    expect(await settleQueuedDecision(t.db, input)).toBe('ok');
+    expect((await alertByKey(t.db, input.dedupeKey))?.answer?.attempt?.state).toBe('unknown');
+    expect((await alertByKey(t.db, input.dedupeKey))?.resolvedAt).toBeNull();
+    expect(await settleQueuedDecision(t.db, input)).toBe('not_open');
+  });
+  it('同毫秒不同答案、旧claim、历史无代次都不能授权结算；有效queued只结算一次，重开废弃旧授权', async () => {
+    const { id } = await alert('worktree:queued');
+    const answerId = randomUUID();
+    const claimId = randomUUID();
+    const answer = {
+      id: answerId,
+      optionId: 'remove',
+      text: '删',
+      at: NOW.toISOString(),
+      by: 'founder',
+      attempt: { id: claimId, state: 'queued' as const, at: NOW.toISOString() },
+      execution: { ok: true, queued: true as const, text: '排队', at: NOW.toISOString() },
+    };
+    await t.db.update(notifications).set({ answer }).where(eq(notifications.id, id));
+    const input = {
+      dedupeKey: 'worktree:queued',
+      answeredAt: NOW.toISOString(),
+      answerId,
+      claimId,
+      execution: { ok: true, text: '保全后已删', at: NOW.toISOString() },
+      resolve: true,
+      auditActor: 'engine',
+      at: NOW,
+    };
+    expect(await settleQueuedDecision(t.db, { ...input, answerId: randomUUID() })).toBe('not_open');
+    expect(await settleQueuedDecision(t.db, { ...input, claimId: randomUUID() })).toBe('not_open');
+    expect((await alertByKey(t.db, input.dedupeKey))?.resolvedAt).toBeNull();
+    expect(await settleQueuedDecision(t.db, input)).toBe('ok');
+    expect(await settleQueuedDecision(t.db, input)).toBe('not_open');
+    await alert(input.dedupeKey);
+    expect((await alertByKey(t.db, input.dedupeKey))?.answer).toBeNull();
+    expect(await settleQueuedDecision(t.db, input)).toBe('not_open');
+    const { id: _id, attempt: _attempt, ...legacy } = answer;
+    await t.db.update(notifications).set({ answer: legacy }).where(eq(notifications.id, id));
+    expect(await settleQueuedDecision(t.db, input)).toBe('not_open');
+  });
+});
 
 describe('resolveAlertWithReason', () => {
   it('撤掉：记处理人、正文开头写「已撤：为什么」，同一事务里记一条操作记录', async () => {

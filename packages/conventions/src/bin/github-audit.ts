@@ -6,9 +6,10 @@
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { ALARM_TITLE, followAlarm } from '../audit-alarm.ts';
+import { auditClient } from '../audit-client.ts';
 import { exitWith, runMain } from '../exit.ts';
 import { reportFindings } from '../findings.ts';
-import { liveGitHub, resolveRepo } from '../github-api.ts';
+import { resolveRepo } from '../github-api.ts';
 import { auditGitHub } from '../github-audit.ts';
 import { annotation } from '../pr-fields.ts';
 
@@ -40,7 +41,13 @@ runMain(async () => {
     exitWith(2);
   }
   const name = resolved.repo;
-  const gh = liveGitHub(name, process.env);
+  let gh: Awaited<ReturnType<typeof auditClient>>;
+  try {
+    gh = await auditClient(name, process.env);
+  } catch (e) {
+    err(e instanceof Error ? e.message : '没查成：GitHub 对账传输装配失败，未切换身份或写告警。');
+    return 2;
+  }
   const r = await auditGitHub(gh, new Date(), gh, { reader: gh, writer: gh });
   const notQueried = [...r.notQueried];
   for (const p of r.pruned) {

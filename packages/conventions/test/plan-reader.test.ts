@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { type GhReadResult, ghReadFetch, planReader, type RunGhRead } from '../src/plan-reader.ts';
+import { type GhReadResult, ghReadFetch, planReader, type RunGhRead, runGh } from '../src/plan-reader.ts';
 import { planCommand } from '../src/plan-view.ts';
 import { order, V1 } from './fake-github.ts';
 
@@ -330,5 +330,36 @@ describe('真实 execFile 封装保持有界并隐藏私人错误', () => {
     expect(result.code).toBe(2);
     expect(result.lines[0]).toContain('进程不可用、超时或输出超限');
     expect(result.lines[0]).not.toContain('private');
+  });
+});
+
+describe('共享 gh 写进程的 stdin', () => {
+  it('正文通过 stdin 发送，不放进命令参数', async () => {
+    const end = vi.fn();
+    child.execFile.mockImplementation((_file, _args, _opts, callback) => {
+      end.mockImplementation(() => callback(null, 'receipt', ''));
+      return { stdin: { on: vi.fn(), end } };
+    });
+    const args = ['api', '--input', '-'];
+    expect(await runGh(args, {}, '{"body":"private-payload"}')).toEqual({ code: 0, stdout: 'receipt' });
+    expect(end).toHaveBeenCalledWith('{"body":"private-payload"}');
+    expect(args.join(' ')).not.toContain('private-payload');
+  });
+
+  it('stdin 写失败明确返回 transport，不能吞错误后当成功', async () => {
+    let fail: () => void = () => {};
+    child.execFile.mockImplementation(() => ({
+      stdin: {
+        on: (_event: string, listener: () => void) => {
+          fail = listener;
+        },
+        end: () => fail(),
+      },
+    }));
+    expect(await runGh(['api', '--input', '-'], {}, '{}')).toEqual({
+      code: null,
+      stdout: '',
+      failure: 'transport',
+    });
   });
 });
