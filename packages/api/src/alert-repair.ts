@@ -586,6 +586,9 @@ export function repairIssueBody(n: Pick<NotificationRecord, 'id' | 'title' | 'bo
 
 // —— 明确关联已有单（#3100）——
 
+/** 一张单的开放 PR 最多读这么多条；满了就当没读全。 */
+const LINK_PR_PAGE = 50;
+
 const sameRepo = (a: { owner: string; name: string }, b: { owner: string; name: string }): boolean =>
   a.owner.toLowerCase() === b.owner.toLowerCase() && a.name.toLowerCase() === b.name.toLowerCase();
 
@@ -637,7 +640,13 @@ async function inspectLinkTarget(
   try {
     facts = await Promise.all([
       deps.store.findTaskByIssue(self.id, target.number),
-      deps.store.listPullRequests({ state: 'open', limit: 200 }),
+      // 在库里按仓和挂的单精确筛，不读全局前 N 条再筛（别的仓 PR 一多，目标 PR 会被截掉，误判成没有 PR 再派一次）
+      deps.store.listPullRequests({
+        state: 'open',
+        repoId: self.id,
+        issueNumber: target.number,
+        limit: LINK_PR_PAGE,
+      }),
     ]);
   } catch (err) {
     throw new ApiError(
@@ -647,7 +656,15 @@ async function inspectLinkTarget(
     );
   }
   const [task, prs] = facts;
+  // 满一页就是没读全：不当成「读到的就是全部」，按读不到处理（不派工）
+  if (prs.length >= LINK_PR_PAGE)
+    throw new ApiError(
+      502,
+      'link_facts_unreadable',
+      `${issueRef(repo, target.number)} 的开放 PR 一页没读完（至少 ${LINK_PR_PAGE} 条），不能确认现场`,
+    );
   const worker = task && !isTaskFinished(task) && task.state !== 'stalled' ? task : undefined;
+  // 精确查询之外再核一遍仓和单：替身或老实现忽略了筛选条件，也不会把别处的 PR 当成这张单的
   const pr = prs.find((p) => p.repoId === self.id && p.issueRefs?.includes(target.number));
   return {
     issue: {
@@ -745,6 +762,14 @@ function runHand(incident: string) {
           );
         } catch (err) {
           const why = clip(errMessage(err), 300);
+          // 读不到 / 没读全（GitHub 网络错误、任务 / PR 事实读不全）：现场不明，不派工，但不把绑定判成失效
+          if (err instanceof ApiError && err.status === 502)
+            return {
+              state: 'failed',
+              issue: bound,
+              link,
+              text: `关联的单 ${ref} 现场没读全：${why}；没开新单、没派工，读得到了再点`,
+            };
           return {
             state: 'failed',
             issue: bound,

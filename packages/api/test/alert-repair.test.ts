@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { checkIssueBody } from '@fleet-dao/conventions';
-import { notifications, registerScheduledJobs, repos, runs, tasks } from '@fleet-dao/db';
+import { notifications, pullRequests, registerScheduledJobs, repos, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import type { AlertRepairLink, AlertRepairRecord } from '@fleet-dao/shared';
 import {
@@ -1500,6 +1500,86 @@ describe('明确关联已有单：交给修复沿用绑定（#3090 形状）', (
     const { view } = await rebuiltView(w);
     expect(view.linked?.invalid).toBeUndefined();
     expect(view.linked?.stage).toBe('linked');
+  });
+});
+
+describe('明确关联已有单：开放 PR 按目标精确读（真库分页）', () => {
+  /** 别的仓 200 条更新的开放 PR + 目标单的那条 PR 排第 201：全局读前 200 条会把它截掉。 */
+  async function crowd(target: { number: number; refs: number[] }[] = [{ number: 3095, refs: [EXISTING] }]) {
+    await t.db.insert(pullRequests).values([
+      ...Array.from({ length: 200 }, (_, i) => ({
+        repoId: IDS.repo,
+        number: 5000 + i,
+        state: 'open' as const,
+        headRef: `fleet/other-${i}`,
+        headSha: `other${i}`,
+        updatedAt: new Date(T0.getTime() - i * 1000),
+        issueRefs: [EXISTING],
+      })),
+      ...target.map((p, i) => ({
+        repoId: SELF.id,
+        number: p.number,
+        state: 'open' as const,
+        headRef: `fleet/3090-${i}`,
+        headSha: `t${i}`,
+        updatedAt: ago(600 + i),
+        issueRefs: p.refs,
+      })),
+    ]);
+  }
+
+  it('关联：第 201 条的目标 PR 照样认出来，记 pr-open；交给修复不派工', async () => {
+    const w = await linkWorld();
+    await crowd();
+    // 证明这是评审说的场景：全局前 200 条里没有目标 PR（别的仓同号单的 PR 也不能当成它）
+    const global = await w.h.deps.store.listPullRequests({ state: 'open', limit: 200 });
+    expect(global).toHaveLength(200);
+    expect(global.some((p) => p.repoId === SELF.id)).toBe(false);
+
+    const v = await hourlyView(w);
+    const linked = await postLink(w, linkBody(v));
+    expect(linked.json.linked).toMatchObject({ stage: 'pr-open', prNumber: 3095 });
+    const clicked = await clickHand(w);
+    expect([clicked.status, clicked.json.error.code]).toEqual([409, 'link_already_handled']);
+    expect(w.f.dispatched).toEqual([]);
+    expect(w.f.opened).toEqual([]);
+  });
+
+  it('交给修复：关联之后才出现的第 201 条目标 PR 也认得，不派工；关联时没有 PR 的阶段会刷新成 pr-open', async () => {
+    const w = await linkWorld();
+    const v = await hourlyView(w);
+    expect((await postLink(w, linkBody(v))).json.linked).toMatchObject({ stage: 'linked' });
+    await crowd();
+    const clicked = await clickHand(w);
+    expect([clicked.status, clicked.json.error.code]).toEqual([409, 'link_already_handled']);
+    expect(w.f.dispatched).toEqual([]);
+    const { view } = await rebuiltView(w);
+    expect(view.last).toBeUndefined();
+    expect(view.linked).toMatchObject({ stage: 'pr-open', prNumber: 3095 });
+  });
+
+  it('目标单的开放 PR 满一页（没读全）：关联 502 拒绝；交给修复标 failed 不派工，绑定不判失效', async () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({ number: 6000 + i, refs: [EXISTING] }));
+    const w = await linkWorld();
+    const v = await hourlyView(w);
+    expect((await postLink(w, linkBody(v))).status).toBe(200);
+    await crowd(many);
+    const clicked = await clickHand(w);
+    expect(clicked.status).toBe(200);
+    expect(clicked.json.repair).toMatchObject({ kind: 'hand-to-repair', state: 'failed' });
+    expect(clicked.json.repair.text).toContain('没读全');
+    expect(w.f.dispatched).toEqual([]);
+    expect(w.f.opened).toEqual([]);
+    expect((await hourlyView(w)).linked?.invalid).toBeUndefined();
+  });
+
+  it('目标单的开放 PR 满一页时直接关联：502 link_facts_unreadable，不落库、不开单、不派工', async () => {
+    const w = await linkWorld();
+    await crowd(Array.from({ length: 50 }, (_, i) => ({ number: 6000 + i, refs: [EXISTING] })));
+    const v = await hourlyView(w);
+    const r = await postLink(w, linkBody(v));
+    expect([r.status, r.json.error.code]).toEqual([502, 'link_facts_unreadable']);
+    await expectUntouched(w);
   });
 });
 
