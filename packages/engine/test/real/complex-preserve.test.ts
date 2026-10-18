@@ -17,7 +17,11 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { confirmDeletionIdle, sweepWorktrees } from '../../src/jobs/worktree-sweep.ts';
+import {
+  confirmDeletionIdle,
+  sweepWorktrees,
+  type WorktreeSweepDeps,
+} from '../../src/jobs/worktree-sweep.ts';
 import { PortError } from '../../src/ports.ts';
 import {
   assertArchiveContainer,
@@ -251,6 +255,93 @@ function restoreArchive(saved: string, dest: string): string {
   return repo;
 }
 
+const deniedCwd = Object.assign(new Error('denied'), { code: 'EACCES' });
+
+function procLook(
+  over: Partial<{
+    list: () => Promise<readonly string[]>;
+    cwd: (pid: number) => Promise<string>;
+    uid: (pid: number) => Promise<string | null>;
+    ppid: (pid: number) => Promise<number | null>;
+  }> = {},
+): ProcLook {
+  return {
+    list: over.list ?? (async () => ['1']),
+    cwd: over.cwd ?? (async () => '/work/tree/src'),
+    uid: over.uid ?? (async () => '1'),
+    ppid: over.ppid ?? (async () => 1),
+  };
+}
+
+function sweepDeps(
+  owners: Map<string, typeof USER>,
+  remove: (dir: string) => Promise<{ gone: boolean }>,
+): WorktreeSweepDeps {
+  return {
+    root: workRoot,
+    probeDir: PROBE_DIR,
+    sessionTmpDir: SESSION_TMP_DIR,
+    machine: '法国',
+    async listDir(dir) {
+      return readdirSync(dir, { withFileTypes: true }).map((entry) => ({
+        name: entry.name,
+        isDir: entry.isDirectory(),
+      }));
+    },
+    treeFor: layout(workRoot).treeFor,
+    async ownerOf(dir) {
+      return owners.get(dir) ?? null;
+    },
+    leftovers: (dir, user, known, scratch) =>
+      treeLeftovers({ exec: localExec(), user, dir, scopePrefix: 'sweep', git: 'git', sh: 'sh' }, known, {
+        scratch,
+      }),
+    remove,
+    async keepShots() {
+      return { outcome: 'none', head: '', branch: '', files: [] };
+    },
+    async issue() {
+      return null;
+    },
+    async prHeads() {
+      return [];
+    },
+    async subtaskTrees() {
+      return [];
+    },
+    async openSessions() {
+      return [];
+    },
+    workflows: {
+      async state() {
+        return { state: 'missing' };
+      },
+    },
+    alerts: {
+      async listOpen() {
+        return { alerts: [], truncated: false };
+      },
+      async byKey() {
+        return null;
+      },
+      async latestByPrefix() {
+        return null;
+      },
+      async resolve() {
+        return 'not_found';
+      },
+      async raise() {},
+      async insertOnce() {
+        return { created: false };
+      },
+      async updateOpen() {
+        return 'ok';
+      },
+    },
+    log() {},
+  };
+}
+
 describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
   it('忽略项只认可丢弃、环境文件、已核对截图和顶层 .git', () => {
     expect(ignoreRuleAllowed('node_modules/', 'node_modules', [])).toBe(true);
@@ -267,121 +358,40 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
   });
 
   it('进程占用：树内 cwd 算在用；同主兄弟读不了 cwd 继续看，子孙读不了或 /proc 列不了算不清', async () => {
-    const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
-    const busy: ProcLook = {
-      async list() {
-        return ['1'];
-      },
-      async cwd() {
-        return '/work/tree/src';
-      },
-      async uid() {
-        return '1';
-      },
-      async ppid() {
-        return 1;
-      },
-    };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, busy)).toBe('busy');
-    const deleted: ProcLook = {
-      ...busy,
-      async cwd() {
-        return '/work/tree (deleted)';
-      },
-    };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, deleted)).toBe('busy');
-    const sibling: ProcLook = {
-      async list() {
-        return ['1'];
-      },
-      async cwd() {
-        throw denied;
-      },
-      async uid() {
-        return '9';
-      },
-      async ppid() {
-        return 1;
-      },
-    };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, sibling)).toBe('idle');
-    const child: ProcLook = {
-      async list() {
-        return ['1'];
-      },
-      async cwd() {
-        throw denied;
-      },
-      async uid() {
-        return '9';
-      },
-      async ppid() {
-        return 10;
-      },
-    };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, child)).toBe('unknown');
-    const uidUnreadable: ProcLook = {
-      async list() {
-        return ['1'];
-      },
-      async cwd() {
-        throw denied;
-      },
-      async uid() {
-        throw Object.assign(new Error('status'), { code: 'EIO' });
-      },
-      async ppid() {
-        return 1;
-      },
-    };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, uidUnreadable)).toBe('unknown');
-    const mixed: ProcLook = {
-      async list() {
-        return ['1', '2'];
-      },
-      async cwd(pid) {
-        if (pid === 1) throw denied;
-        return '/work/tree/file';
-      },
-      async uid() {
-        return '9';
-      },
-      async ppid(pid) {
-        return pid === 1 ? 1 : 10;
-      },
-    };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, mixed)).toBe('busy');
-    const unlistable: ProcLook = {
-      async list() {
-        throw new Error('no proc');
-      },
-      async cwd() {
-        return '/';
-      },
-      async uid() {
-        return '1';
-      },
-      async ppid() {
-        return 1;
-      },
-    };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, unlistable)).toBe('unknown');
-    const other: ProcLook = {
-      async list() {
-        return ['1', '2'];
-      },
-      async cwd(pid) {
-        if (pid === 1) throw denied;
-        return '/somewhere/else';
-      },
-      async uid() {
-        return '5';
-      },
-      async ppid() {
-        return 1;
-      },
-    };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, other)).toBe('idle');
+    const use = (look: ProcLook) => treeProcessUsage('/work/tree', '9', 10, 11, look);
+    const deny = async () => Promise.reject(deniedCwd);
+    expect(await use(procLook())).toBe('busy');
+    expect(await use(procLook({ cwd: async () => '/work/tree (deleted)' }))).toBe('busy');
+    expect(await use(procLook({ cwd: deny, uid: async () => '9' }))).toBe('idle');
+    expect(await use(procLook({ cwd: deny, uid: async () => '9', ppid: async () => 10 }))).toBe('unknown');
+    expect(
+      await use(
+        procLook({
+          cwd: deny,
+          uid: async () => Promise.reject(Object.assign(new Error('status'), { code: 'EIO' })),
+        }),
+      ),
+    ).toBe('unknown');
+    expect(
+      await use(
+        procLook({
+          list: async () => ['1', '2'],
+          cwd: async (pid) => (pid === 1 ? deny() : '/work/tree/file'),
+          uid: async () => '9',
+          ppid: async (pid) => (pid === 1 ? 1 : 10),
+        }),
+      ),
+    ).toBe('busy');
+    expect(await use(procLook({ list: async () => Promise.reject(new Error('no proc')) }))).toBe('unknown');
+    expect(
+      await use(
+        procLook({
+          list: async () => ['1', '2'],
+          cwd: async (pid) => (pid === 1 ? deny() : '/somewhere/else'),
+          uid: async () => '5',
+        }),
+      ),
+    ).toBe('idle');
   });
 
   it('清理锁：活着或确认不了的进程不让第二轮清，退出了的锁可以接手', async () => {
@@ -401,76 +411,48 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
   });
 
   it('删树前确认不了路径、会话或在跑的任务，就不算没人用', async () => {
-    const workflows = {
+    const missing = {
       async state(): Promise<{ state: 'missing' }> {
         return { state: 'missing' };
       },
     };
-    const issue = async () => null;
-    expect(
-      await confirmDeletionIdle({
-        root: '/work',
-        dir: '/etc/passwd',
-        openSessions: async () => [],
-        workflows,
-        issue,
-      }),
-    ).toBe('unknown');
-    expect(
-      await confirmDeletionIdle({
+    const ask = (over: Partial<Parameters<typeof confirmDeletionIdle>[0]> = {}) =>
+      confirmDeletionIdle({
         root: '/work',
         dir: '/work/acme_web/12-keep',
+        openSessions: async () => [],
+        workflows: missing,
+        issue: async () => null,
+        ...over,
+      });
+    expect(await ask({ dir: '/etc/passwd' })).toBe('unknown');
+    expect(
+      await ask({
         openSessions: async () => {
           throw new Error('会话账读不了');
         },
-        workflows,
-        issue,
       }),
     ).toBe('unknown');
+    expect(await ask({ openSessions: async () => [{ path: '/work/acme_web/12-keep' }] })).toBe('busy');
     expect(
-      await confirmDeletionIdle({
-        root: '/work',
-        dir: '/work/acme_web/12-keep',
-        openSessions: async () => [{ path: '/work/acme_web/12-keep' }],
-        workflows,
-        issue,
-      }),
-    ).toBe('busy');
-    expect(
-      await confirmDeletionIdle({
-        root: '/work',
-        dir: '/work/acme_web/12-keep',
-        openSessions: async () => [],
+      await ask({
         workflows: {
           async state() {
             return { state: 'running' as const };
           },
         },
-        issue,
       }),
     ).toBe('busy');
     expect(
-      await confirmDeletionIdle({
-        root: '/work',
-        dir: '/work/acme_web/12-keep',
-        openSessions: async () => [],
+      await ask({
         workflows: {
           async state() {
             throw new Error('temporal');
           },
         },
-        issue,
       }),
     ).toBe('unknown');
-    expect(
-      await confirmDeletionIdle({
-        root: '/work',
-        dir: '/work/acme_web/12-keep',
-        openSessions: async () => [],
-        workflows,
-        issue,
-      }),
-    ).toBe('idle');
+    expect(await ask()).toBe('idle');
   });
 
   it('没有工作根或确认不了没人用时，复杂成果仍留树', async () => {
@@ -516,7 +498,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, remove),
     ).rejects.toMatchObject({ code: 'ARCHIVE_FAILED' });
     expect(readdirSync(secret)).toEqual([]);
-    rmSync(archive);
+    rmSync(archive, { recursive: true });
 
     const realParent = join(root, 'real-parent');
     mkdirSync(realParent);
@@ -1038,104 +1020,31 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
         return { state: 'missing' };
       },
     };
+    const idleAnswer = (dir: string, openSessions: () => Promise<readonly { path: string }[]>) =>
+      confirmDeletionIdle({ root: workRoot, dir, openSessions, workflows, issue: async () => null });
     const run = await sweepWorktrees(
-      {
-        root: workRoot,
-        probeDir: PROBE_DIR,
-        sessionTmpDir: SESSION_TMP_DIR,
-        machine: '法国',
-        async listDir(dir) {
-          return readdirSync(dir, { withFileTypes: true }).map((entry) => ({
-            name: entry.name,
-            isDir: entry.isDirectory(),
-          }));
-        },
-        treeFor: layout(workRoot).treeFor,
-        async ownerOf(dir) {
-          return owners.get(dir) ?? null;
-        },
-        leftovers: (dir, user, known, scratch) =>
-          treeLeftovers({ exec: localExec(), user, dir, scopePrefix: 'sweep', git: 'git', sh: 'sh' }, known, {
-            scratch,
-          }),
-        async remove(dir) {
-          const user = owners.get(dir);
-          if (!user) return { gone: true };
-          const answer = await confirmDeletionIdle({
-            root: workRoot,
-            dir,
-            openSessions: async () => [],
-            workflows,
-            issue: async () => null,
+      sweepDeps(owners, async (dir) => {
+        const user = owners.get(dir);
+        if (!user) return { gone: true };
+        if ((await idleAnswer(dir, async () => [])) !== 'idle') {
+          throw new PortError('WORKTREE_PRESERVED', `${dir} 删除前确认不了没人用，保留原树`, {
+            retryable: false,
           });
-          if (answer !== 'idle') {
-            throw new PortError('WORKTREE_PRESERVED', `${dir} 删除前确认不了没人用，保留原树`, {
-              retryable: false,
-            });
-          }
-          await preserveThenRemove(
-            { exec: localExec(), user, dir, scopePrefix: 'sweep-preserve', git: 'git', sh: 'sh' },
-            archive,
-            {
-              workRoot,
-              confirmIdle: () =>
-                confirmDeletionIdle({
-                  root: workRoot,
-                  dir,
-                  openSessions: async () => [],
-                  workflows,
-                  issue: async () => null,
-                }),
-            },
-            undefined,
-            async () => {
-              removed.push(dir);
-              owners.delete(dir);
-              rmSync(dir, { recursive: true, force: true });
-              return { gone: false };
-            },
-          );
-          return { gone: false };
-        },
-        async keepShots() {
-          return { outcome: 'none', head: '', branch: '', files: [] };
-        },
-        async issue() {
-          return null;
-        },
-        async prHeads() {
-          return [];
-        },
-        async subtaskTrees() {
-          return [];
-        },
-        async openSessions() {
-          return [];
-        },
-        workflows,
-        alerts: {
-          async listOpen() {
-            return { alerts: [], truncated: false };
+        }
+        await preserveThenRemove(
+          { exec: localExec(), user, dir, scopePrefix: 'sweep-preserve', git: 'git', sh: 'sh' },
+          archive,
+          { workRoot, confirmIdle: () => idleAnswer(dir, async () => []) },
+          undefined,
+          async () => {
+            removed.push(dir);
+            owners.delete(dir);
+            rmSync(dir, { recursive: true, force: true });
+            return { gone: false };
           },
-          async byKey() {
-            return null;
-          },
-          async latestByPrefix() {
-            return null;
-          },
-          async resolve() {
-            return 'not_found' as const;
-          },
-          async raise() {},
-          async insertOnce() {
-            return { created: false };
-          },
-          async updateOpen() {
-            return 'ok' as const;
-          },
-        },
-        log() {},
-      },
+        );
+        return { gone: false };
+      }),
       [],
     );
     expect(removed).toEqual([gitDir]);
@@ -1156,79 +1065,14 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     dirtyFile(again);
     owners.set(again.dir, USER);
     const blocked = await sweepWorktrees(
-      {
-        root: workRoot,
-        probeDir: PROBE_DIR,
-        sessionTmpDir: SESSION_TMP_DIR,
-        machine: '法国',
-        async listDir(dir) {
-          return readdirSync(dir, { withFileTypes: true }).map((entry) => ({
-            name: entry.name,
-            isDir: entry.isDirectory(),
-          }));
-        },
-        treeFor: layout(workRoot).treeFor,
-        async ownerOf(dir) {
-          return owners.get(dir) ?? null;
-        },
-        leftovers: (dir, user, known, scratch) =>
-          treeLeftovers({ exec: localExec(), user, dir, scopePrefix: 'sweep', git: 'git', sh: 'sh' }, known, {
-            scratch,
-          }),
-        async remove(dir) {
-          throw new PortError(
-            'WORKTREE_PRESERVED',
-            `${await confirmDeletionIdle({
-              root: workRoot,
-              dir,
-              openSessions: async () => {
-                throw new Error('会话账读不了');
-              },
-              workflows,
-              issue: async () => null,
-            })} 删除前确认不了没人用，保留原树`,
-            { retryable: false },
-          );
-        },
-        async keepShots() {
-          return { outcome: 'none', head: '', branch: '', files: [] };
-        },
-        async issue() {
-          return null;
-        },
-        async prHeads() {
-          return [];
-        },
-        async subtaskTrees() {
-          return [];
-        },
-        async openSessions() {
-          return [];
-        },
-        workflows,
-        alerts: {
-          async listOpen() {
-            return { alerts: [], truncated: false };
-          },
-          async byKey() {
-            return null;
-          },
-          async latestByPrefix() {
-            return null;
-          },
-          async resolve() {
-            return 'not_found' as const;
-          },
-          async raise() {},
-          async insertOnce() {
-            return { created: false };
-          },
-          async updateOpen() {
-            return 'ok' as const;
-          },
-        },
-        log() {},
-      },
+      sweepDeps(owners, async (dir) => {
+        const answer = await idleAnswer(dir, async () => {
+          throw new Error('会话账读不了');
+        });
+        throw new PortError('WORKTREE_PRESERVED', `${answer} 删除前确认不了没人用，保留原树`, {
+          retryable: false,
+        });
+      }),
       [],
     );
     expect(existsSync(again.dir)).toBe(true);
