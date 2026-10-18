@@ -6,9 +6,9 @@
 //     是那一轮下载下来的报告（artifact 名 e2e-<运行号>-<第几次运行>-<分片>）。主线红了只重跑失败的分片：每一片取它最后一次，
 //     再合成一轮，不把两次运行当成两轮，也别漏掉没重跑的那一片。旧的平铺 results*.json 仍当成分片合在一起。
 //     取有报告的近 10 轮，数每条用例偶发（重试才过）的次数，达阈值的开单（同标题已有开着的单就不开；超过 5 条只开一张汇总单；
-//     一次最多新开 3 张，多的下次再开）。同用例在完成边界里绑住的失败 run（completed 的正文，和关闭时刻及之前、
-//     关单后没改过的留言；只认 Actions 运行号），重扫或窗口变了但没有新增失败时不开，并写明旧采样已被哪张原单盖住。
-//     关单之后新写或改过的留言不算处置证明。
+//     一次最多新开 3 张，多的下次再开）。同用例在完成边界里绑住的失败 run（completed 单关单后没改过的正文——经 GraphQL
+//     lastEditedAt 核，和关闭时刻及之前、关单后没改过的留言；只认 Actions 运行号），重扫或窗口变了但没有新增失败时不开，
+//     并写明旧采样已被哪张原单盖住。关单之后新写或改过的留言、正文不算处置证明；时刻缺了、核不了是证据不明。
 //     出现新的失败 run 且仍达阈值就照常开。查失败、页没翻完、运行号或完成边界认不出：记成未知并退出码 1，不说「没有偶发」。
 //     最新一轮整轮坏了开「整轮坏了」单，最新一轮好了就把开着的那张留言关掉。要 GITHUB_TOKEN、GITHUB_REPOSITORY。
 // 读不到、认不出就退出码 1 并明说，不把「没查成」当「没有偶发」。
@@ -28,6 +28,7 @@ import {
   runSummary,
 } from '../e2e-flaky.ts';
 import {
+  bodyEditedReader,
   evidenceUnresolved,
   idleScanLine,
   loadWindowEvidence,
@@ -99,7 +100,16 @@ runMain(async () => {
             open,
             quarantine,
             until,
-            await loadWindowEvidence(window, settledTitlesOf(window), (path) => api.get(path)),
+            await loadWindowEvidence(
+              window,
+              settledTitlesOf(window),
+              (path) => api.get(path),
+              undefined,
+              bodyEditedReader(
+                (query, variables) => api.graphql(query, variables),
+                process.env.GITHUB_REPOSITORY,
+              ),
+            ),
           )
         : planIssues(window, open, quarantine, until);
       const idle = idleScanLine(actions);

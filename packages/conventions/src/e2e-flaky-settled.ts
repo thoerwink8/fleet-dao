@@ -1,7 +1,8 @@
 // 已完成处置里的失败 run 还算不算新故障（决定 0093 的立案去重）。
-// 完成边界只认 completed 单的正文，以及关闭时刻及之前写下、且关单后没改过的留言：那里绑住的 Actions 运行号才算处置过。
-// 关单之后的留言（含关单后改过的）是复发、诊断或验证，里面的运行号不算。对不上关闭时刻的留言也不算。
-// 没有运行号（只有 PR、文档链接）就是证据不明。
+// 完成边界只认 completed 单关单后没改过的正文，以及关闭时刻及之前写下、且关单后没改过的留言：那里绑住的 Actions 运行号才算处置过。
+// 正文没改过要能核验：单在关单后没有任何更新，或 GraphQL 的 lastEditedAt 不晚于关单；核不了、或关单后改过，正文里的运行号是证据不明。
+// 关单之后的留言（含关单后改过的）是复发、诊断或验证，里面的运行号不算。缺写成或改动时刻、对不上关闭时刻的留言是证据不明。
+// 没有运行号（只有 PR、文档链接）就是证据不明。证据不明盖不住新 run：不开也不说没故障，记成未知。
 // 不放进 e2e-flaky.ts：index 从那儿再导出 outcomesOf，那个文件在包的面上。
 // 改面上的文件会让依赖 conventions 的包一起进本机测试，引擎自测 30 分钟跑不完。
 
@@ -55,10 +56,11 @@ export function extractRunKeys(text: string): string[] {
   return keys;
 }
 
-/** 一张已完成处置里、某个用例点明的失败 run。`runs === null` 是证据不明，不能当成修过。 */
+/** 一张已完成处置里、某个用例点明的失败 run。`runs === null` 是证据不明，不能当成修过（`why` 写为什么不明）。 */
 export interface HandledTest {
   number: number;
   runs: readonly string[] | null;
+  why?: string;
 }
 
 /**
@@ -105,16 +107,43 @@ interface ClosedTake {
   body: string;
   /** 关单原因是 completed 才采用完成边界里的 run；别的原因不证明修过。 */
   trust: boolean;
-  /** 关单时刻。没有就不能证明留言是关单前写的，那些留言不进完成边界。 */
+  /** 关单时刻。没有就不能证明正文、留言是完成时的，都是证据不明。 */
   closedAt: number | null;
+  /** 单最后一次更新（正文、留言、标签都会改它）。不晚于关单就说明正文还是完成时的原文。 */
+  updatedAt: number | null;
 }
 
 interface IssueNote {
   body: string;
-  /** 留言写成的时刻。没有就不能放进完成边界。 */
+  /** 留言写成的时刻。没有就对不上关闭时刻，是证据不明。 */
   createdAt: number | null;
-  /** 留言最后改动。晚于关单说明文字可能已不是完成时的原文。没有该字段则只看写成时刻。 */
+  /** 留言最后改动。晚于关单说明文字已不是完成时的原文；没有就核不了，是证据不明。 */
   updatedAt: number | null;
+}
+
+/** 读单正文最后改动的时刻（GraphQL Issue.lastEditedAt，没改过是 null）。读不到就抛。 */
+export type BodyEditedAt = (number: number) => Promise<unknown>;
+
+const BODY_EDITED_QUERY =
+  'query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){issue(number:$number){lastEditedAt}}}';
+
+/** 经 GraphQL 读正文最后改动时刻。仓名认不出、回的长相不对都抛（由 loadWindowEvidence 记成查询失败）。 */
+export function bodyEditedReader(
+  graphql: (query: string, variables: Record<string, unknown>) => Promise<unknown>,
+  repo: string | undefined,
+): BodyEditedAt {
+  return async (number) => {
+    const [owner, name, extra] = (repo ?? '').split('/');
+    if (!owner || !name || extra !== undefined)
+      throw new Error('GITHUB_REPOSITORY 认不出，读不了正文改动时刻');
+    const data = (await graphql(BODY_EDITED_QUERY, { owner, name, number })) as {
+      repository?: { issue?: { lastEditedAt?: unknown } | null } | null;
+    } | null;
+    const issue = data?.repository?.issue;
+    if (!issue || typeof issue !== 'object' || !('lastEditedAt' in issue))
+      throw new Error(`#${number} 的正文改动时刻没读到`);
+    return issue.lastEditedAt;
+  };
 }
 
 function parseClosedRow(
@@ -138,6 +167,9 @@ function parseClosedRow(
   const closedAt = closedInstant(record.closed_at);
   if (closedAt === 'bad')
     return { kind: 'bad', reason: `证据不明：#${String(record.number)} 的关闭时间认不出` };
+  const updatedAt = closedInstant(record.updated_at);
+  if (updatedAt === 'bad')
+    return { kind: 'bad', reason: `证据不明：#${String(record.number)} 的更新时间认不出` };
   return {
     kind: 'take',
     issue: {
@@ -146,6 +178,7 @@ function parseClosedRow(
       body: typeof record.body === 'string' ? record.body : '',
       trust: reason === 'completed',
       closedAt,
+      updatedAt,
     },
   };
 }
@@ -207,12 +240,14 @@ function addHandled(byTest: Record<string, HandledTest[]>, title: string, row: H
 /**
  * 读同用例已完成处置里绑住的失败 run。范围从窗口最旧一轮的创建时间起（更早的单不可能写进这些 run）。
  * 查询抛错、页没翻完、单或留言认不出：返回 unknown，不返回空表（空表会变成「没有旧单、可以新开」）。
+ * `bodyEditedAt` 核单在关单后更新过时正文改没改；不给就核不了，那张单的正文是证据不明。
  */
 export async function loadWindowEvidence(
   runs: readonly { url: string }[],
   titles: ReadonlySet<string>,
   get: (path: string) => Promise<unknown>,
   limits?: { pageCap?: number; commentCap?: number; pageSize?: number },
+  bodyEditedAt?: BodyEditedAt,
 ): Promise<SettledEvidence> {
   const pageCap = limits?.pageCap ?? SETTLED_PAGE_CAP;
   const commentCap = limits?.commentCap ?? SETTLED_COMMENT_CAP;
@@ -235,7 +270,8 @@ export async function loadWindowEvidence(
         if (parsed.kind === 'bad') return { status: 'unknown', reason: parsed.reason };
         if (parsed.kind === 'take') matched.push(parsed.issue);
       }
-      if (got.length < pageSize) return await settleMatched(matched, titles, get, commentCap, pageSize);
+      if (got.length < pageSize)
+        return await settleMatched(matched, titles, get, commentCap, pageSize, bodyEditedAt);
     }
     return {
       status: 'unknown',
@@ -247,15 +283,70 @@ export async function loadWindowEvidence(
   }
 }
 
-/** 关闭时刻及之前写下、且关单后没改过的留言，才算完成时绑住的。时间认不出则整次查询未知。 */
-function noteBoundAtClose(note: IssueNote, closedAt: number | null): boolean {
-  if (closedAt === null || note.createdAt === null || note.createdAt > closedAt) return false;
-  return note.updatedAt === null || note.updatedAt <= closedAt;
+/**
+ * 留言和完成边界的关系：关闭时刻及之前写下、且关单后没改过的是绑住的（bound）；关单后写的或改过的是事后的（after），不算；
+ * 缺写成或改动时刻、或单没有关闭时刻，对不上边界（unclear），是证据不明。
+ */
+function placeNote(note: IssueNote, closedAt: number | null): 'bound' | 'after' | 'unclear' {
+  if (closedAt === null || note.createdAt === null) return 'unclear';
+  if (note.createdAt > closedAt) return 'after';
+  if (note.updatedAt === null) return 'unclear';
+  return note.updatedAt <= closedAt ? 'bound' : 'after';
 }
 
-function completionText(issue: ClosedTake, notes: readonly IssueNote[]): string {
-  const bound = notes.filter((note) => noteBoundAtClose(note, issue.closedAt));
-  return [issue.body, ...bound.map((note) => note.body)].join('\n');
+/**
+ * 正文还是不是完成时的原文：单在关单后没再更新过就是；更新过（留言、标签也会更新它）就核正文最后改动时刻，
+ * 不晚于关单才是。没有关闭时刻、核不了、或关单后改过：unclear。改动时刻认不出：整次查询未知。
+ */
+async function placeBody(
+  issue: ClosedTake,
+  bodyEditedAt: BodyEditedAt | undefined,
+): Promise<'bound' | 'unclear' | { bad: string }> {
+  const closedAt = issue.closedAt;
+  if (closedAt === null) return 'unclear';
+  if (issue.updatedAt !== null && issue.updatedAt <= closedAt) return 'bound';
+  if (!bodyEditedAt) return 'unclear';
+  const edited = closedInstant(await bodyEditedAt(issue.number));
+  if (edited === 'bad') return { bad: `证据不明：#${issue.number} 的正文改动时刻认不出` };
+  return edited === null || edited <= closedAt ? 'bound' : 'unclear';
+}
+
+/** 完成边界里的文字和对不上边界、里面却有运行号的文字分开：前者能证明处置过，后者只能记成证据不明。 */
+function boundaryEvidence(
+  issue: ClosedTake,
+  body: 'bound' | 'unclear',
+  notes: readonly IssueNote[],
+  titles: ReadonlySet<string>,
+): Record<string, HandledTest[]> {
+  const bound: string[] = body === 'bound' ? [issue.body] : [];
+  const unclear: { text: string; why: string }[] = [];
+  if (body === 'unclear')
+    unclear.push({
+      text: issue.body,
+      why: issue.closedAt === null ? '没有关闭时刻' : '关单后正文改过或核不了，读不到完成时的原文',
+    });
+  for (const note of notes) {
+    const place = placeNote(note, issue.closedAt);
+    if (place === 'bound') bound.push(note.body);
+    else if (place === 'unclear') unclear.push({ text: note.body, why: '有留言对不上关闭时刻' });
+  }
+  const out: Record<string, HandledTest[]> = {};
+  for (const [title, runs] of Object.entries(evidenceFor(issue.title, bound.join('\n'), titles))) {
+    out[title] = [{ number: issue.number, runs }];
+  }
+  for (const { text, why } of unclear) {
+    for (const [title, runs] of Object.entries(evidenceFor(issue.title, text, titles))) {
+      // 没有运行号的文字盖不住任何 run，不必记；有运行号却对不上边界：证据不明。
+      if (runs === null) continue;
+      const rows = out[title] ?? [];
+      const blank = rows.find((row) => row.runs === null && row.why === undefined);
+      if (blank) blank.why = why;
+      else if (!rows.some((row) => row.runs === null && row.why === why))
+        rows.push({ number: issue.number, runs: null, why });
+      out[title] = rows;
+    }
+  }
+  return out;
 }
 
 async function settleMatched(
@@ -264,6 +355,7 @@ async function settleMatched(
   get: (path: string) => Promise<unknown>,
   commentCap: number,
   pageSize: number,
+  bodyEditedAt: BodyEditedAt | undefined,
 ): Promise<SettledEvidence> {
   const byTest: Record<string, HandledTest[]> = {};
   for (const issue of matched) {
@@ -284,15 +376,17 @@ async function settleMatched(
       for (const title of mentioned) addHandled(byTest, title, { number: issue.number, runs: null });
       continue;
     }
-    const evidence = evidenceFor(issue.title, completionText(issue, comments.notes), titles);
+    const body = await placeBody(issue, bodyEditedAt);
+    if (typeof body === 'object') return { status: 'unknown', reason: body.bad };
+    const evidence = boundaryEvidence(issue, body, comments.notes, titles);
     // 汇总单没点出任何用例：不知道它盖住了谁，不能当成「没有这张单」去新开。
     if (issue.title === FLAKY_SUMMARY_TITLE && Object.keys(evidence).length === 0)
       return {
         status: 'unknown',
         reason: `证据不明：#${issue.number} 已完成，但没有点明是哪些用例的失败 run，不能当成修过`,
       };
-    for (const [title, runs] of Object.entries(evidence)) {
-      addHandled(byTest, title, { number: issue.number, runs });
+    for (const [title, rows] of Object.entries(evidence)) {
+      for (const row of rows) addHandled(byTest, title, row);
     }
   }
   return { status: 'ready', byTest };
@@ -354,12 +448,13 @@ function judgeFlaky(
   if (rows.length === 0) return { kind: 'file' };
   const keys = urls.map(runKey);
   const known = new Set<string>();
-  const unclear: number[] = [];
+  const unclear: string[] = [];
   for (const row of rows) {
-    // 没有运行号，或混进了 PR、文档链接：这张单证明不了修过哪些 run。
+    // 没有运行号、混进了 PR 文档链接，或有运行号却对不上完成边界：这张单证明不了修过哪些 run。
     const runs = row.runs;
     if (runs === null || runs.length === 0 || runs.some((run) => !isActionRunKey(run))) {
-      unclear.push(row.number);
+      const note = `#${row.number}${row.why ? `（${row.why}）` : ''}`;
+      if (!unclear.includes(note)) unclear.push(note);
       continue;
     }
     for (const run of runs) known.add(run);
@@ -373,7 +468,7 @@ function judgeFlaky(
   if (unclear.length > 0) {
     return {
       kind: 'unknown',
-      reason: `证据不明：#${unclear.join('、#')} 已关闭，但没有点明失败 run，不能当成修过`,
+      reason: `证据不明：${unclear.join('、')} 已关闭，但读不出完成时绑住的失败 run，不能当成修过`,
     };
   }
   return { kind: 'file' };

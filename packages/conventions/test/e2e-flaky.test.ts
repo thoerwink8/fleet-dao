@@ -21,6 +21,7 @@ import {
   runSummary,
 } from '../src/e2e-flaky.ts';
 import {
+  bodyEditedReader,
   evidenceUnresolved,
   extractRunKeys,
   idleScanLine,
@@ -685,6 +686,7 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
                 title,
                 state_reason: 'completed',
                 closed_at: '2026-10-18T18:57:00Z',
+                updated_at: '2026-10-18T18:57:00Z',
                 body: '最近偶发的几轮：',
               },
             ];
@@ -693,7 +695,13 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
         }
         if (path.startsWith('/issues/3064/comments')) {
           // 关单前写下的失败 run 算完成边界；关单之后才出现的链接不算。
-          return [{ body: `- ${gh(20)}/attempts/2\n- ${gh(10)}`, created_at: '2026-10-18T18:40:00Z' }];
+          return [
+            {
+              body: `- ${gh(20)}/attempts/2\n- ${gh(10)}`,
+              created_at: '2026-10-18T18:40:00Z',
+              updated_at: '2026-10-18T18:40:00Z',
+            },
+          ];
         }
         throw new Error(`不该请求 ${path}`);
       },
@@ -831,6 +839,7 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
     }));
 
   test('关单后评论报告新 run 失败：不算处置过，仍达阈值就立案；旧窗口仍被原单盖住', async () => {
+    const asked: number[] = [];
     const evidence = await loadWindowEvidence(
       window,
       titles,
@@ -843,6 +852,8 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
               title,
               state_reason: 'completed',
               closed_at: '2026-10-18T18:57:00Z',
+              // 关单后的留言把单的更新时刻推到了关单之后：正文改没改要另核。
+              updated_at: '2026-10-18T19:05:00Z',
               body: `最近偶发的几轮：\n- ${gh(20)}\n- ${gh(10)}`,
             },
           ];
@@ -851,6 +862,7 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
           return [
             {
               created_at: '2026-10-18T19:05:00Z',
+              updated_at: '2026-10-18T19:05:00Z',
               body: `修后 ${gh(30)} 又失败，尚未处理，请重新立案`,
             },
           ];
@@ -858,7 +870,12 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
         throw new Error(path);
       },
       { pageSize: 100 },
+      async (number) => {
+        asked.push(number);
+        return null;
+      },
     );
+    expect(asked).toEqual([3064]);
     expect(evidence).toEqual({
       status: 'ready',
       byTest: { [title]: [{ number: 3064, runs: ['run:20', 'run:10'] }] },
@@ -872,7 +889,57 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
     expect(same[0]?.label).toContain('旧采样已被覆盖');
   });
 
-  test('留言对不上关闭时刻：里面的新 run 不算处置过，不把旧采样盖掉', async () => {
+  test('【故意造出的失败】留言缺改动时刻或写成时刻：里面的新 run 是证据不明，不盖住也不当没故障', async () => {
+    for (const note of [
+      { created_at: '2026-10-18T18:40:00Z', updated_at: null },
+      { created_at: '2026-10-18T18:40:00Z' },
+      { updated_at: '2026-10-18T18:40:00Z' },
+    ]) {
+      const evidence = await loadWindowEvidence(
+        window,
+        titles,
+        async (path) => {
+          if (path === '/actions/runs/10') return { created_at: '2026-10-18T08:26:00Z' };
+          if (path.startsWith('/issues?')) {
+            return [
+              {
+                number: 3064,
+                title,
+                state_reason: 'completed',
+                closed_at: '2026-10-18T18:57:00Z',
+                updated_at: '2026-10-18T18:57:00Z',
+                body: `最近偶发的几轮：\n- ${gh(20)}\n- ${gh(10)}`,
+              },
+            ];
+          }
+          if (path.startsWith('/issues/3064/comments')) {
+            return [{ ...note, body: `修后 ${gh(30)} 又失败，尚未处理，请重新立案` }];
+          }
+          throw new Error(path);
+        },
+        { pageSize: 100 },
+      );
+      expect(evidence.status, JSON.stringify(note)).toBe('ready');
+      if (evidence.status !== 'ready') continue;
+      expect(evidence.byTest[title]).toEqual([
+        { number: 3064, runs: ['run:20', 'run:10'] },
+        { number: 3064, runs: null, why: '有留言对不上关闭时刻' },
+      ]);
+      const again = planIssues(flakyRuns([30, 20]), [], [], '2026-10-22', evidence);
+      expect(again.map((action) => action.kind)).toEqual(['unknown']);
+      expect(again[0]?.label).toContain('证据未知');
+      expect(again[0]?.label).toContain('#3064');
+      expect(again[0]?.label).not.toContain('旧采样已被覆盖');
+      expect(evidenceUnresolved(again)).toBe(true);
+      expect(idleScanLine(again)).toBeNull();
+      // 旧样本仍由关单时绑住的正文盖住。
+      expect(
+        planIssues(flakyRuns([20, 10]), [], [], '2026-10-22', evidence).map((action) => action.kind),
+      ).toEqual(['covered']);
+    }
+  });
+
+  test('【故意造出的失败】单没有关闭时刻：正文和留言都对不上完成边界，未知，不当成修过', async () => {
     const evidence = await loadWindowEvidence(
       window,
       titles,
@@ -884,6 +951,7 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
               number: 3064,
               title,
               state_reason: 'completed',
+              updated_at: '2026-10-18T18:57:00Z',
               body: `最近偶发的几轮：\n- ${gh(20)}\n- ${gh(10)}`,
             },
           ];
@@ -894,17 +962,104 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
         throw new Error(path);
       },
       { pageSize: 100 },
+      async () => {
+        throw new Error('没有关闭时刻就不必核正文');
+      },
     );
-    expect(evidence).toEqual({
-      status: 'ready',
-      byTest: { [title]: [{ number: 3064, runs: ['run:20', 'run:10'] }] },
+    expect(evidence.status).toBe('ready');
+    for (const ids of [
+      [30, 20],
+      [20, 10],
+    ]) {
+      const actions = planIssues(flakyRuns(ids), [], [], '2026-10-22', evidence);
+      expect(actions.map((action) => action.kind)).toEqual(['unknown']);
+      expect(actions[0]?.label).toContain('没有关闭时刻');
+    }
+  });
+
+  test('【故意造出的失败】关单后在正文追加未处理的新 run：不算处置过；核不了正文也是未知', async () => {
+    const issue = {
+      number: 3064,
+      title,
+      state_reason: 'completed',
+      closed_at: '2026-10-18T09:00:00Z',
+      updated_at: '2026-10-18T10:00:00Z',
+      body: `最近偶发的几轮：\n- ${gh(20)}\n- ${gh(10)}\n\n修后 ${gh(30)} 又失败，未处理`,
+    };
+    const get = async (path: string): Promise<unknown> => {
+      if (path === '/actions/runs/10') return { created_at: '2026-10-18T08:26:00Z' };
+      if (path.startsWith('/issues?')) return [issue];
+      if (path.startsWith('/issues/3064/comments')) return [];
+      throw new Error(path);
+    };
+    const edited = await loadWindowEvidence(
+      window,
+      titles,
+      get,
+      { pageSize: 100 },
+      async () => '2026-10-18T10:00:00Z',
+    );
+    const unchecked = await loadWindowEvidence(window, titles, get, { pageSize: 100 });
+    for (const evidence of [edited, unchecked]) {
+      expect(evidence).toEqual({
+        status: 'ready',
+        byTest: {
+          [title]: [{ number: 3064, runs: null, why: '关单后正文改过或核不了，读不到完成时的原文' }],
+        },
+      });
+      for (const ids of [
+        [30, 20],
+        [20, 10],
+      ]) {
+        const actions = planIssues(flakyRuns(ids), [], [], '2026-10-22', evidence);
+        expect(actions.map((action) => action.kind)).toEqual(['unknown']);
+        expect(actions[0]?.label).toContain('正文改过');
+        expect(actions[0]?.label).not.toContain('旧采样已被覆盖');
+        expect(evidenceUnresolved(actions)).toBe(true);
+      }
+    }
+    // 关单前改的正文仍是完成时的原文：旧样本照样盖住，新 run 照样立案。
+    const before = await loadWindowEvidence(
+      window,
+      titles,
+      async (path) =>
+        path.startsWith('/issues?')
+          ? [{ ...issue, body: `最近偶发的几轮：\n- ${gh(20)}\n- ${gh(10)}` }]
+          : get(path),
+      { pageSize: 100 },
+      async () => '2026-10-18T08:59:00Z',
+    );
+    expect(planIssues(flakyRuns([20, 10]), [], [], '2026-10-22', before).map((a) => a.kind)).toEqual([
+      'covered',
+    ]);
+    expect(planIssues(flakyRuns([30, 20]), [], [], '2026-10-22', before).map((a) => a.kind)).toEqual([
+      'create',
+    ]);
+    // 读正文改动时刻失败或认不出：整次查询未知。
+    const failed = await loadWindowEvidence(window, titles, get, { pageSize: 100 }, async () => {
+      throw new Error('GitHub GraphQL 回了 1 条错误');
     });
-    expect(
-      planIssues(flakyRuns([30, 20]), [], [], '2026-10-22', evidence).map((action) => action.kind),
-    ).toEqual(['create']);
-    expect(
-      planIssues(flakyRuns([20, 10]), [], [], '2026-10-22', evidence).map((action) => action.kind),
-    ).toEqual(['covered']);
+    expect(failed).toMatchObject({ status: 'unknown' });
+    if (failed.status === 'unknown') expect(failed.reason).toContain('查询失败');
+    const garbled = await loadWindowEvidence(window, titles, get, { pageSize: 100 }, async () => '昨天');
+    expect(garbled).toMatchObject({ status: 'unknown' });
+    if (garbled.status === 'unknown') expect(garbled.reason).toContain('正文改动时刻认不出');
+  });
+
+  test('bodyEditedReader：按仓名查 lastEditedAt；仓名认不出、没读到单都抛', async () => {
+    const calls: unknown[] = [];
+    const read = bodyEditedReader(async (query, variables) => {
+      calls.push(variables);
+      expect(query).toContain('lastEditedAt');
+      return { repository: { issue: { lastEditedAt: '2026-10-18T10:00:00Z' } } };
+    }, 'o/r');
+    expect(await read(3064)).toBe('2026-10-18T10:00:00Z');
+    expect(calls).toEqual([{ owner: 'o', name: 'r', number: 3064 }]);
+    const never = bodyEditedReader(async () => ({ repository: { issue: { lastEditedAt: null } } }), 'o/r');
+    expect(await never(1)).toBeNull();
+    const missing = bodyEditedReader(async () => ({ repository: { issue: null } }), 'o/r');
+    await expect(missing(1)).rejects.toThrow('没读到');
+    await expect(bodyEditedReader(async () => ({}), undefined)(1)).rejects.toThrow('GITHUB_REPOSITORY');
   });
 
   test('关单后改过的留言：新写进的失败 run 不算处置过', async () => {
@@ -920,6 +1075,7 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
               title,
               state_reason: 'completed',
               closed_at: '2026-10-18T18:57:00Z',
+              updated_at: '2026-10-18T19:05:00Z',
               body: `最近偶发的几轮：\n- ${gh(20)}\n- ${gh(10)}`,
             },
           ];
@@ -936,6 +1092,7 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
         throw new Error(path);
       },
       { pageSize: 100 },
+      async () => null,
     );
     expect(evidence).toEqual({
       status: 'ready',
@@ -1010,6 +1167,7 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
               title: FLAKY_SUMMARY_TITLE,
               state_reason: 'completed',
               closed_at: '2026-10-18T18:57:00Z',
+              updated_at: '2026-10-18T19:05:00Z',
               body: six.map((name) => line(name, 10)).join('\n'),
             },
           ];
@@ -1018,10 +1176,12 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
           return [
             {
               created_at: '2026-10-18T18:40:00Z',
+              updated_at: '2026-10-18T18:40:00Z',
               body: six.map((name) => line(name, 20, '最近一次 ')).join('\n'),
             },
             {
               created_at: '2026-10-18T19:05:00Z',
+              updated_at: '2026-10-18T19:05:00Z',
               body: six
                 .map((name) => `\`07c-nodes.e2e.ts › ${name}\` 修后又失败 ${gh(30)}，尚未处理，请重新立案`)
                 .join('\n'),
@@ -1031,6 +1191,7 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
         throw new Error(path);
       },
       { pageSize: 100 },
+      async () => '2026-10-18T18:30:00Z',
     );
     expect(evidence.status).toBe('ready');
     if (evidence.status !== 'ready') return;
@@ -1046,6 +1207,69 @@ describe('读取已完成处置：翻完才算数，查失败或页不完整是�
     const again = planIssues([wide(30, six), wide(20, six)], [], [], '2026-10-22', evidence);
     expect(again.map((action) => action.kind)).toEqual(['create']);
     expect(again[0]?.kind === 'create' && again[0].body).toContain(gh(30));
+  });
+
+  test('【故意造出的失败】汇总单关单后在正文追加用例和新 run：不算盖住，未知；关单前的留言仍盖旧样本', async () => {
+    const many = Array.from({ length: 20 }, (_, index) => `例${String(index).padStart(2, '0')}`);
+    const six = many.slice(0, 6);
+    const wide = (id: number) => ({
+      url: gh(id),
+      outcomes: outcomes(
+        Object.fromEntries(many.map((name) => [name, [six.includes(name) ? 'flaky' : 'expected']])),
+      ),
+    });
+    const line = (name: string, id: number) => `- \`07c-nodes.e2e.ts › ${name}\`：2/2，${gh(id)}`;
+    const evidence = await loadWindowEvidence(
+      window,
+      new Set([...six.map((name) => `e2e 偶发：07c-nodes.e2e.ts › ${name}`), FLAKY_SUMMARY_TITLE]),
+      async (path) => {
+        if (path === '/actions/runs/10') return { created_at: '2026-10-18T08:26:00Z' };
+        if (path.startsWith('/issues?')) {
+          return [
+            {
+              number: 9,
+              title: FLAKY_SUMMARY_TITLE,
+              state_reason: 'completed',
+              closed_at: '2026-10-18T09:00:00Z',
+              updated_at: '2026-10-18T10:00:00Z',
+              body: [
+                ...six.map((name) => line(name, 10)),
+                '修后又失败，未处理：',
+                ...six.map((name) => line(name, 30)),
+              ].join('\n'),
+            },
+          ];
+        }
+        if (path.startsWith('/issues/9/comments')) {
+          return [
+            {
+              created_at: '2026-10-18T08:50:00Z',
+              updated_at: '2026-10-18T08:50:00Z',
+              body: six.map((name) => line(name, 20)).join('\n'),
+            },
+          ];
+        }
+        throw new Error(path);
+      },
+      { pageSize: 100 },
+      async () => '2026-10-18T10:00:00Z',
+    );
+    expect(evidence.status).toBe('ready');
+    if (evidence.status !== 'ready') return;
+    for (const name of six) {
+      expect(evidence.byTest[`e2e 偶发：07c-nodes.e2e.ts › ${name}`]).toEqual([
+        { number: 9, runs: ['run:20'] },
+        { number: 9, runs: null, why: '关单后正文改过或核不了，读不到完成时的原文' },
+      ]);
+    }
+    const again = planIssues([wide(30), wide(20)], [], [], '2026-10-22', evidence);
+    expect(again.map((action) => action.kind)).toEqual(['unknown']);
+    expect(again[0]?.label).toContain('正文改过');
+    expect(again[0]?.label).not.toContain('旧采样已被覆盖');
+    expect(evidenceUnresolved(again)).toBe(true);
+    const same = planIssues([wide(20), wide(10)], [], [], '2026-10-22', evidence);
+    expect(same.map((action) => action.kind)).toEqual(['covered']);
+    expect(same[0]?.label).toContain('原单 #9');
   });
 
   test('【故意造出的失败】汇总单只有 PR 链接、没有用例和运行号：证据未知，不当成修过', async () => {
