@@ -71,7 +71,7 @@ export function normalizeAgy(input, platform) {
  */
 export const agyReply = (v) => JSON.stringify(v.code === 0 ? {} : { decision: 'deny', reason: v.message });
 
-if (isMainModule(import.meta.url)) {
+if (isMainModule(import.meta)) {
   runVendor(normalizeAgy, 'Antigravity', (v) => {
     process.stdout.write(`${agyReply(v)}\n`);
     process.exit(0);

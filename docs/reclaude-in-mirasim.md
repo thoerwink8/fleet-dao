@@ -6,6 +6,10 @@ Windows 和 macOS 的接入由本仓 `packages/mirasim-reclaude` 维护。旧 `r
 
 新启动器在空闲后的新回合发出前读取当前会话路由。明确 `local` 使用 reclaude 自有额度；`cloud` 保留 Mirasim 的网关注入，使用平台中继。切换发生在当前回合结束、权限、控制请求与后台任务处理完以后，只重建该会话的执行进程，通过 `--resume` 保留原生会话。运行中以及尚有未决任务时收到的用户引导，完整、按序送给当前执行体，不等待回合结束、不重选路、不重启；执行体异常退出明确报错，不自动重放引导。SDK 恢复仍先完成初始化和控制状态重放，再发用户消息；透传成功只证明 CLI 收到，模型何时处理由 CLI 的消息边界决定。
 
+送达回执：Mirasim 给可引导的会话带 `--replay-user-messages`，Claude Code 真正读进一条用户消息时回显同内容、`isReplay=true` 的 user 帧。Mirasim 显示的「已引导」只表示写进了管道，不等于送到，所以启动器给每条转出去的用户消息记账、见回显销账：没销账的不算空闲，不重选路、不重启执行体（免得 CLI 队列里的消息随旧进程丢掉），后续消息照常交给当前执行体；空闲时（主回合已结束，哪怕后台任务还在跑）转出去 60 秒既没回显也没任何输出，判卡住，给 Mirasim 回一个报错 result，让它当场显示「没送到、请重发」，不无声挂着；10 分钟仍没回显的不再挡路由，只记日志。没带这个参数的会话不记账，行为照旧。
+
+回显对上是哪一条，不按子串，一次回显最多销一条：转出的 user 帧和回显都带 `uuid` 就只按 `uuid` 相等对（`uuid` 不同即使正文一样也不是同一条）；否则按正文精确相等，两边都只有 text（字符串或全是 text 块），各自只去首尾空白后逐字相等，同正文多条时销最早一条，回显多了前后缀、只是包含都不算。带图片等非 text 块或正文为空、又没有 `uuid` 的消息无法判定是哪一条，仍保留未确认责任（日志 `event=user-identity-unknown retained=true`），保护当前执行体直到原有 10 分钟过期边界；空闲时转出且始终没有任何输出，仍按原有 60 秒规则明确报错。不用空正文或不匹配回显销账，也不自动重放；这类消息是否送到，启动器判断不了，不能据此判它已被消费并提前换进程。启动器不假定 CLI 一定回显 `uuid`，转出的帧没带就只走正文规则。
+
 两种来源要分别看证据：
 
 - 自有：启动器记录 `route=local`，Claude 实际经 reclaude 发请求；Mirasim 账本可能没有这笔用量，不能拿账本空白当成功。
@@ -134,6 +138,7 @@ Fleet 接收 Mirasim 的平台成功结果前核账本：至少有计费模型�
 
 - 不带会话参数的调用（如 Mirasim 的用量探测 `get_usage`）没有用户可选的路由，按 Mirasim 的注入原样交出（`route=gateway`）。
 - Mirasim 回收空闲进程发停止信号：优雅停掉执行体、退出 0，记 `event=stopped`。
+- 每条用户消息转给执行体记 `event=user-forward path=turn|active idle=… len=… unacked=…`（`turn`＝空闲时开新回合，`active`＝运行中或有未决任务时直接透传），回显到了记 `event=user-ack ms=…`（对不上任何一条记 `event=user-ack-unmatched`），判卡住记 `event=user-stalled`，10 分钟没回执记 `event=user-unacked-expired`，执行体退出、被停、换掉时还有没销账的记 `event=user-unacked reason=exit|stopped|switch n=…`。只记长度和毫秒数，不记内容。查「已引导却没收到」：Mirasim 那一刻发了消息而日志里没有 `user-forward`，是 Mirasim 没发出来；有 `user-forward` 没 `user-ack`，是 CLI 没读进。测试用 `RECLAUDE_MIRASIM_DELIVERY_STALL_MS` 缩短卡住判定。
 - 切路由只在实际结果变了（保留网关↔剥掉）才重建执行进程；default(保留)↔cloud、default(无网关)↔local 不重启。
 - 索引说 `local`、Mirasim 却注入了带令牌的回环网关（这个进程第一次选路时）：隔 300ms 重读索引最多 3 次，仍矛盾按索引执行并记 `event=route-conflict`。Mirasim「这一回合由空间/远程作者付」的判定只在它内存里，落盘的 `turnPayers` 是调用发生后才记的账，启动器回合开始前读不到，所以这种回合仍按索引走。
 - 读索引和 `record.json`：Windows 上用放开删除共享的句柄、读完立刻关；这只是必要条件，旧 rename 语义的 Windows 上启动器读文件那一瞬间 Mirasim 的覆盖仍会失败（Mirasim 失败即丢弃这次写入），窗口很短；撞上共享冲突或读到半截 JSON 隔 50ms 重读最多 3 次。先直接读本会话的 `record.json`，对不上才扫全部，无关会话的坏记录不挡新会话。多个索引时按 Mirasim 的命名（服务端工作区根目录路径的 base64url）和索引 `keys` 里的登记找会话所属索引。

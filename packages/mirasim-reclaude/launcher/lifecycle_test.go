@@ -120,6 +120,10 @@ func fakeClaude() {
 		fakeSteerClaude(sid, mode)
 		return
 	}
+	if os.Getenv("MIRASIM_TEST_ROLE") == "replay" {
+		fakeReplayClaude(sid)
+		return
+	}
 	if p := os.Getenv("MIRASIM_TEST_GRANDCHILD_PID"); p != "" {
 		self, _ := os.Executable()
 		c := exec.Command(self)

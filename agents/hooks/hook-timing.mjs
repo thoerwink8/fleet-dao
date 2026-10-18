@@ -7,9 +7,9 @@
 // 看分布：node ~/.fleet-dao/hooks/hook-timing.mjs（打 p50/p90/p99/最大，按脚本分）
 import { appendFileSync, mkdirSync, readFileSync, renameSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath } from 'node:url';
+import { isMainModule } from './is-main.mjs';
 
 export const TIMING_LOG = join(homedir(), '.fleet-dao', 'logs', 'hook-timing.jsonl');
 const MAX_BYTES = 2 * 1024 * 1024;
@@ -104,8 +104,7 @@ export function summarize(text, sinceMs = 0) {
   return out;
 }
 
-const entry = process.argv[1];
-if (entry && resolve(entry).toLowerCase() === fileURLToPath(import.meta.url).toLowerCase()) {
+if (isMainModule(import.meta)) {
   const hours = Number(process.argv[2] ?? 24 * 7);
   let text = '';
   try {
