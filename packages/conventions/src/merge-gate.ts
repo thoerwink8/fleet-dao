@@ -1,30 +1,38 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
-// 判红只有两样：
-// - 改标准（人闸第四类，design 第五节「人闸第四类：改标准」）：PR 改到的文件（含改名前的名字）落进 standard-paths.json 的清单，
+// 判红有三样：
+// - 改标准（人闸第四类，design 第五节「人闸第四类：改标准」）：PR 改到的文件（含改名前的名字）落进 standard-paths.json 的 paths 清单，
 //   正文里却没有创始人同意的记录（「创始人原话」那一行，原话、时间都不能空；认法是 pr-columns.ts 的 founderQuote，
 //   pnpm pr:open --founder-quote 写出来的就是它）。清单用跑这段代码的那一份（主线的）：PR 改不了自己的门槛。
+// - 安全基（决定 0106）：PR 改到的文件落进同一个 standard-paths.json 的顶層 security-base 清单（.github/workflows/、CI 判法源码、发布脚本、
+//   锁文件、引导文件等保护计算完整的路径）——这种改动要求**前置要你拍**：只有创始人在「要你拍」对一个具体的 head SHA 拍了，
+//   那个 SHA 上贴出一条 success 的 security-base-approved 状态，闸才放行。SHA 换了（推了新提交）就算旧头上拍过也不算，
+//   闸读的是当前头的状态，天然不满足。之所以不用「创始人原话」那一行：原话是贴在 PR 正文里的，不锁住 head SHA，
+//   写上以后推新代码正文里那行照样在——挡不住「拍完又在安全基里加东西」；「要你拍 = billing fact」要钉到 SHA 才成立。
 // - 引擎任务工作流（#632）开的 PR（分支 fleet/<单号>-t<8 位>）当前头上要有通过的 cold-verify（合前一次冷调用，换家族验
 //   「单子说要的东西真做了没有」，#555-2）——**闸只读这条状态，不在这里起模型调用**（判法要确定，同一份代码什么时候跑
 //   结果都一样，design 第五节）；冷调用在装配侧（引擎）跑、结论贴成状态。别的 PR 不验，也就没有这条状态——
 //   那是「不用验」，不是「没验成」，两者在 coldVerifyNeed 里分开。
 // 草稿、冲突 GitHub 自己拦。读不到、认不出（PR、文件列表、清单、提交状态）写 failure（没查成）。
-// merge-gate.yml 在 PR 事件（头变了、正文改了——补上原话要重算）或 cold-verify 状态写上来时跑它（后一种逐个重算所有开着的 PR）；
-// 主线推送只在闸认的东西（判法、清单、工作流本身）变了才触发、同样重算所有开着的 PR——判法收紧了，开着的 PR 上旧的 success
-// 不能留着（#654 第二意见）；不检出、不跑 PR 里的代码：判法和清单用跑这段代码的那一份（主线的）。
+// merge-gate.yml 在 PR 事件（头变了、正文改了——补上原话要重算）或 cold-verify / security-base-approved 状态写上来时跑它
+// （后两种逐个重算所有开着的 PR）；主线推送只在闸认的东西（判法、清单、工作流本身）变了才触发、同样重算所有开着的 PR——
+// 判法收紧了，开着的 PR 上旧的 success 不能留着（#654 第二意见）；不检出、不跑 PR 里的代码：判法和清单用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
 import { isFlowBranch } from './flow-branch.ts';
 import type { GhApi } from './gh-api.ts';
 import {
   COLD_VERIFY_CONTEXT,
   checkColdVerify,
+  checkSecurityBase,
   coldVerifyFrom,
   coldVerifyNeed,
   GATE_CONTEXT,
+  SECURITY_BASE_CONTEXT,
+  securityBaseFrom,
   statusDescription,
 } from './merge-gates.ts';
 import { founderQuote } from './pr-columns.ts';
 import { type ChangedFile, type StandardPath, standardFiles } from './standard-paths.ts';
-import { loadStandardPaths } from './standard-paths-file.ts';
+import { loadSecurityBase, loadStandardPaths } from './standard-paths-file.ts';
 
 export type GateState = 'success' | 'failure';
 
@@ -150,6 +158,8 @@ export interface GateDeps {
   ciPolicy?: 'force' | 'off';
   /** 改标准的路径清单；不传读跑这段代码的那一份（standard-paths-file.ts，主线检出里的）。读不到、认不出就抛。 */
   standardPaths?: () => Promise<StandardPath[]>;
+  /** 安全基的路径清单（standard-paths.json 的顶层 security-base 字段）；默认从主线上的那份读。读不到、认不出就抛。 */
+  securityBase?: () => Promise<StandardPath[]>;
 }
 
 /** 从文件列表里的一条取 standardFiles 要的几样；认不出返回一句为什么。 */
@@ -170,27 +180,18 @@ interface Verdict {
 }
 
 /** 改标准这一样：碰没碰清单、碰了正文里有没有创始人原话。读不到、认不出是没查成。 */
-async function standardVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict> {
-  const notChecked = (why: string): Verdict => ({ ok: false, notChecked: true, lines: [`没查成：${why}。`] });
+async function standardVerdict(
+  meta: LiveMeta,
+  deps: GateDeps,
+  filesFromStandard: ChangedFile[],
+): Promise<Verdict> {
   let list: StandardPath[];
   try {
     list = await (deps.standardPaths ?? loadStandardPaths)();
   } catch (e) {
-    return notChecked(`改标准的路径清单读不到（${message(e)}）`);
+    return { ok: false, notChecked: true, lines: [`没查成：改标准的路径清单读不到（${message(e)}）。`] };
   }
-  let raw: unknown[];
-  try {
-    raw = await deps.gh.files(meta.number);
-  } catch (e) {
-    return notChecked(`读不到 PR #${meta.number} 改了哪些文件（${message(e)}），判不了碰没碰改标准`);
-  }
-  const files: ChangedFile[] = [];
-  for (const [i, item] of raw.entries()) {
-    const f = changedFileOf(item, i);
-    if (typeof f === 'string') return notChecked(`PR #${meta.number} 的文件列表认不出：${f}`);
-    files.push(f);
-  }
-  const hits = standardFiles(files, list);
+  const hits = standardFiles(filesFromStandard, list);
   if (hits.length === 0) return { ok: true, notChecked: false, lines: [] };
   const named = hits.map((h) => h.file).join('、');
   const quote = founderQuote(meta.body);
@@ -206,6 +207,42 @@ async function standardVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict>
     ok: true,
     notChecked: false,
     lines: [`改标准：碰了 ${named}，正文贴了创始人原话（${quote.at}）。`],
+  };
+}
+
+/** 安全基（决定 0106）这一样：碰了清单任一文件，PR 当前头上就要有 security-base-approved 的 success（「前置要你拍」拍下来贴上的）。 */
+async function securityBaseVerdict(meta: LiveMeta, deps: GateDeps, files: ChangedFile[]): Promise<Verdict> {
+  const notChecked = (why: string): Verdict => ({ ok: false, notChecked: true, lines: [`没查成：${why}。`] });
+  let list: StandardPath[];
+  try {
+    list = await (deps.securityBase ?? loadSecurityBase)();
+  } catch (e) {
+    return notChecked(`安全基清单读不到（${message(e)}）`);
+  }
+  const hits = standardFiles(files, list);
+  if (hits.length === 0) return { ok: true, notChecked: false, lines: [] };
+  let statuses: unknown[];
+  try {
+    statuses = await deps.gh.statuses(meta.head);
+  } catch (e) {
+    return notChecked(`读不到当前头 ${meta.head.slice(0, 7)} 的提交状态（${message(e)}）`);
+  }
+  const got = securityBaseFrom(statuses);
+  if (typeof got === 'string') {
+    return notChecked(`当前头 ${meta.head.slice(0, 7)} 的提交状态认不出：${got}`);
+  }
+  const named = hits.map((h) => h.file).join('、');
+  const problems = checkSecurityBase(meta.head, got);
+  if (problems.length > 0)
+    return {
+      ok: false,
+      notChecked: false,
+      lines: problems.map((p) => `${p}（碰了 ${named}）`),
+    };
+  return {
+    ok: true,
+    notChecked: false,
+    lines: [`安全基：碰了 ${named}，当前头上有 ${SECURITY_BASE_CONTEXT}（批了）。`],
   };
 }
 
@@ -272,7 +309,44 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
   if (!meta.open)
     return { number, head: meta.head, closed: true, state: 'failure', notChecked: false, lines: [] };
 
-  const verdicts = [await coldVerdict(meta, deps), await standardVerdict(meta, deps)];
+  // 先读一次文件列表（standardFiles 和 security-base 共用这一份：判红靠的都是这一遍，不重复调 GitHub）。
+  const filesOk: ChangedFile[] = [];
+  let filesFail: Verdict | null = null;
+  {
+    let raw: unknown[] = [];
+    try {
+      raw = await deps.gh.files(meta.number);
+    } catch (e) {
+      filesFail = {
+        ok: false,
+        notChecked: true,
+        lines: [
+          `没查成：读不到 PR #${meta.number} 改了哪些文件（${message(e)}），判不了碰没碰改标准和安全基。`,
+        ],
+      };
+    }
+    if (!filesFail) {
+      for (const [i, item] of (raw ?? []).entries()) {
+        const f = changedFileOf(item, i);
+        if (typeof f === 'string') {
+          filesFail = {
+            ok: false,
+            notChecked: true,
+            lines: [`没查成：PR #${meta.number} 的文件列表认不出：${f}。`],
+          };
+          break;
+        }
+        filesOk.push(f);
+      }
+    }
+  }
+
+  const verdicts: Verdict[] = [
+    await coldVerdict(meta, deps),
+    filesFail ?? (await standardVerdict(meta, deps, filesOk)),
+    ...(filesFail ? [] : [await securityBaseVerdict(meta, deps, filesOk)]),
+  ];
+  // `filesFail` 已在两项里充当之前的「读不到就判没查成」，别重复进安全基。
   const ok = verdicts.every((v) => v.ok);
   return {
     number,
@@ -310,7 +384,8 @@ export async function targetPrs(
       // 不按事件里的 sha 只算那一个 PR：status 事件共用一个排队组（merge-gate.yml），排着的只留最新一个，中间的被取消——
       // 一轮里给好几个 PR 贴 cold-verify 时，只算最后那个的话前面几个就一直停在旧结论上（#351 演练撞到）。
       // 所以留下来的那一次把开着的 PR 全重算一遍，每个都现读自己此刻的状态。
-      if (ev.context !== COLD_VERIFY_CONTEXT) return [];
+      // security-base-approved 同理：「要你拍」批拍下来贴上新状态时，开着的 PR 要重算。
+      if (ev.context !== COLD_VERIFY_CONTEXT && ev.context !== SECURITY_BASE_CONTEXT) return [];
       return numbersOf(await gh.openPrs(), () => true);
     case 'push':
       // 工作流的 paths 只放行了闸认的那几个文件（merge-gate.yml），到这里就是「判定输入变了」：开着的 PR 全重算，每个都现读自己此刻的状态。

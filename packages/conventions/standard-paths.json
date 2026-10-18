@@ -33,5 +33,59 @@
       "path": "packages/conventions/standard-paths.json",
       "why": "这份清单本身：改了它就改了哪些算标准"
     }
+  ],
+  "security-base": [
+    {
+      "path": "packages/conventions/",
+      "why": "合并闸判法、CI 判法、判变的测试基都在 conventions 包里。拿掉它就看不到「改了闸算不算改闸」，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": "packages/hygiene/",
+      "why": "卫生检查（密钥扫描）。改了它就能把「扫密钥」关掉，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": ".github/workflows/",
+      "why": "CI job 定义本身：加了它就能改 steps 顺序、把 check job 的 needs 减掉、把仓库 secrets 外衣换给外部，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": ".github/actions/",
+      "why": "GitHub 复合 action 定义。action 版本钉得再死，改了 action 内部代码就能偷换，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": "deploy/release.sh",
+      "why": "发布脚本，动它能把要发的代码改掉、发到别处，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": "deploy/**/*.sh",
+      "why": "发布脚本，动它能把要发的代码改掉、发到别处，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "why": "锁文件：动了它就能把恶意包装进来（比如 dependency confusion），这是一条保护计算完整的安全基"
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "why": "工作区配：动了它可以把链接换到全局的那个仓库，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": "package.json",
+      "why": "点了它就能往 dependencies 里加尚未审的包，甚至脚本注入，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": "deploy/",
+      "why": "发布目录全要查，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": ".env*",
+      "why": "引导文件通常能改变解析/构建，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": ".npmrc",
+      "why": "引导文件通常能改变解析/构建，这是一条保护计算完整的安全基"
+    },
+    {
+      "path": ".yarnrc*",
+      "why": "引导文件通常能改变解析/构建，这是一条保护计算完整的安全基"
+    }
   ]
 }

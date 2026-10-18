@@ -85,7 +85,8 @@ function world(
   return Object.assign(w, { gh });
 }
 
-const deps = (w: { gh: GitHubReads }): GateDeps => ({ gh: w.gh });
+/** 安全基默认给空清单（决定 0106 的路径不拦这些既有场景）；专门的安全基用例自己覆写。 */
+const deps = (w: { gh: GitHubReads }): GateDeps => ({ gh: w.gh, securityBase: async () => [] });
 
 /** #555-2：引擎任务工作流开的 PR 还要有一条通过的冷调用结论（另一个 context，闸只读）。 */
 const CV_OK = [{ context: 'cold-verify', state: 'success', description: '验收通过' }];
@@ -311,6 +312,66 @@ describe('合并闸：改标准（人闸第四类，决定 0093）——碰了�
       expect(r.state, body).toBe('failure');
       expect(r.lines[0], body).toMatch(/缺创始人原话/);
     }
+  });
+
+  describe('安全基前置要你拍（决定 0106，端到端）', () => {
+    const WF = touched('.github/workflows/ci.yml');
+    const SB = [{ path: '.github/workflows/', why: 'CI job 定义' }];
+    const approved = [{ context: 'security-base-approved', state: 'success', description: '创始人拍了' }];
+
+    it('碰安全基、没批准 → failure，点名安全基路径和「前置要你拍」', async () => {
+      const w = world({ files: [touched('packages/web/src/x.ts'), WF], statuses: [] });
+      const r = await gatePr(80, { gh: w.gh, securityBase: async () => SB });
+      expect(r.state).toBe('failure');
+      expect(r.notChecked).toBe(false);
+      expect(r.lines.join('\n')).toMatch(/前置要你拍.*\.github\/workflows\/ci\.yml/s);
+    });
+
+    it('碰安全基、当前头上有 success 的 security-base-approved → 过', async () => {
+      const w = world({ files: [WF], statuses: approved });
+      const r = await gatePr(80, { gh: w.gh, securityBase: async () => SB });
+      expect(r).toMatchObject({ state: 'success', notChecked: false });
+      expect(r.lines.join('\n')).toMatch(/安全基.*批了/);
+    });
+
+    it('不碰安全基 → 不看 approval 状态：普通 PR 照常只看 CI', async () => {
+      const w = world({ files: [touched('packages/web/src/x.ts')], statuses: [] });
+      const r = await gatePr(80, { gh: w.gh, securityBase: async () => SB });
+      expect(r).toMatchObject({ state: 'success' });
+      expect(w.statusReads).toBe(0);
+    });
+
+    it('清单读不到 → 没查成，不当成没碰', async () => {
+      const w = world({ files: [WF] });
+      const r = await gatePr(80, {
+        gh: w.gh,
+        securityBase: async () => {
+          throw new Error('认不出');
+        },
+      });
+      expect(r.state).toBe('failure');
+      expect(r.notChecked).toBe(true);
+      expect(r.lines.join('\n')).toMatch(/安全基清单读不到/);
+    });
+
+    it('批准状态认不出（state 坏了）→ 没查成，不当成批了', async () => {
+      const w = world({ files: [WF], statuses: [{ context: 'security-base-approved', state: 'ok' }] });
+      const r = await gatePr(80, { gh: w.gh, securityBase: async () => SB });
+      expect(r.state).toBe('failure');
+      expect(r.notChecked).toBe(true);
+      expect(r.lines.join('\n')).toMatch(/认不出/);
+    });
+
+    it('正文写了创始人原话也过不了安全基这一关：原话锁不住 SHA，0106 起安全基只认 security-base-approved', async () => {
+      const w = world({
+        files: [WF],
+        prOver: { body: `${GATE_LINE}\n${QUOTE}\n` },
+        statuses: [],
+      });
+      const r = await gatePr(80, { gh: w.gh, securityBase: async () => SB });
+      expect(r.state).toBe('failure');
+      expect(r.lines.join('\n')).toMatch(/前置要你拍/);
+    });
   });
 
   it('碰了标准、正文有 pnpm pr:open --founder-quote 写的那一行 → 不因此判红', async () => {

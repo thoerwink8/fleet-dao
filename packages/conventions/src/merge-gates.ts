@@ -12,6 +12,14 @@ export const COLD_VERIFY_CONTEXT = 'cold-verify';
 /** 冷调用最多几轮（specs/555-3：默认 1 轮、最多 2 轮）。到顶了还不过就是不过，不许拿第 3 轮盖过去。 */
 export const COLD_VERIFY_MAX_ROUND = 2;
 
+/**
+ * 「前置要你拍」批了安全基改动那一个 SHA 写在 PR 当前头上的提交状态（决定 0106）。
+ *
+ * 合并闸只**读**它，不起模型调用、也不和人对上——原理同 cold-verify：判法必须确定。
+ * 创始人在「要你拍」里批了后，由批准那一步把结论贴到这个 context 上；SHA 换（推了新提交）则旧 SHA 上的不算。
+ */
+export const SECURITY_BASE_CONTEXT = 'security-base-approved';
+
 export type StatusState = 'success' | 'failure' | 'error' | 'pending';
 const STATES: readonly string[] = ['success', 'failure', 'error', 'pending'];
 
@@ -48,6 +56,36 @@ export function statusByContext(statuses: readonly unknown[], context: string): 
  */
 export function coldVerifyFrom(statuses: readonly unknown[]): CommitStatus | null | string {
   return statusByContext(statuses, COLD_VERIFY_CONTEXT);
+}
+
+/**
+ * 从同一份提交状态里取「要你拍」在安全基这一块批下的那一条。没有 = null（闸判「还没拍」），
+ * 认不出 = 一句为什么（闸判没查成，不当成没问题）。
+ */
+export function securityBaseFrom(statuses: readonly unknown[]): CommitStatus | null | string {
+  return statusByContext(statuses, SECURITY_BASE_CONTEXT);
+}
+
+/**
+ * 安全基这一块的判法（决定 0106）。只在碰了清单里任一路径的 PR 才来找这条：
+ * 别的 PR 不看它（清单在 merge-gate.ts 里判定命中）。
+ *
+ * - **没有这条状态不是「没问题」**：只能在批准的人拍了、贴到这个 head 上之后才算；没贴就是还没拍。
+ * - **state 非 success 都算没拍**：pending 视作「拍着没定论」，failure/error 视作「没拍」。
+ * - **SHA 换了不算**：闸读的是当前头的状态——推了新提交，旧头上就算批了，闸也看不到，重新要拍。
+ */
+export function checkSecurityBase(head: string, got: CommitStatus | null): string[] {
+  const at = `当前头 ${head.slice(0, 7)}`;
+  if (got === null) {
+    return [
+      `前置要你拍：PR 碰了安全基路径，${at} 上没有 ${SECURITY_BASE_CONTEXT} 状态，等创始人拍；拍下了由批准那一步贴上，推了新提交的（在旧 SHA 上拍过）不算。`,
+    ];
+  }
+  if (got.state === 'success') return [];
+  const desc = got.description ? `：${oneLine(got.description)}` : '';
+  return [
+    `前置要你拍：PR 碰了安全基路径，${at} 上的 ${SECURITY_BASE_CONTEXT} 是 ${got.state}${desc}，等创始人拍成 success；推了新提交的，旧 SHA 上的不算。`,
+  ];
 }
 
 /**
