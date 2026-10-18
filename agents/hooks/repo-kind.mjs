@@ -5,14 +5,13 @@
 // 2. fleet-dao 本身（认两份文件）、仓根 AGENTS.md 有自用仓标记（SELF_MARK，旧的私人仓写法照认）：自用仓。标记跟着仓走，
 //    只给自用仓用（比如没有远端的私人仓），对外仓里什么都不加。
 // 3. 看远端：有任何一个不在创始人自己的 GitHub 账号下（公司 GitLab、内网地址、别人的 GitHub）就是对外仓；全在他账号下就是自用仓。
-// 4. 没有远端：判不出来，照对外仓办；开会话提醒一句「动手前问他一次」，答了用第 1 条记下，以后不再问。
+// 4. 没有远端（不在 GitHub 上）：照对外仓办，不问、不提醒；要当自用仓的，创始人说一句用第 1 条记下。
 // git 跑不起来、读不了：照对外仓办（严的一边）。
-// 用它的：ai-attribution.mjs（对外仓不带 AI 署名）、repo-contract.mjs（仓合同不管对外仓）、session-start.mjs（第 4 条那句提醒）。
+// 用它的：ai-attribution.mjs（对外仓不带 AI 署名）、repo-contract.mjs（仓合同不管对外仓）。
 // 命令行：node repo-kind.mjs [show|self|external] [仓路径]（fleet-dao 里是 pnpm repo:kind）。
 // 和别的钩子一样被 agents-sync 整份拷进 ~/.fleet-dao/hooks/，只用 node 自带模块和同目录脚本。
-import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, resolve } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitBroken, gitOk, gitRunner, gitWhy } from './git-run.mjs';
 
@@ -150,59 +149,6 @@ export function githubOwnerOf(url) {
 export function isFounderRemote(url, owners = FOUNDER_GITHUB_OWNERS) {
   const o = (githubOwnerOf(url) ?? '').toLowerCase();
   return o !== '' && owners.some((w) => w.toLowerCase() === o);
-}
-
-/** 按 git 公共目录分仓的记号名：和 repo-contract.mjs 的 stampKeyOf 同一种算法（那边引这里，不反过来引，免得互相引） @param {string} commonDir */
-function stampKeyOf(commonDir) {
-  const p = resolve(commonDir);
-  const norm = process.platform === 'win32' ? p.toLowerCase() : p;
-  return createHash('sha256').update(norm).digest('hex').slice(0, 16);
-}
-
-/** @param {number} now */
-function beijingDay(now) {
-  return new Date(now + 8 * 3_600_000).toISOString().slice(0, 10);
-}
-
-/**
- * 开会话那一句：没有远端、判不出来的仓，叫 AI 动手前问创始人一次是哪种，答了用 repo:kind 记下。每个仓每天最多一次，记号在
- * ~/.fleet-dao/repo-kind/<仓的 git 公共目录的指纹>（和仓合同同一种分仓法）。判得出来的、不是 git 仓的、git 跑不起来的都不出声
- * （git 坏了由别的段说）；钩子自己出错说一句没查成。
- * @param {{ cwd: string, git: Git, home: string, now?: number, read?: (p: string) => string }} o
- * @returns {string[]}
- */
-export function kindReminderLines({ cwd, git, home, now = Date.now(), read = undefined }) {
-  try {
-    const top = git(cwd, ['rev-parse', '--show-toplevel', '--path-format=absolute', '--git-common-dir']);
-    if (gitBroken(top) || !gitOk(top)) return [];
-    const [root, common] = top.stdout.split(/\r?\n/).map((s) => s.trim());
-    if (!root) return [];
-    const info = repoKindInfo(root, { git, ...(read ? { read } : {}) });
-    if (info.source !== 'no-remote') return [];
-    const stamp =
-      common && isAbsolute(common) ? join(home, '.fleet-dao', 'repo-kind', stampKeyOf(common)) : null;
-    const today = beijingDay(now);
-    if (stamp) {
-      try {
-        if (readFileSync(stamp, 'utf8').trim() === today) return [];
-      } catch {
-        // 今天还没说过
-      }
-      try {
-        mkdirSync(dirname(stamp), { recursive: true });
-        writeFileSync(stamp, `${today}\n`);
-      } catch {
-        // 记不下只是今天可能多说一次
-      }
-    }
-    const at = root.replaceAll('\\', '/');
-    return [
-      `这个仓（${at}）没有远端，判不出是对外仓还是自用仓，先照对外仓办（通用段「对外仓和对外内容怎么写」）。` +
-        `动手前问创始人一句「这个仓是对外仓还是自用仓？」，答了用 fleet-dao 的 pnpm repo:kind self|external "${at}" 记进本机，以后不再问。这条每个仓每天只说一次。`,
-    ];
-  } catch (e) {
-    return [`仓类型没查成：钩子自己出错了（${e instanceof Error ? e.message : String(e)}）。照对外仓办。`];
-  }
 }
 
 /**

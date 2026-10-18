@@ -1,5 +1,5 @@
 // 仓是哪一种（agents/hooks/repo-kind.mjs，决定 0108）：本机 .git/config 说过的最先；fleet-dao、AGENTS.md 自用仓标记是自用仓；
-// 再看远端，有一个不在创始人 GitHub 下就是对外仓，全在就是自用仓；没远端判不出来，照对外仓办、开会话提醒问一次（每仓每天一次）。
+// 再看远端，有一个不在创始人 GitHub 下就是对外仓，全在就是自用仓；没远端（不在 GitHub 上）照对外仓办，不问。
 // pnpm repo:kind self|external 记进本机，有不在他 GitHub 下的远端却记成自用仓时提醒后果。真文件、真 git（临时目录里 init）。
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -29,7 +29,6 @@ interface Lib {
   repoKindInfo(root: string, deps?: { git?: Git }): Info;
   githubOwnerOf(url: string): string | null;
   isFounderRemote(url: string, owners?: string[]): boolean;
-  kindReminderLines(o: { cwd: string; git: Git; home: string; now?: number }): string[];
   setRepoKind(
     root: string,
     kind: 'self' | 'external',
@@ -133,43 +132,6 @@ describe('远端地址认法', () => {
     expect(lib.githubOwnerOf('/srv/git/x.git')).toBeNull();
     expect(lib.isFounderRemote('https://github.com/THOERWINK8/a')).toBe(true);
     expect(lib.isFounderRemote('git@github.com:someone/a.git')).toBe(false);
-  });
-});
-
-describe('开会话的提醒（kindReminderLines）：只有判不出来（没远端）时叫 AI 问一次', () => {
-  const NOW = Date.parse('2026-10-18T04:00:00Z');
-  const DAY = 24 * 3_600_000;
-
-  it('没远端：提醒问他、答了用 repo:kind 记下；同一天不再说，第二天再说；记下以后不再说', () => {
-    const root = gitRepo({}, {});
-    const home = dir();
-    const first = lib.kindReminderLines({ cwd: root, git, home, now: NOW });
-    expect(first).toHaveLength(1);
-    expect(first[0]).toMatch(/对外仓还是自用仓/);
-    expect(first[0]).toContain('pnpm repo:kind');
-    expect(lib.kindReminderLines({ cwd: root, git, home, now: NOW + 3_600_000 })).toEqual([]);
-    expect(lib.kindReminderLines({ cwd: root, git, home, now: NOW + DAY })).toHaveLength(1);
-    runChildOk('git', ['config', lib.CONFIG_KEY, 'self'], { cwd: root });
-    expect(lib.kindReminderLines({ cwd: root, git, home, now: NOW + 2 * DAY })).toEqual([]);
-  });
-
-  it('判得出来的（远端全是他的、有公司远端、打了标记）、不是 git 仓的：不出声', () => {
-    const home = dir();
-    for (const cwd of [
-      gitRepo({}, { origin: MINE }),
-      gitRepo({}, { origin: COMPANY }),
-      gitRepo({ 'AGENTS.md': `${lib.SELF_MARK}\n` }, {}),
-      dir(),
-    ])
-      expect(lib.kindReminderLines({ cwd, git, home, now: NOW })).toEqual([]);
-  });
-
-  it('【故意造出的失败】git 抛错：不抛，说一句没查成、照对外仓办', () => {
-    const throwing: Git = () => {
-      throw new Error('炸了');
-    };
-    const out = lib.kindReminderLines({ cwd: dir(), git: throwing, home: dir(), now: NOW });
-    expect(out.join('')).toMatch(/仓类型没查成.*照对外仓办/);
   });
 });
 
