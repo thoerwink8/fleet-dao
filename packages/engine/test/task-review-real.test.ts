@@ -104,6 +104,8 @@ class FakeGitHub {
   failDisable = 0;
   /** 每次挂自动合并的活动开跑之前（第几次挂）。 */
   beforeArm: (n: number) => void = () => undefined;
+  /** 每次自动合并刚挂上、挂的活动还没往下走时（第几次挂）：造「挂之前读完、之后才交」的评审。 */
+  afterEnable: (n: number) => void = () => undefined;
   disables = 0;
   enables = 0;
   /** 每次挂上自动合并时 PR 的头。 */
@@ -169,6 +171,7 @@ class FakeGitHub {
       this.enables += 1;
       this.enabledHeads.push(this.head);
       this.autoMerge = true;
+      this.afterEnable(this.enables);
     },
     setStatus: async (_repo: RepoRef, sha: string, status: { state: string }): Promise<void> => {
       this.statuses.push({ sha, state: status.state });
@@ -623,6 +626,48 @@ describe('正式评审到工人：真装配（#2991）', { timeout: 120_000 }, (
       '01',
       '02',
     ]);
+  });
+
+  it('评审在挂之前那次读完、挂上之后才交（事件还没到）：挂上后的复读接住，当场撤掉自动合并、交给工人，CI 绿了也不合', async () => {
+    const repo = freshRepo();
+    const github = new FakeGitHub(repo);
+    github.ciGreen = false;
+    const gate = new Gate();
+    const world = worldOf();
+    const { tasks, calls } = wired(github, gate, {
+      segment: async (_i, n) => {
+        // 工人返工完，审查者撤销了那条评审，CI 绿
+        if (n === 2) {
+          github.set([review({ commitId: `01${'c'.repeat(38)}`, state: 'DISMISSED' })]);
+          github.ciGreen = true;
+        }
+        return OK_SEGMENT;
+      },
+    });
+    // 第一次挂上的这一刻评审到了（挂之前读到的是空）；事件还在路上，这里不投
+    github.afterEnable = (n) => {
+      if (n === 1) {
+        github.set([review({ commitId: github.head })]);
+        github.ciGreen = true;
+      }
+    };
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input(repo));
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged' });
+    // 挂上后复读撤了自动合并（假 GitHub 在 CI 绿时一读就合，所以撤得要早于任何别的读 PR）
+    expect(github.disables).toBeGreaterThanOrEqual(1);
+    expect(calls.segment).toHaveLength(2);
+    const [line] = reviewLines(calls.segment[1]?.feedback);
+    expect(line).toContain(`review ${REVIEW_ID}`);
+    expect(bodyOf(calls.segment[1]?.feedback, REVIEW_ID)).toBe(BODY);
+    expect(github.enabledHeads[0]).not.toBe(github.enabledHeads[1]);
   });
 
   it('交过的要求改审查者没复审：新头验收过了也不挂合并、不重复派工，停下等人；点继续回来重读、还挂着就接着停', async () => {

@@ -189,7 +189,16 @@ export function reviewMergeHold(
       const repo = parseRepoSlug(ev.repo);
       for (const n of ev.prNumbers ?? []) {
         const pull = await claims.readPull(repo, n);
-        if (pull.state !== 'open' || pull.merged || !pull.autoMerge) continue;
+        if (pull.merged) {
+          // 评审到的时候 PR 已经合了：撤不了、也回不了工人，不装没事，记下来让人跟进
+          log?.warn('正式评审要求改到达时 PR 已经合并，评审回不了工人', {
+            deliveryId: ev.deliveryId,
+            repo: ev.repo,
+            prNumber: n,
+          });
+          continue;
+        }
+        if (pull.state !== 'open' || !pull.autoMerge) continue;
         await claims.disableAutoMerge(repo, pull);
         log?.info('正式评审要求改：撤掉了引擎任务 PR 的自动合并，等引擎合并那一步现读评审', {
           deliveryId: ev.deliveryId,

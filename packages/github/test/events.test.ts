@@ -729,6 +729,17 @@ describe('正式评审要求改：撤引擎任务 PR 的自动合并（#2991，r
     }
   });
 
+  it('评审到的时候 PR 已经合了：不撤，但记警告（回不了工人），不装没事', async () => {
+    const { gh } = setup();
+    const c = claims({ 5: { merged: true } });
+    const warns: string[] = [];
+    const log = { info: () => undefined, warn: (m: string) => void warns.push(m) } as never;
+    await gh.eventSink(reviewMergeHold(c.claims, log)).accept(review('changes_requested'));
+    expect(c.disabled).toEqual([]);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('已经合并');
+  });
+
   it('【故意造出的失败】撤不成：抛出去（这条投递记成出错、对账按原文重放），不当成撤了', async () => {
     const { gh } = setup();
     const c = claims({ 5: {} }, true);

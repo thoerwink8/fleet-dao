@@ -145,6 +145,28 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     return changes;
   };
 
+  /**
+   * 合并完成后补读一次（#2991）：合并和评审到达之间抢不过 GitHub 时（评审在最后一次现读之后、自动合并生效之前交），
+   * PR 已合，评审回不了工人。这里不装没看见：读到还挂着的正式「要求改」就记警告（带 review id），读不成也记，都不挡合并结果。
+   */
+  const auditLateReview = async (repo: RepoRef, prNumber: number): Promise<void> => {
+    if (deps.reviewChanges === undefined) return;
+    try {
+      const late = await deps.reviewChanges(repo, prNumber);
+      if (late.length > 0) {
+        log('PR 合并时还挂着正式「要求改」的评审（晚于最后一次现读到达，合了就回不了工人，需要人跟进）', {
+          prNumber,
+          reviews: late.map((r) => ({ reviewId: r.reviewId, commitId: r.commitId })),
+        });
+      }
+    } catch (error) {
+      log('PR 合并后补读正式评审没读成，不知道有没有晚到的「要求改」', {
+        prNumber,
+        error: errMessage(error),
+      });
+    }
+  };
+
   const treeAs = (dir: string, user: SessionUser, prefix: string, ctx: PortContext): UserTree => ({
     exec: deps.exec,
     user,
@@ -359,12 +381,26 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       if (pull.autoMerge) return { armed: true, merged: false };
       try {
         await mapped(() => gh.claims.enableAutoMerge(repo, pull));
+        // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
+        // 这一次之后交的评审，事件那头读到的就是已挂着（会撤）。两头合起来不留「检查完才到」的窗口。
+        const after = await reviewHold(repo, { ...pull, autoMerge: true });
+        if (after.length > 0) {
+          return {
+            armed: false,
+            merged: false,
+            why: `PR #${prNumber} 挂上自动合并后读到 ${after.length} 条正式「要求改」的评审，已撤掉`,
+            reviewChanges: after,
+          };
+        }
         return { armed: true, merged: false };
       } catch (error) {
         if (!isCleanStatus(error)) throw error;
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
         const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
-        if (merged.merged) return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
+        if (merged.merged) {
+          await auditLateReview(repo, prNumber);
+          return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
+        }
         if (merged.reason === 'behind_main') {
           return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, merged.detail, ctx);
         }
@@ -411,7 +447,10 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       }
       // 不核 CI。头、冲突、落后主线、还开着，mergePr 仍核。分支保护拒绝会抛，不装成合过了。
       const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead, requireCi: false }, ctx));
-      if (merged.merged) return { merged: true, mergeCommit: merged.mergeCommit };
+      if (merged.merged) {
+        await auditLateReview(repo, prNumber);
+        return { merged: true, mergeCommit: merged.mergeCommit };
+      }
       if (merged.reason === 'behind_main') {
         const synced = await syncBehindMain(
           repo,
@@ -449,6 +488,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (pull.merged) {
           if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
           const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
+          await auditLateReview(repo, prNumber);
           return {
             state: 'merged',
             ...(booked.mergeCommit === undefined ? {} : { mergeCommit: booked.mergeCommit }),
