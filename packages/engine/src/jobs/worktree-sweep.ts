@@ -4,7 +4,8 @@
 // 残留 → 以会话用户的身份看树里还剩什么 → 什么都不剩就删（fleet-agent-scope remove）；能重新生成的编译和工具缓存
 // （*.tsbuildinfo、node_modules/ 这些，名单是 real/user-git.ts 的 DISPOSABLE）不算剩着，只剩这些的树照空树删，是不是 git 仓
 // 都一样；还剩没推的提交、没提交的改动、stash、名单以外的文件的，也照决定 0097 直接删（AI 自己产生的工作树，#2729 起不再报
-// 「要人拍」），删掉的是哪几样记进日志和撤卡原因；以前报过、人点了留着的照旧留着。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
+// 「要人拍」），删掉的是哪几样记进日志和撤卡原因；以前报过、人点了留着的照旧留着。
+// 不管哪种删法，删之前先保全树里的界面验收图片（#2983，keepShots）：存不进受限归档就不删、记没查成写明原因，下一轮再试。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
 // 改之前必须知道：「在用」只认任务工作流（task:，含重做后的 :rN）和旧子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
 // 里一起认。认漏了还有一道：树里有没结束的会话（runs.worktree_path）就不碰。
 // 顺带撤提醒：子任务报的「工作树没收掉」（sub:<子任务>:worktree）、Fusion 报的（req:<仓>#<号>:worktree，按这张需求的
@@ -18,6 +19,7 @@ import { SEGMENT_LABELS, type SizeRead, type StageKind, type WorktreeRow } from 
 import { errMessage } from '@fleet-dao/shared/util';
 import { subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { subtaskBranch } from '../contract.ts';
+import type { ShotsDelivery } from '../ports.ts';
 import type { TreeLeftovers } from '../real/user-git.ts';
 import { STAGE_NAMES } from '../routing/names.ts';
 import {
@@ -80,6 +82,15 @@ export interface WorktreeSweepDeps {
     scratch: boolean,
   ): Promise<TreeLeftovers>;
   remove(dir: string): Promise<{ gone: boolean }>;
+  /**
+   * 删之前保全树里的界面验收图片（#2983，real/shots.ts 的 keepShotsBeforeRemove）：_tmp/shots 里的受管图片、没推的孤儿图片提交
+   * （treeLeftovers 看不到不可达的提交、也不看被忽略的文件）。有图就存进受限归档；回 failed（没清点成、归档满了、写不进去）就不删。
+   */
+  keepShots(
+    dir: string,
+    user: SessionUser,
+    at: { issueNumber: number; taskId: string | null; rel: string },
+  ): Promise<ShotsDelivery>;
   issue(ref: { owner: string; name: string; issueNumber: number }): Promise<IssueWorkFacts | null>;
   prHeads(ref: { owner: string; name: string; branch: string }): Promise<string[]>;
   subtaskTrees(ids: string[]): Promise<SubtaskTreeRef[]>;
@@ -243,6 +254,42 @@ function issueUse(s: Sweep, repo: Repo, issueNumber: number): Promise<IssueUse> 
   return use;
 }
 
+/**
+ * 删之前那一道（#2983）：树里的界面验收图片存进受限归档才删。没存成回「没查成」写明原因、树留着（下一轮再试）；
+ * 归档成了、已交付的记日志，回 null 接着删。
+ */
+async function guardShots(
+  s: Sweep,
+  ctx: { rel: string; path: string; tree: TreeKind; user: SessionUser; taskId: string | null },
+): Promise<TreeOutcome | null> {
+  let shots: ShotsDelivery;
+  try {
+    shots = await s.deps.keepShots(ctx.path, ctx.user, {
+      issueNumber: ctx.tree.issue,
+      taskId: ctx.taskId,
+      rel: ctx.rel,
+    });
+  } catch (err) {
+    return { kind: 'unchecked', why: `${ctx.rel} 里的界面截图没核对成，树留着没删：${errMessage(err)}` };
+  }
+  if (shots.outcome === 'failed') {
+    return {
+      kind: 'unchecked',
+      why: `${ctx.rel} 里的界面截图没交付也没存档成，树留着没删：${shots.reason ?? '没说为什么'}`,
+    };
+  }
+  if (shots.outcome !== 'none') {
+    s.deps.log('info', '每小时对账：删树之前保全了树里的界面截图', {
+      tree: ctx.rel,
+      outcome: shots.outcome,
+      files: shots.files.length,
+      ...(shots.archivedTo ? { archivedTo: shots.archivedTo } : {}),
+      ...(shots.reason ? { reason: shots.reason } : {}),
+    });
+  }
+  return null;
+}
+
 async function escalate(
   s: Sweep,
   ctx: {
@@ -262,6 +309,8 @@ async function escalate(
   // 以前（#2729 之前）报过「要你拍」、人看过点了留着（不是对账自己撤的）：照人的意思留着，不删
   if (existing?.resolvedAt && existing.resolvedBy !== RECONCILE_ACTOR)
     return { kind: 'kept', what: ctx.what };
+  const shotsKept = await guardShots(s, ctx);
+  if (shotsKept) return shotsKept;
   // 决定 0097：AI 自己产生的工作树（会话的检出、副本）直接删，不问人（#2729）。剩下的是哪几样写进日志和撤卡的原因里
   try {
     await deps.remove(ctx.path);
@@ -324,6 +373,8 @@ async function sweepTree(s: Sweep, repo: Repo, repoDir: string, name: string): P
   }
   const what = describeLeftovers(left);
   if (what.length === 0) {
+    const shotsKept = await guardShots(s, { rel, path, tree, user, taskId: use.facts?.taskId ?? null });
+    if (shotsKept) return shotsKept;
     // 看完到删之间要是有新一轮需求起来、在这里建树：它建树时会先删掉同一位置的旧树（github-ports 的 createWorktree），
     // 这里删的是看过、什么都不剩的那一棵
     try {

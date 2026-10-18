@@ -2,6 +2,7 @@
 // 真 Temporal 测试服务端 + 假端口 + 脚本化的任务活动。
 
 import { randomUUID } from 'node:crypto';
+import { renderPrBody } from '@fleet-dao/github';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
@@ -13,6 +14,7 @@ import {
   PR_DID_ANSWER_LINES,
   PR_DID_ANSWER_MAX,
   sessionDidLines,
+  shotsPrLines,
   taskPrDid,
 } from '../src/workflows/task-support.ts';
 import { freshRepo, useEnv, withWorker } from './helpers.ts';
@@ -119,5 +121,94 @@ describe('开 PR、第 2 轮更新 PR 说明（#2723）', { timeout: 60_000 }, (
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(world.count('updatePrBody')).toBeGreaterThan(0);
     expect(world.alerts).toEqual([]);
+  });
+});
+
+describe('合并收树后 PR 说明分开写代码和截图交付（#2983）', { timeout: 60_000 }, () => {
+  const HEAD = 'a'.repeat(40);
+  const file = {
+    path: '2969/home.png',
+    bytes: 10,
+    sha256: 'c'.repeat(64),
+    blob: 'd'.repeat(40),
+    from: 'tree',
+  };
+  const base = { head: HEAD, branch: 'shots/2969', files: [file] };
+  const render = (lines: { verified: string[]; owed: string[] }) =>
+    renderPrBody({
+      did: ['x'],
+      verified: lines.verified,
+      ...(lines.owed.length ? { owed: lines.owed } : {}),
+    });
+
+  it('已交付：进「怎么验证的」，按远端读到的写；「还欠什么」是无', () => {
+    const lines = shotsPrLines(7, 'e'.repeat(40), {
+      ...base,
+      outcome: 'delivered',
+      remoteHead: 'f'.repeat(40),
+    });
+    expect(lines?.verified[0]).toBe('代码：PR #7 已合并（eeeeeee），CI 和冷验收看这个 PR 的检查');
+    expect(lines?.verified[1]).toContain('1 张在远端 shots/2969（fffffff）按 blob 号核对过，已交付');
+    expect(lines?.owed).toEqual([]);
+    expect(render(lines as { verified: string[]; owed: string[] })).toContain('**还欠什么**：无');
+  });
+
+  it('待交付（只在受限归档里）：代码一句照写，图片进「还欠什么」，不写「无」', () => {
+    const lines = shotsPrLines(7, undefined, {
+      ...base,
+      outcome: 'archived',
+      reason: '远端没有 shots/2969（404），图片没交付',
+      archivedTo: '/state/archive/t/shots/x/manifest.json',
+    });
+    expect(lines?.verified).toEqual(['代码：PR #7 已合并，CI 和冷验收看这个 PR 的检查']);
+    expect(lines?.owed[0]).toContain(
+      '界面截图待交付：1 张没在远端 shots/2969 读到（远端没有 shots/2969（404）',
+    );
+    expect(lines?.owed[0]).toContain('/state/archive/t/shots/x/manifest.json');
+    const body = render(lines as { verified: string[]; owed: string[] });
+    expect(body).not.toContain('**还欠什么**：无');
+    expect(body).toContain('界面截图待交付');
+  });
+
+  it('【故意造出的失败】失败（树留着）和不知道（没有核对记录）：都进「还欠什么」', () => {
+    const failed = shotsPrLines(7, undefined, { ...base, outcome: 'failed', reason: '图片归档满了' });
+    expect(failed?.owed[0]).toContain(
+      '界面截图交付失败：1 张没交付也没存档成（图片归档满了），工作树留着没删',
+    );
+    const unknown = shotsPrLines(7, undefined, { ...base, files: [], outcome: 'unknown', reason: '没记录' });
+    expect(unknown?.owed[0]).toContain('界面截图交没交付不知道：没记录');
+    expect(shotsPrLines(7, undefined, { ...base, files: [], outcome: 'none' })).toBeNull();
+  });
+
+  it('合并后收树：截图待交付就改一次 PR 说明写进「还欠什么」；收树带着推上去的头', async () => {
+    const world = createFakeWorld({
+      shots: () => ({ outcome: 'archived', files: [file], reason: '远端没有 shots/12（404），图片没交付' }),
+    });
+    const { tasks } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(world.callsOf('removeWorktree')[0]?.input.shots).toEqual({ issueNumber: 12, head: run.head });
+    const updates = world.callsOf('updatePrBody');
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.input.body.owed?.[0]).toContain('界面截图待交付');
+    expect(updates[0]?.input.body.verified[0]).toContain(`代码：PR #${run.prNumber} 已合并`);
+  });
+
+  it('没有受管图片：不多改 PR 说明', async () => {
+    const world = createFakeWorld();
+    const { tasks } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged' });
+    expect(world.count('updatePrBody')).toBe(0);
   });
 });

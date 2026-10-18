@@ -173,6 +173,53 @@ export interface RemoveWorktreeInput extends Scope {
   branch: string;
   /** 没合并就收（叫停、失败）时先存档未提交的改动。 */
   archive: boolean;
+  /**
+   * 收之前先核对界面验收图片（_tmp/shots/<标签>/ 的 PNG/JPEG/WebP、树里没推的孤儿图片提交，#2983）：远端 shots/<单号> 读得到
+   * 才算交付，读不到就存进受限归档；归档也没成就不删树。老历史不带时，端口仍按树的 HEAD 核对并保全。
+   */
+  shots?: ShotsInput;
+}
+
+export interface ShotsInput {
+  issueNumber: number;
+  /** 固定的代码头（推上去、合并的那个）：归档按它分目录，换了头不覆盖。 */
+  head: string;
+}
+
+/** 一张受管图片：路径、多大、字节 sha256、git blob 号、从哪来。 */
+export interface ShotFileRecord {
+  /** 树里的：相对 _tmp/shots 的路径（<标签>/<图>）；孤儿提交里的：<提交短号>/<提交里的路径>。 */
+  path: string;
+  bytes: number;
+  sha256: string;
+  blob: string;
+  /** tree＝_tmp/shots 里的文件；否则是那个没推的孤儿提交号。 */
+  from: string;
+}
+
+/**
+ * 图片交付的结局：none＝没有受管图片；delivered＝远端 shots/<单号> 上全读得到（按 blob 号比，不认本地文件和本地提交）；
+ * archived＝远端没有（或没读成），已存进受限归档，待交付；failed＝没交付也没存档成，树留着没删；
+ * unknown＝树已经收了、又没有核对记录，交没交付不知道。
+ */
+export type ShotsOutcome = 'none' | 'delivered' | 'archived' | 'failed' | 'unknown';
+
+export interface ShotsDelivery {
+  outcome: ShotsOutcome;
+  head: string;
+  /** 远端图片分支：shots/<单号>。 */
+  branch: string;
+  files: ShotFileRecord[];
+  /** 读到的远端图片分支头；分支不在（404）不带。 */
+  remoteHead?: string;
+  /** 远端缺的图片（路径）。 */
+  missing?: string[];
+  /** 核对记录（清单）：归档了的和图片在一个目录。 */
+  archivedTo?: string;
+  /** 拒收的东西（路径：原因）：符号链接、不是图片、层级不对……不读、不存。 */
+  rejected?: string[];
+  /** 为什么不是 delivered（远端没读成、归档满了、写不进去……）。 */
+  reason?: string;
 }
 
 export interface RemoveWorktreeResult {
@@ -180,6 +227,10 @@ export interface RemoveWorktreeResult {
   /** 本来就不在了（正常返回，不抛）。 */
   gone: boolean;
   archivedTo?: string;
+  /** 给了 shots 或无 shots 的收树发现图片时带上：图片交付核对的结局。 */
+  shots?: ShotsDelivery;
+  /** 树没删的原因（图片没交付也没存档成）。 */
+  kept?: string;
 }
 
 export interface PushBranchInput extends Scope {

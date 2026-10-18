@@ -10,7 +10,7 @@ import { describeFailure, type UserCommandResult, type UserExec } from './exec.t
 export const OUT_DIR = '.fleet-out';
 
 export const GIT = '/usr/bin/git';
-const SH = '/bin/sh';
+export const SH = '/bin/sh';
 
 /** 在哪个目录、以谁的身份跑。scopePrefix 拼 scope 编号：同一时刻不许重复，所以每条命令再加序号。 */
 export interface UserTree {
@@ -62,6 +62,25 @@ async function git(
     retryable: !r.aborted,
     details: { user: t.user, dir: t.dir },
   });
+}
+
+/** 以会话用户在树里跑一条命令，原样交回、不判退出码（shots.ts 清点、读图片用）。 */
+export function runInTree(
+  t: UserTree,
+  argv: string[],
+  options: { stdin?: Buffer; timeoutMs?: number } = {},
+): Promise<UserCommandResult> {
+  return run(t, argv, options);
+}
+
+/** 以会话用户在树里跑 git：没跑成（退出码不在 allow 里）抛 PortError。 */
+export function gitInTree(
+  t: UserTree,
+  args: string[],
+  what: string,
+  options: { stdin?: Buffer; timeoutMs?: number; allow?: number[] } = {},
+): Promise<UserCommandResult> {
+  return git(t, args, what, options);
 }
 
 const text = (r: UserCommandResult) => r.stdout.toString('utf8');

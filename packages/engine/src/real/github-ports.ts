@@ -2,7 +2,8 @@
 // 里程碑，#654；查询轴「域:」「性质:」从单上照抄，某一轴不是恰好一个就不抄那一轴，没有需求号或单上没有也不挡）、
 // 第 2 轮起改 PR 正文（#2723）、等 CI、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
 // 并不上才停下留言）、关单，以及建树（记下主线的头；树等起会话时由会话
-// 自己建，见 sessions.ts）、收树（先存档没提交的改动）。
+// 自己建，见 sessions.ts）、收树（先存档没提交的改动；界面验收图片先核对远端、没交付存进受限归档，存不成不删树，见 shots.ts；
+// 不带 shots 的收树、建树前删同一位置的旧树也过这一道）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
 
 import { randomUUID } from 'node:crypto';
@@ -18,6 +19,7 @@ import {
   type PortContext,
   PortError,
   type PrBody,
+  type ShotsDelivery,
   type SyncMainlineInput,
   type WaitCiInput,
   type Worktree,
@@ -25,6 +27,13 @@ import {
 import { isTaskBranch } from '../task-branch.ts';
 import type { UserExec } from './exec.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
+import {
+  blobsInBundle,
+  keepShotsBeforeRemove,
+  preserveShots,
+  type RemoteShots,
+  recordedShots,
+} from './shots.ts';
 import {
   addedLinesAgainst,
   bundleSince,
@@ -392,6 +401,33 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     ...(deps.shBin ? { sh: deps.shBin } : {}),
   });
 
+  /** 读远端图片分支 shots/<单号>：分支头和树里的 blob（镜像打的包，只认远端的东西）。 */
+  const remoteShots =
+    (repo: WaitCiInput['repo'], t: UserTree, ctx: PortContext) =>
+    async (branch: string): Promise<RemoteShots> => {
+      const { head } = await mapped(() => gh.fetchBranchHead({ repo, branch, signal: ctx.signal }, ctx));
+      if (!head) return { head: null, blobs: new Set() };
+      const { bytes, ref } = await bundleFromMirror(gh, deps.tmpDir, repo, head, [], ctx.signal);
+      return { head, blobs: await blobsInBundle(t, bytes, ref, head) };
+    };
+
+  /** 不知道固定代码头的删树（建树前删旧树、不带 shots 的收树）：按树的 HEAD、分支里的单号过同一道（shots.ts）。 */
+  const keepShots = (
+    t: UserTree,
+    taskId: string,
+    repo: WaitCiInput['repo'],
+    branch: string,
+    ctx: PortContext,
+  ): Promise<ShotsDelivery> => {
+    const issue = issueOfBranch(branch)?.issue;
+    return keepShotsBeforeRemove(t, {
+      archiveDir: deps.archiveDir,
+      taskId,
+      now: now(),
+      ...(issue === undefined ? {} : { issueNumber: issue, remote: remoteShots(repo, t, ctx) }),
+    });
+  };
+
   /** 这棵树现在归谁：不在（从没起过会话、或已经收了）明确报错，不当成「没有改动」。 */
   const ownerOrFail = async (dir: string): Promise<SessionUser> => {
     const user = await trees.ownerOf(dir);
@@ -446,17 +482,63 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       const path = trees.treeFor(input.repo, input.branch);
       return withHeartbeat(ctx, heartbeatEveryMs, async () => {
         const main = await mapped(() => gh.fetchMainline({ repo: input.repo, signal: ctx.signal }, ctx));
-        if ((await trees.ownerOf(path)) !== null) await trees.remove(path);
+        const user = await trees.ownerOf(path);
+        if (user !== null) {
+          // 旧树里的界面验收图片（#2983）先过同一道：没交付也没存档成就不删，停下把原因交出去
+          const t = treeAs(path, user, `shots-${input.subtaskId ?? input.taskId}`, ctx);
+          const kept = await keepShots(t, input.taskId, input.repo, input.branch, ctx);
+          if (kept.outcome === 'failed') {
+            throw new PortError(
+              'SHOTS_KEPT',
+              `同一位置的旧工作树 ${path} 里有界面截图，没交付也没存档成，树留着没删：${kept.reason}`,
+              { retryable: false, details: { worktree: path } },
+            );
+          }
+          await trees.remove(path);
+        }
         return { path, branch: input.branch, baseSha: main.head };
       });
     },
 
     async removeWorktree(input, ctx) {
       const user = await trees.ownerOf(input.path);
-      if (!user) return { removed: false, gone: true };
+      if (!user) {
+        // 已经收了（上一次删成、回执丢了）：图片的结局按那一次留下的清单说，没有清单就是不知道
+        if (!input.shots) return { removed: false, gone: true };
+        return {
+          removed: false,
+          gone: true,
+          shots: await recordedShots(deps.archiveDir, input.taskId, input.shots),
+        };
+      }
+      let shots: ShotsDelivery | undefined;
+      // 界面验收图片（#2983）：远端读得到才算交付，读不到存进受限归档；归档也没成就不删树，原因交回去。
+      // 老历史、没推过的不带 shots：一样过这一道（按树的 HEAD、分支里的单号），树里没图回 none、结果里不带
+      const shotsInput = input.shots;
+      const t = treeAs(input.path, user, `shots-${input.subtaskId ?? input.taskId}`, ctx);
+      const delivery = await withHeartbeat(ctx, heartbeatEveryMs, () =>
+        shotsInput
+          ? preserveShots(t, shotsInput, {
+              archiveDir: deps.archiveDir,
+              taskId: input.taskId,
+              now: now(),
+              remote: remoteShots(input.repo, t, ctx),
+            })
+          : keepShots(t, input.taskId, input.repo, input.branch, ctx),
+      );
+      if (shotsInput || delivery.outcome !== 'none') {
+        shots = delivery;
+        if (shots.outcome === 'failed') {
+          return {
+            removed: false,
+            gone: false,
+            shots,
+            kept: `界面截图没交付也没存档成，树留着：${shots.reason}`,
+          };
+        }
+      }
       let archivedTo: string | undefined;
       if (input.archive) {
-        const t = treeAs(input.path, user, `rm-${input.subtaskId ?? input.taskId}`, ctx);
         const { status, patch } = await uncommittedPatch(t);
         if (status.length > 0 || patch.length > 0) {
           const dir = join(deps.archiveDir, input.taskId);
@@ -469,7 +551,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         }
       }
       const { gone } = await trees.remove(input.path);
-      return { removed: !gone, gone, ...(archivedTo ? { archivedTo } : {}) };
+      return { removed: !gone, gone, ...(archivedTo ? { archivedTo } : {}), ...(shots ? { shots } : {}) };
     },
 
     async pushBranch(input, ctx) {

@@ -77,6 +77,7 @@ function world(over: Partial<WorktreeSweepDeps> = {}) {
       removed.push(dir);
       return { gone: true };
     },
+    keepShots: async () => ({ outcome: 'none', head: '', branch: 'shots/0', files: [] }),
     issue: async () => null,
     prHeads: async () => [],
     subtaskTrees: async () => [],
