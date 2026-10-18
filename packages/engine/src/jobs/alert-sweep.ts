@@ -12,7 +12,9 @@
 //    reconcile:* 虽在「自己会撤」的前缀里（过期兜底不碰它们），条件没了的核对那一步已经撤了，还开着的是断链，要立案。
 //    其余自己会撤的（备份、切号……）不立案。认不出仓的不猜、不开。谁在处理读不到：不立案（跟再推相反，开单宁可不开）。
 //    历史事实类不立案（#1420）：键以 reconcile:pr:、reconcile:ledger: 开头且对应 PR 已合并超过 7 天。事实已经发生、改不了，
-//    对账只在合并时判一次，条件永远还在，开单没有可做的事（#1418、#1419 因此白起了会话）。合并未满 7 天、别的类别照旧。
+//    对账只在合并时判一次，条件永远还在，开单没有可做的事（#1418、#1419 因此白起了会话）。合并未满 7 天仍立案，但验收不写
+//    「条件不再成立」：缺证据不可逆，那句会诱导按 PR 号或分支名豁免来清卡。验收改为真实来源与完整回执按现规则核实，或缺证据
+//    标 historical_unproven、走已有可信 ops 历史审计（精确身份、证据、缺口、后续责任）。别的类别照旧。
 //    读不到合并时刻不跳过，记没查成。立案前再自检：单的「怎么算做完」只有「提醒的条件不再成立」一条、且类别不在自己会撤的
 //    清单里，不开单，提醒正文写「没有可做的事，已跳过立案」。
 //
@@ -395,8 +397,20 @@ function stripSkipNote(body: string): string {
   return cut === -1 ? '' : body.slice(cut + 2);
 }
 
-/** 自己会撤的只留「条件不再成立」（条件过去了对账会撤）。其余再加一条 diff 里看得见的，免得自检把正常立案拦掉。 */
+/**
+ * 历史证据类（reconcile:pr:、reconcile:ledger:）的验收。事实不可逆，不写「条件不再成立」。
+ * 「审计」是验收软词：同一条里留「测试」「diff」，拉单才不会把它当成 diff 外证据拒派。
+ */
+const HISTORICAL_EVIDENCE_DONE_ITEMS = [
+  '- 真实来源与完整回执齐全的，可按现有规则核实；缺证据的明确 historical_unproven，并通过已有可信 ops 历史审计处置记录精确身份、证据、缺口和后续责任。不能声称历史条件已经消失。测试与 diff 都不得把缺证据写成条件已消失',
+  '- 不得伪造正常 merge 账、不得晋升 backfill、不得伪造具体 head 的真人批准、不得按 PR 号或 local 分支名豁免；读取失败保留未知，不清卡凑绿',
+] as const;
+
+const isHistoricalEvidenceKey = (key: string) => HISTORICAL_FACT_PREFIXES.some((p) => key.startsWith(p));
+
+/** 自己会撤的只留「条件不再成立」（条件过去了对账会撤）。其余再加一条 diff 里看得见的，免得自检把正常立案拦掉。历史证据类另写，见上。 */
 function defaultDoneItems(key: string): string[] {
+  if (isHistoricalEvidenceKey(key)) return [...HISTORICAL_EVIDENCE_DONE_ITEMS];
   const items = ['- 这条提醒的条件不再成立（对账撤掉它）'];
   if (!resolvesItself(key)) items.push('- 造成这条提醒的问题已经改掉，diff 里看得到');
   return items;
