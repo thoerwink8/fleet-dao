@@ -88,6 +88,13 @@ systemctl is-active fleet-temporal.service; echo exit:$?
 
 #3134 保留开放：还须补控制台实例核对和操作审计（拿不到就明确记录），核对被打断工作流从原持久状态自然接续，以及受影响 PR 精确当前头的策略桥和外部合并闸。服务进程 `active` 不等于任务接续完成，策略桥可读也不等于冷验收已通过；这些结果不得用重派任务、放宽判据或重复报成功代替。
 
+### #3134 逐条收口状态（本次一次性会话只改文档，没有法国、香港、Contabo 的访问）
+
+- 控制台实例核对与是否需要重启：没做成。本机 Browser Bridge 要求重载、读不到既有 Contabo 登录态，没有操作实例；法国在 02:17 前已自行恢复开机，重启条件（客机不在跑）已不成立，不再需要重启。实例身份、控制台状态和操作审计仍是未知。
+- 留证：关机来源以上文 01:24:36 `Power key pressed short.`、01:25 关机、01:48 再启动为准，是客机响应电源键事件的干净关机，触发者未知；10 月 17 日的 OOM 早于本次，不是根因；没有内核 panic 的证据，也没有 kdump/pstore 采集的记录，记为未知。SSH、WG、数据库、Temporal、API、engine 与 healthz 的核验只有 02:17–02:20 的只读快照；`fleet-mirasim-session.service` 为 `inactive`（`ConditionResult=no`），未启动，原因待查。
+- 被打断工作流的接续、受影响 PR 精确当前头的策略桥与外部合并闸：本会话没有后端可连，没核，不报成功。回来后按下一节的 `pnpm progress read`、`fleet-temporal workflow list` 看，PR 要核精确当前头的策略桥与合并闸，不重派、不放宽判据。
+- 代码或配置根因：没有定位到。现有证据指向宿主侧或供应商侧的电源事件，不是本仓代码，所以没有单独的修复和测试。拿到控制台审计或供应商说明前不得关闭 #3134。
+
 ## 回来后看被打断的任务
 
 自己的检出里看进度和没处理的引导：`pnpm progress read`。还在法国上，看没跑完的工作流：`fleet-temporal workflow list --query 'ExecutionStatus="Running"'`。引擎起来后续上，不要手工重开。
