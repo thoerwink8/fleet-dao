@@ -1,6 +1,13 @@
-import { type ChangelogVersion, renderChangelogVersion } from '@fleet-dao/conventions';
-import type { ScheduleResult } from '@fleet-dao/db';
-import { describe, expect, it } from 'vitest';
+import { type ChangelogVersion, type MilestoneDetail, renderChangelogVersion } from '@fleet-dao/conventions';
+import {
+  finishScheduleRun,
+  registerScheduledJobs,
+  type ScheduleResult,
+  scheduleRuns,
+  startScheduleRun,
+} from '@fleet-dao/db';
+import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   CHANGELOG_JOB,
   type ChangelogJobDeps,
@@ -69,7 +76,59 @@ function world() {
   return { deps, milestones, opened, finished };
 }
 
+function legacyMilestones(): MilestoneDetail[] {
+  return ['P0', 'P1', 'P2', 'P3', 'P4', 'P5', 'P6', 'v1', 'v2', 'v3'].map((title, n) => ({
+    number: 100 + n,
+    title,
+    state: 'closed',
+    description: '',
+    closedAt: '2026-10-18T00:00:00Z',
+    dueOn: null,
+  }));
+}
+
 describe('每天补齐更新日志', () => {
+  it('仅旧里程碑也按逐条核过的10个对象记成功，不把零个待补版本记为零扫描', async () => {
+    const w = world();
+    w.deps.github.milestones = async () => legacyMilestones();
+    w.deps.history = async () => {
+      throw new Error('没有缺版不应读发布历史');
+    };
+    expect(await runChangelogJob(w.deps)).toEqual({ outcome: 'ok', scanned: 10, found: 0 });
+    expect(w.opened).toEqual([]);
+    expect(w.finished).toEqual([{ outcome: 'ok', scanned: 10, found: 0 }]);
+  });
+  it('缺版生成PR与无需补版都计全部已核的closed里程碑，不计open对象', async () => {
+    const w = world();
+    w.deps.github.milestones = async () => [
+      ...legacyMilestones(),
+      ...w.milestones,
+      { number: 6, title: 'v6', state: 'open', closedAt: null, description: '', dueOn: null },
+    ];
+    expect(await runChangelogJob(w.deps)).toEqual({ outcome: 'ok', scanned: 12, found: 2 });
+    const pr = w.opened[0];
+    if (!pr) throw new Error('缺版没有生成PR');
+    expect(pr.versions).toEqual([4, 5]);
+    w.deps.github.readHead = async () => ({ commit: HEAD, text: pr.content });
+    expect(await runChangelogJob(w.deps)).toEqual({ outcome: 'ok', scanned: 12, found: 0 });
+    expect(w.opened).toHaveLength(1);
+  });
+  it('完整列表为空时记unscanned和原因，正常返回且不报读取失败', async () => {
+    const w = world();
+    const errors: string[] = [];
+    w.deps.github.milestones = async () => [];
+    w.deps.log = (level, message) => {
+      if (level === 'error') errors.push(message);
+    };
+    w.deps.history = async () => {
+      throw new Error('空列表不应读发布历史');
+    };
+    const result = await runChangelogJob(w.deps);
+    expect(result).toEqual({ outcome: 'unscanned', why: expect.stringContaining('没有已关闭的里程碑') });
+    expect(w.finished).toEqual([result]);
+    expect(w.opened).toEqual([]);
+    expect(errors).toEqual([]);
+  });
   it('一次从读到的主线头补齐全部缺版，v4起倒序；法国提交按北京时间归对应时间盒', async () => {
     const w = world();
     expect(await runChangelogJob(w.deps)).toEqual({ outcome: 'ok', scanned: 2, found: 2 });
@@ -135,6 +194,75 @@ describe('每天补齐更新日志', () => {
       catchupMinutes: 1440,
     });
     expect(changelogSchedule(async () => {}).needsMaster).toBeUndefined();
+  });
+});
+
+describe('更新日志结果接真实schedule_runs约束', () => {
+  let t: TestDb;
+  beforeAll(async () => {
+    t = await createTestDb();
+  }, TEST_DB_TIMEOUT_MS);
+  afterAll(() => t.close());
+  beforeEach(async () => {
+    await resetTestDb(t);
+    await registerScheduledJobs(t.db, [CHANGELOG_JOB]);
+  });
+  function connect(w: ReturnType<typeof world>) {
+    w.deps.runs = {
+      start: (job, at) => startScheduleRun(t.db, job, at),
+      finish: (id, result, at) => finishScheduleRun(t.db, id, result, at),
+    };
+  }
+  it.each(['legacy', 'empty', 'missing', 'complete'] as const)(
+    '%s输入真实start→finish，无未结束孤儿行',
+    async (input) => {
+      const w = world();
+      connect(w);
+      w.deps.github.milestones = async () =>
+        input === 'empty' ? [] : [...legacyMilestones(), ...(input === 'legacy' ? [] : w.milestones)];
+      if (input === 'complete')
+        w.deps.github.readHead = async () => ({
+          commit: HEAD,
+          text: `${renderChangelogVersion(BASE)}\n${renderChangelogVersion({ ...BASE, version: 5 })}`,
+        });
+      const result = await runChangelogJob(w.deps);
+      const rows = await t.db.select().from(scheduleRuns);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        job: CHANGELOG_JOB.id,
+        outcome: input === 'empty' ? 'unscanned' : 'ok',
+        scanned: input === 'empty' ? 0 : input === 'legacy' ? 10 : 12,
+        found: input === 'empty' ? null : input === 'missing' ? 2 : 0,
+        endedAt: w.deps.now(),
+        why: input === 'empty' ? expect.stringContaining('没有已关闭的里程碑') : null,
+      });
+      expect(result.outcome).toBe(input === 'empty' ? 'unscanned' : 'ok');
+      expect(w.opened).toHaveLength(input === 'missing' ? 1 : 0);
+    },
+  );
+  it('读取里程碑失败真实落failed，保留原因且无孤儿行', async () => {
+    const w = world();
+    connect(w);
+    w.deps.github.milestones = async () => {
+      throw new Error('GitHub 503');
+    };
+    await expect(runChangelogJob(w.deps)).rejects.toThrow('GitHub 503');
+    const rows = await t.db.select().from(scheduleRuns);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      outcome: 'failed',
+      endedAt: w.deps.now(),
+      why: '没查成：GitHub 503',
+    });
+    expect(w.opened).toEqual([]);
+  });
+  it('【故意失败】ok/0仍被真实约束拒绝，不放宽约束使任务凑绿', async () => {
+    const id = await startScheduleRun(t.db, CHANGELOG_JOB.id);
+    await expect(finishScheduleRun(t.db, id, { outcome: 'ok', scanned: 0, found: 0 })).rejects.toMatchObject({
+      cause: { constraint: 'schedule_runs_ok_scanned_something' },
+    });
+    const rows = await t.db.select().from(scheduleRuns);
+    expect(rows[0]).toMatchObject({ outcome: null, endedAt: null });
   });
 });
 

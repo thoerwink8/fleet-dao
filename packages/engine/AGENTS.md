@@ -59,6 +59,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 ## 版本更新日志
 
 - `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。
+- `scanned` 统一计实际读全并逐条判断适用性的已关闭里程碑数，`found` 计需要补日志的版本数；只有旧版本或全部已补齐也按真实扫描数记 ok。没有已关闭里程碑时记 unscanned 和原因并正常收尾；读取失败仍记 failed，不用零扫描冒充成功。
 
 ## 固定版本宿主工具
 
