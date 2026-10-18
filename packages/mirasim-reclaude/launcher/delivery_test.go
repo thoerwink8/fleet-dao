@@ -26,10 +26,20 @@ func fakeReplayClaude(sid string) {
 			continue
 		}
 		msg, _ := f["message"].(map[string]any)
+		text, isText := msg["content"].(string)
+		deferredResult := os.Getenv("MIRASIM_TEST_DEFER_RESULT") == "1"
+		if deferredResult && (!isText || strings.TrimSpace(text) == "") {
+			// 上一轮的 result 晚于新 user 到达；新 user 仍在 CLI 队列里，尚未回显。
+			_ = enc.Encode(map[string]any{"type": "result", "subtype": "success", "session_id": sid, "is_error": false})
+			continue
+		}
 		if msg["content"] == "swallow" {
 			continue
 		}
 		_ = enc.Encode(map[string]any{"type": "user", "message": msg, "session_id": sid, "parent_tool_use_id": nil, "isReplay": true, "pid": os.Getpid()})
+		if deferredResult && text == "first" {
+			continue
+		}
 		if msg["content"] == "bg" {
 			_ = enc.Encode(map[string]any{"type": "system", "subtype": "task_started", "task_id": "bg-1", "session_id": sid})
 		}
@@ -38,8 +48,39 @@ func fakeReplayClaude(sid string) {
 	}
 }
 
-func startReplayApp(t *testing.T, f fixture, cache string) *app {
-	return startAppArgs(t, f, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--model", "claude-sonnet-5", "--session-id", f.sid, "--settings", `{}`}, "MIRASIM_TEST_ROLE=replay", "XDG_CACHE_HOME="+cache, "RECLAUDE_MIRASIM_DELIVERY_STALL_MS=300")
+func startReplayApp(t *testing.T, f fixture, cache string, extraEnv ...string) *app {
+	env := append([]string{"MIRASIM_TEST_ROLE=replay", "XDG_CACHE_HOME=" + cache, "RECLAUDE_MIRASIM_DELIVERY_STALL_MS=300"}, extraEnv...)
+	return startAppArgs(t, f, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--model", "claude-sonnet-5", "--session-id", f.sid, "--settings", `{}`}, env...)
+}
+
+func TestUnconfirmedContentKeepsChildAfterPriorTurnResult(t *testing.T) {
+	img := []any{map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "synthetic"}}}
+	mixed := []any{map[string]any{"type": "text", "text": "看图"}, img[0]}
+	for name, content := range map[string]any{"image": img, "mixed": mixed, "empty": ""} {
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t, "local")
+			cache := filepath.Join(f.home, "xdg-cache")
+			a := startReplayApp(t, f, cache, "MIRASIM_TEST_DEFER_RESULT=1")
+			a.user(t, "first")
+			first := a.until(t, "user")
+			a.send(t, map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": content}})
+			a.until(t, "result") // 旧回合结束，不代表后来的 user 已确认。
+			f.route(t, "cloud")
+			a.user(t, "next")
+			next := a.until(t, "user")
+			if first["pid"] != next["pid"] {
+				t.Fatalf("未确认内容仍可能在旧执行体排队，不能切进程：%v -> %v", first["pid"], next["pid"])
+			}
+			_ = a.in.Close()
+			if err := waitEnded(t, a); err != nil {
+				t.Fatal(err)
+			}
+			log := launchLogOf(t, f, cache)
+			if !strings.Contains(log, "event=user-identity-unknown path=active retained=true") || strings.Contains(log, "event=switch ") || strings.Count(log, "event=launch ") != 1 || strings.Count(log, "event=user-forward ") != 3 || !strings.Contains(log, "event=user-unacked reason=exit n=1") {
+				t.Fatalf("未知身份应保留责任、不重放、不切路由：%s", log)
+			}
+		})
+	}
 }
 
 // 10-16 的现场：主回合已结束、后台还在跑，新消息转给了执行体却没被读进。启动器要当场回报错，不能无声挂着。
@@ -177,13 +218,13 @@ func TestOnlySecondEchoAcksOnlySecondMessage(t *testing.T) {
 
 func TestEchoMustEqualNotContainPendingMessage(t *testing.T) {
 	for name, echo := range map[string]any{
-		"回显包含待确认正文":   "继续原任务，先不要改配置",
-		"前缀包装":        "[引导] 继续",
-		"后缀包装":        "继续 （已读）",
-		"完全不匹配":       "另一件事",
-		"空回显":         "",
-		"只有图片":        []any{map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "x"}}},
-		"文本加图片的混合内容":  []any{map[string]any{"type": "text", "text": "继续"}, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "x"}}},
+		"回显包含待确认正文":  "继续原任务，先不要改配置",
+		"前缀包装":       "[引导] 继续",
+		"后缀包装":       "继续 （已读）",
+		"完全不匹配":      "另一件事",
+		"空回显":        "",
+		"只有图片":       []any{map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "x"}}},
+		"文本加图片的混合内容": []any{map[string]any{"type": "text", "text": "继续"}, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "x"}}},
 		"文本块拼接后只是子串": []any{map[string]any{"type": "text", "text": "继续"}, map[string]any{"type": "text", "text": "原任务"}},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -244,21 +285,45 @@ func TestUUIDIdentityBeatsTextAndNeverCrossAcks(t *testing.T) {
 	}
 }
 
-func TestMessagesWithoutIdentityAreNotTracked(t *testing.T) {
+func TestMessagesWithoutIdentityRemainPendingWithoutFalseAck(t *testing.T) {
 	img := []any{map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "x"}}}
 	mixed := []any{map[string]any{"type": "text", "text": "看图"}, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "data": "x"}}}
 	d := trackedDeliveries(t, userFrame(t, "", ""), userFrame(t, "", "  \n"), userFrame(t, "", img))
-	if len(d.pending) != 0 || d.blocking() {
-		t.Fatalf("空正文、纯图片且无 uuid 无法判定，不记账也不挡路由：%v", pendingTexts(d))
+	if len(d.pending) != 3 || !d.blocking() {
+		t.Fatalf("空正文、纯图片且无 uuid 仍保留责任：%v", pendingTexts(d))
 	}
-	// 混合内容无 uuid：同样无法判定，其回显也不能被当成纯文本“看图”去销别的消息。
+	d.observe(echoFrame(t, "", ""))
+	d.observe(echoFrame(t, "", img))
+	if len(d.pending) != 3 || !d.blocking() {
+		t.Fatal("无法关联的回显不能凭空销账")
+	}
+	// 混合内容无 uuid：保留责任，其回显不能当成纯文本“看图”去销别的消息。
 	d = trackedDeliveries(t, userFrame(t, "", mixed), userFrame(t, "", "看图"))
-	if len(d.pending) != 1 {
-		t.Fatalf("混合内容无 uuid 不记账，纯文本照常记：%v", pendingTexts(d))
+	if len(d.pending) != 2 {
+		t.Fatalf("混合内容和纯文本都保留责任：%v", pendingTexts(d))
 	}
 	d.observe(echoFrame(t, "", mixed))
-	if len(d.pending) != 1 {
+	if len(d.pending) != 2 {
 		t.Fatal("混合内容的回显不能销纯文本“看图”")
+	}
+	d.observe(echoFrame(t, "", "看图"))
+	if len(d.pending) != 1 || !d.blocking() {
+		t.Fatal("纯文本回显只能销纯文本，混合内容仍未确认")
+	}
+}
+
+func TestUnknownIdentityKeepsExistingStallAndExpiry(t *testing.T) {
+	d := trackedDeliveries(t, userFrame(t, "", ""))
+	at := d.pending[0].at
+	if got := d.due(at.Add(d.stallAfter)); len(got) != 1 || !d.blocking() {
+		t.Fatal("空闲转出的未知消息仍应明确报错，报错不等于已确认")
+	}
+	if got := d.due(at.Add(d.stallAfter)); len(got) != 0 {
+		t.Fatal("同一条消息只报错一次")
+	}
+	d.due(at.Add(deliveryExpireAfter))
+	if d.blocking() || len(d.pending) != 1 || !d.pending[0].expired {
+		t.Fatal("沿用原有过期释放，不假装销账成功")
 	}
 }
 

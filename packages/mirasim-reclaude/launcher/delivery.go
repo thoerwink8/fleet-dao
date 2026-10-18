@@ -21,8 +21,8 @@ import (
 //  1. 转出的 user 帧带 uuid、回显也带 uuid：只按 uuid 相等对；uuid 不同就是别的消息，哪怕正文一样。
 //  2. 否则按正文精确相等：两边都只有 text（字符串或全是 text 块），各自只去掉首尾空白后逐字相等，
 //     同正文有多条时销最早那条。回显多了前后缀、少了字、只是包含，都不算。
-//  3. 带图片等非 text 块、或正文为空的，没有 uuid 就无法判定是哪一条：不记账（日志 event=user-untracked），
-//     不会挡路由、不会判卡住；它的回显也销不掉任何别的消息。有 uuid 的照常按 1 记账。
+//  3. 带图片等非 text 块、或正文为空的，没有 uuid 就无法判定是哪一条：仍保留未确认责任，
+//     记 event=user-identity-unknown，保护当前执行体直到原有过期边界；不能用空正文销账。有 uuid 的照常按 1 记账。
 //
 // CLI 是否回显 uuid 由协议决定，这里不假定：转出去的帧没带 uuid 就只走 2。
 
@@ -120,8 +120,7 @@ func (d *deliveries) forwarded(f frame, path string, idle bool) {
 	}
 	uuid, text := userIdentity(f)
 	if uuid == "" && text == "" {
-		logLine("event=user-untracked path=" + path + " reason=no-identity")
-		return
+		logLine("event=user-identity-unknown path=" + path + " retained=true")
 	}
 	d.pending = append(d.pending, &pendingUser{uuid: uuid, text: text, at: time.Now(), idle: idle, quiet: true})
 }
