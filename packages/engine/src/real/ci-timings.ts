@@ -28,6 +28,7 @@ import {
 } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CiTimingsGitHub, CiTimingsJobDeps, OpenTimingsPrInput } from '../jobs/ci-timings.ts';
+import { ensurePullQueryLabels } from './pull-query-labels.ts';
 
 export interface CiTimingsWiring {
   db: Db;
@@ -315,6 +316,7 @@ async function openTimingsPr(
   if (!Array.isArray(found.data)) throw new Error('找已开的 PR 时返回认不出');
   const existing = found.data[0];
   const pull = existing ? pullOf(existing, '已开的 PR') : await createPull();
+  await ensurePullQueryLabels(client, repo, pull.number, 'engine', 'process');
 
   try {
     await api.enableAutoMerge(repo, { number: pull.number, nodeId: pull.nodeId });

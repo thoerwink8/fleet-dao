@@ -16,7 +16,7 @@ const fail = (why: string): GhResult => ({ code: 1, stdout: '', stderr: why });
 const body =
   '## 场景\n\n批量登记改进点。\n\n## 原话\n\n无（AI 发现）。\n\n## 已知的模块\n\n开单脚本。\n\n## 怎么算做完\n\n- 测试：批量创建成功时返回所有单号。\n';
 const spec = (): BatchSpec => ({
-  mother: { kind: '需求', title: '一批改进', body },
+  mother: { kind: '需求', title: '一批改进', body, domain: 'engine', nature: 'process' },
   subs: [
     { kind: '缺陷', title: '第一项', body },
     { kind: '杂项', title: '第二项', body },
@@ -151,7 +151,7 @@ function setup(options: FakeOptions = {}) {
 }
 
 describe('母单与子单原子批量创建', () => {
-  it('母子可显式查询轴，子单逐轴继承母单有效值，旧 spec 不因缺轴回滚', async () => {
+  it('母子可显式查询轴，子单逐轴继承母单有效值；旧 spec 缺轴在任何写入之前拒绝', async () => {
     const input = spec();
     input.mother.domain = 'api';
     input.mother.nature = 'process';
@@ -170,17 +170,12 @@ describe('母单与子单原子批量创建', () => {
     ]);
     expect(fake.calls.filter((args) => args[0] === 'label')).toHaveLength(6);
     const old = setup();
-    const warnings: string[] = [];
-    await issueBatchNew(spec(), {
-      gh: old.gh,
-      cwd: old.cwd,
-      journal: old.journal,
-      warn: (message) => warnings.push(message),
-    });
-    expect(old.readJournal().status).toBe('complete');
-    expect(warnings).toHaveLength(6);
+    const missing = spec();
+    delete missing.mother.domain;
+    await expect(old.run(missing)).rejects.toThrow('domain');
+    expect(existsSync(old.journal)).toBe(false);
     expect(old.closeAttempts).toEqual([]);
-    expect(old.calls.some((args) => args[0] === 'label')).toBe(false);
+    expect(old.calls).toEqual([]);
   });
   it('显式轴标签初始化失败时明确报错，尚未创建或补偿任何单', async () => {
     const input = spec();

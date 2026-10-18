@@ -307,7 +307,7 @@ describe('让别家挑错', () => {
         `/api/requests/${seq}/draft`,
         write('PUT', a, {
           baseVersion: d.request.draftVersion,
-          patch: { scene: 's', modules: 'm', done: ['看得见'], needsHuman: '碰发布' },
+          patch: { scene: 's', modules: 'm\n域: api\n性质: process', done: ['看得见'], needsHuman: '碰发布' },
         }),
       ),
     );

@@ -3,6 +3,7 @@
 // 令牌按 GITHUB_TOKEN → GH_TOKEN → 本机 `gh auth token` 的顺序找，都没有就不带（公开仓不带令牌也读得到，
 // 只是每小时 60 次）。令牌只放进请求头，报错里不带。读不到、认不出一律抛，由调用方判「没查成」，不当成没问题。
 import { execFileSync } from 'node:child_process';
+import type { QueryMetadataPort } from './query-metadata.ts';
 
 export interface IssueInfo {
   number: number;
@@ -333,7 +334,8 @@ export function liveGitHub(
   GitHubVersionWriter &
   GitHubAlarmWriter &
   GitHubFamilyReader &
-  GitHubFamilyWriter {
+  GitHubFamilyWriter &
+  QueryMetadataPort {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
   let token: string | undefined | null = null;
@@ -411,6 +413,19 @@ export function liveGitHub(
   };
 
   return {
+    async pull(n) {
+      const res = await get(`/repos/${repo}/pulls/${n}`);
+      if (!res.ok) throw failed(res, ` PR #${n} `);
+      const data = await json(res, ` PR #${n} `);
+      if (
+        !isObject(data) ||
+        !isObject(data.head) ||
+        typeof data.head.ref !== 'string' ||
+        (data.body !== null && typeof data.body !== 'string')
+      )
+        throw new Error(`PR #${n} 来源或正文认不出，没查成`);
+      return { headRef: data.head.ref, body: data.body ?? '' };
+    },
     async allIssues() {
       const rows = await pages(`/repos/${repo}/issues?state=all&per_page=100`, '全部 issue');
       return rows.map((r) => toPlanIssue(r, '全部 issue')).filter((i) => !i.isPr);
@@ -509,6 +524,13 @@ export function liveGitHub(
       const data = await json(res, `给 #${n} 挂里程碑的回包`);
       const got = isObject(data) && isObject(data.milestone) ? data.milestone.number : undefined;
       if (got !== milestone) throw new Error(`给 #${n} 挂里程碑 ${milestone}，回包里挂的是 ${String(got)}`);
+    },
+    async addLabels(n, labels) {
+      const res = await get(`/repos/${repo}/issues/${n}/labels`, {
+        method: 'POST',
+        body: JSON.stringify({ labels }),
+      });
+      if (!res.ok) throw failed(res, `给 #${n} 补查询轴`);
     },
     async closeIssueCompleted(n, body) {
       const res = await get(`/repos/${repo}/issues/${n}`, {

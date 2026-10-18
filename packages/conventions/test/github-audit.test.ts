@@ -26,6 +26,47 @@ const DAY = 24 * 3_600_000;
 const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
 const MOTHER = ['需求', '母单'];
 
+describe('新 issue 和 PR 两轴对账', () => {
+  const createdAt = '2026-10-18T00:00:00Z';
+  const now = new Date('2026-10-18T00:30:00Z');
+  it('新单缺轴会报；齐全和明确未排期不误报', async () => {
+    const w = cleanWorld();
+    w.issues.push(
+      issue(50, { createdAt, labels: ['缺陷'], body: '排期: 当前' }),
+      issue(51, { createdAt, labels: ['缺陷', '域:api', '性质:bug'], body: '排期: 未排期' }),
+    );
+    const result = await auditGitHub(fakeReader(w).reader, now);
+    const found = result.findings.filter((finding) => finding.key.startsWith('query-axis:'));
+    expect(found).toHaveLength(2);
+    expect(found.every((finding) => finding.issue === 50)).toBe(true);
+  });
+  it('PR 缺轴会报；PR 标签现读失败必须写没查成', async () => {
+    const w = cleanWorld();
+    w.pulls = [
+      {
+        number: 80,
+        title: '修复',
+        body: '',
+        headRef: 'feat/x',
+        state: 'open',
+        mergedAt: null,
+        milestone: null,
+      },
+    ];
+    const reader = fakeReader(w).reader;
+    const pr = issue(80, { createdAt, isPr: true, labels: [] });
+    const full = { ...reader, issue: async (n: number) => (n === 80 ? pr : reader.issue(n)) };
+    const bad = await auditGitHub(full, now);
+    expect(bad.findings.filter((finding) => finding.key.startsWith('query-axis:80:'))).toHaveLength(2);
+    pr.labels = ['域:engine', '性质:process'];
+    expect(
+      (await auditGitHub(full, now)).findings.filter((finding) => finding.key.startsWith('query-axis:80:')),
+    ).toEqual([]);
+    const missing = await auditGitHub(reader, now);
+    expect(missing.notQueried).toContainEqual(expect.stringContaining('PR #80 查询轴没核'));
+  });
+});
+
 /** 干净的一份：v1 开着（一张母单带两张子单、一张单独的缺陷）、v0 关了、未排期一张杂项；什么都不该报。 */
 function cleanWorld(): World {
   return {

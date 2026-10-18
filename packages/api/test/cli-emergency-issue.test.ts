@@ -79,7 +79,7 @@ describe('fleet-api emergency-issue', () => {
         key: 'emergency:release-untouched:abc',
         title: '急修：x',
         body: BODY,
-        labels: ['缺陷'],
+        labels: ['缺陷', '域:engine', '性质:bug'],
       },
     ]);
     expect(JSON.parse(s.out.at(-1) ?? '')).toEqual({
