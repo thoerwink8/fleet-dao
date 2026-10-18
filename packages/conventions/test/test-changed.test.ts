@@ -20,6 +20,7 @@ import {
   BASE,
   changedFiles,
   DOC_POINTERS_TEST,
+  decideRun,
   ENGINE_SESSION_MARKER,
   type GitRun,
   LOCAL_ALWAYS_TESTS,
@@ -563,6 +564,55 @@ describe('要全跑时本机不跑：写明原因、全量交给 CI，不再教�
     }
   });
 
+  it.each(['true', '1'])('引擎会话被注入 CI=%s：显式 affected 生效，默认和显式 all 仍全跑', (CI) => {
+    const selection = selectTests(['pnpm-lock.yaml', 'packages/conventions/src/test-changed.ts'], GRAPH);
+    if (selection.kind !== 'all') throw new Error('锁文件改动应判需全跑');
+    const env = { CI, [ENGINE_SESSION_MARKER]: ' run-1 ' };
+    expect(decideRun({ selection, env, all: false, affected: true })).toMatchObject({
+      kind: 'run',
+      args: ['run', ...selection.local.paths],
+    });
+    expect(selection.local.paths).toContain('packages/conventions/');
+    expect(decideRun({ selection, env, all: false })).toMatchObject({ kind: 'run', args: ['run'] });
+    expect(decideRun({ selection, env, all: true, affected: true })).toMatchObject({
+      kind: 'run',
+      args: ['run'],
+    });
+    for (const marker of [undefined, '', ' \t ']) {
+      expect(
+        decideRun({ selection, env: { CI, [ENGINE_SESSION_MARKER]: marker }, all: false, affected: true }),
+      ).toMatchObject({ kind: 'run', args: ['run'] });
+    }
+  });
+
+  it.each(['false', '0'])('CI=%s 不冒充专用 CI：非空标记默认全跑，空白标记保留退出3和 affected', (CI) => {
+    const changed = ['pnpm-lock.yaml', 'packages/conventions/src/test-changed.ts'];
+    expect(run(changed, { env: { CI, [ENGINE_SESSION_MARKER]: 'run-1' } }).vitestCalls).toEqual([['run']]);
+    for (const marker of ['', ' \t ']) {
+      const env = { CI, [ENGINE_SESSION_MARKER]: marker };
+      const ordinary = run(changed, { env });
+      expect(ordinary.code).toBe(REFUSED_FULL_RUN);
+      expect(ordinary.vitestCalls).toEqual([]);
+      const affected = run(changed, { env, argv: ['--affected'] });
+      expect(affected.code).toBe(0);
+      expect(affected.vitestCalls[0]).toContain('packages/conventions/');
+      expect(affected.vitestCalls[0]).not.toEqual(['run']);
+    }
+  });
+
+  it('selection some 保持原路径，不因 CI、引擎标记或 affected 变全量', () => {
+    const changed = ['packages/agent-eval/src/cli.ts'];
+    const expected = run(changed).vitestCalls;
+    expect(expected[0]).toContain('packages/agent-eval/');
+    for (const CI of ['true', '1', 'false', '0']) {
+      for (const marker of ['', 'run-1']) {
+        const env = { CI, [ENGINE_SESSION_MARKER]: marker };
+        expect(run(changed, { env }).vitestCalls).toEqual(expected);
+        expect(run(changed, { env, argv: ['--affected'] }).vitestCalls).toEqual(expected);
+      }
+    }
+  });
+
   it('引擎起的会话（环境里有会话标记）照旧全跑：拒跑的话交活永远过不了；会话在有内存上限的 scope 里', () => {
     expect(ENGINE_SESSION_MARKER).toBe('FLEET_RUN_ID');
     const r = run(['packages/shared/src/domain.ts'], { env: { [ENGINE_SESSION_MARKER]: 'run-1' } });
@@ -711,6 +761,118 @@ describe('CI 每次都跑的测试：ci.yml 和 ALWAYS_TESTS 对得上；本机�
 });
 
 describe('入口', () => {
+  it('真实入口保留引擎/专用CI身份、显式参数和失败退出码', { timeout: 0 }, () => {
+    const bin = fileURLToPath(new URL('../src/bin/test-changed.ts', import.meta.url));
+    const temporaryRoot = join(ROOT, 'packages/conventions/_tmp');
+    mkdirSync(temporaryRoot, { recursive: true });
+    const fixture = mkdtempSync(join(temporaryRoot, '3011-entry-'));
+    const changed = ['pnpm-lock.yaml', 'packages/conventions/src/test-changed.ts'];
+    const selection = selectTests(changed, GRAPH);
+    if (selection.kind !== 'all') throw new Error('锁文件改动应判需全跑');
+    const affected = ['run', ...selection.local.paths];
+    const cases = [
+      { name: '普通本机', env: {}, argv: [], code: REFUSED_FULL_RUN, args: null },
+      ...['true', '1'].flatMap((CI) => [
+        {
+          name: `引擎 CI=${CI} affected`,
+          env: { CI, FLEET_RUN_ID: 'run-1' },
+          argv: ['--affected'],
+          code: 0,
+          args: affected,
+        },
+        { name: `引擎 CI=${CI} 默认`, env: { CI, FLEET_RUN_ID: 'run-1' }, argv: [], code: 0, args: ['run'] },
+        {
+          name: `引擎 CI=${CI} all`,
+          env: { CI, FLEET_RUN_ID: 'run-1' },
+          argv: ['--affected', '--all'],
+          code: 0,
+          args: ['run'],
+        },
+        ...[undefined, '', ' \t '].map((FLEET_RUN_ID) => ({
+          name: `专用CI=${CI} marker=${JSON.stringify(FLEET_RUN_ID)}`,
+          env: { CI, FLEET_RUN_ID },
+          argv: ['--affected'],
+          code: 0,
+          args: ['run'],
+        })),
+      ]),
+      ...['false', '0'].flatMap((CI) => [
+        {
+          name: `本机 CI=${CI}`,
+          env: { CI, FLEET_RUN_ID: ' \t ' },
+          argv: [],
+          code: REFUSED_FULL_RUN,
+          args: null,
+        },
+        {
+          name: `本机 CI=${CI} affected`,
+          env: { CI, FLEET_RUN_ID: '' },
+          argv: ['--affected'],
+          code: 0,
+          args: affected,
+        },
+      ]),
+      {
+        name: 'git读取失败',
+        env: { CI: 'true', FLEET_RUN_ID: 'run-1' },
+        argv: ['--affected'],
+        code: 2,
+        args: null,
+        gitFailed: true,
+      },
+      {
+        name: '测试失败',
+        env: { CI: 'true', FLEET_RUN_ID: 'run-1' },
+        argv: ['--affected'],
+        code: 1,
+        args: affected,
+        runnerStatus: 1,
+      },
+    ];
+    try {
+      for (const test of cases) {
+        // 只换 git/runner 两个外部进程边界；选择器、真实入口和槽逻辑都运行仓内代码。
+        const source = `
+          import cp from 'node:child_process';
+          import { syncBuiltinESMExports } from 'node:module';
+          import { pathToFileURL } from 'node:url';
+          cp.spawnSync = (command, args) => {
+            if (command === 'git') {
+              if (${JSON.stringify('gitFailed' in test)}) return { status: 1, stdout: '', stderr: 'controlled git failure' };
+              const stdout = args[0] === 'rev-parse' ? 'baseline\\n'
+                : args.some(a => a.endsWith('...HEAD')) ? ${JSON.stringify(`${changed.join('\0')}\0`)} : '';
+              return { status: 0, stdout, stderr: '' };
+            }
+            if (command === process.execPath && args[0].endsWith('vitest.mjs')) {
+              console.log('3011_SPAWN ' + JSON.stringify(args.slice(1)));
+              return { status: ${'runnerStatus' in test ? test.runnerStatus : 0}, signal: null };
+            }
+            throw Error('unexpected child process');
+          };
+          syncBuiltinESMExports();
+          process.argv = [process.execPath, ${JSON.stringify(bin)}, ...${JSON.stringify(test.argv)}];
+          await import(pathToFileURL(${JSON.stringify(bin)}).href);
+        `;
+        const env = {
+          ...process.env,
+          CI: '',
+          FLEET_RUN_ID: '',
+          FLEET_LOCAL_TEST_SLOT_HELD: '',
+          FLEET_LOCAL_TEST_SLOTS: '1',
+          FLEET_LOCAL_TEST_SLOTS_DIR: join(fixture, 'slots'),
+          ...test.env,
+        };
+        const result = runChild(process.execPath, ['--input-type=module'], { cwd: ROOT, env, input: source });
+        expect(result.status, `${test.name}: ${result.stderr}`).toBe(test.code);
+        const line = result.stdout.split(/\r?\n/).find((s) => s.startsWith('3011_SPAWN '));
+        const actual = line === undefined ? null : JSON.parse(line.slice('3011_SPAWN '.length));
+        expect(actual, test.name).toEqual(test.args);
+      }
+    } finally {
+      rmSync(fixture, { recursive: true, force: true });
+    }
+  });
+
   // 同步起 node：不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
   it('只收 --all：给了别的参数就退出 2，一个测试都不跑', { timeout: 0 }, () => {
     const bin = fileURLToPath(new URL('../src/bin/test-changed.ts', import.meta.url));

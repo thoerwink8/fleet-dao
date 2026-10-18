@@ -3,7 +3,7 @@
 // 只收 --all 和 --affected：跑哪些由改动决定，加过滤会把「改动影响到的」跑漏（要单跑几个文件用 pnpm exec vitest run <路径>）。
 // 判出要全跑（改到根配置、锁文件、shared 这类）时本机不跑，只写明全量交给 CI、依赖 shared 这类包留给 CI 的那些
 // （不再教人单跑对应包，#1066），退出码 3；带 --all 才在本机全跑；带 --affected 只跑受影响的包（引擎自测用）。
-// CI 里、引擎起的会话里（环境里有 FLEET_RUN_ID）照旧全跑。
+// 没有非空 FLEET_RUN_ID 的专用 CI 照旧全跑；引擎会话默认全跑，显式 --affected 生效，即使写码 CLI 注入 CI=true/1。
 // 开几个测试进程由 vitest.config.ts 按内存上限算（../test-run.ts）。
 // 真起 vitest 之前先拿本机测试槽：整台机器（几个工作树、几个会话）同时最多 2 个（FLEET_LOCAL_TEST_SLOTS 可调），满了排队、
 // 每 10 秒说前面还有几个在跑，等过 15 分钟没拿到就没跑成退出 2（../test-slots.ts）。
