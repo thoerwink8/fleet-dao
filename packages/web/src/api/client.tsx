@@ -665,6 +665,33 @@ export function useRunTranscript(taskId: string, runId: string, enabled: boolean
   });
 }
 
+/** 一步最多读多少条调用（接口一页的上限）；超了页面写「还有 N 条，在会话抽屉里看全部」。 */
+export const STEP_CALLS_MAX = 500;
+
+/**
+ * 任务页「过程」里一步展开后的调用（#3140）：只读这一步的序号区间 [firstSeq, lastSeq]，不读整段会话。
+ * 这一步还在跑（running）的每 3 秒再读一次，已经结束的读一次就够。读失败不自动重试，页面上有「重试」。
+ */
+export function useStepCalls(
+  taskId: string,
+  runId: string,
+  step: { firstSeq: number; lastSeq: number; running: boolean },
+  enabled: boolean,
+) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ['run-step', taskId, runId, step.firstSeq, step.lastSeq] as const,
+    enabled,
+    retry: false,
+    refetchInterval: (q) => (step.running && q.state.status !== 'error' ? TRANSCRIPT_POLL_MS : false),
+    queryFn: () =>
+      api.runTranscript(taskId, runId, {
+        ...(step.firstSeq > 0 ? { after: step.firstSeq - 1 } : {}),
+        limit: Math.min(STEP_CALLS_MAX, step.lastSeq - step.firstSeq + 1),
+      }),
+  });
+}
+
 /**
  * 立即探测的现状（渠道状态页）：有在排队、在探的，每 3 秒重拉一次，看到探完就把路由目录和路由两层也重拉（探完的结论写在
  * 路由上）；没有在探的每 30 秒一次。

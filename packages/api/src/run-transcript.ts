@@ -7,7 +7,7 @@
 //   库读不了、这里没接上（开发环境的内存版没有那张表）= 503 写明原因，页面写「没读成」，不拿空列表顶。
 // - 在跑的段 done 恒为 false，entries 空也不算 noRecord（引擎攒批最多隔一两秒才写，页面等下一次刷新）。
 
-import { type Db, readRunTranscript } from '@fleet-dao/db';
+import { type Db, readRunProcessRows, readRunReport, readRunTranscript } from '@fleet-dao/db';
 import { RunTranscriptQuery, RunTranscriptResponse, WebRoutes } from '@fleet-dao/shared';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
@@ -20,10 +20,18 @@ export interface RunTranscriptPort {
     runId: string,
     opts: { after?: number | undefined; limit: number },
   ): ReturnType<typeof readRunTranscript>;
+  /** 几段的轻量过程行（任务页的概览和过程，#3140）；读不到抛。 */
+  processRows(runIds: readonly string[]): ReturnType<typeof readRunProcessRows>;
+  /** 一段最后的汇报（结论，没有取最后一句话）；一条都没有是 null，读不到抛。 */
+  report(runId: string): ReturnType<typeof readRunReport>;
 }
 
 export function pgRunTranscript(db: Db): RunTranscriptPort {
-  return { read: (runId, opts) => readRunTranscript(db, runId, opts) };
+  return {
+    read: (runId, opts) => readRunTranscript(db, runId, opts),
+    processRows: (runIds) => readRunProcessRows(db, runIds),
+    report: (runId) => readRunReport(db, runId),
+  };
 }
 
 /** 开发环境、内存版：没有这张表。 */

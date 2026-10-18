@@ -103,6 +103,7 @@ import { type CockpitEnv, requireSession } from './session.ts';
 import { readEnvSnapshot, readHomeSnapshot, type SnapshotDeps } from './snapshots.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { taskListView } from './task-list.ts';
+import { buildOverview, newOverviewCache } from './task-overview.ts';
 import { TASK_ROUTE_PINS_NOT_HERE, taskRoutePinView } from './task-route-pins.ts';
 import { taskWorkflowIdForTask } from './temporal.ts';
 import {
@@ -141,6 +142,8 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   const { config, store } = deps;
   const app = new Hono<CockpitEnv>();
   app.use('*', requireSession(config, store, deps.now));
+  /** 已结束的段的过程缓存（任务详情的 overview，task-overview.ts）。 */
+  const overviewCache = newOverviewCache();
 
   const engineProbe = engineHealthProbe({
     health: deps.health,
@@ -315,7 +318,16 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       taskFinished: isTaskFinished(task),
     });
     const flowFallback = flowFallbackReason(await store.getFlowAssignment(task.id));
+    const overview = await buildOverview({
+      runTranscript: deps.runTranscript,
+      runs: segmentRuns,
+      subtaskPrs: subtasks.flatMap((s) => (s.prNumber === undefined ? [] : [s.prNumber])),
+      getPullRequest: (n) => store.getPullRequest(repo.id, n),
+      cache: overviewCache,
+      log: (msg, fields) => deps.log.error(msg, { taskId: task.id, ...fields }),
+    });
     return reply(c, TaskDetailResponse, {
+      overview,
       routePins: await readRoutePins(task.id),
       task: flowFallback ? { ...task, flowFallback } : task,
       repo,

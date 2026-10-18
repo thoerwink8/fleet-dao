@@ -64,7 +64,7 @@ const FULL: Draft[] = [
     kind: 'assistant',
     text: '生成脚本在 scripts/stamp.ts 第 12 行，时间是按 UTC 格式化的。我把它改成 Asia/Shanghai，再把标签里的 UTC 换成「北京时间」。',
   },
-  { min: 2.3, kind: 'tool_call', tool: 'Edit', text: 'scripts/stamp.ts' },
+  { min: 2.3, kind: 'tool_call', tool: 'Edit', text: 'scripts/stamp.ts', meta: { added: 6, removed: 2 } },
   {
     min: 2.4,
     kind: 'tool_result',
@@ -90,7 +90,27 @@ const FULL: Draft[] = [
   },
   { min: 5.2, kind: 'error', text: '测试没过：stamp.test.ts 还在期待旧的标签写法' },
   { min: 5.6, kind: 'assistant', text: '测试里写死了旧标签。改测试的期望值，不改实现。' },
-  { min: 5.8, kind: 'tool_call', tool: 'Edit', text: 'scripts/stamp.test.ts' },
+  {
+    min: 5.8,
+    kind: 'tool_call',
+    tool: 'Edit',
+    text: 'scripts/stamp.test.ts',
+    meta: { added: 1, removed: 1 },
+  },
+  {
+    min: 5.85,
+    kind: 'tool_call',
+    tool: 'Write',
+    text: 'scripts/stamp.fixtures.ts',
+    meta: { added: 24, removed: 0 },
+  },
+  {
+    min: 5.86,
+    kind: 'tool_result',
+    tool: 'Write',
+    ok: true,
+    text: 'File created successfully at: scripts/stamp.fixtures.ts',
+  },
   {
     min: 5.9,
     kind: 'tool_result',
@@ -149,7 +169,7 @@ const RUNNING: Draft[] = [
     ok: true,
     text: 'config/canary.json:4:  "intervalSeconds": 60,',
   },
-  { min: -36, kind: 'tool_call', tool: 'Edit', text: 'config/canary.json' },
+  { min: -36, kind: 'tool_call', tool: 'Edit', text: 'config/canary.json', meta: { added: 1, removed: 1 } },
   {
     min: -36,
     kind: 'tool_result',

@@ -3,7 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { TRANSCRIPT_KINDS } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { appendRunTranscript, readRunTranscript } from '../src/queries/run-transcript.ts';
+import {
+  appendRunTranscript,
+  readRunProcessRows,
+  readRunReport,
+  readRunTranscript,
+} from '../src/queries/run-transcript.ts';
 import { startRun } from '../src/queries/runs.ts';
 import { RUN_TRANSCRIPT_KINDS, runs, runTranscript } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -149,6 +154,46 @@ describe('没有记录', () => {
       any: false,
       more: false,
     });
+  });
+});
+
+describe('任务页的轻量过程行和汇报（#3140）', () => {
+  it('过程行：文本按种类截短、结果和提示词不带文本、子代理和增删行数从 meta 取；脏 meta 不让整张读挂', async () => {
+    await appendRunTranscript(t.db, runId, [
+      row(0, { kind: 'prompt', text: '提示词'.repeat(500) }),
+      row(1, { kind: 'assistant', text: '话'.repeat(1000) }),
+      row(2, { kind: 'tool_call', tool: 'Edit', text: 'a.ts', meta: { added: 3, removed: 1 } }),
+      row(3, { kind: 'tool_result', tool: 'Edit', ok: true, text: '很长的结果' }),
+      row(4, { kind: 'tool_call', tool: 'Edit', text: 'b.ts', meta: { added: 'x', subagent: 'toolu_A' } }),
+    ]);
+    const rows = (await readRunProcessRows(t.db, [runId])).get(runId) ?? [];
+    expect(rows.map((r) => [r.seq, r.kind, r.text.length, r.sub, r.added, r.removed, r.ok])).toEqual([
+      [0, 'prompt', 0, false, null, null, null],
+      [1, 'assistant', 400, false, null, null, null],
+      [2, 'tool_call', 4, false, 3, 1, null],
+      [3, 'tool_result', 0, false, null, null, true],
+      [4, 'tool_call', 4, true, null, null, null],
+    ]);
+  });
+
+  it('没有记录的段、不是 uuid 的编号：不出现在结果里', async () => {
+    expect((await readRunProcessRows(t.db, [runId, 'run-1'])).size).toBe(0);
+    expect((await readRunProcessRows(t.db, [])).size).toBe(0);
+  });
+
+  it('最后的汇报：优先最后一条主会话结论，没有取主会话最后一句话，子代理的不算', async () => {
+    expect(await readRunReport(t.db, runId)).toBeNull();
+    await appendRunTranscript(t.db, runId, [
+      row(0, { kind: 'assistant', text: '第一句' }),
+      row(1, { kind: 'assistant', text: '子代理的话', meta: { subagent: true } }),
+    ]);
+    expect(await readRunReport(t.db, runId)).toMatchObject({ kind: 'assistant', text: '第一句' });
+    await appendRunTranscript(t.db, runId, [
+      row(2, { kind: 'result', text: '结论一', ok: true }),
+      row(3, { kind: 'result', text: '结论二', ok: true }),
+    ]);
+    expect(await readRunReport(t.db, runId)).toMatchObject({ kind: 'result', text: '结论二' });
+    expect(await readRunReport(t.db, 'run-1')).toBeNull();
   });
 });
 

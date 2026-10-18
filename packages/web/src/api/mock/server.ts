@@ -142,6 +142,7 @@ import type { z } from 'zod';
 import { ApiError, type FleetApi } from '../client';
 import type { AuditEntry, LiveEvent, Notification, Worktrees } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
+import { mockOverview, mockOverviewMode } from './overview';
 import { createMockRequests, MOCK_PARTNER, type MockRequestsOptions, mockRequestsAs } from './requests';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 import { LIVE_FIRST_REVEAL, LIVE_REVEAL_STEP, transcriptSeed } from './transcripts';
@@ -2858,7 +2859,25 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           { taskFinished: finished },
         ),
       );
+      // 概览和过程（#3140）：和真后端同一个算法；在跑的段只放出已经「说」出来的那部分
+      const shownEntries = (runId: string) => {
+        const all = transcripts.byRun.get(runId);
+        if (!all || mockTranscriptFail.has(runId)) return undefined;
+        return transcripts.live.has(runId)
+          ? all.slice(0, Math.min(all.length, revealed.get(runId) ?? LIVE_FIRST_REVEAL))
+          : all;
+      };
+      const overview = mockOverview({
+        mode: mockOverviewMode(typeof location === 'undefined' ? '' : location.search),
+        runs: segmentRuns,
+        taskState: tv.task.state,
+        entriesOf: shownEntries,
+        subtaskPrs: tv.subtasks
+          .map(subtaskView)
+          .flatMap((s) => (s.prNumber === undefined ? [] : [s.prNumber])),
+      });
       return TaskDetailResponse.parse({
+        ...(overview === undefined ? {} : { overview }),
         task: tv.task,
         repo: repoView(tv.task.repoId),
         subtasks: tv.subtasks.map(subtaskView),

@@ -131,6 +131,51 @@ describe('Claude：子代理（手写的帧，夹具里没有录到子代理—�
   });
 });
 
+describe('Claude：编辑调用带增删行数（#3140）', () => {
+  const tool = (name: string, input: Record<string, unknown>, parent: string | null = null) => ({
+    type: 'assistant',
+    message: { model: 'm', content: [{ type: 'tool_use', id: `t-${name}`, name, input }] },
+    parent_tool_use_id: parent,
+  });
+  const calls = (frames: unknown[]) => {
+    const reader = new ClaudeStreamReader({ runId: 'r', cwd: '/w', now: () => NOW });
+    return frames
+      .flatMap((f) => reader.read(JSON.stringify(f)).transcript)
+      .filter((e) => e.kind === 'tool_call')
+      .map((e) => [e.tool, e.text, e.meta] as const);
+  };
+
+  it('Edit 记改前改后去掉共同头尾的行数，Write 记整份新增；Bash、Read 不带 meta', () => {
+    expect(
+      calls([
+        tool('Edit', { file_path: '/w/a.ts', old_string: 'a\nb', new_string: 'a\nB\nC' }),
+        tool('Write', { file_path: '/w/b.ts', content: 'x\ny\nz' }),
+        tool('Bash', { command: 'ls' }),
+        tool('Read', { file_path: '/w/a.ts' }),
+      ]),
+    ).toEqual([
+      ['Edit', 'a.ts', { added: 2, removed: 1 }],
+      ['Write', 'b.ts', { added: 3, removed: 0 }],
+      ['Bash', 'ls', undefined],
+      ['Read', 'a.ts', undefined],
+    ]);
+  });
+
+  it('子代理里的编辑：行数和子代理标记并在一起；输入缺字段的不写行数', () => {
+    expect(
+      calls([
+        tool('Agent', { subagent_type: 'worker', prompt: 'go' }),
+        tool('Edit', { file_path: '/w/a.ts', old_string: 'x', new_string: 'y' }, 't-Agent'),
+        tool('Edit', { file_path: '/w/a.ts' }),
+      ]),
+    ).toEqual([
+      ['Agent', '派了 worker：go', undefined],
+      ['Edit', 'a.ts', { subagent: 't-Agent', subagentType: 'worker', added: 1, removed: 1 }],
+      ['Edit', 'a.ts', undefined],
+    ]);
+  });
+});
+
 describe('cursor-agent', () => {
   function cursor(name: string): TranscriptEntry[] {
     const reader = new CursorStreamReader({ runId: 'r', cwd: '/tmp/agent-io-p3/x', now: () => NOW });

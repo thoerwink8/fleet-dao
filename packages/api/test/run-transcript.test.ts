@@ -26,6 +26,13 @@ function fakePort(rows: Record<string, { seq: number; kind: string; text: string
         more: rest.length > limit,
       };
     },
+    // 任务页的概览不在这个接口的范围（task-overview.test.ts 测）
+    async processRows() {
+      return new Map();
+    },
+    async report() {
+      return null;
+    },
   };
 }
 
@@ -147,6 +154,8 @@ describe('会话内容接口：没有记录和读不到分开', () => {
         read: async () => {
           throw new Error('connection terminated');
         },
+        processRows: async () => new Map(),
+        report: async () => null,
       },
     });
     withRuns(h);

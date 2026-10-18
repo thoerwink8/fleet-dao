@@ -33,6 +33,7 @@ export * from './route-probe-now.ts';
 export * from './route-probe-pace.ts';
 export * from './segment-runs.ts';
 export * from './task-list.ts';
+export * from './task-process.ts';
 export * from './task-signals.ts';
 export * from './track-score.ts';
 export * from './transcript.ts';
