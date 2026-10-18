@@ -558,4 +558,148 @@ describe('旧头验收责任替代收口（#3114）', () => {
     expect(await states()).toEqual({ [OLD]: 'open', [FINAL]: 'open' });
     expect((await openAcceptanceDuties(t.db, taskId)).map((d) => d.head)).toEqual([OLD, FINAL]);
   });
+
+  // #3071 / PR #3081 的真实两行：不同冷验收轮次写的，措辞不同，整串相等的判法办不了；要操作者逐项声明覆盖和依据。
+  describe('措辞不同的历史验收项：逐项覆盖声明', () => {
+    const SRC_ITEM = '第 5 条：PR 全套 CI 是否最终全绿并 squash 需要看合并闸和 PR 状态，diff 无法判定。';
+    const TGT_ITEM = '第5条：PR 全套 CI 是否已绿、是否已 squash 需要 GitHub 外部状态，diff 和材料无法判定。';
+    const OTHER = '第 3 条：线上数据是否正常无法从 diff 判定。';
+    const cover = (over: Partial<{ source: string; target: string; basis: string }> = {}) => ({
+      source: SRC_ITEM,
+      target: TGT_ITEM,
+      basis: '两条都是最终全 CI 绿 + squash 的外部状态判定；id16 的验收证据已逐项核过合并闸和 squash b41eaed',
+      ...over,
+    });
+    const supersedeWith = (
+      source: AcceptanceDutyRow,
+      target: AcceptanceDutyRow,
+      coverage: ReturnType<typeof cover>[],
+      evidence = 'PR #3081 最终头已合已验',
+    ) =>
+      supersedeAcceptanceDuty(
+        t.db,
+        { source: ident(source), target: ident(target), by: BY, evidence, coverage },
+        NOW,
+      );
+    async function realScenario(sourceItems = [SRC_ITEM], targetItems = [TGT_ITEM]) {
+      const { taskId } = await seed();
+      await record(taskId, { prNumber: 3081, head: OLD, items: sourceItems });
+      await record(taskId, { prNumber: 3081, head: FINAL, items: targetItems, mergeCommit: SQUASH });
+      await settle(FINAL);
+      return { taskId, old: await rowAt(OLD), final: await rowAt(FINAL) };
+    }
+
+    it('没有声明就拒（只凭同 PR 已合、模糊相似不消账）；声明后成功，旧行回执不伪填，读取和关闭一致', async () => {
+      const { taskId, old, final } = await realScenario();
+      await expect(supersede(old, final)).rejects.toThrow(/没盖住/);
+      await expect(supersedeWith(old, final, [])).rejects.toThrow(/没盖住/);
+      expect(await readAcceptanceDutySupersessions(t.db, ISSUE)).toEqual([]);
+      expect(await openAcceptanceDuties(t.db, taskId)).toEqual([expect.objectContaining({ head: OLD })]);
+
+      const done = await supersedeWith(old, final, [cover()]);
+      expect(done).toMatchObject({
+        head: OLD,
+        mergeCommit: null,
+        mergedAt: null,
+        settledAt: null,
+        successorId: final.id,
+        successorGeneration: final.generation,
+        supersedeCoverage: [cover()],
+      });
+      expect(await states()).toEqual({ [OLD]: 'superseded', [FINAL]: 'settled' });
+      expect(await openAcceptanceDuties(t.db, taskId)).toEqual([]);
+      expect(await readAcceptanceDutySupersessions(t.db, ISSUE)).toEqual([
+        expect.objectContaining({
+          sourceId: old.id,
+          targetId: final.id,
+          targetMergeCommit: SQUASH,
+          by: BY,
+          coverage: [cover()],
+        }),
+      ]);
+
+      // 重放幂等（同一声明）；换依据、去掉声明都不冒充成功，操作记录只一条
+      expect(await supersedeWith(old, final, [cover()])).toMatchObject({ id: old.id });
+      await expect(supersedeWith(old, final, [cover({ basis: '另一份依据' })])).rejects.toThrow(/现行替代/);
+      await expect(supersedeWith(old, final, [])).rejects.toThrow(/现行替代/);
+      expect(await readAcceptanceDutySupersessions(t.db, ISSUE)).toHaveLength(1);
+    });
+
+    it('【故意造出的失败】声明遗漏源项、指向不存在的项、子串、空依据、格式不对：一律拒绝，不落账', async () => {
+      const { taskId, old, final } = await realScenario([SRC_ITEM, OTHER]);
+      // 只声明了一条，OTHER 没盖住
+      await expect(supersedeWith(old, final, [cover()])).rejects.toThrow(/没盖住.*第 3 条/);
+      // 目标里根本没有对应的项（子串、编造的原文）
+      await expect(
+        supersedeWith(old, final, [cover(), cover({ source: OTHER, target: '目标里没有的编造项' })]),
+      ).rejects.toThrow(/不是源 \/ 目标的原文/);
+      await expect(
+        supersedeWith(old, final, [cover({ target: '第5条：PR 全套 CI' }), cover({ source: OTHER })]),
+      ).rejects.toThrow(/不是源 \/ 目标的原文/);
+      await expect(supersedeWith(old, final, [cover({ source: '第 5 条' })])).rejects.toThrow(
+        /不是源 \/ 目标的原文/,
+      );
+      // 空依据、多余字段、非数组
+      await expect(supersedeWith(old, final, [cover({ basis: ' ' })])).rejects.toThrow(/覆盖声明/);
+      await expect(
+        supersedeWith(old, final, [{ ...cover(), extra: 1 } as unknown as ReturnType<typeof cover>]),
+      ).rejects.toThrow(/覆盖声明/);
+      await expect(supersedeWith(old, final, {} as unknown as ReturnType<typeof cover>[])).rejects.toThrow(
+        /覆盖声明/,
+      );
+      expect((await rowAt(OLD)).supersededAt).toBeNull();
+      expect((await rowAt(OLD)).supersedeCoverage).toBeNull();
+      expect(await t.db.select().from(acceptanceDutySupersessions)).toEqual([]);
+      expect(await openAcceptanceDuties(t.db, taskId)).toEqual([expect.objectContaining({ head: OLD })]);
+      // 目标补上对应项并重验后，源两条各自声明才成功；拿旧代目标的请求仍失败
+      await record(taskId, { prNumber: 3081, head: FINAL, items: [OTHER] });
+      await settle(FINAL);
+      const both = [cover(), cover({ source: OTHER, target: OTHER })];
+      await expect(supersedeWith(old, final, both)).rejects.toThrow(/目标验收责任身份或代次/);
+      await supersedeWith(old, await rowAt(FINAL), both);
+      expect(await openAcceptanceDuties(t.db, taskId)).toEqual([]);
+    });
+
+    it('目标和其它前提照旧要查：目标未合未验、换代的陈旧请求，声明救不了', async () => {
+      const { taskId, old, final } = await realScenario();
+      // 目标后来新增项：换代，旧请求失败；目标重开，声明不能让它放行
+      await record(taskId, { prNumber: 3081, head: FINAL, items: ['合后又补一条'] });
+      await expect(supersedeWith(old, final, [cover()])).rejects.toThrow(/目标验收责任身份或代次/);
+      await expect(supersedeWith(old, await rowAt(FINAL), [cover()])).rejects.toThrow(/最终验收/);
+      await settle(FINAL);
+      const done = await supersedeWith(old, await rowAt(FINAL), [cover()]);
+      expect(done.successorGeneration).toBe(final.generation + 1);
+      expect(await openAcceptanceDuties(t.db, taskId)).toEqual([]);
+
+      // 替代后目标又换代：替代过期，旧头回到 open，声明本身不放行
+      await record(taskId, { prNumber: 3081, head: FINAL, items: ['再补一条'] });
+      await settle(FINAL);
+      expect(await states()).toEqual({ [OLD]: 'open', [FINAL]: 'settled' });
+      expect((await openAcceptanceDuties(t.db, taskId)).map((d) => d.head)).toEqual([OLD]);
+      // 重新指必须再给声明；不给就是没盖住
+      await expect(supersede(await rowAt(OLD), await rowAt(FINAL))).rejects.toThrow(/没盖住/);
+      await supersedeWith(await rowAt(OLD), await rowAt(FINAL), [cover()], '重验后再指');
+      expect(await openAcceptanceDuties(t.db, taskId)).toEqual([]);
+
+      // 源新增项：替代和声明一并作废（新项没核过）
+      await record(taskId, { prNumber: 3081, head: OLD, items: [OTHER] });
+      expect(await rowAt(OLD)).toMatchObject({ supersededAt: null, supersedeCoverage: null });
+      expect(await states()).toEqual({ [OLD]: 'open', [FINAL]: 'settled' });
+      expect(await readAcceptanceDutySupersessions(t.db, ISSUE)).toHaveLength(2);
+    });
+
+    it('目标没合并回执 / 没最终验收时，声明同样不放行', async () => {
+      const { taskId } = await seed();
+      await record(taskId, { prNumber: 3081, head: OLD, items: [SRC_ITEM] });
+      await record(taskId, { prNumber: 3081, head: FINAL, items: [TGT_ITEM] });
+      await expect(supersedeWith(await rowAt(OLD), await rowAt(FINAL), [cover()])).rejects.toThrow(
+        /合并回执/,
+      );
+      await record(taskId, { prNumber: 3081, head: FINAL, items: [TGT_ITEM], mergeCommit: SQUASH });
+      await expect(supersedeWith(await rowAt(OLD), await rowAt(FINAL), [cover()])).rejects.toThrow(
+        /最终验收/,
+      );
+      expect(await t.db.select().from(acceptanceDutySupersessions)).toEqual([]);
+    });
+  });
 });

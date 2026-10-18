@@ -283,3 +283,162 @@ it(
   },
   TEST_DB_TIMEOUT_MS,
 );
+
+it(
+  '#3071 真实措辞不同的验收项：生产CLI带 --coverage 才能替代，status、公开口、关单闸同一结论',
+  async () => {
+    const [repo] = await t.db
+      .insert(repos)
+      .values({ owner: 'o', name: 'w', testCommand: 'pnpm check' })
+      .returning();
+    if (!repo) throw new Error('repo seed failed');
+    const [task] = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 3072,
+        title: '换头且措辞不同的单',
+        rawRequest: '验收',
+        requestedBy: 'frank',
+        priority: 1,
+        state: 'running',
+      })
+      .returning();
+    if (!task) throw new Error('task seed failed');
+    const OLD = 'c471bae51632e024f9aeaace4c8e074e627c1376';
+    const FINAL = 'aa5b84356ca84f8b50cdb05cf606614741049437';
+    const SRC_ITEM = '第 5 条：PR 全套 CI 是否最终全绿并 squash 需要看合并闸和 PR 状态，diff 无法判定。';
+    const TGT_ITEM = '第5条：PR 全套 CI 是否已绿、是否已 squash 需要 GitHub 外部状态，diff 和材料无法判定。';
+    const issue = { repo: 'o/w', issueNumber: 3072 };
+    const base = { taskId: task.id, ...issue, prNumber: 3081 };
+    await upsertAcceptanceDuty(t.db, { ...base, head: OLD, items: [SRC_ITEM] });
+    await upsertAcceptanceDuty(t.db, {
+      ...base,
+      head: FINAL,
+      items: [TGT_ITEM],
+      mergeCommit: 'b41eaed8886eb30e799a1a9911414b55e17d56c6',
+      mergedAt: new Date(),
+    });
+    const find = async (head: string) => {
+      const row = (await readAcceptanceDutyRows(t.db, issue)).find((r) => r.head === head);
+      if (!row) throw new Error('duty seed failed');
+      return row;
+    };
+    const output: string[] = [];
+    const deps = {
+      env: { DATABASE_URL: 'test' },
+      out: (x: string) => output.push(x),
+      err: () => {},
+      openDb: async () => ({ db: t.db, close: async () => {} }),
+      openStore: async () => {
+        throw new Error('unexpected');
+      },
+      now: () => new Date('2026-10-18T12:00:00Z'),
+    } as CliDeps;
+    const final0 = await find(FINAL);
+    expect(
+      await main(
+        [
+          'acceptance',
+          'settle',
+          'o/w',
+          '3072',
+          '--id',
+          String(final0.id),
+          '--generation',
+          String(final0.generation),
+          '--pr',
+          '3081',
+          '--head',
+          FINAL,
+          '--evidence',
+          '最终头现场验收',
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    const old = await find(OLD);
+    const final = await find(FINAL);
+    const supersede = (...extra: string[]) =>
+      main(
+        [
+          'acceptance',
+          'supersede',
+          'o/w',
+          '3072',
+          '--id',
+          String(old.id),
+          '--generation',
+          String(old.generation),
+          '--pr',
+          '3081',
+          '--head',
+          OLD,
+          '--target-id',
+          String(final.id),
+          '--target-generation',
+          String(final.generation),
+          '--target-pr',
+          '3081',
+          '--target-head',
+          FINAL,
+          '--evidence',
+          'PR #3081 最终头已合已验',
+          ...extra,
+        ],
+        deps,
+      );
+    const coverage = JSON.stringify([
+      { source: SRC_ITEM, target: TGT_ITEM, basis: '同为最终全 CI 绿 + squash 的外部状态判定' },
+    ]);
+    // 不带声明、声明写错原文：拒，不落账
+    expect(await supersede()).toBe(1);
+    expect(
+      await supersede('--coverage', JSON.stringify([{ source: '第 5 条', target: TGT_ITEM, basis: '子串' }])),
+    ).toBe(1);
+    expect(await readAcceptanceDutySupersessions(t.db, issue)).toEqual([]);
+    expect((await find(OLD)).supersededAt).toBeNull();
+
+    expect(await supersede('--coverage', coverage)).toBe(0);
+    expect(JSON.parse(output.pop() ?? 'null')).toMatchObject({
+      head: OLD,
+      mergeCommit: null,
+      supersedeCoverage: [{ source: SRC_ITEM, target: TGT_ITEM }],
+    });
+    expect(await supersede('--coverage', coverage)).toBe(0);
+    expect(await readAcceptanceDutySupersessions(t.db, issue)).toEqual([
+      expect.objectContaining({
+        coverage: [expect.objectContaining({ source: SRC_ITEM, target: TGT_ITEM })],
+      }),
+    ]);
+
+    expect(await main(['acceptance', 'status', 'o/w', '3072'], deps)).toBe(0);
+    const list = JSON.parse(output.pop() ?? 'null') as { head: string; state: string }[];
+    expect(Object.fromEntries(list.map((d) => [d.head, d.state]))).toEqual({
+      [OLD]: 'superseded',
+      [FINAL]: 'settled',
+    });
+    const app = acceptancePublicRoutes({
+      ciPolicyBridge: { read: async () => ({ repo: 'o/w' }) },
+      acceptanceDuties: (x: { repo: string; issueNumber: number }) => readAcceptanceDutyRows(t.db, x),
+    } as unknown as Deps);
+    const res = await app.request('/api/public/acceptance/v1/repos/1/issues/3072');
+    const duties = ((await res.json()) as { duties: Record<string, unknown>[] }).duties;
+    expect(duties[0]).toMatchObject({ state: 'superseded', supersedeCoverage: [{ source: SRC_ITEM }] });
+    const gh = async () => ({
+      code: 0,
+      stdout: JSON.stringify({ id: 1, full_name: 'o/w', private: false }),
+      stderr: '',
+    });
+    expect(
+      await acceptanceGate(
+        gh,
+        'https://api.github.com/repos/o/w',
+        3072,
+        (async (url: string) => app.request(new URL(url).pathname)) as unknown as typeof fetch,
+        'https://example.org',
+      ),
+    ).toBeUndefined();
+  },
+  TEST_DB_TIMEOUT_MS,
+);

@@ -1,5 +1,11 @@
 // 干活的记录：仓、需求、子任务、会话、叫停请求、进度、追问、人闸批准、状态变化、PR 镜像、需求文档索引。
-import type { FlowMode, FlowSource, TaskExecutor, VerifyRejectClass } from '@fleet-dao/shared';
+import type {
+  AcceptanceCoverage,
+  FlowMode,
+  FlowSource,
+  TaskExecutor,
+  VerifyRejectClass,
+} from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -405,7 +411,7 @@ export const taskRounds = pgTable(
  * 一行 = 一张单在某个 PR 的某个头上转给人的那几条；没有代码的协调验收责任（长期协调单、无代码单）pr_number 记 0、head 记空串，
  * 不要求为它开空 PR。挂在任务行上（不跟着租约、执行方走）：本机租约收回、退回法国、合并、引擎重启都不丢。
  * 同一张单同一 PR 同一个头只一行（重复转交、合并回执重来都落在同一行）；只进不删，验完的记 settled_* 三列。
- * PR 换了头、旧头永远等不到合并回执的（#3114）：操作者显式把旧行替代收口到同单同 PR 已合已验的那一行，记 superseded_* 五列；
+ * PR 换了头、旧头永远等不到合并回执的（#3114）：操作者显式把旧行替代收口到同单同 PR 已合已验的那一行，记 superseded_* 五列和逐项覆盖声明 supersede_coverage；
  * 旧行的合并回执照旧空着，不冒记最终合并。替代还算不算数由 @fleet-dao/shared 的 acceptanceDutyState 现算（目标换代即失效）。
  */
 export const acceptanceDuties = pgTable(
@@ -442,12 +448,14 @@ export const acceptanceDuties = pgTable(
     supersedeEvidence: text('supersede_evidence'),
     successorId: bigint('successor_id', { mode: 'number' }),
     successorGeneration: integer('successor_generation'),
+    /** 替代时操作者逐源项声明的覆盖映射（措辞不同的历史项）：随替代一起写，空 = 没被替代。 */
+    supersedeCoverage: jsonb('supersede_coverage').$type<AcceptanceCoverage[]>(),
   },
   (t) => [
     foreignKey({ name: 'acceptance_duties_successor_fk', columns: [t.successorId], foreignColumns: [t.id] }),
     check(
       'acceptance_duties_superseded_complete',
-      sql`(${t.supersededAt} is null and ${t.supersededBy} is null and ${t.supersedeEvidence} is null and ${t.successorId} is null and ${t.successorGeneration} is null) or (${t.supersededAt} is not null and ${t.supersededBy} is not null and ${t.supersedeEvidence} is not null and length(${t.supersedeEvidence}) > 0 and ${t.successorId} is not null and ${t.successorId} <> ${t.id} and ${t.successorGeneration} is not null and ${t.successorGeneration} > 0)`,
+      sql`(${t.supersededAt} is null and ${t.supersededBy} is null and ${t.supersedeEvidence} is null and ${t.successorId} is null and ${t.successorGeneration} is null and ${t.supersedeCoverage} is null) or (${t.supersededAt} is not null and ${t.supersededBy} is not null and ${t.supersedeEvidence} is not null and length(${t.supersedeEvidence}) > 0 and ${t.successorId} is not null and ${t.successorId} <> ${t.id} and ${t.successorGeneration} is not null and ${t.successorGeneration} > 0 and ${t.supersedeCoverage} is not null and jsonb_typeof(${t.supersedeCoverage}) = 'array')`,
     ),
     unique('acceptance_duties_task_pr_head_unique').on(t.taskId, t.prNumber, t.head),
     check('acceptance_duties_issue_positive', sql`${t.issueNumber} > 0`),
@@ -486,6 +494,8 @@ export const acceptanceDutySupersessions = pgTable(
     prNumber: integer('pr_number').notNull(),
     by: text('by').notNull(),
     evidence: text('evidence').notNull(),
+    /** 本次操作者逐源项声明的覆盖映射（空数组 = 全部整串相等，没用声明）。 */
+    coverage: jsonb('coverage').$type<AcceptanceCoverage[]>().notNull().default(sql`'[]'::jsonb`),
     createdAt: timestamp('created_at', tz).notNull(),
   },
   (t) => [

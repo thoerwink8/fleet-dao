@@ -1,5 +1,5 @@
 {
-  "id": "0667a5fe-3b0c-4fce-9875-6e6df98253da",
+  "id": "840d37b2-c6a3-42c4-9575-23809bda7b9d",
   "prevId": "0c9d9d56-5a0d-4a8c-91c7-2697f11ecb02",
   "version": "7",
   "dialect": "postgresql",
@@ -5672,6 +5672,12 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": false
+        },
+        "supersede_coverage": {
+          "name": "supersede_coverage",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -5724,7 +5730,7 @@
       "checkConstraints": {
         "acceptance_duties_superseded_complete": {
           "name": "acceptance_duties_superseded_complete",
-          "value": "(\"acceptance_duties\".\"superseded_at\" is null and \"acceptance_duties\".\"superseded_by\" is null and \"acceptance_duties\".\"supersede_evidence\" is null and \"acceptance_duties\".\"successor_id\" is null and \"acceptance_duties\".\"successor_generation\" is null) or (\"acceptance_duties\".\"superseded_at\" is not null and \"acceptance_duties\".\"superseded_by\" is not null and \"acceptance_duties\".\"supersede_evidence\" is not null and length(\"acceptance_duties\".\"supersede_evidence\") > 0 and \"acceptance_duties\".\"successor_id\" is not null and \"acceptance_duties\".\"successor_id\" <> \"acceptance_duties\".\"id\" and \"acceptance_duties\".\"successor_generation\" is not null and \"acceptance_duties\".\"successor_generation\" > 0)"
+          "value": "(\"acceptance_duties\".\"superseded_at\" is null and \"acceptance_duties\".\"superseded_by\" is null and \"acceptance_duties\".\"supersede_evidence\" is null and \"acceptance_duties\".\"successor_id\" is null and \"acceptance_duties\".\"successor_generation\" is null and \"acceptance_duties\".\"supersede_coverage\" is null) or (\"acceptance_duties\".\"superseded_at\" is not null and \"acceptance_duties\".\"superseded_by\" is not null and \"acceptance_duties\".\"supersede_evidence\" is not null and length(\"acceptance_duties\".\"supersede_evidence\") > 0 and \"acceptance_duties\".\"successor_id\" is not null and \"acceptance_duties\".\"successor_id\" <> \"acceptance_duties\".\"id\" and \"acceptance_duties\".\"successor_generation\" is not null and \"acceptance_duties\".\"successor_generation\" > 0 and \"acceptance_duties\".\"supersede_coverage\" is not null and jsonb_typeof(\"acceptance_duties\".\"supersede_coverage\") = 'array')"
         },
         "acceptance_duties_issue_positive": {
           "name": "acceptance_duties_issue_positive",
@@ -5841,6 +5847,13 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
+        },
+        "coverage": {
+          "name": "coverage",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'[]'::jsonb"
         },
         "created_at": {
           "name": "created_at",

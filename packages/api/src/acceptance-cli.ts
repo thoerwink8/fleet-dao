@@ -1,9 +1,9 @@
 import { userInfo } from 'node:os';
 import type { Db } from '@fleet-dao/db';
-import { acceptanceDutyState } from '@fleet-dao/shared';
+import { type AcceptanceCoverage, acceptanceDutyState, parseAcceptanceCoverage } from '@fleet-dao/shared';
 
 export const ACCEPTANCE_USAGE =
-  '用法：fleet-api acceptance status <owner/仓> <单号> | fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号，协调责任为0> --head <SHA，协调责任为-> --evidence "验收证据" | fleet-api acceptance supersede <owner/仓> <单号> --id <旧责任号> --generation <代次> --pr <PR号> --head <旧头SHA> --target-id <最终责任号> --target-generation <代次> --target-pr <PR号> --target-head <最终头SHA> --evidence "替代依据"';
+  '用法：fleet-api acceptance status <owner/仓> <单号> | fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号，协调责任为0> --head <SHA，协调责任为-> --evidence "验收证据" | fleet-api acceptance supersede <owner/仓> <单号> --id <旧责任号> --generation <代次> --pr <PR号> --head <旧头SHA> --target-id <最终责任号> --target-generation <代次> --target-pr <PR号> --target-head <最终头SHA> --evidence "替代依据" [--coverage \'[{"source":"源项原文","target":"目标项原文","basis":"覆盖依据"}]\']（源项和目标项措辞不同才写 --coverage，逐条人工审定，原文整串照抄 status 的 items）';
 
 const FLAGS = {
   settle: ['--id', '--generation', '--pr', '--head', '--evidence'],
@@ -17,6 +17,7 @@ const FLAGS = {
     '--target-pr',
     '--target-head',
     '--evidence',
+    '--coverage',
   ],
 } as const;
 
@@ -60,6 +61,16 @@ export function parseAcceptanceArgs(args: readonly string[]) {
       if (!/^[a-f0-9]{40}$/.test(value)) throw new Error(ACCEPTANCE_USAGE);
       return value;
     };
+    let coverage: AcceptanceCoverage[] = [];
+    if (values['--coverage'] !== undefined) {
+      try {
+        const parsed = parseAcceptanceCoverage(JSON.parse(values['--coverage']));
+        if (!parsed?.length) throw new Error(ACCEPTANCE_USAGE);
+        coverage = parsed;
+      } catch {
+        throw new Error(ACCEPTANCE_USAGE);
+      }
+    }
     return {
       action,
       repo,
@@ -81,6 +92,7 @@ export function parseAcceptanceArgs(args: readonly string[]) {
         head: sha('--target-head'),
       },
       evidence,
+      coverage,
     } as const;
   }
   const prNumber = positive('--pr', true);
@@ -111,7 +123,7 @@ export async function runAcceptance(args: readonly string[], db: Db, now: Date) 
   if (input.action === 'supersede')
     return supersedeAcceptanceDuty(
       db,
-      { source: input.source, target: input.target, by, evidence: input.evidence },
+      { source: input.source, target: input.target, by, evidence: input.evidence, coverage: input.coverage },
       now,
     );
   const { action: _, ...identity } = input;

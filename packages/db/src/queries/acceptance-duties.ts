@@ -1,4 +1,10 @@
-import { supersessionProblem } from '@fleet-dao/shared';
+import {
+  type AcceptanceCoverage,
+  normalizeAcceptanceCoverage,
+  parseAcceptanceCoverage,
+  sameAcceptanceCoverage,
+  supersessionProblem,
+} from '@fleet-dao/shared';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { acceptanceDuties, acceptanceDutySupersessions } from '../schema/index.ts';
@@ -39,6 +45,7 @@ export async function upsertAcceptanceDuty(db: Db, values: typeof acceptanceDuti
         supersedeEvidence: sql`CASE WHEN ${added} THEN NULL ELSE ${acceptanceDuties.supersedeEvidence} END`,
         successorId: sql`CASE WHEN ${added} THEN NULL ELSE ${acceptanceDuties.successorId} END`,
         successorGeneration: sql`CASE WHEN ${added} THEN NULL ELSE ${acceptanceDuties.successorGeneration} END`,
+        supersedeCoverage: sql`CASE WHEN ${added} THEN NULL ELSE ${acceptanceDuties.supersedeCoverage} END`,
       },
     });
 }
@@ -54,16 +61,27 @@ const sameIdentity = (row: AcceptanceDutyRow, id: AcceptanceDutyIdentity) =>
 /**
  * 旧头替代收口（#3114）：PR 换头后旧头永远没有合并回执，操作者显式把它指向同单同 PR 已合已验的最终责任。
  * 源、目标两行按 id 顺序 FOR UPDATE 锁住，现读精确身份和代次、核验覆盖、写源行、追加操作记录都在一个事务里；
- * 旧行合并回执不填。同一请求重放幂等；已有现行替代时换目标或换证据报错，不冒充成功；替代因目标换代过期的可以重新指。
+ * 旧行合并回执不填。同一请求重放幂等；已有现行替代时换目标、换证据或换覆盖声明报错，不冒充成功；替代因目标换代过期的可以重新指。
+ * 源项和目标项措辞不同的（不同冷验收轮次写的），操作者用 coverage 逐源项声明由目标哪一条覆盖、依据是什么；
+ * 声明随替代写在源行和操作记录里，读时关闭判定用同一份（shared 的 supersessionProblem），没声明的源项只认整串相等。
  */
 export async function supersedeAcceptanceDuty(
   db: Db,
-  input: { source: AcceptanceDutyIdentity; target: AcceptanceDutyIdentity; by: string; evidence: string },
+  input: {
+    source: AcceptanceDutyIdentity;
+    target: AcceptanceDutyIdentity;
+    by: string;
+    evidence: string;
+    coverage?: readonly AcceptanceCoverage[];
+  },
   now: Date,
 ) {
   const by = input.by.trim(),
     evidence = input.evidence.trim();
   if (!by || !evidence) throw new Error('替代收口要写明谁做的、凭什么');
+  const parsed = parseAcceptanceCoverage(input.coverage ?? []);
+  if (!parsed) throw new Error('覆盖声明要写明每条源项、目标项原文和依据');
+  const coverage = normalizeAcceptanceCoverage(parsed);
   const { source, target } = input;
   if (source.id === target.id) throw new Error('替代收口的源和目标是同一行');
   return db.transaction(async (tx) => {
@@ -94,14 +112,15 @@ export async function supersedeAcceptanceDuty(
           src.successorId === tgt.id &&
           src.successorGeneration === tgt.generation &&
           src.supersededBy === by &&
-          src.supersedeEvidence === evidence
+          src.supersedeEvidence === evidence &&
+          sameAcceptanceCoverage(src.supersedeCoverage, coverage)
         )
           return src;
-        throw new Error('源验收责任已有现行替代（目标或证据不同），不冒充本次成功');
+        throw new Error('源验收责任已有现行替代（目标、证据或覆盖声明不同），不冒充本次成功');
       }
       // 原替代已过期（目标换代、未再验）：可以按现读重新指，旧的那次留在操作记录里
     }
-    const problem = supersessionProblem(src, tgt, tgt.generation);
+    const problem = supersessionProblem(src, tgt, tgt.generation, coverage);
     if (problem) throw new Error(`不能替代收口：${problem}`);
     const [row] = await tx
       .update(acceptanceDuties)
@@ -111,6 +130,7 @@ export async function supersedeAcceptanceDuty(
         supersedeEvidence: evidence,
         successorId: tgt.id,
         successorGeneration: tgt.generation,
+        supersedeCoverage: coverage,
       })
       .where(and(eq(acceptanceDuties.id, src.id), eq(acceptanceDuties.generation, src.generation)))
       .returning();
@@ -128,6 +148,7 @@ export async function supersedeAcceptanceDuty(
       prNumber: src.prNumber,
       by,
       evidence,
+      coverage,
       createdAt: now,
     });
     return row;

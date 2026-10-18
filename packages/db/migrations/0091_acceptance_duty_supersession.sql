@@ -12,6 +12,7 @@ CREATE TABLE "acceptance_duty_supersessions" (
 	"pr_number" integer NOT NULL,
 	"by" text NOT NULL,
 	"evidence" text NOT NULL,
+	"coverage" jsonb DEFAULT '[]'::jsonb NOT NULL,
 	"created_at" timestamp with time zone NOT NULL,
 	CONSTRAINT "acceptance_duty_supersessions_distinct" CHECK ("acceptance_duty_supersessions"."source_id" <> "acceptance_duty_supersessions"."target_id"),
 	CONSTRAINT "acceptance_duty_supersessions_signed" CHECK (length("acceptance_duty_supersessions"."by") > 0 and length("acceptance_duty_supersessions"."evidence") > 0)
@@ -22,8 +23,9 @@ ALTER TABLE "acceptance_duties" ADD COLUMN "superseded_by" text;--> statement-br
 ALTER TABLE "acceptance_duties" ADD COLUMN "supersede_evidence" text;--> statement-breakpoint
 ALTER TABLE "acceptance_duties" ADD COLUMN "successor_id" bigint;--> statement-breakpoint
 ALTER TABLE "acceptance_duties" ADD COLUMN "successor_generation" integer;--> statement-breakpoint
+ALTER TABLE "acceptance_duties" ADD COLUMN "supersede_coverage" jsonb;--> statement-breakpoint
 ALTER TABLE "acceptance_duty_supersessions" ADD CONSTRAINT "acceptance_duty_supersessions_source_id_acceptance_duties_id_fk" FOREIGN KEY ("source_id") REFERENCES "public"."acceptance_duties"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "acceptance_duty_supersessions" ADD CONSTRAINT "acceptance_duty_supersessions_target_id_acceptance_duties_id_fk" FOREIGN KEY ("target_id") REFERENCES "public"."acceptance_duties"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "acceptance_duty_supersessions_source_idx" ON "acceptance_duty_supersessions" USING btree ("source_id");--> statement-breakpoint
 ALTER TABLE "acceptance_duties" ADD CONSTRAINT "acceptance_duties_successor_fk" FOREIGN KEY ("successor_id") REFERENCES "public"."acceptance_duties"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "acceptance_duties" ADD CONSTRAINT "acceptance_duties_superseded_complete" CHECK (("acceptance_duties"."superseded_at" is null and "acceptance_duties"."superseded_by" is null and "acceptance_duties"."supersede_evidence" is null and "acceptance_duties"."successor_id" is null and "acceptance_duties"."successor_generation" is null) or ("acceptance_duties"."superseded_at" is not null and "acceptance_duties"."superseded_by" is not null and "acceptance_duties"."supersede_evidence" is not null and length("acceptance_duties"."supersede_evidence") > 0 and "acceptance_duties"."successor_id" is not null and "acceptance_duties"."successor_id" <> "acceptance_duties"."id" and "acceptance_duties"."successor_generation" is not null and "acceptance_duties"."successor_generation" > 0));
+ALTER TABLE "acceptance_duties" ADD CONSTRAINT "acceptance_duties_superseded_complete" CHECK (("acceptance_duties"."superseded_at" is null and "acceptance_duties"."superseded_by" is null and "acceptance_duties"."supersede_evidence" is null and "acceptance_duties"."successor_id" is null and "acceptance_duties"."successor_generation" is null and "acceptance_duties"."supersede_coverage" is null) or ("acceptance_duties"."superseded_at" is not null and "acceptance_duties"."superseded_by" is not null and "acceptance_duties"."supersede_evidence" is not null and length("acceptance_duties"."supersede_evidence") > 0 and "acceptance_duties"."successor_id" is not null and "acceptance_duties"."successor_id" <> "acceptance_duties"."id" and "acceptance_duties"."successor_generation" is not null and "acceptance_duties"."successor_generation" > 0 and "acceptance_duties"."supersede_coverage" is not null and jsonb_typeof("acceptance_duties"."supersede_coverage") = 'array'));

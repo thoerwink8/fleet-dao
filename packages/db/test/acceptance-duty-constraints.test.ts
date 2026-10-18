@@ -18,6 +18,7 @@ const COMPLETE = {
   supersededBy: 'ops:acceptance:frank',
   supersedeEvidence: 'PR 最终头已合已验',
   successorGeneration: 1,
+  supersedeCoverage: [] as never[],
 } as const;
 
 async function seedDuties() {
@@ -54,6 +55,7 @@ describe('acceptance_duties_superseded_complete', () => {
       'supersedeEvidence',
       'successorId',
       'successorGeneration',
+      'supersedeCoverage',
     ];
     for (const key of missing)
       await expectViolation(
@@ -63,6 +65,11 @@ describe('acceptance_duties_superseded_complete', () => {
     // 评审复现的反例：只写 superseded_at / superseded_by，其余三列 NULL
     await expectViolation(
       t.db.insert(acceptanceDuties).values({ ...row('e'), supersededAt: NOW, supersededBy: 'operator' }),
+      'acceptance_duties_superseded_complete',
+    );
+    // 覆盖声明不是数组同样拒绝
+    await expectViolation(
+      t.db.insert(acceptanceDuties).values({ ...full, supersedeCoverage: {} as never }),
       'acceptance_duties_superseded_complete',
     );
     // 空证据、代次非正同样拒绝

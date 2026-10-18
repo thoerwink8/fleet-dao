@@ -77,6 +77,7 @@ describe('最终验收标准入口', () => {
       source: { id: 11, generation: 1, repo: 'o/r', issueNumber: 7, prNumber: 9, head: 'a'.repeat(40) },
       target: { id: 16, generation: 2, repo: 'o/r', issueNumber: 7, prNumber: 9, head: 'b'.repeat(40) },
       evidence: '最终头已合已验',
+      coverage: [],
     });
     const without = (flag: string) => {
       const i = args.indexOf(flag);
@@ -101,6 +102,22 @@ describe('最终验收标准入口', () => {
     bad[bad.indexOf('--target-pr') + 1] = '0';
     expect(() => parseAcceptanceArgs(bad)).toThrow(/用法/);
     expect(() => parseAcceptanceArgs(['settle', ...args.slice(1)])).toThrow(/用法/);
+    // 措辞不同的历史项：--coverage 逐条声明，格式不对一律按用法报错
+    const entry = { source: '旧写法', target: '新写法', basis: '同一条 CI 全绿 + squash' };
+    expect(parseAcceptanceArgs([...args, '--coverage', JSON.stringify([entry])])).toMatchObject({
+      coverage: [entry],
+    });
+    for (const badCoverage of [
+      '[]',
+      'not json',
+      '{}',
+      JSON.stringify([{ ...entry, basis: ' ' }]),
+      JSON.stringify([{ ...entry, extra: 1 }]),
+      JSON.stringify([{ source: 'x', target: 'y' }]),
+    ])
+      expect(() => parseAcceptanceArgs([...args, '--coverage', badCoverage])).toThrow(/用法/);
+    const dup = ['--coverage', JSON.stringify([entry])];
+    expect(() => parseAcceptanceArgs([...args, ...dup, ...dup])).toThrow(/用法/);
   });
   it('公开口先复核public仓身份，只返DB责任状态，无公开写口', async () => {
     const calls: string[] = [];
