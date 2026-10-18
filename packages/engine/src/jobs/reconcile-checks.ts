@@ -59,10 +59,6 @@ export const MERGE_RECORD_LANDED_WHY =
  * #2175 是引擎机器人自己开、自己合的耗时表。
  */
 const KNOWN_CI_TIMINGS_FALSE_ALARMS = ['reconcile:pr:thoerwink8/fleet-dao#2175'] as const;
-/** #2904 额度页的 PR：本机 pr:open 挂 GitHub 自动合并、CI 绿后合入，不经引擎合并队列；已合入的历史事实，改不了。 */
-export const REVIEWED_BYPASS_WHY =
-  '已核：本机 pr:open 挂 GitHub 自动合并、CI 绿后合入，没经引擎合并队列；已合入的历史事实改不了，对账收掉';
-const KNOWN_REVIEWED_BYPASSES = ['reconcile:pr:thoerwink8/fleet-dao#2904'] as const;
 /** PR 合了以后关单那一步（写关单评论、收会话、记做完）要走一会儿：合并这么久之内的不查记账。 */
 export const LEDGER_GRACE_MS = 30 * 60_000;
 /** 每小时一轮，往回看 26 小时：漏一轮也补得回最近一天里合的。 */
@@ -168,12 +164,7 @@ function prProblems(findings: readonly MergedPrFinding[]): {
 }
 
 /** 开着才撤。读不到记没查成，不当成已经撤了。 */
-async function retireOpenCiTimingsAlert(
-  deps: ReconcileCheckDeps,
-  part: SweepPart,
-  dedupeKey: string,
-  why: string = CI_TIMINGS_SKIP_WHY,
-) {
+async function retireOpenCiTimingsAlert(deps: ReconcileCheckDeps, part: SweepPart, dedupeKey: string) {
   let row: Awaited<ReturnType<ReconcileCheckDeps['alerts']['byKey']>>;
   try {
     row = await deps.alerts.byKey(dedupeKey);
@@ -182,7 +173,7 @@ async function retireOpenCiTimingsAlert(
     return;
   }
   if (!row || row.resolvedAt !== null) return;
-  await resolveOne(deps, part, dedupeKey, why);
+  await resolveOne(deps, part, dedupeKey, CI_TIMINGS_SKIP_WHY);
 }
 
 /**
@@ -221,7 +212,7 @@ async function openPrAlertsByRepo(
  * 每个受管的仓，最近 26 小时合了的 PR：镜像补上算发现（记账那一部分靠镜像认合了的 PR，放在它前面跑）。我们机器人开的
  * PR 合并人不是「引擎」、或没有合并队列的合并记录按 PR 报一条（#431 就是这么漏的：合并前那几道核对——不落后主线、CI
  * 全绿、人闸——可能没走）。条件就是「发生过」，只报一次、不自动撤，要人在驾驶舱点「处理」。
- * 引擎自己的耗时表 PR 不报；这一轮看见的、以及已经开着的 #2175、已核过的 #2904，撤掉。
+ * 引擎自己的耗时表 PR 不报；这一轮看见的、以及已经开着的 #2175，撤掉。
  * 本机线自动合并的（localAutoMergePrs）、实际合并人是「引擎」且真实队列来源和完整回执已核对一致的（cleanPrs），开着的撤掉；
  * 回看窗口往回延到这个仓最老那条开着的提醒。
  */
@@ -229,9 +220,6 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
   const part = empty();
   for (const dedupeKey of KNOWN_CI_TIMINGS_FALSE_ALARMS) {
     await retireOpenCiTimingsAlert(deps, part, dedupeKey);
-  }
-  for (const dedupeKey of KNOWN_REVIEWED_BYPASSES) {
-    await retireOpenCiTimingsAlert(deps, part, dedupeKey, REVIEWED_BYPASS_WHY);
   }
   let repos: RepoRef[];
   try {
