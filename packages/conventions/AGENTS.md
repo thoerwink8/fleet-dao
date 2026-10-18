@@ -19,6 +19,8 @@
 
 ## 常见坑
 
+- `plan-reader.ts` 只给 `pnpm plan` 装配读取传输：gh 明确配置 socket 时经 `gh api --include --method GET`，不搬令牌；没有配置仍走原生 HTTP。数字仓号分页先经当前仓元信息核对 id 和 full_name，不能信 Link 自报身份。配置或进程真失败必须报没读成，不能静默换身份、匿名或直连；其他 GitHub 读写入口保持各自原路径。
+
 - `mother-manifest.ts` 严格读写母单正文 JSON 清单；`family-manifest.ts` 全量读含已关闭子单后按唯一清单修复正文与原生关系，多母认领先报冲突、不写。入口 `bin/github-audit.ts` 显式给 family reader/writer；原对账接口仍可只读。批量写清单失败走整批补偿；`issue:new --parent` 的清单失败须明说子单已开已挂，不能建议重开。
 - 空母单只对批量创建标记报错，不按创建时间报警；目录母单允许空清单。parent 孤儿、字段与原生关系冲突和 manifest 差异仍须报告。
 - `pnpm project check|add` 第二步（`project.ts` 的 `probeApps`）读装没装只经 `fleet-api project installations`（#2977，法国用两个机器人的 metadata:read 安装令牌，和导入列表同一份归并），不读本机 gh 的 `user/installations`；`parseInstallFacts` 逐字段严格认。「没查成」（非 0、ssh 超时、非 JSON、缺字段、`reason` 非空、仓号仓名对不上）是 unchecked、退出码 2，不当成没装、不退回本机 gh 猜、不补装；读全了明确不含才是「没装」（red），add 才走本机 gh 的单仓 PUT 补装。
