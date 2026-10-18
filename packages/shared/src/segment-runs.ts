@@ -4,6 +4,7 @@
 // 只给认得出的值——认不出的原样写进原因里，不塞进给页面的字段。
 import type { BillingKind, SegmentKind, SegmentOutcome, SegmentTier } from './domain.ts';
 import { type CostEstimate, estimateCostUsd, type ModelPrice, modelPriceOf } from './model-prices.ts';
+import { RUN_CAUSES, type RunCause, type RunVerdict } from './run-cause.ts';
 
 export const SEGMENT_KINDS = ['scope', 'manual', 'verify'] as const satisfies readonly SegmentKind[];
 export const SEGMENT_TIERS = ['fast', 'medium', 'heavyweight'] as const satisfies readonly SegmentTier[];
@@ -131,6 +132,13 @@ export interface SegmentRunFacts {
   cpuSeconds?: number | undefined;
   /** 判定不开上一段会话时的原因。 */
   resumeReason?: string | undefined;
+  /** 接着上一笔的会话（runs.resume_session_id）。 */
+  resumeSessionId?: string | undefined;
+  /** 为什么起这一笔、摘要、所属回合、验收结论（#3140）；老行都没有。起因按字符串收，认不出的不给。 */
+  cause?: string | undefined;
+  causeSummary?: string | undefined;
+  roundSeq?: number | undefined;
+  verdict?: RunVerdict | undefined;
   failureReason?: string | undefined;
   prNumber?: number | undefined;
   branch?: string | undefined;
@@ -172,6 +180,16 @@ export interface SegmentRunView {
   cpuSeconds?: number | undefined;
   /** 判定不开上一段会话时的原因；页面原样显示。 */
   resumeReason?: string | undefined;
+  /**
+   * 是新会话还是接上一笔的会话（#3140）：true＝记了续的会话号（接上一笔）；false＝记了新会话的原因；
+   * 都没记（老行、对题和验收）不给，页面写「没记」。
+   */
+  resumed?: boolean | undefined;
+  /** 为什么起这一笔、摘要、所属回合（task_rounds.seq）、验收这一笔的结论（#3140）；老行没有，页面写「老记录没记」。 */
+  cause?: RunCause | undefined;
+  causeSummary?: string | undefined;
+  roundSeq?: number | undefined;
+  verdict?: RunVerdict | undefined;
   failureReason?: string | undefined;
   prNumber?: number | undefined;
   branch?: string | undefined;
@@ -324,6 +342,13 @@ export function readSegmentRun(run: SegmentRunFacts, ctx: SegmentReadContext): S
     ...(isCount(run.memoryPeakMb) ? { memoryPeakMb: run.memoryPeakMb } : {}),
     ...(isCount(run.cpuSeconds) && run.cpuSeconds > 0 ? { cpuSeconds: run.cpuSeconds } : {}),
     ...(run.resumeReason?.trim() ? { resumeReason: run.resumeReason.trim() } : {}),
+    ...(run.resumeSessionId?.trim() ? { resumed: true } : run.resumeReason?.trim() ? { resumed: false } : {}),
+    ...(isOneOf(RUN_CAUSES, run.cause) ? { cause: run.cause } : {}),
+    ...(run.causeSummary?.trim() ? { causeSummary: run.causeSummary.trim() } : {}),
+    ...(run.roundSeq !== undefined && Number.isSafeInteger(run.roundSeq) && run.roundSeq > 0
+      ? { roundSeq: run.roundSeq }
+      : {}),
+    ...(run.verdict !== undefined ? { verdict: run.verdict } : {}),
     ...(run.failureReason !== undefined ? { failureReason: run.failureReason } : {}),
     ...(run.prNumber !== undefined && Number.isSafeInteger(run.prNumber) && run.prNumber > 0
       ? { prNumber: run.prNumber }

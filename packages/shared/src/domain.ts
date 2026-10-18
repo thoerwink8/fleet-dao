@@ -2,6 +2,7 @@
 // 改这里之前：数据库表结构（packages/db）以本文件为准；字段增删要同时改表和迁移。
 import type { SessionEffort } from './effort.ts';
 import type { RepoProfile } from './repo-profile.ts';
+import type { RunCause, RunVerdict } from './run-cause.ts';
 import type { ModelStrength } from './track-score.ts';
 
 /** 流程里的一种活（库里的枚举，只增不删）。路由页和选路现在用哪些，见 flow-purposes.ts。 */
@@ -414,6 +415,13 @@ export interface SegmentRun {
   sessionId?: string;
   /** 判定不开上一段会话时的原因；页面显示在这一段下面。 */
   resumeReason?: string;
+  /** 这一笔接着上一笔的会话（runs.resume_session_id，判定要续的会话号）；没给不一定是新会话（老行没记），看 resumeReason。 */
+  resumeSessionId?: string;
+  /** 为什么起这一笔（#3140，runs.cause，RUN_CAUSES）、摘要、所属回合（task_rounds.seq）、验收这一笔的结论；老行不给。 */
+  cause?: RunCause;
+  causeSummary?: string;
+  roundSeq?: number;
+  verdict?: RunVerdict;
 }
 
 export type ProgressKind = 'plan' | 'say' | 'tool' | 'file' | 'test' | 'ask' | 'done' | 'blocked';

@@ -36,6 +36,7 @@ export * from './run-cause.ts';
 export * from './run-verdict.ts';
 export * from './segment-runs.ts';
 export * from './task-list.ts';
+export * from './task-process.ts';
 export * from './task-signals.ts';
 export * from './track-score.ts';
 export * from './transcript.ts';
