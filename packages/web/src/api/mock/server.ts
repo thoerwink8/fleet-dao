@@ -28,6 +28,7 @@ import {
   describeEngineMaster,
   ENGINE_MASTER_SETTING,
   EnvResponseSchema,
+  ExecuteAlertRepairRequest,
   engineMasterOf,
   FrancePreflightResponseSchema,
   FranceReleaseStateSchema,
@@ -3688,6 +3689,14 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           ? { handoff: { progress: MOCK_NOT_WIRED, ...(n.taskId ? { task: MOCK_NOT_WIRED } : {}) } }
           : {}),
       });
+    },
+    // 看门狗受控修复（#3033）：假数据没有看门狗提醒、没有任务现读和开单，列表上不带 repair，点了照实回不能修。
+    async executeAlertRepair(id, raw) {
+      await wait();
+      ExecuteAlertRepairRequest.parse(raw);
+      if (!st.notifications.some((x) => x.id === id))
+        throw new ApiError(404, 'notification_not_found', '没有这条通知');
+      throw new ApiError(409, 'alert_not_repairable', '假数据里没有看门狗的受控修复动作');
     },
     async audit(query) {
       await wait();

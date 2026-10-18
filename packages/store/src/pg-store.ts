@@ -278,6 +278,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         link: opt(n.link),
         taskId: opt(n.taskId),
         createdAt: iso(n.createdAt),
+        raisedAt: iso(n.raisedAt),
         resolvedAt: isoOpt(n.resolvedAt),
         resolvedBy: opt(n.resolvedBy),
         dedupeKey: n.dedupeKey,
@@ -827,10 +828,23 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         }),
       );
     },
-    async putSetting({ key, value, expectedVersion, by }, entry) {
+    async putSetting({ key, value, expectedVersion, by, expectedNotification }, entry) {
       // 值本身可以是 null（例如不设免打扰时段）：写成 jsonb 的 null，不是 SQL 的空值（列不许空）。
       const jsonValue = sql`${JSON.stringify(value ?? null)}::jsonb`;
       return db.transaction(async (tx) => {
+        if (expectedNotification) {
+          const [notification] = await tx
+            .select({ raisedAt: notifications.raisedAt, resolvedAt: notifications.resolvedAt })
+            .from(notifications)
+            .where(eq(notifications.id, expectedNotification.id))
+            .for('update');
+          if (
+            !notification ||
+            notification.raisedAt.toISOString() !== expectedNotification.raisedAt ||
+            (expectedNotification.requireOpen && notification.resolvedAt !== null)
+          )
+            return 'conflict';
+        }
         const written =
           expectedVersion === 0
             ? await tx

@@ -5,7 +5,9 @@
   "description": "三段流程用的纯判断：接活的几道关、任务简报、验证结论、提醒谁在处理。不碰网络和库，引擎、后端、网页、fleet 命令都调它判",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./self-check-budget": "./src/self-check-budget.ts",
+    "./idle-running": "./src/idle-running.ts"
   },
   "dependencies": {
     "@fleet-dao/shared": "workspace:*",

@@ -34,6 +34,8 @@ import type {
   CreateRequestBody,
   Credentials,
   EnvResponse,
+  ExecuteAlertRepairBody,
+  ExecuteAlertRepairResult,
   FrancePreflightResponse,
   FranceReleaseState,
   GroomNowBody,
@@ -264,6 +266,8 @@ export interface FleetApi {
   resolveNotification(id: string): Promise<void>;
   /** 回答「要你拍」（#1915）：点选项或自己输入；回答案和交给指挥官那一步成没成。 */
   answerNotification(id: string, body: AnswerNotificationBody): Promise<AnswerNotificationResult>;
+  /** 看门狗提醒的受控修复（#3033）：只送服务端给的动作编号 + incident + 幂等身份；条件变了、已撤、过期回 409。 */
+  executeAlertRepair(id: string, body: ExecuteAlertRepairBody): Promise<ExecuteAlertRepairResult>;
   audit(query?: { target?: string | undefined; cursor?: string | undefined; limit?: number }): Promise<Audit>;
   settings(): Promise<Settings>;
   updateSetting(key: SettingKey, body: UpdateSettingBody): Promise<Setting>;

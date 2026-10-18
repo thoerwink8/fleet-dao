@@ -31,6 +31,8 @@ import type {
   EnvScheduleSchema,
   EnvSessionsSchema,
   EnvVersionSchema,
+  ExecuteAlertRepairRequest,
+  ExecuteAlertRepairResponse,
   FrancePreflightResponseSchema,
   FranceReleaseStateSchema,
   GroomNowRequest,
@@ -281,6 +283,8 @@ export type NotificationLevel = z.infer<typeof NotificationLevelSchema>;
 export type DecisionOption = z.infer<typeof DecisionOptionSchema>;
 export type AnswerNotificationBody = z.input<typeof AnswerNotificationRequest>;
 export type AnswerNotificationResult = z.infer<typeof AnswerNotificationResponse>;
+export type ExecuteAlertRepairBody = z.input<typeof ExecuteAlertRepairRequest>;
+export type ExecuteAlertRepairResult = z.infer<typeof ExecuteAlertRepairResponse>;
 
 export type Audit = z.infer<typeof AuditResponse>;
 export type AuditEntry = z.infer<typeof AuditEntrySchema>;
