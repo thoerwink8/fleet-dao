@@ -751,7 +751,16 @@ export function createMemoryStore(
     async listSettings() {
       return [...data.settings].sort((a, b) => a.key.localeCompare(b.key));
     },
-    async putSetting({ key, value, expectedVersion, by }, entry) {
+    async putSetting({ key, value, expectedVersion, by, expectedNotification }, entry) {
+      if (expectedNotification) {
+        const notification = data.notifications.find((n) => n.id === expectedNotification.id);
+        if (
+          !notification ||
+          (notification.raisedAt ?? notification.createdAt) !== expectedNotification.raisedAt ||
+          (expectedNotification.requireOpen && notification.resolvedAt !== undefined)
+        )
+          return 'conflict';
+      }
       const current = data.settings.find((s) => s.key === key);
       if (isSettingConflict(current?.version, expectedVersion)) return 'conflict';
       checkAudit(entry);

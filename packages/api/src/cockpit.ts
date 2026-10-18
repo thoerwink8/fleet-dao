@@ -58,6 +58,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { handlingOf, handlingView, type NotificationRecord } from '@fleet-dao/store';
 import { type Context, Hono } from 'hono';
 import type { z } from 'zod';
+import { alertRepairViews, registerAlertRepairRoutes } from './alert-repair.ts';
 import { meBody } from './auth.ts';
 import { CARPOOL_RECONCILE_NOT_HERE, carpoolReconcileView } from './carpool-reconcile-view.ts';
 import { registerCiPolicyRoutes } from './ci-policy-routes.ts';
@@ -836,10 +837,17 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
           page.items.map((n) => n.id),
         )
       : { ok: false as const, why: '谁在处理没接上：这里没有提醒的认领和 PR 记录（开发环境）' };
+    // 看门狗提醒现在能点的修复动作和最近一次修复结果（#3033）：读时现算，算不出的动作不出现、原因写在 repair.problems
+    const repair = await alertRepairViews(deps, page.items);
     return reply(c, NotificationsResponse, {
       items: page.items.map((n) => {
         const h = handling.ok ? handling.byId.get(n.id) : undefined;
-        return { ...notificationView(n), ...(h ? { handling: handlingView(h) } : {}) };
+        const r = repair.get(n.id);
+        return {
+          ...notificationView(n),
+          ...(h ? { handling: handlingView(h) } : {}),
+          ...(r ? { repair: r } : {}),
+        };
       }),
       nextCursor: page.nextCursor,
       counts,
@@ -1030,6 +1038,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
   registerCliToolsRoutes(app, deps);
   registerReleaseCardRoutes(app, deps);
   registerReleaseRequestRoutes(app, deps, actorOf);
+  registerAlertRepairRoutes(app, deps, actorOf);
 
   /** 表里每一项都返回；没设过的 version=0、value=null。 */
   async function settingsView() {

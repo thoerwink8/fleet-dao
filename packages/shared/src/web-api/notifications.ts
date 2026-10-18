@@ -263,6 +263,113 @@ export const AnswerNotificationResponse = z.object({
     .optional(),
 });
 
+// —— 看门狗提醒的受控修复（#3033）——
+// 普通 alert 不是「要你拍」，不借 decision_reason 假装要拍：可点的动作由后端读时现算（availableActions），点的时候只收
+// 服务端给的动作编号 + incident 版本 + 幂等身份；条件变了、提醒撤了、身份对不上、动作过期都回 409，不发任何副作用。
+// 信号、请求文件写出去只记 accepted（收到了，不等于修好）；重读原检测条件确认恢复了才记 verified，提醒仍由看门狗自己撤。
+// 需要人本人拍的动作带 choice（沿用「要你拍」的选项形状：至少两项、恰好一项推荐）；拒绝、自由输入、不答都不执行。
+
+export const ALERT_REPAIR_KINDS = [
+  'task-recover',
+  'release-retry',
+  'release-restore',
+  'release-abort',
+  'hand-to-repair',
+] as const;
+export const AlertRepairKindSchema = z.enum(ALERT_REPAIR_KINDS);
+export type AlertRepairKind = z.infer<typeof AlertRepairKindSchema>;
+
+export const AlertRepairActionSchema = z.object({
+  /** 服务端给的动作编号：带上证据摘要，证据变了编号就变，旧编号点不动。 */
+  id: z.string().min(1).max(200),
+  kind: AlertRepairKindSchema,
+  label: z.string().min(1).max(60),
+  detail: z.string().min(1).max(300),
+  /** 动作对准的具体目标：任务提醒是任务、仓、当前工作流；发版是提交号；交修复单是 fleet-dao。 */
+  target: z.object({
+    taskId: z.string().optional(),
+    repo: AlertRepoSchema.optional(),
+    issueNumber: z.number().int().positive().optional(),
+    workflowId: z.string().optional(),
+    workflowRunId: z.string().optional(),
+    releaseStartedAt: z.string().optional(),
+    sha: z.string().optional(),
+  }),
+  /** 要人本人拍的动作才有：选项、推荐、可以自己输入；只有执行项会执行，其余和自由输入一样不执行。 */
+  choice: z.object({ options: DecisionOptionsSchema, allowText: z.literal(true) }).optional(),
+});
+export type AlertRepairAction = z.infer<typeof AlertRepairActionSchema>;
+
+/**
+ * executing 接活了还没写结果（中断后不自动重放）；accepted 信号或请求写出去了，还没核实恢复；verified 重读原条件已恢复；
+ * failed 确定没做成；unknown 结果未知，禁止盲重试；declined 人选了不动或自由输入，没执行；handed 已开修复单。
+ */
+export const ALERT_REPAIR_STATES = [
+  'executing',
+  'accepted',
+  'verified',
+  'failed',
+  'unknown',
+  'declined',
+  'handed',
+] as const;
+
+export const AlertRepairRecordSchema = z.object({
+  incident: z.string(),
+  actionId: z.string(),
+  kind: AlertRepairKindSchema,
+  requestId: z.string().uuid(),
+  state: z.enum(ALERT_REPAIR_STATES),
+  text: z.string().max(600),
+  at: Time,
+  by: z.string(),
+  optionId: z.string().optional(),
+  /** 执行时的精确目标；旧记录缺此字段不能冒充核验成功。 */
+  target: AlertRepairActionSchema.shape.target.optional(),
+  /** 核实用的基线（任务行更新时刻、进度记录这一趟的摘要）。 */
+  baseline: z.string().optional(),
+  /** 最近一次重读原检测条件：ok=true 恢复了；false 还没恢复；null 读不到。 */
+  check: z.object({ at: Time, ok: z.boolean().nullable(), text: z.string().max(400) }).optional(),
+  /** 交给修复：开出的单（同一 incident 只一张）。 */
+  issue: z
+    .object({
+      repo: AlertRepoSchema,
+      number: z.number().int().positive(),
+      url: z.string(),
+      created: z.boolean(),
+    })
+    .optional(),
+});
+export type AlertRepairRecord = z.infer<typeof AlertRepairRecordSchema>;
+
+export const AlertRepairViewSchema = z.object({
+  incident: z.string(),
+  actions: z.array(AlertRepairActionSchema),
+  /** 没算出动作的原因（条件已变、没接上、读不到），一条一句。 */
+  problems: z.array(z.string()),
+  last: AlertRepairRecordSchema.optional(),
+});
+export type AlertRepairView = z.infer<typeof AlertRepairViewSchema>;
+
+export const ExecuteAlertRepairRequest = z
+  .object({
+    actionId: z.string().min(1).max(200),
+    incident: z.string().min(1).max(80),
+    /** 同一次点击重试复用；新的一次用新编号。 */
+    requestId: z.string().uuid(),
+    optionId: z.string().min(1).max(40).optional(),
+    text: z.string().trim().min(1).max(2000).optional(),
+  })
+  .refine((b) => b.optionId === undefined || b.text === undefined, {
+    message: '点一个选项或自己输入一段话，二选一',
+  });
+export const ExecuteAlertRepairResponse = z.object({
+  ok: z.literal(true),
+  repair: AlertRepairRecordSchema,
+  /** 同一幂等身份的重放：回原来的结果，没有再发副作用。 */
+  replayed: z.boolean(),
+});
+
 export const NotificationSchema = z.object({
   id: Id,
   level: NotificationLevelSchema,
@@ -295,6 +402,8 @@ export const NotificationSchema = z.object({
   ),
   /** 谁在处理、修到哪（现算）；这一页没算成时整页的 handlingProblem 写为什么。 */
   handling: AlertHandlingSchema.optional(),
+  /** 看门狗提醒现在能点的修复动作（读时现算）和最近一次修复的结果；别的提醒没有。 */
+  repair: AlertRepairViewSchema.optional(),
 });
 
 export const NotificationsQuery = PageQuery.extend({

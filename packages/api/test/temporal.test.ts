@@ -5,6 +5,7 @@ import { WorkflowGoneError, WorkflowTargetNotFoundError, WorkflowUnavailableErro
 import {
   createEnginePollerCheck,
   createNamespaceCheck,
+  createTaskWorkflowExecution,
   createTemporalRouteWake,
   createTemporalWorkflowControl,
   type EnginePollerSource,
@@ -277,5 +278,52 @@ describe('createEnginePollerCheck：FLEET_TASK_QUEUE 上 workflow、activity 两
     };
     const check = createEnginePollerCheck(failing, () => NOW, FRESH_MS);
     await expect(check()).rejects.toThrow('Temporal 连不上');
+  });
+});
+
+describe('修复绑定工作流 run', () => {
+  it('查回精确 run 和运行状态，发送信号也钉在该 run', async () => {
+    const targets: (string | undefined)[][] = [];
+    const base = fakeClient().client;
+    const read = createTaskWorkflowExecution({
+      ...base,
+      workflow: {
+        getHandle(workflowId) {
+          return {
+            async describe() {
+              return { workflowId, runId: 'original-run', status: { name: 'RUNNING' } };
+            },
+          };
+        },
+      },
+    });
+    expect(await read('task/t1')).toEqual({ workflowId: 'task/t1', runId: 'original-run', running: true });
+    const control = createTemporalWorkflowControl({
+      ...base,
+      workflow: {
+        getHandle(workflowId, runId) {
+          targets.push([workflowId, runId]);
+          return { signal: async () => undefined };
+        },
+      },
+    });
+    await control.signal('task/t1', { name: 'taskContinue', by: 'u' }, 'original-run');
+    expect(targets).toEqual([['task/t1', 'original-run']]);
+  });
+  it('读失败原样失败，不返回空 run 或当成新 run', async () => {
+    const base = fakeClient().client;
+    const read = createTaskWorkflowExecution({
+      ...base,
+      workflow: {
+        getHandle() {
+          return {
+            async describe() {
+              throw new Error('unavailable');
+            },
+          };
+        },
+      },
+    });
+    await expect(read('task/t1')).rejects.toThrow('unavailable');
   });
 });
