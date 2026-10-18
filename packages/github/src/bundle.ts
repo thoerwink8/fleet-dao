@@ -134,6 +134,41 @@ export async function fetchBranchHead(
   });
 }
 
+/** 把既定待验提交补进受管镜像，不用可能前进的分支头代替。 */
+export interface FetchCommitInput {
+  repo: RepoRef;
+  headSha: string;
+  signal?: AbortSignal | undefined;
+}
+
+export async function fetchCommitHead(deps: MirrorReadDeps, input: FetchCommitInput): Promise<void> {
+  if (!FULL_SHA.test(input.headSha)) throw new GitHubError('HEAD_NOT_FOUND', '待验头不是完整提交号');
+  const mirror = mirrorPath(deps.mirrorRoot, input.repo);
+  return withMirrorLock(mirror, async () => {
+    input.signal?.throwIfAborted();
+    await ensureMirror(deps, mirror);
+    const local: GitCall = { cwd: mirror, env: gitEnv({ base: deps.baseEnv }), signal: input.signal };
+    const present = () => deps.git(['cat-file', '-e', `${input.headSha}^{commit}`], local);
+    const existing = await present();
+    input.signal?.throwIfAborted();
+    if (existing.code === 0) return;
+    const token = (await deps.client.installationToken('agent', input.repo, input.signal, 'git-read')).token;
+    const fetched = await deps.git(
+      ['fetch', '--no-tags', '--no-write-fetch-head', '--quiet', deps.gitUrl(input.repo), input.headSha],
+      {
+        ...local,
+        env: gitEnv({ base: deps.baseEnv, config: authHeaderConfig(deps.gitHost, token) }),
+        timeoutMs: NET_TIMEOUT_MS,
+      },
+    );
+    input.signal?.throwIfAborted();
+    if (fetched.code !== 0) throw fromGitFailure('抓取待验精确头', repoSlug(input.repo), fetched);
+    const checked = await present();
+    input.signal?.throwIfAborted();
+    if (checked.code !== 0) throw fromGitFailure('核对待验精确头', repoSlug(input.repo), checked);
+  });
+}
+
 export interface ReadFileDiffInput {
   repo: RepoRef;
   /** 基线（三点比较：`基线...头`，和 PR 在 GitHub 上显示的一样只看分叉点之后头这边改的）。 */

@@ -54,6 +54,8 @@ describe('约定与实现对得上', () => {
       if (name === 'node') continue;
       // 会话内容要这张单真有那一段、且接上了 run_transcript 才有 200：在 run-transcript.test.ts 里先建段再读、按同一份 schema 认
       if (name === 'runTranscript') continue;
+      // 一笔切好的步骤同理：在 task-overview.test.ts 里先建段、写会话再读、按同一份 schema 认
+      if (name === 'runProcess') continue;
       // 需求详情要真有那条需求、且接上了需求表（PGlite）才有 200：在 requests.test.ts 里先建再读、按同一份 schema 认
       if (name === 'requestDetail') continue;
       // 开单查询要带 ?draftVersion= 且真有那条需求才有 200：在 request-issue.test.ts 里按同一份 schema 认

@@ -49,6 +49,7 @@
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
 import type { ClaimsGitHub, GitHub, RepoRef } from '@fleet-dao/github';
+import { verdictOf } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
@@ -146,9 +147,9 @@ export function backedOffSeconds(base: number, n: number): number {
 export interface ColdVerifyActivityDeps {
   /**
    * 读 PR、读改到的文件、贴提交状态（引擎机器人）。commentIssue：验收回了「不归我验」时留言到单上转给人（决定 0093）；
-   * 不给 = 留不了言，只写进结论的 notes。
+   * 不给 = 留不了言，只写进结论的 notes。fetchCommitHead：生产在检出前补齐既定头；测试未接仍核原镜像。
    */
-  gh: Pick<EngineGitHub, 'pullFiles' | 'claims'> & Partial<Pick<GitHub, 'commentIssue'>>;
+  gh: Pick<EngineGitHub, 'pullFiles' | 'claims'> & Partial<Pick<GitHub, 'commentIssue' | 'fetchCommitHead'>>;
   /** 选路（store-ports 的 pickRoute）：按族问「这一族此刻有没有能派的路由」。 */
   pickRoute: (input: PickRouteInput, ctx: PortContext) => Promise<PickRouteResult>;
   /** 生产 Spawner 要的东西（路由查询、各家执行方式的驱动、会话临时目录、资源上限）；会话用户的空目录也经它的 trees 备。 */
@@ -709,6 +710,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
                   taskId: verifierInput.taskId,
                   issueNumber: verifierInput.issueNumber,
                   ...(verifierInput.workflowId !== undefined ? { workflowId: verifierInput.workflowId } : {}),
+                  ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
                   prNumber,
                   branch: input.branch,
                 },
@@ -722,11 +724,14 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               );
             }
             // 装了收发目录（生产）：一家验的会话脱开引擎跑，执行方式支持的发版时放手、新引擎接回（#2848）
-            return await invokeVerifier(verifierInput, {
-              ...verifierDeps,
-              ...(sessionIo ? { detach: true } : {}),
-              released,
-            });
+            return await invokeVerifier(
+              input.roundSeq === undefined ? verifierInput : { ...verifierInput, roundSeq: input.roundSeq },
+              {
+                ...verifierDeps,
+                ...(sessionIo ? { detach: true } : {}),
+                released,
+              },
+            );
           } catch (error) {
             if (error instanceof PortError && error.retryable) seen.transient = error;
             // 开跑那一行写不进 runs（#157）：会话没起，库一时不通，过一会儿再验（不是「验收做不出来」）
@@ -779,7 +784,12 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           const { user } = await resolveSegmentRoute(deps.spawner, picked.routeId);
           const dir = deps.spawner.trees.tmpFor(`verify-${newRunId()}`);
           // 放得进 PR 头的完整检出就放；镜像没有、提交不在、目录仍建不出，会话仍起，提示词里的材料还在。
+          const fetchHead = deps.gh.fetchCommitHead;
           await placeVerifyCheckout({
+            signal: ctx.signal,
+            ...(fetchHead
+              ? { ensureHead: () => fetchHead({ repo, headSha: input.headSha, signal: ctx.signal }) }
+              : {}),
             dir,
             head: input.headSha,
             workflowId: ctx.workflowId ?? taskWorkflowId(input.repo, input.issueNumber),
@@ -929,6 +939,15 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       });
     }
     const outOfScope = verdict.outOfScope ?? [];
+    // 结论记在验收那一笔上（#3140，runs.verdict）：过没过、哪几条没过、转给人的。记不成只写日志，结论照常交回工作流
+    const verdictRunId = verdict.session?.runId;
+    if (verdictRunId !== undefined && deps.runs.noteVerdict !== undefined) {
+      try {
+        await deps.runs.noteVerdict(verdictRunId, verdictOf(verdict));
+      } catch (error) {
+        log('验收结论没记进 runs（结论照常交回工作流）', { runId: verdictRunId, error: errMessage(error) });
+      }
+    }
     const handoff =
       outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? [], ctx) : undefined;
     const notes = [verdict.notes, handoff].filter((n): n is string => n !== undefined && n !== '').join('；');

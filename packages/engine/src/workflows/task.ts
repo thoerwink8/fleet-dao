@@ -97,6 +97,7 @@
 //   「还欠什么」。读不成按失败分流重试或停下，不当成没有。没有 outOfScope 的单照旧关。老历史没有这个标记，照旧直接关单。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
+import { clipCauseSummary } from '@fleet-dao/shared/run-cause';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
@@ -123,7 +124,7 @@ import {
   type TaskWorkflowInput,
   taskBranch,
 } from '../task-contract.ts';
-import { activitiesFor, limitsFor } from './kit.ts';
+import { activitiesFor, iso, limitsFor } from './kit.ts';
 import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
 import { TaskRuntime } from './task-runtime.ts';
@@ -149,6 +150,7 @@ import {
   planGoLine,
   planRetryLine,
   RESUME_STREAK_LIMIT,
+  reworkCauseOf,
   roundOutcomeOf,
   SELF_CHECK_RED_LINE,
   SKIP_CI_PR_VERIFIED,
@@ -290,6 +292,7 @@ class TaskFlow {
   /** 一轮开始（#2762）：清掉上一轮的首派模型，记下有一轮没收场。纯状态。 */
   private startRound(): void {
     this.rt.roundFirstModel = null;
+    this.rt.roundStartedAt = iso(Date.now());
     this.roundOpen = true;
   }
 
@@ -314,12 +317,29 @@ class TaskFlow {
       ...(rt.addedLines !== null ? { addedLines: rt.addedLines } : {}),
       // 这张单走的流程（#2826）：定过模式才有（老历史没有）
       ...(rt.flowMode !== null ? { flowMode: rt.flowMode } : {}),
+      // 回合视图要的开始时刻、为什么返工（#3140）：标记 run-cause-fields 在新历史里才为真，老历史入参和原来一样
+      ...this.roundExtras(outcome),
     };
     try {
       await CancellationScope.nonCancellable(() => rt.acts.recordRound(input));
     } catch (error) {
       log.warn('这一轮怎么收场的没记进库，照旧往下走', { error: String(error), outcome });
     }
+  }
+
+  /**
+   * 一轮的开始时刻和返工摘要（#3140）。返工摘要只在这一轮是为返工收场时写（做成了、放弃叫停、超时没有「下一轮要改什么」）：
+   * 取返工意见（rt.feedback）逐条连起来，没有意见退回写 lastProblem。
+   */
+  private roundExtras(outcome: RoundOutcome): Pick<RecordRoundInput, 'startedAt' | 'reworkSummary'> {
+    const rt = this.rt;
+    if (!patched('run-cause-fields')) return {};
+    const rework = outcome !== 'merged' && outcome !== 'stopped' && outcome !== 'timeout';
+    const text = rt.feedback.join('；').trim() || (rt.status.lastProblem ?? '').trim();
+    return {
+      ...(rt.roundStartedAt !== null ? { startedAt: rt.roundStartedAt } : {}),
+      ...(rework && text ? { reworkSummary: clipCauseSummary(text) } : {}),
+    };
   }
 
   /**
@@ -560,12 +580,14 @@ class TaskFlow {
       );
       return true;
     }
+    // 这一轮第一笔动手为什么起（#3140）：上一轮留下了问题就是返工，按问题认哪一类；方案那几笔另记「出方案」
+    const startCause = reworkCauseOf(rt.status.lastProblem, rt.feedback);
     this.planReworkResume();
     // 重活第一轮先出方案（#2755）。老历史没有这个标记，照旧直接动手
     if (tier.tier === 'heavyweight' && rt.round === 1 && !this.planTried && patched('plan-first-heavy')) {
       await this.planFirst(brief, tier, wt);
     }
-    await writeSession(rt, brief, tier, wt);
+    await writeSession(rt, brief, tier, wt, { cause: startCause });
 
     let delivery = await this.readDelivery(wt);
     delivery = await this.nudgeCommit(brief, tier, wt, delivery);
@@ -579,7 +601,9 @@ class TaskFlow {
         rt.feedback = [`${SELF_CHECK_RED_LINE}\n${rt.selfCheckOutput?.text ?? ''}`];
         rt.resumeFrom = { previous: { runId: last.runId }, worktreePath: last.worktreePath };
         await rt.advance('implement', `第 ${rt.round} 轮：自测没过，续进会话再改一次`);
-        await writeSession(rt, brief, tier, wt);
+        await writeSession(rt, brief, tier, wt, {
+          cause: { cause: 'self_check_fix', summary: rt.selfCheckOutput?.text ?? SELF_CHECK_RED_LINE },
+        });
         rt.resumeStreak = streak;
         delivery = await this.readDelivery(wt);
         // 改完再测一次只为把输出交给验收：不论红绿都推，交给 CI
@@ -621,6 +645,8 @@ class TaskFlow {
     if (patched('avoid-empty-commit-route')) rt.commitMisses = 0;
     if (!(await this.withinLineBudget(delivery))) return false;
     let pushed: Awaited<ReturnType<typeof rt.acts.pushBranch>>;
+    // 这个头改了哪些文件记进库（#3140，pr_head_files）：只给活动多带可选入参，不改步序；老历史没有这个标记，入参和原来一样
+    const recordHeadFiles = patched('pr-head-files');
     try {
       pushed = await rt.step(
         'pushBranch',
@@ -631,6 +657,7 @@ class TaskFlow {
             worktreePath: wt.path,
             branch: rt.branch,
             head: delivery.head,
+            ...(recordHeadFiles && rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
           }),
         // 空交付先自动重派一次动手会话（决定 0093），这张单里只一次；再撞上照旧停下
         this.emptyDeliveryRedone ? [] : [EMPTY_DELIVERY_CODE],
@@ -674,6 +701,7 @@ class TaskFlow {
           title: rt.input.title,
           body: this.prBody(),
           ...(generation === undefined ? {} : { generation }),
+          ...(recordHeadFiles && pushed.numstat !== undefined ? { numstat: pushed.numstat } : {}),
         }),
       );
       rt.prNumber = pr.prNumber;
@@ -819,7 +847,9 @@ class TaskFlow {
     rt.feedback = [commitNudgeFeedback(delivery.commits, leftover)];
     rt.resumeFrom = from;
     await rt.advance('implement', `第 ${rt.round} 轮：会话交活时没提交完，续进会话补提交一次`);
-    await writeSession(rt, brief, tier, wt);
+    await writeSession(rt, brief, tier, wt, {
+      cause: { cause: 'commit_nudge', summary: commitNudgeFeedback(delivery.commits, leftover) },
+    });
     rt.resumeStreak = streak;
     return this.readDelivery(wt);
   }
@@ -841,7 +871,10 @@ class TaskFlow {
       rt.feedback = [planRetryLine(parsed.why)];
       rt.resumeFrom = { previous: { runId: first.runId }, worktreePath: first.worktreePath };
       await rt.advance('implement', `第 ${rt.round} 轮：方案格式不对（${parsed.why}），续进会话重出一次`);
-      await writeSession(rt, brief, tier, wt, { plan: true });
+      await writeSession(rt, brief, tier, wt, {
+        plan: true,
+        cause: { cause: 'plan', summary: `方案格式不对（${parsed.why}），续进会话重出一次` },
+      });
       parsed = parsePlan(rt.lastAnswer);
     }
     if (parsed.ok) {

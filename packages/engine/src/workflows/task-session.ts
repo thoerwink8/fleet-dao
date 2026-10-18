@@ -113,6 +113,8 @@ import {
   RESUME_STARTED_SLACK_MS,
   RepinInterrupt,
   type ResumeFrom,
+  reworkCauseOf,
+  type SegmentCauseNote,
   segmentMinutesAfterPatience,
   tokenBudgetStop,
   WALL_CLOCK_SWITCH_STALL,
@@ -133,8 +135,14 @@ export async function writeSession(
   brief: TaskBrief,
   tier: TierDecision,
   wt: Worktree,
-  opts: { plan?: boolean } = {},
+  opts: { plan?: boolean; cause?: SegmentCauseNote } = {},
 ): Promise<void> {
+  // 下一笔为什么起（#3140，runs.cause）：第一笔按调用方说的（补提交、自测红了再改……）、出方案、或这一轮是不是返工；
+  // 之后每一笔由上一笔怎么没成/被停下定（下面各处赋值），人点过「继续」的算「人点了继续」。只记账，不影响任何走向。
+  let nextCause: SegmentCauseNote =
+    opts.cause ?? (opts.plan ? { cause: 'plan' } : reworkCauseOf(rt.status.lastProblem, rt.feedback));
+  let attempts = 0;
+  let parksAtAttempt = rt.parks;
   let counters = ZERO;
   let avoid: Avoid = NO_AVOID;
   let previousMessage: string | undefined;
@@ -226,14 +234,20 @@ export async function writeSession(
         resumeNote = `；没续上会话（${plan.reason}），开新会话`;
       }
     }
-    // runSegment 的活动合约已经固定，不能把工作流判断塞进提示词后再猜；借 route.why 的内部标记把新会话原因
-    // 原样带到 one-shot，落库时再拆回真正的 routeWhy 和 resumeReason。
-    const segmentRoute =
+    // 新会话的原因：新历史（run-cause-fields）经 runSegment 入参的 resumeReason 字段直接带到 one-shot（#3140）；
+    // 老历史当年的活动合约里没有这个字段，借 route.why 的内部标记（fleet-resume-new:…）带，落库时再拆回真正的
+    // routeWhy 和 resumeReason——在途任务重放要认，所以老写法留着，只在没有这个标记时才走。
+    const newSessionReason =
       resumeSessionId === undefined && resumeNote.startsWith('；没续上会话')
+        ? resumeNote.slice('；没续上会话（'.length, -'），开新会话'.length)
+        : undefined;
+    const explicitReason = newSessionReason !== undefined && patched('run-cause-fields');
+    const segmentRoute =
+      newSessionReason !== undefined && !explicitReason
         ? {
             ...route,
             why: `fleet-resume-new:${JSON.stringify({
-              reason: resumeNote.slice('；没续上会话（'.length, -'），开新会话'.length),
+              reason: newSessionReason,
               ...(route.why?.trim() ? { routeWhy: route.why } : {}),
             })}`,
           }
@@ -246,6 +260,13 @@ export async function writeSession(
     rt.roundFirstModel ??= route.modelId;
     // 这一段的起跑时刻：被暂停取消时拿不到执行编号，续会话凭它去库里找这一段
     const attemptAt = Date.now();
+    // 人点过「继续」才回到这里的这一笔，起因记「人点了继续」（#3140）；第一笔前的停不算
+    if (attempts > 0 && rt.parks > parksAtAttempt) {
+      nextCause = { cause: 'human_continue', ...(nextCause.summary ? { summary: nextCause.summary } : {}) };
+    }
+    const stamp = rt.runStamp(nextCause.cause, nextCause.summary);
+    parksAtAttempt = rt.parks;
+    attempts += 1;
     let evidence: SegmentEvidence | null = null;
     // 没跑成时的执行编号：总时长到顶第一次拿它去续同一个会话。没起成就没有
     let failedRunId: string | null = null;
@@ -267,6 +288,9 @@ export async function writeSession(
           patienceWaited > 0 ? segmentMinutesAfterPatience(SEGMENT_MINUTES, patienceWaited) : SEGMENT_MINUTES,
         ...(interrupted ? { interrupted } : {}),
         ...(resumeSessionId ? { resumeSessionId } : {}),
+        ...(explicitReason && newSessionReason ? { resumeReason: newSessionReason } : {}),
+        // 为什么起这一笔、属于第几个回合（#3140，只记账；老历史不带）
+        ...stamp,
         // 只记账（runs.pr_number，#216）：第一轮会话交付之后才开 PR，这时还没有
         ...(rt.prNumber !== null ? { prNumber: rt.prNumber } : {}),
         // 重活先出方案的那一段（#2755）：提示词另说只读、只回方案 JSON
@@ -304,6 +328,7 @@ export async function writeSession(
         // 被人暂停停下的这一段（借 org_switch 的位置，task-contract.ts 的 PAUSED_BY_HUMAN）：不算失败、不记账、不换模型；
         // 回到循环头停在检查点，继续后在原分支原树上重跑，提示词带上被停下的原因
         interrupted = rt.pauseNote(error.command);
+        nextCause = { cause: 'pause_resume', summary: interrupted };
         // 继续后按会话号续上这一段（决定 0088）。老历史没有这个标记：照旧开新会话
         if (patched('segment-resume')) {
           rt.resumeFrom = {
@@ -318,6 +343,7 @@ export async function writeSession(
         // 选路现读驾驶舱写好的指定，新模型原分支原树重跑，提示词带上被停下的原因。人明说要换，不粘上一条路由、
         // 也不带着之前失败攒下的避开（避开里要是有他指定的那个模型，选路就派不出了）
         interrupted = rt.repinNote(error.command);
+        nextCause = { cause: 'repin', summary: interrupted };
         stick = undefined;
         avoid = NO_AVOID;
         continue;
@@ -398,6 +424,14 @@ export async function writeSession(
     });
     // 切号停下的不是这一段的失败：不当「上一次的原文」——既不凑成「和上一次一字不差」，也不打断切号前后两次真失败的比对
     if (failure.code !== ORG_SWITCH_CODE) previousMessage = failure.message;
+    // 下一笔为什么起（#3140）：切号停下的是「切号重跑」，分流说原路再试的是「原路重试」，其余（换路由、换模型、自动重派、停下等人
+    // 后继续）先记「换路由重派」；人点了继续的在下一笔起跑前按停下次数改记。只记账。
+    nextCause =
+      failure.code === ORG_SWITCH_CODE
+        ? { cause: 'org_switch', summary: failure.message }
+        : next.action === 'retry'
+          ? { cause: 'retry', summary: next.reason }
+          : { cause: 'reroute', summary: next.reason };
     rt.status.lastProblem = next.reason;
     counters = bump(counters, next);
     // 出在账号池上（登录失效、封号、设备被撤销）：不挂起这张单。标记在问分流时已经记下（老历史为假，仍走下面的挂起）。
@@ -480,6 +514,7 @@ export async function writeSession(
           if (!(await settledBeforeRestart(rt, attemptAt))) continue;
           patienceRounds += 1;
           patienceWaited += step.seconds;
+          nextCause = { cause: 'retry', summary: next.reason };
           stick = undefined;
           await rt.note(
             `第 ${rt.round} 轮：${route.modelId} ${next.reason}；所有路由都在忙，耐心等 ${step.seconds} 秒再选路（第 ${patienceRounds} 次，从会话时限里扣）`,
@@ -522,6 +557,7 @@ export async function writeSession(
       if ((escalate || !redispatched) && eligible && patched('auto-redispatch-session')) {
         if (patienceOn && !(await settledBeforeRestart(rt, attemptAt))) continue;
         redispatched = true;
+        nextCause = { cause: 'reroute', summary: next.reason };
         stick = undefined;
         if (code === 'model_mismatch') {
           mismatchModel = route.modelId;

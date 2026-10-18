@@ -251,6 +251,22 @@ export interface PushBranchInput extends Scope {
   branch: string;
   /** 要推上去的本地提交；推完远端分支头应当就是它。 */
   head: string;
+  /**
+   * 这张单已经开着的 PR（#3140，只记账）：给了，推上去以后把这个头改了哪些文件、各增删几行记进 pr_head_files。
+   * 第一轮还没有 PR，由开 PR 那一步按 numstat 记。老历史没有这个字段。
+   */
+  prNumber?: number;
+}
+
+/**
+ * 一个头相对主线改了的一个文件（git diff --numstat 主线...头，不做改名识别：改名按删一个加一个算）。
+ * 二进制文件 git 不给行数：binary 为真，added / removed 为空。
+ */
+export interface HeadFileStat {
+  path: string;
+  added: number | null;
+  removed: number | null;
+  binary: boolean;
 }
 
 /**
@@ -286,6 +302,8 @@ export interface OpenPrInput extends Scope {
    * 同一张单上自己上一代留下的任务分支 PR 关掉再开。没传（老历史）或是第一代：有别的 PR 照旧挡回。
    */
   generation?: number;
+  /** 推这个头时数出来的文件清单（#3140，只记账）：开成了就记进 pr_head_files。没数成、老历史没有。 */
+  numstat?: HeadFileStat[];
 }
 
 /** 换掉已开着的 PR 的正文（#2723：第 2 轮起「做了什么」换成这一轮会话的回复）。 */
@@ -320,6 +338,10 @@ export interface RecordRoundInput extends Scope {
   addedLines?: number;
   /** 这张单走的流程（#2826，task_rounds.flow_mode）。定模式之前开工的老历史没有。 */
   flowMode?: 'three' | 'full';
+  /** 这一轮开始的时刻（#3140，task_rounds.started_at，工作流的时钟 ISO）。老历史没有。 */
+  startedAt?: string;
+  /** 这一轮为什么返工、下一轮要改什么（#3140，≤500 字；task_rounds.rework_summary）。做成了、放弃叫停、老历史没有。 */
+  reworkSummary?: string;
 }
 
 export interface PullRequestRef {
@@ -500,7 +522,7 @@ export interface EnginePorts {
   pushBranch(
     input: PushBranchInput,
     ctx: PortContext,
-  ): Promise<{ head: string; changedFiles?: string[]; addedLines?: number }>;
+  ): Promise<{ head: string; changedFiles?: string[]; addedLines?: number; numstat?: HeadFileStat[] }>;
   openPr(input: OpenPrInput, ctx: PortContext): Promise<PullRequestRef>;
   updatePrBody(input: UpdatePrBodyInput, ctx: PortContext): Promise<void>;
   waitCi(input: WaitCiInput, ctx: PortContext): Promise<CiResult>;

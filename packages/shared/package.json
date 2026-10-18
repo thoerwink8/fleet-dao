@@ -8,6 +8,7 @@
     ".": "./src/index.ts",
     "./checks-red": "./src/checks-red.ts",
     "./flow-purposes": "./src/flow-purposes.ts",
+    "./run-cause": "./src/run-cause.ts",
     "./task-redo": "./src/task-redo.ts",
     "./task-signals": "./src/task-signals.ts",
     "./util": "./src/util.ts",

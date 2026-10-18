@@ -71,6 +71,30 @@ describe('打码', () => {
     expect(written[0]?.text).not.toContain(TOKEN);
     expect(written[0]?.meta).toMatchObject({ redacted: 1 });
   });
+
+  it('meta 里的命令说明（description）也打码；调用号、增删行数原样（#3140）', async () => {
+    const { r, written } = recorder();
+    r.record({
+      at,
+      kind: 'tool_call',
+      text: 'ls',
+      tool: 'Bash',
+      meta: { callId: 'toolu_1', description: `用 ${TOKEN} 推一下` },
+    });
+    r.record({
+      at,
+      kind: 'tool_result',
+      text: 'ok',
+      tool: 'Edit',
+      ok: true,
+      meta: { callId: 'e1', added: 3, removed: 1 },
+    });
+    await r.close();
+    expect(JSON.stringify(written[0]?.meta)).not.toContain(TOKEN);
+    expect(written[0]?.meta).toMatchObject({ callId: 'toolu_1' });
+    expect(String(written[0]?.meta?.description)).toContain('已打码');
+    expect(written[1]?.meta).toEqual({ callId: 'e1', added: 3, removed: 1 });
+  });
 });
 
 describe('截断', () => {

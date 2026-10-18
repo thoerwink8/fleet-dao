@@ -7,6 +7,7 @@
 
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { RUN_CAUSE_SUMMARY_MAX, RUN_CAUSES, type RunVerdict } from '@fleet-dao/shared';
 import { z } from 'zod';
 import { TierEnum } from './tier.ts';
 
@@ -55,6 +56,12 @@ const RunRecordFields = z.object({
   /** 这一段起跑前判定要续的会话号；新会话判定则由 resumeReason 说明原因。 */
   resumeSessionId: z.string().min(1).optional(),
   resumeReason: z.string().min(1).optional(),
+  /** 为什么起这一笔（#3140，shared 的 RUN_CAUSES）；不经任务工作流起的会话不给。 */
+  cause: z.enum(RUN_CAUSES).optional(),
+  /** 起因摘要（≤500 字）：为什么、接着做什么。 */
+  causeSummary: z.string().min(1).max(RUN_CAUSE_SUMMARY_MAX).optional(),
+  /** 这一笔属于第几个回合（task_rounds.seq，#3140）。 */
+  roundSeq: z.number().int().positive().optional(),
   /** 内存峰值（MiB）。只对挂在 cgroup 里的会话可读；本机不给。 */
   memoryPeakMb: z.number().int().nonnegative().optional(),
   /** 这一次会话的 CPU 秒数（大于 0）。读不到不给，不写 0（#1980）。 */
@@ -113,6 +120,9 @@ export const RunStartSchema = RunRecordFields.pick({
   routeWhy: true,
   resumeSessionId: true,
   resumeReason: true,
+  cause: true,
+  causeSummary: true,
+  roundSeq: true,
   workflowId: true,
   prNumber: true,
   branch: true,
@@ -135,6 +145,8 @@ export interface RunsWriter {
   record(run: RunRecord): Promise<void>;
   /** 流里拿到真会话号时提前记回；占位实现可不做。 */
   observeSessionId?(runId: string, sessionId: string): Promise<void>;
+  /** 冷验收有结论了（#3140）：写在验收那一笔上（runs.verdict）。占位实现可不做；真实现写不进抛。 */
+  noteVerdict?(runId: string, verdict: RunVerdict): Promise<void>;
 }
 
 /**

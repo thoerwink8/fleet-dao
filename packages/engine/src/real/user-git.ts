@@ -706,6 +706,51 @@ export async function changedFilesAgainst(t: UserTree, mainline: string, head: s
   return lines(await git(t, ['diff', '--name-only', `${mainline}...${head}`], '列分支相对主线改了哪些文件'));
 }
 
+/** 单个头最多列这么多个文件（和 db 的 PR_HEAD_FILES_MAX 一致）；超了只列前面的，调用方写日志。 */
+export const NUMSTAT_MAX_FILES = 500;
+
+/**
+ * 分支相对主线改了哪些文件、各增删几行（git diff --numstat -z 主线...头，不识别改名：改名按「删一个加一个」算，路径才对得上）。
+ * 任务页「已编辑 N 个文件 +x −y」读它（#3140）：一个头一次数全，不拿每次编辑的行数加。二进制文件 git 给 `-`，记 binary、没有行数。
+ * 输出认不出照抛，不拿空顶。返回 total 是真实的文件数（可能比 files 多：只列前 NUMSTAT_MAX_FILES 个）。
+ */
+export async function numstatAgainst(
+  t: UserTree,
+  mainline: string,
+  head: string,
+): Promise<{
+  files: { path: string; added: number | null; removed: number | null; binary: boolean }[];
+  total: number;
+}> {
+  assertSha(mainline, '主线');
+  assertSha(head, '头');
+  const r = await git(
+    t,
+    ['diff', '--numstat', '-z', '--no-renames', `${mainline}...${head}`],
+    '列分支相对主线每个文件增删的行',
+  );
+  const entries = text(r)
+    .split('\0')
+    .filter((e) => e !== '');
+  const files: { path: string; added: number | null; removed: number | null; binary: boolean }[] = [];
+  for (const entry of entries) {
+    const m = /^(\d+|-)\t(\d+|-)\t(.+)$/s.exec(entry);
+    if (!m) {
+      throw new PortError('GIT_FAILED', `列每个文件增删的行：numstat 有一项认不出（${entry.slice(0, 80)}）`, {
+        retryable: false,
+      });
+    }
+    const binary = m[1] === '-' || m[2] === '-';
+    files.push({
+      path: m[3] as string,
+      added: binary ? null : Number(m[1]),
+      removed: binary ? null : Number(m[2]),
+      binary,
+    });
+  }
+  return { files: files.slice(0, NUMSTAT_MAX_FILES), total: files.length };
+}
+
 /**
  * 分支相对主线新增了多少行（git diff --numstat 主线...头 第一列相加，和 PR 在 GitHub 上的 additions 同口径；二进制文件记 0）。
  * 每日简报「流程健康」的重活 PR 新增行 p90 按它算（#2762）。输出认不出照抛，不拿 0 顶。

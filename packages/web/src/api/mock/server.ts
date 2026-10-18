@@ -23,6 +23,7 @@ import {
   type CiPolicy,
   CliToolsResponseSchema,
   CredentialsResponse,
+  cutSteps,
   DEFAULT_SESSION_EFFORT,
   type DecisionAction,
   describeEngineMaster,
@@ -71,6 +72,7 @@ import {
   poolHoldsView,
   poolPressureWindow,
   probeHistoryStrips,
+  processRowOf,
   REPO_IMPORT_ADD,
   REPO_IMPORT_REMOVE,
   type RealtimeTable,
@@ -96,6 +98,7 @@ import {
   RoutingLayersResponse,
   RoutingResponse,
   type RunOutcome,
+  RunStepsResponse,
   RunTranscriptResponse,
   readDecisionAction,
   readSegmentRun,
@@ -2891,6 +2894,26 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         nextAfter: entries.at(-1)?.seq ?? after ?? null,
         done: ended && rest.length <= limit,
         noRecord: ended && all.length === 0,
+      });
+    },
+    async runProcess(taskId, runId) {
+      await wait();
+      const tv = findTask(taskId);
+      const seg = (tv.segmentRuns ?? []).find((r) => r.id === runId);
+      if (!seg) throw new ApiError(404, 'run_not_found', '这张单下没有这一段');
+      if (mockTranscriptFail.has(runId)) {
+        throw new ApiError(503, 'run_steps_unreadable', '没读成：connection terminated');
+      }
+      const all = transcripts.byRun.get(runId) ?? [];
+      const live = transcripts.live.has(runId);
+      const shown = live ? Math.min(all.length, revealed.get(runId) ?? LIVE_FIRST_REVEAL) : all.length;
+      const ended = seg.endedAt !== undefined;
+      if (all.length === 0 && ended) return RunStepsResponse.parse({ state: 'noRecord' });
+      // 和真后端同一个算法（shared 的 cutSteps）：只算已经「说」出来的那部分
+      return RunStepsResponse.parse({
+        state: 'ok',
+        running: !ended,
+        process: cutSteps(all.slice(0, shown).map(processRowOf), { running: !ended, endedAt: seg.endedAt }),
       });
     },
     async updateTaskRoutePin(taskId, raw) {

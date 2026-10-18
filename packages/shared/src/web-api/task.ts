@@ -3,7 +3,10 @@
 import { z } from 'zod';
 import { FLOW_MODES, type FlowMode } from '../flow-mode.ts';
 import type { CostEstimate } from '../model-prices.ts';
+import { RUN_CAUSES } from '../run-cause.ts';
+import { RunVerdictSchema } from '../run-verdict.ts';
 import type { SegmentRunView } from '../segment-runs.ts';
+import type { RunProcess, RunTally } from '../task-process.ts';
 import { TRANSCRIPT_KINDS, TRANSCRIPT_PAGE_DEFAULT, TRANSCRIPT_PAGE_MAX } from '../transcript.ts';
 import type { TaskUsage } from '../usage.ts';
 import { BoardSubtaskSchema, RepoSchema } from './board.ts';
@@ -158,6 +161,13 @@ export const SegmentRunSchema = z.object({
   cpuSeconds: z.number().int().positive().optional(),
   /** 判定不开上一段会话时的原因；页面原样显示。 */
   resumeReason: z.string().min(1).optional(),
+  /** 是新会话还是接上一笔的会话（#3140）：true 接上一笔，false 新会话（原因在 resumeReason），都没记不给。 */
+  resumed: z.boolean().optional(),
+  /** 为什么起这一笔、摘要、所属回合（task_rounds.seq）、验收这一笔的结论（#3140）；老行没有，页面写「老记录没记」。 */
+  cause: z.enum(RUN_CAUSES).optional(),
+  causeSummary: z.string().min(1).optional(),
+  roundSeq: z.number().int().positive().optional(),
+  verdict: RunVerdictSchema.optional(),
   failureReason: z.string().optional(),
   prNumber: z.number().int().positive().optional(),
   branch: z.string().optional(),
@@ -213,6 +223,203 @@ export const UpdateTaskRoutePinRequest = z
   });
 export const UpdateTaskRoutePinResponse = TaskRoutePinSchema;
 
+// —— 任务页的概览和过程（#3140）——
+// 算法在 task-process.ts（切步、小计）。读不到的写原因，不拿 0 顶：每一块都是「读到了 / 没有 / 读不到带原因」三态，
+// 页面照写「没读到」「老记录没记」，不画 0。
+
+export const FileChangeSchema = z.object({
+  path: z.string(),
+  /** 这个文件成功改了几次。 */
+  edits: Count,
+  /** 已记下的增删行数合计；这个文件的编辑一次都没记行数就没有这两个键。 */
+  added: Count.optional(),
+  removed: Count.optional(),
+});
+
+export const ProcessStepSchema = z.object({
+  index: Count,
+  /** 这一步的标题：Agent 开头那句话；先调工具的是「动词 对象」；什么都没有是 null。 */
+  title: z.string().nullable(),
+  titleFromCall: z.boolean(),
+  firstSeq: Count,
+  lastSeq: Count,
+  startedAt: Time,
+  /** 下一步开始的时刻 / 这一笔收场的时刻；这一步还在跑没有。 */
+  endedAt: Time.optional(),
+  durationMs: Count.optional(),
+  running: z.boolean(),
+  /** 这一步有调用没成、报错、或结论没成：页面自动展开。 */
+  failed: z.boolean(),
+  calls: Count,
+  subCalls: Count,
+  commands: Count,
+  commandsFailed: Count,
+  /** 结果读不到的命令：老记录没调用号、收场了没记下结果、流里没有退出码（Mirasim）。 */
+  commandsUnknown: Count,
+  commandsRunning: Count,
+  reads: Count,
+  callsFailed: Count,
+  files: z.array(FileChangeSchema),
+  added: Count,
+  removed: Count,
+  /** 编辑成功了但没记行数的次数：增删合计少了这几次。 */
+  uncounted: Count,
+});
+
+export const ProcessCountsSchema = z.object({
+  commands: Count,
+  commandsDone: Count,
+  commandsFailed: Count,
+  commandsUnknown: Count,
+  commandsRunning: Count,
+  reads: Count,
+  callsFailed: Count,
+  files: z.array(FileChangeSchema),
+  added: Count,
+  removed: Count,
+  uncounted: Count,
+});
+
+export const RunProcessSchema = z.object({
+  steps: z.array(ProcessStepSchema),
+  counts: ProcessCountsSchema,
+  rows: Count,
+  /** 到了每段的条数上限，后面的没记。 */
+  truncated: z.boolean(),
+  /** 没有调用号的调用有几条（老记录）：这几条对不上结果，命令成败写「结果未知」。 */
+  legacyCalls: Count,
+});
+/** 编译期闸：和 task-process.ts 算出来的形状一字不差。 */
+export const RUN_PROCESS_MATCHES: Same<z.infer<typeof RunProcessSchema>, RunProcess> = true;
+
+/** 一笔会话切好的步骤：GET /tasks/:taskId/runs/:runId/steps。这一笔跑在记录之前（结束了、一条都没有）是 noRecord；读不到回 503。 */
+export const RunStepsResponse = z.discriminatedUnion('state', [
+  z.object({ state: z.literal('ok'), running: z.boolean(), process: RunProcessSchema }),
+  z.object({ state: z.literal('noRecord') }),
+]);
+
+export const RunTallySchema = z.object({
+  entries: Count,
+  calls: Count,
+  commands: Count,
+  commandsDone: Count,
+  commandsFailed: Count,
+  commandsUnknown: Count,
+  commandsRunning: Count,
+  reads: Count,
+  callsFailed: Count,
+  editsOk: Count,
+  uncounted: Count,
+  added: Count,
+  removed: Count,
+  firstAt: Time.optional(),
+  lastAt: Time.optional(),
+});
+export const RUN_TALLY_MATCHES: Same<z.infer<typeof RunTallySchema>, RunTally> = true;
+
+/** 没读到的原因：页面照写「没读到：<原因>」。 */
+const Unread = <S extends string>(state: S) =>
+  z.object({ state: z.literal(state), reason: z.string().min(1) });
+
+export const PrFileSchema = z.object({
+  path: z.string(),
+  /** 二进制文件 git 不给行数，两样都是 null。 */
+  added: Count.nullable(),
+  removed: Count.nullable(),
+  binary: z.boolean(),
+});
+
+export const TaskPrSchema = z.object({
+  number: z.number().int().positive(),
+  branch: z.string().optional(),
+  /** merged 已合并 / open 开着 / failed 开着但 CI 红 / closed 关了没合 / unknown 没读到（原因在 note）。 */
+  state: z.enum(['merged', 'open', 'failed', 'closed', 'unknown']),
+  note: z.string().optional(),
+  /** PR 镜像里现在的头；没读到没有。 */
+  headSha: z.string().optional(),
+  /**
+   * 这个 PR 改了哪些文件、各增删几行：推分支时按头记的 numstat（pr_head_files）读最新那个头，不是把每次编辑加起来。
+   * none＝一次都没记过（在记这个账之前推的）；unavailable＝读不到；current＝记的头就是镜像里现在的头（镜像头没读到不给）。
+   */
+  files: z.discriminatedUnion('state', [
+    z.object({
+      state: z.literal('ok'),
+      headSha: z.string(),
+      current: z.boolean().optional(),
+      items: z.array(PrFileSchema),
+    }),
+    Unread('none'),
+    Unread('unavailable'),
+  ]),
+});
+
+/** 一个回合（task_rounds）：一次「动手 → 自测 → 推分支 → CI → 验收」；做成了或返工收场。 */
+export const TaskRoundSchema = z.object({
+  seq: z.number().int().positive(),
+  /** 工作流里的轮数（动手第几轮）。 */
+  round: Count,
+  /** merged、verify_rejected、ci_red……（引擎的 RoundOutcome）；页面认不出的原样写。 */
+  outcome: z.string(),
+  tier: z.string().optional(),
+  firstModel: z.string().optional(),
+  /** 收场时 PR 相对主线的新增行数；没量到不给。 */
+  addedLines: Count.optional(),
+  flowMode: z.enum(FLOW_MODES).optional(),
+  /** 这一轮开始的时刻；老行没有，页面退回第一笔会话的起跑时刻。 */
+  startedAt: Time.optional(),
+  endedAt: Time,
+  /** 这一轮为什么返工、下一轮要改什么；做成了、放弃叫停、老行没有。 */
+  reworkSummary: z.string().optional(),
+});
+
+/** 引擎在会话外做的事（step_timings）：自测、推分支、开 PR、等 CI、验收、合并……和各种等待。 */
+export const EngineStepSchema = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('activity'),
+    /** 活动名（selfCheck、pushBranch、openPr、waitCi、coldVerify……），页面翻成白话。 */
+    activity: z.string(),
+    attempt: Count,
+    startedAt: Time,
+    endedAt: Time,
+    runMs: Count,
+    outcome: z.enum(['ok', 'failed', 'cancelled']),
+    errorCode: z.string().optional(),
+  }),
+  z.object({
+    kind: z.literal('wait'),
+    /** 等什么：human、slot、quota……。 */
+    waitFor: z.string(),
+    detail: z.string().optional(),
+    startedAt: Time,
+    endedAt: Time,
+    waitMs: Count,
+  }),
+]);
+
+export const TaskOverviewSchema = z.object({
+  /** 这张单关联的 PR（段流水里的、子任务里的），按号排。 */
+  prs: z.array(TaskPrSchema),
+  /** 命令、读文件的计数：每一笔一行（库里 GROUP BY run_id 一条查出来）加整张单合计。 */
+  tally: z.discriminatedUnion('state', [
+    z.object({ state: z.literal('ok'), total: RunTallySchema, byRun: z.record(Id, RunTallySchema) }),
+    Unread('unavailable'),
+  ]),
+  /** 最新汇报：最近一笔动手的最后一条主会话助手的话（不取 result）。none＝没有（原因写明）。 */
+  report: z.discriminatedUnion('state', [
+    z.object({ state: z.literal('ok'), text: z.string(), at: Time, runId: Id }),
+    Unread('none'),
+    Unread('unavailable'),
+  ]),
+  rounds: z.discriminatedUnion('state', [
+    z.object({ state: z.literal('ok'), items: z.array(TaskRoundSchema) }),
+    Unread('unavailable'),
+  ]),
+  engineSteps: z.discriminatedUnion('state', [
+    z.object({ state: z.literal('ok'), items: z.array(EngineStepSchema) }),
+    Unread('unavailable'),
+  ]),
+});
+
 export const TaskDetailResponse = z.object({
   task: TaskSchema,
   repo: RepoSchema,
@@ -223,6 +430,8 @@ export const TaskDetailResponse = z.object({
   usage: TaskUsageSchema,
   /** 这张单每段指定的模型（动手、验收）。 */
   routePins: TaskRoutePinsSchema,
+  /** 任务页的概览和过程（#3140）。老后端、老环境推来的详情没有，页面写「这台没给」，不画 0。 */
+  overview: TaskOverviewSchema.optional(),
 });
 
 // —— 一段会话的过程记录（#1640）——
