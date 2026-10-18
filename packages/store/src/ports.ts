@@ -349,9 +349,13 @@ export interface BoardStore {
   /**
    * PR 镜像（新主页「做完的」、将来「在跑的」判合并段用）：state 给了只要那个状态；merged 按 mergedAt 倒序、
    * 其余按 updatedAt 倒序，最多 limit 条（默认 50）。镜像里没有的就给不出——不直接查 GitHub。
+   * repoId / issueNumber 给了就在库里先按仓、按正文挂的单（issue_refs）筛，再排序截断：查某张单有没有开放 PR 要用它，
+   * 不能读全局前 N 条再在内存里筛（别的仓 PR 一多，目标 PR 就被截掉了）。
    */
   listPullRequests(input?: {
     state?: PullRequestRecord['state'] | undefined;
+    repoId?: string | undefined;
+    issueNumber?: number | undefined;
     limit?: number | undefined;
   }): Promise<PullRequestRecord[]>;
 }

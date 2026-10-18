@@ -4,7 +4,8 @@
 // claim：先查这张单有没有开着的 PR（「需求」栏挂着、或分支是 fleet/<单号>-、local/<单号>-）→ 有就停下不领；再经 /api/nodes/claims 登记
 //        （引擎停下等人的 stalled / parked 后端一步接手，叫停它再登记；引擎还在跑、排队的回 409，停下不领）→ 贴「本机做」→ 打出要用的分支名 local/<单号>-<短名>。
 // renew：续租（会话在 local/<单号>- 分支上动着、或开着 PR 挂着这张单，法国自己会顺延，不用手动续；跑超过 2 小时的长测试前续一下）。
-// done：做完（PR 合了）记 done；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
+// done：无 PR 的运维成功，凭真实验证先 issue:close --note 再记 done；有 PR 合并且单已关会自动收账。
+// 未完成的验收责任仍保留，done 不等于结清验收；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
 // queue [--json]：本机队列（单 #2731）——本机做的开着的单，领者、心跳、开着的 PR、挂着的引导、能不能接（work-queue.ts）。只读，不碰法国。
 // run <单号> [--brief 文件] [--worktree 路径] [--again]：脱离聊天进程派一个无头工人（单 #2761，work-run.ts 开头有全貌）——先过本机容量，
 //        本机没租约才领单，建或复用工作树，经 detach.mjs 起看护进程；看护进程没了再跑一次就接着同一个会话续。runs：列 run 派过的工人。
@@ -132,6 +133,10 @@ export interface WorkDeps {
     ) => { ok: true; pid: number; how: string } | { ok: false; why: string };
     git: Git;
     env: NodeJS.ProcessEnv;
+    /** 入口动态加载 unattended.mjs 的同一身份选择契约，不在零安装区复制优先级。 */
+    selectSessionId: (
+      env: NodeJS.ProcessEnv,
+    ) => { ok: true; id: string } | { ok: false; missing: boolean; why: string };
     now: () => Date;
     runsRoot: string;
     /** 跑这条命令的检出 */
@@ -417,6 +422,22 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
     );
   }
   const resume = phase === 'lost' && !a.again;
+  // 续跑沿用原 spec，不把另一会话或旧的无归属记录偷偷重绑。
+  let dispatcher: string | null = null;
+  if (!resume) {
+    const session = r.selectSessionId(r.env);
+    if (!session.ok && !session.missing) throw new Error(session.why);
+    const claude = r.env.CLAUDE_CODE_SESSION_ID;
+    const codex = r.env.CODEX_THREAD_ID;
+    if (claude && codex && claude !== codex)
+      throw new Error('Claude 会话和 Codex thread 身份冲突，不登记另一会话的归属、不派工');
+    // CODEX_SESSION_ID 是 root-session，不能据此承诺匹配 Stop 的 thread session_id。
+    if (session.ok && (claude || codex)) dispatcher = session.id;
+    else
+      deps.out(
+        '没有可验证的 Claude session / Codex thread 归属（Codex 需真实 CODEX_THREAD_ID，CODEX_SESSION_ID 不代替 thread）；结果仍保留，用 pnpm work runs 手工读取。',
+      );
+  }
   // 「看护进程没了」叫醒过一次；接着续就要能再叫醒到终态
   if (resume) rmSync(files.reported, { force: true });
   if (!resume) {
@@ -453,7 +474,7 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
       repoRoot: r.repoRoot,
       worktree,
       branch,
-      dispatcher: r.env.CLAUDE_CODE_SESSION_ID || null,
+      dispatcher,
       reclaude,
       env,
       createdAt: r.now().toISOString(),
@@ -473,8 +494,8 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
   deps.out(`状态 ${files.state}；做完写 ${files.result}。${cap.text}`);
   deps.out(
     spec?.dispatcher
-      ? '到终态（做完、没做成、看护进程没了）收尾钩子 work-watch.mjs 叫醒本会话；中间的心跳、重试不叫。看全部：pnpm work runs'
-      : '没读到 CLAUDE_CODE_SESSION_ID（不是在 Claude Code 里跑的）：到终态没有会话会被叫醒，用 pnpm work runs 看',
+      ? '已关联原派工会话：无人值守开启时，同步 Stop 消费一次终态；Codex 不会因后台完成主动开启新轮，Claude 原生 asyncRewake 能力另计。续跑不改变归属。看全部：pnpm work runs'
+      : '记录 dispatcher=null：没有会话会被主动叫醒，也不自动补绑旧记录；结果仍保留，用 pnpm work runs 看',
   );
   return 0;
 }
@@ -504,7 +525,9 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
       deps.out(
         `领了 #${p.issue}（租约到 ${got.leaseUntil ?? '？'}）。分支用：${localBranchPrefix(p.issue)}${branchSlug(title)}`,
       );
-      deps.out(`做完 pnpm work done ${p.issue}；放手 pnpm work done ${p.issue} --release "原因"`);
+      deps.out(
+        `PR 合并且单已关会自动收账；无 PR 运维成功凭真实验证先 pnpm issue:close ${p.issue} --note "验证结果"，再 pnpm work done ${p.issue}；未完成验收责任保留，不用 done 代替结清。放手 pnpm work done ${p.issue} --release "原因"`,
+      );
       return 0;
     }
     if (p.action === 'renew') {

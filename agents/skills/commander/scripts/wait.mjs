@@ -1,11 +1,11 @@
-// 指挥官等一件事到终态（单 #2730）：node wait.mjs pr <号> | main-ci | issue <号> [--interval <秒>] [-R <owner/repo>]
+// 指挥官等结果：pr <号> | pr-head <号> --after <完整head> | main-ci | issue <号> [--interval <秒>] [-R <owner/repo>]
 // 主线程不再手写「循环 + sleep」盯梢（旧会话 709bd85a：46 个手写轮询，44 个带 2>/dev/null，最后一个 jq 写错、错误进了
 // /dev/null，空跑 90 分钟）。这里只认 gh 的 --json 输出、自己 JSON.parse，不经 jq、不吞 stderr：
 // gh 起不来、退出码非 0、输出不是认得出的 JSON，当场以退出码 2 退出，stderr 写明哪条命令、为什么。
-// 到终态才往 stdout 写一行并退出：绿（合并、CI 成功、单关了）退出码 0；红（PR 有检查失败或被关掉没合、CI 不是成功）退出码 1。
+// 等到结果才往 stdout 写一行并退出：成功（新头、合并、CI 成功、单关了）退出码 0；失败（PR 检查红、关闭未合、CI 未过）退出码 1。
 // 用法错了退出码 2。中途什么都不打，挂成后台命令只在结束时叫醒一次。
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /** 主线 CI 的工作流文件名（.github/workflows/ci.yml，push 到 main 时跑） */
@@ -14,6 +14,7 @@ export const MAIN_CI_WORKFLOW = 'ci.yml';
 export const DEFAULT_INTERVAL_S = 60;
 
 export const USAGE = `用法：node wait.mjs pr <号> [--interval <秒>] [-R <owner/repo>]   等 PR 合并（0）、被关或有检查红（1）
+      node wait.mjs pr-head <号> --after <完整40位head> [--interval <秒>] [-R <owner/repo>]  等新头或已合并（0）、关闭未合（1）
       node wait.mjs main-ci [--interval <秒>] [-R <owner/repo>]     等现在 main 头上那个提交的 ${MAIN_CI_WORKFLOW} 跑完：成功 0、别的 1
       node wait.mjs issue <号> [--interval <秒>] [-R <owner/repo>]  等单关掉（0）
 到终态才写一行并退出；gh 出错、输出认不出当场退出码 2，不重试、不吞错。默认每 ${DEFAULT_INTERVAL_S} 秒问一次。`;
@@ -154,6 +155,31 @@ export function stepPr(gh, n, repo, now = Date.now()) {
 }
 
 /**
+ * 复审等返工头：先认 PR 终态，再比较完整 head，不拿检查或评审结论代替新头。
+ * @param {Gh} gh
+ * @param {number} n
+ * @param {string[]} repo
+ * @param {string} after
+ * @returns {Step}
+ */
+function stepPrHead(gh, n, repo, after) {
+  const what = `gh pr view ${n}`;
+  const o = parseJson(gh(['pr', 'view', String(n), ...repo, '--json', 'state,url,headRefOid']), what);
+  if (!isObj(o)) throw new WaitError(`${what} 的输出不是一个对象`);
+  const state = str(o, 'state', what);
+  const url = str(o, 'url', what);
+  const head = str(o, 'headRefOid', what);
+  if (!/^[0-9a-f]{40}$/.test(head)) throw new WaitError(`${what} 的 headRefOid 认不出：${head}`);
+  if (!/^https?:\/\/\S+$/.test(url) || !URL.canParse(url))
+    throw new WaitError(`${what} 的 url 认不出：${url}`);
+  if (state === 'MERGED') return { done: true, ok: true, line: `PR #${n} 已经合并，当前头 ${head} ${url}` };
+  if (state === 'CLOSED') return { done: true, ok: false, line: `PR #${n} 被关掉、没合并 ${url}` };
+  if (state !== 'OPEN') throw new WaitError(`${what} 的 state 认不出：${state}`);
+  if (head !== after) return { done: true, ok: true, line: `PR #${n} 头已变化：${after} → ${head} ${url}` };
+  return { done: false };
+}
+
+/**
  * 最新那条 CANCELLED 是不是刚结束（completedAt 离现在不到 CANCEL_GRACE_MS）。读不到 completedAt 就不算刚结束。
  * @param {Record<string, unknown>} c
  * @param {number} now
@@ -241,7 +267,7 @@ export function stepIssue(gh, n, repo) {
 /**
  * 读命令行；用法错就返回一句原因。
  * @param {string[]} argv
- * @returns {{ kind: 'pr' | 'issue', n: number, intervalMs: number, repo: string[] } | { kind: 'main-ci', intervalMs: number, repo: string[] } | { usage: string }}
+ * @returns {{ kind: 'pr' | 'issue', n: number, intervalMs: number, repo: string[] } | { kind: 'pr-head', n: number, after: string, intervalMs: number, repo: string[] } | { kind: 'main-ci', intervalMs: number, repo: string[] } | { usage: string }}
  */
 export function parseArgs(argv) {
   /** @type {string[]} */
@@ -249,6 +275,8 @@ export function parseArgs(argv) {
   let interval = DEFAULT_INTERVAL_S;
   /** @type {string[]} */
   let repo = [];
+  /** @type {string | undefined} */
+  let after;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i] ?? '';
     if (a === '--interval') {
@@ -259,6 +287,11 @@ export function parseArgs(argv) {
       const v = argv[++i];
       if (!v || !/^[\w.-]+\/[\w.-]+$/.test(v)) return { usage: `${a} 后面要跟 owner/repo` };
       repo = ['-R', v];
+    } else if (a === '--after') {
+      if (after !== undefined) return { usage: '--after 只能给一次' };
+      const v = argv[++i];
+      if (!v || !/^[0-9a-f]{40}$/.test(v)) return { usage: '--after 后面要跟完整40位head' };
+      after = v;
     } else if (a.startsWith('-')) {
       return { usage: `认不出的参数 ${a}` };
     } else {
@@ -268,6 +301,13 @@ export function parseArgs(argv) {
   const intervalMs = interval * 1000;
   const [kind, num, ...extra] = pos;
   if (extra.length > 0) return { usage: `多出来的参数：${extra.join(' ')}` };
+  if (after !== undefined && kind !== 'pr-head') return { usage: '--after 只用于 pr-head' };
+  if (kind === 'pr-head') {
+    const n = Number(num);
+    if (!num || !Number.isSafeInteger(n) || n <= 0) return { usage: 'pr-head 后面要跟号' };
+    if (after === undefined) return { usage: 'pr-head 必须给 --after <完整40位head>' };
+    return { kind, n, after, intervalMs, repo };
+  }
   if (kind === 'main-ci') {
     if (num !== undefined) return { usage: 'main-ci 后面不跟号' };
     return { kind, intervalMs, repo };
@@ -304,6 +344,8 @@ export async function run(argv, io) {
       step = () => stepMainCi(io.gh, sha, p.repo);
     } else if (p.kind === 'pr') {
       step = () => stepPr(io.gh, p.n, p.repo);
+    } else if (p.kind === 'pr-head') {
+      step = () => stepPrHead(io.gh, p.n, p.repo, p.after);
     } else {
       step = () => stepIssue(io.gh, p.n, p.repo);
     }
@@ -321,11 +363,16 @@ export async function run(argv, io) {
   }
 }
 
+// 入口判定：Node 自带的 import.meta.main 不受软链接影响；旧 Node 退回比真实路径（只比字面路径，经软链接跑时会一声不响什么都不做）
 function isMain() {
+  if (typeof import.meta.main === 'boolean') return import.meta.main;
   const entry = process.argv[1];
   if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
+  const norm = (/** @type {string} */ p) => {
+    const r = realpathSync(p);
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  };
+  return norm(entry) === norm(fileURLToPath(import.meta.url));
 }
 
 if (isMain()) {

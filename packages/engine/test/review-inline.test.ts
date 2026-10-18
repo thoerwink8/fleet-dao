@@ -1,11 +1,12 @@
 // 真 GitHub client/claims HTTP 读取 → 生产 reader → 完整反馈/编辑指纹；不拿假 listReviews 代替装配。
 import { describe, expect, it } from 'vitest';
+import type { PortContext } from '../src/ports.ts';
 import { PortError } from '../src/ports.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
 import { reviewChangesReader } from '../src/real/task-verify.ts';
 import { reviewFeedbackLines, reviewKey, unquote } from '../src/review-feedback.ts';
 import { renderResumePrompt } from '../src/runner/segment-prompt.ts';
-import type { ReviewInlineComment } from '../src/task-contract.ts';
+import type { ReadCiReviewsInput, ReviewInlineComment } from '../src/task-contract.ts';
 import { freshSessionFeedback } from '../src/workflows/task-support.ts';
 import { API, json, repo, setup, sha } from './review-http.ts';
 
@@ -373,5 +374,120 @@ describe('行内读取失败时实际撤autoMerge边界', () => {
       expect(String(error)).toContain('disable failed');
       expect(String(error)).toContain('未确认撤掉');
     }
+  });
+});
+
+function openPull(headSha: string, ref: string) {
+  return {
+    number: 7,
+    node_id: 'PR_kwDOAtest',
+    html_url: `${API}/repos/acme/widgets/pull/7`,
+    state: 'open',
+    title: 'review',
+    body: 'body',
+    user: author,
+    head: { ref, sha: headSha, repo: { full_name: 'acme/widgets' } },
+    base: { ref: 'main', sha: sha('b'), repo: { full_name: 'acme/widgets' } },
+    updated_at: '2026-10-18T00:00:00Z',
+  };
+}
+
+function reviewCtx(): PortContext {
+  return {
+    signal: new AbortController().signal,
+    heartbeat() {},
+    attempt: 1,
+    lastHeartbeat: undefined,
+  };
+}
+
+describe('CI 红返工经真 HTTP 读正式评审', () => {
+  const head = sha('c');
+  const branch = 'fleet/12-tabcdef01';
+  const input: ReadCiReviewsInput = {
+    schemaVersion: 1,
+    taskId: 't-ci-review',
+    repo: { ...repo, id: 'r1', defaultBranch: 'main', testCommand: 'pnpm check' },
+    branch,
+    prNumber: 7,
+    expectedHead: head,
+  };
+
+  function wired(shift = false) {
+    const r = rig();
+    let pulls = 0;
+    r.fake.before.unshift((req) => {
+      if (req.path !== '/repos/acme/widgets/pulls/7') return undefined;
+      pulls += 1;
+      const current = shift && pulls % 2 === 0 ? sha('d') : head;
+      return json(200, openPull(current, branch));
+    });
+    const tasks = createTaskActivities({
+      gh: r.gh as never,
+      trees: {} as never,
+      exec: async () => {
+        throw new Error('no exec');
+      },
+      reviewChanges: r.read,
+    });
+    return { r, tasks, pulls: () => pulls };
+  }
+
+  it('两页行内原文进入快照，旧审查提交留着', async () => {
+    const { tasks, pulls } = wired();
+    const got = await tasks.readCiReviews(input, reviewCtx());
+    expect(got.delivered).toBe(true);
+    if (!got.delivered) return;
+    expect(got.head).toBe(head);
+    expect(got.reviews).toHaveLength(1);
+    expect(got.reviews[0]).toMatchObject({
+      reviewId: 99,
+      reviewer: 'boss',
+      commitId: sha('a'),
+    });
+    const bodies = got.reviews[0]?.inlineComments?.map((c) => c.body) ?? [];
+    expect(bodies).toEqual(['first inline', 'UNIQUE_INLINE_SOURCE_AUTH_BUG']);
+    expect(pulls()).toBe(2);
+  });
+
+  it('第二页 502 抛未交付，不回只含总述的快照', async () => {
+    const { r, tasks } = wired();
+    r.fail();
+    await expect(tasks.readCiReviews(input, reviewCtx())).rejects.toThrow(/未交付/);
+  });
+
+  it('读期间换头回未交付，结果里没有评审字段', async () => {
+    const { tasks, pulls } = wired(true);
+    const got = await tasks.readCiReviews(input, reviewCtx());
+    expect(got).toEqual({
+      delivered: false,
+      headMoved: sha('d'),
+      reason: expect.stringContaining('未交付'),
+    });
+    expect(got).not.toHaveProperty('reviews');
+    expect(pulls()).toBeGreaterThanOrEqual(2);
+  });
+
+  it('真 HTTP 403 明确未交付，不回空名单', async () => {
+    const r = rig();
+    r.fake.before.unshift((req) => {
+      if (req.path === '/repos/acme/widgets/pulls/7') return json(200, openPull(head, branch));
+      if (req.path.endsWith('/pulls/7/reviews')) {
+        return json(403, { message: 'Resource not accessible by integration' });
+      }
+      return undefined;
+    });
+    const tasks = createTaskActivities({
+      gh: r.gh as never,
+      trees: {} as never,
+      exec: async () => {
+        throw new Error('no exec');
+      },
+      reviewChanges: r.read,
+    });
+    const error = await tasks.readCiReviews(input, reviewCtx()).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(PortError);
+    expect(String(error)).toContain('未交付');
+    expect(error).toMatchObject({ retryable: false });
   });
 });

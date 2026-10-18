@@ -16,16 +16,27 @@ export interface GhApi {
 export interface GhApiWrite extends GhApi {
   /** PATCH 仓内接口，body 发 JSON；非 2xx 抛。 */
   patch(path: string, body: unknown): Promise<void>;
+  /** 查 GraphQL（REST 读不到的字段，如正文最后改动的时刻）；非 2xx 或回了 errors 都抛，回 data。 */
+  graphql(query: string, variables: Record<string, unknown>): Promise<unknown>;
 }
 
 export function ghApi(env: Record<string, string | undefined>, fetchImpl: typeof fetch = fetch): GhApiWrite {
-  const call = async (method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<Response> => {
+  const call = async (
+    method: 'GET' | 'POST' | 'PATCH',
+    path: string,
+    body?: unknown,
+    graphql = false,
+  ): Promise<Response> => {
     const token = env.GITHUB_TOKEN;
     const repo = env.GITHUB_REPOSITORY;
     if (!token) throw new Error('没有 GITHUB_TOKEN');
     if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('没有 GITHUB_REPOSITORY（owner/名字）');
     const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
-    const target = path.startsWith('/users/') ? `${api}${path}` : `${api}/repos/${repo}${path}`;
+    const target = graphql
+      ? (env.GITHUB_GRAPHQL_URL ?? `${api}/graphql`)
+      : path.startsWith('/users/')
+        ? `${api}${path}`
+        : `${api}/repos/${repo}${path}`;
     return await fetchImpl(target, {
       method,
       headers: {
@@ -66,6 +77,15 @@ export function ghApi(env: Record<string, string | undefined>, fetchImpl: typeof
     async patch(path, body) {
       const res = await call('PATCH', path, body);
       if (!res.ok) throw failed(res, 'PATCH', path);
+    },
+    async graphql(query, variables) {
+      const res = await call('POST', '/graphql', { query, variables }, true);
+      if (!res.ok) throw failed(res, 'POST', '/graphql');
+      const got = (await res.json()) as { data?: unknown; errors?: unknown } | null;
+      if (got === null || typeof got !== 'object') throw new Error('GitHub GraphQL 回的不是对象');
+      if (Array.isArray(got.errors) && got.errors.length > 0)
+        throw new Error(`GitHub GraphQL 回了 ${got.errors.length} 条错误`);
+      return got.data;
     },
   };
 }

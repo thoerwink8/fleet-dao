@@ -27,7 +27,7 @@ import { WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@te
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ORPHAN_TASK_ADOPT_NOTE } from '../../src/jobs/dispatch-standing.ts';
 import { INTAKE_JOB, runIntakeJob } from '../../src/jobs/intake.ts';
-import { type IntakeGitHub, intakeJob, reportIntakeProfile } from '../../src/real/intake.ts';
+import { type IntakeGitHub, intakeJob, reportIntakeProfile, toolchainProbe } from '../../src/real/intake.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -265,7 +265,19 @@ const wire = (gh: IntakeGitHub) =>
     gateLive: true,
     toolchainReady: async () => [],
   });
-/** 不换探测：command -v 看这台机器的固定安装位置。 */
+/** Linux 跑默认 /bin/sh 真端口；Windows 只验 Linux 命令契约和装配，不冒充真实 shell。 */
+const windowsToolchain = toolchainProbe(async (command, args, options) => {
+  expect(command).toBe('/bin/sh');
+  expect(args[0]).toBe('-c');
+  expect(options.env.PATH).toBe('/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin');
+  expect(options.timeout).toBe(30_000);
+  const script = args[1];
+  const missing = script?.includes("'fleet-dao-no-such-go'");
+  expect(script).toBe(
+    `for tool in 'sh'${missing ? " 'fleet-dao-no-such-go'" : ''}; do command -v "$tool" >/dev/null 2>&1 || printf '%s\\n' "$tool"; done`,
+  );
+  return { stdout: missing ? 'fleet-dao-no-such-go\n' : '' };
+});
 const wireLive = (gh: IntakeGitHub) =>
   intakeJob({
     db: t.db,
@@ -273,6 +285,7 @@ const wireLive = (gh: IntakeGitHub) =>
     now: () => NOW,
     log: (_l, text) => logs.push(text),
     gateLive: true,
+    ...(process.platform === 'win32' ? { toolchainReady: windowsToolchain } : {}),
   });
 
 describe('拉单的真装配', { timeout: 60_000 }, () => {
@@ -1108,7 +1121,7 @@ describe('reportIntakeProfile · 仓档案没就绪的提醒（#2839）', () => 
   });
 });
 
-describe('拉单的真装配 · 法国本机的工具链', () => {
+describe(`拉单的真装配 · 法国工具链（${process.platform === 'win32' ? 'Windows 命令端口夹具' : 'Linux /bin/sh 真端口'}）`, () => {
   it('档案里的工具这台没有：不读单、不拉，原因写明缺哪个', async () => {
     await seedWorld(t.db, { toolchain: ['sh', 'fleet-dao-no-such-go'] });
     const { gh, calls } = fakeGh();
@@ -1129,5 +1142,22 @@ describe('拉单的真装配 · 法国本机的工具链', () => {
     const run = await runIntakeJob(wireLive(gh)(client, 'fleet'));
     expect(run).toMatchObject({ outcome: 'ok', found: 1 });
     expect(starts).toHaveLength(1);
+  });
+});
+
+describe('法国工具链探测的失败纪律（命令端口夹具）', () => {
+  it('命令启动失败保留真实原因，不把失败当成工具齐全', async () => {
+    const { repo } = await seedWorld(t.db, { toolchain: ['sh'] });
+    const probe = toolchainProbe(async () => {
+      throw new Error('spawn /bin/sh ENOENT');
+    });
+    await expect(probe({ ...repo, autoDispatchSince: null })).rejects.toThrow(
+      '检查工具链起不来：spawn /bin/sh ENOENT',
+    );
+  });
+  it('命令返回的缺工具逐个保留，不把非空输出当成功', async () => {
+    const { repo } = await seedWorld(t.db, { toolchain: ['sh', 'missing-a', 'missing-b'] });
+    const probe = toolchainProbe(async () => ({ stdout: 'missing-a\nmissing-b\n' }));
+    expect(await probe({ ...repo, autoDispatchSince: null })).toEqual(['missing-a', 'missing-b']);
   });
 });

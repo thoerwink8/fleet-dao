@@ -1,13 +1,14 @@
 // 仓合同：每个仓（含以后新开的）都该满足的几项写成数据
-// （agents/repo-contract.json），这里是查、补和两个钩子用的提醒。和别的钩子一样被 agents-sync 整份拷进 ~/.fleet-dao/hooks/，
+// （agents/repo-contract.json），这里是查、补和开会话钩子用的提醒。和别的钩子一样被 agents-sync 整份拷进 ~/.fleet-dao/hooks/，
 // 所以只用 node 自带的模块和同目录的钩子脚本，不依赖仓里的 TS。
 // - 合同文件：在仓里是 agents/repo-contract.json（本文件的上一层）；装到机器上之后从同步专用检出 ~/.fleet-dao/origin-main 读
 //   （永远停在 origin/main，开会话钩子每次都把它切到最新），所以合同一合进主线，各台机器下次开会话就按新的查。
-// - 命令行：node repo-contract.mjs check [仓路径]｜init [仓路径] [--dry-run]（fleet-dao 里是 pnpm repo:check / repo:init）。
+// - 只管自用仓（repo-kind.mjs 判，决定 0107）：对外仓照它自己的规矩走，开会话不提醒，check 说一句不管、退出 0，init 拒绝、不写。
+//   init --self 先在仓根 AGENTS.md 打上自用仓标记再补（没有 AGENTS.md 的由 agents-md 那项新建，模板里带标记）。
+// - 命令行：node repo-contract.mjs check [仓路径]｜init [仓路径] [--self] [--dry-run]（fleet-dao 里是 pnpm repo:check / repo:init）。
 //   不给路径就是当前目录；pnpm 跑的时候工作目录被换成 fleet-dao，认 INIT_CWD。check 退出码：全过 0、有缺 1、读不了或认不出 2。
 //   init 只补缺的、绝不覆盖已有内容；入口脚本放占位（一跑就报 TODO、退出 1），占位不算 entry 通过。
 // - 开会话（session-start.mjs）：contractLines，每个仓每天（北京时间）最多说一次缺项，全过一个字不说；读不了说一句没查成。
-// - 引导条目的〔范围：通用｜只此仓〕：scopeProblem 给开会话的 checkDirectives 用；stopScopeCheck 给 Stop 钩子用（只 systemMessage）。
 // 只读本地文件，不取远端、不问 GitHub；出错一律不抛给钩子。
 
 import { createHash } from 'node:crypto';
@@ -15,7 +16,9 @@ import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { gitBroken, gitOk as ok, gitWhy as why } from './git-run.mjs';
+import { gitBroken, gitOk as ok } from './git-run.mjs';
+import { isMainModule } from './is-main.mjs';
+import { hasSelfMark, repoKind, repoKindInfo, SELF_MARK } from './repo-kind.mjs';
 
 /** 按 git 公共目录分仓的记号名：和 fresh-main.mjs 的 repoStampKey 同一种算法（测试钉着两边一致） */
 export function stampKeyOf(commonDir) {
@@ -29,9 +32,6 @@ const SELF = fileURLToPath(import.meta.url).replaceAll('\\', '/');
 export const CONTRACT_FILE = 'repo-contract.json';
 /** 同步专用检出（和 sync-source.mjs 的 syncDirIn 同一个，测试钉着） */
 export const ORIGIN_MAIN_DIR = join('.fleet-dao', 'origin-main');
-/** 和 session-start.mjs 的 checkDirectives 读的是同一个标题 */
-export const DIRECTIVE_HEADING = '## 创始人引导（待处理）';
-const PROGRESS = 'docs/PROGRESS.md';
 const SKIP_MARK = /<!--\s*repo-contract:skip\s+([\w-]+)([^>]*?)-->/g;
 const CHECK_TYPES = new Set(['file', 'scripts', 'lines']);
 const FIX_FOR = { file: 'create', scripts: 'placeholder-scripts', lines: 'append' };
@@ -283,6 +283,23 @@ export function planInit(root, items, fs = realFs) {
   return { actions, blocked };
 }
 
+/**
+ * repo:init --self：仓根 AGENTS.md 在、没有自用仓标记时往后补一行标记；没有 AGENTS.md 的由 agents-md 那项新建（模板里带标记）。
+ * 已经标了的回 null。
+ */
+export function selfMarkAction(root, fs = realFs) {
+  const path = join(root, 'AGENTS.md');
+  const text = fs.read(path);
+  if (text === null || hasSelfMark(root, () => text)) return null;
+  return {
+    id: 'repo-kind',
+    path,
+    kind: 'append',
+    text: `${withNewline(text)}\n${SELF_MARK}\n`,
+    what: `往后补 AGENTS.md：自用仓标记 ${SELF_MARK}`,
+  };
+}
+
 export function applyInit(_root, plan, fs = realFs) {
   for (const a of plan.actions) fs.write(a.path, a.text);
 }
@@ -311,7 +328,8 @@ export function contractLines({ cwd, git, home, now = Date.now(), hookDir = HERE
     const top = git(cwd, ['rev-parse', '--show-toplevel', '--path-format=absolute', '--git-common-dir']);
     if (gitBroken(top) || !ok(top)) return [];
     const [root, common] = top.stdout.split(/\r?\n/).map((s) => s.trim());
-    if (!root) return [];
+    // 对外仓照它自己的规矩走，仓合同不提醒（决定 0107）；判不出来的那句提醒归 repo-kind.mjs
+    if (!root || repoKind(root, { git }) === 'external') return [];
     const key = common && isAbsolute(common) ? stampKeyOf(common) : null;
     const stamp = key ? join(home, '.fleet-dao', 'repo-contract', key) : null;
     const today = beijingDay(now);
@@ -350,114 +368,15 @@ export function contractLines({ cwd, git, home, now = Date.now(), hookDir = HERE
   }
 }
 
-/** 引导条目的范围标记 */
-const SCOPE_MARK = /〔范围：([^〕]*)〕/;
-
-/** 一条引导的范围有没有毛病：null 没毛病；none 没标；unpushed 标了通用还没上推；bad 认不出 */
-export function scopeProblem(text) {
-  const m = SCOPE_MARK.exec(text);
-  if (!m) return 'none';
-  const v = m[1].trim();
-  if (v === '只此仓' || /^通用\s*→\s*fleet-dao#\d+$/.test(v)) return null;
-  if (v === '通用') return 'unpushed';
-  return 'bad';
-}
-
-const brief = (s) => (s.length > 30 ? `${s.slice(0, 30)}…` : s);
-
-/** checkDirectives 那一行后面补的一句（没有毛病给空字符串） */
-export function scopeNote(texts) {
-  const none = texts.filter((t) => scopeProblem(t) !== null && scopeProblem(t) !== 'unpushed');
-  const unpushed = texts.filter((t) => scopeProblem(t) === 'unpushed');
-  let out = '';
-  if (none.length > 0)
-    out += `其中 ${none.length} 条没标范围（${none.slice(0, 3).map(brief).join('；')}）：创始人说的原则、偏好默认各仓通用，条目里写〔范围：通用〕或〔范围：只此仓〕。`;
-  if (unpushed.length > 0)
-    out += `${unpushed.length} 条标了通用、还没上推（${unpushed.slice(0, 3).map(brief).join('；')}）：给 fleet-dao 开 PR（通用段或 agents/repo-contract.json），开了把标记写成〔范围：通用→fleet-dao#<PR号>〕。`;
-  return out;
-}
-
-/** 一份 PROGRESS 正文里「## 创始人引导（待处理）」下没标「已处理」的条目（`- ` 开头，到下一个一、二级标题为止） */
-export function pendingItems(text, headingLine) {
-  const lines = text.split(/\r?\n/);
-  const items = [];
-  for (let i = headingLine; i < lines.length; i++) {
-    const t = lines[i].trim();
-    if (/^#{1,2}\s/.test(t)) break;
-    if (t.startsWith('- ') && !/已处理/.test(t)) items.push(t.slice(2).trim());
-  }
-  return items;
-}
-
-function pendingOf(text) {
-  const at = text.split(/\r?\n/).findIndex((l) => l.trim() === DIRECTIVE_HEADING);
-  return at < 0 ? [] : pendingItems(text, at + 1);
-}
-
-/**
- * Stop 钩子那一段：docs/PROGRESS.md 里比 HEAD 新记的待处理引导没标范围（或标得认不出），提醒一次。
- * 同一会话同一条只说一次：说过的记在 seenFile（没有会话号就是 null，不记）。只给 systemMessage，绝不拦。
- * 不是 git 仓、没有这个文件、没有新条目不出声；git 跑不起来、读不了说没查成。
- */
-export function stopScopeCheck({ cwd, git, seenFile }) {
-  const top = git(cwd, ['rev-parse', '--show-toplevel']);
-  if (gitBroken(top) || !ok(top)) return null;
-  const root = top.stdout.trim();
-  if (!root) return null;
-  let now;
-  try {
-    now = realFs.read(join(root, PROGRESS));
-  } catch (e) {
-    return { systemMessage: `新记的创始人引导有没有标范围没查成：读不了 ${PROGRESS}（${errText(e)}）` };
-  }
-  if (now === null) return null;
-  const head = git(root, ['show', `HEAD:${PROGRESS}`]);
-  if (gitBroken(head))
-    return { systemMessage: `新记的创始人引导有没有标范围没查成：git 跑不起来（${why(head)}）` };
-  // 没提交过、HEAD 里没有这个文件：现有的都算新记的
-  const old = new Set(ok(head) ? pendingOf(head.stdout) : []);
-  const fresh = pendingOf(now).filter(
-    (t) => !old.has(t) && scopeProblem(t) !== null && scopeProblem(t) !== 'unpushed',
-  );
-  if (fresh.length === 0) return null;
-  let seen = [];
-  if (seenFile) {
-    try {
-      const parsed = JSON.parse(readFileSync(seenFile, 'utf8'));
-      if (Array.isArray(parsed)) seen = parsed;
-    } catch {
-      // 没记过、记坏了：当没说过（多说一次不要紧）
-    }
-  }
-  const todo = fresh.filter((t) => !seen.includes(t));
-  if (todo.length === 0) return null;
-  if (seenFile) {
-    try {
-      mkdirSync(dirname(seenFile), { recursive: true });
-      writeFileSync(seenFile, JSON.stringify([...seen, ...todo]));
-    } catch {
-      // 记不下只是下次收尾再说一次
-    }
-  }
-  return {
-    systemMessage: `${PROGRESS} 新记的创始人引导没标范围 ${todo.length} 条（${todo.slice(0, 3).map(brief).join('；')}）：创始人说的原则、偏好默认各仓通用，条目里写〔范围：通用〕或〔范围：只此仓〕；通用的给 fleet-dao 开 PR，开了写成〔范围：通用→fleet-dao#<PR号>〕。`,
-  };
-}
-
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   const [cmd, ...rest] = process.argv.slice(2);
   const dryRun = rest.includes('--dry-run');
+  const markSelf = rest.includes('--self');
   const arg = rest.find((a) => !a.startsWith('--'));
   const base = process.env.INIT_CWD || process.cwd();
   const root = arg ? (isAbsolute(arg) ? arg : resolve(base, arg)) : base;
-  const usage = '用法：repo:check [仓路径]｜repo:init [仓路径] [--dry-run]（不给路径就是当前目录）';
+  const usage =
+    '用法：repo:check [仓路径]｜repo:init [仓路径] [--self] [--dry-run]（不给路径就是当前目录；--self 先标成自用仓，创始人说了是自用仓才加）';
   if (cmd !== 'check' && cmd !== 'init') {
     console.error(usage);
     process.exit(2);
@@ -473,12 +392,23 @@ if (isMain()) {
     console.error(`仓合同没查成：${contract.why}`);
     process.exit(2);
   }
+  // 对外仓照它自己的规矩走：仓合同不查、不补（决定 0107）。check 退出 0（没有要查的），init 拒绝、一个字不写
+  const kind = markSelf && cmd === 'init' ? null : repoKindInfo(root);
+  if (kind && kind.kind === 'external') {
+    console.log(
+      `${root} 是对外仓（${kind.why}）：仓合同不管对外仓，照那个仓自己的规矩走，什么都没动。` +
+        '创始人说了它是自用仓，先 pnpm repo:kind self 记下（或 repo:init <仓路径> --self 在 AGENTS.md 打标记）再补。',
+    );
+    process.exit(cmd === 'check' ? 0 : 1);
+  }
   if (cmd === 'check') {
     const rs = checkRepo(root, contract.items);
     console.log(formatReport(root, rs));
     process.exit(exitCodeOf(rs));
   }
   const plan = planInit(root, contract.items);
+  const mark = markSelf ? selfMarkAction(root) : null;
+  if (mark) plan.actions.unshift(mark);
   if (!dryRun) applyInit(root, plan);
   console.log(formatPlan(root, plan, dryRun));
   const after = dryRun ? null : checkRepo(root, contract.items).find((r) => r.id === 'entry');

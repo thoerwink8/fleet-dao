@@ -8,7 +8,7 @@
 // - end 永远是最后一行：sessionId、这一轮的 usage、total_cost_usd（只算这一轮，续跑那轮只有几分钱）、modelUsage 的键就是实际模型。
 // - 每次模型调用之后有一帧 usage（这一次调用的用量）：fixtures 里五份真跑记录，逐帧加起来和 end 的 usage 四样一个不差。会话被叫停、
 //   超时杀没走到 end 时，靠它记下已经花掉的（callUsage）；最后一次没跑完的调用没有 usage 帧，不在里面。
-import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
+import { countTextDiff, type LineCounts, type ProgressEvent, type ProgressKind } from '@fleet-dao/shared';
 import type { LineEffect } from '../cli-run.ts';
 import {
   cleanTestCommands,
@@ -272,7 +272,15 @@ export class GrokStreamReader {
       summary: toolSummary(tool, this.#cwd),
       ...optional('description', tool.kind === 'execute' ? str(tool.input.description) : undefined),
     } satisfies ToolPayload);
-    this.#tx(effect, 'tool_call', toolSummary(tool, this.#cwd, TRANSCRIPT_SUMMARY_MAX), { tool: tool.name });
+    const description = tool.kind === 'execute' ? str(tool.input.description) : undefined;
+    const callMeta = {
+      ...(id ? { callId: id } : {}),
+      ...(description ? { description: cut(description, 200) } : {}),
+    };
+    this.#tx(effect, 'tool_call', toolSummary(tool, this.#cwd, TRANSCRIPT_SUMMARY_MAX), {
+      tool: tool.name,
+      ...(Object.keys(callMeta).length > 0 ? { meta: callMeta } : {}),
+    });
   }
 
   #toolUpdate(frame: Record<string, unknown>, effect: LineEffect): void {
@@ -299,7 +307,14 @@ export class GrokStreamReader {
       ok,
       ...optional('error', ok ? undefined : failureDetail(status, output, frame.content)),
     } satisfies ToolPayload);
-    this.#tx(effect, 'tool_result', resultTextOf(status, output, frame.content, ok), { tool: tool.name, ok });
+    // 改文件的结果带这一次改了几行：content 里的 diff 块按行精确差分，超限保留未知。
+    const lines = ok && EDIT_KINDS.has(tool.kind) ? diffLines(frame.content) : undefined;
+    const resultMeta = { ...(id ? { callId: id } : {}), ...(lines ?? {}) };
+    this.#tx(effect, 'tool_result', resultTextOf(status, output, frame.content, ok), {
+      tool: tool.name,
+      ok,
+      ...(Object.keys(resultMeta).length > 0 ? { meta: resultMeta } : {}),
+    });
     if (ok && EDIT_KINDS.has(tool.kind)) {
       for (const path of editedPaths(tool, output, frame.content)) {
         const rel = relPath(path, this.#cwd);
@@ -398,6 +413,23 @@ function resultTextOf(
 ): string {
   if (!ok) return failureDetail(status, output, content);
   return grokBlockText(content, '\n') || str(output.output_for_prompt)?.trim() || EMPTY_TOOL_RESULT;
+}
+
+/** 结果 content 里的 diff 块（改前 oldText、改后 newText）合起来改了几行；一个 diff 块都没有返回 undefined。 */
+function diffLines(content: unknown): LineCounts | undefined {
+  if (!Array.isArray(content)) return undefined;
+  let total: LineCounts | undefined;
+  for (const c of content) {
+    const block = rec(c);
+    if (block?.type !== 'diff') continue;
+    const oldText = block.oldText;
+    const newText = block.newText;
+    if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined;
+    const d = countTextDiff(oldText, newText);
+    if (d === undefined) return undefined;
+    total = { added: (total?.added ?? 0) + d.added, removed: (total?.removed ?? 0) + d.removed };
+  }
+  return total;
 }
 
 function editedPaths(tool: PendingTool, output: Record<string, unknown>, content: unknown): string[] {

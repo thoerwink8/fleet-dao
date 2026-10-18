@@ -23,7 +23,7 @@ import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { CATALOG_NAMED_FAMILIES } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -540,15 +540,27 @@ export async function checkoutPrHead(
         missingObject: MISSING_OBJECT.test(archived.stderr),
       });
     }
+    const extractDir = resolve(dir);
     await new Promise<void>((resolve, reject) => {
-      execFile('tar', ['-xf', tarPath, '-C', dir], { timeout: 120_000 }, (err, _stdout, stderr) => {
-        if (!err) return resolve();
-        const why = typeof stderr === 'string' && stderr.trim() !== '' ? oneLine(stderr) : errMessage(err);
-        const code = errnoOf(err);
-        reject(
-          new CheckoutStageError('extract', why, { ...(code === undefined ? {} : { code }), cause: err }),
-        );
-      });
+      // scratch 是本次 mkdtemp 建的私有目录；相对归档名避免 GNU tar 把 Windows 盘符当远端主机。
+      execFile(
+        'tar',
+        [
+          '-xf',
+          'head.tar',
+          '-C',
+          process.platform === 'win32' ? extractDir.replaceAll('\\', '/') : extractDir,
+        ],
+        { cwd: scratch, timeout: 120_000 },
+        (err, _stdout, stderr) => {
+          if (!err) return resolve();
+          const why = typeof stderr === 'string' && stderr.trim() !== '' ? oneLine(stderr) : errMessage(err);
+          const code = errnoOf(err);
+          reject(
+            new CheckoutStageError('extract', why, { ...(code === undefined ? {} : { code }), cause: err }),
+          );
+        },
+      );
     });
   } finally {
     await rm(scratch, { recursive: true, force: true });

@@ -370,6 +370,7 @@ describe('按改动算要跑什么', () => {
       'packages/adapters/',
       'agents/',
       'packages/agents-sync/',
+      'packages/conventions/',
     ]);
     // 只改说明文字不拖上 2 分钟的 deploy/test（#121 只改 AGENTS.md 和 skill 就跑了 2 分 13 秒）
     expect(pr('agents/skills/discuss/SKILL.md').deploy).toBe('none');

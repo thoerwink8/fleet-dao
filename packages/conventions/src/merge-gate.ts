@@ -12,7 +12,14 @@
 // 主线推送只在闸认的东西（判法、清单、工作流本身）变了才触发、同样重算所有开着的 PR——判法收紧了，开着的 PR 上旧的 success
 // 不能留着（#654 第二意见）；不检出、不跑 PR 里的代码：判法和清单用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
-import { CI_POLICY_SOURCE_PREFIX, policySourceNumber } from '../../shared/src/ci-policy-bridge.ts';
+import {
+  CI_POLICY_SOURCE_PREFIX,
+  type PolicyRepo,
+  policyHead,
+  policyRepo,
+  policySourceNumber,
+} from '../../shared/src/ci-policy-bridge.ts';
+import type { ClosedPolicyHead, PolicyReadResult } from './ci-policy-bridge.ts';
 import { isFlowBranch } from './flow-branch.ts';
 import type { GhApi } from './gh-api.ts';
 import {
@@ -142,6 +149,7 @@ export interface GateResult {
   lines: string[];
   /** 本轮已验证的模式；发表前再读，不能沿用旧 off。 */
   policy?: 'force' | 'off';
+  repo?: PolicyRepo;
 }
 
 export interface GateDeps {
@@ -150,7 +158,7 @@ export interface GateDeps {
    * 纯判法可注入 CI 模式，不给一律 force；生产入口只用可信 source 的现读 DB reader。
    */
   ciPolicy?: 'force' | 'off';
-  readCiPolicy?: (number: number, head: string) => Promise<'force' | 'off'>;
+  readCiPolicy?: (number: number, head: string) => Promise<PolicyReadResult>;
   /** 改标准的路径清单；不传读跑这段代码的那一份（standard-paths-file.ts，主线检出里的）。读不到、认不出就抛。 */
   standardPaths?: () => Promise<StandardPath[]>;
 }
@@ -264,8 +272,10 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
     lines: [`没查成：${why}。`],
   });
   let meta: LiveMeta | string;
+  let raw: unknown;
   try {
-    meta = metaOf(await gh.pr(number));
+    raw = await gh.pr(number);
+    meta = metaOf(raw);
   } catch (e) {
     return broken(`读不到 PR #${number} 现在的样子（${message(e)}）`);
   }
@@ -276,8 +286,17 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
     return { number, head: meta.head, closed: true, state: 'failure', notChecked: false, lines: [] };
 
   let policy = deps.ciPolicy ?? 'force';
+  let repo: PolicyRepo | undefined;
   try {
-    if (deps.readCiPolicy) policy = await deps.readCiPolicy(number, meta.head);
+    if (deps.readCiPolicy) {
+      repo = prRepo(raw);
+      const read = await deps.readCiPolicy(number, meta.head);
+      if (typeof read !== 'string') {
+        assertClosed(read, number, meta.head, repo);
+        return { number, head: meta.head, closed: true, state: 'failure', notChecked: false, lines: [] };
+      }
+      policy = read;
+    }
   } catch (e) {
     return { ...broken(`CI 策略来源未查成（${message(e)}）`), head: meta.head };
   }
@@ -292,6 +311,7 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
     state: ok ? 'success' : 'failure',
     notChecked: verdicts.some((v) => v.notChecked),
     ...(deps.readCiPolicy ? { policy } : {}),
+    ...(repo ? { repo } : {}),
     // 不通过时只写不通过的那几样（「能合：……」夹在里面读着像能合）
     lines: verdicts.filter((v) => ok || !v.ok).flatMap((v) => v.lines),
   };
@@ -415,11 +435,23 @@ export async function runMergeGate(opts: {
     try {
       if (opts.readCiPolicy && r.policy) {
         const policy = await opts.readCiPolicy(n, r.head);
-        const current = metaOf(await opts.gh.pr(n));
+        if (!r.repo) throw new Error('本轮 PR 仓身份未查成');
+        if (typeof policy !== 'string') {
+          assertClosed(policy, n, r.head, r.repo);
+          lines.push(`PR #${n} 已经关了，不发表状态。`);
+          continue;
+        }
+        if (policy !== r.policy) throw new Error('发表前 DB 策略改变，请重算');
+        const raw = await opts.gh.pr(n);
+        const identity = policyHead(raw, r.repo);
+        if (identity.number !== n || identity.head !== r.head)
+          throw new Error('发表前 PR 身份或 head 改变，请重算');
+        const current = metaOf(raw);
         if (typeof current === 'string') throw new Error(current);
-        if (!current.open) continue;
-        if (current.number !== n || current.head !== r.head || policy !== r.policy)
-          throw new Error('发表前 PR head 或 DB 策略改变，请重算');
+        if (!current.open) {
+          lines.push(`PR #${n} 已经关了，不发表状态。`);
+          continue;
+        }
       }
       await opts.gh.writeStatus(r.head, {
         state: r.state,
@@ -441,6 +473,23 @@ export async function runMergeGate(opts: {
     }
   }
   return { code, lines };
+}
+
+function prRepo(raw: unknown): PolicyRepo {
+  if (!isObject(raw) || !isObject(raw.base) || !isObject(raw.base.repo))
+    throw new Error('PR 的 base 仓身份未查成');
+  return policyRepo({ ...raw.base.repo, private: false });
+}
+
+function assertClosed(value: ClosedPolicyHead, number: number, head: string, repo: PolicyRepo): void {
+  if (
+    value.closed !== true ||
+    value.number !== number ||
+    value.head !== head ||
+    value.repo.githubId !== repo.githubId ||
+    value.repo.repo.toLowerCase() !== repo.repo.toLowerCase()
+  )
+    throw new Error('已关闭 PR 的仓身份、单号或 head 不匹配');
 }
 
 function message(e: unknown): string {

@@ -150,6 +150,8 @@ function rig(
     driverRun?: (spec: HostRunSpec, hooks: HostRunHooks, n: number) => Promise<HostReport>;
     routeFor?: (routeId: string) => RouteLaunchFacts | null;
     readPullError?: Error;
+    /** 写验收结论进库时抛（#3140）：结论照常交回，只写日志。 */
+    noteVerdictError?: Error;
     pullFilesError?: Error;
     setStatusError?: (posted: Posted[]) => Error | undefined;
     pickRouteError?: Error;
@@ -167,6 +169,8 @@ function rig(
   const specs: HostRunSpec[] = [];
   const recorded: RunRecord[] = [];
   const started: RunStart[] = [];
+  /** 验收有结论时写在验收那一笔上的（#3140，runs.verdict）：[runId, 结论]。 */
+  const verdicts: [string, unknown][] = [];
   /** 每次开跑带给 runs.start 的预占编号（没带是 undefined）。 */
   const startedWith: (string | undefined)[] = [];
   /** 收场时放掉的预占编号。 */
@@ -258,6 +262,10 @@ function rig(
       async record(r) {
         recorded.push(r);
       },
+      async noteVerdict(runId, verdict) {
+        if (opts.noteVerdictError) throw opts.noteVerdictError;
+        verdicts.push([runId, verdict]);
+      },
     },
     reservations: {
       async release(id) {
@@ -290,7 +298,21 @@ function rig(
     round: 1,
     ...over,
   });
-  return { run, input, ft, posted, specs, recorded, started, startedWith, released, asked, reads, slept };
+  return {
+    run,
+    input,
+    ft,
+    posted,
+    specs,
+    recorded,
+    started,
+    startedWith,
+    released,
+    asked,
+    reads,
+    slept,
+    verdicts,
+  };
 }
 
 describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
@@ -344,6 +366,37 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     expect(got.retry).toBeUndefined();
     expect(r.posted.at(-1)).toMatchObject({ sha: HEAD, state: 'failure' });
     expect(r.posted.at(-1)?.description).toContain('没做到验收条');
+  });
+
+  it('验收有结论：结论（过没过、哪几条没过、转给人的）写在验收那一笔 runs 上；回合号一路带到开跑那一行（#3140）', async () => {
+    const pass = rig();
+    const ok = await pass.run(pass.input({ roundSeq: 2 }), ctx());
+    expect(ok.pass).toBe(true);
+    expect(pass.verdicts).toEqual([
+      [pass.recorded[0]?.runId, { pass: true, problems: [], failedCriteria: [], handedOver: [] }],
+    ]);
+    expect(pass.started[0]).toMatchObject({ roundSeq: 2, segment: 'verify' });
+    expect(pass.recorded[0]).toMatchObject({ roundSeq: 2 });
+
+    const fail = rig({ driverRun: async () => report(MODEL_FAIL) });
+    await fail.run(fail.input(), ctx());
+    expect(fail.verdicts).toHaveLength(1);
+    expect(fail.verdicts[0]?.[1]).toMatchObject({
+      pass: false,
+      problems: ['没做到验收条：第 1 条：单子要状态栏，代码里没有'],
+      failedCriteria: [1],
+    });
+    // 老历史的入参没有回合号：开跑那一行不带这个键
+    expect(fail.started[0]).not.toHaveProperty('roundSeq');
+  });
+
+  it('【故意造出的失败】结论写不进库：验收结果照常交回、状态照常贴，只写日志，不把一次验过的验收算成没验成', async () => {
+    const r = rig({ noteVerdictError: new Error('库不通') });
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ pass: true, problems: [] });
+    expect(got.unavailable).toBeUndefined();
+    expect(r.posted.at(-1)).toMatchObject({ state: 'success' });
+    expect(r.verdicts).toEqual([]);
   });
 
   it('写这张单的族不止一个：全部跳过（先 gpt 后 claude 写的 → grok 没路由，验的是 deepseek）', async () => {

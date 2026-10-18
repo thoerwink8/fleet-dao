@@ -1,5 +1,5 @@
 // 仓合同（agents/repo-contract.json + agents/hooks/repo-contract.mjs，决定 0081）：查、补、豁免、命令行退出码、
-// 开会话的提醒（每仓每天一次）、引导条目的〔范围：…〕（开会话的 checkDirectives、收尾的 Stop 钩子）。只提醒、不拦。
+// 开会话的提醒（每仓每天一次）。只提醒、不拦。
 // 真文件（临时目录）、真 git（临时目录里 init）；读不了的那一路用注入的文件读取造。规矩本身钉在 rules/repo-entry.rules.test.ts。
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -44,14 +44,11 @@ interface Lib {
   planInit(root: string, items: Item[], fs?: Fs): Plan;
   applyInit(root: string, plan: Plan, fs?: Fs): void;
   contractLines(o: { cwd: string; git: Git; home: string; now: number; hookDir?: string }): string[];
-  scopeProblem(text: string): null | 'none' | 'unpushed' | 'bad';
-  stopScopeCheck(o: { cwd: string; git: Git; seenFile: string | null }): { systemMessage: string } | null;
   ORIGIN_MAIN_DIR: string;
   stampKeyOf(commonDir: string): string;
 }
 interface SessionLib {
   gitRunner(timeoutMs?: number): Git;
-  checkDirectives(cwd: string, git: Git): string[];
 }
 
 const LIB = fileURLToPath(new URL('../hooks/repo-contract.mjs', import.meta.url));
@@ -88,10 +85,12 @@ function put(root: string, files: Record<string, string>): string {
   return root;
 }
 const g = (cwd: string, ...a: string[]) => runChildOk('git', a, { cwd });
+/** 仓合同只管自用仓（决定 0107）：造的仓默认打上自用仓标记 */
+const SELF_AGENTS = '# AGENTS.md\n\n<!-- repo-kind: 自用仓 -->\n';
 function gitRepo(files: Record<string, string> = {}, commit = true): string {
   const dir = temp('git');
   g(dir, 'init', '-q', '-b', 'main');
-  put(dir, { 'README.md': '# 仓\n', ...files });
+  put(dir, { 'README.md': '# 仓\n', 'AGENTS.md': SELF_AGENTS, ...files });
   if (commit) {
     g(dir, 'add', '-A');
     g(dir, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'init');
@@ -102,19 +101,25 @@ function gitRepo(files: Record<string, string> = {}, commit = true): string {
 const PKG_OK = JSON.stringify({
   scripts: { dev: 'x dev', start: 'x start', stop: 'x stop', check: 'x check' },
 });
-const PROGRESS_OK =
-  '# 进度\n\n## 创始人引导（待处理）\n\n## 生效中的临时调整\n\n| 内容 | 当时为什么 | 谁拍的 | 撤回条件 | 最迟复查日期 |\n|---|---|---|---|---|\n';
 const GOOD: Record<string, string> = {
   'package.json': PKG_OK,
-  'AGENTS.md': '# AGENTS.md\n',
-  'docs/PROGRESS.md': PROGRESS_OK,
+  'AGENTS.md': SELF_AGENTS,
   '.gitignore': 'node_modules/\n_tmp/\n',
 };
 const byId = (rs: Checked[]) => Object.fromEntries(rs.map((r) => [r.id, r]));
 
 describe('合同本身', () => {
-  it('首批四项：entry、agents-md、progress、gitignore-tmp', () => {
-    expect(ITEMS.map((i) => i.id)).toEqual(['entry', 'agents-md', 'progress', 'gitignore-tmp']);
+  it('三项：entry、agents-md、gitignore-tmp（不再要各仓有 docs/PROGRESS.md 的引导清单和临时调整表）', () => {
+    expect(ITEMS.map((i) => i.id)).toEqual(['entry', 'agents-md', 'gitignore-tmp']);
+  });
+
+  it('补给新自用仓的 AGENTS.md 带自用仓标记、只写项目本身的记法，不提 AI、fleet-dao、原话', () => {
+    const root = temp('tmpl');
+    lib.applyInit(root, lib.planInit(root, ITEMS));
+    const text = readFileSync(join(root, 'AGENTS.md'), 'utf8');
+    expect(text).toContain('docs/decisions.md');
+    expect(text.split('\n')).toContain('<!-- repo-kind: 自用仓 -->');
+    expect(text).not.toMatch(/fleet-dao|AI|Claude|原话|引导|临时调整/);
   });
 
   it('装到机器上之后从同步专用检出读：路径和 sync-source.mjs 的 syncDirIn 是同一个', () => {
@@ -147,15 +152,15 @@ describe('合同本身', () => {
 });
 
 describe('repo:check 的判法', () => {
-  it('四项都齐：全过，退出码 0', () => {
+  it('三项都齐：全过，退出码 0', () => {
     const rs = lib.checkRepo(put(temp('good'), GOOD), ITEMS);
-    expect(rs.map((r) => r.status)).toEqual(['ok', 'ok', 'ok', 'ok']);
+    expect(rs.map((r) => r.status)).toEqual(['ok', 'ok', 'ok']);
     expect(lib.exitCodeOf(rs)).toBe(0);
   });
 
-  it('空目录：四项都缺，退出码 1，每项说清缺什么', () => {
+  it('空目录：三项都缺，退出码 1，每项说清缺什么', () => {
     const rs = byId(lib.checkRepo(temp('empty'), ITEMS));
-    expect(Object.values(rs).map((r) => r.status)).toEqual(['missing', 'missing', 'missing', 'missing']);
+    expect(Object.values(rs).map((r) => r.status)).toEqual(['missing', 'missing', 'missing']);
     expect(rs.entry?.why).toMatch(/package\.json/);
     expect(rs['agents-md']?.why).toMatch(/AGENTS\.md/);
     expect(lib.exitCodeOf(Object.values(rs))).toBe(1);
@@ -170,18 +175,6 @@ describe('repo:check 的判法', () => {
     expect(r?.why).toMatch(/stop/);
     expect(r?.why).toMatch(/check.*占位|占位.*check/);
     expect(r?.why).not.toMatch(/dev/);
-  });
-
-  it('progress：两节缺一节就算缺，说出缺的是哪一节', () => {
-    const r = byId(
-      lib.checkRepo(
-        put(temp('prog'), { ...GOOD, 'docs/PROGRESS.md': '# 进度\n\n## 创始人引导（待处理）\n' }),
-        ITEMS,
-      ),
-    ).progress;
-    expect(r?.status).toBe('missing');
-    expect(r?.why).toContain('## 生效中的临时调整');
-    expect(r?.why).not.toContain('创始人引导');
   });
 
   it('gitignore-tmp：/_tmp/ 也认；写在注释里、写成 _tmp_x 不认', () => {
@@ -217,14 +210,14 @@ describe('repo:check 的判法', () => {
 
   it('豁免：AGENTS.md 里写了理由的算豁免、输出里看得见理由；没写理由的不算数、照查、也说出来', () => {
     const agents =
-      '# AGENTS.md\n<!-- repo-contract:skip entry 纯文档仓，没有能跑的东西 -->\n<!-- repo-contract:skip progress -->\n';
-    const root = put(temp('skip'), { 'AGENTS.md': agents, '.gitignore': '_tmp/\n' });
+      '# AGENTS.md\n<!-- repo-contract:skip entry 纯文档仓，没有能跑的东西 -->\n<!-- repo-contract:skip gitignore-tmp -->\n';
+    const root = put(temp('skip'), { 'AGENTS.md': agents });
     const rs = lib.checkRepo(root, ITEMS);
     const r = byId(rs);
     expect(r.entry?.status).toBe('skipped');
     expect(r.entry?.reason).toBe('纯文档仓，没有能跑的东西');
-    expect(r.progress?.status).toBe('missing');
-    expect(r.progress?.note).toMatch(/豁免没写理由/);
+    expect(r['gitignore-tmp']?.status).toBe('missing');
+    expect(r['gitignore-tmp']?.note).toMatch(/豁免没写理由/);
     const report = lib.formatReport(root, rs);
     expect(report).toContain('纯文档仓，没有能跑的东西');
     expect(report).toMatch(/豁免没写理由/);
@@ -233,14 +226,13 @@ describe('repo:check 的判法', () => {
 });
 
 describe('repo:init：只补缺的，绝不覆盖', () => {
-  it('空目录：补出四样骨架；入口是占位，所以 entry 仍算缺，其余三项过', () => {
+  it('空目录：补出三样骨架；入口是占位，所以 entry 仍算缺，其余两项过', () => {
     const root = temp('init');
     lib.applyInit(root, lib.planInit(root, ITEMS));
     const r = byId(lib.checkRepo(root, ITEMS));
     expect(r.entry?.status).toBe('missing');
     expect(r.entry?.why).toMatch(/占位/);
     expect(r['agents-md']?.status).toBe('ok');
-    expect(r.progress?.status).toBe('ok');
     expect(r['gitignore-tmp']?.status).toBe('ok');
     const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
     expect(Object.keys(pkg.scripts)).toEqual(['dev', 'start', 'stop', 'check']);
@@ -253,7 +245,7 @@ describe('repo:init：只补缺的，绝不覆盖', () => {
     expect(lib.planInit(root, ITEMS).actions).toEqual([]);
   });
 
-  it('已有的内容一个字不动：已有的脚本、AGENTS.md、PROGRESS 正文、.gitignore 原样保留，只往后补', () => {
+  it('已有的内容一个字不动：已有的脚本、AGENTS.md、.gitignore 原样保留，只往后补；不再碰 docs/PROGRESS.md', () => {
     const root = put(temp('keep'), {
       'package.json': JSON.stringify(
         { name: 'mine', scripts: { dev: 'vite', test: 'vitest' }, extra: [1, 2] },
@@ -272,9 +264,7 @@ describe('repo:init：只补缺的，绝不覆盖', () => {
     expect(pkg.scripts.test).toBe('vitest');
     expect(pkg.scripts.start).toMatch(/repo-contract:placeholder/);
     expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toBe('# 我自己的\n');
-    const progress = readFileSync(join(root, 'docs/PROGRESS.md'), 'utf8');
-    expect(progress.startsWith('# 进度\n\n原来的正文\n')).toBe(true);
-    expect(progress).toContain('## 创始人引导（待处理）');
+    expect(readFileSync(join(root, 'docs/PROGRESS.md'), 'utf8')).toBe('# 进度\n\n原来的正文');
     expect(readFileSync(join(root, '.gitignore'), 'utf8')).toBe('node_modules/\n_tmp/\n');
   });
 
@@ -302,7 +292,7 @@ describe('命令行：node agents/hooks/repo-contract.mjs check|init', SLOW, () 
 
   it('check：全过 0、缺 1、认不出 2，并说原因', () => {
     expect(cli(['check', put(temp('c0'), GOOD)]).status).toBe(0);
-    const miss = cli(['check', temp('c1')]);
+    const miss = cli(['check', put(temp('c1'), { 'AGENTS.md': SELF_AGENTS })]);
     expect(miss.status).toBe(1);
     expect(miss.stdout).toContain('entry');
     const bad = cli(['check', put(temp('c2'), { ...GOOD, 'package.json': '{坏' })]);
@@ -322,7 +312,7 @@ describe('命令行：node agents/hooks/repo-contract.mjs check|init', SLOW, () 
 
   it('init --dry-run：打印要做什么，一个文件都不写', () => {
     const root = temp('dry');
-    const r = cli(['init', root, '--dry-run']);
+    const r = cli(['init', root, '--self', '--dry-run']);
     expect(r.status).toBe(0);
     expect(r.stdout).toContain('package.json');
     expect(r.stdout).toContain('AGENTS.md');
@@ -332,10 +322,35 @@ describe('命令行：node agents/hooks/repo-contract.mjs check|init', SLOW, () 
 
   it('init：补完提示入口是占位，要填上真正的启动方式才算 entry 通过', () => {
     const root = temp('real');
-    const r = cli(['init', root]);
+    const r = cli(['init', root, '--self']);
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/占位/);
-    expect(existsSync(join(root, 'docs', 'PROGRESS.md'))).toBe(true);
+    expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toContain('<!-- repo-kind: 自用仓 -->');
+    expect(existsSync(join(root, 'docs', 'PROGRESS.md'))).toBe(false);
+  });
+
+  it('对外仓（没有自用仓标记）：check 说不管、退出 0；init 拒绝、一个文件都不写（决定 0107）', () => {
+    const root = put(temp('ext'), { 'AGENTS.md': '# 公司仓自己的规矩\n' });
+    const c = cli(['check', root]);
+    expect(c.status).toBe(0);
+    expect(c.stdout).toMatch(/对外仓/);
+    expect(c.stdout).not.toContain('entry');
+    const i = cli(['init', root]);
+    expect(i.status).toBe(1);
+    expect(i.stdout).toMatch(/对外仓.*什么都没动/);
+    expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toBe('# 公司仓自己的规矩\n');
+    expect(existsSync(join(root, 'package.json'))).toBe(false);
+    expect(existsSync(join(root, '.gitignore'))).toBe(false);
+  });
+
+  it('init --self：已有的 AGENTS.md 原样保留、往后补一行标记；旧的私人仓写法算已标、不重复补', () => {
+    const root = put(temp('mark'), { 'AGENTS.md': '# 我的\n' });
+    expect(cli(['init', root, '--self']).status).toBe(0);
+    expect(readFileSync(join(root, 'AGENTS.md'), 'utf8')).toBe('# 我的\n\n<!-- repo-kind: 自用仓 -->\n');
+    const legacy = put(temp('legacy'), { 'AGENTS.md': '# 我的\n<!-- repo-kind: 私人仓 -->\n' });
+    expect(cli(['init', legacy, '--self']).status).toBe(0);
+    expect(readFileSync(join(legacy, 'AGENTS.md'), 'utf8')).toBe('# 我的\n<!-- repo-kind: 私人仓 -->\n');
+    expect(cli(['check', legacy]).stdout).not.toMatch(/对外仓/);
   });
 
   it('【故意造出的失败】不认识的子命令、路径不存在：退出码 2', () => {
@@ -381,6 +396,13 @@ describe('开会话的提醒（contractLines）：每仓每天最多一次，全
     );
   });
 
+  it('对外仓（AGENTS.md 没有自用仓标记）：缺什么都不提醒，也不记一天一次的记号', () => {
+    const root = gitRepo({ 'AGENTS.md': '# 公司仓\n' });
+    const home = temp('home');
+    expect(lib.contractLines({ cwd: root, git, home, now: NOW, hookDir: HOOK_DIR })).toEqual([]);
+    expect(existsSync(join(home, '.fleet-dao', 'repo-contract'))).toBe(false);
+  });
+
   it('不是 git 仓：不出声', () => {
     expect(
       lib.contractLines({ cwd: temp('plain'), git, home: temp('home'), now: NOW, hookDir: HOOK_DIR }),
@@ -415,93 +437,5 @@ describe('开会话的提醒（contractLines）：每仓每天最多一次，全
       hookDir: HOOK_DIR,
     });
     expect(out.join('')).toMatch(/仓合同没查成/);
-  });
-});
-
-describe('引导条目的〔范围：…〕', () => {
-  it('scopeProblem：没标、标了通用没上推、认不出；只此仓和已上推的不算问题', () => {
-    expect(lib.scopeProblem('- 04:00「要 pnpm 命令」')).toBe('none');
-    expect(lib.scopeProblem('- 04:00「要 pnpm 命令」〔范围：通用〕')).toBe('unpushed');
-    expect(lib.scopeProblem('- 04:00「要 pnpm 命令」〔范围：通用→fleet-dao#1934〕')).toBeNull();
-    expect(lib.scopeProblem('- 04:00「飞瓜别重登」〔范围：只此仓〕')).toBeNull();
-    expect(lib.scopeProblem('- 04:00「x」〔范围：大概通用〕')).toBe('bad');
-  });
-});
-
-describe('开会话的 checkDirectives：待处理的条目没标范围、标了通用没上推，各补一句', SLOW, () => {
-  const head = '# 进度\n\n## 创始人引导（待处理）\n\n';
-  const tail = '\n## 别的节\n';
-
-  it('没标范围：同一行里补一句「没标范围」，原来的那几句照旧', () => {
-    const [line] = session.checkDirectives(
-      gitRepo({ 'docs/PROGRESS.md': `${head}- 04:00「要 pnpm 命令」\n${tail}` }),
-      git,
-    );
-    expect(line).toContain('创始人引导还有 1 条没处理');
-    expect(line).toMatch(/1 条没标范围/);
-    expect(line).toContain('〔范围：通用〕');
-  });
-
-  it('标了通用、没有 →fleet-dao#号：补一句「还没上推」', () => {
-    const [line] = session.checkDirectives(
-      gitRepo({ 'docs/PROGRESS.md': `${head}- 04:00「要 pnpm 命令」〔范围：通用〕\n${tail}` }),
-      git,
-    );
-    expect(line).toMatch(/1 条标了通用、还没上推/);
-    expect(line).not.toMatch(/没标范围/);
-  });
-
-  it('只此仓、已上推的：不补', () => {
-    const text = `${head}- 04:00「a」〔范围：只此仓〕\n- 04:01「b」〔范围：通用→fleet-dao#1934〕\n${tail}`;
-    const [line] = session.checkDirectives(gitRepo({ 'docs/PROGRESS.md': text }), git);
-    expect(line).toContain('创始人引导还有 2 条没处理');
-    expect(line).not.toMatch(/没标范围|还没上推/);
-  });
-
-  it('已处理的老条目不追溯：没标范围也不出声', () => {
-    const text = `${head}- 03:50「密钥要有历史」已处理\n${tail}`;
-    expect(session.checkDirectives(gitRepo({ 'docs/PROGRESS.md': text }), git)).toEqual([]);
-  });
-});
-
-describe('收尾的 Stop 钩子（stopScopeCheck）：比 HEAD 新记的引导没标范围，提醒一次', SLOW, () => {
-  const head = '# 进度\n\n## 创始人引导（待处理）\n\n';
-  const oldItem = '- 03:50「密钥要有历史」\n';
-
-  it('新加了一条没标范围的：提醒它（不提早就在 HEAD 里的老条目）；同一会话第二次不再说', () => {
-    const root = gitRepo({ 'docs/PROGRESS.md': `${head}${oldItem}` });
-    writeFileSync(join(root, 'docs/PROGRESS.md'), `${head}${oldItem}- 04:00「要 pnpm 命令」\n`);
-    const seen = join(temp('state'), 'seen.json');
-    const out = lib.stopScopeCheck({ cwd: root, git, seenFile: seen });
-    expect(out?.systemMessage).toContain('要 pnpm 命令');
-    expect(out?.systemMessage).not.toContain('密钥');
-    expect(out?.systemMessage).toContain('〔范围：通用〕');
-    expect(Object.keys(out ?? {})).toEqual(['systemMessage']);
-    expect(lib.stopScopeCheck({ cwd: root, git, seenFile: seen })).toBeNull();
-  });
-
-  it('新加的标了范围：不出声', () => {
-    const root = gitRepo({ 'docs/PROGRESS.md': head });
-    writeFileSync(join(root, 'docs/PROGRESS.md'), `${head}- 04:00「要 pnpm 命令」〔范围：通用〕\n`);
-    expect(lib.stopScopeCheck({ cwd: root, git, seenFile: null })).toBeNull();
-  });
-
-  it('还没有提交过（HEAD 里没有这个文件）：现有的待处理条目都算新的', () => {
-    const root = gitRepo({ 'docs/PROGRESS.md': `${head}${oldItem}` }, false);
-    expect(lib.stopScopeCheck({ cwd: root, git, seenFile: null })?.systemMessage).toContain('密钥要有历史');
-  });
-
-  it('没有 docs/PROGRESS.md、不是 git 仓：不出声', () => {
-    expect(lib.stopScopeCheck({ cwd: gitRepo(), git, seenFile: null })).toBeNull();
-    expect(lib.stopScopeCheck({ cwd: temp('plain'), git, seenFile: null })).toBeNull();
-  });
-
-  it('【故意造出的失败】git 跑不起来：说没查成，不当成没有', () => {
-    const root = put(temp('nogit'), { 'docs/PROGRESS.md': `${head}${oldItem}` });
-    const dead: Git = (_cwd, args) =>
-      args[0] === 'rev-parse'
-        ? { status: 0, stdout: `${root}\n`, stderr: '' }
-        : { status: 3221225781, stdout: '', stderr: '' };
-    expect(lib.stopScopeCheck({ cwd: root, git: dead, seenFile: null })?.systemMessage).toMatch(/没查成/);
   });
 });

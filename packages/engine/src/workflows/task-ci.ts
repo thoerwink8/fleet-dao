@@ -3,10 +3,15 @@
 // CI 结果没查成（不是 PR 被关了、不是没配检查）先自己隔 CI_UNKNOWN_RECHECK_SECONDS 秒重查，最多 CI_UNKNOWN_RECHECKS 次，再停下等人
 // （决定 0093，patched('ci-unknown-recheck')，只在 waitForCiPolicy：waitForCi 只有老历史走）。
 //
+// CI 红了回动手前（patched('ci-red-review-context')）：现读这张 PR 上仍有效的正式评审，和失败的检查、摘要、日志一起交下一轮。
+// 读失败、身份不符走原来的有界重试后停下；读的过程中头变了明确未交付，不记已消费、不放行合并。老历史没有这个标记，红了只交 CI 那几行。
+//
 // 改这里之前必须知道：等 CI 是长活动（心跳、收得到取消），一律经 rt.cancellable；冲突先自动并主线，并得干净就接着等。
 
-import { patched } from '@temporalio/workflow';
+import { log, patched } from '@temporalio/workflow';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
+import { reviewFeedbackLines, reviewKey } from '../review-feedback.ts';
+import type { ReviewChange } from '../task-contract.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import {
   CI_UNKNOWN_RECHECK_SECONDS,
@@ -47,14 +52,11 @@ export async function waitForCi(rt: TaskRuntime): Promise<CiStep> {
         return { kind: 'green' };
       case 'merged':
         return { kind: 'merged', mergeCommit: got.mergeCommit };
-      case 'red':
-        rt.feedback = [
-          `CI 红了：${got.failedChecks.join('、') || '（没写是哪项）'}`,
-          ...(got.digest ? [got.digest] : []),
-          ...(got.detail ? [got.detail] : []),
-        ];
-        rt.status.lastProblem = 'CI 红了';
+      case 'red': {
+        const next = await finishCiRed(rt, prNumber, got.head, got);
+        if (next === 'stay') continue;
         return { kind: 'rework' };
+      }
       case 'conflict': {
         const sync: SyncResult = await rt.step('syncMainline', () =>
           rt.acts.syncMainline({
@@ -126,14 +128,11 @@ export async function waitForCiPolicy(rt: TaskRuntime): Promise<CiStep> {
         return { kind: 'green' };
       case 'merged':
         return { kind: 'merged', mergeCommit: got.mergeCommit };
-      case 'red':
-        rt.feedback = [
-          `CI 红了：${got.failedChecks.join('、') || '（没写是哪项）'}`,
-          ...(got.digest ? [got.digest] : []),
-          ...(got.detail ? [got.detail] : []),
-        ];
-        rt.status.lastProblem = 'CI 红了';
+      case 'red': {
+        const next = await finishCiRed(rt, prNumber, got.head, got);
+        if (next === 'stay') continue;
         return { kind: 'rework' };
+      }
       case 'conflict': {
         const sync: SyncResult = await rt.step('syncMainline', () =>
           rt.acts.syncMainline({
@@ -186,4 +185,71 @@ export async function waitForCiPolicy(rt: TaskRuntime): Promise<CiStep> {
         continue;
     }
   }
+}
+
+/**
+ * CI 红了：先记下失败的检查、摘要、日志，再（新历史）把仍有效的正式评审附在后面，一起交下一轮。
+ * 已交过但仍挂着的评审只当上下文（again），不为此多起一轮。读失败由 step 按原来的有界重试停下，CI 那几行留着。
+ * 头变了或快照对不上：停下说明未核实，不记已消费，也不拿这次红去返工、更不合。
+ * 回 stay＝调用方接着等 CI（头可能已经换成读到的新头）。
+ */
+async function finishCiRed(
+  rt: TaskRuntime,
+  prNumber: number,
+  head: string,
+  got: CiResult,
+): Promise<'rework' | 'stay'> {
+  const ciLines = [
+    `CI 红了：${got.failedChecks.join('、') || '（没写是哪项）'}`,
+    ...(got.digest ? [got.digest] : []),
+    ...(got.detail ? [got.detail] : []),
+  ];
+  rt.feedback = ciLines;
+  rt.status.lastProblem = 'CI 红了';
+  // 老历史重放：标记不在，patched 为假，不调度读评审，返工意见和原来一样只有 CI 这几行。
+  if (!patched('ci-red-review-context')) return 'rework';
+  const snap = await rt.step('readCiReviews', () =>
+    rt.acts.readCiReviews({
+      schemaVersion: 1,
+      taskId: rt.input.taskId,
+      repo: rt.input.repo,
+      prNumber,
+      branch: rt.branch,
+      expectedHead: head,
+    }),
+  );
+  if (!snap.delivered) {
+    await rt.park('正式评审未核实、未交付', `${snap.reason}\nCI 仍是红的，不放行。\n${ciLines.join('\n')}`);
+    if (snap.headMoved) rt.head = snap.headMoved;
+    rt.feedback = [];
+    return 'stay';
+  }
+  if (snap.head !== head) {
+    await rt.park(
+      '正式评审未核实、未交付',
+      `读回的头 ${snap.head} 不是 CI 红的 ${head}，未核实、未交付。\nCI 仍是红的，不放行。\n${ciLines.join('\n')}`,
+    );
+    rt.feedback = [];
+    return 'stay';
+  }
+  if (snap.reviews.length === 0) return 'rework';
+  const keyOf = (review: ReviewChange) => reviewKey(prNumber, review);
+  const lines = snap.reviews.flatMap((review) =>
+    reviewFeedbackLines(review, head, rt.reviewsHanded.has(keyOf(review))),
+  );
+  rt.feedback = [...ciLines, ...lines];
+  const fresh = snap.reviews.filter((review) => !rt.reviewsHanded.has(keyOf(review)));
+  for (const review of fresh) rt.reviewsHanded.set(keyOf(review), head);
+  log.info('CI 红返工带上仍有效的正式评审', {
+    taskId: rt.input.taskId,
+    prNumber,
+    head,
+    handed: fresh.map((review) => ({
+      reviewId: review.reviewId,
+      reviewer: review.reviewer,
+      commitId: review.commitId,
+    })),
+    reminded: snap.reviews.filter((review) => !fresh.includes(review)).map((review) => review.reviewId),
+  });
+  return 'rework';
 }

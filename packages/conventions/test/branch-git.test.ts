@@ -68,6 +68,16 @@ describe('分支体检：本地缺提交时先 git fetch origin 一次（gitFact
   });
 });
 
+function fixtureGitEnv(base: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return {
+    ...base,
+    GIT_AUTHOR_NAME: 't',
+    GIT_AUTHOR_EMAIL: 't@example.invalid',
+    GIT_COMMITTER_NAME: 't',
+    GIT_COMMITTER_EMAIL: 't@example.invalid',
+  };
+}
+
 const ID = ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false'];
 
 // 同步起几十个 git：用例和建仓的钩子都不设 vitest 的超时，卡死由子进程自己的上限管（为什么见 child.ts 开头）。
@@ -76,7 +86,7 @@ describe('分支体检：内容那几样（真 git，临时仓）', { timeout: 0
   const heads: Record<string, string> = {};
   let main = '';
   const sh = (...args: string[]) => {
-    const r = runChild('git', [...ID, ...args], { cwd: root });
+    const r = runChild('git', [...ID, ...args], { cwd: root, env: fixtureGitEnv() });
     if (r.status !== 0) throw new Error(`git ${args.join(' ')}：${r.stderr}`);
     return r.stdout.trim();
   };
@@ -156,6 +166,24 @@ describe('分支体检：内容那几样（真 git，临时仓）', { timeout: 0
     if (!sha) throw new Error(`没有 ${name}`);
     return contentFacts(git, index, sha);
   };
+
+  it('宿主作者和提交者环境污染不会进入临时 Git 夹具', () => {
+    const inherited = {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'host-author',
+      GIT_AUTHOR_EMAIL: 'host@example.invalid',
+      GIT_COMMITTER_NAME: 'host-committer',
+      GIT_COMMITTER_EMAIL: 'host@example.invalid',
+    };
+    const env = fixtureGitEnv(inherited);
+    for (const who of ['GIT_AUTHOR_IDENT', 'GIT_COMMITTER_IDENT']) {
+      const result = runChild('git', [...ID, 'var', who], { cwd: root, env });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toMatch(/^t <t@example\.invalid>/);
+    }
+    expect(inherited.GIT_AUTHOR_NAME).toBe('host-author');
+    expect(inherited.GIT_COMMITTER_NAME).toBe('host-committer');
+  });
 
   it('主线的索引：现在的文件（中文路径原样，不转义）和历史上出现过的版本', () => {
     index ??= mainIndex(git, main);

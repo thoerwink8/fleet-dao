@@ -383,6 +383,12 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
     return fence.code;
   }
 
+  const head = deps.git(['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (head.code !== 0 || !head.stdout.trim() || head.stdout.trim() === 'HEAD') {
+    err('当前分支没读成或处于 detached HEAD：没推送、没开 PR。');
+    return 2;
+  }
+
   // gh pr create 要远端有这条分支：先推（已推过则幂等）。推不成就不开，免得 gh 报一句看不懂的「must first push」
   const pushed = deps.git(['push', '--set-upstream', 'origin', 'HEAD']);
   if (pushed.code !== 0) {
@@ -402,6 +408,8 @@ function openAndArm(deps: OpenDeps, plan: OpenPlan): number {
   const created = gh([
     'pr',
     'create',
+    '--head',
+    head.stdout.trim(),
     '--title',
     title,
     '--body-file',

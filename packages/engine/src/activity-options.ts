@@ -29,6 +29,8 @@ import {
   type ProbeAssignedResult,
   type ReadCiPolicyInput,
   type ReadCiPolicyResult,
+  type ReadCiReviewsInput,
+  type ReadCiReviewsResult,
   type ReadDeliveryInput,
   type ReadTaskBriefInput,
   type ReleaseReservationInput,
@@ -70,6 +72,8 @@ export type EngineActivities = PortActivities & {
   waitMerged(input: WaitMergedInput): Promise<MergeWait>;
   /** 现读这个仓的 CI 模式（强制 / 不强制）。没有这个受管仓抛错，不当成不强制。 */
   readCiPolicy(input: ReadCiPolicyInput): Promise<ReadCiPolicyResult>;
+  /** CI 红返工前现读仍有效的正式评审。读不全抛错；头变了回未交付。 */
+  readCiReviews(input: ReadCiReviewsInput): Promise<ReadCiReviewsResult>;
   /** 不强制 CI 的仓：直接合并这张 PR（不等检查）。 */
   mergeNow(input: MergeNowInput): Promise<MergeNowResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）：续不上回 new 加原因，不抛。 */
@@ -137,6 +141,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   armAutoMerge: 'git',
   waitMerged: 'poll',
   readCiPolicy: 'quick',
+  readCiReviews: 'git',
   mergeNow: 'git',
   planSegmentResume: 'quick',
   segmentSettled: 'quick',

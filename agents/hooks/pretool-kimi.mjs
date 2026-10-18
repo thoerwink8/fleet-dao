@@ -57,4 +57,4 @@ export function normalizeKimi(input) {
   return `fleet-guard：Kimi Code 的钩子输入里认不出工具名（${JSON.stringify(tool)}），按拦处理`;
 }
 
-if (isMainModule(import.meta.url)) runVendor(normalizeKimi, 'Kimi Code', exitCodeReply);
+if (isMainModule(import.meta)) runVendor(normalizeKimi, 'Kimi Code', exitCodeReply);
