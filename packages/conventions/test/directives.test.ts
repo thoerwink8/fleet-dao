@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   checkIssueOpen,
+  DIRECTIVE_QUERY_AXES,
   DirectiveRefused,
   DirectiveUnchecked,
   directiveFromComment,
@@ -24,6 +25,8 @@ import {
 } from '../src/directives.ts';
 import { gitRunner } from '../src/git-runner.ts';
 import type { Gh, GhResult } from '../src/issue-new.ts';
+import { QUERY_LABEL_SPECS, queryLabelCreateArgs } from '../src/labels.ts';
+import { declaredQueryAxes, resolveQueryAxes } from '../src/query-axis.ts';
 import { runChild } from './child.ts';
 
 const okR = (stdout = ''): GhResult => ({ code: 0, stdout, stderr: '' });
@@ -155,7 +158,17 @@ describe('从 prompt-log 取原话', () => {
 /** 假仓：主线上几份引导文件；记下推送、开 PR 的调用；gh 还答「开着的单」「单的状态」 */
 function repo(
   files: Record<string, string>,
-  over: { pushFails?: string; openIssues?: number[]; ghFails?: string } = {},
+  over: {
+    pushFails?: string;
+    openIssues?: number[];
+    ghFails?: string;
+    /** 建这个标签时 gh 报错 */
+    labelFails?: string;
+    /** gh pr create 报错 */
+    createFails?: string;
+    /** 读回 PR 时的标签；不给就照 create 贴上的 --label 读回 */
+    readBack?: string[] | GhResult;
+  } = {},
 ) {
   const calls: string[][] = [];
   const git: Git = async (args) => {
@@ -179,6 +192,7 @@ function repo(
     return okR('abc\n');
   };
   const ghCalls: string[][] = [];
+  let created: string[] = [];
   const gh: Gh = async (args) => {
     ghCalls.push(args);
     if (args[0] === 'issue') {
@@ -187,7 +201,21 @@ function repo(
       if (args[1] === 'list') return okR(JSON.stringify(open.map((number) => ({ number }))));
       if (args[1] === 'view') return okR(open.includes(Number(args[2])) ? 'OPEN\n' : 'CLOSED\n');
     }
-    return okR('https://github.com/o/r/pull/9\n');
+    if (args[0] === 'label') {
+      if (args[2] === over.labelFails) return { code: 1, stdout: '', stderr: 'HTTP 403' };
+      return okR();
+    }
+    if (args[0] === 'pr' && args[1] === 'create') {
+      if (over.createFails) return { code: 1, stdout: '', stderr: over.createFails };
+      created = args.flatMap((a, i) => (args[i - 1] === '--label' ? [a] : []));
+      return okR('https://github.com/o/r/pull/9\n');
+    }
+    if (args[0] === 'pr' && args[1] === 'view') {
+      const back = over.readBack ?? created;
+      if (!Array.isArray(back)) return back;
+      return okR(JSON.stringify({ labels: back.map((name) => ({ id: 'x', name })) }));
+    }
+    return okR();
   };
   return { git, gh, calls, ghCalls };
 }
@@ -258,10 +286,70 @@ describe('仓里读写', () => {
     expect(url).toBe('https://github.com/o/r/pull/9');
     const push = r.calls.find((a) => a[0] === 'push');
     expect(push).toContain('--force-with-lease=refs/heads/directive/7:');
-    expect(r.ghCalls.map((a) => a.slice(0, 2).join(' '))).toEqual(['pr create', 'pr merge']);
+    expect(r.ghCalls.map((a) => a.slice(0, 2).join(' '))).toEqual([
+      ...QUERY_LABEL_SPECS.map(() => 'label create'),
+      'pr create',
+      'pr view',
+      'pr merge',
+    ]);
   });
 
-  it('【故意造出失败】分支被别的会话占着：拒绝，不开 PR', async () => {
+  it('开 PR 显式贴 engine / process 两轴（标签和正文声明都有），读回齐了才挂自动合并', async () => {
+    const r = repo({});
+    await proposeFile(
+      { git: r.git, gh: r.gh },
+      { id: '7', path: 'docs/directives/2026-10/7.md', content: 'x', title: 't', did: 'd' },
+    );
+    expect(DIRECTIVE_QUERY_AXES).toEqual(['域:engine', '性质:process']);
+    const create = r.ghCalls.find((a) => a[0] === 'pr' && a[1] === 'create') ?? [];
+    expect(create.flatMap((a, i) => (create[i - 1] === '--label' ? [a] : []))).toEqual([
+      ...DIRECTIVE_QUERY_AXES,
+    ]);
+    const body = create[create.indexOf('--body') + 1] ?? '';
+    expect(declaredQueryAxes(body)).toEqual([...DIRECTIVE_QUERY_AXES]);
+    expect(resolveQueryAxes([], body).problems).toEqual([]);
+    expect(r.ghCalls.filter((a) => a[0] === 'label')).toEqual(QUERY_LABEL_SPECS.map(queryLabelCreateArgs));
+    expect(r.ghCalls.at(-1)).toEqual(['pr', 'merge', 'https://github.com/o/r/pull/9', '--auto', '--squash']);
+  });
+
+  it('【故意造出失败】仓上缺标签、建不上：推上了但不开 PR、不挂合并', async () => {
+    const r = repo({}, { labelFails: '性质:process' });
+    await expect(
+      proposeFile({ git: r.git, gh: r.gh }, { id: '7', path: 'p', content: 'x', title: 't', did: 'd' }),
+    ).rejects.toThrow(/推上了 directive\/7.*性质:process.*没建上.*没开 PR/);
+    expect(r.ghCalls.some((a) => a[0] === 'pr')).toBe(false);
+  });
+
+  it('【故意造出失败】开 PR 报错：说推上了、去补开，不挂合并', async () => {
+    const r = repo({}, { createFails: 'HTTP 422 label not found' });
+    await expect(
+      proposeFile({ git: r.git, gh: r.gh }, { id: '7', path: 'p', content: 'x', title: 't', did: 'd' }),
+    ).rejects.toThrow(/推上了 directive\/7，gh 开 PR 报错.*422/);
+    expect(r.ghCalls.some((a) => a[1] === 'merge')).toBe(false);
+  });
+
+  it('【故意造出失败】读回缺轴、两轴冲突、读回报错或认不出：都报没查成，不挂合并', async () => {
+    const cases: Array<[string[] | GhResult, RegExp]> = [
+      [['域:engine'], /读回查询轴不对.*性质.*缺失/],
+      [['域:engine', '域:api', '性质:process'], /读回查询轴不对.*域/],
+      [['域:api', '性质:process'], /缺 域:engine/],
+      [{ code: 1, stdout: '', stderr: 'HTTP 502' }, /读回标签报错.*502/],
+      [okR('not json'), /不是 JSON/],
+    ];
+    for (const [readBack, why] of cases) {
+      const r = repo({}, { readBack });
+      const run = proposeFile(
+        { git: r.git, gh: r.gh },
+        { id: '7', path: 'p', content: 'x', title: 't', did: 'd' },
+      );
+      await expect(run).rejects.toThrow(DirectiveUnchecked);
+      await expect(run).rejects.toThrow(why);
+      await expect(run).rejects.toThrow(/没挂自动合并/);
+      expect(r.ghCalls.some((a) => a[1] === 'merge')).toBe(false);
+    }
+  });
+
+  it('【故意造出失败】分支被别的会话占着：拒绝，不建标签、不开 PR', async () => {
     const r = repo({}, { pushFails: '! [rejected] (stale info)' });
     await expect(
       proposeFile({ git: r.git, gh: r.gh }, { id: '7', path: 'p', content: 'x', title: 't', did: 'd' }),
