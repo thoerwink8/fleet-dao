@@ -1,6 +1,6 @@
 // 钉住「仓合同」这条规矩（改标准：改这个文件要创始人同意，packages/conventions/standard-paths.json）。
 // 每个仓都该有 pnpm 命令入口，只提醒不拦。规矩文字只是上下文、不是强制，所以这里钉的是机制，不钉文字：
-// ① 合同写成数据（agents/repo-contract.json），首批四项；② 开会话钩子在任何仓里都按合同查、提醒；
+// ① 合同写成数据（agents/repo-contract.json），三项，补给新仓的 AGENTS.md 不提 AI 的事；② 开会话钩子在任何仓里都按合同查、提醒；
 // ③ 收尾的 Stop 钩子不再提醒引导范围、不拦；④ fleet-dao 自己也过合同（不适用的写明豁免理由）。
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,7 +20,8 @@ const STOP = fileURLToPath(new URL('../../hooks/stop.mjs', import.meta.url));
 
 interface Item {
   id: string;
-  检查: { type: string; path?: string; scripts?: string[]; 行?: { 认: string[] }[] };
+  检查: { type: string; path?: string; scripts?: string[]; 行?: { 认: string[]; 补?: string }[] };
+  补法?: { text?: string };
 }
 interface Checked {
   id: string;
@@ -32,11 +33,7 @@ const lib = (await import(pathToFileURL(LIB_PATH).href)) as {
   checkRepo(root: string, items: Item[]): Checked[];
   exitCodeOf(rs: Checked[]): number;
 };
-const session = (await import(
-  pathToFileURL(fileURLToPath(new URL('../../hooks/session-start.mjs', import.meta.url))).href
-)) as { DIRECTIVE_HEADING: string; TEMP_HEADING: string };
-
-/** 合同里必须有的四项，缺了哪项、判法变了哪项就列出哪项 */
+/** 合同里必须有的三项、不该有的 progress 项：缺了哪项、判法变了哪项就列出哪项 */
 function contractProblems(text: string): string[] {
   const parsed = lib.parseContract(text);
   if (!parsed.ok) return [`合同读不出：${parsed.why}`];
@@ -49,17 +46,17 @@ function contractProblems(text: string): string[] {
     entry.scripts?.join() !== 'dev,start,stop,check'
   )
     out.push('entry');
-  if (by['agents-md']?.检查.type !== 'file' || by['agents-md']?.检查.path !== 'AGENTS.md')
-    out.push('agents-md');
-  const prog = by.progress?.检查;
-  const progHeads = (prog?.行 ?? []).map((l) => l.认[0]);
-  // 和开会话钩子 checkDirectives、checkTemporary 现读的标题一字不差，不另起一套
+  // 补给新仓（含公司仓）的 AGENTS.md 只写项目本身的记法：不提 AI、fleet-dao、原话、引导（通用段「项目仓记什么」）
+  const agents = by['agents-md'];
   if (
-    prog?.path !== 'docs/PROGRESS.md' ||
-    !progHeads.includes(session.DIRECTIVE_HEADING) ||
-    !progHeads.includes(session.TEMP_HEADING)
+    agents?.检查.type !== 'file' ||
+    agents.检查.path !== 'AGENTS.md' ||
+    !agents.补法?.text?.includes('docs/decisions.md') ||
+    /fleet-dao|AI|Claude|原话|引导|临时调整/.test(agents.补法.text)
   )
-    out.push('progress');
+    out.push('agents-md');
+  // 不再要各仓有 docs/PROGRESS.md 的引导清单和临时调整表：AI 运营的事不进项目仓
+  if (by.progress) out.push('progress');
   const gi = by['gitignore-tmp']?.检查;
   if (gi?.path !== '.gitignore' || !(gi.行 ?? []).some((l) => l.认.includes('_tmp/')))
     out.push('gitignore-tmp');
@@ -87,7 +84,7 @@ function temp(name: string): string {
 }
 
 describe('规矩：仓合同（只提醒不拦）', () => {
-  it('合同写成数据，首批四项都在、判法对', () => {
+  it('合同写成数据，三项都在、判法对，没有往项目仓塞引导清单的 progress 项', () => {
     expect(contractProblems(CONTRACT_TEXT)).toEqual([]);
   });
 
@@ -140,12 +137,18 @@ describe('规矩：仓合同（只提醒不拦）', () => {
     expect(first.stdout).not.toContain('hookSpecificOutput');
   });
 
-  it('【故意造出的失败】合同里拿掉 entry、progress 换了一套标题：查得出来', () => {
+  it('【故意造出的失败】合同里拿掉 entry、模板写回 AI 的事、加回 progress 项：查得出来', () => {
     const obj = JSON.parse(CONTRACT_TEXT) as { items: (Item & Record<string, unknown>)[] };
     obj.items = obj.items.filter((i) => i.id !== 'entry');
-    const prog = obj.items.find((i) => i.id === 'progress');
-    if (prog?.检查.行?.[0]) prog.检查.行[0].认 = ['## 待办'];
-    expect(contractProblems(JSON.stringify(obj))).toEqual(['entry', 'progress']);
+    const agents = obj.items.find((i) => i.id === 'agents-md');
+    if (agents?.补法) agents.补法.text += '- 创始人引导、临时调整记在 docs/PROGRESS.md\n';
+    obj.items.push({
+      id: 'progress',
+      说明: '旧的引导清单',
+      检查: { type: 'lines', path: 'docs/PROGRESS.md', 行: [{ 认: ['## x'], 补: '\n## x\n' }] },
+      补法: { type: 'append', 开头: '# 进度\n' },
+    } as Item & Record<string, unknown>);
+    expect(contractProblems(JSON.stringify(obj))).toEqual(['entry', 'agents-md', 'progress']);
     expect(contractProblems('{坏的')[0]).toMatch(/合同读不出/);
   });
 
