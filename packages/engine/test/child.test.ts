@@ -1,10 +1,23 @@
 // 测试里真起子进程的那一层（child.ts）：卡死的被杀掉、起不来的和被信号杀掉的都抛出说清，不冒充「命令失败」。
 // 这几条故意造出失败：不这样，子进程卡住会让整轮测试挂到 CI 的时限，起不来会让期望「退出码非 0」的用例白白通过。
 import { describe, expect, it } from 'vitest';
-import { runChild } from './child.ts';
+import { runChild, runChildBytes } from './child.ts';
 
 // 同步用例，不设 vitest 的超时（为什么见 child.ts 开头）。
 describe('测试里起子进程', { timeout: 0 }, () => {
+  it('二进制输入输出不经 UTF8，非 0 退出码和 stderr 也原样交回', () => {
+    const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xc3, 0x28]);
+    const r = runChildBytes(
+      process.execPath,
+      [
+        '-e',
+        'process.stdin.pipe(process.stdout); process.stderr.write(Buffer.from([255, 0])); process.exitCode = 3;',
+      ],
+      { input: bytes },
+    );
+    expect(r).toEqual({ status: 3, stdout: bytes, stderr: Buffer.from([255, 0]) });
+  });
+
   it('非 0 退出码照样交回，不抛：由调用方判', () => {
     const r = runChild(process.execPath, ['-e', 'process.stderr.write("坏了"); process.exit(3)']);
     expect(r).toEqual({ status: 3, stdout: '', stderr: '坏了' });

@@ -12,7 +12,9 @@ import {
   type PortName,
   type PushBranchInput,
   type RaiseAlertInput,
+  type RemoveWorktreeInput,
   type RouteChoice,
+  type ShotsDelivery,
   type SyncMainlineInput,
   type TaskStateSnapshot,
   type TimingEntry,
@@ -36,6 +38,8 @@ export interface FakeScript {
   /** 开 PR：给了就抛它（假的卫生检查拦下标题或正文……）；n = 第几次开（从 1 开始）。 */
   openPr: (input: OpenPrInput, n: number) => PortError | undefined;
   route: (input: PickRouteInput, n: number) => PickRouteResult | undefined;
+  /** 收树时图片交付核对的结局（只在带了 shots 时给）；不给就是没有受管图片（none）。 */
+  shots: (input: RemoveWorktreeInput) => Partial<ShotsDelivery> | undefined;
   /** 前 N 次调用抛可重试的 TRANSIENT。 */
   failFirst: Partial<Record<PortName, number>>;
   /** 前 N 次调用做完了再抛可重试的 TRANSIENT（事办成了、回话丢了：重试时考的是幂等）。 */
@@ -170,12 +174,24 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       };
     },
     async removeWorktree(input) {
+      const shots: ShotsDelivery | undefined = input.shots
+        ? {
+            outcome: 'none',
+            head: input.shots.head,
+            branch: `shots/${input.shots.issueNumber}`,
+            files: [],
+            ...script.shots?.(input),
+          }
+        : undefined;
+      if (shots?.outcome === 'failed')
+        return { removed: false, gone: false, shots, kept: shots.reason ?? '假的' };
       return {
         removed: true,
         gone: false,
         ...(input.archive
           ? { archivedTo: `/fake/archive/${input.taskId}/${input.subtaskKey ?? 'main'}` }
           : {}),
+        ...(shots ? { shots } : {}),
       };
     },
     async pushBranch(input) {

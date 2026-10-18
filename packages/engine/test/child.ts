@@ -5,7 +5,7 @@
 // 失败（本机几十个测试进程一起跑时，real/hosts 里找 cursor-agent 的那几条就这么红过）。所以卡死由这里管：子进程超过
 // 上限没退出就杀掉，抛出是哪条命令卡住。起不来、被信号杀掉也抛，不拿 null 退出码冒充「命令失败」。
 // 同样的一份在 packages/hygiene、packages/api 的 test/child.ts：各包的测试自成一体，改这份时看一眼那两份。
-// runChildOk 只加在这一份：退出码不是 0 就抛（带上 stderr），成功返回去掉首尾空白的标准输出。runChild 的签名和行为不动。
+// 本包另有二进制入口 runChildBytes；runChild 仍按 UTF8 读，runChildOk 再核退出码、去掉首尾空白。
 import { spawnSync } from 'node:child_process';
 
 // 不给 node 加 --no-wasm-dynamic-tiering（决定 0093）：Windows 上 .ts 入口用 process.exit 退出偶发崩成 3221226505
@@ -19,7 +19,7 @@ export interface ChildOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   /** 写进标准输入；不给就是空的（马上读到结尾），子进程不会等输入。 */
-  input?: string;
+  input?: string | Buffer;
   /** 只有测上限本身的用例改它。 */
   limitMs?: number;
 }
@@ -32,10 +32,25 @@ export interface ChildResult {
 }
 
 export function runChild(command: string, args: readonly string[], options: ChildOptions = {}): ChildResult {
+  const r = runChildBytes(command, args, options);
+  return { status: r.status, stdout: r.stdout.toString('utf8'), stderr: r.stderr.toString('utf8') };
+}
+
+export interface ChildBytesResult {
+  status: number;
+  stdout: Buffer;
+  stderr: Buffer;
+}
+
+/** 图片、Git 对象等二进制输入输出原样交回，和文本入口共用超时、信号和启动失败判定。 */
+export function runChildBytes(
+  command: string,
+  args: readonly string[],
+  options: ChildOptions = {},
+): ChildBytesResult {
   const { limitMs = CHILD_LIMIT_MS, ...rest } = options;
   const r = spawnSync(command, args, {
     ...rest,
-    encoding: 'utf8',
     timeout: limitMs,
     killSignal: 'SIGKILL',
   });

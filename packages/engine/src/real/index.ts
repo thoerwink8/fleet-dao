@@ -943,6 +943,7 @@ export function realPortsFromEnv(
     gh,
     trees,
     exec,
+    archiveDir: join(config.stateDir, 'archive'),
     sessionOrg,
     carpoolRegistry: () => carpoolCap.view(),
     machine: config.machine,

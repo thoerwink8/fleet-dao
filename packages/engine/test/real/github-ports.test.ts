@@ -295,6 +295,190 @@ describe('建树、收树', () => {
   });
 });
 
+describe('收树前核对界面截图（#2983）', () => {
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const png = (tag: string) => Buffer.concat([PNG, Buffer.from(tag)]);
+
+  function shotIn(dir: string, rel: string, bytes: Buffer) {
+    const file = join(dir, '_tmp', 'shots', rel);
+    mkdirSync(join(file, '..'), { recursive: true });
+    writeFileSync(file, bytes);
+  }
+
+  /** 镜像里放一个只含图片的孤儿提交（顶替远端 shots/<单号> 的头）。 */
+  function shotsCommitInMirror(files: Record<string, Buffer>): string {
+    const work = join(root, 'shots-src');
+    mkdirSync(work, { recursive: true });
+    for (const [name, bytes] of Object.entries(files)) writeFileSync(join(work, name), bytes);
+    // 提交身份放进环境：CI 的机器上没有全局的 user.name
+    const env = {
+      ...process.env,
+      GIT_INDEX_FILE: join(root, 'shots.idx'),
+      GIT_AUTHOR_NAME: 't',
+      GIT_AUTHOR_EMAIL: 'fleet-test@localhost',
+      GIT_COMMITTER_NAME: 't',
+      GIT_COMMITTER_EMAIL: 'fleet-test@localhost',
+    };
+    runChildOk('git', ['--work-tree', work, 'add', '-f', '.'], { cwd: m.dir, env });
+    const t = runChildOk('git', ['write-tree'], { cwd: m.dir, env });
+    const c = runChildOk('git', ['commit-tree', t, '-m', '截图'], { cwd: m.dir, env });
+    rmSync(work, { recursive: true, force: true });
+    rmSync(join(root, 'shots.idx'), { force: true });
+    return c;
+  }
+
+  const remoteShots = (head: string | null) => (input: { branch: string }) => ({
+    head: input.branch === 'shots/12' ? head : m.head,
+  });
+  const shots = () => ({ issueNumber: 12, head: m.head });
+
+  it('复现 #2969：代码合并了，图片只在树里、远端 shots/12 不在（404）：先存进受限归档、记清单，再删树', async () => {
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(null) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/home-1366-light.png', png('after'));
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: false, shots: shots() },
+      ctx,
+    );
+    expect(r).toMatchObject({ removed: true, gone: false, shots: { outcome: 'archived', head: m.head } });
+    expect(r.shots?.reason).toContain('404');
+    const manifest = JSON.parse(readFileSync(r.shots?.archivedTo as string, 'utf8'));
+    expect(manifest.delivery.files[0]).toMatchObject({
+      path: '12/home-1366-light.png',
+      bytes: png('after').length,
+    });
+    const stored = readdirSync(join(r.shots?.archivedTo as string, '..')).filter((f) => f.endsWith('.png'));
+    expect(stored).toHaveLength(1);
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it('远端 shots/12 上读得到同样的 blob：已交付，不存图，照常删树', async () => {
+    const remote = shotsCommitInMirror({ 'home-1366-light.png': png('after') });
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(remote) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/home-1366-light.png', png('after'));
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: false, shots: shots() },
+      ctx,
+    );
+    expect(r).toMatchObject({ removed: true, shots: { outcome: 'delivered', remoteHead: remote } });
+    expect(existsSync(dir)).toBe(false);
+  });
+
+  it('【故意造出的失败】远端 shots/12 在、缺这张的 blob（只在本地）：待交付，存进归档', async () => {
+    const remote = shotsCommitInMirror({ 'other.png': png('someone-else') });
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(remote) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/mine.png', png('mine'));
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: false, shots: shots() },
+      ctx,
+    );
+    expect(r.shots).toMatchObject({ outcome: 'archived', missing: ['12/mine.png'], remoteHead: remote });
+  });
+
+  it('【故意造出的失败】归档写不进去：不删树，kept 写原因；修好后重试存上再删，再重试按清单说', async () => {
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(null) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/a.png', png('a'));
+    writeFileSync(join(root, 'archive'), '占住了');
+    const call = () =>
+      ports.removeWorktree(
+        { taskId: 't1', repo, path: dir, branch: BRANCH, archive: false, shots: shots() },
+        ctx,
+      );
+    const kept = await call();
+    expect(kept).toMatchObject({ removed: false, gone: false, shots: { outcome: 'failed' } });
+    expect(kept.kept).toContain('归档没成');
+    expect(existsSync(join(dir, '_tmp', 'shots', '12', 'a.png'))).toBe(true);
+    rmSync(join(root, 'archive'));
+    const done = await call();
+    expect(done).toMatchObject({ removed: true, shots: { outcome: 'archived' } });
+    expect(existsSync(dir)).toBe(false);
+    const again = await call();
+    expect(again).toEqual({ removed: false, gone: true, shots: done.shots });
+  });
+
+  it('【故意造出的失败】叫停：原样抛，树留着', async () => {
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(null) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/a.png', png('a'));
+    const abort = new AbortController();
+    abort.abort();
+    await expect(
+      ports.removeWorktree(
+        { taskId: 't1', repo, path: dir, branch: BRANCH, archive: false, shots: shots() },
+        { ...ctx, signal: abort.signal },
+      ),
+    ).rejects.toThrow();
+    expect(existsSync(dir)).toBe(true);
+  });
+
+  it('老历史、没推过的不带 shots：一样过这一道（按树的 HEAD、分支里的单号看远端），有图存进归档才删；没图结果和原来一样', async () => {
+    const { ports, trees, calls } = setup({ fetchBranchHead: remoteShots(null) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/a.png', png('a'));
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: true },
+      ctx,
+    );
+    expect(r).toMatchObject({ removed: true, shots: { outcome: 'archived', branch: 'shots/12' } });
+    expect(r.shots?.reason).toContain('404');
+    expect(calls.fetchBranchHead).toBeDefined();
+    expect(existsSync(dir)).toBe(false);
+
+    const plain = await seededTree(trees);
+    expect(
+      await ports.removeWorktree({ taskId: 't1', repo, path: plain, branch: BRANCH, archive: false }, ctx),
+    ).toEqual({ removed: true, gone: false });
+  });
+
+  it('【故意造出的失败】不带 shots、归档写不进去：一样不删树，kept 写原因', async () => {
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(null) });
+    const dir = await seededTree(trees);
+    shotIn(dir, '12/a.png', png('a'));
+    writeFileSync(join(root, 'archive'), '占住了');
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: true },
+      ctx,
+    );
+    expect(r).toMatchObject({ removed: false, gone: false, shots: { outcome: 'failed' } });
+    expect(r.kept).toContain('归档没成');
+    expect(existsSync(join(dir, '_tmp', 'shots', '12', 'a.png'))).toBe(true);
+  });
+
+  it('建树前删同一位置的旧树：旧树里的图先存进归档再删；存不成不删、明确报 SHOTS_KEPT', async () => {
+    const { ports, trees } = setup({ fetchBranchHead: remoteShots(null) });
+    const stale = await seededTree(trees);
+    shotIn(stale, '12/a.png', png('a'));
+    writeFileSync(join(root, 'archive'), '占住了');
+    await expect(ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, ctx)).rejects.toMatchObject({
+      code: 'SHOTS_KEPT',
+      retryable: false,
+      message: expect.stringContaining('归档没成'),
+    });
+    expect(existsSync(join(stale, '_tmp', 'shots', '12', 'a.png'))).toBe(true);
+
+    rmSync(join(root, 'archive'));
+    const tree = await ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, ctx);
+    expect(tree.path).toBe(stale);
+    expect(trees.owners.has(stale)).toBe(false);
+    const archived = readdirSync(join(root, 'archive', 't1', 'shots'));
+    expect(archived).toHaveLength(1);
+  });
+
+  it('没有受管图片：none，照常删树，不问远端', async () => {
+    const { ports, calls, trees } = setup();
+    const dir = await seededTree(trees);
+    const r = await ports.removeWorktree(
+      { taskId: 't1', repo, path: dir, branch: BRANCH, archive: false, shots: shots() },
+      ctx,
+    );
+    expect(r).toMatchObject({ removed: true, shots: { outcome: 'none' } });
+    expect(calls.fetchBranchHead).toBeUndefined();
+  });
+});
+
 describe('推分支', () => {
   it('会话用户把新提交打成 bundle 交出来，github 包导入再推；临时文件用完删掉', async () => {
     const { ports, calls, trees } = setup();

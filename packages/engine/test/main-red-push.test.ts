@@ -565,6 +565,7 @@ function reconcileHarness(mainRedPush: () => Promise<SweepPart>): {
     ownerOf: async () => null,
     leftovers: async () => ({ kind: 'empty' }),
     remove: async () => ({ gone: true }),
+    keepShots: async () => ({ outcome: 'none', head: '', branch: 'shots/0', files: [] }),
     issue: async () => null,
     prHeads: async () => [],
     subtaskTrees: async () => [],

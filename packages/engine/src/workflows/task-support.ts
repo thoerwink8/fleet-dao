@@ -3,7 +3,7 @@
 
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
 import { classifyFailure } from '../failure/classify.ts';
-import type { RoundOutcome, RouteChoice } from '../ports.ts';
+import type { RoundOutcome, RouteChoice, ShotsDelivery } from '../ports.ts';
 import {
   type AbandonCommand,
   type PauseCommand,
@@ -200,6 +200,54 @@ export const SKIP_CI_SELF_VERIFY =
 /** 不强制 CI 的仓，开 PR 正文里「验证」那一行。 */
 export const SKIP_CI_PR_VERIFIED =
   '这个仓不强制 CI：交活前自己跑通（能起来，碰界面的贴截图）。引擎直接合并，不等 CI、不做冷验收';
+
+/**
+ * 合并收树后 PR 说明里代码和图片分开写（#2983）：代码那一句只说合并和 CI，图片按收树前核对的结局写。
+ * 已交付才进「怎么验证的」；待交付（只在受限归档里）、失败（树留着）、不知道都进「还欠什么」，不写「无」。
+ * 没有受管图片（none）回 null：PR 说明不动。
+ */
+export function shotsPrLines(
+  prNumber: number,
+  commit: string | undefined,
+  shots: ShotsDelivery,
+): { verified: string[]; owed: string[] } | null {
+  if (shots.outcome === 'none') return null;
+  const code = `代码：PR #${prNumber} 已合并${commit ? `（${commit.slice(0, 7)}）` : ''}，CI 和冷验收看这个 PR 的检查`;
+  const n = shots.files.length;
+  const at = `代码头 ${shots.head.slice(0, 7)}`;
+  const rejected = shots.rejected?.length
+    ? `；拒收 ${shots.rejected.length} 样（${shots.rejected.slice(0, 3).join('、')}）`
+    : '';
+  switch (shots.outcome) {
+    case 'delivered':
+      return {
+        verified: [
+          code,
+          `界面截图：${n} 张在远端 ${shots.branch}（${shots.remoteHead?.slice(0, 7) ?? '?'}）按 blob 号核对过，已交付（${at}）${rejected}`,
+        ],
+        owed: [],
+      };
+    case 'archived':
+      return {
+        verified: [code],
+        owed: [
+          `界面截图待交付：${n} 张没在远端 ${shots.branch} 读到（${shots.reason ?? '原因没写'}），只存在引擎的受限归档 ${shots.archivedTo ?? '?'}（${at}）${rejected}`,
+        ],
+      };
+    case 'failed':
+      return {
+        verified: [code],
+        owed: [
+          `界面截图交付失败：${n} 张没交付也没存档成（${shots.reason ?? '原因没写'}），工作树留着没删（${at}）${rejected}`,
+        ],
+      };
+    case 'unknown':
+      return {
+        verified: [code],
+        owed: [`界面截图交没交付不知道：${shots.reason ?? '没有核对记录'}（${at}）`],
+      };
+  }
+}
 
 /** 强制 CI 的仓一个检查都没有：停下等人，这句话要出现在提醒里。 */
 export const FORCE_CI_NO_CHECKS = '这个仓是强制 CI，但没配检查';

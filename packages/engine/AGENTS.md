@@ -21,6 +21,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - 合并对账撤风险只认真实 `github.merge_pr`：账的 action/target、完整回执与 GitHub 当前 PR/head/合并提交/实际引擎合并人都须一致；`github.merge_pr_backfill` 留原来源，后续轮次也不能当队列证据。读账失败保留提醒并报没查成。
 
+- 收树图片核对同时清点本地引用可达与不可达的无父图片提交；本地分支、标签、其他引用都不代表远端交付。Git 探测只有明确报告不在仓内才算无仓，坏配置、权限、超时不能当空；清点和清单回读用同一套目录名、图片名边界。树已收后的重试，归档清单必须身份一致，图片实物的大小、hash、blob 号和文件头全部核过才回 archived；缺失、损坏或链接回 unknown，不能只信清单。
 - **改工作流步序必须用 `patched('<新标记>')` 包住**：在途任务（包括停着等人、等合并的）换上新代码会重放对不上，报 `TMPRL1100` 变僵尸。重放测试红了不许重录夹具让它变绿。
 - 工作流里要确定：不取随机数、不生成编号（主键经 `decide('newIds')` 进历史），不碰活动实现、worker、客户端、Node 模块；判断只经本地活动 `decide`，工作流文件对 `decisions` 只许 `import type`。`packages/engine/test/structure.test.ts` 把这些写成了检查。
 - 活动的超时、心跳、重试只在 `packages/engine/src/activity-options.ts` 设，调用处不许另写；长活动要心跳。
