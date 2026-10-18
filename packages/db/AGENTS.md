@@ -33,3 +33,5 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - 改了库、用户、备份相关的部署：同步 ops 第三节「用户、目录、库」、第十一节「备份与恢复」。
 
 - `settleQueuedDecision` 仅结算精确 `answerId`、`claimId`、`answeredAt` 且仍 queued 的答案。历史无代次不授权；失败/未知不能 resolve，不能靠同毫秒时间相等认定同一次回答。
+
+- `private_quotes` 存创始人原话，仅私有管理链访问，不入 realtime 表名单。同 id 异文必须拒绝并回滚整批，不能 upsert 覆盖原话；receivedAt 只在首次入库生成。

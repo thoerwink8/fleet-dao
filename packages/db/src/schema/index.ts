@@ -6,6 +6,7 @@ export * from './channel-models.ts';
 export * from './cli-tool-readings.ts';
 export * from './enums.ts';
 export * from './ops.ts';
+export * from './private-quotes.ts';
 export * from './requests.ts';
 export * from './route-probe-history.ts';
 export * from './runs.ts';
