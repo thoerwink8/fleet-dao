@@ -15,6 +15,14 @@ import {
 import type { GhApi } from './gh-api.ts';
 import type { GitHubReads } from './merge-gate.ts';
 
+export interface ClosedPolicyHead {
+  closed: true;
+  number: number;
+  head: string;
+  repo: PolicyRepo;
+}
+export type PolicyReadResult = 'force' | 'off' | ClosedPolicyHead;
+
 export async function readPolicyHttp(
   url: string,
   repo: Pick<PolicyRepo, 'githubId' | 'repo'>,
@@ -76,14 +84,14 @@ export function trustedEngineLogin(): string {
 }
 
 export function policyReader(api: GhApi, gh: GitHubReads, slug: string, fetchImpl: typeof fetch = fetch) {
-  return async (number: number, expectedHead: string): Promise<'force' | 'off'> => {
+  return async (number: number, expectedHead: string): Promise<PolicyReadResult> => {
     const repo = policyRepo(await api.get(''));
     if (repo.repo.toLowerCase() !== slug.toLowerCase()) throw new Error('GitHub 实际仓身份不匹配');
+    const head = policyHead(await gh.pr(number), repo);
+    if (head.number !== number || head.head !== expectedHead) throw new Error('PR 当前 head 已改变');
+    if (!head.open) return { closed: true, number, head: head.head, repo };
     // 私有仓沿原强制路径；绝不跟随它曾公开时留下的来源 URL。
     if (!repo.public) return 'force';
-    const head = policyHead(await gh.pr(number), repo);
-    if (head.number !== number || head.head !== expectedHead || !head.open)
-      throw new Error('PR 当前 head 已改变');
     const statuses = await gh.statuses(head.head);
     const context = policySourceContext(number);
     // 缺来源保留旧 force；出现来源以后任何不可验证材料均明确失败。
