@@ -1,11 +1,23 @@
 // 本机测试槽（src/test-slots.ts）：占、满了排队、还；死进程占的槽被回收；槽目录读不到写不进、槽文件认不出、等太久
 // 都明确失败（不当成拿到了槽）；两个进程同时抢最后一个槽只有一个拿到（真起两个子进程抢）。
+// 专用 CI（没有非空 FLEET_RUN_ID）跳过；引擎会话即使 CI=true/1 也拿同一把槽；外层已持槽的嵌套不再拿。
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  unlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
+import { ENGINE_SESSION_MARKER } from '../src/test-changed.ts';
 import {
   acquireSlot,
   DEFAULT_MAX_HOLD_MIN,
@@ -128,9 +140,35 @@ describe('readSlotConfig / slotPolicy', () => {
     expect(slotPolicy({})).toEqual({ kind: 'lock' });
     expect(slotPolicy({ CI: 'false' })).toEqual({ kind: 'lock' });
     expect(slotPolicy({ CI: '0' })).toEqual({ kind: 'lock' });
+    expect(slotPolicy({ CI: '' })).toEqual({ kind: 'lock' });
+    expect(slotPolicy({ CI: '  ' })).toEqual({ kind: 'lock' });
+    expect(slotPolicy({ CI: ' false ' })).toEqual({ kind: 'lock' });
     expect(slotPolicy({ CI: 'true' }).kind).toBe('skip');
+    expect(slotPolicy({ CI: '1' }).kind).toBe('skip');
+    expect(slotPolicy({ CI: 'TRUE' }).kind).toBe('skip');
     expect(slotPolicy({ [ENV_HELD]: 'abc' }).kind).toBe('skip');
     expect(slotPolicy({ [ENV_HELD]: '  ' })).toEqual({ kind: 'lock' });
+  });
+
+  it('非空 FLEET_RUN_ID 即使 CI=true/1 也拿槽；空白会话标记仍当专用 CI', () => {
+    expect(ENGINE_SESSION_MARKER).toBe('FLEET_RUN_ID');
+    for (const ci of ['true', '1', 'TRUE']) {
+      expect(slotPolicy({ CI: ci, [ENGINE_SESSION_MARKER]: 'run-1' })).toEqual({ kind: 'lock' });
+    }
+    expect(slotPolicy({ [ENGINE_SESSION_MARKER]: 'run-1' })).toEqual({ kind: 'lock' });
+    expect(slotPolicy({ CI: 'false', [ENGINE_SESSION_MARKER]: 'run-1' })).toEqual({ kind: 'lock' });
+    expect(slotPolicy({ CI: '0', [ENGINE_SESSION_MARKER]: 'run-1' })).toEqual({ kind: 'lock' });
+    for (const runId of ['', '  ', '\t']) {
+      expect(slotPolicy({ CI: 'true', [ENGINE_SESSION_MARKER]: runId }).kind).toBe('skip');
+      expect(slotPolicy({ CI: '1', [ENGINE_SESSION_MARKER]: runId }).kind).toBe('skip');
+    }
+    // 外层真持槽优先：嵌套不再拿，空白持槽标记不算
+    expect(
+      slotPolicy({ [ENV_HELD]: 'parent-token', CI: 'true', [ENGINE_SESSION_MARKER]: 'run-1' }).kind,
+    ).toBe('skip');
+    expect(slotPolicy({ [ENV_HELD]: '  ', CI: '1', [ENGINE_SESSION_MARKER]: 'run-1' })).toEqual({
+      kind: 'lock',
+    });
   });
 });
 
@@ -322,18 +360,212 @@ describe('runInSlot（test:changed 真起 vitest 的那一步）', () => {
     expect(slotFiles(dir)).toEqual([]);
   });
 
-  it('CI 里和外层已拿着槽：不碰槽目录，直接跑', () => {
+  it('没有 FLEET_RUN_ID 的 CI=true/1 不碰槽目录，直接跑；空白标记和 CI=false/0 照常拿真槽', () => {
     const file = join(tmp(), 'would-fail');
     writeFileSync(file, 'x'); // 槽目录若被碰就会报错
     const f = fakeDeps();
     for (const env of [
       { CI: 'true', [ENV_DIR]: file },
+      { CI: '1', [ENV_DIR]: file },
+      { CI: 'TRUE', [ENV_DIR]: file },
+      { CI: 'true', [ENGINE_SESSION_MARKER]: '', [ENV_DIR]: file },
+      { CI: '1', [ENGINE_SESSION_MARKER]: '  ', [ENV_DIR]: file },
       { [ENV_HELD]: 'abc', [ENV_DIR]: file },
+      { [ENV_HELD]: 'parent-token', CI: 'true', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: file },
     ]) {
       expect(runInSlot(env, f.deps, (held) => ({ status: held === undefined ? 0 : 9 }))).toEqual({
         status: 0,
       });
     }
+    for (const env of [
+      {},
+      { CI: 'false' },
+      { CI: '0' },
+      { CI: '' },
+      { CI: '  ' },
+      { CI: ' false ' },
+      { [ENGINE_SESSION_MARKER]: '  ' },
+      { CI: 'true', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_HELD]: '  ' },
+    ]) {
+      const dir = tmp();
+      const seen: Array<string | undefined> = [];
+      const r = runInSlot({ ...env, [ENV_DIR]: dir }, f.deps, (held) => {
+        seen.push(held);
+        expect(slotFiles(dir)).toHaveLength(1);
+        return { status: 0 };
+      });
+      expect(r).toEqual({ status: 0 });
+      expect(seen).toEqual([expect.stringMatching(/^[0-9a-f]{16}$/)]);
+      expect(slotFiles(dir)).toEqual([]);
+    }
+  });
+
+  it('引擎会话带 CI=true/1 通过同一入口拿到真槽，跑完还掉', () => {
+    const f = fakeDeps();
+    for (const ci of ['true', '1']) {
+      const dir = tmp();
+      let seen: string | undefined;
+      const r = runInSlot(
+        {
+          CI: ci,
+          [ENGINE_SESSION_MARKER]: '47f92b82-5f1b-4245-b1cc-1257d54170fc',
+          [ENV_DIR]: dir,
+        },
+        f.deps,
+        (held) => {
+          seen = held;
+          expect(held).toMatch(/^[0-9a-f]{16}$/);
+          const name = slotFiles(dir)[0];
+          expect(name).toBeDefined();
+          const body = JSON.parse(readFileSync(join(dir, name ?? ''), 'utf8')) as Holder;
+          expect(body.token).toBe(held);
+          expect(body.token).not.toBe('');
+          return { status: 0 };
+        },
+      );
+      expect(r).toEqual({ status: 0 });
+      expect(seen).toMatch(/^[0-9a-f]{16}$/);
+      expect(slotFiles(dir)).toEqual([]);
+    }
+  });
+
+  it('槽被普通测试占满时，带 CI 和 FLEET_RUN_ID 的第三个不能直接跑，名额释放后才拿真 token 并还掉', () => {
+    for (const ci of ['true', '1']) {
+      const dir = tmp();
+      putHolder(dir, 0, { pid: 31337, cwd: '/work/test-changed' });
+      putHolder(dir, 1, { pid: 31338, cwd: '/work/engine-self-check' });
+      let calls = 0;
+      let freed = false;
+      const f = fakeDeps({}, (t) => {
+        expect(calls).toBe(0);
+        if (t >= 1_003_000 && !freed) {
+          unlinkSync(join(dir, 'slot-0.json'));
+          freed = true;
+        }
+      });
+      let seen: string | undefined;
+      const r = runInSlot({ CI: ci, [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: dir }, f.deps, (held) => {
+        calls += 1;
+        seen = held;
+        expect(f.deps.now()).toBeGreaterThanOrEqual(1_003_000);
+        expect(held).toMatch(/^[0-9a-f]{16}$/);
+        const ours = JSON.parse(readFileSync(join(dir, 'slot-0.json'), 'utf8')) as Holder;
+        const other = JSON.parse(readFileSync(join(dir, 'slot-1.json'), 'utf8')) as Holder;
+        expect(ours.token).toBe(held);
+        expect(ours.token).not.toBe('');
+        expect(other.token).toBe('tok1');
+        return { status: 0 };
+      });
+      expect(freed).toBe(true);
+      expect(calls).toBe(1);
+      expect(r).toEqual({ status: 0 });
+      expect(seen).toMatch(/^[0-9a-f]{16}$/);
+      expect(slotFiles(dir)).toEqual(['slot-1.json']);
+      expect(f.logs.some((l) => l.includes('前面还有 2 个'))).toBe(true);
+      expect(f.logs.some((l) => l.includes('拿到本机测试槽，共等了'))).toBe(true);
+    }
+  });
+
+  it('外层已持槽的嵌套 vitest 带 CI 和 FLEET_RUN_ID 也不再抢，槽满也不自锁', () => {
+    const dir = tmp();
+    putHolder(dir, 0, { pid: 31337 });
+    putHolder(dir, 1, { pid: 31338 });
+    const f = fakeDeps();
+    for (const ci of ['true', '1']) {
+      let seen: string | undefined = 'unset';
+      const r = runInSlot(
+        {
+          CI: ci,
+          [ENGINE_SESSION_MARKER]: 'run-1',
+          [ENV_HELD]: 'parent-real-token',
+          [ENV_DIR]: dir,
+          [ENV_WAIT_MIN]: '0.01',
+        },
+        f.deps,
+        (held) => {
+          seen = held;
+          return { status: 0 };
+        },
+      );
+      expect(r).toEqual({ status: 0 });
+      expect(seen).toBeUndefined();
+    }
+    expect(slotFiles(dir)).toEqual(['slot-0.json', 'slot-1.json']);
+    expect(f.logs).toEqual([]);
+  });
+
+  it('引擎会话拿不到槽、目录不可读、等太久：回 error，run 不调用，不把没跑成当成功', () => {
+    const f = fakeDeps();
+    let calls = 0;
+    const run = () => {
+      calls += 1;
+      return { status: 0 };
+    };
+    const file = join(tmp(), 'a-file');
+    writeFileSync(file, 'x');
+    const unreadable = tmp();
+    mkdirSync(join(unreadable, 'slot-0.json'));
+    const full = tmp();
+    putHolder(full, 0, { pid: 31337 });
+    putHolder(full, 1, { pid: 31338 });
+    for (const env of [
+      { CI: 'true', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: file },
+      { CI: '1', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: unreadable },
+      { CI: 'true', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: full, [ENV_WAIT_MIN]: '0.01' },
+      { CI: '1', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: tmp(), [ENV_SLOTS]: 'zero' },
+    ]) {
+      const r = runInSlot(env, f.deps, run);
+      expect(r.status).toBeNull();
+      expect(r.error).toBeInstanceOf(TestSlotError);
+    }
+    expect(calls).toBe(0);
+    expect(slotFiles(full)).toEqual(['slot-0.json', 'slot-1.json']);
+  });
+
+  it('死持有者占着唯一名额时，带 CI 的引擎会话回收后才跑，跑完槽是空的', () => {
+    const dir = tmp();
+    putHolder(dir, 0, { pid: 31337, cwd: '/work/dead' });
+    const f = fakeDeps({ pidAlive: (pid) => pid !== 31337 });
+    let seen: string | undefined;
+    const r = runInSlot(
+      { CI: 'true', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: dir, [ENV_SLOTS]: '1' },
+      f.deps,
+      (held) => {
+        seen = held;
+        expect(slotFiles(dir)).toEqual(['slot-0.json']);
+        const body = JSON.parse(readFileSync(join(dir, 'slot-0.json'), 'utf8')) as Holder;
+        expect(body.token).toBe(held);
+        expect(body.pid).toBe(4242);
+        return { status: 0 };
+      },
+    );
+    expect(r).toEqual({ status: 0 });
+    expect(seen).toMatch(/^[0-9a-f]{16}$/);
+    expect(f.logs.join('\n')).toMatch(/回收本机测试槽 slot-0\.json.*31337 已经不在/);
+    expect(slotFiles(dir)).toEqual([]);
+  });
+
+  it('引擎会话拿到槽后 run 抛错或被信号取消：槽还掉，不当成成功', () => {
+    const dir = tmp();
+    const f = fakeDeps();
+    expect(() =>
+      runInSlot({ CI: '1', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: dir }, f.deps, (held) => {
+        expect(held).toMatch(/^[0-9a-f]{16}$/);
+        expect(slotFiles(dir)).toHaveLength(1);
+        throw new Error('cancelled');
+      }),
+    ).toThrow('cancelled');
+    expect(slotFiles(dir)).toEqual([]);
+    const signal = runInSlot(
+      { CI: 'true', [ENGINE_SESSION_MARKER]: 'run-1', [ENV_DIR]: dir },
+      f.deps,
+      (held) => {
+        expect(held).toMatch(/^[0-9a-f]{16}$/);
+        return { status: null, signal: 'SIGTERM' };
+      },
+    );
+    expect(signal).toEqual({ status: null, signal: 'SIGTERM' });
+    expect(slotFiles(dir)).toEqual([]);
   });
 
   it('拿不到槽（槽目录用不了、等太久、个数写错）：回 error、run 一次都不调用，不当成拿到了', () => {

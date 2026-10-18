@@ -11,10 +11,12 @@
 // - 正文写进 GitHub 前过卫生检查：openIssue / commentIssue 自己会过（packages/github 的 assertPublishable），这里把它的拒绝翻成 409 + 原因。
 import {
   checkIssueBody,
+  extractQueryAxes,
   HUMAN_DECISION_LABEL,
   isKindLabel,
   issueBodyTooLong,
   KIND_LABELS,
+  resolveQueryAxes,
 } from '@fleet-dao/conventions';
 import { currentVersion } from '@fleet-dao/core';
 import type { RequestChannel, RequestDraft, RequestDraftField } from '@fleet-dao/shared';
@@ -132,7 +134,9 @@ export function composeIssueBody(input: IssueBodyInput): string {
   }
   section('原话', parts.filter(Boolean).join('\n\n'));
 
-  section('已知的模块', draft.modules ?? '');
+  const classification = extractQueryAxes(draft.modules ?? '');
+  section('已知的模块', classification.withoutDeclarations);
+  if (classification.labels.length > 0) section('查询分类', classification.labels.join('\n'));
   if (draft.notDo?.trim()) section('不做什么', draft.notDo);
   if (draft.size?.trim()) section('规模建议', draft.size);
   section('怎么算做完', (draft.done ?? []).map((d) => `- ${d}`).join('\n'));
@@ -164,7 +168,13 @@ export function checkOpening(input: IssueBodyInput): OpenCheck {
   if (!checked.ok) return { ok: false, why: checked.why };
   const tooLong = issueBodyTooLong(body);
   if (tooLong) return { ok: false, why: tooLong };
-  const labels: string[] = [kind];
+  const axis = resolveQueryAxes([], input.draft.modules);
+  if (axis.problems.length > 0)
+    return {
+      ok: false,
+      why: `已知的模块中还需明确两轴（独立声明行：域: engine|api|mirasim；性质: bug|perf|process）：${axis.problems.join('；')}`,
+    };
+  const labels: string[] = [kind, ...axis.labels];
   // 草稿里「要不要人拍」有内容（碰发布、花钱、删数据、改标准）：贴「要人拍」，引擎不自己拉
   if (input.draft.needsHuman?.trim()) labels.push(HUMAN_DECISION_LABEL);
   return { ok: true, title: input.draft.title, body, labels };
