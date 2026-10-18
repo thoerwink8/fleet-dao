@@ -23,6 +23,14 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Gh, GhResult } from './issue-new.ts';
+import {
+  domainLabel,
+  labelCreateFailure,
+  natureLabel,
+  QUERY_LABEL_SPECS,
+  queryLabelCreateArgs,
+} from './labels.ts';
+import { queryAxisProblems } from './query-axis.ts';
 
 export const DIRECTIVES_DIR = 'docs/directives';
 export const NO_OWNER = '无主';
@@ -452,9 +460,30 @@ export async function listPending(git: Git, gh: Gh, ref: string): Promise<Direct
 export const MAIN = 'origin/main';
 const branchOf = (id: string) => `directive/${id}`;
 
+/** 引导记录 PR 的查询轴：一律 engine / process（约定写死），不按原话猜。 */
+export const DIRECTIVE_DOMAIN = 'engine' as const;
+export const DIRECTIVE_NATURE = 'process' as const;
+export const DIRECTIVE_QUERY_AXES = [domainLabel(DIRECTIVE_DOMAIN), natureLabel(DIRECTIVE_NATURE)] as const;
+
+/** 读回 PR 上的标签名；读不到、认不出都报没查成。 */
+async function prLabels(gh: Gh, pr: string): Promise<string[]> {
+  const r = await gh(['pr', 'view', pr, '--json', 'labels']);
+  if (r.code !== 0) throw new DirectiveUnchecked(`开了 ${pr}，gh 读回标签报错：${one(r)}。没挂自动合并。`);
+  let labels: unknown;
+  try {
+    labels = (JSON.parse(r.stdout) as { labels?: unknown }).labels;
+  } catch {
+    throw new DirectiveUnchecked(`开了 ${pr}，读回标签输出不是 JSON（${one(r)}）。没挂自动合并。`);
+  }
+  if (!Array.isArray(labels))
+    throw new DirectiveUnchecked(`开了 ${pr}，读回来的标签不是列表。没挂自动合并。`);
+  return labels.map((l) => String((l as { name?: unknown }).name ?? ''));
+}
+
 /**
  * 把一个文件的新内容开成 PR 合进主线：不碰任何检出（临时索引上拼一个提交，父提交是刚取的 origin/main），推到
  * directive/<编号>，开 PR、挂自动合并。分支已经在（别的会话正改同一条、PR 还没合）就推不上——这就是锁，返回拒绝不硬推。
+ * 开 PR 时贴查询轴 engine / process（仓上没有就照标准先建，建不成不开），开完读回两轴都对才挂自动合并。
  */
 export async function proposeFile(
   deps: StoreDeps,
@@ -491,7 +520,12 @@ export async function proposeFile(
       );
     throw new DirectiveUnchecked(`git 推 ${branch} 报错：${one(push)}。没改成。`);
   }
-  const body = `**做了什么**：${change.did}\n\n**需求**：无：创始人引导记录（docs/directives，决定 0093）\n`;
+  const body = `**做了什么**：${change.did}\n\n**需求**：无：创始人引导记录（docs/directives，决定 0093）\n\n- 域：${DIRECTIVE_DOMAIN}\n- 性质：${DIRECTIVE_NATURE}\n`;
+  // 仓上没有查询轴标签时，gh pr create --label 会直接拒。先把六个都建上（已有则 --force 只改说明）。
+  for (const spec of QUERY_LABEL_SPECS) {
+    const failed = labelCreateFailure(spec, await gh(queryLabelCreateArgs(spec)));
+    if (failed) throw new DirectiveUnchecked(`推上了 ${branch}，${failed}没开 PR。`);
+  }
   const pr = await gh([
     'pr',
     'create',
@@ -503,11 +537,23 @@ export async function proposeFile(
     change.title,
     '--body',
     body,
+    ...DIRECTIVE_QUERY_AXES.flatMap((l) => ['--label', l]),
   ]);
   if (pr.code !== 0)
     throw new DirectiveUnchecked(`推上了 ${branch}，gh 开 PR 报错：${one(pr)}。去 GitHub 补开。`);
-  const url = pr.stdout.trim().split('\n').pop() ?? '';
-  const arm = await gh(['pr', 'merge', url || branch, '--auto', '--squash']);
+  const url = pr.stdout.trim().split('\n').pop()?.trim() ?? '';
+  if (!/\/pull\/\d+$/.test(url))
+    throw new DirectiveUnchecked(
+      `推上了 ${branch}，gh 开 PR 的输出里认不出 PR（${one(pr)}）：去 GitHub 看一眼，没挂自动合并。`,
+    );
+  const back = await prLabels(gh, url);
+  const wrong = [
+    ...queryAxisProblems(back),
+    ...DIRECTIVE_QUERY_AXES.filter((l) => !back.includes(l)).map((l) => `缺 ${l}`),
+  ];
+  if (wrong.length > 0)
+    throw new DirectiveUnchecked(`开了 ${url}，读回查询轴不对：${wrong.join('；')}。没挂自动合并。`);
+  const arm = await gh(['pr', 'merge', url, '--auto', '--squash']);
   if (arm.code !== 0) throw new DirectiveUnchecked(`开了 ${url}，挂自动合并报错：${one(arm)}。手挂一下。`);
   return url;
 }
