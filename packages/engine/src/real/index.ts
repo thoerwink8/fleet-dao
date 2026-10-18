@@ -891,9 +891,9 @@ export function realPortsFromEnv(
     },
   };
   const real = createRealPorts({
-    ...reviewAudit,
     db,
     master,
+    ...reviewAudit,
     carpoolRegistry: () => carpoolCap.view(),
     gh,
     trees,
