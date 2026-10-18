@@ -1,4 +1,3 @@
-import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import {
   cpSync,
@@ -29,6 +28,7 @@ import {
   savePrivateQuote,
 } from '../src/private-quotes.ts';
 import { progressSessionId } from '../src/progress-session.ts';
+import { runChild } from './child.ts';
 
 const homes: string[] = [];
 const home = () => {
@@ -155,20 +155,21 @@ describe('私有原话先本机再上传', () => {
   });
 });
 
-describe('真实progress入口', () => {
+describe('真实progress入口', { timeout: 0 }, () => {
   it('对外仓普通和收件箱入口缺meaning都先拒绝，不回显原文和remote', () => {
     const h = home();
-    execFileSync('git', ['init', h]);
-    execFileSync('git', [
-      '-C',
-      h,
-      'config',
-      'remote.origin.url',
-      ['https://fixture', 'synthetic-password@fixture.invalid/project'].join(':'),
-    ]);
+    expect(runChild('git', ['init', h]).status).toBe(0);
+    expect(
+      runChild('git', [
+        '-C',
+        h,
+        'config',
+        'remote.origin.url',
+        ['https://fixture', 'synthetic-password@fixture.invalid/project'].join(':'),
+      ]).status,
+    ).toBe(0);
     for (const args of [['directive'], ['directive', '--from-inbox', '123']]) {
-      const result = spawnSync(process.execPath, ['packages/conventions/src/bin/progress.ts', ...args], {
-        encoding: 'utf8',
+      const result = runChild(process.execPath, ['packages/conventions/src/bin/progress.ts', ...args], {
         env: { ...process.env, INIT_CWD: h, USERPROFILE: h, HOME: h },
       });
       expect(result.status).toBe(1);
@@ -186,12 +187,11 @@ describe('真实progress入口', () => {
     cpSync('packages/shared/src/ci-policy-bridge.ts', join(h, 'packages/shared/src/ci-policy-bridge.ts'));
     cpSync('agents/hooks', join(h, 'agents/hooks'), { recursive: true });
     writeFileSync(join(h, 'package.json'), JSON.stringify({ type: 'module' }));
-    const result = spawnSync(
+    const result = runChild(
       process.execPath,
       [join(h, 'packages/conventions/src/bin/progress.ts'), 'quotes:flush'],
       {
         cwd: h,
-        encoding: 'utf8',
         env: { ...process.env, USERPROFILE: h, HOME: h, INIT_CWD: h, NODE_PATH: '' },
       },
     );
