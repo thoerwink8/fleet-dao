@@ -17,6 +17,7 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "agents:sync": "node packages/agents-sync/bin/agents-sync-now",
+    "agents:probe": "node packages/agents-sync/src/probe-main.ts",
     "mirasim:migrate": "node packages/mirasim-reclaude/bin/migrate",
     "mirasim:health": "node packages/mirasim-reclaude/bin/health",
     "mirasim:audit": "node packages/mirasim-reclaude/bin/audit",
