@@ -4,6 +4,7 @@
 // （packages/adapters/test/fixtures/cursor-agent、grok）逐行喂给真的读取器，事件、会话号、终帧用量都是真解析出来的。
 import { randomBytes, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readdir, readFile, readlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   type AgentRunOptions,
@@ -45,6 +46,7 @@ import {
 import type { TestDb } from '@fleet-dao/db/testing';
 import type { ProgressEvent, StageKind } from '@fleet-dao/shared';
 import type { CarpoolApiRead } from '../../src/jobs/carpool-outage.ts';
+import type { ProcLook } from '../../src/real/complex-preserve.ts';
 import type { UserCommand, UserCommandResult, UserExec } from '../../src/real/exec.ts';
 import { cursorLaunchCommand } from '../../src/real/hosts.ts';
 import type { IdentityQuestion } from '../../src/real/probe-identity.ts';
@@ -54,6 +56,30 @@ import { runChildOk } from '../child.ts';
 
 export const NOW = new Date('2026-09-25T08:00:00.000Z');
 export const MIN = 60_000;
+
+/**
+ * 夹具树都在测试新建的临时目录里，只有测试自己起的进程会进去。测试机上别的同主进程（sudo 之类 ptrace 看不了的）
+ * cwd 读不到时按树外算，免得用例跟着 CI 机器的进程表变。生产判法不改：读不到照样算确认不了
+ * （complex-preserve.test.ts 的进程占用用例管）。树里真有测试起的进程，照样读得到、照样算在用。
+ */
+export const fixtureProcLook: ProcLook = {
+  list: () => readdir('/proc'),
+  async cwd(pid) {
+    try {
+      return await readlink(`/proc/${pid}/cwd`);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EACCES' || code === 'EPERM') return '/';
+      throw error;
+    }
+  },
+  async uid(pid) {
+    const line = (await readFile(`/proc/${pid}/status`, 'utf8'))
+      .split('\n')
+      .find((l) => l.startsWith('Uid:'));
+    return line?.split(/\s+/)[1] ?? null;
+  },
+};
 
 /**
  * 接口读数的替身（#194，切号接真库的测试用）：本人额度还宽、拼车和独享各一个可用账号；时刻就是传进来的假钟。
