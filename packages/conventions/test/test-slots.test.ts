@@ -31,6 +31,7 @@ import {
   type Holder,
   readSlotConfig,
   runInSlot,
+  SLOT_ACQUIRED_LINE,
   type SlotConfig,
   type SlotDeps,
   slotPolicy,
@@ -105,7 +106,7 @@ function putHolder(dir: string, index: number, h: Partial<Holder> = {}): Holder 
 const slotFiles = (dir: string) => readdirSync(dir).filter((n) => /^slot-\d+\.json$/.test(n));
 
 describe('readSlotConfig / slotPolicy', () => {
-  it('不设就是默认：2 个、等 15 分钟、持有上限 30 分钟、槽目录在用户目录下', () => {
+  it('不设就是默认：2 个、等 15 分钟、持有上限 45 分钟、槽目录在用户目录下', () => {
     const c = readSlotConfig({}, () => '/home/u');
     expect(c.slots).toBe(DEFAULT_SLOTS);
     expect(c.maxWaitMs).toBe(DEFAULT_MAX_WAIT_MIN * 60_000);
@@ -207,6 +208,17 @@ describe('tryAcquire', () => {
     expect(tryAcquire(cfg, deps).kind).toBe('got');
   });
 
+  it('默认上限下持槽 31 分钟的活进程不被回收（引擎测试最长 30 分钟），超过默认上限才回收', () => {
+    const dir = tmp();
+    const { deps, advance } = fakeDeps();
+    putHolder(dir, 0, { pid: 31337, startedAt: 1_000_000 });
+    const cfg = readSlotConfig({ [ENV_DIR]: dir, [ENV_SLOTS]: '1' }, () => '/home/u');
+    advance(31 * 60_000);
+    expect(tryAcquire(cfg, deps).kind).toBe('busy');
+    advance(DEFAULT_MAX_HOLD_MIN * 60_000);
+    expect(tryAcquire(cfg, deps).kind).toBe('got');
+  });
+
   it('别的主机占的槽没法判进程号：没过期就当还活着', () => {
     const dir = tmp();
     putHolder(dir, 0, { host: 'host-b', pid: 31337 });
@@ -298,6 +310,19 @@ describe('acquireSlot / withTestSlot', () => {
     expect(waits[2]).toMatch(/已等 20 秒/);
     expect(waits).toHaveLength(3);
     expect(f.logs.some((l) => l.includes('拿到本机测试槽，共等了'))).toBe(true);
+  });
+
+  it('没排队也打「拿到本机测试槽」那一行（引擎自测靠它分开等槽和真跑）；没拿到不打', () => {
+    const dir = tmp();
+    const f = fakeDeps();
+    const h = acquireSlot(cfgIn(dir), f.deps);
+    expect(f.logs).toEqual([`${SLOT_ACQUIRED_LINE}，共等了 0 秒`]);
+    h.release();
+
+    putHolder(dir, 0, { pid: 31337 });
+    const busy = fakeDeps();
+    expect(() => acquireSlot(cfgIn(dir, { slots: 1, maxWaitMs: 2000 }), busy.deps)).toThrow(TestSlotError);
+    expect(busy.logs.some((l) => l.startsWith(SLOT_ACQUIRED_LINE))).toBe(false);
   });
 
   it('等过上限还满：抛 TestSlotError，说明占着的是谁、没跑测试', () => {

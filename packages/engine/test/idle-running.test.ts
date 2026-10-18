@@ -10,6 +10,7 @@ import {
   judgeIdleRunning,
   watchIdleRunning,
 } from '../src/jobs/idle-running.ts';
+import { SELF_CHECK_ACTIVITY_MS, SELF_CHECK_DOING } from '../src/self-check-budget.ts';
 
 const NOW = new Date('2026-10-16T03:16:00.000Z');
 const STALE = new Date(NOW.getTime() - IDLE_RUNNING_STALE_MS - 60_000);
@@ -30,6 +31,41 @@ function row(over: Partial<IdleRunningFact> = {}): IdleRunningFact {
     ...over,
   };
 }
+
+describe('judgeIdleRunning：引擎自测那一段', () => {
+  const doing = `第 1 轮：${SELF_CHECK_DOING}`;
+
+  it('进度停在自测上、自测活动限时以内：不报（正常排队、跑测试没有会话）', () => {
+    const at = (ms: number) => new Date(NOW.getTime() - ms);
+    expect(judgeIdleRunning(row({ doing, updatedAt: at(IDLE_RUNNING_STALE_MS + 60_000) }), NOW)).toEqual({
+      alert: false,
+    });
+    expect(judgeIdleRunning(row({ doing, updatedAt: at(SELF_CHECK_ACTIVITY_MS - 1_000) }), NOW)).toEqual({
+      alert: false,
+    });
+  });
+
+  it('过了自测活动限时还停在自测上：报，正文写明去看心跳的阶段和最后输出时刻', () => {
+    const v = judgeIdleRunning(
+      row({ doing, updatedAt: new Date(NOW.getTime() - SELF_CHECK_ACTIVITY_MS - 60_000) }),
+      NOW,
+    );
+    expect(v.alert).toBe(true);
+    if (!v.alert) return;
+    expect(v.body).toContain('停在引擎自测上');
+    expect(v.body).toContain('最后输出时刻');
+    expect(v.body).not.toContain('换路由续之后');
+  });
+
+  it('认的进度字样和改前工作流写进任务行的一字不差：在跑的老工作流、库里的老行照样认得出', () => {
+    expect(SELF_CHECK_DOING).toBe('引擎跑测试和类型检查');
+    expect(judgeIdleRunning(row({ doing: '第 3 轮：引擎跑测试和类型检查' }), NOW)).toEqual({ alert: false });
+  });
+
+  it('别的进度照旧 20 分钟就报', () => {
+    expect(judgeIdleRunning(row({ updatedAt: STALE }), NOW).alert).toBe(true);
+  });
+});
 
 describe('judgeIdleRunning', () => {
   it('running、引擎、没有开着的会话、updated_at 过了 20 分钟：报，正文不写会变的分钟数', () => {

@@ -94,6 +94,7 @@ import type { Limits } from '../limits.ts';
 import type { PrBody, RecordRoundInput, RoundOutcome, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
+import { SELF_CHECK_DOING } from '../self-check-budget.ts';
 import {
   type AbandonCommand,
   type DeliveryRead,
@@ -885,7 +886,7 @@ class TaskFlow {
    */
   private async selfCheck(wt: Worktree, head: string): Promise<'red' | 'green' | 'skipped'> {
     const rt = this.rt;
-    await rt.advance('implement', `第 ${rt.round} 轮：引擎跑测试和类型检查`);
+    await rt.advance('implement', `第 ${rt.round} 轮：${SELF_CHECK_DOING}`);
     try {
       const result = await rt.cancellable(() =>
         rt.acts.selfCheck({

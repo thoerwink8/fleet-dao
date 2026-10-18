@@ -52,7 +52,12 @@ export interface SlotConfig {
 
 export const DEFAULT_SLOTS = 2;
 export const DEFAULT_MAX_WAIT_MIN = 15;
-export const DEFAULT_MAX_HOLD_MIN = 30;
+/**
+ * 持槽上限（分钟）。要盖得住引擎自测里测试真执行的上限（SELF_CHECK_TEST_MS，30 分钟，从拿到槽那一刻起算）再加收尾：
+ * 等于 30 分钟时，引擎的测试还没到限时槽就先被回收，别的 test:changed 多占一个槽，同机并发超过容量。
+ * 引擎的测试（packages/engine/test/real/self-check.test.ts）钉住它大于测试上限加收尾。
+ */
+export const DEFAULT_MAX_HOLD_MIN = 45;
 
 /** 环境变量：同时几个 / 槽目录（测试和特殊机器用）/ 最多等几分钟 / 最多持有几分钟。 */
 export const ENV_SLOTS = 'FLEET_LOCAL_TEST_SLOTS';
@@ -358,7 +363,13 @@ function describeHolders(holders: readonly Holder[], now: number): string {
     .join('；');
 }
 
-/** 拿一个槽，满了就排队：每 reportMs 打一行；等过 maxWaitMs 抛 TestSlotError。 */
+/**
+ * 拿到槽时一定打的那一行的开头（没等也打，「共等了 0 秒」）。引擎自测认这一行分开「等槽」和「真跑测试」
+ * （packages/engine/src/real/self-check.ts 的 SLOT_ACQUIRED 从包的入口引这个常量）。
+ */
+export const SLOT_ACQUIRED_LINE = '拿到本机测试槽';
+
+/** 拿一个槽，满了就排队：每 reportMs 打一行；等过 maxWaitMs 抛 TestSlotError。拿到了打一行 SLOT_ACQUIRED_LINE。 */
 export function acquireSlot(cfg: SlotConfig, deps: SlotDeps): SlotHandle {
   const start = deps.now();
   let lastReport = Number.NEGATIVE_INFINITY;
@@ -366,7 +377,7 @@ export function acquireSlot(cfg: SlotConfig, deps: SlotDeps): SlotHandle {
   for (;;) {
     const r = tryAcquire(cfg, deps);
     if (r.kind === 'got') {
-      if (!first) deps.log(`拿到本机测试槽，共等了 ${Math.round((deps.now() - start) / 1000)} 秒`);
+      deps.log(`${SLOT_ACQUIRED_LINE}，共等了 ${Math.round((deps.now() - start) / 1000)} 秒`);
       return r.handle;
     }
     const now = deps.now();
