@@ -5,7 +5,7 @@
 import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Git } from '../src/directives.ts';
 import type { GhResult } from '../src/issue-new.ts';
 import { work } from '../src/work.ts';
@@ -20,6 +20,7 @@ import {
   readLeases,
   readLocalBeats,
   removeLease,
+  renderQueue,
   writeLease,
 } from '../src/work-queue.ts';
 
@@ -105,13 +106,15 @@ function deps(
     leases?: () => LeaseRecord[];
     gitFails?: boolean;
     graphqlFails?: boolean;
+    repoView?: GhResult;
   } = {},
 ) {
   const graphql: string[] = [];
   const gh = async (args: string[]): Promise<GhResult> => {
     if (args[0] === 'issue' && args[1] === 'list') return o.issues ?? ok(JSON.stringify(ISSUES));
     if (args[0] === 'pr' && args[1] === 'list') return ok(JSON.stringify(PULLS));
-    if (args[0] === 'repo' && args[1] === 'view') return ok(JSON.stringify({ nameWithOwner: REPO }));
+    if (args[0] === 'repo' && args[1] === 'view')
+      return o.repoView ?? ok(JSON.stringify({ nameWithOwner: REPO }));
     if (args[0] === 'api' && args[1] === 'graphql') {
       if (o.graphqlFails) return bad('HTTP 502');
       const q = args.find((a) => a.startsWith('query=')) ?? '';
@@ -299,6 +302,21 @@ describe('buildQueue：本机做的开着的单，每张一个状态', () => {
     expect(byIssue(await buildQueue(deps())).get(92)?.state).toBe('working');
   });
 
+  it('【故意造出的失败】当前仓没读成：租约和前置不算没有，本来可接的不当成可接', async () => {
+    const r = await buildQueue(deps({ repoView: bad('HTTP 502') }));
+    const by = byIssue(r);
+    expect(r.problems.join('\n')).toContain('没读成');
+    expect(r.problems.join('\n')).toContain('不当成可接');
+    expect(by.get(10)?.takeable).toBe(false);
+    expect(by.get(10)?.why).toContain('不当成没有');
+    expect(by.get(30)?.state).toBe('working');
+    expect(by.get(82)?.state).toBe('blocked');
+    expect(by.get(82)?.why).toContain('没查成');
+    expect(by.get(82)?.blockedBy).toEqual([83]);
+    expect(r.items.every((i) => i.state !== 'takeable')).toBe(true);
+    expect(renderQueue(r).some((l) => l.startsWith('[没查成]'))).toBe(true);
+  });
+
   it('【故意造出的失败】心跳、工作树、租约、引导读不成：照列单，没读成的写进 problems，不当成没有', async () => {
     const r = await buildQueue(
       deps({
@@ -314,6 +332,9 @@ describe('buildQueue：本机做的开着的单，每张一个状态', () => {
     expect(r.items).toHaveLength(ISSUES.length);
     const p = r.problems.join('\n');
     for (const w of ['心跳没读成', '工作树没读成', '租约没读成', '引导没读成']) expect(p).toContain(w);
+    expect(byIssue(r).get(10)?.takeable).toBe(false);
+    expect(byIssue(r).get(70)?.why).toContain('不当成没有');
+    expect(byIssue(r).get(30)?.state).toBe('working');
   });
 
   it('【故意造出的失败】单读不成、或到了 200 张没翻全：整条抛，不当成队列空', async () => {
@@ -431,7 +452,12 @@ describe('pnpm work claim / renew / done：本机记下租约，队列才认得�
 });
 
 const made: string[] = [];
+beforeEach(() => {
+  vi.stubEnv('GH_REPO', '');
+  vi.stubEnv('GITHUB_REPOSITORY', '');
+});
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const d of made.splice(0)) rmSync(d, { recursive: true, force: true });
 });
 

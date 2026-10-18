@@ -8,7 +8,7 @@
 - `check.ts`：`pnpm check` = biome 格式 + `tsc -b` + 改到的测试（`--all` 才全量）+ 卫生检查，四样跑完再判红。
 - `issue-batch.ts`：`pnpm issue:batch --spec <JSON>`，整批校验后建母子单、写 parent 并挂原生关系；失败关闭本批，创建结果不明按唯一标记找回。`--recover <记录>` 清理中断产物，记录生成在仓根临时目录的 issue-batch 子目录。GitHub 无跨单事务，撤销失败必须保留记录并报错。
 - 只给 CI 用的（`.github/workflows/` 里调）：`ci-plan.ts`、`ci-box.ts`、`ci-cache.ts`、`ci-verdict.ts`、`main-reuse.ts`、`merge-gate.ts`、`close-on-merge.ts`、`debt-check.ts`、`github-audit.ts`（`--alarm` 红了开同一张「GitHub 对账没过」单，`audit-alarm.ts`）、`version-cut.ts`（版本一周一版、到期自动收口，`github-audit.yml` 的 version-cut 任务每天跑）。
-- 查询轴词汇只在 `src/labels.ts`：`pnpm issue:new`、`pnpm pr:open` 显式带 `--domain engine|api|mirasim --nature bug|perf|process`。`src/bin/label-sync.ts` 和 `label-sync.yml` 同步六标签。`issue:batch` 的母单/子单 JSON 可带 `domain`、`nature`，子单逐轴继承母单有效值；旧 JSON 缺轴只提示，保留原子补偿语义。固定流水线报警贴 engine/bug，引导和项目冒烟单贴 engine/process。
+- 查询轴词汇只在 `src/labels.ts`：`pnpm issue:new`、`pnpm pr:open` 显式带 `--domain engine|api|mirasim --nature bug|perf|process`。`src/bin/label-sync.ts` 和 `label-sync.yml` 同步六标签。`issue:batch` 母单必须提供 `domain`、`nature`，子单可逐轴继承母单有效值；整批写入前检查，缺失或无效就拒绝，原子补偿和恢复语义不变。固定流水线报警贴 engine/bug，引导和项目冒烟单贴 engine/process。`query-metadata.yml` 用可信默认分支代码处理创建/编辑/重开事件，只从当前标签、明确正文声明或唯一来源单补轴；写后回读，未知/冲突/读失败报错，不猜、不改排期。`github:audit` 检查两轴约定落地后的新 issue/PR，漏轴和冲突报断裂，PR 标签读失败报没查成。
 - `packages/conventions/standard-paths.json`：改标准的路径清单（人闸第四类），**改它本身就是改标准**。
 - `packages/conventions/test-timings.json`：CI 测试按耗时分台的耗时表，用 `pnpm ci:timings` 从 CI 日志刷新，别手改。
 
@@ -22,10 +22,12 @@
 - `mother-manifest.ts` 严格读写母单正文 JSON 清单；`family-manifest.ts` 全量读含已关闭子单后按唯一清单修复正文与原生关系，多母认领先报冲突、不写。入口 `bin/github-audit.ts` 显式给 family reader/writer；原对账接口仍可只读。批量写清单失败走整批补偿；`issue:new --parent` 的清单失败须明说子单已开已挂，不能建议重开。
 - 空母单只对批量创建标记报错，不按创建时间报警；目录母单允许空清单。parent 孤儿、字段与原生关系冲突和 manifest 差异仍须报告。
 - `pnpm project check|add` 第二步（`project.ts` 的 `probeApps`）读装没装只经 `fleet-api project installations`（#2977，法国用两个机器人的 metadata:read 安装令牌，和导入列表同一份归并），不读本机 gh 的 `user/installations`；`parseInstallFacts` 逐字段严格认。「没查成」（非 0、ssh 超时、非 JSON、缺字段、`reason` 非空、仓号仓名对不上）是 unchecked、退出码 2，不当成没装、不退回本机 gh 猜、不补装；读全了明确不含才是「没装」（red），add 才走本机 gh 的单仓 PUT 补装。
+- `pnpm project add` 第七步冒烟单（#2995）：有没有这张固定标题只信 issues 列表直接列全的结果，和 `createIssue` 回执单号的直接读取（GET）。搜索索引的空不算没有、也不算没开成；列单或直读失败是没查成（退出码 2），不去补开第二张；回执单号或标题对不上是明确失败，同样不补开。
 
 - 测试读包外文件（别的包的源码、`docs/ops.md`、`AGENTS.md`、`deploy/` 脚本）要登记进 `packages/conventions/src/ci-plan.ts` 的 `PATH_RULES` / `TEST_READS`；`test/ci-plan.test.ts` 扫所有测试文件，漏记一条就红。
 - CI 一律全套（决定 0101）：`ci.yml` 的 changes 只用 `ciFullPlan()`，不按改动选；只有两种跳过——PR 上测试台输入完全相同（`ci-cache.ts`）、主线同树复用 PR 的结果（`main-reuse.ts`，e2e 也复用）。别再往 CI 里加按路径少跑的规则：漏的东西到主线才红。汇总（`ciVerdict`）见到不是全套的 plan 就红。
 - `ci-plan.ts` 的 `planCi` 现在只给本机：`test:changed`、推前预检按改动选先跑哪些，改了判法本机跟着变。
+- `test:changed` 判需全跑时先认非空 `FLEET_RUN_ID`，再认 CI：引擎会话显式 `--affected` 生效，写码 CLI 注入的 `CI=true/1` 不覆盖它；无引擎标记的专用 CI、引擎默认和显式 `--all` 仍全跑。
 - 只改一个包「对外面」以外的文件只测这个包自己（`packages/conventions/src/package-surface.ts`）；认不出面就当整个包都是面。
 - 文档指针检查误报了就收窄 `packages/conventions/src/doc-pointers.ts` 的规则，不往文档里加豁免；章节别光写「第 X 节」，写明是 design 还是 ops 的。
 - CI 里的检查必须确定、只看检出来的文件；看外部状态（GitHub）的放定时任务，只留言不挡 PR。

@@ -78,9 +78,12 @@ function runWorker(o: {
 
 async function renew(): Promise<{ ok: boolean; text: string }> {
   const lines: string[] = [];
+  const repoRoot = spec?.worktree ?? process.cwd();
   const code = await work(['renew', String(spec?.issue)], {
-    // 在工人的工作树里问 gh（派的那份检出可能是会被删掉的工作树）
-    gh: ghRunner(spec?.worktree ?? process.cwd()),
+    // 在工人的工作树里问 gh（派的那份检出可能是会被删掉的工作树）。识仓和 gh 用同一个根，显式 GH_REPO 才不会被 origin 换掉。
+    gh: ghRunner(repoRoot),
+    env: process.env,
+    root: repoRoot,
     post: liveClaimsPost(() => readClaimsEndpoint()),
     out: (l) => lines.push(l),
     err: (l) => lines.push(l),

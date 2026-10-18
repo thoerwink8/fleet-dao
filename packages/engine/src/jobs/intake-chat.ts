@@ -163,6 +163,7 @@ const OUTPUT_RULES = [
   '- 每一轮都先把能从代码和已有对话里推出来的草稿栏写进 patch，能填的都填上。',
   `- 过了给方案的节点（第 ${INTAKE_PROPOSAL_AFTER_TURNS} 次发言之后），创始人又提了新信息：下一轮直接给更新后的 proposal，把新信息写进 patch，不回到逐条提问。`,
   '- patch 只能有这些键：title、kind、scene、modules、want、done（字符串数组，每条是一条看得见的验收）、notDo、size、needsHuman（碰发布、花钱、删数据、改标准时写为什么要人拍）。',
+  '- modules 除模块路径外，必须独立两行写出查询分类「域: engine|api|mirasim」「性质: bug|perf|process」（各选一个值，不写竖线列表）。按实际范围和工作性质判断，不从 kind 自动映射；无法确定时继续澄清，不交开单方案。现有草稿缺这两行时先补 patch，后端缺分类会拒开。',
   `- kind 只能是 ${REQUEST_KINDS.join('、')} 之一（文档、重构这类都算「杂项」）。`,
   '- 除了 done，别的键的值都是一段字符串；要列几条就写成一段多行文字（每行「- 」开头），别写成数组。',
   '- 回话里说「改了哪几栏」只说 patch 里真有的栏。',

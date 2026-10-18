@@ -37,7 +37,7 @@ export const FIRST_BACKOFF_MS = 60_000;
 export const MAX_BACKOFF_MS = 10 * 60_000;
 /** 结果里留最后一条回复的前多少字 */
 export const SUMMARY_MAX = 2000;
-/** 交给工人的环境变量（WMI 起的进程拿不到派的人的环境，只带这几样；不带令牌） */
+/** 交给工人的环境变量（WMI 起的进程拿不到派的人的环境，只带这几样；不带令牌）。显式目标仓要带上，脱离之后续租才不会按 origin 另认一个仓。 */
 export const PASS_ENV = [
   'PATH',
   'Path',
@@ -47,6 +47,8 @@ export const PASS_ENV = [
   'https_proxy',
   'http_proxy',
   'no_proxy',
+  'GH_REPO',
+  'GITHUB_REPOSITORY',
 ];
 
 export type RunState = 'starting' | 'running' | 'retrying' | 'done' | 'failed';

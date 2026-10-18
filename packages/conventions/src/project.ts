@@ -11,7 +11,8 @@
 //   4 仓档案：探测语言、工具链、测试命令、模块根，只补档案里没写的项，经 fleet-api project set-profile 写
 //   5 补齐 PR：缺 AGENTS.md、四节单模板、引用本仓可复用合并闸和关单工作流的，开一个 PR 补上（开过还开着就不再开）
 //   6 跑 project check：全绿才打开「让 AI 接活」（fleet-api dispatch on）；有一项不过就停，接活不开
-//   7 开一张冒烟单（四节齐，标题固定，开过就不再开）
+//   7 开一张冒烟单（四节齐，标题固定，开过就不再开）。有没有这张单只信直接列全的 issues 列表，
+//     和开单回执单号的直接读取；搜索索引暂时看不到不算没有，也不把刚开成的单判成失败（#2995）
 // check 只读：1～5 各查一遍，全绿退出码 0，有不过的 1，没查成的 2（别的步过了也不抵）。
 //
 // 碰 GitHub 只经本机 gh（令牌不读出来；App 装没装例外，经法国的 fleet-api 读），碰法国只经 ssh 调 fleet-api；这两样都收在 ProjectWorld 里，测试换成假的。
@@ -39,6 +40,13 @@ export interface FleetApiResult {
   stderr: string;
 }
 
+/** 一张单的事实：单号、完整标题、状态。直接读到的，不经搜索索引。 */
+export interface IssueFact {
+  number: number;
+  title: string;
+  state: string;
+}
+
 /** 这个命令碰外面的全部口子。真的见 bin/project.ts（gh + ssh），测试用内存里的假的。 */
 export interface ProjectWorld {
   repo(slug: string): Promise<RepoFacts>;
@@ -64,8 +72,21 @@ export interface ProjectWorld {
       body: string;
     },
   ): Promise<{ number: number; url: string }>;
-  /** 按完整标题找单（开着关了都算）。 */
-  findIssue(slug: string, title: string): Promise<{ number: number; state: string } | null>;
+  /**
+   * 按完整标题找单（开着、关了都算）。不得走搜索索引：刚创建的单搜索会晚一步，空不等于没有（#2995）。
+   * 冒烟单「有没有」以 listIssueByTitle 为准；这个口子的空不能当成没有。
+   */
+  findIssue(slug: string, title: string): Promise<IssueFact | null>;
+  /**
+   * 直接列这个仓的单，按完整标题对（issues 列表，不走搜索）。
+   * 读全了没有回 null。没读成、没读全、有一条认不出抛错：没读到不等于没有。
+   */
+  listIssueByTitle(slug: string, title: string): Promise<IssueFact | null>;
+  /**
+   * 按单号直接读（GET /repos/{owner}/{repo}/issues/{number}，不走搜索）。
+   * 没有这张单回 null。端口出错或回的认不出抛错。
+   */
+  readIssue(slug: string, number: number): Promise<IssueFact | null>;
   createIssue(slug: string, input: { title: string; body: string; labels: string[] }): Promise<number>;
   /** 在法国跑一条 fleet-api 子命令（stdin 给了就从标准输入喂进去）。 */
   fleetApi(args: string[], stdin?: string): Promise<FleetApiResult>;
@@ -99,6 +120,7 @@ class Unchecked extends Error {}
 export const PROJECT_USAGE = '用法：pnpm project add <owner/仓> | pnpm project check <owner/仓>';
 export const FILL_BRANCH = 'fleet-dao/standard-fill';
 export const SMOKE_TITLE = '冒烟：fleet-dao 接活打通';
+const SMOKE_LABELS = ['需求', '域:engine', '性质:process'];
 export const REQUIRED_FILES = {
   agents: 'AGENTS.md',
   issueTemplate: '.github/ISSUE_TEMPLATE/需求.md',
@@ -648,6 +670,88 @@ export async function projectCheck(
   return { code, results };
 }
 
+function textOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function issueNumberOk(n: unknown): n is number {
+  return typeof n === 'number' && Number.isSafeInteger(n) && n > 0;
+}
+
+/** 按单号直接读，核对就是这张冒烟单。读不成、读到空、对不上都不当成没有。 */
+async function readSmokeFact(
+  ctx: ProjectContext,
+  slug: string,
+  number: number,
+): Promise<{ ok: true; fact: IssueFact } | { ok: false; status: 'red' | 'unchecked'; detail: string }> {
+  let fact: IssueFact | null;
+  try {
+    fact = await ctx.world.readIssue(slug, number);
+  } catch (err) {
+    return { ok: false, status: 'unchecked', detail: `#${number} 直接读没成：${textOf(err)}` };
+  }
+  if (!fact) {
+    return {
+      ok: false,
+      status: 'unchecked',
+      detail: `#${number} 直接读没有这张单（没读到，不能当成没开成）`,
+    };
+  }
+  if (fact.number !== number || fact.title !== SMOKE_TITLE) {
+    return {
+      ok: false,
+      status: 'red',
+      detail: `直接读到的 #${fact.number}「${fact.title}」和冒烟单 #${number} 对不上`,
+    };
+  }
+  return { ok: true, fact };
+}
+
+/**
+ * 第七步不走 runStep 的「补完用同一条探测再查」。
+ * 那条若是按标题搜索，索引还没跟上会把刚开成的单说成还没开，重跑还可能再开一张（#2995）。
+ * 有没有：直接列单，读全了才算没有。刚开的：只信 createIssue 回的单号，再按这个号直接读。
+ * 空的搜索不算失败，也不算成功；列单或直读失败不再补开。
+ */
+async function smokeIssueStep(ctx: ProjectContext, slug: string): Promise<StepResult> {
+  const step = '7 冒烟单';
+  let listed: IssueFact | null;
+  try {
+    listed = await ctx.world.listIssueByTitle(slug, SMOKE_TITLE);
+  } catch (err) {
+    return { step, status: 'unchecked', detail: `没查成：${textOf(err)}` };
+  }
+  if (listed) {
+    if (!issueNumberOk(listed.number) || listed.title !== SMOKE_TITLE) {
+      return {
+        step,
+        status: 'unchecked',
+        detail: `直接列单回的 #${String(listed.number)}「${listed.title}」认不出，不能当成没开成`,
+      };
+    }
+    const got = await readSmokeFact(ctx, slug, listed.number);
+    if (!got.ok) return { step, status: got.status, detail: got.detail };
+    return { step, status: 'ok', detail: `#${got.fact.number}（${got.fact.state}）` };
+  }
+
+  let created: number;
+  try {
+    created = await ctx.world.createIssue(slug, {
+      title: SMOKE_TITLE,
+      body: smokeIssueBody(slug),
+      labels: SMOKE_LABELS,
+    });
+  } catch (err) {
+    return { step, status: 'unchecked', detail: `创建结果不明：${textOf(err)}` };
+  }
+  if (!issueNumberOk(created)) {
+    return { step, status: 'unchecked', detail: `创建结果不明：回执单号 ${String(created)} 不可信` };
+  }
+  const got = await readSmokeFact(ctx, slug, created);
+  if (!got.ok) return { step, status: got.status, detail: got.detail };
+  return { step, status: 'fixed', detail: `还没开 → 补好了：#${got.fact.number}（${got.fact.state}）` };
+}
+
 /** pnpm project add：七步，每步先查、再补、再核；可重复跑。 */
 export async function projectAdd(
   ctx: ProjectContext,
@@ -695,27 +799,8 @@ export async function projectAdd(
   results.push(dispatch);
   if (dispatch.status !== 'ok' && dispatch.status !== 'fixed') return { code: exitCodeOf(results), results };
 
-  // 7：冒烟单
-  const smoke = await runStep(
-    ctx,
-    '7 冒烟单',
-    async () => {
-      const found = await ctx.world.findIssue(slug, SMOKE_TITLE);
-      if (found) return { ok: true, detail: `#${found.number}（${found.state}）` };
-      return {
-        ok: false,
-        why: '还没开',
-        fix: async () => {
-          await ctx.world.createIssue(slug, {
-            title: SMOKE_TITLE,
-            body: smokeIssueBody(slug),
-            labels: ['需求', '域:engine', '性质:process'],
-          });
-        },
-      };
-    },
-    'add',
-  );
+  // 7：冒烟单。不把搜索的空当成没有，也不在补完后再搜一次标题。
+  const smoke = await smokeIssueStep(ctx, slug);
   print(ctx, smoke);
   results.push(smoke);
   return { code: exitCodeOf(results), results };

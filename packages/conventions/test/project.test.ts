@@ -1,6 +1,7 @@
 // pnpm project add|check（#2749）：七步各自先查、再补、再核，可重复跑；owner 下没装过 App 时提示先在网页装；
 // check 有一项不过就不打开接活；冒烟单四节齐。GitHub、法国都换成内存里的假世界，不打真接口。
 // 第二步读装没装只经 fleet-api project installations（#2977）：读不成、回的认不出一律没查成（退出码 2），不退回本机 gh。
+// 第七步冒烟单（#2995）：创建回执的单号要直接读核对；搜索暂时为空不算失败，也不当成没有再开一张。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -29,7 +30,7 @@ import {
   SMOKE_TITLE,
   smokeIssueBody,
 } from '../src/project.ts';
-import { ghProjectWorld, sshFleetApi } from '../src/project-world.ts';
+import { ghProjectWorld, ISSUE_LIST_PAGE, ISSUE_LIST_PAGES_MAX, sshFleetApi } from '../src/project-world.ts';
 
 const STD = 'acme/fleet';
 const SLUG = 'acme/flux';
@@ -138,9 +139,17 @@ class FakeWorld implements ProjectWorld {
     for (const [p, t] of this.branchFiles) this.files.set(p, t);
     this.openPr = null;
   }
-  async findIssue(_slug: string, title: string) {
+  async findIssue(slug: string, title: string) {
+    return this.listIssueByTitle(slug, title);
+  }
+  /** 直接列单：内存里有就看得到，不模拟搜索延迟。 */
+  async listIssueByTitle(_slug: string, title: string) {
     const i = this.issues.find((x) => x.title === title);
-    return i ? { number: i.number, state: 'OPEN' } : null;
+    return i ? { number: i.number, title: i.title, state: 'OPEN' } : null;
+  }
+  async readIssue(_slug: string, number: number) {
+    const i = this.issues.find((x) => x.number === number);
+    return i ? { number: i.number, title: i.title, state: 'OPEN' } : null;
   }
   async createIssue(_slug: string, input: { title: string; body: string; labels: string[] }) {
     this.writes.push('issue');
@@ -191,6 +200,19 @@ function ctxOf(world: ProjectWorld, apps = APPS): ProjectContext & { lines: stri
   const lines: string[] = [];
   return { world, standardRepo: STD, apps, out: (l) => lines.push(l), lines };
 }
+
+/** 补齐 PR 已合、再跑 add 就会走到接活和冒烟单；冒烟单还没开。 */
+async function readyForSmoke(): Promise<FakeWorld> {
+  const w = new FakeWorld();
+  const first = await projectAdd(ctxOf(w), SLUG);
+  expect(first.results.some((x) => x.step === '7 冒烟单')).toBe(false);
+  w.mergeFillPr();
+  w.writes = [];
+  return w;
+}
+
+const smokeOf = (r: { results: { step: string; status: string; detail: string }[] }) =>
+  r.results.find((x) => x.step === '7 冒烟单');
 
 describe('参数', () => {
   it('只认 add、check 加 owner/仓', () => {
@@ -308,6 +330,197 @@ describe('project add', () => {
   });
 });
 
+describe('冒烟单：创建回执和直接读，不信搜索的空（#2995）', () => {
+  it('创建真实成功、有可信单号，但搜索暂时返回空：不误报失败', async () => {
+    const w = await readyForSmoke();
+    const hidden = new Set<number>();
+    const realList = w.listIssueByTitle.bind(w);
+    const realCreate = w.createIssue.bind(w);
+    let receipt = 0;
+    // 搜索索引：创建前后都是空。判定若靠它，补完再查就会误报失败。
+    w.findIssue = async () => null;
+    w.createIssue = async (slug, input) => {
+      receipt = await realCreate(slug, input);
+      hidden.add(receipt);
+      return receipt;
+    };
+    // 刚写下的单，按标题再查仍是空（搜索会这样）。按单号直接读不受这层影响。
+    w.listIssueByTitle = async (slug, title) => {
+      const hit = await realList(slug, title);
+      if (hit && hidden.has(hit.number)) return null;
+      return hit;
+    };
+
+    const r = await projectAdd(ctxOf(w), SLUG);
+    const smoke = smokeOf(r);
+    expect(r.results.map((x) => x.step)).toEqual([
+      '1 登记仓',
+      '2 装两个 App',
+      '3 流程标签',
+      '4 仓档案',
+      '5 补齐 PR',
+      '6 打开让 AI 接活',
+      '7 冒烟单',
+    ]);
+    expect(r.results.find((x) => x.step === '6 打开让 AI 接活')?.status).toBe('fixed');
+    expect(smoke?.status).toBe('fixed');
+    expect(receipt).toBeGreaterThan(0);
+    expect(smoke?.detail).toContain(`#${receipt}`);
+    expect(w.issues.map((i) => i.number)).toEqual([receipt]);
+    expect(r.code).toBe(0);
+    // 成功来自回执单号的直接读，不是来自空的标题搜索
+    expect(await w.findIssue(SLUG, SMOKE_TITLE)).toBeNull();
+    expect(await w.readIssue(SLUG, receipt)).toMatchObject({ number: receipt, title: SMOKE_TITLE });
+  });
+
+  it('紧接着重试：已有真实冒烟单，搜索仍空，不再创建', async () => {
+    const w = await readyForSmoke();
+    const first = await projectAdd(ctxOf(w), SLUG);
+    expect(smokeOf(first)?.status).toBe('fixed');
+    expect(w.issues).toHaveLength(1);
+    const number = w.issues[0]?.number;
+
+    w.findIssue = async () => null;
+    let creates = 0;
+    const realCreate = w.createIssue.bind(w);
+    w.createIssue = async (slug, input) => {
+      creates += 1;
+      return realCreate(slug, input);
+    };
+    w.writes = [];
+    const again = await projectAdd(ctxOf(w), SLUG);
+    expect(again.code).toBe(0);
+    expect(smokeOf(again)?.status).toBe('ok');
+    expect(smokeOf(again)?.detail).toContain(`#${number}`);
+    expect(creates).toBe(0);
+    expect(w.issues).toHaveLength(1);
+    expect(w.writes).not.toContain('issue');
+    expect(await w.findIssue(SLUG, SMOKE_TITLE)).toBeNull();
+    expect(await w.listIssueByTitle(SLUG, SMOKE_TITLE)).toMatchObject({ number, title: SMOKE_TITLE });
+  });
+
+  it.each(['throw', 'nan'] as const)('创建结果不明（%s）：没查成，零次盲目补建', async (mode) => {
+    const w = await readyForSmoke();
+    let calls = 0;
+    w.findIssue = async () => null;
+    w.createIssue = async (_slug, input) => {
+      calls += 1;
+      w.issues.push({ number: 36, title: input.title, body: input.body, labels: input.labels });
+      if (mode === 'throw') throw new Error('开单：认不出 gh 回的地址');
+      return Number.NaN;
+    };
+    const r = await projectAdd(ctxOf(w), SLUG);
+    expect(smokeOf(r)?.status).toBe('unchecked');
+    expect(smokeOf(r)?.detail).toContain('创建结果不明');
+    expect(smokeOf(r)?.detail).toContain(mode === 'throw' ? '认不出' : '不可信');
+    expect(smokeOf(r)?.detail).not.toContain('还没开');
+    expect(r.code).toBe(2);
+    expect(calls).toBe(1);
+    expect(w.issues).toHaveLength(1);
+
+    w.createIssue = async () => {
+      calls += 1;
+      throw new Error('不该再开');
+    };
+    const again = await projectAdd(ctxOf(w), SLUG);
+    expect(calls).toBe(1);
+    expect(w.issues).toHaveLength(1);
+    expect(smokeOf(again)?.status).toBe('ok');
+    expect(smokeOf(again)?.detail).toContain('#36');
+  });
+
+  it('直接读取端口失败：没查成，不把没读到写成没开，零次盲目补建', async () => {
+    const blocked = await readyForSmoke();
+    blocked.findIssue = async () => null;
+    blocked.listIssueByTitle = async () => {
+      throw new Error('直接列单没成（gh 退出码 1）：HTTP 502');
+    };
+    const missed = await projectAdd(ctxOf(blocked), SLUG);
+    expect(smokeOf(missed)?.status).toBe('unchecked');
+    expect(smokeOf(missed)?.detail).toContain('HTTP 502');
+    expect(smokeOf(missed)?.detail).not.toContain('还没开');
+    expect(missed.code).toBe(2);
+    expect(blocked.issues).toEqual([]);
+    expect(blocked.writes).not.toContain('issue');
+
+    const w = await readyForSmoke();
+    w.findIssue = async () => null;
+    let calls = 0;
+    const realCreate = w.createIssue.bind(w);
+    w.createIssue = async (slug, input) => {
+      calls += 1;
+      return realCreate(slug, input);
+    };
+    w.readIssue = async () => {
+      throw new Error('直接读没成（gh 退出码 1）：timeout');
+    };
+    const created = await projectAdd(ctxOf(w), SLUG);
+    expect(smokeOf(created)?.status).toBe('unchecked');
+    expect(smokeOf(created)?.detail).toContain('timeout');
+    expect(smokeOf(created)?.detail).not.toContain('还没开');
+    expect(created.code).toBe(2);
+    expect(calls).toBe(1);
+    expect(w.issues).toHaveLength(1);
+
+    const again = await projectAdd(ctxOf(w), SLUG);
+    expect(calls).toBe(1);
+    expect(w.issues).toHaveLength(1);
+    expect(smokeOf(again)?.status).toBe('unchecked');
+    expect(smokeOf(again)?.detail).toContain('timeout');
+  });
+
+  it('直接读回空：不算开成，也不写成没开，不再补开', async () => {
+    const w = await readyForSmoke();
+    w.findIssue = async () => null;
+    let calls = 0;
+    const realCreate = w.createIssue.bind(w);
+    w.createIssue = async (slug, input) => {
+      calls += 1;
+      return realCreate(slug, input);
+    };
+    w.readIssue = async () => null;
+    const r = await projectAdd(ctxOf(w), SLUG);
+    expect(smokeOf(r)?.status).toBe('unchecked');
+    expect(smokeOf(r)?.detail).toContain('没读到');
+    expect(smokeOf(r)?.detail).not.toContain('还没开');
+    expect(r.code).toBe(2);
+    expect(calls).toBe(1);
+    expect(w.issues).toHaveLength(1);
+
+    const again = await projectAdd(ctxOf(w), SLUG);
+    expect(calls).toBe(1);
+    expect(w.issues).toHaveLength(1);
+    expect(smokeOf(again)?.status).toBe('unchecked');
+  });
+
+  it.each([
+    ['单号对不上', (n: number) => ({ number: n + 1, title: SMOKE_TITLE, state: 'OPEN' })],
+    ['标题对不上', (n: number) => ({ number: n, title: '别的标题', state: 'OPEN' })],
+  ])('%s：明确失败，零次盲目补建', async (_name, reply) => {
+    const w = await readyForSmoke();
+    w.findIssue = async () => null;
+    let calls = 0;
+    const realCreate = w.createIssue.bind(w);
+    w.createIssue = async (slug, input) => {
+      calls += 1;
+      return realCreate(slug, input);
+    };
+    w.readIssue = async (_slug, n) => reply(n);
+    const r = await projectAdd(ctxOf(w), SLUG);
+    expect(smokeOf(r)?.status).toBe('red');
+    expect(smokeOf(r)?.detail).toContain('对不上');
+    expect(smokeOf(r)?.detail).not.toContain('还没开');
+    expect(r.code).toBe(1);
+    expect(calls).toBe(1);
+    expect(w.issues).toHaveLength(1);
+
+    const again = await projectAdd(ctxOf(w), SLUG);
+    expect(calls).toBe(1);
+    expect(w.issues).toHaveLength(1);
+    expect(smokeOf(again)?.status).toBe('red');
+  });
+});
+
 describe('文件模板', () => {
   it('冒烟单正文四节齐，过得了开单检查', () => {
     const body = smokeIssueBody(SLUG);
@@ -387,6 +600,146 @@ describe('真口子（gh）', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  /** 搜索口固定回空；issues 列表按页回。用来钉「不走 --search」。 */
+  function issueApi(pages: unknown[][]) {
+    const calls: string[][] = [];
+    const gh: Gh = async (args) => {
+      calls.push(args);
+      const joined = args.join(' ');
+      if (args.includes('--search') || joined.includes('search/issues')) {
+        return { code: 0, stdout: '[]', stderr: '' };
+      }
+      const path = args[1] ?? '';
+      if (args[0] === 'api' && path.includes('/issues?')) {
+        const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? '1');
+        const body = pages[page - 1] ?? [];
+        return { code: 0, stdout: JSON.stringify(body), stderr: '' };
+      }
+      const one = /\/issues\/(\d+)$/.exec(path);
+      if (args[0] === 'api' && one) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ number: Number(one[1]), title: SMOKE_TITLE, state: 'open' }),
+          stderr: '',
+        };
+      }
+      return { code: 1, stdout: '', stderr: `不认 ${joined}` };
+    };
+    return { calls, world: ghProjectWorld(gh, async () => ({ code: 0, stdout: '', stderr: '' })) };
+  }
+
+  const otherIssue = (number: number) => ({ number, title: `别的 ${number}`, state: 'open' });
+
+  it('搜索是空、issues 列表读得到：按标题认这张单，不走 --search', async () => {
+    const api = issueApi([
+      [
+        {
+          number: 35,
+          title: SMOKE_TITLE,
+          state: 'open',
+          pull_request: { html_url: 'https://example/pull/35' },
+        },
+        { number: 36, title: SMOKE_TITLE, state: 'open' },
+      ],
+    ]);
+    expect(await api.world.listIssueByTitle(SLUG, SMOKE_TITLE)).toEqual({
+      number: 36,
+      title: SMOKE_TITLE,
+      state: 'open',
+    });
+    expect(await api.world.findIssue(SLUG, SMOKE_TITLE)).toEqual({
+      number: 36,
+      title: SMOKE_TITLE,
+      state: 'open',
+    });
+    expect(api.calls.some((a) => a.includes('--search') || a.join(' ').includes('search/issues'))).toBe(
+      false,
+    );
+    const listed = api.calls.filter((a) => (a[1] ?? '').includes('/issues?'));
+    expect(listed.length).toBeGreaterThan(0);
+    for (const args of listed) {
+      expect(args[1]).toContain('state=all');
+      expect(args[1]).toContain(`per_page=${ISSUE_LIST_PAGE}`);
+      expect(args[1]).not.toContain('filter=');
+    }
+  });
+
+  it('标题在第二页：翻过去才认；读全了没有就回 null，不把 PR 当成这张单', async () => {
+    const full = Array.from({ length: ISSUE_LIST_PAGE }, (_, i) => otherIssue(i + 1));
+    const found = issueApi([full, [{ number: 201, title: SMOKE_TITLE, state: 'closed' }]]);
+    expect(await found.world.listIssueByTitle(SLUG, SMOKE_TITLE)).toEqual({
+      number: 201,
+      title: SMOKE_TITLE,
+      state: 'closed',
+    });
+    expect(found.calls.filter((a) => (a[1] ?? '').includes('/issues?'))).toHaveLength(2);
+
+    const onlyPr = issueApi([
+      [
+        {
+          number: 7,
+          title: SMOKE_TITLE,
+          state: 'open',
+          pull_request: { html_url: 'https://example/pull/7' },
+        },
+      ],
+    ]);
+    expect(await onlyPr.world.listIssueByTitle(SLUG, SMOKE_TITLE)).toBeNull();
+  });
+
+  it('没列完不能当成没有；有一条认不出、列表不是数组、端口失败都抛', async () => {
+    const full = Array.from({ length: ISSUE_LIST_PAGE }, (_, i) => otherIssue(i + 1));
+    const truncated = issueApi(Array.from({ length: ISSUE_LIST_PAGES_MAX + 2 }, () => full));
+    await expect(truncated.world.listIssueByTitle(SLUG, SMOKE_TITLE)).rejects.toThrow(/不能当成没有/);
+    expect(truncated.calls.filter((a) => (a[1] ?? '').includes('/issues?'))).toHaveLength(
+      ISSUE_LIST_PAGES_MAX,
+    );
+
+    const badItem = issueApi([[{ number: 1, state: 'open' }]]);
+    await expect(badItem.world.listIssueByTitle(SLUG, SMOKE_TITLE)).rejects.toThrow(/标题/);
+
+    const gh: Gh = async (args) => {
+      if ((args[1] ?? '').includes('/issues?')) return { code: 0, stdout: '{}', stderr: '' };
+      return { code: 1, stdout: '', stderr: '不认' };
+    };
+    const world = ghProjectWorld(gh, async () => ({ code: 0, stdout: '', stderr: '' }));
+    await expect(world.listIssueByTitle(SLUG, SMOKE_TITLE)).rejects.toThrow(/不是数组/);
+
+    const down = ghProjectWorld(
+      async () => ({ code: 1, stdout: '', stderr: 'HTTP 502' }),
+      async () => ({ code: 0, stdout: '', stderr: '' }),
+    );
+    await expect(down.listIssueByTitle(SLUG, SMOKE_TITLE)).rejects.toThrow(/502/);
+    await expect(down.readIssue(SLUG, 36)).rejects.toThrow(/502/);
+  });
+
+  it('按单号直接读：404 是没有，对不上的号照实回，认不出单号的开单回执抛', async () => {
+    const gh: Gh = async (args) => {
+      const path = args[1] ?? '';
+      if (path.endsWith('/issues/36')) {
+        return {
+          code: 0,
+          stdout: JSON.stringify({ number: 36, title: SMOKE_TITLE, state: 'open' }),
+          stderr: '',
+        };
+      }
+      if (path.endsWith('/issues/37')) {
+        return { code: 0, stdout: JSON.stringify({ number: 99, title: '别的', state: 'open' }), stderr: '' };
+      }
+      if (path.endsWith('/issues/38')) return { code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' };
+      if (args[0] === 'issue' && args[1] === 'create') return { code: 0, stdout: 'created\n', stderr: '' };
+      return { code: 1, stdout: '', stderr: `不认 ${args.join(' ')}` };
+    };
+    const world = ghProjectWorld(gh, async () => ({ code: 0, stdout: '', stderr: '' }));
+    expect(await world.readIssue(SLUG, 36)).toEqual({ number: 36, title: SMOKE_TITLE, state: 'open' });
+    expect(await world.readIssue(SLUG, 37)).toEqual({ number: 99, title: '别的', state: 'open' });
+    expect(await world.readIssue(SLUG, 38)).toBeNull();
+    await expect(world.readIssue(SLUG, 0)).rejects.toThrow(/不可信/);
+    await expect(world.createIssue(SLUG, { title: SMOKE_TITLE, body: 'x', labels: [] })).rejects.toThrow(
+      /认不出/,
+    );
   });
 });
 

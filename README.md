@@ -66,7 +66,7 @@
 
 ### 批量开母子单
 
-`pnpm issue:batch --spec <JSON文件>` 一次返回母单号、全部子单号和恢复记录路径。JSON 的 `mother` 和非空 `subs` 列表中每项都要有 `title`、`body`、`kind`（需求/缺陷/杂项）；正文沿用开单四节校验。整批不挂里程碑（未排期）；`local: true` 表示保留「本机做」。
+`pnpm issue:batch --spec <JSON文件>` 一次返回母单号、全部子单号和恢复记录路径。JSON 的 `mother` 和非空 `subs` 列表中每项都要有 `title`、`body`、`kind`（需求/缺陷/杂项）；母单还要有 `domain`、`nature`，子单可逐轴继承母单的有效值；整批写前校验，缺轴或无效值拒开。正文沿用开单四节校验。整批不挂里程碑（未排期）；`local: true` 表示保留「本机做」。
 
 子单自动写 `parent: #母单号` 并挂原生子议题。整批先暂贴「本机做」，挂好全部关系后再撤暂存标签。失败会把本批单关闭为 `not_planned`（保留撤销记录）；创建回包不明时按批次标记分页找回。进程中断或撤销失败时跑 `pnpm issue:batch --recover <恢复记录路径>` 继续清理；未核清或关闭失败会明确报错，不报成功。GitHub 不提供跨单事务，断网时无法保证立即清完，恢复记录会生成在仓根临时目录的 issue-batch 子目录，处理完之前不要删。
 
@@ -93,4 +93,4 @@
 
 ## 协作
 
-GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。批量建单的 `mother`、`subs` JSON 可带 `domain`、`nature`，子单逐轴继承母单有效值；旧 JSON 缺轴只提示、照常执行。查询轴两套，名字带轴：域（`域:engine`、`域:api`、`域:mirasim`）和性质（`性质:bug`、`性质:perf`、`性质:process`）；新开的单和人开的 PR 每轴贴一个，按这两个标签筛。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，只有四栏：做了什么、怎么验证的、还欠什么、需求（要在合并时关单，「需求」栏下面另起一行写 `Closes #号`），并带和开单同一套 `--domain`、`--nature`；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654）；能不能合只看 CI 和 merge-gate（见 design 第五节）。
+GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。批量建单的 `mother` 必填 `domain`、`nature`，子单逐轴继承母单有效值；缺失或无效在任何 GitHub 写入前拒绝。查询轴两套，名字带轴：域（`域:engine`、`域:api`、`域:mirasim`）和性质（`性质:bug`、`性质:perf`、`性质:process`）；新开的单和 PR 每轴贴一个，按这两个标签筛。受控入口创建前校验；旧检出、网页或直接 gh 创建的对象由可信主线事件补漏，只认明确声明或唯一来源单，不明就报错，`pnpm github:audit` 持续查漏。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，只有四栏：做了什么、怎么验证的、还欠什么、需求（要在合并时关单，「需求」栏下面另起一行写 `Closes #号`），并带和开单同一套 `--domain`、`--nature`；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654）；能不能合只看 CI 和 merge-gate（见 design 第五节）。

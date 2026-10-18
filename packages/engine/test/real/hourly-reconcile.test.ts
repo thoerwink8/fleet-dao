@@ -2,7 +2,7 @@
 // 会话用户）、假的工作树管家（属主记在表里）、假的 Temporal（工作流在不在跑、挂没挂着由用例定）。
 // 残留的树删掉、提醒跟着撤（有没推的东西也删：AI 产生的树，决定 0097、#2729）；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
 // 条件还在的提醒不撤；卡住报警超过 24 小时再推一次、同一天不重复。每条失败路径都故意造一次。
-import { randomUUID } from 'node:crypto';
+import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -23,6 +23,7 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { type AppCredentials, createGitHub, memoryLedger, silentLogger } from '@fleet-dao/github';
 import { noteOnlyOptions } from '@fleet-dao/shared';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { type AlertSweepDeps, type RouteCheck, sweepAlerts } from '../../src/jobs/alert-sweep.ts';
@@ -241,6 +242,170 @@ function ghWith(over: Partial<HourlyReconcileWiring['gh']> = {}): HourlyReconcil
     }),
     ...over,
   };
+}
+
+/**
+ * #1960 正文里那一行。日期还没到；括号里的 #2789 是已合 PR，不是 issue。
+ * 前置语法认括号里的 #N，这一行会解析出 issues=[2789]、until=2026-11-12。
+ */
+const ISSUE_1960_PREREQUISITE =
+  '前置：2026-11-12 复查日（PR #2789 已合、决定 0102 已写；到日子按返工率复查、写进 0102 再关单）';
+
+/** 失败轮之前种下的旧名单。对上北京时间 2026-10-18 05:41 留下的那一份。 */
+const OLD_ORPHANS = [
+  {
+    repo: 'acme/widgets',
+    issue: 7,
+    labeledForMs: 90_000_000,
+    labeledFor: '25 小时',
+    reason: '上一份还在',
+  },
+];
+
+type PrerequisiteNode = { kind: 'issue' | 'pr'; state: 'open' | 'closed' | 'merged' };
+
+const PREREQUISITE_API = 'https://api.github.test';
+const PREREQUISITE_PERMISSIONS = {
+  contents: 'write',
+  pull_requests: 'write',
+  issues: 'write',
+  checks: 'read',
+  actions: 'read',
+  statuses: 'write',
+  metadata: 'read',
+  administration: 'write',
+};
+
+let prerequisiteApps: Record<'agent' | 'engine', AppCredentials> | undefined;
+function prerequisiteAppCredentials(): Record<'agent' | 'engine', AppCredentials> {
+  if (prerequisiteApps) return prerequisiteApps;
+  const agent = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+  const engine = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+  prerequisiteApps = {
+    agent: { role: 'agent', appId: 101, slug: 'fleet-test-agent', privateKey: agent, source: 'test' },
+    engine: { role: 'engine', appId: 202, slug: 'fleet-test-engine', privateKey: engine, source: 'test' },
+  };
+  return prerequisiteApps;
+}
+
+/**
+ * 真 createGitHub 接一份只答安装、令牌、IssueStates 和 issue REST 的假服务。
+ * GraphQL issueOrPullRequest 认 issue 和 PR；REST 的 GET /issues/N 对 PR 带回 pull_request，
+ * 真 readIssueState 因此抛 NOT_AN_ISSUE。装配要是改回逐个 readIssueState，前置是 PR 的那一轮就红。
+ */
+function prerequisiteGitHub(
+  nodes: ReadonlyMap<string, PrerequisiteNode>,
+  breakage?: 'forbidden' | 'down' | 'bad-shape',
+) {
+  const issueStates: { owner: string; name: string; numbers: number[] }[] = [];
+  const issueGets: string[] = [];
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    });
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+    const path = url.pathname;
+    const method = init?.method ?? 'GET';
+    if (/^\/repos\/[^/]+\/[^/]+\/installation$/.test(path)) {
+      return json(200, { id: 22, permissions: PREREQUISITE_PERMISSIONS });
+    }
+    if (path === '/app/installations/22/access_tokens') {
+      return json(201, {
+        token: 'ghs_testengine1xxxxxxxxxxxxxxxx',
+        expires_at: '2099-01-01T00:00:00.000Z',
+        permissions: PREREQUISITE_PERMISSIONS,
+      });
+    }
+    const issuePath = /^\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)$/.exec(path);
+    if (issuePath && method === 'GET') {
+      const owner = issuePath[1] ?? '';
+      const name = issuePath[2] ?? '';
+      const number = Number(issuePath[3]);
+      issueGets.push(`${owner}/${name}#${number}`);
+      const node = nodes.get(`${owner}/${name}#${number}`);
+      if (!node) return json(404, { message: 'Not Found' });
+      return json(200, {
+        number,
+        node_id: `I_${number}`,
+        html_url: `https://github.test/${owner}/${name}/issues/${number}`,
+        state: node.state === 'open' ? 'open' : 'closed',
+        title: `#${number}`,
+        body: '',
+        user: null,
+        updated_at: '2026-10-16T11:12:42Z',
+        ...(node.kind === 'pr'
+          ? { pull_request: { url: `https://github.test/${owner}/${name}/pull/${number}` } }
+          : {}),
+      });
+    }
+    if (path === '/graphql' && method === 'POST') {
+      if (breakage === 'down') throw new Error('network down');
+      if (breakage === 'forbidden') return json(403, { message: 'Resource not accessible by integration' });
+      const body = JSON.parse(String(init?.body ?? '{}')) as {
+        query?: string;
+        variables?: Record<string, unknown>;
+      };
+      if (!body.query?.includes('query IssueStates')) {
+        return json(404, { message: '假 GitHub 不认识这个查询' });
+      }
+      const variables = body.variables ?? {};
+      const owner = String(variables.owner ?? '');
+      const name = String(variables.name ?? '');
+      const indexed: number[] = [];
+      for (const [key, value] of Object.entries(variables)) {
+        const m = /^n(\d+)$/.exec(key);
+        if (!m) continue;
+        indexed[Number(m[1])] = Number(value);
+      }
+      const numbers = indexed.filter((n) => Number.isInteger(n));
+      issueStates.push({ owner, name, numbers });
+      if (breakage === 'bad-shape') {
+        return json(200, { data: { repository: { a0: { __typename: 'Blob' } } } });
+      }
+      const repository: Record<string, unknown> = {};
+      const errors: { type: string; message: string }[] = [];
+      numbers.forEach((n, i) => {
+        const node = nodes.get(`${owner}/${name}#${n}`);
+        if (!node) {
+          repository[`a${i}`] = null;
+          errors.push({
+            type: 'NOT_FOUND',
+            message: `Could not resolve to an issue or pull request with the number of ${n}.`,
+          });
+          return;
+        }
+        repository[`a${i}`] =
+          node.kind === 'issue'
+            ? { __typename: 'Issue', state: node.state === 'open' ? 'OPEN' : 'CLOSED' }
+            : {
+                __typename: 'PullRequest',
+                prState: node.state === 'open' ? 'OPEN' : node.state === 'merged' ? 'MERGED' : 'CLOSED',
+              };
+      });
+      return json(200, { data: { repository }, ...(errors.length > 0 ? { errors } : {}) });
+    }
+    return json(404, { message: `假 GitHub 里没有 ${method} ${path}` });
+  };
+  const gh = createGitHub({
+    ledger: memoryLedger(),
+    apps: prerequisiteAppCredentials(),
+    apiUrl: PREREQUISITE_API,
+    fetch: fetchImpl,
+    now: () => new Date('2026-10-17T22:41:00.000Z'),
+    sleep: async () => undefined,
+    env: {},
+    stateDir: join(root, 'gh-state'),
+    log: silentLogger,
+  });
+  return { gh, issueStates, issueGets };
+}
+
+function prerequisiteNodes(
+  rows: readonly [string, number, PrerequisiteNode['kind'], PrerequisiteNode['state']][],
+): Map<string, PrerequisiteNode> {
+  return new Map(rows.map(([repo, number, kind, state]) => [`${repo}#${number}`, { kind, state }]));
 }
 
 const alert = (
@@ -1234,12 +1399,11 @@ describe('没人处理的卡住报警：超过 24 小时再推一次，一天最
 });
 
 describe('核对接到真库', { timeout: 60_000 }, () => {
-  it('本机没人领：GitHub 正文、标签和前置状态一路传到选择器，等待单不报、普通单照报', async () => {
-    probeDir();
-    await work();
-    const now = new Date('2026-11-11T15:59:59.000Z');
-    const labeledAt = new Date(now.getTime() - 25 * HOUR).toISOString();
-    const issue = (number: number, body: string, labels: string[]) => ({
+  /** 北京时间 2026-10-18 06:41，复查日 2026-11-12 还没到。 */
+  const incidentNow = new Date('2026-10-17T22:41:00.000Z');
+
+  function localIssue(number: number, body: string, labels: string[], at: string) {
+    return {
       number,
       title: `#${number}`,
       body,
@@ -1247,48 +1411,219 @@ describe('核对接到真库', { timeout: 60_000 }, () => {
       authorId: null,
       authorType: null,
       authorIsBot: false,
-      createdAt: labeledAt,
-      updatedAt: labeledAt,
+      createdAt: at,
+      updatedAt: at,
       labels,
       milestone: null,
+    };
+  }
+
+  function localReads(
+    at: string,
+    issues: ReturnType<typeof localIssue>[],
+    states: NonNullable<HourlyReconcileWiring['gh']['readIssueStates']>,
+    one?: HourlyReconcileWiring['gh']['readIssueState'],
+  ): HourlyReconcileWiring['gh'] {
+    return ghWith({
+      readGroomFacts: async () => ({ milestones: [], issues }),
+      readIssueLabelEvents: async () => [
+        { label: '本机做', action: 'labeled' as const, at, actor: 'fleet-engine[bot]', bot: true },
+      ],
+      readIssueComments: async () => [{ body: '留给本机做', at }],
+      readIssueStates: states,
+      ...(one ? { readIssueState: one } : {}),
     });
-    const events = async () => [
-      { label: '本机做', action: 'labeled' as const, at: labeledAt, actor: 'fleet-engine[bot]', bot: true },
+  }
+
+  async function orphanRow() {
+    const res = await sql(
+      `select value, updated_at, version, updated_by from settings where key = 'reconcile.localOrphans'`,
+    );
+    const row = res.rows[0] as
+      | { value: unknown; updated_at: Date; version: number; updated_by: string | null }
+      | undefined;
+    if (!row) throw new Error('reconcile.localOrphans 没有这一行');
+    return row;
+  }
+
+  /** 种下 05:41 的旧名单，跑一轮失败的对账，价值、更新时刻、版本和改的人都得原样留着。 */
+  async function expectOldOrphansKept(why: string, gh: HourlyReconcileWiring['gh']) {
+    probeDir();
+    await work();
+    await sql(
+      `insert into settings (key, value, version, updated_at, updated_by)
+       values ('reconcile.localOrphans', $1::jsonb, 3, '2026-10-18T05:41:28.797+08:00', 'seed')`,
+      [JSON.stringify(OLD_ORPHANS)],
+    );
+    const before = await orphanRow();
+    const run = await runHourlyReconcileJob(deps({ now: () => incidentNow, gh }));
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('上一份名单留着');
+    expect(run.why).toContain(why);
+    expect(await orphanRow()).toEqual(before);
+    expect(await readLocalOrphans(t.db)).toEqual([...OLD_ORPHANS]);
+  }
+
+  it('本机没人领：#1960 的已合 PR 前置走批量口子，日期未到不进名单，普通超时单照进', async () => {
+    probeDir();
+    await work();
+    await t.db.insert(repos).values({ owner: 'beta', name: 'gadgets', testCommand: 'pnpm check' });
+    const labeledAt = new Date(incidentNow.getTime() - 25 * HOUR).toISOString();
+    const issue = (number: number, body: string, labels: string[] = ['本机做']) =>
+      localIssue(number, body, labels, labeledAt);
+    // 1960 和 53 都写了 #2789：同仓只该问一次。beta 是另一个仓，单独一批。
+    const acme = [
+      issue(1960, ISSUE_1960_PREREQUISITE),
+      issue(2088, '等创始人确认', ['本机做', '要人拍']),
+      issue(34, '前置：#35'),
+      issue(35, '前置：#36'),
+      issue(36, '普通超过 24 小时'),
+      issue(50, '前置：#2788'),
+      issue(51, '前置：#2790'),
+      issue(52, '前置：#100 还开着，#2789 已合'),
+      issue(53, '前置：#2789，再写一遍 #2789'),
     ];
-    const comments = async () => [{ body: '留给本机做', at: labeledAt }];
-    const seenStates: number[] = [];
+    const beta = [issue(7, '前置：#2789')];
+    const port = prerequisiteGitHub(
+      prerequisiteNodes([
+        ['acme/widgets', 2789, 'pr', 'merged'],
+        ['acme/widgets', 35, 'issue', 'open'],
+        ['acme/widgets', 36, 'issue', 'closed'],
+        ['acme/widgets', 2788, 'pr', 'open'],
+        ['acme/widgets', 2790, 'pr', 'closed'],
+        ['acme/widgets', 100, 'issue', 'open'],
+        ['beta/gadgets', 2789, 'pr', 'merged'],
+      ]),
+    );
+    const asked: { repo: string; numbers: number[] }[] = [];
     const run = await runHourlyReconcileJob(
       deps({
-        now: () => now,
+        now: () => incidentNow,
         gh: ghWith({
-          readGroomFacts: async () => ({
-            milestones: [],
-            issues: [
-              issue(1960, '前置：2026-11-12 复查日', ['本机做']),
-              issue(2088, '等创始人确认', ['本机做', '要人拍']),
-              issue(34, '前置：#35', ['本机做']),
-              issue(35, '前置：#36', ['本机做']),
-              issue(36, '普通超过 24 小时', ['本机做']),
-            ],
-          }),
-          readIssueLabelEvents: async () => events(),
-          readIssueComments: async () => comments(),
-          async readIssueState(input) {
-            seenStates.push(input.issueNumber);
-            return {
-              state: input.issueNumber === 35 ? ('open' as const) : ('closed' as const),
-              stateReason: null,
-            };
+          async readGroomFacts(input) {
+            const key = `${input.repo.owner}/${input.repo.name}`;
+            const issues = key === 'acme/widgets' ? acme : key === 'beta/gadgets' ? beta : null;
+            if (!issues) throw new Error(`用例没给 ${key} 的开着的单`);
+            return { milestones: [], issues };
           },
+          readIssueLabelEvents: async () => [
+            {
+              label: '本机做',
+              action: 'labeled' as const,
+              at: labeledAt,
+              actor: 'fleet-engine[bot]',
+              bot: true,
+            },
+          ],
+          readIssueComments: async () => [{ body: '留给本机做', at: labeledAt }],
+          async readIssueStates(input) {
+            asked.push({
+              repo: `${input.repo.owner}/${input.repo.name}`,
+              numbers: [...input.numbers],
+            });
+            return port.gh.readIssueStates(input);
+          },
+          readIssueState: (input) => port.gh.readIssueState(input),
         }),
       }),
     );
+    const acmeNumbers = [2789, 35, 36, 2788, 2790, 100];
     expect(run.outcome).toBe('ok');
-    expect(seenStates.sort((a, b) => a - b)).toEqual([35, 36]);
+    expect(asked).toEqual([
+      { repo: 'acme/widgets', numbers: acmeNumbers },
+      { repo: 'beta/gadgets', numbers: [2789] },
+    ]);
+    expect(port.issueStates).toEqual([
+      { owner: 'acme', name: 'widgets', numbers: acmeNumbers },
+      { owner: 'beta', name: 'gadgets', numbers: [2789] },
+    ]);
+    expect(port.issueGets).toEqual([]);
+    // 1960 日期未到；50 前置 PR 还开着；52 混着开着的 issue；34 等 #35；2088 要人拍。
+    // 35 的前置 issue 已关、36 没有前置、51 的前置 PR 已关、53 和 beta#7 的前置 PR 已合：照进名单。
     expect(await readLocalOrphans(t.db)).toEqual([
       expect.objectContaining({ repo: 'acme/widgets', issue: 35 }),
       expect.objectContaining({ repo: 'acme/widgets', issue: 36 }),
+      expect.objectContaining({ repo: 'acme/widgets', issue: 51 }),
+      expect.objectContaining({ repo: 'acme/widgets', issue: 53 }),
+      expect.objectContaining({ repo: 'beta/gadgets', issue: 7 }),
     ]);
+  });
+
+  it('【故意造出的失败】前置号不存在：这一轮 partial，旧名单的值和更新时刻留着', async () => {
+    const labeledAt = new Date(incidentNow.getTime() - 25 * HOUR).toISOString();
+    const port = prerequisiteGitHub(prerequisiteNodes([]));
+    await expectOldOrphansKept(
+      'GraphQL 出错',
+      localReads(
+        labeledAt,
+        [localIssue(1960, '前置：#99999', ['本机做'], labeledAt)],
+        (input) => port.gh.readIssueStates(input),
+        (input) => port.gh.readIssueState(input),
+      ),
+    );
+    expect((await orphanRow()).updated_at.toISOString()).toBe('2026-10-17T21:41:28.797Z');
+  });
+
+  it('【故意造出的失败】前置状态读取被拒绝：这一轮 partial，旧名单留着', async () => {
+    const labeledAt = new Date(incidentNow.getTime() - 25 * HOUR).toISOString();
+    const port = prerequisiteGitHub(prerequisiteNodes([['acme/widgets', 2789, 'pr', 'merged']]), 'forbidden');
+    await expectOldOrphansKept(
+      '没有权限',
+      localReads(
+        labeledAt,
+        [localIssue(1960, ISSUE_1960_PREREQUISITE, ['本机做'], labeledAt)],
+        (input) => port.gh.readIssueStates(input),
+        (input) => port.gh.readIssueState(input),
+      ),
+    );
+  });
+
+  it('【故意造出的失败】前置状态连不上：这一轮 partial，旧名单留着', async () => {
+    const labeledAt = new Date(incidentNow.getTime() - 25 * HOUR).toISOString();
+    const port = prerequisiteGitHub(prerequisiteNodes([['acme/widgets', 2789, 'pr', 'merged']]), 'down');
+    await expectOldOrphansKept(
+      '连不上',
+      localReads(
+        labeledAt,
+        [localIssue(36, '前置：#2789', ['本机做'], labeledAt)],
+        (input) => port.gh.readIssueStates(input),
+        (input) => port.gh.readIssueState(input),
+      ),
+    );
+  });
+
+  it('【故意造出的失败】前置状态的返回形状认不出：这一轮 partial，旧名单留着', async () => {
+    const labeledAt = new Date(incidentNow.getTime() - 25 * HOUR).toISOString();
+    const port = prerequisiteGitHub(prerequisiteNodes([['acme/widgets', 35, 'issue', 'open']]), 'bad-shape');
+    await expectOldOrphansKept(
+      '形状不一样',
+      localReads(
+        labeledAt,
+        [localIssue(36, '前置：#35', ['本机做'], labeledAt)],
+        (input) => port.gh.readIssueStates(input),
+        (input) => port.gh.readIssueState(input),
+      ),
+    );
+  });
+
+  it('【故意造出的失败】前置状态的 Map 缺号：不当 closed，不写空名单，旧名单留着', async () => {
+    const labeledAt = new Date(incidentNow.getTime() - 25 * HOUR).toISOString();
+    await expectOldOrphansKept(
+      'acme/widgets#35 的状态缺号',
+      localReads(labeledAt, [localIssue(36, '前置：#35', ['本机做'], labeledAt)], async () => new Map()),
+    );
+  });
+
+  it('【故意造出的失败】前置状态认不出：不当 closed，不写空名单，旧名单留着', async () => {
+    const labeledAt = new Date(incidentNow.getTime() - 25 * HOUR).toISOString();
+    await expectOldOrphansKept(
+      'acme/widgets#35 的状态认不出：merged',
+      localReads(
+        labeledAt,
+        [localIssue(36, '前置：#35', ['本机做'], labeledAt)],
+        async () => new Map<number, 'open' | 'closed'>([[35, 'merged' as 'open']]),
+      ),
+    );
   });
 
   it('合了的 PR：镜像补上算发现计数；机器人开的 PR 合并人不对报 reconcile:pr 提醒（#440 恢复：#431 就是这么漏的）；列不出来这个仓进原因、这一轮不记 ok', async () => {
