@@ -2683,6 +2683,7 @@ export function haikuGuardVerdict(raw, deps) {
 // Claude Code 的 Agent 调用，subagent_type 不是只读的那几种（斥候、设计、问 CLI 的、配状态栏的），就读一次本机的空闲内存和负载
 // （capacity.mjs），空闲内存 < 4G 或 1 分钟负载 > 核数×0.8 拦下并附读数；读不到也拦（明说没查成，不当成够）。
 // 不数在跑几个工人：不设个数上限。别家没有 Agent 工具，不管。
+// 派到云上的（isolation: "remote"）在云端环境里跑，不占本机内存和 CPU，不判本机容量。
 
 /** 只读的子代理：不改文件、不起重测试，不判容量 */
 export const READ_ONLY_AGENTS = new Set(['Explore', 'Plan', 'claude-code-guide', 'statusline-setup']);
@@ -2705,6 +2706,7 @@ export function capacityVerdict(raw, { read = readCapacity } = {}) {
   if (input.tool_name !== 'Agent' && input.tool_name !== 'Task') return null;
   const type = prop(input.tool_input, 'subagent_type');
   if (typeof type === 'string' && READ_ONLY_AGENTS.has(type)) return null;
+  if (prop(input.tool_input, 'isolation') === 'remote') return null;
   const v = judgeCapacity(read());
   if (v.enough === true) return null;
   const tail =
