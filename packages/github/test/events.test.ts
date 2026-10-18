@@ -888,6 +888,38 @@ describe('对账与补漏', () => {
     });
   });
 
+  it('local/<单号>- 分支、引擎开引擎合、没有真实队列回执：照报没有合并记录，连续两轮都不进 cleanPrs（#3055：分支名不是执行证据）', async () => {
+    const { gh, fake, ledger } = setup();
+    const local = fake.addPull({
+      user: fake.bots.engine,
+      head: { ref: 'local/2903-abcd1234', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.bots.engine,
+    });
+    await ledger.upsertPullRequest({
+      repoId: REPO_ID,
+      number: local.number,
+      state: 'merged',
+      headRef: 'local/2903-abcd1234',
+      headSha: A,
+      updatedAt: new Date('2026-09-25T11:30:00Z'),
+    });
+    const { intake } = fakeIntake(() => true);
+    const reconciler = gh.reconciler({ intake, pollDeliveryId });
+    for (const round of [1, 2]) {
+      const report = await reconciler.auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+      expect(report.outcome, `第 ${round} 轮`).toBe('ok');
+      expect(report.cleanPrs ?? [], `第 ${round} 轮`).not.toContain(local.number);
+      expect(
+        report.findings.some((f) => f.number === local.number && f.kind === 'no_merge_record'),
+        `第 ${round} 轮`,
+      ).toBe(true);
+    }
+  });
+
   it('人开的 PR：镜像没记的照样补上；不报合并人、也不报没有合并记录', async () => {
     const { gh, fake, ledger } = setup();
     const byHuman = fake.addPull({
