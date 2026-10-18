@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import {
@@ -965,7 +965,7 @@ describe('目标目录自己的仓边界', { timeout: 60_000 }, () => {
     expect(fetched).toMatchObject({
       code: 'GIT_FAILED',
       retryable: false,
-      message: expect.stringContaining(realpathSync(parent)),
+      message: expect.stringContaining(gitIn(env, parent, 'rev-parse', '--show-toplevel').trim()),
     });
     expect(pinned).toMatchObject({
       code: 'GIT_FAILED',
@@ -1103,5 +1103,68 @@ describe('目标目录自己的仓边界', { timeout: 60_000 }, () => {
     });
     const flat = argv.map((args) => args.join(' ')).join('\n');
     expect(flat).not.toMatch(/\b(init|config|fetch|update-ref)\b/);
+  });
+
+  it('引擎不能遍历会话私有.git时，真实物理路径仍经会话端口解析并允许自有仓写入', async () => {
+    const env = envFor(root);
+    const dir = join(root, 'session-private');
+    const head = commitRepo(env, dir).trim();
+    chmodSync(dir, 0o700);
+    const bundle = bundleOf(env, dir, head);
+    const t = asTree(env, dir);
+    const real = t.exec;
+    const pathCalls: string[][] = [];
+    t.exec = async (command) => {
+      expect(command.user).toBe('fleet-agent-carpool');
+      expect(command.cwd).toBe(dir);
+      if (command.argv[0] === process.execPath) pathCalls.push(command.argv);
+      return real(command);
+    };
+    // 模拟引擎无搜索权限；真实子进程没有这个 mock，仍由会话执行端口读取同一份独立仓。
+    const native = realpathSync.native;
+    const blocked = vi.spyOn(realpathSync, 'native').mockImplementation((p) => {
+      if (String(p).includes('session-private')) {
+        throw Object.assign(new Error('engine cannot traverse session 700 directory'), { code: 'EACCES' });
+      }
+      return native(p);
+    });
+    try {
+      await expect(fetchBundle(t, bundle, REF, { identity })).resolves.toBe(head);
+      await expect(pinMainline(t, 'main', head)).resolves.toBeUndefined();
+    } finally {
+      blocked.mockRestore();
+    }
+    expect(pathCalls.some((argv) => argv.some((p) => p.endsWith('.git')))).toBe(true);
+    expect(gitIn(env, dir, 'rev-parse', 'refs/remotes/origin/main').trim()).toBe(head);
+  });
+
+  it.each([
+    { code: 1, stdout: '', stderr: 'EACCES: session path unreadable', timedOut: false },
+    { code: null, stdout: '', stderr: '', timedOut: true },
+    { code: 0, stdout: '', stderr: '', timedOut: false },
+    { code: 0, stdout: '[null,null]', stderr: '', timedOut: false },
+    { code: 0, stdout: '["relative","relative"]', stderr: '', timedOut: false },
+  ])('会话物理路径解析失败或结果不明时拒绝写入：%j', async (result) => {
+    const env = envFor(root);
+    const dir = join(root, 'path-failure');
+    const head = commitRepo(env, dir).trim();
+    const bundle = bundleOf(env, dir, head);
+    const before = repoStamp(env, dir);
+    const t = asTree(env, dir);
+    const real = t.exec;
+    const writes: string[][] = [];
+    t.exec = async (command) => {
+      if (command.argv[0] === process.execPath) {
+        return { ...result, stdout: Buffer.from(result.stdout), aborted: false };
+      }
+      if (command.argv.some((arg) => ['init', 'config', 'fetch', 'update-ref'].includes(arg))) {
+        writes.push(command.argv);
+      }
+      return real(command);
+    };
+    await expect(fetchBundle(t, bundle, REF, { identity })).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    await expect(pinMainline(t, 'main', head)).rejects.toMatchObject({ code: 'GIT_FAILED' });
+    expect(writes).toEqual([]);
+    expect(repoStamp(env, dir)).toEqual(before);
   });
 });

@@ -1,7 +1,6 @@
 // 会话目录里的 git，一律以会话用户的身份跑（经 exec.ts）：从 bundle 建树、看头和改动、把新提交打成 bundle 交出来、
 // 并主线后快进。git 没跑成一律抛 PortError（带白话原因），不拿空字符串、空列表冒充「没有改动」。
 
-import { realpathSync } from 'node:fs';
 import path from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { PortError } from '../ports.ts';
@@ -84,18 +83,15 @@ const NOT_A_REPO = /not a git repository/;
 
 /**
  * 两条路径是不是同一个目录。先按当前系统（或测试注入的平台）做词法规范化：`.`、`..`、尾部分隔符；
- * Windows 上再去掉 `\\?\`、折大小写。路径真在磁盘上时再解析符号链接——Windows 的长短路径也由这一步
- * 收成同一条（`realpathSync.native`）。读不了（权限）就抛，不当成「不是同一个」。
+ * Windows 上再去掉 `\\?\`、折大小写。这里只做词法比较；物理路径由 pathsAre 经会话用户解析，
+ * 引擎身份不能遍历会话的700目录。
  * platform 只给测试注入另一套路径规则；生产不传。
  */
 export function repoDirectoryKey(input: string, platform: NodeJS.Platform = process.platform): string {
   if (platform === 'win32') {
-    const lexical = winRepoPath(input);
-    const physical = platform === process.platform ? existingPath(lexical) : lexical;
-    return winRepoPath(physical).toLowerCase();
+    return winRepoPath(input).toLowerCase();
   }
-  const physical =
-    platform === process.platform ? existingPath(path.resolve(input)) : path.posix.resolve(input);
+  const physical = path.posix.resolve(input);
   return physical.length > 1 ? physical.replace(/\/+$/, '') : physical;
 }
 
@@ -106,21 +102,6 @@ function winRepoPath(input: string): string {
   p = path.win32.resolve(p);
   if (p.length > 3) p = p.replace(/[\\/]+$/, '');
   return p;
-}
-
-function existingPath(absolute: string): string {
-  try {
-    return realpathSync.native(absolute);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return absolute;
-    throw error;
-  }
-}
-
-function sameDirectory(dir: string, gitPath: string): boolean {
-  const other = path.isAbsolute(gitPath) ? gitPath : path.resolve(dir, gitPath);
-  return repoDirectoryKey(dir) === repoDirectoryKey(other);
 }
 
 type RepoPlace =
@@ -136,15 +117,9 @@ function placeError(t: UserTree, message: string, retryable = true): PortError {
   });
 }
 
-function pathsMatch(t: UserTree, gitPath: string): boolean {
-  try {
-    return sameDirectory(t.dir, gitPath);
-  } catch (error) {
-    throw placeError(
-      t,
-      `看这个目录归哪一个仓没看成（${error instanceof Error ? error.message : '读不了路径'}）`,
-    );
-  }
+async function pathsMatch(t: UserTree, gitPath: string): Promise<boolean> {
+  const other = path.isAbsolute(gitPath) ? gitPath : path.resolve(t.dir, gitPath);
+  return pathsAre(t.dir, other, t);
 }
 
 /**
@@ -172,7 +147,7 @@ async function repoPlace(t: UserTree): Promise<RepoPlace> {
     if (top.code !== 0) throw placeError(t, describeFailure('看这个目录归哪一个仓', top));
     const found = text(top).trim();
     if (!found) throw placeError(t, '看这个目录归哪一个仓：输出认不出（空的）');
-    if (pathsMatch(t, found)) return { kind: 'checkout' };
+    if (await pathsMatch(t, found)) return { kind: 'checkout' };
     return { kind: 'ancestor', found };
   }
   const located = await run(t, [bin, 'rev-parse', '--absolute-git-dir']);
@@ -180,7 +155,7 @@ async function repoPlace(t: UserTree): Promise<RepoPlace> {
   const found = text(located).trim();
   if (!found) throw placeError(t, '看这个目录归哪一个仓：输出认不出（空的）');
   // bare 的目录本身就是 git 目录。工作树的 .git、bare 里面的子目录都不是目标自己的边界。
-  if (bare === 'true' && pathsMatch(t, found)) return { kind: 'bare' };
+  if (bare === 'true' && (await pathsMatch(t, found))) return { kind: 'bare' };
   return { kind: 'ancestor', found };
 }
 
@@ -202,9 +177,29 @@ async function metadataIsOwn(t: UserTree): Promise<boolean> {
   return pathsAre(gitDirPath, commonAbs, t);
 }
 
-function pathsAre(a: string, b: string, t: UserTree): boolean {
+/** 同一套 Node 原生解析跨平台可用，但必须经现有 UserExec 在会话身份内读，不能在引擎进程读私有目录。 */
+async function pathsAre(a: string, b: string, t: UserTree): Promise<boolean> {
+  const result = await run(t, [
+    process.execPath,
+    '--input-type=commonjs',
+    '-e',
+    'console.log(JSON.stringify(process.argv.slice(1).map(p => require("node:fs").realpathSync.native(p))))',
+    a,
+    b,
+  ]);
+  if (result.code !== 0 || result.timedOut || result.aborted || result.spawnError) {
+    throw placeError(t, describeFailure('看这个目录的物理路径', result), !result.aborted);
+  }
   try {
-    return repoDirectoryKey(a) === repoDirectoryKey(b);
+    const paths: unknown = JSON.parse(text(result));
+    if (
+      !Array.isArray(paths) ||
+      paths.length !== 2 ||
+      paths.some((p) => typeof p !== 'string' || !path.isAbsolute(p))
+    ) {
+      throw new Error('物理路径输出认不出');
+    }
+    return repoDirectoryKey(paths[0]) === repoDirectoryKey(paths[1]);
   } catch (error) {
     throw placeError(
       t,
