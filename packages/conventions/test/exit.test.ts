@@ -5,13 +5,20 @@ import { runChild } from './child.ts';
 
 const EXIT = new URL('../src/exit.ts', import.meta.url).href;
 
-/** 跑一段 ESM 代码，开头已经引入了 runMain、exitWith。 */
-const run = (code: string) =>
-  runChild(process.execPath, [
-    '--input-type=module',
-    '-e',
-    `import { runMain, exitWith, ExitRequest } from ${JSON.stringify(EXIT)};\n${code}`,
-  ]);
+/** 跑一段 ESM 代码，开头已经引入了 runMain、exitWith。父进程开了 FORCE_COLOR 时 console.log 会给数字上色，这里关掉，断言对的是退出码和名字。 */
+const run = (code: string) => {
+  const env = { ...process.env, NO_COLOR: '1' };
+  delete env.FORCE_COLOR;
+  return runChild(
+    process.execPath,
+    [
+      '--input-type=module',
+      '-e',
+      `import { runMain, exitWith, ExitRequest } from ${JSON.stringify(EXIT)};\n${code}`,
+    ],
+    { env },
+  );
+};
 
 describe('runMain：入口的退出码由它设，不调 process.exit', { timeout: 0 }, () => {
   it('回数字就是退出码；不回是 0', () => {
