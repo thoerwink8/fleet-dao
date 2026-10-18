@@ -1,6 +1,5 @@
 // 真实 Git/文件系统回归：本地引用不是交付；树收掉以后也不能只信归档清单。
 // fixture 只建在系统 tmp，init 后先核独立仓边界，再允许写对象；每次 Git 显式固定仓/工作树并隔离继承的 GIT_*。
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   existsSync,
@@ -28,6 +27,8 @@ import {
   shotsArchiveDir,
 } from '../../src/real/shots.ts';
 import type { UserTree } from '../../src/real/user-git.ts';
+import { runChildBytes } from '../child.ts';
+import { isolatedUserExec } from './isolated-git.ts';
 
 vi.setConfig({ testTimeout: 60_000 });
 
@@ -51,16 +52,23 @@ let root: string;
 let dir: string;
 let archive: string;
 let gitDir: string;
-let env: NodeJS.ProcessEnv;
+let env: Record<string, string>;
 
-function cleanEnv(): NodeJS.ProcessEnv {
-  return Object.fromEntries(Object.entries(process.env).filter(([key]) => !/^GIT_/i.test(key)));
+function cleanEnv(): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => !/^GIT_/i.test(entry[0]) && entry[1] !== undefined,
+    ),
+  );
 }
 
 function run(args: string[], bytes?: Buffer, cwd = dir, environment = env): Buffer {
-  const r = spawnSync(GIT, args, { cwd, env: environment, input: bytes, timeout: 60_000 });
-  if (r.status !== 0)
-    throw new Error(`fixture git 失败 ${r.status}: ${r.error?.message ?? r.stderr.toString()}`);
+  const r = runChildBytes(GIT, args, {
+    cwd,
+    env: environment,
+    ...(bytes === undefined ? {} : { input: bytes }),
+  });
+  if (r.status !== 0) throw new Error(`fixture git 失败 ${r.status}: ${r.stderr.toString('utf8')}`);
   return r.stdout;
 }
 
@@ -128,33 +136,18 @@ afterEach(() => {
   rmSync(safe, { recursive: true, force: true });
 });
 
-const exec: UserExec = async (command) => {
-  const environment = {
-    ...env,
-    ...command.env,
-    GIT_DIR: gitDir,
-    GIT_COMMON_DIR: gitDir,
-    GIT_WORK_TREE: dir,
-    GIT_INDEX_FILE: join(gitDir, 'index'),
-    GIT_OBJECT_DIRECTORY: join(gitDir, 'objects'),
-  };
-  const [program, ...args] = command.argv;
-  if (!program) throw new Error('空 fixture 命令');
-  const r = spawnSync(program, args, {
-    cwd: command.cwd,
-    env: environment,
-    input: command.stdin,
-    timeout: command.timeoutMs,
+const exec: UserExec = (command) =>
+  isolatedUserExec(env)({
+    ...command,
+    env: {
+      ...command.env,
+      GIT_DIR: gitDir,
+      GIT_COMMON_DIR: gitDir,
+      GIT_WORK_TREE: dir,
+      GIT_INDEX_FILE: join(gitDir, 'index'),
+      GIT_OBJECT_DIRECTORY: join(gitDir, 'objects'),
+    },
   });
-  return {
-    code: r.status,
-    stdout: r.stdout ?? Buffer.alloc(0),
-    stderr: r.stderr?.toString() ?? '',
-    timedOut: (r.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT',
-    aborted: false,
-    ...(r.error ? { spawnError: r.error.message } : {}),
-  };
-};
 
 function tree(): UserTree {
   return { exec, user: 'fleet-agent-carpool', dir, scopePrefix: 'shots-recovery-test', git: GIT, sh: SH };
