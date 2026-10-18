@@ -59,6 +59,64 @@ describe('engine App 策略 source 严格适配', () => {
       }),
     ).rejects.toThrow();
   });
+  it.each([
+    { state: 'success', creator: { id: 41882, type: 'Bot', login: 'github-actions[bot]' } },
+    { state: 'pending', creator: { id: 41882, type: 'Bot', login: 'github-actions[bot]' } },
+    { state: 'success' },
+    { url: `${API}/repos/acme/widgets/statuses/${sha('b')}` },
+    { target_url: 'https://other.test/gate' },
+  ])('撤绿必须核同context最新一条，不能回退旧engine pending %j', async (over) => {
+    const { gh, fake } = setup();
+    const source = createPolicyGitHub(gh.deps);
+    const pending = status({ context: 'merge-gate', state: 'pending', target_url: null });
+    fake.before.push((r) => {
+      if (r.path === `/repos/acme/widgets/statuses/${sha('a')}`) return json(201, pending);
+      if (r.path.includes(`/commits/${sha('a')}/statuses`))
+        return json(200, [{ ...pending, ...over, id: 2 }, pending]);
+      return undefined;
+    });
+    await expect(
+      source.write(repo, identity, sha('a'), {
+        context: 'merge-gate',
+        state: 'pending',
+        description: 'revoke',
+      }),
+    ).rejects.toThrow();
+  });
+  it.each([false, true])('撤绿确认必须读全分页，后页失败=%s', async (failPage) => {
+    const { gh, fake } = setup();
+    const source = createPolicyGitHub(gh.deps);
+    const pending = status({ context: 'merge-gate', state: 'pending', target_url: null });
+    fake.before.push((r) => {
+      if (r.path === `/repos/acme/widgets/statuses/${sha('a')}`) return json(201, pending);
+      if (r.path.includes(`/commits/${sha('a')}/statuses`))
+        return r.query.get('page') === '2'
+          ? json(failPage ? 403 : 200, failPage ? { message: 'page2 unavailable' } : [])
+          : json(200, [status({ context: 'unrelated' }), pending], {
+              link: `<${API}/repos/acme/widgets/commits/${sha('a')}/statuses?page=2>; rel="next"`,
+            });
+      return undefined;
+    });
+    const write = source.write(repo, identity, sha('a'), {
+      context: 'merge-gate',
+      state: 'pending',
+      description: 'revoke',
+    });
+    if (failPage) await expect(write).rejects.toThrow();
+    else await expect(write).resolves.toBeUndefined();
+    expect(fake.calls('GET', /\/statuses$/)).toHaveLength(2);
+  });
+  it('source授权reader仍选最新可信engine，不被其它writer覆盖', async () => {
+    const { gh, fake } = setup();
+    fake.before.push((r) =>
+      r.path.includes(`/commits/${sha('a')}/statuses`)
+        ? json(200, [status({ id: 2, creator: { id: 41882, type: 'Bot' } }), status()])
+        : undefined,
+    );
+    expect(
+      await createPolicyGitHub(gh.deps).latest(repo, identity, sha('a'), 'fleet-ci-policy-source/pr/7'),
+    ).toMatchObject({ id: 1 });
+  });
   it('private字段缺失、仓号缺失、跨仓PR均拒绝', async () => {
     for (const raw of [
       { id: 123, full_name: 'acme/widgets' },

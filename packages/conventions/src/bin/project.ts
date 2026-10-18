@@ -1,4 +1,4 @@
-// pnpm project add|check <owner/仓>（= node packages/conventions/src/bin/project.ts）：加新项目一条命令做到底。判法、七步见 ../project.ts。
+// pnpm project add|check <owner/仓>（= node packages/conventions/src/bin/project.ts）：加新项目一条命令做到底。判法、八步见 ../project.ts。
 // 退出码：0 全绿；1 有没过的项（add 停在那一步，接活不开）；2 参数不对或没查成。
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';

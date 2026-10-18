@@ -1,6 +1,14 @@
+import { generateKeyPairSync } from 'node:crypto';
 import { gateGitHub } from '@fleet-dao/conventions';
 import { policyReader, readPolicyHttp } from '@fleet-dao/conventions/ci-policy-bridge';
-import { lockerOver, memoryIdempotencyStore } from '@fleet-dao/github';
+import {
+  type AppCredentials,
+  createGitHub,
+  createPolicyGitHub,
+  lockerOver,
+  memoryIdempotencyStore,
+  memoryLedger,
+} from '@fleet-dao/github';
 import { createGitHubIntake } from '@fleet-dao/store';
 import { describe, expect, it, vi } from 'vitest';
 import { withPolicySource } from '../src/ci-policy-bridge.ts';
@@ -70,6 +78,92 @@ describe('真实 DB 只读桥与保护边界', () => {
 });
 
 describe('setter 撤绿、失败与重试', () => {
+  it('真实GitHub回读可见较新actions success时返回503，旧engine pending不能让DB提交', async () => {
+    const h = harness();
+    const { gh } = attachPolicyBridge(h);
+    const session = await h.login();
+    expect(
+      (await h.cockpit.request(`/api/repos/${IDS.repo}/ci-policy`, write('PUT', session, { mode: 'off' })))
+        .status,
+    ).toBe(200);
+    const commit = vi.spyOn(h.store, 'setCiPolicy');
+    const engine: AppCredentials = {
+      role: 'engine',
+      appId: 202,
+      clientId: 'Iv1.test-engine',
+      slug: 'fleet-dao-engine',
+      privateKey: generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey,
+      source: 'test',
+    };
+    const pending = {
+      id: 1,
+      context: 'merge-gate',
+      state: 'pending',
+      creator: { id: 9002, type: 'Bot', login: 'fleet-dao-engine[bot]' },
+      url: `https://api.github.test/repos/example/canary/statuses/${POLICY_SHA}`,
+      target_url: null,
+    };
+    const posts: unknown[] = [];
+    const statuses = [
+      {
+        ...pending,
+        id: 2,
+        state: 'success',
+        creator: { id: 41882, type: 'Bot', login: 'github-actions[bot]' },
+      },
+      pending,
+    ];
+    const readback = vi.fn(() => statuses);
+    const real = createGitHub({
+      ledger: memoryLedger(),
+      apps: { engine, agent: { ...engine, role: 'agent' } },
+      apiUrl: 'https://api.github.test',
+      env: {},
+      writeSpacingMs: 0,
+      fetch: async (url, init) => {
+        const p = new URL(String(url)).pathname;
+        let data: unknown;
+        if (p.endsWith('/installation')) data = { id: 20, permissions: { statuses: 'write' } };
+        else if (p.endsWith('/access_tokens'))
+          data = {
+            token: 'test-engine-token',
+            expires_at: '2099-01-01T00:00:00Z',
+            permissions: { statuses: 'write' },
+          };
+        else if (p.startsWith('/users/')) data = pending.creator;
+        else if (p === `/repos/example/canary/statuses/${POLICY_SHA}` && init?.method === 'POST') {
+          const posted = JSON.parse(String(init.body));
+          posts.push(posted);
+          const recorded = { ...pending, ...posted, id: posts.length + 2 };
+          data = recorded;
+          if (posted.context !== 'merge-gate') statuses.unshift(recorded);
+        } else if (p === `/repos/example/canary/commits/${POLICY_SHA}/statuses`) data = readback();
+        else throw new Error(`unexpected GitHub ${init?.method} ${p}`);
+        return new Response(JSON.stringify(data), { headers: { 'content-type': 'application/json' } });
+      },
+    });
+    gh.write = createPolicyGitHub(real.deps).write;
+    const response = await h.cockpit.request(
+      `/api/repos/${IDS.repo}/ci-policy`,
+      write('PUT', session, { mode: 'force' }),
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      error: {
+        code: 'ci_policy_sync_incomplete',
+        details: {
+          dbState: 'not-attempted',
+          oldGreen: 'unconfirmed',
+          source: 'not-applicable',
+          finalGate: 'not-awaited',
+        },
+      },
+    });
+    expect(readback).toHaveBeenCalledOnce();
+    expect(posts).toEqual([expect.objectContaining({ context: 'merge-gate', state: 'pending' })]);
+    expect(commit).not.toHaveBeenCalled();
+    expect((await h.store.findRepoByName(repo.owner, repo.name))?.ciPolicy).toBe('off');
+  });
   it('没有适用的 open PR 时不冒称已排 source 事件，也不冒称最终 gate 通过', async () => {
     const h = harness();
     const { bridge, state, writes } = attachPolicyBridge(h);

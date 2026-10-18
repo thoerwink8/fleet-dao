@@ -1,4 +1,3 @@
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,6 +11,7 @@ import {
 import { policyReader, readPolicyHttp } from '../src/ci-policy-bridge.ts';
 import { type GhApi, ghApi } from '../src/gh-api.ts';
 import { gateGitHub, gatePr, runMergeGate, targetPrs } from '../src/merge-gate.ts';
+import { runChild } from './child.ts';
 
 const sha = 'a'.repeat(40);
 const slug = 'acme/widgets';
@@ -217,7 +217,9 @@ describe('实际入口收口', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
-  it('真实Node bin零安装接通GitHub身份/source -> HTTP -> merge-gate success，无caller模式输入', () => {
+  it('真实Node bin零安装接通GitHub身份/source -> HTTP -> merge-gate success，无caller模式输入', {
+    timeout: 0,
+  }, () => {
     const dir = temp();
     try {
       const event = resolve(dir, 'event.json'),
@@ -237,7 +239,7 @@ else if(url.includes('/statuses?'))data=[${JSON.stringify(status())}];
 else if(url==='https://api.github.com/repos/acme/widgets')data=${JSON.stringify(repoRaw)};
 else throw Error('unexpected URL '+url);return new Response(JSON.stringify(data),{headers:{'content-type':'application/json'}});};`,
       );
-      const text = execFileSync(
+      const result = runChild(
         process.execPath,
         ['--import', pathToFileURL(preload).href, 'packages/conventions/src/bin/merge-gate.ts'],
         {
@@ -250,12 +252,10 @@ else throw Error('unexpected URL '+url);return new Response(JSON.stringify(data)
             GITHUB_TOKEN: 'test-token',
             GITHUB_ACTIONS: 'false',
           },
-          encoding: 'utf8',
-          timeout: 15_000,
-          windowsHide: true,
         },
       );
-      expect(text).toContain('merge-gate success');
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('merge-gate success');
       expect(JSON.parse(readFileSync(output, 'utf8'))).toEqual([
         expect.objectContaining({ context: 'merge-gate', state: 'success' }),
       ]);

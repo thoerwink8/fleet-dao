@@ -3,6 +3,26 @@
   "bare": [],
   "cross": [
     {
+      "file": "packages/conventions/src/ci-policy-bridge.ts",
+      "spec": "../../shared/src/ci-policy-bridge.ts",
+      "why": "Actions reader 在 pnpm install 前零安装运行，只借 shared 零依赖纯策略协议；package.json 保留 shared 依赖作为变更边"
+    },
+    {
+      "file": "packages/conventions/src/merge-gate.ts",
+      "spec": "../../shared/src/ci-policy-bridge.ts",
+      "why": "Actions 合并闸零安装入口只借 shared 零依赖纯策略协议识别逐 PR source；package.json 保留 shared 依赖作为变更边"
+    },
+    {
+      "file": "packages/conventions/src/project-world.ts",
+      "spec": "../../shared/src/ci-policy-bridge.ts",
+      "why": "project 零安装命令只借 shared 零依赖纯策略协议校验仓策略；package.json 保留 shared 依赖作为变更边"
+    },
+    {
+      "file": "packages/conventions/src/project.ts",
+      "spec": "../../shared/src/ci-policy-bridge.ts",
+      "why": "project 零安装命令只借 shared 零依赖纯策略协议校验 HTTP 读桥；package.json 保留 shared 依赖作为变更边"
+    },
+    {
       "file": "packages/mirasim-reclaude/src/migrate.ts",
       "spec": "../../adapters/src/mirasim/wire.ts",
       "why": "专用同步检出不装 node_modules（docs/reclaude-in-mirasim.md 第 56 行），借 adapters 的零依赖 wire.ts；package.json 声明保留，它是 CI 选测的变更边"
