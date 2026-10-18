@@ -24,6 +24,7 @@ import {
   ENVIRONMENT_FILES,
   GIT,
   recoveryIdentity,
+  SH,
   treeLeftovers,
   type UserTree,
   verifyRecoveryBundle,
@@ -614,6 +615,47 @@ export async function assertPeopleIdle(confirm: () => Promise<IdleAnswer>, what:
   if (answer !== 'idle') throw keep('WORKTREE_PRESERVED', `${what}确认不了没人用，保留原树`);
 }
 
+/** 和 complex-snapshot.mjs 的 readStateFiles 同一份名单：没并完的合并、挑拣、回退、变基、二分和它们留下的指针。 */
+const OPERATION_STATE =
+  /^(?:MERGE_|REBASE|rebase-merge$|rebase-apply$|CHERRY_PICK|REVERT_|SQUASH_|BISECT|AUTO_MERGE|ORIG_HEAD|sequencer$)/;
+
+/**
+ * 这棵树的 git 目录里还挂着哪些操作状态。工作区干净、没有未推提交也算有成果：
+ * 完整 bundle 只带引用，带不走这些文件，只能走复杂快照或留树。列不了就抛，不当成没有。
+ */
+export async function gitOperationState(t: UserTree): Promise<string[]> {
+  const result = await runUser(t, [
+    t.sh ?? SH,
+    '-c',
+    'd=$("$1" rev-parse --absolute-git-dir) && exec ls -A -- "$d"',
+    'sh',
+    t.git ?? GIT,
+  ]);
+  if (result.code !== 0 || result.timedOut || result.aborted || result.spawnError) {
+    throw new PortError('READ_FAILED', describeFailure('看 git 目录里有没有没做完的操作', result), {
+      retryable: !result.aborted,
+      details: { dir: t.dir },
+    });
+  }
+  return result.stdout
+    .toString('utf8')
+    .split('\n')
+    .filter((name) => OPERATION_STATE.test(name))
+    .sort();
+}
+
+/** 删除必经点：不论干净还是复杂，都现核进程 cwd，不只信库里的会话账。 */
+export async function assertNoTreeProcess(
+  t: UserTree,
+  place: TreePlace,
+  processLook?: ProcLook,
+): Promise<void> {
+  const usage = await treeProcessUsage(place.real, place.uid, undefined, undefined, processLook);
+  if (usage === 'busy') throw keep('WORKTREE_PRESERVED', '删除前有进程正用着这棵树，保留原树', t.dir);
+  if (usage !== 'idle')
+    throw keep('WORKTREE_PRESERVED', '删除前确认不了有没有进程用着这棵树，保留原树', t.dir);
+}
+
 const LOCATE_SCRIPT = [
   "const fs = require('node:fs');",
   "const path = require('node:path');",
@@ -1104,6 +1146,9 @@ async function recheckClean(t: UserTree, dir: string, preserved: readonly string
   if (left.kind !== 'repo' || left.dirtyCount > 0 || left.stashes > 0) {
     throw keep('WORKTREE_PRESERVED', '存档之后工作树里又有未提交成果，保留原树', t.dir);
   }
+  if ((await gitOperationState(t)).length > 0) {
+    throw keep('WORKTREE_PRESERVED', '存档之后又有没做完的 git 操作，成果包带不走，保留原树', t.dir);
+  }
 }
 
 /** 删除前再读回执、再恢复、再看原树。不认目录里预先放好的标记。 */
@@ -1134,6 +1179,14 @@ export async function recheckPreservedArchive(
 export async function recheckNoUnique(t: UserTree, preserved: readonly string[]): Promise<void> {
   const left = await treeLeftovers(t, [], { preservedPaths: preserved });
   if (left.kind === 'empty') return;
-  if (left.kind === 'repo' && left.dirtyCount === 0 && left.stashes === 0 && left.unpushedCount === 0) return;
+  if (
+    left.kind === 'repo' &&
+    left.dirtyCount === 0 &&
+    left.stashes === 0 &&
+    left.unpushedCount === 0 &&
+    (await gitOperationState(t)).length === 0
+  ) {
+    return;
+  }
   throw keep('WORKTREE_PRESERVED', '删除前这棵树又有了未归档成果，保留原树', t.dir);
 }

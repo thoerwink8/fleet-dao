@@ -223,7 +223,12 @@ function readStateFiles(cwd, blobs) {
     fail(`列 Git 目录失败：${error instanceof Error ? error.message : '读不了'}`);
   }
   for (const name of top) {
-    if (/^(MERGE_|REBASE|CHERRY_PICK|REVERT_|SQUASH_|BISECT|AUTO_MERGE|ORIG_HEAD|sequencer)/.test(name)) {
+    // 和 complex-preserve.ts 的 OPERATION_STATE 同一份名单。变基目录不认得全的内容会在 sequenceObjects 里拒绝，不静默漏掉。
+    if (
+      /^(?:MERGE_|REBASE|rebase-merge$|rebase-apply$|CHERRY_PICK|REVERT_|SQUASH_|BISECT|AUTO_MERGE|ORIG_HEAD|sequencer$)/.test(
+        name,
+      )
+    ) {
       wanted.add(name);
     }
   }

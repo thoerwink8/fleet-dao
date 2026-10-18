@@ -7,8 +7,10 @@ import { PortError, type ShotsDelivery } from '../ports.ts';
 import {
   archiveMode,
   assertArchiveContainer,
+  assertNoTreeProcess,
   assertPeopleIdle,
   assertTreeInside,
+  gitOperationState,
   holdCleanupLock,
   type IdleAnswer,
   locateTree,
@@ -70,17 +72,16 @@ export async function preserveWorktree(
   const shotPaths = () => preservedShotPaths(t, shots);
   const left = await treeLeftovers(t, [], { preservedPaths: await shotPaths() });
   if (left.kind === 'empty') return undefined;
-  const complex = left.kind === 'repo' && (left.dirtyCount > 0 || left.stashes > 0);
+  // 没并完的合并、挑拣、变基等状态只在 git 目录里：工作区干净也不能走只带引用的成果包
+  const operations = left.kind === 'repo' ? await gitOperationState(t) : [];
+  const complex = left.kind === 'repo' && (left.dirtyCount > 0 || left.stashes > 0 || operations.length > 0);
   const gateReady = context.workRoot !== undefined && context.confirmIdle !== undefined;
-  if (left.kind === 'not-repo' || (complex && !gateReady)) {
-    throw kept('树里有未提交、未跟踪、stash 或非 Git 成果，保留原树供接管', t.dir);
-  }
+  const why = '树里有未提交、未跟踪、stash、没做完的 git 操作或非 Git 成果，保留原树供接管';
+  if (left.kind === 'not-repo' || (complex && !gateReady)) throw kept(why, t.dir);
   if (complex) {
     const workRoot = context.workRoot;
     const confirmIdle = context.confirmIdle;
-    if (!workRoot || !confirmIdle) {
-      throw kept('树里有未提交、未跟踪、stash 或非 Git 成果，保留原树供接管', t.dir);
-    }
+    if (!workRoot || !confirmIdle) throw kept(why, t.dir);
     await assertArchiveContainer(archiveDir);
     return preserveComplexWorktree(
       t,
@@ -140,7 +141,11 @@ export async function preserveWorktree(
   await syncDirectory(dir);
   await syncDirectory(archiveDir);
   const after = await treeLeftovers(t, [], { preservedPaths: await shotPaths() });
-  if (JSON.stringify(after) !== JSON.stringify(left) || (await recoveryIdentity(t)) !== identity) {
+  if (
+    JSON.stringify(after) !== JSON.stringify(left) ||
+    (await recoveryIdentity(t)) !== identity ||
+    (await gitOperationState(t)).length > 0
+  ) {
     throw new PortError('WORKTREE_PRESERVED', '存档期间工作树成果发生变化，保留原树重新核验');
   }
   return dir;
@@ -181,6 +186,8 @@ export async function preserveThenRemove(
       if (context.confirmIdle) await assertPeopleIdle(context.confirmIdle, '删除前');
       await recheckNoUnique(t, preserved);
     }
+    // 删除必经点：干净树、干净未推提交也现核进程 cwd，库里没登记会话不等于没人用
+    await assertNoTreeProcess(t, again, context.processLook);
     const result = await remove();
     return { gone: result.gone, ...(archivedTo ? { archivedTo } : {}) };
   } finally {

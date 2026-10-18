@@ -1192,6 +1192,118 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
   });
 
+  it('工作区干净但合并没做完：走完整快照，合并头和它的提交独立恢复后还在；没给门就留树', async () => {
+    const t = tree('acme_web/12-merging');
+    dirtyFile(t);
+    rmSync(join(t.dir, 'dirty.txt'));
+    git(t.dir, 'checkout', '-q', '-b', 'side');
+    writeFileSync(join(t.dir, 'side.txt'), 'side\n');
+    git(t.dir, 'add', 'side.txt');
+    git(t.dir, 'commit', '-q', '-m', 'side');
+    const side = git(t.dir, 'rev-parse', 'HEAD');
+    git(t.dir, 'checkout', '-q', 'main');
+    git(t.dir, 'merge', '--no-ff', '--no-commit', '-s', 'ours', 'side');
+    git(t.dir, 'branch', '-D', 'side');
+    const left = await treeLeftovers(t, []);
+    expect(left).toMatchObject({ kind: 'repo', dirtyCount: 0, stashes: 0, unpushedCount: 0 });
+    await expect(preserveWorktree(t, archive)).rejects.toThrow(/没做完的 git 操作/);
+    const removed: string[] = [];
+    const result = await preserveThenRemove(t, archive, gate(), undefined, async () => {
+      removed.push(t.dir);
+      return { gone: false };
+    });
+    expect(removed).toEqual([t.dir]);
+    const saved = result.archivedTo as string;
+    expect(JSON.parse(readFileSync(join(saved, 'receipt.json'), 'utf8')).kind).toBe('complex');
+    assertPackHasCommits(readFileSync(join(saved, 'objects.pack')), [side], 'merging');
+    const restored = restoreArchive(saved, join(root, 'merging-restored'));
+    expect(gitClean(restored, ['rev-parse', 'MERGE_HEAD']).trim()).toBe(side);
+    expect(gitClean(restored, ['status'])).toContain('All conflicts fixed but you are still merging');
+  });
+
+  it('干净成果包存好后又冒出没做完的操作，删除前拒绝', async () => {
+    const t = tree('acme_web/12-late-merge');
+    dirtyFile(t);
+    rmSync(join(t.dir, 'dirty.txt'));
+    writeFileSync(join(t.dir, 'work.txt'), 'work\n');
+    git(t.dir, 'add', 'work.txt');
+    git(t.dir, 'commit', '-q', '-m', 'unpushed');
+    const saved = await preserveWorktree(t, archive, gate());
+    expect(existsSync(join(saved as string, 'manifest.json'))).toBe(true);
+    writeFileSync(join(t.dir, '.git', 'MERGE_HEAD'), `${git(t.dir, 'rev-parse', 'HEAD~1')}\n`);
+    const place = await locateTree(t);
+    await expect(recheckPreservedArchive(t, saved as string, gate(), place, [])).rejects.toThrow(
+      /没做完的 git 操作/,
+    );
+    rmSync(join(t.dir, '.git', 'MERGE_HEAD'));
+    git(t.dir, 'update-ref', 'refs/fleet/incoming', 'HEAD');
+    writeFileSync(join(t.dir, '.git', 'CHERRY_PICK_HEAD'), `${git(t.dir, 'rev-parse', 'HEAD')}\n`);
+    await expect(preserveWorktree(t, archive)).rejects.toThrow(/没做完的 git 操作/);
+    expect(existsSync(join(t.dir, '.git', 'CHERRY_PICK_HEAD'))).toBe(true);
+  });
+
+  it('干净树和干净未推提交在删除点也现核进程：有人在树里或看不清就留树', async () => {
+    const t = tree('acme_web/12-clean-busy');
+    dirtyFile(t);
+    rmSync(join(t.dir, 'dirty.txt'));
+    const removed: string[] = [];
+    const remove = async () => {
+      removed.push(t.dir);
+      return { gone: false };
+    };
+    const child = spawn('sleep', ['30'], { cwd: t.dir, stdio: 'ignore' });
+    children.push(child);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await expect(
+      preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, remove),
+    ).rejects.toThrow(/有进程正用着这棵树/);
+    child.kill('SIGKILL');
+    const unreadable = procLook({
+      list: async () => ['1'],
+      cwd: async () => Promise.reject(deniedCwd),
+      uid: async () => String(process.getuid?.() ?? 0),
+    });
+    await expect(
+      preserveThenRemove(t, archive, { ...gate(), processLook: unreadable }, undefined, remove),
+    ).rejects.toThrow(/确认不了有没有进程/);
+    writeFileSync(join(t.dir, 'work.txt'), 'work\n');
+    git(t.dir, 'add', 'work.txt');
+    git(t.dir, 'commit', '-q', '-m', 'unpushed');
+    await expect(
+      preserveThenRemove(t, archive, { ...gate(), processLook: unreadable }, undefined, remove),
+    ).rejects.toThrow(/确认不了有没有进程/);
+    expect(removed).toEqual([]);
+    expect(readFileSync(join(t.dir, 'work.txt'), 'utf8')).toBe('work\n');
+    const done = await preserveThenRemove(t, archive, gate(), undefined, remove);
+    expect(removed).toEqual([t.dir]);
+    expect(existsSync(join(done.archivedTo as string, 'manifest.json'))).toBe(true);
+  });
+
+  it('变基做到一半：变基目录进快照名单，认不全就拒删，不静默漏掉', async () => {
+    const t = tree('acme_web/12-rebase');
+    dirtyFile(t);
+    rmSync(join(t.dir, 'dirty.txt'));
+    git(t.dir, 'checkout', '-q', '-b', 'side');
+    writeFileSync(join(t.dir, 'base.txt'), 'side\n');
+    git(t.dir, 'commit', '-qam', 'side');
+    git(t.dir, 'checkout', '-q', 'main');
+    writeFileSync(join(t.dir, 'base.txt'), 'main\n');
+    git(t.dir, 'commit', '-qam', 'main');
+    git(t.dir, 'checkout', '-q', 'side');
+    const rebased = runChild('git', ['rebase', 'main'], { cwd: t.dir, env: cleanEnv() });
+    expect(rebased.status).not.toBe(0);
+    expect(existsSync(join(t.dir, '.git', 'rebase-merge'))).toBe(true);
+    const removed: string[] = [];
+    await expect(
+      preserveThenRemove(t, archive, gate(), undefined, async () => {
+        removed.push(t.dir);
+        return { gone: false };
+      }),
+    ).rejects.toThrow(/不支持的序列状态 rebase-merge/);
+    expect(removed).toEqual([]);
+    expect(existsSync(join(t.dir, '.git', 'rebase-merge'))).toBe(true);
+  });
+
   it('intent-to-add 和索引标志按原始索引恢复，标志变了旧回执作废', async () => {
     const t = tree('acme_web/12-intent');
     dirtyFile(t);
