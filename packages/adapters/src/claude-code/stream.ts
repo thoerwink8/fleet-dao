@@ -7,7 +7,13 @@
 //   把主会话每条消息的用量加起来当已经花掉的（callUsage）：fixtures 里的真跑记录输入、缓存读、缓存写和终帧一个不差，输出却只是
 //   写到一半时的数（偏小很多），所以输出不取；
 // - 2.1.281 给 opus-5-5 的工具表里没有步骤清单工具（haiku 有 TaskCreate 一类），步骤只能靠 fleet plan 主动报。
-import type { ProgressEvent, ProgressKind } from '@fleet-dao/shared';
+import {
+  countCreatedContent,
+  countStructuredPatch,
+  type LineCounts,
+  type ProgressEvent,
+  type ProgressKind,
+} from '@fleet-dao/shared';
 import {
   cleanTestCommands,
   toolSummary as clipToolSummary,
@@ -397,9 +403,16 @@ export class ClaudeStreamReader {
           ...optional('description', name === 'Bash' ? str(input.description) : undefined),
           ...(subagent ? { subagent: true } : {}),
         } satisfies ToolPayload);
+        // 调用编号（并行调用结果倒序回来也能对上）、Bash 的说明、子代理标记都记在 meta（键的约定见 shared 的 transcript.ts）
+        const description = name === 'Bash' ? str(input.description) : undefined;
+        const meta = {
+          ...(id ? { callId: id } : {}),
+          ...(description ? { description: cut(description, 200) } : {}),
+          ...(subagent ? subMeta : {}),
+        };
         this.#tx(effect, 'tool_call', callText(name, input, this.#cwd), {
           tool: name,
-          ...(subagent ? { meta: subMeta } : {}),
+          ...(Object.keys(meta).length > 0 ? { meta } : {}),
         });
       }
     }
@@ -431,10 +444,17 @@ export class ClaudeStreamReader {
         ...optional('error', ok ? undefined : failureText(resultText(block.content))),
         ...(pending?.subagent ? { subagent: true } : {}),
       } satisfies ToolPayload);
+      // 改文件的结果带这一次改了几行：Edit / MultiEdit 读 CLI 附带的 structuredPatch，Write 新建的按内容行数；读不到不写
+      const lines = ok && EDIT_TOOLS.has(name) ? editLines(structured) : undefined;
+      const resultMeta = {
+        ...(id ? { callId: id } : {}),
+        ...(pending?.subagent ? this.#subagentMeta(pending.parent) : {}),
+        ...(lines ?? {}),
+      };
       this.#tx(effect, 'tool_result', resultText(block.content), {
         tool: name,
         ok,
-        ...(pending?.subagent ? { meta: this.#subagentMeta(pending.parent) } : {}),
+        ...(Object.keys(resultMeta).length > 0 ? { meta: resultMeta } : {}),
       });
       if (ok) {
         const paths: string[] = [];
@@ -569,6 +589,17 @@ export function versionAtLeast(version: string, min: string): boolean | undefine
     if (x !== y) return x > y;
   }
   return true;
+}
+
+/** CLI 附带的结构化结果里改了几行：有 structuredPatch 就数它；新建文件（块是空的）按 content 行数；都没有返回 undefined。 */
+function editLines(structured: Record<string, unknown> | undefined): LineCounts | undefined {
+  if (!structured) return undefined;
+  const patch = countStructuredPatch(structured.structuredPatch);
+  if (patch && (patch.added > 0 || patch.removed > 0)) return patch;
+  if (str(structured.type) === 'create' && typeof structured.content === 'string') {
+    return countCreatedContent(structured.content);
+  }
+  return patch;
 }
 
 /**

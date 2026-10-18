@@ -265,8 +265,14 @@ export class CursorStreamReader {
         summary,
         ...optional('description', key === 'shellToolCall' ? str(args.description) : undefined),
       } satisfies ToolPayload);
+      const description = key === 'shellToolCall' ? str(args.description) : undefined;
+      const callMeta = {
+        ...(id ? { callId: id } : {}),
+        ...(description ? { description: cut(description, 200) } : {}),
+      };
       this.#tx(effect, 'tool_call', toolSummary(key, args, this.#cwd, TRANSCRIPT_SUMMARY_MAX), {
         tool: name,
+        ...(Object.keys(callMeta).length > 0 ? { meta: callMeta } : {}),
       });
       return;
     }
@@ -286,7 +292,18 @@ export class CursorStreamReader {
       ok,
       ...optional('error', ok ? undefined : failureDetail(result, success)),
     } satisfies ToolPayload);
-    this.#tx(effect, 'tool_result', resultTextOf(result, success, ok), { tool: name, ok });
+    // 改文件的结果直接带 linesAdded / linesRemoved
+    const added = ok && kind?.edits ? num(success?.linesAdded) : undefined;
+    const removed = ok && kind?.edits ? num(success?.linesRemoved) : undefined;
+    const resultMeta = {
+      ...(id ? { callId: id } : {}),
+      ...(added !== undefined && removed !== undefined ? { added, removed } : {}),
+    };
+    this.#tx(effect, 'tool_result', resultTextOf(result, success, ok), {
+      tool: name,
+      ok,
+      ...(Object.keys(resultMeta).length > 0 ? { meta: resultMeta } : {}),
+    });
     if (ok && kind?.edits) {
       const path = str(success?.path) ?? str(args.path);
       if (path) {

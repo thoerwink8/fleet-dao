@@ -186,7 +186,9 @@ export class TranscriptRecorder {
         return;
       }
       const clean = sanitizeTranscriptText(kind, raw, this.#limits);
-      const meta = { ...extra.meta, ...clean.meta };
+      const meta: Record<string, unknown> = { ...extra.meta, ...clean.meta };
+      // meta 里唯一的自由文本是命令说明（Agent 自己写的一句话）：和正文一样先打码
+      if (typeof meta.description === 'string') meta.description = redactSecrets(meta.description).text;
       this.#pending.push({
         seq: this.#seq++,
         at,
