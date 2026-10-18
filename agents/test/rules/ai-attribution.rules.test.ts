@@ -2,12 +2,12 @@
 // 项目仓里 git commit 的说明（-m、heredoc、-F 文件）、gh pr / glab mr 的正文带 AI 署名就拦；git push 时要推的提交里带就拦；
 // 人名的 Co-Authored-By 放行；fleet-dao（靠 Haiku 署名统计）和标了私人仓的放行；git 跑不起来放行并说没查成。
 // 用真的临时 git 仓跑。命令里的 git 子命令拆开拼，免得本机护栏认错。
-import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
+import { runChildOk } from '../child.ts';
 
 interface Verdict {
   code: number;
@@ -48,7 +48,7 @@ afterAll(() => {
 });
 
 function git(dir: string, ...args: string[]) {
-  execFileSync('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { stdio: 'pipe' });
+  runChildOk('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args]);
 }
 
 /** 一个带一条已推提交的仓（远端是旁边的裸仓）；files 是仓根额外放的文件 */
@@ -57,7 +57,7 @@ function repo(files: Record<string, string> = {}): string {
   dirs.push(base);
   const remote = join(base, 'remote.git');
   const work = join(base, 'work');
-  execFileSync('git', ['init', '-q', '--bare', remote]);
+  runChildOk('git', ['init', '-q', '--bare', remote]);
   mkdirSync(work);
   git(work, 'init', '-q');
   for (const [rel, text] of Object.entries(files)) {
