@@ -79,6 +79,17 @@ beforeAll(async () => {
 }, 120_000);
 
 describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
+  it('旧夹具没有 CI 红带评审这一步：没有 ci-red-review-context，也没调度 readCiReviews', () => {
+    const marker = Buffer.from(JSON.stringify({ id: 'ci-red-review-context', deprecated: false })).toString(
+      'base64',
+    );
+    for (const file of files) {
+      const text = readFileSync(`${DIR}${file}`, 'utf8');
+      expect(text, file).not.toContain(marker);
+      expect(scheduledActivities(load(file).history), file).not.toContain('readCiReviews');
+    }
+  });
+
   it('夹具都在：做完、等人补交代、等创始人、等合并', () => {
     expect(REQUIRED.filter((name) => !files.includes(`${name}.json`))).toEqual([]);
   });

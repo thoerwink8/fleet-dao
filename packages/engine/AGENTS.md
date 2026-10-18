@@ -21,7 +21,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - 重启收孤儿（`real/orphan-reap.ts`）：脱开会话的真实临时 cwd 从原 `runs.worktree_path` 读，冷验收的目录名不等于 runId。交接或账读不到先报错，不把未知当空清掉；延迟回收前重读 detached 标记及 TTL，已经接回的不碰。
 
-- 正式评审先按原白名单选尚未解决的要求改，再翻全该 review 的行内原文，核仓/PR/review 与原审查者数字身份。总述与行内编辑都进消费键，新完整原文按code point安全分段、带引用尾界保住末空白，旧历史缺行内字段时保留原键和反馈。读不全明确未送达，合前已挂的 autoMerge 尝试撤掉，撤失败一并报明；三个合并入口及waitCi确认已合后共用review-audit补读留账，补读失败记未读，写账失败抛重试。
+- 正式评审先按原白名单选尚未解决的要求改，再翻全该 review 的行内原文，核仓/PR/review 与原审查者数字身份。总述与行内编辑都进消费键，新完整原文按code point安全分段、带引用尾界保住末空白，旧历史缺行内字段时保留原键和反馈。读不全明确未送达，合前已挂的 autoMerge 尝试撤掉，撤失败一并报明；三个合并入口及waitCi确认已合后共用review-audit补读留账，补读失败记未读，写账失败抛重试。CI 红返工入口走同一读取（readCiReviews，patched('ci-red-review-context')），和失败证据一起交下一轮；读失败不当成没有评审。
 
 - 合并对账撤风险只认真实 `github.merge_pr`：账的 action/target、完整回执与 GitHub 当前 PR/head/合并提交/实际引擎合并人都须一致；`github.merge_pr_backfill` 留原来源，后续轮次也不能当队列证据。读账失败保留提醒并报没查成。
 - 已合并观察补账经 `bookMergedPull` 固定传 `mergePr.onlyBook`：writer 在实际重读后、写账前核 PR 编号、已合并、头、完整合并提交和合并人；未合或回执读不全明确失败，不能退到主动合并。主动合并入口不传此约束。
