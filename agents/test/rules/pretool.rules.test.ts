@@ -41,6 +41,8 @@ interface CapacityLib {
     cores?: number;
     runCim?: () => { status: number | null; stdout: string; stderr: string; error?: Error };
     readText?: (path: string) => string;
+    runVmStat?: () => { status: number | null; stdout: string; stderr: string; error?: Error };
+    loadavg?: () => number[];
   }): CapReading;
   judgeCapacity(r: CapReading): { enough: boolean | null; text: string };
 }
@@ -532,7 +534,7 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
     }
   });
 
-  it('读数：Windows 读 CIM（空闲内存 KB、CPU 忙的百分比折成负载），Linux 读 /proc；读不到、认不出、别的平台都是没查成', () => {
+  it('读数：Windows 读 CIM（空闲内存 KB、CPU 忙的百分比折成负载），Linux 读 /proc，macOS 读 vm_stat；读不到、认不出、别的平台都是没查成', () => {
     const win = capacity.readCapacity({
       platform: 'win32',
       cores: 16,
@@ -548,6 +550,22 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
     });
     expect(linux).toMatchObject({ ok: true, freeBytes: 2 * GB, load1: 3.5 });
     expect(capacity.judgeCapacity(linux).text).toContain('空闲内存不够、负载太高');
+    const VM_STAT =
+      'Mach Virtual Memory Statistics: (page size of 16384 bytes)\n' +
+      'Pages free:                                65536.\n' +
+      'Pages active:                            999999.\n' +
+      'Pages inactive:                          262144.\n' +
+      'Pages speculative:                        65536.\n' +
+      'Pages wired down:                        999999.\n' +
+      'Pages purgeable:                          65536.\n';
+    const mac = capacity.readCapacity({
+      platform: 'darwin',
+      cores: 8,
+      runVmStat: () => ({ status: 0, stdout: VM_STAT, stderr: '' }),
+      loadavg: () => [2.5, 1, 1],
+    });
+    expect(mac).toMatchObject({ ok: true, freeBytes: 7 * GB, load1: 2.5, cores: 8 });
+    expect(capacity.judgeCapacity(mac).enough).toBe(true);
     for (const r of [
       capacity.readCapacity({
         platform: 'win32',
@@ -571,7 +589,19 @@ describe('派写码工人前判本机容量：不够、没查成都拦，附读�
           throw new Error('EACCES');
         },
       }),
-      capacity.readCapacity({ platform: 'darwin', cores: 8 }),
+      capacity.readCapacity({
+        platform: 'darwin',
+        cores: 8,
+        runVmStat: () => ({ status: 0, stdout: VM_STAT.replace(/^Pages inactive.*$/m, ''), stderr: '' }),
+        loadavg: () => [1, 1, 1],
+      }),
+      capacity.readCapacity({
+        platform: 'darwin',
+        cores: 8,
+        runVmStat: () => ({ status: null, stdout: '', stderr: '', error: new Error('ENOENT') }),
+        loadavg: () => [1, 1, 1],
+      }),
+      capacity.readCapacity({ platform: 'freebsd', cores: 8 }),
     ]) {
       expect(r.ok).toBe(false);
       expect(capacity.judgeCapacity(r).enough).toBeNull();
