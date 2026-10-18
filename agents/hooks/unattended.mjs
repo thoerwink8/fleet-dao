@@ -22,13 +22,14 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { isMainModule } from './is-main.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 /**
  * 一个会话的无人值守状态（~/.fleet-dao/unattended/<会话号>.json）：readState 认过 state、expiresAt、totalBlocks 才当它是状态。
- * streak：连续无实质进展的次数；streakReleases：到上限暂停过几次（兼容旧字段名）。idle、toolSinceBlock 不再读。
+ * streak：开启或实质进展重置后的接续次数，首次接续也计 1，并非精确的无进展轮数；
+ * streakReleases：到上限暂停过几次（兼容旧字段名）。idle、toolSinceBlock 不再读。
  * @typedef {{ state: 'on' | 'paused' | 'done', expiresAt: string, totalBlocks: number, streak?: number, streakReleases?: number, lastStreakReleaseAt?: string, idle?: number, toolSinceBlock?: boolean, auto?: boolean, since?: string, note?: string, lastBlockAt?: string, consumedProgress?: number, deliveredResults?: string[] }} State
  */
 /**
@@ -263,7 +264,14 @@ export function explicitlyOff(dir, id) {
 }
 
 /** @param {string} iso */
-const fmt = (iso) => new Date(iso).toISOString().replace('T', ' ').slice(0, 16);
+const fmt = (iso) => {
+  const date = new Date(iso);
+  const pad = (/** @type {number} */ value) => String(value).padStart(2, '0');
+  // 日期和偏移都取截止时刻的本地时区，跨日和夏令时也不能把 UTC 冒充本地时间。
+  const offset = -date.getTimezoneOffset();
+  const zone = `${offset >= 0 ? '+' : '-'}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())} UTC${zone}`;
+};
 
 /**
  * 机器自己起的会话的第一条提示：反方（「你是「反方」」，discuss 技能起的）。
@@ -309,14 +317,14 @@ export function sessionLines({ dir, sessionId, now = Date.now() }) {
  * 续轮提示：继续尚未完成的工作、显式等待并消费结果，以及正常结束与故障暂停的边界。
  * @param {State} state
  * @param {number} now
- * @param {number} [streak] 这是连着第几次挡
+ * @param {number} [streak] 开启或实质进展重置后的接续序号
  */
 export function blockReason(state, now, streak = 1) {
   const left = Math.max(0, Math.round((Date.parse(state.expiresAt) - now) / 60_000));
   const watching =
     '接着做尚未完成的工作。后台任务存在不等于已经送达完成通知；用当前 CLI 的阻塞等待工具收结果（Claude TaskOutput、Codex wait_agent/等待后台命令），不要 sleep 或循环查状态。结果回来后实际消费、验收、再接下一件。需要派工就用本 CLI 支持的子代理；不支持等待或唤醒时明确报接续故障，不能声称持续运行。子代理都收口、队列空了才跑 done 收尾。';
   return (
-    `无人值守开着（还剩约 ${left} 分钟，连续无实质进展第 ${streak} 次，到 ${MAX_STREAK} 次后故障暂停）：不要空着结束这一轮。${watching}` +
+    `无人值守开着（还剩约 ${left} 分钟，重置后第 ${streak} 次接续；连续 ${MAX_STREAK} 轮无实质进展会故障暂停）：不要空着结束这一轮。${watching}` +
     `每次子代理有进展（PR 开了、做完、卡住）就 pnpm progress note 记一句、给创始人一行汇报，再接着盯；没有新结果就不写话、别空转、别重复上一句。` +
     `全做完（工人都收口、队列空了）：node ${SCRIPT} done "做完了什么"；碰到要创始人拍的（掏新钱、删了找不回又没备份的）：` +
     `node ${SCRIPT} needs-you "要他拍什么"，再把问题放在最后一条；创始人说停：node ${SCRIPT} off。`
@@ -525,14 +533,7 @@ export function main(argv, io) {
   }
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   process.exit(
     main(process.argv.slice(2), {
       out: (/** @type {string} */ s) => process.stdout.write(`${s}\n`),

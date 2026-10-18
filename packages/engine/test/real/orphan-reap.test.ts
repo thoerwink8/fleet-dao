@@ -234,6 +234,120 @@ describe('脱开引擎跑、等人接回的动手会话（#2238）', () => {
   const open = (id: string) =>
     startRun(t.db, { id, segment: 'manual', model: 'grok-4.7', routeId: 'carpool', startedAt: NOW });
 
+  it('冷验收的独立 verify 目录在重启清扫后仍留给同一次会话接回', async () => {
+    const { reap, trees, ioRoot } = handoffSetup();
+    const runId = randomUUID();
+    const cwd = tmpOf(trees, `verify-${randomUUID()}`);
+    await startRun(t.db, {
+      id: runId,
+      segment: 'verify',
+      model: 'gpt-model',
+      startedAt: NOW,
+      worktreePath: cwd,
+    });
+    ioCell(ioRoot, runId, NOW);
+    mkdirSync(cwd, { recursive: true });
+    writeFileSync(join(cwd, 'checkout'), 'PR head');
+    expect(await reap()).toBe(0);
+    expect(existsSync(join(cwd, 'checkout'))).toBe(true);
+    expect(await getRun(t.db, runId)).toMatchObject({ endedAt: null, worktreePath: cwd });
+  });
+
+  it.each(['cli', 'mirasim'])('独立验收目录只在 %s 会话过 TTL 且尚未接回时回收', async (host) => {
+    const { reap, trees, ioRoot, delayed, setNow } = handoffSetup();
+    const runId = randomUUID();
+    const cwd = tmpOf(trees, `verify-${randomUUID()}`);
+    await startRun(t.db, { id: runId, segment: 'verify', model: 'test', startedAt: NOW, worktreePath: cwd });
+    if (host === 'mirasim') mirasimCell(ioRoot, runId, NOW);
+    else ioCell(ioRoot, runId, NOW);
+    mkdirSync(cwd, { recursive: true });
+    await reap();
+    expect(existsSync(cwd)).toBe(true);
+    setNow(new Date(NOW.getTime() + HANDOFF_TTL_MS));
+    for (const timer of delayed) timer.fn();
+    await vi.waitFor(async () => expect((await getRun(t.db, runId))?.outcome).toBe('killed'));
+    expect(existsSync(cwd)).toBe(false);
+  });
+
+  it('验收已经接回时旧清扫器不删真实 cwd；重新放手的标记不能被旧计时器提前收', async () => {
+    const { reap, trees, ioRoot, delayed, setNow } = handoffSetup();
+    const claimed = randomUUID();
+    const detachedAgain = randomUUID();
+    const dirs = new Map<string, string>();
+    for (const id of [claimed, detachedAgain]) {
+      const cwd = tmpOf(trees, `verify-${randomUUID()}`);
+      dirs.set(id, cwd);
+      await startRun(t.db, { id, segment: 'verify', model: 'test', startedAt: NOW, worktreePath: cwd });
+      ioCell(ioRoot, id, NOW);
+      mkdirSync(cwd, { recursive: true });
+    }
+    await reap();
+    rmSync(join(ioRoot, claimed, DETACHED_MARK));
+    writeFileSync(
+      join(ioRoot, detachedAgain, DETACHED_MARK),
+      new Date(NOW.getTime() + HANDOFF_TTL_MS - 1).toISOString(),
+    );
+    setNow(new Date(NOW.getTime() + HANDOFF_TTL_MS));
+    for (const timer of [...delayed]) timer.fn();
+    await vi.waitFor(() => expect(delayed).toHaveLength(2));
+    for (const cwd of dirs.values()) expect(existsSync(cwd)).toBe(true);
+    expect((await getRun(t.db, detachedAgain))?.endedAt).toBeNull();
+    setNow(new Date(NOW.getTime() + 2 * HANDOFF_TTL_MS));
+    delayed[1]?.fn();
+    await vi.waitFor(async () => expect((await getRun(t.db, detachedAgain))?.outcome).toBe('killed'));
+    expect(existsSync(dirs.get(claimed) ?? '')).toBe(true);
+    expect(existsSync(dirs.get(detachedAgain) ?? '')).toBe(false);
+  });
+
+  it.each(['missing-run', 'missing-cwd', 'outside-root', 'bad-marker', 'bad-handle'])(
+    '交接证据 %s 不明时先失败，不收 scope 或目录',
+    async (problem) => {
+      const { reap, trees, ioRoot, scope } = handoffSetup();
+      const id = randomUUID();
+      const cwd =
+        problem === 'outside-root' ? join(root, 'user-files') : tmpOf(trees, `verify-${randomUUID()}`);
+      mkdirSync(cwd, { recursive: true });
+      if (problem !== 'missing-run')
+        await startRun(t.db, {
+          id,
+          segment: 'verify',
+          model: 'test',
+          startedAt: NOW,
+          ...(problem === 'missing-cwd' ? {} : { worktreePath: cwd }),
+        });
+      const io = ioCell(ioRoot, id, NOW);
+      if (problem === 'bad-marker') {
+        rmSync(join(io, DETACHED_MARK));
+        mkdirSync(join(io, DETACHED_MARK));
+      }
+      if (problem === 'bad-handle') writeFileSync(join(io, 'mirasim.json'), '{broken');
+      process.env.FAKE_SCOPE_LIST = `${id} active\n`;
+      await expect(reap()).rejects.toThrow();
+      expect(scope.calls().filter((c) => c.action === 'stop')).toEqual([]);
+      expect(existsSync(cwd)).toBe(true);
+    },
+  );
+
+  it('终态验收的残留标记不使独立 cwd 永久保留', async () => {
+    const { reap, trees, ioRoot } = handoffSetup();
+    const id = randomUUID();
+    const cwd = tmpOf(trees, `verify-${randomUUID()}`);
+    await startRun(t.db, {
+      id,
+      segment: 'verify',
+      model: 'test',
+      startedAt: NOW,
+      endedAt: NOW,
+      outcome: 'done',
+      worktreePath: cwd,
+    });
+    ioCell(ioRoot, id, NOW);
+    mkdirSync(cwd, { recursive: true });
+    await reap();
+    expect(existsSync(cwd)).toBe(false);
+    expect((await getRun(t.db, id))?.outcome).toBe('done');
+  });
+
   it('上一个引擎刚放手的：scope 不收、临时目录不删、runs 那一行不收、收发目录留着；同一轮别的照孤儿收', async () => {
     const { reap, trees, scope, ioRoot, delayed } = handoffSetup();
     const kept = randomUUID();

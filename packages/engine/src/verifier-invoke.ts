@@ -88,6 +88,8 @@ export const VerifierInvokeInputSchema = z
     otherAuthorFamilies: z.array(z.string().min(1)).optional(),
     /** 这是第几轮：默认 1 轮、最多 2 轮（specs/555 第 3 条）；本模块不判上限，只透传。 */
     round: z.union([z.literal(1), z.literal(2)]),
+    /** 这一笔验收属于第几个回合（task_rounds.seq，#3140，只记账：runs.round_seq）；不在任务工作流里验的、老历史不给。 */
+    roundSeq: z.number().int().positive().optional(),
     /**
      * 第 2 轮复核（工作流在 patched('verify-recheck') 下才给）：上一轮没过的验收条编号（从 1 起，对得上
      * howToFinish），和上轮问题原话。有它时，喂进来的 diff 是这一轮的增量，判法只复核这些条和增量里的改动。
@@ -885,6 +887,8 @@ export interface VerifierAttachInput {
   taskId: string;
   issueNumber: number;
   workflowId?: string;
+  /** 这一笔验收属于第几个回合（#3140，只记账）。 */
+  roundSeq?: number;
   prNumber: number;
   branch: string;
 }
@@ -920,6 +924,7 @@ export async function attachVerifier(
         taskId: input.taskId,
         issueNumber: input.issueNumber,
         ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
+        ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
         prNumber: input.prNumber,
         branch: input.branch,
         prompt: '',
@@ -1114,6 +1119,7 @@ export async function invokeVerifier(
         taskId: parsed.taskId,
         issueNumber: parsed.issueNumber,
         ...(parsed.workflowId !== undefined ? { workflowId: parsed.workflowId } : {}),
+        ...(parsed.roundSeq !== undefined ? { roundSeq: parsed.roundSeq } : {}),
         prNumber: parsed.prNumber,
         branch: parsed.branch,
         prompt,

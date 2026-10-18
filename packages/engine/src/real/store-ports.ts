@@ -1093,6 +1093,8 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
         firstModel: input.firstModel ?? null,
         addedLines: input.addedLines ?? null,
         flowMode: input.flowMode ?? null,
+        startedAt: input.startedAt ? new Date(input.startedAt) : null,
+        reworkSummary: input.reworkSummary ?? null,
       });
     },
 

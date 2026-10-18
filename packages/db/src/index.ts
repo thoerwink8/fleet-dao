@@ -36,6 +36,7 @@ export * from './queries/model-track.ts';
 export * from './queries/pipeline-health.ts';
 export * from './queries/pool-holds.ts';
 export * from './queries/pool-runs.ts';
+export * from './queries/pr-head-files.ts';
 export * from './queries/probe.ts';
 export * from './queries/quota.ts';
 export * from './queries/reconcile.ts';

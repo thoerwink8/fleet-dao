@@ -16,6 +16,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
 import {
   type EnginePorts,
+  type HeadFileStat,
   type PortContext,
   PortError,
   type PrBody,
@@ -51,6 +52,7 @@ import {
   isAncestor,
   isMergeChainOnto,
   mergeInto,
+  numstatAgainst,
   pinIncoming,
   pinMainline,
   type UserTree,
@@ -107,6 +109,16 @@ export interface GitHubPortsDeps extends ReviewAuditDeps {
   shBin?: string;
   /** 等 CI 看到已合并、核实或记合并回执没成时写的日志；不给就打到控制台。 */
   log?: MergeLog;
+  /**
+   * 把一个头改了哪些文件记进库（pr_head_files，#3140）。写不进、没给都不挡推分支和开 PR：只记日志，页面写「没读到」。
+   * 一个头一次写全，同键冲突跳过（活动重试不重复）。
+   */
+  recordHeadFiles?: (input: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    files: readonly HeadFileStat[];
+  }) => Promise<void>;
 }
 
 /** 远小于心跳超时（limits.heartbeatSeconds 默认 120 秒）：漏一两次也不判工人丢了。 */
@@ -398,6 +410,43 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
   const log: MergeLog = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
   const auditLateReview = createReviewAudit(deps, log);
 
+  /** 数一个头相对主线每个文件各增删几行；没数成只写日志、回 undefined（不挡推分支）。超过上限只留前面的并写日志。 */
+  const numstatOf = async (
+    t: UserTree,
+    mainline: string,
+    head: string,
+  ): Promise<HeadFileStat[] | undefined> => {
+    try {
+      const { files, total } = await numstatAgainst(t, mainline, head);
+      if (total > files.length) {
+        log('这个头改的文件太多，只记前面的（pr_head_files 的上限）', { head, total, kept: files.length });
+      }
+      return files;
+    } catch (error) {
+      log('每个文件各增删几行没数成（照旧推，页面写没读到）', { head, error: errMessage(error) });
+      return undefined;
+    }
+  };
+
+  /** 把一个头的文件清单记进库：没接库、没文件、写不进都只写日志，不挡流程。 */
+  const noteHeadFiles = async (
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+    files: readonly HeadFileStat[],
+  ): Promise<void> => {
+    if (deps.recordHeadFiles === undefined || files.length === 0) return;
+    try {
+      await deps.recordHeadFiles({ repoId, prNumber, headSha, files });
+    } catch (error) {
+      log('这个头改了哪些文件没记进库（pr_head_files），页面写没读到', {
+        prNumber,
+        headSha,
+        error: errMessage(error),
+      });
+    }
+  };
+
   const treeAs = (dir: string, user: SessionUser, prefix: string, ctx: PortContext): UserTree => ({
     exec: deps.exec,
     user,
@@ -564,15 +613,21 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       // 推上去的头相对主线的净改动和新增行数（#2762）。新增行只是给流程健康记账的：没数成不挡推，不带这一项
       const delivered = async (mainline: string, pushedHead: string) => {
         const changedFiles = await changedFilesAgainst(t, mainline, pushedHead);
+        // 每个文件各增删几行（#3140）：任务页的改动卡读它。数不成不挡推，不带这一项（页面写「没读到」）
+        const numstat = await numstatOf(t, mainline, pushedHead);
+        if (input.prNumber !== undefined && numstat !== undefined) {
+          await noteHeadFiles(input.repo.id, input.prNumber, pushedHead, numstat);
+        }
         try {
           return {
             head: pushedHead,
             changedFiles,
             addedLines: await addedLinesAgainst(t, mainline, pushedHead),
+            ...(numstat === undefined ? {} : { numstat }),
           };
         } catch (error) {
           if (ctx.signal.aborted) throw error;
-          return { head: pushedHead, changedFiles };
+          return { head: pushedHead, changedFiles, ...(numstat === undefined ? {} : { numstat }) };
         }
       };
       let head = await headOf(t);
@@ -811,6 +866,9 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           ctx,
         ),
       );
+      // 推这个头时数出来的文件清单，PR 开成了才有号可记（#3140）
+      if (input.numstat !== undefined)
+        await noteHeadFiles(input.repo.id, r.number, input.head, input.numstat);
       return { prNumber: r.number, url: r.url };
     },
 

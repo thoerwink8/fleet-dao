@@ -71,7 +71,22 @@ systemctl is-active fleet-temporal.service; echo exit:$?
 
 10:38 干净关机。系统内无人下命令、无崩溃和内存耗尽，疑似宿主机侧。关机 1 小时 01 分，11:40 重新开机。控制台显示 Running 不可信。这是第一次真实重启。
 
-留证：`last -x | head` 里 `shutdown` 紧挨着下一次 `reboot` 就是客机干净关过；`/var/crash` 空着就不是内核 panic。谁下的关机：`journalctl -b -1 -u systemd-logind`（会话用户读不到）。
+留证：`last -x | head` 里的 `shutdown` 和下一次 `reboot` 用来核对关机、开机时间，再结合 `journalctl -b -1 -u systemd-logind` 确认是否走了干净关机流程（会话用户读不到）；干净关机不等于已查明触发者。`/var/crash` 空只说明该路径没读到转储，不足以排除内核 panic。还要结合前一启动的内核日志（`journalctl -b -1 -k`）、已配置的 kdump/pstore 记录和供应商事件；未配置采集、读不到或没有持久日志时，明确记为未知。[Linux Kdump](https://docs.kernel.org/admin-guide/kdump/kdump.html) 的转储依赖预留内存、加载捕获内核和成功写出，[Ramoops](https://docs.kernel.org/admin-guide/ramoops.html) 的持久记录也依赖相应配置与存储；这里仅核查已有证据，不安装或开启采集器。
+
+## 2026-10-19 事故（#3134，恢复核验未收口）
+
+以下时间均为北京时间（UTC+8），记录截至 02:20 的只读证据。
+
+- 01:25 起香港探针报告法国失联。01:28–01:29，香港 SSH、静态健康页和 WireGuard 服务正常，但至法国公网 22/443、隧道 22/8787 同时超时，握手由 352 秒前增至 401 秒前，香港转发的 `/healthz` 返回 HTTP 504。网络证据只能定位到法国整机或宿主网络，不能独自判定关机原因。
+- 恢复后读取上一启动的 `systemd-logind`：01:24:36 记录 `Power key pressed short.`、`Powering off...`；01:25:28 到达 `poweroff.target`，同步文件系统并结束日志。`last -x` 记录 01:25 关机、01:48 再启动，停机约 23 分钟；新启动日志始于 01:48:29。这证明客机响应电源键事件走了干净关机流程，不能据此认定是谁触发。
+- 前一启动确有 10 月 17 日会话 cgroup 内的 OOM 记录；它们早于本次关机，不能当成本次整机关机根因。供应商公开维护说明也不是本实例的事件证明。尚未取得 Contabo 控制台操作审计，电源事件和再次开机的触发者均未知。
+- 02:17–02:20 的只读快照已能经既有 SSH 读取法国；`fleet-api`、`fleet-engine`、`fleet-temporal`、`fleet-auto-release.timer` 均为 `active`，数据库只读查询成功。在用版本仍为 `7b2897e8bb67`。`fleet-mirasim-session.service` 为 `inactive`、`ConditionResult=no`，不能把所有服务统称为正常，也没有为凑绿启动它。
+- 香港独立复核：02:17:28 的公开链路记录为 `down=false`、连续失败 0 次；02:17:39 的直接探测握手 86 秒前、公网 22/443 和隧道 22 均退出码 0，隧道 `/healthz` HTTP 200、耗时 0.584 秒。02:18:44 的具名检查中 `wg-quick@wg-fleet`、`postgresql@16-main`、API 及 socket、engine、Temporal、firewall 均为 `active`。这证实网络和核心服务恢复，不代表全部任务已完成验收。
+- 本次记录不把恢复归功于本机会话：排查没有在法国启动服务、发版、改开关或改网络配置。仅有现存恢复证据，不能声称人工重启解决了根因。
+
+本机脱敏留证：`_tmp/followup-france-outage-20261019.md`、`_tmp/followup-france-recovery-20261019-0218-redacted.txt`、`_tmp/followup-france-0220-services-redacted.txt`；这些是现场资料，不作为公开仓附件。服务和数据库命名核验来自同次只读巡检快照，正文不公开实例公网 IP、凭据或原始日志。
+
+#3134 保留开放：还须补控制台实例核对和操作审计（拿不到就明确记录），核对被打断工作流从原持久状态自然接续，以及受影响 PR 精确当前头的策略桥和外部合并闸。服务进程 `active` 不等于任务接续完成，策略桥可读也不等于冷验收已通过；这些结果不得用重派任务、放宽判据或重复报成功代替。
 
 ## 回来后看被打断的任务
 
