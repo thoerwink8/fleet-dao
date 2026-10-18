@@ -106,6 +106,7 @@ import {
   UpdateSettingResponse,
 } from './settings.ts';
 import {
+  RunStepsResponse,
   RunTranscriptQuery,
   RunTranscriptResponse,
   TaskActionRequest,
@@ -227,6 +228,12 @@ export const WebRoutes = {
     path: '/tasks/:taskId/runs/:runId/transcript',
     query: RunTranscriptQuery,
     response: RunTranscriptResponse,
+  },
+  /** 一笔会话切好的步骤和小计（#3140）：由 run_transcript 的轻量行现算，不建步骤表。只认登录 Cookie。 */
+  runProcess: {
+    method: 'GET',
+    path: '/tasks/:taskId/runs/:runId/steps',
+    response: RunStepsResponse,
   },
   taskAction: {
     method: 'POST',

@@ -71,6 +71,7 @@ const FULL: Draft[] = [
     tool: 'Edit',
     ok: true,
     text: 'The file scripts/stamp.ts has been updated.',
+    meta: { added: 6, removed: 2 },
   },
   { min: 3, kind: 'tool_call', tool: 'Bash', text: 'node scripts/stamp.ts && git diff --stat' },
   {
@@ -97,6 +98,16 @@ const FULL: Draft[] = [
     tool: 'Edit',
     ok: true,
     text: 'The file scripts/stamp.test.ts has been updated.',
+    meta: { added: 1, removed: 1 },
+  },
+  { min: 6, kind: 'tool_call', tool: 'Write', text: 'scripts/stamp.fixtures.ts' },
+  {
+    min: 6.1,
+    kind: 'tool_result',
+    tool: 'Write',
+    ok: true,
+    text: 'File created successfully at: scripts/stamp.fixtures.ts',
+    meta: { added: 24, removed: 0 },
   },
   {
     min: 6.5,
@@ -156,6 +167,7 @@ const RUNNING: Draft[] = [
     tool: 'Edit',
     ok: true,
     text: 'The file config/canary.json has been updated.',
+    meta: { added: 1, removed: 1 },
   },
   { min: -35, kind: 'assistant', text: '配置改好了，跑 canary 的测试。' },
   { min: -34, kind: 'tool_call', tool: 'Bash', text: 'pnpm test canary' },
@@ -175,8 +187,32 @@ const RUNNING: Draft[] = [
   },
 ];
 
-function materialize(drafts: readonly Draft[], at: (min: number) => string): TranscriptEntry[] {
-  return drafts.map(({ min, ...entry }, seq) => ({ seq, at: at(min), ...entry }));
+/**
+ * 草稿 → 条目，并照适配器的样子补调用号（#3140）：每个调用一个编号，结果按「同工具、同一层」先进先出对上同一个编号；
+ * 子代理里的条目的 meta.subagent 写成派它的那次 Agent / Task 调用的编号（真实流里就是这样，不是 true）。
+ */
+function materialize(drafts: readonly Draft[], at: (min: number) => string, key: string): TranscriptEntry[] {
+  const open = new Map<string, string[]>();
+  let n = 0;
+  let agentCall: string | undefined;
+  return drafts.map(({ min, ...entry }, seq) => {
+    const sub = entry.meta?.subagent !== undefined;
+    const slot = `${entry.tool ?? ''}|${sub ? 1 : 0}`;
+    let callId: string | undefined;
+    if (entry.kind === 'tool_call') {
+      callId = `toolu_${key}_${++n}`;
+      open.set(slot, [...(open.get(slot) ?? []), callId]);
+      if (!sub && (entry.tool === 'Task' || entry.tool === 'Agent')) agentCall = callId;
+    } else if (entry.kind === 'tool_result') {
+      callId = open.get(slot)?.shift();
+    }
+    const meta = {
+      ...entry.meta,
+      ...(sub && agentCall !== undefined ? { subagent: agentCall } : {}),
+      ...(callId !== undefined ? { callId } : {}),
+    };
+    return { seq, at: at(min), ...entry, ...(Object.keys(meta).length > 0 ? { meta } : {}) };
+  });
 }
 
 export interface MockTranscripts {
@@ -191,9 +227,9 @@ export function transcriptSeed(at: (min: number) => string): MockTranscripts {
   const base = (startMin: number) => (min: number) => at(startMin + min);
   return {
     byRun: new Map([
-      ['seg-c9-3', materialize(FULL, base(-142))],
-      ['seg-c9-2', materialize(TIMED_OUT, base(-174))],
-      ['seg-t-12-manual-40', materialize(RUNNING, (min) => at(min))],
+      ['seg-c9-3', materialize(FULL, base(-142), 'c93')],
+      ['seg-c9-2', materialize(TIMED_OUT, base(-174), 'c92')],
+      ['seg-t-12-manual-40', materialize(RUNNING, (min) => at(min), 't12')],
     ]),
     live: new Set(['seg-t-12-manual-40']),
   };

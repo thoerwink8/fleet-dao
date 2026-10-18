@@ -82,6 +82,7 @@ import type {
   Routing,
   RoutingEfforts,
   RoutingLayers,
+  RunSteps,
   RunTranscript,
   RunTranscriptQuery,
   SendRequestMessageBody,
@@ -208,6 +209,10 @@ export interface FleetApi {
    * 读不到（库不通、没接上）抛 ApiError（503），这一段跑在记录之前是 noRecord:true，两者分开。
    */
   runTranscript(taskId: string, runId: string, query?: RunTranscriptQuery): Promise<RunTranscript>;
+  /**
+   * 一笔会话切好的步骤和小计（#3140）：由后端从这一笔的轻量行现算；这一笔跑在记录之前是 noRecord，读不到抛 ApiError（503）。
+   */
+  runProcess(taskId: string, runId: string): Promise<RunSteps>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   /** 给这张单的一段（动手、验收）指定模型或清掉（引擎下一次给这一段选路就照它）。 */
   updateTaskRoutePin(taskId: string, body: UpdateTaskRoutePinBody): Promise<TaskRoutePin>;

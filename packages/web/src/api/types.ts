@@ -93,6 +93,7 @@ import type {
   RoutingLayerRouteSchema,
   RoutingLayersResponse,
   RoutingResponse,
+  RunStepsResponse,
   RunTranscriptResponse,
   SendRequestMessageRequest,
   SetChannelEnabledRequest,
@@ -180,6 +181,12 @@ export type TaskListFilter = Pick<z.input<typeof TaskListQuery>, 'status' | 'rep
 export type RunTranscript = z.infer<typeof RunTranscriptResponse>;
 export type TranscriptEntry = RunTranscript['entries'][number];
 export type RunTranscriptQuery = { after?: number | undefined; limit?: number | undefined };
+/** 一笔会话切好的步骤和小计（#3140）。 */
+export type RunSteps = z.infer<typeof RunStepsResponse>;
+export type RunProcess = Extract<RunSteps, { state: 'ok' }>['process'];
+export type ProcessStep = RunProcess['steps'][number];
+export type TaskOverview = NonNullable<TaskDetail['overview']>;
+export type TaskPr = TaskOverview['prs'][number];
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 
 export type Routing = z.infer<typeof RoutingResponse>;
