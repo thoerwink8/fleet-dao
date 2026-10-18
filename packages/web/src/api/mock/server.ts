@@ -23,6 +23,7 @@ import {
   type CiPolicy,
   CliToolsResponseSchema,
   CredentialsResponse,
+  cutSteps,
   DEFAULT_SESSION_EFFORT,
   type DecisionAction,
   describeEngineMaster,
@@ -71,6 +72,7 @@ import {
   poolHoldsView,
   poolPressureWindow,
   probeHistoryStrips,
+  processRowOf,
   REPO_IMPORT_ADD,
   REPO_IMPORT_REMOVE,
   type RealtimeTable,
@@ -96,6 +98,7 @@ import {
   RoutingLayersResponse,
   RoutingResponse,
   type RunOutcome,
+  RunStepsResponse,
   RunTranscriptResponse,
   readDecisionAction,
   readSegmentRun,
@@ -142,6 +145,7 @@ import type { z } from 'zod';
 import { ApiError, type FleetApi } from '../client';
 import type { AuditEntry, LiveEvent, Notification, Worktrees } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
+import { mockOverview, mockOverviewMode } from './overview';
 import { createMockRequests, MOCK_PARTNER, type MockRequestsOptions, mockRequestsAs } from './requests';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 import { LIVE_FIRST_REVEAL, LIVE_REVEAL_STEP, transcriptSeed } from './transcripts';
@@ -2858,6 +2862,24 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           { taskFinished: finished },
         ),
       );
+      // 概览（#3140）：命令计数、步骤用 shared 的 cutSteps 现算，和真后端同一个算法；网址 ?mockOverview=old|unread 演示没读到
+      const overview = mockOverview({
+        mode: mockOverviewMode(globalThis.location?.search ?? ''),
+        taskId,
+        runs: segmentRuns,
+        taskState: tv.task.state,
+        entriesOf: (runId) => {
+          const all = transcripts.byRun.get(runId);
+          if (!all) return undefined;
+          return transcripts.live.has(runId)
+            ? all.slice(0, Math.min(all.length, revealed.get(runId) ?? LIVE_FIRST_REVEAL))
+            : all;
+        },
+        subtaskPrs: tv.subtasks
+          .map(subtaskView)
+          .flatMap((s) => (s.prNumber === undefined ? [] : [s.prNumber])),
+        at: (min) => new Date(now() + min * 60_000).toISOString(),
+      });
       return TaskDetailResponse.parse({
         task: tv.task,
         repo: repoView(tv.task.repoId),
@@ -2866,6 +2888,7 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         routePins: { pins: tv.routePins ?? [] },
         // 和真后端同一个算法（shared 的 usage.ts）：只算三段的流水
         usage: summarizeUsage(segmentRuns),
+        ...(overview === undefined ? {} : { overview }),
       });
     },
     async runTranscript(taskId, runId, query) {
@@ -2891,6 +2914,28 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
         nextAfter: entries.at(-1)?.seq ?? after ?? null,
         done: ended && rest.length <= limit,
         noRecord: ended && all.length === 0,
+      });
+    },
+    async runProcess(taskId, runId) {
+      await wait();
+      const tv = findTask(taskId);
+      const seg = (tv.segmentRuns ?? []).find((r) => r.id === runId);
+      if (!seg) throw new ApiError(404, 'run_not_found', '这张单下没有这一段');
+      if (mockTranscriptFail.has(runId)) {
+        throw new ApiError(503, 'run_steps_unreadable', '没读成：connection terminated');
+      }
+      const all = transcripts.byRun.get(runId) ?? [];
+      const live = transcripts.live.has(runId);
+      const shown = live ? Math.min(all.length, revealed.get(runId) ?? LIVE_FIRST_REVEAL) : all.length;
+      const ended = seg.endedAt !== undefined;
+      if (all.length === 0 && ended) return RunStepsResponse.parse({ state: 'noRecord' });
+      // 在跑的段每被读一次多放几条（演示增量刷新，和会话内容那一路一个节奏）
+      if (live) revealed.set(runId, Math.min(all.length, shown + LIVE_REVEAL_STEP));
+      // 和真后端同一个算法（shared 的 cutSteps）：只算已经「说」出来的那部分
+      return RunStepsResponse.parse({
+        state: 'ok',
+        running: !ended,
+        process: cutSteps(all.slice(0, shown).map(processRowOf), { running: !ended, endedAt: seg.endedAt }),
       });
     },
     async updateTaskRoutePin(taskId, raw) {

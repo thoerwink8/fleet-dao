@@ -1,6 +1,6 @@
 // 每小时对账的真装配：内存库上跑真迁移（提醒、需求、PR 头、结局记账都是真查询）、临时目录里的真 git 树（以本机执行器顶替
 // 会话用户）、假的工作树管家（属主记在表里）、假的 Temporal（工作流在不在跑、挂没挂着由用例定）。
-// 残留的树删掉、提醒跟着撤（未发布提交先完整保全，复杂成果留树）；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
+// 残留的树删掉、提醒跟着撤（未发布提交和复杂未提交成果都先完整保全并独立恢复，非 Git 成果留树）；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
 // 条件还在的提醒不撤；卡住报警超过 24 小时再推一次、同一天不重复。每条失败路径都故意造一次。
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import {
@@ -56,7 +56,7 @@ import {
 } from '../../src/real/hourly-reconcile.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
 import { runChildOk } from '../child.ts';
-import { fakeTrees, git, world } from './fixtures.ts';
+import { fakeTrees, fixtureProcLook, git, world } from './fixtures.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -161,6 +161,7 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     trees: ft.trees,
     exec: localExec(),
     archiveDir: `${root}-archive`,
+    treeProcessLook: fixtureProcLook,
     sessionOrg: async () => ({ ok: true, org: 'carpool' }),
     carpoolRegistry: async () => ({ ok: true }),
     machine: '法国',
@@ -464,7 +465,7 @@ async function resolvedByHuman(where: { key: string } | { id: string }, by: stri
 const runsOf = async () =>
   (await t.db.select().from(scheduleRuns)).filter((r) => r.job === HOURLY_RECONCILE_JOB.id);
 
-describe('工作树：残留的经成果保全后清理，复杂成果和人指定留的树保留', { timeout: 120_000 }, () => {
+describe('工作树：残留的经成果保全后清理，非 Git 成果和人指定留的树保留', { timeout: 120_000 }, () => {
   it('没有在跑的任务在用、什么都不剩的树删掉，「工作树没收掉」跟着撤（写明为什么、记操作记录）；检出副本里会话交给引擎的结论文件不算剩着；探针目录不算残留', async () => {
     const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login');
@@ -493,21 +494,29 @@ describe('工作树：残留的经成果保全后清理，复杂成果和人指�
     expect((await runsOf())[0]).toMatchObject({ outcome: 'ok', scanned: 3, found: 3 });
   });
 
-  it('未提交成果不能被小时清扫绕过保全：留树、记没查成，原卡保持未修复', async () => {
+  it('未提交成果经完整快照和独立恢复后才清理，原卡写明成果保全后清理', async () => {
     const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
     probeDir();
     await alert(`sub:${sub.id}:worktree`, { title: '工作树没收掉' });
 
     const run = await runHourlyReconcileJob(deps());
-    expect(existsSync(tree.dir)).toBe(true);
+    expect(existsSync(tree.dir)).toBe(false);
     expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toBeNull();
     expect((await t.db.select().from(notifications)).filter((n) => n.level === 'decision')).toEqual([]);
+    const archives = readdirSync(`${root}-archive`).filter((name) => name.startsWith('worktree-'));
+    expect(archives).toHaveLength(1);
+    const saved = join(`${root}-archive`, archives[0] as string);
+    const receipt = JSON.parse(readFileSync(join(saved, 'receipt.json'), 'utf8')) as { kind: string };
+    const state = JSON.parse(readFileSync(join(saved, 'state.json'), 'utf8')) as {
+      files: { path: string }[];
+    };
+    expect(receipt.kind).toBe('complex');
+    expect(state.files.some((file) => file.path === 'half-done.ts')).toBe(true);
     const row = await alertByKey(t.db, `sub:${sub.id}:worktree`);
-    expect(row?.resolvedAt).toBeNull();
-    expect(run.outcome).toBe('partial');
-    expect(run.why).toContain('保留原树供接管');
-    expect(git(tree.dir, 'rev-parse', 'HEAD')).toBe(tree.head);
+    expect(row?.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(row?.body).toContain('成果保全后清理');
+    expect(run.outcome).toBe('ok');
   });
 
   describe('删树前保全界面截图（#2983）', () => {

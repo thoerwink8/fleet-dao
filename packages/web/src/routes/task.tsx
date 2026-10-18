@@ -21,10 +21,13 @@ import { Section } from '../components/layout/section';
 import { StatusBadge } from '../components/layout/status-badge';
 import type { LayoutTone } from '../components/layout/tone';
 import { RepoLink } from '../components/repo-link';
+import { RoundProgressStrip } from '../components/round-progress';
 import { RunTranscriptDrawer } from '../components/run-transcript';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { ActionButtons } from '../components/task-actions';
 import { TaskModelPins } from '../components/task-model-pins';
+import { TaskProcess } from '../components/task-process';
+import { TaskSummary } from '../components/task-summary';
 import { Button } from '../components/ui/button';
 import { formatAgo, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -44,6 +47,21 @@ const DETAIL = (
     <p>一张单走了哪几段、每段每个模型花了多久、多少 token 和钱；读不到的写明没读到，不当成 0。</p>
     <ul className="list-disc space-y-1 pl-4">
       <li>顶上一句是这张单现在怎么样；灰字行是仓和单号（点开去 GitHub）、开单时间、最新的 PR。</li>
+      <li>
+        页头下面一条是这一回合走到哪：动手 → 自测 → 推分支 · CI → 验收 →
+        合并，蓝的在做、红的没成；返工的回合带上一回合怎么收场。没有回合记录的老单不画。
+      </li>
+      <li>
+        汇报与改动：最新一笔的结论、命令完成和失败的数、关联的 PR（紫条，带状态）、改了哪些文件（每个文件的
+        +/-）。 文件和行数来自推分支时按 PR 头记的
+        numstat，不是把每次编辑加起来；读不到的写没读到和原因，不当成 0。
+      </li>
+      <li>
+        过程：回合 → 笔 → 步骤 →
+        调用。每一笔写为什么起、是新会话还是接上一笔的会话、结局和用时，笔之间是引擎在会话外做的事
+        （自测、推分支、开 PR、等 CI、验收、合并）；返工的回合顶上写为什么返工。一步 = Agent
+        说一句要做什么，加上它接着做的那串调用，点开才是单个调用；有失败的、在跑的自动展开。
+      </li>
       <li>
         用哪个模型：给动手、验收指定模型，下一次选路起照它，在跑的这一轮不打断；动手这一轮想当场换，点「现在就换」。
         指定的派不出时引擎停下等你，不悄悄换别的。
@@ -246,7 +264,7 @@ export const RUN_PARAM = 'run';
  * 「每一笔」加右侧的会话抽屉（#1802）：点「看会话」把 ?run=<笔号> 推进网址（保留别的参数），抽屉开；网址可分享，
  * 浏览器后退就关。直接打开带 ?run= 的链接，关的时候不后退（后退会离开本页），只把参数去掉。网址里的笔号对不上这张单的任何一笔就不开。
  */
-function RunsWithDrawer({ d, now }: { d: TaskDetail; now: number }) {
+function useRunDrawer(d: TaskDetail, now: number): { open: (runId: string) => void; drawer: ReactNode } {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
   const pushed = useRef(false);
@@ -275,25 +293,27 @@ function RunsWithDrawer({ d, now }: { d: TaskDetail; now: number }) {
       { replace: true },
     );
   };
-  return (
-    <>
-      <SegmentRunList d={d} now={now} onViewTranscript={open} />
-      {active ? (
-        <RunTranscriptDrawer
-          key={active.id}
-          taskId={d.task.id}
-          run={active}
-          nth={runNth(d.segmentRuns, active.id) ?? 1}
-          now={now}
-          onClose={close}
-        />
-      ) : null}
-    </>
-  );
+  return {
+    open,
+    drawer: active ? (
+      <RunTranscriptDrawer
+        key={active.id}
+        taskId={d.task.id}
+        run={active}
+        nth={runNth(d.segmentRuns, active.id) ?? 1}
+        now={now}
+        onClose={close}
+      />
+    ) : null,
+  };
 }
 
-/** 结论块下面的明细：一块接一块，块间距一样（区块间距令牌，经 Section 自己的外边距）。 */
+/**
+ * 结论块下面：先是概览（最新汇报、命令计数、PR 横条、改动文件，#3140），再是「过程」（回合 → 笔 → 步骤 → 调用），
+ * 然后才是用量明细（四个数、用哪个模型、三段、每一笔）。一块接一块，块间距一样（区块间距令牌，经 Section 自己的外边距）。
+ */
 function Body({ d, now }: { d: TaskDetail; now: number }) {
+  const { open, drawer } = useRunDrawer(d, now);
   if (!d.segmentRuns.length) {
     return (
       <>
@@ -315,11 +335,15 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
     <>
       <TaskHero d={d} now={now} />
       <div className="flex flex-col gap-4 lg:gap-6">
+        <RoundProgressStrip d={d} />
+        <TaskSummary d={d} now={now} />
+        <TaskProcess d={d} now={now} onViewTranscript={open} />
         <SegmentStats d={d} now={now} />
         <Pins d={d} now={now} />
         <SegmentBreakdown d={d} now={now} />
-        <RunsWithDrawer d={d} now={now} />
+        <SegmentRunList d={d} now={now} onViewTranscript={open} />
       </div>
+      {drawer}
     </>
   );
 }

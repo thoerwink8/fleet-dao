@@ -12,6 +12,7 @@ import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
 import { type EchoKind, echoOf } from './echo.ts';
 import { mirrorExtrasOf } from './events.ts';
+import { HYGIENE_REPO } from './hygiene-scope.ts';
 import { type MergeReceipt, mergeKey, readPull } from './pulls.ts';
 
 /**
@@ -85,6 +86,8 @@ export interface MergedPrAuditReport extends AuditReport {
    * 没有「没经合并队列」那条发现，调用方仍要按这个把已经开着的 reconcile:pr 撤掉。
    */
   engineCiTimingsPrs?: number[];
+  /** 精确核过同仓、引擎开合、changelog/v<N> 且只改 CHANGELOG.md 的受管 PR。 */
+  engineChangelogPrs?: number[];
   /**
    * 这一轮看到的、我们机器人开的、实际合并人是「引擎」、真实 github.merge_pr 的完整回执与 GitHub 一致的 PR 号。
    * 调用方按这个撤掉已经开着的 reconcile:pr；补账不能证明经过合并队列。
@@ -327,6 +330,7 @@ export async function auditMergedPrs(
   }
   const findings: MergedPrFinding[] = [];
   const engineCiTimingsPrs: number[] = [];
+  const engineChangelogPrs: number[] = [];
   const cleanPrs: number[] = [];
   const note = (
     number: number,
@@ -342,6 +346,7 @@ export async function auditMergedPrs(
     problems: findings.map((f) => f.text),
     findings,
     engineCiTimingsPrs,
+    engineChangelogPrs,
     cleanPrs,
   });
   try {
@@ -393,6 +398,36 @@ export async function auditMergedPrs(
           const mergedByEngine = deps.bots.is('engine', pr.merged_by ?? null);
           const headRef = pr.head.ref;
           const who = { headRef, openedByEngine, mergedByEngine };
+          // 更新日志的豁免窄到自仓、真实 Bot 身份、已合的精确分支及唯一文件；不按标题或分支前缀泛放行。
+          let managedChangelog = false;
+          const self = repoSlug(HYGIENE_REPO);
+          if (
+            slug === self &&
+            openedByEngine &&
+            deps.bots.is('engine', pr.user) &&
+            mergedByEngine &&
+            pr.number === item.number &&
+            pr.merged === true &&
+            pr.state === 'closed' &&
+            /^changelog\/v[1-9]\d*$/.test(headRef) &&
+            Number(headRef.slice('changelog/v'.length)) >= 4 &&
+            pr.head.repo?.full_name === self &&
+            pr.base.ref === 'main' &&
+            pr.base.repo.full_name === self
+          ) {
+            const files = await client.all({
+              method: 'GET',
+              path: `/repos/${enc(repo.owner)}/${enc(repo.name)}/pulls/${item.number}/files`,
+              auth: { as: 'engine', repo },
+              query: { per_page: 100 },
+            });
+            const parsed = z.array(z.object({ filename: z.string(), status: z.string() })).parse(files);
+            managedChangelog =
+              parsed.length === 1 &&
+              parsed[0]?.filename === 'CHANGELOG.md' &&
+              parsed[0].status === 'modified';
+            if (managedChangelog) engineChangelogPrs.push(item.number);
+          }
           // 耗时表这条自己合的，记下来给上面撤旧提醒；有没有合并记录都记，回看窗口里开着的误报才撤得掉。
           if (isEngineCiTimingsPr(who)) engineCiTimingsPrs.push(item.number);
           if (!mergedByEngine) {
@@ -426,7 +461,7 @@ export async function auditMergedPrs(
             receipt.data.mergeCommit === pr.merge_commit_sha &&
             receipt.data.mergedBy === pr.merged_by?.login;
           if (clean) cleanPrs.push(item.number);
-          else if (!isEngineCiTimingsPr(who)) {
+          else if (!isEngineCiTimingsPr(who) && !managedChangelog) {
             note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录', who);
           }
           if (!existing?.completedAt) {

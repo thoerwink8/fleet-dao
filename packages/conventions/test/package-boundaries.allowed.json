@@ -46,6 +46,11 @@
       "file": "packages/api/src/repair-dispatch.ts",
       "spec": "../../engine/src/bin/dispatch-issue.ts",
       "why": "看门狗交修复用固定路径启动同身份的现成 CLI 子进程，复用完整准入和审计；不是 import，不能用包 exports 代替可执行脚本路径；api 的 engine 开发依赖保留 CI 变更边"
+    },
+    {
+      "file": "packages/conventions/src/private-quotes.ts",
+      "spec": "../../shared/src/private-quotes.ts",
+      "why": "开场后台补传为零安装入口，只借shared零依赖私有原话协议；shared依赖保留CI变更边"
     }
   ]
 }

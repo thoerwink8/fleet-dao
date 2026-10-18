@@ -475,7 +475,7 @@ export async function incrementalDiffAtHead(args: {
  * 完整检出是在哪一步没成的（#3036）：头不合规、对不上 / 没有镜像、建目录、git archive、解包；别的（换进来的 checkout 抛的）是 unknown。
  * 报警照这一步写原因和建议：只有 EACCES 才是「目录权限」，缺对象不能修成 chmod。
  */
-export type CheckoutStage = 'head' | 'mirror' | 'mkdir' | 'archive' | 'extract' | 'unknown';
+export type CheckoutStage = 'fetch' | 'head' | 'mirror' | 'mkdir' | 'archive' | 'extract' | 'unknown';
 
 /** checkoutPrHead 抛的错：带失败那一步、原始错误（message 原样）、errno（有才有），archive 那步还带镜像目录和是不是缺对象。 */
 export class CheckoutStageError extends Error {
@@ -594,6 +594,7 @@ export function checkoutAlertKey(workflowId: string | undefined, head: string): 
 }
 
 const STAGE_LABEL: Record<CheckoutStage, string> = {
+  fetch: '获取待验精确头',
   head: '核对 PR 头',
   mirror: '找引擎镜像',
   mkdir: '建检出目录',
@@ -679,6 +680,9 @@ export interface CheckoutRecovered {
 }
 
 export interface PlaceVerifyCheckoutInput {
+  /** 生产经受管镜像的凭据和锁补齐既定头；失败保持 blocked，绝不改用分支最新头。 */
+  ensureHead?: () => Promise<void>;
+  signal?: AbortSignal;
   dir: string;
   head: string;
   workflowId: string | undefined;
@@ -755,20 +759,30 @@ export async function placeVerifyCheckout(input: PlaceVerifyCheckoutInput): Prom
     return 'full';
   };
   try {
+    input.signal?.throwIfAborted();
+    await input.ensureHead?.().catch((error: unknown) => {
+      throw new CheckoutStageError('fetch', errMessage(error), { cause: error });
+    });
+    input.signal?.throwIfAborted();
     await checkout(input.dir, input.head, input.workflowId);
   } catch (error) {
+    input.signal?.throwIfAborted();
     if (errnoOf(error) !== 'EACCES' || input.repair === undefined) return blocked(error);
     try {
       await input.repair(input.dir);
     } catch (repairError) {
+      input.signal?.throwIfAborted();
       return blocked(error, repairError);
     }
     try {
+      input.signal?.throwIfAborted();
       await checkout(input.dir, input.head, input.workflowId);
     } catch (again) {
+      input.signal?.throwIfAborted();
       return blocked(again);
     }
   }
+  input.signal?.throwIfAborted();
   return full();
 }
 

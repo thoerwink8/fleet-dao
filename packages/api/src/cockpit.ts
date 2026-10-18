@@ -103,6 +103,7 @@ import { type CockpitEnv, requireSession } from './session.ts';
 import { readEnvSnapshot, readHomeSnapshot, type SnapshotDeps } from './snapshots.ts';
 import { eventsHandler, type SseRelay } from './sse.ts';
 import { taskListView } from './task-list.ts';
+import { buildOverview } from './task-overview.ts';
 import { TASK_ROUTE_PINS_NOT_HERE, taskRoutePinView } from './task-route-pins.ts';
 import { taskWorkflowIdForTask } from './temporal.ts';
 import {
@@ -315,7 +316,18 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       taskFinished: isTaskFinished(task),
     });
     const flowFallback = flowFallbackReason(await store.getFlowAssignment(task.id));
+    // 任务页的概览（#3140）：每一块读不到各写各的原因，不连累整张详情
+    const overview = await buildOverview({
+      taskId: task.id,
+      repoId: repo.id,
+      port: deps.runTranscript,
+      runs: segmentRuns,
+      subtaskPrs: subtasks.flatMap((s) => (s.prNumber === undefined ? [] : [s.prNumber])),
+      getPullRequest: (n) => store.getPullRequest(repo.id, n),
+      log: (msg, fields) => deps.log.error(msg, fields),
+    });
     return reply(c, TaskDetailResponse, {
+      overview,
       routePins: await readRoutePins(task.id),
       task: flowFallback ? { ...task, flowFallback } : task,
       repo,

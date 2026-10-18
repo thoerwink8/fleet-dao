@@ -6,7 +6,8 @@
 //   只有「这个仓根本没声明改标准清单」（文件不在）才当没有。
 // - 合并这一步 GitHub 说了算：自动合并只由 armAutoMerge 在验收通过之后挂（每小时对账的兜底不碰任务分支，jobs/auto-merge-check.ts）。
 //   挂的时候 GitHub 说「已经是 clean」（所有条件都满足了，没什么可等的）就直接合（github 包的 mergePr：核头、核不落后主线、
-//   核 CI 绿），合不了的原样说明原因交工作流停下报人。
+//   核 CI 绿），合不了的原样说明原因交工作流停下报人。只是检查没跑完（合并闸在同一个头上重跑）就在这一步里隔一会儿再合，
+//   等满 MERGE_PENDING_RETRIES 次还没跑完才交回。
 // - 合并记录：这个仓的对账（github 包 auditMergedPrs）要求引擎开的 PR 账上有合并记录。自动合并是 GitHub 自己合的，没有记录，
 //   所以等到合并之后再调一次 mergePr——它对「已经合了」的 PR 只补记录、删分支，不再合一次。补不成只记日志，不拦任务往下走。
 // - 等合并是长轮询（心跳不断）：叫停时休眠被打断，活动抛取消，不吞。
@@ -57,6 +58,11 @@ import type { WorkTrees } from './worktrees.ts';
 
 /** 等合并时多久看一次 PR（毫秒）。 */
 export const MERGE_POLL_EVERY_MS = 20_000;
+/**
+ * 挂自动合并时 GitHub 说已经 clean、直接合却因检查没跑完被拒：隔 MERGE_POLL_EVERY_MS 再合，最多再试这么多次（#3165）。
+ * 10 × 20 秒，加上每次合并前的核对，留在 git 档 5 分钟的活动时限之内。
+ */
+export const MERGE_PENDING_RETRIES = 10;
 
 /** 等合并这一下读到的必过检查。红了才带 failed；pending / none / green 不带。 */
 export interface MergeWaitChecks {
@@ -582,7 +588,17 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       } catch (error) {
         if (!isCleanStatus(error)) throw error;
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
-        const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+        let merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+        // 只是检查没跑完（没有红的、没出现的）：多半是验收结果刚写、合并闸在同一个头上重跑（#3165）。
+        // 在这一步里隔一会儿再合，不交回去停下等人；有红的、缺的、等满了还没跑完，照旧把原因交回。
+        for (
+          let i = 0;
+          !merged.merged && merged.ciPendingOnly === true && i < MERGE_PENDING_RETRIES;
+          i += 1
+        ) {
+          await sleep(pollEveryMs, ctx.signal);
+          merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+        }
         if (merged.merged) {
           await auditLateReview(repo, prNumber, ctx);
           return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
