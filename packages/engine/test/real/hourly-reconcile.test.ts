@@ -1,6 +1,6 @@
 // 每小时对账的真装配：内存库上跑真迁移（提醒、需求、PR 头、结局记账都是真查询）、临时目录里的真 git 树（以本机执行器顶替
 // 会话用户）、假的工作树管家（属主记在表里）、假的 Temporal（工作流在不在跑、挂没挂着由用例定）。
-// 残留的树删掉、提醒跟着撤（有没推的东西也删：AI 产生的树，决定 0097、#2729）；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
+// 残留的树删掉、提醒跟着撤（未发布提交先完整保全，复杂成果留树）；读不到目录、查不了 Temporal、删不掉、git 没跑成都记没查成；
 // 条件还在的提醒不撤；卡住报警超过 24 小时再推一次、同一天不重复。每条失败路径都故意造一次。
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import {
@@ -464,7 +464,7 @@ async function resolvedByHuman(where: { key: string } | { id: string }, by: stri
 const runsOf = async () =>
   (await t.db.select().from(scheduleRuns)).filter((r) => r.job === HOURLY_RECONCILE_JOB.id);
 
-describe('工作树：残留的删掉（有没推的东西也删，人以前点过留着的照旧留着）', { timeout: 120_000 }, () => {
+describe('工作树：残留的经成果保全后清理，复杂成果和人指定留的树保留', { timeout: 120_000 }, () => {
   it('没有在跑的任务在用、什么都不剩的树删掉，「工作树没收掉」跟着撤（写明为什么、记操作记录）；检出副本里会话交给引擎的结论文件不算剩着；探针目录不算残留', async () => {
     const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login');
@@ -493,23 +493,21 @@ describe('工作树：残留的删掉（有没推的东西也删，人以前点�
     expect((await runsOf())[0]).toMatchObject({ outcome: 'ok', scanned: 3, found: 3 });
   });
 
-  it('【#2729，决定 0097】有没推的提交、没提交的改动：AI 产生的树直接删，不报要你拍；「工作树没收掉」跟着撤、写明删了什么', async () => {
+  it('未提交成果不能被小时清扫绕过保全：留树、记没查成，原卡保持未修复', async () => {
     const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login', { extra: 2, dirty: true });
     probeDir();
     await alert(`sub:${sub.id}:worktree`, { title: '工作树没收掉' });
 
     const run = await runHourlyReconcileJob(deps());
-    expect(existsSync(tree.dir)).toBe(false);
+    expect(existsSync(tree.dir)).toBe(true);
     expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toBeNull();
     expect((await t.db.select().from(notifications)).filter((n) => n.level === 'decision')).toEqual([]);
     const row = await alertByKey(t.db, `sub:${sub.id}:worktree`);
-    expect(row?.resolvedBy).toBe(RECONCILE_ACTOR);
-    expect(row?.body).toMatch(/^已撤：每小时对账把这棵树删了（acme_widgets\/160-login）：AI 产生的工作树/);
-    expect(row?.body).toContain('没推的提交 2 个');
-    expect(row?.body).toContain('照决定 0097 直接删');
-    // 一棵树 + 探针目录；删了一棵、撤了一条
-    expect(run).toMatchObject({ outcome: 'ok', found: 2 });
+    expect(row?.resolvedAt).toBeNull();
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('保留原树供接管');
+    expect(git(tree.dir, 'rev-parse', 'HEAD')).toBe(tree.head);
   });
 
   describe('删树前保全界面截图（#2983）', () => {
@@ -589,7 +587,7 @@ describe('工作树：残留的删掉（有没推的东西也删，人以前点�
     expect(existsSync(tree.dir)).toBe(true);
   });
 
-  it('以前报的工作树要你拍还开着（没人拍）：这一轮直接删树，那条跟着撤、写明删了什么', async () => {
+  it('以前工作树要你拍还开着：未发布提交保全后清理，原卡写明清理前成果', async () => {
     await work();
     const tree = makeTree('acme_widgets/160-login', { extra: 1 });
     probeDir();
@@ -600,7 +598,7 @@ describe('工作树：残留的删掉（有没推的东西也删，人以前点�
     expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toMatchObject({
       resolvedBy: RECONCILE_ACTOR,
       body: expect.stringMatching(
-        /^已撤：树里剩着没推的东西，每小时对账照决定 0097 直接删了（acme_widgets\/160-login）：没推的提交 1 个/,
+        /^已撤：树里剩着没推的东西，每小时对账经成果保全后清理了（acme_widgets\/160-login）：没推的提交 1 个/,
       ),
     });
   });
@@ -614,7 +612,7 @@ describe('工作树：残留的删掉（有没推的东西也删，人以前点�
     };
     const run = await runHourlyReconcileJob(deps());
     expect(run.outcome).toBe('partial');
-    expect(run.why).toContain('acme_widgets/160-login 还剩没推的东西，直接删没删成：权限不够');
+    expect(run.why).toContain('acme_widgets/160-login 还剩没推的东西，保全清理没做成：权限不够');
     expect(existsSync(tree.dir)).toBe(true);
     expect(await alertByKey(t.db, 'worktree:acme_widgets/160-login')).toBeNull();
   });
@@ -660,7 +658,7 @@ describe('工作树：残留的删掉（有没推的东西也删，人以前点�
     expect(run).toMatchObject({ outcome: 'ok', scanned: 3, found: 3 });
   });
 
-  it('缓存以外还剩一个源文件：照决定 0097 直接删（#2729），撤卡的原因里列出那个文件、写明一共几个（缓存不列）', async () => {
+  it('非Git目录剩着源文件：保留原树，不能用AI自产物的身份跳过保全', async () => {
     await work();
     probeDir();
     const dir = plainTree('acme_widgets/160-handover-store', {
@@ -673,15 +671,12 @@ describe('工作树：残留的删掉（有没推的东西也删，人以前点�
     });
 
     const run = await runHourlyReconcileJob(deps());
-    // 删了一棵、撤了一条
-    expect(run).toMatchObject({ outcome: 'ok', found: 2 });
-    expect(existsSync(dir)).toBe(false);
+    expect(run.outcome).toBe('partial');
+    expect(existsSync(dir)).toBe(true);
     const row = await alertByKey(t.db, 'worktree:acme_widgets/160-handover-store');
-    expect(row?.resolvedBy).toBe(RECONCILE_ACTOR);
-    expect(row?.body).toContain(
-      '这一层不是 git 仓，里面有 1 个文件（能重新生成的编译和工具缓存不算）：packages/api/src/handover.ts',
-    );
-    expect(row?.body).not.toContain('tsbuildinfo');
+    expect(row?.resolvedAt).toBeNull();
+    expect(readFileSync(join(dir, 'packages/api/src/handover.ts'), 'utf8')).toContain('export const h');
+    expect(run.why).toContain('保留原树供接管');
   });
 
   it('树里有目录读不了：记没查成（partial，写明哪棵、为什么），不删，也不报要人拍', async () => {

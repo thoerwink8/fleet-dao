@@ -171,7 +171,7 @@ export interface RemoveWorktreeInput extends Scope {
   repo: Repo;
   path: string;
   branch: string;
-  /** 没合并就收（叫停、失败）时先存档未提交的改动。 */
+  /** 没合并就收（叫停、失败）；所有清理都先保全独有提交，复杂未提交状态留树。 */
   archive: boolean;
   /**
    * 收之前先核对界面验收图片（_tmp/shots/<标签>/ 的 PNG/JPEG/WebP、树里没推的孤儿图片提交，#2983）：远端 shots/<单号> 读得到

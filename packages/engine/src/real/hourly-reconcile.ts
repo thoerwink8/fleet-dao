@@ -81,12 +81,13 @@ import {
   type WorkflowView,
 } from '../jobs/reconcile-common.ts';
 import type { WorktreeCleanupDeps } from '../jobs/worktree-cleanup.ts';
-import type { PortContext } from '../ports.ts';
+import type { PortContext, ShotsDelivery } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
 import { type ClosedIssueHoldToken, taskCloseClosedIssueUpdate, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { mainCiRuns } from './main-ci-runs.ts';
+import { preserveWorktree } from './preserve-worktree.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
@@ -609,6 +610,7 @@ export function hourlyReconcileJob(
     },
   };
   return (client) => {
+    const preservedShots = new Map<string, ShotsDelivery>();
     return {
       root: w.trees.root,
       gh: autoMergeGh,
@@ -619,10 +621,32 @@ export function hourlyReconcileJob(
       listDir: w.listDir ?? listDirEntries,
       treeFor: (repo, branch) => w.trees.treeFor(repo, branch),
       ownerOf: (dir) => w.trees.ownerOf(dir),
-      remove: (dir) => w.trees.remove(dir),
+      remove: async (dir) => {
+        try {
+          const user = await w.trees.ownerOf(dir);
+          // WorkTrees.ownerOf 仅 ENOENT 回 null；属主未知、权限或读失败均抛错。
+          if (!user) return { gone: true };
+          await preserveWorktree(
+            {
+              exec: w.exec,
+              user,
+              dir,
+              scopePrefix: 'reconcile-preserve',
+              ...(w.gitBin ? { git: w.gitBin } : {}),
+              ...(w.shBin ? { sh: w.shBin } : {}),
+            },
+            w.archiveDir,
+            {},
+            preservedShots.get(dir),
+          );
+          return await w.trees.remove(dir);
+        } finally {
+          preservedShots.delete(dir);
+        }
+      },
       // 清扫不看远端（这一路没有镜像）：同一个头记过已交付才认，否则有图就存进受限归档，存不成不删
-      keepShots: (dir, user, at) =>
-        keepShotsBeforeRemove(
+      keepShots: async (dir, user, at) => {
+        const kept = await keepShotsBeforeRemove(
           {
             exec: w.exec,
             user,
@@ -637,7 +661,10 @@ export function hourlyReconcileJob(
             issueNumber: at.issueNumber,
             now: now(),
           },
-        ),
+        );
+        if (kept.outcome === 'archived' || kept.outcome === 'delivered') preservedShots.set(dir, kept);
+        return kept;
+      },
       leftovers: (dir, user, known, scratch) =>
         treeLeftovers(
           {

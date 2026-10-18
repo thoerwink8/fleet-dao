@@ -1078,6 +1078,8 @@ const nulSeparated = (r: UserCommandResult) => r.stdout.toString('utf8').split('
 const CHECKOUT_LOG_MAX = 200;
 
 export interface LeftoverOptions {
+  /** 调用方刚按 blob 核实仍与已交付/已归档图片一致的精确路径；不忽略整个目录。 */
+  preservedPaths?: readonly string[];
   /**
    * 引擎的检出副本（分诊、需求文档、方案、审查、开 PR 前验证：sessions.ts 每起一个新会话都 checkout --force + clean -fdx
    * 从头来）：它在这里检出过的提交（HEAD 的检出记录）都是从引擎的镜像取的，算推过。写码的树不给：那里的检出记录
@@ -1141,7 +1143,7 @@ export async function treeLeftovers(
   const dirty = [
     ...lines(changed).filter((line) => !ENVIRONMENT_PATHS.has(porcelainPath(line))),
     ...nulSeparated(untracked)
-      .filter((f) => !ENVIRONMENT_PATHS.has(f))
+      .filter((f) => !ENVIRONMENT_PATHS.has(f) && !options.preservedPaths?.includes(f))
       .map((f) => `?? ${f}`),
   ];
   const stashes = lines(await git(t, ['stash', 'list'], '看有没有存着的 stash')).length;
@@ -1194,10 +1196,54 @@ export async function treeLeftovers(
   };
 }
 
-/** 没合并就收树时存档：没提交的改动（含二进制）和状态，交给引擎写进自己的存档目录。 */
-export async function uncommittedPatch(t: UserTree): Promise<{ status: string[]; patch: Buffer }> {
-  const status = lines(await git(t, ['status', '--porcelain'], '看工作树状态'));
-  const patch = (await git(t, ['diff', 'HEAD', '--binary'], '存档没提交的改动', { timeoutMs: 300_000 }))
-    .stdout;
-  return { status, patch };
+/** 自包含成果包：不排除基线，包含 detached HEAD 与所有引用；包过大或读取失败就留原树。 */
+export async function recoveryBundle(t: UserTree): Promise<Buffer> {
+  const r = await git(t, ['bundle', 'create', '-', '--all', 'HEAD'], '打完整成果包', {
+    timeoutMs: 240_000,
+  });
+  if (r.stdout.length === 0) throw new PortError('READ_FAILED', '完整成果包是空的，保留原树');
+  return r.stdout;
+}
+
+/** 用来核对打包期间有没有换头/换引用，以及空仓恢复后是否完整。 */
+export async function recoveryIdentity(t: UserTree): Promise<string> {
+  const head = await headOf(t);
+  const tree = text(await git(t, ['rev-parse', 'HEAD^{tree}'], '读成果内容树')).trim();
+  assertSha(tree, '成果内容树');
+  const refs = text(await git(t, ['for-each-ref', '--format=%(objectname) %(refname)'], '读成果引用'));
+  return `${head}\n${tree}\n${refs}`;
+}
+
+/** 落盘回读的包在会话用户的临时空仓独立恢复，不借原仓的对象、alternates 或基线。 */
+export async function verifyRecoveryBundle(t: UserTree, bytes: Buffer, identity: string): Promise<void> {
+  const script = [
+    'set -eu',
+    'umask 077',
+    'd=$(mktemp -d -t fleet-recovery.XXXXXXXX)',
+    'd=$(cd "$d" && pwd -P)',
+    'case "$d" in */fleet-recovery.????????) ;; *) echo "unexpected recovery directory" >&2; exit 1;; esac',
+    'trap \'rm -rf -- "$d"\' EXIT',
+    'cat > "$d/recovery.bundle"',
+    '"$1" -c init.templateDir= init --bare -q "$d/repo"',
+    '"$1" -C "$d/repo" bundle verify "$d/recovery.bundle" >&2',
+    '"$1" -C "$d/repo" -c maintenance.auto=false -c gc.auto=0 fetch --no-tags -q "$d/recovery.bundle" "+refs/*:refs/*" HEAD',
+    'head=$("$1" bundle list-heads "$d/recovery.bundle" HEAD | cut -d " " -f1)',
+    '"$1" -C "$d/repo" update-ref --no-deref HEAD "$head"',
+    '"$1" -C "$d/repo" fsck --full --no-progress >&2',
+    '"$1" -C "$d/repo" rev-parse HEAD "HEAD^{tree}"',
+    '"$1" -C "$d/repo" for-each-ref "--format=%(objectname) %(refname)"',
+  ].join('\n');
+  const r = await run(t, [t.sh ?? SH, '-c', script, 'sh', t.git ?? GIT], {
+    stdin: bytes,
+    timeoutMs: 240_000,
+  });
+  if (r.code !== 0 || text(r).replace(/\r\n/g, '\n') !== identity.replace(/\r\n/g, '\n')) {
+    throw new PortError(
+      'ARCHIVE_FAILED',
+      `空仓恢复成果包未核对成功，保留原树：${describeFailure('恢复核验', r)}`,
+      {
+        details: { dir: t.dir },
+      },
+    );
+  }
 }

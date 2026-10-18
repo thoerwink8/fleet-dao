@@ -3,8 +3,8 @@
 // 一轮：列根下每个仓的每棵树 → 认出是哪张需求的 → 需求工作流和它的子任务工作流都不在跑了、树里也没有没结束的会话，才算
 // 残留 → 以会话用户的身份看树里还剩什么 → 什么都不剩就删（fleet-agent-scope remove）；能重新生成的编译和工具缓存
 // （*.tsbuildinfo、node_modules/ 这些，名单是 real/user-git.ts 的 DISPOSABLE）不算剩着，只剩这些的树照空树删，是不是 git 仓
-// 都一样；还剩没推的提交、没提交的改动、stash、名单以外的文件的，也照决定 0097 直接删（AI 自己产生的工作树，#2729 起不再报
-// 「要人拍」），删掉的是哪几样记进日志和撤卡原因；以前报过、人点了留着的照旧留着。
+// 都一样；有未发布提交的先完整归档并独立恢复验真，复杂未提交、未跟踪、stash、非 Git 成果或归档失败留原树、记没查成。
+// 生产 remove 与任务收树共用 preserve-worktree.ts；清理前剩了什么记进日志和撤卡原因；以前报过、人点了留着的照旧留着。
 // 不管哪种删法，删之前先保全树里的界面验收图片（#2983，keepShots）：存不进受限归档就不删、记没查成写明原因，下一轮再试。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
 // 改之前必须知道：「在用」只认任务工作流（task:，含重做后的 :rN）和旧子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
 // 里一起认。认漏了还有一道：树里有没结束的会话（runs.worktree_path）就不碰。
@@ -194,7 +194,7 @@ type TreeOutcome =
   | { kind: 'in-use'; by: string }
   | { kind: 'gone' }
   | { kind: 'removed' }
-  /** 剩着没推的东西，照决定 0097 直接删了（#2729 起不再报要人拍）。what 是删掉的东西，一样一句。 */
+  /** 剩着没推的东西，经共享保全入口后清理了。what 是清理前的成果，一样一句。 */
   | { kind: 'purged'; what: string[] }
   /** 剩着东西，人以前看过那条要人拍、点了留着：留着，不再提醒。 */
   | { kind: 'kept'; what: string[] }
@@ -311,13 +311,13 @@ async function escalate(
     return { kind: 'kept', what: ctx.what };
   const shotsKept = await guardShots(s, ctx);
   if (shotsKept) return shotsKept;
-  // 决定 0097：AI 自己产生的工作树（会话的检出、副本）直接删，不问人（#2729）。剩下的是哪几样写进日志和撤卡的原因里
+  // 不额外问人；生产 remove 必经共享成果保全，不能用 AI 产物的身份跳过恢复核验。
   try {
     await deps.remove(ctx.path);
   } catch (err) {
-    return { kind: 'unchecked', why: `${ctx.rel} 还剩没推的东西，直接删没删成：${errMessage(err)}` };
+    return { kind: 'unchecked', why: `${ctx.rel} 还剩没推的东西，保全清理没做成：${errMessage(err)}` };
   }
-  deps.log('info', '每小时对账：删了一棵还剩没推东西的残留工作树（AI 产生的，决定 0097 直接删）', {
+  deps.log('info', '每小时对账：经成果保全入口清理了一棵残留工作树', {
     tree: ctx.rel,
     what: ctx.what,
     ...(ctx.taskId ? { taskId: ctx.taskId } : {}),
@@ -408,7 +408,7 @@ function outcomeWhy(outcome: TreeOutcome, rel: string): string | null {
     case 'gone':
       return `树已经不在了（${rel}）`;
     case 'purged':
-      return `每小时对账把这棵树删了（${rel}）：AI 产生的工作树，剩下的（${outcome.what.join('；')}）照决定 0097 直接删`;
+      return `每小时对账把这棵树删了（${rel}）：成果保全后清理，清理前剩着（${outcome.what.join('；')}）`;
     case 'kept':
       return `树里还有没推、没提交的东西，人已经看过那条要人拍、决定留着（${rel}）`;
     case 'in-use':
@@ -503,7 +503,7 @@ async function settleTreeAlerts(s: Sweep, open: readonly AlertRow[]): Promise<vo
         outcome?.kind === 'in-use'
           ? `这棵树又被在跑的任务（${outcome.by}）用上了：新一轮会换掉它，不用拍了`
           : outcome?.kind === 'purged'
-            ? `树里剩着没推的东西，每小时对账照决定 0097 直接删了（${rel}）：${outcome.what.join('；')}`
+            ? `树里剩着没推的东西，每小时对账经成果保全后清理了（${rel}）：${outcome.what.join('；')}`
             : outcome?.kind === 'removed'
               ? `树里已经没有没推、没提交的东西了（能重新生成的编译和工具缓存不算），每小时对账把树删了（${rel}）`
               : await treeGoneWhy(s, path, rel);
