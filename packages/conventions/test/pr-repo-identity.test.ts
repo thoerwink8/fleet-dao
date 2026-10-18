@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const { spawn, exec } = vi.hoisted(() => ({ spawn: vi.fn(), exec: vi.fn() }));
-vi.mock('node:child_process', async (original) => ({
-  ...(await original<typeof import('node:child_process')>()),
-  spawnSync: spawn,
-  execFileSync: exec,
-}));
+// 只替换运输函数，不实际同步起进程；真实子进程测试仍统一走 child.ts。
+vi.mock('node:child_process', async (original) => {
+  const mocked = { ...(await original<typeof import('node:child_process')>()) };
+  Reflect.set(mocked, 'spawnSync', spawn);
+  Reflect.set(mocked, 'execFileSync', exec);
+  return mocked;
+});
 
 import { canonicalPrArgs } from '../src/github-api.ts';
 import { livePrGh } from '../src/pr-arm.ts';
