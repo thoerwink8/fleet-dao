@@ -26,8 +26,31 @@ function fakePort(rows: Record<string, { seq: number; kind: string; text: string
         more: rest.length > limit,
       };
     },
+    ...unusedProcessPort,
   };
 }
+
+/** 任务页概览要的几个读法（#3140）不在这个接口的范围（task-overview.test.ts 测）：一律读不到，用到就抛。 */
+const unusedProcessPort: Omit<RunTranscriptPort, 'read'> = {
+  async processRows() {
+    throw new Error('这个用例不读步骤');
+  },
+  async tallies() {
+    throw new Error('这个用例不读计数');
+  },
+  async lastSay() {
+    throw new Error('这个用例不读汇报');
+  },
+  async rounds() {
+    throw new Error('这个用例不读回合');
+  },
+  async engineSteps() {
+    throw new Error('这个用例不读引擎步骤');
+  },
+  async prFiles() {
+    throw new Error('这个用例不读 PR 文件');
+  },
+};
 
 function withRuns(h: ReturnType<typeof harness>) {
   const base = { segment: 'manual' as const, model: 'opus-5.5', startedAt: T0.toISOString() };
@@ -147,6 +170,7 @@ describe('会话内容接口：没有记录和读不到分开', () => {
         read: async () => {
           throw new Error('connection terminated');
         },
+        ...unusedProcessPort,
       },
     });
     withRuns(h);
