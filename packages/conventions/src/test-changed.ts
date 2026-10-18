@@ -222,7 +222,7 @@ export type RunDecision =
   | { kind: 'run'; args: string[]; note?: string }
   | { kind: 'refuse'; code: number; lines: string[] };
 
-/** CI 的环境（GitHub Actions 设 CI=true）。 */
+/** CI 的环境（GitHub Actions 设 CI=true）；调用前先排除引擎会话，写码 CLI 也会注入 CI。 */
 function inCi(env: Readonly<Record<string, string | undefined>>): boolean {
   const v = env.CI?.trim().toLowerCase();
   return v !== undefined && v !== '' && v !== 'false' && v !== '0';
@@ -251,7 +251,7 @@ function refuseLines(local: LocalRun): string[] {
  * 留给 CI 的那些、真要全跑怎么说，退出码 REFUSED_FULL_RUN（不再打单跑对应包的命令，#1066）。
  * 带 --all 就全跑（明说了要）。带 --affected 时不拒，改跑受影响的包（要全跑时先跑的那份，local.paths）：
  * 引擎自测用它在测试锁下跑受影响的包，不把测试整段推给 CI；显式 --affected 覆盖引擎会话标记。
- * CI 仍全跑，--affected 不改 CI 的全量规则。
+ * 先认非空引擎会话标记，再认 CI；写码 CLI 注入的 CI 不覆盖显式 --affected。没有引擎标记的专用 CI 仍全跑。
  */
 export function decideRun(input: {
   selection: TestSelection;
@@ -263,7 +263,8 @@ export function decideRun(input: {
   const { selection, env } = input;
   if (input.all) return { kind: 'run', args: ['run'], note: '带了 --all：本机全跑' };
   if (selection.kind === 'some') return { kind: 'run', args: vitestArgs(selection) };
-  if (inCi(env)) return { kind: 'run', args: ['run'], note: '在 CI 里：全跑' };
+  const engineSession = Boolean(env[ENGINE_SESSION_MARKER]?.trim());
+  if (!engineSession && inCi(env)) return { kind: 'run', args: ['run'], note: '在 CI 里：全跑' };
   if (input.affected && selection.local.paths.length > 0) {
     const paths = selection.local.paths;
     return {
@@ -272,7 +273,7 @@ export function decideRun(input: {
       note: `要全跑，本机改跑受影响的包：${paths.join(' ')}`,
     };
   }
-  if (env[ENGINE_SESSION_MARKER]?.trim()) {
+  if (engineSession) {
     return {
       kind: 'run',
       args: ['run'],
