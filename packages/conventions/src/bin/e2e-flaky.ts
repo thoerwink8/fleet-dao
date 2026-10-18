@@ -6,7 +6,9 @@
 //     是那一轮下载下来的报告（artifact 名 e2e-<运行号>-<第几次运行>-<分片>）。主线红了只重跑失败的分片：每一片取它最后一次，
 //     再合成一轮，不把两次运行当成两轮，也别漏掉没重跑的那一片。旧的平铺 results*.json 仍当成分片合在一起。
 //     取有报告的近 10 轮，数每条用例偶发（重试才过）的次数，达阈值的开单（同标题已有开着的单就不开；超过 5 条只开一张汇总单；
-//     一次最多新开 3 张，多的下次再开）；
+//     一次最多新开 3 张，多的下次再开）。同用例已完成处置里点过名的失败 run，重扫或窗口变了但没有新增失败时不开，
+//     并写明旧采样已被哪张原单盖住；出现新的失败 run 且仍达阈值就照常开。查已完成处置失败、页没翻完、证据点不明：
+//     记成未知并退出码 1，不说「没有偶发」。
 //     最新一轮整轮坏了开「整轮坏了」单，最新一轮好了就把开着的那张留言关掉。要 GITHUB_TOKEN、GITHUB_REPOSITORY。
 // 读不到、认不出就退出码 1 并明说，不把「没查成」当「没有偶发」。
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
@@ -14,8 +16,12 @@ import { join } from 'node:path';
 import {
   BROKEN_ROUND_TITLE,
   deadline,
+  evidenceUnresolved,
   FLAKY_WINDOW,
+  idleScanLine,
   isBrokenRound,
+  loadWindowEvidence,
+  needsSettledEvidence,
   type OpenIssue,
   type Outcomes,
   outcomesOf,
@@ -24,6 +30,7 @@ import {
   type RunOutcomes,
   runFromArtifacts,
   runSummary,
+  settledTitlesOf,
 } from '../e2e-flaky.ts';
 import { exitWith, runMain } from '../exit.ts';
 import { ghApi } from '../gh-api.ts';
@@ -81,8 +88,19 @@ runMain(async () => {
         }[];
         broken.body = [broken.body ?? '', ...comments.map((c) => c.body ?? '')].join('\n');
       }
-      const actions = planIssues(window, open, quarantine, deadline(new Date()));
-      if (actions.length === 0) console.log('没有达到偶发阈值的用例，也没有要处理的「整轮坏了」单');
+      // 开着的单去重不够：关单后滚动窗口里的旧失败 run 还会再开。有偶发要新开时，把同用例已完成处置的 run 读全。
+      const until = deadline(new Date());
+      const actions = needsSettledEvidence(window, open)
+        ? planIssues(
+            window,
+            open,
+            quarantine,
+            until,
+            await loadWindowEvidence(window, settledTitlesOf(window), (path) => api.get(path)),
+          )
+        : planIssues(window, open, quarantine, until);
+      const idle = idleScanLine(actions);
+      if (idle) console.log(idle);
       for (const a of actions) {
         if (a.kind === 'create')
           await api.post('/issues', { title: a.title, body: a.body, labels: a.labels });
@@ -93,6 +111,7 @@ runMain(async () => {
         }
         console.log(a.label);
       }
+      if (evidenceUnresolved(actions)) exitWith(1);
     }
   } else {
     console.error('用法：e2e-flaky.ts summary <报告>... | e2e-flaky.ts scan <runs.json> <报告目录>');
