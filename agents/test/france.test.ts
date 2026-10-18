@@ -209,8 +209,9 @@ const ago = (min: number) => new Date(Date.parse(AT) - min * 60_000).toISOString
 const SHA = 'aaaaaaaaaaaa';
 
 function run(o: {
+  repo?: string | null;
   n?: number | null;
-  stage: string;
+  stage?: string;
   queued: number;
   started?: number | null;
   ended?: number | null;
@@ -230,9 +231,9 @@ function run(o: {
 }) {
   const ended = o.ended === undefined ? o.queued - 5 : o.ended;
   return {
-    repo: o.n === null ? null : 'o/fleet-dao',
+    repo: o.n === null ? null : o.repo === undefined ? 'o/fleet-dao' : o.repo,
     n: o.n === undefined ? 12 : o.n,
-    stage: o.stage,
+    stage: o.stage ?? 'execute',
     route_id: o.route ?? 'claude-carpool:opus-5.5:claude-code',
     model: o.model ?? 'opus-5.5',
     model_name: o.modelName ?? 'Opus 5.5',
@@ -1475,7 +1476,8 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     expect(find(v1, '别的挂起')?.kind).toBe('task-park');
     expect(find(v1, '规矩同步没成')?.kind).toBeUndefined();
     expect(find(v1, '#21 卡住了')?.kind).toBe('task-park');
-    expect(find(v1, '#26 最近的问题')?.kind).toBe('task-park');
+    expect(find(v1, '#26 最近的问题')?.kind).toBeUndefined();
+    expect(find(v1, '#26 最近的问题（未关联信息')?.what).toContain('无法判断是否已重试');
     expect(find(v1, '#21 卡住了')?.key).toBe('task:o/fleet-dao#21:stalled');
     expect(find(v1, '#26 最近的问题')?.key).toBe('task:o/fleet-dao#26:problem');
     expect(find(v1, '验收 2 轮都没过')?.key).toBe('task:o/fleet-dao#1707:review-fail');
@@ -1484,6 +1486,99 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
     const keys = (v: ReturnType<typeof build>) => (v.anomalies as A[]).map((a) => a.key).sort();
     expect(find(v1, '验收 2 轮都没过')?.what).not.toBe(find(v2, '验收 2 轮都没过')?.what);
     expect(keys(v1)).toEqual(keys(v2));
+  });
+
+  describe('lastProblem 和新会话的诊断关联', () => {
+    const task = (repo: string, n: number, updated: string | null, problem = '第1次重试，60秒后') => ({
+      repo,
+      n,
+      title: `单 ${n}`,
+      state: 'running',
+      phase: 'execute',
+      doing: null,
+      last_problem: problem,
+      created_at: ago(500),
+      updated_at: updated,
+    });
+    const problemOf = (v: View, repo: string, n: number) =>
+      v.tasks.active.find((t) => t.key === `${repo}#${n}`)?.lastProblem ?? '';
+
+    it('只把同仓同号、且晚于任务更新时间的会话关联为当前重试', () => {
+      const v = viewOf((s) => {
+        s.tasks = {
+          ok: true,
+          rows: [
+            task('o/fleet-dao', 3033, ago(10)),
+            task('other/fleet-dao', 3033, ago(10)),
+            task('o/fleet-dao', 3037, ago(10)),
+          ],
+        };
+        s.runs = {
+          ok: true,
+          rows: [run({ n: 3033, queued: 5, ended: null })],
+        };
+      });
+      expect(problemOf(v, 'o/fleet-dao', 3033)).toContain('当前重试运行中');
+      expect(problemOf(v, 'other/fleet-dao', 3033)).toContain('未关联信息');
+      expect(problemOf(v, 'o/fleet-dao', 3037)).toContain('未关联信息');
+      expect(whats(v).some((w) => w.includes('other/fleet-dao'))).toBe(false);
+    });
+
+    it('并发新会话只报运行中、结果待核实；再次失败仍明确报失败，不报成功', () => {
+      const running = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3037, ago(10))] };
+        s.runs = {
+          ok: true,
+          rows: [
+            run({ n: 3037, queued: 5, ended: null }),
+            run({ n: 3037, queued: 4, ended: null, outcome: null, message: '连接失败' }),
+          ],
+        };
+      });
+      expect(problemOf(running, 'o/fleet-dao', 3037)).toContain('当前重试运行中（2 个会话）');
+      expect(problemOf(running, 'o/fleet-dao', 3037)).toContain('结果待核实');
+      expect(problemOf(running, 'o/fleet-dao', 3037)).not.toContain('成功');
+
+      const failed = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3037, ago(10))] };
+        s.runs = { ok: true, rows: [run({ n: 3037, queued: 5, ended: 1, outcome: 'failed' })] };
+      });
+      expect(problemOf(failed, 'o/fleet-dao', 3037)).toContain('当前重试再次失败');
+    });
+
+    it('没有新会话或历史超出回看范围时保留未关联问题，不冒充当前状态', () => {
+      const v = viewOf((s) => {
+        s.tasks = {
+          ok: true,
+          rows: [task('o/fleet-dao', 3033, ago(5000)), task('o/fleet-dao', 3037, ago(10))],
+        };
+        // 查询只回近三天的 runs；更早的历史不在快照里，不能当成「没有重试」。
+        s.runs = { ok: true, rows: [] };
+      });
+      expect(problemOf(v, 'o/fleet-dao', 3033)).toContain('未关联信息');
+      expect(problemOf(v, 'o/fleet-dao', 3033)).not.toContain('当前重试');
+      expect(problemOf(v, 'o/fleet-dao', 3037)).toContain('未关联信息');
+    });
+
+    it('会话读取失败、身份不全或任务更新时间缺失时明确说无法判断', () => {
+      const unread = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3033, ago(10))] };
+        s.runs = { ok: false, why: '库查询出错：runs' };
+      });
+      expect(problemOf(unread, 'o/fleet-dao', 3033)).toContain('会话没读到，无法判断');
+
+      const unknownIdentity = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3033, ago(10))] };
+        s.runs = { ok: true, rows: [run({ repo: null, n: 3033, queued: 5 })] };
+      });
+      expect(problemOf(unknownIdentity, 'o/fleet-dao', 3033)).toContain('会话身份不全');
+
+      const unknownTime = viewOf((s) => {
+        s.tasks = { ok: true, rows: [task('o/fleet-dao', 3033, null)] };
+        s.runs = { ok: true, rows: [run({ n: 3033, queued: 5, ended: null })] };
+      });
+      expect(problemOf(unknownTime, 'o/fleet-dao', 3033)).toContain('任务更新时间没读到，无法判断');
+    });
   });
 
   it('定时任务：从没跑过、最近一轮没跑成、一个都没扫到、过期了；只查了一部分是留意', () => {
@@ -1697,13 +1792,15 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
         s.tasks = { ok: true, rows: [raw] };
       });
       expect(idleOf(v, 31)).toEqual([]);
-      expect(whats(v).filter((w) => w.startsWith('#31 '))).toEqual([`#31 最近的问题：等人批准 31`]);
+      expect(whats(v).filter((w) => w.startsWith('#31 '))).toEqual([
+        '#31 最近的问题（未关联信息，无法判断是否已重试）：等人批准 31',
+      ]);
       expect(taskOf(v, 31)).toMatchObject({
         executor: 'local',
         executorName: '本机',
         state: 'running',
         doing: '本机在做 31',
-        lastProblem: '等人批准 31',
+        lastProblem: '最近的问题（未关联信息，无法判断是否已重试）：等人批准 31',
         updatedAt: raw.updated_at,
       });
     });
