@@ -357,7 +357,7 @@ export class MirasimSession {
           action,
           summary,
         } satisfies ToolPayload);
-        this.#tx('tool_call', cut(rawSummary, 2000), { tool: tool.name });
+        this.#tx('tool_call', cut(rawSummary, 2000), { tool: tool.name, meta: { callId: tool.id } });
       }
       if (!isFinal(tool.status) || this.#ended.has(tool.id)) continue;
       this.#ended.add(tool.id);
@@ -376,7 +376,12 @@ export class MirasimSession {
               error: cut(`${tool.status}${typeof tool.result === 'string' ? `：${tool.result}` : ''}`, 500),
             }),
       } satisfies ToolPayload);
-      this.#tx('tool_result', toolResultText(tool, ok), { tool: tool.name, ok });
+      // Mirasim 的快照里没有命令的退出码：命令的结果「完成」不代表成功，记 exitKnown:false，读的一边写「结果未知」
+      this.#tx('tool_result', toolResultText(tool, ok), {
+        tool: tool.name,
+        ok,
+        meta: { callId: tool.id, ...(action === 'run' ? { exitKnown: false } : {}) },
+      });
       const path = this.#pathOf(tool);
       if (ok && action === 'edit' && path) {
         const rel = relPath(path, this.#cwd);

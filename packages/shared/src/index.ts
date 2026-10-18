@@ -9,6 +9,7 @@ export * from './ci-policy-bridge.ts';
 export * from './cli-versions.ts';
 export * from './continue-exhausted.ts';
 export type * from './domain.ts';
+export * from './edit-lines.ts';
 export * from './effort.ts';
 export * from './flow-mode.ts';
 export * from './flow-purposes.ts';
