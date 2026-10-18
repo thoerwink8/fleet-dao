@@ -226,7 +226,7 @@ describe('卡住报警立案', () => {
     let now = NOW;
     // reconcile:* 过期兜底不碰，隔了 8 天提醒还在，才走「看见已关之后再隔 7 天」。
     const alert = row({
-      dedupeKey: 'reconcile:ledger:acme/widgets#9',
+      dedupeKey: 'reconcile:pr:acme/widgets#9',
       body: '已立案：#7（2026-10-01）\n\n原来的正文',
       createdAt: new Date(NOW.getTime() - 10 * DAY),
     });
@@ -243,7 +243,7 @@ describe('卡住报警立案', () => {
     now = new Date(NOW.getTime() + 8 * DAY);
     const second = await h.run();
     expect(second.unchecked).toEqual([]);
-    expect(h.opened.map((o) => o.key)).toEqual(['alert-file:reconcile:ledger:acme/widgets#9:after:7']);
+    expect(h.opened.map((o) => o.key)).toEqual(['alert-file:reconcile:pr:acme/widgets#9:after:7']);
     expect(h.opened[0]?.body).not.toContain('已立案：');
     expect(alert.body.startsWith('已立案：#41（2026-10-17）\n\n')).toBe(true);
     expect(alert.body).toContain('原来的正文');
@@ -264,8 +264,8 @@ describe('卡住报警立案', () => {
     const missing = row({ id: 'm', dedupeKey: 'wf:failure:acme/widgets:missing' });
     const reconcile = row({
       id: 'r',
-      dedupeKey: 'reconcile:ledger:acme/widgets#9',
-      title: '合了的 PR 记账不全',
+      dedupeKey: 'reconcile:pr:acme/widgets#9',
+      title: '机器人开的 PR 没经合并队列合',
     });
     const h = harness([silenced, fixing, waiting, fresh, decision, stall, missing, reconcile], {
       handling: async () =>
@@ -281,10 +281,8 @@ describe('卡住报警立案', () => {
     });
     const part = await h.run();
     expect(part.unchecked).toEqual([]);
-    expect(h.opened.map((o) => o.key)).toEqual(['alert-file:reconcile:ledger:acme/widgets#9']);
-    expect(h.opened[0]?.body).toContain(
-      '无（AI 发现：提醒 reconcile:ledger:acme/widgets#9 第 1 天没人处理）',
-    );
+    expect(h.opened.map((o) => o.key)).toEqual(['alert-file:reconcile:pr:acme/widgets#9']);
+    expect(h.opened[0]?.body).toContain('无（AI 发现：提醒 reconcile:pr:acme/widgets#9 第 1 天没人处理）');
     expect(h.opened[0]?.labels).toEqual(['缺陷', '域:engine', '性质:bug']);
     expect(reconcile.body.startsWith('已立案：#')).toBe(true);
     for (const kept of [silenced, fixing, waiting, fresh, decision, stall, missing]) {
@@ -380,9 +378,9 @@ describe('卡住报警立案', () => {
     expect(ledger.body).not.toContain('已立案：');
   });
 
-  it('合并未满 7 天、刚好满 7 天的 reconcile:ledger 仍立案', async () => {
-    const six = row({ id: 'six', dedupeKey: 'reconcile:ledger:acme/widgets#9' });
-    const exact = row({ id: 'exact', dedupeKey: 'reconcile:ledger:acme/widgets#10' });
+  it('合并未满 7 天、刚好满 7 天的 reconcile:pr 仍立案', async () => {
+    const six = row({ id: 'six', dedupeKey: 'reconcile:pr:acme/widgets#9' });
+    const exact = row({ id: 'exact', dedupeKey: 'reconcile:pr:acme/widgets#10' });
     const h = harness([six, exact], {
       prMergedAt: async (_repo, number) => {
         if (number === 9) return new Date(NOW.getTime() - 6 * DAY);
@@ -393,47 +391,13 @@ describe('卡住报警立案', () => {
     const part = await h.run();
     expect(part.unchecked).toEqual([]);
     expect(h.opened.map((o) => o.key).sort()).toEqual(
-      ['alert-file:reconcile:ledger:acme/widgets#10', 'alert-file:reconcile:ledger:acme/widgets#9'].sort(),
+      ['alert-file:reconcile:pr:acme/widgets#10', 'alert-file:reconcile:pr:acme/widgets#9'].sort(),
     );
     expect(six.body.startsWith('已立案：#')).toBe(true);
     expect(exact.body.startsWith('已立案：#')).toBe(true);
     expect(h.opened.every((o) => o.body.includes('- 这条提醒的条件不再成立（对账撤掉它）'))).toBe(true);
     expect(h.opened.every((o) => !o.body.includes('diff 里看得到'))).toBe(true);
     expect(h.inserted, '不再写再提醒').toEqual([]);
-  });
-
-  it('合并未满 7 天的 reconcile:pr 不立案：条件是「发生过」，开出去只能靠加豁免交差（#3055），正文写没有可做的事', async () => {
-    const alert = row({
-      dedupeKey: 'reconcile:pr:thoerwink8/fleet-dao#2903',
-      title: '机器人开的 PR 没经合并队列合：thoerwink8/fleet-dao#2903',
-    });
-    const h = harness([alert], { prMergedAt: async () => new Date(NOW.getTime() - DAY) });
-    const part = await h.run();
-    expect(part.unchecked).toEqual([]);
-    expect(part.found).toBe(0);
-    expect(h.opened).toEqual([]);
-    expect(alert.resolvedAt).toBeNull();
-    expect(alert.body.startsWith('没有可做的事，已跳过立案\n\n')).toBe(true);
-    expect(alert.body).toContain('原来的正文');
-    // 下一轮不重复写
-    await h.run();
-    expect(h.opened).toEqual([]);
-    expect(alert.body.match(/没有可做的事/g)).toHaveLength(1);
-  });
-
-  it('reconcile:pr 另给了 diff 里看得见的验收条（doneItems）：照常立案', async () => {
-    const alert = row({ dedupeKey: 'reconcile:pr:acme/widgets#9' });
-    const h = harness([alert], {
-      prMergedAt: async () => new Date(NOW.getTime() - DAY),
-      doneItems: () => [
-        '- 这条提醒的条件不再成立（对账撤掉它）',
-        '- 绕开队列的那条合并路径已经改掉，diff 里看得到',
-      ],
-    });
-    const part = await h.run();
-    expect(part.unchecked).toEqual([]);
-    expect(h.opened.map((o) => o.key)).toEqual(['alert-file:reconcile:pr:acme/widgets#9']);
-    expect(alert.body.startsWith('已立案：#')).toBe(true);
   });
 
   it('不是 reconcile 的提醒照常立案，也不去问 PR 的合并时刻', async () => {
@@ -482,7 +446,7 @@ describe('卡住报警立案', () => {
   });
 
   it('【故意造出的失败】读不到 PR 的合并时刻：不跳过，记没查成', async () => {
-    const alert = row({ dedupeKey: 'reconcile:ledger:acme/widgets#9' });
+    const alert = row({ dedupeKey: 'reconcile:pr:acme/widgets#9' });
     const h = harness([alert], {
       prMergedAt: async () => {
         throw new Error('GitHub 502');
@@ -492,7 +456,7 @@ describe('卡住报警立案', () => {
     expect(h.opened).toHaveLength(1);
     expect(alert.body.startsWith('已立案：#')).toBe(true);
     expect(part.unchecked).toEqual([
-      '提醒 reconcile:ledger:acme/widgets#9 的 PR 合并时刻没查成，不跳过：GitHub 502',
+      '提醒 reconcile:pr:acme/widgets#9 的 PR 合并时刻没查成，不跳过：GitHub 502',
     ]);
   });
 });

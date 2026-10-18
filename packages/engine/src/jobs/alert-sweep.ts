@@ -14,8 +14,7 @@
 //    历史事实类不立案（#1420）：键以 reconcile:pr:、reconcile:ledger: 开头且对应 PR 已合并超过 7 天。事实已经发生、改不了，
 //    对账只在合并时判一次，条件永远还在，开单没有可做的事（#1418、#1419 因此白起了会话）。合并未满 7 天、别的类别照旧。
 //    读不到合并时刻不跳过，记没查成。立案前再自检：单的「怎么算做完」只有「提醒的条件不再成立」一条、且类别不在自己会撤的
-//    清单里，不开单，提醒正文写「没有可做的事，已跳过立案」。reconcile:pr: 合并未满 7 天的也这样算：条件是「发生过」，
-//    改代码撤不掉，开出去只能靠加豁免交差（#3055）；它留在驾驶舱等人点处理，满 7 天由对账当历史事实收。
+//    清单里，不开单，提醒正文写「没有可做的事，已跳过立案」。
 //
 // 各种提醒谁来撤（改这里之前先对一遍）：
 // - 「工作树没收掉」（子任务报的 sub:<子任务>:worktree、Fusion 报的 req:<仓>#<号>:worktree）、worktree:<树>「要你拍」：
@@ -95,8 +94,7 @@ export const REFILE_AFTER_MS = 7 * 24 * 60 * 60_000;
  */
 const HISTORICAL_MERGED_AFTER_MS = 7 * 24 * 60 * 60_000;
 /** 跟 jobs/reconcile-checks.ts 的前缀同一串。这里不引用那个文件：它反过来引用本文件，会绕成圈。 */
-const MERGED_PR_ALERT_PREFIX = 'reconcile:pr:';
-const HISTORICAL_FACT_PREFIXES = [MERGED_PR_ALERT_PREFIX, 'reconcile:ledger:'] as const;
+const HISTORICAL_FACT_PREFIXES = ['reconcile:pr:', 'reconcile:ledger:'] as const;
 const SKIP_FILING_NOTE = '没有可做的事，已跳过立案';
 const HISTORICAL_KEY = /^(?:reconcile:pr:|reconcile:ledger:)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)$/;
 /** 开出去的单贴缺陷类别和引擎故障查询轴。不贴「要人拍」「本机做」「待补」：拉不拉由现有准入决定。 */
@@ -439,11 +437,9 @@ export function renderAlertIssueBody(
 /**
  * 怎么算做完只有「提醒的条件不再成立」一条，而且这类提醒不会自己撤：开出去的单没有能做的事。
  * 自己会撤的不在这里拦（条件过去了对账会撤，那一条就是验收）。认不出节的不拦，交给上面的四节检查。
- * reconcile:pr: 虽在自己会撤的前缀里，条件却是「发生过」：只有人点处理、真实队列回执晚到、合并满 7 天当历史事实才撤，
- * 改代码撤不掉它。开出去的单只能靠加豁免交差（#3058 给 #2904 加的被 #3061 撤回，#3055 同样），照没有可做的事算。
  */
 function filingHasNothingToDo(key: string, issueBody: string): boolean {
-  if (resolvesItself(key) && !key.startsWith(MERGED_PR_ALERT_PREFIX)) return false;
+  if (resolvesItself(key)) return false;
   const parsed = criteriaOf(issueBody);
   if (!('ok' in parsed)) return false;
   return parsed.ok.length === 1 && (parsed.ok[0]?.includes('提醒的条件不再成立') ?? false);
