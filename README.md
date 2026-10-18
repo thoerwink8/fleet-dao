@@ -52,7 +52,7 @@
 
 - 装机：ops 第四节（怎么跑装机脚本）。
 - 发版：`deploy/release.sh`，见 ops 第九节（发布应用）。
-- 仓根命令（仓合同 `entry`）：`pnpm dev` 在本机起驾驶舱前端的 mock 开发服务（`packages/web` 的 `dev:mock`，前台跑、Ctrl+C 停，不需要后端）；`pnpm start` / `pnpm stop` 起停本机要常驻的东西，目前只有嵌入式 Postgres（`pnpm pg:local start` / `stop`，脱离会话起，要真库的 e2e 先 start）；`pnpm check` 见下。本机不起引擎和驾驶舱后端，它们跑在法国。进度单用 `pnpm progress <note|directive|claim|done|read>`，本机会话上报用 `pnpm local-sessions <install|uninstall|status>`。
+- 仓根命令（仓合同 `entry`）：`pnpm dev` 在本机起驾驶舱前端的 mock 开发服务（`packages/web` 的 `dev:mock`，前台跑、Ctrl+C 停，不需要后端）；`pnpm start` / `pnpm stop` 起停本机要常驻的东西，目前只有嵌入式 Postgres（`pnpm pg:local start` / `stop`，脱离会话起，要真库的 e2e 先 start）；`pnpm check` 见下。本机不起引擎和驾驶舱后端，它们跑在法国。进度单用 `pnpm progress <note|directive|claim|done|read>`，对外仓引导带 `--meaning`、原文走私有处，补传用 `pnpm progress quotes:flush`（见 [创始人引导](docs/directives/README.md)）；本机会话上报用 `pnpm local-sessions <install|uninstall|status>`。
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
 - 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，整个 `agents/test/` 只在它受影响时带、CI 每个 PR 照旧全跑，引擎的会话交活只认它；它判出要全跑时本机不跑、退出码 3，写明全量交给 CI，真要在本机全跑带 `--all`，只跑受影响的包带 `--affected`）和格式、类型；`pnpm check` 默认 = 格式 + 类型 + 改到的测试（同 `pnpm test:changed`，相对 origin/main）+ 卫生检查，四样都跑完再判红，每样报耗时，任何一样没跑成都算红；`pnpm check --all` 才全量 vitest run（本机要 8 分钟以上，和 CI 重复，一般不跑）。只改一个包的入口脚本、包内模块、测试（不在它 `exports`、`bin` 走得到的面上）时只测这个包自己，不连带依赖它的包（`packages/conventions/src/package-surface.ts`）。本机要真 Postgres 的（驾驶舱 e2e）先 `pnpm pg:local start`（Windows 嵌入式库，脱离会话起，见 `packages/web/e2e/README.md`）。CI 一律全套、并行跑，PR 和 main 都一样（`.github/workflows/ci.yml`，见 design 第五节「CI 一律全套」，决定 0101）；本机按改动选只是推前的快反馈。
 - 开单：`pnpm issue:new --kind 需求 --domain engine --nature bug --milestone 当前 --title "一句话" --body-file 正文.md`（`--domain` 是 engine、api、mirasim 里一个，`--nature` 是 bug、perf、process 里一个，标签名带「域:」「性质:」，只用来筛；`当前`＝开着的那个 `v<N>` 版本，一周一版、到期自动收口，别写死 `v<N>`；未排期写 `--milestone 未排期`，母单加 `--mother`，子单加 `--parent <母单号>`），缺类别、域、性质、里程碑，或正文里「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」有一节没写都不开；整份正文原样进 issue（没有 `--specs`，不再另存需求.md，#654）。
@@ -64,6 +64,8 @@
 - 无人值守状态按真实会话号隔离：`unattended.mjs` 的命令依次读取 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`CODEX_SESSION_ID`；Stop 和 SessionStart 优先使用事件里的 `session_id`，缺失才读同一组环境变量。给出的来源不合法就明确报错，不借另一个会话号。
 - 无人值守接续：Claude/Codex 用同步 Stop 把未完成工作送到下一轮，成功 PostToolUse 登记实质进展；后台任务条数不证明完成通知送达。连续三次无进展明确暂停故障；on 只记意图，不代表已安装、信任、执行或通知验证。各入口能力与验法见 [CLI 无人值守接续](docs/design/CLI无人值守接续.md)。
 - `pnpm work run <单号>` 登记真实 Claude session / Codex thread，开启无人值守后由同步 Stop 一次性消费本会话终态；Codex 后台完成不主动开新轮。只有 `CODEX_SESSION_ID` 的 root-session 不代替 thread；缺归属及旧 `dispatcher=null` 记录用 `pnpm work runs` 手工读取，续跑不改原归属。
+
+- 本机受管工人的审查退回：`pnpm work return <单号> --body-file <完整意见文件>` 交由退回专用工作流与既有合并闸按同一 PR 串行登记；先核实 PR 级 PREPARE，再写当前头阻合状态和正式 review 回执，未结 PREPARE 跨换头/强推继续阻合；只有核实真实状态与正式回执才报 `registered/blocked`，`queued/unconfirmed` 不代表已阻止合并。`pnpm work feedback <单号> [--wait|--retry]` 读取完整意见、等 Actions 结果或按原请求重试，取消、超时和断线保留本机意图。工人用 `pnpm work ack <单号> --return <编号>` 确认收到；审查方用 `pnpm work resolve <单号> --return <编号> --body-file <核验依据>` 对精确候选 head 解除责任；ack、CI 绿和新 head 都不代替 resolve。交付用 `pnpm work deliver <单号>`，不会擅自解除手工草稿。当前显式退回事务只允许个人仓 owner 发起，工人不能替审查方 resolve；普通组织仓和没有退回协议的本机 PR 保留原判法。
 
 ### 批量开母子单
 

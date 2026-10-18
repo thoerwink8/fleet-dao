@@ -281,6 +281,51 @@ describe('wait.mjs pr 同名检查只看最新那条（#2818）', () => {
   });
 });
 
+describe('wait.mjs pr 合并闸在等验收不算红（#3173）', () => {
+  const gate = (description: string) => ({
+    __typename: 'StatusContext',
+    context: 'merge-gate',
+    state: 'FAILURE',
+    description,
+  });
+  const AWAIT = gate('等验收：当前头 abcdef1 上的 cold-verify 还在跑（pending），引擎任务 PR，当前头上要有…');
+  const ask = (checks: unknown[]) => lib.stepPr(() => pr('OPEN', checks), 7, []);
+
+  it('merge-gate fail 理由是等验收：不退出，接着等到合并、退出码 0', async () => {
+    const f = fake([pr('OPEN', [AWAIT]), pr('OPEN', [AWAIT]), pr('MERGED')]);
+    expect(await lib.run(['pr', '7', '--interval', '1'], f.io)).toBe(0);
+    expect(f.out).toEqual(['PR #7 合并了 https://x/pull/7']);
+    expect(f.sleeps()).toBe(2);
+  });
+
+  it('merge-gate fail 别的理由：照样判红', () => {
+    for (const c of [
+      gate('验收没过：当前头 abcdef1 上的 cold-verify 是 failure…'),
+      gate('改标准缺创始人原话：碰了 docs/design.md…'),
+      gate('等验收：当前头 abcdef1 上的 cold-verify 还在跑…（另有 1 条，点详情看）'),
+      { __typename: 'StatusContext', context: 'merge-gate', state: 'FAILURE' },
+      { ...AWAIT, state: 'ERROR' },
+    ]) {
+      const s = ask([c]);
+      expect(s).toMatchObject({ done: true, ok: false });
+      if (s.done) expect(s.line).toContain('merge-gate');
+    }
+  });
+
+  it('merge-gate 在等验收、别的检查 fail：照样判红，只列红的那条', () => {
+    const s = ask([
+      AWAIT,
+      { __typename: 'CheckRun', name: 'ci', status: 'COMPLETED', conclusion: 'FAILURE' },
+      { __typename: 'StatusContext', context: 'other', state: 'FAILURE', description: '等验收：仿冒' },
+    ]);
+    expect(s).toMatchObject({ done: true, ok: false });
+    if (s.done) {
+      expect(s.line).toContain('ci、other');
+      expect(s.line).not.toContain('merge-gate');
+    }
+  });
+});
+
 describe('wait.mjs main-ci', () => {
   it('先取 main 头上的提交，等它的 ci.yml：还没起跑、在跑都接着等，成功退出码 0', async () => {
     const f = fake([

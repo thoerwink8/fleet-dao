@@ -304,6 +304,8 @@ export interface OpenPrInput extends Scope {
   generation?: number;
   /** 推这个头时数出来的文件清单（#3140，只记账）：开成了就记进 pr_head_files。没数成、老历史没有。 */
   numstat?: HeadFileStat[];
+  /** 截断前的总数或采集失败原因；老历史缺失时不能声称清单完整。 */
+  numstatSnapshot?: { total: number } | { reason: string };
 }
 
 /** 换掉已开着的 PR 的正文（#2723：第 2 轮起「做了什么」换成这一轮会话的回复）。 */
@@ -522,7 +524,13 @@ export interface EnginePorts {
   pushBranch(
     input: PushBranchInput,
     ctx: PortContext,
-  ): Promise<{ head: string; changedFiles?: string[]; addedLines?: number; numstat?: HeadFileStat[] }>;
+  ): Promise<{
+    head: string;
+    changedFiles?: string[];
+    addedLines?: number;
+    numstat?: HeadFileStat[];
+    numstatSnapshot?: { total: number } | { reason: string };
+  }>;
   openPr(input: OpenPrInput, ctx: PortContext): Promise<PullRequestRef>;
   updatePrBody(input: UpdatePrBodyInput, ctx: PortContext): Promise<void>;
   waitCi(input: WaitCiInput, ctx: PortContext): Promise<CiResult>;

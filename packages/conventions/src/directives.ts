@@ -68,6 +68,7 @@ export interface Directive {
   owner: string;
   source: string;
   text: string;
+  privateQuoteId?: string | undefined;
   /** 「## 经过」下面的各行（不带「- 」） */
   log: string[];
   /** 仓里的路径 */
@@ -150,6 +151,7 @@ export function formatDirective(d: Omit<Directive, 'path'>): string {
     `- 主：${d.owner}`,
     `- 来源：${d.source}`,
     ...(d.issue !== undefined ? [`- 单：#${d.issue}`] : []),
+    ...(d.privateQuoteId ? [`- 原话：私有处 ${d.privateQuoteId}`] : []),
     '',
     '## 原话',
     '',
@@ -171,12 +173,16 @@ export function parseDirective(raw: string, path: string): Directive {
   const at = field('时间');
   const owner = field('主');
   const source = field('来源');
+  const privateRef = field('原话');
+  const privateQuoteId =
+    privateRef === undefined ? undefined : /^私有处 ([0-9a-f-]{36})$/i.exec(privateRef)?.[1];
   const q = text.indexOf('\n## 原话\n');
   const l = text.lastIndexOf('\n## 经过\n');
   // 新文件没有「经过」一节；旧文件有
   const textEnd = l > q ? l : text.length;
   if (
     !id ||
+    (privateRef !== undefined && privateQuoteId === undefined) ||
     (status !== undefined && !STATUSES.includes(status)) ||
     (issueText !== undefined && issue === undefined) ||
     (status === undefined && issue === undefined) ||
@@ -204,6 +210,7 @@ export function parseDirective(raw: string, path: string): Directive {
     at,
     owner,
     source,
+    ...(privateQuoteId ? { privateQuoteId } : {}),
     text: text.slice(q + '\n## 原话\n'.length, textEnd).trim(),
     log,
     path,
@@ -298,6 +305,7 @@ export function latestFounderPrompt(
 }
 
 export interface DirectiveInput {
+  preserveText?: boolean | undefined;
   text?: string | undefined;
   at?: string | undefined;
   owner?: string | undefined;
@@ -334,8 +342,8 @@ export function resolveDirective(
   const pick = 'entries' in log ? latestFounderPrompt(log.entries, ids) : null;
   const pickWhy =
     'why' in log ? log.why : ids.length === 0 ? '不知道本会话的会话号' : 'prompt-log 里没有本会话他说的话';
-  const text = input.text?.trim() ?? '';
-  if (!text) {
+  const text = input.preserveText ? (input.text ?? '') : (input.text?.trim() ?? '');
+  if (!text.trim()) {
     if (input.at !== undefined)
       throw new DirectiveRefused(
         '给了 --at 却没给原话：原话和时间要么都手填，要么都从 prompt-log 取。没记。',
@@ -343,7 +351,7 @@ export function resolveDirective(
     if (pick === null)
       throw new DirectiveRefused(`没给原话，prompt-log 也取不到（${pickWhy}）。${HAND_FILL}`);
     return {
-      text: pick.prompt.trim(),
+      text: input.preserveText ? pick.prompt : pick.prompt.trim(),
       at: stampZ(pick.at),
       atDate: pick.at,
       owner,
@@ -354,7 +362,7 @@ export function resolveDirective(
     const n = normalizeAt(input.at);
     return { text, at: n.text, atDate: n.date, owner, source: '手填' };
   }
-  if (pick !== null && pick.prompt.trim() === text)
+  if (pick !== null && pick.prompt.trim() === text.trim())
     return { text, at: stampZ(pick.at), atDate: pick.at, owner, source: pick.source ?? 'prompt-log' };
   throw new DirectiveRefused(
     `缺 --at "<原话的时间>"：给的原话和 prompt-log 里本会话最近一句对不上（${pick === null ? pickWhy : '不是同一句'}），时间借不来。没记。`,
@@ -611,7 +619,14 @@ export interface RecordDeps extends StoreDeps {
  * 要挂单：给了 issue 就先查它开着；没给就开一张（没有 newIssue 就拒绝，不留空）。文件写进去以后不再改。
  */
 export async function recordDirective(
-  r: { text: string; at: string; atDate: Date; owner: string; source: string },
+  r: {
+    text: string;
+    at: string;
+    atDate: Date;
+    owner: string;
+    source: string;
+    privateQuoteId?: string | undefined;
+  },
   deps: RecordDeps,
   issue?: number,
 ): Promise<{ id: string; path: string; issue: number; url: string }> {
@@ -634,6 +649,7 @@ export async function recordDirective(
     owner: r.owner,
     source: r.source,
     text: r.text,
+    privateQuoteId: r.privateQuoteId,
     log: [],
   });
   const url = await proposeFile(deps, {

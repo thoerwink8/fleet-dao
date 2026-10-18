@@ -1030,6 +1030,27 @@ function writeJsonAtomic(path, value) {
  * 后台那半：取远端、规矩同步、整池暂停、绿了没挂的 PR、扫工作树，结果写进 bgCachePath。每一步单独兜住，出错记 { ok: false, why }。
  * 另一个后台拿着新锁时什么都不做，返回 'busy'。
  */
+/** 只在后台补传，回执/错误不进入开场缓存，避免泄漏私有正文。 */
+export function flushQuotesInBackground({ home, script, run = spawnSync }) {
+  const dir = join(home, '.fleet-dao', 'private', 'quotes');
+  if (!existsSync(dir)) return [];
+  try {
+    if (readdirSync(dir).length === 0) return [];
+    if (!script) return ['私有原话没传成：补传脚本未安装，待传仍留本机。'];
+    const r = run(process.execPath, [script, 'quotes:flush'], {
+      encoding: 'utf8',
+      timeout: BG_SCRIPT_MS,
+      windowsHide: true,
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+    });
+    if (r.error || r.status !== 0)
+      return ['私有原话没传成：待传仍留本机，运行 pnpm progress quotes:flush 重试。'];
+    return [];
+  } catch {
+    return ['私有原话没传成：本机待传目录读不到，内容不回显。'];
+  }
+}
+
 export function runBackground({
   cwd,
   home,
@@ -1041,6 +1062,7 @@ export function runBackground({
   idlePr = idlePrRunner(),
   poolHolds = null,
   fallbackProxy = undefined,
+  flushQuotes = null,
 }) {
   const common = commonOf((...a) => localGit(cwd, a));
   const path = cachePathOf(home, common);
@@ -1071,6 +1093,18 @@ export function runBackground({
       });
     }
     step('sync', () => syncFleet({ home, git, sync, now }));
+    step('quotes', () =>
+      (
+        flushQuotes ??
+        (() =>
+          flushQuotesInBackground({
+            home,
+            script: source
+              ? progressScript(cwd, join(source.syncDirIn(home), PROGRESS_SCRIPT))
+              : progressScript(cwd, null),
+          }))
+      )(),
+    );
     step('holds', () => (poolHolds ?? (() => readFrancePoolHolds({ home, env, now, spawn: spawnSync })))());
     if (common !== null) {
       const syncDir = source ? source.syncDirIn(home) : null;
@@ -1164,6 +1198,9 @@ export function fastSessionStart({
   const h = got('holds');
   if (h?.ok) lines.push(...poolHoldPromptLines(h.value, beijingToday(now)).map(aged));
   lines.push(...failed('holds', '整池暂停'));
+  const quotes = got('quotes');
+  if (quotes?.ok && Array.isArray(quotes.value)) lines.push(...quotes.value.map(aged));
+  lines.push(...failed('quotes', '私有原话补传'));
   lines.push(...(repoContract ? repoContract(cwd) : []));
   // 引导段同步现查，不用后台缓存：缓存里的「没办完」可能已经办完了（#2726）；办没办完看挂的单，读 GitHub（#2727）
   const syncDir = source ? source.syncDirIn(home) : null;

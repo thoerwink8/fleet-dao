@@ -133,7 +133,12 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'web'] as const;
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
   // 派工/同步 Stop 集成与 subagent:stats 读取真实 hooks 及其依赖，缓存和本机选测须覆盖同一输入。
-  conventions: ['agents/hooks/', '.github/workflows/query-metadata.yml'],
+  conventions: [
+    'agents/hooks/',
+    '.github/workflows/query-metadata.yml',
+    '.github/workflows/managed-feedback.yml',
+    'packages/shared/src/private-quotes.ts',
+  ],
   db: ['adapters', 'core'],
   [AGENTS_UNIT]: ['db', 'agents-sync', 'packages/conventions/standard-paths.json'],
 };
