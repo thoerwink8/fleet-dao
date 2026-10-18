@@ -17,6 +17,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitBroken, gitOk as ok } from './git-run.mjs';
+import { isMainModule } from './is-main.mjs';
 import { hasSelfMark, repoKind, repoKindInfo, SELF_MARK } from './repo-kind.mjs';
 
 /** 按 git 公共目录分仓的记号名：和 fresh-main.mjs 的 repoStampKey 同一种算法（测试钉着两边一致） */
@@ -367,14 +368,7 @@ export function contractLines({ cwd, git, home, now = Date.now(), hookDir = HERE
   }
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   const [cmd, ...rest] = process.argv.slice(2);
   const dryRun = rest.includes('--dry-run');
   const markSelf = rest.includes('--self');

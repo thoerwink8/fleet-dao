@@ -122,6 +122,49 @@ describe('例外：本机说过的最先，其次 fleet-dao 和自用仓标记',
   });
 });
 
+describe('读原始远端配置：insteadOf 只改传输地址，pushurl 也算，读失败不当成没有远端', () => {
+  it('原始地址在他 GitHub、传输被改写成中转：照原始地址判自用仓', () => {
+    const url = 'https://github.com/thoerwink8/mine.git';
+    const root = gitRepo({}, { origin: url });
+    const rewritten: Git = (cwd, args) =>
+      git(cwd, [
+        '-c',
+        'url.https://relay.fixture.invalid/.insteadOf=https://github.com/thoerwink8/',
+        ...args,
+      ]);
+    expect(rewritten(root, ['remote', '-v']).stdout).toContain('https://relay.fixture.invalid/mine.git');
+    expect(lib.repoKindInfo(root, { git: rewritten })).toMatchObject({ kind: 'self', remotes: [url] });
+  });
+
+  it('陌生原始地址被改写成他 GitHub：照原始地址判对外仓；显式非他的 pushurl：对外仓', () => {
+    const stranger = 'https://unknown.fixture.invalid/repo.git';
+    const root = gitRepo({}, { origin: stranger });
+    const rewritten: Git = (cwd, args) =>
+      git(cwd, ['-c', `url.https://github.com/thoerwink8/mine.git.insteadOf=${stranger}`, ...args]);
+    expect(lib.repoKind(root, { git: rewritten })).toBe('external');
+    const mixed = gitRepo({}, { origin: MINE });
+    runChildOk('git', ['config', 'remote.origin.pushurl', 'git@github.com:someone/other.git'], {
+      cwd: mixed,
+    });
+    expect(kindOf(mixed)).toBe('external');
+  });
+
+  it('【故意造出的失败】读远端配置失败、超时：source 是 unchecked，照对外仓办，不当成没有远端', () => {
+    const root = gitRepo({}, { origin: MINE });
+    for (const failed of [
+      { status: 128, stdout: '', stderr: 'cannot read config' },
+      { status: null, stdout: '', stderr: '', error: new Error('timed out') },
+      { status: 0, stdout: 'garbage', stderr: '' },
+    ]) {
+      const broken: Git = (cwd, args) => (args.includes('--get-regexp') ? failed : git(cwd, args));
+      expect(lib.repoKindInfo(root, { git: broken })).toMatchObject({
+        kind: 'external',
+        source: 'unchecked',
+      });
+    }
+  });
+});
+
 describe('远端地址认法', () => {
   it('认 scp 写法、https、ssh://、github 开头的 ssh 别名；GitLab、本地路径不算 GitHub', () => {
     expect(lib.githubOwnerOf('git@github.com:thoerwink8/fleet-dao.git')).toBe('thoerwink8');

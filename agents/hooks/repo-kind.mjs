@@ -12,8 +12,8 @@
 // 和别的钩子一样被 agents-sync 整份拷进 ~/.fleet-dao/hooks/，只用 node 自带模块和同目录脚本。
 import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { gitBroken, gitOk, gitRunner, gitWhy } from './git-run.mjs';
+import { isMainModule } from './is-main.mjs';
 
 /** 自用仓的标记：仓根 AGENTS.md 里单独一行 */
 export const SELF_MARK = '<!-- repo-kind: 自用仓 -->';
@@ -49,15 +49,17 @@ export function repoKindInfo(root, deps = {}) {
     return { kind: 'self', source: 'fleet-dao', why: 'fleet-dao 本身', remotes: [] };
   if (hasSelfMark(root, read))
     return { kind: 'self', source: 'mark', why: `仓根 AGENTS.md 有自用仓标记 ${SELF_MARK}`, remotes: [] };
-  const r = git(root, ['remote', '-v']);
-  if (gitBroken(r) || !gitOk(r))
+  // remote -v / get-url 会展开 insteadOf（本机走代理时 GitHub 地址被改写），归属要读原始配置；pushurl 也算。
+  const r = git(root, ['config', '--null', '--get-regexp', '^remote\\..*\\.(url|pushurl)$']);
+  const none = r.status === 1 && !r.error && !r.stdout && !r.stderr;
+  const remotes = none ? [] : gitBroken(r) || !gitOk(r) ? null : remotesOf(r.stdout);
+  if (remotes === null)
     return {
       kind: 'external',
       source: 'unchecked',
-      why: `没读成远端（${gitWhy(r)}），照对外仓办`,
+      why: `没读成远端（${gitOk(r) ? '远端配置输出认不出' : gitWhy(r)}），照对外仓办`,
       remotes: [],
     };
-  const remotes = remotesOf(r.stdout);
   if (remotes.length === 0)
     return { kind: 'external', source: 'no-remote', why: '没有远端，判不出来，照对外仓办', remotes };
   const others = remotes.filter((u) => !isFounderRemote(u));
@@ -113,16 +115,21 @@ export function hasSelfMark(root, read = (p) => readFileSync(p, 'utf8')) {
   }
 }
 
-/** `git remote -v` 的输出 → 去重的地址 @param {string} text */
+/**
+ * `git config --null --get-regexp` 的输出（每条 key\nvalue\0，地址里的空白不当分隔）→ 去重的地址；认不出回 null
+ * @param {string} text
+ * @returns {string[] | null}
+ */
 function remotesOf(text) {
-  return [
-    ...new Set(
-      text
-        .split(/\r?\n/)
-        .map((l) => l.split(/\s+/)[1] ?? '')
-        .filter(Boolean),
-    ),
-  ];
+  if (!text.endsWith('\0')) return null;
+  /** @type {string[]} */
+  const out = [];
+  for (const record of text.slice(0, -1).split('\0')) {
+    const split = record.indexOf('\n');
+    if (split < 0 || !/^remote\..*\.(url|pushurl)$/.test(record.slice(0, split))) return null;
+    out.push(record.slice(split + 1));
+  }
+  return [...new Set(out)];
 }
 
 /**
@@ -174,14 +181,7 @@ export function setRepoKind(root, kind, git) {
   return { ok: true, lines };
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   const args = process.argv.slice(2);
   const cmd = ['show', 'self', 'external'].includes(args[0] ?? '') ? args[0] : 'show';
   const arg = args.find((a, i) => !(i === 0 && a === cmd) && !a.startsWith('--'));
