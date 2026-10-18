@@ -6,8 +6,9 @@
 // 另外：要人本人拍的发版恢复动作（选项 / 先不动 / 自由输入 / 不答）、409 全家（条件变了、已撤、incident 对不上、动作过期、
 // 在途、结果未知）、幂等重放、状态落库。
 // 关于「真检测器」：api 不依赖 engine（给 api 加 engine 依赖会让每个 engine 改动都连带测 api，ci-plan 钉着不许），所以这里的
-// detector* 是照引擎检测器的出口（键、标题、撤卡口径）写的替身；它们和真检测器对得上，靠 packages/engine/test/alert-repair-keys.test.ts
-// 用真的 watchIdleRunning、judgeReleaseAttention 钉死同一批键和形状。
+// detector* 是照引擎检测器的出口（键、标题、撤卡口径）写的替身。键的写法在引擎那头各有钉子：发版卡住的
+// watchdog:release:train:<提交前 12 位>:running 由引擎 watchdog 测试按字面核；idle-running 的前缀是引擎 idle-running.ts 的
+// IDLE_RUNNING_ALERT_PREFIX。改了键的写法，要连 alert-repair.ts 的 IDLE_PREFIX、RELEASE_KEY 和这里的替身一起改。
 import { checkIssueBody } from '@fleet-dao/conventions';
 import type { AlertRepairRecord } from '@fleet-dao/shared';
 import { NotificationsResponse, TASK_SIGNAL_NAMES, WEB_API_PREFIX } from '@fleet-dao/shared';
