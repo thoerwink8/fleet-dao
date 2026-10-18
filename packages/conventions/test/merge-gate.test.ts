@@ -525,6 +525,33 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
     expect(w.written.map((s) => s.state)).toEqual(['success', 'success']);
   });
 
+  it('pending只使required status失败，writer成功；独立probe仍退出1，真读写失败退出2', async () => {
+    const pending = () =>
+      world({
+        prOver: FLOW_REF,
+        statuses: [{ context: 'cold-verify', state: 'pending', description: 'running' }],
+      });
+    const w = pending();
+    expect((await run(w, 'pull_request_target', { pull_request: { number: 80 } })).code).toBe(0);
+    expect(w.written[0]).toMatchObject({ state: 'failure' });
+    expect(w.written[0]?.description).toMatch(/^等验收：/);
+    expect(
+      (await run(pending(), 'pull_request_target', { pull_request: { number: 80 } }, { write: false })).code,
+    ).toBe(1);
+    const refused = world({
+      prOver: FLOW_REF,
+      statuses: [{ context: 'cold-verify', state: 'failure', description: 'failed' }],
+    });
+    expect((await run(refused, 'pull_request_target', { pull_request: { number: 80 } })).code).toBe(0);
+    expect(refused.written[0]?.description).toMatch(/^验收没过：/);
+    const writeFailed = pending();
+    writeFailed.broken.writeStatus = '403';
+    expect((await run(writeFailed, 'pull_request_target', { pull_request: { number: 80 } })).code).toBe(2);
+    const readFailed = pending();
+    readFailed.broken.statuses = '502';
+    expect((await run(readFailed, 'pull_request_target', { pull_request: { number: 80 } })).code).toBe(2);
+  });
+
   it('主线推送时读不到开着的 PR 列表：没查成（退出码 2），一条状态都不写，不当成「没有要算的」', async () => {
     const w = world({ open: [{ number: 80 }] });
     w.broken.openPrs = '列表读不到';
