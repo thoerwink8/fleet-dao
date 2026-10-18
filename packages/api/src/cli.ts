@@ -73,6 +73,13 @@ import {
 } from './feishu-push-cli.ts';
 import { describeFlowMode, readFlowMode, setFlowMode } from './flow-mode-switch.ts';
 import {
+  HISTORICAL_AUDIT_USAGE,
+  type HistoricalAuditSource,
+  openHistoricalAuditSource,
+  parseHistoricalAudit,
+  resolveHistoricalAudit,
+} from './historical-audit-cli.ts';
+import {
   NOTIFY_USAGE,
   NotifyCliError,
   type NotifyRaiseArgs,
@@ -868,6 +875,9 @@ export type CliEnv = Readonly<Record<string, string | undefined>>;
 
 /** 命令行碰外面的几样：环境变量、输出、连库、读 GitHub、连 Temporal、钟。测试换成内存库和假的，收下输出。 */
 export interface CliDeps {
+  openHistoricalAuditSource?: (
+    url: string,
+  ) => Promise<{ source: HistoricalAuditSource; close(): Promise<void> }>;
   env: CliEnv;
   out(text: string): void;
   err(text: string): void;
@@ -1132,6 +1142,7 @@ const USAGES: Record<string, string> = {
   'emergency-issue': EMERGENCY_ISSUE_USAGE,
   notify: NOTIFY_USAGE,
   acceptance: ACCEPTANCE_USAGE,
+  'historical-audit': HISTORICAL_AUDIT_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -1262,6 +1273,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     );
   }
   if (command === 'alert') return runAlertCommand(rest, deps);
+  if (command === 'historical-audit') return runHistoricalAuditCommand(rest, deps);
   if (command === 'task') return runTaskCommand(rest, deps);
   if (command === 'release') return runReleaseCli(rest, deps);
   if (command === 'feishu-push') return runFeishuPushCommand(rest, deps);
@@ -1346,10 +1358,49 @@ function lazy<T extends object>(open: () => Promise<T>): T {
   });
 }
 
-/**
- * alert（design 15.3「谁在处理」）：带 --json 只往标准输出打一行 JSON（本机脚本读），不带打给人看的话；
- * 出错也照这个样子打。退出码见 alert-cli.ts 开头：0 好了，1 没做成（连不上库、库出错），2 参数不对。
- */
+/** Historical audit disposition uses the existing ops identity and atomic notification/audit transaction. */
+async function runHistoricalAuditCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  if (rest.length === 1 && isHelp(rest[0])) {
+    deps.out(HISTORICAL_AUDIT_USAGE);
+    return 0;
+  }
+  if (rest.length) {
+    deps.err(HISTORICAL_AUDIT_USAGE);
+    return 2;
+  }
+  let input: ReturnType<typeof parseHistoricalAudit>;
+  try {
+    input = parseHistoricalAudit(await (deps.readStdin ?? readAllStdin)());
+  } catch (error) {
+    deps.err(`参数不对：${errMessage(error)}`);
+    return 2;
+  }
+  let opened: Awaited<ReturnType<CliDeps['openStore']>> | undefined;
+  let source: Awaited<ReturnType<typeof openHistoricalAuditSource>> | undefined;
+  try {
+    const url = databaseUrl(deps.env);
+    opened = await deps.openStore(url);
+    source = await (deps.openHistoricalAuditSource ?? openHistoricalAuditSource)(url);
+    deps.out(
+      JSON.stringify(
+        await resolveHistoricalAudit(input, {
+          store: opened.store,
+          source: source.source,
+          operator: operatorName(deps.env),
+        }),
+      ),
+    );
+    return 0;
+  } catch (error) {
+    deps.err(`历史审计处置未做成：${errMessage(error)}`);
+    return 1;
+  } finally {
+    await source?.close();
+    await opened?.close();
+  }
+}
+
+/** alert: JSON or text output, with explicit usage/error exit status. */
 async function runAlertCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
   const json = rest.includes('--json');
   const fail = (code: number, message: string) => {

@@ -83,6 +83,7 @@ import {
   readNodeSnapshot,
   readWorktreeInventoryPayload,
 } from './node-logic.ts';
+import { matchesNotification, sameResolutionAudit } from './notification-resolution.ts';
 import { nextCursorOf } from './paging.ts';
 import type {
   AuditRecord,
@@ -676,9 +677,34 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       for (const r of rows) counts[r.level] = r.n;
       return counts;
     },
-    async resolveNotification({ id, by }, entry) {
+    async resolveNotification({ id, by, expected }, entry) {
       if (!isUuid(id)) return 'not_found';
       return db.transaction(async (tx) => {
+        if (expected) {
+          const [current] = await tx
+            .select()
+            .from(notifications)
+            .where(eq(notifications.id, id))
+            .for('update');
+          if (!current) return 'not_found';
+          if (
+            !matchesNotification(
+              { ...current, dedupeKey: current.dedupeKey ?? undefined, link: current.link ?? undefined },
+              expected,
+            )
+          )
+            return 'conflict';
+          if (current.resolvedAt) {
+            if (current.resolvedBy !== by.id) return 'conflict';
+            const records = await tx
+              .select()
+              .from(auditLog)
+              .where(and(eq(auditLog.target, entry.target), eq(auditLog.action, entry.action)));
+            return records.some((a) => sameResolutionAudit(toAudit(a), entry))
+              ? 'already_resolved'
+              : 'conflict';
+          }
+        }
         const updated = await tx
           .update(notifications)
           .set({ resolvedAt: now(), resolvedBy: by.id })

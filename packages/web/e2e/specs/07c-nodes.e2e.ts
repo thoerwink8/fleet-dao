@@ -112,19 +112,17 @@ test.describe('看板多机', () => {
   test('失联：浏览器的钟快进 10 分钟，横幅写「失联 10 分钟」、说不是现在的，顶栏标「失联」，下拉里那一项变灰', async ({
     page,
     shot,
-    problems,
   }) => {
-    // 钟一快进，轮询一下子到期好几回，新一轮请求把还在路上的上一轮取消掉：被取消的不是失败。
-    // 环境列表（顶栏）和提醒（外壳）都在轮询，都会撞上。
-    problems.allow('/api/nodes net::ERR_ABORTED');
-    problems.allow('/api/notifications net::ERR_ABORTED');
-    // 钟从「推成快照那一刻」起走，不从现在：快照可能是 2 分半内前面用例推的（beforeEach 不重推），从现在起快进 10 分钟
-    // 横幅会写 11、12 分钟（CI 上撞过）。从推成那一刻起，快进 10 分钟就正好失联 10 分钟。
+    // 钟从「推成快照那一刻」起走，不从现在：快照可能是 2 分半内前面用例推的（beforeEach 不重推），从现在起拨 10 分钟
+    // 横幅会写 11、12 分钟（CI 上撞过）。从推成那一刻起，拨到它之后 10 分钟就正好失联 10 分钟。
     await page.clock.install({ time: new Date(pushedAt) });
     await page.goto('/?node=wsl');
     const banner = page.locator('[data-snapshot-banner]');
     await expect(banner).toHaveAttribute('data-snapshot-banner', 'fresh');
-    await page.clock.fastForward('10:00');
+    // 只拨墙上的钟（setSystemTime），不快进定时器（fastForward）：每个请求都挂着 90 秒的超时 abort（src/api/http.ts），
+    // 快进 10 分钟会把那一刻还在路上的请求全掐掉（ERR_ABORTED，页面还当它超时），掐到哪几个看当时谁在飞，首跑偶发红（#3064）。
+    // 新鲜度本来就按页面的钟现算、不等重拉，拨钟不触发任何轮询，正好验这一点。
+    await page.clock.setSystemTime(new Date(pushedAt + 10 * 60_000));
     await expect(banner).toHaveAttribute('data-snapshot-banner', 'stale');
     await expect(banner).toContainText('失联 10 分钟');
     await expect(banner).toContainText('不是现在的');

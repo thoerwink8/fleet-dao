@@ -392,9 +392,13 @@ export interface OpsStore {
   /** 各级别的真实条数（不受分页上限影响）；status 口径同 listNotifications。 */
   countNotifications(query: { status: 'open' | 'all' }): Promise<Record<NotificationRecord['level'], number>>;
   resolveNotification(
-    input: { id: string; by: Actor },
+    input: {
+      id: string;
+      by: Actor;
+      expected?: import('./notification-resolution.ts').NotificationResolutionGuard;
+    },
     audit: NewAuditEntry,
-  ): Promise<'ok' | 'already_resolved' | 'not_found'>;
+  ): Promise<'ok' | 'already_resolved' | 'not_found' | 'conflict'>;
   /**
    * 回答一条还开着的「要你拍」（#1915）：点选项给 optionId，自己输入给 text（二选一，路由已核过）。只记答案和操作记录，
    * 不转已处理——独立 claim 后执行，再由 settleDecision 按答案编号和 claim CAS 结算。未接活可替换；executing/queued/unknown 拒绝不同答案；同请求复用，确定失败可重试。
