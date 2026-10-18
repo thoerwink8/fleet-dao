@@ -307,7 +307,7 @@ export class GrokStreamReader {
       ok,
       ...optional('error', ok ? undefined : failureDetail(status, output, frame.content)),
     } satisfies ToolPayload);
-    // 改文件的结果带这一次改了几行：content 里的 diff 块有改前改后的文本，去掉共同头尾再数
+    // 改文件的结果带这一次改了几行：content 里的 diff 块按行精确差分，超限保留未知。
     const lines = ok && EDIT_KINDS.has(tool.kind) ? diffLines(frame.content) : undefined;
     const resultMeta = { ...(id ? { callId: id } : {}), ...(lines ?? {}) };
     this.#tx(effect, 'tool_result', resultTextOf(status, output, frame.content, ok), {
@@ -422,10 +422,11 @@ function diffLines(content: unknown): LineCounts | undefined {
   for (const c of content) {
     const block = rec(c);
     if (block?.type !== 'diff') continue;
-    const oldText = str(block.oldText) ?? '';
-    const newText = str(block.newText);
-    if (newText === undefined) continue;
+    const oldText = block.oldText;
+    const newText = block.newText;
+    if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined;
     const d = countTextDiff(oldText, newText);
+    if (d === undefined) return undefined;
     total = { added: (total?.added ?? 0) + d.added, removed: (total?.removed ?? 0) + d.removed };
   }
   return total;

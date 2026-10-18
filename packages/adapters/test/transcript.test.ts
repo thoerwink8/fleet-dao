@@ -295,6 +295,57 @@ describe('cursor-agent', () => {
 });
 
 describe('grok', () => {
+  function editResult(oldText: unknown, newText: unknown, extraUnknown = false): TranscriptEntry {
+    const reader = new GrokStreamReader({ runId: 'r', cwd: '/tmp/agent-io-p3/x', now: () => NOW });
+    const entries = fixtureLines('grok', 'grok-edit-commit').flatMap((line) => {
+      const frame = JSON.parse(line);
+      if (frame.type === 'tool_call_update' && Array.isArray(frame.content)) {
+        frame.content = frame.content.map((block: Record<string, unknown>) =>
+          block.type === 'diff' ? { ...block, oldText, newText } : block,
+        );
+        if (extraUnknown && frame.content.some((block: Record<string, unknown>) => block.type === 'diff')) {
+          frame.content.push({ type: 'diff', oldText: 'old\n'.repeat(2000), newText: 'new\n'.repeat(2000) });
+        }
+      }
+      return reader.read(JSON.stringify(frame)).transcript ?? [];
+    });
+    const result = entries.find((entry) => entry.kind === 'tool_result' && entry.tool === 'search_replace');
+    if (!result) throw new Error('真实记录缺少 search_replace 结果');
+    return result;
+  }
+
+  it('真实工具结果帧的不相邻修改不把未改中间行计入', () => {
+    expect(editResult('head\na\nunchanged\nb\ntail', 'head\nA\nunchanged\nB\ntail').meta).toMatchObject({
+      added: 2,
+      removed: 2,
+    });
+  });
+
+  it('一个 diff 块未知则整个工具行数未知，保留成功结果和调用号', () => {
+    const result = editResult('a', 'b', true);
+    expect(result.ok).toBe(true);
+    expect(result.meta?.callId).toBeTruthy();
+    expect(result.meta).not.toHaveProperty('added');
+    expect(result.meta).not.toHaveProperty('removed');
+  });
+
+  it('缺失或错误类型的原文不是空文本；明确空文本才按新建计数', () => {
+    for (const [before, after] of [
+      [undefined, 'new'],
+      [12, 'new'],
+      ['old', undefined],
+      ['old', false],
+    ]) {
+      const result = editResult(before, after);
+      expect(result.ok).toBe(true);
+      expect(result.meta?.callId).toBeTruthy();
+      expect(result.meta).not.toHaveProperty('added');
+      expect(result.meta).not.toHaveProperty('removed');
+    }
+    expect(editResult('', 'new\n').meta).toMatchObject({ added: 1, removed: 0 });
+    expect(editResult('old\n', '').meta).toMatchObject({ added: 0, removed: 1 });
+  });
+
   function grok(name: string): TranscriptEntry[] {
     const reader = new GrokStreamReader({ runId: 'r', cwd: '/tmp/agent-io-p3/x', now: () => NOW });
     const entries = fixtureLines('grok', name).flatMap((l) => reader.read(l).transcript ?? []);
