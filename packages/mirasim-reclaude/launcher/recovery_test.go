@@ -137,8 +137,9 @@ func TestSupervisorHostResendOfUnknownDoesNotRepeatSideEffect(t *testing.T) {
 	a := startReplayApp(t, f, cache, "MIRASIM_TEST_CONSUMED="+consumed)
 	input := map[string]any{"type": "user", "uuid": "original-uuid", "message": map[string]any{"role": "user", "content": "consume-no-echo"}}
 	a.send(t, input)
-	// 唯一正常 result 确认合成副作用已执行；300ms 的启动超时若先到，继续等真实 success。
-	for r := a.until(t, "result"); r["is_error"] != false; r = a.until(t, "result") {
+	// 初始化已就绪，首个 result 必须确认合成副作用执行成功。
+	if r := a.until(t, "result"); r["is_error"] != false {
+		t.Fatalf("就绪后首次执行不应先返回交付错误：%v", r)
 	}
 	a.send(t, input)
 	refusal := a.until(t, "result")
@@ -330,7 +331,7 @@ func TestSupervisorPersistenceFailureIsVisibleBeforeChildInvocation(t *testing.T
 		t.Fatal(err)
 	}
 	invoked := filepath.Join(f.home, "invoked")
-	a := startReplayApp(t, f, cache, "MIRASIM_TEST_INVOKED="+invoked)
+	a := startReplayAppUninitializedAs(t, f, cache, "--session-id", "MIRASIM_TEST_INVOKED="+invoked)
 	// Windows 对中间目录是文件的 ReadFile 可报不存在；真正保存时仍必须在启动子进程前拒绝。
 	_, _ = a.in.Write([]byte("{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"synthetic\"}}\n"))
 	if err := waitEnded(t, a); err == nil {

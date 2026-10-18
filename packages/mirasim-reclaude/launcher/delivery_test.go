@@ -24,6 +24,10 @@ func fakeReplayClaude(sid string) {
 			}
 			return
 		}
+		if f["type"] == "control_request" {
+			_ = enc.Encode(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": f["request_id"], "response": map[string]any{}}})
+			continue
+		}
 		if f["type"] != "user" {
 			continue
 		}
@@ -67,6 +71,20 @@ func startReplayApp(t *testing.T, f fixture, cache string, extraEnv ...string) *
 }
 
 func startReplayAppAs(t *testing.T, f fixture, cache, sessionFlag string, extraEnv ...string) *app {
+	t.Helper()
+	a := startReplayAppUninitializedAs(t, f, cache, sessionFlag, extraEnv...)
+	// 先完成 SDK 初始化，确保执行体已就绪；300ms 仍只检验消息交付，不把冷启动算成卡住。
+	a.send(t, map[string]any{"type": "control_request", "request_id": "fixture-initialize", "request": map[string]any{"subtype": "initialize"}})
+	r := a.until(t, "control_response")
+	response, _ := r["response"].(map[string]any)
+	if response["request_id"] != "fixture-initialize" || response["subtype"] != "success" {
+		t.Fatalf("执行体初始化未成功：%v", r)
+	}
+	return a
+}
+
+func startReplayAppUninitializedAs(t *testing.T, f fixture, cache, sessionFlag string, extraEnv ...string) *app {
+	t.Helper()
 	env := append([]string{"MIRASIM_TEST_ROLE=replay", "XDG_CACHE_HOME=" + cache, "RECLAUDE_MIRASIM_DELIVERY_STALL_MS=300"}, extraEnv...)
 	return startAppArgs(t, f, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--model", "claude-sonnet-5", sessionFlag, f.sid, "--settings", `{}`}, env...)
 }
