@@ -53,6 +53,25 @@ describe('Claude 错误通道保真和额度归因', () => {
     expect(judgeClaudeRun(r).reason).toBe('quota_exhausted');
   });
 
+  it.each([
+    "You've hit your limit · resets 3pm (Asia/Shanghai)",
+    "You've hit your 5-hour limit",
+    'Claude AI session limit reached',
+    'Monthly limit reached',
+  ])('官方订阅额度说法 %j 认作额度用完，不当成探不通', (text) => {
+    const r = report([assistant(text), emptyResult]);
+    expect(claudeRunFacts(r).quotaExhausted).toBe(true);
+    expect(judgeClaudeRun(r)).toMatchObject({ reason: 'quota_exhausted' });
+  });
+
+  it('服务端临时限流的否定句不当额度', () => {
+    const r = report([
+      assistant('Server is temporarily limiting requests (not your usage limit)'),
+      emptyResult,
+    ]);
+    expect(claudeRunFacts(r).quotaExhausted).toBe(false);
+  });
+
   it('标准限流帧仍按既有 exhausted 判据，保留上游重置时间', () => {
     const resetsAt = 1792281600;
     const r = report([

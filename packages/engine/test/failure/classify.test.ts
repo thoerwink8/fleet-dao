@@ -725,6 +725,7 @@ describe('规则的边界', () => {
     });
     // 真用满的说法照样认成额度用满。
     expect(classifyFailure(session({ message: "You've reached your 5-hour usage limit" })).rule).toBe('QT1');
+    expect(classifyFailure(session({ message: "You've hit your limit · resets 3pm" })).rule).toBe('QT1');
   });
 
   it('GitHub 的限流、校验失败、没权限只认不是会话的步骤；AI 渠道报同样的字按它自己的事处置', () => {

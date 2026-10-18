@@ -277,7 +277,7 @@ export const RULES: readonly FailureRule[] = [
     quota: true,
     codes: ['quota_exhausted', 'cloud_exhausted', 'usage_limit_reached', 'usage_limit_exceeded'],
     // 「(not your usage limit)」是 Claude Code 在服务端临时限流时自带的一句，说的恰恰不是额度用满：否定句不认。
-    text: /(?<!\bnot (?:your |a |the )?)usage limit|额度已用完|额度用完|额度用尽|quota (?:is )?exhausted|weekly limit|monthly limit|周限|\b5[- ]?hour limit/i,
+    text: /(?<!\bnot (?:your |a |the )?)usage limit|额度已用完|额度用完|额度用尽|quota (?:is )?exhausted|weekly limit|monthly limit|周限|\b5[- ]?hour limit|hit your (?:[\w-]+ )?limit/i,
     defaultWaitSeconds: 900,
     routeOutcome: 'neutral',
   },

@@ -272,7 +272,7 @@ export function exitStatusUntrusted(command: string): string | undefined {
  */
 export function looksLikeQuotaExhausted(text: string | undefined): boolean {
   if (!text) return false;
-  return /\b402\b|payment required|out of credits|run out of|insufficient[ _](?:account )?(balance|credits|quota)|usage limit|quota (?:is |has been )?(exceeded|exhausted)|exceeded your (current )?quota|weekly limit|need a [\w ]*subscription|额度(已)?用(完|尽|满)|余额不足/i.test(
+  return /\b402\b|payment required|out of credits|run out of|insufficient[ _](?:account )?(balance|credits|quota)|usage limit|quota (?:is |has been )?(exceeded|exhausted)|exceeded your (current )?quota|(?:weekly|monthly|session) limit|\b5[- ]?hour limit|hit your (?:[\w-]+ )?limit|need a [\w ]*subscription|额度(已)?用(完|尽|满)|余额不足/i.test(
     text,
   );
 }
