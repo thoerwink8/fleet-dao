@@ -447,7 +447,7 @@ export const acceptanceDuties = pgTable(
     foreignKey({ name: 'acceptance_duties_successor_fk', columns: [t.successorId], foreignColumns: [t.id] }),
     check(
       'acceptance_duties_superseded_complete',
-      sql`(${t.supersededAt} is null and ${t.supersededBy} is null and ${t.supersedeEvidence} is null and ${t.successorId} is null and ${t.successorGeneration} is null) or (${t.supersededAt} is not null and ${t.supersededBy} is not null and length(${t.supersedeEvidence}) > 0 and ${t.successorId} <> ${t.id} and ${t.successorGeneration} > 0)`,
+      sql`(${t.supersededAt} is null and ${t.supersededBy} is null and ${t.supersedeEvidence} is null and ${t.successorId} is null and ${t.successorGeneration} is null) or (${t.supersededAt} is not null and ${t.supersededBy} is not null and ${t.supersedeEvidence} is not null and length(${t.supersedeEvidence}) > 0 and ${t.successorId} is not null and ${t.successorId} <> ${t.id} and ${t.successorGeneration} is not null and ${t.successorGeneration} > 0)`,
     ),
     unique('acceptance_duties_task_pr_head_unique').on(t.taskId, t.prNumber, t.head),
     check('acceptance_duties_issue_positive', sql`${t.issueNumber} > 0`),

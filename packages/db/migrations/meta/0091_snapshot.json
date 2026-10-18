@@ -5724,7 +5724,7 @@
       "checkConstraints": {
         "acceptance_duties_superseded_complete": {
           "name": "acceptance_duties_superseded_complete",
-          "value": "(\"acceptance_duties\".\"superseded_at\" is null and \"acceptance_duties\".\"superseded_by\" is null and \"acceptance_duties\".\"supersede_evidence\" is null and \"acceptance_duties\".\"successor_id\" is null and \"acceptance_duties\".\"successor_generation\" is null) or (\"acceptance_duties\".\"superseded_at\" is not null and \"acceptance_duties\".\"superseded_by\" is not null and length(\"acceptance_duties\".\"supersede_evidence\") > 0 and \"acceptance_duties\".\"successor_id\" <> \"acceptance_duties\".\"id\" and \"acceptance_duties\".\"successor_generation\" > 0)"
+          "value": "(\"acceptance_duties\".\"superseded_at\" is null and \"acceptance_duties\".\"superseded_by\" is null and \"acceptance_duties\".\"supersede_evidence\" is null and \"acceptance_duties\".\"successor_id\" is null and \"acceptance_duties\".\"successor_generation\" is null) or (\"acceptance_duties\".\"superseded_at\" is not null and \"acceptance_duties\".\"superseded_by\" is not null and \"acceptance_duties\".\"supersede_evidence\" is not null and length(\"acceptance_duties\".\"supersede_evidence\") > 0 and \"acceptance_duties\".\"successor_id\" is not null and \"acceptance_duties\".\"successor_id\" <> \"acceptance_duties\".\"id\" and \"acceptance_duties\".\"successor_generation\" is not null and \"acceptance_duties\".\"successor_generation\" > 0)"
         },
         "acceptance_duties_issue_positive": {
           "name": "acceptance_duties_issue_positive",

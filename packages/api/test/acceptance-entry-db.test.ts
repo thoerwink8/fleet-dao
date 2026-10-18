@@ -1,3 +1,4 @@
+import { acceptanceGate } from '@fleet-dao/conventions/acceptance-gate';
 import {
   readAcceptanceDutyRows,
   readAcceptanceDutySupersessions,
@@ -217,11 +218,27 @@ it(
       return ((await res.json()) as { duties: Record<string, unknown>[] }).duties;
     };
 
+    // 关单闸（issue-close / close-on-merge 共用的 acceptanceGate）读同一个公开口：和 status 同一有效终态
+    const gh = async () => ({
+      code: 0,
+      stdout: JSON.stringify({ id: 1, full_name: 'o/s', private: false }),
+      stderr: '',
+    });
+    const gate = () =>
+      acceptanceGate(
+        gh,
+        'https://api.github.com/repos/o/s',
+        3071,
+        (async (url: string) => app.request(new URL(url).pathname)) as unknown as typeof fetch,
+        'https://example.org',
+      );
+
     // 目标没验完不许替代；旧头走标准 settle 被合并回执 guard 拒（不冒领）
     expect(await supersede(final.generation)).toBe(1);
     expect(await settle(old.id, old.generation, OLD)).toBe(1);
     expect(await settle(final.id, final.generation, FINAL)).toBe(0);
     expect(await status()).toEqual({ [OLD]: 'open', [FINAL]: 'settled' });
+    expect(await gate()).toContain('未结清');
     // 陈旧目标代次：拒，不落账
     expect(await supersede(final.generation + 1)).toBe(1);
     expect(await readAcceptanceDutySupersessions(t.db, issue)).toEqual([]);
@@ -238,6 +255,7 @@ it(
       supersedeEvidence: 'PR #3081 最终头已合已验',
     });
     expect(await status()).toEqual({ [OLD]: 'superseded', [FINAL]: 'settled' });
+    expect(await gate()).toBeUndefined();
     const [oldPublic, finalPublic] = await publicDuties();
     expect(oldPublic).toMatchObject({
       id: old.id,
@@ -260,6 +278,7 @@ it(
     await upsertAcceptanceDuty(t.db, { ...base, head: FINAL, items: ['合后补一条'] });
     expect(await status()).toEqual({ [OLD]: 'open', [FINAL]: 'open' });
     expect((await publicDuties()).map((d) => d.state)).toEqual(['open', 'open']);
+    expect(await gate()).toContain('未结清');
     expect(await readAcceptanceDutyRows(t.db, issue)).toHaveLength(2);
   },
   TEST_DB_TIMEOUT_MS,
