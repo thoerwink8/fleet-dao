@@ -22,8 +22,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { isMainModule } from './is-main.mjs';
 import { cleanSessionId } from './session-id.mjs';
 import { isMachineSession } from './unattended.mjs';
 
@@ -270,14 +270,7 @@ export async function watchRuns(
   }
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   let input = {};
   try {
     const raw = readFileSync(0, 'utf8');

@@ -35,3 +35,11 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - 通知回答先存代次，再原子 claim，最后按答案和 claim CAS 结算；在途或结果未知返回明确 409，不自动重放。HTTP 重试复用 `requestId`，新决定用新编号，带 `requestId` 必须同时带 `expectedAnswerId`（首答 null），拒绝跨新答案的迟到重试。handoff 的 GitHub key 绑定答案代次；历史无代次不能执行或交接。
 
 - 最终现场验收：`fleet-api acceptance status <owner/仓> <单号>` 读持久责任账；`settle` 必须提交精确责任 id、generation、PR/head 和证据，旧代次不能结清新增项。公开只读口复用现有 CI bridge 验证公开仓身份，不提供写口。
+
+- 看门狗提醒的受控修复（#3033，`alert-repair.ts`）：动作读时现算，不存、不借 `decision_reason`；点的时候只收服务端动作编号（含证据摘要）+ incident + `requestId`，条件变了、已撤、incident 对不上、动作过期、上一次在途或结果未知一律 409，不发副作用。信号、请求文件只记 `accepted`，要重读原条件才记 `verified`，读不到或未恢复保持未修好。idle-running 的仓和工作流从键里的任务编号现查，不从正文猜；没有直接修复入口的只能「交给修复」（开在 fleet-dao，key `alert-repair:<incident>`，同一次事故一张），不放开 alert-sweep 的 24 小时立案排除。修复状态在设置表 `alert.repair:<提醒编号>`，版本号 CAS；incident 用现成 `raisedAt` 区分同 key 重开，跨代在途/未知/受理待核验仍禁止覆盖和重放。测试 `alert-repair.test.ts` 跑引擎的真看门狗（`runWatchdogJob(watchdogJob(...))`，PGlite 真库）造提醒，所以 api 的 `devDependencies` 有 engine（只有测试用，`src` 不许引 engine；`tsconfig.json` 的 include 带 `../engine/src`），改 engine 的 PR 也会测 api。看门狗改了键、标题、撤卡口径，这些测试会红：`alert-repair.ts` 的 `IDLE_PREFIX`、`RELEASE_KEY` 要一起改。
+
+- 受控修复同一 incident 在执行、结果未知或受理待核验时，所有其他动作也必须阻挡，不允许覆盖原副作用。idle 判据与原检测器共用 core 纯模块，具体 workflow run 必须现读并钉入信号；发版核验绑原 SHA 和 startedAt。交修复在开单后调用固定 `engine/src/bin/dispatch-issue.ts` 准入入口，不拼 shell，不提权，派工未知保留原单和未知状态；确定未派重试复用原单。
+
+- 真核验通过后按设置版本与通知 `raisedAt` 双守卫 CAS 持久写 verified 和审计；并发 GET 只一份结清审计，结算冲突/读取失败均不展示绿。不替看门狗撤原通知。
+
+- 明确关联已有单（#3100，`POST /api/notifications/:id/repair/link`）：可信登录操作者指定这次告警由哪张现有 fleet-dao 单处理，只收受管仓 + 单号 + 服务端关联版本（视图 `linkAction`）+ incident + `requestId`，多一个字段（如伪造 actor）就 400；服务端现读必须是开着的 issue，并按目标仓和单精确查任务、开放 PR（`listPullRequests` 的 `repoId`/`issueNumber`，不读全局前 N 条再筛；一页读满当没读全，关联 502、交给修复标 failed 不派工）；读不到、PR、错仓、已关闭一律拒绝，不回退成开单。线上契约不加枚举：修复记录的 kind/state 与 #3033 一样，关联存成设置表里的内部记录（`StoredRecordSchema`，只在 `alert-repair.ts` 里认），出口经 `wireLast` 投影，关联只走视图的 `linked` 和关联端点自己的回执；通知卡（#3034）按旧枚举取 `PHASE_META[state]`，新枚举会让它崩溃，`alert-repair.test.ts` 有照抄旧消费者的严格检查。交给修复沿用绑定：每次重新核实，失效标 `invalid` 不开新单；已有进行中的任务或开放 PR 回 409 `link_already_handled` 不派工，否则经原准入派一次（不传 force）。关联与开单抢同一事故走同一个设置版本 CAS。标题正文相似不自动认同根因。

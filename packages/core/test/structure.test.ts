@@ -24,8 +24,10 @@ describe('core 只放纯判断', () => {
       'brief.ts',
       'criteria.ts',
       'dispatch.ts',
+      'idle-running.ts',
       'index.ts',
       'names.ts',
+      'self-check-budget.ts',
       'verdict.ts',
     ]);
   });

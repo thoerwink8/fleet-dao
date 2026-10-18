@@ -278,6 +278,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         link: opt(n.link),
         taskId: opt(n.taskId),
         createdAt: iso(n.createdAt),
+        raisedAt: iso(n.raisedAt),
         resolvedAt: isoOpt(n.resolvedAt),
         resolvedBy: opt(n.resolvedBy),
         dedupeKey: n.dedupeKey,
@@ -827,10 +828,23 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         }),
       );
     },
-    async putSetting({ key, value, expectedVersion, by }, entry) {
+    async putSetting({ key, value, expectedVersion, by, expectedNotification }, entry) {
       // 值本身可以是 null（例如不设免打扰时段）：写成 jsonb 的 null，不是 SQL 的空值（列不许空）。
       const jsonValue = sql`${JSON.stringify(value ?? null)}::jsonb`;
       return db.transaction(async (tx) => {
+        if (expectedNotification) {
+          const [notification] = await tx
+            .select({ raisedAt: notifications.raisedAt, resolvedAt: notifications.resolvedAt })
+            .from(notifications)
+            .where(eq(notifications.id, expectedNotification.id))
+            .for('update');
+          if (
+            !notification ||
+            notification.raisedAt.toISOString() !== expectedNotification.raisedAt ||
+            (expectedNotification.requireOpen && notification.resolvedAt !== null)
+          )
+            return 'conflict';
+        }
         const written =
           expectedVersion === 0
             ? await tx
@@ -951,7 +965,20 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const rows = await db
         .select()
         .from(pullRequests)
-        .where(input.state === undefined ? undefined : eq(pullRequests.state, input.state))
+        .where(
+          and(
+            input.state === undefined ? undefined : eq(pullRequests.state, input.state),
+            // 仓号不是 uuid 的（老数据、测试里的假号）查不到任何行，不拿它去比 uuid 列
+            input.repoId === undefined
+              ? undefined
+              : isUuid(input.repoId)
+                ? eq(pullRequests.repoId, input.repoId)
+                : sql`false`,
+            input.issueNumber === undefined
+              ? undefined
+              : sql`${pullRequests.issueRefs} @> ARRAY[${input.issueNumber}]::integer[]`,
+          ),
+        )
         // merged 按合并时刻倒序、其余按镜像更新时刻倒序；两个时刻都 NULL 的排最后（不拿它们当「最新」）。
         .orderBy(
           input.state === 'merged'

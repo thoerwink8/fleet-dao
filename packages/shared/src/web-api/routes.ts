@@ -43,6 +43,10 @@ import {
   AnswerNotificationResponse,
   AuditQuery,
   AuditResponse,
+  ExecuteAlertRepairRequest,
+  ExecuteAlertRepairResponse,
+  LinkAlertRepairRequest,
+  LinkAlertRepairResponse,
   NotificationsQuery,
   NotificationsResponse,
   ResolveNotificationResponse,
@@ -431,6 +435,20 @@ export const WebRoutes = {
     path: '/notifications/:notificationId/answer',
     request: AnswerNotificationRequest,
     response: AnswerNotificationResponse,
+  },
+  /** 看门狗提醒的受控修复（#3033）：只收服务端给的动作编号 + incident + 幂等身份；条件变了、提醒撤了、编号过期回 409，不发副作用。 */
+  executeAlertRepair: {
+    method: 'POST',
+    path: '/notifications/:notificationId/repair',
+    request: ExecuteAlertRepairRequest,
+    response: ExecuteAlertRepairResponse,
+  },
+  /** 明确关联已有单（#3100）：可信操作者指定这次告警由哪张现有单处理；服务端核实后保存，不开单、不派工。 */
+  linkAlertRepair: {
+    method: 'POST',
+    path: '/notifications/:notificationId/repair/link',
+    request: LinkAlertRepairRequest,
+    response: LinkAlertRepairResponse,
   },
   audit: { method: 'GET', path: '/audit', query: AuditQuery, response: AuditResponse },
   settings: { method: 'GET', path: '/settings', response: SettingsResponse },

@@ -3,7 +3,7 @@
 // 这里是工作流代码也会引入的文件：运行时只引 @temporalio/workflow 的消息定义函数，别的一律只写类型。
 // 输入进了工作流历史：以后只许加可选字段，不许改老字段的意思。
 
-import type { FlowMode, FlowSource, Repo, RepoWithProfile } from '@fleet-dao/shared';
+import type { FlowMode, FlowSource, Repo, RepoWithProfile, RunCause } from '@fleet-dao/shared';
 import {
   type AbandonCommand,
   type ContinueCommand,
@@ -204,6 +204,18 @@ export interface RunSegmentInput {
    */
   interrupted?: string;
   /**
+   * 为什么起这一笔、接着做什么、属于第几个回合（#3140，只记账：runs.cause / cause_summary / round_seq，会话看不到）。
+   * 工作流在 patched('run-cause-fields') 之后才给；老历史里没有这几个字段，那几笔记成「老记录没记」。
+   */
+  cause?: RunCause;
+  causeSummary?: string;
+  roundSeq?: number;
+  /**
+   * 判定不续上一段、开新会话的原因（#3140，runs.resume_reason）。新历史直接给它；老历史借 route.why 的内部标记
+   * （fleet-resume-new:…）带，runner 仍认，只为在途任务重放。
+   */
+  resumeReason?: string;
+  /**
    * 续哪个会话（决定 0088 第 3 条）：工作流经 planSegmentResume 判定能续才给。给了就用执行体的续会话起（--resume 一类），
    * 提示词只补一句被打断的原因和返工意见，不重述整张单。续起来没跑成的，下一次退回开新会话。老历史里没有这个字段。
    */
@@ -318,6 +330,8 @@ export interface ColdVerifyInput {
   /** 「要什么」原文、「怎么算做完」逐条。 */
   what: string;
   howToFinish: string[];
+  /** 验收这一笔属于第几个回合（task_rounds.seq，#3140，只记账：runs.round_seq）；老历史没有。 */
+  roundSeq?: number;
   /** 写这张单的会话用过的路由的族（验收换一个不同的族）。 */
   authorFamilies: string[];
   round: 1 | 2;
@@ -487,6 +501,28 @@ export interface ReadCiPolicyInput {
 export interface ReadCiPolicyResult {
   mode: 'force' | 'off';
 }
+
+/**
+ * CI 红了、回动手之前现读这张 PR 上仍有效的正式评审（patched('ci-red-review-context')）。
+ * 读的是 expectedHead；旧头上的评审可以留在结果里，不按 commit 等于当前头过滤。
+ */
+export interface ReadCiReviewsInput {
+  schemaVersion: 1;
+  taskId: string;
+  repo: Repo;
+  branch: string;
+  prNumber: number;
+  /** CI 红的那个头。读之前或读期间头变了，不把读到的内容当完整快照。 */
+  expectedHead: string;
+}
+
+/**
+ * delivered：这一头的正式评审已经读全（reviews 空数组＝确实没有还有效的要求改）。
+ * 没 delivered：没核实完。不能当成没有评审，也不能沿用上一次的快照。headMoved 是当时 PR 的新头。
+ */
+export type ReadCiReviewsResult =
+  | { delivered: true; head: string; reviews: ReviewChange[] }
+  | { delivered: false; reason: string; headMoved?: string };
 
 /** 不强制 CI 的仓：开完 PR、查完改标准路径之后由引擎直接合并（不等检查、不挂自动合并）。 */
 export interface MergeNowInput {

@@ -479,6 +479,10 @@ export function createHttpApi(opts: HttpApiOptions = {}): FleetApi {
       send('POST', apiUrl(R.answerNotification.path, { notificationId: id }), R.answerNotification.response, {
         body: R.answerNotification.request.parse(body),
       }),
+    executeAlertRepair: (id, body) =>
+      send('POST', apiUrl(R.executeAlertRepair.path, { notificationId: id }), R.executeAlertRepair.response, {
+        body: R.executeAlertRepair.request.parse(body),
+      }),
     audit: (query) =>
       send(
         'GET',

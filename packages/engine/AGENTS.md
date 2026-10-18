@@ -14,12 +14,15 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 ## 测试
 
 - `npx vitest run packages/engine/test/<文件>`。不要 Postgres（用到库的跑在 PGlite 上）。
+- 法国工具链 `/bin/sh` 和目录 chmod 权限测试在 Linux 跑真端口；Windows 用明示的命令/阶段错误夹具验证装配与失败分类，不代表引擎支持 Windows 生产宿主。Git 归档检出在两种系统都跑真实 git/tar，归档名相对私有 scratch，避免 GNU tar 把 Windows 盘符当远端。
 - Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；要真服务端时设 `FLEET_TEST_TEMPORAL_CLI`。
 - 重放：`packages/engine/test/replay.test.ts` 拿 `test/replay/fixtures/task-*.json` 对现在的代码重放。录新场景用 `node packages/engine/test/replay/record.ts <场景>`，已有的夹具拒绝覆盖。
 
 ## 常见坑
 
-- 正式评审先按原白名单选尚未解决的要求改，再翻全该 review 的行内原文，核仓/PR/review 与原审查者数字身份。总述与行内编辑都进消费键，新完整原文按code point安全分段、带引用尾界保住末空白，旧历史缺行内字段时保留原键和反馈。读不全明确未送达，合前已挂的 autoMerge 尝试撤掉，撤失败一并报明；三个合并入口及waitCi确认已合后共用review-audit补读留账，补读失败记未读，写账失败抛重试。
+- 重启收孤儿（`real/orphan-reap.ts`）：脱开会话的真实临时 cwd 从原 `runs.worktree_path` 读，冷验收的目录名不等于 runId。交接或账读不到先报错，不把未知当空清掉；延迟回收前重读 detached 标记及 TTL，已经接回的不碰。
+
+- 正式评审先按原白名单选尚未解决的要求改，再翻全该 review 的行内原文，核仓/PR/review 与原审查者数字身份。总述与行内编辑都进消费键，新完整原文按code point安全分段、带引用尾界保住末空白，旧历史缺行内字段时保留原键和反馈。读不全明确未送达，合前已挂的 autoMerge 尝试撤掉，撤失败一并报明；三个合并入口及waitCi确认已合后共用review-audit补读留账，补读失败记未读，写账失败抛重试。CI 红返工入口走同一读取（readCiReviews，patched('ci-red-review-context')），和失败证据一起交下一轮；读失败不当成没有评审。
 
 - 合并对账撤风险只认真实 `github.merge_pr`：账的 action/target、完整回执与 GitHub 当前 PR/head/合并提交/实际引擎合并人都须一致；`github.merge_pr_backfill` 留原来源，后续轮次也不能当队列证据。读账失败保留提醒并报没查成。
 - 已合并观察补账经 `bookMergedPull` 固定传 `mergePr.onlyBook`：writer 在实际重读后、写账前核 PR 编号、已合并、头、完整合并提交和合并人；未合或回执读不全明确失败，不能退到主动合并。主动合并入口不传此约束。
@@ -41,6 +44,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 ## 改它时要连带改
 
 - 改工作流：加 `patched()` + 必要时录一个新重放场景；改了步序、停在哪等人，同步 design 第五节对应条。
+- 给任务页「过程」记的账（#3140）：动手会话入参的 `cause` / `causeSummary` / `roundSeq` / `resumeReason`、冷验收入参的 `roundSeq`、推分支的 `prNumber`、开 PR 的 `numstat` 都是可选字段，只在 `patched('run-cause-fields')`、`patched('pr-head-files')` 为真时给，只记账不改步序；加新的起因先改 shared 的 `RUN_CAUSES`（库里 `runs_cause_known` 约束同一份，`packages/db/test/run-cause.test.ts` 核对）并在 `task-session.ts` 的 `nextCause` 赋值处点名它为什么起。
 - 改活动超时：只改 `activity-options.ts`。改定时任务：`src/jobs/` 加任务，`real/jobs.ts` 的 `ENGINE_JOBS` 登记。
 - 改读写的表：表结构在 `packages/db`（生成迁移），共用的读写在 `packages/store`（两套实现一起改）。
 - 改派工、选路：同步 design 第九节「自由组合的派工模型」。

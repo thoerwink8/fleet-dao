@@ -305,8 +305,8 @@ describe('按改动算要跑什么', () => {
     expect(p.tsc).toEqual(expect.arrayContaining(['packages/db', 'packages/engine', 'packages/api']));
   });
 
-  it('改了 engine（#88 的偶发超时只挡改到 engine 的 PR）：别的包的 PR 不测 engine', () => {
-    expect(units(pr('packages/engine/src/worker.ts'))).toEqual(['engine']);
+  it('改了 engine（#88 的偶发超时只挡改到 engine 的 PR）：别的包的 PR 不测 engine；api 的测试跑引擎的真看门狗（#3033），所以改 engine 也测 api', () => {
+    expect(units(pr('packages/engine/src/worker.ts'))).toEqual(['api', 'engine']);
     for (const f of [
       'packages/agent-eval/src/cli.ts',
       'packages/web/src/app.css',
@@ -370,6 +370,7 @@ describe('按改动算要跑什么', () => {
       'packages/adapters/',
       'agents/',
       'packages/agents-sync/',
+      'packages/conventions/',
     ]);
     // 只改说明文字不拖上 2 分钟的 deploy/test（#121 只改 AGENTS.md 和 skill 就跑了 2 分 13 秒）
     expect(pr('agents/skills/discuss/SKILL.md').deploy).toBe('none');
@@ -1464,7 +1465,12 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
         .map((f) => (typeof TIMINGS === 'string' ? 0 : (TIMINGS.files[f] ?? 0))),
     );
     expect(Math.max(...loads)).toBeLessThanOrEqual(total / loads.length + heaviest);
-    for (const b of p.tests) expect(b.files.every((f) => f.startsWith('packages/engine/'))).toBe(true);
+    // 改 engine 也测 api（api/test/alert-repair.test.ts 跑引擎的真看门狗，#3033）：台里只有这两个包的文件
+    for (const b of p.tests) {
+      expect(b.files.every((f) => f.startsWith('packages/engine/') || f.startsWith('packages/api/'))).toBe(
+        true,
+      );
+    }
   });
 
   it('【故意造出的失败】少一台 / 两台重了：coverage 报出来，不当成齐了', () => {

@@ -545,7 +545,12 @@ export function createMemoryStore(
     },
     async listPullRequests(input = {}) {
       const limit = input.limit ?? 50;
-      const rows = data.pullRequests.filter((p) => input.state === undefined || p.state === input.state);
+      const rows = data.pullRequests.filter(
+        (p) =>
+          (input.state === undefined || p.state === input.state) &&
+          (input.repoId === undefined || p.repoId === input.repoId) &&
+          (input.issueNumber === undefined || (p.issueRefs ?? []).includes(input.issueNumber)),
+      );
       // 和库版一样：merged 按合并时刻倒序、没读到合并时刻的排最后（不拿 updatedAt 顶，不当「最新」）；
       // 其余按镜像更新时刻倒序（没读到的排最后）；并列都按编号倒序。
       const keyOf = (p: (typeof rows)[number]) => (input.state === 'merged' ? p.mergedAt : p.updatedAt);
@@ -751,7 +756,16 @@ export function createMemoryStore(
     async listSettings() {
       return [...data.settings].sort((a, b) => a.key.localeCompare(b.key));
     },
-    async putSetting({ key, value, expectedVersion, by }, entry) {
+    async putSetting({ key, value, expectedVersion, by, expectedNotification }, entry) {
+      if (expectedNotification) {
+        const notification = data.notifications.find((n) => n.id === expectedNotification.id);
+        if (
+          !notification ||
+          (notification.raisedAt ?? notification.createdAt) !== expectedNotification.raisedAt ||
+          (expectedNotification.requireOpen && notification.resolvedAt !== undefined)
+        )
+          return 'conflict';
+      }
       const current = data.settings.find((s) => s.key === key);
       if (isSettingConflict(current?.version, expectedVersion)) return 'conflict';
       checkAudit(entry);

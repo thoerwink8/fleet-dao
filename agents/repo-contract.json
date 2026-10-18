@@ -1,5 +1,5 @@
 {
-  "说明": "仓合同（决定 0081）：每个仓（含以后新开的）都该满足的几项，写成数据。开会话钩子（agents/hooks/session-start.mjs）在任何仓里开会话都按这份查当前仓、每仓每天最多提醒一次缺项；pnpm repo:check 查、pnpm repo:init 只补缺的（逻辑在 agents/hooks/repo-contract.mjs）。只提醒、不拦。以后新增要求就往 items 里加一项，所有仓都自动被查；改这份是改标准。检查类型：file（文件在）、scripts（package.json 的这些脚本都在、不是空的、不带占位记号）、lines（文件里每组「认」至少有一行和其中一个一字不差，比时去掉两头空白）。某项确实不适用：仓根 AGENTS.md 写一行 <!-- repo-contract:skip <id> <理由> -->，没写理由不算数；豁免在 repo:check 和开会话的提醒里都看得见。",
+  "说明": "仓合同（决定 0081）：每个自用仓（含以后新开的）都该满足的几项，写成数据。对外仓（仓根 AGENTS.md 没有自用仓标记的，agents/hooks/repo-kind.mjs 判）照它自己的规矩走，这份不查、不提醒、不补（决定 0107）。开会话钩子（agents/hooks/session-start.mjs）在自用仓里开会话按这份查当前仓、每仓每天最多提醒一次缺项；pnpm repo:check 查、pnpm repo:init 只补缺的（逻辑在 agents/hooks/repo-contract.mjs）。只提醒、不拦。以后新增要求就往 items 里加一项，所有仓都自动被查；改这份是改标准。检查类型：file（文件在）、scripts（package.json 的这些脚本都在、不是空的、不带占位记号）、lines（文件里每组「认」至少有一行和其中一个一字不差，比时去掉两头空白）。某项确实不适用：仓根 AGENTS.md 写一行 <!-- repo-contract:skip <id> <理由> -->，没写理由不算数；豁免在 repo:check 和开会话的提醒里都看得见。",
   "items": [
     {
       "id": "entry",
@@ -21,27 +21,8 @@
       "检查": { "type": "file", "path": "AGENTS.md" },
       "补法": {
         "type": "create",
-        "text": "# AGENTS.md\n\n本仓特有的规矩（通用规矩以 fleet-dao 为准）：\n\n- 进度、创始人引导、临时调整记在 `docs/PROGRESS.md`。\n- 起、停、检查都用仓根的 pnpm 命令：`pnpm dev`、`pnpm start`、`pnpm stop`、`pnpm check`。\n"
+        "text": "# AGENTS.md\n\n<!-- repo-kind: 自用仓 -->\n\n本仓特有的规矩：\n\n- 需求方的确认、业务和技术决定记在 `docs/decisions.md`，一条写清谁、哪天、定了什么、为什么。\n- 起、停、检查都用仓根的 pnpm 命令：`pnpm dev`、`pnpm start`、`pnpm stop`、`pnpm check`。\n"
       }
-    },
-    {
-      "id": "progress",
-      "说明": "docs/PROGRESS.md 有「## 创始人引导（待处理）」和「## 生效中的临时调整」两节：开会话钩子每次读的就是这两节。",
-      "检查": {
-        "type": "lines",
-        "path": "docs/PROGRESS.md",
-        "行": [
-          {
-            "认": ["## 创始人引导（待处理）"],
-            "补": "\n## 创始人引导（待处理）\n\n<!-- 一条一行：- 时间「原话」〔范围：通用｜只此仓〕〔主：会话〕；办完标「已处理」 -->\n"
-          },
-          {
-            "认": ["## 生效中的临时调整"],
-            "补": "\n## 生效中的临时调整\n\n| 内容 | 当时为什么 | 谁拍的 | 撤回条件 | 最迟复查日期 |\n|---|---|---|---|---|\n"
-          }
-        ]
-      },
-      "补法": { "type": "append", "开头": "# 进度\n" }
     },
     {
       "id": "gitignore-tmp",

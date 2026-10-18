@@ -264,6 +264,7 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
       body: n.body,
       link: n.link ?? null,
       createdAt: date(n.createdAt),
+      raisedAt: date(n.raisedAt ?? n.createdAt),
       updatedAt: date(n.createdAt),
       resolvedAt: dateOpt(n.resolvedAt),
       resolvedBy: n.resolvedBy ?? null,

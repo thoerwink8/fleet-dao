@@ -8,6 +8,7 @@
 // - 停下等人 park() 回来＝人点了「继续」；放弃会在 park() 里抛 Abandoned，走不到下一行。
 
 import type { TaskState } from '@fleet-dao/shared';
+import { clipCauseSummary, type RunCause } from '@fleet-dao/shared/run-cause';
 import {
   CancellationScope,
   condition,
@@ -72,7 +73,8 @@ export class TaskRuntime {
   private continued = 0;
   private routeWakes = 0;
   private abandon: AbandonCommand | null = null;
-  private parks = 0;
+  /** 停下等人的次数（报警的去重键用；#3140 起 task-session 也读它，认「人点了继续才回来」的那一笔）。 */
+  parks = 0;
   private closeHoldGeneration = 0;
   private closeHold: ClosedIssueHoldToken | null = null;
   /**
@@ -119,8 +121,8 @@ export class TaskRuntime {
    */
   verifyRecheck: { head: string; criteria: number[]; problems: string[] } | null = null;
   /**
-   * 已经交给工人的正式「要求改」评审（#2991，task-verify.ts）：review-feedback.ts 的 reviewKey → 交出去时的头。
-   * 同一条（同 PR、同编号、同完整意见）再读到不再派工；纯状态，只在 patched('review-request-changes') 之后写。
+   * 已经交给工人的正式「要求改」评审（#2991，task-verify.ts；CI 红返工也写这里）：reviewKey → 交出去时的头。
+   * 同一条（同 PR、同编号、同完整意见）再读到不再为它多起一轮；CI 红本身的那一轮仍把它当上下文带上。
    */
   readonly reviewsHanded = new Map<string, string>();
   /**
@@ -191,6 +193,8 @@ export class TaskRuntime {
   addedLines: number | null = null;
   /** 这条工作流里已经记了几次一轮收场（task_rounds.seq）。只在 patched('round-outcome') 下加。 */
   roundSeq = 0;
+  /** 这一轮开始的时刻（#3140，工作流的时钟）：一轮收场时写进 task_rounds.started_at。纯状态。 */
+  roundStartedAt: string | null = null;
   /** 连着几次跑成的动手会话是续起来的：到 RESUME_STREAK_LIMIT 下一轮开新会话。 */
   resumeStreak = 0;
   /**
@@ -312,6 +316,29 @@ export class TaskRuntime {
   }
 
   // ---- 状态、等待、停下等人
+
+  /**
+   * 这一笔会话要记进 runs 的起因和所属回合（#3140，只记账，会话看不到）。标记 run-cause-fields 在新历史里才为真：老历史重放
+   * 不带这几个字段，活动入参和原来一样（只是入参多几个可选字段，不改步序）。回合号＝这一轮收场时 task_rounds 的 seq
+   * （已经记了几次收场 + 1，和 endRound 同一个算法）。标记在 patched('round-outcome') 之后才有意义，所以两个都为真才带回合号。
+   */
+  runStamp(
+    cause: RunCause,
+    causeSummary?: string,
+  ): { cause?: RunCause; causeSummary?: string; roundSeq?: number } {
+    if (!patched('run-cause-fields')) return {};
+    const summary = causeSummary?.trim() ? clipCauseSummary(causeSummary) : undefined;
+    return {
+      cause,
+      ...(summary ? { causeSummary: summary } : {}),
+      ...(patched('round-outcome') ? { roundSeq: this.roundSeq + 1 } : {}),
+    };
+  }
+
+  /** 冷验收这一笔所属的回合（#3140）：同 runStamp 的回合号。 */
+  verifyStamp(): { roundSeq?: number } {
+    return patched('run-cause-fields') && patched('round-outcome') ? { roundSeq: this.roundSeq + 1 } : {};
+  }
 
   set(phase: TaskPhase, doing: string): void {
     this.status.phase = phase;

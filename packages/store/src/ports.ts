@@ -180,6 +180,8 @@ export interface NotificationRecord {
   link?: string | undefined;
   taskId?: string | undefined;
   createdAt: string;
+  /** 同 key 撤卡重开时才变化；开放期间重复报警不变，区分事故代次。 */
+  raisedAt?: string | undefined;
   resolvedAt?: string | undefined;
   resolvedBy?: string | undefined;
   deliveries: DeliveryRecord[];
@@ -347,9 +349,13 @@ export interface BoardStore {
   /**
    * PR 镜像（新主页「做完的」、将来「在跑的」判合并段用）：state 给了只要那个状态；merged 按 mergedAt 倒序、
    * 其余按 updatedAt 倒序，最多 limit 条（默认 50）。镜像里没有的就给不出——不直接查 GitHub。
+   * repoId / issueNumber 给了就在库里先按仓、按正文挂的单（issue_refs）筛，再排序截断：查某张单有没有开放 PR 要用它，
+   * 不能读全局前 N 条再在内存里筛（别的仓 PR 一多，目标 PR 就被截掉了）。
    */
   listPullRequests(input?: {
     state?: PullRequestRecord['state'] | undefined;
+    repoId?: string | undefined;
+    issueNumber?: number | undefined;
     limit?: number | undefined;
   }): Promise<PullRequestRecord[]>;
 }
@@ -443,7 +449,14 @@ export interface OpsStore {
   listSettings(): Promise<SettingRecord[]>;
   /** expectedVersion 对不上就不改、返回 conflict（0 = 预期还没设过）。和操作记录同一事务。 */
   putSetting(
-    input: { key: string; value: unknown; expectedVersion: number; by: Actor },
+    input: {
+      key: string;
+      value: unknown;
+      expectedVersion: number;
+      by: Actor;
+      /** 修复结果结算同时锁住原通知代次，禁止旧核验写进已重开的事故。 */
+      expectedNotification?: { id: string; raisedAt: string; requireOpen?: boolean };
+    },
     audit: NewAuditEntry,
   ): Promise<'ok' | 'conflict'>;
 }
