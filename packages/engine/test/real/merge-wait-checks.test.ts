@@ -14,6 +14,8 @@ interface Run {
   name: string;
   conclusion: string | null;
   title?: string;
+  /** 不给：没结论是 in_progress，有结论是 completed。 */
+  status?: string;
 }
 
 interface Status {
@@ -27,7 +29,7 @@ function gh(required: string[], runs: Run[], statuses: Status[]): Pick<GitHub, '
     id: i + 1,
     name: run.name,
     head_sha: A,
-    status: run.conclusion === null ? 'in_progress' : 'completed',
+    status: run.status ?? (run.conclusion === null ? 'in_progress' : 'completed'),
     conclusion: run.conclusion,
     started_at: '2026-09-25T12:00:00Z',
     completed_at: run.conclusion === null ? null : '2026-09-25T12:00:00Z',
@@ -97,6 +99,57 @@ describe('等合并时读必过检查', () => {
       fleetSignals,
     );
     expect(got).toEqual({ overall: 'pending', failed: [], pending: [{ name: 'check' }] });
+  });
+
+  it('检查在排队（queued）：pending，名字算在跑', async () => {
+    const got = await readMergeWaitChecks(
+      gh(['check'], [{ name: 'check', conclusion: null, status: 'queued' }], []),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got).toEqual({ overall: 'pending', failed: [], pending: [{ name: 'check' }] });
+  });
+
+  it('【故意造出的失败】检查跑完了结论却是 stale：不算在跑，交 unsettled 带原词，不带 pending', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'stale' }],
+        [{ context: GATE_CONTEXT, state: 'pending', description: '排队' }],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got.overall).toBe('pending');
+    expect(got.pending).toBeUndefined();
+    expect(got.unsettled).toEqual([{ name: 'check', conclusion: 'stale' }]);
+  });
+
+  it('【故意造出的失败】检查跑完了结论认不出：交 unsettled，不当成在跑', async () => {
+    const got = await readMergeWaitChecks(
+      gh(['check'], [{ name: 'check', conclusion: 'weird_new_value' }], []),
+      repo,
+      A,
+      [],
+    );
+    expect(got).toEqual({
+      overall: 'pending',
+      failed: [],
+      unsettled: [{ name: 'check', conclusion: 'weird_new_value' }],
+    });
+  });
+
+  it('【故意造出的失败】检查在等部署审批（waiting）：不是 queued / in_progress，交 unsettled', async () => {
+    const got = await readMergeWaitChecks(
+      gh(['check'], [{ name: 'check', conclusion: null, status: 'waiting' }], []),
+      repo,
+      A,
+      [],
+    );
+    expect(got.pending).toBeUndefined();
+    expect(got.unsettled).toEqual([{ name: 'check', conclusion: 'waiting' }]);
   });
 
   it('档案没列 cold-verify、闸却写着等验收：pending，不当成红', async () => {

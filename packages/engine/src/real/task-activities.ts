@@ -63,6 +63,8 @@ export interface MergeWaitChecks {
   failed: { name: string; detail?: string }[];
   /** 还在跑（queued / in_progress）。老调用方不读。 */
   pending?: { name: string }[];
+  /** 记成没出结论、却不是在跑的（stale、认不出的结论）：有就不当成可等，显式报没查成。老调用方不读。 */
+  unsettled?: { name: string; conclusion: string }[];
 }
 
 export interface TaskActivitiesDeps extends ReviewAuditDeps {
@@ -439,6 +441,16 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
             merged: false,
             why,
             checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
+          };
+        }
+        // 跑完了结论是 stale、认不出：不是还在跑，等下去不会自己变，不进有界等待。
+        const unsettled = checks.unsettled ?? [];
+        if (unsettled.length > 0) {
+          const which = unsettled.map((item) => `${item.name}（${item.conclusion}）`).join('、');
+          return {
+            armed: false,
+            merged: false,
+            why: `${why}；必过检查没查成：${which} 没出结论、也不是在跑`,
           };
         }
         const names = inProgressNames(checks);
