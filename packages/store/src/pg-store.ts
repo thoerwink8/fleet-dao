@@ -57,7 +57,7 @@ import {
   worktreeInventory,
 } from '@fleet-dao/db';
 import { ciPolicyOf, type ProgressKind, runBelongsToTask, taskWorkflowId } from '@fleet-dao/shared';
-import { and, asc, desc, eq, gt, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
   commandKey,
@@ -65,7 +65,7 @@ import {
   judgeExistingCommand,
   tookOverResult,
 } from './command-logic.ts';
-import { decisionAnswerOf } from './console-logic.ts';
+import { claimDecisionAnswer, prepareDecisionAnswer } from './console-logic.ts';
 import {
   ATTEMPT_FREE_STATUS,
   claimedResult,
@@ -695,17 +695,19 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         return 'ok';
       });
     },
-    async answerNotification({ id, by, optionId, text }, entry) {
+    async answerNotification({ id, by, ...input }, entry) {
       if (!isUuid(id)) return { kind: 'not_found' };
-      // 先锁住这一行再判：两个人同时拍，后到的看到已处理，不会把前一个的答案盖掉
+      // 保存答案和判在途归属在同一行锁里；执行前另用 claimDecision 原子接活。
       const result = await db.transaction(async (tx) => {
         const [row] = await tx.select().from(notifications).where(eq(notifications.id, id)).for('update');
         if (!row) return { kind: 'not_found' as const };
         if (row.level !== 'decision') return { kind: 'not_decision' as const };
-        if (row.resolvedAt) return { kind: 'already_resolved' as const };
+        const replay = input.requestId && row.answer?.requestId === input.requestId;
+        if (row.resolvedAt && !replay) return { kind: 'already_resolved' as const };
         const at = now();
-        const answer = decisionAnswerOf(row.decisionOptions, { optionId, text }, by.id, at.toISOString());
-        if (answer === 'unknown_option') return { kind: 'unknown_option' as const };
+        const answer = prepareDecisionAnswer(row.answer, row.decisionOptions, input, by.id, at.toISOString());
+        if (typeof answer === 'string') return { kind: answer };
+        if (answer === row.answer) return { kind: 'ok' as const, row };
         const [updated] = await tx
           .update(notifications)
           // 只记答案，转不转已处理等照着做完（settleDecision）。再拍一次连上一次的结果一起换掉
@@ -721,26 +723,50 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       if (!notification) throw new Error(`通知 ${id} 存下答案后读不回来`);
       return { kind: 'ok', notification };
     },
-    async settleDecision({ id, execution, resolve, by }) {
+    async claimDecision({ id, answerId }) {
+      if (!isUuid(id)) return { kind: 'stale' };
+      return db.transaction(async (tx) => {
+        const [row] = await tx.select().from(notifications).where(eq(notifications.id, id)).for('update');
+        if (!row || (row.resolvedAt && row.answer?.attempt?.state !== 'succeeded'))
+          return { kind: 'stale' as const };
+        const at = now();
+        const claim = claimDecisionAnswer(row.answer, answerId, at.toISOString());
+        if (claim.kind === 'claimed')
+          await tx
+            .update(notifications)
+            .set({ answer: claim.answer, updatedAt: at })
+            .where(eq(notifications.id, id));
+        return claim;
+      });
+    },
+    async settleDecision({ id, answerId, claimId, execution, resolve, by }) {
+      if (resolve && (!execution.ok || execution.queued || execution.unknown))
+        throw new Error('未核实成功，不能处理通知');
       if (!isUuid(id)) return 'not_found';
       const at = now();
       const [updated] = await db
         .update(notifications)
         .set({
-          answer: sql`${notifications.answer} || jsonb_build_object('execution', ${JSON.stringify(execution)}::jsonb)`,
+          answer: sql`jsonb_set(${notifications.answer} || jsonb_build_object('execution', ${JSON.stringify(execution)}::jsonb), '{attempt,state}', to_jsonb(${execution.unknown ? 'unknown' : execution.queued ? 'queued' : execution.ok ? 'succeeded' : 'failed'}::text))`,
           updatedAt: at,
           ...(resolve ? { resolvedAt: at, resolvedBy: by.id } : {}),
         })
         .where(
-          and(eq(notifications.id, id), isNull(notifications.resolvedAt), isNotNull(notifications.answer)),
+          and(
+            eq(notifications.id, id),
+            isNull(notifications.resolvedAt),
+            sql`${notifications.answer} ->> 'id' = ${answerId}`,
+            sql`${notifications.answer} -> 'attempt' ->> 'id' = ${claimId}`,
+            sql`${notifications.answer} -> 'attempt' ->> 'state' = 'executing'`,
+          ),
         )
         .returning({ id: notifications.id });
       if (updated) return 'ok';
       const [exists] = await db
-        .select({ id: notifications.id })
+        .select({ id: notifications.id, resolvedAt: notifications.resolvedAt, answer: notifications.answer })
         .from(notifications)
         .where(eq(notifications.id, id));
-      return exists ? 'already_resolved' : 'not_found';
+      return !exists ? 'not_found' : exists.resolvedAt || !exists.answer ? 'already_resolved' : 'stale';
     },
     async appendAudit(entry) {
       return insertAudit(db, entry);

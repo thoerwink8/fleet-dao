@@ -866,7 +866,7 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     const body = await readJson(c, AnswerNotificationRequest);
     const actor = actorOf(c);
     const result = await store.answerNotification(
-      { id, by: actor, optionId: body.optionId, text: body.text },
+      { id, by: actor, ...body },
       {
         actor,
         action: 'notification.answer',
@@ -877,6 +877,10 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       },
     );
     if (result.kind !== 'ok') {
+      if (result.kind === 'conflict')
+        throw new ApiError(409, 'decision_answer_conflict', '答案已变化或请求身份重复用于不同答案，请刷新');
+      if (result.kind === 'in_flight')
+        throw new ApiError(409, 'decision_in_flight', '上一答案仍在执行或等待核验，不能覆盖；请先核实结果');
       if (result.kind === 'not_found') throw new ApiError(404, 'notification_not_found', '没有这条通知');
       if (result.kind === 'not_decision')
         throw new ApiError(409, 'notification_not_decision', '这条不是要你拍的，没有答案可记');
@@ -886,7 +890,22 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
     }
     const { notification } = result;
     if (!notification.answer) throw new Error(`通知 ${id} 存下答案后读回来没有答案`);
-    const answered = notification.answer;
+    if (!notification.answer.id)
+      throw new ApiError(409, 'decision_answer_stale', '历史答案没有执行授权，请重新作答');
+    const claim = await store.claimDecision({ id, answerId: notification.answer.id });
+    if (claim.kind === 'in_flight')
+      throw new ApiError(
+        409,
+        'decision_in_flight',
+        '该答案已接活，结果尚未核实；中断后不能自动重放，请核实执行现场',
+      );
+    if (claim.kind === 'stale')
+      throw new ApiError(409, 'decision_answer_stale', '答案已变化或通知已撤，未执行旧动作');
+    if (claim.kind === 'replay')
+      return reply(c, AnswerNotificationResponse, { ok: true, answer: claim.answer });
+    const answered = claim.answer;
+    if (!answered.id || !answered.attempt) throw new Error('执行claim没有答案或执行身份');
+    notification.answer = answered;
     let handoff: DecisionHandoff | undefined;
     const applied = await applyDecisionAnswer({
       notification,
@@ -910,14 +929,36 @@ export function cockpitRoutes(deps: Deps, relay: SseRelay): Hono<CockpitEnv> {
       if (r && !r.ok) deps.log.error('「要你拍」的答案没交给指挥官', { notification: id, where, why: r.why });
     }
     const execution = { ...applied.executed, at: deps.now().toISOString() };
-    const settled = await store.settleDecision({ id, execution, resolve: applied.resolve, by: actor });
+    const settled = await store.settleDecision({
+      id,
+      answerId: answered.id,
+      claimId: claim.claimId,
+      execution,
+      resolve: applied.resolve,
+      by: actor,
+    });
+    if (settled === 'stale')
+      throw new ApiError(409, 'decision_answer_stale', '旧执行结果已过期，未覆盖当前答案');
     if (settled === 'not_found') throw new ApiError(404, 'notification_not_found', '没有这条通知');
     if (settled === 'already_resolved') {
       throw new ApiError(409, 'notification_already_resolved', '这条已经处理过了，执行结果没写上');
     }
     return reply(c, AnswerNotificationResponse, {
       ok: true,
-      answer: { ...answered, execution },
+      answer: {
+        ...answered,
+        execution,
+        attempt: {
+          ...answered.attempt,
+          state: execution.unknown
+            ? 'unknown'
+            : execution.queued
+              ? 'queued'
+              : execution.ok
+                ? 'succeeded'
+                : 'failed',
+        },
+      },
       ...(handoff ? { handoff } : {}),
     });
   });
