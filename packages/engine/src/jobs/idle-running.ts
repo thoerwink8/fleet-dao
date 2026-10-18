@@ -5,12 +5,15 @@
 // （收场是工作流自己停下等人，或人点「继续」叫醒之后要么起会话要么停下）。
 // 正文不写「已经 N 分钟」：看门狗 5 分钟一轮，每轮变一句就会改卡。
 
+import { IDLE_RUNNING_STALE_MS, isIdleRunningStale } from '@fleet-dao/core/idle-running';
+
+export { IDLE_RUNNING_STALE_MS } from '@fleet-dao/core/idle-running';
+
 import { errMessage } from '@fleet-dao/shared/util';
 import { SELF_CHECK_ACTIVITY_MS, SELF_CHECK_DOING } from '../self-check-budget.ts';
 import { clip, stamp } from './reconcile-common.ts';
 
 /** 任务行这么久没动，又没有开着的会话，就报。和「单在干活却没有会话 20 分钟没动」同一档。 */
-export const IDLE_RUNNING_STALE_MS = 20 * 60 * 1000;
 
 export const IDLE_RUNNING_ALERT_PREFIX = 'watchdog:idle-running:';
 
@@ -54,12 +57,8 @@ export function judgeIdleRunning(
   now: Date,
   staleMs = IDLE_RUNNING_STALE_MS,
 ): IdleRunningVerdict {
-  if (row.state !== 'running') return { alert: false };
-  if (row.executor !== 'engine') return { alert: false };
-  if (row.openRuns !== 0) return { alert: false };
+  if (!isIdleRunningStale(row, now, staleMs)) return { alert: false };
   const selfCheck = inSelfCheck(row);
-  const quietMs = selfCheck ? Math.max(staleMs, SELF_CHECK_ACTIVITY_MS) : staleMs;
-  if (row.updatedAt !== null && now.getTime() - row.updatedAt.getTime() < quietMs) return { alert: false };
   const ref = `${row.owner}/${row.name}#${row.issueNumber}`;
   const when = row.updatedAt ? `任务行停在 ${stamp(row.updatedAt)}` : '任务行从没写过更新时刻';
   const doing = row.doing?.trim() ? row.doing.trim() : '（没写在干什么）';

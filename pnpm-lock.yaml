@@ -84,6 +84,10 @@ importers:
       zod:
         specifier: ^4.6.5
         version: 4.6.5
+    devDependencies:
+      '@fleet-dao/engine':
+        specifier: workspace:*
+        version: link:../engine
 
   packages/conventions:
     dependencies:
