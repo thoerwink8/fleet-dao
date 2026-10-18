@@ -31,7 +31,7 @@ import { APP, SCHEMA, SQL, UNITS } from './france-query.mjs';
  * 库里每个定时任务最近一次的某条记录（没有就是 null）。
  * @typedef {{ started_at: string, ended_at?: string | null, outcome?: string | null, why?: string | null }} JobRunFact
  */
-/** @typedef {{ repo: string, n: number, title: string, state: string, phase?: string | null, doing?: string | null, last_problem?: string | null, created_at: string, updated_at?: string | null }} TaskRow */
+/** @typedef {{ repo: string, n: number, title: string, state: string, executor?: string | null, phase?: string | null, doing?: string | null, last_problem?: string | null, created_at: string, updated_at?: string | null }} TaskRow */
 /** @typedef {{ repo?: string | null, n?: number | null, stage: string, route_id: string, model?: string | null, model_name?: string | null, host?: string | null, pool?: string | null, billing?: string | null, actual_model?: string | null, queued_at: string, started_at?: string | null, ended_at?: string | null, input_tokens?: number | null, output_tokens?: number | null, cache_read_tokens?: number | null, cache_write_tokens?: number | null, cost_usd?: number | null, session_cost_usd?: number | null, outcome?: string | null, failure_code?: string | null, failure_message?: string | null, subtask_index?: number | null, subtask_title?: string | null }} RunRow */
 /** @typedef {{ level: string, dedupe_key: string, title: string, body?: string | null, link?: string | null, created_at: string, updated_at?: string | null, n?: number | null }} NotificationRow */
 /** @typedef {{ id: string, name: string, schedule: string, every: number, last_run?: JobRunFact | null, last_finished?: JobRunFact | null, last_success?: JobRunFact | null }} JobRow */
@@ -98,6 +98,17 @@ export const KIND_TASK_IDLE = 'task-idle';
 export const KIND_ROUTE_STALE = 'route-stale';
 /** 由单的状态生成的异常（挂在任务上的提醒、「#N 卡住了」、「#N 最近的问题」）：任务自己停下，不是服务、发布这类基础设施的问题（#1740）。 */
 export const KIND_TASK_PARK = 'task-park';
+
+/** 任务的执行者（packages/db 的 tasks.executor 只许这两个值）：引擎派的、本机人领的。 */
+const EXECUTOR_NAMES = { engine: '引擎', local: '本机' };
+/**
+ * 认执行者：只认 engine、local；缺了、空、不认得的都是 null（未知），不默认成引擎也不默认成健康。
+ * @param {unknown} v
+ * @returns {'engine' | 'local' | null}
+ */
+export function executorOf(v) {
+  return v === 'engine' || v === 'local' ? v : null;
+}
 
 /**
  * 「没处理的提醒」这类异常（法国库 notifications 里还开着的 alert、decision）的 where：buildView 给每条提醒和「还有 N 条提醒没处理」都用它，
@@ -614,6 +625,8 @@ const ROW_SPECS = {
     n: 'int',
     title: 'str',
     state: 'str',
+    // 缺了（查询脚本是旧版）也认这份读数，只是执行者当「未知」：见 executorOf
+    executor: 'str?',
     phase: 'str?',
     doing: 'str?',
     last_problem: 'str?',
@@ -1590,6 +1603,7 @@ export function buildView(snapshot) {
       byStage: summed.byStage.map((s) => ({ ...s, stageName: STAGE_NAMES[s.stage] ?? s.stage })),
     };
     const open = mine.filter((r) => !r.endedAt);
+    const executor = executorOf(t.executor);
     return {
       key,
       repo: t.repo,
@@ -1599,6 +1613,8 @@ export function buildView(snapshot) {
       title: t.title,
       state: t.state,
       stateName: TASK_STATE_WORDS[t.state] ?? t.state,
+      executor,
+      executorName: executor ? EXECUTOR_NAMES[executor] : '未知',
       phase: t.phase,
       doing: t.doing,
       lastProblem: t.last_problem,
@@ -1632,10 +1648,20 @@ export function buildView(snapshot) {
           );
         const quiet = minutesBetween(t.updatedAt ?? t.createdAt, at);
         const idle = `#${t.n} ${quiet} 分钟没动，手上也没有会话（${t.stateName}${t.phase ? ` · ${t.phase}` : ''}）`;
+        // 没有会话只在读到了 runs 才算数（读失败不推断无会话）。「引擎空闲」只对引擎派的单成立（口径同 packages/engine 的
+        // jobs/idle-running.ts：本机领的没有开着的会话是常态）；执行者没读到的不按引擎报、也不当健康，留一句判不了。
         if (S.runs.ok && t.openRuns === 0) {
-          if (t.state === 'running' && quiet > LIMITS.taskIdle)
-            bad(`${idle}：多半停在等人或等一个派不出的路由`, WHERE.task(t.repo, t.n), KIND_TASK_IDLE);
-          else if (t.state !== 'running' && t.state !== 'asking' && quiet > LIMITS.taskQuiet)
+          if (t.state === 'running') {
+            if (quiet > LIMITS.taskIdle && t.executor === 'engine')
+              bad(`${idle}：多半停在等人或等一个派不出的路由`, WHERE.task(t.repo, t.n), KIND_TASK_IDLE);
+            else if (quiet > LIMITS.taskIdle && t.executor === null)
+              note(
+                `#${t.n} 在干活、${quiet} 分钟没动、没有会话，但执行者没读到（缺了或认不得），判不了是不是引擎空闲`,
+                WHERE.task(t.repo, t.n),
+                KIND_TASK_PARK,
+                `task:${t.repo}#${t.n}:executor-unknown`,
+              );
+          } else if (t.state !== 'asking' && t.executor !== 'local' && quiet > LIMITS.taskQuiet)
             note(idle, WHERE.task(t.repo, t.n), KIND_TASK_IDLE);
         }
       }
