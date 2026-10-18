@@ -171,6 +171,12 @@ describe('pnpm pr:open：查询轴', () => {
 });
 
 describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
+  it('detached HEAD 在推送之前拒绝，不把 HEAD 交给 gh 猜', () => {
+    const w = world([], BODY, [ISSUE_7], ok(), ok('[]'), 'HEAD');
+    expect(w.run()).toBe(2);
+    expect(w.calls).toEqual([]);
+    expect(w.gitCalls).toEqual([]);
+  });
   it('没碰改标准路径：开 PR、查文件、当场挂自动合并（squash）', () => {
     const w = world([CREATED, files('packages/api/src/home.ts'), ok()]);
     expect(w.run()).toBe(0);
@@ -178,6 +184,8 @@ describe('pnpm pr:open：开 PR、按路径判挂不挂自动合并', () => {
     expect(w.calls[0]).toEqual([
       'pr',
       'create',
+      '--head',
+      'feat/x',
       '--title',
       '加个东西',
       '--body-file',
