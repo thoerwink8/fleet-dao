@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { GitHubError } from '@fleet-dao/github';
+import { GitHubError, renderPrBody } from '@fleet-dao/github';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
@@ -146,7 +146,7 @@ function setup(over: Parameters<typeof fakeGh>[0] = {}, opts: { heartbeatEveryMs
     now: () => new Date('2026-09-25T08:00:00Z'),
     ...opts,
   });
-  return { ports, calls, trees };
+  return { ports, calls, trees, gh };
 }
 
 /** 会话用户那边的树：从镜像取主线头、检出分支（和 sessions.ts 建树一样）。 */
@@ -1037,6 +1037,39 @@ describe('开 PR、CI、合并', () => {
     expect(calls.updatePullBody).toEqual([
       { number: 101, body: expect.objectContaining({ requirement: 12, did: ['加了验证码'] }) },
     ]);
+  });
+
+  it('待验分片写后现读正文；旧正文或读失败明确拒绝，不能当已改', async () => {
+    const { ports, gh } = setup();
+    const kept = { ...body, requirementRefs: true };
+    const actual = {
+      number: 101,
+      nodeId: 'p',
+      state: 'open' as const,
+      merged: false,
+      draft: false,
+      title: 't',
+      body: '',
+      headSha: m.head,
+      headRef: BRANCH,
+      fromFork: false,
+      author: null,
+      autoMerge: false,
+    };
+    gh.claims.readPull = async () => actual;
+    await expect(ports.updatePrBody({ taskId: 't1', repo, prNumber: 101, body: kept }, ctx)).rejects.toThrow(
+      /Refs/,
+    );
+    gh.claims.readPull = async () => {
+      throw new Error('read failed');
+    };
+    await expect(ports.updatePrBody({ taskId: 't1', repo, prNumber: 101, body: kept }, ctx)).rejects.toThrow(
+      /read failed/,
+    );
+    gh.claims.readPull = async () => ({ ...actual, body: renderPrBody(kept) });
+    await expect(
+      ports.updatePrBody({ taskId: 't1', repo, prNumber: 101, body: kept }, ctx),
+    ).resolves.toBeUndefined();
   });
 
   it('自己这条分支上已经开着的 PR 不算（重放幂等）', async () => {

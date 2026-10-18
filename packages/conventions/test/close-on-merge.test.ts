@@ -2,10 +2,17 @@
 // 每一条「不碰」一个故意造出来的例子（误关有意留着的单比漏关更糟）；读不到、认不出的每一条都断言抛 CloseUnchecked，
 // 不当成「没有要收口的」。改动前（没有这个文件、合并后没人收口）这些全是红的。
 import { describe, expect, it } from 'vitest';
-import { closeOnMerge, whyLeave } from '../src/close-on-merge.ts';
+import {
+  ACCEPTANCE_SETTLED_MARK,
+  closeOnMerge as realCloseOnMerge,
+  whyLeave,
+} from '../src/close-on-merge.ts';
 import { CloseUnchecked } from '../src/issue-close.ts';
 import type { GhResult } from '../src/issue-new.ts';
 import { PROGRESS_ISSUE } from '../src/progress.ts';
+
+const closeOnMerge: typeof realCloseOnMerge = (pr, deps) =>
+  realCloseOnMerge(pr, { acceptance: async () => undefined, ...deps });
 
 const REPO_URL = 'https://api.github.com/repos/o/r';
 const ok = (data: unknown): GhResult => ({ code: 0, stdout: JSON.stringify(data), stderr: '' });
@@ -30,6 +37,8 @@ interface World {
   broken: { match: (args: string[]) => boolean; result: GhResult }[];
   /** 关单之后回读：true 时关了也回读成还开着（造「没关上」）。 */
   closeDoesNothing: boolean;
+  /** 单上的评论（#3037 验收责任看这个）；没给是没有评论。 */
+  comments: Record<number, unknown[]>;
   calls: string[][];
 }
 
@@ -51,6 +60,7 @@ function world(over: Partial<World> = {}) {
     openPulls: [],
     broken: [],
     closeDoesNothing: false,
+    comments: {},
     calls: [],
     ...over,
   };
@@ -70,6 +80,8 @@ function world(over: Partial<World> = {}) {
     }
     const sub = /^repos\/\{owner\}\/\{repo\}\/issues\/(\d+)\/sub_issues\?per_page=100$/.exec(path ?? '');
     if (sub?.[1]) return ok(w.subs[Number(sub[1])] ?? []);
+    const comments = /^repos\/\{owner\}\/\{repo\}\/issues\/(\d+)\/comments\?per_page=100$/.exec(path ?? '');
+    if (comments?.[1]) return ok(w.comments[Number(comments[1])] ?? []);
     const one = /^repos\/\{owner\}\/\{repo\}\/issues\/(\d+)$/.exec(path ?? '');
     if (one?.[1]) {
       const n = Number(one[1]);
@@ -288,6 +300,35 @@ describe('合并时收口：【故意造出的失败】读不到、认不出一�
 
   it('关完回读还是开着：不当成关了', async () => {
     await unchecked({ closeDoesNothing: true }, /关完回读/);
+  });
+});
+
+describe('可信最终验收账（#3037）', () => {
+  it('任意Bot文字不能覆盖仍open的数据库责任', async () => {
+    const { w, gh } = world({
+      comments: { 30: [{ user: { type: 'Bot' }, body: `${ACCEPTANCE_SETTLED_MARK}都好了` }] },
+    });
+    const r = await realCloseOnMerge(500, { gh, acceptance: async () => '数据库责任仍open' });
+    expect(r.outcomes[0]).toMatchObject({ outcome: 'kept', why: '数据库责任仍open' });
+    expect(closedCalls(w)).toEqual([]);
+  });
+  it('DB读取失败明确未知不关', async () => {
+    const { w, gh } = world();
+    await expect(
+      realCloseOnMerge(500, {
+        gh,
+        acceptance: async () => {
+          throw new Error('DB unavailable');
+        },
+      }),
+    ).rejects.toBeInstanceOf(CloseUnchecked);
+    expect(closedCalls(w)).toEqual([]);
+  });
+  it('可信DB已结清时照常关单', async () => {
+    const { gh } = world();
+    expect(
+      (await realCloseOnMerge(500, { gh, acceptance: async () => undefined })).outcomes[0],
+    ).toMatchObject({ outcome: 'closed' });
   });
 });
 

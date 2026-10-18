@@ -28,9 +28,21 @@ function world(o: {
   open: Record<number, string[]>;
   claims?: Record<number, number>;
   unmarkFails?: boolean;
+  /** 任务行 → 还开着的验收责任（#3037）；Error = 读不到。不给 = 没装这个口子。 */
+  duties?: Record<string, { prNumber: number; head: string; items: string[] }[]> | Error;
 }) {
   const steps: string[] = [];
+  const bodies: string[] = [];
+  const duties = o.duties;
   const deps: LocalLeaseDeps = {
+    ...(duties === undefined
+      ? {}
+      : {
+          async openDuties(taskId: string) {
+            if (duties instanceof Error) throw duties;
+            return duties[taskId] ?? [];
+          },
+        }),
     async expired() {
       return o.expired;
     },
@@ -61,14 +73,15 @@ function world(o: {
     sweepLocalLeases(deps, REPO, {
       open: new Map(Object.entries(o.open).map(([k, v]) => [Number(k), v] as const)),
       prClaims: async () => new Map(Object.entries(o.claims ?? {}).map(([k, v]) => [Number(k), v] as const)),
-      comment: async ({ issueNumber, key }) => {
+      comment: async ({ issueNumber, key, body }) => {
         steps.push(`comment ${issueNumber} ${key.split(':')[0]}`);
+        bodies.push(body);
         return { created: true };
       },
       now: NOW,
       log: () => {},
     });
-  return { steps, run };
+  return { steps, bodies, run };
 }
 
 describe('sweepLocalLeases', () => {
@@ -142,6 +155,67 @@ describe('sweepLocalLeases', () => {
     const w = world({ expired: [lease(7)], open: { 7: [] } });
     await w.run();
     expect(w.steps).toEqual(['comment 7 local-lease-expired', 'settle t7 returned']);
+  });
+});
+
+describe('sweepLocalLeases：验收责任跟着单子走（#3037）', () => {
+  const HEAD = 'a'.repeat(40);
+  const field = { prNumber: 3031, head: HEAD, items: ['现场 add/check 五条', '线上数据核对'] };
+
+  it('代码已合、验收责任还开着：不退回法国重做、不摘标签；留言列出原验收项和 PR、头，行记做完', async () => {
+    const w = world({
+      expired: [lease(7)],
+      open: { 7: [LOCAL_LABEL] },
+      merged: { 7: 3031 },
+      duties: { t7: [field] },
+    });
+    const r = await w.run();
+    expect(r).toMatchObject({ returned: 0, awaitingAcceptance: 1, unchecked: [] });
+    expect(w.steps).toEqual(['comment 7 local-lease-acceptance', 'settle t7 done']);
+    expect(w.bodies[0]).toContain('PR #3031');
+    expect(w.bodies[0]).toContain(HEAD);
+    expect(w.bodies[0]).toContain('- 现场 add/check 五条');
+    expect(w.bodies[0]).toContain('- 线上数据核对');
+  });
+
+  it('只剩协调验收责任（没有代码、没有 PR）：同样留着等人验，不要求开空 PR', async () => {
+    const w = world({
+      expired: [lease(7)],
+      open: { 7: [LOCAL_LABEL] },
+      duties: { t7: [{ prNumber: 0, head: '', items: ['和对方确认上线窗口'] }] },
+    });
+    const r = await w.run();
+    expect(r).toMatchObject({ returned: 0, awaitingAcceptance: 1 });
+    expect(w.steps).toEqual(['comment 7 local-lease-acceptance', 'settle t7 done']);
+    expect(w.bodies[0]).toContain('协调验收责任');
+  });
+
+  it('有验收责任、代码还没合：照旧退回法国，退回的留言里列出原验收项（收回不丢验收范围）', async () => {
+    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] }, duties: { t7: [field] } });
+    const r = await w.run();
+    expect(r).toMatchObject({ returned: 1, awaitingAcceptance: 0 });
+    expect(w.steps).toEqual(['unmark 7', 'comment 7 local-lease-expired', 'settle t7 returned']);
+    expect(w.bodies[0]).toContain('- PR #3031：现场 add/check 五条');
+  });
+
+  it('没有验收责任：和原来一样退回', async () => {
+    const w = world({ expired: [lease(7)], open: { 7: [LOCAL_LABEL] }, merged: { 7: 3031 }, duties: {} });
+    const r = await w.run();
+    expect(r).toMatchObject({ returned: 1, awaitingAcceptance: 0 });
+    expect(w.steps).toEqual(['unmark 7', 'comment 7 local-lease-expired', 'settle t7 returned']);
+  });
+
+  it('【故意造出的失败】验收责任读不到：这一条记没查成，不摘标签、不退回、不改行（不当成没有待验的）', async () => {
+    const w = world({
+      expired: [lease(7)],
+      open: { 7: [LOCAL_LABEL] },
+      merged: { 7: 3031 },
+      duties: new Error('库连不上'),
+    });
+    const r = await w.run();
+    expect(r).toMatchObject({ returned: 0, awaitingAcceptance: 0 });
+    expect(r.unchecked).toEqual([expect.stringContaining('库连不上')]);
+    expect(w.steps).toEqual([]);
   });
 });
 

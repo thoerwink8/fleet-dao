@@ -208,6 +208,11 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
       };
     }
     expect(JSON.stringify(history)).not.toContain(marker);
+    expect(JSON.stringify(history)).not.toContain(
+      Buffer.from(JSON.stringify({ id: 'acceptance-duty-before-merge', deprecated: false })).toString(
+        'base64',
+      ),
+    );
     await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
   });
 
@@ -243,6 +248,33 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
       (e: unknown) => e,
     );
     expect(error).toBeInstanceOf(DeterminismViolationError);
+  });
+
+  it('task-merged 老历史里冷验收回了 outOfScope、历史里没有 acceptance-duty 标记：收尾照老步序直接关单，重放得过（#3037）', async () => {
+    const marker = Buffer.from(JSON.stringify({ id: 'acceptance-duty', deprecated: false })).toString(
+      'base64',
+    );
+    const { workflowId, history } = load('task-merged.json');
+    const done = completionOf(history, firstScheduled(history, 'coldVerify'));
+    const attrs = done?.activityTaskCompletedEventAttributes;
+    expect(attrs).toBeDefined();
+    // 老活动结果加上「不归我验」（老历史里本来没有这个字段的也一样）：工作流只记进状态，不多调活动
+    if (attrs) {
+      attrs.result = {
+        payloads: [
+          {
+            metadata: { encoding: 'anNvbi9wbGFpbg==' },
+            data: payloadOf({ pass: true, problems: [], round: 1, outOfScope: ['现场 add/check 五条'] }),
+          },
+        ],
+      };
+    }
+    expect(JSON.stringify(history)).not.toContain(marker);
+    const acts = scheduledActivities(history);
+    expect(acts).toContain('closeIssue');
+    expect(acts).not.toContain('acceptanceDuties');
+    // 反过来验过：把 finish 里的 patched('acceptance-duty') 去掉，这一步重放当场报 TMPRL1100（'closeIssue' 对不上 'acceptanceDuties'）
+    await Worker.runReplayHistory({ workflowBundle: bundle }, history, workflowId);
   });
 
   it('对照：历史里调度的活动和代码调的对不上，重放当场报 DeterminismViolationError（这道检查真能红）', async () => {

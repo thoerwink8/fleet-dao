@@ -2377,3 +2377,194 @@ describe('任务工作流 · 没提交就避开上一轮路由（#1408）', { ti
     expect(calls.segment.filter((segment) => segment.taskId === task.taskId).length).toBeGreaterThan(3);
   });
 });
+
+describe('任务工作流 · 验收责任（#3037）：合并不等于关单', { timeout: 60_000 }, () => {
+  const FIELD = ['现场 add/check 五条', '线上数据核对'];
+
+  it('验收过了、带「不归我验」：照常挂自动合并、合并；不关单，验收责任连 PR、头、合并回执记下，PR 说明改 Refs', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      verify: (_i, n) => ({ pass: true, problems: [], round: n === 1 ? 1 : 2, outOfScope: FIELD }),
+      arm: () => {
+        expect(world.callsOf('updatePrBody').at(-1)?.input.body.requirementRefs).toBe(true);
+        return { armed: true, merged: false };
+      },
+    });
+    const i = input();
+    const run = await withWorker(env, world, async (q) => (await start(q, i)).result() as Promise<TaskRun>, {
+      tasks,
+    });
+    // 代码照合：不因不归我验判没过、不回炉，挂自动合并、等合并都走了
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, verifyRounds: 1, acceptanceOpen: 1 });
+    expect(calls.order).toEqual(['brief', 'segment', 'delivery', 'verify', 'guarded', 'arm', 'merged']);
+    expect(world.count('closeIssue')).toBe(0);
+    // 记下的验收责任：精确到仓、单、PR、头，原验收项原样，带合并回执
+    expect(world.callsOf('acceptanceDuties').at(-1)?.input).toMatchObject({
+      taskId: i.taskId,
+      issueNumber: 12,
+      record: [{ prNumber: run.prNumber, head: run.head, items: FIELD, mergeCommit: 'abc1234567890' }],
+    });
+    expect(world.duties).toEqual([
+      {
+        taskId: i.taskId,
+        repo: `${i.repo.owner}/${i.repo.name}`,
+        issueNumber: 12,
+        prNumber: run.prNumber,
+        head: run.head,
+        items: FIELD,
+        source: 'cold_verify',
+        mergeCommit: 'abc1234567890',
+        settled: false,
+      },
+    ]);
+    const body = world.callsOf('updatePrBody').at(-1)?.input.body;
+    expect(body).toMatchObject({ requirement: 12, requirementRefs: true });
+    expect(body?.owed).toEqual(FIELD.map((x) => `待人验：${x}`));
+    expect(world.states.at(-1)).toMatchObject({ state: 'done' });
+    expect(world.states.at(-1)?.doing).toContain('验收责任 2 条待人验');
+    // 收树照常（不存档）
+    expect(world.callsOf('removeWorktree')[0]?.input).toMatchObject({ archive: false });
+  });
+
+  it('合前 Refs 写失败先重试，只有成功回执后才挂自动合并', async () => {
+    const world = createFakeWorld({ failFirst: { updatePrBody: 1 } });
+    const { tasks } = scripted({
+      verify: () => ({ pass: true, problems: [], round: 1, outOfScope: FIELD }),
+      arm: () => {
+        expect(world.callsOf('updatePrBody').some((c) => c.ok === true && c.input.body.requirementRefs)).toBe(
+          true,
+        );
+        return { armed: true, merged: false };
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(world.callsOf('updatePrBody')[0]?.ok).toBe(false);
+    expect(world.count('closeIssue')).toBe(0);
+  });
+
+  it('没有「不归我验」的普通代码单：照常关单，PR 说明不改 Refs', async () => {
+    const world = createFakeWorld();
+    const { tasks } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(run).not.toHaveProperty('acceptanceOpen');
+    expect(world.callsOf('acceptanceDuties')[0]?.input.record).toEqual([]);
+    expect(world.callsOf('closeIssue')[0]?.input).toMatchObject({ issueNumber: 12, reason: 'completed' });
+    expect(world.callsOf('updatePrBody').some((c) => c.input.body.requirementRefs)).toBe(false);
+  });
+
+  it('库里已有这张单开着的验收责任（上一代、本机租约时期转的人）：这一代没有不归我验也不关单（重启、换执行方不丢）', async () => {
+    const i = input();
+    const world = createFakeWorld({
+      duties: [
+        {
+          taskId: i.taskId,
+          repo: `${i.repo.owner}/${i.repo.name}`,
+          issueNumber: 12,
+          prNumber: 90,
+          head: fakeHead(90),
+          items: ['现场 add/check 五条'],
+          source: 'cold_verify',
+          mergeCommit: null,
+          settled: false,
+        },
+      ],
+    });
+    const { tasks } = scripted();
+    const run = await withWorker(env, world, async (q) => (await start(q, i)).result() as Promise<TaskRun>, {
+      tasks,
+    });
+    expect(run).toMatchObject({ outcome: 'merged', acceptanceOpen: 1 });
+    expect(world.count('closeIssue')).toBe(0);
+    expect(world.duties).toHaveLength(1);
+  });
+
+  it('只有最终验收完成记下了（库里那一行收掉）才按标准关单', async () => {
+    const i = input();
+    const world = createFakeWorld({
+      duties: [
+        {
+          taskId: i.taskId,
+          repo: `${i.repo.owner}/${i.repo.name}`,
+          issueNumber: 12,
+          prNumber: 90,
+          head: fakeHead(90),
+          items: ['现场 add/check 五条'],
+          source: 'cold_verify',
+          mergeCommit: 'm',
+          settled: true,
+        },
+      ],
+    });
+    const { tasks } = scripted();
+    await withWorker(env, world, async (q) => (await start(q, i)).result() as Promise<TaskRun>, { tasks });
+    expect(world.callsOf('closeIssue')[0]?.input).toMatchObject({ issueNumber: 12, reason: 'completed' });
+  });
+
+  it('【故意造出的失败】验收责任读不成：不关单（不当成没有待验的），重试或停下，人放弃后照样不关', async () => {
+    const world = createFakeWorld({ failFirst: { acceptanceDuties: 1_000_000 } });
+    const { tasks } = scripted();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await world.until(() => world.count('acceptanceDuties') >= 2, '验收责任读了不止一次');
+        expect(world.count('closeIssue')).toBe(0);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收尾' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(world.count('closeIssue')).toBe(0);
+  });
+
+  it('同一个头转了两次人（验收重来）、合并回执再来一次：库里只一行，原验收项并起来', async () => {
+    const world = createFakeWorld();
+    const { tasks } = scripted({
+      verify: (_i, n) => ({
+        pass: true,
+        problems: [],
+        round: n === 1 ? 1 : 2,
+        outOfScope: n === 1 ? [FIELD[0] ?? ''] : FIELD,
+      }),
+      // 头被人换了一次：同一个 PR 两个头，各一行
+      merged: (n) =>
+        n === 1 ? { state: 'merged', mergeCommit: 'abc1234567890' } : { state: 'merged', mergeCommit: 'x' },
+    });
+    const i = input();
+    await withWorker(env, world, async (q) => (await start(q, i)).result() as Promise<TaskRun>, { tasks });
+    // 工作流把这一次的再交一遍：和活动那边记过的落在同一行，不重复
+    const again = await world.ports.acceptanceDuties(
+      {
+        taskId: i.taskId,
+        repo: i.repo,
+        issueNumber: 12,
+        record: [
+          {
+            prNumber: world.duties[0]?.prNumber ?? 0,
+            head: world.duties[0]?.head ?? '',
+            items: FIELD,
+            mergeCommit: 'zzz',
+          },
+        ],
+      },
+      { signal: new AbortController().signal, heartbeat: () => {}, attempt: 1, lastHeartbeat: undefined },
+    );
+    expect(again.open).toHaveLength(1);
+    expect(again.open[0]?.mergeCommit).toBe('abc1234567890');
+    expect(world.duties).toHaveLength(1);
+  });
+});

@@ -155,6 +155,8 @@ export interface TaskRun {
   head: string | null;
   rounds: number;
   verifyRounds: number;
+  /** 合了、可验收责任还开着几条（#3037）：单子没关，等最终验收完成。没有开着的不带这个字段。 */
+  acceptanceOpen?: number;
 }
 
 // 信号的名字和参数形状在 shared/task-signals.ts：驾驶舱后端发信号也从那里拿，两边不各拼一遍（#901）。

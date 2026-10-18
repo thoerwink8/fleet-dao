@@ -5,7 +5,14 @@
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
-import { claimLocalTask, createDb, feishuPushFacts, finishLocalTask, renewLocalTask } from '@fleet-dao/db';
+import {
+  claimLocalTask,
+  createDb,
+  feishuPushFacts,
+  finishLocalTask,
+  readAcceptanceDutyRows,
+  renewLocalTask,
+} from '@fleet-dao/db';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import { intakeChatLimitsFrom } from '@fleet-dao/shared';
 import {
@@ -216,6 +223,7 @@ async function assemble(): Promise<{
     taskRedo: temporal.taskRedo,
     github: github.sink,
     ...(github.ciPolicyBridge ? { ciPolicyBridge: github.ciPolicyBridge } : {}),
+    acceptanceDuties: (identity) => readAcceptanceDutyRows(db, identity),
     ...(github.installationRepos ? { installationRepos: github.installationRepos } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     decisionCapabilities: {

@@ -87,13 +87,23 @@
 //   三段的单（和老历史 rt.flowMode 为 null）走原来的路，一步不差。
 // - 收树先核对界面截图（#2983，patched('shots-delivery')，cleanup 给 removeWorktree 带 shots）：远端 shots/<单号> 读不到就存进受限归档，
 //   存不成不删树。合并后 PR 说明代码、图片分开写（shotsPrLines，多一次 updatePrBody），有欠项进「还欠什么」。老历史不带 shots，不多调。
+// - 合并不等于关单（#3037，patched('acceptance-duty')，finish）：冷验收转给人的验收条（outOfScope）不挡合并，可收尾先记、读验收责任
+//   （acceptanceDuties 活动，库里 acceptance_duties），还有开着的就不 closeIssue：单子留着，PR 说明「需求」改 Refs 标分片、原验收项进
+//   「还欠什么」。读不成按失败分流重试或停下，不当成没有。没有 outOfScope 的单照旧关。老历史没有这个标记，照旧直接关单。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
 import type { Limits } from '../limits.ts';
-import type { PrBody, RecordRoundInput, RemoveWorktreeResult, RoundOutcome, Worktree } from '../ports.ts';
+import type {
+  AcceptanceDuty,
+  PrBody,
+  RecordRoundInput,
+  RemoveWorktreeResult,
+  RoundOutcome,
+  Worktree,
+} from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import { SELF_CHECK_DOING } from '../self-check-budget.ts';
@@ -330,6 +340,7 @@ class TaskFlow {
         }
 
         await guardedPaths(rt);
+        await this.prepareAcceptance();
         const merged = await armAndWaitMerged(rt);
         if (merged.kind === 'merged') return { commit: merged.commit };
         // 等合并时 PR 和主线真有冲突（#1838）：返工意见已记下，交回下一轮动手会话解冲突，不回等 CI。
@@ -388,6 +399,7 @@ class TaskFlow {
       }
 
       await guardedPaths(rt);
+      await this.prepareAcceptance();
       const merged = await armAndWaitMerged(rt);
       if (merged.kind === 'merged') return { commit: merged.commit };
       // 等合并时 PR 和主线真有冲突（#1838）：返工意见已记下，交回下一轮动手会话解冲突，不回等 CI。
@@ -437,6 +449,7 @@ class TaskFlow {
   private async mergeNowAndFinish(
     rt: TaskRuntime,
   ): Promise<'rework' | 'head_moved' | { commit?: string | undefined }> {
+    await this.prepareAcceptance();
     await guardedPaths(rt);
     const prNumber = rt.prNumber;
     if (prNumber === null || rt.head === null) throw new Error('合并之前还没有 PR');
@@ -669,8 +682,17 @@ class TaskFlow {
   }
 
   /** PR 正文的结构：「做了什么」带最近一次动手会话的最后一条回复（#2723，有截断上限）。 */
-  private prBody(shots?: { verified: string[]; owed: string[] }): PrBody {
+  private prBody(
+    shots?: { verified: string[]; owed: string[] },
+    duties: readonly AcceptanceDuty[] = [],
+  ): PrBody {
     const rt = this.rt;
+    if (duties.length > 0) {
+      // 验收责任还开着（#3037）：「需求」栏写 Refs 标分片，原验收项进「还欠什么」，合并收口、每日对账都不关它
+      const base = this.prBody(shots);
+      const owed = [...new Set(duties.flatMap((d) => d.items))].map((item) => `待人验：${item}`);
+      return { ...base, requirementRefs: true, owed: [...(base.owed ?? []), ...owed] };
+    }
     const body: PrBody = {
       requirement: rt.input.issueNumber,
       did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length, rt.lastAnswer),
@@ -692,6 +714,7 @@ class TaskFlow {
   private async updatePrBody(
     prNumber: number,
     shots?: { verified: string[]; owed: string[] },
+    duties: readonly AcceptanceDuty[] = [],
   ): Promise<void> {
     const rt = this.rt;
     try {
@@ -700,7 +723,7 @@ class TaskFlow {
           taskId: rt.input.taskId,
           repo: rt.input.repo,
           prNumber,
-          body: this.prBody(shots),
+          body: this.prBody(shots, duties),
         }),
       );
     } catch (error) {
@@ -930,28 +953,49 @@ class TaskFlow {
     return wt;
   }
 
-  /** 收尾：关单、收工作树、写库。 */
+  /**
+   * 收尾：关单、收工作树、写库。
+   * 验收责任还开着（#3037，patched('acceptance-duty')）：代码已合（决定 0093：不归我验不挡合并），可单子不关——先把这条工作流
+   * 见过的转人验收条连合并回执记进库（按「单 + PR + 头」幂等，冷验收活动记过的不重复），再读回这张单还开着的全部；
+   * 有就留着原单，PR 说明「需求」栏改成 Refs 标分片，原验收项写进「还欠什么」。读不成按失败分流重试或停下，不当成没有、不关单。
+   * 老历史没有这个标记，照旧直接关单。
+   */
   private async finish(commit?: string): Promise<TaskRun> {
     const rt = this.rt;
     await this.endRound('merged');
     rt.set('done', `PR #${rt.prNumber} 已合并`);
     rt.status.lastProblem = null;
-    await rt.step('closeIssue', () =>
-      rt.acts.closeIssue({
+    const duties = patched('acceptance-duty') ? await this.openDuties(commit) : [];
+    if (duties.length === 0) {
+      await rt.step('closeIssue', () =>
+        rt.acts.closeIssue({
+          taskId: rt.input.taskId,
+          repo: rt.input.repo,
+          issueNumber: rt.input.issueNumber,
+          reason: 'completed',
+          comment: `已合并：PR #${rt.prNumber}${commit ? `（${commit.slice(0, 7)}）` : ''}`,
+        }),
+      );
+    } else {
+      const items = duties.reduce((n, d) => n + d.items.length, 0);
+      rt.set('done', `PR #${rt.prNumber} 已合并；验收责任 ${items} 条待人验，单子留着`);
+      log.info('代码已合，验收责任还开着：不关单', {
         taskId: rt.input.taskId,
-        repo: rt.input.repo,
         issueNumber: rt.input.issueNumber,
-        reason: 'completed',
-        comment: `已合并：PR #${rt.prNumber}${commit ? `（${commit.slice(0, 7)}）` : ''}`,
-      }),
-    );
+        prNumber: rt.prNumber,
+        commit,
+        duties: duties.map((d) => ({ prNumber: d.prNumber, head: d.head, items: d.items.length })),
+      });
+    }
     const removed = await this.cleanup(false);
     // 界面截图的交付结局写进 PR 说明（#2983）：代码合并和图片交付分开写，有欠项不写「无」。只有带了 shots 的新历史才有
     const prNumber = rt.prNumber;
     const shots = removed?.shots && prNumber !== null ? shotsPrLines(prNumber, commit, removed.shots) : null;
     if (shots && prNumber !== null) {
-      if (shots.owed[0]) rt.set('done', `PR #${prNumber} 已合并；${shots.owed[0]}`);
-      await this.updatePrBody(prNumber, shots);
+      if (shots.owed[0] && duties.length === 0) rt.set('done', `PR #${prNumber} 已合并；${shots.owed[0]}`);
+      await this.updatePrBody(prNumber, shots, duties);
+    } else if (duties.length > 0 && prNumber !== null) {
+      await this.updatePrBody(prNumber, undefined, duties);
     }
     await rt.mirror('done');
     return {
@@ -960,7 +1004,46 @@ class TaskFlow {
       head: rt.head,
       rounds: rt.round,
       verifyRounds: rt.verifyRound,
+      ...(duties.length > 0 ? { acceptanceOpen: duties.length } : {}),
     };
+  }
+
+  /** 合并前把持久待验责任写进分片正文；写不成不挂自动合并。旧历史保留原步序。 */
+  private async prepareAcceptance(): Promise<void> {
+    if (!patched('acceptance-duty-before-merge')) return;
+    const duties = await this.openDuties();
+    const rt = this.rt;
+    if (duties.length === 0 || rt.prNumber === null) return;
+    await rt.step('updatePrBody', () =>
+      rt.acts.updatePrBody({
+        taskId: rt.input.taskId,
+        repo: rt.input.repo,
+        prNumber: rt.prNumber!,
+        body: this.prBody(undefined, duties),
+      }),
+    );
+  }
+
+  /**
+   * 记下这条工作流见过的转人验收条（合进主线的那个 PR 带上合并回执），读回这张单还开着的验收责任（#3037）。
+   * 读不成、写不成由 step 按失败分流重试或停下等人：不回空数组冒充「没有待验的」。
+   */
+  private async openDuties(commit?: string): Promise<AcceptanceDuty[]> {
+    const rt = this.rt;
+    const record = rt.handedOver.map((d) => ({
+      ...d,
+      items: [...d.items],
+      ...(commit && d.prNumber === rt.prNumber ? { mergeCommit: commit } : {}),
+    }));
+    const read = await rt.step('acceptanceDuties', () =>
+      rt.acts.acceptanceDuties({
+        taskId: rt.input.taskId,
+        repo: rt.input.repo,
+        issueNumber: rt.input.issueNumber,
+        record,
+      }),
+    );
+    return read.open;
   }
 
   /**
