@@ -81,13 +81,14 @@ import {
   type WorkflowView,
 } from '../jobs/reconcile-common.ts';
 import type { WorktreeCleanupDeps } from '../jobs/worktree-cleanup.ts';
-import type { PortContext, ShotsDelivery } from '../ports.ts';
+import { confirmDeletionIdle } from '../jobs/worktree-sweep.ts';
+import { type PortContext, PortError, type ShotsDelivery } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
 import { type ClosedIssueHoldToken, taskCloseClosedIssueUpdate, taskStatusQuery } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import { mainCiRuns } from './main-ci-runs.ts';
-import { preserveWorktree } from './preserve-worktree.ts';
+import { preserveThenRemove } from './preserve-worktree.ts';
 import { PROBE_DIR } from './route-probe.ts';
 import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
@@ -626,7 +627,25 @@ export function hourlyReconcileJob(
           const user = await w.trees.ownerOf(dir);
           // WorkTrees.ownerOf 仅 ENOENT 回 null；属主未知、权限或读失败均抛错。
           if (!user) return { gone: true };
-          await preserveWorktree(
+          const idle = () =>
+            confirmDeletionIdle({
+              root: w.trees.root,
+              dir,
+              openSessions: () => openSessionTrees(w.db),
+              workflows: w.workflows ?? temporalWorkflows(client),
+              issue: (ref) => issueWorkFacts(w.db, ref),
+            });
+          const answer = await idle();
+          if (answer !== 'idle') {
+            throw new PortError(
+              'WORKTREE_PRESERVED',
+              answer === 'busy'
+                ? `${dir} 删除前现核仍有任务或会话在用，保留原树`
+                : `${dir} 删除前确认不了没人用，保留原树`,
+              { retryable: false },
+            );
+          }
+          const result = await preserveThenRemove(
             {
               exec: w.exec,
               user,
@@ -636,10 +655,11 @@ export function hourlyReconcileJob(
               ...(w.shBin ? { sh: w.shBin } : {}),
             },
             w.archiveDir,
-            {},
+            { workRoot: w.trees.root, confirmIdle: idle },
             preservedShots.get(dir),
+            () => w.trees.remove(dir),
           );
-          return await w.trees.remove(dir);
+          return { gone: result.gone };
         } finally {
           preservedShots.delete(dir);
         }

@@ -32,6 +32,7 @@ import {
   getRun,
   latestRunOfTask,
   listIntakeRepos,
+  openSessionTrees,
   raiseLateReview,
   readEngineMasterRow,
   readFlowModeSettingRaw,
@@ -238,6 +239,14 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     ...(deps.log ? { log: deps.log } : {}),
     ...(deps.session?.gitBin ? { gitBin: deps.session.gitBin } : {}),
     ...(deps.session?.shBin ? { shBin: deps.session.shBin } : {}),
+    confirmTreeIdle: async (dir) => {
+      try {
+        const rows = await openSessionTrees(deps.db);
+        return rows.some((row) => row.path === dir) ? 'busy' : 'idle';
+      } catch {
+        return 'unknown';
+      }
+    },
   });
   const ports: EnginePorts = {
     pickRoute: store.pickRoute,
