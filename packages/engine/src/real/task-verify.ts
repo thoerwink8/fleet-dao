@@ -49,7 +49,6 @@
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
 import type { ClaimsGitHub, GitHub, RepoRef } from '@fleet-dao/github';
-import { verdictOf } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
@@ -713,9 +712,11 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
                   ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
                   prNumber,
                   branch: input.branch,
+                  headSha: input.headSha,
                 },
                 {
                   oneShot: oneShotFor(attachTicket),
+                  log,
                   ...(verifierDeps.timeoutMinutes !== undefined
                     ? { timeoutMinutes: verifierDeps.timeoutMinutes }
                     : {}),
@@ -728,6 +729,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               input.roundSeq === undefined ? verifierInput : { ...verifierInput, roundSeq: input.roundSeq },
               {
                 ...verifierDeps,
+                log,
                 ...(sessionIo ? { detach: true } : {}),
                 released,
               },
@@ -939,15 +941,6 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       });
     }
     const outOfScope = verdict.outOfScope ?? [];
-    // 结论记在验收那一笔上（#3140，runs.verdict）：过没过、哪几条没过、转给人的。记不成只写日志，结论照常交回工作流
-    const verdictRunId = verdict.session?.runId;
-    if (verdictRunId !== undefined && deps.runs.noteVerdict !== undefined) {
-      try {
-        await deps.runs.noteVerdict(verdictRunId, verdictOf(verdict));
-      } catch (error) {
-        log('验收结论没记进 runs（结论照常交回工作流）', { runId: verdictRunId, error: errMessage(error) });
-      }
-    }
     const handoff =
       outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? [], ctx) : undefined;
     const notes = [verdict.notes, handoff].filter((n): n is string => n !== undefined && n !== '').join('；');
