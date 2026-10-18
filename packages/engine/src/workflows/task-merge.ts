@@ -125,6 +125,8 @@ export async function armAndWaitMerged(
       return { kind: 'head_moved' };
     }
     if (!armed.armed) {
+      if (await rt.parkMainSyncBudget(armed.mainSyncBudgetExhausted, armed.why ?? '同步主线次数已到上限'))
+        continue;
       await rt.park('自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
       continue;
     }
@@ -179,6 +181,14 @@ export async function armAndWaitMerged(
         await rt.advance('merge', MERGE_CONFLICT_NOTE);
         // 已经同步过 MAX_MAIN_SYNCS 次了还是冲突：不接着转（和「落后主线自动同步」同一个上限），原样停下报人。
         if (rt.mainSyncs >= MAX_MAIN_SYNCS) {
+          if (
+            await rt.parkMainSyncBudget(
+              { prNumber, headSha: head, used: rt.mainSyncs },
+              `PR #${prNumber} 的主线同步次数已到上限，GitHub 仍报告冲突`,
+              `连着 ${MAX_MAIN_SYNCS} 次并主线后 PR #${prNumber} 还是和主线冲突`,
+            )
+          )
+            continue;
           await rt.park(
             `连着 ${MAX_MAIN_SYNCS} 次并主线后 PR #${prNumber} 还是和主线冲突`,
             `PR #${prNumber} 和主线冲突，引擎自动并主线 ${MAX_MAIN_SYNCS} 次都没并干净：要人看。` +

@@ -28,7 +28,9 @@ import {
   CI_POLICY_POLL_SECONDS,
   type ClosedIssueHoldToken,
   type GuardedPaths,
+  MAX_MAIN_SYNCS,
   MAX_ROUND_RESETS,
+  type MainSyncBudgetExhausted,
   PAUSED_BY_HUMAN,
   type PauseCommand,
   type RepinCommand,
@@ -105,7 +107,7 @@ export class TaskRuntime {
   prNumber: number | null = null;
   /** 人在哪个头上批过哪些路径（点「继续」那一刻记下）；头换了就作废，新的内容要重新批。 */
   guardApproval: { head: string; paths: GuardedPaths } | null = null;
-  /** 直接合被拒、因为落后主线，引擎已经自动把这张 PR 同步过几次主线（上限 MAX_MAIN_SYNCS，之后停下报人）。 */
+  /** 这张 PR 本段已自动同步主线几次（落后与等合并冲突共用；上限 MAX_MAIN_SYNCS，耗尽停下后可明确继续续段）。 */
   mainSyncs = 0;
   /** 等合并这一轮已经见过一次必过检查红（#1983）。确认窗口里再红一次才返工；中间变回还在跑就清掉。 */
   mergeRedNoted = false;
@@ -694,6 +696,35 @@ export class TaskRuntime {
     this.status.phase = previous;
     this.status.lastProblem = null;
     await this.mirror('running');
+  }
+
+  /** 只在这个精确头的预算耗尽停下、再收到新「继续」后，续一段 MAX_MAIN_SYNCS 次；普通信号不预存预算。 */
+  async parkMainSyncBudget(
+    exhausted: MainSyncBudgetExhausted | undefined,
+    detail: string,
+    title = '主线同步预算已用完',
+  ): Promise<boolean> {
+    if (
+      !exhausted ||
+      exhausted.prNumber !== this.prNumber ||
+      exhausted.headSha !== this.head ||
+      exhausted.used !== this.mainSyncs ||
+      exhausted.used < MAX_MAIN_SYNCS ||
+      !Number.isInteger(exhausted.used) ||
+      !patched('main-sync-budget-continue')
+    )
+      return false;
+    await this.park(
+      title,
+      `${detail}。点「继续」只再允许 ${MAX_MAIN_SYNCS} 次同步；每个新头仍按仓的 CI 模式重走检查和验收。`,
+    );
+    if (
+      exhausted.prNumber === this.prNumber &&
+      exhausted.headSha === this.head &&
+      exhausted.used === this.mainSyncs
+    )
+      this.mainSyncs = 0;
+    return true;
   }
 
   /**
