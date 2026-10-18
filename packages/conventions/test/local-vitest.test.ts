@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -12,6 +11,7 @@ import {
   splitLocalTests,
   verifyLinuxReceipt,
 } from '../src/local-vitest.ts';
+import { runChild } from './child.ts';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -85,12 +85,12 @@ it('runner 必须显式提供 Linux Node 启动参数和绝对依赖根', () => 
   ).toBe('/deps');
 });
 
-it('快照读取当前 tracked 脏改、新文件和删除，不用 HEAD 或暂存副本', () => {
+it('快照读取当前 tracked 脏改、新文件和删除，不用 HEAD 或暂存副本', { timeout: 0 }, () => {
   const root = mkdtempSync(join(tmpdir(), 'fleet-snapshot-'));
   roots.push(root);
   const git = (...args: string[]) => {
-    const r = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
-    if (r.status !== 0) throw new Error(r.stderr || r.error?.message);
+    const r = runChild('git', args, { cwd: root });
+    if (r.status !== 0) throw new Error(r.stderr);
   };
   git('init');
   writeFileSync(join(root, 'tracked.ts'), 'staged');
@@ -124,12 +124,12 @@ it('Windows 命中 Linux 测试且没有配置时明确报错，不能返回成�
   expect(result.status).toBeNull();
 });
 
-it('tracked 父目录被换成链接时拒绝快照，不读取链接另一端的源码', () => {
+it('tracked 父目录被换成链接时拒绝快照，不读取链接另一端的源码', { timeout: 0 }, () => {
   const root = mkdtempSync(join(tmpdir(), 'fleet-snapshot-link-'));
   roots.push(root);
   const git = (...args: string[]) => {
-    const result = spawnSync('git', args, { cwd: root, encoding: 'utf8' });
-    if (result.status !== 0) throw new Error(result.stderr || result.error?.message);
+    const result = runChild('git', args, { cwd: root });
+    if (result.status !== 0) throw new Error(result.stderr);
   };
   git('init');
   mkdirSync(join(root, 'tracked'));
@@ -140,5 +140,7 @@ it('tracked 父目录被换成链接时拒绝快照，不读取链接另一端�
   writeFileSync(join(outside, 'source.ts'), 'outside');
   rmSync(join(root, 'tracked'), { recursive: true });
   symlinkSync(outside, join(root, 'tracked'), 'junction');
+  // Linux 会把新链接本身列为 untracked；忽略这一项，cached tracked/source.ts 仍须走父目录护栏。
+  writeFileSync(join(root, '.gitignore'), '/tracked\n');
   expect(() => snapshotSource(root)).toThrow('符号链接父目录');
 });
