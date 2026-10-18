@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -35,6 +36,18 @@ func fakeReplayClaude(sid string) {
 			continue
 		}
 		if msg["content"] == "swallow" {
+			continue
+		}
+		if strings.Contains(text, "consume-no-echo") {
+			if p := os.Getenv("MIRASIM_TEST_CONSUMED"); p != "" {
+				file, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+				if err != nil {
+					os.Exit(21)
+				}
+				_, _ = file.WriteString("effect\n")
+				_ = file.Close()
+			}
+			_ = enc.Encode(map[string]any{"type": "result", "subtype": "success", "session_id": sid, "is_error": false})
 			continue
 		}
 		_ = enc.Encode(map[string]any{"type": "user", "message": msg, "session_id": sid, "parent_tool_use_id": nil, "isReplay": true, "pid": os.Getpid()})
@@ -98,38 +111,56 @@ func waitLog(t *testing.T, f fixture, cache, want string) {
 	}
 }
 
-// 10-16 的后半段：没读进的消息还在，Mirasim 就把进程强杀了。同一会话下次起进程，下一条消息要把它补在前面。
-func TestUnreadUserSurvivesKilledProcessAndIsRedelivered(t *testing.T) {
-	for _, resent := range []bool{false, true} {
-		t.Run(map[bool]string{false: "补发", true: "Mirasim已重发不重复"}[resent], func(t *testing.T) {
+// 强杀前是否消费不能靠回显证明：未回显与已消费但回显丢失均保留 unknown，不自动再执行。
+func TestUnknownUserSurvivesKilledProcessWithoutAutomaticReplay(t *testing.T) {
+	for _, content := range []string{"swallow", "consume-no-echo"} {
+		t.Run(content, func(t *testing.T) {
 			f := newFixture(t, "local")
 			cache := filepath.Join(f.home, "xdg-cache")
-			a := startReplayApp(t, f, cache)
+			consumed := filepath.Join(f.home, "consumed")
+			a := startReplayApp(t, f, cache, "MIRASIM_TEST_CONSUMED="+consumed)
 			a.user(t, "first")
+			a.until(t, "user")
 			a.until(t, "result")
-			a.user(t, "swallow")
-			waitLog(t, f, cache, "path=turn idle=true len=7")
+			a.user(t, content)
+			if content == "consume-no-echo" {
+				a.until(t, "result")
+			}
+			waitLog(t, f, cache, "event=user-forward path=turn idle=true len="+strconv.Itoa(len(content)))
 			_ = a.cmd.Process.Kill()
 			<-a.ended
-			b := startReplayAppAs(t, f, cache, "--resume")
+			b := startReplayAppAs(t, f, cache, "--resume", "MIRASIM_TEST_CONSUMED="+consumed)
 			next := "next"
-			if resent {
-				next = "swallow 再说一遍 next"
-			}
 			b.user(t, next)
+			warning := b.until(t, "result")
+			if warning["is_error"] != true || !strings.Contains(warning["result"].(string), "交付状态未知") || strings.Contains(warning["result"].(string), content) {
+				t.Fatalf("恢复应明确提示 unknown，不输出原正文：%v", warning)
+			}
 			echo := b.until(t, "user")
-			content, _ := echo["message"].(map[string]any)["content"].(string)
-			if resent {
-				if content != next {
-					t.Fatalf("Mirasim 已重发的不能再补一遍：%q", content)
-				}
-			} else if !strings.HasPrefix(content, redeliveryHeader) || !strings.Contains(content, "1. swallow") || !strings.HasSuffix(content, "next") {
-				t.Fatalf("没读进的消息要补在下一条前面：%q", content)
+			got, _ := echo["message"].(map[string]any)["content"].(string)
+			if got != next {
+				t.Fatalf("不能把 unknown 作为新指令拼入：%q", got)
 			}
 			b.until(t, "result")
 			log := launchLogOf(t, f, cache)
-			if !strings.Contains(log, "event=user-redelivery-loaded n=1") {
-				t.Fatalf("新进程要读回上次没读进的：%s", log)
+			if !strings.Contains(log, "event=user-recovery-unknown n=1") {
+				t.Fatalf("新进程要报告历史 unknown 责任：%s", log)
+			}
+			if content == "consume-no-echo" {
+				b, err := os.ReadFile(consumed)
+				if err != nil || string(b) != "effect\n" {
+					t.Fatalf("副作用只能有一次：%q %v", b, err)
+				}
+			}
+			_ = b.in.Close()
+			if err := waitEnded(t, b); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("LOCALAPPDATA", filepath.Join(f.home, "cache"))
+			t.Setenv("XDG_CACHE_HOME", cache)
+			entries, err := loadRedelivery(f.sid)
+			if err != nil || len(entries) != 1 || entries[0].State != deliveryUnknown || userText(entries[0].User) != content {
+				t.Fatalf("unknown 责任应跨重启保留：%+v %v", entries, err)
 			}
 		})
 	}
@@ -256,9 +287,16 @@ func trackedDeliveries(t *testing.T, frames ...frame) *deliveries {
 	t.Helper()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
-	d := &deliveries{tracking: true, stallAfter: time.Minute}
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	d := &deliveries{tracking: true, stallAfter: time.Minute, session: "delivery-test-session"}
 	for _, f := range frames {
-		d.forwarded(f, "active", true)
+		q, _, err := d.enqueue(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.send(q, io.Discard, "active", true); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return d
 }
