@@ -30,8 +30,10 @@ import {
   finishScheduleRun,
   getFlowAssignment,
   getRun,
+  issueWorkFacts,
   latestRunOfTask,
   listIntakeRepos,
+  openSessionTrees,
   raiseLateReview,
   readEngineMasterRow,
   readFlowModeSettingRaw,
@@ -58,9 +60,11 @@ import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../dr
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
 import { createDecideFlowMode } from '../flow-mode.ts';
 import { probeAssignedRoute } from '../jobs/dispatch-probe.ts';
+import type { WorkflowReader } from '../jobs/reconcile-common.ts';
 import { probeOrgNow } from '../jobs/route-probe.ts';
 import { routeProbeLock } from '../jobs/route-probe-now.ts';
 import type { InterruptedScheduleClose } from '../jobs/timers.ts';
+import { confirmManagedTreeIdle } from '../jobs/worktree-sweep.ts';
 import { SESSION_MEMORY_HIGH_MB, SESSION_MEMORY_MAX_MB } from '../limits.ts';
 import { type EnginePorts, PortError } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
@@ -70,6 +74,7 @@ import { createNoteBare401 } from './bare-401.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
+import { changelogJob } from './changelog.ts';
 import { ciTimingsJob } from './ci-timings.ts';
 import { cliUpgradeJob } from './cli-upgrade.ts';
 import { cliVersionsJob } from './cli-versions.ts';
@@ -95,6 +100,7 @@ import {
   closedIssueEventsJob,
   type HourlyReconcileWiring,
   hourlyReconcileJob,
+  temporalWorkflows,
   worktreeCleanupJob,
 } from './hourly-reconcile.ts';
 import { intakeJob } from './intake.ts';
@@ -150,6 +156,11 @@ export interface RealPortsDeps extends ReviewAuditDeps {
   /** 引擎自己的临时目录（bundle）、存档目录（没合并就收的树里没提交的改动）。 */
   tmpDir: string;
   archiveDir: string;
+  /**
+   * 删树前问任务和子任务工作流还在不在跑。不给就确认不了，不当成没人用。
+   * 生产装配用 Temporal 的 state。
+   */
+  workflows?: Pick<WorkflowReader, 'state'>;
   /**
    * 排空（drain.ts）：在排空时选路回「过一会儿再选」。不给就不闸（测试、只起一次的工具）。
    * 三段会话登记进排空清单的是 oneShotSessions（下面 realPortsFromEnv），不在这里。
@@ -239,6 +250,15 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     ...(deps.log ? { log: deps.log } : {}),
     ...(deps.session?.gitBin ? { gitBin: deps.session.gitBin } : {}),
     ...(deps.session?.shBin ? { shBin: deps.session.shBin } : {}),
+    confirmTreeIdle: (dir, caller) =>
+      confirmManagedTreeIdle({
+        root: deps.trees.root,
+        dir,
+        openSessions: () => openSessionTrees(deps.db),
+        ...(deps.workflows ? { workflows: deps.workflows } : {}),
+        issue: (ref) => issueWorkFacts(deps.db, ref),
+        ...(caller?.workflowId ? { exceptWorkflowId: caller.workflowId } : {}),
+      }),
     // 推分支、开 PR 时记下这个头改了哪些文件（#3140）：任务页的改动卡读 pr_head_files
     recordHeadFiles: async (input) => {
       await recordPrHeadFiles(deps.db, { ...input, files: [...input.files] });
@@ -916,6 +936,9 @@ export function realPortsFromEnv(
       });
     },
   };
+  // 删树前要问工作流还在不在跑。第一次用到才连 Temporal，和下面叫醒等路由共用这一条连接。
+  const temporal = configFromEnv(env as Record<string, string | undefined>);
+  const wakeClient = lazyTemporalWakeClient({ address: temporal.address, namespace: temporal.namespace });
   const real = createRealPorts({
     db,
     master,
@@ -931,6 +954,9 @@ export function realPortsFromEnv(
     tmpDir: join(config.stateDir, 'tmp'),
     archiveDir: join(config.stateDir, 'archive'),
     ...(extra.drain ? { drain: extra.drain } : {}),
+    workflows: {
+      state: (id) => wakeClient.use((client) => temporalWorkflows(client).state(id)),
+    },
   });
   // 三段的一次性会话（动手、验收）的登记：切号照它停下跑在 Claude 池上的那一段，切完任务工作流在原分支上重跑（#59）
   // 同时登记进发布排空的在途清单（#957）：不接 drain，发布排空看不见动手、验收会话，会提前放行、到点也停不到它们
@@ -942,8 +968,6 @@ export function realPortsFromEnv(
   // #194：被拒当场判、定时盯读接口那一轮也走它（同一把单飞锁）；读接口给切号前现读，切完当场探切过去的池（和路由探针同一份探法）
   const readCarpoolApi = carpoolApiReader();
   // 叫醒等路由的活（real/route-wake.ts）：第一次叫醒时才连 Temporal（切号这条路上手里没有 Temporal 客户端）
-  const temporal = configFromEnv(env as Record<string, string | undefined>);
-  const wakeClient = lazyTemporalWakeClient({ address: temporal.address, namespace: temporal.namespace });
   const routeWake = routeWakerFromDb(db, wakeClient, (level, text, fields) =>
     console[level === 'info' ? 'info' : level](text, fields ?? {}),
   );
@@ -1066,6 +1090,11 @@ export function realPortsFromEnv(
     judgeSelfCheck: judgeSelfCheckJob({ db, env }),
     // 每周刷新 CI 测试耗时表（#921）：读本仓 ci.yml 日志、重写表、开 PR。不看总开关。
     ciTimings: ciTimingsJob({ db, github: gh }),
+    changelog: changelogJob({
+      db,
+      github: gh,
+      ...(extra.releasesDir === undefined ? {} : { releasesDir: extra.releasesDir }),
+    }),
     // 用量补记（#1935）：经 Mirasim 起的会话，以会话用户读他家里的用量账本（中转计量回填），把 runs 的输入、缓存、花费补齐。不看总开关。
     usageBackfill: usageBackfillJob({
       db,

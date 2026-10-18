@@ -11,6 +11,7 @@ import {
   CARPOOL_WATCH_JOB,
   runCarpoolWatchUnlessPaused,
 } from './carpool-watch.ts';
+import { runChangelogJob } from './changelog.ts';
 import { runCiTimingsJob } from './ci-timings.ts';
 import {
   CLI_UPGRADE_EVERY_MINUTES,
@@ -68,7 +69,7 @@ import {
   runRouteProbeJob,
 } from './route-probe.ts';
 import { routeProbeLock } from './route-probe-now.ts';
-import { ciTimingsSchedule, judgeSelfCheckSchedule } from './schedules.ts';
+import { changelogSchedule, ciTimingsSchedule, judgeSelfCheckSchedule } from './schedules.ts';
 import type { TimerJob } from './timers.ts';
 import {
   runUsageBackfillJob,
@@ -105,6 +106,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const intake = need(jobs, 'intake');
   const judgeSelfCheck = need(jobs, 'judgeSelfCheck');
   const ciTimings = need(jobs, 'ciTimings');
+  const changelog = need(jobs, 'changelog');
   const usageBackfill = need(jobs, 'usageBackfill');
   const cliVersions = need(jobs, 'cliVersions');
   const cliUpgrade = need(jobs, 'cliUpgrade');
@@ -179,6 +181,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
     judgeSelfCheckSchedule(() => runJudgeSelfCheckJob(judgeSelfCheck())),
     // 每天刷新 CI 测试耗时表（#921）。格子在 jobs/schedules.ts。不标 needsMaster：见文件头。
     ciTimingsSchedule(() => runCiTimingsJob(ciTimings())),
+    changelogSchedule(() => runChangelogJob(changelog())),
     {
       // 用量补记（#1935）：经 Mirasim 起的会话按中转计量补齐用量。不拉单、不起会话，不标 needsMaster
       id: USAGE_BACKFILL_JOB.id,

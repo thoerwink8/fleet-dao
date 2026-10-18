@@ -683,13 +683,15 @@ describe('合并', () => {
     });
   });
 
-  it('合并前再确认一次 CI：红的、没跑完的、没出现的都不合', async () => {
+  it('合并前再确认一次 CI：红的、没跑完的、没出现的都不合；只有没跑完的才标 ciPendingOnly（#3165）', async () => {
     for (const conclusion of ['failure', null, 'none'] as const) {
       const { gh, fake } = setup();
       const pr = fake.addPull({ head: { ref: 'task/1', sha: A } });
       if (conclusion !== 'none') fake.addCheck(A, 'check', conclusion);
       const res = await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A });
       expect(res).toMatchObject({ merged: false, reason: 'ci_not_green' });
+      const pendingOnly = 'ciPendingOnly' in res ? res.ciPendingOnly : undefined;
+      expect(pendingOnly).toBe(conclusion === null ? true : undefined);
     }
   });
 
@@ -865,6 +867,87 @@ describe('同步主线（update-branch）', () => {
   function open(fake: ReturnType<typeof setup>['fake'], headSha = A) {
     return fake.addPull({ title: '登录页加验证码', head: { ref: 'task/1', sha: headSha } });
   }
+
+  it('截止还在将来：照常带头约束同步', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.behindBy.set(A, 1);
+    const res = await gh.updateBranch(
+      { repo, prNumber: pr.number, expectedHead: A },
+      { attemptDeadlineMs: Date.now() + 60_000, scheduleDeadlineMs: Date.now() + 120_000 },
+    );
+    expect(res.updated).toBe(true);
+    expect(fake.calls('PUT', /\/update-branch$/)).toHaveLength(1);
+    expect(fake.calls('PUT', /\/update-branch$/)[0]?.body).toEqual({ expected_head_sha: A });
+  });
+
+  it('compare 判落后跨过截止后，同步主线不再发 update-branch', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.behindBy.set(A, 1);
+    fake.before.push(async (req) => {
+      if (req.method === 'GET' && req.path.includes('/compare/')) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+      return undefined;
+    });
+    const deadline = Date.now() + 500;
+    const limits = { attemptDeadlineMs: deadline, scheduleDeadlineMs: deadline };
+    const merged = await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A }, limits);
+    expect(merged).toMatchObject({ merged: false, reason: 'behind_main' });
+    expect(fake.calls('PUT', /\/merge$/)).toEqual([]);
+    await expect(
+      gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A }, limits),
+    ).rejects.toMatchObject({
+      code: 'WRITE_DEADLINE_PASSED',
+      retryable: false,
+    });
+    expect(fake.calls('PUT', /\/update-branch$/)).toEqual([]);
+    expect(fake.pulls.get(pr.number)?.head.sha).toBe(A);
+  });
+
+  it('同步前的读跨过截止：不再发 update-branch', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.before.push(async (req) => {
+      if (req.method === 'GET' && req.path === `/repos/acme/widgets/pulls/${pr.number}`) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+      return undefined;
+    });
+    const deadline = Date.now() + 500;
+    await expect(
+      gh.updateBranch(
+        { repo, prNumber: pr.number, expectedHead: A },
+        { attemptDeadlineMs: deadline, scheduleDeadlineMs: deadline },
+      ),
+    ).rejects.toMatchObject({ code: 'WRITE_DEADLINE_PASSED', retryable: false });
+    expect(fake.calls('PUT', /\/update-branch$/)).toEqual([]);
+    expect(fake.pulls.get(pr.number)?.head.sha).toBe(A);
+  });
+
+  it('同步前取消、数值截止还在将来：不再发 update-branch', async () => {
+    const ac = new AbortController();
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.before.push(async (req) => {
+      if (req.method === 'GET' && req.path === `/repos/acme/widgets/pulls/${pr.number}`) {
+        ac.abort(new Error('活动已取消'));
+      }
+      return undefined;
+    });
+    await expect(
+      gh.updateBranch(
+        { repo, prNumber: pr.number, expectedHead: A },
+        {
+          signal: ac.signal,
+          attemptDeadlineMs: Date.now() + 600_000,
+          scheduleDeadlineMs: Date.now() + 1_200_000,
+        },
+      ),
+    ).rejects.toThrow('活动已取消');
+    expect(fake.calls('PUT', /\/update-branch$/)).toEqual([]);
+  });
 
   it('用「引擎」带头约束同步；202 之后重读，头换了才算完，回新头', async () => {
     const { gh, fake } = setup();

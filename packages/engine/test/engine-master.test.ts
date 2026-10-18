@@ -185,6 +185,7 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
       intake: never,
       judgeSelfCheck: never,
       ciTimings: never,
+      changelog: never,
       usageBackfill: never,
       cliVersions: never,
       cliUpgrade: never,

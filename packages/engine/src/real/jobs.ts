@@ -6,6 +6,7 @@
 import { type Db, registerScheduledJobs, unregisterScheduledJobs } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import { CARPOOL_WATCH_JOB } from '../jobs/carpool-watch.ts';
+import { CHANGELOG_JOB } from '../jobs/changelog.ts';
 import { CI_TIMINGS_JOB } from '../jobs/ci-timings.ts';
 import { CLI_UPGRADE_JOB } from '../jobs/cli-upgrade.ts';
 import { CLI_VERSIONS_JOB } from '../jobs/cli-versions.ts';
@@ -33,6 +34,7 @@ export const ENGINE_JOBS = [
   INTAKE_JOB,
   JUDGE_SELF_CHECK_JOB,
   CI_TIMINGS_JOB,
+  CHANGELOG_JOB,
   USAGE_BACKFILL_JOB,
   CLI_VERSIONS_JOB,
   CLI_UPGRADE_JOB,

@@ -10,6 +10,7 @@ import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import {
   createTaskActivities,
+  MERGE_PENDING_RETRIES,
   type MergeWaitChecks,
   type TaskActivitiesDeps,
 } from '../../src/real/task-activities.ts';
@@ -1197,6 +1198,49 @@ describe('挂自动合并', () => {
     expect(f.calls).toEqual(['readPull']);
   });
 
+  it('clean 时直接合被拒、只是合并闸没跑完（#3165）：在这一步里隔一会儿再合，合上就回合并提交，不交回去停下', async () => {
+    let tries = 0;
+    const f = cleanButBehind({
+      mergePr: async () => {
+        tries += 1;
+        return tries < 3
+          ? { merged: false, reason: 'ci_not_green', detail: '没跑完：merge-gate', ciPendingOnly: true }
+          : mergedOk('f'.repeat(40), false);
+      },
+    });
+    expect(await run(f.gh)).toEqual({ armed: false, merged: true, mergeCommit: 'f'.repeat(40) });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr', 'mergePr', 'mergePr']);
+  });
+
+  it('【故意造出的失败】clean 时直接合被拒、有红的检查（没标 ciPendingOnly）：不等、不再合，原因原样交回', async () => {
+    const f = cleanButBehind({
+      mergePr: async () => ({
+        merged: false,
+        reason: 'ci_not_green',
+        detail: '红：check；没跑完：merge-gate',
+      }),
+    });
+    const got = await run(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(got.why).toContain('红：check');
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+  });
+
+  it('【故意造出的失败】合并闸一直没跑完：最多再试 MERGE_PENDING_RETRIES 次，到点把「没跑完」交回，不当成合了', async () => {
+    const f = cleanButBehind({
+      mergePr: async () => ({
+        merged: false,
+        reason: 'ci_not_green',
+        detail: '没跑完：merge-gate',
+        ciPendingOnly: true,
+      }),
+    });
+    const got = await run(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(got.why).toContain('没跑完：merge-gate');
+    expect(f.calls.filter((c) => c === 'mergePr')).toHaveLength(1 + MERGE_PENDING_RETRIES);
+  });
+
   it('直接合被拒、因为落后主线：调一次 updateBranch 把 PR 同步到最新主线，新头当 headMoved 交回去（标明是自己同步的）', async () => {
     const NEW = 'c'.repeat(40);
     let asked: unknown;
@@ -1214,6 +1258,28 @@ describe('挂自动合并', () => {
       repo: { owner: REPO.owner, name: REPO.name },
       prNumber: 7,
       expectedHead: HEAD,
+    });
+  });
+
+  it('落后主线要同步时，把同一截止和取消交给 updateBranch', async () => {
+    const ac = new AbortController();
+    const deadlines = futureDeadlines();
+    let passed: unknown;
+    const f = cleanButBehind({
+      updateBranch: async (_input: unknown, context: unknown) => {
+        passed = context;
+        return { updated: true, head: 'e'.repeat(40) };
+      },
+    });
+    const got = await make({ gh: f.gh }).acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx({ signal: ac.signal, ...deadlines }),
+    );
+    expect(got).toMatchObject({ syncedMain: true, headMoved: 'e'.repeat(40) });
+    expect(passed).toMatchObject({
+      signal: ac.signal,
+      attemptDeadlineMs: deadlines.attemptDeadlineMs,
+      scheduleDeadlineMs: deadlines.scheduleDeadlineMs,
     });
   });
 

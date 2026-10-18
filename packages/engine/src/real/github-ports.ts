@@ -2,7 +2,7 @@
 // 里程碑，#654；查询轴「域:」「性质:」从单上照抄，某一轴不是恰好一个就不抄那一轴，没有需求号或单上没有也不挡）、
 // 第 2 轮起改 PR 正文（#2723）、等 CI（等着时 PR 已合并：现读核实、记合并回执再回，merge-receipt.ts，#3018）、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
 // 并不上才停下留言）、关单，以及建树（记下主线的头；树等起会话时由会话
-// 自己建，见 sessions.ts）、收树（干净未发布提交先完整打包并独立恢复核验，复杂未提交成果留原树；界面验收图片先核对远端、没交付存进受限归档，存不成不删树，见 shots.ts；
+// 自己建，见 sessions.ts）、收树（干净未发布提交先完整打包并独立恢复核验；复杂未提交成果要有受管回执并独立恢复核过才删，核不上留原树；界面验收图片先核对远端、没交付存进受限归档，存不成不删树，见 shots.ts；
 // 不带 shots 的收树、建树前删同一位置的旧树也过这一道）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
 
@@ -26,10 +26,11 @@ import {
   type Worktree,
 } from '../ports.ts';
 import { isTaskBranch } from '../task-branch.ts';
+import type { ProcLook } from './complex-preserve.ts';
 import type { UserExec } from './exec.ts';
 import { type MergeLog, settleMergedCi } from './merge-receipt.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
-import { preserveWorktree } from './preserve-worktree.ts';
+import { preserveThenRemove } from './preserve-worktree.ts';
 import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
 import {
   blobsInBundle,
@@ -108,6 +109,14 @@ export interface GitHubPortsDeps extends ReviewAuditDeps {
   /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
   gitBin?: string;
   shBin?: string;
+  /**
+   * 删树前再问有没有没结束的会话、在跑的任务或子任务工作流占着这个目录。
+   * 调用方把自己的工作流编号交进来，只豁免这一条。不给这个函数：复杂成果留树，干净的未发布提交仍按原样保全后删。
+   * 查不清回 unknown，不当成没人用。
+   */
+  confirmTreeIdle?: (dir: string, caller?: { workflowId?: string }) => Promise<'idle' | 'busy' | 'unknown'>;
+  /** 测试用：看进程 cwd 的口子。生产不给，用 /proc。 */
+  treeProcessLook?: ProcLook;
   /** 等 CI 看到已合并、核实或记合并回执没成时写的日志；不给就打到控制台。 */
   log?: MergeLog;
   /**
@@ -485,6 +494,36 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     });
   };
 
+  /** 保全后只删这一个目录。复杂成果没有 confirmTreeIdle 时留树；干净未发布提交仍保全后删。 */
+  const confirmTreeIdle = deps.confirmTreeIdle;
+  const archiveThenRemove = (
+    tree: UserTree,
+    taskId: string,
+    branch: string,
+    delivery: ShotsDelivery | undefined,
+    ctx: PortContext,
+  ) =>
+    preserveThenRemove(
+      tree,
+      deps.archiveDir,
+      {
+        taskId,
+        branch,
+        workRoot: trees.root,
+        ...(deps.treeProcessLook ? { processLook: deps.treeProcessLook } : {}),
+        ...(confirmTreeIdle
+          ? {
+              confirmIdle: () =>
+                ctx.workflowId
+                  ? confirmTreeIdle(tree.dir, { workflowId: ctx.workflowId })
+                  : confirmTreeIdle(tree.dir),
+            }
+          : {}),
+      },
+      delivery,
+      () => trees.remove(tree.dir),
+    );
+
   /** 这棵树现在归谁：不在（从没起过会话、或已经收了）明确报错，不当成「没有改动」。 */
   const ownerOrFail = async (dir: string): Promise<SessionUser> => {
     const user = await trees.ownerOf(dir);
@@ -551,8 +590,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
               { retryable: false, details: { worktree: path } },
             );
           }
-          await preserveWorktree(t, deps.archiveDir, { taskId: input.taskId, branch: input.branch }, kept);
-          await trees.remove(path);
+          await archiveThenRemove(t, input.taskId, input.branch, kept, ctx);
         }
         return { path, branch: input.branch, baseSha: main.head };
       });
@@ -595,16 +633,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           };
         }
       }
-      const archivedTo = await preserveWorktree(
-        t,
-        deps.archiveDir,
-        {
-          taskId: input.taskId,
-          branch: input.branch,
-        },
-        delivery,
-      );
-      const { gone } = await trees.remove(input.path);
+      const { gone, archivedTo } = await archiveThenRemove(t, input.taskId, input.branch, delivery, ctx);
       return { removed: !gone, gone, ...(archivedTo ? { archivedTo } : {}), ...(shots ? { shots } : {}) };
     },
 

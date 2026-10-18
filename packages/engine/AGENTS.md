@@ -52,9 +52,13 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 改派工、选路：同步 design 第九节「自由组合的派工模型」。
 - 改了法国上的单元、环境变量：同步 ops 第五节「AI 会话」或第九节「发布应用（deploy/release.sh）」。
 
+## 版本更新日志
+
+- `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。
+
 ## 固定版本宿主工具
 
 - Go 的 `via: tar` 和固定 `version` 由现有 `cli-upgrade-main.ts` 管理，只在发布/空闲排空窗口运行；实现位于 `cli-upgrade-go.ts`。仅 Linux amd64/arm64，官方精确版本清单与 SHA256 校验，完整新树暂存、实际 `go version` 验真，最后原子替换 `/usr/local/bin/go`。
 - 必须核对 intake 固定 PATH 的实际入口和版本；`/usr/local/go/bin/go` 遮住受管入口时明确失败，保留现有安装，不放宽 readiness。旧树和入口备份保留，失败不记健康、不自动重试。
 
-- 删树前置：`real/preserve-worktree.ts` 由任务收尾、建树前替换旧树与小时清扫共用。干净未发布提交先保存完整 bundle，最终落盘回读并在独立空仓恢复核对 HEAD/内容树/引用；复杂未提交、未跟踪、stash、非 Git 成果或读写核验失败留原树，不能靠 diff HEAD 假称已保全。受管截图仍走 `real/shots.ts`，只排除逐文件核对内容一致的已保全图片。
+- 删树前置：`real/preserve-worktree.ts` 由任务收尾、建树前替换旧树与小时清扫共用。干净未发布提交先保存完整 bundle，最终落盘回读并在独立空仓恢复核对 HEAD/内容树/引用。复杂未提交、未跟踪、stash、git 目录里还挂着的操作状态（没并完的合并、挑拣、回退、变基、二分、ORIG_HEAD 等，工作区干净也算）先打受限快照（工作文件、原始索引及其标志、resolve-undo 指的三层内容、stash 全部记录、合并头和序列状态引用的对象闭包），独立空仓恢复对上、原树身份和指纹没变、并且删除前再次确认没人用，才允许原来的清理入口继续。删除必经点不论干净还是复杂都现核进程 cwd；进程 cwd 能读到在这棵树里才算在用；同主或树主的 cwd 读不到（包括 ptrace 看不了的同主兄弟）算确认不了，留树。别的用户读不到 cwd 不算在用。/proc 列不了留树。测试经 `processLook`/`treeProcessLook` 换成夹具，不跟 CI 机器的进程表走；生产不传。删除前除了没结束的会话，还要看任务和子任务工作流；查不清不当成没人用。调用方只豁免自己这一条工作流，避免任务收自己的树时被自己挡死。非 Git 成果、读失败、快照或恢复失败留原树。旁边已有的备份不是回执。受管截图仍走 `real/shots.ts`，只排除逐文件核对内容一致的已保全图片。

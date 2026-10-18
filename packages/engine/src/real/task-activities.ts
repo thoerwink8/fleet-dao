@@ -9,13 +9,14 @@
 //   核 CI 绿）。直接合因这个头上还有检查在跑被拒：现读检查，只有 queued / in_progress 才交 checksPending，工作流有界等待后
 //   再走这一入口。真红交 checksRed。必过名单里有一条没出现，哪怕旁边还有在跑的，也不交 checksPending。读不成、没出现、对不上，
 //   why 里写明没查成并点名没出现的检查，不靠「ci_not_green / 没跑完」这句原文当还在跑。
-//   别的拒绝原样说明原因交工作流停下报人。
-// - 挂合并的写请求（enableAutoMerge、以及因 clean 才走的直接合）在开写之前同时看取消信号和这次活动的截止
-//   （PortContext 上的 attemptDeadlineMs / scheduleDeadlineMs）。信号已经取消（前面的读 PR、读评审、读检查被挂住后再放行）
-//   就不再向 GitHub 发起新的写，哪怕数值截止还在将来。git 档不心跳，服务端判了超时之后进程里的代码还会往下走，
-//   取消信号不会响，所以超时仍靠数值截止拦。截止已过同样不再开新的写；已经发出、结果未知的，下一次先 readPull：
-//   已经挂上就当挂上了，不盲重试。本地超时或取消撤不回 GitHub 已经接受的请求。没填截止、信号也没取消
-//   （活动测试不经 Temporal）时照旧写。
+//   只是检查没跑完（合并闸在同一个头上重跑，ciPendingOnly）先在这一步里隔一会儿再合，等满 MERGE_PENDING_RETRIES 次
+//   还没跑完再交回有界等待。别的拒绝原样说明原因交工作流停下报人。
+// - 挂合并的写请求（enableAutoMerge、因 clean 才走的直接合、以及落后主线后的同步主线）在真正发出之前同时看取消信号和
+//   这次活动的截止（PortContext 上的 attemptDeadlineMs / scheduleDeadlineMs）。信号已经取消（前面的读 PR、读评审、读检查
+//   被挂住后再放行）就不再向 GitHub 发起新的写，哪怕数值截止还在将来。比较判出落后是在截止前开始的慢读，同步写要带上同一
+//   截止，到了 GitHub 客户端的写边界再看一次。git 档不心跳，服务端判了超时之后进程里的代码还会往下走，取消信号不会响，
+//   所以超时仍靠数值截止拦。截止已过同样不再开新的写；已经发出、结果未知的，下一次先 readPull：已经挂上或头已经换了就照实
+//   回报，不盲重试。本地超时或取消撤不回 GitHub 已经接受的请求。没填截止、信号也没取消（活动测试不经 Temporal）时照旧写。
 // - 合并记录：这个仓的对账（github 包 auditMergedPrs）要求引擎开的 PR 账上有合并记录。自动合并是 GitHub 自己合的，没有记录，
 //   所以等到合并之后再调一次 mergePr——它对「已经合了」的 PR 只补记录、删分支，不再合一次。补不成只记日志，不拦任务往下走。
 // - 等合并是长轮询（心跳不断）：叫停时休眠被打断，活动抛取消，不吞。
@@ -66,6 +67,11 @@ import type { WorkTrees } from './worktrees.ts';
 
 /** 等合并时多久看一次 PR（毫秒）。 */
 export const MERGE_POLL_EVERY_MS = 20_000;
+/**
+ * 挂自动合并时 GitHub 说已经 clean、直接合却因检查没跑完被拒：隔 MERGE_POLL_EVERY_MS 再合，最多再试这么多次（#3165）。
+ * 10 × 20 秒，加上每次合并前的核对，留在 git 档 5 分钟的活动时限之内。
+ */
+export const MERGE_PENDING_RETRIES = 10;
 
 /** 等合并这一下读到的必过检查。红了才带 failed。pending 名字只含还在跑的，没出现的不放；不给就是没分开报。 */
 export interface MergeWaitChecks {
@@ -158,6 +164,15 @@ function refuseLateArmWrite(ctx: PortContext): void {
   throw new PortError('ARM_DEADLINE_PASSED', '挂合并的期限已到，不再向 GitHub 发起新的挂合并或直接合', {
     retryable: false,
   });
+}
+
+/** 离绝对截止还剩多少毫秒。没填截止返回 null，调用方就按原来的间隔等。 */
+function writeBudgetMs(ctx: PortContext): number | null {
+  const marks = [ctx.attemptDeadlineMs, ctx.scheduleDeadlineMs].filter(
+    (n): n is number => typeof n === 'number' && Number.isFinite(n),
+  );
+  if (marks.length === 0) return null;
+  return Math.min(...marks) - Date.now();
 }
 
 /** 直接合被拒时交回工作流的那句。reason 用机器认的枚举，不从 detail 里再猜。 */
@@ -484,6 +499,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
    * 直接合被拒、因为落后主线（引擎同时跑多张单，主线在 CI 跑的这段时间里又进了新提交）：把 PR 同步到最新主线，
    * 新头当 headMoved 交回去，工作流对新头重跑 CI 和验收（直接合那一道的「落后主线不许合」不放宽）。
    * 同一张 PR 最多自动同步 MAX_MAIN_SYNCS 次，之后原样停下报人；同步时冲突也停下报人。
+   * ctx 原样交给 updateBranch：比较可能已经跨过截止，同步写在客户端真正发出前再看一次截止和取消。
    */
   const syncBehindMain = async (
     repo: RepoRef,
@@ -750,7 +766,21 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
         // 这一下若已取消，或挂的时候把期限用完，不再另开直接合。已经发出去的挂合并请求撤不回来。
         refuseLateArmWrite(ctx);
-        const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+        let merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+        // 只是检查没跑完（没有红的、没出现的）：多半是验收结果刚写、合并闸在同一个头上重跑（#3165）。
+        // 在这一步里隔一会儿再合。每一轮再看取消和绝对截止，过了就不再发新的合并写。
+        // 等满、或仍不是「只是没跑完」，交给后面的分类：还在跑交有界等待，落后主线才同步。
+        for (
+          let i = 0;
+          !merged.merged && merged.ciPendingOnly === true && i < MERGE_PENDING_RETRIES;
+          i += 1
+        ) {
+          const left = writeBudgetMs(ctx);
+          if (left !== null && left < 1) break;
+          await sleep(left === null ? pollEveryMs : Math.min(pollEveryMs, left), ctx.signal);
+          refuseLateArmWrite(ctx);
+          merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+        }
         return acceptDirectMerge(merged, true);
       }
     },

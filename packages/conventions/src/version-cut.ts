@@ -4,7 +4,7 @@
 // 规则：
 // - 永远只开一个 v<N> 版本，带到期日；标题写成「v<N> MM-DD～MM-DD」，后面可以接一句目标。
 // - 北京时间过了到期日（到期日当天还算这一版）→ 先开 v<N+1>（到期日 +7 天）→ 开着的单逐张先留一句再挪过去 → 旧版先后段整段接到
-//   新版先后的最前面 → 旧版说明末尾写收口段（关了几张、完成/不做/重复各几、滚过去的单号、收口时主线头）→ 关旧版 → 回读核对。
+//   新版先后的最前面 → 旧版说明末尾写收口段（CHANGELOG 对应节链接、滚过去的单号、收口时主线头）→ 关旧版 → 回读核对。
 // - 兜底：有人手工关了版本、里面还挂着开着的单，同一份代码把它们挪到开着的那一版；一个开着的版本都没有就先开一个（今天起 7 天）。
 //
 // 改这里之前必须知道：
@@ -13,6 +13,7 @@
 // - 读不到、认不出就停：不拿「没读到」当成「没有要挪的单」。
 // - 每条规则在 test/version-cut.test.ts 里有例子。
 
+import { changelogAnchor } from './changelog.ts';
 import type { GitHubVersionWriter, MilestoneDetail, PlanIssue } from './github-api.ts';
 import { milestoneVersion } from './labels.ts';
 import { addToOrder, parseOrder } from './plan-view.ts';
@@ -131,25 +132,22 @@ function rolledFrom(description: string): number[] {
   return [...line.matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
 }
 
-/** 收口段：关了几张（按关单原因分）、滚过去的单号、主线头。写在说明末尾，按标记整段换。 */
+/** 收口段只留排期事实和更新日志链接，版本做了什么只在 CHANGELOG。 */
 export function cutSection(input: {
-  issues: readonly PlanIssue[];
+  version: number;
   rolled: readonly number[];
   to: string;
   head: string;
   at: Date;
   done: boolean;
 }): string {
-  const closed = input.issues.filter((i) => i.state === 'closed');
-  const count = (reason: string) => closed.filter((i) => i.stateReason === reason).length;
-  const other = closed.length - count('completed') - count('not_planned') - count('duplicate');
   const rolled = [...new Set(input.rolled)].sort((a, b) => a - b);
   const at = new Date(input.at.getTime() + 8 * 3_600_000).toISOString();
   return [
     CUT_BEGIN,
     `## 收口（北京时间 ${at.slice(0, 10)} ${at.slice(11, 16)}${input.done ? '' : '，收口中、还没关'}）`,
     '',
-    `- 关了 ${closed.length} 张：完成 ${count('completed')}、不做 ${count('not_planned')}、重复 ${count('duplicate')}${other ? `、别的 ${other}` : ''}`,
+    `- 这一版做了什么：[CHANGELOG v${input.version}](https://github.com/thoerwink8/fleet-dao/blob/main/CHANGELOG.md#${changelogAnchor(input.version)})`,
     `- 滚到「${input.to}」：${rolled.length ? `${rolled.map((n) => `#${n}`).join('、')}（${rolled.length} 张）` : '没有'}`,
     `- 收口时主线头：${input.head}`,
     CUT_END,
@@ -304,7 +302,7 @@ async function rollOver(
   if (moving.length) {
     const draft = withCutSection(
       fromDescription,
-      cutSection({ issues, rolled, to: toTitle, head, at: now, done: false }),
+      cutSection({ version: from.version, rolled, to: toTitle, head, at: now, done: false }),
     );
     try {
       fromDescription = (await gh.setMilestoneDescription(from.milestone.number, draft)).description;
@@ -359,7 +357,14 @@ async function rollOver(
       );
       return;
     }
-    const section = cutSection({ issues: finalIssues, rolled, to: toTitle, head, at: now, done: true });
+    const section = cutSection({
+      version: from.version,
+      rolled,
+      to: toTitle,
+      head,
+      at: now,
+      done: true,
+    });
     await gh.setMilestoneDescription(from.milestone.number, withCutSection(fromDescription, section));
     const closed = await gh.closeMilestone(from.milestone.number);
     if (closed.state !== 'closed') {
