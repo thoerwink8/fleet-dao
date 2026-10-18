@@ -1,5 +1,5 @@
 {
-  "说明": "仓合同（决定 0081）：每个仓（含以后新开的）都该满足的几项，写成数据。开会话钩子（agents/hooks/session-start.mjs）在任何仓里开会话都按这份查当前仓、每仓每天最多提醒一次缺项；pnpm repo:check 查、pnpm repo:init 只补缺的（逻辑在 agents/hooks/repo-contract.mjs）。只提醒、不拦。以后新增要求就往 items 里加一项，所有仓都自动被查；改这份是改标准。检查类型：file（文件在）、scripts（package.json 的这些脚本都在、不是空的、不带占位记号）、lines（文件里每组「认」至少有一行和其中一个一字不差，比时去掉两头空白）。某项确实不适用：仓根 AGENTS.md 写一行 <!-- repo-contract:skip <id> <理由> -->，没写理由不算数；豁免在 repo:check 和开会话的提醒里都看得见。",
+  "说明": "仓合同（决定 0081）：每个自用仓（含以后新开的）都该满足的几项，写成数据。对外仓（仓根 AGENTS.md 没有自用仓标记的，agents/hooks/repo-kind.mjs 判）照它自己的规矩走，这份不查、不提醒、不补（决定 0107）。开会话钩子（agents/hooks/session-start.mjs）在自用仓里开会话按这份查当前仓、每仓每天最多提醒一次缺项；pnpm repo:check 查、pnpm repo:init 只补缺的（逻辑在 agents/hooks/repo-contract.mjs）。只提醒、不拦。以后新增要求就往 items 里加一项，所有仓都自动被查；改这份是改标准。检查类型：file（文件在）、scripts（package.json 的这些脚本都在、不是空的、不带占位记号）、lines（文件里每组「认」至少有一行和其中一个一字不差，比时去掉两头空白）。某项确实不适用：仓根 AGENTS.md 写一行 <!-- repo-contract:skip <id> <理由> -->，没写理由不算数；豁免在 repo:check 和开会话的提醒里都看得见。",
   "items": [
     {
       "id": "entry",
@@ -21,7 +21,7 @@
       "检查": { "type": "file", "path": "AGENTS.md" },
       "补法": {
         "type": "create",
-        "text": "# AGENTS.md\n\n本仓特有的规矩：\n\n- 需求方的确认、业务和技术决定记在 `docs/decisions.md`，一条写清谁、哪天、定了什么、为什么。\n- 起、停、检查都用仓根的 pnpm 命令：`pnpm dev`、`pnpm start`、`pnpm stop`、`pnpm check`。\n"
+        "text": "# AGENTS.md\n\n<!-- repo-kind: 自用仓 -->\n\n本仓特有的规矩：\n\n- 需求方的确认、业务和技术决定记在 `docs/decisions.md`，一条写清谁、哪天、定了什么、为什么。\n- 起、停、检查都用仓根的 pnpm 命令：`pnpm dev`、`pnpm start`、`pnpm stop`、`pnpm check`。\n"
       }
     },
     {
