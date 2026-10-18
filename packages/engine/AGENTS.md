@@ -8,6 +8,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - `packages/engine/src/worker.ts`：起 worker；`packages/engine/src/workflows/index.ts` 是工作流打包入口（只导出 `helloWorkflow`、`taskWorkflow`）。
 - `packages/engine/src/workflows/task.ts`：任务工作流，按职责拆在同目录 `task-*.ts`，共用零件在 `kit.ts`。
 - `packages/engine/src/activities.ts`、`packages/engine/src/real/`：活动和真端口的装配（库、GitHub、会话、工作树），缺一项就不起。
+- `packages/engine/src/real/self-check.ts`：以工作树主人身份跑测试和 tsc；各段预算统一从 `packages/engine/src/self-check-budget.ts` 取，活动总限时只由这些预算相加。
 - `packages/engine/src/decisions/`：判断（纯函数）；`packages/engine/src/routing/`：选路；`packages/engine/src/jobs/`：引擎进程里的定时器（不是 Temporal 工作流，登记表在 `real/jobs.ts`）。
 
 ## 测试
@@ -21,6 +22,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - **改工作流步序必须用 `patched('<新标记>')` 包住**：在途任务（包括停着等人、等合并的）换上新代码会重放对不上，报 `TMPRL1100` 变僵尸。重放测试红了不许重录夹具让它变绿。
 - 工作流里要确定：不取随机数、不生成编号（主键经 `decide('newIds')` 进历史），不碰活动实现、worker、客户端、Node 模块；判断只经本地活动 `decide`，工作流文件对 `decisions` 只许 `import type`。`packages/engine/test/structure.test.ts` 把这些写成了检查。
 - 活动的超时、心跳、重试只在 `packages/engine/src/activity-options.ts` 设，调用处不许另写；长活动要心跳。
+- 自测容量只有一层归属：`test:changed` 和普通本机测试共用 conventions 的测试槽，引擎不再占自测名额，也不设环境变量冒充持槽；自测名额只管 tsc 和其他测试命令。所有等槽、等锁合用 20 分钟排队预算，拿到容量后才算 30 分钟测试执行预算，tsc 另有 5 分钟，杀进程、放锁都有收尾上限。
+- 自测心跳带 probe / queue / test / tsc / done、阶段起点、最后输出时刻；看门狗在活动总限时内把自测无会话视为正常。超时、取消、异常退出保留已有输出并脱敏限长；已确认测试失败或真实 tsc 诊断仍为 fail/red，不能被中断或顶层兜底抹成跳过。无失败证据的普通超时交给 CI；测试未完成而 tsc 通过时，摘要必须写明测试没有结果。
 - 工作流对外的输入（`packages/engine/src/contract.ts`）加字段只许可选，不然在途任务的输入对不上。
 - 新 PR 创建前从需求单现读两轴（正文无需求号时认任务分支）；缺失、冲突或未知值拒开并明报，不猜分类。groom 新单显式提供 domain/nature，拆分单可逐轴继承来源单的唯一有效值，写前仍须齐全。驾驶舱会话在 modules 中独立声明两轴，后端开单前同样校验，正文移到独立查询分类节，不计入模块范围和派工规模。查询轴不参与派工、合并与版本判定；此处只保证创建的元数据齐全。报警立案贴 engine/bug，耗时表直开 PR 贴 engine/process，隔离集直开 PR 贴 engine/bug；直开 PR 贴后回读，失败不能当成功。
 - 引擎自己挑单，进队条件见 design 第九节。要它接：单的四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。

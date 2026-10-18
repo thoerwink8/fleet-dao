@@ -25,6 +25,8 @@ export interface UserCommand {
   scopeId: string;
   /** 额外的环境变量：只有 FLEET_*、LANG、LC_*、TZ、TERM、GIT_TERMINAL_PROMPT 过得了 sudo。 */
   env?: Record<string, string>;
+  /** 每来一段输出（stdout、stderr 都算）就调一次：看哪一刻有输出、认阶段标记。只读，里面抛了也不搅命令。 */
+  onOutput?: (chunk: Buffer) => void;
 }
 
 export interface UserCommandResult {
@@ -122,7 +124,15 @@ function run(
     };
     if (command.signal?.aborted) onAbort();
     command.signal?.addEventListener('abort', onAbort);
+    const observe = (chunk: Buffer) => {
+      try {
+        command.onOutput?.(chunk);
+      } catch {
+        // 看输出的出错不能搅了命令本身
+      }
+    };
     child.stdout.on('data', (chunk: Buffer) => {
+      observe(chunk);
       bytes += chunk.length;
       if (bytes > maxStdout) {
         overflow = true;
@@ -132,6 +142,7 @@ function run(
       chunks.push(chunk);
     });
     child.stderr.on('data', (chunk: Buffer) => {
+      observe(chunk);
       stderr = (stderr + chunk.toString('utf8')).slice(-STDERR_TAIL);
     });
     child.on('error', (error) =>
