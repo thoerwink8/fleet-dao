@@ -1081,6 +1081,16 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 沙箱里还看得到的：fleet 的家目录（pnpm 和缓存在 `/home/fleet`，构建要用，家目录里 fleet 能读的文件构建时也能读）；出网（装依赖要连 registry.npmjs.org）；本机 TCP `127.0.0.1:5432`（只隔了 unix socket 目录，端口没隔；装机给 fleet 的是 socket 上的 peer、不设口令，TCP 那条要口令）；沙箱起来之后才在主机上挂进这三处下面的新挂载（`InaccessiblePaths` 挡不住后挂上的）；沙箱自己 PID 命名空间里的 `/proc`（能看本沙箱进程的环境与文件描述符，看不到主机上别的进程）。没有新建专用构建用户：构建仍是 fleet 这个 UID，靠挂载隔离 + 私有 PID/`/proc` 把密钥目录和主机同 UID 进程隔开。pnpm 11 默认仍不跑依赖的安装脚本（`pnpm-workspace.yaml` 的 `allowBuilds` 现在一个都没放行），这层还在，但不再是唯一的挡。
 
+### 历史合并通知的审计处置
+
+只有历史资料已核查但仍不能证明完整队列时，使用 `fleet-api historical-audit`，从 stdin 输入 JSON；先读原通知、PR 和证据 issue，不替代修复当前生产故障。字段是 `notificationId`、`dedupeKey`（精确 `reconcile:pr:owner/repo#PR`）、`repo`、数字 `pr`、40 位真实 `head`、同仓 `evidenceIssue` URL、固定 `conclusion: "historical_unproven"`，以及非空的 `evidence`（已核实事实）、`gaps`（缺失证据）、`responsibility`（后续责任）。证据 issue 正文必须明确指向该 PR。
+
+```sh
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit < /受控目录/历史审计.json
+```
+
+命令沿用 wrapper 提供的 `FLEET_OPS_OPERATOR`，不冒充创始人。现读 GitHub 的仓、PR、合并状态、head 和证据 issue，任一失败都不处置。成功只把通知标为处理，并在同一事务追加 `notification.historical_audit`（target `notification:<id>`），留下原正文、真实 GitHub 合并人/提交、证据 issue 快照、缺口及责任。正常合并账与 backfill 完全不改；输出明确历史队列仍未证明。相同处置重复执行不新增审计，不同处置或通知已被其他入口处理则拒绝；退出码 0 成功、1 未做成、2 参数不对。核查现有 `/audit` 操作记录及通知的原始正文，不把通知已处理解释成“队列已证明”。
+
 ### 命令行工具升级（#1971）
 
 法国上的 Claude Code、Codex 是 2026-09 用 root 的 `npm i -g` 装进 `/usr/lib/node_modules` 的（二进制在 `/usr/bin`）。Claude Code 官方的自动更新在这种「目录不归运行用户写」的装法下不生效。Cursor、reclaude 有各自的更新路径，不在这里升。Grok 装在会话用户家里（`~/.grok/bin/grok`），会话里关了自动更新，这里在空闲或发版窗口里替它跑 `grok update`。
