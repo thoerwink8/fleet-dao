@@ -41,6 +41,8 @@ export function pgIdempotencyStore(db: Db): IdempotencyStore {
     async peek(key) {
       const [row] = await db
         .select({
+          action: idempotencyKeys.action,
+          target: idempotencyKeys.target,
           claimedAt: idempotencyKeys.claimedAt,
           completedAt: idempotencyKeys.completedAt,
           result: idempotencyKeys.result,

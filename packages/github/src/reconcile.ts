@@ -85,6 +85,11 @@ export interface MergedPrAuditReport extends AuditReport {
    * 没有「没经合并队列」那条发现，调用方仍要按这个把已经开着的 reconcile:pr 撤掉。
    */
   engineCiTimingsPrs?: number[];
+  /**
+   * 这一轮看到的、我们机器人开的、实际合并人是「引擎」、真实 github.merge_pr 的完整回执与 GitHub 一致的 PR 号。
+   * 调用方按这个撤掉已经开着的 reconcile:pr；补账不能证明经过合并队列。
+   */
+  cleanPrs?: number[];
 }
 
 export interface ReconcilerOptions {
@@ -112,6 +117,14 @@ const Delivery = z.object({
   delivered_at: z.string(),
   status_code: z.number().nullable().optional(),
   event: z.string().optional(),
+});
+
+// 撤风险必须能把真实队列回执的四个字段与 GitHub 逐项对上；不完整的历史回执不能证明走过队列。
+const CompletedMergeReceipt = z.object({
+  number: z.number().int().positive().safe(),
+  head: z.string().regex(/^[a-f\d]{40}$/i),
+  mergeCommit: z.string().regex(/^[a-f\d]{40}$/i),
+  mergedBy: z.string().min(1),
 });
 
 // PR 原样整条送进门（looseObject 不删别的字段）：原文也照样落库、能重放。这里只认要用到的几样在不在。
@@ -314,6 +327,7 @@ export async function auditMergedPrs(
   }
   const findings: MergedPrFinding[] = [];
   const engineCiTimingsPrs: number[] = [];
+  const cleanPrs: number[] = [];
   const note = (
     number: number,
     kind: MergedPrFinding['kind'],
@@ -328,6 +342,7 @@ export async function auditMergedPrs(
     problems: findings.map((f) => f.text),
     findings,
     engineCiTimingsPrs,
+    cleanPrs,
   });
   try {
     outer: for await (const page of client.pages({
@@ -390,14 +405,31 @@ export async function auditMergedPrs(
           }
           // 合并队列合的每一张都在幂等账里留了合并记录（C21）。没留的：多半是绕开了合并队列（#431 那种——账号
           // 手动合的、合并前那几道核对可能没走），账上要补上：receipt 里写明实际合并人，让账反映事实。提醒照报，
-          // 创始人兼断一次要不要走合并队列；补账完下一轮 no_merge_record 不再起。
+          // 创始人判断一次要不要走合并队列；补账保留来源，下一轮仍不能作为走过队列的证据。
           // 耗时表（isEngineCiTimingsPr）不报这一条，只补账。别的引擎 PR（包括 fleet/ 任务分支）照报。
           const key = mergeKey(repo, item.number, pr.head.sha);
           const existing = await ledger.idempotency.peek(key);
+          // 只认真实队列动作及与现读 GitHub 完全一致的回执；不能把 backfill 晋升成合前核对证据。
+          const receipt = CompletedMergeReceipt.safeParse(existing?.result);
+          const clean =
+            existing?.completedAt != null &&
+            existing.action === 'github.merge_pr' &&
+            existing.target === `${slug}#${item.number}` &&
+            mergedByEngine &&
+            pr.number === item.number &&
+            pr.state === 'closed' &&
+            pr.merged === true &&
+            pr.merged_at != null &&
+            receipt.success &&
+            receipt.data.number === pr.number &&
+            receipt.data.head === pr.head.sha &&
+            receipt.data.mergeCommit === pr.merge_commit_sha &&
+            receipt.data.mergedBy === pr.merged_by?.login;
+          if (clean) cleanPrs.push(item.number);
+          else if (!isEngineCiTimingsPr(who)) {
+            note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录', who);
+          }
           if (!existing?.completedAt) {
-            if (!isEngineCiTimingsPr(who)) {
-              note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录', who);
-            }
             if (pr.merged_at) {
               try {
                 const receipt: MergeReceipt = {
