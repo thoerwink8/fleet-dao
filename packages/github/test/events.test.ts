@@ -422,8 +422,20 @@ describe('对账与补漏', () => {
     });
     // 引擎合的那张在账上有合并记录（合并队列合的）；另一张没有
     const key = mergeKey(repo, byEngine.number, A);
-    await ledger.idempotency.claim({ key, action: 'github.merge_pr' }, new Date());
-    await ledger.idempotency.complete(key, { number: byEngine.number }, new Date());
+    await ledger.idempotency.claim(
+      { key, action: 'github.merge_pr', target: `acme/widgets#${byEngine.number}` },
+      new Date(),
+    );
+    await ledger.idempotency.complete(
+      key,
+      {
+        number: byEngine.number,
+        head: A,
+        mergeCommit: sha('c'),
+        mergedBy: fake.bots.engine.login,
+      },
+      new Date(),
+    );
     const { intake } = fakeIntake(() => true);
     const report = await gh
       .reconciler({ intake, pollDeliveryId })
@@ -449,7 +461,7 @@ describe('对账与补漏', () => {
     expect(report.problems).toEqual(report.findings.map((f) => f.text));
     expect((await ledger.getPullRequest(REPO_ID, byEngine.number))?.state).toBe('merged');
     // #440：手动合的机器人 PR，按合并回执补上幂等账——账要反映事实（实际合并人、合并提交），
-    // 下一轮对账认得出这张已经补过，不再重复报 no_merge_record。
+    // 下一轮认得出补过账，但补账不证明曾经走过合并队列。
     const backfilled = await ledger.idempotency.peek(mergeKey(repo, byAgent.number, B));
     expect(backfilled?.completedAt).toBeTruthy();
     expect(backfilled?.result).toMatchObject({
@@ -457,6 +469,234 @@ describe('对账与补漏', () => {
       head: B,
       mergedBy: 'fleet-test-agent[bot]',
     });
+  });
+
+  it('真实队列回执匹配才进 cleanPrs；手合和 backfill 连续两轮都不进，也不升级来源', async () => {
+    const { gh, fake, ledger } = setup();
+    const C = sha('e');
+    const landed = fake.addPull({
+      head: { ref: 'fleet/1-abcd1234', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.bots.engine,
+    });
+    const byHand = fake.addPull({
+      head: { ref: 'fleet/2-abcd1234', sha: B },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:10:00Z',
+      merge_commit_sha: sha('d'),
+      merged_by: fake.human,
+    });
+    const missing = fake.addPull({
+      head: { ref: 'fleet/3-abcd1234', sha: C },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:20:00Z',
+      merge_commit_sha: sha('f'),
+      merged_by: fake.bots.engine,
+    });
+    // 前两张账上已有合并记录（人合的那张是上一轮补的账）；第三张没有
+    for (const [number, head, action, commit, actor] of [
+      [landed.number, A, 'github.merge_pr', sha('c'), fake.bots.engine.login],
+      [byHand.number, B, 'github.merge_pr_backfill', sha('d'), fake.human.login],
+    ] as const) {
+      const key = mergeKey(repo, number, head);
+      await ledger.idempotency.claim({ key, action, target: `acme/widgets#${number}` }, new Date());
+      await ledger.idempotency.complete(
+        key,
+        { number, head, mergeCommit: commit, mergedBy: actor },
+        new Date(),
+      );
+    }
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(report.cleanPrs).toEqual([landed.number]);
+    expect(report.findings.some((f) => f.number === missing.number && f.kind === 'no_merge_record')).toBe(
+      true,
+    );
+    const backfill = await ledger.idempotency.peek(mergeKey(repo, missing.number, C));
+    expect(backfill).toMatchObject({
+      action: 'github.merge_pr_backfill',
+      target: `acme/widgets#${missing.number}`,
+      result: { number: missing.number, head: C, mergeCommit: sha('f'), mergedBy: fake.bots.engine.login },
+    });
+    // 下一轮补账仍不是合法队列来源，提醒继续保留。
+    const again = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(again.cleanPrs).toEqual([landed.number]);
+    expect(
+      again.findings
+        .filter((f) => f.kind === 'no_merge_record')
+        .map((f) => f.number)
+        .sort(),
+    ).toEqual([byHand.number, missing.number].sort());
+    expect(await ledger.idempotency.peek(mergeKey(repo, missing.number, C))).toEqual(backfill);
+  });
+
+  it('真实队列占用的同 head 回执晚到：先报风险，完成后才进入 cleanPrs', async () => {
+    const { gh, fake, ledger } = setup();
+    const pr = fake.addPull({
+      head: { ref: 'fleet/1-abcd1234', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: B,
+      merged_by: fake.bots.engine,
+    });
+    const key = mergeKey(repo, pr.number, A);
+    await ledger.idempotency.claim(
+      { key, action: 'github.merge_pr', target: `acme/widgets#${pr.number}` },
+      new Date(),
+    );
+    const { intake } = fakeIntake(() => true);
+    const rec = gh.reconciler({ intake, pollDeliveryId });
+    const first = await rec.auditMergedPrs('acme/widgets', new Date(0));
+    expect(first.cleanPrs).toEqual([]);
+    expect(first.findings.some((f) => f.kind === 'no_merge_record')).toBe(true);
+    await ledger.idempotency.complete(
+      key,
+      { number: pr.number, head: A, mergeCommit: B, mergedBy: fake.bots.engine.login },
+      new Date(),
+    );
+    const next = await rec.auditMergedPrs('acme/widgets', new Date(0));
+    expect(next.cleanPrs).toEqual([pr.number]);
+    expect(next.findings.some((f) => f.kind === 'no_merge_record')).toBe(false);
+  });
+
+  it.each([
+    'backfill',
+    'wrong-action',
+    'missing-target',
+    'wrong-repo',
+    'wrong-target-number',
+    'number-only',
+    'missing-number',
+    'missing-head',
+    'missing-mergeCommit',
+    'missing-mergedBy',
+    'wrong-number',
+    'wrong-head',
+    'wrong-mergeCommit',
+    'wrong-mergedBy',
+    'null-receipt',
+    'array-receipt',
+    'null-mergeCommit',
+    'null-mergedBy',
+    'short-head',
+    'incomplete',
+    'human-actor',
+    'agent-actor',
+    'missing-real-mergeCommit',
+  ])('无效队列证据 %s 不能撤风险，也不能重写已有来源', async (scenario) => {
+    const { gh, fake, ledger } = setup();
+    const pr = fake.addPull({
+      head: { ref: 'fleet/1-abcd1234', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: scenario === 'missing-real-mergeCommit' ? null : B,
+      merged_by:
+        scenario === 'human-actor'
+          ? fake.human
+          : scenario === 'agent-actor'
+            ? fake.bots.agent
+            : fake.bots.engine,
+    });
+    const key = mergeKey(repo, pr.number, A);
+    const action =
+      scenario === 'backfill'
+        ? 'github.merge_pr_backfill'
+        : scenario === 'wrong-action'
+          ? 'github.open_pr'
+          : 'github.merge_pr';
+    const target =
+      scenario === 'missing-target'
+        ? undefined
+        : scenario === 'wrong-repo'
+          ? `other/widgets#${pr.number}`
+          : scenario === 'wrong-target-number'
+            ? `acme/widgets#${pr.number + 1}`
+            : `acme/widgets#${pr.number}`;
+    await ledger.idempotency.claim({ key, action, ...(target === undefined ? {} : { target }) }, new Date());
+    const receipt: Record<string, unknown> = {
+      number: pr.number,
+      head: A,
+      mergeCommit: B,
+      mergedBy: fake.bots.engine.login,
+    };
+    if (
+      scenario.startsWith('missing-') &&
+      scenario !== 'missing-target' &&
+      scenario !== 'missing-real-mergeCommit'
+    )
+      delete receipt[scenario.slice('missing-'.length)];
+    if (scenario === 'wrong-number') receipt.number = pr.number + 1;
+    if (scenario === 'wrong-head') receipt.head = sha('c');
+    if (scenario === 'wrong-mergeCommit') receipt.mergeCommit = sha('d');
+    if (scenario === 'wrong-mergedBy') receipt.mergedBy = fake.human.login;
+    if (scenario === 'null-mergeCommit') receipt.mergeCommit = null;
+    if (scenario === 'null-mergedBy') receipt.mergedBy = null;
+    if (scenario === 'short-head') receipt.head = 'abc';
+    if (scenario !== 'incomplete')
+      await ledger.idempotency.complete(
+        key,
+        scenario === 'number-only'
+          ? { number: pr.number }
+          : scenario === 'null-receipt'
+            ? null
+            : scenario === 'array-receipt'
+              ? [receipt]
+              : receipt,
+        new Date(),
+      );
+    const before = await ledger.idempotency.peek(key);
+    const { intake } = fakeIntake(() => true);
+    const rec = gh.reconciler({ intake, pollDeliveryId });
+    for (let round = 0; round < 2; round += 1) {
+      const report = await rec.auditMergedPrs('acme/widgets', new Date(0));
+      expect(report.cleanPrs).toEqual([]);
+      expect(report.findings.some((f) => f.number === pr.number && f.kind === 'no_merge_record')).toBe(true);
+      expect(await ledger.idempotency.peek(key)).toEqual(before);
+    }
+  });
+
+  it('幂等账 peek 抛错：partial/unchecked，不能当作没有风险或尝试补账', async () => {
+    const { gh, fake, ledger } = setup();
+    const pr = fake.addPull({
+      head: { ref: 'fleet/1-abcd1234', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: B,
+      merged_by: fake.bots.engine,
+    });
+    let claims = 0;
+    ledger.idempotency.claim = async () => {
+      claims += 1;
+      return { status: 'claimed' };
+    };
+    ledger.idempotency.peek = async () => {
+      throw new Error('幂等账读失败');
+    };
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .auditMergedPrs('acme/widgets', new Date(0));
+    expect(report).toMatchObject({ outcome: 'partial', cleanPrs: [] });
+    expect(report.findings).toContainEqual(
+      expect.objectContaining({
+        number: pr.number,
+        kind: 'unchecked',
+        text: expect.stringContaining('幂等账读失败'),
+      }),
+    );
+    expect(claims).toBe(0);
   });
 
   it('「引擎」自己开、自己合的 PR（定时任务的数据 PR）：不报没有合并记录，只补账（#2175）', async () => {
