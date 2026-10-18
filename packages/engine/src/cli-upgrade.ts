@@ -29,7 +29,8 @@ export interface CliToolSpec {
   id: string;
   name: string;
   /** null = 没写或认不出，这一轮不升。 */
-  via: 'npm' | 'self-update' | null;
+  via: 'npm' | 'self-update' | 'tar' | null;
+  version?: string;
   packageName?: string;
   bin?: string;
   user?: string;
@@ -68,8 +69,15 @@ export interface ProcResult {
   timedOut?: boolean;
 }
 
+export interface TarInstallResult extends ProcResult {
+  /** 未切换：会话出现或排空状态未知；下次空闲可以重试。 */
+  refused?: true;
+}
+
 export interface UpgradeIo {
   now(): Date;
+  /** 固定版本 Go：完整暂存、验真、原子切换，失败保留原入口。 */
+  installTar?(spec: CliToolSpec): Promise<TarInstallResult>;
   /** 大于 0 就不许换二进制（含排空状态读不到）。升级过程中会再问。 */
   sessions(): number | Promise<number>;
   /** `pkg@stable` / `pkg@latest` → 版本号。查不到抛错。 */
@@ -430,6 +438,45 @@ export async function runUpgrade(input: {
       tools[spec.id] = prev;
       continue;
     }
+    if (spec.via === 'tar') {
+      const current = await input.io.versionOf(spec);
+      const oldVersion = current.code === 0 ? semverOf(current.stdout) : null;
+      if ((await input.io.sessions()) > 0) {
+        tools[spec.id] = record(
+          spec,
+          'refused',
+          '升级过程中出现会话，不替换二进制',
+          kept(prev, oldVersion, null),
+        );
+        continue;
+      }
+      let result: TarInstallResult;
+      try {
+        result = input.io.installTar
+          ? await input.io.installTar(spec)
+          : { code: 1, stdout: '', stderr: '固定版本 tar 安装端口未接线' };
+      } catch (err) {
+        result = { code: 1, stdout: '', stderr: String(err) };
+      }
+      if (result.refused) {
+        tools[spec.id] = record(
+          spec,
+          'refused',
+          clip(result.stderr || result.stdout),
+          kept(prev, oldVersion, null),
+        );
+        continue;
+      }
+      tools[spec.id] =
+        result.code === 0 && !result.timedOut
+          ? record(spec, oldVersion === spec.version ? 'current' : 'ok', clip(result.stdout), {
+              version: spec.version ?? null,
+              upgradedAt:
+                oldVersion === spec.version ? (prev?.upgradedAt ?? now.toISOString()) : now.toISOString(),
+            })
+          : failed(spec, now, oldVersion, prev, `固定版本安装失败：${clip(result.stderr || result.stdout)}`);
+      continue;
+    }
     const channel = parseChannel(spec.channel);
     if (!channel) {
       const why = spec.channel?.trim() ? `渠道「${spec.channel.trim()}」认不出，不升` : '没写渠道，不升';
@@ -584,10 +631,22 @@ export function readCliToolsConfig(
       return { ok: false, error: `cliTools.${id} 不是对象` };
     }
     const tool = value as Record<string, unknown>;
-    const via = tool.via === 'npm' || tool.via === 'self-update' ? tool.via : null;
+    const via = tool.via === 'npm' || tool.via === 'self-update' || tool.via === 'tar' ? tool.via : null;
     const text = (key: string): string | undefined =>
       typeof tool[key] === 'string' ? (tool[key] as string) : undefined;
     const spec: CliToolSpec = { id, name: text('name')?.trim() || id, via };
+    const version = text('version');
+    if (
+      via === 'tar' &&
+      (id !== 'go' ||
+        !version ||
+        !/^\d+\.\d+\.\d+$/.test(version) ||
+        text('bin') !== '/usr/local/bin/go' ||
+        text('user'))
+    ) {
+      return { ok: false, error: `cliTools.${id} tar 仅支持固定版本 Go 和 /usr/local/bin/go` };
+    }
+    if (version) spec.version = version;
     const packageName = text('package');
     const bin = text('bin');
     const user = text('user');

@@ -56,7 +56,8 @@ export async function handOffDecision(
   answer: DecisionAnswer,
 ): Promise<{ progress: HandoffResult; task?: HandoffResult }> {
   const { commenter, store } = deps;
-  const key = `decision-answer:${n.id}`;
+  if (!answer.id) return { progress: { ok: false, why: '历史答案没有代次：不能自动交接，请重新作答' } };
+  const key = `decision-answer:${n.id}:${answer.id}`;
   const progress = await attempt(async () => {
     if (!commenter) throw new Error(HANDOFF_NOT_WIRED);
     const self = await findSelfRepo(store);

@@ -333,9 +333,15 @@ describe('选路', () => {
       expect((await answer('fixed')).kind).toBe('ok');
       expect((await alarms()).find((a) => a.id === id)?.resolvedAt).toBeNull();
       expect(await pick()).toMatchObject({ ok: true, route: { routeId: 'carpool' } });
+      const saved = (await alarms()).find((a) => a.id === id)?.answer;
+      if (!saved?.id) throw new Error('答案没有代次');
+      const claim = await store.claimDecision({ id, answerId: saved.id });
+      if (claim.kind !== 'claimed') throw new Error('答案没有接活');
       expect(
         await store.settleDecision({
           id,
+          answerId: saved.id,
+          claimId: claim.claimId,
           execution: { ok: true, text: '账号池 claude-solo 已放开', at: new Date().toISOString() },
           resolve: true,
           by,

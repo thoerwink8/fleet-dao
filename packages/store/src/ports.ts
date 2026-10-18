@@ -197,7 +197,7 @@ export interface NotificationRecord {
 /** 回答「要你拍」的结局：存下了（连同存下的那条）；这条不是要人拍的、已经处理过、没有这条、选项编号认不出。 */
 export type AnswerNotificationResult =
   | { kind: 'ok'; notification: NotificationRecord }
-  | { kind: 'not_decision' | 'already_resolved' | 'not_found' | 'unknown_option' };
+  | { kind: 'not_decision' | 'already_resolved' | 'not_found' | 'unknown_option' | 'conflict' | 'in_flight' };
 
 export interface SettingRecord {
   key: string;
@@ -397,23 +397,42 @@ export interface OpsStore {
   ): Promise<'ok' | 'already_resolved' | 'not_found'>;
   /**
    * 回答一条还开着的「要你拍」（#1915）：点选项给 optionId，自己输入给 text（二选一，路由已核过）。只记答案和操作记录，
-   * 不转已处理——执行成功以后由 settleDecision 写结果、再决定转不转。开着时可以再拍，答案（连同上一次的执行结果）换成新的。
+   * 不转已处理——独立 claim 后执行，再由 settleDecision 按答案编号和 claim CAS 结算。未接活可替换；executing/queued/unknown 拒绝不同答案；同请求复用，确定失败可重试。
    * 选项编号不在这条的选项里回 unknown_option，什么都不改。
    */
   answerNotification(
-    input: { id: string; by: Actor; optionId?: string | undefined; text?: string | undefined },
+    input: {
+      id: string;
+      by: Actor;
+      optionId?: string | undefined;
+      text?: string | undefined;
+      requestId?: string | undefined;
+      expectedAnswerId?: string | null | undefined;
+    },
     audit: NewAuditEntry,
   ): Promise<AnswerNotificationResult>;
+  /** 执行前独立原子接活；在途/未知不能接管，确定失败可沿同答案重新接活。历史答案无代次拒绝。 */
+  claimDecision(input: {
+    id: string;
+    answerId: string;
+  }): Promise<
+    | { kind: 'claimed'; answer: DecisionAnswer; claimId: string }
+    | { kind: 'replay'; answer: DecisionAnswer }
+    | { kind: 'stale' }
+    | { kind: 'in_flight' }
+  >;
   /**
    * 把执行结果写进还开着的通知的答案里（answer.execution）。resolve 为真才标已处理（执行成功、并且这一项不是 keepsOpen）。
-   * 已经处理过的、还没有答案的不改（回 already_resolved），没有这条回 not_found。不另记操作记录（回答那条已经记过）。
+   * 已经处理过的、还没有答案的不改（already_resolved），不存在回 not_found，身份/执行状态对不上回 stale。失败、queued、unknown 不能 resolve。不另记操作记录（回答那条已经记过）。
    */
   settleDecision(input: {
     id: string;
+    answerId: string;
+    claimId: string;
     execution: DecisionExecution;
     resolve: boolean;
     by: Actor;
-  }): Promise<'ok' | 'already_resolved' | 'not_found'>;
+  }): Promise<'ok' | 'already_resolved' | 'not_found' | 'stale'>;
   appendAudit(entry: NewAuditEntry): Promise<string>;
   /** 按 (at, id) 倒序。 */
   listAudit(query: { target?: string | undefined } & PageRequest): Promise<Page<AuditRecord>>;

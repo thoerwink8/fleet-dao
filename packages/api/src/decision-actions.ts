@@ -51,6 +51,9 @@ const clip = (text: string, max: number): string => {
   return body.length > max ? `${body.slice(0, max - 1)}…` : body;
 };
 
+/** 已核实没有写入的拒绝；普通写口异常可能发生在提交之后。 */
+class DecisionNotApplied extends Error {}
+
 /**
  * 按动作执行。抛错收成失败（text 是原因，最长 500 字），不往外抛。
  * 重查 GitHub App 没写仓：在调端口之前失败。
@@ -58,7 +61,7 @@ const clip = (text: string, max: number): string => {
 export async function executeDecisionAction(
   action: DecisionAction,
   ports: DecisionActionPorts,
-): Promise<{ ok: boolean; text: string; queued?: true }> {
+): Promise<{ ok: boolean; text: string; queued?: true; unknown?: true }> {
   try {
     switch (action.kind) {
       case 'delete-worktree':
@@ -92,7 +95,17 @@ export async function executeDecisionAction(
         return { ok: true, text: HANDED_TO_COMMANDER };
     }
   } catch (err) {
-    return { ok: false, text: clip(errMessage(err), 500) };
+    const writes =
+      action.kind === 'pause-pool' || action.kind === 'resume-pool' || action.kind === 'drop-repo';
+    const unknown = writes && !(err instanceof DecisionNotApplied);
+    return {
+      ok: false,
+      text: clip(
+        unknown ? `执行结果未知，请核实现场，不能自动重试：${errMessage(err)}` : errMessage(err),
+        500,
+      ),
+      ...(unknown ? { unknown: true as const } : {}),
+    };
   }
 }
 
@@ -113,7 +126,7 @@ export async function applyDecisionAnswer(input: {
   notification: NotificationRecord;
   optionId: string | undefined;
   ports: DecisionActionPorts;
-}): Promise<{ executed: { ok: boolean; text: string; queued?: true }; resolve: boolean }> {
+}): Promise<{ executed: { ok: boolean; text: string; queued?: true; unknown?: true }; resolve: boolean }> {
   const action = actionOfAnswer(input.notification, input.optionId);
   const executed = await executeDecisionAction(action, input.ports);
   return {
@@ -139,9 +152,9 @@ async function writeHolds(
   reason: string,
 ): Promise<void> {
   const accepted = acceptPoolHoldsWrite(before?.value, next);
-  if (!accepted.ok) throw new Error(accepted.message);
+  if (!accepted.ok) throw new DecisionNotApplied(accepted.message);
   const problem = revocationProblem(before?.value, accepted.value, reason);
-  if (problem) throw new Error(problem);
+  if (problem) throw new DecisionNotApplied(problem);
   const result = await store.putSetting(
     {
       key: POOL_HOLDS_SETTING,
@@ -160,7 +173,7 @@ async function writeHolds(
       ok: true,
     },
   );
-  if (result === 'conflict') throw new Error('整池暂停刚被别人改过，再选一次');
+  if (result === 'conflict') throw new DecisionNotApplied('整池暂停刚被别人改过，再选一次');
 }
 
 /**
@@ -188,7 +201,7 @@ export function liveDecisionPorts(input: {
       const current = await setting();
       const map = holdsValue(current?.value);
       if (map === 'corrupt') {
-        throw new Error(`设置 ${POOL_HOLDS_SETTING} 的值不是 {池编号: 条目}，整池暂停写不进去`);
+        throw new DecisionNotApplied(`设置 ${POOL_HOLDS_SETTING} 的值不是 {池编号: 条目}，整池暂停写不进去`);
       }
       const prior = map === 'empty' ? {} : map;
       if (PoolHoldSchema.safeParse(prior[poolId]).success) return;
@@ -214,7 +227,7 @@ export function liveDecisionPorts(input: {
       const map = holdsValue(current?.value);
       if (map === 'empty') return;
       if (map === 'corrupt') {
-        throw new Error(`设置 ${POOL_HOLDS_SETTING} 的值不是 {池编号: 条目}，放开写不进去`);
+        throw new DecisionNotApplied(`设置 ${POOL_HOLDS_SETTING} 的值不是 {池编号: 条目}，放开写不进去`);
       }
       if (!Object.hasOwn(map, poolId)) return;
       const reason = `驾驶舱「让我拍」选了放开账号池 ${poolId}`;
@@ -233,7 +246,7 @@ export function liveDecisionPorts(input: {
     },
     async dropRepo({ owner, name }) {
       const repo = (await store.listRepos()).find((r) => r.owner === owner && r.name === name);
-      if (!repo) throw new Error(`受管的仓里没有 ${owner}/${name}`);
+      if (!repo) throw new DecisionNotApplied(`受管的仓里没有 ${owner}/${name}`);
       const outcome = await store.removeRepo(
         { repoId: repo.id },
         {
@@ -245,8 +258,9 @@ export function liveDecisionPorts(input: {
           ok: true,
         },
       );
-      if (outcome === 'not_found') throw new Error(`受管的仓里没有 ${owner}/${name}`);
-      if (outcome === 'has_tasks') throw new Error('这个仓还挂着没结束的需求，先把它们处理掉再移出');
+      if (outcome === 'not_found') throw new DecisionNotApplied(`受管的仓里没有 ${owner}/${name}`);
+      if (outcome === 'has_tasks')
+        throw new DecisionNotApplied('这个仓还挂着没结束的需求，先把它们处理掉再移出');
     },
     async noteOnly() {
       const handoff = await input.handOff();

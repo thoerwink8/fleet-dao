@@ -1098,6 +1098,10 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 每个工具升完当场 `--version` 对上目标版本，再跑一次 `--help`（不调模型、不花钱）。对不上或冒烟不过，装回上一版（npm 装回精确版本；grok 把升级前拷下的二进制写回去）并记 `failure`。退不回去也记 `failure`，不留在坏版本上。有 `failure` 的工具不再装第二次。整轮只要还有工具带着 `failure`，引擎不再写新的升级请求。看完以后，删掉 `state.json` 里那个工具的 `failure` 字段才再升。驾驶舱「法国」页的「命令行工具」一块显示版本和上次升级时间；没成的推一条提醒（同一条，不另起）。
 
+固定 Go 工具使用同一入口：`cliTools.tools.go` 写 `via: tar`、精确 `version` 和 `/usr/local/bin/go`，不需浮动 channel。仅支持 Linux amd64/arm64；从官方版本清单选择精确架构、大小、SHA256，安全检查 tar 后解包到 `/usr/local/lib/fleet-go` 的新树，实际执行 `go version` 后通过临时链接 rename 原子切换入口，再核对 intake 固定 PATH `/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin` 命中的入口与版本。旧入口备份 `.go-backup-*` 和版本树保留，失败恢复入口并记 failure；切换前发现新会话或排空状态读不到则记 refused、不写 failure，下次空闲重试。已有 `/usr/local/go/bin/go` 遮挡时拒绝安装，不删除现有树。发布完成还需真实核验 Go 入口及目标仓 readiness；配置、mock 测试、PR 合并不能代替现场验收。
+
+依据：[Go 官方安装说明](https://go.dev/doc/install)要求解包到新树并执行版本核验；[官方版本清单](https://go.dev/dl/?mode=json&include=all)提供版本、架构、大小、SHA256；[Node 文件系统 rename](https://nodejs.org/api/fs.html#fspromisesrenameoldpath-newpath)用于同目录入口替换。
+
 单元 45 分钟还没写回结果：引擎撤掉排空、把请求改名为 `request.stuck`，下一轮空闲再试。这不算工具失败。看 `journalctl -u fleet-cli-upgrade`。单元自己的时限是 40 分钟，到点杀掉 npm 子进程。
 
 目录 `/var/lib/fleet-dao/cli-upgrade` 由 root 建成 `fleet:fleet` 0775。引擎写 `wanted.json`、`request.json`；root 写 `state.json`（0644，驾驶舱读得了）。发版窗口开始前会停掉还在跑的 `fleet-cli-upgrade.service`，并删掉 `wanted.json` 和 `request.json`，免得两路同时换二进制、也免得新引擎把没对上的空闲请求当成还要排空。

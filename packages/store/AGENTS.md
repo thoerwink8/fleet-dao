@@ -31,3 +31,5 @@
 - 改接口：`ports.ts` → `memory-store.ts` + `pg-store.ts` → 契约测试；调用方在 api 和 engine。
 - 要新表或新列：先在 `packages/db` 改表结构并生成迁移（见 `packages/db/AGENTS.md`），再改这里。
 - 要驾驶舱实时看到的新表：登记 `packages/shared/src/realtime.ts` 的 `REALTIME_TABLES`，触发器在 db 的迁移里。
+
+- 通知答案先存不可变 `answer.id`，执行前 `claimDecision` 接活，结算携 `answerId` 和 `claimId`。executing/unknown 不超时接管、不覆盖，现场核验前保留待核；确定失败才能同代次重试。历史无代次只能读，不能自动接活。
