@@ -19,6 +19,8 @@
 
 ## 常见坑
 
+- `plan-reader.ts` 只给 `pnpm plan` 装配读取传输：gh 明确配置 socket 时经 `gh api --include --method GET`，不搬令牌；没有配置仍走原生 HTTP。数字仓号分页先经当前仓元信息核对 id 和 full_name，不能信 Link 自报身份。配置或进程真失败必须报没读成，不能静默换身份、匿名或直连；其他 GitHub 读写入口保持各自原路径。
+
 - `mother-manifest.ts` 严格读写母单正文 JSON 清单；`family-manifest.ts` 全量读含已关闭子单后按唯一清单修复正文与原生关系，多母认领先报冲突、不写。入口 `bin/github-audit.ts` 显式给 family reader/writer；原对账接口仍可只读。批量写清单失败走整批补偿；`issue:new --parent` 的清单失败须明说子单已开已挂，不能建议重开。
 - 空母单只对批量创建标记报错，不按创建时间报警；目录母单允许空清单。parent 孤儿、字段与原生关系冲突和 manifest 差异仍须报告。
 - `pnpm project check|add` 第二步（`project.ts` 的 `probeApps`）读装没装只经 `fleet-api project installations`（#2977，法国用两个机器人的 metadata:read 安装令牌，和导入列表同一份归并），不读本机 gh 的 `user/installations`；`parseInstallFacts` 逐字段严格认。「没查成」（非 0、ssh 超时、非 JSON、缺字段、`reason` 非空、仓号仓名对不上）是 unchecked、退出码 2，不当成没装、不退回本机 gh 猜、不补装；读全了明确不含才是「没装」（red），add 才走本机 gh 的单仓 PUT 补装。
@@ -28,6 +30,7 @@
 - CI 一律全套（决定 0101）：`ci.yml` 的 changes 只用 `ciFullPlan()`，不按改动选；只有两种跳过——PR 上测试台输入完全相同（`ci-cache.ts`）、主线同树复用 PR 的结果（`main-reuse.ts`，e2e 也复用）。别再往 CI 里加按路径少跑的规则：漏的东西到主线才红。汇总（`ciVerdict`）见到不是全套的 plan 就红。
 - `ci-plan.ts` 的 `planCi` 现在只给本机：`test:changed`、推前预检按改动选先跑哪些，改了判法本机跟着变。
 - `test:changed` 判需全跑时先认非空 `FLEET_RUN_ID`，再认 CI：引擎会话显式 `--affected` 生效，写码 CLI 注入的 `CI=true/1` 不覆盖它；无引擎标记的专用 CI、引擎默认和显式 `--all` 仍全跑。
+- `src/test-slots.ts` 拿到本机测试槽就打印 `SLOT_ACQUIRED_LINE`（没排队也打印），引擎据此把等槽和实际执行分开计时。默认持槽上限 45 分钟，要盖住引擎 30 分钟测试执行预算和收尾，避免测试还活着时被回收、同机并发超过容量；普通 `test:changed` 和引擎测试共用这组槽。
 - 只改一个包「对外面」以外的文件只测这个包自己（`packages/conventions/src/package-surface.ts`）；认不出面就当整个包都是面。
 - 文档指针检查误报了就收窄 `packages/conventions/src/doc-pointers.ts` 的规则，不往文档里加豁免；章节别光写「第 X 节」，写明是 design 还是 ops 的。
 - CI 里的检查必须确定、只看检出来的文件；看外部状态（GitHub）的放定时任务，只留言不挡 PR。
