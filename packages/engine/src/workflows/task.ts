@@ -143,7 +143,7 @@ import {
   withFamily,
 } from './task-support.ts';
 import { syncMainlineBeforeImplement } from './task-sync.ts';
-import { coldVerifyPr, verifyAlongsideCi } from './task-verify.ts';
+import { coldVerifyPr, handReviewChanges, verifyAlongsideCi } from './task-verify.ts';
 
 /** 和等 CI 同时起的那一次冷验收：结果（不抛）和起的时候的头。 */
 interface EarlyVerify {
@@ -449,6 +449,18 @@ class TaskFlow {
         }),
       );
       if (r.merged) return { commit: r.mergeCommit };
+      // 不强制 CI 也不跑冷验收：合之前现读到还挂着的正式「要求改」（#2991）就不合，交给工人或停下等审查者（点「继续」回来再读再合）。
+      // 老历史的活动结果里没有 reviewChanges，进不了这一支、不打标记
+      if ((r.reviewChanges?.length ?? 0) > 0 && patched('merge-review-changes')) {
+        const next = await handReviewChanges(
+          rt,
+          r.reviewChanges ?? [],
+          { pass: true, problems: [] },
+          'merge',
+        );
+        if (next === 'rework') return 'rework';
+        continue;
+      }
       if (r.reason === 'conflict') {
         rt.feedback = [r.detail ?? `PR #${prNumber} 和主线冲突，解完再交`];
         rt.status.lastProblem = '和主线有冲突';

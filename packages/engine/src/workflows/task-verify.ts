@@ -10,10 +10,11 @@
 // 接回的结论照常认；接回没接成的活动回 retry（重验一次），不算一轮、不算没过，全程「冷验收被拒」的次数也不数它。
 
 // 正式评审（#2991，patched('review-request-changes')）：活动在验收有结论时现读 PR 上认可审查者还没解决的「要求改」，带在结论里。
-// 这里是评审到工人的必经入口（GitHub 事件只写镜像、不叫醒工作流）：没交过的交给下一轮动手，交过的不重复派工，挂着就不合。
+// 没交过的交给下一轮动手，交过的不重复派工，挂着就不合。验收之后到合上之间交的评审由合并那一步接（task-merge.ts：挂自动合并、
+// 等合并的每一圈、直接合之前都重读，读到了撤掉自动合并、交给这里同一份 handReviewChanges）。
 
 import { CancellationScope, log, patched } from '@temporalio/workflow';
-import { reviewFeedbackLine, reviewKey, reviewParkDetail } from '../review-feedback.ts';
+import { reviewFeedbackLines, reviewKey, reviewParkDetail } from '../review-feedback.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import {
   type ColdVerifyInput,
@@ -94,7 +95,7 @@ export async function coldVerifyPr(
     // 停下等审查者复审或撤销。老历史的活动结果里没有 reviewChanges，进不了这一支、不打标记
     const reviews = res.reviewChanges ?? [];
     if (reviews.length > 0 && patched('review-request-changes')) {
-      if ((await handReviewChanges(rt, reviews, res)) === 'rework') return 'rework';
+      if ((await handReviewChanges(rt, reviews, res, 'verify')) === 'rework') return 'rework';
       continue;
     }
     if (res.pass) return 'pass';
@@ -107,37 +108,41 @@ export async function coldVerifyPr(
  * 正式评审交给工人（#2991）：没交过的（新的、改过正文的）连原文、review id、审的提交写进返工意见回 'rework'；验收也没过的，
  * 问题照记、这一轮算验收的一轮，交过的评审附在意见里提醒（审查者没撤，不能因为推了新提交就丢）。
  * 都交过、验收这一头过了：不再派工（重复读到不重复派工），也不认成验过（旧头上的评审不能替新头放行），停下等审查者，
- * 人点「继续」回 'again' 重验一次（重读评审）。
+ * 人点「继续」回 'again'，调用方重读评审（冷验收重验一次；合并那一步重挂、重合，挂之前、合之前都重读）。
+ * from：'verify' 是冷验收刚算了这一轮（评审返工、等审查者都退掉这一轮）；'merge' 是挂自动合并、等合并、直接合时读到的
+ * （验收早过了，评审返工后验收从第 1 轮重新数）。
  */
-async function handReviewChanges(
+export async function handReviewChanges(
   rt: TaskRuntime,
   reviews: readonly ReviewChange[],
-  res: ColdVerifyResult,
+  verdict: Pick<ColdVerifyResult, 'pass' | 'problems'>,
+  from: 'verify' | 'merge',
 ): Promise<'rework' | 'again'> {
   const prNumber = rt.prNumber ?? 0;
   const keyOf = (r: ReviewChange) => reviewKey(prNumber, r);
   const fresh = reviews.filter((r) => !rt.reviewsHanded.has(keyOf(r)));
-  if (fresh.length === 0 && res.pass) {
-    rt.verifyRound -= 1; // 验收过了，等的是审查者：不算一轮
+  if (fresh.length === 0 && verdict.pass) {
+    if (from === 'verify') rt.verifyRound -= 1; // 验收过了，等的是审查者：不算一轮
     await rt.park(
       '正式评审还要求改',
       reviewParkDetail(prNumber, reviews, (r) => rt.reviewsHanded.get(keyOf(r))),
     );
     return 'again';
   }
-  if (res.pass) {
+  if (verdict.pass) {
     // 验收这一头过了，返工是评审要的：不占验收的轮数，下一次从头验新的头
-    rt.verifyRound -= 1;
+    if (from === 'verify') rt.verifyRound -= 1;
+    else rt.verifyRound = 0;
     rt.verifyProblems = [];
     rt.verifyRecheck = null;
     rt.feedback = [];
     rt.status.lastProblem = '正式评审要求改';
   } else {
-    noteVerifyProblems(rt, res.problems);
+    noteVerifyProblems(rt, verdict.problems);
   }
   const head = rt.head;
   rt.feedback = [
-    ...reviews.map((r) => reviewFeedbackLine(r, head, rt.reviewsHanded.has(keyOf(r)))),
+    ...reviews.flatMap((r) => reviewFeedbackLines(r, head, rt.reviewsHanded.has(keyOf(r)))),
     ...rt.feedback,
   ];
   for (const r of fresh) rt.reviewsHanded.set(keyOf(r), head ?? '');

@@ -1082,14 +1082,20 @@ export function realPortsFromEnv(
   // cursor、grok、mirasim 不再被 kept 放行，15 分钟新鲜线一律真探。
   const probeAssigned: AssignedProber = (input) => probeAssignedRoute(routeProbe(), routeProbeLock, input);
   const runsDir = join(config.stateDir, 'runs');
-  // 成员表（认可的审查者，#2991）：每次读评审现读，成员改了不用重启引擎
+  // PR 上还没解决的正式「要求改」评审（#2991）：冷验收有结论时、挂自动合并、等合并的每一圈、直接合之前都现读 GitHub，
+  // 认可的审查者照开单白名单（成员表每次现读，成员改了不用重启引擎）。工作流按读到的交给下一轮工人，读不成抛错不当没有
   const members = createPgStore(db);
+  const reviewChanges = reviewChangesReader({
+    listReviews: (repo, prNumber) => gh.claims.listReviews(repo, prNumber),
+    whitelist: async () => githubWhitelist(await members.listUsers()),
+  });
   const tasks: EngineTasks = {
     ...createTaskActivities({
       gh,
       trees,
       exec,
       log: taskLog,
+      reviewChanges,
       profileOf: async (repo) => {
         const row = await findRepoProfile(db, repo.owner, repo.name);
         if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);
@@ -1178,12 +1184,8 @@ export function realPortsFromEnv(
       gh,
       // 文件接口不给 patch 的大文件，用引擎镜像里的 git 补读（#1308）
       fileDiff: mirrorFileDiff(gh),
-      // PR 上还没解决的正式「要求改」评审（#2991）：验收有结论时现读 GitHub，认可的审查者照开单白名单（成员表现读），
-      // 工作流交给下一轮动手会话。GitHub 事件只写镜像不叫醒（api/main.ts、github-reconcile.ts），这里是评审到工人的必经入口
-      reviewChanges: reviewChangesReader({
-        listReviews: (repo, prNumber) => gh.claims.listReviews(repo, prNumber),
-        whitelist: async () => githubWhitelist(await members.listUsers()),
-      }),
+      // 验收有结论时现读 PR 上还没解决的正式「要求改」（#2991），工作流交给下一轮动手会话
+      reviewChanges,
       pickRoute: real.ports.pickRoute,
       spawner: segmentSpawner,
       runs: taskRuns,

@@ -18,6 +18,7 @@ import {
   listInstallationRepositories,
   type ReleaseFactsReader,
   type RepoRef,
+  reviewMergeHold,
   type SelfCheckItem,
 } from '@fleet-dao/github';
 import { jevConfigLocation } from '@fleet-dao/jev';
@@ -129,9 +130,10 @@ function githubMirror(db: Db): {
 } {
   try {
     const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
-    // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像
+    // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像。
+    // 唯一的例外是正式评审要求改（#2991）：引擎任务 PR 挂着的自动合并当场撤掉，评审由引擎合并那一步现读、交给工人
     return {
-      sink: gh.eventSink({ async wake() {} }),
+      sink: gh.eventSink(reviewMergeHold(gh.claims, log)),
       releaseFacts: gh.releaseFacts,
       decisionCommenter: {
         async comment(input) {

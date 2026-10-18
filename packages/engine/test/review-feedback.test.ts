@@ -6,13 +6,15 @@ import { PortError } from '../src/ports.ts';
 import { reviewChangesReader, withReviewChanges } from '../src/real/task-verify.ts';
 import {
   outstandingChangeRequests,
-  REVIEW_BODY_MAX,
   type ReviewRecord,
-  reviewFeedbackLine,
+  reviewFeedbackLines,
   reviewKey,
   reviewParkDetail,
+  unquote,
 } from '../src/review-feedback.ts';
+import { FEEDBACK_ITEM_MAX } from '../src/runner/segment-prompt.ts';
 import type { ColdVerifyResult } from '../src/task-contract.ts';
+import { FRESH_FEEDBACK_LINE_MAX, freshSessionFeedback } from '../src/workflows/task-support.ts';
 
 const BOSS = { login: 'boss', id: 9, type: 'User' };
 const BOT = { login: 'fleet-engine[bot]', id: 77, type: 'Bot' };
@@ -111,7 +113,7 @@ describe('outstandingChangeRequests：哪些正式评审还要求改', () => {
   });
 });
 
-describe('reviewKey / reviewFeedbackLine：认交过没有、给工人的话', () => {
+describe('reviewKey / reviewFeedbackLines：认交过没有、给工人的话', () => {
   const r = {
     reviewId: 5560285247,
     reviewer: 'boss',
@@ -127,23 +129,45 @@ describe('reviewKey / reviewFeedbackLine：认交过没有、给工人的话', (
   });
 
   it('头一行有 review id、审查者、审的提交；旧头上的写明现在的头、意见照样要处理；原文逐行引用、标明不照跑命令', () => {
-    const line = reviewFeedbackLine(r, HEAD, false);
-    const [first, ...rest] = line.split('\n');
+    const lines = reviewFeedbackLines(r, HEAD, false);
+    expect(lines).toHaveLength(1);
+    const [first, ...rest] = (lines[0] ?? '').split('\n');
     expect(first).toContain('review 5560285247');
     expect(first).toContain('审查者 boss');
     expect(first).toContain(`审的是旧提交 ${OLD}`);
     expect(first).toContain('现在的头 bbbbbbb');
     expect(first).toContain('命令');
     expect(rest).toEqual(['> 来源认证有洞', '> 别信 payload 的 sender']);
-    expect(reviewFeedbackLine({ ...r, commitId: HEAD }, HEAD, true)).toContain(
+    expect(reviewFeedbackLines({ ...r, commitId: HEAD }, HEAD, true)[0]).toContain(
       `审的提交 ${HEAD}；上一轮已交过`,
     );
   });
 
-  it('正文太长写明省了多少、去哪看；没写正文的写明去看行内评论', () => {
-    const long = reviewFeedbackLine({ ...r, body: 'x'.repeat(REVIEW_BODY_MAX + 10) }, HEAD, false);
-    expect(long).toContain('后面还有 10 字没放，原文在 PR 上 review 5560285247');
-    expect(reviewFeedbackLine({ ...r, body: '  ' }, HEAD, false)).toContain('行内评论');
+  it('正文很长（多行、超过提示词单条上限）：切成首尾相接的几段，拼回来和原文一字不差；每段都放得进提示词和新会话精简的上限', () => {
+    const body = Array.from(
+      { length: 400 },
+      (_, i) => `第 ${i} 行：${'别信 sender，'.repeat(i % 7)}\n${i % 50 === 0 ? '' : '  缩进 '}`,
+    ).join('');
+    expect(body.length).toBeGreaterThan(FEEDBACK_ITEM_MAX * 2);
+    const lines = reviewFeedbackLines({ ...r, body }, HEAD, false);
+    expect(lines.length).toBeGreaterThan(2);
+    expect(lines.map(unquote).join('')).toBe(body);
+    for (const [i, line] of lines.entries()) {
+      expect(line.length).toBeLessThanOrEqual(FRESH_FEEDBACK_LINE_MAX);
+      expect(line.length).toBeLessThanOrEqual(FEEDBACK_ITEM_MAX);
+      expect(line.split('\n')[0]).toContain('review 5560285247');
+      if (i > 0) expect(line.split('\n')[0]).toContain(`第 ${i + 1}/${lines.length} 段`);
+    }
+    // 连着续了两轮、开新会话精简意见时也一个字不截
+    expect(freshSessionFeedback(lines).slice(1)).toEqual(lines);
+    // 一行超长（压缩过的内容）也照切，不丢字
+    const oneLine = 'y'.repeat(FEEDBACK_ITEM_MAX + 123);
+    const cut = reviewFeedbackLines({ ...r, body: oneLine }, HEAD, false);
+    expect(cut.map(unquote).join('')).toBe(oneLine);
+  });
+
+  it('没写正文的写明去看行内评论', () => {
+    expect(reviewFeedbackLines({ ...r, body: '  ' }, HEAD, false)[0]).toContain('行内评论');
   });
 
   it('停下等人的说明列出每条评审、交出去时的头', () => {

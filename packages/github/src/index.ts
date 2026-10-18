@@ -75,6 +75,7 @@ export {
   createEventSink,
   type EventSink,
   type IngestedEvent,
+  reviewMergeHold,
   type WakeEvent,
   type WorkflowWaker,
 } from './events.ts';

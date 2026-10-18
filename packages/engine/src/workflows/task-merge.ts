@@ -11,10 +11,15 @@
 // - 等合并时必过检查转红（#1983，patched('merge-wait-red-checks')）：红了和还在跑都是 blocked，以前都当 waiting 一直等。
 //   第一次红就写「检查红了：」加检查名，隔 MERGE_RED_CONFIRM_SECONDS 再读；仍红就把检查名和原因交回返工。
 //   中间变回还在跑就清掉，接着等。老历史里 waitMerged 不回 checks_red；patched() 为假就当还在等。
+// - 正式评审要求改（#2991，patched('merge-review-changes')）：冷验收之后交的评审由这一步接——挂自动合并前、等合并的每一圈都现读，
+//   读到了活动先撤掉已挂的自动合并，这里交给工人（task-verify.ts 的 handReviewChanges，和冷验收同一份）或停下等审查者。
+//   GitHub 事件那头只撤自动合并、不叫醒工作流（@fleet-dao/github 的 reviewMergeHold）：撤了之后这里读到 unarmed、回去重挂，
+//   挂之前读到评审。老历史里活动结果没有 reviewChanges，标记也不在历史里。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { patched } from '@temporalio/workflow';
 import {
+  type ColdVerifyResult,
   type GuardedPaths,
   MAX_MAIN_SYNCS,
   MERGE_POLL_MINUTES,
@@ -24,6 +29,10 @@ import {
 import type { TaskRuntime } from './task-runtime.ts';
 import { headMovedDetail } from './task-support.ts';
 import { syncMainlineOnConflict } from './task-sync.ts';
+import { handReviewChanges } from './task-verify.ts';
+
+/** 合并这一步读到评审时，冷验收早已过了（handReviewChanges 认的「验收这一头过了」）。 */
+const PASSED: Pick<ColdVerifyResult, 'pass' | 'problems'> = { pass: true, problems: [] };
 
 /** 等合并时发现 PR 和主线冲突：写进任务状态的那句话（驾驶舱和库里看得到，和「在合并队列」分开）。 */
 export const MERGE_CONFLICT_NOTE = 'PR 和主线冲突，在并主线';
@@ -96,6 +105,13 @@ export async function armAndWaitMerged(
       }),
     );
     if (armed.merged) return { kind: 'merged', commit: armed.mergeCommit };
+    // 挂之前现读到还挂着的正式「要求改」（#2991）：没挂（挂着的已撤），交给工人；交过的停下等审查者，点「继续」回来重挂、重读。
+    // 老历史的活动结果里没有 reviewChanges，进不了这一支、不打标记
+    if ((armed.reviewChanges?.length ?? 0) > 0 && patched('merge-review-changes')) {
+      const next = await handReviewChanges(rt, armed.reviewChanges ?? [], PASSED, 'merge');
+      if (next === 'rework') return { kind: 'rework' };
+      continue;
+    }
     if (armed.headMoved !== undefined && armed.syncedMain === true) {
       // 落后主线、引擎已把 PR 同步到最新主线：头是自己换的，不停下等人，直接对新头重走 CI 和验收
       rt.mainSyncs += 1;
@@ -132,6 +148,14 @@ export async function armAndWaitMerged(
       // 不是连着两次红：中间有别的结果就把确认清掉（红一下又变回还在跑，不算要返工）。
       if (w.state !== 'checks_red') rt.mergeRedNoted = false;
       if (w.state === 'merged') return { kind: 'merged', commit: w.mergeCommit };
+      if (w.state === 'review_changes') {
+        // 等合并时交的正式「要求改」（#2991）：活动已撤掉自动合并。交给工人，或停下等审查者后回去重挂（挂之前再读一次）。
+        // 老历史里 waitMerged 不回这个状态
+        if (!patched('merge-review-changes')) continue;
+        const next = await handReviewChanges(rt, w.reviewChanges, PASSED, 'merge');
+        if (next === 'rework') return { kind: 'rework' };
+        break;
+      }
       if (w.state === 'unarmed') {
         rt.status.lastProblem = '自动合并被撤掉了，重新挂';
         break;

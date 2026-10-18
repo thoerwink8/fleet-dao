@@ -426,6 +426,11 @@ export interface ArmAutoMergeResult {
    * 老历史里没有这个字段，当作没有（头是别人改的）。
    */
   syncedMain?: true;
+  /**
+   * 挂之前现读到 PR 上还挂着认可审查者的正式「要求改」（#2991）：没挂（已挂着的撤掉了）、没合，交给工作流转给工人。
+   * 老历史里没有这个字段。
+   */
+  reviewChanges?: ReviewChange[];
 }
 
 /** 现读这个仓现在的 CI 模式。工作流每次走到等 CI 之前读，不在拉单那一刻定死。 */
@@ -451,11 +456,13 @@ export interface MergeNowInput {
 export interface MergeNowResult {
   merged: boolean;
   mergeCommit?: string;
-  reason?: 'conflict' | 'head_moved' | 'behind_main' | 'closed' | 'other';
+  reason?: 'conflict' | 'head_moved' | 'behind_main' | 'closed' | 'review_changes' | 'other';
   detail?: string;
   /** 头已经不是 expectedHead。syncedMain 为 true 时是引擎自己同步主线换的头。 */
   headMoved?: string;
   syncedMain?: boolean;
+  /** 合之前现读到还挂着的正式「要求改」（#2991，reason 是 review_changes）：没合。老历史里没有这个字段。 */
+  reviewChanges?: ReviewChange[];
 }
 
 export interface WaitMergedInput {
@@ -483,6 +490,11 @@ export type MergeWait =
    * 老历史里没有这个状态（那时候红了也回 waiting，工作流一直等）。
    */
   | { state: 'checks_red'; failedChecks: string[]; detail: string }
+  /**
+   * 等合并时 PR 上出现了认可审查者的正式「要求改」（#2991）：活动已把自动合并撤掉，交工作流转给工人或停下等审查者。
+   * 老历史里没有这个状态。
+   */
+  | { state: 'review_changes'; reviewChanges: ReviewChange[] }
   | { state: 'waiting'; detail: string };
 
 /** 派单前对选定的这一条路由探一次（#1409）。label 是写进任务状态的名字（模型 id）。 */

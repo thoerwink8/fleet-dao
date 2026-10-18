@@ -31,6 +31,7 @@ import type {
   MergeWait,
   ReadDeliveryInput,
   ReadTaskBriefInput,
+  ReviewChange,
   WaitMergedInput,
 } from '../task-contract.ts';
 import { MAX_MAIN_SYNCS } from '../task-contract.ts';
@@ -76,6 +77,12 @@ export interface TaskActivitiesDeps {
    */
   readChecks?: ((repo: RepoRef, sha: string, signal: AbortSignal) => Promise<MergeWaitChecks>) | undefined;
   log?: (message: string, fields?: Record<string, unknown>) => void;
+  /**
+   * 读 PR 上还没解决的正式「要求改」评审（#2991，task-verify.ts 的 reviewChangesReader，和冷验收同一份）：挂自动合并、
+   * 等合并的每一圈、直接合之前都现读，读到了不挂、撤掉已挂的、不合，交工作流转给工人。读不成抛错，不当成没有。
+   * 不给 = 不读（老测试）；真装配必给。
+   */
+  reviewChanges?: (repo: RepoRef, prNumber: number) => Promise<ReviewChange[]>;
   /** 这个仓的档案（库里的原文，补默认值）。不给就按 fleet-dao 的清单路径和 packages/* 分档（旧测试）。真装配必给。 */
   profileOf?: (repo: RepoRef) => Promise<unknown>;
   /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
@@ -117,6 +124,26 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
   const pollEveryMs = deps.pollEveryMs ?? MERGE_POLL_EVERY_MS;
   const sleep = deps.sleep ?? abortableSleep;
   const log = deps.log ?? (() => undefined);
+
+  /**
+   * 合之前现读还挂着的正式「要求改」（#2991）：没接上读评审回空（老测试）；读到了先把已挂的自动合并撤掉，
+   * 撤不成抛错（不让 GitHub 在这时把它合了还装成拦下了）。
+   */
+  const reviewHold = async (
+    repo: RepoRef,
+    pull: { number: number; nodeId: string; autoMerge: boolean },
+  ): Promise<ReviewChange[]> => {
+    if (deps.reviewChanges === undefined) return [];
+    const changes = await deps.reviewChanges(repo, pull.number);
+    if (changes.length > 0 && pull.autoMerge) {
+      await mapped(() => gh.claims.disableAutoMerge(repo, pull));
+      log('PR 上还挂着正式「要求改」，撤掉了自动合并', {
+        prNumber: pull.number,
+        reviews: changes.map((r) => r.reviewId),
+      });
+    }
+    return changes;
+  };
 
   const treeAs = (dir: string, user: SessionUser, prefix: string, ctx: PortContext): UserTree => ({
     exec: deps.exec,
@@ -320,6 +347,15 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           headMoved: pull.headSha,
         };
       }
+      const held = await reviewHold(repo, pull);
+      if (held.length > 0) {
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 上还挂着 ${held.length} 条正式「要求改」的评审，不挂自动合并`,
+          reviewChanges: held,
+        };
+      }
       if (pull.autoMerge) return { armed: true, merged: false };
       try {
         await mapped(() => gh.claims.enableAutoMerge(repo, pull));
@@ -362,6 +398,15 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           reason: 'head_moved',
           detail: `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎推上去的 ${short(expectedHead)}`,
           headMoved: pull.headSha,
+        };
+      }
+      const held = await reviewHold(repo, pull);
+      if (held.length > 0) {
+        return {
+          merged: false,
+          reason: 'review_changes',
+          detail: `PR #${prNumber} 上还挂着 ${held.length} 条正式「要求改」的评审，不合`,
+          reviewChanges: held,
         };
       }
       // 不核 CI。头、冲突、落后主线、还开着，mergePr 仍核。分支保护拒绝会抛，不装成合过了。
@@ -412,6 +457,9 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (pull.state !== 'open') return { state: 'closed' };
         if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
         if (!pull.autoMerge) return { state: 'unarmed' };
+        // 等合并时交的正式「要求改」（#2991）：每一圈现读，读到了先撤自动合并再交回工作流，不等 GitHub 把它合了
+        const held = await reviewHold(repo, pull);
+        if (held.length > 0) return { state: 'review_changes', reviewChanges: held };
         // 和主线冲突（#1838）：自动合并永远等不到（GitHub 不给冲突的 PR 起 CI、也不会合它，等下去只有超时）。
         // 当场回 conflict 交工作流去并主线，不在这儿干等。老历史里没有这个状态（那时候只回 waiting）。
         if (pull.mergeable === false || pull.mergeableState === 'dirty') {
