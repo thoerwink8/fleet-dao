@@ -176,6 +176,7 @@ func TestUnknownUserSurvivesKilledProcessWithoutAutomaticReplay(t *testing.T) {
 			}
 			t.Setenv("LOCALAPPDATA", filepath.Join(f.home, "cache"))
 			t.Setenv("XDG_CACHE_HOME", cache)
+			t.Setenv("HOME", f.home) // macOS 的缓存在 HOME/Library/Caches，和子进程用同一个 HOME
 			entries, err := loadRedelivery(f.sid)
 			if err != nil || len(entries) != 1 || entries[0].State != deliveryUnknown || userText(entries[0].User) != content {
 				t.Fatalf("unknown 责任应跨重启保留：%+v %v", entries, err)

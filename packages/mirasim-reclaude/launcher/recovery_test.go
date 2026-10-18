@@ -14,8 +14,11 @@ import (
 
 func recoveryDeliveries(t *testing.T) *deliveries {
 	t.Helper()
+	// os.UserCacheDir 在 Windows 读 LOCALAPPDATA、Linux 读 XDG_CACHE_HOME、macOS 读 HOME/Library/Caches：三处都隔离，
+	// 否则 macOS 上各子测试共用本机真实缓存，上一个留下的目录会挡住下一个。
 	t.Setenv("LOCALAPPDATA", t.TempDir())
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
 	d, err := newDeliveries([]string{"--replay-user-messages", "--session-id", "recovery-session"})
 	if err != nil {
 		t.Fatal(err)
@@ -280,6 +283,7 @@ func TestQueuedOriginalFrameRecoversOnceAndDeduplicatesUUID(t *testing.T) {
 	cache := filepath.Join(f.home, "xdg-cache")
 	t.Setenv("LOCALAPPDATA", filepath.Join(f.home, "cache"))
 	t.Setenv("XDG_CACHE_HOME", cache)
+	t.Setenv("HOME", f.home) // macOS 的缓存在 HOME/Library/Caches，和子进程用同一个 HOME
 	d, err := newDeliveries([]string{"--replay-user-messages", "--session-id", f.sid})
 	if err != nil {
 		t.Fatal(err)
@@ -318,17 +322,14 @@ func TestSupervisorPersistenceFailureIsVisibleBeforeChildInvocation(t *testing.T
 	f := newFixture(t, "local")
 	cache := filepath.Join(f.home, "xdg-cache")
 	// 父目录是一份普通文件，constructor 的 ReadFile 必须明确拒绝，不启动假执行体。
-	if err := os.MkdirAll(cache, 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(cache, "reclaude-mirasim"), []byte("blocked"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(f.home, "cache"), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(f.home, "cache", "reclaude-mirasim"), []byte("blocked"), 0600); err != nil {
-		t.Fatal(err)
+	// 三个平台的缓存目录都堵上：Linux XDG_CACHE_HOME、Windows LOCALAPPDATA、macOS HOME/Library/Caches。
+	for _, dir := range []string{cache, filepath.Join(f.home, "cache"), filepath.Join(f.home, "Library", "Caches")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "reclaude-mirasim"), []byte("blocked"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	invoked := filepath.Join(f.home, "invoked")
 	a := startReplayAppUninitializedAs(t, f, cache, "--session-id", "MIRASIM_TEST_INVOKED="+invoked)
