@@ -141,7 +141,15 @@ function SubagentTag({ entry }: { entry: TranscriptEntry }) {
 }
 
 /** 超长文字：只露开头，点「显示全部」看全文。短的原样画，不带按钮。 */
-function Clamped({ text, className, dataKind }: { text: string; className: string; dataKind?: string }) {
+export function Clamped({
+  text,
+  className,
+  dataKind,
+}: {
+  text: string;
+  className: string;
+  dataKind?: string;
+}) {
   const [all, setAll] = useState(false);
   const lines = text.split('\n');
   const long = lines.length > CLAMP_LINES || text.length > CLAMP_CHARS;

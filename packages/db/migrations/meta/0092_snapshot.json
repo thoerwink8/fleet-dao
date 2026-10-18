@@ -1,5 +1,5 @@
 {
-  "id": "e8835d5b-8d6c-4390-a201-511deceb9751",
+  "id": "5edcb792-0f6a-4be5-9d94-0bfa9343d129",
   "prevId": "d53c0328-5e83-4a35-85be-1470bdce4c2b",
   "version": "7",
   "dialect": "postgresql",
@@ -5678,42 +5678,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "superseded_at": {
-          "name": "superseded_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "superseded_by": {
-          "name": "superseded_by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "supersede_evidence": {
-          "name": "supersede_evidence",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "successor_id": {
-          "name": "successor_id",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "successor_generation": {
-          "name": "successor_generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "supersede_coverage": {
-          "name": "supersede_coverage",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": false
         }
       },
       "indexes": {
@@ -5743,15 +5707,6 @@
           "columnsTo": ["id"],
           "onDelete": "no action",
           "onUpdate": "no action"
-        },
-        "acceptance_duties_successor_fk": {
-          "name": "acceptance_duties_successor_fk",
-          "tableFrom": "acceptance_duties",
-          "tableTo": "acceptance_duties",
-          "columnsFrom": ["successor_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
         }
       },
       "compositePrimaryKeys": {},
@@ -5764,10 +5719,6 @@
       },
       "policies": {},
       "checkConstraints": {
-        "acceptance_duties_superseded_complete": {
-          "name": "acceptance_duties_superseded_complete",
-          "value": "(\"acceptance_duties\".\"superseded_at\" is null and \"acceptance_duties\".\"superseded_by\" is null and \"acceptance_duties\".\"supersede_evidence\" is null and \"acceptance_duties\".\"successor_id\" is null and \"acceptance_duties\".\"successor_generation\" is null and \"acceptance_duties\".\"supersede_coverage\" is null) or (\"acceptance_duties\".\"superseded_at\" is not null and \"acceptance_duties\".\"superseded_by\" is not null and \"acceptance_duties\".\"supersede_evidence\" is not null and length(\"acceptance_duties\".\"supersede_evidence\") > 0 and \"acceptance_duties\".\"successor_id\" is not null and \"acceptance_duties\".\"successor_id\" <> \"acceptance_duties\".\"id\" and \"acceptance_duties\".\"successor_generation\" is not null and \"acceptance_duties\".\"successor_generation\" > 0 and \"acceptance_duties\".\"supersede_coverage\" is not null and jsonb_typeof(\"acceptance_duties\".\"supersede_coverage\") = 'array')"
-        },
         "acceptance_duties_issue_positive": {
           "name": "acceptance_duties_issue_positive",
           "value": "\"acceptance_duties\".\"issue_number\" > 0"
@@ -5787,165 +5738,6 @@
         "acceptance_duties_settled_complete": {
           "name": "acceptance_duties_settled_complete",
           "value": "(\"acceptance_duties\".\"settled_at\" is null and \"acceptance_duties\".\"settled_by\" is null and \"acceptance_duties\".\"settle_evidence\" is null) or (\"acceptance_duties\".\"settled_at\" is not null and \"acceptance_duties\".\"settled_by\" is not null and length(\"acceptance_duties\".\"settle_evidence\") > 0)"
-        }
-      },
-      "isRLSEnabled": false
-    },
-    "public.acceptance_duty_supersessions": {
-      "name": "acceptance_duty_supersessions",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "bigint",
-          "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "acceptance_duty_supersessions_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "9223372036854775807",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "source_id": {
-          "name": "source_id",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source_generation": {
-          "name": "source_generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "source_head": {
-          "name": "source_head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_id": {
-          "name": "target_id",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_generation": {
-          "name": "target_generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_head": {
-          "name": "target_head",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "target_merge_commit": {
-          "name": "target_merge_commit",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "repo": {
-          "name": "repo",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "issue_number": {
-          "name": "issue_number",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "pr_number": {
-          "name": "pr_number",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "by": {
-          "name": "by",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "evidence": {
-          "name": "evidence",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "coverage": {
-          "name": "coverage",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'[]'::jsonb"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        }
-      },
-      "indexes": {
-        "acceptance_duty_supersessions_source_idx": {
-          "name": "acceptance_duty_supersessions_source_idx",
-          "columns": [
-            {
-              "expression": "source_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "acceptance_duty_supersessions_source_id_acceptance_duties_id_fk": {
-          "name": "acceptance_duty_supersessions_source_id_acceptance_duties_id_fk",
-          "tableFrom": "acceptance_duty_supersessions",
-          "tableTo": "acceptance_duties",
-          "columnsFrom": ["source_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "acceptance_duty_supersessions_target_id_acceptance_duties_id_fk": {
-          "name": "acceptance_duty_supersessions_target_id_acceptance_duties_id_fk",
-          "tableFrom": "acceptance_duty_supersessions",
-          "tableTo": "acceptance_duties",
-          "columnsFrom": ["target_id"],
-          "columnsTo": ["id"],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {
-        "acceptance_duty_supersessions_distinct": {
-          "name": "acceptance_duty_supersessions_distinct",
-          "value": "\"acceptance_duty_supersessions\".\"source_id\" <> \"acceptance_duty_supersessions\".\"target_id\""
-        },
-        "acceptance_duty_supersessions_signed": {
-          "name": "acceptance_duty_supersessions_signed",
-          "value": "length(\"acceptance_duty_supersessions\".\"by\") > 0 and length(\"acceptance_duty_supersessions\".\"evidence\") > 0"
         }
       },
       "isRLSEnabled": false
@@ -7415,6 +7207,90 @@
           "value": "\"tasks\".\"flow_mode\" is null or \"tasks\".\"flow_mode\" in ('three', 'full')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.private_quotes": {
+      "name": "private_quotes",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
+        "spoken_at": {
+          "name": "spoken_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "text": {
+          "name": "text",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "machine": {
+          "name": "machine",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "lineage": {
+          "name": "lineage",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "remote": {
+          "name": "remote",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "directive_id": {
+          "name": "directive_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "received_at": {
+          "name": "received_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "private_quotes_spoken_at_idx": {
+          "name": "private_quotes_spoken_at_idx",
+          "columns": [
+            {
+              "expression": "spoken_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     }
   },

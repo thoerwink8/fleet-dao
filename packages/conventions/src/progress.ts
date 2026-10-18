@@ -24,7 +24,7 @@ export const ownerLine = (owner: string): string => `〔主：${owner}〕`;
 export const INBOX_DAYS = 30;
 
 export const PROGRESS_USAGE =
-  '用法：pnpm progress note "<一句话进度>"｜pnpm progress directive ["<创始人原话>" --at "<时间>"] [--owner <会话目录名|无主>] [--issue <单号>]' +
+  '用法：pnpm progress quotes:flush｜pnpm progress note "<一句话进度>"｜pnpm progress directive ["<创始人原话>" --at "<时间>"] [--meaning "<可公开的意思>"] [--stdin] [--owner <会话目录名|无主>] [--issue <单号>]' +
   '（不给原话就从 prompt-log 取本会话他最近一句；不给 --issue 就顺手开一张单，引导办没办完看这张单开着还是关了）｜' +
   'pnpm progress directive --from-inbox <收件箱评论号> [--issue <单号>]｜pnpm progress read [--pending] [--limit <条数，默认 10>]';
 

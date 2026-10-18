@@ -47,6 +47,7 @@ export const LEDGER_ALERT_PREFIX = 'reconcile:ledger:';
 export const PR_ALERT_PREFIX = 'reconcile:pr:';
 /** 撤耗时表误报时写的原因（处理人是对账，RECONCILE_ACTOR）。 */
 export const CI_TIMINGS_SKIP_WHY = '引擎自己的耗时表 PR，不走合并队列';
+export const CHANGELOG_SKIP_WHY = '引擎受管的更新日志 PR，只改 CHANGELOG.md，不走合并队列';
 /** 撤「合并记录晚记」那种时写的原因。 */
 export const MERGE_RECORD_LANDED_WHY =
   '实际合并人是「引擎」，真实 github.merge_pr 的目标及完整回执与 GitHub 一致，条件不再成立';
@@ -160,7 +161,12 @@ function prProblems(findings: readonly MergedPrFinding[]): {
 }
 
 /** 开着才撤。读不到记没查成，不当成已经撤了。 */
-async function retireOpenCiTimingsAlert(deps: ReconcileCheckDeps, part: SweepPart, dedupeKey: string) {
+async function retireOpenManagedPrAlert(
+  deps: ReconcileCheckDeps,
+  part: SweepPart,
+  dedupeKey: string,
+  why = CI_TIMINGS_SKIP_WHY,
+) {
   let row: Awaited<ReturnType<ReconcileCheckDeps['alerts']['byKey']>>;
   try {
     row = await deps.alerts.byKey(dedupeKey);
@@ -169,7 +175,7 @@ async function retireOpenCiTimingsAlert(deps: ReconcileCheckDeps, part: SweepPar
     return;
   }
   if (!row || row.resolvedAt !== null) return;
-  await resolveOne(deps, part, dedupeKey, CI_TIMINGS_SKIP_WHY);
+  await resolveOne(deps, part, dedupeKey, why);
 }
 
 /**
@@ -214,7 +220,7 @@ async function openPrAlertsByRepo(
 export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
   for (const dedupeKey of KNOWN_CI_TIMINGS_FALSE_ALARMS) {
-    await retireOpenCiTimingsAlert(deps, part, dedupeKey);
+    await retireOpenManagedPrAlert(deps, part, dedupeKey);
   }
   let repos: RepoRef[];
   try {
@@ -264,7 +270,16 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
     const planned = prProblems(report.findings);
     const timingsNumbers = new Set([...(report.engineCiTimingsPrs ?? []), ...planned.timings]);
     for (const number of timingsNumbers) {
-      await retireOpenCiTimingsAlert(deps, part, prAlertKey(repo.owner, repo.name, number));
+      await retireOpenManagedPrAlert(deps, part, prAlertKey(repo.owner, repo.name, number));
+    }
+    for (const number of new Set(report.engineChangelogPrs ?? [])) {
+      if (planned.problems.has(number)) continue;
+      await retireOpenManagedPrAlert(
+        deps,
+        part,
+        prAlertKey(repo.owner, repo.name, number),
+        CHANGELOG_SKIP_WHY,
+      );
     }
     for (const number of new Set(report.cleanPrs ?? [])) {
       if (!open.has(number) || planned.problems.has(number) || timingsNumbers.has(number)) continue;
