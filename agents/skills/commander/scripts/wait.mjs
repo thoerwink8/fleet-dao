@@ -5,7 +5,7 @@
 // 等到结果才往 stdout 写一行并退出：成功（新头、合并、CI 成功、单关了）退出码 0；失败（PR 检查红、关闭未合、CI 未过）退出码 1。
 // 用法错了退出码 2。中途什么都不打，挂成后台命令只在结束时叫醒一次。
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 /** 主线 CI 的工作流文件名（.github/workflows/ci.yml，push 到 main 时跑） */
@@ -363,11 +363,16 @@ export async function run(argv, io) {
   }
 }
 
+// 入口判定：Node 自带的 import.meta.main 不受软链接影响；旧 Node 退回比真实路径（只比字面路径，经软链接跑时会一声不响什么都不做）
 function isMain() {
+  if (typeof import.meta.main === 'boolean') return import.meta.main;
   const entry = process.argv[1];
   if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
+  const norm = (/** @type {string} */ p) => {
+    const r = realpathSync(p);
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  };
+  return norm(entry) === norm(fileURLToPath(import.meta.url));
 }
 
 if (isMain()) {

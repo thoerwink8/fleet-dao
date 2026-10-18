@@ -11,9 +11,9 @@
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { MODELS, readCursorModels, resolveModel } from './cursor-models.mjs';
 import { stopProcessTree } from './cursor-process.mjs';
@@ -216,11 +216,16 @@ export function removeDir(dir, rm = rmSync) {
   }
 }
 
+// 入口判定：Node 自带的 import.meta.main 不受软链接影响；旧 Node 退回比真实路径（只比字面路径，经软链接跑时会一声不响什么都不做）
 function isMain() {
+  if (typeof import.meta.main === 'boolean') return import.meta.main;
   const entry = process.argv[1];
   if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
+  const norm = (p) => {
+    const r = realpathSync(p);
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  };
+  return norm(entry) === norm(fileURLToPath(import.meta.url));
 }
 
 if (isMain()) {

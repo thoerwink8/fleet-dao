@@ -72,21 +72,32 @@ function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 
-async function missingToolchain(repo: IntakeRepo): Promise<readonly string[]> {
-  const tools = parseRepoProfile(repo.profile).toolchain;
-  if (tools.length === 0) return [];
-  const script = `for tool in ${tools.map(shQuote).join(' ')}; do command -v "$tool" >/dev/null 2>&1 || printf '%s\\n' "$tool"; done`;
-  try {
-    const { stdout } = await execFileAsync('/bin/sh', ['-c', script], {
-      env: { ...process.env, PATH: TOOLCHAIN_PATH },
-      encoding: 'utf8',
-      timeout: 30_000,
-    });
-    return stdout.trim() === '' ? [] : stdout.trim().split(/\s+/);
-  } catch (error) {
-    throw new Error(`检查工具链起不来：${errMessage(error)}`);
-  }
+export type ToolchainCommand = (
+  command: string,
+  args: string[],
+  options: { env: NodeJS.ProcessEnv; encoding: 'utf8'; timeout: number },
+) => Promise<{ stdout: string }>;
+
+/** 法国 Linux 端口；测试可替换运输，不把 Windows 当作具有 /bin/sh 的生产宿主。 */
+export function toolchainProbe(run: ToolchainCommand = execFileAsync) {
+  return async (repo: IntakeRepo): Promise<readonly string[]> => {
+    const tools = parseRepoProfile(repo.profile).toolchain;
+    if (tools.length === 0) return [];
+    const script = `for tool in ${tools.map(shQuote).join(' ')}; do command -v "$tool" >/dev/null 2>&1 || printf '%s\\n' "$tool"; done`;
+    try {
+      const { stdout } = await run('/bin/sh', ['-c', script], {
+        env: { ...process.env, PATH: TOOLCHAIN_PATH },
+        encoding: 'utf8',
+        timeout: 30_000,
+      });
+      return stdout.trim() === '' ? [] : stdout.trim().split(/\s+/);
+    } catch (error) {
+      throw new Error(`检查工具链起不来：${errMessage(error)}`);
+    }
+  };
 }
+
+const missingToolchain = toolchainProbe();
 
 /** 拉单要用到的这几下（不要整个 GitHub）。 */
 export type IntakeGitHub = Pick<

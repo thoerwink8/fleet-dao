@@ -17,7 +17,8 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { gitBroken, gitOk as ok } from './git-run.mjs';
-import { hasSelfMark, repoKind, SELF_MARK } from './repo-kind.mjs';
+import { isMainModule } from './is-main.mjs';
+import { hasSelfMark, repoKind, repoKindInfo, SELF_MARK } from './repo-kind.mjs';
 
 /** 按 git 公共目录分仓的记号名：和 fresh-main.mjs 的 repoStampKey 同一种算法（测试钉着两边一致） */
 export function stampKeyOf(commonDir) {
@@ -327,8 +328,8 @@ export function contractLines({ cwd, git, home, now = Date.now(), hookDir = HERE
     const top = git(cwd, ['rev-parse', '--show-toplevel', '--path-format=absolute', '--git-common-dir']);
     if (gitBroken(top) || !ok(top)) return [];
     const [root, common] = top.stdout.split(/\r?\n/).map((s) => s.trim());
-    // 对外仓照它自己的规矩走，仓合同不提醒（决定 0107）；像不像自用仓由 repo-kind.mjs 的那句提醒管
-    if (!root || repoKind(root) === 'external') return [];
+    // 对外仓照它自己的规矩走，仓合同不提醒（决定 0107）；判不出来的那句提醒归 repo-kind.mjs
+    if (!root || repoKind(root, { git }) === 'external') return [];
     const key = common && isAbsolute(common) ? stampKeyOf(common) : null;
     const stamp = key ? join(home, '.fleet-dao', 'repo-contract', key) : null;
     const today = beijingDay(now);
@@ -367,14 +368,7 @@ export function contractLines({ cwd, git, home, now = Date.now(), hookDir = HERE
   }
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   const [cmd, ...rest] = process.argv.slice(2);
   const dryRun = rest.includes('--dry-run');
   const markSelf = rest.includes('--self');
@@ -399,10 +393,11 @@ if (isMain()) {
     process.exit(2);
   }
   // 对外仓照它自己的规矩走：仓合同不查、不补（决定 0107）。check 退出 0（没有要查的），init 拒绝、一个字不写
-  if (!(cmd === 'init' && markSelf) && repoKind(root) === 'external') {
+  const kind = markSelf && cmd === 'init' ? null : repoKindInfo(root);
+  if (kind && kind.kind === 'external') {
     console.log(
-      `${root} 是对外仓（仓根 AGENTS.md 没有自用仓标记 ${SELF_MARK}）：仓合同不管对外仓，照那个仓自己的规矩走，什么都没动。` +
-        '创始人说了它是自用仓，才用 repo:init <仓路径> --self 标上再补。',
+      `${root} 是对外仓（${kind.why}）：仓合同不管对外仓，照那个仓自己的规矩走，什么都没动。` +
+        '创始人说了它是自用仓，先 pnpm repo:kind self 记下（或 repo:init <仓路径> --self 在 AGENTS.md 打标记）再补。',
     );
     process.exit(cmd === 'check' ? 0 : 1);
   }

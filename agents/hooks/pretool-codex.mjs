@@ -25,4 +25,4 @@ export function normalizeCodex(input, platform) {
   };
 }
 
-if (isMainModule(import.meta.url)) runVendor(normalizeCodex, 'Codex', exitCodeReply);
+if (isMainModule(import.meta)) runVendor(normalizeCodex, 'Codex', exitCodeReply);

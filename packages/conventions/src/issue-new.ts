@@ -28,7 +28,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { doneSection } from './debt.ts';
-import { type MilestoneDetail, resolveRepo, toMilestoneDetail } from './github-api.ts';
+import { implicitRepoView, type MilestoneDetail, resolveRepo, toMilestoneDetail } from './github-api.ts';
 import type { SimilarReport } from './issue-similar.ts';
 import {
   type DomainValue,
@@ -822,19 +822,6 @@ export function ghRunner(root: string, command = 'gh'): Gh {
         },
       );
     });
-}
-
-/** repo view 唯一位置参数是仓名；值选项里的 json 字段、jq、模板、分支不算仓名。 */
-function implicitRepoView(args: readonly string[]): boolean {
-  if (args[0] !== 'repo' || args[1] !== 'view') return false;
-  const withValue = new Set(['--branch', '-b', '--json', '--jq', '-q', '--template', '-t']);
-  for (let i = 2; i < args.length; i++) {
-    const arg = args[i] ?? '';
-    if (arg === '-R' || arg === '--repo' || arg.startsWith('--repo=')) return false;
-    if (withValue.has(arg)) i++;
-    else if (!arg.startsWith('-')) return false;
-  }
-  return true;
 }
 
 function detail(r: GhResult): string {

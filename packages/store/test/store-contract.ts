@@ -297,6 +297,44 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           44, 40, 41, 43, 42,
         ]);
       });
+
+      it('listPullRequests：按仓、按挂的单先筛再截断，目标 PR 不会被更新的别的 PR 挤出 limit', async () => {
+        const pr = (number: number, minutes: number, issueRefs: number[]) => ({
+          repoId: IDS.repo,
+          number,
+          state: 'open' as const,
+          headRef: `fleet/pr-${number}`,
+          headSha: `sha${number}`,
+          checks: 'pending' as const,
+          updatedAt: ago(minutes),
+          issueRefs,
+        });
+        const data = contractData();
+        data.pullRequests = [
+          ...Array.from({ length: 5 }, (_, i) => pr(100 + i, i, [7])),
+          pr(90, 60, [3090]), // 最旧，全局取前 5 条会被截掉
+          pr(91, 70, [12, 3090]),
+        ];
+        const fresh = await make(data, clock);
+        expect(
+          (await fresh.store.listPullRequests({ state: 'open', limit: 5 })).map((p) => p.number),
+        ).not.toContain(90);
+        expect(
+          (
+            await fresh.store.listPullRequests({
+              state: 'open',
+              repoId: IDS.repo,
+              issueNumber: 3090,
+              limit: 5,
+            })
+          ).map((p) => p.number),
+        ).toEqual([90, 91]);
+        expect(
+          await fresh.store.listPullRequests({ state: 'open', repoId: OTHER_UUID, issueNumber: 3090 }),
+        ).toEqual([]);
+        expect(await fresh.store.listPullRequests({ state: 'open', repoId: 'repo-1' })).toEqual([]);
+        expect(await fresh.store.listPullRequests({ state: 'merged', issueNumber: 3090 })).toEqual([]);
+      });
     });
 
     describe('仓、需求、子任务、会话', () => {

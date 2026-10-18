@@ -82,4 +82,4 @@ export function normalizeGemini(input, platform) {
   return `fleet-guard：Gemini CLI 的钩子输入里认不出工具名（${JSON.stringify(tool)}），按拦处理`;
 }
 
-if (isMainModule(import.meta.url)) runVendor(normalizeGemini, 'Gemini CLI', exitCodeReply);
+if (isMainModule(import.meta)) runVendor(normalizeGemini, 'Gemini CLI', exitCodeReply);

@@ -93,7 +93,7 @@ export function attributionVerdict(command, outer, cwd, deps = {}) {
     };
   const root = top.stdout.trim();
   if (!gitOk(top) || !root) return null;
-  if (repoKind(root, deps.read) !== 'external') return null;
+  if (repoKind(root, { git, ...(deps.read ? { read: deps.read } : {}) }) !== 'external') return null;
 
   const texts = [command];
   if (commit) texts.push(...referencedFiles(outer, dir, '-F|--file'));

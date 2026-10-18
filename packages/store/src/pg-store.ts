@@ -965,7 +965,20 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const rows = await db
         .select()
         .from(pullRequests)
-        .where(input.state === undefined ? undefined : eq(pullRequests.state, input.state))
+        .where(
+          and(
+            input.state === undefined ? undefined : eq(pullRequests.state, input.state),
+            // 仓号不是 uuid 的（老数据、测试里的假号）查不到任何行，不拿它去比 uuid 列
+            input.repoId === undefined
+              ? undefined
+              : isUuid(input.repoId)
+                ? eq(pullRequests.repoId, input.repoId)
+                : sql`false`,
+            input.issueNumber === undefined
+              ? undefined
+              : sql`${pullRequests.issueRefs} @> ARRAY[${input.issueNumber}]::integer[]`,
+          ),
+        )
         // merged 按合并时刻倒序、其余按镜像更新时刻倒序；两个时刻都 NULL 的排最后（不拿它们当「最新」）。
         .orderBy(
           input.state === 'merged'

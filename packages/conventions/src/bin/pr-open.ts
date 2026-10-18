@@ -2,7 +2,7 @@
 // 判法、退出码见 ../pr-open.ts；不给 --body-file 时正文由 ../pr-compose.ts 生成；测试 test/pr-open.test.ts、test/pr-compose.test.ts。
 import { fileURLToPath } from 'node:url';
 import { ghRunner } from '../issue-new.ts';
-import { liveGh, liveGit } from '../pr-arm.ts';
+import { liveGit, livePrGh } from '../pr-arm.ts';
 import { prOpenCli } from '../pr-compose.ts';
 import { pickGitCwd } from '../pr-open.ts';
 
@@ -13,7 +13,7 @@ const cwd = process.env.INIT_CWD ?? process.cwd();
 const gitCwd = pickGitCwd(process.env.INIT_CWD, root);
 
 process.exitCode = await prOpenCli(process.argv.slice(2), {
-  gh: liveGh(gitCwd),
+  gh: livePrGh(gitCwd),
   git: liveGit(gitCwd),
   issueGh: ghRunner(root),
   root,

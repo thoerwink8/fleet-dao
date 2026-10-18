@@ -7,9 +7,9 @@
 // 订阅文件读不成：不改项目设置，退出 0，并在 stderr 说明。退出 0 是为了不挡住开会话。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { gitRunner } from './git-run.mjs';
+import { isMainModule } from './is-main.mjs';
 import { PROCESS_HOOKS, RETIRED_PROCESS_HOOKS } from './plugin-catalog.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
 
@@ -229,14 +229,7 @@ export function isEngineTree(cwd) {
   return gitRunner()(cwd, ['rev-parse', '--verify', '--quiet', `${ENGINE_TREE_REF}^{commit}`]).status === 0;
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   // 备用代理进 Bash（proxy-env.mjs）：这是每个仓开会话都跑的用户级钩子，放这里每台、每个仓都有
   for (const l of writeProxyEnv({ envFile: process.env.CLAUDE_ENV_FILE })) process.stderr.write(`${l}\n`);

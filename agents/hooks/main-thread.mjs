@@ -12,10 +12,9 @@
 // 协议：stdin 一份 JSON；拒 = stdout 一份 hookSpecificOutput.permissionDecision: deny，退出码 0；没意见 = 什么都不写。
 // 规矩由 agents/test/rules/main-thread.rules.test.ts、mirasim-steer.rules.test.ts 钉住：改这里的判断就是改规矩，那边会红。
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { backgroundRecoveryContext } from './background-recovery.mjs';
 import { hookTimer } from './hook-timing.mjs';
+import { isMainModule } from './is-main.mjs';
 
 /** 拒的理由里最多带引导的前多少个字 */
 export const DIRECTIVE_SHOWN_CHARS = 200;
@@ -330,14 +329,7 @@ export function hookOutput(v) {
   return Object.keys(out).length > 0 ? JSON.stringify(out) : '';
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   // 各阶段耗时记进 ~/.fleet-dao/logs/hook-timing.jsonl（hook-timing.mjs），查超时用
   const timer = hookTimer('main-thread.mjs');
