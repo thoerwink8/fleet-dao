@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import type { RunFacts, SessionUser } from '@fleet-dao/adapters';
 import {
   createEventSink,
+  type MergedReviewNote,
   memoryLedger,
   type PullFacts,
   type RepoRef,
@@ -101,6 +102,9 @@ class FakeGitHub {
   readonly reviews = new Map<string, ReviewRecord[]>();
   readonly reviewReads: string[] = [];
   failReviewReads = 0;
+  /** 未送达的明账：事件到时 PR 已合（事件那头）、合并后补读到 / 没读成（活动那头）。 */
+  readonly mergedNotes: MergedReviewNote[] = [];
+  readonly lateNotes: Parameters<NonNullable<TaskActivitiesDeps['onLateReview']>>[0][] = [];
   failDisable = 0;
   /** 每次挂自动合并的活动开跑之前（第几次挂）。 */
   beforeArm: (n: number) => void = () => undefined;
@@ -219,7 +223,7 @@ function eventGate(github: FakeGitHub): {
   });
   const sink = createEventSink(
     { ledger: memoryLedger(), log: quiet } as unknown as Parameters<typeof createEventSink>[0],
-    reviewMergeHold(github.claims, quiet),
+    reviewMergeHold(github.claims, quiet, async (note) => void github.mergedNotes.push(note)),
   );
   return { intake: createGitHubIntake({ store, github: sink, log: quiet, now: () => new Date() }), store };
 }
@@ -355,6 +359,7 @@ function wired(github: FakeGitHub, gate: Gate, over: Partial<Script> = {}) {
       throw new Error('这几条用例不该跑命令');
     },
     reviewChanges,
+    onLateReview: async (note) => void github.lateNotes.push(note),
     readChecks: async () => ({ overall: github.ciGreen ? 'green' : 'pending', failed: [] }),
     pollEveryMs: 20,
     sleep: gate.sleep,
@@ -763,6 +768,57 @@ describe('正式评审到工人：真装配（#2991）', { timeout: 120_000 }, (
       }),
     ).toEqual({ verdict: 'accepted', wake: true });
     expect(github.disables).toBe(0);
+    // 不是静默收下：留了一条未送达的明账（仓、PR、review id、审的提交、投递编号）
+    expect(github.mergedNotes).toEqual([
+      {
+        repo: `${repo.owner}/${repo.name}`,
+        prNumber: PR,
+        deliveryId: 'd-after-merge',
+        review: { id: REVIEW_ID, reviewer: 'boss', commitId: github.head },
+      },
+    ]);
+  });
+
+  it('评审晚于最后一次现读、GitHub 先合了：等合并读到「已合」后补读，把没交到工人的评审记成未送达（review id、审的提交、工作流编号）；补读没读成也记，不当成没有评审', async () => {
+    for (const readFails of [false, true]) {
+      const repo = freshRepo();
+      const github = new FakeGitHub(repo);
+      github.ciGreen = false;
+      const gate = new Gate();
+      gate.hold = true;
+      const { tasks, calls } = wired(github, gate);
+      const run = await withWorker(
+        env,
+        worldOf(),
+        async (q) => {
+          const i = input(repo);
+          const h = await start(q, i);
+          await waitUntil(() => github.autoMerge && gate.sleeping > 0, '挂上自动合并、在等合并');
+          // 评审交了，事件还没到；这时 CI 绿，GitHub 把它合了
+          github.set([review({ commitId: github.head })]);
+          github.ciGreen = true;
+          github.failReviewReads = readFails ? 1 : 0;
+          gate.release();
+          const got = await (h.result() as Promise<TaskRun>);
+          expect(h.workflowId).toBe(taskWorkflowId(i.repo, i.issueNumber));
+          return got;
+        },
+        { tasks },
+      );
+      expect(run).toMatchObject({ outcome: 'merged' });
+      expect(calls.segment).toHaveLength(1);
+      expect(github.lateNotes).toHaveLength(1);
+      const [note] = github.lateNotes;
+      expect(note).toMatchObject({ prNumber: PR, repo: { owner: repo.owner, name: repo.name } });
+      expect(note?.workflowId).toContain(String(2975));
+      if (readFails) {
+        expect(note?.review).toBeNull();
+        expect(note?.error).toContain('502');
+      } else {
+        expect(note?.review).toMatchObject({ reviewId: REVIEW_ID, reviewer: 'boss' });
+        expect(note?.review?.body).toBe(BODY);
+      }
+    }
   });
 
   it('【故意造出的失败】事件撤自动合并没成：投递记成出错（原文留着，不当成撤了），等合并那一圈现读接住、撤掉、交给工人；冷验收、挂合并读评审各断一次也不当成没有评审', async () => {

@@ -83,6 +83,18 @@ export interface TaskActivitiesDeps {
    * 不给 = 不读（老测试）；真装配必给。
    */
   reviewChanges?: (repo: RepoRef, prNumber: number) => Promise<ReviewChange[]>;
+  /**
+   * 合并之后才发现有没交到工人的正式「要求改」、或补读评审没读成（#2991）：留一条未送达的明账（真装配写驾驶舱报警，
+   * @fleet-dao/db 的 raiseLateReview）。写不成要抛，活动重试。不给 = 只记日志（老测试）；真装配必给。
+   */
+  onLateReview?: (note: {
+    repo: RepoRef;
+    prNumber: number;
+    /** 读到的那条评审；补读没读成为 null。 */
+    review: ReviewChange | null;
+    error?: string;
+    workflowId?: string | undefined;
+  }) => Promise<void>;
   /** 这个仓的档案（库里的原文，补默认值）。不给就按 fleet-dao 的清单路径和 packages/* 分档（旧测试）。真装配必给。 */
   profileOf?: (repo: RepoRef) => Promise<unknown>;
   /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
@@ -147,23 +159,32 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
 
   /**
    * 合并完成后补读一次（#2991）：合并和评审到达之间抢不过 GitHub 时（评审在最后一次现读之后、自动合并生效之前交），
-   * PR 已合，评审回不了工人。这里不装没看见：读到还挂着的正式「要求改」就记警告（带 review id），读不成也记，都不挡合并结果。
+   * PR 已合，评审回不了工人。合并这件事是确定的，但评审的去向不能装没看见：读到还挂着的正式「要求改」、或读不成
+   * （不知道有没有），都经 onLateReview 留一条「未送达 / 未消费」的明账（带仓、PR、review id、工作流编号）。
+   * 明账写不进去就抛错：活动重试，重试时 PR 已合，会再走到这里补读、补记，不当成记过了。
+   * 三个入口都在「已经合了」的分支上也补读，所以合并成功后这一步失败重来，补读不会被跳过。
    */
-  const auditLateReview = async (repo: RepoRef, prNumber: number): Promise<void> => {
+  const auditLateReview = async (repo: RepoRef, prNumber: number, ctx: PortContext): Promise<void> => {
     if (deps.reviewChanges === undefined) return;
+    const workflowId = ctx.workflowId;
+    let late: ReviewChange[];
     try {
-      const late = await deps.reviewChanges(repo, prNumber);
-      if (late.length > 0) {
-        log('PR 合并时还挂着正式「要求改」的评审（晚于最后一次现读到达，合了就回不了工人，需要人跟进）', {
-          prNumber,
-          reviews: late.map((r) => ({ reviewId: r.reviewId, commitId: r.commitId })),
-        });
-      }
+      late = await deps.reviewChanges(repo, prNumber);
     } catch (error) {
       log('PR 合并后补读正式评审没读成，不知道有没有晚到的「要求改」', {
         prNumber,
         error: errMessage(error),
       });
+      await deps.onLateReview?.({ repo, prNumber, review: null, error: errMessage(error), workflowId });
+      return;
+    }
+    for (const review of late) {
+      log('PR 合并时还挂着正式「要求改」的评审（晚于最后一次现读到达，合了就回不了工人，已记明账）', {
+        prNumber,
+        reviewId: review.reviewId,
+        commitId: review.commitId,
+      });
+      await deps.onLateReview?.({ repo, prNumber, review, workflowId });
     }
   };
 
@@ -352,6 +373,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (booked.otherHead !== undefined) {
           return { armed: false, merged: false, why: booked.otherHead };
         }
+        await auditLateReview(repo, prNumber, ctx);
         return {
           armed: false,
           merged: true,
@@ -398,7 +420,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
         const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
         if (merged.merged) {
-          await auditLateReview(repo, prNumber);
+          await auditLateReview(repo, prNumber, ctx);
           return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
         }
         if (merged.reason === 'behind_main') {
@@ -420,6 +442,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
         if (booked.otherHead !== undefined)
           return { merged: false, reason: 'other', detail: booked.otherHead };
+        await auditLateReview(repo, prNumber, ctx);
         return {
           merged: true,
           ...(booked.mergeCommit === undefined ? {} : { mergeCommit: booked.mergeCommit }),
@@ -448,7 +471,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       // 不核 CI。头、冲突、落后主线、还开着，mergePr 仍核。分支保护拒绝会抛，不装成合过了。
       const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead, requireCi: false }, ctx));
       if (merged.merged) {
-        await auditLateReview(repo, prNumber);
+        await auditLateReview(repo, prNumber, ctx);
         return { merged: true, mergeCommit: merged.mergeCommit };
       }
       if (merged.reason === 'behind_main') {
@@ -488,7 +511,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (pull.merged) {
           if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
           const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
-          await auditLateReview(repo, prNumber);
+          await auditLateReview(repo, prNumber, ctx);
           return {
             state: 'merged',
             ...(booked.mergeCommit === undefined ? {} : { mergeCommit: booked.mergeCommit }),

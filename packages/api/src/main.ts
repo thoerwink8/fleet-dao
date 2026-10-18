@@ -11,6 +11,7 @@ import {
   type Db,
   feishuPushFacts,
   finishLocalTask,
+  raiseMergedReviewEvent,
   renewLocalTask,
 } from '@fleet-dao/db';
 import {
@@ -133,7 +134,12 @@ function githubMirror(db: Db): {
     // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像。
     // 唯一的例外是正式评审要求改（#2991）：引擎任务 PR 挂着的自动合并当场撤掉，评审由引擎合并那一步现读、交给工人
     return {
-      sink: gh.eventSink(reviewMergeHold(gh.claims, log)),
+      // 评审到时 PR 已合：留未送达的明账（驾驶舱报警）；写不成抛错，这条投递记成出错、按原文重放
+      sink: gh.eventSink(
+        reviewMergeHold(gh.claims, log, async (note) => {
+          await raiseMergedReviewEvent(db, note);
+        }),
+      ),
       releaseFacts: gh.releaseFacts,
       decisionCommenter: {
         async comment(input) {

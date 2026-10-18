@@ -33,6 +33,7 @@ import {
   insertAlertOnce,
   latestRunOfTask,
   listIntakeRepos,
+  raiseLateReview,
   readEngineMasterRow,
   readFlowModeSettingRaw,
   recordFlowAssignment,
@@ -1096,6 +1097,23 @@ export function realPortsFromEnv(
       exec,
       log: taskLog,
       reviewChanges,
+      // 合并后才发现没交到工人的评审、或补读没读成：留一条驾驶舱报警当未送达的明账（写不进抛错，活动重试）
+      onLateReview: async (note) => {
+        await raiseLateReview(db, {
+          repo: `${note.repo.owner}/${note.repo.name}`,
+          prNumber: note.prNumber,
+          source: 'merge-audit',
+          review: note.review
+            ? {
+                reviewId: note.review.reviewId,
+                reviewer: note.review.reviewer,
+                commitId: note.review.commitId,
+              }
+            : null,
+          error: note.error,
+          workflowId: note.workflowId,
+        });
+      },
       profileOf: async (repo) => {
         const row = await findRepoProfile(db, repo.owner, repo.name);
         if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);

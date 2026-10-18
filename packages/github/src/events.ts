@@ -36,6 +36,16 @@ export interface WakeEvent {
   headRef?: string | undefined;
   /** pull_request_review 事件里评审的状态（GitHub 原样小写：changes_requested、approved、commented、dismissed）。 */
   reviewState?: string | undefined;
+  /** 评审的编号、审查者和审的提交（事件里带的就带，留明账用；事件只当叫醒，不拿它们当指令）。 */
+  review?: { id: number; reviewer?: string | undefined; commitId?: string | null | undefined } | undefined;
+}
+
+/** 要求改的评审到达时 PR 已经合了：撤不了、也回不了工人，留一条未送达的明账（真装配写驾驶舱报警）。写不成要抛。 */
+export interface MergedReviewNote {
+  repo: string;
+  prNumber: number;
+  deliveryId: string;
+  review: NonNullable<WakeEvent['review']> | null;
 }
 
 export interface WorkflowWaker {
@@ -122,7 +132,14 @@ const WorkflowRunPayload = z.object({
 const StatusPayload = z.object({ sha: z.string() });
 const ReviewPayload = z.object({
   pull_request: z.object({ head: z.object({ ref: z.string(), sha: z.string() }) }),
-  review: z.object({ state: z.string() }).optional(),
+  review: z
+    .object({
+      state: z.string(),
+      id: z.number().optional(),
+      user: z.object({ login: z.string() }).nullable().optional(),
+      commit_id: z.string().nullable().optional(),
+    })
+    .optional(),
 });
 const PushPayload = z.object({ ref: z.string(), after: z.string() });
 
@@ -180,6 +197,7 @@ function ciHead(event: string, payload: unknown): { sha: string; prs: number[]; 
 export function reviewMergeHold(
   claims: Pick<ClaimsGitHub, 'readPull' | 'disableAutoMerge'>,
   log?: Deps['log'],
+  onMerged?: (note: MergedReviewNote) => Promise<void>,
 ): WorkflowWaker {
   return {
     async wake(ev) {
@@ -190,11 +208,17 @@ export function reviewMergeHold(
       for (const n of ev.prNumbers ?? []) {
         const pull = await claims.readPull(repo, n);
         if (pull.merged) {
-          // 评审到的时候 PR 已经合了：撤不了、也回不了工人，不装没事，记下来让人跟进
+          // 评审到的时候 PR 已经合了：撤不了、也回不了工人。不装没事：留未送达的明账（写不成抛错，这条投递记成出错、按原文重放）
           log?.warn('正式评审要求改到达时 PR 已经合并，评审回不了工人', {
             deliveryId: ev.deliveryId,
             repo: ev.repo,
             prNumber: n,
+          });
+          await onMerged?.({
+            repo: ev.repo,
+            prNumber: n,
+            deliveryId: ev.deliveryId,
+            review: ev.review ?? null,
           });
           continue;
         }
@@ -274,6 +298,15 @@ export function createEventSink(deps: Deps, waker: WorkflowWaker): EventSink {
             headRef: r.data.pull_request.head.ref,
             headSha: r.data.pull_request.head.sha,
             ...(r.data.review?.state ? { reviewState: r.data.review.state } : {}),
+            ...(r.data.review?.id === undefined
+              ? {}
+              : {
+                  review: {
+                    id: r.data.review.id,
+                    reviewer: r.data.review.user?.login,
+                    commitId: r.data.review.commit_id,
+                  },
+                }),
           });
         }
       } else if (ev.event === 'push') {

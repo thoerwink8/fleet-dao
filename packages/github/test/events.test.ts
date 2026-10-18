@@ -729,15 +729,39 @@ describe('正式评审要求改：撤引擎任务 PR 的自动合并（#2991，r
     }
   });
 
-  it('评审到的时候 PR 已经合了：不撤，但记警告（回不了工人），不装没事', async () => {
+  it('评审到的时候 PR 已经合了：不撤，留未送达的明账（带 review id、审查者、审的提交、投递编号）；明账写不成就抛，不当成处理了', async () => {
     const { gh } = setup();
     const c = claims({ 5: { merged: true } });
-    const warns: string[] = [];
-    const log = { info: () => undefined, warn: (m: string) => void warns.push(m) } as never;
-    await gh.eventSink(reviewMergeHold(c.claims, log)).accept(review('changes_requested'));
+    const notes: unknown[] = [];
+    const ev = event({
+      deliveryId: 'd-merged',
+      event: 'pull_request_review',
+      action: 'submitted',
+      payload: {
+        action: 'submitted',
+        pull_request: { number: 5, head: { ref: FLOW, sha: A } },
+        review: { id: 777, state: 'changes_requested', user: { login: 'boss' }, commit_id: B },
+      },
+    });
+    await gh.eventSink(reviewMergeHold(c.claims, undefined, async (n) => void notes.push(n))).accept(ev);
     expect(c.disabled).toEqual([]);
-    expect(warns).toHaveLength(1);
-    expect(warns[0]).toContain('已经合并');
+    expect(notes).toEqual([
+      {
+        repo: 'acme/widgets',
+        prNumber: 5,
+        deliveryId: 'd-merged',
+        review: { id: 777, reviewer: 'boss', commitId: B },
+      },
+    ]);
+    await expect(
+      gh
+        .eventSink(
+          reviewMergeHold(c.claims, undefined, async () => {
+            throw new Error('库写不进');
+          }),
+        )
+        .accept(ev),
+    ).rejects.toThrow('库写不进');
   });
 
   it('【故意造出的失败】撤不成：抛出去（这条投递记成出错、对账按原文重放），不当成撤了', async () => {

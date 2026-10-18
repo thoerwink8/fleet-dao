@@ -75,6 +75,7 @@ export {
   createEventSink,
   type EventSink,
   type IngestedEvent,
+  type MergedReviewNote,
   reviewMergeHold,
   type WakeEvent,
   type WorkflowWaker,
