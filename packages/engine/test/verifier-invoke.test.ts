@@ -1074,7 +1074,8 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
     expect([...models].sort()).toEqual(['claude-1', 'gpt-1']); // 两家并行起，先后不定（#1704）
     expect(out.pass).toBe(true);
     expect(out.routeWait).toBeUndefined();
-    expect(out.session?.family).toBe('claude');
+    expect(out.session).toBeUndefined();
+    expect(out.sourceRunIds).toHaveLength(2);
     expect(out.notes).toContain('两家都验：gpt（model gpt-1）、claude（model claude-1）');
   });
 

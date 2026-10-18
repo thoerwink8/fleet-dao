@@ -48,6 +48,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 改工作流：加 `patched()` + 必要时录一个新重放场景；改了步序、停在哪等人，同步 design 第五节对应条。
 - 给任务页「过程」记的账（#3140）：动手会话入参的 `cause` / `causeSummary` / `roundSeq` / `resumeReason`、冷验收入参的 `roundSeq`、推分支的 `prNumber`、开 PR 的 `numstat` 都是可选字段，只在 `patched('run-cause-fields')`、`patched('pr-head-files')` 为真时给，只记账不改步序；加新的起因先改 shared 的 `RUN_CAUSES`（库里 `runs_cause_known` 约束同一份，`packages/db/test/run-cause.test.ts` 核对）并在 `task-session.ts` 的 `nextCause` 赋值处点名它为什么起。
 - 改活动超时：只改 `activity-options.ts`。改定时任务：`src/jobs/` 加任务，`real/jobs.ts` 的 `ENGINE_JOBS` 登记。
+- 冷验收每家原始结论在 `verifier-invoke.ts` 按真实 runId 立即入库，先于格式重试、二轮过滤和聚合，保留完整问题原文；组合另经 `RunsWriter.noteVerifyAggregate` 记精确头/轮次和来源 runIds，多家不带任何一家 session 身份。接回单家验收也走原始结论和聚合两份账，写账失败明确失败。
+- numstat 采集的截断前总数或失败原因经可选 `numstatSnapshot` 和旧 `pr-head-files` 补丁块传到开 PR，零文件照记。老历史只有数组没有总数的明确未知，不升级成完整清单。
 - 改读写的表：表结构在 `packages/db`（生成迁移），共用的读写在 `packages/store`（两套实现一起改）。
 - 改派工、选路：同步 design 第九节「自由组合的派工模型」。
 - 改了法国上的单元、环境变量：同步 ops 第五节「AI 会话」或第九节「发布应用（deploy/release.sh）」。

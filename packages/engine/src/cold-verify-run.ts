@@ -227,6 +227,7 @@ export async function runColdVerifyForPr(
     prNumber,
     branch: pr.branch,
     baseSha: pr.baseSha,
+    headSha: pr.head,
     taskId: spec.taskId,
     issueNumber: spec.issueNumber,
     ...(spec.workflowId !== undefined ? { workflowId: spec.workflowId } : {}),

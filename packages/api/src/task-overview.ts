@@ -5,7 +5,7 @@
 // 改这里之前必须知道：
 // - 读不到就写原因，不拿空、0 顶：每一块都是「读到了 / 没有（带原因）/ 读不到（带原因）」，一块读不到不连累别的块。
 // - 改动卡的文件和增删行数来自按头记的 numstat（pr_head_files），不来自把每次编辑的行数加起来；记的头和 PR 镜像里现在的头不一样
-//   就标 current:false，页面写「这是上一个头的清单」。一次都没记过的 PR（记这个账之前推的）写 none 和原因。
+//   就回 unavailable 并带旧头原因；仅当前完整头的 complete 快照才回 ok。未采过、历史无 metadata、截断、失败分别带真实原因。
 // - 最新汇报取最近一笔动手的最后一条主会话助手的话，不取 result（那是执行体的收场摘要，不是对人说的话）。
 // - 命令计数：每一笔一行（tallyOf：在跑的笔没有结果的命令算「在跑」，收场了算「结果未知」；老记录没调用号、Mirasim 没退出码都是结果未知）。
 
@@ -188,19 +188,44 @@ async function buildPrs(i: OverviewInput): Promise<Pr[]> {
 
 async function prFiles(i: OverviewInput, number: number, prHead: string | undefined): Promise<Pr['files']> {
   if (!i.port) return { state: 'unavailable', reason: TRANSCRIPT_NOT_WIRED };
+  if (prHead === undefined || !/^[0-9a-f]{40}$/.test(prHead)) {
+    return { state: 'unavailable', reason: 'PR 当前完整头没读到，无法核对文件清单' };
+  }
   try {
-    const got = await i.port.prFiles(i.repoId, number);
+    const got = await i.port.prFiles(i.repoId, number, prHead);
     if (!got) {
       return {
         state: 'none',
         reason: '这个 PR 没有记过改了哪些文件（在记这个账之前推的，或推分支时没数成）',
       };
     }
+    const snapshot =
+      got.snapshot === undefined
+        ? undefined
+        : {
+            headSha: got.snapshot.headSha,
+            status: got.snapshot.status,
+            total: got.snapshot.total,
+            kept: got.snapshot.kept,
+            recordedAt: got.snapshot.recordedAt.toISOString(),
+            ...(got.snapshot.reason === null ? {} : { reason: got.snapshot.reason }),
+          };
+    if (got.headSha !== prHead)
+      return {
+        state: 'unavailable',
+        reason: `当前头 ${prHead} 尚未采集，只有旧头 ${got.headSha} 的清单`,
+        ...(snapshot === undefined ? {} : { snapshot }),
+      };
+    if (!snapshot)
+      return { state: 'unavailable', reason: '旧记录没有文件快照完整性 metadata，无法确认完整清单' };
+    if (snapshot.status !== 'complete')
+      return { state: 'unavailable', reason: snapshot.reason ?? '文件清单采集不可用', snapshot };
     return {
       state: 'ok',
       headSha: got.headSha,
-      ...(prHead === undefined ? {} : { current: got.headSha === prHead }),
+      current: true,
       items: got.files,
+      snapshot,
     };
   } catch (err) {
     i.log('PR 改了哪些文件没读成', { taskId: i.taskId, number, error: errMessage(err) });

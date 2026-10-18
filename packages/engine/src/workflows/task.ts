@@ -699,6 +699,9 @@ class TaskFlow {
           body: this.prBody(),
           ...(generation === undefined ? {} : { generation }),
           ...(recordHeadFiles && pushed.numstat !== undefined ? { numstat: pushed.numstat } : {}),
+          ...(recordHeadFiles && pushed.numstatSnapshot !== undefined
+            ? { numstatSnapshot: pushed.numstatSnapshot }
+            : {}),
         }),
       );
       rt.prNumber = pr.prNumber;
