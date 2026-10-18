@@ -137,7 +137,10 @@ function latestPerName(checks, what) {
  */
 export function stepPr(gh, n, repo, now = Date.now()) {
   const what = `gh pr view ${n}`;
-  const o = parseJson(gh(['pr', 'view', String(n), ...repo, '--json', 'state,url,statusCheckRollup']), what);
+  const o = parseJson(
+    gh(['pr', 'view', String(n), ...repo, '--json', 'state,url,headRefOid,statusCheckRollup']),
+    what,
+  );
   if (!isObj(o)) throw new WaitError(`${what} 的输出不是一个对象`);
   const state = str(o, 'state', what);
   const url = str(o, 'url', what);
@@ -146,13 +149,19 @@ export function stepPr(gh, n, repo, now = Date.now()) {
   if (state !== 'OPEN') throw new WaitError(`${what} 的 state 认不出：${state}`);
   const checks = o.statusCheckRollup ?? [];
   if (!Array.isArray(checks)) throw new WaitError(`${what} 的 statusCheckRollup 不是数组`);
+  const latest = latestPerName(checks, what);
+  // gh 的 StatusContext 不带 description；只在需要分辨 merge-gate failure 时读 REST 原始状态。
+  const gate = latest.find((c) => c.context === GATE_CONTEXT && c.state === 'FAILURE');
+  const snapshot = gate === undefined ? undefined : readGateSnapshot(gh, n, repo, o, what);
+  if (snapshot?.state === 'MERGED') return { done: true, ok: true, line: `PR #${n} 合并了 ${url}` };
+  if (snapshot?.state === 'CLOSED') return { done: true, ok: false, line: `PR #${n} 被关掉、没合并 ${url}` };
   /** @type {string[]} */
   const red = [];
-  for (const c of latestPerName(checks, what)) {
+  for (const c of latest) {
     const conclusion = typeof c.conclusion === 'string' ? c.conclusion.toUpperCase() : '';
     const st = typeof c.state === 'string' ? c.state.toUpperCase() : '';
     if (conclusion === 'CANCELLED' && cancelledJustNow(c, now)) continue;
-    if (gateAwaitingVerify(c)) continue;
+    if (c === gate && snapshot?.skipFailure) continue;
     if (RED_CONCLUSIONS.has(conclusion) || RED_STATES.has(st)) {
       red.push(String(c.name ?? c.context ?? '（没名字的检查）'));
     }
@@ -187,16 +196,93 @@ function stepPrHead(gh, n, repo, after) {
 }
 
 /**
- * 合并闸那条提交状态是不是只因等验收而 fail：description 以「等验收：」开头，且没有「另有 N 条」（有就是还有别的理由不能合，
- * merge-gates.ts 的 statusDescription 只放第一条）。读不到 description 不算，照常判红。
- * @param {Record<string, unknown>} c
+ * REST combined status 才有 description。分页逐页核仓/完整头、读完后复读 PR；不把旧头或读失败当等待。
+ * 依据：https://docs.github.com/en/rest/commits/statuses#get-the-combined-status-for-a-specific-reference
+ * gh 字段清单：https://cli.github.com/manual/gh_pr_view
+ * @param {Gh} gh
+ * @param {number} n
+ * @param {string[]} repo
+ * @param {Record<string, unknown>} pr
+ * @param {string} what
  */
-function gateAwaitingVerify(c) {
-  if (c.context !== GATE_CONTEXT || typeof c.description !== 'string') return false;
-  const st = typeof c.state === 'string' ? c.state.toUpperCase() : '';
-  return (
-    st === 'FAILURE' && c.description.startsWith(GATE_AWAITING_VERIFY) && !c.description.includes('（另有 ')
-  );
+function readGateSnapshot(gh, n, repo, pr, what) {
+  const head = str(pr, 'headRefOid', what);
+  const url = str(pr, 'url', what);
+  if (!/^[0-9a-f]{40}$/.test(head)) throw new WaitError(`${what} 的完整 head 认不出`);
+  if (!URL.canParse(url)) throw new WaitError(`${what} 的 PR URL 认不出`);
+  const parsed = new URL(url);
+  const match = /^\/([\w.-]+)\/([\w.-]+)\/pull\/([1-9]\d*)$/.exec(parsed.pathname);
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.origin !== 'https://github.com' ||
+    parsed.username !== '' ||
+    parsed.password !== '' ||
+    !match ||
+    Number(match[3]) !== n ||
+    parsed.search ||
+    parsed.hash
+  )
+    throw new WaitError(`${what} 的仓或 PR URL 身份不符`);
+  const canonical = `${match[1]}/${match[2]}`;
+  if (repo.length !== 0 && repo[1]?.toLowerCase() !== canonical.toLowerCase())
+    throw new WaitError(`${what} 的仓与 -R 不符`);
+  const endpoint = `repos/${canonical}/commits/${head}/status?per_page=100`;
+  const pages = parseJson(gh(['api', endpoint, '--paginate', '--slurp']), `gh api ${endpoint}`);
+  if (!Array.isArray(pages) || pages.length === 0) throw new WaitError('提交状态分页不是非空数组');
+  /** @type {Record<string, unknown>[]} */
+  const statuses = [];
+  let total;
+  let repositoryId;
+  for (const page of pages) {
+    if (
+      !isObj(page) ||
+      page.sha !== head ||
+      !isObj(page.repository) ||
+      typeof page.repository.full_name !== 'string' ||
+      page.repository.full_name.toLowerCase() !== canonical.toLowerCase() ||
+      !Number.isSafeInteger(page.repository.id) ||
+      Number(page.repository.id) <= 0 ||
+      (repositoryId !== undefined && page.repository.id !== repositoryId) ||
+      !Number.isSafeInteger(page.total_count) ||
+      Number(page.total_count) < 0 ||
+      (total !== undefined && page.total_count !== total) ||
+      !Array.isArray(page.statuses)
+    )
+      throw new WaitError('提交状态的仓身份、完整 head 或分页元数据不符');
+    total = page.total_count;
+    repositoryId = page.repository.id;
+    for (const status of page.statuses) {
+      if (
+        !isObj(status) ||
+        typeof status.context !== 'string' ||
+        typeof status.state !== 'string' ||
+        !['success', 'failure', 'error', 'pending'].includes(status.state)
+      )
+        throw new WaitError('提交状态条目认不出');
+      statuses.push(status);
+    }
+  }
+  if (statuses.length !== total) throw new WaitError('提交状态分页没读全');
+  const gates = statuses.filter((s) => s.context === GATE_CONTEXT);
+  if (gates.length !== 1) throw new WaitError('当前头 merge-gate 状态缺失或重复');
+  const gate = gates[0];
+  if (!gate) throw new WaitError('当前头 merge-gate 状态缺失');
+  if (gate.description !== null && typeof gate.description !== 'string')
+    throw new WaitError('当前头 merge-gate description 认不出');
+  const current = parseJson(gh(['pr', 'view', String(n), ...repo, '--json', 'state,url,headRefOid']), what);
+  if (!isObj(current) || current.url !== url || current.headRefOid !== head)
+    throw new WaitError('读取提交状态期间 PR 身份或完整 head 改变，请重新等');
+  if (!['OPEN', 'MERGED', 'CLOSED'].includes(String(current.state)))
+    throw new WaitError('复读 PR 状态认不出');
+  // 同头正常推进到 success/pending 或合并不是真红；仍要检查其他 CheckRun。
+  const skipFailure =
+    gate.state === 'success' ||
+    gate.state === 'pending' ||
+    (gate.state === 'failure' &&
+      typeof gate.description === 'string' &&
+      gate.description.startsWith(GATE_AWAITING_VERIFY) &&
+      !gate.description.includes('（另有 '));
+  return { skipFailure, state: current.state };
 }
 
 /**
