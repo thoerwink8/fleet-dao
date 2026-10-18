@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runChild, runChildOk } from '../child.ts';
+import { interactiveHookEnv } from '../hook-env.ts';
 
 const HOOK = fileURLToPath(new URL('../../hooks/stop.mjs', import.meta.url));
 
@@ -45,7 +46,7 @@ function repoWithStray(): string {
  */
 function isolatedEnv(stateDir: string, sessionId = ''): NodeJS.ProcessEnv {
   return {
-    ...process.env,
+    ...interactiveHookEnv(),
     FLEET_UNATTENDED_DIR: stateDir,
     FLEET_WORKER: '',
     CLAUDE_CODE_SESSION_ID: sessionId,
