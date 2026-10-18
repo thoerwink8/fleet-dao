@@ -15,10 +15,18 @@
 //   读到了活动先撤掉已挂的自动合并，这里交给工人（task-verify.ts 的 handReviewChanges，和冷验收同一份）或停下等审查者。
 //   GitHub 事件那头只撤自动合并、不叫醒工作流（@fleet-dao/github 的 reviewMergeHold）：撤了之后这里读到 unarmed、回去重挂，
 //   挂之前读到评审。老历史里活动结果没有 reviewChanges，标记也不在历史里。
+// - 挂的时候 GitHub 说已经 clean、直接合却因这个头上还有检查在跑被拒（正文改成 Refs 会把 merge-gate 重新打进队列，
+//   patched('merge-arm-pending-checks')）：活动交回 checksPending（绑精确头、还在跑的检查名、原始原因）。这里把状态写成等检查，
+//   在 ARM_PENDING_CHECKS_MINUTES 内每隔 ARM_PENDING_POLL_SECONDS 再走一次 armAutoMerge。同头变绿后仍由那一入口挂上或 squash，
+//   合并账和回执不另开路。真红（checksRed）走下面同一套确认 / 返工。权限、认证、正式要求改、没查成没有这两个字段，照旧停下，
+//   不因 why 里写了 ci_not_green 就重试。等到点仍没跑完：停下，写明 PR、头、检查名和原始原因。头变了回 head_moved，调用方重走
+//   CI、冷验收、批准，不沿用旧头。老历史的活动结果没有这两个字段；标记不在历史里就当没有，照旧停下。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { patched } from '@temporalio/workflow';
 import {
+  ARM_PENDING_CHECKS_MINUTES,
+  ARM_PENDING_POLL_SECONDS,
   type ColdVerifyResult,
   type GuardedPaths,
   MAX_MAIN_SYNCS,
@@ -42,6 +50,53 @@ export const MERGE_CONFLICT_NOTE = 'PR 和主线冲突，在并主线';
  * 不用 MERGE_POLL_MINUTES（那一次要 15 分钟，是「等合并」的节奏）：这里只是等 GitHub 把数据刷新过来。
  */
 const CONFLICT_REPOLL_SECONDS = 60;
+
+const MAX_ARM_PENDING_POLLS = Math.floor((ARM_PENDING_CHECKS_MINUTES * 60) / ARM_PENDING_POLL_SECONDS);
+
+/**
+ * 必过检查红了：第一次记下并隔 MERGE_RED_CONFIRM_SECONDS 再看，仍红才返工。
+ * 等合并的 waitMerged 和挂自动合并时现读到的红共用这一套。
+ */
+async function confirmChecksRed(
+  rt: TaskRuntime,
+  failedChecks: readonly string[],
+  detail: string,
+): Promise<'confirming' | 'rework'> {
+  const names = failedChecks.length > 0 ? failedChecks.join('、') : '（没写是哪项）';
+  const line = `${CHECKS_RED_PREFIX}${names}`;
+  if (!rt.mergeRedNoted) {
+    rt.mergeRedNoted = true;
+    rt.status.lastProblem = line;
+    await rt.advance('merge', line);
+    await rt.pause('merge', detail || line, MERGE_RED_CONFIRM_SECONDS);
+    return 'confirming';
+  }
+  rt.mergeRedNoted = false;
+  rt.feedback = detail ? [line, detail] : [line];
+  rt.status.lastProblem = line;
+  return 'rework';
+}
+
+/** 有界等待耗尽：精确 PR、头、还在跑的检查名、一开始的拒绝原文都留下。 */
+function pendingExhaustedDetail(
+  prNumber: number,
+  head: string,
+  names: readonly string[],
+  started: readonly string[],
+  detail: string,
+): string {
+  const waiting = names.join('、');
+  const origin = started.join('、');
+  const which = waiting === origin ? waiting : `${waiting}（一开始在等：${origin}）`;
+  return `PR #${prNumber} 头 ${head} 上还没跑完：${which}。原始原因：${detail}`;
+}
+
+/** 头已经不是这次挂的那个：停下等人，回来由调用方重走 CI、冷验收、批准。 */
+async function headNoLonger(rt: TaskRuntime, pushed: string, now: string): Promise<{ kind: 'head_moved' }> {
+  await rt.park('PR 的头被别人改了', headMovedDetail(now, pushed));
+  rt.head = now;
+  return { kind: 'head_moved' };
+}
 
 /** 碰了「改标准」的路径：停下等人（工作流不绕合并闸、不替创始人同意）。 */
 export async function guardedPaths(rt: TaskRuntime): Promise<void> {
@@ -92,6 +147,17 @@ export async function armAndWaitMerged(
 ): Promise<{ kind: 'merged'; commit?: string | undefined } | { kind: 'head_moved' } | { kind: 'rework' }> {
   const prNumber = rt.prNumber;
   if (prNumber === null || rt.head === null) throw new Error('合并之前还没有 PR');
+  // 同一次挂合并、同一个头上「检查还在跑」已经看过几回。换头或离开这条等待就清掉，不把上一回的次数套到新头上。
+  let pendingPolls = 0;
+  let pendingHead: string | null = null;
+  let pendingDetail = '';
+  let pendingNames: string[] = [];
+  const clearPending = (): void => {
+    pendingPolls = 0;
+    pendingHead = null;
+    pendingDetail = '';
+    pendingNames = [];
+  };
   for (;;) {
     await rt.advance('merge', `PR #${prNumber} 挂自动合并，等合并`);
     const head: string = rt.head;
@@ -125,9 +191,50 @@ export async function armAndWaitMerged(
       return { kind: 'head_moved' };
     }
     if (!armed.armed) {
+      // 老历史的活动结果没有 checksPending / checksRed，标记也不在：patched() 为假，照旧停下，不因 why 里的 ci_not_green 重试。
+      if (patched('merge-arm-pending-checks')) {
+        const red = armed.checksRed;
+        if (red) {
+          clearPending();
+          if (red.head !== head) return headNoLonger(rt, head, red.head);
+          const outcome = await confirmChecksRed(rt, red.failedChecks, red.detail);
+          if (outcome === 'rework') return { kind: 'rework' };
+          continue;
+        }
+        const pending = armed.checksPending;
+        if (pending && pending.names.length > 0) {
+          if (pending.head !== head) {
+            clearPending();
+            return headNoLonger(rt, head, pending.head);
+          }
+          // 红了一下又变回还在跑：这次确认作废，接着等，不返工。
+          rt.mergeRedNoted = false;
+          if (pendingHead !== head) {
+            pendingPolls = 0;
+            pendingHead = head;
+            pendingDetail = pending.detail;
+            pendingNames = [...pending.names];
+          }
+          pendingPolls += 1;
+          if (pendingPolls > MAX_ARM_PENDING_POLLS) {
+            const detail = pendingExhaustedDetail(prNumber, head, pending.names, pendingNames, pendingDetail);
+            clearPending();
+            await rt.park('等检查超时', detail);
+            continue;
+          }
+          const names = pending.names.join('、');
+          const line = `等检查：${names}`;
+          rt.status.lastProblem = line;
+          if (rt.status.phase !== 'merge' || rt.status.doing !== line) await rt.advance('merge', line);
+          await rt.pause('merge', `等检查：PR #${prNumber} 头 ${head} 的 ${names}`, ARM_PENDING_POLL_SECONDS);
+          continue;
+        }
+      }
+      clearPending();
       await rt.park('自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
       continue;
     }
+    clearPending();
     for (;;) {
       const w: MergeWait = await rt.waiting(
         'merge',
@@ -202,18 +309,8 @@ export async function armAndWaitMerged(
       if (w.state === 'checks_red') {
         // 老历史重放：这一支是加进来的。patched() 为假就当还在等，不多调活动。
         if (!patched('merge-wait-red-checks')) continue;
-        const names = w.failedChecks.length > 0 ? w.failedChecks.join('、') : '（没写是哪项）';
-        const line = `${CHECKS_RED_PREFIX}${names}`;
-        if (!rt.mergeRedNoted) {
-          rt.mergeRedNoted = true;
-          rt.status.lastProblem = line;
-          await rt.advance('merge', line);
-          await rt.pause('merge', w.detail || line, MERGE_RED_CONFIRM_SECONDS);
-          continue;
-        }
-        rt.mergeRedNoted = false;
-        rt.feedback = w.detail ? [line, w.detail] : [line];
-        rt.status.lastProblem = line;
+        const outcome = await confirmChecksRed(rt, w.failedChecks, w.detail);
+        if (outcome === 'confirming') continue;
         return { kind: 'rework' };
       }
       // waiting：这一轮没合，接着等

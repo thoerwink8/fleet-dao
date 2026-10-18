@@ -7,6 +7,7 @@ import { buildTaskBrief, type TaskBrief, type TaskBriefResult } from '../src/run
 import type {
   ArmAutoMergeInput,
   ArmAutoMergeResult,
+  CheckGuardedInput,
   ColdVerifyInput,
   ColdVerifyResult,
   DecideFlowModeInput,
@@ -72,7 +73,7 @@ export interface Script {
     n: number,
     signal: AbortSignal,
   ) => ColdVerifyResult | Promise<ColdVerifyResult>;
-  guarded: (n: number) => GuardedPaths;
+  guarded: (n: number, input: CheckGuardedInput) => GuardedPaths;
   arm: (n: number, input: ArmAutoMergeInput) => ArmAutoMergeResult;
   merged: (n: number) => MergeWait;
   /** 默认强制。不进 calls.order。 */
@@ -98,6 +99,8 @@ export interface Calls {
   delivery: number;
   verify: ColdVerifyInput[];
   guarded: number;
+  /** 查路径收到的入参（批准只认当时的头）。不进 order。 */
+  guardedInputs: CheckGuardedInput[];
   arm: number;
   /** 挂自动合并被调时收到的入参。 */
   armInputs: ArmAutoMergeInput[];
@@ -132,6 +135,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     delivery: 0,
     verify: [],
     guarded: 0,
+    guardedInputs: [],
     arm: 0,
     armInputs: [],
     merged: 0,
@@ -200,10 +204,11 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
         clearInterval(beat);
       }
     },
-    async checkGuarded() {
+    async checkGuarded(input) {
       calls.order.push('guarded');
       calls.guarded += 1;
-      return script.guarded(calls.guarded);
+      calls.guardedInputs.push(input);
+      return script.guarded(calls.guarded, input);
     },
     async armAutoMerge(input) {
       calls.order.push('arm');

@@ -16,6 +16,10 @@ import { type PickRouteInput, PortError, type RouteChoice } from '../src/ports.t
 import { localExec } from '../src/real/exec.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
 import {
+  ARM_PENDING_CHECKS_MINUTES,
+  ARM_PENDING_POLL_SECONDS,
+  type ArmAutoMergeInput,
+  type ArmAutoMergeResult,
   type CheckGuardedInput,
   MAX_IMPLEMENT_ROUNDS,
   MAX_VERIFY_ROUNDS,
@@ -1167,6 +1171,374 @@ describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(calls.segment[1]?.feedback.join('\n')).toContain('验收没过：没做到验收条');
     expect(world.alerts).toEqual([]);
+  });
+});
+
+describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gate）', { timeout: 120_000 }, () => {
+  const ORIGIN =
+    'GitHub 说 PR 已经满足合并条件，直接合被拒（ci_not_green）：PR #3072 的 CI 在 c38530e 上不是全绿（没跑完：merge-gate）';
+  const ARMED: ArmAutoMergeResult = { armed: true, merged: false };
+  const polls = Math.floor((ARM_PENDING_CHECKS_MINUTES * 60) / ARM_PENDING_POLL_SECONDS);
+
+  /** 精确头上 merge-gate 还在队列里：活动交回的那一包。why 里的「没跑完」不算数，只认 checksPending。 */
+  const waitingCheck = (input: ArmAutoMergeInput, names: string[], detail = ORIGIN): ArmAutoMergeResult => ({
+    armed: false,
+    merged: false,
+    why: detail,
+    checksPending: { names, head: input.expectedHead, detail },
+  });
+
+  /** 原文写没跑完，现读却是真红。工作流必须按红处理，不能拿这句去等。 */
+  const redCheck = (input: ArmAutoMergeInput): ArmAutoMergeResult => ({
+    armed: false,
+    merged: false,
+    why: ORIGIN,
+    checksRed: {
+      failedChecks: ['merge-gate'],
+      detail: 'merge-gate：cold-verify 没过',
+      head: input.expectedHead,
+    },
+  });
+
+  it('精确头 CI 已绿、正文更新把 merge-gate 打回队列：等检查，同头绿了自己再挂，不用人点继续', async () => {
+    expect(ARM_PENDING_CHECKS_MINUTES).toBe(15);
+    expect(ARM_PENDING_POLL_SECONDS).toBe(20);
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const { tasks, calls } = scripted({
+      arm: (n, input) => (n === 1 ? waitingCheck(input, ['merge-gate']) : ARMED),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, verifyRounds: 1, head });
+    const noted = world.states.filter((s) => s.doing === '等检查：merge-gate');
+    expect(noted[0]).toMatchObject({
+      phase: 'merge',
+      state: 'running',
+      doing: '等检查：merge-gate',
+      lastProblem: '等检查：merge-gate',
+    });
+    expect(world.states.some((s) => s.state === 'stalled')).toBe(false);
+    expect(world.alerts).toEqual([]);
+    expect(calls.arm).toBe(2);
+    expect(calls.armInputs.map((i) => i.expectedHead)).toEqual([head, head]);
+    expect(calls.merge).toBe(0);
+    expect(calls.order.slice(-3)).toEqual(['arm', 'arm', 'merged']);
+  });
+
+  it('等检查之后由同一次挂合并入口直接合上：不另走不核 CI 的直接合，合并提交仍进关单回执', async () => {
+    const world = createFakeWorld();
+    const commit = 'e'.repeat(40);
+    const { tasks, calls } = scripted({
+      arm: (n, input) =>
+        n === 1 ? waitingCheck(input, ['merge-gate']) : { armed: false, merged: true, mergeCommit: commit },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.arm).toBe(2);
+    expect(calls.merged).toBe(0);
+    expect(calls.merge).toBe(0);
+    expect(world.alerts).toEqual([]);
+    expect(world.states.some((s) => s.doing === '等检查：merge-gate')).toBe(true);
+    expect(world.callsOf('closeIssue')[0]?.input).toMatchObject({
+      reason: 'completed',
+      comment: expect.stringContaining(`（${commit.slice(0, 7)}）`),
+    });
+  });
+
+  it('【故意造出的失败】只有 ci_not_green 原文、没有还在跑的检查：马上停下，不拿这句话反复挂', async () => {
+    const world = createFakeWorld();
+    const why = `${ORIGIN}；必过检查没查成：检查列表翻不完`;
+    const { tasks, calls } = scripted({
+      arm: (n) => (n === 1 ? { armed: false, merged: false, why } : ARMED),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '没查成，停下');
+        expect(s.lastProblem).toContain('自动合并没挂上');
+        expect(world.alerts[0]?.detail).toContain('没查成');
+        expect(world.alerts[0]?.detail).toContain('ci_not_green');
+        expect(calls.arm).toBe(1);
+        expect(world.states.some((st) => st.doing.startsWith('等检查：'))).toBe(false);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.arm).toBe(2);
+    expect(world.alerts).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】checksPending 没有检查名：不当成还在跑', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      arm: (n, input) =>
+        n === 1
+          ? {
+              armed: false,
+              merged: false,
+              why: `${ORIGIN}；必过检查没查成`,
+              checksPending: { names: [], head: input.expectedHead, detail: ORIGIN },
+            }
+          : ARMED,
+    });
+    await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '空的检查名，停下');
+        expect(s.lastProblem).toContain('自动合并没挂上');
+        expect(calls.arm).toBe(1);
+        expect(world.states.some((st) => st.doing.startsWith('等检查：'))).toBe(false);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '停' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+  });
+
+  it('原文写着没跑完、挂合并时现读是真红：确认后返工，不写成等检查', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      arm: (n, input) => (n <= 2 ? redCheck(input) : ARMED),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(world.states.some((s) => s.doing === '检查红了：merge-gate')).toBe(true);
+    expect(world.states.some((s) => s.doing.startsWith('等检查：'))).toBe(false);
+    const feedback = calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(feedback).toContain('检查红了：merge-gate');
+    expect(feedback).toContain('cold-verify 没过');
+    expect(calls.segment[0]?.feedback.join('\n') ?? '').not.toContain('检查红了');
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('红了一下又变回还在跑：不返工，等检查绿了自己挂上', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      arm: (n, input) => {
+        if (n === 1) return redCheck(input);
+        if (n === 2) return waitingCheck(input, ['merge-gate']);
+        return ARMED;
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1 });
+    expect(calls.segment).toHaveLength(1);
+    expect(world.states.some((s) => s.doing === '检查红了：merge-gate')).toBe(true);
+    expect(world.states.some((s) => s.doing === '等检查：merge-gate')).toBe(true);
+    expect(world.alerts).toEqual([]);
+    expect(calls.merge).toBe(0);
+  });
+
+  it('【故意造出的失败】等检查到点还没跑完：停下，留下 PR、头、检查名和原始原因；点继续才重新有界等待', async () => {
+    expect(polls).toBe(45);
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const later = '后来的拒绝原文，不应盖掉原始原因';
+    const { tasks, calls } = scripted({
+      arm: (n, input) => {
+        // 前 46 次（45 次间隔加到点那一次）一直还在跑；继续后第 47 次仍在跑，证明次数已清掉；第 48 次才挂上。
+        if (n <= polls + 1 || n === polls + 2) {
+          return waitingCheck(input, n === 1 ? ['merge-gate'] : ['check'], n === 1 ? ORIGIN : later);
+        }
+        return ARMED;
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await env.sleep('18 minutes');
+        const s = await statusUntil(h, parked, '等检查超时，停下');
+        expect(s.phase).toBe('parked');
+        expect(s.lastProblem).toBe('等检查超时');
+        expect(s.prNumber).not.toBeNull();
+        expect(calls.arm).toBe(polls + 1);
+        expect(calls.segment).toHaveLength(1);
+        expect(calls.merge).toBe(0);
+        expect(calls.armInputs.every((i) => i.expectedHead === head)).toBe(true);
+        const detail = world.alerts[0]?.detail ?? '';
+        expect(world.alerts).toHaveLength(1);
+        expect(world.alerts[0]?.title).toBe('等检查超时');
+        expect(detail).toContain(`PR #${s.prNumber}`);
+        expect(detail).toContain(head);
+        expect(detail).toContain('check（一开始在等：merge-gate）');
+        expect(detail).toContain(`原始原因：${ORIGIN}`);
+        expect(detail).not.toContain(later);
+        expect(world.states.some((st) => st.doing === '等检查：merge-gate')).toBe(true);
+        expect(world.states.some((st) => st.doing === '等检查：check')).toBe(true);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, head });
+    // 停下时清掉这一轮的次数：继续后先再等一次，不是当场又超时
+    expect(calls.arm).toBe(polls + 3);
+    expect(world.alerts).toHaveLength(1);
+    expect(calls.merge).toBe(0);
+  });
+
+  it('等检查期间头被别人改了：不沿用旧头的批准和绿，重走 CI、冷验收、查路径', async () => {
+    const world = createFakeWorld();
+    const moved = fakeHead(777);
+    const approved = 'AGENTS.md（通用段）';
+    const { tasks, calls } = scripted({
+      guarded: (n) => (n === 1 ? { standards: [approved] } : { standards: [] }),
+      arm: (n, input) => {
+        if (n === 1) return waitingCheck(input, ['merge-gate']);
+        if (n === 2) return { armed: false, merged: false, why: 'PR 的头变了', headMoved: moved };
+        return ARMED;
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const gate = await statusUntil(h, parked, '改标准，停下');
+        expect(gate.waiting?.detail).toContain('标准路径');
+        expect(world.alerts[0]?.detail).toContain(approved);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        await env.sleep('1 minute');
+        const movedPark = await statusUntil(
+          h,
+          (st) => parked(st) && (st.lastProblem ?? '').includes('头被别人改了'),
+          '头被改，停下',
+        );
+        expect(movedPark.lastProblem).toContain('头被别人改了');
+        expect(world.alerts.at(-1)?.detail).toContain(moved);
+        expect(world.alerts.at(-1)?.detail).toContain('重跑 CI 和验收');
+        expect(world.states.some((st) => st.doing === '等检查：merge-gate' && st.state === 'running')).toBe(
+          true,
+        );
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    const head = fakeHead(101);
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, verifyRounds: 1, head: moved });
+    expect(calls.merge).toBe(0);
+    expect(calls.armInputs.map((i) => i.expectedHead)).toEqual([head, head, moved]);
+    expect(calls.verify.map((v) => v.headSha)).toEqual([head, moved]);
+    expect(calls.verify[1]?.round).toBe(1);
+    expect(world.callsOf('waitCi').map((c) => (c.input as { head: string }).head)).toEqual([head, moved]);
+    expect(calls.guardedInputs.map((i) => i.approved?.standards)).toEqual([undefined, [approved], undefined]);
+  });
+
+  it('等检查时交回的头已经不是这一轮的头：重走 CI 和冷验收，不在旧头上接着等', async () => {
+    const world = createFakeWorld();
+    const moved = fakeHead(777);
+    const head = fakeHead(101);
+    const { tasks, calls } = scripted({
+      arm: (n, input) => {
+        if (n === 1) return waitingCheck(input, ['merge-gate']);
+        if (n === 2) {
+          return {
+            armed: false,
+            merged: false,
+            why: ORIGIN,
+            checksPending: { names: ['merge-gate'], head: moved, detail: ORIGIN },
+          };
+        }
+        return ARMED;
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await env.sleep('1 minute');
+        const s = await statusUntil(h, parked, '头对不上，停下');
+        expect(s.lastProblem).toContain('头被别人改了');
+        expect(world.alerts[0]?.detail).toContain(moved);
+        expect(world.alerts[0]?.detail).toContain('重跑 CI 和验收');
+        expect(world.states.some((st) => st.doing === '等检查：merge-gate')).toBe(true);
+        expect(calls.arm).toBe(2);
+        expect(calls.armInputs[1]?.expectedHead).toBe(head);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head: moved, rounds: 1 });
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.merge).toBe(0);
+    expect(calls.armInputs[2]?.expectedHead).toBe(moved);
+    expect(calls.verify.map((v) => v.headSha)).toEqual([head, moved]);
+    expect(world.callsOf('waitCi').map((c) => (c.input as { head: string }).head)).toContain(moved);
+  });
+
+  it('【故意造出的失败】真红绑的是另一个头：不拿旧头返工，重走 CI 和冷验收', async () => {
+    const world = createFakeWorld();
+    const moved = fakeHead(777);
+    const head = fakeHead(101);
+    const { tasks, calls } = scripted({
+      arm: (n) =>
+        n === 1
+          ? {
+              armed: false,
+              merged: false,
+              why: ORIGIN,
+              checksRed: {
+                failedChecks: ['merge-gate'],
+                detail: 'merge-gate：cold-verify 没过',
+                head: moved,
+              },
+            }
+          : ARMED,
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '红在另一个头上，停下');
+        expect(s.lastProblem).toContain('头被别人改了');
+        expect(world.alerts[0]?.detail).toContain(moved);
+        expect(world.alerts[0]?.detail).toContain('重跑 CI 和验收');
+        expect(world.states.some((st) => st.doing.startsWith('检查红了：'))).toBe(false);
+        expect(world.states.some((st) => st.doing.startsWith('等检查：'))).toBe(false);
+        expect(calls.segment).toHaveLength(1);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head: moved, rounds: 1 });
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.segment[0]?.feedback.join('\n') ?? '').not.toContain('检查红了');
+    expect(calls.merge).toBe(0);
+    expect(calls.verify.map((v) => v.headSha)).toEqual([head, moved]);
+    expect(calls.armInputs.map((i) => i.expectedHead)).toEqual([head, moved]);
   });
 });
 

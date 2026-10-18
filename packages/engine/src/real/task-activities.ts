@@ -6,7 +6,9 @@
 //   只有「这个仓根本没声明改标准清单」（文件不在）才当没有。
 // - 合并这一步 GitHub 说了算：自动合并只由 armAutoMerge 在验收通过之后挂（每小时对账的兜底不碰任务分支，jobs/auto-merge-check.ts）。
 //   挂的时候 GitHub 说「已经是 clean」（所有条件都满足了，没什么可等的）就直接合（github 包的 mergePr：核头、核不落后主线、
-//   核 CI 绿），合不了的原样说明原因交工作流停下报人。
+//   核 CI 绿）。直接合因这个头上还有检查在跑被拒：现读检查，只有 queued / in_progress 才交 checksPending，工作流有界等待后
+//   再走这一入口。真红交 checksRed。读不成、没出现、对不上，why 里写明没查成，不靠「ci_not_green / 没跑完」这句原文当还在跑。
+//   别的拒绝原样说明原因交工作流停下报人。
 // - 合并记录：这个仓的对账（github 包 auditMergedPrs）要求引擎开的 PR 账上有合并记录。自动合并是 GitHub 自己合的，没有记录，
 //   所以等到合并之后再调一次 mergePr——它对「已经合了」的 PR 只补记录、删分支，不再合一次。补不成只记日志，不拦任务往下走。
 // - 等合并是长轮询（心跳不断）：叫停时休眠被打断，活动抛取消，不吞。
@@ -55,10 +57,12 @@ import type { WorkTrees } from './worktrees.ts';
 /** 等合并时多久看一次 PR（毫秒）。 */
 export const MERGE_POLL_EVERY_MS = 20_000;
 
-/** 等合并这一下读到的必过检查。红了才带 failed；pending / none / green 不带。 */
+/** 等合并这一下读到的必过检查。红了才带 failed。pending 名字只含还在跑的，没出现的不放；不给就是没分开报。 */
 export interface MergeWaitChecks {
   overall: 'green' | 'red' | 'pending' | 'none';
   failed: { name: string; detail?: string }[];
+  /** 还在跑（queued / in_progress）。老调用方不读。 */
+  pending?: { name: string }[];
 }
 
 export interface TaskActivitiesDeps extends ReviewAuditDeps {
@@ -97,7 +101,7 @@ const refOf = (repo: { owner: string; name: string }): RepoRef => ({ owner: repo
 const short = (sha: string) => sha.slice(0, 7);
 
 /** 必过检查红了：检查名和原因交给工作流。没写名字就标明，不回空的。 */
-function checksRedWait(checks: MergeWaitChecks): MergeWait {
+function checksRedWait(checks: MergeWaitChecks): Extract<MergeWait, { state: 'checks_red' }> {
   const failed = checks.failed.filter((item) => item.name.trim().length > 0);
   const failedChecks = failed.length > 0 ? failed.map((item) => item.name) : ['（没写是哪项）'];
   const detail =
@@ -112,6 +116,22 @@ function checksRedWait(checks: MergeWaitChecks): MergeWait {
 /** GitHub 拒绝挂自动合并、因为 PR 已经满足全部合并条件（没什么可等的）。 */
 function isCleanStatus(error: unknown): boolean {
   return /clean status/i.test(errMessage(error));
+}
+
+/** 直接合被拒时交回工作流的那句。reason 用机器认的枚举，不从 detail 里再猜。 */
+function directRefusal(reason: string, detail: string): string {
+  return `GitHub 说 PR 已经满足合并条件，直接合被拒（${reason}）：${detail}`;
+}
+
+/** 还在跑的检查名。没给 pending、名字是空的，都不算。 */
+function inProgressNames(checks: MergeWaitChecks): string[] {
+  const names: string[] = [];
+  for (const item of checks.pending ?? []) {
+    const name = item.name.trim();
+    if (name.length === 0 || names.includes(name)) continue;
+    names.push(name);
+  }
+  return names;
 }
 
 export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
@@ -380,6 +400,71 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         };
       }
       if (pull.autoMerge) return { armed: true, merged: false };
+
+      // clean 之后的直接合。recheckCi 只在「现读已经是绿」时再走一次同一个 mergePr，避免检查刚转绿就停。
+      const acceptDirectMerge = async (
+        result: Awaited<ReturnType<TaskActivitiesDeps['gh']['mergePr']>>,
+        recheckCi: boolean,
+      ): Promise<ArmAutoMergeResult> => {
+        if (result.merged) {
+          await auditLateReview(repo, prNumber, ctx);
+          return { armed: false, merged: true, mergeCommit: result.mergeCommit };
+        }
+        if (result.reason === 'behind_main') {
+          return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, result.detail, ctx);
+        }
+        if (result.reason === 'ci_not_green') return classifyCiNotGreen(result.detail, recheckCi);
+        return { armed: false, merged: false, why: directRefusal(result.reason, result.detail) };
+      };
+
+      // 不看拒绝原文里的「没跑完 / 红了」。还在跑只认 readChecks 交回的 pending 名字，并且绑这个 expectedHead。
+      const classifyCiNotGreen = async (detail: string, recheckCi: boolean): Promise<ArmAutoMergeResult> => {
+        const why = directRefusal('ci_not_green', detail);
+        const readChecks = deps.readChecks;
+        if (!readChecks) {
+          return { armed: false, merged: false, why: `${why}；必过检查没查成：等合并没接上读检查` };
+        }
+        let checks: MergeWaitChecks;
+        try {
+          checks = await mapped(() => readChecks(repo, expectedHead, ctx.signal));
+        } catch (error) {
+          if (ctx.signal.aborted) throw error;
+          return { armed: false, merged: false, why: `${why}；必过检查没查成：${errMessage(error)}` };
+        }
+        const failed = checks.failed.filter((item) => item.name.trim().length > 0);
+        if (checks.overall === 'red' || failed.length > 0) {
+          const red = checksRedWait({ ...checks, failed });
+          return {
+            armed: false,
+            merged: false,
+            why,
+            checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
+          };
+        }
+        const names = inProgressNames(checks);
+        // overall 是 pending 但名字空着（全是没出现、或没分开报）不当成可等。
+        if (checks.overall === 'pending' && names.length > 0) {
+          return {
+            armed: false,
+            merged: false,
+            why,
+            checksPending: { names, head: expectedHead, detail: why },
+          };
+        }
+        if (checks.overall === 'green' && recheckCi) {
+          const again = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+          return acceptDirectMerge(again, false);
+        }
+        if (checks.overall === 'green') {
+          return { armed: false, merged: false, why: `${why}；必过检查读着是绿，直接合仍被拒` };
+        }
+        return {
+          armed: false,
+          merged: false,
+          why: `${why}；必过检查没查成：读到 ${checks.overall}，没有还在跑的检查名`,
+        };
+      };
+
       try {
         await mapped(() => gh.claims.enableAutoMerge(repo, pull));
         // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
@@ -398,18 +483,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (!isCleanStatus(error)) throw error;
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
         const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
-        if (merged.merged) {
-          await auditLateReview(repo, prNumber, ctx);
-          return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
-        }
-        if (merged.reason === 'behind_main') {
-          return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, merged.detail, ctx);
-        }
-        return {
-          armed: false,
-          merged: false,
-          why: `GitHub 说 PR 已经满足合并条件，直接合被拒（${merged.reason}）：${merged.detail}`,
-        };
+        return acceptDirectMerge(merged, true);
       }
     },
 

@@ -9,6 +9,30 @@ import { type GitHub, isGitHubError, type RepoRef, readCi, requiredChecksFor } f
 export interface MergeWaitCheckRead {
   overall: 'green' | 'red' | 'pending' | 'none';
   failed: { name: string; detail?: string }[];
+  /**
+   * 还在跑（queued / in_progress）的检查名。没出现的不放进来。没有就不带这个字段。
+   */
+  pending?: { name: string }[];
+}
+
+/** 还在跑的检查名。没出现、红了的都不算。 */
+function runningNames(checks: readonly { name: string; state: string }[]): { name: string }[] {
+  const names: string[] = [];
+  for (const item of checks) {
+    if (item.state !== 'pending') continue;
+    const name = item.name.trim();
+    if (name.length === 0 || names.includes(name)) continue;
+    names.push(name);
+  }
+  return names.map((name) => ({ name }));
+}
+
+function pendingRead(
+  failed: MergeWaitCheckRead['failed'],
+  checks: readonly { name: string; state: string }[],
+): MergeWaitCheckRead {
+  const pending = runningNames(checks);
+  return pending.length > 0 ? { overall: 'pending', failed, pending } : { overall: 'pending', failed };
 }
 
 function gateWaitingForColdVerify(
@@ -43,11 +67,11 @@ export async function readMergeWaitChecks(
     .map((item) => ({ name: item.name, ...(item.detail ? { detail: item.detail } : {}) }));
   if (gateWaitingForColdVerify(evaluation.checks)) {
     const actualFailures = failed.filter((item) => item.name !== GATE_CONTEXT);
-    if (actualFailures.length === 0) return { overall: 'pending', failed: [] };
+    if (actualFailures.length === 0) return pendingRead([], evaluation.checks);
     return { overall: 'red', failed: actualFailures };
   }
   if (failed.length > 0) return { overall: 'red', failed };
   if (evaluation.overall === 'green') return { overall: 'green', failed: [] };
   if (evaluation.overall === 'none') return { overall: 'none', failed: [] };
-  return { overall: 'pending', failed: [] };
+  return pendingRead([], evaluation.checks);
 }
