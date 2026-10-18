@@ -381,6 +381,53 @@ describe('交付核对和受限归档', () => {
     expect(r.files).toHaveLength(1);
   });
 
+  it('死进程留下的锁（令牌在、超过 10 分钟没续期）被接手；接手后锁释放干净', async () => {
+    shot('2969/a.png', png('a'));
+    const lock = join(archive, '.shots.lock');
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'owner'), 'dead-process');
+    const old = new Date(Date.now() - 11 * 60_000);
+    utimesSync(lock, old, old);
+    const r = await preserveShots(tree(), input, deps());
+    expect(r.outcome).toBe('archived');
+    expect(existsSync(lock)).toBe(false);
+    expect(readdirSync(archive).filter((n) => n.includes('stale'))).toEqual([]);
+  });
+
+  it('别人持着的锁（刚续过期）不被接手：等它放了才写，也不删别人的锁', async () => {
+    shot('2969/a.png', png('a'));
+    const lock = join(archive, '.shots.lock');
+    mkdirSync(lock, { recursive: true });
+    writeFileSync(join(lock, 'owner'), 'live-process');
+    const pending = preserveShots(tree(), input, deps());
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(existsSync(shotsArchiveDir(archive, 'task-1', HEAD))).toBe(false);
+    expect(readFileSync(join(lock, 'owner'), 'utf8')).toBe('live-process');
+    rmSync(lock, { recursive: true });
+    expect((await pending).outcome).toBe('archived');
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it('同一个头：已交付的清单和归档替换并发，两边都不失败，清单读得出来且图与清单对得上', async () => {
+    shot('2969/a.png', png('a'));
+    const blobs = new Set([gitBlobId(png('a'))]);
+    const delivered = async () => ({ head: 'c'.repeat(40), blobs });
+    const [x, y] = await Promise.all([
+      preserveShots(tree(), input, deps()),
+      preserveShots(tree(), input, deps({ remote: delivered })),
+    ]);
+    expect(['archived', 'delivered']).toContain(x.outcome);
+    expect(['archived', 'delivered']).toContain(y.outcome);
+    const at = shotsArchiveDir(archive, 'task-1', HEAD);
+    const manifest = JSON.parse(readFileSync(join(at, 'manifest.json'), 'utf8'));
+    expect(['archived', 'delivered']).toContain(manifest.delivery.outcome);
+    if (manifest.delivery.outcome === 'archived') {
+      expect(existsSync(join(at, `${sha256(png('a'))}.png`))).toBe(true);
+    }
+    expect(readdirSync(at).filter((n) => n.endsWith('.tmp'))).toEqual([]);
+    expect(existsSync(join(archive, '.shots.lock'))).toBe(false);
+  });
+
   it('【故意造出的失败】并发收树：容量检查和写入互斥，放不下的那个失败，不超上限', async () => {
     shot('2969/a.png', png('a'));
     const limits = { archiveMaxBytes: 100 };

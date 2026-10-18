@@ -11,7 +11,9 @@
 // - 归档在 <归档>/<任务>/shots/<代码头>/：图片按 sha256 起名，manifest.json 记代码头、每张的路径、字节数、sha256、blob 号、
 //   结局。同一任务同一个头重试：清单对得上就不重写；换了头另起目录；别的任务的目录只在过期时删。
 // - 容量：所有任务的图片归档合计不超过 archiveMaxBytes；超过 keepDays 天的整目录删掉。删完还放不下就失败，树留着。
-//   清过期、算容量、写入在同一把归档锁里（withArchiveLock），并发收树不会各自通过检查再一起超限。
+//   清过期、算容量、写入在同一把归档锁里（withArchiveLock），并发收树不会各自通过检查再一起超限。锁里记持有者令牌、
+//   持有者定时续期（超过 10 分钟没续才当死锁接手）、释放只删自己的、不可逆的一步之前核对还持着锁；
+//   已交付的清单也在这把锁里写，不会和同一个头的归档替换交错。
 // - 看不全就失败：孤儿提交（无父提交、只含普通文件的图片）太多、不可达提交里的无父提交超过清点上限，一律算失败、树留着。
 // - 已交付也要把清单（固定的头、清单、hash、结局）写下来，写不成算失败，不报已交付。
 // - 删树的路不止收树一条：每小时对账的清扫和一键清理、建树前删同一位置的旧树、不带 shots 的收树都先过 keepShotsBeforeRemove，
@@ -19,7 +21,7 @@
 // - 读树里的东西一律以会话用户的身份（user-git.ts 的 runInTree / gitInTree）：引擎不以自己的身份进会话的目录。
 
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { ShotFileRecord, ShotsDelivery, ShotsInput } from '../ports.ts';
@@ -558,9 +560,13 @@ async function writeRecord(
   const done = { ...delivery, archivedTo: file };
   const temp = join(dir, `.manifest-${randomUUID()}.tmp`);
   try {
-    await mkdir(dir, { recursive: true, mode: 0o700 });
-    await writeFile(temp, manifestJson(input, deps, done), { mode: 0o600 });
-    await rename(temp, file);
+    // 和归档替换同一把锁：不会和同一个头的 rm + rename 交错，写下的清单不会被换掉目录时带走
+    await withArchiveLock(deps.archiveDir, async (held) => {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await writeFile(temp, manifestJson(input, deps, done), { mode: 0o600 });
+      await held();
+      await rename(temp, file);
+    });
     return done;
   } catch (error) {
     await rm(temp, { force: true }).catch(() => undefined);
@@ -649,14 +655,20 @@ async function archiveEntries(archiveDir: string): Promise<{ dir: string; bytes:
 const archiveQueues = new Map<string, Promise<unknown>>();
 const LOCK_NAME = '.shots.lock';
 const LOCK_WAIT_MS = 60_000;
-/** 持锁的段落只写至多几十 MB：锁目录超过这么久没动当成上一个持锁的进程死了，清掉。 */
+/** 超过这么久没续期的锁当成持锁的进程死了，可以接手。持锁的进程每 LOCK_BEAT_MS 续一次期，所以活着的不会被当成死锁。 */
 const LOCK_STALE_MS = 10 * 60_000;
+const LOCK_BEAT_MS = 30_000;
+const LOCK_OWNER = 'owner';
+
+/** 持锁期间交给 fn 的核对：锁被别人接手了（进程冻住太久、锁目录被清）就抛，调用方在不可逆的一步之前调。 */
+type HeldCheck = () => Promise<void>;
 
 /**
  * 容量检查和写入之间的互斥（决定容量上限不被并发收树冲破）：进程内按归档目录排队，跨进程靠归档目录下的锁目录
- * （mkdir 原子；过久没动的当死锁清掉）。等不到锁抛错，调用方当归档没成、树留着。
+ * （mkdir 原子；锁里记持有者的令牌，持有者定时续期，只有超过 LOCK_STALE_MS 没续的才被接手，释放只删自己的锁）。
+ * 等不到锁抛错，调用方当归档没成、树留着。
  */
-async function withArchiveLock<T>(archiveDir: string, fn: () => Promise<T>): Promise<T> {
+async function withArchiveLock<T>(archiveDir: string, fn: (held: HeldCheck) => Promise<T>): Promise<T> {
   const prev = archiveQueues.get(archiveDir) ?? Promise.resolve();
   const run = prev.catch(() => undefined).then(() => withDirLock(archiveDir, fn));
   archiveQueues.set(archiveDir, run);
@@ -667,32 +679,60 @@ async function withArchiveLock<T>(archiveDir: string, fn: () => Promise<T>): Pro
   }
 }
 
-async function withDirLock<T>(archiveDir: string, fn: () => Promise<T>): Promise<T> {
+const readOwner = (lock: string) => readFile(join(lock, LOCK_OWNER), 'utf8').catch(() => null);
+
+async function withDirLock<T>(archiveDir: string, fn: (held: HeldCheck) => Promise<T>): Promise<T> {
   await mkdir(archiveDir, { recursive: true, mode: 0o700 });
   const lock = join(archiveDir, LOCK_NAME);
+  const token = randomUUID();
   const until = Date.now() + LOCK_WAIT_MS;
   for (;;) {
     try {
       await mkdir(lock, { mode: 0o700 });
+      try {
+        await writeFile(join(lock, LOCK_OWNER), token, { mode: 0o600 });
+      } catch (error) {
+        // 目录是自己建的、令牌没写成：撤掉，别留个没主的锁
+        await rm(lock, { recursive: true, force: true });
+        throw error;
+      }
       break;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const seen = await readOwner(lock);
       const age = await stat(lock).then(
         (s) => Date.now() - s.mtimeMs,
         () => 0,
       );
-      if (age > LOCK_STALE_MS) {
-        await rm(lock, { recursive: true, force: true });
+      if (age > LOCK_STALE_MS && (await readOwner(lock)) === seen) {
+        // 接手：先改名再删，不碰这期间别人新建的同名锁（改名成功的只有一个）
+        const dead = `${lock}.stale-${randomUUID()}`;
+        await rename(lock, dead).then(
+          () => rm(dead, { recursive: true, force: true }),
+          () => undefined,
+        );
         continue;
       }
       if (Date.now() > until) throw new Error('等归档的锁等了太久，别的收树还占着');
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
   }
+  const held: HeldCheck = async () => {
+    if ((await readOwner(lock)) !== token) throw new Error('归档的锁被别的进程接手了，这次不写');
+  };
+  const beat = setInterval(() => {
+    void held().then(
+      () => utimes(lock, new Date(), new Date()),
+      () => undefined,
+    );
+  }, LOCK_BEAT_MS);
+  beat.unref();
   try {
-    return await fn();
+    return await fn(held);
   } finally {
-    await rm(lock, { recursive: true, force: true });
+    clearInterval(beat);
+    // 只删自己的：被接手后锁是别人的了
+    if ((await readOwner(lock)) === token) await rm(lock, { recursive: true, force: true });
   }
 }
 
@@ -705,7 +745,9 @@ function archiveShots(
   found: readonly Found[],
   pending: ShotsDelivery,
 ): Promise<ShotsDelivery> {
-  return withArchiveLock(deps.archiveDir, () => archiveShotsLocked(dir, input, deps, limits, found, pending));
+  return withArchiveLock(deps.archiveDir, (held) =>
+    archiveShotsLocked(dir, input, deps, limits, found, pending, held),
+  );
 }
 
 /** 存图：先清过期的、算容量，放得下才写；写进临时目录、逐张核对 hash，再换上。 */
@@ -716,6 +758,7 @@ async function archiveShotsLocked(
   limits: ShotsLimits,
   found: readonly Found[],
   pending: ShotsDelivery,
+  held: HeldCheck,
 ): Promise<ShotsDelivery> {
   const manifestFile = join(dir, 'manifest.json');
   const reused = await sameArchive(dir, found);
@@ -726,6 +769,7 @@ async function archiveShotsLocked(
   for (const e of await archiveEntries(deps.archiveDir)) {
     if (e.dir === dir) continue;
     if (e.at < cutoff) {
+      await held();
       await rm(e.dir, { recursive: true, force: true });
       continue;
     }
@@ -749,6 +793,7 @@ async function archiveShotsLocked(
     }
     const done: ShotsDelivery = { ...pending, archivedTo: manifestFile };
     await writeFile(join(temp, 'manifest.json'), manifestJson(input, deps, done), { mode: 0o600 });
+    await held();
     await rm(dir, { recursive: true, force: true });
     await rename(temp, dir);
     return done;
