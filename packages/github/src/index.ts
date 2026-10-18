@@ -69,12 +69,15 @@ export {
   createClaimsGitHub,
   type LatestStatus,
   type PullFacts,
+  type PullReviewComment,
 } from './engine-pulls.ts';
 export { GitHubError, isGitHubError, redact, redactDeep } from './errors.ts';
 export {
   createEventSink,
   type EventSink,
   type IngestedEvent,
+  type MergedReviewNote,
+  reviewMergeHold,
   type WakeEvent,
   type WorkflowWaker,
 } from './events.ts';

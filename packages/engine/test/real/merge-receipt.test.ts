@@ -13,12 +13,15 @@ import {
   memoryIdempotencyStore,
   memoryLedger,
   mergeKey,
+  reviewMergeHold,
   silentLogger,
 } from '@fleet-dao/github';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PortContext } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { createGitHubPorts, type EngineGitHub } from '../../src/real/github-ports.ts';
+import type { TaskActivitiesDeps } from '../../src/real/task-activities.ts';
+import { reviewChangesReader } from '../../src/real/task-verify.ts';
 import { fakeTrees } from './fixtures.ts';
 
 const API = 'https://api.github.test';
@@ -52,6 +55,7 @@ const ctx: PortContext = {
   heartbeat() {},
   attempt: 1,
   lastHeartbeat: undefined,
+  workflowId: 'task-ci-merged-late',
 };
 
 let apps: Record<'agent' | 'engine', AppCredentials> | undefined;
@@ -85,8 +89,13 @@ type WriterFault =
   | 'other-actor'
   | { mergeCommit: string | null };
 
-function world(fault?: WriterFault) {
+function world(
+  fault?: WriterFault,
+  late?: { readFails?: boolean; writeFails?: boolean; approved?: boolean },
+) {
   const requests: string[] = [];
+  const notes: Parameters<NonNullable<TaskActivitiesDeps['onLateReview']>>[0][] = [];
+  const author = { login: 'boss', id: 1001, type: 'User' };
   const json = (status: number, body: unknown) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
   const pull = {
@@ -98,7 +107,7 @@ function world(fault?: WriterFault) {
     body: '',
     draft: false,
     merged: true,
-    merged_at: MERGED_AT,
+    merged_at: MERGED_AT as string | null,
     merge_commit_sha: MERGE as string | null,
     mergeable: true,
     user: { login: 'fleet-test-agent[bot]', id: 7, type: 'Bot' },
@@ -166,6 +175,43 @@ function world(fault?: WriterFault) {
       pull.merged = true;
       return json(200, { merged: true, sha: MERGE });
     }
+    if (method === 'GET' && path === `/repos/acme/widgets/pulls/${PR}/reviews`)
+      return json(200, [
+        {
+          id: 99,
+          user: author,
+          state: late?.approved ? 'APPROVED' : 'CHANGES_REQUESTED',
+          body: '具体漏洞见行内评论',
+          commit_id: HEAD,
+          submitted_at: MERGED_AT,
+        },
+      ]);
+    if (method === 'GET' && path === `/repos/acme/widgets/pulls/${PR}/reviews/99/comments`) {
+      if (!url.searchParams.has('page'))
+        return new Response('[]', {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            link: `<${API}${path}?per_page=100&page=2>; rel="next"`,
+          },
+        });
+      if (late?.readFails) return json(502, { message: 'late inline second page unavailable' });
+      return json(200, [
+        {
+          id: 102,
+          pull_request_review_id: 99,
+          user: author,
+          body: 'LATE_CI_INLINE_UNDELIVERED',
+          path: 'src/auth.ts',
+          pull_request_url: `${API}/repos/acme/widgets/pulls/${PR}`,
+          line: null,
+          original_line: 8,
+          commit_id: HEAD,
+          original_commit_id: HEAD,
+          updated_at: MERGED_AT,
+        },
+      ]);
+    }
     // 分支合并后已经删了
     if (method === 'GET' && path.startsWith('/repos/acme/widgets/git/ref/heads/')) {
       return json(404, { message: 'Not Found' });
@@ -198,8 +244,27 @@ function world(fault?: WriterFault) {
     },
   } as unknown as EngineGitHub;
   const logs: string[] = [];
+  const reviewChanges = reviewChangesReader({
+    listReviews: real.claims.listReviews,
+    listReviewComments: real.claims.listReviewComments,
+    whitelist: async () => ({
+      userIds: new Set([author.id]),
+      botIds: new Set<number>(),
+      logins: new Set<string>(),
+    }),
+  });
+  const reviewDeps = late
+    ? {
+        reviewChanges,
+        onLateReview: async (note: (typeof notes)[number]) => {
+          if (late.writeFails) throw Error('late ledger unavailable');
+          notes.push(note);
+        },
+      }
+    : {};
   const ports = createGitHubPorts({
-    gh,
+    gh: late ? real : gh,
+    ...reviewDeps,
     trees: fakeTrees(join(root, 'work')).trees,
     exec: localExec(),
     tmpDir: join(root, 'tmp'),
@@ -208,7 +273,7 @@ function world(fault?: WriterFault) {
   });
   const waitCi = () => ports.waitCi({ taskId: 't1', repo, prNumber: PR, branch: BRANCH, head: HEAD }, ctx);
   const key = mergeKey(ref, PR, HEAD);
-  return { waitCi, store, key, requests, logs };
+  return { waitCi, store, key, requests, logs, notes, real, pull, author };
 }
 
 const receipt: MergeReceipt = { number: PR, head: HEAD, mergeCommit: MERGE, mergedBy: ENGINE_LOGIN };
@@ -227,6 +292,72 @@ function noWrites(requests: readonly string[]) {
 }
 
 describe('等 CI 看到已合并：走真实回执收口（#3018）', () => {
+  it.each([false, true])(
+    '事件看到open且未挂合并后外部合并：真实waitCi/HTTP/reader补未送达账，行内读失败=%s',
+    async (readFails) => {
+      const w = world(undefined, { readFails });
+      w.pull.state = 'open';
+      w.pull.merged = false;
+      w.pull.merged_at = null;
+      const eventNotes: unknown[] = [];
+      const hold = reviewMergeHold(w.real.claims, undefined, async (note) => {
+        eventNotes.push(note);
+      });
+      const eventPullReads = w.requests.filter((r) => r === `GET /repos/acme/widgets/pulls/${PR}`).length;
+      await hold.wake({
+        repo: 'acme/widgets',
+        prNumbers: [PR],
+        deliveryId: 'late-ci-review',
+        source: 'webhook',
+        event: 'pull_request_review',
+        action: 'submitted',
+        reviewState: 'changes_requested',
+        headRef: BRANCH,
+        review: { id: 99, reviewer: w.author.login, commitId: HEAD },
+      });
+      expect(w.requests.filter((r) => r === `GET /repos/acme/widgets/pulls/${PR}`).length).toBe(
+        eventPullReads + 1,
+      );
+      expect(eventNotes).toEqual([]);
+      w.pull.state = 'closed';
+      w.pull.merged = true;
+      w.pull.merged_at = MERGED_AT;
+      expect(await w.waitCi()).toEqual(merged);
+      expect(w.notes).toHaveLength(1);
+      expect(w.notes[0]?.workflowId).toBe(ctx.workflowId);
+      expect(w.notes[0]).toMatchObject(
+        readFails
+          ? {
+              repo: ref,
+              prNumber: PR,
+              review: null,
+              error: expect.stringContaining('late inline second page unavailable'),
+            }
+          : {
+              repo: ref,
+              prNumber: PR,
+              review: { reviewId: 99, inlineComments: [{ id: 102, body: 'LATE_CI_INLINE_UNDELIVERED' }] },
+            },
+      );
+      noWrites(w.requests);
+    },
+  );
+
+  it.each([false, true])(
+    '真实waitCi已合后的late明账写失败抛出，重试仍尝试记账；APPROVED无误报；读失败=%s',
+    async (readFails) => {
+      const options = { writeFails: true, readFails };
+      const w = world(undefined, options);
+      await expect(w.waitCi()).rejects.toThrow('late ledger unavailable');
+      options.writeFails = false;
+      expect(await w.waitCi()).toEqual(merged);
+      expect(w.notes).toHaveLength(1);
+      const approved = world(undefined, { approved: true });
+      expect(await approved.waitCi()).toEqual(merged);
+      expect(approved.notes).toEqual([]);
+    },
+  );
+
   it('正常合法路径、账上还没有：记成 github.merge_pr，回执是 GitHub 实际的头、合并提交、合并人；重试幂等', async () => {
     const w = world();
     expect(await w.waitCi()).toEqual(merged);

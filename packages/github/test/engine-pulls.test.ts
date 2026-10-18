@@ -2,9 +2,101 @@
 // 不当成贴上了；读头上的状态认得出是谁贴的；撤自动合并、关 PR（分支不动）、在 PR 上留言。
 import { describe, expect, it } from 'vitest';
 import { isGitHubError } from '../src/errors.ts';
-import { repo, setup, sha } from './helpers.ts';
+import { API } from './fake-github.ts';
+import { json, repo, setup, sha } from './helpers.ts';
 
 const CTX = '认领对得上';
+
+const inlinePath = '/repos/acme/widgets/pulls/7/reviews/99/comments';
+const inlineFact = (over: Record<string, unknown> = {}) => ({
+  id: 101,
+  pull_request_review_id: 99,
+  user: { login: 'boss', id: 9, type: 'User' },
+  body: '原文\n  保留缩进',
+  path: 'src/auth.ts',
+  pull_request_url: `${API}/repos/acme/widgets/pulls/7`,
+  line: null,
+  original_line: null,
+  commit_id: sha('a'),
+  original_commit_id: sha('b'),
+  updated_at: '2026-10-18T00:00:00Z',
+  ...over,
+});
+
+describe('engine-pulls：正式review行内原文', () => {
+  it('真实HTTP逐页读取、只读引擎身份、合法缺失/空位置保留；相同编号去重并按id排稳', async () => {
+    const { gh, fake } = setup();
+    fake.before.push((r) =>
+      r.path !== inlinePath
+        ? undefined
+        : r.query.get('page') === '2'
+          ? json(200, [
+              inlineFact(),
+              inlineFact({ id: 102, line: 12, side: 'RIGHT', start_line: 10, start_side: 'RIGHT' }),
+            ])
+          : json(200, [inlineFact({ id: 103 })], {
+              link: `<${API}${inlinePath}?per_page=100&page=2>; rel="next"`,
+            }),
+    );
+    const got = await gh.claims.listReviewComments(repo, 7, 99);
+    expect(got.map((c) => c.id)).toEqual([101, 102, 103]);
+    expect(got[0]).toMatchObject({
+      reviewId: 99,
+      body: '原文\n  保留缩进',
+      line: null,
+      originalLine: null,
+      side: null,
+      startLine: null,
+      startSide: null,
+    });
+    expect(got[1]).toMatchObject({ line: 12, side: 'RIGHT', startLine: 10, startSide: 'RIGHT' });
+    expect(fake.calls('GET', /reviews\/99\/comments$/).map((c) => c.as)).toEqual(['engine', 'engine']);
+    expect(fake.calls('GET', /reviews\/99\/comments$/)[0]?.query.get('per_page')).toBe('100');
+  });
+
+  it.each([
+    { body: undefined },
+    { body: 7 },
+    { pull_request_review_id: 100 },
+    { pull_request_url: `${API}/repos/other/widgets/pulls/7` },
+    { pull_request_url: `${API}/repos/acme/widgets/pulls/8` },
+    { pull_request_url: 'https://other.test/repos/acme/widgets/pulls/7' },
+    { user: null },
+    { updated_at: 'not-a-date' },
+  ])('坏字段或串repo/PR/review明确报没查成：%j', async (over) => {
+    const { gh, fake } = setup();
+    fake.before.push((r) => (r.path === inlinePath ? json(200, [inlineFact(over)]) : undefined));
+    await expect(gh.claims.listReviewComments(repo, 7, 99)).rejects.toMatchObject({
+      code: 'UNEXPECTED_RESPONSE',
+    });
+  });
+
+  it('同编号冲突内容明确失败；完全相同的重复页条目只返回一次', async () => {
+    for (const conflict of [false, true]) {
+      const { gh, fake } = setup();
+      fake.before.push((r) =>
+        r.path === inlinePath
+          ? json(200, [inlineFact(), inlineFact(conflict ? { body: 'edited during pagination' } : {})])
+          : undefined,
+      );
+      if (conflict) await expect(gh.claims.listReviewComments(repo, 7, 99)).rejects.toThrow('同编号内容冲突');
+      else expect(await gh.claims.listReviewComments(repo, 7, 99)).toHaveLength(1);
+    }
+  });
+
+  it('安全网触顶仍有下一页就报未读全，不返回前10页', async () => {
+    const { gh, fake } = setup();
+    fake.before.push((r) =>
+      r.path === inlinePath
+        ? json(200, [], {
+            link: `<${API}${inlinePath}?page=${Number(r.query.get('page') ?? 1) + 1}>; rel="next"`,
+          })
+        : undefined,
+    );
+    await expect(gh.claims.listReviewComments(repo, 7, 99)).rejects.toMatchObject({ code: 'TOO_MANY_PAGES' });
+    expect(fake.calls('GET', /reviews\/99\/comments$/)).toHaveLength(10);
+  });
+});
 
 describe('engine-pulls：读 PR', () => {
   it('现读一个 PR：正文、头、作者、自动合并开没开；列开着的 PR 不带关了的', async () => {
@@ -178,6 +270,63 @@ describe('engine-pulls：提交状态', () => {
         : undefined,
     );
     await expect(gh.claims.latestStatus(repo, sha('a'), CTX)).rejects.toThrow('没查成');
+  });
+});
+
+describe('engine-pulls：读正式评审（#2991）', () => {
+  const reviewsOf = (reply: () => Response) => (req: { path: string }) =>
+    /\/pulls\/7\/reviews$/.test(req.path) ? reply() : undefined;
+
+  it('以引擎机器人读 PR 上全部评审：原文、review id、审的提交、作者原样带回；没写正文是空串', async () => {
+    const { gh, fake } = setup();
+    fake.before.push(
+      reviewsOf(
+        () =>
+          new Response(
+            JSON.stringify([
+              {
+                id: 5560285247,
+                user: { login: 'boss', id: 9, type: 'User' },
+                state: 'CHANGES_REQUESTED',
+                body: '来源认证有洞：别信 payload 里的 sender',
+                commit_id: sha('a'),
+                submitted_at: '2026-10-17T01:00:00Z',
+              },
+              { id: 2, user: null, state: 'COMMENTED', body: null, commit_id: null, submitted_at: null },
+            ]),
+            { status: 200 },
+          ),
+      ),
+    );
+    const got = await gh.claims.listReviews(repo, 7);
+    expect(got).toEqual([
+      {
+        id: 5560285247,
+        author: { login: 'boss', id: 9, type: 'User' },
+        state: 'CHANGES_REQUESTED',
+        body: '来源认证有洞：别信 payload 里的 sender',
+        commitId: sha('a'),
+        submittedAt: '2026-10-17T01:00:00Z',
+      },
+      { id: 2, author: null, state: 'COMMENTED', body: '', commitId: null, submittedAt: null },
+    ]);
+    const calls = fake.calls('GET', /\/pulls\/7\/reviews$/);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.as).toBe('engine');
+    expect(calls[0]?.query.get('per_page')).toBe('100');
+  });
+
+  it('【故意造出的失败】评审列表认不出、GitHub 回 5xx：抛错，不当成没有评审', async () => {
+    const bad = setup();
+    bad.fake.before.push(
+      reviewsOf(() => new Response(JSON.stringify([{ id: 'x', state: 'APPROVED' }]), { status: 200 })),
+    );
+    await expect(bad.gh.claims.listReviews(repo, 7)).rejects.toThrow();
+    const down = setup();
+    down.fake.before.push(
+      reviewsOf(() => new Response(JSON.stringify({ message: 'boom' }), { status: 500 })),
+    );
+    await expect(down.gh.claims.listReviews(repo, 7)).rejects.toThrow();
   });
 });
 

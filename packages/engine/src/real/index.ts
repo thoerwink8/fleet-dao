@@ -33,6 +33,7 @@ import {
   insertAlertOnce,
   latestRunOfTask,
   listIntakeRepos,
+  raiseLateReview,
   readEngineMasterRow,
   readFlowModeSettingRaw,
   recordFlowAssignment,
@@ -46,7 +47,7 @@ import {
 import { createGitHub } from '@fleet-dao/github';
 import { intakeChatLimitsFrom, parseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { pgLedger, pgLocker } from '@fleet-dao/store';
+import { createPgStore, githubWhitelist, pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import type { EngineJobs, EngineTasks } from '../activities.ts';
 import type { CheckoutBlockedAlert } from '../cold-verify-run.ts';
@@ -111,6 +112,7 @@ import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
 import { requestSweepJob } from './request-sweep.ts';
 import { retireEngineSchedules } from './retire-schedules.ts';
+import type { ReviewAuditDeps } from './review-audit.ts';
 import { routeProbeJob } from './route-probe.ts';
 import {
   lazyTemporalWakeClient,
@@ -129,12 +131,12 @@ import { createStorePorts } from './store-ports.ts';
 import { lazyOnSuccess, prepareSubagents, readSubagentGuard, subagentsOnce } from './subagents-file.ts';
 import { createTaskActivities } from './task-activities.ts';
 import { createRunSegment } from './task-segment.ts';
-import { createColdVerify, mirrorFileDiff } from './task-verify.ts';
+import { createColdVerify, mirrorFileDiff, reviewChangesReader } from './task-verify.ts';
 import { usageBackfillJob } from './usage-backfill.ts';
 import { watchdogJob } from './watchdog.ts';
 import { DEFAULT_WORK_ROOT, helperWorkTrees, type WorkTrees } from './worktrees.ts';
 
-export interface RealPortsDeps {
+export interface RealPortsDeps extends ReviewAuditDeps {
   db: Db;
   gh: EngineGitHub;
   trees: WorkTrees;
@@ -210,6 +212,8 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     exec: deps.exec,
     tmpDir: deps.tmpDir,
     archiveDir: deps.archiveDir,
+    ...(deps.reviewChanges ? { reviewChanges: deps.reviewChanges } : {}),
+    ...(deps.onLateReview ? { onLateReview: deps.onLateReview } : {}),
     ...(deps.now ? { now: deps.now } : {}),
     ...(deps.log ? { log: deps.log } : {}),
     ...(deps.session?.gitBin ? { gitBin: deps.session.gitBin } : {}),
@@ -863,7 +867,31 @@ export function realPortsFromEnv(
   });
   // 动手会话脱开引擎跑（#2238）：发版重启引擎时放手、新引擎接回，不再停在跑的会话
   const handoff = sessionHandoff(DEFAULT_SESSION_IO_ROOT);
+  const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
+  // 冷验收、合前及每个已合并出口（含waitCi）共用真实reader和未送达明账；成员白名单每次现读。
+  const members = createPgStore(db);
+  const reviewChanges = reviewChangesReader({
+    listReviews: (repo, prNumber) => gh.claims.listReviews(repo, prNumber),
+    listReviewComments: (repo, prNumber, reviewId) => gh.claims.listReviewComments(repo, prNumber, reviewId),
+    whitelist: async () => githubWhitelist(await members.listUsers()),
+  });
+  const reviewAudit: ReviewAuditDeps = {
+    reviewChanges,
+    onLateReview: async (note) => {
+      await raiseLateReview(db, {
+        repo: `${note.repo.owner}/${note.repo.name}`,
+        prNumber: note.prNumber,
+        source: 'merge-audit',
+        review: note.review
+          ? { reviewId: note.review.reviewId, reviewer: note.review.reviewer, commitId: note.review.commitId }
+          : null,
+        error: note.error,
+        workflowId: note.workflowId,
+      });
+    },
+  };
   const real = createRealPorts({
+    ...reviewAudit,
     db,
     master,
     carpoolRegistry: () => carpoolCap.view(),
@@ -1036,7 +1064,6 @@ export function realPortsFromEnv(
       env,
     }),
   };
-  const taskLog = (message: string, fields?: Record<string, unknown>) => console.info(message, fields ?? {});
   // 子代理（#1641，决定 0087）：claude-code 的干活会话带的 --agents 文件，引擎起来时从发布目录的 agents/subagents/ 生成一次；生成不成时
   // claude-code 的干活会话起不来（hosts.ts 写清原因），这里先记一条日志。Mirasim 的会话靠工作树里的 settings.local.json 挡子代理，
   // 要的是名字清单，现读现用（读不到就不起会话，不带着没挡的状态起）。
@@ -1090,6 +1117,7 @@ export function realPortsFromEnv(
       trees,
       exec,
       log: taskLog,
+      ...reviewAudit,
       profileOf: async (repo) => {
         const row = await findRepoProfile(db, repo.owner, repo.name);
         if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);
@@ -1178,6 +1206,8 @@ export function realPortsFromEnv(
       gh,
       // 文件接口不给 patch 的大文件，用引擎镜像里的 git 补读（#1308）
       fileDiff: mirrorFileDiff(gh),
+      // 验收有结论时现读 PR 上还没解决的正式「要求改」（#2991），工作流交给下一轮动手会话
+      reviewChanges,
       pickRoute: real.ports.pickRoute,
       spawner: segmentSpawner,
       runs: taskRuns,

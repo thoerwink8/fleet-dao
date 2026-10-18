@@ -27,6 +27,7 @@ export * from './queries/idle-running.ts';
 export * from './queries/intake.ts';
 export * from './queries/intake-history.ts';
 export * from './queries/jev.ts';
+export * from './queries/late-review.ts';
 export * from './queries/local-claims.ts';
 export * from './queries/local-orphans.ts';
 export * from './queries/merge-stall.ts';
