@@ -71,7 +71,7 @@ systemctl is-active fleet-temporal.service; echo exit:$?
 
 10:38 干净关机。系统内无人下命令、无崩溃和内存耗尽，疑似宿主机侧。关机 1 小时 01 分，11:40 重新开机。控制台显示 Running 不可信。这是第一次真实重启。
 
-留证：`last -x | head` 里 `shutdown` 紧挨着下一次 `reboot` 就是客机干净关过；`/var/crash` 空着就不是内核 panic。谁下的关机：`journalctl -b -1 -u systemd-logind`（会话用户读不到）。
+留证：`last -x | head` 里的 `shutdown` 和下一次 `reboot` 用来核对关机、开机时间，再结合 `journalctl -b -1 -u systemd-logind` 确认是否走了干净关机流程（会话用户读不到）；干净关机不等于已查明触发者。`/var/crash` 空只说明该路径没读到转储，不足以排除内核 panic。还要结合前一启动的内核日志（`journalctl -b -1 -k`）、已配置的 kdump/pstore 记录和供应商事件；未配置采集、读不到或没有持久日志时，明确记为未知。[Linux Kdump](https://docs.kernel.org/admin-guide/kdump/kdump.html) 的转储依赖预留内存、加载捕获内核和成功写出，[Ramoops](https://docs.kernel.org/admin-guide/ramoops.html) 的持久记录也依赖相应配置与存储；这里仅核查已有证据，不安装或开启采集器。
 
 ## 2026-10-19 事故（#3134，恢复核验未收口）
 
