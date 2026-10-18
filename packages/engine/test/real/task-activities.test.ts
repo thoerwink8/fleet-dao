@@ -592,6 +592,37 @@ describe('挂自动合并', () => {
   const run = (gh: Gh) =>
     make({ gh }).acts.armAutoMerge({ schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD }, ctx());
 
+  /** 评审反例里的将来截止：取消不能靠「还没到点」放行。 */
+  const futureDeadlines = (): Pick<PortContext, 'attemptDeadlineMs' | 'scheduleDeadlineMs'> => {
+    const now = Date.now();
+    return { attemptDeadlineMs: now + 600_000, scheduleDeadlineMs: now + 1_200_000 };
+  };
+
+  /** 只读先挂住，测试在挂住期间取消，再放行。entered 在开始等待时就完成，避免和取消赛跑。 */
+  function holdThen<T>(value: () => T): {
+    entered: Promise<void>;
+    release: () => void;
+    run: () => Promise<T>;
+  } {
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    return {
+      entered,
+      release: releaseGate,
+      run: async () => {
+        markEntered();
+        await gate;
+        return value();
+      },
+    };
+  }
+
   it('开着、头对得上、没挂：挂上', async () => {
     const f = fakeGh({ readPull: async () => pullFacts(), enableAutoMerge: async () => undefined });
     expect(await run(f.gh)).toEqual({ armed: true, merged: false });
@@ -635,6 +666,119 @@ describe('挂自动合并', () => {
       ),
     ).toEqual({ armed: true, merged: false });
     expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('没取消、数值截止还在将来：照常挂上', async () => {
+    const f = fakeGh({ readPull: async () => pullFacts(), enableAutoMerge: async () => undefined });
+    const { acts } = make({ gh: f.gh });
+    expect(
+      await acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx(futureDeadlines()),
+      ),
+    ).toEqual({ armed: true, merged: false });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge']);
+  });
+
+  it('读 PR 期间被取消、数值截止还在将来：放行后不挂合并、不直接合', async () => {
+    const ac = new AbortController();
+    const held = holdThen(() => pullFacts());
+    const f = fakeGh({
+      readPull: held.run,
+      enableAutoMerge: async () => undefined,
+      mergePr: async () => mergedOk(),
+    });
+    const { acts } = make({ gh: f.gh });
+    const pending = acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx({ signal: ac.signal, ...futureDeadlines() }),
+    );
+    await held.entered;
+    ac.abort(new Error('活动已取消'));
+    held.release();
+    await expect(pending).rejects.toThrow('活动已取消');
+    expect(ac.signal.aborted).toBe(true);
+    expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('读正式评审期间被取消、数值截止还在将来：放行后不挂合并、不直接合', async () => {
+    const ac = new AbortController();
+    const held = holdThen(() => [] as ReviewChange[]);
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => undefined,
+      mergePr: async () => mergedOk(),
+    });
+    const { acts } = make({
+      gh: f.gh,
+      reviewChanges: held.run,
+    });
+    const pending = acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx({ signal: ac.signal, ...futureDeadlines() }),
+    );
+    await held.entered;
+    ac.abort(new Error('活动已取消'));
+    held.release();
+    await expect(pending).rejects.toThrow('活动已取消');
+    expect(ac.signal.aborted).toBe(true);
+    expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('挂合并返回 clean 时上下文已取消、数值截止还在将来：不再直接合', async () => {
+    const ac = new AbortController();
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        ac.abort(new Error('活动已取消'));
+        throw new GitHubError('GRAPHQL_ERROR', 'Pull request is in clean status');
+      },
+      mergePr: async () => mergedOk(),
+    });
+    const { acts } = make({ gh: f.gh });
+    await expect(
+      acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx({ signal: ac.signal, ...futureDeadlines() }),
+      ),
+    ).rejects.toThrow('活动已取消');
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge']);
+  });
+
+  it('现读检查期间被取消、放行后已是绿、数值截止还在将来：不再第二次直接合', async () => {
+    const ac = new AbortController();
+    const held = holdThen(
+      (): MergeWaitChecks => ({
+        overall: 'green',
+        failed: [],
+      }),
+    );
+    let merges = 0;
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        throw new GitHubError('GRAPHQL_ERROR', 'Pull request is in clean status');
+      },
+      mergePr: async () => {
+        merges += 1;
+        return { merged: false, reason: 'ci_not_green' as const, detail: '没跑完：merge-gate' };
+      },
+    });
+    const { acts } = make({
+      gh: f.gh,
+      readChecks: async () => held.run(),
+    });
+    const pending = acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx({ signal: ac.signal, ...futureDeadlines() }),
+    );
+    await held.entered;
+    ac.abort(new Error('活动已取消'));
+    held.release();
+    await expect(pending).rejects.toThrow('活动已取消');
+    expect(merges).toBe(1);
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
   });
 
   it('挂合并那一下把期限用完、GitHub 说已经是 clean：不再直接合', async () => {

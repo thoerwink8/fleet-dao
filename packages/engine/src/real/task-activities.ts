@@ -10,10 +10,12 @@
 //   再走这一入口。真红交 checksRed。必过名单里有一条没出现，哪怕旁边还有在跑的，也不交 checksPending。读不成、没出现、对不上，
 //   why 里写明没查成并点名没出现的检查，不靠「ci_not_green / 没跑完」这句原文当还在跑。
 //   别的拒绝原样说明原因交工作流停下报人。
-// - 挂合并的写请求（enableAutoMerge、以及因 clean 才走的直接合）在开写之前看这次活动的截止（PortContext 上的
-//   attemptDeadlineMs / scheduleDeadlineMs）。git 档不心跳，服务端判了超时之后进程里的代码还会往下走，取消信号不会响。
-//   截止已过就不再向 GitHub 发起新的写；已经发出、结果未知的，下一次先 readPull：已经挂上就当挂上了，不盲重试。
-//   本地超时撤不回 GitHub 已经接受的请求。没填截止（活动测试不经 Temporal）时照旧写。
+// - 挂合并的写请求（enableAutoMerge、以及因 clean 才走的直接合）在开写之前同时看取消信号和这次活动的截止
+//   （PortContext 上的 attemptDeadlineMs / scheduleDeadlineMs）。信号已经取消（前面的读 PR、读评审、读检查被挂住后再放行）
+//   就不再向 GitHub 发起新的写，哪怕数值截止还在将来。git 档不心跳，服务端判了超时之后进程里的代码还会往下走，
+//   取消信号不会响，所以超时仍靠数值截止拦。截止已过同样不再开新的写；已经发出、结果未知的，下一次先 readPull：
+//   已经挂上就当挂上了，不盲重试。本地超时或取消撤不回 GitHub 已经接受的请求。没填截止、信号也没取消
+//   （活动测试不经 Temporal）时照旧写。
 // - 合并记录：这个仓的对账（github 包 auditMergedPrs）要求引擎开的 PR 账上有合并记录。自动合并是 GitHub 自己合的，没有记录，
 //   所以等到合并之后再调一次 mergePr——它对「已经合了」的 PR 只补记录、删分支，不再合一次。补不成只记日志，不拦任务往下走。
 // - 等合并是长轮询（心跳不断）：叫停时休眠被打断，活动抛取消，不吞。
@@ -140,11 +142,14 @@ function isCleanStatus(error: unknown): boolean {
 }
 
 /**
- * 这次活动的尝试或总期限已经到了：不要再向 GitHub 发起新的挂合并或直接合。
- * 不心跳时取消信号不会响，只在工作流返回之后看也来不及——写请求已经发出去了。
- * 两个截止都没填（不经 Temporal 的测试）就当还来得及。
+ * 不要再向 GitHub 发起新的挂合并或直接合。
+ * 先看取消信号：读 PR、读评审、读检查被挂住期间信号已经取消，放行之后数值截止往往还在将来，不能靠截止兜住。
+ * 抛的是信号上的原因（Temporal 叫停是 CancelledFailure），好让这一次活动按取消收场，而不是当成挂合并失败去重试。
+ * 不心跳时服务端超时不会把信号取消，进程里的代码还会往下走，所以接着看数值截止。两个截止都没填、信号也没取消
+ * （不经 Temporal 的测试）就当还来得及。已经发出去的请求这里撤不回来。
  */
 function refuseLateArmWrite(ctx: PortContext): void {
+  ctx.signal.throwIfAborted();
   const marks = [ctx.attemptDeadlineMs, ctx.scheduleDeadlineMs].filter(
     (n): n is number => typeof n === 'number' && Number.isFinite(n),
   );
@@ -708,7 +713,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       };
 
       try {
-        // 读过 PR 了：已经挂上的在上面返回，不会走到这里。期限已过就不再开新的写。
+        // 读过 PR、读过评审了：已经挂上的在上面返回，不会走到这里。已取消或期限已过就不再开新的写。
         refuseLateArmWrite(ctx);
         await mapped(() => gh.claims.enableAutoMerge(repo, pull));
         // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
@@ -726,7 +731,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       } catch (error) {
         if (!isCleanStatus(error)) throw error;
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
-        // 挂的那一下若已把期限用完，不再另开直接合。已经发出去的挂合并请求撤不回来。
+        // 这一下若已取消，或挂的时候把期限用完，不再另开直接合。已经发出去的挂合并请求撤不回来。
         refuseLateArmWrite(ctx);
         const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
         return acceptDirectMerge(merged, true);
