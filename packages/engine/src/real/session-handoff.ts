@@ -168,12 +168,18 @@ export async function listIo(root: string): Promise<IoEntry[]> {
   for (const runId of names) {
     if (!RUN_ID.test(runId)) continue;
     const dir = join(root, runId);
-    const info = await stat(dir).catch(() => undefined);
+    const info = await stat(dir).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
     if (!info?.isDirectory()) continue;
-    const text = await readFile(join(dir, DETACHED_MARK), 'utf8').catch(() => undefined);
+    const text = await readFile(join(dir, DETACHED_MARK), 'utf8').catch((error: NodeJS.ErrnoException) => {
+      if (error.code === 'ENOENT') return undefined;
+      throw error;
+    });
     const at = text === undefined ? undefined : new Date(text.trim());
-    // 交接单读不出（写坏了）当没有：收孤儿时没有它发不了 stop，只能收本机的东西
-    const mirasim = await readMirasimHandle(dir).catch(() => undefined);
+    // 缺文件可以是 CLI 会话；有文件却读不懂时不能把仍在用的目录当成孤儿删。
+    const mirasim = await readMirasimHandle(dir);
     // 标记写坏了（读得出、认不出）按「刚放手」算：宁可多留到 TTL，也不把可能还要接回的会话收掉
     out.push({
       runId,
