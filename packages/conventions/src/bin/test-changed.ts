@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readGraph } from '../ci-plan.ts';
 import { docReaders } from '../doc-readers.ts';
+import { runLocalVitest } from '../local-vitest.ts';
 import { fsRepo } from '../repo.ts';
 import { type GitRun, testChanged } from '../test-changed.ts';
 import { ENV_HELD, realSlotDeps, runInSlot } from '../test-slots.ts';
@@ -40,8 +41,7 @@ const code = testChanged({
     // 本机同时最多 N 个测试（test-slots.ts）：CI 里、外层已拿着槽时不拿；拿不到槽算没跑成，不是测试没过。
     return runInSlot(process.env, realSlotDeps(console.log), (held) => {
       const env = held === undefined ? process.env : { ...process.env, [ENV_HELD]: held };
-      const r = spawnSync(process.execPath, [vitest, ...args], { cwd: root, stdio: 'inherit', env });
-      return { status: r.status, signal: r.signal, error: r.error };
+      return runLocalVitest(root, args, env);
     });
   },
   out: (line) => console.log(line),
