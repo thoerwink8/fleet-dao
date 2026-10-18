@@ -28,6 +28,8 @@
 
 ## 改它时要连带改
 
+`resolveNotification` 的可选 `expected` 用于历史审计处置：事务内核对原通知键、正文和链接，已处理时只有同一份审计可以幂等返回，否则 `conflict`。普通处理入口不带它，保留现有行为。
+
 - 改接口：`ports.ts` → `memory-store.ts` + `pg-store.ts` → 契约测试；调用方在 api 和 engine。
 - 要新表或新列：先在 `packages/db` 改表结构并生成迁移（见 `packages/db/AGENTS.md`），再改这里。
 - 要驾驶舱实时看到的新表：登记 `packages/shared/src/realtime.ts` 的 `REALTIME_TABLES`，触发器在 db 的迁移里。

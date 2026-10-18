@@ -24,6 +24,7 @@
 // routing:all-open）。组织还没读完、库读失败照抛，不返回「解了」。
 
 import {
+  type acceptanceDuties,
   authorFamilyOf,
   type Db,
   type EndedPoolRun,
@@ -49,9 +50,11 @@ import {
   saveTaskSnapshot,
   setChannelFallback,
   type TaskRoutePin,
+  upsertAcceptanceDuty,
   upsertAlert,
 } from '@fleet-dao/db';
 import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
+import { errMessage } from '@fleet-dao/shared/util';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
 import { type RouteReply, routeBreaker } from '../failure/breaker.ts';
@@ -62,7 +65,14 @@ import {
   TASK_RESUMED_PARK_WHY,
   TASK_STOPPED_PARK_WHY,
 } from '../park-alerts.ts';
-import { type EnginePorts, type PickRouteResult, PortError, type RouteChoice } from '../ports.ts';
+import {
+  type AcceptanceDuty,
+  type AcceptanceDutyRecord,
+  type EnginePorts,
+  type PickRouteResult,
+  PortError,
+  type RouteChoice,
+} from '../ports.ts';
 import {
   type AllOpenCheck,
   type BreakerFacts,
@@ -215,7 +225,7 @@ export interface StorePortsDeps {
 
 type StorePorts = Pick<
   EnginePorts,
-  'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState' | 'recordRound'
+  'pickRoute' | 'raiseAlert' | 'recordTiming' | 'saveTaskState' | 'recordRound' | 'acceptanceDuties'
 > & {
   /**
    * 这个阶段现在是不是全熔断。和 pickRoute 同一个 loadStage、同一套熔断判定；暂停的账号池同样避开。
@@ -1109,5 +1119,100 @@ export function createStorePorts(deps: StorePortsDeps): StorePorts {
       else if (input.state === 'running' && input.phase !== 'parked')
         await resolveGenerationParkAlerts(db, ctx.workflowId, TASK_RESUMED_PARK_WHY);
     },
+
+    async acceptanceDuties(input) {
+      return { open: await recordAcceptanceDuties(db, input, clock()) };
+    },
   };
+}
+
+// —— 验收责任（#3037，db 的 acceptance_duties）：冷验收转人的验收条，代码合了也留着原单，直到最终验收完成 ——
+// 写、读都在这几个函数里（工作流收尾的 acceptanceDuties 端口、冷验收转人、本机租约收回共用）。读不成、写不成一律抛
+// ACCEPTANCE_DUTY_UNCHECKED（可重试）：调用方记「没查成」，不回空数组冒充「没有待验的」。
+
+const dutyUnchecked = (what: string, error: unknown): PortError =>
+  error instanceof PortError
+    ? error
+    : new PortError('ACCEPTANCE_DUTY_UNCHECKED', `验收责任${what}没做成：${errMessage(error)}`, {
+        retryable: true,
+      });
+
+type DutyRow = typeof acceptanceDuties.$inferSelect;
+
+function dutyOf(row: DutyRow): AcceptanceDuty {
+  return {
+    repo: row.repo,
+    issueNumber: row.issueNumber,
+    prNumber: row.prNumber,
+    head: row.head,
+    items: [...row.items],
+    source: row.source === 'coordination' ? 'coordination' : 'cold_verify',
+    mergeCommit: row.mergeCommit,
+  };
+}
+
+/** 一条要记的责任先核对形状：没有验收项、有 PR 却没有头的不记（记了也说不清是哪个头上转的）。 */
+function checkDutyRecord(r: AcceptanceDutyRecord): AcceptanceDutyRecord {
+  const items = [...new Set(r.items.map((i) => i.trim()).filter((i) => i !== ''))];
+  if (
+    items.length === 0 ||
+    !Number.isInteger(r.prNumber) ||
+    r.prNumber < 0 ||
+    r.prNumber > 0 !== (r.head !== '')
+  ) {
+    throw new PortError(
+      'ACCEPTANCE_DUTY_INVALID',
+      `验收责任记不了：要有验收项，PR 号和头要么都有、要么都没有（PR #${r.prNumber}、头「${r.head.slice(0, 12)}」、${items.length} 条）`,
+      { retryable: false },
+    );
+  }
+  return { ...r, items };
+}
+
+/** 这张单还开着的验收责任（按记下的先后）。读不成抛 ACCEPTANCE_DUTY_UNCHECKED。 */
+export async function openAcceptanceDuties(db: Db, taskId: string): Promise<AcceptanceDuty[]> {
+  try {
+    const rows = await db.query.acceptanceDuties.findMany({
+      where: (t, { and, eq, isNull }) => and(eq(t.taskId, taskId), isNull(t.settledAt)),
+      orderBy: (t, { asc }) => [asc(t.id)],
+    });
+    return rows.map(dutyOf);
+  } catch (error) {
+    throw dutyUnchecked('读', error);
+  }
+}
+
+/**
+ * 记下几条验收责任，再读回这张单还开着的全部。按「单 + PR + 头」幂等：已有的那一行原验收项只并不删，合并回执只补不改
+ * （已经记了合并提交的不覆盖）。最终验收完成过的那一行不会因为重来又开回去。
+ */
+export async function recordAcceptanceDuties(
+  db: Db,
+  input: {
+    taskId: string;
+    repo: { owner: string; name: string };
+    issueNumber: number;
+    record: AcceptanceDutyRecord[];
+  },
+  now: Date,
+): Promise<AcceptanceDuty[]> {
+  const records = input.record.map(checkDutyRecord);
+  try {
+    for (const r of records) {
+      const values = {
+        taskId: input.taskId,
+        repo: `${input.repo.owner}/${input.repo.name}`,
+        issueNumber: input.issueNumber,
+        prNumber: r.prNumber,
+        head: r.head,
+        items: r.items,
+        source: r.prNumber === 0 ? 'coordination' : 'cold_verify',
+        ...(r.mergeCommit ? { mergeCommit: r.mergeCommit, mergedAt: now } : {}),
+      };
+      await upsertAcceptanceDuty(db, values);
+    }
+  } catch (error) {
+    throw dutyUnchecked('写', error);
+  }
+  return openAcceptanceDuties(db, input.taskId);
 }

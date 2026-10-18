@@ -58,6 +58,7 @@ import { generationLife, readTaskGenerations } from '../jobs/redo.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
 import type { TaskWorkflowInput } from '../task-contract.ts';
 import { groomRequestDeps } from './groom-request.ts';
+import { openAcceptanceDuties } from './store-ports.ts';
 
 const execFileAsync = promisify(execFile);
 /**
@@ -197,6 +198,8 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           await extendLocalLease(w.db, taskId, until);
         },
         settle: (input) => settleExpiredLocalClaim(w.db, input),
+        // 还开着的验收责任（#3037）：挂在任务行上，退回之前看一眼，代码已合的不退回重做；读不到照抛、这一轮记没查成
+        openDuties: (taskId) => openAcceptanceDuties(w.db, taskId),
         async unmarkLocal({ repo, issueNumber }) {
           await w.gh.removeIssueLabel({
             repo: { owner: repo.owner, name: repo.name },

@@ -9,9 +9,12 @@
 //   都没有 → 摘「本机做」、在单上留一句话、行改成 stopped + engine（拉单按「stopped 且没有任何一代」接手，和接手老行同一条路）。
 // 先动 GitHub 再改行：改行写不成，下一轮整件事重来（摘标签不在就当摘了，留言按键只留一次）；反过来先改行，标签摘不掉，单就卡在「本机做」上没人接。
 // 读不到、写不成记进 unchecked（这一轮记没查成），不当成「没有到期的」。
+// 验收责任（#3037）：退回之前看这张单还有没有开着的验收责任。代码已合（或只剩协调验收责任，没有代码要写）就不退回法国重做、
+// 不造空 PR：留言列出原验收项，行记做完，单子留着等人验；没合的照旧退回，退回的留言里也列出原验收项。读不到记没查成、不退回。
 import { issueOfBranch, LOCAL_LABEL } from '@fleet-dao/conventions';
 import { LOCAL_LEASE_MS, type LocalSessionsReport, localSessionState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
+import type { AcceptanceDuty } from '../ports.ts';
 
 /**
  * 本机会话心跳里，还在 local/<单号>- 分支上活着的单号（某仓的）：整份推来的时刻不到租约时长、会话没收场（last ≠ end）、
@@ -80,21 +83,59 @@ export interface LocalLeaseDeps {
   }): Promise<number>;
   /** 摘「本机做」（没贴着不算错）。 */
   unmarkLocal(input: { repo: LocalLeaseRepo; issueNumber: number }): Promise<void>;
+  /**
+   * 这张单（任务行）还开着的验收责任（#3037，store-ports 的 openAcceptanceDuties）。读不到照抛：这一轮这条租约记没查成、不退回，
+   * 不当成没有。缺省不看（老装配）。
+   */
+  openDuties?(taskId: string): Promise<Pick<AcceptanceDuty, 'prNumber' | 'head' | 'items'>[]>;
 }
 
 export interface LeaseSweepResult {
   extended: number;
   returned: number;
   closed: number;
+  /** 代码已合（或只有协调验收责任）、验收责任还开着：不退回法国重做，记做完、单子留着等人验（#3037）。 */
+  awaitingAcceptance: number;
   unchecked: string[];
 }
 
-/** 退回法国时留在单上的话。 */
-export function leaseExpiredComment(issueNumber: number, leaseUntil: Date): string {
+/** 验收责任还开着、不退回法国时留在单上的话（#3037）：原验收项原样列出来，不丢验收范围。 */
+export function leaseAcceptanceComment(
+  issueNumber: number,
+  merged: number | null,
+  duties: readonly Pick<AcceptanceDuty, 'prNumber' | 'head' | 'items'>[],
+): string {
+  return [
+    `本机领这张单的租约到期了，可${merged !== null ? `代码已经合了（PR #${merged}）` : '这张单只剩协调验收责任（没有代码要写）'}，验收责任还开着：不退回法国重做，单子留着等人验。`,
+    '',
+    ...duties.flatMap((d) => [
+      d.prNumber > 0 ? `PR #${d.prNumber}（头 ${d.head}）转给人验的：` : '协调验收责任：',
+      ...d.items.map((i) => `- ${i}`),
+    ]),
+    '',
+    `验完记下最终验收完成以后才关 #${issueNumber}。`,
+  ].join('\n');
+}
+
+/** 退回法国时留在单上的话。还开着的验收责任（#3037）原样列在后面：退回不丢验收范围，法国收尾照它留着单。 */
+export function leaseExpiredComment(
+  issueNumber: number,
+  leaseUntil: Date,
+  duties: readonly Pick<AcceptanceDuty, 'prNumber' | 'head' | 'items'>[] = [],
+): string {
   return [
     `本机领这张单的租约在 ${leaseUntil.toISOString()} 到期：${LOCAL_LEASE_MS / 3_600_000} 小时里本机没有会话在 \`local/${issueNumber}-\` 分支上动过、没有开着的 PR 挂着它、也没有续租，当作本机会话已经断了。`,
     '',
     `已摘掉「${LOCAL_LABEL}」，退回法国队列：交代齐的话引擎下一轮会接。要本机接着做，先 \`pnpm work claim ${issueNumber}\` 重新领（引擎已经接了就领不到）。`,
+    ...(duties.length > 0
+      ? [
+          '',
+          '还开着的验收责任跟着单子走（引擎收尾照它留着单，不关）：',
+          ...duties.flatMap((d) =>
+            d.items.map((i) => `- ${d.prNumber > 0 ? `PR #${d.prNumber}：` : ''}${i}`),
+          ),
+        ]
+      : []),
   ].join('\n');
 }
 
@@ -112,7 +153,7 @@ export async function sweepLocalLeases(
   },
 ): Promise<LeaseSweepResult> {
   const slug = `${repo.owner}/${repo.name}`;
-  const out: LeaseSweepResult = { extended: 0, returned: 0, closed: 0, unchecked: [] };
+  const out: LeaseSweepResult = { extended: 0, returned: 0, closed: 0, awaitingAcceptance: 0, unchecked: [] };
   if (deps.unexpired) {
     try {
       for (const lease of await deps.unexpired(repo, ctx.now)) {
@@ -163,11 +204,28 @@ export async function sweepLocalLeases(
         out.extended += 1;
         continue;
       }
+      // 验收责任还开着（#3037）：代码已合、或只剩协调验收责任，退回法国只会重做一遍或开空 PR；记做完，单子留着等人验
+      const duties = deps.openDuties ? await deps.openDuties(lease.taskId) : [];
+      if (duties.length > 0) {
+        const merged = await deps.mergedPr(repo, lease.issueNumber);
+        if (merged !== null || duties.every((d) => d.prNumber === 0)) {
+          await ctx.comment({
+            issueNumber: lease.issueNumber,
+            key: `local-lease-acceptance:${lease.leaseUntil.toISOString()}`,
+            body: leaseAcceptanceComment(lease.issueNumber, merged, duties),
+          });
+          const why = `本机租约 ${lease.leaseUntil.toISOString()} 到期：${merged !== null ? `PR #${merged} 已合` : '只剩协调验收责任'}，验收责任 ${duties.length} 条还开着，不退回法国，单子留着等人验`;
+          if ((await deps.settle({ taskId: lease.taskId, how: 'done', why, now: ctx.now })) > 0) {
+            out.awaitingAcceptance += 1;
+          }
+          continue;
+        }
+      }
       if (labels.includes(LOCAL_LABEL)) await deps.unmarkLocal({ repo, issueNumber: lease.issueNumber });
       await ctx.comment({
         issueNumber: lease.issueNumber,
         key: `local-lease-expired:${lease.leaseUntil.toISOString()}`,
-        body: leaseExpiredComment(lease.issueNumber, lease.leaseUntil),
+        body: leaseExpiredComment(lease.issueNumber, lease.leaseUntil, duties),
       });
       const why = `本机租约 ${lease.leaseUntil.toISOString()} 到期，没有心跳、没有开着的 PR：退回法国队列`;
       if ((await deps.settle({ taskId: lease.taskId, how: 'returned', why, now: ctx.now })) > 0) {

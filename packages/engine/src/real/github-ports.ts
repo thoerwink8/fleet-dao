@@ -2,7 +2,7 @@
 // 里程碑，#654；查询轴「域:」「性质:」从单上照抄，某一轴不是恰好一个就不抄那一轴，没有需求号或单上没有也不挡）、
 // 第 2 轮起改 PR 正文（#2723）、等 CI（等着时 PR 已合并：现读核实、记合并回执再回，merge-receipt.ts，#3018）、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
 // 并不上才停下留言）、关单，以及建树（记下主线的头；树等起会话时由会话
-// 自己建，见 sessions.ts）、收树（先存档没提交的改动；界面验收图片先核对远端、没交付存进受限归档，存不成不删树，见 shots.ts；
+// 自己建，见 sessions.ts）、收树（干净未发布提交先完整打包并独立恢复核验，复杂未提交成果留原树；界面验收图片先核对远端、没交付存进受限归档，存不成不删树，见 shots.ts；
 // 不带 shots 的收树、建树前删同一位置的旧树也过这一道）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
 
@@ -11,7 +11,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { GATE_CONTEXT, issueOfBranch, pullsOnIssue, resolveQueryAxes } from '@fleet-dao/conventions';
-import type { GitHub, PrBodyInput } from '@fleet-dao/github';
+import { type GitHub, type PrBodyInput, renderPrBody } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
 import {
@@ -28,6 +28,7 @@ import { isTaskBranch } from '../task-branch.ts';
 import type { UserExec } from './exec.ts';
 import { type MergeLog, settleMergedCi } from './merge-receipt.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
+import { preserveWorktree } from './preserve-worktree.ts';
 import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
 import {
   blobsInBundle,
@@ -53,7 +54,6 @@ import {
   pinIncoming,
   pinMainline,
   type UserTree,
-  uncommittedPatch,
   uncommittedTracked,
 } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
@@ -97,7 +97,7 @@ export interface GitHubPortsDeps extends ReviewAuditDeps {
   exec: UserExec;
   /** 引擎自己的临时目录（bundle 落在这里，用完就删）。 */
   tmpDir: string;
-  /** 没合并就收的树，没提交的改动存到这里。 */
+  /** 收树前的完整成果包及图片存档目录（受限权限）。 */
   archiveDir: string;
   now?: () => Date;
   /** 要心跳的活动（建树）在等 GitHub 时多久报一次活着；默认 HEARTBEAT_EVERY_MS，测试调短。 */
@@ -167,6 +167,7 @@ function ownPreviousPull(headRef: string | undefined, issue: number): boolean {
 function prBody(body: PrBody): PrBodyInput {
   return {
     ...(body.requirement === undefined ? {} : { requirement: body.requirement }),
+    ...(body.requirementRefs ? { requirementRefs: true } : {}),
     ...(body.subtask === undefined ? {} : { subtask: body.subtask }),
     did: body.did,
     verified: body.verified,
@@ -500,6 +501,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
               { retryable: false, details: { worktree: path } },
             );
           }
+          await preserveWorktree(t, deps.archiveDir, { taskId: input.taskId, branch: input.branch }, kept);
           await trees.remove(path);
         }
         return { path, branch: input.branch, baseSha: main.head };
@@ -543,19 +545,15 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           };
         }
       }
-      let archivedTo: string | undefined;
-      if (input.archive) {
-        const { status, patch } = await uncommittedPatch(t);
-        if (status.length > 0 || patch.length > 0) {
-          const dir = join(deps.archiveDir, input.taskId);
-          await mkdir(dir, { recursive: true, mode: 0o700 });
-          const stamp = now().toISOString().replace(/[:.]/g, '-');
-          const file = join(dir, `${input.subtaskKey ?? 'tree'}-${stamp}.patch`);
-          const header = `# git status\n${status.map((s) => `# ${s}`).join('\n')}\n`;
-          await writeFile(file, Buffer.concat([Buffer.from(header), patch]), { mode: 0o600 });
-          archivedTo = file;
-        }
-      }
+      const archivedTo = await preserveWorktree(
+        t,
+        deps.archiveDir,
+        {
+          taskId: input.taskId,
+          branch: input.branch,
+        },
+        delivery,
+      );
       const { gone } = await trees.remove(input.path);
       return { removed: !gone, gone, ...(archivedTo ? { archivedTo } : {}), ...(shots ? { shots } : {}) };
     },
@@ -819,6 +817,14 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     async updatePrBody(input) {
       // 第 2 轮起「做了什么」换成这一轮会话的回复（#2723）：和开 PR 同一份结构、同一个模板，用「引擎」机器人改
       await mapped(() => gh.claims.updatePullBody(input.repo, input.prNumber, prBody(input.body)));
+      if (input.body.requirementRefs) {
+        const actual = await mapped(() => gh.claims.readPull(input.repo, input.prNumber));
+        if (actual.number !== input.prNumber || actual.body !== renderPrBody(prBody(input.body))) {
+          throw new PortError('ACCEPTANCE_PR_BODY_UNCHECKED', '合并前分片 Refs 正文没回读齐，暂不进入合并', {
+            retryable: true,
+          });
+        }
+      }
     },
 
     async waitCi(input, ctx) {

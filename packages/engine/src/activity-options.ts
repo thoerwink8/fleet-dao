@@ -124,6 +124,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   updatePrBody: 'git',
   syncMainline: 'git',
   closeIssue: 'git',
+  acceptanceDuties: 'quick',
   createWorktree: 'setup',
   waitCi: 'ci',
   probeAssignedRoute: 'job',

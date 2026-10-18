@@ -20,7 +20,7 @@ import {
 import type { EngineActivities } from '../activity-options.ts';
 import type { FailureContext, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Limits } from '../limits.ts';
-import type { RouteChoice, Worktree } from '../ports.ts';
+import type { AcceptanceDutyRecord, RouteChoice, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import {
   type AbandonCommand,
@@ -123,6 +123,11 @@ export class TaskRuntime {
    * 同一条（同 PR、同编号、同完整意见）再读到不再派工；纯状态，只在 patched('review-request-changes') 之后写。
    */
   readonly reviewsHanded = new Map<string, string>();
+  /**
+   * 冷验收转给人的验收条（#3037，结论里的 outOfScope）：按 PR + 头各记一份，收尾时一起记进验收责任（活动那边已记过的幂等）。
+   * 纯状态，不调活动；老历史的结论里没有 outOfScope，这里一直是空的。
+   */
+  readonly handedOver: AcceptanceDutyRecord[] = [];
   /** 当前单子正文读出来的交代。点「继续」重读之后换掉，验收用这一份，不用起任务时的旧版。 */
   brief: TaskBrief | null = null;
   /** 轮数用尽、人点「继续」之后重读单子。由 TaskFlow 接上。 */
@@ -204,6 +209,15 @@ export class TaskRuntime {
   /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */
   private roundResets = 0;
   attemptSeq = 0;
+
+  /** 记下一次冷验收转给人的验收条（同一 PR 同一个头只记一份，后来的条目并进去）。 */
+  noteHandedOver(prNumber: number, head: string, items: readonly string[]): void {
+    const fresh = items.map((i) => i.trim()).filter((i) => i !== '');
+    if (fresh.length === 0) return;
+    const same = this.handedOver.find((d) => d.prNumber === prNumber && d.head === head);
+    if (same) same.items = [...new Set([...same.items, ...fresh])];
+    else this.handedOver.push({ prNumber, head, items: [...new Set(fresh)] });
+  }
 
   constructor(input: TaskWorkflowInput, acts: EngineActivities, limits: Limits) {
     this.input = input;

@@ -93,7 +93,7 @@ function world(over: Partial<World> = {}): World & { gh: (args: string[]) => Pro
     if (page?.[1]) return ok(w.timeline[Number(page[1]) - 1] ?? []);
     return fail(`假 gh 不认得：${args.join(' ')}`);
   };
-  return Object.assign(w, { gh });
+  return Object.assign(w, { gh, acceptance: async () => undefined });
 }
 
 const run = (w: ReturnType<typeof world>, ...argv: string[]) => issueClose(argv.length ? argv : ['241'], w);
@@ -460,5 +460,32 @@ describe('入口的退出码', { timeout: 0 }, () => {
     });
     expect(r.status).toBe(2);
     expect(r.stderr).toMatch(/gh 读 #241失败（退出码 127）：找不到 gh 命令.*没关/);
+  });
+});
+
+describe('最终现场验收标准门', () => {
+  it('--note及不做了都不能吞掉未结清责任', async () => {
+    for (const args of [
+      ['241', '--note', '我验好了'],
+      ['241', '--reason', 'not_planned'],
+    ]) {
+      const w = world();
+      await expect(issueClose(args, { ...w, acceptance: async () => '责任仍未结清' })).rejects.toBeInstanceOf(
+        CloseRefused,
+      );
+      expect(closeCalls(w)).toEqual([]);
+    }
+  });
+  it('真实账不可达明确unknown，不发关单写入', async () => {
+    const w = world();
+    await expect(
+      issueClose(['241', '--note', 'done'], {
+        ...w,
+        acceptance: async () => {
+          throw new Error('DB unavailable');
+        },
+      }),
+    ).rejects.toBeInstanceOf(CloseUnchecked);
+    expect(closeCalls(w)).toEqual([]);
   });
 });

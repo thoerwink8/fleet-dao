@@ -61,6 +61,7 @@ import {
   readNodeSnapshot,
   readWorktreeInventoryPayload,
 } from './node-logic.ts';
+import { matchesNotification, sameResolutionAudit } from './notification-resolution.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import type {
   AuditRecord,
@@ -667,10 +668,15 @@ export function createMemoryStore(
       }
       return counts;
     },
-    async resolveNotification({ id, by }, entry) {
+    async resolveNotification({ id, by, expected }, entry) {
       const n = data.notifications.find((x) => x.id === id);
       if (!n) return 'not_found';
-      if (!isNotificationOpen(n)) return 'already_resolved';
+      if (expected && !matchesNotification(n, expected)) return 'conflict';
+      if (!isNotificationOpen(n)) {
+        if (expected && (n.resolvedBy !== by.id || !data.audit.some((a) => sameResolutionAudit(a, entry))))
+          return 'conflict';
+        return 'already_resolved';
+      }
       checkAudit(entry);
       n.resolvedAt = now().toISOString();
       n.resolvedBy = by.id;
