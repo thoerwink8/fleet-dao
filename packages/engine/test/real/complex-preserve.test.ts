@@ -266,7 +266,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     expect(ENVIRONMENT_FILES.map((item) => item.path)).toContain('.claude/settings.json');
   });
 
-  it('进程占用：树内 cwd 算在用，同主读不了算不清，别的用户读不了继续看', async () => {
+  it('进程占用：树内 cwd 算在用；同主兄弟读不了 cwd 继续看，子孙读不了或 /proc 列不了算不清', async () => {
     const denied = Object.assign(new Error('denied'), { code: 'EACCES' });
     const busy: ProcLook = {
       async list() {
@@ -278,6 +278,9 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       async uid() {
         return '1';
       },
+      async ppid() {
+        return 1;
+      },
     };
     expect(await treeProcessUsage('/work/tree', '9', 10, 11, busy)).toBe('busy');
     const deleted: ProcLook = {
@@ -287,7 +290,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       },
     };
     expect(await treeProcessUsage('/work/tree', '9', 10, 11, deleted)).toBe('busy');
-    const unknown: ProcLook = {
+    const sibling: ProcLook = {
       async list() {
         return ['1'];
       },
@@ -297,8 +300,57 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       async uid() {
         return '9';
       },
+      async ppid() {
+        return 1;
+      },
     };
-    expect(await treeProcessUsage('/work/tree', '9', 10, 11, unknown)).toBe('unknown');
+    expect(await treeProcessUsage('/work/tree', '9', 10, 11, sibling)).toBe('idle');
+    const child: ProcLook = {
+      async list() {
+        return ['1'];
+      },
+      async cwd() {
+        throw denied;
+      },
+      async uid() {
+        return '9';
+      },
+      async ppid() {
+        return 10;
+      },
+    };
+    expect(await treeProcessUsage('/work/tree', '9', 10, 11, child)).toBe('unknown');
+    const uidUnreadable: ProcLook = {
+      async list() {
+        return ['1'];
+      },
+      async cwd() {
+        throw denied;
+      },
+      async uid() {
+        throw Object.assign(new Error('status'), { code: 'EIO' });
+      },
+      async ppid() {
+        return 1;
+      },
+    };
+    expect(await treeProcessUsage('/work/tree', '9', 10, 11, uidUnreadable)).toBe('unknown');
+    const mixed: ProcLook = {
+      async list() {
+        return ['1', '2'];
+      },
+      async cwd(pid) {
+        if (pid === 1) throw denied;
+        return '/work/tree/file';
+      },
+      async uid() {
+        return '9';
+      },
+      async ppid(pid) {
+        return pid === 1 ? 1 : 10;
+      },
+    };
+    expect(await treeProcessUsage('/work/tree', '9', 10, 11, mixed)).toBe('busy');
     const unlistable: ProcLook = {
       async list() {
         throw new Error('no proc');
@@ -308,6 +360,9 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       },
       async uid() {
         return '1';
+      },
+      async ppid() {
+        return 1;
       },
     };
     expect(await treeProcessUsage('/work/tree', '9', 10, 11, unlistable)).toBe('unknown');
@@ -321,6 +376,9 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       },
       async uid() {
         return '5';
+      },
+      async ppid() {
+        return 1;
       },
     };
     expect(await treeProcessUsage('/work/tree', '9', 10, 11, other)).toBe('idle');

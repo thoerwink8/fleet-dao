@@ -113,6 +113,8 @@ export interface ProcLook {
   list(): Promise<readonly string[]>;
   cwd(pid: number): Promise<string>;
   uid(pid: number): Promise<string | null>;
+  /** 父进程号。进程没了抛 ENOENT 或 ESRCH。 */
+  ppid(pid: number): Promise<number | null>;
 }
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -314,13 +316,46 @@ const linuxProcLook: ProcLook = {
     return readlink(`/proc/${pid}/cwd`);
   },
   async uid(pid) {
-    const text = await readFile(`/proc/${pid}/status`, 'utf8');
-    const line = text.split('\n').find((item) => item.startsWith('Uid:'));
+    const line = (await readFile(`/proc/${pid}/status`, 'utf8'))
+      .split('\n')
+      .find((item) => item.startsWith('Uid:'));
     return line?.split(/\s+/)[1] ?? null;
+  },
+  async ppid(pid) {
+    const line = (await readFile(`/proc/${pid}/status`, 'utf8'))
+      .split('\n')
+      .find((item) => item.startsWith('PPid:'));
+    const value = Number(line?.split(/\s+/)[1]);
+    return Number.isInteger(value) ? value : null;
   },
 };
 
-/** 有进程的 cwd 在这棵树里就是在用。同主进程的 cwd 读不了、或 /proc 列不了，都算确认不了。 */
+/**
+ * 有进程的 cwd 在这棵树里就是在用。/proc 列不了算确认不了。
+ * yama.ptrace_scope 默认看不了同主的兄弟进程，那种 EACCES 不是「有人在这棵树里」。
+ * 同主子孙的 cwd 读不了、uid 读不了，才算确认不了。看见有人在用，优先于确认不了。
+ */
+async function descendantOf(pid: number, selfPid: number, look: ProcLook): Promise<'yes' | 'no' | 'unknown'> {
+  let current = pid;
+  const seen = new Set<number>();
+  for (let hop = 0; hop < 64; hop += 1) {
+    if (seen.has(current)) return 'unknown';
+    seen.add(current);
+    let parent: number | null;
+    try {
+      parent = await look.ppid(current);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      return code === 'ENOENT' || code === 'ESRCH' ? 'no' : 'unknown';
+    }
+    if (parent === null) return 'unknown';
+    if (parent === selfPid) return 'yes';
+    if (parent <= 1) return 'no';
+    current = parent;
+  }
+  return 'unknown';
+}
+
 export async function treeProcessUsage(
   real: string,
   ownerUid: string,
@@ -336,6 +371,7 @@ export async function treeProcessUsage(
     return 'unknown';
   }
   const selfUid = process.getuid?.()?.toString() ?? ownerUid;
+  let unseen = false;
   for (const name of names) {
     if (!/^\d+$/.test(name)) continue;
     const pid = Number(name);
@@ -348,13 +384,21 @@ export async function treeProcessUsage(
       let uid: string | null;
       try {
         uid = await look.uid(pid);
-      } catch {
-        return 'unknown';
+      } catch (uidError) {
+        const uidCode = (uidError as NodeJS.ErrnoException).code;
+        if (uidCode === 'ENOENT' || uidCode === 'ESRCH') continue;
+        unseen = true;
+        continue;
       }
-      if (uid === null || uid === ownerUid || uid === selfUid) return 'unknown';
+      if (uid === null) {
+        unseen = true;
+        continue;
+      }
+      if (uid !== ownerUid && uid !== selfUid) continue;
+      if ((await descendantOf(pid, selfPid, look)) !== 'no') unseen = true;
     }
   }
-  return 'idle';
+  return unseen ? 'unknown' : 'idle';
 }
 
 export function cleanupLockPath(archiveDir: string, dev: string, ino: string, real: string): string {
