@@ -2,7 +2,7 @@
 // 和等 CI 时看到已合并（github-ports.ts 的 waitCi，#3018）都走 bookMergedPull，不另起一套记账。
 //
 // 改这里之前必须知道：
-// - github 包的 mergePr 对已合并的 PR 只记账、删分支，不再发合并请求；账上已经有这把键的（正常记的，或每小时对账补的
+// - mergePr 必须带 onlyBook：在 writer 实际重读处核已合并事实和回执，绝不发合并请求；账上已经有这把键的（正常记的，或每小时对账补的
 //   github.merge_pr_backfill）原样留着，不升级、不覆盖来源。
 // - 等 CI 看到已合并时先现读 PR 核实：没合、关了没合、合的不是 CI 查过的头，都不记账、不当成合上了；读不到、记账没成
 //   照抛（写明 PR 和合并提交），交 waitCi 这次活动重试或失败分流，不把结果未知当成功，也不留给对账去补。
@@ -29,8 +29,8 @@ interface PullRef {
 const short = (sha: string) => sha.slice(0, 7);
 
 /**
- * 给已经合了的 PR 记合并回执（mergePr 只记账、删分支，不再合）。调用方先读过 PR 确认已合并才调：
- * 没合的 PR 交给 mergePr 会真去合。合的不是 expectedHead 回 booked: false（merged_other_head），读不到、记不成照抛。
+ * 给已经合了的 PR 记合并回执。onlyBook 在 writer 实际重读处拒绝未合并、错号和不完整回执，不能退到主动合并。
+ * 合的不是 expectedHead 回 booked: false（merged_other_head），读不到、记不成照抛。
  */
 export async function bookMergedPull(
   gh: Pick<EngineGitHub, 'mergePr'>,
@@ -38,7 +38,7 @@ export async function bookMergedPull(
   ctx: PortContext,
 ): Promise<MergeBooking> {
   const { repo, prNumber, expectedHead } = input;
-  const r = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+  const r = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead, onlyBook: true }, ctx));
   if (!r.merged) return { booked: false, reason: r.reason, detail: r.detail };
   return {
     booked: true,

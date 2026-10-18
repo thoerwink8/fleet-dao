@@ -1462,7 +1462,7 @@ describe('等 CI 时 PR 已经合了：先核实、记合并回执再回 merged�
     expect(await s.run()).toEqual({ state: 'merged', head: m.head, failedChecks: [], mergeCommit: MERGE });
     expect(s.reads).toEqual([101]);
     expect(s.calls.mergePr).toEqual([
-      { repo: { owner: 'acme', name: 'widgets' }, prNumber: 101, expectedHead: m.head },
+      { repo: { owner: 'acme', name: 'widgets' }, prNumber: 101, expectedHead: m.head, onlyBook: true },
     ]);
     expect(s.logs).toEqual([]);
   });
@@ -1539,18 +1539,7 @@ describe('等 CI 时 PR 已经合了：先核实、记合并回执再回 merged�
     await expect(fatal.run()).rejects.toMatchObject({ code: 'MERGE_RECEIPT_FAILED', retryable: false });
   });
 
-  it('回执记上了但合并人读不到 / 不是引擎：照回 merged（合并是确定的），日志写明合并人', async () => {
-    const unknown = mergedSetup({
-      mergePr: () => ({ ...engineMerged, mergedBy: null, mergedByEngine: false }),
-    });
-    expect(await unknown.run()).toMatchObject({ state: 'merged', mergeCommit: MERGE });
-    expect(unknown.logs).toEqual([
-      expect.objectContaining({
-        message: expect.stringContaining('合并人读不到'),
-        fields: expect.objectContaining({ mergedBy: null }),
-      }),
-    ]);
-
+  it('回执是已知的非引擎合并人：保留实际 merged 事实，日志写明合并人', async () => {
     const human = mergedSetup({
       mergePr: () => ({ ...engineMerged, mergedBy: 'someone', mergedByEngine: false }),
     });
