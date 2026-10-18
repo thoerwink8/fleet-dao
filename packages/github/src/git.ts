@@ -17,6 +17,7 @@ export interface GitCall {
   cwd: string;
   env: Record<string, string>;
   timeoutMs?: number;
+  signal?: AbortSignal | undefined;
 }
 
 export type GitRunner = (args: string[], call: GitCall) => Promise<GitRun>;
@@ -32,6 +33,7 @@ export const execGit: GitRunner = (args, call) =>
         timeout: call.timeoutMs ?? 120_000,
         maxBuffer: 64 * 1024 * 1024,
         windowsHide: true,
+        ...(call.signal ? { signal: call.signal } : {}),
       },
       (error, stdout, stderr) => {
         const code = error ? (typeof error.code === 'number' ? error.code : -1) : 0;

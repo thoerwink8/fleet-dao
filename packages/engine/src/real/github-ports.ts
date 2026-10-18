@@ -80,6 +80,7 @@ export type EngineGitHub = Pick<
   | 'commitIdentity'
   | 'syncMainline'
   | 'commentPull'
+  | 'fetchCommitHead'
   | 'fetchMainline'
   | 'fetchBranchHead'
   | 'readFileDiff'
