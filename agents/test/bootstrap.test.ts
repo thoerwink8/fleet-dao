@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runChild } from './child.ts';
+import { interactiveHookEnv } from './hook-env.ts';
 
 interface Health {
   reasons?: string[];
@@ -201,7 +202,7 @@ describe('不该管的机器不动手', () => {
     expect(f.calls).toHaveLength(0);
     // 真当钩子跑也是这样：退出 0、说出来
     const r = runChild(process.execPath, [HOOK], {
-      env: { ...process.env, HOME: home, USERPROFILE: home },
+      env: { ...interactiveHookEnv(), HOME: home, USERPROFILE: home },
     });
     expect(r.status).toBe(0);
     expect(r.stdout).toMatch(/引导钩子没核成/);
@@ -239,7 +240,7 @@ describe('真的当钩子跑（进程、退出码、标准输出）', () => {
     const home = mkdtempSync(join(tmpdir(), 'bootstrap-'));
     dirs.push(home);
     const r = runChild(process.execPath, [HOOK], {
-      env: { ...process.env, HOME: home, USERPROFILE: home },
+      env: { ...interactiveHookEnv(), HOME: home, USERPROFILE: home },
     });
     expect(r.status).toBe(0);
     expect(r.stdout).toBe('');

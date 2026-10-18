@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runChild, runChildOk } from '../child.ts';
+import { interactiveHookEnv } from '../hook-env.ts';
 
 const LOADER = fileURLToPath(new URL('../../hooks/plugin-loader.mjs', import.meta.url));
 const HOOKS = 'C:/Users/ada/.fleet-dao/hooks';
@@ -433,7 +434,7 @@ describe('加载器真跑（决定 0085）', () => {
       cwd,
       input: JSON.stringify({ cwd }),
       // 不往跑测试的这个会话自己的 CLAUDE_ENV_FILE 里写
-      env: { ...process.env, CLAUDE_ENV_FILE: '', ...env },
+      env: { ...interactiveHookEnv(), CLAUDE_ENV_FILE: '', ...env },
     });
   }
 
