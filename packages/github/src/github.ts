@@ -11,9 +11,11 @@ import {
   bundleCommits,
   type FetchBranchInput,
   type FetchBranchResult,
+  type FetchCommitInput,
   type FetchMainlineInput,
   type FetchMainlineResult,
   fetchBranchHead,
+  fetchCommitHead,
   fetchMainline,
   type ReadFileDiffInput,
   type ReadFileDiffResult,
@@ -180,6 +182,8 @@ export interface GitHub {
   bundleCommits(input: BundleCommitsInput, ctx?: ActivityContext): Promise<BundleCommitsResult>;
   /** 抓一个分支此刻在远端的头（不认镜像里旧引用还在不在，重新问一次）：推被拒时认领远端新头用。 */
   fetchBranchHead(input: FetchBranchInput, ctx?: ActivityContext): Promise<FetchBranchResult>;
+  /** 冷验收前补齐既定完整提交号；已有对象不联网，不用分支新头代替。 */
+  fetchCommitHead(input: FetchCommitInput, ctx?: ActivityContext): Promise<void>;
   /** 从镜像读一个文件的 `基线...头` diff（PR 文件接口对大文件不给 patch 时验收补读用；基线、头要已在镜像里）。 */
   readFileDiff(input: ReadFileDiffInput, ctx?: ActivityContext): Promise<ReadFileDiffResult>;
   openPr(input: OpenPrInput, ctx?: ActivityContext): Promise<OpenPrResult>;
@@ -359,6 +363,9 @@ export function createGitHub(options: GitHubOptions): GitHub {
     },
     async bundleCommits(input, ctx = {}) {
       return bundleCommits(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
+    },
+    async fetchCommitHead(input, ctx = {}) {
+      return fetchCommitHead(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
     },
     async fetchBranchHead(input, ctx = {}) {
       return fetchBranchHead(pushDeps, { ...input, signal: input.signal ?? ctx.signal });
