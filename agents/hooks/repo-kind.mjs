@@ -10,7 +10,7 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { gitBroken, gitOk } from './git-run.mjs';
+import { gitBroken, gitOk, gitWhy } from './git-run.mjs';
 
 /** 自用仓的标记：仓根 AGENTS.md 里单独一行 */
 export const SELF_MARK = '<!-- repo-kind: 自用仓 -->';
@@ -102,24 +102,39 @@ function beijingDay(now) {
 /**
  * 开会话那一句：没标记、远端全在创始人 GitHub 下的仓提醒问他要不要加标记。每个仓每天最多一次，记号在
  * ~/.fleet-dao/repo-kind/<仓的 git 公共目录的指纹>（和仓合同同一种分仓法）。自用仓、对外仓里远端不全是他的、
- * 不是 git 仓、git 跑不起来，都不出声；钩子自己出错说一句没查成。
+ * 不是 git 仓不出声；git 或配置读失败说一句没查成。
  * @param {{ cwd: string, git: (cwd: string, args: string[]) => { status: number | null, stdout: string, stderr: string, error?: Error }, home: string, now?: number, read?: (p: string) => string }} o
  * @returns {string[]}
  */
 export function kindReminderLines({ cwd, git, home, now = Date.now(), read = undefined }) {
   try {
     const top = git(cwd, ['rev-parse', '--show-toplevel', '--path-format=absolute', '--git-common-dir']);
-    if (gitBroken(top) || !gitOk(top)) return [];
+    if (gitBroken(top)) throw new Error(gitWhy(top));
+    if (!gitOk(top)) {
+      if (/not a git repository/i.test(top.stderr)) return [];
+      throw new Error(gitWhy(top));
+    }
     const [root, common] = top.stdout.split(/\r?\n/).map((s) => s.trim());
-    if (!root || repoKind(root, read) === 'self') return [];
-    const remotes = git(root, ['remote', '-v']);
-    if (gitBroken(remotes) || !gitOk(remotes)) return [];
+    if (!root) throw new Error('git 没返回仓根');
+    if (repoKind(root, read) === 'self') return [];
+    // remote -v / get-url 会展开 insteadOf，归属要读原始身份，不能用代理传输地址。
+    // --null 的每条记录是 key\nvalue\0，URL 中的空白不当成字段分隔。
+    const remotes = git(root, ['config', '--null', '--get-regexp', '^remote\\..*\\.(url|pushurl)$']);
+    if (gitBroken(remotes)) throw new Error(gitWhy(remotes));
+    if (remotes.status === 1 && !remotes.stdout && !remotes.stderr) return [];
+    if (!gitOk(remotes)) throw new Error(gitWhy(remotes));
+    if (!remotes.stdout.endsWith('\0')) throw new Error('远端配置输出不完整');
     const urls = [
       ...new Set(
         remotes.stdout
-          .split(/\r?\n/)
-          .map((l) => l.split(/\s+/)[1] ?? '')
-          .filter(Boolean),
+          .slice(0, -1)
+          .split('\0')
+          .map((record) => {
+            const split = record.indexOf('\n');
+            if (split < 0 || !/^remote\..*\.(url|pushurl)$/.test(record.slice(0, split)))
+              throw new Error('远端配置输出认不出');
+            return record.slice(split + 1);
+          }),
       ),
     ];
     if (!allFounderRemotes(urls)) return [];
