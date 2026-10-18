@@ -1174,6 +1174,38 @@ describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000
   });
 });
 
+type ProtoDuration = { seconds?: unknown; nanos?: unknown } | null | undefined;
+
+/** 历史里的时长（秒）。没设是 0；认不出就抛，不把空当成 0。 */
+function durationSeconds(d: ProtoDuration): number {
+  if (d == null) return 0;
+  const seconds = Number(d.seconds ?? 0);
+  const nanos = Number(d.nanos ?? 0);
+  if (!Number.isFinite(seconds) || !Number.isFinite(nanos))
+    throw new Error(`认不出时长：${JSON.stringify(d)}`);
+  return seconds + nanos / 1e9;
+}
+
+/** 历史里每一次调度 armAutoMerge 的期限（秒），按调度先后。 */
+function armBudgets(events: readonly unknown[]): { scheduleToClose: number; startToClose: number }[] {
+  const out: { scheduleToClose: number; startToClose: number }[] = [];
+  for (const e of events as {
+    activityTaskScheduledEventAttributes?: {
+      activityType?: { name?: string | null } | null;
+      scheduleToCloseTimeout?: ProtoDuration;
+      startToCloseTimeout?: ProtoDuration;
+    } | null;
+  }[]) {
+    const a = e.activityTaskScheduledEventAttributes;
+    if (a?.activityType?.name !== 'armAutoMerge') continue;
+    out.push({
+      scheduleToClose: durationSeconds(a.scheduleToCloseTimeout),
+      startToClose: durationSeconds(a.startToCloseTimeout),
+    });
+  }
+  return out;
+}
+
 describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gate）', { timeout: 120_000 }, () => {
   const ORIGIN =
     'GitHub 说 PR 已经满足合并条件，直接合被拒（ci_not_green）：PR #3072 的 CI 在 c38530e 上不是全绿（没跑完：merge-gate）';
@@ -1360,12 +1392,14 @@ describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gat
     const world = createFakeWorld();
     const head = fakeHead(101);
     const later = '后来的拒绝原文，不应盖掉原始原因';
+    // 停下那一刻挂过几次。停下之前一直还在跑；继续后第一次仍在跑（证明期限已丢掉、重新起算），下一次才挂上。
+    let parkedAt: number | null = null;
     const { tasks, calls } = scripted({
       arm: (n, input) => {
-        // 前 46 次（45 次间隔加到点那一次）一直还在跑；继续后第 47 次仍在跑，证明次数已清掉；第 48 次才挂上。
-        if (n <= polls + 1 || n === polls + 2) {
+        if (parkedAt === null) {
           return waitingCheck(input, n === 1 ? ['merge-gate'] : ['check'], n === 1 ? ORIGIN : later);
         }
+        if (n === parkedAt + 1) return waitingCheck(input, ['merge-gate']);
         return ARMED;
       },
     });
@@ -1376,10 +1410,13 @@ describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gat
         const h = await start(q, input());
         await env.sleep('18 minutes');
         const s = await statusUntil(h, parked, '等检查超时，停下');
+        parkedAt = calls.arm;
         expect(s.phase).toBe('parked');
         expect(s.lastProblem).toBe('等检查超时');
         expect(s.prNumber).not.toBeNull();
-        expect(calls.arm).toBe(polls + 1);
+        // 按工作流时间到点，不按次数：每 20 秒一次，15 分钟里至多 45 次，到点那一下不再挂
+        expect(calls.arm).toBeLessThanOrEqual(polls + 1);
+        expect(calls.arm).toBeGreaterThan(polls - 5);
         expect(calls.segment).toHaveLength(1);
         expect(calls.merge).toBe(0);
         expect(calls.armInputs.every((i) => i.expectedHead === head)).toBe(true);
@@ -1399,10 +1436,110 @@ describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gat
       { tasks },
     );
     expect(run).toMatchObject({ outcome: 'merged', rounds: 1, head });
-    // 停下时清掉这一轮的次数：继续后先再等一次，不是当场又超时
-    expect(calls.arm).toBe(polls + 3);
+    // 停下时丢掉这一段的期限：继续后先再等一次，不是当场又超时
+    expect(calls.arm).toBe((parkedAt ?? 0) + 2);
     expect(world.alerts).toHaveLength(1);
     expect(calls.merge).toBe(0);
+  });
+
+  it('【故意造出的失败】等检查时上游慢、挂合并一直重试：活动的排队和重试退避算进同一份 15 分钟，到点停下，不另开期限', async () => {
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    // 第一次照常回还在跑；之后上游一直 502，每一下都把 Temporal 的 3 次尝试和退避用完（服务端时间在走）。
+    let failing = true;
+    const { tasks, calls } = scripted({
+      arm: (n, input) => {
+        if (n === 1) return waitingCheck(input, ['merge-gate']);
+        if (failing) throw new PortError('GITHUB_UNAVAILABLE', 'GitHub 502', { retryable: true });
+        return ARMED;
+      },
+    });
+    const armAt: number[] = [];
+    const scriptedArm = tasks.armAutoMerge;
+    if (!scriptedArm) throw new Error('脚本没装 armAutoMerge');
+    tasks.armAutoMerge = async (armInput, ctx) => {
+      armAt.push(await env.currentTimeMs());
+      return scriptedArm(armInput, ctx);
+    };
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await env.sleep('25 minutes');
+        const s = await statusUntil(h, parked, '上游慢耗尽期限，停下');
+        expect(s.lastProblem).toBe('等检查超时');
+        const parkedAt = Date.parse(s.waiting?.since ?? '');
+        const first = armAt[0] ?? Number.NaN;
+        // 从第一次挂合并开调起算，停下不晚于 15 分钟（加几秒工作流任务的零头）。
+        expect(parkedAt - first).toBeLessThanOrEqual(ARM_PENDING_CHECKS_MINUTES * 60_000 + 5_000);
+        expect(parkedAt - first).toBeGreaterThanOrEqual(ARM_PENDING_CHECKS_MINUTES * 60_000 - 40_000);
+        // 历史里：等检查里的每一下挂合并都带着剩余期限（scheduleToClose），单次尝试不超过它，期限只减不增。
+        const budgets = armBudgets((await h.fetchHistory()).events ?? []);
+        expect(budgets[0]?.startToClose).toBe(300);
+        const bounded = budgets.slice(1);
+        // 每一下是至多 3 次尝试加退避、再睡 20 秒：远不到 45 下就到点，不是按次数停的。
+        expect(bounded.length).toBeGreaterThan(5);
+        expect(bounded.length).toBeLessThan(30);
+        expect(calls.arm).toBeGreaterThan(bounded.length + 1);
+        expect(calls.arm).toBeLessThanOrEqual(1 + 3 * bounded.length);
+        for (const [i, b] of bounded.entries()) {
+          expect(b.scheduleToClose).toBeGreaterThan(0);
+          expect(b.scheduleToClose).toBeLessThanOrEqual(ARM_PENDING_CHECKS_MINUTES * 60);
+          expect(b.startToClose).toBeLessThanOrEqual(Math.min(300, b.scheduleToClose));
+          if (i > 0) expect(b.scheduleToClose).toBeLessThan(bounded[i - 1]?.scheduleToClose ?? 0);
+        }
+        const detail = world.alerts[0]?.detail ?? '';
+        expect(world.alerts).toHaveLength(1);
+        expect(world.alerts[0]?.title).toBe('等检查超时');
+        expect(detail).toContain(`PR #${s.prNumber}`);
+        expect(detail).toContain(head);
+        expect(detail).toContain('merge-gate');
+        expect(detail).toContain(`原始原因：${ORIGIN}`);
+        expect(calls.merge).toBe(0);
+        failing = false;
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, head });
+    expect(calls.armInputs.every((i) => i.expectedHead === head)).toBe(true);
+    expect(world.alerts).toHaveLength(1);
+    expect(calls.merge).toBe(0);
+  });
+
+  it('【故意造出的失败】等检查时挂合并碰到认证失败：当场停下报原因，不当成还在跑接着等', async () => {
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const { tasks, calls } = scripted({
+      arm: (n, input) => {
+        if (n === 1) return waitingCheck(input, ['merge-gate']);
+        if (n === 2) throw new PortError('AUTH_REQUIRED', 'GitHub 令牌失效', { retryable: false });
+        return ARMED;
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await env.sleep('1 minute');
+        const s = await statusUntil(h, parked, '认证失败，停下');
+        expect(s.lastProblem).toContain('AUTH_REQUIRED');
+        expect(calls.arm).toBe(2);
+        const detail = world.alerts[0]?.detail ?? '';
+        expect(detail).toContain('GitHub 令牌失效');
+        expect(detail).toContain(head);
+        expect(detail).toContain(`原始原因：${ORIGIN}`);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, head });
+    expect(calls.arm).toBe(3);
+    expect(world.alerts).toHaveLength(1);
   });
 
   it('等检查期间头被别人改了：不沿用旧头的批准和绿，重走 CI、冷验收、查路径', async () => {

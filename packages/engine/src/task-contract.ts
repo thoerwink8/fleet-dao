@@ -67,8 +67,8 @@ export const MERGE_POLL_MINUTES = 15;
 export const MERGE_RED_CONFIRM_SECONDS = 20;
 /**
  * 挂自动合并时 GitHub 说已经是 clean，但这个精确头上还有检查在跑（正文改成 Refs 会把 merge-gate 重新打进队列）：
- * 最多等这么多分钟，每隔 ARM_PENDING_POLL_SECONDS 再走一次正常的挂自动合并。到点还没跑完就停下。
- * 不是无限重试，也不把 ci_not_green 这句原文当成「还在跑」。
+ * 最多等这么多分钟（按工作流时间算的截止时刻，挂合并活动的排队、重试、状态落库、休眠都在里面），每隔 ARM_PENDING_POLL_SECONDS
+ * 再走一次正常的挂自动合并。到点还没跑完就停下。不是按次数，不是无限重试，也不把 ci_not_green 这句原文当成「还在跑」。
  */
 export const ARM_PENDING_CHECKS_MINUTES = 15;
 /** 上面那段有界等待里，隔这么多秒再挂一次。写死，和等合并确认红一样是 20 秒。 */

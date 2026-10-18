@@ -16,17 +16,20 @@
 //   GitHub 事件那头只撤自动合并、不叫醒工作流（@fleet-dao/github 的 reviewMergeHold）：撤了之后这里读到 unarmed、回去重挂，
 //   挂之前读到评审。老历史里活动结果没有 reviewChanges，标记也不在历史里。
 // - 挂的时候 GitHub 说已经 clean、直接合却因这个头上还有检查在跑被拒（正文改成 Refs 会把 merge-gate 重新打进队列，
-//   patched('merge-arm-pending-checks')）：活动交回 checksPending（绑精确头、还在跑的检查名、原始原因）。这里把状态写成等检查，
-//   在 ARM_PENDING_CHECKS_MINUTES 内每隔 ARM_PENDING_POLL_SECONDS 再走一次 armAutoMerge。同头变绿后仍由那一入口挂上或 squash，
+//   patched('merge-arm-pending-deadline')）：活动交回 checksPending（绑精确头、还在跑的检查名、原始原因）。这里把状态写成等检查，
+//   截止时刻按工作流时间（Date.now，重放确定）记一次：第一次读到还在跑的那一下挂合并开调前加 ARM_PENDING_CHECKS_MINUTES。
+//   之后每隔 ARM_PENDING_POLL_SECONDS 再走一次 armAutoMerge，这一下的排队、尝试、重试受剩余期限约束（scheduleToClose），
+//   状态落库、休眠、红的确认也都算在同一份期限里，睡不越过它；不按次数算，也不每次重开。同头变绿后仍由那一入口挂上或 squash，
 //   合并账和回执不另开路。真红（checksRed）走下面同一套确认 / 返工。权限、认证、正式要求改、没查成没有这两个字段，照旧停下，
 //   不因 why 里写了 ci_not_green 就重试。等到点仍没跑完：停下，写明 PR、头、检查名和原始原因。头变了回 head_moved，调用方重走
 //   CI、冷验收、批准，不沿用旧头。老历史的活动结果没有这两个字段；标记不在历史里就当没有，照旧停下。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
-import { patched } from '@temporalio/workflow';
+import { isCancellation, patched } from '@temporalio/workflow';
 import {
   ARM_PENDING_CHECKS_MINUTES,
   ARM_PENDING_POLL_SECONDS,
+  type ArmAutoMergeResult,
   type ColdVerifyResult,
   type GuardedPaths,
   MAX_MAIN_SYNCS,
@@ -34,6 +37,7 @@ import {
   MERGE_RED_CONFIRM_SECONDS,
   type MergeWait,
 } from '../task-contract.ts';
+import { activityWithin, failureOf } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
 import { headMovedDetail } from './task-support.ts';
 import { syncMainlineOnConflict } from './task-sync.ts';
@@ -51,16 +55,36 @@ export const MERGE_CONFLICT_NOTE = 'PR 和主线冲突，在并主线';
  */
 const CONFLICT_REPOLL_SECONDS = 60;
 
-const MAX_ARM_PENDING_POLLS = Math.floor((ARM_PENDING_CHECKS_MINUTES * 60) / ARM_PENDING_POLL_SECONDS);
+const ARM_PENDING_BUDGET_MS = ARM_PENDING_CHECKS_MINUTES * 60_000;
+
+/**
+ * 挂合并时等检查的那一段（只活在一次 armAndWaitMerged 里）：绑这个头，截止时刻是第一次读到还在跑的那一下挂合并开调之前的
+ * 工作流时间加 ARM_PENDING_CHECKS_MINUTES。之后的挂合并、状态落库、休眠、红的确认都算在这一份里，不按次数、不每次重开。
+ */
+interface PendingWait {
+  head: string;
+  deadline: number;
+  /** 一开始在等的检查名、一开始的拒绝原文：到点原样留下。 */
+  started: string[];
+  detail: string;
+  /** 最近一次读到的还在跑的检查名。 */
+  names: string[];
+}
+
+/** 期限里还剩多少秒（向下取整）；不足 1 秒就是到了。 */
+function secondsLeft(wait: PendingWait): number {
+  return Math.floor((wait.deadline - Date.now()) / 1000);
+}
 
 /**
  * 必过检查红了：第一次记下并隔 MERGE_RED_CONFIRM_SECONDS 再看，仍红才返工。
- * 等合并的 waitMerged 和挂自动合并时现读到的红共用这一套。
+ * 等合并的 waitMerged 和挂自动合并时现读到的红共用这一套。maxSeconds 是等检查剩下的期限，确认那一觉不越过它。
  */
 async function confirmChecksRed(
   rt: TaskRuntime,
   failedChecks: readonly string[],
   detail: string,
+  maxSeconds?: number,
 ): Promise<'confirming' | 'rework'> {
   const names = failedChecks.length > 0 ? failedChecks.join('、') : '（没写是哪项）';
   const line = `${CHECKS_RED_PREFIX}${names}`;
@@ -68,7 +92,9 @@ async function confirmChecksRed(
     rt.mergeRedNoted = true;
     rt.status.lastProblem = line;
     await rt.advance('merge', line);
-    await rt.pause('merge', detail || line, MERGE_RED_CONFIRM_SECONDS);
+    const seconds =
+      maxSeconds === undefined ? MERGE_RED_CONFIRM_SECONDS : Math.min(MERGE_RED_CONFIRM_SECONDS, maxSeconds);
+    await rt.pause('merge', detail || line, Math.max(1, seconds));
     return 'confirming';
   }
   rt.mergeRedNoted = false;
@@ -77,18 +103,64 @@ async function confirmChecksRed(
   return 'rework';
 }
 
-/** 有界等待耗尽：精确 PR、头、还在跑的检查名、一开始的拒绝原文都留下。 */
-function pendingExhaustedDetail(
-  prNumber: number,
-  head: string,
-  names: readonly string[],
-  started: readonly string[],
-  detail: string,
-): string {
-  const waiting = names.join('、');
-  const origin = started.join('、');
+/** 有界等待耗尽：精确 PR、头、还在跑的检查名、一开始的拒绝原文都留下。last 是最后那一下挂合并自己没跑成的原因。 */
+function pendingExhaustedDetail(prNumber: number, wait: PendingWait, last?: string): string {
+  const waiting = wait.names.join('、');
+  const origin = wait.started.join('、');
   const which = waiting === origin ? waiting : `${waiting}（一开始在等：${origin}）`;
-  return `PR #${prNumber} 头 ${head} 上还没跑完：${which}。原始原因：${detail}`;
+  const tail = last === undefined ? '' : `。最后一次挂合并没在期限内跑成：${last}`;
+  return (
+    `PR #${prNumber} 头 ${wait.head} 上等了 ${ARM_PENDING_CHECKS_MINUTES} 分钟还没跑完：${which}。` +
+    `原始原因：${wait.detail}${tail}`
+  );
+}
+
+/**
+ * 等检查期间再挂一次：这一下（排队、尝试、重试）受剩余期限约束，不走 rt.step 的失败分流梯（那条梯子的退避不看期限）。
+ * 到期或这一下超时：park 等检查超时。重试也治不好的错（认证、权限）：当场 park，不当成还在跑。
+ * 别的错、期限还有：隔一会儿（不越过期限）再来（again）。parked＝已经停下过、人点了继续，调用方丢掉这段等待从头挂。
+ */
+async function armWithinDeadline(
+  rt: TaskRuntime,
+  prNumber: number,
+  wait: PendingWait,
+): Promise<{ kind: 'result'; armed: ArmAutoMergeResult } | { kind: 'parked' } | { kind: 'again' }> {
+  const left = secondsLeft(wait);
+  if (left < 1) {
+    await rt.park('等检查超时', pendingExhaustedDetail(prNumber, wait));
+    return { kind: 'parked' };
+  }
+  rt.guard();
+  const arm = activityWithin('armAutoMerge', rt.limits, left);
+  try {
+    const armed = await arm({
+      schemaVersion: 1,
+      repo: rt.input.repo,
+      prNumber,
+      expectedHead: wait.head,
+      ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
+    });
+    return { kind: 'result', armed };
+  } catch (error) {
+    if (isCancellation(error)) throw error;
+    const failure = failureOf(error, 'armAutoMerge', rt.limits);
+    const where = `PR #${prNumber} 头 ${wait.head}，在等：${wait.names.join('、')}。原始原因：${wait.detail}`;
+    if (failure.retryable === false) {
+      await rt.park(`挂自动合并没跑成（${failure.code}）`, `${failure.message}。${where}`);
+      return { kind: 'parked' };
+    }
+    const after = secondsLeft(wait);
+    if (failure.code === 'TIMEOUT_SCHEDULE_TO_CLOSE' || after < 1) {
+      await rt.park(
+        '等检查超时',
+        pendingExhaustedDetail(prNumber, wait, `${failure.code}：${failure.message}`),
+      );
+      return { kind: 'parked' };
+    }
+    rt.status.lastProblem = `等检查时挂合并没跑成，再来一次：${failure.message}`;
+    await rt.pause('merge', `等检查：${where}`, Math.max(1, Math.min(ARM_PENDING_POLL_SECONDS, after)));
+    return { kind: 'again' };
+  }
 }
 
 /** 头已经不是这次挂的那个：停下等人，回来由调用方重走 CI、冷验收、批准。 */
@@ -147,33 +219,40 @@ export async function armAndWaitMerged(
 ): Promise<{ kind: 'merged'; commit?: string | undefined } | { kind: 'head_moved' } | { kind: 'rework' }> {
   const prNumber = rt.prNumber;
   if (prNumber === null || rt.head === null) throw new Error('合并之前还没有 PR');
-  // 同一次挂合并、同一个头上「检查还在跑」已经看过几回。换头或离开这条等待就清掉，不把上一回的次数套到新头上。
-  let pendingPolls = 0;
-  let pendingHead: string | null = null;
-  let pendingDetail = '';
-  let pendingNames: string[] = [];
-  const clearPending = (): void => {
-    pendingPolls = 0;
-    pendingHead = null;
-    pendingDetail = '';
-    pendingNames = [];
-  };
+  // 等检查的那一段（绑头、带截止时刻）。换头、停下过、离开这条等待就丢掉，不把上一段的期限套到新头上。
+  // 只有 patched('merge-arm-pending-deadline') 为真时才会有：老历史里一直是 null，下面的调度和原来一样。
+  let pending: PendingWait | null = null;
   for (;;) {
-    await rt.advance('merge', `PR #${prNumber} 挂自动合并，等合并`);
     const head: string = rt.head;
-    const armed = await rt.step('armAutoMerge', () =>
-      rt.acts.armAutoMerge({
-        schemaVersion: 1,
-        repo: rt.input.repo,
-        prNumber,
-        expectedHead: head,
-        ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
-      }),
-    );
+    if (pending !== null && pending.head !== head) pending = null;
+    // 这一下挂合并开调前的工作流时间：第一次读到还在跑时，期限从这里起算，这一下的耗时也在里面。
+    const armStartedAt = Date.now();
+    let armed: ArmAutoMergeResult;
+    if (pending === null) {
+      await rt.advance('merge', `PR #${prNumber} 挂自动合并，等合并`);
+      armed = await rt.step('armAutoMerge', () =>
+        rt.acts.armAutoMerge({
+          schemaVersion: 1,
+          repo: rt.input.repo,
+          prNumber,
+          expectedHead: head,
+          ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
+        }),
+      );
+    } else {
+      const got = await armWithinDeadline(rt, prNumber, pending);
+      if (got.kind === 'parked') {
+        pending = null;
+        continue;
+      }
+      if (got.kind === 'again') continue;
+      armed = got.armed;
+    }
     if (armed.merged) return { kind: 'merged', commit: armed.mergeCommit };
     // 挂之前现读到还挂着的正式「要求改」（#2991）：没挂（挂着的已撤），交给工人；交过的停下等审查者，点「继续」回来重挂、重读。
     // 老历史的活动结果里没有 reviewChanges，进不了这一支、不打标记
     if ((armed.reviewChanges?.length ?? 0) > 0 && patched('merge-review-changes')) {
+      pending = null;
       const next = await handReviewChanges(rt, armed.reviewChanges ?? [], PASSED, 'merge');
       if (next === 'rework') return { kind: 'rework' };
       continue;
@@ -192,49 +271,60 @@ export async function armAndWaitMerged(
     }
     if (!armed.armed) {
       // 老历史的活动结果没有 checksPending / checksRed，标记也不在：patched() 为假，照旧停下，不因 why 里的 ci_not_green 重试。
-      if (patched('merge-arm-pending-checks')) {
+      if (patched('merge-arm-pending-deadline')) {
         const red = armed.checksRed;
         if (red) {
-          clearPending();
           if (red.head !== head) return headNoLonger(rt, head, red.head);
-          const outcome = await confirmChecksRed(rt, red.failedChecks, red.detail);
+          // 等检查当中红了：期限不清、不重开，确认那一觉也不越过它。红一下又变回还在跑，接着用同一份期限。
+          const outcome = await confirmChecksRed(
+            rt,
+            red.failedChecks,
+            red.detail,
+            pending === null ? undefined : secondsLeft(pending),
+          );
           if (outcome === 'rework') return { kind: 'rework' };
           continue;
         }
-        const pending = armed.checksPending;
-        if (pending && pending.names.length > 0) {
-          if (pending.head !== head) {
-            clearPending();
-            return headNoLonger(rt, head, pending.head);
-          }
+        const running = armed.checksPending;
+        if (running && running.names.length > 0) {
+          if (running.head !== head) return headNoLonger(rt, head, running.head);
           // 红了一下又变回还在跑：这次确认作废，接着等，不返工。
           rt.mergeRedNoted = false;
-          if (pendingHead !== head) {
-            pendingPolls = 0;
-            pendingHead = head;
-            pendingDetail = pending.detail;
-            pendingNames = [...pending.names];
+          if (pending === null) {
+            pending = {
+              head,
+              deadline: armStartedAt + ARM_PENDING_BUDGET_MS,
+              started: [...running.names],
+              detail: running.detail,
+              names: [...running.names],
+            };
+          } else {
+            pending.names = [...running.names];
           }
-          pendingPolls += 1;
-          if (pendingPolls > MAX_ARM_PENDING_POLLS) {
-            const detail = pendingExhaustedDetail(prNumber, head, pending.names, pendingNames, pendingDetail);
-            clearPending();
+          const left = secondsLeft(pending);
+          if (left < 1) {
+            const detail = pendingExhaustedDetail(prNumber, pending);
+            pending = null;
             await rt.park('等检查超时', detail);
             continue;
           }
-          const names = pending.names.join('、');
+          const names = running.names.join('、');
           const line = `等检查：${names}`;
           rt.status.lastProblem = line;
           if (rt.status.phase !== 'merge' || rt.status.doing !== line) await rt.advance('merge', line);
-          await rt.pause('merge', `等检查：PR #${prNumber} 头 ${head} 的 ${names}`, ARM_PENDING_POLL_SECONDS);
+          // 落库那一下也花了时间：睡之前再算一次剩下多少，睡不越过期限。
+          const sleepFor = Math.min(ARM_PENDING_POLL_SECONDS, secondsLeft(pending));
+          if (sleepFor >= 1) {
+            await rt.pause('merge', `等检查：PR #${prNumber} 头 ${head} 的 ${names}`, sleepFor);
+          }
           continue;
         }
       }
-      clearPending();
+      pending = null;
       await rt.park('自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
       continue;
     }
-    clearPending();
+    pending = null;
     for (;;) {
       const w: MergeWait = await rt.waiting(
         'merge',
