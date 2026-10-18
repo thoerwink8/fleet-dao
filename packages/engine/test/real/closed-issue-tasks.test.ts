@@ -77,7 +77,7 @@ function port(
       },
       async abandon(workflowId, c) {
         signals.push({ workflowId, ...c });
-        return 'sent';
+        return 'accepted';
       },
       ...rest,
     },

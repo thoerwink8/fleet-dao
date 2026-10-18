@@ -25,6 +25,7 @@ import type { TaskBrief } from '../runner/task-brief.ts';
 import {
   type AbandonCommand,
   CI_POLICY_POLL_SECONDS,
+  type ClosedIssueHoldToken,
   type GuardedPaths,
   MAX_ROUND_RESETS,
   PAUSED_BY_HUMAN,
@@ -35,6 +36,7 @@ import {
   type TaskWait,
   type TaskWorkflowInput,
   taskAbandonSignal,
+  taskCloseClosedIssueUpdate,
   taskContinueSignal,
   taskPauseSignal,
   taskRepinSignal,
@@ -71,6 +73,8 @@ export class TaskRuntime {
   private routeWakes = 0;
   private abandon: AbandonCommand | null = null;
   private parks = 0;
+  private closeHoldGeneration = 0;
+  private closeHold: ClosedIssueHoldToken | null = null;
   /**
    * 正在跑的长活动的取消钩子。冷验收和等 CI 并行（决定 0093）时同时有好几个（和 CI 同时起的那次验收没被认时让它自己跑完，
    * 可能一直跑到下一轮动手）：放弃要全取消，所以是一组、不是一个。
@@ -212,6 +216,7 @@ export class TaskRuntime {
     };
     setHandler(taskContinueSignal, () => {
       this.continued += 1;
+      this.closeHold = null;
       // 还没停下（没到检查点）就收到「继续」：撤掉这次暂停请求；已经停着的由 holdPaused 看 continued 放行
       if (!this.holding) this.pauseReq = null;
     });
@@ -238,10 +243,53 @@ export class TaskRuntime {
       this.abandon ??= command;
       this.cancelAll();
     });
+    // 纯同步检查与写内存，中途没有 await。原历史没有 Update，不改变其活动、定时器步序。
+    setHandler(taskCloseClosedIssueUpdate, ({ token, command }) => {
+      if (typeof command?.by !== 'string' || typeof command.reason !== 'string') return 'busy';
+      const current = this.closeToken();
+      if (
+        !current ||
+        token.version !== 1 ||
+        token.runId !== current.runId ||
+        token.kind !== current.kind ||
+        token.generation !== current.generation ||
+        token.continued !== current.continued
+      )
+        return 'stale';
+      if (this.abandon !== null || this.running.size > 0) return 'busy';
+      this.abandon = command;
+      this.closeHold = null;
+      this.cancelAll();
+      return 'accepted';
+    });
     setHandler(taskStatusQuery, () => ({
       ...this.status,
       waiting: this.status.waiting ? { ...this.status.waiting } : null,
+      closedIssueClose: { version: 1, token: this.closeToken() },
     }));
+  }
+
+  private enterCloseHold(kind: ClosedIssueHoldToken['kind']): void {
+    this.closeHold = {
+      version: 1,
+      runId: workflowInfo().runId,
+      kind,
+      generation: ++this.closeHoldGeneration,
+      continued: this.continued,
+    };
+  }
+
+  private closeToken(): ClosedIssueHoldToken | null {
+    const token = this.closeHold;
+    if (
+      !token ||
+      this.abandon !== null ||
+      token.continued !== this.continued ||
+      token.kind !== this.status.phase ||
+      this.status.waiting?.kind !== (token.kind === 'paused' ? 'paused' : 'human')
+    )
+      return null;
+    return { ...token };
   }
 
   // ---- 状态、等待、停下等人
@@ -314,11 +362,13 @@ export class TaskRuntime {
       detail: `已暂停（等「继续」或「放弃」）：${this.pauseNote(command)}`,
       since: iso(Date.now()),
     };
+    this.enterCloseHold('paused');
     try {
       await this.mirror('running');
       await condition(() => this.continued > before || this.abandon !== null);
     } finally {
       this.holding = false;
+      this.closeHold = null;
     }
     this.pauseReq = null;
     this.guard();
@@ -574,6 +624,7 @@ export class TaskRuntime {
     const previous = this.status.phase;
     this.status.lastProblem = title;
     this.status.phase = 'parked';
+    this.enterCloseHold('parked');
     this.status.doing = `停下等人：${title}`;
     await this.mirror('stalled');
     try {
@@ -593,6 +644,7 @@ export class TaskRuntime {
       condition(() => this.continued > before || this.abandon !== null),
     );
     this.guard();
+    this.closeHold = null;
     this.status.phase = previous;
     this.status.lastProblem = null;
     await this.mirror('running');
@@ -610,6 +662,7 @@ export class TaskRuntime {
     const previous = this.status.phase;
     this.status.lastProblem = title;
     this.status.phase = 'parked';
+    this.enterCloseHold('parked');
     this.status.doing = `停下等人：${title}`;
     await this.mirror('stalled');
     try {
@@ -634,12 +687,14 @@ export class TaskRuntime {
       );
       this.guard();
       if (woken && this.continued > before) {
+        this.closeHold = null;
         this.status.phase = previous;
         this.status.lastProblem = null;
         await this.mirror('running');
         return 'stayed';
       }
       if (await leave()) {
+        this.closeHold = null;
         this.status.phase = previous;
         this.status.lastProblem = null;
         await this.mirror('running');

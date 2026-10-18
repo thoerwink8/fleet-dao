@@ -10,7 +10,13 @@ import {
   type ClosedIssueEventDeps,
   runClosedIssueEvents,
 } from '../src/jobs/closed-issue-events.ts';
-import { CLOSED_ISSUE_ABANDON_REASON, type ClosedIssueTaskDeps } from '../src/jobs/closed-issue-tasks.ts';
+import {
+  abandonClosedIssueTasks,
+  CLOSED_ISSUE_ABANDON_BY,
+  CLOSED_ISSUE_ABANDON_REASON,
+  type ClosedIssueHold,
+  type ClosedIssueTaskDeps,
+} from '../src/jobs/closed-issue-tasks.ts';
 
 const NOW = new Date('2026-10-13T08:00:00.000Z');
 
@@ -41,12 +47,15 @@ function world(opts: {
   states: Record<string, 'open' | 'closed'>;
   deliveries: ClosedIssueDelivery[];
   runningIds?: () => Promise<string[]>;
+  /** 给了就走关单收尾的停法，不再问 isParked。放弃之后改成 busy，模拟工作流已经离开检查点。 */
+  hold?: Record<string, ClosedIssueHold>;
 }): World {
   const signals: World['signals'] = [];
   const resolved: World['resolved'] = [];
   const sinceAsked: Date[] = [];
   const logs: string[] = [];
   const parked = { ...opts.parked };
+  const holds = opts.hold ? { ...opts.hold } : null;
   const ledger: World['ledger'] = new Map(
     opts.deliveries.map((row) => [row.deliveryId, { row, note: null }]),
   );
@@ -56,6 +65,13 @@ function world(opts: {
       async isParked(workflowId) {
         return parked[workflowId] ?? false;
       },
+      ...(holds
+        ? {
+            async holdForClose(workflowId: string) {
+              return holds[workflowId] ?? { kind: 'busy' as const };
+            },
+          }
+        : {}),
       async resolveParkAlerts(workflowId, why, by) {
         resolved.push({ workflowId, why, by });
         return 1;
@@ -69,7 +85,8 @@ function world(opts: {
         signals.push({ workflowId, ...c });
         // 工作流收到放弃就不再停着等人（真引擎里它收尾结束）
         parked[workflowId] = false;
-        return 'sent';
+        if (holds) holds[workflowId] = { kind: 'busy' };
+        return 'accepted';
       },
     },
     now: () => NOW,
@@ -182,5 +199,51 @@ describe('单关了的事件：停着等人的任务马上撤（#2103）', () =>
     expect(await runClosedIssueEvents(w.deps)).toBe(1);
     expect(w.signals).toEqual([]);
     expect(w.ledger.get('d-1')?.note).toBe('单关了：认不出是哪张单，没撤任务');
+  });
+
+  it('检查点软暂停、没有开着的会话：和停着等人走同一条放弃，署名仍是事件这一路', async () => {
+    const w = world({
+      running: ['task:acme/demo#7'],
+      parked: {},
+      hold: { 'task:acme/demo#7': { kind: 'paused', openSessions: 0 } },
+      states: { 'acme/demo#7': 'closed' },
+      deliveries: [closed('d-1', 7)],
+    });
+    expect(await runClosedIssueEvents(w.deps)).toBe(1);
+    expect(w.signals).toEqual([
+      { workflowId: 'task:acme/demo#7', by: CLOSED_ISSUE_EVENT_BY, reason: CLOSED_ISSUE_ABANDON_REASON },
+    ]);
+    expect(w.ledger.get('d-1')?.note).toBe('单关了：放弃了 1 条停着等人的任务');
+    w.ledger.set('d-2', { row: closed('d-2', 7), note: null });
+    expect(await runClosedIssueEvents(w.deps)).toBe(1);
+    expect(w.signals).toHaveLength(1);
+    expect(w.ledger.get('d-2')?.note).toBe('单关了：放弃了 0 条停着等人的任务');
+  });
+
+  it('已经记下「放弃了 0 条」的旧投递不再捞；每小时对账仍按同一套判定收掉停在检查点的', async () => {
+    const id = '388d1990-ca7d-11f1-88a0-ab3b1f9cde3d';
+    const w = world({
+      running: ['task:thoerwink8/fleet-dao#2928'],
+      parked: {},
+      hold: { 'task:thoerwink8/fleet-dao#2928': { kind: 'paused', openSessions: 0 } },
+      states: { 'thoerwink8/fleet-dao#2928': 'closed' },
+      deliveries: [],
+    });
+    w.ledger.set(id, {
+      row: closed(id, 2928, 'thoerwink8/fleet-dao'),
+      note: '单关了：放弃了 0 条停着等人的任务',
+    });
+    expect(await runClosedIssueEvents(w.deps)).toBe(0);
+    expect(w.signals).toEqual([]);
+    expect(w.ledger.get(id)?.note).toBe('单关了：放弃了 0 条停着等人的任务');
+    const part = await abandonClosedIssueTasks(w.deps.tasks());
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.signals).toEqual([
+      {
+        workflowId: 'task:thoerwink8/fleet-dao#2928',
+        by: CLOSED_ISSUE_ABANDON_BY,
+        reason: CLOSED_ISSUE_ABANDON_REASON,
+      },
+    ]);
   });
 });
