@@ -78,7 +78,7 @@ export interface TemporalClientLike {
     withDeadline<R>(deadline: number | Date, fn: () => Promise<R>): Promise<R>;
   };
   workflow: {
-    getHandle(workflowId: string): { signal(name: string, arg: unknown): Promise<void> };
+    getHandle(workflowId: string, runId?: string): { signal(name: string, arg: unknown): Promise<void> };
   };
 }
 
@@ -86,7 +86,7 @@ interface TemporalRouteWakeClientLike {
   connection: TemporalClientLike['connection'];
   workflow: {
     list(options: { query: string }): AsyncIterable<{ workflowId: string }>;
-    getHandle(workflowId: string): { signal(name: string, arg: unknown): Promise<void> };
+    getHandle(workflowId: string, runId?: string): { signal(name: string, arg: unknown): Promise<void> };
   };
 }
 
@@ -98,11 +98,11 @@ export function createTemporalWorkflowControl(
   timeoutMs = DEFAULT_SIGNAL_TIMEOUT_MS,
 ): WorkflowControl {
   return {
-    async signal(workflowId, signal) {
+    async signal(workflowId, signal, runId) {
       const { name, ...arg } = signal;
       try {
         await client.connection.withDeadline(Date.now() + timeoutMs, () =>
-          client.workflow.getHandle(workflowId).signal(name, arg),
+          client.workflow.getHandle(workflowId, runId).signal(name, arg),
         );
       } catch (err) {
         if (isGone(err)) throw new WorkflowGoneError(workflowId, err);
@@ -110,6 +110,27 @@ export function createTemporalWorkflowControl(
         throw err;
       }
     },
+  };
+}
+
+/** 修复核验读具体 execution。通过连接 deadline，读失败不猜 run。 */
+export function createTaskWorkflowExecution(client: {
+  connection: TemporalClientLike['connection'];
+  workflow: {
+    getHandle(workflowId: string): {
+      describe(): Promise<{ workflowId: string; runId: string; status: { name: string } }>;
+    };
+  };
+}): NonNullable<WorkflowControl['taskWorkflowExecution']> {
+  return async (workflowId) => {
+    const execution = await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
+      client.workflow.getHandle(workflowId).describe(),
+    );
+    return {
+      workflowId: execution.workflowId,
+      runId: execution.runId,
+      running: execution.status.name === 'RUNNING',
+    };
   };
 }
 
@@ -431,6 +452,7 @@ export function connectTemporal(
   return {
     control: {
       ...control,
+      taskWorkflowExecution: createTaskWorkflowExecution(client),
       runningTaskWorkflow(repo, issueNumber) {
         return signalTaskWorkflowId(repo, issueNumber, (id) => seenLife(client, id)).catch((err: unknown) => {
           if (err instanceof WorkflowUnavailableError) throw err;

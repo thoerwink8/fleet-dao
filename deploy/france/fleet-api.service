@@ -28,7 +28,7 @@ Restart=always
 RestartSec=5
 TimeoutStopSec=30
 LimitNOFILE=65536
-# 后端不起子进程，可以收紧（引擎不行，见 fleet-engine.service）
+# 后端只可启动同身份的受控 dispatch-issue 子进程，不需提权（引擎的会话另见 fleet-engine.service）
 NoNewPrivileges=yes
 ProtectSystem=strict
 # 能写的地方：「发布到法国」按钮的请求目录（人工档装，见 deploy/lib/human-tier.sh；root 的 path 单元盯着它）。
