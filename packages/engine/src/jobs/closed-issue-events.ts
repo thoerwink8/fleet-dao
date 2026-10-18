@@ -1,9 +1,11 @@
-// 单一关，停着等人的任务马上撤（#2103）：后端门口放进来的 GitHub issues.closed 落在投递账（github_events）上，
-// 引擎每几秒捞一次还没处理的，按那一张单走和每小时对账**同一个**函数（closed-issue-tasks.ts 的 abandonClosedIssueTasks）：
-// 停着等人（parked）的发「放弃」、撤挂起提醒；在跑的不碰；单状态照样回 GitHub 现读，事件只当「叫醒」，不信里面的字。
+// 单一关，停着等人或已在检查点软暂停且没有开着会话的任务马上撤（#2103 / #3002）：后端门口放进来的 GitHub
+// issues.closed 落在投递账（github_events）上，引擎每几秒捞一次还没处理的，按那一张单走和每小时对账**同一个**
+// 函数（closed-issue-tasks.ts 的 abandonClosedIssueTasks）：停着等人（parked）、或 phase=paused 且 waiting.kind=paused
+// 且没有开着会话的，发「放弃」、撤挂起提醒；还在跑的不碰；单状态照样回 GitHub 现读，事件只当「叫醒」，不信里面的字。
 // 改这里之前必须知道：
 // - 处理完把结果写进这条投递的 note，下一眼就不再捞到；同一投递编号重投在后端门口已经去重。没记上、引擎重启后再捞到，
-//   那条任务已经放弃了、不再停着等人，不会再发第二次信号。
+//   那条任务已经放弃了、不再停在可放弃的检查点，不会再发第二次信号。已经记过「放弃了 0 条」的旧投递不再捞，
+//   还停在检查点的由每小时对账用同一个判定收尾。
 // - 列不出在跑的任务工作流（Temporal 连不上）不记，下一眼再来；只捞最近 CLOSED_ISSUE_EVENT_WINDOW_MS 之内收的，
 //   更早的、这里没撤成的由每小时对账兜住。
 import type { ClosedIssueDelivery } from '@fleet-dao/db';

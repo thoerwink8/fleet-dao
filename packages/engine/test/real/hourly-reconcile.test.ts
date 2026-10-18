@@ -37,6 +37,7 @@ import {
 } from '../../src/jobs/reconcile-common.ts';
 import { localExec } from '../../src/real/exec.ts';
 import {
+  closedIssueHoldOf,
   type HourlyReconcileWiring,
   hourlyReconcileJob,
   listDirEntries,
@@ -1842,6 +1843,35 @@ describe('任务工作流的 taskStatus 查询（#901）', () => {
       parked: false,
       waiting: null,
     });
+    const paused = {
+      phase: 'paused',
+      doing: '已暂停',
+      waiting: {
+        kind: 'paused',
+        detail: '已暂停（等「继续」或「放弃」）',
+        since: '2026-10-17T20:32:41.000Z',
+      },
+    };
+    expect(taskViewOf(paused, 'task:a/b#1').parked).toBe(false);
+    expect(closedIssueHoldOf(paused, 'task:a/b#1')).toBe('paused-checkpoint');
+  });
+
+  it('关单收尾只把检查点软暂停从「还在跑」里分出来；parked 仍只认 phase=parked（#3002）', () => {
+    const waiting = { kind: 'paused', detail: '等', since: '2026-10-17T20:32:41.000Z' };
+    expect(
+      closedIssueHoldOf(
+        { phase: 'parked', doing: '停下', waiting: { ...waiting, kind: 'human' } },
+        'task:a/b#1',
+      ),
+    ).toBe('parked');
+    for (const phase of ['implement', 'ci', 'verify', 'merge', 'abandoned', 'done', 'brief']) {
+      expect(closedIssueHoldOf({ phase, doing: phase, waiting: null }, 'task:a/b#1')).toBe('busy');
+    }
+    expect(closedIssueHoldOf({ phase: 'paused', doing: '还没到检查点', waiting: null }, 'task:a/b#1')).toBe(
+      'busy',
+    );
+    expect(closedIssueHoldOf({ phase: 'implement', doing: '动手', waiting }, 'task:a/b#1')).toBe('busy');
+    expect(() => closedIssueHoldOf({ parked: true, doing: 'x' }, 'task:a/b#1')).toThrow('没有 phase');
   });
 
   it('【故意造出的失败】回的是旧 status 的形状（有 parked 没 phase）、null、waiting 形状不对：明确报错，不当成「没挂着」', () => {

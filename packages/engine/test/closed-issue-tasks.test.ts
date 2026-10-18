@@ -59,7 +59,7 @@ function world(
       },
       async abandon(workflowId, c) {
         signals.push({ workflowId, ...c });
-        return 'sent';
+        return 'accepted';
       },
       // 标签读取口子显式转交：没给就不装配（对应「不提供就不收母单、本机做的排队行」）。
       ...(openIssueLabels && { openIssueLabels }),
@@ -201,7 +201,7 @@ describe('单已关且停下等人就撤掉（abandonClosedIssueTasks，#1816）
       states: { 'acme/demo#1': 'closed', 'acme/demo#3': 'closed' },
       async abandon(workflowId) {
         if (workflowId.endsWith('#1')) throw new Error('信号超时');
-        return 'sent';
+        return 'accepted';
       },
     });
     const part = await abandonClosedIssueTasks(w.deps);
@@ -224,6 +224,216 @@ describe('单已关且停下等人就撤掉（abandonClosedIssueTasks，#1816）
     expect(w.signals).toHaveLength(1);
     expect(part.found).toBe(1);
     expect(part.unchecked[0]).toContain('库写失败');
+  });
+});
+
+describe('单已关且停在检查点、没有开着的会话（#3002）', () => {
+  it.each(['stale', 'busy'] as const)('工作流消费回 %s：不加 found、不撤仍相关提醒', async (result) => {
+    const w = world({
+      runningTaskWorkflowIds: async () => ['task:acme/demo#1'],
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => ({ kind: 'paused', openSessions: 0 }),
+      abandon: async () => result,
+    });
+    expect(await abandonClosedIssueTasks(w.deps)).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(w.resolved).toEqual([]);
+  });
+  const id = 'task:acme/demo#1';
+
+  it('发放弃、撤挂起提醒，不把运行中的任务行硬改成终态，也不问 isParked', async () => {
+    const w = world({
+      runningTaskWorkflowIds: async () => [id],
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => ({ kind: 'paused', openSessions: 0 }),
+      isParked: async () => {
+        throw new Error('不该问 parked');
+      },
+    });
+    const part = await abandonClosedIssueTasks(w.deps);
+    expect(w.signals).toEqual([
+      { workflowId: id, by: CLOSED_ISSUE_ABANDON_BY, reason: CLOSED_ISSUE_ABANDON_REASON },
+    ]);
+    expect(w.resolved).toEqual([{ workflowId: id, why: CLOSED_ISSUE_ABANDON_REASON }]);
+    expect(w.stopped).toEqual([]);
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.logs[0]).toContain('已在检查点暂停且没有开着的会话');
+  });
+
+  it('停着等人仍走原来的放弃，不需要会话数', async () => {
+    const w = world({
+      runningTaskWorkflowIds: async () => [id],
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => ({ kind: 'parked' }),
+      isParked: async () => {
+        throw new Error('不该问 parked');
+      },
+    });
+    const part = await abandonClosedIssueTasks(w.deps);
+    expect(w.signals).toHaveLength(1);
+    expect(w.logs[0]).toContain('停下等人');
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+  });
+
+  it('implement / ci / verify / merge，以及检查点上还有会话：不发放弃、不读单', async () => {
+    let reads = 0;
+    const w = world({
+      runningTaskWorkflowIds: async () => [
+        'task:acme/demo#1',
+        'task:acme/demo#2',
+        'task:acme/demo#3',
+        'task:acme/demo#4',
+        'task:acme/demo#5',
+      ],
+      holdForClose: async (workflowId) =>
+        workflowId.endsWith('#5') ? { kind: 'paused', openSessions: 1 } : { kind: 'busy' },
+      issueState: async () => {
+        reads += 1;
+        return 'closed';
+      },
+    });
+    const part = await abandonClosedIssueTasks(w.deps);
+    expect(w.signals).toEqual([]);
+    expect(w.stopped).toEqual([]);
+    expect(reads).toBe(0);
+    expect(part).toEqual({ scanned: 5, found: 0, unchecked: [] });
+  });
+
+  it('单还开着的软暂停保持暂停：不发放弃', async () => {
+    const w = world({
+      runningTaskWorkflowIds: async () => [id],
+      states: { 'acme/demo#1': 'open' },
+      holdForClose: async () => ({ kind: 'paused', openSessions: 0 }),
+    });
+    const part = await abandonClosedIssueTasks(w.deps);
+    expect(w.signals).toEqual([]);
+    expect(part).toEqual({ scanned: 1, found: 0, unchecked: [] });
+  });
+
+  it('会话数是空、小数或空串：记没查成，不发放弃，不当成没有会话', async () => {
+    for (const openSessions of [null, 1.5, '']) {
+      const w = world({
+        runningTaskWorkflowIds: async () => [id],
+        states: { 'acme/demo#1': 'closed' },
+        holdForClose: async () => ({ kind: 'paused', openSessions: openSessions as never }),
+      });
+      const part = await abandonClosedIssueTasks(w.deps);
+      expect(w.signals).toEqual([]);
+      expect(part.found).toBe(0);
+      expect(part.unchecked[0]).toContain('不当成没有会话');
+    }
+  });
+
+  it('发放弃前单又开了、或任务已经继续、或又有了会话：不发信号，也不记没查成', async () => {
+    let reopenReads = 0;
+    const reopen = world({
+      runningTaskWorkflowIds: async () => [id],
+      holdForClose: async () => ({ kind: 'paused', openSessions: 0 }),
+      issueState: async () => {
+        reopenReads += 1;
+        return reopenReads === 1 ? 'closed' : 'open';
+      },
+    });
+    expect(await abandonClosedIssueTasks(reopen.deps)).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(reopen.signals).toEqual([]);
+
+    let holds = 0;
+    const continued = world({
+      runningTaskWorkflowIds: async () => [id],
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => {
+        holds += 1;
+        return holds === 1 ? { kind: 'paused' as const, openSessions: 0 } : { kind: 'busy' as const };
+      },
+    });
+    expect(await abandonClosedIssueTasks(continued.deps)).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(continued.signals).toEqual([]);
+
+    let sessions = 0;
+    const appeared = world({
+      runningTaskWorkflowIds: async () => [id],
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => {
+        sessions += 1;
+        return { kind: 'paused' as const, openSessions: sessions === 1 ? 0 : 1 };
+      },
+    });
+    expect(await abandonClosedIssueTasks(appeared.deps)).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(appeared.signals).toEqual([]);
+  });
+
+  it('再确认时单状态或停法读失败：不发信号，记没查成，不当成已经收尾', async () => {
+    let stateReads = 0;
+    const stateFails = world({
+      runningTaskWorkflowIds: async () => [id],
+      holdForClose: async () => ({ kind: 'paused', openSessions: 0 }),
+      issueState: async () => {
+        stateReads += 1;
+        if (stateReads > 1) throw new Error('GitHub 502');
+        return 'closed';
+      },
+    });
+    const statePart = await abandonClosedIssueTasks(stateFails.deps);
+    expect(stateFails.signals).toEqual([]);
+    expect(statePart.found).toBe(0);
+    expect(statePart.unchecked[0]).toContain('发放弃前再确认没查成');
+    expect(statePart.unchecked[0]).toContain('GitHub 502');
+
+    let holdReads = 0;
+    const holdFails = world({
+      runningTaskWorkflowIds: async () => [id],
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => {
+        holdReads += 1;
+        if (holdReads > 1) throw new Error('查询超时');
+        return { kind: 'paused', openSessions: 0 };
+      },
+    });
+    const holdPart = await abandonClosedIssueTasks(holdFails.deps);
+    expect(holdFails.signals).toEqual([]);
+    expect(holdPart.found).toBe(0);
+    expect(holdPart.unchecked[0]).toContain('发放弃前再确认没查成');
+    expect(holdPart.unchecked[0]).toContain('查询超时');
+  });
+
+  it('收信人不在、撤提醒失败、小时再跑：不虚记成功；第二次不再发', async () => {
+    const gone = world({
+      runningTaskWorkflowIds: async () => [id],
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => ({ kind: 'paused', openSessions: 0 }),
+      abandon: async () => 'gone',
+    });
+    expect(await abandonClosedIssueTasks(gone.deps)).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(gone.resolved).toEqual([]);
+
+    const cleanup = world({
+      runningTaskWorkflowIds: async () => [id],
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => ({ kind: 'paused', openSessions: 0 }),
+      resolveParkAlerts: async () => {
+        throw new Error('库写失败');
+      },
+    });
+    const cleaned = await abandonClosedIssueTasks(cleanup.deps);
+    expect(cleanup.signals).toHaveLength(1);
+    expect(cleaned.found).toBe(1);
+    expect(cleaned.unchecked[0]).toContain('库写失败');
+
+    let listed = true;
+    let reads = 0;
+    const retry = world({
+      runningTaskWorkflowIds: async () => (listed ? [id] : []),
+      states: { 'acme/demo#1': 'closed' },
+      holdForClose: async () => {
+        reads += 1;
+        return reads <= 2 ? { kind: 'paused' as const, openSessions: 0 } : { kind: 'busy' as const };
+      },
+    });
+    expect((await abandonClosedIssueTasks(retry.deps)).found).toBe(1);
+    listed = false;
+    expect(await abandonClosedIssueTasks(retry.deps)).toEqual({ scanned: 0, found: 0, unchecked: [] });
+    listed = true;
+    expect(await abandonClosedIssueTasks(retry.deps)).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    expect(retry.signals).toHaveLength(1);
   });
 });
 
