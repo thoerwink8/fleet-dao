@@ -6,7 +6,14 @@ import {
   UpdateRepoCiPolicyResponse,
 } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
-import { errorCode, harness, IDS, viaBearer, write } from './harness.ts';
+import { attachPolicyBridge } from './ci-policy-helper.ts';
+import { harness as baseHarness, errorCode, IDS, viaBearer, write } from './harness.ts';
+
+function harness() {
+  const h = baseHarness();
+  attachPolicyBridge(h);
+  return h;
+}
 
 const READ = '/api/repos/ci-policy';
 const put = (repoId: string) => `/api/repos/${repoId}/ci-policy`;

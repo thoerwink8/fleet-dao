@@ -2,6 +2,7 @@ import type { AppRole, InstallationListedRepo } from '@fleet-dao/github';
 import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
+import type { CiPolicyBridge } from './ci-policy-bridge.ts';
 import type { CliToolsPort } from './cli-versions.ts';
 import type { Config } from './config.ts';
 import type { DecisionCapabilities } from './decision-actions.ts';
@@ -68,6 +69,8 @@ export interface Deps {
   /** null = 飞书登录没配置（只允许在开发环境）。 */
   feishu: FeishuAuth | null;
   github: GitHubEventSink;
+  /** 只在真实 DB + 既有 engine App 装配，缺少时不能公开样例模式。 */
+  ciPolicyBridge?: CiPolicyBridge | undefined;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
   /** 驾驶舱提醒（#795）。生产的两套装配都给。 */

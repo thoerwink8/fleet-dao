@@ -4,6 +4,7 @@ export * from './carpool-burn.ts';
 export * from './changelog.ts';
 export * from './checks-red.ts';
 export * from './ci-policy.ts';
+export * from './ci-policy-bridge.ts';
 export * from './cli-versions.ts';
 export * from './continue-exhausted.ts';
 export type * from './domain.ts';

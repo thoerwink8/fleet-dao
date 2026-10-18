@@ -333,6 +333,7 @@ function parseUrl(value: string | undefined, problems: string[]): URL | null {
   }
   try {
     const url = new URL(value);
+    if (url.username || url.password) problems.push('FLEET_PUBLIC_URL 不允许 URL 凭据');
     if (url.pathname !== '/' || url.search || url.hash) {
       problems.push('FLEET_PUBLIC_URL 只写到域名（和端口），不带路径');
     }

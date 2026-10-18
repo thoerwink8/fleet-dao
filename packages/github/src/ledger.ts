@@ -23,6 +23,8 @@ export interface LockerOptions {
   staleAfterMs?: number;
   renewEveryMs?: number;
   log?: Logger;
+  /** 调用方需要确认全段持锁时，释放不能确认也必须失败；默认保留旧调用的日志行为。 */
+  strict?: boolean;
 }
 
 /**
@@ -41,19 +43,30 @@ export function lockerOver(store: IdempotencyStore, options: LockerOptions = {})
     staleAfterMs: options.staleAfterMs ?? CLAIM_STALE_AFTER_MS,
     renewEveryMs: options.renewEveryMs,
     log: options.log ?? silentLogger,
+    strict: options.strict ?? false,
   };
   return {
     withLock: (name, fn) =>
       local.withLock(name, async () => {
         const key = `gh:lock:${name}`;
         const lease = await acquireLock(store, key, name, o);
+        let outcome: { value: Awaited<ReturnType<typeof fn>> } | { error: unknown };
         try {
-          return await fn();
-        } finally {
-          if (!(await lease.release())) {
-            o.log.error('锁在持有期间被别的工人当成过期接走了：这段期间可能有两个人同时在做', { lock: name });
-          }
+          outcome = { value: await fn() };
+        } catch (error) {
+          outcome = { error };
         }
+        if (!(await lease.release())) {
+          o.log.error('锁在持有期间被别的工人当成过期接走了：这段期间可能有两个人同时在做', { lock: name });
+          if (o.strict)
+            throw new GitHubError('LOCK_LOST', `锁 ${name} 的持有未完整确认，需重试核对`, {
+              retryable: true,
+              details: { key },
+              cause: 'error' in outcome ? outcome.error : undefined,
+            });
+        }
+        if ('error' in outcome) throw outcome.error;
+        return outcome.value;
       }),
   };
 }

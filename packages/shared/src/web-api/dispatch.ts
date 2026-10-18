@@ -61,7 +61,16 @@ export const UpdateRepoCiPolicyRequest = z.object({
 });
 
 /** changed=false：本来就是这个模式，没改、没记。 */
-export const UpdateRepoCiPolicyResponse = RepoCiPolicySchema.extend({ changed: z.boolean() });
+export const UpdateRepoCiPolicyResponse = RepoCiPolicySchema.extend({
+  changed: z.boolean(),
+  synchronization: z
+    .object({
+      oldGreen: z.enum(['revoked', 'not-applicable']),
+      source: z.enum(['queued', 'not-applicable']),
+      finalGate: z.literal('not-awaited'),
+    })
+    .optional(),
+});
 
 // —— 临时指挥官整理待办（母单 #1335 第 3 片，#1338）：设置页仓库一节的「让指挥官整理」按钮要的两个口 ——
 // 点一下 = 记一条操作记录 groom.request（和命令行 fleet-api groom、引擎拉单一轮自己叫是同一个入口、同一把锁），引擎接手整理。

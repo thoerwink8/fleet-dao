@@ -1,7 +1,7 @@
-// pnpm project add|check（#2749）：七步各自先查、再补、再核，可重复跑；owner 下没装过 App 时提示先在网页装；
+// pnpm project add|check（#2749）：八步各自先查、再补、再核，可重复跑；owner 下没装过 App 时提示先在网页装；
 // check 有一项不过就不打开接活；冒烟单四节齐。GitHub、法国都换成内存里的假世界，不打真接口。
 // 第二步读装没装只经 fleet-api project installations（#2977）：读不成、回的认不出一律没查成（退出码 2），不退回本机 gh。
-// 第七步冒烟单（#2995）：创建回执的单号要直接读核对；搜索暂时为空不算失败，也不当成没有再开一张。
+// 第八步冒烟单（#2995）：创建回执的单号要直接读核对；搜索暂时为空不算失败，也不当成没有再开一张。
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -63,6 +63,11 @@ function installedJson(agent: boolean, engine: boolean, over: Record<string, unk
 
 /** 内存里的 GitHub + 法国。writes 记下每一次写（步名 → 次数），测「重跑不写」。 */
 class FakeWorld implements ProjectWorld {
+  policyMode: 'force' | 'off' = 'force';
+  policyMissing = 0;
+  async policyBridge() {
+    return { ciPolicy: this.policyMode, heads: this.policyMissing, missing: this.policyMissing };
+  }
   writes: string[] = [];
   installs = new Map<number, Set<number>>([
     [11, new Set()],
@@ -123,6 +128,7 @@ class FakeWorld implements ProjectWorld {
     return [...seen].map(([name, type]) => ({ name, type }));
   }
   async fileText(_slug: string, _ref: string, path: string) {
+    if (_slug === STD && path === '.github/workflows/merge-gate.yml') return '# fleet-ci-policy-bridge: v1';
     return this.files.get(path) ?? null;
   }
   async openPrFrom(_slug: string, head: string) {
@@ -165,13 +171,32 @@ class FakeWorld implements ProjectWorld {
     if (cmd === 'project' && sub === 'show') {
       if (!this.row) return { code: 1, stdout: '', stderr: `没查成：库里没有仓 ${SLUG}` };
       const gaps = REPO_PROFILE_KEYS.filter((k) => !(k in (this.row?.profile ?? {})));
-      return ok(JSON.stringify({ ...this.row, testCommand: 'pnpm check', gaps }));
+      return ok(
+        JSON.stringify({
+          repo: SLUG,
+          ciPolicy: this.policyMode,
+          ciPolicyBridge: {
+            version: 1,
+            endpoint: `https://policy.example.test/api/public/ci-policy/v1/repos/${REPO_ID}`,
+            public: true,
+            publisher: true,
+          },
+          ...this.row,
+          testCommand: 'pnpm check',
+          gaps,
+        }),
+      );
     }
     if (cmd === 'project' && sub === 'installations') {
       if (this.installationsReply) return this.installationsReply;
       // 和法国的 fleet-api project installations 一个形状：安装号 11 是 agent、22 是 engine
       const has = (inst: number) => this.installs.get(inst)?.has(REPO_ID) === true;
       return ok(installedJson(has(11), has(22)));
+    }
+    if (cmd === 'project' && sub === 'refresh-policy-source') {
+      this.writes.push('refresh-policy-source');
+      this.policyMissing = 0;
+      return ok('{}');
     }
     if (cmd === 'project' && sub === 'register') {
       this.writes.push('register');
@@ -205,14 +230,68 @@ function ctxOf(world: ProjectWorld, apps = APPS): ProjectContext & { lines: stri
 async function readyForSmoke(): Promise<FakeWorld> {
   const w = new FakeWorld();
   const first = await projectAdd(ctxOf(w), SLUG);
-  expect(first.results.some((x) => x.step === '7 冒烟单')).toBe(false);
+  expect(first.results.some((x) => x.step === '8 冒烟单')).toBe(false);
   w.mergeFillPr();
   w.writes = [];
   return w;
 }
 
 const smokeOf = (r: { results: { step: string; status: string; detail: string }[] }) =>
-  r.results.find((x) => x.step === '7 冒烟单');
+  r.results.find((x) => x.step === '8 冒烟单');
+
+describe('策略体检必须核真实读桥', () => {
+  it.each(['ciPolicy', 'githubId', 'repo', 'autoDispatchSince'])(
+    'show 缺 %s 不误认已装配，也不开接活',
+    async (field) => {
+      const w = await readyForSmoke();
+      const original = w.fleetApi.bind(w);
+      w.fleetApi = async (args, stdin) => {
+        const result = await original(args, stdin);
+        if (args[1] !== 'show') return result;
+        const raw = JSON.parse(result.stdout);
+        delete raw[field];
+        return { ...result, stdout: JSON.stringify(raw) };
+      };
+      const result = await projectCheck(ctxOf(w), SLUG);
+      expect(result.code).toBe(2);
+      expect(result.results.find((x) => x.step === '6 策略读桥')?.status).toBe('unchecked');
+      expect(w.writes).toEqual([]);
+    },
+  );
+
+  it('缺 source 的 check 只读报红，add 才经受保护管理命令补齐后开接活', async () => {
+    const w = await readyForSmoke();
+    w.policyMissing = 1;
+    const result = await projectCheck(ctxOf(w), SLUG);
+    expect(result.code).toBe(1);
+    expect(result.results.find((x) => x.step === '6 策略读桥')?.status).toBe('red');
+    expect(w.writes).toEqual([]);
+    const added = await projectAdd(ctxOf(w), SLUG);
+    expect(added.code).toBe(0);
+    expect(w.writes).toEqual(['refresh-policy-source', 'dispatch', 'issue']);
+  });
+
+  it('无 PR 只确认 HTTP 现读，明确尚未验全链；HTTP 失败不得开接活', async () => {
+    const w = await readyForSmoke();
+    const checked = await projectCheck(ctxOf(w), SLUG);
+    expect(checked.results.find((x) => x.step === '6 策略读桥')?.detail).toContain('尚未验证真实事件全链');
+    w.policyBridge = async () => {
+      throw new Error('HTTP 503');
+    };
+    const added = await projectAdd(ctxOf(w), SLUG);
+    expect(added.code).toBe(2);
+    expect(w.writes).toEqual([]);
+  });
+
+  it('caller 只有 uses 字样、夹带静态模式时不能被 includes 认成标准模板', async () => {
+    const w = await readyForSmoke();
+    w.files.set(REQUIRED_FILES.mergeGate, `${mergeGateCaller(STD)}\n# ci-policy: off\n`);
+    const result = await projectCheck(ctxOf(w), SLUG);
+    expect(result.code).toBe(1);
+    expect(result.results.find((x) => x.step === '5 补齐 PR')?.status).toBe('red');
+    expect(w.writes).toEqual([]);
+  });
+});
 
 describe('参数', () => {
   it('只认 add、check 加 owner/仓', () => {
@@ -238,7 +317,8 @@ describe('project add', () => {
       '3 流程标签': 'fixed',
       '4 仓档案': 'fixed',
       '5 补齐 PR': 'red',
-      '6 打开让 AI 接活': 'red',
+      '6 策略读桥': 'ok',
+      '7 打开让 AI 接活': 'red',
     });
     expect(w.writes.sort()).toEqual(['fill-pr', 'install', 'label', 'label', 'profile', 'register']);
     expect(w.installs.get(11)?.has(REPO_ID)).toBe(true);
@@ -262,13 +342,13 @@ describe('project add', () => {
     w.mergeFillPr();
     const third = await projectAdd(ctxOf(w), SLUG);
     expect(third.code).toBe(0);
-    expect(statuses(third)).toMatchObject({ '6 打开让 AI 接活': 'fixed', '7 冒烟单': 'fixed' });
+    expect(statuses(third)).toMatchObject({ '7 打开让 AI 接活': 'fixed', '8 冒烟单': 'fixed' });
     expect(w.writes).toEqual(['dispatch', 'issue']);
     expect(w.issues.map((i) => [i.title, i.labels])).toEqual([
       [SMOKE_TITLE, ['需求', '域:engine', '性质:process']],
     ]);
 
-    // 第四遍：七步全是 ok，一次都不写
+    // 第四遍：八步全是 ok，一次都不写
     w.writes = [];
     const fourth = await projectAdd(ctxOf(w), SLUG);
     expect(fourth.code).toBe(0);
@@ -316,7 +396,7 @@ describe('project add', () => {
     w.writes = [];
     const r = await projectAdd(ctxOf(w), SLUG);
     expect(r.code).toBe(1);
-    expect(r.results.find((x) => x.step === '6 打开让 AI 接活')?.status).toBe('red');
+    expect(r.results.find((x) => x.step === '7 打开让 AI 接活')?.status).toBe('red');
     expect(w.writes).not.toContain('dispatch');
     expect(w.issues).toEqual([]);
   });
@@ -359,10 +439,11 @@ describe('冒烟单：创建回执和直接读，不信搜索的空（#2995）',
       '3 流程标签',
       '4 仓档案',
       '5 补齐 PR',
-      '6 打开让 AI 接活',
-      '7 冒烟单',
+      '6 策略读桥',
+      '7 打开让 AI 接活',
+      '8 冒烟单',
     ]);
-    expect(r.results.find((x) => x.step === '6 打开让 AI 接活')?.status).toBe('fixed');
+    expect(r.results.find((x) => x.step === '7 打开让 AI 接活')?.status).toBe('fixed');
     expect(smoke?.status).toBe('fixed');
     expect(receipt).toBeGreaterThan(0);
     expect(smoke?.detail).toContain(`#${receipt}`);
@@ -770,11 +851,24 @@ describe('第二步读装没装：经 fleet-api project installations，不读�
             owner: { login: 'thoerwink8' },
             default_branch: 'main',
             archived: false,
+            full_name: FLUX,
+            private: false,
           }),
           stderr: '',
         };
       if (args[0] === 'label' && args[1] === 'list')
         return { code: 0, stdout: JSON.stringify(LABELS), stderr: '' };
+      if (args[0] === 'api' && args[1] === `repos/${FLUX}/pulls?state=open&per_page=100&page=1`)
+        return { code: 0, stdout: '[]', stderr: '' };
+      if (args[0] === 'api' && args[1]?.startsWith(`repos/${STD}/contents/.github/workflows/merge-gate.yml`))
+        return {
+          code: 0,
+          stdout: JSON.stringify({
+            content: Buffer.from('# fleet-ci-policy-bridge: v1').toString('base64'),
+            encoding: 'base64',
+          }),
+          stderr: '',
+        };
       const content = /^repos\/thoerwink8\/fluxwatch\/contents\/([^?]+)\?ref=main$/.exec(args[1] ?? '');
       if (args[0] === 'api' && args.length === 2 && content?.[1]) {
         const path = content[1].split('/').map(decodeURIComponent).join('/');
@@ -795,6 +889,14 @@ describe('第二步读装没装：经 fleet-api project installations，不读�
         return {
           code: 0,
           stdout: JSON.stringify({
+            repo: FLUX,
+            ciPolicy: 'force',
+            ciPolicyBridge: {
+              version: 1,
+              public: true,
+              publisher: true,
+              endpoint: `https://policy.example.test/api/public/ci-policy/v1/repos/${REPO_ID}`,
+            },
             githubId: REPO_ID,
             testCommand: 'pnpm check',
             autoDispatchSince: null,
@@ -806,7 +908,12 @@ describe('第二步读装没装：经 fleet-api project installations，不读�
       if (args[0] === 'project' && args[1] === 'installations') return installations;
       return { code: 2, stdout: '', stderr: `假 fleet-api 不认：${args.join(' ')}` };
     };
-    return { world: ghProjectWorld(gh, fleetApi), ghCalls, fleetCalls };
+    const fetchImpl: typeof fetch = async () =>
+      Response.json(
+        { version: 1, githubId: REPO_ID, repo: FLUX, ciPolicy: 'force' },
+        { headers: { 'cache-control': 'no-store' } },
+      );
+    return { world: ghProjectWorld(gh, fleetApi, fetchImpl), ghCalls, fleetCalls };
   }
   const fullyInstalled = (): FleetApiResult => ({
     code: 0,
@@ -840,7 +947,7 @@ describe('第二步读装没装：经 fleet-api project installations，不读�
   it('离线夹具五项全具备才退出 0', async () => {
     const f = fluxWorld(true, fullyInstalled());
     const r = await projectCheck(ctxOf(f.world), FLUX);
-    expect(r.results.map((x) => x.status)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok']);
+    expect(r.results.map((x) => x.status)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok', 'ok']);
     expect(r.code).toBe(0);
   });
 

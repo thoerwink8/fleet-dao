@@ -20,6 +20,8 @@
 ## 常见坑
 
 - `plan-reader.ts` 只给 `pnpm plan` 装配读取传输：gh 明确配置 socket 时经 `gh api --include --method GET`，不搬令牌；没有配置仍走原生 HTTP。数字仓号分页先经当前仓元信息核对 id 和 full_name，不能信 Link 自报身份。配置或进程真失败必须报没读成，不能静默换身份、匿名或直连；其他 GitHub 读写入口保持各自原路径。
+- `ci-policy-bridge.ts` 是 Actions 零安装的真实 HTTPS reader，只相对引用 shared 的纯协议文件。可信标准 App slug 查数字 Bot，逐 PR `fleet-ci-policy-source/pr/<号>` 选当前头最新可信 source；来源缺失 force，坏来源/读失败明确没查成，私有即时 force 不跟历史公开 URL。发表前重读 head/mode。不得加 caller mode、策略快照或旧 off fallback。
+- `pnpm project check` 的第六步真 HTTP 读桥，caller 按生成模板精确识别；show 缺 mode/数字仓号等字段不猜。缺 source 报红，check 不写，add 才经受保护 `fleet-api project refresh-policy-source` 补齐；没有 PR 必须明说尚未验真实事件全链。
 
 - `mother-manifest.ts` 严格读写母单正文 JSON 清单；`family-manifest.ts` 全量读含已关闭子单后按唯一清单修复正文与原生关系，多母认领先报冲突、不写。入口 `bin/github-audit.ts` 显式给 family reader/writer；原对账接口仍可只读。批量写清单失败走整批补偿；`issue:new --parent` 的清单失败须明说子单已开已挂，不能建议重开。
 - 空母单只对批量创建标记报错，不按创建时间报警；目录母单允许空清单。parent 孤儿、字段与原生关系冲突和 manifest 差异仍须报告。

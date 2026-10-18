@@ -1,6 +1,8 @@
 // 合并闸入口：node packages/conventions/src/bin/merge-gate.ts [--no-write]
 // merge-gate.yml 里跑：按事件（GITHUB_EVENT_NAME、GITHUB_EVENT_PATH）认出要算哪些 PR，算完在各自当前头上写 merge-gate 状态。
 // 带 --no-write：只算这个 PR、只报不写，退出码 0 能合 / 1 不能合 / 2 没查成（手动看用，要 pull_request 类的事件文件）。
+
+import { policyReader } from '../ci-policy-bridge.ts';
 import { ghApi } from '../gh-api.ts';
 import { gateGitHub, runMergeGate } from '../merge-gate.ts';
 import { annotation } from '../pr-fields.ts';
@@ -11,10 +13,13 @@ const runUrl =
   env.GITHUB_SERVER_URL && env.GITHUB_REPOSITORY && env.GITHUB_RUN_ID
     ? `${env.GITHUB_SERVER_URL}/${env.GITHUB_REPOSITORY}/actions/runs/${env.GITHUB_RUN_ID}`
     : undefined;
+const api = ghApi(env);
+const gh = gateGitHub(api);
 const { code, lines } = await runMergeGate({
   eventName: env.GITHUB_EVENT_NAME,
   eventPath: env.GITHUB_EVENT_PATH,
-  gh: gateGitHub(ghApi(env)),
+  gh,
+  readCiPolicy: policyReader(api, gh, env.GITHUB_REPOSITORY ?? ''),
   write: !process.argv.includes('--no-write'),
   ...(runUrl ? { targetUrl: runUrl } : {}),
 });

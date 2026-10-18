@@ -90,6 +90,22 @@ export async function findRepoProfile(db: Db, owner: string, name: string): Prom
   return row ? { ...row, ciPolicy: ciPolicyOf(row.ciPolicy) } : null;
 }
 
+/** 公开策略桥只按已登记的数字仓号找同一行，不接受 caller 自报模式。 */
+export async function findRepoPolicyByGithubId(db: Db, githubId: number) {
+  const [row] = await db
+    .select({
+      id: repos.id,
+      owner: repos.owner,
+      name: repos.name,
+      githubId: repos.githubId,
+      ciPolicy: repos.ciPolicy,
+    })
+    .from(repos)
+    .where(eq(repos.githubId, githubId))
+    .limit(1);
+  return row ? { ...row, ciPolicy: ciPolicyOf(row.ciPolicy) } : null;
+}
+
 /** 操作记录里写档案这件事的名字；target 是 repo:<仓的编号>。 */
 export const REPO_PROFILE_SET = 'repo.profile.set';
 

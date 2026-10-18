@@ -12,6 +12,7 @@
 // 主线推送只在闸认的东西（判法、清单、工作流本身）变了才触发、同样重算所有开着的 PR——判法收紧了，开着的 PR 上旧的 success
 // 不能留着（#654 第二意见）；不检出、不跑 PR 里的代码：判法和清单用跑这段代码的那一份（主线的）。
 import { readFileSync } from 'node:fs';
+import { CI_POLICY_SOURCE_PREFIX, policySourceNumber } from '../../shared/src/ci-policy-bridge.ts';
 import { isFlowBranch } from './flow-branch.ts';
 import type { GhApi } from './gh-api.ts';
 import {
@@ -139,15 +140,17 @@ export interface GateResult {
   /** 有没有「没查成」的：有就是 failure，入口退出码 2。 */
   notChecked: boolean;
   lines: string[];
+  /** 本轮已验证的模式；发表前再读，不能沿用旧 off。 */
+  policy?: 'force' | 'off';
 }
 
 export interface GateDeps {
   gh: GitHubReads;
   /**
-   * 这个仓的 CI 模式。不传 = 强制：闸跑在 GitHub Actions 里，读不到法国的库，
-   * 不能因为没传就把引擎分支的冷验收放掉。驾驶舱设成不强制的仓，由调用方显式传入 off。
+   * 纯判法可注入 CI 模式，不给一律 force；生产入口只用可信 source 的现读 DB reader。
    */
   ciPolicy?: 'force' | 'off';
+  readCiPolicy?: (number: number, head: string) => Promise<'force' | 'off'>;
   /** 改标准的路径清单；不传读跑这段代码的那一份（standard-paths-file.ts，主线检出里的）。读不到、认不出就抛。 */
   standardPaths?: () => Promise<StandardPath[]>;
 }
@@ -211,7 +214,7 @@ async function standardVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict>
 
 /** 合前一次冷调用（#555-2）这一样：强制 CI 的引擎任务 PR（分支名认）当前头上要有通过的 cold-verify。 */
 async function coldVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict> {
-  // 不强制 CI 的仓显式传入 off 才跳过；没传仍要，不能把别的仓放开。
+  // 只跳过本轮已经核实的 off；缺模式仍 force。
   const policy = deps.ciPolicy ?? 'force';
   const flow = isFlowBranch(meta.headRef);
   const cold = coldVerifyNeed(flow, policy);
@@ -272,13 +275,23 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
   if (!meta.open)
     return { number, head: meta.head, closed: true, state: 'failure', notChecked: false, lines: [] };
 
-  const verdicts = [await coldVerdict(meta, deps), await standardVerdict(meta, deps)];
+  let policy = deps.ciPolicy ?? 'force';
+  try {
+    if (deps.readCiPolicy) policy = await deps.readCiPolicy(number, meta.head);
+  } catch (e) {
+    return { ...broken(`CI 策略来源未查成（${message(e)}）`), head: meta.head };
+  }
+  const verdicts = [
+    await coldVerdict(meta, { ...deps, ciPolicy: policy }),
+    await standardVerdict(meta, deps),
+  ];
   const ok = verdicts.every((v) => v.ok);
   return {
     number,
     head: meta.head,
     state: ok ? 'success' : 'failure',
     notChecked: verdicts.some((v) => v.notChecked),
+    ...(deps.readCiPolicy ? { policy } : {}),
     // 不通过时只写不通过的那几样（「能合：……」夹在里面读着像能合）
     lines: verdicts.filter((v) => ok || !v.ok).flatMap((v) => v.lines),
   };
@@ -310,7 +323,11 @@ export async function targetPrs(
       // 不按事件里的 sha 只算那一个 PR：status 事件共用一个排队组（merge-gate.yml），排着的只留最新一个，中间的被取消——
       // 一轮里给好几个 PR 贴 cold-verify 时，只算最后那个的话前面几个就一直停在旧结论上（#351 演练撞到）。
       // 所以留下来的那一次把开着的 PR 全重算一遍，每个都现读自己此刻的状态。
-      if (ev.context !== COLD_VERIFY_CONTEXT) return [];
+      if (ev.context !== COLD_VERIFY_CONTEXT && policySourceNumber(ev.context) === null) {
+        if (typeof ev.context === 'string' && ev.context.startsWith(CI_POLICY_SOURCE_PREFIX))
+          return 'source status 的 PR 号不是规范正安全整数';
+        return [];
+      }
       return numbersOf(await gh.openPrs(), () => true);
     case 'push':
       // 工作流的 paths 只放行了闸认的那几个文件（merge-gate.yml），到这里就是「判定输入变了」：开着的 PR 全重算，每个都现读自己此刻的状态。
@@ -367,6 +384,7 @@ export async function runMergeGate(opts: {
   write: boolean;
   /** 状态上「详情」链到的地方（这次运行的页面）。 */
   targetUrl?: string;
+  readCiPolicy?: GateDeps['readCiPolicy'];
 }): Promise<RunResult> {
   const fail = (why: string): RunResult => ({ code: 2, lines: [`没查成：${why}。`] });
   const numbers = await eventTargets(opts.eventName, opts.eventPath, opts.gh);
@@ -374,7 +392,7 @@ export async function runMergeGate(opts: {
   if (!opts.write && numbers.length !== 1) return fail('只报不写时一次只算一个 PR（pull_request 事件）');
   if (numbers.length === 0) return { code: 0, lines: ['这次没有要算的 PR。'] };
 
-  const deps: GateDeps = { gh: opts.gh };
+  const deps: GateDeps = { gh: opts.gh, ...(opts.readCiPolicy ? { readCiPolicy: opts.readCiPolicy } : {}) };
   const lines: string[] = [];
   let code: 0 | 1 | 2 = 0;
   for (const n of numbers) {
@@ -395,13 +413,30 @@ export async function runMergeGate(opts: {
       continue;
     }
     try {
+      if (opts.readCiPolicy && r.policy) {
+        const policy = await opts.readCiPolicy(n, r.head);
+        const current = metaOf(await opts.gh.pr(n));
+        if (typeof current === 'string') throw new Error(current);
+        if (!current.open) continue;
+        if (current.number !== n || current.head !== r.head || policy !== r.policy)
+          throw new Error('发表前 PR head 或 DB 策略改变，请重算');
+      }
       await opts.gh.writeStatus(r.head, {
         state: r.state,
         description: statusDescription(r.lines),
         ...(opts.targetUrl ? { targetUrl: opts.targetUrl } : {}),
       });
     } catch (e) {
-      lines.push(`  没写上状态（${message(e)}）。`);
+      lines.push(`  最终核验或发表失败（${message(e)}）。`);
+      // 已知头上撤掉旧结论；不能在来源读取失败时留下本轮准备的 success。
+      try {
+        await opts.gh.writeStatus(r.head, {
+          state: 'failure',
+          description: '没查成：发表前策略/head 核验或状态写入失败',
+        });
+      } catch (writeError) {
+        lines.push(`  失败状态也没写上（${message(writeError)}）。`);
+      }
       code = 2;
     }
   }

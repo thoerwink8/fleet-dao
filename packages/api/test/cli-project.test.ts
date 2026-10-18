@@ -4,7 +4,7 @@
 import type { RepoProfileRow } from '@fleet-dao/db';
 import type { InstallationListedRepo } from '@fleet-dao/github';
 import { DEFAULT_REPO_PROFILE } from '@fleet-dao/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { type CliDeps, main } from '../src/cli.ts';
 import type { InstallationReposPort } from '../src/deps.ts';
 import {
@@ -15,6 +15,8 @@ import {
   parseProjectArgs,
 } from '../src/project-cli.ts';
 import { mergedInstallations } from '../src/repo-import-routes.ts';
+import { attachPolicyBridge } from './ci-policy-helper.ts';
+import { harness } from './harness.ts';
 
 const T0 = new Date('2026-10-16T09:00:00.000Z');
 
@@ -69,6 +71,7 @@ function setup(rows: RepoProfileRow[] = [fluxwatch()]) {
   const err: string[] = [];
   const files = new Map<string, string>();
   let stdin = '';
+  const refresh = vi.fn(async () => ({ public: true, heads: 2 }));
   const deps: CliDeps = {
     env: { DATABASE_URL: 'postgres:///fleet', FLEET_OPS_OPERATOR: 'root' },
     out: (t) => out.push(t),
@@ -78,6 +81,23 @@ function setup(rows: RepoProfileRow[] = [fluxwatch()]) {
       throw new Error('project 不该开 Store');
     },
     openProject: async () => ({ port, close: async () => {} }),
+    openPolicyBridge: async () => {
+      const h = harness();
+      const { bridge } = attachPolicyBridge(h);
+      return {
+        bridge: {
+          ...bridge,
+          refresh,
+          describe: async () => ({
+            version: 1,
+            publisher: true,
+            public: true,
+            endpoint: 'https://policy.example.test/api/public/ci-policy/v1/repos/1418484822',
+          }),
+        },
+        close: async () => {},
+      };
+    },
     readFile: async (path) => {
       const text = files.get(path);
       if (text === undefined) throw Object.assign(new Error(`ENOENT: ${path}`), { code: 'ENOENT' });
@@ -91,6 +111,7 @@ function setup(rows: RepoProfileRow[] = [fluxwatch()]) {
     out,
     err,
     files,
+    refresh,
     setStdin: (s: string) => {
       stdin = s;
     },
@@ -157,6 +178,12 @@ describe('project show', () => {
       githubId: 1418484822,
       testCommand: 'pnpm check',
       ciPolicy: 'off',
+      ciPolicyBridge: {
+        version: 1,
+        public: true,
+        publisher: true,
+        endpoint: 'https://policy.example.test/api/public/ci-policy/v1/repos/1418484822',
+      },
       autoDispatchSince: null,
       profile: {},
       effective: DEFAULT_REPO_PROFILE,
@@ -177,6 +204,26 @@ describe('project show', () => {
     const shown = JSON.parse(s.out.join('\n'));
     expect(shown.effective).toBeNull();
     expect(shown.error).toContain('weight');
+  });
+});
+
+describe('project refresh-policy-source', () => {
+  it('受保护管理命令强制重发事件，仅返回排重算，不宣称 gate 成功', async () => {
+    const s = setup();
+    expect(await s.run(['refresh-policy-source', 'thoerwink8/fluxwatch'])).toBe(0);
+    expect(s.refresh).toHaveBeenCalledWith(
+      { action: 'refresh-policy-source', owner: 'thoerwink8', name: 'fluxwatch' },
+      true,
+    );
+    expect(JSON.parse(s.out.join('\n'))).toEqual({ public: true, heads: 2 });
+    expect(s.audits).toEqual([]);
+  });
+  it('source 刷新失败退出1，不拿空 heads 或成功冒充', async () => {
+    const s = setup();
+    s.refresh.mockRejectedValueOnce(new Error('source unavailable'));
+    expect(await s.run(['refresh-policy-source', 'thoerwink8/fluxwatch'])).toBe(1);
+    expect(s.out).toEqual([]);
+    expect(s.err.join('\n')).toContain('source unavailable');
   });
 });
 

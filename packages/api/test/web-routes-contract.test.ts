@@ -2,7 +2,7 @@
 // - 契约里写了、后端没注册：前端调了会 404；
 // - 后端注册了、契约里没有：没人认得的接口（飞书网关、fleet 命令、GitHub 事件另有各自的前缀和约定，不在这里）。
 // 前端那一头（http.ts 用了契约里的哪些）在 packages/web/src/api/http.test.ts 旁边的 contract.test.ts 对。
-import { AUTH_PREFIX, AuthRoutes, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
+import { AUTH_PREFIX, AuthRoutes, PublicCiPolicyRoute, WEB_API_PREFIX, WebRoutes } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { DEV_RUN_ID, harness, IDS, write } from './harness.ts';
 
@@ -12,6 +12,7 @@ const key = (e: Entry) => `${e.method} ${e.path}`;
 /** 契约里的每一条（WebRoutes 在 /api 下、AuthRoutes 在 /auth 下），路径参数名原样。 */
 function contract(): Entry[] {
   return [
+    PublicCiPolicyRoute,
     ...Object.values(WebRoutes).map((r) => ({ method: r.method, path: `${WEB_API_PREFIX}${r.path}` })),
     ...Object.values(AuthRoutes).map((r) => ({ method: r.method, path: `${AUTH_PREFIX}${r.path}` })),
   ];
