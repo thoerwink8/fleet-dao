@@ -149,7 +149,7 @@ it('写权限事件只运行可信默认分支；无外部 PR 代码、正文 sh
   const workflow = parse(
     readFileSync(new URL('../../../.github/workflows/query-metadata.yml', import.meta.url), 'utf8'),
   );
-  expect(workflow.permissions).toEqual({ contents: 'read', issues: 'write', 'pull-requests': 'read' });
+  expect(workflow.permissions).toEqual({ contents: 'read', issues: 'write', 'pull-requests': 'write' });
   expect(workflow.on.issues.types).toEqual(['opened', 'edited', 'reopened']);
   expect(workflow.on.pull_request_target.types).toEqual(['opened', 'edited', 'reopened', 'synchronize']);
   const steps = workflow.jobs.reconcile.steps;
