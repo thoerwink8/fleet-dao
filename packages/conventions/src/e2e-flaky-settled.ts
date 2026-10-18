@@ -1,4 +1,7 @@
 // 已完成处置里的失败 run 还算不算新故障（决定 0093 的立案去重）。
+// 完成边界只认 completed 单的正文，以及关闭时刻及之前写下、且关单后没改过的留言：那里绑住的 Actions 运行号才算处置过。
+// 关单之后的留言（含关单后改过的）是复发、诊断或验证，里面的运行号不算。对不上关闭时刻的留言也不算。
+// 没有运行号（只有 PR、文档链接）就是证据不明。
 // 不放进 e2e-flaky.ts：index 从那儿再导出 outcomesOf，那个文件在包的面上。
 // 改面上的文件会让依赖 conventions 的包一起进本机测试，引擎自测 30 分钟跑不完。
 
@@ -32,22 +35,22 @@ export function runKey(url: string): string {
   return url.replace(/[),.;]+$/g, '').replace(/\/+$/, '');
 }
 
-/** 从正文或留言里抽出失败 run。有 Actions 运行号就只用运行号，避免把别的链接当成 run。 */
+const ACTION_RUN_KEY = /^run:\d+$/;
+
+/** 是不是 GitHub Actions 运行号。PR、文档和其他链接不是失败 run，不能拿来证明修过。 */
+function isActionRunKey(key: string): boolean {
+  return ACTION_RUN_KEY.test(key);
+}
+
+/** 从正文或留言里抽出失败 run。只认 Actions 运行号；一个都没有就是没有证据，不把别的 URL 当成 run。 */
 export function extractRunKeys(text: string): string[] {
   const keys: string[] = [];
   const seen = new Set<string>();
-  const add = (key: string) => {
-    if (seen.has(key)) return;
-    seen.add(key);
-    keys.push(key);
-  };
   for (const match of text.matchAll(/\/actions\/runs\/(\d+)/g)) {
-    if (match[1]) add(`run:${match[1]}`);
-  }
-  if (keys.length === 0) {
-    for (const match of text.matchAll(/https?:\/\/[^\s)>\]]+/g)) {
-      if (match[0]) add(runKey(match[0]));
-    }
+    const id = match[1];
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    keys.push(`run:${id}`);
   }
   return keys;
 }
@@ -100,8 +103,18 @@ interface ClosedTake {
   number: number;
   title: string;
   body: string;
-  /** 关单原因是 completed 才采用正文里的 run；别的原因不证明修过。 */
+  /** 关单原因是 completed 才采用完成边界里的 run；别的原因不证明修过。 */
   trust: boolean;
+  /** 关单时刻。没有就不能证明留言是关单前写的，那些留言不进完成边界。 */
+  closedAt: number | null;
+}
+
+interface IssueNote {
+  body: string;
+  /** 留言写成的时刻。没有就不能放进完成边界。 */
+  createdAt: number | null;
+  /** 留言最后改动。晚于关单说明文字可能已不是完成时的原文。没有该字段则只看写成时刻。 */
+  updatedAt: number | null;
 }
 
 function parseClosedRow(
@@ -122,6 +135,9 @@ function parseClosedRow(
     return { kind: 'bad', reason: `证据不明：#${String(record.number)} 的正文认不出` };
   // 明确不是完成处置的关法，不能拿来证明这批 run 修过。
   if (reason === 'not_planned' || reason === 'duplicate') return { kind: 'skip' };
+  const closedAt = closedInstant(record.closed_at);
+  if (closedAt === 'bad')
+    return { kind: 'bad', reason: `证据不明：#${String(record.number)} 的关闭时间认不出` };
   return {
     kind: 'take',
     issue: {
@@ -129,14 +145,28 @@ function parseClosedRow(
       title: record.title,
       body: typeof record.body === 'string' ? record.body : '',
       trust: reason === 'completed',
+      closedAt,
     },
   };
+}
+
+/** 关单或留言上的时间。缺字段是「没有」；写了但不是时间就是认不出。 */
+function closedInstant(value: unknown): number | null | 'bad' {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return 'bad';
+  return instantOf(value) ?? 'bad';
+}
+
+function instantOf(value: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 function createdAtOf(meta: unknown): string | null {
   if (meta === null || typeof meta !== 'object') return null;
   const created = (meta as { created_at?: unknown }).created_at;
-  if (typeof created !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(created)) return null;
+  if (typeof created !== 'string' || instantOf(created) === null) return null;
   return created;
 }
 
@@ -175,7 +205,7 @@ function addHandled(byTest: Record<string, HandledTest[]>, title: string, row: H
 }
 
 /**
- * 读同用例已完成处置里点名的失败 run。范围从窗口最旧一轮的创建时间起（更早的单不可能写进这些 run）。
+ * 读同用例已完成处置里绑住的失败 run。范围从窗口最旧一轮的创建时间起（更早的单不可能写进这些 run）。
  * 查询抛错、页没翻完、单或留言认不出：返回 unknown，不返回空表（空表会变成「没有旧单、可以新开」）。
  */
 export async function loadWindowEvidence(
@@ -217,6 +247,17 @@ export async function loadWindowEvidence(
   }
 }
 
+/** 关闭时刻及之前写下、且关单后没改过的留言，才算完成时绑住的。时间认不出则整次查询未知。 */
+function noteBoundAtClose(note: IssueNote, closedAt: number | null): boolean {
+  if (closedAt === null || note.createdAt === null || note.createdAt > closedAt) return false;
+  return note.updatedAt === null || note.updatedAt <= closedAt;
+}
+
+function completionText(issue: ClosedTake, notes: readonly IssueNote[]): string {
+  const bound = notes.filter((note) => noteBoundAtClose(note, issue.closedAt));
+  return [issue.body, ...bound.map((note) => note.body)].join('\n');
+}
+
 async function settleMatched(
   matched: readonly ClosedTake[],
   titles: ReadonlySet<string>,
@@ -228,11 +269,12 @@ async function settleMatched(
   for (const issue of matched) {
     const comments = await loadComments(get, issue.number, commentCap, pageSize);
     if (!comments.ok) return { status: 'unknown', reason: comments.reason };
-    const text = [issue.body, ...comments.bodies].join('\n');
+    // 不是完成处置的同标题单：点到哪些用例就记成证据不明，不用它的运行号证明修过。
     if (!issue.trust) {
+      const allText = [issue.body, ...comments.notes.map((note) => note.body)].join('\n');
       const mentioned =
         issue.title === FLAKY_SUMMARY_TITLE
-          ? Object.keys(evidenceFor(issue.title, text, titles))
+          ? Object.keys(evidenceFor(issue.title, allText, titles))
           : [issue.title];
       if (mentioned.length === 0)
         return {
@@ -242,7 +284,14 @@ async function settleMatched(
       for (const title of mentioned) addHandled(byTest, title, { number: issue.number, runs: null });
       continue;
     }
-    for (const [title, runs] of Object.entries(evidenceFor(issue.title, text, titles))) {
+    const evidence = evidenceFor(issue.title, completionText(issue, comments.notes), titles);
+    // 汇总单没点出任何用例：不知道它盖住了谁，不能当成「没有这张单」去新开。
+    if (issue.title === FLAKY_SUMMARY_TITLE && Object.keys(evidence).length === 0)
+      return {
+        status: 'unknown',
+        reason: `证据不明：#${issue.number} 已完成，但没有点明是哪些用例的失败 run，不能当成修过`,
+      };
+    for (const [title, runs] of Object.entries(evidence)) {
       addHandled(byTest, title, { number: issue.number, runs });
     }
   }
@@ -254,20 +303,28 @@ async function loadComments(
   number: number,
   commentCap: number,
   pageSize: number,
-): Promise<{ ok: true; bodies: string[] } | { ok: false; reason: string }> {
-  const bodies: string[] = [];
+): Promise<{ ok: true; notes: IssueNote[] } | { ok: false; reason: string }> {
+  const notes: IssueNote[] = [];
   for (let page = 1; page <= commentCap; page++) {
     const got = await get(`/issues/${number}/comments?per_page=${pageSize}&page=${page}`);
     if (!Array.isArray(got)) return { ok: false, reason: `证据不明：#${number} 的留言不是列表` };
     for (const comment of got) {
       if (comment === null || typeof comment !== 'object')
         return { ok: false, reason: `证据不明：#${number} 的留言有一条认不出` };
-      const body = (comment as { body?: unknown }).body;
-      if (body !== null && body !== undefined && typeof body !== 'string')
+      const record = comment as { body?: unknown; created_at?: unknown; updated_at?: unknown };
+      if (record.body !== null && record.body !== undefined && typeof record.body !== 'string')
         return { ok: false, reason: `证据不明：#${number} 的留言正文认不出` };
-      bodies.push(typeof body === 'string' ? body : '');
+      const createdAt = closedInstant(record.created_at);
+      const updatedAt = closedInstant(record.updated_at);
+      if (createdAt === 'bad' || updatedAt === 'bad')
+        return { ok: false, reason: `证据不明：#${number} 的留言时间认不出` };
+      notes.push({
+        body: typeof record.body === 'string' ? record.body : '',
+        createdAt,
+        updatedAt,
+      });
     }
-    if (got.length < pageSize) return { ok: true, bodies };
+    if (got.length < pageSize) return { ok: true, notes };
   }
   return { ok: false, reason: `分页不完整：#${number} 的留言翻了 ${commentCap} 页仍是满页` };
 }
@@ -282,9 +339,9 @@ function uniqNumbers(numbers: readonly number[]): number[] {
 }
 
 /**
- * 当前失败 run（新的在前）有没有超出已完成处置。
- * 最新一轮失败 run 已经点过名：窗口里更旧的失败不是新增（汇总单以前只写「最近一次」也算盖住）。
- * 有更新的失败 run、并且每张相关单都点得清：立刻立案。有一张单点不清、又盖不住这个新 run：未知，不当没有故障。
+ * 当前失败 run（新的在前）有没有超出完成边界里绑住的那些。
+ * 最新一轮失败 run 已在完成边界里：窗口里更旧的失败不是新增（汇总单以前只写「最近一次」也算盖住）。
+ * 有更新的失败 run、并且每张相关单都列得出运行号：立刻立案。有一张单列不出、又盖不住这个新 run：未知，不当没有故障。
  */
 function judgeFlaky(
   title: string,
@@ -299,11 +356,13 @@ function judgeFlaky(
   const known = new Set<string>();
   const unclear: number[] = [];
   for (const row of rows) {
-    if (row.runs === null || row.runs.length === 0) {
+    // 没有运行号，或混进了 PR、文档链接：这张单证明不了修过哪些 run。
+    const runs = row.runs;
+    if (runs === null || runs.length === 0 || runs.some((run) => !isActionRunKey(run))) {
       unclear.push(row.number);
       continue;
     }
-    for (const run of row.runs) known.add(run);
+    for (const run of runs) known.add(run);
   }
   const newest = keys[0];
   if (newest !== undefined && known.has(newest)) {
@@ -406,8 +465,8 @@ function capCreates(actions: readonly SettledAction[], max = MAX_NEW_ISSUES): Se
 
 /**
  * 近几轮（新的在前）→ 要开/留言/关的单。不传 `settled` 时和 `e2e-flaky.ts` 的 planIssues 同一条路
- * （只按开着的单去重）。传了之后，当前失败 run 没有超出已点名的那些就不新开，并写明原单；
- * 有更新的失败 run 且仍达阈值就照常开。查询没读全是「未知」，不开、也不当没有故障。
+ * （只按开着的单去重）。传了之后，当前失败 run 没有超出完成边界里绑住的那些就不新开，并写明原单；
+ * 有更新的失败 run 且仍达阈值就照常开。查询没读全、或运行号认不出，是「未知」，不开、也不当没有故障。
  * 判在限流之前：被盖住的不占这一次的新开名额。
  */
 export function planIssues(
