@@ -1,15 +1,6 @@
 import { answerResolves, NO_OPTIONS_TEXT } from '@fleet-dao/shared';
 import { useQueryClient } from '@tanstack/react-query';
-import {
-  ArrowUpRight,
-  Bell,
-  Check,
-  ChevronDown,
-  ChevronRight,
-  ExternalLink,
-  Send,
-  TriangleAlert,
-} from 'lucide-react';
+import { ArrowUpRight, Bell, Check, ChevronDown, ExternalLink, Send, TriangleAlert } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
@@ -24,6 +15,8 @@ import {
   useResolveNotification,
 } from '../api/client';
 import type { Me, Notification, NotificationLevel } from '../api/types';
+import { AlertRepairPanel, type RepairRefresh } from '../components/alert-repair';
+import { type AnswerInput, DecisionPicker } from '../components/decision-picker';
 import { EmptyState } from '../components/layout/empty-state';
 import { FilterTabs } from '../components/layout/filter-tabs';
 import { List, ListRow } from '../components/layout/list';
@@ -35,8 +28,8 @@ import { StatusBadge, StatusDot } from '../components/layout/status-badge';
 import { Tag } from '../components/layout/tag';
 import { RepoLink } from '../components/repo-link';
 import { Button } from '../components/ui/button';
-import { Input } from '../components/ui/input';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
+import { isWatchdogAlert } from '../lib/alert-repair';
 import { decisionResult, decisionToast } from '../lib/decision-result';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -216,9 +209,6 @@ function ClampedBody({ text }: { text: string }) {
   );
 }
 
-/** 回答一条「要你拍」：点一个选项，或自己写一段。 */
-export type AnswerInput = { optionId: string } | { text: string };
-
 /**
  * 「要你拍」收起时的那一句灰字（#1950）：不展开也知道系统怎么建议。
  * 有推荐项写「推荐：发布。理由」；拍过了不写（「我选了：…」那一行顶上）；没有选项的老通知写「没有选项，请直接回复」（展开、收起都在）。
@@ -240,97 +230,6 @@ function DecisionHint({ n }: { n: Notification }) {
     <p className="mt-1 truncate text-meta text-muted-foreground" data-testid="decision-hint" title={line}>
       推荐：<span className="font-medium text-foreground">{rec.label}</span>。{rec.recommended}
     </p>
-  );
-}
-
-/**
- * 「要你拍」的选项区（#1915；#2353 起直接摆在卡上，不再收进「看选项」、也不再有「处理了」）：选一个或写一句，系统照着做。
- * 一个选项一行，整行就是按钮，点一下就是拍板；行里是选项的字（推荐的那项带「推荐」标，上次选过的带「上次选的」）
- * 和一句真实效果、推荐的写理由。md 起字和说明同一行、说明左对齐成一列；手机上整行占满、字在上说明在下，可点区至少 44 高。
- * 几项装在一个细框里、项间一根细线（系统设置的单选组），不一个个画框。下面是「自己写一句」的框加「提交」，
- * 框下一行灰字写自己写的去向。没有选项的老通知只给输入框（「没有选项，请直接回复」在标题下那一行）。
- */
-function DecisionPicker({
-  n,
-  id,
-  pending,
-  text,
-  onText,
-  onAnswer,
-}: {
-  n: Notification;
-  id: string;
-  pending: boolean;
-  /** 自己写的草稿放在行上：答了没做成、再答时还在。 */
-  text: string;
-  onText: (text: string) => void;
-  onAnswer: (n: Notification, input: AnswerInput) => void;
-}) {
-  const options = n.options ?? [];
-  const trimmed = text.trim();
-  const last = n.answer?.optionId;
-  return (
-    <div id={id} className="mt-3 space-y-2.5 md:max-w-3xl" data-testid="decision-picker">
-      {options.length > 0 ? (
-        <ul className="divide-y divide-border rounded-md border" aria-label="选一个">
-          {options.map((o) => (
-            <li key={o.id}>
-              <button
-                type="button"
-                aria-label={o.label}
-                aria-describedby={`${id}-${o.id}`}
-                disabled={pending}
-                onClick={() => onAnswer(n, { optionId: o.id })}
-                data-option={o.id}
-                className="group flex min-h-10 w-full flex-col gap-0.5 px-3 py-2 text-left outline-none first:rounded-t-md last:rounded-b-md hover:bg-st-human-soft focus-visible:ring-focus focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 max-md:min-h-11 md:flex-row md:items-baseline md:gap-4"
-              >
-                <span className="flex shrink-0 flex-wrap items-center gap-1.5 text-body font-medium md:w-56">
-                  {o.label}
-                  {o.recommended ? <Tag tone="brand">推荐</Tag> : null}
-                  {last === o.id ? <Tag tone="stop">上次选的</Tag> : null}
-                </span>
-                <span id={`${id}-${o.id}`} className="min-w-0 flex-1 text-meta text-muted-foreground">
-                  {o.detail}
-                  {o.recommended ? <span className="text-foreground">。{o.recommended}</span> : null}
-                </span>
-                <ChevronRight
-                  className="hidden size-4 shrink-0 self-center text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 md:block"
-                  aria-hidden
-                />
-              </button>
-            </li>
-          ))}
-        </ul>
-      ) : null}
-      <div>
-        <form
-          className="flex gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            if (trimmed) onAnswer(n, { text: trimmed });
-          }}
-        >
-          <Input
-            aria-label="自己写一句"
-            placeholder={options.length > 0 ? '都不合适？自己写一句' : '写你的决定'}
-            value={text}
-            maxLength={2000}
-            disabled={pending}
-            onChange={(e) => onText(e.target.value)}
-            className="min-w-0 flex-1"
-          />
-          <Button type="submit" size="sm" variant="outline" disabled={pending || !trimmed}>
-            <Send aria-hidden />
-            提交
-          </Button>
-        </form>
-        <p className="mt-1.5 text-meta text-muted-foreground" data-testid="custom-effect">
-          {answerResolves(options, undefined)
-            ? '自己写的：交给指挥官去办，交出去了这条转已处理'
-            : '自己写的：交给指挥官去办，这条先留着'}
-        </p>
-      </div>
-    </div>
   );
 }
 
@@ -416,6 +315,8 @@ interface RowActions {
   onOpen: (link: string) => void;
   onDone: (n: Notification) => void;
   onAnswer: (n: Notification, input: AnswerInput) => void;
+  /** 看门狗修复点之前重读列表（#3034）：按钮已经不是现在的就不发。 */
+  onRefreshRepair: RepairRefresh;
 }
 
 function NotificationRow({
@@ -428,6 +329,7 @@ function NotificationRow({
   onOpen,
   onDone,
   onAnswer,
+  onRefreshRepair,
 }: { n: Notification; now: number; me: Me | undefined } & RowActions) {
   const resolved = Boolean(n.resolvedAt);
   const level = noticeLevelMeta[n.level];
@@ -520,15 +422,21 @@ function NotificationRow({
                     </Button>
                   ) : (
                     <DecisionPicker
-                      n={n}
                       id={pickerId}
+                      options={n.options ?? []}
+                      lastOptionId={n.answer?.optionId}
                       pending={answeringId === n.id}
                       text={draft}
                       onText={setDraft}
-                      onAnswer={(row, input) => {
+                      onAnswer={(input) => {
                         setRepick(false);
-                        onAnswer(row, input);
+                        onAnswer(n, input);
                       }}
+                      effect={
+                        answerResolves(n.options ?? [], undefined)
+                          ? '自己写的：交给指挥官去办，交出去了这条转已处理'
+                          : '自己写的：交给指挥官去办，这条先留着'
+                      }
                     />
                   )}
                 </>
@@ -537,6 +445,8 @@ function NotificationRow({
                   <ClampedBody text={n.body} />
                   {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
                   <DecisionAnswerLine n={n} me={me} now={now} plain />
+                  {/* 看门狗的卡住报警：后端现算能点的修复、执行到哪、核验结果（#3034）；别的提醒不渲染 */}
+                  <AlertRepairPanel n={n} me={me} now={now} refresh={onRefreshRepair} />
                   {meta}
                 </>
               )}
@@ -714,7 +624,11 @@ export default function Notifications() {
 
   const done = (n: Notification) =>
     resolve.mutate(n.id, {
-      onSuccess: () => toast.success('处理了', { description: n.title }),
+      // 看门狗的卡手动标处理不冒充修好（#3034）：只是不再提醒
+      onSuccess: () =>
+        toast.success('处理了', {
+          description: isWatchdogAlert(n) ? `${n.title}（只是不再提醒，没核实修好）` : n.title,
+        }),
       onError: (e) => toast.error('没处理成', { description: errorText(e) }),
     });
 
@@ -732,6 +646,12 @@ export default function Notifications() {
     );
 
   const open = (link: string) => navigate(link);
+  // 修复点之前重读一次：读失败时 React Query 留着旧数据，不能拿旧的当现在的
+  const refreshRepair: RepairRefresh = async (id) => {
+    const r = await refetch();
+    if (r.isError || !r.data) return { ok: false, why: r.error ? errorText(r.error) : '没读到' };
+    return { ok: true, n: r.data.items.find((x) => x.id === id) };
+  };
   const actions: RowActions = {
     resolvePending: resolve.isPending,
     resolveId: resolve.variables,
@@ -739,6 +659,7 @@ export default function Notifications() {
     onOpen: open,
     onDone: done,
     onAnswer: answer,
+    onRefreshRepair: refreshRepair,
   };
   const listEmpty = foldDaily ? actionItems.length === 0 && dailyItems.length === 0 : list.length === 0;
 
