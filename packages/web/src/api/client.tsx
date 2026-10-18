@@ -1562,6 +1562,8 @@ const TABLE_KEYS: Record<RealtimeTable, readonly (readonly string[])[]> = {
   node_reports: [keys.nodes, ['node']],
   // 提需求（#2060）：需求一有动静（新消息、进度卡、引擎提问、单子状态）就推，载荷里的 id 是需求号；列表和详情跟着重拉
   requests: [['requests'], ['request']],
+  // 替代收口审计目前没有驾驶舱查询页；保留名单映射，避免遗漏实时表类型。
+  acceptance_duty_supersessions: [],
 };
 
 function isRealtimeTable(table: string): table is RealtimeTable {

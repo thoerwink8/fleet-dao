@@ -4,6 +4,8 @@ import { eq } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { savePoolQuota } from '../src/queries/quota.ts';
 import {
+  acceptanceDuties,
+  acceptanceDutySupersessions,
   approvals,
   asks,
   auditLog,
@@ -210,6 +212,45 @@ describe('写入即通知 fleet_changes', () => {
     const task = await addTask(t.db, repo.id);
     const sub = await addSubtask(t.db, task.id);
     const run = await addRun(t.db, { taskId: task.id, routeId: 'r1' });
+    const [source, target] = await t.db
+      .insert(acceptanceDuties)
+      .values([
+        {
+          taskId: task.id,
+          repo: 'o/r',
+          issueNumber: 7,
+          prNumber: 9,
+          head: 'a'.repeat(40),
+          items: ['现场核验'],
+        },
+        {
+          taskId: task.id,
+          repo: 'o/r',
+          issueNumber: 7,
+          prNumber: 9,
+          head: 'b'.repeat(40),
+          items: ['现场核验'],
+          mergeCommit: 'c'.repeat(40),
+          mergedAt: NOW,
+        },
+      ])
+      .returning();
+    if (!source || !target) throw new Error('验收责任没建成');
+    await t.db.insert(acceptanceDutySupersessions).values({
+      sourceId: source.id,
+      sourceGeneration: source.generation,
+      sourceHead: source.head,
+      targetId: target.id,
+      targetGeneration: target.generation,
+      targetHead: target.head,
+      targetMergeCommit: target.mergeCommit ?? '',
+      repo: source.repo,
+      issueNumber: source.issueNumber,
+      prNumber: source.prNumber,
+      by: 'ops:test',
+      evidence: '通知测试',
+      createdAt: NOW,
+    });
     await t.db.insert(runs).values({ segment: 'manual', taskId: task.id, model: 'opus-5.5', startedAt: NOW });
     await t.db.insert(quotaWindows).values({
       poolId: 'relay-a',

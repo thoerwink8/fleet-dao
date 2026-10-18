@@ -46,6 +46,62 @@ describe('最终验收标准入口', () => {
       ]),
     ).toMatchObject({ prNumber: 0, head: '' });
   });
+  it('supersede 源和目标都要精确 id、代次、PR、头和证据，仓单取同一张', () => {
+    const args = [
+      'supersede',
+      'o/r',
+      '7',
+      '--id',
+      '11',
+      '--generation',
+      '1',
+      '--pr',
+      '9',
+      '--head',
+      'a'.repeat(40),
+      '--target-id',
+      '16',
+      '--target-generation',
+      '2',
+      '--target-pr',
+      '9',
+      '--target-head',
+      'b'.repeat(40),
+      '--evidence',
+      '最终头已合已验',
+    ];
+    expect(parseAcceptanceArgs(args)).toEqual({
+      action: 'supersede',
+      repo: 'o/r',
+      issueNumber: 7,
+      source: { id: 11, generation: 1, repo: 'o/r', issueNumber: 7, prNumber: 9, head: 'a'.repeat(40) },
+      target: { id: 16, generation: 2, repo: 'o/r', issueNumber: 7, prNumber: 9, head: 'b'.repeat(40) },
+      evidence: '最终头已合已验',
+    });
+    const without = (flag: string) => {
+      const i = args.indexOf(flag);
+      return [...args.slice(0, i), ...args.slice(i + 2)];
+    };
+    for (const flag of [
+      '--id',
+      '--generation',
+      '--pr',
+      '--head',
+      '--target-id',
+      '--target-generation',
+      '--target-pr',
+      '--target-head',
+      '--evidence',
+    ])
+      expect(() => parseAcceptanceArgs(without(flag))).toThrow(/用法/);
+    const bad = [...args];
+    bad[bad.indexOf('--target-head') + 1] = '-';
+    expect(() => parseAcceptanceArgs(bad)).toThrow(/用法/);
+    bad[bad.indexOf('--target-head') + 1] = 'b'.repeat(40);
+    bad[bad.indexOf('--target-pr') + 1] = '0';
+    expect(() => parseAcceptanceArgs(bad)).toThrow(/用法/);
+    expect(() => parseAcceptanceArgs(['settle', ...args.slice(1)])).toThrow(/用法/);
+  });
   it('公开口先复核public仓身份，只返DB责任状态，无公开写口', async () => {
     const calls: string[] = [];
     const app = acceptancePublicRoutes({
@@ -78,7 +134,9 @@ describe('最终验收标准入口', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('cache-control')).toBe('no-store');
     expect(calls).toEqual(['public:1', 'o/r#7']);
-    expect(JSON.stringify(await res.json())).not.toContain('private context');
+    const body = (await res.json()) as { duties: unknown[] };
+    expect(body.duties[0]).toMatchObject({ state: 'open', supersededAt: null, successorId: null });
+    expect(JSON.stringify(body)).not.toContain('private context');
     expect((await app.request('/api/public/acceptance/v1/repos/1/issues/7', { method: 'POST' })).status).toBe(
       404,
     );
