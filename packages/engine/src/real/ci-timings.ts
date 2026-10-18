@@ -212,19 +212,29 @@ export function ciTimingsGitHub(api: CiTimingsApi): CiTimingsGitHub {
     },
 
     openPr(input) {
-      return openTimingsPr(api, repo, input);
+      return openManagedFilePr(api, repo, {
+        ...input,
+        path: TIMINGS_FILE,
+        branch: `ci-timings/${input.at.toISOString().slice(0, 10)}`,
+        commitMessage: COMMIT_MESSAGE,
+      });
     },
   };
 }
 
-async function openTimingsPr(
+/** 单文件机器人 PR 的受管模板；更新日志额外核取数头和分支内容，原耗时表行为保持。 */
+export async function openManagedFilePr(
   api: CiTimingsApi,
   repo: RepoRef,
-  input: OpenTimingsPrInput,
+  input: Pick<OpenTimingsPrInput, 'baseCommit' | 'content' | 'title' | 'body'> & {
+    path: string;
+    branch: string;
+    commitMessage: string;
+    verifyOnlyFile?: boolean;
+  },
 ): Promise<{ number: number; url: string }> {
   if (!/^[0-9a-f]{40}$/.test(input.baseCommit)) notRead(`开分支用的提交认不出：${input.baseCommit}`);
-  const day = input.at.toISOString().slice(0, 10);
-  const branch = `ci-timings/${day}`;
+  const { branch, path: file, commitMessage } = input;
   if (isFlowBranch(branch)) throw new Error(`分支 ${branch} 像引擎任务分支，这张表不走那条`);
 
   const listed = await api.readRepoFile({ repo, path: STANDARD_PATHS_FILE }).catch((err: unknown) => {
@@ -233,17 +243,19 @@ async function openTimingsPr(
     throw new Error(why.includes('没查成') ? why : `没查成：读不到 ${STANDARD_PATHS_FILE}（${why}）`);
   });
   if (listed.file.kind !== 'text') notRead(`读不到 ${STANDARD_PATHS_FILE}`);
+  if (input.verifyOnlyFile && listed.commit !== input.baseCommit)
+    notRead('主线在取数后变化了，下一轮重读，不用旧内容覆盖新主线');
   const rules = parseStandardPaths(listed.file.text);
   if (typeof rules === 'string') notRead(`${STANDARD_PATHS_FILE} ${rules}`);
-  const hits = standardFiles([{ filename: TIMINGS_FILE, status: 'modified' }], rules);
+  const hits = standardFiles([{ filename: file, status: 'modified' }], rules);
   if (hits.length > 0) {
     throw new Error(`改到了标准路径（${hits.map((h) => h.file).join('、')}），人闸：改标准，不开 PR`);
   }
-  assertPublishable(repo, `刷新 ${repo.owner}/${repo.name} 的 CI 测试耗时表`, [
-    { path: TIMINGS_FILE, text: input.content },
+  assertPublishable(repo, `刷新 ${repo.owner}/${repo.name} 的受管文件`, [
+    { path: file, text: input.content },
     { path: 'PR 标题', text: input.title },
     { path: 'PR 正文', text: input.body },
-    { path: '提交说明', text: COMMIT_MESSAGE },
+    { path: '提交说明', text: commitMessage },
     { path: '分支名', text: branch },
   ]);
 
@@ -260,8 +272,27 @@ async function openTimingsPr(
   if (created.status === 422 && !/already exists/i.test(apiMessage(created.data))) {
     throw new Error(`建分支 ${branch} 被拒绝：${apiMessage(created.data) || created.status}`);
   }
+  const verifyBranch = async () => {
+    const compared = await client.request({
+      method: 'GET',
+      path: `${base}/compare/${input.baseCommit}...${encodeURIComponent(branch)}`,
+      auth,
+    });
+    const result = compared.data as {
+      merge_base_commit?: { sha?: unknown };
+      files?: { filename?: unknown; status?: unknown }[];
+    } | null;
+    if (
+      result?.merge_base_commit?.sha !== input.baseCommit ||
+      !Array.isArray(result.files) ||
+      result.files.length > 1 ||
+      result.files.some((f) => f.filename !== file || f.status !== 'modified')
+    )
+      notRead(`分支 ${branch} 不再只基于取数提交修改 ${file}，不覆盖、不合并`);
+  };
+  if (input.verifyOnlyFile && created.status === 422) await verifyBranch();
 
-  const filePath = `${base}/contents/${encPath(TIMINGS_FILE)}`;
+  const filePath = `${base}/contents/${encPath(file)}`;
   const current = await client.request({
     method: 'GET',
     path: filePath,
@@ -272,7 +303,7 @@ async function openTimingsPr(
   let sha: string | undefined;
   let same = false;
   if (current.status !== 404) {
-    if (!current.data || typeof current.data !== 'object') throw new Error('读分支上的耗时表认不出');
+    if (!current.data || typeof current.data !== 'object') throw new Error('读分支上的受管文件认不出');
     const row = current.data as { type?: unknown; encoding?: unknown; content?: unknown; sha?: unknown };
     if (
       row.type !== 'file' ||
@@ -280,7 +311,7 @@ async function openTimingsPr(
       typeof row.content !== 'string' ||
       typeof row.sha !== 'string'
     ) {
-      throw new Error('读分支上的耗时表认不出');
+      throw new Error('读分支上的受管文件认不出');
     }
     sha = row.sha;
     same = Buffer.from(row.content.replace(/\n/g, ''), 'base64').toString('utf8') === input.content;
@@ -291,7 +322,7 @@ async function openTimingsPr(
       path: filePath,
       auth,
       body: {
-        message: COMMIT_MESSAGE,
+        message: commitMessage,
         content: Buffer.from(input.content, 'utf8').toString('base64'),
         branch,
         ...(sha === undefined ? {} : { sha }),
@@ -299,14 +330,13 @@ async function openTimingsPr(
       allow: [409, 422],
     });
     if (written.status === 409 || written.status === 422) {
-      throw new Error(
-        `写 ${TIMINGS_FILE} 被拒绝（${written.status}：${apiMessage(written.data) || '没有原因'}）`,
-      );
+      throw new Error(`写 ${file} 被拒绝（${written.status}：${apiMessage(written.data) || '没有原因'}）`);
     }
     const commit = (written.data as { commit?: { sha?: unknown } } | null)?.commit?.sha;
-    if (typeof commit !== 'string') throw new Error(`写 ${TIMINGS_FILE} 的回执认不出`);
+    if (typeof commit !== 'string') throw new Error(`写 ${file} 的回执认不出`);
   }
 
+  if (input.verifyOnlyFile) await verifyBranch();
   const found = await client.request({
     method: 'GET',
     path: `${base}/pulls`,
@@ -314,6 +344,7 @@ async function openTimingsPr(
     query: { head: `${repo.owner}:${branch}`, state: 'open', per_page: 10 },
   });
   if (!Array.isArray(found.data)) throw new Error('找已开的 PR 时返回认不出');
+  if (input.verifyOnlyFile && found.data.length > 1) notRead(`分支 ${branch} 对应多张 PR`);
   const existing = found.data[0];
   const pull = existing ? pullOf(existing, '已开的 PR') : await createPull();
   await ensurePullQueryLabels(client, repo, pull.number, 'engine', 'process');

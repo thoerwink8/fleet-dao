@@ -1,3 +1,13 @@
+export {
+  CHANGELOG_FILE,
+  type ChangelogDeliveries,
+  type ChangelogIssue,
+  type ChangelogVersion,
+  changelogAnchor,
+  hasChangelogVersion,
+  renderChangelogVersion,
+  writeChangelogVersion,
+} from './changelog.ts';
 export { closingIssues } from './closing-issues.ts';
 export {
   checkDebtDocs,
@@ -258,3 +268,4 @@ export {
   TIMINGS_RUN_EVENT,
   timingsSource,
 } from './test-timings.ts';
+export { addDays } from './version-cut.ts';

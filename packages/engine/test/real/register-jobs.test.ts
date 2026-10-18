@@ -127,6 +127,7 @@ describe('登记编号和定时器编号对得上', () => {
       intake: never,
       judgeSelfCheck: never,
       ciTimings: never,
+      changelog: never,
       usageBackfill: never,
       cliVersions: never,
       cliUpgrade: never,

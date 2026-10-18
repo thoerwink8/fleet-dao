@@ -70,6 +70,7 @@ import { createNoteBare401 } from './bare-401.ts';
 import { carpoolApiReader } from './carpool-api.ts';
 import { carpoolRegistry } from './carpool-cap.ts';
 import { carpoolWatchJob } from './carpool-watch.ts';
+import { changelogJob } from './changelog.ts';
 import { ciTimingsJob } from './ci-timings.ts';
 import { cliUpgradeJob } from './cli-upgrade.ts';
 import { cliVersionsJob } from './cli-versions.ts';
@@ -1066,6 +1067,11 @@ export function realPortsFromEnv(
     judgeSelfCheck: judgeSelfCheckJob({ db, env }),
     // 每周刷新 CI 测试耗时表（#921）：读本仓 ci.yml 日志、重写表、开 PR。不看总开关。
     ciTimings: ciTimingsJob({ db, github: gh }),
+    changelog: changelogJob({
+      db,
+      github: gh,
+      ...(extra.releasesDir === undefined ? {} : { releasesDir: extra.releasesDir }),
+    }),
     // 用量补记（#1935）：经 Mirasim 起的会话，以会话用户读他家里的用量账本（中转计量回填），把 runs 的输入、缓存、花费补齐。不看总开关。
     usageBackfill: usageBackfillJob({
       db,
