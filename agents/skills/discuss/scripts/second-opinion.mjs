@@ -20,7 +20,7 @@
 // so-profiles.mjs 各家档案和换家、so-verdict.mjs 纯判定（认结论行、判快照和账本）、so-sessions.mjs 起会话（Mirasim、reclaude、
 // cursor-agent）。这份是入口：反方和命令行。从这份 import 的名字（测试）照旧从这份导出。
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -324,11 +324,16 @@ async function main() {
   throw new NotChecked('要 --text <文件>（反方），或 --sessions / --stop-stale / --ping / --selftest');
 }
 
+// 入口判定：Node 自带的 import.meta.main 不受软链接影响；旧 Node 退回比真实路径（只比字面路径，经软链接跑时会一声不响什么都不做）
 function isMain() {
+  if (typeof import.meta.main === 'boolean') return import.meta.main;
   const entry = process.argv[1];
   if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
+  const norm = (/** @type {string} */ p) => {
+    const r = realpathSync(p);
+    return process.platform === 'win32' ? r.toLowerCase() : r;
+  };
+  return norm(entry) === norm(fileURLToPath(import.meta.url));
 }
 
 // 被测试 import 时不跑
