@@ -106,11 +106,14 @@ describe('每家问一次', () => {
   });
 
   it('装了：核过写法的照写法起（Codex 用 codex exec）；没核过写法的（Gemini）记没查成、不起', async () => {
+    const platform = process.platform === 'win32' ? 'win32' : 'linux';
+    const extension = platform === 'win32' ? '.CMD' : '';
     const bin = mkdtempSync(join(tmpdir(), 'probe-bin-'));
     try {
       for (const name of ['codex', 'gemini']) {
-        writeFileSync(join(bin, name), '#!/bin/sh\n');
-        chmodSync(join(bin, name), 0o755);
+        const file = join(bin, name + extension);
+        writeFileSync(file, platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n');
+        if (platform === 'linux') chmodSync(file, 0o755);
       }
       const calls: string[][] = [];
       const run: Runner = async (command, args) => {
@@ -118,7 +121,7 @@ describe('每家问一次', () => {
         return ok(GOOD);
       };
       const lines = await probeAll({
-        detect: { env: { PATH: bin }, platform: 'linux', home: '/nonexistent-home' },
+        detect: { env: { PATH: bin, PATHEXT: '.CMD' }, platform, home: join(bin, 'missing-home') },
         cwd: ROOT,
         run,
         env: {},
@@ -129,7 +132,7 @@ describe('每家问一次', () => {
         ['gemini', 'unchecked'],
       ]);
       expect(lines[1]?.text).toMatch(/没核过/);
-      expect(calls).toEqual([[join(bin, 'codex'), 'exec']]);
+      expect(calls).toEqual([[join(bin, 'codex' + extension), 'exec']]);
     } finally {
       rmSync(bin, { recursive: true, force: true });
     }
