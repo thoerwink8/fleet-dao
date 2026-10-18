@@ -56,6 +56,7 @@ import type { EngineTasks } from '../activities.ts';
 import { familyPickerFrom } from '../cold-verify-pick.ts';
 import {
   type CheckoutBlockedAlert,
+  type CheckoutReceipt,
   type CheckoutRecovered,
   incrementalDiffAtHead,
   placeVerifyCheckout,
@@ -208,6 +209,8 @@ export interface ColdVerifyActivityDeps {
   onCheckoutBlocked?: (alert: CheckoutBlockedAlert) => Promise<void>;
   /** 这个目标真放进了完整检出：撤它开跑之前报的检出报警（#3036）。不给 = 不撤。撤不成不让验收停。 */
   onCheckoutRecovered?: (recovered: CheckoutRecovered) => Promise<void>;
+  /** 成功完整检出的独立持久回执，不依赖旧卡是否存在。 */
+  onCheckoutCompleted?: (receipt: CheckoutReceipt) => Promise<void>;
 }
 
 /** 改到的文件，GitHub 给的样子（packages/github 的 PrFile）。 */
@@ -788,6 +791,10 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           // 放得进 PR 头的完整检出就放；镜像没有、提交不在、目录仍建不出，会话仍起，提示词里的材料还在。
           const fetchHead = deps.gh.fetchCommitHead;
           await placeVerifyCheckout({
+            taskId: input.taskId,
+            runId: picked.runId,
+            ...(deps.now ? { now: deps.now } : {}),
+            ...(deps.onCheckoutCompleted ? { onCompleted: deps.onCheckoutCompleted } : {}),
             signal: ctx.signal,
             ...(fetchHead
               ? { ensureHead: () => fetchHead({ repo, headSha: input.headSha, signal: ctx.signal }) }

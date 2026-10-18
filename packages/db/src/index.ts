@@ -13,6 +13,7 @@ export * from './queries/candidates.ts';
 export * from './queries/carpool-spend.ts';
 export * from './queries/channel-fallback.ts';
 export * from './queries/channel-models.ts';
+export * from './queries/checkout-receipts.ts';
 export * from './queries/cli-versions.ts';
 export * from './queries/daily-brief.ts';
 export * from './queries/engine.ts';
