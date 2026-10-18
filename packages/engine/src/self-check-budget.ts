@@ -30,17 +30,23 @@ export const SELF_CHECK_PROBE_MS = 30_000;
 export const SELF_CHECK_QUEUE_MS = 20 * 60_000;
 
 /**
- * 收尾最多多久（毫秒）：一条命令超时、被叫停后，exec 杀掉它再等管道关（KILL_SETTLE_MS，10 秒，real/exec.ts），再放锁。
- * 一次自测最多五条命令（两次看目录、测试、受影响包、tsc），每条一份还有余。
+ * 放一次自测名额、整机锁最多等多久（毫秒）。超了记日志往下走，没放掉的靠持有者进程已死、过期被回收，不无限拖住活动。
+ * 一次自测最多放三次（受影响包的锁、自测名额、排队中被叫停时拿到的那一个）。
  */
-export const SELF_CHECK_CLEANUP_MS = 60_000;
+export const SELF_CHECK_RELEASE_MS = 10_000;
+
+/**
+ * 收尾最多多久（毫秒）：一条命令超时、被叫停后，exec 杀掉它再等管道关（KILL_SETTLE_MS，10 秒，real/exec.ts），再放名额、放锁
+ * （各自最多 SELF_CHECK_RELEASE_MS）。一次自测最多五条命令（两次看目录、测试、受影响包、tsc）、三次放名额：5 × 10 秒 + 3 × 10 秒。
+ */
+export const SELF_CHECK_CLEANUP_MS = 80_000;
 
 /** 活动限时在各段之外多留的一点，避免刚好卡满被判 StartToClose。 */
 const SELF_CHECK_SLACK_MS = 60_000;
 
 /**
  * 自测活动的 StartToClose（毫秒）：各段上限相加，唯一出处。
- * 以前是「测试 + tsc + 再一轮测试加 tsc 的排队余量」共 72 分钟，排队和执行混在一起；现在分段相加共 58 分钟。
+ * 以前是「测试 + tsc + 再一轮测试加 tsc 的排队余量」共 72 分钟，排队和执行混在一起；现在分段相加共 58 分 20 秒。
  */
 export const SELF_CHECK_ACTIVITY_MS =
   2 * SELF_CHECK_PROBE_MS +

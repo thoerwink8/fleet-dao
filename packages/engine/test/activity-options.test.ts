@@ -10,6 +10,7 @@ import {
   SELF_CHECK_CLEANUP_MS,
   SELF_CHECK_PROBE_MS,
   SELF_CHECK_QUEUE_MS,
+  SELF_CHECK_RELEASE_MS,
   SELF_CHECK_TEST_MS,
   SELF_CHECK_TSC_MS,
 } from '../src/self-check-budget.ts';
@@ -38,7 +39,8 @@ describe('selfCheck 活动档', () => {
     expect(SELF_CHECK_QUEUE_MS).toBeGreaterThan(15 * 60_000);
     expect(11 * 60_000).toBeLessThan(SELF_CHECK_QUEUE_MS);
     // 收尾盖得住五条命令（两次看目录、测试、受影响包、tsc）各自被杀后等管道关
-    expect(SELF_CHECK_CLEANUP_MS).toBeGreaterThanOrEqual(5 * KILL_SETTLE_MS);
+    // 再加三次放名额、放锁，各有自己的上限
+    expect(SELF_CHECK_CLEANUP_MS).toBeGreaterThanOrEqual(5 * KILL_SETTLE_MS + 3 * SELF_CHECK_RELEASE_MS);
     expect(SELF_CHECK_ACTIVITY_MS).toBeLessThan(72 * 60_000);
   });
 });

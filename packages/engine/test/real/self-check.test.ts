@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { SessionUser } from '@fleet-dao/adapters';
+import { DEFAULT_MAX_HOLD_MIN } from '@fleet-dao/conventions';
 import type { RepoWithProfile } from '@fleet-dao/shared';
 import { describe, expect, it, vi } from 'vitest';
 import type { PortContext } from '../../src/ports.ts';
@@ -17,8 +18,10 @@ import {
   createSelfCheck,
   createSelfCheckSlots,
   digestOutput,
+  SELF_CHECK_CLEANUP_MS,
   SELF_CHECK_HEARTBEAT_MS,
   SELF_CHECK_QUEUE_MS,
+  SELF_CHECK_RELEASE_MS,
   SELF_CHECK_SLOTS,
   SELF_CHECK_TEST_MS,
   SELF_CHECK_TSC_MS,
@@ -66,6 +69,8 @@ function rig(over: {
   slots?: SelfCheckFullLock;
   testMs?: number;
   queueMs?: number;
+  releaseMs?: number;
+  log?: (message: string, fields?: Record<string, unknown>) => void;
   /** 测试命令换成按脚本吐输出、会被叫停的假进程（用假时钟走）。给了就不看 test。 */
   testRun?: (command: UserCommand) => Promise<UserCommandResult>;
   tscRun?: (command: UserCommand) => Promise<UserCommandResult>;
@@ -75,6 +80,8 @@ function rig(over: {
     trees: { ownerOf: async () => (over.owner === undefined ? USER : over.owner) },
     ...(over.testMs === undefined ? {} : { testMs: over.testMs }),
     ...(over.queueMs === undefined ? {} : { queueMs: over.queueMs }),
+    ...(over.releaseMs === undefined ? {} : { releaseMs: over.releaseMs }),
+    ...(over.log === undefined ? {} : { log: over.log }),
     fullLock: over.lock ?? openLock,
     slots: over.slots ?? openLock,
     exec: async (command) => {
@@ -825,6 +832,68 @@ describe('排队和执行分开计时（假时钟）', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('收尾有上限：放自测名额卡住，过了 SELF_CHECK_RELEASE_MS 就记日志往下走，结果照常返回', async () => {
+    vi.useFakeTimers();
+    try {
+      const logs: string[] = [];
+      const { check } = rig({
+        log: (m) => logs.push(m),
+        slots: { acquire: async () => () => new Promise<void>(() => {}) },
+      });
+      let settled = false;
+      const pending = check(input(), beatsCtx().c).then((r) => {
+        settled = true;
+        return r;
+      });
+      await vi.advanceTimersByTimeAsync(SELF_CHECK_RELEASE_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2);
+      const got = await pending;
+      expect(got.state).toBe('green');
+      expect(logs.some((l) => l.includes('自测名额') && l.includes('不再等'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('收尾有上限：放整机锁卡住不拖住活动；放锁抛错只记日志，受影响包的结果照常', async () => {
+    vi.useFakeTimers();
+    try {
+      const logs: string[] = [];
+      const stuckLock: SelfCheckFullLock = { acquire: async () => () => new Promise<void>(() => {}) };
+      const { check } = rig({
+        log: (m) => logs.push(m),
+        test: () => result(3, ''),
+        affected: () => result(0, 'Tests  2 passed (2)'),
+        lock: stuckLock,
+      });
+      const pending = check(input(), beatsCtx().c);
+      await vi.advanceTimersByTimeAsync(SELF_CHECK_RELEASE_MS + 1);
+      const got = await pending;
+      expect(got.state).toBe('green');
+      expect(logs.some((l) => l.includes('整机锁') && l.includes('不再等'))).toBe(true);
+
+      const failing = rig({
+        log: (m) => logs.push(m),
+        test: () => result(3, ''),
+        affected: () => result(0, 'Tests  2 passed (2)'),
+        lock: {
+          acquire: async () => () => {
+            throw new Error('EIO');
+          },
+        },
+      });
+      expect((await failing.check(input(), beatsCtx().c)).state).toBe('green');
+      expect(logs.some((l) => l.includes('整机锁没放掉'))).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('持槽上限盖得住引擎测试执行上限加收尾：同机另一个 test:changed 不会在引擎测试还在跑时回收它的槽', () => {
+    expect(DEFAULT_MAX_HOLD_MIN * MIN).toBeGreaterThan(SELF_CHECK_TEST_MS + SELF_CHECK_CLEANUP_MS);
   });
 
   it('起不来：记没跑，写明原因，tsc 照跑', async () => {

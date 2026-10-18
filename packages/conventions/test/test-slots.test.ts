@@ -106,7 +106,7 @@ function putHolder(dir: string, index: number, h: Partial<Holder> = {}): Holder 
 const slotFiles = (dir: string) => readdirSync(dir).filter((n) => /^slot-\d+\.json$/.test(n));
 
 describe('readSlotConfig / slotPolicy', () => {
-  it('不设就是默认：2 个、等 15 分钟、持有上限 30 分钟、槽目录在用户目录下', () => {
+  it('不设就是默认：2 个、等 15 分钟、持有上限 45 分钟、槽目录在用户目录下', () => {
     const c = readSlotConfig({}, () => '/home/u');
     expect(c.slots).toBe(DEFAULT_SLOTS);
     expect(c.maxWaitMs).toBe(DEFAULT_MAX_WAIT_MIN * 60_000);
@@ -205,6 +205,17 @@ describe('tryAcquire', () => {
     const cfg = cfgIn(dir, { slots: 1, maxHoldMs: 60_000 });
     expect(tryAcquire(cfg, deps).kind).toBe('busy');
     advance(60_001);
+    expect(tryAcquire(cfg, deps).kind).toBe('got');
+  });
+
+  it('默认上限下持槽 31 分钟的活进程不被回收（引擎测试最长 30 分钟），超过默认上限才回收', () => {
+    const dir = tmp();
+    const { deps, advance } = fakeDeps();
+    putHolder(dir, 0, { pid: 31337, startedAt: 1_000_000 });
+    const cfg = readSlotConfig({ [ENV_DIR]: dir, [ENV_SLOTS]: '1' }, () => '/home/u');
+    advance(31 * 60_000);
+    expect(tryAcquire(cfg, deps).kind).toBe('busy');
+    advance(DEFAULT_MAX_HOLD_MIN * 60_000);
     expect(tryAcquire(cfg, deps).kind).toBe('got');
   });
 

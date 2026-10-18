@@ -238,7 +238,13 @@ export {
 export { loadStandardPaths } from './standard-paths-file.ts';
 export { ENGINE_SESSION_MARKER, REFUSED_FULL_RUN } from './test-changed.ts';
 // 引擎自测认「拿到本机测试槽」那一行分开等槽和真跑（packages/engine/src/real/self-check.ts），它的测试真起进程占这组槽
-export { acquireSlot, readSlotConfig, realSlotDeps, SLOT_ACQUIRED_LINE } from './test-slots.ts';
+export {
+  acquireSlot,
+  DEFAULT_MAX_HOLD_MIN,
+  readSlotConfig,
+  realSlotDeps,
+  SLOT_ACQUIRED_LINE,
+} from './test-slots.ts';
 export { isTestFile, parseTimings, TIMINGS_FILE, type Timings } from './test-split.ts';
 export {
   medianOfRuns,

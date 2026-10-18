@@ -15,6 +15,8 @@
 // - 排队和真执行分开计时（数字在 self-check-budget.ts）：所有排队（本机测试槽、整机锁、自测名额）合起来 SELF_CHECK_QUEUE_MS；
 //   测试真执行 SELF_CHECK_TEST_MS 从 test:changed 打出「拿到本机测试槽」（老的树没排队时不打，认 vitest 开跑的 RUN 横幅）起算，
 //   别的命令从拿到名额起算；tsc SELF_CHECK_TSC_MS。排队超了、执行超了都杀掉命令，各记各的原因。
+// - 收尾也有上限：每次放名额、放锁最多 SELF_CHECK_RELEASE_MS，超了记日志往下走（没放掉的靠死进程、过期回收）；杀命令后等管道关
+//   是 exec 的 KILL_SETTLE_MS；两样合起来不超过 SELF_CHECK_CLEANUP_MS。
 // - 心跳带阶段：probe（看目录）、queue（等什么）、test、tsc、done，阶段起点和最后一次有输出的时刻；不编完成了几条。
 // - 普通那次超时记 skipped，不算红——慢不等于错，交给 CI；但超时前输出里已经有没过的（FAIL、×）记没过，不掩盖。
 //   超时、被叫停、没正常退出都把已有输出精炼、脱敏后留在摘要里，写明在哪个阶段、跑了多久。
@@ -33,6 +35,7 @@ import {
   SELF_CHECK_CLEANUP_MS,
   SELF_CHECK_PROBE_MS,
   SELF_CHECK_QUEUE_MS,
+  SELF_CHECK_RELEASE_MS,
   SELF_CHECK_SLOTS,
   SELF_CHECK_TEST_MS,
   SELF_CHECK_TSC_MS,
@@ -50,6 +53,7 @@ export {
   SELF_CHECK_CLEANUP_MS,
   SELF_CHECK_PROBE_MS,
   SELF_CHECK_QUEUE_MS,
+  SELF_CHECK_RELEASE_MS,
   SELF_CHECK_SLOTS,
   SELF_CHECK_TEST_MS,
   SELF_CHECK_TSC_MS,
@@ -101,6 +105,8 @@ export interface SelfCheckDeps {
   testMs?: number;
   tscMs?: number;
   queueMs?: number;
+  /** 放一次名额、锁最多等多久（默认 SELF_CHECK_RELEASE_MS）：超了记日志往下走，没放掉的靠死进程、过期回收。测试里调短。 */
+  releaseMs?: number;
   /** 不给就用整机文件锁（排队）。测试换成可控的。 */
   fullLock?: SelfCheckFullLock;
   /**
@@ -628,6 +634,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
   const testMs = deps.testMs ?? SELF_CHECK_TEST_MS;
   const tscMs = deps.tscMs ?? SELF_CHECK_TSC_MS;
   const queueMs = deps.queueMs ?? SELF_CHECK_QUEUE_MS;
+  const releaseMs = deps.releaseMs ?? SELF_CHECK_RELEASE_MS;
   const fullLock = deps.fullLock ?? machineAffectedLock();
   const slots = deps.slots ?? machineSelfCheckSlots();
 
@@ -677,6 +684,27 @@ export function createSelfCheck(deps: SelfCheckDeps) {
       }
       if (!user) return { state: 'skipped', reason: `工作树 ${input.worktreePath} 不在`, steps: [] };
       const owner = user;
+      /** 放名额、放锁：最多等 releaseMs。卡住了记日志往下走，不让收尾无限拖住活动；没放掉的名额靠死进程、过期回收。 */
+      const free = async (what: string, release: () => void | Promise<void>): Promise<void> => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const timedOut = new Promise<'timeout'>((resolve) => {
+            timer = setTimeout(() => resolve('timeout'), releaseMs);
+          });
+          const done = Promise.resolve()
+            .then(release)
+            .then(() => 'done' as const);
+          // 超时之后 done 还在后台跑，它以后再失败也不当成未处理的拒绝
+          done.catch(() => undefined);
+          if ((await Promise.race([done, timedOut])) === 'timeout') {
+            deps.log?.(`自测的${what}放了 ${duration(releaseMs)} 还没放掉，不再等`, { taskId: input.taskId });
+          }
+        } catch (error) {
+          deps.log?.(`自测的${what}没放掉`, { taskId: input.taskId, error: errMessage(error) });
+        } finally {
+          clearTimeout(timer);
+        }
+      };
       const sh = async (
         what: string,
         script: string,
@@ -707,7 +735,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         try {
           const release = await lock.acquire(ac.signal);
           if (ctx.signal.aborted) {
-            await release();
+            await free('名额或锁', release);
             return { why: 'aborted' };
           }
           return { release };
@@ -820,11 +848,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
           const ran = await run('affected', command, { execMs, phase: 'test', slotInside: true });
           return stepOfRun(command, ran, execMs, TEST_CHANGED_NOT_RUN, true);
         } finally {
-          try {
-            await got.release();
-          } catch (error) {
-            deps.log?.('自测的整机锁没放掉', { taskId: input.taskId, error: errMessage(error) });
-          }
+          await free('整机锁', got.release);
         }
       };
       const profile = (input.repo as RepoWithProfile).profile;
@@ -935,11 +959,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         steps.push(stepOfRun(tscCommand, ran, tscMs, {}, false));
         return settled(steps);
       } finally {
-        try {
-          await releaseSlot?.();
-        } catch (error) {
-          deps.log?.('自测名额没放掉', { taskId: input.taskId, error: errMessage(error) });
-        }
+        if (releaseSlot !== undefined) await free('自测名额', releaseSlot);
       }
     } catch (error) {
       deps.log?.('自测没跑成，照旧往下走', { taskId: input.taskId, error: errMessage(error) });

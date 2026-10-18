@@ -52,7 +52,12 @@ export interface SlotConfig {
 
 export const DEFAULT_SLOTS = 2;
 export const DEFAULT_MAX_WAIT_MIN = 15;
-export const DEFAULT_MAX_HOLD_MIN = 30;
+/**
+ * 持槽上限（分钟）。要盖得住引擎自测里测试真执行的上限（SELF_CHECK_TEST_MS，30 分钟，从拿到槽那一刻起算）再加收尾：
+ * 等于 30 分钟时，引擎的测试还没到限时槽就先被回收，别的 test:changed 多占一个槽，同机并发超过容量。
+ * 引擎的测试（packages/engine/test/real/self-check.test.ts）钉住它大于测试上限加收尾。
+ */
+export const DEFAULT_MAX_HOLD_MIN = 45;
 
 /** 环境变量：同时几个 / 槽目录（测试和特殊机器用）/ 最多等几分钟 / 最多持有几分钟。 */
 export const ENV_SLOTS = 'FLEET_LOCAL_TEST_SLOTS';
