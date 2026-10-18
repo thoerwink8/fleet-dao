@@ -15,6 +15,7 @@ import {
   runUpgrade,
   type UpgradeState,
 } from './cli-upgrade.ts';
+import { installGoTar } from './cli-upgrade-go.ts';
 import { writeAtomicOwnedByDir } from './write-owned-by-dir.ts';
 
 const NPM_MS = 10 * 60_000;
@@ -275,7 +276,8 @@ async function main(): Promise<number> {
         exec('npm', ['install', '-g', '--prefix', prefix, '--no-fund', '--no-audit', spec], NPM_MS),
       npmUninstall: (pkg, prefix) => exec('npm', ['uninstall', '-g', '--prefix', prefix, pkg], NPM_MS),
       grokLatestVersion,
-      versionOf: (spec) => runBin(spec, ['--version'], VERSION_MS),
+      installTar: (spec) => installGoTar(spec, { exec, sessions: () => sessions(releaseWindow) }),
+      versionOf: (spec) => runBin(spec, spec.via === 'tar' ? ['version'] : ['--version'], VERSION_MS),
       smoke: (spec) => runBin(spec, ['--help'], SMOKE_MS),
       installSelf: (spec) => runBin(spec, ['update'], GROK_MS),
       backup: async (spec) => {
