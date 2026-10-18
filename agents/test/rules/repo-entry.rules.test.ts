@@ -46,16 +46,17 @@ function contractProblems(text: string): string[] {
     entry.scripts?.join() !== 'dev,start,stop,check'
   )
     out.push('entry');
-  // 补给新仓（含公司仓）的 AGENTS.md 只写项目本身的记法：不提 AI、fleet-dao、原话、引导（通用段「项目仓记什么」）
+  // 补给新自用仓的 AGENTS.md 带自用仓标记，只写项目本身的记法：不提 AI、fleet-dao、原话、引导（对外仓仓合同不管，决定 0107）
   const agents = by['agents-md'];
   if (
     agents?.检查.type !== 'file' ||
     agents.检查.path !== 'AGENTS.md' ||
     !agents.补法?.text?.includes('docs/decisions.md') ||
+    !agents.补法.text.split('\n').includes('<!-- repo-kind: 自用仓 -->') ||
     /fleet-dao|AI|Claude|原话|引导|临时调整/.test(agents.补法.text)
   )
     out.push('agents-md');
-  // 不再要各仓有 docs/PROGRESS.md 的引导清单和临时调整表：AI 运营的事不进项目仓
+  // 不再要各仓有 docs/PROGRESS.md 的引导清单和临时调整表：AI 运营的事只记 fleet-dao
   if (by.progress) out.push('progress');
   const gi = by['gitignore-tmp']?.检查;
   if (gi?.path !== '.gitignore' || !(gi.行 ?? []).some((l) => l.认.includes('_tmp/')))
@@ -84,7 +85,7 @@ function temp(name: string): string {
 }
 
 describe('规矩：仓合同（只提醒不拦）', () => {
-  it('合同写成数据，三项都在、判法对，没有往项目仓塞引导清单的 progress 项', () => {
+  it('合同写成数据，三项都在、判法对，没有往各仓塞引导清单的 progress 项', () => {
     expect(contractProblems(CONTRACT_TEXT)).toEqual([]);
   });
 

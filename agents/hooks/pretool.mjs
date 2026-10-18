@@ -2470,7 +2470,7 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
   const { outer } = splitHeredocs(cmd);
   const del = recursiveDeleteVerdict(outer, kind, rawCwd);
   if (del) return del;
-  // 项目仓的提交、推送、PR/MR 不带 AI 署名（ai-attribution.mjs）。只看清楚的 bash 写法；没查成的那句话跟着放行带出去
+  // 对外仓的提交、推送、PR/MR 不带 AI 署名（ai-attribution.mjs）。只看清楚的 bash 写法；没查成的那句话跟着放行带出去
   /** @type {string} */
   let attributionNote = '';
   if (kind === 'bash' && rawCwd) {
