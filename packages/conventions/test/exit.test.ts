@@ -7,7 +7,8 @@ const EXIT = new URL('../src/exit.ts', import.meta.url).href;
 
 /** 跑一段 ESM 代码，开头已经引入了 runMain、exitWith。父进程开了 FORCE_COLOR 时 console.log 会给数字上色，这里关掉，断言对的是退出码和名字。 */
 const run = (code: string) => {
-  const env = { ...process.env, NO_COLOR: '1' };
+  // 展开 process.env 只留下写明的字段，FORCE_COLOR 会报不存在；标成 ProcessEnv 才能删掉父进程带来的上色。
+  const env: NodeJS.ProcessEnv = { ...process.env, NO_COLOR: '1' };
   delete env.FORCE_COLOR;
   return runChild(
     process.execPath,
