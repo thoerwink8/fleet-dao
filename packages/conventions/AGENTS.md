@@ -30,6 +30,7 @@
 - CI 一律全套（决定 0101）：`ci.yml` 的 changes 只用 `ciFullPlan()`，不按改动选；只有两种跳过——PR 上测试台输入完全相同（`ci-cache.ts`）、主线同树复用 PR 的结果（`main-reuse.ts`，e2e 也复用）。别再往 CI 里加按路径少跑的规则：漏的东西到主线才红。汇总（`ciVerdict`）见到不是全套的 plan 就红。
 - `ci-plan.ts` 的 `planCi` 现在只给本机：`test:changed`、推前预检按改动选先跑哪些，改了判法本机跟着变。
 - `test:changed` 判需全跑时先认非空 `FLEET_RUN_ID`，再认 CI：引擎会话显式 `--affected` 生效，写码 CLI 注入的 `CI=true/1` 不覆盖它；无引擎标记的专用 CI、引擎默认和显式 `--all` 仍全跑。
+- `src/test-slots.ts` 拿到本机测试槽就打印 `SLOT_ACQUIRED_LINE`（没排队也打印），引擎据此把等槽和实际执行分开计时。默认持槽上限 45 分钟，要盖住引擎 30 分钟测试执行预算和收尾，避免测试还活着时被回收、同机并发超过容量；普通 `test:changed` 和引擎测试共用这组槽。
 - 只改一个包「对外面」以外的文件只测这个包自己（`packages/conventions/src/package-surface.ts`）；认不出面就当整个包都是面。
 - 文档指针检查误报了就收窄 `packages/conventions/src/doc-pointers.ts` 的规则，不往文档里加豁免；章节别光写「第 X 节」，写明是 design 还是 ops 的。
 - CI 里的检查必须确定、只看检出来的文件；看外部状态（GitHub）的放定时任务，只留言不挡 PR。
