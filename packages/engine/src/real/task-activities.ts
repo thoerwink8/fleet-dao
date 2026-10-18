@@ -36,6 +36,7 @@ import type {
 import { MAX_MAIN_SYNCS } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import type { EngineGitHub } from './github-ports.ts';
+import { bookMergedPull } from './merge-receipt.ts';
 import { mapped } from './mirror.ts';
 import {
   addedLinesAgainst,
@@ -143,7 +144,10 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     });
   };
 
-  /** 已经合了的 PR：补合并记录、删分支（mergePr 对已合并的只做这两件）。补不成只记日志，合并这件事本身是确定的。 */
+  /**
+   * 已经合了的 PR：补合并记录、删分支（bookMergedPull，和等 CI 看到已合并同一步）。补不成只记日志，合并这件事本身是确定的
+   * （这几步前面已经现读过 PR 是合了的；等 CI 那一处更严，记不成照抛，见 merge-receipt.ts）。
+   */
   const bookMerge = async (
     repo: RepoRef,
     prNumber: number,
@@ -151,8 +155,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     ctx: PortContext,
   ): Promise<{ mergeCommit?: string; otherHead?: string }> => {
     try {
-      const r = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
-      if (r.merged) return { mergeCommit: r.mergeCommit };
+      const r = await bookMergedPull(gh, { repo, prNumber, expectedHead }, ctx);
+      if (r.booked) return { mergeCommit: r.mergeCommit };
       if (r.reason === 'merged_other_head') return { otherHead: r.detail };
       return {};
     } catch (error) {

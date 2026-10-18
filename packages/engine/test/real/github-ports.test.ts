@@ -1215,3 +1215,162 @@ describe('并主线', () => {
     expect(got).toEqual({ state: 'clean', head: m.head, conflictFiles: [] });
   });
 });
+
+describe('等 CI 时 PR 已经合了：先核实、记合并回执再回 merged（#3018，#2751 只剩 backfill 那次）', () => {
+  const MERGE = '8'.repeat(40);
+  const pullOf = (o: { merged?: boolean; state?: 'open' | 'closed'; headSha?: string } = {}) => ({
+    number: 101,
+    nodeId: 'PR_101',
+    state: o.state ?? 'closed',
+    merged: o.merged ?? true,
+    draft: false,
+    title: '登录',
+    body: '',
+    headSha: o.headSha ?? m.head,
+    headRef: BRANCH,
+    fromFork: false,
+    author: null,
+    autoMerge: false,
+  });
+  const engineMerged = {
+    merged: true,
+    mergeCommit: MERGE,
+    alreadyMerged: true,
+    branchDeleted: true,
+    mergedBy: 'fleet-dao-engine[bot]',
+    mergedByEngine: true,
+  };
+
+  function mergedSetup(o: { readPull?: () => unknown; mergePr?: () => unknown }) {
+    const { gh, calls } = fakeGh({
+      waitCi: (input: { head: string }) => ({
+        state: 'closed',
+        head: input.head,
+        merged: true,
+        mergeCommit: MERGE,
+        detail: 'PR #101 已经合并了',
+      }),
+      mergePr: o.mergePr ?? (() => engineMerged),
+    });
+    const reads: number[] = [];
+    const claims = {
+      ...gh.claims,
+      readPull: async (_repo: unknown, number: number) => {
+        reads.push(number);
+        return (o.readPull ?? (() => pullOf()))();
+      },
+    };
+    const logs: { message: string; fields?: Record<string, unknown> }[] = [];
+    const ports = createGitHubPorts({
+      gh: { ...gh, claims } as unknown as EngineGitHub,
+      trees: fakeTrees(join(root, 'work')).trees,
+      exec: localExec(),
+      tmpDir: join(root, 'tmp'),
+      archiveDir: join(root, 'archive'),
+      log: (message, fields) => logs.push({ message, ...(fields ? { fields } : {}) }),
+    });
+    const run = () => ports.waitCi({ taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: m.head }, ctx);
+    return { run, calls, reads, logs };
+  }
+
+  it('同一 PR、CI 查过的头就是合的头：现读核实，走 mergePr 记回执（不再合），回实际的头和合并提交', async () => {
+    const s = mergedSetup({});
+    expect(await s.run()).toEqual({ state: 'merged', head: m.head, failedChecks: [], mergeCommit: MERGE });
+    expect(s.reads).toEqual([101]);
+    expect(s.calls.mergePr).toEqual([
+      { repo: { owner: 'acme', name: 'widgets' }, prNumber: 101, expectedHead: m.head },
+    ]);
+    expect(s.logs).toEqual([]);
+  });
+
+  it('【故意造出的失败】合的不是 CI 查过的头：不记账、不回 merged，头仍是查过的那个（不拿实际头顶），写明要人看', async () => {
+    const other = 'e'.repeat(40);
+    const s = mergedSetup({ readPull: () => pullOf({ headSha: other }) });
+    const got = await s.run();
+    expect(got).toMatchObject({ state: 'unknown', head: m.head });
+    expect(got.detail).toMatch(/^PR 被关了：/);
+    expect(got.detail).toContain('eeeeeee');
+    expect(s.calls.mergePr).toBeUndefined();
+    expect(s.logs[0]?.fields).toMatchObject({ prNumber: 101, actualHead: other });
+  });
+
+  it('【故意造出的失败】现读是关了没合 / 还开着没合：不记账；关了的停下等人，开着的让工作流重查', async () => {
+    const closed = mergedSetup({ readPull: () => pullOf({ merged: false }) });
+    const c = await closed.run();
+    expect(c).toMatchObject({ state: 'unknown', head: m.head });
+    expect(c.detail).toMatch(/^PR 被关了：.*关了没合/);
+    expect(closed.calls.mergePr).toBeUndefined();
+
+    const open = mergedSetup({ readPull: () => pullOf({ merged: false, state: 'open' }) });
+    const o = await open.run();
+    expect(o).toMatchObject({ state: 'unknown', head: m.head });
+    expect(o.detail).toContain('还开着');
+    expect(o.detail).not.toContain('PR 被关了');
+    expect(open.calls.mergePr).toBeUndefined();
+    expect(open.logs).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】mergePr 说合的是别的头（merged_other_head）：不当成合上了', async () => {
+    const s = mergedSetup({
+      mergePr: () => ({ merged: false, reason: 'merged_other_head', detail: '合的头是 fffffff' }),
+    });
+    const got = await s.run();
+    expect(got).toMatchObject({ state: 'unknown', head: m.head });
+    expect(got.detail).toMatch(/^PR 被关了：.*fffffff/);
+  });
+
+  it('【故意造出的失败】现读读不到：照抛（可重试），不记账、不当成合上了，日志写明', async () => {
+    const s = mergedSetup({
+      readPull: () => {
+        throw new GitHubError('UPSTREAM_ERROR', '读 PR 502', { retryable: true });
+      },
+    });
+    await expect(s.run()).rejects.toMatchObject({ code: 'UPSTREAM_ERROR', retryable: true });
+    expect(s.calls.mergePr).toBeUndefined();
+    expect(s.logs[0]?.message).toContain('没读成');
+    expect(s.logs[0]?.fields).toMatchObject({ prNumber: 101, error: '读 PR 502' });
+  });
+
+  it('【故意造出的失败】记回执没成：抛 MERGE_RECEIPT_FAILED（带 PR、头、合并提交，按原错能不能重试），不回 merged、不留给对账补', async () => {
+    const s = mergedSetup({
+      mergePr: () => {
+        throw new GitHubError('IN_FLIGHT', '同一个写操作别处正在做', { retryable: true });
+      },
+    });
+    const err = await s.run().catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({
+      code: 'MERGE_RECEIPT_FAILED',
+      retryable: true,
+      details: { prNumber: 101, head: m.head, cause: 'IN_FLIGHT' },
+    });
+    expect((err as PortError).message).toContain(MERGE.slice(0, 7));
+    expect(s.logs[0]?.message).toContain('记合并回执没成');
+
+    const fatal = mergedSetup({
+      mergePr: () => {
+        throw new GitHubError('UNEXPECTED_RESPONSE', '读 PR #101 的合并提交', { retryable: false });
+      },
+    });
+    await expect(fatal.run()).rejects.toMatchObject({ code: 'MERGE_RECEIPT_FAILED', retryable: false });
+  });
+
+  it('回执记上了但合并人读不到 / 不是引擎：照回 merged（合并是确定的），日志写明合并人', async () => {
+    const unknown = mergedSetup({
+      mergePr: () => ({ ...engineMerged, mergedBy: null, mergedByEngine: false }),
+    });
+    expect(await unknown.run()).toMatchObject({ state: 'merged', mergeCommit: MERGE });
+    expect(unknown.logs).toEqual([
+      expect.objectContaining({
+        message: expect.stringContaining('合并人读不到'),
+        fields: expect.objectContaining({ mergedBy: null }),
+      }),
+    ]);
+
+    const human = mergedSetup({
+      mergePr: () => ({ ...engineMerged, mergedBy: 'someone', mergedByEngine: false }),
+    });
+    expect(await human.run()).toMatchObject({ state: 'merged', mergeCommit: MERGE });
+    expect(human.logs[0]?.fields).toMatchObject({ mergedBy: 'someone' });
+  });
+});

@@ -1,0 +1,220 @@
+// 等 CI 时 PR 已经合了（#3018，#2751 那次：waitCi 回 merged 直接收尾，账上只剩每小时对账补的 github.merge_pr_backfill）。
+// 真 createGitHub（真 mergePr、真幂等账）接一份只答安装、令牌、仓、PR、分支引用的假服务，waitCi 换成「已合并」：
+// 新账记成 github.merge_pr；账上已有正常账、已有 backfill 的原样留着不改来源；重试幂等；从头到尾不发合并请求、不贴状态。
+import { generateKeyPairSync } from 'node:crypto';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  type AppCredentials,
+  createGitHub,
+  type MergeReceipt,
+  memoryIdempotencyStore,
+  memoryLedger,
+  mergeKey,
+  silentLogger,
+} from '@fleet-dao/github';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { PortContext } from '../../src/ports.ts';
+import { localExec } from '../../src/real/exec.ts';
+import { createGitHubPorts, type EngineGitHub } from '../../src/real/github-ports.ts';
+import { fakeTrees } from './fixtures.ts';
+
+const API = 'https://api.github.test';
+const PERMISSIONS = {
+  contents: 'write',
+  pull_requests: 'write',
+  issues: 'write',
+  checks: 'read',
+  actions: 'read',
+  statuses: 'write',
+  metadata: 'read',
+  administration: 'write',
+};
+const repo = {
+  id: 'repo-1',
+  owner: 'acme',
+  name: 'widgets',
+  defaultBranch: 'main',
+  testCommand: 'pnpm check',
+};
+const ref = { owner: 'acme', name: 'widgets' };
+const BRANCH = 'fleet/2751-t01a14481';
+const HEAD = '78ebe6e4526e42826e5e5c3c182624b832ae9d4c';
+const MERGE = '88dfbf760e55013cbf125462b5c5a89f9b206740';
+const PR = 2751;
+const ENGINE_LOGIN = 'fleet-test-engine[bot]';
+const MERGED_AT = '2026-10-16T11:12:42Z';
+
+const ctx: PortContext = {
+  signal: new AbortController().signal,
+  heartbeat() {},
+  attempt: 1,
+  lastHeartbeat: undefined,
+};
+
+let apps: Record<'agent' | 'engine', AppCredentials> | undefined;
+function appCredentials(): Record<'agent' | 'engine', AppCredentials> {
+  if (apps) return apps;
+  const agent = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+  const engine = generateKeyPairSync('rsa', { modulusLength: 2048 }).privateKey;
+  apps = {
+    agent: { role: 'agent', appId: 101, slug: 'fleet-test-agent', privateKey: agent, source: 'test' },
+    engine: { role: 'engine', appId: 202, slug: 'fleet-test-engine', privateKey: engine, source: 'test' },
+  };
+  return apps;
+}
+
+let root: string;
+beforeEach(() => {
+  root = mkdtempSync(join(tmpdir(), 'fleet-merge-receipt-'));
+});
+afterEach(() => rmSync(root, { recursive: true, force: true }));
+
+function world() {
+  const requests: string[] = [];
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  const pull = {
+    number: PR,
+    node_id: `PR_${PR}`,
+    html_url: `https://github.test/acme/widgets/pull/${PR}`,
+    state: 'closed',
+    title: '修登录',
+    body: '',
+    draft: false,
+    merged: true,
+    merged_at: MERGED_AT,
+    merge_commit_sha: MERGE,
+    mergeable: null,
+    user: { login: 'fleet-test-agent[bot]', id: 7, type: 'Bot' },
+    merged_by: { login: ENGINE_LOGIN, id: 9, type: 'Bot' },
+    head: { ref: BRANCH, sha: HEAD, repo: { full_name: 'acme/widgets' } },
+    base: { ref: 'main', sha: 'b'.repeat(40), repo: { full_name: 'acme/widgets' } },
+    updated_at: MERGED_AT,
+  };
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+    const path = url.pathname;
+    const method = init?.method ?? 'GET';
+    requests.push(`${method} ${path}`);
+    if (path === '/repos/acme/widgets/installation') return json(200, { id: 22, permissions: PERMISSIONS });
+    if (path === '/app/installations/22/access_tokens') {
+      return json(201, {
+        token: 'ghs_testengine1xxxxxxxxxxxxxxxx',
+        expires_at: '2099-01-01T00:00:00.000Z',
+        permissions: PERMISSIONS,
+      });
+    }
+    if (method === 'GET' && path === '/repos/acme/widgets') {
+      return json(200, { default_branch: 'main', full_name: 'acme/widgets', private: false });
+    }
+    if (method === 'GET' && path === `/repos/acme/widgets/pulls/${PR}`) return json(200, pull);
+    // 分支合并后已经删了
+    if (method === 'GET' && path.startsWith('/repos/acme/widgets/git/ref/heads/')) {
+      return json(404, { message: 'Not Found' });
+    }
+    return json(404, { message: `假 GitHub 里没有 ${method} ${path}` });
+  };
+  const store = memoryIdempotencyStore();
+  const real = createGitHub({
+    ledger: { ...memoryLedger(), idempotency: store },
+    apps: appCredentials(),
+    apiUrl: API,
+    fetch: fetchImpl,
+    now: () => new Date('2026-10-17T08:00:00.000Z'),
+    sleep: async () => undefined,
+    env: {},
+    stateDir: join(root, 'gh-state'),
+    log: silentLogger,
+  });
+  const gh = {
+    ...real,
+    // github 包的 waitCi 等的时候 PR 被合了：closed + merged + 合并提交（#2751 event1044/1051）
+    waitCi: async (input: { head: string }) => {
+      return {
+        state: 'closed',
+        head: input.head,
+        merged: true,
+        mergeCommit: MERGE,
+        detail: `PR #${PR} 已经合并了`,
+      };
+    },
+  } as unknown as EngineGitHub;
+  const logs: string[] = [];
+  const ports = createGitHubPorts({
+    gh,
+    trees: fakeTrees(join(root, 'work')).trees,
+    exec: localExec(),
+    tmpDir: join(root, 'tmp'),
+    archiveDir: join(root, 'archive'),
+    log: (message) => logs.push(message),
+  });
+  const waitCi = () => ports.waitCi({ taskId: 't1', repo, prNumber: PR, branch: BRANCH, head: HEAD }, ctx);
+  const key = mergeKey(ref, PR, HEAD);
+  return { waitCi, store, key, requests, logs };
+}
+
+const receipt: MergeReceipt = { number: PR, head: HEAD, mergeCommit: MERGE, mergedBy: ENGINE_LOGIN };
+const merged = { state: 'merged', head: HEAD, failedChecks: [], mergeCommit: MERGE };
+
+/** 账上的合并键（只该有这张 PR 这个头的一把）。 */
+function mergeKeys(store: ReturnType<typeof memoryIdempotencyStore>): string[] {
+  return [...store.rows.keys()].filter((k) => k.startsWith('gh:merge_pr:'));
+}
+
+/** 没发合并请求（PUT …/merge）、没贴提交状态（不补造合前通过）。 */
+function noWrites(requests: readonly string[]) {
+  expect(
+    requests.filter((r) => r.startsWith('PUT ') || r.startsWith('PATCH ') || r.includes('/statuses/')),
+  ).toEqual([]);
+}
+
+describe('等 CI 看到已合并：走真实回执收口（#3018）', () => {
+  it('正常合法路径、账上还没有：记成 github.merge_pr，回执是 GitHub 实际的头、合并提交、合并人；重试幂等', async () => {
+    const w = world();
+    expect(await w.waitCi()).toEqual(merged);
+    const row = w.store.rows.get(w.key);
+    expect(row?.action).toBe('github.merge_pr');
+    expect(row?.completedAt).toBeInstanceOf(Date);
+    expect(row?.result).toEqual(receipt);
+    const firstDone = row?.completedAt;
+
+    // 活动重试 / 工作流重放再进来：账不重记、不改，仍不发合并请求
+    expect(await w.waitCi()).toEqual(merged);
+    expect(w.store.rows.get(w.key)?.completedAt).toBe(firstDone);
+    expect(mergeKeys(w.store)).toEqual([w.key]);
+    noWrites(w.requests);
+    expect(w.logs).toEqual([]);
+  });
+
+  it('账上已有真实的正常账（github.merge_pr）：原样留着，不重记', async () => {
+    const w = world();
+    const at = new Date(MERGED_AT);
+    await w.store.claim({ key: w.key, action: 'github.merge_pr', target: `acme/widgets#${PR}` }, at);
+    await w.store.complete(w.key, receipt, at);
+    expect(await w.waitCi()).toEqual(merged);
+    expect(w.store.rows.get(w.key)).toMatchObject({
+      action: 'github.merge_pr',
+      completedAt: at,
+      result: receipt,
+    });
+    noWrites(w.requests);
+  });
+
+  it('账上已有每小时对账补的 github.merge_pr_backfill：来源不升级、不覆盖成 github.merge_pr，回执不动', async () => {
+    const w = world();
+    const at = new Date(MERGED_AT);
+    await w.store.claim({ key: w.key, action: 'github.merge_pr_backfill', target: `acme/widgets#${PR}` }, at);
+    await w.store.complete(w.key, receipt, at);
+    expect(await w.waitCi()).toEqual(merged);
+    expect(await w.waitCi()).toEqual(merged);
+    expect(w.store.rows.get(w.key)).toMatchObject({
+      action: 'github.merge_pr_backfill',
+      completedAt: at,
+      result: receipt,
+    });
+    expect(mergeKeys(w.store)).toEqual([w.key]);
+    noWrites(w.requests);
+  });
+});

@@ -211,6 +211,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     tmpDir: deps.tmpDir,
     archiveDir: deps.archiveDir,
     ...(deps.now ? { now: deps.now } : {}),
+    ...(deps.log ? { log: deps.log } : {}),
     ...(deps.session?.gitBin ? { gitBin: deps.session.gitBin } : {}),
     ...(deps.session?.shBin ? { shBin: deps.session.shBin } : {}),
   });
