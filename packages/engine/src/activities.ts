@@ -55,6 +55,8 @@ import type {
   ProbeAssignedInput,
   ReadCiPolicyInput,
   ReadCiPolicyResult,
+  ReadCiReviewsInput,
+  ReadCiReviewsResult,
   ReadDeliveryInput,
   ReadTaskBriefInput,
   ReleaseReservationInput,
@@ -282,6 +284,10 @@ export interface EngineTasks {
   waitMerged?: (input: WaitMergedInput, ctx: PortContext) => Promise<MergeWait>;
   /** 现读这个仓的 CI 模式。没有这个受管仓要抛，不许当成不强制。 */
   readCiPolicy?: (input: ReadCiPolicyInput, ctx: PortContext) => Promise<ReadCiPolicyResult>;
+  /**
+   * CI 红返工前现读仍有效的正式评审。读不全抛错，不回空数组；头变了回未交付，不用旧快照。
+   */
+  readCiReviews?: (input: ReadCiReviewsInput, ctx: PortContext) => Promise<ReadCiReviewsResult>;
   /** 不强制 CI：直接合并，不等检查。 */
   mergeNow?: (input: MergeNowInput, ctx: PortContext) => Promise<MergeNowResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）。续不上回原因，不抛。 */
@@ -309,6 +315,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   armAutoMerge: true,
   waitMerged: true,
   readCiPolicy: true,
+  readCiReviews: true,
   mergeNow: true,
   planSegmentResume: true,
   segmentSettled: true,
