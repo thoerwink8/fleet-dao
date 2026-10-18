@@ -25,6 +25,7 @@ import {
   type Worktree,
 } from '../ports.ts';
 import { isTaskBranch } from '../task-branch.ts';
+import type { ProcLook } from './complex-preserve.ts';
 import type { UserExec } from './exec.ts';
 import { type MergeLog, settleMergedCi } from './merge-receipt.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
@@ -111,6 +112,8 @@ export interface GitHubPortsDeps extends ReviewAuditDeps {
    * 查不清回 unknown，不当成没人用。
    */
   confirmTreeIdle?: (dir: string, caller?: { workflowId?: string }) => Promise<'idle' | 'busy' | 'unknown'>;
+  /** 测试用：看进程 cwd 的口子。生产不给，用 /proc。 */
+  treeProcessLook?: ProcLook;
   /** 等 CI 看到已合并、核实或记合并回执没成时写的日志；不给就打到控制台。 */
   log?: MergeLog;
 }
@@ -457,6 +460,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         taskId,
         branch,
         workRoot: trees.root,
+        ...(deps.treeProcessLook ? { processLook: deps.treeProcessLook } : {}),
         ...(confirmTreeIdle
           ? {
               confirmIdle: () =>

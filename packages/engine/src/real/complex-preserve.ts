@@ -36,6 +36,8 @@ export interface PreserveGate {
   branch?: string;
   workRoot: string;
   confirmIdle: () => Promise<IdleAnswer>;
+  /** 看进程 cwd 的口子。生产不给，用 /proc；测试机的进程表不归夹具管，测试换成明示的夹具。 */
+  processLook?: ProcLook;
 }
 
 export interface TreePlace {
@@ -885,7 +887,7 @@ export async function preserveComplexWorktree(
   await assertArchiveContainer(archiveDir);
   const place = await locateTree(t);
   assertTreeInside(context.workRoot, place);
-  const usage = await treeProcessUsage(place.real, place.uid);
+  const usage = await treeProcessUsage(place.real, place.uid, undefined, undefined, context.processLook);
   if (usage === 'busy') throw keep('WORKTREE_PRESERVED', '有进程正用着这棵树，保留原树', t.dir);
   if (usage !== 'idle') throw keep('WORKTREE_PRESERVED', '确认不了有没有进程用着这棵树，保留原树', t.dir);
   await assertPeopleIdle(context.confirmIdle, '打快照前');
@@ -937,7 +939,7 @@ export async function preserveComplexWorktree(
   if (JSON.stringify(live.ignored) !== JSON.stringify(parsed.state.ignored)) {
     throw keep('WORKTREE_PRESERVED', '存档期间工作树成果发生变化，保留原树重新核验', t.dir);
   }
-  const again = await treeProcessUsage(place.real, place.uid);
+  const again = await treeProcessUsage(place.real, place.uid, undefined, undefined, context.processLook);
   if (again !== 'idle') throw keep('WORKTREE_PRESERVED', '存档期间确认不了没人用，保留原树', t.dir);
   await assertPeopleIdle(context.confirmIdle, '回执落盘前');
   const receipt: ComplexReceipt = {
@@ -1018,7 +1020,7 @@ function asReceipt(value: unknown, dir: string): ComplexReceipt {
 async function recheckComplex(
   t: UserTree,
   dir: string,
-  context: { confirmIdle?: () => Promise<IdleAnswer> },
+  context: { confirmIdle?: () => Promise<IdleAnswer>; processLook?: ProcLook },
   place: TreePlace,
   preserved: readonly string[],
 ): Promise<void> {
@@ -1037,7 +1039,7 @@ async function recheckComplex(
   ) {
     throw keep('WORKTREE_PRESERVED', '回执上的工作树身份和现在对不上，旧回执作废，保留原树', t.dir);
   }
-  const usage = await treeProcessUsage(place.real, place.uid);
+  const usage = await treeProcessUsage(place.real, place.uid, undefined, undefined, context.processLook);
   if (usage !== 'idle') throw keep('WORKTREE_PRESERVED', '删除前确认不了没人用，保留原树', t.dir);
   if (context.confirmIdle) await assertPeopleIdle(context.confirmIdle, '删除前');
   const stateJson = await readNoFollow(join(dir, 'state.json'));
@@ -1108,7 +1110,7 @@ async function recheckClean(t: UserTree, dir: string, preserved: readonly string
 export async function recheckPreservedArchive(
   t: UserTree,
   archivedTo: string,
-  context: { workRoot?: string; confirmIdle?: () => Promise<IdleAnswer> },
+  context: { workRoot?: string; confirmIdle?: () => Promise<IdleAnswer>; processLook?: ProcLook },
   place: TreePlace,
   preserved: readonly string[],
 ): Promise<void> {

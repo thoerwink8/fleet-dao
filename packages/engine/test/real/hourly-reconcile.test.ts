@@ -56,7 +56,7 @@ import {
 } from '../../src/real/hourly-reconcile.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
 import { runChildOk } from '../child.ts';
-import { fakeTrees, git, world } from './fixtures.ts';
+import { fakeTrees, fixtureProcLook, git, world } from './fixtures.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -161,6 +161,7 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
     trees: ft.trees,
     exec: localExec(),
     archiveDir: `${root}-archive`,
+    treeProcessLook: fixtureProcLook,
     sessionOrg: async () => ({ ok: true, org: 'carpool' }),
     carpoolRegistry: async () => ({ ok: true }),
     machine: '法国',

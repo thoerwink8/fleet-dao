@@ -13,6 +13,7 @@ import {
   type IdleAnswer,
   locateTree,
   makeArchiveDir,
+  type ProcLook,
   preserveComplexWorktree,
   readArchiveFile,
   recheckNoUnique,
@@ -36,6 +37,8 @@ export interface PreserveContext {
   workRoot?: string;
   /** 删除前再问有没有任务或会话在用。没给、答不清，复杂成果留树。 */
   confirmIdle?: () => Promise<IdleAnswer>;
+  /** 看进程 cwd 的口子。生产不给，用 /proc。 */
+  processLook?: ProcLook;
 }
 
 /** 已交付或已归档的图片：按 blob 现核，对上的才从成果清单里拿掉。不信回执里写的路径。 */
@@ -87,6 +90,7 @@ export async function preserveWorktree(
         ...(context.branch ? { branch: context.branch } : {}),
         workRoot,
         confirmIdle,
+        ...(context.processLook ? { processLook: context.processLook } : {}),
       },
       await shotPaths(),
     );
@@ -112,11 +116,12 @@ export async function preserveWorktree(
     }
   }
   await verifyRecoveryBundle(t, saved, identity);
+  const { processLook: _look, ...recorded } = context;
   const manifest = Buffer.from(
     `${JSON.stringify(
       {
         version: 1,
-        ...context,
+        ...recorded,
         originalPath: t.dir,
         identity,
         sha256: createHash('sha256').update(saved).digest('hex'),

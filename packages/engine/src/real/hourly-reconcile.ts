@@ -86,6 +86,7 @@ import { type PortContext, PortError, type ShotsDelivery } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
 import { type ClosedIssueHoldToken, taskCloseClosedIssueUpdate, taskStatusQuery } from '../task-contract.ts';
+import type { ProcLook } from './complex-preserve.ts';
 import type { UserExec } from './exec.ts';
 import { mainCiRuns } from './main-ci-runs.ts';
 import { preserveThenRemove } from './preserve-worktree.ts';
@@ -282,6 +283,8 @@ export interface HourlyReconcileWiring {
   /** 以下测试用。 */
   gitBin?: string;
   shBin?: string;
+  /** 看进程 cwd 的口子；不给用 /proc。 */
+  treeProcessLook?: ProcLook;
   listDir?: HourlyReconcileJobDeps['listDir'];
   stageRoutable?: HourlyReconcileJobDeps['stageRoutable'];
   /** 测试用：不给就用选路同一份事实的只读判法（store.stageAllOpen）。 */
@@ -655,7 +658,11 @@ export function hourlyReconcileJob(
               ...(w.shBin ? { sh: w.shBin } : {}),
             },
             w.archiveDir,
-            { workRoot: w.trees.root, confirmIdle: idle },
+            {
+              workRoot: w.trees.root,
+              confirmIdle: idle,
+              ...(w.treeProcessLook ? { processLook: w.treeProcessLook } : {}),
+            },
             preservedShots.get(dir),
             () => w.trees.remove(dir),
           );

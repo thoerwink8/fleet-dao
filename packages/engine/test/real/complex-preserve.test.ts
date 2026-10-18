@@ -44,7 +44,7 @@ import { PROBE_DIR } from '../../src/real/route-probe.ts';
 import { DISPOSABLE, ENVIRONMENT_FILES, treeLeftovers, type UserTree } from '../../src/real/user-git.ts';
 import { layout, SESSION_TMP_DIR } from '../../src/real/worktrees.ts';
 import { runChild, runChildBytes } from '../child.ts';
-import { git } from './fixtures.ts';
+import { fixtureProcLook, git } from './fixtures.ts';
 
 const USER = 'fleet-agent-carpool' as const;
 const children: ChildProcess[] = [];
@@ -73,6 +73,11 @@ function tree(rel = 'acme_web/12-keep', exec: UserExec = localExec()): UserTree 
 
 function idle(): Promise<'idle'> {
   return Promise.resolve('idle');
+}
+
+/** 没人用的夹具门：工作根、会话和工作流都答没人用，进程看夹具（不跟测试机的进程表走）。 */
+function gate() {
+  return { workRoot, confirmIdle: idle, processLook: fixtureProcLook };
 }
 
 function forbidMutations(exec: UserExec): UserExec {
@@ -293,15 +298,36 @@ function reachableCommits(dir: string): Set<string> {
   );
 }
 
-/** 只解开对象包，不抓成果包。伪引用上的提交必须已经在包里。 */
-function assertPackHasCommits(pack: Buffer, shas: readonly string[], label: string): void {
+/** 只解开对象包，不抓成果包。伪引用上的提交、resolve-undo 指的内容必须已经在包里。 */
+function assertPackHasCommits(pack: Buffer, shas: readonly string[], label: string, type = 'commit'): void {
   const bare = join(root, `pack-${label}`);
   gitClean(root, ['init', '--bare', '-q', bare]);
   gitClean(bare, ['unpack-objects'], pack);
   for (const sha of shas) {
-    expect(gitClean(bare, ['cat-file', '-t', sha]).trim()).toBe('commit');
+    expect(gitClean(bare, ['cat-file', '-t', sha]).trim()).toBe(type);
     gitClean(bare, ['cat-file', '-e', sha]);
   }
+}
+
+/** 三层冲突只经 resolve-undo 指着：内容另写进对象库，不在引用、reflog、当前索引里。 */
+function resolveUndoOnly(t: UserTree): string[] {
+  const blobs = ['base', 'ours', 'theirs'].map((side) =>
+    gitClean(t.dir, ['hash-object', '-w', '--stdin'], Buffer.from(`reuc-${side}\n`)).trim(),
+  );
+  const info = blobs.map((sha, i) => `100644 ${sha} ${i + 1}\tconflict.txt\n`).join('');
+  gitClean(t.dir, ['update-index', '--index-info'], Buffer.from(info));
+  writeFileSync(join(t.dir, 'conflict.txt'), 'resolved\n');
+  git(t.dir, 'add', 'conflict.txt');
+  expect(gitClean(t.dir, ['ls-files', '--resolve-undo']).split('\n').filter(Boolean)).toEqual(
+    blobs.map((sha, i) => `100644 ${sha} ${i + 1}\tconflict.txt`),
+  );
+  const reachable = reachableCommits(t.dir);
+  const staged = gitClean(t.dir, ['ls-files', '--stage']);
+  for (const sha of blobs) {
+    expect(reachable.has(sha)).toBe(false);
+    expect(staged).not.toContain(sha);
+  }
+  return blobs;
 }
 
 function sweepDeps(
@@ -573,7 +599,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       preserveThenRemove(
         t,
         archive,
-        { workRoot, confirmIdle: async () => 'unknown' },
+        { workRoot, confirmIdle: async () => 'unknown', processLook: fixtureProcLook },
         undefined,
         async () => {
           removed.push(t.dir);
@@ -582,10 +608,16 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       ),
     ).rejects.toThrow(/确认不了没人用/);
     await expect(
-      preserveThenRemove(t, archive, { workRoot, confirmIdle: async () => 'busy' }, undefined, async () => {
-        removed.push(t.dir);
-        return { gone: false };
-      }),
+      preserveThenRemove(
+        t,
+        archive,
+        { workRoot, confirmIdle: async () => 'busy', processLook: fixtureProcLook },
+        undefined,
+        async () => {
+          removed.push(t.dir);
+          return { gone: false };
+        },
+      ),
     ).rejects.toThrow(/仍有任务或会话在用/);
     expect(removed).toEqual([]);
     expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
@@ -603,9 +635,9 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       removed.push(t.dir);
       return { gone: false };
     };
-    await expect(
-      preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, remove),
-    ).rejects.toMatchObject({ code: 'ARCHIVE_FAILED' });
+    await expect(preserveThenRemove(t, archive, gate(), undefined, remove)).rejects.toMatchObject({
+      code: 'ARCHIVE_FAILED',
+    });
     expect(readdirSync(secret)).toEqual([]);
     rmSync(archive, { recursive: true });
 
@@ -614,32 +646,30 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     const linkParent = join(root, 'link-parent');
     symlinkSync(realParent, linkParent);
     await expect(
-      preserveThenRemove(t, join(linkParent, 'archive'), { workRoot, confirmIdle: idle }, undefined, remove),
+      preserveThenRemove(t, join(linkParent, 'archive'), gate(), undefined, remove),
     ).rejects.toMatchObject({ code: 'ARCHIVE_FAILED' });
     expect(existsSync(join(realParent, 'archive'))).toBe(false);
 
     const outside = tree('solo');
     dirtyFile(outside);
-    await expect(
-      preserveThenRemove(outside, archive, { workRoot, confirmIdle: idle }, undefined, remove),
-    ).rejects.toThrow(/工作根/);
+    await expect(preserveThenRemove(outside, archive, gate(), undefined, remove)).rejects.toThrow(/工作根/);
     const link = join(workRoot, 'acme_web', '12-link');
     symlinkSync(t.dir, link);
     await expect(
-      preserveThenRemove({ ...t, dir: link }, archive, { workRoot, confirmIdle: idle }, undefined, remove),
+      preserveThenRemove({ ...t, dir: link }, archive, gate(), undefined, remove),
     ).rejects.toMatchObject({ code: 'WORKTREE_PRESERVED' });
 
     const notes = tree('acme_web/12-notes');
     writeFileSync(join(notes.dir, 'hello.txt'), 'keep\n');
-    await expect(
-      preserveThenRemove(notes, archive, { workRoot, confirmIdle: idle }, undefined, remove),
-    ).rejects.toThrow(/保留原树供接管/);
+    await expect(preserveThenRemove(notes, archive, gate(), undefined, remove)).rejects.toThrow(
+      /保留原树供接管/,
+    );
     expect(readFileSync(join(notes.dir, 'hello.txt'), 'utf8')).toBe('keep\n');
     expect(removed).toEqual([]);
     expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
   });
 
-  it('有进程的 cwd 在树里就拒删', async () => {
+  it('有进程的 cwd 在树里就拒删（生产的 /proc 判法）', async () => {
     const t = tree();
     dirtyFile(t);
     const child = spawn('sleep', ['30'], { cwd: t.dir, stdio: 'ignore' });
@@ -672,13 +702,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       return result;
     };
     await expect(
-      preserveThenRemove(
-        { ...t, exec: truncate },
-        archive,
-        { workRoot, confirmIdle: idle },
-        undefined,
-        remove,
-      ),
+      preserveThenRemove({ ...t, exec: truncate }, archive, gate(), undefined, remove),
     ).rejects.toThrow(/快照帧/);
     expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
 
@@ -693,13 +717,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       return result;
     };
     await expect(
-      preserveThenRemove(
-        { ...t, exec: corrupt },
-        archive,
-        { workRoot, confirmIdle: idle },
-        undefined,
-        remove,
-      ),
+      preserveThenRemove({ ...t, exec: corrupt }, archive, gate(), undefined, remove),
     ).rejects.toThrow(/哈希对不上|独立恢复/);
     expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
     expect(archives().length).toBeGreaterThan(0);
@@ -716,13 +734,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       return result;
     };
     await expect(
-      preserveThenRemove(
-        { ...t, exec: dropBlob },
-        archive,
-        { workRoot, confirmIdle: idle },
-        undefined,
-        remove,
-      ),
+      preserveThenRemove({ ...t, exec: dropBlob }, archive, gate(), undefined, remove),
     ).rejects.toThrow(/归档缺文件|哈希对不上|读不了/);
     expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
 
@@ -730,9 +742,10 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     writeFileSync(join(t.dir, 'secret', 'a.txt'), 'hidden\n');
     chmodSync(join(t.dir, 'secret'), 0);
     try {
-      await expect(
-        preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, remove),
-      ).rejects.toMatchObject({ code: 'READ_FAILED', message: expect.stringContaining('读不了') });
+      await expect(preserveThenRemove(t, archive, gate(), undefined, remove)).rejects.toMatchObject({
+        code: 'READ_FAILED',
+        message: expect.stringContaining('读不了'),
+      });
     } finally {
       chmodSync(join(t.dir, 'secret'), 0o755);
     }
@@ -755,16 +768,10 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     };
     const removed: string[] = [];
     await expect(
-      preserveThenRemove(
-        { ...t, exec: racing },
-        archive,
-        { workRoot, confirmIdle: idle },
-        undefined,
-        async () => {
-          removed.push(t.dir);
-          return { gone: false };
-        },
-      ),
+      preserveThenRemove({ ...t, exec: racing }, archive, gate(), undefined, async () => {
+        removed.push(t.dir);
+        return { gone: false };
+      }),
     ).rejects.toThrow(/发生变化|对不上/);
     expect(readFileSync(join(t.dir, 'late.txt'), 'utf8')).toBe('late\n');
     rmSync(join(t.dir, 'late.txt'));
@@ -777,6 +784,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
         archive,
         {
           workRoot,
+          processLook: fixtureProcLook,
           confirmIdle: async () => {
             calls += 1;
             return calls >= 2 ? 'busy' : 'idle';
@@ -807,26 +815,20 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       return result;
     };
     await expect(
-      preserveThenRemove(
-        { ...t, exec: forged },
-        archive,
-        { workRoot, confirmIdle: idle },
-        undefined,
-        async () => {
-          removed.push('/etc');
-          return { gone: false };
-        },
-      ),
+      preserveThenRemove({ ...t, exec: forged }, archive, gate(), undefined, async () => {
+        removed.push('/etc');
+        return { gone: false };
+      }),
     ).rejects.toThrow(/对不上|作废/);
     expect(removed).toEqual([]);
     expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
 
-    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const saved = await preserveWorktree(t, archive, gate());
     writeFileSync(join(t.dir, 'after.txt'), 'after\n');
     const place = await locateTree(t);
-    await expect(
-      recheckPreservedArchive(t, saved as string, { workRoot, confirmIdle: idle }, place, []),
-    ).rejects.toThrow(/作废|发生变化|对不上/);
+    await expect(recheckPreservedArchive(t, saved as string, gate(), place, [])).rejects.toThrow(
+      /作废|发生变化|对不上/,
+    );
     const both = join(archive, 'both');
     mkdirSync(both);
     writeFileSync(join(both, 'receipt.json'), '{}\n');
@@ -858,17 +860,11 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       JSON.stringify({ version: 1, verified: true, originalPath: '/etc', identity: 'forged' }),
     );
     const removed: string[] = [];
-    const result = await preserveThenRemove(
-      t,
-      archive,
-      { workRoot, confirmIdle: idle },
-      undefined,
-      async () => {
-        removed.push(t.dir);
-        rmSync(t.dir, { recursive: true, force: true });
-        return { gone: false };
-      },
-    );
+    const result = await preserveThenRemove(t, archive, gate(), undefined, async () => {
+      removed.push(t.dir);
+      rmSync(t.dir, { recursive: true, force: true });
+      return { gone: false };
+    });
     expect(removed).toEqual([t.dir]);
     expect(result.archivedTo).toBeDefined();
     expect(result.archivedTo).not.toBe(manual);
@@ -886,7 +882,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       if (removes === 1) rmSync(t.dir, { recursive: true, force: true });
       return { gone: false };
     };
-    const once = () => preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, remove);
+    const once = () => preserveThenRemove(t, archive, gate(), undefined, remove);
     const [left, right] = await Promise.allSettled([once(), once()]);
     const fulfilled = [left, right].filter((item) => item.status === 'fulfilled');
     const rejected = [left, right].filter((item) => item.status === 'rejected');
@@ -1010,26 +1006,20 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     const oids = listedOids(dir);
     expect(oids.has(borrowed)).toBe(true);
     const removed: string[] = [];
-    const result = await preserveThenRemove(
-      t,
-      archive,
-      { workRoot, confirmIdle: idle },
-      undefined,
-      async () => {
-        const saved = archives();
-        expect(saved).toHaveLength(1);
-        const state = JSON.parse(readFileSync(join(archive, saved[0] as string, 'state.json'), 'utf8')) as {
-          files: { path: string }[];
-          ignored: { path: string; rule: string }[];
-          objects: { sha: string }[];
-        };
-        cover(dir, state);
-        expect(state.objects.some((obj) => obj.sha === borrowed)).toBe(true);
-        removed.push(t.dir);
-        rmSync(dir, { recursive: true, force: true });
-        return { gone: false };
-      },
-    );
+    const result = await preserveThenRemove(t, archive, gate(), undefined, async () => {
+      const saved = archives();
+      expect(saved).toHaveLength(1);
+      const state = JSON.parse(readFileSync(join(archive, saved[0] as string, 'state.json'), 'utf8')) as {
+        files: { path: string }[];
+        ignored: { path: string; rule: string }[];
+        objects: { sha: string }[];
+      };
+      cover(dir, state);
+      expect(state.objects.some((obj) => obj.sha === borrowed)).toBe(true);
+      removed.push(t.dir);
+      rmSync(dir, { recursive: true, force: true });
+      return { gone: false };
+    });
     expect(removed).toEqual([dir]);
     expect(existsSync(dir)).toBe(false);
     rmSync(other, { recursive: true, force: true });
@@ -1086,16 +1076,10 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     writeFileSync(join(side, 'linked-dirty.txt'), 'linked\n');
     const body = readFileSync(join(side, 'linked-dirty.txt'));
     const linked: UserTree = { ...main, dir: side };
-    const result = await preserveThenRemove(
-      linked,
-      archive,
-      { workRoot, confirmIdle: idle },
-      undefined,
-      async () => {
-        rmSync(side, { recursive: true, force: true });
-        return { gone: false };
-      },
-    );
+    const result = await preserveThenRemove(linked, archive, gate(), undefined, async () => {
+      rmSync(side, { recursive: true, force: true });
+      return { gone: false };
+    });
     expect(existsSync(main.dir)).toBe(true);
     expect(existsSync(side)).toBe(false);
     rmSync(main.dir, { recursive: true, force: true });
@@ -1117,7 +1101,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     const reachable = reachableCommits(t.dir);
     expect(reachable.has(a)).toBe(false);
     expect(reachable.has(b)).toBe(false);
-    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const saved = await preserveWorktree(t, archive, gate());
     assertPackHasCommits(readFileSync(join(saved as string, 'objects.pack')), [a, b], 'merge');
     expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
   });
@@ -1150,9 +1134,46 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     git(dir, 'reflog', 'expire', '--expire=all', '--all');
     rmSync(join(dir, '.git', 'logs'), { recursive: true, force: true });
     expect(reachableCommits(dir).has(b)).toBe(false);
-    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const saved = await preserveWorktree(t, archive, gate());
     assertPackHasCommits(readFileSync(join(saved as string, 'objects.pack')), [a, b], 'pick');
     expect(existsSync(join(dir, 'base.txt'))).toBe(true);
+  });
+
+  it('只被 resolve-undo 指着的三层内容进对象包，独立恢复后还能把冲突找回来', async () => {
+    const t = tree('acme_web/12-reuc');
+    dirtyFile(t);
+    const blobs = resolveUndoOnly(t);
+    const saved = await preserveWorktree(t, archive, gate());
+    assertPackHasCommits(readFileSync(join(saved as string, 'objects.pack')), blobs, 'reuc', 'blob');
+    const state = JSON.parse(readFileSync(join(saved as string, 'state.json'), 'utf8')) as {
+      resolveUndo: string;
+      objects: { sha: string }[];
+    };
+    expect(state.resolveUndo).toBe(`conflict.txt\t${blobs.map((sha) => `100644 ${sha}`).join(' ')}`);
+    for (const sha of blobs) expect(state.objects.map((item) => item.sha)).toContain(sha);
+    const restored = restoreArchive(saved as string, join(root, 'reuc-restored'));
+    gitClean(restored, ['checkout', '-m', '--', 'conflict.txt']);
+    expect(gitClean(restored, ['ls-files', '-u']).split('\n').filter(Boolean)).toEqual(
+      blobs.map((sha, i) => `100644 ${sha} ${i + 1}\tconflict.txt`),
+    );
+    expect(readFileSync(join(restored, 'conflict.txt'), 'utf8')).toContain('reuc-theirs');
+    expect(readFileSync(join(t.dir, 'conflict.txt'), 'utf8')).toBe('resolved\n');
+  });
+
+  it('resolve-undo 指的内容在原仓缺了，拒删并留下原树', async () => {
+    const t = tree('acme_web/12-reuc-gone');
+    dirtyFile(t);
+    const [, ours] = resolveUndoOnly(t);
+    rmSync(join(t.dir, '.git', 'objects', (ours as string).slice(0, 2), (ours as string).slice(2)));
+    const removed: string[] = [];
+    await expect(
+      preserveThenRemove(t, archive, gate(), undefined, async () => {
+        removed.push(t.dir);
+        return { gone: false };
+      }),
+    ).rejects.toThrow(/resolve-undo 指的对象缺失/);
+    expect(removed).toEqual([]);
+    expect(readFileSync(join(t.dir, 'conflict.txt'), 'utf8')).toBe('resolved\n');
   });
 
   it('认不出的序列状态拒绝删除并留下原树', async () => {
@@ -1162,7 +1183,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     writeFileSync(join(t.dir, '.git', 'sequencer', 'message'), '不是提交\n');
     const removed: string[] = [];
     await expect(
-      preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, async () => {
+      preserveThenRemove(t, archive, gate(), undefined, async () => {
         removed.push(t.dir);
         return { gone: false };
       }),
@@ -1182,7 +1203,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     git(t.dir, 'add', '-N', 'new.txt');
     git(t.dir, 'update-index', '--skip-worktree', 'kept.txt');
     expect(gitClean(t.dir, ['status', '--porcelain', '--', 'new.txt'])).toBe(' A new.txt\n');
-    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const saved = await preserveWorktree(t, archive, gate());
     const restored = restoreArchive(saved as string, join(root, 'intent-restored'));
     expect(gitClean(restored, ['status', '--porcelain', '--', 'new.txt'])).toBe(' A new.txt\n');
     const flags = gitClean(restored, ['ls-files', '--debug']);
@@ -1190,9 +1211,9 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     expect(flags).toContain('flags: 40004000');
     git(t.dir, 'update-index', '--assume-unchanged', 'base.txt');
     const place = await locateTree(t);
-    await expect(
-      recheckPreservedArchive(t, saved as string, { workRoot, confirmIdle: idle }, place, []),
-    ).rejects.toThrow(/作废|对不上/);
+    await expect(recheckPreservedArchive(t, saved as string, gate(), place, [])).rejects.toThrow(
+      /作废|对不上/,
+    );
     expect(readFileSync(join(t.dir, 'new.txt'), 'utf8')).toBe('intent\n');
     expect(gitClean(t.dir, ['ls-files', '--debug', '--', 'base.txt'])).toContain('flags: 8000');
   });
@@ -1200,25 +1221,21 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
   it('只改回执里的 HEAD、指纹不动，删除前也拒绝', async () => {
     const t = tree();
     dirtyFile(t);
-    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const saved = await preserveWorktree(t, archive, gate());
     const receiptPath = join(saved as string, 'receipt.json');
     const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as { head: string; version: number };
     const realHead = receipt.head;
     receipt.head = 'a'.repeat(40);
     writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
     const place = await locateTree(t);
-    await expect(
-      recheckPreservedArchive(t, saved as string, { workRoot, confirmIdle: idle }, place, []),
-    ).rejects.toThrow(/HEAD/);
+    await expect(recheckPreservedArchive(t, saved as string, gate(), place, [])).rejects.toThrow(/HEAD/);
     expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
     receipt.version = 2;
     receipt.head = realHead;
     const old = join(archive, 'old-receipt');
     mkdirSync(old);
     writeFileSync(join(old, 'receipt.json'), `${JSON.stringify(receipt)}\n`);
-    await expect(recheckPreservedArchive(t, old, { workRoot, confirmIdle: idle }, place, [])).rejects.toThrow(
-      /认不出/,
-    );
+    await expect(recheckPreservedArchive(t, old, gate(), place, [])).rejects.toThrow(/认不出/);
   });
 
   it('归档子目录或父路径换成指向树外的符号链接时拒写拒读，不删原树', async () => {
@@ -1226,14 +1243,12 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     dirtyFile(t);
     const outside = join(root, 'outside');
     mkdirSync(outside);
-    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const saved = await preserveWorktree(t, archive, gate());
     const blobs = join(saved as string, 'blobs');
     rmSync(blobs, { recursive: true, force: true });
     symlinkSync(outside, blobs);
     const place = await locateTree(t);
-    await expect(
-      recheckPreservedArchive(t, saved as string, { workRoot, confirmIdle: idle }, place, []),
-    ).rejects.toThrow(/符号链接/);
+    await expect(recheckPreservedArchive(t, saved as string, gate(), place, [])).rejects.toThrow(/符号链接/);
     expect(readdirSync(outside)).toEqual([]);
     expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
 
@@ -1301,7 +1316,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
         await preserveThenRemove(
           { exec: localExec(), user, dir, scopePrefix: 'sweep-preserve', git: 'git', sh: 'sh' },
           archive,
-          { workRoot, confirmIdle: () => idleAnswer(dir, async () => []) },
+          { workRoot, confirmIdle: () => idleAnswer(dir, async () => []), processLook: fixtureProcLook },
           undefined,
           async () => {
             removed.push(dir);
