@@ -151,7 +151,9 @@ func TestUnknownUserSurvivesKilledProcessWithoutAutomaticReplay(t *testing.T) {
 			next := "next"
 			b.user(t, next)
 			warning := b.until(t, "result")
-			if warning["is_error"] != true || !strings.Contains(warning["result"].(string), "交付状态未知") || strings.Contains(warning["result"].(string), content) {
+			// 提示里带着缓存路径，临时目录名取自子测试名（就是正文）：先去掉路径再查有没有漏出正文。
+			shown := strings.ReplaceAll(warning["result"].(string), f.home, "")
+			if warning["is_error"] != true || !strings.Contains(shown, "交付状态未知") || strings.Contains(shown, content) {
 				t.Fatalf("恢复应明确提示 unknown，不输出原正文：%v", warning)
 			}
 			echo := b.until(t, "user")
