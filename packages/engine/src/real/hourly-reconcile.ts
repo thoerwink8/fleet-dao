@@ -12,6 +12,7 @@ import {
   activeLocalLeaseKeys,
   alertByKey,
   countAlertFilings,
+  countOpenRunsForIssue,
   type Db,
   findRepoProfile,
   finishScheduleRun,
@@ -49,7 +50,11 @@ import {
 } from '@fleet-dao/db';
 import { type GitHub, type RepoRef, readCi, readPull, requiredChecksFor } from '@fleet-dao/github';
 import { parseRepoProfile } from '@fleet-dao/shared';
-import { requirementWorkflowId, subtaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import {
+  parseTaskWorkflowId,
+  requirementWorkflowId,
+  subtaskWorkflowId,
+} from '@fleet-dao/shared/workflow-ids';
 import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
@@ -187,6 +192,18 @@ export function taskViewOf(raw: unknown, workflowId: string): WorkflowView {
   };
 }
 
+/**
+ * 关单收尾专用（#3002）：停着等人（phase=parked），或已在检查点软暂停（phase=paused 且 waiting.kind=paused）。
+ * 别的阶段都是还在跑，包括暂停了但等待还不是 paused、以及别的阶段碰巧 waiting.kind=paused。
+ * taskViewOf.parked 仍只认 phase=parked，对账别的读法不跟着放宽。认不出照抛，不当成还在跑。
+ */
+export function closedIssueHoldOf(raw: unknown, workflowId: string): 'parked' | 'paused-checkpoint' | 'busy' {
+  const view = taskViewOf(raw, workflowId);
+  if (view.parked) return 'parked';
+  if (asRecord(raw)?.phase === 'paused' && view.waiting?.kind === 'paused') return 'paused-checkpoint';
+  return 'busy';
+}
+
 /** 问 Temporal：没有这条工作流是 missing；别的查不了（连不上、没权限）照抛。 */
 export function temporalWorkflows(client: Pick<Client, 'workflow'>): WorkflowReader {
   return {
@@ -299,8 +316,12 @@ export async function resolveClosedIssueParkAlerts(
   return n;
 }
 
-/** 「单已关且停下等人就撤任务」的真口子（#1816）：在跑的问 Temporal，停没停着问 taskStatus，单状态现读，放弃走 taskAbandonSignal，挂起提醒当场撤。 */
-function temporalClosedIssueTasks(
+/**
+ * 「单已关就撤任务」的真口子（#1816 / #3002）：在跑的问 Temporal。
+ * isParked 仍只认 phase=parked（别的读法不放宽）。关单收尾问 holdForClose：parked，或检查点软暂停再数开着的会话。
+ * 单状态现读，放弃走 taskAbandonSignal，挂起提醒当场撤。
+ */
+export function temporalClosedIssueTasks(
   client: Pick<Client, 'workflow' | 'connection'>,
   gh: Pick<GitHub, 'readIssueState'> & Partial<Pick<GitHub, 'readGroomFacts'>>,
   db: Db,
@@ -320,6 +341,16 @@ function temporalClosedIssueTasks(
     async isParked(workflowId) {
       const handle = client.workflow.getHandle(workflowId);
       return taskViewOf(await handle.query(taskStatusQuery), workflowId).parked;
+    },
+    async holdForClose(workflowId) {
+      const handle = client.workflow.getHandle(workflowId);
+      const kind = closedIssueHoldOf(await handle.query(taskStatusQuery), workflowId);
+      if (kind === 'parked') return { kind: 'parked' };
+      if (kind === 'busy') return { kind: 'busy' };
+      const ref = parseTaskWorkflowId(workflowId);
+      if (!ref) throw new Error(`${workflowId} 认不出是哪张单，开着的会话数没查成`);
+      const openSessions = await countOpenRunsForIssue(db, ref.repo, ref.issueNumber, workflowId);
+      return { kind: 'paused', openSessions };
     },
     resolveParkAlerts: (workflowId, why, by) =>
       resolveClosedIssueParkAlerts(db, workflowId, why, { at: now(), ...(by ? { by } : {}) }),

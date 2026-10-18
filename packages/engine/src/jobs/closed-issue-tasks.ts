@@ -1,12 +1,15 @@
-// 每小时对账的一部分（#1198 / #1816）：单已经关了、任务还停着等人（parked/stalled），就发「放弃」信号
-// （走 taskAbandonSignal，不新造），并撤掉「动手 N 轮都没过」那条挂起提醒，操作记录写「单已关，自动放弃」。
-// 起因：#1182 被 PR 关掉了还挂着；#1795 关单后停下等人的任务没人会再拍，巡查和提醒一直挂着。
-// 只有停下等人的才撤：还在跑（不是 parked）的不走这一支——人刚关单时会话可能还在交活。
-// 读不到单的状态记「没查成」，不撤、不当成单还开着也不当成已关；工作流已经结束的收不到信号，不算问题。
-// 收到 GitHub 的 issues.closed 时也走这一个函数（jobs/closed-issue-events.ts），只看那一张单，单关了马上撤；这一轮当兜底。
+// 每小时对账的一部分（#1198 / #1816 / #3002）：单已经关了，任务停着等人（phase=parked），或已经停在检查点
+// （phase=paused 且 waiting.kind=paused）并且没有开着的会话，就发「放弃」信号（走 taskAbandonSignal，不新造），
+// 并撤掉挂起提醒，操作记录写「单已关，自动放弃」。
+// 起因：#1182 被 PR 关掉了还挂着；#1795 关单后停下等人的任务没人会再拍；#2928 关单后软暂停停在检查点，
+// 只认 parked 的门把放弃跳过，任务一直 running。
+// 还在跑（implement / ci / verify / merge）、软暂停还没到检查点、检查点上仍有开着的会话，都不走这一支。
+// 发信号前再读一次单状态和停法：中间已经继续、或单又开了，就不动。
+// 读不到单的状态、停法、开着的会话数，记「没查成」，不撤；空的会话数不当成没有会话。工作流已经结束的收不到信号，不算问题。
+// 收到 GitHub 的 issues.closed 时也走这一个函数（jobs/closed-issue-events.ts），只看那一张单；已经记过的投递由这一轮再看还在跑的工作流。
 
 import { LOCAL_LABEL, MOTHER_LABEL } from '@fleet-dao/conventions';
-import type { OpenTaskRow } from '@fleet-dao/db';
+import { type OpenTaskRow, requireOpenRunCount } from '@fleet-dao/db';
 import type { RepoRef } from '@fleet-dao/github';
 import type { AbandonCommand } from '@fleet-dao/shared/task-signals';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -22,12 +25,27 @@ export const CLOSED_ISSUE_ABANDON_REASON = '单已关，自动放弃';
 export const CLOSED_ISSUE_IDLE_STOP_REASON = '单已关闭，没有工作流在跑';
 export const NEVER_DISPATCHED_STOP_REASON = '单是母单或本机做，引擎不派';
 
+/**
+ * 关单收尾看见的停法。parked＝停着等人，可以放弃。
+ * paused＝已经停在检查点（phase=paused 且 waiting.kind=paused），只有 openSessions 是整数 0 才可以放弃。
+ * busy＝还在跑、还没到检查点，或认不出，不动。
+ */
+export type ClosedIssueHold =
+  | { kind: 'parked' }
+  | { kind: 'paused'; openSessions: number }
+  | { kind: 'busy' };
+
 export interface ClosedIssueTaskDeps {
   closedIssueTasks: {
     /** 在跑（含停着等人）的任务工作流编号，形如 task:<owner>/<repo>#<号> 或重做后的 :r2。列不出来照抛。 */
     runningTaskWorkflowIds(): Promise<string[]>;
-    /** 这个任务工作流是不是停着等人（phase = parked）。查不到照抛，不当成没挂着。 */
+    /** 这个任务工作流是不是停着等人（phase = parked）。查不到照抛，不当成没挂着。关单收尾在有 holdForClose 时不问它。 */
     isParked(workflowId: string): Promise<boolean>;
+    /**
+     * 关单收尾用的停法。真装配必须提供。不提供时只看 isParked（旧测试装配）：true＝parked，false＝busy。
+     * 查不到、会话数认不出都照抛，不当成没停着、也不当成没有会话。
+     */
+    holdForClose?(workflowId: string): Promise<ClosedIssueHold>;
     /** 撤掉这个工作流还开着的挂起提醒（task:…:park:N）；why 进正文「已撤：」和操作记录，by 记是谁撤的（不给是每小时对账）。回实际新撤了几条。 */
     resolveParkAlerts(workflowId: string, why: string, by?: string): Promise<number>;
     /** 库里还没到终态的任务行。旧的测试装配可以不提供，真装配必须提供。 */
@@ -62,6 +80,22 @@ const sameIssue = (
   ref.issueNumber === only.issueNumber &&
   `${ref.repo.owner}/${ref.repo.name}`.toLowerCase() === `${only.repo.owner}/${only.repo.name}`.toLowerCase();
 
+/** 可以沿标准放弃收尾：停着等人，或已在检查点且开着的会话数是 0。 */
+function isAbandonableHold(hold: ClosedIssueHold): boolean {
+  return hold.kind === 'parked' || (hold.kind === 'paused' && hold.openSessions === 0);
+}
+
+/** 会话数必须是认得出的非负整数。空、小数、负数都抛，不当成没有会话。 */
+function normalizeHold(hold: ClosedIssueHold, slug: string): ClosedIssueHold {
+  if (hold.kind === 'parked') return { kind: 'parked' };
+  if (hold.kind === 'busy') return { kind: 'busy' };
+  if (hold.kind === 'paused') {
+    return { kind: 'paused', openSessions: requireOpenRunCount(hold.openSessions, slug) };
+  }
+  const kind = (hold as { kind?: unknown }).kind;
+  throw new Error(`${slug} 停法认不出（${String(kind)}），不动`);
+}
+
 export async function abandonClosedIssueTasks(
   deps: ClosedIssueTaskDeps,
   scope: AbandonClosedIssueScope = {},
@@ -85,15 +119,21 @@ export async function abandonClosedIssueTasks(
       continue;
     }
     const slug = `${ref.repo.owner}/${ref.repo.name}#${ref.issueNumber}`;
+    // 有 holdForClose 就只问它（真装配）。没有时维持旧装配：isParked 真＝停着等人，假＝还在跑。
+    const readHold = async (): Promise<ClosedIssueHold> => {
+      const read = port.holdForClose;
+      if (read) return normalizeHold(await read.call(port, id), slug);
+      return (await port.isParked(id)) ? { kind: 'parked' } : { kind: 'busy' };
+    };
 
-    let parked: boolean;
+    let hold: ClosedIssueHold;
     try {
-      parked = await port.isParked(id);
+      hold = await readHold();
     } catch (err) {
       part.unchecked.push(`${slug} 任务停没停着等人没查成，不动：${errMessage(err)}`);
       continue;
     }
-    if (!parked) continue;
+    if (!isAbandonableHold(hold)) continue;
 
     let state: 'open' | 'closed';
     try {
@@ -103,11 +143,27 @@ export async function abandonClosedIssueTasks(
       continue;
     }
     if (state !== 'closed') continue;
+    // 发信号前再确认：关单和暂停/继续可能交错。再确认读失败留下没查成；已经继续或单又开了就悄悄跳过，不记成功。
+    try {
+      state = await port.issueState(ref.repo, ref.issueNumber);
+    } catch (err) {
+      part.unchecked.push(`${slug} 发放弃前再确认没查成，任务不动：${errMessage(err)}`);
+      continue;
+    }
+    if (state !== 'closed') continue;
+    try {
+      hold = await readHold();
+    } catch (err) {
+      part.unchecked.push(`${slug} 发放弃前再确认没查成，任务不动：${errMessage(err)}`);
+      continue;
+    }
+    if (!isAbandonableHold(hold)) continue;
     try {
       const sent = await port.abandon(id, { by, reason: CLOSED_ISSUE_ABANDON_REASON });
       if (sent !== 'sent') continue;
       part.found += 1;
-      deps.log('info', `${label}：单已关且停下等人，给任务发了放弃信号`, { workflowId: id });
+      const where = hold.kind === 'paused' ? '已在检查点暂停且没有开着的会话' : '停下等人';
+      deps.log('info', `${label}：单已关且${where}，给任务发了放弃信号`, { workflowId: id });
       try {
         const resolved = await port.resolveParkAlerts(id, CLOSED_ISSUE_ABANDON_REASON, by);
         if (resolved > 0) {
