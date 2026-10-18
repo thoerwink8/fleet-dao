@@ -34,6 +34,7 @@ function fake(answers: (string | Error)[]) {
   const out: string[] = [];
   const err: string[] = [];
   let sleeps = 0;
+  const sleepMs: number[] = [];
   const io: Io = {
     gh: (args) => {
       calls.push(args);
@@ -42,17 +43,109 @@ function fake(answers: (string | Error)[]) {
       if (a instanceof Error) throw a;
       return a;
     },
-    sleep: async () => {
+    sleep: async (ms) => {
       sleeps++;
+      sleepMs.push(ms);
     },
     out: (l) => out.push(l),
     err: (l) => err.push(l),
   };
-  return { io, calls, out, err, sleeps: () => sleeps };
+  return { io, calls, out, err, sleeps: () => sleeps, sleepMs };
 }
 
 const pr = (state: string, checks: unknown[] = []) =>
   JSON.stringify({ state, url: 'https://x/pull/7', statusCheckRollup: checks });
+
+describe('wait.mjs pr-head', () => {
+  const NEXT = 'b'.repeat(40);
+  const head = (state: string, headRefOid = SHA, extra = {}) =>
+    JSON.stringify({ state, headRefOid, url: 'https://x/pull/7', ...extra });
+  const argv = ['pr-head', '7', '--after', SHA];
+
+  it('旧头检查红或绿都继续等，新头到达只写一行完整旧新 head，沿用原循环和仓参数', async () => {
+    const f = fake([
+      head('OPEN', SHA, { statusCheckRollup: [{ conclusion: 'FAILURE' }] }),
+      head('OPEN', SHA, { statusCheckRollup: [{ conclusion: 'SUCCESS' }] }),
+      head('OPEN', NEXT),
+    ]);
+    expect(await lib.run([...argv, '-R', 'acme/demo'], f.io)).toBe(0);
+    expect(f.sleeps()).toBe(2);
+    expect(f.sleepMs).toEqual([60_000, 60_000]);
+    expect(f.out).toEqual([`PR #7 头已变化：${SHA} → ${NEXT} https://x/pull/7`]);
+    expect(f.calls).toEqual(
+      Array.from({ length: 3 }, () => [
+        'pr',
+        'view',
+        '7',
+        '-R',
+        'acme/demo',
+        '--json',
+        'state,url,headRefOid',
+      ]),
+    );
+    expect(f.err).toEqual([]);
+  });
+
+  it.each([SHA, NEXT])('合并优先于头变化（%s），明确已经合并', async (oid) => {
+    const f = fake([head('MERGED', oid)]);
+    expect(await lib.run(argv, f.io)).toBe(0);
+    expect(f.sleeps()).toBe(0);
+    expect(f.out).toEqual([`PR #7 已经合并，当前头 ${oid} https://x/pull/7`]);
+  });
+
+  it('关闭未合即使换头也先退出1，不冒充新头可复审', async () => {
+    const f = fake([head('CLOSED', NEXT)]);
+    expect(await lib.run(argv, f.io)).toBe(1);
+    expect(f.sleeps()).toBe(0);
+    expect(f.out).toEqual(['PR #7 被关掉、没合并 https://x/pull/7']);
+  });
+
+  it.each([
+    ['gh 失败', new Error('HTTP 502')],
+    ['坏 JSON', '{'],
+    ['不是对象', '[]'],
+    ['缺 head', JSON.stringify({ state: 'OPEN', url: 'https://x/pull/7' })],
+    ['非法 head', head('OPEN', 'b'.repeat(39))],
+    ['未知 state 即使换头', head('WEIRD', NEXT)],
+    ['缺 state', JSON.stringify({ headRefOid: SHA, url: 'https://x/pull/7' })],
+    ['缺 url', JSON.stringify({ state: 'OPEN', headRefOid: SHA })],
+    ['非法 url', head('OPEN', NEXT, { url: '' })],
+    ['url 非字符串', head('OPEN', NEXT, { url: 7 })],
+    ['url 换行', head('OPEN', NEXT, { url: 'https://x/pull/7\n伪造结果' })],
+    ['合并但 head 坏', head('MERGED', 'not-a-sha')],
+  ])('%s：明确未知退出2，不输出结论', async (_name, answer) => {
+    const f = fake([answer]);
+    expect(await lib.run(argv, f.io)).toBe(2);
+    expect(f.out).toEqual([]);
+    expect(f.err.join('\n')).toContain('出错，当场退出');
+  });
+
+  it('同头等待后读取失败，不当成仍无变化', async () => {
+    const f = fake([head('OPEN'), new Error('permission denied')]);
+    expect(await lib.run(argv, f.io)).toBe(2);
+    expect(f.sleeps()).toBe(1);
+    expect(f.out).toEqual([]);
+    expect(f.err.join('\n')).toContain('permission denied');
+  });
+
+  it.each([
+    ['pr-head', '7'],
+    ['pr-head', '7', '--after'],
+    ['pr-head', '7', '--after', 'abc'],
+    ['pr-head', '7', '--after', 'g'.repeat(40)],
+    ['pr-head', '7', '--after', SHA, '--after', NEXT],
+    ['pr-head', '0', '--after', SHA],
+    ['pr-head', '9007199254740993', '--after', SHA],
+    ['pr-head', '7', '--after', SHA, 'extra'],
+    ['pr', '7', '--after', SHA],
+    ['issue', '7', '--after', SHA],
+    ['main-ci', '--after', SHA],
+  ])('参数拒绝 %j，不调用 gh', async (...args) => {
+    const f = fake([]);
+    expect(await lib.run(args, f.io)).toBe(2);
+    expect(f.calls).toEqual([]);
+  });
+});
 
 describe('wait.mjs pr', () => {
   it('还在跑就接着等，合并了写一行、退出码 0', async () => {
