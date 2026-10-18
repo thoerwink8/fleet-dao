@@ -45,6 +45,7 @@ import {
   AuditResponse,
   ExecuteAlertRepairRequest,
   ExecuteAlertRepairResponse,
+  LinkAlertRepairRequest,
   NotificationsQuery,
   NotificationsResponse,
   ResolveNotificationResponse,
@@ -439,6 +440,13 @@ export const WebRoutes = {
     method: 'POST',
     path: '/notifications/:notificationId/repair',
     request: ExecuteAlertRepairRequest,
+    response: ExecuteAlertRepairResponse,
+  },
+  /** 明确关联已有单（#3100）：可信操作者指定这次告警由哪张现有单处理；服务端核实后保存，不开单、不派工。 */
+  linkAlertRepair: {
+    method: 'POST',
+    path: '/notifications/:notificationId/repair/link',
+    request: LinkAlertRepairRequest,
     response: ExecuteAlertRepairResponse,
   },
   audit: { method: 'GET', path: '/audit', query: AuditQuery, response: AuditResponse },

@@ -275,6 +275,8 @@ export const ALERT_REPAIR_KINDS = [
   'release-restore',
   'release-abort',
   'hand-to-repair',
+  /** 操作者明确指定这次告警由哪张已有的单处理（#3100）：只记绑定，不开单、不派工。 */
+  'link-existing',
 ] as const;
 export const AlertRepairKindSchema = z.enum(ALERT_REPAIR_KINDS);
 export type AlertRepairKind = z.infer<typeof AlertRepairKindSchema>;
@@ -302,7 +304,8 @@ export type AlertRepairAction = z.infer<typeof AlertRepairActionSchema>;
 
 /**
  * executing 接活了还没写结果（中断后不自动重放）；accepted 信号或请求写出去了，还没核实恢复；verified 重读原条件已恢复；
- * failed 确定没做成；unknown 结果未知，禁止盲重试；declined 人选了不动或自由输入，没执行；handed 已开修复单。
+ * failed 确定没做成；unknown 结果未知，禁止盲重试；declined 人选了不动或自由输入，没执行；handed 已开修复单；
+ * linked 操作者明确关联了已有的单（只是绑定，不等于派工受理，更不等于修好）。
  */
 export const ALERT_REPAIR_STATES = [
   'executing',
@@ -312,6 +315,7 @@ export const ALERT_REPAIR_STATES = [
   'unknown',
   'declined',
   'handed',
+  'linked',
 ] as const;
 
 export const AlertRepairRecordSchema = z.object({
@@ -339,6 +343,19 @@ export const AlertRepairRecordSchema = z.object({
       created: z.boolean(),
     })
     .optional(),
+  /**
+   * 明确关联已有单（#3100）：服务端核实过是同仓开着的 issue 才存。reason 固定 operator-explicit（只有可信操作者显式指定才有，
+   * 标题正文相似不算）；stage 是关联当时的现场：linked 只绑定待处理、worker-active 已有进行中的任务、pr-open 已有开放 PR 挂这张单。
+   * 交给修复沿用这条绑定时也带着它，后续每次都重新核实单子。
+   */
+  link: z
+    .object({
+      reason: z.literal('operator-explicit'),
+      stage: z.enum(['linked', 'worker-active', 'pr-open']),
+      taskId: z.string().optional(),
+      prNumber: z.number().int().positive().optional(),
+    })
+    .optional(),
 });
 export type AlertRepairRecord = z.infer<typeof AlertRepairRecordSchema>;
 
@@ -348,6 +365,8 @@ export const AlertRepairViewSchema = z.object({
   /** 没算出动作的原因（条件已变、没接上、读不到），一条一句。 */
   problems: z.array(z.string()),
   last: AlertRepairRecordSchema.optional(),
+  /** 能明确关联已有单时的服务端版本和仓；不能（没接上、已有在途操作、已绑定）没有这一项。 */
+  link: z.object({ actionId: z.string(), repo: AlertRepoSchema }).optional(),
 });
 export type AlertRepairView = z.infer<typeof AlertRepairViewSchema>;
 
@@ -363,6 +382,16 @@ export const ExecuteAlertRepairRequest = z
   .refine((b) => b.optionId === undefined || b.text === undefined, {
     message: '点一个选项或自己输入一段话，二选一',
   });
+/** 可信操作者把这次告警明确关联到一张已有的单：只收受管仓 + 单号 + 服务端给的版本 + incident + 幂等身份；多一个字段（比如伪造的 actor）就 400。 */
+export const LinkAlertRepairRequest = z
+  .object({
+    actionId: z.string().min(1).max(200),
+    incident: z.string().min(1).max(80),
+    requestId: z.string().uuid(),
+    repo: AlertRepoSchema,
+    issueNumber: z.number().int().positive(),
+  })
+  .strict();
 export const ExecuteAlertRepairResponse = z.object({
   ok: z.literal(true),
   repair: AlertRepairRecordSchema,

@@ -15,6 +15,11 @@
 // - 状态落在设置表 alert.repair:<提醒编号>（版本号做 CAS：先写 executing 再动手，动手后写结果；中断后不自动重放）。
 //   设置页只列 SETTING_SCHEMAS 里的键，这条不会出现在设置页。每次写都带操作记录。
 // - idle-running 和原检测器共用阈值（包括自测预算），并绑定任务、仓和工作流 run；仅更新了时间不等于恢复。
+// - 明确关联已有单（#3100，POST /api/notifications/:id/repair/link）：可信登录操作者指定这次告警由哪张现有单处理。只收受管仓 + 单号 +
+//   服务端关联版本 + incident + requestId；服务端现读单子必须是 fleet-dao 里开着的 issue，并记下当时的任务 / 开放 PR 事实，
+//   写 linked（只是绑定：不开单、不派工、不记 verified）。读不到、非 issue、错仓、已关闭一律拒绝，不回退成开单。
+//   交给修复沿用这条绑定：每次先重新核实，单子失效就标 failed 不开新单；已有进行中的任务 / 开放 PR 不再派工，没有才经原准入派一次。
+//   和开单抢同一事故走同一个设置版本 CAS，输的一方 409。标题正文相似不自动认同根因。
 
 import { createHash } from 'node:crypto';
 import { checkIssueBody, domainLabel, issueBodyTooLong, natureLabel } from '@fleet-dao/conventions';
@@ -29,10 +34,12 @@ import {
   DecisionOptionsSchema,
   ExecuteAlertRepairRequest,
   ExecuteAlertRepairResponse,
+  LinkAlertRepairRequest,
   RELEASE_RECOVER_ACTION,
   RELEASE_RECOVER_WORD,
   type ReleaseRecover,
   type ReleaseRecoverKind,
+  type Task,
   WebRoutes,
 } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -46,6 +53,7 @@ import {
   type Actor,
   type AuditVia,
   type NotificationRecord,
+  type PullRequestRecord,
   type Store,
   WorkflowGoneError,
   WorkflowTargetNotFoundError,
@@ -86,6 +94,8 @@ export interface AlertRepairPort {
   idleTask?(taskId: string): Promise<IdleTaskFact | null>;
   /** 开单（引擎机器人，按 key 幂等）。 */
   openIssue?: RequestIssuePort['openIssue'];
+  /** 现读一张单开没开着（明确关联已有单用；是 PR 抛 NOT_AN_ISSUE，404 抛 NOT_FOUND，没读到抛错）。 */
+  readIssueState?: RequestIssuePort['readIssueState'];
   dispatchIssue?(
     repo: { owner: string; name: string },
     issueNumber: number,
@@ -95,9 +105,12 @@ export interface AlertRepairPort {
 
 export function pgAlertRepair(
   db: Parameters<typeof listRunningEngineTasks>[0],
-  issues: Pick<RequestIssuePort, 'openIssue'> | undefined,
+  issues:
+    | (Pick<RequestIssuePort, 'openIssue'> & Partial<Pick<RequestIssuePort, 'readIssueState'>>)
+    | undefined,
   dispatchIssue?: AlertRepairPort['dispatchIssue'],
 ): AlertRepairPort {
+  const readState = issues?.readIssueState;
   return {
     async idleTask(taskId) {
       const row = (await listRunningEngineTasks(db)).find((r) => r.taskId === taskId);
@@ -110,6 +123,7 @@ export function pgAlertRepair(
       };
     },
     ...(issues ? { openIssue: (input) => issues.openIssue(input) } : {}),
+    ...(readState ? { readIssueState: (input) => readState.call(issues, input) } : {}),
     ...(dispatchIssue ? { dispatchIssue } : {}),
   };
 }
@@ -166,12 +180,15 @@ interface RunContext {
   user: { displayName: string };
   at: string;
   priorIssue?: AlertRepairRecord['issue'];
+  /** 上一条记录里操作者明确关联的绑定：有它就不开新单，沿用前每次重新核实。 */
+  priorLink?: AlertRepairRecord['link'];
 }
 interface Outcome {
-  state: 'accepted' | 'failed' | 'unknown' | 'handed';
+  state: 'accepted' | 'failed' | 'unknown' | 'handed' | 'linked';
   text: string;
   baseline?: string;
   issue?: NonNullable<AlertRepairRecord['issue']>;
+  link?: NonNullable<AlertRepairRecord['link']>;
 }
 type Planned = AlertRepairAction & { run: (ctx: RunContext) => Promise<Outcome> };
 interface Plan {
@@ -521,6 +538,112 @@ export function repairIssueBody(n: Pick<NotificationRecord, 'id' | 'title' | 'bo
   ].join('\n');
 }
 
+// —— 明确关联已有单（#3100）——
+
+const sameRepo = (a: { owner: string; name: string }, b: { owner: string; name: string }): boolean =>
+  a.owner.toLowerCase() === b.owner.toLowerCase() && a.name.toLowerCase() === b.name.toLowerCase();
+
+const issueRef = (repo: { owner: string; name: string }, number: number): string =>
+  `${repo.owner}/${repo.name}#${number}`;
+
+/**
+ * 现读核实关联目标：必须是受管 fleet-dao 里开着的 issue（PR、错仓、已关闭、404、没权限、读不到都抛 ApiError），
+ * 并记下此刻的任务 / 开放 PR 事实。调用方遇到抛错只能拒绝或标失效，不能回退成开单。
+ */
+async function inspectLinkTarget(
+  deps: Deps,
+  target: { repo: { owner: string; name: string }; number: number },
+): Promise<{
+  issue: NonNullable<AlertRepairRecord['issue']>;
+  link: NonNullable<AlertRepairRecord['link']>;
+}> {
+  const read = deps.alertRepair?.readIssueState;
+  const self = await findSelfRepo(deps.store);
+  if (!read || !self)
+    throw new ApiError(
+      409,
+      'link_unavailable',
+      '这台后端没接上 GitHub 读单，或受管的仓里没有 fleet-dao，不能关联已有单',
+    );
+  if (!sameRepo(target.repo, self))
+    throw new ApiError(409, 'link_wrong_repo', `只能关联 ${self.owner}/${self.name} 里的单，不是这个仓`);
+  const repo = { owner: self.owner, name: self.name };
+  let state: Awaited<ReturnType<typeof read>>;
+  try {
+    state = await within(read({ repo, issueNumber: target.number }), '读关联的单');
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code === 'NOT_AN_ISSUE')
+      throw new ApiError(409, 'link_not_issue', `${issueRef(repo, target.number)} 是 PR，不是 issue`);
+    if (code === 'NOT_FOUND')
+      throw new ApiError(404, 'link_issue_not_found', `${issueRef(repo, target.number)} 不存在`);
+    if (code === 'FORBIDDEN' || code === 'AUTH_FAILED')
+      throw new ApiError(502, 'link_issue_forbidden', `机器人没有权限读 ${issueRef(repo, target.number)}`);
+    throw new ApiError(
+      502,
+      'link_issue_unreadable',
+      `读 ${issueRef(repo, target.number)} 没成：${clip(errMessage(err), 200)}`,
+    );
+  }
+  if (state.state !== 'open')
+    throw new ApiError(409, 'link_issue_closed', `${issueRef(repo, target.number)} 已经关闭，不能当作在处理`);
+  let facts: [Task | null, PullRequestRecord[]];
+  try {
+    facts = await Promise.all([
+      deps.store.findTaskByIssue(self.id, target.number),
+      deps.store.listPullRequests({ state: 'open', limit: 200 }),
+    ]);
+  } catch (err) {
+    throw new ApiError(
+      502,
+      'link_facts_unreadable',
+      `读 ${issueRef(repo, target.number)} 的任务 / PR 事实没成：${clip(errMessage(err), 200)}`,
+    );
+  }
+  const [task, prs] = facts;
+  const worker = task && !isTaskFinished(task) && task.state !== 'stalled' ? task : undefined;
+  const pr = prs.find((p) => p.repoId === self.id && p.issueRefs?.includes(target.number));
+  return {
+    issue: {
+      repo,
+      number: target.number,
+      url: `https://github.com/${repo.owner}/${repo.name}/issues/${target.number}`,
+      created: false,
+    },
+    link: {
+      reason: 'operator-explicit',
+      stage: pr ? 'pr-open' : worker ? 'worker-active' : 'linked',
+      ...(worker ? { taskId: worker.id } : {}),
+      ...(pr ? { prNumber: pr.number } : {}),
+    },
+  };
+}
+
+/** 关联版本：事故、受管仓、同事故现有修复状态一变就变，旧编号点不动。 */
+function linkVersion(
+  incident: string,
+  self: { owner: string; name: string },
+  last?: AlertRepairRecord,
+): string {
+  return `link-existing:${digest(incident, self.owner, self.name, last?.state, last?.requestId)}`;
+}
+
+/** 同事故现有记录允许再关联吗：没有、或确定没做成且没绑过单的才行；其余（在途 / 已受理 / 已绑单 / 已开单）一律拒绝，不覆盖。 */
+function linkBlocked(last: AlertRepairRecord | undefined): ApiError | undefined {
+  if (!last) return undefined;
+  if (last.state === 'executing' || last.state === 'unknown')
+    return new ApiError(409, 'repair_in_flight', '上一次还在执行或结果未知，不自动覆盖：请先核实现场');
+  if (last.state === 'accepted')
+    return new ApiError(409, 'repair_pending_verify', '上一次已经受理，还没核实恢复：不覆盖');
+  if (last.issue || last.state === 'linked' || last.state === 'handed' || last.state === 'verified')
+    return new ApiError(
+      409,
+      last.state === 'linked' ? 'already_linked' : 'link_has_issue',
+      '这次事故已经绑定或开过修复单，不改绑：先核实原单',
+    );
+  return undefined;
+}
+
 function runHand(incident: string) {
   return async (ctx: RunContext): Promise<Outcome> => {
     const { deps, n } = ctx;
@@ -536,6 +659,29 @@ function runHand(incident: string) {
     if (tooLong) return { state: 'failed', text: tooLong };
     try {
       const repo = { owner: self.owner, name: self.name };
+      let link = ctx.priorLink;
+      if (ctx.priorIssue && link) {
+        // 操作者明确关联过：每次重新核实；失效就停，不回退成开新单，也不对失效的单派工
+        const ref = issueRef(ctx.priorIssue.repo, ctx.priorIssue.number);
+        try {
+          link = (await inspectLinkTarget(deps, { repo: ctx.priorIssue.repo, number: ctx.priorIssue.number }))
+            .link;
+        } catch (err) {
+          return {
+            state: 'failed',
+            issue: ctx.priorIssue,
+            link,
+            text: `关联的单 ${ref} 已失效：${clip(errMessage(err), 300)}；没开新单、没派工`,
+          };
+        }
+        if (link.stage !== 'linked')
+          return {
+            state: 'linked',
+            issue: ctx.priorIssue,
+            link,
+            text: `关联的单 ${ref} 已有${link.stage === 'pr-open' ? `开放 PR #${link.prNumber}` : '进行中的任务'}在处理，不再派工`,
+          };
+      }
       const issue =
         ctx.priorIssue ??
         (await open({
@@ -551,6 +697,7 @@ function runHand(incident: string) {
           return {
             state: 'failed',
             issue: linked,
+            ...(link ? { link } : {}),
             text: `修复单 #${issue.number} 已开，但派工入口没接上，没有派工`,
           };
         const operator = `${ctx.actor.id} ${ctx.user.displayName}`
@@ -561,12 +708,14 @@ function runHand(incident: string) {
         return {
           state: result.ok ? 'handed' : 'failed',
           issue: linked,
+          ...(link ? { link } : {}),
           text: `修复单 #${issue.number}：${result.ok ? '已由 dispatch-issue 接手' : '派工失败，单保留'}：${clip(result.text, 350)}`,
         };
       } catch (err) {
         return {
           state: 'unknown',
           issue: linked,
+          ...(link ? { link } : {}),
           text: `修复单 #${issue.number} 已开，派工回执未知：${clip(errMessage(err), 350)}，不能盲重试`,
         };
       }
@@ -682,6 +831,7 @@ export async function verifyRecord(
         : { ok: true, text: '同一任务和工作流 run 的原检测条件已恢复' };
     }
     if (rec.kind === 'hand-to-repair') return { ok: null, text: '已交给修复单，等修好后看门狗撤卡' };
+    if (rec.kind === 'link-existing') return { ok: null, text: '已关联现有单，等修好后看门狗撤卡' };
     const snap = await readReleaseSnap(deps, memo);
     if (!snap.ok) return { ok: null, text: `核实不了：${snap.why}` };
     if (snap.pending) return { ok: false, text: '请求还没被法国接走，没修好' };
@@ -747,7 +897,20 @@ function writeState(
       actor: ctx.actor,
       action: 'alert.repair',
       target: `notification:${n.id}`,
-      after: { actionId: rec.actionId, kind: rec.kind, state: rec.state, requestId: rec.requestId },
+      after: {
+        actionId: rec.actionId,
+        kind: rec.kind,
+        state: rec.state,
+        requestId: rec.requestId,
+        ...(rec.kind === 'link-existing' && rec.issue && rec.link
+          ? {
+              incident: rec.incident,
+              issue: `${rec.issue.repo.owner}/${rec.issue.repo.name}#${rec.issue.number}`,
+              linkReason: rec.link.reason,
+              linkStage: rec.link.stage,
+            }
+          : {}),
+      },
       reason: rec.text,
       via: ctx.via,
       ok: true,
@@ -851,7 +1014,18 @@ export async function alertRepairViews(
       const actions = plan.actions
         .filter(() => !(last && BLOCKING.includes(last.state)))
         .map(({ run: _run, ...a }) => a);
-      out.set(n.id, { incident, actions, problems: plan.problems, ...(last ? { last } : {}) });
+      const self = deps.alertRepair?.readIssueState ? await findSelfRepo(deps.store) : undefined;
+      const link =
+        self && !linkBlocked(last)
+          ? { actionId: linkVersion(incident, self, last), repo: { owner: self.owner, name: self.name } }
+          : undefined;
+      out.set(n.id, {
+        incident,
+        actions,
+        problems: plan.problems,
+        ...(last ? { last } : {}),
+        ...(link ? { link } : {}),
+      });
     }),
   );
   return out;
@@ -981,11 +1155,20 @@ export function registerAlertRepairRoutes(
     } else if (body.optionId !== undefined || body.text !== undefined) {
       throw new ApiError(400, 'choice_not_offered', '这个动作不带选项，不用选');
     }
+    // 同事故操作者明确关联过已有单：沿用绑定（claim 也带着，中断后绑定不丢）
+    const bound =
+      prior?.incident === incident &&
+      (prior.kind === 'hand-to-repair' || prior.kind === 'link-existing') &&
+      prior.issue &&
+      prior.link
+        ? { issue: prior.issue, link: prior.link }
+        : undefined;
     const claim: AlertRepairRecord = {
       ...base,
       state: 'executing',
       text: '已接活，正在执行（中断后不会自动重放）',
       ...(body.optionId ? { optionId: body.optionId } : {}),
+      ...(bound ?? {}),
     };
     await write(claim, version);
     const outcome = await action
@@ -996,8 +1179,10 @@ export function registerAlertRepairRoutes(
         via,
         user: c.get('user'),
         at: claim.at,
-        ...(prior?.incident === incident && prior.kind === 'hand-to-repair' && prior.issue
-          ? { priorIssue: prior.issue }
+        ...(prior?.incident === incident &&
+        (prior.kind === 'hand-to-repair' || prior.kind === 'link-existing') &&
+        prior.issue
+          ? { priorIssue: prior.issue, ...(prior.link ? { priorLink: prior.link } : {}) }
           : {}),
       })
       .catch((err: unknown): Outcome => {
@@ -1018,6 +1203,7 @@ export function registerAlertRepairRoutes(
       at: deps.now().toISOString(),
       ...(outcome.baseline ? { baseline: outcome.baseline } : {}),
       ...(outcome.issue ? { issue: outcome.issue } : {}),
+      ...(outcome.link ? { link: outcome.link } : {}),
     };
     if (outcome.state === 'accepted') {
       const check = await verifyRecord(deps, n, rec);
@@ -1031,6 +1217,88 @@ export function registerAlertRepairRoutes(
     if (settled === 'conflict') {
       deps.log.error('修复动作已执行，结果没写上（状态被别处改过）', { notification: id, action: action.id });
     }
+    return reply(c, ExecuteAlertRepairResponse, { ok: true, repair: rec, replayed: false });
+  });
+
+  // 明确关联已有单：只记绑定，不开单、不派工；操作者身份只认登录会话（请求里没有 actor 字段，多写就 400）
+  app.post(WebRoutes.linkAlertRepair.path, async (c) => {
+    const id = c.req.param('notificationId');
+    const body = await readJson(c, LinkAlertRepairRequest);
+    const n = await findNotification(deps.store, id);
+    if (!n) throw new ApiError(404, 'notification_not_found', '没有这条通知');
+    const incident = incidentOf(n);
+    if (body.incident !== incident) {
+      throw new ApiError(
+        409,
+        'incident_mismatch',
+        '这不是这条提醒现在的这次事故（提醒已重开或页面太旧）：刷新后再点',
+      );
+    }
+    const actor = actorOf(c);
+    const via = c.get('via');
+    const { rec: prior, version } = await readState(deps.store, id);
+    if (prior && prior.incident !== incident && UNSETTLED.includes(prior.state)) {
+      throw new ApiError(
+        409,
+        'repair_prior_incident_pending',
+        '上一代事故的操作仍在执行、结果未知或待核验，不能覆盖后重发：先核实原操作',
+      );
+    }
+    if (prior && prior.requestId === body.requestId) {
+      const same =
+        prior.incident === incident &&
+        prior.kind === 'link-existing' &&
+        prior.actionId === body.actionId &&
+        prior.issue?.number === body.issueNumber &&
+        sameRepo(prior.issue.repo, body.repo);
+      if (!same)
+        throw new ApiError(409, 'request_reused', '这个请求编号已经用在另一个动作或另一张单上，换个新编号');
+      return reply(c, ExecuteAlertRepairResponse, { ok: true, repair: prior, replayed: true });
+    }
+    if (!isRepairable(n))
+      throw new ApiError(409, 'alert_not_repairable', '这条不是看门狗的卡住报警，没有可点的修复');
+    if (n.resolvedAt !== undefined)
+      throw new ApiError(409, 'alert_resolved', '这条提醒已经撤了，没动任何东西');
+    const last = prior?.incident === incident ? prior : undefined;
+    const blocked = linkBlocked(last);
+    if (blocked) throw blocked;
+    const self = await findSelfRepo(deps.store);
+    if (!deps.alertRepair?.readIssueState || !self)
+      throw new ApiError(
+        409,
+        'link_unavailable',
+        '这台后端没接上 GitHub 读单，或受管的仓里没有 fleet-dao，不能关联已有单',
+      );
+    if (body.actionId !== linkVersion(incident, self, last)) {
+      throw new ApiError(
+        409,
+        'action_expired',
+        '这个关联版本已经过期（这次事故的修复状态变了，或不是服务端给的）：刷新后再关联',
+      );
+    }
+    const checked = await inspectLinkTarget(deps, { repo: body.repo, number: body.issueNumber });
+    const ref = issueRef(checked.issue.repo, checked.issue.number);
+    const stageWord = {
+      linked: '已关联，待处理',
+      'worker-active': '已有进行中的任务',
+      'pr-open': `已有开放 PR #${checked.link.prNumber}`,
+    }[checked.link.stage];
+    const rec: AlertRepairRecord = {
+      incident,
+      actionId: body.actionId,
+      kind: 'link-existing',
+      target: { repo: checked.issue.repo, issueNumber: checked.issue.number },
+      requestId: body.requestId,
+      at: deps.now().toISOString(),
+      by: actor.id,
+      state: 'linked',
+      text: `已明确关联 ${ref}（${stageWord}）：只绑定，没开单、没派工`,
+      issue: checked.issue,
+      link: checked.link,
+    };
+    const settled = await writeState(deps.store, { actor, via }, n, rec, version, true);
+    if (settled === 'conflict')
+      throw new ApiError(409, 'repair_conflict', '这条提醒的修复状态刚被别处改过：刷新后再看');
     return reply(c, ExecuteAlertRepairResponse, { ok: true, repair: rec, replayed: false });
   });
 }
