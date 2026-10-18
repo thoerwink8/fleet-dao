@@ -133,6 +133,10 @@ export interface WorkDeps {
     ) => { ok: true; pid: number; how: string } | { ok: false; why: string };
     git: Git;
     env: NodeJS.ProcessEnv;
+    /** 入口动态加载 unattended.mjs 的同一身份选择契约，不在零安装区复制优先级。 */
+    selectSessionId: (
+      env: NodeJS.ProcessEnv,
+    ) => { ok: true; id: string } | { ok: false; missing: boolean; why: string };
     now: () => Date;
     runsRoot: string;
     /** 跑这条命令的检出 */
@@ -418,6 +422,22 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
     );
   }
   const resume = phase === 'lost' && !a.again;
+  // 续跑沿用原 spec，不把另一会话或旧的无归属记录偷偷重绑。
+  let dispatcher: string | null = null;
+  if (!resume) {
+    const session = r.selectSessionId(r.env);
+    if (!session.ok && !session.missing) throw new Error(session.why);
+    const claude = r.env.CLAUDE_CODE_SESSION_ID;
+    const codex = r.env.CODEX_THREAD_ID;
+    if (claude && codex && claude !== codex)
+      throw new Error('Claude 会话和 Codex thread 身份冲突，不登记另一会话的归属、不派工');
+    // CODEX_SESSION_ID 是 root-session，不能据此承诺匹配 Stop 的 thread session_id。
+    if (session.ok && (claude || codex)) dispatcher = session.id;
+    else
+      deps.out(
+        '没有可验证的 Claude session / Codex thread 归属（Codex 需真实 CODEX_THREAD_ID，CODEX_SESSION_ID 不代替 thread）；结果仍保留，用 pnpm work runs 手工读取。',
+      );
+  }
   // 「看护进程没了」叫醒过一次；接着续就要能再叫醒到终态
   if (resume) rmSync(files.reported, { force: true });
   if (!resume) {
@@ -454,7 +474,7 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
       repoRoot: r.repoRoot,
       worktree,
       branch,
-      dispatcher: r.env.CLAUDE_CODE_SESSION_ID || null,
+      dispatcher,
       reclaude,
       env,
       createdAt: r.now().toISOString(),
@@ -474,8 +494,8 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
   deps.out(`状态 ${files.state}；做完写 ${files.result}。${cap.text}`);
   deps.out(
     spec?.dispatcher
-      ? '到终态（做完、没做成、看护进程没了）收尾钩子 work-watch.mjs 叫醒本会话；中间的心跳、重试不叫。看全部：pnpm work runs'
-      : '没读到 CLAUDE_CODE_SESSION_ID（不是在 Claude Code 里跑的）：到终态没有会话会被叫醒，用 pnpm work runs 看',
+      ? '已关联原派工会话：无人值守开启时，同步 Stop 消费一次终态；Codex 不会因后台完成主动开启新轮，Claude 原生 asyncRewake 能力另计。续跑不改变归属。看全部：pnpm work runs'
+      : '记录 dispatcher=null：没有会话会被主动叫醒，也不自动补绑旧记录；结果仍保留，用 pnpm work runs 看',
   );
   return 0;
 }
