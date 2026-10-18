@@ -22,6 +22,7 @@ import {
   startReleaseWaitWatch,
   withStatementTimeout,
 } from '@fleet-dao/store';
+import { pgAlertRepair } from './alert-repair.ts';
 import { buildApps } from './app.ts';
 import { pgCarpoolReconcile } from './carpool-reconcile-view.ts';
 import { createChangeHub, startPgChangeFeed } from './changes.ts';
@@ -226,6 +227,8 @@ async function assemble(): Promise<{
       },
     },
     alerts: pgCockpitAlerts(db),
+    // 看门狗提醒的受控修复（#3033）：任务现读读库，开修复单用「引擎」机器人（凭据没读到就没有，「交给修复」不出现）
+    alertRepair: pgAlertRepair(db, github.requestIssues),
     // 提醒谁在处理（design 15.3）：认领、PR 镜像、静默都在同一个库；发布记录只在正式环境有
     alertWork: pgAlertWork(db, production ? () => deployFacts(readDeployLagInput()) : () => null),
     // 路由两层每一层现在活着吗（#574）：和引擎选路读同一份（路由两层那两张表 + 探针、额度、禁令现算）

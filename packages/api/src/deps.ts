@@ -1,6 +1,7 @@
 import type { AppRole, InstallationListedRepo } from '@fleet-dao/github';
 import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
+import type { AlertRepairPort } from './alert-repair.ts';
 import type { CarpoolReconcilePort } from './carpool-reconcile-view.ts';
 import type { CiPolicyBridge } from './ci-policy-bridge.ts';
 import type { CliToolsPort } from './cli-versions.ts';
@@ -80,6 +81,11 @@ export interface Deps {
    * 另写一句「谁在处理没接上」，不拿「没人在修」顶。
    */
   alertWork?: AlertWorkPort | undefined;
+  /**
+   * 看门狗提醒的受控修复（#3033，alert-repair.ts）：任务现读（idle-running 的列表动作和核验）、开修复单。
+   * 没给（开发、内存版）的对应动作不出现，提醒的 repair.problems 写没接上，不假装能修。
+   */
+  alertRepair?: AlertRepairPort | undefined;
   /**
    * 路由两层每一层现在活着吗（#574，routing-layers.ts）：驾驶舱「路由」页现算用。没给（开发、内存版没有那两张表）的接口照样回，
    * 另写一句 unavailable，不拿空列表冒充「都没配」。

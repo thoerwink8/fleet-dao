@@ -33,3 +33,4 @@
 - 要驾驶舱实时看到的新表：登记 `packages/shared/src/realtime.ts` 的 `REALTIME_TABLES`，触发器在 db 的迁移里。
 
 - 通知答案先存不可变 `answer.id`，执行前 `claimDecision` 接活，结算携 `answerId` 和 `claimId`。executing/unknown 不超时接管、不覆盖，现场核验前保留待核；确定失败才能同代次重试。历史无代次只能读，不能自动接活。
+- 看门狗提醒的受控修复状态（#3033）不加表、不改 Store 接口：存在设置表 `alert.repair:<提醒编号>`，靠 `putSetting` 的 `expectedVersion` 做 CAS（先写 executing 再动手）；`listSettings` 里这类键不在 `SETTING_SCHEMAS`，设置页不显示。读写在 `packages/api/src/alert-repair.ts`。
