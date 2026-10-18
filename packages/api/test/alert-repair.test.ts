@@ -14,11 +14,20 @@ import { join } from 'node:path';
 import { checkIssueBody } from '@fleet-dao/conventions';
 import { notifications, registerScheduledJobs, repos, runs, tasks } from '@fleet-dao/db';
 import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import type { AlertRepairRecord } from '@fleet-dao/shared';
-import { NotificationsResponse, TASK_SIGNAL_NAMES, WEB_API_PREFIX } from '@fleet-dao/shared';
+import type { AlertRepairLink, AlertRepairRecord } from '@fleet-dao/shared';
+import {
+  ALERT_REPAIR_KINDS,
+  ALERT_REPAIR_STATES,
+  AlertRepairViewSchema,
+  LinkAlertRepairResponse,
+  NotificationsResponse,
+  TASK_SIGNAL_NAMES,
+  WEB_API_PREFIX,
+} from '@fleet-dao/shared';
 import { createPgStore, devFixtures, IDS, type MemoryData } from '@fleet-dao/store';
 import { and, eq, isNull } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { runWatchdogJob, WATCHDOG_JOB, type WatchdogDeps } from '../../engine/src/jobs/watchdog.ts';
 import { watchdogJob } from '../../engine/src/real/watchdog.ts';
 import {
@@ -1021,6 +1030,57 @@ interface IssueRead {
 const OPEN_ISSUE: IssueRead = { state: 'open', stateReason: null };
 const ghError = (code: string) => Object.assign(new Error(`GitHub ${code}`), { code });
 
+// 已有消费者的线上契约（#3033 上线时的样子，#3034 / PR3083 的通知卡按它查 PHASE_META[state].tone、KIND_LABEL[kind]）：
+// 枚举照抄、对象严格（多一个字段也算不兼容）。关联不能让 last / repair 里冒出新的 kind / state / 字段。
+const OLD_STATES = ['executing', 'accepted', 'verified', 'failed', 'unknown', 'declined', 'handed'] as const;
+const OLD_KINDS = [
+  'task-recover',
+  'release-retry',
+  'release-restore',
+  'release-abort',
+  'hand-to-repair',
+] as const;
+const OldRecord = z.strictObject({
+  incident: z.string(),
+  actionId: z.string(),
+  kind: z.enum(OLD_KINDS),
+  requestId: z.string(),
+  state: z.enum(OLD_STATES),
+  text: z.string(),
+  at: z.string(),
+  by: z.string(),
+  optionId: z.string().optional(),
+  target: z.record(z.string(), z.unknown()).optional(),
+  baseline: z.string().optional(),
+  check: z.unknown().optional(),
+  issue: z
+    .strictObject({
+      repo: z.strictObject({ owner: z.string(), name: z.string() }),
+      number: z.number(),
+      url: z.string(),
+      created: z.boolean(),
+    })
+    .optional(),
+});
+const PHASE_META: Record<string, { tone: string }> = Object.fromEntries(
+  OLD_STATES.map((s) => [s, { tone: s }]),
+);
+const KIND_LABEL: Record<string, string> = Object.fromEntries(OLD_KINDS.map((k) => [k, k]));
+/** 旧消费者读一条修复记录：先过旧 schema，再做和通知卡同一个解引用（新枚举在这里会抛 reading 'tone'）。 */
+function oldConsumer(raw: unknown): string {
+  const rec = OldRecord.parse(raw);
+  const loose = raw as { state: string; kind: string };
+  const tone = (PHASE_META[loose.state] as { tone: string }).tone;
+  const label = KIND_LABEL[loose.kind];
+  if (label === undefined) throw new Error(`旧消费者认不出 kind ${loose.kind}`);
+  return `${label}/${tone}/${rec.state}`;
+}
+/** 视图过新契约，并且 last（有的话）过旧消费者。 */
+function expectOldSafe(view: unknown): void {
+  const parsed = AlertRepairViewSchema.parse(view);
+  if (parsed.last) oldConsumer((view as { last: unknown }).last);
+}
+
 async function linkWorld() {
   const base = data();
   const h = await pgHarness(t, {
@@ -1071,14 +1131,15 @@ type LinkWorld = Awaited<ReturnType<typeof linkWorld>>;
 async function hourlyView(w: LinkWorld) {
   const v = (await list(w.h, w.s)).items.find((n) => n.id === HOURLY_ID)?.repair;
   if (!v) throw new Error('没有 repair 视图');
+  expectOldSafe(v);
   return v;
 }
 type HourlyView = Awaited<ReturnType<typeof hourlyView>>;
 
 function linkBody(v: HourlyView, over: Record<string, unknown> = {}) {
-  if (!v.link) throw new Error('视图没有给关联版本');
+  if (!v.linkAction) throw new Error('视图没有给关联版本');
   return {
-    actionId: v.link.actionId,
+    actionId: v.linkAction.actionId,
     incident: v.incident,
     requestId: uuid(),
     repo: SELF_REPO,
@@ -1087,9 +1148,28 @@ function linkBody(v: HourlyView, over: Record<string, unknown> = {}) {
   };
 }
 
+/** 关联接口的回包（成功只带 linked，不带 repair；409 带 error）。 */
+interface LinkJson {
+  replayed?: boolean;
+  linked: AlertRepairLink;
+  repair?: unknown;
+  error: { code: string; message: string };
+}
 async function postLink(w: LinkWorld, body: Record<string, unknown>) {
   const res = await w.h.cockpit.request(linkPath, write('POST', w.s, body));
-  return { status: res.status, json: (await res.json()) as RepairJson };
+  const json = (await res.json()) as LinkJson;
+  if (res.status === 200) LinkAlertRepairResponse.parse(json);
+  return { status: res.status, json };
+}
+
+/** 重建 deps（全新的 Store 实例读同一个库）后列表视图：过新契约 + 旧消费者。 */
+async function rebuiltView(w: LinkWorld) {
+  const fresh = createPgStore(t.db, { now: () => new Date(w.h.clock.now) });
+  const items = (await fresh.listNotifications({ status: 'all', limit: 200 })).items;
+  const view = (await alertRepairViews({ ...w.h.deps, store: fresh }, items)).get(HOURLY_ID);
+  if (!view) throw new Error('重建后没有 repair 视图');
+  expectOldSafe(JSON.parse(JSON.stringify(view)));
+  return { view, open: items.find((n) => n.id === HOURLY_ID)?.resolvedAt === undefined };
 }
 
 /** 点过的「交给修复」编号：在途 / 已开单后列表不再给按钮，再点用旧编号，验证服务端自己挡住。 */
@@ -1099,7 +1179,9 @@ async function clickHand(w: LinkWorld) {
   const hand = v.actions.find((a) => a.kind === 'hand-to-repair') ?? { id: seenHand.get(w) };
   if (!hand.id) throw new Error('没有交给修复');
   seenHand.set(w, hand.id);
-  return post(w.h, w.s, HOURLY_ID, { actionId: hand.id, incident: v.incident, requestId: uuid() });
+  const res = await post(w.h, w.s, HOURLY_ID, { actionId: hand.id, incident: v.incident, requestId: uuid() });
+  if (res.status === 200) oldConsumer(res.json.repair);
+  return res;
 }
 
 const hourlyRow = async (h: AnyHarness) =>
@@ -1113,11 +1195,22 @@ async function expectUntouched(w: LinkWorld) {
   expect(await repairAudits(w.h)).toEqual([]);
 }
 
+describe('明确关联已有单：线上契约不加枚举', () => {
+  it('修复记录的 kind / state 枚举和 #3033 上线时一样：关联不占枚举，只走可选的 linked / linkAction', () => {
+    expect([...ALERT_REPAIR_STATES]).toEqual([...OLD_STATES]);
+    expect([...ALERT_REPAIR_KINDS]).toEqual([...OLD_KINDS]);
+    // 旧消费者对新枚举确实会崩（证明上面这条守的是真问题）
+    expect(() => oldConsumer({ state: 'linked', kind: 'link-existing' })).toThrow();
+    expect(PHASE_META.linked).toBeUndefined();
+  });
+});
+
 describe('明确关联已有单：端点校验与审计', () => {
-  it('成功只记 linked；非 issue / 错仓 / 已关闭 / 404 / 无读权限 / 网络错误 / 事实读不到全部拒绝，零开单零派工零记录，不回退成开单', async () => {
+  it('成功只回 linked 元数据（不是一次修复）；非 issue / 错仓 / 已关闭 / 404 / 无读权限 / 网络错误 / 事实读不到全部拒绝，零开单零派工零记录，不回退成开单', async () => {
     const w = await linkWorld();
     const v = await hourlyView(w);
-    expect(v.link).toMatchObject({ repo: SELF_REPO });
+    expect(v.linkAction).toMatchObject({ repo: SELF_REPO });
+    expect(v.linked).toBeUndefined();
     expect(v.actions.map((a) => a.kind)).toEqual(['hand-to-repair']);
 
     const rejected: [string, IssueRead | Error, Record<string, unknown>, number, string][] = [
@@ -1155,24 +1248,29 @@ describe('明确关联已有单：端点校验与审计', () => {
     expect(ok.status).toBe(200);
     expect(ok.json).toMatchObject({
       replayed: false,
-      repair: {
-        state: 'linked',
-        kind: 'link-existing',
-        by: IDS.founderA,
+      linked: {
         incident: v.incident,
-        actionId: v.link?.actionId,
-        target: { repo: SELF_REPO, issueNumber: EXISTING },
+        actionId: v.linkAction?.actionId,
+        by: IDS.founderA,
         issue: {
           repo: SELF_REPO,
           number: EXISTING,
-          created: false,
           url: `https://github.com/thoerwink8/fleet-dao/issues/${EXISTING}`,
         },
-        link: { reason: 'operator-explicit', stage: 'linked' },
+        reason: 'operator-explicit',
+        stage: 'linked',
       },
     });
+    expect(ok.json.repair).toBeUndefined();
+    expect(ok.json.linked.invalid).toBeUndefined();
+    expect(w.f.reads.at(-1)).toBe(EXISTING);
     expect(w.f.opened).toEqual([]);
     expect(w.f.dispatched).toEqual([]);
+    // 列表：关联只进 linked，last 里没有冒出新枚举（没有 last），关联入口不再给
+    const after = await hourlyView(w);
+    expect(after.last).toBeUndefined();
+    expect(after.linked).toEqual(ok.json.linked);
+    expect(after.linkAction).toBeUndefined();
   });
 
   it('审计 spy：成功只有一次，actor / via / 通知 / incident / 目标单 / 关联原因精确匹配登录身份和请求；拒绝与伪造 actor 不产生审计', async () => {
@@ -1217,6 +1315,7 @@ describe('明确关联已有单：端点校验与审计', () => {
         issue: `thoerwink8/fleet-dao#${EXISTING}`,
         linkReason: 'operator-explicit',
         linkStage: 'linked',
+        linkBy: IDS.founderA,
       },
     });
     expect(audit?.reason).toContain(`thoerwink8/fleet-dao#${EXISTING}`);
@@ -1227,48 +1326,83 @@ describe('明确关联已有单：端点校验与审计', () => {
   });
 });
 
+const task3090 = { id: 'task-3090', repoId: SELF.id, issueNumber: EXISTING, state: 'running' };
+const pr3090 = {
+  repoId: SELF.id,
+  number: 3095,
+  state: 'open',
+  headRef: 'fleet/3090',
+  headSha: 'abc',
+  checks: 'pending',
+  issueRefs: [EXISTING],
+};
+
 describe('明确关联已有单：真实存储', () => {
-  it('精确 incident 关联和版本落库；重建 deps 后列表仍给出 issue / 操作者 / 阶段 / 原因 / 原版本；通知仍开着，不写 verified / handed', async () => {
+  it.each([
+    ['只绑定、待处理', {}, 'linked', {}],
+    ['已有进行中的任务', { findTaskByIssue: async () => task3090 }, 'worker-active', { taskId: 'task-3090' }],
+    ['已有开放修复 PR', { listPullRequests: async () => [pr3090] }, 'pr-open', { prNumber: 3095 }],
+  ] as const)(
+    '%s：精确 incident 关联和版本落库；重建 deps 后 linked 给出 issue / 操作者 / 阶段 / 原因 / 原版本，last 没有新枚举；通知仍开着，不写 verified / handed',
+    async (_name, stub, stage, extra) => {
+      const w = await linkWorld();
+      const v = await hourlyView(w);
+      const body = linkBody(v);
+      // 任务 / PR 事实只在关联那一刻替身；下面重建的 deps 用全新 Store，不带替身
+      Object.assign(w.h.deps.store, stub);
+      expect((await postLink(w, body)).status).toBe(200);
+
+      const { view: after, open } = await rebuiltView(w);
+      expect(after.incident).toBe(v.incident);
+      expect(after.last).toBeUndefined();
+      expect(after.linked).toEqual({
+        incident: v.incident,
+        issue: {
+          repo: SELF_REPO,
+          number: EXISTING,
+          url: `https://github.com/thoerwink8/fleet-dao/issues/${EXISTING}`,
+        },
+        reason: 'operator-explicit',
+        stage,
+        ...extra,
+        actionId: v.linkAction?.actionId,
+        requestId: body.requestId,
+        by: IDS.founderA,
+        at: expect.any(String),
+        text: expect.stringContaining(`thoerwink8/fleet-dao#${EXISTING}`),
+      });
+      expect(after.linkAction).toBeUndefined();
+      expect(after.actions.map((a) => a.kind)).toEqual(['hand-to-repair']);
+      expect(open).toBe(true);
+      // 原卡的修复状态：内部关联记录，不是 verified / handed / accepted，也没有核验结果
+      const row = (await hourlyRow(w.h))?.value as Record<string, unknown>;
+      expect(row).toMatchObject({ state: 'linked', kind: 'link-existing', incident: v.incident });
+      expect(row.check).toBeUndefined();
+      expect(w.f.opened).toEqual([]);
+      expect(w.f.dispatched).toEqual([]);
+    },
+  );
+
+  it('旧事故的关联行不盖新代次：重开后重建 deps，新事故既没有 last 也没有 linked，可重新关联', async () => {
     const w = await linkWorld();
     const v = await hourlyView(w);
-    const body = linkBody(v);
-    expect((await postLink(w, body)).status).toBe(200);
-
-    const fresh = createPgStore(t.db, { now: () => new Date(w.h.clock.now) });
-    const items = (await fresh.listNotifications({ status: 'all', limit: 200 })).items;
-    const after = (await alertRepairViews({ ...w.h.deps, store: fresh }, items)).get(HOURLY_ID);
-    expect(after?.incident).toBe(v.incident);
-    expect(after?.last).toMatchObject({
-      incident: v.incident,
-      state: 'linked',
-      kind: 'link-existing',
-      actionId: v.link?.actionId,
-      requestId: body.requestId,
-      by: IDS.founderA,
-      issue: { repo: SELF_REPO, number: EXISTING, created: false },
-      link: { reason: 'operator-explicit', stage: 'linked' },
-    });
-    expect(after?.last?.check).toBeUndefined();
-    expect(after?.link).toBeUndefined();
-    expect(after?.actions.map((a) => a.kind)).toEqual(['hand-to-repair']);
-    expect(items.find((n) => n.id === HOURLY_ID)?.resolvedAt).toBeUndefined();
-    expect((await hourlyRow(w.h))?.value).toMatchObject({ state: 'linked', incident: v.incident });
-    expect(w.f.opened).toEqual([]);
-    expect(w.f.dispatched).toEqual([]);
+    expect((await postLink(w, linkBody(v))).status).toBe(200);
+    await t.db
+      .update(notifications)
+      .set({ raisedAt: new Date(T0.getTime() + MIN) })
+      .where(eq(notifications.id, HOURLY_ID));
+    const { view } = await rebuiltView(w);
+    expect(view.incident).not.toBe(v.incident);
+    expect(view.last).toBeUndefined();
+    expect(view.linked).toBeUndefined();
+    expect(view.linkAction?.actionId).toBeDefined();
+    expect(view.linkAction?.actionId).not.toBe(v.linkAction?.actionId);
   });
 });
 
 describe('明确关联已有单：交给修复沿用绑定（#3090 形状）', () => {
-  const task = { id: 'task-3090', repoId: SELF.id, issueNumber: EXISTING, state: 'running' };
-  const pr = {
-    repoId: SELF.id,
-    number: 3095,
-    state: 'open',
-    headRef: 'fleet/3090',
-    headSha: 'abc',
-    checks: 'pending',
-    issueRefs: [EXISTING],
-  };
+  const task = task3090;
+  const pr = pr3090;
   it.each([
     ['已有进行中的任务', { findTaskByIssue: async () => task }, 'worker-active', 0],
     ['已有开放修复 PR', { listPullRequests: async () => [pr] }, 'pr-open', 0],
@@ -1279,29 +1413,50 @@ describe('明确关联已有单：交给修复沿用绑定（#3090 形状）', (
     Object.assign(w.h.deps.store, stub);
     const v = await hourlyView(w);
     const linked = await postLink(w, linkBody(v));
-    expect(linked.json.repair.link).toMatchObject({ stage });
+    expect(linked.json.linked).toMatchObject({ stage });
     // 已关联待处理：只绑定，什么都没派
     expect(w.f.dispatched).toEqual([]);
     expect(w.f.opened).toEqual([]);
 
+    // 明确请求一次受控派工
     const clicked = await clickHand(w);
-    expect(clicked.status).toBe(200);
     expect(w.f.opened).toEqual([]);
     expect(w.f.dispatched).toHaveLength(dispatches);
     if (dispatches === 0) {
-      expect(clicked.json.repair).toMatchObject({
+      // 已有人在处理：什么都没做，明确 409，绑定原样留着（不记成 handed / accepted）
+      expect([clicked.status, clicked.json.error.code]).toEqual([409, 'link_already_handled']);
+      expect((await hourlyRow(w.h))?.value).toMatchObject({
         state: 'linked',
-        issue: { number: EXISTING },
-        link: { stage },
+        kind: 'link-existing',
+        link: { stage, requestId: linked.json.linked.requestId, by: IDS.founderA },
       });
+      const { view } = await rebuiltView(w);
+      expect(view.last).toBeUndefined();
+      expect(view.linked).toMatchObject({ stage, actionId: linked.json.linked.actionId });
     } else {
+      expect(clicked.status).toBe(200);
       expect(clicked.json.repair).toMatchObject({
+        kind: 'hand-to-repair',
         state: 'handed',
         issue: { number: EXISTING, created: false },
       });
+      expect(clicked.json.repair).not.toHaveProperty('link');
       // 只经现有准入：三个参数（仓、单号、操作者），不传 force
       expect(w.f.dispatched[0]).toMatchObject({ number: EXISTING, argc: 3 });
       expect(w.f.dispatched[0]?.operator).toContain(IDS.founderA);
+      // 重建 deps：last 是旧契约里的 handed 交给修复，linked 仍是原来那次关联
+      const { view } = await rebuiltView(w);
+      expect(view.last).toMatchObject({
+        kind: 'hand-to-repair',
+        state: 'handed',
+        issue: { number: EXISTING },
+      });
+      expect(view.linked).toMatchObject({
+        stage: 'linked',
+        actionId: linked.json.linked.actionId,
+        requestId: linked.json.linked.requestId,
+        by: IDS.founderA,
+      });
     }
     // 再点：仍不开单，派工总数不增加
     await clickHand(w);
@@ -1317,11 +1472,17 @@ describe('明确关联已有单：交给修复沿用绑定（#3090 形状）', (
       w.f.read = () => bad;
       const failed = await clickHand(w);
       expect(failed.json.repair).toMatchObject({
+        kind: 'hand-to-repair',
         state: 'failed',
-        issue: { number: EXISTING },
-        link: { reason: 'operator-explicit' },
+        issue: { number: EXISTING, created: false },
       });
       expect(failed.json.repair.text).toContain('已失效');
+      // 绑定标失效（仍是原来那次关联），last 只是旧契约里的 failed
+      const view = await hourlyView(w);
+      expect(view.linked).toMatchObject({
+        reason: 'operator-explicit',
+        invalid: { text: expect.any(String) },
+      });
     }
     // 换仓：受管的 fleet-dao 不在原 owner 下了，原绑定对不上
     await t.db.update(repos).set({ owner: 'moved-org' }).where(eq(repos.id, SELF.id));
@@ -1336,6 +1497,9 @@ describe('明确关联已有单：交给修复沿用绑定（#3090 形状）', (
     expect(recovered.json.repair).toMatchObject({ state: 'handed', issue: { number: EXISTING } });
     expect(w.f.opened).toEqual([]);
     expect(w.f.dispatched).toHaveLength(1);
+    const { view } = await rebuiltView(w);
+    expect(view.linked?.invalid).toBeUndefined();
+    expect(view.linked?.stage).toBe('linked');
   });
 });
 
@@ -1349,8 +1513,16 @@ describe('明确关联已有单：并发 / 幂等', () => {
     const reads = w.f.reads.length;
     const again = await postLink(w, body);
     expect(again.json).toMatchObject({ replayed: true });
-    expect(again.json.repair).toEqual(first.json.repair);
+    expect(again.json.linked).toEqual(first.json.linked);
     expect(w.f.reads).toHaveLength(reads);
+    // 关联的 requestId 拿去点修复：不当成同一次，也不回内部关联记录
+    const hand = v.actions.find((a) => a.kind === 'hand-to-repair');
+    const crossed = await post(w.h, w.s, HOURLY_ID, {
+      actionId: hand?.id,
+      incident: v.incident,
+      requestId: body.requestId,
+    });
+    expect([crossed.status, crossed.json.error.code]).toEqual([409, 'request_reused']);
 
     for (const over of [{ issueNumber: 3091 }, { actionId: 'link-existing:other' }]) {
       const reused = await postLink(w, { ...body, ...over });
@@ -1364,7 +1536,7 @@ describe('明确关联已有单：并发 / 幂等', () => {
     w.h.deps.store = createPgStore(t.db, { now: () => new Date(w.h.clock.now) });
     const restarted = await postLink(w, body);
     expect(restarted.json).toMatchObject({ replayed: true });
-    expect(restarted.json.repair).toEqual(first.json.repair);
+    expect(restarted.json.linked).toEqual(first.json.linked);
     expect(w.f.reads).toHaveLength(reads);
     expect(w.f.opened).toEqual([]);
     expect(w.f.dispatched).toEqual([]);
@@ -1416,7 +1588,7 @@ describe('明确关联已有单：并发 / 幂等', () => {
     expect((await clickHand(w)).json.repair).toMatchObject({ state: 'unknown', issue: { number: 4000 } });
     const before = await hourlyRow(w.h);
     expect(w.f.opened).toHaveLength(1);
-    expect((await hourlyView(w)).link).toBeUndefined();
+    expect((await hourlyView(w)).linkAction).toBeUndefined();
 
     const linked = await postLink(w, linkBody(v));
     expect([linked.status, linked.json.error.code]).toEqual([409, 'repair_in_flight']);
@@ -1442,7 +1614,8 @@ describe('明确关联已有单：失效边界与无关联路径', () => {
     const next = await hourlyView(w);
     expect(next.incident).not.toBe(v.incident);
     expect(next.last).toBeUndefined();
-    expect(next.link?.actionId).not.toBe(v.link?.actionId);
+    expect(next.linked).toBeUndefined();
+    expect(next.linkAction?.actionId).not.toBe(v.linkAction?.actionId);
     const stale = await postLink(w, body);
     expect([stale.status, stale.json.error.code]).toEqual([409, 'incident_mismatch']);
     const reused = await postLink(w, linkBody(next, { requestId: body.requestId }));
@@ -1451,7 +1624,7 @@ describe('明确关联已有单：失效边界与无关联路径', () => {
 
     const fresh = await postLink(w, linkBody(next));
     expect(fresh.status).toBe(200);
-    expect(fresh.json.repair.incident).toBe(next.incident);
+    expect(fresh.json.linked.incident).toBe(next.incident);
     expect((await hourlyRow(w.h))?.value).toMatchObject({ incident: next.incident, state: 'linked' });
   });
 
@@ -1466,7 +1639,7 @@ describe('明确关联已有单：失效边界与无关联路径', () => {
     expect([stale.status, stale.json.error.code]).toEqual([409, 'action_expired']);
     expect(w.f.reads).toEqual([]);
     const now = await hourlyView(w);
-    expect(now.link?.actionId).not.toBe(v.link?.actionId);
+    expect(now.linkAction?.actionId).not.toBe(v.linkAction?.actionId);
     expect((await postLink(w, linkBody(now))).status).toBe(200);
     expect(w.f.dispatched).toEqual([]);
   });
@@ -1475,8 +1648,9 @@ describe('明确关联已有单：失效边界与无关联路径', () => {
     const w = await linkWorld();
     const first = await clickHand(w);
     expect(first.json.repair).toMatchObject({ state: 'handed', issue: { number: 4000, created: true } });
-    expect(first.json.repair.link).toBeUndefined();
+    expect(first.json.repair).not.toHaveProperty('link');
     const v = await hourlyView(w);
+    expect(v.linked).toBeUndefined();
     expect(w.f.opened.map((o) => o.key)).toEqual([`alert-repair:${v.incident}`]);
     expect(w.f.reads).toEqual([]);
     expect(w.f.dispatched.map((d) => d.number)).toEqual([4000]);

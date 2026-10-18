@@ -275,8 +275,6 @@ export const ALERT_REPAIR_KINDS = [
   'release-restore',
   'release-abort',
   'hand-to-repair',
-  /** 操作者明确指定这次告警由哪张已有的单处理（#3100）：只记绑定，不开单、不派工。 */
-  'link-existing',
 ] as const;
 export const AlertRepairKindSchema = z.enum(ALERT_REPAIR_KINDS);
 export type AlertRepairKind = z.infer<typeof AlertRepairKindSchema>;
@@ -304,8 +302,7 @@ export type AlertRepairAction = z.infer<typeof AlertRepairActionSchema>;
 
 /**
  * executing 接活了还没写结果（中断后不自动重放）；accepted 信号或请求写出去了，还没核实恢复；verified 重读原条件已恢复；
- * failed 确定没做成；unknown 结果未知，禁止盲重试；declined 人选了不动或自由输入，没执行；handed 已开修复单；
- * linked 操作者明确关联了已有的单（只是绑定，不等于派工受理，更不等于修好）。
+ * failed 确定没做成；unknown 结果未知，禁止盲重试；declined 人选了不动或自由输入，没执行；handed 已开修复单。
  */
 export const ALERT_REPAIR_STATES = [
   'executing',
@@ -315,7 +312,6 @@ export const ALERT_REPAIR_STATES = [
   'unknown',
   'declined',
   'handed',
-  'linked',
 ] as const;
 
 export const AlertRepairRecordSchema = z.object({
@@ -343,21 +339,33 @@ export const AlertRepairRecordSchema = z.object({
       created: z.boolean(),
     })
     .optional(),
-  /**
-   * 明确关联已有单（#3100）：服务端核实过是同仓开着的 issue 才存。reason 固定 operator-explicit（只有可信操作者显式指定才有，
-   * 标题正文相似不算）；stage 是关联当时的现场：linked 只绑定待处理、worker-active 已有进行中的任务、pr-open 已有开放 PR 挂这张单。
-   * 交给修复沿用这条绑定时也带着它，后续每次都重新核实单子。
-   */
-  link: z
-    .object({
-      reason: z.literal('operator-explicit'),
-      stage: z.enum(['linked', 'worker-active', 'pr-open']),
-      taskId: z.string().optional(),
-      prNumber: z.number().int().positive().optional(),
-    })
-    .optional(),
 });
 export type AlertRepairRecord = z.infer<typeof AlertRepairRecordSchema>;
+
+/**
+ * 明确关联已有单（#3100）：可信操作者指定「这次事故由这张已有的单处理」，服务端现读核实过是受管 fleet-dao 里开着的 issue 才存。
+ * 它不是一次修复动作：不进 last、不加 kind / state 的枚举（已有消费者照旧只认 last 里那几种），只作这条可选的关联元数据。
+ * 关联不等于派工受理、更不等于修好：提醒照旧开着，由看门狗重读原检测条件后自己撤。
+ * - reason 固定 operator-explicit：只有操作者显式指定才有，标题正文相似不算，不做文本归并。
+ * - stage 是最近一次核实时的现场：linked 只绑定、待处理；worker-active 已有进行中的任务；pr-open 已有开放 PR 挂这张单。
+ * - actionId / requestId / by / at 是关联那一刻的服务端关联版本、幂等身份、登录操作者和时刻，之后交给修复沿用也不改。
+ * - invalid：交给修复时重新核实，发现单子已关闭、变成 PR、换了仓或读不到——绑定标失效，不回退成开新单、不派工。
+ */
+export const AlertRepairLinkSchema = z.object({
+  incident: z.string(),
+  issue: z.object({ repo: AlertRepoSchema, number: z.number().int().positive(), url: z.string() }),
+  reason: z.literal('operator-explicit'),
+  stage: z.enum(['linked', 'worker-active', 'pr-open']),
+  taskId: z.string().optional(),
+  prNumber: z.number().int().positive().optional(),
+  actionId: z.string(),
+  requestId: z.string().uuid(),
+  by: z.string(),
+  at: Time,
+  text: z.string().max(600),
+  invalid: z.object({ at: Time, text: z.string().max(400) }).optional(),
+});
+export type AlertRepairLink = z.infer<typeof AlertRepairLinkSchema>;
 
 export const AlertRepairViewSchema = z.object({
   incident: z.string(),
@@ -365,8 +373,10 @@ export const AlertRepairViewSchema = z.object({
   /** 没算出动作的原因（条件已变、没接上、读不到），一条一句。 */
   problems: z.array(z.string()),
   last: AlertRepairRecordSchema.optional(),
-  /** 能明确关联已有单时的服务端版本和仓；不能（没接上、已有在途操作、已绑定）没有这一项。 */
-  link: z.object({ actionId: z.string(), repo: AlertRepoSchema }).optional(),
+  /** 能明确关联已有单时的服务端关联版本和仓（#3100）；不能（没接上、已有在途操作、已绑定或开过单）没有这一项。 */
+  linkAction: z.object({ actionId: z.string(), repo: AlertRepoSchema }).optional(),
+  /** 这次事故操作者明确关联的已有单（#3100）；没关联、或关联属于上一代事故的没有这一项。 */
+  linked: AlertRepairLinkSchema.optional(),
 });
 export type AlertRepairView = z.infer<typeof AlertRepairViewSchema>;
 
@@ -382,7 +392,7 @@ export const ExecuteAlertRepairRequest = z
   .refine((b) => b.optionId === undefined || b.text === undefined, {
     message: '点一个选项或自己输入一段话，二选一',
   });
-/** 可信操作者把这次告警明确关联到一张已有的单：只收受管仓 + 单号 + 服务端给的版本 + incident + 幂等身份；多一个字段（比如伪造的 actor）就 400。 */
+/** 可信操作者把这次告警明确关联到一张已有的单：只收受管仓 + 单号 + 服务端给的关联版本 + incident + 幂等身份；多一个字段（比如伪造的 actor）就 400。 */
 export const LinkAlertRepairRequest = z
   .object({
     actionId: z.string().min(1).max(200),
@@ -392,6 +402,13 @@ export const LinkAlertRepairRequest = z
     issueNumber: z.number().int().positive(),
   })
   .strict();
+/** 关联的回执：只回关联元数据，不冒充一次修复记录（没有 repair）。 */
+export const LinkAlertRepairResponse = z.object({
+  ok: z.literal(true),
+  linked: AlertRepairLinkSchema,
+  /** 同一幂等身份的重放：回原来的关联，没有再读单、再写。 */
+  replayed: z.boolean(),
+});
 export const ExecuteAlertRepairResponse = z.object({
   ok: z.literal(true),
   repair: AlertRepairRecordSchema,
