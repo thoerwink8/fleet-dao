@@ -1507,7 +1507,11 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       const v = viewOf((s) => {
         s.tasks = {
           ok: true,
-          rows: [task('o/fleet-dao', 3033, ago(10)), task('other/fleet-dao', 3033, ago(10))],
+          rows: [
+            task('o/fleet-dao', 3033, ago(10)),
+            task('other/fleet-dao', 3033, ago(10)),
+            task('o/fleet-dao', 3037, ago(10)),
+          ],
         };
         s.runs = {
           ok: true,
@@ -1516,6 +1520,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       });
       expect(problemOf(v, 'o/fleet-dao', 3033)).toContain('当前重试运行中');
       expect(problemOf(v, 'other/fleet-dao', 3033)).toContain('未关联信息');
+      expect(problemOf(v, 'o/fleet-dao', 3037)).toContain('未关联信息');
       expect(whats(v).some((w) => w.includes('other/fleet-dao'))).toBe(false);
     });
 
