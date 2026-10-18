@@ -472,27 +472,82 @@ export async function incrementalDiffAtHead(args: {
 }
 
 /**
- * 把 PR 头的完整检出放进目录（git archive，不带 .git）。镜像没有、提交不在就抛，调用方自己决定要不要因此停下。
+ * 完整检出是在哪一步没成的（#3036）：头不合规、对不上 / 没有镜像、建目录、git archive、解包；别的（换进来的 checkout 抛的）是 unknown。
+ * 报警照这一步写原因和建议：只有 EACCES 才是「目录权限」，缺对象不能修成 chmod。
+ */
+export type CheckoutStage = 'head' | 'mirror' | 'mkdir' | 'archive' | 'extract' | 'unknown';
+
+/** checkoutPrHead 抛的错：带失败那一步、原始错误（message 原样）、errno（有才有），archive 那步还带镜像目录和是不是缺对象。 */
+export class CheckoutStageError extends Error {
+  readonly stage: CheckoutStage;
+  readonly code: string | undefined;
+  readonly mirrorDir: string | undefined;
+  readonly missingObject: boolean;
+
+  constructor(
+    stage: CheckoutStage,
+    message: string,
+    extra: { code?: string; mirrorDir?: string; missingObject?: boolean; cause?: unknown } = {},
+  ) {
+    super(message, extra.cause === undefined ? undefined : { cause: extra.cause });
+    this.name = 'CheckoutStageError';
+    this.stage = stage;
+    this.code = extra.code;
+    this.mirrorDir = extra.mirrorDir;
+    this.missingObject = extra.missingObject ?? false;
+  }
+}
+
+/** git archive 的 stderr 是「镜像里没有这个对象」：not a tree object、bad object、认不出的 revision。 */
+const MISSING_OBJECT =
+  /not a tree object|bad object|not a valid object name|invalid object name|unknown revision|bad revision|missing (blob|tree|commit)/i;
+
+/**
+ * 把 PR 头的完整检出放进目录（git archive，不带 .git）。镜像没有、提交不在就抛 CheckoutStageError（写明哪一步），
+ * 调用方自己决定要不要因此停下。
  */
 export async function checkoutPrHead(
   dir: string,
   head: string,
   workflowId: string | undefined,
 ): Promise<void> {
-  if (!SHA40.test(head)) throw new Error('PR 的头不是完整的提交号');
+  if (!SHA40.test(head)) throw new CheckoutStageError('head', 'PR 的头不是完整的提交号');
   const mirror = mirrorDir(workflowId);
-  if (!mirror.ok) throw new Error(mirror.reason);
-  if (!existsSync(mirror.dir)) throw new Error('引擎镜像里没有这个仓，放不了 PR 头的完整检出');
-  await mkdir(dir, { recursive: true });
-  const scratch = await mkdtemp(join(tmpdir(), 'fleet-verify-head-'));
+  if (!mirror.ok) throw new CheckoutStageError('mirror', mirror.reason);
+  if (!existsSync(mirror.dir)) {
+    throw new CheckoutStageError('mirror', '引擎镜像里没有这个仓，放不了 PR 头的完整检出', {
+      mirrorDir: mirror.dir,
+    });
+  }
+  const scratch = await (async () => {
+    try {
+      await mkdir(dir, { recursive: true });
+      return await mkdtemp(join(tmpdir(), 'fleet-verify-head-'));
+    } catch (error) {
+      const code = errnoOf(error);
+      throw new CheckoutStageError('mkdir', errMessage(error), {
+        ...(code === undefined ? {} : { code }),
+        cause: error,
+      });
+    }
+  })();
   const tarPath = join(scratch, 'head.tar');
   try {
     const archived = await runGit(mirror.dir, ['archive', '--format=tar', '-o', tarPath, head], 120_000);
-    if (archived.code !== 0) throw new Error(oneLine(archived.stderr));
+    if (archived.code !== 0) {
+      throw new CheckoutStageError('archive', oneLine(archived.stderr), {
+        mirrorDir: mirror.dir,
+        missingObject: MISSING_OBJECT.test(archived.stderr),
+      });
+    }
     await new Promise<void>((resolve, reject) => {
-      execFile('tar', ['-xf', tarPath, '-C', dir], { timeout: 120_000 }, (err) => {
-        if (err) reject(err);
-        else resolve();
+      execFile('tar', ['-xf', tarPath, '-C', dir], { timeout: 120_000 }, (err, _stdout, stderr) => {
+        if (!err) return resolve();
+        const why = typeof stderr === 'string' && stderr.trim() !== '' ? oneLine(stderr) : errMessage(err);
+        const code = errnoOf(err);
+        reject(
+          new CheckoutStageError('extract', why, { ...(code === undefined ? {} : { code }), cause: err }),
+        );
       });
     });
   } finally {
@@ -503,22 +558,96 @@ export async function checkoutPrHead(
 /** 日志里这一句表示没放进完整检出，会话只看提示词里的材料。 */
 export const VERIFY_CHECKOUT_FALLBACK = '验收会话没有放进 PR 头的完整检出（仍可看提示词里的材料）';
 
-/** 驾驶舱报警。同一个键只留一条；正文里有建不出的那个目录。 */
+/**
+ * 驾驶舱报警。键按检出目标（工作流编号；没有才按头）各一条：A 目标的故障不会被 B 目标的成功撤掉。
+ * 正文写明失败那一步、目标 head、目录、原始错误和对应这一步的建议。
+ */
 export interface CheckoutBlockedAlert {
   dedupeKey: string;
   level: 'alert';
   taskId: null;
   title: string;
   body: string;
+  stage: CheckoutStage;
 }
 
-export function checkoutBlockedAlert(dir: string, error: string): CheckoutBlockedAlert {
+/** 检出报警的键前缀。老的全局键 `cold-verify:checkout-dir` 不带目标，认不出是谁的，这里不再写、也不替它撤。 */
+export const CHECKOUT_ALERT_PREFIX = 'cold-verify:checkout:';
+
+/** 这个检出目标的报警键：同一工作流（同一张单的 PR）一条，换了头的成功也算这张单好了；没有工作流编号才按头分。 */
+export function checkoutAlertKey(workflowId: string | undefined, head: string): string {
+  const flow = workflowId?.trim();
+  if (flow !== undefined && flow !== '') return `${CHECKOUT_ALERT_PREFIX}${flow}`;
+  return `${CHECKOUT_ALERT_PREFIX}head:${oneLine(head).slice(0, 64)}`;
+}
+
+const STAGE_LABEL: Record<CheckoutStage, string> = {
+  head: '核对 PR 头',
+  mirror: '找引擎镜像',
+  mkdir: '建检出目录',
+  archive: '从镜像 git archive',
+  extract: '解包到检出目录',
+  unknown: '没认出是哪一步',
+};
+
+export interface CheckoutBlockedInput {
+  dir: string;
+  head: string;
+  workflowId: string | undefined;
+  /** 检出抛的原错（CheckoutStageError 带失败那一步；别的算 unknown）。 */
+  error: unknown;
+  /** EACCES 时既有修复（ensure-tmp）本身没成的原因。 */
+  repairError?: unknown;
+}
+
+function stageOf(error: unknown): CheckoutStage {
+  return error instanceof CheckoutStageError ? error.stage : 'unknown';
+}
+
+function adviceFor(input: CheckoutBlockedInput, stage: CheckoutStage): string {
+  const { error, dir, head } = input;
+  const mirror = error instanceof CheckoutStageError ? error.mirrorDir : undefined;
+  if (errnoOf(error) === 'EACCES') {
+    const repaired =
+      input.repairError === undefined ? '' : `既有修复（ensure-tmp）没成：${errMessage(input.repairError)}。`;
+    return `${repaired}引擎用户要能在这一层下面 mkdir（${dir} 的上一层）。`;
+  }
+  if (error instanceof CheckoutStageError && error.missingObject) {
+    return (
+      `引擎镜像 ${mirror ?? '（没有镜像路径）'} 里取不出目标 head ${head}（git archive 认不出这个对象）。` +
+      `请检查镜像里有没有这个提交，按既定 head 把它 fetch 进镜像后再验。这不是目录权限问题，别改属主或权限；引擎不自动重试。`
+    );
+  }
+  switch (stage) {
+    case 'head':
+      return `PR 头 ${head} 不是完整提交号，查读 PR 的那一步。`;
+    case 'mirror':
+      return `对不上或没有引擎镜像${mirror === undefined ? '' : `（${mirror}）`}，查工作流编号和镜像目录。`;
+    case 'mkdir':
+      return `建 ${dir} 没成（不是权限问题），查磁盘和路径。`;
+    case 'archive':
+      return `镜像 ${mirror ?? '（没有镜像路径）'} 上 git archive 没成，查镜像本身是否完好。`;
+    case 'extract':
+      return `解包到 ${dir} 没成，查磁盘空间和目录。`;
+    default:
+      return '原始错误原样附上，按它查。';
+  }
+}
+
+export function checkoutBlockedAlert(input: CheckoutBlockedInput): CheckoutBlockedAlert {
+  const stage = stageOf(input.error);
+  const code = errnoOf(input.error);
+  const target = input.workflowId?.trim() ? input.workflowId.trim() : '（没有工作流编号）';
   return {
-    dedupeKey: 'cold-verify:checkout-dir',
+    dedupeKey: checkoutAlertKey(input.workflowId, input.head),
     level: 'alert',
     taskId: null,
-    title: '冷验收放不进 PR 头的完整检出',
-    body: `建不出 ${dir}：${error}。引擎用户要能在这一层下面 mkdir。`,
+    title: `冷验收放不进 PR 头的完整检出（${STAGE_LABEL[stage]}）`,
+    body:
+      `目标 ${target} 的 head ${input.head}，目录 ${input.dir}。` +
+      `失败在「${STAGE_LABEL[stage]}」这一步${code === undefined ? '' : `（${code}）`}，原始错误：${errMessage(input.error)}。` +
+      adviceFor(input, stage),
+    stage,
   };
 }
 
@@ -528,6 +657,15 @@ function errnoOf(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined;
 }
 
+/** 这个目标真放进了完整检出：交给撤卡端口。startedAt 是这一次开跑的时刻，只证明它之前报的故障好了。 */
+export interface CheckoutRecovered {
+  dedupeKey: string;
+  startedAt: Date;
+  dir: string;
+  head: string;
+  workflowId: string | undefined;
+}
+
 export interface PlaceVerifyCheckoutInput {
   dir: string;
   head: string;
@@ -535,51 +673,91 @@ export interface PlaceVerifyCheckoutInput {
   /** 不给就用 checkoutPrHead。测试换成先抛 EACCES、修好再真检出。 */
   checkout?: (dir: string, head: string, workflowId: string | undefined) => Promise<void>;
   /**
-   * mkdir 是 EACCES 时先调一次（生产：sudo fleet-agent-scope ensure-tmp，把 _tmp 改回引擎用户）。
-   * 不给就直接走退路。
+   * 检出是 EACCES 时先调一次（生产：sudo fleet-agent-scope ensure-tmp，把 _tmp 改回引擎用户）。
+   * 不给就直接走退路。别的错（缺镜像、缺对象、解包失败）不修、不重试。
    */
   repair?: (dir: string) => Promise<void>;
   log?: (message: string, fields?: Record<string, unknown>) => void;
-  /** 退路：除了日志，把目录路径写进报警。写不进只记日志，不让验收因此停。 */
+  /** 退路：除了日志，把失败那一步和目录写进这个目标的报警。写不进只记日志，不让验收因此停。 */
   onBlocked?: (alert: CheckoutBlockedAlert) => Promise<void>;
+  /**
+   * 真放进了完整检出：撤这个目标在 startedAt 之前报的检出报警（之后又报的是新故障，端口不许撤）。
+   * 撤不成只记日志，不当成已恢复，也不让验收停。
+   */
+  onRecovered?: (recovered: CheckoutRecovered) => Promise<void>;
+  /** 测试用。 */
+  now?: () => Date;
 }
 
 /**
- * 把 PR 头的完整检出放进 dir。_tmp 是 root:root 755、引擎用户建不了目录时先 repair 再试一次。
- * 成功回 full。仍放不进回 blocked：记 VERIFY_CHECKOUT_FALLBACK，并 onBlocked（正文含 dir）。
+ * 把 PR 头的完整检出放进 dir。检出 EACCES（_tmp 是 root:root 755）时先 repair 再试一次，别的错不修不重试。
+ * 成功回 full，并 onRecovered 撤这个目标的旧报警。仍放不进回 blocked：记 VERIFY_CHECKOUT_FALLBACK，并 onBlocked。
+ * 只说检出放没放进，不碰验收结论。
  */
 export async function placeVerifyCheckout(input: PlaceVerifyCheckoutInput): Promise<'full' | 'blocked'> {
   const checkout = input.checkout ?? checkoutPrHead;
   const log = input.log ?? (() => undefined);
-  const blocked = async (error: unknown): Promise<'blocked'> => {
-    const message = errMessage(error);
-    log(VERIFY_CHECKOUT_FALLBACK, { error: message, dir: input.dir });
+  const startedAt = (input.now ?? (() => new Date()))();
+  const dedupeKey = checkoutAlertKey(input.workflowId, input.head);
+  const blocked = async (error: unknown, repairError?: unknown): Promise<'blocked'> => {
+    const alert = checkoutBlockedAlert({
+      dir: input.dir,
+      head: input.head,
+      workflowId: input.workflowId,
+      error,
+      ...(repairError === undefined ? {} : { repairError }),
+    });
+    log(VERIFY_CHECKOUT_FALLBACK, {
+      error: errMessage(error),
+      stage: alert.stage,
+      dir: input.dir,
+      head: input.head,
+      ...(repairError === undefined ? {} : { repairError: errMessage(repairError) }),
+    });
     if (input.onBlocked) {
       try {
-        await input.onBlocked(checkoutBlockedAlert(input.dir, message));
+        await input.onBlocked(alert);
       } catch (alertError) {
         log('冷验收检出目录的报警没写进库', { dir: input.dir, error: errMessage(alertError) });
       }
     }
     return 'blocked';
   };
+  const full = async (): Promise<'full'> => {
+    if (input.onRecovered) {
+      try {
+        await input.onRecovered({
+          dedupeKey,
+          startedAt,
+          dir: input.dir,
+          head: input.head,
+          workflowId: input.workflowId,
+        });
+      } catch (resolveError) {
+        log('冷验收检出放进去了，但这个目标的旧检出报警没撤成（报警留着）', {
+          dedupeKey,
+          error: errMessage(resolveError),
+        });
+      }
+    }
+    return 'full';
+  };
   try {
     await checkout(input.dir, input.head, input.workflowId);
-    return 'full';
   } catch (error) {
     if (errnoOf(error) !== 'EACCES' || input.repair === undefined) return blocked(error);
     try {
       await input.repair(input.dir);
     } catch (repairError) {
-      return blocked(repairError);
+      return blocked(error, repairError);
     }
     try {
       await checkout(input.dir, input.head, input.workflowId);
-      return 'full';
     } catch (again) {
       return blocked(again);
     }
   }
+  return full();
 }
 
 function isSourceProblem(problem: string | undefined): boolean {

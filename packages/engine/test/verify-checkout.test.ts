@@ -1,11 +1,15 @@
 // PR 头的完整检出、第 2 轮增量 diff：用临时镜像，不碰本机的引擎镜像。
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  type CheckoutBlockedAlert,
+  type CheckoutRecovered,
+  CheckoutStageError,
+  checkoutAlertKey,
   checkoutBlockedAlert,
   checkoutPrHead,
   incrementalDiffAtHead,
@@ -149,6 +153,239 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(logs).not.toContain(VERIFY_CHECKOUT_FALLBACK);
     expect(blocked).toEqual([]);
   });
+
+  /** 真检出一遍，数 checkout 调了几次、repair 调了几次，收下报警。 */
+  async function placeReal(dest: string, head: string, workflowId: string | undefined) {
+    const calls: string[] = [];
+    const repairs: string[] = [];
+    const alerts: CheckoutBlockedAlert[] = [];
+    const placed = await placeVerifyCheckout({
+      dir: dest,
+      head,
+      workflowId,
+      checkout: async (dir, headSha, flow) => {
+        calls.push(dir);
+        await checkoutPrHead(dir, headSha, flow);
+      },
+      repair: async (dir) => {
+        repairs.push(dir);
+      },
+      onBlocked: async (alert) => {
+        alerts.push(alert);
+      },
+    });
+    return { placed, calls, repairs, alerts };
+  }
+
+  it('镜像里没有目标 head（not a tree object）：归到 git archive 缺对象，写明 head 和镜像，建议 fetch，不修权限不重试', async () => {
+    await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+    const missing = 'f'.repeat(40);
+    const err = await checkoutPrHead(join(state, 'co-missing'), missing, 'task:acme/demo#12').catch((e) => e);
+    expect(err).toBeInstanceOf(CheckoutStageError);
+    expect(err).toMatchObject({ stage: 'archive', missingObject: true });
+    expect(err.message).toContain('not a tree object');
+
+    const { placed, calls, repairs, alerts } = await placeReal(
+      join(state, 'co-missing-2'),
+      missing,
+      'task:acme/demo#12',
+    );
+    expect(placed).toBe('blocked');
+    expect(calls).toHaveLength(1);
+    expect(repairs).toEqual([]);
+    expect(alerts).toHaveLength(1);
+    const alert = alerts[0];
+    expect(alert?.stage).toBe('archive');
+    expect(alert?.dedupeKey).toBe(checkoutAlertKey('task:acme/demo#12', missing));
+    expect(alert?.body).toContain(missing);
+    expect(alert?.body).toContain(join(state, 'mirrors', 'acme', 'demo.git'));
+    expect(alert?.body).toContain('not a tree object');
+    expect(alert?.body).toContain('fetch');
+    expect(alert?.body).not.toContain('mkdir');
+  });
+
+  it('没有镜像：归到找镜像那一步，不修', async () => {
+    const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+    const { placed, repairs, alerts } = await placeReal(join(state, 'co-nomirror'), head, 'task:acme/nope#3');
+    expect(placed).toBe('blocked');
+    expect(repairs).toEqual([]);
+    expect(alerts[0]?.stage).toBe('mirror');
+    expect(alerts[0]?.body).toContain('引擎镜像里没有这个仓');
+    expect(alerts[0]?.body).toContain(join(state, 'mirrors', 'acme', 'nope.git'));
+    expect(alerts[0]?.body).not.toContain('mkdir');
+  });
+
+  it.skipIf(process.getuid?.() === 0)('解包失败：归到解包那一步，原错保留，不修不重试', async () => {
+    const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+    const dest = join(state, 'co-extract');
+    mkdirSync(dest, { recursive: true });
+    chmodSync(dest, 0o555);
+    try {
+      const { placed, calls, repairs, alerts } = await placeReal(dest, head, 'task:acme/demo#12');
+      expect(placed).toBe('blocked');
+      expect(calls).toHaveLength(1);
+      expect(repairs).toEqual([]);
+      expect(alerts[0]?.stage).toBe('extract');
+      expect(alerts[0]?.body).toContain('hello.txt');
+      expect(alerts[0]?.body).not.toContain('mkdir');
+    } finally {
+      chmodSync(dest, 0o755);
+    }
+  });
+
+  it.skipIf(process.getuid?.() === 0)(
+    '真 EACCES（上一层 555）：归到建目录，走既有修复，建议 mkdir',
+    async () => {
+      const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+      const parent = join(state, '_tmp');
+      mkdirSync(parent, { recursive: true });
+      chmodSync(parent, 0o555);
+      try {
+        const { placed, calls, repairs, alerts } = await placeReal(
+          join(parent, 'verify-x'),
+          head,
+          'task:acme/demo#12',
+        );
+        expect(placed).toBe('blocked');
+        expect(repairs).toEqual([join(parent, 'verify-x')]);
+        expect(calls).toHaveLength(2);
+        expect(alerts[0]?.stage).toBe('mkdir');
+        expect(alerts[0]?.body).toContain('EACCES');
+        expect(alerts[0]?.body).toContain('引擎用户要能在这一层下面 mkdir');
+      } finally {
+        chmodSync(parent, 0o755);
+      }
+    },
+  );
+});
+
+/**
+ * 假报警库：照真端口的规矩——再报原地更新（已撤的重开，updatedAt 拨到这一刻），撤只撤 startedAt 之前报的那条。
+ * 时钟是递增的整数，开跑、报警、撤卡谁先谁后看得清。
+ */
+function alertBook() {
+  let tick = 0;
+  const clock = () => new Date(++tick * 1000);
+  const rows = new Map<string, { body: string; updatedAt: Date; resolved: boolean }>();
+  const resolutions: string[] = [];
+  return {
+    clock,
+    rows,
+    resolutions,
+    raise: async (alert: CheckoutBlockedAlert) => {
+      rows.set(alert.dedupeKey, { body: alert.body, updatedAt: clock(), resolved: false });
+    },
+    recover: async (recovered: CheckoutRecovered) => {
+      const row = rows.get(recovered.dedupeKey);
+      if (row === undefined || row.resolved || row.updatedAt >= recovered.startedAt) return;
+      row.resolved = true;
+      resolutions.push(recovered.dedupeKey);
+    },
+  };
+}
+
+describe('检出恢复后按目标撤旧报警', () => {
+  const dir = '/var/lib/fleet-work/_tmp/verify-3036';
+  const A = 'task:acme/demo#12';
+  const B = 'task:acme/demo#13';
+  const head = 'a'.repeat(40);
+  const notATree = () =>
+    new CheckoutStageError('archive', `fatal: not a tree object: ${head}`, { missingObject: true });
+
+  function place(
+    book: ReturnType<typeof alertBook>,
+    workflowId: string,
+    checkout: () => Promise<void>,
+    extra: { log?: (message: string) => void; onRecovered?: (r: CheckoutRecovered) => Promise<void> } = {},
+  ) {
+    return placeVerifyCheckout({
+      dir,
+      head,
+      workflowId,
+      checkout,
+      now: book.clock,
+      onBlocked: book.raise,
+      onRecovered: extra.onRecovered ?? book.recover,
+      ...(extra.log ? { log: extra.log } : {}),
+    });
+  }
+
+  it('A 失败→B 成功：A 的报警留着', async () => {
+    const book = alertBook();
+    expect(await place(book, A, async () => Promise.reject(notATree()))).toBe('blocked');
+    expect(await place(book, B, async () => undefined)).toBe('full');
+    expect(book.rows.get(checkoutAlertKey(A, head))?.resolved).toBe(false);
+    expect(book.resolutions).toEqual([]);
+  });
+
+  it('A 失败→A 成功撤 A；再成功一次幂等', async () => {
+    const book = alertBook();
+    await place(book, A, async () => Promise.reject(notATree()));
+    expect(await place(book, A, async () => undefined)).toBe('full');
+    expect(await place(book, A, async () => undefined)).toBe('full');
+    expect(book.rows.get(checkoutAlertKey(A, head))?.resolved).toBe(true);
+    expect(book.resolutions).toEqual([checkoutAlertKey(A, head)]);
+  });
+
+  it('并发：早开跑的成功回执晚到，不撤之后才报的新故障', async () => {
+    const book = alertBook();
+    let release: () => void = () => undefined;
+    const slow = place(book, A, () => new Promise<void>((resolve) => (release = resolve)));
+    expect(await place(book, A, async () => Promise.reject(notATree()))).toBe('blocked');
+    release();
+    expect(await slow).toBe('full');
+    expect(book.rows.get(checkoutAlertKey(A, head))?.resolved).toBe(false);
+    expect(book.resolutions).toEqual([]);
+  });
+
+  it('失败不撤卡：onRecovered 一次都不调', async () => {
+    const book = alertBook();
+    const recovered: CheckoutRecovered[] = [];
+    await place(book, A, async () => Promise.reject(new Error('别的错')), {
+      onRecovered: async (r) => {
+        recovered.push(r);
+      },
+    });
+    expect(recovered).toEqual([]);
+  });
+
+  it('撤卡端口失败：检出仍是 full，报警留着，记一句没撤成', async () => {
+    const book = alertBook();
+    const logs: string[] = [];
+    await place(book, A, async () => Promise.reject(notATree()));
+    const placed = await place(book, A, async () => undefined, {
+      log: (message) => logs.push(message),
+      onRecovered: async () => {
+        throw new Error('库连不上');
+      },
+    });
+    expect(placed).toBe('full');
+    expect(book.rows.get(checkoutAlertKey(A, head))?.resolved).toBe(false);
+    expect(logs).toContain('冷验收检出放进去了，但这个目标的旧检出报警没撤成（报警留着）');
+  });
+
+  it('EACCES 修好后真检出成功：撤这个目标的旧报警', async () => {
+    const book = alertBook();
+    await place(book, A, async () => Promise.reject(notATree()));
+    let denied = true;
+    const placed = await placeVerifyCheckout({
+      dir,
+      head,
+      workflowId: A,
+      checkout: async () => {
+        if (denied) {
+          denied = false;
+          throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+        }
+      },
+      repair: async () => undefined,
+      now: book.clock,
+      onBlocked: book.raise,
+      onRecovered: book.recover,
+    });
+    expect(placed).toBe('full');
+    expect(book.rows.get(checkoutAlertKey(A, head))?.resolved).toBe(true);
+  });
 });
 
 describe('建不出检出目录时报警里有路径', () => {
@@ -174,13 +411,46 @@ describe('建不出检出目录时报警里有路径', () => {
     });
     expect(placed).toBe('blocked');
     expect(logs).toContain(VERIFY_CHECKOUT_FALLBACK);
+    const error = Object.assign(new Error(`EACCES: permission denied, mkdir '${dir}'`), { code: 'EACCES' });
     expect(blocked).toEqual([
       {
-        dedupeKey: 'cold-verify:checkout-dir',
-        body: checkoutBlockedAlert(dir, `EACCES: permission denied, mkdir '${dir}'`).body,
+        dedupeKey: checkoutAlertKey('task:acme/demo#12', 'a'.repeat(40)),
+        body: checkoutBlockedAlert({ dir, head: 'a'.repeat(40), workflowId: 'task:acme/demo#12', error })
+          .body,
       },
     ]);
     expect(blocked[0]?.body).toContain(dir);
+    expect(blocked[0]?.body).toContain('引擎用户要能在这一层下面 mkdir');
+  });
+
+  it('没认出的错：归 unknown，原错原样，不修、不给目录建议', async () => {
+    const repairs: string[] = [];
+    const alerts: CheckoutBlockedAlert[] = [];
+    const logs: Record<string, unknown>[] = [];
+    const placed = await placeVerifyCheckout({
+      dir,
+      head: 'e'.repeat(40),
+      workflowId: 'task:acme/demo#12',
+      checkout: async () => {
+        throw new Error('磁盘读到一半断了');
+      },
+      repair: async (target) => {
+        repairs.push(target);
+      },
+      log: (_message, fields) => {
+        if (fields) logs.push(fields);
+      },
+      onBlocked: async (alert) => {
+        alerts.push(alert);
+      },
+    });
+    expect(placed).toBe('blocked');
+    expect(repairs).toEqual([]);
+    expect(alerts[0]?.stage).toBe('unknown');
+    expect(alerts[0]?.body).toContain('磁盘读到一半断了');
+    expect(alerts[0]?.body).toContain('e'.repeat(40));
+    expect(alerts[0]?.body).not.toContain('mkdir');
+    expect(logs[0]).toMatchObject({ stage: 'unknown', error: '磁盘读到一半断了' });
   });
 
   it('修复本身失败：不第二次检出，报警正文仍含目录路径', async () => {
@@ -205,6 +475,8 @@ describe('建不出检出目录时报警里有路径', () => {
     expect(checkouts).toEqual([dir]);
     expect(blocked[0]).toContain(dir);
     expect(blocked[0]).toContain('ensure-tmp 没换成');
+    // 原错（EACCES）还在，不被修复那一下的错盖掉
+    expect(blocked[0]).toContain('EACCES');
   });
 
   it('不是权限问题：不修，仍报警且正文含目录路径', async () => {
