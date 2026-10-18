@@ -134,8 +134,15 @@ async function stage(context: BrowserContext, problems: PageProblems, scene: Sce
   // 有意造的 409 和断线：只放过修复那一条请求的
   for (const s of ['/repair', 'status of 409', 'ERR_TIMED_OUT']) problems.allow(s);
   await context.route(/\/api\/notifications\?/, async (route) => {
-    const res = await route.fetch();
-    const json = (await res.json()) as { items: Record<string, unknown>[] };
+    let res: Awaited<ReturnType<typeof route.fetch>>;
+    let json: { items: Record<string, unknown>[] };
+    try {
+      res = await route.fetch();
+      json = (await res.json()) as typeof json;
+    } catch {
+      // 页面已经取消了这次读（React Query 换新的一次、换页、用例收尾）：这条请求已经没人等，不改写
+      return;
+    }
     for (const n of json.items) {
       if (n.title !== STALLED) continue;
       n.dedupeKey = 'watchdog:idle-running:task-12';
@@ -146,7 +153,7 @@ async function stage(context: BrowserContext, problems: PageProblems, scene: Sce
         ...(scene.last ? { last: scene.last } : {}),
       };
     }
-    await route.fulfill({ response: res, json });
+    await route.fulfill({ response: res, json }).catch(() => undefined);
   });
   await context.route(/\/api\/notifications\/[^/?]+\/repair$/, async (route) => {
     const body = route.request().postDataJSON() as Body;
@@ -187,15 +194,18 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     await expect(card.getByTestId('repair-actions')).toContainText(HAND.detail);
     await expect(card.getByRole('button', { name: '叫醒任务继续' })).toContainText('推荐：现有的恢复入口');
     await expect(card.getByText('等你拍板')).toHaveCount(0);
+    await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-可点的动作');
 
     await card.getByRole('button', { name: '叫醒任务继续' }).dblclick();
     await expect(card.getByTestId('repair-busy')).toBeVisible();
     await expect(card.getByText(/已排队：叫醒任务继续/)).toBeVisible();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
-    await expect(card.getByText('已修复')).toHaveCount(0);
+    // 「已修复」作为状态出现才算（说明里那句「恢复了才写『已修复』」不算）
+    await expect(card.getByText('已修复', { exact: true })).toHaveCount(0);
     expect(scene.bodies).toHaveLength(1);
     expect(scene.bodies[0]).toMatchObject({ actionId: RECOVER.id, incident: INCIDENT });
+    await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-核验中');
 
     // 状态变更：后端核验成功（verified）以后重读，原卡才写已修复
@@ -203,7 +213,8 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     scene.last = record(first, 'verified', '核实恢复：同一任务和工作流 run 的原检测条件已恢复');
     await page.reload();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verified');
-    await expect(stalledCard(page).getByText('已修复')).toBeVisible();
+    await expect(stalledCard(page).getByText('已修复', { exact: true })).toBeVisible();
+    await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-已修复');
   });
 
@@ -258,6 +269,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     await card.getByRole('button', { name: '叫醒任务继续' }).click();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'no-receipt');
     await expect(card.getByTestId('repair-actions')).toHaveCount(0);
+    await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-没收到回执');
     await card.getByRole('button', { name: '再问一次（同一请求）' }).click();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
@@ -306,6 +318,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
       'href',
       /\/audit\?target=notification%3A/,
     );
+    await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-没修成');
   });
 
@@ -330,6 +343,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     const card = stalledCard(page);
     await card.getByRole('button', { name: '恢复引擎开关' }).click();
     await expect(card.getByTestId('repair-why-you')).toContainText('会动引擎总开关');
+    await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-要你本人拍');
     await card.getByRole('button', { name: '先不动' }).click();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'declined');
@@ -354,6 +368,7 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     await expect(card.getByTestId('repair-none')).toContainText('没接上任务现读');
     await expect(card.getByRole('link', { name: '到「提需求」写一句' })).toHaveAttribute('href', '/intake');
     await expect(card.getByRole('button', { name: '打开' })).toBeVisible();
+    await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-没有能点的');
     expect(scene.bodies).toHaveLength(0);
   });
