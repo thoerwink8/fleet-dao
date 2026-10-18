@@ -16,9 +16,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { subtaskWorkflowId, taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   confirmDeletionIdle,
+  confirmManagedTreeIdle,
   sweepWorktrees,
   type WorktreeSweepDeps,
 } from '../../src/jobs/worktree-sweep.ts';
@@ -29,9 +32,11 @@ import {
   holdCleanupLock,
   ignoreRuleAllowed,
   locateTree,
+  makeArchiveDir,
   type ProcLook,
   recheckPreservedArchive,
   treeProcessUsage,
+  writeExclusiveArchive,
 } from '../../src/real/complex-preserve.ts';
 import { localExec, type UserExec } from '../../src/real/exec.ts';
 import { preserveThenRemove, preserveWorktree } from '../../src/real/preserve-worktree.ts';
@@ -193,6 +198,7 @@ function restoreArchive(saved: string, dest: string): string {
     head: string;
     headRef: string | null;
     indexInfo: string;
+    indexBlob?: string;
     files: { path: string; kind: string; mode: number; sha256: string }[];
     merge: { name: string; sha256: string }[];
     stash: { sha: string; subject: string }[];
@@ -228,8 +234,14 @@ function restoreArchive(saved: string, dest: string): string {
       chmodSync(target, file.mode);
     }
   }
-  gitClean(repo, ['update-index', '--index-info'], Buffer.from(state.indexInfo));
   const gitDir = gitClean(repo, ['rev-parse', '--absolute-git-dir']).trim();
+  if (state.indexBlob) {
+    const indexBytes = readFileSync(join(saved, 'blobs', state.indexBlob));
+    expect(sha256(indexBytes)).toBe(state.indexBlob);
+    writeFileSync(join(gitDir, 'index'), indexBytes);
+  } else {
+    gitClean(repo, ['update-index', '--index-info'], Buffer.from(state.indexInfo));
+  }
   for (const item of state.merge) {
     const buf = readFileSync(join(saved, 'blobs', item.sha256));
     expect(sha256(buf)).toBe(item.sha256);
@@ -262,15 +274,34 @@ function procLook(
     list: () => Promise<readonly string[]>;
     cwd: (pid: number) => Promise<string>;
     uid: (pid: number) => Promise<string | null>;
-    ppid: (pid: number) => Promise<number | null>;
   }> = {},
 ): ProcLook {
   return {
     list: over.list ?? (async () => ['1']),
     cwd: over.cwd ?? (async () => '/work/tree/src'),
     uid: over.uid ?? (async () => '1'),
-    ppid: over.ppid ?? (async () => 1),
   };
+}
+
+function reachableCommits(dir: string): Set<string> {
+  const text = git(dir, 'rev-list', '--objects', '--all', '--reflog');
+  return new Set(
+    text
+      .split('\n')
+      .map((line) => line.split(/[\s]/)[0] ?? '')
+      .filter((sha) => /^[0-9a-f]{40}$/.test(sha)),
+  );
+}
+
+/** 只解开对象包，不抓成果包。伪引用上的提交必须已经在包里。 */
+function assertPackHasCommits(pack: Buffer, shas: readonly string[], label: string): void {
+  const bare = join(root, `pack-${label}`);
+  gitClean(root, ['init', '--bare', '-q', bare]);
+  gitClean(bare, ['unpack-objects'], pack);
+  for (const sha of shas) {
+    expect(gitClean(bare, ['cat-file', '-t', sha]).trim()).toBe('commit');
+    gitClean(bare, ['cat-file', '-e', sha]);
+  }
 }
 
 function sweepDeps(
@@ -357,13 +388,12 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     expect(ENVIRONMENT_FILES.map((item) => item.path)).toContain('.claude/settings.json');
   });
 
-  it('进程占用：树内 cwd 算在用；同主兄弟读不了 cwd 继续看，子孙读不了或 /proc 列不了算不清', async () => {
+  it('进程占用：树内 cwd 算在用；同主或树主读不了 cwd 算不清；别的用户读不到不算在用', async () => {
     const use = (look: ProcLook) => treeProcessUsage('/work/tree', '9', 10, 11, look);
     const deny = async () => Promise.reject(deniedCwd);
     expect(await use(procLook())).toBe('busy');
     expect(await use(procLook({ cwd: async () => '/work/tree (deleted)' }))).toBe('busy');
-    expect(await use(procLook({ cwd: deny, uid: async () => '9' }))).toBe('idle');
-    expect(await use(procLook({ cwd: deny, uid: async () => '9', ppid: async () => 10 }))).toBe('unknown');
+    expect(await use(procLook({ cwd: deny, uid: async () => '9' }))).toBe('unknown');
     expect(
       await use(
         procLook({
@@ -378,7 +408,6 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
           list: async () => ['1', '2'],
           cwd: async (pid) => (pid === 1 ? deny() : '/work/tree/file'),
           uid: async () => '9',
-          ppid: async (pid) => (pid === 1 ? 1 : 10),
         }),
       ),
     ).toBe('busy');
@@ -453,6 +482,86 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       }),
     ).toBe('unknown');
     expect(await ask()).toBe('idle');
+    const taskId = taskWorkflowId({ owner: 'acme', name: 'web' }, 12);
+    const redoId = taskWorkflowId({ owner: 'acme', name: 'web' }, 12, 2);
+    const subId = subtaskWorkflowId('abc');
+    const facts = async () => ({
+      taskId: 't',
+      state: 'queued' as const,
+      subtasks: [{ id: 'abc', key: 'keep' }],
+    });
+    expect(
+      await ask({
+        exceptWorkflowId: taskId,
+        issue: facts,
+        workflows: {
+          async state(id) {
+            return id === taskId || id === subId
+              ? { state: 'running' as const }
+              : { state: 'missing' as const };
+          },
+        },
+      }),
+    ).toBe('busy');
+    expect(
+      await ask({
+        exceptWorkflowId: taskId,
+        issue: async () => null,
+        workflows: {
+          async state(id) {
+            return id === taskId ? { state: 'running' as const } : { state: 'missing' as const };
+          },
+        },
+      }),
+    ).toBe('idle');
+    expect(
+      await ask({
+        exceptWorkflowId: redoId,
+        workflows: {
+          async state(id) {
+            return id === taskId ? { state: 'running' as const } : { state: 'missing' as const };
+          },
+        },
+      }),
+    ).toBe('busy');
+    expect(
+      await ask({
+        exceptWorkflowId: subId,
+        issue: facts,
+        workflows: {
+          async state(id) {
+            return id === taskId ? { state: 'running' as const } : { state: 'missing' as const };
+          },
+        },
+      }),
+    ).toBe('busy');
+    expect(
+      await ask({
+        exceptWorkflowId: subId,
+        issue: facts,
+        workflows: {
+          async state(id) {
+            return id === subId ? { state: 'running' as const } : { state: 'missing' as const };
+          },
+        },
+      }),
+    ).toBe('idle');
+    expect(
+      await confirmManagedTreeIdle({
+        root: '/work',
+        dir: '/work/acme_web/12-keep',
+        openSessions: async () => [],
+        issue: async () => null,
+      }),
+    ).toBe('unknown');
+    expect(
+      await confirmManagedTreeIdle({
+        root: '/work',
+        dir: '/work/acme_web/12-keep',
+        openSessions: async () => [{ path: '/work/acme_web/12-keep' }],
+        issue: async () => null,
+      }),
+    ).toBe('busy');
   });
 
   it('没有工作根或确认不了没人用时，复杂成果仍留树', async () => {
@@ -994,6 +1103,164 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     expect(readFileSync(join(restored, 'linked-dirty.txt'))).toEqual(body);
     expect(existsSync(join(restored, '.git', 'objects', 'info', 'alternates'))).toBe(false);
     expect(gitClean(restored, ['rev-parse', 'HEAD^{commit}']).trim()).toMatch(/^[0-9a-f]{40}$/);
+  });
+
+  it('多行 MERGE_HEAD 引用的提交进对象包，独立解包后还能 cat-file', async () => {
+    const t = tree('acme_web/12-merge');
+    dirtyFile(t);
+    const treeHash = git(t.dir, 'rev-parse', 'HEAD^{tree}');
+    const a = git(t.dir, 'commit-tree', treeHash, '-m', 'only-a');
+    const b = git(t.dir, 'commit-tree', treeHash, '-m', 'only-b');
+    writeFileSync(join(t.dir, '.git', 'MERGE_HEAD'), `${a}\n${b}\n`);
+    git(t.dir, 'reflog', 'expire', '--expire=all', '--all');
+    rmSync(join(t.dir, '.git', 'logs'), { recursive: true, force: true });
+    const reachable = reachableCommits(t.dir);
+    expect(reachable.has(a)).toBe(false);
+    expect(reachable.has(b)).toBe(false);
+    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    assertPackHasCommits(readFileSync(join(saved as string, 'objects.pack')), [a, b], 'merge');
+    expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
+  });
+
+  it('cherry-pick 序列里没有别的引用的后续提交也会进对象包', async () => {
+    const t = tree('acme_web/12-pick');
+    const dir = t.dir;
+    git(dir, 'init', '-q', '-b', 'main');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'user.email', 'fleet-test@localhost');
+    writeFileSync(join(dir, 'base.txt'), 'base\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'base');
+    git(dir, 'checkout', '-q', '-b', 'side');
+    writeFileSync(join(dir, 'base.txt'), 'a\n');
+    git(dir, 'commit', '-aq', '-m', 'A');
+    const a = git(dir, 'rev-parse', 'HEAD');
+    writeFileSync(join(dir, 'only-b.txt'), 'b\n');
+    git(dir, 'add', 'only-b.txt');
+    git(dir, 'commit', '-q', '-m', 'B');
+    const b = git(dir, 'rev-parse', 'HEAD');
+    git(dir, 'checkout', '-q', 'main');
+    writeFileSync(join(dir, 'base.txt'), 'main\n');
+    git(dir, 'commit', '-aq', '-m', 'main');
+    git(dir, 'update-ref', 'refs/fleet/incoming', 'HEAD');
+    const picked = runChild('git', ['cherry-pick', a, b], { cwd: dir, env: cleanEnv() });
+    expect(picked.status).not.toBe(0);
+    expect(readFileSync(join(dir, '.git', 'sequencer', 'todo'), 'utf8')).toContain(b.slice(0, 7));
+    git(dir, 'branch', '-D', 'side');
+    git(dir, 'reflog', 'expire', '--expire=all', '--all');
+    rmSync(join(dir, '.git', 'logs'), { recursive: true, force: true });
+    expect(reachableCommits(dir).has(b)).toBe(false);
+    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    assertPackHasCommits(readFileSync(join(saved as string, 'objects.pack')), [a, b], 'pick');
+    expect(existsSync(join(dir, 'base.txt'))).toBe(true);
+  });
+
+  it('认不出的序列状态拒绝删除并留下原树', async () => {
+    const t = tree('acme_web/12-seq');
+    dirtyFile(t);
+    mkdirSync(join(t.dir, '.git', 'sequencer'));
+    writeFileSync(join(t.dir, '.git', 'sequencer', 'message'), '不是提交\n');
+    const removed: string[] = [];
+    await expect(
+      preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, async () => {
+        removed.push(t.dir);
+        return { gone: false };
+      }),
+    ).rejects.toThrow(/不支持的序列状态/);
+    expect(removed).toEqual([]);
+    expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
+  });
+
+  it('intent-to-add 和索引标志按原始索引恢复，标志变了旧回执作废', async () => {
+    const t = tree('acme_web/12-intent');
+    dirtyFile(t);
+    writeFileSync(join(t.dir, 'kept.txt'), 'kept\n');
+    git(t.dir, 'add', 'kept.txt');
+    git(t.dir, 'commit', '-q', '-m', 'kept');
+    git(t.dir, 'update-ref', 'refs/fleet/incoming', 'HEAD');
+    writeFileSync(join(t.dir, 'new.txt'), 'intent\n');
+    git(t.dir, 'add', '-N', 'new.txt');
+    git(t.dir, 'update-index', '--skip-worktree', 'kept.txt');
+    expect(gitClean(t.dir, ['status', '--porcelain', '--', 'new.txt'])).toBe(' A new.txt\n');
+    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const restored = restoreArchive(saved as string, join(root, 'intent-restored'));
+    expect(gitClean(restored, ['status', '--porcelain', '--', 'new.txt'])).toBe(' A new.txt\n');
+    const flags = gitClean(restored, ['ls-files', '--debug']);
+    expect(flags).toContain('flags: 20004000');
+    expect(flags).toContain('flags: 40004000');
+    git(t.dir, 'update-index', '--assume-unchanged', 'base.txt');
+    const place = await locateTree(t);
+    await expect(
+      recheckPreservedArchive(t, saved as string, { workRoot, confirmIdle: idle }, place, []),
+    ).rejects.toThrow(/作废|对不上/);
+    expect(readFileSync(join(t.dir, 'new.txt'), 'utf8')).toBe('intent\n');
+    expect(gitClean(t.dir, ['ls-files', '--debug', '--', 'base.txt'])).toContain('flags: 8000');
+  });
+
+  it('只改回执里的 HEAD、指纹不动，删除前也拒绝', async () => {
+    const t = tree();
+    dirtyFile(t);
+    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const receiptPath = join(saved as string, 'receipt.json');
+    const receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) as { head: string; version: number };
+    const realHead = receipt.head;
+    receipt.head = 'a'.repeat(40);
+    writeFileSync(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`);
+    const place = await locateTree(t);
+    await expect(
+      recheckPreservedArchive(t, saved as string, { workRoot, confirmIdle: idle }, place, []),
+    ).rejects.toThrow(/HEAD/);
+    expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
+    receipt.version = 2;
+    receipt.head = realHead;
+    const old = join(archive, 'old-receipt');
+    mkdirSync(old);
+    writeFileSync(join(old, 'receipt.json'), `${JSON.stringify(receipt)}\n`);
+    await expect(recheckPreservedArchive(t, old, { workRoot, confirmIdle: idle }, place, [])).rejects.toThrow(
+      /认不出/,
+    );
+  });
+
+  it('归档子目录或父路径换成指向树外的符号链接时拒写拒读，不删原树', async () => {
+    const t = tree();
+    dirtyFile(t);
+    const outside = join(root, 'outside');
+    mkdirSync(outside);
+    const saved = await preserveWorktree(t, archive, { workRoot, confirmIdle: idle });
+    const blobs = join(saved as string, 'blobs');
+    rmSync(blobs, { recursive: true, force: true });
+    symlinkSync(outside, blobs);
+    const place = await locateTree(t);
+    await expect(
+      recheckPreservedArchive(t, saved as string, { workRoot, confirmIdle: idle }, place, []),
+    ).rejects.toThrow(/符号链接/);
+    expect(readdirSync(outside)).toEqual([]);
+    expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
+
+    symlinkSync(outside, join(archive, 'nested'));
+    await expect(makeArchiveDir(join(archive, 'nested', 'child'))).rejects.toThrow(/符号链接/);
+    await expect(
+      writeExclusiveArchive(join(archive, 'nested', 'evil.txt'), Buffer.from('no')),
+    ).rejects.toThrow(/符号链接/);
+    expect(existsSync(join(outside, 'child'))).toBe(false);
+    expect(existsSync(join(outside, 'evil.txt'))).toBe(false);
+
+    const locks = join(archive, '.locks');
+    if (existsSync(locks)) rmSync(locks, { recursive: true, force: true });
+    symlinkSync(outside, locks);
+    await expect(holdCleanupLock(archive, place)).rejects.toThrow(/符号链接/);
+    expect(readdirSync(outside)).toEqual([]);
+  });
+
+  it('生产删树前问工作流，并且只豁免调用方自己的编号', () => {
+    const index = readFileSync(fileURLToPath(new URL('../../src/real/index.ts', import.meta.url)), 'utf8');
+    expect(index).toContain('confirmManagedTreeIdle');
+    expect(index).toContain('exceptWorkflowId: caller.workflowId');
+    const ports = readFileSync(
+      fileURLToPath(new URL('../../src/real/github-ports.ts', import.meta.url)),
+      'utf8',
+    );
+    expect(ports).toContain('confirmTreeIdle(tree.dir, { workflowId: ctx.workflowId })');
   });
 
   it('标准清扫只在独立恢复通过后删复杂树，确认不了或非 Git 就留着', async () => {

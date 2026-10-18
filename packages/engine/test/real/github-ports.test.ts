@@ -134,7 +134,11 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
 
 function setup(
   over: Parameters<typeof fakeGh>[0] = {},
-  opts: { heartbeatEveryMs?: number; exec?: UserExec } = {},
+  opts: {
+    heartbeatEveryMs?: number;
+    exec?: UserExec;
+    confirmTreeIdle?: (dir: string, caller?: { workflowId?: string }) => Promise<'idle' | 'busy' | 'unknown'>;
+  } = {},
 ) {
   const { gh, calls } = fakeGh(over);
   const trees = fakeTrees(join(root, 'work'));
@@ -279,6 +283,38 @@ describe('建树、收树', () => {
     // 删的那 120 毫秒里（每 20 毫秒一次）至少又报了两次
     expect(beats - beatsAtRemove).toBeGreaterThanOrEqual(2);
     expect(trees.owners.has(stale)).toBe(false);
+  });
+
+  it('删树前把这次工作流编号交给占用确认，在跑就留树', async () => {
+    const seen: { dir: string; workflowId: string | undefined }[] = [];
+    const { ports, trees } = setup(
+      {},
+      {
+        confirmTreeIdle: async (dir, caller) => {
+          seen.push({ dir, workflowId: caller?.workflowId });
+          return 'busy';
+        },
+      },
+    );
+    const dir = await seededTree(trees);
+    writeFileSync(join(dir, 'README.md'), '# 改了没提交\n');
+    const workflowId = 'task:acme/widgets#12';
+    await expect(
+      ports.removeWorktree(
+        { taskId: 't1', subtaskKey: 'login', repo, path: dir, branch: BRANCH, archive: true },
+        { ...ctx, workflowId },
+      ),
+    ).rejects.toMatchObject({ code: 'WORKTREE_PRESERVED' });
+    expect(seen).toEqual([{ dir, workflowId }]);
+    expect(existsSync(dir)).toBe(true);
+    await expect(
+      ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, { ...ctx, workflowId }),
+    ).rejects.toMatchObject({ code: 'WORKTREE_PRESERVED' });
+    expect(seen).toEqual([
+      { dir, workflowId },
+      { dir, workflowId },
+    ]);
+    expect(readFileSync(join(dir, 'README.md'), 'utf8')).toContain('改了没提交');
   });
 
   it('没合并就收：复杂未提交成果留原树；清理后本来就不在的正常返回', async () => {

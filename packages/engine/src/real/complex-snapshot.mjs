@@ -1,5 +1,7 @@
 // 复杂工作树快照。capture 打帧，inspect 只出状态，verify 在临时仓独立恢复后再采集。
-// 恢复仓不写 alternates，也不读调用方的 GIT_DIR / GIT_OBJECT_DIRECTORY。源仓上不做 reset、clean、stash drop。
+// 恢复仓不写 alternates，也不读调用方的 GIT_DIR / GIT_OBJECT_DIRECTORY。
+// 对象包只按清单里的对象名打包。抓成果包之前先证明这些对象都在包里，不靠 refs、reflog 或成果包补洞。
+// 索引按原始字节写回；指纹带标志和 resolve-undo。源仓上不做 reset、clean、stash drop。
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
@@ -68,6 +70,8 @@ function gitEnv() {
   env.LANGUAGE = 'C';
   env.GIT_CONFIG_NOSYSTEM = '1';
   env.GIT_CONFIG_GLOBAL = '/dev/null';
+  // 快照期间不许 git 为了刷新 stat 改写索引，否则标志指纹会对不上。
+  env.GIT_OPTIONAL_LOCKS = '0';
   return env;
 }
 
@@ -312,6 +316,277 @@ function addIndexOids(indexInfo, into) {
   }
 }
 
+/** 和 complex-preserve.ts 的 indexCanonical 必须逐字相同。stage 行相等不算索引相等。 */
+function indexCanonical(indexInfo, indexFlags, resolveUndo) {
+  return `stage\n${indexInfo}flags\n${indexFlags}\nresolve-undo\n${resolveUndo}\n`;
+}
+
+const INDEX_FLAG_KNOWN = (0x3000 | 0x4000 | 0x8000 | 0x20000000 | 0x40000000 | 0x80000000) >>> 0;
+const INDEX_EXTENSIONS = new Set(['TREE', 'REUC', 'UNTR', 'FSMN', 'EOIE', 'IEOT', 'sdir']);
+
+function parseIndex(buf) {
+  if (buf.length < 32 || buf.subarray(0, 4).toString('latin1') !== 'DIRC') fail('索引签名不对，不能保全');
+  const version = buf.readUInt32BE(4);
+  const count = buf.readUInt32BE(8);
+  if (version !== 2 && version !== 3) fail(`索引版本 ${version} 不能完整保全，保留原树`);
+  const end = buf.length - 20;
+  if (end < 12) fail('索引被截断');
+  const sum = createHash('sha1').update(buf.subarray(0, end)).digest();
+  if (!sum.equals(buf.subarray(end))) fail('索引校验和不对，不能保全');
+  let off = 12;
+  const lines = [];
+  for (let i = 0; i < count; i += 1) {
+    if (off + 62 > end) fail('索引条目被截断');
+    const flags16 = buf.readUInt16BE(off + 60);
+    let flags = flags16;
+    let nameAt = off + 62;
+    if ((flags16 & 0x4000) !== 0) {
+      if (off + 64 > end) fail('索引扩展标志被截断');
+      flags = (flags16 | (buf.readUInt16BE(off + 62) << 16)) >>> 0;
+      nameAt = off + 64;
+    }
+    const nameLenField = flags16 & 0x0fff;
+    let nameLen = nameLenField;
+    if (nameLenField === 0x0fff) {
+      let cursor = nameAt;
+      while (cursor < end && buf[cursor] !== 0) cursor += 1;
+      nameLen = cursor - nameAt;
+    }
+    if (nameAt + nameLen >= end || buf[nameAt + nameLen] !== 0) fail('索引文件名被截断');
+    const semantic = (flags & ~0x0fff) >>> 0;
+    const unknown = (semantic & ~INDEX_FLAG_KNOWN) >>> 0;
+    const name = buf.subarray(nameAt, nameAt + nameLen).toString('utf8');
+    if (unknown !== 0) fail(`索引有不能保全的标志 ${unknown.toString(16)}：${name}`);
+    const stage = (flags16 & 0x3000) >> 12;
+    lines.push(`${stage} ${semantic.toString(16)} ${name}`);
+    const entrySize = (nameAt - off + nameLen + 8) & ~7;
+    if (entrySize < nameAt - off + nameLen + 1) fail('索引条目长度不对');
+    off += entrySize;
+    if (off > end) fail('索引条目越界');
+  }
+  let resolveUndo = '';
+  while (off + 8 <= end) {
+    const sig = buf.subarray(off, off + 4).toString('latin1');
+    const size = buf.readUInt32BE(off + 4);
+    off += 8;
+    if (off + size > end) fail('索引扩展被截断');
+    const body = buf.subarray(off, off + size);
+    off += size;
+    if (sig === 'link') fail('分离索引不能自包含保全，保留原树');
+    if (sig === 'REUC') resolveUndo = formatResolveUndo(body);
+    else if (!INDEX_EXTENSIONS.has(sig)) fail(`索引扩展 ${sig} 不能保全，保留原树`);
+  }
+  if (off !== end) fail('索引尾部对不上');
+  return { indexFlags: lines.join('\n'), resolveUndo };
+}
+
+function formatResolveUndo(body) {
+  const lines = [];
+  let at = 0;
+  while (at < body.length) {
+    const pathEnd = body.indexOf(0, at);
+    if (pathEnd < 0) fail('resolve-undo 路径被截断');
+    const path = body.subarray(at, pathEnd).toString('utf8');
+    at = pathEnd + 1;
+    const stages = [];
+    for (let stage = 0; stage < 3; stage += 1) {
+      if (at >= body.length) fail('resolve-undo 被截断');
+      if (body[at] === 0) {
+        stages.push('-');
+        at += 1;
+        continue;
+      }
+      const end = body.indexOf(0, at);
+      if (end < 0) fail('resolve-undo 被截断');
+      stages.push(body.subarray(at, end).toString('utf8'));
+      at = end + 1;
+    }
+    lines.push(`${path}\t${stages.join(' ')}`);
+  }
+  return lines.join('\n');
+}
+
+function resolveObject(expr, cwd) {
+  if (/^[0-9a-f]{40}$/.test(expr)) {
+    const kind = spawnSync(gitBin, ['cat-file', '-t', expr], { cwd, env: gitEnv() });
+    if (kind.status !== 0) fail(`对象缺失：${expr}`);
+    return expr;
+  }
+  const result = spawnSync(gitBin, ['rev-parse', '--verify', `${expr}^{object}`], { cwd, env: gitEnv() });
+  if (result.status !== 0) fail(`序列里的提交认不出：${expr.slice(0, 80)}`);
+  const sha = result.stdout.toString('utf8').trim();
+  if (!/^[0-9a-f]{40}$/.test(sha)) fail(`序列里的提交认不出：${expr.slice(0, 80)}`);
+  return sha;
+}
+
+const CLOSED = new Set();
+
+function addClosure(sha, cwd, into) {
+  if (CLOSED.has(sha)) return;
+  CLOSED.add(sha);
+  into.add(sha);
+  const kind = spawnSync(gitBin, ['cat-file', '-t', sha], { cwd, env: gitEnv() });
+  if (kind.status !== 0) fail(`对象缺失：${sha}`);
+  const type = kind.stdout.toString('utf8').trim();
+  if (type === 'blob') return;
+  if (type === 'commit') {
+    addOids(git(['rev-list', '--objects', sha], cwd).toString('utf8'), into);
+    return;
+  }
+  if (type === 'tag') {
+    const peeled = git(['rev-parse', '--verify', `${sha}^{}`], cwd)
+      .toString('utf8')
+      .trim();
+    if (!/^[0-9a-f]{40}$/.test(peeled)) fail(`标签 ${sha} 指的对象认不出`);
+    addClosure(peeled, cwd, into);
+    return;
+  }
+  if (type === 'tree') {
+    for (const line of git(['ls-tree', '-r', '-t', sha], cwd).toString('utf8').split('\n')) {
+      if (!line) continue;
+      const matched = /^[0-9]+ (?:blob|tree|commit) ([0-9a-f]{40})\b/.exec(line);
+      if (!matched?.[1]) fail(`树 ${sha} 里有认不出的对象`);
+      into.add(matched[1]);
+    }
+    return;
+  }
+  fail(`对象类型不能归档：${type} ${sha}`);
+}
+
+function pointerLines(name, text) {
+  const lines = text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((line) => line.length > 0);
+  if (lines.length === 0) fail(`${name} 没有合并头，不能保全`);
+  for (const line of lines) {
+    if (!/^[0-9a-f]{40}$/.test(line)) fail(`${name} 里有认不出的合并头：${line.slice(0, 80)}`);
+  }
+  return lines;
+}
+
+const TODO_FILES = new Set(['todo', 'git-rebase-todo', 'done']);
+const COMMIT_CMDS = new Set([
+  'pick',
+  'p',
+  'revert',
+  'reword',
+  'r',
+  'edit',
+  'e',
+  'squash',
+  's',
+  'fixup',
+  'f',
+  'drop',
+  'd',
+]);
+const SKIP_CMDS = new Set(['exec', 'x', 'break', 'b', 'label', 'l', 'noop', 'n', 'update-ref']);
+
+function todoObjects(name, text, cwd) {
+  const found = [];
+  for (const raw of text.replace(/\r\n/g, '\n').split('\n')) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const parts = line.split(/\s+/);
+    const cmd = parts[0] ?? '';
+    if (SKIP_CMDS.has(cmd)) continue;
+    if (cmd === 'reset') {
+      const arg = parts[1] ?? '';
+      if (!arg) fail(`${name} 的 reset 缺参数`);
+      if (/^[0-9a-f]{4,40}$/.test(arg)) found.push(resolveObject(arg, cwd));
+      continue;
+    }
+    if (cmd === 'merge' || cmd === 'm') {
+      const flag = parts.indexOf('-C') >= 0 ? parts.indexOf('-C') : parts.indexOf('-c');
+      if (flag >= 0) {
+        const sha = parts[flag + 1];
+        if (!sha || sha.startsWith('-')) fail(`${name} 的 merge 缺提交：${line.slice(0, 80)}`);
+        found.push(resolveObject(sha, cwd));
+      }
+      continue;
+    }
+    if (COMMIT_CMDS.has(cmd)) {
+      let sha = parts[1] ?? '';
+      if (
+        (cmd === 'fixup' || cmd === 'f' || cmd === 'squash' || cmd === 's') &&
+        (sha === '-C' || sha === '-c')
+      ) {
+        sha = parts[2] ?? '';
+      }
+      if (!sha || sha.startsWith('-')) fail(`${name} 的序列指令缺提交：${line.slice(0, 80)}`);
+      found.push(resolveObject(sha, cwd));
+      continue;
+    }
+    fail(`${name} 有不支持的序列指令：${line.slice(0, 80)}`);
+  }
+  return found;
+}
+
+function sequenceObjects(itemName, text, cwd) {
+  const top = itemName.split('/')[0] ?? '';
+  const base = itemName.split('/').pop() ?? '';
+  if (POINTER.has(top) && itemName === top) return pointerLines(itemName, text);
+  if (top !== 'sequencer' && top !== 'rebase-merge' && top !== 'rebase-apply') return [];
+  if (TODO_FILES.has(base)) return todoObjects(itemName, text, cwd);
+  const lines = text
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((line) => line.length > 0);
+  if (lines.length > 0 && lines.every((line) => /^[0-9a-f]{40}$/.test(line))) return lines;
+  fail(`不支持的序列状态 ${itemName}，不能只存文字就删树`);
+  return [];
+}
+
+function rejectSplitIndex(cwd) {
+  const configured = spawnSync(gitBin, ['config', '--get', '--type=bool', 'core.splitIndex'], {
+    cwd,
+    env: gitEnv(),
+  });
+  if (configured.status === 0 && configured.stdout.toString('utf8').trim() === 'true') {
+    fail('分离索引不能自包含保全，保留原树');
+  }
+  if (configured.status !== 0 && configured.status !== 1) fail('看分离索引没看成');
+  for (const arg of ['--absolute-git-dir', '--git-common-dir']) {
+    const rel = git(['rev-parse', arg], cwd).toString('utf8').trim();
+    const abs = rel.startsWith('/') ? rel : join(cwd, rel);
+    let names;
+    try {
+      names = readdirSync(abs);
+    } catch (error) {
+      fail(`列 Git 目录失败：${error instanceof Error ? error.message : '读不了'}`);
+    }
+    if (names.some((name) => name.startsWith('sharedindex'))) fail('分离索引不能自包含保全，保留原树');
+  }
+}
+
+function readIndexBytes(cwd) {
+  rejectSplitIndex(cwd);
+  const format = git(['rev-parse', '--show-object-format'], cwd).toString('utf8').trim();
+  if (format !== 'sha1') fail(`对象格式 ${format || '空的'} 不能完整保全索引，保留原树`);
+  const lockRel = gitPath('index.lock', cwd);
+  const lockAbs = lockRel.startsWith('/') ? lockRel : join(cwd, lockRel);
+  try {
+    lstatSync(lockAbs);
+    fail('索引锁还在，不能保全，保留原树');
+  } catch (error) {
+    if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') {
+      fail('看索引锁没看成');
+    }
+  }
+  const rel = gitPath('index', cwd);
+  const abs = rel.startsWith('/') ? rel : join(cwd, rel);
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch (error) {
+    fail(`读索引失败：${error instanceof Error ? error.message : '读不了'}`);
+  }
+  if (st.isSymbolicLink()) fail('索引是符号链接，不归档');
+  if (!st.isFile()) fail('索引不是普通文件，不能保全');
+  return readNoFollow(abs, 'index');
+}
+
 function mergeText(cwd, name) {
   const top = name.split('/')[0] ?? '';
   const rest = name.slice(top.length + 1);
@@ -321,6 +596,7 @@ function mergeText(cwd, name) {
 }
 
 function collect(cwd, keepBytes) {
+  CLOSED.clear();
   const blobs = keepBytes ? new Map() : null;
   const head = git(['rev-parse', 'HEAD'], cwd).toString('utf8').trim();
   if (!/^[0-9a-f]{40}$/.test(head)) fail(`HEAD 认不出：${head}`);
@@ -332,8 +608,14 @@ function collect(cwd, keepBytes) {
   const tree = git(['rev-parse', 'HEAD^{tree}'], cwd).toString('utf8').trim();
   const refs = git(['for-each-ref', '--format=%(objectname) %(refname)'], cwd).toString('utf8');
   const identity = `${head}\n${tree}\n${refs}`;
-  const indexRaw = git(['ls-files', '--stage', '-z'], cwd);
+  const indexBytes = readIndexBytes(cwd);
+  const indexBlob = sha256(indexBytes);
+  const parsedIndex = parseIndex(indexBytes);
   const indexInfo = git(['ls-files', '--stage'], cwd).toString('utf8');
+  const indexFlags = parsedIndex.indexFlags;
+  const resolveUndo = parsedIndex.resolveUndo;
+  const indexSha = sha256(Buffer.from(indexCanonical(indexInfo, indexFlags, resolveUndo)));
+  blobs?.set(indexBlob, indexBytes);
   const files = [];
   const ignored = [];
   walk(cwd, '', files, ignored, blobs);
@@ -348,17 +630,8 @@ function collect(cwd, keepBytes) {
     addOids(git(['rev-list', '--objects', entry.sha], cwd).toString('utf8'), oids);
   }
   for (const item of merge) {
-    const top = item.name.split('/')[0] ?? '';
-    if (!POINTER.has(top) || item.name !== top) continue;
-    const text = mergeText(cwd, item.name).toString('utf8').trim();
-    if (!/^[0-9a-f]{40}$/.test(text)) continue;
-    oids.add(text);
-    const kind = spawnSync(gitBin, ['cat-file', '-t', text], { cwd, env: gitEnv() });
-    if (kind.status !== 0) fail(`合并状态 ${item.name} 指向的对象缺失：${text}`);
-    const type = kind.stdout.toString('utf8').trim();
-    if (type === 'commit' || type === 'tree' || type === 'tag') {
-      addOids(git(['rev-list', '--objects', text], cwd).toString('utf8'), oids);
-    }
+    const text = mergeText(cwd, item.name).toString('utf8');
+    for (const sha of sequenceObjects(item.name, text, cwd)) addClosure(sha, cwd, oids);
   }
   const list = [...oids].sort();
   const checked = git(
@@ -382,12 +655,15 @@ function collect(cwd, keepBytes) {
   merge.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return {
     state: {
-      version: 2,
+      version: 3,
       head,
       headRef,
       identity,
-      indexSha: sha256(indexRaw),
+      indexSha,
       indexInfo,
+      indexFlags,
+      resolveUndo,
+      indexBlob,
       files,
       ignored,
       merge,
@@ -495,10 +771,19 @@ function restore(frame) {
   mkdirSync(root, { mode: 0o700 });
   const repo = join(root, 'repo');
   try {
+    if (state.version !== 3 || typeof state.indexBlob !== 'string')
+      fail('快照状态不是完整版本，不能放行删除');
     git(['init', '-q', '-b', 'main', repo], root);
     // git 2.43 拒绝把成果包抓进当前检出的分支。这个名字不会落成引用。
     git(['symbolic-ref', 'HEAD', 'refs/heads/fleet-restore-unborn'], repo);
     git(['unpack-objects'], repo, pack);
+    for (const obj of state.objects) {
+      const got = spawnSync(gitBin, ['-C', repo, 'cat-file', '-t', obj.sha], { env: gitEnv() });
+      if (got.status !== 0) fail(`对象包缺 ${obj.sha}，不能靠成果包补`);
+      if (got.stdout.toString('utf8').trim() !== obj.type) {
+        fail(`对象包里的 ${obj.sha} 应是 ${obj.type}，实际 ${got.stdout.toString('utf8').trim() || '没有'}`);
+      }
+    }
     const bundlePath = join(root, 'recovery.bundle');
     writeFileSync(bundlePath, bundle, { mode: 0o600 });
     const verified = spawnSync(gitBin, ['-C', repo, 'bundle', 'verify', bundlePath], { env: gitEnv() });
@@ -536,7 +821,18 @@ function restore(frame) {
         });
       } else fail(`认不出的文件种类：${file.kind}`);
     }
-    git(['update-index', '--index-info'], repo, Buffer.from(state.indexInfo));
+    const indexBuf = blobs.get(state.indexBlob);
+    if (!indexBuf || sha256(indexBuf) !== state.indexBlob) fail('归档缺索引内容');
+    const indexRel = gitPath('index', repo);
+    const indexAbs = indexRel.startsWith('/') ? indexRel : join(repo, indexRel);
+    try {
+      if (lstatSync(indexAbs).isSymbolicLink()) fail('恢复索引是符号链接');
+    } catch (error) {
+      if (!error || typeof error !== 'object' || !('code' in error) || error.code !== 'ENOENT') {
+        fail('看恢复索引没看成');
+      }
+    }
+    writeFileSync(indexAbs, indexBuf, { mode: 0o600 });
     const gitDir = git(['rev-parse', '--absolute-git-dir'], repo).toString('utf8').trim();
     for (const item of state.merge) {
       safeRel(item.name);
@@ -569,11 +865,10 @@ try {
   } else if (mode === 'capture') {
     const { state, blobs } = collect(process.cwd(), true);
     const oids = Buffer.from(`${state.objects.map((item) => item.sha).join('\n')}\n`);
-    const pack = git(
-      ['pack-objects', '--stdout', '--all', '--reflog', '--indexed-objects'],
-      process.cwd(),
-      oids,
-    );
+    // git 2.43 把单独的 --stdin 缩成 --stdin-packs，不能拿来传对象名。
+    // --all 会改走修订列表，只被 MERGE_HEAD、sequencer/todo 指着、又不在 refs/reflog/index 的对象进不了包。
+    // 这里不传这些开关：pack-objects 默认从标准输入读对象名，清单里的每一个都要进包。
+    const pack = git(['pack-objects', '--stdout'], process.cwd(), oids);
     if (pack.length === 0) fail('对象包是空的');
     const bundle = git(['bundle', 'create', '-', '--all', 'HEAD'], process.cwd());
     if (bundle.length === 0) fail('成果包是空的');

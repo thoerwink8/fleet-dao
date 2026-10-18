@@ -5,7 +5,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { constants } from 'node:fs';
 import {
-  chmod,
+  type FileHandle,
   lstat,
   mkdir,
   open,
@@ -13,7 +13,6 @@ import {
   readFile,
   readlink,
   realpath,
-  stat,
   unlink,
 } from 'node:fs/promises';
 import { join, resolve, sep } from 'node:path';
@@ -76,12 +75,17 @@ interface SnapObject {
 }
 
 interface ComplexState {
-  version: 2;
+  version: 3;
   head: string;
   headRef: string | null;
   identity: string;
   indexSha: string;
   indexInfo: string;
+  /** 每条索引的阶段和标志（assume-unchanged、intent-to-add、skip-worktree）。stage 行相等不算索引相等。 */
+  indexFlags: string;
+  resolveUndo: string;
+  /** 原始索引字节的哈希。恢复时整份写回，不经过 update-index --index-info。 */
+  indexBlob: string;
   files: SnapFile[];
   ignored: SnapIgnore[];
   merge: SnapMerge[];
@@ -92,7 +96,7 @@ interface ComplexState {
 }
 
 interface ComplexReceipt {
-  version: 2;
+  version: 3;
   kind: 'complex';
   taskId?: string;
   branch?: string;
@@ -113,8 +117,6 @@ export interface ProcLook {
   list(): Promise<readonly string[]>;
   cwd(pid: number): Promise<string>;
   uid(pid: number): Promise<string | null>;
-  /** 父进程号。进程没了抛 ENOENT 或 ESRCH。 */
-  ppid(pid: number): Promise<number | null>;
 }
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -169,6 +171,11 @@ function ignoreRules(preserved: readonly string[]): string[] {
   ];
 }
 
+/** 和 complex-snapshot.mjs 的 indexCanonical 必须逐字相同。 */
+function indexCanonical(indexInfo: string, indexFlags: string, resolveUndo: string): string {
+  return `stage\n${indexInfo}flags\n${indexFlags}\nresolve-undo\n${resolveUndo}\n`;
+}
+
 function comparable(state: ComplexState): string {
   return JSON.stringify({
     version: state.version,
@@ -177,6 +184,9 @@ function comparable(state: ComplexState): string {
     identity: state.identity,
     indexSha: state.indexSha,
     indexInfo: state.indexInfo,
+    indexFlags: state.indexFlags,
+    resolveUndo: state.resolveUndo,
+    indexBlob: state.indexBlob,
     files: state.files,
     merge: state.merge,
     stash: state.stash,
@@ -192,11 +202,14 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 
 function asState(value: unknown, preserved: readonly string[], dir: string): ComplexState {
   const row = asRecord(value);
-  if (row?.version !== 2) throw keep('ARCHIVE_FAILED', '快照状态认不出', dir);
+  if (row?.version !== 3) throw keep('ARCHIVE_FAILED', '快照状态不是完整版本，旧回执不能放行删除', dir);
   const head = row.head;
   const identity = row.identity;
   const indexSha = row.indexSha;
   const indexInfo = row.indexInfo;
+  const indexFlags = row.indexFlags;
+  const resolveUndo = row.resolveUndo;
+  const indexBlob = row.indexBlob;
   const objectsSha = row.objectsSha;
   if (typeof head !== 'string' || !SHA.test(head)) throw keep('ARCHIVE_FAILED', '快照 HEAD 认不出', dir);
   if (row.headRef !== null && (typeof row.headRef !== 'string' || !row.headRef.startsWith('refs/'))) {
@@ -205,8 +218,19 @@ function asState(value: unknown, preserved: readonly string[], dir: string): Com
   if (typeof identity !== 'string' || !identity.startsWith(`${head}\n`)) {
     throw keep('ARCHIVE_FAILED', '快照身份认不出', dir);
   }
-  if (typeof indexSha !== 'string' || !SHA256.test(indexSha) || typeof indexInfo !== 'string') {
+  if (
+    typeof indexSha !== 'string' ||
+    !SHA256.test(indexSha) ||
+    typeof indexInfo !== 'string' ||
+    typeof indexFlags !== 'string' ||
+    typeof resolveUndo !== 'string' ||
+    typeof indexBlob !== 'string' ||
+    !SHA256.test(indexBlob)
+  ) {
     throw keep('ARCHIVE_FAILED', '快照索引认不出', dir);
+  }
+  if (sha256(Buffer.from(indexCanonical(indexInfo, indexFlags, resolveUndo))) !== indexSha) {
+    throw keep('ARCHIVE_FAILED', '快照索引指纹对不上', dir);
   }
   if (typeof objectsSha !== 'string' || !SHA256.test(objectsSha) || !Array.isArray(row.files)) {
     throw keep('ARCHIVE_FAILED', '快照对象清单认不出', dir);
@@ -287,12 +311,15 @@ function asState(value: unknown, preserved: readonly string[], dir: string): Com
   const listed = sha256(Buffer.from(objects.map((item) => `${item.sha} ${item.type}`).join('\n')));
   if (listed !== objectsSha) throw keep('ARCHIVE_FAILED', '快照对象哈希对不上', dir);
   return {
-    version: 2,
+    version: 3,
     head,
     headRef: row.headRef as string | null,
     identity,
     indexSha,
     indexInfo,
+    indexFlags,
+    resolveUndo,
+    indexBlob,
     files,
     ignored,
     merge,
@@ -321,41 +348,14 @@ const linuxProcLook: ProcLook = {
       .find((item) => item.startsWith('Uid:'));
     return line?.split(/\s+/)[1] ?? null;
   },
-  async ppid(pid) {
-    const line = (await readFile(`/proc/${pid}/status`, 'utf8'))
-      .split('\n')
-      .find((item) => item.startsWith('PPid:'));
-    const value = Number(line?.split(/\s+/)[1]);
-    return Number.isInteger(value) ? value : null;
-  },
 };
 
 /**
- * 有进程的 cwd 在这棵树里就是在用。/proc 列不了算确认不了。
- * yama.ptrace_scope 默认看不了同主的兄弟进程，那种 EACCES 不是「有人在这棵树里」。
- * 同主子孙的 cwd 读不了、uid 读不了，才算确认不了。看见有人在用，优先于确认不了。
+ * 有进程的 cwd 在这棵树里就是在用。/proc 列不了、同主或树主的 cwd 读不到，都算确认不了，留树。
+ * 父子关系证明不了 cwd 在树外：读不到就保留原树。
+ * 别的用户读不到 cwd 不当成在用，否则多用户机器上一棵树永远清不掉。
+ * 进程已经退出（ENOENT、ESRCH）跳过。看见有人在用，优先于确认不了。
  */
-async function descendantOf(pid: number, selfPid: number, look: ProcLook): Promise<'yes' | 'no' | 'unknown'> {
-  let current = pid;
-  const seen = new Set<number>();
-  for (let hop = 0; hop < 64; hop += 1) {
-    if (seen.has(current)) return 'unknown';
-    seen.add(current);
-    let parent: number | null;
-    try {
-      parent = await look.ppid(current);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      return code === 'ENOENT' || code === 'ESRCH' ? 'no' : 'unknown';
-    }
-    if (parent === null) return 'unknown';
-    if (parent === selfPid) return 'yes';
-    if (parent <= 1) return 'no';
-    current = parent;
-  }
-  return 'unknown';
-}
-
 export async function treeProcessUsage(
   real: string,
   ownerUid: string,
@@ -395,7 +395,7 @@ export async function treeProcessUsage(
         continue;
       }
       if (uid !== ownerUid && uid !== selfUid) continue;
-      if ((await descendantOf(pid, selfPid, look)) !== 'no') unseen = true;
+      unseen = true;
     }
   }
   return unseen ? 'unknown' : 'idle';
@@ -415,34 +415,174 @@ async function pidAlive(pid: number): Promise<'alive' | 'dead' | 'unknown'> {
   }
 }
 
+const ARCHIVE_NAME = /^[A-Za-z0-9._-]+$/;
+
+class ArchiveNameExists extends Error {
+  constructor() {
+    super('归档名字已经有了');
+    this.name = 'ArchiveNameExists';
+  }
+}
+
+/** 从根逐级打开。只挡最后一级挡不住上级被换成符号链接之后写出到树外。 */
+function archiveParts(path: string): string[] {
+  const lex = resolve(path);
+  if (!lex.startsWith(sep)) throw keep('ARCHIVE_FAILED', '归档路径不是绝对路径');
+  const parts = lex.split(sep).filter((part) => part.length > 0);
+  if (parts.length === 0) throw keep('ARCHIVE_FAILED', '归档路径是根，拒绝写出');
+  for (const part of parts) {
+    if (part === '.' || part === '..' || !ARCHIVE_NAME.test(part)) {
+      throw keep('ARCHIVE_FAILED', '归档路径有不能打开的名字，拒绝写出');
+    }
+  }
+  return parts;
+}
+
+async function openFromRoot(parts: readonly string[], leafFlags: number): Promise<FileHandle> {
+  const noFollow = constants.O_NOFOLLOW;
+  const directory = constants.O_DIRECTORY;
+  if (typeof noFollow !== 'number' || typeof directory !== 'number') {
+    throw keep('ARCHIVE_FAILED', '这个系统不能拒绝跟随符号链接');
+  }
+  const dirFlags = constants.O_RDONLY | directory | noFollow;
+  let current = await open(sep, dirFlags);
+  try {
+    for (let i = 0; i < parts.length; i += 1) {
+      const name = parts[i] ?? '';
+      const last = i === parts.length - 1;
+      const flags = (last ? leafFlags : dirFlags) | noFollow;
+      let next: FileHandle;
+      try {
+        next = await open(`/proc/self/fd/${current.fd}/${name}`, flags);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === 'ELOOP' || code === 'ENOTDIR')
+          throw keep('ARCHIVE_FAILED', '归档路径上有符号链接，拒绝写出');
+        if (code === 'ENOENT') throw keep('ARCHIVE_FAILED', '归档缺文件');
+        throw keep('ARCHIVE_FAILED', '归档路径打不开');
+      }
+      await current.close();
+      current = next;
+    }
+    return current;
+  } catch (error) {
+    await current.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function makeArchiveDir(path: string): Promise<void> {
+  const parts = archiveParts(path);
+  const name = parts[parts.length - 1] ?? '';
+  const parent = await openFromRoot(parts.slice(0, -1), constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    await mkdir(`/proc/self/fd/${parent.fd}/${name}`, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw keep('ARCHIVE_FAILED', '归档目录建不起来');
+  } finally {
+    await parent.close();
+  }
+  const handle = await openFromRoot(parts, constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    await handle.chmod(0o700);
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function writeExclusiveArchive(path: string, bytes: Buffer): Promise<void> {
+  const parts = archiveParts(path);
+  const name = parts[parts.length - 1] ?? '';
+  const parent = await openFromRoot(parts.slice(0, -1), constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    const flag = constants.O_NOFOLLOW;
+    if (typeof flag !== 'number') throw keep('ARCHIVE_FAILED', '这个系统不能拒绝跟随符号链接');
+    let handle: FileHandle;
+    try {
+      handle = await open(
+        `/proc/self/fd/${parent.fd}/${name}`,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | flag,
+        0o600,
+      );
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') throw new ArchiveNameExists();
+      if (code === 'ELOOP') throw keep('ARCHIVE_FAILED', '归档被换成符号链接');
+      throw keep('ARCHIVE_FAILED', '归档写不进去');
+    }
+    try {
+      await handle.writeFile(bytes);
+      await handle.sync();
+      await handle.chmod(0o600);
+    } finally {
+      await handle.close();
+    }
+  } finally {
+    await parent.close();
+  }
+}
+
+export async function readArchiveFile(path: string): Promise<Buffer> {
+  const handle = await openFromRoot(archiveParts(path), constants.O_RDONLY);
+  try {
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+export async function listArchiveDir(path: string): Promise<string[]> {
+  const handle = await openFromRoot(archiveParts(path), constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    return await readdir(`/proc/self/fd/${handle.fd}`);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function unlinkArchive(path: string): Promise<void> {
+  const parts = archiveParts(path);
+  const name = parts[parts.length - 1] ?? '';
+  const parent = await openFromRoot(parts.slice(0, -1), constants.O_RDONLY | constants.O_DIRECTORY);
+  try {
+    await unlink(`/proc/self/fd/${parent.fd}/${name}`);
+  } finally {
+    await parent.close();
+  }
+}
+
+export async function archiveMode(path: string): Promise<number> {
+  const handle = await openFromRoot(archiveParts(path), constants.O_RDONLY);
+  try {
+    return (await handle.stat()).mode & 0o777;
+  } finally {
+    await handle.close();
+  }
+}
+
 /** 同一棵树的清理互斥。活着的进程占着就拒；进程确认不了也拒；确认已退出才接手一次。 */
 export async function holdCleanupLock(archiveDir: string, place: TreePlace): Promise<() => Promise<void>> {
   const locks = join(archiveDir, '.locks');
-  await mkdir(locks, { mode: 0o700 }).catch((error: NodeJS.ErrnoException) => {
-    if (error.code !== 'EEXIST') throw keep('WORKTREE_PRESERVED', '清理锁目录建不起来');
-  });
-  await chmod(locks, 0o700);
+  try {
+    await makeArchiveDir(locks);
+  } catch (error) {
+    if (error instanceof PortError) throw error;
+    throw keep('WORKTREE_PRESERVED', '清理锁目录建不起来');
+  }
   const file = cleanupLockPath(archiveDir, place.dev, place.ino, place.real);
   const body = Buffer.from(`${process.pid}\n${place.real}\n`);
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const handle = await open(file, 'wx', 0o600);
-      try {
-        await handle.writeFile(body);
-        await handle.sync();
-      } finally {
-        await handle.close();
-      }
+      await writeExclusiveArchive(file, body);
       return async () => {
-        await unlink(file).catch(() => undefined);
+        await unlinkArchive(file).catch(() => undefined);
       };
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw keep('WORKTREE_PRESERVED', '清理锁建不起来');
-      }
+      if (error instanceof PortError) throw error;
+      if (!(error instanceof ArchiveNameExists)) throw keep('WORKTREE_PRESERVED', '清理锁建不起来');
       let text = '';
       try {
-        text = await readFile(file, 'utf8');
+        text = (await readArchiveFile(file)).toString('utf8');
       } catch {
         throw keep('WORKTREE_PRESERVED', '清理锁读不了，确认不了有没有人在清，保留原树');
       }
@@ -450,7 +590,11 @@ export async function holdCleanupLock(archiveDir: string, place: TreePlace): Pro
       const alive = await pidAlive(pid);
       if (alive === 'alive') throw keep('WORKTREE_PRESERVED', '已经有一次清理在进行，保留原树');
       if (alive === 'unknown') throw keep('WORKTREE_PRESERVED', '清理锁的进程确认不了，保留原树');
-      await unlink(file).catch(() => undefined);
+      try {
+        await unlinkArchive(file);
+      } catch (error) {
+        if (error instanceof PortError) throw error;
+      }
     }
   }
   throw keep('WORKTREE_PRESERVED', '清理锁让不出来，保留原树');
@@ -583,15 +727,15 @@ export async function assertArchiveContainer(archiveDir: string): Promise<void> 
   if (!leaf.isDirectory()) throw keep('ARCHIVE_FAILED', '归档目录不是目录，拒绝写出');
   const real = await realpath(lex).catch(() => '');
   if (real !== lex) throw keep('ARCHIVE_FAILED', '归档目录路径经过符号链接，拒绝写出');
-  await chmod(lex, 0o700);
-  if (process.platform !== 'win32' && ((await stat(lex)).mode & 0o777) !== 0o700) {
+  await makeArchiveDir(lex);
+  if (process.platform !== 'win32' && (await archiveMode(lex)) !== 0o700) {
     throw keep('ARCHIVE_FAILED', '归档目录权限不受限');
   }
 }
 
-async function syncDirectory(path: string): Promise<void> {
+export async function syncDirectory(path: string): Promise<void> {
   if (process.platform === 'win32') return;
-  const dir = await open(path, 'r');
+  const dir = await openFromRoot(archiveParts(path), constants.O_RDONLY | constants.O_DIRECTORY);
   try {
     await dir.sync();
   } finally {
@@ -600,32 +744,11 @@ async function syncDirectory(path: string): Promise<void> {
 }
 
 async function exclusiveFile(path: string, bytes: Buffer): Promise<void> {
-  const file = await open(path, 'wx', 0o600);
-  try {
-    await file.writeFile(bytes);
-    await file.sync();
-  } finally {
-    await file.close();
-  }
+  await writeExclusiveArchive(path, bytes);
 }
 
 async function readNoFollow(path: string): Promise<Buffer> {
-  const flag = constants.O_NOFOLLOW;
-  if (typeof flag !== 'number') throw keep('ARCHIVE_FAILED', '这个系统不能拒绝跟随符号链接');
-  let handle: Awaited<ReturnType<typeof open>>;
-  try {
-    handle = await open(path, constants.O_RDONLY | flag);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ELOOP') throw keep('ARCHIVE_FAILED', '归档被换成符号链接');
-    if (code === 'ENOENT') throw keep('ARCHIVE_FAILED', '归档缺文件');
-    throw keep('ARCHIVE_FAILED', '归档读不了');
-  }
-  try {
-    return await handle.readFile();
-  } finally {
-    await handle.close();
-  }
+  return readArchiveFile(path);
 }
 
 function snapEnv(mode: string, t: UserTree, preserved: readonly string[]): Record<string, string> {
@@ -742,7 +865,7 @@ async function inspectLive(t: UserTree, preserved: readonly string[]): Promise<C
 async function modesRestricted(paths: readonly (readonly [string, number])[]): Promise<void> {
   if (process.platform === 'win32') return;
   for (const [path, mode] of paths) {
-    if (((await stat(path)).mode & 0o777) !== mode) throw keep('ARCHIVE_FAILED', '成果存档权限不受限');
+    if ((await archiveMode(path)) !== mode) throw keep('ARCHIVE_FAILED', '成果存档权限不受限');
   }
 }
 
@@ -774,13 +897,14 @@ export async function preserveComplexWorktree(
   const needed = new Set<string>();
   for (const file of parsed.state.files) needed.add(file.sha256);
   for (const item of parsed.state.merge) needed.add(item.sha256);
+  needed.add(parsed.state.indexBlob);
   for (const sum of needed) {
     if (!parsed.blobs.has(sum)) throw keep('ARCHIVE_FAILED', '快照缺文件内容', t.dir);
   }
   const dir = join(archiveDir, `worktree-${randomUUID()}`);
-  await mkdir(dir, { mode: 0o700 });
+  await makeArchiveDir(dir);
   const blobDir = join(dir, 'blobs');
-  await mkdir(blobDir, { mode: 0o700 });
+  await makeArchiveDir(blobDir);
   const bundlePath = join(dir, 'recovery.bundle');
   const packPath = join(dir, 'objects.pack');
   const statePath = join(dir, 'state.json');
@@ -817,7 +941,7 @@ export async function preserveComplexWorktree(
   if (again !== 'idle') throw keep('WORKTREE_PRESERVED', '存档期间确认不了没人用，保留原树', t.dir);
   await assertPeopleIdle(context.confirmIdle, '回执落盘前');
   const receipt: ComplexReceipt = {
-    version: 2,
+    version: 3,
     kind: 'complex',
     ...(context.taskId ? { taskId: context.taskId } : {}),
     ...(context.branch ? { branch: context.branch } : {}),
@@ -871,7 +995,7 @@ function asReceipt(value: unknown, dir: string): ComplexReceipt {
   const row = asRecord(value);
   const artifacts = asRecord(row?.artifacts);
   if (
-    row?.version !== 2 ||
+    row?.version !== 3 ||
     row.kind !== 'complex' ||
     typeof row.originalPath !== 'string' ||
     typeof row.realPath !== 'string' ||
@@ -909,7 +1033,7 @@ async function recheckComplex(
     receipt.dev !== place.dev ||
     receipt.ino !== place.ino ||
     receipt.uid !== place.uid ||
-    receipt.head.length !== 40
+    !SHA.test(receipt.head)
   ) {
     throw keep('WORKTREE_PRESERVED', '回执上的工作树身份和现在对不上，旧回执作废，保留原树', t.dir);
   }
@@ -940,6 +1064,9 @@ async function recheckComplex(
   );
   const live = await inspectLive(t, preserved);
   await assertSameWork(live, restored, t.dir);
+  if (receipt.head !== live.head || receipt.head !== restored.head) {
+    throw keep('WORKTREE_PRESERVED', '回执上的 HEAD 和现在对不上，旧回执作废，保留原树', t.dir);
+  }
   if (sha256(Buffer.from(comparable(live))) !== receipt.fingerprint) {
     throw keep('WORKTREE_PRESERVED', '原树和回执指纹对不上，旧回执作废，保留原树', t.dir);
   }
@@ -986,7 +1113,7 @@ export async function recheckPreservedArchive(
   preserved: readonly string[],
 ): Promise<void> {
   if (context.workRoot) assertTreeInside(context.workRoot, place);
-  const names = new Set(await readdir(archivedTo).catch(() => []));
+  const names = new Set(await listArchiveDir(archivedTo));
   const complex = names.has('receipt.json');
   const clean = names.has('manifest.json');
   if (complex && clean) throw keep('ARCHIVE_FAILED', '归档里同时有两套回执，认不出该信哪套', t.dir);

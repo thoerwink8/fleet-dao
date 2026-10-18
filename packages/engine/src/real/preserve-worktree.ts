@@ -2,19 +2,23 @@
 // 干净的未发布提交打完整包；复杂未提交状态打受限快照和受管回执。
 // 独立恢复对上、原树身份没变、并且删除前再次确认没人用，清理入口才继续。旁边已有的备份不是回执。
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open, readFile, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { PortError, type ShotsDelivery } from '../ports.ts';
 import {
+  archiveMode,
   assertArchiveContainer,
   assertPeopleIdle,
   assertTreeInside,
   holdCleanupLock,
   type IdleAnswer,
   locateTree,
+  makeArchiveDir,
   preserveComplexWorktree,
+  readArchiveFile,
   recheckNoUnique,
   recheckPreservedArchive,
+  syncDirectory,
+  writeExclusiveArchive,
 } from './complex-preserve.ts';
 import {
   gitInTree,
@@ -32,27 +36,6 @@ export interface PreserveContext {
   workRoot?: string;
   /** 删除前再问有没有任务或会话在用。没给、答不清，复杂成果留树。 */
   confirmIdle?: () => Promise<IdleAnswer>;
-}
-
-async function exclusiveFile(path: string, bytes: Buffer): Promise<void> {
-  const file = await open(path, 'wx', 0o600);
-  try {
-    await file.writeFile(bytes);
-    await file.sync();
-  } finally {
-    await file.close();
-  }
-}
-
-async function syncDirectory(path: string): Promise<void> {
-  // Windows 不支持 open 目录；生产 Linux 在删源之前同步目录项，不能只同步文件内容。
-  if (process.platform === 'win32') return;
-  const dir = await open(path, 'r');
-  try {
-    await dir.sync();
-  } finally {
-    await dir.close();
-  }
 }
 
 /** 已交付或已归档的图片：按 blob 现核，对上的才从成果清单里拿掉。不信回执里写的路径。 */
@@ -113,17 +96,17 @@ export async function preserveWorktree(
   const bytes = await recoveryBundle(t);
   await assertArchiveContainer(archiveDir);
   const dir = join(archiveDir, `worktree-${randomUUID()}`);
-  await mkdir(dir, { mode: 0o700 });
+  await makeArchiveDir(dir);
   const bundle = join(dir, 'recovery.bundle');
-  await exclusiveFile(bundle, bytes);
-  const saved = await readFile(bundle);
+  await writeExclusiveArchive(bundle, bytes);
+  const saved = await readArchiveFile(bundle);
   if (!saved.equals(bytes)) throw new PortError('ARCHIVE_FAILED', '落盘成果包回读不一致，保留原树');
   if (process.platform !== 'win32') {
     for (const [path, mode] of [
       [dir, 0o700],
       [bundle, 0o600],
     ] as const) {
-      if (((await stat(path)).mode & 0o777) !== mode) {
+      if ((await archiveMode(path)) !== mode) {
         throw new PortError('ARCHIVE_FAILED', '成果存档权限不受限，保留原树');
       }
     }
@@ -145,8 +128,8 @@ export async function preserveWorktree(
     )}\n`,
   );
   const manifestPath = join(dir, 'manifest.json');
-  await exclusiveFile(manifestPath, manifest);
-  if (!(await readFile(manifestPath)).equals(manifest)) {
+  await writeExclusiveArchive(manifestPath, manifest);
+  if (!(await readArchiveFile(manifestPath)).equals(manifest)) {
     throw new PortError('ARCHIVE_FAILED', '成果清单回读不一致，保留原树');
   }
   await syncDirectory(dir);

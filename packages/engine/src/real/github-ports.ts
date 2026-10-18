@@ -106,10 +106,11 @@ export interface GitHubPortsDeps extends ReviewAuditDeps {
   gitBin?: string;
   shBin?: string;
   /**
-   * 删树前再问有没有没结束的会话占着这个目录。不给：复杂成果留树，干净的未发布提交仍按原样保全后删。
-   * 查不清回 unknown，复杂成果不删。
+   * 删树前再问有没有没结束的会话、在跑的任务或子任务工作流占着这个目录。
+   * 调用方把自己的工作流编号交进来，只豁免这一条。不给这个函数：复杂成果留树，干净的未发布提交仍按原样保全后删。
+   * 查不清回 unknown，不当成没人用。
    */
-  confirmTreeIdle?: (dir: string) => Promise<'idle' | 'busy' | 'unknown'>;
+  confirmTreeIdle?: (dir: string, caller?: { workflowId?: string }) => Promise<'idle' | 'busy' | 'unknown'>;
   /** 等 CI 看到已合并、核实或记合并回执没成时写的日志；不给就打到控制台。 */
   log?: MergeLog;
 }
@@ -447,6 +448,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     taskId: string,
     branch: string,
     delivery: ShotsDelivery | undefined,
+    ctx: PortContext,
   ) =>
     preserveThenRemove(
       tree,
@@ -455,7 +457,14 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         taskId,
         branch,
         workRoot: trees.root,
-        ...(confirmTreeIdle ? { confirmIdle: () => confirmTreeIdle(tree.dir) } : {}),
+        ...(confirmTreeIdle
+          ? {
+              confirmIdle: () =>
+                ctx.workflowId
+                  ? confirmTreeIdle(tree.dir, { workflowId: ctx.workflowId })
+                  : confirmTreeIdle(tree.dir),
+            }
+          : {}),
       },
       delivery,
       () => trees.remove(tree.dir),
@@ -527,7 +536,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
               { retryable: false, details: { worktree: path } },
             );
           }
-          await archiveThenRemove(t, input.taskId, input.branch, kept);
+          await archiveThenRemove(t, input.taskId, input.branch, kept, ctx);
         }
         return { path, branch: input.branch, baseSha: main.head };
       });
@@ -570,7 +579,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           };
         }
       }
-      const { gone, archivedTo } = await archiveThenRemove(t, input.taskId, input.branch, delivery);
+      const { gone, archivedTo } = await archiveThenRemove(t, input.taskId, input.branch, delivery, ctx);
       return { removed: !gone, gone, ...(archivedTo ? { archivedTo } : {}), ...(shots ? { shots } : {}) };
     },
 

@@ -161,6 +161,11 @@ export async function confirmDeletionIdle(input: {
   openSessions: () => Promise<readonly { path: string }[]>;
   workflows: Pick<WorkflowReader, 'state'>;
   issue: (ref: { owner: string; name: string; issueNumber: number }) => Promise<IssueWorkFacts | null>;
+  /**
+   * 调用方自己的工作流编号。任务收自己的树时，这一条还在跑不算占着。
+   * 别的代、还在跑的子任务、没结束的会话照旧算在用。不给就不豁免。
+   */
+  exceptWorkflowId?: string;
 }): Promise<'idle' | 'busy' | 'unknown'> {
   const root = input.root.length > 1 ? input.root.replace(/\/+$/, '') : input.root;
   if (!input.dir.startsWith(`${root}/`)) return 'unknown';
@@ -188,14 +193,48 @@ export async function confirmDeletionIdle(input: {
       if (state.state === 'missing') return 'missing';
       return 'closed';
     });
-    if (running) return 'busy';
+    if (running && running !== input.exceptWorkflowId) return 'busy';
     for (const sub of facts?.subtasks ?? []) {
-      if ((await input.workflows.state(subtaskWorkflowId(sub.id))).state === 'running') return 'busy';
+      const id = subtaskWorkflowId(sub.id);
+      if (id === input.exceptWorkflowId) continue;
+      if ((await input.workflows.state(id)).state === 'running') return 'busy';
     }
   } catch {
     return 'unknown';
   }
   return 'idle';
+}
+
+/**
+ * 生产删树前的最终确认。没接上工作流读取就不能当成没人用：
+ * 没有会话、工作流却还在跑时，只看会话会误判空闲。
+ */
+export async function confirmManagedTreeIdle(input: {
+  root: string;
+  dir: string;
+  openSessions: () => Promise<readonly { path: string }[]>;
+  workflows?: Pick<WorkflowReader, 'state'>;
+  issue: (ref: { owner: string; name: string; issueNumber: number }) => Promise<IssueWorkFacts | null>;
+  exceptWorkflowId?: string;
+}): Promise<'idle' | 'busy' | 'unknown'> {
+  const workflows = input.workflows;
+  if (!workflows) {
+    try {
+      const sessions = await input.openSessions();
+      if (sessions.some((row) => row.path === input.dir)) return 'busy';
+    } catch {
+      return 'unknown';
+    }
+    return 'unknown';
+  }
+  return confirmDeletionIdle({
+    root: input.root,
+    dir: input.dir,
+    openSessions: input.openSessions,
+    workflows,
+    issue: input.issue,
+    ...(input.exceptWorkflowId ? { exceptWorkflowId: input.exceptWorkflowId } : {}),
+  });
 }
 
 /**
