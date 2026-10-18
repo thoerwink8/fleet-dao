@@ -128,6 +128,55 @@ describe('开会话的提醒（kindReminderLines）', () => {
       expect(lib.kindReminderLines({ cwd, git, home, now: NOW })).toEqual([]);
   });
 
+  it('insteadOf 只改传输地址：原始 GitHub 身份仍首次提醒、同日节流、次日再提醒', () => {
+    const url = 'https://github.com/thoerwink8/mine.git';
+    const root = gitRepo({}, { origin: url });
+    const home = dir();
+    const rewritten: Git = (cwd, args) =>
+      git(cwd, [
+        '-c',
+        'url.https://relay.fixture.invalid/.insteadOf=https://github.com/thoerwink8/',
+        ...args,
+      ]);
+    expect(rewritten(root, ['remote', '-v']).stdout).toContain('https://relay.fixture.invalid/mine.git');
+    const first = lib.kindReminderLines({ cwd: root, git: rewritten, home, now: NOW });
+    expect(first).toHaveLength(1);
+    expect(first[0]).toContain(url);
+    expect(first[0]).not.toContain('relay.fixture.invalid');
+    expect(lib.kindReminderLines({ cwd: root, git: rewritten, home, now: NOW + 3_600_000 })).toEqual([]);
+    expect(lib.kindReminderLines({ cwd: root, git: rewritten, home, now: NOW + DAY })).toHaveLength(1);
+  });
+
+  it('陌生原始地址即使传输改成创始人 GitHub 也不提醒，显式非创始人 pushurl 也不漏', () => {
+    const stranger = 'https://unknown.fixture.invalid/repo.git';
+    const root = gitRepo({}, { origin: stranger });
+    const home = dir();
+    const rewritten: Git = (cwd, args) =>
+      git(cwd, ['-c', `url.https://github.com/thoerwink8/mine.git.insteadOf=${stranger}`, ...args]);
+    expect(rewritten(root, ['remote', '-v']).stdout).not.toContain(stranger);
+    expect(lib.repoKind(root)).toBe('external');
+    expect(lib.kindReminderLines({ cwd: root, git: rewritten, home, now: NOW })).toEqual([]);
+    const mixed = gitRepo({}, { origin: 'git@github.com:thoerwink8/mine.git' });
+    runChildOk('git', ['config', 'remote.origin.pushurl', 'git@github.com:someone/other.git'], {
+      cwd: mixed,
+    });
+    expect(lib.kindReminderLines({ cwd: mixed, git, home, now: NOW })).toEqual([]);
+  });
+
+  it('读取远端配置失败明确说没查成，不当成没有远端', () => {
+    const root = gitRepo({}, { origin: 'git@github.com:thoerwink8/mine.git' });
+    const home = dir();
+    for (const failed of [
+      { status: 128, stdout: '', stderr: 'cannot read config' },
+      { status: null, stdout: '', stderr: '', error: new Error('timed out') },
+    ]) {
+      const broken: Git = (cwd, args) => (args[0] === 'rev-parse' ? git(cwd, args) : failed);
+      expect(lib.kindReminderLines({ cwd: root, git: broken, home, now: NOW }).join('')).toMatch(
+        /仓类型没查成/,
+      );
+    }
+  });
+
   it('【故意造出的失败】git 抛错：不抛，说一句没查成、照对外仓办', () => {
     const throwing: Git = () => {
       throw new Error('炸了');
