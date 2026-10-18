@@ -37,6 +37,7 @@ import {
   raiseLateReview,
   readEngineMasterRow,
   readFlowModeSettingRaw,
+  recordCheckoutReceipt,
   recordFlowAssignment,
   recordPrHeadFiles,
   recordRouteProbeDone,
@@ -1277,6 +1278,7 @@ export function realPortsFromEnv(
       repairWorkTmp: () => repairVerifyWorkTmp(),
       onCheckoutBlocked: (alert) => raiseCheckoutBlocked(db, alert),
       onCheckoutRecovered: (recovered) => resolveCheckoutRecovered(db, recovered),
+      onCheckoutCompleted: (receipt) => recordCheckoutReceipt(db, receipt),
     }),
   };
   // 临时指挥官整理待办（#1338，母单 #1335 第 3 片）：选路按用途 groom，会话和动手、验收会话同一份 Spawner 装配，登记进一次性会话的清单

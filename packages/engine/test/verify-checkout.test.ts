@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   type CheckoutBlockedAlert,
+  type CheckoutReceipt,
   type CheckoutRecovered,
   CheckoutStageError,
   checkoutAlertKey,
@@ -143,7 +144,11 @@ describe('PR 头的完整检出和增量 diff', () => {
     const repairs: string[] = [];
     const logs: string[] = [];
     const blocked: string[] = [];
+    const receipts: CheckoutReceipt[] = [];
     const placed = await placeVerifyCheckout({
+      onCompleted: async (r) => {
+        receipts.push(r);
+      },
       dir: dest,
       head,
       workflowId: 'task:acme/demo#12',
@@ -168,6 +173,8 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(placed).toBe('full');
     expect(readFileSync(join(dest, 'hello.txt'), 'utf8')).toBe('hello\n');
     expect(repairs).toEqual([dest]);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]?.head).toBe(head);
     expect(logs).not.toContain(VERIFY_CHECKOUT_FALLBACK);
     expect(blocked).toEqual([]);
   });
@@ -312,7 +319,11 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(await git(mirror, ['rev-parse', 'main'])).toBe(first);
     const dest = join(state, 'expected-checkout');
     const recovered: CheckoutRecovered[] = [];
+    const receipts: CheckoutReceipt[] = [];
     const got = await placeVerifyCheckout({
+      onCompleted: async (r) => {
+        receipts.push(r);
+      },
       dir: dest,
       head: expected,
       workflowId: 'task:acme/demo#12',
@@ -326,6 +337,25 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(got).toBe('full');
     expect(readFileSync(join(dest, 'hello.txt'), 'utf8')).toBe('expected\n');
     expect(recovered[0]?.head).toBe(expected);
+    expect(receipts[0]).toMatchObject({
+      head: expected,
+      dir: dest,
+      type: 'full',
+      workflowId: 'task:acme/demo#12',
+    });
+    await placeVerifyCheckout({
+      dir: join(state, 'second-checkout'),
+      head: expected,
+      workflowId: 'task:acme/demo#12',
+      onCompleted: async (r) => {
+        receipts.push(r);
+      },
+    });
+    expect(receipts).toHaveLength(2);
+    expect(receipts[1]?.receiptId).not.toBe(receipts[0]?.receiptId);
+    expect(receipts[0]?.completedAt.getTime()).toBeGreaterThanOrEqual(
+      receipts[0]?.startedAt.getTime() ?? Infinity,
+    );
   });
 
   it('获取精确头失败保持原头报警，不archive、不误撤；调用取消也不archive或撤报警', async () => {
@@ -668,4 +698,107 @@ it('权限修复期间取消，不再开始第二次archive；起步已取消不
   await expect(placeVerifyCheckout(input)).rejects.toThrow('cancelled during repair');
   expect(attempts).toBe(1);
   expect(ensured).toBe(1);
+});
+
+describe('完整检出成功回执边界', () => {
+  it('失败、修复后失败、最终取消都没有成功回执', async () => {
+    const receipts: CheckoutReceipt[] = [];
+    const base = {
+      dir: 'unused',
+      head: 'a'.repeat(40),
+      workflowId: 'task:a/b#1',
+      onCompleted: async (r: CheckoutReceipt) => {
+        receipts.push(r);
+      },
+    };
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        checkout: async () => {
+          throw new Error('archive failed');
+        },
+      }),
+    ).toBe('blocked');
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        checkout: async () => {
+          throw Object.assign(new Error('permission'), { code: 'EACCES' });
+        },
+        repair: async () => {},
+      }),
+    ).toBe('blocked');
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        ensureHead: async () => {
+          throw new Error('missing exact object');
+        },
+        checkout: async () => {
+          throw new Error('must not checkout');
+        },
+      }),
+    ).toBe('blocked');
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        checkout: async () => {
+          throw Object.assign(new Error('permission'), { code: 'EACCES' });
+        },
+        repair: async () => {
+          throw new Error('repair failed');
+        },
+      }),
+    ).toBe('blocked');
+    const abort = new AbortController();
+    await expect(
+      placeVerifyCheckout({
+        ...base,
+        signal: abort.signal,
+        checkout: async () => {
+          abort.abort(new Error('cancel after archive'));
+        },
+      }),
+    ).rejects.toThrow('cancel after archive');
+    expect(receipts).toEqual([]);
+  });
+  it('回执写失败保留未知诊断，撤卡仍独立运行；撤卡失败不抹掉回执', async () => {
+    const logs: string[] = [];
+    let recovered = 0;
+    const base = {
+      dir: 'unused',
+      head: 'a'.repeat(40),
+      workflowId: 'task:a/b#1',
+      checkout: async () => {},
+      log: (s: string) => {
+        logs.push(s);
+      },
+    };
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        onCompleted: async () => {
+          throw new Error('db down');
+        },
+        onRecovered: async () => {
+          recovered++;
+        },
+      }),
+    ).toBe('full');
+    expect(recovered).toBe(1);
+    expect(logs.some((s) => s.includes('证据未知'))).toBe(true);
+    const receipts: CheckoutReceipt[] = [];
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        onCompleted: async (r) => {
+          receipts.push(r);
+        },
+        onRecovered: async () => {
+          throw new Error('resolve failed');
+        },
+      }),
+    ).toBe('full');
+    expect(receipts).toHaveLength(1);
+  });
 });

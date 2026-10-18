@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { check, failedFilesFromJson, type Step, withRetry } from '../check.ts';
+import { runLocalVitest } from '../local-vitest.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 
@@ -25,11 +26,7 @@ function node(name: string, script: string, args: string[]): Step {
  * 重跑仍红才算红（withRetry）。vitest 起不来、崩了没写结果时读不出失败清单，原样红。
  */
 function vitestAll(): Step {
-  const vitest = join(root, 'node_modules/vitest/vitest.mjs');
-  const spawn = (args: string[]) => {
-    const r = spawnSync(process.execPath, [vitest, ...args], { cwd: root, stdio: 'inherit' });
-    return { status: r.status, signal: r.signal, error: r.error };
-  };
+  const spawn = (args: string[]) => runLocalVitest(root, args);
   return {
     name: '测试（全量 vitest run）',
     run() {

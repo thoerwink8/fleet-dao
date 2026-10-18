@@ -20,6 +20,7 @@ import {
   observeRunSessionId,
   PoolFullError,
   recordChannelAttempt,
+  recordVerifyAggregate,
   releaseReservation,
   startRun as startRunDb,
 } from '@fleet-dao/db';
@@ -93,6 +94,9 @@ export function realRuns(deps: RealRunsDeps): RunsWriter {
     },
     async noteVerdict(runId: string, verdict: RunVerdict) {
       await noteRunVerdict(deps.db, runId, verdict);
+    },
+    async noteVerifyAggregate(input) {
+      await recordVerifyAggregate(deps.db, input);
     },
   };
 }

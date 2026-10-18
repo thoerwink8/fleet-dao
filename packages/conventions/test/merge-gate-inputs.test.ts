@@ -91,7 +91,11 @@ function pushPaths(yml: string): string[] {
 }
 
 /** 闸读的数据文件（不是 import，按路径读）：改标准的路径清单（standard-paths-file.ts 读它）。 */
-const DATA_INPUTS = ['packages/conventions/standard-paths.json', 'packages/conventions/github-apps.json'];
+const DATA_INPUTS = [
+  'packages/conventions/standard-paths.json',
+  'packages/conventions/github-apps.json',
+  '.github/workflows/managed-feedback.yml',
+];
 
 /** 闸的判定输入：入口文件和它 import 到的所有文件、读的数据文件、这份工作流自己；在 push.paths 里漏列的。 */
 function unwatchedInputs(yml: string): string[] {
@@ -205,4 +209,59 @@ describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () =
     // 闸里不许出现起模型调用的痕迹（起了就不确定：同一份代码两次跑结果可能不一样）。
     expect(gate).not.toMatch(/invokeVerifier|chooseModelForFamily|one-shot|runOneShot/);
   });
+});
+
+describe('本机退回的可信执行与精确PR串行通道', () => {
+  it('plan只读计划，所有写者按repository+PR共用通道，all不另写', () => {
+    const doc = parse(workflow);
+    expect(doc.concurrency).toBeUndefined();
+    expect(doc.jobs.plan.steps.some((s: { run?: string }) => s.run?.endsWith('--plan'))).toBe(true);
+    const writer = doc.jobs['merge-gate'];
+    expect(writer.needs).toBe('plan');
+    expect(writer.strategy.matrix.pr).toContain('fromJSON(needs.plan.outputs.prs)');
+    expect(writer.concurrency).toEqual({
+      group: ['merge-gate-', '$', '{{ github.repository }}-pr-', '$', '{{ matrix.pr }}'].join(''),
+      'cancel-in-progress': false,
+      queue: 'max',
+    });
+    expect(writer['timeout-minutes']).toBeLessThanOrEqual(3);
+    expect(
+      writer.steps.find((s: { run?: string }) => s.run?.includes('bin/merge-gate.ts')).env.FLEET_GATE_PR,
+    ).toBe(['$', '{{ matrix.pr }}'].join(''));
+  });
+  it('review/fork触发两个job均固定可信标准main，不使用事件PR的merge/head ref', () => {
+    const doc = parse(workflow);
+    for (const job of Object.values(doc.jobs) as {
+      steps: { uses?: string; with: { ref: string; repository: string; 'persist-credentials': boolean } }[];
+    }[]) {
+      const checkout = job.steps.find((s) => s.uses === 'actions/checkout@v4');
+      expect(checkout?.with.ref).toBe(['$', "{{ inputs.standard-ref || 'main' }}"].join(''));
+      expect(checkout?.with['persist-credentials']).toBe(false);
+      expect(checkout?.with.repository).toBe(
+        ['$', '{{ inputs.standard-repo || github.repository }}'].join(''),
+      );
+    }
+  });
+});
+
+it('退回专用workflow仅dispatch授write，与只读可复用gate用同一精确PR串行通道', () => {
+  const feedback = parse(
+    readFileSync(
+      fileURLToPath(new URL('../../../.github/workflows/managed-feedback.yml', import.meta.url)),
+      'utf8',
+    ),
+  );
+  const gate = parse(workflow);
+  expect(Object.keys(feedback.on)).toEqual(['workflow_dispatch']);
+  expect(feedback.permissions['pull-requests']).toBe('write');
+  expect(gate.permissions['pull-requests']).toBe('read');
+  expect(feedback.jobs.feedback.concurrency).toEqual(gate.jobs['merge-gate'].concurrency);
+  expect(feedback.jobs.feedback.strategy.matrix.pr).toContain('fromJSON(needs.plan.outputs.prs)');
+  for (const job of Object.values(feedback.jobs) as {
+    steps: { uses?: string; with?: { ref: string; 'persist-credentials': boolean } }[];
+  }[]) {
+    const checkout = job.steps.find((s) => s.uses === 'actions/checkout@v4');
+    expect(checkout?.with?.ref).toBe('main');
+    expect(checkout?.with?.['persist-credentials']).toBe(false);
+  }
 });

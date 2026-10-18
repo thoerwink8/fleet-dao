@@ -1,0 +1,64 @@
+name: managed-feedback
+run-name: managed-feedback ${{ inputs.request-id }}
+# 本仓显式退回事务单独授review写权限；可复用merge-gate继续只读PR。
+# 两份工作流所有status写者必须使用完全相同的repository+精确PR并发组。
+on:
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: 精确PR号
+        required: true
+      request-id:
+        description: 本机持久事务编号
+        required: true
+      feedback:
+        description: 版本化退回协议
+        required: true
+permissions:
+  contents: read
+  pull-requests: write
+  statuses: write
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      prs: ${{ steps.plan.outputs.prs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - id: plan
+        run: node packages/conventions/src/bin/merge-gate.ts --plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FLEET_FEEDBACK_REQUEST: ${{ inputs.feedback }}
+  feedback:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.plan.outputs.prs) }}
+    concurrency:
+      group: merge-gate-${{ github.repository }}-pr-${{ matrix.pr }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node packages/conventions/src/bin/merge-gate.ts
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          FLEET_GATE_PR: ${{ matrix.pr }}
+          FLEET_FEEDBACK_REQUEST: ${{ inputs.feedback }}
