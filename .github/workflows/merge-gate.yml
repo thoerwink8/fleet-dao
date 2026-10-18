@@ -9,7 +9,7 @@ name: merge-gate
 # - PR 事件用 pull_request_target：fork 来的 PR 在 pull_request 里拿不到写状态的令牌。
 #   这里跑的是主线上的代码、检出的是主线，不检出也不跑 PR 里的代码；PR 的分支名按 API 现读。
 # - status 事件：验收那一遍写上 cold-verify 时逐个重算所有开着的 PR。
-#   不按事件里的 sha 只算那一个：下面的排队组只留最新一个，一轮对账贴好几个 PR 时中间的运行被取消，只算最后那个的话前面的就停在旧结论上。
+#   全量入口只计划PR列表，各PR与退回事务共用同一条串行写通道，不取消正在执行或排队的事务。
 # - 主线推送且只动了闸认的东西（判法、改标准的路径清单、这份工作流）：已经开着的 PR 上旧的 merge-gate 状态是按旧判法算的，
 #   判法收紧了，旧的 success 不会自己变——所以把开着的 PR 全重算一遍（第二意见 #656 第 2 轮）。
 #   paths 要盖住判法 import 到的每一个文件，packages/conventions/test/merge-gate-inputs.test.ts 钉着：以后给闸多引一个文件却忘了列在这里会红。
@@ -26,20 +26,23 @@ on:
         required: false
         default: ''
       standard-ref:
-        description: 判法检出哪个分支；留空＝那个仓的默认分支
+        description: 可信判法的 ref；留空＝main
         type: string
         required: false
         default: ''
   pull_request_target:
     # 头变了（opened、reopened、synchronize）、正文改了（edited：改标准的 PR 补上创始人原话要重算，不然闸一直红）时重算；
-    # 草稿、冲突、标签、里程碑不是输入（#654），它们变了触发的运行多半被下面的排队组顶掉（70 次里 43 次），白占一个检查位。
-    # edited 也包括改标题、改目标分支，多算一次无妨（同一个 PR 新的顶掉旧的）
+    # 草稿、冲突、标签、里程碑不是输入（#654），不因此重算。
+    # edited 也包括改标题、改目标分支，多算一次无妨。
     types: [opened, reopened, synchronize, edited]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
   status:
   push:
     branches: [main]
     paths:
       - .github/workflows/merge-gate.yml
+      - .github/workflows/managed-feedback.yml
       - packages/conventions/src/bin/merge-gate.ts
       - packages/conventions/src/closing-issues.ts
       - packages/conventions/src/flow-branch.ts
@@ -47,6 +50,8 @@ on:
       - packages/conventions/src/ci-policy-bridge.ts
       - packages/shared/src/ci-policy-bridge.ts
       - packages/conventions/github-apps.json
+      - packages/conventions/src/managed-feedback.ts
+      - packages/conventions/src/managed-feedback-github.ts
       - packages/conventions/src/merge-gate.ts
       - packages/conventions/src/merge-gates.ts
       - packages/conventions/src/pr-columns.ts
@@ -58,32 +63,54 @@ on:
       pr:
         description: PR 号；留空算所有开着的
         required: false
-# PR 事件按 PR 排、新的顶掉旧的；冷验收状态、手动运行共用一个组排队（不中途打断，只留最新一个等着），
-# 旧的不会在新的之后写回。
-concurrency:
-  group: merge-gate-${{ github.event_name == 'pull_request_target' && github.event.pull_request.number || 'all' }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request_target' }}
 permissions:
   contents: read
   pull-requests: read
   statuses: write
 jobs:
-  merge-gate:
+  plan:
     if: github.event_name != 'status' || github.event.context == 'cold-verify' || startsWith(github.event.context, 'fleet-ci-policy-source/pr/')
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 3
+    outputs:
+      prs: ${{ steps.plan.outputs.prs }}
     steps:
-      # 默认检出触发分支（pull_request_target 也是主线），判法和改标准的路径清单都用主线上的：PR 改不了自己的门槛。
-      # 被别的仓引用时检出判法所在的仓（standard-repo），不检出引用方的代码
       - uses: actions/checkout@v4
         with:
           repository: ${{ inputs.standard-repo || github.repository }}
-          ref: ${{ inputs.standard-ref }}
+          ref: ${{ inputs.standard-ref || 'main' }}
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      # 退出码 2 = 有 PR 没算成或没写上状态（没写上的那个 PR 缺 merge-gate，合不了），同样是红
+      - id: plan
+        run: node packages/conventions/src/bin/merge-gate.ts --plan
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+  merge-gate:
+    needs: plan
+    if: needs.plan.outputs.prs != '[]'
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.plan.outputs.prs) }}
+    # 全量重算只负责计划；每个写者都在同一个 PR 通道内，不能另有 all 写者。
+    concurrency:
+      group: merge-gate-${{ github.repository }}-pr-${{ matrix.pr }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.standard-repo || github.repository }}
+          ref: ${{ inputs.standard-ref || 'main' }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - run: node packages/conventions/src/bin/merge-gate.ts
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          FLEET_GATE_PR: ${{ matrix.pr }}

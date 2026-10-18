@@ -1,5 +1,5 @@
 // 合并闸（#74）：在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个（design 第五节「流程只为快」）。
-// 判红只有两样：
+// 判红的输入：
 // - 改标准（人闸第四类，design 第五节「人闸第四类：改标准」）：PR 改到的文件（含改名前的名字）落进 standard-paths.json 的清单，
 //   正文里却没有创始人同意的记录（「创始人原话」那一行，原话、时间都不能空；认法是 pr-columns.ts 的 founderQuote，
 //   pnpm pr:open --founder-quote 写出来的就是它）。清单用跑这段代码的那一份（主线的）：PR 改不了自己的门槛。
@@ -7,6 +7,7 @@
 //   「单子说要的东西真做了没有」，#555-2）——**闸只读这条状态，不在这里起模型调用**（判法要确定，同一份代码什么时候跑
 //   结果都一样，design 第五节）；冷调用在装配侧（引擎）跑、结论贴成状态。别的 PR 不验，也就没有这条状态——
 //   那是「不用验」，不是「没验成」，两者在 coldVerifyNeed 里分开。
+// 本机 local 分支的显式受信退回由 readFeedback 判；未解决或读不到均不清绿。
 // 草稿、冲突 GitHub 自己拦。读不到、认不出（PR、文件列表、清单、提交状态）写 failure（没查成）。
 // merge-gate.yml 在 PR 事件（头变了、正文改了——补上原话要重算）或 cold-verify 状态写上来时跑它（后一种逐个重算所有开着的 PR）；
 // 主线推送只在闸认的东西（判法、清单、工作流本身）变了才触发、同样重算所有开着的 PR——判法收紧了，开着的 PR 上旧的 success
@@ -159,6 +160,7 @@ export interface GateDeps {
    */
   ciPolicy?: 'force' | 'off';
   readCiPolicy?: (number: number, head: string) => Promise<PolicyReadResult>;
+  readFeedback?: (number: number, head: string) => Promise<{ records: { resolved: boolean }[] }>;
   /** 改标准的路径清单；不传读跑这段代码的那一份（standard-paths-file.ts，主线检出里的）。读不到、认不出就抛。 */
   standardPaths?: () => Promise<StandardPath[]>;
 }
@@ -258,6 +260,22 @@ async function coldVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict> {
   return { ok: true, notChecked: false, lines: ['能合：引擎任务 PR 的验收那一遍通过。'] };
 }
 
+async function managedVerdict(meta: LiveMeta, deps: GateDeps): Promise<Verdict> {
+  if (!/^local\/\d+-/.test(meta.headRef)) return { ok: true, notChecked: false, lines: [] };
+  if (!deps.readFeedback) return { ok: false, notChecked: true, lines: ['本机退回 reader 未装配。'] };
+  try {
+    const { records } = await deps.readFeedback(meta.number, meta.head);
+    const open = records.filter((r) => !r.resolved);
+    return {
+      ok: open.length === 0,
+      notChecked: false,
+      lines: open.length ? [`本机审查有 ${open.length} 条未解决退回；消费确认不等于解决。`] : [],
+    };
+  } catch (e) {
+    return { ok: false, notChecked: true, lines: [`本机退回没查成（${message(e)}）。`] };
+  }
+}
+
 /**
  * 判一个 PR。只读，不写状态。判红只有：碰了改标准路径、正文里没有创始人原话；引擎任务 PR 当前头上没有通过的 cold-verify；
  * 读不到、认不出（没查成）。草稿、冲突 GitHub 自己就合不了，这里不判（#654）。
@@ -303,6 +321,7 @@ export async function gatePr(number: number, deps: GateDeps): Promise<GateResult
   const verdicts = [
     await coldVerdict(meta, { ...deps, ciPolicy: policy }),
     await standardVerdict(meta, deps),
+    await managedVerdict(meta, deps),
   ];
   const ok = verdicts.every((v) => v.ok);
   return {
@@ -335,14 +354,13 @@ export async function targetPrs(
   const ev = isObject(event) ? event : {};
   switch (eventName) {
     case 'pull_request':
-    case 'pull_request_target': {
+    case 'pull_request_target':
+    case 'pull_request_review': {
       const pr = isObject(ev.pull_request) ? ev.pull_request.number : undefined;
       return typeof pr === 'number' ? [pr] : '事件里没有 pull_request.number';
     }
     case 'status':
-      // 不按事件里的 sha 只算那一个 PR：status 事件共用一个排队组（merge-gate.yml），排着的只留最新一个，中间的被取消——
-      // 一轮里给好几个 PR 贴 cold-verify 时，只算最后那个的话前面几个就一直停在旧结论上（#351 演练撞到）。
-      // 所以留下来的那一次把开着的 PR 全重算一遍，每个都现读自己此刻的状态。
+      // 全量入口只计划开着的PR；matrix逐PR进入与退回事务相同的串行写通道。
       if (ev.context !== COLD_VERIFY_CONTEXT && policySourceNumber(ev.context) === null) {
         if (typeof ev.context === 'string' && ev.context.startsWith(CI_POLICY_SOURCE_PREFIX))
           return 'source status 的 PR 号不是规范正安全整数';
@@ -376,7 +394,7 @@ function numbersOf(list: unknown[], keep: (p: Record<string, unknown>) => boolea
 }
 
 /** 读事件文件、认出这次要算哪些 PR；认不出返回一句为什么。 */
-async function eventTargets(
+export async function eventTargets(
   eventName: string | undefined,
   eventPath: string | undefined,
   gh: GitHubReads,
@@ -402,17 +420,29 @@ export async function runMergeGate(opts: {
   gh: GitHubReads;
   /** true = 把结果写成 merge-gate 状态；false = 只报（--no-write）。 */
   write: boolean;
+  /** Actions matrix 已计划的精确 PR；所有写者必须共用该 PR 的 concurrency。 */
+  targetPr?: number;
   /** 状态上「详情」链到的地方（这次运行的页面）。 */
   targetUrl?: string;
   readCiPolicy?: GateDeps['readCiPolicy'];
+  readFeedback?: GateDeps['readFeedback'];
 }): Promise<RunResult> {
   const fail = (why: string): RunResult => ({ code: 2, lines: [`没查成：${why}。`] });
-  const numbers = await eventTargets(opts.eventName, opts.eventPath, opts.gh);
+  if (opts.targetPr !== undefined && (!Number.isSafeInteger(opts.targetPr) || opts.targetPr < 1))
+    return fail('精确 PR 号不是正安全整数');
+  const numbers =
+    opts.targetPr === undefined
+      ? await eventTargets(opts.eventName, opts.eventPath, opts.gh)
+      : [opts.targetPr];
   if (typeof numbers === 'string') return fail(numbers);
   if (!opts.write && numbers.length !== 1) return fail('只报不写时一次只算一个 PR（pull_request 事件）');
   if (numbers.length === 0) return { code: 0, lines: ['这次没有要算的 PR。'] };
 
-  const deps: GateDeps = { gh: opts.gh, ...(opts.readCiPolicy ? { readCiPolicy: opts.readCiPolicy } : {}) };
+  const deps: GateDeps = {
+    gh: opts.gh,
+    ...(opts.readFeedback ? { readFeedback: opts.readFeedback } : {}),
+    ...(opts.readCiPolicy ? { readCiPolicy: opts.readCiPolicy } : {}),
+  };
   const lines: string[] = [];
   let code: 0 | 1 | 2 = 0;
   for (const n of numbers) {

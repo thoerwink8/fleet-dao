@@ -2,7 +2,7 @@
 // 故意造出的失败：网关 502、会话还没建起来就断、看护进程自己死了再起、登录坏了、次数用完、容量不够 / 没查成、已经有一个在跑。
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GhResult } from '../src/issue-new.ts';
@@ -230,7 +230,13 @@ describe('superviseRun：看护到终态、网关断了从断点续', () => {
     ]);
     expect(w.calls[0]?.stdin).toBe('单 #42：Add captcha\n');
     expect(w.calls[1]?.stdin).toBe(RESUME_PROMPT);
-    expect(w.calls[0]?.env).toEqual({ PATH: '/bin', FLEET_WORKER: '1' });
+    expect(w.calls[0]?.env).toEqual({
+      PATH: '/bin',
+      FLEET_WORKER: '1',
+      FLEET_WORK_RUNS_DIR: dirname(dir),
+      FLEET_WORK_RUN: '2026-10-16T10:00:00.000Z',
+      FLEET_WORK_SESSION: SID,
+    });
     expect(w.calls[0]?.cwd).toBe('/repo/.claude/worktrees/42-add-captcha');
     expect(w.sleeps).toEqual([FIRST_BACKOFF_MS]);
     expect(w.renews.length).toBe(1);
@@ -559,7 +565,15 @@ describe('pnpm work run：派之前过容量、领单、建工作树，经脱离
       reclaude: 'C:/bin/reclaude.exe',
       env: { PATH: '/bin' },
     });
-    expect(readFileSync(runFiles(w.dir).brief, 'utf8')).toContain('gh issue view 42');
+    const brief = readFileSync(runFiles(w.dir).brief, 'utf8');
+    expect(brief).toContain('gh issue view 42');
+    expect(brief).toContain('受管 PR 建好后不自动挂合并');
+    expect(brief).toContain('先 pnpm work feedback 42 读取完整意见');
+    expect(brief).toContain('由审查方 resolve，工人不能代替审查方解除退回');
+    expect(brief).toContain('再 pnpm work deliver 42');
+    expect(brief).toContain('gh pr checks <PR号> --watch --fail-fast 只等检查结果');
+    expect(brief).toContain('gh pr view <PR号> --json state,mergedAt 核实真实合并');
+    expect(brief).not.toContain('等到合并或红');
     expect(w.spawned).toEqual([{ file: '/node', args: ['/sup.ts', w.dir], cwd: w.repoRoot }]);
     expect(w.out.join('\n')).toContain('派出去了 #42：看护进程 4242');
     expect(w.out.join('\n')).toContain('同步 Stop 消费一次终态');
@@ -637,5 +651,50 @@ describe('pnpm work run：派之前过容量、领单、建工作树，经脱离
     w.out.length = 0;
     expect(await w.run('runs')).toBe(0);
     expect(w.out[0]).toContain('#42（acme/app） 看护进程没了');
+  });
+});
+
+describe('supervisor独立交付核验与精确恢复', () => {
+  it('CLI success不是done：同session恢复先读完整退回，再独立验成才结束', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps(
+      [0, 1].map(() => ({ code: 0, stdout: resultJson({ result: '做完了', session_id: SID }), stderr: '' })),
+    );
+    let checks = 0;
+    w.deps.validateDelivery = async () => {
+      checks++;
+      if (checks === 1) throw new Error('退回未解决');
+    };
+    w.deps.feedbackContext = async () => `完整意见第${checks + 1}次`;
+    const result = await superviseRun(dir, w.deps);
+    expect(result?.state).toBe('done');
+    expect(checks).toBe(2);
+    expect(w.calls[0]?.stdin).toContain('完整意见第1次');
+    expect(w.calls[1]?.stdin).toContain('完整意见第2次');
+    expect(w.calls[1]?.args).toContain('--resume');
+    expect(w.calls.every((c) => c.env.FLEET_WORK_SESSION === SID)).toBe(true);
+  });
+  it('恢复读源失败不派工人、不伪造空意见或完成', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps([]);
+    w.deps.feedbackContext = async () => {
+      throw new Error('GitHub未读成');
+    };
+    await expect(superviseRun(dir, w.deps)).rejects.toThrow('GitHub未读成');
+    expect(w.calls).toHaveLength(0);
+    expect(readJson(runFiles(dir).result)).toBeNull();
+  });
+  it('历史done不能用来结清新退回，重启会重新核验并纠正终态', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: 'done', session_id: SID }), stderr: '' }]);
+    expect((await superviseRun(dir, w.deps))?.state).toBe('done');
+    w.deps.validateDelivery = async () => {
+      throw new Error('新增退回未解决');
+    };
+    const reread = await superviseRun(dir, w.deps);
+    expect(reread?.state).toBe('failed');
+    expect(reread?.why).toContain('新增退回');
+    expect(readJson<RunResult>(runFiles(dir).result)?.state).toBe('failed');
+    expect(w.calls).toHaveLength(1);
   });
 });

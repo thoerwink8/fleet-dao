@@ -22,6 +22,7 @@ import type { Git } from './directives.ts';
 import { localBranchPrefix } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { LOCAL_LABEL } from './labels.ts';
+import { managedWork, validateManagedDelivery } from './managed-work.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
 import { buildQueue, type LeaseRecord, type QueueDeps, readCurrentRepo, renderQueue } from './work-queue.ts';
 import {
@@ -37,6 +38,7 @@ import {
   runDir,
   runFiles,
   runPhase,
+  runsRoot,
   writeJson,
 } from './work-run.ts';
 
@@ -408,9 +410,17 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
   const dir = runDir(r.runsRoot, repo, a.issue);
   const files = runFiles(dir);
   const phase = runPhase(dir, r.now());
+  if (a.again && phase !== 'none') {
+    const old = readJson<RunSpec>(files.spec);
+    if (old) await validateManagedDelivery(deps.gh, old, false, r.runsRoot);
+  }
   if (phase === 'live') throw new Error(`#${a.issue} 已经有工人在跑（pnpm work runs 看），不再派第二个`);
   if (phase === 'terminal' && !a.again) {
     const done = readJson<RunResult>(files.result);
+    if (done?.state === 'done') {
+      const old = readJson<RunSpec>(files.spec);
+      if (old) await validateManagedDelivery(deps.gh, old, true, r.runsRoot);
+    }
     throw new Error(
       `#${a.issue} 上次派的工人已经${done?.state === 'done' ? '做完' : '没做成'}（${files.result}）；要重来加 --again（旧记录改名留着）`,
     );
@@ -502,6 +512,15 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
 
 export async function work(argv: readonly string[], deps: WorkDeps): Promise<number> {
   try {
+    if (['return', 'feedback', 'ack', 'resolve', 'deliver'].includes(argv[0] ?? '')) {
+      const repo = await currentRepo(deps);
+      return await managedWork(argv[0] ?? '', argv.slice(1), {
+        gh: deps.gh,
+        repo,
+        env: deps.env ?? process.env,
+        out: deps.out,
+      });
+    }
     if (argv[0] === 'queue') return await queueCmd(argv.slice(1), deps);
     if (argv[0] === 'run') return await runCmd(argv.slice(1), deps);
     if (argv[0] === 'runs') {
@@ -539,6 +558,10 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
     }
     const outcome = p.failed !== undefined ? 'failed' : p.release !== undefined ? 'released' : 'done';
     const reason = p.failed ?? p.release;
+    if (outcome === 'done') {
+      const spec = readJson<RunSpec>(runFiles(runDir(runsRoot(deps.env), repo, p.issue)).spec);
+      if (spec) await validateManagedDelivery(deps.gh, spec, true, runsRoot(deps.env));
+    }
     await send(deps, { action: 'finish', repo, issue: p.issue, outcome, ...(reason ? { reason } : {}) });
     noteLease(deps, (l) => l.remove(repo, p.issue));
     if (outcome === 'released') {
