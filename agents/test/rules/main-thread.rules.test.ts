@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 import { runChild } from '../child.ts';
+import { interactiveHookEnv } from '../hook-env.ts';
 
 interface Verdict {
   deny?: string;
@@ -119,7 +120,7 @@ const input = (path: unknown, extra: Row = {}, tool = 'Bash', toolInput: Row = {
 
 /** Mirasim 的引导那一条（#1743）在 mirasim-steer.rules.test.ts 钉；这里指到一个不在的家目录，不读跑测试这台机器上的真 diag */
 const NO_MIRASIM = join(dir, 'no-mirasim');
-const NO_MIRASIM_ENV = { ...process.env, FLEET_MIRASIM_DIR: NO_MIRASIM };
+const NO_MIRASIM_ENV = { ...interactiveHookEnv(), FLEET_MIRASIM_DIR: NO_MIRASIM };
 const check = (raw: string) => lib.check(raw, { settleMs: 0, mirasim: NO_MIRASIM });
 
 describe('引导先回', () => {

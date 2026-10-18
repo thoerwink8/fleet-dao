@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runChild, runChildOk } from './child.ts';
+import { interactiveHookEnv } from './hook-env.ts';
 
 interface Result {
   status: number | null;
@@ -424,7 +425,7 @@ describe('命令行外壳：同步那半起脱离的后台，后台写完下次�
         input: JSON.stringify({ hook_event_name: 'SessionStart', cwd }),
         cwd: temp('cwd'),
         env: {
-          ...process.env,
+          ...interactiveHookEnv(),
           HOME: home,
           USERPROFILE: home,
           FLEET_FRANCE_SSH: '',
