@@ -1,17 +1,16 @@
-// 项目仓不带 AI 署名（通用段「项目仓记什么」）：调工具前钩子 pretool.mjs 的 decide 调这里，各家 CLI 经 vendor-pretool.mjs 共用。
+// 对外仓不带 AI 署名（通用段「对外仓和对外内容怎么写」）：调工具前钩子 pretool.mjs 的 decide 调这里，各家 CLI 经 vendor-pretool.mjs 共用。
 // 各家 CLI 默认往提交和 PR 里加署名（Claude Code 的 Co-Authored-By、Generated with），全局说明压得住大多数，这里是兜底：
 // - git push：查这次要推、还不在任何远端上的提交，最终说明里有署名就拦。编辑器、-F 文件、amend 怎么写进去的都盖得住。
 // - git commit：命令文本（-m、--trailer、heredoc 正文）和 -F/--file 指的文件里有署名就拦，免得写完再改。
 // - gh pr create|edit、glab mr create|update：命令文本和 --body-file/-F 指的文件里有就拦。
-// 只管项目仓：fleet-dao（靠提交里的 Co-Authored-By: Claude Haiku 统计降档子代理开的 PR）和标了私人仓的一律放行。
+// 只管对外仓（repo-kind.mjs 判）：自用仓（fleet-dao 靠提交里的 Co-Authored-By: Claude Haiku 统计降档子代理开的 PR）一律放行。
 // 只有命令像上面几种时才跑 git、读文件；git 跑不起来、超时就放行并说一句没查成，不拦。
 // 和别的钩子一样被 agents-sync 整份拷进 ~/.fleet-dao/hooks/，只用 node 自带模块和同目录脚本。
 import { readFileSync } from 'node:fs';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { gitBroken, gitOk, gitRunner, gitWhy } from './git-run.mjs';
+import { repoKind } from './repo-kind.mjs';
 
-/** 私人仓的标记：仓根 AGENTS.md 里去掉两头空白后一字不差的一行 */
-export const PRIVATE_MARK = '<!-- repo-kind: 私人仓 -->';
 export const ATTRIBUTION_GIT_MS = 5_000;
 
 const AI_NAMES = 'claude|anthropic|gpt|openai|codex|gemini|cursor|copilot|kimi|grok|devin|deepseek|glm';
@@ -33,36 +32,6 @@ const GIT_HEAD = String.raw`(?:^|[;&|(\n'"]|\$\()\s*(?:sudo\s+)?git(?:\.exe)?((?
 const GIT_PUSH = new RegExp(`${GIT_HEAD}push(?![\\w-])`);
 const GIT_COMMIT = new RegExp(`${GIT_HEAD}commit(?![\\w-])`);
 const PR_CMD = /(?:^|[;&|(\n]|\$\()\s*(?:gh\s+pr\s+(?:create|edit)|glab\s+mr\s+(?:create|update))(?![\w-])/;
-
-/**
- * 仓是哪一类：fleet-dao、私人仓、项目仓。AGENTS.md 不存在、读不了都算项目仓（严的一边）。
- * @param {string} root 仓根
- * @param {(p: string) => string} [read]
- * @returns {'fleet-dao' | 'private' | 'project'}
- */
-export function repoKind(root, read = (p) => readFileSync(p, 'utf8')) {
-  /** @param {string} rel */
-  const has = (rel) => {
-    try {
-      read(join(root, rel));
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (has('agents/shared-rules.md') && has('packages/conventions/standard-paths.json')) return 'fleet-dao';
-  try {
-    if (
-      read(join(root, 'AGENTS.md'))
-        .split(/\r?\n/)
-        .some((l) => l.trim() === PRIVATE_MARK)
-    )
-      return 'private';
-  } catch {
-    // 没有 AGENTS.md、读不了：按项目仓
-  }
-  return 'project';
-}
 
 /**
  * git 全局选项里的 -C 路径（最后一个算数），没有就是 null
@@ -98,7 +67,7 @@ function referencedFiles(command, cwd, flags) {
   return out;
 }
 
-const RULE = '项目仓的提交和 PR/MR 不加 AI 署名行（通用段「项目仓记什么」）';
+const RULE = '对外仓的提交和 PR/MR 不加 AI 署名行（通用段「对外仓和对外内容怎么写」）';
 
 /**
  * @param {string} command 整条命令（含 heredoc 正文）
@@ -120,11 +89,11 @@ export function attributionVerdict(command, outer, cwd, deps = {}) {
   if (gitBroken(top))
     return {
       code: 0,
-      context: `fleet-guard：没查成这个仓是不是项目仓（${gitWhy(top)}），AI 署名没查。${RULE}。`,
+      context: `fleet-guard：没查成这个仓是不是对外仓（${gitWhy(top)}），AI 署名没查。${RULE}。`,
     };
   const root = top.stdout.trim();
   if (!gitOk(top) || !root) return null;
-  if (repoKind(root, deps.read) !== 'project') return null;
+  if (repoKind(root, deps.read) !== 'external') return null;
 
   const texts = [command];
   if (commit) texts.push(...referencedFiles(outer, dir, '-F|--file'));

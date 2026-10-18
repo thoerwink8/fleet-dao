@@ -14,6 +14,8 @@
     "skills/discuss/scripts/walkthrough.mjs",
     "hooks/pretool.mjs",
     "hooks/ai-attribution.mjs",
+    "hooks/repo-kind.mjs",
+    "hooks/is-main.mjs",
     "hooks/vendor-pretool.mjs",
     "hooks/pretool-codex.mjs",
     "hooks/pretool-gemini.mjs",

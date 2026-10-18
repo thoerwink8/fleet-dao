@@ -24,8 +24,9 @@
 //    只在这台配了登法国的 ssh 时查：~/.fleet-dao/france-ssh，或真开会话时进程里的 FLEET_FRANCE_SSH。没配不出声，不当成没到期。
 //    当库被测试调用时不读进程环境，免得测试机上的环境变量把 ssh 打出去；真开会话（本文件当主程序）才把进程环境传进去。
 //    查不成就说没查成。结果缓存 QUIET_MS，免得每条消息都 ssh。认不出的不当成没到期。
-// 6. 仓合同：会话所在仓按 fleet-dao 的 agents/repo-contract.json 查，
-//    有缺项说一段事实，每个仓每天最多一次，全过不出声。只在真开会话时接上（repoContract 参数），测试按需注入。
+// 6. 仓类型和仓合同：没标自用仓、远端又全在创始人 GitHub 下的仓提醒问他要不要加标记（repo-kind.mjs）；
+//    自用仓按 fleet-dao 的 agents/repo-contract.json 查，有缺项说一段事实，对外仓不查（决定 0107）。
+//    每个仓每天最多一次，全过不出声。只在真开会话时接上（repoContract 参数），测试按需注入。
 // 环境变量 FLEET_WORKER=1（机器派的会话设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
@@ -48,8 +49,10 @@ import { backgroundEnv, backgroundState, launchBackground, processAlive } from '
 import { lineageOf, readFounderHistory } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
+import { isMainModule } from './is-main.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
 import { contractLines } from './repo-contract.mjs';
+import { kindReminderLines } from './repo-kind.mjs';
 import { selectSessionId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
 export const SYNC_MS = 30_000;
@@ -1555,12 +1558,7 @@ export function pickCwd(input) {
   return process.cwd();
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
+const isMain = () => isMainModule(import.meta);
 
 if (isMain() && process.argv[2] === '--background') {
   // 后台那半（fastSessionStart 起的脱离子进程）：输出没人看，结果全写进结果文件；整个崩了也写一笔 crashed，下次开场照实说
@@ -1607,7 +1605,10 @@ if (isMain() && process.argv[2] === '--background') {
       cwd: pickCwd(input),
       home,
       sessionId: session.ok ? session.id : input?.session_id,
-      repoContract: (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
+      repoContract: (dir) => [
+        ...kindReminderLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
+        ...contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
+      ],
     };
     lines =
       process.env.FLEET_WORKER === '1'

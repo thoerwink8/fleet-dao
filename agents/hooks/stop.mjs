@@ -5,9 +5,8 @@
 // 退出码恒为 0：Stop 上 exit 2 也是「不许停」。
 // 规矩本身由 agents/test/rules/stop.rules.test.ts 钉住：不在 fleet-dao 检出里、又没开无人值守时，输出里出现 decision 或 hookSpecificOutput 会红。
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { completedRuns } from './continuation-results.mjs';
+import { isMainModule } from './is-main.mjs';
 import { decideQueueStop } from './queue-stop.mjs';
 import {
   decideStop,
@@ -18,14 +17,7 @@ import {
   stateDir,
 } from './unattended.mjs';
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   if (process.env.FLEET_HEADLESS === '1') process.exit(0);
   /** @type {Record<string, unknown>} */
   let input = {};

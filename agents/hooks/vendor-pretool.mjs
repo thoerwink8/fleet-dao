@@ -7,8 +7,6 @@
 // 回话按那家的协议，由入口自己给：退出码 2 加 stderr（exitCodeReply），或 stdout 一份 JSON。
 // 和 pretool.mjs 一样只用 JSDoc 写类型（原样装到各台机器、纯 node 直接跑），agents/tsconfig.json 用 checkJs 过严格检查。
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { decide } from './pretool.mjs';
 
 /** @typedef {import('./pretool.mjs').Verdict} Verdict */
@@ -104,13 +102,4 @@ export function runVendor(normalize, vendor, reply) {
   reply(verdict);
 }
 
-/**
- * 这个模块是不是被 node 直接跑的（不是被测试 import 的）
- * @param {string} url 入口自己的 import.meta.url
- */
-export function isMainModule(url) {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(url));
-}
+export { isMainModule } from './is-main.mjs';
