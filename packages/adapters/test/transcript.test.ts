@@ -1,5 +1,6 @@
 // 会话过程记录（#1640）：四家插头的读取器从真跑夹具里抽出的条目对不对；经 runClaudeCode 的 onTranscript 一条条交出。
 // 流里没有的种类不编：cursor 没有单独的报错帧，grok 的终帧没有回答正文。
+import { isSubagentMeta } from '@fleet-dao/shared';
 import { describe, expect, it } from 'vitest';
 import { runClaudeCode } from '../src/claude-code/run.ts';
 import { ClaudeStreamReader } from '../src/claude-code/stream.ts';
@@ -121,12 +122,131 @@ describe('Claude：子代理（手写的帧，夹具里没有录到子代理—�
     const entries = frames.flatMap((f) => reader.read(JSON.stringify(f)).transcript);
     const sub = { subagent: 'toolu_A', subagentType: 'reviewer' };
     expect(entries.map((e) => [e.kind, e.tool, e.text, e.meta])).toEqual([
-      ['tool_call', 'Agent', '派了 reviewer：请审 tier.ts 的改动', undefined],
+      ['tool_call', 'Agent', '派了 reviewer：请审 tier.ts 的改动', { callId: 'toolu_A' }],
       ['assistant', undefined, '我来看 tier.ts', sub],
-      ['tool_call', 'Read', 'tier.ts', sub],
-      ['tool_result', 'Read', 'export const T = 1', sub],
-      ['tool_result', 'Agent', '没问题', undefined],
+      ['tool_call', 'Read', 'tier.ts', { callId: 'toolu_B', ...sub }],
+      ['tool_result', 'Read', 'export const T = 1', { callId: 'toolu_B', ...sub }],
+      ['tool_result', 'Agent', '没问题', { callId: 'toolu_A' }],
       ['assistant', undefined, '审完了', undefined],
+    ]);
+  });
+
+  it('引擎实际写的子代理标记是调用编号字符串，不是 true：shared 的 isSubagentMeta 认得出，主会话的条目不被认成子代理（#3140）', () => {
+    const reader = new ClaudeStreamReader({ runId: 'r', cwd: '/w', now: () => NOW });
+    const entries = frames.flatMap((f) => reader.read(JSON.stringify(f)).transcript);
+    expect(entries.map((e) => isSubagentMeta(e.meta))).toEqual([false, true, true, true, false, false]);
+    // 旧写法 meta.subagent === true 一条也认不出：页面当年就是这样把线上的子代理条目全当成主会话的
+    expect(entries.filter((e) => e.meta?.subagent === true)).toHaveLength(0);
+  });
+});
+
+describe('Claude：调用号、命令说明、改文件的增删行数（#3140）', () => {
+  const call = (id: string, name: string, input: Record<string, unknown>) => ({
+    type: 'assistant',
+    message: { model: 'm', content: [{ type: 'tool_use', id, name, input }] },
+    parent_tool_use_id: null,
+  });
+  const result = (id: string, text: string, extra: Record<string, unknown> = {}) => ({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: id, content: text }] },
+    parent_tool_use_id: null,
+    ...extra,
+  });
+  const run = (frames: unknown[]) => {
+    const reader = new ClaudeStreamReader({ runId: 'r', cwd: '/w', now: () => NOW });
+    return frames.flatMap((f) => reader.read(JSON.stringify(f)).transcript);
+  };
+
+  it('真跑夹具：Edit 的结果读 structuredPatch（+1 −1），调用和结果带同一个调用号', () => {
+    const entries = claude('cc-haiku-edit').filter((e) => e.tool === 'Edit');
+    const [c, r] = entries;
+    expect(c?.kind).toBe('tool_call');
+    expect(r?.kind).toBe('tool_result');
+    expect(c?.meta?.callId).toBe('toolu_01BAkEB3sKicL7oimPaLtLef');
+    expect(r?.meta).toEqual({ callId: 'toolu_01BAkEB3sKicL7oimPaLtLef', added: 1, removed: 1 });
+  });
+
+  it('真跑夹具：Write 新建文件没有 patch 块，按内容行数记新增', () => {
+    const r = claude('cc-haiku-write').find((e) => e.kind === 'tool_result' && e.tool === 'Write');
+    expect(r?.meta).toMatchObject({ added: 1, removed: 0 });
+  });
+
+  it('读文件、跑命令的结果不带增删行数；失败的编辑也不带', () => {
+    const read = claude('cc-haiku-read').find((e) => e.kind === 'tool_result');
+    expect(read?.meta).toEqual({ callId: expect.any(String) });
+    const failed = run([
+      call('t1', 'Edit', { file_path: '/w/a.ts', old_string: 'x', new_string: 'y' }),
+      result('t1', 'old_string not found', {
+        tool_use_result: undefined,
+      }),
+    ]);
+    expect(failed.at(-1)?.meta).toEqual({ callId: 't1' });
+    const bad = run([
+      call('t2', 'Edit', { file_path: '/w/a.ts', old_string: 'x', new_string: 'y' }),
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 't2', content: 'boom', is_error: true }] },
+        tool_use_result: { structuredPatch: [{ lines: ['-x', '+y'] }] },
+        parent_tool_use_id: null,
+      },
+    ]);
+    expect(bad.at(-1)).toMatchObject({ ok: false, meta: { callId: 't2' } });
+    expect(bad.at(-1)?.meta).not.toHaveProperty('added');
+  });
+
+  it('Bash 的说明写进调用的 meta.description；别的工具不带', () => {
+    const entries = run([
+      call('b1', 'Bash', { command: 'pnpm test', description: '跑测试' }),
+      call('r1', 'Read', { file_path: '/w/a.ts', description: '不该出现' }),
+    ]);
+    expect(entries[0]?.meta).toEqual({ callId: 'b1', description: '跑测试' });
+    expect(entries[1]?.meta).toEqual({ callId: 'r1' });
+  });
+
+  it('并行的两个 Edit，结果倒序回来：每个结果靠自己的调用号对回自己的调用，增删行数不串（评审反例）', () => {
+    const entries = run([
+      {
+        type: 'assistant',
+        message: {
+          model: 'm',
+          content: [
+            {
+              type: 'tool_use',
+              id: 'ea',
+              name: 'Edit',
+              input: { file_path: '/w/a.ts', old_string: 'a', new_string: 'A' },
+            },
+            {
+              type: 'tool_use',
+              id: 'eb',
+              name: 'Edit',
+              input: { file_path: '/w/b.ts', old_string: 'b', new_string: 'B\nB2' },
+            },
+          ],
+        },
+        parent_tool_use_id: null,
+      },
+      // b 先成功回来
+      {
+        ...result('eb', 'ok'),
+        tool_use_result: { structuredPatch: [{ lines: ['-b', '+B', '+B2'] }] },
+      },
+      // a 后回来，且失败
+      {
+        type: 'user',
+        message: { content: [{ type: 'tool_result', tool_use_id: 'ea', content: 'fail', is_error: true }] },
+        parent_tool_use_id: null,
+      },
+    ]);
+    const calls = entries.filter((e) => e.kind === 'tool_call');
+    const results = entries.filter((e) => e.kind === 'tool_result');
+    expect(calls.map((c) => [c.text, c.meta?.callId])).toEqual([
+      ['a.ts', 'ea'],
+      ['b.ts', 'eb'],
+    ]);
+    expect(results.map((r) => [r.meta?.callId, r.ok, r.meta?.added, r.meta?.removed])).toEqual([
+      ['eb', true, 2, 1],
+      ['ea', false, undefined, undefined],
     ]);
   });
 });
@@ -159,6 +279,18 @@ describe('cursor-agent', () => {
       'result',
     ]);
     expect(entries[2]?.text).toContain('cursor: 追加一行');
+  });
+
+  it('调用和结果带同一个调用号；改文件的结果带 linesAdded / linesRemoved（#3140）', () => {
+    const entries = cursor('cursor-edit-tools');
+    const calls = entries.filter((e) => e.kind === 'tool_call');
+    const results = entries.filter((e) => e.kind === 'tool_result');
+    expect(calls.every((c) => typeof c.meta?.callId === 'string')).toBe(true);
+    expect(results.map((r) => r.meta?.callId).sort()).toEqual(calls.map((c) => c.meta?.callId).sort());
+    const edit = results.find((r) => r.tool === 'edit');
+    expect(edit?.meta).toMatchObject({ added: 1, removed: 0 });
+    // 读文件的结果不带增删
+    expect(results.find((r) => r.tool === 'read')?.meta).not.toHaveProperty('added');
   });
 });
 
@@ -194,6 +326,15 @@ describe('grok', () => {
     // 终帧不带回答正文：最后一句话来自流里的 text 帧，收场时 flush 出来
     expect(entries.at(-2)).toMatchObject({ kind: 'assistant', text: '好了' });
   });
+
+  it('调用和结果带同一个调用号；search_replace 的结果按改前改后的文本记增删行数；命令的说明记在 meta（#3140）', () => {
+    const entries = grok('grok-edit-commit');
+    const calls = entries.filter((e) => e.kind === 'tool_call');
+    const results = entries.filter((e) => e.kind === 'tool_result');
+    expect(calls.map((c) => c.meta?.callId).sort()).toEqual(results.map((r) => r.meta?.callId).sort());
+    expect(results.find((r) => r.tool === 'search_replace')?.meta).toMatchObject({ added: 1, removed: 0 });
+    expect(results.find((r) => r.tool === 'read_file')?.meta).not.toHaveProperty('added');
+  });
 });
 
 describe('Mirasim', () => {
@@ -228,6 +369,17 @@ describe('Mirasim', () => {
     expect(entries.filter((e) => e.kind === 'tool_call')).toHaveLength(2);
     expect(entries.filter((e) => e.kind === 'tool_result')).toHaveLength(2);
     expect(entries.at(-1)).toMatchObject({ kind: 'result', ok: true });
+  });
+
+  it('调用和结果带同一个调用号；命令的结果标 exitKnown:false（快照里没有退出码，完成不代表成功，读的一边写「结果未知」）（#3140）', () => {
+    for (const name of ['mira-kimi', 'mira-pi']) {
+      const entries = replay(name);
+      const calls = entries.filter((e) => e.kind === 'tool_call');
+      const results = entries.filter((e) => e.kind === 'tool_result');
+      expect(calls.length).toBeGreaterThan(0);
+      expect(results.map((r) => r.meta?.callId)).toEqual(calls.map((c) => c.meta?.callId));
+      expect(results.every((r) => r.meta?.exitKnown === false)).toBe(true);
+    }
   });
 
   it('终态带死因：先记 error，再记 ok=false 的结论，只记一次', () => {
