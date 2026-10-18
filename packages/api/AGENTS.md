@@ -32,3 +32,5 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - 改了行为（发信号、权限、读写哪张表）：同步 `docs/design.md` 第十五节「驾驶舱」对应条；改了部署相关的环境变量、端口：同步 `docs/ops.md`。
 
 - 通知回答先存代次，再原子 claim，最后按答案和 claim CAS 结算；在途或结果未知返回明确 409，不自动重放。HTTP 重试复用 `requestId`，新决定用新编号，带 `requestId` 必须同时带 `expectedAnswerId`（首答 null），拒绝跨新答案的迟到重试。handoff 的 GitHub key 绑定答案代次；历史无代次不能执行或交接。
+
+- 最终现场验收：`fleet-api acceptance status <owner/仓> <单号>` 读持久责任账；`settle` 必须提交精确责任 id、generation、PR/head 和证据，旧代次不能结清新增项。公开只读口复用现有 CI bridge 验证公开仓身份，不提供写口。

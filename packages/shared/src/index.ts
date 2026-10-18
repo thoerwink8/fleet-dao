@@ -1,4 +1,5 @@
 // 共用的类型、数据结构校验（zod）与常量
+export * from './acceptance.ts';
 export * from './bans.ts';
 export * from './carpool-burn.ts';
 export * from './changelog.ts';

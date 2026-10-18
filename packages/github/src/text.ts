@@ -37,6 +37,11 @@ export function neutralizeCloseKeywords(text: string): string {
 export interface PrBodyInput {
   /** 对应的需求（issue 号）。 */
   requirement?: number | undefined;
+  /**
+   * 这张 PR 合了单子也不能关（#3037：冷验收有转给人的验收条，验收责任还开着）：「需求」栏写成 `Refs #号（分片、关不了它…）`，
+   * 合并收口、每日对账认「分片」只挂不关。不给 = 原样写 `#号`（引擎自己收尾关单）。
+   */
+  requirementRefs?: boolean | undefined;
   /** 子任务名，例如「A 登录表单」。 */
   subtask?: string | undefined;
   /** 做了什么，3–5 条。 */
@@ -65,7 +70,11 @@ export function renderPrBody(input: PrBodyInput): string {
   if ((input.assumed ?? []).length > 0) lists.push(['按推荐先做了', input.assumed ?? []]);
   const requirement =
     [
-      input.requirement === undefined ? '' : `#${input.requirement}`,
+      input.requirement === undefined
+        ? ''
+        : input.requirementRefs
+          ? `Refs #${input.requirement}（分片、关不了它：验收责任待人验）`
+          : `#${input.requirement}`,
       input.subtask ? `子任务 ${oneLine(input.subtask)}` : '',
     ]
       .filter(Boolean)

@@ -111,6 +111,15 @@ describe('PR 正文模板', () => {
     expect(body).toContain('**需求**：#12');
   });
 
+  it('验收责任还开着（#3037）：「需求」栏写 Refs 加「分片、关不了它」，不写 Closes；没开着照旧只写 #号', () => {
+    const kept = renderPrBody({ requirement: 12, requirementRefs: true, did: ['a'], verified: ['b'] });
+    expect(kept).toContain('**需求**：Refs #12（分片、关不了它：验收责任待人验）');
+    expect(hasCloseKeywords(kept)).toBe(false);
+    const plain = renderPrBody({ requirement: 12, did: ['a'], verified: ['b'] });
+    expect(plain).toContain('**需求**：#12');
+    expect(plain).not.toContain('Refs');
+  });
+
   it('条目里的关单词也改掉', () => {
     expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'] })).toContain('- 关联 #3');
   });

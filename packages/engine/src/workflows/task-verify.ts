@@ -9,6 +9,9 @@
 // 验收会话脱开引擎跑（#2848）：活动交回 detached 时隔 VERIFY_REATTACH_SECONDS 带上 attach 再调同一次验收（patched('cold-verify-attach')），
 // 接回的结论照常认；接回没接成的活动回 retry（重验一次），不算一轮、不算没过，全程「冷验收被拒」的次数也不数它。
 
+// 「不归我验」（#3037）：结论里的 outOfScope 不算没过、不挡合并（决定 0093），按 PR + 头记进 rt.handedOver，收尾（task.ts 的 finish）
+// 照它和库里的验收责任留着原单。
+
 // 正式评审（#2991，patched('review-request-changes')）：活动在验收有结论时现读 PR 上认可审查者还没解决的「要求改」，带在结论里。
 // 没交过的交给下一轮动手，交过的不重复派工，挂着就不合。验收之后到合上之间交的评审由合并那一步接（task-merge.ts：挂自动合并、
 // 等合并的每一圈、直接合之前都重读，读到了撤掉自动合并、交给这里同一份 handReviewChanges）。
@@ -90,6 +93,10 @@ export async function coldVerifyPr(
       rt.verifyRound -= 1; // 没验成不算一轮
       await rt.park('验收做不出来', res.unavailable);
       continue;
+    }
+    // 「不归我验」转给人的验收条（#3037）：不算没过、不挡合并，记下来，收尾时照它留着原单（纯状态，老历史没有这个字段）
+    if (res.outOfScope !== undefined && res.outOfScope.length > 0) {
+      rt.noteHandedOver(rt.prNumber ?? 0, headSha, res.outOfScope);
     }
     // PR 上还挂着认可审查者的正式「要求改」（#2991）：没交过的交给下一轮工人；都交过了、验收这一头又过了，不再派工也不合，
     // 停下等审查者复审或撤销。老历史的活动结果里没有 reviewChanges，进不了这一支、不打标记

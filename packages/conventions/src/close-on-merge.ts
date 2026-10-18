@@ -1,3 +1,4 @@
+import { acceptanceGate, acceptanceOriginForPull } from './acceptance-gate.ts';
 // PR 合并那一步自动收口（#995 拍 1 的 A，决定 0020 第 1 条）：.github/workflows/close-on-merge.yml 在 PR 合并后跑
 // node packages/conventions/src/bin/close-on-merge.ts --pr <号>，这里读这张 PR「需求」栏挂的单，该关的用 issueClose 的逻辑关。
 // 为什么要有它：关单只有「PR 写 Closes（合并时 GitHub 自己关）」和「人手 pnpm issue:close」两条，都要人主动做；
@@ -7,7 +8,8 @@
 // - 只看「需求」栏里同仓的 Closes / Refs；Refs 那一行写了「分片、关不了它」的是有意只挂不关，不碰；
 // - 单还开着、是单不是 PR；贴了「母单」标签的不碰（母单由指挥官收口）；下面有子单还开着的不碰（issueClose 也拒）；
 // - 「本机做」标签的单只认 Closes 的（GitHub 自己会关），Refs 不碰：它是指挥官留给本机的，没人明说做完不替它关；
-// - 还有别的开着的 PR 的「需求」栏挂着同一张单：活还在做，不碰（接力分片常这么排）。
+// - 还有别的开着的 PR 的「需求」栏挂着同一张单：活还在做，不碰（接力分片常这么排）；
+// - 数据库里仍有未结清的最终验收责任：代码合了也不碰，评论不提供授权。
 // 读不到、认不出一律抛 CloseUnchecked（退出码 2，不当成没事）；关的那一步由 issueClose 做并回读核对。
 // 改这里之前必须知道：
 // - 「无在跑工作流」在 GitHub 这一侧读不到引擎的状态，用上面两条（引擎的 PR 不碰、别的开着的 PR 还挂着它不碰）近似。
@@ -34,6 +36,10 @@ export interface CloseOnMergeResult {
 
 const OPEN_PRS_PAGE = 100;
 
+// 旧评论展示标记，不参与验收授权。
+export const ACCEPTANCE_OPEN_MARK = '验收责任已记下';
+export const ACCEPTANCE_SETTLED_MARK = '最终验收完成：';
+
 /**
  * 这张单「有意留着」的几种写法，合并收口（这里）和每日对账（github-audit.ts）认同一套：有就返回为什么不碰，没有返回 undefined。
  * 单是不是开着、是不是 PR、别的 PR 还挂着没有，各用各的读法判，不在这里。
@@ -49,7 +55,10 @@ export function whyLeave(link: IssueColumnLink, labels: readonly string[]): stri
   return undefined;
 }
 
-export async function closeOnMerge(pr: number, deps: { gh: Gh }): Promise<CloseOnMergeResult> {
+export async function closeOnMerge(
+  pr: number,
+  deps: { gh: Gh; acceptance?: typeof acceptanceGate },
+): Promise<CloseOnMergeResult> {
   const { gh } = deps;
   const pull = obj(
     await readJson(gh, ['api', `repos/{owner}/{repo}/pulls/${pr}`], `读 PR #${pr}`),
@@ -81,7 +90,7 @@ export async function closeOnMerge(pr: number, deps: { gh: Gh }): Promise<CloseO
 
   const outcomes: MergeCloseOutcome[] = [];
   for (const link of links) {
-    outcomes.push(await settle(gh, { pr, title: pull.title, link, stillWorked }));
+    outcomes.push(await settle(gh, { pr, title: pull.title, link, stillWorked }, deps.acceptance));
   }
   return { pr, outcomes };
 }
@@ -89,6 +98,7 @@ export async function closeOnMerge(pr: number, deps: { gh: Gh }): Promise<CloseO
 async function settle(
   gh: Gh,
   a: { pr: number; title: string; link: IssueColumnLink; stillWorked: ReadonlySet<number> },
+  acceptance?: typeof acceptanceGate,
 ): Promise<MergeCloseOutcome> {
   const { link, pr } = a;
   const n = link.number;
@@ -123,7 +133,12 @@ async function settle(
         `PR #${pr}「${a.title}」合并了，它的「需求」栏挂着这张单（${link.kind === 'closes' ? 'Closes' : 'Refs'}）、没有别的 PR 还挂着它：合并时自动收口（close-on-merge，决定 0020 第 1 条）。` +
           '收错了就重开它，并在 PR 的「需求」栏那一行写明「分片、关不了它」。',
       ],
-      { gh },
+      {
+        gh,
+        acceptance:
+          acceptance ??
+          (async (g, url, n) => acceptanceGate(g, url, n, fetch, await acceptanceOriginForPull(g, pr))),
+      },
     );
     if (r.outcome === 'already') return kept('已经关了');
     return { number: n, outcome: 'closed', evidence: r.evidence ?? '' };

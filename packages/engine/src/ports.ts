@@ -249,6 +249,8 @@ export interface PushBranchInput extends Scope {
 export interface PrBody {
   /** 对应的需求（issue 号）。 */
   requirement?: number;
+  /** 验收责任还开着（#3037）：「需求」栏写 Refs、标分片，合并收口和每日对账都不关它。 */
+  requirementRefs?: boolean;
   /** 子任务名。 */
   subtask?: string;
   /** 做了什么，3–5 条。 */
@@ -398,6 +400,44 @@ export interface CloseIssueInput extends Scope {
   comment?: string;
 }
 
+/**
+ * 一条要记下的验收责任（#3037，db 的 acceptance_duties）：冷验收判「不归我验」、转给人验的那几条，连哪个 PR、哪个头。
+ * 没有代码的协调验收责任 prNumber 记 0、head 记空串（不要求开空 PR）。
+ */
+export interface AcceptanceDutyRecord {
+  prNumber: number;
+  head: string;
+  /** 原验收项（验收方回的原文），至少一条。 */
+  items: string[];
+  /** 合并回执：合进主线的提交。只在合并之后带。 */
+  mergeCommit?: string;
+}
+
+/** 一条还开着的验收责任（读回来的原样）。 */
+export interface AcceptanceDuty {
+  repo: string;
+  issueNumber: number;
+  prNumber: number;
+  head: string;
+  items: string[];
+  source: 'cold_verify' | 'coordination';
+  mergeCommit: string | null;
+}
+
+/**
+ * 记验收责任并读回这张单还开着的全部（#3037）。record 里的按「单 + PR + 头」幂等：重复转交、合并回执重来都落在同一行，
+ * 原验收项只并不删，合并回执只补不改。record 可以是空的（只读）。读不成、写不成照抛：不回空数组冒充「没有待验的」。
+ */
+export interface AcceptanceDutiesInput extends Scope {
+  repo: Repo;
+  issueNumber: number;
+  record: AcceptanceDutyRecord[];
+}
+
+export interface AcceptanceDutiesResult {
+  open: AcceptanceDuty[];
+}
+
 export interface WriteSpecDocInput extends Scope {
   repo: Repo;
   issueNumber: number;
@@ -457,6 +497,7 @@ export interface EnginePorts {
   saveTaskState(input: TaskStateSnapshot, ctx: PortContext): Promise<void>;
   recordRound(input: RecordRoundInput, ctx: PortContext): Promise<void>;
   closeIssue(input: CloseIssueInput, ctx: PortContext): Promise<void>;
+  acceptanceDuties(input: AcceptanceDutiesInput, ctx: PortContext): Promise<AcceptanceDutiesResult>;
   raiseAlert(input: RaiseAlertInput, ctx: PortContext): Promise<{ alertId: string }>;
   recordTiming(input: TimingEntry, ctx: PortContext): Promise<void>;
 }

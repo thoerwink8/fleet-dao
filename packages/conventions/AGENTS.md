@@ -44,3 +44,5 @@
 - 改 CI：`packages/conventions/src/ci-plan.ts` 和 `.github/workflows/ci.yml` 要对得上（汇总 job 逐个核对该跑的跑了）。
 - 改 `docs/ops.md` 里生成的表（端口、用户、目录、单元、密钥）：`node packages/conventions/src/bin/ops-tables.ts --write` 重新生成，`--check` 核对。
 - 改开单、关单、PR 栏目的规矩：同步 design 第七节和 `README.md`「常用」。
+
+- `issue:close` 和 `close-on-merge` 收尾都现读数据库最终验收责任；`--note`、Bot 评论不能替代结清。Actions 从可信 engine App 的精确 PR/head policy-source 找只读口，本机复用已安装的 local-sessions 地址。没读成明确退出 2、不关单。

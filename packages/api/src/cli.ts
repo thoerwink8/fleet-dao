@@ -1,3 +1,4 @@
+import { ACCEPTANCE_USAGE, parseAcceptanceArgs, runAcceptance } from './acceptance-cli.ts';
 // 后端的管理命令（法国上以 root 经 packages/api/bin/fleet-api 跑，见 docs/ops.md 第九节「账密登录」「让 AI 接活」）。
 //   set-password <飞书名或用户 id> [--username <用户名>]
 // 给白名单里的人设（或重设）账密登录的密码：飞书登录出问题时也进得去驾驶舱。
@@ -1130,6 +1131,7 @@ const USAGES: Record<string, string> = {
   project: PROJECT_USAGE,
   'emergency-issue': EMERGENCY_ISSUE_USAGE,
   notify: NOTIFY_USAGE,
+  acceptance: ACCEPTANCE_USAGE,
 };
 
 const isHelp = (arg: string | undefined) => arg === '--help' || arg === '-h';
@@ -1146,6 +1148,18 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (usage !== undefined && isHelp(rest[0])) {
     deps.out(usage);
     return 0;
+  }
+  if (command === 'acceptance') {
+    parseAcceptanceArgs(rest);
+    const opened = deps.openDb
+      ? await deps.openDb(databaseUrl(deps.env))
+      : await import('@fleet-dao/db').then(({ createDb }) => createDb({ url: databaseUrl(deps.env) }));
+    try {
+      deps.out(JSON.stringify(await runAcceptance(rest, opened.db, deps.now())));
+      return 0;
+    } finally {
+      await opened.close();
+    }
   }
   if (command === 'set-password') {
     const args = parseSetPasswordArgs(rest);

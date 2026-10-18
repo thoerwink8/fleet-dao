@@ -146,6 +146,7 @@ function startToCloseFor(activity: string, limits?: Limits): number | undefined 
     case 'recordTiming':
     case 'saveTaskState':
     case 'recordRound':
+    case 'acceptanceDuties':
     case 'raiseAlert':
     case 'releaseReservation':
     case 'readCiPolicy':
