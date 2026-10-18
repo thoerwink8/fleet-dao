@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { PullFacts } from '../src/engine-pulls.ts';
 import { type IngestedEvent, reviewMergeHold, type WakeEvent } from '../src/events.ts';
 import { mergeKey } from '../src/pulls.ts';
-import type { Intake } from '../src/reconcile.ts';
+import { type Intake, isLocalAutoMergePr } from '../src/reconcile.ts';
 import { json, REPO_ID, repo, setup, sha } from './helpers.ts';
 
 const A = sha('a');
@@ -815,6 +815,57 @@ describe('对账与补漏', () => {
       openedByEngine: true,
       mergedByEngine: true,
     });
+  });
+
+  it('本机线 local/ 的 PR 由「引擎」自动合并：不报没有合并记录、只补账；手动合的照报（#2903）', async () => {
+    const { gh, fake, ledger } = setup();
+    const local = fake.addPull({
+      head: { ref: 'local/2901-published-deps', sha: A },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:00:00Z',
+      merge_commit_sha: sha('c'),
+      merged_by: fake.bots.engine,
+    });
+    const byHand = fake.addPull({
+      head: { ref: 'local/2902-handed', sha: B },
+      state: 'closed',
+      merged: true,
+      merged_at: '2026-09-25T11:10:00Z',
+      merge_commit_sha: sha('d'),
+      merged_by: fake.human,
+    });
+    for (const [number, ref, head] of [
+      [local.number, 'local/2901-published-deps', A],
+      [byHand.number, 'local/2902-handed', B],
+    ] as const) {
+      await ledger.upsertPullRequest({
+        repoId: REPO_ID,
+        number,
+        state: 'merged',
+        headRef: ref,
+        headSha: head,
+        updatedAt: new Date('2026-09-25T11:30:00Z'),
+      });
+    }
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .auditMergedPrs('acme/widgets', new Date('2026-09-25T00:00:00Z'));
+    expect(report.outcome).toBe('ok');
+    expect(report.localAutoMergePrs).toEqual([local.number]);
+    expect(report.findings.map((f) => `${f.number} ${f.kind}`).sort()).toEqual(
+      [
+        `${local.number} backfill_merge_record`,
+        `${byHand.number} not_merged_by_engine`,
+        `${byHand.number} no_merge_record`,
+        `${byHand.number} backfill_merge_record`,
+      ].sort(),
+    );
+    expect(isLocalAutoMergePr({ headRef: 'local/2901-x', mergedByEngine: true })).toBe(true);
+    expect(isLocalAutoMergePr({ headRef: 'local/2901-x', mergedByEngine: false })).toBe(false);
+    expect(isLocalAutoMergePr({ headRef: 'fleet/2901-x', mergedByEngine: true })).toBe(false);
+    expect(isLocalAutoMergePr({ headRef: 'local/misc', mergedByEngine: true })).toBe(false);
   });
 
   it('人开的 PR：镜像没记的照样补上；不报合并人、也不报没有合并记录', async () => {

@@ -5,6 +5,7 @@
 // - 核对：合并的 PR 都记在镜像里。我们两个机器人开的 PR 还要是「引擎」机器人合的、
 //   账上有合并队列的合并记录（C21/C22）。人开的不查这两项：帅位本机开、GitHub 自动合并，没有合并队列这一步。
 //   例外：分支以 ci-timings/ 开头、开和合都是引擎机器人的耗时表 PR（isEngineCiTimingsPr）不走任务合并队列，不报没有合并记录。
+//   例外：本机线 local/<单号>- 的 PR（isLocalAutoMergePr）由 pr:open 挂 GitHub 自动合并、「引擎」合，也不走任务合并队列，不报没有合并记录。
 // 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
@@ -85,6 +86,11 @@ export interface MergedPrAuditReport extends AuditReport {
    * 没有「没经合并队列」那条发现，调用方仍要按这个把已经开着的 reconcile:pr 撤掉。
    */
   engineCiTimingsPrs?: number[];
+  /**
+   * 这一轮看到的本机线 PR 号（isLocalAutoMergePr）：本来就不走任务合并队列，不报没有合并记录；
+   * 调用方按这个把已经开着的 reconcile:pr 撤掉。
+   */
+  localAutoMergePrs?: number[];
   /**
    * 这一轮看到的、我们机器人开的、实际合并人是「引擎」、真实 github.merge_pr 的完整回执与 GitHub 一致的 PR 号。
    * 调用方按这个撤掉已经开着的 reconcile:pr；补账不能证明经过合并队列。
@@ -299,10 +305,20 @@ export function isEngineCiTimingsPr(pr: {
 }
 
 /**
+ * 本机线（决定 0096）的 PR 不走任务的合并队列。
+ * 本机在 `local/<单号>-` 分支上干活，`pnpm pr:open` 以机器人开 PR、当场挂 GitHub 自动合并，合并闸和必过检查绿了由「引擎」合。
+ * 合并队列只收 `fleet/` 任务分支，账上没有合并记录是这条路径的常态，不是绕过队列（#2903 就是这么误报的）。
+ * 合并人不是「引擎」（手动合的），仍算绕过。
+ */
+export function isLocalAutoMergePr(pr: { headRef: string; mergedByEngine: boolean }): boolean {
+  return /^local\/\d+-/.test(pr.headRef) && pr.mergedByEngine;
+}
+
+/**
  * 一段时间里合了的 PR：镜像没记成已合并的都补上（人开的、机器人开的一样，补镜像是安全的）。
  * 合并人必须是「引擎」、账上必须有合并队列的合并记录：只查我们两个机器人开的 PR。人开的没有合并队列这一步，
  * 查了会把帅位本机开的、GitHub 自动合并的每一张都报出来。
- * 引擎自己的耗时表 PR（isEngineCiTimingsPr）不报没有合并记录，只补账。
+ * 引擎自己的耗时表 PR（isEngineCiTimingsPr）、本机线自动合并的 PR（isLocalAutoMergePr）不报没有合并记录，只补账。
  */
 export async function auditMergedPrs(
   deps: Deps,
@@ -327,6 +343,7 @@ export async function auditMergedPrs(
   }
   const findings: MergedPrFinding[] = [];
   const engineCiTimingsPrs: number[] = [];
+  const localAutoMergePrs: number[] = [];
   const cleanPrs: number[] = [];
   const note = (
     number: number,
@@ -342,6 +359,7 @@ export async function auditMergedPrs(
     problems: findings.map((f) => f.text),
     findings,
     engineCiTimingsPrs,
+    localAutoMergePrs,
     cleanPrs,
   });
   try {
@@ -395,6 +413,9 @@ export async function auditMergedPrs(
           const who = { headRef, openedByEngine, mergedByEngine };
           // 耗时表这条自己合的，记下来给上面撤旧提醒；有没有合并记录都记，回看窗口里开着的误报才撤得掉。
           if (isEngineCiTimingsPr(who)) engineCiTimingsPrs.push(item.number);
+          // 本机线自动合并的同理：不走任务合并队列，记下来给上面撤旧提醒。
+          const localAutoMerge = isLocalAutoMergePr(who);
+          if (localAutoMerge) localAutoMergePrs.push(item.number);
           if (!mergedByEngine) {
             note(
               item.number,
@@ -406,7 +427,8 @@ export async function auditMergedPrs(
           // 合并队列合的每一张都在幂等账里留了合并记录（C21）。没留的：多半是绕开了合并队列（#431 那种——账号
           // 手动合的、合并前那几道核对可能没走），账上要补上：receipt 里写明实际合并人，让账反映事实。提醒照报，
           // 创始人判断一次要不要走合并队列；补账保留来源，下一轮仍不能作为走过队列的证据。
-          // 耗时表（isEngineCiTimingsPr）不报这一条，只补账。别的引擎 PR（包括 fleet/ 任务分支）照报。
+          // 耗时表（isEngineCiTimingsPr）、本机线自动合并（isLocalAutoMergePr）不报这一条，只补账。
+          // 别的引擎 PR（包括 fleet/ 任务分支）照报。
           const key = mergeKey(repo, item.number, pr.head.sha);
           const existing = await ledger.idempotency.peek(key);
           // 只认真实队列动作及与现读 GitHub 完全一致的回执；不能把 backfill 晋升成合前核对证据。
@@ -426,7 +448,7 @@ export async function auditMergedPrs(
             receipt.data.mergeCommit === pr.merge_commit_sha &&
             receipt.data.mergedBy === pr.merged_by?.login;
           if (clean) cleanPrs.push(item.number);
-          else if (!isEngineCiTimingsPr(who)) {
+          else if (!isEngineCiTimingsPr(who) && !localAutoMerge) {
             note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录', who);
           }
           if (!existing?.completedAt) {

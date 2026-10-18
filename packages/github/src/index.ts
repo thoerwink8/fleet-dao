@@ -199,6 +199,7 @@ export {
   createReconciler,
   type Intake,
   isEngineCiTimingsPr,
+  isLocalAutoMergePr,
   type MergedPrAuditReport,
   type MergedPrFinding,
   type ReconcileReport,

@@ -40,6 +40,7 @@ export const LEDGER_ALERT_PREFIX = 'reconcile:ledger:';
  * 我们机器人开的 PR 合并人不是「引擎」、或账上没有合并队列的合并记录——合并前那几道核对（不落后主线、CI 全绿、人闸）
  * 可能没走。后面是 <owner>/<name>#<PR 号>。条件就是「发生过」，只报一次、不自动撤，要人在驾驶舱点「处理」。
  * 例外：引擎自己的耗时表 PR（isEngineCiTimingsPr）本来就不走队列，不报；已经开着的下一轮撤掉。
+ * 例外：本机线 local/<单号>- 由 pr:open 挂自动合并、「引擎」合的 PR（isLocalAutoMergePr）也不走队列，不报；已经开着的撤掉。
  * 例外：实际合并人是「引擎」、真实 github.merge_pr 的目标与完整回执均与 GitHub 一致（cleanPrs），撤掉。
  * 补账不能证明经过合并队列；为复查合法的晚到回执，回看窗口往回延到最老那条开着的提醒，最多 7 天。
  * （#445 删过、#440 又办回来：合并队列其实已开，删掉的判断「没开」不准。）
@@ -47,6 +48,9 @@ export const LEDGER_ALERT_PREFIX = 'reconcile:ledger:';
 export const PR_ALERT_PREFIX = 'reconcile:pr:';
 /** 撤耗时表误报时写的原因（处理人是对账，RECONCILE_ACTOR）。 */
 export const CI_TIMINGS_SKIP_WHY = '引擎自己的耗时表 PR，不走合并队列';
+/** 撤本机线自动合并误报时写的原因（#2903）。 */
+export const LOCAL_AUTO_MERGE_WHY =
+  '本机线 local/ 分支的 PR，由 pr:open 挂自动合并、「引擎」合，不走任务合并队列';
 /** 撤「合并记录晚记」那种时写的原因。 */
 export const MERGE_RECORD_LANDED_WHY =
   '实际合并人是「引擎」，真实 github.merge_pr 的目标及完整回执与 GitHub 一致，条件不再成立';
@@ -209,7 +213,8 @@ async function openPrAlertsByRepo(
  * PR 合并人不是「引擎」、或没有合并队列的合并记录按 PR 报一条（#431 就是这么漏的：合并前那几道核对——不落后主线、CI
  * 全绿、人闸——可能没走）。条件就是「发生过」，只报一次、不自动撤，要人在驾驶舱点「处理」。
  * 引擎自己的耗时表 PR 不报；这一轮看见的、以及已经开着的 #2175，撤掉。
- * 实际合并人是「引擎」、真实队列来源和完整回执已核对一致的（cleanPrs），开着的撤掉；回看窗口往回延到这个仓最老那条开着的提醒。
+ * 本机线自动合并的（localAutoMergePrs）、实际合并人是「引擎」且真实队列来源和完整回执已核对一致的（cleanPrs），开着的撤掉；
+ * 回看窗口往回延到这个仓最老那条开着的提醒。
  */
 export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPart> {
   const part = empty();
@@ -265,6 +270,10 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
     const timingsNumbers = new Set([...(report.engineCiTimingsPrs ?? []), ...planned.timings]);
     for (const number of timingsNumbers) {
       await retireOpenCiTimingsAlert(deps, part, prAlertKey(repo.owner, repo.name, number));
+    }
+    for (const number of new Set(report.localAutoMergePrs ?? [])) {
+      if (!open.has(number) || planned.problems.has(number) || timingsNumbers.has(number)) continue;
+      await resolveOne(deps, part, prAlertKey(repo.owner, repo.name, number), LOCAL_AUTO_MERGE_WHY);
     }
     for (const number of new Set(report.cleanPrs ?? [])) {
       if (!open.has(number) || planned.problems.has(number) || timingsNumbers.has(number)) continue;

@@ -11,6 +11,7 @@ import {
   checkLocalOrphans,
   checkMergedPrs,
   LEDGER_GRACE_MS,
+  LOCAL_AUTO_MERGE_WHY,
   LOCAL_ORPHAN_MS,
   type LocalLabeledIssue,
   labeledForText,
@@ -349,6 +350,29 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(seenAgain.resolvedBy).toBe(RECONCILE_ACTOR);
     expect(old.resolvedAt).not.toBeNull();
     expect(old.body.startsWith(`已撤：${CI_TIMINGS_SKIP_WHY}`)).toBe(true);
+  });
+
+  it('本机线 local/ 由「引擎」自动合并的 PR：开着的 reconcile:pr 撤掉；没开着的、还报着的不动（#2903）', async () => {
+    const DAY = 24 * 60 * 60_000;
+    const stale = openAlert('reconcile:pr:acme/widgets#2903', { createdAt: new Date(NOW.getTime() - DAY) });
+    const still = openAlert('reconcile:pr:acme/widgets#21', { createdAt: new Date(NOW.getTime() - DAY) });
+    const w = world({
+      open: [stale, still],
+      repos: [{ owner: 'acme', name: 'widgets' }],
+      audit: async () =>
+        audit(
+          [{ number: 21, kind: 'no_merge_record', text: '#21 合并了，但账上没有合并队列的合并记录' }],
+          // #22 没有开着的提醒；#21 这一轮还报着：都不撤
+          { localAutoMergePrs: [2903, 21, 22] },
+        ),
+    });
+    const part = await checkMergedPrs(w.deps);
+    expect(w.resolved).toEqual([{ dedupeKey: 'reconcile:pr:acme/widgets#2903', why: LOCAL_AUTO_MERGE_WHY }]);
+    expect(stale.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(stale.body.startsWith(`已撤：${LOCAL_AUTO_MERGE_WHY}`)).toBe(true);
+    expect(still.resolvedAt).toBeNull();
+    expect(w.inserted.map((i) => i.dedupeKey)).toEqual(['reconcile:pr:acme/widgets#21']);
+    expect(part.unchecked).toEqual([]);
   });
 
   it('真实队列来源和完整回执核对一致：撤开着的 reconcile:pr；回看延到最老提醒；还报风险的和别仓的不撤', async () => {
