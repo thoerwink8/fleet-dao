@@ -102,6 +102,14 @@ function world() {
 }
 
 const real = hook.gitRunner();
+/** 只替换仓身份的查询；origin 仍是 world() 的本地裸仓，真实 fetch 不出网。 */
+function withFleetIdentity(git: Git): Git {
+  return (cwd, args, opts) =>
+    args.length === 3 && args[0] === 'config' && args[1] === '--get' && args[2] === 'remote.origin.url'
+      ? { status: 0, stdout: 'https://github.com/thoerwink8/fleet-dao.git\n', stderr: '' }
+      : git(cwd, args, opts);
+}
+
 /** 真 git，外加记下取过几次远端 */
 function countingGit() {
   const seen = { fetch: 0 };
@@ -197,7 +205,9 @@ describe('同步那半只读本地', SLOW, () => {
 
   it('引导段同步跑本地查询，不吃后台缓存；用缓存的行都带「后台 N 分钟前」（#2726）', () => {
     const w = world();
-    g(w.work, 'remote', 'set-url', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
+    const { git, seen } = countingGit();
+    const fleetGit = withFleetIdentity(git);
+    expect(g(w.work, 'config', '--get', 'remote.origin.url')).toBe(w.origin);
     const script = join(w.work, 'packages', 'conventions', 'src', 'bin', 'progress.ts');
     mkdirSync(join(script, '..'), { recursive: true });
     writeFileSync(script, '// stub\n');
@@ -205,14 +215,16 @@ describe('同步那半只读本地', SLOW, () => {
     hook.runBackground({
       cwd: w.work,
       home: w.home,
-      git: real,
+      git: fleetGit,
       sync: okSync().sync,
       now: T0,
       env: {},
       poolHolds: overdueHold,
     });
+    expect(seen.fetch).toBe(1);
     const cachePath = hook.bgCachePath(w.home, w.work, real);
     const cached = JSON.parse(readFileSync(cachePath, 'utf8'));
+    expect(cached.steps.fetch).toEqual({ ok: true, value: { ok: true, why: '' } });
     cached.steps.progress = {
       ok: true,
       value: {
@@ -231,7 +243,7 @@ describe('同步那半只读本地', SLOW, () => {
     const lines = hook.fastSessionStart({
       cwd: w.work,
       home: w.home,
-      git: real,
+      git: fleetGit,
       now: T0 + 35 * 60_000,
       env: {},
       spawnBackground: () => ({ ok: true }),
@@ -241,6 +253,7 @@ describe('同步那半只读本地', SLOW, () => {
       },
     });
     const text = lines.join('\n');
+    expect(seen.fetch).toBe(1); // 同步现查引导，不能再取远端。
     expect(calls).toHaveLength(1);
     expect(calls[0]?.replaceAll('\\', '/')).toMatch(/packages\/conventions\/src\/bin\/progress\.ts$/);
     expect(text).not.toContain('旧缓存里的');
@@ -251,14 +264,13 @@ describe('同步那半只读本地', SLOW, () => {
 
   it('【故意造出失败】引导查询本身失败：照实说没查成，不当成没有', () => {
     const w = world();
-    g(w.work, 'remote', 'set-url', 'origin', 'https://github.com/thoerwink8/fleet-dao.git');
     const script = join(w.work, 'packages', 'conventions', 'src', 'bin', 'progress.ts');
     mkdirSync(join(script, '..'), { recursive: true });
     writeFileSync(script, '// stub\n');
     const lines = hook.fastSessionStart({
       cwd: w.work,
       home: w.home,
-      git: real,
+      git: withFleetIdentity(real),
       now: T0,
       env: {},
       spawnBackground: () => ({ ok: true }),
