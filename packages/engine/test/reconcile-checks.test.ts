@@ -6,6 +6,7 @@ import type { AlertRow, MergedPrLedger } from '@fleet-dao/db';
 import type { MergedPrAuditReport, MergedPrFinding } from '@fleet-dao/github';
 import { describe, expect, it } from 'vitest';
 import {
+  CHANGELOG_SKIP_WHY,
   CI_TIMINGS_SKIP_WHY,
   checkLedgers,
   checkLocalOrphans,
@@ -236,6 +237,20 @@ describe('撤掉「开着的单都有着落」留下的旧提醒', () => {
 });
 
 describe('合了的 PR：镜像、合并人、合并记录', () => {
+  it('经GitHub精确核过的受管更新日志PR撤旧误报；未知或仍有风险的不撤', async () => {
+    const safe = openAlert('reconcile:pr:thoerwink8/fleet-dao#10');
+    const unknown = openAlert('reconcile:pr:thoerwink8/fleet-dao#11');
+    const w = world({
+      open: [safe, unknown],
+      repos: [{ owner: 'thoerwink8', name: 'fleet-dao' }],
+      audit: async () =>
+        audit([{ number: 11, kind: 'no_merge_record', text: '#11 仍有风险' }], { engineChangelogPrs: [10] }),
+    });
+    await checkMergedPrs(w.deps);
+    expect(w.resolved).toContainEqual({ dedupeKey: safe.dedupeKey, why: CHANGELOG_SKIP_WHY });
+    expect(w.resolved.some((r) => r.dedupeKey === unknown.dedupeKey)).toBe(false);
+    expect(w.inserted.map((r) => r.dedupeKey)).toContain(unknown.dedupeKey);
+  });
   const sinceOf = (now: Date) => new Date(now.getTime() - MERGED_PR_LOOKBACK_MS);
 
   it('镜像没记成 merged：算发现，不报警', async () => {

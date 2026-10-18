@@ -52,6 +52,10 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 改派工、选路：同步 design 第九节「自由组合的派工模型」。
 - 改了法国上的单元、环境变量：同步 ops 第五节「AI 会话」或第九节「发布应用（deploy/release.sh）」。
 
+## 版本更新日志
+
+- `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。
+
 ## 固定版本宿主工具
 
 - Go 的 `via: tar` 和固定 `version` 由现有 `cli-upgrade-main.ts` 管理，只在发布/空闲排空窗口运行；实现位于 `cli-upgrade-go.ts`。仅 Linux amd64/arm64，官方精确版本清单与 SHA256 校验，完整新树暂存、实际 `go version` 验真，最后原子替换 `/usr/local/bin/go`。
