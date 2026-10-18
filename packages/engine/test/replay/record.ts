@@ -105,6 +105,20 @@ const SCENARIOS: Record<string, Scenario> = {
       return { 'task-paused': handle };
     },
   },
+  // 给任务页「过程」记的账（#3140）：第一轮会话跑完没提交、第 2 轮返工合上。这份历史录在 patched('run-cause-fields')、
+  // patched('pr-head-files') 加进来之后的代码上：动手、验收的入参多了起因和回合号、推分支和开 PR 多了文件清单，一轮收场多了开始时刻
+  // 和返工摘要——重放它证明这些多出来的字段不改步序（老夹具重放证明老历史不被新标记弄僵）。
+  // 不走 CI 红：「旧夹具没有 CI 红带评审这一步」那条只许老夹具有，这份是新的。
+  'task-run-cause': {
+    tasks: scripted({
+      delivery: (n) => ({ head: fakeHead(100 + n), commits: n === 1 ? 0 : 1, changedFiles: ['a.ts'] }),
+    }).tasks,
+    async run(r) {
+      const handle = await startTask(r);
+      await handle.result();
+      return { 'task-run-cause': handle };
+    },
+  },
   // 第一轮 CI 红了、回去动手第 2 轮、再推上去合上（#1246）：这份历史录在「第 2 轮动手前并最新主线」加进来之前的代码上，
   // 重放它证明新加的并主线步骤被 patched('sync-mainline-before-implement') 守住了（第 2 轮动手前老历史里没有 syncMainline）。
   'task-reworked': {

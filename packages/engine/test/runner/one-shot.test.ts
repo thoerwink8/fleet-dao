@@ -324,6 +324,52 @@ describe('one-shot.ts', () => {
     }
   });
 
+  it('起因、摘要、所属回合（#3140）：开跑那一行和收场那一笔都带，摘要截到 500 字；不给就不带键', async () => {
+    const { deps, recorded, started, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: 'x', stderr: '', killed: false },
+    });
+    try {
+      await runOneShot(
+        {
+          ...BASE_INPUT,
+          runId: 'run-cause',
+          cause: 'retry',
+          causeSummary: '上游 503 '.repeat(200),
+          roundSeq: 3,
+        },
+        deps,
+      );
+      await runOneShot({ ...BASE_INPUT, runId: 'run-plain' }, deps);
+      expect(started[0]).toMatchObject({ cause: 'retry', roundSeq: 3 });
+      expect(started[0]?.causeSummary).toHaveLength(500);
+      expect(recorded[0]).toMatchObject({ cause: 'retry', roundSeq: 3 });
+      expect(recorded[1]).not.toHaveProperty('cause');
+      expect(recorded[1]).not.toHaveProperty('causeSummary');
+      expect(recorded[1]).not.toHaveProperty('roundSeq');
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('老历史借 route.why 的内部标记带的新会话原因，仍拆回 resumeReason 和真正的 routeWhy', async () => {
+    const { deps, recorded, cleanup } = await fakeDeps({
+      scripted: { exitCode: 0, stdout: 'x', stderr: '', killed: false },
+    });
+    try {
+      await runOneShot(
+        {
+          ...BASE_INPUT,
+          runId: 'run-legacy-marker',
+          routeWhy: `fleet-resume-new:${JSON.stringify({ reason: '没记会话号', routeWhy: '价低' })}`,
+        },
+        deps,
+      );
+      expect(recorded[0]).toMatchObject({ resumeReason: '没记会话号', routeWhy: '价低' });
+    } finally {
+      await cleanup();
+    }
+  });
+
   it('落盘的 stdout/stderr/result.json 在 runId 目录下，TTL 24h 写在元数据里', async () => {
     const { deps, tmpDir, cleanup } = await fakeDeps({
       scripted: { exitCode: 0, stdout: 'x', stderr: '', killed: false },
