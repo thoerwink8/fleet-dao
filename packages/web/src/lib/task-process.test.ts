@@ -9,8 +9,10 @@ import {
   causeLabel,
   fileParts,
   PR_STATE,
+  reworkDetail,
   roundDurationMs,
   roundOutcome,
+  roundProgress,
   runDurationMs,
   sessionLink,
   stepDurationMs,
@@ -270,5 +272,92 @@ describe('一笔的用时', () => {
     expect(runDurationMs(run('a', { durationMs: 5000 }), 0)).toBe(5000);
     expect(runDurationMs(run('b', { running: true, startedAt: iso(0) }), Date.parse(iso(2)))).toBe(120_000);
     expect(runDurationMs(run('c'), 0)).toBeUndefined();
+  });
+});
+
+describe('reworkDetail：返工意见不重复结局', () => {
+  test('意见以结局开头的去掉那几个字和标点；不以结局开头的原样；空的给 undefined', () => {
+    const ciRed = roundOutcome('ci_red').label;
+    expect(reworkDetail('ci_red', `${ciRed}：packages/db 测试红`)).toBe('packages/db 测试红');
+    expect(reworkDetail('timeout', '30 分钟没交活')).toBe('30 分钟没交活');
+    expect(reworkDetail('ci_red', ciRed)).toBeUndefined();
+    expect(reworkDetail('ci_red', '  ')).toBeUndefined();
+    expect(reworkDetail('ci_red', undefined)).toBeUndefined();
+  });
+});
+
+describe('roundProgress：这一回合走到哪（#3169）', () => {
+  const act = (activity: string, at: number): Engine[number] => ({
+    kind: 'activity',
+    activity,
+    attempt: 1,
+    startedAt: iso(at),
+    endedAt: iso(at + 1),
+    runMs: 60_000,
+    outcome: 'ok',
+  });
+  const states = (p: ReturnType<typeof roundProgress>) => p?.stages.map((s) => s.state);
+  const first: Rounds = [
+    { seq: 1, round: 1, outcome: 'ci_red', startedAt: iso(0), endedAt: iso(30), reworkSummary: 'CI 红了' },
+  ];
+
+  test('进行中的回合在动手：动手在做，后面都没到', () => {
+    const t = buildTimeline([run('a', { roundSeq: 1, startedAt: iso(1), running: true })], ov([], []));
+    const p = roundProgress(t, 'running');
+    expect(p).toMatchObject({ seq: 1, note: '在动手' });
+    expect(states(p)).toEqual(['now', 'todo', 'todo', 'todo', 'todo']);
+  });
+
+  test('动手完了、引擎在等 CI：动手和自测做完，推分支 · CI 在做', () => {
+    const t = buildTimeline(
+      [run('a', { roundSeq: 1, startedAt: iso(1) })],
+      ov([], [act('selfCheck', 10), act('pushBranch', 12), act('waitCi', 13)]),
+    );
+    const p = roundProgress(t, 'running');
+    expect(p?.note).toBe('在推分支 · CI');
+    expect(states(p)).toEqual(['done', 'done', 'now', 'todo', 'todo']);
+  });
+
+  test('验收那一笔在跑：前三步做完，验收在做', () => {
+    const t = buildTimeline(
+      [
+        run('a', { roundSeq: 1, startedAt: iso(1) }),
+        run('v', { roundSeq: 1, segment: 'verify', startedAt: iso(20), running: true }),
+      ],
+      ov([], [act('waitCi', 15)]),
+    );
+    expect(states(roundProgress(t, 'running'))).toEqual(['done', 'done', 'done', 'now', 'todo']);
+  });
+
+  test('回合合并收场：五步全做完', () => {
+    const t = buildTimeline(
+      [run('a', { roundSeq: 1, startedAt: iso(1) })],
+      ov(
+        [{ seq: 1, round: 1, outcome: 'merged', startedAt: iso(0), endedAt: iso(30) }],
+        [act('waitMerged', 25)],
+      ),
+    );
+    const p = roundProgress(t, 'done');
+    expect(p).toMatchObject({ seq: 1, note: '合并了' });
+    expect(states(p)).toEqual(['done', 'done', 'done', 'done', 'done']);
+  });
+
+  test('回合返工收场、单子还在走、下一回合的笔还没起：第 2 回合停在动手，带上一回合的返工意见', () => {
+    const t = buildTimeline([run('a', { roundSeq: 1, startedAt: iso(1) })], ov(first, [act('waitCi', 20)]));
+    const p = roundProgress(t, 'running');
+    expect(p).toMatchObject({ seq: 2, reworkOf: { outcome: 'ci_red', summary: 'CI 红了', seq: 1 } });
+    expect(states(p)).toEqual(['now', 'todo', 'todo', 'todo', 'todo']);
+  });
+
+  test('单子被叫停在进行中的回合：到过的那一步标没成', () => {
+    const t = buildTimeline([run('a', { roundSeq: 1, startedAt: iso(1) })], ov([], [act('selfCheck', 10)]));
+    const p = roundProgress(t, 'stopped');
+    expect(p?.note).toBe('停在自测');
+    expect(states(p)).toEqual(['done', 'failed', 'todo', 'todo', 'todo']);
+  });
+
+  test('没有回合记录的老单（笔都没记回合号）：不画', () => {
+    const t = buildTimeline([run('old', { startedAt: iso(1) })], ov([], []));
+    expect(roundProgress(t, 'done')).toBeUndefined();
   });
 });

@@ -197,6 +197,46 @@ describe('过程：回合 → 笔 → 步骤 → 调用', () => {
   });
 });
 
+describe('页头下面：这一回合走到哪（#3169）', () => {
+  test('t-12 在跑的返工回合：当前一步带 aria-current="step"，写上一回合怎么收场', async () => {
+    open('/tasks/t-12');
+    const strip = await found('[data-round-progress]');
+    const stages = strip.querySelectorAll('[data-stage-state]');
+    expect([...stages].map((s) => s.getAttribute('data-stage'))).toEqual([
+      '动手',
+      '自测',
+      '推分支 · CI',
+      '验收',
+      '合并',
+    ]);
+    const now = strip.querySelectorAll('[aria-current="step"]');
+    expect(now).toHaveLength(1);
+    expect(now[0]?.getAttribute('data-stage-state')).toBe('now');
+    const rework = strip.querySelector('[data-round-rework]')?.textContent ?? '';
+    expect(rework).toContain('上一回合');
+    // 引擎记的意见以结局开头，页面不再重复一遍结局
+    expect(rework.match(/CI 红了/g)).toHaveLength(1);
+  });
+
+  test('t-c9 合并收场：五步都做完，没有当前一步', async () => {
+    open('/tasks/t-c9');
+    const strip = await found('[data-round-progress]');
+    expect(strip.textContent).toContain('第 2 回合');
+    expect(strip.textContent).toContain('合并了');
+    expect(
+      [...strip.querySelectorAll('[data-stage-state]')].map((s) => s.getAttribute('data-stage-state')),
+    ).toEqual(['done', 'done', 'done', 'done', 'done']);
+    expect(strip.querySelector('[aria-current]')).toBeNull();
+  });
+
+  test('没有回合记录的老后端详情不画', async () => {
+    open('/tasks/t-c9', '?mockOverview=old');
+    const box = await found('[data-task-summary]');
+    expect(box.textContent).toContain('这台后端还没有任务概览');
+    expect(document.querySelector('[data-round-progress]')).toBeNull();
+  });
+});
+
 describe('读不到：写原因，不画 0', () => {
   test('老后端没有 overview：概览写「这台后端还没有任务概览」，过程写没有回合这些项', async () => {
     open('/tasks/t-c9', '?mockOverview=old');

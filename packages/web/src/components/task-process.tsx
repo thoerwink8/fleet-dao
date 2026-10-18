@@ -30,6 +30,7 @@ import {
   callVerb,
   causeLabel,
   type RoundGroup,
+  reworkDetail,
   roundDurationMs,
   roundOutcome,
   runDurationMs,
@@ -760,6 +761,7 @@ function RoundHeader({
   const out = g.round ? roundOutcome(g.round.outcome) : undefined;
   const dur = roundDurationMs(g);
   const prevOut = g.reworkOf ? roundOutcome(g.reworkOf.outcome) : undefined;
+  const reworkWhy = g.reworkOf ? reworkDetail(g.reworkOf.outcome, g.reworkOf.summary) : undefined;
   return (
     <div className="px-4 py-1.5" data-round-header={g.seq}>
       <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5">
@@ -783,7 +785,7 @@ function RoundHeader({
       {g.reworkOf ? (
         <p className="mt-0.5 text-meta text-muted-foreground" data-rework-why>
           为什么返工：上一回合{prevOut?.label ?? g.reworkOf.outcome}
-          {g.reworkOf.summary ? `——${g.reworkOf.summary}` : '（没记返工意见）'}
+          {reworkWhy ? `——${reworkWhy}` : '（没记返工意见）'}
         </p>
       ) : null}
     </div>

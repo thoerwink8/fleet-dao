@@ -105,6 +105,22 @@ export function roundOutcome(outcome: string): { label: string; tone: LayoutTone
   return ROUND_OUTCOME[outcome] ?? { label: outcome, tone: 'doubt' };
 }
 
+/**
+ * 返工意见去掉开头和结局重复的那几个字：引擎记的意见常以结局开头（「CI 红了：……」），
+ * 页面前面已经写了「上一回合 CI 红了」，再写一遍就成了「CI 红了——CI 红了：……」。没记意见给 undefined。
+ */
+export function reworkDetail(outcome: string, summary: string | undefined): string | undefined {
+  const s = summary?.trim();
+  if (!s) return undefined;
+  const label = roundOutcome(outcome).label;
+  if (!s.startsWith(label)) return s;
+  const rest = s
+    .slice(label.length)
+    .replace(/^[\s：:，,。.—-]+/, '')
+    .trim();
+  return rest || undefined;
+}
+
 /** 引擎在会话外做的事，翻成白话。别的活动名原样写（不编）。 */
 export const ACTIVITY_LABEL: Record<string, string> = {
   createWorktree: '建工作树',
@@ -287,4 +303,89 @@ export function runDurationMs(run: SegmentRunView, now: number): number | undefi
   return run.running && run.startedAt !== undefined
     ? Math.max(0, now - Date.parse(run.startedAt))
     : undefined;
+}
+
+/** 一个回合的五步（#3169）：页头下面那条「这一回合走到哪」。 */
+export const ROUND_STAGES = ['动手', '自测', '推分支 · CI', '验收', '合并'] as const;
+export type RoundStageState = 'done' | 'now' | 'todo' | 'failed';
+
+/** 一笔、一件引擎做的事落在五步里的哪一步；认不出的（等待、清工作树之外的新活动）不推进。 */
+const STAGE_OF_ACTIVITY: Record<string, number> = {
+  createWorktree: 0,
+  selfCheck: 1,
+  syncMainline: 2,
+  pushBranch: 2,
+  openPr: 2,
+  waitCi: 2,
+  coldVerify: 3,
+  armAutoMerge: 4,
+  waitMerged: 4,
+  mergeNow: 4,
+};
+
+function stageOf(item: TimelineItem): number | undefined {
+  if (item.kind === 'run') {
+    return item.run.segment === 'manual' ? 0 : item.run.segment === 'verify' ? 3 : undefined;
+  }
+  if (item.kind === 'engine') return STAGE_OF_ACTIVITY[item.step.activity];
+  return undefined;
+}
+
+export interface RoundProgress {
+  /** 第几回合（task_rounds.seq；还没开跑的下一回合是上一回合 + 1）。 */
+  seq: number;
+  stages: { label: (typeof ROUND_STAGES)[number]; state: RoundStageState }[];
+  /** 这一回合是返工：上一回合怎么收场、返工意见（老行没有意见）。 */
+  reworkOf: RoundGroup['reworkOf'];
+  /** 一句话：在做哪一步 / 合并了 / 停在哪。 */
+  note: string;
+}
+
+/**
+ * 这一回合走到哪（#3169）：取 buildTimeline 的最后一个回合。回合里最后到过的那一步之前的都算做完；
+ * 回合还没收场是「在做」，单子已经停了（叫停、失败）是「没成」；合并收场五步全做完；
+ * 返工收场、单子还在走，是下一回合还没开跑，停在动手。没有回合记录的老单回 undefined，不画、不猜。
+ */
+export function roundProgress(groups: readonly RoundGroup[], taskState: string): RoundProgress | undefined {
+  const last = [...groups].reverse().find((g) => g.seq !== undefined);
+  if (!last || last.seq === undefined) return undefined;
+  const reached = Math.max(-1, ...last.items.map(stageOf).filter((s): s is number => s !== undefined));
+  const stopped = taskState === 'stopped' || taskState === 'failed';
+  const build = (upTo: number, at: RoundStageState) =>
+    ROUND_STAGES.map((label, i) => ({
+      label,
+      state: (i < upTo ? 'done' : i === upTo ? at : 'todo') as RoundStageState,
+    }));
+  if (last.round?.outcome === 'merged') {
+    return {
+      seq: last.seq,
+      stages: build(ROUND_STAGES.length, 'done'),
+      reworkOf: last.reworkOf,
+      note: '合并了',
+    };
+  }
+  if (last.round) {
+    const outcome = roundOutcome(last.round.outcome).label;
+    if (stopped || taskState === 'done') {
+      return {
+        seq: last.seq,
+        stages: build(Math.max(0, reached), 'failed'),
+        reworkOf: last.reworkOf,
+        note: `${outcome}，停在${ROUND_STAGES[Math.max(0, reached)]}`,
+      };
+    }
+    return {
+      seq: last.seq + 1,
+      stages: build(0, 'now'),
+      reworkOf: { outcome: last.round.outcome, summary: last.round.reworkSummary, seq: last.seq },
+      note: '返工，下一笔动手还没开跑',
+    };
+  }
+  const at = Math.max(0, reached);
+  return {
+    seq: last.seq,
+    stages: build(at, stopped ? 'failed' : 'now'),
+    reworkOf: last.reworkOf,
+    note: stopped ? `停在${ROUND_STAGES[at]}` : `在${ROUND_STAGES[at]}`,
+  };
 }
