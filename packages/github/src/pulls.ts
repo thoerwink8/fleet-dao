@@ -704,6 +704,8 @@ export interface MergePrInput {
   prNumber: number;
   /** 只合这个头；头变了就不合（C8）。 */
   expectedHead: string;
+  /** 只给已合并的 PR 记回执；实际重读未合并时拒绝，绝不发送合并请求。 */
+  onlyBook?: boolean | undefined;
   checks?: readonly string[] | undefined;
   /** squash 提交的标题，默认「PR 标题 (#编号)」。 */
   commitTitle?: string | undefined;
@@ -752,6 +754,30 @@ export async function mergePr(
   const facts = await deps.facts.get(repo, 'engine', ctx.signal);
 
   let pr = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
+  if (input.onlyBook) {
+    if (pr.number !== prNumber) {
+      throw unexpected(`补 PR #${prNumber} 的合并回执，响应却是 PR #${pr.number}`, {
+        expectedNumber: prNumber,
+        actualNumber: pr.number,
+      });
+    }
+    if (pr.state !== 'closed' || !pr.merged) {
+      throw new GitHubError(
+        'READBACK_MISMATCH',
+        `只记 PR #${prNumber} 的合并回执，现读却是${pr.state === 'open' ? '还开着' : '关闭未合并'}：不记账、不再次合并`,
+        { retryable: pr.state === 'open' },
+      );
+    }
+    if (!pr.merge_commit_sha || !/^[0-9a-f]{40}$/.test(pr.merge_commit_sha)) {
+      throw unexpected(`补 PR #${prNumber} 的合并回执，合并提交读不全`, {
+        prNumber,
+        mergeCommit: pr.merge_commit_sha,
+      });
+    }
+    if (!pr.merged_by?.login.trim()) {
+      throw unexpected(`补 PR #${prNumber} 的合并回执，合并人读不到`, { prNumber });
+    }
+  }
   if (pr.merged) {
     // 重试时已经合了：把合并记录补上（上一次可能合完没来得及记账）
     const done = pr;

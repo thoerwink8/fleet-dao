@@ -1,5 +1,5 @@
 // 等 CI 时 PR 已经合了（#3018，#2751 那次：waitCi 回 merged 直接收尾，账上只剩每小时对账补的 github.merge_pr_backfill）。
-// 真 createGitHub（真 mergePr、真幂等账）接一份只答安装、令牌、仓、PR、分支引用的假服务，waitCi 换成「已合并」：
+// 真 createGitHub（真 mergePr、真幂等账）接一份受控 HTTP 假服务，waitCi 换成「已合并」：
 // 新账记成 github.merge_pr；账上已有正常账、已有 backfill 的原样留着不改来源；重试幂等；从头到尾不发合并请求、不贴状态。
 import { generateKeyPairSync } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import {
   type AppCredentials,
   createGitHub,
+  GitHubError,
   type MergeReceipt,
   memoryIdempotencyStore,
   memoryLedger,
@@ -71,7 +72,20 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-function world() {
+type WriterFault =
+  | 'open'
+  | 'open-merged'
+  | 'closed-unmerged'
+  | 'wrong-number'
+  | 'wrong-head'
+  | 'unknown-merged'
+  | 'read-failed'
+  | 'unknown-actor'
+  | 'blank-actor'
+  | 'other-actor'
+  | { mergeCommit: string | null };
+
+function world(fault?: WriterFault) {
   const requests: string[] = [];
   const json = (status: number, body: unknown) =>
     new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
@@ -85,14 +99,19 @@ function world() {
     draft: false,
     merged: true,
     merged_at: MERGED_AT,
-    merge_commit_sha: MERGE,
-    mergeable: null,
+    merge_commit_sha: MERGE as string | null,
+    mergeable: true,
     user: { login: 'fleet-test-agent[bot]', id: 7, type: 'Bot' },
-    merged_by: { login: ENGINE_LOGIN, id: 9, type: 'Bot' },
+    merged_by: { login: ENGINE_LOGIN, id: 9, type: 'Bot' } as {
+      login: string;
+      id: number;
+      type: string;
+    } | null,
     head: { ref: BRANCH, sha: HEAD, repo: { full_name: 'acme/widgets' } },
     base: { ref: 'main', sha: 'b'.repeat(40), repo: { full_name: 'acme/widgets' } },
     updated_at: MERGED_AT,
   };
+  let pullReads = 0;
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     const path = url.pathname;
@@ -109,7 +128,44 @@ function world() {
     if (method === 'GET' && path === '/repos/acme/widgets') {
       return json(200, { default_branch: 'main', full_name: 'acme/widgets', private: false });
     }
-    if (method === 'GET' && path === `/repos/acme/widgets/pulls/${PR}`) return json(200, pull);
+    if (method === 'GET' && path === `/repos/acme/widgets/pulls/${PR}`) {
+      if (++pullReads >= 2 && fault === 'read-failed') return json(502, { message: '读 PR 失败' });
+      // 第一次是 claims 的前置核验；第二次才是 writer 真正会拿来写账的响应。
+      if (pullReads === 2) {
+        if (fault === 'open-merged') pull.state = 'open';
+        else if (fault === 'open' || fault === 'closed-unmerged') {
+          pull.state = fault === 'open' ? 'open' : 'closed';
+          pull.merged = false;
+        } else if (fault === 'wrong-number') pull.number += 1;
+        else if (fault === 'wrong-head') pull.head.sha = 'e'.repeat(40);
+        else if (fault === 'unknown-merged') Reflect.deleteProperty(pull, 'merged');
+        else if (fault === 'unknown-actor') pull.merged_by = null;
+        else if (fault === 'blank-actor') pull.merged_by = { login: ' \t', id: 42, type: 'User' };
+        else if (fault === 'other-actor') pull.merged_by = { login: 'maintainer', id: 42, type: 'User' };
+        else if (typeof fault === 'object') pull.merge_commit_sha = fault.mergeCommit;
+      }
+      return json(200, pull);
+    }
+    // 如果补账错误退入主动合并，假服务必须具备全绿检查和成功 PUT，负例不能碰巧被缺失夹具挡住。
+    if (method === 'GET' && path.includes('/compare/')) return json(200, { behind_by: 0, ahead_by: 1 });
+    if (method === 'GET' && path === '/repos/acme/widgets/rules/branches/main') {
+      return json(200, [
+        { type: 'required_status_checks', parameters: { required_status_checks: [{ context: 'check' }] } },
+      ]);
+    }
+    if (method === 'GET' && path === `/repos/acme/widgets/commits/${HEAD}/check-runs`) {
+      return json(200, {
+        check_runs: [{ id: 1, name: 'check', head_sha: HEAD, status: 'completed', conclusion: 'success' }],
+      });
+    }
+    if (method === 'GET' && path === `/repos/acme/widgets/commits/${HEAD}/status`) {
+      return json(200, { statuses: [] });
+    }
+    if (method === 'PUT' && path === `/repos/acme/widgets/pulls/${PR}/merge`) {
+      pull.state = 'closed';
+      pull.merged = true;
+      return json(200, { merged: true, sha: MERGE });
+    }
     // 分支合并后已经删了
     if (method === 'GET' && path.startsWith('/repos/acme/widgets/git/ref/heads/')) {
       return json(404, { message: 'Not Found' });
@@ -215,6 +271,103 @@ describe('等 CI 看到已合并：走真实回执收口（#3018）', () => {
       result: receipt,
     });
     expect(mergeKeys(w.store)).toEqual([w.key]);
+    noWrites(w.requests);
+  });
+});
+
+describe('已合并观察的 writer 只记账边界（#3026）', () => {
+  function noMergeOrReceipt(w: ReturnType<typeof world>) {
+    noWrites(w.requests);
+    expect(mergeKeys(w.store)).toEqual([]);
+  }
+
+  it.each(['open', 'open-merged', 'closed-unmerged'] as const)(
+    '前置读已合并，writer 重读 %s：明确失败，零合并请求、零成功回执',
+    async (state) => {
+      const w = world(state);
+      await expect(w.waitCi()).rejects.toMatchObject({
+        code: 'MERGE_RECEIPT_FAILED',
+        retryable: state !== 'closed-unmerged',
+        details: { cause: 'READBACK_MISMATCH' },
+      });
+      noMergeOrReceipt(w);
+      expect(w.logs).toContainEqual(expect.stringContaining('记合并回执没成'));
+    },
+  );
+
+  it('前置 PR 号正确，writer 响应另一个号：写账前拒绝，不生成混合身份回执', async () => {
+    const w = world('wrong-number');
+    await expect(w.waitCi()).rejects.toMatchObject({
+      code: 'MERGE_RECEIPT_FAILED',
+      details: { cause: 'UNEXPECTED_RESPONSE' },
+    });
+    noMergeOrReceipt(w);
+  });
+
+  it('writer 头变了：明确回 unknown，不记账、不冒称合上 CI 查过的头', async () => {
+    const w = world('wrong-head');
+    expect(await w.waitCi()).toMatchObject({ state: 'unknown', head: HEAD });
+    noMergeOrReceipt(w);
+  });
+
+  it('writer 不给 merged 事实：明确失败，不能把未知当已合并', async () => {
+    const w = world('unknown-merged');
+    await expect(w.waitCi()).rejects.toMatchObject({
+      code: 'MERGE_RECEIPT_FAILED',
+      details: { cause: 'READBACK_MISMATCH' },
+    });
+    noMergeOrReceipt(w);
+  });
+
+  it.each([null, '', '不是提交', 'c'.repeat(41)])(
+    'writer 合并提交不完整（%s）：写账前失败',
+    async (mergeCommit) => {
+      const w = world({ mergeCommit });
+      await expect(w.waitCi()).rejects.toMatchObject({
+        code: 'MERGE_RECEIPT_FAILED',
+        details: { cause: 'UNEXPECTED_RESPONSE' },
+      });
+      noMergeOrReceipt(w);
+    },
+  );
+
+  it.each(['unknown-actor', 'blank-actor'] as const)(
+    'writer 合并人未知（%s）：不先写成功回执再声称记账完成',
+    async (fault) => {
+      const w = world(fault);
+      await expect(w.waitCi()).rejects.toMatchObject({
+        code: 'MERGE_RECEIPT_FAILED',
+        details: { cause: 'UNEXPECTED_RESPONSE' },
+      });
+      noMergeOrReceipt(w);
+    },
+  );
+
+  it('writer 读取失败：原错误进入明确失败结果，不写账', async () => {
+    const w = world('read-failed');
+    await expect(w.waitCi()).rejects.toMatchObject({ code: 'MERGE_RECEIPT_FAILED', retryable: true });
+    noMergeOrReceipt(w);
+  });
+
+  it('实际合并者已知但不是引擎：保留真实 actor 和告警，不伪造引擎身份', async () => {
+    const w = world('other-actor');
+    expect(await w.waitCi()).toEqual(merged);
+    expect(w.store.rows.get(w.key)?.result).toMatchObject({ mergedBy: 'maintainer' });
+    expect(w.logs).toContainEqual(expect.stringContaining('不是「引擎」机器人合的'));
+    noWrites(w.requests);
+  });
+
+  it('真实 ledger 写失败：不回 merged，不生成成功回执；重试仍只记账', async () => {
+    const w = world();
+    const complete = w.store.complete;
+    w.store.complete = async () => {
+      throw new GitHubError('UPSTREAM_ERROR', '回执存储不可用', { retryable: true });
+    };
+    await expect(w.waitCi()).rejects.toMatchObject({ code: 'MERGE_RECEIPT_FAILED', retryable: true });
+    expect(w.store.rows.get(w.key)?.completedAt).toBeUndefined();
+    w.store.complete = complete;
+    expect(await w.waitCi()).toEqual(merged);
+    expect(w.store.rows.get(w.key)?.result).toEqual(receipt);
     noWrites(w.requests);
   });
 });

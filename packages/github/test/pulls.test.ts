@@ -488,6 +488,36 @@ describe('合并', () => {
     return pr;
   }
 
+  it('onlyBook：已合并的实际回执幂等记账，不再合并；不影响默认主动合并', async () => {
+    const w = setup();
+    const pr = w.fake.addPull({
+      head: { ref: 'task/booked', sha: A },
+      state: 'closed',
+      merged: true,
+      merge_commit_sha: sha('c'),
+      merged_by: w.fake.bots.engine,
+    });
+    const input = { repo, prNumber: pr.number, expectedHead: A, onlyBook: true };
+    expect(await w.gh.mergePr(input)).toMatchObject({ merged: true, alreadyMerged: true });
+    const key = mergeKey(repo, pr.number, A);
+    const first = await w.ledger.idempotency.peek(key);
+    expect(first).toMatchObject({
+      action: 'github.merge_pr',
+      target: `acme/widgets#${pr.number}`,
+      result: { number: pr.number, head: A, mergeCommit: sha('c'), mergedBy: 'fleet-test-engine[bot]' },
+    });
+    await w.gh.mergePr(input);
+    expect(await w.ledger.idempotency.peek(key)).toEqual(first);
+    expect(w.fake.calls('PUT', /\/merge$/)).toEqual([]);
+    const active = ready(w.fake);
+    expect(await w.gh.mergePr({ repo, prNumber: active.number, expectedHead: A })).toMatchObject({
+      merged: true,
+      alreadyMerged: false,
+    });
+    expect(w.fake.calls('PUT', /\/merge$/)).toHaveLength(1);
+    expect(w.fake.calls('PUT', /\/merge$/)[0]?.body).toMatchObject({ merge_method: 'squash' });
+  });
+
   it('用「引擎」squash 合：带头约束和显式的提交标题正文；合后回读合并人、删分支', async () => {
     const { gh, fake } = setup();
     const pr = ready(fake);
