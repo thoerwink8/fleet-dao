@@ -37,6 +37,8 @@ function open(route: string) {
 
 const search = () => screen.getByTestId('search').textContent;
 const drawer = () => document.querySelector('[data-run-drawer]');
+/** 抽屉里的文字：页面上的「汇报与改动」也会写同一句结论，只在抽屉里找。 */
+const inDrawer = async (text: RegExp) => within(await screen.findByRole('dialog')).findByText(text);
 
 describe('「看会话」抽屉', () => {
   test('每一笔不再把会话铺在页面里：只有摘要和「看会话」按钮', async () => {
@@ -55,7 +57,7 @@ describe('「看会话」抽屉', () => {
     expect(search()).toBe('?run=seg-c9-3');
     expect(drawer()?.getAttribute('data-run-drawer')).toBe('seg-c9-3');
     // 那一笔的会话：结论在，出错的工具调用自动展开
-    expect(await screen.findByText(/已提交 4c1d2ab/)).toBeTruthy();
+    expect(await inDrawer(/已提交 4c1d2ab/)).toBeTruthy();
     const dlg = screen.getByRole('dialog');
     expect(within(dlg).getByText('第 2 次')).toBeTruthy();
     expect(within(dlg).getByText(/FAIL scripts\/stamp.test.ts/)).toBeTruthy();
@@ -71,7 +73,7 @@ describe('「看会话」抽屉', () => {
     fireEvent.click(document.querySelector('[data-view-transcript="seg-c9-3"]') as HTMLElement);
     // 保留别的参数
     expect(search()).toBe('?from=%2Ftasks&run=seg-c9-3');
-    await screen.findByText(/已提交 4c1d2ab/);
+    await inDrawer(/已提交 4c1d2ab/);
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '关闭' }));
     await waitFor(() => expect(drawer()).toBeNull());
     expect(search()).toBe('?from=%2Ftasks');
@@ -79,7 +81,7 @@ describe('「看会话」抽屉', () => {
 
   test('直接打开带 ?run= 的链接：抽屉就开；关的时候只去掉参数', async () => {
     open('/tasks/t-c9?run=seg-c9-3');
-    expect(await screen.findByText(/已提交 4c1d2ab/)).toBeTruthy();
+    expect(await inDrawer(/已提交 4c1d2ab/)).toBeTruthy();
     expect(drawer()?.getAttribute('data-run-drawer')).toBe('seg-c9-3');
     fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: '关闭' }));
     await waitFor(() => expect(drawer()).toBeNull());
