@@ -49,6 +49,7 @@
 import { randomUUID } from 'node:crypto';
 import { COLD_VERIFY_CONTEXT } from '@fleet-dao/conventions';
 import type { ClaimsGitHub, GitHub, RepoRef } from '@fleet-dao/github';
+import { verdictOf } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type GithubWhitelist, isTrusted } from '@fleet-dao/store';
@@ -709,6 +710,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
                   taskId: verifierInput.taskId,
                   issueNumber: verifierInput.issueNumber,
                   ...(verifierInput.workflowId !== undefined ? { workflowId: verifierInput.workflowId } : {}),
+                  ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
                   prNumber,
                   branch: input.branch,
                 },
@@ -722,11 +724,14 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               );
             }
             // 装了收发目录（生产）：一家验的会话脱开引擎跑，执行方式支持的发版时放手、新引擎接回（#2848）
-            return await invokeVerifier(verifierInput, {
-              ...verifierDeps,
-              ...(sessionIo ? { detach: true } : {}),
-              released,
-            });
+            return await invokeVerifier(
+              input.roundSeq === undefined ? verifierInput : { ...verifierInput, roundSeq: input.roundSeq },
+              {
+                ...verifierDeps,
+                ...(sessionIo ? { detach: true } : {}),
+                released,
+              },
+            );
           } catch (error) {
             if (error instanceof PortError && error.retryable) seen.transient = error;
             // 开跑那一行写不进 runs（#157）：会话没起，库一时不通，过一会儿再验（不是「验收做不出来」）
@@ -929,6 +934,15 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       });
     }
     const outOfScope = verdict.outOfScope ?? [];
+    // 结论记在验收那一笔上（#3140，runs.verdict）：过没过、哪几条没过、转给人的。记不成只写日志，结论照常交回工作流
+    const verdictRunId = verdict.session?.runId;
+    if (verdictRunId !== undefined && deps.runs.noteVerdict !== undefined) {
+      try {
+        await deps.runs.noteVerdict(verdictRunId, verdictOf(verdict));
+      } catch (error) {
+        log('验收结论没记进 runs（结论照常交回工作流）', { runId: verdictRunId, error: errMessage(error) });
+      }
+    }
     const handoff =
       outOfScope.length > 0 ? await handOff(input, outOfScope, verdict.suggestions ?? [], ctx) : undefined;
     const notes = [verdict.notes, handoff].filter((n): n is string => n !== undefined && n !== '').join('；');

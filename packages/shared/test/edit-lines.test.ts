@@ -3,7 +3,24 @@ import { describe, expect, it } from 'vitest';
 import { countCreatedContent, countStructuredPatch, countTextDiff } from '../src/edit-lines.ts';
 import { isSubagentMeta } from '../src/transcript.ts';
 
-describe('countTextDiff：去掉共同的头尾行，剩下的是删和增', () => {
+describe('countTextDiff：按行差分计数，没变的中间行不计入', () => {
+  it('不相邻的修改与重复行按最长公共子序列计数', () => {
+    expect(countTextDiff('head\na\nunchanged\nb\ntail', 'head\nA\nunchanged\nB\ntail')).toEqual({
+      added: 2,
+      removed: 2,
+    });
+    expect(countTextDiff('a\nkeep\nb\nkeep\nc\n', 'keep\nx\nkeep\n')).toEqual({ added: 1, removed: 3 });
+  });
+  it('行末换行是否存在也是修改', () => {
+    expect(countTextDiff('a\n', 'a')).toEqual({ added: 1, removed: 1 });
+  });
+  it('无法在计算上限内准确完成时明确未知，不返回近似值', () => {
+    expect(countTextDiff('old\n'.repeat(2000), 'new\n'.repeat(2000))).toBeUndefined();
+    expect(countTextDiff('x'.repeat(1_000_001), '')).toBeUndefined();
+    // 大片相同上下文可先剥掉，不会把一次窄修改误报为超限。
+    const context = 'same\n'.repeat(2000);
+    expect(countTextDiff(`${context}a\n`, `${context}b\n`)).toEqual({ added: 1, removed: 1 });
+  });
   it('改一行、加两行、删一行', () => {
     expect(countTextDiff('a\nb\nc', 'a\nB\nB2\nc')).toEqual({ added: 2, removed: 1 });
     expect(countTextDiff('a\nb\n', 'a\nb\nc\n')).toEqual({ added: 1, removed: 0 });

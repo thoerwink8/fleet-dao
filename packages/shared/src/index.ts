@@ -32,6 +32,8 @@ export * from './request-progress.ts';
 export * from './request-rules.ts';
 export * from './route-probe-now.ts';
 export * from './route-probe-pace.ts';
+export * from './run-cause.ts';
+export * from './run-verdict.ts';
 export * from './segment-runs.ts';
 export * from './task-list.ts';
 export * from './task-signals.ts';

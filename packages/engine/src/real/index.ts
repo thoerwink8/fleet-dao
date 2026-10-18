@@ -36,6 +36,7 @@ import {
   readEngineMasterRow,
   readFlowModeSettingRaw,
   recordFlowAssignment,
+  recordPrHeadFiles,
   recordRouteProbeDone,
   recordRouteProbeStart,
   resolveAlertIfUnchangedSince,
@@ -238,6 +239,10 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
     ...(deps.log ? { log: deps.log } : {}),
     ...(deps.session?.gitBin ? { gitBin: deps.session.gitBin } : {}),
     ...(deps.session?.shBin ? { shBin: deps.session.shBin } : {}),
+    // 推分支、开 PR 时记下这个头改了哪些文件（#3140）：任务页的改动卡读 pr_head_files
+    recordHeadFiles: async (input) => {
+      await recordPrHeadFiles(deps.db, { ...input, files: [...input.files] });
+    },
   });
   const ports: EnginePorts = {
     pickRoute: store.pickRoute,
