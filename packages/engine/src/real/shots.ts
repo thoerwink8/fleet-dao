@@ -11,6 +11,9 @@
 // - 归档在 <归档>/<任务>/shots/<代码头>/：图片按 sha256 起名，manifest.json 记代码头、每张的路径、字节数、sha256、blob 号、
 //   结局。同一任务同一个头重试：清单对得上就不重写；换了头另起目录；别的任务的目录只在过期时删。
 // - 容量：所有任务的图片归档合计不超过 archiveMaxBytes；超过 keepDays 天的整目录删掉。删完还放不下就失败，树留着。
+//   清过期、算容量、写入在同一把归档锁里（withArchiveLock），并发收树不会各自通过检查再一起超限。
+// - 看不全就失败：孤儿提交（无父提交、只含普通文件的图片）太多、不可达提交里的无父提交超过清点上限，一律算失败、树留着。
+// - 已交付也要把清单（固定的头、清单、hash、结局）写下来，写不成算失败，不报已交付。
 // - 删树的路不止收树一条：每小时对账的清扫和一键清理、建树前删同一位置的旧树、不带 shots 的收树都先过 keepShotsBeforeRemove，
 //   回 failed 就不删。清扫不看远端，同一个头记过已交付才认，否则有图就归档。
 // - 读树里的东西一律以会话用户的身份（user-git.ts 的 runInTree / gitInTree）：引擎不以自己的身份进会话的目录。
@@ -32,7 +35,7 @@ export interface ShotsLimits {
   maxFileBytes: number;
   /** 一棵树的图片合计（去重后）。 */
   maxTotalBytes: number;
-  /** 最多看几个没父提交的孤儿提交。 */
+  /** 最多存几个没父提交的孤儿图片提交；多了算失败，不挑着存。 */
   maxOrphanCommits: number;
   /** 所有任务的图片归档合计。 */
   archiveMaxBytes: number;
@@ -51,8 +54,8 @@ export const SHOTS_LIMITS: ShotsLimits = {
 
 /** 拒收清单最多记几条。 */
 const REJECTED_MAX = 20;
-/** 不可达提交最多看多少个（找没父提交的）。 */
-const UNREACHABLE_SCAN_MAX = 500;
+/** 树里没父提交的不可达提交最多逐个看多少个；再多就看不全，算失败（树留着），不静默截断。 */
+const ORPHAN_ROOT_SCAN_MAX = 200;
 const SEG = '[A-Za-z0-9][A-Za-z0-9._-]{0,99}';
 const LABEL = new RegExp(`^${SEG}$`);
 const IMAGE_NAME = new RegExp(`^${SEG}\\.(?:png|jpe?g|webp)$`, 'i');
@@ -189,24 +192,35 @@ async function collectOrphanShots(t: UserTree, limits: ShotsLimits, out: Collect
     '找没推的孤儿提交（git fsck）',
     { timeoutMs: 300_000 },
   );
-  const unreachable = fsck.stdout
-    .toString('utf8')
-    .split('\n')
-    .map((l) => /^unreachable commit ([0-9a-f]{40})$/.exec(l.trim())?.[1])
-    .filter((s): s is string => s !== undefined)
-    .slice(0, UNREACHABLE_SCAN_MAX);
+  const unreachable = [
+    ...new Set(
+      fsck.stdout
+        .toString('utf8')
+        .split('\n')
+        .map((l) => /^unreachable commit ([0-9a-f]{40})$/.exec(l.trim())?.[1])
+        .filter((s): s is string => s !== undefined),
+    ),
+  ];
   if (unreachable.length === 0) return;
+  // 提交号走标准输入（不受命令行长度限制），一个都不丢：看不全就不能说「没有别的孤儿图片提交」
   const parents = await gitInTree(
     t,
-    ['log', '--no-walk=unsorted', '--format=%H %P', ...unreachable],
+    ['log', '--no-walk=unsorted', '--stdin', '--format=%H %P'],
     '看孤儿提交有没有父提交',
+    { stdin: Buffer.from(`${unreachable.join('\n')}\n`), timeoutMs: 300_000 },
   );
-  const roots = parents.stdout
-    .toString('utf8')
-    .split('\n')
-    .map((l) => l.trim())
-    .filter((l) => SHA.test(l));
-  for (const commit of roots.slice(0, limits.maxOrphanCommits)) {
+  const roots: string[] = [];
+  for (const line of parents.stdout.toString('utf8').split('\n')) {
+    const [commit, ...parentShas] = line.trim().split(/\s+/);
+    // 没有父提交才算孤儿：后面带着任何父提交号的（哪怕自己不可达）不是
+    if (commit !== undefined && SHA.test(commit) && parentShas.length === 0) roots.push(commit);
+  }
+  if (roots.length > ORPHAN_ROOT_SCAN_MAX) {
+    out.over = `树里没推的无父提交有 ${roots.length} 个，超过清点上限 ${ORPHAN_ROOT_SCAN_MAX}，看不全，不删`;
+    return;
+  }
+  let imageCommits = 0;
+  for (const commit of roots) {
     const listed = await gitInTree(
       t,
       ['ls-tree', '-r', '-z', '-l', commit],
@@ -215,7 +229,8 @@ async function collectOrphanShots(t: UserTree, limits: ShotsLimits, out: Collect
     const entries: { blob: string; size: number; path: string }[] = [];
     let images = true;
     for (const raw of listed.stdout.toString('utf8').split('\0').filter(Boolean)) {
-      const m = /^(\d{6}) blob ([0-9a-f]{40}) +(\d+)\t(.+)$/s.exec(raw);
+      // 只认普通文件（100644 / 100755）：120000 符号链接、160000 子模块的 blob 不是图片
+      const m = /^(100644|100755) blob ([0-9a-f]{40}) +(\d+)\t(.+)$/s.exec(raw);
       const path = m?.[4] ?? '';
       const segs = path.split('/');
       if (!m?.[2] || !segs.every((seg) => LABEL.test(seg)) || !IMAGE_NAME.test(segs.at(-1) ?? '')) {
@@ -226,6 +241,11 @@ async function collectOrphanShots(t: UserTree, limits: ShotsLimits, out: Collect
     }
     // 混着别的文件的不是图片提交，不归这里管
     if (!images || entries.length === 0) continue;
+    imageCommits += 1;
+    if (imageCommits > limits.maxOrphanCommits) {
+      out.over = `没推的孤儿图片提交超过 ${limits.maxOrphanCommits} 个，看不全，不删`;
+      return;
+    }
     for (const e of entries) {
       const path = `${commit.slice(0, 7)}/${e.path}`;
       if (out.found.length >= limits.maxFiles) {
@@ -466,7 +486,7 @@ async function settleShots(
   const branch = `shots/${input.issueNumber}`;
   const base = { head: input.head, branch };
   const dir = shotsArchiveDir(deps.archiveDir, deps.taskId, input.head);
-  const record = (delivery: ShotsDelivery) => writeRecord(dir, input, deps, delivery);
+  const record = (delivery: ShotsDelivery) => writeRecord(dir, input, deps, delivery, t);
   const files = collected.found.map((f) => f.record);
   const rejected = collected.rejected.slice(0, REJECTED_MAX);
   const extra = rejected.length > 0 ? { rejected } : {};
@@ -522,21 +542,35 @@ async function settleShots(
   }
 }
 
-/** 没有图片、已交付的也记一份清单（不存图）：树收了以后重试还说得清结局。记不成不碍事，原样回。 */
+/**
+ * 没有图片、已交付的也记一份清单（不存图）：树收了以后重试还说得清结局。
+ * 没有图片时记不成不碍事，原样回；已交付记不成就回 failed 并写明原因（调用方不删树）：固定的头、清单、hash 和结局
+ * 没持久记下来，就不能说「已交付、可以收树」。
+ */
 async function writeRecord(
   dir: string,
   input: ShotsInput,
   deps: ArchiveDeps,
   delivery: ShotsDelivery,
+  t: UserTree,
 ): Promise<ShotsDelivery> {
   const file = join(dir, 'manifest.json');
   const done = { ...delivery, archivedTo: file };
+  const temp = join(dir, `.manifest-${randomUUID()}.tmp`);
   try {
     await mkdir(dir, { recursive: true, mode: 0o700 });
-    await writeFile(file, manifestJson(input, deps, done), { mode: 0o600 });
+    await writeFile(temp, manifestJson(input, deps, done), { mode: 0o600 });
+    await rename(temp, file);
     return done;
-  } catch {
-    return delivery;
+  } catch (error) {
+    await rm(temp, { force: true }).catch(() => undefined);
+    if (aborted(t)) throw error;
+    if (delivery.outcome !== 'delivered') return delivery;
+    return {
+      ...delivery,
+      outcome: 'failed',
+      reason: `远端已有这些图，但交付清单没写成：${errMessage(error).slice(0, 200)}`,
+    };
   }
 }
 
@@ -611,8 +645,71 @@ async function archiveEntries(archiveDir: string): Promise<{ dir: string; bytes:
   return out;
 }
 
+/** 同一个进程里同一份归档的收树排队（key＝归档目录）。 */
+const archiveQueues = new Map<string, Promise<unknown>>();
+const LOCK_NAME = '.shots.lock';
+const LOCK_WAIT_MS = 60_000;
+/** 持锁的段落只写至多几十 MB：锁目录超过这么久没动当成上一个持锁的进程死了，清掉。 */
+const LOCK_STALE_MS = 10 * 60_000;
+
+/**
+ * 容量检查和写入之间的互斥（决定容量上限不被并发收树冲破）：进程内按归档目录排队，跨进程靠归档目录下的锁目录
+ * （mkdir 原子；过久没动的当死锁清掉）。等不到锁抛错，调用方当归档没成、树留着。
+ */
+async function withArchiveLock<T>(archiveDir: string, fn: () => Promise<T>): Promise<T> {
+  const prev = archiveQueues.get(archiveDir) ?? Promise.resolve();
+  const run = prev.catch(() => undefined).then(() => withDirLock(archiveDir, fn));
+  archiveQueues.set(archiveDir, run);
+  try {
+    return await run;
+  } finally {
+    if (archiveQueues.get(archiveDir) === run) archiveQueues.delete(archiveDir);
+  }
+}
+
+async function withDirLock<T>(archiveDir: string, fn: () => Promise<T>): Promise<T> {
+  await mkdir(archiveDir, { recursive: true, mode: 0o700 });
+  const lock = join(archiveDir, LOCK_NAME);
+  const until = Date.now() + LOCK_WAIT_MS;
+  for (;;) {
+    try {
+      await mkdir(lock, { mode: 0o700 });
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      const age = await stat(lock).then(
+        (s) => Date.now() - s.mtimeMs,
+        () => 0,
+      );
+      if (age > LOCK_STALE_MS) {
+        await rm(lock, { recursive: true, force: true });
+        continue;
+      }
+      if (Date.now() > until) throw new Error('等归档的锁等了太久，别的收树还占着');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+  try {
+    return await fn();
+  } finally {
+    await rm(lock, { recursive: true, force: true });
+  }
+}
+
+/** 存图：整段（清过期、算容量、写入）在归档锁里，并发收树不会同时通过容量检查。 */
+function archiveShots(
+  dir: string,
+  input: ShotsInput,
+  deps: ArchiveDeps,
+  limits: ShotsLimits,
+  found: readonly Found[],
+  pending: ShotsDelivery,
+): Promise<ShotsDelivery> {
+  return withArchiveLock(deps.archiveDir, () => archiveShotsLocked(dir, input, deps, limits, found, pending));
+}
+
 /** 存图：先清过期的、算容量，放得下才写；写进临时目录、逐张核对 hash，再换上。 */
-async function archiveShots(
+async function archiveShotsLocked(
   dir: string,
   input: ShotsInput,
   deps: ArchiveDeps,

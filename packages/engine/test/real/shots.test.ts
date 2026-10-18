@@ -192,6 +192,44 @@ describe('清点：只碰受管图片', () => {
   });
 });
 
+describe('清点：孤儿提交的筛选', () => {
+  /** 不挂引用的提交；parent 给了就带父提交，entries 是 [模式, 路径, blob 号]。 */
+  function looseCommit(entries: [string, string, string][], parent?: string): string {
+    const lines = entries.map(([mode, name, blob]) => `${mode} blob ${blob}\t${name}`).join('\n');
+    const tree = runChildOk('git', ['mktree'], { cwd: dir, input: `${lines}\n` });
+    return runChildOk('git', ['commit-tree', tree, '-m', 'x', ...(parent ? ['-p', parent] : [])], {
+      cwd: dir,
+    });
+  }
+  const blobOf = (bytes: Buffer) => {
+    const f = join(root, 'blob.tmp');
+    writeFileSync(f, bytes);
+    return git('hash-object', '-w', f);
+  };
+
+  it('带父提交的不可达提交不当孤儿：只认没父提交的那个', async () => {
+    const rootCommit = looseCommit([['100644', 'a.png', blobOf(png('root'))]]);
+    looseCommit([['100644', 'b.png', blobOf(png('child'))]], rootCommit);
+    const got = await collectShots(tree());
+    expect(got.found.map((f) => f.record.from)).toEqual([rootCommit]);
+  });
+
+  it('符号链接（120000）的 blob 不当图片：整个提交不归这里管', async () => {
+    looseCommit([['120000', 'a.png', blobOf(png('as-link'))]]);
+    const got = await collectShots(tree());
+    expect(got.found).toEqual([]);
+  });
+
+  it('【故意造出的失败】孤儿图片提交比上限多：算失败，不静默挑前几个', async () => {
+    for (const n of ['1', '2', '3']) orphanCommit({ [`s${n}.png`]: png(`o${n}`) });
+    const got = await collectShots(tree(), { ...SHOTS_LIMITS, maxOrphanCommits: 2 });
+    expect(got.over).toContain('超过 2 个');
+    const r = await preserveShots(tree(), input, deps({ limits: { maxOrphanCommits: 2 } }));
+    expect(r.outcome).toBe('failed');
+    expect(existsSync(shotsArchiveDir(archive, 'task-1', HEAD))).toBe(false);
+  });
+});
+
 describe('交付核对和受限归档', () => {
   it('复现 #2969：代码合并了，图片只在树里、远端 404：存进归档，清单记代码头、路径、字节、hash、结局', async () => {
     shot('2969/home-1366-light.png', png('before'));
@@ -330,6 +368,29 @@ describe('交付核对和受限归档', () => {
     shot('2969/a.png', png('a'));
     expect((await preserveShots(tree(), { ...input, head: '../x' }, deps())).outcome).toBe('failed');
     expect((await preserveShots(tree(), input, deps({ taskId: '../evil' }))).outcome).toBe('failed');
+  });
+
+  it('【故意造出的失败】远端已有但清单写不成：failed 带原因（不能报已交付再删树）', async () => {
+    shot('2969/a.png', png('a'));
+    // 清单的位置被一个目录占住：写不成
+    mkdirSync(join(shotsArchiveDir(archive, 'task-1', HEAD), 'manifest.json'), { recursive: true });
+    const remote = async () => ({ head: 'c'.repeat(40), blobs: new Set([gitBlobId(png('a'))]) });
+    const r = await preserveShots(tree(), input, deps({ remote }));
+    expect(r.outcome).toBe('failed');
+    expect(r.reason).toContain('交付清单没写成');
+    expect(r.files).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】并发收树：容量检查和写入互斥，放不下的那个失败，不超上限', async () => {
+    shot('2969/a.png', png('a'));
+    const limits = { archiveMaxBytes: 100 };
+    const [x, y] = await Promise.all([
+      preserveShots(tree(), input, deps({ taskId: 'task-x', limits })),
+      preserveShots(tree(), input, deps({ taskId: 'task-y', limits })),
+    ]);
+    expect([x.outcome, y.outcome].sort()).toEqual(['archived', 'failed']);
+    expect([x, y].find((r) => r.outcome === 'failed')?.reason).toContain('图片归档满了');
+    expect(existsSync(join(archive, '.shots.lock'))).toBe(false);
   });
 });
 
