@@ -356,6 +356,7 @@ func supervise(cfg configuration) error {
 			}
 			idle := !busy
 			for _, f := range queue {
+				f = sent.prepare(f)
 				if err := writeFrame(child.in, f); err != nil {
 					return err
 				}
@@ -417,7 +418,7 @@ func supervise(cfg configuration) error {
 			// 和 launch 行的 gateway 词同一口径：保留了且确实有回环网关才算 kept。
 			if keep = keep && gatewayPresence(cfg.args, cfg.env) == "kept"; child.keep != keep {
 				stopManaged(child)
-				sent.lost("switch")
+				sent.lost("switch", native)
 				if err = start(sel, true); err != nil {
 					return err
 				}
@@ -425,7 +426,7 @@ func supervise(cfg configuration) error {
 				logLine("event=switch route=" + sel.mode + " sid=" + sel.sessionID)
 			}
 			if len(replay) == 0 {
-				f := queue[0]
+				f := sent.prepare(queue[0])
 				queue = queue[1:]
 				if err := writeFrame(child.in, f); err != nil {
 					return err
@@ -471,7 +472,7 @@ func supervise(cfg configuration) error {
 			// Mirasim 正常回收空闲进程就是发停止信号：优雅停掉执行体，正常退出，不记成会话失败。
 			stopManaged(child)
 			child = nil
-			sent.lost("stopped")
+			sent.lost("stopped", native)
 			logLine("event=stopped sid=" + native)
 			return nil
 		case <-stall:
@@ -496,7 +497,7 @@ func supervise(cfg configuration) error {
 			case "eof":
 				closed = true
 			case "exit":
-				sent.lost("exit")
+				sent.lost("exit", native)
 				if busy || waitingReplay != "" || len(pendingHost) > 0 || len(permissions) > 0 || len(background) > 0 {
 					return fmt.Errorf("执行体提前退出，状态 %d", e.code)
 				}
@@ -604,6 +605,7 @@ func supervise(cfg configuration) error {
 							return fmt.Errorf("执行体会话 ID 格式错误")
 						}
 						native = sid
+						sent.rekey(sid)
 					}
 				}
 				if typ == "system" {

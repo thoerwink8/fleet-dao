@@ -11,7 +11,8 @@ import (
 )
 
 // 按 --replay-user-messages 的真实行为回显：读进一条 user 先回显 isReplay，再出这一回合。
-// swallow 模拟「写进了管道却没被读进」：不回显、不输出；bg 模拟主回合结束、后台任务还在跑。
+// swallow 模拟「写进了管道却没被读进」：不回显、不输出；bg 模拟主回合结束、后台任务还在跑；
+// hold 读进后一直跑着不出 result，模拟长回合。
 func fakeReplayClaude(sid string) {
 	dec, enc := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
 	for {
@@ -37,7 +38,7 @@ func fakeReplayClaude(sid string) {
 			continue
 		}
 		_ = enc.Encode(map[string]any{"type": "user", "message": msg, "session_id": sid, "parent_tool_use_id": nil, "isReplay": true, "pid": os.Getpid()})
-		if deferredResult && text == "first" {
+		if (deferredResult && text == "first") || text == "hold" {
 			continue
 		}
 		if msg["content"] == "bg" {
@@ -49,8 +50,12 @@ func fakeReplayClaude(sid string) {
 }
 
 func startReplayApp(t *testing.T, f fixture, cache string, extraEnv ...string) *app {
+	return startReplayAppAs(t, f, cache, "--session-id", extraEnv...)
+}
+
+func startReplayAppAs(t *testing.T, f fixture, cache, sessionFlag string, extraEnv ...string) *app {
 	env := append([]string{"MIRASIM_TEST_ROLE=replay", "XDG_CACHE_HOME=" + cache, "RECLAUDE_MIRASIM_DELIVERY_STALL_MS=300"}, extraEnv...)
-	return startAppArgs(t, f, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--model", "claude-sonnet-5", "--session-id", f.sid, "--settings", `{}`}, env...)
+	return startAppArgs(t, f, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--model", "claude-sonnet-5", sessionFlag, f.sid, "--settings", `{}`}, env...)
 }
 
 func TestUnconfirmedContentKeepsChildAfterPriorTurnResult(t *testing.T) {
@@ -80,6 +85,72 @@ func TestUnconfirmedContentKeepsChildAfterPriorTurnResult(t *testing.T) {
 				t.Fatalf("未知身份应保留责任、不重放、不切路由：%s", log)
 			}
 		})
+	}
+}
+
+func waitLog(t *testing.T, f fixture, cache, want string) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); !strings.Contains(launchLogOf(t, f, cache), want); {
+		if time.Now().After(deadline) {
+			t.Fatalf("日志里等不到 %q：%s", want, launchLogOf(t, f, cache))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 10-16 的后半段：没读进的消息还在，Mirasim 就把进程强杀了。同一会话下次起进程，下一条消息要把它补在前面。
+func TestUnreadUserSurvivesKilledProcessAndIsRedelivered(t *testing.T) {
+	for _, resent := range []bool{false, true} {
+		t.Run(map[bool]string{false: "补发", true: "Mirasim已重发不重复"}[resent], func(t *testing.T) {
+			f := newFixture(t, "local")
+			cache := filepath.Join(f.home, "xdg-cache")
+			a := startReplayApp(t, f, cache)
+			a.user(t, "first")
+			a.until(t, "result")
+			a.user(t, "swallow")
+			waitLog(t, f, cache, "path=turn idle=true len=7")
+			_ = a.cmd.Process.Kill()
+			<-a.ended
+			b := startReplayAppAs(t, f, cache, "--resume")
+			next := "next"
+			if resent {
+				next = "swallow 再说一遍 next"
+			}
+			b.user(t, next)
+			echo := b.until(t, "user")
+			content, _ := echo["message"].(map[string]any)["content"].(string)
+			if resent {
+				if content != next {
+					t.Fatalf("Mirasim 已重发的不能再补一遍：%q", content)
+				}
+			} else if !strings.HasPrefix(content, redeliveryHeader) || !strings.Contains(content, "1. swallow") || !strings.HasSuffix(content, "next") {
+				t.Fatalf("没读进的消息要补在下一条前面：%q", content)
+			}
+			b.until(t, "result")
+			log := launchLogOf(t, f, cache)
+			if !strings.Contains(log, "event=user-redelivery-loaded n=1") {
+				t.Fatalf("新进程要读回上次没读进的：%s", log)
+			}
+		})
+	}
+}
+
+// 运行中转出去的引导，回合结束了还没读进：从 result 起按空闲算，60 秒（测试里 300ms）后回报错。
+func TestSteerStillUnreadAfterResultReturnsVisibleError(t *testing.T) {
+	f := newFixture(t, "local")
+	cache := filepath.Join(f.home, "xdg-cache")
+	a := startReplayApp(t, f, cache)
+	a.user(t, "hold")
+	a.until(t, "user")
+	a.user(t, "swallow")
+	waitLog(t, f, cache, "path=active idle=false len=7")
+	a.user(t, "release")
+	if r := a.until(t, "result"); r["is_error"] != false {
+		t.Fatalf("release 那一回合应正常结束：%v", r)
+	}
+	r := a.until(t, "result")
+	if r["is_error"] != true || r["result"] != deliveryStallMessage {
+		t.Fatalf("回合结束后仍没读进的引导要回报错：%v", r)
 	}
 }
 
