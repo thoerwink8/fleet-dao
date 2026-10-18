@@ -43,3 +43,5 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - 真核验通过后按设置版本与通知 `raisedAt` 双守卫 CAS 持久写 verified 和审计；并发 GET 只一份结清审计，结算冲突/读取失败均不展示绿。不替看门狗撤原通知。
 
 - 明确关联已有单（#3100，`POST /api/notifications/:id/repair/link`）：可信登录操作者指定这次告警由哪张现有 fleet-dao 单处理，只收受管仓 + 单号 + 服务端关联版本（视图 `linkAction`）+ incident + `requestId`，多一个字段（如伪造 actor）就 400；服务端现读必须是开着的 issue，并按目标仓和单精确查任务、开放 PR（`listPullRequests` 的 `repoId`/`issueNumber`，不读全局前 N 条再筛；一页读满当没读全，关联 502、交给修复标 failed 不派工）；读不到、PR、错仓、已关闭一律拒绝，不回退成开单。线上契约不加枚举：修复记录的 kind/state 与 #3033 一样，关联存成设置表里的内部记录（`StoredRecordSchema`，只在 `alert-repair.ts` 里认），出口经 `wireLast` 投影，关联只走视图的 `linked` 和关联端点自己的回执；通知卡（#3034）按旧枚举取 `PHASE_META[state]`，新枚举会让它崩溃，`alert-repair.test.ts` 有照抄旧消费者的严格检查。交给修复沿用绑定：每次重新核实，失效标 `invalid` 不开新单；已有进行中的任务或开放 PR 回 409 `link_already_handled` 不派工，否则经原准入派一次（不传 force）。关联与开单抢同一事故走同一个设置版本 CAS。标题正文相似不自动认同根因。
+
+- `fleet-api quote put|get|list` 仅私有管理命令；put 从 stdin 收数组，同 id 同内容幂等、异文整批拒绝。错误不回显 payload 或数据库明细，get/list 的私有原文输出不可送公开日志；不挂 HTTP 或 realtime。

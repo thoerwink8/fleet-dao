@@ -1,4 +1,4 @@
 {
   "extends": "../../tsconfig.base.json",
-  "include": ["src", "test", "../shared/src/ci-policy-bridge.ts"]
+  "include": ["src", "test", "../shared/src/ci-policy-bridge.ts", "../shared/src/private-quotes.ts"]
 }
