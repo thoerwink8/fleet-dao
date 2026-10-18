@@ -545,7 +545,12 @@ export function createMemoryStore(
     },
     async listPullRequests(input = {}) {
       const limit = input.limit ?? 50;
-      const rows = data.pullRequests.filter((p) => input.state === undefined || p.state === input.state);
+      const rows = data.pullRequests.filter(
+        (p) =>
+          (input.state === undefined || p.state === input.state) &&
+          (input.repoId === undefined || p.repoId === input.repoId) &&
+          (input.issueNumber === undefined || (p.issueRefs ?? []).includes(input.issueNumber)),
+      );
       // 和库版一样：merged 按合并时刻倒序、没读到合并时刻的排最后（不拿 updatedAt 顶，不当「最新」）；
       // 其余按镜像更新时刻倒序（没读到的排最后）；并列都按编号倒序。
       const keyOf = (p: (typeof rows)[number]) => (input.state === 'merged' ? p.mergedAt : p.updatedAt);
