@@ -300,3 +300,77 @@ describe('抓分支此刻的头（推被拒时认领用）', { timeout: 60_000 }
     });
   });
 });
+
+// 新头由远端同步产生，尚未经过 pushBranch 导入镜像（#3157）。
+describe('待验精确头进入受管镜像', { timeout: 60_000 }, () => {
+  it('镜像缺对象时抓精确 SHA；分支已前进仍能实际归档旧待验头，已有对象不再联网', async () => {
+    const stateDir = tempDir('fleet-gh-verify-state-');
+    const wt = tempDir('fleet-gh-verify-work-');
+    gitIn(wt, 'init', '-q', '-b', 'verify');
+    writeFileSync(join(wt, 'value.txt'), 'expected\n');
+    gitIn(wt, 'add', '.');
+    gitIn(wt, 'commit', '-q', '-m', 'expected');
+    const expected = gitIn(wt, 'rev-parse', 'HEAD');
+    gitIn(wt, 'push', '-q', remote, 'HEAD:refs/heads/verify-exact');
+    writeFileSync(join(wt, 'value.txt'), 'advanced\n');
+    gitIn(wt, 'commit', '-q', '-am', 'advanced');
+    gitIn(wt, 'push', '-q', remote, 'HEAD:refs/heads/verify-exact');
+    const { gh, fake } = setup({ git: execGit, gitUrl: () => remote, stateDir, env: {} });
+    await gh.fetchMainline({ repo });
+    const mirror = join(stateDir, 'mirrors', repo.owner.toLowerCase(), `${repo.name.toLowerCase()}.git`);
+    expect(() => gitIn(mirror, 'cat-file', '-e', expected)).toThrow();
+    await gh.fetchCommitHead({ repo, headSha: expected });
+    expect(gitIn(mirror, 'show', `${expected}:value.txt`)).toBe('expected');
+    const archive = join(wt, 'exact.tar');
+    gitIn(mirror, 'archive', '--format=tar', '-o', archive, expected);
+    expect(statSync(archive).size).toBeGreaterThan(0);
+    const before = fake.calls('POST', /access_tokens$/).length;
+    await gh.fetchCommitHead({ repo, headSha: expected });
+    expect(fake.calls('POST', /access_tokens$/)).toHaveLength(before);
+  });
+
+  it('fetch失败或声称成功但对象仍缺都报错；取消不启动联网fetch', async () => {
+    for (const code of [1, 0]) {
+      const { gh } = setup({
+        git: async (args, call) =>
+          args[0] === 'fetch'
+            ? { code, stdout: '', stderr: code ? 'fetch failed' : '' }
+            : execGit(args, call),
+        gitUrl: () => remote,
+        env: {},
+      });
+      await expect(gh.fetchCommitHead({ repo, headSha: 'f'.repeat(40) })).rejects.toThrow();
+    }
+    const abort = new AbortController();
+    abort.abort(new Error('cancelled'));
+    const { gh, fake } = bundleSetup();
+    await expect(gh.fetchCommitHead({ repo, headSha: mainHead, signal: abort.signal })).rejects.toThrow(
+      'cancelled',
+    );
+    expect(fake.calls('POST', /access_tokens$/)).toHaveLength(0);
+  });
+});
+
+it('精确头fetch将取消和既有网络超时交给GitRunner，取消后不接受成功回执', async () => {
+  const abort = new AbortController();
+  let fetches = 0;
+  const { gh } = setup({
+    git: async (args, call) => {
+      if (args[0] === 'fetch') {
+        fetches++;
+        expect(call.signal).toBe(abort.signal);
+        expect(call.timeoutMs).toBe(5 * 60_000);
+        expect(args.at(-1)).toBe('e'.repeat(40));
+        abort.abort(new Error('cancelled fetch'));
+        return execGit(args, call);
+      }
+      return execGit(args, call);
+    },
+    gitUrl: () => remote,
+    env: {},
+  });
+  await expect(gh.fetchCommitHead({ repo, headSha: 'e'.repeat(40), signal: abort.signal })).rejects.toThrow(
+    'cancelled fetch',
+  );
+  expect(fetches).toBe(1);
+});

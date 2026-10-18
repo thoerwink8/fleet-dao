@@ -20,6 +20,9 @@ export const PAGES: readonly (readonly [string, string])[] = [
   // 画布：原来的主页（决定 0093 挪进「更多」）
   ['board', '/board'],
   ['tasks', '/tasks'],
+  // 任务页的演示样板（#3140、#3169）：t-c9 做完、两个回合返工一次；t-12 在跑的返工回合
+  ['task-c9', '/tasks/t-c9'],
+  ['task-12', '/tasks/t-12'],
   ['notifications', '/notifications'],
   ['routing', '/routing'],
   ['status', '/routing/status'],

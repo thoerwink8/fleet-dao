@@ -82,6 +82,7 @@ import type {
   Routing,
   RoutingEfforts,
   RoutingLayers,
+  RunSteps,
   RunTranscript,
   RunTranscriptQuery,
   SendRequestMessageBody,
@@ -208,6 +209,10 @@ export interface FleetApi {
    * 读不到（库不通、没接上）抛 ApiError（503），这一段跑在记录之前是 noRecord:true，两者分开。
    */
   runTranscript(taskId: string, runId: string, query?: RunTranscriptQuery): Promise<RunTranscript>;
+  /**
+   * 一笔会话切好的步骤和小计（#3140）：由后端从这一笔的轻量行现算；这一笔跑在记录之前是 noRecord，读不到抛 ApiError（503）。
+   */
+  runProcess(taskId: string, runId: string): Promise<RunSteps>;
   taskAction(taskId: string, body: TaskActionBody): Promise<void>;
   /** 给这张单的一段（动手、验收）指定模型或清掉（引擎下一次给这一段选路就照它）。 */
   updateTaskRoutePin(taskId: string, body: UpdateTaskRoutePinBody): Promise<TaskRoutePin>;
@@ -662,6 +667,48 @@ export function useRunTranscript(taskId: string, runId: string, enabled: boolean
         }
       }
     },
+  });
+}
+
+/**
+ * 任务页「过程」里一笔切好的步骤和小计（#3140）：这一笔展开才读（enabled）。在跑的每 3 秒读一次，收场的读一次就够；
+ * 读失败不自动重试，页面上有「重试」。读到的步骤是后端现算的，不在前端再切一遍。
+ */
+export function useRunProcess(taskId: string, runId: string, running: boolean, enabled: boolean) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ['run-process', taskId, runId] as const,
+    enabled,
+    retry: false,
+    refetchInterval: (q) => (running && q.state.status !== 'error' ? TRANSCRIPT_POLL_MS : false),
+    queryFn: () => api.runProcess(taskId, runId),
+  });
+}
+
+/** 一步最多读多少条调用（接口一页的上限）；超了页面写「还有 N 条，在会话抽屉里看全部」。 */
+export const STEP_CALLS_MAX = 500;
+
+/**
+ * 一步展开后的调用（#3140）：只读这一步的序号区间 [firstSeq, lastSeq]，不读整段会话。
+ * 这一步还在跑（running）的每 3 秒再读一次，已经结束的读一次就够。读失败不自动重试，页面上有「重试」。
+ */
+export function useStepCalls(
+  taskId: string,
+  runId: string,
+  step: { firstSeq: number; lastSeq: number; running: boolean },
+  enabled: boolean,
+) {
+  const api = useApi();
+  return useQuery({
+    queryKey: ['run-step', taskId, runId, step.firstSeq, step.lastSeq] as const,
+    enabled,
+    retry: false,
+    refetchInterval: (q) => (step.running && q.state.status !== 'error' ? TRANSCRIPT_POLL_MS : false),
+    queryFn: () =>
+      api.runTranscript(taskId, runId, {
+        ...(step.firstSeq > 0 ? { after: step.firstSeq - 1 } : {}),
+        limit: Math.min(STEP_CALLS_MAX, step.lastSeq - step.firstSeq + 1),
+      }),
   });
 }
 

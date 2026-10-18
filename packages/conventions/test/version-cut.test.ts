@@ -145,7 +145,10 @@ describe('到期收口', () => {
     const v4 = w.milestones.find((m) => m.number === 11);
     expect(v4?.state).toBe('closed');
     expect(v4?.description).toContain('目标：统一。');
-    expect(v4?.description).toContain('- 关了 3 张：完成 2、不做 1、重复 0');
+    expect(v4?.description).toContain(
+      '- 这一版做了什么：[CHANGELOG v4](https://github.com/thoerwink8/fleet-dao/blob/main/CHANGELOG.md#v4)',
+    );
+    expect(v4?.description).not.toContain('- 关了');
     expect(v4?.description).toContain('- 滚到「v5 10-19～10-25」：#10、#20、#30（3 张）');
     expect(v4?.description).toContain(`- 收口时主线头：${HEAD}`);
     expect(v4?.description).not.toContain('收口中');

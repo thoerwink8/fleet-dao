@@ -740,7 +740,13 @@ export type MergePrResult =
       mergedBy: string | null;
       mergedByEngine: boolean;
     }
-  | { merged: false; reason: MergeRefusal; detail: string };
+  | {
+      merged: false;
+      reason: MergeRefusal;
+      detail: string;
+      /** ci_not_green 且只有没跑完的（没有红的、没出现的）：等一会儿再合可能就能合（#3165）。其余拒绝没有这个键。 */
+      ciPendingOnly?: true;
+    };
 
 export async function mergePr(
   deps: Deps,
@@ -794,9 +800,9 @@ export async function mergePr(
     }
     return afterMerge(deps, input, pr, true, ctx);
   }
-  const refuse = (reason: MergeRefusal, detail: string): MergePrResult => {
+  const refuse = (reason: MergeRefusal, detail: string, pendingOnly = false): MergePrResult => {
     deps.log.info('不合并', { repo: slug, prNumber, reason, detail });
-    return { merged: false, reason, detail };
+    return { merged: false, reason, detail, ...(pendingOnly ? { ciPendingOnly: true as const } : {}) };
   };
   if (pr.state !== 'open') return refuse('not_open', `PR #${prNumber} 已经关了`);
   if (pr.head.sha !== expectedHead) {
@@ -828,7 +834,9 @@ export async function mergePr(
   // 否则两张都核过「不落后」、先后合进去，后一张就是在旧主线上测的
   type Locked = { refused: MergePrResult } | { merged: Pull };
   const outcome = await deps.locker.withLock(`merge:${slug.toLowerCase()}`, async (): Promise<Locked> => {
-    const refused = (reason: MergeRefusal, detail: string): Locked => ({ refused: refuse(reason, detail) });
+    const refused = (reason: MergeRefusal, detail: string, pendingOnly = false): Locked => ({
+      refused: refuse(reason, detail, pendingOnly),
+    });
     const cmp = await deps.client.request<{ behind_by?: number; ahead_by?: number }>({
       method: 'GET',
       path: `${base}/compare/${encRef(facts.defaultBranch)}...${expectedHead}`,
@@ -857,6 +865,7 @@ export async function mergePr(
         return refused(
           'ci_not_green',
           `PR #${prNumber} 的 CI 在 ${expectedHead.slice(0, 7)} 上不是全绿（${parts.join('；')}）`,
+          e.failed.length === 0 && e.missing.length === 0 && e.pending.length > 0,
         );
       }
     }
