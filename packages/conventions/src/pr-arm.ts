@@ -12,6 +12,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isFlowBranch } from './flow-branch.ts';
+import { canonicalPrArgs, resolveRepo } from './github-api.ts';
 import {
   type ChangedFile,
   parseStandardPaths,
@@ -34,14 +35,30 @@ export function liveGh(cwd: string, timeoutMs = 60_000): Gh {
   return liveCommand('gh', cwd, timeoutMs);
 }
 
+/** 标准 PR 入口专用：仓身份认不出就停，不让 gh 按 relay remote 猜。 */
+export function livePrGh(cwd: string, timeoutMs = 60_000): Gh {
+  const env = { ...process.env };
+  const resolved = resolveRepo(env, cwd);
+  const error =
+    resolved.error ??
+    (!resolved.repo
+      ? '当前 GitHub 仓认不出：origin 读取失败或不是 GitHub 仓，请明确 GH_REPO=owner/name'
+      : undefined);
+  if (error) return () => ({ code: 1, stdout: '', stderr: error });
+  const repo = resolved.repo as string;
+  env.GH_REPO = repo;
+  const run = liveCommand('gh', cwd, timeoutMs, env);
+  return (args) => run(canonicalPrArgs(args, repo));
+}
+
 /** 真跑 git（pnpm pr:open 读分支上的提交说明用）：同 liveGh 的三态。 */
 export function liveGit(cwd: string, timeoutMs = 60_000): Gh {
   return liveCommand('git', cwd, timeoutMs);
 }
 
-function liveCommand(command: string, cwd: string, timeoutMs: number): Gh {
+function liveCommand(command: string, cwd: string, timeoutMs: number, env?: NodeJS.ProcessEnv): Gh {
   return (args) => {
-    const r = spawnSync(command, args, { cwd, encoding: 'utf8', windowsHide: true, timeout: timeoutMs });
+    const r = spawnSync(command, args, { cwd, encoding: 'utf8', windowsHide: true, timeout: timeoutMs, env });
     if (r.error) {
       const e = r.error as NodeJS.ErrnoException;
       return { code: e.code === 'ENOENT' ? 127 : 1, stdout: r.stdout ?? '', stderr: e.message };

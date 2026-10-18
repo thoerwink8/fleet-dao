@@ -202,6 +202,7 @@ describe('pnpm pr:open 自己生成正文', () => {
       await w.run('--new-issue', '删掉没人用的残留', '--kind', '杂项', '--milestone', '未排期', '--local'),
     ).toBe(0);
     expect(w.issueCalls).toHaveLength(1);
+    expect(w.calls[0]).toEqual(expect.arrayContaining(['--head', 'feat/x']));
     const create = w.issueCalls[0] ?? [];
     expect(create.slice(0, 2)).toEqual(['issue', 'create']);
     expect(create[create.indexOf('--title') + 1]).toBe('删掉没人用的残留');
