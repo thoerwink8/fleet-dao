@@ -1413,6 +1413,56 @@ describe('等合并', () => {
     expect(clock).toBe(0);
   });
 
+  it('必过检查没出现：当场报没查成，不接着轮询', async () => {
+    let reads = 0;
+    let slept = 0;
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true, mergeable: true, mergeableState: 'blocked' }),
+    });
+    const got = await wait(f.gh, {
+      sleep: async () => {
+        slept += 1;
+      },
+      readChecks: async () => {
+        reads += 1;
+        return {
+          overall: 'pending',
+          failed: [],
+          missing: [{ name: 'merge-gate' }],
+          pending: [{ name: 'lint' }],
+        };
+      },
+    });
+    expect(got).toMatchObject({
+      state: 'checks_unreadable',
+      detail: expect.stringContaining('必过检查没查成'),
+    });
+    expect(got.state === 'checks_unreadable' ? got.detail : '').toContain('merge-gate 没出现');
+    expect(reads).toBe(1);
+    expect(slept).toBe(0);
+  });
+
+  it('检查没出结论：当场报没查成，不接着轮询', async () => {
+    let reads = 0;
+    const f = fakeGh({ readPull: async () => pullFacts({ autoMerge: true }) });
+    const got = await wait(f.gh, {
+      readChecks: async () => {
+        reads += 1;
+        return {
+          overall: 'pending',
+          failed: [],
+          unsettled: [{ name: 'cold-verify', conclusion: 'stale' }],
+        };
+      },
+    });
+    expect(got.state).toBe('checks_unreadable');
+    if (got.state === 'checks_unreadable') {
+      expect(got.detail).toContain('cold-verify（stale）');
+      expect(got.detail).toContain('没查成');
+    }
+    expect(reads).toBe(1);
+  });
+
   it('【故意造出的失败】会接着等、却没接上读检查：抛错，不回 waiting', async () => {
     let clock = 0;
     const f = fakeGh({

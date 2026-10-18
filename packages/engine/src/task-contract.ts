@@ -587,6 +587,11 @@ export type MergeWait =
    */
   | { state: 'checks_red'; failedChecks: string[]; detail: string }
   /**
+   * 必过检查没出现，或跑完了却不是在跑、也没有能认的结论。接着轮询不会自己变好。
+   * 老历史里没有这个状态（那时候没分开报，一直等到时限回 waiting）。
+   */
+  | { state: 'checks_unreadable'; detail: string }
+  /**
    * 等合并时 PR 上出现了认可审查者的正式「要求改」（#2991）：活动已把自动合并撤掉，交工作流转给工人或停下等审查者。
    * 老历史里没有这个状态。
    */

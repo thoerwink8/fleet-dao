@@ -176,6 +176,23 @@ function absentNames(checks: MergeWaitChecks): string[] {
   return names;
 }
 
+/**
+ * 没出现，或跑完了却不是在跑：等合并不能当成还在排队。空名单返回 null。
+ * 点名检查，并写明没查成。
+ */
+function unreadableChecksDetail(checks: MergeWaitChecks, prNumber: number, head: string): string | null {
+  const missing = absentNames(checks);
+  const unsettled = (checks.unsettled ?? []).filter((item) => item.name.trim().length > 0);
+  if (missing.length === 0 && unsettled.length === 0) return null;
+  const parts: string[] = [];
+  if (missing.length > 0) parts.push(`${missing.join('、')} 没出现`);
+  if (unsettled.length > 0) {
+    const which = unsettled.map((item) => `${item.name}（${item.conclusion}）`).join('、');
+    parts.push(`${which} 没出结论、也不是在跑`);
+  }
+  return `PR #${prNumber} 头 ${head} 的必过检查没查成：${parts.join('；')}`;
+}
+
 /** 还在跑的检查名。没给 pending、名字是空的，都不算。 */
 function inProgressNames(checks: MergeWaitChecks): string[] {
   const names: string[] = [];
@@ -715,7 +732,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       try {
         // 读过 PR、读过评审了：已经挂上的在上面返回，不会走到这里。已取消或期限已过就不再开新的写。
         refuseLateArmWrite(ctx);
-        await mapped(() => gh.claims.enableAutoMerge(repo, pull));
+        await mapped(() => gh.claims.enableAutoMerge(repo, pull, ctx));
         // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
         // 这一次之后交的评审，事件那头读到的就是已挂着（会撤）。两头合起来不留「检查完才到」的窗口。
         const after = await reviewHold(repo, { ...pull, autoMerge: true });
@@ -841,6 +858,9 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         const checks = await mapped(() => readChecks(repo, pull.headSha, ctx.signal));
         if (checks.overall === 'red') return checksRedWait(checks);
+        // 没出现、没出结论都不是还在跑。旁边就算还有 pending 名字，也不接着轮询装成能等。
+        const unread = unreadableChecksDetail(checks, prNumber, pull.headSha);
+        if (unread) return { state: 'checks_unreadable', detail: unread };
         if (now().getTime() >= deadline) {
           return { state: 'waiting', detail: '自动合并挂着，GitHub 还没合（等必过检查和合并闸）' };
         }

@@ -1764,6 +1764,37 @@ describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gat
     expect(calls.verify.map((v) => v.headSha)).toEqual([head, moved]);
     expect(calls.armInputs.map((i) => i.expectedHead)).toEqual([head, moved]);
   });
+
+  it('等合并时必过检查没出现：停下报没查成，不接着空等', async () => {
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const detail = `PR #12 头 ${head} 的必过检查没查成：merge-gate 没出现`;
+    const { tasks, calls } = scripted({
+      merged: (n) =>
+        n === 1 ? { state: 'checks_unreadable', detail } : { state: 'merged', mergeCommit: 'abc1234567890' },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        const s = await statusUntil(h, parked, '必过检查没查成，停下');
+        expect(s.phase).toBe('parked');
+        expect(s.lastProblem).toBe('必过检查没查成');
+        expect(world.alerts).toHaveLength(1);
+        expect(world.alerts[0]?.title).toBe('必过检查没查成');
+        expect(world.alerts[0]?.detail).toContain('merge-gate 没出现');
+        expect(world.alerts[0]?.detail).toContain(head);
+        expect(calls.merged).toBe(1);
+        expect(calls.arm).toBe(1);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head });
+    expect(calls.merged).toBe(2);
+  });
 });
 
 describe('任务工作流 · 切号停下动手那一段（org_switch，#59）', { timeout: 60_000 }, () => {

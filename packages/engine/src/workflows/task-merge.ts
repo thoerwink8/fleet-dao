@@ -27,6 +27,8 @@
 //   不因 why 里写了 ci_not_green 就重试。必过检查没出现也是没查成：活动不交 checksPending，哪怕旁边还有在跑的。
 //   等到点仍没跑完：停下，写明 PR、头、检查名和原始原因。头变了回 head_moved，调用方重走
 //   CI、冷验收、批准，不沿用旧头。老历史的活动结果没有这两个字段；标记不在历史里就当没有，照旧停下。
+// - 等合并时必过检查没出现或没出结论（patched('merge-wait-unreadable-checks')）：不是还在跑，活动回 checks_unreadable，
+//   这里停下并写明没查成。老历史里 waitMerged 不回这个状态；标记不在历史里就当还在等，不新增步序。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { CancellationScope, isCancellation, log, patched } from '@temporalio/workflow';
@@ -208,7 +210,12 @@ async function armWithinDeadline(
     const where = `PR #${prNumber} 头 ${wait.head}，在等：${wait.names.join('、')}。原始原因：${wait.detail}`;
     const after = secondsLeft(wait);
     // 活动自己拒绝再写（期限已过、不重试）和调度超时一样：停下，不另开一次挂合并。
-    if (failure.code === 'TIMEOUT_SCHEDULE_TO_CLOSE' || failure.code === 'ARM_DEADLINE_PASSED' || after < 1) {
+    if (
+      failure.code === 'TIMEOUT_SCHEDULE_TO_CLOSE' ||
+      failure.code === 'ARM_DEADLINE_PASSED' ||
+      failure.code === 'WRITE_DEADLINE_PASSED' ||
+      after < 1
+    ) {
       await rt.park(
         '等检查超时',
         pendingExhaustedDetail(prNumber, wait, `${failure.code}：${failure.message}`),
@@ -476,6 +483,12 @@ export async function armAndWaitMerged(
           `PR #${prNumber} 的冲突数据还没重算完，等一会儿再看`,
           CONFLICT_REPOLL_SECONDS,
         );
+      }
+      if (w.state === 'checks_unreadable') {
+        // 老历史重放：这一支是加进来的。patched() 为假就当还在等，不多调活动。
+        if (!patched('merge-wait-unreadable-checks')) continue;
+        await rt.park('必过检查没查成', w.detail);
+        continue;
       }
       if (w.state === 'checks_red') {
         // 老历史重放：这一支是加进来的。patched() 为假就当还在等，不多调活动。
