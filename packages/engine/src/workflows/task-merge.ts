@@ -21,7 +21,8 @@
 //   之后每隔 ARM_PENDING_POLL_SECONDS 再走一次 armAutoMerge，这一下的排队、尝试、重试受剩余期限约束（scheduleToClose），
 //   状态落库、休眠、红的确认也都算在同一份期限里，睡不越过它；不按次数算，也不每次重开。同头变绿后仍由那一入口挂上或 squash，
 //   合并账和回执不另开路。真红（checksRed）走下面同一套确认 / 返工。权限、认证、正式要求改、没查成没有这两个字段，照旧停下，
-//   不因 why 里写了 ci_not_green 就重试。等到点仍没跑完：停下，写明 PR、头、检查名和原始原因。头变了回 head_moved，调用方重走
+//   不因 why 里写了 ci_not_green 就重试。必过检查没出现也是没查成：活动不交 checksPending，哪怕旁边还有在跑的。
+//   等到点仍没跑完：停下，写明 PR、头、检查名和原始原因。头变了回 head_moved，调用方重走
 //   CI、冷验收、批准，不沿用旧头。老历史的活动结果没有这两个字段；标记不在历史里就当没有，照旧停下。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';

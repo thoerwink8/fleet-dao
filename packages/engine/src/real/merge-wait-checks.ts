@@ -10,7 +10,8 @@ export interface MergeWaitCheckRead {
   overall: 'green' | 'red' | 'pending' | 'none';
   failed: { name: string; detail?: string }[];
   /**
-   * 还在跑（queued / in_progress）的检查名。没出现的不放进来。没有就不带这个字段。
+   * 还在跑（queued / in_progress）的检查名。没出现的不放进来。
+   * 必过名单里只要有一条没出现，整份都不带这个字段：不能靠旁边一条还在跑的装成可等。没有就不带。
    */
   pending?: { name: string }[];
   /**
@@ -18,6 +19,11 @@ export interface MergeWaitCheckRead {
    * 有这一项就不带 pending，挂合并不据此有界等待，显式报没查成。没有就不带这个字段。
    */
   unsettled?: { name: string; conclusion: string }[];
+  /**
+   * 必过名单里这次没出现的（readCi 的 missing）。有就不带 pending：没出现不是还在跑。
+   * 挂合并点名这些检查、写没查成，不进入有界等待。没有就不带这个字段。
+   */
+  missing?: { name: string }[];
 }
 
 type Verdict = { name: string; state: string; conclusion?: string | undefined };
@@ -48,9 +54,33 @@ function splitPending(checks: readonly Verdict[]): {
   return { running, unsettled };
 }
 
+/** 必过名单里 state 是 missing 的。空名字跳过（名单本身都有名字）。 */
+function missingNames(checks: readonly Verdict[]): { name: string }[] {
+  const names: { name: string }[] = [];
+  for (const item of checks) {
+    if (item.state !== 'missing') continue;
+    const name = item.name.trim();
+    if (name.length === 0 || names.some((entry) => entry.name === name)) continue;
+    names.push({ name });
+  }
+  return names;
+}
+
+/**
+ * 还在跑、没出结论、没出现分开交。有没出现或没出结论的，就不带 pending：
+ * 旁边一条 in_progress 不能把「没出现」装成还能等。
+ */
 function pendingRead(failed: MergeWaitCheckRead['failed'], checks: readonly Verdict[]): MergeWaitCheckRead {
   const { running, unsettled } = splitPending(checks);
-  if (unsettled.length > 0) return { overall: 'pending', failed, unsettled };
+  const missing = missingNames(checks);
+  if (missing.length > 0 || unsettled.length > 0) {
+    return {
+      overall: 'pending',
+      failed,
+      ...(unsettled.length > 0 ? { unsettled } : {}),
+      ...(missing.length > 0 ? { missing } : {}),
+    };
+  }
   return running.length > 0
     ? { overall: 'pending', failed, pending: running }
     : { overall: 'pending', failed };
@@ -93,6 +123,9 @@ export async function readMergeWaitChecks(
   }
   if (failed.length > 0) return { overall: 'red', failed };
   if (evaluation.overall === 'green') return { overall: 'green', failed: [] };
-  if (evaluation.overall === 'none') return { overall: 'none', failed: [] };
+  if (evaluation.overall === 'none') {
+    const missing = missingNames(evaluation.checks);
+    return missing.length > 0 ? { overall: 'none', failed: [], missing } : { overall: 'none', failed: [] };
+  }
   return pendingRead([], evaluation.checks);
 }

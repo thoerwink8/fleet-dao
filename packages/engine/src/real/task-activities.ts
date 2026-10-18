@@ -7,7 +7,8 @@
 // - 合并这一步 GitHub 说了算：自动合并只由 armAutoMerge 在验收通过之后挂（每小时对账的兜底不碰任务分支，jobs/auto-merge-check.ts）。
 //   挂的时候 GitHub 说「已经是 clean」（所有条件都满足了，没什么可等的）就直接合（github 包的 mergePr：核头、核不落后主线、
 //   核 CI 绿）。直接合因这个头上还有检查在跑被拒：现读检查，只有 queued / in_progress 才交 checksPending，工作流有界等待后
-//   再走这一入口。真红交 checksRed。读不成、没出现、对不上，why 里写明没查成，不靠「ci_not_green / 没跑完」这句原文当还在跑。
+//   再走这一入口。真红交 checksRed。必过名单里有一条没出现，哪怕旁边还有在跑的，也不交 checksPending。读不成、没出现、对不上，
+//   why 里写明没查成并点名没出现的检查，不靠「ci_not_green / 没跑完」这句原文当还在跑。
 //   别的拒绝原样说明原因交工作流停下报人。
 // - 合并记录：这个仓的对账（github 包 auditMergedPrs）要求引擎开的 PR 账上有合并记录。自动合并是 GitHub 自己合的，没有记录，
 //   所以等到合并之后再调一次 mergePr——它对「已经合了」的 PR 只补记录、删分支，不再合一次。补不成只记日志，不拦任务往下走。
@@ -61,10 +62,15 @@ export const MERGE_POLL_EVERY_MS = 20_000;
 export interface MergeWaitChecks {
   overall: 'green' | 'red' | 'pending' | 'none';
   failed: { name: string; detail?: string }[];
-  /** 还在跑（queued / in_progress）。老调用方不读。 */
+  /** 还在跑（queued / in_progress）。有 missing 或 unsettled 时不带。老调用方不读。 */
   pending?: { name: string }[];
   /** 记成没出结论、却不是在跑的（stale、认不出的结论）：有就不当成可等，显式报没查成。老调用方不读。 */
   unsettled?: { name: string; conclusion: string }[];
+  /**
+   * 必过名单里这次没出现的。有就不当成可等：哪怕 pending 里还有名字，也不进有界等待，why 里点名没出现的。
+   * 老调用方不读。
+   */
+  missing?: { name: string }[];
 }
 
 export interface TaskActivitiesDeps extends ReviewAuditDeps {
@@ -123,6 +129,17 @@ function isCleanStatus(error: unknown): boolean {
 /** 直接合被拒时交回工作流的那句。reason 用机器认的枚举，不从 detail 里再猜。 */
 function directRefusal(reason: string, detail: string): string {
   return `GitHub 说 PR 已经满足合并条件，直接合被拒（${reason}）：${detail}`;
+}
+
+/** 必过名单里这次没出现的检查名。空名字不算；有名字就不进有界等待。 */
+function absentNames(checks: MergeWaitChecks): string[] {
+  const names: string[] = [];
+  for (const item of checks.missing ?? []) {
+    const name = item.name.trim();
+    if (name.length === 0 || names.includes(name)) continue;
+    names.push(name);
+  }
+  return names;
 }
 
 /** 还在跑的检查名。没给 pending、名字是空的，都不算。 */
@@ -420,6 +437,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       };
 
       // 不看拒绝原文里的「没跑完 / 红了」。还在跑只认 readChecks 交回的 pending 名字，并且绑这个 expectedHead。
+      // 必过检查没出现（missing）或没出结论（unsettled）时，旁边的 pending 名字也不算可等。
       const classifyCiNotGreen = async (detail: string, recheckCi: boolean): Promise<ArmAutoMergeResult> => {
         const why = directRefusal('ci_not_green', detail);
         const readChecks = deps.readChecks;
@@ -443,18 +461,24 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
             checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
           };
         }
-        // 跑完了结论是 stale、认不出：不是还在跑，等下去不会自己变，不进有界等待。
+        // 没出现、或跑完了却是 stale / 认不出：都不是还在跑。旁边的 pending 名字也不进有界等待。
+        const missing = absentNames(checks);
         const unsettled = checks.unsettled ?? [];
-        if (unsettled.length > 0) {
-          const which = unsettled.map((item) => `${item.name}（${item.conclusion}）`).join('、');
+        if (missing.length > 0 || unsettled.length > 0) {
+          const parts: string[] = [];
+          if (missing.length > 0) parts.push(`${missing.join('、')} 没出现`);
+          if (unsettled.length > 0) {
+            const which = unsettled.map((item) => `${item.name}（${item.conclusion}）`).join('、');
+            parts.push(`${which} 没出结论、也不是在跑`);
+          }
           return {
             armed: false,
             merged: false,
-            why: `${why}；必过检查没查成：${which} 没出结论、也不是在跑`,
+            why: `${why}；必过检查没查成：${parts.join('；')}`,
           };
         }
         const names = inProgressNames(checks);
-        // overall 是 pending 但名字空着（全是没出现、或没分开报）不当成可等。
+        // overall 是 pending 但名字空着（全是没出现、或没分开报）不当成可等。没出现的名字在上面已经单独报过。
         if (checks.overall === 'pending' && names.length > 0) {
           return {
             armed: false,

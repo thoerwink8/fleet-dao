@@ -812,6 +812,59 @@ describe('挂自动合并', () => {
     expect(got.why).toContain('check（unknown）');
   });
 
+  it('【故意造出的失败】一个检查在跑、另一个必过检查没出现：写明没查成，不进入等待', async () => {
+    const { f, acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [],
+      pending: [{ name: 'merge-gate' }],
+      missing: [{ name: 'check' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('check 没出现');
+    expect(got.why).not.toContain('等检查');
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】没出现和没出结论一起给：都写进没查成，不拿在跑的去等', async () => {
+    const { acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [],
+      pending: [{ name: 'merge-gate' }],
+      missing: [{ name: 'lint' }],
+      unsettled: [{ name: 'check', conclusion: 'stale' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('lint 没出现');
+    expect(got.why).toContain('check（stale）');
+  });
+
+  it('【故意造出的失败】真红和没出现一起给：按真红，不写成没查成', async () => {
+    const { acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [{ name: 'check', detail: '失败' }],
+      pending: [{ name: 'merge-gate' }],
+      missing: [{ name: 'lint' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toMatchObject({ failedChecks: ['check'], head: HEAD, detail: 'check：失败' });
+    expect(got.why).not.toContain('没出现');
+  });
+
   it('【故意造出的失败】检查一个都没出现：写明没查成，不当成还在跑', async () => {
     const { acts } = cleanCiRefused('没出现：merge-gate', async () => ({ overall: 'none', failed: [] }));
     const got = await acts.armAutoMerge(
