@@ -716,6 +716,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
                 },
                 {
                   oneShot: oneShotFor(attachTicket),
+                  log,
                   ...(verifierDeps.timeoutMinutes !== undefined
                     ? { timeoutMinutes: verifierDeps.timeoutMinutes }
                     : {}),
@@ -728,6 +729,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
               input.roundSeq === undefined ? verifierInput : { ...verifierInput, roundSeq: input.roundSeq },
               {
                 ...verifierDeps,
+                log,
                 ...(sessionIo ? { detach: true } : {}),
                 released,
               },

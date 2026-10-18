@@ -220,6 +220,23 @@ function fullVerdict(res: {
   };
 }
 
+/** 证据没记成不改已跑出的裁决，也不因此再花一次模型；读取端仍只能认真实落库的证据。 */
+async function writeVerdictEvidence(
+  kind: 'raw' | 'aggregate',
+  write: () => Promise<void> | undefined,
+  fields: Record<string, unknown>,
+  log: VerifierInvokeDeps['log'],
+): Promise<void> {
+  try {
+    await write();
+  } catch (error) {
+    (log ?? console.warn)(
+      kind === 'raw' ? '验收原始结论没写进库（裁决照常交回）' : '验收聚合结论没写进库（裁决照常交回）',
+      { ...fields, evidenceStatus: 'unavailable', error: errMessage(error) },
+    );
+  }
+}
+
 /**
  * 拉取 diff 的接口：**注入**。本模块不调 git / gh / GitHub——fetchDiff 的失败明确进 problems，
  * 不许拿空 diff 当「没改也就没挡的」。
@@ -341,6 +358,8 @@ export interface PickedVerifier {
 
 export interface VerifierInvokeDeps {
   oneShot: OneShotDeps;
+  /** 写证据失败的诊断；不改变真实裁决。生产接任务日志，未装配时仍输出警告。 */
+  log?: (message: string, fields?: Record<string, unknown>) => void;
   fetchDiff: FetchDiff;
   fetchSpec: FetchSpec;
   chooseModelForFamily: ChooseModelForFamily;
@@ -924,7 +943,7 @@ export interface VerifierAttachInput {
  */
 export async function attachVerifier(
   input: VerifierAttachInput,
-  deps: Pick<VerifierInvokeDeps, 'oneShot' | 'timeoutMinutes' | 'released'>,
+  deps: Pick<VerifierInvokeDeps, 'oneShot' | 'timeoutMinutes' | 'released' | 'log'>,
 ): Promise<VerifierInvokeOutput> {
   const { attach, round } = input;
   const picked: PickedVerifier = {
@@ -978,17 +997,37 @@ export async function attachVerifier(
     problems: judged.problems,
     outOfScope: judged.outOfScope,
   });
-  await deps.oneShot.runs.noteVerdict?.(judged.session.runId, verdict);
-  if (input.headSha !== undefined)
-    await deps.oneShot.runs.noteVerifyAggregate?.({
-      taskId: input.taskId,
-      ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),
-      prNumber: input.prNumber,
-      headSha: input.headSha,
-      round,
-      sourceRunIds: [judged.session.runId],
-      verdict,
-    });
+  const evidenceFields = {
+    taskId: input.taskId,
+    workflowId: input.workflowId,
+    prNumber: input.prNumber,
+    headSha: input.headSha,
+    round,
+    runId: judged.session.runId,
+  };
+  await writeVerdictEvidence(
+    'raw',
+    () => deps.oneShot.runs.noteVerdict?.(judged.session.runId, verdict),
+    evidenceFields,
+    deps.log,
+  );
+  const headSha = input.headSha;
+  if (headSha !== undefined)
+    await writeVerdictEvidence(
+      'aggregate',
+      () =>
+        deps.oneShot.runs.noteVerifyAggregate?.({
+          taskId: input.taskId,
+          ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),
+          prNumber: input.prNumber,
+          headSha,
+          round,
+          sourceRunIds: [judged.session.runId],
+          verdict,
+        }),
+      { ...evidenceFields, sourceRunIds: [judged.session.runId] },
+      deps.log,
+    );
   return {
     pass: judged.passed,
     problems: judged.problems,
@@ -1015,16 +1054,31 @@ export async function invokeVerifier(
   deps: VerifierInvokeDeps,
 ): Promise<VerifierInvokeOutput> {
   const out = await invokeVerifierInner(input, deps);
-  if (input.headSha !== undefined && out.sourceRunIds?.length) {
-    await deps.oneShot.runs.noteVerifyAggregate?.({
-      taskId: input.taskId,
-      ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),
-      prNumber: input.prNumber,
-      headSha: input.headSha,
-      round: input.round,
-      sourceRunIds: out.sourceRunIds,
-      verdict: fullVerdict(out),
-    });
+  const headSha = input.headSha;
+  const sourceRunIds = out.sourceRunIds;
+  if (headSha !== undefined && sourceRunIds?.length) {
+    await writeVerdictEvidence(
+      'aggregate',
+      () =>
+        deps.oneShot.runs.noteVerifyAggregate?.({
+          taskId: input.taskId,
+          ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),
+          prNumber: input.prNumber,
+          headSha,
+          round: input.round,
+          sourceRunIds,
+          verdict: fullVerdict(out),
+        }),
+      {
+        taskId: input.taskId,
+        workflowId: input.workflowId,
+        prNumber: input.prNumber,
+        headSha: input.headSha,
+        round: input.round,
+        sourceRunIds: out.sourceRunIds,
+      },
+      deps.log,
+    );
   }
   return out;
 }
@@ -1226,9 +1280,22 @@ async function invokeVerifierInner(
         return { kind: 'none' };
       }
       // 先按真实笔保存该家完整原始结论，再做格式重试、二轮过滤和多家聚合。
-      await (prepared?.oneShot ?? deps.oneShot).runs.noteVerdict?.(
-        judged.session.runId,
-        fullVerdict({ pass: judged.passed, problems: judged.problems, outOfScope: judged.outOfScope }),
+      await writeVerdictEvidence(
+        'raw',
+        () =>
+          (prepared?.oneShot ?? deps.oneShot).runs.noteVerdict?.(
+            judged.session.runId,
+            fullVerdict({ pass: judged.passed, problems: judged.problems, outOfScope: judged.outOfScope }),
+          ),
+        {
+          taskId: parsed.taskId,
+          workflowId: parsed.workflowId,
+          prNumber: parsed.prNumber,
+          headSha: parsed.headSha,
+          round: parsed.round,
+          runId: judged.session.runId,
+        },
+        deps.log,
       );
       let problems = judged.problems;
       let suggestions = judged.suggestions;

@@ -53,7 +53,13 @@ beforeEach(async () => {
 });
 const fail = (problem: string) => `## 问题\n- 没做到验收条：${problem}\n\nverdict: fail`;
 const pass = '## 问题\n\nverdict: pass';
-async function run(failed: boolean, opts: Partial<VerifierInvokeInput> = {}, problem = '第 1 条未实现') {
+async function run(
+  failed: boolean,
+  opts: Partial<VerifierInvokeInput> = {},
+  problem = '第 1 条未实现',
+  evidence?: { fail: 'raw' | 'aggregate'; logs: { message: string; fields?: Record<string, unknown> }[] },
+) {
+  const writer = realRuns({ db: t.db });
   return invokeVerifier(
     {
       taskId,
@@ -72,7 +78,23 @@ async function run(failed: boolean, opts: Partial<VerifierInvokeInput> = {}, pro
     },
     {
       oneShot: {
-        runs: realRuns({ db: t.db }),
+        runs: {
+          ...writer,
+          ...(evidence?.fail === 'raw'
+            ? {
+                noteVerdict: async () => {
+                  throw new Error('原始写入故障');
+                },
+              }
+            : {}),
+          ...(evidence?.fail === 'aggregate'
+            ? {
+                noteVerifyAggregate: async () => {
+                  throw new Error('聚合写入故障');
+                },
+              }
+            : {}),
+        },
         tmpDir: dir,
         buildCommand: (input) => ({ argv: ['fake', '--model', input.modelId], cwd: input.cwd }),
         spawn: async (cmd) => ({
@@ -87,11 +109,58 @@ async function run(failed: boolean, opts: Partial<VerifierInvokeInput> = {}, pro
       chooseModelForFamily: async (family) =>
         family === 'gpt' || family === 'grok' ? { modelId: `${family}-m` } : undefined,
       cwd: dir,
+      log: (message, fields) => evidence?.logs.push({ message, ...(fields ? { fields } : {}) }),
     },
   );
 }
 
 describe('验收证据归属与聚合', () => {
+  it.each([
+    { fail: 'raw' as const, passed: true },
+    { fail: 'raw' as const, passed: false },
+    { fail: 'aggregate' as const, passed: true },
+    { fail: 'aggregate' as const, passed: false },
+  ])(
+    '写失败=$fail · 真实pass=$passed：裁决不变，真库缺失证据仍未知且诊断保留真实来源',
+    async ({ fail, passed }) => {
+      const logs: { message: string; fields?: Record<string, unknown> }[] = [];
+      const out = await run(!passed, {}, '第 1 条未实现', { fail, logs });
+      expect(out.pass).toBe(passed);
+      expect(out.problems).toEqual(passed ? [] : ['gpt：没做到验收条：第 1 条未实现']);
+      expect(out.sourceRunIds).toHaveLength(2);
+      expect(out.session).toBeUndefined();
+      const raw = await Promise.all(out.sourceRunIds!.map((id) => getRun(t.db, id)));
+      expect(raw.every((row) => row?.outcome === 'done')).toBe(true);
+      // 真 writer 从未拿到伪造成功，故缺原始结论仍是 null；聚合真查询也保持无记录。
+      if (fail === 'raw') expect(raw.map((row) => row?.verdict)).toEqual([null, null]);
+      else {
+        expect(raw.find((row) => row?.model === 'gpt-m')?.verdict?.pass).toBe(passed);
+        expect(raw.find((row) => row?.model === 'grok-m')?.verdict?.pass).toBe(true);
+      }
+      expect(await listVerifyAggregates(t.db, taskId)).toEqual([]);
+      expect(logs).toContainEqual({
+        message: '验收聚合结论没写进库（裁决照常交回）',
+        fields: expect.objectContaining({
+          evidenceStatus: 'unavailable',
+          sourceRunIds: out.sourceRunIds,
+          taskId,
+          prNumber: 7,
+          headSha: 'a'.repeat(40),
+          round: 1,
+          error: expect.any(String),
+        }),
+      });
+      if (fail === 'raw') {
+        expect(logs.filter((entry) => entry.message.includes('原始'))).toHaveLength(2);
+        for (const runId of out.sourceRunIds!)
+          expect(logs).toContainEqual({
+            message: '验收原始结论没写进库（裁决照常交回）',
+            fields: expect.objectContaining({ runId, error: '原始写入故障', evidenceStatus: 'unavailable' }),
+          });
+      }
+    },
+  );
+
   it.each([true, false])(
     'GPT fail=%s：两家各记原始 verdict，聚合保存精确头和真实贡献来源',
     async (failed) => {
