@@ -87,18 +87,21 @@ export function registerCiPolicyRoutes(
     const body = await readJson(c, UpdateRepoCiPolicyRequest);
     const repo = await store.getRepo(repoId);
     if (!repo) throw new ApiError(404, 'repo_not_found', '没有这个项目');
-    const change = await store.setCiPolicy(
-      { repoId: repo.id, mode: body.mode },
-      {
-        actor: actorOf(c),
-        action: CI_POLICY_SET,
-        target: `repo:${repo.id}`,
-        reason: body.reason ?? `驾驶舱上把 CI 模式改成${MODE_WORD[body.mode]}`,
-        via: c.get('via'),
-        ok: true,
-      },
+    if (!deps.ciPolicyBridge)
+      throw new ApiError(503, 'policy_not_connected', '真实策略桥未装配，未改 CI 模式');
+    const { change, sync } = await deps.ciPolicyBridge.set(repo, body.mode, () =>
+      store.setCiPolicy(
+        { repoId: repo.id, mode: body.mode },
+        {
+          actor: actorOf(c),
+          action: CI_POLICY_SET,
+          target: `repo:${repo.id}`,
+          reason: body.reason ?? `驾驶舱上把 CI 模式改成${MODE_WORD[body.mode]}`,
+          via: c.get('via'),
+          ok: true,
+        },
+      ),
     );
-    if (change === 'not_found') throw new ApiError(404, 'repo_not_found', '没有这个项目');
     const names = await namesOf(store);
     return reply(c, UpdateRepoCiPolicyResponse, {
       repoId: repo.id,
@@ -107,6 +110,7 @@ export function registerCiPolicyRoutes(
       mode: change.ciPolicy,
       recent: await recentSwitches(store, repo.id, names),
       changed: change.changed,
+      synchronization: sync,
     });
   });
 }

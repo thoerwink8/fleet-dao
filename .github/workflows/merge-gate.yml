@@ -1,4 +1,5 @@
 name: merge-gate
+# fleet-ci-policy-bridge: v1
 # 合并闸（#74；#444 起只留四样；#555-2 起加一条冷调用；#654 起草稿、冲突交给 GitHub 自己拦；#1114 / 决定 0023 起去掉先审后合；
 # 决定 0093 起判改标准）: 在 PR 当前头上写提交状态 merge-gate，「按我们的规矩能不能合」只看它一个——碰了改标准路径
 # （packages/conventions/standard-paths.json）的 PR 正文里要有创始人原话那一行；引擎任务 PR 当前头上有通过的 cold-verify
@@ -43,6 +44,9 @@ on:
       - packages/conventions/src/closing-issues.ts
       - packages/conventions/src/flow-branch.ts
       - packages/conventions/src/gh-api.ts
+      - packages/conventions/src/ci-policy-bridge.ts
+      - packages/shared/src/ci-policy-bridge.ts
+      - packages/conventions/github-apps.json
       - packages/conventions/src/merge-gate.ts
       - packages/conventions/src/merge-gates.ts
       - packages/conventions/src/pr-columns.ts
@@ -65,7 +69,7 @@ permissions:
   statuses: write
 jobs:
   merge-gate:
-    if: github.event_name != 'status' || github.event.context == 'cold-verify'
+    if: github.event_name != 'status' || github.event.context == 'cold-verify' || startsWith(github.event.context, 'fleet-ci-policy-source/pr/')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

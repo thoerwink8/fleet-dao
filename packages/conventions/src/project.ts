@@ -1,6 +1,6 @@
 // pnpm project add|check <owner/仓>（#2749，design 15.7「导入项目 + 标准体检与补齐」）：加新项目一条命令做到底。
 //
-// add 七步，每步「先查、再补、再核」，可重复跑（已经做到的步只查不写）：
+// add 八步，每步「先查、再补、再核」，可重复跑（已经做到的步只查不写）：
 //   1 登记仓：经 ssh 调法国的 fleet-api project register（带 GitHub 仓号，认仓认号）
 //   2 装两个 App：读装没装经 ssh 调 fleet-api project installations（#2977：两个机器人的安装令牌只要 metadata:read，
 //     和驾驶舱导入列表同一份归并；不读本机 gh 的 user/installations，本机身份缺权限也不挡）；没查成就是没查成（退出码 2），
@@ -10,13 +10,21 @@
 //   3 同步流程标签：照标准仓（本仓）GitHub 上的标签，缺的建、颜色说明不一样的改，别的标签不动
 //   4 仓档案：探测语言、工具链、测试命令、模块根，只补档案里没写的项，经 fleet-api project set-profile 写
 //   5 补齐 PR：缺 AGENTS.md、四节单模板、引用本仓可复用合并闸和关单工作流的，开一个 PR 补上（开过还开着就不再开）
-//   6 跑 project check：全绿才打开「让 AI 接活」（fleet-api dispatch on）；有一项不过就停，接活不开
-//   7 开一张冒烟单（四节齐，标题固定，开过就不再开）。有没有这张单只信直接列全的 issues 列表，
+//   6 策略读桥：真实 HTTP 现读 DB、核当前头 source；add 经受保护管理命令补缺失 source，check 只读
+//   7 跑 project check：全绿才打开「让 AI 接活」（fleet-api dispatch on）；有一项不过就停，接活不开
+//   8 开一张冒烟单（四节齐，标题固定，开过就不再开）。有没有这张单只信直接列全的 issues 列表，
 //     和开单回执单号的直接读取；搜索索引暂时看不到不算没有，也不把刚开成的单判成失败（#2995）
-// check 只读：1～5 各查一遍，全绿退出码 0，有不过的 1，没查成的 2（别的步过了也不抵）。
+// check 只读：1～6 各查一遍，全绿退出码 0，有不过的 1，没查成的 2（别的步过了也不抵）。
 //
 // 碰 GitHub 只经本机 gh（令牌不读出来；App 装没装例外，经法国的 fleet-api 读），碰法国只经 ssh 调 fleet-api；这两样都收在 ProjectWorld 里，测试换成假的。
-// 本包是零安装区（没装依赖也要能跑），不引别的包：档案形状的校验在法国那头（fleet-api project set-profile），这里读它回的 gaps。
+// 零安装入口只相对引用纯协议文件，不引有外部依赖的模块；档案校验在法国，读取它回的 gaps。
+
+import {
+  type PolicyBridgeDescriptor,
+  parsePolicyUrl,
+  policyId,
+  policyRecord,
+} from '../../shared/src/ci-policy-bridge.ts';
 
 /** 标签：名字、颜色（不带 #）、说明。 */
 export interface RepoLabel {
@@ -90,6 +98,12 @@ export interface ProjectWorld {
   createIssue(slug: string, input: { title: string; body: string; labels: string[] }): Promise<number>;
   /** 在法国跑一条 fleet-api 子命令（stdin 给了就从标准输入喂进去）。 */
   fleetApi(args: string[], stdin?: string): Promise<FleetApiResult>;
+  /** 现读真实 HTTPS 桥和当前 open heads 的 source，仅查不写。 */
+  policyBridge(
+    slug: string,
+    githubId: number,
+    descriptor: PolicyBridgeDescriptor,
+  ): Promise<{ ciPolicy: 'force' | 'off'; heads: number; missing: number }>;
 }
 
 export interface AppInstallConfig {
@@ -143,6 +157,7 @@ export function parseProjectArgv(argv: readonly string[]): { action: 'add' | 'ch
 
 export function mergeGateCaller(standardRepo: string): string {
   return `name: merge-gate
+# fleet-ci-policy-bridge: v1
 # 合并闸：引用 ${standardRepo} 的可复用工作流（pnpm project add 放的），判法在那边，这里只写触发和权限。
 on:
   pull_request_target:
@@ -306,6 +321,9 @@ export async function detectProfile(
 // —— 法国那头 ——
 
 interface ShownRepo {
+  repo: string;
+  ciPolicy: 'force' | 'off';
+  ciPolicyBridge: PolicyBridgeDescriptor | null;
   githubId: number | null;
   testCommand: string;
   autoDispatchSince: string | null;
@@ -319,9 +337,23 @@ async function show(ctx: ProjectContext, slug: string): Promise<ShownRepo | null
   const r = await ctx.world.fleetApi(['project', 'show', slug]);
   if (r.code === 0) {
     try {
-      return JSON.parse(r.stdout) as ShownRepo;
+      const raw: unknown = JSON.parse(r.stdout);
+      if (
+        !policyRecord(raw) ||
+        typeof raw.repo !== 'string' ||
+        raw.repo.toLowerCase() !== slug.toLowerCase() ||
+        !(raw.githubId === null || policyId(raw.githubId)) ||
+        (raw.ciPolicy !== 'force' && raw.ciPolicy !== 'off') ||
+        typeof raw.testCommand !== 'string' ||
+        !policyRecord(raw.profile) ||
+        !Array.isArray(raw.gaps) ||
+        raw.gaps.some((x) => typeof x !== 'string') ||
+        !(raw.autoDispatchSince === null || typeof raw.autoDispatchSince === 'string')
+      )
+        throw new Unchecked('project show 的仓身份、ciPolicy 或字段不完整');
+      return raw as unknown as ShownRepo;
     } catch {
-      throw new Unchecked(`fleet-api project show 回的不是 JSON：${r.stdout.slice(0, 200)}`);
+      throw new Unchecked('fleet-api project show 回的 JSON/仓身份/ciPolicy 不完整，未查成');
     }
   }
   if (r.code === 1 && r.stderr.includes('库里没有仓')) return null;
@@ -341,7 +373,7 @@ async function fleetApiOrThrow(ctx: ProjectContext, args: string[], stdin?: stri
   return r.stdout;
 }
 
-// —— 七步里的五个「查」（check 只跑这五个） ——
+// —— 八步里的六个「查」（check 只跑这六个） ——
 
 async function probeRegister(ctx: ProjectContext, slug: string, facts: RepoFacts): Promise<Probe> {
   const shown = await show(ctx, slug);
@@ -520,7 +552,12 @@ function fillFiles(
       text: issueTemplate(),
       want: (t) => ISSUE_SECTIONS.every((s) => t.includes(`## ${s}`)),
     },
-    { path: REQUIRED_FILES.mergeGate, text: mergeGateCaller(ctx.standardRepo), want: uses('merge-gate.yml') },
+    {
+      path: REQUIRED_FILES.mergeGate,
+      text: mergeGateCaller(ctx.standardRepo),
+      // 只认我们生成的固定 caller，不用 includes 或自制 YAML 扫描猜实际输入语义。
+      want: (t) => t.replaceAll('\r\n', '\n').trim() === mergeGateCaller(ctx.standardRepo).trim(),
+    },
     {
       path: REQUIRED_FILES.closeOnMerge,
       text: closeOnMergeCaller(ctx.standardRepo),
@@ -561,10 +598,52 @@ async function probeFill(
   };
 }
 
+async function probePolicyBridge(ctx: ProjectContext, slug: string, facts: RepoFacts): Promise<Probe> {
+  const shown = await show(ctx, slug);
+  if (!shown || shown.githubId !== facts.id) throw new Unchecked('策略桥的 DB/GitHub 仓身份未对齐');
+  const descriptor = shown.ciPolicyBridge;
+  if (
+    !policyRecord(descriptor) ||
+    descriptor.version !== 1 ||
+    typeof descriptor.public !== 'boolean' ||
+    typeof descriptor.publisher !== 'boolean'
+  )
+    throw new Unchecked('真实策略桥 descriptor 未装配或版本不支持');
+  if (!descriptor.publisher) return { ok: false, why: '真实 source publisher 未装配' };
+  if (!descriptor.public && descriptor.endpoint !== null)
+    throw new Unchecked('私有仓 descriptor 不能公开策略 URL');
+  if (!descriptor.public)
+    return shown.ciPolicy === 'force'
+      ? { ok: true, detail: '私有仓保持 force；未公开策略，off 暂不支持' }
+      : { ok: false, why: '私有仓 off 尚无可信认证读桥，不支持完整准入' };
+  try {
+    parsePolicyUrl(descriptor.endpoint, facts.id);
+  } catch {
+    throw new Unchecked('策略桥 descriptor URL 不符合固定 HTTPS 协议');
+  }
+  const workflow = await ctx.world.fileText(ctx.standardRepo, 'main', '.github/workflows/merge-gate.yml');
+  if (!workflow?.includes('# fleet-ci-policy-bridge: v1'))
+    return { ok: false, why: '标准 reusable 合并闸尚不支持真实策略读桥协议' };
+  const read = await ctx.world.policyBridge(slug, facts.id, descriptor);
+  if (read.ciPolicy !== shown.ciPolicy) return { ok: false, why: '真实 HTTPS 桥与 DB 当前 ciPolicy 不一致' };
+  if (read.missing > 0)
+    return {
+      ok: false,
+      why: `${read.missing} 个当前头缺可信 source`,
+      fix: async () => {
+        await fleetApiOrThrow(ctx, ['project', 'refresh-policy-source', slug]);
+      },
+    };
+  return {
+    ok: true,
+    detail: `HTTPS 真实 DB ${read.ciPolicy} 已核；${read.heads === 0 ? '无 open PR，尚未验证真实事件全链' : `${read.heads} 个当前头 source 已核，未冒称最终 gate 已通过`}`,
+  };
+}
+
 // —— 跑法 ——
 
 async function runStep(
-  ctx: ProjectContext,
+  _ctx: ProjectContext,
   step: string,
   probe: () => Promise<Probe>,
   mode: 'check' | 'add',
@@ -651,10 +730,11 @@ async function steps(
   else await run('4 仓档案', () => probeProfile(ctx, slug, f));
   const testCommand = await testCommandOf(ctx, slug, f).catch(() => 'pnpm check');
   await run('5 补齐 PR', () => probeFill(ctx, slug, f, testCommand));
+  await run('6 策略读桥', () => probePolicyBridge(ctx, slug, f));
   return out;
 }
 
-/** pnpm project check：只读，五项各查一遍。 */
+/** pnpm project check：只读，六项各查一遍。 */
 export async function projectCheck(
   ctx: ProjectContext,
   slug: string,
@@ -708,13 +788,13 @@ async function readSmokeFact(
 }
 
 /**
- * 第七步不走 runStep 的「补完用同一条探测再查」。
+ * 第八步不走 runStep 的「补完用同一条探测再查」。
  * 那条若是按标题搜索，索引还没跟上会把刚开成的单说成还没开，重跑还可能再开一张（#2995）。
  * 有没有：直接列单，读全了才算没有。刚开的：只信 createIssue 回的单号，再按这个号直接读。
  * 空的搜索不算失败，也不算成功；列单或直读失败不再补开。
  */
 async function smokeIssueStep(ctx: ProjectContext, slug: string): Promise<StepResult> {
-  const step = '7 冒烟单';
+  const step = '8 冒烟单';
   let listed: IssueFact | null;
   try {
     listed = await ctx.world.listIssueByTitle(slug, SMOKE_TITLE);
@@ -752,7 +832,7 @@ async function smokeIssueStep(ctx: ProjectContext, slug: string): Promise<StepRe
   return { step, status: 'fixed', detail: `还没开 → 补好了：#${got.fact.number}（${got.fact.state}）` };
 }
 
-/** pnpm project add：七步，每步先查、再补、再核；可重复跑。 */
+/** pnpm project add：八步，每步先查、再补、再核；可重复跑。 */
 export async function projectAdd(
   ctx: ProjectContext,
   slug: string,
@@ -764,12 +844,12 @@ export async function projectAdd(
   }
   const results = await steps(ctx, slug, f, 'add');
 
-  // 6：重新跑一遍只读的 check，全绿才打开接活
-  ctx.out('—— 6 跑 project check ——');
+  // 7：重新跑一遍只读的 check，全绿才打开接活
+  ctx.out('—— 7 跑 project check ——');
   const check = await projectCheck(ctx, slug);
   if (check.code !== 0) {
     const r: StepResult = {
-      step: '6 打开让 AI 接活',
+      step: '7 打开让 AI 接活',
       status: check.code === 2 ? 'unchecked' : 'red',
       detail: `check 没全绿，接活不开：${check.results
         .filter((x) => x.status !== 'ok')
@@ -781,7 +861,7 @@ export async function projectAdd(
   }
   const dispatch = await runStep(
     ctx,
-    '6 打开让 AI 接活',
+    '7 打开让 AI 接活',
     async () => {
       const shown = await show(ctx, slug);
       if (shown?.autoDispatchSince) return { ok: true, detail: `开着，自 ${shown.autoDispatchSince} 起` };

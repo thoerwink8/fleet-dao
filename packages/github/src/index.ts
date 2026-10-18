@@ -152,6 +152,7 @@ export {
   updateIssueProgress,
 } from './issues.ts';
 export { type Ledger, type LockerOptions, lockerOver, memoryLedger, type PrMirror } from './ledger.ts';
+export { createPolicyGitHub, type PolicyGitHub } from './policy-source.ts';
 export {
   humanPart,
   type IssueProgress,

@@ -4,6 +4,8 @@
 export interface GhApi {
   /** GET 仓内接口（path 从 /repos/{owner}/{repo} 之后算，如 /pulls/3）；回 JSON。 */
   get(path: string): Promise<unknown>;
+  /** 可信装配选择的 GitHub 全局只读路径（Bot 数字身份）。 */
+  globalGet?(path: string): Promise<unknown>;
   /** 同 get，但 404 回 null（问「这个文件在不在」用）。 */
   getOrNull(path: string): Promise<unknown>;
   /** POST 仓内接口，body 发 JSON。 */
@@ -23,7 +25,8 @@ export function ghApi(env: Record<string, string | undefined>, fetchImpl: typeof
     if (!token) throw new Error('没有 GITHUB_TOKEN');
     if (!repo || !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error('没有 GITHUB_REPOSITORY（owner/名字）');
     const api = (env.GITHUB_API_URL || 'https://api.github.com').replace(/\/+$/, '');
-    return await fetchImpl(`${api}/repos/${repo}${path}`, {
+    const target = path.startsWith('/users/') ? `${api}${path}` : `${api}/repos/${repo}${path}`;
+    return await fetchImpl(target, {
       method,
       headers: {
         authorization: `Bearer ${token}`,
@@ -39,6 +42,12 @@ export function ghApi(env: Record<string, string | undefined>, fetchImpl: typeof
   const failed = (res: Response, method: string, path: string) =>
     new Error(`GitHub 回了 ${res.status}（${method} ${path.split('?')[0]}）`);
   return {
+    async globalGet(path) {
+      if (!/^\/users\/[A-Za-z0-9%_-]+$/.test(path)) throw new Error('不支持的 GitHub 全局读口');
+      const res = await call('GET', path);
+      if (!res.ok) throw failed(res, 'GET', path);
+      return await res.json();
+    },
     async get(path) {
       const res = await call('GET', path);
       if (!res.ok) throw failed(res, 'GET', path);

@@ -52,6 +52,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import type { AlertWorkPort } from '@fleet-dao/store';
 import { ALERT_USAGE, AlertCliError, runAlert } from './alert-cli.ts';
 import { ATTENTION_USAGE, AttentionCliError, attentionJson, parseAttentionArgs } from './attention-cli.ts';
+import type { CiPolicyBridge } from './ci-policy-bridge.ts';
 import { type Config, loadConfig } from './config.ts';
 import type { InstallationReposPort } from './deps.ts';
 import {
@@ -884,6 +885,10 @@ export interface CliDeps {
   openProject?: (url: string) => Promise<{ port: ProjectPort; close(): Promise<void> }>;
   /** 两个机器人的安装范围（project installations 用，只列）。不给就是真的：读机器人凭据，和后端导入列表同一个 listInstallationRepositories。 */
   openInstallationRepos?: (url: string) => Promise<{ source: InstallationReposPort; close(): Promise<void> }>;
+  openPolicyBridge?: (
+    url: string,
+    env: CliEnv,
+  ) => Promise<{ bridge: CiPolicyBridge; close(): Promise<void> }>;
   /** 读一个文本文件（project set-profile --file 用）。不给就是真的 fs。 */
   readFile?: (path: string) => Promise<string>;
   /** 开急修单（emergency-issue 命令用，#2728）：「引擎」机器人的 GitHub，挂当前版本。不给就是真的：连库记幂等账、读机器人凭据。 */
@@ -1032,6 +1037,28 @@ async function openPgInstallationRepos(
   } catch (err) {
     await close();
     throw err;
+  }
+}
+
+async function openPgPolicyBridge(url: string, env: CliEnv) {
+  const { createDb, findRepoProfile, findRepoPolicyByGithubId } = await import('@fleet-dao/db');
+  const { pgLedger, pgLocker, withStatementTimeout } = await import('@fleet-dao/store');
+  const { createGitHub, createPolicyGitHub } = await import('@fleet-dao/github');
+  const { createCiPolicyBridge } = await import('./ci-policy-bridge.ts');
+  const { db, close } = createDb({ url: withStatementTimeout(url) });
+  try {
+    const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db) });
+    const bridge = createCiPolicyBridge({
+      origin: env.FLEET_PUBLIC_URL ?? '',
+      gh: createPolicyGitHub(gh.deps),
+      locker: pgLocker(db, { strict: true }),
+      find: (repo) => findRepoProfile(db, repo.owner, repo.name),
+      findByGithubId: (id) => findRepoPolicyByGithubId(db, id),
+    });
+    return { bridge, close };
+  } catch (e) {
+    await close();
+    throw e;
   }
 }
 
@@ -1416,6 +1443,7 @@ async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<n
 async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
   let opened: { port: ProjectPort; close(): Promise<void> } | undefined;
   let repos: { source: InstallationReposPort; close(): Promise<void> } | undefined;
+  let policy: { bridge: CiPolicyBridge; close(): Promise<void> } | undefined;
   try {
     const args = parseProjectArgs(rest);
     const url = databaseUrl(deps.env);
@@ -1439,6 +1467,10 @@ async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promis
           repos ??= await (deps.openInstallationRepos ?? openPgInstallationRepos)(url);
           return repos.source;
         },
+        policyBridge: async () => {
+          policy ??= await (deps.openPolicyBridge ?? openPgPolicyBridge)(url, deps.env);
+          return policy.bridge;
+        },
         now: deps.now,
       }),
     );
@@ -1451,6 +1483,7 @@ async function runProjectCommand(rest: readonly string[], deps: CliDeps): Promis
     deps.err(`没做成：${describeDbError(err)}`);
     return 1;
   } finally {
+    await policy?.close().catch(() => undefined);
     await repos?.close().catch(() => undefined);
     await opened?.close().catch(() => undefined);
   }

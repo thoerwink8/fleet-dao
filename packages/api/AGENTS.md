@@ -7,6 +7,8 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - `packages/api/src/main.ts`：进程入口，两个监听（驾驶舱接口、fleet 命令接口）；有 `DATABASE_URL` 走真库 + 真 Temporal，没有就用内存样例数据，飞书登录没配时 `POST /auth/dev-login` 免登（只许本机回环）。
 - `packages/api/src/app.ts`：`buildApps` 装两个应用；驾驶舱挂 `/auth`、`/api`、`/github`，命令接口挂 `/agent/v1`。新路由在这里挂。
 - `packages/api/src/config.ts`：地址、端口、密钥都从环境变量读。
+- `github-mirror.ts`：main 的真实 GitHub 装配；开发环境非 HTTPS origin 只让策略桥未装配，不能把其它能力误报凭据缺失。生产桥初始化错误单独失败。
+- `ci-policy-bridge.ts`、`ci-policy-public.ts`：受管公开仓 DB 策略只读协议与 source publisher。精确 GET 挂在 session 前，严格核 GitHub 当前 public/数字身份；协议在 shared 的 `ci-policy-bridge.ts`，独立于浏览器 FleetApi，路由契约测试仍逐条登记。私有 force 原路径，私有 off 明确不支持。
 - `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
 
 ## 测试
@@ -20,6 +22,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - 「只有创始人本人能开」（决定 0033）：打开 Fable 的路由/模型、加进或拖动用途，一律调 `packages/api/src/founder-only.ts` 的 `guardFounderOnly`，不另写判法；`packages/api/test/fable-founder-only.test.ts` 两道门都测。
 - 飞书网关的意图接口、别的环境推快照的写口挂在登录门前面，只认各自的通行证；改挂载顺序会把它们关到登录门后面（见 `app.ts` 注释）。
 - 读不到就如实报红：GitHub 机器人凭据、Temporal 连不上都不能当成没事，健康检查照实报。
+- CI 策略的唯一权威是 repos 行，不能把 mode 写进 caller/source。publisher 必须在 intake 的 await accept 内，wake=false 也执行，失败沿投递账重放；不让 source status 再发布 source。setter 用策略专用 strict pgLocker，先撤绿、原 DB+audit 事务、再撤绿+刷新 source；成功只排重算，失锁和部分同步返回明确阶段。
 - 两个 App 装没装的判法只有一份：`packages/api/src/repo-import-routes.ts` 的 `mergedInstallations`（一边失败整次失败）。驾驶舱 `GET /api/repos/importable` 和 `fleet-api project installations`（`project-cli.ts` 的 `installationFacts`，#2977）都调它，别另写；后者按仓号认、只打目标仓，没读全、身份对不上退出 1（没查成），不当成没装，也不碰 repos 表、不写安装。
 
 ## 改它时要连带改

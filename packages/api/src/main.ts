@@ -5,23 +5,7 @@
 //   PR、CI 事件经 @fleet-dao/github 写镜像（机器人凭据在 /etc/fleet-dao/github，读不到时如实失败、健康检查报红）。
 // - 开发环境没有 DATABASE_URL：内存里的样例数据；飞书登录没配时可以用 POST /auth/dev-login 免登（只许本机回环监听）；
 //   发给工作流的信号只记日志，不接 Temporal。
-import {
-  claimLocalTask,
-  createDb,
-  type Db,
-  feishuPushFacts,
-  finishLocalTask,
-  raiseMergedReviewEvent,
-  renewLocalTask,
-} from '@fleet-dao/db';
-import {
-  createGitHub,
-  listInstallationRepositories,
-  type ReleaseFactsReader,
-  type RepoRef,
-  reviewMergeHold,
-  type SelfCheckItem,
-} from '@fleet-dao/github';
+import { claimLocalTask, createDb, feishuPushFacts, finishLocalTask, renewLocalTask } from '@fleet-dao/db';
 import { jevConfigLocation } from '@fleet-dao/jev';
 import { intakeChatLimitsFrom } from '@fleet-dao/shared';
 import {
@@ -33,8 +17,6 @@ import {
   devFixtures,
   jsonLogger,
   pgAlertWork,
-  pgLedger,
-  pgLocker,
   readDeployLagInput,
   startDeployLagWatch,
   startReleaseWaitWatch,
@@ -48,7 +30,6 @@ import { ConfigError, engineEnabled, loadConfig } from './config.ts';
 import { probeDb } from './db-probe.ts';
 import { pgDatabaseSizes } from './db-sizes.ts';
 import { runFeishuPushRecheck, runGitHubAppRecheck } from './decision-actions.ts';
-import type { DecisionCommenter } from './decision-handoff.ts';
 import { deployLagCheck } from './deploy-lag-check.ts';
 import type { Deps } from './deps.ts';
 import {
@@ -62,8 +43,9 @@ import { memoryCockpitAlerts, pgCockpitAlerts } from './feishu-alerts.ts';
 import { feishuBotFromConfig, startFeishuPush } from './feishu-push.ts';
 import { productionPreflightReaders } from './france-preflight.ts';
 import { liveFranceReleasePort } from './france-release.ts';
-import { githubAppMissing, githubEventsCheck } from './github.ts';
+import { githubEventsCheck } from './github.ts';
 import { githubAppHealthCheck } from './github-app-health.ts';
+import { githubMirror } from './github-mirror.ts';
 import { serviceHealthChecks } from './health.ts';
 import { engineHealthProbe } from './home-engine.ts';
 import { createHostResourceSampler, realHostReader } from './host-resources.ts';
@@ -75,12 +57,10 @@ import { pgManualTracks } from './manual-tracks.ts';
 import { pgModelRoster } from './model-roster.ts';
 import { nodeReporterFor, nodeReportPart } from './node-reporter.ts';
 import { pgOrgSwitch } from './org-switch-view.ts';
-import type { GitHubEventSink } from './ports.ts';
 import { pgProbeHistory } from './probe-history.ts';
 import { liveReleaseCardPort } from './release-card.ts';
 import { liveReleaseRequestPort } from './release-request.ts';
 import { pgRequestChat } from './request-chat-pg.ts';
-import { currentMilestoneOf, type RequestIssuePort } from './request-issue.ts';
 import { startRequestProgressWatch } from './request-progress.ts';
 import { pgRequests } from './request-store-pg.ts';
 import { pgRoutingEfforts } from './routing-efforts.ts';
@@ -95,87 +75,6 @@ import { connectTemporal, ENGINE_OFF } from './temporal.ts';
 import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './watchdog-health.ts';
 
 const log = jsonLogger();
-
-/**
- * PR、CI 事件写镜像：@fleet-dao/github 的事件去处，要两个机器人的凭据（只在这里、启动时读一次）。读不到时后端照样起，
- * PR、CI 事件如实失败，健康检查的 github_events 报红（credentialsMissing）；补上凭据要重启后端。
- */
-/** 机器人凭据没读到：发版卡读 GitHub 的每一样都如实抛这个原因（卡上各行写没查成 + 原因）。 */ function credentialsMissingFacts(
-  why: string,
-): ReleaseFactsReader {
-  const fail = async (): Promise<never> => {
-    throw new Error(`GitHub 机器人的凭据没读到（${why}）`);
-  };
-  return {
-    mainlineHead: fail,
-    commit: fail,
-    mainCi: fail,
-    compare: fail,
-    lastMergedPull: fail,
-    issueTitle: fail,
-  };
-}
-
-function githubMirror(db: Db): {
-  sink: GitHubEventSink;
-  credentialsMissing?: () => Promise<void>;
-  releaseFacts: ReleaseFactsReader;
-  /** 「要你拍」拍完往进度单、任务单留言（#1915）；凭据没读到就没有，答案照存、回包写没接上。 */
-  decisionCommenter?: DecisionCommenter;
-  /** 重查 GitHub App。凭据没读到就没有，重查报「凭据没读到」。 */
-  selfCheck?: (repos: RepoRef[]) => Promise<SelfCheckItem[]>;
-  /** 提需求（#2060）开单、写回评论、读单子状态，都用「引擎」机器人；凭据没读到就没有，开单回 503，不假装开了。 */
-  requestIssues?: RequestIssuePort;
-  /** 导入列表：两个机器人的安装令牌。凭据没读到就没有，列表回「没接上」。 */
-  installationRepos?: Deps['installationRepos'];
-} {
-  try {
-    const gh = createGitHub({ ledger: pgLedger(db), locker: pgLocker(db, { log }), log });
-    // 引擎等 CI 靠活动自己轮询（waitCi），不收按事件叫醒的信号：PR、CI 事件只写镜像。
-    // 唯一的例外是正式评审要求改（#2991）：引擎任务 PR 挂着的自动合并当场撤掉，评审由引擎合并那一步现读、交给工人
-    return {
-      // 评审到时 PR 已合：留未送达的明账（驾驶舱报警）；写不成抛错，这条投递记成出错、按原文重放
-      sink: gh.eventSink(
-        reviewMergeHold(gh.claims, log, async (note) => {
-          await raiseMergedReviewEvent(db, note);
-        }),
-      ),
-      releaseFacts: gh.releaseFacts,
-      decisionCommenter: {
-        async comment(input) {
-          const got = await gh.commentIssue(input);
-          return { url: got.url };
-        },
-      },
-      selfCheck: (repos) => gh.selfCheck(repos),
-      installationRepos: {
-        list: (role) => listInstallationRepositories(gh.client, role),
-      },
-      requestIssues: {
-        // 不走发件箱，同步调（母单 #2047 方案第六节）；正文过卫生检查、幂等都在 @fleet-dao/github 的 openIssue / commentIssue 里
-        async openIssue(input) {
-          // 挂当前版本（#2683）：创始人开的进当前版本，不落未排期
-          const milestone = await currentMilestoneOf(() => gh.readOpenMilestones({ repo: input.repo }));
-          return gh.openIssue({ ...input, milestone });
-        },
-        async commentIssue(input) {
-          return gh.commentIssue(input);
-        },
-        async readIssueState(input) {
-          return gh.readIssueState(input);
-        },
-      },
-    };
-  } catch (err) {
-    log.error('GitHub 机器人的凭据没读到：PR、CI 事件写不进镜像', { error: String(err) });
-    const missing = githubAppMissing(String(err));
-    return {
-      sink: missing.sink,
-      credentialsMissing: missing.check,
-      releaseFacts: credentialsMissingFacts(String(err)),
-    };
-  }
-}
 
 function load() {
   try {
@@ -268,7 +167,7 @@ async function assemble(): Promise<{
     namespace: config.temporalNamespace,
     taskQueue: config.fleetTaskQueue,
   });
-  const github = githubMirror(db);
+  const github = githubMirror(db, config.publicUrl, log, config.env === 'development');
   const store = createPgStore(db, { now });
   // 正式环境（FLEET_ENV=production）：法国是；下面几项都接着、都判。
   // 线上版本跟不跟得上主线：正式环境才有发布目录和自动发布；读的时候现算，报警每 5 分钟判一次
@@ -316,6 +215,7 @@ async function assemble(): Promise<{
     workflows: temporal.control,
     taskRedo: temporal.taskRedo,
     github: github.sink,
+    ...(github.ciPolicyBridge ? { ciPolicyBridge: github.ciPolicyBridge } : {}),
     ...(github.installationRepos ? { installationRepos: github.installationRepos } : {}),
     ...(github.decisionCommenter ? { decisionCommenter: github.decisionCommenter } : {}),
     decisionCapabilities: {

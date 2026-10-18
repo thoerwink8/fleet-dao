@@ -621,7 +621,8 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
       }),
     ]);
     for (const r of bad) expect(r.code).toBe(2);
-    expect(bad[7]?.lines).toContain('  没写上状态（GitHub 回了 403）。');
+    expect(bad[7]?.lines).toContain('  最终核验或发表失败（GitHub 回了 403）。');
+    expect(bad[7]?.lines).toContain('  失败状态也没写上（GitHub 回了 403）。');
     expect(bad[8]?.lines).toContain('  没写上状态：连 PR 的头都没读到。');
     expect(w.written).toEqual([]);
   });

@@ -148,6 +148,9 @@ describe('配置', () => {
   it('密钥太短、生产用 http：都拒绝启动', () => {
     expect(problems({ ...PROD, FLEET_SESSION_SECRET: 'short' }).join()).toContain('太短');
     expect(problems({ ...PROD, FLEET_PUBLIC_URL: 'http://cockpit.example.test' }).join()).toContain('https');
+    expect(
+      problems({ ...PROD, FLEET_PUBLIC_URL: 'https://user:pass@cockpit.example.test' }).length,
+    ).toBeGreaterThan(0);
     expect(problems({ ...PROD, FLEET_ENV: 'staging' }).join()).toContain('FLEET_ENV');
   });
 

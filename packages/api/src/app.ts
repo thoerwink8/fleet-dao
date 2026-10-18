@@ -5,6 +5,7 @@ import { createGitHubIntake } from '@fleet-dao/store';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import { authRoutes } from './auth.ts';
+import { ciPolicyPublicRoutes } from './ci-policy-public.ts';
 import { cockpitRoutes } from './cockpit.ts';
 import type { Deps } from './deps.ts';
 import { githubRoutes } from './github.ts';
@@ -40,6 +41,7 @@ export function buildApps(deps: Deps): Apps {
   // 别的环境推快照的写口（POST /api/nodes/report）：只认专用通行证（X-Fleet-Node-Token）、不认 Cookie，同样挂在登录门前面；
   // 登录门后面的 GET /api/nodes 不认这个通行证。
   cockpit.route(WEB_API_PREFIX, nodeReportRoutes(deps));
+  cockpit.route('/', ciPolicyPublicRoutes(deps));
   cockpit.route(WEB_API_PREFIX, cockpitRoutes(deps, relay));
   cockpit.route('/github', githubRoutes(deps, createGitHubIntake(deps)));
 

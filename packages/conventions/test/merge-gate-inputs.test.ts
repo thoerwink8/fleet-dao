@@ -1,9 +1,5 @@
-// 钉住合并闸能看的现状只有那几样（创始人 2026-09-27 晚拍，#299；2026-09-28 下午拍 #444 收窄成四样；2026-10-06 拍 #1114 去掉先审后合，
-// 决定 0023；design 第五节「发现问题当场修」第 5 条、AGENTS 本仓段）：CI 里跑的检查必须确定、只看检出来的文件；合并闸
-// merge-gate 汇总 PR 此刻的状态——PR 本身（分支名、开着还是关了、正文里的创始人原话；#654 起不看草稿、冲突）、
-// PR 改了哪些文件（判碰没碰改标准路径，决定 0093）和当前头上的提交状态（只剩引擎任务 PR 的冷调用结论，#555-2）。冷调用的结论在同一次 statuses 调用里读回来——闸里起模型调用会破坏
-// 「CI 检查必须确定」这条，所以冷调用在装配侧跑、结论贴成状态，闸只读。往合并闸里多加别的现状（单子开没开、时间、别的仓……）
-// 这里会红：要加得先改上面那两处的规矩，再改这里的清单。
+// 钉住 design 第五节允许的合并闸现状输入：PR、改动文件、当前头提交状态，以及可信公开策略桥的实时 DB 模式和身份/公开性证明。
+// 冷调用在装配侧跑，闸只读结论；策略桥只认证 HTTPS 读口，不接受 caller 静态模式。纯判法、协议和标准配置的完整导入闭包均须触发重算。
 import { readFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,7 +19,7 @@ const ALLOWED_READS: Record<string, string> = {
   writeStatus: '写 merge-gate 这一个状态',
 };
 
-/** 合并闸认得的提交状态名：自己写的 merge-gate、合前一次冷调用的结论（#555-2：验收那一遍的 verdict，装配侧贴、闸只读，不许闸里起模型调用）。 */
+/** 纯冷验收判法的固定状态名；策略来源逐 PR 构造，另核 workflow 的固定 namespace 触发。 */
 const ALLOWED_CONTEXTS: Record<string, string> = {
   GATE_CONTEXT: 'merge-gate',
   COLD_VERIFY_CONTEXT: 'cold-verify',
@@ -95,7 +91,7 @@ function pushPaths(yml: string): string[] {
 }
 
 /** 闸读的数据文件（不是 import，按路径读）：改标准的路径清单（standard-paths-file.ts 读它）。 */
-const DATA_INPUTS = ['packages/conventions/standard-paths.json'];
+const DATA_INPUTS = ['packages/conventions/standard-paths.json', 'packages/conventions/github-apps.json'];
 
 /** 闸的判定输入：入口文件和它 import 到的所有文件、读的数据文件、这份工作流自己；在 push.paths 里漏列的。 */
 function unwatchedInputs(yml: string): string[] {
@@ -182,6 +178,7 @@ describe('合并闸只汇总 PR 此刻的状态（#299 创始人拍板）', () =
     expect(missingTriggers(workflow)).toEqual([]);
     // 覆盖得全不全由 ALLOWED_CONTEXTS 和 if 现算，不写死几个名字：以后再加一条状态忘了放行，这里照样红。
     expect(Object.keys(ALLOWED_CONTEXTS).length).toBeGreaterThan(1);
+    expect(workflow).toContain("startsWith(github.event.context, 'fleet-ci-policy-source/pr/')");
   });
 
   it('【故意造出的失败】merge-gate.yml 不放行 cold-verify：状态贴上来不重算，查得出来', () => {

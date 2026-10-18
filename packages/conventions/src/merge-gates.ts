@@ -64,7 +64,7 @@ export interface ColdVerifyNeed {
   why: string;
 }
 
-/** 受管仓的合并方式。没传 = 强制（闸跑在 GitHub 上，读不到法国的库，不能把没传当成不强制）。 */
+/** 受管仓的合并方式。纯判法未给模式一律 force；生产由可信只读桥现读模式。 */
 export type GateCiPolicy = 'force' | 'off';
 
 export function coldVerifyNeed(flowPr: boolean, ciPolicy: GateCiPolicy = 'force'): ColdVerifyNeed {

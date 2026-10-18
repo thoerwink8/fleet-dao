@@ -13,11 +13,12 @@
 import type { RegisterRepoResult, RepoProfileRow } from '@fleet-dao/db';
 import { RepoProfileSchema, repoProfileGaps, safeParseRepoProfile } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
+import type { CiPolicyBridge } from './ci-policy-bridge.ts';
 import type { InstallationReposPort } from './deps.ts';
 import { mergedInstallations } from './repo-import-routes.ts';
 
 export const PROJECT_USAGE =
-  '用法：fleet-api project show <owner/仓名>（打印仓号、档案原文、补了默认值的档案、缺哪几项，JSON）；fleet-api project set-profile <owner/仓名> --file <json 文件|->（整份换掉档案，形状不对就拒；- 读标准输入，经 ssh 调时用它）；fleet-api project register <owner/仓名> --github-id <仓号> [--default-branch <分支>]（登记一个仓，认仓号；已登记的不改）；fleet-api project installations <owner/仓名> --github-id <仓号>（两个 App 装没装到这个仓，只读，JSON；没查成退出 1）';
+  '用法：fleet-api project show <owner/仓名>（打印仓号、档案、当前 CI 模式与真实读桥 descriptor，JSON，只读）；fleet-api project refresh-policy-source <owner/仓名>（为公开同仓 open PR 当前头重发可信 source，排合并闸重算）；fleet-api project set-profile <owner/仓名> --file <json 文件|->（整份换掉档案，形状不对就拒；- 读标准输入，经 ssh 调时用它）；fleet-api project register <owner/仓名> --github-id <仓号> [--default-branch <分支>]（登记一个仓，认仓号；已登记的不改）；fleet-api project installations <owner/仓名> --github-id <仓号>（两个 App 装没装到这个仓，只读，JSON；没查成退出 1）';
 
 /** project installations 打出来的来源：pnpm project check 原样写进第二步。 */
 export const INSTALLATIONS_SOURCE =
@@ -53,6 +54,7 @@ export interface ProjectPort {
 
 export type ProjectArgs =
   | { action: 'show'; owner: string; name: string }
+  | { action: 'refresh-policy-source'; owner: string; name: string }
   | { action: 'set-profile'; owner: string; name: string; file: string }
   | { action: 'register'; owner: string; name: string; githubId: number; defaultBranch: string }
   | { action: 'installations'; owner: string; name: string; githubId: number };
@@ -108,7 +110,7 @@ function repoArg(raw: string | undefined): { owner: string; name: string } {
 
 export function parseProjectArgs(argv: readonly string[]): ProjectArgs {
   const [action, repo, ...rest] = argv;
-  if (action === 'show') {
+  if (action === 'show' || action === 'refresh-policy-source') {
     if (rest.length > 0 || repo === undefined)
       throw new ProjectCliError(`show 只要一个参数：owner/仓名。${PROJECT_USAGE}`, 2);
     return { action, ...repoArg(repo) };
@@ -125,7 +127,7 @@ export function parseProjectArgs(argv: readonly string[]): ProjectArgs {
   if (action === 'register') return parseRegister(repo, rest);
   if (action === 'installations') return parseInstallations(repo, rest);
   throw new ProjectCliError(
-    `认不出「${action ?? ''}」：只收 show、set-profile、register、installations。${PROJECT_USAGE}`,
+    `认不出「${action ?? ''}」：只收 show、refresh-policy-source、set-profile、register、installations。${PROJECT_USAGE}`,
     2,
   );
 }
@@ -242,15 +244,21 @@ export async function runProject(
     readStdin(): Promise<string>;
     /** 两个机器人的安装范围（installations 用）；要用时才开。 */
     installations(): Promise<InstallationReposPort>;
+    policyBridge?(): Promise<CiPolicyBridge>;
     now(): Date;
   },
 ): Promise<string> {
   const asked = `${args.owner}/${args.name}`;
   if (args.action === 'installations') return JSON.stringify(await installationFacts(args, deps), null, 2);
+  if (args.action === 'refresh-policy-source') {
+    if (!deps.policyBridge) throw new ProjectCliError('策略 source publisher 未装配');
+    return JSON.stringify(await (await deps.policyBridge()).refresh(args, true));
+  }
   if (args.action === 'show') {
     const row = await deps.port.find(args.owner, args.name);
     if (!row) throw new ProjectCliError(`没查成：库里没有仓 ${asked}（受管的仓就是 repos 表的行）`);
-    return JSON.stringify(describeRow(row), null, 2);
+    const ciPolicyBridge = deps.policyBridge ? await (await deps.policyBridge()).describe(args) : null;
+    return JSON.stringify({ ...describeRow(row), ciPolicyBridge }, null, 2);
   }
   if (args.action === 'register') {
     const r = await deps.port.register({

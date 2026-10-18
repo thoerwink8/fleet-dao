@@ -6,7 +6,16 @@ import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import {
+  parsePolicyUrl,
+  policyHead,
+  policyRepo,
+  policySourceContext,
+} from '../../shared/src/ci-policy-bridge.ts';
+import { policyReader, readPolicyHttp } from './ci-policy-bridge.ts';
+import type { GhApi } from './gh-api.ts';
 import type { Gh } from './issue-new.ts';
+import { gateGitHub } from './merge-gate.ts';
 import type { FleetApiResult, IssueFact, ProjectWorld, RepoFacts, RepoLabel } from './project.ts';
 
 const FLEET_API = '/srv/fleet-dao-releases/current/packages/api/bin/fleet-api';
@@ -180,8 +189,50 @@ async function issueReadByNumber(gh: Gh, slug: string, number: number): Promise<
   return parseIssueFact(raw, what).fact;
 }
 
-export function ghProjectWorld(gh: Gh, fleetApi: FleetApiRunner): ProjectWorld {
+export function ghProjectWorld(
+  gh: Gh,
+  fleetApi: FleetApiRunner,
+  fetchImpl: typeof fetch = fetch,
+): ProjectWorld {
   return {
+    async policyBridge(slug, githubId, descriptor) {
+      const api: GhApi = {
+        get: (path) => ghJson(gh, ['api', `repos/${slug}${path}`], '读真实策略仓/PR/source'),
+        globalGet: (path) => ghJson(gh, ['api', path.replace(/^\//, '')], '读可信 writer 数字身份'),
+        getOrNull: async () => {
+          throw new Error('策略检查不用 getOrNull');
+        },
+        post: async () => {
+          throw new Error('策略体检不允许写 GitHub');
+        },
+      };
+      const identity = policyRepo(await api.get(''));
+      if (
+        !identity.public ||
+        identity.githubId !== githubId ||
+        identity.repo.toLowerCase() !== slug.toLowerCase()
+      )
+        throw new Error('策略桥实际仓身份或 public 不匹配');
+      const endpoint = parsePolicyUrl(descriptor.endpoint, githubId);
+      const response = await readPolicyHttp(endpoint, identity, fetchImpl);
+      const reads = gateGitHub(api);
+      const reader = policyReader(api, reads, slug, fetchImpl);
+      let heads = 0;
+      let missing = 0;
+      for (const raw of await reads.openPrs()) {
+        const head = policyHead(raw, identity);
+        if (!head.open || head.fork) continue;
+        heads++;
+        const statuses = await reads.statuses(head.head);
+        if (!statuses.some((s) => isRecord(s) && s.context === policySourceContext(head.number))) {
+          missing++;
+          continue;
+        }
+        if ((await reader(head.number, head.head)) !== response.ciPolicy)
+          throw new Error('当前头 source 与真实 endpoint 模式不一致');
+      }
+      return { ciPolicy: response.ciPolicy, heads, missing };
+    },
     async repo(slug) {
       const r = await ghJson<{
         id?: unknown;
