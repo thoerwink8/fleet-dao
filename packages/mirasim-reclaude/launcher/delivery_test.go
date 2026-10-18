@@ -5,13 +5,15 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
 // 按 --replay-user-messages 的真实行为回显：读进一条 user 先回显 isReplay，再出这一回合。
-// swallow 模拟「写进了管道却没被读进」：不回显、不输出；bg 模拟主回合结束、后台任务还在跑。
+// swallow 模拟「写进了管道却没被读进」：不回显、不输出；bg 模拟主回合结束、后台任务还在跑；
+// hold 读进后一直跑着不出 result，模拟长回合。
 func fakeReplayClaude(sid string) {
 	dec, enc := json.NewDecoder(os.Stdin), json.NewEncoder(os.Stdout)
 	for {
@@ -21,6 +23,10 @@ func fakeReplayClaude(sid string) {
 				os.Exit(9)
 			}
 			return
+		}
+		if f["type"] == "control_request" {
+			_ = enc.Encode(map[string]any{"type": "control_response", "response": map[string]any{"subtype": "success", "request_id": f["request_id"], "response": map[string]any{}}})
+			continue
 		}
 		if f["type"] != "user" {
 			continue
@@ -36,8 +42,20 @@ func fakeReplayClaude(sid string) {
 		if msg["content"] == "swallow" {
 			continue
 		}
+		if strings.Contains(text, "consume-no-echo") {
+			if p := os.Getenv("MIRASIM_TEST_CONSUMED"); p != "" {
+				file, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+				if err != nil {
+					os.Exit(21)
+				}
+				_, _ = file.WriteString("effect\n")
+				_ = file.Close()
+			}
+			_ = enc.Encode(map[string]any{"type": "result", "subtype": "success", "session_id": sid, "is_error": false})
+			continue
+		}
 		_ = enc.Encode(map[string]any{"type": "user", "message": msg, "session_id": sid, "parent_tool_use_id": nil, "isReplay": true, "pid": os.Getpid()})
-		if deferredResult && text == "first" {
+		if (deferredResult && text == "first") || text == "hold" {
 			continue
 		}
 		if msg["content"] == "bg" {
@@ -49,8 +67,26 @@ func fakeReplayClaude(sid string) {
 }
 
 func startReplayApp(t *testing.T, f fixture, cache string, extraEnv ...string) *app {
+	return startReplayAppAs(t, f, cache, "--session-id", extraEnv...)
+}
+
+func startReplayAppAs(t *testing.T, f fixture, cache, sessionFlag string, extraEnv ...string) *app {
+	t.Helper()
+	a := startReplayAppUninitializedAs(t, f, cache, sessionFlag, extraEnv...)
+	// 先完成 SDK 初始化，确保执行体已就绪；300ms 仍只检验消息交付，不把冷启动算成卡住。
+	a.send(t, map[string]any{"type": "control_request", "request_id": "fixture-initialize", "request": map[string]any{"subtype": "initialize"}})
+	r := a.until(t, "control_response")
+	response, _ := r["response"].(map[string]any)
+	if response["request_id"] != "fixture-initialize" || response["subtype"] != "success" {
+		t.Fatalf("执行体初始化未成功：%v", r)
+	}
+	return a
+}
+
+func startReplayAppUninitializedAs(t *testing.T, f fixture, cache, sessionFlag string, extraEnv ...string) *app {
+	t.Helper()
 	env := append([]string{"MIRASIM_TEST_ROLE=replay", "XDG_CACHE_HOME=" + cache, "RECLAUDE_MIRASIM_DELIVERY_STALL_MS=300"}, extraEnv...)
-	return startAppArgs(t, f, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--model", "claude-sonnet-5", "--session-id", f.sid, "--settings", `{}`}, env...)
+	return startAppArgs(t, f, []string{"-p", "--input-format", "stream-json", "--output-format", "stream-json", "--replay-user-messages", "--model", "claude-sonnet-5", sessionFlag, f.sid, "--settings", `{}`}, env...)
 }
 
 func TestUnconfirmedContentKeepsChildAfterPriorTurnResult(t *testing.T) {
@@ -80,6 +116,93 @@ func TestUnconfirmedContentKeepsChildAfterPriorTurnResult(t *testing.T) {
 				t.Fatalf("未知身份应保留责任、不重放、不切路由：%s", log)
 			}
 		})
+	}
+}
+
+func waitLog(t *testing.T, f fixture, cache, want string) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); !strings.Contains(launchLogOf(t, f, cache), want); {
+		if time.Now().After(deadline) {
+			t.Fatalf("日志里等不到 %q：%s", want, launchLogOf(t, f, cache))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// 强杀前是否消费不能靠回显证明：未回显与已消费但回显丢失均保留 unknown，不自动再执行。
+func TestUnknownUserSurvivesKilledProcessWithoutAutomaticReplay(t *testing.T) {
+	for _, content := range []string{"swallow", "consume-no-echo"} {
+		t.Run(content, func(t *testing.T) {
+			f := newFixture(t, "local")
+			cache := filepath.Join(f.home, "xdg-cache")
+			consumed := filepath.Join(f.home, "consumed")
+			a := startReplayApp(t, f, cache, "MIRASIM_TEST_CONSUMED="+consumed)
+			a.user(t, "first")
+			a.until(t, "user")
+			a.until(t, "result")
+			a.user(t, content)
+			if content == "consume-no-echo" {
+				a.until(t, "result")
+			}
+			waitLog(t, f, cache, "event=user-forward path=turn idle=true len="+strconv.Itoa(len(content)))
+			_ = a.cmd.Process.Kill()
+			<-a.ended
+			b := startReplayAppAs(t, f, cache, "--resume", "MIRASIM_TEST_CONSUMED="+consumed)
+			next := "next"
+			b.user(t, next)
+			warning := b.until(t, "result")
+			// 提示里带着缓存路径，临时目录名取自子测试名（就是正文）：先去掉路径再查有没有漏出正文。
+			shown := strings.ReplaceAll(warning["result"].(string), f.home, "")
+			if warning["is_error"] != true || !strings.Contains(shown, "交付状态未知") || strings.Contains(shown, content) {
+				t.Fatalf("恢复应明确提示 unknown，不输出原正文：%v", warning)
+			}
+			echo := b.until(t, "user")
+			got, _ := echo["message"].(map[string]any)["content"].(string)
+			if got != next {
+				t.Fatalf("不能把 unknown 作为新指令拼入：%q", got)
+			}
+			b.until(t, "result")
+			log := launchLogOf(t, f, cache)
+			if !strings.Contains(log, "event=user-recovery-unknown n=1") {
+				t.Fatalf("新进程要报告历史 unknown 责任：%s", log)
+			}
+			if content == "consume-no-echo" {
+				b, err := os.ReadFile(consumed)
+				if err != nil || string(b) != "effect\n" {
+					t.Fatalf("副作用只能有一次：%q %v", b, err)
+				}
+			}
+			_ = b.in.Close()
+			if err := waitEnded(t, b); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("LOCALAPPDATA", filepath.Join(f.home, "cache"))
+			t.Setenv("XDG_CACHE_HOME", cache)
+			t.Setenv("HOME", f.home) // macOS 的缓存在 HOME/Library/Caches，和子进程用同一个 HOME
+			entries, err := loadRedelivery(f.sid)
+			if err != nil || len(entries) != 1 || entries[0].State != deliveryUnknown || userText(entries[0].User) != content {
+				t.Fatalf("unknown 责任应跨重启保留：%+v %v", entries, err)
+			}
+		})
+	}
+}
+
+// 运行中转出去的引导，回合结束了还没读进：从 result 起按空闲算，60 秒（测试里 300ms）后回报错。
+func TestSteerStillUnreadAfterResultReturnsVisibleError(t *testing.T) {
+	f := newFixture(t, "local")
+	cache := filepath.Join(f.home, "xdg-cache")
+	a := startReplayApp(t, f, cache)
+	a.user(t, "hold")
+	a.until(t, "user")
+	a.user(t, "swallow")
+	waitLog(t, f, cache, "path=active idle=false len=7")
+	a.user(t, "release")
+	if r := a.until(t, "result"); r["is_error"] != false {
+		t.Fatalf("release 那一回合应正常结束：%v", r)
+	}
+	r := a.until(t, "result")
+	if r["is_error"] != true || r["result"] != deliveryStallMessage {
+		t.Fatalf("回合结束后仍没读进的引导要回报错：%v", r)
 	}
 }
 
@@ -185,9 +308,16 @@ func trackedDeliveries(t *testing.T, frames ...frame) *deliveries {
 	t.Helper()
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
-	d := &deliveries{tracking: true, stallAfter: time.Minute}
+	t.Setenv("LOCALAPPDATA", t.TempDir())
+	d := &deliveries{tracking: true, stallAfter: time.Minute, session: "delivery-test-session"}
 	for _, f := range frames {
-		d.forwarded(f, "active", true)
+		q, _, err := d.enqueue(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.send(q, io.Discard, "active", true); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return d
 }

@@ -6,7 +6,15 @@
 // - 读不到的字段 NULL，不拿 0 顶（#216）。确定没发出模型调用的例外：记 0 并写 usage_note（#2689）。
 
 import { randomUUID } from 'node:crypto';
-import { laterGenerationPattern, sessionlessUsage, USAGE_SESSION_UNREAD } from '@fleet-dao/shared';
+import {
+  clipCauseSummary,
+  laterGenerationPattern,
+  type RunCause,
+  type RunVerdict,
+  RunVerdictSchema,
+  sessionlessUsage,
+  USAGE_SESSION_UNREAD,
+} from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { and, asc, desc, eq, gte, inArray, isNotNull, isNull, notInArray, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
@@ -51,6 +59,14 @@ export interface RunInsert {
   resumeSessionId?: string | null;
   /** 判定不开上一段会话、改开新会话的原因。 */
   resumeReason?: string | null;
+  /** 为什么起这一笔（#3140，shared 的 RUN_CAUSES）；老行、不经任务工作流的不给。 */
+  cause?: RunCause | null;
+  /** 起因摘要（≤500 字，写之前截断）。 */
+  causeSummary?: string | null;
+  /** 这一笔属于第几个回合（task_rounds.seq，#3140）。 */
+  roundSeq?: number | null;
+  /** 冷验收的结论（验收那一笔，#3140）；开跑、收场不带，验收有结论后由 noteRunVerdict 写。 */
+  verdict?: RunVerdict | null;
   /**
    * 用量没照终帧读到时记的「怎么来的、为什么缺」（白话）：会话被叫停、超时杀时各家插头给的那句写进 runs.usage_note。
    * 没读到就不写（交给「用量补记」按会话号补）。
@@ -117,6 +133,21 @@ export async function startRun(db: Db, row: RunInsert, now: Date = new Date()): 
     throw new RunInputError(`写入 runs 失败：${message}`, { cause: error });
   }
   return { id: r.id };
+}
+
+/**
+ * 冷验收有结论了：把结论写在验收那一笔上（#3140，过没过、哪几条没过、转给人的）。会话已经收场（那一行早写好了），所以单独写这一列；
+ * 同一笔再写以最后一次为准（接回后重验）。结论形状不对、这一笔不在 runs 里都抛，不悄悄丢。
+ */
+export async function noteRunVerdict(db: Db, runId: string, verdict: RunVerdict): Promise<void> {
+  const parsed = RunVerdictSchema.safeParse(verdict);
+  if (!parsed.success) throw new RunInputError(`验收结论的形状不对：${parsed.error.message}`);
+  const done = await db
+    .update(runs)
+    .set({ verdict: parsed.data, updatedAt: new Date() })
+    .where(eq(runs.id, runId))
+    .returning({ id: runs.id });
+  if (done.length === 0) throw new RunInputError(`验收结论没写进去：库里没有这一笔（${runId}）`);
 }
 
 /**
@@ -976,6 +1007,10 @@ function toRow(row: RunInsert, now: Date): RunRowSure {
     sessionId: row.sessionId ?? null,
     resumeSessionId: row.resumeSessionId ?? null,
     resumeReason: row.resumeReason ?? null,
+    cause: row.cause ?? null,
+    causeSummary: row.causeSummary ? clipCauseSummary(row.causeSummary) : null,
+    roundSeq: row.roundSeq ?? null,
+    verdict: row.verdict ?? null,
     // 收场那一笔只在用量没照终帧读到时带（会话被叫停、超时杀：记的是怎么来的、缺的为什么读不到）；别的由「用量补记」和一次性回填写
     usageNote: row.usageNote ?? null,
     memoryPeakMb: row.memoryPeakMb ?? null,
@@ -1003,6 +1038,11 @@ function pickRowWithoutId(r: RunRowSure) {
     sessionId: sql`coalesce(${r.sessionId}, ${runs.sessionId})`,
     resumeSessionId: sql`coalesce(${r.resumeSessionId}, ${runs.resumeSessionId})`,
     resumeReason: sql`coalesce(${r.resumeReason}, ${runs.resumeReason})`,
+    // 起因、回合、验收结论：开跑写过的，收场那一笔没带就留着（验收结论在收场之后另写，见 noteRunVerdict）
+    cause: sql`coalesce(${r.cause}, ${runs.cause})`,
+    causeSummary: sql`coalesce(${r.causeSummary}, ${runs.causeSummary})`,
+    roundSeq: sql`coalesce(${r.roundSeq}::integer, ${runs.roundSeq})`,
+    verdict: sql`coalesce(${r.verdict === null ? null : JSON.stringify(r.verdict)}::jsonb, ${runs.verdict})`,
     endedAt: sql`coalesce(${r.endedAt?.toISOString() ?? null}::timestamptz, ${runs.endedAt})`,
     outcome: sql`coalesce(${r.outcome}, ${runs.outcome})`,
     routeOutcome: sql`coalesce(${r.routeOutcome}, ${runs.routeOutcome})`,

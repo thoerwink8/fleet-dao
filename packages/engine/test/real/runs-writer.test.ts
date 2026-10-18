@@ -121,6 +121,78 @@ describe('三段各一笔记进 runs：记到这张单名下（#216）', { timeo
     expect(read.every((r) => r.taskId === task.id)).toBe(true);
   });
 
+  it('起因、摘要、所属回合（#3140）：开跑那一行就写进 runs，收场整行补完也不冲掉；验收结论经 noteVerdict 写在验收那一笔上', async () => {
+    const { repo, task } = await addTask(t.db);
+    const workflowId = taskWorkflowId(repo, task.issueNumber);
+    const opening: (RunRow | null)[] = [];
+    const runsWriter = realRuns({ db: t.db });
+    const deps = { spawn: spawnPeeking(opening), runs: runsWriter, tmpDir: join(root, 'runs') };
+    const owner = { taskId: task.id, issueNumber: task.issueNumber, workflowId, branch: BRANCH };
+    const manual = await runOneShot(
+      {
+        ...owner,
+        segment: 'manual',
+        modelId: 'opus-5.5',
+        tier: 'medium',
+        prompt: '动手',
+        cwd: root,
+        cause: 'rework_ci',
+        causeSummary: `检查红了：test\n${'很长'.repeat(400)}`,
+        roundSeq: 2,
+        resumeReason: '上一段没记下会话号',
+      },
+      deps,
+    );
+    // 开跑那一行（会话还在跑时读的）已经带着起因、回合
+    expect(opening[0]).toMatchObject({ cause: 'rework_ci', roundSeq: 2, endedAt: null });
+    const row = await getRun(t.db, manual.runId);
+    expect(row).toMatchObject({
+      cause: 'rework_ci',
+      roundSeq: 2,
+      outcome: 'done',
+      resumeReason: '上一段没记下会话号',
+    });
+    // 摘要截到 500 字（换行折成空格）
+    expect(row?.causeSummary?.startsWith('检查红了：test 很长')).toBe(true);
+    expect(row?.causeSummary?.length).toBe(500);
+
+    const verify = await runOneShot(
+      { ...owner, segment: 'verify', modelId: 'gpt-5.6', prompt: '验收', cwd: root, roundSeq: 2 },
+      deps,
+    );
+    expect(await getRun(t.db, verify.runId)).toMatchObject({ cause: null, roundSeq: 2, verdict: null });
+    await runsWriter.noteVerdict?.(verify.runId, {
+      pass: false,
+      problems: ['第 1 条没做到'],
+      failedCriteria: [1],
+      handedOver: [],
+    });
+    expect((await getRun(t.db, verify.runId))?.verdict).toMatchObject({ pass: false, failedCriteria: [1] });
+  });
+
+  it('【故意造出的失败】起因不在名单里、回合号是 0：写库之前就报错，不起会话、库里不留一行', async () => {
+    const { task } = await addTask(t.db);
+    const spawned: string[] = [];
+    const deps = {
+      spawn: (async () => {
+        spawned.push('起了');
+        return { exitCode: 0, stdout: '', stderr: '', killed: false };
+      }) as OneShotSpawner,
+      runs: realRuns({ db: t.db }),
+      tmpDir: join(root, 'runs'),
+    };
+    for (const bad of [{ cause: 'nope' as never }, { roundSeq: 0 }]) {
+      await expect(
+        runOneShot(
+          { segment: 'manual', modelId: 'opus-5.5', taskId: task.id, prompt: 'x', cwd: root, ...bad },
+          deps,
+        ),
+      ).rejects.toBeInstanceOf(OneShotError);
+    }
+    expect(spawned).toEqual([]);
+    expect(await t.db.select().from(runs)).toHaveLength(0);
+  });
+
   it('动手第一轮还没开 PR：pr_number 是 NULL（不是 0），单子、派工档、工作流、分支照记', async () => {
     const { repo, task } = await addTask(t.db);
     const workflowId = taskWorkflowId(repo, task.issueNumber);

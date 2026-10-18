@@ -16,6 +16,7 @@
 // 没交过的交给下一轮动手，交过的不重复派工，挂着就不合。验收之后到合上之间交的评审由合并那一步接（task-merge.ts：挂自动合并、
 // 等合并的每一圈、直接合之前都重读，读到了撤掉自动合并、交给这里同一份 handReviewChanges）。
 
+import { criterionNumbersOf } from '@fleet-dao/shared/run-cause';
 import { CancellationScope, log, patched } from '@temporalio/workflow';
 import { reviewFeedbackLines, reviewKey, reviewParkDetail } from '../review-feedback.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
@@ -187,6 +188,8 @@ function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): Cold
     authorFamilies: [...rt.families],
     round: roundNo,
     ...(tested ? { testOutput: tested } : {}),
+    // 这一笔验收属于第几个回合（#3140，只记账；老历史不带）
+    ...rt.verifyStamp(),
   };
   // 第 1 轮从头验，丢掉上一张头上留下的复核材料。这一支不调 patched()：老历史第 1 轮的命令顺序不变。
   if (roundNo === 1) {
@@ -206,18 +209,6 @@ function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): Cold
       priorProblems: prior.problems,
     },
   };
-}
-
-/** 从上轮问题里抽出验收条编号（「第 N 条」）。同一个号只留一次。 */
-function criterionNumbers(problems: readonly string[]): number[] {
-  const out: number[] = [];
-  for (const problem of problems) {
-    for (const match of problem.matchAll(/第\s*(\d+)\s*条/g)) {
-      const n = Number(match[1]);
-      if (n >= 1 && !out.includes(n)) out.push(n);
-    }
-  }
-  return out;
 }
 
 /** 和等 CI 同时起的那一次验收：结果（不抛）和只取消它自己的钩子。 */
@@ -268,6 +259,6 @@ export function noteVerifyProblems(rt: TaskRuntime, problems: string[]): void {
   rt.feedback = problems.map((p) => `验收没过：${p}`);
   rt.status.lastProblem = '验收没过';
   if (rt.head !== null) {
-    rt.verifyRecheck = { head: rt.head, criteria: criterionNumbers(problems), problems: [...problems] };
+    rt.verifyRecheck = { head: rt.head, criteria: criterionNumbersOf(problems), problems: [...problems] };
   }
 }

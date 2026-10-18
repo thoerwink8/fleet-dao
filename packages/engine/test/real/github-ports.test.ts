@@ -38,6 +38,8 @@ const repo = {
   testCommand: 'pnpm check',
 };
 const BRANCH = 'fleet/12-login';
+/** commitIn 写了 src/login.ts 一行：推上去的头相对主线的文件清单。 */
+const LOGIN_STAT = [{ path: 'src/login.ts', added: 1, removed: 0, binary: false }];
 
 let root: string;
 let m: ReturnType<typeof mirror>;
@@ -138,6 +140,8 @@ function setup(
     heartbeatEveryMs?: number;
     exec?: UserExec;
     confirmTreeIdle?: (dir: string, caller?: { workflowId?: string }) => Promise<'idle' | 'busy' | 'unknown'>;
+    recordHeadFiles?: NonNullable<Parameters<typeof createGitHubPorts>[0]['recordHeadFiles']>;
+    log?: NonNullable<Parameters<typeof createGitHubPorts>[0]['log']>;
   } = {},
 ) {
   const { gh, calls } = fakeGh(over);
@@ -584,9 +588,45 @@ describe('推分支', () => {
       changedFiles: ['src/login.ts'],
       // 同口径的新增行数（#2762 流程健康记账）：commitIn 写了一行
       addedLines: 1,
+      // 每个文件各增删几行（#3140，任务页的改动卡读它）
+      numstat: LOGIN_STAT,
     });
     expect(calls.pushBranch).toHaveLength(1);
     expect(readdirSync(join(root, 'tmp')).filter((f) => f.startsWith('push-'))).toEqual([]);
+  });
+
+  it('给了已开的 PR 号：推上去以后把这个头改了哪些文件记进库（pr_head_files）；没给 PR 号不记，清单照样交回（#3140）', async () => {
+    const recorded: unknown[] = [];
+    const { ports, trees } = setup({}, { recordHeadFiles: async (r) => void recorded.push(r) });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const base = { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head };
+    const first = await ports.pushBranch(base, ctx);
+    expect(first.numstat).toEqual(LOGIN_STAT);
+    expect(recorded).toEqual([]);
+    await ports.pushBranch({ ...base, prNumber: 7 }, ctx);
+    expect(recorded).toEqual([{ repoId: 'repo-1', prNumber: 7, headSha: head, files: LOGIN_STAT }]);
+  });
+
+  it('【故意造出的失败】记库写不进：推分支照样成功，只写日志，不挡流程（页面写没读到）', async () => {
+    const logs: string[] = [];
+    const { ports, trees } = setup(
+      {},
+      {
+        recordHeadFiles: async () => {
+          throw new Error('库不通');
+        },
+        log: (message) => void logs.push(message),
+      },
+    );
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const r = await ports.pushBranch(
+      { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head, prNumber: 7 },
+      ctx,
+    );
+    expect(r.head).toBe(head);
+    expect(logs.some((l) => l.includes('pr_head_files'))).toBe(true);
   });
 
   it('树的头不是要推的、有没提交的改动、没有新提交、树不在：明确报错，不推', async () => {
@@ -676,6 +716,7 @@ describe('推之前把最新主线并进会话的树', () => {
       head: merged,
       changedFiles: ['src/login.ts'],
       addedLines: 1,
+      numstat: LOGIN_STAT,
     });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([merged, merged]);
   });
@@ -777,6 +818,7 @@ describe('推之前把最新主线并进会话的树', () => {
       head: second,
       changedFiles: ['src/login.ts'],
       addedLines: 1,
+      numstat: LOGIN_STAT,
     });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([first, second, second]);
   });
@@ -1031,6 +1073,18 @@ describe('开 PR、CI、合并', () => {
     did: ['加了验证码'],
     verified: ['pnpm check'],
   };
+
+  it('开 PR 带上推头时数出来的文件清单：开成了才用真 PR 号记进库；清单没给不记（#3140）', async () => {
+    const recorded: unknown[] = [];
+    const { ports } = setup({}, { recordHeadFiles: async (r) => void recorded.push(r) });
+    await ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
+    expect(recorded).toEqual([]);
+    await ports.openPr(
+      { taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body, numstat: LOGIN_STAT },
+      ctx,
+    );
+    expect(recorded).toEqual([{ repoId: 'repo-1', prNumber: 101, headSha: m.head, files: LOGIN_STAT }]);
+  });
 
   it('正文给结构（github 包按模板渲染）；不抄需求 issue 的类别标签和里程碑、不读需求文档、不读单子挂的版本（#654）', async () => {
     const { ports, calls } = setup();
