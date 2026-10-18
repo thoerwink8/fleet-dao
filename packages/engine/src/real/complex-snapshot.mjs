@@ -364,7 +364,8 @@ function parseIndex(buf) {
     off += entrySize;
     if (off > end) fail('索引条目越界');
   }
-  let resolveUndo = '';
+  let resolveUndo = null;
+  let resolveUndoOids = [];
   while (off + 8 <= end) {
     const sig = buf.subarray(off, off + 4).toString('latin1');
     const size = buf.readUInt32BE(off + 4);
@@ -373,37 +374,60 @@ function parseIndex(buf) {
     const body = buf.subarray(off, off + size);
     off += size;
     if (sig === 'link') fail('分离索引不能自包含保全，保留原树');
-    if (sig === 'REUC') resolveUndo = formatResolveUndo(body);
-    else if (!INDEX_EXTENSIONS.has(sig)) fail(`索引扩展 ${sig} 不能保全，保留原树`);
+    if (sig === 'REUC') {
+      if (resolveUndo !== null) fail('索引里有两段 resolve-undo，认不出');
+      const parsed = parseResolveUndo(body);
+      resolveUndo = parsed.text;
+      resolveUndoOids = parsed.oids;
+    } else if (!INDEX_EXTENSIONS.has(sig)) fail(`索引扩展 ${sig} 不能保全，保留原树`);
   }
   if (off !== end) fail('索引尾部对不上');
-  return { indexFlags: lines.join('\n'), resolveUndo };
+  return { indexFlags: lines.join('\n'), resolveUndo: resolveUndo ?? '', resolveUndoOids };
 }
 
-function formatResolveUndo(body) {
+/**
+ * REUC：路径 NUL，三个八进制模式各以 NUL 结尾（没有这一层写 "0"），再按非零模式依次跟 20 字节二进制对象号。
+ * 这些对象常常只被 resolve-undo 指着，不在引用、reflog 和当前索引里，要进对象闭包。子模块提交保全不了，拒绝。
+ */
+function parseResolveUndo(body) {
   const lines = [];
+  const oids = [];
   let at = 0;
+  const field = (what) => {
+    const end = body.indexOf(0, at);
+    if (end < 0) fail(`resolve-undo ${what}被截断`);
+    const value = body.subarray(at, end).toString('utf8');
+    at = end + 1;
+    return value;
+  };
   while (at < body.length) {
-    const pathEnd = body.indexOf(0, at);
-    if (pathEnd < 0) fail('resolve-undo 路径被截断');
-    const path = body.subarray(at, pathEnd).toString('utf8');
-    at = pathEnd + 1;
-    const stages = [];
-    for (let stage = 0; stage < 3; stage += 1) {
-      if (at >= body.length) fail('resolve-undo 被截断');
-      if (body[at] === 0) {
-        stages.push('-');
-        at += 1;
+    const path = field('路径');
+    if (!path) fail('resolve-undo 路径是空的');
+    const modes = [];
+    for (let stage = 1; stage <= 3; stage += 1) {
+      const text = field('模式');
+      if (!/^[0-7]{1,7}$/.test(text)) fail(`resolve-undo 模式认不出：${path}`);
+      const mode = Number.parseInt(text, 8);
+      if (mode !== 0 && mode !== 0o100644 && mode !== 0o100755 && mode !== 0o120000) {
+        fail(`resolve-undo 里的模式 ${text} 不能保全：${path}`);
+      }
+      modes.push(mode);
+    }
+    const parts = [];
+    for (const mode of modes) {
+      if (mode === 0) {
+        parts.push('0 -');
         continue;
       }
-      const end = body.indexOf(0, at);
-      if (end < 0) fail('resolve-undo 被截断');
-      stages.push(body.subarray(at, end).toString('utf8'));
-      at = end + 1;
+      if (at + 20 > body.length) fail(`resolve-undo 对象号被截断：${path}`);
+      const oid = body.subarray(at, at + 20).toString('hex');
+      at += 20;
+      oids.push(oid);
+      parts.push(`${mode.toString(8)} ${oid}`);
     }
-    lines.push(`${path}\t${stages.join(' ')}`);
+    lines.push(`${path}\t${parts.join(' ')}`);
   }
-  return lines.join('\n');
+  return { text: lines.join('\n'), oids };
 }
 
 function resolveObject(expr, cwd) {
@@ -624,6 +648,12 @@ function collect(cwd, keepBytes) {
   const oids = new Set();
   addOids(git(['rev-list', '--objects', '--all', '--reflog'], cwd).toString('utf8'), oids);
   addIndexOids(indexInfo, oids);
+  for (const sha of parsedIndex.resolveUndoOids) {
+    const kind = spawnSync(gitBin, ['cat-file', '-t', sha], { cwd, env: gitEnv() });
+    if (kind.status !== 0) fail(`resolve-undo 指的对象缺失：${sha}`);
+    if (kind.stdout.toString('utf8').trim() !== 'blob') fail(`resolve-undo 指的对象不是文件内容：${sha}`);
+    oids.add(sha);
+  }
   for (const entry of stash) {
     oids.add(entry.sha);
     for (const parent of entry.parents) oids.add(parent);
