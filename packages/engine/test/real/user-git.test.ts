@@ -1,6 +1,18 @@
 // 会话目录里的 git（以会话用户的身份跑；这里用本机执行器、真 git、临时目录）：从 bundle 建树、交 bundle、快进，
 // 没跑成的明确报错，不拿空结果冒充「没有改动」。
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -17,7 +29,9 @@ import {
   ENVIRONMENT_FILES,
   fastForward,
   fetchBundle,
+  hasCheckout,
   hasMainline,
+  hasRepo,
   headOf,
   LEFTOVER_LIST_MAX,
   mainlineRef,
@@ -25,11 +39,13 @@ import {
   OUT_DIR,
   ownSpan,
   pinMainline,
+  repoDirectoryKey,
   treeLeftovers,
   type UserTree,
   uncommittedTracked,
 } from '../../src/real/user-git.ts';
 import { runChildOk } from '../child.ts';
+import { gitIn, isolatedGitEnv, isolatedUserExec, repoStamp } from './isolated-git.ts';
 
 let root: string;
 beforeEach(() => {
@@ -888,5 +904,204 @@ describe('树里还剩什么（每小时对账删树之前看）', { timeout: 60
     expect(await treeLeftovers(t, [], { scratch: true })).toMatchObject({ unpushedCount: 0 });
     writeFileSync(join(t.dir, 'x.ts'), 'x\n');
     expect(await treeLeftovers(t, [])).toMatchObject({ dirtyCount: 1, unpushedCount: 0 });
+  });
+});
+
+// 父仓里的空子目录：rev-parse --git-dir 会向上成功，不能据此把父仓当成目标自己的仓，也不能往父仓写。
+describe('目标目录自己的仓边界', { timeout: 60_000 }, () => {
+  const REF = 'refs/fleet/export/0';
+  const identity = { name: 'fleet-dao-agent[bot]', email: 'bofleet-test@localhost' };
+
+  function envFor(ceiling: string): Record<string, string> {
+    const home = join(ceiling, 'home');
+    mkdirSync(home, { recursive: true });
+    return isolatedGitEnv(realpathSync(ceiling), home);
+  }
+
+  function asTree(env: Record<string, string>, dir: string): UserTree {
+    mkdirSync(dir, { recursive: true });
+    return {
+      exec: isolatedUserExec(env),
+      user: 'fleet-agent-carpool',
+      dir,
+      scopePrefix: 'boundary',
+      git: 'git',
+      sh: 'sh',
+    };
+  }
+
+  function commitRepo(env: Record<string, string>, dir: string): string {
+    mkdirSync(dir, { recursive: true });
+    gitIn(env, dir, 'init', '-q', '-b', 'main');
+    writeFileSync(join(dir, 'README'), 'hi\n');
+    gitIn(env, dir, 'add', 'README');
+    gitIn(env, dir, 'commit', '-q', '-m', 'init');
+    return gitIn(env, dir, 'rev-parse', 'HEAD');
+  }
+
+  function bundleOf(env: Record<string, string>, dir: string, tip: string): Buffer {
+    gitIn(env, dir, 'update-ref', REF, tip);
+    const file = join(dir, '..', 'export.bundle');
+    gitIn(env, dir, 'bundle', 'create', file, REF);
+    gitIn(env, dir, 'update-ref', '-d', REF);
+    return readFileSync(file);
+  }
+
+  it('父仓里的空子目录不算有仓、也不算检出；取 bundle 和钉主线都在写入前停下，父仓的配置、HEAD、引用不变', async () => {
+    const env = envFor(root);
+    const parent = join(root, 'parent');
+    const head = commitRepo(env, parent);
+    const bundle = bundleOf(env, parent, head);
+    const child = join(parent, 'empty-child');
+    const before = repoStamp(env, parent);
+    const t = asTree(env, child);
+
+    expect(existsSync(join(child, '.git'))).toBe(false);
+    expect(await hasRepo(t)).toBe(false);
+    expect(await hasCheckout(t)).toBe(false);
+
+    const fetched = await fetchBundle(t, bundle, REF, { identity }).catch((e: unknown) => e);
+    const pinned = await pinMainline(t, 'main', head).catch((e: unknown) => e);
+    expect(fetched).toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: false,
+      message: expect.stringContaining(realpathSync(parent)),
+    });
+    expect(pinned).toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: false,
+      message: expect.stringContaining('不能往那里写'),
+    });
+    expect(repoStamp(env, parent)).toEqual(before);
+    expect(existsSync(join(child, '.git'))).toBe(false);
+    expect(gitIn(env, parent, 'status', '--porcelain')).toBe('');
+  });
+
+  it('真实检出、bare 仓、linked worktree、未初始化、还没有提交：判断各按各的，不合成一个', async () => {
+    const env = envFor(root);
+    const parent = join(root, 'parent');
+    const head = commitRepo(env, parent);
+    const checkout = asTree(env, parent);
+    expect(await hasRepo(checkout)).toBe(true);
+    expect(await hasCheckout(checkout)).toBe(true);
+
+    const bare = join(root, 'bare.git');
+    gitIn(env, root, 'clone', '--bare', parent, bare);
+    const bareHead = gitIn(env, bare, 'rev-parse', '--verify', 'HEAD^{commit}');
+    expect(bareHead).toMatch(/^[0-9a-f]{40}$/);
+    const bareTree = asTree(env, bare);
+    expect(await hasRepo(bareTree)).toBe(true);
+    expect(await hasCheckout(bareTree)).toBe(false);
+    const bareBefore = repoStamp(env, bare, bare);
+    const insideBare = asTree(env, join(bare, 'objects'));
+    expect(await hasRepo(insideBare)).toBe(false);
+    expect(await hasCheckout(insideBare)).toBe(false);
+    await expect(pinMainline(insideBare, 'main', head)).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: false,
+    });
+    expect(repoStamp(env, bare, bare)).toEqual(bareBefore);
+
+    const linked = join(root, 'linked');
+    gitIn(env, parent, 'worktree', 'add', '-q', linked, 'HEAD');
+    expect(lstatSync(join(linked, '.git')).isFile()).toBe(true);
+    const linkedTree = asTree(env, linked);
+    expect(await hasRepo(linkedTree)).toBe(true);
+    expect(await hasCheckout(linkedTree)).toBe(true);
+    const bundle = bundleOf(env, parent, head);
+    const linkedBefore = repoStamp(env, parent);
+    await expect(fetchBundle(linkedTree, bundle, REF, { identity })).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: false,
+      message: expect.stringContaining('共用元数据'),
+    });
+    await expect(pinMainline(linkedTree, 'main', head)).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: false,
+      message: expect.stringContaining('共用元数据'),
+    });
+    expect(repoStamp(env, parent)).toEqual(linkedBefore);
+
+    const unborn = asTree(env, join(root, 'unborn'));
+    gitIn(env, unborn.dir, 'init', '-q', '-b', 'main');
+    expect(await hasRepo(unborn)).toBe(true);
+    expect(await hasCheckout(unborn)).toBe(false);
+
+    const sibling = asTree(env, join(root, 'sibling'));
+    expect(await hasRepo(sibling)).toBe(false);
+    expect(await hasCheckout(sibling)).toBe(false);
+    expect(await fetchBundle(sibling, bundle, REF, { identity })).toBe(head);
+    expect(lstatSync(join(sibling.dir, '.git')).isDirectory()).toBe(true);
+
+    // .git 是文件，但 git 目录和共用目录是同一处：仍是自己的检出，钉主线写它自己，不要求 .git 必须是目录。
+    const separateGit = join(root, 'separate-git');
+    const separateWt = join(root, 'separate-wt');
+    gitIn(env, root, 'init', '-q', '--separate-git-dir', separateGit, '-b', 'main', separateWt);
+    writeFileSync(join(separateWt, 'a.txt'), 'a\n');
+    gitIn(env, separateWt, 'add', 'a.txt');
+    gitIn(env, separateWt, 'commit', '-q', '-m', 'separate');
+    const separateHead = gitIn(env, separateWt, 'rev-parse', 'HEAD');
+    expect(lstatSync(join(separateWt, '.git')).isFile()).toBe(true);
+    const separate = asTree(env, separateWt);
+    expect(await hasRepo(separate)).toBe(true);
+    expect(await hasCheckout(separate)).toBe(true);
+    await pinMainline(separate, 'main', separateHead);
+    expect(gitIn(env, separateWt, 'rev-parse', 'refs/remotes/origin/main')).toBe(separateHead);
+
+    const link = join(root, 'parent-link');
+    symlinkSync(parent, link);
+    const nested = join(parent, 'nested');
+    mkdirSync(nested);
+    expect(await hasRepo(asTree(env, nested))).toBe(false);
+    expect(await hasRepo({ ...checkout, dir: link })).toBe(true);
+    expect(await hasCheckout({ ...checkout, dir: `${parent}/` })).toBe(true);
+    expect(await hasRepo({ ...checkout, dir: join(nested, '..') })).toBe(true);
+    await pinMainline(checkout, 'main', head);
+    expect(gitIn(env, parent, 'rev-parse', 'refs/remotes/origin/main')).toBe(head);
+  });
+
+  it('同一物理目录的不同写法折成同一条；Windows 的扩展前缀和大小写也折', () => {
+    expect(repoDirectoryKey(join(root, 'a', 'b', '..'))).toBe(repoDirectoryKey(join(root, 'a')));
+    expect(repoDirectoryKey('C:\\Repo\\child\\..', 'win32')).toBe(repoDirectoryKey('c:/repo', 'win32'));
+    expect(repoDirectoryKey('\\\\?\\C:\\Repo', 'win32')).toBe(repoDirectoryKey('C:\\repo', 'win32'));
+    expect(repoDirectoryKey('\\\\?\\UNC\\Server\\Share\\Repo', 'win32')).toBe(
+      repoDirectoryKey('\\\\server\\share\\repo', 'win32'),
+    );
+  });
+
+  it('归属没读成：明确报错，取 bundle 和钉主线都不往下写', async () => {
+    const dir = join(root, 'unreadable');
+    mkdirSync(dir);
+    const argv: string[][] = [];
+    const exec: UserTree['exec'] = (command) => {
+      argv.push(command.argv);
+      return Promise.resolve({
+        code: 128,
+        stdout: Buffer.alloc(0),
+        stderr: "fatal: detected dubious ownership in repository at '/tmp/x'\n",
+        timedOut: false,
+        aborted: false,
+      });
+    };
+    const t: UserTree = {
+      exec,
+      user: 'fleet-agent-carpool',
+      dir,
+      scopePrefix: 'boundary',
+      git: 'git',
+      sh: 'sh',
+    };
+    await expect(fetchBundle(t, Buffer.from('x'), REF, { identity })).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: true,
+      message: expect.stringContaining('看这个目录归哪一个仓'),
+    });
+    await expect(pinMainline(t, 'main', 'a'.repeat(40))).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: true,
+      message: expect.stringContaining('看这个目录归哪一个仓'),
+    });
+    const flat = argv.map((args) => args.join(' ')).join('\n');
+    expect(flat).not.toMatch(/\b(init|config|fetch|update-ref)\b/);
   });
 });

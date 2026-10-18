@@ -1,6 +1,8 @@
 // 会话目录里的 git，一律以会话用户的身份跑（经 exec.ts）：从 bundle 建树、看头和改动、把新提交打成 bundle 交出来、
 // 并主线后快进。git 没跑成一律抛 PortError（带白话原因），不拿空字符串、空列表冒充「没有改动」。
 
+import { realpathSync } from 'node:fs';
+import path from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { PortError } from '../ports.ts';
 import { describeFailure, type UserCommandResult, type UserExec } from './exec.ts';
@@ -77,20 +79,175 @@ function assertSha(sha: string, what: string): void {
     throw new PortError('BAD_INPUT', `${what} 不是完整的提交号：${sha}`, { retryable: false });
 }
 
-/** 目录里有没有 git 仓（.git 在不在）。 */
-export async function hasRepo(t: UserTree): Promise<boolean> {
-  const r = await run(t, [t.git ?? GIT, 'rev-parse', '--git-dir']);
-  if (r.code === 0) return true;
-  if (r.code === 128) return false;
-  throw new PortError('GIT_FAILED', describeFailure('看目录里有没有仓', r), { retryable: true });
+/** `rev-parse` 退出 128 且是这句时，才是「这里和祖先都没有仓」。别的 128（比如归属可疑）是没看成。 */
+const NOT_A_REPO = /not a git repository/;
+
+/**
+ * 两条路径是不是同一个目录。先按当前系统（或测试注入的平台）做词法规范化：`.`、`..`、尾部分隔符；
+ * Windows 上再去掉 `\\?\`、折大小写。路径真在磁盘上时再解析符号链接——Windows 的长短路径也由这一步
+ * 收成同一条（`realpathSync.native`）。读不了（权限）就抛，不当成「不是同一个」。
+ * platform 只给测试注入另一套路径规则；生产不传。
+ */
+export function repoDirectoryKey(input: string, platform: NodeJS.Platform = process.platform): string {
+  if (platform === 'win32') {
+    const lexical = winRepoPath(input);
+    const physical = platform === process.platform ? existingPath(lexical) : lexical;
+    return winRepoPath(physical).toLowerCase();
+  }
+  const physical =
+    platform === process.platform ? existingPath(path.resolve(input)) : path.posix.resolve(input);
+  return physical.length > 1 ? physical.replace(/\/+$/, '') : physical;
+}
+
+function winRepoPath(input: string): string {
+  let p = input.trim().replace(/\//g, '\\');
+  if (p.slice(0, 8).toUpperCase() === '\\\\?\\UNC\\') p = `\\\\${p.slice(8)}`;
+  else if (p.slice(0, 4).toUpperCase() === '\\\\?\\') p = p.slice(4);
+  p = path.win32.resolve(p);
+  if (p.length > 3) p = p.replace(/[\\/]+$/, '');
+  return p;
+}
+
+function existingPath(absolute: string): string {
+  try {
+    return realpathSync.native(absolute);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ENOENT' || code === 'ENOTDIR') return absolute;
+    throw error;
+  }
+}
+
+function sameDirectory(dir: string, gitPath: string): boolean {
+  const other = path.isAbsolute(gitPath) ? gitPath : path.resolve(dir, gitPath);
+  return repoDirectoryKey(dir) === repoDirectoryKey(other);
+}
+
+type RepoPlace =
+  | { kind: 'none' }
+  | { kind: 'checkout' }
+  | { kind: 'bare' }
+  | { kind: 'ancestor'; found: string };
+
+function placeError(t: UserTree, message: string, retryable = true): PortError {
+  return new PortError('GIT_FAILED', message, {
+    retryable,
+    details: { user: t.user, dir: t.dir },
+  });
+}
+
+function pathsMatch(t: UserTree, gitPath: string): boolean {
+  try {
+    return sameDirectory(t.dir, gitPath);
+  } catch (error) {
+    throw placeError(
+      t,
+      `看这个目录归哪一个仓没看成（${error instanceof Error ? error.message : '读不了路径'}）`,
+    );
+  }
 }
 
 /**
- * 目录里是不是一份检出好的仓：仓在，而且 HEAD 解析得出提交。建树是先 init 再从 bundle 取、再检出，取包半截失败的树
- * 只有一个空仓（HEAD 指着还不存在的分支）——光看 .git 在不在会把它当成建好了，会话就在空树里干活。
+ * 这个目录自己的仓边界，不是 git 向上摸到的祖先。
+ * - none：这里和祖先都没有仓。
+ * - checkout：非 bare 的工作树顶层（含 linked worktree，.git 可以是文件）。
+ * - bare：这个目录本身就是 bare 仓。
+ * - ancestor：git 找到了仓，但顶层或 git 目录不是这里（父仓里的空子目录、bare 仓里的子目录、站在 .git 里）。
+ * 归属命令没跑成（不是「没有仓」）就抛，不当成 none。
+ */
+async function repoPlace(t: UserTree): Promise<RepoPlace> {
+  const bin = t.git ?? GIT;
+  const probed = await run(t, [bin, 'rev-parse', '--is-bare-repository', '--is-inside-work-tree']);
+  if (probed.code === 128 && NOT_A_REPO.test(probed.stderr)) return { kind: 'none' };
+  if (probed.code !== 0) throw placeError(t, describeFailure('看这个目录归哪一个仓', probed));
+  const [bare, inside] = text(probed)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if ((bare !== 'true' && bare !== 'false') || (inside !== 'true' && inside !== 'false')) {
+    throw placeError(t, `看这个目录归哪一个仓：输出认不出（${text(probed).trim().slice(0, 80) || '空的'}）`);
+  }
+  if (inside === 'true') {
+    const top = await run(t, [bin, 'rev-parse', '--show-toplevel']);
+    if (top.code !== 0) throw placeError(t, describeFailure('看这个目录归哪一个仓', top));
+    const found = text(top).trim();
+    if (!found) throw placeError(t, '看这个目录归哪一个仓：输出认不出（空的）');
+    if (pathsMatch(t, found)) return { kind: 'checkout' };
+    return { kind: 'ancestor', found };
+  }
+  const located = await run(t, [bin, 'rev-parse', '--absolute-git-dir']);
+  if (located.code !== 0) throw placeError(t, describeFailure('看这个目录归哪一个仓', located));
+  const found = text(located).trim();
+  if (!found) throw placeError(t, '看这个目录归哪一个仓：输出认不出（空的）');
+  // bare 的目录本身就是 git 目录。工作树的 .git、bare 里面的子目录都不是目标自己的边界。
+  if (bare === 'true' && pathsMatch(t, found)) return { kind: 'bare' };
+  return { kind: 'ancestor', found };
+}
+
+/**
+ * 元数据是不是这份仓自己的（git 目录和共用目录是同一处）。
+ * linked worktree 的 .git 是文件，检出根仍是它自己，但配置和引用写进主仓的共用目录。
+ * 这只约束建树写入；不用「.git 必须是目录」来认仓（独立的 gitfile、submodule 共用目录和 git 目录相同）。
+ */
+async function metadataIsOwn(t: UserTree): Promise<boolean> {
+  const bin = t.git ?? GIT;
+  const gitDir = await run(t, [bin, 'rev-parse', '--absolute-git-dir']);
+  if (gitDir.code !== 0) throw placeError(t, describeFailure('看这个目录的 git 目录', gitDir));
+  const common = await run(t, [bin, 'rev-parse', '--git-common-dir']);
+  if (common.code !== 0) throw placeError(t, describeFailure('看这个目录的共用 git 目录', common));
+  const gitDirPath = text(gitDir).trim();
+  const commonPath = text(common).trim();
+  if (!gitDirPath || !commonPath) throw placeError(t, '看这个目录的 git 目录：输出认不出（空的）');
+  const commonAbs = path.isAbsolute(commonPath) ? commonPath : path.resolve(t.dir, commonPath);
+  return pathsAre(gitDirPath, commonAbs, t);
+}
+
+function pathsAre(a: string, b: string, t: UserTree): boolean {
+  try {
+    return repoDirectoryKey(a) === repoDirectoryKey(b);
+  } catch (error) {
+    throw placeError(
+      t,
+      `看这个目录的 git 目录没看成（${error instanceof Error ? error.message : '读不了路径'}）`,
+    );
+  }
+}
+
+/**
+ * 建树写入前的归属：没有仓（可以在这里 init），或这份目录自己的仓且元数据不和别的仓共用。
+ * 祖先对不上、共用元数据、归属没读成，都在这里停，调用方还没写。
+ */
+async function writableTree(t: UserTree, what: string): Promise<'none' | 'own'> {
+  const place = await repoPlace(t);
+  if (place.kind === 'ancestor') {
+    throw placeError(t, `${what}：这个目录在别的仓里（Git 认的是 ${place.found}），不能往那里写`, false);
+  }
+  if (place.kind === 'none') return 'none';
+  if (!(await metadataIsOwn(t))) {
+    throw placeError(t, `${what}：这个检出和别的仓共用元数据，不能在这里改配置或引用`, false);
+  }
+  return 'own';
+}
+
+/**
+ * 目标目录本身是不是一个仓的边界：工作树顶层，或这个目录就是 bare 仓。
+ * 父仓里的空子目录不算——`rev-parse --git-dir` 成功只说明处在某个仓或工作树里，git 会向上找到父仓。
+ * linked worktree（.git 是文件）的顶层就是它自己，算有仓。bare 算有仓；是不是检出由 hasCheckout 另判。
+ */
+export async function hasRepo(t: UserTree): Promise<boolean> {
+  const place = await repoPlace(t);
+  return place.kind === 'checkout' || place.kind === 'bare';
+}
+
+/**
+ * 目标目录本身是不是一份非 bare 的检出根，并且 HEAD 解析得出提交。
+ * 在父仓里面、bare 仓、或 init 了还没有提交的空仓，都不是。建树是先 init 再从 bundle 取、再检出，取包半截失败的树
+ * 只有一个空仓（HEAD 指着还不存在的分支）——光看仓边界在不在会把它当成建好了，会话就在空树里干活。
+ * linked worktree 只要顶层是它自己、HEAD 有效，就是。
  */
 export async function hasCheckout(t: UserTree): Promise<boolean> {
-  if (!(await hasRepo(t))) return false;
+  const place = await repoPlace(t);
+  if (place.kind !== 'checkout') return false;
   const r = await run(t, [t.git ?? GIT, 'rev-parse', '--verify', '--quiet', 'HEAD^{commit}']);
   if (r.code === 0) return true;
   if (r.code === 1 || r.code === 128) return false;
@@ -115,7 +272,9 @@ export async function fetchBundle(
   if (!/^refs\/fleet\/[A-Za-z0-9/_.-]+$/.test(ref)) {
     throw new PortError('BAD_INPUT', `bundle 里的引用名不对：${ref}`, { retryable: false });
   }
-  const fresh = !(await hasRepo(t));
+  // 先核对归属再 init / 改配置 / fetch。父仓里的空目录这里还不是仓，但不能 init：那会写进父仓的工作树。
+  const own = await writableTree(t, '从 bundle 取提交');
+  const fresh = own === 'none';
   if (fresh) await git(t, ['init', '-q'], '建仓');
   // 给了身份就每次都设（幂等）：建了仓、没设好身份就断了的树，同一个 runId 重试时也补得上
   if (options.identity) {
@@ -185,11 +344,12 @@ export async function hasMainline(t: UserTree, defaultBranch: string): Promise<b
  */
 export async function pinMainline(t: UserTree, defaultBranch: string, sha: string): Promise<void> {
   assertSha(sha, '主线的提交');
-  await git(
-    t,
-    ['update-ref', mainlineRef(defaultBranch), sha],
-    `把 origin/${defaultBranch} 钉到 ${sha.slice(0, 7)}`,
-  );
+  const ref = mainlineRef(defaultBranch);
+  const what = `把 origin/${defaultBranch} 钉到 ${sha.slice(0, 7)}`;
+  // 不经过 hasRepo。目录在父仓里时 update-ref 会改父仓的引用，所以写入前单独拒。
+  const own = await writableTree(t, what);
+  if (own === 'none') throw placeError(t, `${what}：这个目录还不是仓`, false);
+  await git(t, ['update-ref', ref, sha], what);
 }
 
 /** 仓里有没有这个提交（换检出之前先看：已经有了就不用再从镜像取，取了反而是空包）。 */
