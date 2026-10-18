@@ -1,7 +1,7 @@
 // docs/PROGRESS.md 的骨架：进度和创始人引导记在 GitHub 置顶单 #1055，这个文件只剩「生效中的临时调整」表。
 // 为什么要钉：开会话钩子（agents/hooks/session-start.mjs）只认这个文件里的「## 生效中的临时调整」标题——标题被改名、
 // 被搬进归档页时它是**静默返回空**（等于「没有到期的」），不会红。所以这里把「这一节在原文件、正好一个、表读得出来」
-// 「归档页里没有这个标题（否则钩子报「不止一张」）」「引导节标题不再出现在 PROGRESS 和归档页（否则别的仓用的老读法会把它当成待办）」
+// 「归档页里没有这个标题（否则钩子报「不止一张」）」「旧的引导清单标题不再出现在 PROGRESS 和归档页（引导记在 docs/directives/，两处记会分叉）」
 // 「指向进度单的那一行还在」钉成测试；每一条都配一条故意造出失败的用例。
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -20,7 +20,6 @@ interface Result {
 type Git = (cwd: string, args: string[]) => Result;
 interface HookLib {
   TEMP_HEADING: string;
-  DIRECTIVE_HEADING: string;
   gitRunner(timeoutMs?: number): Git;
   checkTemporary(cwd: string, git: Git, now?: number): string[];
   parseTempTable(text: string, headingLine: number, today: string): { broken?: string; missing?: string[] };
@@ -28,6 +27,8 @@ interface HookLib {
 
 const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const hook = (await import(pathToFileURL(join(ROOT, 'agents/hooks/session-start.mjs')).href)) as HookLib;
+/** 旧的仓内引导清单标题：引导一条一个文件记在 docs/directives/，这个标题不该回来 */
+const DIRECTIVE_HEADING = '## 创始人引导（待处理）';
 
 const PROGRESS = 'docs/PROGRESS.md';
 const ARCHIVE_DIR = 'docs/archive';
@@ -52,13 +53,13 @@ function problems(progress: string, arch: Record<string, string>): string[] {
     if (r.broken) out.push(`临时调整表认不出：${r.broken}`);
   }
   if (!progress.includes('#1055')) out.push(`${PROGRESS} 里没写进度单 #1055（接手的人找不到进度在哪）`);
-  if (countLine(progress, hook.DIRECTIVE_HEADING) > 0)
-    out.push(`${PROGRESS} 里又有了「${hook.DIRECTIVE_HEADING}」：引导记在进度单 #1055，不在这里`);
+  if (countLine(progress, DIRECTIVE_HEADING) > 0)
+    out.push(`${PROGRESS} 里又有了「${DIRECTIVE_HEADING}」：引导记在进度单 #1055，不在这里`);
   for (const [f, t] of Object.entries(arch)) {
     if (countLine(t, hook.TEMP_HEADING) > 0)
       out.push(`${ARCHIVE_DIR}/${f} 里有「${hook.TEMP_HEADING}」：钩子会当成第二张表`);
-    if (countLine(t, hook.DIRECTIVE_HEADING) > 0)
-      out.push(`${ARCHIVE_DIR}/${f} 里有「${hook.DIRECTIVE_HEADING}」：别的仓用的老读法会把它当成待办`);
+    if (countLine(t, DIRECTIVE_HEADING) > 0)
+      out.push(`${ARCHIVE_DIR}/${f} 里有「${DIRECTIVE_HEADING}」：引导记在 docs/directives/，不在这里`);
   }
   return out;
 }
@@ -126,13 +127,15 @@ describe('docs/PROGRESS.md 骨架：钩子读的临时调整表还在，进度�
       expect(problems(progress, twice).join('\n')).toMatch(/progress-extra\.md 里有「## 生效中的临时调整」/);
       expect(hook.checkTemporary(repoWith(progress, twice), GIT, NOW).join('\n')).toMatch(/不止一张/);
 
-      const inboxBack = `${progress.trimEnd()}\n\n${hook.DIRECTIVE_HEADING}\n\n- x\n`;
+      const inboxBack = `${progress.trimEnd()}\n\n${DIRECTIVE_HEADING}\n\n- x\n`;
       expect(problems(inboxBack, arch).join('\n')).toMatch(/引导记在进度单 #1055，不在这里/);
       const inboxMoved = {
         ...arch,
-        'progress-extra.md': `# 另一页\n\n${hook.DIRECTIVE_HEADING}\n`,
+        'progress-extra.md': `# 另一页\n\n${DIRECTIVE_HEADING}\n`,
       };
-      expect(problems(progress, inboxMoved).join('\n')).toMatch(/老读法会把它当成待办/);
+      expect(problems(progress, inboxMoved).join('\n')).toMatch(
+        /progress-extra\.md 里有「## 创始人引导（待处理）」/,
+      );
 
       expect(problems(progress.replaceAll('#1055', '#0'), arch).join('\n')).toMatch(/没写进度单 #1055/);
     },

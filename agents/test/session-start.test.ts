@@ -67,7 +67,6 @@ interface HookLib {
   ): string[];
   RECENT_TOTAL_CHARS: number;
   checkTemporary(cwd: string, git: Git, now?: number): string[];
-  checkDirectives(cwd: string, git: Git, lineage?: Lineage | null): string[];
   sweepWorktrees(cwd: string, git: Git, now?: number, home?: string): string[];
   beijingToday(now?: number): string;
   render(lines: string[]): string;
@@ -846,8 +845,9 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     expect(lines.at(-1)).toMatch(/^规矩同步/);
   });
 
-  it('工人（FLEET_WORKER=1）开场只留规矩同步：不出创始人引导、临时调整、他最近的话、工作树清单；不带它的会话照旧都出', () => {
+  it('工人（FLEET_WORKER=1）开场只留规矩同步：不出临时调整、他最近的话、工作树清单；不带它的会话照旧都出', () => {
     const w = world();
+    // 仓里留着旧的「## 创始人引导（待处理）」清单也不再读：引导不记在别的仓里（通用段「我拍的板」那条）
     writeFileSync(
       join(w.work, 'PROGRESS.md'),
       `${plan(subagent)}\n## 创始人引导（待处理）\n\n- 04:42 「坏的要删」\n`,
@@ -857,50 +857,12 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
     const base = { cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW };
     const normal = hook.sessionStart({ ...base, env: {} }).join('\n');
-    expect(normal).toContain('创始人引导还有 1 条没处理');
+    expect(normal).not.toContain('坏的要删');
     expect(normal).toContain('临时调整到了最迟复查日期');
 
     const lines = hook.sessionStart({ ...base, env: { FLEET_WORKER: '1' } });
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatch(/^规矩同步/);
-  });
-});
-
-describe('会话所在仓的「创始人引导（待处理）」清单', SLOW, () => {
-  const head = '# 进度\n\n## 创始人引导（待处理）\n\n';
-  const tail = '\n## 别的节\n';
-
-  it('有没处理完的引导：一行报几条，提醒办完标已处理或删掉', () => {
-    const text = `${head}- 04:42 「坏的要删」\n- 05:33 「删库表选 1」\n${tail}`;
-    const dir = repo({ 'docs/PROGRESS.md': text });
-    const lines = hook.checkDirectives(dir, git);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('创始人引导还有 2 条没处理');
-    expect(lines[0]).toContain('坏的要删');
-    expect(lines[0]).toContain('删库表选 1');
-  });
-
-  it('都标了「已处理」：不出声', () => {
-    const text = `${head}- 04:42「坏的要删」已处理\n${tail}`;
-    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': text }), git)).toEqual([]);
-  });
-
-  it('没有这一节、不是 git 仓：都不出声', () => {
-    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': '# 进度\n\n## 版本\n' }), git)).toEqual([]);
-  });
-
-  it('【故意造出失败】把待处理那条标成「已处理」之后就不再报——断言它真读了内容，不是恒返回空', () => {
-    const pending = repo({ 'docs/PROGRESS.md': `${head}- 04:42「坏的要删」\n${tail}` });
-    const done = repo({ 'docs/PROGRESS.md': `${head}- 04:42「坏的要删」已处理\n${tail}` });
-    expect(hook.checkDirectives(pending, git)).toHaveLength(1);
-    expect(hook.checkDirectives(done, git)).toEqual([]);
-  });
-
-  it('【故意造出的失败】git 跑不起来：明说没查成，不当成没事', () => {
-    const dead: Git = () => ({ status: 3221225781, stdout: '', stderr: '' });
-    expect(hook.checkDirectives(repo({ 'docs/PROGRESS.md': head }), dead)[0]).toMatch(
-      /创始人引导待处理清单没查成/,
-    );
   });
 });
 
@@ -1828,30 +1790,6 @@ describe('引导认主：进度单 #1055 上的待处理引导只叫主人那个
     expect(lines[0]).toContain(Array.from(LONG).slice(0, 40).join(''));
     expect(lines[0]).not.toContain('〔主：');
     expect(lines[1]).toMatch(/^无主的创始人引导 1 条/);
-  });
-});
-
-describe('引导认主：别的仓「## 创始人引导（待处理）」清单里的〔主：…〕', SLOW, () => {
-  const mine: Lineage = { status: 'found', dir: 'dir-a', sessionIds: ['dir-a'] };
-  const theirs: Lineage = { status: 'found', dir: 'dir-b', sessionIds: ['dir-b'] };
-  const text =
-    '# 进度\n\n## 创始人引导（待处理）\n\n' +
-    '- 04:42「坏的要删」〔主：dir-a〕\n- 05:33「删库表选 1」〔主：dir-b〕\n- 06:00「老的一条」\n\n## 别的节\n';
-
-  it('本血缘的和无主的列出来（无主的标出来、叫先写上主再办）；别的会话的只计数', () => {
-    const [line] = hook.checkDirectives(repo({ 'docs/PROGRESS.md': text }), git, mine);
-    expect(line).toContain('创始人引导还有 2 条没处理');
-    expect(line).toContain('坏的要删');
-    expect(line).toContain('（无主）06:00「老的一条」');
-    expect(line).toContain('无主的先在那一条写上〔主：dir-a〕认领再办');
-    expect(line).toContain('别的会话还有 1 条引导在办');
-    expect(line).not.toContain('删库表');
-  });
-
-  it('【故意造出的失败】换成另一个会话：它看得到自己那条，看不到 A 的', () => {
-    const [line] = hook.checkDirectives(repo({ 'docs/PROGRESS.md': text }), git, theirs);
-    expect(line).toContain('删库表');
-    expect(line).not.toContain('坏的要删');
   });
 });
 

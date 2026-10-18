@@ -26,7 +26,6 @@
 //    查不成就说没查成。结果缓存 QUIET_MS，免得每条消息都 ssh。认不出的不当成没到期。
 // 6. 仓合同：会话所在仓按 fleet-dao 的 agents/repo-contract.json 查，
 //    有缺项说一段事实，每个仓每天最多一次，全过不出声。只在真开会话时接上（repoContract 参数），测试按需注入。
-//    引导条目的〔范围：通用｜只此仓〕：checkDirectives 在那一行后面补一句没标的、标了通用还没上推的。
 // 环境变量 FLEET_WORKER=1（机器派的会话设）：只做第 1、2 件，其余各段（创始人的事、整池暂停、工作树）一律不出。
 // 没查成、没做成都明说原因和这台落后主线几个提交，不当成是最新的。一律退出 0：开会话钩子退出码非 0 也挡不住会话，
 // 只会把输出丢掉；钩子自己出了意外也要打一句「没查成」。
@@ -50,7 +49,7 @@ import { lineageOf, readFounderHistory } from './founder-inbox.mjs';
 import { fetchIsFresh, fetchWithFallback, markFetchOk, repoStampKey } from './fresh-main.mjs';
 import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } from './git-run.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
-import { contractLines, DIRECTIVE_HEADING, pendingItems, scopeNote } from './repo-contract.mjs';
+import { contractLines } from './repo-contract.mjs';
 import { selectSessionId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
 
 export const SYNC_MS = 30_000;
@@ -290,19 +289,9 @@ export function checkTemporary(cwd, git, now = Date.now()) {
 }
 
 /**
- * 第 3.5 件：会话所在仓里的「## 创始人引导（待处理）」一节（通用段「你的引导必须落盘」那条）。
- * 有没处理完的引导就报几条、让人接着办；没有这一节、不是 git 仓不出声；git 跑不起来、读不了明说没查成。
- * 只用本地 git grep 找已跟踪的 .md（不取远端，限时 GREP_MS），不拖慢开会话。返回要说的几行。
- */
-// 标题和条目的读法放在 repo-contract.mjs：收尾的 Stop 钩子、仓合同的 progress 一项读的是同一个
-export { DIRECTIVE_HEADING };
-
-const DIRECTIVE_NOT_CHECKED = '创始人引导待处理清单没查成';
-
-/**
  * 引导认主（同一个仓开着几个指挥官会话时，每个都被叫去办全部待处理引导，会撞车开出重复 PR）。
- * 主人是记下它的那个会话的血缘（Mirasim 会话目录名，founder-inbox.mjs 的 lineageOf），写成 `〔主：<目录名>〕`：进度单 #1055 的评论里
- * 由 pnpm progress directive 写（认主后不再改）；别的仓「## 创始人引导（待处理）」清单的条目里手写。
+ * 主人是记下它的那个会话的血缘（Mirasim 会话目录名，founder-inbox.mjs 的 lineageOf），由 pnpm progress directive
+ * 写成 `〔主：<目录名>〕`（认主后不再改）。
  * 开会话时本血缘的列出来叫它办；有主、主不是本血缘的只计数、不列原文；没写主或写「无主」的照列，但要先认领。
  */
 export const NO_OWNER = '无主';
@@ -316,73 +305,6 @@ function splitOwner(text) {
 
 /** 本会话的血缘目录名；无血缘、没查成都是 null（有主的引导就一律不算本会话的） */
 const lineageDir = (lineage) => (lineage?.status === 'found' ? lineage.dir : null);
-
-export function checkDirectives(cwd, git, lineage = null) {
-  const top = git(cwd, ['rev-parse', '--show-toplevel']);
-  if (gitBroken(top))
-    return [
-      `${DIRECTIVE_NOT_CHECKED}：这台的 git 跑不起来（${why(top)}），会话所在仓里有没有没处理的引导不知道。`,
-    ];
-  const root = top.stdout.trim();
-  if (!ok(top) || !root) return [];
-  const found = git(root, [
-    'grep',
-    '-n',
-    '-z',
-    '-I',
-    '-E',
-    `^${DIRECTIVE_HEADING}[[:space:]]*$`,
-    '--',
-    '*.md',
-  ]);
-  if (found.status === 1 && !found.error && !found.stderr.trim()) return [];
-  if (!ok(found)) return [`${DIRECTIVE_NOT_CHECKED}：git grep 找这一节没成（${why(found)}）。`];
-  const hits = found.stdout
-    .split('\n')
-    .filter(Boolean)
-    .map((l) => /^([^\0]+)\0(\d+)\0/.exec(l));
-  if (hits.length === 0 || hits.some((m) => m === null))
-    return [`${DIRECTIVE_NOT_CHECKED}：git grep 的输出认不出（${why(found)}）。`];
-  const out = [];
-  for (const [, file, n] of hits) {
-    let text;
-    try {
-      text = readFileSync(join(root, file), 'utf8');
-    } catch (err) {
-      out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：读不了（${err?.code ?? err?.message ?? err}）。`);
-      continue;
-    }
-    const items = pendingItems(text, Number(n));
-    if (items === null) {
-      out.push(`${DIRECTIVE_NOT_CHECKED}（${file}:${n}）：标题下面认不出条目。`);
-      continue;
-    }
-    // 认主：本血缘的、无主的列出来；有主、主不是本血缘的只计数
-    const mine = lineageDir(lineage);
-    const parts = items.map(splitOwner);
-    const shown = parts.filter((p) => p.owner === NO_OWNER || p.owner === mine);
-    const others = parts.length - shown.length;
-    const unowned = shown.filter((p) => p.owner === NO_OWNER).length;
-    const said = [];
-    if (shown.length > 0) {
-      const listed = shown
-        .slice(0, 5)
-        .map((p) => `${mine && p.owner === NO_OWNER ? '（无主）' : ''}${brief(p.text)}`);
-      said.push(
-        `创始人引导还有 ${shown.length} 条没处理（${file}:${n}）：${listed.join('；')}${shown.length > 5 ? ' 等' : ''}。先接着办，办完把那条标「已处理」或删掉。`,
-      );
-      // 〔范围：通用｜只此仓〕：只看待处理的、归本会话或无主的，已处理的老条目不追溯
-      const scope = scopeNote(shown.map((p) => p.text));
-      if (scope) said.push(scope);
-      if (mine && unowned > 0)
-        said.push(`无主的先在那一条写上〔主：${mine}〕认领再办（已写了别的主的不动）。`);
-    }
-    if (others > 0)
-      said.push(`别的会话还有 ${others} 条引导在办（${file}:${n}，写了别的〔主：…〕），不归你，别动。`);
-    if (said.length > 0) out.push(said.join(''));
-  }
-  return out;
-}
 
 /** 这台同步到哪个提交、落后主线几个（g 已经钉在同步专用的检出上了；算不了就说算不了） */
 function lag(g, synced, stale) {
@@ -633,8 +555,8 @@ export function checkIdlePrs({ cwd, git, run, fetch, mirror = null }) {
 
 /**
  * fleet-dao 的创始人引导记在 GitHub 置顶单 #1055（pnpm progress directive），不在仓里的文件里：这里起
- * `progress.ts read --pending` 读没处理的几条，硬超时 PROGRESS_MS。不是 fleet-dao 不出声（别的仓仍读自己的
- * 「## 创始人引导（待处理）」一节，见 checkDirectives）；查不成出一行「没查成」，不挡开会话。
+ * `progress.ts read --pending` 读没处理的几条，硬超时 PROGRESS_MS。不是 fleet-dao 不出声（别的仓不记引导：
+ * 通用段「我拍的板」那条）；查不成出一行「没查成」，不挡开会话。
  * 优先用同步专用检出里那份脚本，没有再用会话所在检出里的。
  */
 export const PROGRESS_MS = 8_000;
@@ -1014,7 +936,6 @@ export function sessionStart({
     ...unattendedSessionLines({ dir: unattendedDir, sessionId, env, now }),
     ...checkTemporary(cwd, localGit, now),
     ...poolHoldPromptLines(holdRead, beijingToday(now)),
-    ...checkDirectives(cwd, localGit, lineage),
     ...(repoContract ? repoContract(cwd) : []),
     ...(quiet
       ? []
@@ -1242,7 +1163,6 @@ export function fastSessionStart({
   const h = got('holds');
   if (h?.ok) lines.push(...poolHoldPromptLines(h.value, beijingToday(now)).map(aged));
   lines.push(...failed('holds', '整池暂停'));
-  lines.push(...checkDirectives(cwd, localGit, lineage));
   lines.push(...(repoContract ? repoContract(cwd) : []));
   // 引导段同步现查，不用后台缓存：缓存里的「没办完」可能已经办完了（#2726）；办没办完看挂的单，读 GitHub（#2727）
   const syncDir = source ? source.syncDirIn(home) : null;
