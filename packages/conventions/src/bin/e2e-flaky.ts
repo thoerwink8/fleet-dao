@@ -1,4 +1,4 @@
-// 驾驶舱 e2e 的偶发统计（决定 0093，判法在 ../e2e-flaky.ts）。两种用法：
+// 驾驶舱 e2e 的偶发统计（决定 0093，判法在 ../e2e-flaky.ts，已完成处置的去重在 ../e2e-flaky-settled.ts）。两种用法：
 //   node packages/conventions/src/bin/e2e-flaky.ts summary <Playwright JSON 报告>...
 //     一轮的汇总（偶发的、隔离集里的结局、过了限期的），打到标准输出；ci.yml 的 e2e job 接进 job 摘要。
 //   node packages/conventions/src/bin/e2e-flaky.ts scan <runs.json> <报告目录>
@@ -16,22 +16,24 @@ import { join } from 'node:path';
 import {
   BROKEN_ROUND_TITLE,
   deadline,
-  evidenceUnresolved,
   FLAKY_WINDOW,
-  idleScanLine,
   isBrokenRound,
-  loadWindowEvidence,
-  needsSettledEvidence,
   type OpenIssue,
   type Outcomes,
   outcomesOf,
   parseQuarantine,
-  planIssues,
   type RunOutcomes,
   runFromArtifacts,
   runSummary,
-  settledTitlesOf,
 } from '../e2e-flaky.ts';
+import {
+  evidenceUnresolved,
+  idleScanLine,
+  loadWindowEvidence,
+  needsSettledEvidence,
+  planIssues,
+  settledTitlesOf,
+} from '../e2e-flaky-settled.ts';
 import { exitWith, runMain } from '../exit.ts';
 import { ghApi } from '../gh-api.ts';
 

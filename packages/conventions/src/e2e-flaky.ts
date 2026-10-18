@@ -3,8 +3,7 @@
 // （packages/web/e2e/quarantine.json：照跑、照报，不挡这一轮；ci.yml 的 e2e job 跳过它们、e2e-quarantine.yml 每天单跑，按它挑用例的是 packages/web/e2e/support/quarantine.ts）。
 // 先判整轮（#2499）：一轮里首跑红的用例超过这一轮用例数的一半、或报告里有全局准备/备库的错，这轮记「整轮坏了」，不计入任何用例的次数，
 // 只汇成一张固定标题的「主线 e2e 整轮坏了」单（同一时间只一张），免得环境坏一次就给每条用例各开一张偶发单。
-// 这里是判法和拼单：读 Playwright 的 JSON 报告、数次数、拼单子，以及「已完成处置里的失败 run 还算不算新故障」。
-// 取报告（gh run download）和开单在 .github/workflows/e2e-flaky.yml 和 bin/e2e-flaky.ts。
+// 这里只有纯函数：读 Playwright 的 JSON 报告、数次数、拼单子；取报告（gh run download）和开单在 .github/workflows/e2e-flaky.yml 和 bin/e2e-flaky.ts。
 
 import { domainLabel, natureLabel } from './labels.ts';
 
@@ -289,7 +288,7 @@ export function flakySummaryBody(findings: readonly FlakyFinding[], until: strin
       `近 ${FLAKY_WINDOW} 轮主线 e2e 里有 ${findings.length} 条用例偶发（同一次运行里首跑红、重试才过）达到阈值（${FLAKY_THRESHOLD} 次）。超过 ${FLAKY_SUMMARY_OVER} 条一起出现多半是同一个根子（时序、夹具、环境），所以只开这一张汇总单，不逐条开。**限期 ${until} 前修掉。**`,
       '',
       ...findings.map(
-        (f) => `- \`${keyText(f.key)}\`：${f.bad}/${f.ran}，失败 run ${f.urls.join('、') || '（没有链接）'}`,
+        (f) => `- \`${keyText(f.key)}\`：${f.bad}/${f.ran}，最近一次 ${f.urls[0] ?? '（没有链接）'}`,
       ),
     ],
     modules: ['`packages/web/e2e/`', '`packages/web/e2e/quarantine.json`'],
@@ -300,349 +299,13 @@ export function flakySummaryBody(findings: readonly FlakyFinding[], until: strin
   });
 }
 
-/** 失败 run 的键：GitHub Actions 运行号优先，这样正文里带 `/attempts/` 或尾斜杠也对得上。 */
-export function runKey(url: string): string {
-  const id = /\/actions\/runs\/(\d+)/.exec(url)?.[1];
-  if (id) return `run:${id}`;
-  return url.replace(/[),.;]+$/g, '').replace(/\/+$/, '');
-}
-
-/** 从正文或留言里抽出失败 run。有 Actions 运行号就只用运行号，避免把别的链接当成 run。 */
-export function extractRunKeys(text: string): string[] {
-  const keys: string[] = [];
-  const seen = new Set<string>();
-  const add = (key: string) => {
-    if (seen.has(key)) return;
-    seen.add(key);
-    keys.push(key);
-  };
-  for (const match of text.matchAll(/\/actions\/runs\/(\d+)/g)) {
-    if (match[1]) add(`run:${match[1]}`);
-  }
-  if (keys.length === 0) {
-    for (const match of text.matchAll(/https?:\/\/[^\s)>\]]+/g)) {
-      if (match[0]) add(runKey(match[0]));
-    }
-  }
-  return keys;
-}
-
-/** 一张已完成处置里、某个用例点明的失败 run。`runs === null` 是证据不明，不能当成修过。 */
-export interface HandledTest {
-  number: number;
-  runs: readonly string[] | null;
-}
-
-/**
- * 同用例已完成处置的失败 run。`ready` 才许拿来判断覆盖；
- * `unknown` 是查询失败、分页不完整或结果认不出，不能当成「没有已处置」。
- */
-export type SettledEvidence =
-  | { status: 'ready'; byTest: Readonly<Record<string, readonly HandledTest[]>> }
-  | { status: 'unknown'; reason: string };
-
-/** 窗口里最旧一轮的运行号。链接里没有运行号就返回 null（调用方必须当成证据不明，不能当成没有旧单）。 */
-export function oldestRunId(runs: readonly { url: string }[]): string | null {
-  const oldest = runs[runs.length - 1];
-  if (!oldest) return null;
-  return /\/actions\/runs\/(\d+)/.exec(oldest.url)?.[1] ?? null;
-}
-
-/** 这次扫描可能要开的偶发单标题（含汇总单）。已完成处置按这些标题认，不对任意关着的单。 */
-export function settledTitlesOf(runs: readonly RunOutcomes[]): Set<string> {
-  const titles = new Set<string>();
-  for (const finding of flakyTests(runs)) titles.add(issueTitle(finding.key));
-  if (titles.size > 0) titles.add(FLAKY_SUMMARY_TITLE);
-  return titles;
-}
-
-/**
- * 还有偶发单要新开时，才需要读已完成处置。开着的同标题单已经挡住重开；整轮坏了不走这条。
- * 没有任何偶发时返回 false：整轮真红只走原来的整轮单，不因为证据查询失败改口。
- */
-export function needsSettledEvidence(runs: readonly RunOutcomes[], open: readonly OpenIssue[]): boolean {
-  const findings = flakyTests(runs);
-  if (findings.length === 0) return false;
-  if (findings.length > FLAKY_SUMMARY_OVER) return !open.some((issue) => issue.title === FLAKY_SUMMARY_TITLE);
-  return findings.some((finding) => !open.some((issue) => issue.title === issueTitle(finding.key)));
-}
-
-const SETTLED_PAGE_CAP = 100;
-const SETTLED_COMMENT_CAP = 20;
-const SETTLED_PAGE_SIZE = 100;
-
-interface ClosedTake {
-  number: number;
-  title: string;
-  body: string;
-  /** 关单原因是 completed 才采用正文里的 run；别的原因不证明修过。 */
-  trust: boolean;
-}
-
-function parseClosedRow(
-  row: unknown,
-  titles: ReadonlySet<string>,
-): { kind: 'skip' } | { kind: 'bad'; reason: string } | { kind: 'take'; issue: ClosedTake } {
-  if (row === null || typeof row !== 'object')
-    return { kind: 'bad', reason: '证据不明：已关闭的单有一条认不出' };
-  const record = row as Record<string, unknown>;
-  if (record.pull_request !== null && record.pull_request !== undefined) return { kind: 'skip' };
-  if (typeof record.title !== 'string' || !Number.isSafeInteger(record.number))
-    return { kind: 'bad', reason: '证据不明：已关闭的单有一条缺标题或单号' };
-  if (!titles.has(record.title)) return { kind: 'skip' };
-  const reason = record.state_reason;
-  if (reason !== null && reason !== undefined && typeof reason !== 'string')
-    return { kind: 'bad', reason: `证据不明：#${String(record.number)} 的关单原因认不出` };
-  if (record.body !== null && record.body !== undefined && typeof record.body !== 'string')
-    return { kind: 'bad', reason: `证据不明：#${String(record.number)} 的正文认不出` };
-  // 明确不是完成处置的关法，不能拿来证明这批 run 修过。
-  if (reason === 'not_planned' || reason === 'duplicate') return { kind: 'skip' };
-  return {
-    kind: 'take',
-    issue: {
-      number: record.number as number,
-      title: record.title,
-      body: typeof record.body === 'string' ? record.body : '',
-      trust: reason === 'completed',
-    },
-  };
-}
-
-function createdAtOf(meta: unknown): string | null {
-  if (meta === null || typeof meta !== 'object') return null;
-  const created = (meta as { created_at?: unknown }).created_at;
-  if (typeof created !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(created)) return null;
-  return created;
-}
-
-/** 汇总单按行认用例（反引号里的 `文件 › 标题`）；逐条偶发单的全部 run 都属于这一个标题。 */
-function evidenceFor(
-  title: string,
-  text: string,
-  titles: ReadonlySet<string>,
-): Record<string, string[] | null> {
-  if (title === FLAKY_SUMMARY_TITLE) {
-    const out: Record<string, string[] | null> = {};
-    const keys = [...titles].filter((item) => item !== FLAKY_SUMMARY_TITLE);
-    for (const line of text.split('\n')) {
-      const runs = extractRunKeys(line);
-      for (const item of keys) {
-        const key = item.startsWith('e2e 偶发：') ? item.slice('e2e 偶发：'.length) : '';
-        if (key === '' || !line.includes(`\`${key}\``)) continue;
-        if (runs.length === 0) {
-          if (!(item in out)) out[item] = null;
-        } else {
-          const prev = out[item];
-          out[item] = prev === null || prev === undefined ? runs : [...prev, ...runs];
-        }
-      }
-    }
-    return out;
-  }
-  const runs = extractRunKeys(text);
-  return { [title]: runs.length > 0 ? runs : null };
-}
-
-function addHandled(byTest: Record<string, HandledTest[]>, title: string, row: HandledTest): void {
-  const list = byTest[title] ?? [];
-  list.push(row);
-  byTest[title] = list;
-}
-
-/**
- * 读同用例已完成处置里点名的失败 run。范围从窗口最旧一轮的创建时间起（更早的单不可能写进这些 run）。
- * 查询抛错、页没翻完、单或留言认不出：返回 unknown，不返回空表（空表会变成「没有旧单、可以新开」）。
- */
-export async function loadWindowEvidence(
-  runs: readonly { url: string }[],
-  titles: ReadonlySet<string>,
-  get: (path: string) => Promise<unknown>,
-  limits?: { pageCap?: number; commentCap?: number; pageSize?: number },
-): Promise<SettledEvidence> {
-  const pageCap = limits?.pageCap ?? SETTLED_PAGE_CAP;
-  const commentCap = limits?.commentCap ?? SETTLED_COMMENT_CAP;
-  const pageSize = limits?.pageSize ?? SETTLED_PAGE_SIZE;
-  try {
-    const id = oldestRunId(runs);
-    if (!id) return { status: 'unknown', reason: '证据不明：窗口里的运行链接认不出运行号，不能查已完成处置' };
-    const created = createdAtOf(await get(`/actions/runs/${id}`));
-    if (!created)
-      return { status: 'unknown', reason: '证据不明：运行记录没有创建时间，不能划定已完成处置的查询范围' };
-    const matched: ClosedTake[] = [];
-    for (let page = 1; page <= pageCap; page++) {
-      const path =
-        `/issues?state=closed&since=${encodeURIComponent(created)}` +
-        `&sort=updated&direction=desc&per_page=${pageSize}&page=${page}`;
-      const got = await get(path);
-      if (!Array.isArray(got)) return { status: 'unknown', reason: '证据不明：已关闭的单不是列表' };
-      for (const row of got) {
-        const parsed = parseClosedRow(row, titles);
-        if (parsed.kind === 'bad') return { status: 'unknown', reason: parsed.reason };
-        if (parsed.kind === 'take') matched.push(parsed.issue);
-      }
-      if (got.length < pageSize) return await settleMatched(matched, titles, get, commentCap, pageSize);
-    }
-    return {
-      status: 'unknown',
-      reason: `分页不完整：已关闭的单翻了 ${pageCap} 页仍是满页，不能当成没有已处置的失败 run`,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 'unknown', reason: `查询失败：${message}` };
-  }
-}
-
-async function settleMatched(
-  matched: readonly ClosedTake[],
-  titles: ReadonlySet<string>,
-  get: (path: string) => Promise<unknown>,
-  commentCap: number,
-  pageSize: number,
-): Promise<SettledEvidence> {
-  const byTest: Record<string, HandledTest[]> = {};
-  for (const issue of matched) {
-    const comments = await loadComments(get, issue.number, commentCap, pageSize);
-    if (!comments.ok) return { status: 'unknown', reason: comments.reason };
-    const text = [issue.body, ...comments.bodies].join('\n');
-    if (!issue.trust) {
-      const mentioned =
-        issue.title === FLAKY_SUMMARY_TITLE
-          ? Object.keys(evidenceFor(issue.title, text, titles))
-          : [issue.title];
-      if (mentioned.length === 0)
-        return {
-          status: 'unknown',
-          reason: `证据不明：#${issue.number} 的关单原因不是已完成，也没点明是哪些用例`,
-        };
-      for (const title of mentioned) addHandled(byTest, title, { number: issue.number, runs: null });
-      continue;
-    }
-    for (const [title, runs] of Object.entries(evidenceFor(issue.title, text, titles))) {
-      addHandled(byTest, title, { number: issue.number, runs });
-    }
-  }
-  return { status: 'ready', byTest };
-}
-
-async function loadComments(
-  get: (path: string) => Promise<unknown>,
-  number: number,
-  commentCap: number,
-  pageSize: number,
-): Promise<{ ok: true; bodies: string[] } | { ok: false; reason: string }> {
-  const bodies: string[] = [];
-  for (let page = 1; page <= commentCap; page++) {
-    const got = await get(`/issues/${number}/comments?per_page=${pageSize}&page=${page}`);
-    if (!Array.isArray(got)) return { ok: false, reason: `证据不明：#${number} 的留言不是列表` };
-    for (const comment of got) {
-      if (comment === null || typeof comment !== 'object')
-        return { ok: false, reason: `证据不明：#${number} 的留言有一条认不出` };
-      const body = (comment as { body?: unknown }).body;
-      if (body !== null && body !== undefined && typeof body !== 'string')
-        return { ok: false, reason: `证据不明：#${number} 的留言正文认不出` };
-      bodies.push(typeof body === 'string' ? body : '');
-    }
-    if (got.length < pageSize) return { ok: true, bodies };
-  }
-  return { ok: false, reason: `分页不完整：#${number} 的留言翻了 ${commentCap} 页仍是满页` };
-}
-
-type FlakyJudgement =
-  | { kind: 'file' }
-  | { kind: 'covered'; numbers: number[] }
-  | { kind: 'unknown'; reason: string };
-
-function uniqNumbers(numbers: readonly number[]): number[] {
-  return [...new Set(numbers)].sort((a, b) => a - b);
-}
-
-/**
- * 当前失败 run（新的在前）有没有超出已完成处置。
- * 最新一轮失败 run 已经点过名：窗口里更旧的失败不是新增（汇总单以前只写「最近一次」也算盖住）。
- * 有更新的失败 run、并且每张相关单都点得清：立刻立案。有一张单点不清、又盖不住这个新 run：未知，不当没有故障。
- */
-function judgeFlaky(
-  title: string,
-  urls: readonly string[],
-  settled: SettledEvidence | undefined,
-): FlakyJudgement {
-  if (!settled) return { kind: 'file' };
-  if (settled.status === 'unknown') return { kind: 'unknown', reason: settled.reason };
-  const rows = settled.byTest[title] ?? [];
-  if (rows.length === 0) return { kind: 'file' };
-  const keys = urls.map(runKey);
-  const known = new Set<string>();
-  const unclear: number[] = [];
-  for (const row of rows) {
-    if (row.runs === null || row.runs.length === 0) {
-      unclear.push(row.number);
-      continue;
-    }
-    for (const run of row.runs) known.add(run);
-  }
-  const newest = keys[0];
-  if (newest !== undefined && known.has(newest)) {
-    const numbers = uniqNumbers(rows.filter((row) => row.runs?.includes(newest)).map((row) => row.number));
-    if (numbers.length === 0) return { kind: 'file' };
-    return { kind: 'covered', numbers };
-  }
-  if (unclear.length > 0) {
-    return {
-      kind: 'unknown',
-      reason: `证据不明：#${unclear.join('、#')} 已关闭，但没有点明失败 run，不能当成修过`,
-    };
-  }
-  return { kind: 'file' };
-}
-
-function judgeSummary(
-  findings: readonly FlakyFinding[],
-  settled: SettledEvidence | undefined,
-): FlakyJudgement {
-  if (!settled) return { kind: 'file' };
-  if (settled.status === 'unknown') return { kind: 'unknown', reason: settled.reason };
-  let file = false;
-  let unknown: string | null = null;
-  const numbers: number[] = [];
-  for (const finding of findings) {
-    const judged = judgeFlaky(issueTitle(finding.key), finding.urls, settled);
-    if (judged.kind === 'file') file = true;
-    else if (judged.kind === 'unknown') unknown ??= judged.reason;
-    else numbers.push(...judged.numbers);
-  }
-  // 已经能确定有新的失败 run：不明的旧单不挡住这次立案。
-  if (file) return { kind: 'file' };
-  if (unknown) return { kind: 'unknown', reason: unknown };
-  const cited = uniqNumbers(numbers);
-  if (cited.length === 0) return { kind: 'file' };
-  return { kind: 'covered', numbers: cited };
-}
-
-function coveredLabel(title: string, numbers: readonly number[]): string {
-  return `旧采样已被覆盖，不开：${title}（原单 ${numbers.map((number) => `#${number}`).join('、')}；这些失败 run 已经处置过，没有新增）`;
-}
-
-function unknownLabel(title: string, reason: string): string {
-  return `证据未知，不开、也不当没有故障：${title}（${reason}）`;
-}
-
-function flakyAction(title: string, judged: FlakyJudgement, create: () => IssueAction): IssueAction {
-  if (judged.kind === 'covered')
-    return { kind: 'covered', title, numbers: judged.numbers, label: coveredLabel(title, judged.numbers) };
-  if (judged.kind === 'unknown')
-    return { kind: 'unknown', title, reason: judged.reason, label: unknownLabel(title, judged.reason) };
-  return create();
-}
-
-/** 一件要做的事：开新单，或给已开着的单留言补新的轮链接，或留言后关单（整轮坏的已恢复），或已有单不用动，或这次超了开单上限、下次再开，或旧采样已被已完成处置盖住，或证据没读清。 */
+/** 一件要做的事：开新单，或给已开着的单留言补新的轮链接，或留言后关单（整轮坏的已恢复），或已有单不用动，或这次超了开单上限、下次再开。 */
 export type IssueAction =
   | { kind: 'create'; title: string; body: string; labels: string[]; label: string }
   | { kind: 'comment'; number: number; body: string; label: string }
   | { kind: 'close'; number: number; body: string; label: string }
   | { kind: 'exists'; label: string }
-  | { kind: 'deferred'; title: string; label: string }
-  | { kind: 'covered'; title: string; numbers: number[]; label: string }
-  | { kind: 'unknown'; title: string; reason: string; label: string };
+  | { kind: 'deferred'; title: string; label: string };
 
 export interface OpenIssue {
   number: number;
@@ -651,33 +314,18 @@ export interface OpenIssue {
   body?: string | null;
 }
 
-const IDLE_SCAN_LINE = '没有达到偶发阈值的用例，也没有要处理的「整轮坏了」单';
-
-/** 没有任何动作时才说「没有偶发」。证据未知也是动作，不能说成没有故障。 */
-export function idleScanLine(actions: readonly IssueAction[]): string | null {
-  return actions.length === 0 ? IDLE_SCAN_LINE : null;
-}
-
-/** 有一张偶发单因为证据没读清而没开：扫描不能以成功收场。 */
-export function evidenceUnresolved(actions: readonly IssueAction[]): boolean {
-  return actions.some((action) => action.kind === 'unknown');
-}
-
 /**
  * 近几轮（新的在前）→ 要开/留言/关的单。「整轮坏了」只看最新一段：最新一轮是整轮坏的，才开那张固定标题的单
  * （已有开着的就只补没写过的轮链接），链接只列从最新往回连着坏的几轮；最新一轮是好的就不开，
  * 已有开着的「整轮坏了」单则留言关掉（再坏会重开）。没有任何一轮时不动（读不到不当成已恢复）。
  * 整轮坏了的轮不计入偶发；其余轮里偶发达阈值的用例各开一张偶发单，同标题已有开着的就不重开；达阈值的超过
  * FLAKY_SUMMARY_OVER 条只开（或补）一张汇总单。一次最多新开 MAX_NEW_ISSUES 张（capCreates），多的下次扫描再开（#2735）。
- * `settled` 是同用例已完成处置里的失败 run：不传则只按开着的单去重（旧调用）。传了之后，当前失败 run 没有超出
- * 已点名的那些就不新开，并写明原单；有更新的失败 run 且仍达阈值就照常开。查询没读全是「未知」，不开、也不当没有故障。
  */
 export function planIssues(
   runs: readonly RunOutcomes[],
   open: readonly OpenIssue[],
   quarantine: readonly QuarantineEntry[],
   until: string,
-  settled?: SettledEvidence,
 ): IssueAction[] {
   const actions: IssueAction[] = [];
   const streak = runs.findIndex((r) => !isBrokenRound(r));
@@ -721,15 +369,13 @@ export function planIssues(
     // 一轮里达阈值的太多：多半是同一个根子，只开（或补）一张汇总单，不逐条开
     const summary = open.find((i) => i.title === FLAKY_SUMMARY_TITLE);
     if (!summary) {
-      actions.push(
-        flakyAction(FLAKY_SUMMARY_TITLE, judgeSummary(findings, settled), () => ({
-          kind: 'create',
-          title: FLAKY_SUMMARY_TITLE,
-          body: flakySummaryBody(findings, until),
-          labels: [...ISSUE_LABELS],
-          label: `开了单：${FLAKY_SUMMARY_TITLE}（${findings.length} 条）`,
-        })),
-      );
+      actions.push({
+        kind: 'create',
+        title: FLAKY_SUMMARY_TITLE,
+        body: flakySummaryBody(findings, until),
+        labels: [...ISSUE_LABELS],
+        label: `开了单：${FLAKY_SUMMARY_TITLE}（${findings.length} 条）`,
+      });
     } else {
       const fresh = findings.filter((f) => !(summary.body ?? '').includes(keyText(f.key)));
       actions.push(
@@ -740,7 +386,7 @@ export function planIssues(
               body: [
                 '又有用例达到偶发阈值：',
                 ...fresh.map(
-                  (f) => `- \`${keyText(f.key)}\`：${f.bad}/${f.ran}，失败 run ${f.urls.join('、')}`,
+                  (f) => `- \`${keyText(f.key)}\`：${f.bad}/${f.ran}，最近一次 ${f.urls[0] ?? ''}`,
                 ),
               ].join('\n'),
               label: `${FLAKY_SUMMARY_TITLE}：补 ${fresh.length} 条到 #${summary.number}`,
@@ -756,15 +402,13 @@ export function planIssues(
         continue;
       }
       const quarantined = quarantine.some((q) => keyText(q) === keyText(f.key));
-      actions.push(
-        flakyAction(title, judgeFlaky(title, f.urls, settled), () => ({
-          kind: 'create',
-          title,
-          body: issueBody(f, until, quarantined),
-          labels: [...ISSUE_LABELS],
-          label: `开了单：${title}（${f.bad}/${f.ran}）`,
-        })),
-      );
+      actions.push({
+        kind: 'create',
+        title,
+        body: issueBody(f, until, quarantined),
+        labels: [...ISSUE_LABELS],
+        label: `开了单：${title}（${f.bad}/${f.ran}）`,
+      });
     }
   }
   return capCreates(actions, MAX_NEW_ISSUES);

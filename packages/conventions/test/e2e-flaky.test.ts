@@ -1,32 +1,35 @@
 // 驾驶舱 e2e 的偶发统计（决定 0093，src/e2e-flaky.ts）：读 Playwright JSON 报告、数近 10 轮偶发（重试才过）、拼单子和汇总、开单限流（#2735）。
+// 已完成处置的失败 run 去重在 src/e2e-flaky-settled.ts（不放进面上的 e2e-flaky.ts）。
 import { describe, expect, test } from 'vitest';
 import {
   BROKEN_ROUND_TITLE,
   brokenRoundBody,
   capCreates,
   deadline,
-  evidenceUnresolved,
-  extractRunKeys,
   FLAKY_SUMMARY_TITLE,
   flakySummaryBody,
   flakyTests,
   globalErrorCount,
-  idleScanLine,
   isBrokenRound,
   issueBody,
   issueTitle,
-  loadWindowEvidence,
   MAX_NEW_ISSUES,
-  needsSettledEvidence,
   type Outcomes,
   outcomesOf,
   parseQuarantine,
-  planIssues,
   runFromArtifacts,
-  runKey,
   runSummary,
-  type SettledEvidence,
 } from '../src/e2e-flaky.ts';
+import {
+  evidenceUnresolved,
+  extractRunKeys,
+  idleScanLine,
+  loadWindowEvidence,
+  needsSettledEvidence,
+  planIssues,
+  runKey,
+  type SettledEvidence,
+} from '../src/e2e-flaky-settled.ts';
 import { checkIssueBody } from '../src/issue-new.ts';
 
 /** 造一份 Playwright JSON 报告：文件 → describe → 用例，每条用例两个视口的结局。 */
@@ -610,6 +613,28 @@ describe('已完成处置的失败 run：旧采样不重开，新的失败 run �
     expect(actions.map((action) => action.kind).sort()).toEqual(['covered', 'create']);
     expect(actions.find((action) => action.kind === 'create')).toMatchObject({ title });
     expect(actions.find((action) => action.kind === 'covered')?.label).toContain('原单 #3000');
+  });
+
+  test('被盖住的不占新开名额；新的失败仍一次最多开 3 张', () => {
+    const five = ['甲', '乙', '丙', '丁', '戊'];
+    // 五条偶发再配五条全绿：刚好一半不算整轮坏，仍走逐条开单。
+    const wide = (id: number) => ({
+      url: gh(id),
+      outcomes: outcomes(
+        Object.fromEntries([
+          ...five.map((name) => [name, ['flaky']]),
+          ...['己', '庚', '辛', '壬', '癸'].map((name) => [name, ['expected']]),
+        ]),
+      ),
+    });
+    const actions = planIssues([wide(40), wide(20)], [], [], '2026-10-22', {
+      status: 'ready',
+      byTest: { [title]: [{ number: 3064, runs: ['run:40', 'run:20'] }] },
+    });
+    expect(actions.filter((action) => action.kind === 'covered')).toHaveLength(1);
+    expect(actions.filter((action) => action.kind === 'create')).toHaveLength(3);
+    expect(actions.filter((action) => action.kind === 'deferred')).toHaveLength(1);
+    expect(actions.find((action) => action.kind === 'covered')?.label).toContain('原单 #3064');
   });
 });
 
