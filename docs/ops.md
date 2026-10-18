@@ -1081,6 +1081,16 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 沙箱里还看得到的：fleet 的家目录（pnpm 和缓存在 `/home/fleet`，构建要用，家目录里 fleet 能读的文件构建时也能读）；出网（装依赖要连 registry.npmjs.org）；本机 TCP `127.0.0.1:5432`（只隔了 unix socket 目录，端口没隔；装机给 fleet 的是 socket 上的 peer、不设口令，TCP 那条要口令）；沙箱起来之后才在主机上挂进这三处下面的新挂载（`InaccessiblePaths` 挡不住后挂上的）；沙箱自己 PID 命名空间里的 `/proc`（能看本沙箱进程的环境与文件描述符，看不到主机上别的进程）。没有新建专用构建用户：构建仍是 fleet 这个 UID，靠挂载隔离 + 私有 PID/`/proc` 把密钥目录和主机同 UID 进程隔开。pnpm 11 默认仍不跑依赖的安装脚本（`pnpm-workspace.yaml` 的 `allowBuilds` 现在一个都没放行），这层还在，但不再是唯一的挡。
 
+### 历史合并通知的审计处置
+
+只有历史资料已核查但仍不能证明完整队列时，使用 `fleet-api historical-audit`，从 stdin 输入 JSON；先读原通知、PR 和证据 issue，不替代修复当前生产故障。字段是 `notificationId`、`dedupeKey`（精确 `reconcile:pr:owner/repo#PR`）、`repo`、数字 `pr`、40 位真实 `head`、同仓 `evidenceIssue` URL、固定 `conclusion: "historical_unproven"`，以及非空的 `evidence`（已核实事实）、`gaps`（缺失证据）、`responsibility`（后续责任）。证据 issue 正文必须明确指向该 PR。
+
+```sh
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit < /受控目录/历史审计.json
+```
+
+命令沿用 wrapper 提供的 `FLEET_OPS_OPERATOR`，不冒充创始人。现读 GitHub 的仓、PR、合并状态、head 和证据 issue，任一失败都不处置。成功只把通知标为处理，并在同一事务追加 `notification.historical_audit`（target `notification:<id>`），留下原正文、真实 GitHub 合并人/提交、证据 issue 快照、缺口及责任。正常合并账与 backfill 完全不改；输出明确历史队列仍未证明。相同处置重复执行不新增审计，不同处置或通知已被其他入口处理则拒绝；退出码 0 成功、1 未做成、2 参数不对。核查现有 `/audit` 操作记录及通知的原始正文，不把通知已处理解释成“队列已证明”。
+
 ### 命令行工具升级（#1971）
 
 法国上的 Claude Code、Codex 是 2026-09 用 root 的 `npm i -g` 装进 `/usr/lib/node_modules` 的（二进制在 `/usr/bin`）。Claude Code 官方的自动更新在这种「目录不归运行用户写」的装法下不生效。Cursor、reclaude 有各自的更新路径，不在这里升。Grok 装在会话用户家里（`~/.grok/bin/grok`），会话里关了自动更新，这里在空闲或发版窗口里替它跑 `grok update`。
@@ -1311,3 +1321,5 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 - **阈值**（`packages/shared/src/web-api/local-sessions.ts`）：一个会话 15 分钟没调工具、没开新的一轮算「超过 15 分钟没动」（`LOCAL_SESSION_IDLE_MS`；每次调工具都刷新，跑得久的不会误判）；一轮做完（Stop）或收场后 2 小时内算「刚停」；法国超过 5 分钟没收到这台推来的算「没上报」（`LOCAL_SESSIONS_FRESH_MS`，错过两轮多一点），页面写上次收到在多久前，那时候的会话灰着写「上次看到」，不冒充还在跑；配了钥匙从没收到写「没上报：一次都没收到」。多久没动按推送方自己钟上的差加上收到后过了多久算，不比两台的钟。
 - **装**（本机，一条命令）：先在法国以 root 生成钥匙、放哈希（上一节第 1、2 步，环境编号换成 `founder-pc`），再在本机仓根跑（PowerShell）`$env:FLEET_NODE_TOKEN='<明文>'; pnpm local-sessions install --url https://<法国看板域名> --machine 创始人的电脑; Remove-Item Env:FLEET_NODE_TOKEN`。它拷脚本到 `~/.fleet-dao/local-sessions/bin/`、写 `config.json`（通行证只从环境变量读，不进命令行历史）、在 `~/.claude/settings.json` 登记五条钩子（只动指向那个目录的，别人的钩子原样留着，改之前留一份 `settings.json.local-sessions.bak`，坏 JSON 不覆盖）、建计划任务（建不成就退回启动文件夹自启，见上一条），当场试推一次打出结果；新开的会话才有心跳。不放进 `~/.fleet-dao/hooks/`、不登记成 `~/.fleet-dao/bin/quiet-*.exe`：那两处归 agents-sync，同步时会被摘掉。
 - **看 / 停**：`pnpm local-sessions status` 看钩子登记了几条、定时推送用的哪种、循环进程活着没有、推到哪、上次推的结果。`pnpm local-sessions uninstall` 一条命令卸：摘掉那几条钩子、删计划任务、删启动文件夹里的 vbs、结束 `loop.pid` 指向的进程、删整个 `~/.fleet-dao/local-sessions/`。法国那边要作废，`config.mjs drop-entry api.env FLEET_NODE_KEYS founder-pc` 删掉那一项、重启 `fleet-api`、新指纹换进期望。
+
+最终验收责任用 `fleet-api acceptance status <owner/仓> <单号>` 查看；现场验过后用 `fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号> --head <40位SHA> --evidence "现场验收记录"` 落账。协调责任用 `--pr 0 --head -`。命令沿既有 root 包装器和数据库身份执行，没有公开结算写口。代次不符、PR未合并、证据缺失均拒绝，随后仍需标准关单。公开仓机器只读入口 `/api/public/acceptance/v1/repos/:githubId/issues/:issue` 不缓存，先经现有 CI bridge 核实公开仓身份，只返回责任身份与结清证据，不返回原验收正文。

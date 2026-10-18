@@ -94,3 +94,5 @@
 ## 协作
 
 GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。批量建单的 `mother` 必填 `domain`、`nature`，子单逐轴继承母单有效值；缺失或无效在任何 GitHub 写入前拒绝。查询轴两套，名字带轴：域（`域:engine`、`域:api`、`域:mirasim`）和性质（`性质:bug`、`性质:perf`、`性质:process`）；新开的单和 PR 每轴贴一个，按这两个标签筛。受控入口创建前校验；旧检出、网页或直接 gh 创建的对象由可信主线事件补漏，只认明确声明或唯一来源单，不明就报错，`pnpm github:audit` 持续查漏。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，只有四栏：做了什么、怎么验证的、还欠什么、需求（要在合并时关单，「需求」栏下面另起一行写 `Closes #号`），并带和开单同一套 `--domain`、`--nature`；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654）；能不能合只看 CI 和 merge-gate（见 design 第五节）。
+
+最终现场验收责任由法国管理命令 `fleet-api acceptance status <owner/仓> <单号>` 查看；`settle` 需精确责任号、代次、PR/head 和现场证据（完整参数见 `--help`）。`pnpm issue:close` 的任何关法都先核对真实责任账，有待验项或读不到时保留原单。

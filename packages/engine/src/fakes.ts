@@ -5,6 +5,7 @@
 import type { CiResult, SyncResult } from './decisions/types.ts';
 import type { PickRouteInput, PickRouteResult } from './ports.ts';
 import {
+  type AcceptanceDuty,
   type EnginePorts,
   type OpenPrInput,
   type PortContext,
@@ -50,6 +51,14 @@ export interface FakeScript {
   holdPorts: PortName[];
   heartbeatMs: number;
   routes: RouteChoice[];
+  /** 「库」里已经有的验收责任（冷验收活动转人时记下的，#3037）。 */
+  duties: FakeDuty[];
+}
+
+/** 假「库」里的一行验收责任：settled 为 true 的是最终验收完成了的。 */
+export interface FakeDuty extends AcceptanceDuty {
+  taskId: string;
+  settled: boolean;
 }
 
 export interface FakeCall {
@@ -69,6 +78,8 @@ export interface FakeWorld {
   states: TaskStateSnapshot[];
   /** 报过的警（按调用顺序，含重复的 dedupeKey）。 */
   alerts: RaiseAlertInput[];
+  /** 「库」里的验收责任（#3037），和真库一样按「单 + PR + 头」只一行。 */
+  duties: FakeDuty[];
   callsOf<P extends PortName>(port: P): (FakeCall & { input: Parameters<EnginePorts[P]>[0] })[];
   count(port: PortName): number;
   /** 放行 holdPorts 挂着的那个端口（挂着的和以后的调用都不再挂）。 */
@@ -108,6 +119,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
   const timings: TimingEntry[] = [];
   const states: TaskStateSnapshot[] = [];
   const alerts: RaiseAlertInput[] = [];
+  const duties: FakeDuty[] = (script.duties ?? []).map((d) => ({ ...d, items: [...d.items] }));
   const heldPorts = new Set<PortName>(script.holdPorts ?? []);
   const counters = new Map<string, number>();
   const prByBranch = new Map<string, number>();
@@ -235,6 +247,35 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
       states.push(input);
     },
     async closeIssue() {},
+    async acceptanceDuties(input) {
+      // 和真库同一套：按「单 + PR + 头」只一行，原验收项只并不删，合并回执只补不改
+      for (const r of input.record) {
+        const same = duties.find(
+          (d) => d.taskId === input.taskId && d.prNumber === r.prNumber && d.head === r.head,
+        );
+        if (same) {
+          same.items = [...new Set([...same.items, ...r.items])];
+          if (same.mergeCommit === null && r.mergeCommit) same.mergeCommit = r.mergeCommit;
+          continue;
+        }
+        duties.push({
+          taskId: input.taskId,
+          repo: `${input.repo.owner}/${input.repo.name}`,
+          issueNumber: input.issueNumber,
+          prNumber: r.prNumber,
+          head: r.head,
+          items: [...r.items],
+          source: r.prNumber === 0 ? 'coordination' : 'cold_verify',
+          mergeCommit: r.mergeCommit ?? null,
+          settled: false,
+        });
+      }
+      return {
+        open: duties
+          .filter((d) => d.taskId === input.taskId && !d.settled)
+          .map(({ taskId: _t, settled: _s, ...d }) => ({ ...d, items: [...d.items] })),
+      };
+    },
     async recordRound() {},
     async raiseAlert(input) {
       alerts.push(input);
@@ -284,6 +325,7 @@ export function createFakeWorld(script: Partial<FakeScript> = {}): FakeWorld {
     timings,
     states,
     alerts,
+    duties,
     callsOf: (<P extends PortName>(port: P) => calls.filter((c) => c.port === port)) as FakeWorld['callsOf'],
     count: (port) => calls.filter((c) => c.port === port).length,
     releasePort(port) {

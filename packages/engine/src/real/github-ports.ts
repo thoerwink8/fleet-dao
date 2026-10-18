@@ -11,7 +11,7 @@ import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { SessionUser } from '@fleet-dao/adapters';
 import { GATE_CONTEXT, issueOfBranch, pullsOnIssue, resolveQueryAxes } from '@fleet-dao/conventions';
-import type { GitHub, PrBodyInput } from '@fleet-dao/github';
+import { type GitHub, type PrBodyInput, renderPrBody } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
 import {
@@ -167,6 +167,7 @@ function ownPreviousPull(headRef: string | undefined, issue: number): boolean {
 function prBody(body: PrBody): PrBodyInput {
   return {
     ...(body.requirement === undefined ? {} : { requirement: body.requirement }),
+    ...(body.requirementRefs ? { requirementRefs: true } : {}),
     ...(body.subtask === undefined ? {} : { subtask: body.subtask }),
     did: body.did,
     verified: body.verified,
@@ -816,6 +817,14 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
     async updatePrBody(input) {
       // 第 2 轮起「做了什么」换成这一轮会话的回复（#2723）：和开 PR 同一份结构、同一个模板，用「引擎」机器人改
       await mapped(() => gh.claims.updatePullBody(input.repo, input.prNumber, prBody(input.body)));
+      if (input.body.requirementRefs) {
+        const actual = await mapped(() => gh.claims.readPull(input.repo, input.prNumber));
+        if (actual.number !== input.prNumber || actual.body !== renderPrBody(prBody(input.body))) {
+          throw new PortError('ACCEPTANCE_PR_BODY_UNCHECKED', '合并前分片 Refs 正文没回读齐，暂不进入合并', {
+            retryable: true,
+          });
+        }
+      }
     },
 
     async waitCi(input, ctx) {

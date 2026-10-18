@@ -1,3 +1,4 @@
+import type { AcceptanceDutyRow } from '@fleet-dao/db';
 import type { AppRole, InstallationListedRepo } from '@fleet-dao/github';
 import type { Repo } from '@fleet-dao/shared';
 import type { AlertWorkPort, DeployLagInput } from '@fleet-dao/store';
@@ -71,6 +72,9 @@ export interface Deps {
   github: GitHubEventSink;
   /** 只在真实 DB + 既有 engine App 装配，缺少时不能公开样例模式。 */
   ciPolicyBridge?: CiPolicyBridge | undefined;
+  acceptanceDuties?:
+    | ((identity: { repo: string; issueNumber: number }) => Promise<AcceptanceDutyRow[]>)
+    | undefined;
   /** /healthz 逐项探的依赖；空 = 没有外部依赖（内存版）。 */
   health: HealthCheck[];
   /** 驾驶舱提醒（#795）。生产的两套装配都给。 */

@@ -400,6 +400,56 @@ export const taskRounds = pgTable(
 );
 
 /**
+ * 验收责任（#3037）：冷验收判「不归我验」的验收条（要截图、现场、线上数据、审计结果才判得了）转给人以后，留在这里的那一份账。
+ * 代码照合（决定 0093：不归我验不挡合并闸），可单子要等这里每一行都记了「最终验收完成」才许关：引擎收尾照它留着原单。
+ * 一行 = 一张单在某个 PR 的某个头上转给人的那几条；没有代码的协调验收责任（长期协调单、无代码单）pr_number 记 0、head 记空串，
+ * 不要求为它开空 PR。挂在任务行上（不跟着租约、执行方走）：本机租约收回、退回法国、合并、引擎重启都不丢。
+ * 同一张单同一 PR 同一个头只一行（重复转交、合并回执重来都落在同一行）；只进不删，验完的记 settled_* 三列。
+ */
+export const acceptanceDuties = pgTable(
+  'acceptance_duties',
+  {
+    id: bigint('id', { mode: 'number' }).primaryKey().generatedAlwaysAsIdentity(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    /** owner/name 原样：合并、重启之后不靠别的表也看得出是哪个仓的哪张单。 */
+    repo: text('repo').notNull(),
+    issueNumber: integer('issue_number').notNull(),
+    /** 哪个 PR 上验出来的；0 = 协调验收责任，没有 PR。 */
+    prNumber: integer('pr_number').notNull().default(0),
+    /** 验的哪个头（完整 sha）；协调验收责任是空串。 */
+    head: text('head').notNull().default(''),
+    /** 新增待验项时递增，最终验收只认现读的这一代。 */
+    generation: integer('generation').notNull().default(1),
+    /** 原验收项：验收方判「不归我验」的那几条原文。 */
+    items: text('items').array().notNull(),
+    /** cold_verify = 冷验收转人；coordination = 协调验收责任（没有代码）。 */
+    source: text('source').notNull().default('cold_verify'),
+    /** 合并回执：PR 合进主线的那个提交；还没合、或没有 PR 是空。 */
+    mergeCommit: text('merge_commit'),
+    mergedAt: timestamp('merged_at', tz),
+    createdAt: timestamp('created_at', tz).notNull().defaultNow(),
+    /** 最终验收完成的时刻、谁验的、凭什么（证据原文或链接）：三样一起写，空 = 还开着。 */
+    settledAt: timestamp('settled_at', tz),
+    settledBy: text('settled_by'),
+    settleEvidence: text('settle_evidence'),
+  },
+  (t) => [
+    unique('acceptance_duties_task_pr_head_unique').on(t.taskId, t.prNumber, t.head),
+    check('acceptance_duties_issue_positive', sql`${t.issueNumber} > 0`),
+    check('acceptance_duties_pr_nonneg', sql`${t.prNumber} >= 0`),
+    check('acceptance_duties_items_nonempty', sql`cardinality(${t.items}) > 0`),
+    check('acceptance_duties_source_known', sql`${t.source} in ('cold_verify', 'coordination')`),
+    check(
+      'acceptance_duties_settled_complete',
+      sql`(${t.settledAt} is null and ${t.settledBy} is null and ${t.settleEvidence} is null) or (${t.settledAt} is not null and ${t.settledBy} is not null and length(${t.settleEvidence}) > 0)`,
+    ),
+    index('acceptance_duties_open_idx').on(t.taskId).where(sql`${t.settledAt} is null`),
+  ],
+);
+
+/**
  * 全程模式的分组记录（#2823）：每张单最多一行，写一次不覆盖（task_id 是主键，再写直接撞唯一约束，由查询函数换成明确的错）。
  * source：label 标签指定、hash 按单号哈希、ineligible 不合格退回三段（reason 写原因）。stratum 是分层用的档位。
  */

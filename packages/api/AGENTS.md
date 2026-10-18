@@ -10,6 +10,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - `github-mirror.ts`：main 的真实 GitHub 装配；开发环境非 HTTPS origin 只让策略桥未装配，不能把其它能力误报凭据缺失。生产桥初始化错误单独失败。
 - `ci-policy-bridge.ts`、`ci-policy-public.ts`：受管公开仓 DB 策略只读协议与 source publisher。精确 GET 挂在 session 前，严格核 GitHub 当前 public/数字身份；协议在 shared 的 `ci-policy-bridge.ts`，独立于浏览器 FleetApi，路由契约测试仍逐条登记。私有 force 原路径，私有 off 明确不支持。
 - `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
+- `historical-audit` 管理命令从 stdin 收历史通知审计 JSON，现读 GitHub PR/head 与证据 issue，再以真实 ops 身份原子处理通知、记审计。结论只允许 `historical_unproven`，不能作为正常队列账或创始人批准；入口在 `src/historical-audit-cli.ts`。
 
 ## 测试
 
@@ -32,3 +33,5 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - 改了行为（发信号、权限、读写哪张表）：同步 `docs/design.md` 第十五节「驾驶舱」对应条；改了部署相关的环境变量、端口：同步 `docs/ops.md`。
 
 - 通知回答先存代次，再原子 claim，最后按答案和 claim CAS 结算；在途或结果未知返回明确 409，不自动重放。HTTP 重试复用 `requestId`，新决定用新编号，带 `requestId` 必须同时带 `expectedAnswerId`（首答 null），拒绝跨新答案的迟到重试。handoff 的 GitHub key 绑定答案代次；历史无代次不能执行或交接。
+
+- 最终现场验收：`fleet-api acceptance status <owner/仓> <单号>` 读持久责任账；`settle` 必须提交精确责任 id、generation、PR/head 和证据，旧代次不能结清新增项。公开只读口复用现有 CI bridge 验证公开仓身份，不提供写口。

@@ -4,6 +4,7 @@ import { AUTH_PREFIX, WEB_API_PREFIX } from '@fleet-dao/shared';
 import { createGitHubIntake } from '@fleet-dao/store';
 import { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { acceptancePublicRoutes } from './acceptance-public.ts';
 import { authRoutes } from './auth.ts';
 import { ciPolicyPublicRoutes } from './ci-policy-public.ts';
 import { cockpitRoutes } from './cockpit.ts';
@@ -33,6 +34,7 @@ export function buildApps(deps: Deps): Apps {
 
   const cockpit = new Hono();
   cockpit.onError(errorHandler(deps.log));
+  cockpit.route('/', acceptancePublicRoutes(deps));
   cockpit.notFound(notFound);
   cockpit.get('/healthz', (c) => healthHandler(deps.health, deps.log)(c));
   cockpit.use(`${WEB_API_PREFIX}/*`, jsonLimit);
