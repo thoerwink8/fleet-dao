@@ -30,7 +30,6 @@ import {
   finishScheduleRun,
   getFlowAssignment,
   getRun,
-  insertAlertOnce,
   latestRunOfTask,
   listIntakeRepos,
   raiseLateReview,
@@ -39,10 +38,12 @@ import {
   recordFlowAssignment,
   recordRouteProbeDone,
   recordRouteProbeStart,
+  resolveAlertIfUnchangedSince,
   routeProbeAuditRows,
   scheduleHealth,
   startScheduleRun,
   taskTokenSpend,
+  upsertAlert,
 } from '@fleet-dao/db';
 import { createGitHub } from '@fleet-dao/github';
 import { intakeChatLimitsFrom, parseRepoProfile } from '@fleet-dao/shared';
@@ -50,7 +51,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import { createPgStore, githubWhitelist, pgLedger, pgLocker } from '@fleet-dao/store';
 import type { Client } from '@temporalio/client';
 import type { EngineJobs, EngineTasks } from '../activities.ts';
-import type { CheckoutBlockedAlert } from '../cold-verify-run.ts';
+import type { CheckoutBlockedAlert, CheckoutRecovered } from '../cold-verify-run.ts';
 import type { EngineDrain } from '../drain.ts';
 import { type DrainControlDeps, drainRequestFile, readDrainRequest } from '../drain-control.ts';
 import { createEngineMasterGate, type EngineMasterGate } from '../engine-master.ts';
@@ -190,8 +191,27 @@ function repairVerifyWorkTmp(): Promise<void> {
   });
 }
 
+/** 这个目标的检出报警：再报原地更新（已撤的重开）——恢复后又坏是新故障，要看得见。 */
 async function raiseCheckoutBlocked(db: Db, alert: CheckoutBlockedAlert): Promise<void> {
-  await insertAlertOnce(db, alert);
+  await upsertAlert(db, {
+    dedupeKey: alert.dedupeKey,
+    level: alert.level,
+    taskId: alert.taskId,
+    title: alert.title,
+    body: alert.body,
+  });
+}
+
+/**
+ * 这个目标真放进了完整检出：只撤它开跑之前报的那条（之后又报的是并发的新故障，回 changed 留着）。
+ * 没撤成（库读写失败）抛给 placeVerifyCheckout 记日志，不当成已恢复。
+ */
+async function resolveCheckoutRecovered(db: Db, recovered: CheckoutRecovered): Promise<void> {
+  await resolveAlertIfUnchangedSince(db, {
+    dedupeKey: recovered.dedupeKey,
+    by: 'cold-verify-checkout',
+    since: recovered.startedAt,
+  });
 }
 
 export function createRealPorts(deps: RealPortsDeps): RealPorts {
@@ -1219,6 +1239,7 @@ export function realPortsFromEnv(
       log: taskLog,
       repairWorkTmp: () => repairVerifyWorkTmp(),
       onCheckoutBlocked: (alert) => raiseCheckoutBlocked(db, alert),
+      onCheckoutRecovered: (recovered) => resolveCheckoutRecovered(db, recovered),
     }),
   };
   // 临时指挥官整理待办（#1338，母单 #1335 第 3 片）：选路按用途 groom，会话和动手、验收会话同一份 Spawner 装配，登记进一次性会话的清单

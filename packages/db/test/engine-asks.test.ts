@@ -8,6 +8,7 @@ import {
   openAlertsByPrefix,
   openApproval,
   resolveAlertByKey,
+  resolveAlertIfUnchangedSince,
   upsertAlert,
 } from '../src/queries/engine.ts';
 import { asks, notifications } from '../src/schema/index.ts';
@@ -162,6 +163,41 @@ describe('resolveAlertByKey', () => {
     expect(row?.resolvedAt).toEqual(NOW);
     expect(row?.resolvedBy).toBe('engine');
     expect(await resolveAlertByKey(t.db, { dedupeKey: 'pool-hold:never', by: 'engine' })).toBe('not_found');
+  });
+});
+
+describe('resolveAlertIfUnchangedSince', () => {
+  it('since 之后又报过的不撤（回 changed）；since 之前报的才撤；再撤幂等；没报过回 not_found', async () => {
+    const key = 'cold-verify:checkout:task:acme/demo#12';
+    await upsertAlert(t.db, { dedupeKey: key, level: 'alert', taskId: null, title: '检出', body: '缺对象' });
+    await t.db.update(notifications).set({ updatedAt: NOW }).where(eq(notifications.dedupeKey, key));
+    // 旧回执：检出在这次报警之前开跑，成功了也不能证明这次报的故障好了
+    expect(
+      await resolveAlertIfUnchangedSince(t.db, { dedupeKey: key, by: 'cold-verify', since: ago(MIN) }),
+    ).toBe('changed');
+    const [open] = await t.db.select().from(notifications).where(eq(notifications.dedupeKey, key));
+    expect(open?.resolvedAt).toBeNull();
+    expect(
+      await resolveAlertIfUnchangedSince(t.db, {
+        dedupeKey: key,
+        by: 'cold-verify',
+        since: later(MIN),
+        at: later(2 * MIN),
+      }),
+    ).toBe('ok');
+    expect(
+      await resolveAlertIfUnchangedSince(t.db, { dedupeKey: key, by: 'other', since: later(3 * MIN) }),
+    ).toBe('already_resolved');
+    const [row] = await t.db.select().from(notifications).where(eq(notifications.dedupeKey, key));
+    expect(row?.resolvedAt).toEqual(later(2 * MIN));
+    expect(row?.resolvedBy).toBe('cold-verify');
+    expect(
+      await resolveAlertIfUnchangedSince(t.db, {
+        dedupeKey: 'cold-verify:checkout:never',
+        by: 'x',
+        since: NOW,
+      }),
+    ).toBe('not_found');
   });
 });
 
