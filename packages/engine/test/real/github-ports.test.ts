@@ -590,6 +590,7 @@ describe('推分支', () => {
       addedLines: 1,
       // 每个文件各增删几行（#3140，任务页的改动卡读它）
       numstat: LOGIN_STAT,
+      numstatSnapshot: { total: 1 },
     });
     expect(calls.pushBranch).toHaveLength(1);
     expect(readdirSync(join(root, 'tmp')).filter((f) => f.startsWith('push-'))).toEqual([]);
@@ -605,7 +606,7 @@ describe('推分支', () => {
     expect(first.numstat).toEqual(LOGIN_STAT);
     expect(recorded).toEqual([]);
     await ports.pushBranch({ ...base, prNumber: 7 }, ctx);
-    expect(recorded).toEqual([{ repoId: 'repo-1', prNumber: 7, headSha: head, files: LOGIN_STAT }]);
+    expect(recorded).toEqual([{ repoId: 'repo-1', prNumber: 7, headSha: head, files: LOGIN_STAT, total: 1 }]);
   });
 
   it('【故意造出的失败】记库写不进：推分支照样成功，只写日志，不挡流程（页面写没读到）', async () => {
@@ -627,6 +628,56 @@ describe('推分支', () => {
     );
     expect(r.head).toBe(head);
     expect(logs.some((l) => l.includes('pr_head_files'))).toBe(true);
+  });
+
+  it.each(['501', 'zero', 'failed'])('numstat %s：真实采集端口保留总数、零文件或失败原因', async (kind) => {
+    const recorded: unknown[] = [];
+    const local = localExec();
+    const exec: UserExec = async (cmd) => {
+      if (cmd.argv.includes('--numstat') && cmd.argv.includes('-z')) {
+        return {
+          code: kind === 'failed' ? 1 : 0,
+          stdout: Buffer.from(
+            kind === '501' ? Array.from({ length: 501 }, (_, n) => `1\t0\tf${n}`).join('\0') + '\0' : '',
+          ),
+          stderr: kind === 'failed' ? 'git denied' : '',
+          timedOut: false,
+          aborted: false,
+        };
+      }
+      return local(cmd);
+    };
+    const { ports, trees } = setup(
+      {},
+      { exec, recordHeadFiles: async (r) => void recorded.push(r), log: () => {} },
+    );
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const pushed = await ports.pushBranch(
+      { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head, prNumber: 7 },
+      ctx,
+    );
+    if (kind === '501') {
+      expect(pushed.numstat).toHaveLength(500);
+      expect(pushed.numstatSnapshot).toEqual({ total: 501 });
+      expect(recorded[0]).toMatchObject({
+        total: 501,
+        files: expect.arrayContaining([{ path: 'f499', added: 1, removed: 0, binary: false }]),
+      });
+    } else if (kind === 'zero') {
+      expect(recorded).toEqual([{ repoId: repo.id, prNumber: 7, headSha: head, files: [], total: 0 }]);
+    } else {
+      expect(recorded).toEqual([
+        {
+          repoId: repo.id,
+          prNumber: 7,
+          headSha: head,
+          files: [],
+          reason: expect.stringContaining('git denied'),
+        },
+      ]);
+      expect(pushed.numstatSnapshot).toHaveProperty('reason');
+    }
   });
 
   it('树的头不是要推的、有没提交的改动、没有新提交、树不在：明确报错，不推', async () => {
@@ -717,6 +768,7 @@ describe('推之前把最新主线并进会话的树', () => {
       changedFiles: ['src/login.ts'],
       addedLines: 1,
       numstat: LOGIN_STAT,
+      numstatSnapshot: { total: 1 },
     });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([merged, merged]);
   });
@@ -819,6 +871,7 @@ describe('推之前把最新主线并进会话的树', () => {
       changedFiles: ['src/login.ts'],
       addedLines: 1,
       numstat: LOGIN_STAT,
+      numstatSnapshot: { total: 1 },
     });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([first, second, second]);
   });
@@ -1080,10 +1133,39 @@ describe('开 PR、CI、合并', () => {
     await ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
     expect(recorded).toEqual([]);
     await ports.openPr(
+      {
+        taskId: 't1',
+        repo,
+        branch: BRANCH,
+        head: m.head,
+        title: '登录',
+        body,
+        numstat: LOGIN_STAT,
+        numstatSnapshot: { total: 1 },
+      },
+      ctx,
+    );
+    expect(recorded).toEqual([
+      { repoId: 'repo-1', prNumber: 101, headSha: m.head, files: LOGIN_STAT, total: 1 },
+    ]);
+  });
+
+  it('开 PR 接到历史清单却无总数时明确未知，不替旧活动结果猜完整', async () => {
+    const recorded: unknown[] = [];
+    const { ports } = setup({}, { recordHeadFiles: async (r) => void recorded.push(r) });
+    await ports.openPr(
       { taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body, numstat: LOGIN_STAT },
       ctx,
     );
-    expect(recorded).toEqual([{ repoId: 'repo-1', prNumber: 101, headSha: m.head, files: LOGIN_STAT }]);
+    expect(recorded).toEqual([
+      {
+        repoId: repo.id,
+        prNumber: 101,
+        headSha: m.head,
+        files: [],
+        reason: expect.stringContaining('历史推分支结果缺少'),
+      },
+    ]);
   });
 
   it('正文给结构（github 包按模板渲染）；不抄需求 issue 的类别标签和里程碑、不读需求文档、不读单子挂的版本（#654）', async () => {

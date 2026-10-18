@@ -127,11 +127,24 @@ describe('真实 quota-read 接线：Grok 账单结构 unknown 不冒充额度',
     expect(oldWindows.rows).toHaveLength(1);
     expect(oldWindows.rows[0]?.used).toBe(47);
 
-    now = new Date(START.getTime() + 15 * 60_000);
-    body = invalidObservedBillingShape();
+    now = new Date(START.getTime() + 31 * 60_000);
+    body = {
+      config: {
+        currentPeriod: {
+          type: 'USAGE_PERIOD_TYPE_WEEKLY',
+          start: '2026-10-19T18:24:24.441496+00:00',
+          end: '2026-10-26T18:24:24.441496+00:00',
+        },
+        isUnifiedBillingUser: true,
+        onDemandCap: { val: 0 },
+        onDemandUsed: { val: 0 },
+        prepaidBalance: { val: 0 },
+      },
+    };
     const failed = await run();
     expect(failed).toMatchObject({ outcome: 'partial', scanned: 1, found: 1 });
-    expect(failed.why).toContain('类型 object');
+    expect(failed.why).toContain('usage_unreported');
+    expect(failed.why).toContain('用量未知');
     expect(failed.why).toContain('config.creditUsagePercent');
     expect(failed.why).not.toContain('47');
 
@@ -144,7 +157,10 @@ describe('真实 quota-read 接线：Grok 账单结构 unknown 不冒充额度',
     expect(windowsAfterFailure.rows).toEqual(oldWindows.rows);
     const open = await alertByKey(t.db, 'quota-read:grok');
     expect(open?.resolvedAt).toBeNull();
-    expect(open?.body).toContain('bad_response');
+    expect(open?.body).toContain('usage_unreported');
+    expect(open?.body).toContain('下一轮定时读取自然重试');
+    expect(open?.body).not.toContain('不会自己好');
+    expect(open?.body).not.toContain('要人动手');
     expect(open?.body).toContain('config.creditUsagePercent');
     expect(JSON.stringify(open)).not.toContain(ACCESS_TOKEN);
 
@@ -154,7 +170,7 @@ describe('真实 quota-read 接线：Grok 账单结构 unknown 不冒充额度',
     );
     expect(runsAfterFailure.rows.map((r) => r.outcome)).toEqual(['ok', 'partial']);
 
-    now = new Date(START.getTime() + 30 * 60_000);
+    now = new Date(START.getTime() + 45 * 60_000);
     body = billing(63);
     await expect(run()).resolves.toMatchObject({ outcome: 'ok', scanned: 1, found: 0 });
 
@@ -193,5 +209,17 @@ describe('真实 quota-read 接线：Grok 账单结构 unknown 不冒充额度',
     });
     expect(result && !result.ok && result.error.message).toContain('config.creditUsagePercent');
     expect(result && !result.ok && 'windows' in result).toBe(false);
+  });
+
+  it('坏类型仍是bad_response，不能当成正常账单未报告', async () => {
+    body = invalidObservedBillingShape();
+    const report = await readAllQuotas(
+      config,
+      quotaDeps(
+        () => now,
+        () => body,
+      ),
+    );
+    expect(report.results[0]).toMatchObject({ ok: false, error: { code: 'bad_response' } });
   });
 });

@@ -52,3 +52,5 @@
 - `issue:close` 和 `close-on-merge` 收尾都现读数据库最终验收责任；`--note`、Bot 评论不能替代结清。Actions 从可信 engine App 的精确 PR/head policy-source 找只读口，本机复用已安装的 local-sessions 地址。没读成明确退出 2、不关单。
 
 - 对外仓引导（#3109）由 repo-kind 按 INIT_CWD 判，原话只从 prompt-log/stdin 进私有待传目录和 quote 管理链，公开文件、开单及收件箱迁移回写只用 meaning；缺 meaning 先拒绝。同编号回执精确确认才删待传，后台失败留明确提醒。协议在 shared 的 private-quotes.ts 零依赖叶子，conventions 相对导入保持同步检出零安装可用。
+
+- 本机显式退回协议在 `managed-feedback.ts`，GitHub事务装配在 `managed-feedback-github.ts`，work入口在 `managed-work.ts`；只接受可信 Actions Bot 的 COMMENTED 明确协议，普通评论、法国正式 CR、coldVerify 和验收责任账互相独立。普通重算由 `merge-gate.yml` 执行，退回事务由 `managed-feedback.yml` 执行；两份工作流的写者必须共用 `merge-gate-${{ github.repository }}-pr-${{ matrix.pr }}` 精确 PR concurrency group，保持 `queue: max`、`cancel-in-progress: false`。批量入口只由 plan 列出 PR、交给 matrix 逐 PR 写，不能另开 all 写者或让本机直接写状态。排队不算阻合，ack不算resolve，读取失败保留未知责任。

@@ -8,6 +8,7 @@ import { acceptanceGate } from './acceptance-gate.ts';
 // 经 gh 读写：读不到 GitHub、读回来认不出一律明确报错、不关（CloseUnchecked，退出码 2），条件不够的拒关（CloseRefused，
 // 退出码 1），不拿「没读到」当「没有」，也不拿「没报错」当「关上了」（关完回读）。
 import type { Gh, GhResult } from './issue-new.ts';
+import { managedCloseGate } from './managed-work.ts';
 
 // —— pnpm issue:close <号> ——
 
@@ -36,6 +37,7 @@ export class CloseUnchecked extends Error {
 export interface IssueCloseDeps {
   gh: Gh;
   acceptance?: typeof acceptanceGate;
+  managed?: typeof managedCloseGate;
 }
 
 export type IssueCloseResult =
@@ -76,6 +78,7 @@ export async function issueClose(argv: readonly string[], deps: IssueCloseDeps):
   }
 
   try {
+    await (deps.managed ?? managedCloseGate)(gh, issue.repoUrl, n);
     const pending = await (deps.acceptance ?? acceptanceGate)(gh, issue.repoUrl, n);
     if (pending) throw new CloseRefused(pending);
   } catch (e) {

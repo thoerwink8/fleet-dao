@@ -147,6 +147,7 @@ export interface RunsWriter {
   observeSessionId?(runId: string, sessionId: string): Promise<void>;
   /** 冷验收有结论了（#3140）：写在验收那一笔上（runs.verdict）。占位实现可不做；真实现写不进抛。 */
   noteVerdict?(runId: string, verdict: RunVerdict): Promise<void>;
+  noteVerifyAggregate?(input: import('@fleet-dao/shared').VerifyAggregate): Promise<void>;
 }
 
 /**

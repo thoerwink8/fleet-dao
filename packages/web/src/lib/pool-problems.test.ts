@@ -52,6 +52,15 @@ describe('poolProblemsOf', () => {
 });
 
 describe('actionOf', () => {
+  test('上游未报告用量：保留未知，行动不误要求重新登录', () => {
+    const body =
+      'grok（grok-billing）这一轮没读成：usage_unreported——Grok 账单已读，但上游未报告当前用量；用量未知。上次读成是 2026-10-15T17:04:00.000Z。等下一轮定时读取自然重试。';
+    const p = poolProblemsOf([note({ dedupeKey: 'quota-read:grok', body })]).get('grok');
+    expect(p?.code).toBe('usage_unreported');
+    expect(p?.reason).toContain('用量未知');
+    expect(p?.action).toContain('下一轮自然读取');
+    expect(p?.action).not.toContain('grok login');
+  });
   test('访问令牌还能由 CLI 续：先等，超过 30 分钟再登录', () => {
     const body =
       'grok（grok-billing）这一轮没读成：auth_refreshable——Grok 的登录令牌已过期，登录文件里还有 refresh_token，等 grok 下次运行会自己续。上次读成是 2026-10-15T17:04:00.000Z。这种会在 grok 下次运行后自己好。';

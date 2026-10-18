@@ -136,6 +136,7 @@ export const TEST_READS: Record<string, string[]> = {
   conventions: [
     'agents/hooks/',
     '.github/workflows/query-metadata.yml',
+    '.github/workflows/managed-feedback.yml',
     'packages/shared/src/private-quotes.ts',
   ],
   db: ['adapters', 'core'],

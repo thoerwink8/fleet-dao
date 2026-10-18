@@ -11,7 +11,7 @@ import {
   type Db,
   listTaskEngineSteps,
   listTaskRounds,
-  readLatestPrHeadFiles,
+  readPrHeadFiles,
   readRunLastSay,
   readRunProcessRows,
   readRunTallies,
@@ -46,8 +46,8 @@ export interface RunTranscriptPort {
   rounds(taskId: string): ReturnType<typeof listTaskRounds>;
   /** 引擎在会话外做的事和等待（step_timings）；读不到抛。 */
   engineSteps(taskId: string): ReturnType<typeof listTaskEngineSteps>;
-  /** 这个 PR 最新一个头的文件清单（pr_head_files，按头记的 numstat）；一次都没记过返回 null；读不到抛。 */
-  prFiles(repoId: string, prNumber: number): ReturnType<typeof readLatestPrHeadFiles>;
+  /** 按 PR 完整头读 numstat 快照；旧头只为诊断，不当作当前完整清单；未采过返回 null，读不到抛。 */
+  prFiles(repoId: string, prNumber: number, headSha: string): ReturnType<typeof readPrHeadFiles>;
 }
 
 export function pgRunTranscript(db: Db): RunTranscriptPort {
@@ -58,7 +58,7 @@ export function pgRunTranscript(db: Db): RunTranscriptPort {
     lastSay: (runId) => readRunLastSay(db, runId),
     rounds: (taskId) => listTaskRounds(db, taskId),
     engineSteps: (taskId) => listTaskEngineSteps(db, taskId),
-    prFiles: (repoId, prNumber) => readLatestPrHeadFiles(db, repoId, prNumber),
+    prFiles: (repoId, prNumber, headSha) => readPrHeadFiles(db, repoId, prNumber, headSha),
   };
 }
 
