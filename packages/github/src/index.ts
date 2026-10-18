@@ -197,7 +197,9 @@ export {
 export {
   type AuditReport,
   createReconciler,
+  DIRECTIVE_RECORD_BRANCH_PREFIX,
   type Intake,
+  isDirectiveRecordFiles,
   isEngineCiTimingsPr,
   type MergedPrAuditReport,
   type MergedPrFinding,

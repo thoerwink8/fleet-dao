@@ -5,14 +5,16 @@
 // - 核对：合并的 PR 都记在镜像里。我们两个机器人开的 PR 还要是「引擎」机器人合的、
 //   账上有合并队列的合并记录（C21/C22）。人开的不查这两项：帅位本机开、GitHub 自动合并，没有合并队列这一步。
 //   例外：分支以 ci-timings/ 开头、开和合都是引擎机器人的耗时表 PR（isEngineCiTimingsPr）不走任务合并队列，不报没有合并记录。
+//   例外：分支以 directive/ 开头、只新增 docs/directives/ 下的记录文件、头上必过检查全绿的创始人引导记录 PR（pnpm progress directive 开、
+//   挂 GitHub 自动合并，没有对应的单可走任务合并队列）：查实了才不报，不按个别 PR 号豁免。
 // 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
-import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
+import { enc, type Logger, parseRepoSlug, type RepoRef, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
 import { type EchoKind, echoOf } from './echo.ts';
 import { mirrorExtrasOf } from './events.ts';
-import { type MergeReceipt, mergeKey, readPull } from './pulls.ts';
+import { type MergeReceipt, mergeKey, pullFiles, readCi, readPull, requiredChecksFor } from './pulls.ts';
 
 /**
  * 和 @fleet-dao/api 的 GitHubIntake 同形：补收的东西走同一道门、同一本投递账。seenBefore = 这一版以前的投递带过
@@ -90,6 +92,11 @@ export interface MergedPrAuditReport extends AuditReport {
    * 调用方按这个撤掉已经开着的 reconcile:pr；补账不能证明经过合并队列。
    */
   cleanPrs?: number[];
+  /**
+   * 这一轮查实的创始人引导记录 PR 号（改到的全是新增的引导记录文件，头上必过检查全绿）。
+   * 没有「没经合并队列」那条发现，调用方仍要按这个把已经开着的 reconcile:pr 撤掉。
+   */
+  directiveRecordPrs?: number[];
 }
 
 export interface ReconcilerOptions {
@@ -298,11 +305,37 @@ export function isEngineCiTimingsPr(pr: {
   return pr.headRef.startsWith('ci-timings/') && pr.openedByEngine && pr.mergedByEngine;
 }
 
+/** 创始人引导记录 PR 的头分支前缀（packages/conventions 的 directives.ts 开 PR 用 directive/<编号>）。 */
+export const DIRECTIVE_RECORD_BRANCH_PREFIX = 'directive/';
+const DIRECTIVE_RECORD_FILE = /^docs\/directives\/\d{4}-\d{2}\/[^/]+\.md$/;
+
+/** 改到的文件至少一个、且全是 docs/directives/<年-月>/ 下新增的记录文件：引导记录 PR 只能是这样。 */
+export function isDirectiveRecordFiles(files: readonly { filename: string; status: string }[]): boolean {
+  return (
+    files.length > 0 && files.every((f) => f.status === 'added' && DIRECTIVE_RECORD_FILE.test(f.filename))
+  );
+}
+
+/**
+ * 创始人引导记录 PR（分支 directive/ 开头）本来就挂 GitHub 自动合并，没有单可走任务合并队列。
+ * 光凭分支名不豁免：改到的文件只能是新增的引导记录，头上的必过检查还要全绿，核实了才算。读不到由调用方当没核实。
+ */
+async function verifyDirectiveRecordPr(
+  deps: Deps,
+  repo: RepoRef,
+  pr: { number: number; head: { ref: string; sha: string } },
+): Promise<boolean> {
+  if (!pr.head.ref.startsWith(DIRECTIVE_RECORD_BRANCH_PREFIX)) return false;
+  if (!isDirectiveRecordFiles(await pullFiles(deps, repo, pr.number))) return false;
+  const ci = await readCi(deps, repo, pr.head.sha, await requiredChecksFor(deps, repo));
+  return ci.evaluation.overall === 'green';
+}
+
 /**
  * 一段时间里合了的 PR：镜像没记成已合并的都补上（人开的、机器人开的一样，补镜像是安全的）。
  * 合并人必须是「引擎」、账上必须有合并队列的合并记录：只查我们两个机器人开的 PR。人开的没有合并队列这一步，
  * 查了会把帅位本机开的、GitHub 自动合并的每一张都报出来。
- * 引擎自己的耗时表 PR（isEngineCiTimingsPr）不报没有合并记录，只补账。
+ * 引擎自己的耗时表 PR（isEngineCiTimingsPr）、查实了的创始人引导记录 PR 不报合并人和没有合并记录，只补账。
  */
 export async function auditMergedPrs(
   deps: Deps,
@@ -328,6 +361,7 @@ export async function auditMergedPrs(
   const findings: MergedPrFinding[] = [];
   const engineCiTimingsPrs: number[] = [];
   const cleanPrs: number[] = [];
+  const directiveRecordPrs: number[] = [];
   const note = (
     number: number,
     kind: MergedPrFinding['kind'],
@@ -343,6 +377,7 @@ export async function auditMergedPrs(
     findings,
     engineCiTimingsPrs,
     cleanPrs,
+    directiveRecordPrs,
   });
   try {
     outer: for await (const page of client.pages({
@@ -395,7 +430,19 @@ export async function auditMergedPrs(
           const who = { headRef, openedByEngine, mergedByEngine };
           // 耗时表这条自己合的，记下来给上面撤旧提醒；有没有合并记录都记，回看窗口里开着的误报才撤得掉。
           if (isEngineCiTimingsPr(who)) engineCiTimingsPrs.push(item.number);
-          if (!mergedByEngine) {
+          // 引导记录 PR：查实了记下来给上面撤旧提醒；核实不了（含读不到）照常报，下一轮查实了对账自己撤。
+          let directiveRecord = false;
+          try {
+            directiveRecord = await verifyDirectiveRecordPr(deps, repo, pr);
+          } catch (err) {
+            log.warn('核实引导记录 PR 没成，按没核实算', {
+              repo: slug,
+              number: item.number,
+              why: errMessage(err),
+            });
+          }
+          if (directiveRecord) directiveRecordPrs.push(item.number);
+          if (!mergedByEngine && !directiveRecord) {
             note(
               item.number,
               'not_merged_by_engine',
@@ -426,7 +473,7 @@ export async function auditMergedPrs(
             receipt.data.mergeCommit === pr.merge_commit_sha &&
             receipt.data.mergedBy === pr.merged_by?.login;
           if (clean) cleanPrs.push(item.number);
-          else if (!isEngineCiTimingsPr(who)) {
+          else if (!isEngineCiTimingsPr(who) && !directiveRecord) {
             note(item.number, 'no_merge_record', '合并了，但账上没有合并队列的合并记录', who);
           }
           if (!existing?.completedAt) {
