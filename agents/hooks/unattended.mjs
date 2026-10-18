@@ -263,7 +263,14 @@ export function explicitlyOff(dir, id) {
 }
 
 /** @param {string} iso */
-const fmt = (iso) => new Date(iso).toISOString().replace('T', ' ').slice(0, 16);
+const fmt = (iso) => {
+  const date = new Date(iso);
+  const pad = (/** @type {number} */ value) => String(value).padStart(2, '0');
+  // 日期和偏移都取截止时刻的本地时区，跨日和夏令时也不能把 UTC 冒充本地时间。
+  const offset = -date.getTimezoneOffset();
+  const zone = `${offset >= 0 ? '+' : '-'}${pad(Math.floor(Math.abs(offset) / 60))}:${pad(Math.abs(offset) % 60)}`;
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())} UTC${zone}`;
+};
 
 /**
  * 机器自己起的会话的第一条提示：反方（「你是「反方」」，discuss 技能起的）。
