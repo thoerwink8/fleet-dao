@@ -36,9 +36,15 @@ export function liveGh(cwd: string, timeoutMs = 60_000): Gh {
 }
 
 /** 标准 PR 入口专用：仓身份认不出就停，不让 gh 按 relay remote 猜。 */
-export function livePrGh(cwd: string, timeoutMs = 60_000): Gh {
-  const env = { ...process.env };
-  const resolved = resolveRepo(env, cwd);
+export interface PrTransport {
+  env?: NodeJS.ProcessEnv;
+  origin?: (cwd: string) => string | undefined;
+  run?: (args: string[], env: NodeJS.ProcessEnv) => RunResult;
+}
+
+export function livePrGh(cwd: string, timeoutMs = 60_000, transport: PrTransport = {}): Gh {
+  const env = { ...(transport.env ?? process.env) };
+  const resolved = resolveRepo(env, cwd, transport.origin);
   const error =
     resolved.error ??
     (!resolved.repo
@@ -47,8 +53,8 @@ export function livePrGh(cwd: string, timeoutMs = 60_000): Gh {
   if (error) return () => ({ code: 1, stdout: '', stderr: error });
   const repo = resolved.repo as string;
   env.GH_REPO = repo;
-  const run = liveCommand('gh', cwd, timeoutMs, env);
-  return (args) => run(canonicalPrArgs(args, repo));
+  const run = transport.run ?? liveCommand('gh', cwd, timeoutMs, env);
+  return (args) => run(canonicalPrArgs(args, repo), env);
 }
 
 /** 真跑 git（pnpm pr:open 读分支上的提交说明用）：同 liveGh 的三态。 */
