@@ -833,8 +833,15 @@ describe('第二步读装没装：经 fleet-api project installations，不读�
     [REQUIRED_FILES.closeOnMerge]: closeOnMergeCaller(STD),
   };
 
-  /** 真口子（ghProjectWorld）+ 假 gh：本机身份读 user/installations 一律 403；默认分支上的文件 withFiles 决定。 */
-  function fluxWorld(withFiles: boolean, installations: FleetApiResult) {
+  /**
+   * 真口子（ghProjectWorld）+ 假 gh：本机身份读 user/installations 一律 403；默认分支上的文件 withFiles 决定。
+   * policy：DB（project show）和真实 HTTPS 读桥各自回的 ciPolicy，默认都是 force。
+   */
+  function fluxWorld(
+    withFiles: boolean,
+    installations: FleetApiResult,
+    policy: { db: 'force' | 'off'; bridge: 'force' | 'off' } = { db: 'force', bridge: 'force' },
+  ) {
     const ghCalls: string[][] = [];
     const fleetCalls: string[][] = [];
     const gh: Gh = async (args) => {
@@ -890,7 +897,7 @@ describe('第二步读装没装：经 fleet-api project installations，不读�
           code: 0,
           stdout: JSON.stringify({
             repo: FLUX,
-            ciPolicy: 'force',
+            ciPolicy: policy.db,
             ciPolicyBridge: {
               version: 1,
               public: true,
@@ -910,7 +917,7 @@ describe('第二步读装没装：经 fleet-api project installations，不读�
     };
     const fetchImpl: typeof fetch = async () =>
       Response.json(
-        { version: 1, githubId: REPO_ID, repo: FLUX, ciPolicy: 'force' },
+        { version: 1, githubId: REPO_ID, repo: FLUX, ciPolicy: policy.bridge },
         { headers: { 'cache-control': 'no-store' } },
       );
     return { world: ghProjectWorld(gh, fleetApi, fetchImpl), ghCalls, fleetCalls };
@@ -949,6 +956,30 @@ describe('第二步读装没装：经 fleet-api project installations，不读�
     const r = await projectCheck(ctxOf(f.world), FLUX);
     expect(r.results.map((x) => x.status)).toEqual(['ok', 'ok', 'ok', 'ok', 'ok', 'ok']);
     expect(r.code).toBe(0);
+  });
+
+  const step6 = (r: { results: { step: string; status: string; detail: string }[] }) =>
+    r.results.find((x) => x.step === '6 策略读桥');
+
+  it('fluxwatch 合法 off（#2997）：DB 与真实读桥都是 off、标准 caller 齐 → 第六步按 off 核过，退出 0，只读', async () => {
+    const f = fluxWorld(true, fullyInstalled(), { db: 'off', bridge: 'off' });
+    const r = await projectCheck(ctxOf(f.world), FLUX);
+    expect(step6(r)).toMatchObject({ status: 'ok' });
+    expect(step6(r)?.detail).toContain('HTTPS 真实 DB off 已核');
+    // 无 open PR 只说尚未验全链，不冒称合并闸已过
+    expect(step6(r)?.detail).toContain('尚未验证真实事件全链');
+    expect(r.code).toBe(0);
+    expect(f.ghCalls.some((a) => a.includes('-X') || a.includes('create') || a.includes('edit'))).toBe(false);
+  });
+
+  it('fluxwatch DB 是 off、读桥仍回 force（#2997 装配漂移）→ 第六步红，check 退出 1，不能当全绿开接活', async () => {
+    const f = fluxWorld(true, fullyInstalled(), { db: 'off', bridge: 'force' });
+    const r = await projectCheck(ctxOf(f.world), FLUX);
+    expect(step6(r)).toMatchObject({ status: 'red', detail: '真实 HTTPS 桥与 DB 当前 ciPolicy 不一致' });
+    expect(r.results.filter((x) => x.step !== '6 策略读桥').map((x) => x.status)).toEqual(
+      Array(r.results.length - 1).fill('ok'),
+    );
+    expect(r.code).toBe(1);
   });
 
   it('读不成也不退回本机 gh 猜：第二步没查成、退出码 2', async () => {
