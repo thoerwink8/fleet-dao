@@ -488,6 +488,28 @@ export interface ReadCiPolicyResult {
   mode: 'force' | 'off';
 }
 
+/**
+ * CI 红了、回动手之前现读这张 PR 上仍有效的正式评审（patched('ci-red-review-context')）。
+ * 读的是 expectedHead；旧头上的评审可以留在结果里，不按 commit 等于当前头过滤。
+ */
+export interface ReadCiReviewsInput {
+  schemaVersion: 1;
+  taskId: string;
+  repo: Repo;
+  branch: string;
+  prNumber: number;
+  /** CI 红的那个头。读之前或读期间头变了，不把读到的内容当完整快照。 */
+  expectedHead: string;
+}
+
+/**
+ * delivered：这一头的正式评审已经读全（reviews 空数组＝确实没有还有效的要求改）。
+ * 没 delivered：没核实完。不能当成没有评审，也不能沿用上一次的快照。headMoved 是当时 PR 的新头。
+ */
+export type ReadCiReviewsResult =
+  | { delivered: true; head: string; reviews: ReviewChange[] }
+  | { delivered: false; reason: string; headMoved?: string };
+
 /** 不强制 CI 的仓：开完 PR、查完改标准路径之后由引擎直接合并（不等检查、不挂自动合并）。 */
 export interface MergeNowInput {
   schemaVersion: 1;

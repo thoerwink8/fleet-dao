@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -148,7 +149,9 @@ async function machine(
     pollMs: 5,
     prepare: async ({ destination }) => {
       mkdirSync(resolve(destination, '..'), { recursive: true });
-      copyFileSync(nativeBinary, destination);
+      // 和真实 prepareBinary 一样先写旁边再改名：macOS 上原地覆盖刚跑过的可执行文件，内核缓存的签名对不上，新进程一起来就被杀
+      copyFileSync(nativeBinary, `${destination}.new`);
+      renameSync(`${destination}.new`, destination);
       return destination;
     },
   };

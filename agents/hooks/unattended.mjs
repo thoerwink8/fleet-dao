@@ -22,8 +22,8 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { isMainModule } from './is-main.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
 /**
@@ -533,14 +533,7 @@ export function main(argv, io) {
   }
 }
 
-function isMain() {
-  const entry = process.argv[1];
-  if (!entry) return false;
-  const norm = (/** @type {string} */ p) => (process.platform === 'win32' ? p.toLowerCase() : p);
-  return norm(resolve(entry)) === norm(fileURLToPath(import.meta.url));
-}
-
-if (isMain()) {
+if (isMainModule(import.meta)) {
   process.exit(
     main(process.argv.slice(2), {
       out: (/** @type {string} */ s) => process.stdout.write(`${s}\n`),

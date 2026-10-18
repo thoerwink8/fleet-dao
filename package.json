@@ -17,6 +17,7 @@
     "typecheck": "tsc -b",
     "test": "vitest run",
     "agents:sync": "node packages/agents-sync/bin/agents-sync-now",
+    "agents:probe": "node packages/agents-sync/src/probe-main.ts",
     "mirasim:migrate": "node packages/mirasim-reclaude/bin/migrate",
     "mirasim:health": "node packages/mirasim-reclaude/bin/health",
     "mirasim:audit": "node packages/mirasim-reclaude/bin/audit",
@@ -45,6 +46,7 @@
     "line:stats": "node packages/db/src/bin/line-stats.ts",
     "repo:check": "node agents/hooks/repo-contract.mjs check",
     "repo:init": "node agents/hooks/repo-contract.mjs init",
+    "repo:kind": "node agents/hooks/repo-kind.mjs",
     "local-sessions": "node agents/local-sessions/install.mjs",
     "agent-eval": "node packages/agent-eval/src/bin/agent-eval.ts",
     "pg:local": "node packages/db/src/bin/local-pg.ts"

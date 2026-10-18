@@ -4,7 +4,7 @@
 // 用法：node check-brief.mjs <任务书文件> [--quote <原话片段>] [--root <仓根>]
 // 仓根默认是当前目录（指挥官在主检出根目录跑）；只用来提示哪些路径仓里还没有，不影响判定。
 // 最后一行 PASS 或 FAIL <条数>；退出码 0 过、1 不过、2 没法判（文件读不到、参数不对）。
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -132,5 +132,9 @@ function main(argv) {
   return r.problems.length ? 1 : 0;
 }
 
-const invoked = process.argv[1] ? resolve(process.argv[1]) : '';
-if (invoked === fileURLToPath(import.meta.url)) process.exitCode = main(process.argv.slice(2));
+// 入口判定：Node 自带的 import.meta.main 不受软链接影响；旧 Node 退回比真实路径
+const invoked =
+  typeof import.meta.main === 'boolean'
+    ? import.meta.main
+    : !!process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url));
+if (invoked) process.exitCode = main(process.argv.slice(2));

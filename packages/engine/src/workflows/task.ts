@@ -33,6 +33,8 @@
 // 并取消那一次验收（patched('verify-cancel-on-ci-red')，dropVerify：省一次验收会话的 token；老历史照旧让它自己跑完）；
 // 第 2 轮验收只复核上轮没过的条和这一轮的增量（patched('verify-recheck')，coldVerifyInput 多带 recheck）：老历史没有这个标记，入参和原来一样。
 // CI 绿了再等验收、认了才算一轮；两样都过才挂自动合并。
+// CI 红了回动手之前（patched('ci-red-review-context')，task-ci.ts）：现读仍有效的正式评审，和失败的检查、摘要、日志一起交下一轮。
+// 读不全未核实未交付，不放行、不把没交全的记成已消费。老历史没有这个标记，红了只交 CI 那几行。
 // 停下前 PR 已开、头已记录，点「继续」先走 deliver（等 CI、验收、挂自动合并），不先起动手会话（patched('continue-redelivers-open-pr')，#1582）。
 // 动手一轮会话跑完但没有提交（#1408，patched('avoid-empty-commit-route')）：下一轮选路避开这条路由；连着第二轮仍没提交，
 // 再避开这个模型（认得出族的连这一族，patched('empty-commit-avoid-family')，别的族派不出退回只避开模型）。避开只在这张单里。没有别的候选就照旧用原来的路由，lastProblem 写「没有别的路由可换」，不死等。

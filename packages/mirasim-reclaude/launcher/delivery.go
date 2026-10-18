@@ -16,6 +16,15 @@ import (
 //     让它当场显示「没送到、请重发」，不再无声地挂着；
 //   - 过了 expireAfter 仍没回显（比如这一版 CLI 对某类输入不回显），不再挡路由，只记日志。
 // 日志只记条数、毫秒数和长度，不记内容。
+//
+// 回显怎么对上是哪一条（一次有效回显最多销一条，绝不按子串）：
+//  1. 转出的 user 帧带 uuid、回显也带 uuid：只按 uuid 相等对；uuid 不同就是别的消息，哪怕正文一样。
+//  2. 否则按正文精确相等：两边都只有 text（字符串或全是 text 块），各自只去掉首尾空白后逐字相等，
+//     同正文有多条时销最早那条。回显多了前后缀、少了字、只是包含，都不算。
+//  3. 带图片等非 text 块、或正文为空的，没有 uuid 就无法判定是哪一条：仍保留未确认责任，
+//     记 event=user-identity-unknown，保护当前执行体直到原有过期边界；不能用空正文销账。有 uuid 的照常按 1 记账。
+//
+// CLI 是否回显 uuid 由协议决定，这里不假定：转出去的帧没带 uuid 就只走 2。
 
 const deliveryStallMessage = "启动器已把这条消息交给 Claude Code，但它一直没有确认读到（没有回显、也没有任何输出），这条很可能没送到。请重新发送；连续出现就重启这个会话的进程。"
 
@@ -29,7 +38,8 @@ func deliveryStallAfter() time.Duration {
 }
 
 type pendingUser struct {
-	text     string
+	uuid     string // 转出的 user 帧自带的 uuid；没有则空
+	text     string // 纯文本正文（去首尾空白）；带非 text 块或为空时为空，只能靠 uuid 对
 	at       time.Time
 	idle     bool // 转出时执行体空闲（没有在跑的回合）：这时 CLI 应当立刻读进并回显
 	quiet    bool // 转出后执行体还没有任何输出
@@ -59,37 +69,60 @@ func hasFlag(args []string, name string) bool {
 	return false
 }
 
-// userText 取 user 帧的正文：字符串原样，内容块数组只拼 text 块。图片等不参与比对。
-func userText(f frame) string {
+// userContent 取 user 帧的 text 正文：字符串原样，内容块数组只拼 text 块。
+// onlyText 为假说明还有图片等非 text 块（或内容读不出来），正文不能代表整条消息。
+func userContent(f frame) (text string, onlyText bool) {
 	m := f.object("message")
 	if m == nil {
-		return ""
+		return "", false
 	}
 	var s string
 	if json.Unmarshal(m["content"], &s) == nil {
-		return s
+		return s, true
 	}
 	var blocks []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if json.Unmarshal(m["content"], &blocks) != nil {
-		return ""
+		return "", false
 	}
 	parts := []string{}
+	onlyText = true
 	for _, b := range blocks {
 		if b.Type == "text" {
 			parts = append(parts, b.Text)
+		} else {
+			onlyText = false
 		}
 	}
-	return strings.Join(parts, "\n")
+	return strings.Join(parts, "\n"), onlyText
+}
+
+func userText(f frame) string {
+	text, _ := userContent(f)
+	return text
+}
+
+// userIdentity 是一条 user 帧能用来对回执的身份：uuid，和纯文本正文（带非 text 块或为空时为空）。
+func userIdentity(f frame) (uuid, text string) {
+	uuid = f.text("uuid")
+	if t, only := userContent(f); only {
+		text = strings.TrimSpace(t)
+	}
+	return uuid, text
 }
 
 func (d *deliveries) forwarded(f frame, path string, idle bool) {
 	logLine("event=user-forward path=" + path + " idle=" + strconv.FormatBool(idle) + " len=" + strconv.Itoa(len(userText(f))) + " unacked=" + strconv.Itoa(d.unacked()))
-	if d.tracking {
-		d.pending = append(d.pending, &pendingUser{text: strings.TrimSpace(userText(f)), at: time.Now(), idle: idle, quiet: true})
+	if !d.tracking {
+		return
 	}
+	uuid, text := userIdentity(f)
+	if uuid == "" && text == "" {
+		logLine("event=user-identity-unknown path=" + path + " retained=true")
+	}
+	d.pending = append(d.pending, &pendingUser{uuid: uuid, text: text, at: time.Now(), idle: idle, quiet: true})
 }
 
 func (d *deliveries) unacked() int {
@@ -105,7 +138,28 @@ func (d *deliveries) unacked() int {
 // blocking：还有没销账、没过期的 user，执行体不算空闲。
 func (d *deliveries) blocking() bool { return d.unacked() > 0 }
 
-// observe 看执行体的每一帧主线输出：任何输出都说明它没卡死；isReplay 的 user 按正文销账。
+// match 返回回显对上的那一条 pending 的下标，对不上返回 -1。先按 uuid，再按正文精确相等，都取最早的一条。
+func (d *deliveries) match(uuid, text string) int {
+	if uuid != "" {
+		for i, p := range d.pending {
+			if p.uuid == uuid {
+				return i
+			}
+		}
+	}
+	if text == "" {
+		return -1
+	}
+	for i, p := range d.pending {
+		// 双方都有 uuid 又不相等，是两条不同的消息，不能因为正文一样就顶替。
+		if p.text == text && (p.uuid == "" || uuid == "") {
+			return i
+		}
+	}
+	return -1
+}
+
+// observe 看执行体的每一帧主线输出：任何输出都说明它没卡死；isReplay 的 user 按身份销账，规则见文件头。
 func (d *deliveries) observe(f frame) {
 	if len(d.pending) == 0 || f.text("parent_tool_use_id") != "" {
 		return
@@ -116,15 +170,14 @@ func (d *deliveries) observe(f frame) {
 	if f.text("type") != "user" || string(f["isReplay"]) != "true" {
 		return
 	}
-	echo := strings.TrimSpace(userText(f))
-	for i, p := range d.pending {
-		if p.text == echo || (p.text != "" && strings.Contains(echo, p.text)) {
-			logLine("event=user-ack ms=" + elapsedMs(p.at) + " reported=" + strconv.FormatBool(p.reported) + " expired=" + strconv.FormatBool(p.expired))
-			d.pending = append(d.pending[:i], d.pending[i+1:]...)
-			return
-		}
+	uuid, text := userIdentity(f)
+	if i := d.match(uuid, text); i >= 0 {
+		p := d.pending[i]
+		logLine("event=user-ack ms=" + elapsedMs(p.at) + " reported=" + strconv.FormatBool(p.reported) + " expired=" + strconv.FormatBool(p.expired))
+		d.pending = append(d.pending[:i], d.pending[i+1:]...)
+		return
 	}
-	logLine("event=user-ack-unmatched len=" + strconv.Itoa(len(echo)) + " unacked=" + strconv.Itoa(d.unacked()))
+	logLine("event=user-ack-unmatched len=" + strconv.Itoa(len(text)) + " unacked=" + strconv.Itoa(d.unacked()))
 }
 
 // due 返回该判卡住、要回报错的条目，并把超时的条目标成过期。
