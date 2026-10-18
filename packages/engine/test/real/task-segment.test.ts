@@ -1,6 +1,16 @@
 // 任务工作流的动手会话（real/task-segment.ts，#632 S2-4b-2）：备树（真 git、本地镜像）→ 提示词 → 一次性会话（假驱动，
 // 不起真执行体）→ 结局整理。每条没跑成、起不来、被叫停、内存放不下的路径故意造一次。
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { type RunFacts, type SessionUser, SUBAGENTS_DIR } from '@fleet-dao/adapters';
@@ -11,6 +21,7 @@ import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import { oneShotSessions } from '../../src/real/one-shot-sessions.ts';
+import { prepareSegmentTree } from '../../src/real/segment-tree.ts';
 import { DETACHED_MARK, type SessionHandoff, sessionHandoff } from '../../src/real/session-handoff.ts';
 import { readSubagentGuard } from '../../src/real/subagents-file.ts';
 import { createRunSegment, type RunSegmentDeps, sweepRunDirs } from '../../src/real/task-segment.ts';
@@ -18,6 +29,7 @@ import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not
 import { type RunSegmentInput, SEGMENT_DETACHED } from '../../src/task-contract.ts';
 import { goodBrief } from '../task-script.ts';
 import { fakeTrees, git, mirror } from './fixtures.ts';
+import { gitIn, isolatedGitEnv, isolatedUserExec, repoStamp } from './isolated-git.ts';
 
 const USER = 'fleet-agent-carpool' as SessionUser;
 const REPO = { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' };
@@ -1418,5 +1430,136 @@ describe('脱开引擎跑、引擎重启后接回（#2238：发版不再停在�
     expect(sessions.stop(new Set([route({ hostId: 'mirasim' }).poolId]), '切号')).toEqual(['run-0002']);
     expect(await pending).toMatchObject({ ok: false, outcome: 'org_switch' });
     expect(existsSync(join(root, 'io', 'run-0002', DETACHED_MARK))).toBe(false);
+  });
+});
+
+describe('备树不把父仓当成目标仓', { timeout: 60_000 }, () => {
+  const REF = 'refs/fleet/export/1';
+
+  function envFor(): Record<string, string> {
+    const home = join(root, 'home');
+    mkdirSync(home, { recursive: true });
+    return isolatedGitEnv(realpathSync(root), home);
+  }
+
+  function commitRepo(env: Record<string, string>, dir: string): string {
+    mkdirSync(dir, { recursive: true });
+    gitIn(env, dir, 'init', '-q', '-b', 'main');
+    writeFileSync(join(dir, 'README'), 'hi\n');
+    gitIn(env, dir, 'add', 'README');
+    gitIn(env, dir, 'commit', '-q', '-m', 'init');
+    return gitIn(env, dir, 'rev-parse', 'HEAD');
+  }
+
+  it('目录还不存在、以及已经在的空子目录：取 bundle 之前就停，不 init、不改父仓', async () => {
+    const env = envFor();
+    const parent = join(root, 'parent');
+    const mirrorDir = join(root, 'mirror');
+    commitRepo(env, parent);
+    const tip = commitRepo(env, mirrorDir);
+    const gh = {
+      async fetchMainline() {
+        return { head: tip, defaultBranch: 'main' };
+      },
+      async bundleCommits(input: { tips: string[]; outPath: string }) {
+        const tipSha = input.tips[0] as string;
+        gitIn(env, mirrorDir, 'update-ref', REF, tipSha);
+        gitIn(env, mirrorDir, 'bundle', 'create', input.outPath, REF);
+        gitIn(env, mirrorDir, 'update-ref', '-d', REF);
+        return { path: input.outPath, bytes: 0, refs: [{ tip: tipSha, ref: REF }] };
+      },
+      async commitIdentity() {
+        return { name: 'fleet-agent[bot]', email: 'bot@localhost' };
+      },
+    };
+    const deps = {
+      gh,
+      trees: fakeTrees(join(root, 'layout')).trees,
+      exec: isolatedUserExec(env),
+      tmpDir: join(root, 'engine-tmp'),
+      gitBin: 'git',
+      shBin: 'sh',
+    };
+    const input = {
+      repo: REPO,
+      worktreePath: join(parent, 'fresh-child'),
+      branch: BRANCH,
+      baseSha: tip,
+      user: USER,
+      runId: 'boundary-fresh',
+    };
+    const before = repoStamp(env, parent);
+    const freshErr = await prepareSegmentTree(deps, input, ctx()).catch((e: unknown) => e);
+    expect(freshErr).toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: false,
+      message: expect.stringContaining('不能往那里写'),
+    });
+    expect(existsSync(join(parent, 'fresh-child', '.git'))).toBe(false);
+
+    const existing = join(parent, 'empty-child');
+    mkdirSync(existing);
+    const ft = fakeTrees(join(root, 'layout-2'));
+    ft.owners.set(existing, USER);
+    const again = await prepareSegmentTree(
+      { ...deps, trees: ft.trees },
+      { ...input, worktreePath: existing, runId: 'boundary-existing' },
+      ctx(),
+    ).catch((e: unknown) => e);
+    expect(again).toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: false,
+      message: expect.stringContaining('不能往那里写'),
+    });
+    expect(existsSync(join(existing, '.git'))).toBe(false);
+    expect(repoStamp(env, parent)).toEqual(before);
+    expect(gitIn(env, parent, 'status', '--porcelain')).toBe('');
+  });
+
+  it('已经是检出、但和主仓共用元数据：走钉主线那一支，写入前停下，主仓的配置、HEAD、引用不变', async () => {
+    const env = envFor();
+    const parent = join(root, 'parent');
+    const head = commitRepo(env, parent);
+    const linked = join(root, 'linked');
+    gitIn(env, parent, 'worktree', 'add', '-q', linked, 'HEAD');
+    expect(lstatSync(join(linked, '.git')).isFile()).toBe(true);
+    const ft = fakeTrees(join(root, 'layout'));
+    ft.owners.set(linked, USER);
+    const before = repoStamp(env, parent);
+    const err = await prepareSegmentTree(
+      {
+        gh: {
+          async fetchMainline() {
+            return { head, defaultBranch: 'main' };
+          },
+          async bundleCommits() {
+            throw new Error('这条路不该去镜像取包');
+          },
+          async commitIdentity() {
+            return { name: 'fleet-agent[bot]', email: 'bot@localhost' };
+          },
+        },
+        trees: ft.trees,
+        exec: isolatedUserExec(env),
+        tmpDir: join(root, 'engine-tmp'),
+        gitBin: 'git',
+        shBin: 'sh',
+      },
+      {
+        repo: REPO,
+        worktreePath: linked,
+        branch: BRANCH,
+        baseSha: head,
+        user: USER,
+        runId: 'boundary-pin',
+      },
+      ctx(),
+    ).catch((e: unknown) => e);
+    expect(err).toMatchObject({
+      code: 'GIT_FAILED',
+      retryable: false,
+      message: expect.stringContaining('共用元数据'),
+    });
+    expect(repoStamp(env, parent)).toEqual(before);
   });
 });
