@@ -22,6 +22,8 @@
 // pool_reservations（#757）是一段选定路由之后、写下开跑那一行之前预占着的池的名额：一行就是「这张单的这一段已经派到这条
 // 路由上、还在建树或等内存」。怎么占、怎么交接、怎么放都在 queries/pool-runs.ts，别处不写这张表。（和账号池整池暂停的
 // 「pool-hold:<池>」提醒是两回事。）
+
+import type { RunCause, RunVerdict } from '@fleet-dao/shared';
 import { sql } from 'drizzle-orm';
 import {
   bigint,
@@ -152,6 +154,20 @@ export const runs = pgTable(
     temporalRunId: text('temporal_run_id'),
     /** 这一笔是重试（re-try）哪一笔：指到 runs.id。重试的字面意思就是「作废上一次、重新跑一次」。 */
     retryOf: uuid('retry_of'),
+    /**
+     * 为什么起这一笔（#3140，shared 的 RUN_CAUSES）：出方案、主写、补提交、自测红了再改、各种返工、重试、换路由重派、切号重跑、
+     * 暂停后继续……引擎起会话时写。老行、不经任务工作流起的会话为空（页面写「老记录没记」）。
+     */
+    cause: text('cause').$type<RunCause>(),
+    /** 起因摘要（≤500 字）：为什么、接着做什么（返工意见的头一截、失败原因……）。没有就空。 */
+    causeSummary: text('cause_summary'),
+    /**
+     * 这一笔属于第几个回合（task_rounds.seq，#3140）：一次「动手 → 自测 → 推分支 → CI → 验收」。验收那一笔也记它所在的回合。
+     * 老行、不经任务工作流的会话为空。
+     */
+    roundSeq: integer('round_seq'),
+    /** 冷验收的结论（验收那一笔上，shared 的 RunVerdictSchema）：过没过、哪几条没过、转给人的。别的笔和老行为空。 */
+    verdict: jsonb('verdict').$type<RunVerdict>(),
     createdAt: timestamp('created_at', tz).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', tz).notNull().defaultNow(),
   },
@@ -179,6 +195,16 @@ export const runs = pgTable(
     ),
     check('runs_memory_nonneg', sql`${t.memoryPeakMb} is null or ${t.memoryPeakMb} >= 0`),
     check('runs_cpu_seconds_positive', sql`${t.cpuSeconds} is null or ${t.cpuSeconds} > 0`),
+    // 名单和 shared 的 RUN_CAUSES 一字不差（test/runs-cause.test.ts 核对）
+    check(
+      'runs_cause_known',
+      sql`${t.cause} is null or ${t.cause} in ('plan', 'main', 'commit_nudge', 'self_check_fix', 'rework_ci', 'rework_verify', 'rework_review', 'rework_conflict', 'rework_no_commit', 'rework_other', 'retry', 'reroute', 'org_switch', 'pause_resume', 'repin', 'human_continue')`,
+    ),
+    check(
+      'runs_cause_summary_short',
+      sql`${t.causeSummary} is null or char_length(${t.causeSummary}) <= 500`,
+    ),
+    check('runs_round_seq_positive', sql`${t.roundSeq} is null or ${t.roundSeq} > 0`),
     // 给组合外键用：追问（asks）挂的会话必须属于同一个需求。
     unique('runs_task_id_id_unique').on(t.taskId, t.id),
     index('runs_task_idx').on(t.taskId, t.createdAt),

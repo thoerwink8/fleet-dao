@@ -36,6 +36,7 @@ import {
   LEFTOVER_LIST_MAX,
   mainlineRef,
   mergeInto,
+  numstatAgainst,
   OUT_DIR,
   ownSpan,
   pinMainline,
@@ -213,6 +214,44 @@ describe('会话目录里的 git', { timeout: 60_000 }, () => {
     expect(await changedFilesAgainst(t, m.head, await headOf(t))).toEqual(['specs/12-登录/方案.md']);
     writeFileSync(join(t.dir, 'specs', '12-登录', '方案.md'), '# 改了没提交\n');
     expect(await uncommittedTracked(t)).toEqual([' M specs/12-登录/方案.md']);
+  });
+
+  it('每个文件各增删几行（numstat）：中文路径原样、二进制记 binary 没有行数、改名按删一个加一个、文件太多只列前面的（#3140）', async () => {
+    const m = mirror();
+    const t = tree('work');
+    await fetchBundle(t, m.bundle(m.head), 'refs/fleet/export/0');
+    await checkoutBranch(t, 'fleet/12-a', m.head);
+    await pinMainline(t, 'main', m.head);
+    mkdirSync(join(t.dir, 'specs', '12-登录'), { recursive: true });
+    writeFileSync(join(t.dir, 'specs', '12-登录', '方案.md'), '# 方案\n第二行\n');
+    writeFileSync(join(t.dir, 'a.ts'), 'export const a = 2;\nexport const b = 3;\n'); // 原来 1 行：删 1 加 2
+    writeFileSync(join(t.dir, 'logo.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3, 0, 0]));
+    runChildOk('git', ['mv', 'README.md', 'README2.md'], { cwd: t.dir });
+    runChildOk('git', ['add', '--all'], { cwd: t.dir });
+    runChildOk('git', ['commit', '-q', '-m', 'many'], { cwd: t.dir, env: ENV });
+    const head = await headOf(t);
+    const { files, total } = await numstatAgainst(t, m.head, head);
+    const by = Object.fromEntries(files.map((f) => [f.path, f]));
+    expect(total).toBe(5);
+    expect(by['specs/12-登录/方案.md']).toEqual({
+      path: 'specs/12-登录/方案.md',
+      added: 2,
+      removed: 0,
+      binary: false,
+    });
+    expect(by['a.ts']).toEqual({ path: 'a.ts', added: 2, removed: 1, binary: false });
+    expect(by['logo.png']).toEqual({ path: 'logo.png', added: null, removed: null, binary: true });
+    // 不识别改名：旧名一条删、新名一条加
+    expect(by['README.md']).toMatchObject({ added: 0, removed: 1 });
+    expect(by['README2.md']).toMatchObject({ added: 1, removed: 0 });
+  });
+
+  it('numstat：提交号不对照样报 GIT_FAILED，不拿空清单冒充没改文件', async () => {
+    const t = tree('plain');
+    await expect(numstatAgainst(t, 'a'.repeat(40), 'b'.repeat(40))).rejects.toMatchObject({
+      code: 'GIT_FAILED',
+    });
+    await expect(numstatAgainst(t, 'not-a-sha', 'b'.repeat(40))).rejects.toMatchObject({ code: 'BAD_INPUT' });
   });
 
   it('没提交的已跟踪改动数得出来（交付判据）', async () => {

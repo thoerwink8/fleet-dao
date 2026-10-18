@@ -31,7 +31,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { redact, StopReason, type TranscriptEntry } from '@fleet-dao/adapters';
-import { sessionlessUsage } from '@fleet-dao/shared';
+import { clipCauseSummary, type RunCause, sessionlessUsage } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { admitSessionMemory } from '../real/memory-admission.ts';
@@ -89,8 +89,15 @@ export interface OneShotInput {
   timeoutMinutes?: number;
   /** 续哪个会话（决定 0088）：给了交给 Spawner 续它，不给开新会话。空串当没给。 */
   resumeSessionId?: string;
-  /** 续会话判定为新会话时的原因；任务工作流通过路由理由的内部标记传入。 */
+  /**
+   * 续会话判定为新会话时的原因。新写法直接给这个字段（#3140）；老历史里的活动入参还借 route.why 的内部标记
+   * （fleet-resume-new:…）带它，下面 runFields 仍认，只为在途任务重放。
+   */
   resumeReason?: string;
+  /** 为什么起这一笔（#3140，shared 的 RunCause）和起因摘要、所属回合（task_rounds.seq）：记进 runs。不经任务工作流的不给。 */
+  cause?: RunCause;
+  causeSummary?: string;
+  roundSeq?: number;
   /**
    * 路由编号：生产 Spawner（real/segment-spawner.ts）据此在库里查执行方式、会话用户、上游模型串；
    * 测试里的假 Spawner 不看。modelId 只是记账和提示用，真正起谁看这个。
@@ -549,6 +556,9 @@ function runFields(input: OneShotInput, runId: string, startedAt: string): RunSt
     ...(input.resumeReason?.trim() || marked?.reason
       ? { resumeReason: input.resumeReason?.trim() ?? marked?.reason }
       : {}),
+    ...(input.cause !== undefined ? { cause: input.cause } : {}),
+    ...(input.causeSummary?.trim() ? { causeSummary: clipCauseSummary(input.causeSummary) } : {}),
+    ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
     ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
     ...(input.prNumber !== undefined ? { prNumber: input.prNumber } : {}),
     ...(input.branch !== undefined ? { branch: input.branch } : {}),

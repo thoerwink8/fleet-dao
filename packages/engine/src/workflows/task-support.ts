@@ -1,6 +1,7 @@
 // 任务工作流（task.ts）的无状态小零件：放弃的异常、失败分流计数、选路时要避开的东西。全是纯函数，不碰活动、不取时间。
 // 这里是工作流代码，会被重放：别加随机数、Date、Node 自带模块（test/structure.test.ts 会拦）。
 
+import type { RunCause } from '@fleet-dao/shared/run-cause';
 import type { AvoidScope, LadderCounters, NextAction } from '../decisions/failure.ts';
 import { classifyFailure } from '../failure/classify.ts';
 import type { RoundOutcome, RouteChoice, ShotsDelivery } from '../ports.ts';
@@ -920,6 +921,36 @@ export function roundOutcomeOf(
   if (p === '会话跑完没有提交' || p === '推的时候没有新提交') return 'no_commit';
   if (p === '会话跑完工作树里还有没提交的改动') return 'leftover';
   return 'other';
+}
+
+/** 这一笔会话为什么起（#3140，runs.cause）加一句话（起因摘要，≤500 字由写库处截断）。 */
+export interface SegmentCauseNote {
+  cause: RunCause;
+  summary?: string;
+}
+
+/**
+ * 这一轮的第一笔动手会话为什么起：上一轮没留下问题（lastProblem 空）就是「主写」；留下了就是返工，按问题认哪一类
+ * （CI 红了、验收没过、评审要求改、和主线冲突、没提交、别的），摘要取返工意见。认法和 roundOutcomeOf 同一套，只记账。
+ */
+export function reworkCauseOf(lastProblem: string | null, feedback: readonly string[]): SegmentCauseNote {
+  if (lastProblem === null || lastProblem === '') return { cause: 'main' };
+  const summary = feedback.join('；').trim() || lastProblem;
+  if (lastProblem.startsWith('正式评审')) return { cause: 'rework_review', summary };
+  switch (roundOutcomeOf('deliver', lastProblem, feedback)) {
+    case 'ci_red':
+      return { cause: 'rework_ci', summary };
+    case 'verify_rejected':
+      return { cause: 'rework_verify', summary };
+    case 'push_conflict':
+    case 'merge_conflict':
+      return { cause: 'rework_conflict', summary };
+    case 'no_commit':
+    case 'leftover':
+      return { cause: 'rework_no_commit', summary };
+    default:
+      return { cause: 'rework_other', summary };
+  }
 }
 
 /** 放弃、叫停时这一轮怎么算：停下的原因是超时（会话总时长到顶、没在时限里跑完）记 timeout，其余记 stopped。 */
