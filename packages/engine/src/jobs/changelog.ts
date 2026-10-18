@@ -28,6 +28,7 @@ export interface OpenChangelogPrInput {
 }
 export interface ChangelogGitHub {
   readHead(): Promise<{ commit: string; text: string }>;
+  /** 分页读全已关闭的里程碑；读取失败抛错，不能返回空列表代替。 */
   milestones(): Promise<MilestoneDetail[]>;
   milestoneIssues(number: number): Promise<PlanIssue[]>;
   openPr(input: OpenChangelogPrInput): Promise<{ number: number; url: string }>;
@@ -82,15 +83,20 @@ function period(m: MilestoneDetail): Pick<ChangelogVersion, 'start' | 'end' | 'c
 async function refresh(deps: ChangelogJobDeps): Promise<ScheduleResult> {
   const head = await deps.github.readHead();
   if (!/^[a-f0-9]{40}$/.test(head.commit)) throw new Error('CHANGELOG 的主线头认不出');
-  const versions = (await deps.github.milestones())
+  // scanned 数的是逐条核过适用性的已关里程碑，不是筛选后需要补日志的版本。
+  const milestones = (await deps.github.milestones()).filter((m) => m.state === 'closed');
+  if (!milestones.length)
+    return { outcome: 'unscanned', why: '已读全里程碑列表，没有已关闭的里程碑可核对更新日志' };
+  const scanned = milestones.length;
+  const versions = milestones
     .flatMap((m) => {
       const version = milestoneVersion(m.title);
-      return version !== undefined && version >= 4 && m.state === 'closed' ? [{ m, version }] : [];
+      return version !== undefined && version >= 4 ? [{ m, version }] : [];
     })
     .sort((a, b) => a.version - b.version);
   if (new Set(versions.map((v) => v.version)).size !== versions.length) throw new Error('已关版本号重复');
   const missing = versions.filter((v) => !hasChangelogVersion(head.text, v.version));
-  if (!missing.length) return { outcome: 'ok', scanned: versions.length, found: 0 };
+  if (!missing.length) return { outcome: 'ok', scanned, found: 0 };
   const released = changelogReleases(await deps.history());
   let content = head.text;
   for (const { m, version } of missing) {
@@ -119,7 +125,7 @@ async function refresh(deps: ChangelogJobDeps): Promise<ScheduleResult> {
     body: '**做了什么**：按已完成单和法国发布历史补齐主线缺少的版本节；排期事实仍在里程碑。\n\n**需求**：无：每天补齐已收口版本的 CHANGELOG，机制见 #3110\n',
   });
   deps.log('info', `更新日志 PR #${pr.number}`, { url: pr.url, versions: numbers });
-  return { outcome: 'ok', scanned: versions.length, found: missing.length };
+  return { outcome: 'ok', scanned, found: missing.length };
 }
 
 export async function runChangelogJob(deps: ChangelogJobDeps): Promise<ScheduleResult> {
@@ -131,7 +137,7 @@ export async function runChangelogJob(deps: ChangelogJobDeps): Promise<ScheduleR
     result = { outcome: 'failed', why: `没查成：${errMessage(error)}` };
   }
   await deps.runs.finish(id, result, deps.now());
-  if (result.outcome !== 'ok') {
+  if (result.outcome !== 'ok' && result.outcome !== 'unscanned') {
     deps.log('error', '版本更新日志没查成', { runId: id, ...result });
     throw new Error('why' in result ? result.why : '版本更新日志没查成');
   }
