@@ -18,6 +18,7 @@ import {
   MERGE_RECORD_LANDED_WHY,
   MERGED_PR_LOOKBACK_MS,
   prAlertKey,
+  REVIEWED_BYPASS_WHY,
   type ReconcileCheckDeps,
   retireHistoricalFactAlerts,
   retireWorkflowAlerts,
@@ -349,6 +350,22 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(seenAgain.resolvedBy).toBe(RECONCILE_ACTOR);
     expect(old.resolvedAt).not.toBeNull();
     expect(old.body.startsWith(`已撤：${CI_TIMINGS_SKIP_WHY}`)).toBe(true);
+  });
+
+  it('已核过的 #2904 开着就撤（处理人是对账）；已撤的不再动，同号别仓的不撤', async () => {
+    const reviewed = openAlert('reconcile:pr:thoerwink8/fleet-dao#2904');
+    const otherRepo = openAlert('reconcile:pr:acme/widgets#2904');
+    const w = world({ open: [reviewed, otherRepo] });
+    await checkMergedPrs(w.deps);
+    expect(w.resolved).toEqual([
+      { dedupeKey: 'reconcile:pr:thoerwink8/fleet-dao#2904', why: REVIEWED_BYPASS_WHY },
+    ]);
+    expect(reviewed.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(reviewed.body.startsWith(`已撤：${REVIEWED_BYPASS_WHY}`)).toBe(true);
+    expect(otherRepo.resolvedAt).toBeNull();
+    // 下一轮：已撤了，不再重复撤
+    await checkMergedPrs(w.deps);
+    expect(w.resolved).toHaveLength(1);
   });
 
   it('真实队列来源和完整回执核对一致：撤开着的 reconcile:pr；回看延到最老提醒；还报风险的和别仓的不撤', async () => {
