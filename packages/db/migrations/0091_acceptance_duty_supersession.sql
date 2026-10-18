@@ -27,8 +27,3 @@ ALTER TABLE "acceptance_duty_supersessions" ADD CONSTRAINT "acceptance_duty_supe
 CREATE INDEX "acceptance_duty_supersessions_source_idx" ON "acceptance_duty_supersessions" USING btree ("source_id");--> statement-breakpoint
 ALTER TABLE "acceptance_duties" ADD CONSTRAINT "acceptance_duties_successor_fk" FOREIGN KEY ("successor_id") REFERENCES "public"."acceptance_duties"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "acceptance_duties" ADD CONSTRAINT "acceptance_duties_superseded_complete" CHECK (("acceptance_duties"."superseded_at" is null and "acceptance_duties"."superseded_by" is null and "acceptance_duties"."supersede_evidence" is null and "acceptance_duties"."successor_id" is null and "acceptance_duties"."successor_generation" is null) or ("acceptance_duties"."superseded_at" is not null and "acceptance_duties"."superseded_by" is not null and length("acceptance_duties"."supersede_evidence") > 0 and "acceptance_duties"."successor_id" <> "acceptance_duties"."id" and "acceptance_duties"."successor_generation" > 0));
---> statement-breakpoint
-DROP TRIGGER IF EXISTS acceptance_duty_supersessions_notify ON acceptance_duty_supersessions;
---> statement-breakpoint
-CREATE TRIGGER acceptance_duty_supersessions_notify AFTER INSERT OR UPDATE OR DELETE ON acceptance_duty_supersessions
-  FOR EACH ROW EXECUTE FUNCTION fleet_notify_change('id');

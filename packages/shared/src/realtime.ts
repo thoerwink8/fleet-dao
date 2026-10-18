@@ -20,7 +20,6 @@ export const REALTIME_TABLES = [
   'node_reports',
   // 提需求（#2060）：需求一有动静（新消息、进度卡、引擎提问、单子状态）就推，id 是需求号（seq）。触发器在 0066。
   'requests',
-  'acceptance_duty_supersessions',
 ] as const;
 
 export type RealtimeTable = (typeof REALTIME_TABLES)[number];
