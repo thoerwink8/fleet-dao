@@ -10,6 +10,7 @@ import {
   checkLedgers,
   checkLocalOrphans,
   checkMergedPrs,
+  DIRECTIVE_RECORD_WHY,
   LEDGER_GRACE_MS,
   LOCAL_ORPHAN_MS,
   type LocalLabeledIssue,
@@ -349,6 +350,37 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(seenAgain.resolvedBy).toBe(RECONCILE_ACTOR);
     expect(old.resolvedAt).not.toBeNull();
     expect(old.body.startsWith(`已撤：${CI_TIMINGS_SKIP_WHY}`)).toBe(true);
+  });
+
+  it('查实的创始人引导记录 PR：开着的 reconcile:pr 撤（处理人是对账）；还报着的、没开的、别仓的不动', async () => {
+    const recorded = openAlert('reconcile:pr:acme/widgets#21');
+    const stillReported = openAlert('reconcile:pr:acme/widgets#22');
+    const otherRepo = openAlert('reconcile:pr:acme/other#21');
+    const w = world({
+      open: [recorded, stillReported, otherRepo],
+      repos: [{ owner: 'acme', name: 'widgets' }],
+      audit: async () =>
+        audit(
+          [{ number: 22, kind: 'no_merge_record', text: '#22 合并了，但账上没有合并队列的合并记录' }],
+          // #21 查实了；#22 同时报着没经队列：不撤；#23 没有开着的提醒
+          { directiveRecordPrs: [21, 22, 23] },
+        ),
+    });
+    await checkMergedPrs(w.deps);
+    expect(w.resolved).toEqual([{ dedupeKey: 'reconcile:pr:acme/widgets#21', why: DIRECTIVE_RECORD_WHY }]);
+    expect(recorded.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(recorded.body.startsWith(`已撤：${DIRECTIVE_RECORD_WHY}`)).toBe(true);
+    expect(stillReported.resolvedAt).toBeNull();
+    expect(otherRepo.resolvedAt).toBeNull();
+    // 没查实的（不在 directiveRecordPrs 里）：不撤
+    const unverified = openAlert('reconcile:pr:acme/widgets#24');
+    const w2 = world({
+      open: [unverified],
+      repos: [{ owner: 'acme', name: 'widgets' }],
+      audit: async () => audit([]),
+    });
+    await checkMergedPrs(w2.deps);
+    expect(unverified.resolvedAt).toBeNull();
   });
 
   it('真实队列来源和完整回执核对一致：撤开着的 reconcile:pr；回看延到最老提醒；还报风险的和别仓的不撤', async () => {
