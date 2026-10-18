@@ -1,6 +1,11 @@
 // 卡住报警立案（#1406）：超过 24 小时没人处理的开一张未排期的单，单号写回正文开头。
 // 每条失败路径都故意造一次；GitHub 写不进的后面还有一条：合并时刻读不到不跳过，放最后。
-import { doneSection, parseMd, requiredSectionProblems } from '@fleet-dao/conventions';
+import {
+  doneSection,
+  offDiffAcceptanceItems,
+  parseMd,
+  requiredSectionProblems,
+} from '@fleet-dao/conventions';
 import type { AlertStage } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
@@ -10,6 +15,7 @@ import {
   type AlertSweepDeps,
   alertRepoFromText,
   FILE_LABELS,
+  renderAlertIssueBody,
   sweepAlerts,
 } from '../src/jobs/alert-sweep.ts';
 import { beijingDayStart, RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
@@ -145,6 +151,26 @@ function harness(
 
 const stage = (id: string, name: AlertStage) => [id, { stage: name, line: name }] as const;
 
+/** 历史证据类立案的验收。只给 reconcile:pr: / reconcile:ledger:，不写「条件不再成立」。 */
+const HISTORICAL_DONE = [
+  '- 真实来源与完整回执齐全的，可按现有规则核实；缺证据的明确 historical_unproven，并通过已有可信 ops 历史审计处置记录精确身份、证据、缺口和后续责任。不能声称历史条件已经消失。测试与 diff 都不得把缺证据写成条件已消失',
+  '- 不得伪造正常 merge 账、不得晋升 backfill、不得伪造具体 head 的真人批准、不得按 PR 号或 local 分支名豁免；读取失败保留未知，不清卡凑绿',
+] as const;
+
+const RECOVERABLE_DONE = [
+  '- 这条提醒的条件不再成立（对账撤掉它）',
+  '- 造成这条提醒的问题已经改掉，diff 里看得到',
+] as const;
+
+function doneLines(body: string): string[] {
+  const marker = '## 怎么算做完\n\n';
+  const start = body.indexOf(marker);
+  if (start < 0) return [];
+  return (body.slice(start + marker.length).split('\n## ')[0] ?? '')
+    .split('\n')
+    .filter((line) => line.length > 0);
+}
+
 describe('卡住报警立案', () => {
   it('满足条件：开一张未排期的缺陷单，四节齐，单号写回正文开头', async () => {
     const alert = row({
@@ -172,7 +198,8 @@ describe('卡住报警立案', () => {
     expect(opened?.body).toContain('合并队列判断出错');
     expect(opened?.body).toContain('正文里提到 #12，不是立案标记');
     expect(opened?.body).toContain('无（AI 发现：提醒 wf:failure:acme/widgets:rule 第 1 天没人处理）');
-    expect(opened?.body).toContain('- 这条提醒的条件不再成立（对账撤掉它）');
+    expect(doneLines(opened?.body ?? '')).toEqual([...RECOVERABLE_DONE]);
+    expect(opened?.body).not.toContain('historical_unproven');
     expect(opened?.body).not.toContain('已立案：');
     expect(alert.body.startsWith('已立案：#41（2026-10-09）\n\n')).toBe(true);
     expect(alert.body).toContain('正文里提到 #12，不是立案标记');
@@ -395,8 +422,10 @@ describe('卡住报警立案', () => {
     );
     expect(six.body.startsWith('已立案：#')).toBe(true);
     expect(exact.body.startsWith('已立案：#')).toBe(true);
-    expect(h.opened.every((o) => o.body.includes('- 这条提醒的条件不再成立（对账撤掉它）'))).toBe(true);
-    expect(h.opened.every((o) => !o.body.includes('diff 里看得到'))).toBe(true);
+    for (const opened of h.opened) {
+      expect(doneLines(opened.body)).toEqual([...HISTORICAL_DONE]);
+      expect(opened.body).not.toContain('这条提醒的条件不再成立');
+    }
     expect(h.inserted, '不再写再提醒').toEqual([]);
   });
 
@@ -410,9 +439,65 @@ describe('卡住报警立案', () => {
     const part = await h.run();
     expect(part.unchecked).toEqual([]);
     expect(h.opened).toHaveLength(1);
-    expect(h.opened[0]?.body).toContain('- 这条提醒的条件不再成立（对账撤掉它）');
-    expect(h.opened[0]?.body).toContain('- 造成这条提醒的问题已经改掉，diff 里看得到');
+    expect(doneLines(h.opened[0]?.body ?? '')).toEqual([...RECOVERABLE_DONE]);
+    expect(h.opened[0]?.body).not.toContain('historical_unproven');
     expect(alert.body.startsWith('已立案：#')).toBe(true);
+  });
+
+  it('只有 reconcile:pr 与 reconcile:ledger 写历史证据验收，普通可恢复告警仍用原模板', async () => {
+    const pr = row({
+      id: 'pr',
+      dedupeKey: 'reconcile:pr:acme/widgets#21',
+      title: '机器人开的 PR 没经合并队列合',
+    });
+    const ledger = row({
+      id: 'led',
+      dedupeKey: 'reconcile:ledger:acme/widgets#22',
+      title: '合了的 PR 记账不全',
+    });
+    const filed = harness([pr, ledger]);
+    const part = await filed.run();
+    expect(part.unchecked).toEqual([]);
+    expect(filed.opened.map((o) => o.key).sort()).toEqual([
+      'alert-file:reconcile:ledger:acme/widgets#22',
+      'alert-file:reconcile:pr:acme/widgets#21',
+    ]);
+    for (const opened of filed.opened) {
+      expect(doneLines(opened.body)).toEqual([...HISTORICAL_DONE]);
+      expect(opened.body).not.toContain('这条提醒的条件不再成立');
+      expect(opened.body).toContain('真实来源与完整回执齐全的，可按现有规则核实');
+      expect(opened.body).toContain('historical_unproven');
+      expect(opened.body).toContain('已有可信 ops 历史审计处置记录精确身份、证据、缺口和后续责任');
+      expect(opened.body).toContain('不能声称历史条件已经消失');
+      expect(opened.body).toContain('不得伪造正常 merge 账');
+      expect(opened.body).toContain('不得晋升 backfill');
+      expect(opened.body).toContain('不得伪造具体 head 的真人批准');
+      expect(opened.body).toContain('不得按 PR 号或 local 分支名豁免');
+      expect(opened.body).toContain('读取失败保留未知，不清卡凑绿');
+      const doc = parseMd('body.md', opened.body);
+      expect(requiredSectionProblems(doc)).toEqual([]);
+      expect(doneSection(doc)).toBe('ok');
+      expect(offDiffAcceptanceItems(doneLines(opened.body).join('\n'))).toEqual([]);
+    }
+
+    const ordinary = renderAlertIssueBody(
+      { dedupeKey: 'wf:failure:acme/widgets:rule', title: '合并队列判断出错', body: '原来的正文' },
+      1,
+    );
+    const workflow = renderAlertIssueBody(
+      { dedupeKey: 'reconcile:workflow:task-1', title: '开着的单没有着落', body: '原来的正文' },
+      1,
+    );
+    const nearMiss = renderAlertIssueBody(
+      { dedupeKey: 'reconcile:preview:acme/widgets#9', title: '别的核对', body: '原来的正文' },
+      1,
+    );
+    expect(doneLines(ordinary)).toEqual([...RECOVERABLE_DONE]);
+    expect(ordinary).not.toContain('historical_unproven');
+    expect(doneLines(workflow)).toEqual(['- 这条提醒的条件不再成立（对账撤掉它）']);
+    expect(workflow).not.toContain('historical_unproven');
+    expect(doneLines(nearMiss)).toEqual(['- 这条提醒的条件不再成立（对账撤掉它）']);
+    expect(nearMiss).not.toContain('historical_unproven');
   });
 
   it('怎么算做完只有「提醒的条件不再成立」、又不会自己撤的，不开单，正文写没有可做的事', async () => {
