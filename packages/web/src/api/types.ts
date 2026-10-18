@@ -187,6 +187,9 @@ export type RunProcess = Extract<RunSteps, { state: 'ok' }>['process'];
 export type ProcessStep = RunProcess['steps'][number];
 export type TaskOverview = NonNullable<TaskDetail['overview']>;
 export type TaskPr = TaskOverview['prs'][number];
+export type TaskRound = Extract<TaskOverview['rounds'], { state: 'ok' }>['items'][number];
+export type EngineStep = Extract<TaskOverview['engineSteps'], { state: 'ok' }>['items'][number];
+export type RunTally = Extract<TaskOverview['tally'], { state: 'ok' }>['total'];
 export type TaskActionBody = z.input<typeof TaskActionRequest>;
 
 export type Routing = z.infer<typeof RoutingResponse>;
