@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { IngestedEvent, WakeEvent } from '../src/events.ts';
+import type { PullFacts } from '../src/engine-pulls.ts';
+import { type IngestedEvent, reviewMergeHold, type WakeEvent } from '../src/events.ts';
 import { mergeKey } from '../src/pulls.ts';
 import type { Intake } from '../src/reconcile.ts';
 import { json, REPO_ID, repo, setup, sha } from './helpers.ts';
@@ -891,5 +892,123 @@ describe('对账与补漏', () => {
     const { statuses: _gone, ...without } = fake.permissions.engine;
     fake.permissions.engine = without;
     expect((await gh.selfCheck([repo]))[1]).toMatchObject({ ok: false, missing: ['statuses:write'] });
+  });
+});
+
+describe('正式评审要求改：撤引擎任务 PR 的自动合并（#2991，reviewMergeHold）', () => {
+  const FLOW = 'fleet/2975-t0123abcd';
+  function claims(pulls: Record<number, Partial<PullFacts>>, failDisable = false) {
+    const reads: number[] = [];
+    const disabled: number[] = [];
+    return {
+      reads,
+      disabled,
+      claims: {
+        async readPull(_r: unknown, n: number): Promise<PullFacts> {
+          reads.push(n);
+          return {
+            number: n,
+            nodeId: `PR_${n}`,
+            state: 'open',
+            merged: false,
+            draft: false,
+            title: '',
+            body: '',
+            headSha: A,
+            headRef: FLOW,
+            fromFork: false,
+            author: null,
+            autoMerge: true,
+            ...pulls[n],
+          };
+        },
+        async disableAutoMerge(_r: unknown, pull: Pick<PullFacts, 'number'>) {
+          if (failDisable) throw new Error('HTTP 502');
+          disabled.push(pull.number);
+        },
+      },
+    };
+  }
+  const review = (state: string, action = 'submitted', ref = FLOW) =>
+    event({
+      event: 'pull_request_review',
+      action,
+      payload: { action, pull_request: { number: 5, head: { ref, sha: A } }, review: { state } },
+    });
+
+  it('认可的要求改（交了、改了正文）：回 GitHub 重读、开着挂着才撤', async () => {
+    const { gh } = setup();
+    const c = claims({ 5: {} });
+    const sink = gh.eventSink(reviewMergeHold(c.claims));
+    await sink.accept(review('changes_requested'));
+    await sink.accept(review('changes_requested', 'edited'));
+    expect(c.reads).toEqual([5, 5]);
+    expect(c.disabled).toEqual([5, 5]);
+  });
+
+  it('普通 COMMENTED、通过、撤销、人开的分支、自家机器人的回声：不读不撤', async () => {
+    const { gh } = setup();
+    const c = claims({ 5: {} });
+    const sink = gh.eventSink(reviewMergeHold(c.claims));
+    await sink.accept(review('commented'));
+    await sink.accept(review('approved'));
+    await sink.accept(review('dismissed', 'dismissed'));
+    await sink.accept(review('changes_requested', 'submitted', 'feature/x'));
+    await sink.accept({ ...review('changes_requested'), wake: false });
+    expect(c.reads).toEqual([]);
+    expect(c.disabled).toEqual([]);
+  });
+
+  it('已经合了、关了、没挂自动合并（终态、或别处先撤了）：读了不撤，不报错', async () => {
+    for (const pull of [{ merged: true }, { state: 'closed' as const }, { autoMerge: false }]) {
+      const { gh } = setup();
+      const c = claims({ 5: pull });
+      await gh.eventSink(reviewMergeHold(c.claims)).accept(review('changes_requested'));
+      expect(c.reads).toEqual([5]);
+      expect(c.disabled).toEqual([]);
+    }
+  });
+
+  it('评审到的时候 PR 已经合了：不撤，留未送达的明账（带 review id、审查者、审的提交、投递编号）；明账写不成就抛，不当成处理了', async () => {
+    const { gh } = setup();
+    const c = claims({ 5: { merged: true } });
+    const notes: unknown[] = [];
+    const ev = event({
+      deliveryId: 'd-merged',
+      event: 'pull_request_review',
+      action: 'submitted',
+      payload: {
+        action: 'submitted',
+        pull_request: { number: 5, head: { ref: FLOW, sha: A } },
+        review: { id: 777, state: 'changes_requested', user: { login: 'boss' }, commit_id: B },
+      },
+    });
+    await gh.eventSink(reviewMergeHold(c.claims, undefined, async (n) => void notes.push(n))).accept(ev);
+    expect(c.disabled).toEqual([]);
+    expect(notes).toEqual([
+      {
+        repo: 'acme/widgets',
+        prNumber: 5,
+        deliveryId: 'd-merged',
+        review: { id: 777, reviewer: 'boss', commitId: B },
+      },
+    ]);
+    await expect(
+      gh
+        .eventSink(
+          reviewMergeHold(c.claims, undefined, async () => {
+            throw new Error('库写不进');
+          }),
+        )
+        .accept(ev),
+    ).rejects.toThrow('库写不进');
+  });
+
+  it('【故意造出的失败】撤不成：抛出去（这条投递记成出错、对账按原文重放），不当成撤了', async () => {
+    const { gh } = setup();
+    const c = claims({ 5: {} }, true);
+    await expect(gh.eventSink(reviewMergeHold(c.claims)).accept(review('changes_requested'))).rejects.toThrow(
+      'HTTP 502',
+    );
   });
 });

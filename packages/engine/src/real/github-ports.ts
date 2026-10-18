@@ -28,6 +28,7 @@ import { isTaskBranch } from '../task-branch.ts';
 import type { UserExec } from './exec.ts';
 import { type MergeLog, settleMergedCi } from './merge-receipt.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
+import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
 import {
   blobsInBundle,
   keepShotsBeforeRemove,
@@ -90,7 +91,7 @@ export type EngineGitHub = Pick<
   | 'claims'
 >;
 
-export interface GitHubPortsDeps {
+export interface GitHubPortsDeps extends ReviewAuditDeps {
   gh: EngineGitHub;
   trees: WorkTrees;
   exec: UserExec;
@@ -394,6 +395,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
   const now = deps.now ?? (() => new Date());
   const heartbeatEveryMs = deps.heartbeatEveryMs ?? HEARTBEAT_EVERY_MS;
   const log: MergeLog = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
+  const auditLateReview = createReviewAudit(deps, log);
 
   const treeAs = (dir: string, user: SessionUser, prefix: string, ctx: PortContext): UserTree => ({
     exec: deps.exec,
@@ -836,6 +838,8 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
         observed.state === 'merged'
           ? await settleMergedCi(gh, input, { ...observed, state: 'merged' }, ctx, log)
           : observed;
+      // 工作流收到merged会直接收尾、取消并行验收；必在这次活动内补读留账，不能指望之后的合并入口。
+      if (result.state === 'merged') await auditLateReview(input.repo, input.prNumber, ctx);
       // CI 认了新头（新头含着老头，github 包的 waitCi 已经用 compare API 核过）：顺手把工作树也快进过去，
       // 别让「CI 查到的头」和「工作树实际的头」分家（#307/#389 那次真事：认了新头查 CI，工作树没跟上，后面
       // 并主线、推分支都从旧头算起，最后推送被拒）。diverged 是新头不含老头的情形，交回去要人看，不在这适用。

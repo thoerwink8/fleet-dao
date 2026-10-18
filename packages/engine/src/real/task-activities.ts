@@ -31,6 +31,7 @@ import type {
   MergeWait,
   ReadDeliveryInput,
   ReadTaskBriefInput,
+  ReviewChange,
   WaitMergedInput,
 } from '../task-contract.ts';
 import { MAX_MAIN_SYNCS } from '../task-contract.ts';
@@ -38,6 +39,7 @@ import type { UserExec } from './exec.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import { bookMergedPull } from './merge-receipt.ts';
 import { mapped } from './mirror.ts';
+import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
 import {
   addedLinesAgainst,
   changedFilesSince,
@@ -59,7 +61,7 @@ export interface MergeWaitChecks {
   failed: { name: string; detail?: string }[];
 }
 
-export interface TaskActivitiesDeps {
+export interface TaskActivitiesDeps extends ReviewAuditDeps {
   gh: Pick<
     EngineGitHub,
     'readIssue' | 'readSpecDoc' | 'readRepoFile' | 'pullFiles' | 'mergePr' | 'updateBranch' | 'claims'
@@ -118,6 +120,49 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
   const pollEveryMs = deps.pollEveryMs ?? MERGE_POLL_EVERY_MS;
   const sleep = deps.sleep ?? abortableSleep;
   const log = deps.log ?? (() => undefined);
+
+  /**
+   * 合之前现读还挂着的正式「要求改」（#2991）：没接上读评审回空（老测试）；读到了先把已挂的自动合并撤掉，
+   * 撤不成抛错（不让 GitHub 在这时把它合了还装成拦下了）。
+   */
+  const reviewHold = async (
+    repo: RepoRef,
+    pull: { number: number; nodeId: string; autoMerge: boolean },
+  ): Promise<ReviewChange[]> => {
+    if (deps.reviewChanges === undefined) return [];
+    let changes: ReviewChange[];
+    try {
+      changes = await deps.reviewChanges(repo, pull.number);
+    } catch (readError) {
+      if (pull.autoMerge) {
+        try {
+          await mapped(() => gh.claims.disableAutoMerge(repo, pull));
+          log('正式评审未读全，已撤自动合并，意见仍未送达', {
+            prNumber: pull.number,
+            error: errMessage(readError),
+          });
+        } catch (disableError) {
+          throw new PortError(
+            'REVIEW_READ_AND_HOLD_FAILED',
+            `正式评审未读全、未送达：${errMessage(readError)}；自动合并未确认撤掉：${errMessage(disableError)}`,
+            { retryable: true },
+          );
+        }
+      }
+      throw readError;
+    }
+    if (changes.length > 0 && pull.autoMerge) {
+      await mapped(() => gh.claims.disableAutoMerge(repo, pull));
+      log('PR 上还挂着正式「要求改」，撤掉了自动合并', {
+        prNumber: pull.number,
+        reviews: changes.map((r) => r.reviewId),
+      });
+    }
+    return changes;
+  };
+
+  // waitCi与三个合并入口共用同一补读和未送达留账判据；重试已合分支仍必经。
+  const auditLateReview = createReviewAudit(deps, log);
 
   const treeAs = (dir: string, user: SessionUser, prefix: string, ctx: PortContext): UserTree => ({
     exec: deps.exec,
@@ -307,6 +352,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (booked.otherHead !== undefined) {
           return { armed: false, merged: false, why: booked.otherHead };
         }
+        await auditLateReview(repo, prNumber, ctx);
         return {
           armed: false,
           merged: true,
@@ -324,15 +370,38 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           headMoved: pull.headSha,
         };
       }
+      const held = await reviewHold(repo, pull);
+      if (held.length > 0) {
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 上还挂着 ${held.length} 条正式「要求改」的评审，不挂自动合并`,
+          reviewChanges: held,
+        };
+      }
       if (pull.autoMerge) return { armed: true, merged: false };
       try {
         await mapped(() => gh.claims.enableAutoMerge(repo, pull));
+        // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
+        // 这一次之后交的评审，事件那头读到的就是已挂着（会撤）。两头合起来不留「检查完才到」的窗口。
+        const after = await reviewHold(repo, { ...pull, autoMerge: true });
+        if (after.length > 0) {
+          return {
+            armed: false,
+            merged: false,
+            why: `PR #${prNumber} 挂上自动合并后读到 ${after.length} 条正式「要求改」的评审，已撤掉`,
+            reviewChanges: after,
+          };
+        }
         return { armed: true, merged: false };
       } catch (error) {
         if (!isCleanStatus(error)) throw error;
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
         const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
-        if (merged.merged) return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
+        if (merged.merged) {
+          await auditLateReview(repo, prNumber, ctx);
+          return { armed: false, merged: true, mergeCommit: merged.mergeCommit };
+        }
         if (merged.reason === 'behind_main') {
           return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, merged.detail, ctx);
         }
@@ -352,6 +421,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
         if (booked.otherHead !== undefined)
           return { merged: false, reason: 'other', detail: booked.otherHead };
+        await auditLateReview(repo, prNumber, ctx);
         return {
           merged: true,
           ...(booked.mergeCommit === undefined ? {} : { mergeCommit: booked.mergeCommit }),
@@ -368,9 +438,21 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           headMoved: pull.headSha,
         };
       }
+      const held = await reviewHold(repo, pull);
+      if (held.length > 0) {
+        return {
+          merged: false,
+          reason: 'review_changes',
+          detail: `PR #${prNumber} 上还挂着 ${held.length} 条正式「要求改」的评审，不合`,
+          reviewChanges: held,
+        };
+      }
       // 不核 CI。头、冲突、落后主线、还开着，mergePr 仍核。分支保护拒绝会抛，不装成合过了。
       const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead, requireCi: false }, ctx));
-      if (merged.merged) return { merged: true, mergeCommit: merged.mergeCommit };
+      if (merged.merged) {
+        await auditLateReview(repo, prNumber, ctx);
+        return { merged: true, mergeCommit: merged.mergeCommit };
+      }
       if (merged.reason === 'behind_main') {
         const synced = await syncBehindMain(
           repo,
@@ -408,6 +490,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (pull.merged) {
           if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
           const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
+          await auditLateReview(repo, prNumber, ctx);
           return {
             state: 'merged',
             ...(booked.mergeCommit === undefined ? {} : { mergeCommit: booked.mergeCommit }),
@@ -416,6 +499,9 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         if (pull.state !== 'open') return { state: 'closed' };
         if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
         if (!pull.autoMerge) return { state: 'unarmed' };
+        // 等合并时交的正式「要求改」（#2991）：每一圈现读，读到了先撤自动合并再交回工作流，不等 GitHub 把它合了
+        const held = await reviewHold(repo, pull);
+        if (held.length > 0) return { state: 'review_changes', reviewChanges: held };
         // 和主线冲突（#1838）：自动合并永远等不到（GitHub 不给冲突的 PR 起 CI、也不会合它，等下去只有超时）。
         // 当场回 conflict 交工作流去并主线，不在这儿干等。老历史里没有这个状态（那时候只回 waiting）。
         if (pull.mergeable === false || pull.mergeableState === 'dirty') {

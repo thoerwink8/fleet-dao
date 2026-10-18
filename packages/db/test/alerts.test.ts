@@ -15,6 +15,7 @@ import {
   updateOpenAlert,
 } from '../src/queries/alerts.ts';
 import { upsertAlert } from '../src/queries/engine.ts';
+import { lateReviewKey, raiseLateReview } from '../src/queries/late-review.ts';
 import {
   issueWorkFacts,
   openSessionTrees,
@@ -95,6 +96,46 @@ describe('resolveAlertWithReason', () => {
     await expect(resolveAlertWithReason(t.db, { dedupeKey: 'x:2', by: 'e', why: '  ' })).rejects.toThrow(
       '没写为什么',
     );
+  });
+});
+
+describe('raiseLateReview（正式评审没交到工人的明账，#2991）', () => {
+  const review = { reviewId: 5560285247, reviewer: 'boss', commitId: 'a'.repeat(40) };
+
+  it('同一条评审只有一条（事件和合并后补读各写一次也落在同一条），正文带 review id、审的提交、工作流和投递编号', async () => {
+    const a = await raiseLateReview(t.db, {
+      repo: 'acme/widgets',
+      prNumber: 7,
+      source: 'event',
+      review,
+      deliveryId: 'd-1',
+    });
+    expect(a.created).toBe(true);
+    const b = await raiseLateReview(t.db, {
+      repo: 'acme/widgets',
+      prNumber: 7,
+      source: 'merge-audit',
+      review,
+      workflowId: 'task-1',
+    });
+    expect(b).toEqual({ id: a.id, created: false });
+    const row = await alertByKey(t.db, lateReviewKey({ repo: 'acme/widgets', prNumber: 7, review }));
+    expect(row?.body).toContain('5560285247');
+    expect(row?.body).toContain('a'.repeat(40));
+    expect(row?.body).toContain('d-1');
+  });
+
+  it('补读没读成：按 PR 一条，写明原因；不同仓、不同 PR、不同评审各是各的', async () => {
+    const base = { repo: 'acme/widgets', prNumber: 7, source: 'merge-audit' as const, review: null };
+    const a = await raiseLateReview(t.db, { ...base, error: 'HTTP 502' });
+    expect((await alertByKey(t.db, lateReviewKey(base)))?.body).toContain('HTTP 502');
+    expect(await raiseLateReview(t.db, { ...base, error: 'HTTP 503' })).toEqual({ id: a.id, created: false });
+    const others = [
+      await raiseLateReview(t.db, { ...base, prNumber: 8 }),
+      await raiseLateReview(t.db, { ...base, repo: 'acme/other' }),
+      await raiseLateReview(t.db, { ...base, review }),
+    ];
+    expect(new Set([a.id, ...others.map((o) => o.id)]).size).toBe(4);
   });
 });
 

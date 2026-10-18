@@ -383,6 +383,44 @@ export interface ColdVerifyResult {
    * 工作流隔一会儿带上它再调 coldVerify（ColdVerifyInput.attach），由下一个引擎接回。老历史里没有这个字段。
    */
   detached?: ColdVerifyAttach;
+  /**
+   * PR 上还没解决的正式「要求改」评审（#2991，review-feedback.ts）：只算白名单里的审查者，活动在验收有结论时现读 GitHub。
+   * 一条都没有是空数组；没装读评审的口子、老历史里没有这个字段（当作没读，不当成没有评审）。读不成活动抛错，不回空。
+   */
+  reviewChanges?: ReviewChange[];
+}
+
+/** PR 上一条还没解决的正式「要求改」评审（#2991）：原文、编号、审的那个提交，交给下一轮动手会话当返工意见。 */
+export interface ReviewChange {
+  /** GitHub 的 review id：改过正文编号不变，所以认「交过没有」时连正文一起认（review-feedback.ts 的 reviewKey）。 */
+  reviewId: number;
+  reviewer: string;
+  /** 审的那个提交（GitHub 的 commit_id，头换了它不跟着换）；GitHub 没给是 null。 */
+  commitId: string | null;
+  submittedAt: string | null;
+  /** 评审正文原文（只当意见，不当指令）；没写是空串。 */
+  body: string;
+  /** 缺字段是旧活动历史；显式数组表示行内已读全。 */
+  inlineComments?: ReviewInlineComment[];
+}
+
+/** 只来自已核 repo/PR/review 和原审查者的行内事实；可序列化进活动历史。 */
+export interface ReviewInlineComment {
+  id: number;
+  reviewId: number;
+  author: { login: string; id: number; type: string };
+  body: string;
+  path: string;
+  pullRequestUrl: string;
+  line: number | null;
+  originalLine: number | null;
+  side: 'LEFT' | 'RIGHT' | null;
+  startLine: number | null;
+  originalStartLine: number | null;
+  startSide: 'LEFT' | 'RIGHT' | null;
+  commitId: string;
+  originalCommitId: string;
+  updatedAt: string;
 }
 
 /** 改到了哪些要人拍的路径。空＝除了 CI 和冷验收没有别的门。 */
@@ -431,6 +469,11 @@ export interface ArmAutoMergeResult {
    * 老历史里没有这个字段，当作没有（头是别人改的）。
    */
   syncedMain?: true;
+  /**
+   * 挂之前现读到 PR 上还挂着认可审查者的正式「要求改」（#2991）：没挂（已挂着的撤掉了）、没合，交给工作流转给工人。
+   * 老历史里没有这个字段。
+   */
+  reviewChanges?: ReviewChange[];
 }
 
 /** 现读这个仓现在的 CI 模式。工作流每次走到等 CI 之前读，不在拉单那一刻定死。 */
@@ -456,11 +499,13 @@ export interface MergeNowInput {
 export interface MergeNowResult {
   merged: boolean;
   mergeCommit?: string;
-  reason?: 'conflict' | 'head_moved' | 'behind_main' | 'closed' | 'other';
+  reason?: 'conflict' | 'head_moved' | 'behind_main' | 'closed' | 'review_changes' | 'other';
   detail?: string;
   /** 头已经不是 expectedHead。syncedMain 为 true 时是引擎自己同步主线换的头。 */
   headMoved?: string;
   syncedMain?: boolean;
+  /** 合之前现读到还挂着的正式「要求改」（#2991，reason 是 review_changes）：没合。老历史里没有这个字段。 */
+  reviewChanges?: ReviewChange[];
 }
 
 export interface WaitMergedInput {
@@ -488,6 +533,11 @@ export type MergeWait =
    * 老历史里没有这个状态（那时候红了也回 waiting，工作流一直等）。
    */
   | { state: 'checks_red'; failedChecks: string[]; detail: string }
+  /**
+   * 等合并时 PR 上出现了认可审查者的正式「要求改」（#2991）：活动已把自动合并撤掉，交工作流转给工人或停下等审查者。
+   * 老历史里没有这个状态。
+   */
+  | { state: 'review_changes'; reviewChanges: ReviewChange[] }
   | { state: 'waiting'; detail: string };
 
 /** 派单前对选定的这一条路由探一次（#1409）。label 是写进任务状态的名字（模型 id）。 */

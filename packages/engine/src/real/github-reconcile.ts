@@ -6,10 +6,11 @@ import {
   type Db,
   finishScheduleRun,
   lastSuccessfulScheduleRunEndedAt,
+  raiseMergedReviewEvent,
   resolveAlertWithReason,
   startScheduleRun,
 } from '@fleet-dao/db';
-import type { GitHub } from '@fleet-dao/github';
+import { type GitHub, reviewMergeHold } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import {
   createGitHubIntake,
@@ -27,7 +28,7 @@ import { type GroomGitHub, type IssueGroomWiring, issueGroomJob } from './issue-
 
 export interface GitHubReconcileWiring {
   db: Db;
-  gh: Pick<GitHub, 'eventSink' | 'reconciler' | 'commentIssue'> & GroomGitHub;
+  gh: Pick<GitHub, 'eventSink' | 'reconciler' | 'commentIssue' | 'claims'> & GroomGitHub;
   /** 单子打标挂版本问 Jev（#448，issue-kind-jev.ts 的 createIssueKindAsker）。 */
   askIssueKind: IssueGroomWiring['askKind'];
   /** 闲置清理的天数（#448，不给用默认 30/14）。 */
@@ -73,8 +74,13 @@ export function githubReconcileJob(
   const now = w.now ?? (() => new Date());
   const log = w.log ?? jsonLogger();
   const store = createPgStore(w.db, { now });
-  // 引擎等 CI 靠活动自己轮询，PR、CI 事件只写镜像，不按事件叫醒（和后端 main.ts 一样）
-  const github = w.gh.eventSink({ async wake() {} });
+  // 引擎等 CI 靠活动自己轮询，PR、CI 事件只写镜像，不按事件叫醒（和后端 main.ts 一样）；正式评审要求改照后端一样
+  // 撤引擎任务 PR 的自动合并（#2991）：后端那一次撤不成记了出错，这里按原文重放时补撤
+  const github = w.gh.eventSink(
+    reviewMergeHold(w.gh.claims, log, async (note) => {
+      await raiseMergedReviewEvent(w.db, note);
+    }),
+  );
   // 旧的关单对账提醒只撤一次（每个引擎进程第一轮）；撤不成不挡对账本身，下一轮再试
   let legacyAlertsRetired = false;
   const groom = issueGroomJob(

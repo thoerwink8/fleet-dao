@@ -1,11 +1,12 @@
 // GitHub 事件过了后端的门（签名、去重、白名单，packages/api 的 github.ts）之后的处理：写 PR 镜像、叫醒工作流。
 // 事件只当「叫醒」：里面的文字不当指令，CI 结论回 GitHub 重读，不信事件里带的（事件会乱序、会晚到、会被补收重放）。
 // 抛错 = 没处理成：后端把这条投递记成出错、原文留着，对账时按原文重放，所以这里的每一步都要能重放。
-import { prLinks } from '@fleet-dao/conventions';
+import { isFlowBranch, prLinks } from '@fleet-dao/conventions';
 import { z } from 'zod';
 import { mirrorChecks } from './checks.ts';
 import { parseRepoSlug, type RepoRef, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
+import type { ClaimsGitHub } from './engine-pulls.ts';
 import { isGitHubError } from './errors.ts';
 import type { PrMirror } from './ledger.ts';
 import { readCi, requiredChecksFor } from './pulls.ts';
@@ -33,6 +34,18 @@ export interface WakeEvent {
   prNumbers?: number[] | undefined;
   headSha?: string | undefined;
   headRef?: string | undefined;
+  /** pull_request_review 事件里评审的状态（GitHub 原样小写：changes_requested、approved、commented、dismissed）。 */
+  reviewState?: string | undefined;
+  /** 评审的编号、审查者和审的提交（事件里带的就带，留明账用；事件只当叫醒，不拿它们当指令）。 */
+  review?: { id: number; reviewer?: string | undefined; commitId?: string | null | undefined } | undefined;
+}
+
+/** 要求改的评审到达时 PR 已经合了：撤不了、也回不了工人，留一条未送达的明账（真装配写驾驶舱报警）。写不成要抛。 */
+export interface MergedReviewNote {
+  repo: string;
+  prNumber: number;
+  deliveryId: string;
+  review: NonNullable<WakeEvent['review']> | null;
 }
 
 export interface WorkflowWaker {
@@ -117,6 +130,17 @@ const WorkflowRunPayload = z.object({
   workflow_run: z.object({ head_sha: z.string(), pull_requests: PrList }),
 });
 const StatusPayload = z.object({ sha: z.string() });
+const ReviewPayload = z.object({
+  pull_request: z.object({ head: z.object({ ref: z.string(), sha: z.string() }) }),
+  review: z
+    .object({
+      state: z.string(),
+      id: z.number().optional(),
+      user: z.object({ login: z.string() }).nullable().optional(),
+      commit_id: z.string().nullable().optional(),
+    })
+    .optional(),
+});
 const PushPayload = z.object({ ref: z.string(), after: z.string() });
 
 /** CI 事件里的头；不是 CI 事件返回 null。 */
@@ -161,6 +185,53 @@ function ciHead(event: string, payload: unknown): { sha: string; prs: number[]; 
     default:
       return null;
   }
+}
+
+/**
+ * 正式评审交「要求改」时先把引擎任务 PR 的自动合并撤掉（#2991）：冷验收之后、GitHub 自己合之前交的评审，不等引擎等合并那一圈
+ * 来读就合进去了。事件只当叫醒、不当指令：这里只撤（不挂、不合、不改代码），撤之前回 GitHub 重读 PR（开着、没合、挂着才撤），
+ * 评审算不算数、交不交给工人由引擎合并那一步现读评审定（读到了不再挂，读不到认可的要求改就照常重挂）。
+ * 只管引擎任务分支（isFlowBranch），人开的 PR 不碰。撤不成抛错：这条投递记成出错、对账时按原文重放，不当成撤了。
+ * 进到这里的评审已过了后端的白名单（作者不认可的事件根本不收），自家机器人的回声不叫醒（wake 为假，到不了这里）。
+ */
+export function reviewMergeHold(
+  claims: Pick<ClaimsGitHub, 'readPull' | 'disableAutoMerge'>,
+  log?: Deps['log'],
+  onMerged?: (note: MergedReviewNote) => Promise<void>,
+): WorkflowWaker {
+  return {
+    async wake(ev) {
+      if (ev.event !== 'pull_request_review' || ev.reviewState !== 'changes_requested') return;
+      if (ev.action !== 'submitted' && ev.action !== 'edited') return;
+      if (ev.headRef === undefined || !isFlowBranch(ev.headRef)) return;
+      const repo = parseRepoSlug(ev.repo);
+      for (const n of ev.prNumbers ?? []) {
+        const pull = await claims.readPull(repo, n);
+        if (pull.merged) {
+          // 评审到的时候 PR 已经合了：撤不了、也回不了工人。不装没事：留未送达的明账（写不成抛错，这条投递记成出错、按原文重放）
+          log?.warn('正式评审要求改到达时 PR 已经合并，评审回不了工人', {
+            deliveryId: ev.deliveryId,
+            repo: ev.repo,
+            prNumber: n,
+          });
+          await onMerged?.({
+            repo: ev.repo,
+            prNumber: n,
+            deliveryId: ev.deliveryId,
+            review: ev.review ?? null,
+          });
+          continue;
+        }
+        if (pull.state !== 'open' || !pull.autoMerge) continue;
+        await claims.disableAutoMerge(repo, pull);
+        log?.info('正式评审要求改：撤掉了引擎任务 PR 的自动合并，等引擎合并那一步现读评审', {
+          deliveryId: ev.deliveryId,
+          repo: ev.repo,
+          prNumber: n,
+        });
+      }
+    },
+  };
 }
 
 export function createEventSink(deps: Deps, waker: WorkflowWaker): EventSink {
@@ -221,6 +292,23 @@ export function createEventSink(deps: Deps, waker: WorkflowWaker): EventSink {
       } else if (ev.event === 'pull_request_review' || ev.event === 'pull_request_review_comment') {
         const n = (ev.payload as { pull_request?: { number?: unknown } })?.pull_request?.number;
         if (typeof n === 'number') wake.prNumbers = [n];
+        const r = ReviewPayload.safeParse(ev.payload);
+        if (r.success) {
+          Object.assign(wake, {
+            headRef: r.data.pull_request.head.ref,
+            headSha: r.data.pull_request.head.sha,
+            ...(r.data.review?.state ? { reviewState: r.data.review.state } : {}),
+            ...(r.data.review?.id === undefined
+              ? {}
+              : {
+                  review: {
+                    id: r.data.review.id,
+                    reviewer: r.data.review.user?.login,
+                    commitId: r.data.review.commit_id,
+                  },
+                }),
+          });
+        }
       } else if (ev.event === 'push') {
         const p = PushPayload.safeParse(ev.payload);
         if (p.success && p.data.ref.startsWith('refs/heads/')) {

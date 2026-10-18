@@ -43,6 +43,39 @@ export interface PullFacts {
   mergeableState?: string;
 }
 
+/**
+ * PR 上的一条正式评审（GET /pulls/{n}/reviews）。state 照 GitHub 原样：APPROVED、CHANGES_REQUESTED、COMMENTED、
+ * DISMISSED（被撤了）、PENDING（还没交）。改过正文的评审编号不变、body 是改后的。commitId 是审的那个提交（头换了它不跟着换）。
+ */
+export interface PullReview {
+  id: number;
+  author: { login: string; id: number; type: string } | null;
+  state: string;
+  /** 没写是空串。 */
+  body: string;
+  commitId: string | null;
+  submittedAt: string | null;
+}
+
+/** 已核归属的一条正式评审行内原文；未知/过时位置留 null，不冒充当前行号。 */
+export interface PullReviewComment {
+  id: number;
+  reviewId: number;
+  author: { login: string; id: number; type: string };
+  body: string;
+  path: string;
+  pullRequestUrl: string;
+  line: number | null;
+  originalLine: number | null;
+  side: 'LEFT' | 'RIGHT' | null;
+  startLine: number | null;
+  originalStartLine: number | null;
+  startSide: 'LEFT' | 'RIGHT' | null;
+  commitId: string;
+  originalCommitId: string;
+  updatedAt: string;
+}
+
 /** 某个 context 在一个提交上最新的一条提交状态。 */
 export interface LatestStatus {
   state: 'success' | 'failure' | 'error' | 'pending';
@@ -69,6 +102,10 @@ export interface ClaimsGitHub {
   readPull(repo: RepoRef, number: number): Promise<PullFacts>;
   /** 开着的 PR（翻完页；翻不完抛错，不当成就这几个）。 */
   openPulls(repo: RepoRef): Promise<PullFacts[]>;
+  /** 这个 PR 上全部正式评审（翻完页，按 GitHub 给的先后）；翻不完、认不出都抛错，不当成没有评审。 */
+  listReviews(repo: RepoRef, number: number): Promise<PullReview[]>;
+  /** 只读指定正式评审的全部行内原文，核仓/PR/review 归属；未翻全或同编号冲突明确抛错。 */
+  listReviewComments(repo: RepoRef, number: number, reviewId: number): Promise<PullReviewComment[]>;
   /**
    * 从 since 起更新过、而且合并了的 PR（按更新时间从新到旧，读到更早的就停）。
    * 停点是 updated 早于 since，不是固定页数。安全网触顶还没走出窗口、认不出，都抛错：
@@ -99,6 +136,40 @@ export interface ClaimsGitHub {
 }
 
 const ClaimPullSchema = PullSchema.extend({ auto_merge: z.unknown().optional() });
+
+const ReviewSchema = z.object({
+  id: z.number(),
+  user: z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable().optional(),
+  state: z.string(),
+  body: z.string().nullable().optional(),
+  commit_id: z.string().nullable().optional(),
+  submitted_at: z.string().nullable().optional(),
+});
+
+/** 一个 PR 的评审最多翻几页（每页 100）：评审过千条的 PR 不正常，翻不完照抛「没查全」。 */
+const REVIEW_MAX_PAGES = 10;
+
+const ReviewCommentSchema = z.object({
+  id: z.number().int().positive().safe(),
+  pull_request_review_id: z.number().int().positive().safe(),
+  user: z.object({
+    login: z.string().min(1),
+    id: z.number().int().positive().safe(),
+    type: z.string().min(1),
+  }),
+  body: z.string(),
+  path: z.string().min(1),
+  pull_request_url: z.string().url(),
+  line: z.number().int().positive().nullable().optional(),
+  original_line: z.number().int().positive().nullable().optional(),
+  side: z.enum(['LEFT', 'RIGHT']).nullable().optional(),
+  start_line: z.number().int().positive().nullable().optional(),
+  original_start_line: z.number().int().positive().nullable().optional(),
+  start_side: z.enum(['LEFT', 'RIGHT']).nullable().optional(),
+  commit_id: z.string().min(1),
+  original_commit_id: z.string().min(1),
+  updated_at: z.string().datetime({ offset: true }),
+});
 
 /**
  * 列窗口里合并 PR 的翻页安全网（每页 100）。
@@ -172,6 +243,85 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
         if (!parsed.success) throw unexpected(`列 ${repoSlug(repo)} 开着的 PR`, item);
         return factsOf(repo, parsed.data);
       });
+    },
+
+    async listReviews(repo, number) {
+      const items = await client.all(
+        {
+          method: 'GET',
+          path: `${base(repo)}/pulls/${number}/reviews`,
+          auth: auth(repo),
+          query: { per_page: 100 },
+        },
+        (d) => d,
+        REVIEW_MAX_PAGES,
+      );
+      return items.map((item) => {
+        const parsed = ReviewSchema.safeParse(item);
+        if (!parsed.success) throw unexpected(`读 PR #${number} 的评审`, item);
+        const r = parsed.data;
+        return {
+          id: r.id,
+          author: r.user ?? null,
+          state: r.state,
+          body: r.body ?? '',
+          commitId: r.commit_id ?? null,
+          submittedAt: r.submitted_at ?? null,
+        };
+      });
+    },
+
+    async listReviewComments(repo, number, reviewId) {
+      const items = await client.all(
+        {
+          method: 'GET',
+          path: `${base(repo)}/pulls/${number}/reviews/${reviewId}/comments`,
+          auth: auth(repo),
+          query: { per_page: 100 },
+        },
+        (d) => d,
+        REVIEW_MAX_PAGES,
+      );
+      const expected = new URL(`${client.apiUrl}${base(repo)}/pulls/${number}`);
+      const comments = new Map<number, PullReviewComment>();
+      for (const item of items) {
+        const parsed = ReviewCommentSchema.safeParse(item);
+        if (!parsed.success) throw unexpected(`读 PR #${number} review ${reviewId} 的行内原文`, item);
+        const c = parsed.data;
+        const url = new URL(c.pull_request_url);
+        if (
+          c.pull_request_review_id !== reviewId ||
+          url.origin !== expected.origin ||
+          url.pathname.toLowerCase() !== expected.pathname.toLowerCase() ||
+          url.search ||
+          url.hash ||
+          url.username ||
+          url.password
+        )
+          throw unexpected(`行内意见不属于 ${repoSlug(repo)} PR #${number} review ${reviewId}`, item);
+        const comment: PullReviewComment = {
+          id: c.id,
+          reviewId: c.pull_request_review_id,
+          author: c.user,
+          body: c.body,
+          path: c.path,
+          pullRequestUrl: c.pull_request_url,
+          line: c.line ?? null,
+          originalLine: c.original_line ?? null,
+          side: c.side ?? null,
+          startLine: c.start_line ?? null,
+          originalStartLine: c.original_start_line ?? null,
+          startSide: c.start_side ?? null,
+          commitId: c.commit_id,
+          originalCommitId: c.original_commit_id,
+          updatedAt: c.updated_at,
+        };
+        const prior = comments.get(comment.id);
+        if (prior && JSON.stringify(prior) !== JSON.stringify(comment))
+          throw unexpected(`review ${reviewId} 的行内 comment ${comment.id} 同编号内容冲突，未读全`, item);
+        comments.set(comment.id, comment);
+      }
+      return [...comments.values()].sort((a, b) => a.id - b.id);
     },
 
     async listMergedPulls(repo, since) {
