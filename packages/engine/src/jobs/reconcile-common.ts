@@ -69,11 +69,13 @@ export interface AlertStore {
   updateOpen(input: { dedupeKey: string; title?: string; body?: string }): Promise<'ok' | 'not_open'>;
   /**
    * 「要你拍」交给引擎做的那一步做完了：结果写回答案（answer.execution），resolve 才标已处理（@fleet-dao/db 的
-   * settleQueuedDecision）。人在这期间又拍了一次（answeredAt 对不上）、已经处理掉的回 not_open。没接上的当没查成。
+   * settleQueuedDecision）。仅匹配 answerId、claimId 和 answeredAt 且仍 queued；已处理或代次不符回 not_open。没接上的当没查成。
    */
   settleQueued?(input: {
     dedupeKey: string;
     answeredAt: string;
+    answerId: string;
+    claimId: string;
     execution: DecisionExecution;
     resolve: boolean;
   }): Promise<'ok' | 'not_open'>;

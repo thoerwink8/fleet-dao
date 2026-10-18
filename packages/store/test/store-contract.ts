@@ -46,6 +46,16 @@ const audit = (over: Partial<NewAuditEntry> = {}): NewAuditEntry => ({
 /** 违反「ok=false 必须带原因」的操作记录：拿它测「操作记录写不进，改动一起回滚」。 */
 const badAudit = (): NewAuditEntry => audit({ ok: false });
 
+async function executionClaim(store: Store, id: string) {
+  const answer = (await store.listNotifications({ status: 'all', limit: 100 })).items.find(
+    (n) => n.id === id,
+  )?.answer;
+  if (!answer?.id) throw new Error('没有本次答案身份');
+  const claim = await store.claimDecision({ id, answerId: answer.id });
+  if (claim.kind !== 'claimed') throw new Error(`没有接活：${claim.kind}`);
+  return { answerId: answer.id, claimId: claim.claimId };
+}
+
 /** 样例数据再加几样契约要用的：不属于需求的会话、模型组额度窗（超额）、PR 镜像、另一位创始人的 union_id。 */
 function contractData(): Partial<MemoryData> {
   const data = devFixtures(T0);
@@ -641,9 +651,15 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(got.kind === 'ok' && got.notification.resolvedAt).toBeUndefined();
         expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore + 1);
         const execution = { ok: true, text: '已转给指挥官', at: clock.now.toISOString() };
-        expect(await store.settleDecision({ id: IDS.notification2, execution, resolve: true, by })).toBe(
-          'ok',
-        );
+        expect(
+          await store.settleDecision({
+            id: IDS.notification2,
+            ...(await executionClaim(store, IDS.notification2)),
+            execution,
+            resolve: true,
+            by,
+          }),
+        ).toBe('ok');
         expect((await store.listAudit({ limit: 200 })).items.length).toBe(auditsBefore + 1);
         const all = await store.listNotifications({ status: 'all', limit: 10 });
         expect(all.items.find((n) => n.id === IDS.notification2)).toMatchObject({
@@ -659,7 +675,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           (await store.listNotifications({ status: 'all', limit: 10 })).items.find(
             (n) => n.id === IDS.notification2,
           )?.answer,
-        ).toEqual({ ...answer, execution });
+        ).toMatchObject({ ...answer, execution });
       });
 
       it('「要你拍」（#1931）：答案先记下、不转已处理；keepsOpen 的 settle 留着、能再拍；了结的要 settleDecision 才转已处理', async () => {
@@ -681,7 +697,13 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await openIds()).toContain(IDS.notification2);
         const kept = { ok: true, text: '已转给指挥官', at: clock.now.toISOString() };
         expect(
-          await store.settleDecision({ id: IDS.notification2, execution: kept, resolve: false, by }),
+          await store.settleDecision({
+            id: IDS.notification2,
+            ...(await executionClaim(store, IDS.notification2)),
+            execution: kept,
+            resolve: false,
+            by,
+          }),
         ).toBe('ok');
         expect((await row())?.answer?.execution).toEqual(kept);
         expect((await row())?.resolvedAt).toBeUndefined();
@@ -702,6 +724,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(
           await store.settleDecision({
             id: IDS.notification2,
+            ...(await executionClaim(store, IDS.notification2)),
             execution: kept,
             resolve: true,
             by,
@@ -717,7 +740,7 @@ export function describeStoreContract(name: string, make: MakeStore): void {
           { id: IDS.notification2, by, text: '先别合，等我周一看' },
           audit(),
         );
-        expect(got.kind === 'ok' && got.notification.answer).toEqual({
+        expect(got.kind === 'ok' && got.notification.answer).toMatchObject({
           text: '先别合，等我周一看',
           at: clock.now.toISOString(),
           by: DEV_USER_ID,
@@ -732,6 +755,190 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(await store.answerNotification({ id: 'nope', by, text: '好' }, audit())).toEqual({
           kind: 'not_found',
         });
+      });
+
+      it('答案执行：同毫秒 A/B 在接活前交错只执行最新代次；旧 claim/回执不能覆盖', async () => {
+        const by = { kind: 'user' as const, id: DEV_USER_ID };
+        const a = await store.answerNotification({ id: IDS.notification2, by, optionId: 'review' }, audit());
+        const b = await store.answerNotification({ id: IDS.notification2, by, optionId: 'approve' }, audit());
+        if (a.kind !== 'ok' || b.kind !== 'ok') throw new Error('答案没有保存');
+        const aId = a.notification.answer?.id ?? '';
+        const bId = b.notification.answer?.id ?? '';
+        expect(aId).not.toBe(bId);
+        expect(a.notification.answer?.at).toBe(b.notification.answer?.at);
+        expect(await store.claimDecision({ id: IDS.notification2, answerId: aId })).toEqual({
+          kind: 'stale',
+        });
+        const claim = await store.claimDecision({ id: IDS.notification2, answerId: bId });
+        if (claim.kind !== 'claimed') throw new Error('B没有接活');
+        const execution = { ok: true, text: 'B真实结果', at: clock.now.toISOString() };
+        expect(
+          await store.settleDecision({
+            id: IDS.notification2,
+            answerId: aId,
+            claimId: claim.claimId,
+            execution,
+            resolve: true,
+            by,
+          }),
+        ).toBe('stale');
+        expect(
+          await store.settleDecision({
+            id: IDS.notification2,
+            answerId: bId,
+            claimId: aId,
+            execution,
+            resolve: true,
+            by,
+          }),
+        ).toBe('stale');
+        expect(
+          await store.settleDecision({
+            id: IDS.notification2,
+            answerId: bId,
+            claimId: claim.claimId,
+            execution,
+            resolve: true,
+            by,
+          }),
+        ).toBe('ok');
+      });
+
+      it('答案执行：A已接活，重复不重放；B明确冲突；中断状态跨读取保留且不会超时接管', async () => {
+        const by = { kind: 'user' as const, id: DEV_USER_ID };
+        const requestId = 'a1111111-0000-4000-8000-000000000001';
+        const input = { id: IDS.notification2, by, optionId: 'review', requestId, expectedAnswerId: null };
+        const a = await store.answerNotification(input, audit());
+        if (a.kind !== 'ok') throw new Error('A没有保存');
+        const answerId = a.notification.answer?.id ?? '';
+        const claim = await store.claimDecision({ id: IDS.notification2, answerId });
+        expect(claim.kind).toBe('claimed');
+        expect((await store.answerNotification(input, audit())).kind).toBe('ok');
+        expect(await store.claimDecision({ id: IDS.notification2, answerId })).toEqual({ kind: 'in_flight' });
+        expect(
+          await store.answerNotification({ id: IDS.notification2, by, optionId: 'approve' }, audit()),
+        ).toEqual({ kind: 'in_flight' });
+        clock.now = new Date(clock.now.getTime() + DAY);
+        const n = (await store.listNotifications({ status: 'open', limit: 100 })).items.find(
+          (n) => n.id === IDS.notification2,
+        );
+        expect(n?.answer?.attempt?.state).toBe('executing');
+        expect(await store.claimDecision({ id: IDS.notification2, answerId })).toEqual({ kind: 'in_flight' });
+      });
+
+      it('答案执行：确定失败同代次重试换claim，旧失败回执不能污染新尝试；未知不重试', async () => {
+        const by = { kind: 'user' as const, id: DEV_USER_ID };
+        const input = { id: IDS.notification2, by, optionId: 'review' };
+        await store.answerNotification(input, audit());
+        const first = await executionClaim(store, IDS.notification2);
+        const failed = { ok: false, text: '明确没有写入', at: clock.now.toISOString() };
+        expect(
+          await store.settleDecision({
+            id: IDS.notification2,
+            ...first,
+            execution: failed,
+            resolve: false,
+            by,
+          }),
+        ).toBe('ok');
+        const retry = await store.answerNotification(input, audit());
+        expect(retry.kind === 'ok' && retry.notification.answer?.id).toBe(first.answerId);
+        const second = await executionClaim(store, IDS.notification2);
+        expect(second.claimId).not.toBe(first.claimId);
+        expect(
+          await store.settleDecision({
+            id: IDS.notification2,
+            ...first,
+            execution: { ...failed, ok: true },
+            resolve: true,
+            by,
+          }),
+        ).toBe('stale');
+        expect(
+          await store.settleDecision({
+            id: IDS.notification2,
+            ...second,
+            execution: { ...failed, unknown: true },
+            resolve: false,
+            by,
+          }),
+        ).toBe('ok');
+        expect(await store.claimDecision({ id: IDS.notification2, answerId: second.answerId })).toEqual({
+          kind: 'in_flight',
+        });
+      });
+
+      it('答案执行：同请求重放已结算回执；不同请求可再选同选项；过期预期不保存', async () => {
+        const by = { kind: 'user' as const, id: DEV_USER_ID };
+        const requestId = 'a1111111-0000-4000-8000-000000000001';
+        const input = { id: IDS.notification2, by, optionId: 'review', requestId, expectedAnswerId: null };
+        await store.answerNotification(input, audit());
+        const claimed = await executionClaim(store, IDS.notification2);
+        const execution = { ok: true, text: '已交接', at: clock.now.toISOString() };
+        await store.settleDecision({ id: IDS.notification2, ...claimed, execution, resolve: false, by });
+        expect((await store.answerNotification(input, audit())).kind).toBe('ok');
+        expect(
+          await store.claimDecision({ id: IDS.notification2, answerId: claimed.answerId }),
+        ).toMatchObject({ kind: 'replay', answer: { execution } });
+        expect(await store.answerNotification({ ...input, optionId: 'approve' }, audit())).toEqual({
+          kind: 'conflict',
+        });
+        expect(
+          await store.answerNotification(
+            { ...input, requestId: 'a1111111-0000-4000-8000-000000000002', expectedAnswerId: null },
+            audit(),
+          ),
+        ).toEqual({ kind: 'conflict' });
+        const next = await store.answerNotification(
+          { ...input, requestId: 'a1111111-0000-4000-8000-000000000002', expectedAnswerId: claimed.answerId },
+          audit(),
+        );
+        expect(next.kind === 'ok' && next.notification.answer?.id).not.toBe(claimed.answerId);
+        expect(await store.answerNotification(input, audit())).toEqual({ kind: 'conflict' });
+        expect(
+          await store.answerNotification(
+            { id: IDS.notification2, by, optionId: 'review', requestId },
+            audit(),
+          ),
+        ).toEqual({ kind: 'conflict' });
+        if (next.kind !== 'ok') throw new Error('B未保存');
+        const second = await executionClaim(store, IDS.notification2);
+        await store.settleDecision({ id: IDS.notification2, ...second, execution, resolve: false, by });
+        expect(await store.answerNotification(input, audit())).toEqual({ kind: 'conflict' });
+        expect(
+          (await store.listNotifications({ status: 'open', limit: 100 })).items.find(
+            (n) => n.id === IDS.notification2,
+          )?.answer?.id,
+        ).toBe(next.notification.answer?.id);
+      });
+
+      it('历史答案可读但无代次不能claim或结算，明确新回答才有执行身份', async () => {
+        const data = contractData();
+        const n = data.notifications?.find((n) => n.id === IDS.notification2);
+        if (!n) throw new Error('没有测试卡');
+        n.answer = {
+          text: '历史决定',
+          at: clock.now.toISOString(),
+          by: DEV_USER_ID,
+          execution: { ok: true, queued: true, text: '旧排队', at: clock.now.toISOString() },
+        };
+        const legacyStore = (await make(data, clock)).store;
+        expect(await legacyStore.claimDecision({ id: n.id, answerId: OTHER_UUID })).toEqual({
+          kind: 'stale',
+        });
+        const by = { kind: 'user' as const, id: DEV_USER_ID };
+        expect(
+          await legacyStore.settleDecision({
+            id: n.id,
+            answerId: OTHER_UUID,
+            claimId: OTHER_UUID,
+            execution: { ok: true, text: '伪造回执', at: clock.now.toISOString() },
+            resolve: true,
+            by,
+          }),
+        ).toBe('stale');
+        const got = await legacyStore.answerNotification({ id: n.id, by, text: '新决定' }, audit());
+        expect(got.kind === 'ok' && got.notification.answer?.id).toEqual(expect.any(String));
       });
 
       it('操作记录：倒序、按对象过滤、同一毫秒的几条翻页不重不漏；编号是字符串', async () => {

@@ -9,7 +9,7 @@ import {
   NotificationsResponse,
   WORKTREE_DELETE_QUEUED,
 } from '@fleet-dao/shared';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { DecisionCommenter } from '../src/decision-handoff.ts';
 import { HANDOFF_NOT_WIRED } from '../src/decision-handoff.ts';
 import { DEV_USER_ID, errorCode, harness, IDS, write } from './harness.ts';
@@ -17,6 +17,14 @@ import { DEV_USER_ID, errorCode, harness, IDS, write } from './harness.ts';
 const SELF_REPO_ID = '11111111-0000-4000-8000-0000000f1ee7';
 
 type Posted = Parameters<DecisionCommenter['comment']>[0];
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
 
 function recorder(fail?: string): { commenter: DecisionCommenter; posted: Posted[] } {
   const posted: Posted[] = [];
@@ -54,6 +62,212 @@ async function answer(
 }
 
 describe('「要你拍」带选项（#1915）', () => {
+  it('HTTP在途重复/不同答案不重复执行，完成后同请求重放原回执，新答案独立交接', async () => {
+    const entered = deferred();
+    const release = deferred();
+    const { posted, commenter } = recorder();
+    const original = commenter.comment;
+    let calls = 0;
+    commenter.comment = async (input) => {
+      if (++calls === 1) {
+        entered.resolve();
+        await release.promise;
+      }
+      return original(input);
+    };
+    const h = harness({ decisionCommenter: commenter });
+    withSelfRepo(h);
+    const s = await h.login();
+    const body = {
+      optionId: 'review',
+      requestId: 'a1111111-0000-4000-8000-000000000001',
+      expectedAnswerId: null,
+    };
+    const a = answer(h, s, IDS.notification2, body);
+    await entered.promise;
+    expect(await errorCode(await answer(h, s, IDS.notification2, body))).toBe('decision_in_flight');
+    expect(await errorCode(await answer(h, s, IDS.notification2, { optionId: 'approve' }))).toBe(
+      'decision_in_flight',
+    );
+    release.resolve();
+    const first = AnswerNotificationResponse.parse(await (await a).json());
+    expect(first.answer.attempt?.state).toBe('succeeded');
+    const before = calls;
+    const replay = AnswerNotificationResponse.parse(
+      await (await answer(h, s, IDS.notification2, body)).json(),
+    );
+    expect(replay.answer).toEqual(first.answer);
+    expect(calls).toBe(before);
+    const b = AnswerNotificationResponse.parse(
+      await (
+        await answer(h, s, IDS.notification2, {
+          text: '改成周一',
+          requestId: 'a1111111-0000-4000-8000-000000000002',
+          expectedAnswerId: first.answer.id,
+        })
+      ).json(),
+    );
+    expect(b.answer.id).not.toBe(first.answer.id);
+    expect(posted[0]?.key).toBe(`decision-answer:${IDS.notification2}:${first.answer.id}`);
+    expect(posted[2]?.key).toBe(`decision-answer:${IDS.notification2}:${b.answer.id}`);
+    expect(posted[2]?.body).toContain('改成周一');
+    const count = calls;
+    expect(await errorCode(await answer(h, s, IDS.notification2, body))).toBe('decision_answer_conflict');
+    expect(
+      await errorCode(
+        await answer(h, s, IDS.notification2, { optionId: 'review', requestId: body.requestId }),
+      ),
+    ).toBe('invalid_request');
+    expect(calls).toBe(count);
+  });
+
+  it('答案保存失败不执行；动作后结算读写失败保留持久在途，重试不能重放', async () => {
+    const { commenter, posted } = recorder();
+    const h = harness({ decisionCommenter: commenter });
+    withSelfRepo(h);
+    const s = await h.login();
+    const save = vi.spyOn(h.store, 'answerNotification').mockRejectedValueOnce(new Error('数据库写失败'));
+    expect((await answer(h, s, IDS.notification2, { optionId: 'review' })).status).toBe(500);
+    expect(posted).toHaveLength(0);
+    save.mockRestore();
+    vi.spyOn(h.store, 'settleDecision').mockRejectedValueOnce(new Error('提交结果未知'));
+    const body = {
+      optionId: 'review',
+      requestId: 'a1111111-0000-4000-8000-000000000003',
+      expectedAnswerId: null,
+    };
+    expect((await answer(h, s, IDS.notification2, body)).status).toBe(500);
+    expect(posted).toHaveLength(2);
+    expect(await errorCode(await answer(h, s, IDS.notification2, body))).toBe('decision_in_flight');
+    expect(posted).toHaveLength(2);
+    expect(h.store.data.notifications.find((n) => n.id === IDS.notification2)?.answer?.attempt?.state).toBe(
+      'executing',
+    );
+  });
+
+  it('确定交接失败重试沿同一答案key；不会把新答案吞进旧幂等账', async () => {
+    const keys: string[] = [];
+    let fail = true;
+    const h = harness({
+      decisionCommenter: {
+        async comment(x) {
+          keys.push(x.key);
+          if (fail) throw new Error('没接上');
+          return { url: 'https://example.test/comment' };
+        },
+      },
+    });
+    withSelfRepo(h);
+    const s = await h.login();
+    const a = AnswerNotificationResponse.parse(
+      await (await answer(h, s, IDS.notification2, { optionId: 'review' })).json(),
+    );
+    fail = false;
+    const retry = AnswerNotificationResponse.parse(
+      await (await answer(h, s, IDS.notification2, { optionId: 'review' })).json(),
+    );
+    expect(retry.answer.id).toBe(a.answer.id);
+    expect(keys[0]).toBe(keys[2]);
+    expect(retry.answer.attempt?.id).not.toBe(a.answer.attempt?.id);
+    expect(retry.answer.execution?.ok).toBe(true);
+  });
+
+  it('A保存后B先保存，A接活失败不会产生外部动作，B仍可独立执行', async () => {
+    const { commenter, posted } = recorder();
+    const h = harness({ decisionCommenter: commenter });
+    withSelfRepo(h);
+    const s = await h.login();
+    const claim = h.store.claimDecision.bind(h.store);
+    vi.spyOn(h.store, 'claimDecision').mockImplementationOnce(async (input) => {
+      await h.store.answerNotification(
+        { id: input.id, by: { kind: 'user', id: DEV_USER_ID }, text: 'B最新答案' },
+        {
+          actor: { kind: 'user', id: DEV_USER_ID },
+          action: 'notification.answer',
+          target: `notification:${input.id}`,
+          via: 'cockpit',
+          ok: true,
+        },
+      );
+      return claim(input);
+    });
+    expect(await errorCode(await answer(h, s, IDS.notification2, { optionId: 'review' }))).toBe(
+      'decision_answer_stale',
+    );
+    expect(posted).toHaveLength(0);
+    const b = AnswerNotificationResponse.parse(
+      await (await answer(h, s, IDS.notification2, { text: 'B最新答案' })).json(),
+    );
+    expect(b.answer.text).toBe('B最新答案');
+    expect(b.answer.execution?.ok).toBe(true);
+    expect(posted[0]?.body).toContain('B最新答案');
+  });
+
+  it('写口提交后抛错保留unknown，重复请求不能再写或伪装已处理', async () => {
+    const h = harness();
+    const n = h.store.data.notifications.find((n) => n.id === IDS.notification2);
+    if (!n?.options?.[0]) throw new Error('缺测试选项');
+    n.options[0].action = { kind: 'pause-pool', poolId: 'test-pool' };
+    const write = h.store.putSetting.bind(h.store);
+    const spy = vi.spyOn(h.store, 'putSetting').mockImplementation(async (...args) => {
+      await write(...args);
+      throw new Error('提交回执断连');
+    });
+    const s = await h.login();
+    const body = {
+      optionId: n.options[0].id,
+      requestId: 'a1111111-0000-4000-8000-000000000004',
+      expectedAnswerId: null,
+    };
+    const first = AnswerNotificationResponse.parse(
+      await (await answer(h, s, IDS.notification2, body)).json(),
+    );
+    expect(first.answer.execution).toMatchObject({ ok: false, unknown: true });
+    expect(first.answer.attempt?.state).toBe('unknown');
+    expect(n.resolvedAt).toBeUndefined();
+    expect(await errorCode(await answer(h, s, IDS.notification2, body))).toBe('decision_in_flight');
+    expect(spy).toHaveBeenCalledTimes(1);
+  });
+
+  it('通知撤销重开后旧claim回执失效，不把已开始的副作用谎称取消', async () => {
+    const entered = deferred();
+    const release = deferred();
+    const h = harness({
+      decisionCapabilities: {
+        async recheckGitHubApp() {
+          entered.resolve();
+          await release.promise;
+        },
+        async recheckFeishuPush() {},
+      },
+    });
+    const n = h.store.data.notifications.find((n) => n.id === IDS.notification2);
+    if (!n?.options?.[0]) throw new Error('缺测试选项');
+    n.options[0].action = { kind: 'recheck', what: 'github-app', repo: 'example/canary' };
+    const s = await h.login();
+    const a = answer(h, s, IDS.notification2, { optionId: n.options[0].id });
+    await entered.promise;
+    const oldId = n.answer?.id;
+    // 与 upsertAlert 重开语义一致：清空旧答案；新回答须重新存代次。
+    delete n.answer;
+    const b = await h.store.answerNotification(
+      { id: n.id, by: { kind: 'user', id: DEV_USER_ID }, text: '重开后新答案' },
+      {
+        actor: { kind: 'user', id: DEV_USER_ID },
+        action: 'notification.answer',
+        target: `notification:${n.id}`,
+        via: 'cockpit',
+        ok: true,
+      },
+    );
+    expect(b.kind === 'ok' && b.notification.answer?.id).not.toBe(oldId);
+    release.resolve();
+    expect(await errorCode(await a)).toBe('decision_answer_stale');
+    const reopened = h.store.data.notifications.find((row) => row.id === n.id);
+    expect(reopened?.answer?.text).toBe('重开后新答案');
+    expect(reopened?.answer?.execution).toBeUndefined();
+    expect(n.resolvedAt).toBeUndefined();
+  });
   it('列表里带选项：每项一句话，恰好一项推荐并写理由', async () => {
     const h = harness();
     const s = await h.login();
@@ -76,7 +290,7 @@ describe('「要你拍」带选项（#1915）', () => {
     const res = await answer(h, s, IDS.notification2, { optionId: 'approve' });
     expect(res.status).toBe(200);
     const body = AnswerNotificationResponse.parse(await res.json());
-    expect(body.answer).toEqual({
+    expect(body.answer).toMatchObject({
       optionId: 'approve',
       text: '批，合进去',
       at: h.clock.now.toISOString(),

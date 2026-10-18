@@ -136,7 +136,7 @@ export async function resolveAlertWithReason(
 
 /**
  * 引擎把「要你拍」交过来的那一步做完了（删工作树：answer.execution.queued）：结果写回答案里；resolve 才标已处理
- * （处理人记拍板的人，操作记录记引擎）。只改还开着、答案还是 answeredAt 那一次的（人又拍了一次就不拿旧结果盖新答案），
+ * （处理人记拍板的人，操作记录记引擎）。只改还开着、answerId/claimId/answeredAt 全相符且仍 queued 的答案（时间相等不能替代代次），
  * 对不上回 not_open。
  */
 export async function settleQueuedDecision(
@@ -144,18 +144,22 @@ export async function settleQueuedDecision(
   input: {
     dedupeKey: string;
     answeredAt: string;
+    answerId: string;
+    claimId: string;
     execution: DecisionExecution;
     resolve: boolean;
     auditActor: string;
     at?: Date;
   },
 ): Promise<'ok' | 'not_open'> {
+  if (input.resolve && (!input.execution.ok || input.execution.queued || input.execution.unknown))
+    throw new Error('未核实成功，不能处理通知');
   const at = input.at ?? new Date();
   return db.transaction(async (tx) => {
     const [row] = await tx
       .update(notifications)
       .set({
-        answer: sql`${notifications.answer} || jsonb_build_object('execution', ${JSON.stringify(input.execution)}::jsonb)`,
+        answer: sql`jsonb_set(${notifications.answer} || jsonb_build_object('execution', ${JSON.stringify(input.execution)}::jsonb), '{attempt,state}', to_jsonb(${input.execution.unknown ? 'unknown' : input.execution.queued ? 'queued' : input.execution.ok ? 'succeeded' : 'failed'}::text))`,
         updatedAt: at,
         ...(input.resolve ? { resolvedAt: at, resolvedBy: sql`${notifications.answer} ->> 'by'` } : {}),
       })
@@ -164,6 +168,10 @@ export async function settleQueuedDecision(
           eq(notifications.dedupeKey, input.dedupeKey),
           isNull(notifications.resolvedAt),
           sql`${notifications.answer} ->> 'at' = ${input.answeredAt}`,
+          sql`${notifications.answer} ->> 'id' = ${input.answerId}`,
+          sql`${notifications.answer} -> 'attempt' ->> 'id' = ${input.claimId}`,
+          sql`${notifications.answer} -> 'attempt' ->> 'state' = 'queued'`,
+          sql`${notifications.answer} -> 'execution' ->> 'queued' = 'true'`,
         ),
       )
       .returning({ id: notifications.id });
