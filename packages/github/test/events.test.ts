@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { PullFacts } from '../src/engine-pulls.ts';
 import { type IngestedEvent, reviewMergeHold, type WakeEvent } from '../src/events.ts';
+import type { memoryIdempotencyStore } from '../src/idempotency.ts';
 import { mergeKey } from '../src/pulls.ts';
 import type { Intake } from '../src/reconcile.ts';
 import { json, REPO_ID, repo, setup, sha } from './helpers.ts';
@@ -263,8 +264,72 @@ describe('对账与补漏', () => {
     expect(fake.calls('GET', /\/app\/hook\/deliveries$/)).toHaveLength(3);
     expect(fake.redelivered).toEqual([500 - 150]);
     expect(report).toMatchObject({ outcome: 'partial', checked: 300, recovered: 1 });
-    expect(report.why).toContain('投递日志翻了 3 页还没翻到 2026-09-25T09:00:00.000Z');
+    expect(report.why).toContain('投递日志这一轮翻了 3 页还没翻到 2026-09-25T09:00:00.000Z');
     expect(report.why).toContain(`只查了 ${fake.deliveries[299]?.delivered_at} 以后的 300 条`);
+  });
+
+  it('翻到页数上限：存下续扫位置，同一个 since 的后几轮接着往更早翻，翻到头才报 ok（不再每轮重翻同一截）', async () => {
+    const { gh, fake, ledger } = setup();
+    // 500 条 = 5 页；一轮只许翻 2 页
+    fake.deliveries = deliveryLog(500, {
+      50: { guid: 'g-p1', status_code: 502 },
+      10: { guid: 'g-late-ok', status_code: 200 },
+      260: { guid: 'g-late-ok', status_code: 504 },
+      250: { guid: 'g-p3', status_code: 502 },
+      450: { guid: 'g-p5', status_code: 502 },
+    });
+    const { intake } = fakeIntake(() => true);
+    // 成功过的投递后端库里有原文：续扫的几轮不带 ok 名单，靠它认出 g-late-ok 早已成功
+    const storedDeliveries = async (guids: readonly string[]) =>
+      new Set(guids.filter((g) => g === 'g-late-ok'));
+    const rec = gh.reconciler({ intake, pollDeliveryId, storedDeliveries, maxDeliveryPages: 2 });
+    const since = new Date('2026-09-25T09:00:00Z');
+    const pageNumbers = () =>
+      fake.calls('GET', /\/app\/hook\/deliveries$/).map((r) => r.query.get('page') ?? '1');
+
+    const r1 = await rec.redeliverFailed(since);
+    expect(r1).toMatchObject({ outcome: 'partial', checked: 200 });
+    expect(r1.why).toContain('续扫位置已存');
+    expect(pageNumbers()).toEqual(['1', '2']);
+    expect(fake.redelivered).toEqual([500 - 50]);
+
+    // 第二轮：先看最新一页（新来的），再从存下的位置（第 3 页）接着翻，不再重翻第 2 页
+    const r2 = await rec.redeliverFailed(since);
+    expect(r2).toMatchObject({ outcome: 'partial' });
+    expect(pageNumbers().slice(2)).toEqual(['1', '3']);
+    expect(fake.redelivered).toEqual([450, 250]);
+
+    const r3 = await rec.redeliverFailed(since);
+    expect(r3).toMatchObject({ outcome: 'partial' });
+    expect(pageNumbers().slice(4)).toEqual(['1', '4']);
+
+    // 第四轮翻到最后一页、没有下一页了：整个窗口查全，报 ok（水位这时才能推进）
+    const r4 = await rec.redeliverFailed(since);
+    expect(r4).toMatchObject({ outcome: 'ok', recovered: 1 });
+    expect(pageNumbers().slice(6)).toEqual(['1', '5']);
+    // 每个没成功过的只重投一次；g-late-ok 后来成功过，不动
+    expect(fake.redelivered).toEqual([450, 250, 50]);
+    const slots = ledger.idempotency as ReturnType<typeof memoryIdempotencyStore>;
+    expect([...slots.rows.keys()].filter((k) => k.includes('deliveries-resume'))).toHaveLength(3);
+  });
+
+  it('续扫位置存不进去、读不出来：退回从头翻，不挡对账，也不报 ok', async () => {
+    const { gh, fake, ledger } = setup();
+    fake.deliveries = deliveryLog(300, { 5: { guid: 'g-x', status_code: 502 } });
+    ledger.idempotency.peek = async () => {
+      throw new Error('库连不上');
+    };
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({
+        intake,
+        pollDeliveryId,
+        storedDeliveries: async () => new Set(),
+        maxDeliveryPages: 2,
+      })
+      .redeliverFailed(new Date('2026-09-25T09:00:00Z'));
+    expect(report).toMatchObject({ outcome: 'partial', checked: 200, recovered: 1 });
+    expect(report.why).not.toContain('续扫位置已存');
   });
 
   it('投递日志翻到页数上限、翻到的那截重投全失败：报 failed，不报 ok', async () => {
