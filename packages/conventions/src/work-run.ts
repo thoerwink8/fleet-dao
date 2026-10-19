@@ -28,11 +28,13 @@
 // state.json（现在怎样）、result.json（终态才有）、attempt-<n>.out.json / attempt-<n>.err.log（每次的输出）、reported（叫醒过了，钩子写）。
 // work-watch.mjs 按同样的文件名和字段读（那边是纯 node，引不了这里；两边的测试各自钉着同一份形状）。
 import {
+  type Dirent,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
+  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -932,7 +934,7 @@ interface RunLockGeneration {
 }
 
 const LOCK_GENERATION_FILE = 'generation.json';
-const LOCK_ABANDONED_FILE = 'abandoned.json';
+const LOCK_CANDIDATES_DIR = 'candidates';
 
 let lockSeq = 0;
 
@@ -940,8 +942,8 @@ function lockPath(dir: string, name: string): string {
   return join(dir, name);
 }
 
-function readLockOwner(dir: string, name: string): RunLockOwner | null {
-  const v = readJson<Partial<RunLockOwner>>(join(lockPath(dir, name), 'owner.json'));
+function parseLockOwner(path: string): RunLockOwner | null {
+  const v = readJson<Partial<RunLockOwner>>(path);
   if (!v || typeof v.token !== 'string' || v.token === '') return null;
   if (typeof v.pid !== 'number' || !Number.isSafeInteger(v.pid) || v.pid < 1) return null;
   if (typeof v.claimedAt !== 'string') return null;
@@ -958,8 +960,20 @@ function readLockOwner(dir: string, name: string): RunLockOwner | null {
   };
 }
 
-function readLockGeneration(lock: string): RunLockGeneration | null {
-  const v = readJson<Partial<RunLockGeneration>>(join(lock, LOCK_GENERATION_FILE));
+interface LockCandidate {
+  path: string;
+  token: string;
+  generation: RunLockGeneration | null;
+  owner: RunLockOwner | null;
+  createdAt: number;
+}
+
+function candidatePath(lock: string, token: string): string {
+  return join(lock, LOCK_CANDIDATES_DIR, token);
+}
+
+function readCandidateGeneration(path: string): RunLockGeneration | null {
+  const v = readJson<Partial<RunLockGeneration>>(join(path, LOCK_GENERATION_FILE));
   if (
     !v ||
     typeof v.token !== 'string' ||
@@ -973,21 +987,58 @@ function readLockGeneration(lock: string): RunLockGeneration | null {
   return { pid: v.pid, token: v.token, claimedAt: v.claimedAt };
 }
 
-/** 失败方只给自己刚创建的那一代打废弃标记，绝不直接删除主锁路径。 */
-function abandonRunLock(lock: string, generation: RunLockGeneration): boolean {
-  if (readLockGeneration(lock)?.token !== generation.token) return false;
+function readCandidates(lock: string): LockCandidate[] {
+  let entries: Dirent[];
   try {
-    writeJson(join(lock, LOCK_ABANDONED_FILE), generation);
+    entries = readdirSync(join(lock, LOCK_CANDIDATES_DIR), { withFileTypes: true });
   } catch {
-    return false;
+    return [];
   }
-  return readJson<Partial<RunLockGeneration>>(join(lock, LOCK_ABANDONED_FILE))?.token === generation.token;
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name !== '' && !entry.name.includes('/'))
+    .map((entry) => {
+      const path = join(lock, LOCK_CANDIDATES_DIR, entry.name);
+      let createdAt = Number.POSITIVE_INFINITY;
+      try {
+        createdAt = statSync(path).ctimeMs;
+      } catch {
+        // 无法确认创建时间的候选不能抢在已知候选前面。
+      }
+      return {
+        path,
+        token: entry.name,
+        generation: readCandidateGeneration(path),
+        owner: parseLockOwner(join(path, 'owner.json')),
+        createdAt,
+      };
+    });
 }
 
-function isAbandonedGeneration(lock: string): boolean {
-  const generation = readLockGeneration(lock);
-  const abandoned = readJson<Partial<RunLockGeneration>>(join(lock, LOCK_ABANDONED_FILE));
-  return !!generation && !!abandoned && abandoned.token === generation.token;
+function ownerAlive(owner: RunLockOwner | null): boolean {
+  return !!owner && (pidAlive(owner.pid) || (owner.workerPid !== undefined && pidAlive(owner.workerPid)));
+}
+
+function candidateFresh(candidate: LockCandidate, now: Date): boolean {
+  return !Number.isFinite(candidate.createdAt) || now.getTime() - candidate.createdAt <= BEAT_STALE_MS;
+}
+
+function candidateCompare(a: LockCandidate, b: LockCandidate): number {
+  return a.createdAt - b.createdAt || a.token.localeCompare(b.token);
+}
+
+function candidateActive(candidate: LockCandidate, now: Date): boolean {
+  if (candidate.owner) return ownerAlive(candidate.owner);
+  return candidateFresh(candidate, now);
+}
+
+function readLockOwner(dir: string, name: string): RunLockOwner | null {
+  const lock = lockPath(dir, name);
+  const root = parseLockOwner(join(lock, 'owner.json'));
+  if (ownerAlive(root)) return root;
+  const candidate = readCandidates(lock)
+    .filter((item) => ownerAlive(item.owner))
+    .sort(candidateCompare)[0];
+  return candidate?.owner ?? root;
 }
 
 /** 进程还在不在。EPERM 当还在（没有权限发信号不代表没这个进程）；只有 ESRCH 是真没了。 */
@@ -1004,22 +1055,18 @@ function pidAlive(pid: number): boolean {
 function lockOccupied(dir: string, name: string, now: Date): boolean {
   const lock = lockPath(dir, name);
   if (!existsSync(lock)) return false;
-  const owner = readLockOwner(dir, name);
-  if (owner) return pidAlive(owner.pid) || (owner.workerPid !== undefined && pidAlive(owner.workerPid));
+  const root = parseLockOwner(join(lock, 'owner.json'));
+  if (root) {
+    if (ownerAlive(root)) return true;
+    return readCandidates(lock).some((item) => candidateActive(item, now));
+  }
+  const candidates = readCandidates(lock);
+  if (candidates.length > 0) return candidates.some((item) => candidateActive(item, now));
   try {
     return now.getTime() - statSync(lock).mtimeMs <= BEAT_STALE_MS;
   } catch {
     return true;
   }
-}
-
-function discardDir(lock: string, grave: string): void {
-  try {
-    renameSync(lock, grave);
-  } catch {
-    return;
-  }
-  rmSync(grave, { recursive: true, force: true });
 }
 
 /**
@@ -1037,125 +1084,113 @@ export function runLockHeld(dir: string, name: string, now: Date, ownReclaimerTo
   return lockOccupied(dir, name, now);
 }
 
-/**
- * 只占回收闸本身。主锁通过外层 claimRunLock 在持有这个闸时完成
- * mkdir、generation 和 owner 发布；这里保留递归回收闸，处理看护
- * 进程死在闸上的情况。
- */
-function claimRunLockRaw(dir: string, name: string, pid: number, now: Date): string | null {
-  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('占位进程号不对');
-  mkdirSync(dir, { recursive: true });
-  const lock = lockPath(dir, name);
-  lockSeq += 1;
-  const token = `${pid}-${now.getTime()}-${lockSeq}`;
-  const generation: RunLockGeneration = { pid, token, claimedAt: now.toISOString() };
-  for (let i = 0; i < 3; i += 1) {
-    // 先看回收闸，避免在另一方已经进入回收临界区时新建主锁；
-    // 这次检查与 mkdir 之间若仍撞上，下面只留下带身份的废弃标记。
-    if (runLockHeld(dir, name, now)) return null;
-    try {
-      mkdirSync(lock);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-      if (runLockHeld(dir, name, now)) return null;
-      // 先原子占住回收闸。没有这道闸，A 检查到旧 owner 已死后，
-      // B 可以先回收并建立新 owner，A 随后会把 B 的活锁一起挪走。
-      const reclaim = `${name}.reclaim`;
-      let reclaimToken: string | null = null;
-      try {
-        reclaimToken = claimRunLockRaw(dir, reclaim, pid, now);
-        if (!reclaimToken) return null;
-        // 回收闸建立后仍服从完整主锁判据：owner 活着、主锁是新鲜空目录、
-        // 或无法确认的目录都不能挪走。只排除自己持有的回收闸，不能把它
-        // 当成主锁恒真；否则会误删另一恢复者刚 mkdir 尚未发布 owner 的活锁。
-        if (runLockHeld(dir, name, now, reclaimToken) && !isAbandonedGeneration(lock)) return null;
-        discardDir(lock, `${lock}.stale-${pid}-${i}-${lockSeq}`);
-      } finally {
-        if (reclaimToken) releaseRunLock(dir, reclaim, reclaimToken);
-      }
-      continue;
-    }
-    // 参与者可能在回收闸建立前已经通过了初次检查，随后才 mkdir 主锁。
-    // 这时不能发布一个会被回收者误认为旧锁的 owner；放弃自己刚建的空目录，
-    // 把同一回收闸作为主锁发布前的互斥边界。
-    if (lockOccupied(dir, `${name}.reclaim`, now)) {
-      // 失败方不能无身份清理路径：另一恢复者可能已经回收这代并
-      // 发布了新赢家。持闸者会按 generation/abandoned 的同一代身份
-      // 在互斥边界内安全回收。
-      abandonRunLock(lock, generation);
-      return null;
-    }
-    // 路径可能已被另一恢复者观察到；保留自己的 generation，后续
-    // 持闸者按 owner/新鲜度接手，不能在这里无条件删除。
-    writeJson(join(lock, LOCK_GENERATION_FILE), generation);
-    writeJson(join(lock, 'owner.json'), generation);
-    if (readLockOwner(dir, name)?.token === token) return token;
-    return null;
-  }
-  return null;
+function removeCandidate(lock: string, token: string): void {
+  const path = candidatePath(lock, token);
+  const generation = readCandidateGeneration(path);
+  if (generation?.token !== token) return;
+  rmSync(path, { recursive: true, force: true });
 }
 
-/**
- * 占主锁的完整协议：先占住同一把 reclaim 闸，再检查/回收旧代，
- * 创建目录并发布 owner，最后才释放闸。创建者不能在闸外通过预检后
- * 延迟发布，从而被回收者换代后覆盖新赢家。
- */
+function cleanReleasedLock(lock: string): void {
+  try {
+    rmdirSync(join(lock, LOCK_CANDIDATES_DIR));
+  } catch {
+    // 新候选出现时目录非空，不能删除它。
+  }
+  try {
+    rmdirSync(lock);
+  } catch {
+    // owner/generation 或新候选仍在，保留主锁目录。
+  }
+}
+
+function ownerForToken(lock: string, token: string): RunLockOwner | null {
+  const root = parseLockOwner(join(lock, 'owner.json'));
+  if (root?.token === token) return root;
+  return readCandidates(lock).find((item) => item.owner?.token === token)?.owner ?? null;
+}
+
+function writeOwnerForToken(lock: string, owner: RunLockOwner): void {
+  const candidate = readCandidates(lock).find((item) => item.token === owner.token);
+  if (candidate) writeJson(join(candidate.path, 'owner.json'), owner);
+  const root = parseLockOwner(join(lock, 'owner.json'));
+  if (root?.token === owner.token) writeJson(join(lock, 'owner.json'), owner);
+}
+
+function peerLockName(name: string): string {
+  return name.endsWith('.reclaim') ? name.slice(0, -'.reclaim'.length) : `${name}.reclaim`;
+}
+
 export function claimRunLock(dir: string, name: string, pid: number, now: Date): string | null {
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('占位进程号不对');
   mkdirSync(dir, { recursive: true });
-  const reclaim = `${name}.reclaim`;
-  const reclaimToken = claimRunLockRaw(dir, reclaim, pid, now);
-  if (!reclaimToken) return null;
-
   const lock = lockPath(dir, name);
+  if (lockOccupied(dir, peerLockName(name), now) || lockOccupied(dir, name, now)) return null;
+  try {
+    mkdirSync(lock);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+    if (lockOccupied(dir, peerLockName(name), now) || lockOccupied(dir, name, now)) return null;
+  }
+
   lockSeq += 1;
   const token = `${pid}-${now.getTime()}-${lockSeq}`;
   const generation: RunLockGeneration = { pid, token, claimedAt: now.toISOString() };
+  mkdirSync(join(lock, LOCK_CANDIDATES_DIR), { recursive: true });
+  const candidate = candidatePath(lock, token);
   try {
-    if (runLockHeld(dir, name, now, reclaimToken)) {
-      // 只有失败创建者留下的同一代 abandoned 才能在闸内回收；
-      // 活 owner、新鲜空目录和无法确认的目录一律保留。
-      if (!isAbandonedGeneration(lock)) return null;
-      discardDir(lock, `${lock}.abandoned-${pid}-${lockSeq}`);
-    } else if (existsSync(lock)) {
-      // 这里仅可能是已失联的旧代，回收操作仍在 reclaim 闸内。
-      discardDir(lock, `${lock}.stale-${pid}-${lockSeq}`);
-    }
-
-    try {
-      mkdirSync(lock);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'EEXIST') return null;
-      throw e;
-    }
-    writeJson(join(lock, LOCK_GENERATION_FILE), generation);
-    writeJson(join(lock, 'owner.json'), generation);
-    return readLockOwner(dir, name)?.token === token ? token : null;
-  } finally {
-    releaseRunLock(dir, reclaim, reclaimToken);
+    mkdirSync(candidate);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return null;
+    throw e;
   }
+  writeJson(join(candidate, LOCK_GENERATION_FILE), generation);
+  writeJson(join(candidate, 'owner.json'), generation);
+
+  if (lockOccupied(dir, peerLockName(name), now)) {
+    removeCandidate(lock, token);
+    cleanReleasedLock(lock);
+    return null;
+  }
+  const winner = readCandidates(lock)
+    .filter((item) => candidateActive(item, now))
+    .sort(candidateCompare)[0];
+  if (!winner || winner.token !== token) {
+    removeCandidate(lock, token);
+    cleanReleasedLock(lock);
+    return null;
+  }
+  writeJson(join(lock, LOCK_GENERATION_FILE), generation);
+  writeJson(join(lock, 'owner.json'), generation);
+  return token;
 }
 
 /** 只放自己占上的那一把。token 对不上就留着，避免并发的失败方把赢的那把删掉。 */
 export function releaseRunLock(dir: string, name: string, token: string): void {
-  const owner = readLockOwner(dir, name);
+  const lock = lockPath(dir, name);
+  const owner = ownerForToken(lock, token);
   if (!owner || owner.token !== token) return;
-  discardDir(lockPath(dir, name), `${lockPath(dir, name)}.released-${token}`);
+  removeCandidate(lock, token);
+  const root = parseLockOwner(join(lock, 'owner.json'));
+  if (root?.token === token) rmSync(join(lock, 'owner.json'), { force: true });
+  const generation = readJson<Partial<RunLockGeneration>>(join(lock, LOCK_GENERATION_FILE));
+  if (generation?.token === token) rmSync(join(lock, LOCK_GENERATION_FILE), { force: true });
+  cleanReleasedLock(lock);
 }
 
 /** 看护进程退出时放开入口交过来的占位。只认自己的进程号，不删别人刚占上的。 */
 export function releaseRunLockByPid(dir: string, name: string, pid: number): void {
   const owner = readLockOwner(dir, name);
   if (!owner || owner.pid !== pid) return;
-  discardDir(lockPath(dir, name), `${lockPath(dir, name)}.released-${pid}`);
+  releaseRunLock(dir, name, owner.token);
 }
 
 /** 入口把占位从自己改到刚拉起的看护进程。token 不变，失败方的 finally 仍删不掉这把锁。 */
 export function handoffRunLock(dir: string, name: string, token: string, pid: number, now: Date): boolean {
-  const owner = readLockOwner(dir, name);
+  const owner = ownerForToken(lockPath(dir, name), token);
   if (!owner || owner.token !== token) return false;
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
-  writeJson(join(lockPath(dir, name), 'owner.json'), { pid, token, claimedAt: now.toISOString() });
+  writeOwnerForToken(lockPath(dir, name), { pid, token, claimedAt: now.toISOString() });
   return readLockOwner(dir, name)?.pid === pid;
 }
 
@@ -1166,10 +1201,11 @@ export function setRunLockWorker(
   token: string,
   workerPid: number | null,
 ): boolean {
-  const owner = readLockOwner(dir, name);
+  const lock = lockPath(dir, name);
+  const owner = ownerForToken(lock, token);
   if (!owner || owner.token !== token) return false;
   if (workerPid !== null && (!Number.isSafeInteger(workerPid) || workerPid < 1)) return false;
-  writeJson(join(lockPath(dir, name), 'owner.json'), {
+  writeOwnerForToken(lock, {
     pid: owner.pid,
     token: owner.token,
     claimedAt: owner.claimedAt,

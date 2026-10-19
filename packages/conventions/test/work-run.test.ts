@@ -1275,9 +1275,16 @@ describe('恢复入口的原子占位', () => {
     const dir = join(temp(), 'stale-lock');
     mkdirSync(dir);
     mkdirSync(join(dir, SUPERVISOR_START_LOCK));
+    mkdirSync(join(dir, `${SUPERVISOR_START_LOCK}.reclaim`));
+    const stale = deadPid();
     writeJson(join(dir, SUPERVISOR_START_LOCK, 'owner.json'), {
-      pid: deadPid(),
+      pid: stale,
       token: 'old-generation',
+      claimedAt: '2026-10-16T09:00:00.000Z',
+    });
+    writeJson(join(dir, `${SUPERVISOR_START_LOCK}.reclaim`, 'owner.json'), {
+      pid: stale,
+      token: 'old-reclaim-generation',
       claimedAt: '2026-10-16T09:00:00.000Z',
     });
     const mod = pathToFileURL(fileURLToPath(new URL('../src/work-run.ts', import.meta.url))).href;
