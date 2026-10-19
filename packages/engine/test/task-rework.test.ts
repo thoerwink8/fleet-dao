@@ -389,6 +389,27 @@ const GREEN: SelfCheckResult = {
 };
 
 describe('会话收场后引擎自测（决定 0093）', { timeout: 60_000 }, () => {
+  it('已有PR同成果返工才携带固定头和PR身份；首次无PR维持原输入', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) => (n === 1 ? { state: 'red', failedChecks: ['test'], digest: '返工' } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      delivery: () => ({ head: fakeHead(101), commits: 1, changedFiles: ['packages/core/src/a.ts'] }),
+      selfCheck: () => GREEN,
+    });
+    const result = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(result).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(calls.selfCheck).toHaveLength(2);
+    expect(calls.selfCheck[0]).not.toHaveProperty('expectedHead');
+    expect(calls.selfCheck[0]).not.toHaveProperty('prNumber');
+    expect(calls.selfCheck[1]).toMatchObject({ expectedHead: fakeHead(101), prNumber: 100 });
+  });
+
   it('红了：精炼输出续进同一个会话再改一次，再测一次就推；最后一次的输出交给冷验收', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({

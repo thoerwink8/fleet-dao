@@ -707,6 +707,25 @@ export interface SelfCheckInput {
   taskId: string;
   repo: RepoWithProfile;
   worktreePath: string;
+  /** 只由新 patched 历史携带；旧历史保持本机自测。 */
+  expectedHead?: string;
+  prNumber?: number;
+}
+
+/** 规范 CI 对源码测试的覆盖，不能计作本机 PASS。 */
+export interface CiTestCoverage {
+  repo: 'thoerwink8/fleet-dao';
+  pr: number;
+  head: string;
+  tree: string;
+  run: number;
+  attempt: number;
+  workflow: number;
+  contractCommit: string;
+  contractHash: string;
+  checks: string[];
+  ciNodes: string[];
+  node: string;
 }
 
 /** 一条命令的结果：精炼过的输出（失败的行和末尾一段，不是整份日志）。 */
@@ -717,6 +736,8 @@ export interface SelfCheckStep {
   exitCode: number | null;
   /** 精炼过的输出（SELF_CHECK_DIGEST_MAX 以内）；跳过的写为什么跳过。 */
   digest: string;
+  /** outcome 仍是 skipped：这条没有在本机实跑。 */
+  coveredByCi?: CiTestCoverage;
 }
 
 /**
