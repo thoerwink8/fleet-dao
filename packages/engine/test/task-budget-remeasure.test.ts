@@ -1,15 +1,16 @@
 // 体量关口重评（#3249）：停在体量预算停点的单，可信重评只放行「这一次停点的这一份交付」，不授权后续。
-// 真 Temporal 测试服务端 + 假端口 + 脚本化的任务活动（重评走 readDelivery 的 budgetRemeasure 入参）。
+// 真 Temporal 开发服务端（createRealEnv，不能跳时间）+ 假端口 + 脚本化的任务活动（重评走 readDelivery 的 budgetRemeasure 入参）。
+// 跨工人重放那一条仍用可跳时间的测试服务端：真开发服务端在工人不缓存时会把 self-check-own-timeout 的补丁标记判成不确定。
 // 不碰真实 #3207，不改生产数据。
 
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
 import { DEFAULT_PR_LINE_BUDGET } from '../src/limits.ts';
@@ -30,14 +31,23 @@ import {
   taskStatusQuery,
 } from '../src/task-contract.ts';
 import { REMEASURE_CATCH_UP_SECONDS } from '../src/workflows/task-budget-remeasure.ts';
-import { engineBundle, freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
+import {
+  createRealEnv,
+  engineBundle,
+  freshRepo,
+  pollQuery,
+  useEnv,
+  waitUntil,
+  withWorker,
+} from './helpers.ts';
 import { goodBrief, scripted } from './task-script.ts';
 
-const currentEnv = useEnv();
+const installedCli = '/opt/fleet-dao/temporal/bin/temporal';
+if (!process.env.FLEET_TEST_TEMPORAL_CLI?.trim() && existsSync(installedCli)) {
+  process.env.FLEET_TEST_TEMPORAL_CLI = installedCli;
+}
+
 let env: TestWorkflowEnvironment;
-beforeEach(() => {
-  env = currentEnv();
-});
 
 const BASE = fakeHead(1);
 const RAW = 9550;
@@ -369,6 +379,16 @@ const expectNoCatchupTimer = (events: readonly HistEvent[]) => {
 };
 
 describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
+  beforeAll(async () => {
+    await engineBundle();
+  }, 120_000);
+  beforeEach(async () => {
+    env = await createRealEnv();
+  }, 120_000);
+  afterEach(async () => {
+    await env.teardown();
+  }, 60_000);
+
   it('8037 行生成折扣、实际计量 1513：预检只测不放行，执行只放行这一份交付，不设永久豁免；旧停点历史可达、整段可重放', async () => {
     const { world, tasks, asks } = setup((ask) => measured(ask), true);
     const i = input();
@@ -689,46 +709,6 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(world.count('pushBranch')).toBe(0);
   });
 
-  it('跨工人接停点：停在体量关口时工人下线，新起的工人从历史整段重放接手，处理重评后照原路走完', async () => {
-    const { world, tasks, asks } = setup((ask) => measured(ask));
-    const i = input();
-    const taskQueue = `q-${randomUUID()}`;
-    // 第一个工人不缓存：下线后不留粘性队列（可跳时间的测试服务端不会把下线工人粘性队列里的任务挪回普通队列）
-    const { h, id } = await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        return { h, id: await parkedIdentity(h) };
-      },
-      { tasks, taskQueue, maxCachedWorkflows: 0 },
-    );
-    // 下线时的停点历史，命令序与旧代码录的真实历史逐条一致
-    const parked = await h.fetchHistory();
-    expect(commandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
-    // 新起的工人（像部署后的新进程，缓存是空的）：第一个工作流任务就是从上面那份历史整段重放，再处理重评
-    const run = await withWorker(
-      env,
-      world,
-      async () => {
-        expect(await send(h, command(i, h, id))).toMatchObject({
-          outcome: 'resumed',
-          receipt: { chargeableAddedLines: 1513, verifiedGeneratedLines: 8037, base: BASE },
-        });
-        // 接手后的重发：只回原身份的幂等回执
-        expect(await send(h, command(i, h, id))).toMatchObject({
-          outcome: 'already_resumed',
-          receipt: { head: id.head },
-        });
-        return h.result() as Promise<TaskRun>;
-      },
-      { tasks, taskQueue },
-    );
-    expect(run.outcome).toBe('merged');
-    expect(asks).toHaveLength(1);
-    expect(world.count('pushBranch')).toBe(1);
-  });
-
   it('catchup：同一身份在停点可见前等到，重评成功且 30 秒定时器取消', async () => {
     const { world, tasks, asks } = setup((ask) => measured(ask), false, { holdPorts: ['raiseAlert'] });
     const i = input();
@@ -1013,5 +993,54 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     );
     expect(run.outcome).toBe('abandoned');
     expect(asks).toHaveLength(0);
+  });
+});
+
+// 真开发服务端（上面那组）在 maxCachedWorkflows=0 时，查询重放会因 self-check-own-timeout 的补丁标记失败。
+// 这条只验换工人接手，仍用可跳时间的测试服务端；catchup 里放弃走上面的真服务端。
+describe('跨工人接停点（可跳时间的测试服务端）', { timeout: 180_000 }, () => {
+  const currentEnv = useEnv();
+  beforeEach(() => {
+    env = currentEnv();
+  });
+
+  it('跨工人接停点：停在体量关口时工人下线，新起的工人从历史整段重放接手，处理重评后照原路走完', async () => {
+    const { world, tasks, asks } = setup((ask) => measured(ask));
+    const i = input();
+    const taskQueue = `q-${randomUUID()}`;
+    // 第一个工人不缓存：下线后不留粘性队列（可跳时间的测试服务端不会把下线工人粘性队列里的任务挪回普通队列）
+    const { h, id } = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        return { h, id: await parkedIdentity(h) };
+      },
+      { tasks, taskQueue, maxCachedWorkflows: 0 },
+    );
+    // 下线时的停点历史，命令序与旧代码录的真实历史逐条一致
+    const parked = await h.fetchHistory();
+    expect(commandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
+    // 新起的工人（像部署后的新进程，缓存是空的）：第一个工作流任务就是从上面那份历史整段重放，再处理重评
+    const run = await withWorker(
+      env,
+      world,
+      async () => {
+        expect(await send(h, command(i, h, id))).toMatchObject({
+          outcome: 'resumed',
+          receipt: { chargeableAddedLines: 1513, verifiedGeneratedLines: 8037, base: BASE },
+        });
+        // 接手后的重发：只回原身份的幂等回执
+        expect(await send(h, command(i, h, id))).toMatchObject({
+          outcome: 'already_resumed',
+          receipt: { head: id.head },
+        });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks, taskQueue },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(asks).toHaveLength(1);
+    expect(world.count('pushBranch')).toBe(1);
   });
 });
