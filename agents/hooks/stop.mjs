@@ -70,6 +70,7 @@ export async function runStop(expectedCli) {
     'Stop',
     process.env,
     authority.kind,
+    expectedCli,
   );
   noteReceipt(context, { phase: 'entered', decision: 'none' });
   if (process.env.FLEET_HEADLESS === '1') {

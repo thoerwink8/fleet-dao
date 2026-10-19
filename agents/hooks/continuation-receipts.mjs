@@ -76,14 +76,23 @@ const codeOf = (error) => {
 /** @typedef {{dir: string, session: string|null, generation: string|null, event: string, eventKey: string|null, cli: string, source: string, turn: string|null, agent: string|null, authority: Authority}} Context */
 /** 事件身份只能取本次输入；缺失不能用继承环境补成已绑定。CLI家族不作为根来源证据。
  * authority 由入口传已算好的准入结果；缺失默认 unknown，不在回执层重新推断根来源。
- * @param {string} dir @param {unknown} input @param {unknown} state @param {string} event @param {NodeJS.ProcessEnv} [env] @param {Authority} [authority]
+ * expectedCli 仅由可信登记入口传入，不从事件正文选择；它只识别CLI家族，不改变authority。
+ * @param {string} dir @param {unknown} input @param {unknown} state @param {string} event @param {NodeJS.ProcessEnv} [env] @param {Authority} [authority] @param {'codex'|undefined} [expectedCli]
  * @returns {Context}
  */
-export function receiptContext(dir, input, state, event, env = process.env, authority = 'unknown') {
+export function receiptContext(
+  dir,
+  input,
+  state,
+  event,
+  env = process.env,
+  authority = 'unknown',
+  expectedCli,
+) {
   const prop = (/** @type {unknown} */ obj, /** @type {string} */ key) =>
     obj && typeof obj === 'object' ? Reflect.get(obj, key) : undefined;
   const claude = !!env.CLAUDE_CODE_SESSION_ID,
-    codex = !!(env.CODEX_THREAD_ID || env.CODEX_SESSION_ID);
+    codex = expectedCli === 'codex' || !!(env.CODEX_THREAD_ID || env.CODEX_SESSION_ID);
   const cli = claude === codex ? 'unknown' : codex ? 'codex' : 'claude';
   const agent = idOf(prop(input, 'agent_id'));
   return {
