@@ -67,8 +67,10 @@ export const ROUNDS_ARGV = [
   '-q',
 ];
 
-/** 能起的命令只有这三条，参数一个不多一个不少（前缀也不行：journalctl 后面加 --rotate 就会动日志）。 */
-export const ALLOWED = [PSQL, SERVICES_ARGV, ROUNDS_ARGV];
+/** 固定只读 attention 入口；不收调用者传来的子命令或参数。 */
+export const ATTENTION_ARGV = ['bash', `${CURRENT_LINK}/packages/api/bin/fleet-api`, 'attention', '--json'];
+/** 能起的命令只有这四条，参数一个不多一个不少（前缀也不行：journalctl 后面加 --rotate 就会动日志）。 */
+export const ALLOWED = [PSQL, SERVICES_ARGV, ROUNDS_ARGV, ATTENTION_ARGV];
 
 /** psql 输出里分块的记号：JSON 不会以 @@ 开头。 */
 export const MARK = '@@fleet-section';
@@ -497,6 +499,18 @@ export function collect(io) {
     at: io.now().toISOString(),
     sections: {
       ...db,
+      runningIdle: guard((io) => {
+        const result = io.run(ATTENTION_ARGV);
+        if (result.error || result.status !== 0)
+          return {
+            ok: false,
+            why: `即时空闲结论没读成：${result.error ?? firstLines(result.stderr || result.stdout)}`,
+          };
+        const body = JSON.parse(result.stdout);
+        if (body.ok !== true || !isObj(body.runningIdle))
+          return { ok: false, why: '法国版本没有即时空闲结论，或 attention 没读成' };
+        return { ok: true, ...body.runningIdle };
+      }),
       services: guard(servicesSection),
       current: guard(currentSection),
       autoRelease: guard(autoReleaseSection),

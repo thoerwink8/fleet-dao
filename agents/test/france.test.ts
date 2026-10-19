@@ -16,6 +16,10 @@ const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const QUERY_FILE = join(SCRIPTS, 'france-query.mjs');
 // 按网址动态加载：.mjs 脚本和 shared 的 .ts 都不进 agents 的类型工程（composite 工程不许引工程外的文件）
 const load = async (file: string) => import(pathToFileURL(file).href);
+const { isIdleRunningStale } = await load(join(ROOT, 'packages/core/src/idle-running.ts'));
+const { SELF_CHECK_ACTIVITY_MS, SELF_CHECK_DOING } = await load(
+  join(ROOT, 'packages/core/src/self-check-budget.ts'),
+);
 
 interface RunResult {
   status: number | null;
@@ -42,6 +46,7 @@ interface QueryLib {
   PSQL: string[];
   SERVICES_ARGV: string[];
   ROUNDS_ARGV: string[];
+  ATTENTION_ARGV: string[];
   ALLOWED: string[][];
   SQL: Record<string, string>;
   UNITS: string[];
@@ -375,6 +380,7 @@ function healthy(): Snapshot {
         ],
       },
       notifications: { ok: true, count: 0, rows: [] },
+      runningIdle: { ok: true, version: 1, at: AT, complete: true, rows: [] },
       jobs: { ok: true, rows: [job('route-probe', 45, { start: 5, end: 4, outcome: 'ok' })] },
       routes: {
         ok: true,
@@ -434,7 +440,43 @@ function parsed(raw: Snapshot) {
 }
 function viewOf(change?: (s: Sections) => void): View {
   const raw = healthy();
+  const originalIdle = raw.sections.runningIdle;
   change?.(raw.sections);
+  // 正式来源的测试装配也用同一判据；单独传 runningIdle 可测试来源与展示不一致/截断。
+  if (raw.sections.runningIdle === originalIdle && raw.sections.tasks?.ok) {
+    raw.sections.runningIdle = {
+      ok: true,
+      version: 1,
+      at: AT,
+      complete: true,
+      rows: rows(raw.sections.tasks)
+        .filter((t) => t.state === 'running' && t.executor === 'engine')
+        .map((t) => {
+          const openRuns = raw.sections.runs?.ok
+            ? rows(raw.sections.runs).filter((r) => r.repo === t.repo && r.n === t.n && !r.ended_at).length
+            : 0;
+          return {
+            taskId: `task-${t.n}`,
+            owner: String(t.repo).split('/')[0],
+            name: String(t.repo).split('/')[1],
+            issueNumber: t.n,
+            updatedAt: t.updated_at ?? null,
+            doing: t.doing ?? null,
+            openRuns,
+            stale: isIdleRunningStale(
+              {
+                state: t.state,
+                executor: t.executor,
+                doing: t.doing,
+                updatedAt: t.updated_at ? new Date(String(t.updated_at)) : null,
+                openRuns,
+              },
+              new Date(AT),
+            ),
+          };
+        }),
+    };
+  }
   return lib.buildView(parsed(raw));
 }
 const serious = (v: View) => v.anomalies.filter((a) => a.level !== 'note');
@@ -530,11 +572,11 @@ describe('只读：法国上的查询脚本不许写库、改文件、起停服�
     );
   });
 
-  it('连库时就把会话设成只读；能起的命令只有三条，一字不差才起（前缀对上也不行）', () => {
+  it('展示SQL连库时就只读；能起的命令只有四条，一字不差才起（前缀对上也不行）', () => {
     expect(query.PSQL.slice(0, 5)).toEqual(['sudo', '-n', '-u', 'fleet', 'psql']);
     expect(query.PSQL).toContain("dbname=fleet options='-c default_transaction_read_only=on'");
     expect(query.PSQL).toContain('-X');
-    expect(query.ALLOWED).toEqual([query.PSQL, query.SERVICES_ARGV, query.ROUNDS_ARGV]);
+    expect(query.ALLOWED).toEqual([query.PSQL, query.SERVICES_ARGV, query.ROUNDS_ARGV, query.ATTENTION_ARGV]);
     expect(query.SERVICES_ARGV.slice(0, 2)).toEqual(['systemctl', 'is-active']);
     expect(query.ROUNDS_ARGV[0]).toBe('journalctl');
     expect(query.ROUNDS_ARGV.filter((a) => a.startsWith('--'))).toEqual(['--since', '--no-pager']);
@@ -560,11 +602,11 @@ describe('只读：法国上的查询脚本不许写库、改文件、起停服�
     expect(code).toMatch(/if \(!allowed\(argv\)\)\s*return/);
   });
 
-  it('查一遍起的命令全在名单里，库只连一次', () => {
+  it('查一遍起的命令全在名单里，展示SQL一次、正式attention一次', () => {
     const calls: string[][] = [];
     const io = fakeIo({ onRun: (argv) => calls.push(argv) });
     query.collect(io);
-    expect(calls.length).toBe(3);
+    expect(calls.length).toBe(4);
     for (const argv of calls) expect(query.allowed(argv), argv.join(' ')).toBe(true);
     expect(calls.filter((a) => a[4] === 'psql')).toHaveLength(1);
   });
@@ -597,6 +639,13 @@ function fakeIo(
     run(argv, input) {
       o.onRun?.(argv);
       if (argv[4] === 'psql') return (o.psql ?? psqlOk)(input ?? '');
+      if (argv[0] === 'bash')
+        return {
+          status: 0,
+          stdout: JSON.stringify({ ok: true, runningIdle: healthy().sections.runningIdle }),
+          stderr: '',
+          error: null,
+        };
       if (argv[0] === 'systemctl')
         return (
           o.services ?? { status: 0, stdout: 'active\nactive\nactive\nactive\n', stderr: '', error: null }
@@ -1821,7 +1870,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       expect(idleOf(v, 43)).toEqual([]);
     });
 
-    it('阈值边界：正好 20 分钟不报，21 分钟报；有开着的会话不报', () => {
+    it('正式阈值边界：正好 20 分钟即报，21 分钟报；有开着的会话不报', () => {
       const v = viewOf((s) => {
         s.tasks = {
           ok: true,
@@ -1833,7 +1882,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
         };
         s.runs = { ok: true, rows: [run({ n: 53, stage: 'execute', queued: 5, ended: null })] };
       });
-      expect(idleOf(v, 51)).toEqual([]);
+      expect(idleOf(v, 51)).toHaveLength(1);
       expect(idleOf(v, 52)).toHaveLength(1);
       expect(idleOf(v, 53)).toEqual([]);
       const local = viewOf((s) => {
@@ -1849,6 +1898,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
           rows: [task(61, 'running', 766, 'engine'), task(62, 'planning', 766, 'engine')],
         };
         s.runs = { ok: false, why: '库查询出错：x' };
+        s.runningIdle = { ok: false, why: '完整会话计数没查成' };
       });
       expect(whats(v).filter((w) => w.includes('没动'))).toEqual([]);
       expect(taskOf(v, 61)).toMatchObject({ openRuns: 0, runs: null, runsWhy: '库查询出错：x' });
@@ -1869,14 +1919,10 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
       for (const n of [71, 72, 73]) {
         expect(taskOf(v, n)).toMatchObject({ executor: null, executorName: '未知' });
         expect(idleOf(v, n)).toEqual([]);
-        has(
-          v,
-          'note',
-          `#${n} 在干活、766 分钟没动、没有会话，但执行者没读到（缺了或认不得），判不了是不是引擎空闲`,
-        );
+        has(v, 'note', `#${n} 执行者没读到（缺了或认不得），判不了是不是引擎空闲`);
       }
-      expect(whats(v).some((w) => w.startsWith('#74 在干活'))).toBe(false);
-      expect(executorKinds(v)).toEqual(['task-park', 'task-park', 'task-park']);
+      expect(whats(v).some((w) => w.startsWith('#74 执行者没读到'))).toBe(true);
+      expect(executorKinds(v)).toEqual(['task-park', 'task-park', 'task-park', 'task-park']);
     });
 
     it('执行者不是字符串：这一块形状认不出，当没查成，不拿默认顶', () => {
@@ -2003,6 +2049,7 @@ describe('断链排查：每一种异常都标得出来，写清去哪看', () =
   it('只有会话没读到：单子照列，每张单写「会话没读到」，不写成 0 次', () => {
     const v = viewOf((s) => {
       s.runs = { ok: false, why: '库查询出错：x' };
+      s.runningIdle = { ok: false, why: '完整会话计数没查成' };
     });
     expect(v.tasks.active[0]?.usage).toBeNull();
     expect(v.tasks.active[0]?.runsWhy).toBe('库查询出错：x');
@@ -2317,5 +2364,117 @@ describe('server.mjs 起来就接了法国引擎页', () => {
         await exited;
       }
     }
+  });
+});
+
+describe('即时引擎空闲只消费正式结论，不从展示列表推断', () => {
+  const fact = (n: number, ageMs: number | null, doing: string | null = null, openRuns = 0) => {
+    const updatedAt = ageMs === null ? null : new Date(Date.parse(AT) - ageMs).toISOString();
+    return {
+      taskId: `id-${n}`,
+      owner: 'o',
+      name: 'fleet-dao',
+      issueNumber: n,
+      updatedAt,
+      doing,
+      openRuns,
+      stale: isIdleRunningStale(
+        {
+          state: 'running',
+          executor: 'engine',
+          updatedAt: updatedAt ? new Date(updatedAt) : null,
+          doing,
+          openRuns,
+        },
+        new Date(AT),
+      ),
+    };
+  };
+  const source = (values: unknown[]) => ({ ok: true, version: 1, at: AT, complete: true, rows: values });
+  it('selfCheck边界前不报，边界/之后报；有完整会话计数不报；缺更新时间按正式判据报', () => {
+    const v = viewOf((s) => {
+      s.tasks = { ok: true, rows: [] };
+      s.runs = { ok: true, rows: [] };
+      s.runningIdle = source([
+        fact(81, SELF_CHECK_ACTIVITY_MS - 1, SELF_CHECK_DOING),
+        fact(82, SELF_CHECK_ACTIVITY_MS, SELF_CHECK_DOING),
+        fact(83, SELF_CHECK_ACTIVITY_MS + 1, SELF_CHECK_DOING),
+        fact(84, SELF_CHECK_ACTIVITY_MS + 1, SELF_CHECK_DOING, 1),
+        fact(85, null),
+      ]);
+    });
+    expect(
+      v.anomalies.filter((a) => a.what.includes('手上也没有会话')).map((a) => a.what.match(/^#\d+/)?.[0]),
+    ).toEqual(['#82', '#83', '#85']);
+  });
+  it('展示runs截断或失败不影响完整正式来源；来源中的任务不在展示tasks里仍报', () => {
+    for (const displayRuns of [
+      { ok: true, rows: [] },
+      { ok: false, why: '展示被截断/失败' },
+    ]) {
+      const v = viewOf((s) => {
+        s.tasks = { ok: true, rows: [] };
+        s.runs = displayRuns;
+        s.runningIdle = source([fact(90, 99 * 60_000), fact(91, 99 * 60_000, null, 9)]);
+      });
+      expect(whats(v).filter((w) => w.includes('手上也没有会话'))).toHaveLength(1);
+      expect(whats(v).join('\n')).toContain('#90 ');
+      expect(whats(v).join('\n')).not.toContain('#91 ');
+    }
+  });
+  it('来源缺失、版本旧、形状坏、不完整、重复身份或过旧均未知；独立服务红仍保留', () => {
+    const raw = healthy();
+    const samples = [
+      undefined,
+      { ok: false, why: '正式读取失败' },
+      { ...source([]), version: 0 },
+      { ...source([]), complete: false },
+      source([{ ...fact(92, 0), openRuns: null }]),
+      source([{ ...fact(92, 0), openRuns: -1 }]),
+      source([{ ...fact(92, 0), openRuns: 0.5 }]),
+      source([{ ...fact(92, 0), updatedAt: undefined }]),
+      source([{ ...fact(92, 0), taskId: '' }]),
+      source([{ ...fact(92, 0), stale: 'false' }]),
+      source([fact(92, 0), fact(92, 0)]),
+      { ...source([]), at: ago(10) },
+      { ...source([]), at: ago(-10) },
+    ];
+    for (const sample of samples) {
+      const v = viewOf((s) => {
+        if (sample === undefined) delete s.runningIdle;
+        else s.runningIdle = sample;
+        s.services = {
+          ok: true,
+          units: query.UNITS.map((unit) => ({
+            unit,
+            state: unit === 'fleet-engine' ? 'inactive' : 'active',
+          })),
+        };
+      });
+      expect(whats(v).some((w) => w.includes('即时引擎空闲结论') && w.includes('没读到'))).toBe(true);
+      expect(whats(v).some((w) => w.includes('fleet-engine'))).toBe(true);
+      expect(whats(v).some((w) => w.includes('手上也没有会话'))).toBe(false);
+    }
+    expect(raw.schema).toBe(1);
+  });
+  it('collect只调用固定attention只读入口；旧版本或调用失败明确未知', () => {
+    for (const result of [
+      { status: 0, stdout: JSON.stringify({ ok: true, notes: [] }), stderr: '', error: null },
+      { status: 1, stdout: '', stderr: 'unknown command attention', error: null },
+    ]) {
+      const io = fakeIo();
+      const original = io.run;
+      io.run = (argv, input) => (argv[0] === 'bash' ? result : original(argv, input));
+      const sections = query.collect(io).sections;
+      expect(sections.runningIdle?.ok).toBe(false);
+      expect(sections.services?.ok).toBe(true);
+    }
+    expect(query.ATTENTION_ARGV).toEqual([
+      'bash',
+      '/srv/fleet-dao-releases/current/packages/api/bin/fleet-api',
+      'attention',
+      '--json',
+    ]);
+    expect(query.allowed([...query.ATTENTION_ARGV, 'on'])).toBe(false);
   });
 });
