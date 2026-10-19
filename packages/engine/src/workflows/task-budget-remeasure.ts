@@ -95,7 +95,7 @@ export function judgeRemeasure(
 ): { ok: true; receipt: LineBudgetRemeasureReceipt } | RemeasureRefusal {
   const identity = command.identity;
   const answer = read.budgetRemeasure;
-  if (!answer || answer.version !== 1) {
+  if (answer?.version !== 1) {
     return { ok: false, reason: 'unsupported', detail: '执行端没按重评口径回答（旧 worker？），保留原停点' };
   }
   if (answer.status === 'refused') {
@@ -115,8 +115,7 @@ export function judgeRemeasure(
   }
   const m = answer.measurement;
   if (
-    !m ||
-    m.version !== 1 ||
+    m?.version !== 1 ||
     m.head !== command.head ||
     m.base !== command.base ||
     !safeCount(m.rawAddedLines) ||

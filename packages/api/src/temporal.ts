@@ -190,7 +190,7 @@ export function createTemporalLineBudgetRemeasure(
     }
     const field = (status as { lineBudgetPark?: { version?: unknown; identity?: ParkIdentityWire | null } })
       ?.lineBudgetPark;
-    if (!field || field.version !== 1) {
+    if (field?.version !== 1) {
       return {
         ok: false,
         reason: 'unsupported',

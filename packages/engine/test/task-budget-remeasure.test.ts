@@ -3,8 +3,6 @@
 // 不碰真实 #3207，不改生产数据。
 
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
@@ -223,24 +221,6 @@ describe('体量关口重评（#3249）', { timeout: 90_000 }, () => {
     expect(asks[0]).toMatchObject({ base: BASE, rawAddedLines: RAW });
   });
 
-  it('新历史重放：带重评 Update 的历史按现在的代码重放不报对不上', async () => {
-    const { world, tasks } = setup((ask) => measured(ask));
-    const i = input();
-    const { history, workflowId } = await withWorker(
-      env,
-      world,
-      async (q) => {
-        const h = await start(q, i);
-        const id = await parkedIdentity(h);
-        expect((await send(h, command(i, h, id))).outcome).toBe('resumed');
-        await h.result();
-        return { history: await h.fetchHistory(), workflowId: h.workflowId };
-      },
-      { tasks },
-    );
-    await Worker.runReplayHistory({ workflowBundle: await engineBundle() }, history, workflowId);
-  });
-
   it('人点「继续」仍保留既有授权语义：之后的交付不再判体量', async () => {
     const { world, tasks } = setup((ask) => measured(ask), true);
     const i = input();
@@ -437,27 +417,71 @@ describe('体量关口重评（#3249）', { timeout: 90_000 }, () => {
   });
 });
 
-describe('旧体量 park 形状的脱敏历史（#3249）', { timeout: 60_000 }, () => {
-  const file = fileURLToPath(new URL('./replay/fixtures/task-budget-parked.json', import.meta.url));
-  const fixture = JSON.parse(readFileSync(file, 'utf8')) as {
-    workflowId: string;
-    history: { events: unknown[] };
-  };
+/**
+ * 重评能力之前的代码（#3249 改动前那一版，假端口、无关数据）真走到体量停点时录下的命令序：活动和 patched 标记按先后排，
+ * 搜索属性略。停点之前的步序原样不动，旧在途历史才重放得过；这里拿现在的代码跑出来的历史逐条比。
+ */
+const OLD_PARK_COMMANDS = (
+  'marker:core_local_activity patch:self-check-own-timeout readTaskBrief saveTaskState ' +
+  'patch:task-contract-revisions-v1 readTaskBrief patch:repo-ci-policy readCiPolicy createWorktree ' +
+  'patch:ui-work-implement readTaskBrief patch:task-token-budget patch:task-budget-this-generation ' +
+  'patch:cancellable-guard taskSpend patch:task-budget-unmetered-estimate patch:avoid-empty-commit-route ' +
+  'patch:dispatch-probe patch:prefer-author-families patch:route-by-tier pickRoute probeAssignedRoute ' +
+  'readTaskBrief patch:dispatch-probe-pass-not-feedback patch:flow-mode decideFlowMode patch:mirror-phase ' +
+  'saveTaskState patch:run-cause-fields patch:round-outcome runSegment readDelivery patch:self-check ' +
+  'saveTaskState patch:self-check-ci-coverage selfCheck patch:pr-line-budget recordRound readTaskBrief ' +
+  'readCiPolicy patch:rework-resume readTaskBrief taskSpend pickRoute probeAssignedRoute readTaskBrief ' +
+  'planSegmentResume saveTaskState runSegment readDelivery saveTaskState selfCheck saveTaskState raiseAlert'
+).split(' ');
 
-  it('重放不报对不上；历史是重评能力之前录的（没有标记、没有重评 Update），停在体量停点上', async () => {
-    const text = readFileSync(file, 'utf8');
-    const marker = Buffer.from(
-      JSON.stringify({ id: 'line-budget-remeasure-v1', deprecated: false }),
-    ).toString('base64');
-    expect(text).not.toContain(marker);
-    expect(text).not.toContain('taskRemeasureLineBudget');
-    expect(text).toContain(
-      Buffer.from(JSON.stringify({ id: 'pr-line-budget', deprecated: false })).toString('base64'),
+type HistoryEvent = NonNullable<Awaited<ReturnType<WorkflowHandle['fetchHistory']>>['events']>[number];
+
+function commandsOf(events: readonly HistoryEvent[]): string[] {
+  return events.flatMap((e) => {
+    const activity = e.activityTaskScheduledEventAttributes?.activityType?.name;
+    if (activity) return [activity];
+    const marker = e.markerRecordedEventAttributes;
+    if (!marker) return [];
+    if (marker.markerName !== 'core_patch') return [`marker:${marker.markerName}`];
+    const payloads = Object.values(marker.details ?? {}).flatMap((p) => p.payloads ?? []);
+    const id = payloads
+      .map((p) => (JSON.parse(Buffer.from(p.data ?? []).toString('utf8')) as { id?: unknown }).id)
+      .find((x) => typeof x === 'string');
+    return [`patch:${String(id)}`];
+  });
+}
+
+describe('旧体量 park 形状的在途历史（#3249）', { timeout: 90_000 }, () => {
+  it('停到体量关口的命令序与重评之前的代码一致；接着重评放行到合并的整段历史按现在的代码重放不报对不上', async () => {
+    const { world, tasks, asks } = setup((ask) => measured(ask));
+    const i = input();
+    const { parked, full, workflowId, run } = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        // 此刻的历史就是「停在体量关口的旧在途任务」：没有重评标记、没有重评 Update
+        const parked = await h.fetchHistory();
+        expect(await send(h, command(i, h, id))).toMatchObject({
+          outcome: 'resumed',
+          receipt: { chargeableAddedLines: 1513, verifiedGeneratedLines: 8037 },
+        });
+        const run = (await h.result()) as TaskRun;
+        return { parked, full: await h.fetchHistory(), workflowId: h.workflowId, run };
+      },
+      { tasks },
     );
-    await Worker.runReplayHistory(
-      { workflowBundle: await engineBundle() },
-      fixture.history as never,
-      fixture.workflowId,
-    );
+    expect(commandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
+    expect(JSON.stringify(parked)).not.toContain('taskRemeasureLineBudget');
+    // 旧停点的前缀原样在整段历史里，后面接重评 Update（标记第一次在 Update 里问）和放行后的原路推、验收、合并
+    expect(commandsOf(full.events ?? []).slice(0, OLD_PARK_COMMANDS.length)).toEqual(OLD_PARK_COMMANDS);
+    expect(JSON.stringify(full)).toContain('taskRemeasureLineBudget');
+    const bundle = { workflowBundle: await engineBundle() };
+    await Worker.runReplayHistory(bundle, parked, workflowId);
+    await Worker.runReplayHistory(bundle, full, workflowId);
+    expect(run.outcome).toBe('merged');
+    expect(asks).toHaveLength(1);
+    expect(world.count('pushBranch')).toBe(1);
   });
 });
