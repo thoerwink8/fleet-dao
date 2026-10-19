@@ -788,6 +788,9 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           headMoved: pull.headSha,
         };
       }
+      if (pull.draft) {
+        return { armed: false, merged: false, why: `PR #${prNumber} 还是草稿，不挂自动合并` };
+      }
       const held = await reviewHold(repo, pull);
       if (held.length > 0) {
         return {
@@ -798,6 +801,28 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         };
       }
       if (pull.autoMerge) return (await contractCurrent()) ? { armed: true, merged: false } : contractChanged;
+      // 挂之前现读这个头上的必过检查（#3206）：真红不写，交 checksRed。还在跑、没出现不拦（自动合并本来就是等它们）。
+      // 没接上读检查不写、明说；读不成照抛（取消原样抛，可重试的交活动重试，下一次从头现读 PR、评审、检查）。
+      // unstable 临时拒绝（github 包标了可重试）也靠活动重试重入这里，不另起循环。
+      const readChecksNow = deps.readChecks;
+      if (!readChecksNow) {
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 头 ${expectedHead} 的必过检查没查成：没接上读检查，不挂自动合并`,
+        };
+      }
+      const before = await mapped(() => readChecksNow(repo, expectedHead, ctx.signal));
+      const redBefore = before.failed.filter((item) => item.name.trim().length > 0);
+      if (before.overall === 'red' || redBefore.length > 0) {
+        const red = checksRedWait({ ...before, failed: redBefore });
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 头 ${expectedHead} 的必过检查红了，不挂自动合并：${red.detail}`,
+          checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
+        };
+      }
 
       // clean 之后的直接合。recheckCi 只在「现读已经是绿」时再走一次同一个 mergePr，避免检查刚转绿就停。
       const acceptDirectMerge = async (

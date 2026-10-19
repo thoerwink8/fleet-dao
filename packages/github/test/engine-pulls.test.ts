@@ -582,3 +582,91 @@ describe('engine-pulls：撤自动合并、关 PR、留言', () => {
     expect(fake.issues.get(issue.number)?.comments).toEqual([]);
   });
 });
+
+describe('engine-pulls：挂自动合并的 unstable 临时拒绝（#3198）', () => {
+  const HEAD = sha('a');
+  /** #3198 事件 254 的原样 errors。 */
+  const unstable = {
+    type: 'UNPROCESSABLE',
+    path: ['enablePullRequestAutoMerge'],
+    message: 'Pull request Pull request is in unstable status',
+  };
+  const refuse = (errors: unknown[]) => {
+    const { gh, fake } = setup();
+    for (let n = 1; n < 7; n += 1) fake.addIssue();
+    fake.addPull({ head: { ref: 'fleet/3219-t1', sha: HEAD } });
+    fake.before.push((r) =>
+      r.path !== '/graphql'
+        ? undefined
+        : (r.body as { query: string }).query.includes('enablePullRequestAutoMerge')
+          ? json(200, { data: { enablePullRequestAutoMerge: null }, errors })
+          : json(200, {
+              data: {
+                disablePullRequestAutoMerge: {
+                  pullRequest: { id: 'PR_7', number: 7, autoMergeRequest: null },
+                },
+              },
+            }),
+    );
+    return gh.claims
+      .enableAutoMerge(repo, { number: 7, nodeId: 'PR_7', headSha: HEAD }, { attempt: 2 })
+      .catch((e: unknown) => e);
+  };
+
+  it('只有 enablePullRequestAutoMerge 的那一条 UNPROCESSABLE unstable：标成可重试，码和原消息不变，原始 errors 原样留着，补 PR/头/尝试', async () => {
+    const err = await refuse([unstable]);
+    expect(err).toMatchObject({
+      code: 'GRAPHQL_ERROR',
+      retryable: true,
+      maybeLanded: false,
+      details: { errors: [unstable], pull: 7, head: HEAD, attempt: 2 },
+    });
+    const message = String((err as Error).message);
+    expect(message).toContain('GraphQL 出错：Pull request Pull request is in unstable status');
+    expect(message).toContain('UNPROCESSABLE enablePullRequestAutoMerge');
+    expect(message).toContain(`原始 errors：${JSON.stringify([unstable])}`);
+    expect(message).toContain(`PR #7 头 ${HEAD}`);
+    expect(message).toContain('第 2 次尝试');
+  });
+
+  it.each([
+    ['别的 path', [{ ...unstable, path: ['disablePullRequestAutoMerge'] }], 'GRAPHQL_ERROR'],
+    ['path 多一层', [{ ...unstable, path: ['enablePullRequestAutoMerge', 'pullRequest'] }], 'GRAPHQL_ERROR'],
+    ['没有 path', [{ type: unstable.type, message: unstable.message }], 'GRAPHQL_ERROR'],
+    ['别的 type', [{ ...unstable, type: 'STALE_DATA' }], 'GRAPHQL_ERROR'],
+    [
+      '权限拒绝',
+      [{ ...unstable, type: 'FORBIDDEN', message: 'Resource not accessible by integration' }],
+      'FORBIDDEN',
+    ],
+    ['别的消息', [{ ...unstable, message: 'Pull request is in dirty status' }], 'GRAPHQL_ERROR'],
+    ['消息多一个句号', [{ ...unstable, message: `${unstable.message}.` }], 'GRAPHQL_ERROR'],
+    ['消息大小写不同', [{ ...unstable, message: unstable.message.toLowerCase() }], 'GRAPHQL_ERROR'],
+    ['消息带首尾空白', [{ ...unstable, message: ` ${unstable.message} ` }], 'GRAPHQL_ERROR'],
+    [
+      '重复的 Pull request 前缀',
+      [{ ...unstable, message: `Pull request ${unstable.message}` }],
+      'GRAPHQL_ERROR',
+    ],
+    [
+      '消息只带 unstable 子串',
+      [{ ...unstable, message: 'Auto merge is not allowed, unstable policy' }],
+      'GRAPHQL_ERROR',
+    ],
+    [
+      '策略拒绝',
+      [{ ...unstable, message: 'Auto merge is not allowed for this repository' }],
+      'GRAPHQL_ERROR',
+    ],
+    [
+      '混合多条 errors',
+      [unstable, { ...unstable, message: 'Auto merge is not allowed for this repository' }],
+      'GRAPHQL_ERROR',
+    ],
+  ])('%s：原样抛、不可重试', async (_name, errors, code) => {
+    const err = await refuse(errors);
+    expect(isGitHubError(err)).toBe(true);
+    expect(err).toMatchObject({ code, retryable: false, details: { errors } });
+    expect(String((err as Error).message)).not.toContain('交活动有界重试');
+  });
+});
