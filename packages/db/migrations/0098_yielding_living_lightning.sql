@@ -1,0 +1,2 @@
+ALTER TABLE "acceptance_duties" DROP CONSTRAINT "acceptance_duties_source_known";--> statement-breakpoint
+ALTER TABLE "acceptance_duties" ADD CONSTRAINT "acceptance_duties_source_known" CHECK ("acceptance_duties"."source" in ('cold_verify', 'coordination', 'management_merge'));
