@@ -345,7 +345,8 @@ describe('环境类、能力标记', () => {
       'packages/engine/test/support.ts',
     ]);
     expect(TEMPORAL_MARKER.test(read('packages/engine/test/support.ts') ?? '')).toBe(true);
-  });
+    // 扫全仓逐个读文件：全量并跑时比 5 秒默认时限慢，会误红
+  }, 30_000);
 });
 
 describe('在真仓上装箱（全跑那一轮）', () => {

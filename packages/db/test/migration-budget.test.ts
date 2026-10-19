@@ -20,13 +20,16 @@ function fixture(): MigrationBudgetData {
     sqlPath: 'packages/db/migrations/0094_acceptance_duty_supersession.sql',
   };
 }
+// 核的是生成结果对不对，不是快慢：机器忙时子进程起来就超 5 秒默认时限，这里放宽；超时那条另用 timeoutMs: 1 单测。
+const SLOW_OK = { timeoutMs: 25_000 };
 const record = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
 const values = (value: unknown): unknown[] => Object.values(record(value));
 
-describe('可信迁移数据核验', () => {
+// 真起可信 child 进程独立生成 SQL：单跑就要三五秒，全量并跑时更慢，5 秒默认时限会误红。
+describe('可信迁移数据核验', { timeout: 30_000 }, () => {
   it('真实已提交 PG7 快照独立生成 SQL，逐字节完全相等', async () => {
     await expect(verifyMigrationData(fixture())).resolves.toBeUndefined();
-    await expect(verifyMigrationBudget(fixture())).resolves.toEqual({ verified: true });
+    await expect(verifyMigrationBudget(fixture(), SLOW_OK)).resolves.toEqual({ verified: true });
   });
   it.each(['top', 'table', 'column', 'meta', 'indexColumn', 'identity', 'defaultObject'])(
     '未知 %s 不被库的strip静默丢掉',
@@ -97,7 +100,7 @@ describe('可信迁移数据核验', () => {
     vi.stubEnv('NODE_OPTIONS', '--import=./candidate-loader-does-not-exist.mjs');
     vi.stubEnv('NODE_PATH', './candidate-node-modules');
     try {
-      expect(await verifyMigrationBudget(fixture())).toEqual({ verified: true });
+      expect(await verifyMigrationBudget(fixture(), SLOW_OK)).toEqual({ verified: true });
     } finally {
       vi.unstubAllEnvs();
     }
