@@ -17,7 +17,16 @@ try {
   });
   const dir = stateDir();
   const state = session.ok && authority.kind === 'allowed' ? readState(dir, session.id) : null;
-  const context = receiptContext(dir, input, state?.ok ? state.state : null, 'SessionStart');
+  const context = receiptContext(
+    dir,
+    input,
+    state?.ok ? state.state : null,
+    'SessionStart',
+    process.env,
+    authority.kind,
+    'codex',
+    session.ok ? () => readState(dir, session.id) : undefined,
+  );
   receipt = context;
   noteReceipt(context, { phase: 'entered', decision: 'none' });
   const bypass =

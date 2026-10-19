@@ -137,12 +137,16 @@ export function withSiblings(selected: readonly string[], universe: readonly str
 // ---- 环境类、能力
 
 /**
- * 要真 Postgres 环境（FLEET_TEST_PG_URL）的测试：packages/db 下的。这一台的 vitest 进程里所有 createTestDb 都会连真库，
+ * 要真 Postgres 环境（FLEET_TEST_PG_URL）的测试：packages/db 下及Store执行资格的精确真实竞争测试。这一台的 vitest 进程里所有 createTestDb 都会连真库，
  * 所以这类文件单独装台。real-pg.test.ts 没设变量时在 CI 里直接红（不悄悄跳过）；
  * test/test-split.test.ts 扫全仓：用到 FLEET_TEST_PG_URL / realTestPgUrl 的测试文件都得落在这一类里。
  */
 export function needsPg(file: string): boolean {
-  return file.startsWith('packages/db/');
+  return (
+    file.startsWith('packages/db/') ||
+    file === 'packages/store/test/task-execution.real-pg.test.ts' ||
+    file === 'packages/store/test/idempotency-race.real-pg.test.ts'
+  );
 }
 
 /**

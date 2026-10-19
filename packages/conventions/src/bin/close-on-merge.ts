@@ -4,6 +4,7 @@
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { closeOnMerge } from '../close-on-merge.ts';
+import { closeOnMergeGh } from '../close-on-merge-gh.ts';
 import { exitWith, runMain } from '../exit.ts';
 import { ghRunner } from '../issue-new.ts';
 
@@ -24,7 +25,7 @@ runMain(async () => {
   }
 
   try {
-    const r = await closeOnMerge(pr, { gh: ghRunner(root) });
+    const r = await closeOnMerge(pr, { gh: closeOnMergeGh(ghRunner(root)) });
     if (r.note) console.log(r.note);
     for (const o of r.outcomes) {
       console.log(
