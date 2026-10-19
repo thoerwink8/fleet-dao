@@ -65,6 +65,8 @@ export const HUMAN_TIER_PATHS = [
   'deploy/france/sudoers-fleet-dao',
   // sudoers 放行的那个 root 脚本
   'deploy/france/fleet-agent-scope.sh',
+  // 同一个固定 sudo 入口加载的 root 二级代码，跟随帮手的特权边界登记。
+  'deploy/france/tree-usage.py',
   // 建用户（会话用户、创始人的登录用户）和防火墙读回、收旧连接用的
   'deploy/lib/session-user.sh',
   'deploy/lib/login-user.sh',
