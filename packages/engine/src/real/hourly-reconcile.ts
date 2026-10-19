@@ -704,6 +704,7 @@ export function hourlyReconcileJob(
       machine: w.machine,
       listDir: w.listDir ?? listDirEntries,
       pendingCleanup: () => w.trees.pendingCleanup(),
+      cleanupNamespace: () => w.trees.cleanupNamespace(),
       treeFor: (repo, branch) => w.trees.treeFor(repo, branch),
       ownerOf: (dir) => w.trees.ownerOf(dir),
       remove: async (dir) => {

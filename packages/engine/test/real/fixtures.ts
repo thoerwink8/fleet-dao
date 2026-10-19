@@ -386,6 +386,9 @@ export function fakeTrees(root: string) {
     async pendingCleanup() {
       return [];
     },
+    async cleanupNamespace() {
+      return [];
+    },
   };
   /** 工作树、检出副本的交接（会话临时目录的不算）。 */
   const treeAdopts = () => adopts.filter((a) => !a.dir.startsWith(`${tmpBase}/`));
