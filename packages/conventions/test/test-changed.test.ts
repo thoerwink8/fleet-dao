@@ -15,6 +15,7 @@ import {
 } from '../src/ci-plan.ts';
 import { docNeedles, docReaders } from '../src/doc-readers.ts';
 import { fsRepo, type RepoView } from '../src/repo.ts';
+import { temporalTestVersion } from '../src/temporal-test-cli.ts';
 import {
   AGENTS_CI_NOTE,
   BASE,
@@ -766,6 +767,9 @@ describe('入口', () => {
     const temporaryRoot = join(ROOT, 'packages/conventions/_tmp');
     mkdirSync(temporaryRoot, { recursive: true });
     const fixture = mkdtempSync(join(temporaryRoot, '3011-entry-'));
+    const cli = join(fixture, 'temporal-fixture');
+    writeFileSync(cli, 'fixture CLI; version probe is isolated below');
+    const version = temporalTestVersion(fsRepo(ROOT));
     const changed = ['pnpm-lock.yaml', 'packages/conventions/src/test-changed.ts'];
     const selection = selectTests(changed, GRAPH);
     if (selection.kind !== 'all') throw new Error('锁文件改动应判需全跑');
@@ -831,7 +835,7 @@ describe('入口', () => {
     ];
     try {
       for (const test of cases) {
-        // 只换 git/runner 两个外部进程边界；选择器、真实入口和槽逻辑都运行仓内代码。
+        // 只换 git、版本探测和 runner 外部边界；选择器、真实入口和槽逻辑运行仓内代码。
         const source = `
           // 这组只验选测/槽/退出码；平台转交由 local-vitest.test.ts 和真实 Linux 验真覆盖。
           Object.defineProperty(process, 'platform', { value: 'linux' });
@@ -839,6 +843,10 @@ describe('入口', () => {
           import { syncBuiltinESMExports } from 'node:module';
           import { pathToFileURL } from 'node:url';
           cp.spawnSync = (command, args) => {
+            if (command === ${JSON.stringify(cli)} && args.length === 1 && args[0] === '--version') {
+              console.log('3011_PROBE');
+              return { status: 0, stdout: ${JSON.stringify(`temporal version ${version}`)}, stderr: '' };
+            }
             if (command === 'git') {
               if (${JSON.stringify('gitFailed' in test)}) return { status: 1, stdout: '', stderr: 'controlled git failure' };
               const stdout = args[0] === 'rev-parse' ? 'baseline\\n'
@@ -862,6 +870,7 @@ describe('入口', () => {
           FLEET_LOCAL_TEST_SLOT_HELD: '',
           FLEET_LOCAL_TEST_SLOTS: '1',
           FLEET_LOCAL_TEST_SLOTS_DIR: join(fixture, 'slots'),
+          FLEET_TEST_TEMPORAL_CLI: cli,
           ...test.env,
         };
         const result = runChild(process.execPath, ['--input-type=module'], { cwd: ROOT, env, input: source });
@@ -869,6 +878,10 @@ describe('入口', () => {
         const line = result.stdout.split(/\r?\n/).find((s) => s.startsWith('3011_SPAWN '));
         const actual = line === undefined ? null : JSON.parse(line.slice('3011_SPAWN '.length));
         expect(actual, test.name).toEqual(test.args);
+        expect(
+          result.stdout.split(/\r?\n/).filter((s) => s === '3011_PROBE'),
+          test.name,
+        ).toHaveLength(test.args === null ? 0 : 1);
       }
     } finally {
       rmSync(fixture, { recursive: true, force: true });

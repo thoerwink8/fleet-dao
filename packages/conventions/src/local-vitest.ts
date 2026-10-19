@@ -1,11 +1,12 @@
 // Windows 的本机选测：需要 Linux FD/进程语义的文件在显式配置的 Linux Node 下跑。
-// CI/Linux 直接走原 Vitest；不安装 Linux、不跳过测试、不使用旧检出冒充当前源码。
+// 各平台先核所选真 Temporal 测试的 CLI；不安装 Linux、不跳过测试、不使用旧检出冒充当前源码。
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { verifyRun } from './ci-box.ts';
 import { fsRepo } from './repo.ts';
+import { prepareTemporalCli, selectedNeedsTemporal } from './temporal-test-cli.ts';
 import { createTestReport } from './test-report.ts';
 import { listTestFiles } from './test-split.ts';
 
@@ -158,9 +159,19 @@ export function runLocalVitest(
     const r = evidence ? evidence.command('native', process.execPath, commandArgs, spawn) : spawn();
     return { status: r.status, signal: r.signal, error: r.error };
   };
-  if (platform !== 'win32') return direct(args);
   try {
-    evidence = createTestReport(root, args, phase);
+    if (platform === 'win32') evidence = createTestReport(root, args, phase);
+    const universe = listTestFiles(fsRepo(root));
+    if (typeof universe === 'string') throw new Error(universe);
+    // 调用入口只传 run、文件过滤和 = 形式的 reporter/outputFile 选项。
+    const filters = args.slice(1).filter((a) => !a.startsWith('--'));
+    const split = splitLocalTests(universe, filters);
+    if (selectedNeedsTemporal(fsRepo(root), [...split.native, ...split.linux])) {
+      const cli = prepareTemporalCli(root, { env });
+      env = { ...env, FLEET_TEST_TEMPORAL_CLI: cli.path };
+      console.log(`Temporal preparation 通过：CLI=${cli.path} version=${cli.version}`);
+    }
+    if (!evidence) return direct(args);
     const files = snapshotSource(root);
     const digest = sourceDigest(files);
     evidence.metadata.source = { kind: 'worktree-sha256', digest, files: files.length };
@@ -172,11 +183,6 @@ export function runLocalVitest(
       '--reporter=json',
       `--outputFile.json=${evidence?.path('native.json')}`,
     ];
-    const universe = listTestFiles(fsRepo(root));
-    if (typeof universe === 'string') throw new Error(universe);
-    // 调用入口只传 run、文件过滤和 = 形式的 reporter/outputFile 选项。
-    const filters = args.slice(1).filter((a) => !a.startsWith('--'));
-    const split = splitLocalTests(universe, filters);
     if (!split.linux.length) {
       result = direct(nativeArgs(args));
       evidence.read('native', evidence.path('native.json'));
