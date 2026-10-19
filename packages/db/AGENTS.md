@@ -22,6 +22,8 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 
 ## 常见坑
 
+- `claimIdempotencyKey` 遇到成功INSERT冲突后成功SELECT为空，会完整重做占键/读回，最多四次；持续竞争抛可重试的 `IdempotencyClaimContentionError`，不冒充已占键。数据库异常直接抛出，不延长TTL、不持连接跨外部操作；更强隔离事务的序列化失败由调用方重试整个事务。
+
 - 改了 `src/schema` 没生成迁移：`packages/db/test/schema-drift.test.ts` 当场红。
 - 迁移只进不退：发布时先迁移再切版本，退回上一版不撤迁移。新迁移要写成旧代码照样能跑（先加列、下一版再删旧的）。见 ops 第八节「改之前要知道的」。
 - 公开仓：种子（`src/seed.ts`）不放账号、池、路由、额度。种子只补缺，已有的行不跟着改值。

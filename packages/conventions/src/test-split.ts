@@ -142,7 +142,11 @@ export function withSiblings(selected: readonly string[], universe: readonly str
  * test/test-split.test.ts 扫全仓：用到 FLEET_TEST_PG_URL / realTestPgUrl 的测试文件都得落在这一类里。
  */
 export function needsPg(file: string): boolean {
-  return file.startsWith('packages/db/') || file === 'packages/store/test/task-execution.real-pg.test.ts';
+  return (
+    file.startsWith('packages/db/') ||
+    file === 'packages/store/test/task-execution.real-pg.test.ts' ||
+    file === 'packages/store/test/idempotency-race.real-pg.test.ts'
+  );
 }
 
 /**
