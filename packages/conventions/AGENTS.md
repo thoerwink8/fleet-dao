@@ -5,11 +5,15 @@
 ## 入口
 
 - `packages/conventions/src/bin/`：每个命令一个入口文件，逻辑在 `packages/conventions/src/` 同名模块里。仓根 `package.json` 的 `check`、`test:changed`、`pr:open`、`issue:new`、`issue:close`、`progress`、`plan`、`intents`、`debt:check`、`github:audit`、`branch:hygiene`、`ci:timings`、`ci:stats`、`flow:stats`、`subagent:stats` 都指到这里。
+- `pr-open` 的同步 GitHub 运输用 `pr-arm.ts` 的 `livePrGh`：复用 `github-api.ts` 的仓身份识别，显式传 canonical repo；创建 PR 明确已推送当前分支，避免 Git relay 改写 remote 后让 gh 猜错仓。
 - `check.ts`：`pnpm check` = biome 格式 + `tsc -b` + 改到的测试（`--all` 才全量）+ 卫生检查，四样跑完再判红。
+- `local-vitest.ts`：Windows 的 `check`（含 `--all`）、`test:changed`、`test:linux` 共用执行入口。四个需要 Linux FD/进程语义的保全测试只能转交显式配置的本机 Linux 普通用户；当前工作树字节快照包含未提交/新文件，删除不复活。Linux 依赖须与当前锁文件和依赖声明一致，workspace 链接重指快照。无配置、摘要/测试清单对不上、报告缺失或跳过都明确失败；CI/Linux 仍直接跑原测试。
+- `work.ts` 的派工归属复用入口动态加载的 `unattended.mjs/selectSessionId`；Claude session / Codex thread 接同步 Stop，只有 Codex root-session 不冒充 thread，缺归属仍保留结果供 `pnpm work runs` 读取。续跑不重绑原 spec（包括旧的 null），Codex 后台完成不主动开启新轮。
 - `issue-batch.ts`：`pnpm issue:batch --spec <JSON>`，整批校验后建母子单、写 parent 并挂原生关系；失败关闭本批，创建结果不明按唯一标记找回。`--recover <记录>` 清理中断产物，记录生成在仓根临时目录的 issue-batch 子目录。GitHub 无跨单事务，撤销失败必须保留记录并报错。
 - 只给 CI 用的（`.github/workflows/` 里调）：`ci-plan.ts`、`ci-box.ts`、`ci-cache.ts`、`ci-verdict.ts`、`main-reuse.ts`、`merge-gate.ts`、`close-on-merge.ts`、`debt-check.ts`、`github-audit.ts`（`--alarm` 红了开同一张「GitHub 对账没过」单，`audit-alarm.ts`）、`version-cut.ts`（版本一周一版、到期自动收口，`github-audit.yml` 的 version-cut 任务每天跑）。
 - 查询轴词汇只在 `src/labels.ts`：`pnpm issue:new`、`pnpm pr:open` 显式带 `--domain engine|api|mirasim --nature bug|perf|process`。`src/bin/label-sync.ts` 和 `label-sync.yml` 同步六标签。`issue:batch` 母单必须提供 `domain`、`nature`，子单可逐轴继承母单有效值；整批写入前检查，缺失或无效就拒绝，原子补偿和恢复语义不变。固定流水线报警贴 engine/bug，引导和项目冒烟单贴 engine/process。`query-metadata.yml` 用可信默认分支代码处理创建/编辑/重开事件，只从当前标签、明确正文声明或唯一来源单补轴；写后回读，未知/冲突/读失败报错，不猜、不改排期。`github:audit` 检查两轴约定落地后的新 issue/PR，漏轴和冲突报断裂，PR 标签读失败报没查成。
 - `packages/conventions/standard-paths.json`：改标准的路径清单（人闸第四类），**改它本身就是改标准**。
+- `src/changelog.ts`（#3110）：完成关单按类别/性质生成版本节，固定交付物、兼容性、验证限制三尾；显式版本锚点幂等替换，临时 AI 运营不当产品条目。引擎每天补齐，里程碑只留链接和排期事实。
 - `packages/conventions/test-timings.json`：CI 测试按耗时分台的耗时表，用 `pnpm ci:timings` 从 CI 日志刷新，别手改。
 
 ## 测试
@@ -36,6 +40,7 @@
 - 只改一个包「对外面」以外的文件只测这个包自己（`packages/conventions/src/package-surface.ts`）；认不出面就当整个包都是面。
 - 文档指针检查误报了就收窄 `packages/conventions/src/doc-pointers.ts` 的规则，不往文档里加豁免；章节别光写「第 X 节」，写明是 design 还是 ops 的。
 - CI 里的检查必须确定、只看检出来的文件；看外部状态（GitHub）的放定时任务，只留言不挡 PR。
+- 合并闸的策略 reader 只在核准仓身份、PR 号和精确 head 后返回结构化 closed；初算和发表前都跳过这种终态，不覆写已合旧头。换头、串仓、策略变化或读取失败仍报错。GitHub 的读取与写状态是分开的 API，最终读取后仍有非原子窗口。
 - CI 由这几块组成（减法，2026-10-16）：`ci.yml` 的 `lint`（biome、tsc、文档指针、技能测试、deps、release_smoke 并行，加卫生检查——CI 里只在 lint 的这一步跑一处，文件树和 PR 历史两遍；本机 `pnpm check` 和 pre-push 钩子另有一份，是推之前的快反馈）、`test`、`web`、`e2e`（合并闸和发版闸，两种屏宽全套，不含隔离集）、`deploy`，PR 和主线都全跑，汇总 job `check` 的 needs 就是这几个。只报不挡或随时间变的挪去定时：`debt.yml`（欠账报告）和 `e2e-quarantine.yml`（隔离集 E2E）每天跑一次、可手动触发，都不再跟 push；`e2e-flaky.yml` 仍跟主线 ci 跑完统计偶发；`ci-rerun.yml` 在主线 ci 第一次运行（run_attempt=1）红了时重跑失败的 job 一次（#2747，`test/ci-rerun.test.ts` 钉着只认 ci、只重跑一次）。
 
 ## 改它时要连带改
@@ -46,3 +51,9 @@
 - 改开单、关单、PR 栏目的规矩：同步 design 第七节和 `README.md`「常用」。
 
 - `issue:close` 和 `close-on-merge` 收尾都现读数据库最终验收责任；`--note`、Bot 评论不能替代结清。Actions 从可信 engine App 的精确 PR/head policy-source 找只读口，本机复用已安装的 local-sessions 地址。没读成明确退出 2、不关单。
+
+- 对外仓引导（#3109）由 repo-kind 按 INIT_CWD 判，原话只从 prompt-log/stdin 进私有待传目录和 quote 管理链，公开文件、开单及收件箱迁移回写只用 meaning；缺 meaning 先拒绝。同编号回执精确确认才删待传，后台失败留明确提醒。协议在 shared 的 private-quotes.ts 零依赖叶子，conventions 相对导入保持同步检出零安装可用。
+
+- 本机显式退回协议在 `managed-feedback.ts`，GitHub事务装配在 `managed-feedback-github.ts`，work入口在 `managed-work.ts`；只接受可信 Actions Bot 的 COMMENTED 明确协议，普通评论、法国正式 CR、coldVerify 和验收责任账互相独立。普通重算由 `merge-gate.yml` 执行，退回事务由 `managed-feedback.yml` 执行；两份工作流的写者必须共用 `merge-gate-${{ github.repository }}-pr-${{ matrix.pr }}` 精确 PR concurrency group，保持 `queue: max`、`cancel-in-progress: false`。批量入口只由 plan 列出 PR、交给 matrix 逐 PR 写，不能另开 all 写者或让本机直接写状态。排队不算阻合，ack不算resolve，读取失败保留未知责任。
+
+- `runMergeGate` 写模式的退出码表达是否算成并成功发表（0/2），不重复表达 required status 的准合裁决；等验收仍发表 failure，writer 成功。独立 `--no-write` probe 保持 0/1/2，等待工具不能忽略失败的同名 CheckRun。

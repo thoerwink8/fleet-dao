@@ -19,7 +19,7 @@ import { localExec, type UserExec } from '../../src/real/exec.ts';
 import { createGitHubPorts, type EngineGitHub, toPortError } from '../../src/real/github-ports.ts';
 import { checkoutBranch, fetchBundle } from '../../src/real/user-git.ts';
 import { runChildOk } from '../child.ts';
-import { fakeTrees, git, mirror } from './fixtures.ts';
+import { fakeTrees, fixtureProcLook, git, mirror } from './fixtures.ts';
 
 // 每条用例（和每条用例前建的镜像）都真跑好几次 git（Windows 上一次几百毫秒），机器忙时默认的 5 秒、10 秒不够。
 vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
@@ -38,6 +38,8 @@ const repo = {
   testCommand: 'pnpm check',
 };
 const BRANCH = 'fleet/12-login';
+/** commitIn 写了 src/login.ts 一行：推上去的头相对主线的文件清单。 */
+const LOGIN_STAT = [{ path: 'src/login.ts', added: 1, removed: 0, binary: false }];
 
 let root: string;
 let m: ReturnType<typeof mirror>;
@@ -134,7 +136,13 @@ function fakeGh(over: Partial<Record<keyof EngineGitHub, (input: never) => unkno
 
 function setup(
   over: Parameters<typeof fakeGh>[0] = {},
-  opts: { heartbeatEveryMs?: number; exec?: UserExec } = {},
+  opts: {
+    heartbeatEveryMs?: number;
+    exec?: UserExec;
+    confirmTreeIdle?: (dir: string, caller?: { workflowId?: string }) => Promise<'idle' | 'busy' | 'unknown'>;
+    recordHeadFiles?: NonNullable<Parameters<typeof createGitHubPorts>[0]['recordHeadFiles']>;
+    log?: NonNullable<Parameters<typeof createGitHubPorts>[0]['log']>;
+  } = {},
 ) {
   const { gh, calls } = fakeGh(over);
   const trees = fakeTrees(join(root, 'work'));
@@ -146,6 +154,7 @@ function setup(
     archiveDir: join(root, 'archive'),
     gitBin: 'git',
     shBin: 'sh',
+    treeProcessLook: fixtureProcLook,
     now: () => new Date('2026-09-25T08:00:00Z'),
     ...opts,
   });
@@ -279,6 +288,38 @@ describe('建树、收树', () => {
     // 删的那 120 毫秒里（每 20 毫秒一次）至少又报了两次
     expect(beats - beatsAtRemove).toBeGreaterThanOrEqual(2);
     expect(trees.owners.has(stale)).toBe(false);
+  });
+
+  it('删树前把这次工作流编号交给占用确认，在跑就留树', async () => {
+    const seen: { dir: string; workflowId: string | undefined }[] = [];
+    const { ports, trees } = setup(
+      {},
+      {
+        confirmTreeIdle: async (dir, caller) => {
+          seen.push({ dir, workflowId: caller?.workflowId });
+          return 'busy';
+        },
+      },
+    );
+    const dir = await seededTree(trees);
+    writeFileSync(join(dir, 'README.md'), '# 改了没提交\n');
+    const workflowId = 'task:acme/widgets#12';
+    await expect(
+      ports.removeWorktree(
+        { taskId: 't1', subtaskKey: 'login', repo, path: dir, branch: BRANCH, archive: true },
+        { ...ctx, workflowId },
+      ),
+    ).rejects.toMatchObject({ code: 'WORKTREE_PRESERVED' });
+    expect(seen).toEqual([{ dir, workflowId }]);
+    expect(existsSync(dir)).toBe(true);
+    await expect(
+      ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, { ...ctx, workflowId }),
+    ).rejects.toMatchObject({ code: 'WORKTREE_PRESERVED' });
+    expect(seen).toEqual([
+      { dir, workflowId },
+      { dir, workflowId },
+    ]);
+    expect(readFileSync(join(dir, 'README.md'), 'utf8')).toContain('改了没提交');
   });
 
   it('没合并就收：复杂未提交成果留原树；清理后本来就不在的正常返回', async () => {
@@ -547,9 +588,96 @@ describe('推分支', () => {
       changedFiles: ['src/login.ts'],
       // 同口径的新增行数（#2762 流程健康记账）：commitIn 写了一行
       addedLines: 1,
+      // 每个文件各增删几行（#3140，任务页的改动卡读它）
+      numstat: LOGIN_STAT,
+      numstatSnapshot: { total: 1 },
     });
     expect(calls.pushBranch).toHaveLength(1);
     expect(readdirSync(join(root, 'tmp')).filter((f) => f.startsWith('push-'))).toEqual([]);
+  });
+
+  it('给了已开的 PR 号：推上去以后把这个头改了哪些文件记进库（pr_head_files）；没给 PR 号不记，清单照样交回（#3140）', async () => {
+    const recorded: unknown[] = [];
+    const { ports, trees } = setup({}, { recordHeadFiles: async (r) => void recorded.push(r) });
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const base = { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head };
+    const first = await ports.pushBranch(base, ctx);
+    expect(first.numstat).toEqual(LOGIN_STAT);
+    expect(recorded).toEqual([]);
+    await ports.pushBranch({ ...base, prNumber: 7 }, ctx);
+    expect(recorded).toEqual([{ repoId: 'repo-1', prNumber: 7, headSha: head, files: LOGIN_STAT, total: 1 }]);
+  });
+
+  it('【故意造出的失败】记库写不进：推分支照样成功，只写日志，不挡流程（页面写没读到）', async () => {
+    const logs: string[] = [];
+    const { ports, trees } = setup(
+      {},
+      {
+        recordHeadFiles: async () => {
+          throw new Error('库不通');
+        },
+        log: (message) => void logs.push(message),
+      },
+    );
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const r = await ports.pushBranch(
+      { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head, prNumber: 7 },
+      ctx,
+    );
+    expect(r.head).toBe(head);
+    expect(logs.some((l) => l.includes('pr_head_files'))).toBe(true);
+  });
+
+  it.each(['501', 'zero', 'failed'])('numstat %s：真实采集端口保留总数、零文件或失败原因', async (kind) => {
+    const recorded: unknown[] = [];
+    const local = localExec();
+    const exec: UserExec = async (cmd) => {
+      if (cmd.argv.includes('--numstat') && cmd.argv.includes('-z')) {
+        return {
+          code: kind === 'failed' ? 1 : 0,
+          stdout: Buffer.from(
+            kind === '501' ? Array.from({ length: 501 }, (_, n) => `1\t0\tf${n}`).join('\0') + '\0' : '',
+          ),
+          stderr: kind === 'failed' ? 'git denied' : '',
+          timedOut: false,
+          aborted: false,
+        };
+      }
+      return local(cmd);
+    };
+    const { ports, trees } = setup(
+      {},
+      { exec, recordHeadFiles: async (r) => void recorded.push(r), log: () => {} },
+    );
+    const dir = await seededTree(trees);
+    const head = commitIn(dir, 'login.ts');
+    const pushed = await ports.pushBranch(
+      { taskId: 't1', repo, worktreePath: dir, branch: BRANCH, head, prNumber: 7 },
+      ctx,
+    );
+    if (kind === '501') {
+      expect(pushed.numstat).toHaveLength(500);
+      expect(pushed.numstatSnapshot).toEqual({ total: 501 });
+      expect(recorded[0]).toMatchObject({
+        total: 501,
+        files: expect.arrayContaining([{ path: 'f499', added: 1, removed: 0, binary: false }]),
+      });
+    } else if (kind === 'zero') {
+      expect(recorded).toEqual([{ repoId: repo.id, prNumber: 7, headSha: head, files: [], total: 0 }]);
+    } else {
+      expect(recorded).toEqual([
+        {
+          repoId: repo.id,
+          prNumber: 7,
+          headSha: head,
+          files: [],
+          reason: expect.stringContaining('git denied'),
+        },
+      ]);
+      expect(pushed.numstatSnapshot).toHaveProperty('reason');
+    }
   });
 
   it('树的头不是要推的、有没提交的改动、没有新提交、树不在：明确报错，不推', async () => {
@@ -639,6 +767,8 @@ describe('推之前把最新主线并进会话的树', () => {
       head: merged,
       changedFiles: ['src/login.ts'],
       addedLines: 1,
+      numstat: LOGIN_STAT,
+      numstatSnapshot: { total: 1 },
     });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([merged, merged]);
   });
@@ -740,6 +870,8 @@ describe('推之前把最新主线并进会话的树', () => {
       head: second,
       changedFiles: ['src/login.ts'],
       addedLines: 1,
+      numstat: LOGIN_STAT,
+      numstatSnapshot: { total: 1 },
     });
     expect(calls.pushBranch?.map((c) => (c as { head: string }).head)).toEqual([first, second, second]);
   });
@@ -994,6 +1126,47 @@ describe('开 PR、CI、合并', () => {
     did: ['加了验证码'],
     verified: ['pnpm check'],
   };
+
+  it('开 PR 带上推头时数出来的文件清单：开成了才用真 PR 号记进库；清单没给不记（#3140）', async () => {
+    const recorded: unknown[] = [];
+    const { ports } = setup({}, { recordHeadFiles: async (r) => void recorded.push(r) });
+    await ports.openPr({ taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body }, ctx);
+    expect(recorded).toEqual([]);
+    await ports.openPr(
+      {
+        taskId: 't1',
+        repo,
+        branch: BRANCH,
+        head: m.head,
+        title: '登录',
+        body,
+        numstat: LOGIN_STAT,
+        numstatSnapshot: { total: 1 },
+      },
+      ctx,
+    );
+    expect(recorded).toEqual([
+      { repoId: 'repo-1', prNumber: 101, headSha: m.head, files: LOGIN_STAT, total: 1 },
+    ]);
+  });
+
+  it('开 PR 接到历史清单却无总数时明确未知，不替旧活动结果猜完整', async () => {
+    const recorded: unknown[] = [];
+    const { ports } = setup({}, { recordHeadFiles: async (r) => void recorded.push(r) });
+    await ports.openPr(
+      { taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body, numstat: LOGIN_STAT },
+      ctx,
+    );
+    expect(recorded).toEqual([
+      {
+        repoId: repo.id,
+        prNumber: 101,
+        headSha: m.head,
+        files: [],
+        reason: expect.stringContaining('历史推分支结果缺少'),
+      },
+    ]);
+  });
 
   it('正文给结构（github 包按模板渲染）；不抄需求 issue 的类别标签和里程碑、不读需求文档、不读单子挂的版本（#654）', async () => {
     const { ports, calls } = setup();
@@ -1279,6 +1452,35 @@ describe('CI 认了新头：工作树跟着并（#307/#389 那次真事补上的
 });
 
 describe('并主线', () => {
+  it('#3186：旧树缺 previousHead 和另一个真实 bundle boundary，补全后快进且重试幂等', async () => {
+    let merged = '';
+    let previous = '';
+    let mainline = '';
+    const s = setup({
+      syncMainline: () => ({ state: 'clean', head: merged, merged: true, previousHead: previous, mainline }),
+    });
+    const dir = await seededTree(s.trees);
+    const common = commitInMirror('common.ts', 'export const common = 1;\n');
+    previous = commitInMirror('previous.ts', 'export const previous = 1;\n');
+    git(m.dir, 'checkout', '-q', '-b', 'new-main', common);
+    mainline = commitInMirror('new-main.ts', 'export const main = 1;\n');
+    git(m.dir, 'merge', '-q', '--no-ff', previous, '-m', 'remote merged main');
+    merged = git(m.dir, 'rev-parse', 'HEAD');
+    const boundary = git(m.dir, 'rev-list', '--boundary', merged, `^${previous}`)
+      .split('\n')
+      .filter((line) => line.startsWith('-'))
+      .sort();
+    expect(boundary).toEqual([`-${common}`, `-${previous}`].sort());
+    const untracked = join(dir, 'keep-local.txt');
+    writeFileSync(untracked, 'local evidence\n');
+    const input = { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: previous, worktreePath: dir };
+    await expect(s.ports.syncMainline(input, ctx)).resolves.toMatchObject({ state: 'clean', head: merged });
+    await expect(s.ports.syncMainline(input, ctx)).resolves.toMatchObject({ state: 'clean', head: merged });
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(merged);
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(mainline);
+    expect(readFileSync(untracked, 'utf8')).toBe('local evidence\n');
+  });
+
   it('并好了：会话的树快进到并出来的新头；冲突原样交回；分支头被别人动过明确报错', async () => {
     const setupTree = async (over: Parameters<typeof fakeGh>[0]) => {
       const s = setup(over);

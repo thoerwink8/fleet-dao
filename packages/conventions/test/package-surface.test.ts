@@ -89,10 +89,16 @@ describe('包的面', () => {
     const pkg = JSON.parse(repo.read('packages/conventions/package.json') ?? '{}') as Record<string, unknown>;
     const surface = packageSurface(repo, 'conventions', pkg);
     expect(surface).not.toBeNull();
-    for (const f of ['src/index.ts', 'src/ci-plan.ts', 'standard-paths.json']) {
+    for (const f of ['src/index.ts', 'src/ci-plan.ts', 'src/e2e-flaky.ts', 'standard-paths.json']) {
       expect(surface, f).toContain(`packages/conventions/${f}`);
     }
-    for (const f of ['src/check.ts', 'src/bin/check.ts', 'src/bin/test-changed.ts']) {
+    for (const f of [
+      'src/check.ts',
+      'src/bin/check.ts',
+      'src/bin/test-changed.ts',
+      'src/bin/e2e-flaky.ts',
+      'src/e2e-flaky-settled.ts',
+    ]) {
       expect(surface, f).not.toContain(`packages/conventions/${f}`);
     }
   });

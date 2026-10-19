@@ -6,6 +6,18 @@ Windows 和 macOS 的接入由本仓 `packages/mirasim-reclaude` 维护。旧 `r
 
 新启动器在空闲后的新回合发出前读取当前会话路由。明确 `local` 使用 reclaude 自有额度；`cloud` 保留 Mirasim 的网关注入，使用平台中继。切换发生在当前回合结束、权限、控制请求与后台任务处理完以后，只重建该会话的执行进程，通过 `--resume` 保留原生会话。运行中以及尚有未决任务时收到的用户引导，完整、按序送给当前执行体，不等待回合结束、不重选路、不重启；执行体异常退出明确报错，不自动重放引导。SDK 恢复仍先完成初始化和控制状态重放，再发用户消息；透传成功只证明 CLI 收到，模型何时处理由 CLI 的消息边界决定。
 
+送达回执：Mirasim 给可引导的会话带 `--replay-user-messages`，Claude Code 读进用户消息时回显同内容、`isReplay=true` 的 user 帧。Mirasim 显示的「已引导」只表示写进了管道，不等于已消费；启动器按回显销账，回显也不代表消息要求的操作已经执行成功。当前执行体还有没销账的消息就不算空闲，不重选路、不重启，后续消息照常透传。空闲时（主回合已结束，哪怕后台任务还在跑）转出去，或运行中转出去、回合结束了仍没回显，从那一刻起 60 秒既没回显也没任何输出，回可见的报错 result，明确交付状态未知；10 分钟过期只释放路由阻塞，不结清或删除责任。没带这个参数的会话不记账，行为照旧。
+
+责任账保存在本机 `<缓存目录>/reclaude-mirasim/unacked/<原生会话 ID>.json`。每条记录有本机条目 ID、原始完整 user 帧（含原 uuid 和图片等内容）与发送状态：入队先保存 `queued`，它证明尚未尝试写入子进程；stdin 的任何写入前先保存 `unknown`。保存失败立即拒绝继续发送、销账或迁移，并在 stderr 返回具体失败操作及系统原因；新会话账成功写入前绝不删旧账或提交新归属，已有目标账也不覆盖。文件以 0600 创建、临时文件写入并 Sync 后替换，空账也保存。不会因为过了 24 小时或解析失败就删除记录。
+
+同一会话重起后，收到下一条 user 才恢复 `queued` 原帧；同 uuid、同完整帧的排队消息只发一次，没有 uuid 的同正文消息无法证明是同一条，不能擅自去重。`unknown` 与旧版只有 Saved/Texts 的缓存一律不自动重放，也不拼入下一条消息：实际已经消费但回显丢失，与根本没消费，启动器无法区分。宿主重送同 uuid 的 unknown 也只会收到明确拒绝，旧责任和当前执行体保留；明确决定重新发送时要发起新的用户动作、使用新 uuid。没有稳定会话 ID 的控制/用量探测仍可走原协议，但在 user 前必须由参数 `--session-id`/`--resume` 或原生 system 帧给出 ID，否则拒绝发送，不假装已保存。平台切换明确拒绝的 queued 先持久销账，再回拒绝，下一进程不会悄悄执行它。
+
+恢复 unknown 时宿主会收到包含会话 ID、条目 ID 和缓存位置的错误 result，提示先核对原会话记录，再决定是否通过 Mirasim 原生输入重发；告警和日志不包含原正文。核对处理后，先等该会话进程空闲并停用，再备份账文件，将已明确处理的 unknown 条目从 `entries` 归档移除，保留其他 queued/unknown；运行中不要手改账，避免下一次保存覆盖人工处理。Claude Code 的 [CLI 参数说明](https://code.claude.com/docs/en/cli-reference) 将 `--replay-user-messages` 定义为 stdin 用户消息的 stdout 回显确认，没有承诺无回显就未执行，不能据此自动补做副作用。
+
+Mirasim 改好之前这套能兜住的：启动器已经接收并成功保存的消息，进程被强杀后仍保留可定位责任；明确未写入的 queued 可恢复，已经尝试写入的 unknown 则提示核对，不静默重复执行。兜不住的：Mirasim 根本没把消息交到启动器，或启动器接收后尚未成功保存就被强杀；磁盘与缓存损坏、多个独立启动器同时使用同一原生会话、系统断电下各平台目录 rename 的持久性也不在保证内。Go 的 [File.Sync](https://pkg.go.dev/os#File.Sync) 和 [Rename](https://pkg.go.dev/os#Rename) 文档明确了写入与平台限制，不能把一次写管道或文件替换当作端到端 exactly-once。
+
+回显对上是哪一条，不按子串，一次回显最多销一条：转出的 user 帧和回显都带 `uuid` 就只按 `uuid` 相等对（`uuid` 不同即使正文一样也不是同一条）；否则按正文精确相等，两边都只有 text（字符串或全是 text 块），各自只去首尾空白后逐字相等，同正文多条时销最早一条，回显多了前后缀、只是包含都不算。带图片等非 text 块或正文为空、又没有 `uuid` 的消息无法判定是哪一条，仍保留未确认责任（日志 `event=user-identity-unknown retained=true`），保护当前执行体直到原有 10 分钟过期边界；空闲时转出且始终没有任何输出，仍按原有 60 秒规则明确报错。不用空正文或不匹配回显销账，也不自动重放；这类消息是否送到，启动器判断不了，不能据此判它已被消费并提前换进程。启动器不假定 CLI 一定回显 `uuid`，转出的帧没带就只走正文规则。
+
 两种来源要分别看证据：
 
 - 自有：启动器记录 `route=local`，Claude 实际经 reclaude 发请求；Mirasim 账本可能没有这笔用量，不能拿账本空白当成功。
@@ -134,6 +146,7 @@ Fleet 接收 Mirasim 的平台成功结果前核账本：至少有计费模型�
 
 - 不带会话参数的调用（如 Mirasim 的用量探测 `get_usage`）没有用户可选的路由，按 Mirasim 的注入原样交出（`route=gateway`）。
 - Mirasim 回收空闲进程发停止信号：优雅停掉执行体、退出 0，记 `event=stopped`。
+- 每条用户消息成功写给执行体记 `event=user-forward path=turn|active idle=… len=… unacked=…`（`turn`＝空闲时开新回合，`active`＝运行中或有未决任务时直接透传），回显持久销账成功记 `event=user-ack ms=…`（对不上记 `event=user-ack-unmatched`），判卡住记 `event=user-stalled`，10 分钟没回执记 `event=user-unacked-expired`，执行体退出、被停、换掉时有未销账消息记 `event=user-unacked reason=exit|stopped|switch n=…`，重启发现历史 unknown 时记 `event=user-recovery-unknown n=…`。只记条数、长度和毫秒数，不记内容。没有 `user-forward` 也可能是保存失败、仍在 queued 或写入报错，先看责任账与 stderr，不能直接归因 Mirasim 没发；有 forward 无 ack 只证明未确认，不能断言 CLI 没消费。测试用 `RECLAUDE_MIRASIM_DELIVERY_STALL_MS` 缩短卡住判定。
 - 切路由只在实际结果变了（保留网关↔剥掉）才重建执行进程；default(保留)↔cloud、default(无网关)↔local 不重启。
 - 索引说 `local`、Mirasim 却注入了带令牌的回环网关（这个进程第一次选路时）：隔 300ms 重读索引最多 3 次，仍矛盾按索引执行并记 `event=route-conflict`。Mirasim「这一回合由空间/远程作者付」的判定只在它内存里，落盘的 `turnPayers` 是调用发生后才记的账，启动器回合开始前读不到，所以这种回合仍按索引走。
 - 读索引和 `record.json`：Windows 上用放开删除共享的句柄、读完立刻关；这只是必要条件，旧 rename 语义的 Windows 上启动器读文件那一瞬间 Mirasim 的覆盖仍会失败（Mirasim 失败即丢弃这次写入），窗口很短；撞上共享冲突或读到半截 JSON 隔 50ms 重读最多 3 次。先直接读本会话的 `record.json`，对不上才扫全部，无关会话的坏记录不挡新会话。多个索引时按 Mirasim 的命名（服务端工作区根目录路径的 base64url）和索引 `keys` 里的登记找会话所属索引。

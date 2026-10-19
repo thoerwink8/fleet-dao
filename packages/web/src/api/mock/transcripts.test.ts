@@ -79,3 +79,45 @@ describe('mock 的会话内容', () => {
     });
   });
 });
+
+describe('mock 的步骤（和真后端同一个 cutSteps）', () => {
+  test('完整一笔：步骤切出来，调用都带调用号所以没有「结果未知」，子代理的条目挂在派它的那次调用下', async () => {
+    const r = await fresh().runProcess('t-c9', 'seg-c9-3');
+    if (r.state !== 'ok') throw new Error('应该有步骤');
+    expect(r.running).toBe(false);
+    expect(r.process.steps.length).toBeGreaterThan(1);
+    expect(r.process.legacyCalls).toBe(0);
+    expect(r.process.counts.commandsUnknown).toBe(0);
+    expect(r.process.counts.commandsRunning).toBe(0);
+    const total = r.process.steps.reduce((n, s) => n + s.calls, 0);
+    expect(total).toBeGreaterThan(0);
+    // 合计 = 各步相加
+    expect(r.process.counts.reads).toBe(r.process.steps.reduce((n, s) => n + s.reads, 0));
+  });
+
+  test('在跑的段：running=true，每读一次多放几条，调用数只增不减', async () => {
+    const api = fresh();
+    const a = await api.runProcess('t-12', 'seg-t-12-manual-40');
+    const b = await api.runProcess('t-12', 'seg-t-12-manual-40');
+    if (a.state !== 'ok' || b.state !== 'ok') throw new Error('应该有步骤');
+    expect(a.running).toBe(true);
+    expect(b.process.rows).toBeGreaterThanOrEqual(a.process.rows);
+  });
+
+  test('没有记录的老段：noRecord，不是零', async () => {
+    expect(await fresh().runProcess('t-c9', 'seg-c9-1')).toEqual({ state: 'noRecord' });
+  });
+
+  test('读不到抛 503，别的单的段 404', async () => {
+    await expect(
+      fresh({ transcriptFail: ['seg-c9-3'] }).runProcess('t-c9', 'seg-c9-3'),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: 'run_steps_unreadable',
+    });
+    await expect(fresh().runProcess('t-12', 'seg-c9-3')).rejects.toMatchObject({
+      status: 404,
+      code: 'run_not_found',
+    });
+  });
+});

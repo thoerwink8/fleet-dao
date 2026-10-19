@@ -2,11 +2,12 @@
 import { execFile } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   type CheckoutBlockedAlert,
+  type CheckoutReceipt,
   type CheckoutRecovered,
   CheckoutStageError,
   checkoutAlertKey,
@@ -71,9 +72,27 @@ describe('PR 头的完整检出和增量 diff', () => {
 
   it('检出里能读到 PR 头上的文件', async () => {
     const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
-    const dest = join(state, 'checkout');
+    const dest = join(state, 'checkout with spaces');
     await checkoutPrHead(dest, head, 'task:acme/demo#12');
     expect(readFileSync(join(dest, 'hello.txt'), 'utf8')).toBe('hello\n');
+  });
+
+  it('相对且含空格的目标目录仍相对调用方 cwd，真实解包到该目录', async () => {
+    const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+    const tmpRoot = join(process.cwd(), '_tmp');
+    mkdirSync(tmpRoot, { recursive: true });
+    const local = mkdtempSync(join(tmpRoot, 'verify-relative-'));
+    // 本次创建的私有目录在当前检出的 _tmp 下，清理只针对它。
+    expect(relative(tmpRoot, local)).toMatch(/^verify-relative-[^/\\]+$/);
+    const absolute = join(local, 'checkout with spaces');
+    const target = relative(process.cwd(), absolute);
+    expect(isAbsolute(target)).toBe(false);
+    try {
+      await checkoutPrHead(target, head, 'task:acme/demo#12');
+      expect(readFileSync(join(absolute, 'hello.txt'), 'utf8')).toBe('hello\n');
+    } finally {
+      rmSync(local, { recursive: true, force: true });
+    }
   });
 
   it('增量 diff 只含上一轮头之后的改动', async () => {
@@ -125,7 +144,11 @@ describe('PR 头的完整检出和增量 diff', () => {
     const repairs: string[] = [];
     const logs: string[] = [];
     const blocked: string[] = [];
+    const receipts: CheckoutReceipt[] = [];
     const placed = await placeVerifyCheckout({
+      onCompleted: async (r) => {
+        receipts.push(r);
+      },
       dir: dest,
       head,
       workflowId: 'task:acme/demo#12',
@@ -150,12 +173,19 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(placed).toBe('full');
     expect(readFileSync(join(dest, 'hello.txt'), 'utf8')).toBe('hello\n');
     expect(repairs).toEqual([dest]);
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0]?.head).toBe(head);
     expect(logs).not.toContain(VERIFY_CHECKOUT_FALLBACK);
     expect(blocked).toEqual([]);
   });
 
-  /** 真检出一遍，数 checkout 调了几次、repair 调了几次，收下报警。 */
-  async function placeReal(dest: string, head: string, workflowId: string | undefined) {
+  /** 默认真检出；Windows 权限用例显式注入阶段错误。数 checkout / repair 次数并收下报警。 */
+  async function placeReal(
+    dest: string,
+    head: string,
+    workflowId: string | undefined,
+    checkout = checkoutPrHead,
+  ) {
     const calls: string[] = [];
     const repairs: string[] = [];
     const alerts: CheckoutBlockedAlert[] = [];
@@ -165,7 +195,7 @@ describe('PR 头的完整检出和增量 diff', () => {
       workflowId,
       checkout: async (dir, headSha, flow) => {
         calls.push(dir);
-        await checkoutPrHead(dir, headSha, flow);
+        await checkout(dir, headSha, flow);
       },
       repair: async (dir) => {
         repairs.push(dir);
@@ -215,36 +245,52 @@ describe('PR 头的完整检出和增量 diff', () => {
     expect(alerts[0]?.body).not.toContain('mkdir');
   });
 
-  it.skipIf(process.getuid?.() === 0)('解包失败：归到解包那一步，原错保留，不修不重试', async () => {
-    const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
-    const dest = join(state, 'co-extract');
-    mkdirSync(dest, { recursive: true });
-    chmodSync(dest, 0o555);
-    try {
-      const { placed, calls, repairs, alerts } = await placeReal(dest, head, 'task:acme/demo#12');
-      expect(placed).toBe('blocked');
-      expect(calls).toHaveLength(1);
-      expect(repairs).toEqual([]);
-      expect(alerts[0]?.stage).toBe('extract');
-      expect(alerts[0]?.body).toContain('hello.txt');
-      expect(alerts[0]?.body).not.toContain('mkdir');
-    } finally {
-      chmodSync(dest, 0o755);
-    }
-  });
+  it.skipIf(process.getuid?.() === 0)(
+    `解包失败（${process.platform === 'win32' ? 'Windows tar 权限失败夹具' : 'POSIX 真权限'}）：原错保留，不修不重试`,
+    async () => {
+      const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+      const dest = join(state, 'co-extract');
+      mkdirSync(dest, { recursive: true });
+      if (process.platform !== 'win32') chmodSync(dest, 0o555);
+      try {
+        // Windows chmod 没有 POSIX 目录写权限语义：明示注入阶段错；Linux 仍跑 chmod + 真 tar。
+        const extract =
+          process.platform === 'win32'
+            ? async () => {
+                // tar 的权限失败是非零退出 + stderr，不是 spawn 的 EACCES errno。
+                throw new CheckoutStageError('extract', 'tar: hello.txt: Cannot open: Permission denied');
+              }
+            : checkoutPrHead;
+        const { placed, calls, repairs, alerts } = await placeReal(dest, head, 'task:acme/demo#12', extract);
+        expect(placed).toBe('blocked');
+        expect(calls).toHaveLength(1);
+        expect(repairs).toEqual([]);
+        expect(alerts[0]?.stage).toBe('extract');
+        expect(alerts[0]?.body).toContain('hello.txt');
+        expect(alerts[0]?.body).not.toContain('mkdir');
+      } finally {
+        if (process.platform !== 'win32') chmodSync(dest, 0o755);
+      }
+    },
+  );
 
   it.skipIf(process.getuid?.() === 0)(
-    '真 EACCES（上一层 555）：归到建目录，走既有修复，建议 mkdir',
+    `建目录 EACCES（${process.platform === 'win32' ? 'Windows 端口夹具' : 'POSIX 上一层 555 真权限'}）：走既有修复，建议 mkdir`,
     async () => {
       const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
       const parent = join(state, '_tmp');
       mkdirSync(parent, { recursive: true });
-      chmodSync(parent, 0o555);
+      if (process.platform !== 'win32') chmodSync(parent, 0o555);
       try {
         const { placed, calls, repairs, alerts } = await placeReal(
           join(parent, 'verify-x'),
           head,
           'task:acme/demo#12',
+          process.platform === 'win32'
+            ? async () => {
+                throw new CheckoutStageError('mkdir', 'EACCES: permission denied, mkdir', { code: 'EACCES' });
+              }
+            : checkoutPrHead,
         );
         expect(placed).toBe('blocked');
         expect(repairs).toEqual([join(parent, 'verify-x')]);
@@ -253,10 +299,108 @@ describe('PR 头的完整检出和增量 diff', () => {
         expect(alerts[0]?.body).toContain('EACCES');
         expect(alerts[0]?.body).toContain('引擎用户要能在这一层下面 mkdir');
       } finally {
-        chmodSync(parent, 0o755);
+        if (process.platform !== 'win32') chmodSync(parent, 0o755);
       }
     },
   );
+  it('补齐远端精确头后真实检出；分支前进不替代待验内容', async () => {
+    const { first } = await mirrorWith([{ path: 'hello.txt', text: 'first\n' }]);
+    const work = join(state, 'work');
+    writeFileSync(join(work, 'hello.txt'), 'expected\n');
+    await git(work, ['commit', '-am', 'expected']);
+    const expected = await git(work, ['rev-parse', 'HEAD']);
+    const remote = join(state, 'remote.git');
+    await git(state, ['init', '--bare', '-b', 'main', remote]);
+    await git(work, ['push', remote, 'HEAD:refs/heads/topic']);
+    writeFileSync(join(work, 'hello.txt'), 'advanced\n');
+    await git(work, ['commit', '-am', 'advanced']);
+    await git(work, ['push', remote, 'HEAD:refs/heads/topic']);
+    const mirror = join(state, 'mirrors', 'acme', 'demo.git');
+    expect(await git(mirror, ['rev-parse', 'main'])).toBe(first);
+    const dest = join(state, 'expected-checkout');
+    const recovered: CheckoutRecovered[] = [];
+    const receipts: CheckoutReceipt[] = [];
+    const got = await placeVerifyCheckout({
+      onCompleted: async (r) => {
+        receipts.push(r);
+      },
+      dir: dest,
+      head: expected,
+      workflowId: 'task:acme/demo#12',
+      ensureHead: async () => {
+        await git(mirror, ['fetch', remote, expected]);
+      },
+      onRecovered: async (r) => {
+        recovered.push(r);
+      },
+    });
+    expect(got).toBe('full');
+    expect(readFileSync(join(dest, 'hello.txt'), 'utf8')).toBe('expected\n');
+    expect(recovered[0]?.head).toBe(expected);
+    expect(receipts[0]).toMatchObject({
+      head: expected,
+      dir: dest,
+      type: 'full',
+      workflowId: 'task:acme/demo#12',
+    });
+    await placeVerifyCheckout({
+      dir: join(state, 'second-checkout'),
+      head: expected,
+      workflowId: 'task:acme/demo#12',
+      onCompleted: async (r) => {
+        receipts.push(r);
+      },
+    });
+    expect(receipts).toHaveLength(2);
+    expect(receipts[1]?.receiptId).not.toBe(receipts[0]?.receiptId);
+    expect(receipts[0]?.completedAt.getTime()).toBeGreaterThanOrEqual(
+      receipts[0]?.startedAt.getTime() ?? Infinity,
+    );
+  });
+
+  it('获取精确头失败保持原头报警，不archive、不误撤；调用取消也不archive或撤报警', async () => {
+    const { head } = await mirrorWith([{ path: 'hello.txt', text: 'hello\n' }]);
+    let checkouts = 0;
+    let recoveries = 0;
+    const alerts: CheckoutBlockedAlert[] = [];
+    const base = {
+      dir: join(state, 'blocked'),
+      head,
+      workflowId: 'task:acme/demo#12',
+      checkout: async () => {
+        checkouts++;
+      },
+      onRecovered: async () => {
+        recoveries++;
+      },
+      onBlocked: async (a: CheckoutBlockedAlert) => {
+        alerts.push(a);
+      },
+    };
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        ensureHead: async () => {
+          throw new Error('exact fetch failed');
+        },
+      }),
+    ).toBe('blocked');
+    expect(alerts[0]?.stage).toBe('fetch');
+    expect(alerts[0]?.body).toContain(head);
+    expect(alerts[0]?.body).toContain('exact fetch failed');
+    const abort = new AbortController();
+    await expect(
+      placeVerifyCheckout({
+        ...base,
+        signal: abort.signal,
+        ensureHead: async () => {
+          abort.abort(new Error('cancelled'));
+        },
+      }),
+    ).rejects.toThrow('cancelled');
+    expect(checkouts).toBe(0);
+    expect(recoveries).toBe(0);
+  });
 });
 
 /**
@@ -520,5 +664,141 @@ describe('建不出检出目录时报警里有路径', () => {
     expect(placed).toBe('blocked');
     expect(logs).toContain(VERIFY_CHECKOUT_FALLBACK);
     expect(logs).toContain('冷验收检出目录的报警没写进库');
+  });
+});
+
+it('权限修复期间取消，不再开始第二次archive；起步已取消不调用ensureHead', async () => {
+  const abort = new AbortController();
+  let attempts = 0,
+    ensured = 0,
+    recovered = 0;
+  const input = {
+    dir: 'unused',
+    head: 'a'.repeat(40),
+    workflowId: 'task:acme/demo#12',
+    signal: abort.signal,
+    ensureHead: async () => {
+      ensured++;
+    },
+    checkout: async () => {
+      attempts++;
+      throw new CheckoutStageError('mkdir', 'EACCES', { code: 'EACCES' });
+    },
+    repair: async () => {
+      abort.abort(new Error('cancelled during repair'));
+    },
+    onRecovered: async () => {
+      recovered++;
+    },
+  };
+  await expect(placeVerifyCheckout(input)).rejects.toThrow('cancelled during repair');
+  expect(attempts).toBe(1);
+  expect(ensured).toBe(1);
+  expect(recovered).toBe(0);
+  await expect(placeVerifyCheckout(input)).rejects.toThrow('cancelled during repair');
+  expect(attempts).toBe(1);
+  expect(ensured).toBe(1);
+});
+
+describe('完整检出成功回执边界', () => {
+  it('失败、修复后失败、最终取消都没有成功回执', async () => {
+    const receipts: CheckoutReceipt[] = [];
+    const base = {
+      dir: 'unused',
+      head: 'a'.repeat(40),
+      workflowId: 'task:a/b#1',
+      onCompleted: async (r: CheckoutReceipt) => {
+        receipts.push(r);
+      },
+    };
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        checkout: async () => {
+          throw new Error('archive failed');
+        },
+      }),
+    ).toBe('blocked');
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        checkout: async () => {
+          throw Object.assign(new Error('permission'), { code: 'EACCES' });
+        },
+        repair: async () => {},
+      }),
+    ).toBe('blocked');
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        ensureHead: async () => {
+          throw new Error('missing exact object');
+        },
+        checkout: async () => {
+          throw new Error('must not checkout');
+        },
+      }),
+    ).toBe('blocked');
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        checkout: async () => {
+          throw Object.assign(new Error('permission'), { code: 'EACCES' });
+        },
+        repair: async () => {
+          throw new Error('repair failed');
+        },
+      }),
+    ).toBe('blocked');
+    const abort = new AbortController();
+    await expect(
+      placeVerifyCheckout({
+        ...base,
+        signal: abort.signal,
+        checkout: async () => {
+          abort.abort(new Error('cancel after archive'));
+        },
+      }),
+    ).rejects.toThrow('cancel after archive');
+    expect(receipts).toEqual([]);
+  });
+  it('回执写失败保留未知诊断，撤卡仍独立运行；撤卡失败不抹掉回执', async () => {
+    const logs: string[] = [];
+    let recovered = 0;
+    const base = {
+      dir: 'unused',
+      head: 'a'.repeat(40),
+      workflowId: 'task:a/b#1',
+      checkout: async () => {},
+      log: (s: string) => {
+        logs.push(s);
+      },
+    };
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        onCompleted: async () => {
+          throw new Error('db down');
+        },
+        onRecovered: async () => {
+          recovered++;
+        },
+      }),
+    ).toBe('full');
+    expect(recovered).toBe(1);
+    expect(logs.some((s) => s.includes('证据未知'))).toBe(true);
+    const receipts: CheckoutReceipt[] = [];
+    expect(
+      await placeVerifyCheckout({
+        ...base,
+        onCompleted: async (r) => {
+          receipts.push(r);
+        },
+        onRecovered: async () => {
+          throw new Error('resolve failed');
+        },
+      }),
+    ).toBe('full');
+    expect(receipts).toHaveLength(1);
   });
 });

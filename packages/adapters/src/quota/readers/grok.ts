@@ -28,6 +28,48 @@ const PERIOD_WINDOW: Record<string, QuotaReading['window']> = {
   USAGE_PERIOD_TYPE_WEEKLY: '7d',
 };
 
+type JsonShape = 'missing' | 'null' | 'array' | 'object' | 'string' | 'number' | 'boolean';
+
+const jsonShape = (value: unknown): JsonShape => {
+  if (value === undefined) return 'missing';
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'array';
+  if (typeof value === 'object') return 'object';
+  if (typeof value === 'number') return 'number';
+  if (typeof value === 'boolean') return 'boolean';
+  return 'string';
+};
+
+const billingFieldProblem = (field: string, value: unknown, detail: string): QuotaReadError =>
+  new QuotaReadError(
+    'bad_response',
+    `Grok 账单字段 ${field} 类型 ${jsonShape(value)}：${detail}（仅保留字段名和类型）`,
+  );
+
+/** 只识别完整的 credits 账期；空对象、错误体和坏字段不能冒充「账单已读」。 */
+function hasReadableBillingPeriod(config: Record<string, unknown>): boolean {
+  const period = config.currentPeriod;
+  if (!isRecord(period)) return false;
+  if (
+    typeof period.type !== 'string' ||
+    !['USAGE_PERIOD_TYPE_WEEKLY', 'USAGE_PERIOD_TYPE_MONTHLY'].includes(period.type)
+  )
+    return false;
+  if (typeof period.start !== 'string' || typeof period.end !== 'string') return false;
+  const start = Date.parse(period.start);
+  const end = Date.parse(period.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+  if (typeof config.isUnifiedBillingUser !== 'boolean') return false;
+  for (const field of ['onDemandCap', 'onDemandUsed', 'prepaidBalance']) {
+    const amount = config[field];
+    if (!isRecord(amount)) return false;
+    // 官方 Cent 的 val 可按 proto3 省略；这里只核结构，不据此产生任何用量读数。
+    if (amount.val !== undefined && (typeof amount.val !== 'number' || !Number.isFinite(amount.val)))
+      return false;
+  }
+  return true;
+}
+
 /**
  * billing?format=credits → 窗口读数。creditUsagePercent 是账号这一期的总用量（百分比），账号级；
  * 分产品的百分比（productUsage）只进说明——我们只用 Grok Build 一个产品，拆成模型组窗口会对不上路由。
@@ -36,11 +78,36 @@ export function readingsFromGrokBilling(
   body: unknown,
   ctx: { poolId: string; readAt: string },
 ): { windows: QuotaReading[]; notes: string[] } {
-  const config = isRecord(body) ? body.config : undefined;
-  if (!isRecord(config)) throw new QuotaReadError('bad_response', 'Grok 账单回包里没有 config');
-  const percent = num(config.creditUsagePercent);
-  if (percent === undefined)
-    throw new QuotaReadError('bad_response', 'Grok 账单回包里没有 creditUsagePercent');
+  if (!isRecord(body)) {
+    throw billingFieldProblem('config', body, '读取器预期对象');
+  }
+  const config = body.config;
+  if (config === undefined) {
+    throw billingFieldProblem('config', config, '缺少字段');
+  }
+  if (!isRecord(config)) {
+    throw billingFieldProblem('config', config, '读取器预期对象');
+  }
+  const rawPercent = config.creditUsagePercent;
+  if (rawPercent === undefined) {
+    if (hasReadableBillingPeriod(config)) {
+      throw new QuotaReadError(
+        'usage_unreported',
+        'Grok 账单已读，但上游未报告当前用量；用量未知（字段 config.creditUsagePercent 类型 missing）',
+      );
+    }
+    throw billingFieldProblem('config.creditUsagePercent', rawPercent, '缺少字段');
+  }
+  const percent = num(rawPercent);
+  if (percent === undefined) {
+    const detail =
+      jsonShape(rawPercent) === 'string'
+        ? '字符串不是可解析的数字'
+        : jsonShape(rawPercent) === 'number'
+          ? '数字不是有限数'
+          : '类型不支持数字读取';
+    throw billingFieldProblem('config.creditUsagePercent', rawPercent, detail);
+  }
   const period = isRecord(config.currentPeriod) ? config.currentPeriod : {};
   const periodType = typeof period.type === 'string' ? period.type : undefined;
   const notes: string[] = [];

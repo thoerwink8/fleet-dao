@@ -5,6 +5,7 @@ import type { Client } from '@temporalio/client';
 import { ApplicationFailure, CancelledFailure } from '@temporalio/common';
 import type { EngineActivities } from './activity-options.ts';
 import type { CarpoolWatchDeps } from './jobs/carpool-watch.ts';
+import type { ChangelogJobDeps } from './jobs/changelog.ts';
 import type { CiTimingsJobDeps } from './jobs/ci-timings.ts';
 import type { CliUpgradeJobDeps } from './jobs/cli-upgrade.ts';
 import type { CliVersionsJobDeps } from './jobs/cli-versions.ts';
@@ -55,6 +56,8 @@ import type {
   ProbeAssignedInput,
   ReadCiPolicyInput,
   ReadCiPolicyResult,
+  ReadCiReviewsInput,
+  ReadCiReviewsResult,
   ReadDeliveryInput,
   ReadTaskBriefInput,
   ReleaseReservationInput,
@@ -252,6 +255,8 @@ export interface EngineJobs {
   judgeSelfCheck?: () => JudgeSelfCheckJobDeps;
   /** 每天刷新 CI 测试耗时表（#921）：读 ci.yml 日志、重写表、开 PR。不拉单。 */
   ciTimings?: () => CiTimingsJobDeps;
+  /** 每天补齐已收口版本的 CHANGELOG（#3110），不拉单、不起模型会话。 */
+  changelog?: () => ChangelogJobDeps;
   /** 用量补记（#1935）：经 Mirasim 起的会话，按中转计量把 runs 的输入、缓存、花费补齐，没齐写原因。不拉单。 */
   usageBackfill?: () => UsageBackfillJobDeps;
   /** 命令行工具升级（#1971）：空闲时排空并写请求，root 的单元去装。不拉单。 */
@@ -282,6 +287,10 @@ export interface EngineTasks {
   waitMerged?: (input: WaitMergedInput, ctx: PortContext) => Promise<MergeWait>;
   /** 现读这个仓的 CI 模式。没有这个受管仓要抛，不许当成不强制。 */
   readCiPolicy?: (input: ReadCiPolicyInput, ctx: PortContext) => Promise<ReadCiPolicyResult>;
+  /**
+   * CI 红返工前现读仍有效的正式评审。读不全抛错，不回空数组；头变了回未交付，不用旧快照。
+   */
+  readCiReviews?: (input: ReadCiReviewsInput, ctx: PortContext) => Promise<ReadCiReviewsResult>;
   /** 不强制 CI：直接合并，不等检查。 */
   mergeNow?: (input: MergeNowInput, ctx: PortContext) => Promise<MergeNowResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）。续不上回原因，不抛。 */
@@ -309,6 +318,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   armAutoMerge: true,
   waitMerged: true,
   readCiPolicy: true,
+  readCiReviews: true,
   mergeNow: true,
   planSegmentResume: true,
   segmentSettled: true,

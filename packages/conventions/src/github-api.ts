@@ -889,3 +889,27 @@ function message(e: unknown): string {
   const text = e instanceof Error ? e.message : String(e);
   return typeof cause === 'string' ? `${text}：${cause}` : text;
 }
+
+/** repo view 唯一位置参数是仓名；值选项里的 json 字段、jq、模板、分支不算仓名。 */
+export function implicitRepoView(args: readonly string[]): boolean {
+  if (args[0] !== 'repo' || args[1] !== 'view') return false;
+  const withValue = new Set(['--branch', '-b', '--json', '--jq', '-q', '--template', '-t']);
+  for (let i = 2; i < args.length; i++) {
+    const arg = args[i] ?? '';
+    if (arg === '-R' || arg === '--repo' || arg.startsWith('--repo=')) return false;
+    if (withValue.has(arg)) i++;
+    else if (!arg.startsWith('-')) return false;
+  }
+  return true;
+}
+
+/** PR 运输不再按改写后的 remote 猜目标；调用者指定仓或 PR URL 时保留。 */
+export function canonicalPrArgs(args: string[], repo: string): string[] {
+  if (implicitRepoView(args)) return ['repo', 'view', repo, ...args.slice(2)];
+  if (!['pr', 'label'].includes(args[0] ?? '')) return args;
+  const explicit = args.some(
+    (a) => a === '--repo' || a === '-R' || a.startsWith('--repo=') || a.startsWith('-R'),
+  );
+  const prUrl = args[0] === 'pr' && /^https:\/\/github\.com\//.test(args[2] ?? '');
+  return explicit || prUrl ? args : [...args, '--repo', repo];
+}

@@ -1,6 +1,6 @@
 # fleet-dao 协作约定
 
-<!-- repo-contract:skip progress 创始人引导一条一个文件记在 docs/directives/（pnpm progress directive），docs/PROGRESS.md 不放那一节 -->
+<!-- repo-kind: 自用仓 -->
 
 只当目录，细则按需读。通用规矩在 `agents/shared-rules.md`。
 
@@ -29,5 +29,6 @@
 - `pnpm install`
 - `npx vitest run <文件>`
 - `pnpm check`
+- `pnpm test:linux`（Windows 的 Linux 安全归档测试，须显式配置本机 Linux runner）
 - `pnpm pr:open`
 - `pnpm progress read`

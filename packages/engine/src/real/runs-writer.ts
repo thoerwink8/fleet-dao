@@ -16,12 +16,15 @@ import type { Db, RunInsert } from '@fleet-dao/db';
 import {
   admitRun,
   type ChannelAttemptWrite,
+  noteRunVerdict,
   observeRunSessionId,
   PoolFullError,
   recordChannelAttempt,
+  recordVerifyAggregate,
   releaseReservation,
   startRun as startRunDb,
 } from '@fleet-dao/db';
+import type { RunVerdict } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import type { z } from 'zod';
 import {
@@ -89,6 +92,12 @@ export function realRuns(deps: RealRunsDeps): RunsWriter {
     async observeSessionId(runId: string, sessionId: string) {
       await observeRunSessionId(deps.db, { runId, sessionId });
     },
+    async noteVerdict(runId: string, verdict: RunVerdict) {
+      await noteRunVerdict(deps.db, runId, verdict);
+    },
+    async noteVerifyAggregate(input) {
+      await recordVerifyAggregate(deps.db, input);
+    },
   };
 }
 
@@ -133,6 +142,9 @@ function columns(run: RunStart): RunInsert {
     ...(run.routeWhy ? { routeWhy: run.routeWhy } : {}),
     ...(run.resumeSessionId ? { resumeSessionId: run.resumeSessionId } : {}),
     ...(run.resumeReason ? { resumeReason: run.resumeReason } : {}),
+    ...(run.cause ? { cause: run.cause } : {}),
+    ...(run.causeSummary ? { causeSummary: run.causeSummary } : {}),
+    ...(run.roundSeq !== undefined ? { roundSeq: run.roundSeq } : {}),
     workflowId: run.workflowId,
     prNumber: run.prNumber,
     branch: run.branch,

@@ -3,7 +3,7 @@
 // 一轮：列根下每个仓的每棵树 → 认出是哪张需求的 → 需求工作流和它的子任务工作流都不在跑了、树里也没有没结束的会话，才算
 // 残留 → 以会话用户的身份看树里还剩什么 → 什么都不剩就删（fleet-agent-scope remove）；能重新生成的编译和工具缓存
 // （*.tsbuildinfo、node_modules/ 这些，名单是 real/user-git.ts 的 DISPOSABLE）不算剩着，只剩这些的树照空树删，是不是 git 仓
-// 都一样；有未发布提交的先完整归档并独立恢复验真，复杂未提交、未跟踪、stash、非 Git 成果或归档失败留原树、记没查成。
+// 都一样；未发布提交和复杂未提交（未跟踪、stash、没并完的合并）先经共享保全入口做成受管回执并独立恢复验真，原树没变且没人用才删；非 Git 成果、读失败或回执核不上留原树、记没查成。
 // 生产 remove 与任务收树共用 preserve-worktree.ts；清理前剩了什么记进日志和撤卡原因；以前报过、人点了留着的照旧留着。
 // 不管哪种删法，删之前先保全树里的界面验收图片（#2983，keepShots）：存不进受限归档就不删、记没查成写明原因，下一轮再试。`_route-probe/<会话用户>` 是路由探针常驻的目录，不算残留。
 // 改之前必须知道：「在用」只认任务工作流（task:，含重做后的 :rN）和旧子任务工作流（sub:）；新加一种会在树里起会话的工作流，要在 issueUse
@@ -149,6 +149,92 @@ export function parseTreeName(name: string): TreeKind | null {
     return { kind: 'scratch', issue: Number(scratch[1]), stage: scratch[2], key: scratch[3] ?? null };
   }
   return null;
+}
+
+/**
+ * 删除前再问一次这棵树有没有人用。路径对不上工作根下的仓/树、会话账或工作流查不清，都算确认不了。
+ * 在跑的任务工作流、子任务工作流、没结束的会话都算在用。只采样过一次不算数，调用方在删的这一下再问。
+ */
+export async function confirmDeletionIdle(input: {
+  root: string;
+  dir: string;
+  openSessions: () => Promise<readonly { path: string }[]>;
+  workflows: Pick<WorkflowReader, 'state'>;
+  issue: (ref: { owner: string; name: string; issueNumber: number }) => Promise<IssueWorkFacts | null>;
+  /**
+   * 调用方自己的工作流编号。任务收自己的树时，这一条还在跑不算占着。
+   * 别的代、还在跑的子任务、没结束的会话照旧算在用。不给就不豁免。
+   */
+  exceptWorkflowId?: string;
+}): Promise<'idle' | 'busy' | 'unknown'> {
+  const root = input.root.length > 1 ? input.root.replace(/\/+$/, '') : input.root;
+  if (!input.dir.startsWith(`${root}/`)) return 'unknown';
+  const parts = input.dir.slice(root.length + 1).split('/');
+  if (
+    parts.length !== 2 ||
+    parts.some((part) => part === '.' || part === '..' || !/^[A-Za-z0-9._-]+$/.test(part))
+  ) {
+    return 'unknown';
+  }
+  const repo = parseRepoDir(parts[0] ?? '');
+  const tree = parseTreeName(parts[1] ?? '');
+  if (!repo || !tree) return 'unknown';
+  try {
+    const sessions = await input.openSessions();
+    if (sessions.some((row) => row.path === input.dir)) return 'busy';
+  } catch {
+    return 'unknown';
+  }
+  try {
+    const facts = await input.issue({ owner: repo.owner, name: repo.name, issueNumber: tree.issue });
+    const running = await runningTaskWorkflowId(repo, tree.issue, async (id) => {
+      const state = await input.workflows.state(id);
+      if (state.state === 'running') return 'running';
+      if (state.state === 'missing') return 'missing';
+      return 'closed';
+    });
+    if (running && running !== input.exceptWorkflowId) return 'busy';
+    for (const sub of facts?.subtasks ?? []) {
+      const id = subtaskWorkflowId(sub.id);
+      if (id === input.exceptWorkflowId) continue;
+      if ((await input.workflows.state(id)).state === 'running') return 'busy';
+    }
+  } catch {
+    return 'unknown';
+  }
+  return 'idle';
+}
+
+/**
+ * 生产删树前的最终确认。没接上工作流读取就不能当成没人用：
+ * 没有会话、工作流却还在跑时，只看会话会误判空闲。
+ */
+export async function confirmManagedTreeIdle(input: {
+  root: string;
+  dir: string;
+  openSessions: () => Promise<readonly { path: string }[]>;
+  workflows?: Pick<WorkflowReader, 'state'>;
+  issue: (ref: { owner: string; name: string; issueNumber: number }) => Promise<IssueWorkFacts | null>;
+  exceptWorkflowId?: string;
+}): Promise<'idle' | 'busy' | 'unknown'> {
+  const workflows = input.workflows;
+  if (!workflows) {
+    try {
+      const sessions = await input.openSessions();
+      if (sessions.some((row) => row.path === input.dir)) return 'busy';
+    } catch {
+      return 'unknown';
+    }
+    return 'unknown';
+  }
+  return confirmDeletionIdle({
+    root: input.root,
+    dir: input.dir,
+    openSessions: input.openSessions,
+    workflows,
+    issue: input.issue,
+    ...(input.exceptWorkflowId ? { exceptWorkflowId: input.exceptWorkflowId } : {}),
+  });
 }
 
 /**

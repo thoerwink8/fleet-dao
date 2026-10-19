@@ -8,6 +8,7 @@
 // 读不到照抛，不拿空顶；窗口里一轮都没有时各占比是 null（调用方写「没有」），不是 0。
 
 import {
+  clipCauseSummary,
   FLOW_MODES,
   type FlowMode,
   INPUT_EQUIVALENT_WEIGHTS,
@@ -34,6 +35,10 @@ export interface RoundRecord {
   flowMode?: FlowMode | null;
   /** 冷验收拒绝的分类（#2823）：只在人工审过之后填，不给就是空。 */
   verifyRejectClass?: VerifyRejectClass | null;
+  /** 这一轮开始的时刻（#3140）；不给就是空。 */
+  startedAt?: Date | null;
+  /** 这一轮为什么返工（#3140，≤500 字，写之前截断）；做成了、放弃叫停、没有就不给。 */
+  reworkSummary?: string | null;
 }
 
 /** 记一轮怎么收场的。同一条工作流同一个 seq 已经记过就不动（活动重试不写第二行）。 */
@@ -63,6 +68,8 @@ export async function recordTaskRound(db: Db, r: RoundRecord): Promise<void> {
       addedLines: r.addedLines ?? null,
       flowMode: r.flowMode ?? null,
       verifyRejectClass: r.verifyRejectClass ?? null,
+      startedAt: r.startedAt ?? null,
+      reworkSummary: r.reworkSummary ? clipCauseSummary(r.reworkSummary) : null,
       ...(r.endedAt ? { endedAt: r.endedAt } : {}),
     })
     .onConflictDoNothing({ target: [taskRounds.workflowId, taskRounds.seq] });

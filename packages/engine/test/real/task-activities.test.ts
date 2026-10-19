@@ -8,7 +8,11 @@ import { GitHubError, type MergePrResult } from '@fleet-dao/github';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
-import { createTaskActivities, type TaskActivitiesDeps } from '../../src/real/task-activities.ts';
+import {
+  createTaskActivities,
+  MERGE_PENDING_RETRIES,
+  type TaskActivitiesDeps,
+} from '../../src/real/task-activities.ts';
 import { pinMainline, type UserTree } from '../../src/real/user-git.ts';
 import { runChildOk } from '../child.ts';
 
@@ -665,8 +669,52 @@ describe('挂自动合并', () => {
     expect(got).toMatchObject({ armed: false, merged: false });
     expect(got.why).toContain('ci_not_green');
     expect(got.why).toContain('CI 红：check');
+    expect(got.mainSyncBudgetExhausted).toBeUndefined();
     expect(got.headMoved).toBeUndefined();
     expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+  });
+
+  it('clean 时直接合被拒、只是合并闸没跑完（#3165）：在这一步里隔一会儿再合，合上就回合并提交，不交回去停下', async () => {
+    let tries = 0;
+    const f = cleanButBehind({
+      mergePr: async () => {
+        tries += 1;
+        return tries < 3
+          ? { merged: false, reason: 'ci_not_green', detail: '没跑完：merge-gate', ciPendingOnly: true }
+          : mergedOk('f'.repeat(40), false);
+      },
+    });
+    expect(await run(f.gh)).toEqual({ armed: false, merged: true, mergeCommit: 'f'.repeat(40) });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr', 'mergePr', 'mergePr']);
+  });
+
+  it('【故意造出的失败】clean 时直接合被拒、有红的检查（没标 ciPendingOnly）：不等、不再合，原因原样交回', async () => {
+    const f = cleanButBehind({
+      mergePr: async () => ({
+        merged: false,
+        reason: 'ci_not_green',
+        detail: '红：check；没跑完：merge-gate',
+      }),
+    });
+    const got = await run(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(got.why).toContain('红：check');
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+  });
+
+  it('【故意造出的失败】合并闸一直没跑完：最多再试 MERGE_PENDING_RETRIES 次，到点把「没跑完」交回，不当成合了', async () => {
+    const f = cleanButBehind({
+      mergePr: async () => ({
+        merged: false,
+        reason: 'ci_not_green',
+        detail: '没跑完：merge-gate',
+        ciPendingOnly: true,
+      }),
+    });
+    const got = await run(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(got.why).toContain('没跑完：merge-gate');
+    expect(f.calls.filter((c) => c === 'mergePr')).toHaveLength(1 + MERGE_PENDING_RETRIES);
   });
 
   it('直接合被拒、因为落后主线：调一次 updateBranch 把 PR 同步到最新主线，新头当 headMoved 交回去（标明是自己同步的）', async () => {
@@ -695,12 +743,33 @@ describe('挂自动合并', () => {
     expect(got).toMatchObject({ armed: false, merged: false });
     expect(got.why).toContain('连着 3 次同步主线后仍落后');
     expect(got.why).toContain('主线比 PR 多 2 个提交');
+    expect(got.mainSyncBudgetExhausted).toEqual({ prNumber: 7, headSha: HEAD, used: 3 });
     expect(got.headMoved).toBeUndefined();
     expect(got.syncedMain).toBeUndefined();
     expect(f.calls).not.toContain('updateBranch');
     // 第 3 次还能同步（已同步 2 次）
     const again = cleanButBehind({ updateBranch: async () => ({ updated: true, head: 'd'.repeat(40) }) });
     expect(await runWith(again.gh, 2)).toMatchObject({ syncedMain: true });
+  });
+
+  it('不强制 CI 的直接合并透传精确预算耗尽身份，不再尝试同步', async () => {
+    const f = cleanButBehind();
+    const got = await make({ gh: f.gh }).acts.mergeNow(
+      {
+        schemaVersion: 1,
+        repo: REPO,
+        prNumber: 7,
+        expectedHead: HEAD,
+        syncedBehind: 3,
+      },
+      ctx(),
+    );
+    expect(got).toMatchObject({
+      merged: false,
+      reason: 'behind_main',
+      mainSyncBudgetExhausted: { prNumber: 7, headSha: HEAD, used: 3 },
+    });
+    expect(f.calls).not.toContain('updateBranch');
   });
 
   it('【故意造出的失败】同步主线时冲突：不当成同步成了，说清原因停下（没有 headMoved）', async () => {
@@ -714,6 +783,7 @@ describe('挂自动合并', () => {
     const got = await run(f.gh);
     expect(got).toMatchObject({ armed: false, merged: false });
     expect(got.why).toContain('同步主线没成');
+    expect(got.mainSyncBudgetExhausted).toBeUndefined();
     expect(got.why).toContain('conflict');
     expect(got.headMoved).toBeUndefined();
     expect(got.syncedMain).toBeUndefined();

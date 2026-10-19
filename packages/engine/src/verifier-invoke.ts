@@ -41,6 +41,7 @@
 //   下一个引擎用 attachVerifier 接回、同一份判法读结论；没脱开的会话在引擎要走时（deps.released）没跑完、接回的会话没给出结论，
 //   回 lostOnRelease（调用方重验一次）。
 
+import { criterionNumbersOf, type RunVerdict } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
 import { classifyFailure, isUpstreamBlip } from './failure/index.ts';
@@ -65,6 +66,11 @@ export const VerifierInvokeInputSchema = z
     branch: z.string().min(1),
     /** diff 的基线（base..？ = PR 引入的全部改动）。 */
     baseSha: z.string().min(7),
+    /** 真实读取并核过的待验完整头；老调用方缺失时不伪造聚合账。 */
+    headSha: z
+      .string()
+      .regex(/^[0-9a-f]{40}$/)
+      .optional(),
     /** 这张单在库里的 tasks.id：fetchSpec 照它找需求文档目录，这一次验收记进 runs 也挂在这张单上（#216）。 */
     taskId: z.guid(),
     /** 单号（GitHub issue #）：记进 runs 的这一笔要挂得上单（#216），没有就不起会话。 */
@@ -88,6 +94,8 @@ export const VerifierInvokeInputSchema = z
     otherAuthorFamilies: z.array(z.string().min(1)).optional(),
     /** 这是第几轮：默认 1 轮、最多 2 轮（specs/555 第 3 条）；本模块不判上限，只透传。 */
     round: z.union([z.literal(1), z.literal(2)]),
+    /** 这一笔验收属于第几个回合（task_rounds.seq，#3140，只记账：runs.round_seq）；不在任务工作流里验的、老历史不给。 */
+    roundSeq: z.number().int().positive().optional(),
     /**
      * 第 2 轮复核（工作流在 patched('verify-recheck') 下才给）：上一轮没过的验收条编号（从 1 起，对得上
      * howToFinish），和上轮问题原话。有它时，喂进来的 diff 是这一轮的增量，判法只复核这些条和增量里的改动。
@@ -130,6 +138,8 @@ export const VerifierInvokeOutputSchema = z.object({
   notes: z.string().optional(),
   /** 第几轮跑出来的（透传 input.round）。 */
   round: z.union([z.literal(1), z.literal(2)]),
+  /** 真正贡献这次结论的笔；多家聚合不借用任何一家 session 的身份。 */
+  sourceRunIds: z.array(z.string()).optional(),
   /**
    * 「不归我验」：要 diff 以外的证据才判得了的验收条（截图、页面现场、线上数据、审计结果，或只靠被跳过的文件才判得了）。
    * 不算没过、不回炉；调用方把它们转给人（留言到单上）。没有就不带。
@@ -195,6 +205,37 @@ export const VerifierInvokeOutputSchema = z.object({
   lostOnRelease: z.string().optional(),
 });
 export type VerifierInvokeOutput = z.infer<typeof VerifierInvokeOutputSchema>;
+
+/** 原始问题逐字保存；展示摘要的截断不能反过来损失审查证据。 */
+function fullVerdict(res: {
+  pass: boolean;
+  problems: readonly string[];
+  outOfScope?: readonly string[] | undefined;
+}): RunVerdict {
+  return {
+    pass: res.pass,
+    problems: [...res.problems],
+    failedCriteria: criterionNumbersOf(res.problems),
+    handedOver: [...(res.outOfScope ?? [])],
+  };
+}
+
+/** 证据没记成不改已跑出的裁决，也不因此再花一次模型；读取端仍只能认真实落库的证据。 */
+async function writeVerdictEvidence(
+  kind: 'raw' | 'aggregate',
+  write: () => Promise<void> | undefined,
+  fields: Record<string, unknown>,
+  log: VerifierInvokeDeps['log'],
+): Promise<void> {
+  try {
+    await write();
+  } catch (error) {
+    (log ?? console.warn)(
+      kind === 'raw' ? '验收原始结论没写进库（裁决照常交回）' : '验收聚合结论没写进库（裁决照常交回）',
+      { ...fields, evidenceStatus: 'unavailable', error: errMessage(error) },
+    );
+  }
+}
 
 /**
  * 拉取 diff 的接口：**注入**。本模块不调 git / gh / GitHub——fetchDiff 的失败明确进 problems，
@@ -317,6 +358,8 @@ export interface PickedVerifier {
 
 export interface VerifierInvokeDeps {
   oneShot: OneShotDeps;
+  /** 写证据失败的诊断；不改变真实裁决。生产接任务日志，未装配时仍输出警告。 */
+  log?: (message: string, fields?: Record<string, unknown>) => void;
   fetchDiff: FetchDiff;
   fetchSpec: FetchSpec;
   chooseModelForFamily: ChooseModelForFamily;
@@ -885,8 +928,11 @@ export interface VerifierAttachInput {
   taskId: string;
   issueNumber: number;
   workflowId?: string;
+  /** 这一笔验收属于第几个回合（#3140，只记账）。 */
+  roundSeq?: number;
   prNumber: number;
   branch: string;
+  headSha?: string;
 }
 
 /**
@@ -897,7 +943,7 @@ export interface VerifierAttachInput {
  */
 export async function attachVerifier(
   input: VerifierAttachInput,
-  deps: Pick<VerifierInvokeDeps, 'oneShot' | 'timeoutMinutes' | 'released'>,
+  deps: Pick<VerifierInvokeDeps, 'oneShot' | 'timeoutMinutes' | 'released' | 'log'>,
 ): Promise<VerifierInvokeOutput> {
   const { attach, round } = input;
   const picked: PickedVerifier = {
@@ -920,6 +966,7 @@ export async function attachVerifier(
         taskId: input.taskId,
         issueNumber: input.issueNumber,
         ...(input.workflowId !== undefined ? { workflowId: input.workflowId } : {}),
+        ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
         prNumber: input.prNumber,
         branch: input.branch,
         prompt: '',
@@ -945,12 +992,49 @@ export async function attachVerifier(
       lostOnRelease: `接回的验收会话没给出结论（${judged.why}）`,
     };
   }
+  const verdict = fullVerdict({
+    pass: judged.passed,
+    problems: judged.problems,
+    outOfScope: judged.outOfScope,
+  });
+  const evidenceFields = {
+    taskId: input.taskId,
+    workflowId: input.workflowId,
+    prNumber: input.prNumber,
+    headSha: input.headSha,
+    round,
+    runId: judged.session.runId,
+  };
+  await writeVerdictEvidence(
+    'raw',
+    () => deps.oneShot.runs.noteVerdict?.(judged.session.runId, verdict),
+    evidenceFields,
+    deps.log,
+  );
+  const headSha = input.headSha;
+  if (headSha !== undefined)
+    await writeVerdictEvidence(
+      'aggregate',
+      () =>
+        deps.oneShot.runs.noteVerifyAggregate?.({
+          taskId: input.taskId,
+          ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),
+          prNumber: input.prNumber,
+          headSha,
+          round,
+          sourceRunIds: [judged.session.runId],
+          verdict,
+        }),
+      { ...evidenceFields, sourceRunIds: [judged.session.runId] },
+      deps.log,
+    );
   return {
     pass: judged.passed,
     problems: judged.problems,
     notes: judged.notes.join('；'),
     round,
     session: judged.session,
+    sourceRunIds: [judged.session.runId],
     ...(judged.outOfScope.length > 0 ? { outOfScope: judged.outOfScope } : {}),
     ...(judged.suggestions.length > 0 ? { suggestions: judged.suggestions } : {}),
   };
@@ -966,6 +1050,40 @@ export async function attachVerifier(
  * - 冷调用跑成 + verdict pass → problems 是空数组（模型该写的「## 问题」也是空的）
  */
 export async function invokeVerifier(
+  input: VerifierInvokeInput,
+  deps: VerifierInvokeDeps,
+): Promise<VerifierInvokeOutput> {
+  const out = await invokeVerifierInner(input, deps);
+  const headSha = input.headSha;
+  const sourceRunIds = out.sourceRunIds;
+  if (headSha !== undefined && sourceRunIds?.length) {
+    await writeVerdictEvidence(
+      'aggregate',
+      () =>
+        deps.oneShot.runs.noteVerifyAggregate?.({
+          taskId: input.taskId,
+          ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),
+          prNumber: input.prNumber,
+          headSha,
+          round: input.round,
+          sourceRunIds,
+          verdict: fullVerdict(out),
+        }),
+      {
+        taskId: input.taskId,
+        workflowId: input.workflowId,
+        prNumber: input.prNumber,
+        headSha: input.headSha,
+        round: input.round,
+        sourceRunIds: out.sourceRunIds,
+      },
+      deps.log,
+    );
+  }
+  return out;
+}
+
+async function invokeVerifierInner(
   input: VerifierInvokeInput,
   deps: VerifierInvokeDeps,
 ): Promise<VerifierInvokeOutput> {
@@ -1114,6 +1232,7 @@ export async function invokeVerifier(
         taskId: parsed.taskId,
         issueNumber: parsed.issueNumber,
         ...(parsed.workflowId !== undefined ? { workflowId: parsed.workflowId } : {}),
+        ...(parsed.roundSeq !== undefined ? { roundSeq: parsed.roundSeq } : {}),
         prNumber: parsed.prNumber,
         branch: parsed.branch,
         prompt,
@@ -1160,6 +1279,24 @@ export async function invokeVerifier(
         if (await missAndNext(label, judged.why)) continue;
         return { kind: 'none' };
       }
+      // 先按真实笔保存该家完整原始结论，再做格式重试、二轮过滤和多家聚合。
+      await writeVerdictEvidence(
+        'raw',
+        () =>
+          (prepared?.oneShot ?? deps.oneShot).runs.noteVerdict?.(
+            judged.session.runId,
+            fullVerdict({ pass: judged.passed, problems: judged.problems, outOfScope: judged.outOfScope }),
+          ),
+        {
+          taskId: parsed.taskId,
+          workflowId: parsed.workflowId,
+          prNumber: parsed.prNumber,
+          headSha: parsed.headSha,
+          round: parsed.round,
+          runId: judged.session.runId,
+        },
+        deps.log,
+      );
       let problems = judged.problems;
       let suggestions = judged.suggestions;
       if (missingCriterionNumbers(problems, parsed.howToFinish.length)) {
@@ -1235,6 +1372,7 @@ export async function invokeVerifier(
           notes: r.notes.join('；'),
           round: parsed.round,
           session: r.session,
+          sourceRunIds: [r.session.runId],
           ...extras([r]),
         };
       }
@@ -1298,7 +1436,7 @@ export async function invokeVerifier(
         ...verdicts.flatMap((v) => v.notes.slice(1).map((n) => `${v.family}：${n}`)),
       ].join('；'),
       round: parsed.round,
-      session: verdicts[1]?.session,
+      sourceRunIds: verdicts.map((v) => v.session.runId),
       ...extras(verdicts),
     };
   }
@@ -1316,6 +1454,7 @@ export async function invokeVerifier(
       ].join('；'),
       round: parsed.round,
       session: only.session,
+      sourceRunIds: [only.session.runId],
       ...extras([only]),
     };
   }

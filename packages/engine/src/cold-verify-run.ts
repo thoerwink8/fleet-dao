@@ -20,10 +20,11 @@
 // 抛了会变成「冷调用没跑起来」，写代码的会话改不出能过的 diff。
 
 import { execFile } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { CATALOG_NAMED_FAMILIES } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
@@ -227,6 +228,7 @@ export async function runColdVerifyForPr(
     prNumber,
     branch: pr.branch,
     baseSha: pr.baseSha,
+    headSha: pr.head,
     taskId: spec.taskId,
     issueNumber: spec.issueNumber,
     ...(spec.workflowId !== undefined ? { workflowId: spec.workflowId } : {}),
@@ -475,7 +477,7 @@ export async function incrementalDiffAtHead(args: {
  * 完整检出是在哪一步没成的（#3036）：头不合规、对不上 / 没有镜像、建目录、git archive、解包；别的（换进来的 checkout 抛的）是 unknown。
  * 报警照这一步写原因和建议：只有 EACCES 才是「目录权限」，缺对象不能修成 chmod。
  */
-export type CheckoutStage = 'head' | 'mirror' | 'mkdir' | 'archive' | 'extract' | 'unknown';
+export type CheckoutStage = 'fetch' | 'head' | 'mirror' | 'mkdir' | 'archive' | 'extract' | 'unknown';
 
 /** checkoutPrHead 抛的错：带失败那一步、原始错误（message 原样）、errno（有才有），archive 那步还带镜像目录和是不是缺对象。 */
 export class CheckoutStageError extends Error {
@@ -540,15 +542,27 @@ export async function checkoutPrHead(
         missingObject: MISSING_OBJECT.test(archived.stderr),
       });
     }
+    const extractDir = resolve(dir);
     await new Promise<void>((resolve, reject) => {
-      execFile('tar', ['-xf', tarPath, '-C', dir], { timeout: 120_000 }, (err, _stdout, stderr) => {
-        if (!err) return resolve();
-        const why = typeof stderr === 'string' && stderr.trim() !== '' ? oneLine(stderr) : errMessage(err);
-        const code = errnoOf(err);
-        reject(
-          new CheckoutStageError('extract', why, { ...(code === undefined ? {} : { code }), cause: err }),
-        );
-      });
+      // scratch 是本次 mkdtemp 建的私有目录；相对归档名避免 GNU tar 把 Windows 盘符当远端主机。
+      execFile(
+        'tar',
+        [
+          '-xf',
+          'head.tar',
+          '-C',
+          process.platform === 'win32' ? extractDir.replaceAll('\\', '/') : extractDir,
+        ],
+        { cwd: scratch, timeout: 120_000 },
+        (err, _stdout, stderr) => {
+          if (!err) return resolve();
+          const why = typeof stderr === 'string' && stderr.trim() !== '' ? oneLine(stderr) : errMessage(err);
+          const code = errnoOf(err);
+          reject(
+            new CheckoutStageError('extract', why, { ...(code === undefined ? {} : { code }), cause: err }),
+          );
+        },
+      );
     });
   } finally {
     await rm(scratch, { recursive: true, force: true });
@@ -582,6 +596,7 @@ export function checkoutAlertKey(workflowId: string | undefined, head: string): 
 }
 
 const STAGE_LABEL: Record<CheckoutStage, string> = {
+  fetch: '获取待验精确头',
   head: '核对 PR 头',
   mirror: '找引擎镜像',
   mkdir: '建检出目录',
@@ -666,7 +681,27 @@ export interface CheckoutRecovered {
   workflowId: string | undefined;
 }
 
+/** 每次物理检出的独立成功证据；重送同一 receiptId 幂等，重做检出生成新 ID。 */
+export interface CheckoutReceipt {
+  receiptId: string;
+  taskId?: string | undefined;
+  runId?: string | undefined;
+  workflowId: string | undefined;
+  head: string;
+  dir: string;
+  startedAt: Date;
+  completedAt: Date;
+  type: 'full';
+}
+
 export interface PlaceVerifyCheckoutInput {
+  taskId?: string | undefined;
+  runId?: string | undefined;
+  /** 独立于撤卡；写失败只诊断，证据保持未知，不改变验收。 */
+  onCompleted?: (receipt: CheckoutReceipt) => Promise<void>;
+  /** 生产经受管镜像的凭据和锁补齐既定头；失败保持 blocked，绝不改用分支最新头。 */
+  ensureHead?: () => Promise<void>;
+  signal?: AbortSignal;
   dir: string;
   head: string;
   workflowId: string | undefined;
@@ -697,7 +732,9 @@ export interface PlaceVerifyCheckoutInput {
 export async function placeVerifyCheckout(input: PlaceVerifyCheckoutInput): Promise<'full' | 'blocked'> {
   const checkout = input.checkout ?? checkoutPrHead;
   const log = input.log ?? (() => undefined);
-  const startedAt = (input.now ?? (() => new Date()))();
+  const now = input.now ?? (() => new Date());
+  const startedAt = now();
+  const receiptId = randomUUID();
   const dedupeKey = checkoutAlertKey(input.workflowId, input.head);
   const blocked = async (error: unknown, repairError?: unknown): Promise<'blocked'> => {
     const alert = checkoutBlockedAlert({
@@ -724,6 +761,27 @@ export async function placeVerifyCheckout(input: PlaceVerifyCheckoutInput): Prom
     return 'blocked';
   };
   const full = async (): Promise<'full'> => {
+    const receipt: CheckoutReceipt = {
+      receiptId,
+      taskId: input.taskId,
+      runId: input.runId,
+      workflowId: input.workflowId,
+      head: input.head,
+      dir: input.dir,
+      startedAt,
+      completedAt: now(),
+      type: 'full',
+    };
+    if (input.onCompleted) {
+      try {
+        await input.onCompleted(receipt);
+      } catch (error) {
+        log('冷验收完整检出成功回执没写进库（证据未知）', {
+          ...receipt,
+          error: errMessage(error),
+        });
+      }
+    }
     if (input.onRecovered) {
       try {
         await input.onRecovered({
@@ -743,20 +801,30 @@ export async function placeVerifyCheckout(input: PlaceVerifyCheckoutInput): Prom
     return 'full';
   };
   try {
+    input.signal?.throwIfAborted();
+    await input.ensureHead?.().catch((error: unknown) => {
+      throw new CheckoutStageError('fetch', errMessage(error), { cause: error });
+    });
+    input.signal?.throwIfAborted();
     await checkout(input.dir, input.head, input.workflowId);
   } catch (error) {
+    input.signal?.throwIfAborted();
     if (errnoOf(error) !== 'EACCES' || input.repair === undefined) return blocked(error);
     try {
       await input.repair(input.dir);
     } catch (repairError) {
+      input.signal?.throwIfAborted();
       return blocked(error, repairError);
     }
     try {
+      input.signal?.throwIfAborted();
       await checkout(input.dir, input.head, input.workflowId);
     } catch (again) {
+      input.signal?.throwIfAborted();
       return blocked(again);
     }
   }
+  input.signal?.throwIfAborted();
   return full();
 }
 

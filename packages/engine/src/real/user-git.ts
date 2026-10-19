@@ -273,6 +273,27 @@ export interface Identity {
   email: string;
 }
 
+/** 用目标仓的真实对象闭包核 bundle；只读对象/引用，临时文件由会话身份创建并清理。 */
+export async function verifyBundle(t: UserTree, bundle: Buffer): Promise<boolean> {
+  if ((await writableTree(t, '核 bundle 依赖')) === 'none') {
+    throw placeError(t, '核 bundle 依赖：目标还不是仓', false);
+  }
+  t.signal?.throwIfAborted();
+  const script =
+    'd="$("$1" rev-parse --git-dir)" || exit 70; ' +
+    'f="$(mktemp "$d/fleet-verify-XXXXXX")" || exit 70; ' +
+    'trap \'rm -f -- "$f"\' EXIT; ' +
+    'cat > "$f" || exit 70; "$1" bundle verify "$f"';
+  const r = await run(t, [t.sh ?? SH, '-c', script, 'sh', t.git ?? GIT], {
+    stdin: bundle,
+    timeoutMs: 120_000,
+  });
+  if (r.aborted || r.timedOut || r.spawnError || r.code === null || r.code === 70) {
+    throw new PortError('GIT_FAILED', describeFailure('核 bundle 依赖', r), { retryable: !r.aborted });
+  }
+  return r.code === 0;
+}
+
 /**
  * 从 bundle 取提交进目录里的仓：没有仓先 init（设好提交身份——会话的提交挂在「干活的」机器人名下；关掉自动维护）。
  * bundle 经标准输入进来，会话用户在自己的 .git 里落成临时文件再 fetch，fetch 完删掉。取完回 refs/fleet/incoming 的头。
@@ -704,6 +725,51 @@ export async function changedFilesAgainst(t: UserTree, mainline: string, head: s
   assertSha(mainline, '主线');
   assertSha(head, '头');
   return lines(await git(t, ['diff', '--name-only', `${mainline}...${head}`], '列分支相对主线改了哪些文件'));
+}
+
+/** 单个头最多列这么多个文件（和 db 的 PR_HEAD_FILES_MAX 一致）；超了只列前面的，调用方写日志。 */
+export const NUMSTAT_MAX_FILES = 500;
+
+/**
+ * 分支相对主线改了哪些文件、各增删几行（git diff --numstat -z 主线...头，不识别改名：改名按「删一个加一个」算，路径才对得上）。
+ * 任务页「已编辑 N 个文件 +x −y」读它（#3140）：一个头一次数全，不拿每次编辑的行数加。二进制文件 git 给 `-`，记 binary、没有行数。
+ * 输出认不出照抛，不拿空顶。返回 total 是真实的文件数（可能比 files 多：只列前 NUMSTAT_MAX_FILES 个）。
+ */
+export async function numstatAgainst(
+  t: UserTree,
+  mainline: string,
+  head: string,
+): Promise<{
+  files: { path: string; added: number | null; removed: number | null; binary: boolean }[];
+  total: number;
+}> {
+  assertSha(mainline, '主线');
+  assertSha(head, '头');
+  const r = await git(
+    t,
+    ['diff', '--numstat', '-z', '--no-renames', `${mainline}...${head}`],
+    '列分支相对主线每个文件增删的行',
+  );
+  const entries = text(r)
+    .split('\0')
+    .filter((e) => e !== '');
+  const files: { path: string; added: number | null; removed: number | null; binary: boolean }[] = [];
+  for (const entry of entries) {
+    const m = /^(\d+|-)\t(\d+|-)\t(.+)$/s.exec(entry);
+    if (!m) {
+      throw new PortError('GIT_FAILED', `列每个文件增删的行：numstat 有一项认不出（${entry.slice(0, 80)}）`, {
+        retryable: false,
+      });
+    }
+    const binary = m[1] === '-' || m[2] === '-';
+    files.push({
+      path: m[3] as string,
+      added: binary ? null : Number(m[1]),
+      removed: binary ? null : Number(m[2]),
+      binary,
+    });
+  }
+  return { files: files.slice(0, NUMSTAT_MAX_FILES), total: files.length };
 }
 
 /**

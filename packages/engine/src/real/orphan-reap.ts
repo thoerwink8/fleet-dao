@@ -13,8 +13,9 @@
 // - 列不出 scope 要明确报错，不当成一个都没有（照旧让工人起不来，比悄悄留着孤儿好）；临时目录列不出、删不掉只记日志，
 //   不挡工人接活（留着的只占盘，下次起来再清）。
 
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { listAgentScopes, SESSION_USERS, stopScope } from '@fleet-dao/adapters';
-import { clearReservations, closeOpenRuns, type Db, resolveAlertWithReason } from '@fleet-dao/db';
+import { clearReservations, closeOpenRuns, type Db, getRun, resolveAlertWithReason } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import {
   awaitingAttach,
@@ -77,15 +78,38 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
       setTimeout(fn, ms).unref?.();
     });
 
-  /** 收发目录列一遍；列不出来只记日志、当一个都没有（那就和以前一样，scope 一律收）。 */
+  /** 读不到交接证据就不清扫：不能把未知当成没有人在用。 */
   async function readIo(): Promise<IoEntry[]> {
     if (!deps.ioRoot) return [];
     try {
       return await listIo(deps.ioRoot);
     } catch (error) {
-      log('动手会话的收发目录列不出来：放了手的会话认不出，照孤儿收', { error: errMessage(error) });
-      return [];
+      throw new Error(`收发目录读不到，未执行孤儿清扫：${errMessage(error)}`);
     }
+  }
+
+  /** 开跑前已落在 runs 的真实 cwd；验收目录和 runId 不同，不能靠目录名猜。 */
+  async function temporaryDirs(id: string): Promise<{ open: boolean; dirs: string[] }> {
+    const row = await getRun(db, id);
+    if (!row) throw new Error(`脱开会话 ${id} 的 runs 记录缺失，未执行孤儿清扫`);
+    if (row.endedAt !== null) return { open: false, dirs: [] };
+    const legacy = resolve(trees.tmpFor(id));
+    const dirs = [legacy];
+    const cwd = row.worktreePath;
+    if (!cwd) {
+      if (row.segment === 'verify') throw new Error(`脱开验收 ${id} 的真实工作目录缺失，未执行孤儿清扫`);
+      return { open: true, dirs };
+    }
+    if (!isAbsolute(cwd) || cwd.split(/[\\/]/).includes('..'))
+      throw new Error(`脱开会话 ${id} 的工作目录不合法，未执行孤儿清扫`);
+    const path = resolve(cwd);
+    const rel = relative(dirname(legacy), path);
+    // 动手会话可以在仓库工作树；这里只接管临时根的直属目录，不按账上的任意路径删文件。
+    const direct =
+      rel !== '' && !rel.includes('/') && !rel.includes('\\') && rel !== '..' && !isAbsolute(rel);
+    if (direct && resolve(trees.tmpFor(basename(path))) === path) dirs.push(path);
+    else if (row.segment === 'verify') throw new Error(`脱开验收 ${id} 的工作目录越出临时根，未执行孤儿清扫`);
+    return { open: true, dirs: [...new Set(dirs)] };
   }
 
   /**
@@ -119,8 +143,27 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
   /** 到了 TTL 还没人接回的：scope、收发目录、临时目录、runs 那一行照孤儿收。不抛，收不掉的记日志。 */
   async function sweepUnclaimed(ids: readonly string[]): Promise<void> {
     const left = new Map((await readIo()).map((e) => [e.runId, e]));
-    const unclaimed = ids.filter((id) => left.get(id)?.detachedAt !== undefined);
+    const present = ids.filter((id) => left.get(id)?.detachedAt !== undefined);
+    const facts = new Map(
+      await Promise.all(present.map(async (id) => [id, await temporaryDirs(id)] as const)),
+    );
+    const renewed = ids.filter((id) => {
+      const at = left.get(id)?.detachedAt;
+      return facts.get(id)?.open && at !== undefined && clock().getTime() - at.getTime() < ttlMs;
+    });
+    if (renewed.length > 0) {
+      const remaining = Math.min(
+        ...renewed.map((id) => ttlMs - (clock().getTime() - (left.get(id)?.detachedAt?.getTime() ?? 0))),
+      );
+      schedule(renewed, remaining);
+    }
+    const unclaimed = ids.filter((id) => {
+      const at = left.get(id)?.detachedAt;
+      return at !== undefined && clock().getTime() - at.getTime() >= ttlMs;
+    });
     if (unclaimed.length === 0) return;
+    // 先把全部关联读明白，读失败不能先删一半。
+    const cwdByRun = facts;
     for (const id of unclaimed) {
       log(`脱开跑的会话 ${id} 放手后 ${Math.round(ttlMs / 60_000)} 分钟没人接回，照孤儿收掉`);
       const mirasim = left.get(id)?.mirasim;
@@ -132,15 +175,24 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
       const dir = left.get(id)?.dir;
       if (dir)
         await removeIo(dir).catch((e: unknown) => log('收发目录没删掉', { dir, error: errMessage(e) }));
-      await trees
-        .remove(trees.tmpFor(id))
-        .catch((e: unknown) => log('临时目录没删掉', { id, error: errMessage(e) }));
+      for (const cwd of cwdByRun.get(id)?.dirs ?? [])
+        await trees.remove(cwd).catch((e: unknown) => log('临时目录没删掉', { id, error: errMessage(e) }));
     }
     try {
       await closeOpenRuns(db, { endedAt: clock(), reason: UNCLAIMED_RUN_REASON, only: unclaimed });
     } catch (error) {
       log('没人接回的会话那几行 runs 没收上', { error: errMessage(error) });
     }
+  }
+
+  function schedule(ids: string[], afterMs: number): void {
+    later(
+      () =>
+        void sweepUnclaimed(ids).catch((error: unknown) => {
+          log('待接回会话的延迟清扫没查成，未证明已清理', { error: errMessage(error) });
+        }),
+      afterMs,
+    );
   }
 
   /** 上一轮会话留下的临时目录：_tmp 下的全清掉（等人接回的除外）。列不出来、删不掉都明说没清成（记日志），不抛。回删掉了几个。 */
@@ -155,7 +207,7 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     let removed = 0;
     const failed: string[] = [];
     for (const dir of dirs) {
-      if (keep.has(dir.split('/').pop() ?? '')) continue;
+      if (keep.has(resolve(dir))) continue;
       try {
         if (!(await trees.remove(dir)).gone) removed += 1;
       } catch (error) {
@@ -177,6 +229,12 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     }
     const io = await readIo();
     const keep = awaitingAttach(io, clock(), ttlMs);
+    const keepDirs = new Set<string>();
+    for (const id of keep) {
+      const fact = await temporaryDirs(id);
+      if (!fact.open) keep.delete(id);
+      else for (const dir of fact.dirs) keepDirs.add(dir);
+    }
     let reaped = 0;
     for (const scope of listed.scopes) {
       if (scope.state === 'inactive') continue;
@@ -190,7 +248,7 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
       if (error) throw new Error(`收不掉上一轮留下的会话 ${scope.id}：${error}`);
       reaped += 1;
     }
-    const swept = await sweepTmp(keep);
+    const swept = await sweepTmp(keepDirs);
     if (swept > 0) log(`删掉上一轮会话留下的临时目录 ${swept} 个`);
     // 收发目录：等人接回的留着，别的（收过场、被叫停、过了时限的）删掉
     for (const e of io) {
@@ -207,7 +265,7 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
       reason: ORPHAN_RUN_REASON,
       except: [...keep],
     });
-    if (keep.size > 0) later(() => void sweepUnclaimed([...keep]), ttlMs);
+    if (keep.size > 0) schedule([...keep], ttlMs);
     if (closed.length > 0) {
       log(`上一轮引擎起的一次性会话没收场的 ${closed.length} 个，库里那几行收成没跑完：${closed.join('、')}`);
     }

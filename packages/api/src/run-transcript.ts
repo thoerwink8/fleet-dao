@@ -7,12 +7,28 @@
 //   库读不了、这里没接上（开发环境的内存版没有那张表）= 503 写明原因，页面写「没读成」，不拿空列表顶。
 // - 在跑的段 done 恒为 false，entries 空也不算 noRecord（引擎攒批最多隔一两秒才写，页面等下一次刷新）。
 
-import { type Db, readRunTranscript } from '@fleet-dao/db';
-import { RunTranscriptQuery, RunTranscriptResponse, WebRoutes } from '@fleet-dao/shared';
+import {
+  type Db,
+  listTaskEngineSteps,
+  listTaskRounds,
+  readPrHeadFiles,
+  readRunLastSay,
+  readRunProcessRows,
+  readRunTallies,
+  readRunTranscript,
+} from '@fleet-dao/db';
+import {
+  cutSteps,
+  RunStepsResponse,
+  RunTranscriptQuery,
+  RunTranscriptResponse,
+  WebRoutes,
+} from '@fleet-dao/shared';
 import type { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { ApiError, fullStack, readQuery, reply } from './http.ts';
 import type { CockpitEnv } from './session.ts';
+import { isTaskFinished } from './views.ts';
 
 export interface RunTranscriptPort {
   /** seq 大于 after 的条目（不给从头）；读不到抛。 */
@@ -20,10 +36,30 @@ export interface RunTranscriptPort {
     runId: string,
     opts: { after?: number | undefined; limit: number },
   ): ReturnType<typeof readRunTranscript>;
+  /** 一笔的轻量行（切步用，#3140）；一条都没有返回空数组；读不到抛。 */
+  processRows(runId: string): ReturnType<typeof readRunProcessRows>;
+  /** 几笔的小计，一条 GROUP BY run_id；没记录的笔不在结果里；读不到抛。 */
+  tallies(runIds: readonly string[]): ReturnType<typeof readRunTallies>;
+  /** 一笔最后一条主会话助手的话（最新汇报）；没有返回 null；读不到抛。 */
+  lastSay(runId: string): ReturnType<typeof readRunLastSay>;
+  /** 这张单的回合（task_rounds）；读不到抛。 */
+  rounds(taskId: string): ReturnType<typeof listTaskRounds>;
+  /** 引擎在会话外做的事和等待（step_timings）；读不到抛。 */
+  engineSteps(taskId: string): ReturnType<typeof listTaskEngineSteps>;
+  /** 按 PR 完整头读 numstat 快照；旧头只为诊断，不当作当前完整清单；未采过返回 null，读不到抛。 */
+  prFiles(repoId: string, prNumber: number, headSha: string): ReturnType<typeof readPrHeadFiles>;
 }
 
 export function pgRunTranscript(db: Db): RunTranscriptPort {
-  return { read: (runId, opts) => readRunTranscript(db, runId, opts) };
+  return {
+    read: (runId, opts) => readRunTranscript(db, runId, opts),
+    processRows: (runId) => readRunProcessRows(db, runId),
+    tallies: (runIds) => readRunTallies(db, runIds),
+    lastSay: (runId) => readRunLastSay(db, runId),
+    rounds: (taskId) => listTaskRounds(db, taskId),
+    engineSteps: (taskId) => listTaskEngineSteps(db, taskId),
+    prFiles: (repoId, prNumber, headSha) => readPrHeadFiles(db, repoId, prNumber, headSha),
+  };
 }
 
 /** 开发环境、内存版：没有这张表。 */
@@ -66,6 +102,36 @@ export function registerRunTranscriptRoutes(app: Hono<CockpitEnv>, deps: Deps): 
       nextAfter: last ? last.seq : (query.after ?? null),
       done: ended && !page.more,
       noRecord: ended && !page.any,
+    });
+  });
+
+  // 一笔切好的步骤和小计（#3140）：由这一笔的轻量行现算（shared 的 cutSteps），不建步骤表。权限、归属、503 的口径和上面一致。
+  app.get(WebRoutes.runProcess.path, async (c) => {
+    const taskId = c.req.param('taskId');
+    const runId = c.req.param('runId');
+    const task = await deps.store.getTask(taskId);
+    if (!task) throw new ApiError(404, 'task_not_found', '没有这个任务');
+    const segment = (await deps.store.listSegmentRuns(task.id)).find((r) => r.id === runId);
+    if (!segment) throw new ApiError(404, 'run_not_found', '这张单下没有这一段');
+    if (!deps.runTranscript) throw new ApiError(503, 'run_transcript_not_wired', RUN_TRANSCRIPT_NOT_HERE);
+    let rows: Awaited<ReturnType<RunTranscriptPort['processRows']>>;
+    try {
+      rows = await deps.runTranscript.processRows(runId);
+    } catch (err) {
+      deps.log.error('这一笔的步骤没读成', { taskId, runId, error: fullStack(err) });
+      throw new ApiError(
+        503,
+        'run_steps_unreadable',
+        `没读成：${(err instanceof Error && err.message) || String(err)}`,
+      );
+    }
+    // 在跑：没结束、单子也没结束（和任务详情里 segmentRuns 的 running 同一个判法）
+    const running = segment.endedAt === undefined && !isTaskFinished(task);
+    if (rows.length === 0 && !running) return reply(c, RunStepsResponse, { state: 'noRecord' });
+    return reply(c, RunStepsResponse, {
+      state: 'ok',
+      running,
+      process: cutSteps(rows, { running, endedAt: segment.endedAt }),
     });
   });
 }

@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { type PoolQuotaResult, readAllQuotas, readingsFromGrokBilling } from '../../src/quota/index.ts';
+import {
+  type PoolQuotaResult,
+  QuotaReadError,
+  readAllQuotas,
+  readingsFromGrokBilling,
+} from '../../src/quota/index.ts';
 import { blockNetwork, FIXED_NOW, fakeDeps, fakeFetch, fakeFiles, fixtureJson } from './helpers.ts';
 
 blockNetwork();
@@ -37,10 +42,84 @@ describe('Grok Build 账单（VPS 真机回包）', () => {
     expect(out.notes.join()).toContain('没见过');
   });
 
-  it('缺总用量：bad_response，不填 0', () => {
+  it('完整账单缺总用量：usage_unreported，不填 0', () => {
     const body = billing() as { config: Record<string, unknown> };
     delete body.config.creditUsagePercent;
-    expect(() => readingsFromGrokBilling(body, ctx)).toThrowError(/creditUsagePercent/);
+    expect(() => readingsFromGrokBilling(body, ctx)).toThrowError(
+      new QuotaReadError(
+        'usage_unreported',
+        'Grok 账单已读，但上游未报告当前用量；用量未知（字段 config.creditUsagePercent 类型 missing）',
+      ),
+    );
+  });
+
+  it('缺字段和类型不支持要分开报，诊断只带字段名与类型', () => {
+    const missing = billing() as { config: Record<string, unknown> };
+    delete missing.config.creditUsagePercent;
+    expect(() => readingsFromGrokBilling(missing, ctx)).toThrowError(
+      /账单已读.*用量未知.*creditUsagePercent 类型 missing/,
+    );
+
+    const unsupported = billing() as { config: Record<string, unknown> };
+    unsupported.config.creditUsagePercent = { value: 47 };
+    expect(() => readingsFromGrokBilling(unsupported, ctx)).toThrowError(
+      /字段 config\.creditUsagePercent 类型 object：类型不支持数字读取/,
+    );
+
+    const invalidString = billing() as { config: Record<string, unknown> };
+    invalidString.config.creditUsagePercent = 'not-a-number';
+    expect(() => readingsFromGrokBilling(invalidString, ctx)).toThrowError(
+      /字段 config\.creditUsagePercent 类型 string：字符串不是可解析的数字/,
+    );
+  });
+
+  it('未知字段结构仍失败，不拿相邻字段或未知字段替代总用量', () => {
+    const body = { config: { usagePercent: 47 } };
+    expect(() => readingsFromGrokBilling(body, ctx)).toThrowError(/creditUsagePercent.*类型 missing/);
+  });
+
+  it.each([
+    null,
+    {},
+    { config: null },
+    { config: {} },
+    { config: { monthlyLimit: { val: 100 }, used: { val: 20 } } },
+  ])('不把未知或仅旧版结构当成已报告当前credits用量：%j', (body) => {
+    try {
+      readingsFromGrokBilling(body, ctx);
+      expect.unreachable('缺少可采信的credits用量');
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'bad_response' });
+    }
+  });
+
+  it.each([null, {}, 'bad', true])('总用量坏型 %j 仍是bad_response，不归未报告', (value) => {
+    const body = billing() as { config: Record<string, unknown> };
+    body.config.creditUsagePercent = value;
+    expect(() => readingsFromGrokBilling(body, ctx)).toThrowError(
+      expect.objectContaining({ code: 'bad_response' }),
+    );
+  });
+
+  it('损坏的账期或金额字段仍是bad_response，诊断不泄漏字段值', () => {
+    for (const field of [
+      'currentPeriod',
+      'isUnifiedBillingUser',
+      'onDemandCap',
+      'onDemandUsed',
+      'prepaidBalance',
+    ]) {
+      const body = billing() as { config: Record<string, unknown> };
+      delete body.config.creditUsagePercent;
+      body.config[field] = 'private-account-value';
+      try {
+        readingsFromGrokBilling(body, ctx);
+        expect.unreachable('坏结构不能当可读账单');
+      } catch (error) {
+        expect(error).toMatchObject({ code: 'bad_response' });
+        expect(String(error)).not.toContain('private-account-value');
+      }
+    }
   });
 });
 
@@ -184,6 +263,18 @@ describe('Grok 读取器', () => {
     expect(partial.result.notes.join()).toContain('订阅档位没读到');
     const denied = await run(() => ({ status: 401, body: {} }));
     expect(!denied.result.ok && denied.result.error.code).toBe('auth');
+  });
+
+  it('上游错误只保留 HTTP 状态，不把回包正文带进失败或通知', async () => {
+    const secret = 'Bearer account-response-token';
+    const result = await run(() => ({
+      status: 503,
+      body: { accountId: '<用户编号>', token: secret, error: 'billing unavailable' },
+    }));
+    expect(!result.result.ok && result.result.error.code).toBe('upstream');
+    expect(!result.result.ok && result.result.error.message).toBe('Grok /billing?format=credits 回 HTTP 503');
+    expect(JSON.stringify(result.report)).not.toContain(secret);
+    expect(JSON.stringify(result.report)).not.toContain('<用户编号>');
   });
 
   it('读不到的每条路都给明确失败：没登录文件、文件里没令牌、上游 5xx、连不上、回包认不出', async () => {

@@ -40,7 +40,7 @@ export async function fetchJson(
   if (res.status === 401 || res.status === 403) {
     throw new QuotaReadError('auth', `${call.name} 登录失效（HTTP ${res.status}）：${call.authHint}`);
   }
-  if (!res.ok) throw new QuotaReadError('upstream', `${call.name} 回 HTTP ${res.status}：${redact(text)}`);
+  if (!res.ok) throw new QuotaReadError('upstream', `${call.name} 回 HTTP ${res.status}`);
   if (text.length > MAX_BODY) throw new QuotaReadError('bad_response', `${call.name} 回包太大`);
   try {
     return JSON.parse(text);

@@ -190,6 +190,111 @@ describe('可信 source 与真实 HTTPS reader', () => {
 });
 
 describe('实际入口收口', () => {
+  it.each(
+    [2, 3, 4].flatMap((closeAt) =>
+      [false, true].flatMap((privateRepo) =>
+        [false, true].map((merged) => ({ closeAt, privateRepo, merged })),
+      ),
+    ),
+  )(
+    '第$closeAt次关闭（private=$privateRepo，merged=$merged）不发表状态',
+    async ({ closeAt, privateRepo, merged }) => {
+      const dir = temp();
+      try {
+        const eventPath = resolve(dir, 'event.json');
+        writeFileSync(eventPath, JSON.stringify({ pull_request: { number: 7 } }));
+        const f = fixture({ repo: { ...repoRaw, private: privateRepo } });
+        const original = f.gh.pr;
+        let reads = 0;
+        f.gh.pr = async (n) => ({
+          ...((await original(n)) as typeof prRaw),
+          state: ++reads >= closeAt ? 'closed' : 'open',
+          merged,
+        });
+        const r = await runMergeGate({
+          eventName: 'pull_request_target',
+          eventPath,
+          gh: f.gh,
+          write: true,
+          readCiPolicy: f.reader,
+        });
+        expect(r.code).toBe(0);
+        expect(f.api.post).not.toHaveBeenCalled();
+        expect(r.lines.join('\n')).toContain('已经关了');
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+  it.each(
+    [2, 3, 4].flatMap((at) => [
+      { at, name: 'closed换头', over: { state: 'closed', head: { ...prRaw.head, sha: 'b'.repeat(40) } } },
+      { at, name: 'closed错单号', over: { state: 'closed', number: 8 } },
+      { at, name: 'closed错数字仓', over: { state: 'closed', base: { repo: { id: 124, full_name: slug } } } },
+      {
+        at,
+        name: 'closed错仓名',
+        over: { state: 'closed', base: { repo: { id: 123, full_name: 'other/repo' } } },
+      },
+      { at, name: 'open换头', over: { head: { ...prRaw.head, sha: 'b'.repeat(40) } } },
+      { at, name: '非法状态', over: { state: 'unknown' } },
+    ]),
+  )('第$at次读取$name必须失败，不借closed放行', async ({ at, over }) => {
+    const dir = temp();
+    try {
+      const eventPath = resolve(dir, 'event.json');
+      writeFileSync(eventPath, JSON.stringify({ pull_request: { number: 7 } }));
+      const f = fixture();
+      let reads = 0;
+      f.gh.pr = async () => ({ ...prRaw, ...(++reads >= at ? over : {}) });
+      const r = await runMergeGate({
+        eventName: 'pull_request_target',
+        eventPath,
+        gh: f.gh,
+        write: true,
+        readCiPolicy: f.reader,
+      });
+      expect(r.code).toBe(2);
+      expect(f.api.post).toHaveBeenCalledWith(
+        `/statuses/${sha}`,
+        expect.objectContaining({ state: 'failure' }),
+      );
+      expect(f.api.post).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ state: 'success' }),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it.each([2, 3, 4])('第%d次读取真报错，即使文字像closed也失败', async (at) => {
+    const dir = temp();
+    try {
+      const eventPath = resolve(dir, 'event.json');
+      writeFileSync(eventPath, JSON.stringify({ pull_request: { number: 7 } }));
+      const f = fixture();
+      let reads = 0;
+      f.gh.pr = async () => {
+        if (++reads >= at) throw new Error('PR 已经关了');
+        return prRaw;
+      };
+      const r = await runMergeGate({
+        eventName: 'pull_request_target',
+        eventPath,
+        gh: f.gh,
+        write: true,
+        readCiPolicy: f.reader,
+      });
+      expect(r.code).toBe(2);
+      expect(f.api.post).toHaveBeenCalledWith(
+        `/statuses/${sha}`,
+        expect.objectContaining({ state: 'failure' }),
+      );
+      expect(r.lines.join('\n')).toMatch(/未查成|失败/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it('gate发表前DB off变force，不能把先前off结论写绿', async () => {
     const dir = temp();
     try {

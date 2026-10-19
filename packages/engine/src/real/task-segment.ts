@@ -371,6 +371,11 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
               effort: input.tier.effort,
               ...(input.route.reservationId ? { reservationId: input.route.reservationId } : {}),
               ...(input.resumeSessionId ? { resumeSessionId: input.resumeSessionId } : {}),
+              // 为什么起这一笔、属于第几个回合（#3140）；新历史直接给 resumeReason，老历史的借位仍由 runner 拆
+              ...(input.resumeReason?.trim() ? { resumeReason: input.resumeReason.trim() } : {}),
+              ...(input.cause !== undefined ? { cause: input.cause } : {}),
+              ...(input.causeSummary?.trim() ? { causeSummary: input.causeSummary } : {}),
+              ...(input.roundSeq !== undefined ? { roundSeq: input.roundSeq } : {}),
               detach: attach ? { attach: { startedAt: attach.startedAt } } : {},
             },
             {

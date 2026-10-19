@@ -17,7 +17,10 @@ function used(prefix: string): Set<string> {
 
 /** 契约里有、前端（http.ts）没用的：key → 为什么。 */
 /** 契约里有、页面故意不调的。用途成员和手工登记已由路由页接上（#1380），不在这里。 */
-const WEB_NOT_USED: Record<string, string> = {};
+const WEB_NOT_USED: Record<string, string> = {
+  // #3100 只做后端契约与持久化；通知卡上的关联交互归 #3034，接上后从这里删掉
+  linkAlertRepair: '明确关联已有单的后端先上，通知卡交互归 #3034',
+};
 const AUTH_NOT_USED: Record<string, string> = {
   // 飞书登录、回调是浏览器整页跳转（<a href>），不经 http.ts 的 fetch
   feishuLogin: '浏览器整页跳转，不走 fetch',

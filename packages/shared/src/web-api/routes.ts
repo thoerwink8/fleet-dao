@@ -45,6 +45,8 @@ import {
   AuditResponse,
   ExecuteAlertRepairRequest,
   ExecuteAlertRepairResponse,
+  LinkAlertRepairRequest,
+  LinkAlertRepairResponse,
   NotificationsQuery,
   NotificationsResponse,
   ResolveNotificationResponse,
@@ -104,6 +106,7 @@ import {
   UpdateSettingResponse,
 } from './settings.ts';
 import {
+  RunStepsResponse,
   RunTranscriptQuery,
   RunTranscriptResponse,
   TaskActionRequest,
@@ -225,6 +228,12 @@ export const WebRoutes = {
     path: '/tasks/:taskId/runs/:runId/transcript',
     query: RunTranscriptQuery,
     response: RunTranscriptResponse,
+  },
+  /** 一笔会话切好的步骤和小计（#3140）：由 run_transcript 的轻量行现算，不建步骤表。只认登录 Cookie。 */
+  runProcess: {
+    method: 'GET',
+    path: '/tasks/:taskId/runs/:runId/steps',
+    response: RunStepsResponse,
   },
   taskAction: {
     method: 'POST',
@@ -440,6 +449,13 @@ export const WebRoutes = {
     path: '/notifications/:notificationId/repair',
     request: ExecuteAlertRepairRequest,
     response: ExecuteAlertRepairResponse,
+  },
+  /** 明确关联已有单（#3100）：可信操作者指定这次告警由哪张现有单处理；服务端核实后保存，不开单、不派工。 */
+  linkAlertRepair: {
+    method: 'POST',
+    path: '/notifications/:notificationId/repair/link',
+    request: LinkAlertRepairRequest,
+    response: LinkAlertRepairResponse,
   },
   audit: { method: 'GET', path: '/audit', query: AuditQuery, response: AuditResponse },
   settings: { method: 'GET', path: '/settings', response: SettingsResponse },

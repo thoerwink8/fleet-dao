@@ -32,6 +32,8 @@ const READ_FAIL = /没读成：([a-z_]+)——([\s\S]+?)。(?:这种要人动手
 
 /** 要人做什么：按错误码，再按原话里点名的登录命令。 */
 export function actionOf(code: string | undefined, reason: string): string {
+  if (code === 'usage_unreported')
+    return '账单已读但用量未知，等下一轮自然读取；持续未报告时核查上游用量接口，不据此重新登录';
   const login = /grok login/.test(reason)
     ? 'grok login'
     : /cursor-agent login/.test(reason)

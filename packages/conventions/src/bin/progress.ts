@@ -1,3 +1,4 @@
+import { progressSessionId } from '../progress-session.ts';
 // 进度和创始人引导的入口：pnpm progress note / progress directive / progress read。
 // 引导记在仓里 docs/directives/（../directives.ts），进度流水和驾驶舱来的引导收件箱在置顶单 #1055（../progress.ts）。
 // 引导办没办完看它挂的单（文件里「单：#N」）：开着就是没办完、关了就是办完；不再有认领、标已处理（#2727）。
@@ -9,7 +10,7 @@
 // `directive --from-inbox <评论号>`：把驾驶舱答案收件箱（#1055）里的一条搬进仓（挂单同 directive），原评论改成已迁。
 
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, hostname, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -32,6 +33,7 @@ import {
 } from '../directives.ts';
 import { gitRunner } from '../git-runner.ts';
 import { ghRunner, issueNew } from '../issue-new.ts';
+import { flushPrivateQuotes, privatizeDirective, publicMeaning } from '../private-quotes.ts';
 import {
   inboxPending,
   markMigrated,
@@ -45,6 +47,7 @@ import {
   recentComments,
   textOf,
 } from '../progress.ts';
+import { franceSshHost, sshFleetApi } from '../project-world.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 const gh = ghRunner(root);
@@ -62,10 +65,7 @@ interface Hooks {
 /** 钩子家的脚本，按路径动态加载（同步专用检出里也是这样排的） */
 const hooks = async (): Promise<Hooks> =>
   (await import(pathToFileURL(join(root, 'agents', 'hooks', 'founder-inbox.mjs')).href)) as Hooks;
-const sessionId = (): string | null => {
-  const s = process.env.CLAUDE_CODE_SESSION_ID;
-  return typeof s === 'string' && s ? s : null;
-};
+const sessionId = (): string | null => progressSessionId(process.env);
 async function myLineage(): Promise<LineageInfo> {
   return (await hooks()).lineageOf({ home: homedir(), sessionId: sessionId() });
 }
@@ -104,24 +104,52 @@ async function newIssue(draft: { title: string; body: string }): Promise<number>
   }
 }
 const deps = { git, gh, newIssue };
+const privateApi = sshFleetApi(() => franceSshHost(), 'ssh', 30_000);
+const callingRoot = process.env.INIT_CWD || process.cwd();
+const kindHooks = await import(pathToFileURL(join(root, 'agents/hooks/repo-kind.mjs')).href);
+const external = kindHooks.repoKind(callingRoot) === 'external';
+async function privateRecord<T extends { text: string; atDate: Date; owner: string }>(
+  r: T,
+  meaning: string | undefined,
+) {
+  if (!external) return r;
+  const remoteResult = await gitRunner(callingRoot)(['config', '--get', 'remote.origin.url']);
+  const saved = await privatizeDirective(r, {
+    home: homedir(),
+    machine: hostname(),
+    lineage: r.owner === '无主' ? (sessionId() ?? 'unknown:no-session-id') : r.owner,
+    remote: remoteResult.code === 0 ? remoteResult.stdout.trim() : null,
+    meaning,
+    api: privateApi,
+  });
+  if (saved.remaining)
+    console.error('私有原话没传成：已留本机私有待传目录，稍后 pnpm progress quotes:flush。');
+  return saved.directive;
+}
 
 /** 收件箱里的一条搬进仓（挂 issue 这张单，没给就开一张），再把原评论改成「已迁」 */
 async function importFromInbox(
   id: number,
   issue: number | undefined,
+  meaning: string | undefined,
 ): Promise<{ url: string; issue: number }> {
   const c = await readInboxComment(id, { gh });
+  const original = directiveFromComment({ ...c, text: textOf(c) }, issue ?? 1);
+  const safe = await privateRecord(
+    { ...original, atDate: new Date(original.at.replace(' ', 'T').replace(' +0800', ':00+08:00')) },
+    meaning,
+  );
   let n = issue;
   if (n !== undefined) await checkIssueOpen(gh, n);
   else
     n = await newIssue(
       directiveIssueDraft({
-        text: textOf(c),
-        at: c.head.replace(/^【[^】]*】/, ''),
+        text: safe.text,
+        at: safe.at,
         source: `#${PROGRESS_ISSUE} 评论 ${id}`,
       }),
     );
-  const d = directiveFromComment({ ...c, text: textOf(c) }, n);
+  const d = { ...safe, issue: n };
   const url = await proposeFile(deps, {
     id: d.id,
     path: d.path,
@@ -129,7 +157,11 @@ async function importFromInbox(
     title: `搬创始人引导 ${d.id} 进仓（从 #${PROGRESS_ISSUE}，挂单 #${n}）`,
     did: `搬到 ${d.path}，挂单 #${n}，从 #${PROGRESS_ISSUE} 收件箱`,
   });
-  await markMigrated(c, `${d.path}（${url}）`, { gh });
+  await markMigrated(
+    external ? { ...c, head: PENDING_TAG + safe.at, body: PENDING_TAG + safe.at + '\n\n' + safe.text } : c,
+    `${d.path}（${url}）`,
+    { gh },
+  );
   return { url, issue: n };
 }
 
@@ -176,6 +208,8 @@ try {
       pending: { type: 'boolean' },
       issue: { type: 'string' },
       'from-inbox': { type: 'string' },
+      meaning: { type: 'string' },
+      stdin: { type: 'boolean' },
     },
   });
   const issueArg = (): number | undefined => {
@@ -184,17 +218,31 @@ try {
     if (!m?.[1]) throw new ProgressRefused(`--issue ${values.issue} 不对，要单号（如 2727）。`);
     return Number(m[1]);
   };
-  if (cmd === 'note') {
+  if (cmd === 'directive' && external) {
+    publicMeaning(values.meaning);
+    if (positionals.length)
+      throw new DirectiveRefused('对外仓原话只从 prompt-log 或 --stdin 读取，不接受命令行正文。');
+  }
+  if (cmd === 'quotes:flush') {
+    const result = await flushPrivateQuotes(homedir(), privateApi);
+    console.log('私有原话补传：成功 ' + result.sent + '，未传成 ' + result.remaining + '（内容不回显）。');
+    if (result.remaining) process.exitCode = 2;
+  } else if (cmd === 'note') {
     const c = await progressNote(positionals.join(' '), { gh });
     console.log(`贴到 #${PROGRESS_ISSUE} 了：${c.url}`);
   } else if (cmd === 'directive' && values['from-inbox'] !== undefined) {
     const cid = Number(values['from-inbox']);
     if (!Number.isInteger(cid) || cid <= 0)
       throw new ProgressRefused(`--from-inbox ${values['from-inbox']} 不对，要收件箱评论号。`);
-    const r = await importFromInbox(cid, issueArg());
+    const r = await importFromInbox(cid, issueArg(), values.meaning);
     console.log(`搬进仓了（评论 ${cid}，挂单 #${r.issue}），PR 已挂自动合并：${r.url}`);
   } else if (cmd === 'directive') {
-    const text = positionals.join(' ');
+    let text = positionals.join(' ');
+    if (values.stdin) {
+      if (text) throw new DirectiveRefused('--stdin 不和命令行正文一起用。');
+      text = '';
+      for await (const chunk of process.stdin) text += chunk;
+    }
     const line = await myLineage();
     const sent =
       line.status === 'found'
@@ -211,15 +259,16 @@ try {
           }))
         : [];
     const r = resolveDirective(
-      { text: text || undefined, at: values.at, owner: values.owner },
+      { text: text || undefined, at: values.at, owner: values.owner, preserveText: external },
       line,
       mergeLogs(readPromptLog(promptLogDir(), new Date()), mirasim),
       sessionId(),
     );
-    const made = await recordDirective(r, deps, issueArg());
+    const safe = await privateRecord(r, values.meaning);
+    const made = await recordDirective(safe, deps, issueArg());
     console.log(
-      `记下创始人引导 ${made.id}（挂单 #${made.issue}，主：${r.owner}，时间 ${r.at}，来源 ${r.source}）：${made.path}，PR 已挂自动合并 ${made.url}\n` +
-        `原话：${r.text.replace(/\s+/g, ' ').slice(0, 200)}\n办完就是把单 #${made.issue} 关掉：干活的 PR 写 Closes #${made.issue}（合并自动关），这个文件不用再改。`,
+      `记下创始人引导 ${made.id}（挂单 #${made.issue}，主：${safe.owner}，时间 ${safe.at}，来源 ${safe.source}）：${made.path}，PR 已挂自动合并 ${made.url}\n` +
+        `${external ? '意思' : '原话'}：${safe.text.replace(/\s+/g, ' ').slice(0, 200)}\n办完就是把单 #${made.issue} 关掉：干活的 PR 写 Closes #${made.issue}（合并自动关），这个文件不用再改。`,
     );
   } else if (cmd === 'read') {
     const limit = values.limit === undefined ? 10 : Number(values.limit);
@@ -248,6 +297,12 @@ try {
     throw new ProgressRefused(PROGRESS_USAGE);
   }
 } catch (e) {
-  console.error(e instanceof Error ? e.message : String(e));
+  console.error(
+    external && process.argv[2] === 'directive' && !(e instanceof DirectiveRefused)
+      ? '对外仓引导没记成；私有原话已存的保留待传，内容不回显。'
+      : e instanceof Error
+        ? e.message
+        : String(e),
+  );
   process.exitCode = e instanceof ProgressRefused || e instanceof DirectiveRefused ? 1 : 2;
 }

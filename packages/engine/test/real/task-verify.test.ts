@@ -150,6 +150,9 @@ function rig(
     driverRun?: (spec: HostRunSpec, hooks: HostRunHooks, n: number) => Promise<HostReport>;
     routeFor?: (routeId: string) => RouteLaunchFacts | null;
     readPullError?: Error;
+    /** 写验收结论进库时抛（#3140）：结论照常交回，只写日志。 */
+    noteVerdictError?: Error;
+    noteAggregateError?: Error;
     pullFilesError?: Error;
     setStatusError?: (posted: Posted[]) => Error | undefined;
     pickRouteError?: Error;
@@ -167,6 +170,10 @@ function rig(
   const specs: HostRunSpec[] = [];
   const recorded: RunRecord[] = [];
   const started: RunStart[] = [];
+  /** 验收有结论时写在验收那一笔上的（#3140，runs.verdict）：[runId, 结论]。 */
+  const verdicts: [string, unknown][] = [];
+  const aggregates: unknown[] = [];
+  const logs: { message: string; fields?: Record<string, unknown> }[] = [];
   /** 每次开跑带给 runs.start 的预占编号（没带是 undefined）。 */
   const startedWith: (string | undefined)[] = [];
   /** 收场时放掉的预占编号。 */
@@ -258,6 +265,14 @@ function rig(
       async record(r) {
         recorded.push(r);
       },
+      async noteVerdict(runId, verdict) {
+        if (opts.noteVerdictError) throw opts.noteVerdictError;
+        verdicts.push([runId, verdict]);
+      },
+      async noteVerifyAggregate(aggregate) {
+        if (opts.noteAggregateError) throw opts.noteAggregateError;
+        aggregates.push(aggregate);
+      },
     },
     reservations: {
       async release(id) {
@@ -270,6 +285,7 @@ function rig(
       return `run-${String(ids).padStart(4, '0')}`;
     },
     heartbeatEveryMs: 5,
+    log: (message, fields) => logs.push({ message, ...(fields ? { fields } : {}) }),
     sleep: async (ms) => {
       slept.push(ms);
     },
@@ -290,7 +306,23 @@ function rig(
     round: 1,
     ...over,
   });
-  return { run, input, ft, posted, specs, recorded, started, startedWith, released, asked, reads, slept };
+  return {
+    run,
+    input,
+    ft,
+    posted,
+    specs,
+    recorded,
+    started,
+    startedWith,
+    released,
+    asked,
+    reads,
+    slept,
+    verdicts,
+    aggregates,
+    logs,
+  };
 }
 
 describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
@@ -344,6 +376,92 @@ describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
     expect(got.retry).toBeUndefined();
     expect(r.posted.at(-1)).toMatchObject({ sha: HEAD, state: 'failure' });
     expect(r.posted.at(-1)?.description).toContain('没做到验收条');
+  });
+
+  it('验收有结论：结论（过没过、哪几条没过、转给人的）写在验收那一笔 runs 上；回合号一路带到开跑那一行（#3140）', async () => {
+    const pass = rig();
+    const ok = await pass.run(pass.input({ roundSeq: 2 }), ctx());
+    expect(ok.pass).toBe(true);
+    expect(pass.verdicts).toEqual([
+      [pass.recorded[0]?.runId, { pass: true, problems: [], failedCriteria: [], handedOver: [] }],
+    ]);
+    expect(pass.started[0]).toMatchObject({ roundSeq: 2, segment: 'verify' });
+    expect(pass.recorded[0]).toMatchObject({ roundSeq: 2 });
+
+    const fail = rig({ driverRun: async () => report(MODEL_FAIL) });
+    await fail.run(fail.input(), ctx());
+    expect(fail.verdicts).toHaveLength(1);
+    expect(fail.verdicts[0]?.[1]).toMatchObject({
+      pass: false,
+      problems: ['没做到验收条：第 1 条：单子要状态栏，代码里没有'],
+      failedCriteria: [1],
+    });
+    // 老历史的入参没有回合号：开跑那一行不带这个键
+    expect(fail.started[0]).not.toHaveProperty('roundSeq');
+  });
+
+  it('【故意造出的失败】结论写不进库：验收结果照常交回、状态照常贴，只写日志，不把一次验过的验收算成没验成', async () => {
+    const r = rig({ noteVerdictError: new Error('库不通') });
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ pass: true, problems: [] });
+    expect(got.unavailable).toBeUndefined();
+    expect(r.posted.at(-1)).toMatchObject({ state: 'success' });
+    expect(r.verdicts).toEqual([]);
+    expect(r.specs).toHaveLength(1);
+    expect(r.logs).toContainEqual({
+      message: '验收原始结论没写进库（裁决照常交回）',
+      fields: expect.objectContaining({
+        runId: r.recorded[0]?.runId,
+        headSha: HEAD,
+        evidenceStatus: 'unavailable',
+        error: '库不通',
+      }),
+    });
+  });
+
+  it.each([true, false])(
+    '聚合写失败：真实pass=%s与GitHub状态不变，只记录证据失败且不起第二次模型',
+    async (passed) => {
+      const r = rig({
+        noteAggregateError: new Error('聚合库不通'),
+        driverRun: async () => report(passed ? MODEL_PASS : MODEL_FAIL),
+      });
+      const got = await r.run(r.input(), ctx());
+      expect(got.pass).toBe(passed);
+      expect(got.problems).toEqual(passed ? [] : ['没做到验收条：第 1 条：单子要状态栏，代码里没有']);
+      expect(got.unavailable).toBeUndefined();
+      expect(got.retry).toBeUndefined();
+      expect(r.posted.at(-1)?.state).toBe(passed ? 'success' : 'failure');
+      expect(r.specs).toHaveLength(1);
+      expect(r.verdicts[0]?.[1]).toMatchObject({ pass: passed });
+      expect(r.aggregates).toEqual([]);
+      expect(r.logs).toContainEqual({
+        message: '验收聚合结论没写进库（裁决照常交回）',
+        fields: expect.objectContaining({
+          sourceRunIds: [r.recorded[0]?.runId],
+          taskId: TASK_ID,
+          prNumber: 42,
+          headSha: HEAD,
+          round: 1,
+          evidenceStatus: 'unavailable',
+          error: '聚合库不通',
+        }),
+      });
+    },
+  );
+
+  it('原始失败裁决写不进库：仍返原问题并贴failure，不改没验成、不再起模型', async () => {
+    const r = rig({ noteVerdictError: new Error('原始库不通'), driverRun: async () => report(MODEL_FAIL) });
+    const got = await r.run(r.input(), ctx());
+    expect(got).toMatchObject({ pass: false, problems: ['没做到验收条：第 1 条：单子要状态栏，代码里没有'] });
+    expect(got.unavailable).toBeUndefined();
+    expect(got.retry).toBeUndefined();
+    expect(r.posted.at(-1)?.state).toBe('failure');
+    expect(r.specs).toHaveLength(1);
+    expect(r.verdicts).toEqual([]);
+    expect(r.logs).toContainEqual(
+      expect.objectContaining({ message: '验收原始结论没写进库（裁决照常交回）' }),
+    );
   });
 
   it('写这张单的族不止一个：全部跳过（先 gpt 后 claude 写的 → grok 没路由，验的是 deepseek）', async () => {
@@ -855,6 +973,55 @@ describe('冷验收会话脱开引擎跑、引擎重启后接回（#2848：和�
     expect(r2.ft.removes).toContain(d.cwd);
     expect(existsSync(join(ioRoot, d.runId))).toBe(false);
   });
+
+  it.each([
+    { kind: 'raw', passed: true },
+    { kind: 'raw', passed: false },
+    { kind: 'aggregate', passed: true },
+    { kind: 'aggregate', passed: false },
+  ])(
+    '接回真实裁决pass=$passed、$kind写失败：不改原裁决、不丢任务日志、不新起模型',
+    async ({ kind, passed }) => {
+      const r = rig({
+        routeFor: mirasimRoute,
+        handoff: sessionHandoff(join(root, 'evidence-io')),
+        ...(kind === 'raw'
+          ? { noteVerdictError: new Error('接回原始库不通') }
+          : { noteAggregateError: new Error('接回聚合库不通') }),
+        driverRun: async () => report(passed ? MODEL_PASS : MODEL_FAIL, { hostId: 'mirasim' }),
+      });
+      const attach = {
+        runId: 'run-0007',
+        startedAt: new Date().toISOString(),
+        family: 'gpt',
+        modelId: 'gpt-model',
+        routeId: 'route-gpt',
+        poolId: 'pool-gpt',
+        cwd: join(root, 'verify-run-0007'),
+      };
+      const got = await r.run(r.input({ attach }), ctx());
+      expect(got.pass).toBe(passed);
+      expect(got.problems).toEqual(passed ? [] : ['没做到验收条：第 1 条：单子要状态栏，代码里没有']);
+      expect(got.unavailable).toBeUndefined();
+      expect(got.retry).toBeUndefined();
+      expect(r.posted.at(-1)?.state).toBe(passed ? 'success' : 'failure');
+      expect(r.asked).toEqual([]);
+      expect(r.started).toEqual([]);
+      expect(r.specs).toHaveLength(1);
+      expect(r.recorded).toEqual([expect.objectContaining({ runId: attach.runId, outcome: 'done' })]);
+      expect(r.logs).toContainEqual({
+        message:
+          kind === 'raw' ? '验收原始结论没写进库（裁决照常交回）' : '验收聚合结论没写进库（裁决照常交回）',
+        fields: expect.objectContaining({
+          taskId: TASK_ID,
+          headSha: HEAD,
+          runId: attach.runId,
+          evidenceStatus: 'unavailable',
+          error: kind === 'raw' ? '接回原始库不通' : '接回聚合库不通',
+        }),
+      });
+    },
+  );
 
   it('接回时引擎又在走（发版连着发）：不碰会话、不读 GitHub，当场再交回 detached 等下一个引擎', async () => {
     const leaving = sessionHandoff(join(root, 'io'));

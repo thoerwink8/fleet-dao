@@ -9,6 +9,7 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - `packages/db/drizzle.config.ts`：只用来生成迁移，不连库。
 - 命令（`pnpm --filter @fleet-dao/db <命令>`）：`db:generate`（生成迁移并格式化）、`db:migrate`、`db:seed`、`db:catalog`、`db:routing`，入口都在 `packages/db/src/bin/`。
 - `packages/db/src/bin/local-pg.ts`：仓根 `pnpm start` / `pnpm stop` / `pnpm pg:local` 都指向它，起停本机嵌入式 Postgres（默认端口 55432，判法在 `src/local-pg.ts`）。
+- `src/queries/task-process.ts`：任务概览按请求的 runIds 单次批量读轻量统计列，不读 text 或整份 meta；调用/结果的接受和去重由 shared 的同一解析器供概览与步骤使用。无调用号命令仍未知；孤立失败和编辑事实保留在结果出现的步骤，不造调用号或文件路径。没有记录和读不到分开，不拿 0 代替。
 - `packages/db/routing.default.json`、`packages/db/quota-reserve.default.json`：路由骨架和额度留量线的默认值，只在新装机时写初始值。
 
 ## 测试
@@ -33,3 +34,9 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - 改了库、用户、备份相关的部署：同步 ops 第三节「用户、目录、库」、第十一节「备份与恢复」。
 
 - `settleQueuedDecision` 仅结算精确 `answerId`、`claimId`、`answeredAt` 且仍 queued 的答案。历史无代次不授权；失败/未知不能 resolve，不能靠同毫秒时间相等认定同一次回答。
+
+- `private_quotes` 存创始人原话，仅私有管理链访问，不入 realtime 表名单。同 id 异文必须拒绝并回滚整批，不能 upsert 覆盖原话；receivedAt 只在首次入库生成。
+- PR 文件账经 `recordPrHeadFiles` 同事务写 `pr_head_snapshots` 和文件，成功零文件也有快照。读取用 `readPrHeadFiles` 传完整头；只有精确头 `complete` 才是完整清单，旧行无 metadata 不推定完整，失败不覆盖成功。
+- `verify_aggregates` 独立存组合结论，来源 run 必须属于同任务/工作流/PR 且已有原始 verdict；已有来源不能跨头或跨验收轮复用。首次精确头由真实验收装配绑定，runs 自身没有 head 列，库不能独立证明首次头身份。
+
+- `recordCheckoutReceipt` 复用 audit_log：每次物理完整检出独立 receiptId，target 为 checkout:<receiptId>，同 ID 同内容幂等、异内容拒绝；事务锁串行查重。无回执的旧历史保持未知，不回填、不以已撤报警冒充成功证据。

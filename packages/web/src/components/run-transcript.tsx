@@ -2,6 +2,7 @@
 // 数据来自后端按段记的 run_transcript（引擎写、接口按段增量读）。抽屉打开才读；在跑的那一笔每 3 秒往后追加、贴底跟随，
 // 人往上滚就停止跟随并出现「跳到最新」。工具调用默认折成一行（工具名加摘要），出错的自动展开；超长的输出截断、点「显示全部」。
 // 有「只看出错」「只看文字」两个过滤。条目多时只画最近 200 条（没有虚拟滚动库，不加依赖），更早的点「显示更早的」再放出 200 条。
+import { isSubagentMeta } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { ChevronRight, LoaderCircle } from 'lucide-react';
 import {
@@ -53,11 +54,18 @@ type Item =
 
 export type TranscriptFilter = 'all' | 'errors' | 'text';
 
-const isSub = (e: TranscriptEntry) => e.meta?.subagent === true;
+/** 子代理里的条目：引擎实际写的 meta.subagent 是它所属那次 Agent 调用的编号（字符串），不是 true（shared 的 isSubagentMeta）。 */
+const isSub = (e: TranscriptEntry) => isSubagentMeta(e.meta);
+
+const callIdOf = (e: TranscriptEntry): string | undefined => {
+  const v = e.meta?.callId;
+  return typeof v === 'string' && v !== '' ? v : undefined;
+};
 
 /**
- * 工具调用和它的结果（同一个工具、同一层）并起来：结果通常紧跟着；调用的是子代理时，结果在子代理那几条之后，往后找到同层、
- * 同工具的第一条结果为止，中间又出现同层同工具的调用就不再找。找不到结果的（还没回来、被截掉的）单画调用。
+ * 工具调用和它的结果并起来。调用和结果都带原生调用号（meta.callId）的按调用号对：并行调用的结果倒序回来也不会错配。
+ * 老记录没有调用号的按同工具、同一层往后找第一条结果：结果通常紧跟着；调用的是子代理时，结果在子代理那几条之后，
+ * 中间又出现同层同工具的调用就不再找。找不到结果的（还没回来、被截掉的）单画调用。
  */
 export function groupEntries(entries: readonly TranscriptEntry[]): Item[] {
   const items: Item[] = [];
@@ -70,6 +78,19 @@ export function groupEntries(entries: readonly TranscriptEntry[]): Item[] {
       continue;
     }
     let result: TranscriptEntry | undefined;
+    const id = callIdOf(e);
+    if (id !== undefined) {
+      for (let j = i + 1; j < entries.length; j++) {
+        const n = entries[j];
+        if (n && !used.has(j) && n.kind === 'tool_result' && callIdOf(n) === id) {
+          result = n;
+          used.add(j);
+          break;
+        }
+      }
+      items.push({ kind: 'call', call: e, result });
+      continue;
+    }
     for (let j = i + 1; j < entries.length; j++) {
       const n = entries[j];
       if (!n || used.has(j) || isSub(n) !== isSub(e) || n.tool !== e.tool) continue;
@@ -120,7 +141,15 @@ function SubagentTag({ entry }: { entry: TranscriptEntry }) {
 }
 
 /** 超长文字：只露开头，点「显示全部」看全文。短的原样画，不带按钮。 */
-function Clamped({ text, className, dataKind }: { text: string; className: string; dataKind?: string }) {
+export function Clamped({
+  text,
+  className,
+  dataKind,
+}: {
+  text: string;
+  className: string;
+  dataKind?: string;
+}) {
   const [all, setAll] = useState(false);
   const lines = text.split('\n');
   const long = lines.length > CLAMP_LINES || text.length > CLAMP_CHARS;

@@ -52,7 +52,7 @@
 
 - 装机：ops 第四节（怎么跑装机脚本）。
 - 发版：`deploy/release.sh`，见 ops 第九节（发布应用）。
-- 仓根命令（仓合同 `entry`）：`pnpm dev` 在本机起驾驶舱前端的 mock 开发服务（`packages/web` 的 `dev:mock`，前台跑、Ctrl+C 停，不需要后端）；`pnpm start` / `pnpm stop` 起停本机要常驻的东西，目前只有嵌入式 Postgres（`pnpm pg:local start` / `stop`，脱离会话起，要真库的 e2e 先 start）；`pnpm check` 见下。本机不起引擎和驾驶舱后端，它们跑在法国。进度单用 `pnpm progress <note|directive|claim|done|read>`，本机会话上报用 `pnpm local-sessions <install|uninstall|status>`。
+- 仓根命令（仓合同 `entry`）：`pnpm dev` 在本机起驾驶舱前端的 mock 开发服务（`packages/web` 的 `dev:mock`，前台跑、Ctrl+C 停，不需要后端）；`pnpm start` / `pnpm stop` 起停本机要常驻的东西，目前只有嵌入式 Postgres（`pnpm pg:local start` / `stop`，脱离会话起，要真库的 e2e 先 start）；`pnpm check` 见下。本机不起引擎和驾驶舱后端，它们跑在法国。进度单用 `pnpm progress <note|directive|claim|done|read>`，对外仓引导带 `--meaning`、原文走私有处，补传用 `pnpm progress quotes:flush`（见 [创始人引导](docs/directives/README.md)）；本机会话上报用 `pnpm local-sessions <install|uninstall|status>`。
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
 - 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，整个 `agents/test/` 只在它受影响时带、CI 每个 PR 照旧全跑，引擎的会话交活只认它；它判出要全跑时本机不跑、退出码 3，写明全量交给 CI，真要在本机全跑带 `--all`，只跑受影响的包带 `--affected`）和格式、类型；`pnpm check` 默认 = 格式 + 类型 + 改到的测试（同 `pnpm test:changed`，相对 origin/main）+ 卫生检查，四样都跑完再判红，每样报耗时，任何一样没跑成都算红；`pnpm check --all` 才全量 vitest run（本机要 8 分钟以上，和 CI 重复，一般不跑）。只改一个包的入口脚本、包内模块、测试（不在它 `exports`、`bin` 走得到的面上）时只测这个包自己，不连带依赖它的包（`packages/conventions/src/package-surface.ts`）。本机要真 Postgres 的（驾驶舱 e2e）先 `pnpm pg:local start`（Windows 嵌入式库，脱离会话起，见 `packages/web/e2e/README.md`）。CI 一律全套、并行跑，PR 和 main 都一样（`.github/workflows/ci.yml`，见 design 第五节「CI 一律全套」，决定 0101）；本机按改动选只是推前的快反馈。
 - 开单：`pnpm issue:new --kind 需求 --domain engine --nature bug --milestone 当前 --title "一句话" --body-file 正文.md`（`--domain` 是 engine、api、mirasim 里一个，`--nature` 是 bug、perf、process 里一个，标签名带「域:」「性质:」，只用来筛；`当前`＝开着的那个 `v<N>` 版本，一周一版、到期自动收口，别写死 `v<N>`；未排期写 `--milestone 未排期`，母单加 `--mother`，子单加 `--parent <母单号>`），缺类别、域、性质、里程碑，或正文里「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」有一节没写都不开；整份正文原样进 issue（没有 `--specs`，不再另存需求.md，#654）。
@@ -60,9 +60,30 @@
 - 欠账：`pnpm debt:check` 只看文件，查活文档里推后的话带着单号（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
 - 加新项目：`pnpm project add <owner/仓>` 一条命令做到底（登记、装两个 App、流程标签、仓档案、补齐 PR、真实策略读桥、全绿才开接活、冒烟单），可重复跑；`pnpm project check <owner/仓>` 只查（退出码 0 全绿、1 有没过的、2 没查成）。两个 App 装没装经法国的 `fleet-api project installations <owner/仓> --github-id <仓号>` 读（只读，和驾驶舱导入列表同一份归并；没读全是没查成，不是没装）。见 ops 第九节「加新项目」。
 - 计划：`pnpm plan` 从 GitHub 现读版本、先后、母单和子单打印出来，不写文件（#654 起仓里不存快照）；没登录、GitHub 读不到、先后标记认不出都报错、退出码 2。每天一轮 GitHub 对账（`.github/workflows/github-audit.yml`，随时也能 `pnpm github:audit`）查单子和先后有没有断，见 design 第七节「GitHub 对账」。
-- 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。
+- 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。同步完想核各家实际读没读到规矩，在 fleet-dao 仓根跑 `pnpm agents:probe [家的 id …]`：真起每家装了的 CLI 问一次（花各家额度，只在手动跑时跑），按它原样抄出的通用段、仓根 AGENTS.md 标题和 `pnpm check` 判，每家一行：过、没读到什么、没装、没查成；退出码全过 0、有没读到的 1、只有没查成的 2（`packages/agents-sync/src/probe.ts`）。
 - 无人值守状态按真实会话号隔离：`unattended.mjs` 的命令依次读取 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`CODEX_SESSION_ID`；Stop 和 SessionStart 优先使用事件里的 `session_id`，缺失才读同一组环境变量。给出的来源不合法就明确报错，不借另一个会话号。
 - 无人值守接续：Claude/Codex 用同步 Stop 把未完成工作送到下一轮，成功 PostToolUse 登记实质进展；后台任务条数不证明完成通知送达。连续三次无进展明确暂停故障；on 只记意图，不代表已安装、信任、执行或通知验证。各入口能力与验法见 [CLI 无人值守接续](docs/design/CLI无人值守接续.md)。
+- `pnpm work run <单号>` 登记真实 Claude session / Codex thread，开启无人值守后由同步 Stop 一次性消费本会话终态；Codex 后台完成不主动开新轮。只有 `CODEX_SESSION_ID` 的 root-session 不代替 thread；缺归属及旧 `dispatcher=null` 记录用 `pnpm work runs` 手工读取，续跑不改原归属。
+
+- 本机受管工人的审查退回：`pnpm work return <单号> --body-file <完整意见文件>` 交由退回专用工作流与既有合并闸按同一 PR 串行登记；先核实 PR 级 PREPARE，再写当前头阻合状态和正式 review 回执，未结 PREPARE 跨换头/强推继续阻合；只有核实真实状态与正式回执才报 `registered/blocked`，`queued/unconfirmed` 不代表已阻止合并。`pnpm work feedback <单号> [--wait|--retry]` 读取完整意见、等 Actions 结果或按原请求重试，取消、超时和断线保留本机意图。工人用 `pnpm work ack <单号> --return <编号>` 确认收到；审查方用 `pnpm work resolve <单号> --return <编号> --body-file <核验依据>` 对精确候选 head 解除责任；ack、CI 绿和新 head 都不代替 resolve。交付用 `pnpm work deliver <单号>`，不会擅自解除手工草稿。当前显式退回事务只允许个人仓 owner 发起，工人不能替审查方 resolve；普通组织仓和没有退回协议的本机 PR 保留原判法。
+
+### Windows 上的 Linux 安全测试
+
+`pnpm check`（含 `--all`）和 `pnpm test:changed` 选到安全归档测试时，会将它们交给显式配置的本机 Linux 普通用户；其余测试仍在 Windows 跑。单独验这组测试用 `pnpm test:linux`。不配置或环境不可用会明确失败，不跳过、不自动安装或启动新发行版、不改默认发行版。
+
+将 `FLEET_TEST_LINUX_RUNNER` 设置为本机 JSON 配置文件的绝对路径，配置不进仓。例如已安装 WSL 的配置结构：
+
+```json
+{
+  "command": "C:/Windows/System32/wsl.exe",
+  "args": ["--distribution", "<已配置的发行版>", "--user", "<普通用户>", "--exec", "/usr/bin/env", "-i", "HOME=/home/<用户>", "TMPDIR=/home/<用户>/tmp", "PATH=/usr/local/bin:/usr/bin:/bin", "/usr/local/bin/node"],
+  "dependencyRoot": "/home/<用户>/fleet-test-dependencies"
+}
+```
+
+`command` 和 `args` 合起来必须启动 Linux Node（符合仓根 Node 版本要求），检查器在末尾加执行参数，JSON 快照从 stdin 传入；支持已有的其他本机 Linux 启动器。不要将 SSH/VPS 命令当本机 runner。`dependencyRoot` 是该 Linux 中已用 `pnpm install --frozen-lockfile` 安装依赖的仓目录，锁文件、workspace 设置和各包依赖声明须与本次工作树一致。运行时把当前已跟踪和未忽略的新文件复制到独立 Linux 临时目录，包含未提交改动，已删的文件不复活；workspace 依赖链接指向本次快照，第三方依赖复用已安装目录。源码摘要、普通用户、测试清单和 JSON 结果逐项核对后才算通过。Linux 本机和 CI 直接跑原测试。
+
+实现依据：[Node 的真实路径解析](https://github.com/nodejs/node/blob/main/doc/api/cli.md#--preserve-symlinks)要求防止依赖链接回到旧源码；[WSL 显式发行版和用户参数](https://learn.microsoft.com/windows/wsl/basic-commands)允许使用现有环境而不修改默认设置。Windows 不提供 `/proc/self/fd` 上逐级固定目录句柄的归档语义，不能以普通路径操作替代安全断言。
 
 ### 批量开母子单
 

@@ -2,7 +2,7 @@
 // 里程碑，#654；查询轴「域:」「性质:」从单上照抄，某一轴不是恰好一个就不抄那一轴，没有需求号或单上没有也不挡）、
 // 第 2 轮起改 PR 正文（#2723）、等 CI（等着时 PR 已合并：现读核实、记合并回执再回，merge-receipt.ts，#3018）、并主线（并完把会话的树快进到新头；树在旧头之后还有没推的提交就在本地把远端并进来再推，
 // 并不上才停下留言）、关单，以及建树（记下主线的头；树等起会话时由会话
-// 自己建，见 sessions.ts）、收树（干净未发布提交先完整打包并独立恢复核验，复杂未提交成果留原树；界面验收图片先核对远端、没交付存进受限归档，存不成不删树，见 shots.ts；
+// 自己建，见 sessions.ts）、收树（干净未发布提交先完整打包并独立恢复核验；复杂未提交成果要有受管回执并独立恢复核过才删，核不上留原树；界面验收图片先核对远端、没交付存进受限归档，存不成不删树，见 shots.ts；
 // 不带 shots 的收树、建树前删同一位置的旧树也过这一道）。
 // GitHubError 一律换成 PortError：码和「能不能重试」原样带过 Temporal 边界，失败分流按码判。
 
@@ -16,6 +16,7 @@ import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
 import {
   type EnginePorts,
+  type HeadFileStat,
   type PortContext,
   PortError,
   type PrBody,
@@ -25,10 +26,11 @@ import {
   type Worktree,
 } from '../ports.ts';
 import { isTaskBranch } from '../task-branch.ts';
+import type { ProcLook } from './complex-preserve.ts';
 import type { UserExec } from './exec.ts';
 import { type MergeLog, settleMergedCi } from './merge-receipt.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
-import { preserveWorktree } from './preserve-worktree.ts';
+import { preserveThenRemove } from './preserve-worktree.ts';
 import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
 import {
   blobsInBundle,
@@ -51,6 +53,7 @@ import {
   isAncestor,
   isMergeChainOnto,
   mergeInto,
+  numstatAgainst,
   pinIncoming,
   pinMainline,
   type UserTree,
@@ -78,6 +81,7 @@ export type EngineGitHub = Pick<
   | 'commitIdentity'
   | 'syncMainline'
   | 'commentPull'
+  | 'fetchCommitHead'
   | 'fetchMainline'
   | 'fetchBranchHead'
   | 'readFileDiff'
@@ -105,8 +109,28 @@ export interface GitHubPortsDeps extends ReviewAuditDeps {
   /** 会话目录里跑的 git、sh（测试里换成 PATH 上的）。 */
   gitBin?: string;
   shBin?: string;
+  /**
+   * 删树前再问有没有没结束的会话、在跑的任务或子任务工作流占着这个目录。
+   * 调用方把自己的工作流编号交进来，只豁免这一条。不给这个函数：复杂成果留树，干净的未发布提交仍按原样保全后删。
+   * 查不清回 unknown，不当成没人用。
+   */
+  confirmTreeIdle?: (dir: string, caller?: { workflowId?: string }) => Promise<'idle' | 'busy' | 'unknown'>;
+  /** 测试用：看进程 cwd 的口子。生产不给，用 /proc。 */
+  treeProcessLook?: ProcLook;
   /** 等 CI 看到已合并、核实或记合并回执没成时写的日志；不给就打到控制台。 */
   log?: MergeLog;
+  /**
+   * 把一个头改了哪些文件记进库（pr_head_files，#3140）。写不进、没给都不挡推分支和开 PR：只记日志，页面写「没读到」。
+   * 一个头一次写全，同键冲突跳过（活动重试不重复）。
+   */
+  recordHeadFiles?: (input: {
+    repoId: string;
+    prNumber: number;
+    headSha: string;
+    files: readonly HeadFileStat[];
+    total?: number;
+    reason?: string;
+  }) => Promise<void>;
 }
 
 /** 远小于心跳超时（limits.heartbeatSeconds 默认 120 秒）：漏一两次也不判工人丢了。 */
@@ -398,6 +422,44 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
   const log: MergeLog = deps.log ?? ((message, fields) => console.warn(message, fields ?? {}));
   const auditLateReview = createReviewAudit(deps, log);
 
+  /** 数精确头的 numstat，保留截断前总数；没数成记录明确失败，不挡推分支。 */
+  const numstatOf = async (
+    t: UserTree,
+    mainline: string,
+    head: string,
+  ): Promise<{ files: HeadFileStat[]; snapshot: { total: number } | { reason: string } }> => {
+    try {
+      const { files, total } = await numstatAgainst(t, mainline, head);
+      if (total > files.length) {
+        log('这个头改的文件太多，只记前面的（pr_head_files 的上限）', { head, total, kept: files.length });
+      }
+      return { files, snapshot: { total } };
+    } catch (error) {
+      log('每个文件各增删几行没数成（照旧推，页面写没读到）', { head, error: errMessage(error) });
+      return { files: [], snapshot: { reason: `numstat 采集失败：${errMessage(error)}` } };
+    }
+  };
+
+  /** 把文件与采集状态交给同一事务；零文件和失败也落账。写不进只写日志，不挡推分支。 */
+  const noteHeadFiles = async (
+    repoId: string,
+    prNumber: number,
+    headSha: string,
+    files: readonly HeadFileStat[],
+    snapshot: { total: number } | { reason: string },
+  ): Promise<void> => {
+    if (deps.recordHeadFiles === undefined) return;
+    try {
+      await deps.recordHeadFiles({ repoId, prNumber, headSha, files, ...snapshot });
+    } catch (error) {
+      log('这个头改了哪些文件没记进库（pr_head_files），页面写没读到', {
+        prNumber,
+        headSha,
+        error: errMessage(error),
+      });
+    }
+  };
+
   const treeAs = (dir: string, user: SessionUser, prefix: string, ctx: PortContext): UserTree => ({
     exec: deps.exec,
     user,
@@ -434,6 +496,36 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       ...(issue === undefined ? {} : { issueNumber: issue, remote: remoteShots(repo, t, ctx) }),
     });
   };
+
+  /** 保全后只删这一个目录。复杂成果没有 confirmTreeIdle 时留树；干净未发布提交仍保全后删。 */
+  const confirmTreeIdle = deps.confirmTreeIdle;
+  const archiveThenRemove = (
+    tree: UserTree,
+    taskId: string,
+    branch: string,
+    delivery: ShotsDelivery | undefined,
+    ctx: PortContext,
+  ) =>
+    preserveThenRemove(
+      tree,
+      deps.archiveDir,
+      {
+        taskId,
+        branch,
+        workRoot: trees.root,
+        ...(deps.treeProcessLook ? { processLook: deps.treeProcessLook } : {}),
+        ...(confirmTreeIdle
+          ? {
+              confirmIdle: () =>
+                ctx.workflowId
+                  ? confirmTreeIdle(tree.dir, { workflowId: ctx.workflowId })
+                  : confirmTreeIdle(tree.dir),
+            }
+          : {}),
+      },
+      delivery,
+      () => trees.remove(tree.dir),
+    );
 
   /** 这棵树现在归谁：不在（从没起过会话、或已经收了）明确报错，不当成「没有改动」。 */
   const ownerOrFail = async (dir: string): Promise<SessionUser> => {
@@ -474,6 +566,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       newHead,
       [input.head],
       ctx.signal,
+      t,
     );
     const ff = await fastForward(t, bytes, ref, newHead);
     // ff === 'diverged'：核过之后（上面两行）工作树又变了，极罕见的竞态，一样跳过、不抛，下一轮再试。
@@ -501,8 +594,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
               { retryable: false, details: { worktree: path } },
             );
           }
-          await preserveWorktree(t, deps.archiveDir, { taskId: input.taskId, branch: input.branch }, kept);
-          await trees.remove(path);
+          await archiveThenRemove(t, input.taskId, input.branch, kept, ctx);
         }
         return { path, branch: input.branch, baseSha: main.head };
       });
@@ -545,16 +637,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           };
         }
       }
-      const archivedTo = await preserveWorktree(
-        t,
-        deps.archiveDir,
-        {
-          taskId: input.taskId,
-          branch: input.branch,
-        },
-        delivery,
-      );
-      const { gone } = await trees.remove(input.path);
+      const { gone, archivedTo } = await archiveThenRemove(t, input.taskId, input.branch, delivery, ctx);
       return { removed: !gone, gone, ...(archivedTo ? { archivedTo } : {}), ...(shots ? { shots } : {}) };
     },
 
@@ -564,15 +647,24 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       // 推上去的头相对主线的净改动和新增行数（#2762）。新增行只是给流程健康记账的：没数成不挡推，不带这一项
       const delivered = async (mainline: string, pushedHead: string) => {
         const changedFiles = await changedFilesAgainst(t, mainline, pushedHead);
+        // 每个文件各增删几行（#3140）：任务页的改动卡读它。数不成不挡推，不带这一项（页面写「没读到」）
+        const measured = await numstatOf(t, mainline, pushedHead);
+        const numstat = measured.files;
+        const numstatSnapshot = measured.snapshot;
+        if (input.prNumber !== undefined) {
+          await noteHeadFiles(input.repo.id, input.prNumber, pushedHead, numstat, numstatSnapshot);
+        }
         try {
           return {
             head: pushedHead,
             changedFiles,
             addedLines: await addedLinesAgainst(t, mainline, pushedHead),
+            numstat,
+            numstatSnapshot,
           };
         } catch (error) {
           if (ctx.signal.aborted) throw error;
-          return { head: pushedHead, changedFiles };
+          return { head: pushedHead, changedFiles, numstat, numstatSnapshot };
         }
       };
       let head = await headOf(t);
@@ -619,6 +711,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           main.head,
           [incoming],
           ctx.signal,
+          t,
         );
         await fetchBundle(t, bytes, ref);
       }
@@ -695,6 +788,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             freshHead,
             [incoming],
             ctx.signal,
+            t,
           );
           await fetchBundle(t, fetchedBundle.bytes, fetchedBundle.ref);
         }
@@ -811,6 +905,15 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           ctx,
         ),
       );
+      // 推这个头时数出来的文件清单，PR 开成了才有号可记（#3140）
+      if (input.numstat !== undefined || input.numstatSnapshot !== undefined)
+        await noteHeadFiles(
+          input.repo.id,
+          r.number,
+          input.head,
+          input.numstatSnapshot === undefined ? [] : (input.numstat ?? []),
+          input.numstatSnapshot ?? { reason: '历史推分支结果缺少文件快照总数，完整性未知' },
+        );
       return { prNumber: r.number, url: r.url };
     },
 
@@ -900,6 +1003,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
               r.mainline,
               [r.head],
               ctx.signal,
+              t,
             );
             await fetchBundle(t, bytes, ref);
           }
@@ -921,6 +1025,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           r.head,
           [r.previousHead],
           ctx.signal,
+          t,
         );
         const ff = await fastForward(t, bytes, ref, r.head);
         if (ff === 'diverged') {
