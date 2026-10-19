@@ -49,8 +49,8 @@ export interface WorkTrees {
   /** 目录归哪个会话用户；不在回 null。归了别人（不是会话用户）明确报错。 */
   ownerOf(dir: string): Promise<SessionUser | null>;
   /** 交给这个会话用户（不在就建）。 */
-  adopt(dir: string, user: SessionUser): Promise<void>;
-  adoptTemporary(dir: string, user: SessionUser): Promise<TreeIdentity>;
+  adopt(dir: string, user: SessionUser, signal?: AbortSignal): Promise<void>;
+  adoptTemporary(dir: string, user: SessionUser, signal?: AbortSignal): Promise<TreeIdentity>;
   remove(dir: string, identity: TreeIdentity): Promise<{ gone: boolean }>;
   /** Disposable session directories only; preservation callers must pass their original identity to remove. */
   removeTemporary(dir: string, expected: TreeIdentity): Promise<{ gone: boolean }>;
@@ -161,16 +161,20 @@ export function helperWorkTrees(options: HelperWorkTreesOptions = {}): WorkTrees
       }
       return user;
     },
-    async adopt(dir, user) {
-      const r = await adoptWorktree({ dir, user, ...helperOpts });
+    async adopt(dir, user, signal) {
+      signal?.throwIfAborted();
+      const r = await adoptWorktree({ dir, user, ...helperOpts, ...(signal ? { signal } : {}) });
+      signal?.throwIfAborted();
       if (r.ok) return;
       throw new PortError('ADOPT_FAILED', `把 ${dir} 交给 ${user} 没成：${r.detail}`, {
         retryable: r.code !== 'usage',
         details: { exitCode: r.exitCode },
       });
     },
-    async adoptTemporary(dir, user) {
-      const r = await adoptWorktree({ dir, user, ...helperOpts });
+    async adoptTemporary(dir, user, signal) {
+      signal?.throwIfAborted();
+      const r = await adoptWorktree({ dir, user, ...helperOpts, ...(signal ? { signal } : {}) });
+      signal?.throwIfAborted();
       if (r.ok) return r.identity;
       throw new PortError('ADOPT_FAILED', `临时目录认领失败：${r.detail}`, { retryable: r.code !== 'usage' });
     },

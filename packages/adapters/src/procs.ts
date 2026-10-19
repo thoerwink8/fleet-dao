@@ -320,6 +320,8 @@ export interface AdoptWorktreeInput {
   helper?: string;
   /** 调帮手的前缀，默认 ['/usr/bin/sudo', '-n']；测试里给 [] 直接起假帮手。 */
   sudo?: readonly string[];
+  /** 只阻止尚未发送的调用；已经发送的 root 操作不保证撤回。 */
+  signal?: AbortSignal;
 }
 
 export type AdoptWorktreeResult =
@@ -345,12 +347,15 @@ export function adoptWorktree(input: AdoptWorktreeInput): Promise<AdoptWorktreeR
 
 async function adoptChecked(input: AdoptWorktreeInput): Promise<AdoptWorktreeResult> {
   try {
+    input.signal?.throwIfAborted();
     const reply = await invokeTreeHelper(input, ['adopt', input.dir, '--user', input.user]);
+    input.signal?.throwIfAborted();
     if (reply.state !== 'adopted') throw new Error('缺少受管认领回执');
     const identity = treeIdentity(reply.identity);
     if (identity.real !== input.dir) throw new Error('认领回执路径不匹配');
     return { ok: true, identity };
   } catch (error) {
+    input.signal?.throwIfAborted();
     const exitCode = error instanceof TreeHelperError ? error.exitCode : null;
     return { ok: false, code: exitCode === 64 ? 'usage' : 'failed', exitCode, detail: String(error) };
   }
