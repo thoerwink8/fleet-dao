@@ -9,7 +9,8 @@
 // queue [--json]：本机队列（单 #2731）——本机做的开着的单，领者、心跳、开着的 PR、挂着的引导、能不能接（work-queue.ts）。只读，不碰法国。
 // run <单号> [--brief 文件] [--worktree 路径] [--again]：脱离聊天进程派一个无头工人（单 #2761，work-run.ts 开头有全貌）——先过本机容量，
 //        本机没租约才领单，建或复用工作树，经 detach.mjs 起看护进程；看护进程没了再跑一次就接着同一个会话续。
-//        交付停在 waiting 时再跑只起看护进程复核，不领单、不新开工人；已由其他真实 PR 交付而 stopped 的不再派。runs：列 run 派过的工人。
+//        交付停在 waiting 时再跑只起看护进程复核，不领单、不新开工人；已由其他真实 PR 交付而 stopped 的不再派。
+//        起看护进程前先原子占位：两个并发恢复不能同时判失联再各起一个工人。runs：列 run 派过的工人。
 //
 // 改这里之前必须知道：
 // - 写法国只用本机会话心跳同一个通行证（~/.fleet-dao/local-sessions/config.json 的 url、token，pnpm local-sessions install 写的），
@@ -27,7 +28,9 @@ import { managedWork, validateManagedDelivery } from './managed-work.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
 import { buildQueue, type LeaseRecord, type QueueDeps, readCurrentRepo, renderQueue } from './work-queue.ts';
 import {
+  claimRunLock,
   defaultBrief,
+  handoffRunLock,
   listRuns,
   PASS_ENV,
   prepareRunDir,
@@ -36,11 +39,13 @@ import {
   type RunSpec,
   type RunStatus,
   readJson,
+  releaseRunLock,
   renderRuns,
   runDir,
   runFiles,
   runPhase,
   runsRoot,
+  SUPERVISOR_START_LOCK,
   writeJson,
 } from './work-run.ts';
 
@@ -442,90 +447,112 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
       `#${a.issue} 上次派的工人已经${word}（${files.result}）；要重来加 --again（旧记录改名留着）`,
     );
   }
-  const cap = await r.capacity();
-  if (cap.enough !== true) {
-    throw new Error(
-      cap.enough === null ? `${cap.text}——没查成不当成够，不派` : `${cap.text}——等一个工人收口再派`,
-    );
-  }
   const resume = (phase === 'lost' || phase === 'waiting') && !a.again;
-  // 续跑沿用原 spec，不把另一会话或旧的无归属记录偷偷重绑。
-  let dispatcher: string | null = null;
-  if (!resume) {
-    const session = r.selectSessionId(r.env);
-    if (!session.ok && !session.missing) throw new Error(session.why);
-    const claude = r.env.CLAUDE_CODE_SESSION_ID;
-    const codex = r.env.CODEX_THREAD_ID;
-    if (claude && codex && claude !== codex)
-      throw new Error('Claude 会话和 Codex thread 身份冲突，不登记另一会话的归属、不派工');
-    // CODEX_SESSION_ID 是 root-session，不能据此承诺匹配 Stop 的 thread session_id。
-    if (session.ok && (claude || codex)) dispatcher = session.id;
-    else
-      deps.out(
-        '没有可验证的 Claude session / Codex thread 归属（Codex 需真实 CODEX_THREAD_ID，CODEX_SESSION_ID 不代替 thread）；结果仍保留，用 pnpm work runs 手工读取。',
+  // 心跳失联和「没有占位」之间有空窗。先 mkdir 占住，再去做会让出事件循环的事；没占上就不起第二个。
+  let startToken: string | null = null;
+  try {
+    if (resume) {
+      startToken = claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, r.now());
+      if (!startToken) throw new Error(`#${a.issue} 已有恢复占位，不再并发起工人`);
+      const phaseNow = runPhase(dir, r.now());
+      if (phaseNow === 'live')
+        throw new Error(`#${a.issue} 已经有工人在跑（pnpm work runs 看），不再派第二个`);
+      if (phaseNow === 'terminal') throw new Error(`#${a.issue} 已经终了，不再并发起工人`);
+    }
+    const cap = await r.capacity();
+    if (cap.enough !== true) {
+      throw new Error(
+        cap.enough === null ? `${cap.text}——没查成不当成够，不派` : `${cap.text}——等一个工人收口再派`,
       );
-  }
-  // 「看护进程没了」叫醒过一次；接着续就要能再叫醒到终态
-  if (resume) rmSync(files.reported, { force: true });
-  if (!resume) {
-    const issue = (await ghJson(
-      deps.gh,
-      ['issue', 'view', String(a.issue), '--json', 'title,state'],
-      `#${a.issue}`,
-    )) as {
-      title?: unknown;
-      state?: unknown;
-    };
-    const title = issueTitle(a.issue, issue);
-    if (r.hasLease(repo, a.issue)) deps.out(`#${a.issue} 本机已经领着（租约没到期），不再领`);
-    else {
-      const got = await claimIssue(deps, repo, a.issue, title);
-      deps.out(`领了 #${a.issue}（租约到 ${got.leaseUntil ?? '？'}）`);
     }
-    const reclaude = r.findReclaude();
-    if (reclaude === null) throw new Error('PATH 上找不到 reclaude（Claude 一律经 reclaude 起），不派');
-    const { worktree, branch } = await ensureWorktree(r, a.issue, title, a.worktree);
-    prepareRunDir(dir, r.now(), a.again);
-    const extra = a.brief === undefined ? '' : `\n\n## 另外的交代\n\n${r.readText(resolve(a.brief)).trim()}`;
-    writeFileSync(files.brief, `${defaultBrief({ issue: a.issue, title, worktree, branch })}${extra}\n`);
-    const env: Record<string, string> = {};
-    for (const k of PASS_ENV) {
-      const v = r.env[k];
-      if (typeof v === 'string' && v !== '') env[k] = v;
+    // 续跑沿用原 spec，不把另一会话或旧的无归属记录偷偷重绑。
+    let dispatcher: string | null = null;
+    if (!resume) {
+      const session = r.selectSessionId(r.env);
+      if (!session.ok && !session.missing) throw new Error(session.why);
+      const claude = r.env.CLAUDE_CODE_SESSION_ID;
+      const codex = r.env.CODEX_THREAD_ID;
+      if (claude && codex && claude !== codex)
+        throw new Error('Claude 会话和 Codex thread 身份冲突，不登记另一会话的归属、不派工');
+      // CODEX_SESSION_ID 是 root-session，不能据此承诺匹配 Stop 的 thread session_id。
+      if (session.ok && (claude || codex)) dispatcher = session.id;
+      else
+        deps.out(
+          '没有可验证的 Claude session / Codex thread 归属（Codex 需真实 CODEX_THREAD_ID，CODEX_SESSION_ID 不代替 thread）；结果仍保留，用 pnpm work runs 手工读取。',
+        );
     }
-    const spec: RunSpec = {
-      v: RUN_SCHEMA,
-      repo,
-      issue: a.issue,
-      title,
-      repoRoot: r.repoRoot,
-      worktree,
-      branch,
-      dispatcher,
-      reclaude,
-      env,
-      createdAt: r.now().toISOString(),
-    };
-    writeJson(files.spec, spec);
-  }
-  const started = r.spawnDetached(r.node, [r.supervisor, dir], { cwd: r.repoRoot });
-  if (!started.ok) {
-    throw new Error(
-      `看护进程没起成：${started.why}（记录在 ${dir}，修好再跑一次 pnpm work run ${a.issue} 接着起）`,
+    // 「看护进程没了」叫醒过一次；接着续就要能再叫醒到终态
+    if (resume) rmSync(files.reported, { force: true });
+    if (!resume) {
+      const issue = (await ghJson(
+        deps.gh,
+        ['issue', 'view', String(a.issue), '--json', 'title,state'],
+        `#${a.issue}`,
+      )) as {
+        title?: unknown;
+        state?: unknown;
+      };
+      const title = issueTitle(a.issue, issue);
+      if (r.hasLease(repo, a.issue)) deps.out(`#${a.issue} 本机已经领着（租约没到期），不再领`);
+      else {
+        const got = await claimIssue(deps, repo, a.issue, title);
+        deps.out(`领了 #${a.issue}（租约到 ${got.leaseUntil ?? '？'}）`);
+      }
+      const reclaude = r.findReclaude();
+      if (reclaude === null) throw new Error('PATH 上找不到 reclaude（Claude 一律经 reclaude 起），不派');
+      const { worktree, branch } = await ensureWorktree(r, a.issue, title, a.worktree);
+      prepareRunDir(dir, r.now(), a.again);
+      const extra =
+        a.brief === undefined ? '' : `\n\n## 另外的交代\n\n${r.readText(resolve(a.brief)).trim()}`;
+      writeFileSync(files.brief, `${defaultBrief({ issue: a.issue, title, worktree, branch })}${extra}\n`);
+      const env: Record<string, string> = {};
+      for (const k of PASS_ENV) {
+        const v = r.env[k];
+        if (typeof v === 'string' && v !== '') env[k] = v;
+      }
+      const spec: RunSpec = {
+        v: RUN_SCHEMA,
+        repo,
+        issue: a.issue,
+        title,
+        repoRoot: r.repoRoot,
+        worktree,
+        branch,
+        dispatcher,
+        reclaude,
+        env,
+        createdAt: r.now().toISOString(),
+      };
+      writeJson(files.spec, spec);
+      startToken = claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, r.now());
+      if (!startToken) throw new Error(`#${a.issue} 已有恢复占位，不再并发起工人`);
+    }
+    const started = r.spawnDetached(r.node, [r.supervisor, dir], { cwd: r.repoRoot });
+    if (!started.ok) {
+      throw new Error(
+        `看护进程没起成：${started.why}（记录在 ${dir}，修好再跑一次 pnpm work run ${a.issue} 接着起）`,
+      );
+    }
+    const handed =
+      startToken !== null && handoffRunLock(dir, SUPERVISOR_START_LOCK, startToken, started.pid, r.now());
+    // 进程已经拉起：即便交接写入失败也别把占位删掉，避免另一个恢复再起一个工人。
+    startToken = null;
+    if (!handed) throw new Error(`#${a.issue} 占位没交接到看护进程，不再当作已经派出去`);
+    const spec = readJson<RunSpec>(files.spec);
+    const how = phase === 'waiting' ? '复核等待，不新开工人' : resume ? '接着上次的会话续' : '派出去了';
+    deps.out(
+      `${how} #${a.issue}：看护进程 ${started.pid}（${started.how === 'wmi' ? 'WMI 起，' : ''}不在聊天进程的进程树里），工作树 ${spec?.worktree ?? '？'}`,
     );
+    deps.out(`状态 ${files.state}；做完写 ${files.result}。${cap.text}`);
+    deps.out(
+      spec?.dispatcher
+        ? '已关联原派工会话：无人值守开启时，同步 Stop 消费一次终态；Codex 不会因后台完成主动开启新轮，Claude 原生 asyncRewake 能力另计。续跑不改变归属。看全部：pnpm work runs'
+        : '记录 dispatcher=null：没有会话会被主动叫醒，也不自动补绑旧记录；结果仍保留，用 pnpm work runs 看',
+    );
+    return 0;
+  } finally {
+    if (startToken) releaseRunLock(dir, SUPERVISOR_START_LOCK, startToken);
   }
-  const spec = readJson<RunSpec>(files.spec);
-  const how = phase === 'waiting' ? '复核等待，不新开工人' : resume ? '接着上次的会话续' : '派出去了';
-  deps.out(
-    `${how} #${a.issue}：看护进程 ${started.pid}（${started.how === 'wmi' ? 'WMI 起，' : ''}不在聊天进程的进程树里），工作树 ${spec?.worktree ?? '？'}`,
-  );
-  deps.out(`状态 ${files.state}；做完写 ${files.result}。${cap.text}`);
-  deps.out(
-    spec?.dispatcher
-      ? '已关联原派工会话：无人值守开启时，同步 Stop 消费一次终态；Codex 不会因后台完成主动开启新轮，Claude 原生 asyncRewake 能力另计。续跑不改变归属。看全部：pnpm work runs'
-      : '记录 dispatcher=null：没有会话会被主动叫醒，也不自动补绑旧记录；结果仍保留，用 pnpm work runs 看',
-  );
-  return 0;
 }
 
 export async function work(argv: readonly string[], deps: WorkDeps): Promise<number> {

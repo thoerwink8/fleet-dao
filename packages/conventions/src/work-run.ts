@@ -16,13 +16,24 @@
 //   会话还没建起来就断了（--resume 报找不到会话）→ 下一次用原会话号重新起。
 // - 看护进程自己没了（关机、被杀）：state.json 不是终态、beatAt 超过 BEAT_STALE_MS 没动。再跑一次 pnpm work run <单号> 就接着同一个
 //   状态文件、同一个会话号续（--resume），尝试次数接着数，租约心跳重新跑起来。
+//   续跑和第一次派工都先在运行目录里原子占住 supervisor-start（mkdir，跨进程只有一个能建成）。占位上的进程还活着就不再起第二个看护，
+//   也不手写 state/result、不杀已有进程；进程已经没了的占位才由下一次接手。看护进程自己再占 worker-slot，两个看护也不会各起一个工人。
 // - 叫醒：agents/hooks/work-watch.mjs 挂在 Stop 上（asyncRewake），只在 result.json 写出来（或看护进程没了）时叫醒派它的会话
 //   （state.json 的 dispatcher = 派的时候的 CLAUDE_CODE_SESSION_ID），中间的心跳、重试都不叫。
 //
 // 文件（~/.fleet-dao/work-runs/<owner>__<name>__<单号>/，FLEET_WORK_RUNS_DIR 可改）：spec.json（怎么起）、brief.md（交代）、
 // state.json（现在怎样）、result.json（终态才有）、attempt-<n>.out.json / attempt-<n>.err.log（每次的输出）、reported（叫醒过了，钩子写）。
 // work-watch.mjs 按同样的文件名和字段读（那边是纯 node，引不了这里；两边的测试各自钉着同一份形状）。
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
@@ -449,6 +460,7 @@ function lastWorkerSummary(dir: string, attempts: number): string {
 /**
  * 看护一张单的工人到终态或等待复核。重复起（看护进程没了再起）接着同一个状态文件续。
  * 已经有一个活着的看护进程在管就回 null、什么都不动。waiting 的恢复只复核交付，不起工人。
+ * 真要起工人之前先原子占住 worker-slot：两个看护进程同时读到失联心跳，也只有一个能起工人。
  */
 export async function superviseRun(
   dir: string,
@@ -483,12 +495,34 @@ export async function superviseRun(
     }
     return done;
   }
-  const at = () => deps.now().toISOString();
   const prev = readJson<RunStatus>(f.state);
   if (prev && prev.supervisorPid !== deps.pid && supervisorLive(prev, deps.now())) {
     deps.log(`#${spec.issue} 已经有看护进程 ${prev.supervisorPid} 在管（${prev.beatAt} 还在动），这个退出`);
     return null;
   }
+  const slot = claimRunLock(dir, WORKER_SLOT_LOCK, process.pid, deps.now());
+  if (!slot) {
+    deps.log(`#${spec.issue} 工人名额已被占住，不并发起工人`);
+    return null;
+  }
+  try {
+    return await superviseClaimed(dir, spec, brief, prev, deps);
+  } finally {
+    releaseRunLock(dir, WORKER_SLOT_LOCK, slot);
+    releaseRunLockByPid(dir, SUPERVISOR_START_LOCK, process.pid);
+  }
+}
+
+/** 占到工人名额之后才写状态、起心跳、起工人。没占到的调用方不会进这里。 */
+async function superviseClaimed(
+  dir: string,
+  spec: RunSpec,
+  brief: string,
+  prev: RunStatus | null,
+  deps: SuperviseDeps,
+): Promise<RunResult | WaitingOutcome | null> {
+  const f = runFiles(dir);
+  const at = () => deps.now().toISOString();
   let s: RunStatus = {
     v: RUN_SCHEMA,
     repo: spec.repo,
@@ -725,6 +759,9 @@ export function renderRuns(rows: RunRow[], now: Date): string[] {
         r.result.state === 'done' ? '做完' : r.result.state === 'stopped' ? '已停，不再派工' : '没做成';
       return `${head} ${label}（第 ${r.result.attempts} 次，${r.result.finishedAt}）：${tail}`;
     }
+    if (runLockHeld(r.dir, SUPERVISOR_START_LOCK, now) && !supervisorLive(s, now)) {
+      return `${head} 看护进程正在起来，不再另派；工作树 ${s.worktree}`;
+    }
     if (s.state === 'waiting') {
       const who = supervisorLive(s, now) ? '正在复核' : '在等';
       return `${head} ${who}，不续工人：${s.lastError ?? ''}；工作树 ${s.worktree}；会话 ${s.sessionId ?? '无'} 保留`;
@@ -736,6 +773,122 @@ export function renderRuns(rows: RunRow[], now: Date): string[] {
     const lease = s.lastRenewOk === false ? '，租约上次没续上' : '';
     return `${head} 在跑：第 ${s.attempts} 次${retry}${lease}；工作树 ${s.worktree}`;
   });
+}
+
+/** 恢复入口的跨进程占位。目录名本身就是锁：mkdir 只有一个进程能建成。 */
+export const SUPERVISOR_START_LOCK = 'supervisor-start';
+/** 看护进程里的工人名额。两个看护进程同时进来，只有占到的那个起工人。 */
+export const WORKER_SLOT_LOCK = 'worker-slot';
+
+interface RunLockOwner {
+  pid: number;
+  token: string;
+  claimedAt: string;
+}
+
+let lockSeq = 0;
+
+function lockPath(dir: string, name: string): string {
+  return join(dir, name);
+}
+
+function readLockOwner(dir: string, name: string): RunLockOwner | null {
+  const v = readJson<Partial<RunLockOwner>>(join(lockPath(dir, name), 'owner.json'));
+  if (!v || typeof v.token !== 'string' || v.token === '') return null;
+  if (typeof v.pid !== 'number' || !Number.isSafeInteger(v.pid) || v.pid < 1) return null;
+  if (typeof v.claimedAt !== 'string') return null;
+  return { pid: v.pid, token: v.token, claimedAt: v.claimedAt };
+}
+
+/** 进程还在不在。EPERM 当还在（没有权限发信号不代表没这个进程）；只有 ESRCH 是真没了。 */
+function pidAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+function discardDir(lock: string, grave: string): void {
+  try {
+    renameSync(lock, grave);
+  } catch {
+    return;
+  }
+  rmSync(grave, { recursive: true, force: true });
+}
+
+/**
+ * 占位还算不算数。进程还活着就占着，恢复不能再起一个工人。
+ * 进程已经没了，或目录刚建上却没写上归属且已经过了失联窗口，才放手给下一次接手。
+ * 认不出归属又还新鲜：当有人正在占，不并发起。
+ */
+export function runLockHeld(dir: string, name: string, now: Date): boolean {
+  const lock = lockPath(dir, name);
+  if (!existsSync(lock)) return false;
+  const owner = readLockOwner(dir, name);
+  if (owner) return pidAlive(owner.pid);
+  try {
+    return now.getTime() - statSync(lock).mtimeMs <= BEAT_STALE_MS;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * 原子占住运行目录里的一把锁。返回 token；占不上是 null（别人还占着）。
+ * 死进程留下的目录改名挪走再占，挪走本身也是原子的，两个恢复只有一个能接手。
+ */
+export function claimRunLock(dir: string, name: string, pid: number, now: Date): string | null {
+  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('占位进程号不对');
+  mkdirSync(dir, { recursive: true });
+  const lock = lockPath(dir, name);
+  lockSeq += 1;
+  const token = `${pid}-${now.getTime()}-${lockSeq}`;
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      mkdirSync(lock);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+      if (runLockHeld(dir, name, now)) return null;
+      discardDir(lock, `${lock}.stale-${pid}-${i}-${lockSeq}`);
+      continue;
+    }
+    try {
+      writeJson(join(lock, 'owner.json'), { pid, token, claimedAt: now.toISOString() });
+    } catch (e) {
+      rmSync(lock, { recursive: true, force: true });
+      throw e;
+    }
+    if (readLockOwner(dir, name)?.token === token) return token;
+    return null;
+  }
+  return null;
+}
+
+/** 只放自己占上的那一把。token 对不上就留着，避免并发的失败方把赢的那把删掉。 */
+export function releaseRunLock(dir: string, name: string, token: string): void {
+  const owner = readLockOwner(dir, name);
+  if (!owner || owner.token !== token) return;
+  discardDir(lockPath(dir, name), `${lockPath(dir, name)}.released-${token}`);
+}
+
+/** 看护进程退出时放开入口交过来的占位。只认自己的进程号，不删别人刚占上的。 */
+export function releaseRunLockByPid(dir: string, name: string, pid: number): void {
+  const owner = readLockOwner(dir, name);
+  if (!owner || owner.pid !== pid) return;
+  discardDir(lockPath(dir, name), `${lockPath(dir, name)}.released-${pid}`);
+}
+
+/** 入口把占位从自己改到刚拉起的看护进程。token 不变，失败方的 finally 仍删不掉这把锁。 */
+export function handoffRunLock(dir: string, name: string, token: string, pid: number, now: Date): boolean {
+  const owner = readLockOwner(dir, name);
+  if (!owner || owner.token !== token) return false;
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  writeJson(join(lockPath(dir, name), 'owner.json'), { pid, token, claimedAt: now.toISOString() });
+  return readLockOwner(dir, name)?.pid === pid;
 }
 
 /** 一张单有没有运行记录、在不在跑、是不是终了、还是停着等复核 */

@@ -1,9 +1,10 @@
 // pnpm work run（单 #2761 第二片）：脱离聊天进程派无头工人、看护进程靠租约心跳、网关断了从断点续、结束写结果文件。
 // 故意造出的失败：网关 502、会话还没建起来就断、看护进程自己死了再起、登录坏了、次数用完、容量不够 / 没查成、已经有一个在跑。
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GhResult } from '../src/issue-new.ts';
 import { validateManagedDelivery } from '../src/managed-work.ts';
@@ -12,6 +13,7 @@ import {
   type AttemptOutput,
   BEAT_STALE_MS,
   backoffMs,
+  claimRunLock,
   DeliveryCheckError,
   FIRST_BACKOFF_MS,
   judgeAttempt,
@@ -22,11 +24,15 @@ import {
   type RunSpec,
   type RunStatus,
   readJson,
+  releaseRunLock,
   renderRuns,
   runDir,
   runFiles,
+  runLockHeld,
+  SUPERVISOR_START_LOCK,
   type SuperviseDeps,
   superviseRun,
+  WORKER_SLOT_LOCK,
   workerArgs,
   writeJson,
 } from '../src/work-run.ts';
@@ -372,7 +378,15 @@ const ok = (stdout = ''): GhResult => ({ code: 0, stdout, stderr: '' });
 
 /** pnpm work run 的假世界：gh、法国、git、容量、起进程都记下来 */
 function runWorld(
-  o: { enough?: boolean | null; lease?: boolean; spawnOk?: boolean; env?: NodeJS.ProcessEnv } = {},
+  o: {
+    enough?: boolean | null;
+    lease?: boolean;
+    spawnOk?: boolean;
+    env?: NodeJS.ProcessEnv;
+    /** 容量检查让出事件循环，用来把两个恢复叠在占位还没交接的窗口里 */
+    capacityDelayMs?: number;
+    spawnPid?: number;
+  } = {},
 ) {
   const root = temp();
   const runs = join(root, 'runs');
@@ -402,18 +416,24 @@ function runWorld(
       out: (l) => out.push(l),
       err: (l) => err.push(l),
       run: {
-        capacity: async () => ({
-          enough: o.enough === undefined ? true : o.enough,
-          text:
-            o.enough === null
-              ? '本机容量没查成：CIM 超时'
-              : o.enough === false
-                ? '本机容量不够（空闲内存不够）'
-                : '本机容量够',
-        }),
+        capacity: async () => {
+          if (o.capacityDelayMs !== undefined)
+            await new Promise((resolve) => setTimeout(resolve, o.capacityDelayMs));
+          return {
+            enough: o.enough === undefined ? true : o.enough,
+            text:
+              o.enough === null
+                ? '本机容量没查成：CIM 超时'
+                : o.enough === false
+                  ? '本机容量不够（空闲内存不够）'
+                  : '本机容量够',
+          };
+        },
         spawnDetached: (file, args, opts) => {
           spawned.push({ file, args, ...opts });
-          return o.spawnOk === false ? { ok: false, why: 'WMI 返回 9' } : { ok: true, pid: 4242, how: 'wmi' };
+          return o.spawnOk === false
+            ? { ok: false, why: 'WMI 返回 9' }
+            : { ok: true, pid: o.spawnPid ?? 4242, how: 'wmi' };
         },
         git: async (args) => {
           gitCalls.push(args);
@@ -1003,5 +1023,231 @@ describe('pnpm work run 对等待和已停不重派', () => {
     );
     expect(stopped[0]).toContain('已停，不再派工');
     expect(stopped[0]).toContain('PR #3194');
+  });
+});
+
+function deadPid(): number {
+  const finished = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
+  if (typeof finished.pid !== 'number' || finished.pid < 1) throw new Error('没拿到已退出的进程号');
+  try {
+    process.kill(finished.pid, 0);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ESRCH') return finished.pid;
+  }
+  throw new Error('刚退出的进程号仍能发信号，不能拿来当死占位');
+}
+
+describe('恢复入口的原子占位', () => {
+  function lostRun(w: ReturnType<typeof runWorld>) {
+    mkdirSync(w.dir, { recursive: true });
+    writeJson(runFiles(w.dir).spec, {
+      worktree: '/wt',
+      dispatcher: 'sess-main',
+      repo: 'acme/app',
+      issue: 42,
+    });
+    writeJson(runFiles(w.dir).state, {
+      state: 'retrying',
+      beatAt: '2026-10-16T09:00:00.000Z',
+      sessionId: SID,
+      attempts: 4,
+      supervisorPid: null,
+    });
+  }
+
+  it('占位进程还活着时再恢复不起第二个，也不改 state/result', async () => {
+    const w = runWorld();
+    lostRun(w);
+    const token = claimRunLock(w.dir, SUPERVISOR_START_LOCK, process.pid, w.now);
+    expect(token).toBeTruthy();
+    const before = readFileSync(runFiles(w.dir).state, 'utf8');
+    expect(await w.run('run', '42')).toBe(1);
+    expect(w.spawned).toEqual([]);
+    expect(w.sent).toEqual([]);
+    expect(w.err.join('\n')).toContain('已有恢复占位，不再并发起工人');
+    expect(readFileSync(runFiles(w.dir).state, 'utf8')).toBe(before);
+    expect(existsSync(runFiles(w.dir).result)).toBe(false);
+    if (token) releaseRunLock(w.dir, SUPERVISOR_START_LOCK, token);
+  });
+
+  it('两个并发恢复都判失联时只起一个看护，败的那个不改 state/result', async () => {
+    const w = runWorld({ capacityDelayMs: 30 });
+    lostRun(w);
+    const before = readFileSync(runFiles(w.dir).state, 'utf8');
+    const codes = await Promise.all([w.run('run', '42'), w.run('run', '42')]);
+    expect(codes.filter((c) => c === 0)).toHaveLength(1);
+    expect(codes.filter((c) => c === 1)).toHaveLength(1);
+    expect(w.spawned).toHaveLength(1);
+    expect(w.err.join('\n')).toContain('已有恢复占位，不再并发起工人');
+    expect(readFileSync(runFiles(w.dir).state, 'utf8')).toBe(before);
+    expect(existsSync(runFiles(w.dir).result)).toBe(false);
+    expect(w.sent).toEqual([]);
+  });
+
+  it('心跳还没写上、看护进程号仍活着：再恢复不另起', async () => {
+    const w = runWorld({ spawnPid: process.pid });
+    lostRun(w);
+    expect(await w.run('run', '42'), w.err.join('\n')).toBe(0);
+    expect(w.spawned).toHaveLength(1);
+    expect(runLockHeld(w.dir, SUPERVISOR_START_LOCK, w.now)).toBe(true);
+    w.spawned.length = 0;
+    w.err.length = 0;
+    expect(await w.run('run', '42')).toBe(1);
+    expect(w.spawned).toEqual([]);
+    expect(w.err.join('\n')).toContain('已有恢复占位，不再并发起工人');
+  });
+
+  it('死掉的占位可以接手，只起一个', async () => {
+    const w = runWorld();
+    lostRun(w);
+    const pid = deadPid();
+    mkdirSync(join(w.dir, SUPERVISOR_START_LOCK));
+    writeJson(join(w.dir, SUPERVISOR_START_LOCK, 'owner.json'), {
+      pid,
+      token: 'stale',
+      claimedAt: '2026-10-16T09:00:00.000Z',
+    });
+    expect(runLockHeld(w.dir, SUPERVISOR_START_LOCK, w.now)).toBe(false);
+    expect(await w.run('run', '42'), w.err.join('\n')).toBe(0);
+    expect(w.spawned).toHaveLength(1);
+  });
+
+  it('看护没起成就放开占位，下一次还能占上', async () => {
+    const w = runWorld({ spawnOk: false });
+    lostRun(w);
+    expect(await w.run('run', '42')).toBe(1);
+    expect(w.err.join('\n')).toContain('看护进程没起成');
+    expect(existsSync(join(w.dir, SUPERVISOR_START_LOCK))).toBe(false);
+    const token = claimRunLock(w.dir, SUPERVISOR_START_LOCK, process.pid, w.now);
+    expect(token).toBeTruthy();
+    if (token) releaseRunLock(w.dir, SUPERVISOR_START_LOCK, token);
+  });
+
+  it('两个进程同时占同一把锁，只有一个占上', async () => {
+    const dir = join(temp(), 'lock');
+    mkdirSync(dir);
+    const mod = pathToFileURL(fileURLToPath(new URL('../src/work-run.ts', import.meta.url))).href;
+    const script = [
+      'const { claimRunLock, SUPERVISOR_START_LOCK } = await import(process.env.FLEET_LOCK_MOD);',
+      'const token = claimRunLock(process.env.FLEET_LOCK_DIR, SUPERVISOR_START_LOCK, process.pid, new Date());',
+      'if (!token) process.stdout.write("lost\\n");',
+      'else { process.stdout.write("won\\n"); await new Promise((r) => setTimeout(r, 400)); }',
+    ].join('\n');
+    const once = () =>
+      new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          ['--experimental-strip-types', '--input-type=module', '-e', script],
+          {
+            env: { ...process.env, FLEET_LOCK_MOD: mod, FLEET_LOCK_DIR: dir },
+          },
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (b: Buffer) => {
+          stdout += b;
+        });
+        child.stderr.on('data', (b: Buffer) => {
+          stderr += b;
+        });
+        child.on('error', reject);
+        child.on('close', (code) => resolve({ stdout, stderr, code }));
+      });
+    const [a, b] = await Promise.all([once(), once()]);
+    const detail = `${a.stderr}\n${b.stderr}`;
+    expect(
+      [a.stdout.trim(), b.stdout.trim()].filter((s) => s === 'won'),
+      detail,
+    ).toHaveLength(1);
+    expect(
+      [a.stdout.trim(), b.stdout.trim()].filter((s) => s === 'lost'),
+      detail,
+    ).toHaveLength(1);
+  });
+
+  it('列表能看见正在起来的占位', () => {
+    const dir = join(temp(), 'row');
+    mkdirSync(dir, { recursive: true });
+    const token = claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date('2026-10-16T10:00:00.000Z'));
+    expect(token).toBeTruthy();
+    const line = renderRuns(
+      [
+        {
+          dir,
+          problem: null,
+          result: null,
+          status: {
+            issue: 42,
+            repo: 'acme/app',
+            state: 'retrying',
+            attempts: 2,
+            beatAt: '2026-10-16T09:00:00.000Z',
+            worktree: '/wt',
+            supervisorPid: null,
+          } as RunStatus,
+        },
+      ],
+      new Date('2026-10-16T10:00:00.000Z'),
+    );
+    expect(line[0]).toContain('看护进程正在起来，不再另派');
+    expect(line[0]).toContain('/wt');
+    if (token) releaseRunLock(dir, SUPERVISOR_START_LOCK, token);
+  });
+});
+
+describe('看护进程的工人名额', () => {
+  it('名额被占住时不起工人、不改状态', async () => {
+    const { dir } = runFixture();
+    const state = {
+      state: 'retrying',
+      beatAt: '2026-10-16T09:00:00.000Z',
+      sessionId: SID,
+      attempts: 2,
+      supervisorPid: null,
+    };
+    writeJson(runFiles(dir).state, state);
+    const before = readFileSync(runFiles(dir).state, 'utf8');
+    const token = claimRunLock(dir, WORKER_SLOT_LOCK, process.pid, new Date());
+    expect(token).toBeTruthy();
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '不该跑', session_id: SID }), stderr: '' }]);
+    expect(await superviseRun(dir, w.deps)).toBeNull();
+    expect(w.calls).toEqual([]);
+    expect(readFileSync(runFiles(dir).state, 'utf8')).toBe(before);
+    expect(existsSync(runFiles(dir).result)).toBe(false);
+    if (token) releaseRunLock(dir, WORKER_SLOT_LOCK, token);
+  });
+
+  it('两个看护同时进同一运行只起一个工人', async () => {
+    const { dir } = runFixture();
+    writeJson(runFiles(dir).state, {
+      state: 'retrying',
+      beatAt: '2026-10-16T09:00:00.000Z',
+      sessionId: SID,
+      attempts: 2,
+      supervisorPid: null,
+    });
+    const w1 = fakeDeps([
+      { code: 0, stdout: resultJson({ result: '只该这一次', session_id: SID }), stderr: '' },
+    ]);
+    const w2 = fakeDeps([{ code: 0, stdout: resultJson({ result: '不该跑', session_id: SID }), stderr: '' }]);
+    const [a, b] = await Promise.all([superviseRun(dir, w1.deps), superviseRun(dir, w2.deps)]);
+    expect(w1.calls.length + w2.calls.length).toBe(1);
+    expect([a, b].filter((x) => x === null)).toHaveLength(1);
+    expect([a, b].some((x) => x !== null && x.state === 'done')).toBe(true);
+  });
+
+  it('死掉的工人名额可以接手，只起一个工人', async () => {
+    const { dir } = runFixture();
+    const pid = deadPid();
+    mkdirSync(join(dir, WORKER_SLOT_LOCK));
+    writeJson(join(dir, WORKER_SLOT_LOCK, 'owner.json'), {
+      pid,
+      token: 'stale',
+      claimedAt: '2026-10-16T09:00:00.000Z',
+    });
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '接手了', session_id: SID }), stderr: '' }]);
+    const result = await superviseRun(dir, w.deps);
+    expect(result?.state).toBe('done');
+    expect(w.calls).toHaveLength(1);
   });
 });
