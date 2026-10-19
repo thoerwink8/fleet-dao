@@ -140,7 +140,13 @@ export const TEST_READS: Record<string, string[]> = {
     'packages/shared/src/private-quotes.ts',
   ],
   db: ['adapters', 'core'],
-  [AGENTS_UNIT]: ['db', 'agents-sync', 'packages/conventions/standard-paths.json'],
+  [AGENTS_UNIT]: [
+    'db',
+    'agents-sync',
+    'packages/conventions/standard-paths.json',
+    'packages/core/src/idle-running.ts',
+    'packages/core/src/self-check-budget.ts',
+  ],
 };
 
 export type Rule =
