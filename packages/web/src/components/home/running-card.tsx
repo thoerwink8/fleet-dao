@@ -143,7 +143,8 @@ export function toneOf(item: HomeRunning): { tone: Tone; icon: typeof CircleDot 
 /** 卡片上那句「在哪一段」：排在对题、但一笔流水都还没有的，是排着队还没开始，不写「在对题」。 */
 export function statusTextOf(item: HomeRunning): string {
   if (item.waitingReason === 'paused') return '已暂停';
-  if (item.waitingReason === 'parked') return '停下等人';
+  // 停下且最近一笔做坏了：颜色是失败红（toneOf），标签跟着说出了问题才停，不写成等你色的「停下等人」（#3279）
+  if (item.waitingReason === 'parked') return parkedForHuman(item) ? '停下等人' : '出问题停下';
   // 本机领的单没有三段流水（本机自己做，不走法国的 runs）：写本机在做，不写「还没记在哪一段」
   if (isLocalTask(item) && item.segment === null) return '本机在做';
   if (item.segment === 'merge' && item.redChecks) return `${CHECKS_RED_PREFIX}${item.redChecks}`;
