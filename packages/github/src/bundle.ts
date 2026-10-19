@@ -295,6 +295,7 @@ export async function bundleCommits(
   deps: Pick<MirrorReadDeps, 'git' | 'mirrorRoot' | 'baseEnv'>,
   input: BundleCommitsInput,
 ): Promise<BundleCommitsResult> {
+  input.signal?.throwIfAborted();
   const { repo, outPath } = input;
   const slug = repoSlug(repo);
   if (input.tips.length === 0) throw new GitHubError('BAD_INPUT', '至少要给一个 tip 提交');
@@ -303,8 +304,14 @@ export async function bundleCommits(
 
   const mirror = mirrorPath(deps.mirrorRoot, repo);
   return withMirrorLock(mirror, async () => {
+    input.signal?.throwIfAborted();
     await ensureMirror(deps, mirror);
-    const local: GitCall = { cwd: mirror, env: gitEnv({ base: deps.baseEnv }) };
+    const local: GitCall = {
+      cwd: mirror,
+      env: gitEnv({ base: deps.baseEnv }),
+      signal: input.signal,
+      timeoutMs: 120_000,
+    };
     const git: Git = (args, call) => deps.git(args, call);
     const exists = async (rev: string) =>
       (await git(['cat-file', '-e', `${rev}^{commit}`], local)).code === 0;
@@ -338,7 +345,11 @@ export async function bundleCommits(
       const bytes = statSync(outPath).size;
       return { path: outPath, bytes, refs };
     } finally {
-      for (const r of refs) await git(['update-ref', '-d', r.ref], local).catch(() => undefined);
+      // 取消已打断导出，清理引用仍须有自己的短预算，不能继承已取消的 signal。
+      for (const r of refs)
+        await git(['update-ref', '-d', r.ref], { ...local, signal: undefined, timeoutMs: 5_000 }).catch(
+          () => undefined,
+        );
     }
   });
 }

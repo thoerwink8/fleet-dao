@@ -2,10 +2,11 @@
 // 包落在引擎自己的临时目录，读进内存后就删；经标准输入交给会话用户那边的 git（user-git.ts 的 fetchBundle）。
 
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rm } from 'node:fs/promises';
+import { mkdir, readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { type GitHub, isGitHubError } from '@fleet-dao/github';
+import { type GitHub, isGitHubError, MAX_BUNDLE_BYTES } from '@fleet-dao/github';
 import { PortError } from '../ports.ts';
+import { type UserTree, verifyBundle } from './user-git.ts';
 
 export type MirrorGitHub = Pick<GitHub, 'fetchMainline' | 'bundleCommits'>;
 
@@ -54,7 +55,12 @@ export async function bundleFromMirror(
   tip: string,
   exclude: string[],
   signal?: AbortSignal,
+  target?: UserTree,
 ): Promise<{ bytes: Buffer; ref: string }> {
+  signal?.throwIfAborted();
+  if (exclude.length > 0 && !target) {
+    throw new PortError('BAD_INPUT', '增量镜像 bundle 必须在目标身份下验证依赖', { retryable: false });
+  }
   await mkdir(tmpDir, { recursive: true, mode: 0o700 });
   const outPath = join(tmpDir, `mirror-${randomUUID()}.bundle`);
   try {
@@ -65,7 +71,22 @@ export async function bundleFromMirror(
         retryable: true,
       });
     }
-    return { bytes: await readFile(made.path), ref };
+    const size = (await stat(made.path)).size;
+    if (size > MAX_BUNDLE_BYTES) {
+      throw new PortError('BUNDLE_TOO_LARGE', `镜像 bundle 超过 ${MAX_BUNDLE_BYTES} 字节上限`, {
+        retryable: false,
+      });
+    }
+    const bytes = await readFile(made.path, signal ? { signal } : undefined);
+    signal?.throwIfAborted();
+    if (target && !(await verifyBundle(target, bytes))) {
+      // 不解析 stderr 猜缺哪个对象；真实 bundle verify 同时核全部 boundary 和目标闭包。
+      // 增量不适用仅回退一次完整包；完整包仍不通过则明确失败，不 fetch/重置目标。
+      if (exclude.length > 0) return bundleFromMirror(gh, tmpDir, repo, tip, [], signal, target);
+      throw new PortError('BUNDLE_INVALID', '完整镜像 bundle 在目标仓验证失败，未导入', { retryable: true });
+    }
+    signal?.throwIfAborted();
+    return { bytes, ref };
   } finally {
     await rm(outPath, { force: true });
   }

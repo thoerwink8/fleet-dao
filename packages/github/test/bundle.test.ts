@@ -32,6 +32,33 @@ function outFile(name: string): string {
 }
 
 describe('从镜像打包', { timeout: 60_000 }, () => {
+  it('取消传到 bundle 命令；导出引用清理用独立短预算，不继承已取消信号', async () => {
+    const stateDir = tempDir('fleet-gh-cancel-bundle-');
+    const controller = new AbortController();
+    let canceled = false;
+    const runner: GitRunner = async (args, call) => {
+      if (args[0] === 'bundle' && args[1] === 'create') {
+        expect(call.signal).toBe(controller.signal);
+        expect(call.timeoutMs).toBe(120_000);
+        controller.abort();
+        canceled = true;
+        throw new Error('canceled bundle');
+      }
+      if (canceled && args[0] === 'update-ref' && args[1] === '-d') {
+        expect(call.signal).toBeUndefined();
+        expect(call.timeoutMs).toBe(5_000);
+      }
+      return execGit(args, call);
+    };
+    const { gh } = setup({ git: runner, gitUrl: () => remote, env: {}, stateDir });
+    const { head } = await gh.fetchMainline({ repo });
+    await expect(
+      gh.bundleCommits({ repo, tips: [head], outPath: outFile('cancel'), signal: controller.signal }),
+    ).rejects.toThrow('canceled bundle');
+    const mirror = join(stateDir, 'mirrors', repo.owner.toLowerCase(), `${repo.name.toLowerCase()}.git`);
+    expect(gitIn(mirror, 'for-each-ref', 'refs/fleet/export')).toBe('');
+  });
+
   it('fetchMainline 抓到远端 main 的头；bundleCommits 打出的包能被另一个空仓 fetch 出同一个头', async () => {
     const { gh, fake } = bundleSetup();
     const fetched = await gh.fetchMainline({ repo });

@@ -273,6 +273,27 @@ export interface Identity {
   email: string;
 }
 
+/** 用目标仓的真实对象闭包核 bundle；只读对象/引用，临时文件由会话身份创建并清理。 */
+export async function verifyBundle(t: UserTree, bundle: Buffer): Promise<boolean> {
+  if ((await writableTree(t, '核 bundle 依赖')) === 'none') {
+    throw placeError(t, '核 bundle 依赖：目标还不是仓', false);
+  }
+  t.signal?.throwIfAborted();
+  const script =
+    'd="$("$1" rev-parse --git-dir)" || exit 70; ' +
+    'f="$(mktemp "$d/fleet-verify-XXXXXX")" || exit 70; ' +
+    'trap \'rm -f -- "$f"\' EXIT; ' +
+    'cat > "$f" || exit 70; "$1" bundle verify "$f"';
+  const r = await run(t, [t.sh ?? SH, '-c', script, 'sh', t.git ?? GIT], {
+    stdin: bundle,
+    timeoutMs: 120_000,
+  });
+  if (r.aborted || r.timedOut || r.spawnError || r.code === null || r.code === 70) {
+    throw new PortError('GIT_FAILED', describeFailure('核 bundle 依赖', r), { retryable: !r.aborted });
+  }
+  return r.code === 0;
+}
+
 /**
  * 从 bundle 取提交进目录里的仓：没有仓先 init（设好提交身份——会话的提交挂在「干活的」机器人名下；关掉自动维护）。
  * bundle 经标准输入进来，会话用户在自己的 .git 里落成临时文件再 fetch，fetch 完删掉。取完回 refs/fleet/incoming 的头。

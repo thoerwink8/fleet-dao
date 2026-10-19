@@ -566,6 +566,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
       newHead,
       [input.head],
       ctx.signal,
+      t,
     );
     const ff = await fastForward(t, bytes, ref, newHead);
     // ff === 'diverged'：核过之后（上面两行）工作树又变了，极罕见的竞态，一样跳过、不抛，下一轮再试。
@@ -710,6 +711,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           main.head,
           [incoming],
           ctx.signal,
+          t,
         );
         await fetchBundle(t, bytes, ref);
       }
@@ -786,6 +788,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
             freshHead,
             [incoming],
             ctx.signal,
+            t,
           );
           await fetchBundle(t, fetchedBundle.bytes, fetchedBundle.ref);
         }
@@ -1000,6 +1003,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
               r.mainline,
               [r.head],
               ctx.signal,
+              t,
             );
             await fetchBundle(t, bytes, ref);
           }
@@ -1021,6 +1025,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           r.head,
           [r.previousHead],
           ctx.signal,
+          t,
         );
         const ff = await fastForward(t, bytes, ref, r.head);
         if (ff === 'diverged') {
