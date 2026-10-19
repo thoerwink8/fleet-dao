@@ -162,7 +162,7 @@ write_train() { # 状态 这一趟的提交
   "$NODE" -e '
     const fs = require("fs");
     const [dir, status, sha] = process.argv.slice(1);
-    const note = status === "failed" ? "上一趟发版是「failed」状态，要人看，不自动再发" : "在用的就是主线头";
+    const note = status === "failed" ? "现在不发：上一趟动手发版没成（第 4 步：没写原因），同一个提交不自动重发，等主线上更新的绿提交" : "在用的就是主线头";
     fs.writeFileSync(dir + "/.train/release-train.json", JSON.stringify({
       schema: 1, status, phase: status === "done" ? 8 : 4,
       startedAt: "2026-10-16T02:06:00.000Z",
