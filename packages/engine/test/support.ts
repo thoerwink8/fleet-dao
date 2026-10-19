@@ -1,5 +1,15 @@
 // 测试共用（不依赖 vitest，录重放夹具的脚本也用）：可跳时间的 Temporal 测试服务端 + 真的工作流包 + 假端口。
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import {
+  defaultHome,
+  parsePin,
+  resolveCli,
+  START_DEADLINE_MS,
+  startWithDeadline,
+  TemporalCliError,
+} from '@fleet-dao/conventions/temporal-cli';
 import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
@@ -29,33 +39,38 @@ export function createEnv(): Promise<TestWorkflowEnvironment> {
 /**
  * 真的 Temporal 开发服务端（temporal server start-dev），不能跳时间。只给「测试服务端和真服务端行为不同」的用例用：
  * 比如测试服务端不会让已经请求叫停、又不心跳的活动超时（一直等工人回话），真服务端到了限时就判超时。
- * FLEET_TEST_TEMPORAL_CLI 指向本机的 temporal 命令就用它（最好和法国同一版），否则按 SDK 默认的版本下载一份（缓存一天）。
+ * 命令行只认 deploy/france.sh 钉的版本（packages/conventions/src/temporal-cli.ts）：FLEET_TEST_TEMPORAL_CLI 显式路径，
+ * 或 `pnpm temporal:cli` 装进受管缓存的那份。缺失、坏路径、错版本、卡住、执行失败各自明确抛错并写出修复命令；
+ * 绝不退回 SDK 随包下载（它没有整体期限，卡住时分不清是下载还是启动）。起服务端有期限，迟到起来的服务端会被回收。
  */
-export function createRealEnv(): Promise<TestWorkflowEnvironment> {
-  const cli = process.env.FLEET_TEST_TEMPORAL_CLI?.trim();
-  // CI 按 deploy/france.sh 钉的版本装好命令行再交过来（.github/workflows/ci.yml）；没给说明那几步坏了，
-  // 不许悄悄退回 SDK 默认版本（和法国不同版，测过也不算数）。
-  if (!cli && process.env.CI) {
-    throw new Error(
-      'CI 里没给 FLEET_TEST_TEMPORAL_CLI：Temporal 命令行没按法国的版本装上，这条真服务端的测试不算数',
-    );
-  }
-  const options = cli ? { server: { executable: { type: 'existing-path' as const, path: cli } } } : {};
-  if (cli) return TestWorkflowEnvironment.createLocal(options);
+export async function createRealEnv(): Promise<TestWorkflowEnvironment> {
+  const cli = preparedRealCli();
+  const options = { server: { executable: { type: 'existing-path' as const, path: cli } } };
+  return startWithDeadline(
+    () => TestWorkflowEnvironment.createLocal(options),
+    (late) => late.teardown(),
+    START_DEADLINE_MS,
+    (e) =>
+      console.error(`迟到起来的真 Temporal 服务端回收失败：${e instanceof Error ? e.message : String(e)}`),
+  );
+}
 
-  // 本地没有固定命令行时，SDK 会按需从网络下载；连接重置不应让整次验收直接抖红。
-  return (async () => {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        return await TestWorkflowEnvironment.createLocal(options);
-      } catch (error) {
-        lastError = error;
-        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
-      }
-    }
-    throw lastError;
-  })();
+let preparedCli: string | undefined;
+/** 核实命令行（进程内只核一次成功的结果）；失败抛带阶段的 TemporalCliError。 */
+function preparedRealCli(): string {
+  if (preparedCli) return preparedCli;
+  const france = readFileSync(fileURLToPath(new URL('../../../deploy/france.sh', import.meta.url)), 'utf8');
+  const pin = parsePin(france);
+  if (typeof pin === 'string') throw new TemporalCliError('missing', pin);
+  const r = resolveCli({
+    env: process.env,
+    version: pin.version,
+    platform: process.platform,
+    home: defaultHome(),
+  });
+  if (!r.ok) throw new Error(r.message);
+  preparedCli = r.path;
+  return r.path;
 }
 
 export interface WorkerOptions {

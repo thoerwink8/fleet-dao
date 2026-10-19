@@ -17,7 +17,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - `npx vitest run packages/engine/test/<文件>`。不要 Postgres（用到库的跑在 PGlite 上）。
 - 法国工具链 `/bin/sh` 和目录 chmod 权限测试在 Linux 跑真端口；Windows 用明示的命令/阶段错误夹具验证装配与失败分类，不代表引擎支持 Windows 生产宿主。Git 归档检出在两种系统都跑真实 git/tar，归档名相对私有 scratch，避免 GNU tar 把 Windows 盘符当远端。
-- Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；要真服务端时设 `FLEET_TEST_TEMPORAL_CLI`。
+- Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；要真服务端（`createRealEnv`）先 `pnpm temporal:cli`（装固定版本到受管缓存）或设 `FLEET_TEST_TEMPORAL_CLI`；命令行不可用按阶段（缺失/坏路径/错版本/卡住/执行失败/启动或连接）明确失败，不走 SDK 下载。起服务端有 60 秒期限，迟到起来的服务端会被回收。
 - 重放：`packages/engine/test/replay.test.ts` 拿 `test/replay/fixtures/task-*.json` 对现在的代码重放。录新场景用 `node packages/engine/test/replay/record.ts <场景>`，已有的夹具拒绝覆盖。
 
 ## 常见坑

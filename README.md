@@ -70,7 +70,9 @@
 
 ### Windows 上的 Linux 安全测试
 
-`pnpm check`（含 `--all`）和 `pnpm test:changed` 选到安全归档测试时，会将它们交给显式配置的本机 Linux 普通用户；其余测试仍在 Windows 跑。单独验这组测试用 `pnpm test:linux`。不配置或环境不可用会明确失败，不跳过、不自动安装或启动新发行版、不改默认发行版。
+`pnpm check`（含 `--all`）和 `pnpm test:changed` 选到安全归档测试时，会将它们交给显式配置的本机 Linux 普通用户；其余测试仍在 Windows 跑。单独验这组测试用 `pnpm test:linux`。
+
+真 Temporal 服务端的测试（调 `createRealEnv` 的文件）要 `deploy/france.sh` 固定版本的 Temporal 命令行。本机先跑一次 `pnpm temporal:cli`：按固定版本和平台校验和下载（整体期限、有界重试、解包核版本后原子落盘）到 `~/.cache/fleet-temporal-cli/<版本>/`，已就绪则不动；也可自己装好并设 `FLEET_TEST_TEMPORAL_CLI`。`pnpm check`、`pnpm test:changed` 选到这类文件时先核命令行，缺失、坏路径、错版本、卡住、执行失败各自明确非零退出并给修复命令；直接 `npx vitest` 跑这类文件同样先核，绝不退回 SDK 隐式下载。不配置或环境不可用会明确失败，不跳过、不自动安装或启动新发行版、不改默认发行版。
 
 将 `FLEET_TEST_LINUX_RUNNER` 设置为本机 JSON 配置文件的绝对路径，配置不进仓。例如已安装 WSL 的配置结构：
 

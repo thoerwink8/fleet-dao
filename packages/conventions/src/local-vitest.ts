@@ -7,7 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { verifyRun } from './ci-box.ts';
 import { fsRepo } from './repo.ts';
-import { listTestFiles } from './test-split.ts';
+import { defaultHome, type ProbeDeps, parsePin, resolveCli } from './temporal-cli.ts';
+import { listTestFiles, TEMPORAL_MARKER } from './test-split.ts';
 
 export const LINUX_TESTS = [
   'packages/engine/test/real/complex-preserve.test.ts',
@@ -138,12 +139,62 @@ export function verifyLinuxReceipt(
   return receipt;
 }
 
+export interface TemporalPreflightDeps {
+  home: string;
+  probe?: ProbeDeps;
+}
+
+/**
+ * 所选文件里有要真 Temporal 服务端的（TEMPORAL_MARKER 认出的），先核固定版本命令行；核过的路径写进子进程 env
+ * 的 FLEET_TEST_TEMPORAL_CLI。没有这类文件不碰命令行。读不到文件、读不到固定版本、命令行不可用都返回原因（调用方不跑测试）。
+ */
+export function temporalPreflight(
+  root: string,
+  args: string[],
+  env: NodeJS.ProcessEnv,
+  platform: string,
+  deps: TemporalPreflightDeps = { home: defaultHome() },
+): { ok: true; env: NodeJS.ProcessEnv; checked?: string } | { ok: false; message: string } {
+  const repo = fsRepo(root);
+  const universe = listTestFiles(repo);
+  if (typeof universe === 'string') return { ok: false, message: universe };
+  const filters = args.slice(1).filter((a) => !a.startsWith('--'));
+  const selected = splitLocalTests(universe, filters);
+  const picked = [...selected.linux, ...selected.native];
+  const needing: string[] = [];
+  for (const f of picked) {
+    const text = repo.read(f);
+    if (text === undefined)
+      return { ok: false, message: `读不到测试文件 ${f}（认不出它要不要 Temporal 命令行）` };
+    if (TEMPORAL_MARKER.test(text)) needing.push(f);
+  }
+  if (needing.length === 0) return { ok: true, env };
+  const france = repo.read('deploy/france.sh');
+  const pin =
+    france === undefined ? '读不到 deploy/france.sh（固定的 Temporal 命令行版本在这里）' : parsePin(france);
+  if (typeof pin === 'string') return { ok: false, message: pin };
+  const r = resolveCli({ env, version: pin.version, platform, home: deps.home, deps: deps.probe });
+  if (!r.ok)
+    return {
+      ok: false,
+      message: `${r.message}\n（要真服务端的测试：${needing.join('、')}；未跑测试，不算通过）`,
+    };
+  return { ok: true, env: { ...env, FLEET_TEST_TEMPORAL_CLI: r.path }, checked: r.path };
+}
+
 export function runLocalVitest(
   root: string,
   args: string[],
-  env = process.env,
+  env0 = process.env,
   platform = process.platform,
 ): Result {
+  const pre = temporalPreflight(root, args, env0, platform);
+  if (!pre.ok) {
+    console.error(pre.message);
+    return { status: 2 };
+  }
+  const env = pre.env;
+  if (pre.checked) console.log(`Temporal 命令行已核实：${pre.checked}`);
   const direct = (argv: string[]) => {
     const r = spawnSync(process.execPath, [join(root, 'node_modules/vitest/vitest.mjs'), ...argv], {
       cwd: root,

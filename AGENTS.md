@@ -30,5 +30,6 @@
 - `npx vitest run <文件>`
 - `pnpm check`
 - `pnpm test:linux`（Windows 的 Linux 安全归档测试，须显式配置本机 Linux runner）
+- `pnpm temporal:cli`（本机真 Temporal 服务端测试前准备固定版本命令行）
 - `pnpm pr:open`
 - `pnpm progress read`
