@@ -3,6 +3,9 @@
 // 白名单放行/拒绝、会话交白名单外的裁决不执行、诊断文字带进提醒；真装配的开关、操作记录名下另在 real/park-triage.test.ts。
 import type { ScheduleResult } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
+import type { SpinRound } from '../src/decisions/spin.ts';
+import type { GroomSessionInput, GroomSessionOutcome } from '../src/jobs/groom.ts';
+import type { IntakeRepo } from '../src/jobs/intake.ts';
 import {
   COMMANDER_AUDIT_CLAIM,
   type CommanderActEntry,
@@ -16,10 +19,7 @@ import {
   runParkTriageJob,
   triageParkedTasks,
 } from '../src/jobs/park-triage.ts';
-import type { GroomSessionInput, GroomSessionOutcome } from '../src/jobs/groom.ts';
-import type { IntakeRepo } from '../src/jobs/intake.ts';
 import type { ParkedRetryRow, ParkedSnapshot } from '../src/jobs/parked-retry.ts';
-import type { SpinRound } from '../src/decisions/spin.ts';
 import {
   COMMANDER_ACTOR,
   type ContinueCommand,

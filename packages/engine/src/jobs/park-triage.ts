@@ -30,8 +30,8 @@ import {
   type TaskParkInfo,
 } from '../task-contract.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
-import { extractJson, renderNewIssueBody } from './groom-plan.ts';
 import type { GroomSessionInput, GroomSessionOutcome } from './groom.ts';
+import { extractJson, renderNewIssueBody } from './groom-plan.ts';
 import type { IntakeRepo } from './intake.ts';
 import type { ParkedRetryRow, ParkedSnapshot } from './parked-retry.ts';
 import { stamp } from './reconcile-common.ts';
