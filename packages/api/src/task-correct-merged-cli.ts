@@ -249,6 +249,7 @@ export function portsFromParts(parts: {
   execution(req: CorrectionRequest): Promise<ExecutionFacts>;
 }): CorrectMergedPorts {
   return {
+    execution: (req) => parts.execution(req),
     async read(req) {
       const ledger = await parts.ledger.readCorrectMergedLedger({
         owner: req.repo.owner,
@@ -361,6 +362,7 @@ export async function runCorrectMergedCommand(
   if (!operatorAllowed(operator) || !workflowBelongs(req.workflowId, req.repo, req.issueNumber)) {
     const report = await runCorrectMerged(req, operator, args.note, mode, {
       read: () => Promise.reject(new Error('前置不成立，不应读取')),
+      execution: () => Promise.reject(new Error('前置不成立，不应读取')),
       cas: () => Promise.reject(new Error('前置不成立，不应写入')),
     });
     deps.out(reportLine(report));

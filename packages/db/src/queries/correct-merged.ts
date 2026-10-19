@@ -54,7 +54,15 @@ export interface CasCorrectMergedInput {
   prNumber: number;
   now: Date;
   audit: { actorId: string; reason: string; before: unknown; after: unknown };
+  /**
+   * 调用方的外部核对（Temporal 代数、run 身份等）。在事务里任务行已加锁后调用一次，
+   * 写入之后、提交之前再调用一次。返回 false 就回 stale 并整笔回滚；抛错也回滚并原样抛出。
+   */
+  verify?: () => Promise<boolean>;
 }
+
+/** 写入之后核对没过：抛出以回滚整笔事务，外层转成 stale。 */
+class StaleAfterWrite extends Error {}
 
 const DOING = '受管纠正为真实已合；原 abandoned 结论留在操作记录和原执行结果';
 
@@ -236,6 +244,15 @@ export async function casCorrectMergedTask(
   input: CasCorrectMergedInput,
 ): Promise<'corrected' | 'stale'> {
   if (!Number.isSafeInteger(input.expectedUpdatedAtMs)) return 'stale';
+  try {
+    return await casInTransaction(db, input);
+  } catch (err) {
+    if (err instanceof StaleAfterWrite) return 'stale';
+    throw err;
+  }
+}
+
+async function casInTransaction(db: Db, input: CasCorrectMergedInput): Promise<'corrected' | 'stale'> {
   return db.transaction(async (tx) => {
     const [row] = await tx
       .select({
@@ -263,6 +280,7 @@ export async function casCorrectMergedTask(
       .where(eq(runs.taskId, row.id));
     if (!sessionLinkHolds(sessionLinks(sessionRows), input.workflowId, input.prNumber, input.runId))
       return 'stale';
+    if (input.verify && !(await input.verify())) return 'stale';
     await tx
       .update(tasks)
       .set({
@@ -285,6 +303,7 @@ export async function casCorrectMergedTask(
       via: 'ops',
       ok: true,
     });
+    if (input.verify && !(await input.verify())) throw new StaleAfterWrite();
     return 'corrected';
   });
 }

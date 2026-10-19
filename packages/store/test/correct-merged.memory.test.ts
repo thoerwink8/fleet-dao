@@ -106,6 +106,31 @@ describe('内存版受管纠正', () => {
     ]);
   });
 
+  it('写入前或写入后外部核对没过，都回 stale 且整笔回到原样', async () => {
+    const before = store();
+    expect(await before.casCorrectMerged({ ...input, verify: async () => false })).toBe('stale');
+    expect(before.data.tasks[0]?.state).toBe('stopped');
+    expect(before.data.audit).toEqual([]);
+
+    const after = store();
+    let seen = 0;
+    const onceThenFail = async () => {
+      seen += 1;
+      return seen === 1;
+    };
+    expect(await after.casCorrectMerged({ ...input, verify: onceThenFail })).toBe('stale');
+    expect(seen).toBe(2);
+    expect(after.data.tasks[0]?.state).toBe('stopped');
+    expect(after.data.taskClosures[0]?.phase).toBe('abandoned');
+    expect(after.data.taskClosures[0]?.updatedAt).toBe(WHEN);
+    expect(after.data.stateChanges.some((row) => row.to === 'done')).toBe(false);
+    expect(after.data.audit).toEqual([]);
+
+    const ok = store();
+    expect(await ok.casCorrectMerged({ ...input, verify: async () => true })).toBe('corrected');
+    expect(ok.data.tasks[0]?.state).toBe('done');
+  });
+
   it('开着的会话或更新时间变了就不写', async () => {
     const memory = store();
     memory.data.runs.push({

@@ -31,7 +31,7 @@
 `resolveNotification` 的可选 `expected` 用于历史审计处置：事务内核对原通知键、正文和链接，已处理时只有同一份审计可以幂等返回，否则 `conflict`。普通处理入口不带它，保留现有行为。
 
 - 改接口：`ports.ts` → `memory-store.ts` + `pg-store.ts` → 契约测试；调用方在 api 和 engine。
-- `readCorrectMergedLedger` / `casCorrectMerged`：误记 abandoned 的已合任务。读任务行、会话、请求的 PR 镜像和既有纠正回执；CAS 只在仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍钉着这次交付时，把任务行改成 done/merged，并在同一事务写操作记录。同一工作流另有不同非空 PR 的会话算没钉住，回 stale；二次核对之后事务里才读到的冲突会话同样不写。不改 runs、PR 镜像、验收责任。内存版的 phase / 更新时间在 `taskClosures`，合并提交在 `pullMerges`，不塞进驾驶舱读出去的任务和 PR。
+- `readCorrectMergedLedger` / `casCorrectMerged`：误记 abandoned 的已合任务。读任务行、会话、请求的 PR 镜像和既有纠正回执；CAS 只在仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍钉着这次交付时，把任务行改成 done/merged，并在同一事务写操作记录。同一工作流另有不同非空 PR 的会话算没钉住，回 stale；二次核对之后事务里才读到的冲突会话同样不写。不改 runs、PR 镜像、验收责任。可传 verify：任务行加锁后、写入前、写入后各核一次，回假就 stale 整笔回滚。内存版的 phase / 更新时间在 `taskClosures`，合并提交在 `pullMerges`，不塞进驾驶舱读出去的任务和 PR。
 - 要新表或新列：先在 `packages/db` 改表结构并生成迁移（见 `packages/db/AGENTS.md`），再改这里。
 - 要驾驶舱实时看到的新表：登记 `packages/shared/src/realtime.ts` 的 `REALTIME_TABLES`，触发器在 db 的迁移里。
 

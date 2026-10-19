@@ -283,6 +283,9 @@ function paginate<T extends { at: string; id: string }>(
   );
 }
 
+/** 受管纠正写入之后外部核对没过：抛出以回滚，外层转成 stale。 */
+class StaleAfterWrite extends Error {}
+
 export function createMemoryStore(
   seed: Partial<MemoryData> = {},
   options: MemoryStoreOptions = {},
@@ -416,14 +419,15 @@ export function createMemoryStore(
     };
   }
 
-  function casLedger(input: {
+  async function casLedger(input: {
     taskId: string;
     expectedUpdatedAtMs: number;
     workflowId: string;
     runId: string;
     prNumber: number;
     audit: { actorId: string; reason: string; before: unknown; after: unknown };
-  }): 'corrected' | 'stale' {
+    verify?: () => Promise<boolean>;
+  }): Promise<'corrected' | 'stale'> {
     if (!Number.isSafeInteger(input.expectedUpdatedAtMs)) return 'stale';
     const index = data.tasks.findIndex((row) => row.id === input.taskId);
     const task = data.tasks[index];
@@ -448,6 +452,7 @@ export function createMemoryStore(
         ended: run.endedAt !== undefined,
       }));
     if (!sessionLinkHolds(sessions, input.workflowId, input.prNumber, input.runId)) return 'stale';
+    if (input.verify && !(await input.verify())) return 'stale';
     const entry: NewAuditEntry = {
       actor: { kind: 'ops', id: input.audit.actorId },
       action: CORRECT_MERGED_AUDIT_ACTION,
@@ -477,9 +482,20 @@ export function createMemoryStore(
         at: now().toISOString(),
       });
       audit(entry);
+      if (input.verify && !(await input.verify())) {
+        throw new StaleAfterWrite();
+      }
       changed('tasks', task.id);
       return 'corrected';
     } catch (error) {
+      if (error instanceof StaleAfterWrite) {
+        data.tasks[index] = previous;
+        closure.phase = previousClosure.phase;
+        closure.updatedAt = previousClosure.updatedAt;
+        data.stateChanges.length = changes;
+        data.audit.length = audits;
+        return 'stale';
+      }
       data.tasks[index] = previous;
       closure.phase = previousClosure.phase;
       closure.updatedAt = previousClosure.updatedAt;

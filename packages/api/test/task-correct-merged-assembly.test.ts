@@ -27,6 +27,10 @@ interface World {
   resultThrows: boolean;
   extraGeneration: boolean;
   onSecondRead: (() => Promise<void>) | null;
+  /** CAS 调用前（已过二次读取）Temporal 多出一代。 */
+  generationBeforeCas: boolean;
+  /** 只让写入之后的第二次核对失败：验证事务回滚。 */
+  failVerifyAfterWrite: boolean;
   wrapCas: boolean;
   conflictOnCas: boolean;
   reads: number;
@@ -53,6 +57,8 @@ function world(): World {
     resultThrows: false,
     extraGeneration: false,
     onSecondRead: null,
+    generationBeforeCas: false,
+    failVerifyAfterWrite: false,
     wrapCas: false,
     conflictOnCas: false,
     reads: 0,
@@ -170,8 +176,10 @@ describe('task correct-merged 真实装配', () => {
               if (current.reads === 2 && current.onSecondRead) await current.onSecondRead();
               return real.read(request);
             },
+            execution: (request) => real.execution(request),
             cas: async (input) => {
               current.casCalls += 1;
+              if (current.generationBeforeCas) current.extraGeneration = true;
               if (current.wrapCas) {
                 await t.db
                   .update(tasks)
@@ -192,7 +200,16 @@ describe('task correct-merged 真实装配', () => {
                   workflowId: WF,
                 });
               }
-              return real.cas(input);
+              let checks = 0;
+              if (!current.failVerifyAfterWrite || !input.verify) return real.cas(input);
+              const original = input.verify;
+              return real.cas({
+                ...input,
+                verify: async () => {
+                  checks += 1;
+                  return checks === 1 ? original() : false;
+                },
+              });
             },
           },
           close: async () => {},
@@ -267,7 +284,8 @@ describe('task correct-merged 真实装配', () => {
     expect(applied.code).toBe(0);
     expect(applied.json?.status).toBe('corrected');
     expect(applied.json?.preview.execution?.outcome).toBe('abandoned');
-    expect(current.resultCalls).toBe(2);
+    // 两遍核对读 + CAS 前后各一次核对（任务行锁里）
+    expect(current.resultCalls).toBe(4);
     const row = await taskRow();
     expect(row?.state).toBe('done');
     expect(row?.phase).toBe('merged');
@@ -614,6 +632,38 @@ describe('task correct-merged 真实装配', () => {
     expect(next.json?.reason).toContain('新的一代');
     expect(current.casCalls).toBe(0);
     expect((await taskRow())?.phase).toBe('abandoned');
+  });
+
+  it('二次读取之后、CAS 之前新一代工作流启动，事务核对拒绝，不写 done', async () => {
+    current.generationBeforeCas = true;
+    const result = await invoke(args(['--apply']));
+    expect(result.code).toBe(1);
+    expect(result.json?.status).toBe('refused');
+    expect(result.json?.reason).toContain('变了');
+    expect(current.casCalls).toBe(1);
+    const row = await taskRow();
+    expect(row?.state).toBe('stopped');
+    expect(row?.phase).toBe('abandoned');
+    expect(row?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
+    expect(await audits()).toEqual([]);
+    const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
+    expect(changes.some((change) => change.toState === 'done')).toBe(false);
+  });
+
+  it('写入之后的核对没过，整笔回滚，任务行和操作记录都不留', async () => {
+    current.failVerifyAfterWrite = true;
+    const result = await invoke(args(['--apply']));
+    expect(result.code).toBe(1);
+    expect(result.json?.status).toBe('refused');
+    expect(result.json?.reason).toContain('变了');
+    expect(current.casCalls).toBe(1);
+    const row = await taskRow();
+    expect(row?.state).toBe('stopped');
+    expect(row?.phase).toBe('abandoned');
+    expect(row?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
+    expect(await audits()).toEqual([]);
+    const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
+    expect(changes.some((change) => change.toState === 'done')).toBe(false);
   });
 
   it('核对之后更新时间被别人改了，事务回 stale，不写成 done', async () => {

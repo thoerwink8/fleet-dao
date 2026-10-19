@@ -9,6 +9,7 @@ import {
   type CorrectionRequest,
   type CorrectMergedSnapshot,
   decideCorrection,
+  type ExecutionFacts,
   type LedgerTask,
   operatorAllowed,
   workflowBelongs,
@@ -16,6 +17,8 @@ import {
 
 export interface CorrectMergedPorts {
   read(req: CorrectionRequest): Promise<CorrectMergedSnapshot>;
+  /** 只读这张单的原工作流各代（Temporal describe/result），给 CAS 前后核对用。 */
+  execution(req: CorrectionRequest): Promise<ExecutionFacts>;
   cas(input: Omit<CasCorrectMergedInput, 'now'>): Promise<'corrected' | 'stale'>;
 }
 
@@ -205,6 +208,9 @@ async function apply(
 ): Promise<CorrectMergedReport> {
   const task = snap.task as LedgerTask;
   const ref = `${req.repo.owner}/${req.repo.name}#${req.issueNumber}`;
+  // 代数和结果在 CAS 前后各核一次（CAS 在任务行锁里做）。与核对时冻结的快照不一致、或读不到，就回滚拒绝。
+  const frozen = JSON.stringify(snap.execution);
+  const verify = async (): Promise<boolean> => JSON.stringify(await ports.execution(req)) === frozen;
   let outcome: 'corrected' | 'stale';
   try {
     outcome = await ports.cas({
@@ -219,9 +225,15 @@ async function apply(
         before: decision.receiptBefore,
         after: decision.receiptAfter,
       },
+      verify,
     });
   } catch (err) {
-    return refused('apply', req, snap, `操作记录写不进（${errMessage(err)}），任务行保持原样，不纠正`);
+    return refused(
+      'apply',
+      req,
+      snap,
+      `操作记录写不进或核对没成（${errMessage(err)}），任务行保持原样，不纠正`,
+    );
   }
   if (outcome === 'stale') {
     return refused('apply', req, snap, '任务在核对之后变了（并发换代或新运行），拒绝覆盖，请重新预检');
