@@ -14,6 +14,8 @@ interface Run {
   name: string;
   conclusion: string | null;
   title?: string;
+  /** 不给：没结论是 in_progress，有结论是 completed。 */
+  status?: string;
 }
 
 interface Status {
@@ -27,7 +29,7 @@ function gh(required: string[], runs: Run[], statuses: Status[]): Pick<GitHub, '
     id: i + 1,
     name: run.name,
     head_sha: A,
-    status: run.conclusion === null ? 'in_progress' : 'completed',
+    status: run.status ?? (run.conclusion === null ? 'in_progress' : 'completed'),
     conclusion: run.conclusion,
     started_at: '2026-09-25T12:00:00Z',
     completed_at: run.conclusion === null ? null : '2026-09-25T12:00:00Z',
@@ -89,14 +91,74 @@ describe('等合并时读必过检查', () => {
     expect(got).toEqual({ overall: 'red', failed: [{ name: GATE_CONTEXT, detail: 'cold-verify 没过' }] });
   });
 
+  const signalsGreen: Status[] = [
+    { context: GATE_CONTEXT, state: 'success' },
+    { context: COLD_VERIFY_CONTEXT, state: 'success' },
+  ];
+
   it('检查还在跑：pending，不是红', async () => {
     const got = await readMergeWaitChecks(
-      gh(['check'], [{ name: 'check', conclusion: null }], []),
+      gh(['check'], [{ name: 'check', conclusion: null }], signalsGreen),
       repo,
       A,
       fleetSignals,
     );
-    expect(got).toEqual({ overall: 'pending', failed: [] });
+    expect(got).toEqual({ overall: 'pending', failed: [], pending: [{ name: 'check' }] });
+  });
+
+  it('检查在排队（queued）：pending，名字算在跑', async () => {
+    const got = await readMergeWaitChecks(
+      gh(['check'], [{ name: 'check', conclusion: null, status: 'queued' }], signalsGreen),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got).toEqual({ overall: 'pending', failed: [], pending: [{ name: 'check' }] });
+  });
+
+  it('【故意造出的失败】检查跑完了结论却是 stale：不算在跑，交 unsettled 带原词，不带 pending', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'stale' }],
+        [
+          { context: GATE_CONTEXT, state: 'pending', description: '排队' },
+          { context: COLD_VERIFY_CONTEXT, state: 'success' },
+        ],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got.overall).toBe('pending');
+    expect(got.pending).toBeUndefined();
+    expect(got.missing).toBeUndefined();
+    expect(got.unsettled).toEqual([{ name: 'check', conclusion: 'stale' }]);
+  });
+
+  it('【故意造出的失败】检查跑完了结论认不出：交 unsettled，不当成在跑', async () => {
+    const got = await readMergeWaitChecks(
+      gh(['check'], [{ name: 'check', conclusion: 'weird_new_value' }], []),
+      repo,
+      A,
+      [],
+    );
+    expect(got).toEqual({
+      overall: 'pending',
+      failed: [],
+      unsettled: [{ name: 'check', conclusion: 'weird_new_value' }],
+    });
+  });
+
+  it('【故意造出的失败】检查在等部署审批（waiting）：不是 queued / in_progress，交 unsettled', async () => {
+    const got = await readMergeWaitChecks(
+      gh(['check'], [{ name: 'check', conclusion: null, status: 'waiting' }], []),
+      repo,
+      A,
+      [],
+    );
+    expect(got.pending).toBeUndefined();
+    expect(got.unsettled).toEqual([{ name: 'check', conclusion: 'waiting' }]);
   });
 
   it('档案没列 cold-verify、闸却写着等验收：pending，不当成红', async () => {
@@ -119,7 +181,7 @@ describe('等合并时读必过检查', () => {
     expect(got).toEqual({ overall: 'pending', failed: [] });
   });
 
-  it('cold-verify 列了但这次没读到、闸写着等验收：pending，不当成红', async () => {
+  it('cold-verify 列了但这次没读到、闸写着等验收：不当成红，点名没出现的', async () => {
     const got = await readMergeWaitChecks(
       gh(
         ['check'],
@@ -130,7 +192,12 @@ describe('等合并时读必过检查', () => {
       A,
       fleetSignals,
     );
-    expect(got).toEqual({ overall: 'pending', failed: [] });
+    expect(got).toEqual({
+      overall: 'pending',
+      failed: [],
+      missing: [{ name: COLD_VERIFY_CONTEXT }],
+    });
+    expect(got.pending).toBeUndefined();
   });
 
   it('等验收的同时别的必过检查红了：只把别的交回返工', async () => {
@@ -161,7 +228,11 @@ describe('等合并时读必过检查', () => {
       A,
       fleetSignals,
     );
-    expect(got).toEqual({ overall: 'pending', failed: [] });
+    expect(got).toEqual({
+      overall: 'pending',
+      failed: [],
+      pending: [{ name: COLD_VERIFY_CONTEXT }],
+    });
   });
 
   it('必过绿、合并闸和 cold-verify 还没出现：pending，不当红', async () => {
@@ -173,6 +244,71 @@ describe('等合并时读必过检查', () => {
     );
     expect(got.overall).toBe('pending');
     expect(got.failed).toEqual([]);
+    // 还没出现不是还在跑：没有 pending 名字，挂合并不能据此有界等待，并点名没出现的。
+    expect(got.pending).toBeUndefined();
+    expect(got.missing).toEqual([{ name: GATE_CONTEXT }, { name: COLD_VERIFY_CONTEXT }]);
+  });
+
+  it('必过已绿、merge-gate 还在队列、cold-verify 也已绿：pending，名字只有 merge-gate', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [
+          { context: GATE_CONTEXT, state: 'pending', description: '排队' },
+          { context: COLD_VERIFY_CONTEXT, state: 'success' },
+        ],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got).toEqual({ overall: 'pending', failed: [], pending: [{ name: GATE_CONTEXT }] });
+    expect(got.missing).toBeUndefined();
+  });
+
+  it('【故意造出的失败】一个检查 in_progress、另一个必过检查没出现：不交可等的 pending，点名没出现的', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check', 'lint'],
+        [{ name: 'check', conclusion: null, status: 'in_progress' }],
+        [
+          { context: GATE_CONTEXT, state: 'success' },
+          { context: COLD_VERIFY_CONTEXT, state: 'success' },
+        ],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got.overall).toBe('pending');
+    expect(got.pending).toBeUndefined();
+    expect(got.unsettled).toBeUndefined();
+    expect(got.missing).toEqual([{ name: 'lint' }]);
+    expect(got.failed).toEqual([]);
+  });
+
+  it('【故意造出的失败】merge-gate 在队列里、cold-verify 没出现：不把没出现当成可等', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [{ context: GATE_CONTEXT, state: 'pending', description: '排队' }],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got.pending).toBeUndefined();
+    expect(got.missing).toEqual([{ name: COLD_VERIFY_CONTEXT }]);
+    expect(got.overall).toBe('pending');
+  });
+
+  it('必过检查一个都没出现：none，并点名没出现的，不带 pending', async () => {
+    const got = await readMergeWaitChecks(gh(['check', 'lint'], [], []), repo, A, []);
+    expect(got.overall).toBe('none');
+    expect(got.pending).toBeUndefined();
+    expect(got.missing).toEqual([{ name: 'check' }, { name: 'lint' }]);
   });
 
   it('必过、合并闸、cold-verify 都绿：green', async () => {

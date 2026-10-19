@@ -332,6 +332,13 @@ export function packTests(input: PackInput): Packed | string {
       parent.set(find(g), find(f));
     }
   }
+  // 要 Temporal 命令行的文件必须同一台：CI 只给标了 temporal 的那一台装命令行。拆开就会多一台都得装。
+  const temporalFiles = input.files.filter((f) => input.temporal.has(f)).sort();
+  if (temporalFiles.length > 1) {
+    const root = temporalFiles[0] as string;
+    for (const f of temporalFiles.slice(1)) parent.set(find(f), find(root));
+    notes.push(`${temporalFiles.join('、')} 都要 Temporal 命令行，放在同一台`);
+  }
   const groups = new Map<string, string[]>();
   for (const f of [...input.files].sort()) {
     const r = find(f);
@@ -340,7 +347,10 @@ export function packTests(input: PackInput): Packed | string {
   const pgItems: Item[] = [];
   const plainItems: Item[] = [];
   for (const files of groups.values()) {
-    if (files.length > 1) notes.push(`${files.join('、')} 按名字会互相拉上（vitest 是子串过滤），放在同一台`);
+    // 按名字绑在一起的才记这一句。只因为都要 Temporal 命令行才并到一组的，上面已经另记过。
+    if (files.length > 1 && files.some((f) => siblingsOf(f, files).length > 0)) {
+      notes.push(`${files.join('、')} 按名字会互相拉上（vitest 是子串过滤），放在同一台`);
+    }
     const pg = files.filter(needsPg).length;
     if (pg > 0 && pg < files.length)
       return `${files.join('、')} 按名字绑在一起，却一半要真 Postgres、一半不要：分不了台`;

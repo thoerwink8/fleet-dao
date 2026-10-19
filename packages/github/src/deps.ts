@@ -6,11 +6,21 @@ import { type AppRole, botLogin, isBot } from './credentials.ts';
 import type { Ledger } from './ledger.ts';
 import type { RepoFactsCache } from './repos.ts';
 
-/** 和引擎的 PortContext 同形（取子集）：叫停信号、心跳、上一次尝试的心跳内容。 */
+/** 和引擎的 PortContext 同形（取子集）：叫停信号、心跳、上一次尝试的心跳内容、这一次写的绝对截止。 */
 export interface ActivityContext {
   signal?: AbortSignal | undefined;
   heartbeat?: ((details?: unknown) => void) | undefined;
   lastHeartbeat?: unknown;
+  /**
+   * 这一次尝试必须在这之前结束（毫秒，墙钟）。写请求在排队、慢读之后、真正发出去之前再看一次。
+   * 不填就不当成已经到期。
+   */
+  attemptDeadlineMs?: number | undefined;
+  /**
+   * 这一次调度（含排队、重试）必须在这之前结束（毫秒，墙钟）。和 attemptDeadlineMs 取更早的那个。
+   * 没设就不填。
+   */
+  scheduleDeadlineMs?: number | undefined;
 }
 
 export interface Locker {

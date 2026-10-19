@@ -2,7 +2,7 @@
 // 建树仍是 setup（20 分钟、重试 3 次）。两档不要搅在一起。
 
 import { describe, expect, it } from 'vitest';
-import { ACTIVITY_PROFILE, activityOptions } from '../src/activity-options.ts';
+import { ACTIVITY_PROFILE, activityOptions, activityOptionsWithin } from '../src/activity-options.ts';
 import { DEFAULT_LIMITS } from '../src/limits.ts';
 import { KILL_SETTLE_MS } from '../src/real/exec.ts';
 import {
@@ -42,5 +42,19 @@ describe('selfCheck 活动档', () => {
     // 再加三次放名额、放锁，各有自己的上限
     expect(SELF_CHECK_CLEANUP_MS).toBeGreaterThanOrEqual(5 * KILL_SETTLE_MS + 3 * SELF_CHECK_RELEASE_MS);
     expect(SELF_CHECK_ACTIVITY_MS).toBeLessThan(72 * 60_000);
+  });
+});
+
+describe('受剩余期限约束的那一次（挂合并时等检查）', () => {
+  it('scheduleToClose 是剩下的秒数，单次尝试不超过它，重试照这一档', () => {
+    const own = activityOptions('armAutoMerge', DEFAULT_LIMITS);
+    const wide = activityOptionsWithin('armAutoMerge', DEFAULT_LIMITS, 880);
+    expect(wide.scheduleToCloseTimeout).toBe(880_000);
+    expect(wide.startToCloseTimeout).toBe(300_000);
+    expect(wide.retry).toEqual(own.retry);
+
+    const tight = activityOptionsWithin('armAutoMerge', DEFAULT_LIMITS, 100);
+    expect(tight.scheduleToCloseTimeout).toBe(100_000);
+    expect(tight.startToCloseTimeout).toBe(100_000);
   });
 });

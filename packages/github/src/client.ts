@@ -57,6 +57,13 @@ export interface GhRequest {
   idempotent?: boolean | undefined;
   /** 翻页时用 Link 头给的完整地址。 */
   url?: string | undefined;
+  /**
+   * 这一次写必须在这之前发出（毫秒，墙钟）。只拦写：慢读、等锁、查账可以跨过它，真正 fetch 之前再看。
+   * 不填就不当成已经到期。读请求不看它。
+   */
+  attemptDeadlineMs?: number | undefined;
+  /** 调度总期限（毫秒，墙钟）。和 attemptDeadlineMs 取更早的那个。不填就不参与。 */
+  scheduleDeadlineMs?: number | undefined;
 }
 
 export interface GhResponse<T = unknown> {
@@ -354,7 +361,12 @@ export class GitHubClient {
     auth: Auth,
     query: string,
     variables: Record<string, unknown>,
-    options: { mutation?: boolean; signal?: AbortSignal | undefined } = {},
+    options: {
+      mutation?: boolean;
+      signal?: AbortSignal | undefined;
+      attemptDeadlineMs?: number | undefined;
+      scheduleDeadlineMs?: number | undefined;
+    } = {},
   ): Promise<T> {
     const res = await this.request<{ data?: T | null; errors?: { type?: string; message?: string }[] }>({
       method: 'POST',
@@ -363,6 +375,8 @@ export class GitHubClient {
       body: { query, variables },
       idempotent: !options.mutation,
       signal: options.signal,
+      ...(options.attemptDeadlineMs === undefined ? {} : { attemptDeadlineMs: options.attemptDeadlineMs }),
+      ...(options.scheduleDeadlineMs === undefined ? {} : { scheduleDeadlineMs: options.scheduleDeadlineMs }),
     });
     const errors = res.data?.errors ?? [];
     if (errors.length > 0) {
@@ -430,6 +444,9 @@ export class GitHubClient {
         body = JSON.stringify(req.body);
       }
 
+      // 慢读、等锁、换令牌、写队列的间隔都可能跨过截止。写在真正 fetch 之前再看一次；读不拦，好回查已发出去的结果。
+      // 放在 try 外面：截止错误不能被下面当成「连不上、再试一次」。
+      if (write) refuseLateGitHubWrite(req);
       let res: Response;
       try {
         res = await this.fetchImpl(req.url ?? this.url(req.path, req.query), {
@@ -561,6 +578,26 @@ export function encRef(ref: string): string {
 
 function isWrite(req: GhRequest): boolean {
   return req.method !== 'GET' && !req.idempotent;
+}
+
+/**
+ * 写请求已经排队、前面的只读也跑完了：取消了，或墙钟越过了绝对截止，就不要再 fetch。
+ * 不心跳时服务端超时不会取消 signal，所以截止用数值。已经发出去的请求这里撤不回。
+ */
+function refuseLateGitHubWrite(req: GhRequest): void {
+  req.signal?.throwIfAborted();
+  const marks = [req.attemptDeadlineMs, req.scheduleDeadlineMs].filter(
+    (n): n is number => typeof n === 'number' && Number.isFinite(n),
+  );
+  if (marks.length === 0) return;
+  if (Date.now() < Math.min(...marks)) return;
+  throw new GitHubError(
+    'WRITE_DEADLINE_PASSED',
+    `${req.method} ${req.path} 的期限已到，不再向 GitHub 发起新的写`,
+    {
+      retryable: false,
+    },
+  );
 }
 
 /**
