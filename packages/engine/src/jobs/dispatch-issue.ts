@@ -7,7 +7,9 @@
 //   （有一代任务工作流在跑或已结束；只有任务行、没有任何一代、行是 queued 或 stopped 的不算，接手那一行再派）、
 //   任务工作流没查成（不确定，不当成没有工作流）、碰 workflows、碰改标准的路径（standard-paths.json 列的，判法同拉单的
 //   standardPathIn；引擎的 PR 正文没有创始人原话，合并闸永远判红，决定 0093）、
-//   已有 PR 挂着、交代不全（任务工作流第一步会拒收，放行了只会起一条马上失败的工作流）。
+//   已有 PR 挂着、交代不全（任务工作流第一步会拒收，放行了只会起一条马上失败的工作流）、
+//   前置没等完（正文「前置：」那一行，判法和拉单共用 intake.ts 的 judgePrerequisites：日期没到、前置单还开着是 waiting_prerequisite；
+//   前置单开没开着读不到、结果缺号是 prerequisite_unknown，不当成都关了。开单顺手戳的 dispatch-issue 也走这里，#3298）。
 //   「就绪度闸」--force 可以放行：改动规模是最重档、历史失败超限。放行必须带 --note，进操作记录。
 //   挂不挂当前版本不是闸（决定 0031：拉单不看版本；#2683 删了原来的版本这一道）。
 // - 硬闸遇到第一个就停（后面的不必读）；就绪度闸全部判完一次说全，让人看清 force 放行的是哪几样。
@@ -35,6 +37,7 @@ import {
   type IntakeIssue,
   type IntakePlan,
   type IntakeRepo,
+  judgePrerequisites,
   standardPathIn,
   workflowPathIn,
 } from './intake.ts';
@@ -60,6 +63,8 @@ export type DispatchGateReason =
   | 'touches_workflows'
   | 'touches_standard'
   | 'pr_claimed'
+  | 'waiting_prerequisite'
+  | 'prerequisite_unknown'
   | 'brief_incomplete'
   | 'heaviest_tier'
   | 'failure_history';
@@ -113,6 +118,10 @@ export interface DispatchIssueDeps {
   issueTask: IntakeDeps['issueTask'];
   taskGenerations: IntakeDeps['taskGenerations'];
   openPrClaims: IntakeDeps['openPrClaims'];
+  /** 这张单「前置：」里写的单号此刻开没开着（真装配和拉单同一个批量读，只问这几个号）。读不到照抛；缺号按没查成。 */
+  prerequisiteStates: IntakeDeps['prerequisiteStates'];
+  /** 判日期前置用的此刻（真装配和拉单同一个时间来源）。 */
+  now: () => Date;
   readSpecDoc: IntakeDeps['readSpecDoc'];
   /** 这个仓自己的改标准路径清单；不给读引擎自己带的那一份（只给没接装配的测试）。读不到、认不出照抛。 */
   standardPaths?(repo: IntakeRepo): Promise<StandardPath[]>;
@@ -186,6 +195,18 @@ async function hardFailure(
         '已经派出过（要再做，跑 fleet-api task redo <owner/仓> <单号> --note "<为什么>"，或在驾驶舱点「重做」）',
       ),
     };
+  }
+  // 前置没等完：和拉单同一份判法（#3298：开单顺手戳的点名派单原来没有这一道，前置还开着就派了）
+  const prerequisite = await judgePrerequisites(issue.body, deps.now(), (numbers) =>
+    deps.prerequisiteStates(repo, numbers),
+  );
+  if (prerequisite.kind === 'waiting') {
+    return {
+      failure: fail('waiting_prerequisite', `${prerequisite.why}：前置等完了引擎拉单会自己接，不用再派`),
+    };
+  }
+  if (prerequisite.kind === 'unchecked') {
+    return { failure: fail('prerequisite_unknown', `${prerequisite.why}；没当成已关放行`) };
   }
   const workflowPath = workflowPathIn(issue.body);
   if (workflowPath !== null) {
@@ -348,7 +369,7 @@ async function decide(deps: DispatchIssueDeps, args: DispatchIssueArgs): Promise
 
 export const DISPATCH_ISSUE_USAGE =
   '用法：fleet-api dispatch-issue <owner/仓名> <单号> [--force --note "<为什么>"]（开关关着时点名把一张单交给引擎：先跑一遍拉单的准入，过了才派。' +
-  '--force 只放行就绪度闸〔不是当前版本、规模最重档、历史失败超限〕，必须带 --note；作者白名单、母单子单、本机做、已有 PR、碰 workflows、已有任务工作流、任务工作流没查成，任何情况下都不放行。没有工作流的排队或已叫停老行会接手再派。' +
+  '--force 只放行就绪度闸〔不是当前版本、规模最重档、历史失败超限〕，必须带 --note；作者白名单、母单子单、本机做、已有 PR、碰 workflows、已有任务工作流、任务工作流没查成、前置没等完或没查成，任何情况下都不放行。没有工作流的排队或已叫停老行会接手再派。' +
   '不受「让 AI 接活」开关限制，但引擎总开关关着会拒。每次都写操作记录。退出码：0 派了；1 没派或没查成；2 参数不对）';
 
 export class DispatchIssueUsageError extends Error {
