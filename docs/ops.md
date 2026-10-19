@@ -293,6 +293,7 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | `/root/.ssh/authorized_keys2` | root:root 600 | 整份归 fleet-dao：法国上传钥匙一行，限死成只许从 `10.99.0.2` 来、不给终端、只能跑 `rrsync -wo -munge /srv/fleet-dao-web`。root 原有的 `authorized_keys` 一行不碰 |
 | `/var/www/fleet-dao-acme` | root:root 755 | 证书续期的验证文件 |
 | `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | fleet-dao 的站点。同一个 nginx 上另有 MiraQuota 的站点 `ai-gateway`（不归 fleet-dao 管，装机不碰） |
+| `/var/lib/nginx/body` | www-data，700；保留已有组 | 香港 Ubuntu nginx 请求体落盘目录。`hk.sh` 配置没变也核/修；只接受实际 worker 全为 www-data、父目录逐级非链接且归 root、组和其他人不可写。只原位修该目录 owner/必要的 700 权限，不递归、不动内容或其他 nginx 临时路径、不为此重载服务。`--check` 只核 metadata 并以 www-data 执行 `test -w/-x`，不建探针；识别不了身份或路径不安全明确失败 |
 | `/etc/letsencrypt/live/<驾驶舱域名>` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥 |
 | `/var/backups/fleet-dao/restic-copies` | root:root 700 | 备份仓库的第二份：root 每天复制一份，按日期一个目录，留 14 天。备份用户碰不到（第十一节） |
@@ -809,7 +810,7 @@ rm -r /etc/systemd/system/fleet-hk-france-probe.service.d && systemctl daemon-re
 - `curl -I https://<驾驶舱域名>`、`certbot certificates`
 - `curl -s -o /dev/null -w '%{http_code}\n' https://<驾驶舱域名>/release.json`：从公网取应为 404（它只给法国经隧道读，第九节）
 - `certbot renew --dry-run --cert-name <驾驶舱域名>`：只演练续期，不换证书
-- `wg show wg-fleet`（看法国的 latest handshake）、`nginx -t`
+- `wg show wg-fleet`（看法国的 latest handshake）；只读核 nginx 请求体目录用 `hk.sh --check`。`nginx -t` / `nginx -T` 不是纯只读：检查配置时也可能创建或改变临时目录的属主，不能用作不改现场的巡检；隔离测试必须显式配置全部五种 temp path（client_body、proxy、fastcgi、uwsgi、scgi）到测试目录。
 - 往法国的连接有没有复用：`for i in 1 2 3; do curl -s -o /dev/null -w '%{time_starttransfer}\n' https://<驾驶舱域名>/api/me; done`，复用时每次约 0.2 秒（一趟隧道往返），每次新建连接约 0.4 秒；`hk.sh --check` 的读回也核对站点里的 `upstream fleet_dao_api`
 
 自检（P02：以 root 执行的文件要全链属 root、组和其他人不可写）分三档：
@@ -1338,3 +1339,5 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit
 - **看 / 停**：`pnpm local-sessions status` 看钩子登记了几条、定时推送用的哪种、循环进程活着没有、推到哪、上次推的结果。`pnpm local-sessions uninstall` 一条命令卸：摘掉那几条钩子、删计划任务、删启动文件夹里的 vbs、结束 `loop.pid` 指向的进程、删整个 `~/.fleet-dao/local-sessions/`。法国那边要作废，`config.mjs drop-entry api.env FLEET_NODE_KEYS founder-pc` 删掉那一项、重启 `fleet-api`、新指纹换进期望。
 
 最终验收责任用 `fleet-api acceptance status <owner/仓> <单号>` 查看；现场验过后用 `fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号> --head <40位SHA> --evidence "现场验收记录"` 落账。协调责任用 `--pr 0 --head -`。命令沿既有 root 包装器和数据库身份执行，没有公开结算写口。代次不符、PR未合并、证据缺失均拒绝，随后仍需标准关单。公开仓机器只读入口 `/api/public/acceptance/v1/repos/:githubId/issues/:issue` 不缓存，先经现有 CI bridge 核实公开仓身份，只返回责任身份与结清证据，不返回原验收正文。PR 换头后旧头永远没有合并回执时，用 `fleet-api acceptance supersede <owner/仓> <单号> --id <旧责任号> --generation <代次> --pr <PR号> --head <旧头SHA> --target-id <最终责任号> --target-generation <代次> --target-pr <PR号> --target-head <最终头SHA> --evidence "替代依据"` 替代收口：目标须同仓同单同 PR、有真实合并回执、已最终验收且验收项盖住旧头的；两头验收项是不同冷验收轮次写的、措辞不同时，整串相等的判不过，要加 `--coverage '[{"source":"旧头验收项原文","target":"目标验收项原文","basis":"覆盖依据"}]'` 逐条人工声明（source / target 必须是 `status` 里两行 items 的原文整串，basis 写为什么算覆盖；漏一条、写错原文、空依据都拒，不做模糊或子串匹配），声明随替代写进旧行和操作记录，重放同一声明幂等、换声明不冒充成功，目标或旧头新增项后替代与声明一并作废、重新指要重新给声明；旧行不伪填合并回执，读口每行带 `state`（open / settled / superseded）。`issue:close` 和 `close-on-merge` 的关单闸只认这个 `state`，目标后来新增项则替代作废、旧头回到 open。
+
+历史责任归并预检（#3207 第 1 片，只读，不写任何表）：`fleet-api acceptance merge-plan <owner/仓> <单号> --task <任务UUID> --workflow <原workflowId> --run <原run ID> --pr <PR号> --head <最终头SHA> --merge-commit <合并提交SHA> --duties <责任号:代次,责任号:代次…>`。输出归并计划 JSON：每条原责任的精确身份和代次（`duties`）、目标责任（最终头）会带上的完整原项（`target.items`，逐项在 `sources` 里写来自哪条原责任，同一原文多条责任都有的列全部来源，只有某一条才有的单列、不揉掉；最终头上已有责任行的也列出，`existingTarget` 为真）。合并回执只认同仓 PR 镜像对最终头和合并提交的记录，不拿旧责任行自己的 merge 字段证明旧头合并过。错仓、错单、错任务、错 run、头对不上、PR 未合、回执未知或矛盾、代次已变、责任已验收或已被替代、不是同一个 PR，任一条都拒绝：不输出可用计划，原因随 stderr 带完整 JSON，退出 1；点名的责任行读不全也报错退出 1，不输出空计划。全通过才在 stdout 输出计划、退出 0。这一步不落账，归并写入是后续片。
