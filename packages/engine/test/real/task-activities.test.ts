@@ -844,9 +844,14 @@ describe('挂自动合并', () => {
         return { merged: false, reason: 'ci_not_green' as const, detail: '没跑完：merge-gate' };
       },
     });
+    // 第一次是挂之前的核验（绿），挂住的是 clean 之后的那次现读
+    let reads = 0;
     const { acts } = make({
       gh: f.gh,
-      readChecks: async () => held.run(),
+      readChecks: async () => {
+        reads += 1;
+        return reads === 1 ? { overall: 'green', failed: [] } : held.run();
+      },
     });
     const pending = acts.armAutoMerge(
       { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
@@ -953,9 +958,15 @@ describe('挂自动合并', () => {
       },
     });
     const seen: string[] = [];
+    let gated = false;
     const { acts } = make({
       gh: f.gh,
       readChecks: async (repo, sha) => {
+        // 第一次是挂之前的核验（绿，放行去挂）；之后才是 clean 被拒之后的现读，下面的用例测的是它
+        if (!gated) {
+          gated = true;
+          return { overall: 'green', failed: [] };
+        }
         seen.push(`${repo.owner}/${repo.name}@${sha}`);
         if (!readChecks) throw new Error('测试没接上读检查');
         return readChecks(repo, sha, new AbortController().signal);
@@ -1251,7 +1262,7 @@ describe('挂自动合并', () => {
     expect(got.checksPending).toBeUndefined();
     expect(got.why).toContain('读着是绿');
     expect(got.why).toContain('仍被拒');
-    expect(reads).toBe(2);
+    expect(reads).toBe(3); // 挂之前 1 次，clean 被拒后 2 次
     expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(2);
   });
 
@@ -1708,6 +1719,7 @@ describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝
       pulls?: ReturnType<typeof pullFacts>[];
       readChecks?: TaskActivitiesDeps['readChecks'];
       ctx?: PortContext;
+      raw?: boolean;
     } = {},
   ) {
     const real = setupHttp();
@@ -1729,7 +1741,16 @@ describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝
       },
     });
     (f.gh.claims as { enableAutoMerge: unknown }).enableAutoMerge = real.gh.claims.enableAutoMerge;
-    const { acts } = make({ gh: f.gh, readChecks: opts.readChecks ?? (async () => green) });
+    // 默认：第一次读检查是挂之前的核验（绿，放行去挂），opts.readChecks 管 unstable 之后的那次；raw 则从第一次起就用它
+    let checkReads = 0;
+    const readChecks: TaskActivitiesDeps['readChecks'] =
+      opts.raw === true
+        ? opts.readChecks
+        : async (...args) => {
+            checkReads += 1;
+            return checkReads === 1 || !opts.readChecks ? green : opts.readChecks(...args);
+          };
+    const { acts } = make({ gh: f.gh, readChecks });
     const run = () =>
       acts.armAutoMerge(
         // 受控 HTTP 夹具只认 acme/widgets
@@ -1845,5 +1866,84 @@ describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝
     });
     expect(await late.run()).toMatchObject({ armed: false, why: expect.stringContaining('期限已到') });
     expect(late.sent()).toBe(1);
+  });
+
+  describe('每次挂之前现读必过检查：真红不写', () => {
+    const redChecks = async (): Promise<MergeWaitChecks> => ({
+      overall: 'red',
+      failed: [{ name: 'check', detail: '挂了' }],
+    });
+
+    it('首次挂之前就是真红：交 checksRed，一次都不写', async () => {
+      const a = arm([null], { raw: true, readChecks: redChecks });
+      expect(await a.run()).toMatchObject({
+        armed: false,
+        merged: false,
+        checksRed: { failedChecks: ['check'], head: HEAD, detail: 'check：挂了' },
+      });
+      expect(a.sent()).toBe(0);
+    });
+
+    it('有点名的失败、旁边还有在跑的：按真红，不写', async () => {
+      const a = arm([null], {
+        raw: true,
+        readChecks: async () => ({
+          overall: 'pending',
+          failed: [{ name: 'check', detail: '失败' }],
+          pending: [{ name: 'merge-gate' }],
+        }),
+      });
+      expect(await a.run()).toMatchObject({ armed: false, checksRed: { failedChecks: ['check'] } });
+      expect(a.sent()).toBe(0);
+    });
+
+    it('unstable 之后等待期间检查转红：重试前现读到红，不发第二次写', async () => {
+      let n = 0;
+      const a = arm([[unstable], null], {
+        raw: true,
+        readChecks: async () => {
+          n += 1;
+          return n <= 2 ? green : redChecks(); // 1 = 首次挂之前，2 = unstable 后分类，3 = 重试前
+        },
+      });
+      expect(await a.run()).toMatchObject({
+        armed: false,
+        checksRed: { failedChecks: ['check'], head: HEAD },
+      });
+      expect(a.sent()).toBe(1);
+      expect(a.reads()).toBe(2);
+    });
+
+    it('读检查失败：照抛、不写；没接上读检查：明说没挂、不写', async () => {
+      const broken = arm([null], {
+        raw: true,
+        readChecks: async () => {
+          throw new GitHubError('UPSTREAM_ERROR', '读检查 500', { retryable: true });
+        },
+      });
+      await expect(broken.run()).rejects.toMatchObject({ code: 'UPSTREAM_ERROR', retryable: true });
+      expect(broken.sent()).toBe(0);
+
+      const unwired = arm([null], { raw: true });
+      expect(await unwired.run()).toMatchObject({
+        armed: false,
+        why: expect.stringContaining('没接上读检查'),
+      });
+      expect(unwired.sent()).toBe(0);
+    });
+
+    it('还在跑 / 没出现不拦：照常挂（自动合并本来就是等它们）', async () => {
+      const a = arm([null], {
+        raw: true,
+        readChecks: async () => ({
+          overall: 'pending',
+          failed: [],
+          pending: [{ name: 'merge-gate' }],
+          missing: [{ name: 'cold-verify' }],
+        }),
+      });
+      expect(await a.run()).toEqual({ armed: true, merged: false });
+      expect(a.sent()).toBe(1);
+    });
   });
 });

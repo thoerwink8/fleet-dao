@@ -835,9 +835,34 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         return 'retry';
       };
 
+      // 每次挂之前现读这个头上的必过检查：真红不写，交 checksRed。还在跑、没出现不拦（自动合并本来就是等它们）。
+      // 没接上读检查、读不成都不写：没接上明说没挂，读不成照抛（取消原样抛；可重试的交活动重试，下一次从头现读）。
+      const redBeforeWrite = async (): Promise<ArmAutoMergeResult | null> => {
+        const readChecks = deps.readChecks;
+        if (!readChecks) {
+          return {
+            armed: false,
+            merged: false,
+            why: `PR #${prNumber} 头 ${expectedHead} 的必过检查没查成：没接上读检查，不挂自动合并`,
+          };
+        }
+        const checks = await mapped(() => readChecks(repo, expectedHead, ctx.signal));
+        const failed = checks.failed.filter((item) => item.name.trim().length > 0);
+        if (checks.overall !== 'red' && failed.length === 0) return null;
+        const red = checksRedWait({ ...checks, failed });
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 头 ${expectedHead} 的必过检查红了，不挂自动合并：${red.detail}`,
+          checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
+        };
+      };
+
       for (let attempt = 1; ; attempt += 1) {
+        const redNow = await redBeforeWrite();
+        if (redNow !== null) return redNow;
         try {
-          // 读过 PR、读过评审了：已经挂上的在上面返回，不会走到这里。已取消或期限已过就不再开新的写。
+          // 读过 PR、读过评审、读过检查了：已经挂上的在上面返回，不会走到这里。已取消或期限已过就不再开新的写。
           refuseLateArmWrite(ctx);
           await mapped(() => gh.claims.enableAutoMerge(repo, pull, ctx));
           // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
