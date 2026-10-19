@@ -41,6 +41,7 @@ import {
   SELF_CHECK_TEST_MS,
   SELF_CHECK_TSC_MS,
 } from '../self-check-budget.ts';
+import type { CiTestCoverage } from '../task-contract.ts';
 import {
   SELF_CHECK_DIGEST_MAX,
   type SelfCheckInput,
@@ -48,6 +49,7 @@ import {
   type SelfCheckStep,
 } from '../task-contract.ts';
 import type { UserCommandResult, UserExec } from './exec.ts';
+import type { CiSourceInput } from './self-check-ci.ts';
 
 export {
   SELF_CHECK_ACTIVITY_MS,
@@ -102,6 +104,7 @@ export interface SelfCheckFullLock {
 export interface SelfCheckDeps {
   trees: { ownerOf(dir: string): Promise<SessionUser | null> };
   exec: UserExec;
+  ciCoverage?: ((input: CiSourceInput, signal: AbortSignal) => Promise<CiTestCoverage | null>) | undefined;
   /** 测试里调短。testMs 是测试真执行的上限，queueMs 是一次自测所有排队合起来的上限。 */
   testMs?: number;
   tscMs?: number;
@@ -640,6 +643,22 @@ function affectedCommand(testCommand: string): string {
   return `${testCommand} --affected`;
 }
 
+/** 轻量输入身份探针；异常一律非零，包含未跟踪文件、索引特殊标记和子模块。 */
+export const CI_IDENTITY_SCRIPT = [
+  'set -eu',
+  'export GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0',
+  'git_safe() { git -c core.fsmonitor=false -c core.untrackedCache=false -c core.hooksPath=/dev/null "$@"; }',
+  'git_safe rev-parse --verify HEAD',
+  "git_safe rev-parse --verify 'HEAD^{tree}'",
+  'dirty=$(git_safe status --porcelain=v1 --untracked-files=all --ignore-submodules=none); test -z "$dirty"',
+  // gitlink 是否存在用索引读口，不让未初始化子模块被 status 忽略。
+  "index=$(git_safe ls-files --stage); printf '%s\\n' \"$index\" | LC_ALL=C awk '$1 == 160000 { found=1 } END { exit found }'",
+  'flags=$(git_safe ls-files -v); printf \'%s\\n\' "$flags" | LC_ALL=C awk \'length($0) && substr($0,1,1) != "H" { found=1 } END { exit found }\'',
+  'node --version',
+  'pnpm --version',
+  'node -e \'console.log(JSON.parse(require("fs").readFileSync("node_modules/vitest/package.json", "utf8")).version)\'',
+].join('\n');
+
 type Phase = 'probe' | 'queue' | 'test' | 'tsc' | 'done';
 
 /** 在名额、锁上排队的结局。 */
@@ -695,10 +714,16 @@ export function createSelfCheck(deps: SelfCheckDeps) {
       queueLeft = Math.max(0, queueLeft - ms);
     };
     const steps: SelfCheckStep[] = [];
-    const cancelled = (): SelfCheckResult =>
-      steps.some((s) => s.outcome === 'fail')
+    const cancelled = (): SelfCheckResult => {
+      for (const step of steps) {
+        if (step.coveredByCi === undefined) continue;
+        delete step.coveredByCi;
+        step.digest = '被叫停了，未采纳 CI 覆盖证据';
+      }
+      return steps.some((s) => s.outcome === 'fail')
         ? { state: 'red', steps }
         : { state: 'skipped', reason: '被叫停了', steps };
+    };
     try {
       let user: SessionUser | null;
       try {
@@ -898,7 +923,46 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         }
       }
 
-      const settled = (steps: SelfCheckStep[]): SelfCheckResult => {
+      // 除 Git 的跟踪/index/untracked 状态，子模块和工具实际读数也必须明确。
+      // 所有命令仍以会话用户运行；不让引擎在候选树中执行 Git/Node。
+      const ciIdentity = async (): Promise<CiSourceInput | null> => {
+        if (input.expectedHead === undefined || input.prNumber === undefined) return null;
+        const r = await sh('ci-identity', CI_IDENTITY_SCRIPT, SELF_CHECK_PROBE_MS);
+        if (r.code !== 0 || r.aborted || r.timedOut || r.spawnError !== undefined) return null;
+        const lines = r.stdout.toString('utf8').trim().split('\n');
+        if (
+          lines.length !== 5 ||
+          lines[0] !== input.expectedHead ||
+          !/^[0-9a-f]{40}$/.test(lines[1] ?? '') ||
+          !/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(lines[2] ?? '') ||
+          !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(lines[3] ?? '') ||
+          !/^[0-9]+\.[0-9]+\.[0-9]+$/.test(lines[4] ?? '')
+        )
+          return null;
+        return {
+          pr: input.prNumber,
+          head: input.expectedHead,
+          tree: lines[1] as string,
+          node: lines[2] as string,
+          pnpm: lines[3] as string,
+          vitest: lines[4] as string,
+        };
+      };
+      let covered: CiTestCoverage | null = null;
+      let measured: CiSourceInput | null = null;
+      const settled = async (steps: SelfCheckStep[]): Promise<SelfCheckResult> => {
+        if (covered !== null) {
+          if (ctx.signal.aborted) {
+            return cancelled();
+          }
+          const final = await ciIdentity().catch(() => null);
+          if (final === null || JSON.stringify(final) !== JSON.stringify(measured)) {
+            // 取证后、tsc 期间有变化：不保留覆盖回执，回原本机检查，旧失败不能被重试覆盖。
+            const retried = await createSelfCheck({ ...deps, ciCoverage: undefined })(input, ctx);
+            const failed = steps.filter((s) => s.outcome === 'fail');
+            return failed.length === 0 ? retried : { state: 'red', steps: [...retried.steps, ...failed] };
+          }
+        }
         if (steps.some((s) => s.outcome === 'fail')) return { state: 'red', steps };
         if (steps.some((s) => s.outcome === 'pass')) return { state: 'green', steps };
         return {
@@ -908,6 +972,29 @@ export function createSelfCheck(deps: SelfCheckDeps) {
         };
       };
       const testCommand = (profile?.testCommand ?? input.repo.testCommand)?.trim() ?? '';
+      if (
+        deps.ciCoverage !== undefined &&
+        testCommand === 'pnpm test:changed' &&
+        input.repo.owner === 'thoerwink8' &&
+        input.repo.name === 'fleet-dao' &&
+        input.expectedHead !== undefined &&
+        input.prNumber !== undefined
+      ) {
+        measured = await ciIdentity();
+        if (measured !== null) {
+          try {
+            covered = await deps.ciCoverage(measured, ctx.signal);
+          } catch (error) {
+            if (ctx.signal.aborted) return cancelled();
+            deps.log?.('CI 覆盖证据没读成，回本机自测', { taskId: input.taskId, error: errMessage(error) });
+          }
+          if (covered !== null) {
+            const after = await ciIdentity();
+            if (after === null || JSON.stringify(after) !== JSON.stringify(measured)) covered = null;
+          }
+        }
+      }
+      if (ctx.signal.aborted) return cancelled();
       const tscCommand = `${TSC} -b --pretty false`;
       // 看有没有 tsc 是轻的，不占名额。真正的测试命令和 tsc 才要名额。
       const has = await sh(
@@ -927,7 +1014,15 @@ export function createSelfCheck(deps: SelfCheckDeps) {
       const changed = /\btest:changed\b/.test(testCommand);
       let releaseSlot: (() => void | Promise<void>) | undefined;
       try {
-        if (testCommand === '') {
+        if (covered !== null) {
+          steps.push({
+            command: testCommand,
+            outcome: 'skipped',
+            exitCode: null,
+            coveredByCi: covered,
+            digest: `可信完整 CI 已覆盖源码测试；未重复本机执行，不计本机 PASS。run=${covered.run} attempt=${covered.attempt} PR=#${covered.pr} head=${covered.head} tree=${covered.tree} workflow=${covered.workflow} contract=${covered.contractCommit}/${covered.contractHash} checks=${covered.checks.join(',')} CI_Node=${covered.ciNodes.join(',')} local_Node=${covered.node}`,
+          });
+        } else if (testCommand === '') {
           steps.push(notRun('（测试命令）', '这个仓没配测试命令（repos.test_command）'));
         } else if (changed) {
           const first = await run('test', testCommand, { execMs: testMs, phase: 'test', slotInside: true });
@@ -989,6 +1084,12 @@ export function createSelfCheck(deps: SelfCheckDeps) {
       }
     } catch (error) {
       deps.log?.('自测没跑成，照旧往下走', { taskId: input.taskId, error: errMessage(error) });
+      if (ctx.signal.aborted) return cancelled();
+      if (steps.some((step) => step.coveredByCi !== undefined)) {
+        const retried = await createSelfCheck({ ...deps, ciCoverage: undefined })(input, ctx);
+        const failed = steps.filter((s) => s.outcome === 'fail');
+        return failed.length === 0 ? retried : { state: 'red', steps: [...retried.steps, ...failed] };
+      }
       if (steps.some((s) => s.outcome === 'fail')) return { state: 'red', steps };
       return { state: 'skipped', reason: `自测没跑成：${errMessage(error)}`, steps };
     } finally {

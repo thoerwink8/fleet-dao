@@ -1135,6 +1135,9 @@ class TaskFlow {
           taskId: rt.input.taskId,
           repo: rt.input.repo,
           worktreePath: wt.path,
+          ...(patched('self-check-ci-coverage') && typeof rt.prNumber === 'number'
+            ? { expectedHead: head, prNumber: rt.prNumber }
+            : {}),
         }),
       );
       rt.selfCheckOutput = { head, text: selfCheckText(result) };
