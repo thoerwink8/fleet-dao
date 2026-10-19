@@ -1,8 +1,8 @@
-import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { localExec } from '../../src/real/exec.ts';
 import { runBoundedStream } from '../../src/real/exec-stream.ts';
+import { runChild } from '../child.ts';
 
 const base = {
   user: 'fleet-agent-carpool' as const,
@@ -14,11 +14,11 @@ const base = {
 describe('复杂快照有界进出', () => {
   it('原生Node直接加载生产TS入口，不依赖Vitest扩展名映射', () => {
     const entry = new URL('../../src/real/exec.ts', import.meta.url).href;
-    const result = spawnSync(
-      process.execPath,
-      ['--input-type=module', '-e', `await import(${JSON.stringify(entry)})`],
-      { encoding: 'utf8' },
-    );
+    const result = runChild(process.execPath, [
+      '--input-type=module',
+      '-e',
+      `await import(${JSON.stringify(entry)})`,
+    ]);
     expect(result.stderr).toBe('');
     expect(result.status).toBe(0);
   });
