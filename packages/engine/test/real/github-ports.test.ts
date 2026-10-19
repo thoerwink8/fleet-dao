@@ -1452,6 +1452,35 @@ describe('CI 认了新头：工作树跟着并（#307/#389 那次真事补上的
 });
 
 describe('并主线', () => {
+  it('#3186：旧树缺 previousHead 和另一个真实 bundle boundary，补全后快进且重试幂等', async () => {
+    let merged = '';
+    let previous = '';
+    let mainline = '';
+    const s = setup({
+      syncMainline: () => ({ state: 'clean', head: merged, merged: true, previousHead: previous, mainline }),
+    });
+    const dir = await seededTree(s.trees);
+    const common = commitInMirror('common.ts', 'export const common = 1;\n');
+    previous = commitInMirror('previous.ts', 'export const previous = 1;\n');
+    git(m.dir, 'checkout', '-q', '-b', 'new-main', common);
+    mainline = commitInMirror('new-main.ts', 'export const main = 1;\n');
+    git(m.dir, 'merge', '-q', '--no-ff', previous, '-m', 'remote merged main');
+    merged = git(m.dir, 'rev-parse', 'HEAD');
+    const boundary = git(m.dir, 'rev-list', '--boundary', merged, `^${previous}`)
+      .split('\n')
+      .filter((line) => line.startsWith('-'))
+      .sort();
+    expect(boundary).toEqual([`-${common}`, `-${previous}`].sort());
+    const untracked = join(dir, 'keep-local.txt');
+    writeFileSync(untracked, 'local evidence\n');
+    const input = { taskId: 't1', repo, prNumber: 101, branch: BRANCH, head: previous, worktreePath: dir };
+    await expect(s.ports.syncMainline(input, ctx)).resolves.toMatchObject({ state: 'clean', head: merged });
+    await expect(s.ports.syncMainline(input, ctx)).resolves.toMatchObject({ state: 'clean', head: merged });
+    expect(git(dir, 'rev-parse', 'HEAD')).toBe(merged);
+    expect(git(dir, 'rev-parse', 'refs/remotes/origin/main')).toBe(mainline);
+    expect(readFileSync(untracked, 'utf8')).toBe('local evidence\n');
+  });
+
   it('并好了：会话的树快进到并出来的新头；冲突原样交回；分支头被别人动过明确报错', async () => {
     const setupTree = async (over: Parameters<typeof fakeGh>[0]) => {
       const s = setup(over);
