@@ -687,6 +687,13 @@
       "when": 1792442145444,
       "tag": "0097_friendly_mauler",
       "breakpoints": true
+    },
+    {
+      "idx": 98,
+      "version": "7",
+      "when": 1792451558051,
+      "tag": "0098_yielding_living_lightning",
+      "breakpoints": true
     }
   ]
 }
