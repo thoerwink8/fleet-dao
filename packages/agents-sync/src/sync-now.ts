@@ -16,10 +16,15 @@ export const NOW_USAGE = `pnpm agents:sync —— 现在就把这台机器同步
 
 用法：
   pnpm agents:sync             取远端、把同步专用的检出切到 origin/main、跑 agents-sync --apply
-  pnpm agents:sync --check     只读：不取远端、不切、不写，只报这台和仓里（上次取到的主线）差在哪
+  pnpm agents:sync --check     预检：不取远端、不切源、不更新目标配置，只报这台和仓里（上次取到的主线）差在哪；
+                                封装仍会临时创建并释放源锁 ~/.fleet-dao/origin-main.lock，整条命令不是零写入
   pnpm agents:sync --offline   不取远端（取不到时用），按本机上次取到的 origin/main 同步
   pnpm agents:sync --seed <目录>   拿这个 fleet-dao 检出当种子（第一次建专用检出、或它坏了要重建时用；
                                 默认：~/.fleet-dao/synced.json 记的那个检出，再没有就是本脚本所在的检出）
+
+严格零写入的检查：node ~/.fleet-dao/origin-main/packages/agents-sync/bin/agents-sync --check --repo ~/.fleet-dao/origin-main
+（直接对官方树跑，不经过本封装、不碰源锁、不取远端）。它不核这棵树是不是最新主线，须另核官方提交身份
+（git -C ~/.fleet-dao/origin-main rev-parse HEAD 对 origin/main）；旧缓存或候选树的结果不能当最新主线。
 
 同步专用的检出在 ~/.fleet-dao/origin-main，永远停在 origin/main 上；这台机器自己的 fleet-dao 检出一个字都不动
 （在哪个分支、有没有没提交的改动都不影响同步）。
