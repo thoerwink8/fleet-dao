@@ -7,8 +7,14 @@ import { describe, expect, it } from 'vitest';
 import type { CliDeps } from '../src/cli.ts';
 import { main } from '../src/cli.ts';
 import type { TaskRedoPort } from '../src/deps.ts';
-import type { TaskSignal } from '../src/ports.ts';
+import type {
+  LineBudgetRemeasureRequest,
+  LineBudgetRemeasureResponse,
+  TaskSignal,
+  WorkflowControl,
+} from '../src/ports.ts';
 import { WorkflowGoneError } from '../src/ports.ts';
+import { createTemporalLineBudgetRemeasure, REMEASURE_UPDATE_NAME } from '../src/temporal.ts';
 
 const T0 = new Date('2026-10-09T00:00:00.000Z');
 const NOTE = '卡在检查点，接着做';
@@ -19,7 +25,14 @@ function task12(store: ReturnType<typeof createMemoryStore>) {
   return task;
 }
 
-function setup(options?: { workflowId?: string; gone?: boolean; redo?: TaskRedoPort['redo'] }) {
+function setup(options?: {
+  workflowId?: string;
+  gone?: boolean;
+  redo?: TaskRedoPort['redo'];
+  /** 体量重评（#3249）：不给＝控制端没接这项能力。 */
+  remeasure?: NonNullable<WorkflowControl['remeasureLineBudget']>;
+  execution?: { runId: string; running: boolean };
+}) {
   const store = createMemoryStore(devFixtures(T0));
   const out: string[] = [];
   const err: string[] = [];
@@ -47,6 +60,14 @@ function setup(options?: { workflowId?: string; gone?: boolean; redo?: TaskRedoP
           lookups += 1;
           return options?.workflowId ?? 'task:example/canary#12';
         },
+        ...(options?.remeasure
+          ? {
+              remeasureLineBudget: options.remeasure,
+              async taskWorkflowExecution(workflowId: string) {
+                return { workflowId, ...(options.execution ?? { runId: RUN, running: true }) };
+              },
+            }
+          : {}),
       },
       taskRedo: {
         redo: async (input) => {
@@ -242,5 +263,327 @@ describe('fleet-api task', () => {
       ok: false,
       after: { who: 'root', issue: 'example/canary#12', note: '工作流没了' },
     });
+  });
+});
+
+const RUN = 'run-0001';
+const HEAD = '0684b1d2a3c71a7f02d5716376f1046c2243b42c';
+const BASE = '0524abecd5c4145d909f261e19c400f1cdccb526';
+const FLAGS = ['--head', HEAD, '--base', BASE, '--note', '只重新核这次成果'];
+const RECEIPT = {
+  head: HEAD,
+  base: BASE,
+  rawAddedLines: 9550,
+  verifiedGeneratedLines: 8037,
+  chargeableAddedLines: 1513,
+  budget: 3000,
+  reason: '已核单份快照',
+};
+
+function remeasurer(respond?: (request: LineBudgetRemeasureRequest) => LineBudgetRemeasureResponse) {
+  const requests: LineBudgetRemeasureRequest[] = [];
+  const remeasure: NonNullable<WorkflowControl['remeasureLineBudget']> = async (request) => {
+    requests.push(request);
+    return (
+      respond?.(request) ?? {
+        ok: true,
+        outcome: request.mode === 'resume' ? 'resumed' : 'eligible',
+        park: '2.5.0',
+        receipt: RECEIPT,
+      }
+    );
+  };
+  return { requests, remeasure };
+}
+
+describe('fleet-api task budget-remeasure（#3249）', () => {
+  it('参数：head/base 要完整 sha；--execute 必须带预检看到的 run 和停点；别的动作不收这些参数；全部退出码 2 不连库', async () => {
+    const cases: string[][] = [
+      ['budget-remeasure', 'example/canary', '12', '--base', BASE, '--note', 'n'],
+      ['budget-remeasure', 'example/canary', '12', '--head', 'abc', '--base', BASE, '--note', 'n'],
+      [
+        'budget-remeasure',
+        'example/canary',
+        '12',
+        '--head',
+        HEAD,
+        '--base',
+        BASE.toUpperCase(),
+        '--note',
+        'n',
+      ],
+      ['budget-remeasure', 'example/canary', '12', ...FLAGS, '--execute'],
+      ['budget-remeasure', 'example/canary', '12', ...FLAGS, '--execute', '--run', RUN],
+      ['budget-remeasure', 'example/canary', '12', ...FLAGS, '--park', 'x'],
+      ['continue', 'example/canary', '12', '--head', HEAD, '--note', 'n'],
+      ['abandon', 'example/canary', '12', '--execute', '--note', 'n'],
+    ];
+    for (const args of cases) {
+      const h = setup();
+      expect(await h.run(args), args.join(' ')).toBe(2);
+      expect(h.opened()).toBe(0);
+    }
+  });
+
+  it('默认只读预检：只发 check，不放行、不发任何信号、不写操作记录，并打印可复制的执行命令', async () => {
+    const r = remeasurer();
+    const h = setup({ remeasure: r.remeasure });
+    expect(await h.run(['budget-remeasure', 'example/canary', '12', ...FLAGS])).toBe(0);
+    expect(r.requests).toEqual([
+      expect.objectContaining({
+        mode: 'check',
+        runId: RUN,
+        head: HEAD,
+        base: BASE,
+        by: 'root',
+        taskId: expect.any(String),
+      }),
+    ]);
+    expect(h.sent).toEqual([]);
+    expect(taskAudits(h.store)).toEqual([]);
+    const out = h.out.join('\n');
+    expect(out).toContain('预检通过（只读，没放行）');
+    expect(out).toContain('实际计量 1513 行');
+    expect(out).toContain('已核生成 8037 行');
+    expect(out).toContain(`--execute --run ${RUN} --park 2.5.0`);
+  });
+
+  it('--execute：发 resume，记一条操作记录；不发 taskContinue / taskRouteWake', async () => {
+    const r = remeasurer();
+    const h = setup({ remeasure: r.remeasure });
+    const code = await h.run([
+      'budget-remeasure',
+      'example/canary',
+      '12',
+      ...FLAGS,
+      '--execute',
+      '--run',
+      RUN,
+      '--park',
+      '2.5.0',
+    ]);
+    expect(code).toBe(0);
+    expect(r.requests[0]).toMatchObject({ mode: 'resume', park: '2.5.0', runId: RUN });
+    expect(h.sent).toEqual([]);
+    expect(h.out.join('\n')).toContain('已放行这一份成果（不算「继续」，不授权后续交付）');
+    expect(taskAudits(h.store)).toEqual([
+      expect.objectContaining({ action: 'task.budget-remeasure', ok: true, via: 'ops' }),
+    ]);
+  });
+
+  it('幂等回执照实说「已放行过」；换代（run 对不上）本地就拒，不调用重评', async () => {
+    const again = remeasurer((request) => ({
+      ok: true,
+      outcome: 'already_resumed',
+      park: request.park ?? '2.5.0',
+      receipt: RECEIPT,
+    }));
+    const h = setup({ remeasure: again.remeasure });
+    expect(
+      await h.run([
+        'budget-remeasure',
+        'example/canary',
+        '12',
+        ...FLAGS,
+        '--execute',
+        '--run',
+        RUN,
+        '--park',
+        '2.5.0',
+      ]),
+    ).toBe(0);
+    expect(h.out.join('\n')).toContain('已放行过（幂等回执，不再放行别的头）');
+
+    const r = remeasurer();
+    const moved = setup({ remeasure: r.remeasure, execution: { runId: 'run-0002', running: true } });
+    expect(
+      await moved.run([
+        'budget-remeasure',
+        'example/canary',
+        '12',
+        ...FLAGS,
+        '--execute',
+        '--run',
+        RUN,
+        '--park',
+        '2.5.0',
+      ]),
+    ).toBe(1);
+    expect(moved.err.join('\n')).toContain('工作流已换代');
+    expect(r.requests).toEqual([]);
+    expect(taskAudits(moved.store)[0]).toMatchObject({ action: 'task.budget-remeasure', ok: false });
+  });
+
+  it('拒绝都退出码 1、标准输出不打成功；执行的拒绝写失败记录，预检的不写', async () => {
+    const reasons = [
+      'stale',
+      'busy',
+      'unknown',
+      'changed',
+      'unverified',
+      'over_budget',
+      'unsupported',
+      'identity',
+    ];
+    for (const reason of reasons) {
+      const r = remeasurer(() => ({
+        ok: false,
+        reason,
+        detail: `原因 ${reason}`,
+        park: '2.5.0',
+        current: { head: HEAD, rawAddedLines: 9550, chargeableAddedLines: 9550, budget: 3000 },
+      }));
+      const pre = setup({ remeasure: r.remeasure });
+      expect(await pre.run(['budget-remeasure', 'example/canary', '12', ...FLAGS])).toBe(1);
+      expect(pre.err.join('\n')).toContain(`体量重评被拒（${reason}）`);
+      expect(pre.err.join('\n')).toContain('原停点保留，没放行任何成果');
+      expect(pre.out).toEqual([]);
+      expect(taskAudits(pre.store)).toEqual([]);
+
+      const exec = setup({ remeasure: r.remeasure });
+      expect(
+        await exec.run([
+          'budget-remeasure',
+          'example/canary',
+          '12',
+          ...FLAGS,
+          '--execute',
+          '--run',
+          RUN,
+          '--park',
+          '2.5.0',
+        ]),
+      ).toBe(1);
+      expect(exec.out).toEqual([]);
+      expect(taskAudits(exec.store)).toEqual([expect.objectContaining({ ok: false })]);
+    }
+  });
+
+  it('控制端没接重评、工作流已结束、重评调用抛错（结果未知）：都不放行', async () => {
+    const none = setup();
+    expect(await none.run(['budget-remeasure', 'example/canary', '12', ...FLAGS])).toBe(1);
+    expect(none.err.join('\n')).toContain('没接上可信重评能力');
+
+    const ended = setup({ remeasure: remeasurer().remeasure, execution: { runId: RUN, running: false } });
+    expect(await ended.run(['budget-remeasure', 'example/canary', '12', ...FLAGS])).toBe(1);
+    expect(ended.err.join('\n')).toContain('已经结束');
+
+    const boom = setup({
+      remeasure: async () => {
+        throw new Error('rpc 超时');
+      },
+    });
+    expect(
+      await boom.run([
+        'budget-remeasure',
+        'example/canary',
+        '12',
+        ...FLAGS,
+        '--execute',
+        '--run',
+        RUN,
+        '--park',
+        '2.5.0',
+      ]),
+    ).toBe(1);
+    expect(boom.err.join('\n')).toContain('结果未知，原停点保留');
+    expect(taskAudits(boom.store)[0]).toMatchObject({ ok: false });
+  });
+});
+
+describe('Temporal 重评适配（#3249）', () => {
+  const identity = {
+    version: 1 as const,
+    runId: RUN,
+    parks: 2,
+    generation: 5,
+    continued: 0,
+    prNumber: null,
+    head: HEAD,
+    rawAddedLines: 9550,
+    chargeableAddedLines: 9550,
+    budget: 3000,
+  };
+  function client(status: unknown, update?: unknown) {
+    const calls: { kind: string; name: string; args?: unknown[] }[] = [];
+    return {
+      calls,
+      client: {
+        connection: { withDeadline: async <R>(_d: number | Date, fn: () => Promise<R>) => fn() },
+        workflow: {
+          getHandle: () => ({
+            async query(name: string) {
+              calls.push({ kind: 'query', name });
+              return status;
+            },
+            async executeUpdate(name: string, options: { args: unknown[] }) {
+              calls.push({ kind: 'update', name, args: options.args });
+              return update;
+            },
+          }),
+        },
+      },
+    };
+  }
+  const request: LineBudgetRemeasureRequest = {
+    workflowId: 'task:example/canary#12',
+    runId: RUN,
+    repo: { owner: 'example', name: 'canary' },
+    taskId: 't1',
+    head: HEAD,
+    base: BASE,
+    mode: 'resume',
+    park: '2.5.0',
+    by: 'root',
+  };
+
+  it('Update 名与引擎同一份', async () => {
+    const { taskRemeasureLineBudgetUpdate } = await import('../../engine/src/task-contract.ts');
+    expect(taskRemeasureLineBudgetUpdate.name).toBe(REMEASURE_UPDATE_NAME);
+  });
+
+  it('身份来自工作流的 taskStatus；通过时发带完整停点身份的 Update', async () => {
+    const c = client(
+      { lineBudgetPark: { version: 1, identity } },
+      { outcome: 'resumed', receipt: { ...RECEIPT, identity } },
+    );
+    const got = await createTemporalLineBudgetRemeasure(c.client)(request);
+    expect(got).toMatchObject({ ok: true, outcome: 'resumed', park: '2.5.0' });
+    expect(c.calls.map((x) => x.kind)).toEqual(['query', 'update']);
+    expect(c.calls[1]?.args?.[0]).toMatchObject({
+      mode: 'resume',
+      identity,
+      head: HEAD,
+      base: BASE,
+      workflowId: request.workflowId,
+    });
+  });
+
+  it('旧 worker 没有字段、不在体量停点、停点编号变了、头不同：本地就拒，不发 Update', async () => {
+    const run = (status: unknown, over: Partial<LineBudgetRemeasureRequest> = {}) => {
+      const c = client(status);
+      return createTemporalLineBudgetRemeasure(c.client)({ ...request, ...over }).then((r) => ({ r, c }));
+    };
+    const old = await run({ phase: 'parked', lastProblem: '改动超出体量预算：新增 9550 行' });
+    expect(old.r).toMatchObject({ ok: false, reason: 'unsupported' });
+    const none = await run({ lineBudgetPark: { version: 1, identity: null } });
+    expect(none.r).toMatchObject({ ok: false, reason: 'stale' });
+    const park = await run({ lineBudgetPark: { version: 1, identity } }, { park: '1.4.0' });
+    expect(park.r).toMatchObject({ ok: false, reason: 'stale', park: '2.5.0' });
+    const head = await run({ lineBudgetPark: { version: 1, identity } }, { head: 'f'.repeat(40) });
+    expect(head.r).toMatchObject({ ok: false, reason: 'changed' });
+    for (const x of [old, none, park, head]) expect(x.c.calls.map((y) => y.kind)).toEqual(['query']);
+  });
+
+  it('工作流回拒绝或认不出的回执：都不当成功', async () => {
+    const status = { lineBudgetPark: { version: 1, identity } };
+    const refused = await createTemporalLineBudgetRemeasure(
+      client(status, { outcome: 'refused', reason: 'over_budget', detail: '仍超' }).client,
+    )(request);
+    expect(refused).toMatchObject({ ok: false, reason: 'over_budget', detail: '仍超' });
+    const odd = await createTemporalLineBudgetRemeasure(client(status, { outcome: 'resumed' }).client)(
+      request,
+    );
+    expect(odd).toMatchObject({ ok: false, reason: 'unknown' });
   });
 });

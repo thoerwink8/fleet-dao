@@ -82,6 +82,8 @@
 //   格式不对续进会话重出一次，还不对照常动手；认下了带进意见、动手续这个会话。
 // - 体量预算（#2755，Limits.prLineBudget，0 = 关；patched('pr-line-budget')，withinLineBudget）：推之前看交的头相对主线新增几行，
 //   超了第一次打回收窄，第二次停下等人并附拆单建议，人点「继续」照推。
+//   体量关口重评（#3249，patched('line-budget-remeasure-v1') 只在 taskRemeasureLineBudget Update 处理里问）：停点身份由 park() 记（不改命令序，
+//   旧历史里停下的单也有），可信重测通过只放行「这一次停点的这一份交付」，不设 budgetApproved、不增加继续数；人点「继续」优先，仍是原授权语义。
 // - 每一轮收场记进库（#2762，patched('round-outcome')，startRound / endRound）：返工、合并、放弃叫停时各记一行 task_rounds
 //   （怎么结束的按 lastProblem 认，roundOutcomeOf；档位、首派模型、PR 新增行数），每日简报「流程健康」按它算。记不成不挡原流程。
 // - 交活没提交续一次（#2722，patched('commit-nudge-same-round')，nudgeCommit）：会话收场时没提交、或树里有剩（常见是把测试丢到后台就结束了），
@@ -791,7 +793,7 @@ class TaskFlow {
       return false;
     }
     if (patched('avoid-empty-commit-route')) rt.commitMisses = 0;
-    if (!(await this.withinLineBudget(delivery))) return false;
+    if (!(await this.withinLineBudget(delivery, wt))) return false;
     let pushed: Awaited<ReturnType<typeof rt.acts.pushBranch>>;
     // 这个头改了哪些文件记进库（#3140，pr_head_files）：只给活动多带可选入参，不改步序；老历史没有这个标记，入参和原来一样
     const recordHeadFiles = patched('pr-head-files');
@@ -1054,7 +1056,7 @@ class TaskFlow {
    * 推之前比体量预算（#2755，patched('pr-line-budget')）：交的头相对主线新增行超了预算，第一次打回让会话收窄（意见带上方案和方案外的文件）；
    * 收窄过还超就停下等人，附拆单建议，人点「继续」照这一版推、这张单后面不再判。没量到新增行（老历史、没数成）不判。回 false＝这一轮返工。
    */
-  private async withinLineBudget(delivery: DeliveryRead): Promise<boolean> {
+  private async withinLineBudget(delivery: DeliveryRead, wt: Worktree): Promise<boolean> {
     const rt = this.rt;
     const budget = this.lineBudget();
     const rawAdded = delivery.addedLines;
@@ -1086,10 +1088,23 @@ class TaskFlow {
       rt.status.lastProblem = '改动超出体量预算';
       return false;
     }
+    // 停点身份（#3249）：不改命令序。可信重评只放行这一份交付（budgetResume 绑停点编号），不设 budgetApproved。
+    const parks = rt.parks + 1;
     await rt.park(
       `改动超出体量预算：新增 ${added} 行，预算 ${budget} 行，收窄过一次仍超`,
-      `${splitSuggestion(delivery.changedFiles)}${detail ? ` ${detail}` : ''} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。`,
+      `${splitSuggestion(delivery.changedFiles)}${detail ? ` ${detail}` : ''} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。管理入口 fleet-api task budget-remeasure 可只重新核这一份成果的体量（不授权后续）。`,
+      'stuck',
+      rawAdded === undefined
+        ? undefined
+        : {
+            head: delivery.head,
+            rawAddedLines: rawAdded,
+            chargeableAddedLines: added,
+            budget,
+            worktreePath: wt.path,
+          },
     );
+    if (rt.takeLineBudgetResume(parks)) return true;
     this.budgetApproved = true;
     return true;
   }

@@ -1031,6 +1031,15 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
   ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task redo thoerwink8/fleet-dao 1402 --note "叫停之后重来"'
   ```
   `continue` 发 `taskContinue`（和驾驶舱「继续」同一个信号），`abandon` 发 `taskAbandon`（和「叫停」同一个，`--note` 就是原因）。`redo` 走后端现成的 `taskRedo.redo`（`packages/api/src/temporal.ts`），只在库里这张单是已叫停或挂起时另起一代；做完、失败、还在跑的拒绝并说现在是什么状态。`--note` 必填。每条写一条操作记录（`task.continue` / `task.abandon` / `task.redo`，target `issue:<owner/仓>#<号>`，after 里有谁、哪张单、note、结果）。找不到这张单或任务工作流已经不在：退出码 1，标准输出不打成功。退出码：0 做成了；1 没做成；2 参数不对。`dispatch-issue` 碰到已派过，提示改跑这条 `redo`（驾驶舱按钮同样能点）。
+- **体量停点只重新核这一份成果**（`fleet-api task budget-remeasure`，#3249）：单子停在「改动超出体量预算」（收窄过一次仍超）时，不想用「继续」（它会让这张单后面所有交付都不再判体量），就只让工作流重新核这一份成果。
+  ```
+  # 1) 默认只读预检：重新测量，不放行、不写操作记录。--head 是被停下的成果头，--base 是固定测量基线（头相对主线的 merge-base，必须是头的祖先、在树里钉的主线历史上）
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task budget-remeasure thoerwink8/fleet-dao 3207 --head <完整头sha> --base <完整基线sha> --note "只重新核这次成果"'
+  # 2) 预检通过后，把它打印的 run 和停点编号原样带回，显式执行
+  ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task budget-remeasure thoerwink8/fleet-dao 3207 --head <头> --base <基线> --execute --run <预检打印的runId> --park <预检打印的停点编号> --note "…"'
+  ```
+  权限：和 `task continue` 一样，只在法国上以运维身份跑（`FLEET_OPS_OPERATOR`，连得上库和 Temporal）；预检不改库、不写操作记录，工作流历史里只多一条 `taskRemeasureLineBudget` Update；执行写一条操作记录 `task.budget-remeasure`（成功、被拒都记）。流程：命令先查 run，再读工作流 `taskStatus` 里的 `lineBudgetPark`（停点身份：run、第几次停、停法代数、继续数、PR、成果头、原始行数、按预算计的行数、预算）——不看停下原因的自由文本；旧 worker 没有这个字段就明确不支持。身份对得上才发 Update，工作流自己再核一遍（repo / task / workflow / 完整 run / 停点 / 头），再让引擎用发布版测量实现（只读 Git 对象，不执行候选源码或配置、不起模型、不改预算和硬上限）在那棵工作树上重测：头是请求的头、树干净（含未跟踪文件；开会话钩子改的环境文件不算）、base 是头的祖先且在树里钉的主线上、原始新增行与停下时一致，测量前后各核一次头和干净程度。**只有「可信完整测量（verified）且实际计量不超原预算」才放行**，放行的只是这一份成果：不发 `taskContinue`、不增加继续次数、不设「这张单后面不再判体量」，之后仍走原来的交付检查、验收和合并，下一个新头必须重新完整计量，仍超预算继续按原规则停下。
+  拒绝类别（退出码 1，标准输出不打成功，原停点一律保留，写明停点上现在的头和行数供对照）：`unsupported`（旧 worker）、`identity`（repo/task/workflow/run 对不上）、`stale`（旧停点、已继续、已放行、换代、放弃、已结束、别的停法或运行中）、`busy`（别的重评正在跑）、`unknown`（读 Git 失败、超时 240 秒、被取消：结果未知，不当 0 或 ok）、`changed`（头、基线、原始行数、干净程度变了）、`unverified`（没有可信完整测量：超 20000 行 / 2MiB 硬界、候选改了信任根、形状不支持）、`over_budget`（实际计量仍超原预算）。并发请求只有一个在测，其余 `busy`；测量期间有人点「继续」、放弃或换代，这次测量作废。同一已放行请求重发回「已放行过」的幂等回执，不再放行别的头；放行后若又停在新头上，旧回执对新头无效。失败恢复：被拒或未知后什么都没变，修好原因（比如清掉树里的改动、换对 base）再预检；要放行别的成果或授权后续就用原来的「继续」。本命令不自动恢复任何现有停下的任务，也不处理成果本身的验收问题。
 - 认领账和提醒（认领账 #556 已删，只剩提醒；design 15.3「谁在处理」）：2026-09-28 起「谁在处理」这份状态只留给驾驶舱看（#445，「提醒派单」整层删掉——不再等没人认领自动开跟进单、不用认领、没有 `alert claim`）；经 ssh 能看的只剩开着的提醒、跟进单（历史上挂过的）、PR、静默：
 
   ```
