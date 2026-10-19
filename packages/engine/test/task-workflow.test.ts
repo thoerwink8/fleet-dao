@@ -1001,6 +1001,48 @@ describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000
     expect(calls.arm).toBe(1);
   });
 
+  it('【#3281 故意造出的失败】冷验收同一个头一直验不了满 2 小时：让出在跑名额（任务行 stalled）、只报一次警，到点自己再验、验过照常合', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n <= 6
+          ? {
+              pass: false,
+              problems: [],
+              round: 1,
+              retry: { wait: 'quota', reason: '所有验收家族都在等额度', afterSeconds: 30 * 60 },
+            }
+          : { pass: true, problems: [], round: 1 },
+    });
+    const states: { state: string; doing: string }[] = [];
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+        wrapActivities: (acts) => ({
+          ...acts,
+          async saveTaskState(snapshot) {
+            states.push({ state: snapshot.state, doing: snapshot.doing });
+            return acts.saveTaskState(snapshot);
+          },
+        }),
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', verifyRounds: 1 });
+    expect(calls.verify).toHaveLength(7);
+    // 前 4 次（0–1.5 小时）照旧占着名额睡；满 2 小时那次起让出名额，第 6 次接着让、不再报警
+    const stalls = states.filter((s) => s.state === 'stalled');
+    expect(stalls.map((s) => s.doing)).toEqual([
+      '让出名额等路由：冷验收一直派不出',
+      '让出名额等路由：冷验收一直派不出',
+    ]);
+    expect(world.alerts.map((a) => a.title)).toEqual(['冷验收一直派不出']);
+    expect(world.alerts[0]?.detail).toContain('不用点「继续」');
+    expect(calls.segment).toHaveLength(1); // 不算没过、没有返工
+  });
+
   it('验收时发现 PR 的头被换了：停下等人看过；点「继续」后对新的头重走 CI 和验收，验收重新数轮', async () => {
     const world = createFakeWorld();
     const moved = fakeHead(999);
