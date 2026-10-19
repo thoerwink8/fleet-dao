@@ -31,6 +31,7 @@ import {
   MAX_MAIN_SYNCS,
   MAX_ROUND_RESETS,
   type MainSyncBudgetExhausted,
+  type MergedTaskReceipt,
   PAUSED_BY_HUMAN,
   type PauseCommand,
   type RepinCommand,
@@ -44,6 +45,7 @@ import {
   taskPauseSignal,
   taskRepinSignal,
   taskRouteWakeSignal,
+  taskSettleMergedUpdate,
   taskStatusQuery,
 } from '../task-contract.ts';
 import { conflictFilesOf, conflictPendingOf, failureOf, iso, judgeRetrying } from './kit.ts';
@@ -57,6 +59,7 @@ import {
   HygieneHandoff,
   infraAvoidScope,
   type LastSession,
+  MergedTask,
   NO_AVOID,
   PausedInterrupt,
   RepinInterrupt,
@@ -79,6 +82,9 @@ export class TaskRuntime {
   parks = 0;
   private closeHoldGeneration = 0;
   private closeHold: ClosedIssueHoldToken | null = null;
+  private verifiedMerged: MergedTaskReceipt | null = null;
+  private settlingMerged = false;
+  finishingMerged = false;
   /**
    * 正在跑的长活动的取消钩子。冷验收和等 CI 并行（决定 0093）时同时有好几个（和 CI 同时起的那次验收没被认时让它自己跑完，
    * 可能一直跑到下一轮动手）：放弃要全取消，所以是一组、不是一个。
@@ -268,8 +274,8 @@ export class TaskRuntime {
       this.abandon ??= command;
       this.cancelAll();
     });
-    // 纯同步检查与写内存，中途没有 await。原历史没有 Update，不改变其活动、定时器步序。
-    setHandler(taskCloseClosedIssueUpdate, ({ token, command }) => {
+    // 旧历史保留同步关单；新入口先核真实合并身份，不能绕过已合任务的成功收尾。
+    setHandler(taskCloseClosedIssueUpdate, async ({ token, command }) => {
       if (typeof command?.by !== 'string' || typeof command.reason !== 'string') return 'busy';
       const current = this.closeToken();
       if (
@@ -282,16 +288,104 @@ export class TaskRuntime {
       )
         return 'stale';
       if (this.abandon !== null || this.running.size > 0) return 'busy';
+      if (this.prNumber !== null && patched('settle-merged-task-checkpoint')) {
+        if (this.head === null || this.settlingMerged) return 'busy';
+        const prNumber = this.prNumber;
+        const head = this.head;
+        this.settlingMerged = true;
+        try {
+          const actual = await this.acts.readMergedTask({
+            schemaVersion: 1,
+            repo: { owner: this.input.repo.owner, name: this.input.repo.name },
+            prNumber,
+            expectedHead: head,
+            idle: {
+              issueNumber: this.input.issueNumber,
+              workflowId: workflowInfo().workflowId,
+              includeOpen: true,
+            },
+          });
+          const after = this.closeToken();
+          if (
+            !after ||
+            this.running.size > 0 ||
+            this.prNumber !== prNumber ||
+            this.head !== head ||
+            after.runId !== token.runId ||
+            after.kind !== token.kind ||
+            after.generation !== token.generation ||
+            after.continued !== token.continued
+          )
+            return 'stale';
+          if (actual) {
+            this.verifiedMerged = actual;
+            this.closeHold = null;
+            // 旧关单调用方只把 accepted 当撤提醒授权；成功收尾未完成，不能给它。
+            return 'busy';
+          }
+        } finally {
+          this.settlingMerged = false;
+        }
+      }
       this.abandon = command;
       this.closeHold = null;
       this.cancelAll();
       return 'accepted';
     });
+    setHandler(taskSettleMergedUpdate, async ({ token, receipt }) => {
+      if (!this.mergedHoldMatches(token, receipt)) return 'stale';
+      if (this.settlingMerged) return 'busy';
+      this.settlingMerged = true;
+      try {
+        const actual = await this.acts.readMergedTask({
+          schemaVersion: 1,
+          repo: receipt.repo,
+          prNumber: receipt.prNumber,
+          expectedHead: receipt.head,
+          expectedMergeCommit: receipt.mergeCommit,
+          idle: { issueNumber: this.input.issueNumber, workflowId: workflowInfo().workflowId },
+        });
+        // An Update can interleave with continue/repin while awaiting the activity.
+        if (!actual || !this.mergedHoldMatches(token, receipt)) return 'stale';
+        this.verifiedMerged = actual;
+        this.closeHold = null;
+        return 'accepted';
+      } finally {
+        this.settlingMerged = false;
+      }
+    });
     setHandler(taskStatusQuery, () => ({
       ...this.status,
       waiting: this.status.waiting ? { ...this.status.waiting } : null,
       closedIssueClose: { version: 1, token: this.closeToken() },
+      mergedTaskClose: {
+        version: 1,
+        token: this.running.size === 0 ? this.closeToken() : null,
+        repo: { owner: this.input.repo.owner, name: this.input.repo.name },
+        prNumber: this.prNumber,
+        head: this.head,
+      },
     }));
+  }
+
+  private mergedHoldMatches(token: ClosedIssueHoldToken, receipt: MergedTaskReceipt): boolean {
+    const current = this.closeToken();
+    return (
+      !!current &&
+      !!token &&
+      !!receipt &&
+      this.running.size === 0 &&
+      token.version === 1 &&
+      token.runId === current.runId &&
+      token.kind === current.kind &&
+      token.generation === current.generation &&
+      token.continued === current.continued &&
+      receipt.repo?.owner === this.input.repo.owner &&
+      receipt.repo.name === this.input.repo.name &&
+      receipt.prNumber === this.prNumber &&
+      receipt.head === this.head &&
+      /^[0-9a-f]{40}$/.test(receipt.mergeCommit)
+    );
   }
 
   private enterCloseHold(kind: ClosedIssueHoldToken['kind']): void {
@@ -373,6 +467,7 @@ export class TaskRuntime {
 
   guard(): void {
     if (this.abandon) throw new Abandoned(this.abandon);
+    if (this.verifiedMerged && !this.finishingMerged) throw new MergedTask(this.verifiedMerged);
   }
 
   /**
@@ -382,7 +477,37 @@ export class TaskRuntime {
    */
   async checkpoint(): Promise<void> {
     this.guard();
-    if (this.pauseReq !== null) await this.holdPaused(this.pauseReq);
+    if (
+      !this.finishingMerged &&
+      this.prNumber !== null &&
+      this.head !== null &&
+      this.running.size === 0 &&
+      patched('settle-merged-task-checkpoint')
+    ) {
+      for (;;) {
+        let merged: MergedTaskReceipt | null;
+        try {
+          merged = await this.acts.readMergedTask({
+            schemaVersion: 1,
+            repo: { owner: this.input.repo.owner, name: this.input.repo.name },
+            prNumber: this.prNumber,
+            expectedHead: this.head,
+            idle: { issueNumber: this.input.issueNumber, workflowId: workflowInfo().workflowId },
+          });
+        } catch (error) {
+          if (isCancellation(error)) throw error;
+          await this.park('PR 是否已合并没核实，保留现场', String(error));
+          continue;
+        }
+        this.guard();
+        if (merged) {
+          this.verifiedMerged = merged;
+          throw new MergedTask(merged);
+        }
+        break;
+      }
+    }
+    if (!this.finishingMerged && this.pauseReq !== null) await this.holdPaused(this.pauseReq);
   }
 
   /** 暂停的原因怎么写给人看：谁、为什么（没写原因就只写谁）。 */
@@ -413,7 +538,7 @@ export class TaskRuntime {
     this.enterCloseHold('paused');
     try {
       await this.mirror('running');
-      await condition(() => this.continued > before || this.abandon !== null);
+      await condition(() => this.continued > before || this.abandon !== null || this.verifiedMerged !== null);
     } finally {
       this.holding = false;
       this.closeHold = null;
@@ -548,6 +673,17 @@ export class TaskRuntime {
         this.repinCancelled = false;
         this.repinReq = null;
       }
+    }
+  }
+
+  /** 脱开的仍是原活会话：接回等待期间也算在跑，不授权收树；不增加取消范围或杀会话。 */
+  async reattachExisting<T>(fn: () => Promise<T>): Promise<T> {
+    const existing = () => {};
+    this.running.add(existing);
+    try {
+      return await fn();
+    } finally {
+      this.running.delete(existing);
     }
   }
 
@@ -689,7 +825,7 @@ export class TaskRuntime {
       log.warn('报警没发出去，照样停下等人', { title, error: String(error) });
     }
     await this.waiting('human', `${title}（等「继续」或「放弃」）`, () =>
-      condition(() => this.continued > before || this.abandon !== null),
+      condition(() => this.continued > before || this.abandon !== null || this.verifiedMerged !== null),
     );
     this.guard();
     this.closeHold = null;
@@ -758,7 +894,7 @@ export class TaskRuntime {
     for (;;) {
       const woken = await this.waiting('human', `${title}（等「继续」或「放弃」，或仓改成不强制 CI）`, () =>
         condition(
-          () => this.continued > before || this.abandon !== null,
+          () => this.continued > before || this.abandon !== null || this.verifiedMerged !== null,
           `${CI_POLICY_POLL_SECONDS} seconds`,
         ),
       );
@@ -795,7 +931,7 @@ export class TaskRuntime {
       try {
         return await fn();
       } catch (error) {
-        if (error instanceof Abandoned) throw error;
+        if (error instanceof Abandoned || error instanceof MergedTask) throw error;
         if (isCancellation(error)) throw error;
         const failure = failureOf(error, source, this.limits);
         // 合并冲突不在这一步里原地重试：第二次原文必一字不差，会直接挂起，会话根本看不到冲突。

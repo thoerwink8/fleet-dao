@@ -99,7 +99,7 @@ export interface ClaimsGitHub {
   isAgentBot(
     user: { login?: string | null; id?: number | null; type?: string | null } | null | undefined,
   ): boolean;
-  readPull(repo: RepoRef, number: number): Promise<PullFacts>;
+  readPull(repo: RepoRef, number: number, options?: { requireMergeState: true }): Promise<PullFacts>;
   /** 开着的 PR（翻完页；翻不完抛错，不当成就这几个）。 */
   openPulls(repo: RepoRef): Promise<PullFacts[]>;
   /** 这个 PR 上全部正式评审（翻完页，按 GitHub 给的先后）；翻不完、认不出都抛错，不当成没有评审。 */
@@ -219,7 +219,7 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
     engineLogin: () => botLogin(client.apps.engine),
     isAgentBot: (user) => deps.bots.is('agent', user),
 
-    async readPull(repo, number) {
+    async readPull(repo, number, options) {
       const res = await client.request({
         method: 'GET',
         path: `${base(repo)}/pulls/${number}`,
@@ -228,6 +228,18 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
       const parsed = ClaimPullSchema.safeParse(res.data);
       if (!parsed.success) throw unexpected(`读 PR #${number}`, res.data);
       if (parsed.data.number !== number) throw unexpected(`读 PR #${number}（回的号对不上）`, res.data);
+      if (
+        options?.requireMergeState &&
+        parsed.data.merged === undefined &&
+        parsed.data.merged_at === undefined
+      )
+        throw unexpected(`读 PR #${number}（合并状态未知）`, res.data);
+      if (
+        options?.requireMergeState &&
+        ((parsed.data.merged === false && parsed.data.merged_at != null) ||
+          (parsed.data.merged === true && parsed.data.merged_at === null))
+      )
+        throw unexpected(`读 PR #${number}（合并状态矛盾）`, res.data);
       return factsOf(repo, parsed.data);
     },
 

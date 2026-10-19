@@ -24,6 +24,7 @@ import {
 import type { RunCommand } from '@fleet-dao/adapters/quota';
 import {
   closeInterruptedScheduleRuns as closeInterruptedScheduleRunsInDb,
+  countOpenRunsForIssue,
   createDb,
   type Db,
   findRepoProfile,
@@ -1169,6 +1170,7 @@ export function realPortsFromEnv(
   const runsDir = join(config.stateDir, 'runs');
   const tasks: EngineTasks = {
     ...createTaskActivities({
+      openRunsForIssue: (repo, issue, workflowId) => countOpenRunsForIssue(db, repo, issue, workflowId),
       gh,
       trees,
       exec,

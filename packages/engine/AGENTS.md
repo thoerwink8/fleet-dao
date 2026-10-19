@@ -20,6 +20,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 ## 常见坑
 
+- 已合 PR 任务只按同仓精确 PR/head/真实 mergeCommit 经 `readMergedTask` + `onlyBook` 结清；活工人自然返回后在检查点止损，不取消会话。parked/paused 用 `taskSettleMerged` Update，IO 前后核同 run/停法代数/continued，数据库活动会话必须为零；accepted 不是 finish 完成，不提前撤提醒。收尾走 merged 与持久验收责任，未结责任保留 OPEN，工作树先存档，不用 closed-issue/abandon 冒充已合。closed-issue 正式 Update 对已知 PR 同样现读，未知不放弃、已合转成功收尾但不发撤提醒回执；新 reader 用 Claims.readPull 的 requireMergeState，缺失/矛盾状态不能合成为未合。detached 等待到同 session 接回终态期间一直算在跑，禁止提前结清或收树。
+
 - 镜像给用户树的增量包统一经 `real/mirror.ts bundleFromMirror`，有 exclude 必须传目标 `UserTree`：以目标会话身份执行真实 `git bundle verify`，核全部 prerequisites/对象闭包；不通过只回退一次有大小和取消限制的完整包，再验证才能导入。不能用 previousHead 存在或错误文案代替证明，也不能 reset/强推掩盖旧树与远端不同步。
 
 - 主线同步每段最多 `MAX_MAIN_SYNCS` 次；只有精确 PR/head/已用次数对应的预算耗尽停法，实际收到这次停下之后的新「继续」，才能续下一段。普通失败、运行中或重复的「继续」不能预存额度。活动旧结果没有结构身份时先保持原停法，重试得到新身份后仍须下一次「继续」；每次同步新头仍重走仓原有 CI、验收与路径闸。

@@ -7,11 +7,22 @@ import { classifyFailure } from '../failure/classify.ts';
 import type { RoundOutcome, RouteChoice, ShotsDelivery } from '../ports.ts';
 import {
   type AbandonCommand,
+  type MergedTaskReceipt,
   type PauseCommand,
   type RepinCommand,
   SELF_CHECK_DIGEST_MAX,
   type SelfCheckResult,
 } from '../task-contract.ts';
+
+/** Verified merge exits through success/acceptance/preservation, never abandonment. */
+export class MergedTask extends Error {
+  readonly receipt: MergedTaskReceipt;
+  constructor(receipt: MergedTaskReceipt) {
+    super(`PR #${receipt.prNumber} 已合并`);
+    this.name = 'MergedTask';
+    this.receipt = receipt;
+  }
+}
 
 /** 放弃：从各处抛到最外层收尾。 */
 export class Abandoned extends Error {

@@ -47,7 +47,7 @@ import {
 } from '../task-contract.ts';
 import { activityWithin, failureOf } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
-import { headMovedDetail } from './task-support.ts';
+import { headMovedDetail, MergedTask } from './task-support.ts';
 import { syncMainlineOnConflict } from './task-sync.ts';
 import { handReviewChanges } from './task-verify.ts';
 
@@ -114,7 +114,7 @@ async function advanceWithin(
       }),
     );
   } catch (error) {
-    if (isCancellation(error)) throw error;
+    if (error instanceof MergedTask || isCancellation(error)) throw error;
     const failure = failureOf(error, 'saveTaskState', rt.limits);
     if (
       failure.code === 'TIMEOUT_SCHEDULE_TO_CLOSE' ||
@@ -207,7 +207,7 @@ async function armWithinDeadline(
     });
     return { kind: 'result', armed };
   } catch (error) {
-    if (isCancellation(error)) throw error;
+    if (error instanceof MergedTask || isCancellation(error)) throw error;
     const failure = failureOf(error, 'armAutoMerge', rt.limits);
     const where = `PR #${prNumber} 头 ${wait.head}，在等：${wait.names.join('、')}。原始原因：${wait.detail}`;
     const after = secondsLeft(wait);

@@ -18,6 +18,7 @@ import {
   type EngineStartedAt,
   type GuardedPaths,
   MERGE_POLL_MINUTES,
+  type MergedTaskReceipt,
   type MergeNowInput,
   type MergeNowResult,
   type MergeWait,
@@ -32,6 +33,7 @@ import {
   type ReadCiReviewsInput,
   type ReadCiReviewsResult,
   type ReadDeliveryInput,
+  type ReadMergedTaskInput,
   type ReadTaskBriefInput,
   type ReleaseReservationInput,
   type ReleaseReservationResult,
@@ -53,6 +55,7 @@ type PortActivities = {
 
 /** 工作流看到的活动：端口（EnginePorts）里的，加上引擎自己的。 */
 export type EngineActivities = PortActivities & {
+  readMergedTask(input: ReadMergedTaskInput): Promise<MergedTaskReceipt | null>;
   /** 当前 worker 进程的启动时刻；超时分流用它和旧活动最后一次心跳作严格比较。 */
   engineStartedAt(input: { schemaVersion: 1 }): Promise<EngineStartedAt>;
   // —— 任务工作流（task-contract.ts；#632）要的活动：现读单子、起一次无头动手会话、读交付、冷验收、合并这几步 ——
@@ -134,6 +137,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   probeAssignedRoute: 'job',
   releaseReservation: 'quick',
   readTaskBrief: 'git',
+  readMergedTask: 'git',
   runSegment: 'segment',
   readDelivery: 'git',
   coldVerify: 'segment',
