@@ -35,6 +35,7 @@ import {
   PortError,
   type PortName,
 } from './ports.ts';
+import type { PushHandbackPreflight, PushHandbackPreflightInput } from './push-handback.ts';
 import type { TaskBriefResult } from './runner/task-brief.ts';
 import type {
   ArmAutoMergeInput,
@@ -303,6 +304,10 @@ export interface EngineJobs {
  * 的活动明确报 TASK_NOT_CONFIGURED（不重试），不装作做过。
  */
 export interface EngineTasks {
+  readPushHandbackPreflight?: (
+    input: PushHandbackPreflightInput,
+    ctx: PortContext,
+  ) => Promise<PushHandbackPreflight>;
   readMergedTask?: (input: ReadMergedTaskInput, ctx: PortContext) => Promise<MergedTaskReceipt | null>;
   /** 当前 worker 的进程启动时刻；只读、无业务副作用。 */
   engineStartedAt?: (input: { schemaVersion: 1 }, ctx: PortContext) => Promise<EngineStartedAt>;
@@ -339,6 +344,7 @@ export interface EngineTasks {
 
 /** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
 const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
+  readPushHandbackPreflight: true,
   readMergedTask: true,
   engineStartedAt: true,
   readTaskBrief: true,
