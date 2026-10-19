@@ -1,7 +1,7 @@
-import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, expect, it, vi } from 'vitest';
 import { runLocalVitest } from '../src/local-vitest.ts';
 import {
@@ -11,8 +11,8 @@ import {
   startTemporalTestEnvironment,
   temporalCliRegistration,
   temporalTestVersion,
-  temporalVersionOutput,
 } from '../src/temporal-test-cli.ts';
+import { runChild } from './child.ts';
 import { memRepo } from './helpers.ts';
 
 const roots: string[] = [];
@@ -110,38 +110,56 @@ it('沿用能力标记，只读实际已选文件；未选真服务端不触发�
 });
 
 it('真实探测进程正常退出只透传 --version，非零退出及起不来都报 preparation', { timeout: 0 }, () => {
-  const execute = (script: string) =>
-    temporalVersionOutput(process.execPath, 5_000, (command, args, options) => {
-      expect(command).toBe(process.execPath);
-      expect(args).toEqual(['--version']);
-      expect(options.shell).toBe(false);
+  const result = probeChild(`
+    const execute = script => temporalVersionOutput(process.execPath, 5_000, (command, args, options) => {
+      assert.equal(command, process.execPath);
+      assert.deepEqual(args, ['--version']);
+      assert.equal(options.shell, false);
       return spawnSync(process.execPath, ['-e', script, '--', ...args], options);
     });
-  expect(execute("console.log('temporal version 1.9.1')")).toBe('temporal version 1.9.1');
-  expect(() => execute("console.error('fixture-denied'); process.exitCode = 9")).toThrow('exit=9');
-  expect(() => temporalVersionOutput(join(tmpdir(), 'fleet-does-not-exist-temporal.exe'))).toThrow(
-    'preparation',
-  );
+    assert.equal(execute("console.log('temporal version 1.9.1')"), 'temporal version 1.9.1');
+    assert.throws(() => execute("console.error('fixture-denied'); process.exitCode = 9"), /exit=9/);
+    assert.throws(() => temporalVersionOutput(${JSON.stringify(join(tmpdir(), 'fleet-does-not-exist-temporal.exe'))}), /preparation/);
+    console.log('probe cases passed');
+  `);
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout.trim()).toBe('probe cases passed');
 });
 
 it('卡住的真实版本探测被有界终止并保留 ETIMEDOUT 原因，不留迟到运行的进程', { timeout: 0 }, () => {
-  let pid = 0;
-  let failure: unknown;
-  try {
-    temporalVersionOutput(process.execPath, 500, (_command, _args, options) => {
-      const result = spawnSync(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], options);
-      pid = result.pid;
-      return result;
-    });
-  } catch (error) {
-    failure = error;
-  }
-  expect(failure).toBeInstanceOf(Error);
-  expect((failure as Error).message).toContain('500ms');
-  expect(((failure as Error).cause as NodeJS.ErrnoException).code).toBe('ETIMEDOUT');
-  expect(pid).toBeGreaterThan(0);
-  expect(() => process.kill(pid, 0)).toThrow();
+  const result = probeChild(`
+    let pid = 0;
+    let failure;
+    try {
+      temporalVersionOutput(process.execPath, 500, (_command, _args, options) => {
+        const result = spawnSync(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], options);
+        pid = result.pid;
+        return result;
+      });
+    } catch (error) { failure = error; }
+    assert.ok(failure instanceof Error);
+    assert.match(failure.message, /500ms/);
+    assert.equal(failure.cause?.code, 'ETIMEDOUT');
+    assert.ok(pid > 0);
+    assert.throws(() => process.kill(pid, 0));
+    console.log(JSON.stringify({ pid, code: failure.cause.code }));
+  `);
+  expect(result.status, result.stderr).toBe(0);
+  expect(JSON.parse(result.stdout)).toEqual({ pid: expect.any(Number), code: 'ETIMEDOUT' });
 });
+
+function probeChild(source: string) {
+  const module = fileURLToPath(new URL('../src/temporal-test-cli.ts', import.meta.url));
+  return runChild(process.execPath, ['--input-type=module'], {
+    input: `
+      import assert from 'node:assert/strict';
+      import {spawnSync} from 'node:child_process';
+      import {pathToFileURL} from 'node:url';
+      const {temporalVersionOutput} = await import(pathToFileURL(${JSON.stringify(module)}).href);
+      ${source}
+    `,
+  });
+}
 
 it('SDK创建保留同一资源与原错误，准确报合并阶段，只尝试一次', async () => {
   const cli = { path: process.execPath, version: '1.9.1' };
