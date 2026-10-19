@@ -1122,7 +1122,7 @@ export class TaskRuntime {
             next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason,
             failure.message,
             'stuck',
-            stepParkKind(source, next),
+            stepParkKind(source, next, failure.code),
           );
           counters = ZERO;
           previousMessage = undefined;
@@ -1158,11 +1158,39 @@ export class TaskRuntime {
 }
 
 /**
+ * 挂合并、直接合并这两步里，发了新版也治不好的认证和权限（#3294 返工）。
+ * 规则：登录失效 AU2、没有权限 PM1（这两条没写 humanFix，以前被源步骤一刀切成 unarmed）。
+ * 码：规则表没单列、分流会落到「认不出」的 GitHub 401（AUTH_FAILED）和 403（FORBIDDEN），以及已经能对上规则的那几个码。
+ */
+const MERGE_CREDENTIAL_RULES = new Set(['AU2', 'PM1']);
+const MERGE_CREDENTIAL_CODES = new Set([
+  'auth_failed',
+  'auth_required',
+  'forbidden',
+  'permission_denied',
+  'workflows_permission',
+  'workflow_permission',
+]);
+
+function mergeCredentialStop(rule: string | undefined, failureCode: string | undefined): boolean {
+  if (rule !== undefined && MERGE_CREDENTIAL_RULES.has(rule)) return true;
+  const code = failureCode?.trim().toLowerCase();
+  return code !== undefined && MERGE_CREDENTIAL_CODES.has(code);
+}
+
+/**
  * 失败分流判了停下的那一次算哪一类（#3294）：要人修的（有 humanFix）不续；挂合并、直接合并这两步算「自动合并没挂上」；
  * 认不出走兜底梯（FB）的算「按临时的办」；别的不续。
+ * 认证、权限即使出在这两步也不算「没挂上」：令牌失效、没有权限，法国发了新版也续不上。
  */
-export function stepParkKind(source: string, next: Pick<NextAction, 'humanFix' | 'rule'>): ParkKind {
+export function stepParkKind(
+  source: string,
+  next: Pick<NextAction, 'humanFix' | 'rule'>,
+  failureCode?: string,
+): ParkKind {
   if (next.humanFix) return 'other';
-  if (source === 'armAutoMerge' || source === 'mergeNow') return 'unarmed';
+  const mergeStep = source === 'armAutoMerge' || source === 'mergeNow';
+  if (mergeStep && mergeCredentialStop(next.rule, failureCode)) return 'other';
+  if (mergeStep) return 'unarmed';
   return next.rule === 'FB' ? 'transient' : 'other';
 }

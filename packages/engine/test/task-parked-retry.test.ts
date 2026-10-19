@@ -301,6 +301,61 @@ describe('停下等人按规则续一次（#3294）', { timeout: 120_000 }, () =
     }
   });
 
+  it('第一次挂合并就抛认证或权限：走 step 的失败分流，停法记 other，发了新版也不续', async () => {
+    // 等检查那条路（armWithinDeadline → parkInMerge）已经另测。这里是第一次 rt.step('armAutoMerge')：
+    // AU2 / PM1 没有 humanFix，GitHub 真 401（AUTH_FAILED）和 403（FORBIDDEN）又落不进这两条规则。
+    const cases: { name: string; code: string; message: string; title: RegExp }[] = [
+      { name: '登录失效', code: 'AUTH_REQUIRED', message: 'GitHub 令牌失效', title: /登录失效/ },
+      { name: '没有权限', code: 'PERMISSION_DENIED', message: '没有权限', title: /没有权限/ },
+      {
+        name: 'workflows 权限',
+        code: 'WORKFLOWS_PERMISSION',
+        message: '机器人没有 workflows 权限',
+        title: /没有权限/,
+      },
+      {
+        name: 'GitHub 401',
+        code: 'AUTH_FAILED',
+        message: 'POST /repos/acme/widgets：凭据被拒（401）：Bad credentials',
+        title: /认不出/,
+      },
+      {
+        name: 'GitHub 403',
+        code: 'FORBIDDEN',
+        message: 'POST /repos/acme/widgets：没有权限（403）',
+        title: /认不出/,
+      },
+    ];
+    for (const c of cases) {
+      const world = createFakeWorld();
+      const { tasks, calls } = scripted({
+        arm: (n) => {
+          if (n === 1) throw new PortError(c.code, c.message, { retryable: false });
+          return ARMED;
+        },
+      });
+      await withWorker(
+        env,
+        world,
+        async (q) => {
+          const i = input();
+          const h = await start(q, i);
+          const s = await statusUntil(h, (st) => st.phase === 'parked', `${c.name}，第一次挂合并停下`);
+          expect(s.park?.kind, c.name).toBe('other');
+          expect(s.park?.title, c.name).toMatch(c.title);
+          expect(s.lastProblem, c.name).toMatch(c.title);
+          expect(calls.arm, c.name).toBe(1);
+          const job = jobOn(h, i, anHourAfter);
+          expect((await retryParkedTasks(job.deps)).continued, c.name).toEqual([]);
+          expect(job.audits, c.name).toEqual([]);
+          expect((await h.query(taskStatusQuery)).phase, c.name).toBe('parked');
+          await h.terminate('测试收场');
+        },
+        { tasks },
+      );
+    }
+  }, 180_000);
+
   it('停下之后没发新版、PR 也还不能合：不续，原地等人', async () => {
     const world = createFakeWorld();
     const { tasks } = scripted({ arm: (n) => (n === 1 ? UNARMED : ARMED) });
