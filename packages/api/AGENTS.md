@@ -11,6 +11,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - `ci-policy-bridge.ts`、`ci-policy-public.ts`：受管公开仓 DB 策略只读协议与 source publisher。精确 GET 挂在 session 前，严格核 GitHub 当前 public/数字身份；协议在 shared 的 `ci-policy-bridge.ts`，独立于浏览器 FleetApi，路由契约测试仍逐条登记。私有 force 原路径，私有 off 明确不支持。
 - `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
 - `historical-audit` 管理命令从 stdin 收历史通知审计 JSON，现读 GitHub PR/head 与证据 issue，再以真实 ops 身份原子处理通知、记审计。结论只允许 `historical_unproven`，不能作为正常队列账或创始人批准；入口在 `src/historical-audit-cli.ts`。
+- `attention --json` 的 `runningIdle` 是版本化即时只读结论：完整 `listRunningEngineTasks` 与 core 唯一 idle 判据，带任务身份、完整 openRuns 和采集时刻。`notes` 是按推送白名单到点的通知，两者不能相互替代；读取失败退出 1，诊断不回退为展示会话计数。
 
 ## 测试
 
@@ -40,7 +41,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 
 - 受控修复同一 incident 在执行、结果未知或受理待核验时，所有其他动作也必须阻挡，不允许覆盖原副作用。idle 判据与原检测器共用 core 纯模块，具体 workflow run 必须现读并钉入信号；发版核验绑原 SHA 和 startedAt。交修复在开单后调用固定 `engine/src/bin/dispatch-issue.ts` 准入入口，不拼 shell，不提权，派工未知保留原单和未知状态；确定未派重试复用原单。
 
-- 真核验通过后按设置版本与通知 `raisedAt` 双守卫 CAS 持久写 verified 和审计；并发 GET 只一份结清审计，结算冲突/读取失败均不展示绿。不替看门狗撤原通知。
+- 真核验通过后按设置版本与通知 `raisedAt` 双守卫 CAS 持久写 verified 和审计；并发 GET 只一份结清审计，结算冲突/读取失败均不展示绿。不替看门狗撤原通知。执行路由的最终结算同样只回已落库的记录：CAS 冲突或持久读写失败不把内存里的 verified 等终态当 200；重读只采纳精确同一 incident、requestId、动作且已落库的结果，不覆盖并发赢家，不重放动作。
 
 - 明确关联已有单（#3100，`POST /api/notifications/:id/repair/link`）：可信登录操作者指定这次告警由哪张现有 fleet-dao 单处理，只收受管仓 + 单号 + 服务端关联版本（视图 `linkAction`）+ incident + `requestId`，多一个字段（如伪造 actor）就 400；服务端现读必须是开着的 issue，并按目标仓和单精确查任务、开放 PR（`listPullRequests` 的 `repoId`/`issueNumber`，不读全局前 N 条再筛；一页读满当没读全，关联 502、交给修复标 failed 不派工）；读不到、PR、错仓、已关闭一律拒绝，不回退成开单。线上契约不加枚举：修复记录的 kind/state 与 #3033 一样，关联存成设置表里的内部记录（`StoredRecordSchema`，只在 `alert-repair.ts` 里认），出口经 `wireLast` 投影，关联只走视图的 `linked` 和关联端点自己的回执；通知卡（#3034）按旧枚举取 `PHASE_META[state]`，新枚举会让它崩溃，`alert-repair.test.ts` 有照抄旧消费者的严格检查。交给修复沿用绑定：每次重新核实，失效标 `invalid` 不开新单；已有进行中的任务或开放 PR 回 409 `link_already_handled` 不派工，否则经原准入派一次（不传 force）。关联与开单抢同一事故走同一个设置版本 CAS。标题正文相似不自动认同根因。
 

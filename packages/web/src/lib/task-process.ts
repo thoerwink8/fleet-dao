@@ -338,6 +338,15 @@ export function runDurationMs(run: SegmentRunView, now: number): number | undefi
 }
 
 /** 一个回合的五步（#3169）：页头下面那条「这一回合走到哪」。 */
+/** 第几笔：整张单的笔按起跑先后一起数（三段不分开），过程和页头进度条同一个数。 */
+export function runOrder(runs: readonly SegmentRunView[]): Map<string, number> {
+  return new Map(
+    [...runs]
+      .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''))
+      .map((r, i) => [r.id, i + 1] as const),
+  );
+}
+
 export const ROUND_STAGES = ['动手', '自测', '推分支 · CI', '验收', '合并'] as const;
 export type RoundStageState = 'done' | 'now' | 'todo' | 'failed';
 
@@ -366,7 +375,8 @@ function stageOf(item: TimelineItem): number | undefined {
 export interface RoundProgress {
   /** 第几回合（task_rounds.seq；还没开跑的下一回合是上一回合 + 1）。 */
   seq: number;
-  stages: { label: (typeof ROUND_STAGES)[number]; state: RoundStageState }[];
+  /** 五步各自的状态，和这一回合里落在这一步的笔、引擎做的事（页面拿它写每格第二行：用了多久、第几笔在跑）。 */
+  stages: { label: (typeof ROUND_STAGES)[number]; state: RoundStageState; items: TimelineItem[] }[];
   /** 这一回合是返工：上一回合怎么收场、返工意见（老行没有意见）。 */
   reworkOf: RoundGroup['reworkOf'];
   /** 一句话：在做哪一步 / 合并了 / 停在哪。 */
@@ -383,10 +393,13 @@ export function roundProgress(groups: readonly RoundGroup[], taskState: string):
   if (!last || last.seq === undefined) return undefined;
   const reached = Math.max(-1, ...last.items.map(stageOf).filter((s): s is number => s !== undefined));
   const stopped = taskState === 'stopped' || taskState === 'failed';
-  const build = (upTo: number, at: RoundStageState) =>
+  const itemsAt = ROUND_STAGES.map((_, i) => last.items.filter((it) => stageOf(it) === i));
+  const build = (upTo: number, at: RoundStageState, fresh = false) =>
     ROUND_STAGES.map((label, i) => ({
       label,
       state: (i < upTo ? 'done' : i === upTo ? at : 'todo') as RoundStageState,
+      // 下一回合还没开跑：格子里不放上一回合的东西
+      items: fresh ? [] : (itemsAt[i] ?? []),
     }));
   if (last.round?.outcome === 'merged') {
     return {
@@ -408,7 +421,7 @@ export function roundProgress(groups: readonly RoundGroup[], taskState: string):
     }
     return {
       seq: last.seq + 1,
-      stages: build(0, 'now'),
+      stages: build(0, 'now', true),
       reworkOf: { outcome: last.round.outcome, summary: last.round.reworkSummary, seq: last.seq },
       note: '返工，下一笔动手还没开跑',
     };

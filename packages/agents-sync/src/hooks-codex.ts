@@ -82,6 +82,10 @@ export function codexSourcePath(abs: string): string {
   }
 }
 
+export function codexHookKey(abs: string, event: string, group: number, handler: number): string {
+  return `${codexSourcePath(abs)}:${EVENT_LABEL[event] ?? event}:${group}:${handler}`;
+}
+
 /** 本脚本登记的一条要信任的钩子 */
 export interface TrustNeed {
   /** [hooks.state."…"] 里的那个键 */
@@ -393,7 +397,7 @@ type Planned =
   | { ok: false; why: string }
   | { ok: true; text: string | null; states: Map<TrustNeed, State>; hooksOff: boolean };
 
-/** 记上信任后的全文（已经都信任了是 null）；人关掉的、用点号写在块外的不动 */
+/** 只更新受管入口的真实哈希；启停保留，块外关闭项的点号键也按原作用域更新。 */
 export function planTrust(text: string, needs: readonly TrustNeed[]): Planned {
   const scanned = scanCodexConfig(text);
   if (!scanned.ok) return scanned;
@@ -413,21 +417,32 @@ export function planTrust(text: string, needs: readonly TrustNeed[]): Planned {
       body.push(`trusted_hash = ${tomlString(n.hash)}`, '');
       continue;
     }
-    if (state === 'trusted' || state === 'disabled') continue;
-    if (e.header === undefined)
+    if (state === 'trusted' || (state === 'disabled' && e.trustedHash?.value === n.hash)) continue;
+    if (e.header === undefined && state !== 'disabled')
       return { ok: false, why: `[hooks.state."${n.key}"] 是用点号写在别处的，逐行改不准；要人看` };
     if (e.trustedHash !== undefined) {
       const at = e.trustedHash.line;
-      const indent = /^\s*/.exec(lines[at] ?? '')?.[0] ?? '';
-      lines[at] = `${indent}trusted_hash = ${tomlString(n.hash)}`;
+      const raw = lines[at] ?? '';
+      const indent = /^\s*/.exec(raw)?.[0] ?? '';
+      const kv = readKeyPath(raw.trimStart(), 0, '=');
+      if (!kv) return { ok: false, why: `第 ${at + 1} 行的信任键认不出` };
+      lines[at] = `${raw.slice(0, indent.length + kv.next + 1)} ${tomlString(n.hash)}`;
     } else {
-      lines.splice(e.header + 1, 0, `trusted_hash = ${tomlString(n.hash)}`);
+      const at = e.header !== undefined ? e.header + 1 : e.enabled?.line;
+      if (at === undefined) return { ok: false, why: `${n.key} 的启停位置认不出` };
+      let assignment = 'trusted_hash';
+      if (e.header === undefined) {
+        const kv = readKeyPath((lines[at] ?? '').trimStart(), 0, '=');
+        if (!kv) return { ok: false, why: `第 ${at + 1} 行的启停键认不出` };
+        assignment = [...kv.path.slice(0, -1).map(tomlString), 'trusted_hash'].join('.');
+      }
+      lines.splice(at, 0, `${assignment} = ${tomlString(n.hash)}`);
       // 插了一行，后面记的行号都要挪；块的位置也跟着挪
       for (const other of entries.values()) {
-        for (const v of [other.trustedHash, other.enabled]) if (v && v.line > e.header) v.line++;
-        if (other.header !== undefined && other.header > e.header) other.header++;
+        for (const v of [other.trustedHash, other.enabled]) if (v && v.line >= at) v.line++;
+        if (other.header !== undefined && other.header >= at) other.header++;
       }
-      if (block && block.start > e.header) {
+      if (block && block.start >= at) {
         block.start++;
         block.end++;
       }

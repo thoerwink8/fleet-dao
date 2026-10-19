@@ -17,6 +17,7 @@ trap 'rm -rf -- "$TMP"' EXIT
 export FLEET_RELEASES_DIR=$TMP/releases
 # shellcheck source=../release.sh
 source "$HERE/../release.sh"
+eval "real_$(declare -f health_gate)"
 set +e # release.sh 开了 -e；这里自己判每一步
 # activate 会换帮手、改 _tmp。这里换成桩：不写 /usr/local/sbin，也不碰真的 /var/lib/fleet-work。
 install_scope_helper() { :; }
@@ -68,7 +69,7 @@ api_report_before() { :; }
 # 后端重启后等它答话（#2186）：各段的后端是假的，换成桩；真代码在「后端重启后起不来」那一段测
 eval "real_$(declare -f api_wait_up)"
 api_wait_up() { :; }
-SYNCED=0 # 往香港发过几次静态文件
+SYNCED=0   # 往香港发过几次静态文件
 PROBED=0   # 试通过几次往香港传静态文件的路
 WEB_DOWN=0 # 1 = 往香港传静态文件的路试不通
 sync_web() { SYNCED=$((SYNCED + 1)); }
@@ -331,21 +332,26 @@ else
   # 引擎按设置没开时后端报「未接」（ok:true + status:not_wired）：发布脚本当好的看，整体也回 200
   body='{"ok":true,"checks":{"database":{"ok":true},"engine":{"ok":true,"status":"not_wired","message":"这台机器按设置没开引擎"}}}'
   check "「未接」的项按好的给出" "$(report_items "$body" | tr '\t\n' '|;')" "database|ok|;engine|ok|;"
-  for body in '<html>502 Bad Gateway</html>' '{"ok":true}' '{"ok":"true","checks":{}}' '{"ok":true,"checks":[]}' ''; do
+  for body in '<html>502 Bad Gateway</html>' '{"ok":true}' '{"ok":"true","checks":{}}' '{"ok":true,"checks":[]}' '{"ok":false,"checks":{"database":{}}}' '{"ok":false,"checks":{"database":{"ok":"unknown"}}}' ''; do
     report_items "$body" >/dev/null 2>&1
     check "认不出的回答退出 1：${body:-（空）}" "$?" 1
   done
-  tq='{"pollers":[{"taskQueueType":"workflow","identity":"4242@vmi"},{"taskQueueType":"activity","identity":"4242@vmi"}]}'
+  poll_at=$("$NODE" -e 'process.stdout.write(new Date().toISOString())')
+  tq="{\"pollers\":[{\"taskQueueType\":\"workflow\",\"identity\":\"4242@vmi\",\"lastAccessTime\":\"$poll_at\"},{\"taskQueueType\":\"activity\",\"identity\":\"4242@vmi\",\"lastAccessTime\":\"$poll_at\"}]}"
   engine_polling "$tq" 4242@
   check "引擎工人两种任务都在取：在" "$?" 0
   engine_polling "$tq" 999@
   check "换了进程号（旧工人的记录）：不算" "$?" 1
   engine_polling '{"pollers":[{"taskQueueType":"workflow","identity":"4242@vmi"}]}' 4242@
-  check "只取工作流任务、不取活动任务：不算" "$?" 1
+  check "取活时间也没读到：保持未知" "$?" 2
   engine_polling '{"reachability":null,"pollers":null}' 4242@
   check "没人在取（pollers 为 null）：不算" "$?" 1
   engine_polling 'rpc error: connection refused' 4242@
-  check "回答认不出：不算" "$?" 1
+  check "回答认不出：保持未知" "$?" 2
+  for tq in '{"pollers":[null]}' '{"pollers":[{}]}' '{"pollers":["broken"]}'; do
+    engine_polling "$tq" 4242@
+    check "取活记录结构损坏：保持未知" "$?" 2
+  done
 fi
 
 echo "== 切之后的健康报告逐项和切之前比：好的变坏了才算这一版的错；会随时间自己变红的项（看门狗）只标待处理、不退回"
@@ -390,6 +396,177 @@ compare_api_items "$(printf 'database\tok\t\nengine\tok\t\n')" \
 check "本机启用了引擎：切之前好、切之后坏——算这一版的错（真坏的不能放过）" "$?" 1
 check "启用了引擎：报红" "$(printf '%s\n' "${REDS[@]}" | grep -c 'engine 切之前是好的，换了这一版不好了')" 1
 FLEET_SERVICES="$_fs_saved"
+
+echo "== 发布健康三态贯穿真实 do_release：未决不 done/不退回，完整报告的新真红仍退回（#3256）"
+_health_saved="$(declare -f health_gate api_healthz unit_prop running_release settle_services check_chain api_report_before service_unchanged record_runtime_matches check_auto_release tcli)"
+_health_fs=$FLEET_SERVICES
+_health_parts=$FLEET_HK_PARTS
+health_gate() { real_health_gate "$@"; }
+ENGINE_RECONCILE_GAP=0
+ENGINE_RECONCILE_TRIES=2
+ENGINE_POLL_WAIT=3
+FLEET_SERVICES='fleet-engine fleet-api'
+FLEET_HK_PARTS=""
+sleep() { :; }
+settle_services() { return 0; }
+check_chain() { :; }
+check_auto_release() { :; }
+systemctl() {
+  if [[ "$1" == is-active ]]; then cat "$TMP/live-state"; fi
+  return 0
+}
+unit_prop() { if [[ "$2" == MainPID ]]; then cat "$TMP/live-pid"; else echo 0; fi; }
+running_release() { printf '%s/%s' "$RELEASES" "$(cat "$TMP/live-sha")"; }
+service_unchanged() {
+  UNCHANGED_WHY["$1 $2 $3"]='夹具运行内容相同'
+  return 0
+}
+record_runtime_matches() { :; }
+api_report_before() { printf 'database\tok\t\nengine\tok\t\n'; }
+tcli() {
+  case "$HEALTH_CASE" in
+    pid-change) echo 4343 >"$TMP/live-pid" ;;
+    version-change) echo "$C" >"$TMP/live-sha" ;;
+  esac
+  if [[ "$HEALTH_CASE" == queue-empty ]]; then
+    echo '{"pollers":[]}'
+    return 0
+  fi
+  if [[ "$HEALTH_CASE" == queue-unreadable ]]; then return 1; fi
+  if [[ "$HEALTH_CASE" == malformed-poller ]]; then
+    echo '{"pollers":[null]}'
+    return 0
+  fi
+  if [[ "$HEALTH_CASE" == train-target-change || "$HEALTH_CASE" == train-nonce-change ]]; then
+    "$NODE" -e 'const fs=require("fs"), f=process.argv[1],s=JSON.parse(fs.readFileSync(f)); if(process.argv[2]==="train-target-change")s.target.value=process.argv[3];else s.release.healthAttempt="22222222-2222-4222-8222-222222222222";fs.writeFileSync(f,JSON.stringify(s))' "$RELEASES/.train/release-train.json" "$HEALTH_CASE" "$C"
+    cp "$RELEASES/.train/release-train.json" "$TMP/train-winner"
+  fi
+  local at
+  at=$("$NODE" -e 'process.stdout.write(new Date().toISOString())')
+  if [[ "$HEALTH_CASE" == stale-red ]]; then at=2000-01-01T00:00:00Z; fi
+  printf '{"pollers":[{"identity":"4242@fixture","taskQueueType":"workflow","lastAccessTime":"%s"},{"identity":"4242@fixture","taskQueueType":"activity","lastAccessTime":"%s"},{"identity":"4343@fixture","taskQueueType":"workflow","lastAccessTime":"%s"},{"identity":"4343@fixture","taskQueueType":"activity","lastAccessTime":"%s"}]}' "$at" "$at" "$at" "$at"
+}
+# shellcheck disable=SC2317,SC2329 # 由真实health_gate间接调用。
+api_healthz() {
+  local n
+  n=$(cat "$TMP/api-n")
+  echo $((n + 1)) >"$TMP/api-n"
+  if [[ "$HEALTH_CASE" == db-new-pid-change || "$HEALTH_CASE" == db-new-pid-change-retry && "$n" != 0 ]]; then
+    echo 4343 >"$TMP/live-pid"
+    printf '503\t{"ok":false,"checks":{"database":{"ok":false,"message":"混代报告的新红不能归属原进程"},"engine":{"ok":true}}}'
+    return 0
+  fi
+  if [[ "$HEALTH_CASE" == api-down && "$n" != 0 ]]; then return 1; fi
+  if [[ "$HEALTH_CASE" == bad-report && "$n" != 0 ]]; then
+    printf '503\tnot-json'
+    return 0
+  fi
+  if [[ "$HEALTH_CASE" == malformed-check && "$n" != 0 ]]; then
+    printf '503\t{"ok":false,"checks":{"database":{},"engine":{"ok":false}}}'
+    return 0
+  fi
+  if [[ "$HEALTH_CASE" == nonboolean-check && "$n" != 0 ]]; then
+    printf '503\t{"ok":false,"checks":{"database":{"ok":"unknown"},"engine":{"ok":false}}}'
+    return 0
+  fi
+  if [[ "$HEALTH_CASE" == bad-http && "$n" != 0 ]]; then
+    printf '502\t{"ok":true,"checks":{"database":{"ok":true},"engine":{"ok":true}}}'
+    return 0
+  fi
+  if [[ "$HEALTH_CASE" == inconsistent-http && "$n" != 0 ]]; then
+    printf '503\t{"ok":true,"checks":{"database":{"ok":true},"engine":{"ok":true}}}'
+    return 0
+  fi
+  if [[ "$HEALTH_CASE" == db-new && "$n" != 0 ]]; then
+    printf '503\t{"ok":false,"checks":{"database":{"ok":false,"message":"新出现的真实数据库失败"},"engine":{"ok":true}}}'
+  elif [[ "$HEALTH_CASE" == green || "$HEALTH_CASE" == recovered && "$n" != 0 || "$HEALTH_CASE" == pid-change && "$n" != 0 || "$HEALTH_CASE" == version-change && "$n" != 0 ]]; then
+    printf '200\t{"ok":true,"checks":{"database":{"ok":true},"engine":{"ok":true}}}'
+  else
+    printf '503\t{"ok":false,"checks":{"database":{"ok":true},"engine":{"ok":false,"message":"workflow poller超过120秒"}}}'
+  fi
+}
+health_case_prepare() {
+  rm -rf -- "${RELEASES:?}"/* "$RELEASES/.history" "$RELEASES/.train"
+  MIG=()
+  DB_MIG=0
+  build_release "$A" >/dev/null
+  build_release "$B" >/dev/null
+  ln -s "$A" "$RELEASES/current"
+  record "$A" release
+  echo 4242 >"$TMP/live-pid"
+  echo "$B" >"$TMP/live-sha"
+  echo active >"$TMP/live-state"
+  echo 0 >"$TMP/api-n"
+  mkdir -p "$RELEASES/.train"
+  "$NODE" -e 'require("fs").writeFileSync(process.argv[1],JSON.stringify({schema:1,status:"running",phase:4,target:{kind:"sha",value:process.argv[2]},startedAt:"2026-10-19T10:00:00Z",release:{healthAttempt:"11111111-1111-4111-8111-111111111111"}}))' "$RELEASES/.train/release-train.json" "$B"
+  reset
+}
+for HEALTH_CASE in engine-red stale-red api-down pid-change version-change bad-report malformed-check nonboolean-check bad-http inconsistent-http queue-unreadable malformed-poller db-new-pid-change db-new-pid-change-retry; do
+  health_case_prepare
+  do_release "$B" >"$TMP/health-output"
+  check "$HEALTH_CASE：目标保留，不自动退回" "$(current_sha)" "$B"
+  check "$HEALTH_CASE：不冒称发布完成" "$(grep -c '发布完成：' "$TMP/health-output")" 0
+  check "$HEALTH_CASE：无不健康历史" "$(grep -c 'unhealthy\|recovered\|auto-rollback' "$HISTORY")" 0
+  check "$HEALTH_CASE：回执绑定目标/本次nonce且blocked" "$("$NODE" -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1]));process.stdout.write(String(s.status==="blocked"&&s.phase===4&&s.release.healthPending.sha===process.argv[2]&&s.release.healthPending.attempt===s.release.healthAttempt&&!!s.release.healthPending.identity))' "$RELEASES/.train/release-train.json" "$B")" true
+  check "$HEALTH_CASE：受管未决协议只有一份" "$(grep -c '^FLEET_RELEASE_HEALTH_PENDING' "$TMP/health-output")" 1
+done
+
+# --check必须只读，并且使用原before而非把已经红的engine降成“切前就坏”。
+HEALTH_CASE=engine-red
+health_case_prepare
+do_release "$B" >/dev/null
+cp "$RELEASES/.train/release-train.json" "$TMP/pending-before"
+reset
+do_check >"$TMP/health-check"
+check "只读复核仍未决：回执没有被清" "$(
+  cmp -s "$TMP/pending-before" "$RELEASES/.train/release-train.json"
+  echo $?
+)" 0
+check "只读复核沿用原基线：未决协议仍输出" "$(grep -c '^FLEET_RELEASE_HEALTH_PENDING' "$TMP/health-check")" 1
+HEALTH_CASE=green
+reset
+do_check >"$TMP/health-check"
+check "同身份自然变绿：只读复核不再报健康未决" "$(grep -c '^FLEET_RELEASE_HEALTH_PENDING' "$TMP/health-check")" 0
+check "变绿的--check仍只读，协调者才收敛" "$(
+  cmp -s "$TMP/pending-before" "$RELEASES/.train/release-train.json"
+  echo $?
+)" 0
+echo 4343 >"$TMP/live-pid"
+reset
+do_check >"$TMP/health-check"
+check "重入时已换PID：不以新身份清旧未决" "$(grep -c '^FLEET_RELEASE_HEALTH_PENDING' "$TMP/health-check")" 1
+
+for HEALTH_CASE in green recovered; do
+  health_case_prepare
+  do_release "$B" >"$TMP/health-output"
+  check "$HEALTH_CASE：同一身份新鲜证据正常完成" "$(grep -c '发布完成：' "$TMP/health-output")" 1
+  check "$HEALTH_CASE：子发布不跳过父协调者发后验证" "$("$NODE" -e 'const s=JSON.parse(require("fs").readFileSync(process.argv[1]));process.stdout.write(s.status+":"+s.phase)' "$RELEASES/.train/release-train.json")" running:4
+done
+for HEALTH_CASE in train-target-change train-nonce-change; do
+  health_case_prepare
+  do_release "$B" >"$TMP/health-output"
+  check "$HEALTH_CASE：不覆盖后来请求的进度" "$(
+    cmp -s "$TMP/train-winner" "$RELEASES/.train/release-train.json"
+    echo $?
+  )" 0
+  check "$HEALTH_CASE：不冒称发布完成或输出受管回执" "$(grep -Ec '发布完成：|^FLEET_RELEASE_HEALTH_PENDING' "$TMP/health-output")" 0
+done
+for HEALTH_CASE in db-new queue-empty; do
+  health_case_prepare
+  do_release "$B" >"$TMP/health-output"
+  check "$HEALTH_CASE：真实故障仍记不健康" "$(grep -c "$B unhealthy" "$HISTORY")" 1
+  check "$HEALTH_CASE：真实故障仍自动退回" "$(current_sha)" "$A"
+  check "$HEALTH_CASE：有红" "$((${#REDS[@]} > 0))" 1
+done
+
+unset -f sleep systemctl
+eval "$_health_saved"
+FLEET_SERVICES=$_health_fs
+FLEET_HK_PARTS=$_health_parts
+ENGINE_RECONCILE_TRIES=18
+ENGINE_RECONCILE_GAP=5
+ENGINE_POLL_WAIT=90
+rm -rf -- "$RELEASES/.train"
 
 echo "== 切版本之前读后端的健康报告：没在跑就空着照切；在跑却读不到（连不上、回的不是健康报告）不切（审查 S1：空的「切之前」会让切之后变红的项被当成「之前就不好」、不退回）"
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history

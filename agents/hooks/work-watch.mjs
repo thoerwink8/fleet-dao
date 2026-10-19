@@ -28,7 +28,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isMainModule } from './is-main.mjs';
 import { cleanSessionId } from './session-id.mjs';
-import { isMachineSession } from './unattended.mjs';
+import { unattendedAuthority } from './unattended.mjs';
 
 /** 多久看一次 */
 export const WATCH_TICK_MS = 10_000;
@@ -269,7 +269,17 @@ export async function watchRuns(
   if (typeof input.agent_id === 'string' && input.agent_id.trim() !== '') return 0;
   const sessionId = cleanSessionId(input.session_id);
   if (sessionId === null) return 0;
-  if (isMachineSession({ env, cwd: input.cwd })) return 0;
+  const authority = unattendedAuthority({
+    env,
+    cwd: input.cwd,
+    hookId: input.session_id,
+    agentId: input.agent_id,
+  });
+  if (authority.kind === 'unknown') {
+    err(`工人盯账身份没查成（${authority.code}），未读父会话派工，不请求续轮`);
+    return 0;
+  }
+  if (authority.kind === 'machine') return 0;
   const root = runsRootOf(env, home);
   if (pendingRuns(root, sessionId, clock()).length === 0) return 0;
 

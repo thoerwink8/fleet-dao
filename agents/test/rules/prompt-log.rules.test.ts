@@ -39,6 +39,8 @@ function feed(input: string, env: Record<string, string> = {}) {
     input,
     env: {
       ...interactiveHookEnv(),
+      HOME: dir,
+      USERPROFILE: dir,
       FLEET_PROMPT_LOG_DIR: dir,
       FLEET_UNATTENDED_DIR: join(dir, 'unattended'),
       ...env,

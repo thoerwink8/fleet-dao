@@ -277,6 +277,7 @@ describe('行内读取失败时实际撤autoMerge边界', () => {
         reads++;
         return !merged && !autoMerge ? [] : r.read(...args);
       },
+      readChecks: async () => ({ overall: 'green', failed: [] }),
       onLateReview: async (note) => {
         if (noteFails) throw Error('late ledger unavailable');
         notes.push(note);

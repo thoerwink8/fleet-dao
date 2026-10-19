@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { GitHubError, type MergePrResult } from '@fleet-dao/github';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { toActivityFailure } from '../../src/activities.ts';
 import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import {
@@ -15,8 +16,10 @@ import {
   type TaskActivitiesDeps,
 } from '../../src/real/task-activities.ts';
 import { pinMainline, type UserTree } from '../../src/real/user-git.ts';
+import { requirementContract } from '../../src/runner/task-brief.ts';
 import type { ReviewChange } from '../../src/task-contract.ts';
 import { runChildOk } from '../child.ts';
+import { json as httpJson, setup as setupHttp } from '../review-http.ts';
 
 const REPO = { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' };
 const HEAD = 'a'.repeat(40);
@@ -90,6 +93,8 @@ function fakeGh(over: Partial<Record<string, unknown>> = {}): { gh: Gh; calls: s
     claims: {
       readPull: pick('readPull'),
       enableAutoMerge: pick('enableAutoMerge'),
+      disableAutoMerge: pick('disableAutoMerge'),
+      setStatus: pick('setStatus'),
     },
   } as unknown as Gh;
   return { gh, calls };
@@ -130,6 +135,119 @@ function make(over: Partial<TaskActivitiesDeps> & { gh: Gh }) {
   });
   return { acts, logs };
 }
+
+describe('正式合同写前核验（#3216）', () => {
+  const guard = { issueNumber: 12, expected: requirementContract(BODY) };
+  const arm = {
+    schemaVersion: 1 as const,
+    repo: REPO,
+    prNumber: 7,
+    expectedHead: HEAD,
+    contractGuard: guard,
+  };
+  const changed = BODY.replace('验收中', '新验收');
+  const defaults = {
+    readPull: async () => pullFacts({ autoMerge: true }),
+    readIssue: async () => ({ number: 12, title: '正式需求', state: 'open', body: changed }),
+    readSpecDoc: async () => null,
+    disableAutoMerge: async () => undefined,
+    setStatus: async () => undefined,
+  };
+  it('已挂自动合并也要读合同：同head换验收后撤挂并阻合', async () => {
+    const { gh, calls } = fakeGh(defaults);
+    expect(await make({ gh }).acts.armAutoMerge(arm, ctx())).toMatchObject({
+      armed: false,
+      merged: false,
+      contractChanged: true,
+    });
+    expect(calls).toContain('disableAutoMerge');
+    expect(calls).toContain('setStatus');
+    expect(calls).not.toContain('enableAutoMerge');
+    expect(calls).not.toContain('mergePr');
+  });
+  it('最终真实挂写前再次核验，读取期间正文修改不会用旧合同写', async () => {
+    let body = BODY;
+    let armed = false;
+    const { gh, calls } = fakeGh({
+      ...defaults,
+      readPull: async () => pullFacts({ autoMerge: armed }),
+      readIssue: async () => ({ number: 12, title: '需求', state: 'open', body }),
+      enableAutoMerge: async () => {
+        armed = true;
+        body = changed;
+      },
+    });
+    expect(await make({ gh }).acts.armAutoMerge(arm, ctx())).toMatchObject({ contractChanged: true });
+    expect(calls.filter((c) => c === 'readIssue')).toHaveLength(2);
+    // GitHub已接受的写无法撤回；后读发现修订，显式撤挂，不报告armed。
+    expect(calls).toContain('setStatus');
+    expect(calls).toContain('disableAutoMerge');
+  });
+  it.each(['clean-fallback', 'ci-pending-retry'])(
+    '%s 每次真实直接合前核合同，不把先前读取当永久许可',
+    async (path) => {
+      let body = BODY;
+      const { gh, calls } = fakeGh({
+        ...defaults,
+        readPull: async () => pullFacts({ autoMerge: false }),
+        readIssue: async () => ({ number: 12, title: '需求', state: 'open', body }),
+        enableAutoMerge: async () => {
+          if (path === 'clean-fallback') body = changed;
+          throw new Error('clean status');
+        },
+        mergePr: async () => {
+          body = changed;
+          return { merged: false, reason: 'ci_not_green', detail: '仍在跑', ciPendingOnly: true };
+        },
+      });
+      expect(await make({ gh }).acts.armAutoMerge(arm, ctx())).toMatchObject({
+        armed: false,
+        merged: false,
+        contractChanged: true,
+      });
+      expect(calls.filter((c) => c === 'mergePr')).toHaveLength(path === 'clean-fallback' ? 0 : 1);
+    },
+  );
+  it('未知规范版本或新版缺读口不能绕过核验', async () => {
+    const { gh, calls } = fakeGh(defaults);
+    await expect(
+      make({ gh }).acts.armAutoMerge(
+        { ...arm, contractGuard: { ...guard, expected: { ...guard.expected, version: 2 } as never } },
+        ctx(),
+      ),
+    ).rejects.toMatchObject({ code: 'TASK_CONTRACT_UNREADABLE' });
+    expect(calls).not.toContain('enableAutoMerge');
+  });
+  it('正式正文读失败必须先阻合再失败；撤挂失败不能冒充成功', async () => {
+    const readIssue = async () => {
+      throw new Error('正文读取断网');
+    };
+    const { gh, calls } = fakeGh({ ...defaults, readIssue });
+    await expect(make({ gh }).acts.armAutoMerge(arm, ctx())).rejects.toMatchObject({
+      code: 'TASK_CONTRACT_UNREADABLE',
+    });
+    expect(calls).toContain('disableAutoMerge');
+    const failed = fakeGh({
+      ...defaults,
+      disableAutoMerge: async () => {
+        throw new Error('撤挂未确认');
+      },
+    });
+    await expect(make({ gh: failed.gh }).acts.armAutoMerge(arm, ctx())).rejects.toThrow('撤挂未确认');
+    expect(failed.calls).not.toContain('setStatus');
+  });
+  it('直接合与既有等待合并读取也受相同合同限制', async () => {
+    const { gh, calls } = fakeGh(defaults);
+    expect(await make({ gh }).acts.mergeNow(arm, ctx())).toMatchObject({
+      merged: false,
+      contractChanged: true,
+    });
+    expect(await make({ gh }).acts.waitMerged({ ...arm, minutes: 1 }, ctx())).toEqual({
+      state: 'contract_changed',
+    });
+    expect(calls).not.toContain('mergePr');
+  });
+});
 
 describe('停法收尾活动的真实空闲核验（#3193）', () => {
   const input = {
@@ -349,6 +467,38 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
       // 相对钉住的主线新增几行（#2755 体量预算）：两个文件各一行
       addedLines: 2,
     });
+  });
+
+  it('本仓小改动不启动例外核验；当前raw读取失败抛错，不冒充老历史缺字段', async () => {
+    const { dir, base } = await tree();
+    writeFileSync(join(dir, 'small.ts'), 'export const small = true;\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'small');
+    const real = localExec();
+    const { acts } = make({
+      gh: fakeGh().gh,
+      exec: (command) => {
+        if (command.argv.includes('merge-base') && command.argv.includes('--no-replace-objects'))
+          throw new Error('小改动不应进入快照预算');
+        return real(command);
+      },
+    });
+    const readInput = { ...input(dir, base), repo: { ...REPO, owner: 'thoerwink8', name: 'fleet-dao' } };
+    expect(await acts.readDelivery(readInput, ctx())).toMatchObject({ addedLines: 1 });
+    const broken = make({
+      gh: fakeGh().gh,
+      exec: (command) =>
+        command.argv.includes('--numstat')
+          ? Promise.resolve({
+              code: 1,
+              stdout: Buffer.alloc(0),
+              stderr: '真实计数失败',
+              timedOut: false,
+              aborted: false,
+            })
+          : real(command),
+    }).acts;
+    await expect(broken.readDelivery(readInput, ctx())).rejects.toMatchObject({ code: 'GIT_FAILED' });
   });
 
   it('【故意造出的失败】一个提交都没有、工作树里有改过的和新建没加的文件：commits 是 0，leftover 把它们都列出来', async () => {
@@ -842,9 +992,14 @@ describe('挂自动合并', () => {
         return { merged: false, reason: 'ci_not_green' as const, detail: '没跑完：merge-gate' };
       },
     });
+    // 第一次是挂之前的核验（绿），挂住的是 clean 之后的那次现读
+    let reads = 0;
     const { acts } = make({
       gh: f.gh,
-      readChecks: async () => held.run(),
+      readChecks: async () => {
+        reads += 1;
+        return reads === 1 ? { overall: 'green', failed: [] } : held.run();
+      },
     });
     const pending = acts.armAutoMerge(
       { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
@@ -951,9 +1106,15 @@ describe('挂自动合并', () => {
       },
     });
     const seen: string[] = [];
+    let gated = false;
     const { acts } = make({
       gh: f.gh,
       readChecks: async (repo, sha) => {
+        // 第一次是挂之前的核验（绿，放行去挂）；之后才是 clean 被拒之后的现读，下面的用例测的是它
+        if (!gated) {
+          gated = true;
+          return { overall: 'green', failed: [] };
+        }
         seen.push(`${repo.owner}/${repo.name}@${sha}`);
         if (!readChecks) throw new Error('测试没接上读检查');
         return readChecks(repo, sha, new AbortController().signal);
@@ -1249,7 +1410,7 @@ describe('挂自动合并', () => {
     expect(got.checksPending).toBeUndefined();
     expect(got.why).toContain('读着是绿');
     expect(got.why).toContain('仍被拒');
-    expect(reads).toBe(2);
+    expect(reads).toBe(3); // 挂之前 1 次，clean 被拒后 2 次
     expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(2);
   });
 
@@ -1436,6 +1597,70 @@ describe('挂自动合并', () => {
     });
     await expect(run(f.gh)).rejects.toMatchObject({ code: 'FORBIDDEN', retryable: false });
     expect(f.calls).toEqual(['readPull', 'enableAutoMerge']);
+  });
+});
+
+describe('停在合并这一步后的复核（mergeReady，#3281）', () => {
+  const ready = (gh: Gh, over: Partial<TaskActivitiesDeps> = {}) =>
+    make({ gh, ...over }).acts.mergeReady(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+
+  it('开着、头没变、没有要求改、必过检查全绿：满足；只读，不挂、不撤、不合', async () => {
+    const f = fakeGh({ readPull: async () => pullFacts() });
+    const got = await ready(f.gh, {
+      readChecks: async () => ({ overall: 'green', failed: [] }),
+      reviewChanges: async () => [],
+    });
+    expect(got.ready).toBe(true);
+    expect(f.calls.filter((c) => c !== 'readPull')).toEqual([]);
+  });
+
+  it('已经合并了：算满足（醒来重挂时现读到已合、照常记账收尾）', async () => {
+    const f = fakeGh({ readPull: async () => pullFacts({ merged: true }) });
+    expect((await ready(f.gh)).ready).toBe(true);
+  });
+
+  it('【故意造出的失败】关了 / 换了头 / 挂着要求改 / 检查还在跑或红了：都不满足，写明哪一条', async () => {
+    const green = { readChecks: async () => ({ overall: 'green' as const, failed: [] }) };
+    const closed = await ready(fakeGh({ readPull: async () => pullFacts({ state: 'closed' }) }).gh, green);
+    expect(closed).toMatchObject({ ready: false, why: expect.stringContaining('被关了') });
+    const moved = await ready(
+      fakeGh({ readPull: async () => pullFacts({ headSha: 'b'.repeat(40) }) }).gh,
+      green,
+    );
+    expect(moved).toMatchObject({ ready: false, why: expect.stringContaining('头换了') });
+    const held = await ready(fakeGh({ readPull: async () => pullFacts() }).gh, {
+      ...green,
+      reviewChanges: async () => [
+        { reviewId: 1, reviewer: 'r', commitId: HEAD, body: '改一下', submittedAt: '2026-10-19T00:00:00Z' },
+      ],
+    });
+    expect(held).toMatchObject({ ready: false, why: expect.stringContaining('要求改') });
+    const running = await ready(fakeGh({ readPull: async () => pullFacts() }).gh, {
+      readChecks: async () => ({ overall: 'pending', failed: [], pending: [{ name: 'merge-gate (1)' }] }),
+    });
+    expect(running).toMatchObject({ ready: false, why: expect.stringContaining('还在跑：merge-gate (1)') });
+    const red = await ready(fakeGh({ readPull: async () => pullFacts() }).gh, {
+      readChecks: async () => ({ overall: 'red', failed: [{ name: 'cold-verify' }] }),
+    });
+    expect(red).toMatchObject({ ready: false, why: expect.stringContaining('红：cold-verify') });
+  });
+
+  it('【故意造出的失败】读检查没接上 / 读 PR 失败：抛错，不当成满足', async () => {
+    await expect(
+      ready(fakeGh({ readPull: async () => pullFacts() }).gh, { readChecks: undefined }),
+    ).rejects.toThrow('没接上读检查');
+    await expect(
+      ready(
+        fakeGh({
+          readPull: async () => {
+            throw new GitHubError('UPSTREAM_ERROR', 'GitHub 502', { retryable: true });
+          },
+        }).gh,
+      ),
+    ).rejects.toThrow('502');
   });
 });
 
@@ -1687,5 +1912,228 @@ describe('等合并', () => {
       },
     });
     await expect(wait(f.gh)).rejects.toMatchObject({ code: 'UPSTREAM_ERROR', retryable: true });
+  });
+});
+
+describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝（#3198，真 enableAutoMerge + 原样 GitHub errors）', () => {
+  /** #3198 事件 254 的原样 errors。 */
+  const unstable = {
+    type: 'UNPROCESSABLE',
+    path: ['enablePullRequestAutoMerge'],
+    message: 'Pull request Pull request is in unstable status',
+  };
+  const green: MergeWaitChecks = { overall: 'green', failed: [] };
+  const pullJson = (pull: ReturnType<typeof pullFacts>) => ({
+    number: 7,
+    node_id: 'PR_7',
+    html_url: 'https://github.test/acme/widgets/pulls/7',
+    state: pull.state,
+    title: pull.title,
+    body: pull.body,
+    draft: pull.draft,
+    merged: pull.merged,
+    merged_at: null,
+    merge_commit_sha: null,
+    mergeable: pull.mergeable,
+    mergeable_state: pull.mergeableState,
+    user: null,
+    merged_by: null,
+    head: { ref: pull.headRef, sha: pull.headSha, repo: { full_name: 'acme/widgets' } },
+    base: { ref: 'main', sha: 'b'.repeat(40), repo: { full_name: 'acme/widgets' } },
+    updated_at: '2026-10-19T00:00:00Z',
+    auto_merge: pull.autoMerge ? { merge_method: 'squash' } : null,
+  });
+  /**
+   * 一次活动调度：replies 按次序回 graphql（null = 挂成功，数组 = 原样 errors，用尽后一直回最后一个），
+   * pulls 按次序给每次重入现读到的 PR。attempt(n) 模拟 Temporal 第 n 次尝试重入同一个活动。
+   */
+  function arm(
+    replies: (unknown[] | null)[],
+    opts: {
+      pulls?: ReturnType<typeof pullFacts>[];
+      readChecks?: TaskActivitiesDeps['readChecks'];
+      mergePr?: () => Promise<ReturnType<typeof mergedOk>>;
+    } = {},
+  ) {
+    const real = setupHttp();
+    const pulls = opts.pulls ?? [pullFacts()];
+    real.fake.before.push((r) =>
+      r.path === '/repos/acme/widgets/pulls/7' ? httpJson(200, pullJson(pulls[0]!)) : undefined,
+    );
+    let sent = 0;
+    real.fake.before.push((r) => {
+      if (r.path !== '/graphql') return undefined;
+      const reply = replies[Math.min(sent, replies.length - 1)];
+      sent += 1;
+      return reply === null
+        ? httpJson(200, {
+            data: {
+              enablePullRequestAutoMerge: {
+                pullRequest: {
+                  id: 'PR_7',
+                  number: 7,
+                  autoMergeRequest: {
+                    commitHeadline: 't (#7)',
+                    commitBody: '由 fleet 引擎经合并队列 squash 合并（PR #7）。',
+                    mergeMethod: 'SQUASH',
+                  },
+                },
+              },
+            },
+          })
+        : httpJson(200, { data: { enablePullRequestAutoMerge: null }, errors: reply });
+    });
+    let reads = 0;
+    let merges = 0;
+    const f = fakeGh({
+      readPull: async () => pulls[Math.min(reads++, pulls.length - 1)],
+      mergePr: async () => {
+        merges += 1;
+        return opts.mergePr ? opts.mergePr() : mergedOk();
+      },
+    });
+    (f.gh.claims as { enableAutoMerge: unknown }).enableAutoMerge = real.gh.claims.enableAutoMerge;
+    const { acts } = make({
+      gh: f.gh,
+      readChecks: 'readChecks' in opts ? opts.readChecks : async () => green,
+    });
+    const attempt = (n: number, over: Partial<PortContext> = {}) =>
+      acts.armAutoMerge(
+        // 受控 HTTP 夹具只认 acme/widgets
+        { schemaVersion: 1, repo: { ...REPO, name: 'widgets' }, prNumber: 7, expectedHead: HEAD },
+        ctx({ attempt: n, ...over }),
+      );
+    return { attempt, sent: () => sent, reads: () => reads, merges: () => merges };
+  }
+
+  // #3281：unstable 是「必过检查已满足、只是非必过的还在跑或红了」，PR 现在就能合，和 clean 一样没东西可等。
+  // 走同一条直接合（mergePr 只核必过检查、头、不落后主线），不再交活动重试、重试完停下等人（#3208、#3257）。
+  it('unstable：不抛、不重试，直接合上；只挂了一次', async () => {
+    const a = arm([[unstable]]);
+    expect(await a.attempt(1)).toMatchObject({ armed: false, merged: true });
+    expect([a.sent(), a.merges()]).toEqual([1, 1]);
+  });
+
+  it('unstable、非必过检查红而必过检查绿：照样直接合上', async () => {
+    const a = arm([[unstable]], {
+      readChecks: async () => ({ overall: 'green', failed: [] }),
+    });
+    expect(await a.attempt(1)).toMatchObject({ merged: true });
+    expect(a.merges()).toBe(1);
+  });
+
+  it.each([
+    ['别的 path', [{ ...unstable, path: ['disablePullRequestAutoMerge'] }], 'GRAPHQL_ERROR'],
+    ['别的 type', [{ ...unstable, type: 'STALE_DATA' }], 'GRAPHQL_ERROR'],
+    ['只带 unstable 子串', [{ ...unstable, message: 'Merge queue is unstable' }], 'GRAPHQL_ERROR'],
+    ['混合多条 errors', [unstable, { ...unstable, message: 'Auto merge is not allowed' }], 'GRAPHQL_ERROR'],
+    [
+      '权限拒绝',
+      [{ type: 'FORBIDDEN', path: unstable.path, message: 'Resource not accessible by integration' }],
+      'FORBIDDEN',
+    ],
+    [
+      '策略拒绝',
+      [{ ...unstable, message: 'Auto merge is not allowed for this repository' }],
+      'GRAPHQL_ERROR',
+    ],
+  ])('%s：原样抛、不可重试，转成活动失败也是 nonRetryable', async (_name, errors, code) => {
+    const a = arm([errors]);
+    const err = await a.attempt(1).catch((e: unknown) => e);
+    expect(err).toMatchObject({ code, retryable: false });
+    expect(toActivityFailure(err)).toMatchObject({ type: code, nonRetryable: true });
+    expect(a.sent()).toBe(1);
+  });
+
+  it('现读到已关 / 草稿 / 换头：各自明确结果，不写', async () => {
+    const cases = [
+      { pull: pullFacts({ state: 'closed' }), want: { armed: false, merged: false, why: 'PR #7 已经关了' } },
+      { pull: { ...pullFacts(), draft: true }, want: { armed: false, why: expect.stringContaining('草稿') } },
+      { pull: pullFacts({ headSha: 'b'.repeat(40) }), want: { armed: false, headMoved: 'b'.repeat(40) } },
+    ];
+    for (const c of cases) {
+      const a = arm([[unstable]], { pulls: [c.pull] });
+      expect(await a.attempt(2)).toMatchObject(c.want);
+      expect([a.sent(), a.merges()]).toEqual([0, 0]);
+    }
+  });
+
+  it('上一次结果未知、重入时现读到已挂上：照实回报，不再写', async () => {
+    const armed = arm([[unstable]], { pulls: [pullFacts({ autoMerge: true })] });
+    expect(await armed.attempt(2)).toEqual({ armed: true, merged: false });
+    expect([armed.sent(), armed.merges()]).toEqual([0, 0]);
+  });
+
+  it('已取消 / 期限已过：不写', async () => {
+    const cancelled = arm([[unstable]]);
+    const ac = new AbortController();
+    ac.abort(new Error('活动已取消'));
+    await expect(
+      cancelled.attempt(2, { signal: ac.signal, attemptDeadlineMs: Date.now() + 600_000 }),
+    ).rejects.toThrow('活动已取消');
+    expect([cancelled.sent(), cancelled.merges()]).toEqual([0, 0]);
+
+    const late = arm([[unstable]]);
+    await expect(late.attempt(2, { attemptDeadlineMs: Date.now() - 1 })).rejects.toMatchObject({
+      code: 'ARM_DEADLINE_PASSED',
+      retryable: false,
+    });
+    expect([late.sent(), late.merges()]).toEqual([0, 0]);
+  });
+
+  describe('每次挂之前现读必过检查：真红不写', () => {
+    it('首次挂之前就是真红：交 checksRed，一次都不写', async () => {
+      const a = arm([null], {
+        readChecks: async () => ({ overall: 'red', failed: [{ name: 'check', detail: '挂了' }] }),
+      });
+      expect(await a.attempt(1)).toMatchObject({
+        armed: false,
+        merged: false,
+        checksRed: { failedChecks: ['check'], head: HEAD, detail: 'check：挂了' },
+      });
+      expect(a.sent()).toBe(0);
+    });
+
+    it('有点名的失败、旁边还有在跑的：按真红，不写', async () => {
+      const a = arm([null], {
+        readChecks: async () => ({
+          overall: 'pending',
+          failed: [{ name: 'check', detail: '失败' }],
+          pending: [{ name: 'merge-gate' }],
+        }),
+      });
+      expect(await a.attempt(1)).toMatchObject({ armed: false, checksRed: { failedChecks: ['check'] } });
+      expect(a.sent()).toBe(0);
+    });
+
+    it('读检查失败：照抛、不写；没接上读检查：明说没挂、不写', async () => {
+      const broken = arm([null], {
+        readChecks: async () => {
+          throw new GitHubError('UPSTREAM_ERROR', '读检查 500', { retryable: true });
+        },
+      });
+      await expect(broken.attempt(1)).rejects.toMatchObject({ code: 'UPSTREAM_ERROR', retryable: true });
+      expect(broken.sent()).toBe(0);
+
+      const unwired = arm([null], { readChecks: undefined });
+      expect(await unwired.attempt(1)).toMatchObject({
+        armed: false,
+        why: expect.stringContaining('没接上读检查'),
+      });
+      expect(unwired.sent()).toBe(0);
+    });
+
+    it('还在跑 / 没出现不拦：照常挂（自动合并本来就是等它们）', async () => {
+      const a = arm([null], {
+        readChecks: async () => ({
+          overall: 'pending',
+          failed: [],
+          pending: [{ name: 'merge-gate' }],
+          missing: [{ name: 'cold-verify' }],
+        }),
+      });
+      expect(await a.attempt(1)).toEqual({ armed: true, merged: false });
+      expect(a.sent()).toBe(1);
+    });
   });
 });

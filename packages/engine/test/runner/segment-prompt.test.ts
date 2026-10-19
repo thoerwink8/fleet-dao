@@ -23,6 +23,19 @@ const render = (over: Partial<Parameters<typeof renderSegmentPrompt>[0]> = {}) =
   renderSegmentPrompt({ brief, specDir: 'specs/12-驾驶舱状态', feedback: [], ...over });
 
 describe('续会话的提示词（决定 0088）', () => {
+  it('正式修订的长正文和有效CR走完整材料，不使用日志6000字截断', () => {
+    const long = `${'正文'.repeat(FEEDBACK_ITEM_MAX)}正文最后一字`;
+    const review = `${'评审'.repeat(FEEDBACK_ITEM_MAX)}评审最后一字`;
+    const text = renderSegmentPrompt({
+      brief: { ...brief, request: long },
+      feedback: ['普通返工'],
+      resumed: true,
+      contractRevision: { reviews: [review] },
+    });
+    expect(text).toContain(long);
+    expect(text).toContain(review);
+    expect(text).toContain('完整正文替代旧合同');
+  });
   it('只补被打断的原因和这一轮要改的，不重述整张单：交代、规矩、验收条都不重复出现', () => {
     const text = renderSegmentPrompt({
       brief,

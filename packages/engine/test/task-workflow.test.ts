@@ -15,6 +15,7 @@ import type { RouteProbeJobDeps } from '../src/jobs/route-probe.ts';
 import { type PickRouteInput, PortError, type RouteChoice } from '../src/ports.ts';
 import { localExec } from '../src/real/exec.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
+import { requirementContract } from '../src/runner/task-brief.ts';
 import {
   ARM_PENDING_CHECKS_MINUTES,
   ARM_PENDING_POLL_SECONDS,
@@ -1000,6 +1001,48 @@ describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000
     expect(calls.arm).toBe(1);
   });
 
+  it('【#3281 故意造出的失败】冷验收同一个头一直验不了满 2 小时：让出在跑名额（任务行 stalled）、只报一次警，到点自己再验、验过照常合', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      verify: (_i, n) =>
+        n <= 6
+          ? {
+              pass: false,
+              problems: [],
+              round: 1,
+              retry: { wait: 'quota', reason: '所有验收家族都在等额度', afterSeconds: 30 * 60 },
+            }
+          : { pass: true, problems: [], round: 1 },
+    });
+    const states: { state: string; doing: string }[] = [];
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      {
+        tasks,
+        wrapActivities: (acts) => ({
+          ...acts,
+          async saveTaskState(snapshot) {
+            states.push({ state: snapshot.state, doing: snapshot.doing });
+            return acts.saveTaskState(snapshot);
+          },
+        }),
+      },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', verifyRounds: 1 });
+    expect(calls.verify).toHaveLength(7);
+    // 前 4 次（0–1.5 小时）照旧占着名额睡；满 2 小时那次起让出名额，第 6 次接着让、不再报警
+    const stalls = states.filter((s) => s.state === 'stalled');
+    expect(stalls.map((s) => s.doing)).toEqual([
+      '让出名额等路由：冷验收一直派不出',
+      '让出名额等路由：冷验收一直派不出',
+    ]);
+    expect(world.alerts.map((a) => a.title)).toEqual(['冷验收一直派不出']);
+    expect(world.alerts[0]?.detail).toContain('不用点「继续」');
+    expect(calls.segment).toHaveLength(1); // 不算没过、没有返工
+  });
+
   it('验收时发现 PR 的头被换了：停下等人看过；点「继续」后对新的头重走 CI 和验收，验收重新数轮', async () => {
     const world = createFakeWorld();
     const moved = fakeHead(999);
@@ -1795,6 +1838,55 @@ describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gat
     expect(run).toMatchObject({ outcome: 'merged', head });
     expect(calls.merged).toBe(2);
   });
+
+  it('【#3281 故意造出的失败】必过检查没查成停下：只报一次警；每小时复核，没满足原地等、满足了自己醒来合上，不用点「继续」', async () => {
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const detail = `PR #12 头 ${head} 的必过检查没查成：merge-gate 没出现`;
+    const { tasks, calls } = scripted({
+      merged: (n) =>
+        n === 1 ? { state: 'checks_unreadable', detail } : { state: 'merged', mergeCommit: 'abc1234567890' },
+      mergeReady: (n) =>
+        n < 3
+          ? { ready: false, why: `头 ${head.slice(0, 7)} 的必过检查还没全绿（还在跑：merge-gate）` }
+          : { ready: true, why: '必过检查全绿' },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head });
+    expect(calls.mergeReady).toHaveLength(3);
+    expect(calls.mergeReady.map((i) => i.expectedHead)).toEqual([head, head, head]);
+    // 停下那一下报一次；没满足的两次复核不再报
+    expect(world.alerts.map((a) => a.title)).toEqual(['必过检查没查成']);
+    expect(world.alerts[0]?.detail).toContain('不用点「继续」');
+    // 醒来和人点「继续」回来一样：自动合并还挂着，接着等合并（挂一次、等合并两次）
+    expect(calls.arm).toBe(1);
+    expect(calls.merged).toBe(2);
+  });
+
+  it('【#3281】自己醒来后同一个头又因同一个原因停下：不再报警；人点「继续」照样能接着走', async () => {
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const detail = `PR #12 头 ${head} 的必过检查没查成：merge-gate 没出现`;
+    const { tasks, calls } = scripted({
+      merged: (n) =>
+        n <= 2 ? { state: 'checks_unreadable', detail } : { state: 'merged', mergeCommit: 'abc1234567890' },
+      mergeReady: () => ({ ready: true, why: '必过检查全绿' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head });
+    expect(calls.merged).toBe(3);
+    expect(world.alerts.map((a) => a.title)).toEqual(['必过检查没查成']);
+  });
 });
 
 describe('任务工作流 · 切号停下动手那一段（org_switch，#59）', { timeout: 60_000 }, () => {
@@ -2447,7 +2539,10 @@ describe('任务工作流 · 现在就换模型（#1216，taskRepin）', { timeo
 const HANDOFF = '已继续 3 次仍没过，交指挥官';
 
 function briefSaying(request: string, acceptance: string[]) {
-  return { ok: true as const, brief: { ...goodBrief(), request, acceptance } };
+  return {
+    ok: true as const,
+    brief: { ...goodBrief(), contract: requirementContract(request), request, acceptance },
+  };
 }
 
 /** 验收连着没过，直到停下。返回那次停下的通知正文。 */
@@ -2479,9 +2574,11 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
     expect(MAX_IMPLEMENT_ROUNDS).toBe(3);
     expect(MAX_VERIFY_ROUNDS).toBe(2);
     const world = createFakeWorld();
+    let current = briefSaying('旧正文', ['旧验收条']);
     const { tasks, calls } = scripted({
-      // 头一回用尽自动续（决定 0093）也重读一次单子：前两次读到旧正文，点「继续」后读到新的
-      brief: (n) => (n <= 2 ? briefSaying('旧正文', ['旧验收条']) : briefSaying('新正文', ['新验收条'])),
+      // 自动继续仍读旧合同；人停下时修订，耗尽后的现读也经同一合同接纳路径。
+      brief: () => current,
+      contractBrief: () => current,
       verify: (_input, n) =>
         n === 6
           ? { pass: true, problems: [], round: 2 }
@@ -2500,6 +2597,7 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
         expect(calls.segment).toHaveLength(5);
         expect(calls.verify).toHaveLength(4);
         expect(calls.verify.every((item) => item.what === '旧正文')).toBe(true);
+        current = briefSaying('新正文', ['新验收条']);
         await h.signal(taskContinueSignal, { by: 'frank' });
         await waitUntil(
           () =>
@@ -2513,7 +2611,8 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
       { tasks },
     );
     expect(run.outcome).toBe('merged');
-    expect(calls.brief).toBe(3);
+    expect(calls.brief).toBe(1);
+    expect(calls.contractReads.length).toBeGreaterThan(0);
     expect(calls.segment).toHaveLength(6);
     expect(calls.segment[5]?.brief).toMatchObject({ request: '新正文', acceptance: ['新验收条'] });
     expect(calls.verify.map((item) => item.round)).toEqual([1, 2, 1, 2, 1, 2]);

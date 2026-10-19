@@ -779,7 +779,20 @@ export async function numstatAgainst(
 export async function addedLinesAgainst(t: UserTree, mainline: string, head: string): Promise<number> {
   assertSha(mainline, '主线');
   assertSha(head, '头');
-  const out = lines(await git(t, ['diff', '--numstat', `${mainline}...${head}`], '数分支相对主线新增的行'));
+  const out = lines(
+    await git(
+      t,
+      [
+        '--no-replace-objects',
+        'diff',
+        '--numstat',
+        '--no-ext-diff',
+        '--no-textconv',
+        `${mainline}...${head}`,
+      ],
+      '数分支相对主线新增的行',
+    ),
+  );
   let total = 0;
   for (const line of out) {
     const added = line.split('\t')[0] ?? '';

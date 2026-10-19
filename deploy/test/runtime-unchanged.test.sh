@@ -133,6 +133,15 @@ check_web() { :; }
 check_chain() { :; }
 curl() { return 0; }
 running_release() { printf '%s' "$(<"$TMP/proc")"; }
+# 这一段模拟两个沿用旧目录的主进程，身份读取也要有各自稳定的 PID；不查宿主机的真实 systemd。
+unit_prop() {
+  [[ "$2" == MainPID ]] || return 1
+  case "$1" in
+  fleet-engine.service) printf '4242' ;;
+  fleet-api.service) printf '4343' ;;
+  *) return 1 ;;
+  esac
+}
 activate() { # 提交号 事件：切 current、记历史，主进程不动（模拟没重启）
   local sha=$1 how=$2
   if [[ "$(readlink -- "$RELEASES/current" 2>/dev/null)" != "$sha" ]]; then
@@ -153,7 +162,7 @@ write_train() { # 状态 这一趟的提交
   "$NODE" -e '
     const fs = require("fs");
     const [dir, status, sha] = process.argv.slice(1);
-    const note = status === "failed" ? "上一趟发版是「failed」状态，要人看，不自动再发" : "在用的就是主线头";
+    const note = status === "failed" ? "现在不发：上一趟动手发版没成（第 4 步：没写原因），同一个提交不自动重发，等主线上更新的绿提交" : "在用的就是主线头";
     fs.writeFileSync(dir + "/.train/release-train.json", JSON.stringify({
       schema: 1, status, phase: status === "done" ? 8 : 4,
       startedAt: "2026-10-16T02:06:00.000Z",
@@ -211,6 +220,9 @@ check "只改文档：历史不记不健康" "$(grep -cE 'unhealthy|auto-rollbac
 check "只改文档：不写「重启后」" "$(grep -c '重启后' "$TMP/docs.out" || true)" 0
 check "只改文档：写了沿用上一版进程" "$(grep -cF '没重启，沿用上一版进程' "$TMP/docs.out")" 1
 check "只改文档：两个服务都核运行内容一致" "$(grep -cF '运行内容一致' "$TMP/docs.out")" 2
+docs_identity=$(health_identity "$docs_sha")
+check "只改文档：稳定旧进程可绑定健康身份" "$?" 0
+check "只改文档：身份分别绑定两服务 PID 与实际旧目录" "$docs_identity" "$docs_sha|fleet-engine:4242:$RELEASES/$BASE|fleet-api:4343:$RELEASES/$BASE"
 ENGINE_UNCHANGED=0
 API_UNCHANGED=0
 UNCHANGED_RC=()

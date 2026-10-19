@@ -19,10 +19,12 @@
 // - 只有成功 PostToolUse 的新写入、验证、提交、收工才重置连续无进展计数；重复动作、sleep 和查询状态不算。
 // - 数值上限不扩大；故障暂停保留未完成状态，避免无限循环烧额度。
 // - 钩子里任何一步出错一律放行（只提示），绝不抛、不拦：这里是兜底，不是新的故障点。
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { codexSessionSource } from './codex-session-source.mjs';
+import { noteReceipt, receiptContext, receiptStatus } from './continuation-receipts.mjs';
 import { isMainModule } from './is-main.mjs';
 
 // 类型只写在 JSDoc 里（这份文件被同步工具原样装到各台机器、纯 node 直接跑，没有编译步骤）；agents/tsconfig.json 用 checkJs 过严格检查。
@@ -30,7 +32,7 @@ import { isMainModule } from './is-main.mjs';
  * 一个会话的无人值守状态（~/.fleet-dao/unattended/<会话号>.json）：readState 认过 state、expiresAt、totalBlocks 才当它是状态。
  * streak：开启或实质进展重置后的接续次数，首次接续也计 1，并非精确的无进展轮数；
  * streakReleases：到上限暂停过几次（兼容旧字段名）。idle、toolSinceBlock 不再读。
- * @typedef {{ state: 'on' | 'paused' | 'done', expiresAt: string, totalBlocks: number, streak?: number, streakReleases?: number, lastStreakReleaseAt?: string, idle?: number, toolSinceBlock?: boolean, auto?: boolean, since?: string, note?: string, lastBlockAt?: string, consumedProgress?: number, deliveredResults?: string[] }} State
+ * @typedef {{ state: 'on' | 'paused' | 'done', expiresAt: string, totalBlocks: number, generation?: string, streak?: number, streakReleases?: number, lastStreakReleaseAt?: string, idle?: number, toolSinceBlock?: boolean, auto?: boolean, since?: string, note?: string, lastBlockAt?: string, consumedProgress?: number, deliveredResults?: string[] }} State
  */
 /**
  * Stop 输入里还有什么在跑：tasks 是 background_tasks 的条数，crons 是 session_crons 的条数；输入里没有这一项是 null（判不出）。
@@ -215,6 +217,7 @@ export function readState(dir, id) {
       Number.isInteger(s.totalBlocks);
     if (
       !good ||
+      ('generation' in s && (typeof s.generation !== 'string' || !/^[a-f0-9-]{36}$/.test(s.generation))) ||
       ('deliveredResults' in s &&
         (!Array.isArray(s.deliveredResults) || !s.deliveredResults.every((v) => typeof v === 'string'))) ||
       ('consumedProgress' in s && (!Number.isInteger(s.consumedProgress) || Number(s.consumedProgress) < 0))
@@ -293,6 +296,19 @@ const MACHINE_TREE = /[\\/]\.claude[\\/]worktrees[\\/]w-[^\\/]+(?:[\\/]|$)/;
 export function isMachineSession({ env = process.env, cwd } = {}) {
   if (env.FLEET_WORKER === '1') return true;
   return typeof cwd === 'string' && MACHINE_TREE.test(cwd);
+}
+
+/** 必经身份闸：Codex当前来源未知时不读写无人值守，不借父会话状态；不充当hook根回合的消费证明。
+ * @param {{ env?: NodeJS.ProcessEnv, cwd?: unknown, hookId?: unknown, agentId?: unknown, expectedCli?: 'codex'|undefined }} [opts]
+ * @returns {{ kind: 'allowed'|'machine'|'unknown', code: string }}
+ */
+export function unattendedAuthority({ env = process.env, cwd, hookId, agentId, expectedCli } = {}) {
+  if (env.FLEET_HEADLESS === '1' || agentId || isMachineSession({ env, cwd }))
+    return { kind: 'machine', code: 'MACHINE' };
+  const source = codexSessionSource({ env, hookId, expectedCli });
+  if (source.kind === 'child') return { kind: 'machine', code: source.code };
+  if (source.kind === 'unknown') return { kind: 'unknown', code: source.code };
+  return { kind: 'allowed', code: source.code };
 }
 
 /**
@@ -454,8 +470,25 @@ export function main(argv, io) {
     return 2;
   }
   const id = session.id;
+  const authority = unattendedAuthority({ env, cwd: process.cwd() });
+  if (authority.kind === 'unknown') {
+    io.err(`没查成：当前 Codex 会话来源未知（${authority.code}），无人值守状态未读写。`);
+    return 2;
+  }
+  if (authority.kind === 'machine' && (cmd === 'on' || env.CODEX_THREAD_ID || env.CODEX_SESSION_ID)) {
+    io.err('没做成：工人、反方、原生子代理这类机器派的会话不开无人值守，也不代改父会话状态。');
+    return 2;
+  }
   try {
     if (cmd === 'status') {
+      if (rest.includes('--receipts')) {
+        const current = readState(dir, id);
+        const status = current.ok
+          ? receiptStatus(dir, id, current.state?.generation)
+          : { evidence: 'unknown', code: 'STATE_UNKNOWN' };
+        io.out(JSON.stringify(status));
+        return status.evidence === 'unknown' || ('code' in status && status.code === 'LIMIT') ? 1 : 0;
+      }
       if (explicitlyOff(dir, id)) {
         io.out('无人值守：off（本会话已明确停止，队列不会再拉起；重新 on 才恢复）。');
         return 0;
@@ -475,19 +508,19 @@ export function main(argv, io) {
       return 0;
     }
     if (cmd === 'off') {
+      const previous = readState(dir, id);
       removeState(dir, id);
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, `${id}.off`), 'off\n');
       rmSync(join(dir, `${id}.queue.json`), { force: true });
+      noteReceipt(
+        receiptContext(dir, { session_id: id }, previous.ok ? previous.state : null, 'Command', env),
+        { phase: 'window', decision: 'off' },
+      );
       io.out('无人值守已关。');
       return 0;
     }
     if (cmd === 'on') {
-      // 工人和反方是机器派的会话，没有创始人在前面；让它们把自己按住没有意义，还会困住机器
-      if (isMachineSession({ env })) {
-        io.err('没做成：工人、反方这类机器派的会话不开无人值守（不挡它们的收尾）。');
-        return 2;
-      }
       let hours = DEFAULT_HOURS;
       const i = rest.indexOf('--hours');
       if (i >= 0) hours = Number(rest[i + 1]);
@@ -497,16 +530,22 @@ export function main(argv, io) {
       }
       const expiresAt = new Date(now + hours * 3_600_000).toISOString();
       const previous = readState(dir, id);
+      const generation = randomUUID();
       rmSync(join(dir, `${id}.off`), { force: true });
       rmSync(join(dir, `${id}.progress`), { recursive: true, force: true });
       writeState(dir, id, {
         state: 'on',
+        generation,
         since: new Date(now).toISOString(),
         expiresAt,
         totalBlocks: 0,
         streak: 0,
         note: '',
         deliveredResults: previous.ok ? (previous.state?.deliveredResults ?? []) : [],
+      });
+      noteReceipt(receiptContext(dir, { session_id: id }, { generation }, 'Command', env), {
+        phase: 'window',
+        decision: 'on',
       });
       io.out(
         `无人值守状态已记 on，到 ${fmt(expiresAt)}；这只记录意图，不代表 Stop 已登记、信任或执行验证。Claude/Codex 未完成工作经同步 Stop 进入下一轮，后台任务先显式等待并消费结果，不能凭条数结束。成功的新工作重置计数，连续 ${MAX_STREAK} 次无实质进展明确故障暂停。其他 CLI 尚未接通时不得声称接续成功。做完 done、要他拍板 needs-you、他说停 off。`,
@@ -525,6 +564,10 @@ export function main(argv, io) {
       return 1;
     }
     writeState(dir, id, { ...r.state, state: cmd === 'done' ? 'done' : 'paused', note });
+    noteReceipt(receiptContext(dir, { session_id: id }, r.state, 'Command', env), {
+      phase: 'window',
+      decision: cmd === 'done' ? 'done' : 'needs-you',
+    });
     io.out(`无人值守${cmd === 'done' ? '收尾' : '暂停'}：${note}。这一轮现在可以结束了。`);
     return 0;
   } catch (err) {

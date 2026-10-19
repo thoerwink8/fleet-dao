@@ -172,6 +172,21 @@ export const EXIT_PENDING = 2;
  * 由接活单元每趟写（release-request/lib.mjs 的 runRequest、runPhases），不靠哪个进程的内存。
  */
 export const UNTOUCHED_FAIL_LIMIT = 3;
+/**
+ * 发版动手之后（release.sh 起了、第 4 步起）没成、已自动退回的那一趟：同一个提交不自动重发，主线上更新的绿提交照发
+ * （修好的版本要能发上来，决定 0093 第 4 条「先自动处理一次再停下等人」）。动手后连败（不论是不是同一个提交）这么多趟才停、开急修单。
+ * 计数是进度记录的 startedFails，由接活单元每趟写（release-request/lib.mjs 的 runRequest、runPhases）。
+ */
+export const STARTED_FAIL_LIMIT = 2;
+/**
+ * 版本切上了、发后健康没核实（进度 blocked 带 healthPending）：隔这么久自动请求一次只读复核（同驾驶舱发版卡的「重试」），
+ * 最多这么多次；还核实不了就开急修单。核实了进度变成 done，更新的提交照常发。
+ */
+export const HEALTH_RETRY_MS = 10 * 60_000;
+export const HEALTH_RETRY_LIMIT = 3;
+/** 自动发版被闸拦下这么久就报警，不只在每轮读数里记「落后」；写出发版请求或跟上主线头自己撤。 */
+export const HELD_ALERT_MS = 30 * 60_000;
+export const HELD_KEY = `${ALERT_PREFIX}held`;
 /** 急修单开没开成：没开成报这一条（每轮再试，开成了自己撤）。 */
 export const EMERGENCY_KEY = `${ALERT_PREFIX}emergency-issue`;
 /** 在用那一版的依赖（node_modules）发版后被动过：`auto-release:deps:<提交号>`，下一次发版（换了提交）自己撤。 */
@@ -300,6 +315,10 @@ export function carryOver(prev) {
     engineCheck: p.engineCheck ?? null,
     /** 同一个提交发版还没动手就连败 UNTOUCHED_FAIL_LIMIT 趟、开的急修单：{ sha, number, url, at } 或没开成 { sha, number: null, error, at }。 */
     emergency: p.emergency ?? null,
+    /** 健康没核实那一趟自动请求过几次只读复核：{ sha, count, at }（healthRetryStep；换了提交从 0 数）。 */
+    healthRetry: p.healthRetry ?? null,
+    /** 自动发版从什么时候起一直被闸拦着（heldStep；写出请求或跟上主线头就清掉）。没被拦不带这个键。 */
+    ...(typeof p.heldSince === 'string' ? { heldSince: p.heldSince } : {}),
     /** 已撤过失败卡的那一趟目标（被后来的发版取代，supersededStep；同一个只撤一次）。 */
     superseded: typeof p.superseded === 'string' ? p.superseded : null,
     /** 在用那一版依赖的指纹（发版后第一轮记下，之后每轮核对）：{ commit, fingerprint, prunedAt, recordedAt, result, detail, checkedAt }。 */
@@ -588,6 +607,42 @@ export function untouchedFails(train) {
   return Number.isInteger(train.untouchedFails) && train.untouchedFails > 0 ? train.untouchedFails : 1;
 }
 
+/**
+ * 这一趟是不是「发版动手之后没成」（状态 failed、release.sh 起了或停在第 4 步以后：版本切过、多半已自动退回）。
+ * 是的话回动手后连败趟数（进度记录的 startedFails；老记录没有这个键算 1 趟），不是回 0。和 untouchedFails 互不重叠。
+ */
+export function startedFails(train) {
+  if (!train || typeof train !== 'object' || train.status !== 'failed') return 0;
+  const started =
+    (train.release && typeof train.release === 'object' && train.release.started === true) ||
+    (Number.isInteger(train.phase) && train.phase >= 4);
+  if (!started) return 0;
+  return Number.isInteger(train.startedFails) && train.startedFails > 0 ? train.startedFails : 1;
+}
+
+/** 版本切上了、发后健康还没核实的那一趟（blocked 带 healthPending，目标就是回执里的提交）。 */
+function healthPendingOf(train) {
+  return (
+    train?.status === 'blocked' &&
+    typeof train.release?.healthPending?.sha === 'string' &&
+    train.release.healthPending.sha === trainTarget(train)
+  );
+}
+
+/** 发版历史（release.sh 的 HISTORY，「时间 提交号 事件」）最后一行是不是这个提交没过健康检查或被退回。 */
+function failedInHistory(historyLast, sha) {
+  if (typeof sha !== 'string' || !sha) return false;
+  const [, at, event] = String(historyLast ?? '')
+    .trim()
+    .split(/\s+/);
+  return (
+    typeof at === 'string' &&
+    at.length >= 7 &&
+    sha.startsWith(at) &&
+    ['unhealthy', 'auto-rollback'].includes(event)
+  );
+}
+
 /** 进度记录原文 → 对象；不在、认不出回 null（gateVerdict 自己会把认不出当原因）。 */
 function parseTrain(text) {
   if (text === null || text === undefined) return null;
@@ -607,7 +662,10 @@ const trainTarget = (t) => (t?.target && typeof t.target === 'object' ? t.target
  * trainText: 发版进度文件原文（不在是 null）, lockBusy: 发布锁被占着,
  * current: 法国 current 的提交号（没有是 null）, mainline: 主线提交号，从新到旧, target: 这一轮要发的提交 }。
  * failed 记录：current 已等于或新于它所记 target 时不挡（trainFailureSuperseded）；发版还没动手就没成的（untouchedFails）
- * 不挡，下一轮照常重试——同一个提交连败 UNTOUCHED_FAIL_LIMIT 趟才挡（换了要发的提交不挡：修好的新提交要能发上来）。
+ * 不挡，下一轮照常重试——同一个提交连败 UNTOUCHED_FAIL_LIMIT 趟才挡（换了要发的提交不挡：修好的新提交要能发上来）；
+ * 动手后没成、已退回的（startedFails）挡同一个提交、放更新的提交，动手后连败 STARTED_FAIL_LIMIT 趟才全挡；
+ * 健康没核实的 blocked（healthPending）挡着等自动复核。其余 failed、blocked 要人看。
+ * historyLast：发版历史最后一行（要发的提交上次没过健康检查或被退回过，同样不重发）。
  */
 export function gateVerdict(facts) {
   if (!facts || typeof facts !== 'object') return '发版闸的事实没读到';
@@ -638,9 +696,25 @@ export function gateVerdict(facts) {
       t.status !== 'aborted' &&
       !trainFailureSuperseded(t, facts.current, facts.mainline)
     ) {
+      const sameTarget = typeof facts.target !== 'string' || facts.target === trainTarget(t);
+      // 版本切上了、健康没核实：releaseStep 自动请求只读复核，核实了才发新的
+      if (healthPendingOf(t)) {
+        return `${short(trainTarget(t))} 已切上、发后健康还没核实，等自动复核`;
+      }
+      // 动手后没成、已退回：同一个提交不重发；更新的提交照发，动手后连败满 STARTED_FAIL_LIMIT 趟才停
+      const s = startedFails(t);
+      if (s > 0) {
+        const last = `第 ${t.phase} 步：${why(t.why ?? '没写原因')}`;
+        if (sameTarget || failedInHistory(facts.historyLast, facts.target)) {
+          return `${short(trainTarget(t))} 上一趟动手发版没成（${last}），同一个提交不自动重发，等主线上更新的绿提交`;
+        }
+        if (s >= STARTED_FAIL_LIMIT) {
+          return `动手发版已连败 ${s} 趟（最近一趟 ${short(trainTarget(t))}，${last}），不再自动发，等急修`;
+        }
+        return null;
+      }
       const n = untouchedFails(t);
       if (n === 0) return `上一趟发版是「${t.status}」状态，要人看，不自动再发`;
-      const sameTarget = typeof facts.target !== 'string' || facts.target === trainTarget(t);
       if (n >= UNTOUCHED_FAIL_LIMIT && sameTarget) {
         return `${short(trainTarget(t))} 发版还没动手就连败 ${n} 趟（第 ${t.phase} 步：${why(t.why ?? '没写原因')}），不再自动发，等急修`;
       }
@@ -665,7 +739,10 @@ async function releaseStep(io, st, now, current) {
   if (current === null) return note('法国还没发布过，第一次发版走驾驶舱按钮');
   const head = st.main.head;
   const idx = st.main.commits.findIndex(([sha]) => sha === current);
-  if (idx === 0) return note('在用的就是主线头，没有要发的');
+  if (idx === 0) {
+    clearHeld(st);
+    return note('在用的就是主线头，没有要发的');
+  }
   if (idx < 0) return note('在用的不在主线最近的提交里，不自动发');
   const headCi = st.ci?.sha === head ? st.ci.verdict : '没查';
   const green = st.ciGreen;
@@ -706,9 +783,17 @@ async function releaseStep(io, st, now, current) {
     mainline: Array.isArray(st.main?.commits) ? st.main.commits.map((row) => row[0]) : [],
   });
   if (blocked) {
+    heldStep(st, now, blocked, idx);
     const n = untouchedFails(train);
     if (n >= UNTOUCHED_FAIL_LIMIT && trainTarget(train) === target) {
       return note(`现在不发：${blocked}；${await emergencyStep(io, st, now, train, n)}${reason}`);
+    }
+    const s = startedFails(train);
+    if (s >= STARTED_FAIL_LIMIT && trainTarget(train) !== target) {
+      return note(`现在不发：${blocked}；${await emergencyStep(io, st, now, train, s, 'started')}${reason}`);
+    }
+    if (healthPendingOf(train)) {
+      return note(`现在不发：${blocked}；${await healthRetryStep(io, st, now, train)}${reason}`);
     }
     return note(`现在不发：${blocked}${reason}`);
   }
@@ -729,6 +814,7 @@ async function releaseStep(io, st, now, current) {
   resolveKeyLater(st, AUTO_REQUEST_KEY);
   // 连败停下的那个提交被挡着，能写出请求说明要发的已经换了（修好的新提交）：急修单没开成的那条报警不用再挂
   resolveKeyLater(st, EMERGENCY_KEY);
+  clearHeld(st);
   st.auto = {
     sha: target,
     at: iso(now),
@@ -800,19 +886,41 @@ const PHASE_NAMES = ['预检', '暂停本机', '暂停法国', '等收尾'];
  * 连败停下时开的急修单（引擎能接的四节单，贴「缺陷」、进当前版本；不是要人拍的卡）。key 按提交，同一个提交只开一张
  * （fleet-api emergency-issue 按 key 幂等）。「怎么算做完」只写 diff 里看得见的。
  */
-export function emergencyIssue(train, n) {
+export function emergencyIssue(train, n, kind = 'untouched') {
   const sha = trainTarget(train);
   const phase = Number.isInteger(train?.phase) ? train.phase : 0;
-  const step = `第 ${phase} 步「${PHASE_NAMES[phase] ?? '?'}」`;
+  const step = PHASE_NAMES[phase] ? `第 ${phase} 步「${PHASE_NAMES[phase]}」` : `第 ${phase} 步`;
   const reason = why(train?.why ?? '进度记录没写原因');
+  const what = {
+    untouched: {
+      title: `急修：法国自动发版 ${short(sha)} 在${step}连败 ${n} 趟，已停`,
+      scene:
+        `法国自动发版请求发 \`${sha}\`，接活单元（fleet-release-request）在${step}就没成、什么都还没动；同一个提交连着 ${n} 趟都这样，` +
+        '自动发版停下、不再请求这个提交（主线上新的提交照常发）。',
+      done: `- 找到${step}没成的根因，修在必经的那一步；测试里造出同样的失败，改前红、改后绿。`,
+    },
+    started: {
+      title: `急修：法国发版动手后连败 ${n} 趟（最近 ${short(sha)}），自动发版已停`,
+      scene:
+        `法国发版在发版脚本动手之后（切版本、健康门）连着 ${n} 趟没成、都自动退回了上一版；最近一趟发的是 \`${sha}\`，停在${step}。` +
+        '自动发版不再请求任何提交，等这张单修好根因（驾驶舱「发布到法国」照样能手动发）。',
+      done: `- 找到动手后${step}没成的根因（真坏还是健康门误判），修在必经的那一步；测试里造出同样的失败，改前红、改后绿。`,
+    },
+    health: {
+      title: `急修：法国 ${short(sha)} 已切上，发后健康复核 ${n} 次仍没核实`,
+      scene:
+        `法国发版 \`${sha}\` 已切上，发后健康没核实（进度停在${step}、带待核验回执）；自动发版隔 ${HEALTH_RETRY_MS / 60_000} 分钟请求只读复核，` +
+        `${n} 次仍没核实，不再请求，更新的提交也先不发。`,
+      done: '- 找到健康一直核实不了的根因（哪一项读不到或判不出），修在必经的那一步；测试里造出同样的情形，改前红、改后绿。',
+    },
+  }[kind];
   return {
-    key: `release-untouched:${sha}`,
-    title: `急修：法国自动发版 ${short(sha)} 在${step}连败 ${n} 趟，已停`,
+    key: `release-${kind}:${sha}`,
+    title: what.title,
     body: [
       '## 场景',
       '',
-      `法国自动发版请求发 \`${sha}\`，接活单元（fleet-release-request）在${step}就没成、什么都还没动；同一个提交连着 ${n} 趟都这样，` +
-        '自动发版停下、不再请求这个提交（主线上新的提交照常发）。',
+      what.scene,
       '',
       `最后一趟的原因：${reason}`,
       '',
@@ -831,7 +939,7 @@ export function emergencyIssue(train, n) {
       '',
       '## 怎么算做完',
       '',
-      `- 找到${step}没成的根因，修在必经的那一步；测试里造出同样的失败，改前红、改后绿。`,
+      what.done,
       '- 失败原因里写得出是哪一样没成（模块名、命令、文件），不是只有尾几行。',
     ].join('\n'),
   };
@@ -841,12 +949,12 @@ export function emergencyIssue(train, n) {
  * 同一个提交连败 UNTOUCHED_FAIL_LIMIT 趟、自动发版停下：开急修单（io.fileIssue，真的是 current 那一版的 fleet-api emergency-issue）。
  * 开成了记进 st.emergency，不再开；没开成（fleet-api 本身坏了、GitHub 不通）报 EMERGENCY_KEY、每轮再试。回一句写进 note 的话。
  */
-async function emergencyStep(io, st, now, train, n) {
+async function emergencyStep(io, st, now, train, n, kind = 'untouched') {
   const sha = trainTarget(train);
   if (st.emergency?.sha === sha && Number.isInteger(st.emergency.number)) {
     return `已开急修单 #${st.emergency.number}，等修好的新提交`;
   }
-  const issue = emergencyIssue(train, n);
+  const issue = emergencyIssue(train, n, kind);
   let got;
   try {
     if (typeof io.fileIssue !== 'function') throw new Error('这台没接上开单（io.fileIssue）');
@@ -867,6 +975,56 @@ async function emergencyStep(io, st, now, train, n) {
   resolveKeyLater(st, EMERGENCY_KEY);
   act(st, now, 'emergency-issue', `开了急修单 #${got.number}`);
   return `已开急修单 #${got.number}，等修好的新提交`;
+}
+
+/**
+ * 自动发版被闸拦下：动作名记 auto-held（不再停在读数的 behind），从第一次拦下起记时刻；拦满 HELD_ALERT_MS 报 HELD_KEY。
+ * 标题不带分钟数（同一件事不每轮重发），正文写从几点起、落后几个、为什么拦。
+ */
+function heldStep(st, now, blocked, behind) {
+  const since = Date.parse(st.heldSince ?? '');
+  if (Number.isNaN(since)) st.heldSince = iso(now);
+  act(st, now, 'auto-held', blocked);
+  const from = Number.isNaN(since) ? Number(now) : since;
+  if (Number(now) - from < HELD_ALERT_MS) return;
+  keepRaised(
+    st,
+    HELD_KEY,
+    '法国自动发版被拦下，新版本发不上去',
+    `从 ${iso(from).slice(0, 16)}Z 起自动发版一直被闸拦着（落后主线 ${behind} 个提交）：${blocked}。` +
+      '写出发版请求或跟上主线头后这条自己撤；要马上发可以点驾驶舱「发布到法国」。',
+  );
+}
+
+/** 不再被拦（写出了请求、或已跟上主线头）：清掉记时，撤掉拦下的报警。 */
+function clearHeld(st) {
+  delete st.heldSince;
+  resolveKeyLater(st, HELD_KEY);
+}
+
+/**
+ * 版本切上了、发后健康没核实（blocked 带 healthPending）：隔 HEALTH_RETRY_MS 写一份只读复核请求（kind retry，同驾驶舱发版卡「重试」），
+ * 同一个提交最多 HEALTH_RETRY_LIMIT 次，记在 st.healthRetry；到上限开急修单。回一句写进 note 的话。
+ */
+async function healthRetryStep(io, st, now, train) {
+  const sha = trainTarget(train);
+  const prev = st.healthRetry?.sha === sha ? st.healthRetry : { sha, count: 0, at: null };
+  if (prev.count >= HEALTH_RETRY_LIMIT) {
+    return `自动复核 ${prev.count} 次仍没核实；${await emergencyStep(io, st, now, train, prev.count, 'health')}`;
+  }
+  const last = Date.parse(prev.at ?? '');
+  if (!Number.isNaN(last) && Number(now) - last < HEALTH_RETRY_MS) {
+    return `已请求第 ${prev.count} 次只读复核，${minutes(last + HEALTH_RETRY_MS - Number(now))} 分钟后没核实再请求`;
+  }
+  if (typeof io.requestRetry !== 'function') return '这台没接上自动复核，到驾驶舱「法国」页发版卡点「重试」';
+  try {
+    await io.requestRetry({ sha, at: iso(now), by: AUTO_RELEASE_BY });
+  } catch (e) {
+    return `只读复核的请求没写成（${why(e)}），下一轮再试`;
+  }
+  st.healthRetry = { sha, count: prev.count + 1, at: iso(now) };
+  act(st, now, 'auto-health-retry', `请求第 ${prev.count + 1} 次只读复核 ${short(sha)}`);
+  return `已请求第 ${prev.count + 1} 次只读复核（最多 ${HEALTH_RETRY_LIMIT} 次）`;
 }
 
 /**

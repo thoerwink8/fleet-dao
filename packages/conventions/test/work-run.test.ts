@@ -494,12 +494,24 @@ describe('pnpm work run：派之前过容量、领单、建工作树，经脱离
       });
       expect(await w.run('run', '42'), w.err.join('\n')).toBe(0);
       expect(readJson<RunSpec>(runFiles(w.dir).spec)?.dispatcher).toBe(id);
+      // 派工断言保留不同root别名；无人值守阶段使用可证当前rollout的独立临时身份。
+      const codexHome = join(temp(), 'codex-home');
+      const date = join(codexHome, 'sessions', '2026', '10', '19');
+      mkdirSync(date, { recursive: true });
+      writeFileSync(
+        join(date, `rollout-isolated-${id}.jsonl`),
+        `${JSON.stringify({
+          type: 'session_meta',
+          payload: { id, source: 'cli' },
+        })}\n`,
+      );
       const env = {
         ...process.env,
         CLAUDE_CODE_SESSION_ID: '',
         CODEX_THREAD_ID: '',
-        CODEX_SESSION_ID: '',
         ...w.env,
+        CODEX_SESSION_ID: '',
+        CODEX_HOME: codexHome,
         FLEET_HEADLESS: '',
         FLEET_WORKER: '',
         FLEET_UNATTENDED_DIR: join(temp(), 'unattended'),

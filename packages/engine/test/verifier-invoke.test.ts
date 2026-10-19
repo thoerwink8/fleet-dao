@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { roomForAnother } from '../src/real/task-verify.ts';
 import { NoSlotError, type RunRecord, type RunStart, type RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnCommand, SpawnOutcome } from '../src/runner/one-shot.ts';
 import {
@@ -1230,6 +1231,52 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
       expect(out.problems[0]).toContain('gpt/gpt-1');
       expect(out.routeWait).toBeUndefined();
     });
+
+    it('【#3281】第一家判 fail 却一条算挡的问题都没写：不停下等人，避开它换下一家重验，用下一家的结论', async () => {
+      const { oneShot, models } = scriptedOneShot({
+        'grok-1': { exitCode: 0, stdout: 'verdict: fail', stderr: '', killed: false },
+      });
+      const { choose } = scriptedChoose({ grok: 'grok-1', claude: 'claude-1' });
+      const out = await invokeVerifier(AUTHOR_GPT, deps(oneShot, choose));
+      expect(models).toEqual(['grok-1', 'claude-1']);
+      expect(out.pass).toBe(true);
+      expect(out.session?.family).toBe('claude');
+    });
+
+    it('【#3281】每一家都判 fail 却不写问题：试遍了才回「冷调用没跑成」，写明每一家为什么没验成', async () => {
+      const empty = { exitCode: 0, stdout: 'verdict: fail', stderr: '', killed: false };
+      const { oneShot, models } = scriptedOneShot({ 'grok-1': empty, 'claude-1': empty, 'gpt-1': empty });
+      const { choose } = scriptedChoose({ grok: 'grok-1', claude: 'claude-1', gpt: 'gpt-1' });
+      const out = await invokeVerifier(AUTHOR_GPT, deps(oneShot, choose));
+      expect(models).toEqual(['grok-1', 'claude-1', 'gpt-1']);
+      expect(out.pass).toBe(false);
+      expect(out.problems[0]?.startsWith('冷调用没跑成：试过的路由都没验成')).toBe(true);
+      expect(out.problems[0]).toContain('一条都没写');
+    });
+
+    it('【#3281】第一家超时后活动剩下的时间不够再起一家：不起第二家，回等待（工作流过一会儿重验），不拖到活动超时', async () => {
+      const { oneShot, models } = scriptedOneShot({ 'grok-1': hang });
+      const { choose } = scriptedChoose({ grok: 'grok-1', claude: 'claude-1', gpt: 'gpt-1' });
+      let asks = 0;
+      const out = await invokeVerifier(AUTHOR_GPT, {
+        ...deps(oneShot, choose),
+        timeoutMinutes: 0.0005,
+        roomForAnother: () => ++asks === 1,
+      });
+      expect(models).toEqual(['grok-1']);
+      expect(out.pass).toBe(false);
+      expect(out.session).toBeUndefined();
+      expect(out.routeWait?.reason).toContain('这一次验收剩下的时间不够再起一家');
+    });
+  });
+});
+
+describe('roomForAnother（#3281）', () => {
+  it('没有截止一直够；剩下的不够一家的限时加收尾就不够', () => {
+    const now = 1_000_000;
+    expect(roomForAnother(undefined, 30, now)).toBe(true);
+    expect(roomForAnother(now + 33 * 60_000, 30, now)).toBe(true);
+    expect(roomForAnother(now + 31 * 60_000, 30, now)).toBe(false);
   });
 });
 

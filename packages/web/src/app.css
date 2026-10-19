@@ -174,7 +174,7 @@
 
 /*
  * ---------- 版式常量 ----------
- * 某一页、某一块要的专用尺寸（39 个）。不是设计档位，别的页别拿来当间距用；写明哪页用、依据是什么。
+ * 某一页、某一块要的专用尺寸（41 个）。不是设计档位，别的页别拿来当间距用；写明哪页用、依据是什么。
  * 名字放在 Tailwind 工具类认的命名空间下（h-* 认 --height/--spacing，max-w 认 --container……），src/test/theme-tokens.test.ts 钉住。
  */
 @theme inline {
@@ -433,6 +433,13 @@ html {
   }
   ::selection {
     background: color-mix(in oklab, var(--brand) 28%, transparent);
+  }
+  /* 会话里「在会话里找」的命中（#3277，CSS 自定义高亮，components/run-transcript.tsx）：全部命中淡黄，当前这一个深一档。 */
+  ::highlight(transcript-find) {
+    background-color: var(--color-st-stall-soft);
+  }
+  ::highlight(transcript-find-now) {
+    background-color: var(--color-st-stall-line);
   }
 }
 

@@ -30,8 +30,12 @@ const insideShell = (t: RouteConfigEntry[]) =>
 
 describe('路由表', () => {
   test('登录页在外壳外面；其余页面都在外壳（登录闸）里面，兜底的 404 也在里面且排最后', () => {
-    expect(table.map((e) => e.path ?? e.file)).toEqual(['login', 'routes/shell.tsx']);
+    expect(table.map((e) => e.path ?? e.file)).toEqual(['login', 'routes/bare.tsx', 'routes/shell.tsx']);
     expect(table[0]?.file).toBe('routes/login.tsx');
+    // 不带外壳的弹出页（#3277）也要先过登录闸：bare 和 shell 用同一个 AuthGate，只放这一页
+    const bare = table[1];
+    expect((bare?.children ?? []).map((c) => c.path)).toEqual(['tasks/:taskId/runs/:runId']);
+    expect(readFileSync(path.join(SRC, 'routes/bare.tsx'), 'utf8')).toContain('<AuthGate>');
     const kids = shellOf(table).children ?? [];
     expect(kids.some((c) => c.file === 'routes/login.tsx')).toBe(false);
     const last = kids.at(-1);

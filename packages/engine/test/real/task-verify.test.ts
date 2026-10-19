@@ -32,8 +32,10 @@ import {
   VERIFY_RETRY_CAP_SECONDS,
 } from '../../src/real/task-verify.ts';
 import { NoSlotError, type RunRecord, type RunStart } from '../../src/runner/not-wired.ts';
+import { requirementContract } from '../../src/runner/task-brief.ts';
 import type { ColdVerifyInput } from '../../src/task-contract.ts';
 import { FAMILY_ORDER, type ModelFamily } from '../../src/verifier-invoke.ts';
+import { BODY as CONTRACT_BODY } from '../task-script.ts';
 import { fakeTrees } from './fixtures.ts';
 
 const USER = 'fleet-agent-carpool' as SessionUser;
@@ -308,6 +310,7 @@ function rig(
   });
   return {
     run,
+    gh,
     input,
     ft,
     posted,
@@ -326,6 +329,33 @@ function rig(
 }
 
 describe('跑通：换了家族、贴了状态', { timeout: 30_000 }, () => {
+  it.each([false, true])('同head旧合同晚到pass不能发布success（显式版本=%s）', async (versioned) => {
+    let body = CONTRACT_BODY;
+    const disabled: number[] = [];
+    const r = rig({
+      pull: { autoMerge: true },
+      driverRun: async () => {
+        body = CONTRACT_BODY.replace('验收中', '新版验收');
+        return report(MODEL_PASS);
+      },
+    });
+    r.gh.readIssue = async () => ({ number: 12, title: '正式需求', state: 'open', body });
+    r.gh.readSpecDoc = async () => null;
+    r.gh.claims.disableAutoMerge = async () => {
+      disabled.push(1);
+    };
+    const got = await r.run(
+      r.input({
+        what: CONTRACT_BODY,
+        ...(versioned ? { contract: requirementContract(CONTRACT_BODY) } : {}),
+      }),
+      ctx(),
+    );
+    expect(got).toMatchObject({ pass: false, contractChanged: true });
+    expect(r.specs).toHaveLength(1);
+    expect(r.posted.map((p) => p.state)).toEqual(['pending', 'failure']);
+    expect(disabled).toHaveLength(1);
+  });
   it('通过：先贴 pending 再贴 success（都在要验的头上）；会话在会话用户的空目录里起，收场就删；跑记到这张单名下', async () => {
     const r = rig();
     const got = await r.run(r.input(), ctx());
