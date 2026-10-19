@@ -1,10 +1,10 @@
 // 复杂快照 verify 的两段对象核对走有界批量 cat-file：真实 Git 隔离仓，按进程调用计数证明不再逐对象起 Git。
 // 基准只打印实际平台、规模和耗时，不拿毫秒数当闸门。
-import { spawnSync } from 'node:child_process';
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { runChildBytes } from '../child.ts';
 
 const SCRIPT = readFileSync(new URL('../../src/real/complex-snapshot.mjs', import.meta.url), 'utf8');
 const BATCH = 4096;
@@ -51,16 +51,9 @@ function env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
 }
 
 function git(cwd: string, args: string[], input?: Buffer | string): Buffer {
-  const result = spawnSync('git', args, {
-    cwd,
-    env: env(),
-    input,
-    maxBuffer: 64 * 1024 * 1024,
-    timeout: 60_000,
-    killSignal: 'SIGKILL',
-  });
+  const result = runChildBytes('git', args, { cwd, env: env(), ...(input === undefined ? {} : { input }) });
   if (result.status !== 0) {
-    throw new Error(`git ${args[0]} 退出 ${result.status}：${result.stderr?.toString('utf8').slice(0, 400)}`);
+    throw new Error(`git ${args[0]} 退出 ${result.status}：${result.stderr.toString('utf8').slice(0, 400)}`);
   }
   return result.stdout;
 }
@@ -68,15 +61,12 @@ function git(cwd: string, args: string[], input?: Buffer | string): Buffer {
 function snap(mode: 'capture' | 'verify', input: Buffer | undefined, extra: Record<string, string> = {}) {
   const log = join(root, `git-${Math.random().toString(16).slice(2)}.log`);
   writeFileSync(log, '');
-  const result = spawnSync(process.execPath, ['--input-type=module', '-e', SCRIPT], {
+  const result = runChildBytes(process.execPath, ['--input-type=module', '-e', SCRIPT], {
     cwd: repo,
     env: env({ FLEET_SNAP_MODE: mode, FLEET_GIT: wrapper, FLEET_TEST_GIT_LOG: log, ...extra }),
-    input,
-    maxBuffer: 256 * 1024 * 1024,
-    timeout: 120_000,
-    killSignal: 'SIGKILL',
+    ...(input === undefined ? {} : { input }),
+    limitMs: 120_000,
   });
-  if (result.status === null) throw new Error(`快照子进程没跑完：${result.error?.message ?? result.signal}`);
   const calls = readFileSync(log, 'utf8').split('\n').filter(Boolean);
   return { status: result.status, stdout: result.stdout, stderr: result.stderr.toString('utf8'), calls };
 }
