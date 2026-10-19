@@ -219,6 +219,20 @@ function historyLastLine() {
   }
 }
 
+/**
+ * 写一份请求文件：先写临时文件再 link 到 request.json（已有一份就失败，不盖掉别人的）。请求目录归 fleet，这里是 root，写得进。
+ * 样子同驾驶舱后端（packages/api/src/release-request.ts 的 requestText、recoverRequestText，键的先后固定）。
+ */
+function writeRequest(obj) {
+  const tmp = `${REQUEST_DIR}/.auto-${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(obj)}\n`, { mode: 0o644 });
+  try {
+    linkSync(tmp, REQUEST_FILE);
+  } finally {
+    unlinkSync(tmp);
+  }
+}
+
 /** 进程活没活：kill 0 不发信号只问；EPERM 是活着但不归我们（同 release-request 的 pidAlive）。 */
 function pidAlive(pid) {
   try {
@@ -371,18 +385,13 @@ values ('ops'::actor_kind, 'ops:auto-release', :'action', :'target', :'before'::
   async clearTrainMarker() {
     unlinkSync(TRAIN_MARKER);
   },
-  /**
-   * 写发版请求：样子同驾驶舱后端（packages/api/src/release-request.ts 的 requestText：{ v, sha, at, by }，键的先后固定），
-   * 先写临时文件再 link 到 request.json（已有一份就失败，不盖掉别人的）。请求目录归 fleet，这里是 root，写得进。
-   */
+  /** 写发版请求：{ v, sha, at, by }（writeRequest）。 */
   async requestRelease({ sha, at, by }) {
-    const tmp = `${REQUEST_DIR}/.auto-${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify({ v: 1, sha, at, by })}\n`, { mode: 0o644 });
-    try {
-      linkSync(tmp, REQUEST_FILE);
-    } finally {
-      unlinkSync(tmp);
-    }
+    writeRequest({ v: 1, sha, at, by });
+  },
+  /** 写只读复核请求（发版卡「重试」同一份：kind retry，键的先后同 packages/api/src/release-request.ts）：健康没核实那一趟用。 */
+  async requestRetry({ sha, at, by }) {
+    writeRequest({ v: 1, kind: 'retry', sha, at, by });
   },
   /**
    * 开急修单（lib.mjs 的 emergencyStep）：current 那一版的 fleet-api emergency-issue，正文从标准输入喂；它经「引擎」机器人开单、

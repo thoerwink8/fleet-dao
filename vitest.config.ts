@@ -1,9 +1,10 @@
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { defineConfig } from 'vitest/config';
 import { applyPosixToolsPath } from './packages/conventions/src/test-posix-path.ts';
 import { testWorkers } from './packages/conventions/src/test-run.ts';
 import { TEST_INCLUDE } from './packages/conventions/src/test-split.ts';
+import { assetServingAllow } from './packages/web/src/build/asset-access.ts';
 
 // 开几个测试进程按本进程所在 cgroup 的内存上限算（引擎的会话被关在有上限的 scope 里），CI、引擎的会话里没有上限照 vitest 默认；
 // 本机人手跑的再按核数和整机负载降一档。读不到、认不出上限就报错，不猜。见 packages/conventions/src/test-run.ts。
@@ -15,6 +16,11 @@ const workers = testWorkers();
 if (workers.note) console.warn(workers.note);
 
 export default defineConfig({
+  // web 的测试会读依赖里的 ?url 资源（elkjs worker）；全局虚拟仓下包的真实路径在工作区外，vite 默认的 strict allow 会拒绝。
+  // 只补 web 声明依赖的真实包目录，strict 照开（packages/web/src/build/asset-access.ts）。
+  server: {
+    fs: { allow: assetServingAllow(resolve(import.meta.dirname, 'packages/web'), import.meta.dirname) },
+  },
   test: {
     // 收哪些测试文件只有一份（test-split.ts 的 TEST_INCLUDE）：CI 的 changes job 不装依赖，要自己在仓里按它枚举
     // （test-split.ts 的 listTestFiles），两边差一个都算错——test/test-split.test.ts 拿 vitest list 核对。

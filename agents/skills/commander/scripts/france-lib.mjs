@@ -1271,6 +1271,8 @@ export const ACTION_WORDS = {
   'history-unreadable': '发布历史读不到',
   'checkout-blocked': '部署检出被挡',
   'state-unwritable': '状态文件写不进去',
+  'auto-held': '自动发版被闸拦下',
+  'auto-health-retry': '请求了发后健康的只读复核',
 };
 
 /**
@@ -1355,7 +1357,7 @@ function releaseFacts(current, auto, at) {
       const newer = st.main.commits[i - 1];
       if (!newer) throw new RangeError(`commits[${i - 1}] 取不到（i 来自 findIndex，不该发生）`);
       view.oldestUnreleasedAt = newer[1];
-      // 落后几个提交只是读数、不算异常：发布只由驾驶舱按钮（或发版车）发，没人点就不会上线（决定 0032、#1271）
+      // 落后由自动发布去追（决定 0088），这里只是读数；自动发版被闸拦久了由它报 auto-release:held（#3278）
     } else if (i === 0) view.behind = 0;
     else if (fresh)
       issues.push({

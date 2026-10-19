@@ -1,6 +1,7 @@
 import { reactRouter } from '@react-router/dev/vite';
 import tailwindcss from '@tailwindcss/vite';
-import { defineConfig } from 'vite';
+import { defineConfig, searchForWorkspaceRoot } from 'vite';
+import { assetServingAllow } from './src/build/asset-access.ts';
 import { LICENSE_DATA, thirdPartyLicenses } from './src/build/licenses.ts';
 
 // 开发时 /api、/auth 转给本机的驾驶舱后端（packages/api，默认 127.0.0.1:8787），页面和接口同源。
@@ -12,6 +13,8 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // 全局虚拟仓下依赖的真实路径在工作区外：strict 照开，只补声明依赖的包目录（src/build/asset-access.ts）。
+    fs: { allow: assetServingAllow(import.meta.dirname, searchForWorkspaceRoot(import.meta.dirname)) },
     proxy: {
       '/api': { target: backend },
       '/auth': { target: backend },
