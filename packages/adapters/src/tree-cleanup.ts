@@ -70,11 +70,16 @@ export async function invokeTreeHelper(options: TreeHelperOptions, args: string[
   if (
     capability.state !== 'ok' ||
     !Array.isArray(features) ||
-    !['tree-usage', 'identity-remove', 'cleanup-status', 'cleanup-rollback', 'locked-adopt'].every((name) =>
-      features.includes(name),
-    )
+    ![
+      'tree-usage',
+      'identity-remove',
+      'cleanup-status',
+      'cleanup-rollback',
+      'locked-adopt',
+      'temporary-files',
+    ].every((name) => features.includes(name))
   )
-    throw new Error('受管帮手不支持完整删树协议，保留原树');
+    throw new Error('受管帮手不支持完整删树协议（含 temporary-files），保留原对象');
   return call(options, args);
 }
 
