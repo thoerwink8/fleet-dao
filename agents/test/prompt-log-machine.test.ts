@@ -26,12 +26,18 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-/** 像 Claude Code 那样喂一条消息进去；env 里没有的 FLEET_WORKER 一律去掉，免得这台机器自己的环境串进来。 */
+/** 像 Claude Code 那样喂一条消息进去；机器标记在隔离宿主身份后按场景显式设置。 */
 function feed(input: Record<string, unknown>, env: Record<string, string> = {}) {
-  const { FLEET_WORKER: _drop, ...base } = interactiveHookEnv();
   const r = runChild(process.execPath, [HOOK], {
     input: JSON.stringify(input),
-    env: { ...base, FLEET_PROMPT_LOG_DIR: dir, FLEET_UNATTENDED_DIR: join(dir, 'unattended'), ...env },
+    env: {
+      ...interactiveHookEnv(),
+      HOME: dir,
+      USERPROFILE: dir,
+      FLEET_PROMPT_LOG_DIR: dir,
+      FLEET_UNATTENDED_DIR: join(dir, 'unattended'),
+      ...env,
+    },
   });
   return { code: r.status, out: r.stdout ?? '' };
 }
