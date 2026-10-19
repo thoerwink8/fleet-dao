@@ -302,6 +302,7 @@ describe('环境类、能力标记', () => {
     expect(needsPg('packages/db/src/x.test.ts')).toBe(true);
     expect(needsPg('packages/api/test/store.pg.test.ts')).toBe(false);
     expect(needsPg('packages/store/test/task-execution.real-pg.test.ts')).toBe(true);
+    expect(needsPg('packages/store/test/idempotency-race.real-pg.test.ts')).toBe(true);
     expect(needsPg('packages/store/test/task-execution.pg.test.ts')).toBe(false);
     expect(needsPg('packages/store/test/other.real-pg.test.ts')).toBe(false);
   });
@@ -405,7 +406,10 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     for (const b of r.boxes.filter((x) => x.pg))
       expect(
         b.files.every(
-          (f) => f.startsWith('packages/db/') || f === 'packages/store/test/task-execution.real-pg.test.ts',
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
       ).toBe(true);
     const withTemporal = r.boxes.filter((b) => b.temporal);

@@ -18,6 +18,7 @@
 - 契约测试 `packages/store/test/store-contract.ts`：内存版（`store.memory.test.ts`）和 Postgres 版（`store.pg.test.ts`）过同一套；另有几套分主题的契约（credentials、nodes、task-list）。
 - Postgres 版默认跑在 PGlite 上（真迁移，不要起库）；设了 `FLEET_TEST_PG_URL` 才连真库（CI 的 pg 台）。见 `packages/db/src/testing.ts`。
 - `test/task-execution.real-pg.test.ts` 单独进入pg台，验证同隔离库两独立backend真实锁竞争及四种修改的审计触发器故障回滚；本机缺测试URL明确跳过，CI缺URL明确失败。Memory/PGlite/真PG共用身份合同，不拿PGlite替代真实竞争。
+- `test/idempotency-race.real-pg.test.ts` 同样进pg台：在真实冲突INSERT与SELECT之间受控释放旧owner，核占键重做、第三者抢占、持续竞争有界失败及单连接临界区可查库；不替换SQL结果或靠sleep命中。
 
 ## 常见坑
 
