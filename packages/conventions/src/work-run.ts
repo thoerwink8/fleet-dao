@@ -1029,6 +1029,13 @@ export function claimRunLock(dir: string, name: string, pid: number, now: Date):
       }
       continue;
     }
+    // 参与者可能在回收闸建立前已经通过了初次检查，随后才 mkdir 主锁。
+    // 这时不能发布一个会被回收者误认为旧锁的 owner；放弃自己刚建的空目录，
+    // 把同一回收闸作为主锁发布前的互斥边界。
+    if (lockOccupied(dir, `${name}.reclaim`, now)) {
+      rmSync(lock, { recursive: true, force: true });
+      return null;
+    }
     try {
       writeJson(join(lock, 'owner.json'), { pid, token, claimedAt: now.toISOString() });
     } catch (e) {

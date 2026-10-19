@@ -1186,6 +1186,16 @@ describe('恢复入口的原子占位', () => {
     expect(readJson<{ token: string }>(join(lock, 'owner.json'))?.token).toBe('published-by-a');
   });
 
+  it('主锁暂时消失但回收闸仍在时，不创建并发布平行 owner', () => {
+    const dir = join(temp(), 'reclaim-publish');
+    mkdirSync(dir, { recursive: true });
+    const reclaim = claimRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, process.pid, new Date());
+    expect(reclaim).toBeTruthy();
+    expect(claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date())).toBeNull();
+    expect(existsSync(join(dir, SUPERVISOR_START_LOCK))).toBe(false);
+    if (reclaim) releaseRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, reclaim);
+  });
+
   it('看护已启动但占位交接失败时，不释放后来接手的占位', async () => {
     let replacement = false;
     const w = runWorld({
