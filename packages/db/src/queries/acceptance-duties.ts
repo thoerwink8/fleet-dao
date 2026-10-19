@@ -7,7 +7,14 @@ import {
 } from '@fleet-dao/shared';
 import { and, asc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { acceptanceDuties, acceptanceDutySupersessions } from '../schema/index.ts';
+import {
+  acceptanceDuties,
+  acceptanceDutySupersessions,
+  pullRequests,
+  repos,
+  runs,
+  tasks,
+} from '../schema/index.ts';
 
 export type AcceptanceDutyRow = typeof acceptanceDuties.$inferSelect;
 export type AcceptanceDutyIdentity = Pick<
@@ -21,6 +28,61 @@ export function readAcceptanceDutyRows(db: Db, identity: { repo: string; issueNu
     where: (t, { and, eq }) => and(eq(t.repo, identity.repo), eq(t.issueNumber, identity.issueNumber)),
     orderBy: (t, { asc }) => [asc(t.id)],
   });
+}
+
+/**
+ * 历史责任归并预检（#3207 第 1 片）要的全部事实，纯读：任务及其仓、原 workflow / run 对应的运行、同仓 PR 镜像、
+ * 点名的责任行、最终头上已有的责任行。回执只取 PR 镜像（pull_requests），不看责任行自己的 merge 列。
+ * 任一次读失败照抛；点名的责任号读不全由调用方判。
+ */
+export async function readAcceptanceMergeFacts(
+  db: Db,
+  q: {
+    taskId: string;
+    workflowId: string;
+    temporalRunId: string;
+    prNumber: number;
+    head: string;
+    dutyIds: readonly number[];
+  },
+) {
+  const [task] = await db
+    .select({
+      id: tasks.id,
+      issueNumber: tasks.issueNumber,
+      repoId: tasks.repoId,
+      owner: repos.owner,
+      name: repos.name,
+    })
+    .from(tasks)
+    .innerJoin(repos, eq(repos.id, tasks.repoId))
+    .where(eq(tasks.id, q.taskId));
+  const matchedRuns = await db
+    .select({ id: runs.id, taskId: runs.taskId })
+    .from(runs)
+    .where(and(eq(runs.workflowId, q.workflowId), eq(runs.temporalRunId, q.temporalRunId)));
+  const [pr] = task
+    ? await db
+        .select()
+        .from(pullRequests)
+        .where(and(eq(pullRequests.repoId, task.repoId), eq(pullRequests.number, q.prNumber)))
+    : [];
+  const duties = await db
+    .select()
+    .from(acceptanceDuties)
+    .where(inArray(acceptanceDuties.id, [...q.dutyIds]))
+    .orderBy(asc(acceptanceDuties.id));
+  const [target] = await db
+    .select()
+    .from(acceptanceDuties)
+    .where(
+      and(
+        eq(acceptanceDuties.taskId, q.taskId),
+        eq(acceptanceDuties.prNumber, q.prNumber),
+        eq(acceptanceDuties.head, q.head),
+      ),
+    );
+  return { task, runs: matchedRuns, pr, duties, target };
 }
 
 /** 冲突更新在数据库中合并全部验收项；新项使旧的最终验收凭据失效。 */
