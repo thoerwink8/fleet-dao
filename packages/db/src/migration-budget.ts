@@ -38,9 +38,10 @@ export function verifyMigrationBudget(
       resolve(result);
     };
     const abort = () => finish({ verified: false, reason: '迁移核验已取消' });
+    // 子进程起 node 加生成 SQL 单跑就要三四秒，机器忙时常过 5 秒；超时只会退回 raw 多计行数，给足 20 秒。
     const timer = setTimeout(
       () => finish({ verified: false, reason: '迁移核验超时' }),
-      options.timeoutMs ?? 5000,
+      options.timeoutMs ?? 20_000,
     );
     options.signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', (chunk: Buffer) => {
