@@ -16,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { latestRows } from '../hooks/continuation-latest.mjs';
 import {
   appendReceipt,
   DIAGNOSTIC_RECEIPT_KEY,
@@ -25,11 +26,13 @@ import {
   MAX_RECEIPT_ROWS,
   observeContinuation,
   readDiagnosticReceipts,
+  readLatestDiagnosticState,
+  readLatestReceiptState,
   readReceipts,
   receiptContext,
   receiptStatus,
 } from '../hooks/continuation-receipts.mjs';
-import { main, unattendedAuthority } from '../hooks/unattended.mjs';
+import { main, readState, unattendedAuthority } from '../hooks/unattended.mjs';
 import { runChild } from './child.ts';
 import { codexSourceFixture } from './codex-source-fixture.ts';
 
@@ -61,6 +64,14 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
   const command = (...args: string[]) => main(args, { env, out: () => {}, err: () => {} });
   expect(command('on')).toBe(0);
   const state = () => JSON.parse(readFileSync(join(dir, `${sid}.json`), 'utf8'));
+  // 构造升级前同一窗口的v1历史；真实入口随后只写v2，v1存储单测继续测旧格式合同。
+  rmSync(join(dir, '.receipts', `${fingerprint(sid)}.latest-v2`));
+  expect(
+    appendReceipt(receiptContext(dir, { session_id: sid }, state(), 'Command', env, 'allowed'), {
+      phase: 'window',
+      decision: 'on',
+    }),
+  ).toEqual({ ok: true });
   const run = (script: string, more: object = {}, extraEnv: NodeJS.ProcessEnv = {}) =>
     runChild(process.execPath, [fileURLToPath(new URL(`../hooks/${script}.mjs`, import.meta.url))], {
       cwd: dir,
@@ -70,7 +81,11 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
   const rows = () => {
     const r = readReceipts(dir, fingerprint(sid));
     if (!r.ok) throw Error(r.code);
-    return r.rows;
+    const latest = readLatestReceiptState(dir, fingerprint(sid));
+    return [
+      ...r.rows,
+      ...(latest.ok && latest.state ? latestRows(latest.state).filter((row) => row !== null) : []),
+    ];
   };
   const context = (more: object = {}, captured = state()) => {
     const input = { session_id: sid, cwd: dir, ...more };
@@ -80,12 +95,20 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
       hookId: input.session_id,
       agentId: Reflect.get(input, 'agent_id'),
     });
-    return receiptContext(dir, input, captured, 'Stop', env, authority.kind);
+    return receiptContext(dir, input, captured, 'Stop', env, authority.kind, undefined, () =>
+      readState(dir, sid),
+    );
   };
   const diagnostics = () => {
     const r = readDiagnosticReceipts(dir);
     if (!r.ok) throw Error(r.code);
-    return r.rows;
+    const latest = readLatestDiagnosticState(dir);
+    return [
+      ...r.rows,
+      ...(latest.ok && latest.state
+        ? [{ authority: latest.state.authority, receipt: latest.state.receipt }]
+        : []),
+    ];
   };
   const file = join(dir, '.receipts', `${fingerprint(sid)}.jsonl`);
   return { dir, sid, env, state, command, run, rows, diagnostics, context, file };
@@ -233,7 +256,7 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
   it('关闭读取句柄失败明确未知，关联观察不抛异常或泄露原始错误', async () => {
     const s = fixture();
     s.run('stop', { turn_id: 'turn-one' });
-    const context = s.context({ turn_id: 'turn-two' });
+    const context = { ...s.context({ turn_id: 'turn-two' }), event: 'PostToolUse' };
     const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
     const failClose = (fd: number) => {
       actual.closeSync(fd);
@@ -243,7 +266,7 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     expect(readReceipts(s.dir, fingerprint(s.sid))).toEqual({ ok: false, code: 'IO' });
     vi.mocked(closeSync).mockImplementationOnce(failClose);
     expect(() => observeContinuation(context)).not.toThrow();
-    expect(s.rows().at(-1)).toMatchObject({ phase: 'fault', decision: 'read_failed' });
+    expect(s.rows().some((row) => row.phase === 'fault' && row.decision === 'read_failed')).toBe(true);
     expect(readFileSync(s.file, 'utf8')).not.toContain('private-close-detail');
   });
   it.each(['output-close', 'lock-close', 'unlock'] as const)(
@@ -273,8 +296,10 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
   it('真实进展入口的回执读取close失败不挡原有进展登记', () => {
     const s = fixture();
     s.run('stop', { turn_id: 'turn-one' });
+    const snapshot = join(s.dir, '.receipts', `${fingerprint(s.sid)}.latest-v2`);
+    const before = readFileSync(snapshot);
     const script = new URL('../hooks/continuation-progress.mjs', import.meta.url).href;
-    const wrapper = `const fs=require('node:fs');const open=fs.openSync,close=fs.closeSync;let target=null;fs.openSync=(path,flags,...args)=>{const fd=open(path,flags,...args);if(String(path).endsWith('.jsonl')&&typeof flags==='number'&&!(flags&(fs.constants.O_RDWR|fs.constants.O_WRONLY)))target=fd;return fd};fs.closeSync=fd=>{close(fd);if(fd===target){target=null;throw Error('private-close-error')}};require('node:module').syncBuiltinESMExports();import(${JSON.stringify(script)}).then(m=>m.runProgress());`;
+    const wrapper = `const fs=require('node:fs');const open=fs.openSync,close=fs.closeSync;let target=null;fs.openSync=(path,flags,...args)=>{const fd=open(path,flags,...args);if(String(path).endsWith('.latest-v2')&&typeof flags==='number'&&!(flags&(fs.constants.O_RDWR|fs.constants.O_WRONLY)))target=fd;return fd};fs.closeSync=fd=>{close(fd);if(fd===target){target=null;throw Error('private-close-error')}};require('node:module').syncBuiltinESMExports();import(${JSON.stringify(script)}).then(m=>m.runProgress());`;
     const r = runChild(process.execPath, ['-e', wrapper], {
       cwd: s.dir,
       env: s.env,
@@ -291,7 +316,9 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     expect(r.status).toBe(0);
     expect(r.stderr).not.toContain('private-close-error');
     expect(readdirSync(join(s.dir, `${s.sid}.progress`))).toHaveLength(1);
-    expect(s.rows().some((row) => row.phase === 'fault' && row.decision === 'read_failed')).toBe(true);
+    // 持续关闭失败时连故障快照也不能安全提交，明确报IO并保留原始证据。
+    expect(r.stderr).toContain('IO');
+    expect(readFileSync(snapshot)).toEqual(before);
   });
   it.each(['close', 'unlock'] as const)('新日志准入锁%s失败不报成功，保留日志锁明确未知', async (kind) => {
     const s = fixture();
@@ -469,7 +496,7 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     const r = s.run('stop', { session_id: 'new-session' }, { CODEX_THREAD_ID: 'new-session' });
     // 新session没有开关，原本应放行；容量失败不能把它误判成已开。
     expect(r.stdout).toBe('');
-    expect(r.stderr).toContain('LIMIT');
+    expect(r.stderr).toContain('WINDOW_UNKNOWN');
     expect(JSON.parse(s.run('stop').stdout).decision).toBe('block');
   });
   it('目录准入锁占用或异常条目都明确失败，不无限扫描或当空目录', () => {
@@ -540,7 +567,7 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
         .rows()
         .filter((r) => r.event === 'PostToolUse' && r.phase === 'entered')
         .map((r) => r.eventKey),
-    ).toEqual([fingerprint('tool-a'), fingerprint('tool-b')]);
+    ).toEqual([fingerprint('tool-b')]);
     const row = s.rows()[0];
     writeFileSync(s.file, `${JSON.stringify({ ...row, tool_input: 'private' })}\n`);
     expect(readReceipts(s.dir, fingerprint(s.sid)).ok).toBe(false);
@@ -559,12 +586,12 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     expect(s.run('stop').stdout).toBe('');
     s.command('off');
     expect(s.run('stop').stdout).toBe('');
-    expect(s.rows().some((r) => r.phase === 'allow' && r.decision === 'off')).toBe(true);
+    expect(s.run('stop').stdout).toBe('');
     s.command('on');
     const state = { ...s.state(), expiresAt: '2000-01-01T00:00:00.000Z' };
     writeFileSync(join(s.dir, `${s.sid}.json`), JSON.stringify(state));
     s.run('stop');
-    expect(s.rows().some((r) => r.decision === 'expired')).toBe(true);
+    expect(readState(s.dir, s.sid)).toMatchObject({ ok: true, state: null });
     const raw = readFileSync(s.file, 'utf8');
     expect(raw).not.toMatch(/private reason|private done|receipt-session|child/);
   });

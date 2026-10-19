@@ -28,6 +28,7 @@ export function runProgress(expectedCli) {
       process.env,
       authority.kind,
       expectedCli,
+      session.ok ? () => readState(dir, session.id) : undefined,
     );
     receipt = context;
     noteReceipt(context, { phase: 'entered', decision: 'none' });
