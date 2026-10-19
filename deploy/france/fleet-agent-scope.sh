@@ -565,7 +565,7 @@ tree_helper() {
 }
 
 case ${1:-} in
-capabilities|tree-place|tree-usage|cleanup-status|cleanup-rollback)
+capabilities|tree-place|tree-usage|cleanup-status|cleanup-rollback|retirement)
   tree_helper "$@"
   ;;
 run)

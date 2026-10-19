@@ -204,6 +204,14 @@ flowchart TD
 - 「我理解为」卡片不挡路：活照常开工，看到理解错了点「改一下」，任务停下重新规划。
 - 卡住了按「下一步该干什么」处理（第十二节），不再默认停下等人。
 
+### 无 PR 的推送权限停点交还
+
+`taskHandbackPermissionPush` 仅处理同一 run 的首次 `pushBranch/WORKFLOWS_PERMISSION` 自然停点（hold generation=1、continued=0，三段模式、无 PR）。完整请求含业务 requestId、token、操作者和返工意见；同编号同载荷复用结果，异文即冲突。transport Update ID 还绑定完整规范载荷的 SHA-256，避免 SDK 去重吞掉异文。无缓存或换 worker 重放时先确定性重建首次 hold；未来代数立即拒绝，不另发 timer。
+
+可信 Activity 重新读取完整连续历史、自然返回的 run 和持久结果、预算、正式需求合同、干净 Git 树、旧 worker 服务代际与固定 scopes/helper 的自然终态，并在最后重核树、合同和活会话。旧 DB 缺 temporalRunId 时仅接受历史 runId、任务/工作流/树/分支及精确时间共同绑定的 legacy 来源；非空值必须同 run。当前 root 全进程/线程扫描是现核，不能独自代替历史退场证明。无证据、重试/取消/超时、预算饱和或身份变化均不放行。
+
+预检成功只进入 ready；原 park 原子消费后将返工意见交回主循环，完成本轮记录并接纳返工才返回 `handed_back`。继续、放弃或终态使在途请求失效；不清动手/验收轮数，不赠 token 份数，不借自动 reset 获得新预算。默认运维检查只读；其报告不是执行凭据，execute 必须再读全部来源。它不为预算停点、未知 Activity attempt、已有 PR 或通用跨任务接手发资格。
+
 ## 六、任务颗粒度与合并（已定）
 
 > 层级是版本 → 母单或单独的小单 → 子单 → 块（决定 0010 替掉了 0003 的 Lead 按块循环）。
