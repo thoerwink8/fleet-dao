@@ -3,9 +3,11 @@
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CLEANUP_PAGE_LIMITS } from '@fleet-dao/adapters';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { helperWorkTrees, layout, sessionUserUids } from '../../src/real/worktrees.ts';
+import { pagedCleanupHelper } from './fixtures.ts';
 
 const repo = { owner: 'acme', name: 'widgets' };
 
@@ -92,74 +94,47 @@ describe('属主', () => {
 
 describe('清理事务分页的真实装配（帮手回执由测试摆布）', () => {
   const root = '/var/lib/fleet-work';
-  const namespace = {
-    lex: `${root}/.cleanup-transactions`,
-    real: `${root}/.cleanup-transactions`,
-    dev: '1',
-    ino: '2',
-    uid: '0',
-  };
-  const hash = (n: number) => n.toString(16).padStart(64, '0');
-  const tail = { id: 'e'.repeat(64), pathHash: hash(120), phase: 'RECOVERY_REQUIRED' };
-  const head = { version: 1, state: 'ok', namespace, generation: 'd'.repeat(64) };
-  const firstPage = {
-    ...head,
-    rows: [],
-    truncated: true,
-    after: null,
-    next: hash(99),
-    proof: 'c'.repeat(64),
-  };
-  const lastPage = { ...head, rows: [tail], truncated: false, after: hash(99), next: null };
   let dir: string;
+  let fake: ReturnType<typeof pagedCleanupHelper>;
   let trees: ReturnType<typeof helperWorkTrees>;
-  // 假帮手只认能力和 cleanup-status：按调用顺序吐 pages.json 里的回执，吐完了按读失败退出。
-  function pages(list: unknown[]) {
-    writeFileSync(join(dir, 'pages.json'), JSON.stringify(list));
-    writeFileSync(join(dir, 'used'), '0');
-  }
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-pages-'));
-    const helper = join(dir, 'fake-scope.mjs');
-    const features = [
-      'tree-usage',
-      'identity-remove',
-      'cleanup-status',
-      'cleanup-rollback',
-      'locked-adopt',
-      'temporary-files',
-    ];
-    writeFileSync(
-      helper,
-      [
-        "import { readFileSync, writeFileSync } from 'node:fs';",
-        'const [action] = process.argv.slice(2);',
-        `const dir = ${JSON.stringify(dir)};`,
-        `if (action === 'capabilities') { process.stdout.write(JSON.stringify({ version: 1, state: 'ok', features: ${JSON.stringify(features)} })); process.exit(0); }`,
-        "const used = Number(readFileSync(dir + '/used', 'utf8'));",
-        "writeFileSync(dir + '/used', String(used + 1));",
-        "const list = JSON.parse(readFileSync(dir + '/pages.json', 'utf8'));",
-        "if (action !== 'cleanup-status' || used >= list.length) process.exit(1);",
-        'process.stdout.write(JSON.stringify(list[used]));',
-      ].join('\n'),
-    );
-    trees = helperWorkTrees({ root, helper, sudo: [process.execPath] });
+    fake = pagedCleanupHelper(dir, root);
+    trees = helperWorkTrees({ root, helper: fake.helper, sudo: [process.execPath] });
   });
   afterEach(() => {
     rmSync(dir, { recursive: true, force: true });
   });
 
   it('完整读取：cleanupNamespace/pendingCleanup 读完全部页，尾部待恢复事务照报', async () => {
-    pages([firstPage, lastPage]);
-    expect(await trees.cleanupNamespace()).toEqual([tail]);
-    pages([firstPage, lastPage]);
-    expect(await trees.pendingCleanup()).toEqual([tail]);
+    fake.pages([fake.firstPage, fake.lastPage]);
+    expect(await trees.cleanupNamespace()).toEqual([fake.tail]);
+    fake.pages([fake.firstPage, fake.lastPage]);
+    expect(await trees.pendingCleanup()).toEqual([fake.tail]);
   });
 
-  it('partial：只读到首页（空行）或缺页时仍是“清理事务列表不完整”，不当全清', async () => {
-    pages([firstPage]);
-    await expect(trees.cleanupNamespace()).rejects.toThrow('清理事务列表不完整');
-    pages([{ ...firstPage, generation: undefined, next: undefined }]);
-    await expect(trees.pendingCleanup()).rejects.toThrow('清理事务列表不完整');
+  it('partial：只读到首页（空行）、缺页、旧帮手无游标或变动超轮次时仍是“清理事务列表不完整”，不当全清', async () => {
+    const changed = { version: 1, state: 'changed' };
+    for (const list of [
+      [fake.firstPage],
+      [{ ...fake.firstPage, round: undefined, cursor: undefined }],
+      [fake.firstPage, changed, fake.firstPage, changed, fake.firstPage, changed],
+    ]) {
+      fake.pages(list);
+      await expect(trees.cleanupNamespace()).rejects.toThrow('清理事务列表不完整');
+      fake.pages(list);
+      await expect(trees.pendingCleanup()).rejects.toThrow('清理事务列表不完整');
+    }
+  }, 30_000); // 每页起两个子进程，变动超轮次那组一共二十来个，机器忙时会超默认 5 秒
+
+  it('partial：超过整轮页数上限仍不完整，不放宽上限', async () => {
+    const saved = CLEANUP_PAGE_LIMITS.pages;
+    CLEANUP_PAGE_LIMITS.pages = 1;
+    try {
+      fake.pages([fake.firstPage, fake.lastPage]);
+      await expect(trees.pendingCleanup()).rejects.toThrow('页上限');
+    } finally {
+      CLEANUP_PAGE_LIMITS.pages = saved;
+    }
   });
 });

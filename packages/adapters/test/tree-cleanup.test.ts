@@ -69,10 +69,29 @@ describe('cleanup-status 原帮手端口的命名空间事实', () => {
 describe('cleanup-status 分页：只有全部页读完才算完整', () => {
   const hash = (n: number) => n.toString(16).padStart(64, '0');
   const tail = { id: 'e'.repeat(64), pathHash: hash(129), phase: 'RECOVERY_REQUIRED' };
-  const gen = (c: string) => c.repeat(64);
-  const head = { version: 1, state: 'ok', namespace, generation: gen('a') };
-  const firstPage = { ...head, rows: [], truncated: true, after: null, next: hash(99), proof: gen('9') };
-  const lastPage = { ...head, rows: [tail], truncated: false, after: hash(99), next: null };
+  const round = 'a'.repeat(32);
+  const cursor = (n: number) => `c${n}.${String(n % 10).repeat(64)}`;
+  const head = { version: 1, state: 'ok', namespace, round };
+  // 首页读了前 100 桶（全是空/已结），第 2 页读完尾部 30 桶并把 130 桶全部复核：只有它是 truncated=false。
+  const firstPage = {
+    ...head,
+    rows: [],
+    truncated: true,
+    page: 1,
+    pass: 'read',
+    from: null,
+    through: hash(99),
+    cursor: cursor(1),
+  };
+  const lastPage = {
+    ...head,
+    rows: [tail],
+    truncated: false,
+    page: 2,
+    pass: 'verify',
+    from: hash(99),
+    through: hash(129),
+  };
   let dir = '';
   const saved = { ...CLEANUP_PAGE_LIMITS };
 
@@ -99,32 +118,48 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     dir = '';
   });
 
-  it('完整读取：首页空行仍截断，带绑定身份和代次的游标读到尾部 RECOVERY_REQUIRED', async () => {
+  it('完整读取：首页空行仍截断，只把帮手签发的游标原样交回，读到尾部 RECOVERY_REQUIRED', async () => {
     pages([firstPage, lastPage]);
     expect(await readCleanupNamespace(root, options)).toEqual([tail]);
-    expect(cursors()).toEqual([
-      [],
-      ['--after', hash(99), '--dev', '1', '--ino', '2', '--generation', gen('a'), '--proof', gen('9')],
-    ]);
+    // 游标不透明：不自己拼桶名、偏移或摘要，只带上一页给的那串。
+    expect(cursors()).toEqual([[], ['--cursor', cursor(1)]]);
     pages([firstPage, lastPage]);
     expect(await cleanupStatus(options)).toEqual([tail]);
   });
 
-  it('完整读取：翻页中换代整轮重启，不拼两份列表', async () => {
-    const fresh = { generation: gen('b') };
+  it('完整读取：复核页（同一桶位、无记录）也要接续，末页才完整', async () => {
+    const verify = {
+      ...head,
+      rows: [],
+      truncated: true,
+      page: 2,
+      pass: 'verify',
+      from: hash(129),
+      through: hash(129),
+      cursor: cursor(2),
+    };
+    const read = { ...firstPage, rows: [tail], page: 1, through: hash(129) };
+    const done = { ...lastPage, rows: [], page: 3, from: hash(129) };
+    pages([read, verify, done]);
+    expect(await readCleanupNamespace(root, options)).toEqual([tail]);
+    expect(cursors()).toEqual([[], ['--cursor', cursor(1)], ['--cursor', cursor(2)]]);
+  });
+
+  it('完整读取：翻页中命名空间变了整轮重启，不拼两轮的页', async () => {
+    const fresh = { round: 'b'.repeat(32) };
     pages([
       firstPage,
-      { version: 1, state: 'changed', namespace },
-      { ...firstPage, ...fresh },
+      { version: 1, state: 'changed', reason: 'namespace changed during the round' },
+      { ...firstPage, ...fresh, cursor: cursor(3) },
       { ...lastPage, ...fresh },
     ]);
     expect(await readCleanupNamespace(root, options)).toEqual([tail]);
-    expect(cursors().map((args) => args.at(-3) ?? 'first')).toEqual(['first', gen('a'), 'first', gen('b')]);
+    expect(cursors()).toEqual([[], ['--cursor', cursor(1)], [], ['--cursor', cursor(3)]]);
   });
 
   it.each([
     [
-      'partial：连续换代超过轮次',
+      'partial：连续变动超过轮次',
       [
         firstPage,
         { version: 1, state: 'changed' },
@@ -137,26 +172,34 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     ],
     ['partial：缺页（第二页读失败）', [firstPage], '读失败'],
     [
-      'partial：旧帮手只给前缀，无代次/游标',
-      [{ ...firstPage, generation: undefined, next: undefined }],
+      'partial：旧帮手只给前缀，无轮次/游标',
+      [{ ...firstPage, round: undefined, cursor: undefined }],
       '不支持分页',
     ],
-    ['partial：首页冒充续页', [{ ...lastPage }], '首页回执带了游标'],
-    ['partial：截断页缺游标', [{ ...firstPage, next: undefined }], '游标'],
-    ['partial：截断页缺游标证明，不能续读', [{ ...firstPage, proof: undefined }], '缺游标证明'],
-    ['partial：游标证明不是摘要', [{ ...firstPage, proof: '12' }], '缺游标证明'],
-    ['partial：重复页/循环游标', [firstPage, { ...firstPage, after: hash(99) }], '重复或回退'],
-    ['partial：游标回退', [firstPage, { ...firstPage, after: hash(99), next: hash(5) }], '重复或回退'],
-    ['partial：回执不是所请求游标之后', [firstPage, { ...lastPage, after: hash(1) }], '所请求游标'],
+    ['partial：首页冒充续页', [{ ...lastPage, page: 1 }], '接着读'],
+    ['partial：截断页缺游标', [{ ...firstPage, cursor: undefined }], '游标缺失或重复'],
+    ['partial：游标不是帮手格式', [{ ...firstPage, cursor: `--after ${hash(99)}` }], '游标缺失或重复'],
+    ['partial：重复游标（循环）', [firstPage, { ...firstPage, page: 2, from: hash(99) }], '游标缺失或重复'],
+    ['partial：页号跳了', [firstPage, { ...lastPage, page: 3 }], '本轮的下一页'],
+    ['partial：混进别的轮次', [firstPage, { ...lastPage, round: 'b'.repeat(32) }], '本轮的下一页'],
+    ['partial：没从上一页停下处接着读', [firstPage, { ...lastPage, from: hash(1) }], '接着读'],
+    ['partial：读到的位置回退', [firstPage, { ...lastPage, through: hash(5) }], '回退'],
     ['partial：命名空间换了', [firstPage, { ...lastPage, namespace: { ...namespace, ino: '3' } }], '身份'],
-    ['partial：代次变了却仍报 ok', [firstPage, { ...lastPage, generation: gen('c') }], '代次'],
-    ['partial：旧格式代次（非摘要）不认', [{ ...firstPage, generation: '77.130' }], '不支持分页'],
+    ['partial：轮次不是帮手格式', [{ ...firstPage, round: '77' }], '不支持分页'],
     [
-      'partial：记录落在游标之前',
+      'partial：记录落在本页起点之前',
       [firstPage, { ...lastPage, rows: [{ ...tail, pathHash: hash(3) }] }],
       '范围',
     ],
-    ['partial：记录越过本页游标', [{ ...firstPage, rows: [tail] }, lastPage], '范围'],
+    ['partial：记录越过本页读到的桶', [{ ...firstPage, rows: [tail] }, lastPage], '范围'],
+    [
+      'partial：复核页带记录',
+      [
+        { ...firstPage, through: hash(129) },
+        { ...lastPage, from: hash(129), rows: [tail] },
+      ],
+      '范围',
+    ],
     ['partial：跨页重复记录', [{ ...firstPage, rows: [{ ...tail, pathHash: hash(9) }] }, lastPage], '重复'],
     ['partial：坏记录', [firstPage, { ...lastPage, rows: [{ phase: 'DELETING' }] }], '坏记录'],
     ['partial：坏回执', [firstPage, { ...lastPage, rows: null }], '回执不完整'],
@@ -172,9 +215,10 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
   it('partial：页数、条数、字节、整轮时间超界不放宽', async () => {
     const chain = [0, 1, 2, 3].map((i) => ({
       ...firstPage,
-      after: i ? hash(i * 10) : null,
-      next: hash(i * 10 + 10),
-      proof: gen(String(i)),
+      page: i + 1,
+      from: i ? hash(i * 10) : null,
+      through: hash(i * 10 + 10),
+      cursor: cursor(i + 1),
     }));
     CLEANUP_PAGE_LIMITS.pages = 3;
     pages(chain);

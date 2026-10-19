@@ -4,11 +4,14 @@ No caller-selected executable, proc root, work root, uid exclusion, or import pa
 The process scan is bounded evidence at a mandatory gate, not a global snapshot.
 """
 
+import base64
+import bisect
 import contextlib
 import ctypes
 import errno
 import fcntl
 import hashlib
+import hmac
 import json
 import os
 import pwd
@@ -24,18 +27,29 @@ VERSION = 1
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 SESSION_USER = "fleet-agent-carpool"
 DEADLINE = time.monotonic() + 110
-# One cleanup-status page; a caller only calls the list complete after walking every page.
+# One cleanup-status page; a caller only calls the list complete after a page with truncated=false.
+# Per page: buckets read, buckets re-stamped by the verify pass, rows and their bytes, intent bytes
+# read (settled or not), bucket entries listed or stamped, and the namespace listing itself.
 PAGE_BUCKETS = 100
+PAGE_CHECKS = 500
 PAGE_ROWS = 200
 PAGE_BYTES = 96 * 1024
-PAGE_ENTRIES = 1000
+PAGE_READ_BYTES = 1024 * 1024
+PAGE_ENTRIES = 2000
+NAMESPACE_BUCKETS = 10000
 # Soft: no new bucket after this. Hard: every open, lock wait and record read stops at PAGE_SECONDS.
 PAGE_SOFT_SECONDS = 10
 PAGE_SECONDS = 20
-# Timestamps tick coarsely: a namespace stamp must be older than this before it can prove "unchanged".
+# One round, first page to complete; the signed cursor carries both and the helper refuses past them.
+ROUND_PAGES = 256
+ROUND_SECONDS = 600
+# Timestamps tick coarsely: a stamp must be older than this before it can prove "unchanged".
 RACY_NS = 50_000_000
 PAGE_UNTIL = None
 HEX64 = re.compile(r"[0-9a-f]{64}")
+# Root-only per-boot key: a cleanup cursor is accepted back only if this helper signed it.
+KEY_DIR = "/run/fleet-dao-tree-usage"
+CURSOR = re.compile(r"([A-Za-z0-9_-]{1,2048})\.([0-9a-f]{64})")
 
 
 class Kept(Exception):
@@ -44,6 +58,10 @@ class Kept(Exception):
 
 class Overflow(Kept):
     pass
+
+
+class Moving(Exception):
+    """The namespace moved under the round: the caller restarts it, pages are never stitched."""
 
 
 def check_time():
@@ -55,21 +73,23 @@ def check_time():
 
 
 class Budget:
-    """What one cleanup-status page may still read; spending past it aborts the read, not after it."""
+    """What one cleanup-status page may still read; every cost is paid before the read it allows."""
 
     def __init__(self):
-        self.rows, self.size, self.entries = PAGE_ROWS, PAGE_BYTES, PAGE_ENTRIES
+        self.rows, self.size, self.read, self.entries = PAGE_ROWS, PAGE_BYTES, PAGE_READ_BYTES, PAGE_ENTRIES
 
     def require(self, rows=0, size=0):
         if self.rows < rows or self.size < size:
             raise Overflow("cleanup page bound exceeded")
 
-    def spend(self, rows=0, size=0, entries=0):
+    def spend(self, rows=0, size=0, read=0, entries=0):
+        self.require(rows, size)
+        if self.read < read or self.entries < entries:
+            raise Overflow("cleanup page bound exceeded")
         self.rows -= rows
         self.size -= size
+        self.read -= read
         self.entries -= entries
-        if min(self.rows, self.size, self.entries) < 0:
-            raise Overflow("cleanup page bound exceeded")
 
 
 def interrupted(signum, frame):
@@ -218,8 +238,10 @@ def read_record(fd, budget=None):
         if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o077 or st.st_size > 32768:
             raise Kept("untrusted intent")
         if budget:
-            # The page must still be able to hold this record before it is read and parsed.
+            # Paid before it is read, settled (DONE/RESTORED) or not; and the page must still be
+            # able to hold it as a row before it is parsed.
             budget.require(rows=1, size=st.st_size)
+            budget.spend(read=st.st_size)
         data = json.loads(os.read(h, 32769))
     finally:
         os.close(h)
@@ -249,17 +271,29 @@ def write_record(fd, rec):
     os.fsync(fd)
 
 
+def listing(fd, budget, limit=None):
+    """Directory names, each paid for (or counted against `limit`) before the next one is read."""
+    out = []
+    with os.scandir(fd) as it:
+        for entry in it:
+            check_time()
+            if budget:
+                budget.spend(entries=1)
+            elif len(out) >= limit:
+                raise Kept("cleanup namespace exceeds round bound")
+            out.append(entry.name)
+    return out
+
+
 def pending(fd, budget=None, first=False):
     """Open transactions of one bucket; with a budget every entry and row is paid for before the next read."""
     out = []
-    for name in os.listdir(fd):
+    for name in listing(fd, budget) if budget else os.listdir(fd):
         check_time()
         if name == "lock":
             continue
         if not HEX64.fullmatch(name):
             raise Kept("unrecognized transaction entry")
-        if budget:
-            budget.spend(entries=1)
         h = os.open(name, FLAGS, dir_fd=fd)
         try:
             rec = read_record(h, budget)
@@ -535,185 +569,293 @@ def remove(pathfd, qpath, exp):
             os.close(fd)
 
 
-def cleanup_cursor(args):
+CURSOR_FIELDS = {"v", "dev", "ino", "mtime", "ctime", "round", "started", "page", "pass", "after", "through", "seal", "check"}
+NUMBER = re.compile(r"0|[1-9][0-9]{0,39}")
+ZERO = "0" * 64
+
+
+def cursor_key(create):
+    """The per-boot signing key: root-owned 0600, exactly 32 bytes, under a root-private KEY_DIR.
+
+    Created once (never replaced, so cursors already signed stay valid); a cursor page never creates
+    it, so a lost key (reboot) refuses every outstanding cursor instead of accepting any.
+    """
+    try:
+        with chain(KEY_DIR, create=create, private=True) as (fd, _):
+            for _ in range(2):
+                try:
+                    h = os.open("cursor.key", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=fd)
+                except FileNotFoundError:
+                    if not create:
+                        break
+                    tmp = "cursor.key.%d" % os.getpid()
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(tmp, dir_fd=fd)
+                    w = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+                    try:
+                        if os.write(w, os.urandom(32)) != 32:
+                            raise Kept("short cleanup cursor key write")
+                        os.fsync(w)
+                    finally:
+                        os.close(w)
+                    try:
+                        os.link(tmp, "cursor.key", src_dir_fd=fd, dst_dir_fd=fd)
+                    except FileExistsError:
+                        pass  # Another page made it first; use that one.
+                    finally:
+                        os.unlink(tmp, dir_fd=fd)
+                    continue
+                try:
+                    st = os.fstat(h)
+                    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o077 or st.st_size != 32:
+                        raise Kept("untrusted cleanup cursor key")
+                    key = os.read(h, 33)
+                finally:
+                    os.close(h)
+                if len(key) != 32:
+                    raise Kept("untrusted cleanup cursor key")
+                return key
+    except FileNotFoundError:
+        pass
+    raise Kept("cleanup cursor was not issued by this helper")
+
+
+def sign(body):
+    data = base64.urlsafe_b64encode(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
+    data = data.decode().rstrip("=")
+    return data + "." + hmac.new(cursor_key(True), data.encode(), hashlib.sha256).hexdigest()
+
+
+def open_cursor(args):
+    """Only a cursor this helper signed: no caller-chosen bucket, offset, digest, page or bound."""
     if not args:
         return None
-    if len(args) != 10 or args[0::2] != ["--after", "--dev", "--ino", "--generation", "--proof"]:
-        raise Kept("cleanup-status [--after H --dev D --ino I --generation G --proof P]")
-    after, dev, ino, gen, proof = args[1::2]
-    number = r"0|[1-9][0-9]{0,39}"
-    if not all(HEX64.fullmatch(v) for v in (after, gen, proof)):
+    got = CURSOR.fullmatch(args[1]) if len(args) == 2 and args[0] == "--cursor" else None
+    if not got:
+        raise Kept("cleanup-status [--cursor C]")
+    data, mac = got.groups()
+    expected_mac = hmac.new(cursor_key(False), data.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(mac, expected_mac):
+        raise Kept("cleanup cursor was not issued by this helper")
+    try:
+        body = json.loads(base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)))
+    except ValueError:
+        body = None
+    valid = (
+        isinstance(body, dict) and set(body) == CURSOR_FIELDS and body["v"] == 1
+        and all(isinstance(body[k], str) and NUMBER.fullmatch(body[k]) for k in ("dev", "ino", "mtime", "ctime", "started"))
+        and type(body["page"]) is int and body["page"] >= 2 and body["pass"] in ("read", "verify")
+        and isinstance(body["round"], str) and re.fullmatch(r"[0-9a-f]{32}", body["round"])
+        and all(body[k] is None or (isinstance(body[k], str) and HEX64.fullmatch(body[k])) for k in ("after", "through"))
+        and all(isinstance(body[k], str) and HEX64.fullmatch(body[k]) for k in ("seal", "check"))
+    )
+    if not valid:
         raise Kept("invalid cleanup cursor")
-    if any(not re.fullmatch(number, v) for v in (dev, ino)):
-        raise Kept("invalid cleanup cursor identity")
-    return after, dev, ino, gen, proof
-
-
-def cursor_proof(generation, names, count):
-    """Binds a cursor to the exact sorted prefix it claims to have covered, in this generation.
-
-    There is no helper secret to sign with (the diagnostic stays read-only and creates nothing),
-    so this is not authentication: it only refuses a cursor that does not describe the current
-    prefix, e.g. a later bucket picked as --after without knowing every bucket before it.
-    """
-    body = generation + "\n" + str(count) + "\n" + "\n".join(names[:count])
-    return hashlib.sha256(body.encode()).hexdigest()
-
-
-def bucket_rows(ph, budget):
-    with chain(BASE + "/" + PRIVATE + "/" + ph, private=True) as (fd, _):
-        # Re-open under the same path lock after learning the original path.
-        for rec in pending(fd, budget, first=True):
-            if rec["pathHash"] != ph:
-                raise Kept("transaction bucket identity mismatch")
-            with locked(rec["identity"]["real"]) as (held, _):
-                return pending(held, budget)
-    return []
+    return body
 
 
 def mark(name, st):
     return "%s %d %d %d %d\n" % (name, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def scan_namespace():
-    """Stamp the namespace, every bucket, every transaction directory and its intent into one digest.
+def bucket_mark(fd, budget):
+    """Stamps of one bucket, its entries and every intent, no record parsed; paid per entry.
 
-    No record is parsed; the structure checks stay (private parent, entry names and types). Any
-    add, phase write, rollback or replacement moves a stamp. Returns None if something vanished
-    or the root moved while scanning.
+    Any transaction added, phase written, rolled back or replaced moves one. Returns the digest
+    and the newest timestamp seen.
     """
-    q = BASE + "/" + PRIVATE
-    with chain(q, private=True) as (root, _):
-        before = os.fstat(root)
-        names = sorted(os.listdir(root))
-        if any(not HEX64.fullmatch(ph) for ph in names):
-            raise Kept("invalid private namespace entry")
-        lines, newest = [], 0
-        for ph in names:
-            check_time()
+    st = os.fstat(fd)
+    lines, newest = [mark(".", st)], max(st.st_mtime_ns, st.st_ctime_ns)
+    for name in sorted(listing(fd, budget)):
+        check_time()
+        if name != "lock" and not HEX64.fullmatch(name):
+            raise Kept("unrecognized transaction entry")
+        cs = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if not (stat.S_ISREG(cs.st_mode) if name == "lock" else stat.S_ISDIR(cs.st_mode)):
+            raise Kept("unrecognized transaction entry type")
+        stamps = [cs]
+        if name != "lock":
+            budget.spend(entries=1)
+            h = os.open(name, FLAGS, dir_fd=fd)
             try:
-                fd = os.open(ph, FLAGS, dir_fd=root)
+                stamps = [os.fstat(h)]
                 try:
-                    st = os.fstat(fd)
-                    if st.st_uid != 0 or st.st_mode & 0o022:
-                        raise Kept("untrusted private parent: " + ph)
-                    entries = sorted(os.listdir(fd))
-                    if len(entries) > PAGE_ENTRIES + 1:
-                        raise Kept("cleanup bucket exceeds page bound: " + ph)
-                    lines.append(mark(ph, st))
-                    newest = max(newest, st.st_mtime_ns, st.st_ctime_ns)
-                    for name in entries:
-                        check_time()
-                        if name != "lock" and not HEX64.fullmatch(name):
-                            raise Kept("unrecognized transaction entry")
-                        cs = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                        if not (stat.S_ISREG(cs.st_mode) if name == "lock" else stat.S_ISDIR(cs.st_mode)):
-                            raise Kept("unrecognized transaction entry type")
-                        lines.append(mark(name, cs))
-                        newest = max(newest, cs.st_mtime_ns, cs.st_ctime_ns)
-                        if name != "lock":
-                            try:
-                                lines.append(mark("intent", os.stat(name + "/intent.json", dir_fd=fd, follow_symlinks=False)))
-                            except FileNotFoundError:
-                                lines.append("intent -\n")
-                finally:
-                    os.close(fd)
-            except FileNotFoundError:
-                return None
-        after = os.fstat(root)
-        if (before.st_ino, before.st_mtime_ns, before.st_ctime_ns) != (after.st_ino, after.st_mtime_ns, after.st_ctime_ns):
-            return None
-        newest = max(newest, after.st_mtime_ns, after.st_ctime_ns)
-        lines.append(mark("root", after) + "%d\n" % after.st_dev)
-        return after, names, hashlib.sha256("".join(lines).encode()).hexdigest(), newest
+                    stamps.append(os.stat("intent.json", dir_fd=h, follow_symlinks=False))
+                except FileNotFoundError:
+                    lines.append(name + " intent -\n")
+            finally:
+                os.close(h)
+        for s in stamps:
+            lines.append(mark(name, s))
+            newest = max(newest, s.st_mtime_ns, s.st_ctime_ns)
+    return hashlib.sha256("".join(lines).encode()).hexdigest(), newest
 
 
-def namespace_state(settle):
-    """Generation of the whole namespace. A first page waits out coarse timestamps so a later write
-    in the same tick still moves a stamp; None means it kept moving (the caller restarts)."""
-    for _ in range(5):
-        got = scan_namespace()
-        if got is None:
-            if not settle:
-                return None
-            continue
-        wait = RACY_NS - (time.time_ns() - got[3])
-        if not settle or wait <= 0:
-            return got
+def settled_mark(fd, budget):
+    """A bucket stamp that can prove "unchanged" later: every timestamp in it was already older
+    than RACY_NS when stamping began, so a write after it cannot land in the same coarse tick."""
+    for _ in range(3):
+        began = time.time_ns()
+        digest, newest = bucket_mark(fd, budget)
+        wait = RACY_NS - (began - newest)
+        if wait <= 0:
+            return digest
         check_time()
         time.sleep(min(wait, RACY_NS) / 1e9)
-    return None
+    raise Moving()
+
+
+def read_bucket(ph, budget):
+    """Open rows of one bucket and its settled stamp, taken before its records are read."""
+    with chain(BASE + "/" + PRIVATE + "/" + ph, private=True) as (fd, _):
+        seal = settled_mark(fd, budget)
+        probe = pending(fd, budget, first=True)
+        if not probe:
+            return [], seal
+        if probe[0]["pathHash"] != ph:
+            raise Kept("transaction bucket identity mismatch")
+        # Re-open under the same path lock after learning the original path, and stamp again there.
+        with locked(probe[0]["identity"]["real"]) as (held, _):
+            seal = settled_mark(held, budget)
+            rows = pending(held, budget)
+            if any(rec["pathHash"] != ph for rec in rows):
+                raise Kept("transaction bucket identity mismatch")
+            return rows, seal
+
+
+def check_bucket(ph, budget):
+    with chain(BASE + "/" + PRIVATE + "/" + ph, private=True) as (fd, _):
+        return bucket_mark(fd, budget)[0]
+
+
+def fold(digest, ph, stamp_digest):
+    return hashlib.sha256((digest + ph + stamp_digest).encode()).hexdigest()
+
+
+def bound(st, cursor):
+    """The namespace a round began on, with the stamp it began with; another one is never continued."""
+    if (str(st.st_dev), str(st.st_ino)) != (cursor["dev"], cursor["ino"]):
+        raise Kept("cleanup cursor bound to another namespace")
+    if (str(st.st_mtime_ns), str(st.st_ctime_ns)) != (cursor["mtime"], cursor["ctime"]):
+        raise Moving()
+
+
+def namespace_root(cursor):
+    """The namespace root and its sorted bucket names (at most NAMESPACE_BUCKETS), listed between
+    two equal stamps. A first page waits until the stamp is older than RACY_NS, so any later add,
+    removal or rename of a bucket moves it; a cursor page must find the stamp its round began with."""
+    for _ in range(5):
+        with chain(BASE + "/" + PRIVATE, private=True) as (root, _):
+            began = time.time_ns()
+            before = os.fstat(root)
+            if cursor:
+                bound(before, cursor)
+            wait = RACY_NS - (began - max(before.st_mtime_ns, before.st_ctime_ns))
+            if not cursor and wait > 0:
+                check_time()
+                time.sleep(min(wait, RACY_NS) / 1e9)
+                continue
+            names = sorted(listing(root, None, NAMESPACE_BUCKETS))
+            after = os.fstat(root)
+            if mark("", after) != mark("", before) or after.st_dev != before.st_dev:
+                if cursor:
+                    raise Moving()
+                continue
+            if any(not HEX64.fullmatch(ph) for ph in names):
+                raise Kept("invalid private namespace entry")
+            return after, names
+    raise Moving()
 
 
 def cleanup_page(args):
-    """One bounded page of buckets in sorted order, never an atomic snapshot across pages.
+    """One bounded page of a round over the sorted buckets; never an atomic snapshot across pages.
 
-    The generation is a digest over the namespace inode and every bucket and transaction stamp.
-    Each cursor page recomputes it and the last page recomputes it again after reading, so an
-    add, update or replacement anywhere during the walk returns state=changed and the caller
-    restarts its round instead of stitching pages of different listings.
+    A round first reads every bucket (rows, plus a settled stamp folded into `seal`), then
+    re-stamps every bucket (folded into `check`). It is complete only when both agree and the
+    namespace root still has the stamp the round began with: a bucket added, removed or replaced,
+    or a transaction added, rewritten or rolled back anywhere during the round, returns
+    state=changed and the caller restarts the round. Position, digests and round bounds travel in
+    a cursor signed with a root-only key, so a caller can only continue where this helper stopped.
     """
     global PAGE_UNTIL
-    cursor = cleanup_cursor(args)
+    cursor = open_cursor(args)
     PAGE_UNTIL = time.monotonic() + PAGE_SECONDS
     try:
         return read_page(cursor)
+    except Moving:
+        return {"state": "changed", "reason": "namespace changed during the round"}
     finally:
         PAGE_UNTIL = None
 
 
 def read_page(cursor):
     q = BASE + "/" + PRIVATE
+    if cursor and cursor["page"] > ROUND_PAGES:
+        raise Kept("cleanup round exceeds page bound")
+    if cursor and time.time_ns() - int(cursor["started"]) > ROUND_SECONDS * 10**9:
+        raise Kept("cleanup round exceeds time bound")
     try:
-        state = namespace_state(cursor is None)
+        st, names = namespace_root(cursor)
     except FileNotFoundError:
         if cursor:
             raise Kept("cleanup namespace disappeared during paging")
         return {"state": "ok", "rows": [], "truncated": False, "namespace": None}
-    if state is None:
-        return {"state": "changed", "reason": "namespace changed during listing"}
-    st, names, generation, _ = state
     namespace = identity(st, q)
-    start = 0
-    if cursor:
-        after, dev, ino, gen, proof = cursor
-        if (namespace["dev"], namespace["ino"]) != (dev, ino):
-            raise Kept("cleanup cursor bound to another namespace")
-        if gen != generation:
-            return {"state": "changed", "namespace": namespace, "reason": "namespace generation changed"}
-        if after not in names:
-            raise Kept("cleanup cursor is not a namespace bucket")
-        start = names.index(after) + 1
-        if proof != cursor_proof(generation, names, start):
-            raise Kept("cleanup cursor does not describe the covered prefix")
-    rows, budget, done, began = [], Budget(), start, time.monotonic()
-    for ph in names[start:start + PAGE_BUCKETS]:
+    c = dict(cursor or {
+        "v": 1, "dev": namespace["dev"], "ino": namespace["ino"], "mtime": str(st.st_mtime_ns),
+        "ctime": str(st.st_ctime_ns), "round": os.urandom(16).hex(), "started": str(time.time_ns()), "page": 1,
+        "pass": "read", "after": None, "through": None, "seal": ZERO, "check": ZERO})
+    if c["after"] is not None and c["after"] not in names:
+        raise Kept("cleanup cursor is not a namespace bucket")
+    covered, rows, budget, began = c["through"], [], Budget(), time.monotonic()
+    done, finished = {"read": 0, "verify": 0}, False
+    while True:
         check_time()
-        first = done == start
-        if not first and time.monotonic() - began >= PAGE_SOFT_SECONDS:
+        pos = bisect.bisect_right(names, c["after"]) if c["after"] else 0
+        if pos == len(names):
+            if c["pass"] == "verify":
+                finished = True
+                break
+            c["pass"], c["after"] = "verify", None
+            continue
+        if done[c["pass"]] >= (PAGE_BUCKETS if c["pass"] == "read" else PAGE_CHECKS):
             break
+        units = done["read"] + done["verify"]
+        if units and time.monotonic() - began >= PAGE_SOFT_SECONDS:
+            break
+        ph = names[pos]
         try:
-            got = bucket_rows(ph, budget)
+            if c["pass"] == "read":
+                got, digest = read_bucket(ph, budget)
+            else:
+                digest = check_bucket(ph, budget)
         except Overflow:
-            if first:
+            if not units:
                 raise Kept("cleanup bucket exceeds page bound: " + ph)
             break
-        rows.extend(got)
-        done += 1
+        if c["pass"] == "read":
+            rows.extend(got)
+            c["seal"], c["through"] = fold(c["seal"], ph, digest), ph
+        else:
+            c["check"] = fold(c["check"], ph, digest)
+        c["after"] = ph
+        done[c["pass"]] += 1
     check_time()
-    more = done < len(names)
-    # A page is only returned if the same namespace (re-resolved by path) kept the same generation
-    # while it was read; otherwise the caller restarts instead of trusting these rows.
+    # Re-resolved by path: the same namespace with the stamp the round began with, or no page.
     try:
-        again = namespace_state(False)
+        with chain(q, private=True) as (root, _):
+            bound(os.fstat(root), c)
     except FileNotFoundError:
         raise Kept("cleanup namespace disappeared during paging")
-    if again is None or again[2] != generation or identity(again[0], q) != namespace:
-        return {"state": "changed", "namespace": namespace, "reason": "namespace changed during page read"}
-    return {"state": "ok", "rows": rows, "truncated": more, "namespace": namespace,
-            "after": cursor[0] if cursor else None, "next": names[done - 1] if more else None,
-            "proof": cursor_proof(generation, names, done) if more else None,
-            "generation": generation, "buckets": len(names)}
+    if finished and c["check"] != c["seal"]:
+        raise Moving()
+    reply = {"state": "ok", "rows": rows, "truncated": not finished, "namespace": namespace,
+             "round": c["round"], "page": c["page"], "pass": c["pass"], "from": covered, "through": c["through"],
+             "buckets": len(names)}
+    if not finished:
+        c["page"] += 1
+        reply["cursor"] = sign(c)
+    return reply
 
 
 def main(args):

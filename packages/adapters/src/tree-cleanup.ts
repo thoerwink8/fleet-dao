@@ -167,9 +167,11 @@ export async function cleanupStatus(options: TreeHelperOptions = {}): Promise<Re
 }
 
 /** Bounds of one whole cleanup-status read; past any of them the list stays incomplete. */
-export const CLEANUP_PAGE_LIMITS = { pages: 64, rounds: 3, rows: 5000, bytes: 4 * 1024 * 1024, ms: 300_000 };
+export const CLEANUP_PAGE_LIMITS = { pages: 256, rounds: 3, rows: 5000, bytes: 8 * 1024 * 1024, ms: 300_000 };
 
 const HASH = /^[0-9a-f]{64}$/;
+const ROUND = /^[0-9a-f]{32}$/;
+const CURSOR = /^[A-Za-z0-9_-]{1,2048}\.[0-9a-f]{64}$/;
 
 function incomplete(why: string): Error {
   return new Error(`清理事务列表不完整：${why}`);
@@ -177,8 +179,10 @@ function incomplete(why: string): Error {
 
 /**
  * Walk every helper page; only a final page with truncated=false proves the list complete. The
- * cursor is the helper's last bucket, bound to the namespace inode and generation; a changed
- * generation restarts the whole round (bounded), so pages of different listings are never stitched.
+ * cursor is opaque and signed by the helper (position, namespace stamp, digests, round bounds);
+ * this side checks the chain: one round, consecutive pages, each starting at the bucket the last
+ * one stopped at, rows inside that range, no cursor or row twice. state=changed restarts the whole
+ * round (bounded), so pages of different rounds are never stitched.
  */
 async function readCleanupPages(options: TreeHelperOptions): Promise<{ rows: Reply[]; namespace: unknown }> {
   const deadline = Date.now() + CLEANUP_PAGE_LIMITS.ms;
@@ -195,22 +199,22 @@ async function readCleanupRound(
 ): Promise<{ rows: Reply[]; namespace: unknown } | null> {
   const rows: Reply[] = [];
   const ids = new Set<string>();
+  const seen = new Set<string>();
   let bytes = 0;
-  let first: { namespace: TreeIdentity; generation: string } | null = null;
-  let after: string | null = null;
-  let proof: string | null = null;
+  let round: { id: string; namespace: TreeIdentity } | null = null;
+  let through: string | null = null;
+  let cursor: string | null = null;
   for (let page = 1; ; page++) {
     if (page > CLEANUP_PAGE_LIMITS.pages) throw incomplete(`超过 ${CLEANUP_PAGE_LIMITS.pages} 页上限`);
     const left = deadline - Date.now();
     if (left <= 0) throw incomplete('整轮读取超时');
     const signal = AbortSignal.any([AbortSignal.timeout(left), ...(options.signal ? [options.signal] : [])]);
-    const cursor = first
-      ? ['--after', after as string, '--dev', first.namespace.dev, '--ino', first.namespace.ino]
-      : [];
-    if (first) cursor.push('--generation', first.generation, '--proof', proof as string);
     let reply: Reply;
     try {
-      reply = await invokeTreeHelper({ ...options, signal }, ['cleanup-status', ...cursor]);
+      reply = await invokeTreeHelper(
+        { ...options, signal },
+        cursor ? ['cleanup-status', '--cursor', cursor] : ['cleanup-status'],
+      );
     } catch (error) {
       throw incomplete(`第 ${page} 页读失败：${error instanceof Error ? error.message : String(error)}`);
     }
@@ -218,27 +222,29 @@ async function readCleanupRound(
     bytes += Buffer.byteLength(JSON.stringify(reply));
     if (reply.state !== 'ok' || !Array.isArray(reply.rows) || typeof reply.truncated !== 'boolean')
       throw incomplete(`第 ${page} 页回执不完整`);
-    if (first) {
-      if (reply.after !== after) throw incomplete(`第 ${page} 页不是所请求游标之后的页`);
-      if (JSON.stringify(treeIdentity(reply.namespace)) !== JSON.stringify(first.namespace))
+    // A helper without pages answers one untruncated page; it is complete only because it says so.
+    const legacy = page === 1 && !reply.truncated && reply.round === undefined;
+    if (round) {
+      if (reply.round !== round.id || reply.page !== page) throw incomplete(`第 ${page} 页不是本轮的下一页`);
+      if (JSON.stringify(treeIdentity(reply.namespace)) !== JSON.stringify(round.namespace))
         throw incomplete('翻页中命名空间身份变了');
-      if (reply.generation !== first.generation) throw incomplete('翻页中命名空间代次变了');
-    } else if (reply.after != null) {
-      throw incomplete('首页回执带了游标');
-    } else if (reply.truncated) {
-      if (typeof reply.generation !== 'string' || !HASH.test(reply.generation))
-        throw incomplete('帮手不支持分页游标（缺代次），只读到前缀');
-      first = { namespace: treeIdentity(reply.namespace), generation: reply.generation };
+    } else if (!legacy) {
+      if (typeof reply.round !== 'string' || !ROUND.test(reply.round) || reply.page !== 1)
+        throw incomplete('帮手不支持分页游标，只读到前缀');
+      if (reply.truncated) round = { id: reply.round, namespace: treeIdentity(reply.namespace) };
     }
-    const next = reply.next;
-    if (
-      reply.truncated &&
-      (typeof next !== 'string' || !HASH.test(next) || (after !== null && next <= after))
-    )
-      throw incomplete(`第 ${page} 页游标缺失、重复或回退`);
-    // The helper binds the cursor to the covered prefix; a page that cannot be continued is a partial read.
-    if (reply.truncated && (typeof reply.proof !== 'string' || !HASH.test(reply.proof)))
-      throw incomplete(`第 ${page} 页缺游标证明`);
+    const from = reply.from ?? null;
+    const end = reply.through ?? null;
+    if (!legacy) {
+      if (from !== through) throw incomplete(`第 ${page} 页不是从上一页停下的桶接着读`);
+      if (end !== null && (typeof end !== 'string' || !HASH.test(end) || (from !== null && end < from)))
+        throw incomplete(`第 ${page} 页读到的位置缺失或回退`);
+    }
+    if (reply.truncated) {
+      if (typeof reply.cursor !== 'string' || !CURSOR.test(reply.cursor) || seen.has(reply.cursor))
+        throw incomplete(`第 ${page} 页游标缺失或重复`);
+      seen.add(reply.cursor);
+    }
     for (const row of reply.rows as unknown[]) {
       const r = row as Reply;
       if (!r || typeof r !== 'object' || typeof r.id !== 'string' || !HASH.test(r.id))
@@ -247,10 +253,9 @@ async function readCleanupRound(
       if (
         typeof ph !== 'string' ||
         !HASH.test(ph) ||
-        (after !== null && ph <= after) ||
-        (reply.truncated && ph > (next as string))
+        (!legacy && (end === null || ph > end || (from !== null && ph <= from)))
       )
-        throw incomplete(`第 ${page} 页记录不在本页游标范围内`);
+        throw incomplete(`第 ${page} 页记录不在本页读到的桶范围内`);
       if (ids.has(r.id)) throw incomplete(`第 ${page} 页记录重复`);
       ids.add(r.id);
       rows.push(r);
@@ -258,8 +263,8 @@ async function readCleanupRound(
     if (rows.length > CLEANUP_PAGE_LIMITS.rows || bytes > CLEANUP_PAGE_LIMITS.bytes)
       throw incomplete('整轮记录条数或字节超过上限');
     if (!reply.truncated) return { rows, namespace: reply.namespace };
-    after = next as string;
-    proof = reply.proof as string;
+    through = end as string | null;
+    cursor = reply.cursor as string;
   }
 }
 

@@ -1,6 +1,8 @@
 """Real Linux/root tests; isolated /var/lib fixture, never the installed helper."""
 
+import base64
 import hashlib
+import hmac
 import importlib.util
 import json
 import os
@@ -27,6 +29,7 @@ class Protocol(unittest.TestCase):
         self.m = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.m)
         self.m.BASE = self.root
+        self.m.KEY_DIR = self.root + "/.cursor-key"
         self.m.DEADLINE = time.monotonic() + 30
         self.path = self.root + "/_tmp/task"
         os.makedirs(self.path)
@@ -336,21 +339,23 @@ while True: time.sleep(0.1)
         for i in range(101):
             os.mkdir(private + "/" + format(i, "064x"), 0o700)
         partial = self.m.main(["cleanup-status"])
-        self.assertTrue(partial["truncated"])
-        self.assertEqual(partial["next"], format(99, "064x"))
-        original = self.m.os.listdir
+        # partial: one page of 100 buckets is never the whole list.
+        self.assertEqual((partial["truncated"], partial["pass"], partial["through"]), (True, "read", format(99, "064x")))
+        self.assertRegex(partial["cursor"], r"^[A-Za-z0-9_-]+\.[0-9a-f]{64}$")
+        original = self.m.os.scandir
         try:
-            self.m.os.listdir = lambda _: (_ for _ in ()).throw(PermissionError("denied"))
+            self.m.os.scandir = lambda _: (_ for _ in ()).throw(PermissionError("denied"))
             with self.assertRaises(PermissionError):
                 self.m.main(["cleanup-status"])
         finally:
-            self.m.os.listdir = original
+            self.m.os.scandir = original
 
     def crowded(self, count, tail_phase="RECOVERY_REQUIRED"):
         """Empty, lock-only and settled buckets first; the only open transaction sorts last."""
         private = self.root + "/" + self.m.PRIVATE
         os.mkdir(private, 0o700)
         paths = sorted((self.root + "/_tmp/t" + str(i) for i in range(count)), key=self.m.path_hash)
+        self.settled = {}
         for i, path in enumerate(paths[:-1]):
             if i % 4 == 0:
                 os.mkdir(private + "/" + self.m.path_hash(path), 0o700)
@@ -358,60 +363,122 @@ while True: time.sleep(0.1)
                 with self.m.locked(path):
                     pass
             else:
-                self.bucket_record(path, "DONE" if i % 4 == 2 else "RESTORED")
+                self.settled[path] = self.bucket_record(path, "DONE" if i % 4 == 2 else "RESTORED")
         return paths, self.bucket_record(paths[-1], tail_phase)
 
-    def cursor_args(self, prev, after=None, proof=None):
-        """The honest cursor of `prev`, or a hand-built one: `after` alone gets the proof the helper would accept."""
-        ns = prev["namespace"]
-        if after is None:
-            after, proof = prev["next"], proof or prev["proof"]
-        elif proof is None:
-            names = sorted(os.listdir(self.root + "/" + self.m.PRIVATE))
-            proof = self.m.cursor_proof(prev["generation"], names, names.index(after) + 1) if after in names else "0" * 64
-        return ["--after", after, "--dev", ns["dev"], "--ino", ns["ino"], "--generation", prev["generation"],
-                "--proof", proof]
+    def page(self, prev):
+        return self.m.main(["cleanup-status", "--cursor", prev["cursor"]])
 
-    def page(self, prev, after=None, proof=None):
-        return self.m.main(["cleanup-status", *self.cursor_args(prev, after, proof)])
-
-    def walk(self):
+    def walk(self, limit=400):
         pages = [self.m.main(["cleanup-status"])]
-        while pages[-1]["truncated"]:
-            self.assertLess(len(pages), 200, "cursor never finished")
+        while pages[-1]["state"] == "ok" and pages[-1]["truncated"]:
+            self.assertLess(len(pages), limit, "cursor never finished")
             pages.append(self.page(pages[-1]))
         return pages
 
+    def complete(self, pages):
+        """complete: one round of consecutive pages, each starting where the last stopped, the last untruncated."""
+        self.assertEqual({p["round"] for p in pages}, {pages[0]["round"]})
+        self.assertEqual([p["page"] for p in pages], list(range(1, len(pages) + 1)))
+        for prev, cur in zip(pages, pages[1:]):
+            self.assertEqual(cur["from"], prev["through"])
+        self.assertEqual((pages[-1]["state"], pages[-1]["truncated"], pages[-1]["pass"]), ("ok", False, "verify"))
+        self.assertNotIn("cursor", pages[-1])
+        return [r for p in pages for r in p["rows"]]
+
+    def bucket_listing(self):
+        private = self.root + "/" + self.m.PRIVATE
+        return {ph: sorted(os.listdir(private + "/" + ph)) for ph in os.listdir(private)}
+
+    def forge(self, cursor, key=None, **change):
+        """A cursor body changed by the caller: re-signed with `key`, or carrying the helper's old signature."""
+        data, mac = cursor.split(".")
+        body = json.loads(base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)))
+        body.update(change)
+        data = base64.urlsafe_b64encode(json.dumps(body, sort_keys=True, separators=(",", ":")).encode())
+        data = data.decode().rstrip("=")
+        return data + "." + (mac if key is None else hmac.new(key, data.encode(), hashlib.sha256).hexdigest())
+
     def test_cleanup_pages_complete_read_beyond_100_with_tail_recovery(self):
         paths, tail = self.crowded(130)
+        before = self.bucket_listing()
         first = self.m.main(["cleanup-status"])
-        # partial: the old fixed prefix shows no rows, which never proves the namespace is clear.
-        self.assertEqual((first["rows"], first["truncated"]), ([], True))
-        self.assertEqual(first["next"], self.m.path_hash(paths[99]))
-        self.assertRegex(first["generation"], "^[0-9a-f]{64}$")
+        # partial: the first 100 buckets show no rows, which never proves the namespace clear.
+        self.assertEqual((first["rows"], first["truncated"], first["through"]), ([], True, self.m.path_hash(paths[99])))
         pages = self.walk()
         self.assertEqual(len(pages), 2)
-        self.assertEqual({p["generation"] for p in pages}, {first["generation"]})
-        self.assertEqual(pages[1]["after"], first["next"])
-        # complete: every page walked, the tail RECOVERY_REQUIRED is visible and nothing else is open.
-        self.assertEqual((pages[-1]["truncated"], pages[-1]["next"]), (False, None))
-        self.assertEqual([r for p in pages for r in p["rows"]], [tail])
-        for ph in map(self.m.path_hash, paths):
-            self.assertTrue(os.path.isdir(self.root + "/" + self.m.PRIVATE + "/" + ph))
+        # complete: every page walked and re-stamped; the tail RECOVERY_REQUIRED is the only open row.
+        self.assertEqual(self.complete(pages), [tail])
+        self.assertEqual(pages[-1]["buckets"], 130)
+        # Nothing removed to make room: empty, lock-only, DONE and RESTORED buckets all stay.
+        self.assertEqual(self.bucket_listing(), before)
+        key = os.lstat(self.m.KEY_DIR + "/cursor.key")
+        self.assertEqual((key.st_uid, key.st_mode & 0o777, key.st_size), (0, 0o600, 32))
+        self.assertEqual(os.lstat(self.m.KEY_DIR).st_mode & 0o777, 0o700)
 
-    def test_cleanup_page_boundaries_rows_bytes_and_time(self):
+    def test_cleanup_single_page_round_signs_nothing(self):
+        paths, tail = self.crowded(3)
+        self.assertEqual(self.complete([self.m.main(["cleanup-status"])]), [tail])
+        self.assertFalse(os.path.lexists(self.m.KEY_DIR))
+
+    def test_cleanup_page_bounds_settled_record_bytes_and_entries(self):
+        paths, tail = self.crowded(60, "PREPARED")
+        private = self.root + "/" + self.m.PRIVATE
+        size = max(os.stat(private + "/" + r["pathHash"] + "/" + r["id"] + "/intent.json").st_size
+                   for r in [tail, *self.settled.values()])
+        read, listed = [], []
+        original_read, original_listing = self.m.read_record, self.m.listing
+
+        def counted_read(fd, budget=None):
+            got = os.stat("intent.json", dir_fd=fd, follow_symlinks=False).st_size
+            rec = original_read(fd, budget)
+            read[-1] += got
+            return rec
+
+        def counted_listing(fd, budget, limit=None):
+            got = original_listing(fd, budget, limit)
+            if budget:
+                listed[-1] += len(got)
+            return got
+
+        self.m.read_record, self.m.listing = counted_read, counted_listing
+        self.addCleanup(setattr, self.m, "read_record", original_read)
+        self.addCleanup(setattr, self.m, "listing", original_listing)
+        # DONE/RESTORED records are paid for like open ones: a page of settled buckets stops at the bound.
+        self.m.PAGE_READ_BYTES, self.m.PAGE_ENTRIES = 6 * size, 40
+        pages = []
+        while not pages or pages[-1]["truncated"]:
+            read.append(0)
+            listed.append(0)
+            pages.append(self.m.main(["cleanup-status", *(["--cursor", pages[-1]["cursor"]] if pages else [])]))
+        self.assertEqual(self.complete(pages), [tail])
+        self.assertGreater(len(pages), 6)
+        self.assertLessEqual(max(read), self.m.PAGE_READ_BYTES)
+        self.assertLessEqual(max(listed), self.m.PAGE_ENTRIES)
+        settled = sum(os.stat(private + "/" + r["pathHash"] + "/" + r["id"] + "/intent.json").st_size
+                      for r in self.settled.values())
+        self.assertGreaterEqual(sum(read), settled)  # every settled record was read and paid for
+        self.m.read_record, self.m.listing = original_read, original_listing
+        self.m.PAGE_READ_BYTES = size - 1
+        with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
+            self.walk()
+        self.m.PAGE_READ_BYTES, self.m.PAGE_ENTRIES = 1024 * 1024, 2000
+        self.m.NAMESPACE_BUCKETS = 59
+        with self.assertRaisesRegex(self.m.Kept, "namespace exceeds round bound"):
+            self.m.main(["cleanup-status"])
+
+    def test_cleanup_page_bounds_rows_and_bytes(self):
         paths, tail = self.crowded(100, "PREPARED")
         one = self.walk()
-        self.assertEqual((len(one), one[0]["truncated"], one[0]["rows"]), (1, False, [tail]))
-        self.bucket_record(self.root + "/_tmp/extra", "DELETING")
+        self.assertEqual((len(one), self.complete(one)), (1, [tail]))
+        extra = self.bucket_record(self.root + "/_tmp/extra", "DELETING")
         two = self.walk()
         self.assertEqual(len(two), 2)
-        self.assertEqual(sum(len(p["rows"]) for p in two), 2)
-        last = self.page(two[0], max(map(self.m.path_hash, paths + [self.root + "/_tmp/extra"])))
-        self.assertEqual((last["rows"], last["truncated"], last["next"]), ([], False, None))
+        self.assertEqual(sorted(r["id"] for r in self.complete(two)), sorted([tail["id"], extra["id"]]))
         self.m.PAGE_ROWS = 1
-        rows = [r for p in self.walk() for r in p["rows"]]
-        self.assertEqual(len(rows), 2)
+        pages = self.walk()
+        self.assertEqual(len(self.complete(pages)), 2)
+        self.assertTrue(all(len(p["rows"]) <= 1 for p in pages))
         self.bucket_record(tail["identity"]["real"], "CLAIMED", "8")
         with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
             self.walk()
@@ -419,12 +486,24 @@ while True: time.sleep(0.1)
         self.m.PAGE_BYTES = 10
         with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
             self.walk()
-        self.m.PAGE_BYTES = 96 * 1024
+
+    def test_cleanup_soft_page_time_round_bounds_and_hard_deadline(self):
+        paths, tail = self.crowded(12, "PREPARED")
         self.m.PAGE_SOFT_SECONDS = 0
         timed = self.walk()
-        self.assertEqual(len(timed), 101)
+        # One bucket per page: 12 reads, then 12 re-stamps; every page but the last is partial.
+        self.assertEqual(len(timed), 24)
+        self.assertEqual(self.complete(timed), [tail])
         self.assertTrue(all(p["truncated"] for p in timed[:-1]))
-        self.assertEqual(sum(len(p["rows"]) for p in timed), 3)
+        self.m.ROUND_PAGES = 5
+        with self.assertRaisesRegex(self.m.Kept, "round exceeds page bound"):
+            self.walk()
+        self.m.ROUND_PAGES = 256
+        first = self.m.main(["cleanup-status"])
+        self.m.ROUND_SECONDS = 0
+        time.sleep(0.01)
+        with self.assertRaisesRegex(self.m.Kept, "round exceeds time bound"):
+            self.page(first)
         self.m.DEADLINE = time.monotonic() - 1
         with self.assertRaisesRegex(self.m.Kept, "hard deadline"):
             self.m.main(["cleanup-status"])
@@ -432,28 +511,27 @@ while True: time.sleep(0.1)
     def test_cleanup_pages_concurrent_add_and_namespace_replacement(self):
         paths, tail = self.crowded(105)
         first = self.m.main(["cleanup-status"])
-        with self.m.locked(self.path):
+        with self.m.locked(self.path):  # a new bucket between pages
             pass
         changed = self.page(first)
         self.assertEqual(changed["state"], "changed")
         self.assertNotIn("rows", changed)
-        restarted = self.walk()
-        self.assertEqual([r for p in restarted for r in p["rows"]], [tail])
+        self.assertEqual(self.complete(self.walk()), [tail])
         private = self.root + "/" + self.m.PRIVATE
+        current = self.m.main(["cleanup-status"])
         os.rename(private, private + "-old")
         os.mkdir(private, 0o700)
         for name in os.listdir(private + "-old"):
             os.mkdir(private + "/" + name, 0o700)
-        replaced = self.m.main(["cleanup-status"])
         with self.assertRaisesRegex(self.m.Kept, "another namespace"):
-            self.page(dict(restarted[0], generation=replaced["generation"]))
+            self.page(current)
         os.rename(private, private + "-gone")
         with self.assertRaisesRegex(self.m.Kept, "disappeared"):
-            self.page(replaced)
+            self.page(current)
 
     def mutate_after_read(self, bucket, mutate):
         """Run `mutate` once, right after `bucket` was read: i.e. while that page is still being read."""
-        original, fired = self.m.bucket_rows, []
+        original, fired = self.m.read_bucket, []
 
         def wrapped(ph, budget):
             got = original(ph, budget)
@@ -462,8 +540,8 @@ while True: time.sleep(0.1)
                 mutate()
             return got
 
-        self.m.bucket_rows = wrapped
-        self.addCleanup(setattr, self.m, "bucket_rows", original)
+        self.m.read_bucket = wrapped
+        self.addCleanup(setattr, self.m, "read_bucket", original)
         return fired
 
     def update_phase(self, rec, phase):
@@ -477,37 +555,38 @@ while True: time.sleep(0.1)
         head = self.bucket_record(paths[0], "PREPARED", "9")  # a new transaction in an already read bucket
         self.assertEqual(self.page(first)["state"], "changed")
         restarted = self.walk()
-        self.assertEqual(sorted(r["id"] for p in restarted for r in p["rows"]), sorted([tail["id"], head["id"]]))
-        again = self.m.main(["cleanup-status"])
-        self.update_phase(head, "DELETING")  # a phase write to a read transaction
-        self.assertEqual(self.page(again)["state"], "changed")
-
-    def test_cleanup_change_during_last_page_read_is_never_complete(self):
-        paths, tail = self.crowded(130)
-        last = self.m.path_hash(paths[-1])
-        original = self.m.bucket_rows
-
-        def late_bucket():
-            with self.m.locked(self.root + "/_tmp/late"):
-                pass
-
+        self.assertEqual(sorted(r["id"] for r in self.complete(restarted)), sorted([tail["id"], head["id"]]))
+        restored = next(r for r in self.settled.values() if r["phase"] == "RESTORED")
+        self.assertLess(restored["pathHash"], first["through"])  # read on the first page
         for name, mutate in (
-            ("new transaction in a read bucket", lambda: self.bucket_record(paths[0], "PREPARED", "9")),
-            ("tail transaction rewritten", lambda: self.update_phase(tail, "DELETING")),
-            ("bucket added after the scan", late_bucket),
+            ("phase written in a read transaction", lambda: self.update_phase(head, "DELETING")),
+            ("read RESTORED receipt reused as PREPARED", lambda: self.update_phase(restored, "PREPARED")),
         ):
             with self.subTest(name):
-                self.m.bucket_rows = original
-                first = self.m.main(["cleanup-status"])
-                self.mutate_after_read(last, mutate)
-                reply = self.page(first)
-                self.assertEqual(reply["state"], "changed")
-                self.assertNotIn("rows", reply)
-        self.m.bucket_rows = original
+                again = self.m.main(["cleanup-status"])
+                mutate()
+                self.assertEqual(self.page(again)["state"], "changed")
+        rows = self.complete(self.walk())
+        self.assertEqual(sorted(r["phase"] for r in rows), ["DELETING", "PREPARED", "RECOVERY_REQUIRED"])
 
-    def test_cleanup_single_page_change_and_replacement_during_read(self):
+    def test_cleanup_change_during_a_page_is_never_complete(self):
         paths, tail = self.crowded(5)
         last = self.m.path_hash(paths[-1])
+        original = self.m.read_bucket
+        for name, mutate in (
+            ("read bucket gains a transaction", lambda: self.bucket_record(paths[0], "PREPARED", "9")),
+            ("tail transaction rewritten", lambda: self.update_phase(tail, "DELETING")),
+            ("bucket added after the listing", lambda: self.bucket_record(self.root + "/_tmp/late", "RECOVERY_REQUIRED")),
+        ):
+            with self.subTest(name):
+                self.m.read_bucket = original
+                self.mutate_after_read(last, mutate)
+                reply = self.m.main(["cleanup-status"])
+                self.assertEqual(reply["state"], "changed")  # never ok, rows, truncated=false
+                self.assertNotIn("rows", reply)
+        self.m.read_bucket = original
+        rows = self.complete(self.walk())
+        self.assertEqual(sorted(r["phase"] for r in rows), ["DELETING", "PREPARED", "RECOVERY_REQUIRED"])
         private = self.root + "/" + self.m.PRIVATE
 
         def replace():
@@ -516,29 +595,18 @@ while True: time.sleep(0.1)
             for name in os.listdir(private + "-old"):
                 os.mkdir(private + "/" + name, 0o700)
 
-        original = self.m.bucket_rows
-        for name, mutate in (
-            ("read bucket gains a transaction", lambda: self.bucket_record(paths[0], "PREPARED", "9")),
-            ("namespace replaced", replace),
-        ):
-            with self.subTest(name):
-                self.m.bucket_rows = original
-                self.mutate_after_read(last, mutate)
-                reply = self.m.main(["cleanup-status"])
-                self.assertEqual(reply["state"], "changed")
-                self.assertNotIn("rows", reply)
-        self.m.bucket_rows = original
-        settled = self.m.main(["cleanup-status"])
-        self.assertEqual((settled["state"], settled["truncated"]), ("ok", False))
+        self.mutate_after_read(last, replace)
+        with self.assertRaisesRegex(self.m.Kept, "another namespace"):
+            self.m.main(["cleanup-status"])
 
     def test_cleanup_first_page_waits_out_coarse_timestamps(self):
-        self.crowded(3)
+        paths, tail = self.crowded(3)
         slept, real = [], self.m.time
         self.addCleanup(setattr, self.m, "time", real)
         self.m.time = types.SimpleNamespace(monotonic=real.monotonic, time_ns=real.time_ns,
                                             sleep=lambda s: (slept.append(s), real.sleep(s)))
         reply = self.m.main(["cleanup-status"])
-        self.assertEqual(reply["state"], "ok")
+        self.assertEqual((reply["state"], reply["truncated"]), ("ok", False))
         self.assertTrue(slept and all(0 < s <= self.m.RACY_NS / 1e9 for s in slept))
         slept.clear()
 
@@ -550,6 +618,11 @@ while True: time.sleep(0.1)
         self.m.time = types.SimpleNamespace(monotonic=real.monotonic, time_ns=real.time_ns, sleep=churn)
         self.assertEqual(self.m.main(["cleanup-status"])["state"], "changed")
         self.assertEqual(len(slept), 5)
+        # A bucket that keeps being written is never stamped as settled either.
+        with self.m.chain(self.root + "/" + self.m.PRIVATE + "/" + tail["pathHash"], private=True) as (fd, _):
+            with self.assertRaises(self.m.Moving):
+                self.m.settled_mark(fd, self.m.Budget())
+        self.assertEqual(len(slept), 8)
 
     def test_cleanup_page_deadline_covers_first_bucket_lock_and_reads(self):
         paths, tail = self.crowded(3, "PREPARED")
@@ -608,7 +681,7 @@ while True: time.sleep(0.1)
         paths, tail = self.crowded(130)
         slow_bucket = self.m.path_hash(paths[99])
         self.m.PAGE_SECONDS = 2
-        original = self.m.bucket_rows
+        original = self.m.read_bucket
 
         def wrapped(ph, budget):
             got = original(ph, budget)
@@ -616,8 +689,8 @@ while True: time.sleep(0.1)
                 time.sleep(2.2)
             return got
 
-        self.m.bucket_rows = wrapped
-        self.addCleanup(setattr, self.m, "bucket_rows", original)
+        self.m.read_bucket = wrapped
+        self.addCleanup(setattr, self.m, "read_bucket", original)
         with self.assertRaisesRegex(self.m.Kept, "page deadline"):
             self.m.main(["cleanup-status"])
 
@@ -632,35 +705,59 @@ while True: time.sleep(0.1)
         self.assertEqual((restarted["state"], restarted["truncated"]), ("ok", False))
         self.assertEqual([r["phase"] for r in restarted["rows"]], ["RECOVERY_REQUIRED"])
 
-    def test_cleanup_cursor_forged_cycle_and_malformed_rejected(self):
+    def test_cleanup_cursor_only_from_this_helper(self):
         paths, tail = self.crowded(130)
         first = self.m.main(["cleanup-status"])
-        ns = first["namespace"]
+        cursor = first["cursor"]
         names = sorted(os.listdir(self.root + "/" + self.m.PRIVATE))
-        with self.assertRaisesRegex(self.m.Kept, "not a namespace bucket"):
-            self.page(first, "f" * 64)
-        stale = self.page(dict(first, generation="0" * 64))
-        self.assertEqual(stale["state"], "changed")
-        again = self.page(first, first["next"])
-        self.assertEqual(again, self.page(first))
-        # A legal later bucket as --after must not skip the buckets before it, however it is dressed up.
+        keyfile = pathlib.Path(self.m.KEY_DIR, "cursor.key")
+        key = keyfile.read_bytes()
+
+        def refuse(arg, why):
+            with self.assertRaisesRegex(self.m.Kept, why):
+                self.m.main(["cleanup-status", "--cursor", arg])
+
+        # A legal later bucket must not skip the ones before it, however the caller dresses it up:
+        # the body, the bucket names and sha256 are all public, the key is not.
         for forged in (names[-1], names[120], names[100]):
             with self.subTest(forged=forged[:8]):
-                for proof in ("0" * 64, first["proof"], hashlib.sha256(forged.encode()).hexdigest(),
-                              self.m.cursor_proof(first["generation"], names, 120)):
-                    with self.assertRaisesRegex(self.m.Kept, "does not describe the covered prefix"):
-                        self.page(first, forged, proof)
-        good = self.cursor_args(first)
-        for bad in (["--after", "A" * 64, *good[2:]],
-                    ["--after", "../x", *good[2:]],
-                    [*good[:2], "--dev", "01", *good[4:]],
-                    [*good[:8], "--proof", "short"],
-                    good[:8],  # no proof at all
-                    ["--after", first["next"], "--generation", first["generation"]],
-                    ["--offset", "100"]):
-            with self.assertRaises(self.m.Kept):
+                refuse(self.forge(cursor, after=forged, through=forged), "not issued by this helper")
+                for guess in (b"", os.urandom(32), hashlib.sha256(forged.encode()).digest()):
+                    refuse(self.forge(cursor, key=guess, after=forged, through=forged), "not issued by this helper")
+                data = self.forge(cursor, after=forged).split(".")[0]
+                refuse(data + "." + hashlib.sha256(data.encode()).hexdigest(), "not issued by this helper")
+        refuse(self.forge(cursor, seal="0" * 64), "not issued by this helper")
+        refuse(self.forge(cursor, page=2, **{"pass": "verify"}), "not issued by this helper")
+        refuse(self.forge(cursor, mtime="1"), "not issued by this helper")
+        refuse(cursor[:-1] + ("0" if cursor[-1] != "0" else "1"), "not issued by this helper")
+        # Even under the real key, a body this helper would never write is refused.
+        for change in ({"page": 0}, {"after": "../x"}, {"extra": 1}, {"v": 2}):
+            refuse(self.forge(cursor, key=key, **change), "invalid cleanup cursor")
+        for bad in (["--after", names[100], "--dev", first["namespace"]["dev"]], ["--offset", "100"], ["--cursor"],
+                    ["--cursor", cursor, "--cursor", cursor], ["--cursor", "../" + cursor], ["--cursor", "A" * 3000 + "." + "0" * 64]):
+            with self.assertRaisesRegex(self.m.Kept, r"cleanup-status \[--cursor C\]"):
                 self.m.main(["cleanup-status", *bad])
-        self.assertEqual(ns, self.page(first)["namespace"])
+        # Replaying the helper's own cursor repeats that page; it never moves anywhere else.
+        again = self.page(first)
+        self.assertEqual(self.page(first), again)
+        self.assertEqual(self.complete([first, again]), [tail])
+        # A key that is not root-only, a link, or gone (reboot): every outstanding cursor is refused.
+        os.chmod(keyfile, 0o644)
+        refuse(cursor, "untrusted cleanup cursor key")
+        os.chmod(keyfile, 0o600)
+        os.chmod(self.m.KEY_DIR, 0o777)
+        refuse(cursor, "untrusted private parent")
+        os.chmod(self.m.KEY_DIR, 0o700)
+        os.rename(keyfile, str(keyfile) + ".x")
+        os.symlink(str(keyfile) + ".x", keyfile)
+        with self.assertRaises(OSError):
+            self.page(first)
+        os.unlink(keyfile)
+        refuse(cursor, "not issued by this helper")
+        fresh = self.walk()
+        self.assertNotEqual(keyfile.read_bytes(), key)
+        refuse(cursor, "not issued by this helper")
+        self.assertEqual(self.complete(fresh), [tail])
 
     def test_cleanup_tail_bucket_guards_beyond_first_page(self):
         paths, tail = self.crowded(103)
@@ -695,6 +792,26 @@ while True: time.sleep(0.1)
         pathlib.Path(private, "e" * 64).write_text("not a bucket")
         with self.assertRaises(OSError):
             self.walk()
+        os.unlink(private + "/" + "e" * 64)
+        os.chmod(intent, 0o644)
+        with self.assertRaisesRegex(self.m.Kept, "untrusted intent"):
+            self.walk()
+        os.chmod(intent, 0o600)
+        pathlib.Path(bucket, "a" * 64).write_text("not a transaction")
+        with self.assertRaisesRegex(self.m.Kept, "unrecognized transaction entry type"):
+            self.walk()
+        os.unlink(bucket + "/" + "a" * 64)
+        os.unlink(bucket + "/lock")
+        os.symlink("/etc/passwd", bucket + "/lock")
+        with self.assertRaisesRegex(self.m.Kept, "unrecognized transaction entry type"):
+            self.walk()
+        os.unlink(bucket + "/lock")
+        os.rename(bucket + "/" + tail["id"], bucket + "/" + "b" * 64)
+        with self.assertRaisesRegex(self.m.Kept, "transaction directory identity mismatch"):
+            self.walk()
+        os.rename(bucket + "/" + "b" * 64, bucket + "/" + tail["id"])
+        # Every guard lifted: the same tail is read in full again, its lock re-created under the path lock.
+        self.assertEqual(self.complete(self.walk()), [tail])
 
     def temp_file(self, name="ops-verify-2901.tar"):
         path = self.root + "/_tmp/" + name
