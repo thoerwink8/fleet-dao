@@ -61,6 +61,12 @@ CATALOG_FILE=deploy/catalog.json # 相对这一版的目录
 NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
 SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
 ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
+# 后端报 engine 红、切之前是好的时，先和「工人已在任务队列取活」核对：有界重试（共 TRIES 次、每次隔 GAP 秒，默认约 90 秒，
+# 和 ENGINE_POLL_WAIT 同一个窗口），不凭一次探针红就退回（#3250）；只有测试会改
+ENGINE_RECONCILE_TRIES=${ENGINE_RECONCILE_TRIES:-18}
+ENGINE_RECONCILE_GAP=${ENGINE_RECONCILE_GAP:-5}
+ENGINE_RECONCILE_VERDICT="" # 最近一次核对的裁决：保留 / 未决 / 退回
+ENGINE_RECONCILE_RECEIPT="" # 最近一次核对的回执（两边证据、重试次数、裁决理由）
 API_UP_WAIT=${API_UP_WAIT:-30} # 后端重启后等它答话最多这么久（秒，平常 3 秒左右）；只有测试会改
 AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数（deploy/france/auto-release 写，--check 列出来）
 NOW_MODE=0 # --now：不给在跑的会话宽限
@@ -1788,6 +1794,99 @@ check_running_release() { # 提交号
 # 这里的名字都得是后端真报的项（packages/api 的 health.test.ts 核对，改了名那边报警）
 DRIFTING_HEALTH_ITEMS="judge deploy_lag session_org github_app watchdog"
 
+# 引擎工人眼下的证据（只看一眼、不等）：polling = 主进程在、任务队列上工作流和活动两类都在取活；
+# idle = 进程在、队列上没有它的取活记录；dead = 单元没在跑或没有主进程号（进程已退）
+engine_worker_evidence() { # 主进程号
+  local pid=${1:-} json
+  if [[ -z "$pid" || "$pid" == 0 ]] || [[ "$(systemctl is-active fleet-engine.service 2>/dev/null)" != active ]]; then
+    echo dead
+    return 0
+  fi
+  json=$(tcli task-queue describe --task-queue "$TASK_QUEUE" -o json 2>/dev/null </dev/null) || json=""
+  if engine_polling "$json" "$pid@"; then echo polling; else echo idle; fi
+}
+
+# 再问一次后端的 engine 项：打印 ok，或「bad<TAB>原因」
+engine_probe() {
+  local got items line
+  if ! got=$(api_healthz </dev/null); then
+    printf 'bad\t驾驶舱接口 http://%s/healthz 连不上' "$COCKPIT"
+    return 0
+  fi
+  if ! items=$(report_items "${got#*$'\t'}" 2>/dev/null); then
+    printf 'bad\t/healthz 回的不是健康报告（HTTP %s）' "${got%%$'\t'*}"
+    return 0
+  fi
+  line=$(awk -F '\t' '$1 == "engine" { print $2 "\t" $3; exit }' <<<"$items")
+  case "$line" in
+  ok$'\t'*) printf ok ;;
+  bad$'\t'*) printf 'bad\t%s' "${line#bad$'\t'}" ;;
+  *) printf 'bad\t后端没报 engine 项' ;;
+  esac
+}
+
+# 后端报 engine 红、切之前是好的：和工人拉活证据核对再裁决（#3250）。每一轮先看工人、再（第二轮起）重问探针：
+#   进程已退（dead）→ 马上裁退回；探针转绿 → 保留；用完次数时工人仍在取活 → 未决（不当成已证实故障、不退回）；
+#   用完次数时队列上没有它的取活 → 退回。两边证据、重试次数、理由都写进回执（ENGINE_RECONCILE_RECEIPT）。
+# 返回 1 = 裁退回（算这一版的错），0 = 保留或未决
+reconcile_engine() { # 探针原因
+  local why=$1 tries=$ENGINE_RECONCILE_TRIES i ev="" pid probe verdict reason probe_text worker_text receipt used
+  ((tries >= 1)) || tries=1
+  pid=$(unit_prop fleet-engine.service MainPID)
+  for ((i = 1; i <= tries; i++)); do
+    ev=$(engine_worker_evidence "$pid")
+    [[ "$ev" == dead ]] && break
+    if ((i > 1)); then
+      probe=$(engine_probe)
+      if [[ "$probe" == ok ]]; then
+        why=""
+        break
+      fi
+      why=${probe#bad$'\t'}
+    fi
+    if ((i < tries)); then sleep "$ENGINE_RECONCILE_GAP"; fi
+  done
+  used=$((i > tries ? tries - 1 : i - 1))
+  case "$ev" in
+  polling) worker_text="工人已在任务队列 $TASK_QUEUE 取工作流任务和活动任务（pid $pid）" ;;
+  idle) worker_text="工人进程在（pid $pid），但任务队列 $TASK_QUEUE 上没有它的取活记录" ;;
+  *) worker_text="工人进程已退或没起（pid ${pid:-无}）" ;;
+  esac
+  if [[ -z "$why" ]]; then
+    probe_text="重试后转绿"
+    verdict=保留
+    reason="API 探针重试后转绿，和工人拉活一致，之前那次红是探针滞后"
+  else
+    probe_text="红（$why）"
+    case "$ev" in
+    polling)
+      verdict=未决
+      reason="工人在取活而 API 探针重试 ${used} 次仍红，两证矛盾：不能把未决写成已证实故障，不退回，留给下一轮健康检查和人看"
+      ;;
+    idle)
+      verdict=退回
+      reason="重试到底队列上仍没有工人的取活记录，API 探针也红，两边都指向引擎真不在线"
+      ;;
+    *)
+      verdict=退回
+      reason="引擎进程已退或没起，这是真故障"
+      ;;
+    esac
+  fi
+  receipt="引擎核对回执：工人证据=$worker_text；API 探针=$probe_text；重试 $used 次（上限 $((tries - 1)) 次）；裁决=$verdict；理由=$reason"
+  ENGINE_RECONCILE_VERDICT=$verdict
+  ENGINE_RECONCILE_RECEIPT=$receipt
+  case "$verdict" in
+  保留) ok "后端报 engine 好了（重试后转绿）：$receipt" ;;
+  未决) pending "后端报 engine 不好：$why（$receipt）" ;;
+  *)
+    red "fleet-api：engine 切之前是好的，换了这一版不好了：$why；$receipt"
+    return 1
+    ;;
+  esac
+  return 0
+}
+
 # 切之后的健康报告逐项和切之前比：之前好的变坏了才算这一版的错（返回 1）；会自己变红的那几项只标待处理
 compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
   local k st why was bad=0
@@ -1802,6 +1901,9 @@ compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
       pending "后端报 engine 不好：$why（本机没启用引擎：$RELEASE_ENV 的 FLEET_SERVICES 里没有 fleet-engine，是预期的，不退回）"
     elif [[ " $DRIFTING_HEALTH_ITEMS " == *" $k "* ]]; then
       pending "后端报 $k 不好：$why（这一项会随时间自己变红，和换没换版无关，不退回）"
+    elif [[ "$k" == engine && "$was" == ok ]]; then
+      # 引擎红要先和工人已拉活的证据核对，不凭一次探针红就退回（#3250）
+      reconcile_engine "$why" || bad=1
     elif [[ "$was" == ok ]]; then
       red "fleet-api：$k 切之前是好的，换了这一版不好了：$why"
       bad=1
