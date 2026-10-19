@@ -12,7 +12,7 @@ beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'fleet-migration-budget-'));
 });
 afterEach(() => rmSync(root, { recursive: true, force: true }));
-async function fixture(renameSnapshot = false) {
+async function fixture(renameSnapshot = false, seedPath?: string) {
   const env = isolatedGitEnv(root, root),
     git = (...args: string[]) => gitIn(env, root, ...args).trim();
   git('init', '-q', '-b', 'main');
@@ -25,6 +25,7 @@ async function fixture(renameSnapshot = false) {
   const prefix = 'packages/db/migrations/';
   put(`${prefix}meta/_journal.json`, JSON.stringify({ ...journal, entries: journal.entries.slice(0, 94) }));
   put(`${prefix}meta/0093_snapshot.json`, read('meta/0093_snapshot.json'));
+  if (seedPath) put(seedPath, '// trust input before\n');
   if (renameSnapshot) put('template_snapshot.json', read('meta/0094_snapshot.json'));
   git('add', '.');
   git('commit', '-qm', 'base');
@@ -52,6 +53,31 @@ async function fixture(renameSnapshot = false) {
   return { tree, base, head, raw, put, commit, prefix, git };
 }
 describe('固定 Git blob 的生成快照计量', { timeout: 30000 }, () => {
+  it.each([
+    ['A', 'packages/db/src/migration-budget-data.ts'],
+    ['M', 'packages/db/src/migration-budget-data.ts'],
+    ['D', 'packages/db/src/migration-budget-data.ts'],
+    ['M', 'packages/db/package.json'],
+    ['M', 'pnpm-lock.yaml'],
+    ['A', 'packages/engine/src/real/migration-budget.ts'],
+    ['M', 'packages/engine/src/real/user-git.ts'],
+    ['A', '.gitattributes'],
+    ['A', 'packages/db/migrations/.gitattributes'],
+  ])('候选信任根%s %s即无折扣，保留完整raw', async (status, p) => {
+    const f = await fixture(false, status === 'A' ? undefined : p);
+    if (status === 'D') f.git('rm', p);
+    else f.put(p, '// trust input after\n');
+    const head = f.commit(),
+      raw = await addedLinesAgainst(f.tree, f.base, head);
+    const measured = await measureMigrationBudget(f.tree, f.base, head, raw);
+    expect(measured).toMatchObject({
+      verified: false,
+      rawAddedLines: raw,
+      verifiedGeneratedLines: 0,
+      chargeableAddedLines: raw,
+      reason: expect.stringContaining(`信任根 ${p}`),
+    });
+  });
   it('全局raw识别改名时，不用局部no-renames全量快照错误抵扣代码', async () => {
     const f = await fixture(true);
     f.put('many-lines.ts', '// normal source change\n'.repeat(9000));

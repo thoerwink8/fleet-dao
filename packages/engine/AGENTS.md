@@ -10,7 +10,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - `packages/engine/src/activities.ts`、`packages/engine/src/real/`：活动和真端口的装配（库、GitHub、会话、工作树），缺一项就不起。
 - `packages/engine/src/real/self-check.ts`：以工作树主人身份跑测试和 tsc；各段预算统一从 `packages/engine/src/self-check-budget.ts` 取，活动总限时只由这些预算相加。
 - `packages/engine/src/decisions/`：判断（纯函数）；`packages/engine/src/routing/`：选路；`packages/engine/src/jobs/`：引擎进程里的定时器（不是 Temporal 工作流，登记表在 `real/jobs.ts`）。
-- `src/real/migration-budget.ts`：本仓超默认体量预算时，按固定 Git blob 和发布版数据验证器识别唯一新增 PG7 快照；原始 addedLines 不换口径，未知回 raw，Git读取失败抛错。20k行/2MiB只限自动折扣资格，不自动恢复已停任务。
+- `src/real/migration-budget.ts`：本仓超默认体量预算时，按固定 Git blob 和发布版数据验证器识别唯一新增 PG7 快照；原始 addedLines 不换口径，未知回 raw，Git读取失败抛错。候选改动验证器、依赖声明/锁、计量判据或任意层级 `.gitattributes` 等固定信任输入时不折扣。20k行/2MiB只限自动折扣资格，不自动恢复已停任务。
 
 ## 测试
 

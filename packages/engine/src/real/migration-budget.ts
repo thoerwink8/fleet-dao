@@ -8,6 +8,32 @@ export const GENERATED_BUDGET_MAX_LINES = 20_000;
 export const GENERATED_BUDGET_MAX_BYTES = 2 * 1024 * 1024;
 const JOURNAL = 'packages/db/migrations/meta/_journal.json';
 const MIGRATIONS = 'packages/db/migrations/';
+// 候选不能同时改未来发布版的信任根并获得此根的折扣；不执行候选代码是另一条独立防线。
+const TRUST_INPUTS = new Set([
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  '.npmrc',
+  '.pnpmfile.cjs',
+  'packages/db/package.json',
+  'packages/db/src/package.json',
+  'packages/db/src/bin/package.json',
+  'packages/db/src/migration-budget.ts',
+  'packages/db/src/migration-budget-data.ts',
+  'packages/db/src/bin/migration-budget.ts',
+  'packages/engine/package.json',
+  'packages/engine/src/package.json',
+  'packages/engine/src/real/package.json',
+  'packages/engine/src/workflows/package.json',
+  'packages/engine/src/real/migration-budget.ts',
+  'packages/engine/src/real/user-git.ts',
+  'packages/engine/src/real/exec.ts',
+  'packages/engine/src/real/task-activities.ts',
+  'packages/engine/src/task-contract.ts',
+  'packages/engine/src/limits.ts',
+  'packages/engine/src/workflows/task.ts',
+  'packages/engine/src/workflows/kit.ts',
+]);
 let sequence = 0;
 function utf8(buffer: Buffer): string | null {
   try {
@@ -67,12 +93,18 @@ export async function measureMigrationBudget(
   );
   if (!patch) return fallback('完整 patch 超过 2MiB，不适用自动折扣');
   const rawDiffBytes = patch.length;
-  const names = await read(['diff', '--name-status', '-z', '--no-renames', base, head, '--', MIGRATIONS]);
-  if (!names) return fallback('迁移文件清单超限', rawDiffBytes);
+  const names = await read(['diff', '--name-status', '-z', '--no-renames', base, head, '--']);
+  if (!names) return fallback('完整变更清单超限，信任根未核实', rawDiffBytes);
   const parts = names.toString('utf8').split('\0');
   if (parts.pop() !== '' || parts.length % 2) throw new PortError('GIT_FAILED', '迁移文件清单形状不完整');
   const changed = new Map<string, string>();
-  for (let i = 0; i < parts.length; i += 2) changed.set(parts[i + 1] as string, parts[i] as string);
+  for (let i = 0; i < parts.length; i += 2) {
+    const p = parts[i + 1] as string;
+    if (TRUST_INPUTS.has(p) || p === '.gitattributes' || p.endsWith('/.gitattributes')) {
+      return fallback(`候选改动信任根 ${p}，不适用快照折扣`, rawDiffBytes);
+    }
+    if (p.startsWith(MIGRATIONS)) changed.set(p, parts[i] as string);
+  }
   if (changed.size !== 3 || changed.get(JOURNAL) !== 'M')
     return fallback('仅支持 journal 加一份新快照和一份新 SQL', rawDiffBytes);
   const snapshots = [...changed].filter(
