@@ -1,5 +1,5 @@
 // Windows 的本机选测：需要 Linux FD/进程语义的文件在显式配置的 Linux Node 下跑。
-// CI/Linux 直接走原 Vitest；不安装 Linux、不跳过测试、不使用旧检出冒充当前源码。
+// 各平台先核所选真 Temporal 测试的 CLI；不安装 Linux、不跳过测试、不使用旧检出冒充当前源码。
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { verifyRun } from './ci-box.ts';
 import { fsRepo } from './repo.ts';
+import { prepareTemporalCli, selectedNeedsTemporal } from './temporal-test-cli.ts';
 import { listTestFiles } from './test-split.ts';
 
 export const LINUX_TESTS = [
@@ -152,7 +153,6 @@ export function runLocalVitest(
     });
     return { status: r.status, signal: r.signal, error: r.error };
   };
-  if (platform !== 'win32') return direct(args);
   let temporary: string | undefined;
   try {
     const universe = listTestFiles(fsRepo(root));
@@ -160,6 +160,12 @@ export function runLocalVitest(
     // 调用入口只传 run、文件过滤和 = 形式的 reporter/outputFile 选项。
     const filters = args.slice(1).filter((a) => !a.startsWith('--'));
     const split = splitLocalTests(universe, filters);
+    if (selectedNeedsTemporal(fsRepo(root), [...split.native, ...split.linux])) {
+      const cli = prepareTemporalCli(root, { env });
+      env = { ...env, FLEET_TEST_TEMPORAL_CLI: cli.path };
+      console.log(`Temporal preparation 通过：CLI=${cli.path} version=${cli.version}`);
+    }
+    if (platform !== 'win32') return direct(args);
     if (!split.linux.length) return direct(args);
     const config = env.FLEET_TEST_LINUX_RUNNER;
     if (!config)
