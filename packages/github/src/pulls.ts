@@ -145,8 +145,7 @@ export async function openPr(
 ): Promise<OpenPrResult> {
   const { repo, branch } = input;
   const slug = repoSlug(repo);
-  const rawBody = typeof input.body === 'string' ? input.body : renderPrBody(input.body);
-  const body = neutralizeCloseKeywords(rawBody);
+  const body = typeof input.body === 'string' ? input.body : renderPrBody(input.body);
   const title = neutralizeCloseKeywords(input.title.trim());
   assertBodySize('PR 正文', body);
   // 标题、正文（会话交活时写的总结在里面）和分支名开出去就公开了（分支名进 PR 的网页地址和 git 的分支列表），
@@ -165,8 +164,8 @@ export async function openPr(
   if (branch.toLowerCase() === facts.defaultBranch.toLowerCase()) {
     throw new GitHubError('BRANCH_FORBIDDEN', `不能拿主线 ${facts.defaultBranch} 开 PR`);
   }
-  if (body !== rawBody || title !== input.title.trim()) {
-    deps.log.warn('PR 标题或正文里有 GitHub 关单词，已改成「关联」', { repo: slug, branch });
+  if (title !== input.title.trim()) {
+    deps.log.warn('PR 标题里有 GitHub 关单词，已改成「关联」', { repo: slug, branch });
   }
 
   const receipt = (p: Pull): PrReceipt => ({

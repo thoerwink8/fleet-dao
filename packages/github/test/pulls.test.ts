@@ -111,7 +111,7 @@ describe('开 PR', () => {
     );
   });
 
-  it('C13：标题正文里的关单词改成「关联」', async () => {
+  it('C13：标题里的关单词改成「关联」；正文先留下有效关单词，合并前才中和', async () => {
     const { gh, fake } = setup();
     fake.refs.set('task/4', A);
     const res = await gh.openPr({
@@ -123,7 +123,8 @@ describe('开 PR', () => {
     });
     const pr = fake.pulls.get(res.number);
     expect(pr?.title).toBe('关联 #3 登录');
-    expect(pr?.body).toBe('做完了。关联 #12, 关联 acme/other#9');
+    expect(pr?.body).toBe('做完了。Closes #12, resolves: acme/other#9');
+    expect(hasCloseKeywords(pr?.body ?? '')).toBe(true);
   });
 
   it('B3：长正文走请求体；超过 65536 个字符发出前就拒，报实际字数', async () => {

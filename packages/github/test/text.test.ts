@@ -100,15 +100,17 @@ describe('PR 正文模板', () => {
     }
   });
 
-  it('引擎开的 PR 不关单（#241：GitHub 替引擎关了单，接活当成叫停，第 7 步的关单评论和记账就做不完）：条目里的关单词也改成「关联」', () => {
+  it('开着的正文留下有效关单词（验收要核对）；合并前 mergePr 才中和，避免 GitHub 在合并时自己关单', () => {
     const body = renderPrBody({
-      requirement: 12,
-      did: ['做完了 closes #12'],
+      requirement: 3210,
+      did: ['做完了 closes #12', 'Closes #3210'],
       verified: ['ok'],
     });
-    expect(hasCloseKeywords(body)).toBe(false);
-    expect(body).toContain('- 做完了 关联 #12');
-    expect(body).toContain('**需求**：#12');
+    expect(hasCloseKeywords(body)).toBe(true);
+    expect(body).toContain('- 做完了 closes #12');
+    expect(body).toContain('- Closes #3210');
+    expect(body).toContain('**需求**：#3210');
+    expect(hasCloseKeywords(neutralizeCloseKeywords(body))).toBe(false);
   });
 
   it('验收责任还开着（#3037）：「需求」栏写 Refs 加「分片、关不了它」，不写 Closes；没开着照旧只写 #号', () => {
@@ -120,8 +122,8 @@ describe('PR 正文模板', () => {
     expect(plain).not.toContain('Refs');
   });
 
-  it('条目里的关单词也改掉', () => {
-    expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'] })).toContain('- 关联 #3');
+  it('条目里的有效关单词留在开着的正文里', () => {
+    expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'] })).toContain('- fixes #3');
   });
 });
 
