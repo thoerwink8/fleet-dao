@@ -305,6 +305,12 @@ describe('selfCheck 规范 CI 源码覆盖', () => {
       expect(isCiContractPath(path)).toBe(true);
     expect(isCiContractPath('packages/core/src/dispatch.ts')).toBe(false);
   });
+  it('候选新增补丁不能借同tree的CI自证安装合同变化', async () => {
+    const f = fixture();
+    const candidate = f.data[`/git/trees/${TREE}?recursive=1`] as typeof f.tree;
+    candidate.tree.push({ path: 'patches/new.patch', sha: 'f'.repeat(40), mode: '100644', type: 'blob' });
+    expect(await f.check(input, signal())).toBeNull();
+  });
   it('声明来自每台test runner的setup-node实际输出，不借changes机器代称', () => {
     const ci = parse(readFileSync(new URL('../../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
     const steps = ci.jobs.test.steps as Record<string, unknown>[];

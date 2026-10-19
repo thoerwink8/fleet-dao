@@ -43,6 +43,8 @@ export function isCiContractPath(path: string): boolean {
     !path.includes('/') ||
     path.startsWith('.github/') ||
     path.startsWith('packages/conventions/') ||
+    path.startsWith('patches/') ||
+    path.endsWith('.patch') ||
     path === 'deploy/france.sh' ||
     /(^|\/)(?:package\.json|tsconfig[^/]*\.json|vitest[^/]*\.[^/]+|TEST_READS[^/]*)$/.test(path)
   );

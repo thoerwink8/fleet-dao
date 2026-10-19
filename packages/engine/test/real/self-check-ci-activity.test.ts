@@ -39,6 +39,10 @@ function rig(
     cancelRead?: boolean;
     cancelTsc?: boolean;
     errorAt?: number;
+    invalidateCiDuringTsc?: boolean;
+    dirtyDuringFinalRead?: boolean;
+    cancelFinalRead?: boolean;
+    changedFinalAttempt?: boolean;
     noCoverage?: boolean;
   } = {},
 ) {
@@ -47,9 +51,16 @@ function rig(
   let probes = 0;
   let tests = 0;
   let typed = 0;
+  let ciPolluted = false;
   const commands: UserCommand[] = [];
   const coverage = vi.fn(async () => {
     if (options.cancelRead) ac.abort();
+    if (typed > 0) {
+      if (options.cancelFinalRead) ac.abort();
+      if (options.dirtyDuringFinalRead) ciPolluted = true;
+      if (options.invalidateCiDuringTsc) return null;
+      if (options.changedFinalAttempt) return { ...receipt, attempt: 3 };
+    }
     return options.noCoverage ? null : receipt;
   });
   const check = createSelfCheck({
@@ -63,7 +74,7 @@ function rig(
       if (s.includes('git_safe()')) {
         probes++;
         if (options.errorAt === probes) throw new Error('git probe unavailable');
-        return options.dirtyAt === probes || (options.mutateTsc && typed > 0)
+        return options.dirtyAt === probes || (options.mutateTsc && typed > 0) || ciPolluted
           ? commandResult(1)
           : commandResult(0, identity);
       }
@@ -132,6 +143,33 @@ describe('selfCheck 必经口的 CI 覆盖', () => {
     const f = rig({ errorAt: 3 });
     const result = await f.check(f.input, f.context);
     expect(f.counts().tests).toBe(1);
+    expect(result.steps.every((s) => s.coveredByCi === undefined)).toBe(true);
+  });
+  it.each([false, true])('tsc期间最新CI失效：撤回覆盖回原检查，保留已知失败=%s', async (failTsc) => {
+    const f = rig({ invalidateCiDuringTsc: true, failTsc });
+    const result = await f.check(f.input, f.context);
+    expect(f.coverage).toHaveBeenCalledTimes(2);
+    expect(f.counts().tests).toBe(1);
+    expect(result.state).toBe(failTsc ? 'red' : 'green');
+    expect(result.steps.every((s) => s.coveredByCi === undefined)).toBe(true);
+  });
+  it('最后CI读取期间污染：其后仍核本地身份并回原检查', async () => {
+    const f = rig({ dirtyDuringFinalRead: true });
+    const result = await f.check(f.input, f.context);
+    expect(f.counts().tests).toBe(1);
+    expect(result.steps.every((s) => s.coveredByCi === undefined)).toBe(true);
+  });
+  it('最终CI换attempt，即使新attempt也绿，仍保守回原检查', async () => {
+    const f = rig({ changedFinalAttempt: true });
+    const result = await f.check(f.input, f.context);
+    expect(f.counts().tests).toBe(1);
+    expect(result.steps.every((s) => s.coveredByCi === undefined)).toBe(true);
+  });
+  it('最终CI读取时取消撤证据，不开始原测试', async () => {
+    const f = rig({ cancelFinalRead: true });
+    const result = await f.check(f.input, f.context);
+    expect(result.state).toBe('skipped');
+    expect(f.counts().tests).toBe(0);
     expect(result.steps.every((s) => s.coveredByCi === undefined)).toBe(true);
   });
   it('本机tsc期间取消：撤掉覆盖字段及覆盖摘要，不留下假的采纳回执', async () => {

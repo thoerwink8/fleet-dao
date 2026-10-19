@@ -28,8 +28,13 @@ function tree() {
   writeFileSync(join(dir, 'tracked.txt'), 'original\n');
   git('add', '.');
   git('-c', 'user.name=test', '-c', 'user.email=test@example.test', 'commit', '-qm', 'fixture');
+  // Windows 的真实 Git 在 mingw64/bin；仅测试替换工具位置，生产探针固定 root 工具 PATH。
+  const testScript = CI_IDENTITY_SCRIPT.replace(
+    'PATH=/usr/local/bin:/usr/bin:/bin; export PATH',
+    'PATH="$PWD/.tools:$PATH"; export PATH',
+  );
   const probe = () =>
-    spawnSync('sh', ['-c', CI_IDENTITY_SCRIPT], { cwd: dir, env, encoding: 'utf8', timeout: 10_000 });
+    spawnSync('sh', ['-c', testScript], { cwd: dir, env, encoding: 'utf8', timeout: 10_000 });
   return { dir, tools, git, probe };
 }
 

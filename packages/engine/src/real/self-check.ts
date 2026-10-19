@@ -646,6 +646,8 @@ function affectedCommand(testCommand: string): string {
 /** 轻量输入身份探针；异常一律非零，包含未跟踪文件、索引特殊标记和子模块。 */
 export const CI_IDENTITY_SCRIPT = [
   'set -eu',
+  // 身份读数只用发布约定的 root 工具目录，不读用户的 go/bin 或候选 node_modules/.bin。
+  'PATH=/usr/local/bin:/usr/bin:/bin; export PATH',
   'export GIT_NO_REPLACE_OBJECTS=1 GIT_OPTIONAL_LOCKS=0',
   'git_safe() { git -c core.fsmonitor=false -c core.untrackedCache=false -c core.hooksPath=/dev/null "$@"; }',
   'git_safe rev-parse --verify HEAD',
@@ -955,8 +957,20 @@ export function createSelfCheck(deps: SelfCheckDeps) {
           if (ctx.signal.aborted) {
             return cancelled();
           }
+          // tsc 期间可能有人重跑 CI：本地树没变不代表原 attempt 仍是最新成功。
+          const finalCoverage =
+            measured !== null && deps.ciCoverage !== undefined
+              ? await deps.ciCoverage(measured, ctx.signal).catch(() => null)
+              : null;
+          if (ctx.signal.aborted) return cancelled();
+          // 必须排在最后一次 CI 读取之后，防读取期间工作树/工具又变化。
           const final = await ciIdentity().catch(() => null);
-          if (final === null || JSON.stringify(final) !== JSON.stringify(measured)) {
+          if (
+            finalCoverage === null ||
+            JSON.stringify(finalCoverage) !== JSON.stringify(covered) ||
+            final === null ||
+            JSON.stringify(final) !== JSON.stringify(measured)
+          ) {
             // 取证后、tsc 期间有变化：不保留覆盖回执，回原本机检查，旧失败不能被重试覆盖。
             const retried = await createSelfCheck({ ...deps, ciCoverage: undefined })(input, ctx);
             const failed = steps.filter((s) => s.outcome === 'fail');
@@ -1020,7 +1034,7 @@ export function createSelfCheck(deps: SelfCheckDeps) {
             outcome: 'skipped',
             exitCode: null,
             coveredByCi: covered,
-            digest: `可信完整 CI 已覆盖源码测试；未重复本机执行，不计本机 PASS。run=${covered.run} attempt=${covered.attempt} PR=#${covered.pr} head=${covered.head} tree=${covered.tree} workflow=${covered.workflow} contract=${covered.contractCommit}/${covered.contractHash} checks=${covered.checks.join(',')} CI_Node=${covered.ciNodes.join(',')} local_Node=${covered.node}`,
+            digest: `可信完整 CI 已覆盖源码测试；未重复本机执行，不计本机 PASS；现场仅核 pnpm/Vitest 精确版本，不证明整个依赖安装。run=${covered.run} attempt=${covered.attempt} PR=#${covered.pr} head=${covered.head} tree=${covered.tree} workflow=${covered.workflow} contract=${covered.contractCommit}/${covered.contractHash} checks=${covered.checks.join(',')} CI_Node=${covered.ciNodes.join(',')} local_Node=${covered.node}`,
           });
         } else if (testCommand === '') {
           steps.push(notRun('（测试命令）', '这个仓没配测试命令（repos.test_command）'));
