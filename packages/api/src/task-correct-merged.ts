@@ -221,7 +221,7 @@ export function decideCorrection(
     return refuse('原执行的 PR 或 head 与请求不一致，不能用别的交付来纠正');
   }
   if (!sessionLinkHolds(facts.sessions, req.workflowId, req.prNumber, req.runId)) {
-    return refuse('受管会话账对不上这次交付（无证据，或 run 记成了别的）');
+    return refuse('受管会话账对不上这次交付（无证据、run 记成了别的，或同一工作流下有矛盾的 PR）');
   }
   if (!facts.issue) return refuse('读不到这张 issue，不能确认编号属于这个仓');
   if (!sameRepo(facts.issue.repo, req.repo) || facts.issue.number !== req.issueNumber) {

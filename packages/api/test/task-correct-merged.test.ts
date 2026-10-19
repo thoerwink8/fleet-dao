@@ -1,4 +1,5 @@
 // 合成的 #3114 反例：只在判断和读取替身上走，不连生产库、不发信号。
+import { sessionLinkHolds } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import { TaskCliError } from '../src/task-cli.ts';
 import {
@@ -208,6 +209,50 @@ describe('decideCorrection', () => {
         snap({ sessions: [{ workflowId: WF, prNumber: 3137, temporalRunId: 'other', ended: true }] }),
       ),
     ).toContain('无证据');
+  });
+
+  it('同一工作流另有不同 PR 的会话就拒绝，不能靠一条匹配记录或已有回执放行', () => {
+    const matching = { workflowId: WF, prNumber: 3137, temporalRunId: RUN, ended: true };
+    const otherPr = { workflowId: WF, prNumber: 1, temporalRunId: null, ended: true };
+    expect(sessionLinkHolds([matching, otherPr], WF, 3137, RUN)).toBe(false);
+    expect(sessionLinkHolds([matching, { ...otherPr, temporalRunId: RUN }], WF, 3137, RUN)).toBe(false);
+    expect(sessionLinkHolds([matching, { ...otherPr, ended: false }], WF, 3137, RUN)).toBe(false);
+    expect(sessionLinkHolds([matching], WF, 3137, RUN)).toBe(true);
+    expect(
+      sessionLinkHolds(
+        [matching, { workflowId: WF, prNumber: null, temporalRunId: null, ended: true }],
+        WF,
+        3137,
+        RUN,
+      ),
+    ).toBe(true);
+    expect(
+      sessionLinkHolds(
+        [matching, { workflowId: `${WF}:r2`, prNumber: 9, temporalRunId: null, ended: true }],
+        WF,
+        3137,
+        RUN,
+      ),
+    ).toBe(true);
+
+    expect(reason('founder', req, snap({ sessions: [matching, otherPr] }))).toContain('矛盾');
+
+    const identity = correctionIdentity(req, TASK);
+    const receipt = {
+      before: { state: 'stopped', phase: 'abandoned' },
+      after: { state: 'done', phase: 'merged', ...identity },
+    };
+    const repeat = decideCorrection(
+      'founder',
+      req,
+      snap({
+        task: { ...task, state: 'done', phase: 'merged' },
+        sessions: [matching, otherPr],
+        corrections: [receipt],
+      }),
+    );
+    expect(repeat.ok).toBe(false);
+    if (!repeat.ok) expect(repeat.reason).toContain('矛盾');
   });
 
   it('镜像没有不挡；对不上就拒绝。空的 issueRefs 不是矛盾', () => {

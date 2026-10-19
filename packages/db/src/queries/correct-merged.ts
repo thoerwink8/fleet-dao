@@ -96,7 +96,8 @@ function sessionLinks(
 
 /**
  * 受管会话账是否仍把这张任务、这条工作流、这个 PR 和这次 run 钉在一起。
- * temporal_run_id 为空的老行不冒充别的 run；一旦记了别的 run，就不能用这次请求盖过去。
+ * temporal_run_id 或 PR 号为空的老行不冒充别的交付；一旦同一工作流记下了别的 run，
+ * 或同时还存在另一条不同 PR 的会话，就不能靠其中一条对得上的记录放行。
  */
 export function sessionLinkHolds(
   sessions: readonly CorrectMergedSessionLink[],
@@ -105,8 +106,10 @@ export function sessionLinkHolds(
   runId: string,
 ): boolean {
   const sameWorkflow = sessions.filter((row) => row.workflowId === workflowId);
-  const recorded = sameWorkflow.map((row) => row.temporalRunId).filter((id): id is string => id !== null);
-  if (recorded.some((id) => id !== runId)) return false;
+  const recordedRuns = sameWorkflow.map((row) => row.temporalRunId).filter((id): id is string => id !== null);
+  if (recordedRuns.some((id) => id !== runId)) return false;
+  const recordedPrs = sameWorkflow.map((row) => row.prNumber).filter((n): n is number => n !== null);
+  if (recordedPrs.some((n) => n !== prNumber)) return false;
   return sameWorkflow.some(
     (row) =>
       row.ended && row.prNumber === prNumber && (row.temporalRunId === null || row.temporalRunId === runId),
@@ -204,7 +207,8 @@ export async function readCorrectMergedLedger(
 
 /**
  * 仅当任务行仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍钉着这次交付时，
- * 改成 done/merged 并写操作记录。任一条件不成立回 stale，不写。审计失败抛错，整笔回滚。
+ * 改成 done/merged 并写操作记录。同一工作流另有不同 PR 的会话算对不上，回 stale，不写。
+ * 审计失败抛错，整笔回滚。
  */
 export async function casCorrectMergedTask(
   db: Db,

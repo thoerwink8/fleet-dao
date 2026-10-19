@@ -1030,7 +1030,7 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
   ssh "$(head -1 ~/.fleet-dao/france-ssh)" 'bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api task redo thoerwink8/fleet-dao 1402 --note "叫停之后重来"'
   ```
   `continue` 发 `taskContinue`（和驾驶舱「继续」同一个信号），`abandon` 发 `taskAbandon`（和「叫停」同一个，`--note` 就是原因）。`redo` 走后端现成的 `taskRedo.redo`（`packages/api/src/temporal.ts`），只在库里这张单是已叫停或挂起时另起一代；做完、失败、还在跑的拒绝并说现在是什么状态。`--note` 必填。每条写一条操作记录（`task.continue` / `task.abandon` / `task.redo`，target `issue:<owner/仓>#<号>`，after 里有谁、哪张单、note、结果）。找不到这张单或任务工作流已经不在：退出码 1，标准输出不打成功。退出码：0 做成了；1 没做成；2 参数不对。`dispatch-issue` 碰到已派过，提示改跑这条 `redo`（驾驶舱按钮同样能点）。
-  已经结束、任务行却是 stopped/abandoned、GitHub 上那次 PR 确实已合并的，用 `task correct-merged`（不带 `--apply` 只预检，标准输出一行 JSON：对象和拟改成的 done/merged）。`--apply` 会再读一遍仓、单、PR、最终头、真实合并提交、任务行、原工作流和原 run；仍是引擎的已结束任务、没有活会话、和预检是同一份，才在同一个事务里把任务行改成 done/merged 并写 `task.correct-merged`（谁、为什么、前后状态、证据）。原 run、原 Temporal 结果、待验责任都不改，不关、不重开 GitHub 单，issue 已关闭不算做完。对不上、读不到、操作者不是 `FLEET_OPS_OPERATOR`、核对之后又变了，都拒绝且不写。同一份再跑一次是已纠正，不写第二条。退出码：0 预检通过、已纠正或本来就是；1 拒绝或没查成；2 参数不对。
+  已经结束、任务行却是 stopped/abandoned、GitHub 上那次 PR 确实已合并的，用 `task correct-merged`（不带 `--apply` 只预检，标准输出一行 JSON：对象和拟改成的 done/merged）。`--apply` 会再读一遍仓、单、PR、最终头、真实合并提交、任务行、原工作流和原 run；仍是引擎的已结束任务、没有活会话、和预检是同一份，才在同一个事务里把任务行改成 done/merged 并写 `task.correct-merged`（谁、为什么、前后状态、证据）。原 run、原 Temporal 结果、待验责任都不改，不关、不重开 GitHub 单，issue 已关闭不算做完。对不上、读不到、操作者不是 `FLEET_OPS_OPERATOR`、核对之后又变了，都拒绝且不写。同一工作流的会话里只要还有另一条不同 PR，不算对得上：首次纠正拒绝，已经纠正过之后再出现这种矛盾也不能当成同一次成功。同一份、证据没变，再跑一次才是已纠正，不写第二条。退出码：0 预检通过、已纠正或本来就是；1 拒绝或没查成；2 参数不对。
 - 认领账和提醒（认领账 #556 已删，只剩提醒；design 15.3「谁在处理」）：2026-09-28 起「谁在处理」这份状态只留给驾驶舱看（#445，「提醒派单」整层删掉——不再等没人认领自动开跟进单、不用认领、没有 `alert claim`）；经 ssh 能看的只剩开着的提醒、跟进单（历史上挂过的）、PR、静默：
 
   ```

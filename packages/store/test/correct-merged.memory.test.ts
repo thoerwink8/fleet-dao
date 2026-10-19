@@ -84,6 +84,25 @@ describe('内存版受管纠正', () => {
     expect(again.data.stateChanges.some((row) => row.to === 'done')).toBe(false);
   });
 
+  it('同一工作流另有不同 PR 的会话就不写', async () => {
+    const memory = store();
+    memory.data.segmentRuns.push({
+      id: 'other-pr',
+      segment: 'manual',
+      taskId: TASK,
+      model: 'test',
+      startedAt: WHEN,
+      endedAt: WHEN,
+      outcome: 'done',
+      workflowId: 'task:thoerwink8/fleet-dao#3114',
+      prNumber: 1,
+    });
+    expect(await memory.casCorrectMerged(input)).toBe('stale');
+    expect(memory.data.tasks[0]?.state).toBe('stopped');
+    expect(memory.data.taskClosures[0]?.phase).toBe('abandoned');
+    expect(memory.data.audit).toEqual([]);
+  });
+
   it('开着的会话或更新时间变了就不写', async () => {
     const memory = store();
     memory.data.runs.push({
