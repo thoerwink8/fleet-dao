@@ -20,6 +20,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 ## 常见坑
 
+- 主线同步每段最多 `MAX_MAIN_SYNCS` 次；只有精确 PR/head/已用次数对应的预算耗尽停法，实际收到这次停下之后的新「继续」，才能续下一段。普通失败、运行中或重复的「继续」不能预存额度。活动旧结果没有结构身份时先保持原停法，重试得到新身份后仍须下一次「继续」；每次同步新头仍重走仓原有 CI、验收与路径闸。
+
 - 冷验收完整检出：archive 前经 GitHub 的受管镜像入口补齐既定完整 head，复用镜像锁、只读凭据、取消和超时；已有对象不联网，不拿分支最新头替换待验头。获取或检出失败保留真实降级和报警，只有精确头完整检出成功才撤旧报警。
 
 - 重启收孤儿（`real/orphan-reap.ts`）：脱开会话的真实临时 cwd 从原 `runs.worktree_path` 读，冷验收的目录名不等于 runId。交接或账读不到先报错，不把未知当空清掉；延迟回收前重读 detached 标记及 TTL，已经接回的不碰。
@@ -48,6 +50,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 改工作流：加 `patched()` + 必要时录一个新重放场景；改了步序、停在哪等人，同步 design 第五节对应条。
 - 给任务页「过程」记的账（#3140）：动手会话入参的 `cause` / `causeSummary` / `roundSeq` / `resumeReason`、冷验收入参的 `roundSeq`、推分支的 `prNumber`、开 PR 的 `numstat` 都是可选字段，只在 `patched('run-cause-fields')`、`patched('pr-head-files')` 为真时给，只记账不改步序；加新的起因先改 shared 的 `RUN_CAUSES`（库里 `runs_cause_known` 约束同一份，`packages/db/test/run-cause.test.ts` 核对）并在 `task-session.ts` 的 `nextCause` 赋值处点名它为什么起。
 - 改活动超时：只改 `activity-options.ts`。改定时任务：`src/jobs/` 加任务，`real/jobs.ts` 的 `ENGINE_JOBS` 登记。
+- 冷验收每家原始结论在 `verifier-invoke.ts` 按真实 runId 立即入库，先于格式重试、二轮过滤和聚合，保留完整问题原文；组合另经 `RunsWriter.noteVerifyAggregate` 记精确头/轮次和来源 runIds，多家不带任何一家 session 身份。接回单家验收也走原始结论和聚合两份账；任一写账失败明确记任务日志、证据保持未知，不改已跑出的真实裁决、不因此再起模型重验。
+- numstat 采集的截断前总数或失败原因经可选 `numstatSnapshot` 和旧 `pr-head-files` 补丁块传到开 PR，零文件照记。老历史只有数组没有总数的明确未知，不升级成完整清单。
 - 改读写的表：表结构在 `packages/db`（生成迁移），共用的读写在 `packages/store`（两套实现一起改）。
 - 改派工、选路：同步 design 第九节「自由组合的派工模型」。
 - 改了法国上的单元、环境变量：同步 ops 第五节「AI 会话」或第九节「发布应用（deploy/release.sh）」。
@@ -62,3 +66,5 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 必须核对 intake 固定 PATH 的实际入口和版本；`/usr/local/go/bin/go` 遮住受管入口时明确失败，保留现有安装，不放宽 readiness。旧树和入口备份保留，失败不记健康、不自动重试。
 
 - 删树前置：`real/preserve-worktree.ts` 由任务收尾、建树前替换旧树与小时清扫共用。干净未发布提交先保存完整 bundle，最终落盘回读并在独立空仓恢复核对 HEAD/内容树/引用。复杂未提交、未跟踪、stash、git 目录里还挂着的操作状态（没并完的合并、挑拣、回退、变基、二分、ORIG_HEAD 等，工作区干净也算）先打受限快照（工作文件、原始索引及其标志、resolve-undo 指的三层内容、stash 全部记录、合并头和序列状态引用的对象闭包），独立空仓恢复对上、原树身份和指纹没变、并且删除前再次确认没人用，才允许原来的清理入口继续。删除必经点不论干净还是复杂都现核进程 cwd；进程 cwd 能读到在这棵树里才算在用；同主或树主的 cwd 读不到（包括 ptrace 看不了的同主兄弟）算确认不了，留树。别的用户读不到 cwd 不算在用。/proc 列不了留树。测试经 `processLook`/`treeProcessLook` 换成夹具，不跟 CI 机器的进程表走；生产不传。删除前除了没结束的会话，还要看任务和子任务工作流；查不清不当成没人用。调用方只豁免自己这一条工作流，避免任务收自己的树时被自己挡死。非 Git 成果、读失败、快照或恢复失败留原树。旁边已有的备份不是回执。受管截图仍走 `real/shots.ts`，只排除逐文件核对内容一致的已保全图片。
+
+- 完整检出成功回执由 `placeVerifyCheckout.onCompleted` 在 ensureHead、checkout、最终取消守卫后独立写入，不借撤卡证明成功；写失败诊断证据未知，不改 full 或验收裁决。每次物理调用新 receiptId，调用者确实已分配才传 verifier runId。

@@ -21,7 +21,7 @@
 // work-watch.mjs 按同样的文件名和字段读（那边是纯 node，引不了这里；两边的测试各自钉着同一份形状）。
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export const RUN_SCHEMA = 1;
 /** 看护进程多久写一次 beatAt */
@@ -260,9 +260,10 @@ export function defaultBrief(o: { issue: number; title: string; worktree: string
     `照 \`gh issue view ${o.issue}\` 的正文做，「怎么算做完」逐条做到，直到 PR 合并。`,
     `- 工作树 ${o.worktree}（分支 ${o.branch}，从 origin/main 拉的；先读仓根 AGENTS.md，再 pnpm install --frozen-lockfile）。单已经领好，不用再 pnpm work claim。`,
     '- 只跑改到的和新加的测试文件（npx vitest run <文件>），再跑仓里的格式和类型检查；新用例改前红、改后绿。',
-    `- 开 PR 用 pnpm pr:open（分支带单号会自动写关单词；改到改标准路径照仓里的规矩办，没有创始人原话就停下写进最后的回复）。开完用一条前台的 gh pr checks <PR号> --watch --fail-fast 等到合并或红，红了查根子、修好再推，直到合并。`,
+    `- 开 PR 用 pnpm pr:open（分支带单号会自动写关单词；改到改标准路径照仓里的规矩办，没有创始人原话就停下写进最后的回复）。受管 PR 建好后不自动挂合并：先 pnpm work feedback ${o.issue} 读取完整意见，按原 run/session 对退回逐条 ack；修复并推送后由审查方 resolve，工人不能代替审查方解除退回。无未结退回时再 pnpm work deliver ${o.issue} 为精确 head 申请 squash 自动合并。gh pr checks <PR号> --watch --fail-fast 只等检查结果，红了修好再推并重新走交付核验；检查全绿后仍须 gh pr view <PR号> --json state,mergedAt 核实真实合并，不能把检查通过当成交付完成。`,
     '- 你是 pnpm work run 派的无头工人（脱离聊天进程跑），没人能回答你的问题：交代没写的取最保守的理解，取舍写进最后的回复。',
     '- 中途被打断（网关断、进程被停）会用同一个会话续上：续的时候先看工作树和 PR 的现状，别重做已经做完的。',
+    `- 每次交付先 pnpm work feedback ${o.issue} 读取完整意见；按原run/session用 pnpm work ack ${o.issue} --return <编号>确认收到，不能自行resolve。交付用 pnpm work deliver ${o.issue}，不要裸gh ready/merge绕过审查；新head和CI绿都不解除退回。`,
     '- 最后一条回复会写进结果文件、叫醒派你的会话：写结论、PR 号和合没合、没做的和原因，结论带证据。',
   ].join('\n');
 }
@@ -292,6 +293,8 @@ export interface SuperviseDeps {
   /** 每 ms 毫秒调一次 fn，回一个停下的函数 */
   repeat: (fn: () => void, ms: number) => () => void;
   log: (line: string) => void;
+  feedbackContext?: (spec: RunSpec) => Promise<string>;
+  validateDelivery?: (spec: RunSpec) => Promise<void>;
 }
 
 /** 工人的命令行：第一次定会话号，续的时候 --resume 同一个 */
@@ -316,7 +319,30 @@ export async function superviseRun(dir: string, deps: SuperviseDeps): Promise<Ru
   if (!spec) throw new Error(`${f.spec} 不在：先 pnpm work run <单号>`);
   const brief = readFileSync(f.brief, 'utf8');
   const done = readJson<RunResult>(f.result);
-  if (done) return done;
+  if (done) {
+    if (done.state === 'done' && deps.validateDelivery) {
+      try {
+        await deps.validateDelivery(spec);
+      } catch (e) {
+        const corrected: RunResult = {
+          ...done,
+          state: 'failed',
+          why: `旧完成回执重新核验失败：${e instanceof Error ? e.message : String(e)}`,
+        };
+        writeJson(f.result, corrected);
+        const old = readJson<RunStatus>(f.state);
+        if (old)
+          writeJson(f.state, {
+            ...old,
+            state: 'failed',
+            lastError: corrected.why,
+            updatedAt: deps.now().toISOString(),
+          });
+        return corrected;
+      }
+    }
+    return done;
+  }
   const at = () => deps.now().toISOString();
   const prev = readJson<RunStatus>(f.state);
   if (prev && prev.supervisorPid !== deps.pid && supervisorLive(prev, deps.now())) {
@@ -402,14 +428,34 @@ export async function superviseRun(dir: string, deps: SuperviseDeps): Promise<Ru
       );
       const out = await deps.runWorker({
         args: workerArgs(sessionId, resume),
-        stdin: resume ? RESUME_PROMPT : brief,
+        stdin: deps.feedbackContext
+          ? `${resume ? RESUME_PROMPT : brief}\n${await deps.feedbackContext(spec)}`
+          : resume
+            ? RESUME_PROMPT
+            : brief,
         cwd: spec.worktree,
-        env: { ...spec.env, FLEET_WORKER: '1' },
+        env: {
+          ...spec.env,
+          FLEET_WORKER: '1',
+          FLEET_WORK_RUNS_DIR: dirname(dir),
+          FLEET_WORK_RUN: spec.createdAt,
+          FLEET_WORK_SESSION: sessionId,
+        },
         outFile: f.out(n),
         errFile: f.err(n),
       });
       const v = judgeAttempt(out);
-      if (v.kind === 'done') return finish('done', v.summary, null);
+      if (v.kind === 'done') {
+        try {
+          if (deps.validateDelivery) await deps.validateDelivery(spec);
+          return finish('done', v.summary, null);
+        } catch (e) {
+          const why = `交付未核实：${e instanceof Error ? e.message : String(e)}`;
+          save({ state: 'retrying', sessionStarted: true, lastError: why });
+          deps.log(why);
+          continue;
+        }
+      }
       if (v.kind === 'fatal') return finish('failed', '', v.why);
       // 会话号对上了、或 --session-id 说号已经用了，说明会话建起来了，下次 --resume；--resume 报找不到会话就退回用原会话号新起
       const started =

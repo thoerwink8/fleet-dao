@@ -21,6 +21,7 @@ import { Section } from '../components/layout/section';
 import { StatusBadge } from '../components/layout/status-badge';
 import type { LayoutTone } from '../components/layout/tone';
 import { RepoLink } from '../components/repo-link';
+import { RoundProgressStrip } from '../components/round-progress';
 import { RunTranscriptDrawer } from '../components/run-transcript';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { ActionButtons } from '../components/task-actions';
@@ -46,6 +47,10 @@ const DETAIL = (
     <p>一张单走了哪几段、每段每个模型花了多久、多少 token 和钱；读不到的写明没读到，不当成 0。</p>
     <ul className="list-disc space-y-1 pl-4">
       <li>顶上一句是这张单现在怎么样；灰字行是仓和单号（点开去 GitHub）、开单时间、最新的 PR。</li>
+      <li>
+        页头下面一条是这一回合走到哪：动手 → 自测 → 推分支 · CI → 验收 →
+        合并，蓝的在做、红的没成；返工的回合带上一回合怎么收场。没有回合记录的老单不画。
+      </li>
       <li>
         汇报与改动：最新一笔的结论、命令完成和失败的数、关联的 PR（紫条，带状态）、改了哪些文件（每个文件的
         +/-）。 文件和行数来自推分支时按 PR 头记的
@@ -330,6 +335,7 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
     <>
       <TaskHero d={d} now={now} />
       <div className="flex flex-col gap-4 lg:gap-6">
+        <RoundProgressStrip d={d} />
         <TaskSummary d={d} now={now} />
         <TaskProcess d={d} now={now} onViewTranscript={open} />
         <SegmentStats d={d} now={now} />

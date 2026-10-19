@@ -4,7 +4,12 @@ import { RUN_CAUSE_SUMMARY_MAX, RUN_CAUSES } from '@fleet-dao/shared';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { recordTaskRound } from '../src/queries/pipeline-health.ts';
-import { PR_HEAD_FILES_MAX, readLatestPrHeadFiles, recordPrHeadFiles } from '../src/queries/pr-head-files.ts';
+import {
+  PR_HEAD_FILES_MAX,
+  readLatestPrHeadFiles,
+  readPrHeadFiles,
+  recordPrHeadFiles,
+} from '../src/queries/pr-head-files.ts';
 import { getRun, noteRunVerdict, startRun } from '../src/queries/runs.ts';
 import { prHeadFiles, runs, taskRounds } from '../src/schema/index.ts';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '../src/testing.ts';
@@ -200,10 +205,18 @@ describe('pr_head_files：按头记 numstat', () => {
       files: [{ path: 'c.ts', added: 1, removed: 0, binary: false }],
     });
     const b = await readLatestPrHeadFiles(t.db, key.repoId, key.prNumber);
-    expect(b).toEqual({ headSha: HEAD_B, files: [{ path: 'c.ts', added: 1, removed: 0, binary: false }] });
+    expect(b).toMatchObject({
+      headSha: HEAD_B,
+      files: [{ path: 'c.ts', added: 1, removed: 0, binary: false }],
+      snapshot: { status: 'complete', total: 1, kept: 1 },
+    });
+    expect(await readPrHeadFiles(t.db, key.repoId, key.prNumber, HEAD_A)).toMatchObject({
+      headSha: HEAD_A,
+      snapshot: { total: 2 },
+    });
   });
 
-  it('超过上限只记前面的并说明截断；空清单不写；库里的形状约束', async () => {
+  it('超过上限保留真实总数；零文件也有完整快照；库里的形状约束', async () => {
     const key = await pr();
     const many = Array.from({ length: PR_HEAD_FILES_MAX + 2 }, (_, i) => ({
       path: `f${String(i).padStart(4, '0')}.ts`,
@@ -215,11 +228,23 @@ describe('pr_head_files：按头记 numstat', () => {
       written: PR_HEAD_FILES_MAX,
       truncated: true,
     });
+    expect(await readPrHeadFiles(t.db, key.repoId, key.prNumber, HEAD_A)).toMatchObject({
+      snapshot: { status: 'truncated', total: PR_HEAD_FILES_MAX + 2, kept: PR_HEAD_FILES_MAX },
+    });
     expect(await recordPrHeadFiles(t.db, { ...key, headSha: HEAD_B, files: [] })).toEqual({
       written: 0,
       truncated: false,
     });
-    expect(await readLatestPrHeadFiles(t.db, key.repoId, key.prNumber)).toMatchObject({ headSha: HEAD_A });
+    expect(await readPrHeadFiles(t.db, key.repoId, key.prNumber, HEAD_B)).toMatchObject({
+      headSha: HEAD_B,
+      files: [],
+      snapshot: { status: 'complete', total: 0, kept: 0 },
+    });
+    // 重试采集失败不能把成功零文件冲成未知。
+    await recordPrHeadFiles(t.db, { ...key, headSha: HEAD_B, files: [], reason: 'git failed' });
+    expect(await readPrHeadFiles(t.db, key.repoId, key.prNumber, HEAD_B)).toMatchObject({
+      snapshot: { status: 'complete', total: 0 },
+    });
     // 二进制不能带行数、文本一定要有行数、头必须是完整提交号
     await expectViolation(
       t.db
@@ -237,5 +262,40 @@ describe('pr_head_files：按头记 numstat', () => {
         .values({ ...key, headSha: 'abc', path: 'z', binary: false, added: 0, removed: 0 }),
       'pr_head_files_head_sha_shape',
     );
+  });
+
+  it('失败快照带原因，重采成功可恢复；文件写失败连 metadata 一起回滚；旧文件行不伪称完整', async () => {
+    const key = await pr();
+    await recordPrHeadFiles(t.db, { ...key, headSha: HEAD_A, files: [], reason: 'git 无权限' });
+    expect(await readPrHeadFiles(t.db, key.repoId, key.prNumber, HEAD_A)).toMatchObject({
+      files: [],
+      snapshot: { status: 'unavailable', total: null, kept: 0, reason: 'git 无权限' },
+    });
+    await recordPrHeadFiles(t.db, { ...key, headSha: HEAD_A, files: [] });
+    expect(await readPrHeadFiles(t.db, key.repoId, key.prNumber, HEAD_A)).toMatchObject({
+      snapshot: { status: 'complete', total: 0 },
+    });
+    await expect(
+      recordPrHeadFiles(t.db, {
+        ...key,
+        headSha: HEAD_B,
+        files: [{ path: 'bad', added: -1, removed: 0, binary: false }],
+      }),
+    ).rejects.toThrow();
+    const after = await readPrHeadFiles(t.db, key.repoId, key.prNumber, HEAD_B);
+    expect(after?.headSha).toBe(HEAD_A);
+    // 独立 PR 只存在旧文件行，没有任何 metadata。
+    await t.db.insert(prHeadFiles).values({
+      ...key,
+      prNumber: 8,
+      headSha: HEAD_B,
+      path: 'legacy.ts',
+      added: 1,
+      removed: 0,
+      binary: false,
+    });
+    const legacy = await readPrHeadFiles(t.db, key.repoId, 8, HEAD_B);
+    expect(legacy?.headSha).toBe(HEAD_B);
+    expect(legacy?.snapshot).toBeUndefined();
   });
 });

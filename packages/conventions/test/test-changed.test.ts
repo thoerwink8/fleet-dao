@@ -833,6 +833,8 @@ describe('入口', () => {
       for (const test of cases) {
         // 只换 git/runner 两个外部进程边界；选择器、真实入口和槽逻辑都运行仓内代码。
         const source = `
+          // 这组只验选测/槽/退出码；平台转交由 local-vitest.test.ts 和真实 Linux 验真覆盖。
+          Object.defineProperty(process, 'platform', { value: 'linux' });
           import cp from 'node:child_process';
           import { syncBuiltinESMExports } from 'node:module';
           import { pathToFileURL } from 'node:url';

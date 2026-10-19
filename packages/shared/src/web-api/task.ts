@@ -329,6 +329,15 @@ export const PrFileSchema = z.object({
   binary: z.boolean(),
 });
 
+export const PrHeadSnapshotSchema = z.object({
+  headSha: z.string().regex(/^[0-9a-f]{40}$/),
+  status: z.enum(['complete', 'truncated', 'unavailable']),
+  total: Count.nullable(),
+  kept: Count,
+  reason: z.string().min(1).optional(),
+  recordedAt: Time,
+});
+
 export const TaskPrSchema = z.object({
   number: z.number().int().positive(),
   branch: z.string().optional(),
@@ -338,8 +347,8 @@ export const TaskPrSchema = z.object({
   /** PR 镜像里现在的头；没读到没有。 */
   headSha: z.string().optional(),
   /**
-   * 这个 PR 改了哪些文件、各增删几行：推分支时按头记的 numstat（pr_head_files）读最新那个头，不是把每次编辑加起来。
-   * none＝一次都没记过（在记这个账之前推的）；unavailable＝读不到；current＝记的头就是镜像里现在的头（镜像头没读到不给）。
+   * 按当前完整 PR 头读 numstat；只有完整快照可回 ok（含成功零文件），不把每次编辑加起来。
+   * none＝未采过；unavailable＝读不到、头未知/不符、历史完整性未知、失败或截断，原因和可选 snapshot 说明来源。
    */
   files: z.discriminatedUnion('state', [
     z.object({
@@ -347,9 +356,10 @@ export const TaskPrSchema = z.object({
       headSha: z.string(),
       current: z.boolean().optional(),
       items: z.array(PrFileSchema),
+      snapshot: PrHeadSnapshotSchema.optional(),
     }),
     Unread('none'),
-    Unread('unavailable'),
+    Unread('unavailable').extend({ snapshot: PrHeadSnapshotSchema.optional() }),
   ]),
 });
 

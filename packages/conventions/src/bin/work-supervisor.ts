@@ -4,8 +4,9 @@
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { ghRunner } from '../issue-new.ts';
+import { managedFeedbackContext, validateManagedDelivery } from '../managed-work.ts';
 import { liveClaimsPost, readClaimsEndpoint, work } from '../work.ts';
 import { removeLease, writeLease } from '../work-queue.ts';
 import { type AttemptOutput, type RunSpec, readJson, runFiles, superviseRun } from '../work-run.ts';
@@ -100,6 +101,8 @@ try {
     newSessionId: () => randomUUID(),
     runWorker,
     renew,
+    feedbackContext: (s) => managedFeedbackContext(ghRunner(s.worktree), s),
+    validateDelivery: (s) => validateManagedDelivery(ghRunner(s.worktree), s, true, dirname(dir)),
     repeat: (fn, ms) => {
       const t = setInterval(fn, ms);
       return () => clearInterval(t);

@@ -3,6 +3,7 @@ import type {
   AcceptanceCoverage,
   FlowMode,
   FlowSource,
+  RunVerdict,
   TaskExecutor,
   VerifyRejectClass,
 } from '@fleet-dao/shared';
@@ -341,7 +342,7 @@ export const pullRequests = pgTable(
 
 /**
  * PR 的头改了哪些文件、各增删几行（#3140）：引擎推分支成功后，按推上去的头现算 `git diff --numstat <主线>...<头>` 写进来
- * （键是仓、PR、头、路径）。任务页「已编辑 N 个文件 +x −y」读最新那个头的这几行，不拿每次编辑的行数加起来。
+ * （键是仓、PR、头、路径）。任务页核对 pr_head_snapshots 的当前精确头和完整性后读，不拿每次编辑的行数加起来。
  * 二进制文件 git 不给行数：binary 为真、added / removed 为空。一个头一次写全（同键冲突跳过，重放不重复）；
  * 单个头最多记 500 个文件，超了 truncated 那一行不另建，页面按「记了 N 个」写（引擎写之前截断并在日志里说明）。
  * 推的时候没数成不写这张表：页面写「没读到」，不拿 0 顶。
@@ -384,6 +385,64 @@ export const prHeadFiles = pgTable(
  * push_conflict 推分支并主线冲突；merge_conflict 等 CI、等合并时和主线冲突；timeout 超时停下后被放弃；stopped 放弃、叫停；other 别的（卫生检查拦下……）。
  * 同一条工作流里第几次收场（seq）只记一行：活动重试不重复写。
  */
+/** 每个精确 PR 头的一次完整采集；零文件也有行，老的文件行不自动升级为完整快照。 */
+export const prHeadSnapshots = pgTable(
+  'pr_head_snapshots',
+  {
+    repoId: uuid('repo_id')
+      .notNull()
+      .references(() => repos.id),
+    prNumber: integer('pr_number').notNull(),
+    headSha: text('head_sha').notNull(),
+    status: text('status').$type<'complete' | 'truncated' | 'unavailable'>().notNull(),
+    total: integer('total'),
+    kept: integer('kept').notNull(),
+    reason: text('reason'),
+    recordedAt: timestamp('recorded_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.repoId, t.prNumber, t.headSha] }),
+    check('pr_head_snapshots_identity', sql`${t.prNumber} > 0 and ${t.headSha} ~ '^[0-9a-f]{40}$'`),
+    check(
+      'pr_head_snapshots_shape',
+      sql`(${t.status} = 'complete' and ${t.total} = ${t.kept} and ${t.total} is not null and ${t.reason} is null) or (${t.status} = 'truncated' and ${t.total} is not null and ${t.total} > ${t.kept} and ${t.reason} is not null and length(trim(${t.reason})) > 0) or (${t.status} = 'unavailable' and ${t.total} is null and ${t.kept} = 0 and ${t.reason} is not null and length(trim(${t.reason})) > 0)`,
+    ),
+    check(
+      'pr_head_snapshots_counts',
+      sql`${t.kept} between 0 and 500 and (${t.total} is null or ${t.total} >= 0)`,
+    ),
+  ],
+);
+
+/** 聚合结论独立于各家 runs.verdict；来源组合固定，重试不能把它归给其中一笔。 */
+export const verifyAggregates = pgTable(
+  'verify_aggregates',
+  {
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    workflowId: text('workflow_id'),
+    prNumber: integer('pr_number').notNull(),
+    headSha: text('head_sha').notNull(),
+    round: integer('round').notNull(),
+    sourceKey: text('source_key').notNull(),
+    sourceRunIds: uuid('source_run_ids').array().notNull(),
+    verdict: jsonb('verdict').$type<RunVerdict>().notNull(),
+    recordedAt: timestamp('recorded_at', tz).notNull().defaultNow(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.taskId, t.prNumber, t.headSha, t.round, t.sourceKey] }),
+    check(
+      'verify_aggregates_identity',
+      sql`${t.prNumber} > 0 and ${t.headSha} ~ '^[0-9a-f]{40}$' and ${t.round} in (1, 2)`,
+    ),
+    check(
+      'verify_aggregates_sources',
+      sql`cardinality(${t.sourceRunIds}) > 0 and ${t.sourceKey} = array_to_string(${t.sourceRunIds}, ',')`,
+    ),
+  ],
+);
+
 export const ROUND_OUTCOMES = [
   'merged',
   'verify_rejected',
