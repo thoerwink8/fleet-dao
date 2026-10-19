@@ -99,7 +99,15 @@
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { clipCauseSummary } from '@fleet-dao/shared/run-cause';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
-import { CancellationScope, isCancellation, log, patched, workflowInfo } from '@temporalio/workflow';
+import {
+  allHandlersFinished,
+  CancellationScope,
+  condition,
+  isCancellation,
+  log,
+  patched,
+  workflowInfo,
+} from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
 import type { Limits } from '../limits.ts';
 import type {
@@ -144,6 +152,7 @@ import {
   hygieneFeedbackLine,
   hygieneSpotKey,
   hygieneSpots,
+  MergedTask,
   noteEmptyCommit,
   overBudgetLine,
   parsePlan,
@@ -392,7 +401,31 @@ class TaskFlow {
       const early =
         rt.verifyRound < MAX_VERIFY_ROUNDS && patched('verify-parallel-ci') ? this.startVerify(brief) : null;
       const ci = await waitForCiPolicy(rt);
-      if (ci.kind !== 'green') this.dropVerify(early);
+      if (ci.kind === 'merged' && early && patched('settle-merged-task-checkpoint')) {
+        // 外部合并不杀仍活的验收；只接同一个会话到终态，再核真实 merged/idle 与保全。
+        await early.run.result;
+        await rt.checkpoint();
+        return { commit: ci.mergeCommit };
+      }
+      if (ci.kind !== 'green' && early && patched('settle-merged-task-checkpoint')) {
+        // CI 红/未知也可能落后于外部合并；真正取消旧验收前现读，已合则自然等原会话。
+        const prNumber = rt.prNumber;
+        const expectedHead = rt.head;
+        if (prNumber === null || expectedHead === null) throw new Error('并行验收缺少 PR 身份');
+        const observed = await rt.step('readMergedTask', () =>
+          rt.acts.readMergedTask({
+            schemaVersion: 1,
+            repo: { owner: rt.input.repo.owner, name: rt.input.repo.name },
+            prNumber,
+            expectedHead,
+          }),
+        );
+        if (!observed) this.dropVerify(early);
+        await early.run.result;
+        await rt.checkpoint();
+      } else if (ci.kind !== 'green') {
+        this.dropVerify(early);
+      }
       if (ci.kind === 'merged') return { commit: ci.mergeCommit };
       if (ci.kind === 'rework') return 'rework';
       if (ci.kind === 'skip') {
@@ -406,7 +439,24 @@ class TaskFlow {
       const again = await readRepoCiPolicy(rt);
       this.ciMode = again;
       if (again === 'off') {
-        this.dropVerify(early);
+        if (early && patched('settle-merged-task-checkpoint')) {
+          const prNumber = rt.prNumber;
+          const expectedHead = rt.head;
+          if (prNumber === null || expectedHead === null) throw new Error('并行验收缺少 PR 身份');
+          const observed = await rt.step('readMergedTask', () =>
+            rt.acts.readMergedTask({
+              schemaVersion: 1,
+              repo: { owner: rt.input.repo.owner, name: rt.input.repo.name },
+              prNumber,
+              expectedHead,
+            }),
+          );
+          if (!observed) this.dropVerify(early);
+          await early.run.result;
+          await rt.checkpoint();
+        } else {
+          this.dropVerify(early);
+        }
         const direct = await this.mergeNowAndFinish(rt);
         if (direct === 'rework') return 'rework';
         if (direct === 'head_moved') continue;
@@ -458,7 +508,8 @@ class TaskFlow {
   private async joinVerify(early: EarlyVerify, brief: TaskBrief): Promise<'pass' | 'rework' | 'head_moved'> {
     const got = await early.run.result;
     if (!got.ok) {
-      if (got.error instanceof Abandoned || isCancellation(got.error)) throw got.error;
+      if (got.error instanceof Abandoned || got.error instanceof MergedTask || isCancellation(got.error))
+        throw got.error;
       return this.verifyOnce(brief);
     }
     if (this.rt.head !== early.head) return this.verifyOnce(brief);
@@ -765,7 +816,7 @@ class TaskFlow {
         }),
       );
     } catch (error) {
-      if (error instanceof Abandoned || isCancellation(error)) throw error;
+      if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
       log.warn('PR 说明没改成，照旧往下走', { error: String(error) });
     }
   }
@@ -974,7 +1025,7 @@ class TaskFlow {
       rt.selfCheckOutput = { head, text: selfCheckText(result) };
       return result.state;
     } catch (error) {
-      if (error instanceof Abandoned || isCancellation(error)) throw error;
+      if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
       log.warn('自测没跑成，照旧推', { error: String(error) });
       rt.selfCheckOutput = null;
       return 'skipped';
@@ -1003,8 +1054,9 @@ class TaskFlow {
    * 有就留着原单，PR 说明「需求」栏改成 Refs 标分片，原验收项写进「还欠什么」。读不成按失败分流重试或停下，不当成没有、不关单。
    * 老历史没有这个标记，照旧直接关单。
    */
-  private async finish(commit?: string): Promise<TaskRun> {
+  private async finish(commit?: string, preserve = false): Promise<TaskRun> {
     const rt = this.rt;
+    if (patched('settle-merged-task-checkpoint')) rt.finishingMerged = true;
     await this.endRound('merged');
     rt.set('done', `PR #${rt.prNumber} 已合并`);
     rt.status.lastProblem = null;
@@ -1030,7 +1082,7 @@ class TaskFlow {
         duties: duties.map((d) => ({ prNumber: d.prNumber, head: d.head, items: d.items.length })),
       });
     }
-    const removed = await this.cleanup(false);
+    const removed = await this.cleanup(preserve);
     // 界面截图的交付结局写进 PR 说明（#2983）：代码合并和图片交付分开写，有欠项不写「无」。只有带了 shots 的新历史才有
     const prNumber = rt.prNumber;
     const shots = removed?.shots && prNumber !== null ? shotsPrLines(prNumber, commit, removed.shots) : null;
@@ -1049,6 +1101,13 @@ class TaskFlow {
       verifyRounds: rt.verifyRound,
       ...(duties.length > 0 ? { acceptanceOpen: duties.length } : {}),
     };
+  }
+
+  async finishMerged(receipt: import('../task-contract.ts').MergedTaskReceipt): Promise<TaskRun> {
+    this.rt.finishingMerged = true;
+    this.rt.head = receipt.head;
+    // 外部合并可能发生在返工会话期间；已合的头以外还有未推成果，必须先存档。
+    return this.finish(receipt.mergeCommit, true);
   }
 
   /** 合并前把持久待验责任写进分片正文；写不成不挂自动合并。旧历史保留原步序。 */
@@ -1152,8 +1211,11 @@ export async function taskWorkflow(input: TaskWorkflowInput): Promise<TaskRun> {
   try {
     return await flow.run();
   } catch (error) {
-    if (error instanceof Abandoned) return flow.abandoned(error.command);
+    if (error instanceof MergedTask) return await flow.finishMerged(error.receipt);
+    if (error instanceof Abandoned) return await flow.abandoned(error.command);
     if (isCancellation(error)) await CancellationScope.nonCancellable(() => flow.cancelled());
     throw error;
+  } finally {
+    await condition(allHandlersFinished);
   }
 }

@@ -12,7 +12,7 @@
 import { isCancellation, log, patched } from '@temporalio/workflow';
 import type { SyncResult } from '../decisions/types.ts';
 import type { TaskRuntime } from './task-runtime.ts';
-import { Abandoned } from './task-support.ts';
+import { Abandoned, MergedTask } from './task-support.ts';
 
 /** 没查成时写进 lastProblem 的前缀：之后并成功了认这个前缀把它清掉，不动别的原因。 */
 export const SYNC_UNREAD = '动手前并最新主线没查成';
@@ -59,7 +59,7 @@ export async function syncMainlineBeforeImplement(rt: TaskRuntime): Promise<Sync
     if (rt.status.lastProblem?.startsWith(SYNC_UNREAD)) rt.status.lastProblem = null;
     return merged ? 'merged' : 'current';
   } catch (error) {
-    if (error instanceof Abandoned || isCancellation(error)) throw error;
+    if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
     const why = String(
       (error as { cause?: { message?: string } })?.cause?.message ?? (error as Error)?.message ?? error,
     );

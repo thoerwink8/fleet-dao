@@ -15,7 +15,7 @@ import type { TierDecision } from '../runner/tier.ts';
 import { MAX_FULL_PUSHES } from '../task-contract.ts';
 import { failureOf } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
-import { Abandoned } from './task-support.ts';
+import { Abandoned, MergedTask } from './task-support.ts';
 
 /** 第一段动手之前定一次模式。定过、老历史、不是这一代的第一段：什么都不做。 */
 export async function decideFlowOnce(
@@ -45,7 +45,7 @@ export async function decideFlowOnce(
       );
     }
   } catch (error) {
-    if (error instanceof Abandoned || isCancellation(error)) throw error;
+    if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
     const why = failureOf(error, 'decideFlowMode').message;
     log.warn('定模式没定成，这张单按三段走', { error: why });
     rt.flowMode = 'three';

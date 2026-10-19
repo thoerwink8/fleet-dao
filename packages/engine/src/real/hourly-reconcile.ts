@@ -72,6 +72,7 @@ import {
   pushMainRed,
   storedMainCiVerdict,
 } from '../jobs/main-red-push.ts';
+import { mergedTaskCandidateOf } from '../jobs/merged-task-closure.ts';
 import { pushOverduePoolHolds } from '../jobs/pool-hold-push.ts';
 import type { LocalLabeledIssue } from '../jobs/reconcile-checks.ts';
 import {
@@ -85,7 +86,12 @@ import { confirmDeletionIdle } from '../jobs/worktree-sweep.ts';
 import { type PortContext, PortError, type ShotsDelivery } from '../ports.ts';
 import type { CarpoolRegistryView } from '../routing/index.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
-import { type ClosedIssueHoldToken, taskCloseClosedIssueUpdate, taskStatusQuery } from '../task-contract.ts';
+import {
+  type ClosedIssueHoldToken,
+  taskCloseClosedIssueUpdate,
+  taskSettleMergedUpdate,
+  taskStatusQuery,
+} from '../task-contract.ts';
 import type { ProcLook } from './complex-preserve.ts';
 import type { UserExec } from './exec.ts';
 import { mainCiRuns } from './main-ci-runs.ts';
@@ -296,6 +302,7 @@ export interface HourlyReconcileWiring {
   autoMergeAlerts?: HourlyReconcileJobDeps['autoMergeAlerts'];
   /** 测试用：换掉「单已关就撤任务」那部分的 Temporal / GitHub 口子；不给就用真的（问 Temporal 在跑的任务工作流、现读单状态）。 */
   closedIssueTasks?: HourlyReconcileJobDeps['closedIssueTasks'];
+  mergedTasks?: NonNullable<HourlyReconcileJobDeps['mergedTasks']>;
 }
 
 /** 等工作流消费回执的 RPC 上限；到点不代表 Update 未执行，保留未核实，重试同一 updateId。 */
@@ -408,6 +415,79 @@ export function temporalClosedIssueTasks(
       } catch (err) {
         if (isWorkflowGone(err)) return 'gone';
         throw err;
+      }
+    },
+  };
+}
+
+/** 只提交精确合并回执；受理 Update 不代表 finish 已完成，也不提前撤提醒。 */
+export function temporalMergedTasks(
+  client: Pick<Client, 'workflow' | 'connection'>,
+  gh: Pick<GitHub, 'deps'>,
+  db: Db,
+): NonNullable<HourlyReconcileJobDeps['mergedTasks']> {
+  return {
+    async workflows() {
+      const ids: string[] = [];
+      for await (const info of client.workflow.list({
+        query: `WorkflowType = '${WORKFLOW_TYPES.task}' AND ExecutionStatus = 'Running'`,
+      }))
+        ids.push(info.workflowId);
+      return ids;
+    },
+    async candidate(workflowId) {
+      const candidate = mergedTaskCandidateOf(
+        await client.workflow.getHandle(workflowId).query(taskStatusQuery),
+        workflowId,
+      );
+      if (!candidate) return null;
+      const ref = parseTaskWorkflowId(workflowId);
+      if (!ref) throw new Error('已合任务工作流身份认不出');
+      const count = await countOpenRunsForIssue(db, ref.repo, ref.issueNumber, workflowId);
+      if (!Number.isSafeInteger(count) || count < 0) throw new Error('已合任务活动会话数没查成');
+      return count === 0 ? candidate : null;
+    },
+    async readMerged(candidate) {
+      const pr = await readPull(gh.deps, candidate.repo, candidate.prNumber, 'engine');
+      if (
+        pr.number !== candidate.prNumber ||
+        pr.base.repo.full_name.toLowerCase() !==
+          `${candidate.repo.owner}/${candidate.repo.name}`.toLowerCase()
+      )
+        throw new Error('已合 PR 仓或编号不符');
+      if (pr.merged === undefined && pr.merged_at === undefined)
+        throw new Error('PR 合并状态未知，不提交收尾');
+      if ((pr.merged === false && pr.merged_at != null) || (pr.merged === true && pr.merged_at === null))
+        throw new Error('PR 合并状态矛盾，不提交收尾');
+      if (!(pr.merged ?? (pr.merged_at !== null && pr.merged_at !== undefined))) return null;
+      if (
+        pr.head.sha !== candidate.head ||
+        typeof pr.merge_commit_sha !== 'string' ||
+        !/^[0-9a-f]{40}$/.test(pr.merge_commit_sha)
+      )
+        throw new Error('已合 PR 头或真实合并提交不符');
+      return {
+        repo: candidate.repo,
+        prNumber: candidate.prNumber,
+        head: candidate.head,
+        mergeCommit: pr.merge_commit_sha,
+      };
+    },
+    async settle(candidate, receipt) {
+      const { token, workflowId } = candidate;
+      try {
+        const result = await client.connection.withDeadline(Date.now() + CLOSED_ISSUE_UPDATE_TIMEOUT_MS, () =>
+          client.workflow.getHandle(workflowId, token.runId).executeUpdate(taskSettleMergedUpdate, {
+            args: [{ token, receipt }],
+            updateId: `merged-task:${token.runId}:${token.kind}:${token.generation}:${token.continued}:${receipt.prNumber}:${receipt.head}:${receipt.mergeCommit}`,
+          }),
+        );
+        if (result !== 'accepted' && result !== 'stale' && result !== 'busy')
+          throw new Error('已合任务收尾回执认不出');
+        return result;
+      } catch (error) {
+        if (isWorkflowGone(error)) return 'gone';
+        throw error;
       }
     },
   };
@@ -740,6 +820,7 @@ export function hourlyReconcileJob(
       },
       workflows: w.workflows ?? temporalWorkflows(client),
       closedIssueTasks: w.closedIssueTasks ?? temporalClosedIssueTasks(client, w.gh, w.db, now),
+      mergedTasks: w.mergedTasks ?? temporalMergedTasks(client, w.gh, w.db),
       stageRoutable,
       stageAllOpen,
       handling,
