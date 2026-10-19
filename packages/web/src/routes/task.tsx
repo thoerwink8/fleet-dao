@@ -8,8 +8,8 @@
 
 import { errMessage } from '@fleet-dao/shared/util';
 import { ListChecks, SearchX } from 'lucide-react';
-import { Fragment, type ReactNode, useRef } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router';
+import { Fragment, type ReactNode } from 'react';
+import { Link, useParams, useSearchParams } from 'react-router';
 import { brand } from '#brand';
 import { isNotFound, useTaskDetail } from '../api/client';
 import type { TaskDetail } from '../api/types';
@@ -22,17 +22,23 @@ import { StatusBadge } from '../components/layout/status-badge';
 import type { LayoutTone } from '../components/layout/tone';
 import { RepoLink } from '../components/repo-link';
 import { RoundProgressStrip } from '../components/round-progress';
-import { RunTranscriptDrawer } from '../components/run-transcript';
 import { SegmentBreakdown, SegmentRunList, SegmentStats } from '../components/segment-usage';
 import { ActionButtons } from '../components/task-actions';
 import { TaskModelPins } from '../components/task-model-pins';
-import { TaskProcess } from '../components/task-process';
+import {
+  PanelLauncher,
+  PanelToggle,
+  type TaskPanel,
+  TaskPanelView,
+  usePanelKeys,
+  useTaskPanel,
+} from '../components/task-panel';
 import { TaskSummary } from '../components/task-summary';
 import { Button } from '../components/ui/button';
 import { UsageFold, usageFoldSummary } from '../components/usage-fold';
 import { formatAgo, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
-import { liveMs, runNth, segmentLabel, UNKNOWN_SEGMENT } from '../lib/segments';
+import { liveMs, segmentLabel, UNKNOWN_SEGMENT } from '../lib/segments';
 import { useShownError } from '../lib/shown-error';
 import { isTaskFinished, taskStateLabel, taskTone } from '../lib/status';
 import { backToList, FROM_PARAM } from '../lib/task-list';
@@ -58,7 +64,8 @@ const DETAIL = (
         numstat，不是把每次编辑加起来；读不到的写没读到和原因，不当成 0。
       </li>
       <li>
-        过程（宽屏在右栏）：回合 → 笔 → 步骤 →
+        过程在右侧面板里，页头「过程」或按 \
+        开关，开没开记在这台浏览器；从右边盖上来、不占正文，左边沿能拉宽，手机整屏。回合 → 笔 → 步骤 →
         调用。前面收场的回合收成一行，点开看；每一笔写第几笔、为什么起、是新会话还是接上一笔的会话、结局和用时，笔之间一行是引擎在会话外连着做的事
         （自测 → 推分支 → 开 PR → 等 CI → 验收 → 合并）；返工的回合顶上红框写为什么返工。一步 = Agent
         说一句要做什么，加上它接着做的那串调用，点开才是单个调用；有失败的、在跑的自动展开。
@@ -71,7 +78,8 @@ const DETAIL = (
       <li>三段：对题 → 动手 → 验收，每段再按模型分。没读到的格子留 —，不是 0；段名悬停看这一段做什么。</li>
       <li>
         每一笔：三段每跑一次一笔，按起跑先后。没记 task_id、按单号对上的标「按单号兜底」；没读到的写明为什么。
-        点「看会话」在右侧抽屉里看会话内容，网址带着这一笔，能发给别人。
+        点「看会话」面板换成那一笔的会话，网址带着这一笔，能发给别人；「‹ 过程」或后退回到过程，K / J
+        换上一笔、下一笔；「弹出到新窗口」单开一个不带侧栏的窗口看长会话。
       </li>
     </ul>
   </div>
@@ -259,63 +267,11 @@ function TaskHero({ d, now }: { d: TaskDetail; now: number }) {
   );
 }
 
-/** 网址里开着哪一笔的会话抽屉。 */
-export const RUN_PARAM = 'run';
-
 /**
- * 「每一笔」加右侧的会话抽屉（#1802）：点「看会话」把 ?run=<笔号> 推进网址（保留别的参数），抽屉开；网址可分享，
- * 浏览器后退就关。直接打开带 ?run= 的链接，关的时候不后退（后退会离开本页），只把参数去掉。网址里的笔号对不上这张单的任何一笔就不开。
+ * 结论块下面：这一回合走到哪、最新汇报（#3140），用量明细收成一行；「过程」和每一笔的会话在右侧面板里（#3277，
+ * components/task-panel.tsx），关着时正文末尾一行点开。
  */
-function useRunDrawer(d: TaskDetail, now: number): { open: (runId: string) => void; drawer: ReactNode } {
-  const [params, setParams] = useSearchParams();
-  const navigate = useNavigate();
-  const pushed = useRef(false);
-  const runId = params.get(RUN_PARAM);
-  const active = runId ? d.segmentRuns.find((r) => r.id === runId) : undefined;
-  const open = (id: string) => {
-    pushed.current = true;
-    setParams((prev) => {
-      const next = new URLSearchParams(prev);
-      next.set(RUN_PARAM, id);
-      return next;
-    });
-  };
-  const close = () => {
-    if (pushed.current) {
-      pushed.current = false;
-      void navigate(-1);
-      return;
-    }
-    setParams(
-      (prev) => {
-        const next = new URLSearchParams(prev);
-        next.delete(RUN_PARAM);
-        return next;
-      },
-      { replace: true },
-    );
-  };
-  return {
-    open,
-    drawer: active ? (
-      <RunTranscriptDrawer
-        key={active.id}
-        taskId={d.task.id}
-        run={active}
-        nth={runNth(d.segmentRuns, active.id) ?? 1}
-        now={now}
-        onClose={close}
-      />
-    ) : null,
-  };
-}
-
-/**
- * 结论块下面：先是概览（最新汇报、命令计数、PR 横条、改动文件，#3140），再是「过程」（回合 → 笔 → 步骤 → 调用），
- * 然后才是用量明细（四个数、用哪个模型、三段、每一笔）。一块接一块，块间距一样（区块间距令牌，经 Section 自己的外边距）。
- */
-function Body({ d, now }: { d: TaskDetail; now: number }) {
-  const { open, drawer } = useRunDrawer(d, now);
+function Body({ d, now, panel }: { d: TaskDetail; now: number; panel: TaskPanel }) {
   if (!d.segmentRuns.length) {
     return (
       <>
@@ -333,29 +289,22 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
       </>
     );
   }
-  // 照设计稿（#3228）：xl 起左结论、右「过程」两栏，右栏贴顶自己滚；窄屏一栏，过程在结论下面。用量明细收成一行。
+  // 正文一栏；面板是盖在右边的抽屉，不占正文的位置（#3277）
   return (
     <>
-      <div className="flex min-w-0 flex-col gap-4 lg:gap-6 xl:grid xl:grid-cols-task xl:items-start">
-        <div className="flex min-w-0 flex-col gap-4 lg:gap-6">
-          <TaskHero d={d} now={now} />
-          <RoundProgressStrip d={d} now={now} />
-          <TaskSummary d={d} now={now} />
-          <UsageFold summary={usageFoldSummary(d, now)}>
-            <SegmentStats d={d} now={now} />
-            <Pins d={d} now={now} />
-            <SegmentBreakdown d={d} now={now} />
-            <SegmentRunList d={d} now={now} onViewTranscript={open} />
-          </UsageFold>
-        </div>
-        <div
-          data-task-aside
-          className="min-w-0 xl:sticky xl:top-0 xl:max-h-task-aside xl:overflow-y-auto xl:scrollbar-thin"
-        >
-          <TaskProcess d={d} now={now} onViewTranscript={open} />
-        </div>
+      <div className="flex min-w-0 flex-col gap-4 lg:gap-6">
+        <TaskHero d={d} now={now} />
+        <RoundProgressStrip d={d} now={now} />
+        <TaskSummary d={d} now={now} onShowProcess={panel.run ? panel.back : panel.show} />
+        <UsageFold summary={usageFoldSummary(d, now)}>
+          <SegmentStats d={d} now={now} />
+          <Pins d={d} now={now} />
+          <SegmentBreakdown d={d} now={now} />
+          <SegmentRunList d={d} now={now} onViewTranscript={panel.openRun} />
+        </UsageFold>
+        <PanelLauncher d={d} now={now} panel={panel} />
       </div>
-      {drawer}
+      <TaskPanelView d={d} now={now} panel={panel} />
     </>
   );
 }
@@ -394,6 +343,8 @@ function Missing({ taskId }: { taskId: string | undefined }) {
   );
 }
 
+const NO_RUNS: readonly TaskDetail['segmentRuns'][number][] = [];
+
 /** 任务详情靠推送更新，没有自己的轮询。这份快照超过 5 分钟还没再读成，刷新钮旁标「数据已过期」。 */
 const TASK_STALE_AFTER_MS = 5 * TIME.MIN;
 
@@ -404,6 +355,8 @@ export default function TaskPage() {
   const error = useShownError(taskId, detail);
   const now = useNow();
   const d = detail.data;
+  const panel = useTaskPanel(d?.segmentRuns ?? NO_RUNS);
+  usePanelKeys(panel);
   return (
     <Page
       title={
@@ -423,7 +376,14 @@ export default function TaskPage() {
         staleAfterMs: TASK_STALE_AFTER_MS,
       }}
       breadcrumb={<Crumbs d={d} />}
-      actions={d ? <TaskActionBar d={d} /> : undefined}
+      actions={
+        d ? (
+          <>
+            {d.segmentRuns.length ? <PanelToggle panel={panel} /> : null}
+            <TaskActionBar d={d} />
+          </>
+        ) : undefined
+      }
     >
       {error && isNotFound(error) ? (
         <Missing taskId={taskId} />
@@ -443,7 +403,7 @@ export default function TaskPage() {
               />
             </div>
           ) : null}
-          <Body d={d} now={now} />
+          <Body d={d} now={now} panel={panel} />
         </>
       )}
     </Page>
