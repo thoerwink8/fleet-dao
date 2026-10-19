@@ -10,7 +10,7 @@ import { enc, type RepoRef, repoSlug, unexpected } from './client.ts';
 import { botLogin } from './credentials.ts';
 import type { ActivityContext, Deps } from './deps.ts';
 import { recordEcho } from './echo.ts';
-import { GitHubError } from './errors.ts';
+import { GitHubError, isGitHubError } from './errors.ts';
 import { type CommentIssueResult, commentPull } from './issues.ts';
 import { assertPublishable } from './publish-check.ts';
 import { PullSchema } from './pulls.ts';
@@ -189,6 +189,21 @@ const StatusSchema = z.object({
   description: z.string().nullable().optional(),
   creator: z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable().optional(),
 });
+
+/** enablePullRequestAutoMerge 的 UNPROCESSABLE「is in unstable status」：回包里只有这一条，path 恰好是这个 mutation。 */
+function isUnstableRefusal(details: unknown): boolean {
+  const errors = (details as { errors?: unknown } | null | undefined)?.errors;
+  if (!Array.isArray(errors) || errors.length !== 1) return false;
+  const e = errors[0] as { type?: unknown; message?: unknown; path?: unknown } | null;
+  return (
+    e?.type === 'UNPROCESSABLE' &&
+    Array.isArray(e.path) &&
+    e.path.length === 1 &&
+    e.path[0] === 'enablePullRequestAutoMerge' &&
+    typeof e.message === 'string' &&
+    /^(?:Pull request )+is in unstable status\.?$/i.test(e.message.trim())
+  );
+}
 
 function factsOf(repo: RepoRef, p: z.infer<typeof ClaimPullSchema>): PullFacts {
   const merged = p.merged ?? (p.merged_at !== null && p.merged_at !== undefined);
@@ -446,17 +461,25 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
     },
 
     async enableAutoMerge(repo, pull, ctx) {
-      await client.graphql(
-        auth(repo),
-        'mutation($id: ID!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) { pullRequest { number } } }',
-        { id: pull.nodeId },
-        {
-          mutation: true,
-          signal: ctx?.signal,
-          ...(ctx?.attemptDeadlineMs === undefined ? {} : { attemptDeadlineMs: ctx.attemptDeadlineMs }),
-          ...(ctx?.scheduleDeadlineMs === undefined ? {} : { scheduleDeadlineMs: ctx.scheduleDeadlineMs }),
-        },
-      );
+      try {
+        await client.graphql(
+          auth(repo),
+          'mutation($id: ID!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) { pullRequest { number } } }',
+          { id: pull.nodeId },
+          {
+            mutation: true,
+            signal: ctx?.signal,
+            ...(ctx?.attemptDeadlineMs === undefined ? {} : { attemptDeadlineMs: ctx.attemptDeadlineMs }),
+            ...(ctx?.scheduleDeadlineMs === undefined ? {} : { scheduleDeadlineMs: ctx.scheduleDeadlineMs }),
+          },
+        );
+      } catch (error) {
+        // 只认这个 mutation 自己回的 unstable 临时拒绝：码改成 AUTO_MERGE_UNSTABLE，消息和原始 errors 原样保留，仍不可重试
+        // （调用方现读之后有界再试，不交给通用重试）。
+        if (isGitHubError(error, 'GRAPHQL_ERROR') && isUnstableRefusal(error.details))
+          throw new GitHubError('AUTO_MERGE_UNSTABLE', error.message, { details: error.details });
+        throw error;
+      }
     },
 
     async closePull(repo, number) {

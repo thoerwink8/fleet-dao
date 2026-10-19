@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { type PortContext, PortError } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import {
+  ARM_UNSTABLE_RETRIES,
   createTaskActivities,
   MERGE_PENDING_RETRIES,
   type MergeWaitChecks,
@@ -17,6 +18,7 @@ import {
 import { pinMainline, type UserTree } from '../../src/real/user-git.ts';
 import type { ReviewChange } from '../../src/task-contract.ts';
 import { runChildOk } from '../child.ts';
+import { json as httpJson, setup as setupHttp } from '../review-http.ts';
 
 const REPO = { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' };
 const HEAD = 'a'.repeat(40);
@@ -1687,5 +1689,161 @@ describe('等合并', () => {
       },
     });
     await expect(wait(f.gh)).rejects.toMatchObject({ code: 'UPSTREAM_ERROR', retryable: true });
+  });
+});
+
+describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝（#3198，真 enableAutoMerge + 原样 GitHub errors）', () => {
+  /** #3198 事件 254 的原样 errors。 */
+  const unstable = {
+    type: 'UNPROCESSABLE',
+    path: ['enablePullRequestAutoMerge'],
+    message: 'Pull request Pull request is in unstable status',
+  };
+  const green: MergeWaitChecks = { overall: 'green', failed: [] };
+
+  /** replies 按次序回 graphql：null = 挂成功，数组 = 原样 errors；用尽后一直回最后一个。pulls 同理按次序给现读结果。 */
+  function arm(
+    replies: (unknown[] | null)[],
+    opts: {
+      pulls?: ReturnType<typeof pullFacts>[];
+      readChecks?: TaskActivitiesDeps['readChecks'];
+      ctx?: PortContext;
+    } = {},
+  ) {
+    const real = setupHttp();
+    let sent = 0;
+    real.fake.before.push((r) => {
+      if (r.path !== '/graphql') return undefined;
+      const reply = replies[Math.min(sent, replies.length - 1)];
+      sent += 1;
+      return reply === null
+        ? httpJson(200, { data: { enablePullRequestAutoMerge: { pullRequest: { number: 7 } } } })
+        : httpJson(200, { data: { enablePullRequestAutoMerge: null }, errors: reply });
+    });
+    const pulls = opts.pulls ?? [pullFacts()];
+    let reads = 0;
+    const f = fakeGh({
+      readPull: async () => pulls[Math.min(reads++, pulls.length - 1)],
+      mergePr: async () => {
+        throw new Error('unstable 不该走直接合');
+      },
+    });
+    (f.gh.claims as { enableAutoMerge: unknown }).enableAutoMerge = real.gh.claims.enableAutoMerge;
+    const { acts } = make({ gh: f.gh, readChecks: opts.readChecks ?? (async () => green) });
+    const run = () =>
+      acts.armAutoMerge(
+        // 受控 HTTP 夹具只认 acme/widgets
+        { schemaVersion: 1, repo: { ...REPO, name: 'widgets' }, prNumber: 7, expectedHead: HEAD },
+        opts.ctx ?? ctx(),
+      );
+    return { run, sent: () => sent, reads: () => reads, calls: f.calls };
+  }
+
+  it('同头第一次 unstable、现读后全绿再挂成功：armed，读了两次 PR、写了两次', async () => {
+    const a = arm([[unstable], null]);
+    expect(await a.run()).toEqual({ armed: true, merged: false });
+    expect([a.sent(), a.reads()]).toEqual([2, 2]);
+  });
+
+  it('持续 unstable：用尽 ARM_UNSTABLE_RETRIES 后交回，why 带完整原始 type/path/message、PR/头/尝试次数', async () => {
+    const a = arm([[unstable]]);
+    const got = await a.run();
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(a.sent()).toBe(ARM_UNSTABLE_RETRIES + 1);
+    expect(got.why).toContain('UNPROCESSABLE');
+    expect(got.why).toContain('enablePullRequestAutoMerge');
+    expect(got.why).toContain('Pull request Pull request is in unstable status');
+    expect(got.why).toContain(`PR #7 头 ${HEAD}`);
+    expect(got.why).toContain(`已试 ${ARM_UNSTABLE_RETRIES + 1} 次`);
+  });
+
+  it.each([
+    ['别的 path', [{ ...unstable, path: ['disablePullRequestAutoMerge'] }], 'GRAPHQL_ERROR'],
+    ['别的 type', [{ ...unstable, type: 'STALE_DATA' }], 'GRAPHQL_ERROR'],
+    ['只带 unstable 子串', [{ ...unstable, message: 'Merge queue is unstable' }], 'GRAPHQL_ERROR'],
+    [
+      '权限拒绝',
+      [{ type: 'FORBIDDEN', path: unstable.path, message: 'Resource not accessible by integration' }],
+      'FORBIDDEN',
+    ],
+    [
+      '策略拒绝',
+      [{ ...unstable, message: 'Auto merge is not allowed for this repository' }],
+      'GRAPHQL_ERROR',
+    ],
+  ])('%s：原样抛、不重试', async (_name, errors, code) => {
+    const a = arm([errors]);
+    await expect(a.run()).rejects.toMatchObject({ code, retryable: false });
+    expect([a.sent(), a.reads()]).toEqual([1, 1]);
+  });
+
+  it('重试前现读发现 PR 已关 / 草稿 / 已换头：各自明确结果，不再写', async () => {
+    const closed = arm([[unstable]], { pulls: [pullFacts(), pullFacts({ state: 'closed' })] });
+    expect(await closed.run()).toMatchObject({ armed: false, merged: false, why: 'PR #7 已经关了' });
+    const draft = arm([[unstable]], { pulls: [pullFacts(), { ...pullFacts(), draft: true }] });
+    expect(await draft.run()).toMatchObject({ armed: false, why: expect.stringContaining('草稿') });
+    const moved = arm([[unstable]], { pulls: [pullFacts(), pullFacts({ headSha: 'b'.repeat(40) })] });
+    expect(await moved.run()).toMatchObject({ armed: false, headMoved: 'b'.repeat(40) });
+    for (const a of [closed, draft, moved]) expect(a.sent()).toBe(1);
+  });
+
+  it('重试前现读发现已被挂上：armed，不再写', async () => {
+    const a = arm([[unstable]], { pulls: [pullFacts(), pullFacts({ autoMerge: true })] });
+    expect(await a.run()).toEqual({ armed: true, merged: false });
+    expect(a.sent()).toBe(1);
+  });
+
+  it('unstable 时必过检查真红：交 checksRed，不重挂；还在跑：交 checksPending 给有界等待；读不成：明说，不重挂', async () => {
+    const red = arm([[unstable]], {
+      readChecks: async () => ({ overall: 'red', failed: [{ name: 'check', detail: '挂了' }] }),
+    });
+    expect(await red.run()).toMatchObject({
+      armed: false,
+      checksRed: { failedChecks: ['check'], head: HEAD },
+    });
+    const pending = arm([[unstable]], {
+      readChecks: async () => ({ overall: 'pending', failed: [], pending: [{ name: 'check' }] }),
+    });
+    expect(await pending.run()).toMatchObject({
+      armed: false,
+      checksPending: { names: ['check'], head: HEAD },
+    });
+    const broken = arm([[unstable]], {
+      readChecks: async () => {
+        throw new Error('读检查 500');
+      },
+    });
+    expect(await broken.run()).toMatchObject({
+      armed: false,
+      why: expect.stringContaining('必过检查没查成'),
+    });
+    const missing = arm([[unstable]], {
+      readChecks: async () => ({ overall: 'pending', failed: [], missing: [{ name: 'check' }] }),
+    });
+    expect(await missing.run()).toMatchObject({ armed: false, why: expect.stringContaining('没出现') });
+    for (const a of [red, pending, broken, missing]) expect(a.sent()).toBe(1);
+  });
+
+  it('等的过程中被取消：不再写；截止到了：交回说明，不再写', async () => {
+    const ac = new AbortController();
+    const cancelled = arm([[unstable]], {
+      ctx: ctx({ signal: ac.signal, ...{ attemptDeadlineMs: Date.now() + 600_000 } }),
+      readChecks: async () => {
+        ac.abort(new Error('活动已取消'));
+        return green;
+      },
+    });
+    await expect(cancelled.run()).rejects.toThrow('活动已取消');
+    expect(cancelled.sent()).toBe(1);
+
+    const late = arm([[unstable]], {
+      ctx: ctx({ attemptDeadlineMs: Date.now() + 200 }),
+      readChecks: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return green;
+      },
+    });
+    expect(await late.run()).toMatchObject({ armed: false, why: expect.stringContaining('期限已到') });
+    expect(late.sent()).toBe(1);
   });
 });

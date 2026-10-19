@@ -370,3 +370,43 @@ describe('engine-pulls：撤自动合并、关 PR、留言', () => {
     expect(fake.issues.get(issue.number)?.comments).toEqual([]);
   });
 });
+
+describe('engine-pulls：挂自动合并的 unstable 临时拒绝（#3198）', () => {
+  const pull = { number: 7, nodeId: 'PR_7' };
+  /** #3198 事件 254 的原样 errors。 */
+  const unstable = {
+    type: 'UNPROCESSABLE',
+    path: ['enablePullRequestAutoMerge'],
+    message: 'Pull request Pull request is in unstable status',
+  };
+  const refuse = (errors: unknown[]) => {
+    const { gh, fake } = setup();
+    fake.before.push((r) =>
+      r.path === '/graphql' ? json(200, { data: { enablePullRequestAutoMerge: null }, errors }) : undefined,
+    );
+    return gh.claims.enableAutoMerge(repo, pull);
+  };
+
+  it('只有 enablePullRequestAutoMerge 的 UNPROCESSABLE unstable：码改成 AUTO_MERGE_UNSTABLE，原始 type/path/message 原样保留，不可重试', async () => {
+    const err = await refuse([unstable]).catch((e) => e);
+    expect(err).toMatchObject({
+      code: 'AUTO_MERGE_UNSTABLE',
+      retryable: false,
+      details: { errors: [unstable] },
+    });
+    expect(err.message).toContain('Pull request Pull request is in unstable status');
+  });
+
+  it.each([
+    ['别的 path', [{ ...unstable, path: ['disablePullRequestAutoMerge'] }]],
+    ['没有 path', [{ type: unstable.type, message: unstable.message }]],
+    ['别的 type', [{ ...unstable, type: 'FORBIDDEN' }]],
+    ['别的消息', [{ ...unstable, message: 'Pull request is in dirty status' }]],
+    ['消息只是带 unstable 子串', [{ ...unstable, message: 'Auto merge is not allowed, unstable policy' }]],
+    ['多条 errors', [unstable, { ...unstable, message: 'Auto merge is not allowed for this repository' }]],
+  ])('%s：仍是原分类，不误当临时拒绝', async (_name, errors) => {
+    const err = await refuse(errors).catch((e) => e);
+    expect(isGitHubError(err)).toBe(true);
+    expect(err.code).not.toBe('AUTO_MERGE_UNSTABLE');
+  });
+});
