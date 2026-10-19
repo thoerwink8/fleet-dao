@@ -230,10 +230,11 @@ describe('buildTimeline：回合 → 笔 → 引擎做的事', () => {
     expect(gap[1]?.items.map((i) => i.kind)).toEqual(['waits', 'run']);
   });
 
-  test('没记回合的笔（老记录）单列一组放最前，不猜它是哪一回合', () => {
+  test('没记回合的笔（老记录）早于第 1 回合记的开始时刻：第 1 回合从头算起，归第 1 回合（#3190）', () => {
     const t = buildTimeline([run('old', { startedAt: iso(-100) }), ...runs], ov(rounds, engine));
-    expect(t.map((g) => g.seq)).toEqual([undefined, 1, 2]);
-    expect(t[0]?.items.map((i) => (i.kind === 'run' ? i.run.id : i.kind))).toEqual(['old']);
+    expect(t.map((g) => g.seq)).toEqual([1, 2]);
+    expect(t[0]?.items.map((i) => (i.kind === 'run' ? i.run.id : i.kind))).toEqual(['old', 'a', 'engine']);
+    expect(t[0]?.byTime).toBe(1);
   });
 
   describe('笔没记回合号（旧引擎跑的）按回合收场时刻归（#3190）', () => {
@@ -290,12 +291,98 @@ describe('buildTimeline：回合 → 笔 → 引擎做的事', () => {
       expect(ids(t[0])).toEqual(['late']);
     });
 
-    test('回合记了开始时刻、笔在开始之前的：不归进去', () => {
+    test('回合记了开始时刻、笔落在上一回合收场和它开始之间：不看开始时刻，归这一回合', () => {
+      // 回合 1 在 00:00:30 收场；回合 2 在 00:00:50 开始、00:01:00 收场；老笔 00:00:45 起
+      const sec = (s: number) => iso(s / 60);
       const t = buildTimeline(
-        [run('gap', { startedAt: iso(60.05) })],
-        ov([{ seq: 1, round: 1, outcome: 'ci_red', endedAt: iso(60) }, ...oldRounds.slice(2)], []),
+        [run('gap', { startedAt: sec(45) })],
+        ov(
+          [
+            { seq: 1, round: 1, outcome: 'ci_red', endedAt: sec(30) },
+            { seq: 2, round: 2, outcome: 'merged', startedAt: sec(50), endedAt: sec(60) },
+          ],
+          [],
+        ),
       );
-      expect(t[0]?.seq).toBeUndefined();
+      expect(t.map((g) => g.seq)).toEqual([1, 2]);
+      expect(ids(t[1])).toEqual(['gap']);
+      expect(t[1]?.byTime).toBe(1);
+    });
+
+    test('第 1 回合记了开始时刻、笔在它开始之前：第 1 回合从头算起，照样归第 1 回合', () => {
+      const t = buildTimeline(
+        [run('early', { startedAt: iso(-30) })],
+        ov([{ seq: 1, round: 1, outcome: 'merged', startedAt: iso(0), endedAt: iso(30) }], []),
+      );
+      expect(t.map((g) => g.seq)).toEqual([1]);
+      expect(ids(t[0])).toEqual(['early']);
+    });
+
+    test('7 个已收场回合：每笔按（上一回合收场, 本回合收场]归，记没记开始时刻都一样', () => {
+      // 回合 k 在第 10k 分钟收场；单号回合记了开始时刻（收场前 3 分钟），双号没记
+      const seven: Rounds = Array.from({ length: 7 }, (_, i) => {
+        const seq = i + 1;
+        return {
+          seq,
+          round: seq,
+          outcome: seq === 7 ? 'merged' : 'ci_red',
+          ...(seq % 2 === 1 ? { startedAt: iso(seq * 10 - 3) } : {}),
+          endedAt: iso(seq * 10),
+        };
+      });
+      // 每回合两笔：一笔落在上一回合收场后、本回合开始前，一笔贴着本回合收场
+      const olds = seven.flatMap((r) => [
+        run(`r${r.seq}-early`, { startedAt: iso(r.seq * 10 - 9) }),
+        run(`r${r.seq}-late`, { startedAt: iso(r.seq * 10 - 0.5) }),
+      ]);
+      const t = buildTimeline(olds, ov(seven, []));
+      expect(t.map((g) => g.seq)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+      for (const g of t) {
+        expect(ids(g)).toEqual([`r${g.seq}-early`, `r${g.seq}-late`]);
+        expect(g.byTime).toBe(2);
+      }
+    });
+
+    test('边界：正好等于上一回合收场的归上一回合，晚一毫秒才归下一回合；正好等于本回合收场的仍归本回合', () => {
+      const at = (min: number, plusMs = 0) => new Date(Date.parse(iso(min)) + plusMs).toISOString();
+      const t = buildTimeline(
+        [
+          run('eq1', { startedAt: at(30) }),
+          run('after1', { startedAt: at(30, 1) }),
+          run('eq2', { startedAt: at(60) }),
+          run('after2', { startedAt: at(60, 1) }),
+          run('eq3', { startedAt: at(90) }),
+        ],
+        ov(oldRounds, []),
+      );
+      expect(t.map((g) => g.seq)).toEqual([1, 2, 3]);
+      expect(ids(t[0])).toEqual(['eq1']);
+      expect(ids(t[1])).toEqual(['after1', 'eq2']);
+      expect(ids(t[2])).toEqual(['after2', 'eq3']);
+    });
+
+    test('笔上记了回合号的照记的走，不被时间推断改写，也不算进按时间归的笔数', () => {
+      const t = buildTimeline(
+        [run('rec', { roundSeq: 3, startedAt: iso(1) }), run('old', { startedAt: iso(2) })],
+        ov(oldRounds, []),
+      );
+      expect(t.map((g) => g.seq)).toEqual([1, 2, 3]);
+      expect(ids(t[0])).toEqual(['old']);
+      expect(t[0]?.byTime).toBe(1);
+      expect(ids(t[2])).toEqual(['rec']);
+      expect(t[2]?.byTime).toBeUndefined();
+    });
+
+    test('正好等于最后一个已收场回合收场时刻的，归它，不归进行中回合', () => {
+      const t = buildTimeline(
+        [
+          run('eqLast', { startedAt: iso(90) }),
+          run('open', { roundSeq: 4, startedAt: iso(95), running: true }),
+        ],
+        ov(oldRounds, []),
+      );
+      expect(ids(t.find((g) => g.seq === 3))).toEqual(['eqLast']);
+      expect(ids(t.find((g) => g.seq === 4))).toEqual(['open']);
     });
 
     test('没有回合记录：老笔照旧进「更早的几笔」', () => {
