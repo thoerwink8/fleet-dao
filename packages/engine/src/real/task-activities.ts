@@ -50,7 +50,7 @@ import type {
 import { MAX_MAIN_SYNCS } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import type { EngineGitHub } from './github-ports.ts';
-import { bookMergedPull } from './merge-receipt.ts';
+import { bookMergedPull, readMergedTask } from './merge-receipt.ts';
 import { mapped } from './mirror.ts';
 import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
 import {
@@ -89,6 +89,7 @@ export interface MergeWaitChecks {
 }
 
 export interface TaskActivitiesDeps extends ReviewAuditDeps {
+  openRunsForIssue?: (repo: RepoRef, issueNumber: number, workflowId: string) => Promise<number>;
   gh: Pick<
     EngineGitHub,
     'readIssue' | 'readSpecDoc' | 'readRepoFile' | 'pullFiles' | 'mergePr' | 'updateBranch' | 'claims'
@@ -123,6 +124,7 @@ type TaskActivities = Required<
     | 'waitMerged'
     | 'mergeNow'
     | 'readCiReviews'
+    | 'readMergedTask'
   >
 >;
 
@@ -543,6 +545,16 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
   };
 
   return {
+    async readMergedTask(input, ctx) {
+      return readMergedTask(gh, input, ctx, async () => {
+        if (!input.idle) return;
+        if (!deps.openRunsForIssue)
+          throw new PortError('TASK_NOT_CONFIGURED', '未装配已合收尾的在跑会话核验', { retryable: false });
+        const count = await deps.openRunsForIssue(input.repo, input.idle.issueNumber, input.idle.workflowId);
+        if (!Number.isSafeInteger(count) || count !== 0)
+          throw new PortError('TASK_BUSY', '已合任务仍有会话或未核实，不收尾', { retryable: true });
+      });
+    },
     async readTaskBrief(input: ReadTaskBriefInput, ctx: PortContext) {
       const repo = refOf(input.repo);
       const profile = await profileOf(repo);

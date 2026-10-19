@@ -100,6 +100,7 @@ import {
   EN1_ACTIVITY_TIMEOUT_CODES,
   failureLooksLikeBare401,
   isDispatchProbePassOnly,
+  MergedTask,
   mergeAvoid,
   NO_AVOID,
   NO_OTHER_FAMILY,
@@ -302,15 +303,21 @@ export async function writeSession(
       let res = await rt.cancellable(() => rt.acts.runSegment(segmentInput), { pausable: true });
       // 引擎换版本、重启时会话没停、脱开接着跑（#2238）：隔一会儿带上 attach 接回，等它收场——不算失败、不换路由、不重起。
       // 老引擎还在排空时接回会当场再交回 detached，所以隔一会儿再接。老历史没有这个标记（也不会有 detached）
-      while (!res.ok && res.outcome === SEGMENT_DETACHED && res.detached && patched('segment-reattach')) {
-        const attach = res.detached;
-        await rt.pause(
-          'retry',
-          '引擎在换版本：动手会话脱开引擎接着跑，等新引擎接回',
-          SEGMENT_REATTACH_SECONDS,
-        );
-        res = await rt.cancellable(() => rt.acts.runSegment({ ...segmentInput, attach }), { pausable: true });
-      }
+      const wasDetached = !res.ok && res.outcome === SEGMENT_DETACHED && !!res.detached;
+      await rt.reattachExisting(async () => {
+        while (!res.ok && res.outcome === SEGMENT_DETACHED && res.detached && patched('segment-reattach')) {
+          const attach = res.detached;
+          await rt.pause(
+            'retry',
+            '引擎在换版本：动手会话脱开引擎接着跑，等新引擎接回',
+            SEGMENT_REATTACH_SECONDS,
+          );
+          res = await rt.cancellable(() => rt.acts.runSegment({ ...segmentInput, attach }), {
+            pausable: true,
+          });
+        }
+      });
+      if (wasDetached && patched('settle-merged-task-checkpoint')) await rt.checkpoint();
       if (res.ok) {
         rt.lastImplementRoute = route;
         const resumed = resumeSessionId !== undefined;
@@ -323,7 +330,7 @@ export async function writeSession(
       evidence = res.evidence;
       failedRunId = res.runId;
     } catch (error) {
-      if (error instanceof Abandoned || isCancellation(error)) throw error;
+      if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
       if (error instanceof PausedInterrupt) {
         // 被人暂停停下的这一段（借 org_switch 的位置，task-contract.ts 的 PAUSED_BY_HUMAN）：不算失败、不记账、不换模型；
         // 回到循环头停在检查点，继续后在原分支原树上重跑，提示词带上被停下的原因
@@ -377,7 +384,7 @@ export async function writeSession(
           };
         }
       } catch (error) {
-        if (error instanceof Abandoned || isCancellation(error)) throw error;
+        if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
         log.warn('超时活动的引擎启动代次没查成，按真实超时处理', {
           error: failureOf(error, 'engineStartedAt').message,
         });
@@ -451,7 +458,7 @@ export async function writeSession(
             dedupeKey: poolHoldDedupeKey(route.poolId),
           });
         } catch (error) {
-          if (error instanceof Abandoned || isCancellation(error)) throw error;
+          if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
           log.warn('整池暂停的提醒没发出去，这张单照旧换池', { poolId: route.poolId, error: String(error) });
         }
       } else {
@@ -709,7 +716,7 @@ async function settledBeforeRestart(rt: TaskRuntime, attemptAt: number): Promise
       }),
     );
   } catch (error) {
-    if (error instanceof Abandoned || isCancellation(error)) throw error;
+    if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
     log.warn('上一段收场没有没查成，照旧接着走', { error: failureOf(error, 'segmentSettled').message });
     return true;
   }
@@ -744,7 +751,7 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
       }),
     );
   } catch (error) {
-    if (error instanceof Abandoned || isCancellation(error)) throw error;
+    if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
     log.warn('查这张单花掉的 token 没查成，照旧起会话', { error: failureOf(error, 'taskSpend').message });
     return;
   }
@@ -796,7 +803,7 @@ export async function planResume(
     );
     return plan.kind === 'resume' ? { kind: 'resume', sessionId: plan.sessionId } : plan;
   } catch (error) {
-    if (error instanceof Abandoned || isCancellation(error)) throw error;
+    if (error instanceof Abandoned || error instanceof MergedTask || isCancellation(error)) throw error;
     return { kind: 'new', reason: `续会话没查成：${failureOf(error, 'planSegmentResume').message}` };
   }
 }

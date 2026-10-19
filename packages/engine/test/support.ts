@@ -104,7 +104,8 @@ export async function withWorker<T>(
   const taskQueue = options.taskQueue ?? `q-${randomUUID()}`;
   const userWrap = options.wrapActivities;
   const wrapActivities = (activities: EngineActivities): EngineActivities => {
-    const base = options.jobs?.routeProbe ? activities : freshProbePass(activities);
+    const routed = options.jobs?.routeProbe ? activities : freshProbePass(activities);
+    const base = options.tasks?.readMergedTask ? routed : { ...routed, readMergedTask: async () => null };
     return userWrap ? userWrap(base) : base;
   };
   const worker = await createEngineWorker({

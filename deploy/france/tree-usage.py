@@ -108,7 +108,29 @@ def parent_unchanged(path, marks):
 
 
 def same(st, exp):
-    return stat.S_ISDIR(st.st_mode) and identity(st, exp["real"]) == exp
+    allowed = stat.S_ISDIR(st.st_mode) or (
+        stat.S_ISREG(st.st_mode) and os.path.dirname(exp["real"]) == BASE + "/_tmp"
+    )
+    return allowed and identity(st, exp["real"]) == exp
+
+
+@contextlib.contextmanager
+def place(path):
+    with chain(os.path.dirname(path)) as (parent, _):
+        st = os.stat(os.path.basename(path), dir_fd=parent, follow_symlinks=False)
+        exp = identity(st, path)
+        if not same(st, exp):
+            raise Kept("only directories or direct _tmp regular files are managed")
+        if stat.S_ISDIR(st.st_mode):
+            fd = os.open(os.path.basename(path), FLAGS, dir_fd=parent)
+            try:
+                if not same(os.fstat(fd), exp):
+                    raise Kept("tree identity changed before open")
+                yield exp
+            finally:
+                os.close(fd)
+        else:
+            yield exp
 
 
 def path_hash(path):
@@ -208,6 +230,7 @@ def pending(fd):
 
 def scan(real, exp):
     """All TGIDs and TIDs, pinned proc FDs. No uid/name/ancestor exclusions."""
+    regular = stat.S_ISREG(os.stat(real, follow_symlinks=False).st_mode)
     until = min(DEADLINE, time.monotonic() + 10)
     seen = 0
     previous = None
@@ -273,6 +296,23 @@ def scan(real, exp):
                                     raise Kept("live thread cwd unavailable: " + tid)
                                 if cwd.removesuffix(" (deleted)") == real or cwd.startswith(real + "/"):
                                     return {"state": "busy", "scanned": seen, "failed": 0, "reason": "cwd in tree, tid=" + tid}
+                                # A temporary file cannot be a cwd. Compare its inode against
+                                # open FDs, including after it moves into the private claim.
+                                if regular:
+                                    handles = os.open("fd", FLAGS, dir_fd=thread)
+                                    try:
+                                        for name in os.listdir(handles):
+                                            check_time()
+                                            if time.monotonic() >= until:
+                                                raise Kept("open file scan deadline")
+                                            try:
+                                                opened = os.stat(name, dir_fd=handles)
+                                            except FileNotFoundError:
+                                                continue  # Descriptor closed during enumeration.
+                                            if str(opened.st_dev) == exp["dev"] and str(opened.st_ino) == exp["ino"]:
+                                                return {"state": "busy", "scanned": seen, "failed": 0, "reason": "open file in use, tid=" + tid}
+                                    finally:
+                                        os.close(handles)
                                 after = read("stat")
                                 if after[after.rfind(")") + 2 :].split()[19] != start:
                                     raise Kept("thread identity changed: " + tid)
@@ -395,10 +435,14 @@ def remove(pathfd, qpath, exp):
             parent_unchanged(path, marks)
             rec["phase"] = "CLAIMED"
             write_record(fd, rec)
-            target = os.open("tree", FLAGS, dir_fd=fd)
+            regular = stat.S_ISREG(claimed.st_mode)
+            # A regular payload is pinned by the root-private claim, not an open
+            # file FD that would itself count as active use in the second scan.
+            target = None if regular else os.open("tree", FLAGS, dir_fd=fd)
             try:
                 actual = qpath + "/" + tx + "/tree"
-                if not same(os.fstat(target), exp) or os.readlink("/proc/self/fd/" + str(target)) != actual:
+                pinned = os.stat("tree", dir_fd=fd, follow_symlinks=False) if regular else os.fstat(target)
+                if not same(pinned, exp) or (not regular and os.readlink("/proc/self/fd/" + str(target)) != actual):
                     raise Kept("claimed path/FD identity mismatch")
                 proof = scan(actual, exp)
                 if proof["state"] != "idle":
@@ -407,10 +451,14 @@ def remove(pathfd, qpath, exp):
                 rec["phase"] = "DELETING"
                 rec["destructive"] = True
                 write_record(fd, rec)
-                erase(target, st.st_dev)
+                if not regular:
+                    erase(target, st.st_dev)
                 if not same(os.stat("tree", dir_fd=fd, follow_symlinks=False), exp):
                     raise Kept("claimed root identity changed")
-                os.rmdir("tree", dir_fd=fd)
+                if regular:
+                    os.unlink("tree", dir_fd=fd)
+                else:
+                    os.rmdir("tree", dir_fd=fd)
                 os.fsync(fd)
                 rec["phase"] = "DONE"
                 write_record(fd, rec)
@@ -420,7 +468,8 @@ def remove(pathfd, qpath, exp):
                     return {"state": "removed", "identity": exp, "transaction": tx}
                 raise Kept("authorized object removed; replacement at source preserved")
             finally:
-                os.close(target)
+                if target is not None:
+                    os.close(target)
         except BaseException as error:
             if rec["phase"] != "DONE":
                 try:
@@ -443,7 +492,7 @@ def main(args):
         raise Kept("requires fixed root entry")
     action = args.pop(0) if args else ""
     if action == "capabilities" and not args:
-        return {"state": "ok", "features": ["tree-usage", "identity-remove", "cleanup-status", "cleanup-rollback", "locked-adopt"]}
+        return {"state": "ok", "features": ["tree-usage", "identity-remove", "cleanup-status", "cleanup-rollback", "locked-adopt", "temporary-files"]}
     if action == "guard-run" and len(args) == 1:
         path = os.path.realpath(args[0])
         if path == BASE + "/" + PRIVATE or path.startswith(BASE + "/" + PRIVATE + "/"):
@@ -515,8 +564,8 @@ def main(args):
             if pending(tx):
                 raise Kept("unresolved cleanup transaction")
             try:
-                with chain(path) as (fd, _):
-                    return {"state": "ok", "identity": identity(os.fstat(fd), path)}
+                with place(path) as exp:
+                    return {"state": "ok", "identity": exp}
             except FileNotFoundError:
                 return {"state": "gone"}
     if action in ("tree-usage", "remove"):
@@ -527,12 +576,12 @@ def main(args):
                 return remove(tx, q, exp)
             if pending(tx):
                 raise Kept("unresolved cleanup transaction")
-            with chain(path) as (fd, _):
-                if not same(os.fstat(fd), exp):
+            with place(path) as current:
+                if current != exp:
                     raise Kept("tree identity mismatch")
                 result = scan(path, exp)
-                with chain(path) as (again, _):
-                    if not same(os.fstat(again), exp):
+                with place(path) as again:
+                    if again != exp:
                         raise Kept("tree identity changed during scan")
                 return {**result, "identity": exp}
     raise Kept("unsupported fixed operation or arguments")

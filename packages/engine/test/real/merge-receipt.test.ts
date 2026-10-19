@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { PortContext } from '../../src/ports.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { createGitHubPorts, type EngineGitHub } from '../../src/real/github-ports.ts';
+import { readMergedTask } from '../../src/real/merge-receipt.ts';
 import type { TaskActivitiesDeps } from '../../src/real/task-activities.ts';
 import { reviewChangesReader } from '../../src/real/task-verify.ts';
 import { fakeTrees } from './fixtures.ts';
@@ -278,6 +279,61 @@ function world(
 
 const receipt: MergeReceipt = { number: PR, head: HEAD, mergeCommit: MERGE, mergedBy: ENGINE_LOGIN };
 const merged = { state: 'merged', head: HEAD, failedChecks: [], mergeCommit: MERGE };
+
+describe('已合任务精确收尾回执（#3193）', () => {
+  const input = { schemaVersion: 1 as const, repo: ref, prNumber: PR, expectedHead: HEAD };
+  it('真实 writer onlyBook 记账，重复读取幂等，不发合并请求', async () => {
+    const w = world();
+    const expected = { repo: ref, prNumber: PR, head: HEAD, mergeCommit: MERGE };
+    expect(await readMergedTask(w.real, input, ctx)).toEqual(expected);
+    expect(await readMergedTask(w.real, input, ctx)).toEqual(expected);
+    expect(mergeKeys(w.store)).toEqual([w.key]);
+    noWrites(w.requests);
+  });
+  it('普通未合 PR 返回 null，也不记成功账', async () => {
+    const w = world('open');
+    w.pull.state = 'open';
+    w.pull.merged = false;
+    w.pull.merged_at = null;
+    expect(await readMergedTask(w.real, input, ctx)).toBeNull();
+    expect(mergeKeys(w.store)).toEqual([]);
+    noWrites(w.requests);
+  });
+  it('第一次 claims 读取合并字段全缺，明确未知，不回 null 授权关单', async () => {
+    const w = world();
+    const raw = w.pull as unknown as Record<string, unknown>;
+    delete raw.merged;
+    delete raw.merged_at;
+    await expect(readMergedTask(w.real, input, ctx)).rejects.toThrow('合并状态未知');
+    expect(mergeKeys(w.store)).toEqual([]);
+    noWrites(w.requests);
+  });
+  it('第一次 claims 的 merged=false 却带真实合并时间，拒绝矛盾而非授权关单', async () => {
+    const w = world();
+    w.pull.merged = false;
+    await expect(readMergedTask(w.real, input, ctx)).rejects.toThrow('合并状态矛盾');
+    expect(mergeKeys(w.store)).toEqual([]);
+    noWrites(w.requests);
+  });
+  it.each(['wrong-number', 'wrong-head', 'unknown-merged'] as const)('拒绝 %s', async (fault) => {
+    const w = world(fault);
+    await expect(readMergedTask(w.real, input, ctx)).rejects.toThrow();
+    expect(mergeKeys(w.store)).toEqual([]);
+    noWrites(w.requests);
+  });
+  it('预期合并提交与真实回执不同，不接受停法收尾', async () => {
+    const w = world();
+    await expect(
+      readMergedTask(w.real, { ...input, expectedMergeCommit: 'f'.repeat(40) }, ctx),
+    ).rejects.toThrow('真实合并回执');
+    noWrites(w.requests);
+  });
+  it('GitHub 读取失败不能凑未合或已合', async () => {
+    const w = world('read-failed');
+    await expect(readMergedTask(w.real, input, ctx)).rejects.toThrow();
+    expect(mergeKeys(w.store)).toEqual([]);
+  });
+});
 
 /** 账上的合并键（只该有这张 PR 这个头的一把）。 */
 function mergeKeys(store: ReturnType<typeof memoryIdempotencyStore>): string[] {

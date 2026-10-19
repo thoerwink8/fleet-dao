@@ -17,7 +17,14 @@ if (action === 'capabilities') {
     JSON.stringify({
       version: 1,
       state: 'ok',
-      features: ['tree-usage', 'identity-remove', 'cleanup-status', 'cleanup-rollback', 'locked-adopt'],
+      features: [
+        'tree-usage',
+        'identity-remove',
+        'cleanup-status',
+        'cleanup-rollback',
+        'locked-adopt',
+        'temporary-files',
+      ],
     }),
   );
 } else if (action === 'run') {

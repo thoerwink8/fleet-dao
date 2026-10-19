@@ -135,6 +135,14 @@ export interface TaskStatus {
   tier: TierDecision | null;
   /** 关单收尾能力。旧 worker 缺此字段，调用方必须保留未核实，不能回退无条件放弃。 */
   closedIssueClose?: { version: 1; token: ClosedIssueHoldToken | null };
+  /** Separate from closed-issue abandonment: real merged PR, even when acceptance keeps its issue open. */
+  mergedTaskClose?: {
+    version: 1;
+    token: ClosedIssueHoldToken | null;
+    repo: { owner: string; name: string };
+    prNumber: number | null;
+    head: string | null;
+  };
 }
 
 /** 只在这一 run 的这一次停法有效；继续信号收到时立即失效，不等公开 phase 回写。 */
@@ -156,6 +164,28 @@ export interface ClosedIssueCloseCommand {
 export const taskCloseClosedIssueUpdate = defineUpdate<ClosedIssueCloseResult, [ClosedIssueCloseCommand]>(
   'taskCloseClosedIssue',
 );
+
+export interface MergedTaskReceipt {
+  repo: { owner: string; name: string };
+  prNumber: number;
+  head: string;
+  mergeCommit: string;
+}
+
+export interface ReadMergedTaskInput {
+  schemaVersion: 1;
+  repo: { owner: string; name: string };
+  prNumber: number;
+  expectedHead: string;
+  expectedMergeCommit?: string;
+  /** Merged settlement rechecks detached sessions. The closed-issue entry also requires idle for open PRs. */
+  idle?: { issueNumber: number; workflowId: string; includeOpen?: true };
+}
+
+export const taskSettleMergedUpdate = defineUpdate<
+  ClosedIssueCloseResult,
+  [{ token: ClosedIssueHoldToken; receipt: MergedTaskReceipt }]
+>('taskSettleMerged');
 
 export interface TaskRun {
   outcome: 'merged' | 'abandoned';

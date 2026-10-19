@@ -71,13 +71,21 @@ export async function coldVerifyPr(
     // 引擎换版本、重启时验收会话没停、脱开接着跑（#2848，和动手段 segment-reattach 同一套）：隔一会儿带上 attach 再调同一次验收，
     // 等它收场——不算一轮、不算没过、不重新起会话。老引擎还在排空时接回会当场再交回 detached，所以隔一会儿再接。
     // 老历史没有这个标记（也不会有 detached）
-    while (res.detached && patched('cold-verify-attach')) {
-      const attach = res.detached;
-      await rt.pause('retry', '引擎在换版本：验收会话脱开引擎接着跑，等新引擎接回', VERIFY_REATTACH_SECONDS);
-      res = await rt.step('coldVerify', () =>
-        rt.cancellable(() => rt.acts.coldVerify({ ...verifyInput, attach })),
-      );
-    }
+    const wasDetached = !!res.detached;
+    await rt.reattachExisting(async () => {
+      while (res.detached && patched('cold-verify-attach')) {
+        const attach = res.detached;
+        await rt.pause(
+          'retry',
+          '引擎在换版本：验收会话脱开引擎接着跑，等新引擎接回',
+          VERIFY_REATTACH_SECONDS,
+        );
+        res = await rt.step('coldVerify', () =>
+          rt.cancellable(() => rt.acts.coldVerify({ ...verifyInput, attach })),
+        );
+      }
+    });
+    if (wasDetached && patched('settle-merged-task-checkpoint')) await rt.checkpoint();
     if (res.headMoved !== undefined) {
       rt.verifyRound -= 1;
       await rt.park('PR 的头被别人改了', headMovedDetail(res.headMoved, headSha));
@@ -232,12 +240,26 @@ export function verifyAlongsideCi(rt: TaskRuntime, brief: TaskBrief): AlongsideV
   // 这一层要在 rt.cancellable 的范围里建（父范围取建的那一刻的当前范围）：放弃取消外层时连着它一起取消
   let own: CancellationScope | null = null;
   let cancelled = false;
+  let detached = false;
   const result = rt
     .cancellable(() => {
       const scope = new CancellationScope({ cancellable: true });
       own = scope;
       if (cancelled) scope.cancel();
-      return scope.run(() => rt.acts.coldVerify(input));
+      return scope.run(async () => {
+        let res = await rt.acts.coldVerify(input);
+        detached = !!res.detached;
+        // 新任务的并行验收也接完同一个 detached session 再交结果；期间 rt.cancellable 一直算在跑。
+        if (patched('settle-merged-task-checkpoint')) {
+          while (res.detached) {
+            const attach = res.detached;
+            await rt.pause('retry', '引擎在换版本：并行验收会话接回原 session', VERIFY_REATTACH_SECONDS);
+            res = await rt.acts.coldVerify({ ...input, attach });
+            detached = !!res.detached;
+          }
+        }
+        return res;
+      });
     })
     .then(
       (res) => ({ ok: true as const, res }),
@@ -247,6 +269,8 @@ export function verifyAlongsideCi(rt: TaskRuntime, brief: TaskBrief): AlongsideV
     result,
     cancel: () => {
       if (cancelled) return;
+      // 脱开的原会话必须接回才能记终态；取消等待定时器会把活 runs 永久留在库里。
+      if (detached && patched('settle-merged-task-checkpoint')) return;
       cancelled = true;
       (own as CancellationScope | null)?.cancel();
     },
