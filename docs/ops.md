@@ -293,6 +293,7 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | `/root/.ssh/authorized_keys2` | root:root 600 | 整份归 fleet-dao：法国上传钥匙一行，限死成只许从 `10.99.0.2` 来、不给终端、只能跑 `rrsync -wo -munge /srv/fleet-dao-web`。root 原有的 `authorized_keys` 一行不碰 |
 | `/var/www/fleet-dao-acme` | root:root 755 | 证书续期的验证文件 |
 | `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | fleet-dao 的站点。同一个 nginx 上另有 MiraQuota 的站点 `ai-gateway`（不归 fleet-dao 管，装机不碰） |
+| `/var/lib/nginx/body` | www-data，700；保留已有组 | 香港 Ubuntu nginx 请求体落盘目录。`hk.sh` 配置没变也核/修；只接受实际 worker 全为 www-data、父目录逐级非链接且归 root、组和其他人不可写。只原位修该目录 owner/必要的 700 权限，不递归、不动内容或其他 nginx 临时路径、不为此重载服务。`--check` 只核 metadata 并以 www-data 执行 `test -w/-x`，不建探针；识别不了身份或路径不安全明确失败 |
 | `/etc/letsencrypt/live/<驾驶舱域名>` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥 |
 | `/var/backups/fleet-dao/restic-copies` | root:root 700 | 备份仓库的第二份：root 每天复制一份，按日期一个目录，留 14 天。备份用户碰不到（第十一节） |
@@ -809,7 +810,7 @@ rm -r /etc/systemd/system/fleet-hk-france-probe.service.d && systemctl daemon-re
 - `curl -I https://<驾驶舱域名>`、`certbot certificates`
 - `curl -s -o /dev/null -w '%{http_code}\n' https://<驾驶舱域名>/release.json`：从公网取应为 404（它只给法国经隧道读，第九节）
 - `certbot renew --dry-run --cert-name <驾驶舱域名>`：只演练续期，不换证书
-- `wg show wg-fleet`（看法国的 latest handshake）、`nginx -t`
+- `wg show wg-fleet`（看法国的 latest handshake）；只读核 nginx 请求体目录用 `hk.sh --check`。`nginx -t` / `nginx -T` 不是纯只读：检查配置时也可能创建或改变临时目录的属主，不能用作不改现场的巡检；隔离测试必须显式配置全部五种 temp path（client_body、proxy、fastcgi、uwsgi、scgi）到测试目录。
 - 往法国的连接有没有复用：`for i in 1 2 3; do curl -s -o /dev/null -w '%{time_starttransfer}\n' https://<驾驶舱域名>/api/me; done`，复用时每次约 0.2 秒（一趟隧道往返），每次新建连接约 0.4 秒；`hk.sh --check` 的读回也核对站点里的 `upstream fleet_dao_api`
 
 自检（P02：以 root 执行的文件要全链属 root、组和其他人不可写）分三档：
