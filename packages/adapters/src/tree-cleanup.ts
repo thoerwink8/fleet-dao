@@ -16,6 +16,9 @@ export interface TreeHelperOptions {
 
 type Reply = Record<string, unknown>;
 
+/** Only the fixed root helper can attest this private namespace; never inspect it as a session. */
+export const CLEANUP_TRANSACTION_DIR = '.cleanup-transactions';
+
 export class TreeHelperError extends Error {
   readonly exitCode: number | null;
   constructor(message: string, exitCode: number | null) {
@@ -161,7 +164,21 @@ export async function removeTreeIdentity(
 
 export async function cleanupStatus(options: TreeHelperOptions = {}): Promise<Reply[]> {
   const reply = await invokeTreeHelper(options, ['cleanup-status']);
+  return cleanupRows(reply);
+}
+
+function cleanupRows(reply: Reply): Reply[] {
   if (reply.state !== 'ok' || !Array.isArray(reply.rows) || reply.truncated !== false)
     throw new Error('清理事务列表不完整');
   return reply.rows as Reply[];
+}
+
+/** A missing/old/failed helper response cannot exempt a root entry from the sweep. */
+export async function readCleanupNamespace(root: string, options: TreeHelperOptions = {}): Promise<Reply[]> {
+  const reply = await invokeTreeHelper(options, ['cleanup-status']);
+  const rows = cleanupRows(reply);
+  const namespace = treeIdentity(reply.namespace);
+  if (namespace.real !== `${root}/${CLEANUP_TRANSACTION_DIR}` || namespace.uid !== '0')
+    throw new Error('清理事务命名空间身份不匹配');
+  return rows;
 }

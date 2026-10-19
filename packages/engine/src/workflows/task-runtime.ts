@@ -140,6 +140,16 @@ export class TaskRuntime {
   readonly handedOver: AcceptanceDutyRecord[] = [];
   /** 当前单子正文读出来的交代。点「继续」重读之后换掉，验收用这一份，不用起任务时的旧版。 */
   brief: TaskBrief | null = null;
+  /** 首次安全边界核实之后才具备版本身份，旧历史不伪造。 */
+  contractVersioned = false;
+  contractRevision: { reviews: string[] } | null = null;
+  refreshContract: (boundary: string) => Promise<boolean> = async () => false;
+  contractGuard() {
+    if (!this.contractVersioned) return {};
+    const expected = this.brief?.contract;
+    if (!expected) throw new Error('正式合同未核实');
+    return { contractGuard: { issueNumber: this.input.issueNumber, expected } };
+  }
   /** 轮数用尽、人点「继续」之后重读单子。由 TaskFlow 接上。 */
   reloadBrief: () => Promise<void> = async () => {
     throw new Error('重读单子还没接上（工作流自己的状态乱了）');

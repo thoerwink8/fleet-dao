@@ -8,8 +8,8 @@ import { ChevronRight, FileText } from 'lucide-react';
 import { useState } from 'react';
 import type { TaskDetail, TaskPr } from '../api/types';
 import { formatAgo } from '../lib/format';
-import { runNth, segmentLabel, UNKNOWN_SEGMENT } from '../lib/segments';
-import { fileParts, PR_STATE } from '../lib/task-process';
+import { segmentLabel, UNKNOWN_SEGMENT } from '../lib/segments';
+import { fileParts, PR_STATE, runOrder } from '../lib/task-process';
 import { cn } from '../lib/utils';
 import { DiffStat } from './diff-stat';
 import { Notice } from './layout/notice';
@@ -17,6 +17,7 @@ import { Section } from './layout/section';
 import { StatusBadge } from './layout/status-badge';
 import { RepoLink } from './repo-link';
 import { Clamped } from './run-transcript';
+import { Button } from './ui/button';
 
 /** 改动卡默认露几个文件；PR 横条默认露几条。 */
 export const FILES_SHOWN = 3;
@@ -27,7 +28,7 @@ type PrFiles = Extract<TaskPr['files'], { state: 'ok' }>;
 type PrFile = PrFiles['items'][number];
 
 /** 最新汇报：最近一笔动手的最后一句话；没有写原因，读不到另说。 */
-function Report({ d, o, now }: { d: TaskDetail; o: Overview; now: number }) {
+function Report({ o }: { o: Overview }) {
   const r = o.report;
   if (r.state === 'unavailable') {
     return (
@@ -43,17 +44,26 @@ function Report({ d, o, now }: { d: TaskDetail; o: Overview; now: number }) {
       </p>
     );
   }
-  const run = d.segmentRuns.find((x) => x.id === r.runId);
-  const nth = run ? (runNth(d.segmentRuns, run.id) ?? 1) : undefined;
-  const seg = run?.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT;
   return (
     <div data-task-report>
       <Clamped text={r.text} className="min-w-0 text-body break-words whitespace-pre-wrap" />
-      <p className="mt-1 text-meta text-muted-foreground">
-        {run ? `来自${seg}第 ${nth} 次` : '来自最新一笔'} · {formatAgo(r.at, now)}
-      </p>
     </div>
   );
+}
+
+/** 「最新汇报」标题后面一句（照设计稿）：第几笔 · 段 · 模型 · 多久前；没有汇报不写。 */
+export function reportMeta(d: TaskDetail, o: Overview, now: number): string | undefined {
+  const r = o.report;
+  if (r.state !== 'ok') return undefined;
+  const run = d.segmentRuns.find((x) => x.id === r.runId);
+  if (!run) return `最新一笔 · ${formatAgo(r.at, now)}`;
+  const seg = run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT;
+  return [
+    `第 ${runOrder(d.segmentRuns).get(run.id) ?? '?'} 笔`,
+    seg,
+    run.modelName,
+    formatAgo(r.at, now),
+  ].join(' · ');
 }
 
 /** 进度一行：N 个命令已完成，M 个失败；在跑的是一个蓝色小块；只有失败数标红。 */
@@ -295,17 +305,38 @@ export function TaskSummary({ d, now }: { d: TaskDetail; now: number }) {
   const o = d.overview;
   if (!o) {
     return (
-      <Section title="汇报与改动" data-task-summary>
+      <Section title="最新汇报" variant="plain" data-task-summary>
         <Notice tone="info">
           这台后端还没有任务概览（老版本推来的详情），所以最新汇报、PR 状态、改动文件和命令计数都没读到。
         </Notice>
       </Section>
     );
   }
+  // 照设计稿（#3228）：不套卡片，标题「最新汇报」后面写谁、多久前说的，右边跳到过程
   return (
-    <Section title="汇报与改动" data-task-summary>
+    <Section
+      title="最新汇报"
+      description={reportMeta(d, o, now)}
+      variant="plain"
+      actions={
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost"
+          className="text-muted-foreground"
+          onClick={() =>
+            document
+              .querySelector('[data-task-process]')
+              ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+          }
+        >
+          看全部过程
+        </Button>
+      }
+      data-task-summary
+    >
       <div className="space-y-3">
-        <Report d={d} o={o} now={now} />
+        <Report o={o} />
         <ProgressLine o={o} />
         <PrBars d={d} o={o} />
         <ChangedFilesBlock d={d} o={o} />

@@ -118,6 +118,7 @@ import type {
   RoundOutcome,
   Worktree,
 } from '../ports.ts';
+import { reviewFeedbackLines } from '../review-feedback.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import { SELF_CHECK_DOING } from '../self-check-budget.ts';
@@ -179,6 +180,7 @@ import { coldVerifyPr, handReviewChanges, verifyAlongsideCi } from './task-verif
 interface EarlyVerify {
   run: ReturnType<typeof verifyAlongsideCi>;
   head: string | null;
+  contract?: string | undefined;
 }
 
 class TaskFlow {
@@ -213,13 +215,75 @@ class TaskFlow {
     let { brief, tier } = await this.readBrief();
     rt.status.tier = tier;
     rt.reloadBrief = async () => {
+      // 耗尽后继续也走同一接纳口；先覆盖 brief 会让下一边界认不出合同修订。
+      if (patched('task-contract-revisions-v1')) {
+        await rt.refreshContract('轮数耗尽后重读');
+        return;
+      }
       brief = (await this.readBrief()).brief;
+    };
+    rt.refreshContract = async (boundary) => {
+      if (!patched('task-contract-revisions-v1')) return false;
+      const before = rt.brief?.contract;
+      const got = await this.readBrief(true);
+      const next = got.brief.contract;
+      if (next?.version !== 1 || !/^[a-f0-9]{64}$/.test(next.sha256))
+        throw new Error('正式合同版本或摘要未核实');
+      rt.contractVersioned = true;
+      rt.status.contract = next;
+      brief = got.brief;
+      tier = got.tier;
+      rt.status.tier = tier;
+      const changed = before?.version !== next.version || before?.sha256 !== next.sha256;
+      if (!changed) return false;
+      rt.verifyRecheck = null;
+      rt.verifyProblems = [];
+      rt.guardApproval = null;
+      rt.contractRevision = { reviews: [] };
+      this.plan = null;
+      this.budgetApproved = false;
+      const revision = `正式需求已修订（合同 v1 ${next.sha256}；${boundary}）。当前交代替代旧需求和旧验收条，仍有效正式评审继续遵守。`;
+      rt.feedback = [
+        ...rt.feedback.filter(
+          (line) => !line.startsWith('验收没过：') && !line.startsWith('正式需求已修订（合同'),
+        ),
+        revision,
+      ];
+      if (rt.prNumber !== null && rt.head !== null) {
+        for (;;) {
+          const snapshot = await rt.step('readCiReviews', () =>
+            rt.acts.readCiReviews({
+              schemaVersion: 1,
+              taskId: rt.input.taskId,
+              repo: rt.input.repo,
+              prNumber: rt.prNumber as number,
+              branch: rt.branch,
+              expectedHead: rt.head as string,
+            }),
+          );
+          if (!snapshot.delivered) {
+            await rt.park('正式评审未核实、未交付', snapshot.reason);
+            if (snapshot.headMoved) rt.head = snapshot.headMoved;
+            continue;
+          }
+          // 修订不清 reviewsHanded；仍有效的正式 CR 连原文再交付，不能把“交过”当“解决”。
+          const lines = snapshot.reviews.flatMap((review) => reviewFeedbackLines(review, rt.head, false));
+          rt.contractRevision = { reviews: lines };
+          rt.feedback = [...lines, ...rt.feedback];
+          break;
+        }
+      }
+      await rt.note(
+        `安全边界接纳正式合同 v1 ${next.sha256}（${boundary}），旧冷验收和批准资格失效；累计预算与轮数保留`,
+      );
+      return true;
     };
     rt.branch = taskBranch(rt.input.issueNumber, workflowInfo().runId);
     await rt.mirror('running');
 
     for (;;) {
       await rt.checkpoint();
+      await rt.refreshContract('动手前');
       // 验收没过要返工、验收还没到 2 轮的上限：这一轮动手照给（#1967：CI 红了 2 轮、第 3 轮才验，验收意见还没交给会话就因
       // 动手轮数用完停下等了 8 小时）。只多给一次：第 2 轮验收再不过 verifyRound 就到顶，照旧停下。老历史没有这个标记。
       const verifyGrace =
@@ -360,6 +424,7 @@ class TaskFlow {
     const rt = this.rt;
     for (;;) {
       await rt.checkpoint();
+      await rt.refreshContract('交付/冷验收前');
       // 老历史没有这个标记：下面这一支的活动顺序和原来一字不差。
       if (!patched('repo-ci-policy')) {
         const ci = await waitForCi(rt);
@@ -490,7 +555,7 @@ class TaskFlow {
   /** 和等 CI 同时起的冷验收（决定 0093）：只调一次活动、不动状态；记下起的时候的头，CI 收场后据此认不认。 */
   private startVerify(brief: TaskBrief): EarlyVerify {
     const head = this.rt.head;
-    return { run: verifyAlongsideCi(this.rt, brief), head };
+    return { run: verifyAlongsideCi(this.rt, brief), head, contract: this.rt.brief?.contract?.sha256 };
   }
 
   /**
@@ -513,6 +578,11 @@ class TaskFlow {
       return this.verifyOnce(brief);
     }
     if (this.rt.head !== early.head) return this.verifyOnce(brief);
+    await this.rt.refreshContract('并行验收接纳前');
+    if (this.rt.contractVersioned && this.rt.brief?.contract?.sha256 !== early.contract) {
+      this.rt.verifyRound += 1; // 已实际启动的旧合同验收照算，修订不能重新领取轮数。
+      return this.verifyOnce(this.rt.brief ?? brief);
+    }
     return coldVerifyPr(this.rt, brief, got.res);
   }
 
@@ -530,6 +600,7 @@ class TaskFlow {
     const prNumber = rt.prNumber;
     if (prNumber === null || rt.head === null) throw new Error('合并之前还没有 PR');
     for (;;) {
+      if (await rt.refreshContract('直接合并前')) return 'rework';
       await rt.advance('merge', `PR #${prNumber} 不强制 CI，直接合并`);
       const head: string = rt.head;
       const r = await rt.step('mergeNow', () =>
@@ -538,9 +609,14 @@ class TaskFlow {
           repo: rt.input.repo,
           prNumber,
           expectedHead: head,
+          ...rt.contractGuard(),
           ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
         }),
       );
+      if (r.contractChanged) {
+        await rt.refreshContract('直接合并活动发现修订');
+        return 'rework';
+      }
       if (r.merged) return { commit: r.mergeCommit };
       // 不强制 CI 也不跑冷验收：合之前现读到还挂着的正式「要求改」（#2991）就不合，交给工人或停下等审查者（点「继续」回来再读再合）。
       // 老历史的活动结果里没有 reviewChanges，进不了这一支、不打标记
@@ -581,7 +657,7 @@ class TaskFlow {
   }
 
   /** 读交代：缺栏就停下等人补，补了点「继续」再读。 */
-  private async readBrief(): Promise<{ brief: TaskBrief; tier: TierDecision }> {
+  private async readBrief(boundary = false): Promise<{ brief: TaskBrief; tier: TierDecision }> {
     const rt = this.rt;
     for (;;) {
       rt.set('brief', '读单子和需求文档');
@@ -590,9 +666,28 @@ class TaskFlow {
           schemaVersion: 1,
           repo: { owner: rt.input.repo.owner, name: rt.input.repo.name },
           issueNumber: rt.input.issueNumber,
+          ...(boundary ? { checkContract: true as const } : {}),
+          ...(boundary && rt.prNumber !== null
+            ? {
+                contractGuard: {
+                  prNumber: rt.prNumber,
+                  ...(rt.brief?.contract ? { expected: rt.brief.contract } : {}),
+                },
+              }
+            : {}),
         }),
       );
       if (got.ok) {
+        if (
+          boundary &&
+          (got.brief.contract?.version !== 1 || !/^[a-f0-9]{64}$/.test(got.brief.contract.sha256))
+        ) {
+          await rt.park(
+            '正式合同未核实',
+            '安全边界读回的正式合同缺摘要或规范版本未知，不动手、不验收、不合并',
+          );
+          continue;
+        }
         rt.brief = got.brief;
         return { brief: got.brief, tier: got.brief.tier };
       }
@@ -962,18 +1057,38 @@ class TaskFlow {
   private async withinLineBudget(delivery: DeliveryRead): Promise<boolean> {
     const rt = this.rt;
     const budget = this.lineBudget();
-    const added = delivery.addedLines;
+    const rawAdded = delivery.addedLines;
+    const measurement = delivery.lineBudgetMeasurement;
+    const measured =
+      measurement &&
+      patched('verified-migration-budget-v1') &&
+      measurement.version === 1 &&
+      measurement.verified &&
+      measurement.head === delivery.head &&
+      measurement.rawAddedLines === rawAdded &&
+      Number.isSafeInteger(measurement.verifiedGeneratedLines) &&
+      measurement.verifiedGeneratedLines >= 0 &&
+      Number.isSafeInteger(measurement.chargeableAddedLines) &&
+      measurement.chargeableAddedLines >= 0 &&
+      measurement.chargeableAddedLines + measurement.verifiedGeneratedLines === rawAdded;
+    const added = measured ? measurement.chargeableAddedLines : rawAdded;
+    const detail = measurement
+      ? `原始新增 ${rawAdded} 行；已核生成快照 ${measured ? measurement.verifiedGeneratedLines : 0} 行；${measurement.reason}`
+      : '';
     if (budget === 0 || added === undefined || added <= budget || this.budgetApproved) return true;
     if (!patched('pr-line-budget')) return true;
     if (!this.budgetBounced) {
       this.budgetBounced = true;
-      rt.feedback = [overBudgetLine(added, budget, this.plan, delivery.changedFiles)];
+      rt.feedback = [
+        overBudgetLine(added, budget, this.plan, delivery.changedFiles),
+        ...(detail ? [detail] : []),
+      ];
       rt.status.lastProblem = '改动超出体量预算';
       return false;
     }
     await rt.park(
       `改动超出体量预算：新增 ${added} 行，预算 ${budget} 行，收窄过一次仍超`,
-      `${splitSuggestion(delivery.changedFiles)} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。`,
+      `${splitSuggestion(delivery.changedFiles)}${detail ? ` ${detail}` : ''} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。`,
     );
     this.budgetApproved = true;
     return true;
@@ -1020,6 +1135,9 @@ class TaskFlow {
           taskId: rt.input.taskId,
           repo: rt.input.repo,
           worktreePath: wt.path,
+          ...(patched('self-check-ci-coverage') && typeof rt.prNumber === 'number'
+            ? { expectedHead: head, prNumber: rt.prNumber }
+            : {}),
         }),
       );
       rt.selfCheckOutput = { head, text: selfCheckText(result) };

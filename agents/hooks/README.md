@@ -17,4 +17,10 @@ pnpm typecheck
 
 原生消息链独占投递。main-thread 只检查原生queued_command后的先回规则，并由 background-recovery 读取本会话原生重启通知。恢复提示保留真实任务编号和原任务，兼容旧tick文件只保存backgroundRestartKey；不读创始人原文账、不轮询Mirasim、不标已读。session-id是它和work-watch共用的纯校验。
 
+无人值守身份闸由 `codex-session-source.mjs` 只读当前 Codex 首条 session_meta；原生子代理即使未设 FLEET_WORKER 也拒绝开启或代改父窗口。来源冲突/不完整/超界明确unknown，开场和续轮不借父状态；受配 Mirasim sessions 根链接允许，后代日期/文件链接拒绝。它只作准入，不证明宿主续轮或根消费。
+
+无人值守执行回执由 `continuation-receipts.mjs` 共用，既有 Stop/start/progress 入口只追加脱敏阶段，不另起通知、轮询或看护。每份上限2MiB、最多128份，目录准入与读取均有界，满额保留历史并明确未知。`pnpm exec node agents/hooks/unattended.mjs status --receipts` 读当前窗口；无证据、坏行、超限或锁故障明确unknown，不能把on、prepared/emitted或同session工具事件称为根会话已接续/结果已消费。完整边界见 [CLI无人值守接续](../../docs/design/CLI无人值守接续.md)。
+
 session-start只列同血缘旧号实际prompt-log历史，保留时间/字数封顶与来源读取失败诊断。turns缺行不判断丢失，旧seen和steer-shown不参与投递。inbox-watch在退役目录中；inbox-tick和steer-shown也已移除，标准同步清理受管安装目录的旧脚本，不删除用户历史状态。Stop仍保留stop与work-watch，只有work-watch使用asyncRewake。
+
+Codex 的 SessionStart 使用 continuation-start，PostToolUse / Stop 分别使用 continuation-progress-codex / stop-codex 专用入口。登记入口明确 CLI 家族；宿主缺终端环境号时，仅本次可信事件 session_id 可选取来源，直接 on 仍须终端环境号。Claude 共用入口不从 CODEX_HOME 猜 CLI，agent_id 传入共用开场及所有身份闸。prompt-log/work-watch 仍仅按既有 Claude 过程组登记，不新增 Codex 事件。

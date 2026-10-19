@@ -113,6 +113,77 @@ function world(over: Partial<WorktreeSweepDeps> = {}) {
 
 const byTree = (inv: WorktreeInventory) => Object.fromEntries(inv.trees.map((t) => [t.tree, t]));
 
+describe('受管清理事务命名空间', () => {
+  function namespaceWorld(
+    entries = [{ name: '.cleanup-transactions', isDir: true }],
+    cleanupNamespace?: WorktreeSweepDeps['cleanupNamespace'],
+  ) {
+    const reads: string[] = [];
+    const { deps, removed } = world({
+      listDir: async (dir) => {
+        reads.push(dir);
+        if (dir !== ROOT) throw new Error('不得普通读取私有目录');
+        return entries;
+      },
+      ...(cleanupNamespace ? { cleanupNamespace } : {}),
+    });
+    return { deps, reads, removed };
+  }
+
+  it('可信帮手核准正常空/已结命名空间：不作仓或树，不普通读取或删除', async () => {
+    const w = namespaceWorld(undefined, async () => []);
+    const part = await sweepWorktrees(w.deps, null);
+    expect(part.unchecked).toEqual([]);
+    expect(part.scanned).toBe(0);
+    expect(part.inventory.trees).toEqual([]);
+    expect(w.reads).toEqual([ROOT]);
+    expect(w.removed).toEqual([]);
+  });
+
+  it('识别命名空间仍保留原cleanup-status未结责任', async () => {
+    const w = namespaceWorld(undefined, async () => [{ id: 'tx1', phase: 'DELETING' }]);
+    const part = await sweepWorktrees(w.deps, null);
+    expect(part.unchecked).toEqual(['隔离清理待恢复：{"id":"tx1","phase":"DELETING"}']);
+    expect(w.reads).toEqual([ROOT]);
+    expect(w.removed).toEqual([]);
+  });
+
+  it.each(['错属主', '不安全权限', '坏记录', '读取失败', '截断'])('%s 仍明确没核成', async (why) => {
+    const w = namespaceWorld(undefined, async () => {
+      throw new Error(why);
+    });
+    const part = await sweepWorktrees(w.deps, null);
+    expect(part.unchecked).toHaveLength(1);
+    expect(part.unchecked[0]).toContain(why);
+    expect(w.reads).toEqual([ROOT]);
+    expect(w.removed).toEqual([]);
+  });
+
+  it('未接可信端口不能按名字放行', async () => {
+    const w = namespaceWorld();
+    expect((await sweepWorktrees(w.deps, null)).unchecked[0]).toContain('没有接上可信帮手');
+  });
+
+  it('同名普通文件/符号链接和其它陌生点目录仍报未知，不进私有目录', async () => {
+    // listDirEntries 用 Dirent.isDirectory，不跟随符号链接；两者均是 isDir=false。
+    const w = namespaceWorld(
+      [
+        { name: '.cleanup-transactions', isDir: false },
+        { name: '.cleanup-transactions-old', isDir: true },
+        { name: '.other', isDir: true },
+      ],
+      async () => {
+        throw new Error('不应核准这些条目');
+      },
+    );
+    const part = await sweepWorktrees(w.deps, null);
+    expect(part.unchecked).toHaveLength(3);
+    expect(part.unchecked.every((why) => why.includes('认不出的东西'))).toBe(true);
+    expect(w.reads).toEqual([ROOT]);
+    expect(w.removed).toEqual([]);
+  });
+});
+
 describe('一轮的清单（sweepWorktrees 带出 inventory）', () => {
   it('每棵树的去向：在跑、会话在用、认不出的留着；没人用的删了（干净的、有没推提交的、有没提交改动的都删，#2729）、不在清单里', async () => {
     const { deps, removed } = world();

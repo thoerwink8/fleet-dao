@@ -15,7 +15,7 @@ import {
 import { defineQuery, defineSignal, defineUpdate } from '@temporalio/workflow';
 import type { FailureEvidence } from './failure/types.ts';
 import type { RouteChoice } from './ports.ts';
-import type { TaskBrief } from './runner/task-brief.ts';
+import type { RequirementContract, TaskBrief } from './runner/task-brief.ts';
 import type { TierDecision } from './runner/tier.ts';
 
 /** 动手最多几轮（CI 红了、没交付、验收没过都回动手重来一轮）。这个数不随「继续」改变。 */
@@ -122,6 +122,8 @@ export interface TaskWait {
 }
 
 export interface TaskStatus {
+  /** 最近一次安全边界核实的正式合同；没有＝旧历史/尚未核实。 */
+  contract?: RequirementContract;
   phase: TaskPhase;
   /** 白话：正在做什么。 */
   doing: string;
@@ -213,13 +215,19 @@ export const taskStatusQuery = defineQuery<TaskStatus>('taskStatus');
 // ---- 新增的活动（EngineActivities 里的「任务」一组）
 
 export interface ReadTaskBriefInput {
+  /** 安全边界读取；旧历史缺此字段，不能伪造已核当前合同。 */
+  checkContract?: true;
   schemaVersion: 1;
   repo: Pick<Repo, 'owner' | 'name'>;
   issueNumber: number;
+  /** 安全边界读取：过期或读取失败必须先阻合；旧输入没有。 */
+  contractGuard?: { prNumber: number; expected?: RequirementContract };
 }
 
 /** 起一段动手会话。runId 由活动自己起（每次尝试一个，进 runs 表的主键），工作流里不生成编号。 */
 export interface RunSegmentInput {
+  /** 新版正式正文必须完整交给续会话，不能走日志反馈的长度截断。 */
+  contractRevision?: { reviews: string[] };
   schemaVersion: 1;
   /** 库里的 tasks.id（runs 里这一段挂在这张单上，#216）。 */
   taskId: string;
@@ -351,12 +359,27 @@ export interface DeliveryRead {
    */
   conflicts?: string[];
   /**
-   * 交的头相对树里钉住的主线新增了多少行（#2755 体量预算按它判）。没数成、老历史里没有：当作没量到，不判预算。
+   * 交的头相对钉住主线的原始新增行数，始终与 GitHub additions 同口径。当前真实读取失败抛错；老历史缺省不判预算。
    */
   addedLines?: number;
+  /** #3242：原 addedLines 永远是 raw；此项只供新版本预算判断，缺省沿用原判。 */
+  lineBudgetMeasurement?: LineBudgetMeasurement;
+}
+
+export interface LineBudgetMeasurement {
+  version: 1;
+  base: string;
+  head: string;
+  rawAddedLines: number;
+  rawDiffBytes?: number;
+  verifiedGeneratedLines: number;
+  chargeableAddedLines: number;
+  verified: boolean;
+  reason: string;
 }
 
 export interface ColdVerifyInput {
+  contract?: RequirementContract;
   schemaVersion: 1;
   taskId: string;
   repo: Repo;
@@ -409,6 +432,8 @@ export interface ColdVerifyAttach {
 }
 
 export interface ColdVerifyResult {
+  /** 原会话已收场，但正式合同变化，不能认其结论或复用增量验收。 */
+  contractChanged?: true;
   /** 验收有结论且通过。 */
   pass: boolean;
   /** 只有三种能挡：没做到验收条、弄坏了原有功能、安全或丢数据。 */
@@ -497,6 +522,7 @@ export interface CheckGuardedInput {
 }
 
 export interface ArmAutoMergeInput {
+  contractGuard?: { issueNumber: number; expected: RequirementContract };
   schemaVersion: 1;
   repo: Repo;
   prNumber: number;
@@ -516,6 +542,7 @@ export interface MainSyncBudgetExhausted {
 }
 
 export interface ArmAutoMergeResult {
+  contractChanged?: true;
   /** 自动合并挂上了（或本来就挂着）。 */
   armed: boolean;
   /** 挂的时候发现已经合了（或本来就满足合并条件、当场合了）。 */
@@ -593,6 +620,7 @@ export type ReadCiReviewsResult =
 
 /** 不强制 CI 的仓：开完 PR、查完改标准路径之后由引擎直接合并（不等检查、不挂自动合并）。 */
 export interface MergeNowInput {
+  contractGuard?: { issueNumber: number; expected: RequirementContract };
   schemaVersion: 1;
   repo: Repo;
   prNumber: number;
@@ -602,6 +630,7 @@ export interface MergeNowInput {
 }
 
 export interface MergeNowResult {
+  contractChanged?: true;
   merged: boolean;
   mergeCommit?: string;
   reason?: 'conflict' | 'head_moved' | 'behind_main' | 'closed' | 'review_changes' | 'other';
@@ -615,6 +644,7 @@ export interface MergeNowResult {
 }
 
 export interface WaitMergedInput {
+  contractGuard?: { issueNumber: number; expected: RequirementContract };
   schemaVersion: 1;
   repo: Repo;
   prNumber: number;
@@ -623,6 +653,7 @@ export interface WaitMergedInput {
 }
 
 export type MergeWait =
+  | { state: 'contract_changed' }
   | { state: 'merged'; mergeCommit?: string }
   | { state: 'closed' }
   | { state: 'head_moved'; head: string }
@@ -676,6 +707,25 @@ export interface SelfCheckInput {
   taskId: string;
   repo: RepoWithProfile;
   worktreePath: string;
+  /** 只由新 patched 历史携带；旧历史保持本机自测。 */
+  expectedHead?: string;
+  prNumber?: number;
+}
+
+/** 规范 CI 对源码测试的覆盖，不能计作本机 PASS。 */
+export interface CiTestCoverage {
+  repo: 'thoerwink8/fleet-dao';
+  pr: number;
+  head: string;
+  tree: string;
+  run: number;
+  attempt: number;
+  workflow: number;
+  contractCommit: string;
+  contractHash: string;
+  checks: string[];
+  ciNodes: string[];
+  node: string;
 }
 
 /** 一条命令的结果：精炼过的输出（失败的行和末尾一段，不是整份日志）。 */
@@ -686,6 +736,8 @@ export interface SelfCheckStep {
   exitCode: number | null;
   /** 精炼过的输出（SELF_CHECK_DIGEST_MAX 以内）；跳过的写为什么跳过。 */
   digest: string;
+  /** outcome 仍是 skipped：这条没有在本机实跑。 */
+  coveredByCi?: CiTestCoverage;
 }
 
 /**

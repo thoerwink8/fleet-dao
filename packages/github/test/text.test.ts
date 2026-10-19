@@ -100,15 +100,17 @@ describe('PR 正文模板', () => {
     }
   });
 
-  it('引擎开的 PR 不关单（#241：GitHub 替引擎关了单，接活当成叫停，第 7 步的关单评论和记账就做不完）：条目里的关单词也改成「关联」', () => {
+  it('引擎正文只保留关联，关单留给受管收尾', () => {
     const body = renderPrBody({
-      requirement: 12,
-      did: ['做完了 closes #12'],
+      requirement: 3210,
+      did: ['做完了 closes #12', 'Closes #3210'],
       verified: ['ok'],
     });
     expect(hasCloseKeywords(body)).toBe(false);
     expect(body).toContain('- 做完了 关联 #12');
-    expect(body).toContain('**需求**：#12');
+    expect(body).toContain('- 关联 #3210');
+    expect(body).toContain('**需求**：#3210');
+    expect(hasCloseKeywords(neutralizeCloseKeywords(body))).toBe(false);
   });
 
   it('验收责任还开着（#3037）：「需求」栏写 Refs 加「分片、关不了它」，不写 Closes；没开着照旧只写 #号', () => {
@@ -120,7 +122,7 @@ describe('PR 正文模板', () => {
     expect(plain).not.toContain('Refs');
   });
 
-  it('条目里的关单词也改掉', () => {
+  it('条目里的关单词也中和', () => {
     expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'] })).toContain('- 关联 #3');
   });
 });
