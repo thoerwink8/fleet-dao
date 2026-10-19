@@ -48,6 +48,7 @@ import {
 } from './context-menu';
 import {
   type BoardNodeData,
+  isOptionalKey,
   phasesOf,
   type SegmentKey,
   type Side,
@@ -70,14 +71,17 @@ const SAMPLE_DAYS = 7;
 export { segmentName };
 
 export function segmentHintOf(key: SegmentKey): string {
-  return key === 'none' ? 'runs 里没有流水可推出在哪一段' : segmentHint[key];
+  if (key === 'none') return 'runs 里没有流水可推出在哪一段';
+  if (key === 'parked') return '引擎停下了，要你点继续、放弃或重做';
+  return segmentHint[key];
 }
 
 /** 三段节点上的平均耗时那句：没有样本不写 0；不计的段（对题，#761）写「不计」。 */
 export function avgText(stage: HomeFlowStage | undefined, key: SegmentKey): string {
+  if (key === 'parked') return '停着不往前走，不计耗时';
   if (!stage) return '不在三段里，没有耗时';
   if (stage.avgMs === undefined) {
-    const unmetered = key === 'none' ? undefined : SEGMENT_UNMETERED[key];
+    const unmetered = isOptionalKey(key) ? undefined : SEGMENT_UNMETERED[key];
     return unmetered ? `${unmetered.short}耗时` : '还没有跑完的样本';
   }
   return `平均 ${formatDuration(stage.avgMs)} · ${stage.samples} 笔`;
@@ -269,10 +273,13 @@ export function FarTicket({
   usage,
   flowMode,
   flowFallback,
+  parked,
 }: {
   tone: Tone;
   id: string;
   title: string;
+  /** 引擎停下等人（#3279）：单号后面带「等你」，拉远了也看得出它停着、要人点。 */
+  parked?: boolean | undefined;
   /** 内存、CPU 的短写（#1973）：标题下面一行，和单号同一个字号、灰字。 */
   usage?: { text: string; title: string } | undefined;
   /** 这张单走全程还是三段。没有就不画。 */
@@ -283,11 +290,17 @@ export function FarTicket({
   return (
     <div className={cn('flex h-full flex-col justify-center gap-1 overflow-hidden px-3', softClass[tone])}>
       <div
-        className={cn('num shrink-0 leading-none font-semibold', inkClass[tone])}
+        className="flex shrink-0 items-baseline gap-2 leading-none font-semibold"
         style={{ fontSize: FAR_ID_FONT }}
-        data-far-id
       >
-        {id}
+        <span className={cn('num', inkClass[tone])} data-far-id>
+          {id}
+        </span>
+        {parked ? (
+          <span className="text-ink-human" data-far-parked>
+            停下 · 等你
+          </span>
+        ) : null}
       </div>
       <FlowModeTag mode={flowMode} fallback={flowFallback} />
       <div
@@ -505,6 +518,7 @@ export const TicketNode = memo(function TicketNode({ id, data }: Props) {
           usage={{ text: usageShort(data.usage), title: usageTitle(data.usage) }}
           flowMode={item.flowMode}
           flowFallback={item.flowFallback}
+          parked={item.waitingReason === 'parked'}
         />
       ) : (
         <div className="flex h-full flex-col overflow-hidden py-3 pr-3 pl-4">

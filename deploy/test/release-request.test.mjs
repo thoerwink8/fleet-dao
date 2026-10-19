@@ -1945,6 +1945,33 @@ test('【#2728】同一个提交发版还没动手就没成：进度记录里连
   assert.equal(log.notes.at(-1).level, 'alert');
 });
 
+test('【#3278】动手后没成：startedFails 记一趟、不论哪个提交带到下一趟再加一，做完清零；飞书写明不重发同一个提交、更新的照发', async () => {
+  let prev = null;
+  const once = async (req, runRelease) => {
+    const { io, log } = fakeIo({
+      readRequest: () => ({ kind: 'ok', text: req }),
+      readState: () => ({ ok: true, state: prev }),
+      ciRuns: async () => ({ status: 200, body: ciBody({ head_sha: JSON.parse(req).sha }) }),
+      ...(runRelease ? { runRelease } : {}),
+    });
+    const code = await runRequest(io);
+    prev = log.states.at(-1);
+    return { code, log };
+  };
+  const boom = async () => ({ status: 1, stdout: '', stderr: '已自动退回' });
+  let r = await once(goodRequest(), boom);
+  assert.equal(r.code, EXIT.failed);
+  assert.equal(prev.startedFails, 1, '第一趟动手后没成记 1');
+  assert.equal(prev.untouchedFails, 0);
+  assert.match(r.log.pushes.at(-1), /这个提交不再自动重发；主线上更新的绿提交照常自动发/);
+  r = await once(goodRequest({ sha: 'b'.repeat(40) }), boom);
+  assert.equal(prev.startedFails, 2, '换了提交照样带过来、再加一');
+  assert.match(r.log.pushes.at(-1), /动手后已连败 2 趟，自动发版停下、开急修单/);
+  r = await once(goodRequest());
+  assert.equal(prev.status, 'done');
+  assert.equal(prev.startedFails, 0, '做完清零');
+});
+
 test('驾驶舱后端的单元放行请求目录这一处可写，没有放行进度目录（它只读）', () => {
   const api = read('france/fleet-api.service');
   const line = /^ReadWritePaths=(.*)$/m.exec(api)?.[1] ?? '';

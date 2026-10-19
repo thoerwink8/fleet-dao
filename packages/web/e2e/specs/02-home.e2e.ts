@@ -22,6 +22,9 @@ type Home = {
   flow: { segment: string; inFlight: number; avgMs?: number; samples: number }[];
 };
 
+/** 段节点几个：三段永远在；有引擎停下等人的单（waitingReason=parked）再多一组「停下等你」（#3279）。 */
+const laneCount = (home: Home) => 3 + (home.running.some((r) => r.waitingReason === 'parked') ? 1 : 0);
+
 const card = (page: import('@playwright/test').Page, issue: number) =>
   page.locator('[data-running-card]', { hasText: new RegExp(`#${issue}\\b`) });
 
@@ -94,7 +97,12 @@ test.describe('画布（原主页）', () => {
     await expect(card(page, 12)).toContainText('Opus 5.5');
     // 三段节点：各自写在途几张和平均耗时（对题、动手有跑完的样本，验收没有 = 不给平均、不写 0）
     const lanes = page.locator('[data-flow-lane]');
-    await expect(lanes).toHaveCount(3);
+    await expect(lanes).toHaveCount(laneCount(home));
+    // 停下等人的单不算进它停在的那一段，单独一组（#3279）
+    for (const r of home.running.filter((x) => x.waitingReason === 'parked')) {
+      await expect(page.locator('[data-flow-lane="parked"]')).toBeVisible();
+      await expect(card(page, r.issueNumber)).toHaveCount(1);
+    }
     await expect(page.locator('[data-flow-lane="manual"]')).toContainText('在途');
     await expect(page.locator('[data-flow-lane="verify"]')).not.toContainText(/平均 0/);
   });
@@ -137,10 +145,11 @@ test.describe('画布（原主页）', () => {
   });
 
   // 原来 D9（#902）钉的是「泳道右边缘被面板截掉一截」；换成思维导图后同一件事是：排完版整张图收进画布里，一张卡都不被截。
-  test('看板：排完版整张图收进画布里（中心、三段、每张单都在画布框里，不被截掉）', async ({ page }) => {
+  test('看板：排完版整张图收进画布里（中心、三段、每张单都在画布框里，不被截掉）', async ({ page, api }) => {
+    const home = (await api.get('/api/home')) as Home;
     await page.goto('/board');
     await expect(page.locator('[data-flow-board]')).toBeVisible();
-    await expect(page.locator('.react-flow__node-segment')).toHaveCount(3);
+    await expect(page.locator('.react-flow__node-segment')).toHaveCount(laneCount(home));
     // 收进视野是一段 450 毫秒的动画：等它停下再量
     await expect
       .poll(
@@ -182,8 +191,8 @@ test.describe('画布（原主页）', () => {
     expect(stuck.length, '至少藏掉一张正常往前走的').toBeLessThan(home.running.length);
     await expect(page.locator('.react-flow__node[data-id^="ticket:"]')).toHaveCount(stuck.length);
     for (const r of stuck) await expect(card(page, r.issueNumber)).toHaveCount(1);
-    // 三段节点还在（过滤只藏单子）
-    await expect(page.locator('.react-flow__node-segment')).toHaveCount(3);
+    // 段节点还在（过滤只藏单子）
+    await expect(page.locator('.react-flow__node-segment')).toHaveCount(laneCount(home));
     // React Flow 自己的外框也是 role=application：按名字认看板那一层
     await page.getByRole('application', { name: /在跑的单的看板/ }).focus();
     await page.keyboard.press('?');
@@ -296,7 +305,7 @@ test.describe('主页：深色主题和手机宽度', () => {
     await expect(tree).toBeVisible();
     await expect(page.locator('.react-flow')).toHaveCount(0);
     await expect(page.getByRole('button', { name: '放大' })).toHaveCount(0);
-    await expect(tree.locator('[data-flow-lane]')).toHaveCount(3);
+    await expect(tree.locator('[data-flow-lane]')).toHaveCount(laneCount(home));
     // 一张单一行摘要，默认不展开；点开才有整张卡
     await expect(tree.locator('[data-ticket-row]')).toHaveCount(home.running.length);
     await expect(tree.locator('[data-running-card]')).toHaveCount(0);

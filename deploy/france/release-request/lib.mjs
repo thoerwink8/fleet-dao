@@ -24,6 +24,8 @@
 //   卡住、失败是卡住报警级（alert，不是「要你拍」，#2728）；开始、成功等不写通知，只写进度记录（#2368）。
 // - 发版还没动手（第 0–3 步、release.sh 没起）就没成的，不挡自动发版：进度记录的 untouchedFails 记同一个提交连败几趟，
 //   自动发布下一轮照常再请求，满 UNTOUCHED_FAIL_LIMIT 趟才停、开急修单（auto-release/lib.mjs 的 gateVerdict、emergencyStep）。
+//   动手之后没成（release.sh 起了，多半已自动退回）的：startedFails 记动手后连败几趟（不论哪个提交），自动发布不重发同一个提交、
+//   照发更新的绿提交，满 STARTED_FAIL_LIMIT 趟才全停、开急修单。
 // - 失败原因用 reasonOf：保留认得出的关键行（Cannot find package '…' 这种），不只取尾几行（#2728）。
 // - 这个目录的脚本是自动档：发完版由 france.sh --auto-tier 照在用那一版换上；只有 fleet-release-request.{service,path} 和目录是人工档。
 // - 请求的种类（#2027，请求文件的 kind，没写就是 release 发布，老后端照常）：retry 从停在第 3 步「等收尾」的那一趟接着走（老版本留下的）、
@@ -32,7 +34,14 @@
 
 import { randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
-import { ciVerdict, reasonOf, UNTOUCHED_FAIL_LIMIT, untouchedFails } from '../auto-release/lib.mjs';
+import {
+  ciVerdict,
+  reasonOf,
+  STARTED_FAIL_LIMIT,
+  startedFails,
+  UNTOUCHED_FAIL_LIMIT,
+  untouchedFails,
+} from '../auto-release/lib.mjs';
 import { SESSION_WAIT_MS } from './session-wait.mjs';
 
 export const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
@@ -455,6 +464,11 @@ function newState(io, req) {
      * 这一趟也这样没成再加一。自动发布按它判下一轮重不重试（满 UNTOUCHED_FAIL_LIMIT 停、开急修单），不靠内存。
      */
     untouchedFails: 0,
+    /**
+     * 发版动手之后（release.sh 起了）连着没成几趟，不论是不是同一个提交：上一趟也是动手后没成就带过来，这一趟再这样没成加一，做完清零。
+     * 自动发布按它判：同一个提交不重发、更新的提交照发，满 STARTED_FAIL_LIMIT 趟全停、开急修单。
+     */
+    startedFails: 0,
     via: 'cockpit',
     requestedBy: req.by,
     requestedAt: req.at,
@@ -1095,12 +1109,23 @@ function buttonHint(state, kind) {
       ? `版本还没发、什么都没动；同一个提交已连败 ${n} 趟，自动发版停下、开急修单修根因，修好的新提交合进主线后照常自动发`
       : `版本还没发、什么都没动；自动发版下一轮自动重试（第 ${n} 趟，同一个提交连败 ${UNTOUCHED_FAIL_LIMIT} 趟才停、开急修单）`;
   }
+  if (kind === 'failed' && started(state)) {
+    const n = Number.isInteger(state.startedFails) ? state.startedFails : 1;
+    return n >= STARTED_FAIL_LIMIT
+      ? `发版动手后已连败 ${n} 趟，自动发版停下、开急修单修根因；要马上发到驾驶舱「法国」页点「发布到法国」`
+      : `这个提交不再自动重发；主线上更新的绿提交照常自动发（动手后连败 ${STARTED_FAIL_LIMIT} 趟才停、开急修单）`;
+  }
   return '到驾驶舱「法国」页看发版卡写的原因（版本可能已经发出去了）';
 }
 
 /** 这一趟是不是发版还没动手就没成（第 0–3 步、release.sh 没起；判法同 auto-release 的 untouchedFails）。 */
 function untouched(state) {
   return untouchedFails({ ...state, untouchedFails: 1 }) > 0;
+}
+
+/** 这一趟是不是发版动手之后没成（release.sh 起了或第 4 步以后；判法同 auto-release 的 startedFails）。 */
+function started(state) {
+  return startedFails({ ...state, startedFails: 1 }) > 0;
 }
 
 /**
@@ -1248,6 +1273,8 @@ export async function runRequest(io) {
   }
   // 同一个提交上一趟发版还没动手就没成：连败趟数带过来（这一趟再这样没成就加一）
   if (prev?.target?.value === req.sha) state.untouchedFails = untouchedFails(prev);
+  // 上一趟发版动手之后没成（不论哪个提交）：动手后连败趟数带过来
+  state.startedFails = startedFails(prev);
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
   say(io, `收到驾驶舱的发布请求：${req.sha.slice(0, 12)}，${req.by} 在 ${req.at} 点的`);
   await push(io, state, 'start');
@@ -1281,6 +1308,8 @@ async function runPhases(io, state, req, from) {
       state.waiting = null;
       if (state.status === 'failed' && untouched(state)) {
         state.untouchedFails = (Number.isInteger(state.untouchedFails) ? state.untouchedFails : 0) + 1;
+      } else if (state.status === 'failed' && started(state)) {
+        state.startedFails = (Number.isInteger(state.startedFails) ? state.startedFails : 0) + 1;
       }
       io.writeState(state);
       io.err(`第 ${p} 步「${PHASES[p]}」${r.kind === 'blocked' ? '卡住了' : '没成'}：${r.why}`);
@@ -1292,6 +1321,7 @@ async function runPhases(io, state, req, from) {
   state.status = 'done';
   state.why = null;
   state.waiting = null;
+  state.startedFails = 0;
   io.writeState(state);
   const passed = state.check?.ok === true;
   say(io, passed ? '这一趟做完了，发后体检通过。' : '这一趟发完了，但发后体检没通过（看上面的 [没过]）。');

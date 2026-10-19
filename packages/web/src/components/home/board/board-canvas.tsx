@@ -997,7 +997,7 @@ const LEGEND: { tone: Tone; label: string; meaning: string }[] = [
   { tone: 'run', label: toneLabel.run, meaning: '对题、动手、验收正常往前走' },
   { tone: 'wait', label: toneLabel.wait, meaning: '排队、等额度、等合并队列' },
   { tone: 'stall', label: '还没验', meaning: '动手收了、验收还没起，不是失败' },
-  { tone: 'human', label: toneLabel.human, meaning: '等你拍板（要你拍的那块里有它）' },
+  { tone: 'human', label: toneLabel.human, meaning: '等你拍板，或引擎停下等你点' },
   { tone: 'fail', label: '出问题', meaning: '最近一次是超时、失败或没起来' },
 ];
 
@@ -1026,6 +1026,10 @@ function Legend() {
             </li>
           ))}
         </ul>
+        <div className="mt-3 border-t pt-2 text-meta text-muted-foreground" data-legend-parked>
+          <span className="font-medium text-foreground">停下等你</span>
+          ：引擎停下的单（超预算、认不出的错误……）单独成一组，不算进它停在的那一段；要你点继续、放弃或重做。最近一笔做坏了才停的画出问题红。
+        </div>
       </PopoverContent>
     </Popover>
   );
