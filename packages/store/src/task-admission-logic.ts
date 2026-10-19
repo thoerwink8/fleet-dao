@@ -17,8 +17,22 @@ export function canonicalExecutionInput(value: unknown): string {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return JSON.stringify(value);
   if (typeof value === 'number' && Number.isFinite(value)) return JSON.stringify(value);
   if (Array.isArray(value)) {
-    if (Object.keys(value).length !== value.length) throw new Error('执行输入数组含空洞或附加属性');
-    return `[${value.map(canonicalExecutionInput).join(',')}]`;
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.length !== value.length + 1 ||
+      keys.some(
+        (key) =>
+          typeof key !== 'string' ||
+          (key !== 'length' && (!/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length)),
+      )
+    )
+      throw new Error('执行输入数组含空洞或附加属性');
+    const entries: string[] = [];
+    for (let index = 0; index < value.length; index++) {
+      if (!Object.hasOwn(value, index)) throw new Error('执行输入数组含空洞或附加属性');
+      entries.push(canonicalExecutionInput(value[index]));
+    }
+    return `[${entries.join(',')}]`;
   }
   if (object(value) && Object.getPrototypeOf(value) === Object.prototype)
     return `{${Object.keys(value)
