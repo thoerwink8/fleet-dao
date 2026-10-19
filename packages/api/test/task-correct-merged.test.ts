@@ -39,6 +39,7 @@ const task: LedgerTask = {
   executor: 'engine',
   updatedAtMs: Date.parse('2026-10-19T01:52:06.446Z'),
   openRunCount: 0,
+  startPending: false,
 };
 
 function snap(patch: Partial<CorrectMergedSnapshot> = {}): CorrectMergedSnapshot {
@@ -114,101 +115,39 @@ describe('decideCorrection', () => {
     expect(reason('founder', req, snap({ task: { ...task, openRunCount: 1 } }))).toContain('活跃会话');
   });
 
+  // 还没合并、错 head、错 merge、本机执行、issue 读不到或是 PR：见真实装配测试的拒绝表
   it('交付对不上就拒绝', () => {
+    const other = { owner: 'other', name: 'x' };
     expect(reason('founder', req, snap({ pull: null }))).toContain('读不到 GitHub');
-    expect(reason('founder', req, snap({ pull: { ...pull, merged: false } }))).toContain('还没合并');
-    expect(
-      reason('founder', req, snap({ pull: { ...pull, repo: { owner: 'other', name: 'x' } } })),
-    ).toContain('错仓');
+    expect(reason('founder', req, snap({ pull: { ...pull, repo: other } }))).toContain('错仓');
     expect(reason('founder', req, snap({ pull: { ...pull, number: 1 } }))).toContain('错 PR');
-    expect(reason('founder', req, snap({ pull: { ...pull, head: 'a'.repeat(40) } }))).toContain('错 head');
-    expect(reason('founder', req, snap({ pull: { ...pull, mergeCommit: 'b'.repeat(40) } }))).toContain(
-      '错 merge',
-    );
-    expect(reason('founder', { ...req, workflowId: 'task:thoerwink8/fleet-dao#9' }, snap())).toContain(
-      '不属于这张单',
-    );
     expect(reason('founder', req, snap({ task: null }))).toContain('库里没有');
-    expect(
-      reason('founder', req, snap({ task: { ...task, repo: { owner: 'other', name: 'x' } } })),
-    ).toContain('错仓或错单');
-    expect(reason('founder', req, snap({ task: { ...task, executor: 'local' } }))).toContain('本机执行');
-    expect(reason('founder', req, snap({ issue: null }))).toContain('读不到这张 issue');
-    expect(
-      reason('founder', req, snap({ issue: { number: 3114, repo: REPO, isPullRequest: true } })),
-    ).toContain('这是 PR 不是 issue');
+    expect(reason('founder', req, snap({ task: { ...task, repo: other } }))).toContain('错仓或错单');
   });
 
-  it('原执行必须是这一代、已完成、abandoned，而且会话账钉得住', () => {
-    const running = snap({
-      execution: {
-        generations: [{ workflowId: WF, generation: 1, runId: RUN, status: 'RUNNING' }],
-        matched: { workflowId: WF, runId: RUN, status: 'RUNNING', result: null },
-      },
-    });
-    expect(reason('founder', req, running)).toContain('仍在运行');
-    const next = snap({
-      execution: {
-        generations: [
-          { workflowId: WF, generation: 1, runId: RUN, status: 'COMPLETED' },
-          { workflowId: `${WF}:r2`, generation: 2, runId: 'other-run', status: 'COMPLETED' },
-        ],
-        matched: {
-          workflowId: WF,
-          runId: RUN,
-          status: 'COMPLETED',
-          result: { outcome: 'abandoned', prNumber: 3137, head: HEAD },
+  it('原执行必须是这一代、已完成、abandoned，而且会话账钉得住；起代结果未知就拒绝', () => {
+    const exec = (status: string, runId = RUN, result: unknown = null, more: object[] = []) =>
+      snap({
+        execution: {
+          generations: [{ workflowId: WF, generation: 1, runId, status }, ...(more as never[])],
+          matched: { workflowId: WF, runId, status, result: result as never },
         },
-      },
-    });
-    expect(reason('founder', req, next)).toContain('新的一代');
-    const failed = snap({
-      execution: {
-        generations: [{ workflowId: WF, generation: 1, runId: RUN, status: 'FAILED' }],
-        matched: { workflowId: WF, runId: RUN, status: 'FAILED', result: null },
-      },
-    });
-    expect(reason('founder', req, failed)).toContain('不是已完成');
-    const wrongRun = snap({
-      execution: {
-        generations: [{ workflowId: WF, generation: 1, runId: 'other-run', status: 'COMPLETED' }],
-        matched: { workflowId: WF, runId: 'other-run', status: 'COMPLETED', result: null },
-      },
-    });
-    expect(reason('founder', req, wrongRun)).toContain('错 run');
-    const unread = snap({
-      execution: {
-        generations: [{ workflowId: WF, generation: 1, runId: RUN, status: 'COMPLETED' }],
-        matched: { workflowId: WF, runId: RUN, status: 'COMPLETED', result: null },
-      },
-    });
-    expect(reason('founder', req, unread)).toContain('原执行结果读不到');
-    const merged = snap({
-      execution: {
-        generations: [{ workflowId: WF, generation: 1, runId: RUN, status: 'COMPLETED' }],
-        matched: {
-          workflowId: WF,
-          runId: RUN,
-          status: 'COMPLETED',
-          result: { outcome: 'merged', prNumber: 3137, head: HEAD },
-        },
-      },
-    });
-    expect(reason('founder', req, merged)).toContain('不是 abandoned');
-    expect(
-      reason(
-        'founder',
-        req,
-        snap({ sessions: [{ workflowId: WF, prNumber: 1, temporalRunId: null, ended: true }] }),
-      ),
-    ).toContain('歧义');
-    expect(
-      reason(
-        'founder',
-        req,
-        snap({ sessions: [{ workflowId: WF, prNumber: 3137, temporalRunId: 'other', ended: true }] }),
-      ),
-    ).toContain('无证据');
+      });
+    const abandoned = { outcome: 'abandoned', prNumber: 3137, head: HEAD };
+    const second = { workflowId: `${WF}:r2`, generation: 2, runId: 'other-run', status: 'COMPLETED' };
+    expect(reason('founder', req, exec('RUNNING'))).toContain('仍在运行');
+    expect(reason('founder', req, exec('COMPLETED', RUN, abandoned, [second]))).toContain('新的一代');
+    expect(reason('founder', req, exec('FAILED'))).toContain('不是已完成');
+    expect(reason('founder', req, exec('COMPLETED', 'other-run'))).toContain('错 run');
+    expect(reason('founder', req, exec('COMPLETED'))).toContain('原执行结果读不到');
+    expect(reason('founder', req, exec('COMPLETED', RUN, { ...abandoned, outcome: 'merged' }))).toContain(
+      '不是 abandoned',
+    );
+    const session = (prNumber: number, temporalRunId: string | null) =>
+      snap({ sessions: [{ workflowId: WF, prNumber, temporalRunId, ended: true }] });
+    expect(reason('founder', req, session(1, null))).toContain('歧义');
+    expect(reason('founder', req, session(3137, 'other'))).toContain('无证据');
+    expect(reason('founder', req, snap({ task: { ...task, startPending: true } }))).toContain('结果未知');
   });
 
   it('同一工作流另有不同 PR 的会话就拒绝，旧行没记 run 时写明歧义，不能靠一条匹配记录或已有回执放行', () => {
@@ -219,51 +158,21 @@ describe('decideCorrection', () => {
     expect(ambiguous).toContain('歧义');
     expect(ambiguous).toContain('不能当作同一次执行的证据');
     expect(reason('founder', req, snap({ sessions: [matching, otherPr] }))).toBe(ambiguous);
-    expect(
-      sessionLinkHolds(
-        [matching, { workflowId: WF, prNumber: 99999, temporalRunId: RUN, ended: true }],
-        WF,
-        3137,
-        RUN,
-      ),
-    ).toBe(false);
-    expect(
-      sessionLinkRefusal(
-        [
-          { workflowId: WF, prNumber: 3137, temporalRunId: RUN, ended: true },
-          { workflowId: WF, prNumber: 99999, temporalRunId: RUN, ended: true },
-        ],
-        WF,
-        3137,
-        RUN,
-      ),
-    ).toContain('不能任取一条');
+    const recorded = { ...otherPr, temporalRunId: RUN };
+    expect(sessionLinkHolds([matching, recorded], WF, 3137, RUN)).toBe(false);
+    expect(sessionLinkRefusal([{ ...matching, temporalRunId: RUN }, recorded], WF, 3137, RUN)).toContain(
+      '不能任取一条',
+    );
     expect(sessionLinkHolds([matching, { ...otherPr, ended: false }], WF, 3137, RUN)).toBe(false);
-    expect(sessionLinkHolds([matching], WF, 3137, RUN)).toBe(true);
-    expect(
-      sessionLinkHolds(
-        [matching, { workflowId: WF, prNumber: 3137, temporalRunId: null, ended: true }],
-        WF,
-        3137,
-        RUN,
-      ),
-    ).toBe(true);
-    expect(
-      sessionLinkHolds(
-        [matching, { workflowId: WF, prNumber: null, temporalRunId: null, ended: true }],
-        WF,
-        3137,
-        RUN,
-      ),
-    ).toBe(true);
-    expect(
-      sessionLinkHolds(
-        [matching, { workflowId: `${WF}:r2`, prNumber: 99999, temporalRunId: null, ended: true }],
-        WF,
-        3137,
-        RUN,
-      ),
-    ).toBe(true);
+    // 单条、重复同 PR、空 PR、别的工作流上的旧 PR 都不否决
+    for (const extra of [
+      [],
+      [matching],
+      [{ ...matching, prNumber: null }],
+      [{ ...otherPr, workflowId: `${WF}:r2` }],
+    ]) {
+      expect(sessionLinkHolds([matching, ...extra], WF, 3137, RUN)).toBe(true);
+    }
 
     const identity = correctionIdentity(req, TASK);
     const receipt = {
@@ -287,47 +196,19 @@ describe('decideCorrection', () => {
   });
 
   it('镜像没有不挡；对不上就拒绝。空的 issueRefs 不是矛盾', () => {
+    const mirror = {
+      number: 3137,
+      headSha: HEAD,
+      mergeSha: MERGE,
+      issueRefs: [] as number[],
+      state: 'merged',
+    };
     expect(decideCorrection('founder', req, snap()).ok).toBe(true);
-    expect(
-      decideCorrection(
-        'founder',
-        req,
-        snap({
-          mirror: { number: 3137, headSha: HEAD, mergeSha: MERGE, issueRefs: [], state: 'merged' },
-        }),
-      ).ok,
-    ).toBe(true);
-    expect(
-      reason(
-        'founder',
-        req,
-        snap({
-          mirror: { number: 3137, headSha: 'a'.repeat(40), mergeSha: MERGE, issueRefs: [], state: 'open' },
-        }),
-      ),
-    ).toContain('错 head');
-    expect(
-      reason(
-        'founder',
-        req,
-        snap({
-          mirror: {
-            number: 3137,
-            headSha: HEAD,
-            mergeSha: 'b'.repeat(40),
-            issueRefs: [3114],
-            state: 'merged',
-          },
-        }),
-      ),
-    ).toContain('错 merge');
-    expect(
-      reason(
-        'founder',
-        req,
-        snap({ mirror: { number: 3137, headSha: HEAD, mergeSha: null, issueRefs: [1], state: 'merged' } }),
-      ),
-    ).toContain('镜像没有挂这张单');
+    expect(decideCorrection('founder', req, snap({ mirror })).ok).toBe(true);
+    const bad = (patch: object) => reason('founder', req, snap({ mirror: { ...mirror, ...patch } }));
+    expect(bad({ headSha: 'a'.repeat(40), state: 'open' })).toContain('错 head');
+    expect(bad({ mergeSha: 'b'.repeat(40), issueRefs: [3114] })).toContain('错 merge');
+    expect(bad({ mergeSha: null, issueRefs: [1] })).toContain('镜像没有挂这张单');
   });
 
   it('幂等只认同一条回执；错对象、另一条 run、没有回执都不算已纠正', () => {
@@ -448,23 +329,8 @@ describe('readCorrectMergedExecution', () => {
 });
 
 describe('参数和 GitHub 读取', () => {
-  const argv = [
-    'correct-merged',
-    'thoerwink8/fleet-dao',
-    '3114',
-    '--pr',
-    '3137',
-    '--head',
-    HEAD,
-    '--merge',
-    MERGE,
-    '--workflow',
-    WF,
-    '--run',
-    RUN,
-    '--note',
-    '为什么',
-  ];
+  const argv = ['correct-merged', 'thoerwink8/fleet-dao', '3114', '--pr', '3137', '--head', HEAD];
+  argv.push('--merge', MERGE, '--workflow', WF, '--run', RUN, '--note', '为什么');
 
   it('缺 sha 或认不出的参数直接拒绝', () => {
     expect(parseCorrectMergedArgs([...argv, '--apply']).apply).toBe(true);
@@ -481,46 +347,26 @@ describe('参数和 GitHub 读取', () => {
   });
 
   it('issue 的 state 不进结果；缺 merged 是读不全；404 是没有', async () => {
-    const github = {
+    const pullBody = {
+      number: 3137,
+      head: { sha: HEAD },
+      merge_commit_sha: MERGE,
+      base: { repo: { full_name: 'thoerwink8/fleet-dao' } },
+      state: 'closed',
+    };
+    const githubWith = (pullData: object) => ({
       request: async ({ path }: { path: string }) => {
         if (path.endsWith('/issues/3114')) {
           return { status: 200, data: { number: 3114, state: 'closed', title: 'x' } };
         }
-        if (path.endsWith('/pulls/3137')) {
-          return {
-            status: 200,
-            data: {
-              number: 3137,
-              merged: true,
-              head: { sha: HEAD },
-              merge_commit_sha: MERGE,
-              base: { repo: { full_name: 'thoerwink8/fleet-dao' } },
-              state: 'closed',
-            },
-          };
-        }
-        return { status: 404, data: {} };
+        return path.endsWith('/pulls/3137') ? { status: 200, data: pullData } : { status: 404, data: {} };
       },
-    };
-    const read = await readGitHubCorrection(github, REPO, 3114, 3137);
+    });
+    const read = await readGitHubCorrection(githubWith({ ...pullBody, merged: true }), REPO, 3114, 3137);
     expect(read.issue).toEqual({ number: 3114, repo: REPO, isPullRequest: false });
     expect(JSON.stringify(read.issue)).not.toContain('closed');
     expect(read.pull?.merged).toBe(true);
-    const incomplete = {
-      request: async ({ path }: { path: string }) =>
-        path.includes('/pulls/')
-          ? {
-              status: 200,
-              data: {
-                number: 3137,
-                head: { sha: HEAD },
-                merge_commit_sha: MERGE,
-                base: { repo: { full_name: 'thoerwink8/fleet-dao' } },
-              },
-            }
-          : { status: 404, data: {} },
-    };
-    await expect(readGitHubCorrection(incomplete, REPO, 3114, 3137)).rejects.toThrow('读不全');
+    await expect(readGitHubCorrection(githubWith(pullBody), REPO, 3114, 3137)).rejects.toThrow('读不全');
     const missing = { request: async () => ({ status: 404, data: {} }) };
     expect(await readGitHubCorrection(missing, REPO, 3114, 3137)).toEqual({ issue: null, pull: null });
   });

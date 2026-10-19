@@ -27,6 +27,7 @@ import type {
   Subtask,
   Task,
   TaskListGroup,
+  TaskState,
   WorktreeInventory,
 } from '@fleet-dao/shared';
 import type { z } from 'zod';
@@ -455,13 +456,26 @@ export interface OpsStore {
     prNumber: number;
   }): Promise<import('@fleet-dao/db').CorrectMergedLedger | null>;
   /**
-   * 任务栅栏：受管起代（重做）和受管纠正都在 fn 里做「读事实、判、起代或写」，同一任务同一时刻只一个进入。
-   * pg 用 pgLocker（库里的租约行，跨进程有效，持有期间不占库连接）；内存版在进程内排队。
-   * 栅栏不替代 CAS：fn 里仍要重读、核对。
+   * 受管起代（重做、拉单接手老行）在起 Temporal 之前调：锁任务行，状态在 allowed 里才落起代意图（操作记录）
+   * 并改更新时间，提交后才许起。回意图编号；状态不对回 ok=false 带现状（没有这行是 null）。
    */
-  withTaskFence<T>(taskId: string, fn: () => Promise<T>): Promise<T>;
+  beginTaskStart(input: {
+    taskId: string;
+    allowed: readonly TaskState[];
+    actor: import('@fleet-dao/db').TaskStartActor;
+  }): Promise<import('@fleet-dao/db').TaskStartBegun>;
   /**
-   * 同一事务：任务行仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍钉着这次交付时，
+   * 起代结果明确（起成或确定没起）才调，覆盖到这条为止的意图。抛错、超时、结果未知不调：
+   * 意图一直挂着，受管纠正一直拒绝，不靠超时或进程退出放行。
+   */
+  settleTaskStart(input: {
+    taskId: string;
+    intent: string;
+    outcome: string;
+    actor: import('@fleet-dao/db').TaskStartActor;
+  }): Promise<void>;
+  /**
+   * 同一事务：任务行仍是引擎的 stopped/abandoned、更新时间没变、没有没结的起代意图、没有开着的会话、会话账仍钉着这次交付时，
    * 改成 done/merged 并写操作记录。不改 runs、不改 PR 镜像、不改验收责任。同一工作流另有不同非空 PR
    * （含旧行没记 temporal run 的混合 PR）或核对之后才出现的冲突会话，回 stale，不写。
    * 操作记录写不进抛错，任务行一起回到原样。时钟用 Store 自己的。

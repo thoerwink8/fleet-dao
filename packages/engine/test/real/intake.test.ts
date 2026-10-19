@@ -17,6 +17,8 @@ import {
   settings,
   stateChanges,
   TASK_ADOPT_AUDIT_ACTION,
+  TASK_START_INTENT_ACTION,
+  TASK_START_SETTLED_ACTION,
   tasks,
   upsertAlert,
   users,
@@ -546,8 +548,12 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
       args: [{ taskId: old.id, title: '给驾驶舱加状态' }],
     });
     const audit = (await t.db.select().from(auditLog)).filter((a) => a.target === `task:${old.id}`);
-    expect(audit.map((a) => a.action)).toEqual([TASK_ADOPT_AUDIT_ACTION]);
-    expect(audit[0]).toMatchObject({ ok: true, reason: ORPHAN_TASK_ADOPT_NOTE, via: 'github' });
+    expect(audit.map((a) => a.action)).toEqual([
+      TASK_START_INTENT_ACTION,
+      TASK_START_SETTLED_ACTION,
+      TASK_ADOPT_AUDIT_ACTION,
+    ]);
+    expect(audit[2]).toMatchObject({ ok: true, reason: ORPHAN_TASK_ADOPT_NOTE, via: 'github' });
   });
 
   it('已叫停的老行、没有任何一代：接手后改回排队，原来的状态变化还在', async () => {
@@ -653,6 +659,9 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect((await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION)).toEqual(
       [],
     );
+    // 起代没成也不知道到底起没起：意图挂着、不落已结，纠正一直拒绝
+    const pending = (await t.db.select().from(auditLog)).filter((a) => a.action.startsWith('task.start-'));
+    expect(pending.map((a) => a.action)).toEqual([TASK_START_INTENT_ACTION]);
   });
 
   it('有一代在跑：不接手、不起，标题不动', async () => {

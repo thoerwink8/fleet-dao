@@ -1512,7 +1512,11 @@ async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<n
       await runTask(args, {
         store: opened.store,
         workflows: control.workflows,
-        taskRedo: fencedTaskRedo(control.taskRedo, opened.store),
+        taskRedo: fencedTaskRedo(control.taskRedo, opened.store, {
+          kind: 'ops',
+          id: operatorName(deps.env),
+          via: 'ops',
+        }),
         operator: operatorName(deps.env),
       }),
     );

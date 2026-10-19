@@ -1,4 +1,4 @@
-// 受管起代的栅栏包装：正常重做照常另起；已做完、不在库里的单不调 Temporal。
+// 受管起代先落起代意图：正常重做照常另起并落已结；已做完、不在库里的单不调 Temporal；结果未知时意图一直挂着。
 import type { TaskState } from '@fleet-dao/shared';
 import { createMemoryStore } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
@@ -14,6 +14,7 @@ const REPO = {
   defaultBranch: 'main',
   testCommand: 'pnpm test',
 };
+const ACTOR = { kind: 'ops', id: 'founder', via: 'ops' } as const;
 
 function storeWith(state: TaskState) {
   return createMemoryStore(
@@ -33,49 +34,71 @@ function storeWith(state: TaskState) {
           executor: 'engine',
         },
       ],
+      taskClosures: [{ taskId: TASK, phase: 'abandoned', updatedAt: WHEN }],
     },
     { now: () => new Date('2026-10-19T02:00:00.000Z') },
   );
 }
 
-function fakeRedo() {
+function fakeRedo(behave: () => Promise<Awaited<ReturnType<TaskRedoPort['redo']>>>) {
   const calls: string[] = [];
   const port: TaskRedoPort = {
     async redo(input) {
       calls.push(input.taskId);
-      return { ok: true, workflowId: 'task:thoerwink8/fleet-dao#3114:r2', generation: 2 };
+      return behave();
     },
   };
   return { port, calls };
 }
 
+const started = async () => ({
+  ok: true as const,
+  workflowId: 'task:thoerwink8/fleet-dao#3114:r2',
+  generation: 2,
+});
 const input = { taskId: TASK, issueNumber: 3114, title: '合成', repo: REPO } as const;
 
-describe('受管起代的栅栏包装', () => {
-  it('已叫停的单照常另起一代，经栅栏调用一次', async () => {
-    const store = storeWith('stopped');
-    const { port, calls } = fakeRedo();
-    const outcome = await fencedTaskRedo(port, store).redo(input);
-    expect(outcome).toEqual({ ok: true, workflowId: 'task:thoerwink8/fleet-dao#3114:r2', generation: 2 });
-    expect(calls).toEqual([TASK]);
+async function pending(store: ReturnType<typeof storeWith>) {
+  const ledger = await store.readCorrectMergedLedger({
+    owner: 'thoerwink8',
+    name: 'fleet-dao',
+    issueNumber: 3114,
+    prNumber: 3137,
+  });
+  return ledger?.task.startPending;
+}
+
+// 起成落已结、Postgres 上的意图和更新时间见 task-correct-merged-assembly.test.ts。
+describe('受管起代的起代意图', () => {
+  it('已做完或不在库里：意图里重读就拒绝，不调 Temporal，不落意图', async () => {
+    for (const [state, taskId] of [
+      ['done', TASK],
+      ['stopped', 'd629758a-570d-405d-be00-000000000000'],
+    ] as const) {
+      const store = storeWith(state);
+      const { port, calls } = fakeRedo(started);
+      const outcome = await fencedTaskRedo(port, store, ACTOR).redo({ ...input, taskId });
+      expect(outcome.ok).toBe(false);
+      if (state === 'done')
+        expect(outcome).toEqual({ ok: false, why: '这张单现在是done，只有已叫停或挂起的才能重做' });
+      expect(calls).toEqual([]);
+      expect(store.data.audit).toEqual([]);
+    }
   });
 
-  it('已做完的单栅栏里重读就拒绝，不调 Temporal', async () => {
-    const store = storeWith('done');
-    const { port, calls } = fakeRedo();
-    const outcome = await fencedTaskRedo(port, store).redo(input);
-    expect(outcome).toEqual({ ok: false, why: '这张单现在是done，只有已叫停或挂起的才能重做' });
-    expect(calls).toEqual([]);
-  });
-
-  it('不在库里的任务拒绝，不调 Temporal', async () => {
+  it('起代抛错（超时，结果未知）：意图挂着不落已结；后一次结果明确的重做覆盖掉它', async () => {
     const store = storeWith('stopped');
-    const { port, calls } = fakeRedo();
-    const outcome = await fencedTaskRedo(port, store).redo({
-      ...input,
-      taskId: 'd629758a-570d-405d-be00-000000000000',
+    const timeout = fakeRedo(async () => {
+      throw new Error('4 DEADLINE_EXCEEDED');
     });
-    expect(outcome.ok).toBe(false);
-    expect(calls).toEqual([]);
+    await expect(fencedTaskRedo(timeout.port, store, ACTOR).redo(input)).rejects.toThrow('DEADLINE_EXCEEDED');
+    expect(await pending(store)).toBe(true);
+
+    const refused = fakeRedo(async () => ({ ok: false as const, why: '第 2 代还在跑' }));
+    expect(await fencedTaskRedo(refused.port, store, ACTOR).redo(input)).toEqual({
+      ok: false,
+      why: '第 2 代还在跑',
+    });
+    expect(await pending(store)).toBe(false);
   });
 });

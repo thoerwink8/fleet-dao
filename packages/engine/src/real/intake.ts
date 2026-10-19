@@ -433,6 +433,28 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           issueNumber,
           title,
         };
+        // 老行（接手）先落起代意图，和受管纠正抢同一行：纠正已写成做完就不起；起代结果未知时意图挂着，纠正一直拒绝。
+        const startActor = { kind: 'engine', id: BREAKER_ACTOR, via: 'engine' } as const;
+        const intent = created.created
+          ? null
+          : await store.beginTaskStart({
+              taskId: created.task.id,
+              allowed: ['queued', 'stopped'],
+              actor: startActor,
+            });
+        if (intent && !intent.ok) {
+          throw new Error(`任务 ${created.task.id} 现在是 ${intent.state ?? '不在库里'}，不起工作流`);
+        }
+        const settle = async (outcome: string) => {
+          if (intent?.ok) {
+            await store.settleTaskStart({
+              taskId: created.task.id,
+              intent: intent.intent,
+              outcome,
+              actor: startActor,
+            });
+          }
+        };
         try {
           await client.connection.withDeadline(Date.now() + startTimeoutMs, () =>
             client.workflow.start(WORKFLOW_TYPES.task, {
@@ -472,9 +494,13 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
               });
             }
           }
-          if (error instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
+          if (error instanceof WorkflowExecutionAlreadyStartedError) {
+            await settle('not_started already_exists');
+            return 'already_exists';
+          }
           throw error;
         }
+        await settle('started');
         if (prepared) {
           // 行在起工作流之前已经改成当前这一代。这里只补操作记录；状态若已被第一步写成 running，也不再改回去。
           try {

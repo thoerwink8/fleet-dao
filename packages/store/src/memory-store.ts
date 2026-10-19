@@ -2,7 +2,13 @@
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
 import { randomUUID } from 'node:crypto';
-import { CORRECT_MERGED_AUDIT_ACTION, type CorrectMergedLedger, sessionLinkHolds } from '@fleet-dao/db';
+import {
+  CORRECT_MERGED_AUDIT_ACTION,
+  type CorrectMergedLedger,
+  sessionLinkHolds,
+  TASK_START_INTENT_ACTION,
+  TASK_START_SETTLED_ACTION,
+} from '@fleet-dao/db';
 import {
   type Ban,
   type Channel,
@@ -84,7 +90,6 @@ import type {
   Store,
   User,
 } from './ports.ts';
-import { taskFenceName } from './task-fence.ts';
 import {
   addRepoAudit,
   autoDispatchAudit,
@@ -284,24 +289,6 @@ function paginate<T extends { at: string; id: string }>(
   );
 }
 
-/** 受管纠正写入之后外部核对没过：抛出以回滚，外层转成 stale。 */
-class StaleAfterWrite extends Error {}
-
-/** 进程内的任务栅栏：同一名字一次只跑一个 fn，后来的排队。 */
-const fenceTails = new Map<string, Promise<unknown>>();
-function queueFence<T>(name: string, fn: () => Promise<T>): Promise<T> {
-  const prev = fenceTails.get(name) ?? Promise.resolve();
-  const run = prev.then(fn, fn);
-  const settled = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  fenceTails.set(name, settled);
-  return run.finally(() => {
-    if (fenceTails.get(name) === settled) fenceTails.delete(name);
-  });
-}
-
 export function createMemoryStore(
   seed: Partial<MemoryData> = {},
   options: MemoryStoreOptions = {},
@@ -376,6 +363,20 @@ export function createMemoryStore(
     return ids.size;
   }
 
+  /** 和库里同一判法：最新的起代意图比已结覆盖到的还新，就是结果未知。 */
+  function startPending(taskId: string): boolean {
+    let intent = 0;
+    let settled = 0;
+    for (const row of data.audit) {
+      if (row.target !== `task:${taskId}`) continue;
+      if (row.action === TASK_START_INTENT_ACTION) intent = Math.max(intent, Number(row.id));
+      if (row.action === TASK_START_SETTLED_ACTION) {
+        settled = Math.max(settled, Number((row.after as { upTo?: unknown } | undefined)?.upTo ?? 0));
+      }
+    }
+    return intent > settled;
+  }
+
   function readLedger(input: {
     owner: string;
     name: string;
@@ -418,6 +419,7 @@ export function createMemoryStore(
         executor: task.executor ?? 'engine',
         updatedAt: closure?.updatedAt ?? null,
         openRunCount: openRunCount(task.id),
+        startPending: startPending(task.id),
       },
       sessions,
       mirror: mirrorRow
@@ -442,11 +444,9 @@ export function createMemoryStore(
     runId: string;
     prNumber: number;
     audit: { actorId: string; reason: string; before: unknown; after: unknown };
-    verify?: () => Promise<boolean>;
   }): Promise<'corrected' | 'stale'> {
     if (!Number.isSafeInteger(input.expectedUpdatedAtMs)) return 'stale';
-    // 外部核对先于同步段：从这里到写完不再 await，并发的两次纠正不会都通过检查
-    if (input.verify && !(await input.verify())) return 'stale';
+    // 从这里到写完不 await：并发的纠正和起代意图不会交错
     const index = data.tasks.findIndex((row) => row.id === input.taskId);
     const task = data.tasks[index];
     const closure = data.taskClosures.find((row) => row.taskId === input.taskId);
@@ -457,6 +457,7 @@ export function createMemoryStore(
       closure.phase !== 'abandoned' ||
       (task.executor ?? 'engine') !== 'engine' ||
       updatedAtMs !== input.expectedUpdatedAtMs ||
+      startPending(task.id) ||
       openRunCount(task.id) !== 0
     ) {
       return 'stale';
@@ -499,20 +500,9 @@ export function createMemoryStore(
         at: now().toISOString(),
       });
       audit(entry);
-      if (input.verify && !(await input.verify())) {
-        throw new StaleAfterWrite();
-      }
       changed('tasks', task.id);
       return 'corrected';
     } catch (error) {
-      if (error instanceof StaleAfterWrite) {
-        data.tasks[index] = previous;
-        closure.phase = previousClosure.phase;
-        closure.updatedAt = previousClosure.updatedAt;
-        data.stateChanges.length = changes;
-        data.audit.length = audits;
-        return 'stale';
-      }
       data.tasks[index] = previous;
       closure.phase = previousClosure.phase;
       closure.updatedAt = previousClosure.updatedAt;
@@ -946,8 +936,33 @@ export function createMemoryStore(
     async readCorrectMergedLedger(input) {
       return readLedger(input);
     },
-    async withTaskFence(taskId, fn) {
-      return queueFence(taskFenceName(taskId), fn);
+    async beginTaskStart({ taskId, allowed, actor }) {
+      // 和库里一样：查状态、落意图、改更新时间之间不 await
+      const task = data.tasks.find((row) => row.id === taskId);
+      if (!task) return { ok: false, state: null };
+      if (!allowed.includes(task.state)) return { ok: false, state: task.state };
+      const intent = audit({
+        actor: { kind: actor.kind, id: actor.id },
+        action: TASK_START_INTENT_ACTION,
+        target: `task:${taskId}`,
+        after: { state: task.state },
+        via: actor.via,
+        ok: true,
+      });
+      const closure = data.taskClosures.find((row) => row.taskId === taskId);
+      if (closure) closure.updatedAt = now().toISOString();
+      changed('tasks', taskId);
+      return { ok: true, intent };
+    },
+    async settleTaskStart({ taskId, intent, outcome, actor }) {
+      audit({
+        actor: { kind: actor.kind, id: actor.id },
+        action: TASK_START_SETTLED_ACTION,
+        target: `task:${taskId}`,
+        after: { upTo: Number(intent), outcome },
+        via: actor.via,
+        ok: true,
+      });
     },
     async casCorrectMerged(input) {
       return casLedger(input);

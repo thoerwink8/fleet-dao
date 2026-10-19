@@ -40,6 +40,8 @@ export interface LedgerTask {
   /** null = 库里没有更新时间，不能做 CAS。 */
   updatedAtMs: number | null;
   openRunCount: number;
+  /** 有一次受管起代已经发出、结果没明确。 */
+  startPending: boolean;
 }
 
 export interface GenerationFact {
@@ -196,6 +198,9 @@ export function decideCorrection(
   const sessions = idle(task.openRunCount);
   if (sessions === 'unknown') return refuse('活跃会话数未知，不把未知当成没有会话');
   if (sessions === 'busy') return refuse('原任务还有活跃会话，拒绝纠正，等它结束');
+  if (task.startPending) {
+    return refuse('这张单有一次受管起代（重做或接手）已经发出、结果未知，可能正在起新一代，拒绝纠正');
+  }
 
   const execution = facts.execution;
   if (execution.generations.some((row) => generationLife(row.status) === 'running')) {

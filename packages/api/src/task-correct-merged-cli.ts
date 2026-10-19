@@ -24,7 +24,7 @@ export const CORRECT_MERGED_USAGE =
   '用法：fleet-api task correct-merged <owner/仓名> <单号> --pr <PR> --head <40位sha> --merge <40位sha> ' +
   '--workflow <任务工作流编号> --run <原 run id> --note "<为什么>" [--apply]' +
   '（不带 --apply 只预检，打印将核对的对象和拟改成的 done/merged，不写库。' +
-  '--apply 再读一遍，仍一致才在同一事务里改任务行并写操作记录。' +
+  '--apply 现读一遍全部事实，仍对得上、没有结果未知的受管起代，才在同一事务里改任务行并写操作记录。' +
   '原 abandoned 结论、原 run、Temporal 历史和待验责任都不改，也不关 GitHub 单。' +
   '操作者只认 FLEET_OPS_OPERATOR。退出码：0 预检通过、已纠正或本来就是；1 拒绝或没查成；2 参数不对）';
 
@@ -233,6 +233,7 @@ export function snapshotFrom(
       executor: ledger.task.executor,
       updatedAtMs: parsed !== null && Number.isFinite(parsed) ? parsed : null,
       openRunCount: ledger.task.openRunCount,
+      startPending: ledger.task.startPending,
     },
     sessions: ledger.sessions,
     mirror: ledger.mirror,
@@ -244,13 +245,12 @@ export function snapshotFrom(
 }
 
 export function portsFromParts(parts: {
-  ledger: Pick<Store, 'readCorrectMergedLedger' | 'casCorrectMerged' | 'withTaskFence'>;
+  ledger: Pick<Store, 'readCorrectMergedLedger' | 'casCorrectMerged'>;
   github: GitHubGet;
   execution(req: CorrectionRequest): Promise<ExecutionFacts>;
 }): CorrectMergedPorts {
   return {
-    fence: (taskId, fn) => parts.ledger.withTaskFence(taskId, fn),
-    execution: (req) => parts.execution(req),
+    // 先读账再读 Temporal：CAS 核的更新时间要早于 Temporal 这次读，之后才落的起代意图才挡得住
     async read(req) {
       const ledger = await parts.ledger.readCorrectMergedLedger({
         owner: req.repo.owner,
@@ -363,8 +363,6 @@ export async function runCorrectMergedCommand(
   if (!operatorAllowed(operator) || !workflowBelongs(req.workflowId, req.repo, req.issueNumber)) {
     const report = await runCorrectMerged(req, operator, args.note, mode, {
       read: () => Promise.reject(new Error('前置不成立，不应读取')),
-      fence: () => Promise.reject(new Error('前置不成立，不应进栅栏')),
-      execution: () => Promise.reject(new Error('前置不成立，不应读取')),
       cas: () => Promise.reject(new Error('前置不成立，不应写入')),
     });
     deps.out(reportLine(report));

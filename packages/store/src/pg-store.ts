@@ -9,6 +9,7 @@
 import {
   auditLog,
   bans,
+  beginTaskStart,
   casCorrectMergedTask,
   channels,
   countTaskGroups,
@@ -39,6 +40,7 @@ import {
   scheduleHealth,
   searchSpecs,
   settings,
+  settleTaskStart,
   stateChanges,
   subtaskDeps,
   subtasks,
@@ -77,7 +79,6 @@ import {
   reclaimMissStatus,
 } from './delivery-logic.ts';
 import { testRunOf } from './done-check.ts';
-import { pgLocker } from './github-pg.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import {
   nodeReportRow,
@@ -107,7 +108,6 @@ import type {
   Store,
   User,
 } from './ports.ts';
-import { taskFenceName } from './task-fence.ts';
 import {
   addRepoAudit,
   autoDispatchAudit,
@@ -208,9 +208,6 @@ function toAudit(r: AuditRow): AuditRecord {
 
 export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   const now = options.now ?? (() => new Date());
-  // 任务栅栏：库里的租约行，严格模式（丢了租约就抛错，不假装还持有）
-  const fence = pgLocker(db, { strict: true });
-
   async function insertAudit(tx: Db, entry: NewAuditEntry): Promise<string> {
     const [row] = await tx
       .insert(auditLog)
@@ -807,8 +804,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     async readCorrectMergedLedger(input) {
       return readCorrectMergedLedger(db, input);
     },
-    async withTaskFence(taskId, fn) {
-      return fence.withLock(taskFenceName(taskId), fn);
+    async beginTaskStart(input) {
+      if (!isUuid(input.taskId)) return { ok: false, state: null };
+      return beginTaskStart(db, { ...input, now: now() });
+    },
+    async settleTaskStart(input) {
+      await settleTaskStart(db, { ...input, now: now() });
     },
     async casCorrectMerged(input) {
       if (!isUuid(input.taskId)) return 'stale';

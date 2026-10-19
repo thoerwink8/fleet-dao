@@ -71,7 +71,10 @@ function setup(options?: { workflowId?: string; gone?: boolean; redo?: TaskRedoP
 }
 
 function taskAudits(store: ReturnType<typeof createMemoryStore>) {
-  return store.data.audit.filter((row) => row.action.startsWith('task.'));
+  // 起代意图和已结是重做的内部账，另有测试（task-generation-fence.test.ts）
+  return store.data.audit.filter(
+    (row) => row.action.startsWith('task.') && !row.action.startsWith('task.start-'),
+  );
 }
 
 describe('fleet-api task', () => {

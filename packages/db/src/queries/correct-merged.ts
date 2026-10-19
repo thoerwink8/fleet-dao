@@ -1,10 +1,14 @@
 // 已经结束、却被误记成 abandoned 的真实已合任务：读受管账，并在同一事务里 CAS 改任务行、写操作记录。
 // 不改 runs、不改 pull_requests、不改 acceptance_duties、不碰 Temporal。审计插入失败时事务回滚，任务行保持原样。
-import { and, asc, desc, eq, isNull, sql } from 'drizzle-orm';
+// 受管起代（重做、拉单接手老行）先在任务行锁里落一条起代意图并改更新时间，提交后才去起 Temporal；结果明确才落已结。
+// 纠正事务锁同一行：有没结的意图就拒绝；意图落在纠正读账之后，更新时间对不上也拒绝。没有租约，不靠超时放行。
+import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, pullRequests, repos, runs, tasks } from '../schema/index.ts';
 
 export const CORRECT_MERGED_AUDIT_ACTION = 'task.correct-merged';
+export const TASK_START_INTENT_ACTION = 'task.start-intent';
+export const TASK_START_SETTLED_ACTION = 'task.start-settled';
 
 /** 审计一次最多读这么多条成功回执。再多就当没读全，拒绝，不挑一条方便的。 */
 const AUDIT_LIMIT = 20;
@@ -39,6 +43,8 @@ export interface CorrectMergedLedger {
     executor: 'engine' | 'local';
     updatedAt: string | null;
     openRunCount: number;
+    /** 有一次受管起代已经发出、结果还没明确。true 就不能纠正。 */
+    startPending: boolean;
   };
   sessions: CorrectMergedSessionLink[];
   /** 请求的那条 PR 在 pull_requests 里的镜像。没有这行是 null，不当成已合。 */
@@ -54,15 +60,100 @@ export interface CasCorrectMergedInput {
   prNumber: number;
   now: Date;
   audit: { actorId: string; reason: string; before: unknown; after: unknown };
-  /**
-   * 调用方的外部核对（Temporal 代数、run 身份等）。在事务里任务行已加锁后调用一次，
-   * 写入之后、提交之前再调用一次。返回 false 就回 stale 并整笔回滚；抛错也回滚并原样抛出。
-   */
-  verify?: () => Promise<boolean>;
 }
 
-/** 写入之后核对没过：抛出以回滚整笔事务，外层转成 stale。 */
-class StaleAfterWrite extends Error {}
+/** 谁要起代。写进起代意图和已结两条操作记录。 */
+export interface TaskStartActor {
+  kind: 'user' | 'engine' | 'ops';
+  id: string;
+  via: 'cockpit' | 'engine' | 'ops';
+}
+
+export type TaskStartBegun = { ok: true; intent: string } | { ok: false; state: string | null };
+
+function serialValue(value: unknown): bigint | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'bigint') return value;
+  if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value);
+  if (typeof value === 'string' && /^\d+$/.test(value)) return BigInt(value);
+  throw new Error('起代意图读不全');
+}
+
+/** 最新一条起代意图比已结覆盖到的还新，就是有一次起代结果未知。读不成就抛，不当成没有。 */
+async function startPending(db: Pick<Db, 'select'>, taskId: string): Promise<boolean> {
+  const [row] = await db
+    .select({
+      intent: sql<unknown>`max(${auditLog.id}) filter (where ${auditLog.action} = ${TASK_START_INTENT_ACTION})`,
+      settled: sql<unknown>`max((${auditLog.after} ->> 'upTo')::bigint) filter (where ${auditLog.action} = ${TASK_START_SETTLED_ACTION})`,
+    })
+    .from(auditLog)
+    .where(
+      and(
+        eq(auditLog.target, `task:${taskId}`),
+        inArray(auditLog.action, [TASK_START_INTENT_ACTION, TASK_START_SETTLED_ACTION]),
+      ),
+    );
+  const intent = serialValue(row?.intent);
+  if (intent === null) return false;
+  const settled = serialValue(row?.settled);
+  return settled === null || settled < intent;
+}
+
+/**
+ * 受管起代之前调：锁任务行，状态在 allowed 里才落起代意图并改更新时间。提交之后调用方才许去起 Temporal。
+ * 纠正先写成 done/merged 的，这里重读到就拒绝。起完、结果明确，再拿意图编号调 settleTaskStart。
+ */
+export async function beginTaskStart(
+  db: Db,
+  input: { taskId: string; allowed: readonly string[]; actor: TaskStartActor; now: Date },
+): Promise<TaskStartBegun> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select({ state: tasks.state })
+      .from(tasks)
+      .where(eq(tasks.id, input.taskId))
+      .for('update');
+    if (!row) return { ok: false as const, state: null };
+    if (!input.allowed.includes(row.state)) return { ok: false as const, state: row.state };
+    const [audit] = await tx
+      .insert(auditLog)
+      .values({
+        at: input.now,
+        actorKind: input.actor.kind,
+        actorId: input.actor.id,
+        action: TASK_START_INTENT_ACTION,
+        target: `task:${input.taskId}`,
+        after: { state: row.state },
+        via: input.actor.via,
+        ok: true,
+      })
+      .returning({ id: auditLog.id });
+    if (!audit) throw new Error('起代意图没写进去');
+    await tx.update(tasks).set({ updatedAt: input.now }).where(eq(tasks.id, input.taskId));
+    return { ok: true as const, intent: String(audit.id) };
+  });
+}
+
+/**
+ * 起代结果明确了（起成，或确定没起）才调。覆盖到这条为止的所有意图：这一次明确的列代晚于更早那次未知的起代。
+ * 起代抛错、超时、进程退出都不调，意图一直挂着，纠正一直拒绝。
+ */
+export async function settleTaskStart(
+  db: Db,
+  input: { taskId: string; intent: string; outcome: string; actor: TaskStartActor; now: Date },
+): Promise<void> {
+  if (!/^\d+$/.test(input.intent)) throw new Error('起代意图编号不对');
+  await db.insert(auditLog).values({
+    at: input.now,
+    actorKind: input.actor.kind,
+    actorId: input.actor.id,
+    action: TASK_START_SETTLED_ACTION,
+    target: `task:${input.taskId}`,
+    after: { upTo: Number(input.intent), outcome: input.outcome },
+    via: input.actor.via,
+    ok: true,
+  });
+}
 
 const DOING = '受管纠正为真实已合；原 abandoned 结论留在操作记录和原执行结果';
 
@@ -219,6 +310,7 @@ export async function readCorrectMergedLedger(
       executor: task.executor,
       updatedAt: task.updatedAt ? task.updatedAt.toISOString() : null,
       openRunCount,
+      startPending: await startPending(db, task.id),
     },
     sessions: sessionLinks(sessionRows),
     mirror: mirror
@@ -235,24 +327,16 @@ export async function readCorrectMergedLedger(
 }
 
 /**
- * 仅当任务行仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍钉着这次交付时，
+ * 仅当任务行仍是引擎的 stopped/abandoned、更新时间没变、没有没结的起代意图、没有开着的会话、会话账仍钉着这次交付时，
  * 改成 done/merged 并写操作记录。同一工作流另有不同非空 PR（含旧行 temporal run 为空的混合 PR）算对不上，
  * 回 stale，不写。核对之后事务里才看到的冲突会话同样拒绝。审计失败抛错，整笔回滚。
+ * expectedUpdatedAtMs 必须来自先于 Temporal 读取的那次读账：之后才落的起代意图会改掉更新时间。事务里不等网络。
  */
 export async function casCorrectMergedTask(
   db: Db,
   input: CasCorrectMergedInput,
 ): Promise<'corrected' | 'stale'> {
   if (!Number.isSafeInteger(input.expectedUpdatedAtMs)) return 'stale';
-  try {
-    return await casInTransaction(db, input);
-  } catch (err) {
-    if (err instanceof StaleAfterWrite) return 'stale';
-    throw err;
-  }
-}
-
-async function casInTransaction(db: Db, input: CasCorrectMergedInput): Promise<'corrected' | 'stale'> {
   return db.transaction(async (tx) => {
     const [row] = await tx
       .select({
@@ -268,6 +352,7 @@ async function casInTransaction(db: Db, input: CasCorrectMergedInput): Promise<'
     if (!row || row.state !== 'stopped' || row.phase !== 'abandoned' || row.executor !== 'engine')
       return 'stale';
     if (row.updatedAt === null || row.updatedAt.getTime() !== input.expectedUpdatedAtMs) return 'stale';
+    if (await startPending(tx, row.id)) return 'stale';
     if ((await openRuns(tx, row.id)) !== 0) return 'stale';
     const sessionRows = await tx
       .select({
@@ -280,7 +365,6 @@ async function casInTransaction(db: Db, input: CasCorrectMergedInput): Promise<'
       .where(eq(runs.taskId, row.id));
     if (!sessionLinkHolds(sessionLinks(sessionRows), input.workflowId, input.prNumber, input.runId))
       return 'stale';
-    if (input.verify && !(await input.verify())) return 'stale';
     await tx
       .update(tasks)
       .set({
@@ -303,7 +387,6 @@ async function casInTransaction(db: Db, input: CasCorrectMergedInput): Promise<'
       via: 'ops',
       ok: true,
     });
-    if (input.verify && !(await input.verify())) throw new StaleAfterWrite();
     return 'corrected';
   });
 }

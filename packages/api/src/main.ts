@@ -223,7 +223,11 @@ async function assemble(): Promise<{
     now,
     feishu,
     workflows: temporal.control,
-    taskRedo: fencedTaskRedo(temporal.taskRedo, store),
+    taskRedo: fencedTaskRedo(temporal.taskRedo, store, {
+      kind: 'engine',
+      id: 'cockpit:redo',
+      via: 'cockpit',
+    }),
     github: github.sink,
     ...(github.ciPolicyBridge ? { ciPolicyBridge: github.ciPolicyBridge } : {}),
     acceptanceDuties: (identity) => readAcceptanceDutyRows(db, identity),

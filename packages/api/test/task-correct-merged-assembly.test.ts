@@ -1,7 +1,7 @@
-// 真实装配：fleet-api 命令、PGlite、pg Store 的事务。GitHub 和 Temporal 用替身，不打生产，不发信号。
+// 真实装配：fleet-api 命令、PGlite、pg Store 的事务、真 runTask 重做和起代意图。GitHub 和 Temporal 用替身，不打生产，不发信号。
 import { acceptanceDuties, auditLog, pullRequests, repos, runs, stateChanges, tasks } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { createPgStore } from '@fleet-dao/store';
+import { createPgStore, type Store } from '@fleet-dao/store';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { main } from '../src/cli.ts';
@@ -28,24 +28,17 @@ interface World {
   status: string;
   runId: string;
   result: unknown;
-  resultThrows: boolean;
+  /** 替身 Temporal 上第二代在不在（重做真起成、或迟到的起代落地才出现）。 */
   extraGeneration: boolean;
-  onSecondRead: (() => Promise<void>) | null;
-  /** CAS 调用前（已过二次读取）Temporal 多出一代。 */
-  generationBeforeCas: boolean;
-  /** 替身 Temporal 起代的次数（经 fencedTaskRedo + runTask 进来的重做）。 */
-  redoStarts: number;
-  /** 第一次读取之后（栅栏之外）、第二次读取之后（栅栏之内）各跑一次的交错钩子。 */
-  afterFirstRead: (() => Promise<void>) | null;
-  afterSecondRead: (() => Promise<void>) | null;
-  /** 只让写入之后的第二次核对失败：验证事务回滚。 */
-  failVerifyAfterWrite: boolean;
+  /** Temporal 这一读已经拍下了旧快照、还没交回之前跑：模拟「最后一次 describe 之后才起代」。 */
+  afterExecutionRead: (() => Promise<void>) | null;
   wrapCas: boolean;
   conflictOnCas: boolean;
   reads: number;
   resultCalls: number;
   casCalls: number;
   opened: number;
+  redoStarts: number;
 }
 
 function world(): World {
@@ -63,20 +56,15 @@ function world(): World {
     status: 'COMPLETED',
     runId: RUN,
     result: { outcome: 'abandoned', prNumber: 3137, head: HEAD },
-    resultThrows: false,
     extraGeneration: false,
-    onSecondRead: null,
-    generationBeforeCas: false,
-    failVerifyAfterWrite: false,
-    redoStarts: 0,
-    afterFirstRead: null,
-    afterSecondRead: null,
+    afterExecutionRead: null,
     wrapCas: false,
     conflictOnCas: false,
     reads: 0,
     resultCalls: 0,
     casCalls: 0,
     opened: 0,
+    redoStarts: 0,
   };
 }
 
@@ -90,15 +78,14 @@ describe('task correct-merged 真实装配', () => {
   afterAll(async () => {
     await t?.close();
   });
-  beforeEach(async () => {
+
+  /** 合成的 #3114：引擎的 stopped/abandoned，一条已结束的会话记着 PR #3137，验收责任还开着。 */
+  async function seed() {
     await resetTestDb(t);
     current = world();
-    await t.db.insert(repos).values({
-      id: REPO_ID,
-      owner: 'thoerwink8',
-      name: 'fleet-dao',
-      testCommand: 'pnpm test',
-    });
+    await t.db
+      .insert(repos)
+      .values({ id: REPO_ID, owner: 'thoerwink8', name: 'fleet-dao', testCommand: 'pnpm test' });
     await t.db.insert(tasks).values({
       id: TASK,
       repoId: REPO_ID,
@@ -112,18 +99,7 @@ describe('task correct-merged 真实装配', () => {
       executor: 'engine',
       updatedAt: WHEN,
     });
-    await t.db.insert(runs).values({
-      id: RUN_ROW,
-      segment: 'manual',
-      taskId: TASK,
-      issueNumber: 3114,
-      model: 'test',
-      startedAt: WHEN,
-      endedAt: WHEN,
-      outcome: 'done',
-      prNumber: 3137,
-      workflowId: WF,
-    });
+    await addRun({ id: RUN_ROW, endedAt: WHEN, outcome: 'done', prNumber: 3137 });
     await t.db.insert(acceptanceDuties).values({
       taskId: TASK,
       repo: 'thoerwink8/fleet-dao',
@@ -132,19 +108,29 @@ describe('task correct-merged 真实装配', () => {
       head: HEAD,
       items: ['要现场看一眼'],
     });
-  });
+  }
+  beforeEach(seed);
+
+  function addRun(over: Partial<typeof runs.$inferInsert> & { id: string }) {
+    return t.db.insert(runs).values({
+      segment: 'manual',
+      taskId: TASK,
+      issueNumber: 3114,
+      model: 'test',
+      startedAt: WHEN,
+      workflowId: WF,
+      ...over,
+    });
+  }
 
   function execution(): ExecutionFacts {
     const first = { workflowId: WF, generation: 1, runId: current.runId, status: current.status };
     const generations = current.extraGeneration
-      ? [first, { workflowId: `${WF}:r2`, generation: 2, runId: 'later-run', status: 'COMPLETED' }]
+      ? [first, { workflowId: `${WF}:r2`, generation: 2, runId: 'later-run', status: 'RUNNING' }]
       : [first];
-    const matched =
-      current.status === 'COMPLETED' && current.runId === RUN && !current.resultThrows
-        ? { ...first, result: resultOf(current.result) }
-        : { ...first, result: null };
-    if (current.status === 'COMPLETED' && current.runId === RUN) current.resultCalls += 1;
-    return { generations, matched: generations.some((row) => row.workflowId === WF) ? matched : null };
+    const readable = current.status === 'COMPLETED' && current.runId === RUN;
+    if (readable) current.resultCalls += 1;
+    return { generations, matched: { ...first, result: readable ? resultOf(current.result) : null } };
   }
 
   function github(): GitHubGet {
@@ -162,14 +148,21 @@ describe('task correct-merged 真实装配', () => {
     };
   }
 
+  function pgStore(): Store {
+    return createPgStore(t.db, { now: () => new Date('2026-10-19T02:00:00.000Z') });
+  }
+
   async function invoke(argv: string[], env: Record<string, string | undefined> = {}) {
     const out: string[] = [];
     const err: string[] = [];
-    const store = createPgStore(t.db, { now: () => new Date('2026-10-19T02:00:00.000Z') });
     const real = portsFromParts({
-      ledger: store,
+      ledger: pgStore(),
       github: github(),
-      execution: async () => execution(),
+      execution: async () => {
+        const facts = execution();
+        if (current.afterExecutionRead) await current.afterExecutionRead();
+        return facts;
+      },
     });
     const code = await main(['task', ...argv], {
       env: { DATABASE_URL: 'postgres://assembly', FLEET_OPS_OPERATOR: 'founder', ...env },
@@ -185,17 +178,10 @@ describe('task correct-merged 真实装配', () => {
           ports: {
             read: async (request) => {
               current.reads += 1;
-              if (current.reads === 2 && current.onSecondRead) await current.onSecondRead();
-              const snapshot = await real.read(request);
-              if (current.reads === 1 && current.afterFirstRead) await current.afterFirstRead();
-              if (current.reads === 2 && current.afterSecondRead) await current.afterSecondRead();
-              return snapshot;
+              return real.read(request);
             },
-            execution: (request) => real.execution(request),
-            fence: (taskId, fn) => real.fence(taskId, fn),
             cas: async (input) => {
               current.casCalls += 1;
-              if (current.generationBeforeCas) current.extraGeneration = true;
               if (current.wrapCas) {
                 await t.db
                   .update(tasks)
@@ -203,29 +189,14 @@ describe('task correct-merged 真实装配', () => {
                   .where(eq(tasks.id, input.taskId));
               }
               if (current.conflictOnCas) {
-                await t.db.insert(runs).values({
+                await addRun({
                   id: 'c3114000-0000-4000-8000-000000000097',
-                  segment: 'manual',
-                  taskId: TASK,
-                  issueNumber: 3114,
-                  model: 'test',
-                  startedAt: WHEN,
                   endedAt: WHEN,
                   outcome: 'done',
                   prNumber: 99999,
-                  workflowId: WF,
                 });
               }
-              let checks = 0;
-              if (!current.failVerifyAfterWrite || !input.verify) return real.cas(input);
-              const original = input.verify;
-              return real.cas({
-                ...input,
-                verify: async () => {
-                  checks += 1;
-                  return checks === 1 ? original() : false;
-                },
-              });
+              return real.cas(input);
             },
           },
           close: async () => {},
@@ -245,7 +216,7 @@ describe('task correct-merged 真实装配', () => {
   }
 
   function args(extra: string[] = [], patch: Record<string, string> = {}) {
-    const values: Record<string, string> = {
+    const v: Record<string, string> = {
       repo: 'thoerwink8/fleet-dao',
       issue: '3114',
       pr: '3137',
@@ -258,20 +229,10 @@ describe('task correct-merged 真实装配', () => {
     };
     return [
       'correct-merged',
-      values.repo ?? '',
-      values.issue ?? '',
-      '--pr',
-      values.pr ?? '',
-      '--head',
-      values.head ?? '',
-      '--merge',
-      values.merge ?? '',
-      '--workflow',
-      values.workflow ?? '',
-      '--run',
-      values.run ?? '',
-      '--note',
-      values.note ?? '',
+      v.repo ?? '',
+      v.issue ?? '',
+      ...['--pr', v.pr ?? '', '--head', v.head ?? '', '--merge', v.merge ?? ''],
+      ...['--workflow', v.workflow ?? '', '--run', v.run ?? '', '--note', v.note ?? ''],
       ...extra,
     ];
   }
@@ -281,38 +242,67 @@ describe('task correct-merged 真实装配', () => {
     return row;
   }
 
-  async function audits() {
-    return t.db.select().from(auditLog).where(eq(auditLog.action, 'task.correct-merged'));
+  async function audits(action = 'task.correct-merged') {
+    return t.db.select().from(auditLog).where(eq(auditLog.action, action));
   }
 
-  /** 经真实 runTask（task 命令的重做）起代，栅栏和替身 Temporal 都是真的。返回回给人看的那句，或拒绝原因。 */
-  function redoViaRunTask(): Promise<string> {
-    const store = createPgStore(t.db, { now: () => new Date('2026-10-19T02:00:00.000Z') });
+  async function expectUntouched(label = '') {
+    const row = await taskRow();
+    expect(row?.state, label).toBe('stopped');
+    expect(row?.phase, label).toBe('abandoned');
+    expect(await audits(), label).toEqual([]);
+    const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
+    expect(
+      changes.some((change) => change.toState === 'done'),
+      label,
+    ).toBe(false);
+  }
+
+  /**
+   * 经真实 runTask（task 命令的重做）+ fencedTaskRedo + pg Store 起代。替身 Temporal：
+   * ok 起成第二代；deadline 抛 DEADLINE_EXCEEDED（结果未知，起代可能迟到落地）。
+   * beforeRedo 在 runTask 读到 stopped 之后、进起代意图之前跑。
+   */
+  function redoViaRunTask(mode: 'ok' | 'deadline', beforeRedo?: () => Promise<void>): Promise<string> {
+    const store = pgStore();
     const port: TaskRedoPort = {
       async redo() {
         current.redoStarts += 1;
+        if (mode === 'deadline') throw Object.assign(new Error('4 DEADLINE_EXCEEDED'), { code: 4 });
         current.extraGeneration = true;
         return { ok: true, workflowId: `${WF}:r2`, generation: 2 };
       },
     };
+    const read: Pick<Store, 'findTaskByIssue'> = {
+      async findTaskByIssue(repoId, issueNumber) {
+        const task = await store.findTaskByIssue(repoId, issueNumber);
+        await beforeRedo?.();
+        return task;
+      },
+    };
     const workflows = { async signal() {} } as unknown as WorkflowControl;
+    const actor = { kind: 'ops', id: 'founder', via: 'ops' } as const;
     return runTask(
       { action: 'redo', owner: 'thoerwink8', name: 'fleet-dao', issueNumber: 3114, note: '交错回归' },
-      { store, workflows, taskRedo: fencedTaskRedo(port, store), operator: 'founder' },
+      {
+        store: { ...store, findTaskByIssue: read.findTaskByIssue },
+        workflows,
+        taskRedo: fencedTaskRedo(port, store, actor),
+        operator: 'founder',
+      },
     ).then(
       (text) => text,
       (err: unknown) => (err instanceof Error ? err.message : String(err)),
     );
   }
 
-  it('预检不写；--apply 纠正并留下原 run、原 abandoned 结果和待验责任', async () => {
+  it('预检不写；--apply 纠正并留下原 run、原 abandoned 结果和待验责任；重复调用幂等', async () => {
     const preview = await invoke(args());
     expect(preview.code).toBe(0);
     expect(preview.json?.status).toBe('precheck');
     expect(preview.json?.preview.proposed).toEqual({ state: 'done', phase: 'merged' });
     expect(preview.json?.text).not.toContain('closed');
     expect(current.casCalls).toBe(0);
-    expect(current.reads).toBe(1);
     expect((await taskRow())?.state).toBe('stopped');
 
     current = world();
@@ -320,8 +310,7 @@ describe('task correct-merged 真实装配', () => {
     expect(applied.code).toBe(0);
     expect(applied.json?.status).toBe('corrected');
     expect(applied.json?.preview.execution?.outcome).toBe('abandoned');
-    // 两遍核对读 + CAS 前后各一次核对（任务行锁里）
-    expect(current.resultCalls).toBe(4);
+    expect(current.reads).toBe(1);
     const row = await taskRow();
     expect(row?.state).toBe('done');
     expect(row?.phase).toBe('merged');
@@ -361,50 +350,32 @@ describe('task correct-merged 真实装配', () => {
     expect((await audits())[0]?.reason).toContain('合成的 #3114 反例');
   });
 
-  it('事实不对、读不到、未授权、活着、换代都不写', async () => {
+  it('事实不对、读不到、未授权、活着、换代、起代结果未知都不写', async () => {
+    const pull = (patch: object) => () => {
+      current.pull = { ...(current.pull as object), ...patch };
+    };
     const cases: {
       name: string;
       patch?: Record<string, string>;
       env?: Record<string, string | undefined>;
-      prepare?: () => Promise<void> | void;
+      prepare?: () => unknown;
       fragment: string;
       open?: boolean;
+      state?: string;
     }[] = [
       { name: '未授权', env: { FLEET_OPS_OPERATOR: '' }, fragment: '未授权', open: false },
       { name: '错仓', patch: { repo: 'other/fleet-dao' }, fragment: '不属于这张单', open: false },
-      { name: '错 PR', patch: { pr: '9999' }, fragment: '原执行的 PR', open: true },
-      { name: '错 run', patch: { run: 'other-run-id' }, fragment: '错 run', open: true },
-      {
-        name: '还没合并',
-        prepare: () => {
-          current.pull = { ...(current.pull as object), merged: false };
-        },
-        fragment: '还没合并',
-        open: true,
-      },
-      {
-        name: '错 head',
-        prepare: () => {
-          current.pull = { ...(current.pull as object), head: { sha: 'a'.repeat(40) } };
-        },
-        fragment: '错 head',
-        open: true,
-      },
-      {
-        name: '错 merge',
-        prepare: () => {
-          current.pull = { ...(current.pull as object), merge_commit_sha: 'b'.repeat(40) };
-        },
-        fragment: '错 merge',
-        open: true,
-      },
+      { name: '错 PR', patch: { pr: '9999' }, fragment: '原执行的 PR' },
+      { name: '错 run', patch: { run: 'other-run-id' }, fragment: '错 run' },
+      { name: '还没合并', prepare: pull({ merged: false }), fragment: '还没合并' },
+      { name: '错 head', prepare: pull({ head: { sha: 'a'.repeat(40) } }), fragment: '错 head' },
+      { name: '错 merge', prepare: pull({ merge_commit_sha: 'b'.repeat(40) }), fragment: '错 merge' },
       {
         name: '读不到',
         prepare: () => {
           current.throwRead = 'github down';
         },
         fragment: '读取事实没成',
-        open: true,
       },
       {
         name: 'issue 不存在',
@@ -412,7 +383,6 @@ describe('task correct-merged 真实装配', () => {
           current.issue = null;
         },
         fragment: '读不到这张 issue',
-        open: true,
       },
       {
         name: '编号其实是 PR',
@@ -420,31 +390,16 @@ describe('task correct-merged 真实装配', () => {
           current.issue = { number: 3114, pull_request: { url: 'https://example.test' } };
         },
         fragment: '这是 PR 不是 issue',
-        open: true,
       },
       {
         name: '本机执行',
-        prepare: async () => {
-          await t.db.update(tasks).set({ executor: 'local' }).where(eq(tasks.id, TASK));
-        },
+        prepare: () => t.db.update(tasks).set({ executor: 'local' }).where(eq(tasks.id, TASK)),
         fragment: '本机执行',
-        open: true,
       },
       {
         name: '活会话',
-        prepare: async () => {
-          await t.db.insert(runs).values({
-            id: 'c3114000-0000-4000-8000-000000000001',
-            segment: 'manual',
-            taskId: TASK,
-            issueNumber: 3114,
-            model: 'test',
-            startedAt: WHEN,
-            workflowId: WF,
-          });
-        },
+        prepare: () => addRun({ id: 'c3114000-0000-4000-8000-000000000001' }),
         fragment: '活跃会话',
-        open: true,
       },
       {
         name: '仍在运行',
@@ -452,7 +407,13 @@ describe('task correct-merged 真实装配', () => {
           current.status = 'RUNNING';
         },
         fragment: '仍在运行',
-        open: true,
+      },
+      {
+        name: '已有新的一代',
+        prepare: () => {
+          current.extraGeneration = true;
+        },
+        fragment: '仍在运行',
       },
       {
         name: '结果读不到',
@@ -460,12 +421,11 @@ describe('task correct-merged 真实装配', () => {
           current.result = { outcome: 'abandoned' };
         },
         fragment: '原执行结果读不到',
-        open: true,
       },
       {
         name: '镜像冲突',
-        prepare: async () => {
-          await t.db.insert(pullRequests).values({
+        prepare: () =>
+          t.db.insert(pullRequests).values({
             repoId: REPO_ID,
             number: 3137,
             state: 'merged',
@@ -474,285 +434,148 @@ describe('task correct-merged 真实装配', () => {
             mergeSha: MERGE,
             updatedAt: WHEN,
             issueRefs: [3114],
-          });
-        },
+          }),
         fragment: '镜像',
-        open: true,
       },
       {
         name: '会话记了别的 run',
-        prepare: async () => {
-          await t.db.update(runs).set({ temporalRunId: 'other-run' }).where(eq(runs.id, RUN_ROW));
-        },
+        prepare: () => t.db.update(runs).set({ temporalRunId: 'other-run' }).where(eq(runs.id, RUN_ROW)),
         fragment: '无证据',
-        open: true,
       },
       {
         name: '同一工作流另有不同 PR',
-        prepare: async () => {
-          await t.db.insert(runs).values({
+        prepare: () =>
+          addRun({
             id: 'c3114000-0000-4000-8000-000000000099',
-            segment: 'manual',
-            taskId: TASK,
-            issueNumber: 3114,
-            model: 'test',
-            startedAt: WHEN,
             endedAt: WHEN,
             outcome: 'done',
             prNumber: 99999,
-            workflowId: WF,
-          });
-        },
+          }),
         fragment: '歧义',
-        open: true,
+      },
+      {
+        name: '起代意图没结',
+        prepare: () =>
+          pgStore().beginTaskStart({
+            taskId: TASK,
+            allowed: ['stopped'],
+            actor: { kind: 'ops', id: 'founder', via: 'ops' },
+          }),
+        fragment: '结果未知',
       },
       {
         name: '不是 abandoned',
-        prepare: async () => {
-          await t.db.update(tasks).set({ state: 'running', phase: null }).where(eq(tasks.id, TASK));
-        },
+        prepare: () => t.db.update(tasks).set({ state: 'running', phase: null }).where(eq(tasks.id, TASK)),
         fragment: '不是误记',
-        open: true,
+        state: 'running',
       },
       {
         name: '没有更新时间',
-        prepare: async () => {
-          await t.db.update(tasks).set({ updatedAt: null }).where(eq(tasks.id, TASK));
-        },
+        prepare: () => t.db.update(tasks).set({ updatedAt: null }).where(eq(tasks.id, TASK)),
         fragment: '更新时间',
-        open: true,
       },
       {
         name: 'done 但没有这次回执',
-        prepare: async () => {
-          await t.db.update(tasks).set({ state: 'done', phase: 'merged' }).where(eq(tasks.id, TASK));
-        },
+        prepare: () => t.db.update(tasks).set({ state: 'done', phase: 'merged' }).where(eq(tasks.id, TASK)),
         fragment: '审计回执',
-        open: true,
+        state: 'done',
       },
     ];
     for (const item of cases) {
-      await resetTestDb(t);
-      await t.db
-        .insert(repos)
-        .values({ id: REPO_ID, owner: 'thoerwink8', name: 'fleet-dao', testCommand: 'pnpm test' });
-      await t.db.insert(tasks).values({
-        id: TASK,
-        repoId: REPO_ID,
-        issueNumber: 3114,
-        title: '合成',
-        rawRequest: '合成',
-        requestedBy: 'test',
-        state: 'stopped',
-        phase: 'abandoned',
-        priority: 0,
-        executor: 'engine',
-        updatedAt: WHEN,
-      });
-      await t.db.insert(runs).values({
-        id: RUN_ROW,
-        segment: 'manual',
-        taskId: TASK,
-        issueNumber: 3114,
-        model: 'test',
-        startedAt: WHEN,
-        endedAt: WHEN,
-        outcome: 'done',
-        prNumber: 3137,
-        workflowId: WF,
-      });
-      current = world();
+      await seed();
       await item.prepare?.();
       const result = await invoke(args(['--apply'], item.patch), item.env);
       expect(result.code, item.name).toBe(1);
       expect(result.json?.status, item.name).toBe('refused');
       expect(result.json?.reason ?? result.json?.text, item.name).toContain(item.fragment);
       expect(current.casCalls, item.name).toBe(0);
-      expect(current.opened, item.name).toBe(item.open ? 1 : 0);
-      const row = await taskRow();
+      expect(current.opened, item.name).toBe(item.open === false ? 0 : 1);
       expect(await audits(), item.name).toEqual([]);
-      if (item.name === 'done 但没有这次回执') expect(row?.state, item.name).toBe('done');
-      else if (item.name === '不是 abandoned') expect(row?.state, item.name).toBe('running');
-      else {
-        expect(row?.state, item.name).toBe('stopped');
-        expect(row?.phase, item.name).toBe('abandoned');
-      }
+      const row = await taskRow();
+      expect(row?.state, item.name).toBe(item.state ?? 'stopped');
+      if (!item.state) expect(row?.phase, item.name).toBe('abandoned');
     }
-  });
+  }, 60_000);
 
-  it('已经纠正后再出现同一工作流的不同 PR，不能当成同一次成功', async () => {
-    const applied = await invoke(args(['--apply']));
-    expect(applied.code).toBe(0);
-    expect(applied.json?.status).toBe('corrected');
-
-    await t.db.insert(runs).values({
-      id: 'c3114000-0000-4000-8000-000000000098',
-      segment: 'manual',
-      taskId: TASK,
-      issueNumber: 3114,
-      model: 'test',
-      startedAt: WHEN,
-      endedAt: WHEN,
-      outcome: 'done',
-      prNumber: 99999,
-      workflowId: WF,
-    });
-    current = world();
-    const preview = await invoke(args());
-    expect(preview.code).toBe(1);
-    expect(preview.json?.status).toBe('refused');
-    expect(preview.json?.reason).toContain('歧义');
-    expect(preview.json?.reason).toContain('不能当作同一次执行的证据');
-    expect(current.casCalls).toBe(0);
-
-    current = world();
-    const again = await invoke(args(['--apply'], { note: '换一句原因' }));
-    expect(again.code).toBe(1);
-    expect(again.json?.status).toBe('refused');
-    expect(again.json?.reason).toContain('歧义');
-    expect(current.casCalls).toBe(0);
-    const row = await taskRow();
-    expect(row?.state).toBe('done');
-    expect(row?.phase).toBe('merged');
-    const recorded = await audits();
-    expect(recorded).toHaveLength(1);
-    expect(recorded[0]?.reason).toContain('合成的 #3114 反例');
-    const kept = await t.db.select().from(runs).where(eq(runs.taskId, TASK));
-    expect(kept).toHaveLength(2);
-    expect(kept.every((run) => run.outcome === 'done')).toBe(true);
-  });
-
-  it('二次读取之后才出现冲突会话，事务拒绝且不写任务和审计', async () => {
+  it('读取之后才出现冲突会话，或更新时间被别人改了：事务回 stale，不写', async () => {
     current.conflictOnCas = true;
-    const result = await invoke(args(['--apply']));
-    expect(result.code).toBe(1);
-    expect(result.json?.reason).toContain('变了');
-    expect(current.reads).toBe(2);
+    const conflict = await invoke(args(['--apply']));
+    expect(conflict.code).toBe(1);
+    expect(conflict.json?.reason).toContain('变了');
     expect(current.casCalls).toBe(1);
-    const row = await taskRow();
-    expect(row?.state).toBe('stopped');
-    expect(row?.phase).toBe('abandoned');
-    expect(row?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
-    expect(await audits()).toEqual([]);
-    const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
-    expect(changes.some((change) => change.toState === 'done')).toBe(false);
-    const kept = await t.db.select().from(runs).where(eq(runs.taskId, TASK));
-    expect(kept.map((run) => run.prNumber).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([3137, 99999]);
+    await expectUntouched('冲突会话');
+    expect((await taskRow())?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
+
+    await seed();
+    current.wrapCas = true;
+    const moved = await invoke(args(['--apply']));
+    expect(moved.json?.reason).toContain('变了');
+    await expectUntouched('更新时间');
   });
 
-  it('第二次读到活会话或新一代就拒绝，不覆盖', async () => {
-    current.onSecondRead = async () => {
-      await t.db.insert(runs).values({
-        id: 'c3114000-0000-4000-8000-000000000002',
-        segment: 'manual',
-        taskId: TASK,
-        issueNumber: 3114,
-        model: 'test',
-        startedAt: WHEN,
-        workflowId: WF,
-      });
-    };
-    const live = await invoke(args(['--apply']));
-    expect(live.code).toBe(1);
-    expect(live.json?.reason).toContain('活跃会话');
-    expect(current.casCalls).toBe(0);
-    expect((await taskRow())?.state).toBe('stopped');
-
-    await t.db.delete(runs).where(eq(runs.id, 'c3114000-0000-4000-8000-000000000002'));
-    current = world();
-    current.onSecondRead = async () => {
-      current.extraGeneration = true;
-    };
-    const next = await invoke(args(['--apply']));
-    expect(next.code).toBe(1);
-    expect(next.json?.reason).toContain('新的一代');
-    expect(current.casCalls).toBe(0);
-    expect((await taskRow())?.phase).toBe('abandoned');
-  });
-
-  it('二次读取之后、CAS 之前新一代工作流启动，事务核对拒绝，不写 done', async () => {
-    current.generationBeforeCas = true;
-    const result = await invoke(args(['--apply']));
-    expect(result.code).toBe(1);
-    expect(result.json?.status).toBe('refused');
-    expect(result.json?.reason).toContain('变了');
-    expect(current.casCalls).toBe(1);
-    const row = await taskRow();
-    expect(row?.state).toBe('stopped');
-    expect(row?.phase).toBe('abandoned');
-    expect(row?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
-    expect(await audits()).toEqual([]);
-    const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
-    expect(changes.some((change) => change.toState === 'done')).toBe(false);
-  });
-
-  it('写入之后的核对没过，整笔回滚，任务行和操作记录都不留', async () => {
-    current.failVerifyAfterWrite = true;
-    const result = await invoke(args(['--apply']));
-    expect(result.code).toBe(1);
-    expect(result.json?.status).toBe('refused');
-    expect(result.json?.reason).toContain('变了');
-    expect(current.casCalls).toBe(1);
-    const row = await taskRow();
-    expect(row?.state).toBe('stopped');
-    expect(row?.phase).toBe('abandoned');
-    expect(row?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
-    expect(await audits()).toEqual([]);
-    const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
-    expect(changes.some((change) => change.toState === 'done')).toBe(false);
-  });
-
-  it('固定交错：两次读取后、CAS 前，重做经栅栏要起新代——纠正先写完，重做重读到已做完而拒绝，新代从未起', async () => {
-    let pending: Promise<string> | null = null;
-    let startsWhileHeld = -1;
-    current.afterSecondRead = async () => {
-      pending = redoViaRunTask();
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      startsWhileHeld = current.redoStarts;
-    };
-    const result = await invoke(args(['--apply']));
-    expect(startsWhileHeld).toBe(0);
-    expect(result.code).toBe(0);
-    expect(result.json?.status).toBe('corrected');
-    expect(await pending).toContain('现在是done');
-    expect(current.redoStarts).toBe(0);
-    const row = await taskRow();
-    expect(row?.state).toBe('done');
-    expect(row?.phase).toBe('merged');
-    expect(await audits()).toHaveLength(1);
-    const kept = await t.db.select().from(runs).where(eq(runs.taskId, TASK));
-    expect(kept.map((run) => run.outcome)).toEqual(['done']);
-  }, 30_000);
-
-  it('固定交错：第一次读取后、栅栏前，重做先起了新代——纠正第二次读取核对到新代，拒绝且不写', async () => {
+  it('固定交错（评审 5567178504/5567399389）：Temporal 最后一读拍下旧快照之后，真 runTask 重做起成新代——CAS 因起代意图回 stale，不写 done', async () => {
     let redoText = '';
-    current.afterFirstRead = async () => {
-      redoText = await redoViaRunTask();
+    current.afterExecutionRead = async () => {
+      current.afterExecutionRead = null;
+      redoText = await redoViaRunTask('ok');
     };
     const result = await invoke(args(['--apply']));
     expect(redoText).toContain('已重做');
     expect(current.redoStarts).toBe(1);
+    expect(current.extraGeneration).toBe(true);
     expect(result.code).toBe(1);
     expect(result.json?.status).toBe('refused');
-    expect(result.json?.reason).toMatch(/新的一代|变了/);
-    expect(current.casCalls).toBe(0);
-    const row = await taskRow();
-    expect(row?.state).toBe('stopped');
-    expect(row?.phase).toBe('abandoned');
-    expect(row?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
-    expect(await audits()).toEqual([]);
+    expect(result.json?.reason).toContain('受管起代');
+    expect(current.casCalls).toBe(1);
+    await expectUntouched();
+    expect(await audits('task.redo')).toHaveLength(1);
+    expect((await audits('task.start-intent')).length).toBe(1);
+    expect((await audits('task.start-settled')).length).toBe(1);
+    // 起成已结：意图不再挂着；再预检拒绝的理由是新一代在跑，不是结果未知
+    current.afterExecutionRead = null;
+    const again = await invoke(args());
+    expect(again.json?.reason).toContain('仍在运行');
   }, 30_000);
 
-  it('核对之后更新时间被别人改了，事务回 stale，不写成 done', async () => {
-    current.wrapCas = true;
-    const result = await invoke(args(['--apply']));
-    expect(result.code).toBe(1);
-    expect(result.json?.reason).toContain('变了');
-    const row = await taskRow();
-    expect(row?.state).toBe('stopped');
-    expect(row?.phase).toBe('abandoned');
-    expect(await audits()).toEqual([]);
-  });
+  it('固定交错（评审 5567809690 第 1 条）：起代超时结果未知、迟到的起代在纠正最后一读之后才落地——意图一直挂着，纠正拒绝，不靠超时放行', async () => {
+    // 窗口里：纠正已读完旧快照，重做起代超时
+    current.afterExecutionRead = async () => {
+      current.afterExecutionRead = null;
+      expect(await redoViaRunTask('deadline')).toContain('DEADLINE_EXCEEDED');
+    };
+    const first = await invoke(args(['--apply']));
+    expect(first.json?.status).toBe('refused');
+    expect(current.casCalls).toBe(1);
+    await expectUntouched('窗口里超时');
+
+    // 之后再纠正：Temporal 还看不到新代，但意图没结，照样拒绝，连 CAS 都不进
+    for (const mode of [[], ['--apply']]) {
+      current = world();
+      const later = await invoke(args(mode));
+      expect(later.json?.status).toBe('refused');
+      expect(later.json?.reason).toContain('结果未知');
+      expect(current.casCalls).toBe(0);
+    }
+    // 迟到的起代真落地了：任务行仍是原样，没有被旧请求写成 done
+    current.extraGeneration = true;
+    await expectUntouched('迟到落地');
+    expect(await audits('task.start-intent')).toHaveLength(1);
+    expect(await audits('task.start-settled')).toEqual([]);
+  }, 30_000);
+
+  it('固定交错：重做已读到 stopped、还没落意图时纠正先提交——起代意图重读到 done 而拒绝，新代从未起', async () => {
+    let corrected = '';
+    const text = await redoViaRunTask('ok', async () => {
+      corrected = (await invoke(args(['--apply']))).json?.status ?? '';
+    });
+    expect(corrected).toBe('corrected');
+    expect(text).toContain('现在是done');
+    expect(current.redoStarts).toBe(0);
+    expect(current.extraGeneration).toBe(false);
+    expect((await taskRow())?.state).toBe('done');
+    expect(await audits()).toHaveLength(1);
+    expect(await audits('task.start-intent')).toEqual([]);
+  }, 30_000);
 
   it('操作记录写不进时任务行和状态变化一起回滚', async () => {
     await t.db.execute(sql`
@@ -775,12 +598,7 @@ describe('task correct-merged 真实装配', () => {
       const result = await invoke(args(['--apply']));
       expect(result.code).toBe(1);
       expect(result.json?.reason).toContain('写不进');
-      const row = await taskRow();
-      expect(row?.state).toBe('stopped');
-      expect(row?.phase).toBe('abandoned');
-      expect(await audits()).toEqual([]);
-      const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
-      expect(changes.some((change) => change.toState === 'done')).toBe(false);
+      await expectUntouched();
     } finally {
       await t.db.execute(sql`drop trigger if exists correct_merged_audit_boom on audit_log`);
       await t.db.execute(sql`drop function if exists correct_merged_audit_boom()`);
@@ -800,12 +618,7 @@ function resultOf(value: unknown): { outcome: string; prNumber: number; head: st
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
   const row = value as Record<string, unknown>;
   const prNumber = row.prNumber;
-  if (
-    typeof row.outcome !== 'string' ||
-    typeof prNumber !== 'number' ||
-    !Number.isInteger(prNumber) ||
-    typeof row.head !== 'string'
-  ) {
+  if (typeof row.outcome !== 'string' || typeof prNumber !== 'number' || typeof row.head !== 'string') {
     return null;
   }
   return { outcome: row.outcome, prNumber, head: row.head };

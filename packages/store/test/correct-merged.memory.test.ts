@@ -84,89 +84,30 @@ describe('内存版受管纠正', () => {
     expect(again.data.stateChanges.some((row) => row.to === 'done')).toBe(false);
   });
 
-  it('同一工作流另有不同 PR 的会话就不写', async () => {
+  it('两个并发纠正同时到达：只有一次写入，另一次回 stale', async () => {
     const memory = store();
-    memory.data.segmentRuns.push({
-      id: 'other-pr',
-      segment: 'manual',
-      taskId: TASK,
-      model: 'test',
-      startedAt: WHEN,
-      endedAt: WHEN,
-      outcome: 'done',
-      workflowId: 'task:thoerwink8/fleet-dao#3114',
-      prNumber: 99999,
-    });
-    expect(await memory.casCorrectMerged(input)).toBe('stale');
-    expect(memory.data.tasks[0]?.state).toBe('stopped');
-    expect(memory.data.taskClosures[0]?.phase).toBe('abandoned');
-    expect(memory.data.audit).toEqual([]);
-    expect(memory.data.segmentRuns.map((run) => run.prNumber).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([
-      3137, 99999,
-    ]);
-  });
-
-  it('写入前或写入后外部核对没过，都回 stale 且整笔回到原样', async () => {
-    const before = store();
-    expect(await before.casCorrectMerged({ ...input, verify: async () => false })).toBe('stale');
-    expect(before.data.tasks[0]?.state).toBe('stopped');
-    expect(before.data.audit).toEqual([]);
-
-    const after = store();
-    let seen = 0;
-    const onceThenFail = async () => {
-      seen += 1;
-      return seen === 1;
-    };
-    expect(await after.casCorrectMerged({ ...input, verify: onceThenFail })).toBe('stale');
-    expect(seen).toBe(2);
-    expect(after.data.tasks[0]?.state).toBe('stopped');
-    expect(after.data.taskClosures[0]?.phase).toBe('abandoned');
-    expect(after.data.taskClosures[0]?.updatedAt).toBe(WHEN);
-    expect(after.data.stateChanges.some((row) => row.to === 'done')).toBe(false);
-    expect(after.data.audit).toEqual([]);
-
-    const ok = store();
-    expect(await ok.casCorrectMerged({ ...input, verify: async () => true })).toBe('corrected');
-    expect(ok.data.tasks[0]?.state).toBe('done');
-  });
-
-  it('两个并发纠正同时到达：外部核对时让出，只有一次写入，另一次回 stale', async () => {
-    const memory = store();
-    const slowVerify = async () => {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-      return true;
-    };
-    const [a, b] = await Promise.all([
-      memory.casCorrectMerged({ ...input, verify: slowVerify }),
-      memory.casCorrectMerged({ ...input, verify: slowVerify }),
-    ]);
+    const [a, b] = await Promise.all([memory.casCorrectMerged(input), memory.casCorrectMerged(input)]);
     expect([a, b].sort()).toEqual(['corrected', 'stale']);
     expect(
       memory.data.audit.filter((row) => row.action === CORRECT_MERGED_AUDIT_ACTION && row.ok),
     ).toHaveLength(1);
-    expect(memory.data.stateChanges.filter((row) => row.to === 'done')).toHaveLength(1);
   });
 
-  it('任务栅栏同一任务串行，不同任务互不等', async () => {
+  it('起代意图没结就不写；意图改了更新时间，旧的期望也对不上；落了已结、换上新的更新时间才写', async () => {
     const memory = store();
-    const order: string[] = [];
-    const slow = memory.withTaskFence(TASK, async () => {
-      order.push('a:start');
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      order.push('a:end');
-      return 'a';
+    const actor = { kind: 'ops', id: 'founder', via: 'ops' } as const;
+    const begun = await memory.beginTaskStart({ taskId: TASK, allowed: ['stopped'], actor });
+    if (!begun.ok) throw new Error('意图没落上');
+    const bumped = Date.parse('2026-10-19T02:00:00.000Z');
+    expect(await memory.casCorrectMerged(input)).toBe('stale');
+    expect(await memory.casCorrectMerged({ ...input, expectedUpdatedAtMs: bumped })).toBe('stale');
+    expect(memory.data.tasks[0]?.state).toBe('stopped');
+    await memory.settleTaskStart({ taskId: TASK, intent: begun.intent, outcome: 'not_started', actor });
+    expect(await memory.casCorrectMerged({ ...input, expectedUpdatedAtMs: bumped })).toBe('corrected');
+    expect(await memory.beginTaskStart({ taskId: TASK, allowed: ['stopped'], actor })).toEqual({
+      ok: false,
+      state: 'done',
     });
-    const next = memory.withTaskFence(TASK, async () => {
-      order.push('b');
-      return 'b';
-    });
-    const other = memory.withTaskFence('other-task', async () => {
-      order.push('other');
-      return 'other';
-    });
-    expect(await Promise.all([slow, next, other])).toEqual(['a', 'b', 'other']);
-    expect(order.indexOf('a:end')).toBeLessThan(order.indexOf('b'));
   });
 
   it('开着的会话或更新时间变了就不写', async () => {
