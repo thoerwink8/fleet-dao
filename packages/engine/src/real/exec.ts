@@ -11,6 +11,7 @@ import {
   scopePrefix,
   stopScope,
 } from '@fleet-dao/adapters';
+import { runBoundedStream } from './exec-stream.ts';
 
 export interface UserCommand {
   user: SessionUser;
@@ -19,6 +20,11 @@ export interface UserCommand {
   /** argv[0] 是绝对路径。 */
   argv: string[];
   stdin?: Buffer;
+  /** 复杂快照专用：不收集整包；消费者必须遵守取消信号。普通命令仍受原 stdout 上限约束。 */
+  snapshotStream?: {
+    input?: AsyncIterable<Buffer>;
+    output?: (chunk: Buffer, signal: AbortSignal) => Promise<void>;
+  };
   timeoutMs: number;
   signal?: AbortSignal;
   /** scope 编号（单元名 fleet-agent-<编号>.scope 的一段）：同一时刻不许重复，最长 63。 */
@@ -39,6 +45,8 @@ export interface UserCommandResult {
   aborted: boolean;
   /** 起不来（找不到 sudo、帮手脚本）时的原因。 */
   spawnError?: string;
+  /** 专用流触发停止后的绝对收尾截止时间；调用方清理本次临时件共享这一预算。 */
+  stopDeadlineMs?: number;
 }
 
 export type UserExec = (command: UserCommand) => Promise<UserCommandResult>;
@@ -70,6 +78,7 @@ function run(
   stop?: () => Promise<unknown>,
   settleMs: number = KILL_SETTLE_MS,
 ): Promise<UserCommandResult> {
+  if (command.snapshotStream) return runBoundedStream(plan, command, stop, settleMs);
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let bytes = 0;
