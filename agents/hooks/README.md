@@ -17,4 +17,6 @@ pnpm typecheck
 
 原生消息链独占投递。main-thread 只检查原生queued_command后的先回规则，并由 background-recovery 读取本会话原生重启通知。恢复提示保留真实任务编号和原任务，兼容旧tick文件只保存backgroundRestartKey；不读创始人原文账、不轮询Mirasim、不标已读。session-id是它和work-watch共用的纯校验。
 
+无人值守执行回执由 `continuation-receipts.mjs` 共用，既有 Stop/start/progress 入口只追加脱敏阶段，不另起通知、轮询或看护。每份上限2MiB、最多128份，目录准入与读取均有界，满额保留历史并明确未知。`pnpm exec node agents/hooks/unattended.mjs status --receipts` 读当前窗口；无证据、坏行、超限或锁故障明确unknown，不能把on、prepared/emitted或同session工具事件称为根会话已接续/结果已消费。完整边界见 [CLI无人值守接续](../../docs/design/CLI无人值守接续.md)。
+
 session-start只列同血缘旧号实际prompt-log历史，保留时间/字数封顶与来源读取失败诊断。turns缺行不判断丢失，旧seen和steer-shown不参与投递。inbox-watch在退役目录中；inbox-tick和steer-shown也已移除，标准同步清理受管安装目录的旧脚本，不删除用户历史状态。Stop仍保留stop与work-watch，只有work-watch使用asyncRewake。
