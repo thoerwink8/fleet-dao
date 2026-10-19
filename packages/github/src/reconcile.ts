@@ -11,6 +11,7 @@ import { z } from 'zod';
 import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
 import { type EchoKind, echoOf } from './echo.ts';
+import { isGitHubError } from './errors.ts';
 import { mirrorExtrasOf } from './events.ts';
 import { HYGIENE_REPO } from './hygiene-scope.ts';
 import { type MergeReceipt, mergeKey, readPull } from './pulls.ts';
@@ -106,7 +107,19 @@ export interface ReconcilerOptions {
   storedDeliveries?: ((guids: readonly string[]) => Promise<ReadonlySet<string>>) | undefined;
   /** 一次最多重投几个（重投是写请求，要串行、要间隔），默认 50。 */
   maxRedeliveries?: number | undefined;
+  /**
+   * 投递日志最多翻几页（每页 100 条），默认 DELIVERY_MAX_PAGES。翻到上限还没翻到 since：翻到的那一截照样重投，
+   * 这一步报 partial（没查全，不推进成功水位）。
+   */
+  maxDeliveryPages?: number | undefined;
 }
+
+/**
+ * 投递日志默认最多翻 200 页 = 2 万条。client 通用的 50 页（5000 条）在发布勤的时候几小时就满（法国实测 2026-10-20：
+ * 每 15 分钟撞一次 50 页上限、一轮轮报没查全、一个都不重投，since 停在原地，窗口越拉越长、越翻越翻不完）。
+ * 定时任务在引擎进程里跑、没有活动超时；GitHub 每页约 1 秒，翻满也只要几分钟，落在 15 分钟一轮里。
+ */
+export const DELIVERY_MAX_PAGES = 200;
 
 // 投递编号已超出 JS 安全整数（19 位）：client 按原文留成字符串，小的照旧是数字；一律转成原文拼重投的路径。
 // 丢了精度的数字（没拿到原文）不认：拿它重投只会 404，宁可这一轮报「形状不认识」。
@@ -156,13 +169,20 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
       const failed = new Map<string, { id: string; deliveredAt: string }>();
       const ok = new Set<string>();
       let checked = 0;
+      const maxPages = options.maxDeliveryPages ?? DELIVERY_MAX_PAGES;
+      // 翻到的最老一条的时刻；翻到上限没翻到 since 时记进 truncatedAt：它以后的查全了，[since, 它) 这一轮没查
+      let oldestSeen: string | null = null;
+      let truncatedAt: string | null = null;
       try {
-        for await (const page of client.pages({
-          method: 'GET',
-          path: '/app/hook/deliveries',
-          auth: { as: 'app', role: 'engine' },
-          query: { per_page: 100 },
-        })) {
+        for await (const page of client.pages(
+          {
+            method: 'GET',
+            path: '/app/hook/deliveries',
+            auth: { as: 'app', role: 'engine' },
+            query: { per_page: 100 },
+          },
+          maxPages,
+        )) {
           const parsed = z.array(Delivery).safeParse(page.data);
           if (!parsed.success)
             return { outcome: 'unscanned', checked, recovered: 0, why: '投递日志的形状不认识' };
@@ -174,6 +194,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
               continue;
             }
             checked += 1;
+            oldestSeen = d.delivered_at;
             const code = d.status_code ?? 0;
             if (code >= 200 && code < 300) ok.add(d.guid);
             else if (!failed.has(d.guid)) failed.set(d.guid, { id: d.id, deliveredAt: d.delivered_at });
@@ -181,7 +202,13 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
           if (older || parsed.data.length === 0) break;
         }
       } catch (err) {
-        return { outcome: 'unscanned', checked, recovered: 0, why: `读投递日志失败：${errMessage(err)}` };
+        // 翻到上限：新的在前，翻到的是 since 以来最新的一截。同一个 guid 后来成功的那次比失败新，必定也在这一截里，
+        // 所以这一截里「一次都没成功」是准的，照样重投（不然每轮从头翻同一截、一个都不补）；这一步至少报 partial，
+        // 不推进成功水位，没翻到的那段下一轮还在窗口里
+        if (!isGitHubError(err, 'TOO_MANY_PAGES') || oldestSeen === null) {
+          return { outcome: 'unscanned', checked, recovered: 0, why: `读投递日志失败：${errMessage(err)}` };
+        }
+        truncatedAt = oldestSeen;
       }
       const neverOk = [...failed].filter(([guid]) => !ok.has(guid));
       let stored: ReadonlySet<string> = new Set();
@@ -222,6 +249,9 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
       if (todo.length > 0) log.warn('有投递一直没成功，已重投', { failed: todo.length, recovered });
       const attempted = Math.min(todo.length, limit);
       const notes = [
+        truncatedAt
+          ? `投递日志翻了 ${maxPages} 页还没翻到 ${since.toISOString()}：只查了 ${truncatedAt} 以后的 ${checked} 条，更早的这次没查全`
+          : '',
         todo.length > limit ? `还有 ${todo.length - limit} 个没重投（一次最多 ${limit} 个）` : '',
         errors.length ? `重投失败 ${errors.length} 个：${errors.slice(0, 3).join('；')}` : '',
       ].filter(Boolean);

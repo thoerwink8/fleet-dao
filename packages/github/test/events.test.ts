@@ -225,6 +225,64 @@ describe('对账与补漏', () => {
     expect(report.why).toContain('还有 1 个没重投（一次最多 2 个）');
   });
 
+  // 新的在前排好的投递日志：n 条、每条早一秒，全在 since 之后；over 按下标改某几条
+  const deliveryLog = (n: number, over: Record<number, { guid: string; status_code: number }> = {}) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: n - i,
+      guid: over[i]?.guid ?? `g-${n - i}`,
+      delivered_at: new Date(Date.parse('2026-09-25T11:00:00Z') - i * 1000).toISOString(),
+      status_code: over[i]?.status_code ?? 200,
+      event: 'issues',
+    }));
+
+  it('投递日志超过 client 默认的 50 页：照样翻到 since、查全，最老的失败也补上（法国实测每轮撞 50 页、since 卡住不前进）', async () => {
+    const { gh, fake } = setup();
+    fake.deliveries = deliveryLog(6000, { 5999: { guid: 'g-oldest', status_code: 502 } });
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .redeliverFailed(new Date('2026-09-25T09:00:00Z'));
+    expect(report).toEqual({ outcome: 'ok', checked: 6000, recovered: 1, why: undefined });
+    expect(fake.redelivered).toEqual([1]);
+    expect(fake.calls('GET', /\/app\/hook\/deliveries$/)).toHaveLength(60);
+  });
+
+  it('投递日志翻到页数上限还没到 since：翻到的那一截照样重投，这一步报 partial（没查全，不当 ok），页数有界', async () => {
+    const { gh, fake } = setup();
+    fake.deliveries = deliveryLog(500, {
+      10: { guid: 'g-later-ok', status_code: 200 },
+      20: { guid: 'g-later-ok', status_code: 504 },
+      150: { guid: 'g-never-ok', status_code: 502 },
+      // 第 4 页：上限 3 页，这一轮看不到
+      350: { guid: 'g-beyond', status_code: 502 },
+    });
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId, maxDeliveryPages: 3 })
+      .redeliverFailed(new Date('2026-09-25T09:00:00Z'));
+    expect(fake.calls('GET', /\/app\/hook\/deliveries$/)).toHaveLength(3);
+    expect(fake.redelivered).toEqual([500 - 150]);
+    expect(report).toMatchObject({ outcome: 'partial', checked: 300, recovered: 1 });
+    expect(report.why).toContain('投递日志翻了 3 页还没翻到 2026-09-25T09:00:00.000Z');
+    expect(report.why).toContain(`只查了 ${fake.deliveries[299]?.delivered_at} 以后的 300 条`);
+  });
+
+  it('投递日志翻到页数上限、翻到的那截重投全失败：报 failed，不报 ok', async () => {
+    const { gh, fake } = setup();
+    fake.deliveries = deliveryLog(300, { 5: { guid: 'g-x', status_code: 502 } });
+    fake.before.push((req) =>
+      req.path === '/app/hook/deliveries/295/attempts'
+        ? json(422, { message: 'Validation Failed' })
+        : undefined,
+    );
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId, maxDeliveryPages: 2 })
+      .redeliverFailed(new Date('2026-09-25T09:00:00Z'));
+    expect(report).toMatchObject({ outcome: 'failed', checked: 200, recovered: 0 });
+    expect(report.why).toContain('翻了 2 页还没翻到');
+  });
+
   it('重投：19 位的投递编号按原文拼路径，不丢精度（法国实测 …928 被改成 …000，重投全 404）', async () => {
     const { gh, fake } = setup();
     // 原文里的数字超出 JS 安全整数：只能手写 JSON 文本，JSON.stringify 一个 number 已经丢了精度
