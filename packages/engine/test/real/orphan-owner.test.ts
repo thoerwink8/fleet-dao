@@ -55,7 +55,6 @@ it('测试和清理都超时后，机器核明预期红项，下一例的库、h
       FAKE_SCOPE_LIST_EXIT: '19',
       FAKE_SCOPE_STOP_EXIT: '17',
     };
-    delete env.FLEET_TEST_PG_URL;
     const child = runChild(
       process.execPath,
       [
