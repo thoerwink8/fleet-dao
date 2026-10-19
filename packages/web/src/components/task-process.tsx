@@ -36,6 +36,7 @@ import {
   roundOutcome,
   roundProgress,
   runDurationMs,
+  runOrder,
   sessionLink,
   stepDurationMs,
   type TimelineItem,
@@ -1025,11 +1026,7 @@ export function TaskProcess({
   const lastRunId = runs.at(-1)?.id;
   const finished = isTaskFinished(d.task);
   // 第几笔：整张单按起跑先后一起数（三段不分开），和设计稿的「第 N 笔」一致
-  const nthOf = new Map(
-    [...runs]
-      .sort((a, b) => (a.startedAt ?? '').localeCompare(b.startedAt ?? ''))
-      .map((r, i) => [r.id, i + 1] as const),
-  );
+  const nthOf = runOrder(runs);
   // 回合默认只展开最后一个和有笔在跑的，前面收场了的收成一行头；人点过就听人的
   const [roundPicks, setRoundPicks] = useState<Record<string, boolean>>({});
   const roundOpen = (g: RoundGroup, i: number) =>
