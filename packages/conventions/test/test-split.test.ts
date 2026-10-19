@@ -297,10 +297,13 @@ describe('环境类、能力标记', () => {
     expect(unitOfTestFile('docs/a.test.ts')).toBeUndefined();
   });
 
-  it('要真 Postgres 的：packages/db 下的（CI 上只有它们设 FLEET_TEST_PG_URL）', () => {
+  it('要真 Postgres 的：db及Store精确真实竞争文件，其它Store测试保持原分台', () => {
     expect(needsPg('packages/db/test/migrations.test.ts')).toBe(true);
     expect(needsPg('packages/db/src/x.test.ts')).toBe(true);
     expect(needsPg('packages/api/test/store.pg.test.ts')).toBe(false);
+    expect(needsPg('packages/store/test/task-execution.real-pg.test.ts')).toBe(true);
+    expect(needsPg('packages/store/test/task-execution.pg.test.ts')).toBe(false);
+    expect(needsPg('packages/store/test/other.real-pg.test.ts')).toBe(false);
   });
 
   it('扫全仓：用到 FLEET_TEST_PG_URL / realTestPgUrl 的测试文件，都在 pg 这一类里', () => {
@@ -391,7 +394,7 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     expect(Math.max(...seconds)).toBeLessThanOrEqual(Math.min(...seconds) * 2);
   });
 
-  it('pg 台只有 db 的文件；Temporal 装在有 github-reconcile.test.ts 的那一台', () => {
+  it('pg 台只有 db 和执行资格真竞争文件；Temporal 装在有 github-reconcile.test.ts 的那一台', () => {
     const r = packTests({
       files: FILES,
       universe: FILES,
@@ -400,7 +403,11 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     });
     if (typeof r === 'string') throw new Error(r);
     for (const b of r.boxes.filter((x) => x.pg))
-      expect(b.files.every((f) => f.startsWith('packages/db/'))).toBe(true);
+      expect(
+        b.files.every(
+          (f) => f.startsWith('packages/db/') || f === 'packages/store/test/task-execution.real-pg.test.ts',
+        ),
+      ).toBe(true);
     const withTemporal = r.boxes.filter((b) => b.temporal);
     expect(withTemporal).toHaveLength(1);
     expect(withTemporal[0]?.files).toContain('packages/engine/test/github-reconcile.test.ts');

@@ -5,6 +5,7 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 ## 入口
 
 - `packages/db/src/schema/`：全部表和枚举；`packages/db/src/queries/`：查询函数；`packages/db/src/index.ts`：对外导出。
+- `src/schema/task-execution.ts`：未接生产的持久执行资格两表；控制行缺失就是未受管，不回填、不自动初始化。当前指针组合外键绑定任务、操作、epoch和revision，历史操作不是受管覆盖证明；真实竞争夹具只在 `@fleet-dao/db/testing` 创建随机克隆库和独立连接。
 - `packages/db/migrations/`：迁移，drizzle-kit 生成的和手写的（触发器等，如 `0001_triggers.sql`）放在一起，按编号走。
 - `packages/db/drizzle.config.ts`：只用来生成迁移，不连库。
 - `@fleet-dao/db/migration-budget`：发布版固定子进程只核 PG7 snapshot JSON 与独立生成 SQL 的字节一致性，不加载候选 schema/config；完整已知形状、journal链和重复键先核，未知或超时明确失败。TS 与快照的漂移仍由 `schema-drift.test.ts` 核验。
