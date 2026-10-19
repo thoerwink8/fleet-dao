@@ -2,13 +2,13 @@
 //
 // - readRunProcessRows：一笔的轻量行（run_transcript，不带整段文本：切步、算小计只要种类、工具名、成败、时刻、调用号和一小截文本），
 //   给 shared 的 cutSteps 切步；一笔最多 3000 行。
-// - readRunTallies：几笔的小计，一条 GROUP BY run_id 现算（命令几条、失败几个、没有结果几个、读了几个文件、改了几次……），
-//   不读整段文本；命令名单用 shared 的 COMMAND_TOOLS（和切步同一份，cursor 的 xxxToolCall 去掉后缀再比）。
+// - readRunTallies：按请求的 runIds 一条批量查询，只读统计列、不读文本或整份 meta，再用 shared 的 tallyProcessRows 现算。
+//   概览与切步共用调用号接受/去重规则；entries 和首尾时刻包括所有种类，没有记录的笔不造 0。
 // - readRunLastSay：一笔最后一条主会话助手的话（最新汇报；不取 result，不取子代理的）。
 // - listTaskRounds：回合（task_rounds）；listTaskEngineSteps：引擎在会话外做的事（step_timings 里这张单的活动和等待）。
 // 读不到（库不通）一律抛，由接口回「没读到」带原因；「这一笔没有记录」返回空，和读不到分开。
-import { COMMAND_TOOLS, EDIT_TOOLS, type ProcessRow, READ_TOOLS, type RunTallyRow } from '@fleet-dao/shared';
-import { asc, eq, sql } from 'drizzle-orm';
+import { type ProcessRow, type RunTallyRow, tallyProcessRows } from '@fleet-dao/shared';
+import { asc, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { stepTimings, taskRounds } from '../schema/index.ts';
 import { runTranscript } from '../schema/runs.ts';
@@ -17,7 +17,6 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const rowsOf = (res: unknown) =>
   (Array.isArray(res) ? res : (res as { rows: unknown[] }).rows) as Record<string, unknown>[];
-const num = (v: unknown): number => (v === null || v === undefined ? 0 : Number(v));
 
 /** 文本留多长：助手的话、结论、报错取开头一截（标题只要第一句）；工具调用的输入摘要（命令、路径）；结果和提示词不要文本。 */
 const TEXT_LIMIT = sql`case
@@ -76,83 +75,48 @@ const list = (names: readonly string[]) =>
   );
 
 /**
- * 几笔的小计：一条 GROUP BY run_id。读不到抛。没有记录的笔不出现在结果里（页面写「没记录」，不写 0）。
- * 命令的成败拆成互不重叠的几个数（失败、没有退出码、有调用号却对不上结果、没有调用号）；是在跑还是没记结果由调用方按这一笔在不在跑定
- * （shared 的 tallyOf）。
+ * 几笔的小计：一条轻量列查询，无 N+1，不取 text 或整 meta；shared 与切步共用原生号配对规则。
+ * 读不到抛；没有记录的笔不出现在结果里。所有 kind 都保留，entries 和首尾时刻不因只看工具而缩水。
  */
 export async function readRunTallies(db: Db, runIds: readonly string[]): Promise<Map<string, RunTallyRow>> {
   const out = new Map<string, RunTallyRow>();
   const ids = runIds.filter((id) => UUID.test(id));
   if (ids.length === 0) return out;
-  const idList = sql.join(
-    ids.map((id) => sql`${id}::uuid`),
-    sql`, `,
-  );
-  const res = rowsOf(
-    await db.execute(sql`
-      with t as (
-        select run_id, seq, at, kind, ok, meta,
-               regexp_replace(lower(coalesce(tool, '')), 'toolcall$', '') as tk,
-               meta ->> 'callId' as call_id
-          from run_transcript
-         where run_id in (${idList}) and kind in ('tool_call', 'tool_result')
-      ),
-      ends as (
-        select run_id, count(*) as entries, min(at) as first_at, max(at) as last_at
-          from run_transcript
-         where run_id in (${idList})
-         group by run_id
-      )
-      select e.run_id::text as run_id,
-             e.entries,
-             e.first_at,
-             e.last_at,
-             count(*) filter (where t.kind = 'tool_call') as calls,
-             count(*) filter (where t.kind = 'tool_call' and t.tk in (${list(COMMAND_TOOLS)})) as commands,
-             count(*) filter (where t.kind = 'tool_result' and t.ok is false and t.tk in (${list(COMMAND_TOOLS)})) as commands_failed,
-             count(*) filter (where t.kind = 'tool_result' and t.ok is not false
-                               and (t.meta ->> 'exitKnown') = 'false' and t.tk in (${list(COMMAND_TOOLS)})) as commands_exit_unknown,
-             count(*) filter (where t.kind = 'tool_call' and t.tk in (${list(COMMAND_TOOLS)}) and t.call_id is not null
-                               and not exists (select 1 from t r2
-                                                where r2.run_id = t.run_id and r2.kind = 'tool_result'
-                                                  and r2.call_id = t.call_id)) as commands_no_result,
-             count(*) filter (where t.kind = 'tool_call' and t.tk in (${list(COMMAND_TOOLS)}) and t.call_id is null) as commands_legacy,
-             count(*) filter (where t.kind = 'tool_call' and t.tk in (${list(READ_TOOLS)})) as reads,
-             count(*) filter (where t.kind = 'tool_result' and t.ok is false) as calls_failed,
-             count(*) filter (where t.kind = 'tool_result' and t.ok is not false and t.tk in (${list(EDIT_TOOLS)})) as edits_ok,
-             count(*) filter (where t.kind = 'tool_result' and t.ok is not false and t.tk in (${list(EDIT_TOOLS)})
-                               and jsonb_typeof(t.meta -> 'added') is distinct from 'number'
-                               and jsonb_typeof(t.meta -> 'removed') is distinct from 'number') as edits_uncounted,
-             coalesce(sum(case when t.kind = 'tool_result' and t.ok is not false and t.tk in (${list(EDIT_TOOLS)})
-                                and jsonb_typeof(t.meta -> 'added') = 'number' then (t.meta ->> 'added')::bigint end), 0) as added,
-             coalesce(sum(case when t.kind = 'tool_result' and t.ok is not false and t.tk in (${list(EDIT_TOOLS)})
-                                and jsonb_typeof(t.meta -> 'removed') = 'number' then (t.meta ->> 'removed')::bigint end), 0) as removed
-        from ends e
-        left join t on t.run_id = e.run_id
-       group by e.run_id, e.entries, e.first_at, e.last_at
-    `),
-  );
-  for (const r of res) {
-    const at = (v: unknown) =>
-      v === null || v === undefined ? undefined : new Date(String(v)).toISOString();
-    out.set(String(r.run_id), {
-      entries: num(r.entries),
-      calls: num(r.calls),
-      commands: num(r.commands),
-      commandsFailed: num(r.commands_failed),
-      commandsExitUnknown: num(r.commands_exit_unknown),
-      commandsNoResult: num(r.commands_no_result),
-      commandsLegacy: num(r.commands_legacy),
-      reads: num(r.reads),
-      callsFailed: num(r.calls_failed),
-      editsOk: num(r.edits_ok),
-      editsUncounted: num(r.edits_uncounted),
-      added: num(r.added),
-      removed: num(r.removed),
-      ...(at(r.first_at) === undefined ? {} : { firstAt: at(r.first_at) }),
-      ...(at(r.last_at) === undefined ? {} : { lastAt: at(r.last_at) }),
+  const rows = await db
+    .select({
+      runId: runTranscript.runId,
+      seq: runTranscript.seq,
+      at: runTranscript.at,
+      kind: runTranscript.kind,
+      tool: runTranscript.tool,
+      ok: runTranscript.ok,
+      callId: sql<string | null>`${runTranscript.meta} ->> 'callId'`,
+      exitUnknown: sql<boolean>`(${runTranscript.meta} ->> 'exitKnown') = 'false'`,
+      added: metaInt('added'),
+      removed: metaInt('removed'),
+    })
+    .from(runTranscript)
+    .where(inArray(runTranscript.runId, ids))
+    .orderBy(asc(runTranscript.runId), asc(runTranscript.seq));
+  const byRun = new Map<string, ProcessRow[]>();
+  for (const r of rows) {
+    const runRows = byRun.get(r.runId) ?? [];
+    runRows.push({
+      seq: r.seq,
+      at: r.at.toISOString(),
+      kind: r.kind,
+      text: '',
+      sub: false,
+      ...(r.tool === null ? {} : { tool: r.tool }),
+      ...(r.ok === null ? {} : { ok: r.ok }),
+      ...(r.callId === null || r.callId === '' ? {} : { callId: r.callId }),
+      ...(r.exitUnknown ? { exitKnown: false } : {}),
+      ...(r.added === null ? {} : { added: r.added }),
+      ...(r.removed === null ? {} : { removed: r.removed }),
     });
+    byRun.set(r.runId, runRows);
   }
+  for (const [id, runRows] of byRun) out.set(id, tallyProcessRows(runRows));
   return out;
 }
 
