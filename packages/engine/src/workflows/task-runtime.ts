@@ -63,6 +63,7 @@ import {
   LINE_BUDGET_REMEASURE_PATCH,
   type LineBudgetParkInput,
   type LineBudgetParkState,
+  REMEASURE_CATCH_UP_CLOSED_PATCH,
   REMEASURE_CATCH_UP_SECONDS,
   REMEASURE_TIMEOUT_SECONDS,
   sameParkIdentity,
@@ -1018,6 +1019,34 @@ export class TaskRuntime {
     return !this.parkWokeByContinue;
   }
 
+  /** 同一 resume 请求已经有匹配回执：同身份、同头、同 base。不看别的停点。 */
+  private sameResume(command: RemeasureLineBudgetCommand): LineBudgetRemeasureReceipt | null {
+    const done = this.budgetResume;
+    if (
+      command.mode !== 'resume' ||
+      !done ||
+      !sameParkIdentity(done.identity, command.identity) ||
+      done.head !== command.head ||
+      done.base !== command.base
+    )
+      return null;
+    return done.receipt;
+  }
+
+  /**
+   * 这次请求的停点身份已经回不来：放弃或已核实合并，或继续次数、停点次数、关单代数已经超过请求里的。
+   * 重放还没赶上时这些计数只会更小或相等，这里不用不等号拒绝，冷工人接手同一停点仍要等它出现。
+   */
+  private catchupClosed(identity: LineBudgetParkIdentity): boolean {
+    return (
+      this.abandon !== null ||
+      this.verifiedMerged !== null ||
+      this.continued > identity.continued ||
+      this.parks > identity.parks ||
+      this.closeHoldGeneration > identity.generation
+    );
+  }
+
   private async remeasureLineBudget(command: RemeasureLineBudgetCommand): Promise<RemeasureLineBudgetResult> {
     const refuse = (reason: LineBudgetRefusal, detail: string): RemeasureLineBudgetResult => ({
       outcome: 'refused',
@@ -1038,19 +1067,30 @@ export class TaskRuntime {
     )
       return refuse('identity', 'repo / task / workflow / run 与这条工作流对不上');
     // 同一已放行请求重发（只认执行）：回绑定原停点、原头、原 base 的回执，不再测、不放行别的头
-    const done = this.budgetResume;
-    if (
-      command.mode === 'resume' &&
-      done &&
-      sameParkIdentity(done.identity, command.identity) &&
-      done.head === command.head &&
-      done.base === command.base
-    )
-      return { outcome: 'already_resumed', receipt: done.receipt };
+    const resumed = this.sameResume(command);
+    if (resumed) return { outcome: 'already_resumed', receipt: resumed };
     // 新起的工人从整段历史重放接手时，Update 可能先于同一批里主流程走回停点（报警结果还没回填、waiting 还没设）。
-    // 停点还看不见就短等主流程追上（有缓存的工人上停点直接可见，不等、不起定时器）；等不到再按不在停点拒。
-    if (this.parkIdentity() === null)
-      await condition(() => this.parkIdentity() !== null, `${REMEASURE_CATCH_UP_SECONDS} seconds`);
+    // 停点还看不见、而这请求的身份仍可能出现，就短等主流程追上（有缓存的工人上停点直接可见，不等、不起定时器）。
+    // 放弃、已核实合并，或继续/停点/关单代数已经超过这次请求：身份回不来，不再等（#3297）。不等进 running，
+    // 放弃靠条件里的事实唤醒，不靠 cancelAll。等的期间同一请求已经有回执，也从这里醒，醒了下面再核一次。
+    const earlyExit = patched(REMEASURE_CATCH_UP_CLOSED_PATCH);
+    if (this.parkIdentity() === null && !(earlyExit && this.catchupClosed(command.identity))) {
+      if (earlyExit) {
+        await condition(
+          () =>
+            this.parkIdentity() !== null ||
+            this.sameResume(command) !== null ||
+            this.catchupClosed(command.identity),
+          `${REMEASURE_CATCH_UP_SECONDS} seconds`,
+        );
+      } else {
+        await condition(() => this.parkIdentity() !== null, `${REMEASURE_CATCH_UP_SECONDS} seconds`);
+      }
+    }
+    if (earlyExit) {
+      const again = this.sameResume(command);
+      if (again) return { outcome: 'already_resumed', receipt: again };
+    }
     const park = this.budgetPark;
     const current = this.parkIdentity();
     if (!park || !current || !sameParkIdentity(current, command.identity) || command.head !== current.head)

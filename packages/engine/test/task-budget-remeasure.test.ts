@@ -13,6 +13,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
 import { DEFAULT_PR_LINE_BUDGET } from '../src/limits.ts';
+import type { PortName } from '../src/ports.ts';
 import type { TaskBrief } from '../src/runner/task-brief.ts';
 import {
   type DeliveryRead,
@@ -28,7 +29,8 @@ import {
   taskRemeasureLineBudgetUpdate,
   taskStatusQuery,
 } from '../src/task-contract.ts';
-import { engineBundle, freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
+import { REMEASURE_CATCH_UP_SECONDS } from '../src/workflows/task-budget-remeasure.ts';
+import { engineBundle, freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
 import { goodBrief, scripted } from './task-script.ts';
 
 const currentEnv = useEnv();
@@ -99,10 +101,10 @@ function measured(
 function setup(
   remeasure: Remeasure,
   verifyFirstFails = false,
-  opts: { measuredBase?: string; old?: boolean } = {},
+  opts: { measuredBase?: string; old?: boolean; holdPorts?: PortName[] } = {},
 ) {
   const parkedBase = opts.measuredBase;
-  const world = createFakeWorld();
+  const world = createFakeWorld(opts.holdPorts ? { holdPorts: opts.holdPorts } : {});
   let regular = 0;
   const asks: ReadDeliveryInput['budgetRemeasure'][] = [];
   const { tasks, calls } = scripted({
@@ -230,6 +232,118 @@ const OLD_PARK = (() => {
   return { workflowId: (JSON.parse(first) as { workflowId: string }).workflowId, events };
 })();
 const OLD_PARK_COMMANDS = commandsOf(OLD_PARK.events);
+
+/** 停点报警还挂着、waiting 尚未设上时，第一次体量停点应有的身份（交付头是第二份常规交付）。 */
+function formingPark(runId: string, over: Partial<LineBudgetParkIdentity> = {}): LineBudgetParkIdentity {
+  return {
+    version: 1,
+    runId,
+    parks: 1,
+    generation: 1,
+    continued: 0,
+    prNumber: null,
+    head: fakeHead(102),
+    rawAddedLines: RAW,
+    chargeableAddedLines: RAW,
+    budget: DEFAULT_PR_LINE_BUDGET,
+    base: BASE,
+    ...over,
+  };
+}
+
+type HistEvent = {
+  eventId?: unknown;
+  timerStartedEventAttributes?: { startToFireTimeout?: unknown } | null;
+  timerFiredEventAttributes?: { startedEventId?: unknown } | null;
+  timerCanceledEventAttributes?: { startedEventId?: unknown } | null;
+};
+
+function timeoutSeconds(raw: unknown): number {
+  if (typeof raw === 'string') {
+    const secs = /^(\d+(?:\.\d+)?)s$/.exec(raw);
+    if (secs?.[1]) return Number(secs[1]);
+    const hours = /^(\d+(?:\.\d+)?)h$/.exec(raw);
+    if (hours?.[1]) return Number(hours[1]) * 3600;
+  }
+  if (typeof raw === 'object' && raw !== null && 'seconds' in raw) {
+    const seconds = (raw as { seconds: unknown }).seconds;
+    if (typeof seconds === 'number' || typeof seconds === 'bigint') return Number(seconds);
+    if (typeof seconds === 'string' && seconds !== '') return Number(seconds);
+    if (typeof seconds === 'object' && seconds !== null && 'toNumber' in seconds) {
+      return (seconds as { toNumber: () => number }).toNumber();
+    }
+  }
+  throw new Error(`定时器时长认不出：${JSON.stringify(raw)}`);
+}
+
+function startedTimerSeconds(events: readonly HistEvent[]): number[] {
+  const started: number[] = [];
+  for (const e of events) {
+    if (!e.timerStartedEventAttributes) continue;
+    started.push(timeoutSeconds(e.timerStartedEventAttributes.startToFireTimeout));
+  }
+  return started;
+}
+
+/** 已响或已取消的开始事件。认不出对应的开始时长就抛，不把缺事件当成没响。 */
+function settledTimerSeconds(events: readonly HistEvent[], fired: boolean): number[] {
+  const duration = new Map<string, number>();
+  for (const e of events) {
+    if (!e.timerStartedEventAttributes || e.eventId == null) continue;
+    duration.set(String(e.eventId), timeoutSeconds(e.timerStartedEventAttributes.startToFireTimeout));
+  }
+  const out: number[] = [];
+  for (const e of events) {
+    const id = fired
+      ? e.timerFiredEventAttributes?.startedEventId
+      : e.timerCanceledEventAttributes?.startedEventId;
+    if (id == null) continue;
+    const secs = duration.get(String(id));
+    if (secs === undefined)
+      throw new Error(`定时器${fired ? '响了' : '取消了'}但找不到开始事件 ${String(id)}`);
+    out.push(secs);
+  }
+  return out;
+}
+
+const historyOf = async (h: WorkflowHandle): Promise<HistEvent[]> =>
+  ((await h.fetchHistory()).events ?? []) as HistEvent[];
+
+const catchupTimers = (events: readonly HistEvent[], fired: boolean) =>
+  settledTimerSeconds(events, fired).filter((s) => s === REMEASURE_CATCH_UP_SECONDS);
+
+/**
+ * 等这次 Update。不可恢复的身份若仍起了 catchup 定时器，用 unblock 解开挂着的活动，
+ * 让定时器按历史走完（测试服务端跳过剩余时间也会留下 TimerFired），再把历史交回去断言。
+ */
+async function finishUpdate(
+  h: WorkflowHandle,
+  pending: Promise<RemeasureLineBudgetResult>,
+  unblock: () => void,
+): Promise<{ result: RemeasureLineBudgetResult; events: HistEvent[] }> {
+  let stop = false;
+  const sawTimer = (async () => {
+    const deadline = Date.now() + 8_000;
+    while (!stop && Date.now() < deadline) {
+      if (startedTimerSeconds(await historyOf(h)).includes(REMEASURE_CATCH_UP_SECONDS)) return true;
+      await new Promise((r) => setTimeout(r, 40));
+    }
+    return false;
+  })();
+  const winner = await Promise.race([
+    pending.then((result) => ({ kind: 'result' as const, result })),
+    sawTimer.then((timer) => ({ kind: 'timer' as const, timer })),
+  ]);
+  stop = true;
+  if (winner.kind === 'timer' && winner.timer) unblock();
+  const result = winner.kind === 'result' ? winner.result : await pending;
+  return { result, events: await historyOf(h) };
+}
+
+const expectNoCatchupTimer = (events: readonly HistEvent[]) => {
+  expect(startedTimerSeconds(events).filter((s) => s === REMEASURE_CATCH_UP_SECONDS)).toEqual([]);
+  expect(catchupTimers(events, true)).toEqual([]);
+};
 
 describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
   it('8037 行生成折扣、实际计量 1513：预检只测不放行，执行只放行这一份交付，不设永久豁免；旧停点历史可达、整段可重放', async () => {
@@ -590,5 +704,269 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(run.outcome).toBe('merged');
     expect(asks).toHaveLength(1);
     expect(world.count('pushBranch')).toBe(1);
+  });
+
+  it('catchup：同一身份在停点可见前等到，重评成功且 30 秒定时器取消', async () => {
+    const { world, tasks, asks } = setup((ask) => measured(ask), false, { holdPorts: ['raiseAlert'] });
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        await world.until(
+          () => world.calls.some((c) => c.port === 'raiseAlert' && c.end === null),
+          '体量停点的报警还挂着',
+        );
+        const id = formingPark((await h.describe()).runId);
+        const pending = send(h, command(i, h, id));
+        await waitUntil(async () => {
+          const open = startedTimerSeconds(await historyOf(h)).filter(
+            (s) => s === REMEASURE_CATCH_UP_SECONDS,
+          );
+          const done =
+            catchupTimers(await historyOf(h), true).length + catchupTimers(await historyOf(h), false).length;
+          return open.length > done;
+        }, '同一身份的 catchup 定时器已起');
+        world.releasePort('raiseAlert');
+        expect(await pending).toMatchObject({
+          outcome: 'resumed',
+          receipt: { head: id.head, base: BASE, chargeableAddedLines: 1513 },
+        });
+        const events = await historyOf(h);
+        expect(catchupTimers(events, true)).toEqual([]);
+        expect(catchupTimers(events, false)).toEqual([REMEASURE_CATCH_UP_SECONDS]);
+        expect(asks).toHaveLength(1);
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(world.count('pushBranch')).toBe(1);
+  });
+
+  it('catchup：等待中放弃，定时器取消而不是响，旧请求 stale，工作流结束', async () => {
+    const { world, tasks, asks } = setup((ask) => measured(ask), false, { holdPorts: ['raiseAlert'] });
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        await world.until(
+          () => world.calls.some((c) => c.port === 'raiseAlert' && c.end === null),
+          '体量停点的报警还挂着',
+        );
+        const id = formingPark((await h.describe()).runId);
+        const pending = send(h, command(i, h, id));
+        await waitUntil(
+          async () => startedTimerSeconds(await historyOf(h)).includes(REMEASURE_CATCH_UP_SECONDS),
+          'catchup 定时器已起',
+        );
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '不要了' });
+        // 报警是不可取消的：一直挂着，测试服务端不能把 30 秒跳掉。放弃若唤不醒，这里会真等满才返回。
+        expect(await pending).toMatchObject({ outcome: 'refused', reason: 'stale' });
+        const events = await historyOf(h);
+        expect(catchupTimers(events, true)).toEqual([]);
+        expect(catchupTimers(events, false)).toEqual([REMEASURE_CATCH_UP_SECONDS]);
+        expect(asks).toHaveLength(0);
+        world.releasePort('raiseAlert');
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(world.count('pushBranch')).toBe(0);
+  });
+
+  it('catchup：继续之后原请求才到，再放弃；不测不推，不等定时器响', async () => {
+    let releaseMirror: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      releaseMirror = r;
+    });
+    let mirrorHeld: () => void = () => {};
+    const held = new Promise<void>((r) => {
+      mirrorHeld = r;
+    });
+    let sawBudgetAlert = false;
+    const { world, tasks, asks } = setup((ask) => measured(ask));
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        await held;
+        const pending = send(h, command(i, h, id));
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '不要了' });
+        const { result, events } = await finishUpdate(h, pending, releaseMirror);
+        expect(result).toMatchObject({ outcome: 'refused', reason: 'stale' });
+        expectNoCatchupTimer(events);
+        expect(asks).toHaveLength(0);
+        releaseMirror();
+        return h.result() as Promise<TaskRun>;
+      },
+      {
+        tasks,
+        wrapActivities: (acts) => ({
+          ...acts,
+          raiseAlert: async (input) => {
+            const out = await acts.raiseAlert(input);
+            if (input.title.includes('体量预算')) sawBudgetAlert = true;
+            return out;
+          },
+          saveTaskState: async (input) => {
+            if (sawBudgetAlert && input.state === 'running') {
+              mirrorHeld();
+              await gate;
+            }
+            return acts.saveTaskState(input);
+          },
+        }),
+      },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(world.count('pushBranch')).toBe(0);
+    expect(asks).toHaveLength(0);
+  });
+
+  it('catchup：请求到达时已经放弃，直接拒绝，不起 30 秒定时器', async () => {
+    const { world, tasks, asks } = setup((ask) => measured(ask), false, { holdPorts: ['removeWorktree'] });
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '不要了' });
+        await world.until(
+          () => world.calls.some((c) => c.port === 'removeWorktree' && c.end === null),
+          '放弃后正在收树',
+        );
+        const pending = send(h, command(i, h, id));
+        const { result, events } = await finishUpdate(h, pending, () => world.releasePort('removeWorktree'));
+        expect(result).toMatchObject({ outcome: 'refused', reason: 'stale' });
+        expectNoCatchupTimer(events);
+        expect(asks).toHaveLength(0);
+        world.releasePort('removeWorktree');
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(world.count('pushBranch')).toBe(0);
+  });
+
+  it('catchup：请求到达时已经换代，直接拒绝，不测也不唤醒新停点', async () => {
+    let releaseAlert: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      releaseAlert = r;
+    });
+    let secondEntered: () => void = () => {};
+    const entered = new Promise<void>((r) => {
+      secondEntered = r;
+    });
+    let alerts = 0;
+    const { world, tasks, asks } = setup((ask) => measured(ask), true);
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        const id = await parkedIdentity(h);
+        expect(await send(h, command(i, h, id))).toMatchObject({ outcome: 'resumed' });
+        await entered;
+        // 同一请求的幂等回执在新停点还没可见时也不再测、不唤醒它
+        expect(await send(h, command(i, h, id))).toMatchObject({
+          outcome: 'already_resumed',
+          receipt: { head: id.head, base: BASE },
+        });
+        expect(asks).toHaveLength(1);
+        const pending = send(h, command(i, h, id, { mode: 'check' }));
+        const { result, events } = await finishUpdate(h, pending, releaseAlert);
+        expect(result).toMatchObject({ outcome: 'refused', reason: 'stale' });
+        expectNoCatchupTimer(events);
+        expect(asks).toHaveLength(1);
+        const pushes = world.count('pushBranch');
+        releaseAlert();
+        const next = await parkedIdentity(h, id.parks);
+        expect(next.parks).toBeGreaterThan(id.parks);
+        expect(next.head).not.toBe(id.head);
+        await waitingHuman(h);
+        expect(world.count('pushBranch')).toBe(pushes);
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });
+        return h.result() as Promise<TaskRun>;
+      },
+      {
+        tasks,
+        wrapActivities: (acts) => ({
+          ...acts,
+          raiseAlert: async (input) => {
+            alerts += 1;
+            if (alerts === 2) {
+              secondEntered();
+              await gate;
+            }
+            return acts.raiseAlert(input);
+          },
+        }),
+      },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(asks).toHaveLength(1);
+  });
+
+  it('catchup：计数还小于请求时有界等满 30 秒再拒绝，不测不放行', async () => {
+    let releaseRead: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      releaseRead = r;
+    });
+    let secondEntered: () => void = () => {};
+    const entered = new Promise<void>((r) => {
+      secondEntered = r;
+    });
+    let reads = 0;
+    const { world, tasks, asks } = setup((ask) => measured(ask));
+    const i = input();
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        await entered;
+        const id = formingPark((await h.describe()).runId, { parks: 99, generation: 99, continued: 99 });
+        const pending = send(h, command(i, h, id));
+        expect(await pending).toMatchObject({ outcome: 'refused', reason: 'stale' });
+        const events = await historyOf(h);
+        expect(catchupTimers(events, true)).toEqual([REMEASURE_CATCH_UP_SECONDS]);
+        expect(asks).toHaveLength(0);
+        expect(world.count('pushBranch')).toBe(0);
+        releaseRead();
+        await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });
+        return h.result() as Promise<TaskRun>;
+      },
+      {
+        tasks,
+        wrapActivities: (acts) => ({
+          ...acts,
+          readDelivery: async (input) => {
+            if (!input.budgetRemeasure) {
+              reads += 1;
+              if (reads === 2) {
+                secondEntered();
+                await gate;
+              }
+            }
+            return acts.readDelivery(input);
+          },
+        }),
+      },
+    );
+    expect(run.outcome).toBe('abandoned');
+    expect(asks).toHaveLength(0);
   });
 });
