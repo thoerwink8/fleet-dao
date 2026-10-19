@@ -5,8 +5,12 @@ import { createPgStore } from '@fleet-dao/store';
 import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { main } from '../src/cli.ts';
+import type { TaskRedoPort } from '../src/deps.ts';
+import type { WorkflowControl } from '../src/ports.ts';
+import { runTask } from '../src/task-cli.ts';
 import type { ExecutionFacts } from '../src/task-correct-merged.ts';
 import { type GitHubGet, portsFromParts } from '../src/task-correct-merged-cli.ts';
+import { fencedTaskRedo } from '../src/task-generation-fence.ts';
 
 const HEAD = '5b52006a9cdcef60c030c5dbeec645f81a2ad86a';
 const MERGE = 'bfe1b1ae69c7ae6404b068eb3ed7bde3082b3e40';
@@ -29,6 +33,11 @@ interface World {
   onSecondRead: (() => Promise<void>) | null;
   /** CAS 调用前（已过二次读取）Temporal 多出一代。 */
   generationBeforeCas: boolean;
+  /** 替身 Temporal 起代的次数（经 fencedTaskRedo + runTask 进来的重做）。 */
+  redoStarts: number;
+  /** 第一次读取之后（栅栏之外）、第二次读取之后（栅栏之内）各跑一次的交错钩子。 */
+  afterFirstRead: (() => Promise<void>) | null;
+  afterSecondRead: (() => Promise<void>) | null;
   /** 只让写入之后的第二次核对失败：验证事务回滚。 */
   failVerifyAfterWrite: boolean;
   wrapCas: boolean;
@@ -59,6 +68,9 @@ function world(): World {
     onSecondRead: null,
     generationBeforeCas: false,
     failVerifyAfterWrite: false,
+    redoStarts: 0,
+    afterFirstRead: null,
+    afterSecondRead: null,
     wrapCas: false,
     conflictOnCas: false,
     reads: 0,
@@ -174,9 +186,13 @@ describe('task correct-merged 真实装配', () => {
             read: async (request) => {
               current.reads += 1;
               if (current.reads === 2 && current.onSecondRead) await current.onSecondRead();
-              return real.read(request);
+              const snapshot = await real.read(request);
+              if (current.reads === 1 && current.afterFirstRead) await current.afterFirstRead();
+              if (current.reads === 2 && current.afterSecondRead) await current.afterSecondRead();
+              return snapshot;
             },
             execution: (request) => real.execution(request),
+            fence: (taskId, fn) => real.fence(taskId, fn),
             cas: async (input) => {
               current.casCalls += 1;
               if (current.generationBeforeCas) current.extraGeneration = true;
@@ -267,6 +283,26 @@ describe('task correct-merged 真实装配', () => {
 
   async function audits() {
     return t.db.select().from(auditLog).where(eq(auditLog.action, 'task.correct-merged'));
+  }
+
+  /** 经真实 runTask（task 命令的重做）起代，栅栏和替身 Temporal 都是真的。返回回给人看的那句，或拒绝原因。 */
+  function redoViaRunTask(): Promise<string> {
+    const store = createPgStore(t.db, { now: () => new Date('2026-10-19T02:00:00.000Z') });
+    const port: TaskRedoPort = {
+      async redo() {
+        current.redoStarts += 1;
+        current.extraGeneration = true;
+        return { ok: true, workflowId: `${WF}:r2`, generation: 2 };
+      },
+    };
+    const workflows = { async signal() {} } as unknown as WorkflowControl;
+    return runTask(
+      { action: 'redo', owner: 'thoerwink8', name: 'fleet-dao', issueNumber: 3114, note: '交错回归' },
+      { store, workflows, taskRedo: fencedTaskRedo(port, store), operator: 'founder' },
+    ).then(
+      (text) => text,
+      (err: unknown) => (err instanceof Error ? err.message : String(err)),
+    );
   }
 
   it('预检不写；--apply 纠正并留下原 run、原 abandoned 结果和待验责任', async () => {
@@ -665,6 +701,47 @@ describe('task correct-merged 真实装配', () => {
     const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
     expect(changes.some((change) => change.toState === 'done')).toBe(false);
   });
+
+  it('固定交错：两次读取后、CAS 前，重做经栅栏要起新代——纠正先写完，重做重读到已做完而拒绝，新代从未起', async () => {
+    let pending: Promise<string> | null = null;
+    let startsWhileHeld = -1;
+    current.afterSecondRead = async () => {
+      pending = redoViaRunTask();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      startsWhileHeld = current.redoStarts;
+    };
+    const result = await invoke(args(['--apply']));
+    expect(startsWhileHeld).toBe(0);
+    expect(result.code).toBe(0);
+    expect(result.json?.status).toBe('corrected');
+    expect(await pending).toContain('现在是done');
+    expect(current.redoStarts).toBe(0);
+    const row = await taskRow();
+    expect(row?.state).toBe('done');
+    expect(row?.phase).toBe('merged');
+    expect(await audits()).toHaveLength(1);
+    const kept = await t.db.select().from(runs).where(eq(runs.taskId, TASK));
+    expect(kept.map((run) => run.outcome)).toEqual(['done']);
+  }, 30_000);
+
+  it('固定交错：第一次读取后、栅栏前，重做先起了新代——纠正第二次读取核对到新代，拒绝且不写', async () => {
+    let redoText = '';
+    current.afterFirstRead = async () => {
+      redoText = await redoViaRunTask();
+    };
+    const result = await invoke(args(['--apply']));
+    expect(redoText).toContain('已重做');
+    expect(current.redoStarts).toBe(1);
+    expect(result.code).toBe(1);
+    expect(result.json?.status).toBe('refused');
+    expect(result.json?.reason).toMatch(/新的一代|变了/);
+    expect(current.casCalls).toBe(0);
+    const row = await taskRow();
+    expect(row?.state).toBe('stopped');
+    expect(row?.phase).toBe('abandoned');
+    expect(row?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
+    expect(await audits()).toEqual([]);
+  }, 30_000);
 
   it('核对之后更新时间被别人改了，事务回 stale，不写成 done', async () => {
     current.wrapCas = true;

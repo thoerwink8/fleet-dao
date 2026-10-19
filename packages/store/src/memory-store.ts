@@ -84,6 +84,7 @@ import type {
   Store,
   User,
 } from './ports.ts';
+import { taskFenceName } from './task-fence.ts';
 import {
   addRepoAudit,
   autoDispatchAudit,
@@ -286,6 +287,21 @@ function paginate<T extends { at: string; id: string }>(
 /** 受管纠正写入之后外部核对没过：抛出以回滚，外层转成 stale。 */
 class StaleAfterWrite extends Error {}
 
+/** 进程内的任务栅栏：同一名字一次只跑一个 fn，后来的排队。 */
+const fenceTails = new Map<string, Promise<unknown>>();
+function queueFence<T>(name: string, fn: () => Promise<T>): Promise<T> {
+  const prev = fenceTails.get(name) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  fenceTails.set(name, settled);
+  return run.finally(() => {
+    if (fenceTails.get(name) === settled) fenceTails.delete(name);
+  });
+}
+
 export function createMemoryStore(
   seed: Partial<MemoryData> = {},
   options: MemoryStoreOptions = {},
@@ -429,6 +445,8 @@ export function createMemoryStore(
     verify?: () => Promise<boolean>;
   }): Promise<'corrected' | 'stale'> {
     if (!Number.isSafeInteger(input.expectedUpdatedAtMs)) return 'stale';
+    // 外部核对先于同步段：从这里到写完不再 await，并发的两次纠正不会都通过检查
+    if (input.verify && !(await input.verify())) return 'stale';
     const index = data.tasks.findIndex((row) => row.id === input.taskId);
     const task = data.tasks[index];
     const closure = data.taskClosures.find((row) => row.taskId === input.taskId);
@@ -452,7 +470,6 @@ export function createMemoryStore(
         ended: run.endedAt !== undefined,
       }));
     if (!sessionLinkHolds(sessions, input.workflowId, input.prNumber, input.runId)) return 'stale';
-    if (input.verify && !(await input.verify())) return 'stale';
     const entry: NewAuditEntry = {
       actor: { kind: 'ops', id: input.audit.actorId },
       action: CORRECT_MERGED_AUDIT_ACTION,
@@ -928,6 +945,9 @@ export function createMemoryStore(
     },
     async readCorrectMergedLedger(input) {
       return readLedger(input);
+    },
+    async withTaskFence(taskId, fn) {
+      return queueFence(taskFenceName(taskId), fn);
     },
     async casCorrectMerged(input) {
       return casLedger(input);

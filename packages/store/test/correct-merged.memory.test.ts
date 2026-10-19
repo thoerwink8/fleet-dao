@@ -131,6 +131,44 @@ describe('内存版受管纠正', () => {
     expect(ok.data.tasks[0]?.state).toBe('done');
   });
 
+  it('两个并发纠正同时到达：外部核对时让出，只有一次写入，另一次回 stale', async () => {
+    const memory = store();
+    const slowVerify = async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return true;
+    };
+    const [a, b] = await Promise.all([
+      memory.casCorrectMerged({ ...input, verify: slowVerify }),
+      memory.casCorrectMerged({ ...input, verify: slowVerify }),
+    ]);
+    expect([a, b].sort()).toEqual(['corrected', 'stale']);
+    expect(
+      memory.data.audit.filter((row) => row.action === CORRECT_MERGED_AUDIT_ACTION && row.ok),
+    ).toHaveLength(1);
+    expect(memory.data.stateChanges.filter((row) => row.to === 'done')).toHaveLength(1);
+  });
+
+  it('任务栅栏同一任务串行，不同任务互不等', async () => {
+    const memory = store();
+    const order: string[] = [];
+    const slow = memory.withTaskFence(TASK, async () => {
+      order.push('a:start');
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      order.push('a:end');
+      return 'a';
+    });
+    const next = memory.withTaskFence(TASK, async () => {
+      order.push('b');
+      return 'b';
+    });
+    const other = memory.withTaskFence('other-task', async () => {
+      order.push('other');
+      return 'other';
+    });
+    expect(await Promise.all([slow, next, other])).toEqual(['a', 'b', 'other']);
+    expect(order.indexOf('a:end')).toBeLessThan(order.indexOf('b'));
+  });
+
   it('开着的会话或更新时间变了就不写', async () => {
     const memory = store();
     memory.data.runs.push({

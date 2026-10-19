@@ -79,6 +79,7 @@ import { pgRunTranscript } from './run-transcript.ts';
 import { sessionOrgHealthCheck } from './session-org-health.ts';
 import { closeConnectionWhenStopping, gracefulShutdown } from './shutdown.ts';
 import { readEnvSnapshot, readHomeSnapshot } from './snapshots.ts';
+import { fencedTaskRedo } from './task-generation-fence.ts';
 import { pgTaskRoutePins } from './task-route-pins.ts';
 import { connectTemporal, ENGINE_OFF } from './temporal.ts';
 import { startWatchdogWatch, WATCHDOG_NOT_HERE, watchdogHealthCheck } from './watchdog-health.ts';
@@ -222,7 +223,7 @@ async function assemble(): Promise<{
     now,
     feishu,
     workflows: temporal.control,
-    taskRedo: temporal.taskRedo,
+    taskRedo: fencedTaskRedo(temporal.taskRedo, store),
     github: github.sink,
     ...(github.ciPolicyBridge ? { ciPolicyBridge: github.ciPolicyBridge } : {}),
     acceptanceDuties: (identity) => readAcceptanceDutyRows(db, identity),

@@ -244,11 +244,12 @@ export function snapshotFrom(
 }
 
 export function portsFromParts(parts: {
-  ledger: Pick<Store, 'readCorrectMergedLedger' | 'casCorrectMerged'>;
+  ledger: Pick<Store, 'readCorrectMergedLedger' | 'casCorrectMerged' | 'withTaskFence'>;
   github: GitHubGet;
   execution(req: CorrectionRequest): Promise<ExecutionFacts>;
 }): CorrectMergedPorts {
   return {
+    fence: (taskId, fn) => parts.ledger.withTaskFence(taskId, fn),
     execution: (req) => parts.execution(req),
     async read(req) {
       const ledger = await parts.ledger.readCorrectMergedLedger({
@@ -362,6 +363,7 @@ export async function runCorrectMergedCommand(
   if (!operatorAllowed(operator) || !workflowBelongs(req.workflowId, req.repo, req.issueNumber)) {
     const report = await runCorrectMerged(req, operator, args.note, mode, {
       read: () => Promise.reject(new Error('前置不成立，不应读取')),
+      fence: () => Promise.reject(new Error('前置不成立，不应进栅栏')),
       execution: () => Promise.reject(new Error('前置不成立，不应读取')),
       cas: () => Promise.reject(new Error('前置不成立，不应写入')),
     });

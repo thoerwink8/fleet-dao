@@ -111,6 +111,7 @@ import {
   TaskCliError,
 } from './task-cli.ts';
 import { type OpenedCorrectMerged, runCorrectMergedCommand } from './task-correct-merged-cli.ts';
+import { fencedTaskRedo } from './task-generation-fence.ts';
 import { nowSeconds, randomToken } from './tokens.ts';
 
 export class CliError extends Error {
@@ -1511,7 +1512,7 @@ async function runTaskCommand(rest: readonly string[], deps: CliDeps): Promise<n
       await runTask(args, {
         store: opened.store,
         workflows: control.workflows,
-        taskRedo: control.taskRedo,
+        taskRedo: fencedTaskRedo(control.taskRedo, opened.store),
         operator: operatorName(deps.env),
       }),
     );

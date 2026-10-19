@@ -16,6 +16,8 @@ import {
 } from './task-correct-merged.ts';
 
 export interface CorrectMergedPorts {
+  /** 任务栅栏（与受管起代共用）：fn 里做第二次读取、核对、写入。 */
+  fence<T>(taskId: string, fn: () => Promise<T>): Promise<T>;
   read(req: CorrectionRequest): Promise<CorrectMergedSnapshot>;
   /** 只读这张单的原工作流各代（Temporal describe/result），给 CAS 前后核对用。 */
   execution(req: CorrectionRequest): Promise<ExecutionFacts>;
@@ -176,6 +178,23 @@ export async function runCorrectMerged(
     return { mode, status: view.status, text: view.text, preview: proposed };
   }
 
+  const taskId = first.task?.id;
+  if (!taskId) return refused(mode, req, first, '任务行不在库里，不纠正');
+  // 栅栏里才第二次读取、核对、写入：受管起代（重做）也抢这把栅栏，所以它要么在这之前起完（这里核对到新代、拒绝），
+  // 要么等这里写完（重做重读到已做完、拒绝）。两边不会交错。
+  return ports.fence(taskId, () => confirmAndApply(req, operator, reason, mode, first, decision, ports, ref));
+}
+
+async function confirmAndApply(
+  req: CorrectionRequest,
+  operator: string,
+  reason: string,
+  mode: 'precheck' | 'apply',
+  first: CorrectMergedSnapshot,
+  decision: Extract<CorrectionDecision, { ok: true }>,
+  ports: CorrectMergedPorts,
+  ref: string,
+): Promise<CorrectMergedReport> {
   let second: CorrectMergedSnapshot;
   try {
     second = await ports.read(req);
