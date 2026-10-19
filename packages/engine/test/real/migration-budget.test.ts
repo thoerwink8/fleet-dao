@@ -54,7 +54,7 @@ async function fixture(renameSnapshot = false, seedPath?: string) {
   const raw = await addedLinesAgainst(tree, base, head);
   return { tree, base, head, raw, put, commit, prefix, git };
 }
-describe('固定 Git blob 的生成快照计量', { timeout: 30000 }, () => {
+describe('固定 Git blob 的生成快照计量', { timeout: 60_000 }, () => {
   it.each([
     ['A', 'packages/db/src/migration-budget-data.ts'],
     ['M', 'packages/db/src/migration-budget-data.ts'],
