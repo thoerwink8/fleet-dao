@@ -3,7 +3,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { fingerprint, receiptStatus } from '../hooks/continuation-receipts.mjs';
+import { latestRows } from '../hooks/continuation-latest.mjs';
+import { fingerprint, readLatestReceiptState, receiptStatus } from '../hooks/continuation-receipts.mjs';
 import { runChild } from './child.ts';
 import { codexSourceFixture } from './codex-source-fixture.ts';
 import { interactiveHookEnv } from './hook-env.ts';
@@ -34,13 +35,13 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
     },
   );
   expect(opened.status).toBe(0);
-  const file = join(dir, '.receipts', `${fingerprint(sid)}.jsonl`);
+  const file = join(dir, '.receipts', `${fingerprint(sid)}.latest-v2`);
   const stateFile = join(dir, `${sid}.json`);
-  const rows = () =>
-    readFileSync(file, 'utf8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
+  const rows = () => {
+    const read = readLatestReceiptState(dir, fingerprint(sid));
+    if (!read.ok || !read.state) throw Error(read.ok ? 'missing snapshot' : read.code);
+    return latestRows(read.state).filter((row) => row !== null);
+  };
   const run = (hook: string, input: object = {}, extra: NodeJS.ProcessEnv = {}) => {
     const r = runChild(process.execPath, [fileURLToPath(new URL(`../hooks/${hook}.mjs`, import.meta.url))], {
       cwd: dir,
@@ -120,12 +121,9 @@ describe('可信Codex wrapper使用本次事件turn，CLI家族不授予根资�
       }
       expect(readFileSync(s.file)).toEqual(parent);
       expect(readFileSync(s.stateFile)).toEqual(state);
-      const pool = join(s.dir, '.receipts', `${'0'.repeat(64)}.jsonl`);
+      const pool = join(s.dir, '.receipts', `${'0'.repeat(64)}.latest-v2`);
       expect(existsSync(pool)).toBe(true);
-      const rows = readFileSync(pool, 'utf8')
-        .trim()
-        .split('\n')
-        .map((line) => JSON.parse(line));
+      const rows = [JSON.parse(readFileSync(pool, 'utf8'))];
       expect(
         rows.every(
           (r) => r.authority === (kind === 'unknown' || kind === 'cli-conflict' ? 'unknown' : 'machine'),

@@ -25,6 +25,7 @@ try {
     process.env,
     authority.kind,
     'codex',
+    session.ok ? () => readState(dir, session.id) : undefined,
   );
   receipt = context;
   noteReceipt(context, { phase: 'entered', decision: 'none' });

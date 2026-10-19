@@ -17,6 +17,8 @@ import {
   fingerprint,
   MAX_RECEIPT_FILES,
   MAX_RECEIPT_ROWS,
+  readLatestDiagnosticState,
+  readLatestReceiptState,
   receiptContext,
 } from '../hooks/continuation-receipts.mjs';
 import { runChild } from './child.ts';
@@ -52,6 +54,16 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
   const root = join(dir, '.receipts');
   const parentFile = join(root, `${fingerprint(sid)}.jsonl`);
   const pool = join(root, `${poolKey}.jsonl`);
+  const diagnosticFile = join(root, `${poolKey}.latest-v2`);
+  // 升级前v1历史原位保留；后续真实入口不追加这些文件。
+  rmSync(join(root, `${fingerprint(sid)}.latest-v2`));
+  const captured = JSON.parse(readFileSync(stateFile, 'utf8'));
+  expect(
+    appendReceipt(receiptContext(dir, { session_id: sid }, captured, 'Command', env, 'allowed'), {
+      phase: 'window',
+      decision: 'on',
+    }),
+  ).toEqual({ ok: true });
   const run = (script: string, more: object = {}, extra: NodeJS.ProcessEnv = {}, raw?: string) =>
     runChild(process.execPath, [fileURLToPath(new URL(`../hooks/${script}.mjs`, import.meta.url))], {
       cwd: dir,
@@ -60,12 +72,33 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
     });
   const context = (session: string, authority: 'allowed' | 'machine' | 'unknown' = 'machine') =>
     receiptContext(dir, { session_id: session }, null, 'PostToolUse', env, authority);
-  const diagnostics = () =>
-    readFileSync(pool, 'utf8')
-      .trim()
-      .split('\n')
-      .map((line) => JSON.parse(line));
-  return { dir, sid, env, root, parentFile, pool, stateFile, run, command, context, diagnostics };
+  const legacyDiagnostics = () =>
+    existsSync(pool)
+      ? readFileSync(pool, 'utf8')
+          .trim()
+          .split('\n')
+          .map((line) => JSON.parse(line))
+      : [];
+  const diagnostics = () => {
+    const read = readLatestDiagnosticState(dir);
+    if (!read.ok) throw Error(read.code);
+    return [...legacyDiagnostics(), ...(read.state ? [read.state] : [])];
+  };
+  return {
+    dir,
+    sid,
+    env,
+    root,
+    parentFile,
+    pool,
+    diagnosticFile,
+    stateFile,
+    run,
+    command,
+    context,
+    diagnostics,
+    legacyDiagnostics,
+  };
 }
 
 describe('非根回执容量隔离，原权威来源与原业务不变', { timeout: 0 }, () => {
@@ -80,15 +113,14 @@ describe('非根回执容量隔离，原权威来源与原业务不变', { timeo
       const r = s.run(script, more, extra);
       expect(r.status).toBe(0);
       expect(r.stdout).toBe('');
+      expect(s.diagnostics().at(-1)).toMatchObject({
+        authority: 'machine',
+        receipt: { cli: 'claude', event: script === 'stop' ? 'Stop' : 'PostToolUse', phase: 'bypass' },
+      });
     }
     expect(readFileSync(s.parentFile)).toEqual(parent);
     expect(readFileSync(s.stateFile)).toEqual(state);
-    expect(s.diagnostics()).toMatchObject([
-      { authority: 'machine', receipt: { cli: 'claude', event: 'PostToolUse', phase: 'entered' } },
-      { authority: 'machine', receipt: { cli: 'claude', event: 'PostToolUse', phase: 'bypass' } },
-      { authority: 'machine', receipt: { cli: 'claude', event: 'Stop', phase: 'entered' } },
-      { authority: 'machine', receipt: { cli: 'claude', event: 'Stop', phase: 'bypass' } },
-    ]);
+    expect(s.diagnostics()).toHaveLength(1);
   });
 
   it.each(['agent', 'native-child', 'headless', 'worker', 'unknown'] as const)(
@@ -119,15 +151,26 @@ describe('非根回执容量隔离，原权威来源与原业务不变', { timeo
         const r = s.run(script, input, extra);
         expect(r.status).toBe(0);
         if (r.stdout) expect(JSON.parse(r.stdout).decision).not.toBe('block');
+        const row = s.diagnostics().at(-1);
+        expect(row).toMatchObject({
+          authority: kind === 'unknown' ? 'unknown' : 'machine',
+          receipt: {
+            event:
+              script === 'continuation-start'
+                ? 'SessionStart'
+                : script === 'stop-codex'
+                  ? 'Stop'
+                  : 'PostToolUse',
+            phase: kind === 'unknown' ? 'fault' : 'bypass',
+            session: fingerprint(s.sid),
+            generation: null,
+          },
+        });
       }
       expect(readFileSync(s.parentFile)).toEqual(before);
       expect(readFileSync(s.stateFile)).toEqual(state);
       const rows = s.diagnostics();
-      expect(rows.filter((r) => r.receipt.phase === 'entered').map((r) => r.receipt.event)).toEqual([
-        'SessionStart',
-        'PostToolUse',
-        'Stop',
-      ]);
+      expect(rows).toHaveLength(1);
       expect(rows.every((r) => r.authority === (kind === 'unknown' ? 'unknown' : 'machine'))).toBe(true);
       expect(
         rows.every(
@@ -138,9 +181,9 @@ describe('非根回执容量隔离，原权威来源与原业务不变', { timeo
         ),
       ).toBe(true);
       expect(rows.filter((r) => r.receipt.phase === (kind === 'unknown' ? 'fault' : 'bypass'))).toHaveLength(
-        3,
+        1,
       );
-      expect(readFileSync(s.pool, 'utf8')).not.toMatch(
+      expect(readFileSync(s.diagnosticFile, 'utf8')).not.toMatch(
         /private-command-canary|private-output-canary|capacity-root|child-agent/,
       );
     },
@@ -163,7 +206,7 @@ describe('非根回执容量隔离，原权威来源与原业务不变', { timeo
     ]);
   });
 
-  it('不同子session只用一份池，原根命令和Stop仍留原文件，旧准入仍可建新根日志', () => {
+  it('旧writer仍按旧池追加；新入口保持旧文件不变，最新Stop进入v2', () => {
     const s = fixture();
     const before = readFileSync(s.parentFile);
     for (let i = 0; i <= MAX_RECEIPT_FILES; i++)
@@ -172,7 +215,7 @@ describe('非根回执容量隔离，原权威来源与原业务不变', { timeo
       });
     expect(readFileSync(s.parentFile)).toEqual(before);
     expect(readdirSync(s.root).filter((name) => name.endsWith('.jsonl'))).toHaveLength(2);
-    expect(new Set(s.diagnostics().map((r) => r.receipt.session)).size).toBe(MAX_RECEIPT_FILES + 1);
+    expect(new Set(s.legacyDiagnostics().map((r) => r.receipt.session)).size).toBe(MAX_RECEIPT_FILES + 1);
     // 同一个目录中已有新池，旧准入识别的受管名字不使合法新根创建变成IO。
     expect(
       appendReceipt(s.context('second-root', 'allowed'), { phase: 'entered', decision: 'none' }),
@@ -184,8 +227,12 @@ describe('非根回执容量隔离，原权威来源与原业务不变', { timeo
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line));
-    expect(rootRows.some((r) => r.event === 'Command' && r.decision === 'off')).toBe(true);
-    expect(rootRows.some((r) => r.event === 'Stop' && r.phase === 'emitted')).toBe(true);
+    expect(readFileSync(s.parentFile)).toEqual(before);
+    const latest = readLatestReceiptState(s.dir, fingerprint(s.sid));
+    expect(latest).toMatchObject({
+      ok: true,
+      state: { pending: { emitted: { event: 'Stop', phase: 'emitted' } } },
+    });
     expect(rootRows.every((r) => r.session === fingerprint(s.sid))).toBe(true);
   });
 
