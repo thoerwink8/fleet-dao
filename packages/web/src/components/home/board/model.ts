@@ -7,6 +7,8 @@
 // - 「还没验」（verify_pending）不是失败：颜色走 stall 黄系，不进「卡住的」过滤；红只留给最近一次事件是 trouble 的单。
 // - 「卡住」只算失败色。等你色不算卡住，单独走「只看等你的」。两个过滤都开时取并集。
 // - 推不出在哪一段的单（segment=null）挂在「还没分段」下面，只有真有这样的单才出现这一支，不拿空节点占地方。
+// - 引擎停下等人的单（waitingReason=parked：额度、体量超预算，认不出的 GitHub 错误……）不按它停在哪一段分，
+//   单独一组「停下等你」排在三段之后（#3279：验收栏 7 张里 6 张其实是停下等人，看着像一堆待验证）；同样只有真有才画。
 // - 三段节点永远在（哪怕这一段 0 张）：它们是流程本身；过滤只藏单子，不藏段。
 // - 单子节点编号 ticket:<单号>:<owner/name>（e2e 按这个前缀数单子）。
 import { laneOf, type SegmentKind } from '@fleet-dao/shared';
@@ -17,12 +19,19 @@ import { needsFounder, toneOf } from '../running-card';
 import type { HomeFlowStage, HomeHealth, HomeResources, HomeRunning } from '../types';
 import { segmentNodeWidth } from './far-type';
 
-export type SegmentKey = SegmentKind | 'none';
-export const SEGMENT_KEYS: readonly SegmentKey[] = ['scope', 'manual', 'verify', 'none'];
+export type SegmentKey = SegmentKind | 'parked' | 'none';
+export const SEGMENT_KEYS: readonly SegmentKey[] = ['scope', 'manual', 'verify', 'parked', 'none'];
+
+/** 不是流程里的段、只有真有单才画的组。 */
+export function isOptionalKey(key: SegmentKey): key is 'parked' | 'none' {
+  return key === 'parked' || key === 'none';
+}
 
 /** 一段给人看的名字。 */
 export function segmentName(key: SegmentKey): string {
-  return key === 'none' ? '还没分段' : segmentLabel[key];
+  if (key === 'none') return '还没分段';
+  if (key === 'parked') return '停下等你';
+  return segmentLabel[key];
 }
 
 export type NodeKind = 'root' | 'segment' | 'ticket' | 'ask';
@@ -150,6 +159,7 @@ export const nodeId = {
 };
 
 export function segmentKeyOf(item: HomeRunning): SegmentKey {
+  if (item.waitingReason === 'parked') return 'parked';
   return laneOf(item.segment) ?? 'none';
 }
 
@@ -222,18 +232,18 @@ export interface SegmentGroup {
   total: number;
 }
 
-/** 按段分组：三段固定先后；「还没分段」只在真有这样的单时才有。 */
+/** 按段分组：三段固定先后；「停下等你」「还没分段」只在真有这样的单时才有。 */
 export function groupSegments(
   running: readonly HomeRunning[],
   flow: readonly HomeFlowStage[],
   filter: BoardFilter,
 ): SegmentGroup[] {
-  const keys = SEGMENT_KEYS.filter((k) => k !== 'none' || running.some((r) => segmentKeyOf(r) === 'none'));
+  const keys = SEGMENT_KEYS.filter((k) => !isOptionalKey(k) || running.some((r) => segmentKeyOf(r) === k));
   return keys.map((key) => {
     const all = running.filter((r) => segmentKeyOf(r) === key);
     return {
       key,
-      stage: key === 'none' ? undefined : flow.find((f) => f.segment === key),
+      stage: isOptionalKey(key) ? undefined : flow.find((f) => f.segment === key),
       items: all.filter((r) => passesFilter(r, filter)).sort(compareTickets),
       total: all.length,
     };

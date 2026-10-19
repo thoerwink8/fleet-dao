@@ -1838,6 +1838,55 @@ describe('任务工作流 · 挂合并时检查还在跑（Refs 重跑 merge-gat
     expect(run).toMatchObject({ outcome: 'merged', head });
     expect(calls.merged).toBe(2);
   });
+
+  it('【#3281 故意造出的失败】必过检查没查成停下：只报一次警；每小时复核，没满足原地等、满足了自己醒来合上，不用点「继续」', async () => {
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const detail = `PR #12 头 ${head} 的必过检查没查成：merge-gate 没出现`;
+    const { tasks, calls } = scripted({
+      merged: (n) =>
+        n === 1 ? { state: 'checks_unreadable', detail } : { state: 'merged', mergeCommit: 'abc1234567890' },
+      mergeReady: (n) =>
+        n < 3
+          ? { ready: false, why: `头 ${head.slice(0, 7)} 的必过检查还没全绿（还在跑：merge-gate）` }
+          : { ready: true, why: '必过检查全绿' },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head });
+    expect(calls.mergeReady).toHaveLength(3);
+    expect(calls.mergeReady.map((i) => i.expectedHead)).toEqual([head, head, head]);
+    // 停下那一下报一次；没满足的两次复核不再报
+    expect(world.alerts.map((a) => a.title)).toEqual(['必过检查没查成']);
+    expect(world.alerts[0]?.detail).toContain('不用点「继续」');
+    // 醒来和人点「继续」回来一样：自动合并还挂着，接着等合并（挂一次、等合并两次）
+    expect(calls.arm).toBe(1);
+    expect(calls.merged).toBe(2);
+  });
+
+  it('【#3281】自己醒来后同一个头又因同一个原因停下：不再报警；人点「继续」照样能接着走', async () => {
+    const world = createFakeWorld();
+    const head = fakeHead(101);
+    const detail = `PR #12 头 ${head} 的必过检查没查成：merge-gate 没出现`;
+    const { tasks, calls } = scripted({
+      merged: (n) =>
+        n <= 2 ? { state: 'checks_unreadable', detail } : { state: 'merged', mergeCommit: 'abc1234567890' },
+      mergeReady: () => ({ ready: true, why: '必过检查全绿' }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head });
+    expect(calls.merged).toBe(3);
+    expect(world.alerts.map((a) => a.title)).toEqual(['必过检查没查成']);
+  });
 });
 
 describe('任务工作流 · 切号停下动手那一段（org_switch，#59）', { timeout: 60_000 }, () => {

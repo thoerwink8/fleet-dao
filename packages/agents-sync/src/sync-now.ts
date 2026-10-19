@@ -19,6 +19,7 @@ export const NOW_USAGE = `pnpm agents:sync —— 现在就把这台机器同步
   pnpm agents:sync --check     预检：不取远端、不切源、不更新目标配置，只报这台和仓里（上次取到的主线）差在哪；
                                 封装仍会临时创建并释放源锁 ~/.fleet-dao/origin-main.lock，整条命令不是零写入
   pnpm agents:sync --offline   不取远端（取不到时用），按本机上次取到的 origin/main 同步
+  pnpm agents:sync --no-maintenance  仍同步全部目标，但本次不运行 Mirasim 迁移、本机会话 refresh、reclaude 后台健康维护；不是只同步钩子
   pnpm agents:sync --seed <目录>   拿这个 fleet-dao 检出当种子（第一次建专用检出、或它坏了要重建时用；
                                 默认：~/.fleet-dao/synced.json 记的那个检出，再没有就是本脚本所在的检出）
 
@@ -46,15 +47,24 @@ export interface NowDeps {
   /** 在 dir 里跑一条取远端的 git：比读慢，超时另算（60 秒） */
   fetch: (dir: string, args: string[]) => GitResult;
   /** 用检出里的 agents-sync 跑一遍，输出直接给用户看；返回退出码，跑不起来是错误 */
-  sync: (repo: string, mode: '--apply' | '--check') => { status: number | null; error?: Error | undefined };
+  sync: (
+    repo: string,
+    mode: '--apply' | '--check',
+    options?: SyncOptions,
+  ) => { status: number | null; error?: Error | undefined };
   stdout: (text: string) => void;
   stderr: (text: string) => void;
+}
+
+export interface SyncOptions {
+  noMaintenance?: boolean;
 }
 
 interface Args {
   mode: '--apply' | '--check';
   offline: boolean;
   seed?: string;
+  noMaintenance?: boolean;
 }
 
 function parse(argv: readonly string[]): Args | 'help' | string {
@@ -64,6 +74,7 @@ function parse(argv: readonly string[]): Args | 'help' | string {
     if (a === '--help' || a === '-h') return 'help';
     if (a === '--check') out.mode = '--check';
     else if (a === '--offline') out.offline = true;
+    else if (a === '--no-maintenance') out.noMaintenance = true;
     // --repo 是原来的名字，留着：意思一样（给一个 fleet-dao 检出当种子）
     else if (a === '--seed' || a === '--repo') {
       const v = argv[++i];
@@ -204,7 +215,9 @@ export async function syncNow(argv: readonly string[], deps: NowDeps): Promise<n
       deps.stdout(`同步专用的检出 ${prepared.dir} 切到了主线 ${short(head)}。\n`);
     else deps.stdout(`同步专用的检出 ${prepared.dir} 本来就在主线 ${short(head)}。\n`);
 
-    const r = deps.sync(prepared.dir, args.mode);
+    const r = args.noMaintenance
+      ? deps.sync(prepared.dir, args.mode, { noMaintenance: true })
+      : deps.sync(prepared.dir, args.mode);
     if (r.error || r.status === null) {
       deps.stderr(`一键同步没跑成：agents-sync 起不来（${r.error?.message ?? '没有退出码'}）\n`);
       return 1;
@@ -258,8 +271,13 @@ export function realGit(timeoutMs: number): (dir: string, args: string[]) => Git
 export function realSync(
   repo: string,
   mode: '--apply' | '--check',
+  options: SyncOptions = {},
 ): { status: number | null; error?: Error } {
   const bin = join(repo, 'packages', 'agents-sync', 'bin', 'agents-sync');
-  const r = spawnSync(process.execPath, [bin, mode, '--repo', repo], { stdio: 'inherit', windowsHide: true });
+  const r = spawnSync(
+    process.execPath,
+    [bin, mode, '--repo', repo, ...(options.noMaintenance ? ['--no-maintenance'] : [])],
+    { stdio: 'inherit', windowsHide: true },
+  );
   return { status: r.status, ...(r.error ? { error: r.error } : {}) };
 }

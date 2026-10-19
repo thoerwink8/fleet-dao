@@ -49,6 +49,8 @@ import type {
   MergedTaskReceipt,
   MergeNowInput,
   MergeNowResult,
+  MergeReadyInput,
+  MergeReadyResult,
   MergeWait,
   NoteBare401Input,
   NoteBare401Result,
@@ -308,6 +310,8 @@ export interface EngineTasks {
   checkGuarded?: (input: CheckGuardedInput, ctx: PortContext) => Promise<GuardedPaths>;
   armAutoMerge?: (input: ArmAutoMergeInput, ctx: PortContext) => Promise<ArmAutoMergeResult>;
   waitMerged?: (input: WaitMergedInput, ctx: PortContext) => Promise<MergeWait>;
+  /** 停在合并这一步时现读一次 PR（#3281）。只读；读不到抛，不当成满足。 */
+  mergeReady?: (input: MergeReadyInput, ctx: PortContext) => Promise<MergeReadyResult>;
   /** 现读这个仓的 CI 模式。没有这个受管仓要抛，不许当成不强制。 */
   readCiPolicy?: (input: ReadCiPolicyInput, ctx: PortContext) => Promise<ReadCiPolicyResult>;
   /**
@@ -341,6 +345,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   checkGuarded: true,
   armAutoMerge: true,
   waitMerged: true,
+  mergeReady: true,
   readCiPolicy: true,
   readCiReviews: true,
   mergeNow: true,
