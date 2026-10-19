@@ -434,6 +434,13 @@ html {
   ::selection {
     background: color-mix(in oklab, var(--brand) 28%, transparent);
   }
+  /* 会话里「在会话里找」的命中（#3277，CSS 自定义高亮，components/run-transcript.tsx）：全部命中淡黄，当前这一个深一档。 */
+  ::highlight(transcript-find) {
+    background-color: var(--color-st-stall-soft);
+  }
+  ::highlight(transcript-find-now) {
+    background-color: var(--color-st-stall-line);
+  }
 }
 
 /*

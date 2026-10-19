@@ -8,12 +8,11 @@
 // - 调用：展开一步才去读这一步的序号区间。
 // - 顶上一条时间条，看每笔各占多久。
 // 读不到的写「没读到」和原因：老后端没给 overview、哪一块读不了、这一笔跑在记录之前，都分开写，不画 0。
-import { toolClass } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { Check, ChevronRight, CircleDashed, LoaderCircle, X } from 'lucide-react';
 import { type ReactNode, useState } from 'react';
 import { STEP_CALLS_MAX, useRunProcess, useStepCalls } from '../api/client';
-import type { ProcessStep, RunTally, TaskDetail, TranscriptEntry } from '../api/types';
+import type { ProcessStep, RunTally, TaskDetail } from '../api/types';
 import { formatClock, formatClockSeconds, formatDuration } from '../lib/format';
 import {
   runNth,
@@ -28,7 +27,6 @@ import {
   ACTIVITY_LABEL,
   barWeights,
   buildTimeline,
-  callVerb,
   causeLabel,
   type RoundGroup,
   reworkDetail,
@@ -44,100 +42,17 @@ import {
   uncountedHint,
   waitLabel,
 } from '../lib/task-process';
+import { groupEntries } from '../lib/transcript-items';
 import { cn } from '../lib/utils';
+import { CallRow } from './call-row';
 import { DiffStat } from './diff-stat';
 import { EmptyState } from './layout/empty-state';
 import { Notice } from './layout/notice';
 import { Section } from './layout/section';
 import { inkClass } from './layout/tone';
-import { Clamped, groupEntries } from './run-transcript';
 import { Button } from './ui/button';
 
 export { DiffStat };
-
-const metaInt = (e: TranscriptEntry, key: string): number | undefined => {
-  const v = e.meta?.[key];
-  return typeof v === 'number' ? v : undefined;
-};
-
-/** 单个调用一行：灰色动词 + 对象，改文件带 +/-，失败标红；点开看工具回的结果。 */
-function CallRow({
-  call,
-  result,
-  live,
-}: {
-  call: TranscriptEntry;
-  result: TranscriptEntry | undefined;
-  live: boolean;
-}) {
-  const failed = result?.ok === false;
-  const state = failed ? 'failed' : result ? 'ok' : live ? 'pending' : 'unknown';
-  const cls = toolClass(call.tool);
-  const verb = cls === 'agent' ? '' : callVerb(call.tool, state === 'unknown' ? 'ok' : state);
-  const [picked, setPicked] = useState<boolean | undefined>(undefined);
-  const open = picked ?? failed;
-  // 命令没有可信的退出码（Mirasim 的流里没有）：结果是「完成」，不是「成功」
-  const exitUnknown = cls === 'command' && result?.meta?.exitKnown === false;
-  return (
-    <div className="min-w-0 text-body" data-call data-failed={failed ? '' : undefined}>
-      <button
-        type="button"
-        aria-expanded={open}
-        onClick={() => setPicked(!open)}
-        className="flex min-h-8 w-full min-w-0 items-baseline gap-1.5 rounded-md px-1 py-0.5 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none max-md:min-h-10 max-md:items-center"
-      >
-        <ChevronRight
-          className={cn(
-            'size-3.5 shrink-0 translate-y-0.5 text-muted-foreground max-md:translate-y-0',
-            open && 'rotate-90',
-          )}
-          aria-hidden
-        />
-        {verb ? (
-          <span className={cn('shrink-0', failed ? 'font-medium text-ink-fail' : 'text-muted-foreground')}>
-            {verb}
-          </span>
-        ) : null}
-        <span className={cn('num min-w-0 truncate', failed && 'text-ink-fail')} title={call.text}>
-          {call.text}
-        </span>
-        {cls === 'edit' && result ? (
-          <DiffStat added={metaInt(result, 'added')} removed={metaInt(result, 'removed')} />
-        ) : null}
-        {state === 'unknown' ? (
-          <span className="shrink-0 text-meta text-muted-foreground">没读到结果</span>
-        ) : exitUnknown ? (
-          <span
-            className="shrink-0 text-meta text-muted-foreground"
-            title="这一家的流里没有命令的退出码：只知道命令跑完了，成没成不知道"
-          >
-            结果未知
-          </span>
-        ) : null}
-      </button>
-      {open ? (
-        <div
-          className={cn(
-            'mt-1 mb-1 ml-5 rounded-md border px-2.5 py-1.5',
-            failed ? 'border-st-fail-line bg-st-fail-soft' : 'bg-muted',
-          )}
-          data-call-result
-        >
-          {result ? (
-            <Clamped
-              text={result.text || '（无输出）'}
-              className="num min-w-0 text-meta break-words whitespace-pre-wrap"
-            />
-          ) : (
-            <span className="text-meta text-muted-foreground">
-              {live ? '还没有结果' : '这一笔收场时没有记下结果'}
-            </span>
-          )}
-        </div>
-      ) : null}
-    </div>
-  );
-}
 
 /** 一步展开后的调用：只读这一步的序号区间；条目多于一页的写明还有多少，去会话抽屉看全部。 */
 function StepCalls({
