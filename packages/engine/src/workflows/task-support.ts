@@ -117,18 +117,20 @@ const TSC_STEP = /(^|\/)tsc\s/;
 export function selfCheckText(result: SelfCheckResult): string {
   const parts = result.steps.map((s) => {
     const mark =
-      s.outcome === 'pass'
-        ? '过了'
-        : s.outcome === 'fail'
-          ? s.exitCode === null
-            ? '没过（没跑完）'
-            : `没过（退出码 ${s.exitCode}）`
-          : '没跑或没跑完';
+      s.coveredByCi !== undefined
+        ? 'CI 已覆盖，未重复本机执行（不计本机 PASS）'
+        : s.outcome === 'pass'
+          ? '过了'
+          : s.outcome === 'fail'
+            ? s.exitCode === null
+              ? '没过（没跑完）'
+              : `没过（退出码 ${s.exitCode}）`
+            : '没跑或没跑完';
     return `$ ${s.command}：${mark}\n${s.digest}`;
   });
   const tests = result.steps.filter((s) => !TSC_STEP.test(s.command));
   const tsc = result.steps.find((s) => TSC_STEP.test(s.command));
-  if (tests.length > 0 && tests.every((s) => s.outcome === 'skipped')) {
+  if (tests.length > 0 && tests.every((s) => s.outcome === 'skipped' && s.coveredByCi === undefined)) {
     const typed =
       tsc?.outcome === 'pass' ? '类型检查过了；' : tsc?.outcome === 'fail' ? '类型检查没过；' : '';
     parts.unshift(`${typed}测试没有结果（没跑或没跑完），不等于测试过了，以完整 CI 为准。`);
