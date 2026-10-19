@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { main, selectSessionId } from '../hooks/unattended.mjs';
+import { codexSourceFixture } from './codex-source-fixture.ts';
 
 const made: string[] = [];
 afterEach(() => {
@@ -77,8 +78,10 @@ describe('无人值守真实会话号（#2929）', () => {
     '%s 支持全部命令，另一个会话的开关和收尾不影响它',
     (source) => {
       const dir = temp();
-      const env = { FLEET_UNATTENDED_DIR: dir, [source]: 'session-one' };
-      const other = { FLEET_UNATTENDED_DIR: dir, [source]: 'session-two' };
+      const { home } = codexSourceFixture(dir, 'session-one');
+      codexSourceFixture(dir, 'session-two');
+      const env = { FLEET_UNATTENDED_DIR: dir, CODEX_HOME: home, [source]: 'session-one' };
+      const other = { FLEET_UNATTENDED_DIR: dir, CODEX_HOME: home, [source]: 'session-two' };
       const file = join(dir, 'session-one.json');
       expect(invoke(env, 'on').status).toBe(0);
       const original = readFileSync(file, 'utf8');
@@ -117,7 +120,8 @@ describe('SessionStart 无人值守状态消费方', () => {
   for (const name of ['sessionStart', 'fastSessionStart'] as const) {
     it(`${name} 没有事件号时读 Codex 环境号与指定状态目录；事件号隔离父环境`, () => {
       const dir = temp();
-      const env = { FLEET_UNATTENDED_DIR: dir, CODEX_THREAD_ID: 'codex-real-session' };
+      const { home } = codexSourceFixture(dir, 'codex-real-session');
+      const env = { FLEET_UNATTENDED_DIR: dir, CODEX_HOME: home, CODEX_THREAD_ID: 'codex-real-session' };
       expect(invoke(env, 'on').status).toBe(0);
       const noop = () => ({ status: 1, stdout: '', stderr: '假的非仓库' });
       const options: StartOptions = {
@@ -135,7 +139,7 @@ describe('SessionStart 无人值守状态消费方', () => {
         '无人值守开着',
       );
       const invalid = starts[name]({ ...options, env: { ...env, CODEX_THREAD_ID: '../bad' } });
-      expect(invalid.join('\n')).toContain('无人值守状态没查成');
+      expect(invalid.join('\n')).toContain('开场身份没查成');
       expect(invalid.join('\n')).not.toContain('无人值守开着');
     });
   }

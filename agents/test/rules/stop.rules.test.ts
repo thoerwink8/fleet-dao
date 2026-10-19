@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { runChild, runChildOk } from '../child.ts';
+import { codexSourceFixture } from '../codex-source-fixture.ts';
 import { interactiveHookEnv } from '../hook-env.ts';
 
 const HOOK = fileURLToPath(new URL('../../hooks/stop.mjs', import.meta.url));
@@ -198,7 +199,8 @@ describe('规矩：无人值守——只有这个会话自己跑了 on 才挡，
     'Stop 没有事件号时与 CLI 同读 %s，不借别的会话',
     (source) => {
       const dir = temp('state');
-      const env = { ...isolatedEnv(dir), [source]: SID };
+      const { home } = codexSourceFixture(dir, SID);
+      const env = { ...isolatedEnv(dir), CODEX_HOME: home, [source]: SID };
       expect(cli(['on'], env).status).toBe(0);
       expect(blocked(stop(env, { session_id: undefined }).stdout)).toBe(true);
       const before = readFileSync(stateFile(dir), 'utf8');
