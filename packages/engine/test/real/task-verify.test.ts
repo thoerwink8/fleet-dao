@@ -969,8 +969,8 @@ describe('冷验收会话脱开引擎跑、引擎重启后接回（#2848：和�
       expect.objectContaining({ runId: d.runId, segment: 'verify', outcome: 'done', startedAt: d.startedAt }),
     ]);
     expect(r2.posted.at(-1)).toMatchObject({ sha: HEAD, state: 'success' });
-    // 收场：验收的空目录、收发目录都删掉
-    expect(r2.ft.removes).toContain(d.cwd);
+    // 历史交接没有原目录身份：保留空目录给任务/TTL门后的孤儿回收，收发目录照常删。
+    expect(r2.ft.removes).not.toContain(d.cwd);
     expect(existsSync(join(ioRoot, d.runId))).toBe(false);
   });
 

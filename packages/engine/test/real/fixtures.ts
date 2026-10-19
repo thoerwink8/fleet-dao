@@ -372,6 +372,20 @@ export function fakeTrees(root: string) {
       rmSync(dir, { recursive: true, force: true });
       return { gone };
     },
+    async adoptTemporary(dir, user) {
+      await this.adopt(dir, user);
+      return { lex: dir, real: dir, dev: '0', ino: '0', uid: '0' };
+    },
+    async reapTemporary(dir) {
+      return this.remove(dir, { lex: dir, real: dir, dev: '0', ino: '0', uid: '0' });
+    },
+    async removeTemporary(dir) {
+      // Disposable fixture objects use the same deterministic deletion fault port.
+      return this.remove(dir, { lex: dir, real: dir, dev: '0', ino: '0', uid: '0' });
+    },
+    async pendingCleanup() {
+      return [];
+    },
   };
   /** 工作树、检出副本的交接（会话临时目录的不算）。 */
   const treeAdopts = () => adopts.filter((a) => !a.dir.startsWith(`${tmpBase}/`));

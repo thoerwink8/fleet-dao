@@ -11,9 +11,9 @@
 #   sudo -n fleet-agent-scope list            在册的会话：编号 状态，一行一个
 #   sudo -n fleet-agent-scope adopt <工作树> --user <会话用户>
 #                                    把工作树交给这个会话用户：不在就建（中间各级 root:root 755，最后一级归它、700），
-#                                    在就改属主。退出码：0 成功；64 校验不过；其余失败 1。
-#   sudo -n fleet-agent-scope remove <工作树>  删掉一棵工作树（不跟随符号链接、不跨文件系统）。本来就不在也返回 0；
-#                                    标准输出最后一行是 removed <路径> 或 gone <路径>。退出码同 adopt。
+#                                    在就改属主，JSON回执返回原始身份。失败不返回成功回执。
+#   sudo -n fleet-agent-scope remove <工作树> --dev D --ino I --uid U
+#                                    必须原始身份，完整进程门和隔离事务后返回JSON回执；裸路径和未知状态都拒删。
 #   sudo -n fleet-agent-scope ensure-tmp       把 WORK_BASE/_tmp 改成引擎用户 fleet、755（不递归，里面已有的会话目录不动）。
 #                                    冷验收要以引擎用户在这下面 mkdir verify-*。已经是这个属主和权限就什么都不改。
 #                                    改完以引擎用户 mkdir 再 rmdir，写不进就失败，原因里有目录路径。退出码同 adopt。
@@ -62,8 +62,6 @@ ENV_RE='^(FLEET_[A-Z0-9_]+|LANG|LANGUAGE|LC_[A-Z_]+|TZ|TERM|GIT_TERMINAL_PROMPT)
 # 把 fleet 用户环境里的 FLEET_* 原样带进这个以 root 跑的脚本，这个开关要是也叫 FLEET_*，fleet 用户自己在调用
 # sudo 前设一个同名变量就能把生产上的落点边界改掉；不在 env_keep 白名单里的名字，sudo 会在进来之前就擦掉它。
 WORK_BASE=${AGENT_SCOPE_TEST_WORK_BASE:-/var/lib/fleet-work}
-# fs.protected_hardlinks 的读取路径，理由同上：测试专用开关，故意不叫 FLEET_*。
-PROTECTED_HARDLINKS_PATH=${AGENT_SCOPE_TEST_PROTECTED_HARDLINKS_PATH:-/proc/sys/fs/protected_hardlinks}
 # 期望里登记的会话代理（#786）：reclaude 出网要经它（登记成空＝直连，法国就是这样），
 # org-use 给 reclaude 的环境是清干净的（env -i），登记了代理而不带上就切不了号。
 # 怎么读、认的样子、规范成什么写法都在 deploy/lib/session-proxy.sh 的 session_proxy_load 里——和引擎起会话、装机时以会话
@@ -169,6 +167,7 @@ run() {
   # 先以会话用户的身份进一次这个目录：root 先 cd 进去再降权，会让会话占着一个它自己本来进不去的目录
   # shellcheck disable=SC2016 # $1 要由降权后的 sh 展开
   as_session_user "$user" /bin/sh -c 'cd -- "$1"' sh "$cwd" 2>/dev/null || die "$user 进不去这个目录：$cwd"
+  tree_helper guard-run "$cwd" >/dev/null || die "工作目录触及未结清的受管隔离边界"
   cd -- "$cwd"
   home=$(getent passwd "$user" | cut -d: -f6)
   path=${FLEET_SESSION_PATH:-/usr/local/bin:/usr/bin:/bin}
@@ -205,120 +204,6 @@ list() {
 
 # 把工作树交给会话用户（docs/design.md 第十四节）：不在就建，在就改属主。只有一个会话用户，续会话（含切号后的
 # fork）都在同一个家目录里，过程记录不用拷。退出码：0 成功；64 用法/校验不过（下面全部经 die）；其余失败 1。
-# 工作树落点（docs/design.md 第十四节）：绝对路径、在 WORK_BASE 之下、至少两层（仓/任务）、每一段只许字母数字和 . _ -
-# （不许 . 和 ..）。WORK_BASE 和中间各级都归 root、别人写不进，会话用户没法在路径上塞符号链接；这里照样逐段核对。
-check_tree_path() {
-  local dir=$1 rel seg
-  local -a segs=()
-  [[ "$dir" == /* ]] || die "工作树要写绝对路径：「$dir」"
-  case $dir in
-  "$WORK_BASE"/*) ;;
-  *) die "工作树要在 $WORK_BASE 之下：「$dir」" ;;
-  esac
-  rel=${dir#"$WORK_BASE"/}
-  [[ "$rel" == */* ]] || die "工作树至少要在 $WORK_BASE 下两层（仓/任务）：「$dir」"
-  IFS=/ read -r -a segs <<<"$rel"
-  for seg in "${segs[@]}"; do
-    [[ -n "$seg" && "$seg" != . && "$seg" != .. ]] || die "工作树路径里不许有空段、. 和 ..：「$dir」"
-    [[ "$seg" =~ ^[A-Za-z0-9._-]+$ ]] || die "工作树路径每一段只许字母、数字和 . _ -：「$dir」"
-  done
-}
-
-# 路径上 WORK_BASE 到上一级之间各段：不许是符号链接，在的要是目录；make=1 时不在的以 root:root 755 建。
-walk_parents() {
-  local dir=$1 make=$2 cur seg i
-  local -a segs=()
-  [[ -d "$WORK_BASE" && ! -L "$WORK_BASE" ]] || die "工作树的根不在或是符号链接：$WORK_BASE"
-  IFS=/ read -r -a segs <<<"${dir#"$WORK_BASE"/}"
-  cur=$WORK_BASE
-  for ((i = 0; i < ${#segs[@]} - 1; i++)); do
-    seg=${segs[i]}
-    cur=$cur/$seg
-    [[ ! -L "$cur" ]] || die "工作树路径上有符号链接：「$cur」"
-    if [[ -e "$cur" ]]; then
-      [[ -d "$cur" ]] || die "工作树路径上的「$cur」不是目录"
-    elif ((make)); then
-      install -d -o root -g root -m 755 -- "$cur" || {
-        echo "fleet-agent-scope：建不了目录：$cur" >&2
-        exit 1
-      }
-    fi
-  done
-}
-
-# 把工作树交给 user：不在就建（归它、700），在就整棵改属主（不跟随符号链接）。
-ensure_tree() {
-  local dir=$1 user=$2 real hardlinks
-  walk_parents "$dir" 1
-  [[ ! -L "$dir" ]] || die "工作树路径上有符号链接：「$dir」"
-  if [[ -e "$dir" ]]; then
-    [[ -d "$dir" ]] || die "工作树不是目录：「$dir」"
-    real=$(realpath -e -- "$dir" 2>/dev/null) || die "工作树不存在：「$dir」"
-    [[ "$real" == "$dir" ]] || die "工作树路径上有符号链接：「$dir」解析成「$real」"
-    # chown -R 前先核这台开没开硬链接保护：没开的话，工作树里的会话用户能对自己读不到、写不到的文件建
-    # 硬链接，这次 chown -R 会连带把那个文件也改成会话用户的——读不到这个开关（没挂 procfs、路径不对……）
-    # 一律当没开处理，不能当「开着」放过去。
-    hardlinks=$(cat -- "$PROTECTED_HARDLINKS_PATH" 2>/dev/null) || hardlinks=""
-    [[ "$hardlinks" == 1 ]] || {
-      echo "fleet-agent-scope：fs.protected_hardlinks 没开（读到「${hardlinks:-读不到}」），不做 chown -R：$dir" >&2
-      exit 1
-    }
-    chown -R --no-dereference "$user:$user" -- "$dir" || {
-      echo "fleet-agent-scope：改属主失败：$dir" >&2
-      exit 1
-    }
-  else
-    install -d -o "$user" -g "$user" -m 700 -- "$dir" || {
-      echo "fleet-agent-scope：建不了工作树：$dir" >&2
-      exit 1
-    }
-  fi
-}
-
-# 删一棵工作树：以 root rm -rf，不跟随符号链接（rm 只删链接本身）、不跨文件系统。本来就不在算删好。
-remove() {
-  local dir=${1:-} real
-  [[ -n "$dir" ]] || die "用法：fleet-agent-scope remove <工作树>"
-  (($# == 1)) || die "remove 只收一个参数（工作树）"
-  check_tree_path "$dir"
-  walk_parents "$dir" 0
-  if [[ ! -e "$dir" && ! -L "$dir" ]]; then
-    echo "gone $dir"
-    return 0
-  fi
-  [[ ! -L "$dir" ]] || die "工作树路径上有符号链接：「$dir」"
-  [[ -d "$dir" ]] || die "工作树不是目录：「$dir」"
-  real=$(realpath -e -- "$dir" 2>/dev/null) || die "工作树不存在：「$dir」"
-  [[ "$real" == "$dir" ]] || die "工作树路径上有符号链接：「$dir」解析成「$real」"
-  rm -rf --one-file-system -- "$dir" || {
-    echo "fleet-agent-scope：删不掉：$dir" >&2
-    exit 1
-  }
-  echo "removed $dir"
-}
-
-adopt() {
-  local dir=${1:-} user="" u ok=0
-  [[ -n "$dir" ]] || die "用法：fleet-agent-scope adopt <工作树> --user <会话用户>"
-  shift
-  while (($#)); do
-    case $1 in
-    --user)
-      (($# >= 2)) || die "$1 后面要给一个值"
-      user=$2
-      shift 2
-      ;;
-    *) die "不认识的参数：「$1」" ;;
-    esac
-  done
-  # 先验和文件系统无关的：user 的形状，不用等工作树存在就能测
-  for u in "${SESSION_USERS[@]}"; do if [[ "$user" == "$u" ]]; then ok=1; fi; done
-  ((ok)) || die "--user 只能是会话用户 ${SESSION_USERS[*]}，给的是「$user」"
-  check_tree_path "$dir"
-  ensure_tree "$dir" "$user"
-  echo "已把 $dir 交给 $user"
-}
-
 # 冷验收的检出目录在 WORK_BASE/_tmp 下，引擎用户自己 mkdir。这一层要归它、755。
 # 不递归：里面已有的会话目录不动。已经对了就不再 chown（避免改时间、误报）。
 ensure_tmp() {
@@ -674,7 +559,15 @@ probe() {
   probe_one "$user" "$tool"
 }
 
+tree_helper() {
+  (cd / && exec /usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+    /usr/bin/python3 -I -S /usr/local/libexec/fleet-dao-tree-usage.py "$@")
+}
+
 case ${1:-} in
+capabilities|tree-place|tree-usage|cleanup-status|cleanup-rollback)
+  tree_helper "$@"
+  ;;
 run)
   shift
   run "$@"
@@ -685,8 +578,7 @@ stop)
   ;;
 list) list ;;
 adopt)
-  shift
-  adopt "$@"
+  tree_helper "$@"
   ;;
 ensure-tmp)
   shift
@@ -694,8 +586,7 @@ ensure-tmp)
   ensure_tmp
   ;;
 remove)
-  shift
-  remove "$@"
+  tree_helper "$@"
   ;;
 org-use)
   shift

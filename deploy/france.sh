@@ -1323,6 +1323,8 @@ readback_sessions() {
   fi
   REC_VIOLATIONS=()
   rec_check_path "sudo:fleet" "$AGENT_SCOPE_BIN" 程序
+  rec_check_path "sudo:fleet" /usr/local/libexec/fleet-dao-tree-usage.py 固定删树代码
+  rec_check_path "sudo:fleet" /usr/bin/python3 固定解释器
   if ((${#REC_VIOLATIONS[@]})); then red "${REC_VIOLATIONS[0]//$'\t'/ | }"; fi
   id=readback-$$
   want_cg="0::/fleet.slice/fleet-agents.slice/fleet-agent-$id.scope"
@@ -1649,7 +1651,10 @@ readback_service_home() {
 # 帮手脚本随自动档换：sudoers 已经放行这一个路径，这里只换文件内容（ensure-tmp）。
 # 整套装机的 setup_sudoers 也会写同一份；内容一样就什么都不改。
 install_scope_bin() {
+  ensure_dir /usr/local/libexec root:root 755 || return 1
+  put_file /usr/local/libexec/fleet-dao-tree-usage.py root:root 644 "$(<"$DEPLOY_DIR/france/tree-usage.py")"
   put_file "$AGENT_SCOPE_BIN" root:root 755 "$(<"$DEPLOY_DIR/france/fleet-agent-scope.sh")"
+  rec_scope_installed "$DEPLOY_DIR/france/fleet-agent-scope.sh" "$DEPLOY_DIR/france/tree-usage.py" "$AGENT_SCOPE_BIN" || return 1
 }
 
 # 自动档（--auto-tier）：自动发布每发完一版以 root 顺带跑。只放不碰防火墙、sudoers、用户、机器上钥匙和环境文件的步骤

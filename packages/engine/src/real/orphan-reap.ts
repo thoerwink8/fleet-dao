@@ -41,7 +41,7 @@ export const RETIRED_IO_ROOT_ALERT_KEY = 'engine-session-io';
 export interface OrphanReapDeps {
   db: Db;
   /** 会话临时目录的管理（real/worktrees.ts）：只用列、删这两样。 */
-  trees: Pick<WorkTrees, 'listTmp' | 'remove' | 'tmpFor'>;
+  trees: Pick<WorkTrees, 'listTmp' | 'reapTemporary' | 'tmpFor'>;
   /** 动手会话的收发目录的根（#2238，session-handoff.ts）。不给 = 不认放手标记，scope 一律收（测试、开发机）。 */
   ioRoot?: string;
   /** 放手以后等人接回多久（默认 HANDOFF_TTL_MS）。 */
@@ -176,7 +176,9 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
       if (dir)
         await removeIo(dir).catch((e: unknown) => log('收发目录没删掉', { dir, error: errMessage(e) }));
       for (const cwd of cwdByRun.get(id)?.dirs ?? [])
-        await trees.remove(cwd).catch((e: unknown) => log('临时目录没删掉', { id, error: errMessage(e) }));
+        await trees
+          .reapTemporary(cwd)
+          .catch((e: unknown) => log('临时目录没删掉', { id, error: errMessage(e) }));
     }
     try {
       await closeOpenRuns(db, { endedAt: clock(), reason: UNCLAIMED_RUN_REASON, only: unclaimed });
@@ -209,7 +211,7 @@ export function orphanReaper(deps: OrphanReapDeps): () => Promise<number> {
     for (const dir of dirs) {
       if (keep.has(resolve(dir))) continue;
       try {
-        if (!(await trees.remove(dir)).gone) removed += 1;
+        if (!(await trees.reapTemporary(dir)).gone) removed += 1;
       } catch (error) {
         failed.push(`${dir}：${errMessage(error)}`);
       }

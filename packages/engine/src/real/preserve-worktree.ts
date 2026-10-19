@@ -21,6 +21,7 @@ import {
   recheckNoUnique,
   recheckPreservedArchive,
   syncDirectory,
+  type TreePlace,
   writeExclusiveArchive,
 } from './complex-preserve.ts';
 import {
@@ -160,7 +161,7 @@ export async function preserveThenRemove(
   archiveDir: string,
   context: PreserveContext & { workRoot: string },
   shots: ShotsDelivery | undefined,
-  remove: () => Promise<{ gone: boolean }>,
+  remove: (identity: TreePlace) => Promise<{ gone: boolean }>,
 ): Promise<{ gone: boolean; archivedTo?: string }> {
   await assertArchiveContainer(archiveDir);
   const place = await locateTree(t);
@@ -188,7 +189,7 @@ export async function preserveThenRemove(
     }
     // 删除必经点：干净树、干净未推提交也现核进程 cwd，库里没登记会话不等于没人用
     await assertNoTreeProcess(t, again, context.processLook);
-    const result = await remove();
+    const result = await remove(place);
     return { gone: result.gone, ...(archivedTo ? { archivedTo } : {}) };
   } finally {
     await release();

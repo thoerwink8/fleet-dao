@@ -807,12 +807,12 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             ...(deps.onCheckoutBlocked ? { onBlocked: deps.onCheckoutBlocked } : {}),
             ...(deps.onCheckoutRecovered ? { onRecovered: deps.onCheckoutRecovered } : {}),
           });
-          await deps.spawner.trees.adopt(dir, user);
+          const identity = await deps.spawner.trees.adoptTemporary(dir, user);
           return {
             cwd: dir,
             ...(ticket ? { oneShot: oneShotFor(ticket) } : {}),
             release: async () => {
-              await deps.spawner.trees.remove(dir).catch((error: unknown) => {
+              await deps.spawner.trees.removeTemporary(dir, identity).catch((error: unknown) => {
                 log('验收会话的空目录没删掉（引擎下次起来时的清理会收）', { dir, error: errMessage(error) });
               });
             },
@@ -867,12 +867,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
       for (const t of tickets.values()) t.leave();
       // 接回的会话收场了（没再放手）：它的空目录这时才删（放手时留给接回的那个引擎）
       if (attach && !seen.detached) {
-        await deps.spawner.trees.remove(attach.cwd).catch((error: unknown) => {
-          log('接回的验收会话的空目录没删掉（引擎下次起来时的清理会收）', {
-            dir: attach.cwd,
-            error: errMessage(error),
-          });
-        });
+        log('接回验收没有原始目录身份，保留给任务/TTL门后的孤儿清理', { dir: attach.cwd });
       }
       for (const reservationId of reservations) {
         await deps.reservations.release(reservationId).catch((error: unknown) => {
