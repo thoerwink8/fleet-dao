@@ -368,10 +368,7 @@ export class GitHubClient {
       scheduleDeadlineMs?: number | undefined;
     } = {},
   ): Promise<T> {
-    const res = await this.request<{
-      data?: T | null;
-      errors?: { type?: string; message?: string; path?: unknown }[];
-    }>({
+    const res = await this.request<{ data?: T | null; errors?: { type?: string; message?: string }[] }>({
       method: 'POST',
       path: '/graphql',
       auth,
