@@ -27,6 +27,7 @@ export function runProgress(expectedCli) {
       'PostToolUse',
       process.env,
       authority.kind,
+      expectedCli,
     );
     receipt = context;
     noteReceipt(context, { phase: 'entered', decision: 'none' });
