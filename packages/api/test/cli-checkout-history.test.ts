@@ -22,7 +22,12 @@ const OPEN_RUN_ID = 'd1000000-0000-4000-8000-000000013098';
 const TEMPORAL_RUN_ID = 'temporal-checkout-history-1';
 const WORKFLOW_ID = 'task:example/canary#13';
 const HEAD = 'b'.repeat(40);
-const BODY = `目标 ${WORKFLOW_ID} 的 head ${HEAD}，目录 /tmp/verify-13。失败在「从镜像 git archive」这一步，原始错误：fatal: not a valid object name。引擎镜像里取不出目标 head。`;
+/** 照引擎 checkoutBlockedAlert 缺对象那一路写的整段正文。 */
+const BODY =
+  `目标 ${WORKFLOW_ID} 的 head ${HEAD}，目录 /var/lib/fleet-work/_tmp/verify-0f0e0d0c-0b0a-4908-8706-050403020100。` +
+  '失败在「从镜像 git archive」这一步，原始错误：fatal: not a valid object name。' +
+  `引擎镜像 /var/lib/fleet-github/mirrors/example/canary.git 里取不出目标 head ${HEAD}（git archive 认不出这个对象）。` +
+  '请检查镜像里有没有这个提交，按既定 head 把它 fetch 进镜像后再验。这不是目录权限问题，别改属主或权限；引擎不自动重试。';
 
 let testDb: TestDb;
 
@@ -243,6 +248,25 @@ describe('checkout-history 私有 CLI（真实 Postgres Store）', () => {
       (await cli(store, ['--archive'], JSON.stringify({ ...input, conclusion: 'recovered' }))).code,
     ).toBe(1);
     expect((await cli(store, ['--archive'], JSON.stringify(input), 'other')).code).toBe(1);
+    expect((await notificationOf(store))?.resolvedAt).toBeUndefined();
+    expect(await audits(store)).toEqual([]);
+  });
+
+  it('原 verify 段成功收场、或通知只是相似不是受管格式：预检和 archive 都拒，什么都不写', async () => {
+    const input = await inputFor(store);
+    await testDb.db.update(runs).set({ outcome: 'done', failureReason: null }).where(eq(runs.id, RUN_ID));
+    const done = { ...input, runOutcome: 'done' };
+    expect((await cli(store, [], JSON.stringify(done))).code).toBe(1);
+    expect((await cli(store, ['--archive'], JSON.stringify(done))).code).toBe(1);
+    await testDb.db
+      .update(runs)
+      .set({ outcome: 'failed', failureReason: '缺对象' })
+      .where(eq(runs.id, RUN_ID));
+    const forged = `${BODY}另附一句。`;
+    await testDb.db.update(notifications).set({ body: forged }).where(eq(notifications.id, NOTIFICATION_ID));
+    const similar = { ...input, notificationBody: forged };
+    expect((await cli(store, [], JSON.stringify(similar))).code).toBe(1);
+    expect((await cli(store, ['--archive'], JSON.stringify(similar))).code).toBe(1);
     expect((await notificationOf(store))?.resolvedAt).toBeUndefined();
     expect(await audits(store)).toEqual([]);
   });

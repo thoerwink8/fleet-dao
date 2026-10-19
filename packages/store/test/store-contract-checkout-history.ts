@@ -18,8 +18,13 @@ const LINK = 'https://github.com/example/canary/pull/39';
 const OPEN_RUN_ID = 'd1000000-0000-4000-8000-000000013098';
 const KEY = `cold-verify:checkout:${WF}`;
 
+const DIR = '/var/lib/fleet-work/_tmp/verify-0f0e0d0c-0b0a-4908-8706-050403020100';
+const MIRROR = '/var/lib/fleet-github/mirrors/example/canary.git';
+/** 照引擎 checkoutBlockedAlert 缺对象那一路写的整段正文。 */
 const alertBody = (head = HEAD) =>
-  `目标 ${WF} 的 head ${head}，目录 /tmp/verify-13。失败在「从镜像 git archive」这一步，原始错误：fatal: not a valid object name。引擎镜像里取不出目标 head。`;
+  `目标 ${WF} 的 head ${head}，目录 ${DIR}。失败在「从镜像 git archive」这一步，原始错误：fatal: not a valid object name。` +
+  `引擎镜像 ${MIRROR} 里取不出目标 head ${head}（git archive 认不出这个对象）。` +
+  '请检查镜像里有没有这个提交，按既定 head 把它 fetch 进镜像后再验。这不是目录权限问题，别改属主或权限；引擎不自动重试。';
 
 export interface CheckoutHistoryHarness {
   store: Store;
@@ -278,6 +283,15 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         { title: '别的报警' },
         { body: alertBody('c'.repeat(40)) },
         { body: `目标 ${WF} 的 head ${HEAD}，目录 /x。` },
+        // 只有前缀或片段相似、不是引擎受管格式的标题/正文
+        { title: '冷验收放不进 PR 头的完整检出（从镜像 git archive）——转述' },
+        { title: '冷验收放不进 PR 头的完整检出（建检出目录）' },
+        { body: `${alertBody()}另附一句。` },
+        { body: alertBody().replace(DIR, '/tmp/verify-13') },
+        { body: alertBody().replace('引擎不自动重试。', '') },
+        {
+          body: `目标 ${WF} 的 head ${HEAD}，目录 ${DIR}。失败在「从镜像 git archive」这一步，原始错误：x。引擎镜像里取不出目标 head。`,
+        },
       ];
       for (const notification of variants) {
         const other = await make(data({ notification }));
@@ -302,10 +316,17 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       }
     });
 
-    it('原 run 不是 verify 段 / 没有终态 / 不是同一 PR：拒绝', async () => {
+    it('原 run 不是 verify 段 / 没有终态 / 不是失败收场 / 不是同一 PR / 报警不在它起止内：拒绝', async () => {
       for (const run of [
         { segment: 'manual' },
         { endedAt: undefined, outcome: undefined },
+        // 成功收场或没进到放检出那一步、切号重跑的段都不是这张检出失败卡的原执行
+        { outcome: 'done', failureReason: undefined },
+        { outcome: 'admission_blocked' },
+        { outcome: 'org_switch' },
+        // 报警时刻在这一段之外：别的段报的
+        { startedAt: '2026-10-19T03:10:00.001Z', endedAt: '2026-10-19T03:20:00.000Z' },
+        { startedAt: '2026-10-19T02:00:00.000Z', endedAt: '2026-10-19T03:09:59.999Z' },
         { issueNumber: 12 },
         { prNumber: 38 },
         { workflowId: 'task:example/canary#13:r2' },
@@ -315,6 +336,15 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         const input = baseInput();
         expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
         expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
+      }
+    });
+
+    it('别的失败收场（超时、被杀、起不来）的原执行同样可归档', async () => {
+      for (const outcome of ['timeout', 'killed', 'spawn_failed'] as const) {
+        const other = await make(data({ run: { outcome } }));
+        const input = baseInput({ runOutcome: outcome });
+        expect((await other.store.readHistoricalCheckout(input)).run.outcome).toBe(outcome);
+        expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('ok');
       }
     });
 

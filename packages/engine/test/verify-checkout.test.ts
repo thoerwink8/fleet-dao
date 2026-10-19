@@ -4,6 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, relative } from 'node:path';
 import { promisify } from 'node:util';
+import { checkoutNotificationProblem } from '@fleet-dao/store';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   type CheckoutBlockedAlert,
@@ -800,5 +801,74 @@ describe('完整检出成功回执边界', () => {
       }),
     ).toBe('full');
     expect(receipts).toHaveLength(1);
+  });
+});
+
+describe('历史 checkout 归档认的报警格式和引擎写的一致（store 的 checkoutNotificationProblem 照抄引擎格式）', () => {
+  const head = 'a'.repeat(40);
+  const workflowId = 'task:acme/demo#12';
+  const dir = '/var/lib/fleet-work/_tmp/verify-0f0e0d0c-0b0a-4908-8706-050403020100';
+  const mirrorDir = '/var/lib/fleet-github/mirrors/acme/demo.git';
+  const eacces = Object.assign(new Error('permission denied'), { code: 'EACCES' });
+  const errors: [string, unknown, unknown?][] = [
+    ['fetch', new CheckoutStageError('fetch', '取精确头失败')],
+    ['head', new CheckoutStageError('head', 'PR 的头不是完整的提交号')],
+    ['mirror 无路径', new CheckoutStageError('mirror', '对不上')],
+    ['mirror 有路径', new CheckoutStageError('mirror', '没有这个仓', { mirrorDir })],
+    ['mkdir 带错误码', new CheckoutStageError('mkdir', 'no space。磁盘满了', { code: 'ENOSPC' })],
+    ['mkdir EACCES', new CheckoutStageError('mkdir', 'permission denied', { code: 'EACCES' })],
+    ['EACCES 修复也没成', eacces, new Error('sudo 不让跑。')],
+    ['archive', new CheckoutStageError('archive', 'fatal: corrupt', { mirrorDir })],
+    [
+      'archive 缺对象',
+      new CheckoutStageError('archive', 'fatal: not a valid object name', { mirrorDir, missingObject: true }),
+    ],
+    ['archive 缺对象无镜像路径', new CheckoutStageError('archive', 'bad object', { missingObject: true })],
+    ['extract', new CheckoutStageError('extract', 'tar: 写不进')],
+    ['unknown', new Error('磁盘读到一半断了')],
+  ];
+  for (const [label, error, repairError] of errors) {
+    it(`引擎写的「${label}」报警过得了历史归档的格式校验`, () => {
+      const alert = checkoutBlockedAlert({
+        dir,
+        head,
+        workflowId,
+        error,
+        ...(repairError === undefined ? {} : { repairError }),
+      });
+      expect(
+        checkoutNotificationProblem({ title: alert.title, body: alert.body }, { workflowId, head }),
+      ).toBeUndefined();
+    });
+  }
+
+  it('相似但不是受管格式的标题/正文都拒', () => {
+    const alert = checkoutBlockedAlert({
+      dir,
+      head,
+      workflowId,
+      error: new CheckoutStageError('archive', 'fatal: not a valid object name', {
+        mirrorDir,
+        missingObject: true,
+      }),
+    });
+    const real = { title: alert.title, body: alert.body };
+    const forged: { title: string; body: string }[] = [
+      { ...real, title: `${alert.title}（补）` },
+      { ...real, title: '冷验收放不进 PR 头的完整检出（随便写的一步）' },
+      // 标题的步骤和正文的步骤对不上
+      { ...real, title: '冷验收放不进 PR 头的完整检出（建检出目录）' },
+      { ...real, body: `${alert.body}另附一句。` },
+      { ...real, body: alert.body.replace('引擎不自动重试。', '') },
+      { ...real, body: alert.body.replace(dir, '/tmp/verify-13') },
+      { ...real, body: alert.body.replace(`取不出目标 head ${head}`, `取不出目标 head ${'c'.repeat(40)}`) },
+      { ...real, body: alert.body.replace('（git archive 认不出这个对象）', '') },
+      {
+        ...real,
+        body: `目标 ${workflowId} 的 head ${head}，目录 ${dir}。失败在「从镜像 git archive」这一步，原始错误：x。`,
+      },
+    ];
+    for (const n of forged) expect(checkoutNotificationProblem(n, { workflowId, head })).toBeDefined();
+    expect(checkoutNotificationProblem(real, { workflowId: 'task:acme/demo#13', head })).toBeDefined();
   });
 });

@@ -410,7 +410,11 @@ export function createMemoryStore(
       );
     });
     if (!run) throw new Error('原执行 run 不存在或不属于这张任务');
-    const runProblem = checkoutRunProblem(run, { ...input, issueNumber: input.issueNumber });
+    const runProblem = checkoutRunProblem(
+      run,
+      { ...input, issueNumber: input.issueNumber },
+      notification.raisedAt,
+    );
     if (runProblem) throw new Error(runProblem);
     const baseWorkflowId = baseWorkflowIdOf(input.workflowId);
     if (baseWorkflowId !== taskWorkflowId(actualRepo, task.issueNumber))

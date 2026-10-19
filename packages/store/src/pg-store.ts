@@ -388,8 +388,10 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         endedAt: isoOpt(run.endedAt),
         outcome: opt(run.outcome),
         prNumber: opt(run.prNumber),
+        startedAt: iso(run.startedAt),
       },
       { ...input, issueNumber: input.issueNumber },
+      notificationRaisedAt,
     );
     if (runProblem) throw new Error(`历史 checkout ${runProblem}`);
     const activeRunIds = candidateRuns.filter((r) => r.endedAt === null).map((r) => r.id);
