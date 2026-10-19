@@ -51,6 +51,12 @@ import {
 import { INTAKE_EVERY_MINUTES, INTAKE_JOB, INTAKE_OFFSET_MINUTES, runIntakeJob } from './intake.ts';
 import { runJudgeSelfCheckJob } from './judge-self-check.ts';
 import {
+  PARKED_RETRY_EVERY_MINUTES,
+  PARKED_RETRY_JOB,
+  PARKED_RETRY_OFFSET_MINUTES,
+  runParkedRetryJob,
+} from './parked-retry.ts';
+import {
   QUOTA_READ_EVERY_MINUTES,
   QUOTA_READ_JOB,
   QUOTA_READ_OFFSET_MINUTES,
@@ -113,6 +119,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const requestSweep = need(jobs, 'requestSweep');
   const dailyBrief = need(jobs, 'dailyBrief');
   const e2eQuarantine = need(jobs, 'e2eQuarantine');
+  const parkedRetry = need(jobs, 'parkedRetry');
   return [
     {
       id: GITHUB_RECONCILE_JOB.id,
@@ -236,6 +243,16 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       catchupMinutes: E2E_QUARANTINE_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
       run: () => runE2eQuarantineJob(e2eQuarantine()),
+    },
+    {
+      // 停下等人的单按规则续一次（#3294）：只续「认不出按临时的办」「自动合并没挂上」，发了新版或 PR 已能合才续。
+      // 不调模型、不起会话；总开关关着照跑（续了的单要等开着才派得出会话，续本身不起会话），不标 needsMaster
+      id: PARKED_RETRY_JOB.id,
+      everyMinutes: PARKED_RETRY_EVERY_MINUTES,
+      offsetMinutes: PARKED_RETRY_OFFSET_MINUTES,
+      catchupMinutes: PARKED_RETRY_EVERY_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
+      run: () => runParkedRetryJob(parkedRetry()),
     },
   ];
 }

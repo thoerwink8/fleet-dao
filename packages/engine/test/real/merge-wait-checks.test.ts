@@ -178,7 +178,7 @@ describe('等合并时读必过检查', () => {
       A,
       [GATE_CONTEXT],
     );
-    expect(got).toEqual({ overall: 'pending', failed: [] });
+    expect(got).toEqual({ overall: 'pending', failed: [], pending: [{ name: GATE_CONTEXT }] });
   });
 
   it('cold-verify 列了但这次没读到、闸写着等验收：不当成红，点名没出现的', async () => {
@@ -231,7 +231,71 @@ describe('等合并时读必过检查', () => {
     expect(got).toEqual({
       overall: 'pending',
       failed: [],
-      pending: [{ name: COLD_VERIFY_CONTEXT }],
+      pending: [{ name: GATE_CONTEXT }, { name: COLD_VERIFY_CONTEXT }],
+    });
+  });
+
+  it('冷验收已经通过、闸还写着等验收：接着等闸重算，不当成红（#3316）', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [
+          {
+            context: GATE_CONTEXT,
+            state: 'failure',
+            description:
+              '等验收：当前头 10eb6fb 上的 cold-verify 还在跑（pending：第 1 轮冷调用跑着），这是引擎任务工作流开的 PR',
+          },
+          { context: COLD_VERIFY_CONTEXT, state: 'success', description: '过了' },
+        ],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got).toEqual({ overall: 'pending', failed: [], pending: [{ name: GATE_CONTEXT }] });
+  });
+
+  it('等验收里还写着另有别的理由：仍是红，不装成在等', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [
+          {
+            context: GATE_CONTEXT,
+            state: 'failure',
+            description: '等验收：cold-verify 还在跑（另有 1 条，点详情看）',
+          },
+          { context: COLD_VERIFY_CONTEXT, state: 'pending', description: '跑着' },
+        ],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got.overall).toBe('red');
+    expect(got.failed.map((item) => item.name)).toEqual([GATE_CONTEXT]);
+  });
+
+  it('等验收的同时 cold-verify 自己已经失败：只把验收交回返工', async () => {
+    const got = await readMergeWaitChecks(
+      gh(
+        ['check'],
+        [{ name: 'check', conclusion: 'success' }],
+        [
+          { context: GATE_CONTEXT, state: 'failure', description: '等验收：cold-verify 还在跑' },
+          { context: COLD_VERIFY_CONTEXT, state: 'failure', description: '验收没过' },
+        ],
+      ),
+      repo,
+      A,
+      fleetSignals,
+    );
+    expect(got).toEqual({
+      overall: 'red',
+      failed: [{ name: COLD_VERIFY_CONTEXT, detail: '验收没过' }],
     });
   });
 

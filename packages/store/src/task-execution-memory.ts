@@ -1,4 +1,5 @@
 import type { MemoryData } from './memory-store.ts';
+import { memoryTaskAdmission } from './task-admission-memory.ts';
 import type { ExecutionAudit, ExecutionRead, ExecutionResult, TaskExecutionStore } from './task-execution.ts';
 import {
   canonicalExecutionUuid,
@@ -13,6 +14,7 @@ export function memoryTaskExecution(
   now: () => Date,
   nextId: () => string,
   notify: (id: string) => void,
+  admissionNotify: (table: 'tasks' | 'audit_log', id: string) => void,
 ): TaskExecutionStore {
   const read = (taskId: string): ExecutionRead => {
     if (!canonicalExecutionUuid(taskId) || !data.tasks.some((t) => t.id === taskId))
@@ -52,6 +54,7 @@ export function memoryTaskExecution(
     return structuredClone(plan.result);
   };
   return {
+    ...memoryTaskAdmission(data, now, nextId, admissionNotify),
     getExecutionControl: async (taskId) => structuredClone(read(taskId)),
     reserveExecution: (input, audit) => mutate('reserve', input, audit),
     dispatchExecution: (input, audit) => mutate('dispatch', input, audit),
