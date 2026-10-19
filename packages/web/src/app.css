@@ -203,8 +203,6 @@
   --max-height-menu: 18.75rem; /* 300 */
   /* 路由页渠道列表在 xl 下的最高：视口高减去 16rem。依据：渠道状态左侧列表（max-h-routing-pane）。 */
   --max-height-routing-pane: calc(100dvh - 16rem);
-  /* 任务页 xl 起右栏「过程」贴在正文区顶上、自己滚：视口高减去顶栏和上下留白（#3228）。 */
-  --max-height-task-aside: calc(100dvh - var(--spacing-topbar) - 3rem);
   /* 开关轨道高 1.15rem。h-* 只认 --height / --spacing。 */
   --height-switch: 1.15rem;
   /* 基础件聚焦圈宽 3px（button、input、select、textarea、badge、toggle、switch 的聚焦圈）。
@@ -256,8 +254,6 @@
   --grid-template-columns-usage: 3.5rem minmax(0, 1fr); /* usage 花费行：原来写死 3.5rem、剩余 */
   --grid-template-columns-timeline: 10rem 1fr; /* run-timeline 在 md：原来写死 160px（10rem）、剩余 */
   --grid-template-columns-board: minmax(0, 26rem) minmax(0, 1fr); /* 2xl 起：最宽 26rem、剩余 */
-  /* 任务页 xl 起两栏（#3228）：左结论、右「过程」。右栏至少 24rem（桌面 480px），宽屏按 3:4 跟着变宽，照设计稿右侧面板。 */
-  --grid-template-columns-task: minmax(0, 1fr) minmax(24rem, 0.75fr);
   --grid-template-rows-stack: auto 1fr; /* 行：自动、剩余 */
   --grid-template-rows-media: auto auto 1fr; /* 行：自动、自动、剩余 */
 }
@@ -437,6 +433,13 @@ html {
   }
   ::selection {
     background: color-mix(in oklab, var(--brand) 28%, transparent);
+  }
+  /* 会话里「在会话里找」的命中（#3277，CSS 自定义高亮，components/run-transcript.tsx）：全部命中淡黄，当前这一个深一档。 */
+  ::highlight(transcript-find) {
+    background-color: var(--color-st-stall-soft);
+  }
+  ::highlight(transcript-find-now) {
+    background-color: var(--color-st-stall-line);
   }
 }
 

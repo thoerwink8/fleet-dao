@@ -11,4 +11,5 @@ export * from './requests.ts';
 export * from './route-probe-history.ts';
 export * from './runs.ts';
 export * from './session-org-state.ts';
+export * from './task-execution.ts';
 export * from './work.ts';

@@ -1,7 +1,7 @@
 // 驾驶舱截图（#1847，设计规范片 1）：起 dev:mock（假数据，不连后端），按页 × 宽度 × 亮暗逐张截，
 // 存到仓根 _tmp/shots/<标签>/<页>-<宽>-<亮暗>.png。改界面的 PR 用它出改前（主线）改后两组图。
 // 用法（在 packages/web 下）：
-//   node scripts/shots.ts before                         12 页 × 1920/1366/390 × 亮暗
+//   node scripts/shots.ts before                         PAGES 全部页 × 1920/1366/390 × 亮暗
 //   node scripts/shots.ts after --widths 1366 --modes light --pages home,tasks
 //   node scripts/shots.ts after --base http://localhost:5173   已有开发服务时不再另起
 // 浏览器默认用本机 Chrome（channel chrome），别的用 SHOTS_BROWSER_CHANNEL（msedge、chromium）。
@@ -25,6 +25,11 @@ export const PAGES: readonly (readonly [string, string])[] = [
   ['task-12', '/tasks/t-12'],
   // 新旧引擎交替的单（#3190）：前面回合的笔没记回合号，按回合收场时刻归
   ['task-c9-mixed', '/tasks/t-c9?mockOverview=mixed'],
+  // 过程面板开在一笔会话上、弹出窗口（#3277）
+  ['task-c9-run', '/tasks/t-c9?run=seg-c9-3'],
+  ['task-run-popout', '/tasks/t-c9/runs/seg-c9-3'],
+  // 在跑的那一笔：最后一步蓝字、底栏「还在跑」
+  ['task-12-run', '/tasks/t-12?run=seg-t-12-manual-40'],
   ['notifications', '/notifications'],
   ['routing', '/routing'],
   ['status', '/routing/status'],

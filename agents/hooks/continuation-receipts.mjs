@@ -20,6 +20,8 @@ export const MAX_RECEIPT_FILES = 128;
 export const MAX_RECEIPT_ROWS = 4096;
 const MAX_DIRECTORY_ENTRIES = MAX_RECEIPT_FILES * 2 + 2;
 const MAX_ROW_BYTES = 2048;
+// 纯存储键，没有借用任何已知 session 输入的指纹；旧版目录准入仍认得这个名字。
+export const DIAGNOSTIC_RECEIPT_KEY = '0'.repeat(64);
 const EVENTS = new Set(['Command', 'SessionStart', 'PostToolUse', 'Stop']);
 const PHASES = new Set([
   'entered',
@@ -69,16 +71,28 @@ const codeOf = (error) => {
   return SAFE_CODES.has(code) ? code : 'IO';
 };
 /** @typedef {{version: 1, at: string, session: string|null, generation: string|null, event: string, eventKey: string|null, cli: string, source: string, turn: string|null, agent: string|null, phase: string, decision: string, continuation: string|null, originTurn: string|null, results: string[], omittedResults: number}} Receipt */
-/** @typedef {{dir: string, session: string|null, generation: string|null, event: string, eventKey: string|null, cli: string, source: string, turn: string|null, agent: string|null}} Context */
+/** @typedef {'allowed'|'machine'|'unknown'} Authority */
+/** @typedef {{version: 1, authority: 'machine'|'unknown', receipt: Receipt}} DiagnosticReceipt */
+/** @typedef {{dir: string, session: string|null, generation: string|null, event: string, eventKey: string|null, cli: string, source: string, turn: string|null, agent: string|null, authority: Authority}} Context */
 /** 事件身份只能取本次输入；缺失不能用继承环境补成已绑定。CLI家族不作为根来源证据。
- * @param {string} dir @param {unknown} input @param {unknown} state @param {string} event @param {NodeJS.ProcessEnv} [env]
+ * authority 由入口传已算好的准入结果；缺失默认 unknown，不在回执层重新推断根来源。
+ * expectedCli 仅由可信登记入口传入，不从事件正文选择；它只识别CLI家族，不改变authority。
+ * @param {string} dir @param {unknown} input @param {unknown} state @param {string} event @param {NodeJS.ProcessEnv} [env] @param {Authority} [authority] @param {'codex'|undefined} [expectedCli]
  * @returns {Context}
  */
-export function receiptContext(dir, input, state, event, env = process.env) {
+export function receiptContext(
+  dir,
+  input,
+  state,
+  event,
+  env = process.env,
+  authority = 'unknown',
+  expectedCli,
+) {
   const prop = (/** @type {unknown} */ obj, /** @type {string} */ key) =>
     obj && typeof obj === 'object' ? Reflect.get(obj, key) : undefined;
   const claude = !!env.CLAUDE_CODE_SESSION_ID,
-    codex = !!(env.CODEX_THREAD_ID || env.CODEX_SESSION_ID);
+    codex = expectedCli === 'codex' || !!(env.CODEX_THREAD_ID || env.CODEX_SESSION_ID);
   const cli = claude === codex ? 'unknown' : codex ? 'codex' : 'claude';
   const agent = idOf(prop(input, 'agent_id'));
   return {
@@ -91,6 +105,7 @@ export function receiptContext(dir, input, state, event, env = process.env) {
     source: agent ? 'subagent' : 'unknown',
     agent,
     turn: cli === 'codex' ? idOf(prop(input, 'turn_id')) : null,
+    authority,
   };
 }
 /** @param {string} dir @param {string|null} session */
@@ -171,10 +186,29 @@ function isReceipt(value) {
     r.omittedResults >= 0
   );
 }
-/** @param {number} fd @param {string|null} session
- * @returns {{ok:true, rows:Receipt[], evidence:'observed'|'unknown'}|{ok:false, code:string}}
+/** @param {unknown} value @returns {value is DiagnosticReceipt} */
+function isDiagnosticReceipt(value) {
+  if (!value || typeof value !== 'object') return false;
+  const r = /** @type {DiagnosticReceipt} */ (value);
+  return (
+    Object.keys(r).sort().join(',') === 'authority,receipt,version' &&
+    r.version === 1 &&
+    (r.authority === 'machine' || r.authority === 'unknown') &&
+    isReceipt(r.receipt)
+  );
+}
+/** @param {string|null} session @returns {(value:unknown)=>value is Receipt} */
+function sessionReceipt(session) {
+  /** @param {unknown} value @returns {value is Receipt} */
+  function matches(value) {
+    return isReceipt(value) && value.session === session;
+  }
+  return matches;
+}
+/** @template T @param {number} fd @param {(value:unknown)=>value is T} validate @param {string} [mismatch]
+ * @returns {{ok:true, rows:T[], evidence:'observed'|'unknown'}|{ok:false, code:string}}
  */
-function readOpened(fd, session) {
+function readOpened(fd, validate, mismatch = 'IO') {
   const opened = fstatSync(fd);
   if (!opened.isFile()) return { ok: false, code: 'IO' };
   if (opened.size >= MAX_RECEIPT_BYTES) return { ok: false, code: 'LIMIT' };
@@ -192,22 +226,24 @@ function readOpened(fd, session) {
   if (!text.endsWith('\n')) return { ok: false, code: 'CORRUPT' };
   const lines = text.slice(0, -1).split('\n');
   if (lines.length > MAX_RECEIPT_ROWS) return { ok: false, code: 'LIMIT' };
-  const rows = lines.map((line) => {
+  /** @type {T[]} */
+  const rows = [];
+  for (const line of lines) {
     if (Buffer.byteLength(line) >= MAX_ROW_BYTES) throw new Error();
     const row = JSON.parse(line);
-    if (!isReceipt(row) || row.session !== session) throw new Error();
-    return row;
-  });
+    if (!validate(row)) return { ok: false, code: mismatch };
+    rows.push(row);
+  }
   return { ok: true, rows, evidence: 'observed' };
 }
-/** 有锁、损坏、超限均报未知；没有文件也不证明没触发。
- * @param {string} dir @param {string|null} session
- * @returns {{ok:true, rows:Receipt[], evidence:'observed'|'unknown'}|{ok:false, code:string}}
+/** 有锁、损坏、超限均报未知；不同存储格式使用各自严格验证器。
+ * @template T @param {string} dir @param {string|null} key @param {(value:unknown)=>value is T} validate @param {string} [mismatch]
+ * @returns {{ok:true, rows:T[], evidence:'observed'|'unknown'}|{ok:false, code:string}}
  */
-export function readReceipts(dir, session) {
-  const p = paths(dir, session);
+function readJournal(dir, key, validate, mismatch = 'IO') {
+  const p = paths(dir, key);
   /** @type {number|undefined} */ let fd;
-  /** @returns {{ok:true, rows:Receipt[], evidence:'observed'|'unknown'}|{ok:false, code:string}} */
+  /** @returns {{ok:true, rows:T[], evidence:'observed'|'unknown'}|{ok:false, code:string}} */
   const read = () => {
     try {
       checkRoot(p.root);
@@ -219,7 +255,7 @@ export function readReceipts(dir, session) {
       }
       checkFile(p.file);
       fd = openSync(p.file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      return readOpened(fd, session);
+      return readOpened(fd, validate, mismatch);
     } catch (error) {
       return codeOf(error) === 'ENOENT'
         ? { ok: true, rows: [], evidence: 'unknown' }
@@ -236,38 +272,72 @@ export function readReceipts(dir, session) {
   }
   return result;
 }
+/** 原会话历史始终逐行核 session，不能接受混合诊断池。
+ * @param {string} dir @param {string|null} session
+ */
+export function readReceipts(dir, session) {
+  return readJournal(dir, session, sessionReceipt(session));
+}
+/** 混合池只作非根诊断，保留每条原事件身份，不提供根续轮或消费投影。
+ * @param {string} dir
+ */
+export function readDiagnosticReceipts(dir) {
+  return readJournal(dir, DIAGNOSTIC_RECEIPT_KEY, isDiagnosticReceipt, 'CONFLICT');
+}
 /** @param {Context} context @param {{phase:string,decision:string,continuation?:string|null,originTurn?:string|null,results?:string[]}} detail
  * @returns {{ok:true}|{ok:false,code:string}}
  */
 export function appendReceipt(context, detail) {
-  const p = paths(context.dir, context.session);
+  try {
+    const results = detail.results ?? [];
+    const row = {
+      version: /** @type {const} */ (1),
+      at: new Date().toISOString(),
+      session: context.session,
+      generation: context.generation,
+      event: context.event,
+      eventKey: context.eventKey,
+      cli: context.cli,
+      source: context.source,
+      turn: context.turn,
+      agent: context.agent,
+      phase: detail.phase,
+      decision: detail.decision,
+      continuation: detail.continuation ?? null,
+      originTurn: detail.originTurn ?? null,
+      results: results.slice(0, 16).map(fingerprint),
+      omittedResults: Math.max(0, results.length - 16),
+    };
+    if (context.authority === 'allowed') {
+      if (context.session === DIAGNOSTIC_RECEIPT_KEY) return { ok: false, code: 'CONFLICT' };
+      return appendJournal(context.dir, context.session, row, sessionReceipt(context.session));
+    }
+    const diagnostic = {
+      version: /** @type {const} */ (1),
+      authority: /** @type {'machine'|'unknown'} */ (context.authority === 'machine' ? 'machine' : 'unknown'),
+      receipt: row,
+    };
+    return appendJournal(context.dir, DIAGNOSTIC_RECEIPT_KEY, diagnostic, isDiagnosticReceipt, true);
+  } catch (error) {
+    return { ok: false, code: codeOf(error) };
+  }
+}
+/** 共用原有有界安全写入；新混合池不能接管已有空文件或不兼容的历史。
+ * @template T @param {string} dir @param {string|null} key @param {T} row
+ * @param {(value:unknown)=>value is T} validate @param {boolean} [rejectExistingEmpty]
+ * @returns {{ok:true}|{ok:false,code:string}}
+ */
+function appendJournal(dir, key, row, validate, rejectExistingEmpty = false) {
+  const p = paths(dir, key);
   /** @type {number|undefined} */ let fd;
   /** @type {number|undefined} */ let output;
   /** @type {number|undefined} */ let admission;
   const admissionLock = join(p.root, '.admission.lock');
+  let creating = false;
   /** @returns {{ok:true}|{ok:false,code:string}} */
   const append = () => {
     try {
-      const results = detail.results ?? [];
-      const row = {
-        version: 1,
-        at: new Date().toISOString(),
-        session: context.session,
-        generation: context.generation,
-        event: context.event,
-        eventKey: context.eventKey,
-        cli: context.cli,
-        source: context.source,
-        turn: context.turn,
-        agent: context.agent,
-        phase: detail.phase,
-        decision: detail.decision,
-        continuation: detail.continuation ?? null,
-        originTurn: detail.originTurn ?? null,
-        results: results.slice(0, 16).map(fingerprint),
-        omittedResults: Math.max(0, results.length - 16),
-      };
-      if (!isReceipt(row)) return { ok: false, code: 'SHAPE' };
+      if (!validate(row)) return { ok: false, code: 'SHAPE' };
       const text = `${JSON.stringify(row)}\n`;
       if (Buffer.byteLength(text) >= MAX_ROW_BYTES) return { ok: false, code: 'ROW_LIMIT' };
       mkdirSync(p.root, { recursive: true, mode: 0o700 });
@@ -277,6 +347,7 @@ export function appendReceipt(context, detail) {
         lstatSync(p.file);
       } catch (error) {
         if (codeOf(error) !== 'ENOENT') throw error;
+        creating = true;
         admission = openSync(admissionLock, 'wx', 0o600);
         const limit = directoryCapacity(p.root);
         if (limit) return { ok: false, code: limit };
@@ -292,8 +363,9 @@ export function appendReceipt(context, detail) {
       const target = fstatSync(output);
       if (!target.isFile()) return { ok: false, code: 'IO' };
       const size = target.size;
+      if (rejectExistingEmpty && !creating && size === 0) return { ok: false, code: 'CONFLICT' };
       if (size + Buffer.byteLength(text) >= MAX_RECEIPT_BYTES) return { ok: false, code: 'LIMIT' };
-      const prior = readOpened(output, context.session);
+      const prior = readOpened(output, validate, rejectExistingEmpty ? 'CONFLICT' : 'IO');
       if (!prior.ok) return prior;
       if (prior.rows.length >= MAX_RECEIPT_ROWS) return { ok: false, code: 'LIMIT' };
       appendFileSync(output, text, { encoding: 'utf8' });
@@ -363,6 +435,7 @@ export function noteReceipt(context, detail) {
  * @param {Context} context
  */
 export function observeContinuation(context) {
+  if (context.authority !== 'allowed') return;
   const read = readReceipts(context.dir, context.session);
   if (!read.ok) {
     noteReceipt(context, { phase: 'fault', decision: 'read_failed' });

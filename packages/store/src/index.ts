@@ -10,9 +10,11 @@ export { isSerial, isUuid, parseCursor } from './ids.ts';
 export { jsonLogger, silentLogger } from './log.ts';
 export * from './memory-store.ts';
 export * from './pg-store.ts';
+export * from './policy-source.ts';
 export * from './ports.ts';
 export * from './reconcile.ts';
 export * from './release-waits.ts';
+export * from './task-execution.ts';
 export {
   actorFor,
   GhUser,

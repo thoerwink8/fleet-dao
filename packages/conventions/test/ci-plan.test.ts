@@ -276,16 +276,30 @@ describe('按改动算要跑什么', () => {
     expect(units(p)).toEqual(['agents', 'api', 'db', 'engine', 'jev', 'store']);
     expect(units(p)).not.toContain('github');
     const packed = assigned(p);
-    // db 的测试（要真 Postgres）单独一台，不和别的包混在一个 vitest 进程里（FLEET_TEST_PG_URL 一设，全进程都连真库）
+    // db 和执行资格真竞争测试单独进 pg 台，其它 Store 测试不进同一个 vitest 进程（FLEET_TEST_PG_URL 一设，全进程都连真库）
     const pg = packed.tests.filter((b) => b.pg);
     expect(pg.length).toBeGreaterThanOrEqual(1);
     for (const b of pg) {
-      expect(b.files.every((f) => f.startsWith('packages/db/'))).toBe(true);
+      expect(
+        b.files.every(
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
+        ),
+      ).toBe(true);
       expect(b.label).toContain('· pg');
     }
-    // 别的台不带 pg，也不装 db 的文件
+    // 别的台不带 pg，也不装这两类真 PG 文件
     for (const b of packed.tests.filter((x) => !x.pg)) {
-      expect(b.files.some((f) => f.startsWith('packages/db/'))).toBe(false);
+      expect(
+        b.files.some(
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
+        ),
+      ).toBe(false);
     }
     // 每个要测的包都有自己的测试文件在某台里
     for (const u of ['db', 'engine', 'api', 'jev']) {
@@ -1422,20 +1436,35 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     expect(labels(p).filter((l) => l.includes('· pg')).length).toBeGreaterThanOrEqual(1);
     expect(labels(p).filter((l) => l.includes('· temporal'))).toHaveLength(1);
     // 台数封顶 8 之后，全量合计远大于 8×目标（表里 455 个文件合计 700 秒上下），每台自然超过「目标 50 秒」，所以不拿目标比、
-    // 拿平均比：装得匀，哪一台都不超过平均的 1.3 倍（pg 台只有 db 的文件、不能和别的台互补，它是最容易偏高的那一台）。
+    // 拿平均比：装得匀，哪一台都不超过平均的 1.3 倍（pg 台只有 db 和执行资格真竞争文件、不能和别的台互补，它是最容易偏高的那一台）。
     // 原来写「目标的两倍」，耗时表一刷新（总量涨了）就红，不是装箱坏了。
     const avg = p.tests.reduce((s, b) => s + b.estMs, 0) / p.tests.length;
     for (const b of p.tests) expect(b.estMs).toBeLessThanOrEqual(avg * 1.3);
     expect(coverage(p)).toEqual(Object.fromEntries(p.testUnits.map((u) => [u, '有台'])));
   });
 
-  it('db 的测试单独一台（要真 Postgres），那一台只有 db 的文件；别的台不带 pg', () => {
+  it('db 和执行资格真竞争测试进 pg 台，其它文件不进；别的台不带 pg', () => {
     const p = assigned(pr('packages/db/src/schema/index.ts'));
     const pg = p.tests.filter((b) => b.pg);
     expect(pg.length).toBeGreaterThanOrEqual(1);
-    for (const b of pg) expect(b.files.every((f) => f.startsWith('packages/db/'))).toBe(true);
+    for (const b of pg)
+      expect(
+        b.files.every(
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
+        ),
+      ).toBe(true);
     for (const b of p.tests.filter((x) => !x.pg))
-      expect(b.files.some((f) => f.startsWith('packages/db/'))).toBe(false);
+      expect(
+        b.files.some(
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
+        ),
+      ).toBe(false);
   });
 
   it('要 Temporal 命令行的文件（github-reconcile.test.ts）装在哪台，哪台装 Temporal', () => {

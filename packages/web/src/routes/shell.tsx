@@ -39,7 +39,7 @@ function Screen({ children }: { children: ReactNode }) {
  * 确认登录的同时外壳和页面已经挂上（看不见）：它们的读取和 /api/me 一起发出去，确认完直接显示。经香港转到法国的
  * 每个请求都要一趟往返（约 0.2 秒），等确认完再发就白白多等一轮。没登录的话这些读取也是 401，照样跳登录页。
  */
-function AuthGate({ children }: { children: ReactNode }) {
+export function AuthGate({ children }: { children: ReactNode }) {
   const me = useMe();
   if (me.data || me.isPending) {
     return (

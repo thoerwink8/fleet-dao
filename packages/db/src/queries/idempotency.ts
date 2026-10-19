@@ -12,21 +12,37 @@ export type ClaimResult =
   /** 别人占着还没写完（或写到一半死了）：先回读外部系统确认，别盲写。 */
   | { status: 'in-flight'; claimedAt: Date };
 
+/** 有界竞争已耗尽；调用方可按自己的策略重试，不代表已占键。 */
+export class IdempotencyClaimContentionError extends Error {
+  readonly code = 'IDEMPOTENCY_CLAIM_CONTENTION';
+  readonly retryable = true;
+  constructor(key: string) {
+    super(`幂等键 ${key} 连续竞争后仍未取得稳定记录，请重试`);
+    this.name = 'IdempotencyClaimContentionError';
+  }
+}
+
 export async function claimIdempotencyKey(
   db: Db,
   input: { key: string; action: string; target?: string },
   now: Date = new Date(),
 ): Promise<ClaimResult> {
-  const inserted = await db
-    .insert(idempotencyKeys)
-    .values({ key: input.key, action: input.action, target: input.target ?? null, claimedAt: now })
-    .onConflictDoNothing()
-    .returning({ key: idempotencyKeys.key });
-  if (inserted.length > 0) return { status: 'claimed' };
-  const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, input.key));
-  if (!row) throw new Error(`幂等键 ${input.key} 占不到也读不到`);
-  if (row.completedAt !== null) return { status: 'done', result: row.result, completedAt: row.completedAt };
-  return { status: 'in-flight', claimedAt: row.claimedAt };
+  // READ COMMITTED下，INSERT确认冲突后原持有者可能正常释放；后续SELECT读空是合法交错。
+  // 只在两条SQL均成功且读空时重做，最多四次；SQL/连接/序列化错误直接交给调用方。
+  // 不新开事务或持锁跨外部操作；更强隔离事务仍遵循自己的快照及事务重试合同。
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const inserted = await db
+      .insert(idempotencyKeys)
+      .values({ key: input.key, action: input.action, target: input.target ?? null, claimedAt: now })
+      .onConflictDoNothing()
+      .returning({ key: idempotencyKeys.key });
+    if (inserted.length > 0) return { status: 'claimed' };
+    const [row] = await db.select().from(idempotencyKeys).where(eq(idempotencyKeys.key, input.key));
+    if (!row) continue;
+    if (row.completedAt !== null) return { status: 'done', result: row.result, completedAt: row.completedAt };
+    return { status: 'in-flight', claimedAt: row.claimedAt };
+  }
+  throw new IdempotencyClaimContentionError(input.key);
 }
 
 /** 写成了：记回执（URL、编号……）。键不存在或已完成就抛错。 */
