@@ -548,3 +548,333 @@ describe('这次事故明确关联了已有单（repair.linked）', () => {
     expect(within(row).getByText('没人在修')).toBeTruthy();
   });
 });
+
+const NEXT = 'incident-b';
+const RECOVER_B: RepairAction = {
+  ...RECOVER,
+  id: 'task-recover:next',
+  label: '重开后继续',
+  detail: '新事故这一代能点的动作',
+};
+
+async function refreshList(): Promise<void> {
+  const btn = screen.getByRole('button', { name: '刷新' });
+  await waitFor(() => expect(btn.getAttribute('aria-busy')).not.toBe('true'));
+  fireEvent.click(btn);
+}
+
+describe('同一条通知换事故代次：本地状态隔离开，服务端的旧事故保护留着', () => {
+  test('A 已 verified、B 无 last 但有新动作：不显示 A 的已修复，也不被它挡住', async () => {
+    let incident = INCIDENT;
+    let last: RepairRecord | undefined;
+    let actions: RepairAction[] = [RECOVER];
+    const { bodies } = setup({
+      view: () => ({
+        incident,
+        actions,
+        problems: [],
+        ...(last ? { last } : {}),
+      }),
+      exec: async (body) => {
+        const repair = rec({
+          incident: body.incident,
+          actionId: body.actionId,
+          requestId: body.requestId,
+          state: body.incident === NEXT ? 'accepted' : 'verified',
+          text: body.incident === NEXT ? '新事故已受理（收到了，不等于修好）' : '核实恢复：上一代',
+        });
+        if (body.incident === incident) {
+          last = repair;
+          actions = body.incident === NEXT ? [] : actions;
+        }
+        return { ok: true, repair, replayed: false };
+      },
+    });
+    const row = await card();
+    fireEvent.click(within(row).getByRole('button', { name: '叫醒任务继续' }));
+    await waitFor(() => expect(within(row).getByTestId('repair-record').dataset.phase).toBe('verified'));
+    expect(within(row).getByText('已修复')).toBeTruthy();
+
+    incident = NEXT;
+    last = undefined;
+    actions = [RECOVER_B];
+    await refreshList();
+    const again = await card();
+    await waitFor(() => expect(within(again).getByTestId('repair-actions')).toBeTruthy());
+    expect(within(again).queryByText('已修复')).toBeNull();
+    expect(within(again).queryByTestId('repair-record')).toBeNull();
+    expect(within(again).getByText(RECOVER_B.detail)).toBeTruthy();
+    expect(within(again).queryByText(RECOVER.detail)).toBeNull();
+
+    fireEvent.click(within(again).getByRole('button', { name: '重开后继续' }));
+    await waitFor(() => expect(within(again).getByTestId('repair-record').dataset.phase).toBe('verifying'));
+    expect(bodies.map((b) => b.incident)).toEqual([INCIDENT, NEXT]);
+    expect(bodies[1]).toMatchObject({ actionId: RECOVER_B.id, incident: NEXT });
+    expect(bodies[1]?.requestId).not.toBe(bodies[0]?.requestId);
+    expect(bodies.filter((b) => b.requestId === bodies[0]?.requestId)).toHaveLength(1);
+  });
+
+  test('重读时事故已换代：不发上一代那一包', async () => {
+    let incident = INCIDENT;
+    let hold = false;
+    let release: () => void = () => undefined;
+    const { api, bodies } = setup({
+      view: () => ({
+        incident,
+        actions: incident === INCIDENT ? [RECOVER] : [RECOVER_B],
+        problems: [],
+      }),
+      exec: async () => {
+        throw new Error('不该执行');
+      },
+    });
+    const inner = api.notifications.bind(api);
+    api.notifications = async (query) => {
+      if (hold) {
+        hold = false;
+        await new Promise<void>((r) => {
+          release = r;
+        });
+      }
+      return inner(query);
+    };
+    const row = await card();
+    hold = true;
+    fireEvent.click(within(row).getByRole('button', { name: '叫醒任务继续' }));
+    await waitFor(() => expect(within(row).getByTestId('repair-busy').dataset.step).toBe('checking'));
+    incident = NEXT;
+    release();
+    const again = await card();
+    await waitFor(() => expect(within(again).getByText(RECOVER_B.detail)).toBeTruthy());
+    expect(bodies).toHaveLength(0);
+    expect(within(again).queryByText('已修复')).toBeNull();
+  });
+
+  test('没收到回执只留在原事故上，换代以后不挡新动作，也不把那次请求再发一遍', async () => {
+    let incident = INCIDENT;
+    const { bodies } = setup({
+      view: () => ({
+        incident,
+        actions: incident === INCIDENT ? [RECOVER] : [RECOVER_B],
+        problems: [],
+      }),
+      exec: async () => {
+        throw new ApiError(0, 'timeout', '后端 30 秒没回话');
+      },
+    });
+    const row = await card();
+    fireEvent.click(within(row).getByRole('button', { name: '叫醒任务继续' }));
+    await waitFor(() => expect(within(row).getByTestId('repair-record').dataset.phase).toBe('no-receipt'));
+    incident = NEXT;
+    await refreshList();
+    const next = await card();
+    await waitFor(() => expect(within(next).getByText(RECOVER_B.detail)).toBeTruthy());
+    expect(within(next).queryByText('没收到回执')).toBeNull();
+    expect(within(next).queryByRole('button', { name: '再问一次（同一请求）' })).toBeNull();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.incident).toBe(INCIDENT);
+  });
+
+  test('点开的选项和草稿只留在原事故上', async () => {
+    let incident = INCIDENT;
+    const { bodies } = setup({
+      view: () => ({
+        incident,
+        actions: incident === INCIDENT ? [RESTORE] : [RECOVER_B],
+        problems: [],
+      }),
+      exec: async () => {
+        throw new Error('不该执行');
+      },
+    });
+    const row = await card();
+    fireEvent.click(within(row).getByRole('button', { name: '恢复引擎开关' }));
+    fireEvent.change(within(row).getByRole('textbox', { name: '自己写一句' }), {
+      target: { value: '先别动' },
+    });
+    expect(within(row).getByTestId('decision-picker')).toBeTruthy();
+    incident = NEXT;
+    await refreshList();
+    const next = await card();
+    await waitFor(() => expect(within(next).getByText(RECOVER_B.detail)).toBeTruthy());
+    expect(within(next).queryByTestId('decision-picker')).toBeNull();
+    expect(within(next).queryByDisplayValue('先别动')).toBeNull();
+    expect(bodies).toHaveLength(0);
+  });
+
+  test('报错只留在原事故上', async () => {
+    let incident = INCIDENT;
+    const { bodies } = setup({
+      view: () => ({
+        incident,
+        actions: incident === INCIDENT ? [RECOVER] : [RECOVER_B],
+        problems: [],
+      }),
+      exec: async () => {
+        throw new ApiError(409, 'action_expired', '这个动作已经过期');
+      },
+    });
+    const row = await card();
+    fireEvent.click(within(row).getByRole('button', { name: '叫醒任务继续' }));
+    await waitFor(() => expect(within(row).getByTestId('repair-note').textContent).toContain('已刷新'));
+    incident = NEXT;
+    await refreshList();
+    const next = await card();
+    await waitFor(() => expect(within(next).getByText(RECOVER_B.detail)).toBeTruthy());
+    expect(within(next).queryByTestId('repair-note')).toBeNull();
+    expect(bodies).toHaveLength(1);
+    expect(bodies.filter((b) => b.incident === NEXT)).toHaveLength(0);
+  });
+
+  async function lateWhileBRuns(failA: boolean) {
+    let incident = INCIDENT;
+    let releaseA: () => void = () => undefined;
+    let releaseB: () => void = () => undefined;
+    const { bodies, reads } = setup({
+      view: () => ({
+        incident,
+        actions: incident === INCIDENT ? [RECOVER] : [RECOVER_B],
+        problems: [],
+      }),
+      exec: async (body) => {
+        if (body.incident === INCIDENT) {
+          await new Promise<void>((r) => {
+            releaseA = r;
+          });
+          if (failA) throw new ApiError(0, 'timeout', '后端 30 秒没回话');
+          return {
+            ok: true,
+            repair: rec({
+              incident: INCIDENT,
+              requestId: body.requestId,
+              state: 'verified',
+              text: '核实恢复：上一代',
+            }),
+            replayed: false,
+          };
+        }
+        await new Promise<void>((r) => {
+          releaseB = r;
+        });
+        return {
+          ok: true,
+          repair: rec({
+            incident: NEXT,
+            actionId: body.actionId,
+            requestId: body.requestId,
+            state: 'accepted',
+            text: '新事故已受理（收到了，不等于修好）',
+          }),
+          replayed: false,
+        };
+      },
+    });
+    const row = await card();
+    fireEvent.click(within(row).getByRole('button', { name: '叫醒任务继续' }));
+    await waitFor(() => expect(within(row).getByTestId('repair-busy').dataset.step).toBe('sent'));
+    incident = NEXT;
+    await refreshList();
+    const next = await card();
+    await waitFor(() => expect(within(next).getByRole('button', { name: '重开后继续' })).toBeTruthy());
+    fireEvent.click(within(next).getByRole('button', { name: '重开后继续' }));
+    await waitFor(() => expect(within(next).getByTestId('repair-busy').dataset.step).toBe('sent'));
+    const before = reads();
+    releaseA();
+    await waitFor(() => expect(reads()).toBeGreaterThan(before));
+    const still = await card();
+    expect(within(still).getByTestId('repair-busy').dataset.step).toBe('sent');
+    expect(within(still).queryByText('已修复')).toBeNull();
+    expect(within(still).queryByText('核实恢复：上一代')).toBeNull();
+    expect(within(still).queryByText('没收到回执')).toBeNull();
+    expect(within(still).queryByTestId('repair-note')).toBeNull();
+    expect(toast.success).not.toHaveBeenCalled();
+    expect(bodies).toHaveLength(2);
+    expect(bodies[0]).toMatchObject({ actionId: RECOVER.id, incident: INCIDENT });
+    expect(bodies[1]).toMatchObject({ actionId: RECOVER_B.id, incident: NEXT });
+    releaseB();
+    await waitFor(() => expect(within(still).getByTestId('repair-record').dataset.phase).toBe('verifying'));
+    expect(within(still).getByText('新事故已受理（收到了，不等于修好）')).toBeTruthy();
+    expect(within(still).queryByText('已修复')).toBeNull();
+    expect(within(still).queryByText('没收到回执')).toBeNull();
+    expect(bodies).toHaveLength(2);
+  }
+
+  test('迟到的 A 成功不污染 B，也不清掉 B 正在执行的状态', async () => {
+    await lateWhileBRuns(false);
+  });
+
+  test('迟到的 A 失败不污染 B，也不清掉 B 正在执行的状态', async () => {
+    await lateWhileBRuns(true);
+  });
+
+  test('服务端明示的上一代在途/未知/待核验继续展示并挡住动作', async () => {
+    for (const state of ['unknown', 'executing', 'accepted'] as const) {
+      cleanup();
+      setup({
+        view: () => ({
+          incident: NEXT,
+          actions: [RECOVER_B],
+          problems: ['上一代事故的操作仍在执行、结果未知或待核验，不能覆盖后重发；请先核实原操作'],
+          last: rec({
+            incident: INCIDENT,
+            state,
+            text: `上一代还没结：${state}`,
+            requestId: '22222222-2222-4222-8222-222222222222',
+          }),
+        }),
+      });
+      const row = await card();
+      const phase = state === 'accepted' ? 'verifying' : state;
+      expect(within(row).getByTestId('repair-record').dataset.phase).toBe(phase);
+      expect(within(row).getByText(`上一代还没结：${state}`)).toBeTruthy();
+      expect(row.textContent).toContain('不能覆盖后重发');
+      expect(within(row).queryByTestId('repair-actions')).toBeNull();
+      expect(within(row).queryByRole('button', { name: '重开后继续' })).toBeNull();
+    }
+  });
+
+  test('本地还留着 A 的已修复时，服务端带回的上一代在途不能被滤掉', async () => {
+    let incident = INCIDENT;
+    let actions: RepairAction[] = [RECOVER];
+    let last: RepairRecord | undefined;
+    let problems: string[] = [];
+    setup({
+      view: () => ({
+        incident,
+        actions,
+        problems,
+        ...(last ? { last } : {}),
+      }),
+      exec: async (body) => {
+        const repair = rec({
+          incident: body.incident,
+          requestId: body.requestId,
+          state: 'verified',
+          text: '核实恢复：上一代',
+        });
+        last = repair;
+        actions = [];
+        return { ok: true, repair, replayed: false };
+      },
+    });
+    const row = await card();
+    fireEvent.click(within(row).getByRole('button', { name: '叫醒任务继续' }));
+    await waitFor(() => expect(within(row).getByText('已修复')).toBeTruthy());
+    incident = NEXT;
+    actions = [RECOVER_B];
+    problems = ['上一代事故的操作仍在执行、结果未知或待核验，不能覆盖后重发；请先核实原操作'];
+    last = rec({
+      incident: INCIDENT,
+      state: 'executing',
+      text: '上一代仍在执行',
+      requestId: '22222222-2222-4222-8222-222222222222',
+    });
+    await refreshList();
+    const again = await card();
+    await waitFor(() => expect(within(again).getByTestId('repair-record').dataset.phase).toBe('executing'));
+    expect(within(again).getByText('上一代仍在执行')).toBeTruthy();
+    expect(within(again).queryByText('已修复')).toBeNull();
+    expect(within(again).queryByTestId('repair-actions')).toBeNull();
+    expect(again.textContent).toContain('不能覆盖后重发');
+  });
+});
