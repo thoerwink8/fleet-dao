@@ -13,6 +13,7 @@ import {
   SWITCH_ORG_TIMEOUT_MS,
   switchSessionOrg,
 } from '../src/procs.ts';
+import { readTreePlace } from '../src/tree-cleanup.ts';
 import { tempDir } from './helpers.ts';
 
 const HELPER = join(dirname(fileURLToPath(import.meta.url)), 'fake-scope-helper.ts');
@@ -149,6 +150,7 @@ describe('removeWorktreeDir · 调帮手删工作树（假帮手）', () => {
     delete process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT;
     delete process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR;
     delete process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT;
+    delete process.env.FLEET_FAKE_SCOPE_CAPABILITIES;
   });
   const remove = (over: Partial<Parameters<typeof removeWorktreeDir>[0]> = {}) =>
     removeWorktreeDir({
@@ -158,6 +160,26 @@ describe('removeWorktreeDir · 调帮手删工作树（假帮手）', () => {
       sudo: [process.execPath],
       ...over,
     });
+
+  it('旧目录协议或错误版本不授权临时文件删除，不调用 remove', async () => {
+    const features = ['tree-usage', 'identity-remove', 'cleanup-status', 'cleanup-rollback', 'locked-adopt'];
+    const dir = '/var/lib/fleet-work/_tmp/ops-verify-2901.tar';
+    for (const capability of [
+      { version: 1, state: 'ok', features },
+      { version: 2, state: 'ok', features: [...features, 'temporary-files'] },
+    ]) {
+      process.env.FLEET_FAKE_SCOPE_CAPABILITIES = JSON.stringify(capability);
+      await expect(readTreePlace(dir, { helper: HELPER, sudo: [process.execPath] })).rejects.toThrow();
+      const result = await remove({ dir, identity: { lex: dir, real: dir, dev: '1', ino: '2', uid: '993' } });
+      expect(result).toMatchObject({ ok: false, code: 'failed' });
+    }
+    expect(
+      readFileSync(log, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line).action),
+    ).toEqual(['capabilities', 'capabilities', 'capabilities', 'capabilities']);
+  });
 
   it('参数：remove <工作树>；帮手报 removed 就是删了', async () => {
     expect(await remove()).toEqual({ ok: true, gone: false });
