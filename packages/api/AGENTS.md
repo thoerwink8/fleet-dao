@@ -40,7 +40,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 
 - 受控修复同一 incident 在执行、结果未知或受理待核验时，所有其他动作也必须阻挡，不允许覆盖原副作用。idle 判据与原检测器共用 core 纯模块，具体 workflow run 必须现读并钉入信号；发版核验绑原 SHA 和 startedAt。交修复在开单后调用固定 `engine/src/bin/dispatch-issue.ts` 准入入口，不拼 shell，不提权，派工未知保留原单和未知状态；确定未派重试复用原单。
 
-- 真核验通过后按设置版本与通知 `raisedAt` 双守卫 CAS 持久写 verified 和审计；并发 GET 只一份结清审计，结算冲突/读取失败均不展示绿。不替看门狗撤原通知。
+- 真核验通过后按设置版本与通知 `raisedAt` 双守卫 CAS 持久写 verified 和审计；并发 GET 只一份结清审计，结算冲突/读取失败均不展示绿。不替看门狗撤原通知。执行路由的最终结算同样只回已落库的记录：CAS 冲突或持久读写失败不把内存里的 verified 等终态当 200；重读只采纳精确同一 incident、requestId、动作且已落库的结果，不覆盖并发赢家，不重放动作。
 
 - 明确关联已有单（#3100，`POST /api/notifications/:id/repair/link`）：可信登录操作者指定这次告警由哪张现有 fleet-dao 单处理，只收受管仓 + 单号 + 服务端关联版本（视图 `linkAction`）+ incident + `requestId`，多一个字段（如伪造 actor）就 400；服务端现读必须是开着的 issue，并按目标仓和单精确查任务、开放 PR（`listPullRequests` 的 `repoId`/`issueNumber`，不读全局前 N 条再筛；一页读满当没读全，关联 502、交给修复标 failed 不派工）；读不到、PR、错仓、已关闭一律拒绝，不回退成开单。线上契约不加枚举：修复记录的 kind/state 与 #3033 一样，关联存成设置表里的内部记录（`StoredRecordSchema`，只在 `alert-repair.ts` 里认），出口经 `wireLast` 投影，关联只走视图的 `linked` 和关联端点自己的回执；通知卡（#3034）按旧枚举取 `PHASE_META[state]`，新枚举会让它崩溃，`alert-repair.test.ts` 有照抄旧消费者的严格检查。交给修复沿用绑定：每次重新核实，失效标 `invalid` 不开新单；已有进行中的任务或开放 PR 回 409 `link_already_handled` 不派工，否则经原准入派一次（不传 force）。关联与开单抢同一事故走同一个设置版本 CAS。标题正文相似不自动认同根因。
 
