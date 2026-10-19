@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./acceptance-gate": "./src/acceptance-gate.ts",
     "./ci-policy-bridge": "./src/ci-policy-bridge.ts"
   },
   "dependencies": {

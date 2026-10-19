@@ -266,9 +266,9 @@ describe('建树、收树', () => {
     const stale = trees.trees.treeFor(repo, BRANCH);
     await trees.trees.adopt(stale, 'fleet-agent-carpool');
     const remove = trees.trees.remove.bind(trees.trees);
-    trees.trees.remove = async (dir) => {
+    trees.trees.remove = async (dir, identity) => {
       await new Promise((r) => setTimeout(r, 120));
-      return remove(dir);
+      return remove(dir, identity);
     };
     let beats = 0;
     let beatsAtRemove = -1;
@@ -279,9 +279,9 @@ describe('建树、收树', () => {
       },
     };
     const slowRemove = trees.trees.remove;
-    trees.trees.remove = async (dir) => {
+    trees.trees.remove = async (dir, identity) => {
       beatsAtRemove = beats;
-      return slowRemove(dir);
+      return slowRemove(dir, identity);
     };
     await ports.createWorktree({ taskId: 't1', repo, branch: BRANCH }, counting);
     expect(beatsAtRemove).toBeGreaterThanOrEqual(1);
@@ -334,7 +334,7 @@ describe('建树、收树', () => {
     ).rejects.toMatchObject({ code: 'WORKTREE_PRESERVED' });
     expect(readFileSync(join(dir, 'README.md'), 'utf8')).toContain('改了没提交');
     expect(existsSync(dir)).toBe(true);
-    await trees.trees.remove(dir);
+    await trees.trees.reapTemporary(dir);
     expect(
       await ports.removeWorktree({ taskId: 't1', repo, path: dir, branch: BRANCH, archive: true }, ctx),
     ).toEqual({ removed: false, gone: true });

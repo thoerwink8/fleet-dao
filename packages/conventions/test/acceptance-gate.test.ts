@@ -19,6 +19,18 @@ const row = {
   settledAt: null,
   settledBy: null,
   settleEvidence: null,
+  state: 'open',
+  supersededAt: null,
+  supersededBy: null,
+  supersedeEvidence: null,
+  successorId: null,
+  successorGeneration: null,
+};
+const done = {
+  settledAt: '2026-10-18T10:00:00Z',
+  settledBy: 'ops',
+  settleEvidence: '现场记录',
+  state: 'settled',
 };
 const fetchRows = (duties: unknown[], over = {}) =>
   (async () =>
@@ -29,16 +41,7 @@ describe('DB最终验收可信读', () => {
   it('open拒关，可信精确已验可收尾，普通空责任照旧', async () => {
     vi.stubEnv('FLEET_PUBLIC_URL', 'https://example.org');
     expect(await acceptanceGate(gh, repo, 7, fetchRows([row]))).toContain('未结清');
-    expect(
-      await acceptanceGate(
-        gh,
-        repo,
-        7,
-        fetchRows([
-          { ...row, settledAt: '2026-10-18T10:00:00Z', settledBy: 'ops', settleEvidence: '现场记录' },
-        ]),
-      ),
-    ).toBeUndefined();
+    expect(await acceptanceGate(gh, repo, 7, fetchRows([{ ...row, ...done }]))).toBeUndefined();
     expect(await acceptanceGate(gh, repo, 7, fetchRows([]))).toBeUndefined();
   });
   it('跨仓、跨issue、坏代次、缺证据、网络失败全部unknown', async () => {
@@ -47,7 +50,10 @@ describe('DB最终验收可信读', () => {
       [{ ...row, repo: 'evil/r' }],
       [{ ...row, generation: 0 }],
       [{ ...row, issueNumber: 8 }],
-      [{ ...row, settledAt: '2026-10-18T10:00:00Z', settledBy: 'ops', settleEvidence: '' }],
+      [{ ...row, ...done, settleEvidence: '' }],
+      [{ ...row, state: undefined }],
+      [{ ...row, state: 'closed' }],
+      [{ ...row, ...done, state: 'open' }],
     ])
       await expect(acceptanceGate(gh, repo, 7, fetchRows(duties))).rejects.toThrow();
     await expect(acceptanceGate(gh, repo, 7, fetchRows([], { issueNumber: 8 }))).rejects.toThrow();
@@ -56,6 +62,56 @@ describe('DB最终验收可信读', () => {
         throw new Error('refused');
       }) as typeof fetch),
     ).rejects.toThrow('refused');
+  });
+});
+
+describe('旧头替代收口后的关闭判定（#3114）', () => {
+  const final = { ...row, id: 2, generation: 3, head: 'c'.repeat(40), ...done };
+  const old = {
+    ...row,
+    id: 1,
+    mergeCommit: null,
+    state: 'superseded',
+    supersededAt: '2026-10-18T11:00:00Z',
+    supersededBy: 'ops:acceptance:frank',
+    supersedeEvidence: 'PR 最终头已合已验',
+    successorId: 2,
+    successorGeneration: 3,
+  };
+  it('旧头被替代、最终头已验：放行关单；旧头仍 open 或替代已过期（读口回 open）照旧拦', async () => {
+    vi.stubEnv('FLEET_PUBLIC_URL', 'https://example.org');
+    expect(await acceptanceGate(gh, repo, 7, fetchRows([old, final]))).toBeUndefined();
+    expect(await acceptanceGate(gh, repo, 7, fetchRows([{ ...old, ...row, id: 1 }, final]))).toContain(
+      '未结清',
+    );
+    // 目标后来新增项：读口把目标和旧头都算回 open
+    expect(
+      await acceptanceGate(
+        gh,
+        repo,
+        7,
+        fetchRows([
+          { ...old, state: 'open' },
+          { ...final, generation: 4, state: 'open', settledAt: null, settledBy: null, settleEvidence: null },
+        ]),
+      ),
+    ).toContain('未结清');
+  });
+  it('替代证据缺失、指向对不上（目标缺、代次不符、非已验、不同 PR、同头）、冒充完成回执：不放行', async () => {
+    vi.stubEnv('FLEET_PUBLIC_URL', 'https://example.org');
+    for (const duties of [
+      [old],
+      [old, { ...final, generation: 4 }],
+      [old, { ...final, state: 'open', settledAt: null, settledBy: null, settleEvidence: null }],
+      [old, { ...final, prNumber: 10 }],
+      [old, { ...final, head: old.head }],
+      [{ ...old, supersedeEvidence: ' ' }, final],
+      [{ ...old, supersededBy: null }, final],
+      [{ ...old, successorId: null }, final],
+      [{ ...old, mergeCommit: 'b'.repeat(40) }, final],
+      [{ ...old, settledAt: '2026-10-18T10:00:00Z' }, final],
+    ])
+      await expect(acceptanceGate(gh, repo, 7, fetchRows(duties))).rejects.toThrow();
   });
 });
 
@@ -102,8 +158,7 @@ describe('有界完整读取', () => {
     vi.stubEnv('FLEET_PUBLIC_URL', 'https://example.org');
     const settled = {
       ...row,
-      settledAt: '2026-10-18T10:00:00Z',
-      settledBy: 'ops',
+      ...done,
       settleEvidence: 'x'.repeat(6000),
     };
     expect(await acceptanceGate(gh, repo, 7, fetchRows([settled]))).toBeUndefined();

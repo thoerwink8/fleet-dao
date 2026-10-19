@@ -156,11 +156,12 @@ function harness(
     drivers,
     trees: {
       tmpFor: (runId) => `/var/lib/fleet-work/_tmp/${runId}`,
-      async adopt(dir, user) {
+      async adoptTemporary(dir, user) {
         order.push('adopt');
         adopted.push({ dir, user });
+        return { lex: dir, real: dir, dev: '0', ino: '0', uid: '0' };
       },
-      async remove(dir) {
+      async removeTemporary(dir) {
         order.push('remove');
         removed.push(dir);
         return { gone: false };
@@ -232,7 +233,8 @@ describe('hostSegmentSpawner · 内存峰值（#948）', () => {
     slicePath: 'fleet.slice/fleet-agents.slice',
     intervalMs: 5,
   });
-  const afterAWhile = () => new Promise((r) => setTimeout(r, 40));
+  // 采样间隔 5 毫秒，第三次才是 301。整仓并行时事件循环会把定时器拖过 40 毫秒，只采到 100。
+  const afterAWhile = () => new Promise((r) => setTimeout(r, 200));
 
   it('会话跑着时读到的最大那次进 runs.memory_peak_mb（向上取整成 MB）；读的是这个会话自己的 scope', async () => {
     const paths: string[] = [];
@@ -840,7 +842,11 @@ describe('hostSegmentSpawner · 【故意造出的失败】读不到、认不出
     const spawn = hostSegmentSpawner({
       routeFacts: async () => route(),
       drivers: { 'claude-code': driver } as unknown as Record<WiredHost, HostDriver>,
-      trees: { tmpFor: () => '/x', adopt: async () => undefined, remove: async () => ({ gone: true }) },
+      trees: {
+        tmpFor: () => '/x',
+        adoptTemporary: async () => ({ lex: '/x', real: '/x', dev: '0', ino: '0', uid: '0' }),
+        removeTemporary: async () => ({ gone: true }),
+      },
       baseEnv: {},
       resources: { memoryHighMb: -1, memoryMaxMb: 6144, swapMaxMb: 0 },
     });
@@ -851,7 +857,11 @@ describe('hostSegmentSpawner · 【故意造出的失败】读不到、认不出
   it('没装路由查询 → 起不了（不拿空顶）', async () => {
     const spawn = hostSegmentSpawner({
       drivers: {} as Record<WiredHost, HostDriver>,
-      trees: { tmpFor: () => '/x', adopt: async () => undefined, remove: async () => ({ gone: true }) },
+      trees: {
+        tmpFor: () => '/x',
+        adoptTemporary: async () => ({ lex: '/x', real: '/x', dev: '0', ino: '0', uid: '0' }),
+        removeTemporary: async () => ({ gone: true }),
+      },
       baseEnv: {},
       resources: { memoryHighMb: 1, memoryMaxMb: 2, swapMaxMb: 0 },
     });
@@ -1260,7 +1270,7 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
     const got = await h.run({ detach: { attach: { startedAt } } });
     expect(got).toMatchObject({ outcome: 'done', startedAt });
     expect(h.calls[0]?.hooks.io).toMatchObject({ dir, attach: true });
-    expect(h.order).toEqual(['run', 'remove']);
+    expect(h.order).toEqual(['run']);
     expect(h.adopted).toEqual([]);
     expect(h.recorded).toEqual([expect.objectContaining({ runId: RUN_ID, outcome: 'done', startedAt })]);
     expect(existsSync(dir)).toBe(false);

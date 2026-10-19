@@ -92,6 +92,17 @@ SHOW=$T/show.txt
 } >"$SHOW"
 
 export ROOT_EXEC_CHECK_SHOW=$SHOW
+# The formal entry must include fixed sudo code, even when systemd never names it.
+(
+  rec_check_path() { printf '%s\n' "$2" >>"$T/fixed-called"; }
+  root_exec_check || exit 1
+  for path in /usr/local/sbin/fleet-agent-scope /usr/local/libexec/fleet-dao-tree-usage.py /usr/bin/python3; do
+    grep -Fxq "$path" "$T/fixed-called" || exit 1
+  done
+) || {
+  echo '不通过：正式入口漏查固定sudo代码或解释器'
+  exit 1
+}
 root_exec_check
 rc=$?
 

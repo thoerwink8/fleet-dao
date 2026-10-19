@@ -206,7 +206,9 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
     ticket.attempt(runId);
     const dir = w.trees.treeFor(ref(input.repo), `fleet/groom-${runId.slice(0, 8)}`);
     const timeoutMs = input.timeoutMinutes * 60_000;
+    let treeIdentity: Awaited<ReturnType<WorkTrees['adoptTemporary']>> | undefined;
     try {
+      treeIdentity = await w.trees.adoptTemporary(dir, info.user);
       // 3. 主线的检出（钉在读到的主线头）
       await prepareSegmentTree(
         { gh: w.gh, trees: w.trees, exec: w.exec, tmpDir: w.tmpDir },
@@ -268,9 +270,10 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
       return { ok: false, why: errMessage(err), routeId: route.routeId };
     } finally {
       ticket.leave();
-      await w.trees.remove(dir).catch((err: unknown) => {
-        log('warn', '整理会话的检出没删掉（引擎下次起来时的清理会收）', { dir, error: errMessage(err) });
-      });
+      if (treeIdentity)
+        await w.trees.removeTemporary(dir, treeIdentity).catch((err: unknown) => {
+          log('warn', '整理会话的检出没删掉（引擎下次起来时的清理会收）', { dir, error: errMessage(err) });
+        });
     }
   };
 

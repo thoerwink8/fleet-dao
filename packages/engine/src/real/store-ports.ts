@@ -53,7 +53,7 @@ import {
   upsertAcceptanceDuty,
   upsertAlert,
 } from '@fleet-dao/db';
-import type { HostId, OrgKind, StageKind } from '@fleet-dao/shared';
+import { acceptanceDutyState, type HostId, type OrgKind, type StageKind } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { DRAIN_ROUTE_RETRY_SECONDS, type EngineDrain, stoppingNote } from '../drain.ts';
 import { type EngineMasterGate, MASTER_ROUTE_RETRY_SECONDS, masterOffNote } from '../engine-master.ts';
@@ -1171,14 +1171,17 @@ function checkDutyRecord(r: AcceptanceDutyRecord): AcceptanceDutyRecord {
   return { ...r, items };
 }
 
-/** 这张单还开着的验收责任（按记下的先后）。读不成抛 ACCEPTANCE_DUTY_UNCHECKED。 */
+/**
+ * 这张单还开着的验收责任（按记下的先后）。开不开照 shared 的 acceptanceDutyState（和受管 status、公开读口同一判法）：
+ * 被已合已验的后续交付替代收口、且替代没过期的不算开着。读不成抛 ACCEPTANCE_DUTY_UNCHECKED。
+ */
 export async function openAcceptanceDuties(db: Db, taskId: string): Promise<AcceptanceDuty[]> {
   try {
     const rows = await db.query.acceptanceDuties.findMany({
-      where: (t, { and, eq, isNull }) => and(eq(t.taskId, taskId), isNull(t.settledAt)),
+      where: (t, { eq }) => eq(t.taskId, taskId),
       orderBy: (t, { asc }) => [asc(t.id)],
     });
-    return rows.map(dutyOf);
+    return rows.filter((r) => acceptanceDutyState(r, rows) === 'open').map(dutyOf);
   } catch (error) {
     throw dutyUnchecked('读', error);
   }

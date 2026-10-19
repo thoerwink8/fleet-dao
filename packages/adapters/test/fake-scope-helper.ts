@@ -8,7 +8,19 @@ const [action, ...rest] = process.argv.slice(2);
 const log = process.env.FLEET_FAKE_SCOPE_LOG;
 if (log) appendFileSync(log, `${JSON.stringify({ action, args: rest, env: process.env })}\n`);
 
-if (action === 'run') {
+if (action === 'capabilities') {
+  if (process.env.FLEET_FAKE_SCOPE_CAPABILITIES !== undefined) {
+    process.stdout.write(process.env.FLEET_FAKE_SCOPE_CAPABILITIES);
+    process.exit(0);
+  }
+  process.stdout.write(
+    JSON.stringify({
+      version: 1,
+      state: 'ok',
+      features: ['tree-usage', 'identity-remove', 'cleanup-status', 'cleanup-rollback', 'locked-adopt'],
+    }),
+  );
+} else if (action === 'run') {
   const at = rest.indexOf('--');
   const cwdAt = rest.indexOf('--cwd');
   const command = rest.slice(at + 1);
@@ -35,13 +47,28 @@ if (action === 'run') {
   // 退出码由测试摆布：验 adoptWorktree 把各个退出码翻成哪种 AdoptWorktreeResult
   if (process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR)
     process.stderr.write(process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR);
+  process.stdout.write(
+    JSON.stringify({
+      version: 1,
+      state: 'adopted',
+      identity: { lex: rest[0], real: rest[0], dev: '0', ino: '0', uid: '0' },
+    }),
+  );
   process.exit(Number(process.env.FLEET_FAKE_SCOPE_ADOPT_EXIT ?? '0'));
 } else if (action === 'list') {
   process.stdout.write(process.env.FLEET_FAKE_SCOPE_LIST_STDOUT ?? '');
   process.exit(Number(process.env.FLEET_FAKE_SCOPE_LIST_EXIT ?? '0'));
 } else if (action === 'remove') {
   // 标准输出和退出码由测试摆布：验 removeWorktreeDir 怎么认 removed / gone / 认不出
-  process.stdout.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT ?? `removed ${rest[0]}\n`);
+  process.stdout.write(
+    process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT ??
+      JSON.stringify({
+        version: 1,
+        state: 'removed',
+        identity: { lex: rest[0], real: rest[0], dev: rest[2], ino: rest[4], uid: rest[6] },
+        transaction: 'a'.repeat(64),
+      }),
+  );
   if (process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR)
     process.stderr.write(process.env.FLEET_FAKE_SCOPE_REMOVE_STDERR);
   process.exit(Number(process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT ?? '0'));

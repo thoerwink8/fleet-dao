@@ -65,6 +65,14 @@ export const MERGE_POLL_MINUTES = 15;
  * 写死：不是上面那一轮 15 分钟，也不是一直等。
  */
 export const MERGE_RED_CONFIRM_SECONDS = 20;
+/**
+ * 挂自动合并时 GitHub 说已经是 clean，但这个精确头上还有检查在跑（正文改成 Refs 会把 merge-gate 重新打进队列）：
+ * 最多等这么多分钟（按工作流时间算的截止时刻，挂合并活动的排队、重试、状态落库、休眠都在里面），每隔 ARM_PENDING_POLL_SECONDS
+ * 再走一次正常的挂自动合并。到点还没跑完就停下。不是按次数，不是无限重试，也不把 ci_not_green 这句原文当成「还在跑」。
+ */
+export const ARM_PENDING_CHECKS_MINUTES = 15;
+/** 上面那段有界等待里，隔这么多秒再挂一次。写死，和等合并确认红一样是 20 秒。 */
+export const ARM_PENDING_POLL_SECONDS = 20;
 
 /** 同一张 PR 每段最多自动同步主线几次；耗尽后停下，只有对应停法的新「继续」才能续下一段，免得主线一直在动就一直转。 */
 export const MAX_MAIN_SYNCS = 3;
@@ -498,6 +506,27 @@ export interface ArmAutoMergeResult {
    * 老历史里没有这个字段。
    */
   reviewChanges?: ReviewChange[];
+  /**
+   * clean 之后直接合被拒，现读这个头：必过检查里还有 queued / in_progress，不是红、不是没出现、也不是没查成。
+   * 工作流有界等待后重新走挂自动合并。只认这个结构，不认 why 里的「没跑完」。老历史没有这个字段。
+   */
+  checksPending?: {
+    /** 还在跑的检查名。至少一条。 */
+    names: string[];
+    /** 绑住的头，和这次 expectedHead 同一个。头不是这个就不能接着等。 */
+    head: string;
+    /** 直接合被拒的原文。等到点了原样留下。 */
+    detail: string;
+  };
+  /**
+   * 同一条路上现读到真红。工作流按等合并的确认 / 返工走，不当成还在跑。老历史没有这个字段。
+   */
+  checksRed?: {
+    failedChecks: string[];
+    detail: string;
+    /** 现读的那个头。和 expectedHead 不是同一个就当头变了，不拿旧头的红或绿往下用。 */
+    head: string;
+  };
 }
 
 /** 现读这个仓现在的 CI 模式。工作流每次走到等 CI 之前读，不在拉单那一刻定死。 */
@@ -580,6 +609,11 @@ export type MergeWait =
    * 老历史里没有这个状态（那时候红了也回 waiting，工作流一直等）。
    */
   | { state: 'checks_red'; failedChecks: string[]; detail: string }
+  /**
+   * 必过检查没出现，或跑完了却不是在跑、也没有能认的结论。接着轮询不会自己变好。
+   * 老历史里没有这个状态（那时候没分开报，一直等到时限回 waiting）。
+   */
+  | { state: 'checks_unreadable'; detail: string }
   /**
    * 等合并时 PR 上出现了认可审查者的正式「要求改」（#2991）：活动已把自动合并撤掉，交工作流转给工人或停下等审查者。
    * 老历史里没有这个状态。

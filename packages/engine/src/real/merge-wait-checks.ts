@@ -9,6 +9,81 @@ import { type GitHub, isGitHubError, type RepoRef, readCi, requiredChecksFor } f
 export interface MergeWaitCheckRead {
   overall: 'green' | 'red' | 'pending' | 'none';
   failed: { name: string; detail?: string }[];
+  /**
+   * 还在跑（queued / in_progress）的检查名。没出现的不放进来。
+   * 必过名单里只要有一条没出现，整份都不带这个字段：不能靠旁边一条还在跑的装成可等。没有就不带。
+   */
+  pending?: { name: string }[];
+  /**
+   * readCi 记成 pending、却不是在跑的（跑完了结论是 stale 或认不出、waiting / requested 这些）：检查名和 GitHub 原样的词。
+   * 有这一项就不带 pending，挂合并不据此有界等待，显式报没查成。没有就不带这个字段。
+   */
+  unsettled?: { name: string; conclusion: string }[];
+  /**
+   * 必过名单里这次没出现的（readCi 的 missing）。有就不带 pending：没出现不是还在跑。
+   * 挂合并点名这些检查、写没查成，不进入有界等待。没有就不带这个字段。
+   */
+  missing?: { name: string }[];
+}
+
+type Verdict = { name: string; state: string; conclusion?: string | undefined };
+
+/**
+ * 算「还在跑」的 GitHub 原词：检查的 status 是 queued / in_progress；提交状态（merge-gate、cold-verify 是这种）只有 pending
+ * 一个没出结论的词，跑完了只会是 success / failure / error。检查跑完的结论里没有这三个词。
+ */
+const RUNNING = new Set(['queued', 'in_progress', 'pending']);
+
+/** readCi 的 pending 分成真在跑的和别的（stale、认不出……）。没出现、红了的都不算。 */
+function splitPending(checks: readonly Verdict[]): {
+  running: { name: string }[];
+  unsettled: { name: string; conclusion: string }[];
+} {
+  const running: { name: string }[] = [];
+  const unsettled: { name: string; conclusion: string }[] = [];
+  for (const item of checks) {
+    if (item.state !== 'pending') continue;
+    const name = item.name.trim();
+    const conclusion = item.conclusion ?? '';
+    if (name.length > 0 && RUNNING.has(conclusion)) {
+      if (!running.some((r) => r.name === name)) running.push({ name });
+      continue;
+    }
+    unsettled.push({ name: name.length > 0 ? name : '（没写是哪项）', conclusion: conclusion || 'unknown' });
+  }
+  return { running, unsettled };
+}
+
+/** 必过名单里 state 是 missing 的。空名字跳过（名单本身都有名字）。 */
+function missingNames(checks: readonly Verdict[]): { name: string }[] {
+  const names: { name: string }[] = [];
+  for (const item of checks) {
+    if (item.state !== 'missing') continue;
+    const name = item.name.trim();
+    if (name.length === 0 || names.some((entry) => entry.name === name)) continue;
+    names.push({ name });
+  }
+  return names;
+}
+
+/**
+ * 还在跑、没出结论、没出现分开交。有没出现或没出结论的，就不带 pending：
+ * 旁边一条 in_progress 不能把「没出现」装成还能等。
+ */
+function pendingRead(failed: MergeWaitCheckRead['failed'], checks: readonly Verdict[]): MergeWaitCheckRead {
+  const { running, unsettled } = splitPending(checks);
+  const missing = missingNames(checks);
+  if (missing.length > 0 || unsettled.length > 0) {
+    return {
+      overall: 'pending',
+      failed,
+      ...(unsettled.length > 0 ? { unsettled } : {}),
+      ...(missing.length > 0 ? { missing } : {}),
+    };
+  }
+  return running.length > 0
+    ? { overall: 'pending', failed, pending: running }
+    : { overall: 'pending', failed };
 }
 
 function gateWaitingForColdVerify(
@@ -43,11 +118,14 @@ export async function readMergeWaitChecks(
     .map((item) => ({ name: item.name, ...(item.detail ? { detail: item.detail } : {}) }));
   if (gateWaitingForColdVerify(evaluation.checks)) {
     const actualFailures = failed.filter((item) => item.name !== GATE_CONTEXT);
-    if (actualFailures.length === 0) return { overall: 'pending', failed: [] };
+    if (actualFailures.length === 0) return pendingRead([], evaluation.checks);
     return { overall: 'red', failed: actualFailures };
   }
   if (failed.length > 0) return { overall: 'red', failed };
   if (evaluation.overall === 'green') return { overall: 'green', failed: [] };
-  if (evaluation.overall === 'none') return { overall: 'none', failed: [] };
-  return { overall: 'pending', failed: [] };
+  if (evaluation.overall === 'none') {
+    const missing = missingNames(evaluation.checks);
+    return missing.length > 0 ? { overall: 'none', failed: [], missing } : { overall: 'none', failed: [] };
+  }
+  return pendingRead([], evaluation.checks);
 }

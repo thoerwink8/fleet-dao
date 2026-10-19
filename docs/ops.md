@@ -120,6 +120,7 @@ GitHub 事件地址：`https://<驾驶舱域名>/github/webhook`。飞书登录�
 | /usr/local/lib/fleet-dao/auto-release | root:root | 755 | deploy/france.sh |
 | /usr/local/lib/fleet-dao/backup | root:root | 755 | deploy/hk.sh |
 | /usr/local/lib/fleet-dao/release-request | root:root | 755 | deploy/france.sh |
+| /usr/local/libexec | root:root | 755 | deploy/france.sh |
 | /var/backups/fleet-dao/restic-copies | root:root | 700 | deploy/hk.sh |
 | /var/lib/fleet-dao | fleet:fleet | 750 | deploy/lib/human-tier.sh |
 | /var/lib/fleet-dao/engine | fleet:fleet | 750 | deploy/lib/human-tier.sh |
@@ -369,6 +370,10 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 - `sudo bash deploy/test/agent-scope.e2e.sh`（法国）：会话通路真跑一遍，见第五节；含引擎给的 PATH 里没有会话用户的 `~/.local/bin` 时，会话里照样先找那儿、找得到 ddgs。只测 `run`、`stop`、`list`；`adopt` 在真机上还没有这样的用例，只有上一条在 CI 里跑的。
 
 ## 五、AI 会话
+
+工作树删除统一经固定 root `fleet-agent-scope` 的 v1 身份协议；二级代码装在 root 不可写链的 `/usr/local/libexec/fleet-dao-tree-usage.py`，仅以 `/usr/bin/python3 -I -S` 和空环境启动。旧 helper 不支持完整能力时引擎留树；旧调用没有 dev/ino/uid 时新 helper 同样拒删。所有活 TGID/TID 的 cwd 都要查全，权限或枚举未知即保留，不按用户豁免。
+
+正常临时目录持创建/认领回执的身份；历史接回会话没有原身份时保留，后续仅在孤儿清理的任务/TTL门通过后显式认领。root 在同一文件系统的 `.cleanup-transactions` 私有目录持锁隔离，记录 PREPARED、CLAIMED、DELETING、DONE。小时清扫把未结事务列为 unchecked，不因原路径消失报成功。只读诊断用 `sudo -n fleet-agent-scope cleanup-status`；未开始破坏的事务可按回执中的 pathHash 和 id 执行 `sudo -n fleet-agent-scope cleanup-rollback <pathHash> <id>`，目标已被占用时不覆盖。DELETING 或已部分删除的事务拒绝伪装完整回退，保留剩余隔离内容和明确错误供恢复；不要手动复用隔离路径或直接 rm 原路径。扫描是删除必经点的有界证据，不保证阻止任意进程随后进入目录。
 
 资源池与起会话：
 
@@ -1322,4 +1327,4 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit
 - **装**（本机，一条命令）：先在法国以 root 生成钥匙、放哈希（上一节第 1、2 步，环境编号换成 `founder-pc`），再在本机仓根跑（PowerShell）`$env:FLEET_NODE_TOKEN='<明文>'; pnpm local-sessions install --url https://<法国看板域名> --machine 创始人的电脑; Remove-Item Env:FLEET_NODE_TOKEN`。它拷脚本到 `~/.fleet-dao/local-sessions/bin/`、写 `config.json`（通行证只从环境变量读，不进命令行历史）、在 `~/.claude/settings.json` 登记五条钩子（只动指向那个目录的，别人的钩子原样留着，改之前留一份 `settings.json.local-sessions.bak`，坏 JSON 不覆盖）、建计划任务（建不成就退回启动文件夹自启，见上一条），当场试推一次打出结果；新开的会话才有心跳。不放进 `~/.fleet-dao/hooks/`、不登记成 `~/.fleet-dao/bin/quiet-*.exe`：那两处归 agents-sync，同步时会被摘掉。
 - **看 / 停**：`pnpm local-sessions status` 看钩子登记了几条、定时推送用的哪种、循环进程活着没有、推到哪、上次推的结果。`pnpm local-sessions uninstall` 一条命令卸：摘掉那几条钩子、删计划任务、删启动文件夹里的 vbs、结束 `loop.pid` 指向的进程、删整个 `~/.fleet-dao/local-sessions/`。法国那边要作废，`config.mjs drop-entry api.env FLEET_NODE_KEYS founder-pc` 删掉那一项、重启 `fleet-api`、新指纹换进期望。
 
-最终验收责任用 `fleet-api acceptance status <owner/仓> <单号>` 查看；现场验过后用 `fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号> --head <40位SHA> --evidence "现场验收记录"` 落账。协调责任用 `--pr 0 --head -`。命令沿既有 root 包装器和数据库身份执行，没有公开结算写口。代次不符、PR未合并、证据缺失均拒绝，随后仍需标准关单。公开仓机器只读入口 `/api/public/acceptance/v1/repos/:githubId/issues/:issue` 不缓存，先经现有 CI bridge 核实公开仓身份，只返回责任身份与结清证据，不返回原验收正文。
+最终验收责任用 `fleet-api acceptance status <owner/仓> <单号>` 查看；现场验过后用 `fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号> --head <40位SHA> --evidence "现场验收记录"` 落账。协调责任用 `--pr 0 --head -`。命令沿既有 root 包装器和数据库身份执行，没有公开结算写口。代次不符、PR未合并、证据缺失均拒绝，随后仍需标准关单。公开仓机器只读入口 `/api/public/acceptance/v1/repos/:githubId/issues/:issue` 不缓存，先经现有 CI bridge 核实公开仓身份，只返回责任身份与结清证据，不返回原验收正文。PR 换头后旧头永远没有合并回执时，用 `fleet-api acceptance supersede <owner/仓> <单号> --id <旧责任号> --generation <代次> --pr <PR号> --head <旧头SHA> --target-id <最终责任号> --target-generation <代次> --target-pr <PR号> --target-head <最终头SHA> --evidence "替代依据"` 替代收口：目标须同仓同单同 PR、有真实合并回执、已最终验收且验收项盖住旧头的；两头验收项是不同冷验收轮次写的、措辞不同时，整串相等的判不过，要加 `--coverage '[{"source":"旧头验收项原文","target":"目标验收项原文","basis":"覆盖依据"}]'` 逐条人工声明（source / target 必须是 `status` 里两行 items 的原文整串，basis 写为什么算覆盖；漏一条、写错原文、空依据都拒，不做模糊或子串匹配），声明随替代写进旧行和操作记录，重放同一声明幂等、换声明不冒充成功，目标或旧头新增项后替代与声明一并作废、重新指要重新给声明；旧行不伪填合并回执，读口每行带 `state`（open / settled / superseded）。`issue:close` 和 `close-on-merge` 的关单闸只认这个 `state`，目标后来新增项则替代作废、旧头回到 open。

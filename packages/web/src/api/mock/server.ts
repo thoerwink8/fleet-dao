@@ -145,7 +145,7 @@ import type { z } from 'zod';
 import { ApiError, type FleetApi } from '../client';
 import type { AuditEntry, LiveEvent, Notification, Worktrees } from '../types';
 import type { MLog, MockState, MSubtask, MTask } from './model';
-import { mockOverview, mockOverviewMode } from './overview';
+import { mockOverview, mockOverviewMode, withOldEngineRuns } from './overview';
 import { createMockRequests, MOCK_PARTNER, type MockRequestsOptions, mockRequestsAs } from './requests';
 import { createSeed, fakeAction, fakeUsage } from './seed';
 import { LIVE_FIRST_REVEAL, LIVE_REVEAL_STEP, transcriptSeed } from './transcripts';
@@ -2851,7 +2851,8 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
       const tv = findTask(taskId);
       // 三段的流水和真后端 segmentRunViews 一个读法（shared 的 readSegmentRun）：模型名查目录、计费方式查渠道
       const finished = TERMINAL.has(tv.task.state);
-      const segmentRuns = (tv.segmentRuns ?? []).map((r) =>
+      const mode = mockOverviewMode(globalThis.location?.search ?? '');
+      const readRuns = (tv.segmentRuns ?? []).map((r) =>
         readSegmentRun(
           {
             ...r,
@@ -2862,9 +2863,11 @@ export function createMockApi(opts: MockOptions = {}): MockApi {
           { taskFinished: finished },
         ),
       );
-      // 概览（#3140）：命令计数、步骤用 shared 的 cutSteps 现算，和真后端同一个算法；网址 ?mockOverview=old|unread 演示没读到
+      const segmentRuns = mode === 'mixed' ? withOldEngineRuns(readRuns) : readRuns;
+      // 概览（#3140）：命令计数、步骤用 shared 的 cutSteps 现算，和真后端同一个算法；
+      // 网址 ?mockOverview=old|unread 演示没读到，mixed 演示新旧引擎交替的单
       const overview = mockOverview({
-        mode: mockOverviewMode(globalThis.location?.search ?? ''),
+        mode,
         taskId,
         runs: segmentRuns,
         taskState: tv.task.state,

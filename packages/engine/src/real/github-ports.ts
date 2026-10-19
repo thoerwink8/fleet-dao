@@ -524,7 +524,7 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           : {}),
       },
       delivery,
-      () => trees.remove(tree.dir),
+      (identity) => trees.remove(tree.dir, identity),
     );
 
   /** 这棵树现在归谁：不在（从没起过会话、或已经收了）明确报错，不当成「没有改动」。 */

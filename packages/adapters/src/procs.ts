@@ -7,6 +7,13 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { OrgKind } from '@fleet-dao/shared';
 import { PROXY_ENV_KEYS, parseSessionProxy, SESSION_BASE_KEYS, SESSION_NO_PROXY } from './env.ts';
+import {
+  invokeTreeHelper,
+  removeTreeIdentity,
+  TreeHelperError,
+  type TreeIdentity,
+  treeIdentity,
+} from './tree-cleanup.ts';
 
 /** 会话标记的环境变量名：每个会话一个值，子孙进程都继承它，重启后的引擎也能按它认出旧会话的进程。 */
 export const RUN_MARKER_KEY = 'FLEET_RUN_ID';
@@ -316,7 +323,7 @@ export interface AdoptWorktreeInput {
 }
 
 export type AdoptWorktreeResult =
-  | { ok: true }
+  | { ok: true; identity: TreeIdentity }
   | { ok: false; code: 'usage' | 'failed'; exitCode: number | null; detail: string };
 
 function assertAdoptInput(input: AdoptWorktreeInput): void {
@@ -333,25 +340,20 @@ function assertAdoptInput(input: AdoptWorktreeInput): void {
  */
 export function adoptWorktree(input: AdoptWorktreeInput): Promise<AdoptWorktreeResult> {
   assertAdoptInput(input);
-  const [bin, ...rest] = [
-    ...(input.sudo ?? ['/usr/bin/sudo', '-n']),
-    input.helper ?? SCOPE_HELPER,
-    'adopt',
-    input.dir,
-    '--user',
-    input.user,
-  ];
-  return new Promise((resolve) => {
-    execFile(bin as string, rest, { encoding: 'utf8', timeout: 60_000 }, (err, _stdout, stderr) => {
-      if (!err) {
-        resolve({ ok: true });
-        return;
-      }
-      const exitCode = typeof err.code === 'number' ? err.code : null;
-      const detail = `${stderr || ''}${err.message}`.trim();
-      resolve({ ok: false, code: exitCode === 64 ? 'usage' : 'failed', exitCode, detail });
-    });
-  });
+  return adoptChecked(input);
+}
+
+async function adoptChecked(input: AdoptWorktreeInput): Promise<AdoptWorktreeResult> {
+  try {
+    const reply = await invokeTreeHelper(input, ['adopt', input.dir, '--user', input.user]);
+    if (reply.state !== 'adopted') throw new Error('缺少受管认领回执');
+    const identity = treeIdentity(reply.identity);
+    if (identity.real !== input.dir) throw new Error('认领回执路径不匹配');
+    return { ok: true, identity };
+  } catch (error) {
+    const exitCode = error instanceof TreeHelperError ? error.exitCode : null;
+    return { ok: false, code: exitCode === 64 ? 'usage' : 'failed', exitCode, detail: String(error) };
+  }
 }
 
 export interface ListAgentScopesOptions {
@@ -398,6 +400,7 @@ export function listAgentScopes(options: ListAgentScopesOptions = {}): Promise<L
 export interface RemoveWorktreeDirInput {
   /** AI 会话的工作树，绝对路径；帮手脚本以 root 再核实一遍（同 adoptWorktree）。 */
   dir: string;
+  identity: TreeIdentity;
   helper?: string;
   sudo?: readonly string[];
 }
@@ -414,32 +417,18 @@ export type RemoveWorktreeDirResult =
 export function removeWorktreeDir(input: RemoveWorktreeDirInput): Promise<RemoveWorktreeDirResult> {
   if (!input.dir.startsWith('/')) throw new Error(`工作树要写绝对路径：${input.dir}`);
   if (CONTROL_CHAR.test(input.dir)) throw new Error('工作树路径里有控制字符，不写上命令行');
-  const [bin, ...rest] = [
-    ...(input.sudo ?? ['/usr/bin/sudo', '-n']),
-    input.helper ?? SCOPE_HELPER,
-    'remove',
-    input.dir,
-  ];
-  return new Promise((resolve) => {
-    execFile(bin as string, rest, { encoding: 'utf8', timeout: 120_000 }, (err, stdout, stderr) => {
-      if (err) {
-        const exitCode = typeof err.code === 'number' ? err.code : null;
-        const detail = `${stderr || ''}${err.message}`.trim();
-        resolve({ ok: false, code: exitCode === 64 ? 'usage' : 'failed', exitCode, detail });
-        return;
-      }
-      const last = stdout.trimEnd().split('\n').at(-1) ?? '';
-      if (last === `removed ${input.dir}`) resolve({ ok: true, gone: false });
-      else if (last === `gone ${input.dir}`) resolve({ ok: true, gone: true });
-      else
-        resolve({
-          ok: false,
-          code: 'failed',
-          exitCode: 0,
-          detail: `帮手退出码 0，但没报 removed / gone（最后一行：「${last.slice(0, 200)}」）`,
-        });
-    });
-  });
+  return removeChecked(input);
+}
+
+async function removeChecked(input: RemoveWorktreeDirInput): Promise<RemoveWorktreeDirResult> {
+  try {
+    if (input.identity.real !== input.dir) throw new Error('删除路径不是原授权身份');
+    await removeTreeIdentity(input.identity, input);
+    return { ok: true, gone: false };
+  } catch (error) {
+    const exitCode = error instanceof TreeHelperError ? error.exitCode : null;
+    return { ok: false, code: exitCode === 64 ? 'usage' : 'failed', exitCode, detail: String(error) };
+  }
 }
 
 export interface SwitchSessionOrgInput {

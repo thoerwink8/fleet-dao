@@ -748,6 +748,19 @@ export type MergePrResult =
       ciPendingOnly?: true;
     };
 
+/** 合并这条路上的写要带到 HTTP 边界的截止和取消。读请求不带，跨过截止仍可回查已经发出去的结果。 */
+function mergeWriteLimits(ctx: ActivityContext): {
+  signal?: AbortSignal;
+  attemptDeadlineMs?: number;
+  scheduleDeadlineMs?: number;
+} {
+  return {
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
+    ...(typeof ctx.attemptDeadlineMs === 'number' ? { attemptDeadlineMs: ctx.attemptDeadlineMs } : {}),
+    ...(typeof ctx.scheduleDeadlineMs === 'number' ? { scheduleDeadlineMs: ctx.scheduleDeadlineMs } : {}),
+  };
+}
+
 export async function mergePr(
   deps: Deps,
   input: MergePrInput,
@@ -875,7 +888,7 @@ export async function mergePr(
         auth,
         'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }',
         { id: pr.node_id },
-        { mutation: true, signal: ctx.signal },
+        { mutation: true, ...mergeWriteLimits(ctx) },
       );
     }
 
@@ -888,7 +901,7 @@ export async function mergePr(
         path: `${base}/pulls/${prNumber}`,
         auth,
         body: { title, body: neutralizeCloseKeywords(prBody) },
-        signal: ctx.signal,
+        ...mergeWriteLimits(ctx),
       });
       const p = PullSchema.safeParse(patched.data);
       if (!p.success) throw unexpected(`改 PR #${prNumber} 正文的回执`, patched.data);
@@ -926,7 +939,8 @@ export async function mergePr(
               commit_message: commitMessage,
             },
             allow: [405, 409, 422],
-            signal: ctx.signal,
+            // 比较、读 CI、等仓锁、幂等回查都在这之前。截止和取消在 fetch 前再看一次，不能只在进 mergePr 时看。
+            ...mergeWriteLimits(ctx),
           });
           // 不看文案：重读一遍再分类。只有冲突是「必然失败」，其余交给重试（C11）
           const again = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
@@ -1034,7 +1048,8 @@ export async function updateBranch(
     auth: { as: 'engine', repo },
     body: { expected_head_sha: expectedHead },
     allow: [409, 422],
-    signal: ctx.signal,
+    // 落后是 mergePr 里的慢比较读出来的，可能已经跨过截止。读完当前头之后、真正 fetch 之前再看一次。
+    ...mergeWriteLimits(ctx),
   });
 
   if (res.status === 409 || res.status === 422) {

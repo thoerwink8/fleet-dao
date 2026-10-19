@@ -669,7 +669,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
   });
 
-  it('有进程的 cwd 在树里就拒删（生产的 /proc 判法）', async () => {
+  it('有进程的 cwd 在树里就拒删（明示真实子进程夹具，root全表扫描另测）', async () => {
     const t = tree();
     dirtyFile(t);
     const child = spawn('sleep', ['30'], { cwd: t.dir, stdio: 'ignore' });
@@ -677,10 +677,23 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     const removed: string[] = [];
     await expect(
-      preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, async () => {
-        removed.push(t.dir);
-        return { gone: false };
-      }),
+      preserveThenRemove(
+        t,
+        archive,
+        {
+          workRoot,
+          confirmIdle: idle,
+          processLook: procLook({
+            list: async () => [String(child.pid)],
+            cwd: async (pid) => readlinkSync('/proc/' + pid + '/cwd'),
+          }),
+        },
+        undefined,
+        async () => {
+          removed.push(t.dir);
+          return { gone: false };
+        },
+      ),
     ).rejects.toThrow(/有进程正用着这棵树/);
     expect(removed).toEqual([]);
     expect(existsSync(join(t.dir, 'dirty.txt'))).toBe(true);
@@ -1255,7 +1268,20 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
     children.push(child);
     await new Promise((resolve) => setTimeout(resolve, 200));
     await expect(
-      preserveThenRemove(t, archive, { workRoot, confirmIdle: idle }, undefined, remove),
+      preserveThenRemove(
+        t,
+        archive,
+        {
+          workRoot,
+          confirmIdle: idle,
+          processLook: procLook({
+            list: async () => [String(child.pid)],
+            cwd: async (pid) => readlinkSync('/proc/' + pid + '/cwd'),
+          }),
+        },
+        undefined,
+        remove,
+      ),
     ).rejects.toThrow(/有进程正用着这棵树/);
     child.kill('SIGKILL');
     const unreadable = procLook({

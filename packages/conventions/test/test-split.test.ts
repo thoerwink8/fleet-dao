@@ -318,7 +318,10 @@ describe('环境类、能力标记', () => {
   it('要 Temporal 命令行的：调了 createRealEnv 的测试文件；别人不许包一层再调（扫全仓，漏认了会红）', () => {
     const callers = FILES.filter((f) => TEMPORAL_MARKER.test(read(f) ?? ''));
     expect(callers.length, '没有测试调 createRealEnv 了：这条查的东西不存在，测试该删').toBeGreaterThan(0);
-    expect(callers).toEqual(['packages/engine/test/github-reconcile.test.ts']);
+    expect(callers).toEqual([
+      'packages/engine/test/arm-deadline-real.test.ts',
+      'packages/engine/test/github-reconcile.test.ts',
+    ]);
     // 定义它的只有 support.ts：本仓别的非测试文件要是包了一层再调（createRealEnv 不出现、认不出要 Temporal），
     // 这里就红——那种包一层会绕开标记，跑到没装命令行的台上（CI 里 support.ts 会抛错，不会悄悄过）。
     const others: string[] = [];
@@ -366,7 +369,9 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     expect(all.length).toBe(FILES.length);
     expect([...all].sort()).toEqual([...FILES].sort());
     // 耗时表是上一轮量出来的，这一轮新加的文件不在上面（按所在包的均值估）——那正是「表过期只是不匀、不影响跑不跑」
-    expect(r.notes.filter((n) => !n.includes('按所在包的均值'))).toEqual([]);
+    expect(
+      r.notes.filter((n) => !n.includes('按所在包的均值') && !n.includes('都要 Temporal 命令行')),
+    ).toEqual([]);
   });
 
   it('每一台的估计耗时（对比现在的 --shard 分片：89/35/137 · 141 · 87/72/125 秒）', () => {
@@ -399,6 +404,7 @@ describe('在真仓上装箱（全跑那一轮）', () => {
     const withTemporal = r.boxes.filter((b) => b.temporal);
     expect(withTemporal).toHaveLength(1);
     expect(withTemporal[0]?.files).toContain('packages/engine/test/github-reconcile.test.ts');
+    expect(withTemporal[0]?.files).toContain('packages/engine/test/arm-deadline-real.test.ts');
     expect(input.read('packages/engine/test/github-reconcile.test.ts')).toBeDefined();
   });
 });

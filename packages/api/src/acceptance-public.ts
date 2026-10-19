@@ -1,5 +1,5 @@
 import type { AcceptanceDutyRow } from '@fleet-dao/db';
-import { PublicAcceptanceRoute } from '@fleet-dao/shared';
+import { acceptanceDutyState, PublicAcceptanceRoute } from '@fleet-dao/shared';
 import { Hono } from 'hono';
 import type { Deps } from './deps.ts';
 import { ApiError } from './http.ts';
@@ -38,6 +38,13 @@ export function acceptancePublicRoutes(deps: Deps): Hono {
         settledAt: r.settledAt,
         settledBy: r.settledBy,
         settleEvidence: r.settleEvidence,
+        // 有效终态照 shared 现算；被替代的旧头 settled_* 和合并回执照旧是空，不冒充验收完成
+        state: acceptanceDutyState(r, rows),
+        supersededAt: r.supersededAt ?? null,
+        supersededBy: r.supersededBy ?? null,
+        supersedeEvidence: r.supersedeEvidence ?? null,
+        successorId: r.successorId ?? null,
+        successorGeneration: r.successorGeneration ?? null,
       })),
     });
   });

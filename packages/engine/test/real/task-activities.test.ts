@@ -11,9 +11,11 @@ import { localExec } from '../../src/real/exec.ts';
 import {
   createTaskActivities,
   MERGE_PENDING_RETRIES,
+  type MergeWaitChecks,
   type TaskActivitiesDeps,
 } from '../../src/real/task-activities.ts';
 import { pinMainline, type UserTree } from '../../src/real/user-git.ts';
+import type { ReviewChange } from '../../src/task-contract.ts';
 import { runChildOk } from '../child.ts';
 
 const REPO = { id: 'r1', owner: 'acme', name: 'demo', defaultBranch: 'main', testCommand: 'pnpm check' };
@@ -591,6 +593,37 @@ describe('挂自动合并', () => {
   const run = (gh: Gh) =>
     make({ gh }).acts.armAutoMerge({ schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD }, ctx());
 
+  /** 评审反例里的将来截止：取消不能靠「还没到点」放行。 */
+  const futureDeadlines = (): Pick<PortContext, 'attemptDeadlineMs' | 'scheduleDeadlineMs'> => {
+    const now = Date.now();
+    return { attemptDeadlineMs: now + 600_000, scheduleDeadlineMs: now + 1_200_000 };
+  };
+
+  /** 只读先挂住，测试在挂住期间取消，再放行。entered 在开始等待时就完成，避免和取消赛跑。 */
+  function holdThen<T>(value: () => T): {
+    entered: Promise<void>;
+    release: () => void;
+    run: () => Promise<T>;
+  } {
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    return {
+      entered,
+      release: releaseGate,
+      run: async () => {
+        markEntered();
+        await gate;
+        return value();
+      },
+    };
+  }
+
   it('开着、头对得上、没挂：挂上', async () => {
     const f = fakeGh({ readPull: async () => pullFacts(), enableAutoMerge: async () => undefined });
     expect(await run(f.gh)).toEqual({ armed: true, merged: false });
@@ -601,6 +634,172 @@ describe('挂自动合并', () => {
     const f = fakeGh({ readPull: async () => pullFacts({ autoMerge: true }) });
     expect(await run(f.gh)).toEqual({ armed: true, merged: false });
     expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('期限已过：先读 PR，不再向 GitHub 发起新的挂合并', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => undefined,
+      mergePr: async () => mergedOk(),
+    });
+    const { acts } = make({ gh: f.gh });
+    const past = Date.now() - 1_000;
+    await expect(
+      acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx({ attemptDeadlineMs: past, scheduleDeadlineMs: past }),
+      ),
+    ).rejects.toMatchObject({ code: 'ARM_DEADLINE_PASSED', retryable: false });
+    expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('期限已过但读到已经挂上：当挂上了，不再写一次', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true }),
+      enableAutoMerge: async () => undefined,
+    });
+    const { acts } = make({ gh: f.gh });
+    const past = Date.now() - 1_000;
+    expect(
+      await acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx({ scheduleDeadlineMs: past }),
+      ),
+    ).toEqual({ armed: true, merged: false });
+    expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('没取消、数值截止还在将来：照常挂上', async () => {
+    const f = fakeGh({ readPull: async () => pullFacts(), enableAutoMerge: async () => undefined });
+    const { acts } = make({ gh: f.gh });
+    expect(
+      await acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx(futureDeadlines()),
+      ),
+    ).toEqual({ armed: true, merged: false });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge']);
+  });
+
+  it('读 PR 期间被取消、数值截止还在将来：放行后不挂合并、不直接合', async () => {
+    const ac = new AbortController();
+    const held = holdThen(() => pullFacts());
+    const f = fakeGh({
+      readPull: held.run,
+      enableAutoMerge: async () => undefined,
+      mergePr: async () => mergedOk(),
+    });
+    const { acts } = make({ gh: f.gh });
+    const pending = acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx({ signal: ac.signal, ...futureDeadlines() }),
+    );
+    await held.entered;
+    ac.abort(new Error('活动已取消'));
+    held.release();
+    await expect(pending).rejects.toThrow('活动已取消');
+    expect(ac.signal.aborted).toBe(true);
+    expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('读正式评审期间被取消、数值截止还在将来：放行后不挂合并、不直接合', async () => {
+    const ac = new AbortController();
+    const held = holdThen(() => [] as ReviewChange[]);
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => undefined,
+      mergePr: async () => mergedOk(),
+    });
+    const { acts } = make({
+      gh: f.gh,
+      reviewChanges: held.run,
+    });
+    const pending = acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx({ signal: ac.signal, ...futureDeadlines() }),
+    );
+    await held.entered;
+    ac.abort(new Error('活动已取消'));
+    held.release();
+    await expect(pending).rejects.toThrow('活动已取消');
+    expect(ac.signal.aborted).toBe(true);
+    expect(f.calls).toEqual(['readPull']);
+  });
+
+  it('挂合并返回 clean 时上下文已取消、数值截止还在将来：不再直接合', async () => {
+    const ac = new AbortController();
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        ac.abort(new Error('活动已取消'));
+        throw new GitHubError('GRAPHQL_ERROR', 'Pull request is in clean status');
+      },
+      mergePr: async () => mergedOk(),
+    });
+    const { acts } = make({ gh: f.gh });
+    await expect(
+      acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx({ signal: ac.signal, ...futureDeadlines() }),
+      ),
+    ).rejects.toThrow('活动已取消');
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge']);
+  });
+
+  it('现读检查期间被取消、放行后已是绿、数值截止还在将来：不再第二次直接合', async () => {
+    const ac = new AbortController();
+    const held = holdThen(
+      (): MergeWaitChecks => ({
+        overall: 'green',
+        failed: [],
+      }),
+    );
+    let merges = 0;
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        throw new GitHubError('GRAPHQL_ERROR', 'Pull request is in clean status');
+      },
+      mergePr: async () => {
+        merges += 1;
+        return { merged: false, reason: 'ci_not_green' as const, detail: '没跑完：merge-gate' };
+      },
+    });
+    const { acts } = make({
+      gh: f.gh,
+      readChecks: async () => held.run(),
+    });
+    const pending = acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx({ signal: ac.signal, ...futureDeadlines() }),
+    );
+    await held.entered;
+    ac.abort(new Error('活动已取消'));
+    held.release();
+    await expect(pending).rejects.toThrow('活动已取消');
+    expect(merges).toBe(1);
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+  });
+
+  it('挂合并那一下把期限用完、GitHub 说已经是 clean：不再直接合', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 80));
+        throw new GitHubError('GRAPHQL_ERROR', 'Pull request is in clean status');
+      },
+      mergePr: async () => mergedOk('e'.repeat(40), false),
+    });
+    const { acts } = make({ gh: f.gh });
+    const deadline = Date.now() + 30;
+    await expect(
+      acts.armAutoMerge(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx({ attemptDeadlineMs: deadline, scheduleDeadlineMs: deadline }),
+      ),
+    ).rejects.toMatchObject({ code: 'ARM_DEADLINE_PASSED', retryable: false });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge']);
   });
 
   it('【故意造出的失败】PR 关了 / 头被别人改了：不挂，说清楚为什么', async () => {
@@ -661,17 +860,343 @@ describe('挂自动合并', () => {
       ctx(),
     );
 
-  it('【故意造出的失败】clean 时直接合被拒（不是落后主线，比如 CI 不绿）：不当成合了，不去同步主线，把拒绝的原因原样交出去', async () => {
+  const cleanCiRefused = (
+    detail: string,
+    readChecks: TaskActivitiesDeps['readChecks'],
+    merge?: (n: number) => Awaited<ReturnType<Gh['mergePr']>> | Promise<Awaited<ReturnType<Gh['mergePr']>>>,
+  ) => {
+    let merges = 0;
     const f = cleanButBehind({
-      mergePr: async () => ({ merged: false, reason: 'ci_not_green', detail: 'CI 红：check' }),
+      mergePr: async () => {
+        merges += 1;
+        if (merge) return merge(merges);
+        return { merged: false, reason: 'ci_not_green' as const, detail };
+      },
     });
-    const got = await run(f.gh);
-    expect(got).toMatchObject({ armed: false, merged: false });
+    const seen: string[] = [];
+    const { acts } = make({
+      gh: f.gh,
+      readChecks: async (repo, sha) => {
+        seen.push(`${repo.owner}/${repo.name}@${sha}`);
+        if (!readChecks) throw new Error('测试没接上读检查');
+        return readChecks(repo, sha, new AbortController().signal);
+      },
+    });
+    return { f, acts, seen, merges: () => merges };
+  };
+
+  it('【故意造出的失败】clean 时直接合被拒、现读是真红：交 checksRed，不当成还在跑，不去同步主线', async () => {
+    const { f, acts, seen } = cleanCiRefused('CI 红：check', async () => ({
+      overall: 'red',
+      failed: [{ name: 'check', detail: 'CI 红：check' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got).toMatchObject({
+      armed: false,
+      merged: false,
+      checksRed: { failedChecks: ['check'], head: HEAD, detail: 'check：CI 红：check' },
+    });
+    expect(got.checksPending).toBeUndefined();
     expect(got.why).toContain('ci_not_green');
     expect(got.why).toContain('CI 红：check');
     expect(got.mainSyncBudgetExhausted).toBeUndefined();
     expect(got.headMoved).toBeUndefined();
     expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+    expect(seen).toEqual([`${REPO.owner}/${REPO.name}@${HEAD}`]);
+  });
+
+  it('原文写着没跑完、现读却是真红：仍是 checksRed，不因为句子里有「没跑完」就去等', async () => {
+    const { f, acts } = cleanCiRefused(
+      'PR #7 的 CI 在 aaaaaaa 上不是全绿（没跑完：merge-gate）',
+      async () => ({
+        overall: 'red',
+        failed: [{ name: 'merge-gate', detail: 'cold-verify 没过' }],
+      }),
+    );
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toMatchObject({
+      failedChecks: ['merge-gate'],
+      head: HEAD,
+      detail: 'merge-gate：cold-verify 没过',
+    });
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+  });
+
+  it('精确头上 merge-gate 还在跑：交 checksPending，只合这一次，不再直接合', async () => {
+    const detail = 'PR #7 的 CI 在 aaaaaaa 上不是全绿（没跑完：merge-gate）';
+    const { f, acts, seen } = cleanCiRefused(detail, async () => ({
+      overall: 'pending',
+      failed: [],
+      pending: [{ name: 'merge-gate' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got).toMatchObject({
+      armed: false,
+      merged: false,
+      checksPending: { names: ['merge-gate'], head: HEAD },
+    });
+    expect(got.checksPending?.detail).toContain('ci_not_green');
+    expect(got.checksPending?.detail).toContain('没跑完：merge-gate');
+    expect(got.checksRed).toBeUndefined();
+    expect(got.headMoved).toBeUndefined();
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+    expect(seen).toEqual([`${REPO.owner}/${REPO.name}@${HEAD}`]);
+  });
+
+  it('原文写着 CI 红、现读却是 merge-gate 还在跑：以现读为准，进入 checksPending', async () => {
+    const { acts } = cleanCiRefused('CI 红：check', async () => ({
+      overall: 'pending',
+      failed: [],
+      pending: [{ name: 'merge-gate' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending?.names).toEqual(['merge-gate']);
+    expect(got.checksRed).toBeUndefined();
+  });
+
+  it('【故意造出的失败】ci_not_green 但没有还在跑的检查名：写明没查成，不进入等待', async () => {
+    const { acts } = cleanCiRefused('没跑完：merge-gate', async () => ({ overall: 'pending', failed: [] }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('没跑完：merge-gate');
+  });
+
+  it('【故意造出的失败】merge-gate 在跑、cold-verify 跑完却是 stale：写明没查成和原词，不进入等待', async () => {
+    const { f, acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [],
+      unsettled: [{ name: 'cold-verify', conclusion: 'stale' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('cold-verify（stale）');
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】pending 名字和没出结论的一起给：仍按没查成，不拿在跑的那几条去等', async () => {
+    const { acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [],
+      pending: [{ name: 'merge-gate' }],
+      unsettled: [{ name: 'check', conclusion: 'unknown' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.why).toContain('check（unknown）');
+  });
+
+  it('【故意造出的失败】一个检查在跑、另一个必过检查没出现：写明没查成，不进入等待', async () => {
+    const { f, acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [],
+      pending: [{ name: 'merge-gate' }],
+      missing: [{ name: 'check' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('check 没出现');
+    expect(got.why).not.toContain('等检查');
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】没出现和没出结论一起给：都写进没查成，不拿在跑的去等', async () => {
+    const { acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [],
+      pending: [{ name: 'merge-gate' }],
+      missing: [{ name: 'lint' }],
+      unsettled: [{ name: 'check', conclusion: 'stale' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('lint 没出现');
+    expect(got.why).toContain('check（stale）');
+  });
+
+  it('【故意造出的失败】真红和没出现一起给：按真红，不写成没查成', async () => {
+    const { acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [{ name: 'check', detail: '失败' }],
+      pending: [{ name: 'merge-gate' }],
+      missing: [{ name: 'lint' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toMatchObject({ failedChecks: ['check'], head: HEAD, detail: 'check：失败' });
+    expect(got.why).not.toContain('没出现');
+  });
+
+  it('【故意造出的失败】检查一个都没出现：写明没查成，不当成还在跑', async () => {
+    const { acts } = cleanCiRefused('没出现：merge-gate', async () => ({ overall: 'none', failed: [] }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('none');
+  });
+
+  it('【故意造出的失败】既有还在跑的、又有点名的失败：按真红，不进入等待', async () => {
+    const { f, acts } = cleanCiRefused('没跑完：merge-gate', async () => ({
+      overall: 'pending',
+      failed: [{ name: 'check', detail: '失败' }],
+      pending: [{ name: 'merge-gate' }],
+    }));
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toMatchObject({ failedChecks: ['check'], head: HEAD, detail: 'check：失败' });
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】读检查失败：写明没查成，不当成还在跑', async () => {
+    const { f, acts } = cleanCiRefused('没跑完：merge-gate', async () => {
+      throw new PortError('UPSTREAM_ERROR', '检查列表翻不完', { retryable: true });
+    });
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got).toMatchObject({ armed: false, merged: false });
+    expect(got.checksPending).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('检查列表翻不完');
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】读检查碰到认证失败：写明没查成，不重复合', async () => {
+    const { f, acts } = cleanCiRefused('没跑完：merge-gate', async () => {
+      throw new GitHubError('UNAUTHORIZED', 'Bad credentials', { retryable: false });
+    });
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.why).toContain('没查成');
+    expect(got.why).toContain('Bad credentials');
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】clean 后直接合本身认证失败：抛错，不装成检查还在跑', async () => {
+    const f = cleanButBehind({
+      mergePr: async () => {
+        throw new GitHubError('UNAUTHORIZED', 'Bad credentials', { retryable: false });
+      },
+    });
+    await expect(run(f.gh)).rejects.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
+  });
+
+  it('现读已经全绿：再走一次同一个直接合，合上了就带回合并提交', async () => {
+    let merges = 0;
+    const f = cleanButBehind({
+      mergePr: async () => {
+        merges += 1;
+        if (merges === 1)
+          return { merged: false, reason: 'ci_not_green' as const, detail: '没跑完：merge-gate' };
+        return mergedOk('e'.repeat(40), false);
+      },
+    });
+    const { acts } = make({
+      gh: f.gh,
+      readChecks: async () => ({ overall: 'green', failed: [] }),
+    });
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got).toEqual({ armed: false, merged: true, mergeCommit: 'e'.repeat(40) });
+    expect(merges).toBe(2);
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(2);
+  });
+
+  it('【故意造出的失败】连着两次现读都是绿、直接合仍被拒：不再合第三次，也不进入等待', async () => {
+    let reads = 0;
+    const f = cleanButBehind({
+      mergePr: async () => ({ merged: false, reason: 'ci_not_green' as const, detail: '没跑完：merge-gate' }),
+    });
+    const { acts } = make({
+      gh: f.gh,
+      readChecks: async () => {
+        reads += 1;
+        return { overall: 'green', failed: [] } satisfies MergeWaitChecks;
+      },
+    });
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got.checksPending).toBeUndefined();
+    expect(got.why).toContain('读着是绿');
+    expect(got.why).toContain('仍被拒');
+    expect(reads).toBe(2);
+    expect(f.calls.filter((call) => call === 'mergePr')).toHaveLength(2);
+  });
+
+  it('【故意造出的失败】正式「要求改」还挂着：不挂、不合，也不当成检查还在跑', async () => {
+    const held: ReviewChange = {
+      reviewId: 42,
+      reviewer: 'frank',
+      commitId: HEAD,
+      submittedAt: '2026-10-18T00:00:00Z',
+      body: '请改这里',
+    };
+    const f = fakeGh({ readPull: async () => pullFacts() });
+    const { acts } = make({
+      gh: f.gh,
+      reviewChanges: async () => [held],
+    });
+    const got = await acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got).toMatchObject({ armed: false, merged: false, reviewChanges: [held] });
+    expect(got.checksPending).toBeUndefined();
+    expect(got.checksRed).toBeUndefined();
+    expect(f.calls).toEqual(['readPull']);
   });
 
   it('clean 时直接合被拒、只是合并闸没跑完（#3165）：在这一步里隔一会儿再合，合上就回合并提交，不交回去停下', async () => {
@@ -734,6 +1259,28 @@ describe('挂自动合并', () => {
       repo: { owner: REPO.owner, name: REPO.name },
       prNumber: 7,
       expectedHead: HEAD,
+    });
+  });
+
+  it('落后主线要同步时，把同一截止和取消交给 updateBranch', async () => {
+    const ac = new AbortController();
+    const deadlines = futureDeadlines();
+    let passed: unknown;
+    const f = cleanButBehind({
+      updateBranch: async (_input: unknown, context: unknown) => {
+        passed = context;
+        return { updated: true, head: 'e'.repeat(40) };
+      },
+    });
+    const got = await make({ gh: f.gh }).acts.armAutoMerge(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx({ signal: ac.signal, ...deadlines }),
+    );
+    expect(got).toMatchObject({ syncedMain: true, headMoved: 'e'.repeat(40) });
+    expect(passed).toMatchObject({
+      signal: ac.signal,
+      attemptDeadlineMs: deadlines.attemptDeadlineMs,
+      scheduleDeadlineMs: deadlines.scheduleDeadlineMs,
     });
   });
 
@@ -953,6 +1500,56 @@ describe('等合并', () => {
     });
     expect(reads).toBe(1);
     expect(clock).toBe(0);
+  });
+
+  it('必过检查没出现：当场报没查成，不接着轮询', async () => {
+    let reads = 0;
+    let slept = 0;
+    const f = fakeGh({
+      readPull: async () => pullFacts({ autoMerge: true, mergeable: true, mergeableState: 'blocked' }),
+    });
+    const got = await wait(f.gh, {
+      sleep: async () => {
+        slept += 1;
+      },
+      readChecks: async () => {
+        reads += 1;
+        return {
+          overall: 'pending',
+          failed: [],
+          missing: [{ name: 'merge-gate' }],
+          pending: [{ name: 'lint' }],
+        };
+      },
+    });
+    expect(got).toMatchObject({
+      state: 'checks_unreadable',
+      detail: expect.stringContaining('必过检查没查成'),
+    });
+    expect(got.state === 'checks_unreadable' ? got.detail : '').toContain('merge-gate 没出现');
+    expect(reads).toBe(1);
+    expect(slept).toBe(0);
+  });
+
+  it('检查没出结论：当场报没查成，不接着轮询', async () => {
+    let reads = 0;
+    const f = fakeGh({ readPull: async () => pullFacts({ autoMerge: true }) });
+    const got = await wait(f.gh, {
+      readChecks: async () => {
+        reads += 1;
+        return {
+          overall: 'pending',
+          failed: [],
+          unsettled: [{ name: 'cold-verify', conclusion: 'stale' }],
+        };
+      },
+    });
+    expect(got.state).toBe('checks_unreadable');
+    if (got.state === 'checks_unreadable') {
+      expect(got.detail).toContain('cold-verify（stale）');
+      expect(got.detail).toContain('没查成');
+    }
+    expect(reads).toBe(1);
   });
 
   it('【故意造出的失败】会接着等、却没接上读检查：抛错，不回 waiting', async () => {

@@ -540,6 +540,101 @@ describe('合并', () => {
     expect(fake.calls('DELETE', /\/git\/refs\/heads\/task\/1$/).map((r) => r.as)).toEqual(['engine']);
   });
 
+  it('截止还在将来：照常 squash', async () => {
+    const { gh, fake } = setup();
+    const pr = ready(fake);
+    const res = await gh.mergePr(
+      { repo, prNumber: pr.number, expectedHead: A },
+      { attemptDeadlineMs: Date.now() + 60_000, scheduleDeadlineMs: Date.now() + 120_000 },
+    );
+    expect(res).toMatchObject({ merged: true, alreadyMerged: false });
+    expect(fake.calls('PUT', /\/merge$/)).toHaveLength(1);
+  });
+
+  it('compare 跨过截止后不再发合并 PUT', async () => {
+    const { gh, fake } = setup();
+    const pr = ready(fake);
+    fake.before.push(async (req) => {
+      if (req.method === 'GET' && req.path.includes('/compare/')) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+      return undefined;
+    });
+    const deadline = Date.now() + 500;
+    await expect(
+      gh.mergePr(
+        { repo, prNumber: pr.number, expectedHead: A },
+        { attemptDeadlineMs: deadline, scheduleDeadlineMs: deadline },
+      ),
+    ).rejects.toMatchObject({ code: 'WRITE_DEADLINE_PASSED', retryable: false });
+    expect(fake.calls('GET', /\/compare\//).length).toBeGreaterThan(0);
+    expect(fake.calls('PUT', /\/merge$/)).toEqual([]);
+  });
+
+  it('compare 期间取消、数值截止还在将来：不再发合并 PUT', async () => {
+    const ac = new AbortController();
+    const { gh, fake } = setup();
+    const pr = ready(fake);
+    fake.before.push(async (req) => {
+      if (req.method === 'GET' && req.path.includes('/compare/')) {
+        ac.abort(new Error('活动已取消'));
+      }
+      return undefined;
+    });
+    await expect(
+      gh.mergePr(
+        { repo, prNumber: pr.number, expectedHead: A },
+        {
+          signal: ac.signal,
+          attemptDeadlineMs: Date.now() + 600_000,
+          scheduleDeadlineMs: Date.now() + 1_200_000,
+        },
+      ),
+    ).rejects.toThrow('活动已取消');
+    expect(ac.signal.aborted).toBe(true);
+    expect(fake.calls('PUT', /\/merge$/)).toEqual([]);
+  });
+
+  it('截止已过不再发挂自动合并；还没到点照常挂', async () => {
+    const late = setup();
+    const latePr = ready(late.fake);
+    await expect(
+      late.gh.claims.enableAutoMerge(
+        repo,
+        { number: latePr.number, nodeId: `PR_${latePr.number}` },
+        { attemptDeadlineMs: Date.now() - 1_000, scheduleDeadlineMs: Date.now() + 60_000 },
+      ),
+    ).rejects.toMatchObject({ code: 'WRITE_DEADLINE_PASSED', retryable: false });
+    expect(late.fake.calls('POST', /\/graphql$/)).toEqual([]);
+
+    const ac = new AbortController();
+    ac.abort(new Error('活动已取消'));
+    const aborted = setup();
+    const abortedPr = ready(aborted.fake);
+    await expect(
+      aborted.gh.claims.enableAutoMerge(
+        repo,
+        { number: abortedPr.number, nodeId: `PR_${abortedPr.number}` },
+        {
+          signal: ac.signal,
+          attemptDeadlineMs: Date.now() + 600_000,
+          scheduleDeadlineMs: Date.now() + 1_200_000,
+        },
+      ),
+    ).rejects.toThrow('活动已取消');
+    expect(aborted.fake.calls('POST', /\/graphql$/)).toEqual([]);
+
+    const ok = setup();
+    const okPr = ready(ok.fake);
+    await ok.gh.claims.enableAutoMerge(
+      repo,
+      { number: okPr.number, nodeId: `PR_${okPr.number}` },
+      { attemptDeadlineMs: Date.now() + 60_000, scheduleDeadlineMs: Date.now() + 120_000 },
+    );
+    expect(ok.fake.calls('POST', /\/graphql$/)).toHaveLength(1);
+    expect(ok.fake.pulls.get(okPr.number)?.auto_merge).toBe(true);
+  });
+
   it('C21：合并记进幂等账（对账拿它核「是合并队列合的」）；合完回执丢了，重试补记、不再合', async () => {
     const first = setup();
     const pr = ready(first.fake);
@@ -772,6 +867,87 @@ describe('同步主线（update-branch）', () => {
   function open(fake: ReturnType<typeof setup>['fake'], headSha = A) {
     return fake.addPull({ title: '登录页加验证码', head: { ref: 'task/1', sha: headSha } });
   }
+
+  it('截止还在将来：照常带头约束同步', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.behindBy.set(A, 1);
+    const res = await gh.updateBranch(
+      { repo, prNumber: pr.number, expectedHead: A },
+      { attemptDeadlineMs: Date.now() + 60_000, scheduleDeadlineMs: Date.now() + 120_000 },
+    );
+    expect(res.updated).toBe(true);
+    expect(fake.calls('PUT', /\/update-branch$/)).toHaveLength(1);
+    expect(fake.calls('PUT', /\/update-branch$/)[0]?.body).toEqual({ expected_head_sha: A });
+  });
+
+  it('compare 判落后跨过截止后，同步主线不再发 update-branch', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.behindBy.set(A, 1);
+    fake.before.push(async (req) => {
+      if (req.method === 'GET' && req.path.includes('/compare/')) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+      return undefined;
+    });
+    const deadline = Date.now() + 500;
+    const limits = { attemptDeadlineMs: deadline, scheduleDeadlineMs: deadline };
+    const merged = await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A }, limits);
+    expect(merged).toMatchObject({ merged: false, reason: 'behind_main' });
+    expect(fake.calls('PUT', /\/merge$/)).toEqual([]);
+    await expect(
+      gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A }, limits),
+    ).rejects.toMatchObject({
+      code: 'WRITE_DEADLINE_PASSED',
+      retryable: false,
+    });
+    expect(fake.calls('PUT', /\/update-branch$/)).toEqual([]);
+    expect(fake.pulls.get(pr.number)?.head.sha).toBe(A);
+  });
+
+  it('同步前的读跨过截止：不再发 update-branch', async () => {
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.before.push(async (req) => {
+      if (req.method === 'GET' && req.path === `/repos/acme/widgets/pulls/${pr.number}`) {
+        await new Promise((resolve) => setTimeout(resolve, 800));
+      }
+      return undefined;
+    });
+    const deadline = Date.now() + 500;
+    await expect(
+      gh.updateBranch(
+        { repo, prNumber: pr.number, expectedHead: A },
+        { attemptDeadlineMs: deadline, scheduleDeadlineMs: deadline },
+      ),
+    ).rejects.toMatchObject({ code: 'WRITE_DEADLINE_PASSED', retryable: false });
+    expect(fake.calls('PUT', /\/update-branch$/)).toEqual([]);
+    expect(fake.pulls.get(pr.number)?.head.sha).toBe(A);
+  });
+
+  it('同步前取消、数值截止还在将来：不再发 update-branch', async () => {
+    const ac = new AbortController();
+    const { gh, fake } = setup();
+    const pr = open(fake);
+    fake.before.push(async (req) => {
+      if (req.method === 'GET' && req.path === `/repos/acme/widgets/pulls/${pr.number}`) {
+        ac.abort(new Error('活动已取消'));
+      }
+      return undefined;
+    });
+    await expect(
+      gh.updateBranch(
+        { repo, prNumber: pr.number, expectedHead: A },
+        {
+          signal: ac.signal,
+          attemptDeadlineMs: Date.now() + 600_000,
+          scheduleDeadlineMs: Date.now() + 1_200_000,
+        },
+      ),
+    ).rejects.toThrow('活动已取消');
+    expect(fake.calls('PUT', /\/update-branch$/)).toEqual([]);
+  });
 
   it('用「引擎」带头约束同步；202 之后重读，头换了才算完，回新头', async () => {
     const { gh, fake } = setup();

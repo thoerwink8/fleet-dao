@@ -1,7 +1,7 @@
 // 每个活动的超时、心跳、重试、叫停时等不等它收场：按活动类型分开设，唯一出处在这里（旧系统所有活动共用一个 74 分钟、
 // 没有心跳，工人一重启丢掉的活动要干等 74 分钟才判死）。工作流按这张表给每个活动配代理，不许在调用处另写。
 
-import type { ActivityOptions, RetryPolicy } from '@temporalio/common';
+import { type ActivityOptions, msToNumber, type RetryPolicy } from '@temporalio/common';
 import type { Limits } from './limits.ts';
 import type { EnginePorts } from './ports.ts';
 import type { TaskBriefResult } from './runner/task-brief.ts';
@@ -224,4 +224,17 @@ export function profileOptions(profile: Profile, limits: Limits): ActivityOption
 /** 一个活动的完整选项：它那一档的超时、心跳、重试。 */
 export function activityOptions(name: ActivityName, limits: Limits): ActivityOptions {
   return profileOptions(ACTIVITY_PROFILE[name], limits);
+}
+
+/**
+ * 受剩余期限约束的那一次（挂合并时等检查，workflows/task-merge.ts）：这一档的选项，外加 scheduleToClose＝剩下的秒数，
+ * 排队、每次尝试、尝试之间的退避合在一起不越过它；单次尝试的限时也不超过它。重试几次、哪些码不重试照这一档。
+ */
+export function activityOptionsWithin(name: ActivityName, limits: Limits, seconds: number): ActivityOptions {
+  const own = activityOptions(name, limits);
+  const attemptMs =
+    own.startToCloseTimeout === undefined
+      ? seconds * 1000
+      : Math.min(msToNumber(own.startToCloseTimeout), seconds * 1000);
+  return { ...own, startToCloseTimeout: attemptMs, scheduleToCloseTimeout: seconds * 1000 };
 }

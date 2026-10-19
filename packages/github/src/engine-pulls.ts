@@ -8,7 +8,7 @@
 import { z } from 'zod';
 import { enc, type RepoRef, repoSlug, unexpected } from './client.ts';
 import { botLogin } from './credentials.ts';
-import type { Deps } from './deps.ts';
+import type { ActivityContext, Deps } from './deps.ts';
 import { recordEcho } from './echo.ts';
 import { GitHubError } from './errors.ts';
 import { type CommentIssueResult, commentPull } from './issues.ts';
@@ -123,7 +123,11 @@ export interface ClaimsGitHub {
    * 不用 Actions 自带的 GITHUB_TOKEN——它挂的自动合并合进主线后，不会触发主线上后面的工作流（#242）。
    * 挂不上（权限不够、GitHub 报错）照抛，调用方不当成已经挂上。
    */
-  enableAutoMerge(repo: RepoRef, pull: Pick<PullFacts, 'number' | 'nodeId'>): Promise<void>;
+  enableAutoMerge(
+    repo: RepoRef,
+    pull: Pick<PullFacts, 'number' | 'nodeId'>,
+    ctx?: ActivityContext,
+  ): Promise<void>;
   /** 关掉 PR（分支不动）。已经关了的不报错。 */
   closePull(repo: RepoRef, number: number): Promise<void>;
   /**
@@ -429,12 +433,17 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
       );
     },
 
-    async enableAutoMerge(repo, pull) {
+    async enableAutoMerge(repo, pull, ctx) {
       await client.graphql(
         auth(repo),
         'mutation($id: ID!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) { pullRequest { number } } }',
         { id: pull.nodeId },
-        { mutation: true },
+        {
+          mutation: true,
+          signal: ctx?.signal,
+          ...(ctx?.attemptDeadlineMs === undefined ? {} : { attemptDeadlineMs: ctx.attemptDeadlineMs }),
+          ...(ctx?.scheduleDeadlineMs === undefined ? {} : { scheduleDeadlineMs: ctx.scheduleDeadlineMs }),
+        },
       );
     },
 

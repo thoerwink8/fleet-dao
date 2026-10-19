@@ -91,6 +91,14 @@ export async function acceptanceGate(
     throw new Error('验收责任响应身份或协议不匹配');
   const ids = new Set<number>();
   let open = false;
+  const finals = new Map<number, { generation: number; prNumber: number; head: string }>();
+  const superseded: {
+    id: number;
+    prNumber: number;
+    head: string;
+    successorId: number;
+    successorGeneration: number;
+  }[] = [];
   for (const duty of raw.duties) {
     if (
       !policyRecord(duty) ||
@@ -108,10 +116,42 @@ export async function acceptanceGate(
     )
       throw new Error('验收责任精确身份或代次认不出');
     ids.add(Number(duty.id));
-    if (duty.settledAt === null) {
+    // 有效终态只认读口照 shared 算出来的 state（#3114），不再自己按 settledAt 判；缺了或不认识就是没读成
+    if (duty.state !== 'open' && duty.state !== 'settled' && duty.state !== 'superseded')
+      throw new Error('验收责任缺有效终态，无法判定能否关单');
+    if (duty.state === 'open') {
+      if (duty.settledAt !== null) throw new Error('验收责任终态与最终验收回执矛盾');
       open = true;
       continue;
     }
+    if (duty.state === 'superseded') {
+      if (
+        duty.settledAt !== null ||
+        duty.mergeCommit !== null ||
+        typeof duty.supersededAt !== 'string' ||
+        !Number.isFinite(Date.parse(duty.supersededAt)) ||
+        typeof duty.supersededBy !== 'string' ||
+        !duty.supersededBy.trim() ||
+        typeof duty.supersedeEvidence !== 'string' ||
+        !duty.supersedeEvidence.trim() ||
+        !Number.isSafeInteger(duty.successorId) ||
+        !Number.isSafeInteger(duty.successorGeneration)
+      )
+        throw new Error('被替代的验收责任缺可信替代证据');
+      superseded.push({
+        id: Number(duty.id),
+        prNumber: Number(duty.prNumber),
+        head: duty.head,
+        successorId: Number(duty.successorId),
+        successorGeneration: Number(duty.successorGeneration),
+      });
+      continue;
+    }
+    finals.set(Number(duty.id), {
+      generation: Number(duty.generation),
+      prNumber: Number(duty.prNumber),
+      head: duty.head,
+    });
     if (
       typeof duty.settledAt !== 'string' ||
       !Number.isFinite(Date.parse(duty.settledAt)) ||
@@ -123,6 +163,17 @@ export async function acceptanceGate(
         (typeof duty.mergeCommit !== 'string' || !/^[a-f0-9]{40}$/.test(duty.mergeCommit)))
     )
       throw new Error('最终验收缺少可信落账证据');
+  }
+  // 被替代的必须指向本单里同 PR 另一头、已最终验收且代次吻合的责任；指不到就是账不自洽，不放行
+  for (const s of superseded) {
+    const target = finals.get(s.successorId);
+    if (
+      !target ||
+      target.generation !== s.successorGeneration ||
+      target.prNumber !== s.prNumber ||
+      target.head === s.head
+    )
+      throw new Error('被替代的验收责任指向的最终责任对不上');
   }
   return open ? '数据库里还有未结清的现场验收责任，代码可以合，原单保留' : undefined;
 }

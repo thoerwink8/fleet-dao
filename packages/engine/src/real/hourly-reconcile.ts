@@ -623,6 +623,7 @@ export function hourlyReconcileJob(
       sessionTmpDir: SESSION_TMP_DIR,
       machine: w.machine,
       listDir: w.listDir ?? listDirEntries,
+      pendingCleanup: () => w.trees.pendingCleanup(),
       treeFor: (repo, branch) => w.trees.treeFor(repo, branch),
       ownerOf: (dir) => w.trees.ownerOf(dir),
       remove: async (dir) => {
@@ -664,7 +665,7 @@ export function hourlyReconcileJob(
               ...(w.treeProcessLook ? { processLook: w.treeProcessLook } : {}),
             },
             preservedShots.get(dir),
-            () => w.trees.remove(dir),
+            (identity) => w.trees.remove(dir, identity),
           );
           return { gone: result.gone };
         } finally {

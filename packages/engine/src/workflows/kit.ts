@@ -21,6 +21,7 @@ import {
   ACTIVITY_PROFILE,
   type ActivityName,
   activityOptions,
+  activityOptionsWithin,
   type EngineActivities,
   profileOptions,
 } from '../activity-options.ts';
@@ -85,6 +86,18 @@ export function activitiesFor(limits: Limits): EngineActivities {
     out[name] = proxyActivities<EngineActivities>(options)[name];
   }
   return out as EngineActivities;
+}
+
+/**
+ * 受剩余期限约束的那一次活动（选项见 activity-options.ts 的 activityOptionsWithin）：排队、尝试、重试加起来不超过 seconds 秒。
+ * 到点 Temporal 判超时，调用方按到期处理。
+ */
+export function activityWithin<K extends ActivityName>(
+  name: K,
+  limits: Limits,
+  seconds: number,
+): EngineActivities[K] {
+  return proxyActivities<EngineActivities>(activityOptionsWithin(name, limits, seconds))[name];
 }
 
 export function iso(ms: number): string {

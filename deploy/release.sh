@@ -24,6 +24,8 @@ umask 022
 DEPLOY_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/common.sh
 source "$DEPLOY_DIR/lib/common.sh"
+# shellcheck source=lib/root-exec-check.sh
+source "$DEPLOY_DIR/lib/root-exec-check.sh"
 # ensure_work_tmp：发版在引擎起来之前把 _tmp 改成引擎用户。只定义函数，ENGINE_USER=fleet。
 # shellcheck source=lib/human-tier.sh
 source "$DEPLOY_DIR/lib/human-tier.sh"
@@ -1460,7 +1462,17 @@ install_scope_helper() { # 这一版的目录
     red "这一版没有 $src，换不了 fleet-agent-scope"
     return 1
   fi
+  [[ -f "$1/deploy/france/tree-usage.py" ]] || {
+    red "缺少受管删树协议"
+    return 1
+  }
+  ensure_dir /usr/local/libexec root:root 755 || return 1
+  put_file /usr/local/libexec/fleet-dao-tree-usage.py root:root 644 "$(<"$1/deploy/france/tree-usage.py")"
   put_file "$dest" root:root 755 "$(<"$src")"
+  rec_scope_installed "$src" "$1/deploy/france/tree-usage.py" "$dest" || {
+    red "删树协议内容、可信链或能力读回失败"
+    return 1
+  }
 }
 
 # 引擎起来之前：_tmp 归引擎用户，冷验收才能在下面 mkdir。测试换成桩，不碰真的 /var/lib/fleet-work。
