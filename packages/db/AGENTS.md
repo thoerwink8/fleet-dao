@@ -18,6 +18,7 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 
 - `npx vitest run packages/db/test/<文件>`。默认每个测试文件一份 PGlite（内存 Postgres，跑真迁移），不要起库；占内存大。
 - 设了 `FLEET_TEST_PG_URL` 才连真库（CI 的 pg 台起 `postgres:16`）；连不上、迁移没跑成当场报错，不退回 PGlite。`test/real-pg.test.ts` 只在设了它时跑。
+- `TestClient.query` 的 raw JSON/JSONB 参数：字符串按已序列化 JSON 文本传给数据库验证，对象/数组仍可直接传；JSON 字符串值须先 `JSON.stringify`。仅测试 raw PG 池覆盖 JSON 编码，不更改日期和其它类型的原合同。
 - 驾驶舱 e2e 用的是另一个变量 `E2E_PG_ADMIN_URL`，见 `packages/web/e2e/README.md`。
 
 ## 常见坑
