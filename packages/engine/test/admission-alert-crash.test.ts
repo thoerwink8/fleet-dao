@@ -61,6 +61,19 @@ const count = () => {
     d.close();
   }
 };
+async function bounded<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(Error('测试子进程阶段超时')), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 describe('SQLite真实进程崩溃与恢复界', () => {
   it.each(['before-begin', 'after-schema', 'after-version', 'before-commit', 'after-commit'])(
     '首次初始化%s强杀：未确认不冒成功，零字节/无schema保留unknown；已提交schema可重开',
@@ -94,24 +107,87 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     },
     10000,
   );
-  it('32独立宿主抢同identity允许明确busy，有界重试后只有一行', async () => {
+  it('32真实SQLite进程ready后争同identity，只允spooled/busy且最终一行', async () => {
     const o = observation();
     expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
-    const results = await Promise.all(
-      Array.from({ length: 32 }, () =>
-        createAdmissionAlertSink({ spoolPath: path }).record(o, {
-          signal: new AbortController().signal,
-          deadlineAt: performance.now() + 10000,
-        }),
-      ),
+    const contender = fileURLToPath(
+      new URL('./fixtures/admission-alert-sqlite-contender.mjs', import.meta.url),
     );
-    expect(results.every((r) => r.kind === 'spooled' || (r.kind === 'unknown' && r.code === 'busy'))).toBe(
-      true,
+    const processes = Array.from({ length: 32 }, () => {
+      const child = spawn(process.execPath, [contender], {
+        stdio: ['ignore', 'ignore', 'ignore', 'ipc'],
+        windowsHide: true,
+      });
+      children.push(child);
+      return { child, ready: once(child, 'message'), closed: once(child, 'close') };
+    });
+    try {
+      for (const message of await bounded(Promise.all(processes.map((p) => p.ready)), 45000))
+        expect(message[0]).toEqual({ ready: true });
+      const finished = processes.map(async ({ child, closed }) => {
+        const result = once(child, 'message');
+        child.send({ path, observation: o });
+        const [message] = await result;
+        await closed;
+        expect(child.exitCode).toBe(0);
+        expect(child.signalCode).toBeNull();
+        return message.result;
+      });
+      const results = await bounded(Promise.all(finished), 10000);
+      expect(
+        results.every((r) => r.kind === 'spooled' || (r.kind === 'unknown' && r.code === 'busy')),
+        JSON.stringify(results),
+      ).toBe(true);
+      expect(results.some((r) => r.kind === 'spooled')).toBe(true);
+      expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+      expect(count()).toBe(1);
+    } finally {
+      await bounded(
+        Promise.all(
+          processes.map(async ({ child, closed }) => {
+            if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+            await closed;
+          }),
+        ),
+        5000,
+      );
+    }
+  }, 65000);
+  it('真实sink冷启动未就绪仍按总deadline强杀，close后不留槽或假承接', async () => {
+    let child: ChildProcess | undefined;
+    let closed: Promise<unknown> | undefined;
+    const sink = createAdmissionAlertSink(
+      { spoolPath: path },
+      {
+        launch: (entry) => {
+          expect(entry).toBe(fileURLToPath(new URL('../src/real/admission-alert-child.ts', import.meta.url)));
+          // 仅模拟加载产品入口前的冷启动停顿，不改产品deadline或响应。
+          child = spawn(
+            process.execPath,
+            [
+              '--input-type=module',
+              '-e',
+              'await new Promise(r => setTimeout(r, 60000)); await import(process.argv[1]);',
+              entry,
+            ],
+            { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true },
+          );
+          children.push(child);
+          closed = once(child, 'close');
+          return child;
+        },
+      },
     );
-    expect(results.some((r) => r.kind === 'spooled')).toBe(true);
-    expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
-    expect(count()).toBe(1);
-  }, 20000);
+    const result = await sink.record(observation(), {
+      signal: new AbortController().signal,
+      deadlineAt: performance.now() + 2000,
+    });
+    expect(result).toEqual({ kind: 'unknown', code: 'deadline' });
+    await closed;
+    expect(child?.signalCode).toBe('SIGKILL');
+    expect(sink.status()).toEqual({ active: 0, cleanupPending: 0 });
+    expect(existsSync(path)).toBe(false);
+  }, 10000);
   it('不同identity争最后一格：busy可有界重试，只承接一个且保全全部旧行', async () => {
     for (let n = 0; n < 255; n++) expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
     const a = observation(),
