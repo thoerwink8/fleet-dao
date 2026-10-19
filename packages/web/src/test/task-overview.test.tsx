@@ -3,14 +3,43 @@
 // 老后端没给、哪一块读不到都写「没读到」和原因，不画 0。
 import { cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { Route, Routes } from 'react-router';
-import { afterEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { PANEL_OPEN_KEY } from '../components/task-panel';
 import TaskPage from '../routes/task';
 import { renderApp } from './harness';
 
+// 过程在右侧面板里（#3277）：这里都按宽屏、面板开着看（开关、窄屏、后退见 task-panel.test.tsx）
+beforeEach(() => {
+  localStorage.setItem(PANEL_OPEN_KEY, 'true');
+  vi.spyOn(window, 'matchMedia').mockImplementation(
+    (query: string) =>
+      ({
+        matches: [...query.matchAll(/\((min|max)-width:\s*(\d+)px\)/g)].every(([, kind, px]) =>
+          kind === 'min' ? 1440 >= Number(px) : 1440 <= Number(px),
+        ),
+        media: query,
+        onchange: null,
+        addEventListener() {},
+        removeEventListener() {},
+        addListener() {},
+        removeListener() {},
+        dispatchEvent: () => false,
+      }) as MediaQueryList,
+  );
+});
+
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
+  localStorage.clear();
   window.history.replaceState({}, '', '/');
 });
+
+/** 只看正文的用例先把面板关上：面板是模态抽屉，开着时正文对按角色查找是藏起来的。 */
+function openBody(route: string) {
+  localStorage.setItem(PANEL_OPEN_KEY, 'false');
+  return open(route);
+}
 
 function open(route: string, search = '') {
   window.history.replaceState({}, '', `/${search}`);
@@ -40,7 +69,7 @@ const expandRounds = async () => {
 
 describe('概览：汇报、命令计数、PR、改动文件', () => {
   test('t-c9：最新汇报（最近一笔动手的最后一句话）、命令计数（只有失败数标红）、PR 横条、改动卡', async () => {
-    open('/tasks/t-c9');
+    openBody('/tasks/t-c9');
     const box = await found('[data-task-summary]');
     const report = await found('[data-task-report]', box);
     expect(report.textContent).toContain('测试里写死了旧标签');
@@ -62,7 +91,7 @@ describe('概览：汇报、命令计数、PR、改动文件', () => {
   });
 
   test('改动卡：数字来自按头记的 numstat；只露前 3 个，其余点「还有 N 个文件」；二进制不写 +/-', async () => {
-    open('/tasks/t-c9');
+    openBody('/tasks/t-c9');
     const card = await found('[data-changed-files]');
     expect(card.textContent).toContain('已编辑 5 个文件');
     // 32 行增、4 行删（二进制不计）
@@ -228,9 +257,9 @@ describe('新旧引擎交替的单：没记回合号的笔按回合收场时刻�
   });
 });
 
-describe('排版：左结论、右过程，用量收成一行（#3228）', () => {
+describe('排版：正文是结论，过程在右侧抽屉，用量收成一行（#3228、#3277）', () => {
   test('用量和模型默认收起，摘要写几笔、用时、模型；点开才出明细，地址记下展开', async () => {
-    open('/tasks/t-c9');
+    openBody('/tasks/t-c9');
     const fold = await found('[data-usage-fold]');
     const btn = fold.querySelector('button[aria-expanded]') as HTMLButtonElement;
     expect(btn.getAttribute('aria-expanded')).toBe('false');
@@ -243,9 +272,9 @@ describe('排版：左结论、右过程，用量收成一行（#3228）', () =>
     expect(btn.getAttribute('aria-expanded')).toBe('true');
   });
 
-  test('过程在右栏那一块里，结论（汇报、进度条）在左栏', async () => {
+  test('过程在右侧面板里（#3277），结论（汇报、进度条）在正文', async () => {
     open('/tasks/t-c9');
-    const aside = await found('[data-task-aside]');
+    const aside = await found('[data-task-panel]');
     expect(aside.querySelector('[data-task-process]')).toBeTruthy();
     expect(aside.querySelector('[data-task-summary]')).toBeNull();
     expect(aside.querySelector('[data-round-progress]')).toBeNull();
@@ -281,11 +310,12 @@ describe('过程照设计稿（#3228）', () => {
     expect(b.querySelector('[data-run-outcome]')?.textContent).toBe('完成');
   });
 
-  test('时间条下面写起止；头上写几个回合、几笔、用时', async () => {
+  test('时间条下面写起止；面板头上写几个回合、几笔、用时', async () => {
     open('/tasks/t-c9');
     const proc = await found('[data-task-process]');
     expect((await found('[data-bar-axis]', proc)).textContent).toMatch(/^\d\d:\d\d.*\d\d:\d\d$/);
-    expect(proc.textContent).toMatch(/2 个回合 · 4 笔 · 用时 /);
+    const head = (await found('[data-task-panel] header')).textContent;
+    expect(head).toMatch(/^过程2 个回合 · 4 笔 · 用时 /);
   });
 
   test('t-12 在跑：最后一回合末尾写「接下来」还要走的几步', async () => {

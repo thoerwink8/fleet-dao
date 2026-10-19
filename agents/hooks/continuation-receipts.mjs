@@ -397,7 +397,7 @@ export function observeContinuation(context) {
     originTurn: emitted.turn,
   });
 }
-/** 只读投影：不存在/缺身份/截断是未知，任何阶段均不宣称模型理解/消费。
+/** 只读投影：满额保留已验证历史，容量与后续覆盖单列；任何阶段均不宣称模型理解/消费。
  * @param {string} dir @param {unknown} sessionId @param {unknown} [generation]
  */
 export function receiptStatus(dir, sessionId, generation = null) {
@@ -407,16 +407,12 @@ export function receiptStatus(dir, sessionId, generation = null) {
     return {
       evidence: 'unknown',
       code: read.code,
+      capacity: 'unknown',
+      coverage: 'unknown',
       rootContinuation: 'unknown',
       resultConsumption: 'unknown',
     };
-  if (read.rows.length >= MAX_RECEIPT_ROWS)
-    return {
-      evidence: 'unknown',
-      code: 'LIMIT',
-      rootContinuation: 'unknown',
-      resultConsumption: 'unknown',
-    };
+  const exhausted = read.rows.length >= MAX_RECEIPT_ROWS;
   const current = idOf(generation);
   const rows = read.rows.filter((r) => r.generation === current);
   const latest = rows.at(-1);
@@ -428,6 +424,9 @@ export function receiptStatus(dir, sessionId, generation = null) {
   );
   return {
     evidence: latest ? 'observed' : 'unknown',
+    ...(exhausted ? { code: 'LIMIT' } : {}),
+    capacity: exhausted ? 'exhausted' : 'available',
+    coverage: 'unknown',
     latest: latest
       ? {
           at: latest.at,

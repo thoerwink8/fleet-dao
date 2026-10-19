@@ -292,7 +292,7 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     expect(readReceipts(s.dir, fingerprint('new-session'))).toEqual({ ok: false, code: 'BUSY' });
     expect(existsSync(join(s.dir, '.receipts', '.admission.lock'))).toBe(true);
   });
-  it('写入达到4096行时不越过可读上限，保留完整历史并返回LIMIT', () => {
+  it('写入达到4096行时不越过可读上限，保留历史投影但覆盖耗尽仍返回LIMIT', () => {
     const s = fixture();
     const row = `${JSON.stringify(s.rows()[0])}\n`;
     writeFileSync(s.file, row.repeat(MAX_RECEIPT_ROWS - 1));
@@ -306,9 +306,128 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     expect(readFileSync(s.file, 'utf8')).toBe(previous);
     expect(s.rows()).toHaveLength(MAX_RECEIPT_ROWS);
     expect(receiptStatus(s.dir, s.sid, s.state().generation)).toMatchObject({
-      evidence: 'unknown',
+      evidence: 'observed',
       code: 'LIMIT',
+      capacity: 'exhausted',
+      coverage: 'unknown',
+      stages: { Stop: { evidence: 'observed' } },
     });
+  });
+  it.each([MAX_RECEIPT_ROWS - 1, MAX_RECEIPT_ROWS, MAX_RECEIPT_ROWS + 1])(
+    '真实只读CLI在%d行区分历史证据与容量，耗尽或超限非零退出',
+    (count) => {
+      const s = fixture();
+      const context = s.context({ turn_id: 'historical-turn' });
+      for (const phase of ['entered', 'prepared', 'emitted'] as const)
+        expect(
+          appendReceipt(context, {
+            phase,
+            decision: 'block',
+            continuation: fingerprint('historical-request'),
+          }),
+        ).toEqual({ ok: true });
+      for (const event of ['SessionStart', 'PostToolUse'])
+        expect(appendReceipt({ ...context, event }, { phase: 'entered', decision: 'none' })).toEqual({
+          ok: true,
+        });
+      expect(appendReceipt(context, { phase: 'fault', decision: 'write_failed' })).toEqual({ ok: true });
+      const history = s.rows().map((row) => `${JSON.stringify(row)}\n`);
+      const first = history[0];
+      if (!first) throw Error('隔离窗口缺少初始回执');
+      const raw = first.repeat(count - history.length) + history.join('');
+      writeFileSync(s.file, raw);
+      const stateBefore = readFileSync(join(s.dir, `${s.sid}.json`), 'utf8');
+      const status = runChild(
+        process.execPath,
+        [fileURLToPath(new URL('../hooks/unattended.mjs', import.meta.url)), 'status', '--receipts'],
+        { cwd: s.dir, env: s.env },
+      );
+      expect(status.status).toBe(count < MAX_RECEIPT_ROWS ? 0 : 1);
+      const result = JSON.parse(status.stdout);
+      expect(result).toMatchObject({
+        evidence: count > MAX_RECEIPT_ROWS ? 'unknown' : 'observed',
+        capacity:
+          count > MAX_RECEIPT_ROWS ? 'unknown' : count === MAX_RECEIPT_ROWS ? 'exhausted' : 'available',
+        coverage: 'unknown',
+        rootContinuation: 'unknown',
+        resultConsumption: 'unknown',
+      });
+      if (count >= MAX_RECEIPT_ROWS) expect(result.code).toBe('LIMIT');
+      else expect(result).not.toHaveProperty('code');
+      if (count <= MAX_RECEIPT_ROWS)
+        expect(result).toMatchObject({
+          stages: {
+            SessionStart: { evidence: 'observed' },
+            PostToolUse: { evidence: 'observed' },
+            Stop: { evidence: 'observed' },
+          },
+          requestPrepared: true,
+          requestEmitted: true,
+          faults: [{ event: 'Stop', decision: 'write_failed' }],
+        });
+      else {
+        expect(result).not.toHaveProperty('stages');
+        expect(result).not.toHaveProperty('requestEmitted');
+      }
+      expect(readFileSync(s.file, 'utf8')).toBe(raw);
+      expect(readFileSync(join(s.dir, `${s.sid}.json`), 'utf8')).toBe(stateBefore);
+    },
+  );
+  it('满额只投影当前代次；新on不腾容量，也不借旧代次或其他session证明根续轮', () => {
+    const s = fixture();
+    expect(appendReceipt(s.context(), { phase: 'entered', decision: 'none' })).toEqual({ ok: true });
+    expect(appendReceipt(s.context(), { phase: 'emitted', decision: 'block' })).toEqual({ ok: true });
+    const oldGeneration = s.state().generation;
+    const historical = s.rows().map((row) => `${JSON.stringify(row)}\n`);
+    const first = historical[0];
+    if (!first) throw Error('隔离窗口缺少初始回执');
+    const raw = first.repeat(MAX_RECEIPT_ROWS - historical.length) + historical.join('');
+    writeFileSync(s.file, raw);
+    expect(s.command('on')).toBe(0);
+    const generation = s.state().generation;
+    expect(generation).not.toBe(oldGeneration);
+    expect(receiptStatus(s.dir, s.sid, generation)).toMatchObject({
+      evidence: 'unknown',
+      capacity: 'exhausted',
+      coverage: 'unknown',
+      code: 'LIMIT',
+      latest: null,
+      stages: { Stop: { evidence: 'unknown' } },
+      requestPrepared: false,
+      requestEmitted: false,
+      nextTurnObserved: false,
+      rootContinuation: 'unknown',
+      resultConsumption: 'unknown',
+    });
+    expect(receiptStatus(s.dir, s.sid, oldGeneration)).toMatchObject({
+      evidence: 'observed',
+      capacity: 'exhausted',
+      code: 'LIMIT',
+      stages: { Stop: { evidence: 'observed' } },
+      requestEmitted: true,
+    });
+    expect(receiptStatus(s.dir, s.sid)).toMatchObject({ evidence: 'unknown', requestEmitted: false });
+    expect(receiptStatus(s.dir, 'another-session', oldGeneration)).toMatchObject({ evidence: 'unknown' });
+    expect(readFileSync(s.file, 'utf8')).toBe(raw);
+  });
+  it.each(['bad-shape', 'partial', 'locked'] as const)('满额但%s时不展示未验证的历史，仍只读未知', (kind) => {
+    const s = fixture();
+    const line = `${JSON.stringify(s.rows()[0])}\n`;
+    let raw = line.repeat(MAX_RECEIPT_ROWS);
+    if (kind === 'bad-shape') raw = `${line.repeat(MAX_RECEIPT_ROWS - 1)}{"private":"sensitive"}\n`;
+    if (kind === 'partial') raw = raw.slice(0, -1);
+    writeFileSync(s.file, raw);
+    if (kind === 'locked') writeFileSync(`${s.file}.lock`, '');
+    const result = receiptStatus(s.dir, s.sid, s.state().generation);
+    expect(result).toMatchObject({
+      evidence: 'unknown',
+      capacity: 'unknown',
+      coverage: 'unknown',
+      rootContinuation: 'unknown',
+      resultConsumption: 'unknown',
+    });
+    expect(result).not.toHaveProperty('stages');
+    expect(readFileSync(s.file, 'utf8')).toBe(raw);
   });
   it('跨session文件数满额后不新增、不删旧历史，已有会话仍能追加，原Stop照常block', () => {
     const s = fixture();

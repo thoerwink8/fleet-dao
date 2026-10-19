@@ -1,5 +1,5 @@
 // 点名派单（jobs/dispatch-issue.ts，#1337）的真装配：库、GitHub、Temporal 都和拉单（real/intake.ts）用同一套，这里只把
-// 拉单已经接好的几样（白名单、现读一张单、读需求文档、PR 挂单表、建任务行加起工作流）原样转过来，再补三样拉单没有的：
+// 拉单已经接好的几样（白名单、现读一张单、读需求文档、PR 挂单表、前置单状态和此刻、建任务行加起工作流）原样转过来，再补三样拉单没有的：
 // 受管的仓按名字找、引擎总开关那一行、一张单以前的任务工作流失败了几条（顺着代数问 Temporal）。
 //
 // 改这里之前必须知道：
@@ -60,6 +60,9 @@ export function dispatchIssueDeps(w: DispatchIssueWiring): DispatchIssueDeps {
     issueTask: (repo, issueNumber) => intake.issueTask(repo, issueNumber),
     taskGenerations: (repo, issueNumber) => intake.taskGenerations(repo, issueNumber),
     openPrClaims: (repo) => intake.openPrClaims(repo),
+    // 前置单开没开着、日期前置的此刻：和拉单同一个批量读、同一个时间来源（#3298）
+    prerequisiteStates: (repo, numbers) => intake.prerequisiteStates(repo, numbers),
+    now: intake.now,
     readSpecDoc: (input) => intake.readSpecDoc(input),
     standardPaths: (repo) => readRepoStandardPaths(w.gh, repo),
     failedAttempts: (repo, issueNumber) => failedGenerations(w.client, repo, issueNumber),
