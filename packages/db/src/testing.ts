@@ -34,6 +34,7 @@ import * as schema from './schema/index.ts';
 
 /** 测试库暴露给测试的最小接口：PGlite、真 Postgres 各实现一份。 */
 export interface TestClient {
+  /** raw SQL 的 JSON/JSONB 字符串参数是已序列化文本；对象/数组可直接传入，字符串值须先 JSON.stringify。 */
   query<R = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: R[] }>;
   /** 跑一段（可能多个语句的）SQL，不回行。 */
   exec(sql: string): Promise<void>;
@@ -323,7 +324,20 @@ class RealTestClient implements TestClient {
       // 并发克隆同一个模板是安全的；模板库此时没被任何连接占着（ensureTemplate 跑完就关了自己的连接）。
       await sql.unsafe(`create database ${dbName} template ${template}`);
     });
-    const sql = postgres(urlForDb(url, dbName), { max: 5, onnotice: () => {} });
+    const sql = postgres(urlForDb(url, dbName), {
+      max: 5,
+      onnotice: () => {},
+      // 只改raw池的JSON类型。字符串是已序列化文本，由PG校验；对象/数组仍走JSON编码。
+      // 不套Drizzle，避免顺带改变原raw池的日期参数和日期读回合同。
+      types: {
+        json: {
+          to: 114,
+          from: [114, 3802],
+          serialize: (value: unknown) => (typeof value === 'string' ? value : JSON.stringify(value)),
+          parse: JSON.parse,
+        },
+      },
+    });
     const client = new RealTestClient(sql, dbName);
     try {
       await client.assertCleanClone();
