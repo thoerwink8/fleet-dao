@@ -26,7 +26,8 @@ interface Layout {
 
 /** 造 { 工作区/app（声明依赖 asset-pkg 和 @scope/asset-pkg）、store（真实包放在哪由 external 定）}。 */
 function layout(external: boolean): Layout {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), 'asset-access-')));
+  // native 展开 Windows 临时目录的 8.3 短名；Vite strict 会在 allow 检查前拒绝短名路径。
+  const base = realpathSync.native(mkdtempSync(join(tmpdir(), 'asset-access-')));
   cleanups.push(() => rmSync(base, { recursive: true, force: true }));
   const workspace = join(base, 'ws');
   const app = join(workspace, 'packages', 'app');
