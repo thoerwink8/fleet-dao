@@ -82,6 +82,7 @@ export type HourlyReconcileJobDeps = WorktreeSweepDeps &
      * 存不进记进 unchecked，不许当成存了。
      */
     saveInventory?: (inventory: WorktreeInventory) => Promise<void>;
+    pendingCleanup?: () => Promise<Record<string, unknown>[]>;
     /**
      * 贴着「本机做」的开着的单（含标签时间线和评论）。三个都给才核；一个都不给就跳过（单测外壳）。
      * 只给了一部分记没查成，不当成「没有没人领的」。
@@ -183,6 +184,15 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     });
   }
   const trees = await sweepWorktrees(deps, before);
+  if (deps.pendingCleanup) {
+    try {
+      for (const row of await deps.pendingCleanup()) {
+        trees.unchecked.push(`隔离清理待恢复：${JSON.stringify(row)}`);
+      }
+    } catch (error) {
+      trees.unchecked.push(`隔离清理事务未读全：${errMessage(error)}`);
+    }
+  }
   if (deps.saveInventory) {
     try {
       await deps.saveInventory(inventoryOf(trees, { trigger: 'hourly', at: deps.now(), root: deps.root }));

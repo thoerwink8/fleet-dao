@@ -53,7 +53,10 @@ export type IntakeChatGitHub = MirrorGitHub & {
 export interface IntakeChatWiring {
   db: Db;
   gh: IntakeChatGitHub;
-  trees: Pick<WorkTrees, 'treeFor' | 'remove' | 'ownerOf' | 'adopt'>;
+  trees: Pick<
+    WorkTrees,
+    'treeFor' | 'removeTemporary' | 'reapTemporary' | 'adoptTemporary' | 'ownerOf' | 'adopt'
+  >;
   exec: UserExec;
   tmpDir: string;
   /** 生产 Spawner 的装配（和动手、验收、整理同一份）：路由查询和起会话都用它。 */
@@ -80,8 +83,12 @@ export function intakeChatSession(
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
   const familyOf = w.familyOf ?? ((ids: string[]) => modelFamilies(w.db, ids));
   const spawn = w.spawn ?? hostSegmentSpawner(w.spawner);
-  const removeQuietly = async (dir: string) => {
-    await w.trees.remove(dir).catch((err: unknown) => {
+  const removeQuietly = async (dir: string, expected?: Awaited<ReturnType<WorkTrees['adoptTemporary']>>) => {
+    if (!expected) {
+      log('warn', '旧会话没有原始目录身份，保留给任务/TTL门后的孤儿清理', { dir });
+      return;
+    }
+    await w.trees.removeTemporary(dir, expected).catch((err: unknown) => {
       log('warn', '指挥官会话的检出没删掉（引擎下次起来时的清理会收）', { dir, error: errMessage(err) });
     });
   };
@@ -153,8 +160,10 @@ export function intakeChatSession(
     });
     ticket.attempt(runId);
     let keepDir = false;
+    let treeIdentity: Awaited<ReturnType<WorkTrees['adoptTemporary']>> | undefined;
     try {
       if (!resume) {
+        treeIdentity = await w.trees.adoptTemporary(dir, info.user);
         const main = await mapped(() =>
           w.gh.fetchMainline({ repo: { owner: input.repo.owner, name: input.repo.name } }),
         );
@@ -233,7 +242,7 @@ export function intakeChatSession(
       return { ok: false, why: `起会话没成：${errMessage(err)}`, session: EMPTY };
     } finally {
       ticket.leave();
-      if (!keepDir) await removeQuietly(dir);
+      if (!keepDir) await removeQuietly(dir, treeIdentity);
     }
   };
 }
@@ -258,7 +267,7 @@ export function intakeChatJob(w: IntakeChatWiring): () => IntakeChatDeps {
     fail: (i) => failRequestChat(w.db, { ...i, now: now() }),
     idle: (cutoff) => idleRequestChats(w.db, cutoff),
     removeDir: async (dir) => {
-      await w.trees.remove(dir);
+      await w.trees.reapTemporary(dir);
     },
     forget: (i) => forgetRequestChatSession(w.db, { ...i, now: now() }),
     recover: () => recoverRunningRequestChats(w.db, now()),

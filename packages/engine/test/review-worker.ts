@@ -34,7 +34,7 @@ export function reviewWorker(root: string) {
     const rel = relative(root, path);
     if (!rel || rel.startsWith('..') || isAbsolute(rel)) throw Error('fixture tree越界');
   };
-  const trees: Pick<WorkTrees, 'ownerOf' | 'adopt' | 'remove' | 'tmpFor'> = {
+  const trees: Pick<WorkTrees, 'ownerOf' | 'adopt' | 'adoptTemporary' | 'removeTemporary' | 'tmpFor'> = {
     ownerOf: async (path) => {
       check(path);
       return 'fleet-agent-carpool' as SessionUser;
@@ -43,7 +43,11 @@ export function reviewWorker(root: string) {
       check(path);
       mkdirSync(path, { recursive: true });
     },
-    remove: async (path) => {
+    adoptTemporary: async (path, user) => {
+      await trees.adopt(path, user);
+      return { lex: path, real: path, dev: '0', ino: '0', uid: '0' };
+    },
+    removeTemporary: async (path) => {
       check(path);
       rmSync(path, { recursive: true, force: true });
       return { gone: true };

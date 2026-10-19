@@ -50,6 +50,7 @@ describe('adoptWorktree · 调帮手的参数与退出码（假帮手）', () =>
     delete process.env.FLEET_FAKE_SCOPE_LOG;
     delete process.env.FLEET_FAKE_SCOPE_ADOPT_EXIT;
     delete process.env.FLEET_FAKE_SCOPE_ADOPT_STDERR;
+    delete process.env.FLEET_FAKE_SCOPE_CAPABILITIES;
   });
   const entries = () =>
     readFileSync(log, 'utf8')
@@ -59,15 +60,27 @@ describe('adoptWorktree · 调帮手的参数与退出码（假帮手）', () =>
 
   it('adopt <工作树> --user <用户>，别的什么都不带（只有一个会话用户，过程记录不用拷）', async () => {
     const result = await adoptWorktree(input());
-    expect(result).toEqual({ ok: true });
-    const [run] = entries();
+    expect(result).toMatchObject({ ok: true });
+    const run = entries().find((row) => row.action === 'adopt');
     expect(run?.action).toBe('adopt');
     expect(run?.args).toEqual([DIR, '--user', 'fleet-agent-carpool']);
   });
 
   it('退出码 0：ok true', async () => {
     process.env.FLEET_FAKE_SCOPE_ADOPT_EXIT = '0';
-    expect(await adoptWorktree(input())).toEqual({ ok: true });
+    expect(await adoptWorktree(input())).toMatchObject({ ok: true });
+  });
+
+  it('旧或残缺能力握手拒绝认领，不继续调用adopt', async () => {
+    for (const capabilities of [
+      'old helper output',
+      JSON.stringify({ version: 1, state: 'ok', features: ['identity-remove'] }),
+      JSON.stringify({ version: 2, state: 'ok', features: [] }),
+    ]) {
+      process.env.FLEET_FAKE_SCOPE_CAPABILITIES = capabilities;
+      expect(await adoptWorktree(input())).toMatchObject({ ok: false });
+    }
+    expect(entries().map((row) => row.action)).toEqual(['capabilities', 'capabilities', 'capabilities']);
   });
 
   it('退出码 64：usage，detail 里带着帮手的原话', async () => {
@@ -138,28 +151,35 @@ describe('removeWorktreeDir · 调帮手删工作树（假帮手）', () => {
     delete process.env.FLEET_FAKE_SCOPE_REMOVE_EXIT;
   });
   const remove = (over: Partial<Parameters<typeof removeWorktreeDir>[0]> = {}) =>
-    removeWorktreeDir({ dir: DIR, helper: HELPER, sudo: [process.execPath], ...over });
+    removeWorktreeDir({
+      dir: DIR,
+      identity: { lex: DIR, real: DIR, dev: '1', ino: '2', uid: '993' },
+      helper: HELPER,
+      sudo: [process.execPath],
+      ...over,
+    });
 
   it('参数：remove <工作树>；帮手报 removed 就是删了', async () => {
     expect(await remove()).toEqual({ ok: true, gone: false });
-    const [run] = readFileSync(log, 'utf8')
+    const run = readFileSync(log, 'utf8')
       .split('\n')
       .filter((l) => l)
-      .map((l) => JSON.parse(l) as { action: string; args: string[] });
+      .map((l) => JSON.parse(l) as { action: string; args: string[] })
+      .find((row) => row.action === 'remove');
     expect(run?.action).toBe('remove');
-    expect(run?.args).toEqual([DIR]);
+    expect(run?.args).toEqual([DIR, '--dev', '1', '--ino', '2', '--uid', '993']);
   });
 
   it('帮手报 gone：本来就不在，正常返回', async () => {
     process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT = `gone ${DIR}\n`;
-    expect(await remove()).toEqual({ ok: true, gone: true });
+    expect(await remove()).toMatchObject({ ok: false });
   });
 
   it('退出码 0 却认不出最后一行（别的路径、空输出）：failed，不当成删好了', async () => {
     process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT = 'removed /var/lib/fleet-work/repo1/other\n';
-    expect(await remove()).toMatchObject({ ok: false, code: 'failed', exitCode: 0 });
+    expect(await remove()).toMatchObject({ ok: false, code: 'failed', exitCode: null });
     process.env.FLEET_FAKE_SCOPE_REMOVE_STDOUT = '';
-    expect(await remove()).toMatchObject({ ok: false, code: 'failed', exitCode: 0 });
+    expect(await remove()).toMatchObject({ ok: false, code: 'failed', exitCode: null });
   });
 
   it('退出码 64：usage，带帮手原话；别的退出码：failed', async () => {

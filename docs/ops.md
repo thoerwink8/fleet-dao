@@ -370,6 +370,10 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 
 ## 五、AI 会话
 
+工作树删除统一经固定 root `fleet-agent-scope` 的 v1 身份协议；二级代码装在 root 不可写链的 `/usr/local/libexec/fleet-dao-tree-usage.py`，仅以 `/usr/bin/python3 -I -S` 和空环境启动。旧 helper 不支持完整能力时引擎留树；旧调用没有 dev/ino/uid 时新 helper 同样拒删。所有活 TGID/TID 的 cwd 都要查全，权限或枚举未知即保留，不按用户豁免。
+
+正常临时目录持创建/认领回执的身份；历史接回会话没有原身份时保留，后续仅在孤儿清理的任务/TTL门通过后显式认领。root 在同一文件系统的 `.cleanup-transactions` 私有目录持锁隔离，记录 PREPARED、CLAIMED、DELETING、DONE。小时清扫把未结事务列为 unchecked，不因原路径消失报成功。只读诊断用 `sudo -n fleet-agent-scope cleanup-status`；未开始破坏的事务可按回执中的 pathHash 和 id 执行 `sudo -n fleet-agent-scope cleanup-rollback <pathHash> <id>`，目标已被占用时不覆盖。DELETING 或已部分删除的事务拒绝伪装完整回退，保留剩余隔离内容和明确错误供恢复；不要手动复用隔离路径或直接 rm 原路径。扫描是删除必经点的有界证据，不保证阻止任意进程随后进入目录。
+
 资源池与起会话：
 
 - 池子 `fleet-agents.slice`（cgroup 路径 `/fleet.slice/fleet-agents.slice`）：CPU、内存、进程数、IO 都记账（按 windsurf-dao 仓 `docs/decisions/2026-09-24-agent-isolation-and-error-routing.md` 的「先观测」起步），内存设了总量上限（2026-09-28 起，断链之后：见下面「会话的内存上限和测试进程数」）；CPUWeight、TasksMax 还没实测画像，这两个值目前空着（还没实测，不算推后要做的事）。

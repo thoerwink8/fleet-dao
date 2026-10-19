@@ -6,7 +6,15 @@
 
 import { readFileSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
-import { adoptWorktree, removeWorktreeDir, SESSION_USERS, type SessionUser } from '@fleet-dao/adapters';
+import {
+  adoptWorktree,
+  cleanupStatus,
+  readTreePlace,
+  removeWorktreeDir,
+  SESSION_USERS,
+  type SessionUser,
+  type TreeIdentity,
+} from '@fleet-dao/adapters';
 import type { Repo, StageKind } from '@fleet-dao/shared';
 import { PortError } from '../ports.ts';
 
@@ -40,7 +48,13 @@ export interface WorkTrees {
   ownerOf(dir: string): Promise<SessionUser | null>;
   /** 交给这个会话用户（不在就建）。 */
   adopt(dir: string, user: SessionUser): Promise<void>;
-  remove(dir: string): Promise<{ gone: boolean }>;
+  adoptTemporary(dir: string, user: SessionUser): Promise<TreeIdentity>;
+  remove(dir: string, identity: TreeIdentity): Promise<{ gone: boolean }>;
+  /** Disposable session directories only; preservation callers must pass their original identity to remove. */
+  removeTemporary(dir: string, expected: TreeIdentity): Promise<{ gone: boolean }>;
+  /** Only after the caller's orphan task/TTL gate: explicitly claim the current object. */
+  reapTemporary(dir: string): Promise<{ gone: boolean }>;
+  pendingCleanup(): Promise<Record<string, unknown>[]>;
 }
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
@@ -151,13 +165,29 @@ export function helperWorkTrees(options: HelperWorkTreesOptions = {}): WorkTrees
         details: { exitCode: r.exitCode },
       });
     },
-    async remove(dir) {
-      const r = await removeWorktreeDir({ dir, ...helperOpts });
+    async adoptTemporary(dir, user) {
+      const r = await adoptWorktree({ dir, user, ...helperOpts });
+      if (r.ok) return r.identity;
+      throw new PortError('ADOPT_FAILED', `临时目录认领失败：${r.detail}`, { retryable: r.code !== 'usage' });
+    },
+    async remove(dir, identity) {
+      const r = await removeWorktreeDir({ dir, identity, ...helperOpts });
       if (r.ok) return { gone: r.gone };
       throw new PortError('REMOVE_FAILED', `删 ${dir} 没成：${r.detail}`, {
         retryable: r.code !== 'usage',
         details: { exitCode: r.exitCode },
       });
+    },
+    async removeTemporary(dir, expected) {
+      return this.remove(dir, expected);
+    },
+    async reapTemporary(dir) {
+      const identity = await readTreePlace(dir, helperOpts);
+      if (!identity) return { gone: true };
+      return this.remove(dir, identity);
+    },
+    pendingCleanup() {
+      return cleanupStatus(helperOpts);
     },
   };
 }

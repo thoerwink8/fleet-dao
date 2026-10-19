@@ -92,7 +92,7 @@ export interface SegmentSpawnerDeps {
   runs?: Pick<RunsWriter, 'observeSessionId'>;
   drivers: Record<WiredHost, HostDriver>;
   /** 会话临时目录的管理（real/worktrees.ts）：只用这三样。 */
-  trees: Pick<WorkTrees, 'tmpFor' | 'adopt' | 'remove'>;
+  trees: Pick<WorkTrees, 'tmpFor' | 'adoptTemporary' | 'removeTemporary'>;
   /** 宿主环境，一般传 process.env；只会抄白名单里的键（adapters 的 buildSessionEnv），凭据类的键进不去。 */
   baseEnv: Readonly<Record<string, string | undefined>>;
   /** 一个会话的内存软上限、硬上限、swap 上限（MB）：照 limits.ts 的 SESSION_MEMORY_*，swap 一般给 0。 */
@@ -264,7 +264,7 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
 
     const tmpDir = deps.trees.tmpFor(runId);
     // 接回的临时目录还归会话在用：不重新交接
-    if (!attach) await deps.trees.adopt(tmpDir, user);
+    const tmpIdentity = !attach ? await deps.trees.adoptTemporary(tmpDir, user) : undefined;
     if (detach && !attach) await ensureIoRoot(detach.root);
     // 接回：先删放手标记——删了收孤儿就不会再当它没人接
     if (io && attach) await clearDetached(io.dir);
@@ -406,7 +406,11 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
           });
         });
       }
-      await deps.trees.remove(tmpDir).catch((err: unknown) => {
+      if (!tmpIdentity) {
+        log('接回会话没有原始临时目录身份，保留给任务/TTL门后的孤儿清理', { runId, tmpDir });
+        return;
+      }
+      await deps.trees.removeTemporary(tmpDir, tmpIdentity).catch((err: unknown) => {
         log('一次性段会话的临时目录没删掉（引擎下次起来时的清理会收）', {
           runId,
           tmpDir,

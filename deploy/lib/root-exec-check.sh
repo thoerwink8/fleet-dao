@@ -164,9 +164,34 @@ rec_check_argv() { # 单元 程序 argv
 }
 
 # 跑一遍：违规记进 REC_VIOLATIONS。返回 0 干净、1 有违规、2 没查成（拿不到 systemctl show 的输出）。
+rec_scope_paths() {
+  rec_check_path 'sudo:fleet' /usr/local/sbin/fleet-agent-scope 固定帮手
+  rec_check_path 'sudo:fleet' /usr/local/libexec/fleet-dao-tree-usage.py 固定删树代码
+  rec_check_path 'sudo:fleet' /usr/bin/python3 固定隔离解释器
+}
+
+# Installation readback: no cached path verdict can authorize newly installed bytes.
+rec_scope_installed() { # shell-source python-source helper-destination
+  local shell_source=$1 python_source=$2 dest=$3 capability
+  REC_NODE=()
+  REC_VERDICT=()
+  REC_CULPRIT=()
+  REC_VIOLATIONS=()
+  rec_scope_paths
+  ((${#REC_VIOLATIONS[@]} == 0)) || return 1
+  [[ -f "$dest" && -f /usr/local/libexec/fleet-dao-tree-usage.py ]] || return 1
+  cmp -s -- "$dest" <(printf '%s\n' "$(<"$shell_source")") || return 1
+  cmp -s -- /usr/local/libexec/fleet-dao-tree-usage.py <(printf '%s\n' "$(<"$python_source")") || return 1
+  [[ $(stat -c '%u:%g:%a' -- "$dest") == 0:0:755 ]] || return 1
+  [[ $(stat -c '%u:%g:%a' -- /usr/local/libexec/fleet-dao-tree-usage.py) == 0:0:644 ]] || return 1
+  capability=$("$dest" capabilities) || return 1
+  /usr/bin/python3 -I -S -c 'import json,sys; r=json.loads(sys.argv[1]); required={"tree-usage","identity-remove","cleanup-status","cleanup-rollback","locked-adopt"}; assert type(r.get("version")) is int and r["version"]==1 and r.get("state")=="ok" and isinstance(r.get("features"),list) and required.issubset(r["features"])' "$capability"
+}
+
 root_exec_check() {
   local shown kind unit a b c is_root=-1
   REC_VIOLATIONS=()
+  rec_scope_paths
   shown=$(rec_show) || return 2
   [[ -n "$shown" ]] || return 2
   while IFS='|' read -r kind unit a b c; do

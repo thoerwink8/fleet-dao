@@ -44,8 +44,8 @@ function rig(over: Partial<SegmentSpawnerDeps> = {}) {
     }),
     trees: {
       tmpFor: (runId) => join(tmp, 'sessions', runId),
-      adopt: async () => undefined,
-      remove: async () => ({ gone: true }),
+      adoptTemporary: async (dir) => ({ lex: dir, real: dir, dev: '0', ino: '0', uid: '0' }),
+      removeTemporary: async () => ({ gone: true }),
     },
     baseEnv: { PATH: '/usr/bin' },
     resources: { memoryHighMb: 5888, memoryMaxMb: 6144, swapMaxMb: 0 },
