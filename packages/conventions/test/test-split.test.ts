@@ -324,6 +324,8 @@ describe('环境类、能力标记', () => {
     expect(callers.length, '没有测试调 createRealEnv 了：这条查的东西不存在，测试该删').toBeGreaterThan(0);
     expect(callers).toEqual([
       'packages/engine/test/arm-deadline-real.test.ts',
+      'packages/engine/test/execution-legacy-admission-real.test.ts',
+      'packages/engine/test/execution-start-reader-real.test.ts',
       'packages/engine/test/github-reconcile.test.ts',
     ]);
     // 定义它的只有 support.ts：本仓别的非测试文件要是包了一层再调（createRealEnv 不出现、认不出要 Temporal），
@@ -349,7 +351,8 @@ describe('环境类、能力标记', () => {
       'packages/engine/test/support.ts',
     ]);
     expect(TEMPORAL_MARKER.test(read('packages/engine/test/support.ts') ?? '')).toBe(true);
-  });
+    // 扫全仓逐个读文件：全量并跑时比 5 秒默认时限慢，会误红
+  }, 30_000);
 });
 
 describe('在真仓上装箱（全跑那一轮）', () => {

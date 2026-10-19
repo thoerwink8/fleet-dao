@@ -19,6 +19,7 @@ import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
 import type { IntakeDeps } from './jobs/intake.ts';
 import type { IntakeChatDeps } from './jobs/intake-chat.ts';
 import type { JudgeSelfCheckJobDeps } from './jobs/judge-self-check.ts';
+import type { ParkedRetryDeps as ParkedRetryJobDeps } from './jobs/parked-retry.ts';
 import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
 import type { RequestSweepJobDeps } from './jobs/request-sweep.ts';
 import type { RouteProbeJobDeps } from './jobs/route-probe.ts';
@@ -293,6 +294,8 @@ export interface EngineJobs {
   dailyBrief?: () => DailyBriefDeps;
   /** 隔离集进出（决定 0093）：偶发单放进 quarantine.json，连续 7 天全过的移出并关单。不拉单、不调模型。 */
   e2eQuarantine?: () => E2eQuarantineJobDeps;
+  /** 停下等人的单按规则续一次（#3294）：发了新版或 PR 已能合就发「继续」。不调模型、不拉单。 */
+  parkedRetry?: () => ParkedRetryJobDeps;
 }
 
 /**

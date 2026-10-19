@@ -192,6 +192,7 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
       requestSweep: never,
       dailyBrief: never,
       e2eQuarantine: never,
+      parkedRetry: never,
     } as unknown as EngineJobs;
   };
   const client = { workflow: { start: async () => ({}), getHandle: () => ({}) } } as never;

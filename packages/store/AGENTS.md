@@ -11,6 +11,7 @@
 - `packages/store/src/policy-source.ts`：API webhook 与 engine replay/poll 共用 source publisher/wrapper，intake 白名单门通过后先发布、再 accepted；核受管数字仓身份、当前 open 同仓非 fork 精确 head，发布后 head 变更失败。
 - `packages/store/src/testing.ts`：测试用的种库（`seedPg`）。
 - `src/task-execution.ts` 与 `task-execution-logic.ts`：未接生产的执行资格合同和共用判断，两适配在 `task-execution-memory.ts` / `task-execution-pg.ts`。UUID仅接受规范小写，generation沿用正整数1到 `MAX_TASK_GENERATION`；同请求完整身份永久幂等，reserved可撤销留墓碑，dispatching/admitted只能返回proof_required。没有生产初始化或终态证明入口，不替代后续可信Temporal身份核验。
+- `src/task-admission-*.ts`：未接生产的原子出生与 legacy 持久责任。新 task/control/birth/audit 同事务；已有 task 永不管理化，同出生请求比较完整不可变 canonical，不能按当前可变任务镜像重算。legacy 按 namespace/runId 唯一并核完整输入；不同 run 的责任可并存，不按 TTL、owner 或 endedAt 释放。输入只是候选身份，不能当作已经可信核验的 Temporal 来源。canonical 只进私有库，审计只存身份摘要。新 Birth/Legacy 成功结果的 `postCommitWarnings` 明示本层通知异常；通知失败不伪装成事务失败，空列表也不证明送达或旧通知已恢复。
 
 ## 测试
 

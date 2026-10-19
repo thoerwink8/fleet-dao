@@ -23,7 +23,8 @@ function fixture(): MigrationBudgetData {
 const record = (value: unknown): Record<string, unknown> => value as Record<string, unknown>;
 const values = (value: unknown): unknown[] => Object.values(record(value));
 
-describe('可信迁移数据核验', () => {
+// 真起可信 child 进程独立生成 SQL：单跑就要三四秒，机器忙时更慢；子进程默认给 20 秒，测试时限要盖住它。
+describe('可信迁移数据核验', { timeout: 30_000 }, () => {
   it('真实已提交 PG7 快照独立生成 SQL，逐字节完全相等', async () => {
     await expect(verifyMigrationData(fixture())).resolves.toBeUndefined();
     await expect(verifyMigrationBudget(fixture())).resolves.toEqual({ verified: true });

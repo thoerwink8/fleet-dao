@@ -338,6 +338,10 @@ describe('发布源解析：认不出就写原因', () => {
     expect(parseInstalledOutput('claude', '2.1.282 (Claude Code)\n')).toBe('2.1.282');
     expect(parseInstalledOutput('codex', 'codex-cli 0.156.1\n')).toBe('0.156.1');
     expect(parseInstalledOutput('grok', 'grok 1.0.41 (abc123)\n')).toBe('1.0.41');
+    expect(parseInstalledOutput('grok', 'grok 1.0.41\n')).toBe('1.0.41');
+    expect(parseInstalledOutput('grok', 'grok 1.0.62 (1474f9cbdd91) [stable]\n')).toBe('1.0.62');
+    expect(parseInstalledOutput('grok', 'grok 1.0.63 (1474f9cbdd91) [beta]\n')).toBe('1.0.63');
+    expect(parseInstalledOutput('grok', 'grok 1.0.64 stable\n')).toBeNull();
     expect(parseInstalledOutput('grok', 'not grok\n')).toBeNull();
     expect(
       parseInstalledOutput(

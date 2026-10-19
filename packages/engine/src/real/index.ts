@@ -117,6 +117,7 @@ import { readMergeWaitChecks } from './merge-wait-checks.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
+import { parkedRetryJob } from './parked-retry.ts';
 import type { AssignedProber } from './pick-then-probe.ts';
 import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
@@ -415,6 +416,8 @@ export function agentCommands(config: Pick<RealPortsConfig, 'claudeBin' | 'curso
   };
 }
 
+/** 引擎续停现读一张 PR 最多等多久（#3294）。 */
+const PARKED_RETRY_READ_TIMEOUT_MS = 60_000;
 const MIRASIM_TOKEN_NAME = /^local-([1-9][0-9]{0,4})\.token$/;
 
 /** 一条以那个会话用户的身份跑的短命令：起个短命 scope（scopeId 每次都不同，同一时刻不撞）。 */
@@ -1284,6 +1287,29 @@ export function realPortsFromEnv(
       onCheckoutCompleted: (receipt) => recordCheckoutReceipt(db, receipt),
     }),
   };
+  // 停下等人的单按规则续一次（#3294）：现读 PR 和停在合并这一步自己复核同一个 mergeReady（只读），「继续」和看门狗共用一条 Temporal 连接
+  jobs.parkedRetry = parkedRetryJob({
+    db,
+    temporal: wakeClient,
+    store: members,
+    ...(extra.releasesDir === undefined ? {} : { releasesDir: extra.releasesDir }),
+    mergeReady: async (repo, prNumber, expectedHead) => {
+      const row = await findRepoProfile(db, repo.owner, repo.name);
+      if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，现读不了 PR`);
+      const { id, owner, name, defaultBranch, testCommand } = row;
+      const read = tasks.mergeReady;
+      if (!read) throw new Error('现读 PR 的 mergeReady 没接上');
+      return read(
+        { schemaVersion: 1, repo: { id, owner, name, defaultBranch, testCommand }, prNumber, expectedHead },
+        {
+          signal: AbortSignal.timeout(PARKED_RETRY_READ_TIMEOUT_MS),
+          heartbeat() {},
+          attempt: 1,
+          lastHeartbeat: undefined,
+        },
+      );
+    },
+  });
   // 临时指挥官整理待办（#1338，母单 #1335 第 3 片）：选路按用途 groom，会话和动手、验收会话同一份 Spawner 装配，登记进一次性会话的清单
   // （切号、发布排空都停得下它）；会话没有 GitHub 令牌，写操作全在引擎代码里（real/groom.ts）
   jobs.groom = groomJob({
