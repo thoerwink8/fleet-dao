@@ -97,6 +97,34 @@ describe('旧头替代收口后的关闭判定（#3114）', () => {
       ),
     ).toContain('未结清');
   });
+  it('有效替代保留历史合并字段：不能把旧值当旧头已合证明，也不能挡住最终责任收口', async () => {
+    vi.stubEnv('FLEET_PUBLIC_URL', 'https://example.org');
+    for (const mergeCommit of [null, final.mergeCommit, 'd'.repeat(40)])
+      expect(await acceptanceGate(gh, repo, 7, fetchRows([{ ...old, mergeCommit }, final]))).toBeUndefined();
+    // 源字段存在不能代替最终头的合并回执，不能放过仍未验的目标。
+    await expect(
+      acceptanceGate(
+        gh,
+        repo,
+        7,
+        fetchRows([
+          { ...old, mergeCommit: final.mergeCommit },
+          { ...final, mergeCommit: null },
+        ]),
+      ),
+    ).rejects.toThrow('最终验收');
+    await expect(
+      acceptanceGate(
+        gh,
+        repo,
+        7,
+        fetchRows([
+          { ...old, mergeCommit: final.mergeCommit },
+          { ...final, state: 'open', settledAt: null },
+        ]),
+      ),
+    ).rejects.toThrow();
+  });
   it('替代证据缺失、指向对不上（目标缺、代次不符、非已验、不同 PR、同头）、冒充完成回执：不放行', async () => {
     vi.stubEnv('FLEET_PUBLIC_URL', 'https://example.org');
     for (const duties of [
@@ -108,7 +136,8 @@ describe('旧头替代收口后的关闭判定（#3114）', () => {
       [{ ...old, supersedeEvidence: ' ' }, final],
       [{ ...old, supersededBy: null }, final],
       [{ ...old, successorId: null }, final],
-      [{ ...old, mergeCommit: 'b'.repeat(40) }, final],
+      [{ ...old, mergeCommit: 'not-a-sha' }, final],
+      [{ ...old, mergeCommit: undefined }, final],
       [{ ...old, settledAt: '2026-10-18T10:00:00Z' }, final],
     ])
       await expect(acceptanceGate(gh, repo, 7, fetchRows(duties))).rejects.toThrow();

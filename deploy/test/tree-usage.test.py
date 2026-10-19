@@ -269,6 +269,132 @@ while True: time.sleep(0.1)
         with self.assertRaisesRegex(self.m.Kept, "untrusted private parent"):
             self.do_remove()
 
+    def temp_file(self, name="ops-verify-2901.tar"):
+        path = self.root + "/_tmp/" + name
+        pathlib.Path(path).write_text("temporary payload")
+        os.chown(path, 1000, 1000)
+        return path, self.m.identity(os.stat(path), path)
+
+    def remove_file(self, path, exp):
+        return self.m.main(["remove", path, "--dev", exp["dev"], "--ino", exp["ino"], "--uid", exp["uid"]])
+
+    def test_ops_temporary_regular_files_use_identity_transaction(self):
+        for suffix in ("bundle", "log", "tar", "tgz"):
+            with self.subTest(suffix=suffix):
+                path, exp = self.temp_file("ops-verify-2901." + suffix)
+                self.assertEqual(self.m.main(["tree-place", path])["identity"], exp)
+                usage = self.m.main(["tree-usage", path, "--dev", exp["dev"], "--ino", exp["ino"], "--uid", exp["uid"]])
+                self.assertEqual(usage["state"], "idle")
+                result = self.remove_file(path, exp)
+                self.assertEqual(result["state"], "removed")
+                self.assertEqual(result["identity"], exp)
+                self.assertFalse(os.path.lexists(path))
+
+    def test_file_scope_excludes_other_paths_links_and_special_files(self):
+        for name in ("repo1/file", "_tmp/nested/file"):
+            path = self.root + "/" + name
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            pathlib.Path(path).write_text("keep")
+            with self.subTest(path=path), self.assertRaises(self.m.Kept):
+                self.m.main(["tree-place", path])
+            self.assertEqual(pathlib.Path(path).read_text(), "keep")
+        path, exp = self.temp_file()
+        os.rename(path, path + "-old")
+        os.symlink(path + "-old", path)
+        with self.assertRaises(self.m.Kept):
+            self.m.main(["tree-place", path])
+        with self.assertRaises(self.m.Kept):
+            self.remove_file(path, exp)
+        self.assertEqual(pathlib.Path(path + "-old").read_text(), "temporary payload")
+        os.mkfifo(self.root + "/_tmp/pipe")
+        with self.assertRaises(self.m.Kept):
+            self.m.main(["tree-place", self.root + "/_tmp/pipe"])
+
+    def test_file_replaced_inode_or_owner_is_not_reauthorized(self):
+        for change in ("inode", "uid"):
+            path, exp = self.temp_file(change)
+            if change == "inode":
+                os.rename(path, path + "-old")
+                pathlib.Path(path).write_text("new object")
+                os.chown(path, 1000, 1000)
+            else:
+                os.chown(path, 1001, 1001)
+            with self.subTest(change=change), self.assertRaisesRegex(self.m.Kept, "identity changed"):
+                self.remove_file(path, exp)
+            self.assertTrue(os.path.exists(path))
+
+    def test_file_claimed_replacement_is_restored_without_unlink(self):
+        path, exp = self.temp_file()
+        original = self.m.rename_noreplace
+        moved = False
+        def replace(a, name, b, dest):
+            nonlocal moved
+            if not moved:
+                moved = True
+                os.rename(path, path + "-old")
+                pathlib.Path(path).write_text("replacement")
+            return original(a, name, b, dest)
+        self.m.rename_noreplace = replace
+        with self.assertRaisesRegex(self.m.Kept, "claimed a replacement"):
+            self.remove_file(path, exp)
+        self.assertEqual(pathlib.Path(path).read_text(), "replacement")
+        self.assertEqual(pathlib.Path(path + "-old").read_text(), "temporary payload")
+
+    def test_file_parent_symlink_swap_is_retained(self):
+        path, exp = self.temp_file()
+        original = self.m.scan
+        def swap(real, expected):
+            result = original(real, expected)
+            os.rename(self.root + "/_tmp", self.root + "/tmp-old")
+            os.symlink(self.root + "/tmp-old", self.root + "/_tmp")
+            return result
+        self.m.scan = swap
+        with self.assertRaises((self.m.Kept, OSError)):
+            self.remove_file(path, exp)
+        self.assertEqual(pathlib.Path(self.root, "tmp-old", os.path.basename(path)).read_text(), "temporary payload")
+
+    def test_file_unknown_claimed_scan_rolls_back_and_stays_visible(self):
+        path, exp = self.temp_file()
+        calls = 0
+        def fail_after_claim(*args):
+            nonlocal calls
+            calls += 1
+            return {"state": "idle"} if calls == 1 else {"state": "unknown", "reason": "proc unreadable"}
+        self.m.scan = fail_after_claim
+        with self.assertRaisesRegex(self.m.Kept, "proc unreadable; transaction="):
+            self.remove_file(path, exp)
+        self.assertEqual(pathlib.Path(path).read_text(), "temporary payload")
+        with self.m.locked(path) as (fd, _):
+            self.assertEqual(self.m.pending(fd), [])
+
+    def test_live_open_file_blocks_both_source_and_claimed_stage(self):
+        path, exp = self.temp_file()
+        script = 'import sys,time; f=open(sys.argv[1]); print("READY",flush=True); time.sleep(30)'
+        proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", script, path],
+                                cwd="/", stdout=subprocess.PIPE, text=True, user=1000, group=1000)
+        try:
+            import select
+            self.assertTrue(select.select([proc.stdout], [], [], 5)[0])
+            self.assertEqual(proc.stdout.readline().strip(), "READY")
+            with self.assertRaisesRegex(self.m.Kept, "open file"):
+                self.remove_file(path, exp)
+            self.assertTrue(os.path.exists(path))
+            original = self.m.scan
+            calls = 0
+            def after_claim(real, expected):
+                nonlocal calls
+                calls += 1
+                return {"state": "idle"} if calls == 1 else original(real, expected)
+            self.m.scan = after_claim
+            with self.assertRaisesRegex(self.m.Kept, "open file"):
+                self.remove_file(path, exp)
+            self.assertEqual(calls, 2)
+            self.assertEqual(pathlib.Path(path).read_text(), "temporary payload")
+        finally:
+            proc.terminate()
+            proc.wait()
+            proc.stdout.close()
+
 
 if __name__ == "__main__":
     unittest.main()

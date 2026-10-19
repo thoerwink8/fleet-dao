@@ -30,6 +30,7 @@ import {
   skippedReposNote,
 } from './github-app-check.ts';
 import type { ScheduleRunLog } from './github-reconcile.ts';
+import { type MergedTaskClosureDeps, settleMergedTasks } from './merged-task-closure.ts';
 import {
   checkLedgers,
   checkLocalOrphans,
@@ -65,6 +66,7 @@ export type HourlyReconcileJobDeps = WorktreeSweepDeps &
   ReconcileCheckDeps &
   AutoMergeCheckDeps &
   ClosedIssueTaskDeps &
+  MergedTaskClosureDeps &
   Pick<GitHubAppCheckDeps, 'apps'> & {
     runs: ScheduleRunLog;
     /**
@@ -217,6 +219,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   const historical = await retireHistoricalFactAlerts(deps);
   const autoMerges = await checkAutoMerges(skipping);
   // 单已关且停着等人、或已在检查点软暂停且没有开着会话的，撤掉（#1816 / #3002）：当场发放弃并撤挂起提醒；放在提醒清扫之前
+  const mergedTasks = await settleMergedTasks(deps);
   const closedTasks = await abandonClosedIssueTasks(deps);
   // 单已关、没有工作流的遗留行也收掉（#1622）：和上面的任务工作流对账合并统计
   const idleClosedRows = await settleIdleClosedIssueRows(deps);
@@ -256,6 +259,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     }
   }
   return combineParts([
+    mergedTasks,
     trees,
     retired,
     merged,

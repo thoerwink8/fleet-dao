@@ -187,6 +187,14 @@ function deps(over: Partial<HourlyReconcileWiring> & { now?: () => Date } = {}) 
       listOpenByPrefix: async () => [],
     },
     // 单已关且停下等人就撤任务（#1816）在本文件不走到 Temporal / GitHub：默认空装（这里的假客户端也列不了工作流）
+    mergedTasks: {
+      workflows: async () => [],
+      candidate: async () => null,
+      readMerged: async () => null,
+      settle: async () => {
+        throw new Error('测试未准备已合任务收尾');
+      },
+    },
     closedIssueTasks: {
       runningTaskWorkflowIds: async () => [],
       isParked: async () => false,
