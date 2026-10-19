@@ -7,7 +7,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./acceptance-gate": "./src/acceptance-gate.ts",
-    "./ci-policy-bridge": "./src/ci-policy-bridge.ts"
+    "./ci-policy-bridge": "./src/ci-policy-bridge.ts",
+    "./temporal-test-cli": "./src/temporal-test-cli.ts"
   },
   "dependencies": {
     "@fleet-dao/shared": "workspace:*",
