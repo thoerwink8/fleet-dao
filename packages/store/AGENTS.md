@@ -8,6 +8,7 @@
 - `packages/store/src/memory-store.ts`：内存版，也是语义的参照实现；测试和本地开发用它，`onChange` 模拟库的 `NOTIFY fleet_changes`。
 - `packages/store/src/pg-store.ts`：Postgres 版，用 `@fleet-dao/db`。
 - `packages/store/src/*-logic.ts`（`task-logic.ts`、`credentials-logic.ts` 等）：两套实现共用的判断，两边都调它。
+- `packages/store/src/policy-source.ts`：API webhook 与 engine replay/poll 共用 source publisher/wrapper，intake 白名单门通过后先发布、再 accepted；核受管数字仓身份、当前 open 同仓非 fork 精确 head，发布后 head 变更失败。
 - `packages/store/src/testing.ts`：测试用的种库（`seedPg`）。
 
 ## 测试
