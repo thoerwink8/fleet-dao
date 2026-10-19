@@ -73,9 +73,35 @@ function checkoutBodyPatterns(stage: CheckoutStage, workflowId: string, head: st
   return patterns;
 }
 
+// 引擎 alert-sweep（packages/engine/src/jobs/alert-sweep.ts）会往还开着的提醒正文最前面补两种整块前缀，块之间隔一个空行，
+// 可叠加、先后不定：`已立案：#N（日期[，已关 时刻]）` 和 `没有可做的事，已跳过立案`。真实历史卡多半带着它们。
+// 这里只剥这两种整块（逐字符匹配），剥完剩下的必须是引擎原文；任何别的前缀仍然拒。引擎测试 alert-sweep.test.ts 用真 sweep 核对。
+const SWEEP_FILING_BLOCK = /^已立案：#[1-9][0-9]*（\d{4}-\d{2}-\d{2}(?:，已关 [^）\n]+)?）(?:\n\n|$)/u;
+const SWEEP_SKIP_BLOCK = '没有可做的事，已跳过立案';
+const MAX_SWEEP_BLOCKS = 4;
+
+/** 去掉 alert-sweep 补的前缀块，回引擎原写的正文；前缀以外的内容原样不动。 */
+export function engineBodyOf(body: string): string {
+  let rest = body;
+  for (let i = 0; i < MAX_SWEEP_BLOCKS; i++) {
+    const filing = SWEEP_FILING_BLOCK.exec(rest);
+    if (filing) {
+      rest = rest.slice(filing[0].length);
+      continue;
+    }
+    if (rest === SWEEP_SKIP_BLOCK) return '';
+    if (rest.startsWith(`${SWEEP_SKIP_BLOCK}\n\n`)) {
+      rest = rest.slice(SWEEP_SKIP_BLOCK.length + 2);
+      continue;
+    }
+    break;
+  }
+  return rest;
+}
+
 /**
  * 通知本身得是引擎为这个目标、这个 head 写的检出失败报警：标题和正文整段符合受管格式（失败步骤、错误码、原始错误、
- * 对应建议都在且彼此一致），不是只有前缀或片段相似。
+ * 对应建议都在且彼此一致），不是只有前缀或片段相似。正文开头允许有 alert-sweep 补的立案/跳过立案整块前缀（见 engineBodyOf）。
  */
 export function checkoutNotificationProblem(
   notification: {
@@ -110,9 +136,10 @@ export function checkoutNotificationProblem(
     notification.link !== `https://github.com/${target.repo}/pull/${target.pr}`
   )
     return '通知没有绑定原 PR';
-  if (!notification.body.startsWith(`目标 ${target.workflowId} 的 head ${target.head}，`))
+  const body = engineBodyOf(notification.body);
+  if (!body.startsWith(`目标 ${target.workflowId} 的 head ${target.head}，`))
     return '通知正文的目标或 head 与处置目标不一致';
-  if (!checkoutBodyPatterns(stage, target.workflowId, target.head).some((p) => p.test(notification.body)))
+  if (!checkoutBodyPatterns(stage, target.workflowId, target.head).some((p) => p.test(body)))
     return '通知正文不是受管检出失败报警的完整格式（步骤、错误码、原始错误或建议对不上）';
   return undefined;
 }

@@ -271,6 +271,27 @@ describe('checkout-history 私有 CLI（真实 Postgres Store）', () => {
     expect(await audits(store)).toEqual([]);
   });
 
+  it('alert-sweep 已在正文前补了立案/跳过立案前缀的真实历史卡：预检、archive 都认，审计保留带前缀的原正文', async () => {
+    const prefixed = `已立案：#41（2026-10-09）\n\n没有可做的事，已跳过立案\n\n${BODY}`;
+    await testDb.db
+      .update(notifications)
+      .set({ body: prefixed })
+      .where(eq(notifications.id, NOTIFICATION_ID));
+    const input = await inputFor(store);
+    expect(input.notificationBody).toBe(prefixed);
+    expect((await cli(store, [], JSON.stringify(input))).json).toMatchObject({ mode: 'preflight' });
+    const archived = await cli(store, ['--archive'], JSON.stringify(input));
+    expect(archived.code).toBe(0);
+    expect(archived.json).toMatchObject({ result: 'ok' });
+    expect(await notificationOf(store)).toMatchObject({ resolvedBy: 'ops:checkout-history', body: prefixed });
+    const [record, ...rest] = await audits(store);
+    expect(rest).toEqual([]);
+    expect(record?.after).toMatchObject({ notificationBody: prefixed });
+    expect((await cli(store, ['--archive'], JSON.stringify(input))).json).toMatchObject({
+      result: 'already_archived',
+    });
+  });
+
   it('旧的无目标 checkout-dir 键仍拒绝', async () => {
     const input = await inputFor(store);
     const legacy = {

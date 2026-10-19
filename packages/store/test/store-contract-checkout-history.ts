@@ -302,6 +302,47 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       }
     });
 
+    it('alert-sweep 补过「已立案」「没有可做的事」前缀的真实历史卡：可预检、可归档，原正文整段保留进审计', async () => {
+      const prefixes = [
+        '已立案：#41（2026-10-09）\n\n',
+        '没有可做的事，已跳过立案\n\n',
+        '已立案：#41（2026-10-09，已关 2026-10-12T03:00:00.000Z）\n\n没有可做的事，已跳过立案\n\n',
+        '没有可做的事，已跳过立案\n\n已立案：#41（2026-10-09）\n\n',
+      ];
+      for (const prefix of prefixes) {
+        const body = `${prefix}${alertBody()}`;
+        const other = await make(data({ notification: { body } }));
+        const input = baseInput({ notificationBody: body });
+        expect((await other.store.readHistoricalCheckout(input)).notification.body).toBe(body);
+        const audit = auditFor(input);
+        expect(await other.store.archiveHistoricalCheckout(input, audit)).toBe('ok');
+        const archived = await notificationOf(other.store, NID);
+        expect(archived.body).toBe(body);
+        expect(archived.resolvedBy).toBe('ops:checkout-history');
+        const [record] = await auditsOf(other.store, NID);
+        expect(record?.after).toMatchObject({ notificationBody: body });
+        expect(await other.store.archiveHistoricalCheckout(input, audit)).toBe('already_archived');
+      }
+    });
+
+    it('前缀不是 alert-sweep 的整块、或前缀后的正文不是引擎原文：拒绝，什么都不写', async () => {
+      for (const body of [
+        `补充：已处理\n\n${alertBody()}`,
+        `已立案：#41\n\n${alertBody()}`,
+        `没有可做的事，已跳过立案${alertBody()}`,
+        `已立案：#41（2026-10-09）\n\n${alertBody()}另附一句。`,
+        `已立案：#41（2026-10-09）\n\n${alertBody().replace('引擎不自动重试。', '')}`,
+        `已立案：#41（2026-10-09）\n\n${alertBody('c'.repeat(40))}`,
+      ]) {
+        const other = await make(data({ notification: { body } }));
+        const input = baseInput({ notificationBody: body });
+        await expect(other.store.readHistoricalCheckout(input)).rejects.toThrow();
+        expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
+        expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
+        expect(await auditsOf(other.store, NID)).toEqual([]);
+      }
+    });
+
     it('通知必须绑定原任务和对应 PR 链接，不能用正文相似凑关联', async () => {
       for (const notification of [
         { taskId: IDS.task12 },

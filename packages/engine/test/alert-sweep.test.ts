@@ -8,8 +8,9 @@ import {
 } from '@fleet-dao/conventions';
 import type { AlertStage } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
+import { checkoutNotificationProblem } from '@fleet-dao/store';
 import { describe, expect, it } from 'vitest';
-import { checkoutAlertKey } from '../src/cold-verify-run.ts';
+import { CheckoutStageError, checkoutAlertKey, checkoutBlockedAlert } from '../src/cold-verify-run.ts';
 import {
   type AlertFiling,
   type AlertRepo,
@@ -753,5 +754,61 @@ describe('冷验收检出报警不落三天过期兜底', () => {
     expect(checkout.body).toBe('原来的正文');
     expect(h.opened.map((o) => o.key)).toEqual(['alert-file:wf:failure:acme/widgets:plain']);
     expect(unknown.body.startsWith('已立案：#')).toBe(true);
+  });
+});
+
+describe('alert-sweep 补的前缀不挡历史 checkout 归档的格式校验', () => {
+  const HEAD = 'a'.repeat(40);
+  const WF = 'task:acme/widgets#12';
+  const alert = checkoutBlockedAlert({
+    dir: '/var/lib/fleet-work/_tmp/verify-0f0e0d0c-0b0a-4908-8706-050403020100',
+    head: HEAD,
+    workflowId: WF,
+    error: new CheckoutStageError('archive', 'fatal: not a valid object name', {
+      mirrorDir: '/var/lib/fleet-github/mirrors/acme/widgets.git',
+      missingObject: true,
+    }),
+  });
+  const problem = (body: string) =>
+    checkoutNotificationProblem({ title: alert.title, body }, { workflowId: WF, head: HEAD });
+
+  it('引擎原文通过；真 sweep 写的「已立案」「没有可做的事」前缀（单独、叠加、已关）也通过', async () => {
+    expect(problem(alert.body)).toBeUndefined();
+
+    // 用真 sweep 在一条非 checkout 键上写前缀（checkout 键不立案），正文换成真引擎报警正文。
+    const filed = row({ dedupeKey: 'wf:failure:acme/widgets:rule', body: alert.body });
+    expect((await harness([filed]).run()).unchecked).toEqual([]);
+    expect(filed.body.startsWith('已立案：#41（2026-10-09）\n\n')).toBe(true);
+    expect(problem(filed.body)).toBeUndefined();
+
+    const skipped = row({ dedupeKey: 'wf:failure:acme/widgets:rule', body: alert.body });
+    const skipHarness = harness([skipped], { doneItems: () => ['- 这条提醒的条件不再成立（对账撤掉它）'] });
+    expect((await skipHarness.run()).unchecked).toEqual([]);
+    expect(skipped.body.startsWith('没有可做的事，已跳过立案\n\n')).toBe(true);
+    expect(problem(skipped.body)).toBeUndefined();
+
+    // 叠加：先跳过立案、后又有了单号（单号写在最前），以及已关的单号标记
+    expect(problem(`已立案：#41（2026-10-09）\n\n${skipped.body}`)).toBeUndefined();
+    expect(
+      problem(
+        `没有可做的事，已跳过立案\n\n已立案：#7（2026-10-01，已关 ${NOW.toISOString()}）\n\n${alert.body}`,
+      ),
+    ).toBeUndefined();
+  });
+
+  it('不是 sweep 写的前缀、残缺前缀、前缀后面接的不是引擎原文：仍拒', () => {
+    for (const body of [
+      `已立案：#41\n\n${alert.body}`,
+      `已立案：#0（2026-10-09）\n\n${alert.body}`,
+      `已立案：#41（2026-10-09）${alert.body}`,
+      `没有可做的事，已跳过立案${alert.body}`,
+      `没有可做的事\n\n${alert.body}`,
+      `补充说明：已处理\n\n${alert.body}`,
+      `已立案：#41（2026-10-09）\n\n${alert.body}另附一句。`,
+      `已立案：#41（2026-10-09）\n\n没有可做的事，已跳过立案`,
+      '已立案：#41（2026-10-09）',
+      `${'已立案：#41（2026-10-09）\n\n'.repeat(5)}${alert.body}`,
+    ])
+      expect(problem(body)).toBeDefined();
   });
 });
