@@ -8,7 +8,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - `packages/api/src/app.ts`：`buildApps` 装两个应用；驾驶舱挂 `/auth`、`/api`、`/github`，命令接口挂 `/agent/v1`。新路由在这里挂。
 - `packages/api/src/config.ts`：地址、端口、密钥都从环境变量读。
 - `github-mirror.ts`：main 的真实 GitHub 装配；开发环境非 HTTPS origin 只让策略桥未装配，不能把其它能力误报凭据缺失。生产桥初始化错误单独失败。
-- `ci-policy-bridge.ts`、`ci-policy-public.ts`：受管公开仓 DB 策略只读协议与 source publisher。精确 GET 挂在 session 前，严格核 GitHub 当前 public/数字身份；协议在 shared 的 `ci-policy-bridge.ts`，独立于浏览器 FleetApi，路由契约测试仍逐条登记。私有 force 原路径，私有 off 明确不支持。
+- `ci-policy-bridge.ts`、`ci-policy-public.ts`：受管公开仓 DB 策略只读协议、HTTP 错误映射与策略切换；source publisher/wrapper 复用 store，与 engine replay/poll 同义。精确 GET 挂在 session 前，严格核 GitHub 当前 public/数字身份；协议在 shared 的 `ci-policy-bridge.ts`，独立于浏览器 FleetApi，路由契约测试仍逐条登记。私有 force 原路径，私有 off 明确不支持。
 - `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
 - `historical-audit` 管理命令从 stdin 收历史通知审计 JSON，现读 GitHub PR/head 与证据 issue，再以真实 ops 身份原子处理通知、记审计。结论只允许 `historical_unproven`，不能作为正常队列账或创始人批准；入口在 `src/historical-audit-cli.ts`。
 - `attention --json` 的 `runningIdle` 是版本化即时只读结论：完整 `listRunningEngineTasks` 与 core 唯一 idle 判据，带任务身份、完整 openRuns 和采集时刻。`notes` 是按推送白名单到点的通知，两者不能相互替代；读取失败退出 1，诊断不回退为展示会话计数。

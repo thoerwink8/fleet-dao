@@ -354,6 +354,10 @@ describe('签名 webhook -> intake await publisher -> 失败账重放', () => {
     state.failWrite = true;
     expect((await deliverGithub(h, 'pull_request', payload, { delivery: 'policy-replay' })).status).toBe(500);
     expect((await h.store.getDelivery('policy-replay'))?.status).toBe('failed');
+    await expect(createGitHubIntake(h.deps).replay('policy-replay', { force: true })).rejects.toThrow(
+      'GitHub write unavailable',
+    );
+    expect((await h.store.getDelivery('policy-replay'))?.status).toBe('failed');
     state.failWrite = false;
     expect(await createGitHubIntake(h.deps).replay('policy-replay', { force: true })).toMatchObject({
       verdict: 'accepted',
