@@ -39,6 +39,14 @@ describe('远档单子', () => {
     expect(title?.className).not.toContain('truncate');
     expect(title?.getAttribute('title')).toBe('数据库夜间备份超时');
   });
+
+  test('停下等人的单（#3279）：单号后面带「等你」，拉远了也看得出它停着；别的单不带', () => {
+    render(<FarTicket tone="human" id="#3207" title="体量超预算" parked />);
+    expect(document.querySelector('[data-far-parked]')?.textContent).toContain('等你');
+    cleanup();
+    render(<FarTicket tone="run" id="#1742" title="数据库夜间备份超时" />);
+    expect(document.querySelector('[data-far-parked]')).toBeNull();
+  });
 });
 
 describe('远档段节点', () => {
