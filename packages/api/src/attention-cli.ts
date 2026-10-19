@@ -1,6 +1,6 @@
 // fleet-api attention --json（#2370）：引擎自己出一份「现在要人看的事」的结论，指挥官本机巡检（agents/skills/commander/scripts/patrol-lib.mjs）只读它，
 // 不再自己抄一套判法。只读，不写库、不发消息。输出一行 JSON：
-//   { ok: true, at, healthz: { code, red }, notes: [{ key, level, title, since, delivered }], feishuPushProblem, dailyBriefProblem, localOrphans }
+//   { ok: true, at, healthz: { code, red }, notes: [{ key, level, title, since, delivered }], feishuPushProblem, dailyBriefProblem, localOrphans, runningIdle }
 // 改这里之前必须知道：
 // - healthz：本机问一次驾驶舱的 /healthz（地址取 api.env 的 FLEET_COCKPIT_LISTEN）。code 0 = 连不上；red 是 ok:false 的检查名。
 // - notes：开着、而且按推送白名单该推的通知（到点了的）。白名单判法不在这里抄：用 @fleet-dao/db 的 feishuPushableSince（feishu-push.ts），
@@ -8,7 +8,10 @@
 // - feishuPushProblem、dailyBriefProblem：就是 @fleet-dao/db 的 feishuPushProblem、dailyBriefProblem 的结论（通着、好着是 null）。
 // - localOrphans：每小时对账写在设置表里的「贴了本机做超过 24 小时、又没有本机租约」的单。这里不另判，读到什么就是什么。
 //   还没写过这一行是空数组。写过、形状认不出照抛（退出码 1），不拿空数组顶。
+// - runningIdle：即时 running/engine 原条件；完整任务/会话计数由 listRunningEngineTasks 读，唯一判据是 core/isIdleRunningStale。
+//   与按时点/白名单推送的 notes 口径不同；不扫 Temporal，不从展示列表或 heartbeat 推断恢复。
 // - 读不到就报没读成（ok:false，退出码 1），不拿空列表、null 顶。参数不对退出码 2。
+import { isIdleRunningStale } from '@fleet-dao/core/idle-running';
 import {
   beijingDay,
   type Db,
@@ -23,6 +26,7 @@ import {
   feishuPushFacts,
   feishuPushProblem,
   type LocalOrphan,
+  listRunningEngineTasks,
   notificationDeliveries,
   notifications,
   readLocalOrphans,
@@ -65,6 +69,22 @@ export interface Attention {
   dailyBriefProblem: string | null;
   /** 对账写下的没人领的「本机做」。空数组是没有，或对账还没写过。 */
   localOrphans: LocalOrphan[];
+  /** 即时原条件；不等于推送白名单里的通知，也不受展示 runs 的条数限制。 */
+  runningIdle: Awaited<ReturnType<typeof runningIdleFacts>>;
+}
+
+export async function runningIdleFacts(db: Db, at: Date) {
+  const rows = await listRunningEngineTasks(db);
+  return {
+    version: 1 as const,
+    at: at.toISOString(),
+    complete: true as const,
+    rows: rows.map((row) => ({
+      ...row,
+      updatedAt: row.updatedAt?.toISOString() ?? null,
+      stale: isIdleRunningStale({ ...row, state: 'running', executor: 'engine' }, at),
+    })),
+  };
 }
 
 /** 问一次 /healthz：回状态码（连不上是 0）和红的检查名。 */
@@ -159,12 +179,13 @@ export async function runAttention(deps: {
 }): Promise<Attention> {
   const at = deps.now();
   const { day, start } = beijingDay(at);
-  const [healthz, notes, pushFacts, briefStatus, localOrphans] = await Promise.all([
+  const [healthz, notes, pushFacts, briefStatus, localOrphans, runningIdle] = await Promise.all([
     deps.healthz(),
     pushableOpenNotes(deps.db, at),
     feishuPushFacts(deps.db, at),
     dailyBriefStatus(deps.db, day, start),
     readLocalOrphans(deps.db),
+    runningIdleFacts(deps.db, at),
   ]);
   return {
     ok: true,
@@ -174,6 +195,7 @@ export async function runAttention(deps: {
     feishuPushProblem: feishuPushProblem(pushFacts, at),
     dailyBriefProblem: dailyBriefProblem(briefStatus, at),
     localOrphans,
+    runningIdle,
   };
 }
 

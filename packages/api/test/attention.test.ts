@@ -1,9 +1,15 @@
 // fleet-api attention --json（#2370）：现在要人看的事一份结论。该推的通知用 feishu-push.ts 的 feishuPushableSince 判，
 // 推送不通、简报没到用 db 里的 feishuPushProblem、dailyBriefProblem；这里管命令这一层（真 Postgres：PGlite）。
+
+import { IDLE_RUNNING_STALE_MS } from '@fleet-dao/core/idle-running';
+import { SELF_CHECK_ACTIVITY_MS, SELF_CHECK_DOING } from '@fleet-dao/core/self-check-budget';
 import {
   LOCAL_ORPHANS_SETTING,
   notificationDeliveries,
+  repos,
+  runs,
   settings,
+  tasks,
   upsertAlert,
   writeLocalOrphans,
 } from '@fleet-dao/db';
@@ -40,6 +46,56 @@ const add = (key: string, level: 'decision' | 'alert' | 'daily', title = key) =>
   });
 
 describe('fleet-api attention', () => {
+  it('即时 idle 使用正式边界、完整会话数和任务身份，不拿推送通知判恢复', async () => {
+    const at = new Date('2099-01-01T02:00:00Z');
+    const [repo] = await t.db
+      .insert(repos)
+      .values({ owner: 'o', name: 'idle', testCommand: 'pnpm check' })
+      .returning();
+    if (!repo) throw new Error('fixture repo missing');
+    const cases = [
+      { n: 1, age: IDLE_RUNNING_STALE_MS - 1, stale: false },
+      { n: 2, age: IDLE_RUNNING_STALE_MS, stale: true },
+      { n: 3, age: SELF_CHECK_ACTIVITY_MS - 1, doing: SELF_CHECK_DOING, stale: false },
+      { n: 4, age: SELF_CHECK_ACTIVITY_MS, doing: SELF_CHECK_DOING, stale: true },
+      { n: 5, age: SELF_CHECK_ACTIVITY_MS + 1, busy: true, stale: false },
+      { n: 6, age: SELF_CHECK_ACTIVITY_MS + 1, local: true, stale: false },
+      { n: 7, age: null, stale: true },
+    ];
+    for (const c of cases) {
+      const [task] = await t.db
+        .insert(tasks)
+        .values({
+          repoId: repo.id,
+          issueNumber: c.n,
+          title: 'idle',
+          rawRequest: 'idle',
+          requestedBy: 'test',
+          priority: 10,
+          state: 'running',
+          executor: c.local ? 'local' : 'engine',
+          doing: c.doing ?? '动手',
+          updatedAt: c.age === null ? null : new Date(at.getTime() - c.age),
+        })
+        .returning();
+      if (!task) throw new Error('fixture task missing');
+      if (c.busy)
+        await t.db.insert(runs).values({ taskId: task.id, segment: 'manual', model: 'test', startedAt: at });
+    }
+    const result = await runAttention({ db: t.db, now: () => at, healthz: GREEN });
+    expect(result.notes).toEqual([]);
+    expect(result.runningIdle).toMatchObject({ version: 1, at: at.toISOString(), complete: true });
+    expect(result.runningIdle.rows.map((r) => [r.issueNumber, r.stale])).toEqual(
+      cases.filter((c) => !c.local).map((c) => [c.n, c.stale]),
+    );
+    expect(result.runningIdle.rows.find((r) => r.issueNumber === 5)).toMatchObject({
+      owner: 'o',
+      name: 'idle',
+      openRuns: 1,
+      taskId: expect.any(String),
+    });
+    expect(result.runningIdle.rows.find((r) => r.issueNumber === 7)?.updatedAt).toBeNull();
+  });
   it('参数：只认 --json', () => {
     expect(() => parseAttentionArgs(['--json'])).not.toThrow();
     expect(() => parseAttentionArgs([])).toThrow(/--json/);

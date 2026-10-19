@@ -14,7 +14,7 @@ import { GitHubError, isGitHubError } from './errors.ts';
 import { type CommentIssueResult, commentPull } from './issues.ts';
 import { assertPublishable } from './publish-check.ts';
 import { PullSchema } from './pulls.ts';
-import { assertBodySize, neutralizeCloseKeywords, type PrBodyInput, renderPrBody } from './text.ts';
+import { assertBodySize, type PrBodyInput, renderPrBody } from './text.ts';
 
 /** 引擎读 PR 要的样子。 */
 export interface PullFacts {
@@ -513,7 +513,7 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
     },
 
     async updatePullBody(repo, number, input) {
-      const body = neutralizeCloseKeywords(typeof input === 'string' ? input : renderPrBody(input));
+      const body = typeof input === 'string' ? input : renderPrBody(input);
       assertBodySize('PR 正文', body);
       assertPublishable(
         repo,

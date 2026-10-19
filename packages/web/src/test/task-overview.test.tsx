@@ -29,13 +29,25 @@ const found = async <T extends Element = HTMLElement>(selector: string, root: Pa
     return el as unknown as T;
   });
 
+// 过程里前面收场了的回合默认收成一行头（#3228）：要看里面的笔、引擎的事先点开
+const expandRounds = async () => {
+  const proc = await found('[data-task-process]');
+  await found('[data-round-header]', proc);
+  for (const b of proc.querySelectorAll('[data-round-header] > button[aria-expanded="false"]'))
+    fireEvent.click(b);
+  return proc;
+};
+
 describe('概览：汇报、命令计数、PR、改动文件', () => {
   test('t-c9：最新汇报（最近一笔动手的最后一句话）、命令计数（只有失败数标红）、PR 横条、改动卡', async () => {
     open('/tasks/t-c9');
     const box = await found('[data-task-summary]');
     const report = await found('[data-task-report]', box);
     expect(report.textContent).toContain('测试里写死了旧标签');
-    expect(report.textContent).toContain('来自动手第 2 次');
+    // 标题「最新汇报」后面写第几笔 · 段 · 模型 · 多久前（照设计稿，#3228）；这一笔是整张单第 3 笔
+    expect(box.querySelector('h2')?.textContent).toBe('最新汇报');
+    expect(box.textContent).toMatch(/第 3 笔 · 动手 · Opus 5\.5 · /);
+    expect(within(box).getByRole('button', { name: '看全部过程' })).toBeTruthy();
     const line = await found('[data-progress-line]', box);
     expect(line.textContent).toContain('个命令已完成');
     expect(within(line).getByText('1 个失败').className).toContain('text-ink-fail');
@@ -98,6 +110,7 @@ describe('过程：回合 → 笔 → 步骤 → 调用', () => {
 
   test('每一笔：为什么起、新会话还是接上一笔、结局、用时；摘要在第二行', async () => {
     open('/tasks/t-c9');
+    await expandRounds();
     const a = await found('[data-run-process="seg-c9-2"]');
     expect(a.querySelector('[data-run-cause]')?.textContent).toBe('主写');
     expect(a.querySelector('[data-run-link]')?.textContent).toBe('新会话');
@@ -117,12 +130,16 @@ describe('过程：回合 → 笔 → 步骤 → 调用', () => {
 
   test('笔之间引擎做的事：自测、推分支、开 PR、等 CI、验收、合并；连着的等待折成一行', async () => {
     open('/tasks/t-c9');
-    const proc = await found('[data-task-process]');
+    const proc = await expandRounds();
     await found('[data-engine="selfCheck"]', proc);
     for (const a of ['pushBranch', 'openPr', 'waitCi', 'coldVerify', 'armAutoMerge', 'waitMerged']) {
       expect(proc.querySelector(`[data-engine="${a}"]`), a).toBeTruthy();
     }
-    expect(proc.querySelector('[data-engine="selfCheck"]')?.textContent).toContain('引擎：自测');
+    // 连着的几件串成一行「引擎 自测 → 推分支 → …」，右边总用时（照设计稿）
+    const self = proc.querySelector('[data-engine="selfCheck"]') as HTMLElement;
+    expect(self.textContent).toBe('自测');
+    const chain = self.closest('[data-engine-chain]') as HTMLElement;
+    expect(chain.textContent).toMatch(/^引擎自测 → 推分支 → 开 PR/);
     const waits = proc.querySelectorAll('[data-waits="memory"]');
     expect(waits).toHaveLength(1);
     expect(waits[0]?.textContent).toMatch(/等内存 3 次，共 /);
@@ -200,7 +217,7 @@ describe('过程：回合 → 笔 → 步骤 → 调用', () => {
 describe('新旧引擎交替的单：没记回合号的笔按回合收场时刻归（#3190）', () => {
   test('t-c9 mixed：第 1 回合那笔没记回合号也归进第 1 回合，回合头写明是按时间归的；不再有「更早的几笔」', async () => {
     open('/tasks/t-c9', '?mockOverview=mixed');
-    const proc = await found('[data-task-process]');
+    const proc = await expandRounds();
     const r1 = await found('[data-round-header="1"]', proc);
     expect(r1.querySelector('[data-round-bytime]')?.textContent).toContain('其中 1 笔是旧引擎跑的');
     expect(proc.querySelector('[data-round-header="2"] [data-round-bytime]')).toBeNull();
@@ -235,6 +252,55 @@ describe('排版：左结论、右过程，用量收成一行（#3228）', () =>
   });
 });
 
+describe('过程照设计稿（#3228）', () => {
+  test('t-c9：前面收场的回合收成一行头（起止、用时、几笔、彩字结局），最后一回合展开；点头展开', async () => {
+    open('/tasks/t-c9');
+    const proc = await found('[data-task-process]');
+    const r1 = await found('[data-round-header="1"]', proc);
+    const btn1 = r1.querySelector('button[aria-expanded]') as HTMLElement;
+    expect(btn1.getAttribute('aria-expanded')).toBe('false');
+    expect(btn1.textContent).toMatch(/\d\d:\d\d–\d\d:\d\d/);
+    expect(btn1.textContent).toContain('1 笔');
+    expect(btn1.textContent).toContain('超时');
+    expect(proc.querySelector('[data-run-process="seg-c9-2"]')).toBeNull();
+    const r2 = await found('[data-round-header="2"]', proc);
+    expect(r2.querySelector('button')?.getAttribute('aria-expanded')).toBe('true');
+    expect(r2.querySelector('[data-rework-why]')?.textContent).toMatch(/^为什么返工/);
+    fireEvent.click(btn1);
+    await found('[data-run-process="seg-c9-2"]', proc);
+  });
+
+  test('每一笔一行：「第 N 笔 · 段 · 起因」按整张单起跑先后数；第二行模型、起止、用时、结局', async () => {
+    open('/tasks/t-c9');
+    const b = await found('[data-run-process="seg-c9-3"]');
+    const head = b.querySelector('button[aria-expanded]') as HTMLElement;
+    // 对题第 1 笔、超时那笔第 2 笔，这一笔第 3 笔
+    expect(head.textContent).toMatch(/第 3 笔 · 动手 · 换路由重派/);
+    // 「·」是单独的分隔元素，textContent 里两边不带空格
+    expect(head.textContent).toMatch(/Opus 5\.5·\d\d:\d\d–\d\d:\d\d·/);
+    expect(b.querySelector('[data-run-outcome]')?.textContent).toBe('完成');
+  });
+
+  test('时间条下面写起止；头上写几个回合、几笔、用时', async () => {
+    open('/tasks/t-c9');
+    const proc = await found('[data-task-process]');
+    expect((await found('[data-bar-axis]', proc)).textContent).toMatch(/^\d\d:\d\d.*\d\d:\d\d$/);
+    expect(proc.textContent).toMatch(/2 个回合 · 4 笔 · 用时 /);
+  });
+
+  test('t-12 在跑：最后一回合末尾写「接下来」还要走的几步', async () => {
+    open('/tasks/t-12');
+    const next = await found('[data-next-steps]');
+    expect(next.textContent).toBe('接下来自测 → 推分支 · CI → 验收 → 合并');
+  });
+
+  test('t-c9 做完了：没有「接下来」', async () => {
+    open('/tasks/t-c9');
+    await found('[data-round-header="2"]');
+    expect(document.querySelector('[data-next-steps]')).toBeNull();
+  });
+});
+
 describe('页头下面：这一回合走到哪（#3169）', () => {
   test('t-12 在跑的返工回合：当前一步带 aria-current="step"，写上一回合怎么收场', async () => {
     open('/tasks/t-12');
@@ -250,6 +316,9 @@ describe('页头下面：这一回合走到哪（#3169）', () => {
     const now = strip.querySelectorAll('[aria-current="step"]');
     expect(now).toHaveLength(1);
     expect(now[0]?.getAttribute('data-stage-state')).toBe('now');
+    // 每格第二行（#3228）：在做的写第几笔跑了多久，没到的写还没到
+    expect(now[0]?.querySelector('[data-stage-detail]')?.textContent).toMatch(/^第 3 笔 · \d/);
+    expect(strip.querySelector('[data-stage="验收"] [data-stage-detail]')?.textContent).toBe('还没到');
     const rework = strip.querySelector('[data-round-rework]')?.textContent ?? '';
     expect(rework).toContain('上一回合');
     // 引擎记的意见以结局开头，页面不再重复一遍结局
