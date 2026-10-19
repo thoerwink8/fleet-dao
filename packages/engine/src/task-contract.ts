@@ -772,6 +772,24 @@ export interface WaitMergedInput {
   minutes: number;
 }
 
+/** 停在合并这一步时现读一次 PR：条件都满足了（#3281）就自己醒来接着合，不等人点「继续」。只读。 */
+export interface MergeReadyInput {
+  schemaVersion: 1;
+  repo: Repo;
+  prNumber: number;
+  expectedHead: string;
+}
+
+export interface MergeReadyResult {
+  /** 已合并，或开着、头没变、没有挂着的「要求改」、必过检查（含合并闸、cold-verify）全绿。 */
+  ready: boolean;
+  /** 为什么能 / 不能，写进等待那一行。 */
+  why: string;
+}
+
+/** 停在合并这一步（等检查超时、挂合并没成、检查没查成）后多久现读一次 PR，条件满足就自己醒（#3281）。 */
+export const MERGE_PARK_RECHECK_SECONDS = 60 * 60;
+
 export type MergeWait =
   | { state: 'contract_changed' }
   | { state: 'merged'; mergeCommit?: string }

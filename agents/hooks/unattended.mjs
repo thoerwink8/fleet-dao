@@ -487,7 +487,7 @@ export function main(argv, io) {
           ? receiptStatus(dir, id, current.state?.generation)
           : { evidence: 'unknown', code: 'STATE_UNKNOWN' };
         io.out(JSON.stringify(status));
-        return status.evidence === 'unknown' ? 1 : 0;
+        return status.evidence === 'unknown' || ('code' in status && status.code === 'LIMIT') ? 1 : 0;
       }
       if (explicitlyOff(dir, id)) {
         io.out('无人值守：off（本会话已明确停止，队列不会再拉起；重新 on 才恢复）。');

@@ -126,6 +126,50 @@ async function post(
 const repairAudits = async (h: AnyHarness) =>
   (await h.store.listAudit({ limit: 100 })).items.filter((a) => a.action === 'alert.repair');
 
+const repairAuditHits = async (h: AnyHarness, state: string, requestId?: string) =>
+  (await repairAudits(h)).filter((a) => {
+    const after = a.after as { state?: string; requestId?: string } | undefined;
+    return after?.state === state && (requestId === undefined || after.requestId === requestId);
+  });
+
+async function repairRow(h: AnyHarness, id: string) {
+  const row = (await h.store.listSettings()).find((item) => item.key === repairSettingKey(id));
+  if (!row) throw new Error('没有修复状态');
+  return row;
+}
+
+type PutSetting = PgHarness['store']['putSetting'];
+
+/** 只拦最终结算（接活的 executing 照写）。用来让最后一次 putSetting 冲突、抛错，或先落一个并发赢家。 */
+function hookFinalSettle(
+  h: PgHarness,
+  settle: (
+    input: Parameters<PutSetting>[0],
+    audit: Parameters<PutSetting>[1],
+    original: PutSetting,
+  ) => ReturnType<PutSetting>,
+) {
+  const original = h.store.putSetting.bind(h.store) as PutSetting;
+  h.store.putSetting = (input, audit) => {
+    const value = input.value;
+    const state =
+      typeof value === 'object' && value !== null && 'state' in value
+        ? (value as { state?: string }).state
+        : undefined;
+    if (state !== undefined && state !== 'executing') return settle(input, audit, original);
+    return original(input, audit);
+  };
+}
+
+/** 信号发出去之后任务行变新，同一次 POST 的核验会在内存里算出 verified。 */
+function recoverDuringSignal(h: PgHarness) {
+  const signal = h.deps.workflows.signal.bind(h.deps.workflows);
+  h.deps.workflows.signal = async (workflowId, sig, runId) => {
+    await signal(workflowId, sig, runId);
+    await setTask({ updatedAt: new Date(h.clock.now.getTime() - MIN) });
+  };
+}
+
 async function findAlert(h: AnyHarness, keyPrefix: string) {
   const n = (await h.store.listNotifications({ status: 'all', limit: 200 })).items.find((x) =>
     x.dedupeKey?.startsWith(keyPrefix),
@@ -248,6 +292,9 @@ describe('idle-running：真看门狗 → 落库 → 当前动作 → 点 → �
     expect(sent.json.replayed).toBe(false);
     expect(sent.json.repair).toMatchObject({ state: 'accepted', kind: 'task-recover', requestId });
     expect(sent.json.repair.check).toMatchObject({ ok: false });
+    const acceptedRow = await repairRow(h, alert.id);
+    expect(acceptedRow.value).toEqual(sent.json.repair);
+    expect(await repairAuditHits(h, 'accepted', requestId)).toHaveLength(1);
     // 真发了两下：先继续、再路由叫醒，发给当前工作流
     expect(h.signals.map((x) => [x.workflowId, x.signal.name])).toEqual([
       ['task:example/canary#12', TASK_SIGNAL_NAMES.continue],
@@ -256,7 +303,7 @@ describe('idle-running：真看门狗 → 落库 → 当前动作 → 点 → �
     // 受理不撤卡；列表上这张卡写着「已受理、未修好」，同一个动作不再给按钮
     const mid = (await list(h, s)).items.find((n) => n.id === alert.id);
     expect(mid?.resolvedAt).toBeUndefined();
-    expect(mid?.repair?.last).toMatchObject({ state: 'accepted', check: { ok: false } });
+    expect(mid?.repair?.last).toEqual(sent.json.repair);
     expect(mid?.repair?.actions).toEqual([]);
 
     // 同一幂等身份重放：回原结果，信号不再发
@@ -315,7 +362,10 @@ describe('idle-running：真看门狗 → 落库 → 当前动作 → 点 → �
     // 引擎有了反应（任务行更新了）：原条件不再成立，核成 verified；真看门狗下一轮自己撤卡
     await setTask({ updatedAt: new Date(h.clock.now.getTime() - MIN) });
     const after = (await list(h, s)).items.find((n) => n.id === alert.id);
-    expect(after?.repair?.last).toMatchObject({ state: 'verified', check: { ok: true } });
+    expect(after?.repair?.last).toMatchObject({ state: 'verified', requestId, check: { ok: true } });
+    const verifiedRow = await repairRow(h, alert.id);
+    expect(verifiedRow.value).toEqual(after?.repair?.last);
+    expect(await repairAuditHits(h, 'verified', requestId)).toHaveLength(1);
     h.clock.now = new Date(T0.getTime() + 10 * MIN);
     await runWatchdog(h, 'idle');
     const done = (await list(h, s)).items.find((n) => n.id === alert.id);
@@ -418,9 +468,22 @@ describe('idle-running：真看门狗 → 落库 → 当前动作 → 点 → �
     const s = await h.login();
     const view = (await list(h, s)).items.find((n) => n.id === alert.id)?.repair;
     const recover = view?.actions.find((a) => a.kind === 'task-recover');
+    const requestId = uuid();
+    const unknown = await post(h, s, alert.id, {
+      actionId: recover?.id,
+      incident: view?.incident,
+      requestId,
+    });
+    expect(unknown.status).toBe(200);
+    expect(unknown.json.repair).toMatchObject({ state: 'unknown', requestId, kind: 'task-recover' });
+    const unknownRow = await repairRow(h, alert.id);
+    expect(unknownRow.value).toEqual(unknown.json.repair);
+    expect((await list(h, s)).items.find((n) => n.id === alert.id)?.repair?.last).toEqual(
+      unknown.json.repair,
+    );
+    expect(await repairAuditHits(h, 'unknown', requestId)).toHaveLength(1);
     const click = () =>
       post(h, s, alert.id, { actionId: recover?.id, incident: view?.incident, requestId: uuid() });
-    expect((await click()).json.repair).toMatchObject({ state: 'unknown' });
     const hand = view?.actions.find((a) => a.kind === 'hand-to-repair');
     const other = await post(h, s, alert.id, {
       actionId: hand?.id,
@@ -596,6 +659,365 @@ describe('idle-running：真看门狗 → 落库 → 当前动作 → 点 → �
     expect(sent.map((x) => x.name)).toEqual([TASK_SIGNAL_NAMES.continue, TASK_SIGNAL_NAMES.routeWake]);
   });
 });
+
+describe('最终结算的回执必须是已落库的记录', () => {
+  async function idleClick() {
+    const h = await pgWorld();
+    await runWatchdog(h, 'idle');
+    const alert = await findAlert(h, 'watchdog:idle-running:');
+    const s = await h.login();
+    const view = (await list(h, s)).items.find((n) => n.id === alert.id)?.repair;
+    const recover = view?.actions.find((a) => a.kind === 'task-recover');
+    const hand = view?.actions.find((a) => a.kind === 'hand-to-repair');
+    if (!view || !recover || !hand) throw new Error('没有可点的修复');
+    return { h, s, alert, view, recover, hand };
+  }
+
+  const bodyOf = (
+    view: { incident: string },
+    actionId: string,
+    requestId = uuid(),
+  ): { actionId: string; incident: string; requestId: string } => ({
+    actionId,
+    incident: view.incident,
+    requestId,
+  });
+
+  it('当场核验通过：POST、设置表、随后的 GET 和 verified 审计是同一份', async () => {
+    const { h, s, alert, view, recover } = await idleClick();
+    recoverDuringSignal(h);
+    const requestId = uuid();
+    const sent = await post(h, s, alert.id, bodyOf(view, recover.id, requestId));
+    expect(sent.status).toBe(200);
+    expect(sent.json.replayed).toBe(false);
+    expect(sent.json.repair).toMatchObject({ state: 'verified', requestId, kind: 'task-recover' });
+    const row = await repairRow(h, alert.id);
+    expect(row.value).toEqual(sent.json.repair);
+    const again = (await list(h, s)).items.find((n) => n.id === alert.id)?.repair?.last;
+    expect(again).toEqual(sent.json.repair);
+    expect(await repairAuditHits(h, 'verified', requestId)).toHaveLength(1);
+    expect(h.signals).toHaveLength(2);
+  });
+
+  it('最终 putSetting 冲突：内存 verified 不能当 200；持久仍是 executing；同请求不重放，新请求和新事故都不覆盖', async () => {
+    const { h, s, alert, view, recover } = await idleClick();
+    recoverDuringSignal(h);
+    hookFinalSettle(h, () => Promise.resolve('conflict'));
+    const requestId = uuid();
+    const sent = await post(h, s, alert.id, bodyOf(view, recover.id, requestId));
+    expect([sent.status, sent.json.error.code]).toEqual([409, 'repair_conflict']);
+    expect(JSON.stringify(sent.json)).not.toContain('verified');
+    const row = await repairRow(h, alert.id);
+    expect(row.value).toMatchObject({
+      state: 'executing',
+      requestId,
+      incident: view.incident,
+      actionId: recover.id,
+    });
+    expect((await list(h, s)).items.find((n) => n.id === alert.id)?.repair?.last).toMatchObject({
+      state: 'executing',
+      requestId,
+    });
+    expect(await repairAuditHits(h, 'verified')).toHaveLength(0);
+    expect(await repairAuditHits(h, 'executing', requestId)).toHaveLength(1);
+    expect(h.signals).toHaveLength(2);
+
+    const replay = await post(h, s, alert.id, bodyOf(view, recover.id, requestId));
+    expect(replay.status).toBe(200);
+    expect(replay.json).toMatchObject({ replayed: true, repair: { state: 'executing', requestId } });
+    expect(h.signals).toHaveLength(2);
+
+    // 信号把任务行更新了，动作编号会变；拨回原来的更新时间，旧编号仍在，新请求被在途挡住，不会重发。
+    await setTask({ updatedAt: ago(60) });
+    const again = await post(h, s, alert.id, bodyOf(view, recover.id));
+    expect([again.status, again.json.error.code]).toEqual([409, 'repair_in_flight']);
+    expect(h.signals).toHaveLength(2);
+    expect((await repairRow(h, alert.id)).value).toMatchObject({ state: 'executing', requestId });
+
+    await t.db
+      .update(notifications)
+      .set({ raisedAt: new Date(T0.getTime() + MIN) })
+      .where(eq(notifications.id, alert.id));
+    const next = (await list(h, s)).items.find((n) => n.id === alert.id)?.repair;
+    expect(next?.incident).not.toBe(view.incident);
+    expect(next?.actions).toEqual([]);
+    const denied = await post(h, s, alert.id, {
+      actionId: recover.id,
+      incident: next?.incident ?? '',
+      requestId: uuid(),
+    });
+    expect([denied.status, denied.json.error.code]).toEqual([409, 'repair_prior_incident_pending']);
+    expect((await repairRow(h, alert.id)).value).toMatchObject({
+      state: 'executing',
+      requestId,
+      incident: view.incident,
+    });
+    expect(h.signals).toHaveLength(2);
+  });
+
+  it('冲突赢家是精确同一事故、请求和动作：回已落库的那条，不回内存 verified，也不再写', async () => {
+    const { h, s, alert, view, recover } = await idleClick();
+    recoverDuringSignal(h);
+    const requestId = uuid();
+    let finals = 0;
+    hookFinalSettle(h, async (input, audit, original) => {
+      finals += 1;
+      const winner = { ...asRepair(input.value), state: 'failed', text: '并发赢家落库的失败结果' };
+      await original(
+        { ...input, value: winner },
+        {
+          ...audit,
+          reason: winner.text,
+          after: { ...(audit.after as Record<string, unknown>), state: 'failed' },
+        },
+      );
+      return 'conflict';
+    });
+    const sent = await post(h, s, alert.id, bodyOf(view, recover.id, requestId));
+    expect(sent.status).toBe(200);
+    expect(sent.json.replayed).toBe(false);
+    expect(sent.json.repair).toMatchObject({
+      state: 'failed',
+      requestId,
+      actionId: recover.id,
+      incident: view.incident,
+      text: '并发赢家落库的失败结果',
+    });
+    expect(sent.json.repair.state).not.toBe('verified');
+    expect((await repairRow(h, alert.id)).value).toEqual(sent.json.repair);
+    expect((await list(h, s)).items.find((n) => n.id === alert.id)?.repair?.last).toEqual(sent.json.repair);
+    expect(await repairAuditHits(h, 'verified')).toHaveLength(0);
+    expect(await repairAuditHits(h, 'failed', requestId)).toHaveLength(1);
+    expect(finals).toBe(1);
+    expect(h.signals).toHaveLength(2);
+  });
+
+  it('并发赢家是别的请求或别的事故：409，不回内存 verified，也不覆盖赢家', async () => {
+    const otherRequest = uuid();
+    const { h, s, alert, view, recover } = await idleClick();
+    recoverDuringSignal(h);
+    hookFinalSettle(h, async (input, audit, original) => {
+      const winner = {
+        ...asRepair(input.value),
+        requestId: otherRequest,
+        state: 'failed',
+        text: '别的请求先落库了',
+      };
+      await original(
+        { ...input, value: winner },
+        {
+          ...audit,
+          reason: winner.text,
+          after: { ...(audit.after as Record<string, unknown>), state: 'failed', requestId: otherRequest },
+        },
+      );
+      return 'conflict';
+    });
+    const sent = await post(h, s, alert.id, bodyOf(view, recover.id));
+    expect([sent.status, sent.json.error.code]).toEqual([409, 'repair_conflict']);
+    expect(JSON.stringify(sent.json)).not.toContain('verified');
+    expect((await repairRow(h, alert.id)).value).toMatchObject({
+      state: 'failed',
+      requestId: otherRequest,
+      text: '别的请求先落库了',
+    });
+    expect(h.signals).toHaveLength(2);
+
+    const next = await idleClick();
+    recoverDuringSignal(next.h);
+    hookFinalSettle(next.h, async (input, audit, original) => {
+      const winner = {
+        ...asRepair(input.value),
+        incident: 'other-incident',
+        state: 'accepted',
+        text: '别的事故先落库了',
+      };
+      await original(
+        { ...input, value: winner },
+        {
+          ...audit,
+          reason: winner.text,
+          after: { ...(audit.after as Record<string, unknown>), state: 'accepted' },
+        },
+      );
+      return 'conflict';
+    });
+    const crossed = await post(next.h, next.s, next.alert.id, bodyOf(next.view, next.recover.id));
+    expect([crossed.status, crossed.json.error.code]).toEqual([409, 'repair_conflict']);
+    expect((await repairRow(next.h, next.alert.id)).value).toMatchObject({
+      incident: 'other-incident',
+      state: 'accepted',
+      text: '别的事故先落库了',
+    });
+    expect(next.h.signals).toHaveLength(2);
+  });
+
+  it('持久写入失败：不回内存 verified；读也失败时明确读不懂，都不重放', async () => {
+    const { h, s, alert, view, recover } = await idleClick();
+    recoverDuringSignal(h);
+    hookFinalSettle(h, () => Promise.reject(new Error('设置表写不进去')));
+    const requestId = uuid();
+    const sent = await post(h, s, alert.id, bodyOf(view, recover.id, requestId));
+    expect([sent.status, sent.json.error.code]).toEqual([409, 'repair_conflict']);
+    expect(sent.json.error.message).toContain('持久写入失败');
+    expect(JSON.stringify(sent.json)).not.toContain('verified');
+    expect((await repairRow(h, alert.id)).value).toMatchObject({ state: 'executing', requestId });
+    expect((await list(h, s)).items.find((n) => n.id === alert.id)?.repair?.last?.state).toBe('executing');
+    expect(await repairAuditHits(h, 'verified')).toHaveLength(0);
+    const replay = await post(h, s, alert.id, bodyOf(view, recover.id, requestId));
+    expect(replay.json).toMatchObject({ replayed: true, repair: { state: 'executing', requestId } });
+    expect(h.signals).toHaveLength(2);
+
+    const unread = await idleClick();
+    recoverDuringSignal(unread.h);
+    let trap = false;
+    const listSettings = unread.h.store.listSettings.bind(unread.h.store);
+    unread.h.store.listSettings = async () => {
+      if (trap) {
+        trap = false;
+        throw new Error('设置表读不出来');
+      }
+      return listSettings();
+    };
+    hookFinalSettle(unread.h, () => {
+      trap = true;
+      return Promise.reject(new Error('设置表写不进去'));
+    });
+    const blind = await post(unread.h, unread.s, unread.alert.id, bodyOf(unread.view, unread.recover.id));
+    expect([blind.status, blind.json.error.code]).toEqual([409, 'repair_state_unreadable']);
+    expect(JSON.stringify(blind.json)).not.toContain('verified');
+    expect((await repairRow(unread.h, unread.alert.id)).value).toMatchObject({ state: 'executing' });
+    expect(unread.h.signals).toHaveLength(2);
+  });
+
+  it('结算冲突后持久状态读不到或读不懂：不回内存 verified，设置表仍是 executing', async () => {
+    const thrown = await idleClick();
+    recoverDuringSignal(thrown.h);
+    let trap = false;
+    const listSettings = thrown.h.store.listSettings.bind(thrown.h.store);
+    thrown.h.store.listSettings = async () => {
+      if (trap) {
+        trap = false;
+        throw new Error('设置表读不出来');
+      }
+      return listSettings();
+    };
+    hookFinalSettle(thrown.h, () => {
+      trap = true;
+      return Promise.resolve('conflict');
+    });
+    const sent = await post(thrown.h, thrown.s, thrown.alert.id, bodyOf(thrown.view, thrown.recover.id));
+    expect([sent.status, sent.json.error.code]).toEqual([409, 'repair_state_unreadable']);
+    expect(sent.json.error.message).toContain('没读到');
+    expect((await repairRow(thrown.h, thrown.alert.id)).value).toMatchObject({ state: 'executing' });
+    expect(
+      (await list(thrown.h, thrown.s)).items.find((n) => n.id === thrown.alert.id)?.repair?.last?.state,
+    ).toBe('executing');
+    expect(await repairAuditHits(thrown.h, 'verified')).toHaveLength(0);
+    expect(thrown.h.signals).toHaveLength(2);
+
+    const corrupt = await idleClick();
+    recoverDuringSignal(corrupt.h);
+    let lie = false;
+    const read = corrupt.h.store.listSettings.bind(corrupt.h.store);
+    corrupt.h.store.listSettings = async () => {
+      const rows = await read();
+      if (!lie) return rows;
+      lie = false;
+      return rows.map((row) =>
+        row.key === repairSettingKey(corrupt.alert.id) ? { ...row, value: { broken: true } } : row,
+      );
+    };
+    hookFinalSettle(corrupt.h, () => {
+      lie = true;
+      return Promise.resolve('conflict');
+    });
+    const garbled = await post(
+      corrupt.h,
+      corrupt.s,
+      corrupt.alert.id,
+      bodyOf(corrupt.view, corrupt.recover.id),
+    );
+    expect([garbled.status, garbled.json.error.code]).toEqual([409, 'repair_state_unreadable']);
+    expect(garbled.json.error.message).toContain('读不懂');
+    expect(JSON.stringify(garbled.json)).not.toContain('verified');
+    expect((await repairRow(corrupt.h, corrupt.alert.id)).value).toMatchObject({ state: 'executing' });
+    expect(corrupt.h.signals).toHaveLength(2);
+  });
+
+  it('交给修复的最终结算冲突：不回 handed；开单和派工只发生一次，重试不再开', async () => {
+    const issues: Issues = { calls: [] };
+    const h = await pgWorld({ issues });
+    await runWatchdog(h, 'idle');
+    const alert = await findAlert(h, 'watchdog:idle-running:');
+    const s = await h.login();
+    const view = (await list(h, s)).items.find((n) => n.id === alert.id)?.repair;
+    const hand = view?.actions.find((a) => a.kind === 'hand-to-repair');
+    if (!view || !hand || !h.deps.alertRepair?.dispatchIssue) throw new Error('没有交给修复');
+    let dispatches = 0;
+    const dispatch = h.deps.alertRepair.dispatchIssue.bind(h.deps.alertRepair);
+    h.deps.alertRepair.dispatchIssue = async (...args) => {
+      dispatches += 1;
+      return dispatch(...args);
+    };
+    hookFinalSettle(h, () => Promise.resolve('conflict'));
+    const requestId = uuid();
+    const sent = await post(h, s, alert.id, bodyOf(view, hand.id, requestId));
+    expect([sent.status, sent.json.error.code]).toEqual([409, 'repair_conflict']);
+    expect(JSON.stringify(sent.json)).not.toContain('handed');
+    expect(issues.calls).toHaveLength(1);
+    expect(dispatches).toBe(1);
+    expect((await repairRow(h, alert.id)).value).toMatchObject({
+      state: 'executing',
+      requestId,
+      kind: 'hand-to-repair',
+    });
+    const replay = await post(h, s, alert.id, bodyOf(view, hand.id, requestId));
+    expect(replay.json).toMatchObject({ replayed: true, repair: { state: 'executing', requestId } });
+    const again = await post(h, s, alert.id, bodyOf(view, hand.id));
+    expect([again.status, again.json.error.code]).toEqual([409, 'repair_in_flight']);
+    expect(issues.calls).toHaveLength(1);
+    expect(dispatches).toBe(1);
+  });
+
+  it('结果未知的结算冲突：不回内存 unknown，不重发信号', async () => {
+    const h = await pgWorld({
+      workflows: {
+        workflows: {
+          async signal() {
+            throw new WorkflowUnavailableError('Temporal 超时');
+          },
+        },
+      },
+    });
+    await runWatchdog(h, 'idle');
+    const alert = await findAlert(h, 'watchdog:idle-running:');
+    const s = await h.login();
+    const view = (await list(h, s)).items.find((n) => n.id === alert.id)?.repair;
+    const recover = view?.actions.find((a) => a.kind === 'task-recover');
+    if (!view || !recover) throw new Error('没有叫醒');
+    let calls = 0;
+    h.deps.workflows.signal = async () => {
+      calls += 1;
+      throw new WorkflowUnavailableError('Temporal 超时');
+    };
+    hookFinalSettle(h, () => Promise.resolve('conflict'));
+    const requestId = uuid();
+    const sent = await post(h, s, alert.id, bodyOf(view, recover.id, requestId));
+    expect([sent.status, sent.json.error.code]).toEqual([409, 'repair_conflict']);
+    expect(JSON.stringify(sent.json)).not.toContain('unknown');
+    expect((await repairRow(h, alert.id)).value).toMatchObject({ state: 'executing', requestId });
+    expect(await repairAuditHits(h, 'unknown')).toHaveLength(0);
+    const replay = await post(h, s, alert.id, bodyOf(view, recover.id, requestId));
+    expect(replay.json).toMatchObject({ replayed: true, repair: { state: 'executing' } });
+    expect(calls).toBe(1);
+  });
+});
+
+function asRepair(value: unknown): Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) throw new Error('修复记录不是对象');
+  return { ...(value as Record<string, unknown>) };
+}
 
 /** 真格式的发版进度记录（deploy/france/release-request/lib.mjs 写的那个形状），写进临时发布目录的 .train。 */
 function writeTrain(dir: string, status: string, startedMinAgo: number) {
