@@ -356,6 +356,8 @@ class TaskFlow {
     await rt.park(
       rejected ? `全程：冷验收被拒 ${MAX_VERIFY_ROUNDS} 次` : `全程：推送 ${MAX_FULL_PUSHES} 次还没合`,
       `最近的意见：${problems}。点「继续」两样都从 0 再计、重读单子，接着续同一个会话修；或「放弃」。`,
+      'stuck',
+      'rounds',
     );
     rt.fullPushes = 0;
     rt.verifyRound = 0;
@@ -652,7 +654,10 @@ class TaskFlow {
       }
       if (await rt.parkMainSyncBudget(r.mainSyncBudgetExhausted, r.detail ?? '同步主线次数已到上限'))
         continue;
-      await rt.park('直接合并没成', r.detail ?? 'GitHub 没说为什么');
+      // 结构化拒绝（关了、基线不对、合到了别的头）不是「自动合并没挂上」：法国发了新版也不续。
+      // 抛出去的错仍走上面 step 的失败分流（认证、权限是 other，其余合并步是 unarmed）。
+      // 停法只进查询，不改报警活动的入参，老历史重放不变。
+      await rt.park('直接合并没成', r.detail ?? 'GitHub 没说为什么', 'stuck', 'other');
     }
   }
 
@@ -1089,6 +1094,8 @@ class TaskFlow {
     await rt.park(
       `改动超出体量预算：新增 ${added} 行，预算 ${budget} 行，收窄过一次仍超`,
       `${splitSuggestion(delivery.changedFiles)}${detail ? ` ${detail}` : ''} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。`,
+      'stuck',
+      'size',
     );
     this.budgetApproved = true;
     return true;

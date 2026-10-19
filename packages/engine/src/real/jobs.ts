@@ -16,6 +16,7 @@ import { GITHUB_RECONCILE_JOB } from '../jobs/github-reconcile.ts';
 import { HOURLY_RECONCILE_JOB } from '../jobs/hourly-reconcile.ts';
 import { INTAKE_JOB } from '../jobs/intake.ts';
 import { JUDGE_SELF_CHECK_JOB } from '../jobs/judge-self-check.ts';
+import { PARKED_RETRY_JOB } from '../jobs/parked-retry.ts';
 import { QUOTA_READ_JOB } from '../jobs/quota-read.ts';
 import { REQUEST_SWEEP_JOB } from '../jobs/request-sweep.ts';
 import { RETIRED_SCHEDULE_IDS } from '../jobs/retired-schedules.ts';
@@ -41,6 +42,7 @@ export const ENGINE_JOBS = [
   REQUEST_SWEEP_JOB,
   DAILY_BRIEF_JOB,
   E2E_QUARANTINE_JOB,
+  PARKED_RETRY_JOB,
 ] as const;
 
 export async function registerEngineJobs(db: Db): Promise<void> {

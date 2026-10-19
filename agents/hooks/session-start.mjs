@@ -51,7 +51,12 @@ import { gitBroken, gitRunner, gitOk as ok, readFallbackProxy, gitWhy as why } f
 import { isMainModule } from './is-main.mjs';
 import { writeProxyEnv } from './proxy-env.mjs';
 import { contractLines } from './repo-contract.mjs';
-import { selectSessionId, stateDir, sessionLines as unattendedLines } from './unattended.mjs';
+import {
+  selectSessionId,
+  stateDir,
+  unattendedAuthority,
+  sessionLines as unattendedLines,
+} from './unattended.mjs';
 
 export const SYNC_MS = 30_000;
 export const QUIET_MS = 3 * 60_000;
@@ -885,9 +890,12 @@ export function poolHoldPromptLines(read, today) {
   return lines;
 }
 
-function unattendedSessionLines({ dir, sessionId, env, now }) {
+function unattendedSessionLines({ dir, sessionId, agentId, cwd, env, now }) {
   const session = selectSessionId(env, sessionId);
   if (!session.ok) return session.missing ? [] : [`无人值守状态没查成：${session.why}。`];
+  const authority = unattendedAuthority({ env, cwd, hookId: sessionId, agentId });
+  if (authority.kind === 'machine') return [];
+  if (authority.kind === 'unknown') return [`无人值守身份没查成（${authority.code}），未读取父会话状态。`];
   return unattendedLines({ dir: dir ?? stateDir(env), sessionId: session.id, now });
 }
 
@@ -900,6 +908,7 @@ export function sessionStart({
   localGit = git,
   now = Date.now(),
   sessionId = null,
+  agentId = null,
   unattendedDir = null,
   idlePr = idlePrRunner(),
   progress = progressRunner(),
@@ -909,7 +918,8 @@ export function sessionStart({
 }) {
   // 工人不走三分钟门：它起来就要当前的远端。聊天这场每条消息都续上。
   // 问 GitHub、扫工作树看 session-net；git fetch 看 fetch-ok（子代理刚取成过就不再取）。两扇门都是三分钟。
-  const worker = env.FLEET_WORKER === '1';
+  const authority = unattendedAuthority({ env, cwd, hookId: sessionId, agentId });
+  const worker = authority.kind === 'machine';
   const stamp = worker ? null : sessionNetStamp(home, cwd, localGit);
   const quiet = stamp !== null && quietFor(stamp, now) !== null;
   const fetchedRecently = !worker && fetchIsFresh({ home, cwd, git: localGit, okOf: ok, now });
@@ -922,6 +932,11 @@ export function sessionStart({
   // 注进工人的开场它会当成自己的活，还白占 8–11 秒
   if (worker)
     return [...(here.line ? [here.line] : []), syncFleet({ home, git, sync, fetch: here.fetch, now })];
+  if (authority.kind === 'unknown')
+    return [
+      ...(here.line ? [here.line] : []),
+      `开场身份没查成（${authority.code}），不注入父会话引导或无人值守状态。`,
+    ];
   let holdRead = { ok: true, skipped: true };
   try {
     holdRead = (poolHolds ?? (() => readFrancePoolHolds({ home, now, spawn: spawnSync })))();
@@ -934,7 +949,7 @@ export function sessionStart({
   const lineage = lineageOf({ home, sessionId, env });
   return [
     ...(here.line ? [here.line] : []),
-    ...unattendedSessionLines({ dir: unattendedDir, sessionId, env, now }),
+    ...unattendedSessionLines({ dir: unattendedDir, sessionId, agentId, cwd, env, now }),
     ...checkTemporary(cwd, localGit, now),
     ...poolHoldPromptLines(holdRead, beijingToday(now)),
     ...(repoContract ? repoContract(cwd) : []),
@@ -1164,6 +1179,7 @@ export function fastSessionStart({
   localGit = git,
   now = Date.now(),
   sessionId = null,
+  agentId = null,
   unattendedDir = null,
   env = process.env,
   repoContract = null,
@@ -1171,6 +1187,13 @@ export function fastSessionStart({
   spawnBackground = null,
 }) {
   const here = checkHere(cwd, localGit, { network: false });
+  const authority = unattendedAuthority({ env, cwd, hookId: sessionId, agentId });
+  if (authority.kind === 'machine') return here.line ? [here.line] : [];
+  if (authority.kind === 'unknown')
+    return [
+      ...(here.line ? [here.line] : []),
+      `开场身份没查成（${authority.code}），不注入父会话引导或无人值守状态。`,
+    ];
   const path = cachePathOf(home, here.fetch?.common ?? null);
   const cache = readBgCache(path);
   const c = cache.kind === 'ok' ? cache.value : null;
@@ -1193,7 +1216,7 @@ export function fastSessionStart({
       `开场核规矩没查成：后台 git fetch 失败（${f.value.why}，${ago}）。规矩以 origin/main 为准，动手前用 git show origin/main:AGENTS.md 读一遍。`,
     );
   lines.push(...failed('fetch', '开场核规矩（取远端）'));
-  lines.push(...unattendedSessionLines({ dir: unattendedDir, sessionId, env, now }));
+  lines.push(...unattendedSessionLines({ dir: unattendedDir, sessionId, agentId, cwd, env, now }));
   lines.push(...checkTemporary(cwd, localGit, now));
   const h = got('holds');
   if (h?.ok) lines.push(...poolHoldPromptLines(h.value, beijingToday(now)).map(aged));
@@ -1640,6 +1663,7 @@ if (isMain() && process.argv[2] === '--background') {
       cwd: pickCwd(input),
       home,
       sessionId: session.ok ? session.id : input?.session_id,
+      agentId: input?.agent_id,
       repoContract: (dir) => contractLines({ cwd: dir, git: gitRunner(GREP_MS), home }),
     };
     lines =

@@ -121,6 +121,33 @@ export interface TaskWait {
   since: string;
 }
 
+/**
+ * 停下等人的停法类别（#3294，patched('park-kind')）：引擎续停（jobs/parked-retry.ts）按它判续不续。
+ * transient＝失败分流认不出、按临时的办；unarmed＝自动合并没挂上；rounds＝轮数用尽；quota＝token 额度超预算；
+ * size＝改动体量超预算；standard＝改标准等人闸；other＝别的（不续）。
+ */
+export type ParkKind = 'transient' | 'unarmed' | 'rounds' | 'quota' | 'size' | 'standard' | 'other';
+
+/** 引擎会自己续一次的停法：别的（预算、人闸、轮数用尽……）一律不续。 */
+export const AUTO_RETRY_PARK_KINDS: readonly ParkKind[] = ['transient', 'unarmed'];
+
+/** 引擎续停发「继续」时的 by（操作记录、工作流认引擎续的都看它）。 */
+export const PARKED_RETRY_ACTOR = 'engine:parked-retry';
+
+/** 正停着的这一次停下（#3294）：只在 patched('park-kind') 的新历史里有，老历史一直没有。 */
+export interface TaskParkInfo {
+  kind: ParkKind;
+  /** 第几次停下（TaskRuntime.parks）：引擎续停的「继续」带上它，对不上的不认。 */
+  seq: number;
+  /** 停下的时刻（ISO，工作流时钟）。 */
+  at: string;
+  title: string;
+  /** 停下时的 PR 头；没有 PR 是 null。 */
+  head: string | null;
+  /** 同一原文（停法 + 标题 + 原因）引擎已经续过一次：这次不再续。 */
+  retriedBefore: boolean;
+}
+
 export interface TaskStatus {
   /** 最近一次安全边界核实的正式合同；没有＝旧历史/尚未核实。 */
   contract?: RequirementContract;
@@ -135,6 +162,8 @@ export interface TaskStatus {
   /** 最近一次卡住的原因；顺利推进时是 null。 */
   lastProblem: string | null;
   tier: TierDecision | null;
+  /** 正停着的这一次停下（#3294）；没在停、老历史是缺省。 */
+  park?: TaskParkInfo;
   /** 关单收尾能力。旧 worker 缺此字段，调用方必须保留未核实，不能回退无条件放弃。 */
   closedIssueClose?: { version: 1; token: ClosedIssueHoldToken | null };
   /** Separate from closed-issue abandonment: real merged PR, even when acceptance keeps its issue open. */
@@ -550,6 +579,8 @@ export interface ArmAutoMergeResult {
   /** merged 时的合并提交。 */
   mergeCommit?: string;
   why?: string;
+  /** 没挂是因为 PR 本身关了、还是草稿（要人处理，引擎续停不续）。老历史没有这个字段。 */
+  refused?: 'closed' | 'draft';
   mainSyncBudgetExhausted?: MainSyncBudgetExhausted;
   /** 挂的时候发现 PR 的头已经不是引擎验过、推上去的那个了（有人改过）：现在的头。老历史里没有这个字段。 */
   headMoved?: string;
@@ -651,6 +682,24 @@ export interface WaitMergedInput {
   expectedHead: string;
   minutes: number;
 }
+
+/** 停在合并这一步时现读一次 PR：条件都满足了（#3281）就自己醒来接着合，不等人点「继续」。只读。 */
+export interface MergeReadyInput {
+  schemaVersion: 1;
+  repo: Repo;
+  prNumber: number;
+  expectedHead: string;
+}
+
+export interface MergeReadyResult {
+  /** 已合并，或开着、头没变、没有挂着的「要求改」、必过检查（含合并闸、cold-verify）全绿。 */
+  ready: boolean;
+  /** 为什么能 / 不能，写进等待那一行。 */
+  why: string;
+}
+
+/** 停在合并这一步（等检查超时、挂合并没成、检查没查成）后多久现读一次 PR，条件满足就自己醒（#3281）。 */
+export const MERGE_PARK_RECHECK_SECONDS = 60 * 60;
 
 export type MergeWait =
   | { state: 'contract_changed' }

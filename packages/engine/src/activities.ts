@@ -19,6 +19,7 @@ import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
 import type { IntakeDeps } from './jobs/intake.ts';
 import type { IntakeChatDeps } from './jobs/intake-chat.ts';
 import type { JudgeSelfCheckJobDeps } from './jobs/judge-self-check.ts';
+import type { ParkedRetryDeps as ParkedRetryJobDeps } from './jobs/parked-retry.ts';
 import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
 import type { RequestSweepJobDeps } from './jobs/request-sweep.ts';
 import type { RouteProbeJobDeps } from './jobs/route-probe.ts';
@@ -49,6 +50,8 @@ import type {
   MergedTaskReceipt,
   MergeNowInput,
   MergeNowResult,
+  MergeReadyInput,
+  MergeReadyResult,
   MergeWait,
   NoteBare401Input,
   NoteBare401Result,
@@ -291,6 +294,8 @@ export interface EngineJobs {
   dailyBrief?: () => DailyBriefDeps;
   /** 隔离集进出（决定 0093）：偶发单放进 quarantine.json，连续 7 天全过的移出并关单。不拉单、不调模型。 */
   e2eQuarantine?: () => E2eQuarantineJobDeps;
+  /** 停下等人的单按规则续一次（#3294）：发了新版或 PR 已能合就发「继续」。不调模型、不拉单。 */
+  parkedRetry?: () => ParkedRetryJobDeps;
 }
 
 /**
@@ -308,6 +313,8 @@ export interface EngineTasks {
   checkGuarded?: (input: CheckGuardedInput, ctx: PortContext) => Promise<GuardedPaths>;
   armAutoMerge?: (input: ArmAutoMergeInput, ctx: PortContext) => Promise<ArmAutoMergeResult>;
   waitMerged?: (input: WaitMergedInput, ctx: PortContext) => Promise<MergeWait>;
+  /** 停在合并这一步时现读一次 PR（#3281）。只读；读不到抛，不当成满足。 */
+  mergeReady?: (input: MergeReadyInput, ctx: PortContext) => Promise<MergeReadyResult>;
   /** 现读这个仓的 CI 模式。没有这个受管仓要抛，不许当成不强制。 */
   readCiPolicy?: (input: ReadCiPolicyInput, ctx: PortContext) => Promise<ReadCiPolicyResult>;
   /**
@@ -341,6 +348,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   checkGuarded: true,
   armAutoMerge: true,
   waitMerged: true,
+  mergeReady: true,
   readCiPolicy: true,
   readCiReviews: true,
   mergeNow: true,

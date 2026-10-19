@@ -60,12 +60,19 @@
 - 欠账：`pnpm debt:check` 只看文件，查活文档里推后的话带着单号（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
 - 加新项目：`pnpm project add <owner/仓>` 一条命令做到底（登记、装两个 App、流程标签、仓档案、补齐 PR、真实策略读桥、全绿才开接活、冒烟单），可重复跑；`pnpm project check <owner/仓>` 只查（退出码 0 全绿、1 有没过的、2 没查成）。两个 App 装没装经法国的 `fleet-api project installations <owner/仓> --github-id <仓号>` 读（只读，和驾驶舱导入列表同一份归并；没读全是没查成，不是没装）。见 ops 第九节「加新项目」。
 - 计划：`pnpm plan` 从 GitHub 现读版本、先后、母单和子单打印出来，不写文件（#654 起仓里不存快照）；没登录、GitHub 读不到、先后标记认不出都报错、退出码 2。每天一轮 GitHub 对账（`.github/workflows/github-audit.yml`，随时也能 `pnpm github:audit`）查单子和先后有没有断，见 design 第七节「GitHub 对账」。
-- 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 只读，最后报这台同步到哪个提交、落后主线几个；`--offline` 不取远端），直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。同步完想核各家实际读没读到规矩，在 fleet-dao 仓根跑 `pnpm agents:probe [家的 id …]`：真起每家装了的 CLI 问一次（花各家额度，只在手动跑时跑），按它原样抄出的通用段、仓根 AGENTS.md 标题和 `pnpm check` 判，每家一行：过、没读到什么、没装、没查成；退出码全过 0、有没读到的 1、只有没查成的 2（`packages/agents-sync/src/probe.ts`）。
+- 各家 AI 的全局说明、技能和钩子：开发机上由开会话钩子自动同步（同步用的是一份只归它的检出 `~/.fleet-dao/origin-main`，永远停在 `origin/main` 上，本机自己的检出在哪个分支都不影响）；手动跑 `pnpm agents:sync`（`--check` 是预检：不取远端、不切源、不更新目标配置，最后报这台同步到哪个提交、落后主线几个，但封装仍会临时创建并释放源锁 `~/.fleet-dao/origin-main.lock`，整条命令不是零写入；`--offline` 不取远端）；要严格零写入，直接对官方树跑 `node ~/.fleet-dao/origin-main/packages/agents-sync/bin/agents-sync --check --repo ~/.fleet-dao/origin-main`：不经过源准备封装、不碰源锁、不拉远端，所以须另核官方树的提交身份（`git -C ~/.fleet-dao/origin-main rev-parse HEAD` 对 `origin/main`），旧缓存或候选树的结果不能当最新主线；直接查仓里的原文件用 `node packages/agents-sync/bin/agents-sync --check`；`--help` 看全部用法，法国怎么跑见 ops 第五节。同步完想核各家实际读没读到规矩，在 fleet-dao 仓根跑 `pnpm agents:probe [家的 id …]`：真起每家装了的 CLI 问一次（花各家额度，只在手动跑时跑），按它原样抄出的通用段、仓根 AGENTS.md 标题和 `pnpm check` 判，每家一行：过、没读到什么、没装、没查成；退出码全过 0、有没读到的 1、只有没查成的 2（`packages/agents-sync/src/probe.ts`）。
+- 无附带维护同步：`pnpm agents:sync --no-maintenance` 仍同步全部目标，只跳过本次 Mirasim 迁移、本机会话 refresh、reclaude 后台健康维护；直接入口的 `--check`、`--apply` 也支持此参数。不带参数时维护行为不变。
 - 无人值守状态按真实会话号隔离：`unattended.mjs` 的命令依次读取 `CLAUDE_CODE_SESSION_ID`、`CODEX_THREAD_ID`、`CODEX_SESSION_ID`；Stop 和 SessionStart 优先使用事件里的 `session_id`，缺失才读同一组环境变量。给出的来源不合法就明确报错，不借另一个会话号。
 - 无人值守接续：Claude/Codex 用同步 Stop 把未完成工作送到下一轮，成功 PostToolUse 登记实质进展；后台任务条数不证明完成通知送达。连续三次无进展明确暂停故障；on 只记意图，不代表已安装、信任、执行或通知验证。各入口能力与验法见 [CLI 无人值守接续](docs/design/CLI无人值守接续.md)。
 - `pnpm work run <单号>` 登记真实 Claude session / Codex thread，开启无人值守后由同步 Stop 一次性消费本会话终态；Codex 后台完成不主动开新轮。只有 `CODEX_SESSION_ID` 的 root-session 不代替 thread；缺归属及旧 `dispatcher=null` 记录用 `pnpm work runs` 手工读取，续跑不改原归属。
 
 - 本机受管工人的审查退回：`pnpm work return <单号> --body-file <完整意见文件>` 交由退回专用工作流与既有合并闸按同一 PR 串行登记；先核实 PR 级 PREPARE，再写当前头阻合状态和正式 review 回执，未结 PREPARE 跨换头/强推继续阻合；只有核实真实状态与正式回执才报 `registered/blocked`，`queued/unconfirmed` 不代表已阻止合并。`pnpm work feedback <单号> [--wait|--retry]` 读取完整意见、等 Actions 结果或按原请求重试，取消、超时和断线保留本机意图。工人用 `pnpm work ack <单号> --return <编号>` 确认收到；审查方用 `pnpm work resolve <单号> --return <编号> --body-file <核验依据>` 对精确候选 head 解除责任；ack、CI 绿和新 head 都不代替 resolve。交付用 `pnpm work deliver <单号>`，不会擅自解除手工草稿。当前显式退回事务只允许个人仓 owner 发起，工人不能替审查方 resolve；普通组织仓和没有退回协议的本机 PR 保留原判法。
+
+### 真 Temporal 测试准备
+
+`pnpm test:temporal --cli <已安装的CLI绝对路径>` 登记本机测试 CLI，版本必须与 `deploy/france.sh` 一致；之后 `pnpm test:temporal` 检查登记是否仍可用。登记只写 `~/.fleet-dao/test-tools/`，不下载、不改全局 PATH、不启动服务端。也可直接设 `FLEET_TEST_TEMPORAL_CLI`，显式路径优先，坏路径不会退回登记；CI 必须显式设置。
+
+`pnpm check`、`pnpm test:changed` 选到调用 `createRealEnv` 的文件时先核 CLI；没选到则不做这项准备。直接跑单个测试也会在创建真环境前核验，缺失明确失败，不回退 SDK 隐式下载。`--version` 探测限 5 秒，超时终止该探测进程。随后 SDK 创建只报 `start-or-connect`：SDK 未公开启动和连接的细分状态，日志如实记未知；没有另套超时竞速，环境仍由 SDK 创建并由用例 teardown 清理。
 
 ### Windows 上的 Linux 安全测试
 

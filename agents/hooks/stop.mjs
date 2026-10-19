@@ -14,11 +14,11 @@ import { decideQueueStop } from './queue-stop.mjs';
 import {
   decideStop,
   explicitlyOff,
-  isMachineSession,
   pendingOf,
   readState,
   selectSessionId,
   stateDir,
+  unattendedAuthority,
 } from './unattended.mjs';
 
 /** stdout 回调只证明写出请求，不证明宿主已接收或模型已消费。
@@ -39,7 +39,8 @@ async function emitContinuation(context, payload, results, decision) {
   });
 }
 
-if (isMainModule(import.meta)) {
+/** @param {'codex'|undefined} [expectedCli] */
+export async function runStop(expectedCli) {
   /** @type {Record<string, unknown>} */
   let input = {};
   let validInput = true;
@@ -53,17 +54,33 @@ if (isMainModule(import.meta)) {
   }
   const dir = stateDir();
   const session = selectSessionId(process.env, input?.session_id);
-  const initial = session.ok ? readState(dir, session.id) : null;
+  const authority = unattendedAuthority({
+    env: process.env,
+    cwd: input.cwd,
+    hookId: input.session_id,
+    agentId: input.agent_id,
+    expectedCli,
+  });
+  const initial = session.ok && authority.kind === 'allowed' ? readState(dir, session.id) : null;
   // 开始时捕获身份和generation；旧事件晚到也不能挂到后来重新on的窗口。
-  const context = receiptContext(dir, input, initial?.ok ? initial.state : null, 'Stop');
+  const context = receiptContext(
+    dir,
+    input,
+    initial?.ok ? initial.state : null,
+    'Stop',
+    process.env,
+    authority.kind,
+    expectedCli,
+    session.ok ? () => readState(dir, session.id) : undefined,
+  );
   noteReceipt(context, { phase: 'entered', decision: 'none' });
   if (process.env.FLEET_HEADLESS === '1') {
     noteReceipt(context, { phase: 'bypass', decision: 'headless' });
     process.exit(0);
   }
-  if (input.agent_id || isMachineSession({ env: process.env, cwd: input.cwd })) {
+  if (authority.kind === 'machine') {
     noteReceipt(context, { phase: 'bypass', decision: input.agent_id ? 'subagent' : 'machine' });
-  } else if (!session.ok || context.session === null) {
+  } else if (!session.ok || context.session === null || authority.kind === 'unknown') {
     noteReceipt(context, { phase: 'fault', decision: validInput ? 'identity_unknown' : 'invalid_input' });
   } else if (!initial?.ok) {
     noteReceipt(context, { phase: 'fault', decision: 'state_unknown' });
@@ -72,8 +89,10 @@ if (isMainModule(import.meta)) {
   // （我们自己挡回去之后那个标志就一直是真的）。机器派的会话（工人、反方）不挡。
   const notes = [];
   try {
+    if (authority.kind === 'unknown')
+      notes.push(`无人值守身份没查成（${authority.code}），未读取父会话状态，这一轮不拦。`);
     if (!session.ok && !session.missing) notes.push(`无人值守状态没查成：${session.why}，这一轮不拦。`);
-    if (session.ok && !input.agent_id && !isMachineSession({ env: process.env, cwd: input.cwd })) {
+    if (session.ok && authority.kind === 'allowed') {
       const sessionId = session.id;
       // 先接续本会话任务；不能被队列的另一个三次计数遮住，也不能凭后台任务存在而放行。
       /** @type {{ key: string, text: string }[]} */
@@ -131,3 +150,4 @@ if (isMainModule(import.meta)) {
   if (notes.length > 0) process.stdout.write(`${JSON.stringify({ systemMessage: notes.join('；') })}\n`);
   process.exit(0);
 }
+if (isMainModule(import.meta)) await runStop();

@@ -20,7 +20,7 @@ it.each([
       const expiresAt = ${JSON.stringify(expiresAt)};
       const now = Date.parse(expiresAt) - 12 * 3600000;
       const sessionId = 'timezone-test';
-      const env = { FLEET_UNATTENDED_DIR: dir, CODEX_THREAD_ID: sessionId };
+      const env = { FLEET_UNATTENDED_DIR: dir, CLAUDE_CODE_SESSION_ID: sessionId };
       const lines = [];
       const io = { env, now, out: s => lines.push(s), err: s => { throw Error(s); } };
       if (main(['on'], io) !== 0 || main(['status'], io) !== 0) throw Error('CLI failed');

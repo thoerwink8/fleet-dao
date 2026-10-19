@@ -849,7 +849,8 @@ export interface NodeSessionsRecord {
   report: LocalSessionsReport;
 }
 
-export type Store = UserStore &
+export type Store = import('./task-execution.ts').TaskExecutionStore &
+  UserStore &
   BoardStore &
   RoutingStore &
   OpsStore &

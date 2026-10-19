@@ -101,6 +101,17 @@ import { sweepRunDirs } from './task-segment.ts';
 
 /** 一次验收会话最长几分钟：验收只读 diff，比动手会话短得多。 */
 export const VERIFY_MINUTES = 30;
+/** 起下一家验收会话前，活动剩下的时间除了一家的限时，还要留这么久收尾（写状态、记账）。 */
+const VERIFY_WRAP_UP_MS = 2 * 60_000;
+
+/**
+ * 活动剩下的时间够不够再起一家验收会话（#3281）：换家族链一家最多 VERIFY_MINUTES，链比活动限时长，换到后面整个活动会超时、
+ * 被挂起等人。不够就不再起，回等待交工作流过一会儿重验。没有截止（不经 Temporal 的调用）一直够。
+ */
+export function roomForAnother(deadlineMs: number | undefined, minutes: number, now = Date.now()): boolean {
+  if (deadlineMs === undefined) return true;
+  return deadlineMs - now > minutes * 60_000 + VERIFY_WRAP_UP_MS;
+}
 /** 喂给验收会话的 diff 最多多少字符（约 8 万 token）；再大一次看不全，要人看。 */
 export const MAX_DIFF_CHARS = 240_000;
 /** 补读来的单个文件 diff 最多多少行；超过只给摘要。 */
@@ -750,6 +761,8 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
                 log,
                 ...(sessionIo ? { detach: true } : {}),
                 released,
+                roomForAnother: () =>
+                  roomForAnother(ctx.attemptDeadlineMs, verifierDeps.timeoutMinutes ?? VERIFY_MINUTES),
               },
             );
           } catch (error) {

@@ -90,6 +90,51 @@ describe('图的层级：引擎 → 三段 → 单子 →（要你拍）', () =>
     expect(without.nodes.some((n) => n.id === 'segment:none')).toBe(false);
   });
 
+  test('复现 #3279：停在验收的停下等人的单不算进验收，单独一组「停下等你」排在三段之后；没有就不画', () => {
+    const parked = ticket(20, {
+      segment: 'verify_pending',
+      waitingReason: 'parked',
+      parked: '体量超预算：这一单已用 31 万 token',
+    });
+    const redParked = ticket(21, {
+      segment: 'verifying',
+      waitingReason: 'parked',
+      lastEvent: { text: '验收超时：30 分钟没交活', at: '2026-10-07T01:00:00Z', tone: 'trouble' },
+    });
+    const g = buildGraph({ running: [...RUNNING, parked, redParked], flow: FLOW, filter: { stuck: false } });
+    expect(g.nodes.filter((n) => n.data.kind === 'segment').map((n) => n.id)).toEqual([
+      'segment:scope',
+      'segment:manual',
+      'segment:verify',
+      'segment:parked',
+    ]);
+    expect(g.parentOf.get(nodeId.ticket(parked))).toBe('segment:parked');
+    expect(g.parentOf.get(nodeId.ticket(redParked))).toBe('segment:parked');
+    const verify = g.nodes.find((n) => n.id === 'segment:verify')?.data;
+    expect(verify?.kind === 'segment' && verify.total).toBe(1);
+    const group = g.nodes.find((n) => n.id === 'segment:parked')?.data;
+    expect(group?.kind === 'segment' && group.total).toBe(2);
+    expect(group?.kind === 'segment' && group.stage).toBeUndefined();
+    // 过滤照常：等你色的进「只看等你的」，最近一笔超时的红单进「只看卡住的」
+    const needsYou = buildGraph({
+      running: [...RUNNING, parked, redParked],
+      flow: FLOW,
+      filter: { stuck: false, needsYou: true },
+    });
+    expect(needsYou.parentOf.get(nodeId.ticket(parked))).toBe('segment:parked');
+    expect(needsYou.parentOf.has(nodeId.ticket(redParked))).toBe(false);
+    const stuck = buildGraph({
+      running: [...RUNNING, parked, redParked],
+      flow: FLOW,
+      filter: { stuck: true },
+    });
+    expect(stuck.parentOf.get(nodeId.ticket(redParked))).toBe('segment:parked');
+    expect(stuck.parentOf.has(nodeId.ticket(parked))).toBe(false);
+    // 停下等人的组走完了（单子都续上了）就不画
+    const none = buildGraph({ running: RUNNING, flow: FLOW, filter: { stuck: false } });
+    expect(none.nodes.some((n) => n.id === 'segment:parked')).toBe(false);
+  });
+
   test('一张单都没有：三段照样在（它们是流程本身），每段 0 张', () => {
     const g = buildGraph({ running: [], flow: FLOW, filter: { stuck: false } });
     const segs = g.nodes.filter((n) => n.data.kind === 'segment');

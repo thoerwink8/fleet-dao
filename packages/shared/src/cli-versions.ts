@@ -176,7 +176,10 @@ export function cliStatusLabel(status: CliToolStatus): string {
 export function parseInstalledOutput(tool: string, stdout: string): string | null {
   const text = stdout.trim();
   if (tool === 'grok') {
-    const m = /^grok ([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9._]+)?)(?: \([0-9a-f]+\))?$/m.exec(text);
+    const m =
+      /^grok ([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9._]+)?)(?: \([0-9a-f]+\))?(?:[ \t]+\[[A-Za-z0-9._-]+\])?$/m.exec(
+        text,
+      );
     return m?.[1] ?? null;
   }
   if (tool === 'cursor-agent') {

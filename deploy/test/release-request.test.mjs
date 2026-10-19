@@ -170,6 +170,11 @@ function fakeIo(over = {}, opts = {}) {
     limits: { pollMs: 1000, sessionsMs: 5000, deployMs: 3000, verifyMs: 4000 },
     ...over,
   };
+  const initialReadState = io.readState;
+  io.readState = () =>
+    log.states.length
+      ? { ok: true, state: JSON.parse(JSON.stringify(log.states.at(-1))) }
+      : initialReadState();
   return { io, log, setMaster: (m) => (master = m) };
 }
 
@@ -258,6 +263,238 @@ test('release.sh 退出码 2（没红有待配）：记一句，接着验证，�
   const { io, log } = fakeIo({ runRelease: async () => ({ status: 2, stdout: '', stderr: '' }) });
   assert.equal(await runRequest(io), EXIT.done);
   assert.ok(log.out.some((l) => l.includes('退出码 2')));
+});
+
+function healthPendingIo(previous = null, request = {}) {
+  const f = fakeIo({ readRequest: () => ({ kind: 'ok', text: goodRequest(request) }) });
+  let stored = previous ? JSON.parse(JSON.stringify(previous)) : null;
+  const write = f.io.writeState;
+  f.io.writeState = (s) => {
+    stored = JSON.parse(JSON.stringify(s));
+    write(s);
+  };
+  f.io.readState = () => ({ ok: true, state: stored ? JSON.parse(JSON.stringify(stored)) : null });
+  const reply = (over = {}) => ({
+    status: 2,
+    stderr: '',
+    stdout: `FLEET_RELEASE_HEALTH_PENDING\t${JSON.stringify({
+      schema: 1,
+      sha: SHA,
+      attempt: stored.release.healthAttempt,
+      before: 'database\tok\t\nengine\tok\t',
+      identity: `${SHA}|fleet-engine:4242:runtime-matches`,
+      receipt: 'API持续红/读取失败，健康尚未核实',
+      at: f.io.now().toISOString(),
+      ...over,
+    })}\n`,
+  });
+  f.io.runRelease = async (sha) => {
+    f.log.release.push(sha);
+    return reply();
+  };
+  return {
+    ...f,
+    reply,
+    stored: () => stored,
+    replace: (s) => {
+      stored = s;
+    },
+  };
+}
+
+test('#3256 真实请求消费：特定健康未决阻断在phase4，不走验证、不写done，普通待配退出2保持兼容', async () => {
+  const f = healthPendingIo();
+  assert.equal(await runRequest(f.io), EXIT.blocked);
+  assert.equal(f.stored().status, 'blocked');
+  assert.equal(f.stored().phase, 4);
+  assert.equal(f.log.check, 0);
+  assert.ok(!f.log.states.some((s) => s.status === 'done'));
+  assert.ok(!f.log.pushes.some((s) => s.startsWith('【发版成功】')));
+  assert.equal(f.log.lasts.at(-1).outcome, 'blocked');
+});
+
+for (const [name, over] of [
+  ['旧nonce', { attempt: 'old-attempt' }],
+  ['其它目标', { sha: 'b'.repeat(40) }],
+  ['缺完整基线', { before: null }],
+  ['缺进程身份', { identity: '' }],
+]) {
+  test(`#3256 ${name}的未决stdout不能当本次回执/完成`, async () => {
+    const f = healthPendingIo();
+    f.io.runRelease = async () => f.reply(over);
+    assert.equal(await runRequest(f.io), EXIT.failed);
+    assert.ok(!f.log.states.some((s) => s.status === 'done'));
+  });
+}
+
+test('#3256 stdout丢失：子进程已持久写未决，父旧state仍不能将它覆盖成done', async () => {
+  const f = healthPendingIo();
+  f.io.runRelease = async () => {
+    const p = JSON.parse(f.reply().stdout.split('\t')[1]);
+    f.replace({ ...f.stored(), status: 'blocked', release: { ...f.stored().release, healthPending: p } });
+    return { status: 2, stdout: '', stderr: '' };
+  };
+  assert.equal(await runRequest(f.io), EXIT.blocked);
+  assert.equal(f.stored().status, 'blocked');
+});
+
+for (const outcome of ['cancelled', 'throw', 'failed']) {
+  test(`#3256 子发布${outcome}前已落盘pending：父协调者保全回执并保持blocked`, async () => {
+    const f = healthPendingIo();
+    f.io.runRelease = async () => {
+      const p = JSON.parse(f.reply().stdout.split('\t')[1]);
+      f.replace({ ...f.stored(), status: 'blocked', release: { ...f.stored().release, healthPending: p } });
+      if (outcome === 'throw') throw Error('cancelled');
+      return { status: outcome === 'failed' ? 1 : null, error: 'cancelled', stdout: '', stderr: '' };
+    };
+    assert.equal(await runRequest(f.io), EXIT.blocked);
+    assert.ok(f.stored().release.healthPending);
+  });
+}
+
+for (const outcome of ['pending', 'green', 'throw']) {
+  test(`#3256 retry期间同一请求被abort，复核返回${outcome}也不能覆盖aborted`, async () => {
+    const first = healthPendingIo();
+    await runRequest(first.io);
+    const f = healthPendingIo(first.stored(), { kind: 'retry' });
+    let winner;
+    f.io.releaseCheck = async () => {
+      const response = outcome === 'pending' ? f.reply() : { status: 0, stdout: '', stderr: '' };
+      winner = { ...f.stored(), status: 'aborted' };
+      f.replace(winner);
+      if (outcome === 'throw') throw Error('cancelled');
+      return response;
+    };
+    assert.equal(await runRequest(f.io), EXIT.failed);
+    assert.deepEqual(f.stored(), winner);
+  });
+}
+
+test('#3256 受管retry仅只读复核，同目标同nonce同原身份通过后才收敛，不重跑发布', async () => {
+  const first = healthPendingIo();
+  assert.equal(await runRequest(first.io), EXIT.blocked);
+  const f = healthPendingIo(first.stored(), { kind: 'retry' });
+  assert.equal(await runRequest(f.io), EXIT.done);
+  assert.deepEqual(f.log.release, []);
+  assert.ok(f.log.check >= 2, '复核和原phaseDeploy检查都跑过');
+  assert.equal(f.stored().release.healthPending, undefined);
+});
+
+test('#3256 phase5只读检查新未决也能正式retry，只读收敛且不重新发布', async () => {
+  const first = healthPendingIo();
+  first.io.runRelease = async () => ({ status: 0, stdout: '', stderr: '' });
+  first.io.releaseCheck = async () => first.reply();
+  assert.equal(await runRequest(first.io), EXIT.blocked);
+  assert.equal(first.stored().phase, 5);
+  const f = healthPendingIo(first.stored(), { kind: 'retry' });
+  assert.equal(await runRequest(f.io), EXIT.done);
+  assert.deepEqual(f.log.release, []);
+  assert.equal(f.stored().release.healthPending, undefined);
+});
+
+test('#3256 phase5检查期间abort后抛异常：旧父协调者不覆盖aborted', async () => {
+  const f = healthPendingIo();
+  let winner;
+  f.io.runRelease = async () => ({ status: 0, stdout: '', stderr: '' });
+  f.io.releaseCheck = async () => {
+    winner = { ...f.stored(), status: 'aborted' };
+    f.replace(winner);
+    throw Error('cancelled');
+  };
+  assert.equal(await runRequest(f.io), EXIT.failed);
+  assert.deepEqual(f.stored(), winner);
+});
+
+test('#3256 健康复核绿色结果属于换代版本：保留原目标pending不收敛', async () => {
+  const first = healthPendingIo();
+  await runRequest(first.io);
+  const f = healthPendingIo(first.stored(), { kind: 'retry' });
+  let current = SHA;
+  f.io.currentRelease = async () => ({ ok: true, sha: current });
+  f.io.releaseCheck = async () => {
+    current = 'b'.repeat(40);
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  assert.equal(await runRequest(f.io), EXIT.blocked);
+  assert.equal(f.stored().release.healthPending.sha, SHA);
+  assert.deepEqual(f.log.release, []);
+});
+
+test('#3256 retry持续未决：保留原before/identity，换本次nonce，仍停phase4', async () => {
+  const first = healthPendingIo();
+  await runRequest(first.io);
+  const prior = first.stored();
+  const f = healthPendingIo(prior, { kind: 'retry' });
+  f.io.releaseCheck = async () => {
+    f.log.check++;
+    return f.reply();
+  };
+  assert.equal(await runRequest(f.io), EXIT.blocked);
+  assert.equal(f.stored().phase, 4);
+  assert.equal(f.stored().release.healthPending.before, prior.release.healthPending.before);
+  assert.equal(f.stored().release.healthPending.identity, prior.release.healthPending.identity);
+  assert.notEqual(f.stored().release.healthPending.attempt, prior.release.healthPending.attempt);
+  assert.deepEqual(f.log.release, []);
+});
+
+test('#3256 retry只读检查期间换代：旧协调者不清原pending、不覆盖新请求state', async () => {
+  const first = healthPendingIo();
+  await runRequest(first.io);
+  const f = healthPendingIo(first.stored(), { kind: 'retry' });
+  let newer;
+  f.io.releaseCheck = async () => {
+    newer = {
+      ...f.stored(),
+      startedAt: '2026-10-19T11:00:00Z',
+      target: { kind: 'sha', value: 'c'.repeat(40) },
+    };
+    f.replace(newer);
+    return { status: 0, stdout: '', stderr: '' };
+  };
+  assert.equal(await runRequest(f.io), EXIT.failed);
+  assert.deepEqual(f.stored(), newer);
+  assert.ok(!f.log.states.some((s) => s.status === 'done'));
+});
+
+for (const status of [0, 2, null]) {
+  test(`#3256 子发布返回${status}时进度已换代：不覆盖新目标或遗失nonce的后来者`, async () => {
+    const f = healthPendingIo();
+    let winner;
+    f.io.runRelease = async () => {
+      winner = { ...f.stored(), target: { kind: 'sha', value: 'c'.repeat(40) }, release: {} };
+      f.replace(winner);
+      return { status, error: status === null ? 'cancelled' : undefined, stdout: '', stderr: '' };
+    };
+    assert.equal(await runRequest(f.io), EXIT.failed);
+    assert.deepEqual(f.stored(), winner);
+  });
+}
+
+test('#3256 retry返回未决或取消期间换代：仍不覆盖新请求', async () => {
+  for (const cancelled of [false, true]) {
+    const first = healthPendingIo();
+    await runRequest(first.io);
+    const f = healthPendingIo(first.stored(), { kind: 'retry' });
+    let winner;
+    f.io.releaseCheck = async () => {
+      const response = cancelled ? { status: null, error: 'cancelled' } : f.reply();
+      winner = { ...f.stored(), startedAt: '2026-10-19T11:00:00Z', release: {} };
+      f.replace(winner);
+      return response;
+    };
+    assert.equal(await runRequest(f.io), EXIT.failed);
+    assert.deepEqual(f.stored(), winner);
+  }
+});
+
+test('#3256 retry检查被取消/读不完整：保持blocked，既不清pending也不重发', async () => {
+  const first = healthPendingIo();
+  await runRequest(first.io);
+  const f = healthPendingIo(first.stored(), { kind: 'retry' });
+  f.io.releaseCheck = async () => ({ status: null, error: 'cancelled', stdout: '', stderr: '' });
+  assert.equal(await runRequest(f.io), EXIT.blocked);
+  assert.ok(f.stored().release.healthPending);
+  assert.deepEqual(f.log.release, []);
 });
 
 // —— 拒绝路径：每一条故意造出失败 ——
@@ -695,17 +932,20 @@ test('老现场（上一回老版本关了总开关、停在卡住）：再点�
 
 test('【故意造出的失败】上一回是新版本没成的（没关过总开关）、现在总开关被人关了：不带上一回的「开着」，不当成我们关的，发完不开', async () => {
   const { io, log, setMaster } = fakeIo();
-  io.readState = () => ({
-    ok: true,
-    state: {
-      schema: 1,
-      status: 'failed',
-      phase: 4,
-      pausedMaster: false,
-      before: { master: true, repos: null },
-      target: {},
-    },
-  });
+  io.readState = () =>
+    log.states.length
+      ? { ok: true, state: clone(log.states.at(-1)) }
+      : {
+          ok: true,
+          state: {
+            schema: 1,
+            status: 'failed',
+            phase: 4,
+            pausedMaster: false,
+            before: { master: true, repos: null },
+            target: {},
+          },
+        };
   setMaster('off');
   assert.equal(await runRequest(io), EXIT.done);
   assert.equal(engineOns(log).length, 0);
@@ -715,10 +955,13 @@ test('【故意造出的失败】上一回是新版本没成的（没关过总�
 
 test('【故意造出的失败】上一回是做完了的（done）、这一回引擎发版前是关着：不带上一回的「开着」，发完保持关', async () => {
   const { io, log, setMaster } = fakeIo();
-  io.readState = () => ({
-    ok: true,
-    state: { schema: 1, status: 'done', phase: 8, before: { master: true, repos: null }, target: {} },
-  });
+  io.readState = () =>
+    log.states.length
+      ? { ok: true, state: clone(log.states.at(-1)) }
+      : {
+          ok: true,
+          state: { schema: 1, status: 'done', phase: 8, before: { master: true, repos: null }, target: {} },
+        };
   setMaster('off');
   assert.equal(await runRequest(io), EXIT.done);
   assert.equal(engineOns(log).length, 0);
@@ -1700,6 +1943,33 @@ test('【#2728】同一个提交发版还没动手就没成：进度记录里连
   assert.equal(await runRequest(io), EXIT.failed);
   assert.equal(log.states.at(-1).untouchedFails, 0, 'release.sh 起了就不是还没动手');
   assert.equal(log.notes.at(-1).level, 'alert');
+});
+
+test('【#3278】动手后没成：startedFails 记一趟、不论哪个提交带到下一趟再加一，做完清零；飞书写明不重发同一个提交、更新的照发', async () => {
+  let prev = null;
+  const once = async (req, runRelease) => {
+    const { io, log } = fakeIo({
+      readRequest: () => ({ kind: 'ok', text: req }),
+      readState: () => ({ ok: true, state: prev }),
+      ciRuns: async () => ({ status: 200, body: ciBody({ head_sha: JSON.parse(req).sha }) }),
+      ...(runRelease ? { runRelease } : {}),
+    });
+    const code = await runRequest(io);
+    prev = log.states.at(-1);
+    return { code, log };
+  };
+  const boom = async () => ({ status: 1, stdout: '', stderr: '已自动退回' });
+  let r = await once(goodRequest(), boom);
+  assert.equal(r.code, EXIT.failed);
+  assert.equal(prev.startedFails, 1, '第一趟动手后没成记 1');
+  assert.equal(prev.untouchedFails, 0);
+  assert.match(r.log.pushes.at(-1), /这个提交不再自动重发；主线上更新的绿提交照常自动发/);
+  r = await once(goodRequest({ sha: 'b'.repeat(40) }), boom);
+  assert.equal(prev.startedFails, 2, '换了提交照样带过来、再加一');
+  assert.match(r.log.pushes.at(-1), /动手后已连败 2 趟，自动发版停下、开急修单/);
+  r = await once(goodRequest());
+  assert.equal(prev.status, 'done');
+  assert.equal(prev.startedFails, 0, '做完清零');
 });
 
 test('驾驶舱后端的单元放行请求目录这一处可写，没有放行进度目录（它只读）', () => {

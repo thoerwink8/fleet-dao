@@ -25,6 +25,7 @@ import type { AcceptanceDutyRecord, RouteChoice, Worktree } from '../ports.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import {
   type AbandonCommand,
+  AUTO_RETRY_PARK_KINDS,
   CI_POLICY_POLL_SECONDS,
   type ClosedIssueHoldToken,
   type GuardedPaths,
@@ -32,7 +33,9 @@ import {
   MAX_ROUND_RESETS,
   type MainSyncBudgetExhausted,
   type MergedTaskReceipt,
+  PARKED_RETRY_ACTOR,
   PAUSED_BY_HUMAN,
+  type ParkKind,
   type PauseCommand,
   type RepinCommand,
   type TaskPhase,
@@ -80,6 +83,12 @@ export class TaskRuntime {
   private abandon: AbandonCommand | null = null;
   /** 停下等人的次数（报警的去重键用；#3140 起 task-session 也读它，认「人点了继续才回来」的那一笔）。 */
   parks = 0;
+  /**
+   * 引擎已经续过的停下原文（#3294：停法 + 标题 + 原因）。同一原文再停下不再续，交人。只在内存里，由信号重放算得出来。
+   */
+  private readonly engineRetried = new Set<string>();
+  /** 正停着的这一次的原文键（patched('park-kind') 之后才写；没在停是空串）。 */
+  private parkKey = '';
   private closeHoldGeneration = 0;
   private closeHold: ClosedIssueHoldToken | null = null;
   private verifiedMerged: MergedTaskReceipt | null = null;
@@ -228,6 +237,15 @@ export class TaskRuntime {
   budgetGrants = 1;
   round = 0;
   verifyRound = 0;
+  /**
+   * 冷验收这个头从什么时候起一直回「过会儿再验」（#3281，工作流时间，重放算得出）：换了头、验出结论清掉；alerted 是这一段报过警没有。
+   */
+  verifyWaitSince: { head: string; at: number; alerted: boolean } | null = null;
+  /**
+   * 停在合并这一步后引擎复核到条件满足、自己醒来的那一次（#3281）：同一个头醒来后又因同一个原因停下，不再报警（第一次停下报过了），
+   * 免得条件看着满足、挂合并又不成时每小时报一条。人点「继续」、换头清掉。
+   */
+  mergeRecheckWoke: { head: string; title: string } | null = null;
   /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */
   private roundResets = 0;
   attemptSeq = 0;
@@ -255,7 +273,22 @@ export class TaskRuntime {
       lastProblem: null,
       tier: null,
     };
-    setHandler(taskContinueSignal, () => {
+    setHandler(taskContinueSignal, (command) => {
+      // 引擎续停（#3294）：只认正停着的这一次（编号对得上）、停法是引擎可续的、这一次还没被引擎续过；别的一律不理，不算一次「继续」
+      if (command?.by === PARKED_RETRY_ACTOR) {
+        const park = this.status.park;
+        if (
+          !park ||
+          park.seq !== command.parkSeq ||
+          !AUTO_RETRY_PARK_KINDS.includes(park.kind) ||
+          park.retriedBefore ||
+          this.engineRetried.has(this.parkKey)
+        )
+          return;
+        this.engineRetried.add(this.parkKey);
+        // 查询里也立刻标上：这一次在离开 parked 之前（报警还在发、状态还在落库）下一轮续停读到的就是「已续」，不再发、不再记操作记录
+        park.retriedBefore = true;
+      }
       this.continued += 1;
       this.closeHold = null;
       // 还没停下（没到检查点）就收到「继续」：撤掉这次暂停请求；已经停着的由 holdPaused 看 continued 放行
@@ -645,6 +678,55 @@ export class TaskRuntime {
     return woken ? 'woken' : 'timeout';
   }
 
+  /**
+   * 等路由等太久（#3281）：任务行写成 stalled，让出在跑名额（intake 不数 stalled 的），别的单照常接；alert 为真时报一次警。
+   * 路由那边变了（叫醒信号，记号之后到过一次就算）、到 seconds 秒、人点「继续」都醒，醒了写回 running，调用方再试一次。
+   * 不改阶段、不进关单保持（不是停下等人，到点自己会再试）。放弃抛 Abandoned。
+   */
+  async stallForRoute(
+    title: string,
+    detail: string,
+    seconds: number,
+    mark: number,
+    alert: boolean,
+  ): Promise<'woken' | 'timeout'> {
+    this.guard();
+    const before = this.continued;
+    this.status.lastProblem = title;
+    this.status.doing = `让出名额等路由：${title}`;
+    await this.mirror('stalled');
+    if (alert) {
+      this.parks += 1;
+      try {
+        await CancellationScope.nonCancellable(() =>
+          this.acts.raiseAlert({
+            taskId: this.input.taskId,
+            level: 'stuck',
+            title,
+            detail,
+            dedupeKey: `${workflowInfo().workflowId}:park:${this.parks}`,
+          }),
+        );
+      } catch (error) {
+        log.warn('报警没发出去，照样让出名额等路由', { title, error: String(error) });
+      }
+    }
+    const woken = await this.waiting('retry', `${title}（路由恢复、到点或「继续」就再试）`, () =>
+      condition(
+        () =>
+          this.abandon !== null ||
+          this.continued > before ||
+          this.routeWakes > mark ||
+          this.verifiedMerged !== null,
+        `${seconds} seconds`,
+      ),
+    );
+    this.guard();
+    this.status.lastProblem = null;
+    await this.mirror('running');
+    return woken ? 'woken' : 'timeout';
+  }
+
   /** 把一段长活动放进可取消的范围：放弃的信号一到就取消它（活动心跳，收得到），结果抛 Abandoned。 */
   async cancellable<T>(fn: () => Promise<T>, options: { pausable?: boolean } = {}): Promise<T> {
     // 放弃的信号可能在上一个 await（比如换阶段落库）期间就到了：那时还没有可取消的范围，running 里没有它，
@@ -720,7 +802,7 @@ export class TaskRuntime {
       );
       return 'auto';
     }
-    await this.park(title, reset ? detail : legacyDetail, level);
+    await this.park(title, reset ? detail : legacyDetail, level, 'rounds');
     // 点「继续」清掉没提交攒下的避让，和轮数清零同一处（#1408）。老历史没有这个标记，不碰。
     if (patched('avoid-empty-commit-route')) this.clearCommitAvoid();
     if (!reset) return 'legacy';
@@ -728,7 +810,7 @@ export class TaskRuntime {
     if (this.roundResets > MAX_ROUND_RESETS) {
       const handoff = `已继续 ${MAX_ROUND_RESETS} 次仍没过，交指挥官`;
       for (;;) {
-        await this.park(handoff, handoff);
+        await this.park(handoff, handoff, 'stuck', 'rounds');
       }
     }
     this.resetRounds();
@@ -811,9 +893,15 @@ export class TaskRuntime {
    * 停下等人：报警、写库、等「继续」或「放弃」。继续了回来，调用方从头再试这一步。
    * level 默认 stuck（提醒）。等合并检查红了、返工轮数用完传 decision，进「要你拍的」。
    */
-  async park(title: string, detail: string, level: 'stuck' | 'decision' = 'stuck'): Promise<void> {
+  async park(
+    title: string,
+    detail: string,
+    level: 'stuck' | 'decision' = 'stuck',
+    kind: ParkKind = 'other',
+  ): Promise<void> {
     this.guard();
     this.parks += 1;
+    this.notePark(kind, title, detail);
     const before = this.continued;
     const previous = this.status.phase;
     this.status.lastProblem = title;
@@ -834,14 +922,41 @@ export class TaskRuntime {
     } catch (error) {
       log.warn('报警没发出去，照样停下等人', { title, error: String(error) });
     }
-    await this.waiting('human', `${title}（等「继续」或「放弃」）`, () =>
-      condition(() => this.continued > before || this.abandon !== null || this.verifiedMerged !== null),
-    );
+    try {
+      await this.waiting('human', `${title}（等「继续」或「放弃」）`, () =>
+        condition(() => this.continued > before || this.abandon !== null || this.verifiedMerged !== null),
+      );
+    } finally {
+      this.leavePark();
+    }
     this.guard();
     this.closeHold = null;
     this.status.phase = previous;
     this.status.lastProblem = null;
     await this.mirror('running');
+  }
+
+  /**
+   * 记下正停着的这一次（#3294）：停法类别、第几次、几点、停在哪个头，同一原文引擎续过没有。纯状态，只给查询看（引擎续停读它）。
+   * 老历史没有这个标记：patched() 为假就不记，引擎续停看不到停法，一律不续。
+   */
+  private notePark(kind: ParkKind, title: string, detail: string): void {
+    if (!patched('park-kind')) return;
+    this.parkKey = `${kind}\n${title}\n${detail}`;
+    this.status.park = {
+      kind,
+      seq: this.parks,
+      at: iso(Date.now()),
+      title,
+      head: this.head,
+      retriedBefore: this.engineRetried.has(this.parkKey),
+    };
+  }
+
+  /** 这一次停下结束了（继续、放弃、自己醒）：查询里不再挂着它。 */
+  private leavePark(): void {
+    delete this.status.park;
+    this.parkKey = '';
   }
 
   /** 只在这个精确头的预算耗尽停下、再收到新「继续」后，续一段 MAX_MAIN_SYNCS 次；普通信号不预存预算。 */
@@ -874,13 +989,23 @@ export class TaskRuntime {
   }
 
   /**
-   * 停下等人，但每 CI_POLICY_POLL_SECONDS 秒问一次 leave。leave 回 true：恢复运行并回 left（仓已切成不强制 CI）。
+   * 停下等人，但每 CI_POLICY_POLL_SECONDS 秒（或 opts.pollSeconds）问一次 leave。leave 回 true：恢复运行并回 left（仓已切成不强制 CI）。
    * 人点「继续」回 stayed。放弃抛 Abandoned。还没离开就继续等，不每轮再报警。
-   * 只给 patched('repo-ci-policy') 的新路径用；老的 park() 仍是无限等。
+   * 只给 patched('repo-ci-policy')、patched('merge-park-recheck') 的新路径用；老的 park() 仍是无限等。
+   * opts 不给就是仓 CI 模式那一套（每 CI_POLICY_POLL_SECONDS 秒、等待那一行写「或仓改成不强制 CI」）；
+   * 停在合并这一步的传自己的间隔和说法（#3281）；alert 为 false 时不报警（同一原因已经报过）。
    */
-  async parkUnless(title: string, detail: string, leave: () => Promise<boolean>): Promise<'left' | 'stayed'> {
+  async parkUnless(
+    title: string,
+    detail: string,
+    leave: () => Promise<boolean>,
+    opts?: { pollSeconds: number; until: string; alert?: boolean; kind?: ParkKind },
+  ): Promise<'left' | 'stayed'> {
+    const pollSeconds = opts?.pollSeconds ?? CI_POLICY_POLL_SECONDS;
+    const until = opts?.until ?? '或仓改成不强制 CI';
     this.guard();
     this.parks += 1;
+    this.notePark(opts?.kind ?? 'other', title, detail);
     const before = this.continued;
     const previous = this.status.phase;
     this.status.lastProblem = title;
@@ -888,28 +1013,37 @@ export class TaskRuntime {
     this.enterCloseHold('parked');
     this.status.doing = `停下等人：${title}`;
     await this.mirror('stalled');
-    try {
-      await CancellationScope.nonCancellable(() =>
-        this.acts.raiseAlert({
-          taskId: this.input.taskId,
-          level: 'stuck',
-          title,
-          detail,
-          dedupeKey: `${workflowInfo().workflowId}:park:${this.parks}`,
-        }),
-      );
-    } catch (error) {
-      log.warn('报警没发出去，照样停下等人', { title, error: String(error) });
+    if (opts?.alert !== false) {
+      try {
+        await CancellationScope.nonCancellable(() =>
+          this.acts.raiseAlert({
+            taskId: this.input.taskId,
+            level: 'stuck',
+            title,
+            detail,
+            dedupeKey: `${workflowInfo().workflowId}:park:${this.parks}`,
+          }),
+        );
+      } catch (error) {
+        log.warn('报警没发出去，照样停下等人', { title, error: String(error) });
+      }
     }
     for (;;) {
-      const woken = await this.waiting('human', `${title}（等「继续」或「放弃」，或仓改成不强制 CI）`, () =>
-        condition(
-          () => this.continued > before || this.abandon !== null || this.verifiedMerged !== null,
-          `${CI_POLICY_POLL_SECONDS} seconds`,
-        ),
-      );
-      this.guard();
+      let woken: boolean;
+      try {
+        woken = await this.waiting('human', `${title}（等「继续」或「放弃」，${until}）`, () =>
+          condition(
+            () => this.continued > before || this.abandon !== null || this.verifiedMerged !== null,
+            `${pollSeconds} seconds`,
+          ),
+        );
+        this.guard();
+      } catch (error) {
+        this.leavePark();
+        throw error;
+      }
       if (woken && this.continued > before) {
+        this.leavePark();
         this.closeHold = null;
         this.status.phase = previous;
         this.status.lastProblem = null;
@@ -917,6 +1051,7 @@ export class TaskRuntime {
         return 'stayed';
       }
       if (await leave()) {
+        this.leavePark();
         this.closeHold = null;
         this.status.phase = previous;
         this.status.lastProblem = null;
@@ -986,6 +1121,8 @@ export class TaskRuntime {
           await this.park(
             next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason,
             failure.message,
+            'stuck',
+            stepParkKind(source, next, failure.code),
           );
           counters = ZERO;
           previousMessage = undefined;
@@ -1018,4 +1155,42 @@ export class TaskRuntime {
       context: { now: iso(Date.now()), ...stripUndefined(context) },
     });
   }
+}
+
+/**
+ * 挂合并、直接合并这两步里，发了新版也治不好的认证和权限（#3294 返工）。
+ * 规则：登录失效 AU2、没有权限 PM1（这两条没写 humanFix，以前被源步骤一刀切成 unarmed）。
+ * 码：规则表没单列、分流会落到「认不出」的 GitHub 401（AUTH_FAILED）和 403（FORBIDDEN），以及已经能对上规则的那几个码。
+ */
+const MERGE_CREDENTIAL_RULES = new Set(['AU2', 'PM1']);
+const MERGE_CREDENTIAL_CODES = new Set([
+  'auth_failed',
+  'auth_required',
+  'forbidden',
+  'permission_denied',
+  'workflows_permission',
+  'workflow_permission',
+]);
+
+function mergeCredentialStop(rule: string | undefined, failureCode: string | undefined): boolean {
+  if (rule !== undefined && MERGE_CREDENTIAL_RULES.has(rule)) return true;
+  const code = failureCode?.trim().toLowerCase();
+  return code !== undefined && MERGE_CREDENTIAL_CODES.has(code);
+}
+
+/**
+ * 失败分流判了停下的那一次算哪一类（#3294）：要人修的（有 humanFix）不续；挂合并、直接合并这两步算「自动合并没挂上」；
+ * 认不出走兜底梯（FB）的算「按临时的办」；别的不续。
+ * 认证、权限即使出在这两步也不算「没挂上」：令牌失效、没有权限，法国发了新版也续不上。
+ */
+export function stepParkKind(
+  source: string,
+  next: Pick<NextAction, 'humanFix' | 'rule'>,
+  failureCode?: string,
+): ParkKind {
+  if (next.humanFix) return 'other';
+  const mergeStep = source === 'armAutoMerge' || source === 'mergeNow';
+  if (mergeStep && mergeCredentialStop(next.rule, failureCode)) return 'other';
+  if (mergeStep) return 'unarmed';
+  return next.rule === 'FB' ? 'transient' : 'other';
 }

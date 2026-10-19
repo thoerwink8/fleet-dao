@@ -8,6 +8,9 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - `packages/engine/src/worker.ts`：起 worker；`packages/engine/src/workflows/index.ts` 是工作流打包入口（只导出 `helloWorkflow`、`taskWorkflow`）。
 - `packages/engine/src/workflows/task.ts`：任务工作流，按职责拆在同目录 `task-*.ts`，共用零件在 `kit.ts`。
 - `packages/engine/src/activities.ts`、`packages/engine/src/real/`：活动和真端口的装配（库、GitHub、会话、工作树），缺一项就不起。
+- `src/real/execution-start-reader.ts`：未接生产准入的只读前置；专用 Connection 显式限制接收大小、禁默认重试，按精确 run 读首个 Start 参数。`observed` 只证明读取结果，可信 ActivityInfo、任务与派发身份仍须由后续 gate 核验，不能当执行资格或终态证明。
+- `src/real/execution-legacy-admission.ts`：未接生产的 legacy 来源适配器；无参入口从当前 Local Activity Context 读精确 Start 并登记持久责任，返回允许/拒绝/未知，不生成 Workflow 失败、不支持 managed 派发或终态释放；在途 SQL 取消后可能提交责任，仍不得返回允许。
+- `src/real/github-reconcile.ts`：replay/poll 与 API 复用 store source publisher，`synced` 同样先发布再 accepted；失败留原投递账重放。`policy-source-origin.ts` 只读固定 `/etc/fleet-dao/api.env` 的唯一 `FLEET_PUBLIC_URL`，复用发布配置的 systemd parser，不装入环境或回显配置；缺失/重复/非法值使相关投递失败，不阻塞 engine 启动。旧已 accepted 版本保留去重，由标准 `fleet-api project refresh-policy-source` 补当前 open 头，不为已合 PR 补历史。
 - `src/real/self-check-ci.ts`：只给 fleet-dao 已有 PR 的同树标准源码测试识别规范 CI 覆盖；受信运行发布 SHA 绑定官方 Git 配置/锁合同，每台 test job 的实际 Node 声明须同 major/minor。未知、旧 CI、脏树/子模块、合同变更回本机路径；tsc 与自定义命令仍实跑，`coveredByCi` 不算本机 PASS。
 - `packages/engine/src/real/self-check.ts`：以工作树主人身份跑测试和 tsc；各段预算统一从 `packages/engine/src/self-check-budget.ts` 取，活动总限时只由这些预算相加。
 - `packages/engine/src/decisions/`：判断（纯函数）；`packages/engine/src/routing/`：选路；`packages/engine/src/jobs/`：引擎进程里的定时器（不是 Temporal 工作流，登记表在 `real/jobs.ts`）。
@@ -17,7 +20,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - `npx vitest run packages/engine/test/<文件>`。不要 Postgres（用到库的跑在 PGlite 上）。
 - 法国工具链 `/bin/sh` 和目录 chmod 权限测试在 Linux 跑真端口；Windows 用明示的命令/阶段错误夹具验证装配与失败分类，不代表引擎支持 Windows 生产宿主。Git 归档检出在两种系统都跑真实 git/tar，归档名相对私有 scratch，避免 GNU tar 把 Windows 盘符当远端。
-- Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；要真服务端时设 `FLEET_TEST_TEMPORAL_CLI`。
+- Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；真服务端先用 `pnpm test:temporal --cli <绝对路径>` 登记已安装 CLI，或设 `FLEET_TEST_TEMPORAL_CLI`，版本须与 `deploy/france.sh` 一致。正规选测和创建入口都核路径/版本，不隐式下载；SDK 创建阶段只报 `start-or-connect`，内部细分状态未知。
 - 重放：`packages/engine/test/replay.test.ts` 拿 `test/replay/fixtures/task-*.json` 对现在的代码重放。录新场景用 `node packages/engine/test/replay/record.ts <场景>`，已有的夹具拒绝覆盖。
 
 ## 常见坑

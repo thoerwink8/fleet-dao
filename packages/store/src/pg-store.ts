@@ -116,6 +116,7 @@ import type {
   Store,
   User,
 } from './ports.ts';
+import { pgTaskExecution } from './task-execution-pg.ts';
 import {
   addRepoAudit,
   autoDispatchAudit,
@@ -439,6 +440,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
 
   return {
     // —— 人 ——
+    ...pgTaskExecution(db, now),
     async getUser(id) {
       if (!isUuid(id)) return null;
       const [row] = await db.select().from(users).where(eq(users.id, id));
