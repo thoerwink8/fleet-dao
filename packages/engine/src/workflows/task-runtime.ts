@@ -286,6 +286,8 @@ export class TaskRuntime {
         )
           return;
         this.engineRetried.add(this.parkKey);
+        // 查询里也立刻标上：这一次在离开 parked 之前（报警还在发、状态还在落库）下一轮续停读到的就是「已续」，不再发、不再记操作记录
+        park.retriedBefore = true;
       }
       this.continued += 1;
       this.closeHold = null;

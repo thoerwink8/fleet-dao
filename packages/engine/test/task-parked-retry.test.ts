@@ -183,6 +183,43 @@ describe('停下等人按规则续一次（#3294）', { timeout: 120_000 }, () =
     expect(calls.arm).toBe(3);
   });
 
+  it('引擎续了之后、工作流还没离开 parked（报警还在发）：查询里已标 retriedBefore，下一轮续停不再发「继续」、不再记操作记录', async () => {
+    const world = createFakeWorld({ holdPorts: ['raiseAlert'] });
+    const { tasks, calls } = scripted({ arm: (n) => (n === 1 ? UNARMED : ARMED) });
+    let signals = 0;
+    let audits: string[] = [];
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const i = input();
+        const h = await start(q, i);
+        const first = await statusUntil(h, (st) => st.phase === 'parked', '停下，报警还挂着');
+        expect(first.park?.retriedBefore).toBe(false);
+        const job = jobOn(h, i, anHourAfter);
+        const send = job.deps.continueTask;
+        job.deps.continueTask = async (workflowId, command) => {
+          signals += 1;
+          return send(workflowId, command);
+        };
+        expect((await retryParkedTasks(job.deps)).continued).toHaveLength(1);
+        // 报警还没发完，工作流仍停着；查询已经标上这一次引擎续过了
+        const mid = await h.query(taskStatusQuery);
+        expect(mid.phase).toBe('parked');
+        expect(mid.park).toMatchObject({ seq: first.park?.seq, retriedBefore: true });
+        expect((await retryParkedTasks(job.deps)).continued).toEqual([]);
+        audits = job.audits;
+        world.releasePort('raiseAlert');
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(signals).toBe(1);
+    expect(audits).toHaveLength(1);
+    expect(calls.arm).toBe(2);
+  });
+
   it('改标准等人闸：停法记 standard，发了新版也不续；直接发引擎「继续」也不认，要人点', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({
