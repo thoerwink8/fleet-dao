@@ -24,7 +24,7 @@
 
 import type { SessionUser } from '@fleet-dao/adapters';
 import { type ChangedFile, STANDARD_PATHS_FILE, standardFiles } from '@fleet-dao/conventions';
-import type { RepoRef } from '@fleet-dao/github';
+import { isUnstableRefusal, type RepoRef } from '@fleet-dao/github';
 import { parseRepoProfile, type RepoProfile } from '@fleet-dao/shared';
 import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import type { EngineTasks } from '../activities.ts';
@@ -147,9 +147,14 @@ function checksRedWait(checks: MergeWaitChecks): Extract<MergeWait, { state: 'ch
   return { state: 'checks_red', failedChecks, detail };
 }
 
-/** GitHub 拒绝挂自动合并、因为 PR 已经满足全部合并条件（没什么可等的）。 */
-function isCleanStatus(error: unknown): boolean {
-  return /clean status/i.test(errMessage(error));
+/**
+ * GitHub 拒绝挂自动合并、因为 PR 现在就能合（没什么可等的）：clean 是全部检查都过了；unstable 是必过检查已满足、
+ * 只是非必过的还在跑或红了（引擎自己写验收状态、改正文会触发几条非必过的 job）。两种都走直接合，mergePr 只核必过检查。
+ * unstable 只认这个 mutation 自己回的那一条（github 包的 isUnstableRefusal，原始 errors 在 details 里），别的原样抛。
+ */
+function isMergeableNow(error: unknown): boolean {
+  if (/clean status/i.test(errMessage(error))) return true;
+  return isUnstableRefusal((error as { details?: unknown } | null)?.details);
 }
 
 /**
@@ -712,7 +717,6 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       if (pull.autoMerge) return (await contractCurrent()) ? { armed: true, merged: false } : contractChanged;
       // 挂之前现读这个头上的必过检查（#3206）：真红不写，交 checksRed。还在跑、没出现不拦（自动合并本来就是等它们）。
       // 没接上读检查不写、明说；读不成照抛（取消原样抛，可重试的交活动重试，下一次从头现读 PR、评审、检查）。
-      // unstable 临时拒绝（github 包标了可重试）也靠活动重试重入这里，不另起循环。
       const readChecksNow = deps.readChecks;
       if (!readChecksNow) {
         return {
@@ -838,8 +842,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         return { armed: true, merged: false };
       } catch (error) {
-        if (!isCleanStatus(error)) throw error;
-        // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
+        if (!isMergeableNow(error)) throw error;
+        // 必过条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核必过检查绿）。
         // 这一下若已取消，或挂的时候把期限用完，不再另开直接合。已经发出去的挂合并请求撤不回来。
         refuseLateArmWrite(ctx);
         if (!(await contractCurrent())) return contractChanged;

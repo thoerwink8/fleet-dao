@@ -69,6 +69,7 @@ export {
   type ClaimsGitHub,
   type CommitStatusInput,
   createClaimsGitHub,
+  isUnstableRefusal,
   type LatestStatus,
   type PullFacts,
   type PullReviewComment,
