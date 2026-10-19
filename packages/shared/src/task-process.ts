@@ -8,7 +8,8 @@
 // - 子代理里的条目（meta.subagent）跟着它出现的位置归当时那一步（步骤的序号范围连续，展开才好读），页面按 subOf 把它们挂在派它的
 //   调用下面。
 // - 调用和结果只按原生调用号（meta.callId）对：并行同名调用、结果倒序回来也不会错配。没有调用号的老记录不强配，那几条命令的成败
-//   写「结果未知」（legacyCalls 点名有几条）。
+//   写「结果未知」（legacyCalls 点名有几条）。孤立结果的失败、编辑事实记在结果出现的步骤，不编调用号或文件路径。
+//   非空调用号的调用、结果各只接受第一次；先收到的孤立结果不倒配到以后才出现的调用。概览和步骤共用这份接受规则。
 // - 命令数只数 Bash 一类（toolClass = command）。成败：结果 ok=false 是失败；Mirasim 一类流里没有退出码（exitKnown=false），
 //   「完成」不代表成功，记「结果未知」；没有结果的，这一笔还在跑就是「在跑」、已经结束就是「没读到结果」。
 // - 改了哪些文件、各增删几行：改文件的调用成功了（结果 ok≠false）才算改；增删行数读结果条目 meta 里的 added / removed（适配器按
@@ -190,7 +191,7 @@ export interface ProcessStep {
   /** 这一笔还在跑、还没回结果的命令。 */
   commandsRunning: number;
   reads: number;
-  /** 没成的调用（任何工具）。 */
+  /** 已接受的失败结果（任何工具，含无法配对到调用的结果）。 */
   callsFailed: number;
   /** 改了的文件，一个文件一行。 */
   files: FileChange[];
@@ -251,10 +252,44 @@ interface OpenStep {
   files: Map<string, FileChange>;
 }
 
-interface PendingCall {
-  step: OpenStep;
-  cls: ToolClass;
+interface AcceptedCall {
   row: ProcessRow;
+  result?: ProcessRow;
+}
+
+const callIdOf = (row: ProcessRow): string | undefined => row.callId || undefined;
+
+/** 输入已按 seq 排序。原生号各只接受一次；没有号的不猜配，保留每条结果的已知事实。 */
+function resolveTools(rows: readonly ProcessRow[]) {
+  const calls = new Map<number, AcceptedCall>();
+  const results = new Map<number, ProcessRow | undefined>();
+  const byId = new Map<string, AcceptedCall>();
+  const seenResults = new Set<string>();
+  for (const row of rows) {
+    const id = callIdOf(row);
+    if (row.kind === 'tool_call') {
+      if (id !== undefined && byId.has(id)) continue;
+      const call: AcceptedCall = { row };
+      calls.set(row.seq, call);
+      if (id !== undefined) byId.set(id, call);
+    } else if (row.kind === 'tool_result') {
+      if (id !== undefined && seenResults.has(id)) continue;
+      if (id !== undefined) seenResults.add(id);
+      const call = id === undefined ? undefined : byId.get(id);
+      if (call) call.result = row;
+      results.set(row.seq, call?.row);
+    }
+  }
+  return { calls, results };
+}
+
+/** 成功编辑结果的已知行数，不依赖调用号或文件路径；没有行数必须保留未计数。 */
+function editCounts(row: ProcessRow): { added: number; removed: number; uncounted: number } {
+  return {
+    added: row.added ?? 0,
+    removed: row.removed ?? 0,
+    uncounted: row.added === undefined && row.removed === undefined ? 1 : 0,
+  };
 }
 
 const ms = (iso: string): number => new Date(iso).getTime();
@@ -312,8 +347,8 @@ export function cutSteps(input: readonly ProcessRow[], opts: CutOptions): RunPro
   const hasMainSay = rows.some((r) => r.kind === 'assistant' && !r.sub);
   const open: OpenStep[] = [];
   let cur: OpenStep | undefined;
-  const calls = new Map<string, PendingCall>();
-  const resolved = new Set<string>();
+  const tools = resolveTools(rows);
+  const callSteps = new Map<number, OpenStep>();
   let legacyCalls = 0;
 
   const begin = (row: ProcessRow, title: string | null, fromCall: boolean): OpenStep => {
@@ -348,24 +383,24 @@ export function cutSteps(input: readonly ProcessRow[], opts: CutOptions): RunPro
     s.lastAt = row.at;
     if (row.kind === 'tool_call') {
       s.hasCalls = true;
+      if (!tools.calls.has(row.seq)) continue;
+      callSteps.set(row.seq, s);
       s.step.calls++;
       if (row.sub) s.step.subCalls++;
       const cls = toolClass(row.tool);
       if (cls === 'command') s.step.commands++;
       if (cls === 'read') s.step.reads++;
-      if (row.callId === undefined) {
+      if (callIdOf(row) === undefined) {
         // 老记录没有调用号：不强配结果，命令的成败写「结果未知」
         legacyCalls++;
         if (cls === 'command') s.step.commandsUnknown++;
-      } else {
-        calls.set(row.callId, { step: s, cls, row });
       }
     } else if (row.kind === 'tool_result') {
       s.hasCalls = true;
-      const call = row.callId === undefined ? undefined : calls.get(row.callId);
-      if (!call || resolved.has(row.callId as string)) continue;
-      resolved.add(row.callId as string);
-      applyResult(call, row);
+      if (!tools.results.has(row.seq)) continue;
+      const call = tools.results.get(row.seq);
+      const owner = call === undefined ? s : callSteps.get(call.seq);
+      if (owner) applyResult(owner, call, row);
     } else if (row.kind === 'error') {
       s.step.failed = true;
     } else if (row.kind === 'result' && row.ok === false) {
@@ -374,10 +409,12 @@ export function cutSteps(input: readonly ProcessRow[], opts: CutOptions): RunPro
   }
 
   // 没等到结果的命令：这一笔还在跑 = 在跑；已经结束 = 没读到结果。改文件没等到结果的不算改（不知道成没成）
-  for (const [id, call] of calls) {
-    if (resolved.has(id) || call.cls !== 'command') continue;
-    if (opts.running) call.step.step.commandsRunning++;
-    else call.step.step.commandsUnknown++;
+  for (const call of tools.calls.values()) {
+    if (call.result || callIdOf(call.row) === undefined || toolClass(call.row.tool) !== 'command') continue;
+    const step = callSteps.get(call.row.seq)?.step;
+    if (!step) continue;
+    if (opts.running) step.commandsRunning++;
+    else step.commandsUnknown++;
   }
 
   const steps = open.map((o, i) => {
@@ -405,35 +442,36 @@ export function cutSteps(input: readonly ProcessRow[], opts: CutOptions): RunPro
     legacyCalls,
   };
 
-  function applyResult(call: PendingCall, row: ProcessRow): void {
-    const s = call.step.step;
+  function applyResult(owner: OpenStep, call: ProcessRow | undefined, row: ProcessRow): void {
+    const s = owner.step;
+    const cls = toolClass(call === undefined ? row.tool : call.tool);
     if (row.ok === false) {
       s.callsFailed++;
       s.failed = true;
-      if (call.cls === 'command') s.commandsFailed++;
+      if (call !== undefined && cls === 'command') s.commandsFailed++;
       return;
     }
-    if (call.cls === 'command' && row.exitKnown === false) {
+    if (call !== undefined && cls === 'command' && row.exitKnown === false) {
       s.commandsUnknown++;
       return;
     }
-    if (call.cls === 'edit') recordEdit(call.step, call.row, row);
+    if (cls === 'edit') recordEdit(owner, call, row);
   }
 }
 
-/** 改文件的调用成功了：算一个文件；增删行数读结果里的，没记的计入 uncounted。 */
-function recordEdit(step: OpenStep, call: ProcessRow, result: ProcessRow): void {
-  const path = call.text.trim();
+/** 保留成功编辑结果的行数事实；可信调用里有路径才列文件，孤立结果不造路径。 */
+function recordEdit(step: OpenStep, call: ProcessRow | undefined, result: ProcessRow): void {
+  const counts = editCounts(result);
+  step.step.added += counts.added;
+  step.step.removed += counts.removed;
+  step.step.uncounted += counts.uncounted;
+  const path = call?.text.trim();
   if (!path) return;
   const f = step.files.get(path) ?? { path, edits: 0 };
   f.edits++;
   if (result.added !== undefined || result.removed !== undefined) {
     f.added = (f.added ?? 0) + (result.added ?? 0);
     f.removed = (f.removed ?? 0) + (result.removed ?? 0);
-    step.step.added += result.added ?? 0;
-    step.step.removed += result.removed ?? 0;
-  } else {
-    step.step.uncounted++;
   }
   step.files.set(path, f);
 }
@@ -476,9 +514,9 @@ function sumStepCounts(steps: readonly ProcessStep[]): ProcessCounts {
   };
 }
 
-// —— 一笔的小计（任务详情用）：库里一条 GROUP BY run_id 现算出一行，这里折成页面要的数 ——
+// —— 一笔的小计（任务详情用）：库里批量取轻量行，同一个接受规则现算，不读原文 ——
 
-/** 库里按 run_id 分组算出的一行（db 的 readRunTallies）：命令的成败拆成几个互不重叠的数，在跑还是没记结果由这里按这一笔在不在跑定。 */
+/** 一笔的统计事实：命令分类互不重叠，在跑还是没记结果由 tallyOf 按这一笔的状态定。 */
 export interface RunTallyRow {
   /** 一共几条记录。 */
   entries: number;
@@ -493,7 +531,7 @@ export interface RunTallyRow {
   commandsLegacy: number;
   reads: number;
   callsFailed: number;
-  /** 成功的改文件调用数，和其中没记行数的。 */
+  /** 已知成功的编辑结果数（含无法配对的），和其中没记行数的。 */
   editsOk: number;
   editsUncounted: number;
   /** 成功的改文件结果里记下的增删行数合计（不是 PR 的净改动，见 numstat）。 */
@@ -519,6 +557,60 @@ export interface RunTally {
   removed: number;
   firstAt?: string | undefined;
   lastAt?: string | undefined;
+}
+
+/** 概览与 cutSteps 共用调用/结果接受规则；无原文也能算，不借文件路径推测结果。 */
+export function tallyProcessRows(input: readonly ProcessRow[]): RunTallyRow {
+  const rows = [...input].sort((a, b) => a.seq - b.seq);
+  const tools = resolveTools(rows);
+  let firstAt: string | undefined;
+  let lastAt: string | undefined;
+  for (const row of rows) {
+    if (firstAt === undefined || row.at < firstAt) firstAt = row.at;
+    if (lastAt === undefined || row.at > lastAt) lastAt = row.at;
+  }
+  const tally: RunTallyRow = {
+    entries: rows.length,
+    calls: tools.calls.size,
+    commands: 0,
+    commandsFailed: 0,
+    commandsExitUnknown: 0,
+    commandsNoResult: 0,
+    commandsLegacy: 0,
+    reads: 0,
+    callsFailed: 0,
+    editsOk: 0,
+    editsUncounted: 0,
+    added: 0,
+    removed: 0,
+    ...(firstAt === undefined ? {} : { firstAt }),
+    ...(lastAt === undefined ? {} : { lastAt }),
+  };
+  for (const { row, result } of tools.calls.values()) {
+    const cls = toolClass(row.tool);
+    if (cls === 'read') tally.reads++;
+    if (cls !== 'command') continue;
+    tally.commands++;
+    if (callIdOf(row) === undefined) tally.commandsLegacy++;
+    else if (result === undefined) tally.commandsNoResult++;
+    else if (result.ok === false) tally.commandsFailed++;
+    else if (result.exitKnown === false) tally.commandsExitUnknown++;
+  }
+  for (const row of rows) {
+    if (!tools.results.has(row.seq)) continue;
+    if (row.ok === false) {
+      tally.callsFailed++;
+      continue;
+    }
+    const call = tools.results.get(row.seq);
+    if (toolClass(call === undefined ? row.tool : call.tool) !== 'edit') continue;
+    const counts = editCounts(row);
+    tally.editsOk++;
+    tally.editsUncounted += counts.uncounted;
+    tally.added += counts.added;
+    tally.removed += counts.removed;
+  }
+  return tally;
 }
 
 /** 一行折成小计：这一笔还在跑，没有结果的命令算「在跑」，收场了算「结果未知」；老记录没调用号的、没有退出码的都算结果未知。 */

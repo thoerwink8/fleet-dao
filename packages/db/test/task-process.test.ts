@@ -1,8 +1,8 @@
-// 任务页「过程」的读法（#3140）：一笔的轻量行、几笔的小计（GROUP BY run_id）、最后一句话、回合、引擎在会话外做的事。
-// 小计的 SQL 和 shared 的 cutSteps 对同一份记录要算出同一个数（两套算法一套口径）。
+// 任务页「过程」的读法（#3140）：一笔的轻量行、几笔的批量小计、最后一句话、回合、引擎在会话外做的事。
+// 概览和 shared 的 cutSteps 共享调用/结果规则，对同一份记录要算出同一个数。
 import { randomUUID } from 'node:crypto';
 import { cutSteps, tallyOf } from '@fleet-dao/shared';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { recordTaskRound } from '../src/queries/pipeline-health.ts';
 import { appendRunTranscript, type TranscriptRow } from '../src/queries/run-transcript.ts';
 import { startRun } from '../src/queries/runs.ts';
@@ -137,7 +137,137 @@ describe('readRunProcessRows', () => {
   });
 });
 
-describe('readRunTallies：一条 GROUP BY run_id，和 cutSteps 同一个口径', () => {
+describe('readRunTallies：单次批量轻量读取，和 cutSteps 同一个口径', () => {
+  it('库读取失败原样抛错，不把不可用变成没有记录或零', async () => {
+    const select = vi.spyOn(t.db, 'select').mockImplementationOnce(() => {
+      throw Error('read unavailable');
+    });
+    try {
+      await expect(readRunTallies(t.db, [randomUUID()])).rejects.toThrow('read unavailable');
+    } finally {
+      select.mockRestore();
+    }
+  });
+  it('历史笔失败/编辑事实保留，旧命令不与失败双计；空ID、重复、孤立、并行倒序和缺结果逐项与步骤守恒', async () => {
+    const cases: Row[][] = [
+      [
+        { seq: 0, sec: 0, kind: 'tool_call', tool: 'Bash', text: 'legacy' },
+        { seq: 1, sec: 1, kind: 'tool_result', tool: 'Bash', ok: false, text: 'failed' },
+        { seq: 2, sec: 2, kind: 'tool_call', tool: 'Edit', text: 'unknown-path.ts' },
+        { seq: 3, sec: 3, kind: 'tool_result', tool: 'Edit', ok: true, text: 'done' },
+      ],
+      [
+        { seq: 0, sec: 0, kind: 'tool_call', tool: 'Bash', text: 'empty', meta: { callId: '' } },
+        {
+          seq: 1,
+          sec: 1,
+          kind: 'tool_result',
+          tool: 'Bash',
+          ok: false,
+          text: 'failed',
+          meta: { callId: '' },
+        },
+        {
+          seq: 2,
+          sec: 2,
+          kind: 'tool_result',
+          tool: 'Edit',
+          ok: true,
+          text: 'orphan',
+          meta: { callId: 'orphan', added: 2 },
+        },
+        {
+          seq: 3,
+          sec: 3,
+          kind: 'tool_result',
+          tool: 'Edit',
+          ok: true,
+          text: 'duplicate',
+          meta: { callId: 'orphan', added: 2 },
+        },
+      ],
+      [
+        { seq: 0, sec: 0, kind: 'tool_call', tool: 'Bash', text: 'first', meta: { callId: 'a' } },
+        { seq: 1, sec: 1, kind: 'tool_call', tool: 'Bash', text: 'duplicate', meta: { callId: 'a' } },
+        { seq: 2, sec: 2, kind: 'tool_call', tool: 'Bash', text: 'second', meta: { callId: 'b' } },
+        { seq: 3, sec: 3, kind: 'tool_result', tool: 'Bash', ok: true, text: 'b', meta: { callId: 'b' } },
+        { seq: 4, sec: 4, kind: 'tool_result', tool: 'Bash', ok: false, text: 'a', meta: { callId: 'a' } },
+        {
+          seq: 5,
+          sec: 5,
+          kind: 'tool_result',
+          tool: 'Bash',
+          ok: true,
+          text: 'duplicate a',
+          meta: { callId: 'a' },
+        },
+      ],
+      [
+        { seq: 0, sec: 0, kind: 'tool_call', tool: 'Bash', text: 'unknown exit', meta: { callId: 'm' } },
+        {
+          seq: 1,
+          sec: 1,
+          kind: 'tool_result',
+          tool: 'Bash',
+          ok: true,
+          text: 'done',
+          meta: { callId: 'm', exitKnown: false },
+        },
+        { seq: 2, sec: 2, kind: 'tool_call', tool: 'Bash', text: 'pending', meta: { callId: 'pending' } },
+        { seq: 3, sec: 3, kind: 'tool_call', tool: 'Edit', text: '', meta: { callId: 'blank-path' } },
+        {
+          seq: 4,
+          sec: 4,
+          kind: 'tool_result',
+          tool: 'Edit',
+          ok: true,
+          text: '',
+          meta: { callId: 'blank-path' },
+        },
+      ],
+    ];
+    const ids: string[] = [];
+    for (const rows of cases) {
+      const id = await newRun();
+      ids.push(id);
+      await appendRunTranscript(t.db, id, toRows(rows));
+    }
+    const tallies = await readRunTallies(t.db, ids);
+    for (const id of ids) {
+      const raw = tallies.get(id);
+      expect(raw).toBeDefined();
+      if (!raw) throw Error('missing tally');
+      for (const running of [false, true]) {
+        const tally = tallyOf(raw, running);
+        const cut = cutSteps(await readRunProcessRows(t.db, id), { running });
+        const { files: _files, ...counts } = cut.counts;
+        expect(tally).toMatchObject(counts);
+        expect(tally.commands).toBe(
+          tally.commandsDone + tally.commandsFailed + tally.commandsUnknown + tally.commandsRunning,
+        );
+      }
+    }
+    expect(tallies.get(ids[0] as string)).toMatchObject({
+      commands: 1,
+      commandsFailed: 0,
+      commandsLegacy: 1,
+      callsFailed: 1,
+      editsUncounted: 1,
+    });
+    expect(tallies.get(ids[1] as string)).toMatchObject({
+      commandsFailed: 0,
+      commandsLegacy: 1,
+      callsFailed: 1,
+      added: 2,
+    });
+    expect(tallies.get(ids[2] as string)).toMatchObject({ commands: 2, commandsFailed: 1, callsFailed: 1 });
+    expect(tallies.get(ids[3] as string)).toMatchObject({
+      commandsExitUnknown: 1,
+      commandsNoResult: 1,
+      editsUncounted: 1,
+    });
+  });
+
   it('每一类互不重叠：成败、没结果、没调用号、没退出码、读文件、改文件的行数；和 cutSteps 对同一份记录算出同一个数', async () => {
     const id = await newRun();
     await appendRunTranscript(t.db, id, toRows(MIXED));
