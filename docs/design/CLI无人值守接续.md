@@ -31,4 +31,8 @@ Codex 原生子代理没有 `FLEET_WORKER` 时，也不能凭继承的旧用户�
 
 Codex 宿主的钩子进程可能没有终端 CODEX_THREAD_ID / CODEX_SESSION_ID。专用登记入口（continuation-start、continuation-progress-codex、stop-codex）明确家族后，只用本次事件 session_id 选来源；存在环境号时仍要求一致。直接 on 不借事件号或其他会话兜底，Claude 共有入口不因存在 CODEX_HOME 就切换家族。可信 agent_id 在共用 SessionStart 的快慢实现及内部无人值守提示全链透传；子代理开场不读创始人队列。prompt-log 不把子提示记成创始人历史，work-watch 不读父派工、不claim reported、不请求rewake；两者不新增 Codex 登记。
 
+非根容量隔离（#3293）：入口把既有 authority 的 allowed/machine/unknown 传给回执层，不重新推断身份。allowed 继续使用原 session 指纹文件和逐行 session 校验；machine/unknown 共用一个有界诊断池，外层记录真实 authority，内层保留原事件的 session、agent、generation 等指纹。没有判定的 catch 上下文默认 unknown；合法根开关命令显式传原判定，仍进原会话日志。池名只是存储键，不替换事件身份，池中事件不能作为根执行、下一轮或结果消费证据。
+
+池使用64个零作保留存储键，兼容旧入口的64位十六进制目录名准入；它不是任何已知固定 session 字符串的 SHA-256，不提供可构造的合法 session 原像。根写入若恰好得到该键则明确 CONFLICT；诊断写入若遇原路径已有空文件、旧会话格式或其他不兼容内容也拒绝，不接管、迁移或修改旧文件。诊断读取用独立严格白名单，原会话读取不接受池格式。池与原日志共用128份/258目录项总准入和2MiB/4096行/单行2KiB上限及普通文件、链接、锁与关闭失败保护；新池也可能满额，失败只报未知，不改变原钩子业务决策。所有既有历史原位保留，根自身工具事件仍可耗尽其原日志；本单不轮转、不恢复旧满额根的追加，不重新on或补generation，#3247自然验收独立保留。
+
 来源读取在目录遍历、文件打开前、fd打开后和首行读完后核对后代目录与文件的非链接类型、realpath 包含关系及 dev/ino，目录换链接、文件换代均明确未知。Node 当前接口不提供本次路径遍历的原子 openat 合同；这些前后身份核验不声称能抵御本地恶意攻击者的 ABA 替换，也不作为根续轮或结果消费证明。

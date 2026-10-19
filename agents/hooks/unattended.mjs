@@ -514,7 +514,14 @@ export function main(argv, io) {
       writeFileSync(join(dir, `${id}.off`), 'off\n');
       rmSync(join(dir, `${id}.queue.json`), { force: true });
       noteReceipt(
-        receiptContext(dir, { session_id: id }, previous.ok ? previous.state : null, 'Command', env),
+        receiptContext(
+          dir,
+          { session_id: id },
+          previous.ok ? previous.state : null,
+          'Command',
+          env,
+          authority.kind,
+        ),
         { phase: 'window', decision: 'off' },
       );
       io.out('无人值守已关。');
@@ -543,7 +550,7 @@ export function main(argv, io) {
         note: '',
         deliveredResults: previous.ok ? (previous.state?.deliveredResults ?? []) : [],
       });
-      noteReceipt(receiptContext(dir, { session_id: id }, { generation }, 'Command', env), {
+      noteReceipt(receiptContext(dir, { session_id: id }, { generation }, 'Command', env, authority.kind), {
         phase: 'window',
         decision: 'on',
       });
@@ -564,7 +571,7 @@ export function main(argv, io) {
       return 1;
     }
     writeState(dir, id, { ...r.state, state: cmd === 'done' ? 'done' : 'paused', note });
-    noteReceipt(receiptContext(dir, { session_id: id }, r.state, 'Command', env), {
+    noteReceipt(receiptContext(dir, { session_id: id }, r.state, 'Command', env, authority.kind), {
       phase: 'window',
       decision: cmd === 'done' ? 'done' : 'needs-you',
     });
