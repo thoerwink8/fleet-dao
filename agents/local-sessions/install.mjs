@@ -17,7 +17,8 @@
 // 改这里之前必须知道：
 // - settings.json 读不出（坏 JSON）就停、不覆盖：那是创始人的设置，写坏了所有会话都受影响。改之前留一份 settings.json.local-sessions.bak。
 // - 每一步成没成都打出来；有一步没成退出码非 0，不说「装好了」。
-// - 只支持 Windows（创始人的电脑）；别的系统明说没装定时推送，给出要自己加的 crontab 那一行。
+// - Windows 用计划任务 / 启动文件夹；macOS 用当前用户的 LaunchAgent，每 2 分钟直接跑 push.mjs，不另起循环。
+//   不支持的平台在写配置之前拒绝。launchctl 查不到与没查成分开；卸载没成功就保留脚本和配置，供重试。
 // - 两路只留一路：计划任务建成了就把自启那一套（vbs、循环进程）清掉；退回自启时先结束旧循环再起新的，重装不会有两个循环
 //   （loop.mjs 自己也有 loop.pid 锁）。旧版本手工放在 ~/.fleet-dao/local-sessions/loop.mjs（根上）的，重装时删掉。
 // - 启动文件夹只认调用方传进来的 startupDir（main 里按 %APPDATA% 算）：测试不传，就不会碰到真的启动文件夹。
@@ -34,7 +35,9 @@ import {
   HOOK_EVENTS,
   loopPidPath,
   messageOf,
+  PUSH_EVERY_MS,
   pushOnce,
+  readConfig,
   STARTUP_VBS,
   statusPath,
   TASK_NAME,
@@ -44,6 +47,89 @@ import { readLoopPid, isAlive as realIsAlive } from './loop.mjs';
 
 const SCRIPTS = ['lib.mjs', 'heartbeat.mjs', 'push.mjs', 'loop.mjs', 'detach.mjs'];
 const OURS = /[\\/]\.fleet-dao[\\/]local-sessions[\\/]bin[\\/]/;
+export const LAUNCH_AGENT_LABEL = 'org.fleet-dao.local-sessions';
+/** @param {string} home */
+export const launchAgentPath = (home) => join(home, 'Library', 'LaunchAgents', `${LAUNCH_AGENT_LABEL}.plist`);
+
+/** @param {string} text */
+const xml = (text) =>
+  text
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;');
+
+/** @param {string} nodePath @param {string} pushPath */
+export const launchAgentPlist = (nodePath, pushPath) => `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>${LAUNCH_AGENT_LABEL}</string>
+  <key>ProgramArguments</key><array><string>${xml(nodePath)}</string><string>${xml(pushPath)}</string></array>
+  <key>StartInterval</key><integer>${PUSH_EVERY_MS / 1000}</integer>
+</dict></plist>
+`;
+
+/** @param {number | undefined} uid */
+function launchDomain(uid) {
+  const id = uid ?? process.getuid?.();
+  if (!Number.isSafeInteger(id) || id === undefined || id <= 0)
+    throw new Error('认不出当前普通用户 UID；请在这台 Mac 登录后的用户会话里运行，不用 sudo');
+  return `gui/${id}`;
+}
+
+/**
+ * 先确认域可读，再认精确服务的不存在；权限、命令缺失、域不存在均不能当作没安装。
+ * @param {Run} run @param {string} domain @param {string} home
+ * @returns {{ state: 'loaded' | 'missing' | 'failed', detail: string }}
+ */
+function inspectLaunchAgent(run, domain, home) {
+  const plist = launchAgentPath(home);
+  const hasFile = existsSync(plist);
+  if (hasFile) {
+    const text = readFileSync(plist, 'utf8');
+    // 只认自己完整生成的格式；局部认 Label/Arguments 会漏掉 Program 覆盖、重复键或第二个根 dict。
+    // Node 可以升级换路径，所以只抽出这个值，其余字节必须完全吻合，不解析任意 plist。
+    const node = text.match(/<key>ProgramArguments<\/key><array><string>(\/[^<]+)<\/string>/)?.[1];
+    const canonical = node
+      ? launchAgentPlist('FLEET_NODE_PATH', join(binDir(home), 'push.mjs')).replace(
+          'FLEET_NODE_PATH',
+          () => node,
+        )
+      : undefined;
+    if (text !== canonical) return { state: 'failed', detail: `${plist} 无法确认为本机会话上报的文件，不改` };
+  }
+  const d = run('/bin/launchctl', ['print', domain]);
+  if (d.status !== 0) return { state: 'failed', detail: `launchctl 读不到 ${domain}（${d.status}）` };
+  const r = run('/bin/launchctl', ['print', `${domain}/${LAUNCH_AGENT_LABEL}`]);
+  if (r.status === 0)
+    return hasFile
+      ? { state: 'loaded', detail: `${domain}/${LAUNCH_AGENT_LABEL} 已加载` }
+      : {
+          state: 'failed',
+          detail: `${domain}/${LAUNCH_AGENT_LABEL} 已加载但缺少本任务 plist，归属没查成，不改`,
+        };
+  if (r.status === 113 && r.stderr.includes(`Could not find service "${LAUNCH_AGENT_LABEL}"`))
+    return { state: 'missing', detail: `${domain}/${LAUNCH_AGENT_LABEL} 未加载` };
+  return { state: 'failed', detail: `launchctl 没查成 ${domain}/${LAUNCH_AGENT_LABEL}（${r.status}）` };
+}
+
+/** @param {Run} run @param {string} domain @param {string} home @returns {Step} */
+function unloadLaunchAgent(run, domain, home) {
+  const found = inspectLaunchAgent(run, domain, home);
+  if (found.state === 'failed') return { ok: false, step: '定时推送', detail: found.detail };
+  if (found.state === 'missing') return { ok: true, step: '定时推送', detail: found.detail };
+  const r = run('/bin/launchctl', ['bootout', `${domain}/${LAUNCH_AGENT_LABEL}`]);
+  if (r.status !== 0)
+    return { ok: false, step: '定时推送', detail: `launchctl bootout 没成（${r.status}），保留文件供重试` };
+  const after = inspectLaunchAgent(run, domain, home);
+  return {
+    ok: after.state === 'missing',
+    step: '定时推送',
+    detail:
+      after.state === 'missing' ? `已卸载 ${domain}/${LAUNCH_AGENT_LABEL}` : `卸载后没核成：${after.detail}`,
+  };
+}
 
 /** @typedef {Record<string, unknown>} Obj */
 /** @typedef {(cmd: string, args: string[]) => { status: number | null, stdout: string, stderr: string }} Run */
@@ -237,7 +323,7 @@ export const vbsOf = (nodePath, pushPath) =>
   `CreateObject("WScript.Shell").Run """${nodePath}"" ""${pushPath}""", 0, False\r\n`;
 
 /**
- * @typedef {{ startupDir?: string, isAlive?: (pid: number) => boolean, kill?: (pid: number) => void }} LoopOpts
+ * @typedef {{ startupDir?: string, isAlive?: (pid: number) => boolean, kill?: (pid: number) => void, uid?: number }} LoopOpts
  * @param {{ home: string, srcDir: string, url?: string, token?: string, machine?: string, platform?: NodeJS.Platform, run?: Run, nodePath?: string, fetchImpl?: typeof fetch, now?: () => Date, startLoop?: (nodePath: string, loopPath: string) => void, waitMs?: number, sleep?: (ms: number) => Promise<void> } & LoopOpts} o
  * @returns {Promise<Step[]>}
  */
@@ -250,6 +336,18 @@ export async function install(o) {
     steps.push({ ok: false, step, detail });
     return steps;
   };
+  if (platform !== 'win32' && platform !== 'darwin')
+    return fail('平台', `不支持 ${platform}，没有安装或改配置`);
+  let domain = '';
+  if (platform === 'darwin') {
+    try {
+      domain = launchDomain(o.uid);
+      const found = inspectLaunchAgent(run, domain, o.home);
+      if (found.state === 'failed') return fail('定时推送', found.detail);
+    } catch (e) {
+      return fail('定时推送', messageOf(e));
+    }
+  }
 
   // ① 配置：先核，缺了就不往下装（装了钩子却推不出去，只会让看板一直写没上报）
   const cfgPath = configPath(o.home);
@@ -360,11 +458,27 @@ export async function install(o) {
         detail: `用的是启动文件夹自启（${reason}）：${startupVbs} 登录时隐藏起 loop.mjs；现在已起一个循环（进程 ${pid}），每 2 分钟推一次`,
       });
     }
-  } else {
-    return fail(
-      '定时推送',
-      `这台不是 Windows，没装定时推送：自己加一行 crontab「*/2 * * * * ${nodePath} ${pushPath}」`,
-    );
+  } else if (platform === 'darwin') {
+    const plist = launchAgentPath(o.home);
+    try {
+      const stopped = unloadLaunchAgent(run, domain, o.home);
+      if (!stopped.ok) return fail(stopped.step, stopped.detail);
+      writeAtomic(plist, launchAgentPlist(nodePath, pushPath));
+      const enabled = run('/bin/launchctl', ['enable', `${domain}/${LAUNCH_AGENT_LABEL}`]);
+      if (enabled.status !== 0)
+        return fail('定时推送', `launchctl enable 没成（${enabled.status}），保留文件供重试`);
+      const r = run('/bin/launchctl', ['bootstrap', domain, plist]);
+      if (r.status !== 0) return fail('定时推送', `launchctl bootstrap 没成（${r.status}），保留文件供重试`);
+      const found = inspectLaunchAgent(run, domain, o.home);
+      if (found.state !== 'loaded') return fail('定时推送', `加载后没核成：${found.detail}`);
+      steps.push({
+        ok: true,
+        step: '定时推送',
+        detail: `用的是 LaunchAgent ${LAUNCH_AGENT_LABEL}，登录后每 2 分钟推一次`,
+      });
+    } catch (e) {
+      return fail('定时推送', `LaunchAgent 没装成：${messageOf(e)}`);
+    }
   }
 
   // 当场推一次
@@ -405,13 +519,41 @@ export function uninstall(o) {
   const run = o.run ?? realRun;
   /** @type {Step[]} */
   const steps = [];
+  if (platform !== 'win32' && platform !== 'darwin')
+    return [{ ok: false, step: '平台', detail: `不支持 ${platform}，没有卸载或改配置` }];
   const settingsPath = join(o.home, '.claude', 'settings.json');
+  if (platform === 'darwin') {
+    // 先验证可读；坏 JSON 时连当前任务也不卸载。写入仍可能失败，摘钩成功前保留全部文件供重试。
+    try {
+      readSettings(settingsPath);
+    } catch (e) {
+      return [{ ok: false, step: '钩子', detail: messageOf(e) }];
+    }
+    try {
+      const stopped = unloadLaunchAgent(run, launchDomain(o.uid), o.home);
+      steps.push(stopped);
+      if (!stopped.ok) return steps;
+    } catch (e) {
+      steps.push({ ok: false, step: '自启', detail: messageOf(e) });
+      return steps;
+    }
+  }
   try {
     const { settings, removed } = removeHooks(readSettings(settingsPath));
     if (removed > 0) writeSettings(settingsPath, settings);
     steps.push({ ok: true, step: '钩子', detail: `摘了 ${removed} 条` });
   } catch (e) {
     steps.push({ ok: false, step: '钩子', detail: messageOf(e) });
+    if (platform === 'darwin') return steps;
+  }
+  if (platform === 'darwin') {
+    try {
+      rmSync(launchAgentPath(o.home), { force: true });
+      steps.push({ ok: true, step: '自启', detail: `已清理 ${launchAgentPath(o.home)}` });
+    } catch (e) {
+      steps.push({ ok: false, step: '自启', detail: messageOf(e) });
+      return steps;
+    }
   }
   if (platform === 'win32') {
     const startupVbs = o.startupDir ? join(o.startupDir, STARTUP_VBS) : undefined;
@@ -458,19 +600,23 @@ export function uninstall(o) {
  * 现在装没装、用的哪种定时方式、循环进程活不活、上次推得怎样（不打印通行证）。
  * @param {string} home
  * @param {{ platform?: NodeJS.Platform, run?: Run } & LoopOpts} [o]
- * @returns {string[]}
+ * @returns {{ ok: boolean, lines: string[] }}
  */
-export function status(home, o = {}) {
+export function statusReport(home, o = {}) {
   const platform = o.platform ?? process.platform;
   const run = o.run ?? realRun;
   const isAlive = o.isAlive ?? realIsAlive;
   const lines = [];
+  let ok = true;
+  if (platform !== 'win32' && platform !== 'darwin')
+    return { ok: false, lines: [`平台：不支持 ${platform}，没查成定时推送`] };
   const settingsPath = join(home, '.claude', 'settings.json');
   try {
     const s = readSettings(settingsPath);
     const n = JSON.stringify(s.hooks ?? {}).match(/local-sessions\/bin\/heartbeat\.mjs/g)?.length ?? 0;
     lines.push(`钩子：${n === 0 ? '没登记' : `登记了 ${n} 条`}`);
   } catch (e) {
+    ok = false;
     lines.push(`钩子：没查成（${messageOf(e)}）`);
   }
   if (platform === 'win32') {
@@ -496,19 +642,41 @@ export function status(home, o = {}) {
             : `没在跑（loop.pid 里的进程 ${pid} 已不在）`;
       lines.push(`循环进程：${state}`);
     }
+  } else if (platform === 'darwin') {
+    try {
+      const found = inspectLaunchAgent(run, launchDomain(o.uid), home);
+      ok = ok && found.state === 'loaded' && existsSync(launchAgentPath(home));
+      lines.push(`定时推送：LaunchAgent ${found.state === 'failed' ? '没查成：' : ''}${found.detail}`);
+      lines.push(`登录自启文件：${existsSync(launchAgentPath(home)) ? launchAgentPath(home) : '没装'}`);
+    } catch (e) {
+      ok = false;
+      lines.push(`定时推送：没查成（${messageOf(e)}）`);
+    }
   }
   try {
-    const c = JSON.parse(readFileSync(configPath(home), 'utf8'));
-    lines.push(`推到：${isObj(c) && typeof c.url === 'string' ? c.url : '认不出'}`);
-  } catch {
-    lines.push('推到：没配（没有 config.json）');
+    const c = readConfig(home);
+    lines.push(`推到：${c.url}`);
+  } catch (e) {
+    if (platform === 'darwin') ok = false;
+    lines.push(`推到：没查成（${messageOf(e)}）`);
   }
   try {
-    lines.push(`上次推：${readFileSync(statusPath(home), 'utf8').trim()}`);
+    const saved = readFileSync(statusPath(home), 'utf8').trim();
+    if (platform === 'darwin') {
+      const push = JSON.parse(saved);
+      if (!isObj(push) || push.ok !== true || typeof push.at !== 'string') ok = false;
+    }
+    lines.push(`上次推：${saved}`);
   } catch {
+    if (platform === 'darwin') ok = false;
     lines.push('上次推：还没推过');
   }
-  return lines;
+  return { ok, lines };
+}
+
+/** @param {string} home @param {{ platform?: NodeJS.Platform, run?: Run } & LoopOpts} [o] */
+export function status(home, o = {}) {
+  return statusReport(home, o).lines;
 }
 
 /** @param {string[]} argv */
@@ -540,8 +708,9 @@ async function main() {
   } else if (cmd === 'uninstall') {
     steps = uninstall({ home, ...loopOpts });
   } else if (cmd === 'status') {
-    for (const l of status(home, loopOpts)) process.stdout.write(`${l}\n`);
-    return 0;
+    const report = statusReport(home, loopOpts);
+    for (const l of report.lines) process.stdout.write(`${l}\n`);
+    return report.ok ? 0 : 1;
   } else {
     process.stderr.write(
       '用法：install --url <法国地址> [--machine 名字]（通行证放 FLEET_NODE_TOKEN）| refresh [--home 目录] | uninstall | status\n',
