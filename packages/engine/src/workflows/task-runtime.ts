@@ -232,6 +232,11 @@ export class TaskRuntime {
    * 冷验收这个头从什么时候起一直回「过会儿再验」（#3281，工作流时间，重放算得出）：换了头、验出结论清掉；alerted 是这一段报过警没有。
    */
   verifyWaitSince: { head: string; at: number; alerted: boolean } | null = null;
+  /**
+   * 停在合并这一步后引擎复核到条件满足、自己醒来的那一次（#3281）：同一个头醒来后又因同一个原因停下，不再报警（第一次停下报过了），
+   * 免得条件看着满足、挂合并又不成时每小时报一条。人点「继续」、换头清掉。
+   */
+  mergeRecheckWoke: { head: string; title: string } | null = null;
   /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */
   private roundResets = 0;
   attemptSeq = 0;
@@ -927,11 +932,20 @@ export class TaskRuntime {
   }
 
   /**
-   * 停下等人，但每 CI_POLICY_POLL_SECONDS 秒问一次 leave。leave 回 true：恢复运行并回 left（仓已切成不强制 CI）。
+   * 停下等人，但每 CI_POLICY_POLL_SECONDS 秒（或 opts.pollSeconds）问一次 leave。leave 回 true：恢复运行并回 left（仓已切成不强制 CI）。
    * 人点「继续」回 stayed。放弃抛 Abandoned。还没离开就继续等，不每轮再报警。
-   * 只给 patched('repo-ci-policy') 的新路径用；老的 park() 仍是无限等。
+   * 只给 patched('repo-ci-policy')、patched('merge-park-recheck') 的新路径用；老的 park() 仍是无限等。
+   * opts 不给就是仓 CI 模式那一套（每 CI_POLICY_POLL_SECONDS 秒、等待那一行写「或仓改成不强制 CI」）；
+   * 停在合并这一步的传自己的间隔和说法（#3281）；alert 为 false 时不报警（同一原因已经报过）。
    */
-  async parkUnless(title: string, detail: string, leave: () => Promise<boolean>): Promise<'left' | 'stayed'> {
+  async parkUnless(
+    title: string,
+    detail: string,
+    leave: () => Promise<boolean>,
+    opts?: { pollSeconds: number; until: string; alert?: boolean },
+  ): Promise<'left' | 'stayed'> {
+    const pollSeconds = opts?.pollSeconds ?? CI_POLICY_POLL_SECONDS;
+    const until = opts?.until ?? '或仓改成不强制 CI';
     this.guard();
     this.parks += 1;
     const before = this.continued;
@@ -941,24 +955,26 @@ export class TaskRuntime {
     this.enterCloseHold('parked');
     this.status.doing = `停下等人：${title}`;
     await this.mirror('stalled');
-    try {
-      await CancellationScope.nonCancellable(() =>
-        this.acts.raiseAlert({
-          taskId: this.input.taskId,
-          level: 'stuck',
-          title,
-          detail,
-          dedupeKey: `${workflowInfo().workflowId}:park:${this.parks}`,
-        }),
-      );
-    } catch (error) {
-      log.warn('报警没发出去，照样停下等人', { title, error: String(error) });
+    if (opts?.alert !== false) {
+      try {
+        await CancellationScope.nonCancellable(() =>
+          this.acts.raiseAlert({
+            taskId: this.input.taskId,
+            level: 'stuck',
+            title,
+            detail,
+            dedupeKey: `${workflowInfo().workflowId}:park:${this.parks}`,
+          }),
+        );
+      } catch (error) {
+        log.warn('报警没发出去，照样停下等人', { title, error: String(error) });
+      }
     }
     for (;;) {
-      const woken = await this.waiting('human', `${title}（等「继续」或「放弃」，或仓改成不强制 CI）`, () =>
+      const woken = await this.waiting('human', `${title}（等「继续」或「放弃」，${until}）`, () =>
         condition(
           () => this.continued > before || this.abandon !== null || this.verifiedMerged !== null,
-          `${CI_POLICY_POLL_SECONDS} seconds`,
+          `${pollSeconds} seconds`,
         ),
       );
       this.guard();
