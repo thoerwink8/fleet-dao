@@ -1,4 +1,9 @@
 import { ACCEPTANCE_USAGE, parseAcceptanceArgs, runAcceptance } from './acceptance-cli.ts';
+import {
+  CHECKOUT_HISTORY_USAGE,
+  parseCheckoutHistoryArgs,
+  runCheckoutHistory,
+} from './checkout-history-cli.ts';
 import { parseQuoteArgs, QUOTE_USAGE, runQuote } from './quote-cli.ts';
 // 后端的管理命令（法国上以 root 经 packages/api/bin/fleet-api 跑，见 docs/ops.md 第九节「账密登录」「让 AI 接活」）。
 //   set-password <飞书名或用户 id> [--username <用户名>]
@@ -1144,6 +1149,7 @@ const USAGES: Record<string, string> = {
   notify: NOTIFY_USAGE,
   quote: QUOTE_USAGE,
   acceptance: ACCEPTANCE_USAGE,
+  'checkout-history': CHECKOUT_HISTORY_USAGE,
   'historical-audit': HISTORICAL_AUDIT_USAGE,
 };
 
@@ -1300,8 +1306,47 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   if (command === 'project') return runProjectCommand(rest, deps);
   if (command === 'emergency-issue') return runEmergencyIssueCommand(rest, deps);
   if (command === 'notify') return runNotifyCommand(rest, deps);
+  if (command === 'checkout-history') return runCheckoutHistoryCommand(rest, deps);
   deps.err(Object.values(USAGES).join('\n'));
   return 2;
+}
+
+async function runCheckoutHistoryCommand(rest: readonly string[], deps: CliDeps): Promise<number> {
+  let args: { archive: boolean };
+  try {
+    args = parseCheckoutHistoryArgs(rest);
+  } catch (error) {
+    deps.out(JSON.stringify({ ok: false, reason: 'usage', why: errMessage(error) }));
+    return 2;
+  }
+  try {
+    const body = await (deps.readStdin ?? readAllStdin)();
+    const { store, close } = await deps.openStore(databaseUrl(deps.env));
+    try {
+      deps.out(
+        JSON.stringify(
+          await runCheckoutHistory({
+            store,
+            body,
+            archive: args.archive,
+            operator: operatorName(deps.env),
+          }),
+        ),
+      );
+      return 0;
+    } finally {
+      await close();
+    }
+  } catch (error) {
+    deps.out(
+      JSON.stringify({
+        ok: false,
+        reason: args.archive ? 'error' : 'preflight_failed',
+        why: errMessage(error),
+      }),
+    );
+    return 1;
+  }
 }
 
 /** attention --json：只读；参数不对退出码 2（打 JSON），读不成退出码 1（打 JSON）。 */

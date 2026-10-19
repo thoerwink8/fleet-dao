@@ -1098,6 +1098,22 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit
 
 命令沿用 wrapper 提供的 `FLEET_OPS_OPERATOR`，不冒充创始人。现读 GitHub 的仓、PR、合并状态、head 和证据 issue，任一失败都不处置。成功只把通知标为处理，并在同一事务追加 `notification.historical_audit`（target `notification:<id>`），留下原正文、真实 GitHub 合并人/提交、证据 issue 快照、缺口及责任。正常合并账与 backfill 完全不改；输出明确历史队列仍未证明。相同处置重复执行不新增审计，不同处置或通知已被其他入口处理则拒绝；退出码 0 成功、1 未做成、2 参数不对。核查现有 `/audit` 操作记录及通知的原始正文，不把通知已处理解释成“队列已证明”。
 
+### 已结束任务的 checkout 历史归档
+
+checkout 失败卡不能用 `historical-audit` 冒充，也不能靠重派任务证明恢复。使用私有 `fleet-api checkout-history`：标准输入给通知、仓、任务、原工作流/run、Temporal run、PR 和 head 的精确身份；默认只读预检，不写库：
+
+```sh
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history < /受控目录/checkout-history.json
+```
+
+预检通过后，人工把完整预检快照补齐 `raisedAt`、通知正文/link、仓 id、run 的 segment/起止/结局/PR、操作者、原因、证据、缺口、责任和固定 `conclusion: "historical_unproven"`，再显式执行：
+
+```sh
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history --archive < /受控目录/checkout-history-archive.json
+```
+
+归档在 Store 事务内（先锁 runs 表挡住并发新增，含 task_id 为空的历史兼容 run）重新核对全部身份、通知代次、通知标题/正文确为该目标该 head 的检出失败报警、原 run 确为该任务该 PR 已终态的 verify 段、终态、无在途 run、merged PR/head，并只撤旧通知、追加 `notification.checkout_history_archive` 审计；失败写审计会回滚撤卡。输出明确“历史归档、检出恢复未证实”，不修改任务、run、PR、正常冷验收账或验收责任。重复同一完整请求幂等，不同快照冲突；实际生产处置前仍须由指挥官独立核验。
+
 ### 命令行工具升级（#1971）
 
 法国上的 Claude Code、Codex 是 2026-09 用 root 的 `npm i -g` 装进 `/usr/lib/node_modules` 的（二进制在 `/usr/bin`）。Claude Code 官方的自动更新在这种「目录不归运行用户写」的装法下不生效。Cursor、reclaude 有各自的更新路径，不在这里升。Grok 装在会话用户家里（`~/.grok/bin/grok`），会话里关了自动更新，这里在空闲或发版窗口里替它跑 `grok update`。
