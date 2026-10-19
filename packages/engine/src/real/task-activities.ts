@@ -72,8 +72,6 @@ export const MERGE_POLL_EVERY_MS = 20_000;
  * 10 × 20 秒，加上每次合并前的核对，留在 git 档 5 分钟的活动时限之内。
  */
 export const MERGE_PENDING_RETRIES = 10;
-/** 挂自动合并被 unstable 临时拒绝、必过检查读着全绿：隔 MERGE_POLL_EVERY_MS 现读后重挂，最多再试这么多次（共 6 × 20 秒，在 git 档 5 分钟时限内）。 */
-export const ARM_UNSTABLE_RETRIES = 6;
 
 /** 等合并这一下读到的必过检查。红了才带 failed。pending 名字只含还在跑的，没出现的不放；不给就是没分开报。 */
 export interface MergeWaitChecks {
@@ -643,59 +641,65 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     async armAutoMerge(input: ArmAutoMergeInput, ctx: PortContext): Promise<ArmAutoMergeResult> {
       const repo = refOf(input.repo);
       const { prNumber, expectedHead } = input;
-      // 每次挂之前的现读：已合、已关、草稿、换头、还挂着「要求改」、已经挂上，都在这里收口；都不是才交回 PR 去挂。
-      // unstable 临时拒绝之后重试前也走同一段，不拿上一轮的快照去写。
-      const recheck = async (): Promise<
-        { done: ArmAutoMergeResult } | { pull: Awaited<ReturnType<typeof gh.claims.readPull>> }
-      > => {
-        const fresh = await mapped(() => gh.claims.readPull(repo, prNumber));
-        if (fresh.merged) {
-          const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
-          if (booked.otherHead !== undefined) {
-            return { done: { armed: false, merged: false, why: booked.otherHead } };
-          }
-          await auditLateReview(repo, prNumber, ctx);
-          return {
-            done: {
-              armed: false,
-              merged: true,
-              ...(booked.mergeCommit === undefined ? {} : { mergeCommit: booked.mergeCommit }),
-            },
-          };
+      const pull = await mapped(() => gh.claims.readPull(repo, prNumber));
+      if (pull.merged) {
+        const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
+        if (booked.otherHead !== undefined) {
+          return { armed: false, merged: false, why: booked.otherHead };
         }
-        if (fresh.state !== 'open') {
-          return { done: { armed: false, merged: false, why: `PR #${prNumber} 已经关了` } };
-        }
-        if (fresh.headSha !== expectedHead) {
-          return {
-            done: {
-              armed: false,
-              merged: false,
-              why: `PR #${prNumber} 的头是 ${short(fresh.headSha)}，不是引擎验过、推上去的 ${short(expectedHead)}（有人改过）`,
-              headMoved: fresh.headSha,
-            },
-          };
-        }
-        if (fresh.draft) {
-          return { done: { armed: false, merged: false, why: `PR #${prNumber} 还是草稿，不挂自动合并` } };
-        }
-        const held = await reviewHold(repo, fresh);
-        if (held.length > 0) {
-          return {
-            done: {
-              armed: false,
-              merged: false,
-              why: `PR #${prNumber} 上还挂着 ${held.length} 条正式「要求改」的评审，不挂自动合并`,
-              reviewChanges: held,
-            },
-          };
-        }
-        if (fresh.autoMerge) return { done: { armed: true, merged: false } };
-        return { pull: fresh };
-      };
-      const first = await recheck();
-      if ('done' in first) return first.done;
-      let pull = first.pull;
+        await auditLateReview(repo, prNumber, ctx);
+        return {
+          armed: false,
+          merged: true,
+          ...(booked.mergeCommit === undefined ? {} : { mergeCommit: booked.mergeCommit }),
+        };
+      }
+      if (pull.state !== 'open') {
+        return { armed: false, merged: false, why: `PR #${prNumber} 已经关了` };
+      }
+      if (pull.headSha !== expectedHead) {
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎验过、推上去的 ${short(expectedHead)}（有人改过）`,
+          headMoved: pull.headSha,
+        };
+      }
+      if (pull.draft) {
+        return { armed: false, merged: false, why: `PR #${prNumber} 还是草稿，不挂自动合并` };
+      }
+      const held = await reviewHold(repo, pull);
+      if (held.length > 0) {
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 上还挂着 ${held.length} 条正式「要求改」的评审，不挂自动合并`,
+          reviewChanges: held,
+        };
+      }
+      if (pull.autoMerge) return { armed: true, merged: false };
+      // 挂之前现读这个头上的必过检查（#3206）：真红不写，交 checksRed。还在跑、没出现不拦（自动合并本来就是等它们）。
+      // 没接上读检查不写、明说；读不成照抛（取消原样抛，可重试的交活动重试，下一次从头现读 PR、评审、检查）。
+      // unstable 临时拒绝（github 包标了可重试）也靠活动重试重入这里，不另起循环。
+      const readChecksNow = deps.readChecks;
+      if (!readChecksNow) {
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 头 ${expectedHead} 的必过检查没查成：没接上读检查，不挂自动合并`,
+        };
+      }
+      const before = await mapped(() => readChecksNow(repo, expectedHead, ctx.signal));
+      const redBefore = before.failed.filter((item) => item.name.trim().length > 0);
+      if (before.overall === 'red' || redBefore.length > 0) {
+        const red = checksRedWait({ ...before, failed: redBefore });
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 头 ${expectedHead} 的必过检查红了，不挂自动合并：${red.detail}`,
+          checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
+        };
+      }
 
       // clean 之后的直接合。recheckCi 只在「现读已经是绿」时再走一次同一个 mergePr，避免检查刚转绿就停。
       const acceptDirectMerge = async (
@@ -779,134 +783,43 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         };
       };
 
-      // GitHub 对 enablePullRequestAutoMerge 回 UNPROCESSABLE「unstable」（#3198 同头全绿后也出现过）：只对这一条临时拒绝，
-      // 现读检查之后有界再试。真红交 checksRed，还在跑交有界等待（checksPending），没查成就明说；全绿仍被拒才在这里
-      // 隔 pollEveryMs 重挂，最多 ARM_UNSTABLE_RETRIES 次、不越过截止，用尽带着原始 type/path/message 交回。
-      const unstableWhy = (error: unknown, attempt: number, extra: string): string => {
-        const errors = (error as { details?: { errors?: unknown } } | null)?.details?.errors;
-        return `GitHub 拒绝挂自动合并（enablePullRequestAutoMerge，unstable）：${errMessage(error)}；原始 errors：${JSON.stringify(errors ?? null)}；PR #${prNumber} 头 ${expectedHead}，已试 ${attempt} 次${extra}`;
-      };
-      const onUnstable = async (error: unknown, attempt: number): Promise<ArmAutoMergeResult | 'retry'> => {
-        const why = unstableWhy(error, attempt, '');
-        const readChecks = deps.readChecks;
-        if (!readChecks) return { armed: false, merged: false, why: `${why}；必过检查没查成：没接上读检查` };
-        let checks: MergeWaitChecks;
-        try {
-          checks = await mapped(() => readChecks(repo, expectedHead, ctx.signal));
-        } catch (readError) {
-          if (ctx.signal.aborted) throw readError;
-          return { armed: false, merged: false, why: `${why}；必过检查没查成：${errMessage(readError)}` };
-        }
-        const failed = checks.failed.filter((item) => item.name.trim().length > 0);
-        if (checks.overall === 'red' || failed.length > 0) {
-          const red = checksRedWait({ ...checks, failed });
+      try {
+        // 读过 PR、读过评审了：已经挂上的在上面返回，不会走到这里。已取消或期限已过就不再开新的写。
+        refuseLateArmWrite(ctx);
+        await mapped(() => gh.claims.enableAutoMerge(repo, pull, ctx));
+        // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
+        // 这一次之后交的评审，事件那头读到的就是已挂着（会撤）。两头合起来不留「检查完才到」的窗口。
+        const after = await reviewHold(repo, { ...pull, autoMerge: true });
+        if (after.length > 0) {
           return {
             armed: false,
             merged: false,
-            why,
-            checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
+            why: `PR #${prNumber} 挂上自动合并后读到 ${after.length} 条正式「要求改」的评审，已撤掉`,
+            reviewChanges: after,
           };
         }
-        const unreadable = unreadableChecksDetail(checks, prNumber, expectedHead);
-        if (unreadable !== null) return { armed: false, merged: false, why: `${why}；${unreadable}` };
-        const names = inProgressNames(checks);
-        if (checks.overall === 'pending' && names.length > 0) {
-          return {
-            armed: false,
-            merged: false,
-            why,
-            checksPending: { names, head: expectedHead, detail: why },
-          };
-        }
-        if (checks.overall !== 'green') {
-          return { armed: false, merged: false, why: `${why}；必过检查没查成：读到 ${checks.overall}` };
-        }
-        // 必过检查读着全绿、GitHub 仍说 unstable：多半是它那边的合并状态还没算完。
-        const left = writeBudgetMs(ctx);
-        if (attempt > ARM_UNSTABLE_RETRIES || (left !== null && left < 1)) {
-          return {
-            armed: false,
-            merged: false,
-            why: unstableWhy(error, attempt, '；重试用尽或期限已到，不再重挂'),
-          };
-        }
-        log('挂自动合并被 unstable 拒，现读后再试', { prNumber, attempt });
-        await sleep(left === null ? pollEveryMs : Math.min(pollEveryMs, left), ctx.signal);
-        return 'retry';
-      };
-
-      // 每次挂之前现读这个头上的必过检查：真红不写，交 checksRed。还在跑、没出现不拦（自动合并本来就是等它们）。
-      // 没接上读检查、读不成都不写：没接上明说没挂，读不成照抛（取消原样抛；可重试的交活动重试，下一次从头现读）。
-      const redBeforeWrite = async (): Promise<ArmAutoMergeResult | null> => {
-        const readChecks = deps.readChecks;
-        if (!readChecks) {
-          return {
-            armed: false,
-            merged: false,
-            why: `PR #${prNumber} 头 ${expectedHead} 的必过检查没查成：没接上读检查，不挂自动合并`,
-          };
-        }
-        const checks = await mapped(() => readChecks(repo, expectedHead, ctx.signal));
-        const failed = checks.failed.filter((item) => item.name.trim().length > 0);
-        if (checks.overall !== 'red' && failed.length === 0) return null;
-        const red = checksRedWait({ ...checks, failed });
-        return {
-          armed: false,
-          merged: false,
-          why: `PR #${prNumber} 头 ${expectedHead} 的必过检查红了，不挂自动合并：${red.detail}`,
-          checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
-        };
-      };
-
-      for (let attempt = 1; ; attempt += 1) {
-        const redNow = await redBeforeWrite();
-        if (redNow !== null) return redNow;
-        try {
-          // 读过 PR、读过评审、读过检查了：已经挂上的在上面返回，不会走到这里。已取消或期限已过就不再开新的写。
+        return { armed: true, merged: false };
+      } catch (error) {
+        if (!isCleanStatus(error)) throw error;
+        // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
+        // 这一下若已取消，或挂的时候把期限用完，不再另开直接合。已经发出去的挂合并请求撤不回来。
+        refuseLateArmWrite(ctx);
+        let merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
+        // 只是检查没跑完（没有红的、没出现的）：多半是验收结果刚写、合并闸在同一个头上重跑（#3165）。
+        // 在这一步里隔一会儿再合。每一轮再看取消和绝对截止，过了就不再发新的合并写。
+        // 等满、或仍不是「只是没跑完」，交给后面的分类：还在跑交有界等待，落后主线才同步。
+        for (
+          let i = 0;
+          !merged.merged && merged.ciPendingOnly === true && i < MERGE_PENDING_RETRIES;
+          i += 1
+        ) {
+          const left = writeBudgetMs(ctx);
+          if (left !== null && left < 1) break;
+          await sleep(left === null ? pollEveryMs : Math.min(pollEveryMs, left), ctx.signal);
           refuseLateArmWrite(ctx);
-          await mapped(() => gh.claims.enableAutoMerge(repo, pull, ctx));
-          // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
-          // 这一次之后交的评审，事件那头读到的就是已挂着（会撤）。两头合起来不留「检查完才到」的窗口。
-          const after = await reviewHold(repo, { ...pull, autoMerge: true });
-          if (after.length > 0) {
-            return {
-              armed: false,
-              merged: false,
-              why: `PR #${prNumber} 挂上自动合并后读到 ${after.length} 条正式「要求改」的评审，已撤掉`,
-              reviewChanges: after,
-            };
-          }
-          return { armed: true, merged: false };
-        } catch (error) {
-          if (error instanceof PortError && error.code === 'AUTO_MERGE_UNSTABLE') {
-            const next = await onUnstable(error, attempt);
-            if (next !== 'retry') return next;
-            const again = await recheck();
-            if ('done' in again) return again.done;
-            pull = again.pull;
-            continue;
-          }
-          if (!isCleanStatus(error)) throw error;
-          // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
-          // 这一下若已取消，或挂的时候把期限用完，不再另开直接合。已经发出去的挂合并请求撤不回来。
-          refuseLateArmWrite(ctx);
-          let merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
-          // 只是检查没跑完（没有红的、没出现的）：多半是验收结果刚写、合并闸在同一个头上重跑（#3165）。
-          // 在这一步里隔一会儿再合。每一轮再看取消和绝对截止，过了就不再发新的合并写。
-          // 等满、或仍不是「只是没跑完」，交给后面的分类：还在跑交有界等待，落后主线才同步。
-          for (
-            let i = 0;
-            !merged.merged && merged.ciPendingOnly === true && i < MERGE_PENDING_RETRIES;
-            i += 1
-          ) {
-            const left = writeBudgetMs(ctx);
-            if (left !== null && left < 1) break;
-            await sleep(left === null ? pollEveryMs : Math.min(pollEveryMs, left), ctx.signal);
-            refuseLateArmWrite(ctx);
-            merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
-          }
-          return acceptDirectMerge(merged, true);
+          merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
         }
+        return acceptDirectMerge(merged, true);
       }
     },
 

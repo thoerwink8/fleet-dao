@@ -125,8 +125,8 @@ export interface ClaimsGitHub {
    */
   enableAutoMerge(
     repo: RepoRef,
-    pull: Pick<PullFacts, 'number' | 'nodeId'>,
-    ctx?: ActivityContext,
+    pull: Pick<PullFacts, 'number' | 'nodeId'> & { headSha?: string | undefined },
+    ctx?: ActivityContext & { attempt?: number | undefined },
   ): Promise<void>;
   /** 关掉 PR（分支不动）。已经关了的不报错。 */
   closePull(repo: RepoRef, number: number): Promise<void>;
@@ -474,10 +474,22 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
           },
         );
       } catch (error) {
-        // 只认这个 mutation 自己回的 unstable 临时拒绝：码改成 AUTO_MERGE_UNSTABLE，消息和原始 errors 原样保留，仍不可重试
-        // （调用方现读之后有界再试，不交给通用重试）。
-        if (isGitHubError(error, 'GRAPHQL_ERROR') && isUnstableRefusal(error.details))
-          throw new GitHubError('AUTO_MERGE_UNSTABLE', error.message, { details: error.details });
+        // 只认这个 mutation 自己回的那一条 UNPROCESSABLE unstable 临时拒绝：标成可重试，交活动既有的有界重试
+        // （git 档 3 次、退避），每次重入 armAutoMerge 从头现读 PR、评审、检查。码和原消息不变，原始 errors 原样留在
+        // details 里，消息后面补上 type/path、PR、头、第几次尝试，重试用尽停下时一眼看得出。别的一律原样抛。
+        if (isGitHubError(error, 'GRAPHQL_ERROR') && isUnstableRefusal(error.details)) {
+          const attempt = typeof ctx?.attempt === 'number' ? ctx.attempt : null;
+          const head = typeof pull.headSha === 'string' ? pull.headSha : null;
+          throw new GitHubError(
+            error.code,
+            `${error.message}（UNPROCESSABLE enablePullRequestAutoMerge；PR #${pull.number}${head ? ` 头 ${head}` : ''}${attempt === null ? '' : `，第 ${attempt} 次尝试`}；临时拒绝，交活动有界重试）`,
+            {
+              retryable: true,
+              details: { ...(error.details as object), pull: pull.number, head, attempt },
+              ...(error.status === undefined ? {} : { status: error.status }),
+            },
+          );
+        }
         throw error;
       }
     },
