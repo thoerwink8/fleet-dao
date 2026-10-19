@@ -210,10 +210,12 @@ export function latestBudget(root, target, newLegacy) {
 /** @template T @param {string} root @param {string} session @param {(value:unknown)=>value is T} validate @returns {SnapshotRead<T>} */
 function readCurrent(root, session, validate) {
   const path = join(root, `${session}.latest-v2`);
+  let existed = false;
   /** @type {number|undefined} */ let fd;
   /** @type {SnapshotRead<T>} */ let result = { ok: false, code: 'IO' };
   try {
     const before = regular(path);
+    existed = true;
     if (!before.size || before.size >= MAX_LATEST_BYTES) result = { ok: false, code: 'CORRUPT' };
     else {
       fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -250,7 +252,10 @@ function readCurrent(root, session, validate) {
       }
     }
   } catch (error) {
-    result = code(error) === 'ENOENT' ? { ok: true, state: null } : { ok: false, code: code(error) };
+    result =
+      code(error) === 'ENOENT' && !existed
+        ? { ok: true, state: null }
+        : { ok: false, code: code(error) === 'ENOENT' ? 'IO' : code(error) };
   }
   if (fd !== undefined)
     try {
@@ -268,8 +273,10 @@ export function readLatest(dir, session, rowValid) {
 function readSnapshot(dir, session, validate) {
   if (!hash(session)) return { ok: false, code: 'IDENTITY_UNKNOWN' };
   const root = join(dir, '.receipts');
+  let existed = false;
   try {
     const before = rootDirectory(root);
+    existed = true;
     for (const path of [join(root, '.admission.lock'), join(root, `${session}.next-v2`)]) {
       try {
         lstatSync(path);
@@ -292,7 +299,9 @@ function readSnapshot(dir, session, validate) {
     }
     return read;
   } catch (error) {
-    return code(error) === 'ENOENT' ? { ok: true, state: null } : { ok: false, code: code(error) };
+    return code(error) === 'ENOENT' && !existed
+      ? { ok: true, state: null }
+      : { ok: false, code: code(error) === 'ENOENT' ? 'IO' : code(error) };
   }
 }
 /** @param {Context} context */

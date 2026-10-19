@@ -2,9 +2,11 @@ import {
   closeSync,
   existsSync,
   fsyncSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   opendirSync,
+  openSync,
   readdirSync,
   readFileSync,
   renameSync,
@@ -44,6 +46,8 @@ vi.mock('node:fs', async (original) => {
     renameSync: vi.fn(fs.renameSync),
     opendirSync: vi.fn(fs.opendirSync),
     unlinkSync: vi.fn(fs.unlinkSync),
+    openSync: vi.fn(fs.openSync),
+    lstatSync: vi.fn(fs.lstatSync),
   };
 });
 const made: string[] = [];
@@ -669,4 +673,27 @@ describe('根有界最新状态与v1历史分开记账', { timeout: 0 }, () => {
     expect(readdirSync(s.root).sort()).toEqual(before);
     expect(readFileSync(s.oldFile)).toEqual(s.oldBytes);
   });
+  it.each(['file-open', 'directory-after-read'] as const)(
+    '%s中途消失返回IO，不当首次无状态成功',
+    async (kind) => {
+      const s = fixture(),
+        before = readFileSync(s.current);
+      const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+      if (kind === 'file-open')
+        vi.mocked(openSync).mockImplementationOnce(() => {
+          throw Object.assign(Error('private-disappeared'), { code: 'ENOENT' });
+        });
+      else {
+        let reads = 0;
+        vi.mocked(lstatSync).mockImplementation((...args) => {
+          if (String(args[0]) === s.root && ++reads === 2)
+            throw Object.assign(Error('private-directory-disappeared'), { code: 'ENOENT' });
+          return actual.lstatSync(...args);
+        });
+      }
+      expect(readLatestReceiptState(s.dir, fingerprint(s.sid))).toEqual({ ok: false, code: 'IO' });
+      expect(readFileSync(s.current)).toEqual(before);
+      expect(readFileSync(s.oldFile)).toEqual(s.oldBytes);
+    },
+  );
 });
