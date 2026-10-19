@@ -45,7 +45,6 @@ export function acceptancePublicRoutes(deps: Deps): Hono {
         supersedeEvidence: r.supersedeEvidence ?? null,
         successorId: r.successorId ?? null,
         successorGeneration: r.successorGeneration ?? null,
-        supersedeCoverage: r.supersedeCoverage ?? null,
       })),
     });
   });

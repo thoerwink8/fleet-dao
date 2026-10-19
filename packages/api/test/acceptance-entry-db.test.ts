@@ -423,8 +423,13 @@ it(
       acceptanceDuties: (x: { repo: string; issueNumber: number }) => readAcceptanceDutyRows(t.db, x),
     } as unknown as Deps);
     const res = await app.request('/api/public/acceptance/v1/repos/1/issues/3072');
-    const duties = ((await res.json()) as { duties: Record<string, unknown>[] }).duties;
-    expect(duties[0]).toMatchObject({ state: 'superseded', supersedeCoverage: [{ source: SRC_ITEM }] });
+    const publicBody = await res.text();
+    const duties = (JSON.parse(publicBody) as { duties: Record<string, unknown>[] }).duties;
+    expect(duties[0]).toMatchObject({ state: 'superseded' });
+    expect(duties[0]).not.toHaveProperty('supersedeCoverage');
+    expect(publicBody).not.toContain(SRC_ITEM);
+    expect(publicBody).not.toContain(TGT_ITEM);
+    expect(publicBody).not.toContain('同为最终全 CI 绿 + squash 的外部状态判定');
     const gh = async () => ({
       code: 0,
       stdout: JSON.stringify({ id: 1, full_name: 'o/w', private: false }),
