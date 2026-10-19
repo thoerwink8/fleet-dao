@@ -54,6 +54,18 @@ export interface UserCommandResult {
 
 export type UserExec = (command: UserCommand) => Promise<UserCommandResult>;
 
+/** 准备阶段只在未取消时发下一条命令；已发出的命令不因此证明已回滚。 */
+export function cancellationCheckedExec(exec: UserExec, signal: AbortSignal): UserExec {
+  return async (command) => {
+    signal.throwIfAborted();
+    try {
+      return await exec({ ...command, signal });
+    } finally {
+      signal.throwIfAborted();
+    }
+  };
+}
+
 const STDERR_TAIL = 4000;
 /** stdout 上限：bundle 最大 100 MiB（github 包的 MAX_BUNDLE_BYTES），多留一点。超了就杀掉、算失败。 */
 export const MAX_STDOUT_BYTES = 110 * 1024 * 1024;

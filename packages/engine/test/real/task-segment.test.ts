@@ -109,6 +109,7 @@ function rig(
   opts: {
     driverRun?: (spec: HostRunSpec, hooks: HostRunHooks, n: number) => Promise<HostReport>;
     route?: RouteLaunchFacts | null;
+    routeFacts?: (routeId: string) => Promise<RouteLaunchFacts | null>;
     deps?: Partial<RunSegmentDeps>;
     /** 动手会话脱开引擎跑（#2238）。 */
     handoff?: SessionHandoff;
@@ -151,7 +152,7 @@ function rig(
       shBin: 'sh',
     },
     spawner: {
-      routeFacts: async () => (opts.route === undefined ? route() : opts.route),
+      routeFacts: opts.routeFacts ?? (async () => (opts.route === undefined ? route() : opts.route)),
       drivers: {
         'claude-code': driver('claude-code'),
         'cursor-agent': driver('cursor-agent'),
@@ -221,6 +222,187 @@ function commitInTree(spec: HostRunSpec, file = 'page.tsx'): void {
   git(spec.cwd, 'add', '.');
   git(spec.cwd, 'commit', '-q', '-m', `add ${file}`);
 }
+
+/** 不靠计时：先确认正式读口已进入，再取消并释放它。 */
+function preparationBarrier() {
+  let enter: () => void = () => undefined;
+  let release: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    entered,
+    release,
+    async wait() {
+      enter();
+      await blocked;
+    },
+  };
+}
+
+describe('取消后不再开始新的准备动作', { timeout: 60_000 }, () => {
+  it('入口已经取消时不读路由、不认领树、不起会话', async () => {
+    const lookup = vi.fn(async () => route());
+    const r = rig({ routeFacts: lookup });
+    const stop = new AbortController();
+    const reason = new Error('取消先于入口');
+    stop.abort(reason);
+    await expect(r.run(r.input(), ctx(stop.signal))).rejects.toBe(reason);
+    expect(lookup).not.toHaveBeenCalled();
+    expect(r.ft.adopts).toEqual([]);
+    expect(r.specs).toEqual([]);
+  });
+
+  it.each(['return', 'throw'] as const)('路由慢读之后取消（%s），原取消不变成配置失败', async (finish) => {
+    const gate = preparationBarrier();
+    const r = rig({
+      routeFacts: async () => {
+        await gate.wait();
+        if (finish === 'throw') throw new Error('迟到路由错误');
+        return route();
+      },
+    });
+    const stop = new AbortController();
+    const reason = new Error('路由读期间取消');
+    const pending = r.run(r.input(), ctx(stop.signal));
+    const checked = expect(pending).rejects.toBe(reason);
+    await gate.entered;
+    stop.abort(reason);
+    gate.release();
+    await checked;
+    expect(r.ft.adopts).toEqual([]);
+    expect(existsSync(r.dir)).toBe(false);
+    expect(r.started).toEqual([]);
+    expect(r.specs).toEqual([]);
+  });
+
+  it.each(['return', 'throw'] as const)('ownerOf 慢读之后取消（%s），不再 adopt 或写树', async (finish) => {
+    const r = rig();
+    const gate = preparationBarrier();
+    vi.spyOn(r.ft.trees, 'ownerOf').mockImplementation(async () => {
+      await gate.wait();
+      if (finish === 'throw') throw new Error('迟到属主错误');
+      return null;
+    });
+    const stop = new AbortController();
+    const reason = new Error('属主读期间取消');
+    const pending = r.run(r.input(), ctx(stop.signal));
+    const checked = expect(pending).rejects.toBe(reason);
+    await gate.entered;
+    stop.abort(reason);
+    gate.release();
+    await checked;
+    expect(r.ft.adopts).toEqual([]);
+    expect(existsSync(r.dir)).toBe(false);
+    expect(r.specs).toEqual([]);
+  });
+
+  it('读取提交身份时取消，已建的空目录保留，但不再取包或运行 Git', async () => {
+    const commands = vi.fn(localExec());
+    const r = rig({ exec: commands });
+    const gate = preparationBarrier();
+    vi.spyOn(r.m.gh, 'commitIdentity').mockImplementation(async () => {
+      await gate.wait();
+      return { name: 'probe', email: 'probe@localhost' };
+    });
+    const stop = new AbortController();
+    const reason = new Error('提交身份读期间取消');
+    const checked = expect(r.run(r.input(), ctx(stop.signal))).rejects.toBe(reason);
+    await gate.entered;
+    const adoptedBeforeCancel = [...r.ft.adopts];
+    stop.abort(reason);
+    gate.release();
+    await checked;
+    expect(r.ft.adopts).toEqual(adoptedBeforeCancel);
+    expect(existsSync(join(r.dir, '.git'))).toBe(false);
+    expect(r.m.calls).toEqual([]);
+    expect(commands).not.toHaveBeenCalled();
+    expect(r.specs).toEqual([]);
+  });
+
+  it('已有树的主线读取期间取消，不再补写主线引用或发下一条 Git 命令', async () => {
+    const gate = preparationBarrier();
+    const baseExec = localExec();
+    let block = false;
+    const afterCancel: string[][] = [];
+    const stop = new AbortController();
+    const r = rig({
+      exec: async (command) => {
+        if (stop.signal.aborted) afterCancel.push(command.argv);
+        const result = await baseExec(command);
+        if (block && command.argv.some((arg) => arg === 'refs/remotes/origin/main^{commit}')) {
+          await gate.wait();
+        }
+        return result;
+      },
+    });
+    await r.run(r.input(), ctx());
+    git(r.dir, 'update-ref', '-d', 'refs/remotes/origin/main');
+    const env = isolatedGitEnv(root, root);
+    const before = repoStamp(env, r.dir);
+    const starts = r.specs.length;
+    block = true;
+    const reason = new Error('Git 读期间取消');
+    const checked = expect(r.run(r.input(), ctx(stop.signal))).rejects.toBe(reason);
+    await gate.entered;
+    stop.abort(reason);
+    gate.release();
+    await checked;
+    expect(repoStamp(env, r.dir)).toEqual(before);
+    expect(afterCancel).toEqual([]);
+    expect(r.specs).toHaveLength(starts);
+  });
+
+  it('子代理设置清单慢读后取消，不写 settings，也不启动驱动', async () => {
+    const gate = preparationBarrier();
+    const r = rig({
+      route: route({ hostId: 'mirasim' }),
+      deps: {
+        subagentGuard: async () => {
+          await gate.wait();
+          return { names: [], isolated: [] };
+        },
+      },
+    });
+    const stop = new AbortController();
+    const reason = new Error('设置读期间取消');
+    const checked = expect(r.run(r.input(), ctx(stop.signal))).rejects.toBe(reason);
+    await gate.entered;
+    const before = repoStamp(isolatedGitEnv(root, root), r.dir);
+    stop.abort(reason);
+    gate.release();
+    await checked;
+    expect(existsSync(join(r.dir, '.claude/settings.local.json'))).toBe(false);
+    expect(repoStamp(isolatedGitEnv(root, root), r.dir)).toEqual(before);
+    expect(r.specs).toEqual([]);
+  });
+
+  it('Spawner 的第二次路由读期间取消，不再认领临时目录或启动驱动', async () => {
+    const gate = preparationBarrier();
+    let reads = 0;
+    const r = rig({
+      routeFacts: async () => {
+        reads += 1;
+        if (reads === 2) await gate.wait();
+        return route();
+      },
+    });
+    const stop = new AbortController();
+    const reason = new Error('Spawner 路由读期间取消');
+    const checked = expect(r.run(r.input(), ctx(stop.signal))).rejects.toBe(reason);
+    await gate.entered;
+    const adopted = [...r.ft.adopts];
+    stop.abort(reason);
+    gate.release();
+    await checked;
+    expect(r.ft.adopts).toEqual(adopted);
+    expect(r.ft.adopts.every((entry) => !entry.dir.startsWith(r.ft.tmpBase))).toBe(true);
+    expect(r.specs).toEqual([]);
+  });
+});
 
 describe('备树', { timeout: 60_000 }, () => {
   it('第一轮：树还不存在，会话用户从镜像建树、检出任务分支、钉好主线；会话在这棵树里起，提示词里有交代和规矩', async () => {

@@ -28,6 +28,7 @@ export class TreeHelperError extends Error {
 }
 
 async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> {
+  options.signal?.throwIfAborted();
   const [bin, ...rest] = [
     ...(options.sudo ?? ['/usr/bin/sudo', '-n']),
     options.helper ?? '/usr/local/sbin/fleet-agent-scope',
