@@ -356,6 +356,36 @@ describe('停下等人按规则续一次（#3294）', { timeout: 120_000 }, () =
     }
   }, 180_000);
 
+  it('不强制 CI、直接合并时 PR 关了：停法记 other，发了新版也不续，要人点「继续」', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      ciPolicy: () => ({ mode: 'off' }),
+      mergeNow: (n) =>
+        n === 1
+          ? { merged: false, reason: 'closed', detail: 'PR #3208 已经关了' }
+          : { merged: true, mergeCommit: 'abc1234567890' },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const i = input();
+        const h = await start(q, i);
+        const s = await statusUntil(h, (st) => st.phase === 'parked', '直接合并，PR 关了');
+        expect(s.park).toMatchObject({ kind: 'other', title: '直接合并没成' });
+        const job = jobOn(h, i, anHourAfter);
+        expect((await retryParkedTasks(job.deps)).continued).toEqual([]);
+        expect(job.audits).toEqual([]);
+        expect(calls.merge).toBe(1);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.merge).toBe(2);
+  });
+
   it('停下之后没发新版、PR 也还不能合：不续，原地等人', async () => {
     const world = createFakeWorld();
     const { tasks } = scripted({ arm: (n) => (n === 1 ? UNARMED : ARMED) });

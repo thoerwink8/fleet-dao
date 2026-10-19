@@ -654,7 +654,10 @@ class TaskFlow {
       }
       if (await rt.parkMainSyncBudget(r.mainSyncBudgetExhausted, r.detail ?? '同步主线次数已到上限'))
         continue;
-      await rt.park('直接合并没成', r.detail ?? 'GitHub 没说为什么', 'stuck', 'unarmed');
+      // 结构化拒绝（关了、基线不对、合到了别的头）不是「自动合并没挂上」：法国发了新版也不续。
+      // 抛出去的错仍走上面 step 的失败分流（认证、权限是 other，其余合并步是 unarmed）。
+      // 停法只进查询，不改报警活动的入参，老历史重放不变。
+      await rt.park('直接合并没成', r.detail ?? 'GitHub 没说为什么', 'stuck', 'other');
     }
   }
 

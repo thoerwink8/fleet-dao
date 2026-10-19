@@ -3,7 +3,7 @@
 // 档案没写 merge-gate 的仓不等它：别的仓没有这条状态，写死了会永远等不到。
 // 主线规则一条必过都没有时，不把 NO_REQUIRED_CHECKS 当成「还在等」抛出去挡死：仍看档案里的检查。别的读失败原样抛。
 
-import { COLD_VERIFY_CONTEXT, GATE_CONTEXT } from '@fleet-dao/conventions';
+import { GATE_CONTEXT } from '@fleet-dao/conventions';
 import { type GitHub, isGitHubError, type RepoRef, readCi, requiredChecksFor } from '@fleet-dao/github';
 
 export interface MergeWaitCheckRead {
@@ -66,6 +66,33 @@ function missingNames(checks: readonly Verdict[]): { name: string }[] {
   return names;
 }
 
+/** 合并闸只因冷验收还在跑而失败时，description 的开头（merge-gates.ts 的 checkColdVerify）。 */
+const AWAITING_VERIFY = '等验收：';
+/** description 里还有别的不通过理由时，不能把整条当成「只是在等验收」。 */
+const EXTRA_REASONS = '（另有 ';
+
+/**
+ * 闸的失败原文是不是「只在等验收」。冷验收已经贴了通过、闸还没重算时，原文仍是这句；
+ * 带「另有」的是同一条里还有别的不通过，照旧当红。
+ */
+function gateOnlyAwaitingVerify(detail: string | undefined): boolean {
+  return detail?.startsWith(AWAITING_VERIFY) === true && !detail.includes(EXTRA_REASONS);
+}
+
+/**
+ * 把「只在等验收」的合并闸从失败改成还在跑。冷验收是 pending、missing，或已经 success，都不交回返工：
+ * 验收跑完闸会重算。验收自己已经失败时，红名单里只留验收，不把这句过时的「等验收」再算一条红。
+ */
+function awaitingVerifyAsPending<T extends Verdict & { detail?: string | undefined }>(
+  checks: readonly T[],
+): T[] {
+  return checks.map((item) => {
+    if (item.name !== GATE_CONTEXT || item.state !== 'failure' || !gateOnlyAwaitingVerify(item.detail))
+      return item;
+    return { ...item, state: 'pending', conclusion: 'pending' };
+  });
+}
+
 /**
  * 还在跑、没出结论、没出现分开交。有没出现或没出结论的，就不带 pending：
  * 旁边一条 in_progress 不能把「没出现」装成还能等。
@@ -86,17 +113,6 @@ function pendingRead(failed: MergeWaitCheckRead['failed'], checks: readonly Verd
     : { overall: 'pending', failed };
 }
 
-function gateWaitingForColdVerify(
-  checks: readonly { name: string; state: string; detail?: string | undefined }[],
-): boolean {
-  const gate = checks.find((item) => item.name === GATE_CONTEXT);
-  if (gate?.state !== 'failure' || gate.detail?.startsWith('等验收：') !== true) return false;
-  const cold = checks.find((item) => item.name === COLD_VERIFY_CONTEXT);
-  // 闸的原文已经写明冷验收还在跑。cold-verify 没列进档案、这次没读到，或还是 pending，都不算红。
-  // 它已经出了别的结论（过了或没过）时不在这里挡：闸下次重算会改掉「等验收」。
-  return cold === undefined || cold.state === 'pending' || cold.state === 'missing';
-}
-
 export async function readMergeWaitChecks(
   gh: Pick<GitHub, 'deps'>,
   repo: RepoRef,
@@ -113,19 +129,18 @@ export async function readMergeWaitChecks(
   const names = [...new Set([...required, ...mergeSignals])];
   if (names.length === 0) return { overall: 'none', failed: [] };
   const { evaluation } = await readCi(gh.deps, repo, sha, names, signal);
-  const failed = evaluation.checks
+  // 先把「只在等验收」的闸改成还在跑，再判红。否则冷验收已经 success、闸的旧 failure 还写着「等验收」时，
+  // 会在闸重算之前被当成真红交回返工（#3316 头 10eb6fb）。
+  const checks = awaitingVerifyAsPending(evaluation.checks);
+  const failed = checks
     .filter((item) => item.state === 'failure')
     .map((item) => ({ name: item.name, ...(item.detail ? { detail: item.detail } : {}) }));
-  if (gateWaitingForColdVerify(evaluation.checks)) {
-    const actualFailures = failed.filter((item) => item.name !== GATE_CONTEXT);
-    if (actualFailures.length === 0) return pendingRead([], evaluation.checks);
-    return { overall: 'red', failed: actualFailures };
-  }
   if (failed.length > 0) return { overall: 'red', failed };
-  if (evaluation.overall === 'green') return { overall: 'green', failed: [] };
-  if (evaluation.overall === 'none') {
-    const missing = missingNames(evaluation.checks);
+  if (checks.length > 0 && checks.every((item) => item.state === 'success'))
+    return { overall: 'green', failed: [] };
+  if (checks.every((item) => item.state === 'missing')) {
+    const missing = missingNames(checks);
     return missing.length > 0 ? { overall: 'none', failed: [], missing } : { overall: 'none', failed: [] };
   }
-  return pendingRead([], evaluation.checks);
+  return pendingRead([], checks);
 }
