@@ -56,7 +56,7 @@ import {
   users,
   worktreeInventory,
 } from '@fleet-dao/db';
-import { ciPolicyOf, type ProgressKind, runBelongsToTask, taskWorkflowId } from '@fleet-dao/shared';
+import { ciPolicyOf, runBelongsToTask, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
   claimedCommandResult,
@@ -74,7 +74,6 @@ import {
   RECLAIMABLE_STATUSES,
   reclaimMissStatus,
 } from './delivery-logic.ts';
-import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import {
   nodeReportRow,
@@ -83,7 +82,12 @@ import {
   readNodeSnapshot,
   readWorktreeInventoryPayload,
 } from './node-logic.ts';
-import { matchesNotification, sameResolutionAudit } from './notification-resolution.ts';
+import {
+  HISTORICAL_CHECKOUT_ACTION,
+  HISTORICAL_CHECKOUT_ACTOR,
+  matchesNotification,
+  sameResolutionAudit,
+} from './notification-resolution.ts';
 import { nextCursorOf } from './paging.ts';
 import type {
   AuditRecord,
@@ -92,10 +96,12 @@ import type {
   CommandClaim,
   GitHubDelivery,
   GitHubObjectVersion,
+  HistoricalCheckoutFacts,
   JobRecord,
   NewAuditEntry,
   NodeReportSummary,
   NotificationRecord,
+  OpsStore,
   Page,
   PasswordCredentials,
   PullRequestRecord,
@@ -183,6 +189,14 @@ function toPullRequest(r: typeof pullRequests.$inferSelect): PullRequestRecord {
     mergedAt: isoOpt(r.mergedAt),
     issueRefs: r.issueRefs,
     ...(r.title === null ? {} : { title: r.title }),
+  };
+}
+
+function toSegmentRunRecord(r: typeof runs.$inferSelect) {
+  return {
+    ...toSegmentRun(r),
+    ...(r.temporalRunId === null ? {} : { temporalRunId: r.temporalRunId }),
+    ...(r.worktreePath === null ? {} : { worktreePath: r.worktreePath }),
   };
 }
 
@@ -295,6 +309,104 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           })),
       }),
     );
+  }
+
+  async function readHistoricalCheckout(
+    input: Parameters<OpsStore['readHistoricalCheckout']>[0],
+    executor = db,
+  ): Promise<HistoricalCheckoutFacts> {
+    if (!isUuid(input.notificationId) || !isUuid(input.taskId)) {
+      throw new Error('历史 checkout 身份不是有效 UUID');
+    }
+    const [notification] = await executor
+      .select()
+      .from(notifications)
+      .where(eq(notifications.id, input.notificationId));
+    const [taskRow] = await executor
+      .select({ task: tasks, repo: repos })
+      .from(tasks)
+      .innerJoin(repos, eq(repos.id, tasks.repoId))
+      .where(eq(tasks.id, input.taskId));
+    if (!notification || !taskRow) throw new Error('历史 checkout 通知或任务不存在');
+    const notificationRaisedAt = isoOpt(notification.raisedAt);
+    if (
+      notification.level !== 'alert' ||
+      !matchesNotification(
+        {
+          dedupeKey: notification.dedupeKey,
+          body: notification.body,
+          link: opt(notification.link),
+          raisedAt: notificationRaisedAt,
+        },
+        { dedupeKey: input.dedupeKey, body: notification.body, raisedAt: notificationRaisedAt ?? '' },
+      ) ||
+      notification.dedupeKey !== `cold-verify:checkout:${input.workflowId}` ||
+      notificationRaisedAt === undefined
+    ) {
+      throw new Error('历史 checkout 通知已换代或身份不完整');
+    }
+    const repoName = `${taskRow.repo.owner}/${taskRow.repo.name}`;
+    if (repoName !== input.repo || taskRow.task.issueNumber !== input.issueNumber) {
+      throw new Error('历史 checkout 仓或任务单号不匹配');
+    }
+    const baseWorkflowId = input.workflowId.replace(/:r[2-9][0-9]*$/, '');
+    const expectedBaseWorkflowId = taskWorkflowId(
+      { owner: taskRow.repo.owner, name: taskRow.repo.name },
+      taskRow.task.issueNumber,
+    );
+    if (baseWorkflowId !== expectedBaseWorkflowId) throw new Error('历史 checkout 工作流身份不匹配');
+    const candidateRuns = await runsOfTask(executor, {
+      id: input.taskId,
+      issueNumber: input.issueNumber,
+      workflowId: baseWorkflowId,
+    });
+    const run = candidateRuns.find(
+      (r) =>
+        r.id === input.runId && r.workflowId === input.workflowId && r.temporalRunId === input.temporalRunId,
+    );
+    if (!run) throw new Error('历史 checkout 原 run 不存在或身份不完整');
+    const activeRunIds = candidateRuns.filter((r) => r.endedAt === null).map((r) => r.id);
+    if (!isTerminalTaskState(taskRow.task.state)) throw new Error('任务尚未终态');
+    const [pr] = await executor
+      .select()
+      .from(pullRequests)
+      .where(
+        and(
+          eq(pullRequests.repoId, taskRow.repo.id),
+          eq(pullRequests.number, input.pr),
+          eq(pullRequests.headSha, input.head),
+          eq(pullRequests.state, 'merged'),
+        ),
+      );
+    if (!pr || pr.mergedAt === null || !(pr.issueRefs ?? []).includes(input.issueNumber)) {
+      throw new Error('历史 checkout 对应的 merged PR 不存在或 head 不匹配');
+    }
+    const [record] = await notificationRecords([notification]);
+    if (!record) throw new Error('历史 checkout 通知读回失败');
+    const segment = (run as unknown as { segment?: string }).segment;
+    return {
+      notification: record,
+      repo: toRepo(taskRow.repo),
+      task: toTask(taskRow.task),
+      run: {
+        id: run.id,
+        segment: segment ?? '',
+        ...(run.taskId === null ? {} : { taskId: run.taskId }),
+        ...(run.issueNumber === null ? {} : { issueNumber: run.issueNumber }),
+        model: run.model,
+        ...(run.workflowId === null ? {} : { workflowId: run.workflowId }),
+        ...(run.temporalRunId === null ? {} : { temporalRunId: run.temporalRunId }),
+        startedAt: iso(run.startedAt),
+        ...(run.endedAt === null ? {} : { endedAt: iso(run.endedAt) }),
+        ...(run.outcome === null ? {} : { outcome: run.outcome }),
+        ...(run.failureReason === null ? {} : { failureReason: run.failureReason }),
+        ...(run.prNumber === null ? {} : { prNumber: run.prNumber }),
+        ...(run.branch === null ? {} : { branch: run.branch }),
+        ...(run.worktreePath === null ? {} : { worktreePath: run.worktreePath }),
+      },
+      pullRequest: toPullRequest(pr),
+      activeRunIds,
+    };
   }
 
   return {
@@ -485,7 +597,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         workflowId: taskWorkflowId(task, task.issueNumber),
       });
       return rows.map((r) => ({
-        ...toSegmentRun(r),
+        ...toSegmentRunRecord(r),
         matchedBy: r.taskId === taskId ? ('task' as const) : ('issueNumber' as const),
       }));
     },
@@ -500,7 +612,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         .orderBy(...order);
       // 主页流水线图走默认：不按单号兜底，顺序照 SQL。任务列表要重做各代才开 includeIssueMatch。
       if (!opts?.includeIssueMatch) {
-        return directRows.map((r) => ({ ...toSegmentRun(r), matchedBy: 'task' as const }));
+        return directRows.map((r) => ({ ...toSegmentRunRecord(r), matchedBy: 'task' as const }));
       }
       const taskRows = await db
         .select({ id: tasks.id, issueNumber: tasks.issueNumber, owner: repos.owner, name: repos.name })
@@ -531,7 +643,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           at: row.startedAt,
           createdAt: row.createdAt,
           id: row.id,
-          record: { ...run, matchedBy: 'issueNumber', matchedTaskId: task.id },
+          record: { ...toSegmentRunRecord(row), matchedBy: 'issueNumber', matchedTaskId: task.id },
         });
       }
       const merged = [
@@ -540,7 +652,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           createdAt: row.createdAt,
           id: row.id,
           record: {
-            ...toSegmentRun(row),
+            ...toSegmentRunRecord(row),
             matchedBy: 'task' as const,
             ...(row.taskId ? { matchedTaskId: row.taskId } : {}),
           },
@@ -677,6 +789,132 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       const counts = { decision: 0, alert: 0, daily: 0 };
       for (const r of rows) counts[r.level] = r.n;
       return counts;
+    },
+    async readHistoricalCheckout(input) {
+      return readHistoricalCheckout(input);
+    },
+    async archiveHistoricalCheckout(input, entry) {
+      if (!isUuid(input.notificationId) || !isUuid(input.taskId) || !isUuid(input.repoId)) {
+        return 'not_found';
+      }
+      return db.transaction(async (tx) => {
+        const [notification] = await tx
+          .select()
+          .from(notifications)
+          .where(eq(notifications.id, input.notificationId))
+          .for('update');
+        if (!notification) return 'not_found';
+        const [taskRow] = await tx
+          .select({ task: tasks, repo: repos })
+          .from(tasks)
+          .innerJoin(repos, eq(repos.id, tasks.repoId))
+          .where(and(eq(tasks.id, input.taskId), eq(tasks.repoId, input.repoId)))
+          .for('update');
+        if (!taskRow) return 'conflict';
+        const currentLink = opt(notification.link);
+        const currentRaisedAt = isoOpt(notification.raisedAt);
+        if (
+          notification.level !== 'alert' ||
+          !matchesNotification(
+            {
+              dedupeKey: notification.dedupeKey,
+              body: notification.body,
+              link: currentLink,
+              raisedAt: currentRaisedAt,
+            },
+            {
+              dedupeKey: input.dedupeKey,
+              body: input.notificationBody,
+              link: input.notificationLink,
+              raisedAt: input.raisedAt,
+            },
+          ) ||
+          notification.dedupeKey !== `cold-verify:checkout:${input.workflowId}` ||
+          currentRaisedAt === undefined ||
+          `${taskRow.repo.owner}/${taskRow.repo.name}` !== input.repo ||
+          taskRow.task.issueNumber !== input.issueNumber ||
+          !isTerminalTaskState(taskRow.task.state)
+        ) {
+          return 'conflict';
+        }
+        const baseWorkflowId = input.workflowId.replace(/:r[2-9][0-9]*$/, '');
+        const expectedBaseWorkflowId = taskWorkflowId(
+          { owner: taskRow.repo.owner, name: taskRow.repo.name },
+          taskRow.task.issueNumber,
+        );
+        if (baseWorkflowId !== expectedBaseWorkflowId) return 'conflict';
+        const candidateRuns = await runsOfTask(tx, {
+          id: input.taskId,
+          issueNumber: input.issueNumber,
+          workflowId: baseWorkflowId,
+        });
+        const run = candidateRuns.find(
+          (r) =>
+            r.id === input.runId &&
+            r.workflowId === input.workflowId &&
+            r.temporalRunId === input.temporalRunId,
+        );
+        if (
+          !run ||
+          run.endedAt === null ||
+          run.segment !== input.runSegment ||
+          iso(run.startedAt) !== input.runStartedAt ||
+          isoOpt(run.endedAt) !== input.runEndedAt ||
+          run.outcome !== input.runOutcome ||
+          run.prNumber !== input.runPrNumber ||
+          candidateRuns.some((r) => r.endedAt === null)
+        ) {
+          return 'conflict';
+        }
+        const [pr] = await tx
+          .select()
+          .from(pullRequests)
+          .where(
+            and(
+              eq(pullRequests.repoId, input.repoId),
+              eq(pullRequests.number, input.pr),
+              eq(pullRequests.headSha, input.head),
+              eq(pullRequests.state, 'merged'),
+            ),
+          )
+          .for('update');
+        if (!pr || pr.mergedAt === null || !(pr.issueRefs ?? []).includes(input.issueNumber)) {
+          return 'conflict';
+        }
+        if (
+          entry.actor.kind !== HISTORICAL_CHECKOUT_ACTOR.kind ||
+          entry.actor.id !== HISTORICAL_CHECKOUT_ACTOR.id ||
+          entry.action !== HISTORICAL_CHECKOUT_ACTION ||
+          entry.target !== `notification:${input.notificationId}` ||
+          entry.via !== 'ops' ||
+          !entry.ok
+        ) {
+          return 'conflict';
+        }
+        const auditRows = await tx
+          .select()
+          .from(auditLog)
+          .where(
+            and(
+              eq(auditLog.target, entry.target),
+              eq(auditLog.action, entry.action),
+              eq(auditLog.actorKind, entry.actor.kind),
+              eq(auditLog.actorId, entry.actor.id),
+            ),
+          );
+        if (notification.resolvedAt !== null) {
+          return auditRows.some((r) => sameResolutionAudit(toAudit(r), entry))
+            ? 'already_archived'
+            : 'conflict';
+        }
+        const at = now();
+        await tx
+          .update(notifications)
+          .set({ resolvedAt: at, resolvedBy: HISTORICAL_CHECKOUT_ACTOR.id })
+          .where(and(eq(notifications.id, input.notificationId), isNull(notifications.resolvedAt)));
+        await insertAudit(tx, entry);
+        return 'ok';
+      });
     },
     async resolveNotification({ id, by, expected }, entry) {
       if (!isUuid(id)) return 'not_found';

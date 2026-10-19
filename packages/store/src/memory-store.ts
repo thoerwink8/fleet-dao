@@ -52,7 +52,6 @@ import {
   sameInstant,
   supersedes,
 } from './delivery-logic.ts';
-import { testRunOf } from './done-check.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import {
   nodeReportRow,
@@ -61,12 +60,19 @@ import {
   readNodeSnapshot,
   readWorktreeInventoryPayload,
 } from './node-logic.ts';
-import { matchesNotification, sameResolutionAudit } from './notification-resolution.ts';
+import {
+  HISTORICAL_CHECKOUT_ACTION,
+  HISTORICAL_CHECKOUT_ACTOR,
+  matchesNotification,
+  sameResolutionAudit,
+} from './notification-resolution.ts';
 import { byAtThenId, compareIds, pageOfSorted } from './paging.ts';
 import type {
   AuditRecord,
   CommandClaim,
   GitHubDelivery,
+  HistoricalCheckoutFacts,
+  HistoricalCheckoutRun,
   JobRecord,
   NewAuditEntry,
   NodeReportRecord,
@@ -77,7 +83,6 @@ import type {
   PullRequestRecord,
   QuotaSampleRecord,
   QuotaWindowRecord,
-  RunPlan,
   SegmentRunRecord,
   SettingRecord,
   Store,
@@ -97,6 +102,7 @@ import {
   isAutoDispatchUnchanged,
   isCiPolicyUnchanged,
   isRequestUnchanged,
+  isTerminalTaskState,
   keepOnBoard,
   lastTaskChangeAt,
   matchesTaskSearch,
@@ -344,6 +350,94 @@ export function createMemoryStore(
     changed('audit_log', id);
     return id;
   }
+
+  const checkoutRunOf = (run: SegmentRun): HistoricalCheckoutRun => {
+    const row = run as unknown as Record<string, unknown>;
+    return {
+      id: run.id,
+      segment: run.segment,
+      ...(run.taskId === undefined ? {} : { taskId: run.taskId }),
+      ...(typeof row.issueNumber === 'number' ? { issueNumber: row.issueNumber } : {}),
+      model: run.model,
+      ...(typeof row.workflowId === 'string' ? { workflowId: row.workflowId } : {}),
+      ...(typeof row.temporalRunId === 'string' ? { temporalRunId: row.temporalRunId } : {}),
+      startedAt: run.startedAt,
+      ...(run.endedAt === undefined ? {} : { endedAt: run.endedAt }),
+      ...(typeof row.outcome === 'string' ? { outcome: row.outcome } : {}),
+      ...(typeof row.failureReason === 'string' ? { failureReason: row.failureReason } : {}),
+      ...(typeof row.prNumber === 'number' ? { prNumber: row.prNumber } : {}),
+      ...(typeof row.branch === 'string' ? { branch: row.branch } : {}),
+      ...(typeof row.worktreePath === 'string' ? { worktreePath: row.worktreePath } : {}),
+    };
+  };
+
+  const checkoutRuns = (): HistoricalCheckoutRun[] => [...data.segmentRuns.map(checkoutRunOf)];
+
+  const checkoutFacts = (input: Parameters<Store['readHistoricalCheckout']>[0]): HistoricalCheckoutFacts => {
+    const notification = data.notifications.find((n) => n.id === input.notificationId);
+    if (!notification) throw new Error('原 checkout 通知不存在、不是报警、代次或 raisedAt 不匹配');
+    if (
+      notification.level !== 'alert' ||
+      notification.dedupeKey !== input.dedupeKey ||
+      notification.dedupeKey !== `cold-verify:checkout:${input.workflowId}` ||
+      notification.raisedAt === undefined
+    )
+      throw new Error('原 checkout 通知不存在、不是报警、代次或 raisedAt 不匹配');
+    const actualRepo = data.repos.find((r) => `${r.owner}/${r.name}` === input.repo);
+    if (!actualRepo) throw new Error('仓身份读不到或不完整');
+    const task = data.tasks.find(
+      (t) => t.id === input.taskId && t.repoId === actualRepo.id && t.issueNumber === input.issueNumber,
+    );
+    if (!task) throw new Error('原任务身份不匹配');
+    const run = checkoutRuns().find((r) => {
+      if (r.id !== input.runId) return false;
+      if (r.taskId !== undefined && r.taskId !== task.id) return false;
+      return (
+        r.taskId === task.id ||
+        (r.taskId === undefined && r.issueNumber === task.issueNumber && r.workflowId === input.workflowId)
+      );
+    });
+    if (
+      !run ||
+      run.workflowId !== input.workflowId ||
+      run.temporalRunId !== input.temporalRunId ||
+      run.endedAt === undefined ||
+      run.outcome === undefined ||
+      run.prNumber !== input.pr
+    )
+      throw new Error('原执行 run 身份不完整、未终态或 PR 关联不匹配');
+    const activeRunIds = checkoutRuns()
+      .filter(
+        (r) =>
+          r.endedAt === undefined &&
+          (r.taskId === task.id ||
+            (r.taskId === undefined &&
+              r.issueNumber === task.issueNumber &&
+              typeof r.workflowId === 'string' &&
+              (r.workflowId === input.workflowId ||
+                r.workflowId.startsWith(`task:${input.repo}#${input.issueNumber}:r`)))),
+      )
+      .map((r) => r.id);
+    if (!isTerminalTaskState(task.state)) throw new Error('任务仍在跑、待接回，或任务状态不是终态');
+    const pullRequest = data.pullRequests.find(
+      (p) =>
+        p.repoId === actualRepo.id &&
+        p.number === input.pr &&
+        p.state === 'merged' &&
+        p.headSha === input.head &&
+        p.issueRefs?.includes(input.issueNumber) &&
+        p.mergedAt !== undefined,
+    );
+    if (!pullRequest) throw new Error('失败对应的完整 PR head 或任务关联读不到');
+    return {
+      notification: { ...notification, deliveries: notification.deliveries.map((d) => ({ ...d })) },
+      repo: { ...actualRepo },
+      task: { ...task },
+      run,
+      pullRequest: { ...pullRequest },
+      activeRunIds,
+    };
+  };
 
   /** 占用凭据就是这次占用的时刻（和库里的 claimed_at 一样）：接管会把它改新，旧凭据就对不上了。 */
   const heldBy = (record: IdempotencyRecord | undefined, token: string): record is IdempotencyRecord =>
@@ -672,6 +766,63 @@ export function createMemoryStore(
         if (status === 'all' || n.resolvedAt === undefined) counts[n.level] += 1;
       }
       return counts;
+    },
+    async readHistoricalCheckout(input) {
+      return checkoutFacts(input);
+    },
+    async archiveHistoricalCheckout(input, entry) {
+      let facts: HistoricalCheckoutFacts;
+      try {
+        facts = checkoutFacts(input);
+      } catch {
+        return 'conflict';
+      }
+      const n = data.notifications.find((notification) => notification.id === input.notificationId);
+      if (!n) return 'not_found';
+      if (facts.activeRunIds.length > 0) return 'conflict';
+      if (
+        n.raisedAt !== input.raisedAt ||
+        n.body !== input.notificationBody ||
+        (n.link ?? null) !== input.notificationLink ||
+        facts.repo.id !== input.repoId ||
+        facts.task.id !== input.taskId ||
+        facts.task.issueNumber !== input.issueNumber ||
+        facts.run.workflowId !== input.workflowId ||
+        facts.run.temporalRunId !== input.temporalRunId ||
+        facts.run.segment !== input.runSegment ||
+        facts.run.startedAt !== input.runStartedAt ||
+        facts.run.endedAt !== input.runEndedAt ||
+        facts.run.outcome !== input.runOutcome ||
+        facts.run.prNumber !== input.runPrNumber ||
+        facts.pullRequest.number !== input.pr ||
+        facts.pullRequest.headSha !== input.head
+      )
+        return 'conflict';
+      if (
+        entry.actor.kind !== HISTORICAL_CHECKOUT_ACTOR.kind ||
+        entry.actor.id !== HISTORICAL_CHECKOUT_ACTOR.id ||
+        entry.action !== HISTORICAL_CHECKOUT_ACTION ||
+        entry.target !== `notification:${input.notificationId}` ||
+        entry.via !== 'ops' ||
+        !entry.ok
+      )
+        return 'conflict';
+      checkAudit(entry);
+      if (!isNotificationOpen(n)) {
+        const same =
+          n.resolvedBy === HISTORICAL_CHECKOUT_ACTOR.id
+            ? data.audit.some(
+                (a) =>
+                  a.target === entry.target && a.action === entry.action && sameResolutionAudit(a, entry),
+              )
+            : false;
+        return same ? 'already_archived' : 'conflict';
+      }
+      n.resolvedAt = now().toISOString();
+      n.resolvedBy = HISTORICAL_CHECKOUT_ACTOR.id;
+      audit(entry);
+      changed('notifications', input.notificationId);
+      return 'ok';
     },
     async resolveNotification({ id, by, expected }, entry) {
       const n = data.notifications.find((x) => x.id === id);
