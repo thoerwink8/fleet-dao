@@ -59,6 +59,12 @@ import {
 import { ciPolicyOf, runBelongsToTask, taskWorkflowId } from '@fleet-dao/shared';
 import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm';
 import {
+  baseWorkflowIdOf,
+  checkoutAlertKeyOf,
+  checkoutNotificationProblem,
+  checkoutRunProblem,
+} from './checkout-history-logic.ts';
+import {
   claimedCommandResult,
   commandKey,
   commandTarget,
@@ -269,11 +275,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
   /** 通知行连同送达记录拼成接口的样子（送到哪 target 不往外给）。 */
   async function notificationRecords(
     page: readonly (typeof notifications.$inferSelect)[],
+    executor: Db = db,
   ): Promise<NotificationRecord[]> {
     const deliveries =
       page.length === 0
         ? []
-        : await db
+        : await executor
             .select()
             .from(notificationDeliveries)
             .where(
@@ -340,16 +347,18 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         },
         { dedupeKey: input.dedupeKey, body: notification.body, raisedAt: notificationRaisedAt ?? '' },
       ) ||
-      notification.dedupeKey !== `cold-verify:checkout:${input.workflowId}` ||
+      notification.dedupeKey !== checkoutAlertKeyOf(input.workflowId) ||
       notificationRaisedAt === undefined
     ) {
       throw new Error('历史 checkout 通知已换代或身份不完整');
     }
+    const notificationProblem = checkoutNotificationProblem(notification, input);
+    if (notificationProblem) throw new Error(`历史 checkout ${notificationProblem}`);
     const repoName = `${taskRow.repo.owner}/${taskRow.repo.name}`;
     if (repoName !== input.repo || taskRow.task.issueNumber !== input.issueNumber) {
       throw new Error('历史 checkout 仓或任务单号不匹配');
     }
-    const baseWorkflowId = input.workflowId.replace(/:r[2-9][0-9]*$/, '');
+    const baseWorkflowId = baseWorkflowIdOf(input.workflowId);
     const expectedBaseWorkflowId = taskWorkflowId(
       { owner: taskRow.repo.owner, name: taskRow.repo.name },
       taskRow.task.issueNumber,
@@ -360,11 +369,20 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       issueNumber: input.issueNumber,
       workflowId: baseWorkflowId,
     });
-    const run = candidateRuns.find(
-      (r) =>
-        r.id === input.runId && r.workflowId === input.workflowId && r.temporalRunId === input.temporalRunId,
+    const run = candidateRuns.find((r) => r.id === input.runId);
+    if (!run) throw new Error('历史 checkout 原 run 不存在或不属于这张任务');
+    const runProblem = checkoutRunProblem(
+      {
+        segment: run.segment,
+        workflowId: opt(run.workflowId),
+        temporalRunId: opt(run.temporalRunId),
+        endedAt: isoOpt(run.endedAt),
+        outcome: opt(run.outcome),
+        prNumber: opt(run.prNumber),
+      },
+      input,
     );
-    if (!run) throw new Error('历史 checkout 原 run 不存在或身份不完整');
+    if (runProblem) throw new Error(`历史 checkout ${runProblem}`);
     const activeRunIds = candidateRuns.filter((r) => r.endedAt === null).map((r) => r.id);
     if (!isTerminalTaskState(taskRow.task.state)) throw new Error('任务尚未终态');
     const [pr] = await executor
@@ -381,16 +399,15 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     if (!pr || pr.mergedAt === null || !(pr.issueRefs ?? []).includes(input.issueNumber)) {
       throw new Error('历史 checkout 对应的 merged PR 不存在或 head 不匹配');
     }
-    const [record] = await notificationRecords([notification]);
+    const [record] = await notificationRecords([notification], executor);
     if (!record) throw new Error('历史 checkout 通知读回失败');
-    const segment = (run as unknown as { segment?: string }).segment;
     return {
       notification: record,
       repo: toRepo(taskRow.repo),
       task: toTask(taskRow.task),
       run: {
         id: run.id,
-        segment: segment ?? '',
+        segment: run.segment,
         ...(run.taskId === null ? {} : { taskId: run.taskId }),
         ...(run.issueNumber === null ? {} : { issueNumber: run.issueNumber }),
         model: run.model,
@@ -811,74 +828,29 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
           .where(and(eq(tasks.id, input.taskId), eq(tasks.repoId, input.repoId)))
           .for('update');
         if (!taskRow) return 'conflict';
-        const currentLink = opt(notification.link);
-        const currentRaisedAt = isoOpt(notification.raisedAt);
-        if (
-          notification.level !== 'alert' ||
-          !matchesNotification(
-            {
-              dedupeKey: notification.dedupeKey,
-              body: notification.body,
-              link: currentLink,
-              raisedAt: currentRaisedAt,
-            },
-            {
-              dedupeKey: input.dedupeKey,
-              body: input.notificationBody,
-              link: input.notificationLink,
-              raisedAt: input.raisedAt,
-            },
-          ) ||
-          notification.dedupeKey !== `cold-verify:checkout:${input.workflowId}` ||
-          currentRaisedAt === undefined ||
-          `${taskRow.repo.owner}/${taskRow.repo.name}` !== input.repo ||
-          taskRow.task.issueNumber !== input.issueNumber ||
-          !isTerminalTaskState(taskRow.task.state)
-        ) {
+        // task_id 为空的历史兼容 run 不受任务行锁约束：锁表挡住并发新增/改动 runs（读照常），
+        // 这样下面数「在跑」的 run 和提交归档之间不会漏进新的活执行。拿不到锁就整笔失败、不归档。
+        await tx.execute(sql`set local lock_timeout = '5s'`);
+        await tx.execute(sql`lock table ${runs} in share row exclusive mode`);
+        // 身份、终态、活执行全部在锁内重读（和预检同一份判断），读不到或不完整一律 conflict。
+        let facts: HistoricalCheckoutFacts;
+        try {
+          facts = await readHistoricalCheckout(input, tx);
+        } catch {
           return 'conflict';
         }
-        const baseWorkflowId = input.workflowId.replace(/:r[2-9][0-9]*$/, '');
-        const expectedBaseWorkflowId = taskWorkflowId(
-          { owner: taskRow.repo.owner, name: taskRow.repo.name },
-          taskRow.task.issueNumber,
-        );
-        if (baseWorkflowId !== expectedBaseWorkflowId) return 'conflict';
-        const candidateRuns = await runsOfTask(tx, {
-          id: input.taskId,
-          issueNumber: input.issueNumber,
-          workflowId: baseWorkflowId,
-        });
-        const run = candidateRuns.find(
-          (r) =>
-            r.id === input.runId &&
-            r.workflowId === input.workflowId &&
-            r.temporalRunId === input.temporalRunId,
-        );
         if (
-          !run ||
-          run.endedAt === null ||
-          run.segment !== input.runSegment ||
-          iso(run.startedAt) !== input.runStartedAt ||
-          isoOpt(run.endedAt) !== input.runEndedAt ||
-          run.outcome !== input.runOutcome ||
-          run.prNumber !== input.runPrNumber ||
-          candidateRuns.some((r) => r.endedAt === null)
+          facts.notification.raisedAt !== input.raisedAt ||
+          facts.notification.body !== input.notificationBody ||
+          (facts.notification.link ?? null) !== input.notificationLink ||
+          facts.repo.id !== input.repoId ||
+          facts.task.id !== input.taskId ||
+          facts.run.segment !== input.runSegment ||
+          facts.run.startedAt !== input.runStartedAt ||
+          facts.run.endedAt !== input.runEndedAt ||
+          facts.run.outcome !== input.runOutcome ||
+          facts.run.prNumber !== input.runPrNumber
         ) {
-          return 'conflict';
-        }
-        const [pr] = await tx
-          .select()
-          .from(pullRequests)
-          .where(
-            and(
-              eq(pullRequests.repoId, input.repoId),
-              eq(pullRequests.number, input.pr),
-              eq(pullRequests.headSha, input.head),
-              eq(pullRequests.state, 'merged'),
-            ),
-          )
-          .for('update');
-        if (!pr || pr.mergedAt === null || !(pr.issueRefs ?? []).includes(input.issueNumber)) {
           return 'conflict';
         }
         if (
@@ -903,15 +875,24 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
             ),
           );
         if (notification.resolvedAt !== null) {
-          return auditRows.some((r) => sameResolutionAudit(toAudit(r), entry))
+          return notification.resolvedBy === HISTORICAL_CHECKOUT_ACTOR.id &&
+            auditRows.some((r) => sameResolutionAudit(toAudit(r), entry))
             ? 'already_archived'
             : 'conflict';
         }
-        const at = now();
-        await tx
+        if (facts.activeRunIds.length > 0) return 'conflict';
+        const archived = await tx
           .update(notifications)
-          .set({ resolvedAt: at, resolvedBy: HISTORICAL_CHECKOUT_ACTOR.id })
-          .where(and(eq(notifications.id, input.notificationId), isNull(notifications.resolvedAt)));
+          .set({ resolvedAt: now(), resolvedBy: HISTORICAL_CHECKOUT_ACTOR.id })
+          .where(
+            and(
+              eq(notifications.id, input.notificationId),
+              isNull(notifications.resolvedAt),
+              eq(notifications.raisedAt, new Date(input.raisedAt)),
+            ),
+          )
+          .returning({ id: notifications.id });
+        if (archived.length === 0) return 'conflict';
         await insertAudit(tx, entry);
         return 'ok';
       });

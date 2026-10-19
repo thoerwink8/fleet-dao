@@ -95,6 +95,8 @@ export async function runCheckoutHistory(input: {
     },
     after: {
       ...archive,
+      originalTitle: facts.notification.title,
+      runFailureReason: facts.run.failureReason ?? null,
       operator: input.operator,
       conclusion: 'historical_unproven',
     },

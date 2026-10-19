@@ -23,6 +23,12 @@ import {
   taskWorkflowId,
 } from '@fleet-dao/shared';
 import {
+  baseWorkflowIdOf,
+  checkoutAlertKeyOf,
+  checkoutNotificationProblem,
+  checkoutRunProblem,
+} from './checkout-history-logic.ts';
+import {
   claimedCommandResult,
   commandKey,
   commandTarget,
@@ -379,10 +385,12 @@ export function createMemoryStore(
     if (
       notification.level !== 'alert' ||
       notification.dedupeKey !== input.dedupeKey ||
-      notification.dedupeKey !== `cold-verify:checkout:${input.workflowId}` ||
+      notification.dedupeKey !== checkoutAlertKeyOf(input.workflowId) ||
       notification.raisedAt === undefined
     )
       throw new Error('原 checkout 通知不存在、不是报警、代次或 raisedAt 不匹配');
+    const notificationProblem = checkoutNotificationProblem(notification, input);
+    if (notificationProblem) throw new Error(notificationProblem);
     const actualRepo = data.repos.find((r) => `${r.owner}/${r.name}` === input.repo);
     if (!actualRepo) throw new Error('仓身份读不到或不完整');
     const task = data.tasks.find(
@@ -397,15 +405,12 @@ export function createMemoryStore(
         (r.taskId === undefined && r.issueNumber === task.issueNumber && r.workflowId === input.workflowId)
       );
     });
-    if (
-      !run ||
-      run.workflowId !== input.workflowId ||
-      run.temporalRunId !== input.temporalRunId ||
-      run.endedAt === undefined ||
-      run.outcome === undefined ||
-      run.prNumber !== input.pr
-    )
-      throw new Error('原执行 run 身份不完整、未终态或 PR 关联不匹配');
+    if (!run) throw new Error('原执行 run 不存在或不属于这张任务');
+    const runProblem = checkoutRunProblem(run, input);
+    if (runProblem) throw new Error(runProblem);
+    const baseWorkflowId = baseWorkflowIdOf(input.workflowId);
+    if (baseWorkflowId !== taskWorkflowId(actualRepo, task.issueNumber))
+      throw new Error('历史 checkout 工作流身份不匹配');
     const activeRunIds = checkoutRuns()
       .filter(
         (r) =>
@@ -414,8 +419,7 @@ export function createMemoryStore(
             (r.taskId === undefined &&
               r.issueNumber === task.issueNumber &&
               typeof r.workflowId === 'string' &&
-              (r.workflowId === input.workflowId ||
-                r.workflowId.startsWith(`task:${input.repo}#${input.issueNumber}:r`)))),
+              baseWorkflowIdOf(r.workflowId) === baseWorkflowId)),
       )
       .map((r) => r.id);
     if (!isTerminalTaskState(task.state)) throw new Error('任务仍在跑、待接回，或任务状态不是终态');
@@ -771,15 +775,14 @@ export function createMemoryStore(
       return checkoutFacts(input);
     },
     async archiveHistoricalCheckout(input, entry) {
+      const n = data.notifications.find((notification) => notification.id === input.notificationId);
+      if (!n) return 'not_found';
       let facts: HistoricalCheckoutFacts;
       try {
         facts = checkoutFacts(input);
       } catch {
         return 'conflict';
       }
-      const n = data.notifications.find((notification) => notification.id === input.notificationId);
-      if (!n) return 'not_found';
-      if (facts.activeRunIds.length > 0) return 'conflict';
       if (
         n.raisedAt !== input.raisedAt ||
         n.body !== input.notificationBody ||
@@ -818,6 +821,7 @@ export function createMemoryStore(
             : false;
         return same ? 'already_archived' : 'conflict';
       }
+      if (facts.activeRunIds.length > 0) return 'conflict';
       n.resolvedAt = now().toISOString();
       n.resolvedBy = HISTORICAL_CHECKOUT_ACTOR.id;
       audit(entry);

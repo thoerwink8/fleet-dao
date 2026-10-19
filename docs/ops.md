@@ -1110,7 +1110,7 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history
 bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history --archive < /受控目录/checkout-history-archive.json
 ```
 
-归档在 Store 事务内重新核对全部身份、通知代次、终态、无在途 run、merged PR/head，并只撤旧通知、追加 `notification.checkout_history_archive` 审计；失败写审计会回滚撤卡。输出明确“历史归档、检出恢复未证实”，不修改任务、run、PR、正常冷验收账或验收责任。重复同一完整请求幂等，不同快照冲突；实际生产处置前仍须由指挥官独立核验。
+归档在 Store 事务内（先锁 runs 表挡住并发新增，含 task_id 为空的历史兼容 run）重新核对全部身份、通知代次、通知标题/正文确为该目标该 head 的检出失败报警、原 run 确为该任务该 PR 已终态的 verify 段、终态、无在途 run、merged PR/head，并只撤旧通知、追加 `notification.checkout_history_archive` 审计；失败写审计会回滚撤卡。输出明确“历史归档、检出恢复未证实”，不修改任务、run、PR、正常冷验收账或验收责任。重复同一完整请求幂等，不同快照冲突；实际生产处置前仍须由指挥官独立核验。
 
 ### 命令行工具升级（#1971）
 
