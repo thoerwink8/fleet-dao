@@ -8,6 +8,7 @@
 - `packages/store/src/memory-store.ts`：内存版，也是语义的参照实现；测试和本地开发用它，`onChange` 模拟库的 `NOTIFY fleet_changes`。
 - `packages/store/src/pg-store.ts`：Postgres 版，用 `@fleet-dao/db`。
 - `packages/store/src/*-logic.ts`（`task-logic.ts`、`credentials-logic.ts` 等）：两套实现共用的判断，两边都调它。
+- `packages/store/src/policy-source.ts`：API webhook 与 engine replay/poll 共用 source publisher/wrapper，intake 白名单门通过后先发布、再 accepted；核受管数字仓身份、当前 open 同仓非 fork 精确 head，发布后 head 变更失败。
 - `packages/store/src/testing.ts`：测试用的种库（`seedPg`）。
 - `src/task-execution.ts` 与 `task-execution-logic.ts`：未接生产的执行资格合同和共用判断，两适配在 `task-execution-memory.ts` / `task-execution-pg.ts`。UUID仅接受规范小写，generation沿用正整数1到 `MAX_TASK_GENERATION`；同请求完整身份永久幂等，reserved可撤销留墓碑，dispatching/admitted只能返回proof_required。没有生产初始化或终态证明入口，不替代后续可信Temporal身份核验。
 
