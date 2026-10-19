@@ -1,76 +1,221 @@
-name: github-audit
-# GitHub 对账（#654，packages/conventions/src/github-audit.ts）：每天一轮，查 GitHub 上的单子、母子单、版本先后有没有断裂——
-# 开着的单没有类别标签、母单的子单都关了它还开着、子单挂在已关的母单下面、母单标签和子单对不上、里程碑说明里的先后和实际对不上。
-# 母单 manifest 含全部子单（含已关闭的），每日补齐；唯一清单自动修复正文 parent 与原生挂接，清单争抢或读取失败时不写。
-# 批量母单为空、子单 parent 孤儿仍对账；目录母单允许空清单，不再因创建超过一天而报警。
-# 查出来的挂得到单上的留言到那张单上（同一条只留一次），再把这一轮标红，修好才绿；红了开（或更新）同一张「GitHub 对账没过」单，绿了自动关（--alarm）。
-# 还查一周一版的兜底：开着的 v<N> 恰好一个、带到期日、过期一天多还没收口、已关的版本还挂着开着的单、开着的 PR 挂了里程碑。
-# 只在定时和手动时跑：结果随单子开关、随时间变，不进 PR 的必过检查（#87），也不在 PR、主线推送上跑；随时想核就 pnpm github:audit。
-# 退出码：没有断裂 = 0；有断裂 = 1；没查成（读不到 GitHub、留言没留成）= 2。
-# branches：分支体检（#769，packages/conventions/src/branch-hygiene.ts）：判远端每条分支删、留还是等人定，删内容全在主线（或已合并
-# PR）里的、和巡检单上人勾了删的；有产出的列到巡检单上等人勾。只有它要删分支（contents: write），所以和上面分开一个 job；
-# 内容按本地 git 比，检出全部历史。退出码：0 都判了（有等人定的也是 0）；1 有删失败的；2 没查成。随时想看就 pnpm branch:hygiene（只判不删）。
+name: reader-rate-probe-3332
+run-name: reader-rate-probe-3332
 on:
-  schedule:
-    - cron: '41 1 * * *'
   workflow_dispatch:
-concurrency:
-  group: github-audit
-  cancel-in-progress: false
-permissions:
-  contents: read
+permissions: {}
 jobs:
-  audit:
+  gate-readonly:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 3
     permissions:
       contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: node packages/conventions/src/bin/github-audit.ts --comment --alarm
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
-  version-cut:
-    # 版本收口（#2683，packages/conventions/src/version-cut.ts）：一周一版，北京时间过了到期日就开下一版、把开着的单滚过去、关旧版；
-    # 没到期什么都不做；已关的版本还挂着开着的单也挪到当前版本。退出码 0 收完或没到期；1 要人看；2 没做成（旧版没关）。
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      issues: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - run: node packages/conventions/src/bin/version-cut.ts
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-
-  branches:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: write
-      issues: write
       pull-requests: read
+      statuses: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
+          repository: thoerwink8/fleet-dao
+          ref: a76f3b3108afc21b08569671dc80bfe16f6419f3
           persist-credentials: false
-          fetch-depth: 0
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
-      - run: node packages/conventions/src/bin/branch-hygiene.ts --delete --board
+      - name: Compare two GET responses using trusted gate reader
+        shell: bash
         env:
+          PROBE_READER: gate
+          PROBE_CONTEXT_TOKEN: ${{ github.token }}
           GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          node --input-type=module <<'NODE'
+          const mode = process.env.PROBE_READER;
+          const emit = (record) => console.log(JSON.stringify({type: 'reader-rate-probe-3332', reader: mode, ...record}));
+          const integer = (value) => typeof value === 'string' && /^(0|[1-9][0-9]{0,15})$/.test(value) && Number.isSafeInteger(Number(value)) ? value : 'unknown';
+          const date = (value) => typeof value === 'string' && value.length === 29 && Number.isFinite(Date.parse(value)) && new Date(value).toUTCString() === value ? value : 'unknown';
+          const safeHeaders = (headers) => {
+            const resource = headers.get('x-ratelimit-resource');
+            const retry = headers.get('retry-after');
+            const id = headers.get('x-github-request-id');
+            return {
+              date: date(headers.get('date')),
+              'x-ratelimit-limit': integer(headers.get('x-ratelimit-limit')),
+              'x-ratelimit-remaining': integer(headers.get('x-ratelimit-remaining')),
+              'x-ratelimit-reset': integer(headers.get('x-ratelimit-reset')),
+              'x-ratelimit-resource': ['core', 'graphql', 'search', 'code_search', 'integration_manifest'].includes(resource) ? resource : 'unknown',
+              'retry-after': integer(retry) !== 'unknown' ? integer(retry) : date(retry),
+              'x-github-request-id': id && /^[0-9A-Fa-f:]{1,128}$/.test(id) ? id : 'unknown',
+            };
+          };
+          try {
+            if (!['gate', 'metadata'].includes(mode)) throw new Error('config');
+            const {githubToken, liveGitHub} = await import('./packages/conventions/src/github-api.ts');
+            const {ghApi} = await import('./packages/conventions/src/gh-api.ts');
+            const env = process.env;
+            const rawApi = env.GITHUB_API_URL || 'https://api.github.com';
+            const api = rawApi.replace(/\/+$/, '');
+            const apiKnown = rawApi === 'https://api.github.com' || rawApi === 'https://api.github.com/';
+            const context = env.PROBE_CONTEXT_TOKEN;
+            const selected = mode === 'gate' ? env.GITHUB_TOKEN : githubToken(env, () => undefined);
+            const source = mode === 'gate' ? (env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : 'none') : env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : env.GH_TOKEN ? 'GH_TOKEN' : 'none';
+            emit({phase: 'identity', sourceSha: 'a76f3b3108afc21b08569671dc80bfe16f6419f3', apiOrigin: apiKnown ? 'https://api.github.com' : 'unknown', selectedSource: source,
+              selectedEqualsContext: Boolean(selected && context && selected === context),
+              githubTokenEqualsContext: Boolean(env.GITHUB_TOKEN && context && env.GITHUB_TOKEN === context),
+              ghTokenEqualsContext: Boolean(env.GH_TOKEN && context && env.GH_TOKEN === context),
+              envPresent: Object.fromEntries(['GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_API_URL', 'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'all_proxy', 'no_proxy', 'NODE_OPTIONS', 'NODE_USE_ENV_PROXY'].map(key => [key, Boolean(env[key])])),
+              nodeEnvProxyEnabled: env.NODE_USE_ENV_PROXY === '1'});
+            if (!apiKnown || !selected || env.GITHUB_REPOSITORY !== 'thoerwink8/fleet-dao') throw new Error('identity');
+            const allowed = [api + '/rate_limit', api + '/repos/thoerwink8/fleet-dao/pulls/3332'];
+            const actualFetch = globalThis.fetch.bind(globalThis);
+            const outcomes = [];
+            let requests = 0;
+            const auditFetch = async (input, init = {}) => {
+              const target = typeof input === 'string' ? input : '';
+              const headers = new Headers(init.headers);
+              const index = requests;
+              if (index > 1 || target !== allowed[index] || (init.method || 'GET') !== 'GET' || init.body !== undefined || headers.get('authorization') !== 'Bearer ' + selected) throw new Error('request-boundary');
+              requests += 1;
+              const phase = index === 0 ? 'rate_limit' : 'reader_pr';
+              const startedAt = new Date().toISOString();
+              let response;
+              try {
+                response = await actualFetch(target, {...init, redirect: 'error', signal: AbortSignal.timeout(20000)});
+              } catch {
+                emit({phase, startedAt, observedAt: new Date().toISOString(), result: 'transport-unknown'});
+                outcomes.push(false);
+                throw new Error('transport');
+              }
+              emit({phase, startedAt, observedAt: new Date().toISOString(), status: response.status, headers: safeHeaders(response.headers)});
+              outcomes.push(response.ok);
+              return response;
+            };
+            try {
+              const response = await auditFetch(allowed[0], {method: 'GET', headers: {authorization: 'Bearer ' + selected, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': mode === 'gate' ? 'fleet-dao-merge-gate' : 'fleet-dao-conventions'}});
+              const body = await response.json();
+              const resource = (name) => Object.fromEntries(['limit', 'remaining', 'reset', 'used'].map(key => [key, Number.isSafeInteger(body?.resources?.[name]?.[key]) && body.resources[name][key] >= 0 ? body.resources[name][key] : 'unknown']));
+              emit({phase: 'rate_resources', core: resource('core'), graphql: resource('graphql')});
+            } catch {
+              emit({phase: 'rate_resources', result: 'unavailable'});
+            }
+            if (requests !== 1) throw new Error('request-count');
+            try {
+              if (mode === 'gate') await ghApi(env, auditFetch).get('/pulls/3332');
+              else await liveGitHub('thoerwink8/fleet-dao', env, {fetchImpl: auditFetch, token: () => undefined}).pull(3332);
+              emit({phase: 'reader_result', result: 'read-success'});
+            } catch {
+              emit({phase: 'reader_result', result: 'read-failed'});
+            }
+            emit({phase: 'completed', requests, allHttpSuccess: requests === 2 && outcomes.length === 2 && outcomes.every(Boolean)});
+            if (requests !== 2 || outcomes.length !== 2 || !outcomes.every(Boolean)) process.exitCode = 1;
+          } catch {
+            emit({phase: 'aborted', result: 'identity-or-config-unknown'});
+            process.exitCode = 1;
+          }
+          NODE
+  metadata-readonly:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: thoerwink8/fleet-dao
+          ref: a76f3b3108afc21b08569671dc80bfe16f6419f3
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+      - name: Compare two GET responses using trusted metadata reader
+        shell: bash
+        env:
+          PROBE_READER: metadata
+          PROBE_CONTEXT_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          node --input-type=module <<'NODE'
+          const mode = process.env.PROBE_READER;
+          const emit = (record) => console.log(JSON.stringify({type: 'reader-rate-probe-3332', reader: mode, ...record}));
+          const integer = (value) => typeof value === 'string' && /^(0|[1-9][0-9]{0,15})$/.test(value) && Number.isSafeInteger(Number(value)) ? value : 'unknown';
+          const date = (value) => typeof value === 'string' && value.length === 29 && Number.isFinite(Date.parse(value)) && new Date(value).toUTCString() === value ? value : 'unknown';
+          const safeHeaders = (headers) => {
+            const resource = headers.get('x-ratelimit-resource');
+            const retry = headers.get('retry-after');
+            const id = headers.get('x-github-request-id');
+            return {
+              date: date(headers.get('date')),
+              'x-ratelimit-limit': integer(headers.get('x-ratelimit-limit')),
+              'x-ratelimit-remaining': integer(headers.get('x-ratelimit-remaining')),
+              'x-ratelimit-reset': integer(headers.get('x-ratelimit-reset')),
+              'x-ratelimit-resource': ['core', 'graphql', 'search', 'code_search', 'integration_manifest'].includes(resource) ? resource : 'unknown',
+              'retry-after': integer(retry) !== 'unknown' ? integer(retry) : date(retry),
+              'x-github-request-id': id && /^[0-9A-Fa-f:]{1,128}$/.test(id) ? id : 'unknown',
+            };
+          };
+          try {
+            if (!['gate', 'metadata'].includes(mode)) throw new Error('config');
+            const {githubToken, liveGitHub} = await import('./packages/conventions/src/github-api.ts');
+            const {ghApi} = await import('./packages/conventions/src/gh-api.ts');
+            const env = process.env;
+            const rawApi = env.GITHUB_API_URL || 'https://api.github.com';
+            const api = rawApi.replace(/\/+$/, '');
+            const apiKnown = rawApi === 'https://api.github.com' || rawApi === 'https://api.github.com/';
+            const context = env.PROBE_CONTEXT_TOKEN;
+            const selected = mode === 'gate' ? env.GITHUB_TOKEN : githubToken(env, () => undefined);
+            const source = mode === 'gate' ? (env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : 'none') : env.GITHUB_TOKEN ? 'GITHUB_TOKEN' : env.GH_TOKEN ? 'GH_TOKEN' : 'none';
+            emit({phase: 'identity', sourceSha: 'a76f3b3108afc21b08569671dc80bfe16f6419f3', apiOrigin: apiKnown ? 'https://api.github.com' : 'unknown', selectedSource: source,
+              selectedEqualsContext: Boolean(selected && context && selected === context),
+              githubTokenEqualsContext: Boolean(env.GITHUB_TOKEN && context && env.GITHUB_TOKEN === context),
+              ghTokenEqualsContext: Boolean(env.GH_TOKEN && context && env.GH_TOKEN === context),
+              envPresent: Object.fromEntries(['GITHUB_TOKEN', 'GH_TOKEN', 'GITHUB_API_URL', 'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'NO_PROXY', 'https_proxy', 'http_proxy', 'all_proxy', 'no_proxy', 'NODE_OPTIONS', 'NODE_USE_ENV_PROXY'].map(key => [key, Boolean(env[key])])),
+              nodeEnvProxyEnabled: env.NODE_USE_ENV_PROXY === '1'});
+            if (!apiKnown || !selected || env.GITHUB_REPOSITORY !== 'thoerwink8/fleet-dao') throw new Error('identity');
+            const allowed = [api + '/rate_limit', api + '/repos/thoerwink8/fleet-dao/pulls/3332'];
+            const actualFetch = globalThis.fetch.bind(globalThis);
+            const outcomes = [];
+            let requests = 0;
+            const auditFetch = async (input, init = {}) => {
+              const target = typeof input === 'string' ? input : '';
+              const headers = new Headers(init.headers);
+              const index = requests;
+              if (index > 1 || target !== allowed[index] || (init.method || 'GET') !== 'GET' || init.body !== undefined || headers.get('authorization') !== 'Bearer ' + selected) throw new Error('request-boundary');
+              requests += 1;
+              const phase = index === 0 ? 'rate_limit' : 'reader_pr';
+              const startedAt = new Date().toISOString();
+              let response;
+              try {
+                response = await actualFetch(target, {...init, redirect: 'error', signal: AbortSignal.timeout(20000)});
+              } catch {
+                emit({phase, startedAt, observedAt: new Date().toISOString(), result: 'transport-unknown'});
+                outcomes.push(false);
+                throw new Error('transport');
+              }
+              emit({phase, startedAt, observedAt: new Date().toISOString(), status: response.status, headers: safeHeaders(response.headers)});
+              outcomes.push(response.ok);
+              return response;
+            };
+            try {
+              const response = await auditFetch(allowed[0], {method: 'GET', headers: {authorization: 'Bearer ' + selected, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'user-agent': mode === 'gate' ? 'fleet-dao-merge-gate' : 'fleet-dao-conventions'}});
+              const body = await response.json();
+              const resource = (name) => Object.fromEntries(['limit', 'remaining', 'reset', 'used'].map(key => [key, Number.isSafeInteger(body?.resources?.[name]?.[key]) && body.resources[name][key] >= 0 ? body.resources[name][key] : 'unknown']));
+              emit({phase: 'rate_resources', core: resource('core'), graphql: resource('graphql')});
+            } catch {
+              emit({phase: 'rate_resources', result: 'unavailable'});
+            }
+            if (requests !== 1) throw new Error('request-count');
+            try {
+              if (mode === 'gate') await ghApi(env, auditFetch).get('/pulls/3332');
+              else await liveGitHub('thoerwink8/fleet-dao', env, {fetchImpl: auditFetch, token: () => undefined}).pull(3332);
+              emit({phase: 'reader_result', result: 'read-success'});
+            } catch {
+              emit({phase: 'reader_result', result: 'read-failed'});
+            }
+            emit({phase: 'completed', requests, allHttpSuccess: requests === 2 && outcomes.length === 2 && outcomes.every(Boolean)});
+            if (requests !== 2 || outcomes.length !== 2 || !outcomes.every(Boolean)) process.exitCode = 1;
+          } catch {
+            emit({phase: 'aborted', result: 'identity-or-config-unknown'});
+            process.exitCode = 1;
+          }
+          NODE
