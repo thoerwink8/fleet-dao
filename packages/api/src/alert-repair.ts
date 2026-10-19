@@ -13,7 +13,7 @@
 // - 要人本人拍的动作（恢复引擎开关、撤掉暂停）带 choice：选项、推荐、自由输入沿用「要你拍」的形状；只有「执行」那一项会执行，
 //   先不动、自己输入、不答都不执行。
 // - 状态落在设置表 alert.repair:<提醒编号>（版本号做 CAS：先写 executing 再动手，动手后写结果；中断后不自动重放）。
-//   设置页只列 SETTING_SCHEMAS 里的键，这条不会出现在设置页。每次写都带操作记录。
+//   最终结算没写上（CAS 冲突或持久读写失败）时，回执不采用内存里算出的终态。设置页只列 SETTING_SCHEMAS 里的键，这条不会出现在设置页。每次写都带操作记录。
 // - idle-running 和原检测器共用阈值（包括自测预算），并绑定任务、仓和工作流 run；仅更新了时间不等于恢复。
 // - 明确关联已有单（#3100，POST /api/notifications/:id/repair/link）：可信登录操作者指定这次告警由哪张现有单处理。只收受管仓 + 单号 +
 //   服务端关联版本 + incident + requestId；服务端现读单子必须是 fleet-dao 里开着的 issue，并记下当时的任务 / 开放 PR 事实，
@@ -1129,6 +1129,96 @@ export async function alertRepairViews(
   return out;
 }
 
+/** 已经落库、可以当回执的终态。executing 只是动手前的接活，结算没写上时不能拿它冒充结果。 */
+const RECEIPT_STATES = new Set<StoredRecord['state']>([
+  'accepted',
+  'verified',
+  'failed',
+  'unknown',
+  'declined',
+  'handed',
+]);
+
+/** 重读到的记录必须是这次事故、这次请求、这个动作，而且已经是落库的终态。对不上就当没有，免得串事故或盖掉并发赢家。 */
+function persistedReceipt(
+  stored: StoredRecord | undefined,
+  want: StoredRecord,
+): AlertRepairRecord | undefined {
+  if (!stored || stored.kind === LINK_KIND || stored.kind !== want.kind) return undefined;
+  if (
+    stored.incident !== want.incident ||
+    stored.requestId !== want.requestId ||
+    stored.actionId !== want.actionId
+  )
+    return undefined;
+  if (!RECEIPT_STATES.has(stored.state)) return undefined;
+  return wireLast(stored);
+}
+
+async function readPersistedReceipt(
+  deps: Deps,
+  notificationId: string,
+  want: StoredRecord,
+): Promise<AlertRepairRecord | undefined> {
+  try {
+    const { rec } = await readState(deps.store, notificationId);
+    return persistedReceipt(rec, want);
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    deps.log.error('修复结算之后持久状态没读到', {
+      notification: notificationId,
+      error: errMessage(err),
+    });
+    throw new ApiError(
+      409,
+      'repair_state_unreadable',
+      '修复动作已经发出，持久状态没读到：不把没落库的结果当成功，请先核实现场',
+    );
+  }
+}
+
+/**
+ * 动作已经发出去之后才结算。只有写进设置表的那条能当回执。
+ * 冲突或写入失败时不再回内存里的 verified 等终态，也不再写第二笔：重读只采纳精确同一事故、请求、动作的已落库结果。
+ */
+async function settleExecuted(
+  deps: Deps,
+  ctx: { actor: Actor; via: AuditVia },
+  n: NotificationRecord,
+  rec: StoredRecord,
+  expectedVersion: number,
+): Promise<AlertRepairRecord> {
+  try {
+    const settled = await writeState(deps.store, ctx, n, rec, expectedVersion);
+    if (settled === 'ok') return wireRepair(rec);
+    deps.log.error('修复动作已执行，结果没写上（状态被别处改过）', {
+      notification: n.id,
+      action: rec.actionId,
+    });
+  } catch (err) {
+    if (err instanceof ApiError) throw err;
+    deps.log.error('修复动作已执行，结果没写上（持久写入失败）', {
+      notification: n.id,
+      action: rec.actionId,
+      error: errMessage(err),
+    });
+    const winner = await readPersistedReceipt(deps, n.id, rec);
+    if (winner) return winner;
+    throw new ApiError(
+      409,
+      'repair_conflict',
+      '修复动作已经发出，结果没写上（持久写入失败）：不把没落库的结果当成功，请先核实现场',
+    );
+  }
+  const winner = await readPersistedReceipt(deps, n.id, rec);
+  if (winner) return winner;
+  throw new ApiError(
+    409,
+    'repair_conflict',
+    '修复动作已经发出，结果没写上（状态被别处改过）：不把没落库的结果当成功，请刷新后再看',
+  );
+}
+
 async function findNotification(store: Store, id: string): Promise<NotificationRecord | undefined> {
   for (const status of ['open', 'all'] as const) {
     let cursor: string | undefined;
@@ -1325,11 +1415,8 @@ export function registerAlertRepairRoutes(
         ...(check.ok === true ? { state: 'verified' as const } : {}),
       };
     }
-    const settled = await writeState(deps.store, { actor, via }, n, rec, version + 1);
-    if (settled === 'conflict') {
-      deps.log.error('修复动作已执行，结果没写上（状态被别处改过）', { notification: id, action: action.id });
-    }
-    return reply(c, ExecuteAlertRepairResponse, { ok: true, repair: wireRepair(rec), replayed: false });
+    const repair = await settleExecuted(deps, { actor, via }, n, rec, version + 1);
+    return reply(c, ExecuteAlertRepairResponse, { ok: true, repair, replayed: false });
   });
 
   // 明确关联已有单：只记绑定，不开单、不派工；操作者身份只认登录会话（请求里没有 actor 字段，多写就 400）
