@@ -2,7 +2,6 @@
 // 真 Temporal 测试服务端 + 假端口 + 脚本化的任务活动（重评走 readDelivery 的 budgetRemeasure 入参）。
 // 不碰真实 #3207，不改生产数据。
 
-import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -31,6 +30,7 @@ import {
   taskRemeasureLineBudgetUpdate,
   taskStatusQuery,
 } from '../src/task-contract.ts';
+import { runChild } from './child.ts';
 import { engineBundle, freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
 import { goodBrief, scripted } from './task-script.ts';
 
@@ -671,32 +671,33 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
   });
 });
 
-/** #3249 改动前的 828c9d47：只打包那一版工作流，活动仍用现在的测试脚本。不改、不覆盖已有夹具。 */
-const OLD_WORKER_COMMIT = '828c9d47';
-const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+/**
+ * #3249 改动前的 828c9d47（树 99756f1fa095868b373a9360e3dcc43625458067）里的 packages/engine/src。
+ * CI 的测试检出是浅克隆，那个提交对象不在仓里，不能在测试里 git archive。源码包随夹具走，不许为了变绿重打包。
+ * 只打包那一版工作流；活动仍用现在的测试脚本。依赖只挂本包自己的 node_modules（仓根那份不在测试缓存键里）。
+ */
+const OLD_WORKER_ARCHIVE = fileURLToPath(
+  new URL('./replay/fixtures/old-park-worker-828c9d47.tar.gz', import.meta.url),
+);
 let oldParkBundle: Promise<WorkflowBundle> | undefined;
 
 function oldParkWorkerBundle(): Promise<WorkflowBundle> {
   oldParkBundle ??= (async () => {
     const root = mkdtempSync(join(tmpdir(), 'fleet-3249-old-park-'));
     try {
-      const archive = join(root, 'src.tar');
-      execFileSync('git', ['archive', `--output=${archive}`, OLD_WORKER_COMMIT, 'packages/engine/src'], {
-        cwd: REPO_ROOT,
-      });
-      execFileSync('tar', ['-x', '-C', root, '-f', archive]);
+      const extracted = runChild('tar', ['-xz', '-C', root, '-f', OLD_WORKER_ARCHIVE]);
+      if (extracted.status !== 0) {
+        throw new Error(`解旧工人源码失败（退出码 ${extracted.status}）：${extracted.stderr.trim()}`);
+      }
       const silent = { trace() {}, debug() {}, info() {}, warn() {}, error: console.error, log() {} };
-      const modules = [
-        fileURLToPath(new URL('../node_modules', import.meta.url)),
-        fileURLToPath(new URL('../../../node_modules', import.meta.url)),
-      ];
+      const modules = join(import.meta.dirname, '..', 'node_modules');
       return await bundleWorkflowCode({
         workflowsPath: join(root, 'packages/engine/src/workflows/index.ts'),
         logger: silent as never,
         webpackConfigHook: (config) => {
           config.resolve ??= {};
           const current = config.resolve.modules ?? ['node_modules'];
-          config.resolve.modules = [...modules, ...current];
+          config.resolve.modules = [modules, ...current];
           return config;
         },
       });
