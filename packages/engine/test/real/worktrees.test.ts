@@ -2,8 +2,7 @@
 // 不在回 null、归了别人明确报错（不碰）。
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { helperWorkTrees, layout, sessionUserUids } from '../../src/real/worktrees.ts';
@@ -105,22 +104,41 @@ describe('清理事务分页的真实装配（帮手回执由测试摆布）', (
   const head = { version: 1, state: 'ok', namespace, generation: '9.121' };
   const firstPage = { ...head, rows: [], truncated: true, after: null, next: hash(99) };
   const lastPage = { ...head, rows: [tail], truncated: false, after: hash(99), next: null };
-  const trees = helperWorkTrees({
-    root,
-    helper: join(dirname(fileURLToPath(import.meta.url)), '../../../adapters/test/fake-scope-helper.ts'),
-    sudo: [process.execPath],
-  });
   let dir: string;
+  let trees: ReturnType<typeof helperWorkTrees>;
+  // 假帮手只认能力和 cleanup-status：按调用顺序吐 pages.json 里的回执，吐完了按读失败退出。
   function pages(list: unknown[]) {
-    process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES = JSON.stringify(list);
-    process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER = join(dir, `counter-${Math.random()}`);
+    writeFileSync(join(dir, 'pages.json'), JSON.stringify(list));
+    writeFileSync(join(dir, 'used'), '0');
   }
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-pages-'));
+    const helper = join(dir, 'fake-scope.mjs');
+    const features = [
+      'tree-usage',
+      'identity-remove',
+      'cleanup-status',
+      'cleanup-rollback',
+      'locked-adopt',
+      'temporary-files',
+    ];
+    writeFileSync(
+      helper,
+      [
+        "import { readFileSync, writeFileSync } from 'node:fs';",
+        'const [action] = process.argv.slice(2);',
+        `const dir = ${JSON.stringify(dir)};`,
+        `if (action === 'capabilities') { process.stdout.write(JSON.stringify({ version: 1, state: 'ok', features: ${JSON.stringify(features)} })); process.exit(0); }`,
+        "const used = Number(readFileSync(dir + '/used', 'utf8'));",
+        "writeFileSync(dir + '/used', String(used + 1));",
+        "const list = JSON.parse(readFileSync(dir + '/pages.json', 'utf8'));",
+        "if (action !== 'cleanup-status' || used >= list.length) process.exit(1);",
+        'process.stdout.write(JSON.stringify(list[used]));',
+      ].join('\n'),
+    );
+    trees = helperWorkTrees({ root, helper, sudo: [process.execPath] });
   });
   afterEach(() => {
-    delete process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES;
-    delete process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER;
     rmSync(dir, { recursive: true, force: true });
   });
 
