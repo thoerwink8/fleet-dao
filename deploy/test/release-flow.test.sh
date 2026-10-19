@@ -391,6 +391,91 @@ check "本机启用了引擎：切之前好、切之后坏——算这一版的�
 check "启用了引擎：报红" "$(printf '%s\n' "${REDS[@]}" | grep -c 'engine 切之前是好的，换了这一版不好了')" 1
 FLEET_SERVICES="$_fs_saved"
 
+echo "== 后端报引擎不在线时，先和工人已在队列取活的证据核对再裁决（#3250）：探针滞后保留/未决、真离线退回、重试转绿保留、重试仍红按工人证据裁"
+_recon_saved="$(declare -f engine_worker_evidence api_healthz unit_prop)"
+ENGINE_RECONCILE_GAP=0
+ENGINE_RECONCILE_TRIES=4
+EV_SEQ=()    # 工人证据按轮给：polling / idle / dead；用完了重复最后一个
+PROBE_SEQ=() # 后端 /healthz 里 engine 项按次给：ok / bad / down；用完了重复最后一个
+EV_N_FILE=$TMP/ev-n # 计数落文件：桩在 $(...) 子 shell 里跑，变量计数带不出来
+PROBE_N_FILE=$TMP/probe-n
+bump() { local n; n=$(cat -- "$1" 2>/dev/null || echo 0); echo $((n + 1)) >"$1"; echo "$n"; }
+unit_prop() { if [[ "$2" == MainPID ]]; then echo 4242; else echo ""; fi; }
+engine_worker_evidence() {
+  local i; i=$(bump "$EV_N_FILE")
+  ((i < ${#EV_SEQ[@]})) || i=$((${#EV_SEQ[@]} - 1))
+  echo "${EV_SEQ[$i]}"
+}
+api_healthz() {
+  local i; i=$(bump "$PROBE_N_FILE")
+  ((i < ${#PROBE_SEQ[@]})) || i=$((${#PROBE_SEQ[@]} - 1))
+  case "${PROBE_SEQ[$i]}" in
+  ok) printf '200\t{"ok":true,"checks":{"database":{"ok":true},"engine":{"ok":true}}}' ;;
+  bad) printf '503\t{"ok":false,"checks":{"database":{"ok":true},"engine":{"ok":false,"message":"workflow poller 最近一次拉活超时"}}}' ;;
+  *) return 1 ;;
+  esac
+}
+FLEET_SERVICES="fleet-engine fleet-api"
+recon() { # 说明 工人证据序列（空格隔开） 探针序列：切之前引擎好、切之后探针红，跑一遍核对
+  read -ra EV_SEQ <<<"$2"
+  read -ra PROBE_SEQ <<<"$3"
+  rm -f -- "$EV_N_FILE" "$PROBE_N_FILE"
+  ENGINE_RECONCILE_VERDICT=""
+  ENGINE_RECONCILE_RECEIPT=""
+  reset
+  compare_api_items "$(printf 'database\tok\t\nengine\tok\t\n')" \
+    "$(printf 'database\tok\t\nengine\tbad\t引擎不在线：workflow poller 最近一次拉活超时\n')" >/dev/null
+  RECON_RC=$?
+}
+has() { printf '%s' "$ENGINE_RECONCILE_RECEIPT" | grep -cF -- "$1"; }
+
+recon 工人已拉活但探针一直滞后 "polling" "bad"
+check "工人已拉活、探针一直红：不退回（返回 0）" "$RECON_RC" 0
+check "工人已拉活、探针一直红：裁决未决" "$ENGINE_RECONCILE_VERDICT" 未决
+check "未决：没有红" "${#REDS[@]}" 0
+check "未决：记成待处理、回执写明未决不当成已证实故障" "$(printf '%s\n' "${PENDING[@]}" | grep -c '裁决=未决.*不能把未决写成已证实故障')" 1
+check "回执写出工人这一边证据" "$(has '工人证据=工人已在任务队列 fleet 取工作流任务和活动任务（pid 4242）')" 1
+check "回执写出探针这一边证据" "$(has 'API 探针=红（workflow poller 最近一次拉活超时）')" 1
+check "回执写出重试次数" "$(has '重试 3 次（上限 3 次）')" 1
+check "未决：没有同时宣称引擎不在线又退回（没有红、没有切之前好切之后不好那句）" "$(printf '%s\n' "${REDS[@]}" | grep -c '换了这一版不好了')" 0
+
+recon 真离线进程已退 "dead" "bad"
+check "进程已退：算这一版的错（退回）" "$RECON_RC" 1
+check "进程已退：裁决退回" "$ENGINE_RECONCILE_VERDICT" 退回
+check "进程已退：马上裁，不重试" "$(has '重试 0 次')" 1
+check "进程已退：红里有两边证据和裁决理由" "$(printf '%s\n' "${REDS[@]}" | grep -c '工人证据=工人进程已退或没起.*API 探针=红.*裁决=退回.*理由=引擎进程已退')" 1
+recon 真离线队列无拉活 "idle" "bad"
+check "队列上没有工人取活、探针也红：退回" "$RECON_RC" 1
+check "队列无拉活：裁决退回" "$ENGINE_RECONCILE_VERDICT" 退回
+check "队列无拉活：重试用满才裁" "$(has '重试 3 次（上限 3 次）')" 1
+check "队列无拉活：回执写明队列上没有取活记录" "$(has '任务队列 fleet 上没有它的取活记录')" 1
+
+recon 重试后探针转绿 "polling polling polling" "bad ok"
+check "探针重试后转绿：保留（返回 0）" "$RECON_RC" 0
+check "转绿：裁决保留" "$ENGINE_RECONCILE_VERDICT" 保留
+check "转绿：没有红、没有待处理" "$((${#REDS[@]} + ${#PENDING[@]}))" 0
+check "转绿：回执写明重试后转绿、重试 1 次" "$(has 'API 探针=重试后转绿；重试 2 次')" 1
+
+recon 重试后仍红且工人证据丢了 "polling idle idle" "bad"
+check "重试后仍红、工人也不再取活：退回" "$RECON_RC" 1
+check "重试后仍红、工人证据丢了：裁决退回" "$ENGINE_RECONCILE_VERDICT" 退回
+recon 重试后仍红但工人稳定在取活 "polling polling polling polling" "bad bad down"
+check "重试后仍红（探针后来连不上）、工人稳定取活：未决不退回" "$RECON_RC" 0
+check "重试后仍红：裁决未决" "$ENGINE_RECONCILE_VERDICT" 未决
+check "重试后仍红：回执写明最后一次探针原因" "$(has '驾驶舱接口 http://')" 1
+
+# 切之前引擎就不好：不算这一版的错，不核对、不重试
+recon 切之前就不好 "idle" "bad"
+reset
+rm -f -- "$EV_N_FILE"
+compare_api_items "$(printf 'database\tok\t\nengine\tbad\t旧的\n')" \
+  "$(printf 'database\tok\t\nengine\tbad\t引擎不在线\n')" >/dev/null
+check "切之前引擎就不好：不退回" "$?" 0
+check "切之前引擎就不好：不去核对工人" "$(cat -- "$EV_N_FILE" 2>/dev/null || echo 0)" 0
+
+eval "$_recon_saved"
+FLEET_SERVICES="$_fs_saved"
+
 echo "== 切版本之前读后端的健康报告：没在跑就空着照切；在跑却读不到（连不上、回的不是健康报告）不切（审查 S1：空的「切之前」会让切之后变红的项被当成「之前就不好」、不退回）"
 rm -rf "${RELEASES:?}"/* "$RELEASES"/.history
 GATE=()

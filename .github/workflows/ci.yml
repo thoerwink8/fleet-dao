@@ -274,9 +274,13 @@ jobs:
           persist-credentials: false
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
+        id: test-node
         with:
           node-version: 22
           cache: pnpm
+      # 每台实际测试环境的读回声明；selfCheck 只认可严格唯一、成功的声明，旧 CI 回本机路径。
+      - name: 已测的环境 node=${{ steps.test-node.outputs.node-version }}
+        run: ':'
       - run: pnpm install --frozen-lockfile
       - name: 等 postgres:16 起来（只 pg 台）
         if: matrix.pg
