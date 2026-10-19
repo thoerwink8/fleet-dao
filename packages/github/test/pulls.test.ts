@@ -111,7 +111,7 @@ describe('开 PR', () => {
     );
   });
 
-  it('C13：标题里的关单词改成「关联」；正文先留下有效关单词，合并前才中和', async () => {
+  it('C13：标题里的关单词改成「关联」；正文同步中和，保留需求关联', async () => {
     const { gh, fake } = setup();
     fake.refs.set('task/4', A);
     const res = await gh.openPr({
@@ -123,8 +123,8 @@ describe('开 PR', () => {
     });
     const pr = fake.pulls.get(res.number);
     expect(pr?.title).toBe('关联 #3 登录');
-    expect(pr?.body).toBe('做完了。Closes #12, resolves: acme/other#9');
-    expect(hasCloseKeywords(pr?.body ?? '')).toBe(true);
+    expect(pr?.body).toBe('做完了。关联 #12, 关联 acme/other#9');
+    expect(hasCloseKeywords(pr?.body ?? '')).toBe(false);
   });
 
   it('B3：长正文走请求体；超过 65536 个字符发出前就拒，报实际字数', async () => {
@@ -834,6 +834,27 @@ describe('合并', () => {
       expect(hasCloseKeywords(sent), sent).toBe(false);
     }
   });
+
+  it.each([undefined, '', '   ', 'Fixes #3210'])(
+    'REST squash 标题显式非空且不关单：%j',
+    async (commitTitle) => {
+      const { gh, fake } = setup();
+      const pr = ready(fake, {
+        head: { ref: 'task/1', sha: A },
+        body: '**需求**：Refs #3210（验收责任未结）',
+      });
+      await gh.mergePr({ repo, prNumber: pr.number, expectedHead: A, commitTitle });
+      const request = fake.calls('PUT', /\/merge$/)[0]?.body as {
+        commit_title: string;
+        commit_message: string;
+      };
+      expect(request.commit_title.trim()).toBeTruthy();
+      expect(request.commit_message.trim()).toBeTruthy();
+      expect(hasCloseKeywords(`${request.commit_title}\n${request.commit_message}`)).toBe(false);
+      expect(fake.pulls.get(pr.number)?.body).toContain('Refs #3210');
+      expect(fake.calls('PATCH', /\/issues\//)).toEqual([]);
+    },
+  );
 
   it('同一个仓的两张 PR 同时合：从核对主线到发合并请求按仓串行，不交错', async () => {
     const { gh, fake } = setup();
