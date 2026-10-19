@@ -19,7 +19,13 @@ import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readTreeUsage } from '@fleet-dao/adapters';
 import { PortError } from '../ports.ts';
-import { describeFailure, type UserCommandResult } from './exec.ts';
+import { describeFailure, type UserCommand, type UserCommandResult } from './exec.ts';
+import {
+  SNAPSHOT_MAX_COMPONENTS,
+  SNAPSHOT_METADATA_BYTES,
+  SNAPSHOT_TOTAL_BYTES,
+  SnapshotFrameReader,
+} from './snapshot-frame.ts';
 import {
   DISPOSABLE,
   ENVIRONMENT_FILES,
@@ -207,6 +213,11 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 function asState(value: unknown, preserved: readonly string[], dir: string): ComplexState {
   const row = asRecord(value);
   if (row?.version !== 3) throw keep('ARCHIVE_FAILED', '快照状态不是完整版本，旧回执不能放行删除', dir);
+  for (const key of ['files', 'ignored', 'merge', 'stash', 'objects']) {
+    const list = row[key];
+    if (!Array.isArray(list) || list.length > (key === 'objects' ? 250_000 : 100_000))
+      throw keep('ARCHIVE_FAILED', '快照清单数量越界', dir);
+  }
   const head = row.head;
   const identity = row.identity;
   const indexSha = row.indexSha;
@@ -688,15 +699,23 @@ function scopeId(prefix: string): string {
 async function runUser(
   t: UserTree,
   argv: string[],
-  options: { cwd?: string; stdin?: Buffer; env?: Record<string, string>; timeoutMs?: number } = {},
+  options: {
+    cwd?: string;
+    stdin?: Buffer;
+    env?: Record<string, string>;
+    timeoutMs?: number;
+    snapshotStream?: UserCommand['snapshotStream'];
+    ignoreCancellation?: boolean;
+  } = {},
 ): Promise<UserCommandResult> {
   return t.exec({
     user: t.user,
     cwd: options.cwd ?? t.dir,
     argv,
     ...(options.stdin ? { stdin: options.stdin } : {}),
+    ...(options.snapshotStream ? { snapshotStream: options.snapshotStream } : {}),
     timeoutMs: options.timeoutMs ?? 240_000,
-    ...(t.signal ? { signal: t.signal } : {}),
+    ...(t.signal && !options.ignoreCancellation ? { signal: t.signal } : {}),
     scopeId: scopeId(t.scopePrefix),
     ...(options.env ? { env: options.env } : {}),
   });
@@ -819,22 +838,102 @@ function snapEnv(mode: string, t: UserTree, preserved: readonly string[]): Recor
   };
 }
 
+const SNAP_TEMP_SCRIPT = `
+import {constants,openSync,closeSync,mkdirSync,fstatSync,lstatSync,renameSync,rmSync,realpathSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join,dirname,basename} from 'node:path';
+const token=process.env.FLEET_SNAP_TOKEN;
+if(!/^[0-9a-f-]{36}$/.test(token))throw Error('临时事务token非法');
+function openDir(path){let fd=openSync('/',constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);try{for(const name of path.split('/').filter(Boolean)){const next=openSync('/proc/self/fd/'+fd+'/'+name,constants.O_RDONLY|constants.O_DIRECTORY|constants.O_NOFOLLOW);closeSync(fd);fd=next;}return fd;}catch(e){closeSync(fd);throw e;}}
+if(process.env.FLEET_SNAP_TEMP_ACTION==='prepare'){
+ const base=realpathSync(tmpdir()),parent=openDir(base),name='fleet-snapshot-'+token;
+ try{mkdirSync('/proc/self/fd/'+parent+'/'+name,{mode:0o700});const fd=openDir(join(base,name));try{const s=fstatSync(fd);process.stdout.write(JSON.stringify({path:join(base,name),dev:String(s.dev),ino:String(s.ino),uid:String(s.uid),token}));}finally{closeSync(fd);}}finally{closeSync(parent);}
+}else{
+ const identity=JSON.parse(process.env.FLEET_SNAP_TEMP);
+ if(identity.token!==token||basename(identity.path)!=='fleet-snapshot-'+token)throw Error('临时事务路径不符');
+ const parent=openDir(dirname(identity.path)),name=basename(identity.path),path='/proc/self/fd/'+parent+'/'+name;
+ const same=s=>s.isDirectory()&&!s.isSymbolicLink()&&String(s.dev)===identity.dev&&String(s.ino)===identity.ino&&String(s.uid)===identity.uid&&(s.mode&511)===448;
+ try{if(!same(lstatSync(path)))throw Error('临时事务身份变化，拒绝清理');const retired=path+'-retiring';renameSync(path,retired);if(!same(lstatSync(retired)))throw Error('临时事务隔离后身份变化，拒绝清理');rmSync(retired,{recursive:true});process.stdout.write('clean');}finally{closeSync(parent);}
+}
+`;
+
 async function runSnap(
   t: UserTree,
   mode: 'capture' | 'inspect' | 'verify',
   preserved: readonly string[],
   stdin?: Buffer,
+  stream?: UserCommand['snapshotStream'],
 ): Promise<Buffer> {
+  const deadline = Date.now() + 240_000;
   let script: string;
   try {
     script = await readFile(SCRIPT, 'utf8');
   } catch {
     throw keep('ARCHIVE_FAILED', '快照脚本读不了', t.dir);
   }
-  const result = await runUser(t, [process.execPath, '--input-type=module', '-e', script], {
-    ...(stdin ? { stdin } : {}),
-    env: snapEnv(mode, t, preserved),
-  });
+  let temporary: string | undefined;
+  const token = randomUUID();
+  if (mode !== 'inspect') {
+    const prep = await runUser(t, [process.execPath, '--input-type=module', '-e', SNAP_TEMP_SCRIPT], {
+      timeoutMs: Math.min(10_000, deadline - Date.now()),
+      env: { FLEET_SNAP_TOKEN: token, FLEET_SNAP_TEMP_ACTION: 'prepare' },
+    });
+    if (prep.code !== 0 || prep.stdout.length > 4096)
+      throw keep('ARCHIVE_FAILED', describeFailure('快照临时事务准备失败', prep), t.dir);
+    const identity = asRecord(JSON.parse(prep.stdout.toString('utf8')));
+    if (
+      identity?.token !== token ||
+      typeof identity.path !== 'string' ||
+      typeof identity.dev !== 'string' ||
+      typeof identity.ino !== 'string' ||
+      typeof identity.uid !== 'string'
+    )
+      throw keep('ARCHIVE_FAILED', '快照临时事务身份读不全', t.dir);
+    temporary = JSON.stringify(identity);
+  }
+  let result: UserCommandResult | undefined;
+  let primaryError: unknown;
+  try {
+    result = await runUser(t, [process.execPath, '--input-type=module', '-e', script], {
+      ...(stdin ? { stdin } : {}),
+      ...(stream ? { snapshotStream: stream } : {}),
+      timeoutMs: Math.max(1, deadline - Date.now()),
+      env: { ...snapEnv(mode, t, preserved), ...(temporary ? { FLEET_SNAP_TEMP: temporary } : {}) },
+    });
+  } catch (error) {
+    primaryError = error;
+  }
+  if (temporary) {
+    const cleanupDeadline = Math.min(deadline + 10_000, result?.stopDeadlineMs ?? Date.now() + 10_000);
+    const remaining = cleanupDeadline - Date.now();
+    if (remaining <= 0) throw keep('ARCHIVE_FAILED', `快照临时事务收尾超时，保留待核：${temporary}`, t.dir);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const clean = await Promise.race([
+        runUser(t, [process.execPath, '--input-type=module', '-e', SNAP_TEMP_SCRIPT], {
+          timeoutMs: remaining,
+          ignoreCancellation: true,
+          env: { FLEET_SNAP_TOKEN: token, FLEET_SNAP_TEMP_ACTION: 'cleanup', FLEET_SNAP_TEMP: temporary },
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(keep('ARCHIVE_FAILED', `快照临时事务未在收尾期限内清理：${temporary}`, t.dir)),
+            remaining,
+          );
+        }),
+      ]);
+      if (clean.code !== 0 || clean.stdout.toString() !== 'clean')
+        throw keep(
+          'ARCHIVE_FAILED',
+          `${describeFailure('快照临时事务未清理', clean)}；待核：${temporary}`,
+          t.dir,
+        );
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (primaryError) throw primaryError;
+  if (!result) throw keep('ARCHIVE_FAILED', '快照命令没有回执', t.dir);
   if (result.code !== 0 || result.timedOut || result.aborted || result.spawnError) {
     throw keep(
       'ARCHIVE_FAILED',
@@ -842,65 +941,207 @@ async function runSnap(
       t.dir,
     );
   }
-  if (result.stdout.length === 0) throw keep('ARCHIVE_FAILED', '快照输出是空的', t.dir);
+  if (!stream && result.stdout.length === 0) throw keep('ARCHIVE_FAILED', '快照输出是空的', t.dir);
   return result.stdout;
 }
 
-function parseFrame(
-  buf: Buffer,
-  preserved: readonly string[],
-  dir: string,
-): {
-  state: ComplexState;
-  stateJson: Buffer;
-  pack: Buffer;
-  bundle: Buffer;
-  blobs: Map<string, Buffer>;
-} {
-  let at = 0;
-  const blobs = new Map<string, Buffer>();
-  let stateJson: Buffer | undefined;
-  let pack: Buffer | undefined;
-  let bundle: Buffer | undefined;
-  while (at < buf.length) {
-    const nl = buf.indexOf(0x0a, at);
-    if (nl < 0) throw keep('ARCHIVE_FAILED', '快照帧不完整', dir);
-    const header = buf.subarray(at, nl).toString('utf8');
-    at = nl + 1;
-    if (header === 'END') break;
-    const matched = /^(JSON|PACK|BUNDLE|BLOB [0-9a-f]{64}) (\d+)$/.exec(header);
-    if (!matched?.[1] || !matched[2]) throw keep('ARCHIVE_FAILED', '快照帧认不出', dir);
-    const len = Number(matched[2]);
-    if (!Number.isInteger(len) || at + len > buf.length) throw keep('ARCHIVE_FAILED', '快照帧长度不对', dir);
-    const body = buf.subarray(at, at + len);
-    at += len;
-    if (matched[1] === 'JSON') stateJson = Buffer.from(body);
-    else if (matched[1] === 'PACK') pack = Buffer.from(body);
-    else if (matched[1] === 'BUNDLE') bundle = Buffer.from(body);
-    else blobs.set(matched[1].slice(5), Buffer.from(body));
-  }
-  if (at !== buf.length || !stateJson || !pack || !bundle) throw keep('ARCHIVE_FAILED', '快照帧缺内容', dir);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stateJson.toString('utf8'));
-  } catch {
-    throw keep('ARCHIVE_FAILED', '快照状态不是 JSON', dir);
-  }
-  return { state: asState(parsed, preserved, dir), stateJson, pack, bundle, blobs };
+type SnapshotArtifacts = ComplexReceipt['artifacts'];
+
+function componentPath(dir: string, name: string): string {
+  if (name === 'JSON') return join(dir, 'state.json');
+  if (name === 'PACK') return join(dir, 'objects.pack');
+  if (name === 'BUNDLE') return join(dir, 'recovery.bundle');
+  if (/^BLOB [0-9a-f]{64}$/.test(name)) return join(dir, 'blobs', name.slice(5));
+  throw keep('ARCHIVE_FAILED', '快照组件名非法', dir);
 }
 
-function buildFrame(stateJson: Buffer, pack: Buffer, bundle: Buffer, blobs: Map<string, Buffer>): Buffer {
-  const parts: Buffer[] = [];
-  const add = (name: string, buf: Buffer) => {
-    parts.push(Buffer.from(`${name} ${buf.length}\n`));
-    parts.push(buf);
+async function captureArchive(
+  t: UserTree,
+  dir: string,
+  preserved: readonly string[],
+): Promise<{ state: ComplexState; artifacts: SnapshotArtifacts }> {
+  let current: FileHandle | undefined;
+  let hash = createHash('sha256');
+  let name = '';
+  const hashes = new Map<string, string>();
+  const parser = new SnapshotFrameReader({
+    begin: async (component) => {
+      name = component.name;
+      hash = createHash('sha256');
+      const parts = archiveParts(componentPath(dir, name));
+      const parent = await openFromRoot(parts.slice(0, -1), constants.O_RDONLY | constants.O_DIRECTORY);
+      try {
+        current = await open(
+          `/proc/self/fd/${parent.fd}/${parts.at(-1)}`,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o600,
+        );
+      } finally {
+        await parent.close();
+      }
+    },
+    write: async (chunk) => {
+      if (!current) throw keep('ARCHIVE_FAILED', '快照组件未打开');
+      hash.update(chunk);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const { bytesWritten } = await current.write(chunk, offset, chunk.length - offset);
+        if (!bytesWritten) throw keep('ARCHIVE_FAILED', '快照写入没有进展');
+        offset += bytesWritten;
+      }
+    },
+    end: async () => {
+      if (!current) throw keep('ARCHIVE_FAILED', '快照组件未打开');
+      try {
+        await current.sync();
+      } finally {
+        await current.close();
+        current = undefined;
+      }
+      const sum = hash.digest('hex');
+      if (name.startsWith('BLOB ') && sum !== name.slice(5))
+        throw keep('ARCHIVE_FAILED', '快照内容哈希不符', t.dir);
+      hashes.set(name, sum);
+    },
+  });
+  try {
+    await runSnap(t, 'capture', preserved, undefined, {
+      output: async (chunk, signal) => {
+        signal.throwIfAborted();
+        await parser.write(chunk);
+      },
+    });
+    parser.finish();
+  } finally {
+    await current?.close();
+  }
+  const stateBytes = await readArchiveMetadata(join(dir, 'state.json'));
+  const state = asState(JSON.parse(stateBytes.toString('utf8')), preserved, t.dir);
+  const needed = new Set([
+    state.indexBlob,
+    ...state.files.map((file) => file.sha256),
+    ...state.merge.map((item) => item.sha256),
+  ]);
+  for (const sum of needed)
+    if (!hashes.has(`BLOB ${sum}`)) throw keep('ARCHIVE_FAILED', '快照缺文件内容', t.dir);
+  return {
+    state,
+    artifacts: {
+      state: hashes.get('JSON') ?? '',
+      pack: hashes.get('PACK') ?? '',
+      bundle: hashes.get('BUNDLE') ?? '',
+      blobs: [...hashes.keys()]
+        .filter((key) => key.startsWith('BLOB '))
+        .map((key) => key.slice(5))
+        .sort(),
+    },
   };
-  add('JSON', stateJson);
-  add('PACK', pack);
-  add('BUNDLE', bundle);
-  for (const [sum, buf] of [...blobs.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) add(`BLOB ${sum}`, buf);
-  parts.push(Buffer.from('END\n'));
-  return Buffer.concat(parts);
+}
+
+async function readArchiveMetadata(path: string): Promise<Buffer> {
+  const handle = await openFromRoot(archiveParts(path), constants.O_RDONLY | constants.O_NONBLOCK);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > SNAPSHOT_METADATA_BYTES)
+      throw keep('ARCHIVE_FAILED', '快照元数据不是受限普通文件');
+    const buffer = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, offset, buffer.length - offset, offset);
+      if (!bytesRead) throw keep('ARCHIVE_FAILED', '快照元数据截断');
+      offset += bytesRead;
+    }
+    if ((await handle.read(Buffer.alloc(1), 0, 1, buffer.length)).bytesRead)
+      throw keep('ARCHIVE_FAILED', '快照元数据读取期间增长');
+    const after = await handle.stat();
+    if (stat.size !== after.size || stat.mtimeMs !== after.mtimeMs || stat.ctimeMs !== after.ctimeMs)
+      throw keep('ARCHIVE_FAILED', '快照元数据读取期间变化');
+    return buffer;
+  } finally {
+    await handle.close();
+  }
+}
+
+/** 旧 v3 组件也走同一 reader；逐件固定 FD、hash/fstat 完整才发 END。 */
+export async function* archiveFrame(dir: string, artifacts: SnapshotArtifacts): AsyncGenerator<Buffer> {
+  if (artifacts.blobs.length + 3 > SNAPSHOT_MAX_COMPONENTS) throw keep('ARCHIVE_FAILED', '归档组件太多');
+  const names: [string, string][] = [
+    ['JSON', artifacts.state],
+    ['PACK', artifacts.pack],
+    ['BUNDLE', artifacts.bundle],
+  ];
+  let previous = '';
+  for (const sum of artifacts.blobs) {
+    if (!SHA256.test(sum) || sum <= previous) throw keep('ARCHIVE_FAILED', '归档内容哈希重复或非法');
+    previous = sum;
+    names.push([`BLOB ${sum}`, sum]);
+  }
+  let total = 4;
+  for (const [name, expected] of names) {
+    if (!SHA256.test(expected)) throw keep('ARCHIVE_FAILED', '归档哈希非法');
+    const handle = await openFromRoot(
+      archiveParts(componentPath(dir, name)),
+      constants.O_RDONLY | constants.O_NONBLOCK,
+    );
+    try {
+      const before = await handle.stat();
+      if (
+        !before.isFile() ||
+        !Number.isSafeInteger(before.size) ||
+        before.size < 0 ||
+        (name === 'JSON' && before.size > SNAPSHOT_METADATA_BYTES)
+      )
+        throw keep('ARCHIVE_FAILED', '归档组件长度非法');
+      const header = Buffer.from(`${name} ${before.size}\n`);
+      total += header.length + before.size;
+      if (total > SNAPSHOT_TOTAL_BYTES) throw keep('ARCHIVE_FAILED', '归档超过 1GiB');
+      yield header;
+      const hash = createHash('sha256');
+      let offset = 0;
+      while (offset < before.size) {
+        const buffer = Buffer.alloc(Math.min(64 * 1024, before.size - offset));
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, offset);
+        if (!bytesRead) throw keep('ARCHIVE_FAILED', '归档组件截断');
+        offset += bytesRead;
+        const bytes = buffer.subarray(0, bytesRead);
+        hash.update(bytes);
+        yield bytes;
+      }
+      const after = await handle.stat();
+      if (
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size ||
+        before.mtimeMs !== after.mtimeMs ||
+        before.ctimeMs !== after.ctimeMs ||
+        hash.digest('hex') !== expected
+      )
+        throw keep('ARCHIVE_FAILED', '归档内容哈希或身份对不上');
+    } finally {
+      await handle.close();
+    }
+  }
+  yield Buffer.from('END\n');
+}
+
+async function verifyArchive(
+  t: UserTree,
+  dir: string,
+  preserved: readonly string[],
+  artifacts: SnapshotArtifacts,
+): Promise<ComplexState> {
+  const parts: Buffer[] = [];
+  let length = 0;
+  await runSnap(t, 'verify', preserved, undefined, {
+    input: archiveFrame(dir, artifacts),
+    output: async (chunk, signal) => {
+      signal.throwIfAborted();
+      length += chunk.length;
+      if (length > SNAPSHOT_METADATA_BYTES) throw keep('ARCHIVE_FAILED', '恢复元数据超过 32MiB');
+      parts.push(Buffer.from(chunk));
+    },
+  });
+  return asState(JSON.parse(Buffer.concat(parts).toString('utf8')), preserved, t.dir);
 }
 
 async function inspectLive(t: UserTree, preserved: readonly string[]): Promise<ComplexState> {
@@ -940,49 +1181,12 @@ export async function preserveComplexWorktree(
   if (usage === 'busy') throw keep('WORKTREE_PRESERVED', '有进程正用着这棵树，保留原树', t.dir);
   if (usage !== 'idle') throw keep('WORKTREE_PRESERVED', '确认不了有没有进程用着这棵树，保留原树', t.dir);
   await assertPeopleIdle(context.confirmIdle, '打快照前');
-  const frame = await runSnap(t, 'capture', preserved);
-  const parsed = parseFrame(frame, preserved, t.dir);
-  for (const [sum, buf] of parsed.blobs) {
-    if (sha256(buf) !== sum) throw keep('ARCHIVE_FAILED', `快照内容哈希对不上：${sum}`, t.dir);
-  }
-  const needed = new Set<string>();
-  for (const file of parsed.state.files) needed.add(file.sha256);
-  for (const item of parsed.state.merge) needed.add(item.sha256);
-  needed.add(parsed.state.indexBlob);
-  for (const sum of needed) {
-    if (!parsed.blobs.has(sum)) throw keep('ARCHIVE_FAILED', '快照缺文件内容', t.dir);
-  }
   const dir = join(archiveDir, `worktree-${randomUUID()}`);
   await makeArchiveDir(dir);
   const blobDir = join(dir, 'blobs');
   await makeArchiveDir(blobDir);
-  const bundlePath = join(dir, 'recovery.bundle');
-  const packPath = join(dir, 'objects.pack');
-  const statePath = join(dir, 'state.json');
-  await exclusiveFile(bundlePath, parsed.bundle);
-  await exclusiveFile(packPath, parsed.pack);
-  await exclusiveFile(statePath, parsed.stateJson);
-  for (const [sum, buf] of parsed.blobs) await exclusiveFile(join(blobDir, sum), buf);
-  const readBack = async (path: string, bytes: Buffer) => {
-    const saved = await readNoFollow(path);
-    if (!saved.equals(bytes)) throw keep('ARCHIVE_FAILED', '落盘成果回读不一致', t.dir);
-  };
-  await readBack(bundlePath, parsed.bundle);
-  await readBack(packPath, parsed.pack);
-  await readBack(statePath, parsed.stateJson);
-  for (const [sum, buf] of parsed.blobs) await readBack(join(blobDir, sum), buf);
-  await modesRestricted([
-    [dir, 0o700],
-    [blobDir, 0o700],
-    [bundlePath, 0o600],
-    [packPath, 0o600],
-    [statePath, 0o600],
-  ]);
-  const restored = asState(
-    JSON.parse((await runSnap(t, 'verify', preserved, frame)).toString('utf8')),
-    preserved,
-    t.dir,
-  );
+  const parsed = await captureArchive(t, dir, preserved);
+  const restored = await verifyArchive(t, dir, preserved, parsed.artifacts);
   const live = await inspectLive(t, preserved);
   await assertSameWork(live, restored, t.dir);
   if (JSON.stringify(live.ignored) !== JSON.stringify(parsed.state.ignored)) {
@@ -1006,14 +1210,11 @@ export async function preserveComplexWorktree(
     ignored: live.ignored,
     preservedPaths: [...preserved],
     ignoreRules: ignoreRules(preserved),
-    artifacts: {
-      state: sha256(parsed.stateJson),
-      pack: sha256(parsed.pack),
-      bundle: sha256(parsed.bundle),
-      blobs: [...parsed.blobs.keys()].sort(),
-    },
+    artifacts: parsed.artifacts,
   };
   const receiptBytes = Buffer.from(`${JSON.stringify(receipt, null, 2)}\n`);
+  if (receiptBytes.length > SNAPSHOT_METADATA_BYTES)
+    throw keep('ARCHIVE_FAILED', '快照回执超过 32MiB', t.dir);
   const receiptPath = join(dir, 'receipt.json');
   await exclusiveFile(receiptPath, receiptBytes);
   if (!(await readNoFollow(receiptPath)).equals(receiptBytes)) {
@@ -1074,7 +1275,7 @@ async function recheckComplex(
   preserved: readonly string[],
 ): Promise<void> {
   const receipt = asReceipt(
-    JSON.parse((await readNoFollow(join(dir, 'receipt.json'))).toString('utf8')),
+    JSON.parse((await readArchiveMetadata(join(dir, 'receipt.json'))).toString('utf8')),
     t.dir,
   );
   if (receipt.originalPath !== t.dir || receipt.realPath !== place.real) {
@@ -1091,28 +1292,7 @@ async function recheckComplex(
   const usage = await placeProcessUsage(t, place, context.processLook);
   if (usage !== 'idle') throw keep('WORKTREE_PRESERVED', '删除前确认不了没人用，保留原树', t.dir);
   if (context.confirmIdle) await assertPeopleIdle(context.confirmIdle, '删除前');
-  const stateJson = await readNoFollow(join(dir, 'state.json'));
-  const pack = await readNoFollow(join(dir, 'objects.pack'));
-  const bundle = await readNoFollow(join(dir, 'recovery.bundle'));
-  if (sha256(stateJson) !== receipt.artifacts.state || sha256(pack) !== receipt.artifacts.pack) {
-    throw keep('ARCHIVE_FAILED', '归档内容哈希对不上', t.dir);
-  }
-  if (sha256(bundle) !== receipt.artifacts.bundle)
-    throw keep('ARCHIVE_FAILED', '归档成果包哈希对不上', t.dir);
-  const blobs = new Map<string, Buffer>();
-  for (const sum of receipt.artifacts.blobs) {
-    if (typeof sum !== 'string' || !SHA256.test(sum))
-      throw keep('ARCHIVE_FAILED', '回执里的内容哈希认不出', t.dir);
-    const bytes = await readNoFollow(join(dir, 'blobs', sum));
-    if (sha256(bytes) !== sum) throw keep('ARCHIVE_FAILED', '归档内容哈希对不上', t.dir);
-    blobs.set(sum, bytes);
-  }
-  const frame = buildFrame(stateJson, pack, bundle, blobs);
-  const restored = asState(
-    JSON.parse((await runSnap(t, 'verify', preserved, frame)).toString('utf8')),
-    preserved,
-    t.dir,
-  );
+  const restored = await verifyArchive(t, dir, preserved, receipt.artifacts);
   const live = await inspectLive(t, preserved);
   await assertSameWork(live, restored, t.dir);
   if (receipt.head !== live.head || receipt.head !== restored.head) {

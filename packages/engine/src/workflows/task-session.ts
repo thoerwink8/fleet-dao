@@ -174,13 +174,24 @@ export async function writeSession(
   let mismatchRoutesDown = false;
   // 动手前判这张单是不是界面活（#1264）：界面活按 ui 用途选路并带 uiWork，GPT 不派；判不出按界面活处理。
   // 判法是纯代码、不起活动；老历史（没有这个标记）重放照旧按 execute 选。
-  const ui: UiJudgement | undefined = patched('ui-work-implement')
+  let ui: UiJudgement | undefined = patched('ui-work-implement')
     ? judgeImplementUiWork({ touches: brief.touches, request: brief.request, changedFiles: rt.changedFiles })
     : undefined;
-  const unrecognized = ui !== undefined && !ui.recognized ? `（${UI_UNRECOGNIZED_NOTE}）` : '';
+  let unrecognized = ui !== undefined && !ui.recognized ? `（${UI_UNRECOGNIZED_NOTE}）` : '';
   if (unrecognized) rt.set('implement', `动手第 ${rt.round} 轮${unrecognized}`);
   for (;;) {
     await rt.checkpoint(); // 被人暂停了就停在这儿，不起新会话（#820 片 3）
+    await rt.refreshContract('新动手/续会话派前');
+    if (rt.contractVersioned && rt.brief) {
+      brief = rt.brief;
+      tier = brief.tier;
+      ui = judgeImplementUiWork({
+        touches: brief.touches,
+        request: brief.request,
+        changedFiles: rt.changedFiles,
+      });
+      unrecognized = !ui.recognized ? `（${UI_UNRECOGNIZED_NOTE}）` : '';
+    }
     await holdForBudget(rt);
     const picked = await pickRoute(
       rt,
@@ -197,6 +208,14 @@ export async function writeSession(
     bare401RouteId = undefined;
     failedChannel = undefined;
     const route = picked.route;
+    // 选路等待期间可能修订。不能拿按旧档预占的路由启动新版合同。
+    if (await rt.refreshContract('选路完成、会话启动前')) {
+      if (route.reservationId)
+        await rt.step('releaseReservation', () =>
+          rt.acts.releaseReservation({ schemaVersion: 1, reservationId: route.reservationId as string }),
+        );
+      continue;
+    }
     if (picked.probeNote) {
       // 探通且没换路不进返工意见：下一轮提示词把意见里每一条都当成必改。动手状态那一行仍写这句。
       // 老历史没有这个标记：重放时意见里照旧留着「通」，活动入参不变。只在探通没换路时记标记。
@@ -284,6 +303,7 @@ export async function writeSession(
         baseSha: rt.since,
         brief,
         tier,
+        ...(rt.contractRevision ? { contractRevision: rt.contractRevision } : {}),
         feedback: rt.feedback,
         timeoutMinutes:
           patienceWaited > 0 ? segmentMinutesAfterPatience(SEGMENT_MINUTES, patienceWaited) : SEGMENT_MINUTES,
@@ -319,6 +339,7 @@ export async function writeSession(
       });
       if (wasDetached && patched('settle-merged-task-checkpoint')) await rt.checkpoint();
       if (res.ok) {
+        if (rt.contractVersioned) rt.contractRevision = null;
         rt.lastImplementRoute = route;
         const resumed = resumeSessionId !== undefined;
         rt.lastSession = { runId: res.runId, worktreePath: wt.path, resumed };

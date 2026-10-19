@@ -17,6 +17,7 @@ import {
   type TaskActivitiesDeps,
 } from '../../src/real/task-activities.ts';
 import { pinMainline, type UserTree } from '../../src/real/user-git.ts';
+import { requirementContract } from '../../src/runner/task-brief.ts';
 import type { ReviewChange } from '../../src/task-contract.ts';
 import { runChildOk } from '../child.ts';
 import { json as httpJson, setup as setupHttp } from '../review-http.ts';
@@ -93,6 +94,8 @@ function fakeGh(over: Partial<Record<string, unknown>> = {}): { gh: Gh; calls: s
     claims: {
       readPull: pick('readPull'),
       enableAutoMerge: pick('enableAutoMerge'),
+      disableAutoMerge: pick('disableAutoMerge'),
+      setStatus: pick('setStatus'),
     },
   } as unknown as Gh;
   return { gh, calls };
@@ -133,6 +136,119 @@ function make(over: Partial<TaskActivitiesDeps> & { gh: Gh }) {
   });
   return { acts, logs };
 }
+
+describe('正式合同写前核验（#3216）', () => {
+  const guard = { issueNumber: 12, expected: requirementContract(BODY) };
+  const arm = {
+    schemaVersion: 1 as const,
+    repo: REPO,
+    prNumber: 7,
+    expectedHead: HEAD,
+    contractGuard: guard,
+  };
+  const changed = BODY.replace('验收中', '新验收');
+  const defaults = {
+    readPull: async () => pullFacts({ autoMerge: true }),
+    readIssue: async () => ({ number: 12, title: '正式需求', state: 'open', body: changed }),
+    readSpecDoc: async () => null,
+    disableAutoMerge: async () => undefined,
+    setStatus: async () => undefined,
+  };
+  it('已挂自动合并也要读合同：同head换验收后撤挂并阻合', async () => {
+    const { gh, calls } = fakeGh(defaults);
+    expect(await make({ gh }).acts.armAutoMerge(arm, ctx())).toMatchObject({
+      armed: false,
+      merged: false,
+      contractChanged: true,
+    });
+    expect(calls).toContain('disableAutoMerge');
+    expect(calls).toContain('setStatus');
+    expect(calls).not.toContain('enableAutoMerge');
+    expect(calls).not.toContain('mergePr');
+  });
+  it('最终真实挂写前再次核验，读取期间正文修改不会用旧合同写', async () => {
+    let body = BODY;
+    let armed = false;
+    const { gh, calls } = fakeGh({
+      ...defaults,
+      readPull: async () => pullFacts({ autoMerge: armed }),
+      readIssue: async () => ({ number: 12, title: '需求', state: 'open', body }),
+      enableAutoMerge: async () => {
+        armed = true;
+        body = changed;
+      },
+    });
+    expect(await make({ gh }).acts.armAutoMerge(arm, ctx())).toMatchObject({ contractChanged: true });
+    expect(calls.filter((c) => c === 'readIssue')).toHaveLength(2);
+    // GitHub已接受的写无法撤回；后读发现修订，显式撤挂，不报告armed。
+    expect(calls).toContain('setStatus');
+    expect(calls).toContain('disableAutoMerge');
+  });
+  it.each(['clean-fallback', 'ci-pending-retry'])(
+    '%s 每次真实直接合前核合同，不把先前读取当永久许可',
+    async (path) => {
+      let body = BODY;
+      const { gh, calls } = fakeGh({
+        ...defaults,
+        readPull: async () => pullFacts({ autoMerge: false }),
+        readIssue: async () => ({ number: 12, title: '需求', state: 'open', body }),
+        enableAutoMerge: async () => {
+          if (path === 'clean-fallback') body = changed;
+          throw new Error('clean status');
+        },
+        mergePr: async () => {
+          body = changed;
+          return { merged: false, reason: 'ci_not_green', detail: '仍在跑', ciPendingOnly: true };
+        },
+      });
+      expect(await make({ gh }).acts.armAutoMerge(arm, ctx())).toMatchObject({
+        armed: false,
+        merged: false,
+        contractChanged: true,
+      });
+      expect(calls.filter((c) => c === 'mergePr')).toHaveLength(path === 'clean-fallback' ? 0 : 1);
+    },
+  );
+  it('未知规范版本或新版缺读口不能绕过核验', async () => {
+    const { gh, calls } = fakeGh(defaults);
+    await expect(
+      make({ gh }).acts.armAutoMerge(
+        { ...arm, contractGuard: { ...guard, expected: { ...guard.expected, version: 2 } as never } },
+        ctx(),
+      ),
+    ).rejects.toMatchObject({ code: 'TASK_CONTRACT_UNREADABLE' });
+    expect(calls).not.toContain('enableAutoMerge');
+  });
+  it('正式正文读失败必须先阻合再失败；撤挂失败不能冒充成功', async () => {
+    const readIssue = async () => {
+      throw new Error('正文读取断网');
+    };
+    const { gh, calls } = fakeGh({ ...defaults, readIssue });
+    await expect(make({ gh }).acts.armAutoMerge(arm, ctx())).rejects.toMatchObject({
+      code: 'TASK_CONTRACT_UNREADABLE',
+    });
+    expect(calls).toContain('disableAutoMerge');
+    const failed = fakeGh({
+      ...defaults,
+      disableAutoMerge: async () => {
+        throw new Error('撤挂未确认');
+      },
+    });
+    await expect(make({ gh: failed.gh }).acts.armAutoMerge(arm, ctx())).rejects.toThrow('撤挂未确认');
+    expect(failed.calls).not.toContain('setStatus');
+  });
+  it('直接合与既有等待合并读取也受相同合同限制', async () => {
+    const { gh, calls } = fakeGh(defaults);
+    expect(await make({ gh }).acts.mergeNow(arm, ctx())).toMatchObject({
+      merged: false,
+      contractChanged: true,
+    });
+    expect(await make({ gh }).acts.waitMerged({ ...arm, minutes: 1 }, ctx())).toEqual({
+      state: 'contract_changed',
+    });
+    expect(calls).not.toContain('mergePr');
+  });
+});
 
 describe('停法收尾活动的真实空闲核验（#3193）', () => {
   const input = {

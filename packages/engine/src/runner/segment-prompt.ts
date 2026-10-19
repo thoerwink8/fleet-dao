@@ -25,6 +25,7 @@ import { type PreloadRead, renderPreload } from './preload.ts';
 export const FEEDBACK_ITEM_MAX = 6000;
 
 export interface SegmentPromptInput {
+  contractRevision?: { reviews: readonly string[] };
   brief: ManualBrief;
   /** 单子指着的需求文档目录（老单才有，已经在主线上）；需求在单子正文里的没有。 */
   specDir?: string | undefined;
@@ -109,6 +110,7 @@ function feedbackSection(feedback: readonly string[], title: string): string[] {
  * 被打断的说一句原因；返工意见按条给。两样都没有也给一句「接着做」，不交空提示词。
  */
 export function renderResumePrompt(input: {
+  revision?: { brief: ManualBrief; reviews: readonly string[] };
   interrupted?: string;
   feedback: readonly string[];
   plan?: boolean;
@@ -116,6 +118,14 @@ export function renderResumePrompt(input: {
 }): string {
   const interrupted = input.interrupted?.trim();
   const out = [
+    ...(input.revision
+      ? [
+          '## 正式需求已修订（完整正文替代旧合同）',
+          renderBrief(input.revision.brief),
+          '## 仍有效的正式评审（原文；未撤销不代表已解决）',
+          ...input.revision.reviews,
+        ]
+      : []),
     interrupted
       ? `刚才这个会话被引擎打断了（${clip(interrupted)}）。分支和工作树都没变，先看 git status、git log，接着刚才的进度往下做，别从头重来。`
       : '接着这个会话往下做：分支和工作树都没变，单子和规矩照前面的。',
@@ -137,6 +147,9 @@ export function renderResumePrompt(input: {
 export function renderSegmentPrompt(input: SegmentPromptInput): string {
   if (input.resumed) {
     return renderResumePrompt({
+      ...(input.contractRevision
+        ? { revision: { brief: input.brief, reviews: input.contractRevision.reviews } }
+        : {}),
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
       feedback: input.feedback,
       ...(input.plan ? { plan: true } : {}),
