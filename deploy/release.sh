@@ -39,55 +39,55 @@ source "$DEPLOY_DIR/lib/session-proxy.sh"
 source "$DEPLOY_DIR/lib/root-ssh-login.sh"
 
 REPO_URL=https://github.com/thoerwink8/fleet-dao.git
-RELEASES=${FLEET_RELEASES_DIR:-/srv/fleet-dao-releases} # 只有 deploy/test/release-flow.test.sh 会改它
+RELEASES=${FLEET_RELEASES_DIR:-/srv/fleet-dao-releases}     # 只有 deploy/test/release-flow.test.sh 会改它
 FLEET_SYSTEMD_DIR=${FLEET_SYSTEMD_DIR:-/etc/systemd/system} # 单元文件装到哪；只有测试会改
-CACHE=$RELEASES/.repo.git   # 取代码用的裸仓（root 的）
+CACHE=$RELEASES/.repo.git                                   # 取代码用的裸仓（root 的）
 # 每切一次、每判一次记一行：时间 提交号 事件 [unmerged]。事件：release、rollback、auto-rollback（切过去）、
 # unhealthy（健康检查没过）、recovered（判过不健康的在用版本后来又过了）
 HISTORY=$RELEASES/.history
-KEEP=5                      # 留几版：在用的、上一版，再加最近用过的
+KEEP=5 # 留几版：在用的、上一版，再加最近用过的
 APP_UNITS=(fleet-engine fleet-api)
 RELEASE_ENV=/etc/fleet-dao/release.env
 UPLOAD_KEY=/etc/fleet-dao/web-upload.key
 HK_KNOWN_HOSTS=/etc/fleet-dao/hk-known-hosts
-HK_TUNNEL=10.99.0.1            # 香港在隧道上的地址：静态文件经它发，发完也经它核对（不依赖公网解析）
-HK_PARTS=(web)                 # 往香港发的一样：驾驶舱静态文件（根地址）（release.env 的 FLEET_HK_PARTS 选）
-COCKPIT=10.99.0.2:8787         # 驾驶舱接口（api.env 的 FLEET_COCKPIT_LISTEN）
-TASK_QUEUE=fleet               # 引擎工人取活的任务队列（engine.env 的 FLEET_TASK_QUEUE）
+HK_TUNNEL=10.99.0.1    # 香港在隧道上的地址：静态文件经它发，发完也经它核对（不依赖公网解析）
+HK_PARTS=(web)         # 往香港发的一样：驾驶舱静态文件（根地址）（release.env 的 FLEET_HK_PARTS 选）
+COCKPIT=10.99.0.2:8787 # 驾驶舱接口（api.env 的 FLEET_COCKPIT_LISTEN）
+TASK_QUEUE=fleet       # 引擎工人取活的任务队列（engine.env 的 FLEET_TASK_QUEUE）
 # 迁移连本机库：unix socket + peer 认证（同 api.env；postgres.js 不认连接串里的 ?host=，主机走 PGHOST）
 DB_ENV=(DATABASE_URL=postgres:///fleet PGHOST=/var/run/postgresql PGUSER=fleet)
 # 目录配置（族、渠道、账号池、模型、路由）是仓里的 deploy/catalog.json，跟着版本走：迁移之后装这一版自己带的那份进库（docs/ops.md 第九节「目录配置」）
 CATALOG_FILE=deploy/catalog.json # 相对这一版的目录
-NODE=/usr/bin/node    # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
-SETTLE_SECONDS=10     # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
-ENGINE_POLL_WAIT=90   # 引擎工人起来后要先打包工作流，才去任务队列取活
+NODE=/usr/bin/node               # 法国的 node（france.sh 的前提里查过 22 以上）；只有测试会换成别处的
+SETTLE_SECONDS=10                # 服务起来后再看这么久：这段时间里退出过、重启过，就是没起稳
+ENGINE_POLL_WAIT=90              # 引擎工人起来后要先打包工作流，才去任务队列取活
 # 后端报 engine 红、切之前是好的时，先和「工人已在任务队列取活」核对：有界重试（共 TRIES 次、每次隔 GAP 秒，默认约 90 秒，
 # 和 ENGINE_POLL_WAIT 同一个窗口），不凭一次探针红就退回（#3250）；只有测试会改
 ENGINE_RECONCILE_TRIES=${ENGINE_RECONCILE_TRIES:-18}
 ENGINE_RECONCILE_GAP=${ENGINE_RECONCILE_GAP:-5}
-ENGINE_RECONCILE_VERDICT="" # 最近一次核对的裁决：保留 / 未决 / 退回
-ENGINE_RECONCILE_RECEIPT="" # 最近一次核对的回执（两边证据、重试次数、裁决理由）
-API_UP_WAIT=${API_UP_WAIT:-30} # 后端重启后等它答话最多这么久（秒，平常 3 秒左右）；只有测试会改
-AUTO_STATE=$RELEASES/.auto/state.json         # 自动发布每一轮的读数（deploy/france/auto-release 写，--check 列出来）
-NOW_MODE=0 # --now：不给在跑的会话宽限
+ENGINE_RECONCILE_VERDICT=""           # 最近一次核对的裁决：保留 / 未决 / 退回
+ENGINE_RECONCILE_RECEIPT=""           # 最近一次核对的回执（两边证据、重试次数、裁决理由）
+API_UP_WAIT=${API_UP_WAIT:-30}        # 后端重启后等它答话最多这么久（秒，平常 3 秒左右）；只有测试会改
+AUTO_STATE=$RELEASES/.auto/state.json # 自动发布每一轮的读数（deploy/france/auto-release 写，--check 列出来）
+NOW_MODE=0                            # --now：不给在跑的会话宽限
 # 切版本前排空引擎（packages/engine/src/drain.ts、drain-control.ts）。改宽限要和引擎的 RELEASE_GRACE_MS、fleet-engine.service 的
 # TimeoutStopSec 一起改（packages/engine/test/drain.test.ts 核对）。请求只在发布锁占着时算数：这个脚本中途没了，引擎不会一直停着不派
-DRAIN_GRACE=120                  # 宽限（秒）：发了 hard 暂停以后，停不下来的会话（验收这类不可暂停的段）最多再做这么久
+DRAIN_GRACE=120 # 宽限（秒）：发了 hard 暂停以后，停不下来的会话（验收这类不可暂停的段）最多再做这么久
 DRAIN_REQUEST=$RELEASES/.drain-request
 # 发版暂停的任务名单（packages/api/src/release-pause.ts 的 PauseList）：暂停、继续两步读同一份；继续发不出去的留在里面，
 # 自动发布单元（deploy/france/auto-release）见它放久了、又没有发布在跑，就接着发「继续」并报警（驱动中途没了的兜底）
 PAUSE_FILE=$RELEASES/.release-paused.json
-RESUME_ON_FINISH=0 # 占着发布锁的发布、退回：收尾时对名单发「继续」（--check 不碰）
-DRAIN_STOP_REPORT=120            # 到截止引擎叫停会话以后，等它们交回最多这么久（秒，和引擎的 STOP_REPORT_MS 同一个数）
-DRAIN_SLACK=60                   # 再多等这么久才不等了、直接停（秒）
-DRAIN_POLL=10                    # 多久看一次排空进度（秒）
+RESUME_ON_FINISH=0    # 占着发布锁的发布、退回：收尾时对名单发「继续」（--check 不碰）
+DRAIN_STOP_REPORT=120 # 到截止引擎叫停会话以后，等它们交回最多这么久（秒，和引擎的 STOP_REPORT_MS 同一个数）
+DRAIN_SLACK=60        # 再多等这么久才不等了、直接停（秒）
+DRAIN_POLL=10         # 多久看一次排空进度（秒）
 ENGINE_ENV=/etc/fleet-dao/engine.env
-ENGINE_STATE_DEFAULT=/var/lib/fleet-dao/engine # 引擎写 drain.json 的地方（engine.env 的 FLEET_ENGINE_STATE_DIR，没写取它）
+ENGINE_STATE_DEFAULT=/var/lib/fleet-dao/engine                           # 引擎写 drain.json 的地方（engine.env 的 FLEET_ENGINE_STATE_DIR，没写取它）
 CLI_UPGRADE_DIR=${FLEET_CLI_UPGRADE_DIR:-/var/lib/fleet-dao/cli-upgrade} # 命令行工具升级的请求和结果（#1971）
-DRAIN_WROTE=0    # 这次写了排空请求、还没撤
-DRAIN_UNTIL=0    # 请求里的截止（秒）
-ENGINE_DRAINS=0  # 在跑的引擎会排空（认了 drain.json）
-ENGINE_STOPPED=0 # 这次把引擎停下了、还没起回来：没走到切版本就失败，收尾时照原样起回来
+DRAIN_WROTE=0                                                            # 这次写了排空请求、还没撤
+DRAIN_UNTIL=0                                                            # 请求里的截止（秒）
+ENGINE_DRAINS=0                                                          # 在跑的引擎会排空（认了 drain.json）
+ENGINE_STOPPED=0                                                         # 这次把引擎停下了、还没起回来：没走到切版本就失败，收尾时照原样起回来
 # 这一版相对在用版本没碰引擎 / 后端的运行内容（service_unchanged，#2797：按引用闭包判）：不暂停、不重启那一个服务
 ENGINE_UNCHANGED=0
 API_UNCHANGED=0
@@ -275,10 +275,10 @@ build_sandbox_run() { # 工作目录 命令…
     -p "InaccessiblePaths=$joined" \
     -p NoNewPrivileges=true \
     -- /usr/bin/unshare --pid --fork --mount-proc --kill-child -- \
-      /usr/bin/setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs -- \
-      /usr/bin/env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
-      "PATH=$path" LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
-      "${pnpm_env[@]}" "${PROXY_ENVS[@]}" "$@"
+    /usr/bin/setpriv --reuid=fleet --regid=fleet --init-groups --no-new-privs -- \
+    /usr/bin/env -i HOME=/home/fleet USER=fleet LOGNAME=fleet \
+    "PATH=$path" LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+    "${pnpm_env[@]}" "${PROXY_ENVS[@]}" "$@"
 }
 
 # 读回：fleet 在沙箱里还能不能把 /etc/fleet-dao 当目录用（直接路径，或经 /proc/<pid>/root 绕路）。
@@ -361,7 +361,7 @@ as_build_in() { # 目录 命令…
 }
 
 pg_admin() { (cd / && runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -tA "$@"); }
-tcli() { env -i HOME=/root PATH=/usr/bin:/bin /usr/local/bin/fleet-temporal "$@"; }
+tcli() { timeout 10 env -i HOME=/root PATH=/usr/bin:/bin /usr/local/bin/fleet-temporal "$@"; }
 
 # ── 前提 ──
 
@@ -407,12 +407,12 @@ load_release_env() { # 文件
   FLEET_SERVICES=""
   FLEET_DOMAIN=""
   FLEET_HK_PARTS=$HK_PARTS_DEFAULT
-  FLEET_DEMO_PATH="" # #1223
+  FLEET_DEMO_PATH=""                                                                   # #1223
   load_env "$1" FLEET_SERVICES FLEET_DOMAIN FLEET_HK_PARTS FLEET_DEMO_PATH || return 1 # #1223
-  if [[ -n "$FLEET_DEMO_PATH" ]]; then LEGACY_KEYS=1; fi # #1223
+  if [[ -n "$FLEET_DEMO_PATH" ]]; then LEGACY_KEYS=1; fi                               # #1223
   for s in $FLEET_HK_PARTS; do
     if [[ "$s" == demo ]]; then # #1223
-      LEGACY_KEYS=1 # #1223
+      LEGACY_KEYS=1             # #1223
     elif [[ "$s" == gateway ]]; then
       : # 已删的飞书网关一样：老的 release.env 里可能还有，认下来、丢掉，照期望写配置时换成新的
     else
@@ -1174,18 +1174,18 @@ config_cli() { # 参数…
   out=$("$NODE" "$CONFIG_CLI" "$@" 2>&1) || rc=$?
   while IFS= read -r line; do
     case $line in
-    "ok "*) ok "${line#ok }" ;;
-    "changed "*) changed "${line#changed }" ;;
-    "note "*) echo "  · ${line#note }" ;;
-    "red "*)
-      CONFIG_REDS+=("${line#red }")
-      echo "    ${line#red }"
-      ;;
-    "") ;;
-    *)
-      CONFIG_REDS+=("$line")
-      echo "    $line"
-      ;;
+      "ok "*) ok "${line#ok }" ;;
+      "changed "*) changed "${line#changed }" ;;
+      "note "*) echo "  · ${line#note }" ;;
+      "red "*)
+        CONFIG_REDS+=("${line#red }")
+        echo "    ${line#red }"
+        ;;
+      "") ;;
+      *)
+        CONFIG_REDS+=("$line")
+        echo "    $line"
+        ;;
     esac
   done <<<"$out"
   if ((rc != 0 && ${#CONFIG_REDS[@]} == 0)); then CONFIG_REDS+=("$CONFIG_CLI 退出码 $rc，没说原因"); fi
@@ -1641,12 +1641,17 @@ report_items() {
       try { r = JSON.parse(s); } catch { process.exit(1); }
       const isObj = (v) => typeof v === "object" && v !== null && !Array.isArray(v);
       if (!isObj(r) || typeof r.ok !== "boolean" || !isObj(r.checks)) process.exit(1);
+      if (Object.values(r.checks).some((v) => !isObj(v) || typeof v.ok !== "boolean")) process.exit(1);
+      if (process.argv[1]) {
+        const good = Object.values(r.checks).every((v) => isObj(v) && v.ok === true);
+        if (!Object.keys(r.checks).length || r.ok !== good || process.argv[1] !== (good ? "200" : "503")) process.exit(1);
+      }
       for (const [k, v] of Object.entries(r.checks)) {
         const good = isObj(v) && v.ok === true;
         const why = good ? "" : isObj(v) && typeof v.message === "string" && v.message ? v.message : "没给原因";
         console.log(`${k}\t${good ? "ok" : "bad"}\t${why.replace(/\s+/g, " ")}`);
       }
-    });'
+    });' "${2:-}"
 }
 
 # 驾驶舱接口上的 /healthz：打印「状态码<TAB>正文」；连不上返回 1
@@ -1694,7 +1699,7 @@ api_report_before() {
     return 1
   fi
   code=${got%%$'\t'*}
-  if [[ "$code" != 200 && "$code" != 503 ]] || ! items=$(report_items "${got#*$'\t'}" 2>/dev/null); then
+  if [[ "$code" != 200 && "$code" != 503 ]] || ! items=$(report_items "${got#*$'\t'}" "$code" 2>/dev/null); then
     printf '/healthz 回的不是健康报告（HTTP %s）' "$code"
     return 1
   fi
@@ -1704,19 +1709,19 @@ api_report_before() {
 # 服务起来后再看一会儿：还在跑、主进程没换、没被重启过，才算起稳了
 settle_services() {
   local u bad=0
-  local -A pid=() restarts=()
+  local -A service_pids=() restarts=()
   for u in $FLEET_SERVICES; do
-    pid[$u]=$(unit_prop "$u.service" MainPID)
+    service_pids[$u]=$(unit_prop "$u.service" MainPID)
     restarts[$u]=$(unit_prop "$u.service" NRestarts)
   done
   sleep "$SETTLE_SECONDS"
   for u in $FLEET_SERVICES; do
-    if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" != active || "$(unit_prop "$u.service" MainPID)" != "${pid[$u]}" ||
-      "$(unit_prop "$u.service" NRestarts)" != "${restarts[$u]}" ]]; then
+    if [[ "$(systemctl is-active "$u.service" 2>/dev/null)" != active || "$(unit_prop "$u.service" MainPID)" != "${service_pids[$u]}" ||
+    "$(unit_prop "$u.service" NRestarts)" != "${restarts[$u]}" ]]; then
       red "$u 起来后没稳住（${SETTLE_SECONDS} 秒里退出或重启过，累计重启 $(unit_prop "$u.service" NRestarts) 次）：journalctl -u $u -n 50"
       bad=1
     else
-      ok "$u 起稳了（pid ${pid[$u]}，${SETTLE_SECONDS} 秒没退出）"
+      ok "$u 起稳了（pid ${service_pids[$u]}，${SETTLE_SECONDS} 秒没退出）"
     fi
     socket_listening "$u" || bad=1
   done
@@ -1794,104 +1799,119 @@ check_running_release() { # 提交号
 # 这里的名字都得是后端真报的项（packages/api 的 health.test.ts 核对，改了名那边报警）
 DRIFTING_HEALTH_ITEMS="judge deploy_lag session_org github_app watchdog"
 
-# 引擎工人眼下的证据（只看一眼、不等）：polling = 主进程在、任务队列上工作流和活动两类都在取活；
-# idle = 进程在、队列上没有它的取活记录；dead = 单元没在跑或没有主进程号（进程已退）
-engine_worker_evidence() { # 主进程号
-  local wpid=${1:-} json
-  if [[ -z "$wpid" || "$wpid" == 0 ]] || [[ "$(systemctl is-active fleet-engine.service 2>/dev/null)" != active ]]; then
-    echo dead
-    return 0
-  fi
-  json=$(tcli task-queue describe --task-queue "$TASK_QUEUE" -o json 2>/dev/null </dev/null) || json=""
-  if engine_polling "$json" "$wpid@"; then echo polling; else echo idle; fi
-}
-
-# 再问一次后端的 engine 项：打印 ok，或「bad<TAB>原因」
-engine_probe() {
-  local got items line
-  if ! got=$(api_healthz </dev/null); then
-    printf 'bad\t驾驶舱接口 http://%s/healthz 连不上' "$COCKPIT"
-    return 0
-  fi
-  if ! items=$(report_items "${got#*$'\t'}" 2>/dev/null); then
-    printf 'bad\t/healthz 回的不是健康报告（HTTP %s）' "${got%%$'\t'*}"
-    return 0
-  fi
-  line=$(awk -F '\t' '$1 == "engine" { print $2 "\t" $3; exit }' <<<"$items")
-  case "$line" in
-  ok$'\t'*) printf ok ;;
-  bad$'\t'*) printf 'bad\t%s' "${line#bad$'\t'}" ;;
-  *) printf 'bad\t后端没报 engine 项' ;;
-  esac
-}
-
-# 后端报 engine 红、切之前是好的：和工人拉活证据核对再裁决（#3250）。每一轮先看工人、再（第二轮起）重问探针：
-#   进程已退（dead）→ 马上裁退回；探针转绿 → 保留；用完次数时工人仍在取活 → 未决（不当成已证实故障、不退回）；
-#   用完次数时队列上没有它的取活 → 退回。两边证据、重试次数、理由都写进回执（ENGINE_RECONCILE_RECEIPT）。
-# 返回 1 = 裁退回（算这一版的错），0 = 保留或未决
-reconcile_engine() { # 探针原因
-  local why=$1 tries=$ENGINE_RECONCILE_TRIES i ev="" pid probe verdict reason probe_text worker_text receipt used
-  ((tries >= 1)) || tries=1
-  pid=$(unit_prop fleet-engine.service MainPID)
-  for ((i = 1; i <= tries; i++)); do
-    ev=$(engine_worker_evidence "$pid")
-    [[ "$ev" == dead ]] && break
-    if ((i > 1)); then
-      probe=$(engine_probe)
-      if [[ "$probe" == ok ]]; then
-        why=""
-        break
-      fi
-      why=${probe#bad$'\t'}
-    fi
-    if ((i < tries)); then sleep "$ENGINE_RECONCILE_GAP"; fi
+# 一份证据必须对应同一 current、实际 PID 和运行目录；沿用旧目录仍按已有引用闭包合同核对。
+health_identity() { # 目标提交
+  local sha=$1 u wpid running identity
+  [[ "$(current_sha)" == "$sha" ]] || return 2
+  check_running_release "$sha" >/dev/null || return 2
+  identity=$sha
+  for u in $FLEET_SERVICES; do
+    wpid=$(unit_prop "$u.service" MainPID) || return 2
+    [[ "$wpid" =~ ^[1-9][0-9]*$ ]] || return 2
+    running=$(running_release "$u.service")
+    [[ -n "$running" && "$(unit_prop "$u.service" MainPID)" == "$wpid" ]] || return 2
+    identity+="|$u:$wpid:$running"
   done
-  used=$((i > tries ? tries - 1 : i - 1))
-  case "$ev" in
-  polling) worker_text="工人已在任务队列 $TASK_QUEUE 取工作流任务和活动任务（pid $pid）" ;;
-  idle) worker_text="工人进程在（pid $pid），但任务队列 $TASK_QUEUE 上没有它的取活记录" ;;
-  *) worker_text="工人进程已退或没起（pid ${pid:-无}）" ;;
-  esac
-  if [[ -z "$why" ]]; then
-    probe_text="重试后转绿"
-    verdict=保留
-    reason="API 探针重试后转绿，和工人拉活一致，之前那次红是探针滞后"
-  else
-    probe_text="红（$why）"
-    case "$ev" in
-    polling)
-      verdict=未决
-      reason="工人在取活而 API 探针重试 ${used} 次仍红，两证矛盾：不能把未决写成已证实故障，不退回，留给下一轮健康检查和人看"
-      ;;
-    idle)
-      verdict=退回
-      reason="重试到底队列上仍没有工人的取活记录，API 探针也红，两边都指向引擎真不在线"
-      ;;
-    *)
-      verdict=退回
-      reason="引擎进程已退或没起，这是真故障"
-      ;;
-    esac
+  printf '%s' "$identity"
+}
+
+# 只读一份完整报告；调用者直接调用，最后的完整结果保留在 API_ITEMS，不能只截取 engine 而漏其它新红。
+read_api_items() { # 目标提交 原报告身份（可选）
+  local sha=$1 expected=${2:-} got code items identity after
+  API_READ_ERROR=""
+  if ! identity=$(health_identity "$sha") || [[ -n "$expected" && "$identity" != "$expected" ]]; then
+    API_READ_ERROR="读取完整健康报告前进程/版本身份已换代或读不到"
+    return 2
   fi
-  receipt="引擎核对回执：工人证据=$worker_text；API 探针=$probe_text；重试 $used 次（上限 $((tries - 1)) 次）；裁决=$verdict；理由=$reason"
-  # shellcheck disable=SC2034 # 只有 deploy/test/release-flow.test.sh 读
-  ENGINE_RECONCILE_VERDICT=$verdict
-  # shellcheck disable=SC2034
-  ENGINE_RECONCILE_RECEIPT=$receipt
-  case "$verdict" in
-  保留) ok "后端报 engine 好了（重试后转绿）：$receipt" ;;
-  未决) pending "后端报 engine 不好：$why（$receipt）" ;;
-  *)
-    red "fleet-api：engine 切之前是好的，换了这一版不好了：$why；$receipt"
-    return 1
-    ;;
+  if ! got=$(api_healthz </dev/null); then
+    API_READ_ERROR="驾驶舱接口 http://$COCKPIT/healthz 连不上"
+    return 2
+  fi
+  code=${got%%$'\t'*}
+  if [[ "$code" != 200 && "$code" != 503 ]] || ! items=$(report_items "${got#*$'\t'}" "$code" 2>/dev/null); then
+    API_READ_ERROR="/healthz 回的不是健康报告（HTTP $code）"
+    return 2
+  fi
+  if ! after=$(health_identity "$sha") || [[ "$after" != "$identity" ]]; then
+    API_READ_ERROR="读取完整健康报告期间进程/版本换代，报告不能归属原代"
+    return 2
+  fi
+  API_ITEMS=$items
+  API_IDENTITY=$identity
+}
+
+# polling 必须是当前 PID 两类 poller 都在原120秒窗口内；读失败、坏记录、陈旧记录均不冒充无工人。
+engine_worker_evidence() { # 主进程号
+  local wpid=$1 json rc
+  if ! json=$(tcli task-queue describe --task-queue "$TASK_QUEUE" -o json 2>/dev/null </dev/null); then
+    echo unknown
+  elif engine_polling "$json" "$wpid@"; then
+    echo polling
+  else
+    rc=$?
+    if ((rc == 1)); then echo idle; else echo unknown; fi
+  fi
+}
+
+# 只在引擎原本好、首份完整报告变红的发布窗口核对。0证实恢复；1证实离线；2仍待核验。
+# 每轮两边证据被同一进程/版本身份夹住，最后完整 API 报告交回 check_api 逐项裁决。
+reconcile_engine() { # 目标提交
+  local sha=$1 tries=$ENGINE_RECONCILE_TRIES i identity after wpid ev=unknown st reason="" rc=2
+  ((tries >= 1)) || tries=1
+  ENGINE_RECONCILE_VERDICT=未决
+  identity=${API_IDENTITY:-}
+  if [[ -z "$identity" ]] || ! after=$(health_identity "$sha") || [[ "$after" != "$identity" ]]; then
+    ENGINE_RECONCILE_RECEIPT="无法确认目标 $sha 的进程/运行内容身份"
+    return 2
+  fi
+  wpid=$(unit_prop fleet-engine.service MainPID)
+  for ((i = 0; i < tries; i++)); do
+    local active
+    active=$(systemctl is-active fleet-engine.service 2>/dev/null) || true
+    if [[ "$active" == inactive || "$active" == failed ]] && [[ "$(unit_prop fleet-engine.service MainPID)" == 0 ]]; then
+      ev=dead
+      rc=1
+      reason="引擎进程已确认退出"
+      break
+    fi
+    ev=$(engine_worker_evidence "$wpid")
+    if ((i > 0)); then read_api_items "$sha" "$identity" || true; fi
+    if ! after=$(health_identity "$sha") || [[ "$after" != "$identity" ]]; then
+      reason="读取期间进程或版本换代，不能拼接不同代证据"
+      rc=2
+      break
+    fi
+    st=$(awk -F '\t' '$1 == "engine" { print $2; exit }' <<<"$API_ITEMS")
+    if [[ -z "$API_READ_ERROR" && "$st" == ok && "$ev" == polling ]]; then
+      reason="同一身份的当前工人两类拉活新鲜，最后完整 API 报告的 engine 转绿"
+      rc=0
+      break
+    fi
+    if ((i + 1 < tries)); then sleep "$ENGINE_RECONCILE_GAP"; fi
+  done
+  if [[ -z "$reason" ]]; then
+    if [[ "$ev" == idle && -z "$API_READ_ERROR" && "$st" == bad ]]; then
+      rc=1
+      reason="有界核对后当前工人仍无两类拉活，完整 API 报告的 engine 也红"
+    else
+      rc=2
+      reason="有界核对后证据仍矛盾、陈旧或没读全（${API_READ_ERROR:-engine=$st}）"
+    fi
+  fi
+  case $rc in
+    0) ENGINE_RECONCILE_VERDICT=保留 ;;
+    1) ENGINE_RECONCILE_VERDICT=退回 ;;
+    *) ENGINE_RECONCILE_VERDICT=未决 ;;
   esac
-  return 0
+  ENGINE_RECONCILE_RECEIPT="引擎核对回执：目标=$sha；身份=$identity；工人证据=$ev；API engine=${st:-未知}；重读=$i；裁决=$ENGINE_RECONCILE_VERDICT；理由=$reason"
+  if ((rc == 1)); then red "$ENGINE_RECONCILE_RECEIPT"; fi
+  if ((rc == 2)); then pending "$ENGINE_RECONCILE_RECEIPT"; fi
+  return "$rc"
 }
 
 # 切之后的健康报告逐项和切之前比：之前好的变坏了才算这一版的错（返回 1）；会自己变红的那几项只标待处理
 compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
-  local k st why was bad=0
+  local k st why was bad=0 unresolved=0
   while IFS=$'\t' read -r k st why; do
     if [[ -z "$k" ]]; then continue; fi
     was=$(awk -F '\t' -v k="$k" '$1 == k { print $2 }' <<<"$1")
@@ -1903,9 +1923,6 @@ compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
       pending "后端报 engine 不好：$why（本机没启用引擎：$RELEASE_ENV 的 FLEET_SERVICES 里没有 fleet-engine，是预期的，不退回）"
     elif [[ " $DRIFTING_HEALTH_ITEMS " == *" $k "* ]]; then
       pending "后端报 $k 不好：$why（这一项会随时间自己变红，和换没换版无关，不退回）"
-    elif [[ "$k" == engine && "$was" == ok ]]; then
-      # 引擎红要先和工人已拉活的证据核对，不凭一次探针红就退回（#3250）
-      reconcile_engine "$why" || bad=1
     elif [[ "$was" == ok ]]; then
       red "fleet-api：$k 切之前是好的，换了这一版不好了：$why"
       bad=1
@@ -1913,52 +1930,88 @@ compare_api_items() { # 切之前的逐项结果 切之后的逐项结果
       pending "后端报 $k 不好：$why（切之前就不好或第一次起，不算这一版的错，不退回）"
     fi
   done <<<"$2"
-  return "$bad"
+  while IFS=$'\t' read -r k st why; do
+    if [[ "$st" != ok || "$k" == "${3:-}" ]]; then continue; fi
+    if ! awk -F '\t' -v k="$k" '$1 == k { found=1 } END { exit !found }' <<<"$2"; then
+      pending "后端完整报告缺少切前好的 $k 项，不能认作恢复"
+      unresolved=1
+    fi
+  done <<<"$1"
+  ((bad == 0)) || return 1
+  if ((unresolved)); then return 2; fi
+  return 0
 }
 
-check_api() { # 切之前的逐项结果
-  local before=$1 got code body items bad=0
-  if ! got=$(api_healthz); then
-    red "fleet-api：驾驶舱接口 http://$COCKPIT/healthz 连不上"
-    return 1
+check_api() { # 切之前的逐项结果 目标提交 原健康身份（可选）
+  local before=$1 sha=${2:-} expected=${3:-} rc=0 compared items ignored=""
+  API_ITEMS=""
+  API_IDENTITY=""
+  API_READ_ERROR=""
+  if ! read_api_items "$sha" "$expected"; then
+    pending "fleet-api：$API_READ_ERROR，健康尚未核实"
+    return 2
   fi
-  code=${got%%$'\t'*}
-  body=${got#*$'\t'}
-  if [[ "$code" != 200 && "$code" != 503 ]] || ! items=$(report_items "$body"); then
-    red "fleet-api：/healthz 回的不是健康报告（HTTP $code）"
-    return 1
+  if has_service fleet-engine &&
+    [[ "$(awk -F '\t' '$1 == "engine" { print $2 }' <<<"$before")" == ok &&
+    "$(awk -F '\t' '$1 == "engine" { print $2 }' <<<"$API_ITEMS")" != ok ]]; then
+    reconcile_engine "$sha" || rc=$?
   fi
-  ok "fleet-api：驾驶舱接口 $COCKPIT 在答健康报告（HTTP $code）"
-  compare_api_items "$before" "$items" || bad=1
-  return "$bad"
+  # 引擎的未决/退回已经裁过；仍核最后完整报告的其余每一项，新真红优先于未决。
+  items=$API_ITEMS
+  if ((rc != 0)); then
+    items=$(awk -F '\t' '$1 != "engine"' <<<"$items")
+    ignored=engine
+  fi
+  compare_api_items "$before" "$items" "$ignored" || {
+    compared=$?
+    if ((compared == 1 || rc == 0)); then rc=$compared; fi
+  }
+  if has_service fleet-engine && ! awk -F '\t' '$1 == "engine" { found=1 } END { exit !found }' <<<"$API_ITEMS" && ((rc != 1)); then
+    pending "后端完整报告缺少 engine 项，健康仍待核验"
+    rc=2
+  fi
+  if [[ -n "$API_READ_ERROR" && "$rc" != 1 ]]; then rc=2; fi
+  return "$rc"
 }
 
 # 引擎工人：任务队列上有它（身份是「进程号@主机名」）在取工作流任务和活动任务
 # fleet-temporal task-queue describe -o json 的回答里，身份以这个前缀开头的取活者，工作流任务和活动任务是不是都在取。
-# 回答认不出（不是 JSON）也算不在，不当成「没问题」
+# 回答认不出、结构或记录不完整时返回2，不能据此认定工人离线。
 engine_polling() { # JSON 身份前缀
   printf '%s' "$1" | "$NODE" -e '
     let s = ""; process.stdin.on("data", (d) => (s += d)).on("end", () => {
-      let r; try { r = JSON.parse(s); } catch { process.exit(1); }
-      const mine = ((r && r.pollers) || []).filter((p) => typeof p.identity === "string" && p.identity.startsWith(process.argv[1]));
-      const types = new Set(mine.map((p) => p.taskQueueType));
-      process.exit(types.has("workflow") && types.has("activity") ? 0 : 1);
+      let r; try { r = JSON.parse(s); } catch { process.exit(2); }
+      if (!r || typeof r !== "object" || (r.pollers !== null && !Array.isArray(r.pollers))) process.exit(2);
+      if ((r.pollers || []).some((p) => !p || typeof p !== "object" ||
+        typeof p.identity !== "string" || !["workflow", "activity"].includes(p.taskQueueType))) process.exit(2);
+      const mine = (r.pollers || []).filter((p) => typeof p.identity === "string" && p.identity.startsWith(process.argv[1]));
+      const types = new Set(); let unknown = false;
+      for (const p of mine) {
+        const at = Date.parse(p.lastAccessTime), age = Date.now() - at;
+        if (!Number.isFinite(at) || age < 0 || age > 120000) unknown = true;
+        else types.add(p.taskQueueType);
+      }
+      process.exit(types.has("workflow") && types.has("activity") ? 0 : unknown ? 2 : 1);
     });' "$2"
 }
 
 check_engine() {
-  local pid json i
-  pid=$(unit_prop fleet-engine.service MainPID)
+  local wpid ev=unknown i
   for ((i = 0; i < ENGINE_POLL_WAIT; i += 3)); do
-    json=$(tcli task-queue describe --task-queue "$TASK_QUEUE" -o json 2>/dev/null) || json=""
-    if engine_polling "$json" "$pid@"; then
-      ok "fleet-engine：引擎工人（pid $pid）在任务队列 $TASK_QUEUE 上取工作流任务和活动任务"
+    wpid=$(unit_prop fleet-engine.service MainPID)
+    ev=$(engine_worker_evidence "$wpid")
+    if [[ "$ev" == polling ]]; then
+      ok "fleet-engine：当前工人（pid $wpid）两类取活均在120秒内"
       return 0
     fi
     sleep 3
   done
-  red "fleet-engine：引擎工人（pid $pid）${ENGINE_POLL_WAIT} 秒还没到任务队列 $TASK_QUEUE 取活：journalctl -u fleet-engine -n 50"
-  return 1
+  if [[ "$ev" == idle ]]; then
+    red "fleet-engine：当前工人（pid $wpid）${ENGINE_POLL_WAIT} 秒仍没有两类取活"
+    return 1
+  fi
+  pending "fleet-engine：当前工人（pid $wpid）取活证据陈旧或未读全，不能确认健康"
+  return 2
 }
 
 # 香港在发的对不对：经隧道连香港的 nginx（证书照常按域名校验）。发了 web 的，读 release.json 与健康页——
@@ -2006,20 +2059,20 @@ check_chain() {
   local code
   code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 --resolve "$FLEET_DOMAIN:443:$HK_TUNNEL" "https://$FLEET_DOMAIN/healthz") || code=000
   case $code in
-  200) ok "健康页那条路通：香港 → 隧道 → 法国后端的 /healthz 回 200（全好）" ;;
-  503) ok "健康页那条路通：香港 → 隧道 → 法国后端的 /healthz 回 503（有项不好，健康页会照实报红）" ;;
-  502 | 504)
-    if ! has_service fleet-api; then
-      pending "健康页现在三项全红（香港转 /healthz 回 $code）：本机没启用 fleet-api（$RELEASE_ENV 的 FLEET_SERVICES）"
-    elif api_healthz >/dev/null; then
-      pending "本机后端在答，香港却转不过来（HTTP $code）：看香港 nginx 与隧道"
-    else
-      # 本机后端没在答，上面已经记了红；健康页这时照实显示「香港连不上法国后端」
-      echo "  · 健康页现在三项全红（香港转 /healthz 回 $code）：本机后端没在答"
-    fi
-    ;;
-  404) pending "香港还没转 /healthz（HTTP 404）：香港 git pull 后重跑 deploy/hk.sh" ;;
-  *) pending "经香港取 /healthz 没取成（HTTP $code）" ;;
+    200) ok "健康页那条路通：香港 → 隧道 → 法国后端的 /healthz 回 200（全好）" ;;
+    503) ok "健康页那条路通：香港 → 隧道 → 法国后端的 /healthz 回 503（有项不好，健康页会照实报红）" ;;
+    502 | 504)
+      if ! has_service fleet-api; then
+        pending "健康页现在三项全红（香港转 /healthz 回 $code）：本机没启用 fleet-api（$RELEASE_ENV 的 FLEET_SERVICES）"
+      elif api_healthz >/dev/null; then
+        pending "本机后端在答，香港却转不过来（HTTP $code）：看香港 nginx 与隧道"
+      else
+        # 本机后端没在答，上面已经记了红；健康页这时照实显示「香港连不上法国后端」
+        echo "  · 健康页现在三项全红（香港转 /healthz 回 $code）：本机后端没在答"
+      fi
+      ;;
+    404) pending "香港还没转 /healthz（HTTP 404）：香港 git pull 后重跑 deploy/hk.sh" ;;
+    *) pending "经香港取 /healthz 没取成（HTTP $code）" ;;
   esac
 }
 
@@ -2040,6 +2093,18 @@ real_node() {
   return 1
 }
 
+# 在子发布入口固定父请求身份，不能到写回时才把后来者的 nonce 当成本趟。
+train_health_owner() {
+  local node_bin
+  node_bin=$(real_node) || return 1
+  "$node_bin" -e '
+    const fs = require("fs"); let s;
+    try { s = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); }
+    catch (e) { if (e.code === "ENOENT") process.exit(0); throw e; }
+    if (s.release?.healthAttempt) process.stdout.write(JSON.stringify([s.target?.value, s.release.healthAttempt, s.startedAt]));
+  ' "$RELEASES/.train/release-train.json"
+}
+
 settle_train_succeeded() { # 提交号
   local sha=$1 file now node_bin
   [[ "$(current_sha)" == "$sha" ]] || return 0
@@ -2050,7 +2115,13 @@ settle_train_succeeded() { # 提交号
   # shellcheck disable=SC2016 # 单引号里是给 node 的 JS，不归 shell 展开
   "$node_bin" -e '
     const fs = require("fs");
-    const [file, sha, now] = process.argv.slice(1);
+    const [file, sha, now, owner] = process.argv.slice(1);
+    // 受管请求还要由父协调者跑发后验证；子发布不能提前跳到 done。
+    if (owner) process.exit(0);
+    let raw = "", prev;
+    try { raw = fs.readFileSync(file, "utf8"); prev = JSON.parse(raw); }
+    catch (e) { if (e.code !== "ENOENT") throw e; }
+    if (prev?.release?.healthAttempt) throw Error("发布请求已换代，不覆盖");
     const next = {
       schema: 1,
       phase: 8,
@@ -2061,24 +2132,94 @@ settle_train_succeeded() { # 提交号
     };
     next.status = "done";
     const tmp = file + ".tmp";
+    if ((fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "") !== raw) throw Error("发布进度已换代，不覆盖");
     fs.writeFileSync(tmp, JSON.stringify(next) + "\n");
     fs.renameSync(tmp, file);
-  ' "$file" "$sha" "$now" || true
+  ' "$file" "$sha" "$now" "${RELEASE_HEALTH_OWNER:-}" || true
 }
 
-# 这一版健不健康：起了的服务起稳了、各自该通的通了、香港在发这一版。不过返回 1（原因已记成红）
-health_gate() { # 提交号 切之前后端的逐项结果
-  local sha=$1 before=${2:-} bad=0
+# 健康未决是受管回执，不混用普通待配。写入和消费都绑定目标、发布请求的本次 nonce；--check 只输出，不写文件。
+settle_train_pending() { # 提交号 切前完整逐项基线 write|check
+  local sha=$1 before=$2 mode=${3:-write} file=$RELEASES/.train/release-train.json node_bin
+  if [[ "$mode" == write ]]; then install -d -m 755 -- "$RELEASES/.train" || return 1; fi
+  node_bin=$(real_node) || return 1
+  "$node_bin" -e '
+    const fs = require("fs"), crypto = require("crypto");
+    const [file, sha, before, receipt, mode, identity, owner] = process.argv.slice(1);
+    let raw = "", s;
+    try { raw = fs.readFileSync(file, "utf8"); s = JSON.parse(raw); }
+    catch (e) { if (e.code !== "ENOENT") throw e; }
+    if (s && s.target?.value !== sha) throw Error("发布目标已换代，不覆盖");
+    if (mode === "write" && owner && JSON.stringify([s?.target?.value, s?.release?.healthAttempt, s?.startedAt]) !== owner) throw Error("发布请求已换代，不覆盖");
+    if (mode === "write" && !owner && s?.release?.healthAttempt) throw Error("发布请求已换代，不接管后来者");
+    if (!s) s = {schema: 1, target: {kind: "sha", value: sha}, startedAt: new Date().toISOString(), release: {}};
+    s.release ??= {};
+    const attempt = s.release.healthAttempt ?? crypto.randomUUID();
+    const pending = {schema: 1, sha, attempt, before, identity, receipt, at: new Date().toISOString()};
+    if (mode === "write") {
+      s.release.healthPending = pending;
+      s.status = "blocked"; s.phase = 4; s.updatedAt = pending.at; s.why = receipt;
+      if ((fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "") !== raw) throw Error("发布进度已换代，不覆盖");
+      fs.writeFileSync(file + ".tmp", JSON.stringify(s) + "\n"); fs.renameSync(file + ".tmp", file);
+    }
+    console.log("FLEET_RELEASE_HEALTH_PENDING\t" + JSON.stringify(pending));
+  ' "$file" "$sha" "$before" "${ENGINE_RECONCILE_RECEIPT:-健康证据尚未核实}" "$mode" "${HEALTH_GATE_IDENTITY:-未知}" "${RELEASE_HEALTH_OWNER:-}"
+}
+
+# 重入沿用本趟原基线，不能因切后 engine 已红而把它降成“切前就红”。读不全明确失败。
+pending_health_context() { # 当前提交
+  local node_bin
+  node_bin=$(real_node) || return 1
+  "$node_bin" -e '
+    const fs = require("fs"); const [file, sha] = process.argv.slice(1); let s;
+    try { s = JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { if (e.code === "ENOENT") process.exit(0); throw e; }
+    const p = s.release?.healthPending;
+    if (!p) process.exit(0);
+    if (s.target?.value !== sha) throw Error("健康待核验目标与在用版本不一致");
+    if (p.schema !== 1 || p.sha !== sha || typeof p.before !== "string" || typeof p.attempt !== "string" || typeof p.identity !== "string" || !p.identity) throw Error("健康未决回执认不出");
+    process.stdout.write(JSON.stringify(p));
+  ' "$RELEASES/.train/release-train.json" "$1"
+}
+
+# 0=完整通过，1=已证故障，2=健康尚未核实；其它待配仍用原 PENDING/退出2合同。
+health_gate() { # 提交号 切之前后端的逐项结果 原未决身份（重入时）
+  local sha=$1 before=${2:-} expected=${3:-} bad=0 unresolved=0 rc identity="" after=""
+  ENGINE_RECONCILE_RECEIPT=""
   step "健康检查（${sha:0:12}）"
   if [[ -n "$FLEET_SERVICES" ]]; then
     settle_services || bad=1
     check_running_release "$sha" || bad=1
+    identity=$(health_identity "$sha") || unresolved=1
+    if [[ -n "$expected" && "$identity" != "$expected" ]]; then
+      unresolved=1
+      pending "当前服务身份不同于原健康未决回执，不能用新代清旧代"
+    fi
   fi
-  if has_service fleet-api; then check_api "$before" || bad=1; fi
-  if has_service fleet-engine; then check_engine || bad=1; fi
+  HEALTH_GATE_IDENTITY=${expected:-${identity:-未知}}
+  if has_service fleet-api; then
+    check_api "$before" "$sha" "$HEALTH_GATE_IDENTITY" || {
+      rc=$?
+      if ((rc == 2)); then unresolved=1; else bad=1; fi
+    }
+  fi
+  if has_service fleet-engine && ((unresolved == 0)); then
+    check_engine || {
+      rc=$?
+      if ((rc == 2)); then unresolved=1; else bad=1; fi
+    }
+  fi
   if has_part web; then check_web "$sha" || bad=1; fi
   check_chain
-  return "$bad"
+  if [[ -n "$FLEET_SERVICES" ]]; then
+    if ! after=$(health_identity "$sha") || [[ "$after" != "$identity" ]]; then
+      unresolved=1
+      pending "健康读取期间服务进程/版本换代，完整证据未能绑定同一身份"
+      ENGINE_RECONCILE_RECEIPT="健康读取期间服务进程/版本换代，目标=$sha"
+    fi
+  fi
+  ((bad == 0)) || return 1
+  if ((unresolved)); then return 2; fi
+  return 0
 }
 
 mark_unhealthy() { # 提交号
@@ -2246,7 +2387,11 @@ service_unchanged() { # engine|api 在用提交 目标提交
 }
 
 do_release() { # 要发的提交（空 = 主线最新）
-  local cur before=""
+  local cur before="" context="" expected="" gate=1 RELEASE_HEALTH_OWNER=""
+  if ! RELEASE_HEALTH_OWNER=$(train_health_owner); then
+    red "发布请求原身份读不全，不发布、不覆盖进度"
+    return 1
+  fi
   fetch_code "$1"
   # 构建期间引擎照常派活、会话照常干（#2038）：停接新活只在下面切版本这一段
   build_release "$SHA"
@@ -2280,10 +2425,25 @@ do_release() { # 要发的提交（空 = 主线最新）
     red "后端在跑，但切版本之前读不到它的健康报告（$before）：没有「切之前」就分不出切之后变红的项是不是这一版弄坏的，不切；后端答得上来了再发"
     return 1
   fi
+  if [[ "$cur" == "$SHA" ]]; then
+    if ! context=$(pending_health_context "$SHA"); then
+      pending "健康未决原基线读不全，本次不重发、不伪造成功"
+      printf 'FLEET_RELEASE_HEALTH_PENDING\tINVALID\n'
+      return 0
+    fi
+    if [[ -n "$context" ]]; then
+      before=$(json_field "$context" before)
+      expected=$(json_field "$context" identity)
+    fi
+  fi
   # 紧挨着切版本：写完到服务换上这一版之间，在跑的旧服务自己重启才会读到新配置，这段越短越好
   apply_config "$SHA" release || return 1
   step "切到 ${SHA:0:12}（在用：$(short "$cur" 还没有)）"
-  if record_runtime_matches "$SHA" && activate "$SHA" release && health_gate "$SHA" "$before"; then
+  if record_runtime_matches "$SHA" && activate "$SHA" release; then
+    gate=0
+    health_gate "$SHA" "$before" "$expected" || gate=$?
+  fi
+  if ((gate == 0)); then
     # 之前判过不健康（比如那时本机配置没备齐）、这次过了：记回健康，它又能当退回的目标
     if [[ "$(last_event "$SHA")" == unhealthy ]]; then
       record "$SHA" recovered
@@ -2293,6 +2453,9 @@ do_release() { # 要发的提交（空 = 主线最新）
     settle_train_succeeded "$SHA"
     # 发版前后都不碰引擎总开关和各项目的「让 AI 接活」（决定 0093）：停接新活只靠切版本这一段的排空请求，
     # 发版暂停的任务在收尾（finish_hook → resume_tasks）只对名单里这一批发「继续」。
+  elif ((gate == 2)); then
+    pending "${SHA:0:12} 已切上，健康待核验：不写发布完成、不将未决记成不健康或自动退回"
+    settle_train_pending "$SHA" "$before" || red "健康未决回执写不成，发布未完成"
   elif [[ "$(current_sha)" != "$SHA" ]]; then
     # socket 没装上（停不掉旧服务、enable 失败）时 activate 在切 current 之前就返回：版本没动，不用退
     red "${SHA:0:12} 没切过去（见上面的红），在用的还是 $(short "$cur" 还没有)"
@@ -2353,7 +2516,7 @@ do_rollback() {
 }
 
 do_check() {
-  local cur prev d s
+  local cur prev d s before="" context="" expected="" gate=0
   step "版本"
   cur=$(current_sha)
   prev=$(previous_sha)
@@ -2385,7 +2548,19 @@ do_check() {
       echo "  · $s 本机没启用（$RELEASE_ENV 的 FLEET_SERVICES）"
     fi
   done
-  health_gate "$cur" "" || true
+  if ! context=$(pending_health_context "$cur"); then
+    pending "健康未决原基线读不全，不能把未知当成切前已坏"
+    printf 'FLEET_RELEASE_HEALTH_PENDING\tINVALID\n'
+    return 0
+  fi
+  if [[ -n "$context" ]]; then
+    before=$(json_field "$context" before)
+    expected=$(json_field "$context" identity)
+  fi
+  health_gate "$cur" "$before" "$expected" || gate=$?
+  if ((gate == 2)); then
+    settle_train_pending "$cur" "$before" check || red "健康待核验回执读不成"
+  fi
 }
 
 # 自动发布单元的读数（fleet-auto-release 每一轮写的状态文件）照实列出来：主线头、CI、在用的落后几个、这一轮读到了什么、自动发版为什么发或没发、规矩同步到哪、
@@ -2461,25 +2636,25 @@ main() {
   UNMERGED=0
   for arg in "$@"; do
     case $arg in
-    --rollback) mode=rollback ;;
-    --check) mode=check ;;
-    --unmerged) UNMERGED=1 ;;
-    --now) NOW_MODE=1 ;;
-    -h | --help)
-      usage
-      exit 0
-      ;;
-    -*)
-      usage >&2
-      exit 64
-      ;;
-    *)
-      if [[ -n "$target" || ! "$arg" =~ ^[0-9a-f]{7,40}$ ]]; then
+      --rollback) mode=rollback ;;
+      --check) mode=check ;;
+      --unmerged) UNMERGED=1 ;;
+      --now) NOW_MODE=1 ;;
+      -h | --help)
+        usage
+        exit 0
+        ;;
+      -*)
         usage >&2
         exit 64
-      fi
-      target=$arg
-      ;;
+        ;;
+      *)
+        if [[ -n "$target" || ! "$arg" =~ ^[0-9a-f]{7,40}$ ]]; then
+          usage >&2
+          exit 64
+        fi
+        target=$arg
+        ;;
     esac
   done
   if [[ "$mode" != release && (-n "$target" || "$UNMERGED" == 1) ]]; then
