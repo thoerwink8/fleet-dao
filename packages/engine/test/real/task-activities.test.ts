@@ -131,6 +131,83 @@ function make(over: Partial<TaskActivitiesDeps> & { gh: Gh }) {
   return { acts, logs };
 }
 
+describe('停法收尾活动的真实空闲核验（#3193）', () => {
+  const input = {
+    schemaVersion: 1 as const,
+    repo: REPO,
+    prNumber: 7,
+    expectedHead: HEAD,
+    idle: { issueNumber: 12, workflowId: 'task:acme/demo#12' },
+  };
+  it.each([1, -1, Number.NaN])('会话数 %s 不允许读成功回执', async (count) => {
+    const { gh, calls } = fakeGh({ readPull: async () => pullFacts({ merged: true, state: 'closed' }) });
+    const { acts } = make({ gh, openRunsForIssue: async () => count });
+    await expect(acts.readMergedTask(input, ctx())).rejects.toMatchObject({ code: 'TASK_BUSY' });
+    expect(calls).toEqual(['readPull']);
+  });
+  it('缺活动会话读取装配或读取失败不能默认为零', async () => {
+    const { gh, calls } = fakeGh({ readPull: async () => pullFacts({ merged: true, state: 'closed' }) });
+    await expect(make({ gh }).acts.readMergedTask(input, ctx())).rejects.toMatchObject({
+      code: 'TASK_NOT_CONFIGURED',
+    });
+    await expect(
+      make({
+        gh,
+        openRunsForIssue: async () => {
+          throw new Error('DB offline');
+        },
+      }).acts.readMergedTask(input, ctx()),
+    ).rejects.toThrow('DB offline');
+    expect(calls).toEqual(['readPull', 'readPull']);
+  });
+  it('OPEN PR 即使有 detached 活会话也返回 null，不查 idle、不记 onlyBook', async () => {
+    const { gh, calls } = fakeGh({ readPull: async () => pullFacts() });
+    let counted = 0;
+    const { acts } = make({
+      gh,
+      openRunsForIssue: async () => {
+        counted++;
+        return 1;
+      },
+    });
+    expect(await acts.readMergedTask(input, ctx())).toBeNull();
+    expect(counted).toBe(0);
+    expect(calls).toEqual(['readPull']);
+    await expect(
+      acts.readMergedTask({ ...input, idle: { ...input.idle, includeOpen: true } }, ctx()),
+    ).rejects.toMatchObject({ code: 'TASK_BUSY' });
+    expect(counted).toBe(1);
+  });
+  it('确认为零才现读 PR 和真实 onlyBook 回执', async () => {
+    let onlyBook: boolean | undefined;
+    const { gh, calls } = fakeGh({
+      readPull: async () => pullFacts({ merged: true, state: 'closed' }),
+      mergePr: async (request: { onlyBook?: boolean }) => {
+        onlyBook = request.onlyBook;
+        return mergedOk();
+      },
+    });
+    const { acts } = make({
+      gh,
+      openRunsForIssue: async (repo, issue, workflowId) => {
+        expect({ repo, issue, workflowId }).toEqual({
+          repo: REPO,
+          issue: 12,
+          workflowId: input.idle.workflowId,
+        });
+        return 0;
+      },
+    });
+    expect(await acts.readMergedTask(input, ctx())).toMatchObject({
+      prNumber: 7,
+      head: HEAD,
+      mergeCommit: 'c'.repeat(40),
+    });
+    expect(onlyBook).toBe(true);
+    expect(calls).toEqual(['readPull', 'mergePr']);
+  });
+});
+
 describe('读交代', () => {
   it('单子正文写全了：拼出交代，分档、验收条都在', async () => {
     const { gh, calls } = fakeGh({

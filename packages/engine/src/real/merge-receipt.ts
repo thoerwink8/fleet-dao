@@ -10,6 +10,7 @@
 import { errMessage } from '@fleet-dao/shared/util';
 import type { CiResult } from '../decisions/types.ts';
 import { type PortContext, PortError } from '../ports.ts';
+import type { MergedTaskReceipt, ReadMergedTaskInput } from '../task-contract.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import { mapped } from './mirror.ts';
 
@@ -27,6 +28,63 @@ interface PullRef {
 }
 
 const short = (sha: string) => sha.slice(0, 7);
+
+/** Never arms or merges an open PR. The writer re-reads the actual merge before onlyBook. */
+export async function readMergedTask(
+  gh: Pick<EngineGitHub, 'mergePr' | 'claims'>,
+  input: ReadMergedTaskInput,
+  ctx: PortContext,
+  verifyIdle?: () => Promise<void>,
+): Promise<MergedTaskReceipt | null> {
+  const sha = /^[0-9a-f]{40}$/;
+  if (
+    input.schemaVersion !== 1 ||
+    !input.repo?.owner ||
+    !input.repo.name ||
+    !Number.isSafeInteger(input.prNumber) ||
+    input.prNumber <= 0 ||
+    !sha.test(input.expectedHead) ||
+    (input.expectedMergeCommit !== undefined && !sha.test(input.expectedMergeCommit))
+  ) {
+    throw new PortError('INVALID_INPUT', '已合任务收尾缺少完整 PR 身份', { retryable: false });
+  }
+  const pull = await mapped(() =>
+    gh.claims.readPull(input.repo, input.prNumber, { requireMergeState: true }),
+  );
+  if (pull.number !== input.prNumber)
+    throw new PortError('MERGE_IDENTITY_MISMATCH', '现读 PR 编号与原任务不一致', { retryable: false });
+  // Ordinary open PRs are expected. A merged different head is never fresh authorization.
+  // Normal checkpoint reads must not block reconnecting a detached session on an open PR.
+  if (!pull.merged) {
+    if (input.idle?.includeOpen) {
+      if (!verifyIdle)
+        throw new PortError('TASK_NOT_CONFIGURED', '未装配关单收尾的在跑会话核验', { retryable: false });
+      await verifyIdle();
+    }
+    return null;
+  }
+  if (pull.headSha !== input.expectedHead)
+    throw new PortError('MERGE_IDENTITY_MISMATCH', '已合 PR 不是原任务头，保留现场', { retryable: false });
+  if (input.idle) {
+    if (!verifyIdle)
+      throw new PortError('TASK_NOT_CONFIGURED', '未装配已合收尾的在跑会话核验', { retryable: false });
+    await verifyIdle();
+  }
+  const booked = await bookMergedPull(gh, input, ctx);
+  if (
+    !booked.booked ||
+    !sha.test(booked.mergeCommit) ||
+    (input.expectedMergeCommit !== undefined && input.expectedMergeCommit !== booked.mergeCommit)
+  ) {
+    throw new PortError('MERGE_IDENTITY_MISMATCH', '真实合并回执与待结清身份不一致', { retryable: false });
+  }
+  return {
+    repo: input.repo,
+    prNumber: input.prNumber,
+    head: input.expectedHead,
+    mergeCommit: booked.mergeCommit,
+  };
+}
 
 /**
  * 给已经合了的 PR 记合并回执。onlyBook 在 writer 实际重读处拒绝未合并、错号和不完整回执，不能退到主动合并。

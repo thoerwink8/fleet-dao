@@ -755,3 +755,5 @@ GitHub 上只用标签和里程碑两样容器。issue 照第七节建（创始�
 | 10 | 在驾驶舱里直接问 AI（问进度、问原因、问数据） | windsurf-dao#816 | 驾驶舱 |
 
 最终现场验收以持久数据库责任账为准：代码可合并不等于原需求已完成；标准关单与合并收口都必须查完责任账。最终验收通过管理 CLI 用精确 repo/issue/PR/head、责任 id 和 generation 做 CAS，新增待验项递增代次并撤销旧结清。任何 Bot 评论和标签均不能提供结清授权。只读公开桥复用现有 engine App 对公开仓身份的核验；Actions 的 origin 来自可信 writer 对精确 PR/head 发布的 policy-source，本机来自已安装的机器配置。读不到明确未知、不关单。
+
+已合 PR 的任务结清（#3193）沿用原任务成功收尾与验收责任账。工作流在必经检查点现读同仓精确 PR/head，真实 writer 通过 `onlyBook` 核合并提交并记回执；普通未合返回空结果，读取失败保留现场。活工人自然返回再止损，未推成果先存档。停着的任务由现有每小时对账提交 `taskSettleMerged` Update，绑定 run、停法代数、继续次数、仓、PR、头和真实合并提交；异步现读前后均核对身份及零活动会话。受理 Update 不等于完成，不提前撤提醒，不关有未结验收责任的单。旧历史用 `settle-merged-task-checkpoint` patch 保留原步序。
