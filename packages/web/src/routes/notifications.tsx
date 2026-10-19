@@ -29,7 +29,7 @@ import { Tag } from '../components/layout/tag';
 import { RepoLink } from '../components/repo-link';
 import { Button } from '../components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../components/ui/tooltip';
-import { isWatchdogAlert } from '../lib/alert-repair';
+import { handlingContradicted, isWatchdogAlert, linkPhase } from '../lib/alert-repair';
 import { decisionResult, decisionToast } from '../lib/decision-result';
 import { formatAgo, formatClock, formatDateTime, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
@@ -143,7 +143,31 @@ function WorkLink({
  * 没查成的（发布判不了之类）照实列出来。
  * 一行不折（#1939，路由页样板「行的小字只占一行」）：状态、多久、链接不让位；谁、静默说明、没查成的话放不下就截断，整句（后端给的 line）在悬停里。
  */
-function HandlingRow({ h, now }: { h: Handling; now: number }) {
+function HandlingRow({ h, now, n }: { h: Handling; now: number; n: Notification }) {
+  // 这一行说「没人在修」，这次事故却明确关联了单（#3034 评审）：照关联现场写，不拿已知不对的「没人在修」顶着
+  const link = handlingContradicted(n) ? n.repair?.linked : undefined;
+  if (link) {
+    const phase = linkPhase(link);
+    const ref = `${link.issue.repo.owner}/${link.issue.repo.name}#${link.issue.number}`;
+    return (
+      <div
+        className="mt-1 flex min-w-0 items-center gap-x-2 overflow-hidden text-meta whitespace-nowrap text-muted-foreground"
+        title={`${link.text} · 处理人未知`}
+        data-testid="alert-handling"
+        data-from="linked"
+      >
+        <StatusBadge tone={phase.tone} label={phase.label} variant="dot" />
+        <span className="num shrink-0" title={formatDateTime(link.at)}>
+          {formatDuration(now - Date.parse(link.at))}
+        </span>
+        <WorkLink repo={link.issue.repo} kind="issues" n={link.issue.number} label={ref} />
+        {link.prNumber ? (
+          <WorkLink repo={link.issue.repo} kind="pull" n={link.prNumber} label={`PR #${link.prNumber}`} />
+        ) : null}
+        <span className="min-w-0 truncate">处理人未知</span>
+      </div>
+    );
+  }
   const since = formatDuration(now - Date.parse(h.since));
   const full = [h.line, ...h.problems].join(' · ');
   return (
@@ -407,7 +431,7 @@ function NotificationRow({
                     {meta}
                   </div>
                   <ClampedBody text={n.body} />
-                  {n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
+                  {n.handling ? <HandlingRow h={n.handling} now={now} n={n} /> : null}
                   <DecisionAnswerLine n={n} me={me} now={now} />
                   {queued && !repick ? (
                     <Button
@@ -443,7 +467,7 @@ function NotificationRow({
               ) : (
                 <>
                   <ClampedBody text={n.body} />
-                  {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} /> : null}
+                  {!resolved && n.handling ? <HandlingRow h={n.handling} now={now} n={n} /> : null}
                   <DecisionAnswerLine n={n} me={me} now={now} plain />
                   {/* 看门狗的卡住报警：后端现算能点的修复、执行到哪、核验结果（#3034）；别的提醒不渲染 */}
                   <AlertRepairPanel n={n} me={me} now={now} refresh={onRefreshRepair} />

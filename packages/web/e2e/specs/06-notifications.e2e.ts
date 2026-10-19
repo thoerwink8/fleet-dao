@@ -126,6 +126,10 @@ interface Scene {
   actions: unknown[];
   problems: string[];
   last?: Rec;
+  /** 这次事故明确关联的单（#3100 的 repair.linked）。 */
+  linked?: Record<string, unknown>;
+  /** 换掉真后端给的「谁在处理」（造线上那种过时的「没人在修」）。 */
+  handling?: Record<string, unknown>;
   bodies: Body[];
   exec: (body: Body) => Promise<{ status: number; json: unknown } | 'timeout'>;
 }
@@ -151,7 +155,9 @@ async function stage(context: BrowserContext, problems: PageProblems, scene: Sce
         actions: scene.actions,
         problems: scene.problems,
         ...(scene.last ? { last: scene.last } : {}),
+        ...(scene.linked ? { linked: scene.linked } : {}),
       };
+      if (scene.handling) n.handling = scene.handling;
     }
     await route.fulfill({ response: res, json }).catch(() => undefined);
   });
@@ -370,6 +376,86 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     await expect(card.getByRole('button', { name: '打开' })).toBeVisible();
     await stalledCard(page).scrollIntoViewIfNeeded();
     await shot(page, '06-修复-没有能点的');
+    expect(scene.bodies).toHaveLength(0);
+  });
+
+  // 评审 5565720994 的线上现场：关联 #3183 后 GET 回 linked.stage=worker-active，重读为 pr-open、PR #3184；
+  // repair.last 没有，旧 handling.stage=unclaimed。这里照同一形状造（incident 换成本场景的），后端仍列着「交给修复」。
+  test('明确关联了已有单：照关联写单号、任务 / PR 和阶段，不写「没人在修」、处理人写未知、不摆交给修复', async ({
+    page,
+    context,
+    problems,
+    shot,
+  }) => {
+    const fleet = { owner: 'thoerwink8', name: 'fleet-dao' };
+    const linked = {
+      incident: INCIDENT,
+      issue: { repo: fleet, number: 3183, url: 'https://github.com/thoerwink8/fleet-dao/issues/3183' },
+      reason: 'operator-explicit',
+      stage: 'worker-active',
+      taskId: 'task-3183',
+      actionId: 'link:e2e',
+      requestId: '22222222-2222-4222-8222-222222222222',
+      by: 'session:commander',
+      at: new Date(Date.now() - 2 * 60_000).toISOString(),
+      text: '已明确关联 thoerwink8/fleet-dao#3183（已有进行中的任务）：只绑定，没开单、没派工',
+    };
+    const scene: Scene = {
+      actions: [{ ...HAND, target: { repo: fleet } }],
+      problems: [],
+      linked,
+      handling: {
+        stage: 'unclaimed',
+        stageText: '没人在修',
+        since: new Date(Date.now() - 30 * 60_000).toISOString(),
+        line: '没人在修 · 30 分钟',
+        problems: [],
+      },
+      bodies: [],
+      exec: async () => ({ status: 500, json: {} }),
+    };
+    await stage(context, problems, scene);
+    await page.goto('/notifications');
+    const card = stalledCard(page);
+    await expect(card.getByTestId('repair-linked')).toHaveAttribute('data-stage', 'worker-active');
+    await expect(card.getByTestId('repair-linked')).toContainText('已关联 thoerwink8/fleet-dao#3183');
+    await expect(card.getByRole('link', { name: '看在做的任务' })).toHaveAttribute(
+      'href',
+      '/tasks/task-3183',
+    );
+    await expect(card.getByTestId('alert-handling')).toHaveAttribute('data-from', 'linked');
+    await expect(card.getByText('没人在修')).toHaveCount(0);
+    await expect(card.getByTestId('repair-linked-who')).toContainText('处理人：未知');
+    await expect(card.getByTestId('repair-linked-who')).toContainText('关联的人不是修的人');
+    await expect(card.getByRole('button', { name: '交给修复' })).toHaveCount(0);
+    await expect(card.getByText('已修复', { exact: true })).toHaveCount(0);
+    await card.scrollIntoViewIfNeeded();
+    await shot(page, '06-修复-已关联-任务在做');
+
+    // 重读：后端核实到开放 PR #3184
+    scene.linked = {
+      ...linked,
+      stage: 'pr-open',
+      prNumber: 3184,
+      text: '已明确关联 thoerwink8/fleet-dao#3183（已有开放 PR #3184）：只绑定，没开单、没派工',
+    };
+    await page.reload();
+    await expect(stalledCard(page).getByTestId('repair-linked')).toHaveAttribute('data-stage', 'pr-open');
+    await expect(stalledCard(page).getByText('PR #3184 开着').first()).toBeVisible();
+    await expect(stalledCard(page).getByText('没人在修')).toHaveCount(0);
+    await stalledCard(page).scrollIntoViewIfNeeded();
+    await shot(page, '06-修复-已关联-PR开着');
+
+    // 绑定失效：写原因，「没人在修」照实回来，原卡没修成
+    scene.linked = {
+      ...linked,
+      stage: 'linked',
+      invalid: { at: new Date().toISOString(), text: '单子已关闭' },
+    };
+    await page.reload();
+    await expect(stalledCard(page).getByTestId('repair-linked')).toHaveAttribute('data-stage', 'invalid');
+    await expect(stalledCard(page).getByTestId('repair-linked-invalid')).toContainText('单子已关闭');
+    await expect(stalledCard(page).getByText('没人在修')).toBeVisible();
     expect(scene.bodies).toHaveLength(0);
   });
 });

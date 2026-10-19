@@ -7,6 +7,35 @@ import type { Tone } from './status';
 export type RepairView = NonNullable<Notification['repair']>;
 export type RepairAction = RepairView['actions'][number];
 export type RepairRecord = NonNullable<RepairView['last']>;
+export type RepairLink = NonNullable<RepairView['linked']>;
+
+/**
+ * 这次事故操作者明确关联的单（#3100 的 repair.linked）落在哪一段：只绑定待处理 / 已有任务在做 / 已有开放 PR / 绑定失效。
+ * 关联不是一次修复动作：不等于受理、更不等于修好，卡照样开着。
+ */
+export function linkPhase(link: RepairLink): { label: string; tone: Tone } {
+  if (link.invalid) return { label: '关联已失效', tone: 'fail' };
+  if (link.stage === 'pr-open')
+    return { label: link.prNumber ? `PR #${link.prNumber} 开着` : 'PR 开着', tone: 'run' };
+  if (link.stage === 'worker-active') return { label: '已有任务在做', tone: 'run' };
+  return { label: '已关联，待处理', tone: 'wait' };
+}
+
+/** 关联有效、且已有任务或 PR 在处理：交给修复后端会回 409 link_already_handled，不再摆它。 */
+export function linkHandled(link: RepairLink | undefined): boolean {
+  return Boolean(link && !link.invalid && link.stage !== 'linked');
+}
+
+/**
+ * 「谁在处理」一行和当前事故的有效关联冲突：那一行说「没人在修」，关联却说这张单已绑定、在做或开着 PR。
+ * 冲突时不能拿已知不对的「没人在修」顶在卡上（#3034 评审 5565720994）。
+ */
+export function handlingContradicted(n: Pick<Notification, 'handling' | 'repair'>): boolean {
+  const link = n.repair?.linked;
+  return Boolean(
+    link && link.incident === n.repair?.incident && !link.invalid && n.handling?.stage === 'unclaimed',
+  );
+}
 
 /** 卡上那一格现在是哪一段：queued 是这一页刚发出去还没回话；no-receipt 是发了没收到回执（超时、断网）。 */
 export type RepairPhase =

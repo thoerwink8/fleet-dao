@@ -9,10 +9,14 @@ import { toast } from 'sonner';
 import { ApiError, errorText, useExecuteAlertRepair } from '../api/client';
 import type { ExecuteAlertRepairBody, ExecuteAlertRepairResult, Me, Notification } from '../api/types';
 import {
+  handlingContradicted,
   isWatchdogAlert,
   KIND_LABEL,
+  linkHandled,
+  linkPhase,
   PHASE_META,
   type RepairAction,
+  type RepairLink,
   type RepairPhase,
   type RepairRecord,
   recommendation,
@@ -136,8 +140,7 @@ function RepairRecordBox({
             {`${rec.issue.repo.owner}/${rec.issue.repo.name}#${rec.issue.number}`}
           </RepoLink>
           <span>
-            {rec.issue.created ? '这次开的' : '同一次事故原有的那张'} · 处理人：
-            {n.handling?.who ?? '还没登记谁接手（看上面「谁在处理」）'}
+            {rec.issue.created ? '这次开的' : '同一次事故原有的那张'} · 处理人：{workerOf(n)}
           </span>
         </p>
       ) : null}
@@ -162,6 +165,91 @@ function RepairRecordBox({
           </li>
         </ul>
       </details>
+    </Notice>
+  );
+}
+
+/** 修的人：「谁在处理」那一行登记了且和关联不冲突才用它；否则明说未知（关联的操作者不是修的人）。 */
+function workerOf(n: Notification): string {
+  const who = handlingContradicted(n) ? undefined : n.handling?.who;
+  return who ?? '未知（还没登记谁接手）';
+}
+
+/**
+ * 这次事故明确关联的单（repair.linked，#3100）：单号、任务、PR、阶段照服务端最近一次核实写；失效写原因。
+ * 它和修复记录（交给修复 / 受理 / 已修复）分开一格：关联不是一次修复动作，不等于受理、更不等于修好。
+ */
+function LinkedBox({
+  n,
+  link,
+  me,
+  now,
+}: {
+  n: Notification;
+  link: RepairLink;
+  me: Me | undefined;
+  now: number;
+}) {
+  const phase = linkPhase(link);
+  const ref = `${link.issue.repo.owner}/${link.issue.repo.name}#${link.issue.number}`;
+  const by = isMine(link.by, me) ? '我' : link.by;
+  return (
+    <Notice
+      tone={link.invalid ? 'fail' : 'info'}
+      role="status"
+      className="mt-3 md:max-w-3xl"
+      title={
+        <span
+          className="flex min-w-0 flex-wrap items-center gap-x-2"
+          data-testid="repair-linked"
+          data-stage={link.invalid ? 'invalid' : link.stage}
+        >
+          <StatusBadge tone={phase.tone} label={phase.label} variant="dot" />
+          <span>已关联 {ref}</span>
+        </span>
+      }
+    >
+      <p className="flex min-w-0 flex-wrap items-center gap-x-3 text-meta" data-testid="repair-linked-refs">
+        <RepoLink
+          repo={link.issue.repo}
+          kind="issues"
+          n={link.issue.number}
+          className="inline-flex items-center gap-0.5 underline underline-offset-2"
+          icon={<ExternalLink className="size-3" aria-hidden />}
+        >
+          {ref}
+        </RepoLink>
+        {link.prNumber ? (
+          <RepoLink
+            repo={link.issue.repo}
+            kind="pull"
+            n={link.prNumber}
+            className="inline-flex items-center gap-0.5 underline underline-offset-2"
+            icon={<ExternalLink className="size-3" aria-hidden />}
+          >
+            PR #{link.prNumber}
+          </RepoLink>
+        ) : null}
+        {link.taskId ? (
+          <Link to={`/tasks/${link.taskId}`} className="underline underline-offset-2">
+            看在做的任务
+          </Link>
+        ) : null}
+      </p>
+      <p className="mt-1 break-words text-meta">{link.text}</p>
+      {link.invalid ? (
+        <p className="mt-1 break-words text-meta" data-testid="repair-linked-invalid">
+          失效原因（{formatAgo(link.invalid.at, now)}）：{link.invalid.text}
+        </p>
+      ) : null}
+      <p className="mt-1 text-meta" data-testid="repair-linked-who">
+        处理人：{workerOf(n)} · {by}关联的（
+        <span className="num" title={formatDateTime(link.at)}>
+          {formatAgo(link.at, now)}
+        </span>
+        ，关联的人不是修的人）
+      </p>
+      <p className="mt-1 text-meta">关联不等于修好：原卡照旧开着，看门狗重读原检测条件恢复了才撤。</p>
     </Notice>
   );
 }
@@ -232,7 +320,13 @@ export function AlertRepairPanel({
   const pendingReceipt = unsent && repair?.last?.requestId !== unsent.body.requestId ? unsent : undefined;
   const blocked =
     Boolean(busy) || Boolean(pendingReceipt) || (recPhase !== undefined && BLOCKING.includes(recPhase));
-  const actions = !resolved && !blocked ? (repair?.actions ?? []) : [];
+  // 这次事故明确关联的单（只认这一代 incident 的）
+  const link = repair?.linked && repair.linked.incident === repair.incident ? repair.linked : undefined;
+  const linkRef = link ? `${link.issue.repo.owner}/${link.issue.repo.name}#${link.issue.number}` : '';
+  // 关联的单已有任务或 PR 在处理：交给修复后端回 409 link_already_handled，不再摆，免得重复派工
+  const actions = (!resolved && !blocked ? (repair?.actions ?? []) : []).filter(
+    (a) => !(a.kind === 'hand-to-repair' && linkHandled(link)),
+  );
   const rec2 = recommendation(actions);
 
   const send = async (body: ExecuteAlertRepairBody, label: string) => {
@@ -309,6 +403,7 @@ export function AlertRepairPanel({
   return (
     <div data-testid="alert-repair" className="min-w-0">
       {rec ? <RepairRecordBox n={n} rec={rec} me={me} now={now} /> : null}
+      {link ? <LinkedBox n={n} link={link} me={me} now={now} /> : null}
       {resolved && recPhase !== 'verified' ? (
         <p className="mt-1.5 text-meta text-muted-foreground" data-testid="repair-manual">
           手动标了已处理：只是不再提醒，没核实修好。
@@ -388,7 +483,9 @@ export function AlertRepairPanel({
                       {a.choice ? <Tag tone="human">要你拍</Tag> : null}
                     </span>
                     <span className="min-w-0 flex-1 text-meta text-muted-foreground">
-                      {a.detail}
+                      {a.kind === 'hand-to-repair' && link && !link.invalid
+                        ? `已关联 ${linkRef}：交给修复沿用这张单派工，不另开单`
+                        : a.detail}
                       {recommended && rec2 ? (
                         <span className="text-foreground">。推荐：{rec2.why}</span>
                       ) : null}
@@ -426,7 +523,7 @@ export function AlertRepairPanel({
             </Link>
           </p>
         </div>
-      ) : !blocked ? (
+      ) : !blocked && !link ? (
         <NoRepair
           title="现在没有能直接点的修复"
           lines={repair.problems.length > 0 ? repair.problems : ['后端没算出能点的动作，也没写原因。']}

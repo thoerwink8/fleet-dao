@@ -13,7 +13,13 @@ vi.mock('sonner', () => ({ toast, Toaster: () => null }));
 import { ApiError } from '../api/client';
 import { createMockApi } from '../api/mock/server';
 import type { ExecuteAlertRepairBody, ExecuteAlertRepairResult, Notification } from '../api/types';
-import { type RepairAction, type RepairRecord, type RepairView, recommendation } from '../lib/alert-repair';
+import {
+  type RepairAction,
+  type RepairLink,
+  type RepairRecord,
+  type RepairView,
+  recommendation,
+} from '../lib/alert-repair';
 import NotificationsPage from '../routes/notifications';
 import { renderApp } from './harness';
 
@@ -391,5 +397,154 @@ describe('没有能点的、没接上、手动处理', () => {
     setup({ view: () => undefined, patch: (n) => ({ ...n, dedupeKey: 'stalled:17' }) });
     const row = await card();
     expect(within(row).queryByTestId('alert-repair')).toBeNull();
+  });
+});
+
+// 评审 5565720994 的线上现场（2026-10-19 07:42–07:44）：changelog 告警 incident 4ffd5e760f9d 经正式会话关联 #3183，
+// GET 回 repair.linked.stage=worker-active，重读为 pr-open、PR #3184；repair.last 没有，旧 handling.stage=unclaimed（没人在修）。
+describe('这次事故明确关联了已有单（repair.linked）', () => {
+  const LIVE = '4ffd5e760f9d';
+  const FLEET = { owner: 'thoerwink8', name: 'fleet-dao' };
+  const HAND_LIVE: RepairAction = { ...HAND, id: 'hand-to-repair:live', target: { repo: FLEET } };
+  const link = (over: Partial<RepairLink>): RepairLink => ({
+    incident: LIVE,
+    issue: { repo: FLEET, number: 3183, url: 'https://github.com/thoerwink8/fleet-dao/issues/3183' },
+    reason: 'operator-explicit',
+    stage: 'worker-active',
+    taskId: 'task-3183',
+    actionId: 'link:live',
+    requestId: '22222222-2222-4222-8222-222222222222',
+    by: 'session:commander',
+    at: new Date(Date.now() - 2 * 60_000).toISOString(),
+    text: '已明确关联 thoerwink8/fleet-dao#3183（已有进行中的任务）：只绑定，没开单、没派工',
+    ...over,
+  });
+  const unclaimed = (n: Notification): Notification => ({
+    ...n,
+    handling: {
+      stage: 'unclaimed',
+      stageText: '没人在修',
+      since: new Date(Date.now() - 30 * 60_000).toISOString(),
+      line: '没人在修 · 30 分钟',
+      problems: [],
+    },
+  });
+  const live = (l: RepairLink, extra: Partial<RepairView> = {}) =>
+    setup({
+      view: () => ({ incident: LIVE, actions: [HAND_LIVE], problems: [], linked: l, ...extra }),
+      patch: unclaimed,
+    });
+
+  test('worker-active、没有 last：写 #3183、任务链接和阶段；不写「没人在修」，处理人写未知；不摆交给修复', async () => {
+    live(link({}));
+    const row = await card();
+    const box = within(row).getByTestId('repair-linked');
+    expect(box.dataset.stage).toBe('worker-active');
+    expect(row.textContent).toContain('已有任务在做');
+    expect(within(row).getAllByText('thoerwink8/fleet-dao#3183').length).toBeGreaterThan(0);
+    expect(within(row).getByRole('link', { name: '看在做的任务' }).getAttribute('href')).toBe(
+      '/tasks/task-3183',
+    );
+    const handling = within(row).getByTestId('alert-handling');
+    expect(handling.dataset.from).toBe('linked');
+    expect(within(row).queryByText('没人在修')).toBeNull();
+    // 关联的人不是修的人：处理人未知，不拿 linked.by 冒充
+    const who = within(row).getByTestId('repair-linked-who').textContent ?? '';
+    expect(who).toContain('处理人：未知');
+    expect(who).toContain('session:commander关联的');
+    expect(who).toContain('关联的人不是修的人');
+    // 关联不是修复记录：没有 handed / 已修复，原卡照旧未修好
+    expect(within(row).queryByTestId('repair-record')).toBeNull();
+    expect(within(row).queryByText('已修复')).toBeNull();
+    expect(within(row).queryByRole('button', { name: '交给修复' })).toBeNull();
+    expect(within(row).queryByTestId('repair-none')).toBeNull();
+  });
+
+  test('重读为 pr-open：写 PR #3184 开着和 PR 链接', async () => {
+    live(link({ stage: 'pr-open', prNumber: 3184 }));
+    const row = await card();
+    expect(within(row).getByTestId('repair-linked').dataset.stage).toBe('pr-open');
+    expect(within(row).getAllByText('PR #3184 开着').length).toBeGreaterThan(0);
+    const prLinks = within(row).getAllByRole('link', { name: /PR #3184/ });
+    expect(prLinks.some((a) => a.getAttribute('href')?.endsWith('/thoerwink8/fleet-dao/pull/3184'))).toBe(
+      true,
+    );
+    expect(within(row).queryByText('没人在修')).toBeNull();
+  });
+
+  test('只绑定待处理（stage=linked）：交给修复照摆，写明沿用这张单、不另开；后端 409 照原话写并刷新', async () => {
+    const { bodies } = setup({
+      view: () => ({
+        incident: LIVE,
+        actions: [HAND_LIVE],
+        problems: [],
+        linked: link({ stage: 'linked', taskId: undefined }),
+      }),
+      patch: unclaimed,
+      exec: async () => {
+        throw new ApiError(
+          409,
+          'link_already_handled',
+          '关联的单 thoerwink8/fleet-dao#3183 已有进行中的任务在处理，不再派工',
+        );
+      },
+    });
+    const row = await card();
+    const btn = within(row).getByRole('button', { name: '交给修复' });
+    expect(btn.textContent).toContain('已关联 thoerwink8/fleet-dao#3183：交给修复沿用这张单派工，不另开单');
+    fireEvent.click(btn);
+    await waitFor(() => expect(within(row).getByTestId('repair-note').textContent).toContain('不再派工'));
+    expect(bodies).toHaveLength(1);
+    expect(within(row).getByTestId('repair-linked')).toBeTruthy();
+  });
+
+  test('关联失效：写失效原因，原卡没修成；「没人在修」不再被关联顶掉', async () => {
+    live(link({ stage: 'linked', invalid: { at: new Date().toISOString(), text: '单子已关闭' } }), {
+      actions: [],
+      last: rec({
+        incident: LIVE,
+        kind: 'hand-to-repair',
+        actionId: HAND_LIVE.id,
+        state: 'failed',
+        text: '关联的单 thoerwink8/fleet-dao#3183 已失效：单子已关闭；没开新单、没派工',
+      }),
+    });
+    const row = await card();
+    expect(within(row).getByTestId('repair-linked').dataset.stage).toBe('invalid');
+    expect(within(row).getByTestId('repair-linked-invalid').textContent).toContain('单子已关闭');
+    expect(within(row).getByTestId('repair-record').dataset.phase).toBe('failed');
+    expect(within(row).getByTestId('alert-handling').dataset.from).toBeUndefined();
+    expect(within(row).getByText('没人在修')).toBeTruthy();
+  });
+
+  test('关联之后交给修复（last=handed）：修复记录和关联分两格，处理人不拿冲突的「谁在处理」', async () => {
+    live(link({ stage: 'linked', taskId: undefined }), {
+      actions: [],
+      last: rec({
+        incident: LIVE,
+        kind: 'hand-to-repair',
+        actionId: HAND_LIVE.id,
+        state: 'handed',
+        text: '修复单 #3183：已由 dispatch-issue 接手',
+        issue: {
+          repo: FLEET,
+          number: 3183,
+          url: 'https://github.com/thoerwink8/fleet-dao/issues/3183',
+          created: false,
+        },
+      }),
+    });
+    const row = await card();
+    expect(within(row).getByTestId('repair-record').dataset.phase).toBe('handed');
+    expect(within(row).getByTestId('repair-linked').dataset.stage).toBe('linked');
+    expect(within(row).getByTestId('repair-issue').textContent).toContain('处理人：未知');
+    expect(within(row).queryByText('已修复')).toBeNull();
+  });
+
+  test('关联属于别的 incident：不显示', async () => {
+    live(link({ incident: 'old-incident' }));
+    const row = await card();
+    expect(within(row).queryByTestId('repair-linked')).toBeNull();
+    expect(within(row).getByText('没人在修')).toBeTruthy();
   });
 });
