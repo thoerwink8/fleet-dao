@@ -9,7 +9,17 @@
 import { existsSync, mkdirSync, readFileSync, readlinkSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import type { Backups } from './backup.ts';
-import { applyCodexTrust, checkCodexTrust, trustKey, trustNeeds } from './hooks-codex.ts';
+import {
+  applyCodexTrust,
+  checkCodexTrust,
+  codexHookKey,
+  codexSourcePath,
+  planTrust,
+  readConfig,
+  scanCodexConfig,
+  trustKey,
+  trustNeeds,
+} from './hooks-codex.ts';
 import { applyKimiHooks, checkKimiHooks, kimiKey } from './hooks-kimi.ts';
 import { bareQuietCommand, guiSubsystem, quietExeBytes, quietExeName, replaceExe } from './quiet-win.ts';
 import { type Line, line } from './report.ts';
@@ -590,6 +600,7 @@ function applyScripts(ctx: Ctx, src: Sources): Line {
 
 /** 去掉本脚本管的（含以前手装的），再按仓里的登记一遍；别的钩子原样留着 */
 function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj {
+  if (t.format === 'codex') return mergedCodex(root, t, home, platform);
   const next = structuredClone(root);
   if (t.format === 'agy') {
     // 名字叫 agyName 的那一项整项归本脚本：重写，只留人设的 enabled = false；别的项里混进来的本脚本的命令摘掉
@@ -614,6 +625,114 @@ function merged(root: Obj, t: HookTarget, home: string, platform: Platform): Obj
   }
   next.hooks = hooks;
   return next;
+}
+
+/** Codex 的启停按位置记：同一逻辑入口原位换命令，不把第三方挤到旧信任键上。 */
+function codexRole(event: string, script: string): string {
+  if (event === 'Stop' && script === 'stop-codex.mjs') return 'stop.mjs';
+  if (event === 'PostToolUse' && script === 'continuation-progress-codex.mjs')
+    return 'continuation-progress.mjs';
+  return script;
+}
+
+function mergedCodex(root: Obj, t: HookTarget, home: string, platform: Platform): Obj {
+  const next = structuredClone(root);
+  const hooks: Obj = isObj(next.hooks) ? next.hooks : {};
+  const used = new Set<HookSpec>();
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    const kept: unknown[] = [];
+    for (const old of groups) {
+      if (!isObj(old) || !Array.isArray(old.hooks)) {
+        kept.push(old);
+        continue;
+      }
+      const handlers: unknown[] = [];
+      for (const handler of old.hooks) {
+        const mine = isObj(handler) ? ownedHandler(handler) : null;
+        if (!mine) {
+          handlers.push(handler);
+          continue;
+        }
+        const candidates = t.hooks.filter(
+          (s) =>
+            s.event === event &&
+            sameMatcher(old.matcher, s.matcher) &&
+            codexRole(event, s.script) === codexRole(event, mine.script),
+        );
+        if (candidates.length > 1 || (candidates[0] && used.has(candidates[0])))
+          throw new Error(`${event} 的 ${mine.script} 有重复逻辑身份，不能猜测启停归属`);
+        const spec = candidates[0];
+        if (!spec) continue;
+        used.add(spec);
+        handlers.push(handlerFor(t, spec, home, platform));
+      }
+      if (handlers.length > 0 || old.hooks.length === 0) kept.push({ ...old, hooks: handlers });
+    }
+    if (kept.length > 0) hooks[event] = kept;
+    else delete hooks[event];
+  }
+  for (const spec of t.hooks) {
+    if (used.has(spec)) continue;
+    const list = Array.isArray(hooks[spec.event]) ? (hooks[spec.event] as unknown[]) : [];
+    list.push(group(t, spec, home, platform));
+    hooks[spec.event] = list;
+  }
+  next.hooks = hooks;
+  return next;
+}
+
+/** 只用于判断旧位置是否仍是同一入口；第三方完整定义保留，不替它重算信任。 */
+function codexPositions(root: Obj, source: string): Map<string, string> {
+  const out = new Map<string, string>();
+  if (!isObj(root.hooks)) return out;
+  for (const [event, groups] of Object.entries(root.hooks)) {
+    if (!Array.isArray(groups)) continue;
+    groups.forEach((g, gi) => {
+      if (!isObj(g) || !Array.isArray(g.hooks)) return;
+      g.hooks.forEach((h: unknown, hi: number) => {
+        const mine = isObj(h) ? ownedHandler(h) : null;
+        const role = mine ? ['owned', codexRole(event, mine.script)] : ['other', h];
+        out.set(codexHookKey(source, event, gi, hi), JSON.stringify([event, g.matcher ?? '', role]));
+      });
+    });
+  }
+  return out;
+}
+
+/** 没有跨 hooks/config 的事务；会改有状态位置时先拒绝，不能先写 JSON 再丢启停。 */
+function guardCodexPositions(ctx: Ctx, t: HookTarget, before: Obj, next: Obj, targets: HookTarget[]): void {
+  const storage = codexFile(ctx, t, 'hooks.json').abs;
+  for (const reader of targets.filter((target) => target.format === 'codex')) {
+    let readerStorage: string;
+    try {
+      readerStorage = codexFile(ctx, reader, 'hooks.json').abs;
+    } catch {
+      // 无效共享入口由它自己的同步拒绝；默认文件尚未创建时也不借链接写入。
+      continue;
+    }
+    if (readerStorage !== storage) continue;
+    const source = relOf(ctx, reader.settings).abs;
+    const old = codexPositions(before, source);
+    const after = codexPositions(next, source);
+    const changed = new Set(
+      [...old.keys(), ...after.keys()].filter((key) => old.get(key) !== after.get(key)),
+    );
+    const config = readConfig(relOf(ctx, trustConfig(ctx, reader)).abs);
+    if (config.kind === 'bad') throw new Error(`不能核对移位钩子的启停：${config.why}`);
+    const scan = scanCodexConfig(config.kind === 'text' ? config.text : '');
+    if (!scan.ok) throw new Error(`不能核对移位钩子的启停：${scan.why}`);
+    const prefix = `${codexSourcePath(source)}:`;
+    for (const key of scan.value.entries.keys()) {
+      if (key.startsWith(prefix) && changed.has(key))
+        throw new Error(`${key} 的逻辑入口会移位或移除，旧信任/启停归属未决；未改 hooks.json`);
+    }
+    const want = trustNeeds(source, next, reader.hooks, (script) =>
+      commandIn(reader, ctx.home, ctx.platform, script),
+    );
+    const planned = planTrust(config.kind === 'text' ? config.text : '', want.needs);
+    if (!planned.ok) throw new Error(`不能预检新命令的信任：${planned.why}；未改 hooks.json`);
+  }
 }
 
 /** 按事件挂的那几组里摘掉本脚本的命令（就地改）；摘空的组去掉，摘空的事件去掉 */
@@ -668,7 +787,7 @@ function group(t: HookTarget, spec: HookSpec, home: string, platform: Platform):
   };
 }
 
-function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
+function applySettings(ctx: Ctx, t: HookTarget, backups: Backups, targets: HookTarget[]): Line {
   if (t.format === 'kimi')
     return applyKimiHooks(ctx, t, (script) => commandIn(t, ctx.home, ctx.platform, script), backups);
   const { rel, abs, key } = relOf(ctx, t.settings);
@@ -690,6 +809,7 @@ function applySettings(ctx: Ctx, t: HookTarget, backups: Backups): Line {
     if (shared)
       return line('failed', key, '没动——共享默认 hooks 尚未登记齐全；只由默认入口更新，不写共享链接');
     const next = merged(root, t, ctx.home, ctx.platform);
+    if (t.format === 'codex') guardCodexPositions(ctx, t, root, next, targets);
     const eol = read.kind === 'ok' && read.text.includes('\r\n') ? '\r\n' : '\n';
     const text = `${JSON.stringify(next, null, 2)}\n`.replaceAll('\n', eol);
     const saved = read.kind === 'ok' ? backups.saveFile(abs, rel.replaceAll('\\', '/')) : undefined;
@@ -739,7 +859,7 @@ export function applyHooks(ctx: Ctx, src: Sources, backups: Backups, skip?: Hook
       );
       continue;
     }
-    const settings = applySettings(ctx, t, backups);
+    const settings = applySettings(ctx, t, backups, targets);
     out.push(settings, ...lackLines(t));
     registered.set(t, settings);
   }
