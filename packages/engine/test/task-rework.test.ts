@@ -10,6 +10,7 @@ import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
 import { DEFAULT_TASK_TOKEN_BUDGET } from '../src/limits.ts';
 import { PortError } from '../src/ports.ts';
+import { buildTaskBrief } from '../src/runner/task-brief.ts';
 import {
   type SelfCheckResult,
   type TaskRun,
@@ -20,7 +21,7 @@ import {
 } from '../src/task-contract.ts';
 import { COMMIT_NUDGE_LINE, SELF_CHECK_RED_LINE } from '../src/workflows/task-support.ts';
 import { freshRepo, pollQuery, useEnv, withWorker } from './helpers.ts';
-import { scripted } from './task-script.ts';
+import { BODY, goodBrief, scripted } from './task-script.ts';
 
 const currentEnv = useEnv();
 let env: TestWorkflowEnvironment;
@@ -70,6 +71,137 @@ const statusOf = (h: WorkflowHandle): Promise<TaskStatus> => h.query(taskStatusQ
 const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
 
 const RESUME_ALWAYS = () => ({ kind: 'resume' as const, sessionId: 'sess-1', runId: 'run-1' });
+
+describe('在途正式合同修订（#3216）', { timeout: 60_000 }, () => {
+  const revised = () => {
+    const result = buildTaskBrief({
+      issue: {
+        number: 12,
+        title: '修订需求',
+        state: 'open',
+        body: BODY.replace('packages/web/src/pages/', 'packages/engine/src/jobs/watchdog.ts').replace(
+          '页面上能看到「验收中」这个状态',
+          '引擎 PR 普通关联本单，不要求 Closes',
+        ),
+      },
+    });
+    if (!result.ok) throw new Error('测试合同不全');
+    return result.brief;
+  };
+  it('CI期间收窄：下一续会话收到同版brief/tier、完整修订和仍有效正式CR，累计轮数保留', async () => {
+    let current = goodBrief();
+    const next = revised();
+    let reviewsOpen = true;
+    const review = {
+      reviewId: 9,
+      reviewer: 'reviewer',
+      commitId: 'a'.repeat(40),
+      submittedAt: null,
+      body: '仍有效的正式CR原文',
+      comments: [],
+    };
+    const world = createFakeWorld({
+      ci: (_input, n) => {
+        if (n === 1) {
+          current = next;
+          return { state: 'red', failedChecks: ['test'], digest: '必须返工' };
+        }
+        return undefined;
+      },
+    });
+    const { tasks, calls } = scripted({
+      contractBrief: () => ({ ok: true, brief: current }),
+      resume: RESUME_ALWAYS,
+      verify: () => ({ pass: true, problems: [], round: 1, reviewChanges: reviewsOpen ? [review] : [] }),
+    });
+    tasks.readCiReviews = async (i) => ({ delivered: true, head: i.expectedHead, reviews: [review] });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await pollQuery(
+          () => statusOf(h),
+          (s) => parked(s) && s.lastProblem === '正式评审还要求改',
+          '新合同cold pass仍必须等正式CR复审',
+        );
+        expect(calls.arm).toBe(0);
+        reviewsOpen = false;
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    const second = calls.segment[1];
+    expect(second?.resumeSessionId).toBe('sess-1');
+    expect(second?.brief.contract).toEqual(next.contract);
+    expect(second?.tier).toEqual(next.tier);
+    expect(second?.tier.tier).toBe('fast');
+    expect(second?.contractRevision?.reviews.join('\n')).toContain(review.body);
+    expect(second?.feedback.join('\n')).toContain('正式需求已修订');
+    expect(calls.spendInputs.every((i) => i.since === calls.spendInputs[0]?.since)).toBe(true);
+    expect(calls.armInputs[0]?.contractGuard?.expected).toEqual(next.contract);
+  });
+  it('同head验收中改正文：旧/晚到pass作废，轮数不清零，新合同从全量重验', async () => {
+    let current = goodBrief();
+    const next = revised();
+    const { tasks, calls } = scripted({
+      contractBrief: () => ({ ok: true, brief: current }),
+      verify: (_input, n) => {
+        if (n === 1) current = next;
+        return { pass: true, problems: [], round: n === 1 ? 1 : 2 };
+      },
+    });
+    const run = await withWorker(
+      env,
+      createFakeWorld(),
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, verifyRounds: 2 });
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.verify).toHaveLength(2);
+    expect(calls.verify[1]?.headSha).toBe(calls.verify[0]?.headSha);
+    expect(calls.verify[1]?.contract).toEqual(next.contract);
+    expect(calls.verify[1]?.recheck).toBeUndefined();
+    expect(calls.arm).toBe(1);
+    expect(calls.armInputs[0]?.contractGuard?.expected).toEqual(next.contract);
+  });
+  it('反复修订仍耗尽原验收轮数，只用既有一次自动继续，之后受管停下', async () => {
+    let current = goodBrief();
+    const { tasks, calls } = scripted({
+      brief: () => ({ ok: true, brief: current }),
+      contractBrief: () => ({ ok: true, brief: current }),
+      verify: (_input, n) => {
+        const next = buildTaskBrief({
+          issue: { number: 12, title: '连续修订', state: 'open', body: `${BODY}\n2. 修订 ${n}` },
+        });
+        if (!next.ok) throw new Error('测试合同不全');
+        current = next.brief;
+        return { pass: true, problems: [], round: n % 2 === 1 ? 1 : 2 };
+      },
+    });
+    await withWorker(
+      env,
+      createFakeWorld(),
+      async (q) => {
+        const h = await start(q, input());
+        const status = await pollQuery(
+          () => statusOf(h),
+          (s) => parked(s) && s.lastProblem === '验收 2 轮都没过',
+          '连续修订后仍按既有上限停下',
+        );
+        expect(status.verifyRound).toBe(2);
+        expect(calls.verify).toHaveLength(4);
+        expect(calls.segment).toHaveLength(1);
+        expect(calls.arm).toBe(0);
+        expect(calls.spendInputs.every((i) => i.since === calls.spendInputs[0]?.since)).toBe(true);
+      },
+      { tasks },
+    );
+  });
+});
 
 describe('返工续会话（决定 0093）', { timeout: 60_000 }, () => {
   it('CI 红了：下一轮续上一轮跑成的会话，判续会话指名上一段的执行编号，提示词只补返工意见', async () => {
@@ -673,5 +805,60 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(run.outcome).toBe('merged');
     expect(calls.segment).toHaveLength(1);
     expect(world.alerts).toEqual([]);
+  });
+});
+
+describe('耗尽后接纳正式合同修订（#3216）', { timeout: 60_000 }, () => {
+  it('全程停下期间修改正文：继续同一会话仍交付新版brief和正式CR', async () => {
+    let current = goodBrief();
+    const next = buildTaskBrief({
+      issue: {
+        number: 12,
+        title: '全程续行修订',
+        state: 'open',
+        body: BODY.replace('packages/web/src/pages/', 'packages/engine/src/jobs/watchdog.ts'),
+      },
+    });
+    if (!next.ok) throw new Error('测试合同不全');
+    const review = {
+      reviewId: 3216,
+      reviewer: 'reviewer',
+      commitId: 'a'.repeat(40),
+      submittedAt: null,
+      body: 'FULL_LIMITS_REVISION_REVIEW',
+      inlineComments: [],
+    };
+    const { tasks, calls } = scripted({
+      brief: () => ({ ok: true, brief: current }),
+      contractBrief: () => ({ ok: true, brief: current }),
+      flow: () => ({ mode: 'full', source: 'hash', reason: null }),
+      resume: RESUME_ALWAYS,
+    });
+    tasks.readCiReviews = async (i) => ({ delivered: true, head: i.expectedHead, reviews: [review] });
+    const world = createFakeWorld({
+      ci: (_i, n) => (n <= 6 ? { state: 'red', failedChecks: ['test'], digest: 'old CI red' } : undefined),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await pollQuery(
+          () => statusOf(h),
+          (s) => parked(s) && s.lastProblem?.includes('推送 6 次') === true,
+          '全程耗尽停下',
+        );
+        current = next.brief;
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    const after = calls.segment[6];
+    expect(after?.resumeSessionId).toBe('sess-1');
+    expect(after?.brief.contract).toEqual(next.brief.contract);
+    expect(after?.tier).toEqual(next.brief.tier);
+    expect(after?.contractRevision?.reviews.join('\n') ?? '').toContain(review.body);
   });
 });

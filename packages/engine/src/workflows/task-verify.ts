@@ -49,6 +49,11 @@ export async function coldVerifyPr(
   let current = brief;
   let ready = early;
   for (;;) {
+    const revisedBefore = await rt.refreshContract('冷验收开始前');
+    if (revisedBefore && ready) {
+      rt.verifyRound += 1;
+      ready = undefined;
+    }
     if (rt.verifyRound >= MAX_VERIFY_ROUNDS) {
       const problems = rt.feedback.join('；') || '（没有）';
       const mode = await rt.exhaustRounds(
@@ -86,6 +91,11 @@ export async function coldVerifyPr(
       }
     });
     if (wasDetached && patched('settle-merged-task-checkpoint')) await rt.checkpoint();
+    const revisedAfter = await rt.refreshContract('冷验收结果接纳前');
+    if (revisedAfter || res.contractChanged) {
+      // 真跑过的旧验收仍占原轮数；旧/晚到结论不授予新版合同合并资格。
+      continue;
+    }
     if (res.headMoved !== undefined) {
       rt.verifyRound -= 1;
       await rt.park('PR 的头被别人改了', headMovedDetail(res.headMoved, headSha));
@@ -191,6 +201,7 @@ function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): Cold
     branch: rt.branch,
     baseSha: wt.baseSha,
     headSha,
+    ...(rt.contractVersioned && brief.contract ? { contract: brief.contract } : {}),
     what: brief.request,
     howToFinish: brief.acceptance,
     authorFamilies: [...rt.families],

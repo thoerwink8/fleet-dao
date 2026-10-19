@@ -54,6 +54,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 ## 改它时要连带改
 
 - 改工作流：加 `patched()` + 必要时录一个新重放场景；改了步序、停在哪等人，同步 design 第五节对应条。
+- 在途需求修订：正式正文合同由 `runner/task-brief.ts` 的版本化规范产生；工作流在安全边界现读，brief/tier 同版且不清预算轮数。真实验收状态与合并写经 `real/task-contract-guard.ts` 核预期版本；读不全、旧合同不得发布通过或挂合并，撤挂未确认明确失败。普通评论不改合同，旧历史和 attach 保留原身份。
 - 给任务页「过程」记的账（#3140）：动手会话入参的 `cause` / `causeSummary` / `roundSeq` / `resumeReason`、冷验收入参的 `roundSeq`、推分支的 `prNumber`、开 PR 的 `numstat` 都是可选字段，只在 `patched('run-cause-fields')`、`patched('pr-head-files')` 为真时给，只记账不改步序；加新的起因先改 shared 的 `RUN_CAUSES`（库里 `runs_cause_known` 约束同一份，`packages/db/test/run-cause.test.ts` 核对）并在 `task-session.ts` 的 `nextCause` 赋值处点名它为什么起。
 - 改活动超时：只改 `activity-options.ts`。改定时任务：`src/jobs/` 加任务，`real/jobs.ts` 的 `ENGINE_JOBS` 登记。
 - 冷验收每家原始结论在 `verifier-invoke.ts` 按真实 runId 立即入库，先于格式重试、二轮过滤和聚合，保留完整问题原文；组合另经 `RunsWriter.noteVerifyAggregate` 记精确头/轮次和来源 runIds，多家不带任何一家 session 身份。接回单家验收也走原始结论和聚合两份账；任一写账失败明确记任务日志、证据保持未知，不改已跑出的真实裁决、不因此再起模型重验。
