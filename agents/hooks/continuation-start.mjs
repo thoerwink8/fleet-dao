@@ -24,6 +24,7 @@ try {
     'SessionStart',
     process.env,
     authority.kind,
+    'codex',
   );
   receipt = context;
   noteReceipt(context, { phase: 'entered', decision: 'none' });
