@@ -59,7 +59,17 @@ it('真实服务：无参 Local Activity 从实际 Start 准入；同 run 幂等
       namespace,
       taskQueue,
       connection,
-      store,
+      admit: async (input, audit) => {
+        const result = await store.admitLegacyExecution(input, audit);
+        return result.kind === 'rejected'
+          ? { kind: 'denied', code: result.reason }
+          : {
+              kind: 'allowed',
+              status: result.kind,
+              admissionId: result.admission.id,
+              postCommitWarnings: result.postCommitWarnings,
+            };
+      },
       audit: { actor: { kind: 'user', id: randomUUID() }, via: 'agent', reason: '真实 legacy 来源隔离验证' },
     });
     const worker = await Worker.create({

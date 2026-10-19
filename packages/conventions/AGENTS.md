@@ -16,7 +16,7 @@
 - `packages/conventions/standard-paths.json`：改标准的路径清单（人闸第四类），**改它本身就是改标准**。
 - `src/changelog.ts`（#3110）：完成关单按类别/性质生成版本节，固定交付物、兼容性、验证限制三尾；显式版本锚点幂等替换，临时 AI 运营不当产品条目。引擎每天补齐，里程碑只留链接和排期事实。
 - `packages/conventions/test-timings.json`：CI 测试按耗时分台的耗时表，用 `pnpm ci:timings` 从 CI 日志刷新，别手改。
-- `test-split.ts` 的 `needsPg` 除db测试外，只把 `packages/store/test/task-execution.real-pg.test.ts` 和 `packages/store/test/idempotency-race.real-pg.test.ts` 精确放入pg台；其它Store测试保持原分台，不能把真实竞争悄悄降成PGlite。
+- `test-split.ts` 的 `needsPg` 除db测试外，只把 `packages/store/test/task-execution.real-pg.test.ts`、`packages/store/test/idempotency-race.real-pg.test.ts` 和 `packages/engine/test/legacy-admission.real-pg.test.ts` 精确放入pg台；其它Store测试保持原分台，不能把真实竞争悄悄降成PGlite。
 
 ## 测试
 
