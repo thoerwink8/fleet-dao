@@ -925,6 +925,15 @@ interface RunLockOwner {
   workerPid?: number;
 }
 
+interface RunLockGeneration {
+  pid: number;
+  token: string;
+  claimedAt: string;
+}
+
+const LOCK_GENERATION_FILE = 'generation.json';
+const LOCK_ABANDONED_FILE = 'abandoned.json';
+
 let lockSeq = 0;
 
 function lockPath(dir: string, name: string): string {
@@ -947,6 +956,38 @@ function readLockOwner(dir: string, name: string): RunLockOwner | null {
     claimedAt: v.claimedAt,
     ...(v.workerPid === undefined ? {} : { workerPid: v.workerPid }),
   };
+}
+
+function readLockGeneration(lock: string): RunLockGeneration | null {
+  const v = readJson<Partial<RunLockGeneration>>(join(lock, LOCK_GENERATION_FILE));
+  if (
+    !v ||
+    typeof v.token !== 'string' ||
+    v.token === '' ||
+    typeof v.pid !== 'number' ||
+    !Number.isSafeInteger(v.pid) ||
+    v.pid < 1 ||
+    typeof v.claimedAt !== 'string'
+  )
+    return null;
+  return { pid: v.pid, token: v.token, claimedAt: v.claimedAt };
+}
+
+/** 失败方只给自己刚创建的那一代打废弃标记，绝不直接删除主锁路径。 */
+function abandonRunLock(lock: string, generation: RunLockGeneration): boolean {
+  if (readLockGeneration(lock)?.token !== generation.token) return false;
+  try {
+    writeJson(join(lock, LOCK_ABANDONED_FILE), generation);
+  } catch {
+    return false;
+  }
+  return readJson<Partial<RunLockGeneration>>(join(lock, LOCK_ABANDONED_FILE))?.token === generation.token;
+}
+
+function isAbandonedGeneration(lock: string): boolean {
+  const generation = readLockGeneration(lock);
+  const abandoned = readJson<Partial<RunLockGeneration>>(join(lock, LOCK_ABANDONED_FILE));
+  return !!generation && !!abandoned && abandoned.token === generation.token;
 }
 
 /** 进程还在不在。EPERM 当还在（没有权限发信号不代表没这个进程）；只有 ESRCH 是真没了。 */
@@ -1006,7 +1047,11 @@ export function claimRunLock(dir: string, name: string, pid: number, now: Date):
   const lock = lockPath(dir, name);
   lockSeq += 1;
   const token = `${pid}-${now.getTime()}-${lockSeq}`;
+  const generation: RunLockGeneration = { pid, token, claimedAt: now.toISOString() };
   for (let i = 0; i < 3; i += 1) {
+    // 先看回收闸，避免在另一方已经进入回收临界区时新建主锁；
+    // 这次检查与 mkdir 之间若仍撞上，下面只留下带身份的废弃标记。
+    if (runLockHeld(dir, name, now)) return null;
     try {
       mkdirSync(lock);
     } catch (e) {
@@ -1022,7 +1067,7 @@ export function claimRunLock(dir: string, name: string, pid: number, now: Date):
         // 回收闸建立后仍服从完整主锁判据：owner 活着、主锁是新鲜空目录、
         // 或无法确认的目录都不能挪走。只排除自己持有的回收闸，不能把它
         // 当成主锁恒真；否则会误删另一恢复者刚 mkdir 尚未发布 owner 的活锁。
-        if (runLockHeld(dir, name, now, reclaimToken)) return null;
+        if (runLockHeld(dir, name, now, reclaimToken) && !isAbandonedGeneration(lock)) return null;
         discardDir(lock, `${lock}.stale-${pid}-${i}-${lockSeq}`);
       } finally {
         if (reclaimToken) releaseRunLock(dir, reclaim, reclaimToken);
@@ -1033,15 +1078,16 @@ export function claimRunLock(dir: string, name: string, pid: number, now: Date):
     // 这时不能发布一个会被回收者误认为旧锁的 owner；放弃自己刚建的空目录，
     // 把同一回收闸作为主锁发布前的互斥边界。
     if (lockOccupied(dir, `${name}.reclaim`, now)) {
-      rmSync(lock, { recursive: true, force: true });
+      // 失败方不能无身份清理路径：另一恢复者可能已经回收这代并
+      // 发布了新赢家。持闸者会按 generation/abandoned 的同一代身份
+      // 在互斥边界内安全回收。
+      abandonRunLock(lock, generation);
       return null;
     }
-    try {
-      writeJson(join(lock, 'owner.json'), { pid, token, claimedAt: now.toISOString() });
-    } catch (e) {
-      rmSync(lock, { recursive: true, force: true });
-      throw e;
-    }
+    // 路径可能已被另一恢复者观察到；保留自己的 generation，后续
+    // 持闸者按 owner/新鲜度接手，不能在这里无条件删除。
+    writeJson(join(lock, LOCK_GENERATION_FILE), generation);
+    writeJson(join(lock, 'owner.json'), generation);
     if (readLockOwner(dir, name)?.token === token) return token;
     return null;
   }

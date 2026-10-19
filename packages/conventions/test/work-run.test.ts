@@ -1139,6 +1139,17 @@ describe('恢复入口的原子占位', () => {
     expect(w.spawned).toHaveLength(1);
   });
 
+  it('锁发布会留下同一代身份，失败方不能靠无身份清理换代后的主锁', () => {
+    const dir = join(temp(), 'generation');
+    mkdirSync(dir, { recursive: true });
+    const token = claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date());
+    expect(token).toBeTruthy();
+    expect(readJson<{ token: string }>(join(dir, SUPERVISOR_START_LOCK, 'generation.json'))).toMatchObject({
+      token,
+    });
+    if (token) releaseRunLock(dir, SUPERVISOR_START_LOCK, token);
+  });
+
   it('看护没起成就放开占位，下一次还能占上', async () => {
     const w = runWorld({ spawnOk: false });
     lostRun(w);
