@@ -8,6 +8,7 @@
 - `packages/store/src/memory-store.ts`：内存版，也是语义的参照实现；测试和本地开发用它，`onChange` 模拟库的 `NOTIFY fleet_changes`。
 - `packages/store/src/pg-store.ts`：Postgres 版，用 `@fleet-dao/db`。
 - `packages/store/src/*-logic.ts`（`task-logic.ts`、`credentials-logic.ts` 等）：两套实现共用的判断，两边都调它。
+- `packages/store/src/policy-source.ts`：API webhook 与 engine replay/poll 共用 source publisher/wrapper，intake 白名单门通过后先发布、再 accepted；核受管数字仓身份、当前 open 同仓非 fork 精确 head，发布后 head 变更失败。
 - `packages/store/src/testing.ts`：测试用的种库（`seedPg`）。
 - `src/task-execution.ts` 与 `task-execution-logic.ts`：未接生产的执行资格合同和共用判断，两适配在 `task-execution-memory.ts` / `task-execution-pg.ts`。UUID仅接受规范小写，generation沿用正整数1到 `MAX_TASK_GENERATION`；同请求完整身份永久幂等，reserved可撤销留墓碑，dispatching/admitted只能返回proof_required。没有生产初始化或终态证明入口，不替代后续可信Temporal身份核验。
 
@@ -17,6 +18,7 @@
 - 契约测试 `packages/store/test/store-contract.ts`：内存版（`store.memory.test.ts`）和 Postgres 版（`store.pg.test.ts`）过同一套；另有几套分主题的契约（credentials、nodes、task-list）。
 - Postgres 版默认跑在 PGlite 上（真迁移，不要起库）；设了 `FLEET_TEST_PG_URL` 才连真库（CI 的 pg 台）。见 `packages/db/src/testing.ts`。
 - `test/task-execution.real-pg.test.ts` 单独进入pg台，验证同隔离库两独立backend真实锁竞争及四种修改的审计触发器故障回滚；本机缺测试URL明确跳过，CI缺URL明确失败。Memory/PGlite/真PG共用身份合同，不拿PGlite替代真实竞争。
+- `test/idempotency-race.real-pg.test.ts` 同样进pg台：在真实冲突INSERT与SELECT之间受控释放旧owner，核占键重做、第三者抢占、持续竞争有界失败及单连接临界区可查库；不替换SQL结果或靠sleep命中。
 
 ## 常见坑
 

@@ -514,7 +514,16 @@ export function main(argv, io) {
       writeFileSync(join(dir, `${id}.off`), 'off\n');
       rmSync(join(dir, `${id}.queue.json`), { force: true });
       noteReceipt(
-        receiptContext(dir, { session_id: id }, previous.ok ? previous.state : null, 'Command', env),
+        receiptContext(
+          dir,
+          { session_id: id },
+          previous.ok ? previous.state : null,
+          'Command',
+          env,
+          authority.kind,
+          undefined,
+          () => readState(dir, id),
+        ),
         { phase: 'window', decision: 'off' },
       );
       io.out('无人值守已关。');
@@ -543,10 +552,22 @@ export function main(argv, io) {
         note: '',
         deliveredResults: previous.ok ? (previous.state?.deliveredResults ?? []) : [],
       });
-      noteReceipt(receiptContext(dir, { session_id: id }, { generation }, 'Command', env), {
-        phase: 'window',
-        decision: 'on',
-      });
+      noteReceipt(
+        receiptContext(
+          dir,
+          { session_id: id },
+          { generation, totalBlocks: 0 },
+          'Command',
+          env,
+          authority.kind,
+          undefined,
+          () => readState(dir, id),
+        ),
+        {
+          phase: 'window',
+          decision: 'on',
+        },
+      );
       io.out(
         `无人值守状态已记 on，到 ${fmt(expiresAt)}；这只记录意图，不代表 Stop 已登记、信任或执行验证。Claude/Codex 未完成工作经同步 Stop 进入下一轮，后台任务先显式等待并消费结果，不能凭条数结束。成功的新工作重置计数，连续 ${MAX_STREAK} 次无实质进展明确故障暂停。其他 CLI 尚未接通时不得声称接续成功。做完 done、要他拍板 needs-you、他说停 off。`,
       );
@@ -564,10 +585,15 @@ export function main(argv, io) {
       return 1;
     }
     writeState(dir, id, { ...r.state, state: cmd === 'done' ? 'done' : 'paused', note });
-    noteReceipt(receiptContext(dir, { session_id: id }, r.state, 'Command', env), {
-      phase: 'window',
-      decision: cmd === 'done' ? 'done' : 'needs-you',
-    });
+    noteReceipt(
+      receiptContext(dir, { session_id: id }, r.state, 'Command', env, authority.kind, undefined, () =>
+        readState(dir, id),
+      ),
+      {
+        phase: 'window',
+        decision: cmd === 'done' ? 'done' : 'needs-you',
+      },
+    );
     io.out(`无人值守${cmd === 'done' ? '收尾' : '暂停'}：${note}。这一轮现在可以结束了。`);
     return 0;
   } catch (err) {

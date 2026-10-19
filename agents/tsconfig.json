@@ -39,6 +39,7 @@
     "hooks/continuation-progress-codex.mjs",
     "hooks/continuation-results.mjs",
     "hooks/continuation-receipts.mjs",
+    "hooks/continuation-latest.mjs",
     "hooks/capacity.mjs",
     "hooks/queue-stop.mjs",
     "hooks/background-launch.mjs",

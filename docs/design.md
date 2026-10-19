@@ -585,7 +585,7 @@ GitHub 上只用标签和里程碑两样容器。issue 照第七节建（创始�
   - Mirasim 来源隔离（决定 0012）：法国 Linux 自有直接 reclaude、无头 Mirasim 固定 cloud，Fleet/Temporal 负责渠道接续；平台成功入账先核计费模型请求全部走中继，缺证据明确没查成。桌面 Windows/macOS 用本仓 `packages/mirasim-reclaude` 在回合结束且权限、控制请求与后台任务清空的边界重新选路并恢复同一原生会话；运行中引导完整、按序直传当前执行体，不等 result、不重选路或重启，SDK 恢复仍先完成控制状态重放。创始人消息只由原生通道投递，hooks 不再按 turns 缺行猜未收到或补发原文；先回引导、同血缘实际历史与后台任务恢复仍保留（[职责与证据边界](design/hooks与Agent机制审计.md)）。旧安装随同步等空闲迁移。缺失会话记录仅在每个实例的完整全局列表缺项、Claude 条目均明确非活跃且原生活动基线明确 `noRun` 时判作历史残留，未查成保持等待；后台记录等待原因和核对时间。判闲后重取源码版本，准备后再变仍拒绝切换，指南见 `docs/reclaude-in-mirasim.md`。
   - codex 不直接起：直接起用的是按量计费的 key，只经 Mirasim 中转走。
 - **两个 GitHub 机器人**：「干活的」只能推分支、开 PR；「引擎」才能合并、改 issue、续互动限制、推 CI 配置改动。主线用 GitHub 规则集锁住，只有「引擎」能动（公开仓免费）。管理员角色（创始人账号，本机 AI 也用它）只能经 PR 绕过，不能直推、强推（2026-10-02 起：那天一个会话直推主线 3 次、强推 2 次）。旧系统两个机器人权限一模一样，写码的也能合并，这次分开。
-- **收 GitHub 事件**：校验签名；漏收的靠对账与定时轮询补回；防重复写的记录放 Postgres，不放本机文件；机器人提交挂到机器人账号名下。
+- **收 GitHub 事件**：校验签名；漏收的靠对账与定时轮询补回；防重复写的记录放 Postgres，不放本机文件；机器人提交挂到机器人账号名下。通过受管仓、白名单及非 fork 门的 PR opened/synchronize/reopened/synced，在 intake 的 await accept 内先经 store 共用 publisher 核当前 open 同仓精确 head 并发布 source，再写 accepted；失败沿原文投递账由 API 或 engine 重放，wake=false 也执行，status 不自循环。API 使用原 publicUrl，engine 只读既有 api.env 的唯一 HTTPS origin，复用 systemd parser，不执行或装入配置；读失败不回显内容、不放行投递。
 
 ## 十五、驾驶舱
 
@@ -698,7 +698,7 @@ GitHub 上只用标签和里程碑两样容器。issue 照第七节建（创始�
 - **每个项目都有**（平台机制，不是 fleet-dao 专属）：读那个项目的仓自己的里程碑和版本说明。总览里每个项目一行：当前版本、先后里的第一项。
 - 读不到里程碑或先后标记，这一栏写「没读到」和原因，不显示成 0 或空。
 
-策略切换的受保护写口先严格撤掉公开仓当前 open 同仓头的旧 merge-gate 绿（force unchanged 也执行），再在原事务提交 DB 和操作记录，随后再次置 pending、强制刷新 source 排重算。HTTP 不在 DB 事务内等待；策略专用租约锁失锁或任一阶段未确认均报失败并列明 DB/撤绿/source 阶段。成功只表示 source 已排重算，未等待最终 gate。公开读口仅精确 GET，未受管和私有同为不可用，只返回版本、GitHub 仓号、仓名和当前模式；不开放写入。
+策略切换的受保护写口先严格撤掉公开仓当前 open 同仓头的旧 merge-gate 绿（force unchanged 也执行），再在原事务提交 DB 和操作记录，随后再次置 pending、强制刷新 source 排重算。HTTP 不在 DB 事务内等待；策略专用租约锁失锁或任一阶段未确认均报失败并列明 DB/撤绿/source 阶段。成功只表示 source 已排重算，未等待最终 gate。已接受的旧投递版本保留去重；需要补源时使用受保护的 `fleet-api project refresh-policy-source` 刷新当前 open 同仓头，已关闭 PR 不补造历史 source。公开读口仅精确 GET，未受管和私有同为不可用，只返回版本、GitHub 仓号、仓名和当前模式；不开放写入。
 
 ### 15.7 项目与标准（创始人 2026-09-26 拍，选项 1）
 

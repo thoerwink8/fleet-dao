@@ -20,7 +20,16 @@ export function runProgress(expectedCli) {
     });
     const dir = stateDir();
     const state = session.ok && authority.kind === 'allowed' ? readState(dir, session.id) : null;
-    const context = receiptContext(dir, input, state?.ok ? state.state : null, 'PostToolUse');
+    const context = receiptContext(
+      dir,
+      input,
+      state?.ok ? state.state : null,
+      'PostToolUse',
+      process.env,
+      authority.kind,
+      expectedCli,
+      session.ok ? () => readState(dir, session.id) : undefined,
+    );
     receipt = context;
     noteReceipt(context, { phase: 'entered', decision: 'none' });
     const bypass =

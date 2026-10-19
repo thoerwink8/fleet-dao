@@ -282,7 +282,10 @@ describe('按改动算要跑什么', () => {
     for (const b of pg) {
       expect(
         b.files.every(
-          (f) => f.startsWith('packages/db/') || f === 'packages/store/test/task-execution.real-pg.test.ts',
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
       ).toBe(true);
       expect(b.label).toContain('· pg');
@@ -291,7 +294,10 @@ describe('按改动算要跑什么', () => {
     for (const b of packed.tests.filter((x) => !x.pg)) {
       expect(
         b.files.some(
-          (f) => f.startsWith('packages/db/') || f === 'packages/store/test/task-execution.real-pg.test.ts',
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
       ).toBe(false);
     }
@@ -1444,13 +1450,19 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
     for (const b of pg)
       expect(
         b.files.every(
-          (f) => f.startsWith('packages/db/') || f === 'packages/store/test/task-execution.real-pg.test.ts',
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
       ).toBe(true);
     for (const b of p.tests.filter((x) => !x.pg))
       expect(
         b.files.some(
-          (f) => f.startsWith('packages/db/') || f === 'packages/store/test/task-execution.real-pg.test.ts',
+          (f) =>
+            f.startsWith('packages/db/') ||
+            f === 'packages/store/test/task-execution.real-pg.test.ts' ||
+            f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
       ).toBe(false);
   });
