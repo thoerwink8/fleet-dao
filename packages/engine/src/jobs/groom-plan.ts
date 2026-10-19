@@ -116,7 +116,7 @@ export interface ParsedGroomPlan {
 const KNOWN_KEYS = new Set(['summary', 'newIssues', 'amendments', 'reviews']);
 
 /** 从会话的回答里取最后一段 JSON（优先 ```json 围栏，其次整段回答）。 */
-function extractJson(answer: string): unknown {
+export function extractJson(answer: string): unknown {
   const candidates = [...answer.matchAll(/```(?:json)?[ \t]*\n([\s\S]*?)```/g)]
     .map((m) => m[1] ?? '')
     .reverse();

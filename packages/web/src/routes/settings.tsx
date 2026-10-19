@@ -346,6 +346,38 @@ function SoloPaused({ s }: { s: Setting | undefined }) {
 }
 
 /**
+ * 指挥官看停下的任务（#3294 第 2 片）：没设过算开；关了就不再把停下的单交指挥官会话看。哪个模型当指挥官在路由页的「指挥官」一栏配，
+ * 那一栏清空时指挥官明说「没配模型」并报警。开关一拨就存，带版本号、进操作记录。
+ */
+function CommanderSwitch({ s }: { s: Setting | undefined }) {
+  const current = SETTING_SCHEMAS['engine.commander'].safeParse(s?.value);
+  const on = current.success ? current.data : true;
+  const { save, pending } = useSaveSetting();
+  return (
+    <FieldRow
+      onSubmit={(e) => e.preventDefault()}
+      formLabel={settingLabel['engine.commander']}
+      label={settingLabel['engine.commander']}
+      hint={
+        <>
+          开着时：任务停下超过 15
+          分钟、引擎自己的规则没解开，就交给路由页「指挥官」一栏选出的模型看一眼；它只交裁决（继续、重做、拆单、停掉、留给人），
+          引擎按白名单核过才执行，改标准、没权限这类要人拍的只写诊断建议。每张单每次停下最多处理一次，每天有总次数上限。
+          <SettingMeta s={s} />
+        </>
+      }
+    >
+      <Switch
+        checked={on}
+        disabled={pending}
+        onCheckedChange={(next) => save('engine.commander', next, s)}
+        aria-label={settingLabel['engine.commander']}
+      />
+    </FieldRow>
+  );
+}
+
+/**
  * 留量线一行的窗口名。other →「其他窗口」；7d_model 没有组名时不要把字段名漏出来（「7d_model 周额度」），
  * 写成「单模型周额度」；这个池的读数带了组名就写在后面。别的窗口沿用 quotaWindowName，名字不变。
  */
@@ -693,6 +725,7 @@ export default function Settings() {
                     placeholder="没设"
                   />
                   <SoloPaused s={find('engine.soloPaused')} />
+                  <CommanderSwitch s={find('engine.commander')} />
                   <FlowModeSetting s={find('engine.flowMode')} />
                 </FieldGroup>
                 <QuotaReserve s={find('engine.quotaReserve')} />

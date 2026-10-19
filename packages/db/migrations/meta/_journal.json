@@ -673,6 +673,20 @@
       "when": 1792410971203,
       "tag": "0095_stormy_bug",
       "breakpoints": true
+    },
+    {
+      "idx": 96,
+      "version": "7",
+      "when": 1792500000000,
+      "tag": "0096_commander_purpose",
+      "breakpoints": true
+    },
+    {
+      "idx": 97,
+      "version": "7",
+      "when": 1792500060000,
+      "tag": "0097_commander_default_order",
+      "breakpoints": true
     }
   ]
 }

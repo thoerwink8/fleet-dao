@@ -19,6 +19,7 @@ import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
 import type { IntakeDeps } from './jobs/intake.ts';
 import type { IntakeChatDeps } from './jobs/intake-chat.ts';
 import type { JudgeSelfCheckJobDeps } from './jobs/judge-self-check.ts';
+import type { ParkTriageDeps as ParkTriageJobDeps } from './jobs/park-triage.ts';
 import type { ParkedRetryDeps as ParkedRetryJobDeps } from './jobs/parked-retry.ts';
 import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
 import type { RequestSweepJobDeps } from './jobs/request-sweep.ts';
@@ -296,6 +297,8 @@ export interface EngineJobs {
   e2eQuarantine?: () => E2eQuarantineJobDeps;
   /** 停下等人的单按规则续一次（#3294）：发了新版或 PR 已能合就发「继续」。不调模型、不拉单。 */
   parkedRetry?: () => ParkedRetryJobDeps;
+  /** 停下的单交指挥官会话看（#3294 第 2 片）：停了 15 分钟规则没解开的、交指挥官的，会话交裁决，引擎白名单核了再执行。起会话，标 needsMaster。 */
+  parkTriage?: () => ParkTriageJobDeps;
 }
 
 /**
