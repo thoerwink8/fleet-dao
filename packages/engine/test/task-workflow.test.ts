@@ -15,6 +15,7 @@ import type { RouteProbeJobDeps } from '../src/jobs/route-probe.ts';
 import { type PickRouteInput, PortError, type RouteChoice } from '../src/ports.ts';
 import { localExec } from '../src/real/exec.ts';
 import { createTaskActivities, type TaskActivitiesDeps } from '../src/real/task-activities.ts';
+import { requirementContract } from '../src/runner/task-brief.ts';
 import {
   ARM_PENDING_CHECKS_MINUTES,
   ARM_PENDING_POLL_SECONDS,
@@ -2447,7 +2448,10 @@ describe('任务工作流 · 现在就换模型（#1216，taskRepin）', { timeo
 const HANDOFF = '已继续 3 次仍没过，交指挥官';
 
 function briefSaying(request: string, acceptance: string[]) {
-  return { ok: true as const, brief: { ...goodBrief(), request, acceptance } };
+  return {
+    ok: true as const,
+    brief: { ...goodBrief(), contract: requirementContract(request), request, acceptance },
+  };
 }
 
 /** 验收连着没过，直到停下。返回那次停下的通知正文。 */
@@ -2479,9 +2483,11 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
     expect(MAX_IMPLEMENT_ROUNDS).toBe(3);
     expect(MAX_VERIFY_ROUNDS).toBe(2);
     const world = createFakeWorld();
+    let current = briefSaying('旧正文', ['旧验收条']);
     const { tasks, calls } = scripted({
-      // 头一回用尽自动续（决定 0093）也重读一次单子：前两次读到旧正文，点「继续」后读到新的
-      brief: (n) => (n <= 2 ? briefSaying('旧正文', ['旧验收条']) : briefSaying('新正文', ['新验收条'])),
+      // 自动继续仍读旧合同；人停下时修订，耗尽后的现读也经同一合同接纳路径。
+      brief: () => current,
+      contractBrief: () => current,
       verify: (_input, n) =>
         n === 6
           ? { pass: true, problems: [], round: 2 }
@@ -2500,6 +2506,7 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
         expect(calls.segment).toHaveLength(5);
         expect(calls.verify).toHaveLength(4);
         expect(calls.verify.every((item) => item.what === '旧正文')).toBe(true);
+        current = briefSaying('新正文', ['新验收条']);
         await h.signal(taskContinueSignal, { by: 'frank' });
         await waitUntil(
           () =>
@@ -2513,7 +2520,8 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
       { tasks },
     );
     expect(run.outcome).toBe('merged');
-    expect(calls.brief).toBe(3);
+    expect(calls.brief).toBe(1);
+    expect(calls.contractReads.length).toBeGreaterThan(0);
     expect(calls.segment).toHaveLength(6);
     expect(calls.segment[5]?.brief).toMatchObject({ request: '新正文', acceptance: ['新验收条'] });
     expect(calls.verify.map((item) => item.round)).toEqual([1, 2, 1, 2, 1, 2]);

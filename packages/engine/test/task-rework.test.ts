@@ -807,3 +807,58 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(world.alerts).toEqual([]);
   });
 });
+
+describe('耗尽后接纳正式合同修订（#3216）', { timeout: 60_000 }, () => {
+  it('全程停下期间修改正文：继续同一会话仍交付新版brief和正式CR', async () => {
+    let current = goodBrief();
+    const next = buildTaskBrief({
+      issue: {
+        number: 12,
+        title: '全程续行修订',
+        state: 'open',
+        body: BODY.replace('packages/web/src/pages/', 'packages/engine/src/jobs/watchdog.ts'),
+      },
+    });
+    if (!next.ok) throw new Error('测试合同不全');
+    const review = {
+      reviewId: 3216,
+      reviewer: 'reviewer',
+      commitId: 'a'.repeat(40),
+      submittedAt: null,
+      body: 'FULL_LIMITS_REVISION_REVIEW',
+      inlineComments: [],
+    };
+    const { tasks, calls } = scripted({
+      brief: () => ({ ok: true, brief: current }),
+      contractBrief: () => ({ ok: true, brief: current }),
+      flow: () => ({ mode: 'full', source: 'hash', reason: null }),
+      resume: RESUME_ALWAYS,
+    });
+    tasks.readCiReviews = async (i) => ({ delivered: true, head: i.expectedHead, reviews: [review] });
+    const world = createFakeWorld({
+      ci: (_i, n) => (n <= 6 ? { state: 'red', failedChecks: ['test'], digest: 'old CI red' } : undefined),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await pollQuery(
+          () => statusOf(h),
+          (s) => parked(s) && s.lastProblem?.includes('推送 6 次') === true,
+          '全程耗尽停下',
+        );
+        current = next.brief;
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    const after = calls.segment[6];
+    expect(after?.resumeSessionId).toBe('sess-1');
+    expect(after?.brief.contract).toEqual(next.brief.contract);
+    expect(after?.tier).toEqual(next.brief.tier);
+    expect(after?.contractRevision?.reviews.join('\n') ?? '').toContain(review.body);
+  });
+});

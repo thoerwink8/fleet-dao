@@ -215,12 +215,12 @@ class TaskFlow {
     let { brief, tier } = await this.readBrief();
     rt.status.tier = tier;
     rt.reloadBrief = async () => {
-      const got = await this.readBrief();
-      brief = got.brief;
+      // 耗尽后继续也走同一接纳口；先覆盖 brief 会让下一边界认不出合同修订。
       if (patched('task-contract-revisions-v1')) {
-        tier = got.tier;
-        rt.status.tier = tier;
+        await rt.refreshContract('轮数耗尽后重读');
+        return;
       }
+      brief = (await this.readBrief()).brief;
     };
     rt.refreshContract = async (boundary) => {
       if (!patched('task-contract-revisions-v1')) return false;
