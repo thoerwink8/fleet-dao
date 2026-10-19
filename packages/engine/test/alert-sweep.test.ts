@@ -9,13 +9,17 @@ import {
 import type { AlertStage } from '@fleet-dao/core';
 import type { AlertRow } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
+import { checkoutAlertKey } from '../src/cold-verify-run.ts';
 import {
   type AlertFiling,
   type AlertRepo,
   type AlertSweepDeps,
   alertRepoFromText,
+  EXPIRE_AFTER_MS,
+  eligibleToFile,
   FILE_LABELS,
   renderAlertIssueBody,
+  SELF_RESOLVING_PREFIXES,
   sweepAlerts,
 } from '../src/jobs/alert-sweep.ts';
 import { beijingDayStart, RECONCILE_ACTOR } from '../src/jobs/reconcile-common.ts';
@@ -634,5 +638,120 @@ describe('日报超过 48 小时由这一轮收掉', () => {
     expect(pushed.inserted, '不再写再提醒').toEqual([]);
     expect(pushed.opened.map((o) => o.key)).toEqual([`alert-file:${key}`]);
     expect(pushed.opened[0]?.body).toContain('第 1 天没人处理');
+  });
+});
+
+describe('冷验收检出报警不落三天过期兜底', () => {
+  const HEAD = 'a'.repeat(40);
+  const checkoutTask = checkoutAlertKey('task:thoerwink8/fleet-dao#3067', HEAD);
+  const checkoutHead = checkoutAlertKey(undefined, HEAD);
+  const unknownKey = 'wf:failure:account-banned';
+  const legacyKey = 'cold-verify:checkout-dir:legacy';
+  const otherColdKey = 'cold-verify:archive:task:thoerwink8/fleet-dao#3067';
+
+  it('真实 checkoutAlertKey 在 3 天边界和更久都不因 TTL 撤，普通未知键仍按原边界撤', async () => {
+    expect(checkoutTask).toBe('cold-verify:checkout:task:thoerwink8/fleet-dao#3067');
+    expect(checkoutHead.startsWith('cold-verify:checkout:head:')).toBe(true);
+    expect(SELF_RESOLVING_PREFIXES).toContain('cold-verify:checkout:');
+    expect(SELF_RESOLVING_PREFIXES).not.toContain('cold-verify:');
+    expect(SELF_RESOLVING_PREFIXES).not.toContain('cold-verify:checkout-dir');
+    expect(SELF_RESOLVING_PREFIXES).not.toContain('cold-verify:checkout-dir:');
+    expect(eligibleToFile(checkoutTask)).toBe(false);
+    expect(eligibleToFile(checkoutHead)).toBe(false);
+    expect(eligibleToFile(unknownKey)).toBe(true);
+    expect(eligibleToFile(legacyKey)).toBe(true);
+    expect(eligibleToFile(otherColdKey)).toBe(true);
+
+    const ages = [
+      { idle: EXPIRE_AFTER_MS, expireOthers: false },
+      { idle: EXPIRE_AFTER_MS + 864, expireOthers: true },
+      { idle: 30 * DAY, expireOthers: true },
+    ];
+    for (const task of ['running', 'done', null] as const) {
+      for (const age of ages) {
+        const reads = { task: 0, state: 0, view: 0 };
+        const resolved: { dedupeKey: string; why: string }[] = [];
+        const updatedAt = new Date(NOW.getTime() - age.idle);
+        const open = [checkoutTask, checkoutHead, unknownKey, legacyKey, otherColdKey].map((dedupeKey) =>
+          row({
+            dedupeKey,
+            taskId: '3067',
+            title: '冷验收放不进 PR 头的完整检出',
+            createdAt: updatedAt,
+            updatedAt,
+          }),
+        );
+        const deps: AlertSweepDeps = {
+          workflows: {
+            state: async () => {
+              reads.state += 1;
+              return task === 'running' ? { state: 'running' } : { state: 'closed', status: 'COMPLETED' };
+            },
+            view: async () => {
+              reads.view += 1;
+              return { parked: false, waiting: null, doing: '检出', approval: null };
+            },
+          },
+          taskState: async () => {
+            reads.task += 1;
+            return task;
+          },
+          approval: async () => null,
+          stageRoutable: async () => ({ kind: 'none', detail: '没有' }),
+          alerts: {
+            listOpen: async () => ({ alerts: open, truncated: false }),
+            byKey: async (key) => open.find((a) => a.dedupeKey === key) ?? null,
+            latestByPrefix: async () => null,
+            resolve: async (x) => {
+              resolved.push({ dedupeKey: x.dedupeKey, why: x.why });
+              return 'ok';
+            },
+            raise: async () => {},
+            insertOnce: async () => ({ created: false }),
+            updateOpen: async () => 'ok',
+          },
+          now: () => NOW,
+          log: () => {},
+        };
+        const part = await sweepAlerts(deps, open, false);
+        expect(part.unchecked, `${task ?? '未知'} / ${age.idle}`).toEqual([]);
+        expect(reads, `${task ?? '未知'} / ${age.idle}`).toEqual({ task: 0, state: 0, view: 0 });
+        const gone = resolved.map((r) => r.dedupeKey).sort();
+        if (age.expireOthers) {
+          expect(gone, `${task ?? '未知'} / ${age.idle}`).toEqual(
+            [legacyKey, otherColdKey, unknownKey].sort(),
+          );
+          expect(resolved.every((r) => r.why.startsWith('过期：'))).toBe(true);
+        } else {
+          expect(gone, `${task ?? '未知'} / ${age.idle}`).toEqual([]);
+        }
+        expect(resolved.some((r) => r.dedupeKey === checkoutTask || r.dedupeKey === checkoutHead)).toBe(
+          false,
+        );
+      }
+    }
+  });
+
+  it('检出前缀不走自动兜底立案，普通未知键仍立案', async () => {
+    const stale = new Date(NOW.getTime() - 30 * DAY);
+    const checkout = row({
+      dedupeKey: checkoutTask,
+      taskId: '3067',
+      title: '冷验收放不进 PR 头的完整检出',
+      createdAt: stale,
+      updatedAt: stale,
+    });
+    const unknown = row({
+      dedupeKey: 'wf:failure:acme/widgets:plain',
+      createdAt: new Date(NOW.getTime() - 25 * HOUR),
+      updatedAt: new Date(NOW.getTime() - 25 * HOUR),
+    });
+    const h = harness([checkout, unknown]);
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(checkout.resolvedAt).toBeNull();
+    expect(checkout.body).toBe('原来的正文');
+    expect(h.opened.map((o) => o.key)).toEqual(['alert-file:wf:failure:acme/widgets:plain']);
+    expect(unknown.body.startsWith('已立案：#')).toBe(true);
   });
 });
