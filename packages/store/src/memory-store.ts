@@ -83,6 +83,8 @@ import type {
   Store,
   User,
 } from './ports.ts';
+import type { ExecutionControl, ExecutionOperation } from './task-execution.ts';
+import { memoryTaskExecution } from './task-execution-memory.ts';
 import {
   addRepoAudit,
   autoDispatchAudit,
@@ -159,6 +161,8 @@ export type RepoRecord = Repo & {
 export type MemoryUser = User & { createdAt?: string | undefined };
 
 export interface MemoryData {
+  executionControls: Map<string, ExecutionControl>;
+  executionOperations: Map<string, ExecutionOperation>;
   users: MemoryUser[];
   repos: RepoRecord[];
   tasks: Task[];
@@ -206,6 +210,8 @@ export interface MemoryData {
 
 export function emptyData(): MemoryData {
   return {
+    executionControls: new Map(),
+    executionOperations: new Map(),
     users: [],
     repos: [],
     tasks: [],
@@ -351,6 +357,7 @@ export function createMemoryStore(
 
   return {
     data,
+    ...memoryTaskExecution(data, now, nextId, (id) => changed('audit_log', id)),
 
     // —— 人 ——
     async getUser(id) {

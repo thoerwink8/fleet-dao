@@ -37,6 +37,7 @@ const CHECKED = [
   'hooks/continuation-start.mjs',
   'hooks/continuation-progress.mjs',
   'hooks/continuation-results.mjs',
+  'hooks/continuation-latest.mjs',
   'hooks/capacity.mjs',
   'hooks/queue-stop.mjs',
   'hooks/subagent-ledger.mjs',

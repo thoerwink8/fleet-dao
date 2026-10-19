@@ -38,13 +38,13 @@ describe('策略来源读取只对网络失败重读', () => {
     ['连接超时', () => netError('UND_ERR_CONNECT_TIMEOUT')],
   ])('%s后第二次读成就用第二次的即时结果', async (_name, fail) => {
     const { impl, inits } = scripted([fail, ok]);
-    expect((await readPolicyHttp(url, repo, impl, 0)).ciPolicy).toBe('force');
+    expect((await readPolicyHttp(url, repo, impl, { pauseMs: 0 })).ciPolicy).toBe('force');
     expect(inits).toHaveLength(2);
   });
 
   it('每次都是新的 10 秒合同：两次的 signal 各自独立，第一次超时不连累第二次', async () => {
     const { impl, inits } = scripted([timeout, ok]);
-    await readPolicyHttp(url, repo, impl, 0);
+    await readPolicyHttp(url, repo, impl, { pauseMs: 0 });
     expect(inits[0]?.signal).not.toBe(inits[1]?.signal);
     expect(inits[1]?.signal?.aborted).toBe(false);
     for (const init of inits)
@@ -58,8 +58,26 @@ describe('策略来源读取只对网络失败重读', () => {
 
   it('两次都超时：明确失败并说读了几次，不回退任何策略', async () => {
     const { impl, inits } = scripted([timeout, timeout]);
-    await expect(readPolicyHttp(url, repo, impl, 0)).rejects.toThrow(/读了 2 次都没收到响应：.*timeout/);
+    await expect(readPolicyHttp(url, repo, impl, { pauseMs: 0 })).rejects.toThrow(
+      /读了 2 次都没读成：第 1 次 .*stage=unknown;.*codes=TimeoutError.*；第 2 次 .*codes=TimeoutError/,
+    );
     expect(inits).toHaveLength(2);
+  });
+
+  it('第一次超时、第二次收到不合规响应：照第二次的答复失败，不再读第三次', async () => {
+    const http503 = () =>
+      new Response('{}', { status: 503, headers: { 'content-type': 'application/json' } });
+    const { impl, inits } = scripted([timeout, http503, ok]);
+    await expect(readPolicyHttp(url, repo, impl, { pauseMs: 0 })).rejects.toThrow(
+      /读了 2 次都没读成：第 1 次 .*codes=TimeoutError.*；第 2 次 .*HTTP 503.*stage=body/,
+    );
+    expect(inits).toHaveLength(2);
+  });
+
+  it('证书错误不重读', async () => {
+    const { impl, inits } = scripted([() => netError('CERT_HAS_EXPIRED'), ok]);
+    await expect(readPolicyHttp(url, repo, impl, { pauseMs: 0 })).rejects.toThrow(/codes=CERT_HAS_EXPIRED/);
+    expect(inits).toHaveLength(1);
   });
 
   it.each([
@@ -67,7 +85,7 @@ describe('策略来源读取只对网络失败重读', () => {
     ['认不出的错', () => new Error('boom')],
   ])('%s不重读', async (_name, fail) => {
     const { impl, inits } = scripted([fail, ok]);
-    await expect(readPolicyHttp(url, repo, impl, 0)).rejects.toThrow();
+    await expect(readPolicyHttp(url, repo, impl, { pauseMs: 0 })).rejects.toThrow();
     expect(inits).toHaveLength(1);
   });
 
@@ -89,7 +107,7 @@ describe('策略来源读取只对网络失败重读', () => {
     ],
   ])('收到了响应（%s）就照原样判，不重读', async (_name, make) => {
     const { impl, inits } = scripted([make, ok]);
-    await expect(readPolicyHttp(url, repo, impl, 0)).rejects.toThrow();
+    await expect(readPolicyHttp(url, repo, impl, { pauseMs: 0 })).rejects.toThrow();
     expect(inits).toHaveLength(1);
   });
 });

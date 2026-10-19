@@ -1,5 +1,8 @@
 // Actions 的零安装真实读桥；协议 import 也只能走零依赖文件。
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { channel } from 'node:diagnostics_channel';
 import { readFileSync } from 'node:fs';
+import { performance } from 'node:perf_hooks';
 import {
   latestPolicyStatus,
   type PolicyRepo,
@@ -23,100 +26,278 @@ export interface ClosedPolicyHead {
 }
 export type PolicyReadResult = 'force' | 'off' | ClosedPolicyHead;
 
-/** 每次都是完整的 10 秒合同；只有一次都没收到响应的网络失败才再读一次。 */
-export const POLICY_READ_ATTEMPTS = 2;
-const RETRY_PAUSE_MS = 1000;
-// 没收到任何响应的网络错（DNS、TCP、TLS、超时）：请求可能根本没到入口，重读同一个只读 GET 不改变判据。
-// 重定向、HTTP 状态、协议不符是对方给了答复，读多少次都一样，照原样失败。
-const NETWORK_CODES = new Set([
-  'ECONNREFUSED',
-  'ECONNRESET',
-  'EPIPE',
-  'ETIMEDOUT',
+interface PolicyTrace {
+  stage: 'unknown' | 'headers' | 'body';
+}
+const policyTraceScope = new AsyncLocalStorage<PolicyTrace>();
+const policyNetworkCodes = new Set([
   'ENOTFOUND',
   'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
   'ENETUNREACH',
   'EHOSTUNREACH',
+  'ETIMEDOUT',
+  'EPIPE',
+  'EPROTO',
+  'ERR_TLS_CERT_ALTNAME_INVALID',
+  'CERT_HAS_EXPIRED',
+  'CERT_NOT_YET_VALID',
+  'DEPTH_ZERO_SELF_SIGNED_CERT',
+  'SELF_SIGNED_CERT_IN_CHAIN',
+  'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'TimeoutError',
+  'AbortError',
+]);
+
+/** 仅提取已知枚举；不保留可能含地址、响应体或凭据的原始异常。 */
+function policyErrorCodes(error: unknown): string[] {
+  const codes = new Set<string>();
+  const visited = new Set<object>();
+  const queue: { value: unknown; depth: number }[] = [{ value: error, depth: 0 }];
+  for (let i = 0; i < queue.length && i < 32 && codes.size < 8; i++) {
+    const entry = queue[i];
+    // 诊断不能让代理对象或自定义 getter 的异常取代原失败。
+    try {
+      if (!entry || !policyRecord(entry.value) || visited.has(entry.value)) continue;
+      const value = entry.value;
+      visited.add(value);
+      for (const code of [value.code, value.name]) {
+        if (typeof code === 'string' && policyNetworkCodes.has(code)) codes.add(code);
+      }
+      if (entry.depth < 4) {
+        queue.push({ value: value.cause, depth: entry.depth + 1 });
+        if (value instanceof AggregateError && Array.isArray(value.errors)) {
+          for (let n = 0; n < Math.min(value.errors.length, 8); n++)
+            queue.push({ value: value.errors[n], depth: entry.depth + 1 });
+        }
+      }
+    } catch {
+      // 未识别的异常结构没有可用诊断。
+    }
+  }
+  return [...codes].slice(0, 8);
+}
+
+class PolicyHttpContractError extends Error {}
+
+/** 一次读取的脱敏失败：stage/codes 只来自本次观测，供是否重读判断。 */
+class PolicyHttpReadError extends Error {
+  readonly stage: PolicyTrace['stage'];
+  readonly codes: string[];
+  constructor(message: string, stage: PolicyTrace['stage'], codes: string[]) {
+    super(message);
+    this.stage = stage;
+    this.codes = codes;
+  }
+}
+
+/** 每次都是完整的 10 秒合同；只有没收到响应头的网络失败才再读一次。 */
+export const POLICY_READ_ATTEMPTS = 2;
+const RETRY_PAUSE_MS = 1000;
+// 没收到响应的网络错（DNS、TCP、超时、连接被断）：请求可能根本没到入口（#3268），重读同一个只读 GET 不改变判据。
+// 证书类错误读多少次都一样；收到响应以后（stage=body）的状态、重定向、缓存头、串仓、超限是对方的答复，照原样失败。
+const policyRetryCodes = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ETIMEDOUT',
+  'EPIPE',
   'UND_ERR_CONNECT_TIMEOUT',
   'UND_ERR_HEADERS_TIMEOUT',
   'UND_ERR_SOCKET',
+  'TimeoutError',
+  'AbortError',
 ]);
-
-function networkFailure(e: unknown): boolean {
-  if (!(e instanceof Error)) return false;
-  if (e.name === 'TimeoutError' || e.name === 'AbortError') return true;
-  const code = (e.cause as { code?: unknown } | undefined)?.code;
-  return e instanceof TypeError && typeof code === 'string' && NETWORK_CODES.has(code);
-}
 
 export async function readPolicyHttp(
   url: string,
   repo: Pick<PolicyRepo, 'githubId' | 'repo'>,
   fetchImpl: typeof fetch = fetch,
-  pauseMs = RETRY_PAUSE_MS,
+  { attempts = POLICY_READ_ATTEMPTS, pauseMs = RETRY_PAUSE_MS } = {},
 ): Promise<PolicyResponse> {
+  const failures: string[] = [];
   for (let attempt = 1; ; attempt++) {
-    let res: Response;
     try {
-      res = await fetchImpl(url, policyInit());
-    } catch (e) {
-      if (attempt < POLICY_READ_ATTEMPTS && networkFailure(e)) {
-        await new Promise((r) => setTimeout(r, pauseMs));
-        continue;
+      return await readPolicyHttpOnce(url, repo, fetchImpl);
+    } catch (error) {
+      if (!(error instanceof PolicyHttpReadError)) throw error;
+      failures.push(error.message);
+      const retry =
+        attempt < attempts &&
+        error.stage !== 'body' &&
+        error.codes.some((code) => policyRetryCodes.has(code));
+      if (!retry) {
+        if (failures.length === 1) throw error;
+        throw new Error(
+          `读了 ${failures.length} 次都没读成：${failures.map((m, i) => `第 ${i + 1} 次 ${m}`).join('；')}`,
+        );
       }
-      if (attempt > 1 && e instanceof Error)
-        throw new Error(`读了 ${attempt} 次都没收到响应：${e.message}`, { cause: e });
-      throw e;
+      await new Promise((resolve) => setTimeout(resolve, pauseMs));
     }
-    return readPolicyBody(res, repo);
   }
 }
 
-function policyInit(): RequestInit & { cache: 'no-store' } {
-  return {
-    method: 'GET',
-    redirect: 'error',
-    credentials: 'omit',
-    cache: 'no-store',
-    headers: { accept: 'application/json', 'cache-control': 'no-cache, no-store' },
-    signal: AbortSignal.timeout(10_000),
+function observePolicyHttp(url: string, trace: PolicyTrace): () => void {
+  const requestCreated = channel('undici:request:create');
+  const sendHeaders = channel('undici:client:sendHeaders');
+  let request: object | undefined;
+  let ambiguous = false;
+  let events = 0;
+  // 诊断频道缺事件或结构不认识时保持unknown，不猜DNS/TCP/TLS的socket归属。
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    return () => {};
+  }
+  const guard = (action: (message: unknown) => void) => (message: unknown) => {
+    try {
+      action(message);
+    } catch {
+      // 被动观察器不能改变 fetch 的成功或失败。
+    }
+  };
+  const created = guard((message) => {
+    if (policyTraceScope.getStore() !== trace) return;
+    if (++events > 64) {
+      ambiguous = true;
+      if (trace.stage !== 'body') trace.stage = 'unknown';
+      return;
+    }
+    if (!policyRecord(message) || !policyRecord(message.request)) return;
+    const candidate = message.request;
+    if (
+      candidate.method !== 'GET' ||
+      candidate.origin !== target.origin ||
+      candidate.path !== target.pathname + target.search
+    )
+      return;
+    // 同scope的同URL也可能属于另一次请求；第二身份出现后撤回早先的阶段证据。
+    if (request && request !== candidate) {
+      ambiguous = true;
+      if (trace.stage !== 'body') trace.stage = 'unknown';
+    }
+    request ??= candidate;
+  });
+  const sending = guard((message) => {
+    if (ambiguous || !request || !policyRecord(message) || message.request !== request) return;
+    if (++events > 64) {
+      ambiguous = true;
+      if (trace.stage !== 'body') trace.stage = 'unknown';
+      return;
+    }
+    // request对象身份来自本次create；事件调度所在scope不代表连接归属。
+    if (trace.stage !== 'body') trace.stage = 'headers';
+  });
+  requestCreated.subscribe(created);
+  sendHeaders.subscribe(sending);
+  return () => {
+    requestCreated.unsubscribe(created);
+    sendHeaders.unsubscribe(sending);
   };
 }
 
-async function readPolicyBody(
-  res: Response,
+async function readPolicyHttpOnce(
+  url: string,
   repo: Pick<PolicyRepo, 'githubId' | 'repo'>,
+  fetchImpl: typeof fetch,
 ): Promise<PolicyResponse> {
-  if (
-    res.status !== 200 ||
-    res.redirected ||
-    !/^application\/json(?:\s*;|$)/i.test(res.headers.get('content-type') ?? '')
-  )
-    throw new Error(`CI 策略桥未读成（HTTP ${res.status} 或非 JSON/重定向）`);
-  if (!(res.headers.get('cache-control') ?? '').split(',').some((x) => x.trim().toLowerCase() === 'no-store'))
-    throw new Error('CI 策略桥没有禁止缓存');
-  if (!res.body) throw new Error('CI 策略桥没有响应体');
-  const reader = res.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
+  const trace: PolicyTrace = { stage: 'unknown' };
+  const started = performance.now();
+  const cleanup = observePolicyHttp(url, trace);
   try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > 4096) throw new Error('CI 策略桥响应超过 4096 字节');
-      chunks.push(value);
+    return await policyTraceScope.run(trace, async () => {
+      const init: RequestInit & { cache: 'no-store' } = {
+        method: 'GET',
+        redirect: 'error',
+        credentials: 'omit',
+        cache: 'no-store',
+        headers: { accept: 'application/json', 'cache-control': 'no-cache, no-store' },
+        signal: AbortSignal.timeout(10_000),
+      };
+      const res = await fetchImpl(url, init);
+      trace.stage = 'body';
+      if (
+        res.status !== 200 ||
+        res.redirected ||
+        !/^application\/json(?:\s*;|$)/i.test(res.headers.get('content-type') ?? '')
+      )
+        throw new PolicyHttpContractError(
+          `CI 策略桥未读成（HTTP ${Number.isInteger(res.status) && res.status >= 100 && res.status <= 599 ? res.status : 'unknown'} 或非 JSON/重定向）`,
+        );
+      if (
+        !(res.headers.get('cache-control') ?? '')
+          .split(',')
+          .some((x) => x.trim().toLowerCase() === 'no-store')
+      )
+        throw new PolicyHttpContractError('CI 策略桥没有禁止缓存');
+      if (!res.body) throw new PolicyHttpContractError('CI 策略桥没有响应体');
+      const reader = res.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      let bodyFailed = false;
+      let bodyError: unknown;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > 4096) throw new PolicyHttpContractError('CI 策略桥响应超过 4096 字节');
+          chunks.push(value);
+        }
+      } catch (error) {
+        bodyFailed = true;
+        bodyError = error;
+      }
+      try {
+        await reader.cancel();
+      } catch (error) {
+        if (!bodyFailed) throw error;
+      }
+      if (bodyFailed) throw bodyError;
+      const bytes = new Uint8Array(size);
+      let offset = 0;
+      for (const c of chunks) {
+        bytes.set(c, offset);
+        offset += c.length;
+      }
+      let raw: unknown;
+      try {
+        raw = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+      } catch {
+        throw new PolicyHttpContractError('CI 策略桥响应不是有效 UTF-8 JSON');
+      }
+      try {
+        return parsePolicyResponse(raw, repo);
+      } catch {
+        throw new PolicyHttpContractError('CI 策略桥响应的协议、仓身份或模式不匹配');
+      }
+    });
+  } catch (error) {
+    let reason = 'CI 策略桥 HTTP 读取失败';
+    try {
+      if (error instanceof PolicyHttpContractError) reason = error.message;
+    } catch {
+      // 被撤销的 Proxy 等未知异常也只报告固定失败。
     }
+    const codes = policyErrorCodes(error);
+    throw new PolicyHttpReadError(
+      `${reason} [stage=${trace.stage}; elapsedMs=${Math.max(0, Math.round(performance.now() - started))}; codes=${codes.join(',') || 'unknown'}]`,
+      trace.stage,
+      codes,
+    );
   } finally {
-    await reader.cancel();
+    cleanup();
   }
-  const bytes = new Uint8Array(size);
-  let offset = 0;
-  for (const c of chunks) {
-    bytes.set(c, offset);
-    offset += c.length;
-  }
-  return parsePolicyResponse(JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)), repo);
 }
 
 /** writer slug 只从可信标准检出读取，不从 caller 或 source 接收。 */
