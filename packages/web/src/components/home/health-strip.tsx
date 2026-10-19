@@ -118,8 +118,11 @@ function Chip({ item, withDetail }: { item: HealthItem; withDetail: boolean }) {
     >
       <StatusBadge tone={KIND_TONE[item.kind]} variant="outline" label={`${item.name} ${item.word}`} />
       {withDetail ? (
-        // 详情宽度用 max-w-health-detail。
-        <span className="hidden min-w-0 max-w-health-detail truncate text-meta text-muted-foreground 2xl:inline">
+        // 详情宽度用 max-w-health-detail。全文在 title 上，窄了截断不删字。
+        <span
+          data-health-detail
+          className="hidden min-w-0 max-w-health-detail truncate text-meta text-muted-foreground 2xl:inline"
+        >
           {item.detail}
         </span>
       ) : null}
@@ -169,7 +172,9 @@ function MenuPopover({
               className="flex flex-col items-start gap-1"
             >
               <StatusBadge tone={KIND_TONE[i.kind]} variant="outline" label={`${i.name} ${i.word}`} />
-              <span className="text-meta text-muted-foreground">{i.detail}</span>
+              <span data-health-detail className="text-meta text-muted-foreground">
+                {i.detail}
+              </span>
             </li>
           ))}
         </ul>

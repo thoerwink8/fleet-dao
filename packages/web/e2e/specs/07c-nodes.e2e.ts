@@ -3,11 +3,115 @@
 // 快照是用例自己经公开的写口（POST /api/nodes/report，头 X-Fleet-Node-Token）推的：内容取这台后端自己的 /api/home、/api/env，
 // 只把环境名换成「演练 WSL」，和真的 WSL 推来的是同一个形状（后端按 shared 的 NodeReportSchema 校验，形状不对会回 400、这里当场红）。
 // 失联靠把浏览器的钟拨到收到快照之后 10 分钟：新不新鲜按「收到快照的时刻」和页面的钟现算（lib/node.ts），不等下一次重拉。
-import type { APIRequestContext } from '@playwright/test';
+import type { APIRequestContext, Page } from '@playwright/test';
 import { expect, test } from '../support/fixtures.ts';
 import { NODE_TOKEN_WSL } from '../support/node-keys.ts';
 
 const WSL = '演练 WSL';
+
+type HeaderGeometry = {
+  vw: number;
+  titleLines: number;
+  titleNeed: number;
+  titleHave: number;
+  titleFont: number;
+  overflowDoc: number;
+  overflowMain: number;
+  overlap: boolean;
+  sameRow: boolean;
+  actionsPastMain: boolean;
+  hitHealth: boolean;
+  hitRefresh: boolean;
+  hitFlow: boolean;
+  titleText: string;
+};
+
+type DetailGeometry = {
+  items: { text: string; font: number; overlaps: boolean; inside: boolean }[];
+};
+
+// 字符串送进浏览器：函数里的类型注解会被原样带过去，浏览器解析不了。
+const HEADER_JS = `(() => {
+  const h1 = document.querySelector('[data-page-titlebar] h1');
+  const titlebar = document.querySelector('[data-page-titlebar]');
+  const actions = document.querySelector('[data-page-actions]');
+  const main = document.querySelector('main');
+  if (!(h1 instanceof HTMLElement) || !(titlebar instanceof HTMLElement) || !(actions instanceof HTMLElement) || !(main instanceof HTMLElement)) {
+    return null;
+  }
+  const cs = getComputedStyle(h1);
+  const lh = parseFloat(cs.lineHeight);
+  const titleBox = h1.getBoundingClientRect();
+  const probe = h1.cloneNode(true);
+  if (!(probe instanceof HTMLElement)) return null;
+  probe.style.position = 'absolute';
+  probe.style.left = '0';
+  probe.style.top = '0';
+  probe.style.visibility = 'hidden';
+  probe.style.whiteSpace = 'nowrap';
+  probe.style.width = 'max-content';
+  probe.style.maxWidth = 'none';
+  document.body.appendChild(probe);
+  const titleNeed = probe.getBoundingClientRect().width;
+  probe.remove();
+  const tb = titlebar.getBoundingClientRect();
+  const ab = actions.getBoundingClientRect();
+  const mb = main.getBoundingClientRect();
+  const hit = (el) => {
+    if (!(el instanceof Element)) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return false;
+    const top = document.elementFromPoint(Math.min(r.left + r.width / 2, window.innerWidth - 1), r.top + r.height / 2);
+    return top !== null && (el === top || el.contains(top));
+  };
+  const flowButtons = [...document.querySelectorAll('[data-flow-mode-switch] button')];
+  return {
+    vw: window.innerWidth,
+    titleLines: lh > 0 ? Math.round(titleBox.height / lh) : -1,
+    titleNeed,
+    titleHave: tb.width,
+    titleFont: parseFloat(cs.fontSize),
+    overflowDoc: document.documentElement.scrollWidth - window.innerWidth,
+    overflowMain: main.scrollWidth - main.clientWidth,
+    overlap:
+      Math.min(tb.right, ab.right) - Math.max(tb.left, ab.left) > 1 &&
+      Math.min(tb.bottom, ab.bottom) - Math.max(tb.top, ab.top) > 1,
+    sameRow: tb.top < ab.bottom - 1 && ab.top < tb.bottom - 1 && tb.left < ab.left,
+    actionsPastMain: ab.right > mb.right + 1 || ab.left < mb.left - 1,
+    hitHealth: hit(document.querySelector('[data-health-strip]')),
+    hitRefresh: hit(document.querySelector('[data-refresh-bar] button')),
+    hitFlow: flowButtons.length > 0 && flowButtons.every((el) => hit(el)),
+    titleText: h1.textContent ?? '',
+  };
+})()`;
+
+const DETAIL_JS = `(() => {
+  const h1 = document.querySelector('[data-page-titlebar] h1');
+  const hr = h1 instanceof HTMLElement ? h1.getBoundingClientRect() : null;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const items = [...document.querySelectorAll('[data-health-detail]')].flatMap((el) => {
+    if (!(el instanceof HTMLElement)) return [];
+    const r = el.getBoundingClientRect();
+    if (r.width < 1 || r.height < 1) return [];
+    return [{
+      text: el.textContent ?? '',
+      font: parseFloat(getComputedStyle(el).fontSize),
+      overlaps: hr !== null &&
+        Math.min(hr.right, r.right) - Math.max(hr.left, r.left) > 1 &&
+        Math.min(hr.bottom, r.bottom) - Math.max(hr.top, r.top) > 1,
+      inside: r.left >= -1 && r.right <= vw + 1 && r.top >= -1 && r.bottom <= vh + 1,
+    }];
+  });
+  return { items };
+})()`;
+
+/** 远程首页页头：短标题一行放完，长状态说明还在版面上、不盖住标题、不把页面撑出横向滚动。 */
+async function remoteHeaderLayout(page: Page): Promise<HeaderGeometry> {
+  const g = await page.evaluate(HEADER_JS);
+  if (!g) throw new Error('页头量不到');
+  return g as HeaderGeometry;
+}
 /** 上次推成的时刻（客户端）：同一个环境 20 秒内只收一次，快照 3 分钟内算新鲜，所以 2 分半以内不重推。 */
 let pushedAt = 0;
 /**
@@ -140,6 +244,42 @@ test.describe('看板多机', () => {
     await expect(banner).toContainText('失联 10 分钟');
     await expect(banner).toContainText('不是现在的');
     await expect(trigger).toContainText('失联');
+    // 长健康说明和远程标题挤在同一行时，标题列至少留得下一整行，说明收进「状态」或截在自己的格子里，不改失联文案。
+    const g = await remoteHeaderLayout(page);
+    expect(g.titleText, `${g.vw} 标题`).toContain(`主页 · ${WSL}`);
+    expect(
+      g.titleLines,
+      `${g.vw} 标题行数（列宽 ${Math.round(g.titleHave)}，一行要 ${Math.round(g.titleNeed)}）`,
+    ).toBe(1);
+    expect(g.titleHave + 1, `${g.vw} 标题列比一行字窄`).toBeGreaterThanOrEqual(g.titleNeed);
+    expect(g.titleFont, `${g.vw} 标题字号被缩小`).toBeGreaterThanOrEqual(20);
+    expect(g.overflowDoc, `${g.vw} 整页横滚`).toBeLessThanOrEqual(1);
+    expect(g.overflowMain, `${g.vw} 正文横滚`).toBeLessThanOrEqual(1);
+    expect(g.overlap, `${g.vw} 标题和操作区重叠`).toBe(false);
+    expect(g.sameRow, `${g.vw} 标题和操作区不在同一行`).toBe(true);
+    expect(g.actionsPastMain, `${g.vw} 操作区超出正文`).toBe(false);
+    expect(g.hitHealth, `${g.vw} 状态点不着`).toBe(true);
+    expect(g.hitRefresh, `${g.vw} 刷新点不着`).toBe(true);
+    expect(g.hitFlow, `${g.vw} 流程开关点不着`).toBe(true);
+    let details = (await page.evaluate(DETAIL_JS)) as DetailGeometry;
+    let openedMenu = false;
+    if (details.items.length === 0) {
+      await page.locator('[data-health-menu]').click();
+      await expect(page.locator('[data-health-detail]').first()).toBeVisible();
+      details = (await page.evaluate(DETAIL_JS)) as DetailGeometry;
+      openedMenu = true;
+    }
+    const longest = details.items.reduce((m, item) => Math.max(m, item.text.length), 0);
+    expect(longest, `${g.vw} 长状态消息还在`).toBeGreaterThanOrEqual(16);
+    for (const item of details.items) {
+      expect(item.font, `${g.vw} 状态说明字号「${item.text}」`).toBeGreaterThanOrEqual(14);
+      expect(item.overlaps, `${g.vw} 状态说明盖住标题「${item.text}」`).toBe(false);
+      expect(item.inside, `${g.vw} 状态说明超出屏幕「${item.text}」`).toBe(true);
+    }
+    if (openedMenu) {
+      await page.keyboard.press('Escape');
+      await expect(page.locator('[data-slot="popover-content"]')).toHaveCount(0);
+    }
     await trigger.click();
     await expect(page.locator('[data-node-item="wsl"]')).toHaveAttribute('data-node-state', 'stale');
     await shot(page, '07c-失联');
