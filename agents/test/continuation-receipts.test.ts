@@ -29,6 +29,7 @@ import {
 } from '../hooks/continuation-receipts.mjs';
 import { main } from '../hooks/unattended.mjs';
 import { runChild } from './child.ts';
+import { codexSourceFixture } from './codex-source-fixture.ts';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -43,6 +44,7 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
   const dir = mkdtempSync(join(tmpdir(), 'continuation-receipts-'));
   dirs.push(dir);
   const sid = 'receipt-session';
+  const { home } = codexSourceFixture(dir, sid);
   const env = {
     ...process.env,
     FLEET_UNATTENDED_DIR: dir,
@@ -52,6 +54,7 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
     CLAUDE_CODE_SESSION_ID: cli === 'claude' ? sid : '',
     CODEX_THREAD_ID: cli === 'codex' ? sid : '',
     CODEX_SESSION_ID: '',
+    CODEX_HOME: home,
   };
   const command = (...args: string[]) => main(args, { env, out: () => {}, err: () => {} });
   expect(command('on')).toBe(0);
@@ -128,13 +131,14 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
       turn: null,
     });
   });
-  it('事件session优先于继承环境号，不借另一会话已发请求凑关联', () => {
+  it('事件session与Codex环境冲突时明确未知，不借另一会话已发请求凑关联', () => {
     const s = fixture();
     s.run('stop', { turn_id: 'turn-one' });
     s.run('continuation-progress', { session_id: 'other-session', turn_id: 'turn-two' });
     expect(s.rows().some((r) => r.phase === 'next_turn_observed')).toBe(false);
     s.run('continuation-progress', { turn_id: 'turn-two' }, { CODEX_THREAD_ID: 'different-inherited-id' });
-    expect(s.rows().some((r) => r.phase === 'next_turn_observed')).toBe(true);
+    expect(s.rows().some((r) => r.phase === 'next_turn_observed')).toBe(false);
+    expect(s.rows().some((r) => r.phase === 'fault' && r.decision === 'identity_unknown')).toBe(true);
   });
   it('on换代保留回执，旧hook晚写不挂新窗口；legacy无generation仍未知', () => {
     const s = fixture(),
@@ -248,7 +252,7 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     const s = fixture();
     s.run('stop', { turn_id: 'turn-one' });
     const script = new URL('../hooks/continuation-progress.mjs', import.meta.url).href;
-    const wrapper = `const fs=require('node:fs');const open=fs.openSync,close=fs.closeSync;let target=null;fs.openSync=(path,flags,...args)=>{const fd=open(path,flags,...args);if(String(path).endsWith('.jsonl')&&typeof flags==='number'&&!(flags&(fs.constants.O_RDWR|fs.constants.O_WRONLY)))target=fd;return fd};fs.closeSync=fd=>{close(fd);if(fd===target){target=null;throw Error('private-close-error')}};require('node:module').syncBuiltinESMExports();import(${JSON.stringify(script)});`;
+    const wrapper = `const fs=require('node:fs');const open=fs.openSync,close=fs.closeSync;let target=null;fs.openSync=(path,flags,...args)=>{const fd=open(path,flags,...args);if(String(path).endsWith('.jsonl')&&typeof flags==='number'&&!(flags&(fs.constants.O_RDWR|fs.constants.O_WRONLY)))target=fd;return fd};fs.closeSync=fd=>{close(fd);if(fd===target){target=null;throw Error('private-close-error')}};require('node:module').syncBuiltinESMExports();import(${JSON.stringify(script)}).then(m=>m.runProgress());`;
     const r = runChild(process.execPath, ['-e', wrapper], {
       cwd: s.dir,
       env: s.env,
@@ -320,7 +324,8 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     expect(existsSync(join(root, `${fingerprint('new-session')}.jsonl`))).toBe(false);
     expect(existsSync(join(root, `${fingerprint('other-1')}.jsonl`))).toBe(true);
     expect(appendReceipt(s.context(), { phase: 'entered', decision: 'none' })).toEqual({ ok: true });
-    const r = s.run('stop', { session_id: 'new-session' });
+    codexSourceFixture(s.dir, 'new-session');
+    const r = s.run('stop', { session_id: 'new-session' }, { CODEX_THREAD_ID: 'new-session' });
     // 新session没有开关，原本应放行；容量失败不能把它误判成已开。
     expect(r.stdout).toBe('');
     expect(r.stderr).toContain('LIMIT');
