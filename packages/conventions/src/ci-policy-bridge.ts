@@ -23,12 +23,57 @@ export interface ClosedPolicyHead {
 }
 export type PolicyReadResult = 'force' | 'off' | ClosedPolicyHead;
 
+/** 每次都是完整的 10 秒合同；只有一次都没收到响应的网络失败才再读一次。 */
+export const POLICY_READ_ATTEMPTS = 2;
+const RETRY_PAUSE_MS = 1000;
+// 没收到任何响应的网络错（DNS、TCP、TLS、超时）：请求可能根本没到入口，重读同一个只读 GET 不改变判据。
+// 重定向、HTTP 状态、协议不符是对方给了答复，读多少次都一样，照原样失败。
+const NETWORK_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET',
+]);
+
+function networkFailure(e: unknown): boolean {
+  if (!(e instanceof Error)) return false;
+  if (e.name === 'TimeoutError' || e.name === 'AbortError') return true;
+  const code = (e.cause as { code?: unknown } | undefined)?.code;
+  return e instanceof TypeError && typeof code === 'string' && NETWORK_CODES.has(code);
+}
+
 export async function readPolicyHttp(
   url: string,
   repo: Pick<PolicyRepo, 'githubId' | 'repo'>,
   fetchImpl: typeof fetch = fetch,
+  pauseMs = RETRY_PAUSE_MS,
 ): Promise<PolicyResponse> {
-  const init: RequestInit & { cache: 'no-store' } = {
+  for (let attempt = 1; ; attempt++) {
+    let res: Response;
+    try {
+      res = await fetchImpl(url, policyInit());
+    } catch (e) {
+      if (attempt < POLICY_READ_ATTEMPTS && networkFailure(e)) {
+        await new Promise((r) => setTimeout(r, pauseMs));
+        continue;
+      }
+      if (attempt > 1 && e instanceof Error)
+        throw new Error(`读了 ${attempt} 次都没收到响应：${e.message}`, { cause: e });
+      throw e;
+    }
+    return readPolicyBody(res, repo);
+  }
+}
+
+function policyInit(): RequestInit & { cache: 'no-store' } {
+  return {
     method: 'GET',
     redirect: 'error',
     credentials: 'omit',
@@ -36,7 +81,12 @@ export async function readPolicyHttp(
     headers: { accept: 'application/json', 'cache-control': 'no-cache, no-store' },
     signal: AbortSignal.timeout(10_000),
   };
-  const res = await fetchImpl(url, init);
+}
+
+async function readPolicyBody(
+  res: Response,
+  repo: Pick<PolicyRepo, 'githubId' | 'repo'>,
+): Promise<PolicyResponse> {
   if (
     res.status !== 200 ||
     res.redirected ||
