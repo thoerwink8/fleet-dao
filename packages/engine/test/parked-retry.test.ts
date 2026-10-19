@@ -7,8 +7,8 @@ import type { ScheduleResult } from '@fleet-dao/db';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   judgeParked,
-  ParkedRetryFailedError,
   type ParkedRetryDeps,
+  ParkedRetryFailedError,
   type ParkedRetryRow,
   type ParkedSnapshot,
   retryParkedTasks,
@@ -134,7 +134,9 @@ describe('retryParkedTasks：过一遍停着的单', () => {
       mergeReady: async () => ({ ready: true, why: '必过检查全绿' }),
     });
     const got = await retryParkedTasks(ready.deps);
-    expect(got.continued.map((c) => c.why)).toEqual([expect.stringContaining('现读 PR #3210：必过检查全绿，可以合')]);
+    expect(got.continued.map((c) => c.why)).toEqual([
+      expect.stringContaining('现读 PR #3210：必过检查全绿，可以合'),
+    ]);
 
     const notReady = fakeDeps();
     expect((await retryParkedTasks(notReady.deps)).continued).toEqual([]);
@@ -185,7 +187,9 @@ describe('retryParkedTasks：过一遍停着的单', () => {
     expect(got.listed).toBe(4);
     expect(got.scanned).toBe(2);
     expect(got.continued.map((c) => c.workflowId)).toEqual(['wf-3257']);
-    expect(got.problems).toEqual([expect.stringContaining('thoerwink8/fleet-dao#3208 没判成：Temporal 连不上')]);
+    expect(got.problems).toEqual([
+      expect.stringContaining('thoerwink8/fleet-dao#3208 没判成：Temporal 连不上'),
+    ]);
   });
 });
 

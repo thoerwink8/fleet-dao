@@ -136,7 +136,9 @@ describe('停下等人按规则续一次（#3294）', { timeout: 120_000 }, () =
       { tasks },
     );
     expect(result?.continued).toHaveLength(1);
-    expect(audits).toEqual([expect.stringMatching(/^引擎续的（停法「自动合并没挂上」.*法国发了新版 dddddddddddd/)]);
+    expect(audits).toEqual([
+      expect.stringMatching(/^引擎续的（停法「自动合并没挂上」.*法国发了新版 dddddddddddd/),
+    ]);
     expect(run).toMatchObject({ outcome: 'merged' });
     expect(calls.arm).toBe(2);
     // 只报了停下那一次
