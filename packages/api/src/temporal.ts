@@ -8,9 +8,15 @@
 // Temporal 没起来时后端照样能起，真正发信号或查健康才会报错。测试一律用假客户端（TemporalClientLike /
 // EnginePollerSource 的最小形状），不碰真网络；connectTemporal 本身没有自动化测试覆盖（要连真 Temporal）。
 
-import { TASK_SIGNAL_NAMES, TASK_WORKFLOW_TYPE, taskWorkflowId } from '@fleet-dao/shared';
+import {
+  parseTaskWorkflowId,
+  TASK_SIGNAL_NAMES,
+  TASK_WORKFLOW_TYPE,
+  taskWorkflowId,
+} from '@fleet-dao/shared';
 import {
   generationLife,
+  MAX_TASK_GENERATION,
   readTaskGenerations,
   redoCanStop,
   redoTask,
@@ -33,6 +39,7 @@ import {
   WorkflowTargetNotFoundError,
   WorkflowUnavailableError,
 } from './ports.ts';
+import type { ExecutionFacts } from './task-correct-merged.ts';
 
 /** 还没接上 Temporal：发信号一律抛 WorkflowUnavailableError，健康检查报红。不装作接上了。 */
 export function notConnectedTemporal(): TemporalConnection {
@@ -387,6 +394,86 @@ async function abandonParkedWorkflow(client: Client, workflowId: string): Promis
   throw new Error(`叫停 ${workflowId} 后还没停，没有另起`);
 }
 
+export interface CorrectMergedTemporalClient {
+  connection: {
+    withDeadline<R>(deadline: number | Date, fn: () => Promise<R>): Promise<R>;
+  };
+  workflow: {
+    getHandle(
+      workflowId: string,
+      runId?: string,
+    ): {
+      describe(): Promise<{ workflowId: string; runId: string; status: { name: string } }>;
+      result(): Promise<unknown>;
+    };
+  };
+}
+
+function missingWorkflow(err: unknown): boolean {
+  return (
+    err instanceof WorkflowNotFoundError || (err instanceof Error && err.name === 'WorkflowNotFoundError')
+  );
+}
+
+function executionResult(value: unknown): { outcome: string; prNumber: number; head: string } | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  if (typeof row.outcome !== 'string' || !Number.isInteger(row.prNumber) || typeof row.head !== 'string')
+    return null;
+  return { outcome: row.outcome, prNumber: row.prNumber as number, head: row.head };
+}
+
+/**
+ * 只读这张单的任务工作流各代。不 signal、不 terminate、不 reset、不起新的。
+ * 第一代起往上 describe，遇到不存在就停。第二十代还在就没列全，抛错。
+ * 只有「请求的那条已经是 COMPLETED，而且最新 run 就是请求的 run」才读 result；其余状态读 result 会一直等。
+ */
+export async function readCorrectMergedExecution(
+  client: CorrectMergedTemporalClient,
+  input: {
+    repo: { owner: string; name: string };
+    issueNumber: number;
+    workflowId: string;
+    runId: string;
+  },
+): Promise<ExecutionFacts> {
+  const parsed = parseTaskWorkflowId(input.workflowId);
+  const aligned =
+    parsed !== null &&
+    parsed.issueNumber === input.issueNumber &&
+    parsed.repo.owner.toLowerCase() === input.repo.owner.toLowerCase() &&
+    parsed.repo.name.toLowerCase() === input.repo.name.toLowerCase();
+  const repo = aligned && parsed ? parsed.repo : input.repo;
+  const generations: ExecutionFacts['generations'] = [];
+  for (let generation = 1; generation <= MAX_TASK_GENERATION; generation++) {
+    const workflowId = taskWorkflowId(repo, input.issueNumber, generation);
+    try {
+      const described = await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
+        client.workflow.getHandle(workflowId).describe(),
+      );
+      if (described.workflowId !== workflowId) throw new Error(`工作流编号读回来不是 ${workflowId}`);
+      generations.push({
+        workflowId,
+        generation,
+        runId: described.runId,
+        status: described.status.name,
+      });
+    } catch (err) {
+      if (missingWorkflow(err)) break;
+      throw err;
+    }
+  }
+  if (generations.length === MAX_TASK_GENERATION) throw new Error('原任务工作流的代数没有列全，不纠正');
+  const row = generations.find((item) => item.workflowId === input.workflowId) ?? null;
+  if (!row || row.status !== 'COMPLETED' || row.runId !== input.runId) {
+    return { generations, matched: row ? { ...row, result: null } : null };
+  }
+  const raw = await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
+    client.workflow.getHandle(row.workflowId, row.runId).result(),
+  );
+  return { generations, matched: { ...row, result: executionResult(raw) } };
+}
+
 /** 真 Temporal 上的重做：顺着代数 describe。都终止，或还在跑但只是停在 parked / 正在收尾放弃（先叫停再等到终止），才用新编号起下一代（REJECT_DUPLICATE，不盖旧执行）。真在跑拒绝。 */
 export function createTemporalTaskRedo(client: Client, taskQueue: string): TaskRedoPort {
   return {
@@ -443,9 +530,12 @@ export function createTemporalTaskRedo(client: Client, taskQueue: string): TaskR
   };
 }
 
-export function connectTemporal(
-  config: TemporalConnectionConfig,
-): TemporalConnection & { taskRedo: TaskRedoPort; routeWake: (reason: string) => Promise<void> } {
+export function connectTemporal(config: TemporalConnectionConfig): TemporalConnection & {
+  taskRedo: TaskRedoPort;
+  routeWake: (reason: string) => Promise<void>;
+  /** 受管纠正只读各代和已结束结果。不发信号。 */
+  correctMerged: CorrectMergedTemporalClient;
+} {
   const connection = Connection.lazy({ address: config.address });
   const client = new Client({ connection, namespace: config.namespace });
   const control = createTemporalWorkflowControl(client);
@@ -463,6 +553,7 @@ export function connectTemporal(
     },
     taskRedo: createTemporalTaskRedo(client, config.taskQueue),
     routeWake: createTemporalRouteWake(client),
+    correctMerged: client,
     check: createNamespaceCheck(
       {
         async describeNamespace(namespace) {

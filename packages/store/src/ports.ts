@@ -444,6 +444,24 @@ export interface OpsStore {
     by: Actor;
   }): Promise<'ok' | 'already_resolved' | 'not_found' | 'stale'>;
   appendAudit(entry: NewAuditEntry): Promise<string>;
+  /**
+   * 误记 abandoned 的已合任务：读这张单的任务行、会话账、请求的那条 PR 镜像和既有纠正回执。
+   * 仓或任务不在库里回 null。读不全抛错，调用方拒绝，不把未知当成可以纠正。
+   */
+  readCorrectMergedLedger(input: {
+    owner: string;
+    name: string;
+    issueNumber: number;
+    prNumber: number;
+  }): Promise<import('@fleet-dao/db').CorrectMergedLedger | null>;
+  /**
+   * 同一事务：任务行仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍钉着这次交付时，
+   * 改成 done/merged 并写操作记录。不改 runs、不改 PR 镜像、不改验收责任。对不上回 stale，不写。
+   * 操作记录写不进抛错，任务行一起回到原样。时钟用 Store 自己的。
+   */
+  casCorrectMerged(
+    input: Omit<import('@fleet-dao/db').CasCorrectMergedInput, 'now'>,
+  ): Promise<'corrected' | 'stale'>;
   /** 按 (at, id) 倒序。 */
   listAudit(query: { target?: string | undefined } & PageRequest): Promise<Page<AuditRecord>>;
   listSettings(): Promise<SettingRecord[]>;

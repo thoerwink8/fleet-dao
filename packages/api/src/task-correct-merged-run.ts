@@ -1,89 +1,235 @@
-// fleet-api task correct-merged 的执行段：现读 GitHub PR、库里任务行、Temporal 已结束身份，交给 decideCorrection 判；
-// 通过了再经 casCorrectMerged 在同一事务里把任务行 CAS 改成 done/merged 并写操作记录。
-// 幂等：已经是 done/merged 且身份全部对得上，回「已纠正」，不再写第二条。读失败、拒绝、CAS 失配都明确报错，不假装做成。
+// fleet-api task correct-merged 的执行段。预检只读一次。执行先再读一遍，两遍不一致就拒绝，然后才 CAS。
+// 幂等不在判断之前短路：操作者、交付身份和审计回执都要过。写库失败把拒绝交回去，不另写一条失败审计。
 
+import type { CasCorrectMergedInput } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import {
-  type CorrectionRequest,
-  type ExecutionFacts,
-  type PullFacts,
-  type TaskFacts,
-  alreadyCorrected,
   CORRECTED_BY_PREFIX,
+  type CorrectionDecision,
+  type CorrectionRequest,
+  type CorrectMergedSnapshot,
   decideCorrection,
+  type LedgerTask,
+  operatorAllowed,
+  workflowBelongs,
 } from './task-correct-merged.ts';
 
 export interface CorrectMergedPorts {
-  /** 现读 GitHub 上的 PR（头、合并提交、是否已合）。读不到抛错。 */
-  readPull(repo: { owner: string; name: string }, number: number): Promise<PullFacts | null>;
-  /** 现读库里的任务行与开着的会话数。 */
-  readTask(repo: { owner: string; name: string }, issueNumber: number): Promise<TaskFacts | null>;
-  /** 现读原任务工作流的已结束执行身份。读不到抛错。 */
-  readExecution(workflowId: string): Promise<ExecutionFacts | null>;
-  /**
-   * 原子 CAS：仅当任务行仍是 stopped/abandoned 且 updated_at 等于 expectedUpdatedAtMs 时，
-   * 改成 done/merged，并在同一事务里写操作记录。CAS 失配回 'stale'，不写。
-   */
-  casCorrect(input: {
-    taskId: string;
-    expectedUpdatedAtMs: number;
-    audit: { operator: string; reason: string; evidence: Record<string, unknown> };
-  }): Promise<'corrected' | 'stale'>;
+  read(req: CorrectionRequest): Promise<CorrectMergedSnapshot>;
+  cas(input: Omit<CasCorrectMergedInput, 'now'>): Promise<'corrected' | 'stale'>;
 }
 
-export type CorrectMergedOutcome =
-  | { status: 'corrected'; text: string }
-  | { status: 'already'; text: string }
-  | { status: 'refused'; reason: string };
+export interface CorrectMergedPreview {
+  repo: string;
+  issue: number;
+  task: {
+    id: string;
+    state: string;
+    phase: string | null;
+    updatedAtMs: number | null;
+    openRunCount: number;
+  } | null;
+  execution: {
+    workflowId: string;
+    runId: string;
+    status: string;
+    outcome: string | null;
+    prNumber: number | null;
+    head: string | null;
+  } | null;
+  generations: { workflowId: string; generation: number; runId: string; status: string }[];
+  pull: { number: number; merged: boolean; head: string | null; mergeCommit: string | null } | null;
+  proposed: { state: 'done'; phase: 'merged' } | null;
+}
+
+export interface CorrectMergedReport {
+  mode: 'precheck' | 'apply';
+  status: 'precheck' | 'corrected' | 'already' | 'refused';
+  text: string;
+  reason?: string;
+  preview: CorrectMergedPreview;
+}
+
+const EMPTY_EXECUTION: CorrectMergedSnapshot['execution'] = { generations: [], matched: null };
+
+function emptySnapshot(): CorrectMergedSnapshot {
+  return {
+    task: null,
+    sessions: [],
+    mirror: null,
+    corrections: [],
+    issue: null,
+    pull: null,
+    execution: EMPTY_EXECUTION,
+  };
+}
+
+function previewOf(
+  req: CorrectionRequest,
+  snap: CorrectMergedSnapshot,
+  proposed: boolean,
+): CorrectMergedPreview {
+  const matched = snap.execution.matched;
+  return {
+    repo: `${req.repo.owner}/${req.repo.name}`,
+    issue: req.issueNumber,
+    task: snap.task
+      ? {
+          id: snap.task.id,
+          state: snap.task.state,
+          phase: snap.task.phase,
+          updatedAtMs: snap.task.updatedAtMs,
+          openRunCount: snap.task.openRunCount,
+        }
+      : null,
+    execution: matched
+      ? {
+          workflowId: matched.workflowId,
+          runId: matched.runId,
+          status: matched.status,
+          outcome: matched.result?.outcome ?? null,
+          prNumber: matched.result?.prNumber ?? null,
+          head: matched.result?.head ?? null,
+        }
+      : null,
+    generations: snap.execution.generations.map((row) => ({
+      workflowId: row.workflowId,
+      generation: row.generation,
+      runId: row.runId,
+      status: row.status,
+    })),
+    pull: snap.pull
+      ? {
+          number: snap.pull.number,
+          merged: snap.pull.merged,
+          head: snap.pull.head,
+          mergeCommit: snap.pull.mergeCommit,
+        }
+      : null,
+    proposed: proposed ? { state: 'done', phase: 'merged' } : null,
+  };
+}
+
+function fingerprint(snap: CorrectMergedSnapshot): string {
+  return JSON.stringify({
+    task: snap.task,
+    sessions: snap.sessions,
+    mirror: snap.mirror,
+    corrections: snap.corrections,
+    issue: snap.issue,
+    pull: snap.pull,
+    execution: snap.execution,
+  });
+}
+
+function refused(
+  mode: CorrectMergedReport['mode'],
+  req: CorrectionRequest,
+  snap: CorrectMergedSnapshot,
+  reason: string,
+): CorrectMergedReport {
+  return { mode, status: 'refused', text: reason, reason, preview: previewOf(req, snap, false) };
+}
+
+function described(
+  decision: CorrectionDecision,
+  ref: string,
+  prNumber: number,
+): { status: 'precheck' | 'already'; text: string } {
+  if (decision.ok && decision.kind === 'already') {
+    return { status: 'already', text: `已纠正（之前已做过）：${ref}` };
+  }
+  return {
+    status: 'precheck',
+    text: `可以纠正：${ref}（PR #${prNumber} 真实已合，将改为 done/merged；原 abandoned 结论留在原执行结果）`,
+  };
+}
 
 export async function runCorrectMerged(
   req: CorrectionRequest,
   operator: string,
   reason: string,
+  mode: 'precheck' | 'apply',
   ports: CorrectMergedPorts,
-): Promise<CorrectMergedOutcome> {
+): Promise<CorrectMergedReport> {
   const ref = `${req.repo.owner}/${req.repo.name}#${req.issueNumber}`;
-  let pr: PullFacts | null;
-  let task: TaskFacts | null;
-  let execution: ExecutionFacts | null;
+  const blank = emptySnapshot();
+  if (!operatorAllowed(operator)) return refused(mode, req, blank, '未授权：没有可用的 ops 操作者，不纠正');
+  if (!workflowBelongs(req.workflowId, req.repo, req.issueNumber)) {
+    return refused(mode, req, blank, '工作流编号不属于这张单，不能用别的执行来纠正');
+  }
+
+  let first: CorrectMergedSnapshot;
   try {
-    pr = await ports.readPull(req.repo, req.prNumber);
-    task = await ports.readTask(req.repo, req.issueNumber);
-    execution = await ports.readExecution(req.workflowId);
+    first = await ports.read(req);
   } catch (err) {
-    return { status: 'refused', reason: `读取事实没成（${errMessage(err)}），不纠正` };
+    return refused(mode, req, blank, `读取事实没成（${errMessage(err)}），不纠正`);
+  }
+  const decision = decideCorrection(operator, req, first);
+  if (!decision.ok) return refused(mode, req, first, decision.reason);
+  const proposed = previewOf(req, first, true);
+  if (mode === 'precheck') {
+    const view = described(decision, ref, req.prNumber);
+    return { mode, status: view.status, text: view.text, preview: proposed };
   }
 
-  // 幂等：已是纠正后的状态，且身份全部对得上（否则不算已纠正）
-  if (alreadyCorrected(task) && task && pr && pr.merged && pr.head === req.head && pr.mergeCommit === req.mergeCommit) {
-    return { status: 'already', text: `已纠正（之前已做过）：${ref}` };
+  let second: CorrectMergedSnapshot;
+  try {
+    second = await ports.read(req);
+  } catch (err) {
+    return refused(mode, req, first, `读取事实没成（${errMessage(err)}），不纠正`);
   }
+  const again = decideCorrection(operator, req, second);
+  if (!again.ok) return refused(mode, req, second, again.reason);
+  if (again.kind !== decision.kind || fingerprint(first) !== fingerprint(second)) {
+    return refused(mode, req, second, '任务在核对之后变了（并发换代或新运行），拒绝覆盖，请重新预检');
+  }
+  if (again.kind === 'already') {
+    return {
+      mode,
+      status: 'already',
+      text: `已纠正（之前已做过）：${ref}`,
+      preview: previewOf(req, second, true),
+    };
+  }
+  return apply(req, operator, reason, again, second, ports);
+}
 
-  const decision = decideCorrection(req, pr, task, execution);
-  if (!decision.ok) return { status: 'refused', reason: decision.reason };
-  if (!task) return { status: 'refused', reason: '库里没有这张单的任务' };
-
-  const outcome = await ports.casCorrect({
-    taskId: task.id,
-    expectedUpdatedAtMs: task.updatedAtMs,
-    audit: {
-      operator: `${CORRECTED_BY_PREFIX}:${operator}`,
-      reason,
-      evidence: {
-        repo: `${req.repo.owner}/${req.repo.name}`,
-        issue: req.issueNumber,
-        pr: req.prNumber,
-        head: req.head,
-        mergeCommit: req.mergeCommit,
-        workflowId: req.workflowId,
-        runId: req.runId,
-        before: decision.before,
-        after: decision.after,
+async function apply(
+  req: CorrectionRequest,
+  operator: string,
+  reason: string,
+  decision: Extract<CorrectionDecision, { ok: true; kind: 'correct' }>,
+  snap: CorrectMergedSnapshot,
+  ports: CorrectMergedPorts,
+): Promise<CorrectMergedReport> {
+  const task = snap.task as LedgerTask;
+  const ref = `${req.repo.owner}/${req.repo.name}#${req.issueNumber}`;
+  let outcome: 'corrected' | 'stale';
+  try {
+    outcome = await ports.cas({
+      taskId: task.id,
+      expectedUpdatedAtMs: task.updatedAtMs ?? Number.NaN,
+      workflowId: req.workflowId,
+      runId: req.runId,
+      prNumber: req.prNumber,
+      audit: {
+        actorId: `${CORRECTED_BY_PREFIX}:${operator}`,
+        reason,
+        before: decision.receiptBefore,
+        after: decision.receiptAfter,
       },
-    },
-  });
-  if (outcome === 'stale') {
-    return { status: 'refused', reason: '任务行在核对之后变了（并发换代或新运行），拒绝覆盖，请重新预检' };
+    });
+  } catch (err) {
+    return refused('apply', req, snap, `操作记录写不进（${errMessage(err)}），任务行保持原样，不纠正`);
   }
-  return { status: 'corrected', text: `已纠正：${ref}（PR #${req.prNumber} 真实已合，改为 done/merged）` };
+  if (outcome === 'stale') {
+    return refused('apply', req, snap, '任务在核对之后变了（并发换代或新运行），拒绝覆盖，请重新预检');
+  }
+  return {
+    mode: 'apply',
+    status: 'corrected',
+    text: `已纠正：${ref}（PR #${req.prNumber} 真实已合，改为 done/merged；原 abandoned 结论留在原执行结果）`,
+    preview: previewOf(req, snap, true),
+  };
 }

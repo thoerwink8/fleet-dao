@@ -2,6 +2,7 @@
 // 行为照库的约束来（比较后再改、和操作记录同一「事务」、ok=false 的操作记录必须带原因……），
 // 和 pg-store.ts 过同一套契约测试（test/store-contract.ts）。onChange 模拟数据库的 NOTIFY fleet_changes。
 import { randomUUID } from 'node:crypto';
+import { CORRECT_MERGED_AUDIT_ACTION, type CorrectMergedLedger, sessionLinkHolds } from '@fleet-dao/db';
 import {
   type Ban,
   type Channel,
@@ -202,6 +203,15 @@ export interface MemoryData {
   nodeSessions: { nodeId: string; receivedAt: string; report: unknown }[];
   /** 法国工作树最近一份清单（worktree_inventory，#1993）；没存过是 null。原样放，读回来再认一遍。 */
   worktreeInventory: unknown;
+  /**
+   * 任务行上领域对象没有的 phase / updatedAt。受管纠正靠它们做 CAS。
+   * 没给这一行时 phase 和更新时间都是未知，不能当成 abandoned。
+   */
+  taskClosures: { taskId: string; phase: string | null; updatedAt: string | null }[];
+  /** PR 镜像的合并提交。不放进对外的 PullRequestRecord，驾驶舱接口不带它。没有就是没读到。 */
+  pullMerges: { repoId: string; number: number; mergeSha: string | null }[];
+  /** 会话账上的 Temporal run。没记是 null，和库里老行一样，不能拿别的 run 来填。 */
+  runIdentities: { runId: string; temporalRunId: string | null }[];
 }
 
 export function emptyData(): MemoryData {
@@ -235,6 +245,9 @@ export function emptyData(): MemoryData {
     nodeReports: [],
     nodeSessions: [],
     worktreeInventory: null,
+    taskClosures: [],
+    pullMerges: [],
+    runIdentities: [],
   };
 }
 
@@ -275,6 +288,9 @@ export function createMemoryStore(
   options: MemoryStoreOptions = {},
 ): Store & { data: MemoryData } {
   const data: MemoryData = { ...emptyData(), ...seed };
+  data.taskClosures ??= [];
+  data.pullMerges ??= [];
+  data.runIdentities ??= [];
   const now = options.now ?? (() => new Date());
   const changed = (table: RealtimeTable, id: string) => options.onChange?.(table, id);
   let seq = 0;
@@ -323,6 +339,154 @@ export function createMemoryStore(
   function checkAudit(entry: NewAuditEntry): void {
     if (!entry.ok && !entry.error)
       throw new Error('audit_log_failure_has_error：ok=false 的操作记录必须带 error');
+  }
+
+  function sameRepoName(owner: string, name: string, repo: { owner: string; name: string }): boolean {
+    return owner.toLowerCase() === repo.owner.toLowerCase() && name.toLowerCase() === repo.name.toLowerCase();
+  }
+
+  function openRunCount(taskId: string): number {
+    const ids = new Set<string>();
+    for (const run of data.segmentRuns) {
+      if (run.taskId === taskId && run.endedAt === undefined) ids.add(run.id);
+    }
+    for (const run of data.runs) {
+      if (run.taskId === taskId && run.endedAt === undefined) ids.add(`session:${run.id}`);
+    }
+    if (!Number.isSafeInteger(ids.size) || ids.size < 0) throw new Error('活跃会话数读不到');
+    return ids.size;
+  }
+
+  function readLedger(input: {
+    owner: string;
+    name: string;
+    issueNumber: number;
+    prNumber: number;
+  }): CorrectMergedLedger | null {
+    const repos = data.repos.filter((repo) => sameRepoName(input.owner, input.name, repo));
+    if (repos.length === 0) return null;
+    if (repos.length > 1) throw new Error('仓名对上了多行，没有唯一的仓，不纠正');
+    const repo = repos[0];
+    if (!repo) return null;
+    const task = data.tasks.find((row) => row.repoId === repo.id && row.issueNumber === input.issueNumber);
+    if (!task) return null;
+    const closure = data.taskClosures.find((row) => row.taskId === task.id);
+    const sessions = data.segmentRuns
+      .filter((run) => run.taskId === task.id)
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))
+      .map((run) => ({
+        workflowId: run.workflowId ?? null,
+        prNumber: run.prNumber ?? null,
+        temporalRunId: data.runIdentities.find((row) => row.runId === run.id)?.temporalRunId ?? null,
+        ended: run.endedAt !== undefined,
+      }));
+    const mirrorRow = data.pullRequests.find(
+      (row) => row.repoId === repo.id && row.number === input.prNumber,
+    );
+    const corrections = data.audit
+      .filter(
+        (row) => row.ok && row.action === CORRECT_MERGED_AUDIT_ACTION && row.target === `task:${task.id}`,
+      )
+      .sort((a, b) => Number(b.id) - Number(a.id));
+    if (corrections.length > 20) throw new Error('受管纠正的审计记录没有读全，不纠正');
+    return {
+      task: {
+        id: task.id,
+        repo: { owner: repo.owner, name: repo.name },
+        issueNumber: task.issueNumber,
+        state: task.state,
+        phase: closure?.phase ?? null,
+        executor: task.executor ?? 'engine',
+        updatedAt: closure?.updatedAt ?? null,
+        openRunCount: openRunCount(task.id),
+      },
+      sessions,
+      mirror: mirrorRow
+        ? {
+            number: mirrorRow.number,
+            headSha: mirrorRow.headSha,
+            mergeSha:
+              data.pullMerges.find((row) => row.repoId === repo.id && row.number === mirrorRow.number)
+                ?.mergeSha ?? null,
+            issueRefs: mirrorRow.issueRefs ?? [],
+            state: mirrorRow.state,
+          }
+        : null,
+      corrections: corrections.map((row) => ({ before: row.before ?? null, after: row.after ?? null })),
+    };
+  }
+
+  function casLedger(input: {
+    taskId: string;
+    expectedUpdatedAtMs: number;
+    workflowId: string;
+    runId: string;
+    prNumber: number;
+    audit: { actorId: string; reason: string; before: unknown; after: unknown };
+  }): 'corrected' | 'stale' {
+    if (!Number.isSafeInteger(input.expectedUpdatedAtMs)) return 'stale';
+    const index = data.tasks.findIndex((row) => row.id === input.taskId);
+    const task = data.tasks[index];
+    const closure = data.taskClosures.find((row) => row.taskId === input.taskId);
+    if (!task || !closure) return 'stale';
+    const updatedAtMs = closure.updatedAt === null ? null : Date.parse(closure.updatedAt);
+    if (
+      task.state !== 'stopped' ||
+      closure.phase !== 'abandoned' ||
+      (task.executor ?? 'engine') !== 'engine' ||
+      updatedAtMs !== input.expectedUpdatedAtMs ||
+      openRunCount(task.id) !== 0
+    ) {
+      return 'stale';
+    }
+    const sessions = data.segmentRuns
+      .filter((run) => run.taskId === task.id)
+      .map((run) => ({
+        workflowId: run.workflowId ?? null,
+        prNumber: run.prNumber ?? null,
+        temporalRunId: data.runIdentities.find((row) => row.runId === run.id)?.temporalRunId ?? null,
+        ended: run.endedAt !== undefined,
+      }));
+    if (!sessionLinkHolds(sessions, input.workflowId, input.prNumber, input.runId)) return 'stale';
+    const entry: NewAuditEntry = {
+      actor: { kind: 'ops', id: input.audit.actorId },
+      action: CORRECT_MERGED_AUDIT_ACTION,
+      target: `task:${task.id}`,
+      before: input.audit.before,
+      after: input.audit.after,
+      reason: input.audit.reason,
+      via: 'ops',
+      ok: true,
+    };
+    checkAudit(entry);
+    const previous = task;
+    const previousClosure = { ...closure };
+    const changes = data.stateChanges.length;
+    const audits = data.audit.length;
+    try {
+      data.tasks[index] = { ...task, state: 'done' };
+      closure.phase = 'merged';
+      closure.updatedAt = now().toISOString();
+      data.stateChanges.push({
+        id: nextId(),
+        entity: 'task',
+        entityId: task.id,
+        taskId: task.id,
+        from: 'stopped',
+        to: 'done',
+        at: now().toISOString(),
+      });
+      audit(entry);
+      changed('tasks', task.id);
+      return 'corrected';
+    } catch (error) {
+      data.tasks[index] = previous;
+      closure.phase = previousClosure.phase;
+      closure.updatedAt = previousClosure.updatedAt;
+      data.stateChanges.length = changes;
+      data.audit.length = audits;
+      throw error;
+    }
   }
 
   function audit(entry: NewAuditEntry): string {
@@ -745,6 +909,12 @@ export function createMemoryStore(
     },
     async appendAudit(entry) {
       return audit(entry);
+    },
+    async readCorrectMergedLedger(input) {
+      return readLedger(input);
+    },
+    async casCorrectMerged(input) {
+      return casLedger(input);
     },
     async listAudit({ target, ...page }) {
       return paginate(

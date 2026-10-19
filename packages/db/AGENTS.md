@@ -40,3 +40,4 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - `verify_aggregates` 独立存组合结论，来源 run 必须属于同任务/工作流/PR 且已有原始 verdict；已有来源不能跨头或跨验收轮复用。首次精确头由真实验收装配绑定，runs 自身没有 head 列，库不能独立证明首次头身份。
 
 - `recordCheckoutReceipt` 复用 audit_log：每次物理完整检出独立 receiptId，target 为 checkout:<receiptId>，同 ID 同内容幂等、异内容拒绝；事务锁串行查重。无回执的旧历史保持未知，不回填、不以已撤报警冒充成功证据。
+- `readCorrectMergedLedger` / `casCorrectMergedTask`：误记 abandoned 且真实已合的任务。读任务、会话、指定 PR 的镜像和成功的 `task.correct-merged` 回执；CAS 在同一事务里锁任务行，仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍对得上，才改成 done/merged 并写操作记录。不改 runs、pull_requests、acceptance_duties。审计写不进整笔回滚。会话数读不成就抛错，不当成零。

@@ -9,6 +9,7 @@
 import {
   auditLog,
   bans,
+  casCorrectMergedTask,
   channels,
   countTaskGroups,
   type Db,
@@ -29,6 +30,7 @@ import {
   quotaSamplesSince,
   quotaWindows,
   readChannelStates,
+  readCorrectMergedLedger,
   recordFlowAssignment,
   repos,
   routes,
@@ -797,6 +799,13 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     },
     async appendAudit(entry) {
       return insertAudit(db, entry);
+    },
+    async readCorrectMergedLedger(input) {
+      return readCorrectMergedLedger(db, input);
+    },
+    async casCorrectMerged(input) {
+      if (!isUuid(input.taskId)) return 'stale';
+      return casCorrectMergedTask(db, { ...input, now: now() });
     },
     async listAudit({ target, cursor: raw, limit }): Promise<Page<AuditRecord>> {
       const cursor = parseCursor(raw, isSerial);
