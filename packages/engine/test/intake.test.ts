@@ -15,6 +15,7 @@ import {
   type IntakeRepo,
   incompleteComment,
   incompleteKey,
+  judgePrerequisites,
   MAX_ISSUE_FAILURES,
   MAX_RUNNING_TASKS,
   MAX_STARTS_PER_HOUR,
@@ -1784,6 +1785,60 @@ describe('准入 · 正文里的「前置：」（#2783）', () => {
     expect(h.started).toEqual([]);
     expect(h.localMarked).toEqual([]);
     expect(h.comments).toEqual([]);
+  });
+});
+
+describe('judgePrerequisites：拉单和点名派单共用的前置判法（#3298）', () => {
+  const at = new Date('2026-10-02T14:00:00Z'); // 北京时间 10-02 22:00
+  const states =
+    (got: Record<number, 'open' | 'closed'>, asked: number[][] = []) =>
+    async (numbers: readonly number[]) => {
+      asked.push([...numbers]);
+      return new Map(numbers.flatMap((n) => (got[n] ? [[n, got[n]] as const] : [])));
+    };
+
+  it('没写前置、前置都关了：clear；开着的：waiting 只写开着的', async () => {
+    expect(await judgePrerequisites(BODY, at, states({}))).toEqual({ kind: 'clear' });
+    expect(await judgePrerequisites('前置：#5、#6', at, states({ 5: 'closed', 6: 'closed' }))).toEqual({
+      kind: 'clear',
+    });
+    expect(await judgePrerequisites('前置：#5、#6', at, states({ 5: 'closed', 6: 'open' }))).toEqual({
+      kind: 'waiting',
+      why: '等前置 #6',
+    });
+  });
+
+  it('日期没到：waiting「等到 <日期>」，不读前置单；北京时间那天 0 点起不再等', async () => {
+    const asked: number[][] = [];
+    expect(await judgePrerequisites('前置：#5 2026-10-03', at, states({}, asked))).toEqual({
+      kind: 'waiting',
+      why: '等到 2026-10-03',
+    });
+    expect(asked).toEqual([]);
+    expect(
+      await judgePrerequisites('前置：2026-10-03', new Date('2026-10-02T16:00:00Z'), states({})),
+    ).toEqual({ kind: 'clear' });
+  });
+
+  it('【故意造出的失败】读失败、缺号：unchecked，写明没查成，不当成都关了', async () => {
+    const thrown = await judgePrerequisites('前置：#5', at, async () => {
+      throw new Error('GraphQL 502');
+    });
+    expect(thrown).toMatchObject({ kind: 'unchecked', numbers: [5] });
+    expect(thrown.kind === 'unchecked' && thrown.why).toContain('GraphQL 502');
+    const missing = await judgePrerequisites('前置：#5、#6', at, states({ 5: 'closed' }));
+    expect(missing).toMatchObject({ kind: 'unchecked', numbers: [5, 6] });
+    expect(missing.kind === 'unchecked' && missing.why).toContain('#6 没读到状态');
+  });
+
+  it('代码块、引用里的「前置：」是举例：clear，不读前置单；正文不是文字就抛', async () => {
+    const asked: number[][] = [];
+    const body = '```\n前置：#7\n```\n\n> 前置：#8';
+    expect(await judgePrerequisites(body, at, states({ 7: 'open', 8: 'open' }, asked))).toEqual({
+      kind: 'clear',
+    });
+    expect(asked).toEqual([]);
+    await expect(judgePrerequisites(null, at, states({}))).rejects.toThrow('单正文读不到');
   });
 });
 
