@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
@@ -23,6 +24,7 @@ import {
   MAX_RECEIPT_FILES,
   MAX_RECEIPT_ROWS,
   observeContinuation,
+  readDiagnosticPool,
   readReceipts,
   receiptContext,
   receiptStatus,
@@ -30,6 +32,15 @@ import {
 import { main } from '../hooks/unattended.mjs';
 import { runChild } from './child.ts';
 import { codexSourceFixture } from './codex-source-fixture.ts';
+
+type Receipt = Record<string, unknown> & {
+  decision: string;
+  phase: string;
+  source: string;
+  session: string | null;
+};
+const POOL_NAME = 'fleet-dao:non-root-receipt-diagnostic-pool:v1';
+const sha = (path: string) => createHash('sha256').update(readFileSync(path)).digest('hex');
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -73,7 +84,13 @@ function fixture(cli: 'codex' | 'claude' = 'codex') {
   const context = (more: object = {}, captured = state()) =>
     receiptContext(dir, { session_id: sid, ...more }, captured, 'Stop', env);
   const file = join(dir, '.receipts', `${fingerprint(sid)}.jsonl`);
-  return { dir, sid, env, state, command, run, rows, context, file };
+  const poolFile = join(dir, '.receipts', `${fingerprint(POOL_NAME)}.jsonl`);
+  const pool = () => {
+    const r = readDiagnosticPool(dir);
+    if (!r.ok) throw Error(r.code);
+    return r.rows as unknown as (Receipt & { pool: string; authority: string })[];
+  };
+  return { dir, sid, env, state, command, run, rows, context, file, pool, poolFile };
 }
 describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, () => {
   it('真实Stop准备/写出不同阶段；同轮非新轮，下一轮来源未知，任意工具不证明消费', () => {
@@ -120,7 +137,12 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     s.run('stop', { turn_id: 'turn-one' });
     s.run('continuation-progress', { turn_id: 'turn-child', agent_id: 'child-one' });
     expect(s.rows().some((r) => r.phase === 'next_turn_observed')).toBe(false);
-    expect(s.rows().find((r) => r.decision === 'subagent')).toMatchObject({ source: 'subagent' });
+    expect(s.rows().some((r) => r.decision === 'subagent')).toBe(false);
+    expect(s.pool().find((r) => r.decision === 'subagent')).toMatchObject({
+      source: 'subagent',
+      authority: 'machine',
+      session: fingerprint(s.sid),
+    });
     s.run('continuation-progress', { session_id: null, turn_id: 'turn-two' });
     expect(s.rows().some((r) => r.phase === 'next_turn_observed')).toBe(false);
     const c = fixture('claude');
@@ -138,7 +160,12 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     expect(s.rows().some((r) => r.phase === 'next_turn_observed')).toBe(false);
     s.run('continuation-progress', { turn_id: 'turn-two' }, { CODEX_THREAD_ID: 'different-inherited-id' });
     expect(s.rows().some((r) => r.phase === 'next_turn_observed')).toBe(false);
-    expect(s.rows().some((r) => r.phase === 'fault' && r.decision === 'identity_unknown')).toBe(true);
+    expect(s.rows().some((r) => r.phase === 'fault' && r.decision === 'identity_unknown')).toBe(false);
+    expect(
+      s
+        .pool()
+        .some((r) => r.phase === 'fault' && r.decision === 'identity_unknown' && r.authority === 'unknown'),
+    ).toBe(true);
   });
   it('on换代保留回执，旧hook晚写不挂新窗口；legacy无generation仍未知', () => {
     const s = fixture(),
@@ -564,5 +591,214 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     );
     expect(status.status).toBe(1);
     expect(JSON.parse(status.stdout)).toEqual({ evidence: 'unknown', code: 'STATE_UNKNOWN' });
+  });
+});
+
+describe('非根/身份未知事件转入共享诊断池，不占交互会话日志容量（#3293）', { timeout: 0 }, () => {
+  const startEvent = { source: 'startup' };
+  /** 三个入口各跑一遍同一个非根场景。 */
+  const allEntries = (s: ReturnType<typeof fixture>, more: object, env: NodeJS.ProcessEnv = {}) => {
+    s.run('continuation-start', { ...startEvent, ...more }, env);
+    s.run('continuation-progress', { tool_use_id: 'tool-x', ...more }, env);
+    return s.run('stop', { turn_id: 'turn-x', ...more }, env);
+  };
+  const scenarios: { name: string; more: object; env: NodeJS.ProcessEnv; authority: string }[] = [
+    { name: '显式agent_id', more: { agent_id: 'agent-a' }, env: {}, authority: 'machine' },
+    { name: 'headless', more: {}, env: { FLEET_HEADLESS: '1' }, authority: 'machine' },
+    { name: 'worker', more: {}, env: { FLEET_WORKER: '1' }, authority: 'machine' },
+    {
+      name: '来源未知（事件与环境冲突）',
+      more: {},
+      env: { CODEX_THREAD_ID: 'other-thread' },
+      authority: 'unknown',
+    },
+  ];
+  it.each(scenarios)(
+    '$name：三个入口都不增长父session日志，诊断落池且保留原判定',
+    ({ more, env, authority }) => {
+      const s = fixture();
+      const before = sha(s.file);
+      const rootRows = s.rows().length;
+      const r = allEntries(s, more, env);
+      expect(sha(s.file)).toBe(before);
+      expect(s.rows()).toHaveLength(rootRows);
+      const pool = s.pool();
+      expect(pool.length).toBeGreaterThanOrEqual(6);
+      for (const row of pool) {
+        expect(row).toMatchObject({ pool: 'non-root', authority, session: fingerprint(s.sid) });
+      }
+      for (const event of ['SessionStart', 'PostToolUse', 'Stop'])
+        expect(pool.some((row) => row.event === event && row.phase === 'entered')).toBe(true);
+      // 原钩子决策不变：非根/未知不拦。
+      expect(r.stdout).not.toContain('"decision":"block"');
+      expect(s.state().totalBlocks).toBe(0);
+      // 池里的任何事件都不是根续轮证据。
+      expect(pool.some((row) => ['prepared', 'emitted', 'next_turn_observed'].includes(row.phase))).toBe(
+        false,
+      );
+      expect(receiptStatus(s.dir, s.sid, s.state().generation)).toMatchObject({
+        rootContinuation: 'unknown',
+        resultConsumption: 'unknown',
+        requestEmitted: false,
+      });
+    },
+  );
+  it('原生子代理独立session：不建自己的日志，也不碰父日志', () => {
+    const s = fixture();
+    const child = 'native-child-thread';
+    const { home } = codexSourceFixture(
+      s.dir,
+      child,
+      { subagent: { thread_spawn: { parent_thread_id: s.sid, depth: 1, agent_path: '/root/x' } } },
+      s.sid,
+    );
+    const before = sha(s.file);
+    for (let i = 0; i < 3; i++) {
+      s.run(
+        'continuation-progress',
+        { session_id: child, tool_use_id: `t-${i}` },
+        { CODEX_THREAD_ID: child, CODEX_HOME: home },
+      );
+    }
+    expect(sha(s.file)).toBe(before);
+    expect(existsSync(join(s.dir, '.receipts', `${fingerprint(child)}.jsonl`))).toBe(false);
+    expect(s.pool().every((row) => row.session === fingerprint(child) && row.authority === 'machine')).toBe(
+      true,
+    );
+    expect(readdirSync(join(s.dir, '.receipts')).filter((n) => n.endsWith('.jsonl'))).toHaveLength(2);
+  });
+  it('已识别机器无agent_id：命令入口也走原authority，on仍被拒，off记入池', () => {
+    const s = fixture();
+    const before = sha(s.file);
+    const env = {
+      ...s.env,
+      FLEET_WORKER: '1',
+      CODEX_THREAD_ID: '',
+      CODEX_SESSION_ID: '',
+      CLAUDE_CODE_SESSION_ID: s.sid,
+    };
+    expect(main(['on'], { env, out: () => {}, err: () => {} })).toBe(2);
+    expect(main(['off'], { env, out: () => {}, err: () => {} })).toBe(0);
+    expect(sha(s.file)).toBe(before);
+    expect(s.pool().find((row) => row.decision === 'off')).toMatchObject({ authority: 'machine' });
+  });
+  it('根session正常事件、Command与Stop继续写原日志，不进池', () => {
+    const s = fixture();
+    s.run('continuation-start', startEvent);
+    s.run('continuation-progress', { tool_use_id: 'root-tool' });
+    expect(JSON.parse(s.run('stop', { turn_id: 'root-turn' }).stdout).decision).toBe('block');
+    const rows = s.rows();
+    expect(rows.some((r) => r.event === 'Command' && r.decision === 'on')).toBe(true);
+    for (const event of ['SessionStart', 'PostToolUse', 'Stop'])
+      expect(rows.some((r) => r.event === event && r.phase === 'entered')).toBe(true);
+    expect(existsSync(s.poolFile)).toBe(false);
+  });
+  it('池名是旧准入认得的64位十六进制名，池与根格式互不通用', () => {
+    const s = fixture();
+    allEntries(s, { agent_id: 'agent-a' });
+    expect(s.poolFile).toMatch(/[a-f0-9]{64}\.jsonl$/);
+    expect(existsSync(s.poolFile)).toBe(true);
+    const poolRow = JSON.parse(readFileSync(s.poolFile, 'utf8').split('\n')[0] ?? '');
+    // 池行不是根格式；根行不是池格式。
+    const rootLine = `${JSON.stringify(s.rows()[0])}\n`;
+    writeFileSync(s.file, `${JSON.stringify(poolRow)}\n`);
+    expect(readReceipts(s.dir, fingerprint(s.sid))).toEqual({ ok: false, code: 'IO' });
+    writeFileSync(s.poolFile, rootLine);
+    expect(readDiagnosticPool(s.dir).ok).toBe(false);
+  });
+  it('池满4096行：明确LIMIT、池原样，不外溢到父日志，Stop原决策不变，根仍可追加', () => {
+    const s = fixture();
+    allEntries(s, { agent_id: 'agent-a' });
+    const line = readFileSync(s.poolFile, 'utf8').split('\n')[0];
+    writeFileSync(s.poolFile, `${line}\n`.repeat(MAX_RECEIPT_ROWS));
+    const poolHash = sha(s.poolFile);
+    const rootHash = sha(s.file);
+    const r = s.run('stop', { agent_id: 'agent-a' });
+    expect(r.stderr).toContain('LIMIT');
+    expect(r.status).toBe(0);
+    expect(sha(s.poolFile)).toBe(poolHash);
+    expect(sha(s.file)).toBe(rootHash);
+    expect(readDiagnosticPool(s.dir)).toMatchObject({ ok: true });
+    expect(JSON.parse(s.run('stop', { turn_id: 'root-turn' }).stdout).decision).toBe('block');
+    expect(sha(s.file)).not.toBe(rootHash);
+  });
+  it('目录已满128份：池不新增、不清历史；池已存在时仍能在自身上限内追加', () => {
+    const s = fixture();
+    const root = join(s.dir, '.receipts');
+    for (let i = 1; i < MAX_RECEIPT_FILES; i++)
+      writeFileSync(join(root, `${fingerprint(`o-${i}`)}.jsonl`), '');
+    const names = readdirSync(root).sort();
+    const rootHash = sha(s.file);
+    const r = s.run('stop', { agent_id: 'agent-a' });
+    expect(r.stderr).toContain('LIMIT');
+    expect(r.status).toBe(0);
+    expect(existsSync(s.poolFile)).toBe(false);
+    expect(readdirSync(root).sort()).toEqual(names);
+    expect(sha(s.file)).toBe(rootHash);
+    // 池先于满额存在：不需要新准入。
+    rmSync(join(root, `${fingerprint('o-1')}.jsonl`));
+    s.run('stop', { agent_id: 'agent-a' });
+    expect(existsSync(s.poolFile)).toBe(true);
+    writeFileSync(join(root, `${fingerprint('o-1')}.jsonl`), '');
+    const before = s.pool().length;
+    s.run('stop', { agent_id: 'agent-a' });
+    expect(s.pool().length).toBeGreaterThan(before);
+  });
+  it('旧根恰满4096行：非根事件不动它，root自身上限仍执行，历史hash不变', () => {
+    const s = fixture();
+    const row = `${JSON.stringify(s.rows()[0])}\n`;
+    writeFileSync(s.file, row.repeat(MAX_RECEIPT_ROWS));
+    const before = sha(s.file);
+    allEntries(s, { agent_id: 'agent-a' });
+    expect(sha(s.file)).toBe(before);
+    expect(s.pool().length).toBeGreaterThan(0);
+    expect(appendReceipt(s.context(), { phase: 'entered', decision: 'none' })).toEqual({
+      ok: false,
+      code: 'LIMIT',
+    });
+    expect(sha(s.file)).toBe(before);
+  });
+  it.each(['partial', 'bad-shape', 'locked', 'link', 'not-file'] as const)(
+    '池%s：明确unknown，不改父日志，不改钩子原决策',
+    (kind) => {
+      const s = fixture();
+      allEntries(s, { agent_id: 'agent-a' });
+      const rootHash = sha(s.file);
+      const outside = join(s.dir, 'outside-target');
+      writeFileSync(outside, 'private-linked-data');
+      if (kind === 'partial') writeFileSync(s.poolFile, '{"broken":');
+      if (kind === 'bad-shape') writeFileSync(s.poolFile, '{"private":"sensitive"}\n');
+      if (kind === 'locked') writeFileSync(`${s.poolFile}.lock`, '');
+      if (kind === 'link') {
+        rmSync(s.poolFile);
+        symlinkSync(outside, s.poolFile, 'file');
+      }
+      if (kind === 'not-file') {
+        rmSync(s.poolFile);
+        mkdirSync(s.poolFile);
+      }
+      expect(readDiagnosticPool(s.dir).ok).toBe(false);
+      const r = s.run('stop', { agent_id: 'agent-a' });
+      expect(r.status).toBe(0);
+      expect(r.stderr).toMatch(/回执没查成/);
+      expect(r.stderr).not.toContain('private');
+      expect(sha(s.file)).toBe(rootHash);
+      expect(readFileSync(outside, 'utf8')).toBe('private-linked-data');
+      expect(JSON.parse(s.run('stop', { turn_id: 'root-turn' }).stdout).decision).toBe('block');
+    },
+  );
+  it('池写后关闭失败：报IO并保留锁使读回unknown，不泄露原始错误', async () => {
+    const s = fixture();
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+    const ctx = receiptContext(s.dir, { session_id: s.sid, agent_id: 'a' }, null, 'Stop', s.env, {
+      kind: 'machine',
+    });
+    vi.mocked(closeSync).mockImplementationOnce((fd) => {
+      actual.closeSync(fd);
+      throw Error('private-pool-close');
+    });
+    expect(appendReceipt(ctx, { phase: 'entered', decision: 'none' })).toEqual({ ok: false, code: 'IO' });
+    expect(readDiagnosticPool(s.dir)).toEqual({ ok: false, code: 'BUSY' });
+    expect(readFileSync(s.poolFile, 'utf8')).not.toContain('private-');
   });
 });

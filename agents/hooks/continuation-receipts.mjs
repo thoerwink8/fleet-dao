@@ -69,12 +69,15 @@ const codeOf = (error) => {
   return SAFE_CODES.has(code) ? code : 'IO';
 };
 /** @typedef {{version: 1, at: string, session: string|null, generation: string|null, event: string, eventKey: string|null, cli: string, source: string, turn: string|null, agent: string|null, phase: string, decision: string, continuation: string|null, originTurn: string|null, results: string[], omittedResults: number}} Receipt */
-/** @typedef {{dir: string, session: string|null, generation: string|null, event: string, eventKey: string|null, cli: string, source: string, turn: string|null, agent: string|null}} Context */
+/** @typedef {{dir: string, session: string|null, generation: string|null, event: string, eventKey: string|null, cli: string, source: string, turn: string|null, agent: string|null, pool: 'session'|'diagnostic', authority: 'machine'|'unknown'|null}} Context */
+/** @typedef {Receipt & {pool: 'non-root', authority: 'machine'|'unknown'}} PoolReceipt */
 /** 事件身份只能取本次输入；缺失不能用继承环境补成已绑定。CLI家族不作为根来源证据。
+ * authority 是入口已算出的原判定：只有 machine/unknown 才改存非根诊断池，allowed 或未传保持原会话日志。
  * @param {string} dir @param {unknown} input @param {unknown} state @param {string} event @param {NodeJS.ProcessEnv} [env]
+ * @param {{kind?: string}} [authority]
  * @returns {Context}
  */
-export function receiptContext(dir, input, state, event, env = process.env) {
+export function receiptContext(dir, input, state, event, env = process.env, authority) {
   const prop = (/** @type {unknown} */ obj, /** @type {string} */ key) =>
     obj && typeof obj === 'object' ? Reflect.get(obj, key) : undefined;
   const claude = !!env.CLAUDE_CODE_SESSION_ID,
@@ -91,12 +94,16 @@ export function receiptContext(dir, input, state, event, env = process.env) {
     source: agent ? 'subagent' : 'unknown',
     agent,
     turn: cli === 'codex' ? idOf(prop(input, 'turn_id')) : null,
+    pool: authority?.kind === 'machine' || authority?.kind === 'unknown' ? 'diagnostic' : 'session',
+    authority: authority?.kind === 'machine' || authority?.kind === 'unknown' ? authority.kind : null,
   };
 }
-/** @param {string} dir @param {string|null} session */
-const paths = (dir, session) => {
+/** 非根诊断池文件名是固定的64位十六进制，旧版目录准入认得；真实会话号过 idOf 后是其哈希，撞不上这个固定名。 */
+const POOL_FILE = fingerprint('fleet-dao:non-root-receipt-diagnostic-pool:v1');
+/** @param {string} dir @param {string|null} session @param {boolean} [pool] */
+const paths = (dir, session, pool = false) => {
   const root = join(dir, '.receipts');
-  const file = join(root, `${session ?? 'unbound'}.jsonl`);
+  const file = join(root, `${pool ? POOL_FILE : (session ?? 'unbound')}.jsonl`);
   return { root, file, lock: `${file}.lock` };
 };
 /** @param {string} root */
@@ -171,10 +178,18 @@ function isReceipt(value) {
     r.omittedResults >= 0
   );
 }
-/** @param {number} fd @param {string|null} session
+/** 诊断池行：在原回执格式上多 pool/authority 两字段，session 保存原事件指纹（可空），不充当会话身份。
+ * @param {unknown} value @returns {value is PoolReceipt}
+ */
+function isPoolReceipt(value) {
+  if (!value || typeof value !== 'object') return false;
+  const { pool, authority, ...rest } = /** @type {Record<string, unknown>} */ (value);
+  return pool === 'non-root' && (authority === 'machine' || authority === 'unknown') && isReceipt(rest);
+}
+/** @param {number} fd @param {string|null} session @param {boolean} [pool]
  * @returns {{ok:true, rows:Receipt[], evidence:'observed'|'unknown'}|{ok:false, code:string}}
  */
-function readOpened(fd, session) {
+function readOpened(fd, session, pool = false) {
   const opened = fstatSync(fd);
   if (!opened.isFile()) return { ok: false, code: 'IO' };
   if (opened.size >= MAX_RECEIPT_BYTES) return { ok: false, code: 'LIMIT' };
@@ -195,17 +210,17 @@ function readOpened(fd, session) {
   const rows = lines.map((line) => {
     if (Buffer.byteLength(line) >= MAX_ROW_BYTES) throw new Error();
     const row = JSON.parse(line);
-    if (!isReceipt(row) || row.session !== session) throw new Error();
+    if (pool ? !isPoolReceipt(row) : !isReceipt(row) || row.session !== session) throw new Error();
     return row;
   });
   return { ok: true, rows, evidence: 'observed' };
 }
 /** 有锁、损坏、超限均报未知；没有文件也不证明没触发。
- * @param {string} dir @param {string|null} session
+ * @param {string} dir @param {string|null} session @param {boolean} [pool]
  * @returns {{ok:true, rows:Receipt[], evidence:'observed'|'unknown'}|{ok:false, code:string}}
  */
-export function readReceipts(dir, session) {
-  const p = paths(dir, session);
+export function readReceipts(dir, session, pool = false) {
+  const p = paths(dir, session, pool);
   /** @type {number|undefined} */ let fd;
   /** @returns {{ok:true, rows:Receipt[], evidence:'observed'|'unknown'}|{ok:false, code:string}} */
   const read = () => {
@@ -219,7 +234,7 @@ export function readReceipts(dir, session) {
       }
       checkFile(p.file);
       fd = openSync(p.file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      return readOpened(fd, session);
+      return readOpened(fd, session, pool);
     } catch (error) {
       return codeOf(error) === 'ENOENT'
         ? { ok: true, rows: [], evidence: 'unknown' }
@@ -236,11 +251,16 @@ export function readReceipts(dir, session) {
   }
   return result;
 }
+/** 非根诊断池只读：严格按池格式校验，行里的 session 是原事件指纹而非会话；任何行都不是根执行/续轮/消费证明。
+ * @param {string} dir
+ */
+export const readDiagnosticPool = (dir) => readReceipts(dir, null, true);
 /** @param {Context} context @param {{phase:string,decision:string,continuation?:string|null,originTurn?:string|null,results?:string[]}} detail
  * @returns {{ok:true}|{ok:false,code:string}}
  */
 export function appendReceipt(context, detail) {
-  const p = paths(context.dir, context.session);
+  const pool = context.pool === 'diagnostic';
+  const p = paths(context.dir, context.session, pool);
   /** @type {number|undefined} */ let fd;
   /** @type {number|undefined} */ let output;
   /** @type {number|undefined} */ let admission;
@@ -266,8 +286,9 @@ export function appendReceipt(context, detail) {
         originTurn: detail.originTurn ?? null,
         results: results.slice(0, 16).map(fingerprint),
         omittedResults: Math.max(0, results.length - 16),
+        ...(pool ? { pool: 'non-root', authority: context.authority } : {}),
       };
-      if (!isReceipt(row)) return { ok: false, code: 'SHAPE' };
+      if (pool ? !isPoolReceipt(row) : !isReceipt(row)) return { ok: false, code: 'SHAPE' };
       const text = `${JSON.stringify(row)}\n`;
       if (Buffer.byteLength(text) >= MAX_ROW_BYTES) return { ok: false, code: 'ROW_LIMIT' };
       mkdirSync(p.root, { recursive: true, mode: 0o700 });
@@ -293,7 +314,7 @@ export function appendReceipt(context, detail) {
       if (!target.isFile()) return { ok: false, code: 'IO' };
       const size = target.size;
       if (size + Buffer.byteLength(text) >= MAX_RECEIPT_BYTES) return { ok: false, code: 'LIMIT' };
-      const prior = readOpened(output, context.session);
+      const prior = readOpened(output, context.session, pool);
       if (!prior.ok) return prior;
       if (prior.rows.length >= MAX_RECEIPT_ROWS) return { ok: false, code: 'LIMIT' };
       appendFileSync(output, text, { encoding: 'utf8' });

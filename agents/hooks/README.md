@@ -19,7 +19,7 @@ pnpm typecheck
 
 无人值守身份闸由 `codex-session-source.mjs` 只读当前 Codex 首条 session_meta；原生子代理即使未设 FLEET_WORKER 也拒绝开启或代改父窗口。来源冲突/不完整/超界明确unknown，开场和续轮不借父状态；受配 Mirasim sessions 根链接允许，后代日期/文件链接拒绝。它只作准入，不证明宿主续轮或根消费。
 
-无人值守执行回执由 `continuation-receipts.mjs` 共用，既有 Stop/start/progress 入口只追加脱敏阶段，不另起通知、轮询或看护。每份上限2MiB、最多128份，目录准入与读取均有界，满额保留历史并明确未知。`pnpm exec node agents/hooks/unattended.mjs status --receipts` 读当前窗口；无证据、坏行、超限或锁故障明确unknown，不能把on、prepared/emitted或同session工具事件称为根会话已接续/结果已消费。完整边界见 [CLI无人值守接续](../../docs/design/CLI无人值守接续.md)。
+无人值守执行回执由 `continuation-receipts.mjs` 共用，既有 Stop/start/progress 入口只追加脱敏阶段，不另起通知、轮询或看护。每份上限2MiB、最多128份，目录准入与读取均有界，满额保留历史并明确未知。`pnpm exec node agents/hooks/unattended.mjs status --receipts` 读当前窗口；无证据、坏行、超限或锁故障明确unknown，不能把on、prepared/emitted或同session工具事件称为根会话已接续/结果已消费。机器/子代理/headless/worker 与身份未知事件按入口已有的 authority 结果转入共享的非根诊断池（固定哈希名、计入128份总准入、同样2MiB/4096行上限），不再占交互会话日志；池满或故障明确unknown，不改钩子决策，池内事件不证明根续轮或消费，根自身上限与历史不变。完整边界见 [CLI无人值守接续](../../docs/design/CLI无人值守接续.md)。
 
 session-start只列同血缘旧号实际prompt-log历史，保留时间/字数封顶与来源读取失败诊断。turns缺行不判断丢失，旧seen和steer-shown不参与投递。inbox-watch在退役目录中；inbox-tick和steer-shown也已移除，标准同步清理受管安装目录的旧脚本，不删除用户历史状态。Stop仍保留stop与work-watch，只有work-watch使用asyncRewake。
 
