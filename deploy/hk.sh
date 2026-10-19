@@ -17,6 +17,8 @@ source "$DEPLOY_DIR/lib/common.sh"
 source "$DEPLOY_DIR/lib/snapshot.sh"
 # shellcheck source=lib/root-exec-check.sh
 source "$DEPLOY_DIR/lib/root-exec-check.sh"
+# shellcheck source=lib/nginx-body.sh
+source "$DEPLOY_DIR/lib/nginx-body.sh"
 # fail2ban 的 sshd jail 装法复用法国的（setup_fail2ban_sshd、readback_fail2ban_sshd）。它顺带带进来同名的 setup_identity、
 # setup_firewall：下面香港自己的同名函数在 source 之后定义，会盖掉它们，所以这一行必须在所有函数定义之前。
 # shellcheck source=lib/human-tier.sh
@@ -460,6 +462,8 @@ default_site_codes() {
 setup_site() {
   step "nginx 站点（$SITE_AVAILABLE）"
   ensure_pkgs nginx
+  # 配置没变也核/修请求体落盘目录；否则小请求通、大 webhook 在转发前 500。
+  ensure_nginx_body || return 1
   # 驾驶舱页面归 root：跑在这台上的别的进程被打穿也改不了驾驶舱的页面
   ensure_dir "$WEB_ROOT" root:root 755
   # 占位页只在还没有首页时放：驾驶舱真正发布之后，这一步不能把它盖掉（只管属主和权限）
@@ -985,6 +989,8 @@ readback_wireguard() {
 
 readback_site() {
   local name=${FLEET_DOMAIN:-$PLACEHOLDER_NAME} code probe token body gaps
+  # 只读核目录和真实 worker 身份，不用会改临时目录 metadata 的 nginx -t/-T。
+  readback_nginx_body || return 1
   if [[ "$(systemctl is-active nginx 2>/dev/null)" != active ]]; then
     red "nginx 没在跑"
     return 0
