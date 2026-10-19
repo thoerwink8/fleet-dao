@@ -400,6 +400,68 @@ describe('engine-pulls：撤自动合并、关 PR、留言', () => {
     expect(pr.auto_merge).toBe(false);
   });
 
+  it.each([{ enablePullRequestAutoMerge: null }, null])(
+    'GraphQL null bubbling 隐去已成功挂载的 payload：%j',
+    async (data) => {
+      const { gh, fake } = setup();
+      const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('a') } });
+      fake.before.push((req) => {
+        if (
+          req.path === '/graphql' &&
+          (req.body as { query: string }).query.includes('enablePullRequestAutoMerge')
+        ) {
+          pr.auto_merge = true;
+          return json(200, {
+            data,
+            errors: [
+              {
+                message: 'non-null child field unavailable',
+                path: ['enablePullRequestAutoMerge', 'pullRequest', 'id'],
+              },
+            ],
+          });
+        }
+        return undefined;
+      });
+      await expect(
+        gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}` }),
+      ).rejects.toThrow('non-null child field unavailable');
+      expect(pr.auto_merge).toBe(false);
+    },
+  );
+
+  it.each(
+    [
+      ['enablePullRequestAutoMerge'],
+      ['anotherMutation', 'pullRequest', 'id'],
+      ['enablePullRequestAutoMerge', null],
+      'enablePullRequestAutoMerge.pullRequest',
+    ].map((path) => ({ path })),
+  )('仅精确 mutation 子字段路径才判未知写；确定拒挂保留原错：%j', async ({ path }) => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('a') } });
+    fake.before.push((req) => {
+      if (
+        req.path === '/graphql' &&
+        (req.body as { query: string }).query.includes('enablePullRequestAutoMerge')
+      )
+        return json(200, {
+          data: { enablePullRequestAutoMerge: null },
+          errors: [{ message: 'Pull request is in clean status', path }],
+        });
+      return undefined;
+    });
+    await expect(
+      gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}` }),
+    ).rejects.toMatchObject({
+      code: 'GRAPHQL_ERROR',
+      maybeLanded: false,
+      message: expect.stringContaining('clean status'),
+    });
+    expect(fake.calls('POST', /^\/graphql$/)).toHaveLength(1);
+    expect(pr.auto_merge).toBe(false);
+  });
+
   it('挂载已落地但 GraphQL data 丢失：客户端解析错误也必须撤挂', async () => {
     const { gh, fake } = setup();
     const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('a') } });

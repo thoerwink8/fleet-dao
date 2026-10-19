@@ -533,8 +533,33 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
           { mutation: true, ...options },
         );
       } catch (error) {
-        if (error instanceof GitHubError && (error.maybeLanded || error.code === 'UNEXPECTED_RESPONSE'))
-          await revokeUnverified(error);
+        if (error instanceof GitHubError) {
+          // 非空子字段报错可把整份 payload 向上置 null；只认本次 mutation 的精确子字段路径。
+          const details = error.details;
+          const nestedAutoMergeError =
+            typeof details === 'object' &&
+            details !== null &&
+            'errors' in details &&
+            Array.isArray(details.errors) &&
+            details.errors.some((entry: unknown) => {
+              if (typeof entry !== 'object' || entry === null || !('path' in entry)) return false;
+              const path = entry.path;
+              return (
+                Array.isArray(path) &&
+                path.length > 1 &&
+                path[0] === 'enablePullRequestAutoMerge' &&
+                path
+                  .slice(1)
+                  .every(
+                    (part: unknown) =>
+                      typeof part === 'string' ||
+                      (typeof part === 'number' && Number.isInteger(part) && part >= 0),
+                  )
+              );
+            });
+          if (error.maybeLanded || error.code === 'UNEXPECTED_RESPONSE' || nestedAutoMergeError)
+            await revokeUnverified(error);
+        }
         throw error;
       }
       // 核已挂请求的消息；这不证明 merge queue 最终会沿用它（GitHub 明确会忽略自定义消息）。
