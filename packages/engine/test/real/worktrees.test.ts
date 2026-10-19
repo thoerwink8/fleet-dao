@@ -101,7 +101,7 @@ describe('清理事务分页的真实装配（帮手回执由测试摆布）', (
   };
   const hash = (n: number) => n.toString(16).padStart(64, '0');
   const tail = { id: 'e'.repeat(64), pathHash: hash(120), phase: 'RECOVERY_REQUIRED' };
-  const head = { version: 1, state: 'ok', namespace, generation: '9.121' };
+  const head = { version: 1, state: 'ok', namespace, generation: 'd'.repeat(64) };
   const firstPage = { ...head, rows: [], truncated: true, after: null, next: hash(99) };
   const lastPage = { ...head, rows: [tail], truncated: false, after: hash(99), next: null };
   let dir: string;

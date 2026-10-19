@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 
 sys.dont_write_bytecode = True
@@ -377,6 +378,7 @@ while True: time.sleep(0.1)
         # partial: the old fixed prefix shows no rows, which never proves the namespace is clear.
         self.assertEqual((first["rows"], first["truncated"]), ([], True))
         self.assertEqual(first["next"], self.m.path_hash(paths[99]))
+        self.assertRegex(first["generation"], "^[0-9a-f]{64}$")
         pages = self.walk()
         self.assertEqual(len(pages), 2)
         self.assertEqual({p["generation"] for p in pages}, {first["generation"]})
@@ -408,7 +410,7 @@ while True: time.sleep(0.1)
         with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
             self.walk()
         self.m.PAGE_BYTES = 96 * 1024
-        self.m.PAGE_SECONDS = 0
+        self.m.PAGE_SOFT_SECONDS = 0
         timed = self.walk()
         self.assertEqual(len(timed), 101)
         self.assertTrue(all(p["truncated"] for p in timed[:-1]))
@@ -439,13 +441,153 @@ while True: time.sleep(0.1)
         with self.assertRaisesRegex(self.m.Kept, "disappeared"):
             self.page(replaced)
 
+    def mutate_after_read(self, bucket, mutate):
+        """Run `mutate` once, right after `bucket` was read: i.e. while that page is still being read."""
+        original, fired = self.m.bucket_rows, []
+
+        def wrapped(ph, budget):
+            got = original(ph, budget)
+            if ph == bucket and not fired:
+                fired.append(ph)
+                mutate()
+            return got
+
+        self.m.bucket_rows = wrapped
+        self.addCleanup(setattr, self.m, "bucket_rows", original)
+        return fired
+
+    def update_phase(self, rec, phase):
+        with self.m.chain(self.root + "/" + self.m.PRIVATE + "/" + rec["pathHash"] + "/" + rec["id"],
+                          private=True) as (fd, _):
+            self.m.write_record(fd, dict(rec, phase=phase))
+
+    def test_cleanup_visited_bucket_change_between_pages_restarts(self):
+        paths, tail = self.crowded(130)
+        first = self.m.main(["cleanup-status"])
+        head = self.bucket_record(paths[0], "PREPARED", "9")  # a new transaction in an already read bucket
+        self.assertEqual(self.page(first)["state"], "changed")
+        restarted = self.walk()
+        self.assertEqual(sorted(r["id"] for p in restarted for r in p["rows"]), sorted([tail["id"], head["id"]]))
+        again = self.m.main(["cleanup-status"])
+        self.update_phase(head, "DELETING")  # a phase write to a read transaction
+        self.assertEqual(self.page(again)["state"], "changed")
+
+    def test_cleanup_change_during_last_page_read_is_never_complete(self):
+        paths, tail = self.crowded(130)
+        last = self.m.path_hash(paths[-1])
+        original = self.m.bucket_rows
+
+        def late_bucket():
+            with self.m.locked(self.root + "/_tmp/late"):
+                pass
+
+        for name, mutate in (
+            ("new transaction in a read bucket", lambda: self.bucket_record(paths[0], "PREPARED", "9")),
+            ("tail transaction rewritten", lambda: self.update_phase(tail, "DELETING")),
+            ("bucket added after the scan", late_bucket),
+        ):
+            with self.subTest(name):
+                self.m.bucket_rows = original
+                first = self.m.main(["cleanup-status"])
+                self.mutate_after_read(last, mutate)
+                reply = self.page(first)
+                self.assertEqual(reply["state"], "changed")
+                self.assertNotIn("rows", reply)
+        self.m.bucket_rows = original
+
+    def test_cleanup_single_page_change_and_replacement_during_read(self):
+        paths, tail = self.crowded(5)
+        last = self.m.path_hash(paths[-1])
+        private = self.root + "/" + self.m.PRIVATE
+
+        def replace():
+            os.rename(private, private + "-old")
+            os.mkdir(private, 0o700)
+            for name in os.listdir(private + "-old"):
+                os.mkdir(private + "/" + name, 0o700)
+
+        original = self.m.bucket_rows
+        for name, mutate in (
+            ("read bucket gains a transaction", lambda: self.bucket_record(paths[0], "PREPARED", "9")),
+            ("namespace replaced", replace),
+        ):
+            with self.subTest(name):
+                self.m.bucket_rows = original
+                self.mutate_after_read(last, mutate)
+                reply = self.m.main(["cleanup-status"])
+                self.assertEqual(reply["state"], "changed")
+                self.assertNotIn("rows", reply)
+        self.m.bucket_rows = original
+        settled = self.m.main(["cleanup-status"])
+        self.assertEqual((settled["state"], settled["truncated"]), ("ok", False))
+
+    def test_cleanup_first_page_waits_out_coarse_timestamps(self):
+        self.crowded(3)
+        slept, real = [], self.m.time
+        self.addCleanup(setattr, self.m, "time", real)
+        self.m.time = types.SimpleNamespace(monotonic=real.monotonic, time_ns=real.time_ns,
+                                            sleep=lambda s: (slept.append(s), real.sleep(s)))
+        reply = self.m.main(["cleanup-status"])
+        self.assertEqual(reply["state"], "ok")
+        self.assertTrue(slept and all(0 < s <= self.m.RACY_NS / 1e9 for s in slept))
+        slept.clear()
+
+        def churn(s):
+            slept.append(s)
+            self.bucket_record(self.root + "/_tmp/churn" + str(len(slept)), "DONE")
+
+        self.m.RACY_NS = 10 * 10**9  # slow writes must not look old: the sleeps are fake here
+        self.m.time = types.SimpleNamespace(monotonic=real.monotonic, time_ns=real.time_ns, sleep=churn)
+        self.assertEqual(self.m.main(["cleanup-status"])["state"], "changed")
+        self.assertEqual(len(slept), 5)
+
+    def test_cleanup_page_deadline_covers_first_bucket_lock_and_reads(self):
+        paths, tail = self.crowded(3, "PREPARED")
+        self.m.PAGE_SECONDS = 0
+        with self.assertRaisesRegex(self.m.Kept, "page deadline"):
+            self.m.main(["cleanup-status"])
+        self.m.PAGE_SECONDS = 0.3
+        started = time.monotonic()
+        with self.m.locked(tail["identity"]["real"]):
+            with self.assertRaisesRegex(self.m.Kept, "page deadline"):  # lock wait on the first bucket
+                self.m.main(["cleanup-status"])
+        self.assertLess(time.monotonic() - started, 5)
+        original = self.m.pending
+
+        def slow(*args, **kwargs):
+            time.sleep(0.5)
+            return original(*args, **kwargs)
+
+        self.m.pending = slow
+        self.addCleanup(setattr, self.m, "pending", original)
+        with self.assertRaisesRegex(self.m.Kept, "page deadline"):  # a slow record read
+            self.m.main(["cleanup-status"])
+
+    def test_cleanup_budget_stops_reading_inside_one_bucket(self):
+        path = self.root + "/_tmp/many"
+        for i in range(50):
+            self.bucket_record(path, "PREPARED", str(100 + i))
+        calls, original = [], self.m.read_record
+        self.m.read_record = lambda fd: (calls.append(1), original(fd))[1]
+        self.addCleanup(setattr, self.m, "read_record", original)
+        self.m.PAGE_ROWS = 2
+        with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
+            self.m.main(["cleanup-status"])
+        self.assertLess(len(calls), 8)  # stopped at the third row, not after all 50
+        self.m.PAGE_ROWS = 200
+        self.m.PAGE_ENTRIES = 5
+        calls.clear()
+        with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
+            self.m.main(["cleanup-status"])
+        self.assertEqual(calls, [])  # entry count refused before any record is read
+
     def test_cleanup_cursor_forged_cycle_and_malformed_rejected(self):
         self.crowded(102)
         first = self.m.main(["cleanup-status"])
         ns = first["namespace"]
         with self.assertRaisesRegex(self.m.Kept, "not a namespace bucket"):
             self.page(first, "f" * 64)
-        stale = self.page(dict(first, generation="1.1"))
+        stale = self.page(dict(first, generation="0" * 64))
         self.assertEqual(stale["state"], "changed")
         again = self.page(first, first["next"])
         self.assertEqual(again, self.page(first))

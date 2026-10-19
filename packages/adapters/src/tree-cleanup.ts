@@ -225,7 +225,7 @@ async function readCleanupRound(
     } else if (reply.after != null) {
       throw incomplete('首页回执带了游标');
     } else if (reply.truncated) {
-      if (typeof reply.generation !== 'string' || !/^\d+\.\d+$/.test(reply.generation))
+      if (typeof reply.generation !== 'string' || !HASH.test(reply.generation))
         throw incomplete('帮手不支持分页游标（缺代次），只读到前缀');
       first = { namespace: treeIdentity(reply.namespace), generation: reply.generation };
     }

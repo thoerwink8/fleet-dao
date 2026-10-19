@@ -69,7 +69,8 @@ describe('cleanup-status 原帮手端口的命名空间事实', () => {
 describe('cleanup-status 分页：只有全部页读完才算完整', () => {
   const hash = (n: number) => n.toString(16).padStart(64, '0');
   const tail = { id: 'e'.repeat(64), pathHash: hash(129), phase: 'RECOVERY_REQUIRED' };
-  const head = { version: 1, state: 'ok', namespace, generation: '77.130' };
+  const gen = (c: string) => c.repeat(64);
+  const head = { version: 1, state: 'ok', namespace, generation: gen('a') };
   const firstPage = { ...head, rows: [], truncated: true, after: null, next: hash(99) };
   const lastPage = { ...head, rows: [tail], truncated: false, after: hash(99), next: null };
   let dir = '';
@@ -103,14 +104,14 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     expect(await readCleanupNamespace(root, options)).toEqual([tail]);
     expect(cursors()).toEqual([
       [],
-      ['--after', hash(99), '--dev', '1', '--ino', '2', '--generation', '77.130'],
+      ['--after', hash(99), '--dev', '1', '--ino', '2', '--generation', gen('a')],
     ]);
     pages([firstPage, lastPage]);
     expect(await cleanupStatus(options)).toEqual([tail]);
   });
 
   it('完整读取：翻页中换代整轮重启，不拼两份列表', async () => {
-    const fresh = { generation: '78.131' };
+    const fresh = { generation: gen('b') };
     pages([
       firstPage,
       { version: 1, state: 'changed', namespace },
@@ -118,7 +119,7 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
       { ...lastPage, ...fresh },
     ]);
     expect(await readCleanupNamespace(root, options)).toEqual([tail]);
-    expect(cursors().map((args) => args.at(-1) ?? 'first')).toEqual(['first', '77.130', 'first', '78.131']);
+    expect(cursors().map((args) => args.at(-1) ?? 'first')).toEqual(['first', gen('a'), 'first', gen('b')]);
   });
 
   it.each([
@@ -146,7 +147,8 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     ['partial：游标回退', [firstPage, { ...firstPage, after: hash(99), next: hash(5) }], '重复或回退'],
     ['partial：回执不是所请求游标之后', [firstPage, { ...lastPage, after: hash(1) }], '所请求游标'],
     ['partial：命名空间换了', [firstPage, { ...lastPage, namespace: { ...namespace, ino: '3' } }], '身份'],
-    ['partial：代次变了却仍报 ok', [firstPage, { ...lastPage, generation: '79.131' }], '代次'],
+    ['partial：代次变了却仍报 ok', [firstPage, { ...lastPage, generation: gen('c') }], '代次'],
+    ['partial：旧格式代次（非摘要）不认', [{ ...firstPage, generation: '77.130' }], '不支持分页'],
     [
       'partial：记录落在游标之前',
       [firstPage, { ...lastPage, rows: [{ ...tail, pathHash: hash(3) }] }],
@@ -156,10 +158,14 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     ['partial：跨页重复记录', [{ ...firstPage, rows: [{ ...tail, pathHash: hash(9) }] }, lastPage], '重复'],
     ['partial：坏记录', [firstPage, { ...lastPage, rows: [{ phase: 'DELETING' }] }], '坏记录'],
     ['partial：坏回执', [firstPage, { ...lastPage, rows: null }], '回执不完整'],
-  ])('%s', async (_name, list, why) => {
-    pages(list as unknown[]);
-    await expect(readCleanupNamespace(root, options)).rejects.toThrow(why);
-  });
+  ])(
+    '%s',
+    async (_name, list, why) => {
+      pages(list as unknown[]);
+      await expect(readCleanupNamespace(root, options)).rejects.toThrow(why);
+    },
+    30_000,
+  ); // 每页起两个子进程，机器忙时轮次用尽的那条会超默认 5 秒
 
   it('partial：页数、条数、字节、整轮时间超界不放宽', async () => {
     const chain = [0, 1, 2, 3].map((i) => ({
