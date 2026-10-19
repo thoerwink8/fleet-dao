@@ -82,6 +82,7 @@ export const taskExecutionControls = pgTable(
     currentOperationId: uuid('current_operation_id'),
   },
   (t) => [
+    unique('task_execution_controls_task_epoch_unique').on(t.taskId, t.coverageEpoch),
     check('task_execution_controls_protocol_known', sql`${t.protocolVersion} = 1`),
     check('task_execution_controls_revision_safe', sql`${t.revision} between 0 and 9007199254740991`),
     foreignKey({
@@ -94,5 +95,67 @@ export const taskExecutionControls = pgTable(
         taskExecutionOperations.revision,
       ],
     }),
+  ],
+);
+
+/** 不回填旧任务。canonical 仅供私有存储核对，不能复制到审计或公开日志。 */
+export const taskExecutionBirths = pgTable(
+  'task_execution_births',
+  {
+    taskId: uuid('task_id').primaryKey(),
+    protocolVersion: integer('protocol_version').notNull(),
+    birthRequestId: uuid('birth_request_id').notNull().unique(),
+    coverageEpoch: uuid('coverage_epoch').notNull(),
+    namespace: text('namespace').notNull(),
+    workflowType: text('workflow_type').$type<'taskWorkflow'>().notNull(),
+    taskQueue: text('task_queue').notNull(),
+    birthInputCanonical: text('birth_input_canonical').notNull(),
+    birthInputHash: text('birth_input_hash').notNull(),
+    createdAt: timestamp('created_at', tz).notNull(),
+  },
+  (t) => [
+    foreignKey({
+      name: 'task_execution_births_control_identity',
+      columns: [t.taskId, t.coverageEpoch],
+      foreignColumns: [taskExecutionControls.taskId, taskExecutionControls.coverageEpoch],
+    }),
+    check('task_execution_births_protocol_known', sql`${t.protocolVersion} = 1`),
+    check(
+      'task_execution_births_identity_valid',
+      sql`length(btrim(${t.namespace})) > 0 and ${t.workflowType} = 'taskWorkflow' and length(btrim(${t.taskQueue})) > 0 and length(btrim(${t.birthInputCanonical})) > 0 and ${t.birthInputHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+  ],
+);
+
+/** 每个精确 run 的持久责任，不用单任务唯一约束把旧系统改造成并发限流。 */
+export const taskLegacyExecutionAdmissions = pgTable(
+  'task_legacy_execution_admissions',
+  {
+    id: uuid('id').primaryKey(),
+    schemaVersion: integer('schema_version').notNull(),
+    taskId: uuid('task_id')
+      .notNull()
+      .references(() => tasks.id),
+    namespace: text('namespace').notNull(),
+    workflowId: text('workflow_id').notNull(),
+    runId: uuid('run_id').notNull(),
+    workflowType: text('workflow_type').$type<'taskWorkflow'>().notNull(),
+    taskQueue: text('task_queue').notNull(),
+    generation: integer('generation').notNull(),
+    inputCanonical: text('input_canonical').notNull(),
+    inputHash: text('input_hash').notNull(),
+    admittedAt: timestamp('admitted_at', tz).notNull(),
+  },
+  (t) => [
+    unique('task_legacy_execution_admissions_run_unique').on(t.namespace, t.runId),
+    check('task_legacy_execution_admissions_schema_known', sql`${t.schemaVersion} = 1`),
+    check(
+      'task_legacy_execution_admissions_generation_range',
+      sql`${t.generation} between 1 and ${sql.raw(String(MAX_TASK_GENERATION))}`,
+    ),
+    check(
+      'task_legacy_execution_admissions_identity_valid',
+      sql`length(btrim(${t.namespace})) > 0 and length(btrim(${t.workflowId})) > 0 and ${t.workflowType} = 'taskWorkflow' and length(btrim(${t.taskQueue})) > 0 and length(btrim(${t.inputCanonical})) > 0 and ${t.inputHash} ~ '^[0-9a-f]{64}$'`,
+    ),
   ],
 );
