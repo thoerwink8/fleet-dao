@@ -203,6 +203,7 @@ async function armWithinDeadline(
       repo: rt.input.repo,
       prNumber,
       expectedHead: wait.head,
+      ...rt.contractGuard(),
       ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
     });
     return { kind: 'result', armed };
@@ -295,6 +296,7 @@ export async function armAndWaitMerged(
   let pending: PendingWait | null = null;
   for (;;) {
     const head: string = rt.head;
+    if (await rt.refreshContract('挂自动合并前')) return { kind: 'rework' };
     if (pending !== null && pending.head !== head) pending = null;
     // 这一下挂合并开调前的工作流时间：第一次读到还在跑时，期限从这里起算，这一下的耗时也在里面。
     const armStartedAt = Date.now();
@@ -307,6 +309,7 @@ export async function armAndWaitMerged(
           repo: rt.input.repo,
           prNumber,
           expectedHead: head,
+          ...rt.contractGuard(),
           ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
         }),
       );
@@ -318,6 +321,10 @@ export async function armAndWaitMerged(
       }
       if (got.kind === 'again') continue;
       armed = got.armed;
+    }
+    if (armed.contractChanged) {
+      await rt.refreshContract('挂合并活动发现修订');
+      return { kind: 'rework' };
     }
     if (armed.merged) return { kind: 'merged', commit: armed.mergeCommit };
     // 挂之前现读到还挂着的正式「要求改」（#2991）：没挂（挂着的已撤），交给工人；交过的停下等审查者，点「继续」回来重挂、重读。
@@ -431,6 +438,7 @@ export async function armAndWaitMerged(
                 prNumber,
                 expectedHead: head,
                 minutes: MERGE_POLL_MINUTES,
+                ...rt.contractGuard(),
               }),
             ),
           ),
@@ -438,6 +446,10 @@ export async function armAndWaitMerged(
       // 不是连着两次红：中间有别的结果就把确认清掉（红一下又变回还在跑，不算要返工）。
       if (w.state !== 'checks_red') rt.mergeRedNoted = false;
       if (w.state === 'merged') return { kind: 'merged', commit: w.mergeCommit };
+      if (w.state === 'contract_changed') {
+        await rt.refreshContract('等待合并发现修订');
+        return { kind: 'rework' };
+      }
       if (w.state === 'review_changes') {
         // 等合并时交的正式「要求改」（#2991）：活动已撤掉自动合并。交给工人，或停下等审查者后回去重挂（挂之前再读一次）。
         // 老历史里 waitMerged 不回这个状态

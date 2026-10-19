@@ -73,6 +73,7 @@ import {
 import { outstandingChangeRequests } from '../review-feedback.ts';
 import type { RunsWriter } from '../runner/not-wired.ts';
 import { type OneShotDeps, OneShotError, SESSION_ARTIFACT_TTL_MS } from '../runner/one-shot.ts';
+import { requirementContract } from '../runner/task-brief.ts';
 import {
   type ColdVerifyAttach,
   type ColdVerifyInput,
@@ -95,6 +96,7 @@ import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import { type AssignedProber, createProbeBudget } from './pick-then-probe.ts';
 import type { SegmentReservations } from './runs-writer.ts';
 import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
+import { guardRequirementContract } from './task-contract-guard.ts';
 import { sweepRunDirs } from './task-segment.ts';
 
 /** 一次验收会话最长几分钟：验收只读 diff，比动手会话短得多。 */
@@ -149,7 +151,8 @@ export interface ColdVerifyActivityDeps {
    * 读 PR、读改到的文件、贴提交状态（引擎机器人）。commentIssue：验收回了「不归我验」时留言到单上转给人（决定 0093）；
    * 不给 = 留不了言，只写进结论的 notes。fetchCommitHead：生产在检出前补齐既定头；测试未接仍核原镜像。
    */
-  gh: Pick<EngineGitHub, 'pullFiles' | 'claims'> & Partial<Pick<GitHub, 'commentIssue' | 'fetchCommitHead'>>;
+  gh: Pick<EngineGitHub, 'pullFiles' | 'claims'> &
+    Partial<Pick<GitHub, 'commentIssue' | 'fetchCommitHead' | 'readIssue' | 'readSpecDoc'>>;
   /** 选路（store-ports 的 pickRoute）：按族问「这一族此刻有没有能派的路由」。 */
   pickRoute: (input: PickRouteInput, ctx: PortContext) => Promise<PickRouteResult>;
   /** 生产 Spawner 要的东西（路由查询、各家执行方式的驱动、会话临时目录、资源上限）；会话用户的空目录也经它的 trees 备。 */
@@ -489,6 +492,18 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     if (input.attach && sessionIo?.signal.aborted) {
       return { pass: false, problems: [], round, detached: input.attach };
     }
+    // 旧活动缺版本时，用它实际携带的正文构造旧合同，不能把刚读的新正文伪装成原会话合同。
+    // 未装读口的旧测试保留旧行为；新版输入即使缺端口也必须明确失败。
+    const publicationContract =
+      input.contract ?? (deps.gh.readIssue ? requirementContract(input.what) : undefined);
+    let contractExpired = false;
+    if (
+      !input.attach &&
+      publicationContract &&
+      !(await guardRequirementContract(deps.gh, repo, prNumber, input.issueNumber, publicationContract, ctx))
+    ) {
+      return { pass: false, problems: [], round, contractChanged: true };
+    }
     // 引擎要走了（收到停机信号）：这时没跑完的验收会话是发版叫停的，不是没验成（#2848）
     const released = (): string | undefined =>
       sessionIo?.signal.aborted ? '发版叫停了这一次验收（引擎要走了）' : undefined;
@@ -819,6 +834,21 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
           };
         },
         writeStatus: async ({ head, status }) => {
+          if (status.state !== 'pending' && publicationContract) {
+            if (
+              !(await guardRequirementContract(
+                deps.gh,
+                repo,
+                prNumber,
+                input.issueNumber,
+                publicationContract,
+                ctx,
+              ))
+            ) {
+              contractExpired = true;
+              return; // guard 已撤自动合并并写明确 failure；不发布旧结论。
+            }
+          }
           await mapped(() =>
             deps.gh.claims.setStatus(repo, head, {
               context: COLD_VERIFY_CONTEXT,
@@ -827,7 +857,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
             }),
           );
         },
-        statusMemo: statusMemo.scoped(prKey),
+        statusMemo: statusMemo.scoped(`${prKey}:${publicationContract?.sha256 ?? 'legacy'}`),
         round,
         timeoutMinutes: deps.timeoutMinutes ?? VERIFY_MINUTES,
         waitReason: (verdict) => {
@@ -882,6 +912,7 @@ export function createColdVerify(deps: ColdVerifyActivityDeps): NonNullable<Engi
     if (ctx.signal.aborted) throw ctx.signal.reason ?? new Error('被叫停了');
     void sweepRunDirs(deps.runsDir, now(), SESSION_ARTIFACT_TTL_MS, log);
     if (seen.transient) throw seen.transient;
+    if (contractExpired) return { pass: false, problems: [], round, contractChanged: true };
     // 记账收口（#2007）：PR 关了、合了，状态记忆丢掉；这一圈没在等（真派上了、或出了结论）连续等待的次数归零
     if (pull.state !== 'open') statusMemo.forget(prKey);
     if (run.wait === undefined || run.verdict?.upstreamRetry !== undefined) backoff.delete(prKey);

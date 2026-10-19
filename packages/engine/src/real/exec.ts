@@ -11,6 +11,7 @@ import {
   scopePrefix,
   stopScope,
 } from '@fleet-dao/adapters';
+import { runBoundedStream } from './exec-stream.ts';
 
 export interface UserCommand {
   user: SessionUser;
@@ -19,6 +20,13 @@ export interface UserCommand {
   /** argv[0] 是绝对路径。 */
   argv: string[];
   stdin?: Buffer;
+  /** 单次小数据读取可收紧输出界；不能放宽执行器的全局界。 */
+  maxStdoutBytes?: number;
+  /** 复杂快照专用：不收集整包；消费者必须遵守取消信号。普通命令仍受原 stdout 上限约束。 */
+  snapshotStream?: {
+    input?: AsyncIterable<Buffer>;
+    output?: (chunk: Buffer, signal: AbortSignal) => Promise<void>;
+  };
   timeoutMs: number;
   signal?: AbortSignal;
   /** scope 编号（单元名 fleet-agent-<编号>.scope 的一段）：同一时刻不许重复，最长 63。 */
@@ -39,6 +47,9 @@ export interface UserCommandResult {
   aborted: boolean;
   /** 起不来（找不到 sudo、帮手脚本）时的原因。 */
   spawnError?: string;
+  outputOverflow?: boolean;
+  /** 专用流触发停止后的绝对收尾截止时间；调用方清理本次临时件共享这一预算。 */
+  stopDeadlineMs?: number;
 }
 
 export type UserExec = (command: UserCommand) => Promise<UserCommandResult>;
@@ -70,6 +81,7 @@ function run(
   stop?: () => Promise<unknown>,
   settleMs: number = KILL_SETTLE_MS,
 ): Promise<UserCommandResult> {
+  if (command.snapshotStream) return runBoundedStream(plan, command, stop, settleMs);
   return new Promise((resolve) => {
     const chunks: Buffer[] = [];
     let bytes = 0;
@@ -111,6 +123,7 @@ function run(
             ),
           timedOut,
           aborted,
+          ...(overflow ? { outputOverflow: true } : {}),
         });
       }, settleMs);
     };
@@ -158,6 +171,7 @@ function run(
     child.on('close', (code) =>
       finish({
         code: overflow ? null : code,
+        ...(overflow ? { outputOverflow: true } : {}),
         stdout: Buffer.concat(chunks),
         stderr: overflow ? `${stderr}\n输出超过 ${maxStdout} 字节，已中止`.slice(-STDERR_TAIL) : stderr,
         timedOut,
@@ -179,6 +193,12 @@ export interface ScopeExecOptions {
   /** 杀掉以后最多再等多久管道关（默认 KILL_SETTLE_MS）；测试调小。 */
   killSettleMs?: number;
 }
+const captureLimit = (requested: number | undefined, ceiling: number): number =>
+  requested === undefined
+    ? ceiling
+    : Number.isSafeInteger(requested) && requested >= 0
+      ? Math.min(requested, ceiling)
+      : 0;
 
 /** 生产用：`sudo -n fleet-agent-scope run <编号> --user <用户> --cwd <目录> -- <命令…>`。 */
 export function scopeExec(options: ScopeExecOptions = {}): UserExec {
@@ -207,7 +227,7 @@ export function scopeExec(options: ScopeExecOptions = {}): UserExec {
         },
       },
       command,
-      options.maxStdoutBytes ?? MAX_STDOUT_BYTES,
+      captureLimit(command.maxStdoutBytes, options.maxStdoutBytes ?? MAX_STDOUT_BYTES),
       () => stopScope(scope),
       options.killSettleMs,
     );
@@ -232,7 +252,7 @@ export function localExec(env: Readonly<Record<string, string | undefined>> = pr
         env: { ...base, GIT_TERMINAL_PROMPT: '0', ...(command.env ?? {}) },
       },
       command,
-      MAX_STDOUT_BYTES,
+      captureLimit(command.maxStdoutBytes, MAX_STDOUT_BYTES),
     );
   };
 }

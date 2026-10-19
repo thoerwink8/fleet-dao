@@ -23,6 +23,7 @@ import type {
   ReadCiPolicyResult,
   ReadCiReviewsInput,
   ReadDeliveryInput,
+  ReadTaskBriefInput,
   RunSegmentInput,
   RunSegmentResult,
   SegmentSettledInput,
@@ -61,6 +62,8 @@ export function goodBrief(): TaskBrief {
 
 export interface Script {
   brief: (n: number) => TaskBriefResult;
+  /** 安全边界的当前正文；旧脚本没有外部编辑时沿用最近一次显式读取的正文。 */
+  contractBrief?: (input: ReadTaskBriefInput, n: number) => TaskBriefResult;
   segment: (
     input: RunSegmentInput,
     n: number,
@@ -93,6 +96,7 @@ export interface Script {
 }
 
 export interface Calls {
+  contractReads: ReadTaskBriefInput[];
   /** 任务活动被调的先后（验收一定在挂自动合并之前）。 */
   order: string[];
   brief: number;
@@ -132,6 +136,7 @@ export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: 
 /** 默认全走通；哪一步要出岔子，给那一步的脚本。 */
 export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; calls: Calls } {
   const calls: Calls = {
+    contractReads: [],
     order: [],
     brief: 0,
     segment: [],
@@ -175,11 +180,21 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     ...over,
   };
   const bare401 = new Map<string, Bare401Stamp>();
+  let currentBrief: TaskBriefResult | null = null;
   const tasks: EngineTasks = {
-    async readTaskBrief() {
+    async readTaskBrief(input) {
+      if (input.checkContract) {
+        calls.contractReads.push(input);
+        return (
+          script.contractBrief?.(input, calls.contractReads.length) ??
+          currentBrief ??
+          script.brief(calls.brief)
+        );
+      }
       calls.order.push('brief');
       calls.brief += 1;
-      return script.brief(calls.brief);
+      currentBrief = script.brief(calls.brief);
+      return currentBrief;
     },
     async runSegment(input, ctx) {
       calls.order.push('segment');
