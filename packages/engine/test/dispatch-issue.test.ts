@@ -18,7 +18,7 @@ import {
 } from '../src/jobs/dispatch-issue.ts';
 import type { TaskGenerationFacts } from '../src/jobs/dispatch-standing.ts';
 import type { IntakeIssue, IntakePlan, IntakeRepo } from '../src/jobs/intake.ts';
-import { failedGenerations } from '../src/real/dispatch-issue.ts';
+import { dispatchIssueDeps, failedGenerations } from '../src/real/dispatch-issue.ts';
 
 const V1 = { number: 3, title: 'v1 三段一条龙' };
 const V2 = { number: 4, title: 'v2 下一版' };
@@ -102,11 +102,21 @@ interface Over {
   auditFails?: boolean;
   /** 读改标准的路径清单时抛这个。 */
   standardPathsError?: Error;
+  /** 前置单此刻开没开着（批量读回的结果；没写的号回来就缺）。 */
+  prereqStates?: Record<number, 'open' | 'closed'>;
+  /** 批量读前置单时抛这个。 */
+  prereqError?: Error;
+  /** 此刻；默认 NOW。 */
+  now?: Date;
 }
 
-function world(over: Over = {}): World {
+/** 北京时间 2026-10-19 12:00。 */
+const NOW = new Date('2026-10-19T04:00:00Z');
+
+function world(over: Over = {}): World & { prereqReads: number[][] } {
   const started: World['started'] = [];
   const audits: DispatchIssueAudit[] = [];
+  const prereqReads: number[][] = [];
   const master = over.master ?? true;
   const deps: DispatchIssueDeps = {
     findRepo: async () => (over.repo === undefined ? REPO : over.repo),
@@ -130,6 +140,17 @@ function world(over: Over = {}): World {
       return { ok: true, lives: [] };
     },
     openPrClaims: async () => over.claims ?? new Map(),
+    prerequisiteStates: async (_repo, numbers) => {
+      prereqReads.push([...numbers]);
+      if (over.prereqError) throw over.prereqError;
+      const out = new Map<number, 'open' | 'closed'>();
+      for (const n of numbers) {
+        const s = over.prereqStates?.[n];
+        if (s !== undefined) out.set(n, s);
+      }
+      return out;
+    },
+    now: () => over.now ?? NOW,
     ...(over.standardPathsError
       ? {
           standardPaths: async () => {
@@ -148,7 +169,7 @@ function world(over: Over = {}): World {
       audits.push(entry);
     },
   };
-  return { deps, started, audits };
+  return { deps, started, audits, prereqReads };
 }
 
 const ARGS = { owner: 'acme', name: 'demo', issueNumber: 12, force: false } as const;
@@ -372,6 +393,14 @@ describe('硬闸：--force 怎么都不放行', () => {
       reason: 'brief_incomplete',
       over: { issue: issue({ body: '## 场景\n\n只写了场景' }) },
     },
+    {
+      reason: 'waiting_prerequisite',
+      over: { issue: issue({ body: `前置：#5\n\n${BODY}` }), prereqStates: { 5: 'open' } },
+    },
+    {
+      reason: 'prerequisite_unknown',
+      over: { issue: issue({ body: `前置：#5\n\n${BODY}` }), prereqError: new Error('GraphQL 502') },
+    },
   ];
 
   it.each(hard)('$reason：带 --force --note 也拒绝，写明不放行，不起工作流', async ({ reason, over }) => {
@@ -393,6 +422,130 @@ describe('硬闸：--force 怎么都不放行', () => {
     });
     const r = await dispatchIssue(w.deps, FORCE);
     expect(r).toMatchObject({ outcome: 'refused', failures: [{ reason: 'untrusted_author' }] });
+  });
+});
+
+describe('前置没等完：和拉单同一份判法，force 也不放行（#3298）', () => {
+  /** 场景段开头加一行 */
+  const withPre = (line: string) => issue({ body: BODY.replace('## 场景\n\n', `## 场景\n\n${line}\n\n`) });
+
+  it('前置单还开着：开单顺手戳的那条命令（不带 force）不派，原因写等前置、提示 force 也不放行，操作记录写明', async () => {
+    const w = world({ issue: withPre('前置：#3249'), prereqStates: { 3249: 'open' } });
+    // pnpm issue:new 戳法国跑的就是 `fleet-api dispatch-issue <owner/仓> <单号>`，不带别的参数
+    const r = await cli(w, ['acme/demo', '12']);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('waiting_prerequisite');
+    expect(r.err).toContain('等前置 #3249');
+    expect(r.err).toContain('force 也不放行');
+    expect(w.started).toHaveLength(0);
+    expect(w.prereqReads).toEqual([[3249]]);
+    expect(w.audits).toEqual([
+      {
+        repo: 'acme/demo',
+        issueNumber: 12,
+        force: false,
+        note: undefined,
+        ok: false,
+        result: expect.stringContaining('waiting_prerequisite（等前置 #3249'),
+        forced: [],
+      },
+    ]);
+  });
+
+  it('前置单还开着：带 --force --note 也不派，前置不在 FORCEABLE 里', async () => {
+    expect(FORCEABLE.has('waiting_prerequisite')).toBe(false);
+    expect(FORCEABLE.has('prerequisite_unknown')).toBe(false);
+    expect([...FORCEABLE]).toEqual(['heaviest_tier', 'failure_history']);
+    const w = world({ issue: withPre('前置：#3249'), prereqStates: { 3249: 'open' }, failed: 3 });
+    const r = await dispatchIssue(w.deps, FORCE);
+    expect(r).toMatchObject({
+      outcome: 'refused',
+      failures: [{ reason: 'waiting_prerequisite', forceable: false }],
+    });
+    expect(w.started).toHaveLength(0);
+    expect(w.audits[0]).toMatchObject({ force: true, note: FORCE.note, ok: false, forced: [] });
+    expect(w.audits[0]?.result).toContain('waiting_prerequisite');
+  });
+
+  it('几个前置只有一部分开着：只写开着的那个', async () => {
+    const w = world({ issue: withPre('前置：#5、#6'), prereqStates: { 5: 'closed', 6: 'open' } });
+    const r = await dispatchIssue(w.deps, ARGS);
+    expect(r.outcome === 'refused' && r.failures[0]?.why).toContain('等前置 #6');
+    expect(r.outcome === 'refused' && r.failures[0]?.why).not.toContain('#5');
+    expect(w.started).toHaveLength(0);
+  });
+
+  it('日期前置北京时间没到：不派、不读前置单；那天 0 点（北京时间）起照派', async () => {
+    const early = world({ issue: withPre('前置：2026-10-20 复查日') });
+    const r = await dispatchIssue(early.deps, FORCE);
+    expect(r).toMatchObject({ outcome: 'refused', failures: [{ reason: 'waiting_prerequisite' }] });
+    expect(r.outcome === 'refused' && r.failures[0]?.why).toContain('等到 2026-10-20');
+    expect(early.started).toHaveLength(0);
+    expect(early.prereqReads).toEqual([]);
+    expect(early.audits[0]?.result).toContain('等到 2026-10-20');
+
+    // UTC 10-19 15:59:59 是北京时间 10-19 23:59:59，还没到
+    const almost = world({ issue: withPre('前置：2026-10-20'), now: new Date('2026-10-19T15:59:59Z') });
+    expect((await dispatchIssue(almost.deps, ARGS)).outcome).toBe('refused');
+    const due = world({ issue: withPre('前置：2026-10-20'), now: new Date('2026-10-19T16:00:00Z') });
+    expect((await dispatchIssue(due.deps, ARGS)).outcome).toBe('started');
+    expect(due.started).toHaveLength(1);
+  });
+
+  it('【故意造出的失败】前置单状态读不到：不派，原因是没查成（prerequisite_unknown），不当成已关；force 也一样', async () => {
+    const w = world({ issue: withPre('前置：#3249'), prereqError: new Error('GraphQL 502') });
+    const r = await cli(w, ['acme/demo', '12', '--force', '--note', '我就是要派']);
+    expect(r.code).toBe(1);
+    expect(r.err).toContain('prerequisite_unknown');
+    expect(r.err).toContain('没查成');
+    expect(r.err).toContain('GraphQL 502');
+    expect(r.err).not.toContain('waiting_prerequisite');
+    expect(r.err).toContain('force 也不放行');
+    expect(w.started).toHaveLength(0);
+    expect(w.audits).toHaveLength(1);
+    expect(w.audits[0]).toMatchObject({ force: true, ok: false, forced: [] });
+    expect(w.audits[0]?.result).toContain('prerequisite_unknown');
+    expect(w.audits[0]?.result).toContain('GraphQL 502');
+  });
+
+  it('【故意造出的失败】批量读回来缺了前置单的号：同样算没查成，不派', async () => {
+    const w = world({ issue: withPre('前置：#5、#6'), prereqStates: { 5: 'closed' } });
+    const r = await dispatchIssue(w.deps, FORCE);
+    expect(r).toMatchObject({ outcome: 'refused', failures: [{ reason: 'prerequisite_unknown' }] });
+    expect(r.outcome === 'refused' && r.failures[0]?.why).toContain('#6 没读到状态');
+    expect(w.started).toHaveLength(0);
+    expect(w.audits[0]?.result).toContain('prerequisite_unknown');
+  });
+
+  it('前置都关了：照派，只读一次、只问这几个号', async () => {
+    const w = world({ issue: withPre('前置：#5、#6'), prereqStates: { 5: 'closed', 6: 'closed' } });
+    const r = await dispatchIssue(w.deps, ARGS);
+    expect(r.outcome).toBe('started');
+    expect(w.started).toHaveLength(1);
+    expect(w.prereqReads).toEqual([[5, 6]]);
+    expect(w.audits[0]).toMatchObject({ ok: true, result: '已派' });
+  });
+
+  it('没写前置：照派，不读前置单', async () => {
+    const w = world();
+    expect((await dispatchIssue(w.deps, ARGS)).outcome).toBe('started');
+    expect(w.prereqReads).toEqual([]);
+  });
+
+  it('代码块、引用、列表里的「前置：」和正文里顺口提的 #N 都是举例，不算前置：照派，不读前置单', async () => {
+    const w = world({
+      issue: withPre('顺带看 #5。\n\n```\n前置：#7\n```\n\n> 前置：#8\n\n- 前置：#9'),
+      prereqStates: { 5: 'open', 7: 'open', 8: 'open', 9: 'open' },
+    });
+    expect((await dispatchIssue(w.deps, ARGS)).outcome).toBe('started');
+    expect(w.prereqReads).toEqual([]);
+  });
+
+  it('前置排在碰 workflows 这些硬闸前面、在已派过之后：已派过的仍报已派过', async () => {
+    const dispatched = world({ issue: withPre('前置：#5'), prereqStates: { 5: 'open' }, dispatched: true });
+    const r = await dispatchIssue(dispatched.deps, ARGS);
+    expect(r).toMatchObject({ outcome: 'refused', failures: [{ reason: 'already_dispatched' }] });
+    expect(dispatched.prereqReads).toEqual([]);
   });
 });
 
@@ -594,5 +747,32 @@ describe('故意造出失败：查 Temporal 失败按不确定拒绝（放最后
     expect(r.err).toContain('force 也不放行');
     expect(w.started).toHaveLength(0);
     expect(w.audits[0]).toMatchObject({ ok: false });
+  });
+});
+
+describe('真装配：点名派单接的是拉单的前置单批量读和同一个时间来源（#3298）', () => {
+  it('prerequisiteStates 走 gh.readIssueStates（只问给的号），now 用装配给的时钟', async () => {
+    const asked: { repo: { owner: string; name: string }; numbers: readonly number[] }[] = [];
+    const gh = {
+      readIssueStates: async (input: {
+        repo: { owner: string; name: string };
+        numbers: readonly number[];
+      }) => {
+        asked.push(input);
+        return new Map(input.numbers.map((n) => [n, 'open'] as const));
+      },
+    };
+    const clock = new Date('2026-10-19T15:59:59Z');
+    const deps = dispatchIssueDeps({
+      db: {} as never,
+      gh: gh as never,
+      client: {} as never,
+      taskQueue: 'q',
+      operator: 'ops',
+      now: () => clock,
+    });
+    expect(await deps.prerequisiteStates(REPO, [3249])).toEqual(new Map([[3249, 'open']]));
+    expect(asked).toEqual([{ repo: { owner: 'acme', name: 'demo' }, numbers: [3249] }]);
+    expect(deps.now()).toBe(clock);
   });
 });
