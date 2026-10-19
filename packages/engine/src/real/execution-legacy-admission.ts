@@ -2,32 +2,32 @@
 import { MAX_TASK_GENERATION } from '@fleet-dao/shared/task-redo';
 import { parseTaskWorkflowId, taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import {
-  type AdmissionWarning,
   canonicalExecutionInput,
   type ExecutionAudit,
   executionInputHash,
   isUuid,
   type LegacyAdmissionResult,
   type LegacyExecutionIdentityV1,
-  type TaskExecutionStore,
 } from '@fleet-dao/store';
 import { Context } from '@temporalio/activity';
 import {
+  EXECUTION_START_READ_MS,
   type ExecutionHistoryConnection,
   type ExecutionStartRead,
   executionStartReader,
   type ObservedExecution,
 } from './execution-start-reader.ts';
+import {
+  type BoundedLegacyAdmission,
+  LEGACY_ADMISSION_CLEANUP_MS,
+  LEGACY_ADMISSION_TOTAL_MS,
+  type LegacySqlOutcome,
+} from './legacy-admission-protocol.ts';
 
 type StartFailure = Extract<ExecutionStartRead, { kind: 'unknown' }>['code'];
 type StoreRejection = Extract<LegacyAdmissionResult, { kind: 'rejected' }>['reason'];
 export type LegacySourceAdmission =
-  | {
-      kind: 'allowed';
-      status: 'admitted' | 'replayed';
-      admissionId: string;
-      postCommitWarnings: readonly AdmissionWarning[];
-    }
+  | LegacySqlOutcome
   | {
       kind: 'denied';
       code: StoreRejection | 'invalid_start_input' | 'start_identity_conflict' | 'managed_start_unsupported';
@@ -46,7 +46,7 @@ export type LegacySourceAdmission =
 
 interface LegacyAdmissionDeps {
   connection: ExecutionHistoryConnection;
-  store: Pick<TaskExecutionStore, 'admitLegacyExecution'>;
+  admit: BoundedLegacyAdmission;
   namespace: string;
   taskQueue: string;
   audit: ExecutionAudit;
@@ -123,9 +123,11 @@ export function createLegacyExecutionAdmission(
   )
     throw new Error('legacy 来源须使用禁默认重试的专用读取连接');
   const reader = executionStartReader(deps.connection);
-  const { namespace, taskQueue, store } = deps;
+  const { namespace, taskQueue, admit } = deps;
   const audit = structuredClone(deps.audit);
   return async () => {
+    // History、容量、spawn、SQL、COMMIT和收尾共用一个期限，后续阶段不重置。
+    const deadlineAt = performance.now() + LEGACY_ADMISSION_TOTAL_MS;
     let context: Context;
     try {
       context = Context.current();
@@ -154,10 +156,35 @@ export function createLegacyExecutionAdmission(
       isLocal: true,
     };
     let start: ExecutionStartRead;
+    const reading = new AbortController();
+    const readSignal = AbortSignal.any([signal, reading.signal]);
+    let readTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelRead: (() => void) | undefined;
     try {
-      start = await reader.read(observed, signal);
+      start = await Promise.race([
+        reader.read(observed, readSignal),
+        new Promise<ExecutionStartRead>((resolve) => {
+          cancelRead = () => resolve({ kind: 'unknown', code: 'cancelled' });
+          signal.addEventListener('abort', cancelRead, { once: true });
+          readTimer = setTimeout(
+            () => {
+              reading.abort();
+              resolve({ kind: 'unknown', code: 'deadline' });
+            },
+            Math.max(
+              0,
+              Math.min(EXECUTION_START_READ_MS, deadlineAt - LEGACY_ADMISSION_CLEANUP_MS - performance.now()),
+            ),
+          );
+          if (signal.aborted) cancelRead();
+        }),
+      ]);
     } catch {
       return signal.aborted ? cancelled() : { kind: 'unknown', code: 'start_unavailable' };
+    } finally {
+      clearTimeout(readTimer);
+      if (cancelRead) signal.removeEventListener('abort', cancelRead);
+      reading.abort();
     }
     if (signal.aborted) return cancelled();
     if (start.kind === 'unknown') {
@@ -168,20 +195,17 @@ export function createLegacyExecutionAdmission(
     const candidate = legacyCandidate(start.input, observed);
     if ('kind' in candidate) return candidate;
     if (signal.aborted) return cancelled();
-    let result: LegacyAdmissionResult;
+    if (performance.now() >= deadlineAt - LEGACY_ADMISSION_CLEANUP_MS)
+      return { kind: 'unknown', code: 'deadline' };
+    let result: LegacySqlOutcome;
     try {
-      result = await store.admitLegacyExecution(candidate, audit);
+      result = await admit(candidate, audit, { signal, deadlineAt });
     } catch {
       return signal.aborted ? cancelled() : { kind: 'unknown', code: 'store_unavailable' };
     }
-    // Store 无 SQL 取消合同：在途请求可能迟到提交。保留那份责任，不返回 allowed、不声称回滚。
+    // 即使独立宿主已提交，活动取消也不能再允许；已持久责任不删除、不声称回滚。
     if (signal.aborted) return cancelled();
-    if (result.kind === 'rejected') return { kind: 'denied', code: result.reason };
-    return {
-      kind: 'allowed',
-      status: result.kind,
-      admissionId: result.admission.id,
-      postCommitWarnings: result.postCommitWarnings,
-    };
+    if (performance.now() >= deadlineAt) return { kind: 'unknown', code: 'deadline' };
+    return result;
   };
 }

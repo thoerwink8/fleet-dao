@@ -204,6 +204,14 @@ flowchart TD
 - 「我理解为」卡片不挡路：活照常开工，看到理解错了点「改一下」，任务停下重新规划。
 - 卡住了按「下一步该干什么」处理（第十二节），不再默认停下等人。
 
+### 无 PR 的推送权限停点交还
+
+`taskHandbackPermissionPush` 仅处理同一 run 的首次 `pushBranch/WORKFLOWS_PERMISSION` 自然停点（hold generation=1、continued=0，三段模式、无 PR）。完整请求含业务 requestId、token、操作者和返工意见；同编号同载荷复用结果，异文即冲突。transport Update ID 还绑定完整规范载荷的 SHA-256，避免 SDK 去重吞掉异文。无缓存或换 worker 重放时先确定性重建首次 hold；未来代数立即拒绝，不另发 timer。
+
+可信 Activity 重新读取完整连续历史、自然返回的 run 和持久结果、预算、正式需求合同、干净 Git 树、旧 worker 服务代际与固定 scopes/helper 的自然终态，并在最后重核树、合同和活会话。旧 DB 缺 temporalRunId 时仅接受历史 runId、任务/工作流/树/分支及精确时间共同绑定的 legacy 来源；非空值必须同 run。当前 root 全进程/线程扫描是现核，不能独自代替历史退场证明。无证据、重试/取消/超时、预算饱和或身份变化均不放行。
+
+预检成功只进入 ready；原 park 原子消费后将返工意见交回主循环，完成本轮记录并接纳返工才返回 `handed_back`。继续、放弃或终态使在途请求失效；不清动手/验收轮数，不赠 token 份数，不借自动 reset 获得新预算。默认运维检查只读；其报告不是执行凭据，execute 必须再读全部来源。它不为预算停点、未知 Activity attempt、已有 PR 或通用跨任务接手发资格。
+
 ## 六、任务颗粒度与合并（已定）
 
 > 层级是版本 → 母单或单独的小单 → 子单 → 块（决定 0010 替掉了 0003 的 Lead 按块循环）。
@@ -394,7 +402,7 @@ GitHub 上只用标签和里程碑两样容器。issue 照第七节建（创始�
 
 ## 九、自由组合的派工模型
 
-工作树根下的 `.cleanup-transactions` 是固定 root 帮手的私有事务空间，不是仓或工作树。根清扫只有在原 `cleanup-status` 现核无链接目录链、root 属主和安全权限并返回精确目录身份及完整列表后才认它；未结事务照报待恢复，损坏、读取失败、截断或缺身份不能当空或跳过。普通文件、冒名链接和其它陌生点目录仍报未知，不由普通会话或 `guard-run` 进入事务目录。
+工作树根下的 `.cleanup-transactions` 是固定 root 帮手的私有事务空间，不是仓或工作树。根清扫只有在原 `cleanup-status` 现核无链接目录链、root 属主和安全权限并返回精确目录身份及完整列表后才认它；未结事务照报待恢复，损坏、读取失败、截断或缺身份不能当空或跳过。超过一页的命名空间由帮手按排序桶分页读一整轮：先逐桶取已落定的时间戳摘要再读记录，读完再逐桶重取摘要复核，两遍一致且命名空间根戳没变才算完整，帮手每次建事务、写 intent 前后都刷新根戳，变了（加删桶、已读或已复核的桶新增或改事务）就整轮重读；写者全程持桶锁，读者读和复核每个桶（空桶、已结桶也一样）都先取同一把锁，所以不会把写到一半的 intent 当成完整（锁属主/权限不对或有事务却无锁都拒绝）；每页只碰有界的桶、目录项、记录字节（已结记录照扣）、行和时间，命名空间桶数、整轮页数和时长也有上限。游标是帮手用 root 专有的每次开机钥匙签的不透明串，调用方不能自选位置或伪造续读；有界读完全部页才算完整，超界照报不完整，不靠删已结/空桶或提高单页上限换容量。普通文件、冒名链接和其它陌生点目录仍报未知，不由普通会话或 `guard-run` 进入事务目录。
 
 > 本节写自由组合的派工模型。路由配置已是两层，「模式 A/B」「在哪能做」那套作废（`specs/509-需求梳理/流程重做方案.md` §八）；需求怎么进来（驾驶舱「提需求」，飞书不再收话）见决定 0090（`docs/decisions/0090-intake-in-cockpit.md`）和 `specs/2047-提需求/方案.md`。路由两层（#574）已落地：选路、路由探针、切号按「用途 → 模型顺序、模型 → 路由顺序」两张表（`routing_purpose_models`、`routing_catalog`），下面「每个阶段类型挂一串有序的路由」那条已按它改写。每一层现在活着吗（接得上、额度够、没被禁令挡，读的时候现算、不存）在驾驶舱「路由」页（`/routing`，接口 `GET /api/routing/layers`）。先后和开关也在这页改（母单 #1089，#1333 改成拖动）：用途下的模型、模型下的渠道拖到目标位置再保存（每行有置顶、上移、下移、置底，键盘聚焦后 Alt+上下键挪一格、Alt+Home / End 置顶 / 置底，点了就保存，用的还是下面这两个接口，没有新接口；关着的行置灰写「已跳过」，实际顺位只数开着的：引擎自动跳过关着的、顺延给下一个，判法见 `packages/engine/src/routing/filter.ts` 的 switched-off，页面上的算法在 `packages/web/src/lib/routing-order.ts`；桌面端调整顺序的区域占满页面主体高度、模型和路由左右并排各自内部滚动，手机整页纵向铺开；#1366 起页面分「用途 / 模型目录 / 渠道」三块，长列表带搜索和只看已开启、只画窗口里的行；`PUT /api/routing/purposes/:purpose/models/:modelId` 和 `PUT /api/routing/models/:modelId/routes/:routeId` 的 body 可以带整段 `order` 加看到的 `expected`，一位一位的 `direction` 还留着）。开关：每条路由一个、模型一个（`PUT /api/routing/models/:modelId`，关了这个模型在所有用途里不派）、渠道一个（`PUT /api/routing/channels/:channelId`，写 `channels.enabled`；渠道关了，下面的路由显示「渠道已关」，不能单独开）。整池暂停（`engine.poolHolds`）在对应池旁边设和撤。开关点之前二次确认；拖动放下才保存，失败回到原顺序。写的时候带「我看到的」（别人先改了回 409），换位置在一个事务里先挪到临时位置躲唯一约束（`packages/db/src/routing-order.ts`），记操作记录（`routing.order.move`、`routing.route.enable`、`routing.model.enable`、`channel.enable` / `channel.disable`）；选了远程环境的改不了。
 

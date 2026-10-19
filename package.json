@@ -7,6 +7,7 @@
     "node": ">=22.22"
   },
   "scripts": {
+    "task:handback-permission-push": "node packages/engine/src/bin/push-handback.ts",
     "dev": "pnpm --filter @fleet-dao/web dev:mock",
     "start": "node packages/db/src/bin/local-pg.ts start",
     "stop": "node packages/db/src/bin/local-pg.ts stop",

@@ -144,6 +144,7 @@ export function withSiblings(selected: readonly string[], universe: readonly str
 export function needsPg(file: string): boolean {
   return (
     file.startsWith('packages/db/') ||
+    file === 'packages/engine/test/legacy-admission.real-pg.test.ts' ||
     file === 'packages/store/test/task-execution.real-pg.test.ts' ||
     file === 'packages/store/test/idempotency-race.real-pg.test.ts'
   );
