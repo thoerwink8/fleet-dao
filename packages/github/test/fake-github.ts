@@ -1087,19 +1087,42 @@ export class FakeGitHub {
           errors: [{ type: 'UNPROCESSABLE', message: 'Pull request auto merge is not enabled' }],
         });
       pr.auto_merge = false;
-      return this.json(200, { data: { disablePullRequestAutoMerge: { pullRequest: { number: n } } } });
+      return this.json(200, {
+        data: {
+          disablePullRequestAutoMerge: { pullRequest: { id: `PR_${n}`, number: n, autoMergeRequest: null } },
+        },
+      });
     }
     if (query.includes('enablePullRequestAutoMerge')) {
       const n = Number(String(variables.id).replace('PR_', ''));
       const pr = this.pulls.get(n);
       if (!pr) return this.json(200, { data: null, errors: [{ type: 'NOT_FOUND', message: 'not found' }] });
+      if (variables.head !== undefined && variables.head !== pr.head.sha)
+        return this.json(200, {
+          data: null,
+          errors: [{ type: 'UNPROCESSABLE', message: 'Head OID does not match' }],
+        });
       if (pr.auto_merge)
         return this.json(200, {
           data: { enablePullRequestAutoMerge: null },
           errors: [{ type: 'UNPROCESSABLE', message: 'Pull request auto merge is already enabled' }],
         });
       pr.auto_merge = true;
-      return this.json(200, { data: { enablePullRequestAutoMerge: { pullRequest: { number: n } } } });
+      return this.json(200, {
+        data: {
+          enablePullRequestAutoMerge: {
+            pullRequest: {
+              id: `PR_${n}`,
+              number: n,
+              autoMergeRequest: {
+                commitHeadline: variables.headline,
+                commitBody: variables.body,
+                mergeMethod: 'SQUASH',
+              },
+            },
+          },
+        },
+      });
     }
     if (query.includes('markPullRequestReadyForReview')) {
       const n = Number(String(variables.id).replace('PR_', ''));

@@ -331,6 +331,156 @@ describe('engine-pulls：读正式评审（#2991）', () => {
 });
 
 describe('engine-pulls：撤自动合并、关 PR、留言', () => {
+  it('Refs 与开放责任的 PR：历史提交含关单词也不能成为默认 squash 消息', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({
+      head: { ref: 'fleet/3210-t1', sha: sha('a') },
+      body: '**需求**：Refs #3210（验收责任未结）',
+    });
+    await gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}` });
+    const request = fake.calls('POST', /^\/graphql$/).at(-1)?.body as {
+      variables: { headline?: string; body?: string };
+    };
+    // GitHub 未指定正文时会使用分支提交列表；模拟 #3225 的生产形状。
+    const actualSquash = request.variables.body || '修复提醒\n\nCloses #3210\nFixes #3210';
+    expect(actualSquash).not.toMatch(/(?:closes|fixes|resolves) #3210/i);
+    expect(request.variables.headline?.trim()).toBeTruthy();
+    expect(request.variables.body?.trim()).toBeTruthy();
+    expect(fake.pulls.get(pr.number)?.body).toContain('Refs #3210');
+    expect(fake.calls('PATCH', /\/issues\//)).toEqual([]);
+  });
+
+  it.each([
+    null,
+    { id: 'PR_1', number: 1, autoMergeRequest: null },
+    { id: 'PR_999', number: 999, autoMergeRequest: null },
+    {
+      id: 'PR_1',
+      number: 1,
+      autoMergeRequest: { commitHeadline: 'default', commitBody: 'Closes #3210', mergeMethod: 'SQUASH' },
+    },
+  ])('挂自动合并回执未知或消息未采用就报错：%j', async (receipt) => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('a') } });
+    fake.before.push((req) => {
+      if (
+        req.path !== '/graphql' ||
+        !(req.body as { query: string }).query.includes('enablePullRequestAutoMerge')
+      )
+        return undefined;
+      // 写已落地但回执不明：必须撤掉，不能只向调用者抛错。
+      pr.auto_merge = true;
+      return json(200, { data: { enablePullRequestAutoMerge: { pullRequest: receipt } } });
+    });
+    await expect(
+      gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}` }),
+    ).rejects.toThrow('安全消息回执');
+    expect(pr.auto_merge).toBe(false);
+  });
+
+  it('GraphQL 部分成功带 errors：不把已挂上的自动合并留在后台', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('a') } });
+    fake.before.push((req) => {
+      if (
+        req.path === '/graphql' &&
+        (req.body as { query: string }).query.includes('enablePullRequestAutoMerge')
+      ) {
+        pr.auto_merge = true;
+        return json(200, {
+          data: { enablePullRequestAutoMerge: { pullRequest: { number: pr.number } } },
+          errors: [{ message: 'child field unavailable' }],
+        });
+      }
+      return undefined;
+    });
+    await expect(
+      gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}` }),
+    ).rejects.toThrow('child field unavailable');
+    expect(pr.auto_merge).toBe(false);
+  });
+
+  it('挂载已落地但 GraphQL data 丢失：客户端解析错误也必须撤挂', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('a') } });
+    fake.before.push((req) => {
+      if (
+        req.path === '/graphql' &&
+        (req.body as { query: string }).query.includes('enablePullRequestAutoMerge')
+      ) {
+        pr.auto_merge = true;
+        return json(200, {});
+      }
+      return undefined;
+    });
+    await expect(
+      gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}` }),
+    ).rejects.toThrow('GraphQL');
+    expect(pr.auto_merge).toBe(false);
+  });
+
+  it('安全消息未知且撤挂失败：保留原失败并标明写入结果未知', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('a') } });
+    fake.before.push((req) => {
+      if (req.path !== '/graphql') return undefined;
+      const query = (req.body as { query: string }).query;
+      if (query.includes('enablePullRequestAutoMerge')) {
+        pr.auto_merge = true;
+        return json(200, { data: { enablePullRequestAutoMerge: null } });
+      }
+      return json(200, { data: { disablePullRequestAutoMerge: null } });
+    });
+    await expect(
+      gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}` }),
+    ).rejects.toMatchObject({ maybeLanded: true, message: expect.stringContaining('安全消息回执') });
+    expect(pr.auto_merge).toBe(true);
+  });
+
+  it('现读后又推新头：GitHub expectedHeadOid 拒绝，不挂到未经确认的新头', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('a') } });
+    fake.before.push((req) => {
+      if (req.path === '/graphql') pr.head.sha = sha('b');
+      return undefined;
+    });
+    await expect(
+      gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}`, headSha: sha('a') }),
+    ).rejects.toThrow('Head OID does not match');
+    expect(pr.auto_merge).toBe(false);
+  });
+
+  it('验过的头到挂载前已变：不把新 GET 的头当成预期头', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/3210-t1', sha: sha('b') } });
+    await expect(
+      gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}`, headSha: sha('a') }),
+    ).rejects.toThrow('预期头');
+    expect(fake.calls('POST', /^\/graphql$/)).toEqual([]);
+  });
+
+  it('挂自动合并核精确身份、当前头，并中和旧 PR 标题正文', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({
+      head: { ref: 'fleet/3210-t1', sha: sha('a') },
+      title: 'Fixes #3210',
+      body: 'Closes #3210',
+    });
+    await expect(gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: 'PR_wrong' })).rejects.toThrow(
+      '核身份',
+    );
+    expect(fake.calls('POST', /^\/graphql$/)).toEqual([]);
+    await gh.claims.enableAutoMerge(repo, { number: pr.number, nodeId: `PR_${pr.number}` });
+    const request = fake.calls('POST', /^\/graphql$/).at(-1)?.body as {
+      variables: { head: string; headline: string; body: string };
+      query: string;
+    };
+    expect(request.variables.head).toBe(sha('a'));
+    expect(request.query).toContain('expectedHeadOid: $head');
+    expect(request.variables.headline).not.toMatch(/Fixes/i);
+    expect(fake.pulls.get(pr.number)?.body).toBe('关联 #3210');
+  });
+
   it('撤自动合并；关 PR 不删分支；在 PR 上留言同一个 key 只发一次', async () => {
     const { gh, fake } = setup();
     const pr = fake.addPull({ head: { ref: 'fix/a', sha: sha('a') }, auto_merge: true });
@@ -347,7 +497,7 @@ describe('engine-pulls：撤自动合并、关 PR、留言', () => {
     expect(fake.pulls.get(pr.number)?.comments).toHaveLength(1);
   });
 
-  it('改 PR 正文（#2723）：按模板渲染，有效关单词留在开着的正文里，分支和状态不动', async () => {
+  it('改 PR 正文（#2723）：按模板渲染，中和关单词且保留关联，分支和状态不动', async () => {
     const { gh, fake } = setup();
     const pr = fake.addPull({ head: { ref: 'fleet/12-t1', sha: sha('a') }, body: '旧的' });
     await gh.claims.updatePullBody(repo, pr.number, {
@@ -358,8 +508,8 @@ describe('engine-pulls：撤自动合并、关 PR、留言', () => {
     const body = fake.pulls.get(pr.number)?.body ?? '';
     expect(body).toContain('**做了什么**：');
     expect(body).toContain('- 按 #12 的要求动手（第 2 轮）');
-    expect(body).toContain('- Closes #12 的那条做完了');
-    expect(body).toMatch(/Closes #12/i);
+    expect(body).toContain('- 关联 #12 的那条做完了');
+    expect(body).not.toMatch(/Closes #12/i);
     expect(fake.pulls.get(pr.number)?.state).toBe('open');
   });
 
