@@ -225,15 +225,14 @@ export function buildTimeline(
     0,
     ...runs.map((r) => r.roundSeq ?? 0).filter((s) => s > lastEndedSeq && !ended.some((r) => r.seq === s)),
   );
-  // 笔上没记回合号（旧引擎跑的）：按回合起止归——第 N 回合管（第 N-1 回合收场, 第 N 回合收场]，记了开始时刻的
-  // 从开始时刻算，第 1 回合没记开始就从头算；落在所有已收场回合之后的归还没收场的那个回合；都不沾的进「更早的几笔」。
+  // 笔上没记回合号（旧引擎跑的）：按回合收场时刻归——第 N 回合管（第 N-1 回合收场, 第 N 回合收场]，第 1 回合从头算起，
+  // 不看开始时刻；落在所有已收场回合之后的归还没收场的那个回合；都不沾的进「更早的几笔」。
   // 对题本来就不进回合，不按时间归。
   const homeByTime = (at: number): RoundGroup | undefined => {
     if (Number.isNaN(at)) return undefined;
     const r = ended.find((x, i) => {
-      const from =
-        x.startedAt !== undefined ? ms(x.startedAt) : i > 0 ? ms(ended[i - 1]?.endedAt) : -Infinity;
-      return at >= from && at <= ms(x.endedAt);
+      const from = i > 0 ? ms(ended[i - 1]?.endedAt) : -Infinity;
+      return at > from && at <= ms(x.endedAt);
     });
     if (r) return groupFor(r.seq);
     const lastEnd = ms(ended.at(-1)?.endedAt);
