@@ -754,7 +754,10 @@ describe('真装配：点名派单接的是拉单的前置单批量读和同一�
   it('prerequisiteStates 走 gh.readIssueStates（只问给的号），now 用装配给的时钟', async () => {
     const asked: { repo: { owner: string; name: string }; numbers: readonly number[] }[] = [];
     const gh = {
-      readIssueStates: async (input: { repo: { owner: string; name: string }; numbers: readonly number[] }) => {
+      readIssueStates: async (input: {
+        repo: { owner: string; name: string };
+        numbers: readonly number[];
+      }) => {
         asked.push(input);
         return new Map(input.numbers.map((n) => [n, 'open'] as const));
       },
