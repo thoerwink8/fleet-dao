@@ -40,6 +40,8 @@ import type {
   GuardedPaths,
   MergeNowInput,
   MergeNowResult,
+  MergeReadyInput,
+  MergeReadyResult,
   MergeWait,
   ReadCiReviewsInput,
   ReadCiReviewsResult,
@@ -125,6 +127,7 @@ type TaskActivities = Required<
     | 'checkGuarded'
     | 'armAutoMerge'
     | 'waitMerged'
+    | 'mergeReady'
     | 'mergeNow'
     | 'readCiReviews'
     | 'readMergedTask'
@@ -1012,6 +1015,52 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         await sleep(pollEveryMs, ctx.signal);
       }
+    },
+
+    /**
+     * 停在合并这一步时现读一次（#3281）：只读，不挂、不撤、不合。合了的算满足（工作流醒来重挂时现读到已合、照常记账收尾）；
+     * 关了、换了头、挂着「要求改」、必过检查（含合并闸、cold-verify）没全绿都不满足，写明哪一条。读不到抛，不当成满足。
+     */
+    async mergeReady(input: MergeReadyInput, ctx: PortContext): Promise<MergeReadyResult> {
+      ctx.heartbeat();
+      const repo = refOf(input.repo);
+      const pull = await mapped(() => gh.claims.readPull(repo, input.prNumber));
+      if (pull.merged) return { ready: true, why: `PR #${input.prNumber} 已经合并了` };
+      if (pull.state !== 'open') return { ready: false, why: `PR #${input.prNumber} 被关了` };
+      if (pull.headSha !== input.expectedHead) {
+        return {
+          ready: false,
+          why: `PR #${input.prNumber} 的头换了（${short(input.expectedHead)} → ${short(pull.headSha)}），要重走 CI 和验收`,
+        };
+      }
+      if (deps.reviewChanges !== undefined) {
+        const held = await deps.reviewChanges(repo, pull.number);
+        if (held.length > 0) {
+          return { ready: false, why: `PR #${input.prNumber} 还挂着 ${held.length} 条正式「要求改」` };
+        }
+      }
+      const readChecks = deps.readChecks;
+      if (!readChecks) {
+        throw new PortError('MERGE_CHECKS_UNWIRED', '复核合并条件没接上读检查：不知道绿没绿，不当成满足', {
+          retryable: false,
+        });
+      }
+      const checks = await mapped(() => readChecks(repo, pull.headSha, ctx.signal));
+      if (checks.overall !== 'green') {
+        const red = checks.failed.map((f) => f.name).join('、');
+        const running = (checks.pending ?? []).map((p) => p.name).join('、');
+        const missing = (checks.missing ?? []).map((m) => m.name).join('、');
+        const parts = [
+          red ? `红：${red}` : '',
+          running ? `还在跑：${running}` : '',
+          missing ? `没出现：${missing}` : '',
+        ].filter((p) => p !== '');
+        return {
+          ready: false,
+          why: `头 ${short(pull.headSha)} 的必过检查还没全绿（${parts.join('；') || checks.overall}）`,
+        };
+      }
+      return { ready: true, why: `头 ${short(pull.headSha)} 的必过检查全绿、没有挂着的「要求改」` };
     },
 
     async readCiReviews(input: ReadCiReviewsInput, ctx: PortContext): Promise<ReadCiReviewsResult> {

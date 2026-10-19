@@ -1600,6 +1600,70 @@ describe('挂自动合并', () => {
   });
 });
 
+describe('停在合并这一步后的复核（mergeReady，#3281）', () => {
+  const ready = (gh: Gh, over: Partial<TaskActivitiesDeps> = {}) =>
+    make({ gh, ...over }).acts.mergeReady(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+
+  it('开着、头没变、没有要求改、必过检查全绿：满足；只读，不挂、不撤、不合', async () => {
+    const f = fakeGh({ readPull: async () => pullFacts() });
+    const got = await ready(f.gh, {
+      readChecks: async () => ({ overall: 'green', failed: [] }),
+      reviewChanges: async () => [],
+    });
+    expect(got.ready).toBe(true);
+    expect(f.calls.filter((c) => c !== 'readPull')).toEqual([]);
+  });
+
+  it('已经合并了：算满足（醒来重挂时现读到已合、照常记账收尾）', async () => {
+    const f = fakeGh({ readPull: async () => pullFacts({ merged: true }) });
+    expect((await ready(f.gh)).ready).toBe(true);
+  });
+
+  it('【故意造出的失败】关了 / 换了头 / 挂着要求改 / 检查还在跑或红了：都不满足，写明哪一条', async () => {
+    const green = { readChecks: async () => ({ overall: 'green' as const, failed: [] }) };
+    const closed = await ready(fakeGh({ readPull: async () => pullFacts({ state: 'closed' }) }).gh, green);
+    expect(closed).toMatchObject({ ready: false, why: expect.stringContaining('被关了') });
+    const moved = await ready(
+      fakeGh({ readPull: async () => pullFacts({ headSha: 'b'.repeat(40) }) }).gh,
+      green,
+    );
+    expect(moved).toMatchObject({ ready: false, why: expect.stringContaining('头换了') });
+    const held = await ready(fakeGh({ readPull: async () => pullFacts() }).gh, {
+      ...green,
+      reviewChanges: async () => [
+        { reviewId: 1, reviewer: 'r', commitId: HEAD, body: '改一下', submittedAt: '2026-10-19T00:00:00Z' },
+      ],
+    });
+    expect(held).toMatchObject({ ready: false, why: expect.stringContaining('要求改') });
+    const running = await ready(fakeGh({ readPull: async () => pullFacts() }).gh, {
+      readChecks: async () => ({ overall: 'pending', failed: [], pending: [{ name: 'merge-gate (1)' }] }),
+    });
+    expect(running).toMatchObject({ ready: false, why: expect.stringContaining('还在跑：merge-gate (1)') });
+    const red = await ready(fakeGh({ readPull: async () => pullFacts() }).gh, {
+      readChecks: async () => ({ overall: 'red', failed: [{ name: 'cold-verify' }] }),
+    });
+    expect(red).toMatchObject({ ready: false, why: expect.stringContaining('红：cold-verify') });
+  });
+
+  it('【故意造出的失败】读检查没接上 / 读 PR 失败：抛错，不当成满足', async () => {
+    await expect(
+      ready(fakeGh({ readPull: async () => pullFacts() }).gh, { readChecks: undefined }),
+    ).rejects.toThrow('没接上读检查');
+    await expect(
+      ready(
+        fakeGh({
+          readPull: async () => {
+            throw new GitHubError('UPSTREAM_ERROR', 'GitHub 502', { retryable: true });
+          },
+        }).gh,
+      ),
+    ).rejects.toThrow('502');
+  });
+});
+
 describe('等合并', () => {
   const wait = (gh: Gh, over: Partial<TaskActivitiesDeps> = {}, c: PortContext = ctx(), minutes = 15) =>
     make({ gh, ...over }).acts.waitMerged(
