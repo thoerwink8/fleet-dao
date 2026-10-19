@@ -23,6 +23,8 @@ export const PAGES: readonly (readonly [string, string])[] = [
   // 任务页的演示样板（#3140、#3169）：t-c9 做完、两个回合返工一次；t-12 在跑的返工回合
   ['task-c9', '/tasks/t-c9'],
   ['task-12', '/tasks/t-12'],
+  // 新旧引擎交替的单（#3190）：前面回合的笔没记回合号，按回合收场时刻归
+  ['task-c9-mixed', '/tasks/t-c9?mockOverview=mixed'],
   ['notifications', '/notifications'],
   ['routing', '/routing'],
   ['status', '/routing/status'],

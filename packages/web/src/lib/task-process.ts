@@ -187,6 +187,8 @@ export interface RoundGroup {
   /** 上一回合没做成时它写的返工意见：这一回合是接着它返工的。 */
   reworkOf: { outcome: string; summary: string | undefined; seq: number } | undefined;
   items: TimelineItem[];
+  /** 其中几笔笔上没记回合号（旧引擎跑的），是按回合收场时刻归进来的；页面照实写出来，不冒充是记下的。 */
+  byTime?: number;
 }
 
 const ms = (iso: string | undefined): number => (iso === undefined ? Number.NaN : Date.parse(iso));
@@ -194,7 +196,7 @@ const sortKey = (n: number): number => (Number.isNaN(n) ? Number.POSITIVE_INFINI
 
 /**
  * 把笔、回合、引擎做的事排成「回合 → 笔（和笔之间引擎做的事）」。
- * - 笔按 roundSeq 归回合；没记回合的（老记录）单列一组放最前，不猜它是哪一回合。
+ * - 笔按 roundSeq 归回合；没记的（旧引擎跑的）按回合收场时刻归，归不进任何回合的单列一组放最前，不猜。
  * - 回合有收场记录的用记录里的结局、用时；没有的是进行中。
  * - 引擎做的事（自测、推分支、开 PR、等 CI……）按开始时刻放进它落在的那个回合，落在所有回合之外的放进最近的上一个。
  * - 连着的同一种等待折成一行（等内存每 30 秒记一行，页面写「等内存 N 次，共 X」）。
@@ -215,10 +217,41 @@ export function buildTimeline(
     }
     return g;
   };
-  for (const r of [...rounds].sort((a, b) => a.seq - b.seq)) groupFor(r.seq).round = r;
+  const ended = [...rounds].sort((a, b) => a.seq - b.seq);
+  for (const r of ended) groupFor(r.seq).round = r;
+  // 还没收场的回合：笔上记了回合号、库里还没有它的收场记录，取号最大的那个
+  const lastEndedSeq = ended.at(-1)?.seq ?? 0;
+  const openSeq = Math.max(
+    0,
+    ...runs.map((r) => r.roundSeq ?? 0).filter((s) => s > lastEndedSeq && !ended.some((r) => r.seq === s)),
+  );
+  // 笔上没记回合号（旧引擎跑的）：按回合起止归——第 N 回合管（第 N-1 回合收场, 第 N 回合收场]，记了开始时刻的
+  // 从开始时刻算，第 1 回合没记开始就从头算；落在所有已收场回合之后的归还没收场的那个回合；都不沾的进「更早的几笔」。
+  // 对题本来就不进回合，不按时间归。
+  const homeByTime = (at: number): RoundGroup | undefined => {
+    if (Number.isNaN(at)) return undefined;
+    const r = ended.find((x, i) => {
+      const from =
+        x.startedAt !== undefined ? ms(x.startedAt) : i > 0 ? ms(ended[i - 1]?.endedAt) : -Infinity;
+      return at >= from && at <= ms(x.endedAt);
+    });
+    if (r) return groupFor(r.seq);
+    const lastEnd = ms(ended.at(-1)?.endedAt);
+    return openSeq > 0 && !(at <= lastEnd) ? groupFor(openSeq) : undefined;
+  };
   for (const run of runs) {
     const item: TimelineItem = { kind: 'run', key: `run-${run.id}`, at: ms(run.startedAt), run };
-    (run.roundSeq === undefined ? orphan : groupFor(run.roundSeq)).items.push(item);
+    if (run.roundSeq !== undefined) {
+      groupFor(run.roundSeq).items.push(item);
+      continue;
+    }
+    const home = run.segment === 'scope' ? undefined : homeByTime(item.at);
+    if (!home) {
+      orphan.items.push(item);
+      continue;
+    }
+    home.items.push(item);
+    home.byTime = (home.byTime ?? 0) + 1;
   }
   const groups = [...bySeq.values()].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
   // 返工：上一回合没做成，这一回合顶上写它的返工意见

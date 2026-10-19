@@ -236,6 +236,74 @@ describe('buildTimeline：回合 → 笔 → 引擎做的事', () => {
     expect(t[0]?.items.map((i) => (i.kind === 'run' ? i.run.id : i.kind))).toEqual(['old']);
   });
 
+  describe('笔没记回合号（旧引擎跑的）按回合收场时刻归（#3190）', () => {
+    // 新旧引擎交替那几天的单：回合都记了收场时刻，前几回合没记开始时刻，笔上都没记回合号
+    const oldRounds: Rounds = [
+      { seq: 1, round: 1, outcome: 'ci_red', endedAt: iso(30) },
+      { seq: 2, round: 2, outcome: 'verify_rejected', endedAt: iso(60) },
+      { seq: 3, round: 3, outcome: 'merged', startedAt: iso(60.1), endedAt: iso(90) },
+    ];
+    const ids = (g: { items: readonly { kind: string; run?: SegmentRunView }[] } | undefined) =>
+      g?.items.map((i) => (i.kind === 'run' ? i.run?.id : i.kind));
+
+    test('全是老笔：每笔归进它落在的回合，回合记下按时间归了几笔；对题不归，留在「回合之前」', () => {
+      const t = buildTimeline(
+        [
+          run('scope', { segment: 'scope', startedAt: iso(-5) }),
+          run('m1', { startedAt: iso(1) }),
+          run('m2', { startedAt: iso(10) }),
+          run('v1', { segment: 'verify', startedAt: iso(28) }),
+          run('m3', { startedAt: iso(31) }),
+          run('m4', { startedAt: iso(61) }),
+        ],
+        ov(oldRounds, []),
+      );
+      expect(t.map((g) => g.seq)).toEqual([undefined, 1, 2, 3]);
+      expect(ids(t[0])).toEqual(['scope']);
+      expect(ids(t[1])).toEqual(['m1', 'm2', 'v1']);
+      expect(ids(t[2])).toEqual(['m3']);
+      expect(ids(t[3])).toEqual(['m4']);
+      expect(t.map((g) => g.byTime)).toEqual([undefined, 3, 1, 1]);
+      // 回合用时：没记开始时刻的退回第一笔的起跑
+      expect(t[1] && roundDurationMs(t[1])).toBe(29 * 60_000);
+    });
+
+    test('一半记了回合号一半没记：记了的照记的走，没记的落在已收场回合之后、有进行中回合就归它', () => {
+      const t = buildTimeline(
+        [
+          run('m1', { startedAt: iso(1) }),
+          run('m4', { startedAt: iso(91) }),
+          run('m5', { roundSeq: 4, startedAt: iso(95), running: true }),
+        ],
+        ov(oldRounds, []),
+      );
+      expect(t.map((g) => g.seq)).toEqual([1, 2, 3, 4]);
+      expect(ids(t[0])).toEqual(['m1']);
+      expect(ids(t[3])).toEqual(['m4', 'm5']);
+      expect(t[3]?.byTime).toBe(1);
+      expect(t[3]?.round).toBeUndefined();
+    });
+
+    test('落在所有已收场回合之后、又没有进行中回合的：不猜，进「更早的几笔」', () => {
+      const t = buildTimeline([run('late', { startedAt: iso(120) })], ov(oldRounds, []));
+      expect(t[0]?.seq).toBeUndefined();
+      expect(ids(t[0])).toEqual(['late']);
+    });
+
+    test('回合记了开始时刻、笔在开始之前的：不归进去', () => {
+      const t = buildTimeline(
+        [run('gap', { startedAt: iso(60.05) })],
+        ov([{ seq: 1, round: 1, outcome: 'ci_red', endedAt: iso(60) }, ...oldRounds.slice(2)], []),
+      );
+      expect(t[0]?.seq).toBeUndefined();
+    });
+
+    test('没有回合记录：老笔照旧进「更早的几笔」', () => {
+      const t = buildTimeline([run('m1', { startedAt: iso(1) })], ov([], []));
+      expect(t.map((g) => g.seq)).toEqual([undefined]);
+    });
+  });
+
   test('回合还没收场（库里没有它的记录）：group.round 是 undefined，用时没有', () => {
     const t = buildTimeline(
       [run('c', { roundSeq: 3, startedAt: iso(70), running: true })],
