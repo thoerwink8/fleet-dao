@@ -18,9 +18,12 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 
 - `npx vitest run packages/db/test/<文件>`。默认每个测试文件一份 PGlite（内存 Postgres，跑真迁移），不要起库；占内存大。
 - 设了 `FLEET_TEST_PG_URL` 才连真库（CI 的 pg 台起 `postgres:16`）；连不上、迁移没跑成当场报错，不退回 PGlite。`test/real-pg.test.ts` 只在设了它时跑。
+- `TestClient.query` 的 raw JSON/JSONB 参数：字符串按已序列化 JSON 文本传给数据库验证，对象/数组仍可直接传；JSON 字符串值须先 `JSON.stringify`。仅测试 raw PG 池覆盖 JSON 编码，不更改日期和其它类型的原合同。
 - 驾驶舱 e2e 用的是另一个变量 `E2E_PG_ADMIN_URL`，见 `packages/web/e2e/README.md`。
 
 ## 常见坑
+
+- `claimIdempotencyKey` 遇到成功INSERT冲突后成功SELECT为空，会完整重做占键/读回，最多四次；持续竞争抛可重试的 `IdempotencyClaimContentionError`，不冒充已占键。数据库异常直接抛出，不延长TTL、不持连接跨外部操作；更强隔离事务的序列化失败由调用方重试整个事务。
 
 - 改了 `src/schema` 没生成迁移：`packages/db/test/schema-drift.test.ts` 当场红。
 - 迁移只进不退：发布时先迁移再切版本，退回上一版不撤迁移。新迁移要写成旧代码照样能跑（先加列、下一版再删旧的）。见 ops 第八节「改之前要知道的」。

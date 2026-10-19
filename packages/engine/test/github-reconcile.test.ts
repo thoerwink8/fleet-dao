@@ -16,7 +16,7 @@ import {
   users,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
-import { type AppCredentials, createGitHub } from '@fleet-dao/github';
+import { type AppCredentials, createGitHub, createPolicyGitHub } from '@fleet-dao/github';
 import { noteOnlyOptions } from '@fleet-dao/shared';
 import { pgLedger } from '@fleet-dao/store';
 import { type Client, ScheduleNotFoundError } from '@temporalio/client';
@@ -83,6 +83,7 @@ interface GitHubState {
  * 这一轮就会算没做完，测试跟着红。
  */
 function githubApi(state: GitHubState): typeof fetch {
+  const statuses: Record<string, unknown>[] = [];
   return async (input, init) => {
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     const reply = (status: number, body: unknown) =>
@@ -96,8 +97,24 @@ function githubApi(state: GitHubState): typeof fetch {
       return reply(201, {
         token: 'test-installation-token',
         expires_at: '2099-01-01T00:00:00Z',
-        permissions: {},
+        permissions: { statuses: 'write' },
       });
+    }
+    if (url.pathname === `/repos/${SLUG}`) return reply(200, { id: 12345, full_name: SLUG, private: false });
+    const pr = /^\/repos\/example\/canary\/pulls\/(\d+)$/.exec(url.pathname);
+    if (pr)
+      return reply(
+        200,
+        state.pulls.find((p) => (p as { number: number }).number === Number(pr[1])),
+      );
+    const bot = { id: 9002, login: 'fleet-test-engine[bot]', type: 'Bot' };
+    if (url.pathname.startsWith('/users/')) return reply(200, bot);
+    if (url.pathname.includes('/commits/') && url.pathname.endsWith('/statuses')) return reply(200, statuses);
+    if (url.pathname.includes('/statuses/') && init?.method === 'POST') {
+      const posted = JSON.parse(String(init.body));
+      const row = { ...posted, id: statuses.length + 1, creator: bot, url: API + url.pathname };
+      statuses.unshift(row);
+      return reply(201, row);
     }
     if (url.pathname === `/repos/${SLUG}/pulls`) return reply(200, state.pulls);
     if (url.pathname === '/app/hook/deliveries') return reply(200, []);
@@ -112,8 +129,8 @@ function pull(number: number, minutes: number) {
     merged_at: null,
     updated_at: at(minutes),
     user: founder,
-    head: { ref: `fleet/${number}-a`, sha: 'a'.repeat(40), repo: { full_name: SLUG } },
-    base: { ref: 'main', repo: { full_name: SLUG } },
+    head: { ref: `fleet/${number}-a`, sha: 'a'.repeat(40), repo: { id: 12345, full_name: SLUG } },
+    base: { ref: 'main', repo: { id: 12345, full_name: SLUG } },
   };
 }
 
@@ -135,6 +152,7 @@ async function wiring(state: GitHubState, options: { register?: boolean } = {}) 
     .values({
       owner: OWNER,
       name: NAME,
+      githubId: 12345,
       testCommand: 'pnpm check',
       autoDispatchSince: new Date(Date.now() - 3_600_000),
     })
@@ -154,6 +172,10 @@ async function wiring(state: GitHubState, options: { register?: boolean } = {}) 
   const job = githubReconcileJob({
     db: t.db,
     gh,
+    policySource: {
+      gh: createPolicyGitHub(gh.deps),
+      readEnv: () => 'FLEET_PUBLIC_URL=https://cockpit.example.test\n',
+    },
     // 单子打标挂版本（#448）这里的用例不看它：没接判断题就是「没问成」，categoryPlan 不贴、只记没查成
     askIssueKind: async () => ({ judged: false, reason: 'unreachable', detail: '这个用例没接判断题' }),
     // 单子打标挂版本（#448）按真钟每小时跑：这里的用例不看它，关掉，免得几点跑测试结果就不一样
@@ -196,6 +218,7 @@ describe('对账补漏跑一轮（真库，不起 Temporal）', { timeout: 60_00
     const jobs = { githubReconcile: w.job };
 
     const first = await runOnce(jobs);
+    expect(first.why).toBeUndefined();
     expect(first).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
     expect((await pullsOf(w.repoId)).map((r) => [r.number, r.state])).toEqual([[41, 'open']]);
 
