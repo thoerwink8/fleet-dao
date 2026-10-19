@@ -25,6 +25,10 @@ import { drizzle as drizzlePostgres } from 'drizzle-orm/postgres-js';
 import { migrate as migratePostgres } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import type { Db } from './client.ts';
+import { allSettledOrThrow } from './queries/all-settled.ts';
+
+export { allSettledOrThrow } from './queries/all-settled.ts';
+
 import { MIGRATIONS_FOLDER } from './migrate.ts';
 import * as schema from './schema/index.ts';
 
@@ -384,6 +388,58 @@ async function createRealTestDb(url: string): Promise<TestDb> {
     close: async () => {
       await sqlUnsafe.end({ timeout: 5 });
       await client.close(url);
+    },
+  };
+}
+
+/** 仅测试：同一随机克隆库的两条固定独立连接，外部库/URL不可指定。close先收连接再删本次克隆库。 */
+export async function createConcurrentTestDb(): Promise<
+  TestDb & { peers: readonly [TestDb, TestDb]; blocker: TestDb }
+> {
+  const url = realTestPgUrl();
+  if (!url) throw new Error('真实竞争测试必须提供FLEET_TEST_PG_URL');
+  const owner = await RealTestClient.create(url);
+  const pools: postgres.Sql[] = [];
+  const peer = (): TestDb => {
+    const sql = postgres(urlForDb(url, owner.dbName), {
+      max: 1,
+      onnotice: () => {},
+      connect_timeout: 5,
+      connection: { statement_timeout: 10000, lock_timeout: 10000 },
+    });
+    pools.push(sql);
+    return {
+      db: drizzlePostgres(sql, { schema }) as unknown as Db,
+      client: {
+        dataDir: undefined,
+        query: async <R = Record<string, unknown>>(query: string, params: unknown[] = []) => ({
+          rows: (await sql.unsafe(query, params as never[])) as unknown as R[],
+        }),
+        exec: async (query) => {
+          await sql.unsafe(query);
+        },
+        listen: async () => {
+          throw new Error('固定竞争连接不提供LISTEN');
+        },
+      },
+      close: async () => {
+        throw new Error('独立连接由竞争测试库统一关闭');
+      },
+    };
+  };
+  const peers = [peer(), peer()] as const;
+  const blocker = peer();
+  return {
+    db: peers[0].db,
+    client: owner,
+    peers,
+    blocker,
+    close: async () => {
+      try {
+        await allSettledOrThrow(pools.map((sql) => sql.end({ timeout: 5 })));
+      } finally {
+        await owner.close(url);
+      }
     },
   };
 }
