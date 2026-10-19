@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { acceptanceGate } from './acceptance-gate.ts';
+import { closingIssues } from './closing-issues.ts';
 import type { GhApi } from './gh-api.ts';
+import { issueOfBranch } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import {
   type FeedbackEvent,
@@ -11,7 +14,18 @@ import {
   sameFeedbackRequest,
 } from './managed-feedback.ts';
 import { readManagedFeedback, readManagedFeedbackForGate } from './managed-feedback-github.ts';
-import { type RunSpec, type RunStatus, readJson, runDir, runFiles, runsRoot, writeJson } from './work-run.ts';
+import { issueColumnLinks } from './pr-columns.ts';
+import {
+  DeliveryCheckError,
+  type ExternalDeliveryFact,
+  type RunSpec,
+  type RunStatus,
+  readJson,
+  runDir,
+  runFiles,
+  runsRoot,
+  writeJson,
+} from './work-run.ts';
 
 export function feedbackApi(gh: Gh, repo: string): GhApi {
   const get = async (path: string, global = false): Promise<unknown> => {
@@ -67,37 +81,230 @@ export async function managedPr(gh: Gh, branch: string) {
     isDraft: boolean;
   };
 }
+const SHA = /^[a-f0-9]{40}$/;
+type AcceptanceState = 'open' | 'settled' | 'unknown';
+type AcceptanceRead = (gh: Gh, repo: string, issue: number) => Promise<AcceptanceState>;
+
+async function defaultAcceptance(gh: Gh, repo: string, issue: number): Promise<AcceptanceState> {
+  try {
+    const pending = await acceptanceGate(gh, `https://api.github.com/repos/${repo}`, issue);
+    return pending ? 'open' : 'settled';
+  } catch {
+    // 验收账没读成不能当成已结清，也不能因此去重开工人。
+    return 'unknown';
+  }
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+function asNumber(v: unknown): number | null {
+  return typeof v === 'number' && Number.isSafeInteger(v) ? v : null;
+}
+
+async function ghValue(
+  gh: Gh,
+  args: string[],
+): Promise<{ ok: true; value: unknown } | { ok: false; missing: boolean; why: string }> {
+  let r: { code: number; stdout: string; stderr: string };
+  try {
+    r = await gh(args);
+  } catch (e) {
+    return { ok: false, missing: false, why: e instanceof Error ? e.message : String(e) };
+  }
+  if (r.code !== 0) {
+    const why = (r.stderr || r.stdout || `退出码 ${r.code}`).trim();
+    return { ok: false, missing: /\b404\b|not found/i.test(why), why };
+  }
+  try {
+    return { ok: true, value: JSON.parse(r.stdout) };
+  } catch {
+    return { ok: false, missing: false, why: '响应不是JSON' };
+  }
+}
+
+interface ListedPr {
+  number: number;
+  headRefOid: string;
+  state: string;
+  mergedAt: string | null;
+  isDraft: boolean;
+}
+
+/** 列表里每一条都要有真实 PR 号和 head；认不出就整份作废，不当成没有 PR。 */
+function asListed(value: unknown): ListedPr[] | null {
+  if (!Array.isArray(value)) return null;
+  const prs: ListedPr[] = [];
+  for (const item of value) {
+    const number = isRecord(item) ? asNumber(item.number) : null;
+    if (!isRecord(item) || number === null || typeof item.headRefOid !== 'string') return null;
+    if (!SHA.test(item.headRefOid)) return null;
+    prs.push({
+      number,
+      headRefOid: item.headRefOid,
+      state: typeof item.state === 'string' ? item.state : '',
+      mergedAt: typeof item.mergedAt === 'string' ? item.mergedAt : null,
+      isDraft: item.isDraft === true,
+    });
+  }
+  return prs;
+}
+
+/** 需求关联：同仓关单关键字或「需求」栏 Closes，或这条分支前缀就是这张单。分片 Refs、别的仓、标题里的号都不算交付。 */
+function deliversIssue(body: string, headRef: string, issue: number, repo: string): boolean {
+  const links = issueColumnLinks(body);
+  if (links.some((l) => l.number === issue && l.kind === 'closes' && !l.slice)) return true;
+  if (links.some((l) => l.number === issue && l.slice)) return false;
+  if (closingIssues(body, repo).includes(issue)) return true;
+  return issueOfBranch(headRef)?.issue === issue;
+}
+
+function verifiedFact(value: unknown, spec: RunSpec, number: number): ExternalDeliveryFact | null {
+  if (!isRecord(value) || !isRecord(value.head) || !isRecord(value.base) || !isRecord(value.base.repo))
+    return null;
+  const full = typeof value.base.repo.full_name === 'string' ? value.base.repo.full_name : '';
+  const headRef = typeof value.head.ref === 'string' ? value.head.ref : '';
+  const headSha = typeof value.head.sha === 'string' ? value.head.sha : '';
+  const merge = typeof value.merge_commit_sha === 'string' ? value.merge_commit_sha : '';
+  const mergedAt = typeof value.merged_at === 'string' ? value.merged_at : '';
+  if (value.number !== number || value.merged !== true || value.state !== 'closed') return null;
+  if (full.toLowerCase() !== spec.repo.toLowerCase() || headRef === '' || headRef === spec.branch)
+    return null;
+  if (!SHA.test(headSha) || !SHA.test(merge) || !Number.isFinite(Date.parse(mergedAt))) return null;
+  if (!deliversIssue(typeof value.body === 'string' ? value.body : '', headRef, spec.issue, spec.repo))
+    return null;
+  return { repo: spec.repo, pr: number, head: headSha, mergeCommit: merge, mergedAt };
+}
+
+function acceptanceWord(state: AcceptanceState): string {
+  if (state === 'open') return '验收责任仍未结清，保留';
+  if (state === 'settled') return '验收责任已结清';
+  return '验收责任没读成，保留未知责任，不当已交付';
+}
+
+/**
+ * 本分支没有唯一真实 PR。只在同仓、需求关联、head、mergeCommit 都核到时才报外部交付；
+ * issue 已关闭、别的仓、对不上的提交都不算。始终抛错：这里不能把本运行记完成。
+ */
+async function refuseMissingBranchDelivery(
+  gh: Gh,
+  spec: RunSpec,
+  acceptance: AcceptanceRead,
+  retainIntent: boolean,
+): Promise<never> {
+  const found = await ghValue(gh, [
+    'pr',
+    'list',
+    '--repo',
+    spec.repo,
+    '--state',
+    'merged',
+    '--search',
+    String(spec.issue),
+    '--limit',
+    '100',
+    '--json',
+    'number',
+  ]);
+  if (!found.ok) throw new DeliveryCheckError('retry', `他分支交付没读成：${found.why}`);
+  if (!Array.isArray(found.value))
+    throw new DeliveryCheckError('blocked', '他分支PR列表认不出，不能当已交付');
+  if (found.value.length >= 100) {
+    throw new DeliveryCheckError('blocked', '同仓已合并PR搜索结果可能被截断，没看全，不能判已交付，不续工人');
+  }
+  const numbers: number[] = [];
+  for (const item of found.value) {
+    const number = isRecord(item) ? asNumber(item.number) : null;
+    if (number === null || number < 1) {
+      throw new DeliveryCheckError('blocked', '他分支PR列表认不出，不能当已交付');
+    }
+    if (!numbers.includes(number)) numbers.push(number);
+  }
+  const verified: ExternalDeliveryFact[] = [];
+  for (const number of numbers) {
+    const pull = await ghValue(gh, ['api', `repos/${spec.repo}/pulls/${number}`]);
+    if (!pull.ok) {
+      if (pull.missing) continue;
+      throw new DeliveryCheckError('retry', `外部PR #${number} 没读成：${pull.why}`);
+    }
+    const fact = verifiedFact(pull.value, spec, number);
+    if (fact) verified.push(fact);
+  }
+  if (verified.length > 1) {
+    const which = verified.map((v) => `#${v.pr}`).join('、');
+    throw new DeliveryCheckError(
+      'blocked',
+      `同仓多条已合并PR都关联 #${spec.issue}（${which}），不能判哪条交付，不记完成、不续工人`,
+    );
+  }
+  const fact = verified[0];
+  if (!fact) {
+    const why = retainIntent
+      ? '本分支没有唯一真实PR，也没核到同仓已合并的需求关联PR；本机退回意图仍保留。issue是否关闭不能当作交付，不记完成、不续工人'
+      : '本分支没有唯一真实PR，也没核到同仓已合并、关联本单、head和mergeCommit都真实的PR。issue是否关闭不能当作交付，不记完成、不续工人';
+    throw new DeliveryCheckError(retainIntent ? 'review' : 'blocked', why);
+  }
+  const settled = await acceptance(gh, spec.repo, spec.issue);
+  const why =
+    `需求已由同仓其他真实PR #${fact.pr} 交付（head ${fact.head}，merge ${fact.mergeCommit}，${fact.mergedAt}）。` +
+    `本分支没有PR，不伪造、不记完成。${acceptanceWord(settled)}。停止重复写码，工作树和会话保留。` +
+    (retainIntent ? '本机退回意图仍保留，不能终结。' : '');
+  throw new DeliveryCheckError('external', why, {
+    acceptance: settled,
+    external: fact,
+    ...(retainIntent ? { retain: true } : {}),
+  });
+}
+
 export async function validateManagedDelivery(
   gh: Gh,
   spec: RunSpec,
   requireMerged = true,
   root = runsRoot(),
+  acceptance: AcceptanceRead = defaultAcceptance,
 ): Promise<void> {
-  if (!requireMerged) {
-    const listed = await gh([
-      'pr',
-      'list',
-      '--head',
-      spec.branch,
-      '--state',
-      'all',
-      '--json',
-      'number',
-      '--limit',
-      '100',
-    ]);
-    if (listed.code !== 0) throw new Error('重派前受管PR未读成');
-    const values: unknown = JSON.parse(listed.stdout);
-    if (!Array.isArray(values)) throw new Error('重派前PR列表认不出');
-    if (values.length === 0) {
-      if (readJson<FeedbackEvent>(join(runDir(root, spec.repo, spec.issue), 'feedback-intent.json')))
-        throw new Error('没有PR但保留退回意图，不能清运行');
+  const intent = readJson<FeedbackEvent>(join(runDir(root, spec.repo, spec.issue), 'feedback-intent.json'));
+  const listed = await ghValue(gh, [
+    'pr',
+    'list',
+    '--repo',
+    spec.repo,
+    '--head',
+    spec.branch,
+    '--state',
+    'all',
+    '--json',
+    'number,headRefOid,state,mergedAt,isDraft',
+    '--limit',
+    '100',
+  ]);
+  if (!listed.ok) {
+    throw new DeliveryCheckError(
+      'retry',
+      requireMerged ? `受管PR读取失败：${listed.why}` : '重派前受管PR未读成',
+    );
+  }
+  const prs = asListed(listed.value);
+  if (!prs) {
+    throw new DeliveryCheckError(
+      'blocked',
+      requireMerged ? '受管PR列表认不出，不能当已交付' : '重派前PR列表认不出',
+    );
+  }
+  if (prs.length === 0) {
+    if (!requireMerged) {
+      if (intent) throw new DeliveryCheckError('review', '没有PR但保留退回意图，不能清运行');
       return;
     }
+    await refuseMissingBranchDelivery(gh, spec, acceptance, intent !== null);
   }
-  const pr = await managedPr(gh, spec.branch);
+  if (prs.length !== 1) {
+    throw new DeliveryCheckError('blocked', '受管分支必须对应唯一真实PR，这是确定条件，不续工人');
+  }
+  const pr = prs[0];
+  if (!pr) throw new DeliveryCheckError('blocked', '受管分支必须对应唯一真实PR，这是确定条件，不续工人');
   const { records } = await readManagedFeedbackForGate(feedbackApi(gh, spec.repo), pr.number, pr.headRefOid);
-  const intent = readJson<FeedbackEvent>(join(runDir(root, spec.repo, spec.issue), 'feedback-intent.json'));
   if (intent) {
     const snapshot = await readManagedFeedback(feedbackApi(gh, spec.repo), pr.number, pr.headRefOid);
     if (
@@ -108,14 +315,27 @@ export async function validateManagedDelivery(
           sameFeedbackRequest(parseFeedback(r.body) as FeedbackEvent, intent),
       )
     )
-      throw new Error('本机事务回执未核实；不能清除运行或记完成');
+      throw new DeliveryCheckError('review', '本机事务回执未核实；不能清除运行或记完成');
   }
-  if (records.some((r) => !r.resolved)) throw new Error('本机审查退回尚未解决；不能记完成');
+  if (records.some((r) => !r.resolved))
+    throw new DeliveryCheckError('review', '本机审查退回尚未解决；不能记完成');
   if (!requireMerged) return;
-  if (!pr.mergedAt || pr.state !== 'MERGED') throw new Error('PR尚未真实合并，CLI成功退出不算交付');
-  const issue = await gh(['issue', 'view', String(spec.issue), '--json', 'state']);
-  if (issue.code !== 0 || JSON.parse(issue.stdout)?.state !== 'CLOSED')
-    throw new Error('需求单未核实关闭，验收责任仍保留，不能记完成');
+  if (!pr.mergedAt || pr.state !== 'MERGED') {
+    throw new DeliveryCheckError('review', 'PR尚未真实合并，CLI成功退出不算交付');
+  }
+  const issue = await ghValue(gh, [
+    'issue',
+    'view',
+    String(spec.issue),
+    '--repo',
+    spec.repo,
+    '--json',
+    'state',
+  ]);
+  if (!issue.ok) throw new DeliveryCheckError('retry', '需求单未读成，验收责任仍保留，不能记完成');
+  if (!isRecord(issue.value) || issue.value.state !== 'CLOSED') {
+    throw new DeliveryCheckError('review', '需求单未核实关闭，验收责任仍保留，不能记完成');
+  }
 }
 async function managedWorkUnlocked(
   action: string,

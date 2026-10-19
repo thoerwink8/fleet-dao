@@ -6,11 +6,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GhResult } from '../src/issue-new.ts';
+import { validateManagedDelivery } from '../src/managed-work.ts';
 import { type LocalClaimRequest, type WorkDeps, work } from '../src/work.ts';
 import {
   type AttemptOutput,
   BEAT_STALE_MS,
   backoffMs,
+  DeliveryCheckError,
   FIRST_BACKOFF_MS,
   judgeAttempt,
   MAX_ATTEMPTS,
@@ -20,6 +22,7 @@ import {
   type RunSpec,
   type RunStatus,
   readJson,
+  renderRuns,
   runDir,
   runFiles,
   type SuperviseDeps,
@@ -654,25 +657,44 @@ describe('pnpm work run：派之前过容量、领单、建工作树，经脱离
   });
 });
 
+const HEAD = 'a'.repeat(40);
+const MERGE = 'c'.repeat(40);
+
+function mergedPull(n: number, body: string, repo = 'acme/app', extra: Record<string, unknown> = {}) {
+  return {
+    number: n,
+    state: 'closed',
+    merged: true,
+    merged_at: '2026-10-19T01:36:55Z',
+    merge_commit_sha: MERGE,
+    title: 'delivered elsewhere',
+    body,
+    head: { ref: `fleet/${n}-other`, sha: HEAD },
+    base: { repo: { full_name: repo } },
+    ...extra,
+  };
+}
+
 describe('supervisor独立交付核验与精确恢复', () => {
-  it('CLI success不是done：同session恢复先读完整退回，再独立验成才结束', async () => {
+  it('审查未结不续工人：停在 waiting，复核通过后才记完成，不再起 CLI', async () => {
     const { dir } = runFixture();
-    const w = fakeDeps(
-      [0, 1].map(() => ({ code: 0, stdout: resultJson({ result: '做完了', session_id: SID }), stderr: '' })),
-    );
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '做完了', session_id: SID }), stderr: '' }]);
     let checks = 0;
     w.deps.validateDelivery = async () => {
-      checks++;
-      if (checks === 1) throw new Error('退回未解决');
+      checks += 1;
+      if (checks === 1) throw new DeliveryCheckError('review', '本机审查退回尚未解决；不能记完成');
     };
-    w.deps.feedbackContext = async () => `完整意见第${checks + 1}次`;
-    const result = await superviseRun(dir, w.deps);
-    expect(result?.state).toBe('done');
+    const first = await superviseRun(dir, w.deps);
+    expect(first?.state).toBe('waiting');
+    expect(w.calls).toHaveLength(1);
+    expect(w.sleeps).toEqual([]);
+    expect(readJson(runFiles(dir).result)).toBeNull();
+    expect(readJson<RunStatus>(runFiles(dir).state)?.hold?.kind).toBe('review');
+    expect(readJson<RunStatus>(runFiles(dir).state)?.sessionId).toBe(SID);
+    const second = await superviseRun(dir, w.deps);
+    expect(second?.state).toBe('done');
     expect(checks).toBe(2);
-    expect(w.calls[0]?.stdin).toContain('完整意见第1次');
-    expect(w.calls[1]?.stdin).toContain('完整意见第2次');
-    expect(w.calls[1]?.args).toContain('--resume');
-    expect(w.calls.every((c) => c.env.FLEET_WORK_SESSION === SID)).toBe(true);
+    expect(w.calls).toHaveLength(1);
   });
   it('恢复读源失败不派工人、不伪造空意见或完成', async () => {
     const { dir } = runFixture();
@@ -696,5 +718,290 @@ describe('supervisor独立交付核验与精确恢复', () => {
     expect(reread?.why).toContain('新增退回');
     expect(readJson<RunResult>(runFiles(dir).result)?.state).toBe('failed');
     expect(w.calls).toHaveLength(1);
+  });
+
+  it('正常本分支交付：核验通过就 done，只起一次工人', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps([
+      { code: 0, stdout: resultJson({ result: 'PR #9 合了', session_id: SID }), stderr: '' },
+    ]);
+    let checks = 0;
+    w.deps.validateDelivery = async () => {
+      checks += 1;
+    };
+    const result = await superviseRun(dir, w.deps);
+    expect(result).toMatchObject({ state: 'done', summary: 'PR #9 合了', why: null });
+    expect(checks).toBe(1);
+    expect(w.calls).toHaveLength(1);
+  });
+
+  it('交付核验的网络失败只退避复核，不起第二个工人；读通后记完成', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '做完了', session_id: SID }), stderr: '' }]);
+    let checks = 0;
+    w.deps.validateDelivery = async () => {
+      checks += 1;
+      if (checks < 3) throw new DeliveryCheckError('retry', '受管PR读取失败：socket hang up');
+    };
+    const result = await superviseRun(dir, w.deps);
+    expect(result?.state).toBe('done');
+    expect(checks).toBe(3);
+    expect(w.calls).toHaveLength(1);
+    expect(w.sleeps).toEqual([FIRST_BACKOFF_MS, 2 * FIRST_BACKOFF_MS]);
+  });
+
+  it('【故意造出的失败】交付核验一直读不成：到次数后停住，不记 done，也不再起工人', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '做完了', session_id: SID }), stderr: '' }]);
+    let checks = 0;
+    w.deps.validateDelivery = async () => {
+      checks += 1;
+      throw new Error('GitHub退回读取失败：timed out');
+    };
+    const result = await superviseRun(dir, w.deps);
+    expect(result?.state).toBe('waiting');
+    expect(checks).toBe(MAX_ATTEMPTS);
+    expect(w.calls).toHaveLength(1);
+    expect(w.sleeps).toHaveLength(MAX_ATTEMPTS - 1);
+    expect(readJson(runFiles(dir).result)).toBeNull();
+    expect(readJson<RunStatus>(runFiles(dir).state)?.lastError).toContain('没读成');
+  });
+
+  it('【故意造出的失败】读到认不出的结果不当已交付，不续工人', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '做完了', session_id: SID }), stderr: '' }]);
+    w.deps.validateDelivery = async () => {
+      throw new Error('受管PR列表认不出，不能当已交付');
+    };
+    const result = await superviseRun(dir, w.deps);
+    expect(result?.state).toBe('waiting');
+    expect(result && 'why' in result ? result.why : '').toContain('认不出');
+    expect(w.calls).toHaveLength(1);
+    expect(w.sleeps).toEqual([]);
+    expect(readJson<RunResult>(runFiles(dir).result)?.state).not.toBe('done');
+  });
+
+  it('等待复核时另一个看护还在：不启动工人、不改状态', async () => {
+    const { dir } = runFixture();
+    const live = {
+      state: 'waiting',
+      supervisorPid: 555,
+      beatAt: '2026-10-16T09:59:30.000Z',
+      hold: { kind: 'review', why: '审查未结' },
+      sessionId: SID,
+    };
+    writeJson(runFiles(dir).state, live);
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '不该跑', session_id: SID }), stderr: '' }]);
+    expect(await superviseRun(dir, w.deps)).toBeNull();
+    expect(w.calls).toEqual([]);
+    expect(readJson(runFiles(dir).state)).toEqual(live);
+  });
+});
+
+describe('他分支已交付与恢复不派工', () => {
+  function world(
+    acceptance: 'open' | 'settled' | 'unknown',
+    pull = mergedPull(3194, '**需求**：Closes #42\n'),
+  ) {
+    const { dir, spec } = runFixture();
+    const tree = join(temp(), 'wt');
+    mkdirSync(tree);
+    writeFileSync(join(tree, 'unpushed.txt'), 'keep-me');
+    spec.worktree = tree;
+    writeJson(runFiles(dir).spec, spec);
+    const calls: string[][] = [];
+    const gh: Parameters<typeof validateManagedDelivery>[0] = async (args) => {
+      calls.push([...args]);
+      if (args[0] === 'pr' && args[1] === 'list' && args.includes('--head')) {
+        return { code: 0, stdout: '[]', stderr: '' };
+      }
+      if (args[0] === 'pr' && args[1] === 'list') {
+        return { code: 0, stdout: JSON.stringify([{ number: 3194 }]), stderr: '' };
+      }
+      if (args[0] === 'api') return { code: 0, stdout: JSON.stringify(pull), stderr: '' };
+      if (args[0] === 'issue') return { code: 0, stdout: JSON.stringify({ state: 'CLOSED' }), stderr: '' };
+      if (args.includes('create') || args.includes('merge')) return { code: 0, stdout: 'forged', stderr: '' };
+      return { code: 1, stdout: '', stderr: `unexpected ${args.join(' ')}` };
+    };
+    const w = fakeDeps([
+      { code: 0, stdout: resultJson({ result: '按审查停下', session_id: SID }), stderr: '' },
+    ]);
+    w.deps.validateDelivery = (s) =>
+      validateManagedDelivery(gh, s, true, dirname(dir), async () => acceptance);
+    return { dir, tree, calls, w };
+  }
+
+  it('他分支已合且有本机未推成果、验收未结：waiting，不记 done，不续工人，成果还在', async () => {
+    const { dir, tree, calls, w } = world('open');
+    const first = await superviseRun(dir, w.deps);
+    expect(first?.state).toBe('waiting');
+    expect(w.calls).toHaveLength(1);
+    expect(readJson(runFiles(dir).result)).toBeNull();
+    expect(readFileSync(join(tree, 'unpushed.txt'), 'utf8')).toBe('keep-me');
+    const status = readJson<RunStatus>(runFiles(dir).state);
+    expect(status).toMatchObject({
+      state: 'waiting',
+      sessionId: SID,
+      worktree: tree,
+      supervisorPid: null,
+      hold: {
+        kind: 'external',
+        acceptance: 'open',
+        external: { repo: 'acme/app', pr: 3194, head: HEAD, mergeCommit: MERGE },
+      },
+    });
+    expect(calls.some((c) => c.includes('create') || c.includes('merge'))).toBe(false);
+    const again = await superviseRun(dir, w.deps);
+    expect(again?.state).toBe('waiting');
+    expect(w.calls).toHaveLength(1);
+    expect(readFileSync(join(tree, 'unpushed.txt'), 'utf8')).toBe('keep-me');
+  });
+
+  it('外部交付且验收已结清：stopped，不是 done；再进一次不起工人', async () => {
+    const { dir, tree, w } = world('settled');
+    const first = await superviseRun(dir, w.deps);
+    expect(first?.state).toBe('stopped');
+    expect(first?.state).not.toBe('done');
+    expect(readJson<RunResult>(runFiles(dir).result)?.state).toBe('stopped');
+    expect(readJson<RunResult>(runFiles(dir).result)?.why).toContain('PR #3194');
+    expect(readJson<RunResult>(runFiles(dir).result)?.why).toContain(MERGE);
+    expect(readFileSync(join(tree, 'unpushed.txt'), 'utf8')).toBe('keep-me');
+    const again = await superviseRun(dir, w.deps);
+    expect(again?.state).toBe('stopped');
+    expect(w.calls).toHaveLength(1);
+  });
+
+  it('验收没读成：有外部事实也只 waiting，不当已交付', async () => {
+    const { dir, w } = world('unknown');
+    const result = await superviseRun(dir, w.deps);
+    expect(result?.state).toBe('waiting');
+    expect(readJson<RunStatus>(runFiles(dir).state)?.hold?.acceptance).toBe('unknown');
+    expect(readJson(runFiles(dir).result)).toBeNull();
+    expect(w.calls).toHaveLength(1);
+  });
+
+  it('外部事实齐了但本机退回意图还在：waiting，不记 stopped，不再起工人', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '停下', session_id: SID }), stderr: '' }]);
+    w.deps.validateDelivery = async () => {
+      throw new DeliveryCheckError(
+        'external',
+        '需求已由同仓其他真实PR #3194 交付。本机退回意图仍保留，不能终结。',
+        {
+          acceptance: 'settled',
+          external: {
+            repo: 'acme/app',
+            pr: 3194,
+            head: HEAD,
+            mergeCommit: MERGE,
+            mergedAt: '2026-10-19T01:36:55Z',
+          },
+          retain: true,
+        },
+      );
+    };
+    const result = await superviseRun(dir, w.deps);
+    expect(result?.state).toBe('waiting');
+    expect(readJson(runFiles(dir).result)).toBeNull();
+    expect(readJson<RunStatus>(runFiles(dir).state)?.hold?.kind).toBe('external');
+    expect(w.calls).toHaveLength(1);
+    expect(w.sleeps).toEqual([]);
+  });
+});
+
+describe('pnpm work run 对等待和已停不重派', () => {
+  it('waiting 再跑只起看护复核；心跳还在或 --again 都不再派', async () => {
+    const w = runWorld();
+    mkdirSync(w.dir, { recursive: true });
+    writeJson(runFiles(w.dir).spec, { worktree: '/wt', repo: 'acme/app', issue: 42, branch: 'local/42-x' });
+    writeJson(runFiles(w.dir).state, {
+      state: 'waiting',
+      supervisorPid: null,
+      beatAt: '2026-10-16T09:00:00.000Z',
+      sessionId: SID,
+      hold: { kind: 'review', why: '审查未结' },
+      lastError: '审查未结',
+    });
+    expect(await w.run('run', '42'), w.err.join('\n')).toBe(0);
+    expect(w.sent).toEqual([]);
+    expect(w.gitCalls).toEqual([]);
+    expect(w.spawned).toHaveLength(1);
+    expect(w.out.join('\n')).toContain('复核等待，不新开工人');
+    writeJson(runFiles(w.dir).state, {
+      state: 'waiting',
+      supervisorPid: 4242,
+      beatAt: w.now.toISOString(),
+      hold: { kind: 'review', why: '审查未结' },
+    });
+    w.spawned.length = 0;
+    w.err.length = 0;
+    expect(await w.run('run', '42')).toBe(1);
+    expect(w.err.join('\n')).toContain('已经有工人在跑');
+    expect(w.spawned).toEqual([]);
+    w.err.length = 0;
+    expect(await w.run('run', '42', '--again')).toBe(1);
+    expect(w.err.join('\n')).toContain('不重派');
+    expect(w.spawned).toEqual([]);
+  });
+
+  it('stopped 不再派工，--again 也不另开', async () => {
+    const w = runWorld();
+    mkdirSync(w.dir, { recursive: true });
+    writeJson(runFiles(w.dir).spec, { worktree: '/wt', repo: 'acme/app', issue: 42 });
+    writeJson(runFiles(w.dir).state, { state: 'stopped', supervisorPid: null, beatAt: w.now.toISOString() });
+    writeJson(runFiles(w.dir).result, { state: 'stopped', why: '需求已由其他真实PR交付', attempts: 1 });
+    expect(await w.run('run', '42')).toBe(1);
+    expect(w.err.join('\n')).toContain('不再派工');
+    expect(w.spawned).toEqual([]);
+    w.err.length = 0;
+    expect(await w.run('run', '42', '--again')).toBe(1);
+    expect(w.err.join('\n')).toContain('不重派');
+    expect(w.spawned).toEqual([]);
+  });
+
+  it('pnpm work runs 把等待和已停写出来', () => {
+    const now = new Date('2026-10-16T10:00:00.000Z');
+    const waiting = renderRuns(
+      [
+        {
+          dir: '/runs/42',
+          problem: null,
+          result: null,
+          status: {
+            issue: 42,
+            repo: 'acme/app',
+            state: 'waiting',
+            attempts: 1,
+            beatAt: '2026-10-16T09:00:00.000Z',
+            lastError: '审查未结',
+            worktree: '/wt',
+            sessionId: SID,
+            supervisorPid: null,
+          } as RunStatus,
+        },
+      ],
+      now,
+    );
+    expect(waiting[0]).toContain('在等，不续工人');
+    expect(waiting[0]).toContain('/wt');
+    const stopped = renderRuns(
+      [
+        {
+          dir: '/runs/42',
+          problem: null,
+          status: { issue: 42, repo: 'acme/app', state: 'stopped' } as RunStatus,
+          result: {
+            state: 'stopped',
+            why: '需求已由 PR #3194 交付',
+            attempts: 1,
+            finishedAt: '2026-10-19T01:36:55Z',
+            summary: '',
+          } as RunResult,
+        },
+      ],
+      now,
+    );
+    expect(stopped[0]).toContain('已停，不再派工');
+    expect(stopped[0]).toContain('PR #3194');
   });
 });

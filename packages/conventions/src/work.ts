@@ -8,7 +8,8 @@
 // 未完成的验收责任仍保留，done 不等于结清验收；--failed "原因" 记没做成（还是本机的账，法国不自动接）；--release "原因" 放手，退回法国队列。
 // queue [--json]：本机队列（单 #2731）——本机做的开着的单，领者、心跳、开着的 PR、挂着的引导、能不能接（work-queue.ts）。只读，不碰法国。
 // run <单号> [--brief 文件] [--worktree 路径] [--again]：脱离聊天进程派一个无头工人（单 #2761，work-run.ts 开头有全貌）——先过本机容量，
-//        本机没租约才领单，建或复用工作树，经 detach.mjs 起看护进程；看护进程没了再跑一次就接着同一个会话续。runs：列 run 派过的工人。
+//        本机没租约才领单，建或复用工作树，经 detach.mjs 起看护进程；看护进程没了再跑一次就接着同一个会话续。
+//        交付停在 waiting 时再跑只起看护进程复核，不领单、不新开工人；已由其他真实 PR 交付而 stopped 的不再派。runs：列 run 派过的工人。
 //
 // 改这里之前必须知道：
 // - 写法国只用本机会话心跳同一个通行证（~/.fleet-dao/local-sessions/config.json 的 url、token，pnpm local-sessions install 写的），
@@ -33,6 +34,7 @@ import {
   RUN_SCHEMA,
   type RunResult,
   type RunSpec,
+  type RunStatus,
   readJson,
   renderRuns,
   runDir,
@@ -410,19 +412,34 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
   const dir = runDir(r.runsRoot, repo, a.issue);
   const files = runFiles(dir);
   const phase = runPhase(dir, r.now());
+  const status = readJson<RunStatus>(files.state);
+  const recorded = readJson<RunResult>(files.result);
+  if (
+    a.again &&
+    (phase === 'waiting' ||
+      status?.state === 'waiting' ||
+      status?.hold?.kind === 'external' ||
+      recorded?.state === 'stopped')
+  ) {
+    throw new Error(`#${a.issue} 在等待复核或已由其他真实PR交付，不重派工人、不另开运行`);
+  }
   if (a.again && phase !== 'none') {
     const old = readJson<RunSpec>(files.spec);
     if (old) await validateManagedDelivery(deps.gh, old, false, r.runsRoot);
   }
   if (phase === 'live') throw new Error(`#${a.issue} 已经有工人在跑（pnpm work runs 看），不再派第二个`);
   if (phase === 'terminal' && !a.again) {
-    const done = readJson<RunResult>(files.result);
+    const done = recorded;
     if (done?.state === 'done') {
       const old = readJson<RunSpec>(files.spec);
       if (old) await validateManagedDelivery(deps.gh, old, true, r.runsRoot);
     }
+    if (done?.state === 'stopped') {
+      throw new Error(`#${a.issue} 已停，不再派工（${files.result}）。不要 --again 重开工人`);
+    }
+    const word = done?.state === 'done' ? '做完' : '没做成';
     throw new Error(
-      `#${a.issue} 上次派的工人已经${done?.state === 'done' ? '做完' : '没做成'}（${files.result}）；要重来加 --again（旧记录改名留着）`,
+      `#${a.issue} 上次派的工人已经${word}（${files.result}）；要重来加 --again（旧记录改名留着）`,
     );
   }
   const cap = await r.capacity();
@@ -431,7 +448,7 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
       cap.enough === null ? `${cap.text}——没查成不当成够，不派` : `${cap.text}——等一个工人收口再派`,
     );
   }
-  const resume = phase === 'lost' && !a.again;
+  const resume = (phase === 'lost' || phase === 'waiting') && !a.again;
   // 续跑沿用原 spec，不把另一会话或旧的无归属记录偷偷重绑。
   let dispatcher: string | null = null;
   if (!resume) {
@@ -498,8 +515,9 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
     );
   }
   const spec = readJson<RunSpec>(files.spec);
+  const how = phase === 'waiting' ? '复核等待，不新开工人' : resume ? '接着上次的会话续' : '派出去了';
   deps.out(
-    `${resume ? '接着上次的会话续' : '派出去了'} #${a.issue}：看护进程 ${started.pid}（${started.how === 'wmi' ? 'WMI 起，' : ''}不在聊天进程的进程树里），工作树 ${spec?.worktree ?? '？'}`,
+    `${how} #${a.issue}：看护进程 ${started.pid}（${started.how === 'wmi' ? 'WMI 起，' : ''}不在聊天进程的进程树里），工作树 ${spec?.worktree ?? '？'}`,
   );
   deps.out(`状态 ${files.state}；做完写 ${files.result}。${cap.text}`);
   deps.out(

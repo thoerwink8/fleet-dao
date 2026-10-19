@@ -153,6 +153,42 @@ describe('work-watch：只在终态叫醒派它的会话', () => {
     expect((await watch(root, main)).code).toBe(0);
   });
 
+  it('审查等待心跳再旧也不叫、不说去续跑', async () => {
+    const { root, run } = setup();
+    const dir = run('acme__app__42', {
+      'state.json': state({
+        state: 'waiting',
+        supervisorPid: null,
+        beatAt: new Date(T0 - BEAT_STALE_MS - 1).toISOString(),
+        lastError: '审查未结',
+      }),
+    });
+    const r = await watch(root, main);
+    expect(r).toEqual({ code: 0, said: '', ticks: 0 });
+    expect(existsSync(join(dir, 'reported'))).toBe(false);
+  });
+
+  it('已由其他真实PR交付而停止：叫一次，写明不再派工；再盯不重复叫', async () => {
+    const { root, run } = setup();
+    const dir = run('acme__app__42', {
+      'state.json': state({ state: 'stopped' }),
+      'result.json': {
+        issue: 42,
+        state: 'stopped',
+        why: '需求已由同仓其他真实PR #3194 交付',
+        attempts: 7,
+        summary: '按审查停下',
+      },
+    });
+    const r = await watch(root, main);
+    expect(r.code).toBe(2);
+    expect(r.said).toContain('不再派工');
+    expect(r.said).toContain('PR #3194');
+    expect(r.said).not.toContain('接着');
+    expect(existsSync(join(dir, 'reported'))).toBe(true);
+    expect((await watch(root, main)).code).toBe(0);
+  });
+
   it('子代理收尾、机器派的会话（工人自己）、引擎无头：不盯', async () => {
     const { root, run } = setup();
     run('acme__app__42', {

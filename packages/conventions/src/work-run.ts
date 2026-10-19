@@ -10,6 +10,9 @@
 //   --output-format json，--session-id 定好会话号）；每 BEAT_EVERY_MS 写一次 state.json 的 beatAt，每 RENEW_EVERY_MS 续一次法国的租约
 //   （pnpm work renew 同一条路）；工人退出后判：做完 → 写 result.json（done）；网关、网络断（5xx、overloaded、连不上……）或认不出的失败 →
 //   等一会儿（1、2、4……分钟，最多 10 分钟）用 --resume <同一个会话号> 接着做，最多 MAX_ATTEMPTS 次；登录、权限坏了 → 写 result.json（failed）。
+//   工人进程自己没跑完（网关、崩溃）才 --resume。退出码成功但交付没核上：网络读失败只退避复核、不再起工人；
+//   审查未结、本分支没有唯一真实 PR、或其他确定条件写成 waiting（工作树、会话、检查点留着，不续写码）；
+//   同仓其他真实 PR 已合并且验收责任已结清才写 stopped，不把本运行记 done，也不靠 issue 已关闭或伪造本分支 PR。
 //   会话还没建起来就断了（--resume 报找不到会话）→ 下一次用原会话号重新起。
 // - 看护进程自己没了（关机、被杀）：state.json 不是终态、beatAt 超过 BEAT_STALE_MS 没动。再跑一次 pnpm work run <单号> 就接着同一个
 //   状态文件、同一个会话号续（--resume），尝试次数接着数，租约心跳重新跑起来。
@@ -51,8 +54,55 @@ export const PASS_ENV = [
   'GITHUB_REPOSITORY',
 ];
 
-export type RunState = 'starting' | 'running' | 'retrying' | 'done' | 'failed';
-export const TERMINAL: readonly RunState[] = ['done', 'failed'];
+export type RunState = 'starting' | 'running' | 'retrying' | 'waiting' | 'done' | 'failed' | 'stopped';
+export const TERMINAL: readonly RunState[] = ['done', 'failed', 'stopped'];
+
+/** 同仓其他分支已经合并、并核对过的交付事实。没有这些字段就不能当已交付。 */
+export interface ExternalDeliveryFact {
+  repo: string;
+  pr: number;
+  head: string;
+  mergeCommit: string;
+  mergedAt: string;
+}
+
+/** 交付核验没通过时停在哪一类。retry 才会退避再读；其余确定条件不 resume 工人。 */
+export type DeliveryFailureKind = 'retry' | 'review' | 'external' | 'blocked';
+
+export interface DeliveryHold {
+  kind: 'review' | 'external' | 'blocked';
+  why: string;
+  acceptance?: 'open' | 'settled' | 'unknown';
+  external?: ExternalDeliveryFact;
+}
+
+/**
+ * 交付核验的分类失败。kind 给看护进程用：网络读失败可退避，审查等待和他分支已交付不立刻 resume。
+ * 调用方仍以抛错表示「不能记完成」。
+ */
+export class DeliveryCheckError extends Error {
+  readonly kind: DeliveryFailureKind;
+  readonly acceptance?: 'open' | 'settled' | 'unknown';
+  readonly external?: ExternalDeliveryFact;
+  /** 还有本机未确认的退回意图或未结责任：即便外部事实齐了也不能终结 */
+  readonly retain?: boolean;
+  constructor(
+    kind: DeliveryFailureKind,
+    message: string,
+    extra?: {
+      acceptance?: 'open' | 'settled' | 'unknown';
+      external?: ExternalDeliveryFact;
+      retain?: boolean;
+    },
+  ) {
+    super(message);
+    this.name = 'DeliveryCheckError';
+    this.kind = kind;
+    if (extra?.acceptance !== undefined) this.acceptance = extra.acceptance;
+    if (extra?.external !== undefined) this.external = extra.external;
+    if (extra?.retain !== undefined) this.retain = extra.retain;
+  }
+}
 
 export interface RunSpec {
   v: typeof RUN_SCHEMA;
@@ -89,19 +139,30 @@ export interface RunStatus {
   lastRenewOk: boolean | null;
   lastError: string | null;
   nextTryAt: string | null;
+  /** 交付没核上时为什么停着。没有就是还在跑或已终了 */
+  hold?: DeliveryHold | null;
 }
 
 export interface RunResult {
   v: typeof RUN_SCHEMA;
   repo: string;
   issue: number;
-  state: 'done' | 'failed';
+  /** stopped：需求已由其他真实 PR 交付且验收已结清，本运行停止，不记 done */
+  state: 'done' | 'failed' | 'stopped';
   /** 工人最后一条回复（截断） */
   summary: string;
   why: string | null;
   sessionId: string | null;
   attempts: number;
   finishedAt: string;
+}
+
+/** 确定条件停下：没写 result.json，工作树和会话还在，恢复时只复核、不起工人。 */
+export interface WaitingOutcome {
+  state: 'waiting';
+  why: string;
+  sessionId: string | null;
+  attempts: number;
 }
 
 /** 运行记录的根目录 */
@@ -151,11 +212,76 @@ export function readJson<T>(path: string): T | null {
   return JSON.parse(text) as T;
 }
 
-/** 看护进程还在不在：不是终态、beatAt 在 BEAT_STALE_MS 以内 */
+/**
+ * 看护进程还在不在：不是终态、beatAt 在 BEAT_STALE_MS 以内。
+ * waiting 且 pid 已清掉是故意停着等复核，心跳时间还新鲜也不算有工人在跑，恢复入口不用空等一个心跳周期。
+ * 复核进行中 pid 还在，这段时间算活着，同一个运行不会再起一个工人。
+ */
 export function supervisorLive(s: RunStatus, now: Date): boolean {
   if (TERMINAL.includes(s.state)) return false;
+  if (s.state === 'waiting' && !Number.isSafeInteger(s.supervisorPid)) return false;
   const beat = Date.parse(s.beatAt);
   return Number.isFinite(beat) && now.getTime() - beat <= BEAT_STALE_MS;
+}
+
+const READ_FAIL =
+  /未读成|没读成|读取失败|响应不是JSON|Unexpected token|Unexpected end|ECONN|ETIMEDOUT|fetch failed|network|超时|timed? ?out|socket hang up|\b5\d\d\b/i;
+
+export interface ClassifiedDelivery {
+  kind: DeliveryFailureKind;
+  why: string;
+  acceptance?: 'open' | 'settled' | 'unknown';
+  external?: ExternalDeliveryFact;
+  retain?: boolean;
+}
+
+/** 把交付核验抛错分成可退避的读失败，和不能靠重开 CLI 消失的确定条件。认不出的不当已交付。 */
+export function classifyDeliveryError(e: unknown): ClassifiedDelivery {
+  if (e instanceof DeliveryCheckError) {
+    return {
+      kind: e.kind,
+      why: e.message,
+      ...(e.acceptance ? { acceptance: e.acceptance } : {}),
+      ...(e.external ? { external: e.external } : {}),
+      ...(e.retain ? { retain: true } : {}),
+    };
+  }
+  const why = e instanceof Error ? e.message : String(e);
+  if (e instanceof SyntaxError || READ_FAIL.test(why) || TRANSIENT.test(why)) return { kind: 'retry', why };
+  return { kind: 'blocked', why };
+}
+
+const SHA = /^[a-f0-9]{40}$/;
+
+/** 他分支已交付可以终结：同仓、真实 PR/head/mergeCommit、验收已结清、没有仍要保留的责任。issue 关闭不算。 */
+export function externalStop(spec: RunSpec, hold: DeliveryHold): boolean {
+  const fact = hold.external;
+  return (
+    hold.kind === 'external' &&
+    hold.acceptance === 'settled' &&
+    !!fact &&
+    fact.repo.toLowerCase() === spec.repo.toLowerCase() &&
+    Number.isSafeInteger(fact.pr) &&
+    fact.pr > 0 &&
+    SHA.test(fact.head) &&
+    SHA.test(fact.mergeCommit) &&
+    Number.isFinite(Date.parse(fact.mergedAt))
+  );
+}
+
+function holdFrom(spec: RunSpec, failure: ClassifiedDelivery): DeliveryHold {
+  const same =
+    failure.external && failure.external.repo.toLowerCase() === spec.repo.toLowerCase()
+      ? failure.external
+      : undefined;
+  const kind: DeliveryHold['kind'] =
+    failure.kind === 'review' ? 'review' : failure.kind === 'external' && same ? 'external' : 'blocked';
+  return {
+    kind,
+    why: failure.why,
+    ...(failure.acceptance ? { acceptance: failure.acceptance } : {}),
+    ...(kind === 'external' && same ? { external: same } : {}),
+  };
 }
 
 // ---------- 判一次工人跑完的结果 ----------
@@ -309,11 +435,25 @@ export function workerArgs(sessionId: string, resume: boolean): string[] {
   ];
 }
 
+/** 上次工人写进 attempt 文件的回复；复核收尾时用，不再为了取这句话起一次 CLI。 */
+function lastWorkerSummary(dir: string, attempts: number): string {
+  if (attempts < 1) return '';
+  try {
+    const json = parseResultJson(readFileSync(runFiles(dir).out(attempts), 'utf8'));
+    return clip(typeof json?.result === 'string' ? json.result.trim() : '', SUMMARY_MAX);
+  } catch {
+    return '';
+  }
+}
+
 /**
- * 看护一张单的工人到终态。重复起（看护进程没了再起）接着同一个状态文件续。返回最后写下的结果；
- * 已经有一个活着的看护进程在管就回 null、什么都不动。
+ * 看护一张单的工人到终态或等待复核。重复起（看护进程没了再起）接着同一个状态文件续。
+ * 已经有一个活着的看护进程在管就回 null、什么都不动。waiting 的恢复只复核交付，不起工人。
  */
-export async function superviseRun(dir: string, deps: SuperviseDeps): Promise<RunResult | null> {
+export async function superviseRun(
+  dir: string,
+  deps: SuperviseDeps,
+): Promise<RunResult | WaitingOutcome | null> {
   const f = runFiles(dir);
   const spec = readJson<RunSpec>(f.spec);
   if (!spec) throw new Error(`${f.spec} 不在：先 pnpm work run <单号>`);
@@ -363,7 +503,8 @@ export async function superviseRun(dir: string, deps: SuperviseDeps): Promise<Ru
     lastRenewAt: prev?.lastRenewAt ?? null,
     lastRenewOk: prev?.lastRenewOk ?? null,
     lastError: prev?.lastError ?? null,
-    state: 'running',
+    hold: prev?.state === 'waiting' ? (prev.hold ?? null) : null,
+    state: prev?.state === 'waiting' ? 'waiting' : 'running',
     supervisorPid: deps.pid,
     updatedAt: at(),
     beatAt: at(),
@@ -392,7 +533,12 @@ export async function superviseRun(dir: string, deps: SuperviseDeps): Promise<Ru
     }
   };
   const stopRenew = deps.repeat(() => void renew(), RENEW_EVERY_MS);
-  const finish = (state: 'done' | 'failed', summary: string, why: string | null): RunResult => {
+  const finish = (
+    state: 'done' | 'failed' | 'stopped',
+    summary: string,
+    why: string | null,
+    hold: DeliveryHold | null = null,
+  ): RunResult => {
     const r: RunResult = {
       v: RUN_SCHEMA,
       repo: spec.repo,
@@ -405,13 +551,66 @@ export async function superviseRun(dir: string, deps: SuperviseDeps): Promise<Ru
       finishedAt: at(),
     };
     writeJson(f.result, r);
-    save({ state, nextTryAt: null, lastError: why });
+    save({ state, nextTryAt: null, lastError: why, hold });
     return r;
+  };
+  // 交付没核上：不写 result，清掉 pid，让恢复入口能进来复核；会话和工作树不动。
+  const park = (hold: DeliveryHold): WaitingOutcome => {
+    save({
+      state: 'waiting',
+      hold,
+      lastError: hold.why,
+      nextTryAt: null,
+      supervisorPid: null,
+      sessionStarted: true,
+    });
+    deps.log(`#${spec.issue} 交付停在确定条件，不续工人：${hold.why}`);
+    return { state: 'waiting', why: hold.why, sessionId: s.sessionId, attempts: s.attempts };
+  };
+  // 工人已经正常退出之后只复核事实。网络失败退避再读；确定条件停下。两种都不另起 CLI。
+  const settleDelivery = async (summary: string): Promise<RunResult | WaitingOutcome> => {
+    let tries = 0;
+    for (;;) {
+      try {
+        if (deps.validateDelivery) await deps.validateDelivery(spec);
+        return finish('done', summary, null);
+      } catch (e) {
+        const failure = classifyDeliveryError(e);
+        if (failure.kind === 'retry') {
+          tries += 1;
+          const why = `交付核验没读成：${failure.why}`;
+          if (tries >= MAX_ATTEMPTS) {
+            return park({
+              kind: 'blocked',
+              why: `交付核验连续 ${tries} 次没读成，不再起工人：${failure.why}`,
+            });
+          }
+          const wait = backoffMs(tries);
+          save({
+            state: 'waiting',
+            supervisorPid: deps.pid,
+            hold: { kind: 'blocked', why },
+            lastError: why,
+            nextTryAt: new Date(deps.now().getTime() + wait).toISOString(),
+            sessionStarted: true,
+          });
+          deps.log(`#${spec.issue} ${why}，${Math.round(wait / 1000)} 秒后只复核、不起工人`);
+          await deps.sleep(wait);
+          continue;
+        }
+        const hold = holdFrom(spec, failure);
+        if (failure.kind === 'external' && !failure.retain && externalStop(spec, hold)) {
+          return finish('stopped', summary, hold.why, hold);
+        }
+        return park(hold);
+      }
+    }
   };
   try {
     await renew();
     const sessionId = s.sessionId ?? deps.newSessionId();
     if (s.sessionId === null) save({ sessionId });
+    if (prev?.state === 'waiting') return await settleDelivery(lastWorkerSummary(dir, s.attempts));
     for (;;) {
       if (s.attempts >= MAX_ATTEMPTS) {
         return finish(
@@ -446,15 +645,8 @@ export async function superviseRun(dir: string, deps: SuperviseDeps): Promise<Ru
       });
       const v = judgeAttempt(out);
       if (v.kind === 'done') {
-        try {
-          if (deps.validateDelivery) await deps.validateDelivery(spec);
-          return finish('done', v.summary, null);
-        } catch (e) {
-          const why = `交付未核实：${e instanceof Error ? e.message : String(e)}`;
-          save({ state: 'retrying', sessionStarted: true, lastError: why });
-          deps.log(why);
-          continue;
-        }
+        save({ sessionStarted: true });
+        return await settleDelivery(v.summary);
       }
       if (v.kind === 'fatal') return finish('failed', '', v.why);
       // 会话号对上了、或 --session-id 说号已经用了，说明会话建起来了，下次 --resume；--resume 报找不到会话就退回用原会话号新起
@@ -529,7 +721,13 @@ export function renderRuns(rows: RunRow[], now: Date): string[] {
     if (r.result) {
       const tail =
         r.result.state === 'done' ? clip(r.result.summary.split('\n')[0] ?? '', 120) : (r.result.why ?? '');
-      return `${head} ${r.result.state === 'done' ? '做完' : '没做成'}（第 ${r.result.attempts} 次，${r.result.finishedAt}）：${tail}`;
+      const label =
+        r.result.state === 'done' ? '做完' : r.result.state === 'stopped' ? '已停，不再派工' : '没做成';
+      return `${head} ${label}（第 ${r.result.attempts} 次，${r.result.finishedAt}）：${tail}`;
+    }
+    if (s.state === 'waiting') {
+      const who = supervisorLive(s, now) ? '正在复核' : '在等';
+      return `${head} ${who}，不续工人：${s.lastError ?? ''}；工作树 ${s.worktree}；会话 ${s.sessionId ?? '无'} 保留`;
     }
     if (!supervisorLive(s, now)) {
       return `${head} 看护进程没了（最后心跳 ${s.beatAt}，第 ${s.attempts} 次）：pnpm work run ${s.issue} 接着同一个会话续`;
@@ -540,13 +738,15 @@ export function renderRuns(rows: RunRow[], now: Date): string[] {
   });
 }
 
-/** 一张单有没有运行记录、在不在跑、是不是终了 */
-export function runPhase(dir: string, now: Date): 'none' | 'live' | 'lost' | 'terminal' {
+/** 一张单有没有运行记录、在不在跑、是不是终了、还是停着等复核 */
+export function runPhase(dir: string, now: Date): 'none' | 'live' | 'lost' | 'terminal' | 'waiting' {
   const f = runFiles(dir);
   if (existsSync(f.result)) return 'terminal';
   const s = readJson<RunStatus>(f.state);
   if (!s) return existsSync(f.spec) ? 'lost' : 'none';
-  return supervisorLive(s, now) ? 'live' : 'lost';
+  if (supervisorLive(s, now)) return 'live';
+  if (s.state === 'waiting') return 'waiting';
+  return 'lost';
 }
 
 /** 新起一张单的运行目录（已有终了的记录要 --again：旧目录改名留着，不删） */

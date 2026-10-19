@@ -4,8 +4,9 @@
 // 又不能让主线程手写轮询（钩子拦，#2730）。所以收尾时由这个钩子盯着，只在终态叫一次：中间的心跳、网关断了在续，都不叫。
 // 做法：
 // - 找这个会话派的（state.json / spec.json 的 dispatcher = 本会话号）、还没叫醒过（没有 reported 文件）的运行记录；一件都没有就退 0；
-// - 每 WATCH_TICK_MS 看一次：有 result.json 的是终态（做完、没做成）；不是终态、state.json 的 beatAt 超过 BEAT_STALE_MS 没动
-//   （没有 state.json 就看 spec.json 的修改时间）的是看护进程没了（关机、被杀），也叫：要人再跑一次 pnpm work run <单号> 续；
+// - 每 WATCH_TICK_MS 看一次：有 result.json 的是终态（做完、没做成、已停不再派工）；state.json 是 waiting 的
+//   （审查未结或外部交付还不能终结）不盯、不叫，心跳再旧也不当成看护进程丢了；其余不是终态、beatAt 超过
+//   BEAT_STALE_MS 没动（没有 state.json 就看 spec.json 的修改时间）的是看护进程没了，也叫：要人再跑一次 pnpm work run <单号> 续；
 // - 叫之前用独占创建 reported 文件占住（同一件只叫一次，几个盯着的进程抢，只有一个叫）；把每件一两句打到 stderr，退出码 2；
 // - 同一会话只留一个盯着的（锁 <运行目录根>/watch-<会话号>.lock，后来的接班），最长等 3 小时，起它的 Claude Code 没了也退 0；
 // - 子代理收尾（带 agent_id）、引擎无头、机器派的会话（工人自己）：直接退 0。
@@ -86,7 +87,7 @@ function hostAlive() {
 }
 
 /**
- * @typedef {{ dir: string, issue: number | null, kind: 'done' | 'failed' | 'lost', text: string }} Ended 到终态的一件
+ * @typedef {{ dir: string, issue: number | null, kind: 'done' | 'failed' | 'stopped' | 'lost', text: string }} Ended 到终态的一件
  */
 
 /**
@@ -114,8 +115,10 @@ export function pendingRuns(root, sessionId) {
       } catch {
         // 没叫醒过
       }
-      const owner =
-        readObj(join(dir, 'state.json'))?.dispatcher ?? readObj(join(dir, 'spec.json'))?.dispatcher;
+      const state = readObj(join(dir, 'state.json'));
+      // 审查等待或外部交付还不能终结：不是还在写码。留在名单里会让 Stop 空等满 3 小时，并可能被说成看护进程丢了。
+      if (state?.state === 'waiting' && !readObj(join(dir, 'result.json'))) return false;
+      const owner = state?.dispatcher ?? readObj(join(dir, 'spec.json'))?.dispatcher;
       return owner === sessionId;
     });
 }
@@ -144,6 +147,14 @@ export function endedOf(dir, now) {
         text: `${tag} 工人做完了（${attempts}）：${shown || '（最后一条回复是空的）'}\n结果文件 ${join(dir, 'result.json')}`,
       };
     }
+    if (result.state === 'stopped') {
+      return {
+        dir,
+        issue,
+        kind: 'stopped',
+        text: `${tag} 已停，不再派工（${attempts}）：${typeof result.why === 'string' ? result.why : '（没写原因）'}\n结果文件 ${join(dir, 'result.json')}。工作树和会话留在 state.json，不要再派工人`,
+      };
+    }
     return {
       dir,
       issue,
@@ -151,6 +162,8 @@ export function endedOf(dir, now) {
       text: `${tag} 工人没做成（${attempts}）：${typeof result.why === 'string' ? result.why : '（没写原因）'}\n结果文件 ${join(dir, 'result.json')}，每次的输出在同目录 attempt-*.err.log`,
     };
   }
+  // 审查等待或外部交付未终结：故意停着，不是看护进程丢了，不要叫人去续跑工人。
+  if (state?.state === 'waiting') return null;
   let beat = typeof state?.beatAt === 'string' ? Date.parse(state.beatAt) : Number.NaN;
   if (!state) {
     try {
