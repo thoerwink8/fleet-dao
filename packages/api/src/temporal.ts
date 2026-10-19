@@ -150,7 +150,7 @@ interface ParkIdentityWire {
   rawAddedLines: number;
   chargeableAddedLines: number;
   budget: number;
-  /** 停下时那次测量的固定 base；停下时没测量为 null。 */
+  /** 停下时原始新增行实际按的固定 base；重评能力之前停下的没记为 null（不能重评）。 */
   base: string | null;
 }
 
@@ -307,8 +307,16 @@ export function createTemporalLineBudgetRemeasure(
       };
     if (id.head !== request.head)
       return { ok: false, reason: 'changed', detail: '停点上的交付头与请求的 head 不同', park, current };
-    // 停下时有测量就钉死那次的 base（null＝停下时没测量，由活动现算 merge-base 核对）
-    if (id.base !== null && id.base !== undefined && id.base !== request.base)
+    // 只认停下时原始新增行实际按的那个 base；老版本停下的没记，证明不了原测量范围，明确拒绝
+    if (typeof id.base !== 'string')
+      return {
+        ok: false,
+        reason: 'unsupported',
+        detail: '这次停点没有记下停下时的测量 base（重评能力之前停下的），不能重评；要放行请用原来的「继续」',
+        park,
+        current,
+      };
+    if (id.base !== request.base)
       return {
         ok: false,
         reason: 'changed',

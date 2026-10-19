@@ -63,6 +63,7 @@ import {
   LINE_BUDGET_REMEASURE_PATCH,
   type LineBudgetParkInput,
   type LineBudgetParkState,
+  REMEASURE_CATCH_UP_SECONDS,
   REMEASURE_TIMEOUT_SECONDS,
   sameParkIdentity,
 } from './task-budget-remeasure.ts';
@@ -988,12 +989,22 @@ export class TaskRuntime {
       done.base === command.base
     )
       return { outcome: 'already_resumed', receipt: done.receipt };
+    // 新起的工人从整段历史重放接手时，Update 可能先于同一批里主流程走回停点（报警结果还没回填、waiting 还没设）。
+    // 停点还看不见就短等主流程追上（有缓存的工人上停点直接可见，不等、不起定时器）；等不到再按不在停点拒。
+    if (this.parkIdentity() === null)
+      await condition(() => this.parkIdentity() !== null, `${REMEASURE_CATCH_UP_SECONDS} seconds`);
     const park = this.budgetPark;
     const current = this.parkIdentity();
     if (!park || !current || !sameParkIdentity(current, command.identity) || command.head !== current.head)
       return refuse('stale', '不在这次体量停点（旧停点、已继续、已放行、换代、放弃或已结束）');
-    // 停下时有测量就钉死那次的 base：不能换另一个旧 base 改测量范围（没有时活动现算 merge-base 核对）
-    if (current.base !== null && command.base !== current.base)
+    // 只认停下时原始新增行实际按的那个 base：同 raw 的旧祖先会换掉测量范围（变更构成不同），一律拒。
+    // 老版本停下的没记这个 base，证明不了原测量范围：明确拒绝，不拿现在的主线或请求者给的值顶替。
+    if (current.base === null)
+      return refuse(
+        'unsupported',
+        '这次停点没有记下停下时的测量 base（重评能力之前停下的），证明不了原测量范围；要放行请用原来的「继续」',
+      );
+    if (command.base !== current.base)
       return refuse('changed', `base 不是停下时测量的固定 base ${current.base}`);
     if (this.budgetRemeasuring || this.running.size > 0) return refuse('busy', '已有重评或活动在跑');
 

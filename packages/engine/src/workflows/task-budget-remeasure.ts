@@ -16,6 +16,8 @@ import type {
 export const LINE_BUDGET_REMEASURE_PATCH = 'line-budget-remeasure-v1';
 /** 一次重评在工作流里最多等多久（活动自己的 5 分钟限时之内）。 */
 export const REMEASURE_TIMEOUT_SECONDS = 240;
+/** 重放接手时停点还没走回来：最多等主流程追上这么久，再按不在停点拒。 */
+export const REMEASURE_CATCH_UP_SECONDS = 30;
 
 const SHA = /^[0-9a-f]{40}$/;
 
@@ -61,11 +63,22 @@ export function sameParkIdentity(a: LineBudgetParkIdentity, b: LineBudgetParkIde
   );
 }
 
-/** 停下时那次测量的固定 base：测量和这份交付对得上（同头、同原始行、完整 sha）才认，否则 null（重评时现算 merge-base 核对）。 */
+/**
+ * 停下时原始新增行实际按的固定 base：readDelivery 报的 addedLinesBase；同一份交付带了可信测量（同头、同原始行）时
+ * 两者必须一致。缺、不是完整 sha、两者对不上都回 null——证明不了原测量范围，重评明确拒绝，不猜。
+ */
 export function parkedMeasurementBase(delivery: DeliveryRead): string | null {
+  const base = delivery.addedLinesBase;
+  if (typeof base !== 'string' || !SHA.test(base)) return null;
   const m = delivery.lineBudgetMeasurement;
-  if (m?.version !== 1 || m.head !== delivery.head || m.rawAddedLines !== delivery.addedLines) return null;
-  return typeof m.base === 'string' && SHA.test(m.base) ? m.base : null;
+  if (
+    m?.version === 1 &&
+    m.head === delivery.head &&
+    m.rawAddedLines === delivery.addedLines &&
+    m.base !== base
+  )
+    return null;
+  return base;
 }
 
 /** 请求的形状：缺字段、非完整 sha、模式不认都拒（不猜）。回 null＝形状对。 */

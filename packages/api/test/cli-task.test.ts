@@ -576,7 +576,11 @@ describe('Temporal 重评适配（#3249）', () => {
     // 停下时测量的固定 base 钉在身份里：换另一个（更早的）base 改测量范围，本地就拒
     const base = await run({ lineBudgetPark: { version: 1, identity } }, { base: 'e'.repeat(40) });
     expect(base.r).toMatchObject({ ok: false, reason: 'changed', detail: expect.stringContaining(BASE) });
-    for (const x of [old, none, park, head, base]) expect(x.c.calls.map((y) => y.kind)).toEqual(['query']);
+    // 重评能力之前停下的没记测量 base：证明不了原测量范围，不拿请求者给的 base 顶替
+    const unbound = await run({ lineBudgetPark: { version: 1, identity: { ...identity, base: null } } });
+    expect(unbound.r).toMatchObject({ ok: false, reason: 'unsupported' });
+    for (const x of [old, none, park, head, base, unbound])
+      expect(x.c.calls.map((y) => y.kind)).toEqual(['query']);
   });
 
   it('同一已放行请求重发：停点身份已清空或换成新停点，按放行绑定带回原身份，拿工作流的幂等回执', async () => {

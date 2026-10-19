@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DEFAULT_PR_LINE_BUDGET } from '../../src/limits.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { measureMigrationBudget } from '../../src/real/migration-budget.ts';
 import { remeasureLineBudget } from '../../src/real/task-activities.ts';
@@ -264,6 +265,48 @@ describe('体量关口重评活动（#3249）', { timeout: 30000 }, () => {
     expect(
       (await remeasureLineBudget(f.tree, repo, { head, base: f.head, rawAddedLines: fixed })).budgetRemeasure,
     ).toMatchObject({ status: 'measured', base: f.head, head });
+  });
+
+  it('同头同 raw、不同 base 的变更构成不同（评审反例）：旧祖先 A 会把主线已有的 0094 当新增折掉，必须拒绝', async () => {
+    const f = await fixture();
+    // 0094 那份迁移（journal、快照、SQL）的新增行；业务文件凑成同样行数，让 A→H 与 S→H 的 raw 恰好相等
+    const migrationLines = f.raw - 1; // fixture 的头另加了一行 source.ts
+    const business = Array.from({ length: migrationLines }, (_, k) => `export const line${k} = ${k};\n`).join(
+      '',
+    );
+    f.git('checkout', '-q', '--detach', f.base);
+    f.put('business.ts', business);
+    const a = f.commit(); // 旧主线 A：合法 0093 + 业务文件
+    f.git('checkout', f.head, '--', 'packages/db/migrations');
+    f.git('rm', '-q', 'business.ts');
+    const s = f.commit(); // 主线 S：完整追加合法 0094，删掉业务文件
+    f.put('business.ts', business);
+    const h = f.commit(); // 候选 H：只恢复业务文件；真正的分叉点是 S
+    f.git('update-ref', 'refs/remotes/origin/main', s);
+    const fromS = await addedLinesAgainst(f.tree, s, h);
+    const fromA = await addedLinesAgainst(f.tree, a, h);
+    expect(fromA).toBe(fromS); // 同 head、同 raw
+    // 主线真实测量：全是业务行，没有可折扣的快照，超预算
+    expect(await measureMigrationBudget(f.tree, s, h, fromS)).toMatchObject({
+      verified: false,
+      verifiedGeneratedLines: 0,
+      chargeableAddedLines: fromS,
+    });
+    // 换成旧祖先 A：业务文件没变，已在主线的 0094 反被当新增，可信验证器会核成快照并大幅折扣——这正是要挡住的
+    const wrong = await measureMigrationBudget(f.tree, a, h, fromA);
+    expect(wrong).toMatchObject({ verified: true, base: a });
+    expect(wrong.chargeableAddedLines).toBeLessThan(DEFAULT_PR_LINE_BUDGET);
+    expect(fromS).toBeGreaterThan(DEFAULT_PR_LINE_BUDGET);
+    // 重评活动：A 是头的祖先、也在主线历史上、raw 也对得上，照样拒绝；只认固定的 S
+    expect(
+      (await remeasureLineBudget(f.tree, repo, { head: h, base: a, rawAddedLines: fromA })).budgetRemeasure,
+    ).toMatchObject({ status: 'refused', reason: 'base' });
+    expect(
+      (await remeasureLineBudget(f.tree, repo, { head: h, base: s, rawAddedLines: fromS })).budgetRemeasure,
+    ).toMatchObject({
+      status: 'measured',
+      measurement: { verified: false, base: s, chargeableAddedLines: fromS },
+    });
   });
 
   it('原始新增行与停下时不同、不适用的仓、读失败：回 refused 或抛错，不当 0', async () => {

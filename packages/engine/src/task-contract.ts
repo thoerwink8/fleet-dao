@@ -216,8 +216,8 @@ export interface LineBudgetParkIdentity {
   chargeableAddedLines: number;
   budget: number;
   /**
-   * 停下时那次测量的固定 base（头相对树里钉的主线的 merge-base，来自 readDelivery 的 lineBudgetMeasurement）；
-   * 停下时没有测量（老单、别的仓）为 null，这时重评活动现算 merge-base 核对。重评只认这个 base，不能换旧 base 改测量范围。
+   * 停下时原始新增行实际按的固定 base（readDelivery 的 addedLinesBase，与 lineBudgetMeasurement.base 互相印证）。
+   * 重评只认这个 base，不能换另一个同 raw 的旧祖先改测量范围；老版本停下的没记（null），重评明确拒绝。
    */
   base: string | null;
 }
@@ -230,7 +230,7 @@ export interface RemeasureLineBudgetCommand {
   repo: { owner: string; name: string };
   taskId: string;
   workflowId: string;
-  /** 精确的头和固定的测量 base：必须正是头相对树里钉的主线的 merge-base；停点身份带 base 时还必须等于它。 */
+  /** 精确的头和固定的测量 base：必须等于停点身份里停下时记的 base，且仍是头相对树里钉的主线的 merge-base。 */
   head: string;
   base: string;
   by: string;
@@ -459,6 +459,11 @@ export interface DeliveryRead {
    * 交的头相对钉住主线的原始新增行数，始终与 GitHub additions 同口径。当前真实读取失败抛错；老历史缺省不判预算。
    */
   addedLines?: number;
+  /**
+   * addedLines 实际按哪个 base 数的（头相对钉住主线的 merge-base，#3249）。体量停点把它记进停点身份，重评只认它；
+   * 老历史缺省＝停下时没记，重评明确拒绝，不拿现在的主线或请求者给的旧祖先顶替。
+   */
+  addedLinesBase?: string;
   /** #3242：原 addedLines 永远是 raw；此项只供新版本预算判断，缺省沿用原判。 */
   lineBudgetMeasurement?: LineBudgetMeasurement;
   /** 只在 ReadDeliveryInput.budgetRemeasure 给了时才有（#3249）；这时其它交付字段不代表会话交付。 */

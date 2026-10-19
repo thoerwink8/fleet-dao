@@ -75,6 +75,13 @@ import type { WorkTrees } from './worktrees.ts';
 
 const FULL_SHA = /^[0-9a-f]{40}$/;
 
+/** 两个提交的分叉点（完整 sha）；没有共同祖先回 null，git 没跑成照抛。 */
+async function mergeBaseOf(t: UserTree, a: string, b: string): Promise<string | null> {
+  const r = await gitInTree(t, ['merge-base', a, b], '算分叉点', { allow: [1] });
+  const sha = r.code === 0 ? r.stdout.toString('utf8').trim() : '';
+  return FULL_SHA.test(sha) ? sha : null;
+}
+
 /** 工作树里没提交的改动（含没跟踪的文件），环境文件不算。只读：不还原、不写（和 deliveryLeftover 的口径一样，但不动树）。 */
 async function dirtyEntries(t: UserTree): Promise<string[]> {
   const status = await gitInTree(
@@ -134,15 +141,10 @@ export async function remeasureLineBudget(
     return refused('dirty', `工作树有没提交的改动：${dirtyBefore.slice(0, 5).join('、')}`);
   if (!(await hasCommit(t, ask.base))) return refused('base', '树里没有这个 base 提交');
   if (!(await isAncestor(t, ask.base, ask.head))) return refused('base', 'base 不是 head 的祖先');
-  // 固定 base 只认「头相对树里钉的主线的 merge-base」（停下时原始新增行就按它数）：主线上更早的祖先也拒，不让换范围
-  const fixed = await gitInTree(
-    t,
-    ['merge-base', mainlineRef(repo.defaultBranch), ask.head],
-    '算头相对树里钉的主线的 merge-base',
-    { allow: [1] },
-  );
-  const mergeBase = fixed.code === 0 ? fixed.stdout.toString('utf8').trim() : '';
-  if (!FULL_SHA.test(mergeBase)) return refused('base', '头和树里钉的主线没有共同祖先');
+  // 工作流已核 base 等于停下时记的那个；这里再核它仍是「头相对树里钉的主线的 merge-base」：主线上更早的祖先、
+  // 主线在停下后被挪过，都拒，不让换测量范围
+  const mergeBase = await mergeBaseOf(t, mainlineRef(repo.defaultBranch), ask.head);
+  if (mergeBase === null) return refused('base', '头和树里钉的主线没有共同祖先');
   if (mergeBase !== ask.base)
     return refused('base', `base 不是头相对树里钉的主线的 merge-base（应为 ${mergeBase.slice(0, 12)}）`);
   const raw = await addedLinesAgainst(t, ask.base, ask.head);
@@ -710,6 +712,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const conflicts = await unresolvedConflicts(t, { since: input.baseSha, mainline: span.mainline });
       // 原始统计不换口径；当前 Git 读取失败抛错。只有本仓超默认预算才尝试有界快照折扣。
       const addedLines = span.mainline ? await addedLinesAgainst(t, span.mainline, head) : undefined;
+      // addedLines 实际按的 base（mainline...head 的分叉点）：体量停点记进身份，重评只认它（#3249）
+      const addedLinesBase = span.mainline ? await mergeBaseOf(t, span.mainline, head) : undefined;
       const lineBudgetMeasurement =
         span.mainline &&
         addedLines !== undefined &&
@@ -725,6 +729,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         leftover,
         conflicts,
         ...(addedLines === undefined ? {} : { addedLines }),
+        ...(addedLinesBase ? { addedLinesBase } : {}),
         ...(lineBudgetMeasurement === undefined ? {} : { lineBudgetMeasurement }),
       };
     },
