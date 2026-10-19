@@ -70,7 +70,9 @@
 
 ### 真 Temporal 测试准备
 
-`pnpm test:temporal --cli <已安装的CLI绝对路径>` 登记本机测试 CLI，版本必须与 `deploy/france.sh` 一致；之后 `pnpm test:temporal` 检查登记是否仍可用。登记只写 `~/.fleet-dao/test-tools/`，不下载、不改全局 PATH、不启动服务端。也可直接设 `FLEET_TEST_TEMPORAL_CLI`，显式路径优先，坏路径不会退回登记；CI 必须显式设置。
+首次准备本机真 Temporal 测试运行 `pnpm temporal:install`。它按 `deploy/france.sh` 的固定版本和当前平台（macOS arm64/x64、Linux x64/arm64、Windows x64）从 Temporal 官方发布地址下载，核固定 SHA-256，验证 `--version` 后原子落到 `~/.fleet-dao/test-tools/temporal-cli/`，不改全局 PATH、不碰 SDK 缓存。已准备好的同版本不会重下。下载失败、超时、校验不符或版本不符都不会登记成可用 CLI。
+
+也可以用 `pnpm test:temporal --cli <已安装的CLI绝对路径>` 登记已有 CLI，版本必须与 `deploy/france.sh` 一致；之后 `pnpm test:temporal` 检查登记是否仍可用。登记只写 `~/.fleet-dao/test-tools/`，不下载、不启动服务端。也可直接设 `FLEET_TEST_TEMPORAL_CLI`，显式路径优先，坏路径不会退回登记；CI 必须显式设置。
 
 `pnpm check`、`pnpm test:changed` 选到调用 `createRealEnv` 的文件时先核 CLI；没选到则不做这项准备。直接跑单个测试也会在创建真环境前核验，缺失明确失败，不回退 SDK 隐式下载。`--version` 探测限 5 秒，超时终止该探测进程。随后 SDK 创建只报 `start-or-connect`：SDK 未公开启动和连接的细分状态，日志如实记未知；没有另套超时竞速，环境仍由 SDK 创建并由用例 teardown 清理。
 
