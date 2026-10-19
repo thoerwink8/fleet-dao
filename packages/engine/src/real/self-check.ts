@@ -159,6 +159,22 @@ function codeOf(e: unknown): string | undefined {
   return (e as NodeJS.ErrnoException).code;
 }
 
+/**
+ * Windows 的删除窗口会让目录改名、扫描或读令牌暂报 EPERM。只用原参数重试一次；
+ * 成功、缺失和被占仍由原操作及调用方判断，持续权限拒绝和其它 IO 错误照抛。
+ * 等待可取消，不换令牌、不删竞争者目录，也不把错误当成已经拿到名额。
+ */
+async function afterWindowsRelease<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (process.platform !== 'win32' || codeOf(error) !== 'EPERM') throw error;
+    await sleep(10, signal);
+    if (signal.aborted) throw new LockAbort();
+    return operation();
+  }
+}
+
 /** 一代锁的文件名：16 位十六进制。拆锁只删这个名字，不按目录路径整棵删。 */
 const TOKEN_NAME = /^[0-9a-f]{16}$/;
 const PENDING_PREFIX = 'pending-';
@@ -238,10 +254,11 @@ async function stealStale(
   lockDir: string,
   staleMs: number,
   hooks: { beforeRemove?: () => Promise<void> | void; afterRemove?: () => Promise<void> | void },
+  signal: AbortSignal,
 ): Promise<boolean> {
   let names: string[];
   try {
-    names = await readdir(lockDir);
+    names = await afterWindowsRelease(() => readdir(lockDir), signal);
   } catch (e) {
     if (codeOf(e) === 'ENOENT') return true;
     throw e;
@@ -250,7 +267,7 @@ async function stealStale(
   if (tokens.length === 0) {
     let s: Awaited<ReturnType<typeof stat>> | undefined;
     try {
-      s = await stat(lockDir);
+      s = await afterWindowsRelease(() => stat(lockDir), signal);
     } catch (e) {
       if (codeOf(e) === 'ENOENT') return true;
       throw e;
@@ -270,7 +287,7 @@ async function stealStale(
   for (const name of tokens) {
     let text: string;
     try {
-      text = await readFile(join(lockDir, name), 'utf8');
+      text = await afterWindowsRelease(() => readFile(join(lockDir, name), 'utf8'), signal);
     } catch (e) {
       if (codeOf(e) === 'ENOENT') continue;
       throw e;
@@ -304,7 +321,7 @@ async function stealStale(
  */
 async function publish(dir: string, lockDir: string, token: string, signal: AbortSignal): Promise<boolean> {
   try {
-    await stat(lockDir);
+    await afterWindowsRelease(() => stat(lockDir), signal);
     return false;
   } catch (e) {
     if (codeOf(e) !== 'ENOENT') throw e;
@@ -317,7 +334,7 @@ async function publish(dir: string, lockDir: string, token: string, signal: Abor
     await writeFile(join(pending, token), `${process.pid}\n${Date.now()}\n`, { flag: 'wx' });
     if (signal.aborted) throw new LockAbort();
     try {
-      await rename(pending, lockDir);
+      await afterWindowsRelease(() => rename(pending, lockDir), signal);
       published = true;
       return true;
     } catch (e) {
@@ -326,8 +343,9 @@ async function publish(dir: string, lockDir: string, token: string, signal: Abor
       // Windows 上竞争者先公布非空目录时 rename 报 EPERM；复查目标在才算忙，真实权限错误照样抛。
       if (process.platform === 'win32' && code === 'EPERM') {
         try {
-          if ((await stat(lockDir)).isDirectory()) return false;
-        } catch {
+          if ((await afterWindowsRelease(() => stat(lockDir), signal)).isDirectory()) return false;
+        } catch (error) {
+          if (error instanceof LockAbort) throw error;
           // 目标不在或读不到，不能把原来的权限错误当成锁被占。
         }
       }
@@ -380,7 +398,7 @@ export function createAffectedLock(
             await releaseGeneration(lockDir, token);
           };
         }
-        const stole = await stealStale(lockDir, staleMs, hooks);
+        const stole = await stealStale(lockDir, staleMs, hooks, signal);
         if (!stole) await sleep(pollMs, signal);
       }
     },
@@ -408,7 +426,7 @@ export function createSelfCheckSlots(
         if (signal.aborted) throw new LockAbort();
         for (let i = 0; i < slots; i++) {
           const lockDir = join(dir, `slot-${i}`);
-          await stealStale(lockDir, staleMs, {});
+          await stealStale(lockDir, staleMs, {}, signal);
           if (await publish(dir, lockDir, token, signal)) {
             if (signal.aborted) {
               await releaseGeneration(lockDir, token);
