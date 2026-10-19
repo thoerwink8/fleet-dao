@@ -664,6 +664,32 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect(pending.map((a) => a.action)).toEqual([TASK_START_INTENT_ACTION]);
   });
 
+  it('老行有未知起代责任：不再次起工作流，也不把接手改动留在行上', async () => {
+    const { repo } = await seedWorld(t.db);
+    const old = await seedOrphan(repo.id, { state: 'stopped' });
+    await t.db.insert(auditLog).values({
+      at: NOW,
+      actorKind: 'engine',
+      actorId: 'engine:intake',
+      action: TASK_START_INTENT_ACTION,
+      target: `task:${old.id}`,
+      after: { state: 'stopped' },
+      via: 'engine',
+      ok: true,
+    });
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+    expect(run.outcome).toBe('partial');
+    expect(run.why).toContain('结果未知');
+    expect(starts).toEqual([]);
+    expect((await t.db.select().from(tasks))[0]).toMatchObject({
+      id: old.id,
+      title: 'Fusion 留下的标题',
+      rawRequest: 'Fusion 留下的原话',
+      state: 'stopped',
+    });
+  });
+
   it('有一代在跑：不接手、不起，标题不动', async () => {
     const { repo } = await seedWorld(t.db);
     await seedOrphan(repo.id);

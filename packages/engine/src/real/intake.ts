@@ -443,7 +443,25 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
               actor: startActor,
             });
         if (intent && !intent.ok) {
-          throw new Error(`任务 ${created.task.id} 现在是 ${intent.state ?? '不在库里'}，不起工作流`);
+          if (prepared) {
+            const restored = await store.restoreOrphanTask({
+              taskId: created.task.id,
+              title: prepared.title,
+              rawRequest: prepared.rawRequest,
+              state: prepared.state,
+            });
+            if (restored === 'not_found') {
+              throw new Error(`任务 ${created.task.id} 起代前恢复时却找不到这一行`);
+            }
+            if (restored === 'not_queued') {
+              log('warn', `拉单：${slug} 的起代意图已拒绝，但老行已经不是排队，未覆盖当前状态`, {
+                taskId: created.task.id,
+              });
+            }
+          }
+          throw new Error(
+            intent.reason ?? `任务 ${created.task.id} 现在是 ${intent.state ?? '不在库里'}，不起工作流`,
+          );
         }
         const settle = async (outcome: string) => {
           if (intent?.ok) {

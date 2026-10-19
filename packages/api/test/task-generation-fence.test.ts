@@ -86,7 +86,7 @@ describe('受管起代的起代意图', () => {
     }
   });
 
-  it('起代抛错（超时，结果未知）：意图挂着不落已结；后一次结果明确的重做覆盖掉它', async () => {
+  it('起代抛错（超时，结果未知）：意图挂着不落已结；再次重做也不能越过未知责任', async () => {
     const store = storeWith('stopped');
     const timeout = fakeRedo(async () => {
       throw new Error('4 DEADLINE_EXCEEDED');
@@ -97,8 +97,9 @@ describe('受管起代的起代意图', () => {
     const refused = fakeRedo(async () => ({ ok: false as const, why: '第 2 代还在跑' }));
     expect(await fencedTaskRedo(refused.port, store, ACTOR).redo(input)).toEqual({
       ok: false,
-      why: '第 2 代还在跑',
+      why: '这张单已有一次受管起代结果未知，不能再次起代；先核清那次起代',
     });
-    expect(await pending(store)).toBe(false);
+    expect(refused.calls).toEqual([]);
+    expect(await pending(store)).toBe(true);
   });
 });

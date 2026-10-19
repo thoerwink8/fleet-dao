@@ -23,9 +23,10 @@ export function fencedTaskRedo(
         return {
           ok: false as const,
           why:
-            begun.state === null
+            begun.reason ??
+            (begun.state === null
               ? '库里没有这张任务，不另起'
-              : `这张单现在是${begun.state}，只有已叫停或挂起的才能重做`,
+              : `这张单现在是${begun.state}，只有已叫停或挂起的才能重做`),
         };
       }
       const outcome = await port.redo(input);

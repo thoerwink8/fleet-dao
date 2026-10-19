@@ -369,9 +369,21 @@ export function createMemoryStore(
     let settled = 0;
     for (const row of data.audit) {
       if (row.target !== `task:${taskId}`) continue;
-      if (row.action === TASK_START_INTENT_ACTION) intent = Math.max(intent, Number(row.id));
+      if (row.action === TASK_START_INTENT_ACTION) {
+        if (!/^\d+$/.test(row.id)) throw new Error('起代意图读不全');
+        const value = Number(row.id);
+        if (!Number.isSafeInteger(value)) throw new Error('起代意图读不全');
+        intent = Math.max(intent, value);
+      }
       if (row.action === TASK_START_SETTLED_ACTION) {
-        settled = Math.max(settled, Number((row.after as { upTo?: unknown } | undefined)?.upTo ?? 0));
+        const value = (row.after as { upTo?: unknown } | undefined)?.upTo;
+        if (
+          (typeof value !== 'number' && typeof value !== 'string') ||
+          !/^\d+$/.test(String(value)) ||
+          !Number.isSafeInteger(Number(value))
+        )
+          throw new Error('起代意图读不全');
+        settled = Math.max(settled, Number(value));
       }
     }
     return intent > settled;
@@ -941,6 +953,13 @@ export function createMemoryStore(
       const task = data.tasks.find((row) => row.id === taskId);
       if (!task) return { ok: false, state: null };
       if (!allowed.includes(task.state)) return { ok: false, state: task.state };
+      if (startPending(taskId)) {
+        return {
+          ok: false,
+          state: task.state,
+          reason: '这张单已有一次受管起代结果未知，不能再次起代；先核清那次起代',
+        };
+      }
       const intent = audit({
         actor: { kind: actor.kind, id: actor.id },
         action: TASK_START_INTENT_ACTION,
@@ -955,6 +974,34 @@ export function createMemoryStore(
       return { ok: true, intent };
     },
     async settleTaskStart({ taskId, intent, outcome, actor }) {
+      if (!/^\d+$/.test(intent)) throw new Error('起代意图编号不对');
+      const wanted = Number(intent);
+      if (!Number.isSafeInteger(wanted)) throw new Error('起代意图编号不对');
+      let latest: number | null = null;
+      let settled = 0;
+      for (const row of data.audit) {
+        if (row.target !== `task:${taskId}`) continue;
+        if (row.action === TASK_START_INTENT_ACTION) {
+          if (!/^\d+$/.test(row.id) || !Number.isSafeInteger(Number(row.id)))
+            throw new Error('起代意图读不全');
+          latest = latest === null ? Number(row.id) : Math.max(latest, Number(row.id));
+        }
+        if (row.action === TASK_START_SETTLED_ACTION) {
+          const value = (row.after as { upTo?: unknown } | undefined)?.upTo;
+          if (
+            (typeof value !== 'number' && typeof value !== 'string') ||
+            !/^\d+$/.test(String(value)) ||
+            !Number.isSafeInteger(Number(value))
+          )
+            throw new Error('起代意图读不全');
+          settled = Math.max(settled, Number(value));
+        }
+      }
+      if (latest === null || latest !== wanted) throw new Error('起代意图已经换代，不能结算旧意图');
+      if (settled >= wanted) {
+        if (settled === wanted) return;
+        throw new Error('起代意图已经被别的结果覆盖，不能越代结算');
+      }
       audit({
         actor: { kind: actor.kind, id: actor.id },
         action: TASK_START_SETTLED_ACTION,

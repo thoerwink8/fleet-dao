@@ -69,7 +69,9 @@ export interface TaskStartActor {
   via: 'cockpit' | 'engine' | 'ops';
 }
 
-export type TaskStartBegun = { ok: true; intent: string } | { ok: false; state: string | null };
+export type TaskStartBegun =
+  | { ok: true; intent: string }
+  | { ok: false; state: string | null; reason?: string };
 
 function serialValue(value: unknown): bigint | null {
   if (value === null || value === undefined) return null;
@@ -115,6 +117,13 @@ export async function beginTaskStart(
       .for('update');
     if (!row) return { ok: false as const, state: null };
     if (!input.allowed.includes(row.state)) return { ok: false as const, state: row.state };
+    if (await startPending(tx, input.taskId)) {
+      return {
+        ok: false as const,
+        state: row.state,
+        reason: '这张单已有一次受管起代结果未知，不能再次起代；先核清那次起代',
+      };
+    }
     const [audit] = await tx
       .insert(auditLog)
       .values({
@@ -143,15 +152,40 @@ export async function settleTaskStart(
   input: { taskId: string; intent: string; outcome: string; actor: TaskStartActor; now: Date },
 ): Promise<void> {
   if (!/^\d+$/.test(input.intent)) throw new Error('起代意图编号不对');
-  await db.insert(auditLog).values({
-    at: input.now,
-    actorKind: input.actor.kind,
-    actorId: input.actor.id,
-    action: TASK_START_SETTLED_ACTION,
-    target: `task:${input.taskId}`,
-    after: { upTo: Number(input.intent), outcome: input.outcome },
-    via: input.actor.via,
-    ok: true,
+  const intent = BigInt(input.intent);
+  await db.transaction(async (tx) => {
+    const [task] = await tx
+      .select({ id: tasks.id })
+      .from(tasks)
+      .where(eq(tasks.id, input.taskId))
+      .for('update');
+    if (!task) throw new Error('任务不在库里，不能结算起代意图');
+    const [row] = await tx
+      .select({
+        latestIntent: sql<unknown>`max(${auditLog.id}) filter (where ${auditLog.action} = ${TASK_START_INTENT_ACTION})`,
+        settled: sql<unknown>`max((${auditLog.after} ->> 'upTo')::bigint) filter (where ${auditLog.action} = ${TASK_START_SETTLED_ACTION})`,
+      })
+      .from(auditLog)
+      .where(eq(auditLog.target, `task:${input.taskId}`));
+    const latest = serialValue(row?.latestIntent);
+    const settled = serialValue(row?.settled);
+    if (latest === null || latest !== intent) {
+      throw new Error('起代意图已经换代，不能结算旧意图');
+    }
+    if (settled !== null && settled >= intent) {
+      if (settled === intent) return;
+      throw new Error('起代意图已经被别的结果覆盖，不能越代结算');
+    }
+    await tx.insert(auditLog).values({
+      at: input.now,
+      actorKind: input.actor.kind,
+      actorId: input.actor.id,
+      action: TASK_START_SETTLED_ACTION,
+      target: `task:${input.taskId}`,
+      after: { upTo: Number(input.intent), outcome: input.outcome },
+      via: input.actor.via,
+      ok: true,
+    });
   });
 }
 
