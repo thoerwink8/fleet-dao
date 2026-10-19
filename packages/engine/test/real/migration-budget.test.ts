@@ -201,6 +201,7 @@ describe('体量关口重评活动（#3249）', { timeout: 30000 }, () => {
       base: f.base,
       headAfter: f.head,
       cleanAfter: true,
+      mergeBaseAfter: f.base,
       measurement: { verified: true, rawAddedLines: f.raw, base: f.base, head: f.head },
     });
     const m = (
@@ -307,6 +308,19 @@ describe('体量关口重评活动（#3249）', { timeout: 30000 }, () => {
       status: 'measured',
       measurement: { verified: false, base: s, chargeableAddedLines: fromS },
     });
+  });
+
+  it('测量期间主线引用变了、merge-base 不再是请求的 base：拒绝，不接受测量前的旧结果', async () => {
+    const f = await ready();
+    const got = await remeasureLineBudget(f.tree, repo, ask(f), async (tree, base, head, raw) => {
+      const measured = await measureMigrationBudget(tree, base, head, raw);
+      // 测量窗口里把钉住的主线挪到候选头上：merge-base 变成头自己，不再是停下时的 base
+      f.git('update-ref', 'refs/remotes/origin/main', head);
+      return measured;
+    });
+    expect(got.budgetRemeasure).toMatchObject({ status: 'refused', reason: 'base' });
+    const detail = (got.budgetRemeasure as { detail?: string }).detail ?? '';
+    expect(detail).toContain('测量之后');
   });
 
   it('原始新增行与停下时不同、不适用的仓、读失败：回 refused 或抛错，不当 0', async () => {

@@ -111,12 +111,14 @@ async function dirtyEntries(t: UserTree): Promise<string[]> {
 
 /**
  * 体量关口重评（#3249）：只在这棵树上对精确 head、固定 base 重做可信计量。用发布版测量实现（只读 Git 对象，
- * 不执行候选源码或配置、不起模型），测量前后各核一次头和干净程度。读失败抛错（工作流按未知处理），身份对不上回 refused。
+ * 不执行候选源码或配置、不起模型），测量前后各核一次头和干净程度，测量后再核一次主线 merge-base。
+ * 读失败抛错（工作流按未知处理），身份对不上回 refused。measure 只给测试在测量窗口里改主线引用；生产不传。
  */
 export async function remeasureLineBudget(
   t: UserTree,
   repo: { owner: string; name: string; defaultBranch: string },
   ask: NonNullable<ReadDeliveryInput['budgetRemeasure']>,
+  measure: typeof measureMigrationBudget = measureMigrationBudget,
 ): Promise<DeliveryRead> {
   if (!FULL_SHA.test(ask.head) || !FULL_SHA.test(ask.base) || !Number.isSafeInteger(ask.rawAddedLines)) {
     throw new PortError('BAD_INPUT', '重评要完整 head / base 和原始新增行', { retryable: false });
@@ -150,9 +152,19 @@ export async function remeasureLineBudget(
   const raw = await addedLinesAgainst(t, ask.base, ask.head);
   if (raw !== ask.rawAddedLines)
     return refused('raw', `原始新增行是 ${raw}，与停下时的 ${ask.rawAddedLines} 不同`);
-  const measurement = await measureMigrationBudget(t, ask.base, ask.head, raw);
+  const measurement = await measure(t, ask.base, ask.head, raw);
   const headAfter = await headOf(t);
   const dirtyAfter = await dirtyEntries(t);
+  // 测量期间钉住的主线可能被推进或挪走：再算一次 merge-base，不再是请求的 base 就丢掉这次测量，不拿旧 base 的结果放行。
+  const mergeBaseAfter = await mergeBaseOf(t, mainlineRef(repo.defaultBranch), ask.head);
+  if (mergeBaseAfter !== ask.base) {
+    return refused(
+      'base',
+      mergeBaseAfter === null
+        ? '测量之后头和树里钉的主线没有共同祖先'
+        : `测量之后主线基线变了（现在的 merge-base 是 ${mergeBaseAfter.slice(0, 12)}），这次测量作废`,
+    );
+  }
   return answer({
     version: 1,
     status: 'measured',
@@ -160,6 +172,7 @@ export async function remeasureLineBudget(
     base: ask.base,
     headAfter,
     cleanAfter: dirtyAfter.length === 0,
+    mergeBaseAfter,
     measurement,
   });
 }

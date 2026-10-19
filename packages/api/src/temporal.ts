@@ -195,7 +195,13 @@ export function createTemporalLineBudgetRemeasure(
         lineBudgetPark?: {
           version?: unknown;
           identity?: ParkIdentityWire | null;
-          resumed?: { identity: ParkIdentityWire; head: string; base: string } | null;
+          busy?: unknown;
+          resumed?: {
+            identity: ParkIdentityWire;
+            head: string;
+            base: string;
+            receipt?: LineBudgetRemeasureReceiptView;
+          } | null;
         };
       }
     )?.lineBudgetPark;
@@ -270,6 +276,7 @@ export function createTemporalLineBudgetRemeasure(
     };
     // 同一已放行请求重发：放行后停点身份已清空（或已是新停点），按工作流报的放行绑定（同 run、同停点编号、同头、同 base）
     // 原样带回，由工作流自己核对并回幂等回执；对不上就走下面的现停点核对，不放行别的头。
+    // 工作流已经结束时 Update 发不出去：只在查询里的回执和请求逐项对得上时回幂等回执，不再测、不放行别的头。
     const resumed = field.resumed;
     if (
       request.mode === 'resume' &&
@@ -278,14 +285,42 @@ export function createTemporalLineBudgetRemeasure(
       parkLabel(resumed.identity) === request.park &&
       resumed.head === request.head &&
       resumed.base === request.base
-    )
-      return send(resumed.identity, parkLabel(resumed.identity));
+    ) {
+      const park = parkLabel(resumed.identity);
+      try {
+        return await send(resumed.identity, park);
+      } catch (err) {
+        // send 把「已结束」包成 WorkflowGoneError，原始错误在 cause 上。
+        if (!(err instanceof WorkflowGoneError) && !isGone(err)) throw err;
+        const receipt = resumed.receipt;
+        if (
+          receipt &&
+          receipt.head === request.head &&
+          receipt.base === request.base &&
+          Number.isSafeInteger(receipt.rawAddedLines) &&
+          Number.isSafeInteger(receipt.verifiedGeneratedLines) &&
+          Number.isSafeInteger(receipt.chargeableAddedLines) &&
+          Number.isSafeInteger(receipt.budget)
+        ) {
+          return { ok: true, outcome: 'already_resumed', park, receipt };
+        }
+        return {
+          ok: false,
+          reason: 'unknown',
+          detail: '工作流已结束，绑定的幂等回执读不全，不当作新的放行',
+          park,
+        };
+      }
+    }
     const id = field.identity;
     if (!id) {
+      if (field.busy === true) {
+        return { ok: false, reason: 'busy', detail: '已有重评正在跑，原停点保留' };
+      }
       return {
         ok: false,
         reason: 'stale',
-        detail: '工作流此刻不在可重评的体量停点（运行中、已继续、已放行、别的停法或正在重评）',
+        detail: '工作流此刻不在可重评的体量停点（运行中、已继续、已放行、别的停法或已结束）',
       };
     }
     const current = {

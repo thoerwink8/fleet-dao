@@ -145,7 +145,18 @@ export interface TaskStatus {
   lineBudgetPark?: {
     version: 1;
     identity: LineBudgetParkIdentity | null;
-    resumed?: { identity: LineBudgetParkIdentity; head: string; base: string } | null;
+    /**
+     * 正在重评：identity 被藏起来，管理入口必须回 busy，不能把「正在核」当成不在停点（stale）。
+     * 旧 worker 不报这个字段；没报又没有 identity，仍按不在停点拒绝。
+     */
+    busy?: boolean;
+    resumed?: {
+      identity: LineBudgetParkIdentity;
+      head: string;
+      base: string;
+      /** 放行回执。工作流结束后 Update 发不出去，同一请求凭查询里的这份回执取幂等结果。 */
+      receipt?: LineBudgetRemeasureReceipt;
+    } | null;
   };
   /** Separate from closed-issue abandonment: real merged PR, even when acceptance keeps its issue open. */
   mergedTaskClose?: {
@@ -426,7 +437,7 @@ export interface ReadDeliveryInput {
   budgetRemeasure?: { head: string; base: string; rawAddedLines: number };
 }
 
-/** 重评的活动回答（DeliveryRead.budgetRemeasure）：拒绝带原因；测量带测量前后核对过的头和干净程度。 */
+/** 重评的活动回答（DeliveryRead.budgetRemeasure）：拒绝带原因；测量带测量前后核对过的头、主线基线和干净程度。 */
 export type BudgetRemeasureRead =
   | {
       version: 1;
@@ -436,6 +447,11 @@ export type BudgetRemeasureRead =
       /** 测量之后重读的头和工作树状态；与入参不同＝测量期间换了。 */
       headAfter: string;
       cleanAfter: boolean;
+      /**
+       * 测量之后重读的「头相对树里钉的主线」的 merge-base。必须仍等于请求的 base。
+       * 缺了＝活动没做测量后核对（旧活动），工作流不放行。
+       */
+      mergeBaseAfter: string;
       measurement: LineBudgetMeasurement;
     }
   | { version: 1; status: 'refused'; reason: 'head' | 'base' | 'dirty' | 'raw'; detail: string };

@@ -2,13 +2,16 @@
 // 真 Temporal 测试服务端 + 假端口 + 脚本化的任务活动（重评走 readDelivery 的 budgetRemeasure 入参）。
 // 不碰真实 #3207，不改生产数据。
 
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
-import { Worker } from '@temporalio/worker';
+import { bundleWorkflowCode, Worker, type WorkflowBundle } from '@temporalio/worker';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
@@ -87,6 +90,7 @@ function measured(
         reason: '已核单份快照',
         ...over.measurement,
       },
+      mergeBaseAfter: ask.base,
       ...over.answer,
     },
   } as DeliveryRead;
@@ -231,6 +235,16 @@ const OLD_PARK = (() => {
 })();
 const OLD_PARK_COMMANDS = commandsOf(OLD_PARK.events);
 
+/** 新代码在体量停点报警前问一次重评标记（提示句跟着它走）。旧夹具没有这个标记，命令序不该被改写成新的。 */
+function withRemeasurePatch(commands: readonly string[]): string[] {
+  const next = [...commands];
+  const alert = next.lastIndexOf('raiseAlert');
+  const save = next.lastIndexOf('saveTaskState', alert);
+  const at = save >= 0 && save < alert ? save : Math.max(alert, 0);
+  next.splice(at, 0, 'patch:line-budget-remeasure-v1');
+  return next;
+}
+
 describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
   it('8037 行生成折扣、实际计量 1513：预检只测不放行，执行只放行这一份交付，不设永久豁免；旧停点历史可达、整段可重放', async () => {
     const { world, tasks, asks } = setup((ask) => measured(ask), true);
@@ -267,10 +281,11 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
         const resumed = await send(h, command(i, h, id));
         expect(resumed.outcome).toBe('resumed');
         // 放行绑定对外可读（同一请求重发凭它拿幂等回执），停点身份不再可用
-        expect((await status(h)).lineBudgetPark?.resumed).toEqual({
+        expect((await status(h)).lineBudgetPark?.resumed).toMatchObject({
           identity: id,
           head: id.head,
           base: BASE,
+          receipt: { head: id.head, base: BASE, chargeableAddedLines: 1513, verifiedGeneratedLines: 8037 },
         });
         // 这一份交付被推走；验收第一次不过，第 3 份交付没有折扣：必须重新计量并再次停下，没有永久豁免
         const next = await parkedIdentity(h, id.parks);
@@ -299,11 +314,11 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(asks).toHaveLength(2); // check + resume 各测一次；重放不再测
     expect(asks[0]).toMatchObject({ base: BASE, rawAddedLines: RAW });
 
-    // 旧在途历史：停到体量关口的命令序与重评之前的代码一致；这段前缀原样在整段历史里，后面接重评 Update
-    // （标记第一次在 Update 里问）和放行后的推、验收、再停、继续、合并。两段都按现在的代码重放不报对不上。
-    expect(commandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
+    // 新代码停到体量关口：命令序只比旧夹具多出报警前的重评标记（提示句用它守着）。整段按现在的代码重放不报对不上。
+    const parkedCommands = commandsOf(parked.events ?? []);
+    expect(parkedCommands).toEqual(withRemeasurePatch(OLD_PARK_COMMANDS));
     expect(JSON.stringify(parked)).not.toContain('taskRemeasureLineBudget');
-    expect(commandsOf(full.events ?? []).slice(0, OLD_PARK_COMMANDS.length)).toEqual(OLD_PARK_COMMANDS);
+    expect(commandsOf(full.events ?? []).slice(0, parkedCommands.length)).toEqual(parkedCommands);
     expect(JSON.stringify(full)).toContain('taskRemeasureLineBudget');
     const bundle = { workflowBundle: await engineBundle() };
     await Worker.runReplayHistory(bundle, parked, workflowId);
@@ -393,6 +408,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
       (ask) => measured(ask, { answer: { cleanAfter: false } }),
       (ask) => measured(ask, { answer: { base: fakeHead(2) } }),
       (ask) => measured(ask, { measurement: { rawAddedLines: RAW + 1, chargeableAddedLines: 1514 } }),
+      (ask) => measured(ask, { answer: { mergeBaseAfter: fakeHead(4) } }),
     ];
     let n = 0;
     // 停下时那次测量的 base 是 BASE：停点身份钉住它
@@ -469,7 +485,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
         const id = await parkedIdentity(h);
         const first = send(h, command(i, h, id));
         await inFlight;
-        expect((await status(h)).lineBudgetPark?.identity).toBeNull(); // 重评中不暴露可用身份
+        expect((await status(h)).lineBudgetPark).toMatchObject({ identity: null, busy: true });
         expect(await send(h, command(i, h, id))).toMatchObject({ outcome: 'refused', reason: 'busy' });
         await h.signal(taskContinueSignal, { by: 'frank' });
         release();
@@ -525,6 +541,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(OLD_PARK_COMMANDS).toContain('patch:pr-line-budget');
     expect(OLD_PARK_COMMANDS.at(-1)).toBe('raiseAlert');
     expect(text).not.toContain('addedLinesBase');
+    expect(text).not.toContain('budget-remeasure');
     await Worker.runReplayHistory(
       { workflowBundle: await engineBundle() },
       { events: OLD_PARK.events } as never,
@@ -552,8 +569,8 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(world.count('pushBranch')).toBe(0);
   });
 
-  it('跨工人接停点：停在体量关口时工人下线，新起的工人从历史整段重放接手，处理重评后照原路走完', async () => {
-    const { world, tasks, asks } = setup((ask) => measured(ask));
+  it('跨工人接停点：停在体量关口时工人下线，新起的工人从历史整段重放接手，重评后下一头仍按原预算停下', async () => {
+    const { world, tasks, asks } = setup((ask) => measured(ask), true);
     const i = input();
     const taskQueue = `q-${randomUUID()}`;
     // 第一个工人不缓存：下线后不留粘性队列（可跳时间的测试服务端不会把下线工人粘性队列里的任务挪回普通队列）
@@ -566,9 +583,9 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
       },
       { tasks, taskQueue, maxCachedWorkflows: 0 },
     );
-    // 下线时的停点历史，命令序与旧代码录的真实历史逐条一致
+    // 下线时的停点历史：旧命令序加上报警前的重评标记（新代码才有；旧夹具本身在另一条用例里重放）
     const parked = await h.fetchHistory();
-    expect(commandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
+    expect(commandsOf(parked.events ?? [])).toEqual(withRemeasurePatch(OLD_PARK_COMMANDS));
     // 新起的工人（像部署后的新进程，缓存是空的）：第一个工作流任务就是从上面那份历史整段重放，再处理重评
     const run = await withWorker(
       env,
@@ -578,17 +595,114 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
           outcome: 'resumed',
           receipt: { chargeableAddedLines: 1513, verifiedGeneratedLines: 8037, base: BASE },
         });
-        // 接手后的重发：只回原身份的幂等回执
+        const next = await parkedIdentity(h, id.parks);
+        expect(next.head).not.toBe(id.head);
+        expect(next.continued).toBe(id.continued);
+        expect(next.rawAddedLines).toBe(RAW);
+        // 接手后的重发：只回原身份的幂等回执，不放行新头
         expect(await send(h, command(i, h, id))).toMatchObject({
           outcome: 'already_resumed',
           receipt: { head: id.head },
         });
+        expect(await send(h, command(i, h, id, { head: next.head }))).toMatchObject({
+          outcome: 'refused',
+          reason: 'stale',
+        });
+        await waitingHuman(h);
+        await h.signal(taskContinueSignal, { by: 'frank' });
         return h.result() as Promise<TaskRun>;
       },
       { tasks, taskQueue },
     );
     expect(run.outcome).toBe('merged');
     expect(asks).toHaveLength(1);
-    expect(world.count('pushBranch')).toBe(1);
+    // 放行的那一头推了一次；下一头超预算又停下，人点继续后才再推。没有第三次体量停点（继续之后不再判）
+    expect(world.count('pushBranch')).toBe(2);
+    expect(world.alerts.filter((a) => a.title.includes('体量预算'))).toHaveLength(2);
+  });
+
+  it('改动前的工人停在体量关口：新 bundle 重放那段历史，新工人处理重评后人点继续仍是原授权', async () => {
+    const old = await oldParkWorkerBundle();
+    // 活动和旧工人同一形状：交付不报 addedLinesBase（828c9d47 的读交付结果里没有这个字段）。
+    const { world, tasks, asks } = setup((ask) => measured(ask), true, { old: true });
+    const i = input();
+    const taskQueue = `q-${randomUUID()}`;
+    const { h, history } = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, i);
+        // 旧工人的查询没有 lineBudgetPark；用停下原因认体量停点（只在测试里等它，管理入口不凭这句自由文本放行）。
+        await pollQuery(
+          () => status(h),
+          (x) => x.phase === 'parked' && (x.lastProblem ?? '').includes('体量预算'),
+          '旧工人停在体量关口',
+          60_000,
+        );
+        expect((await status(h)).lineBudgetPark).toBeUndefined();
+        return { h, history: await h.fetchHistory() };
+      },
+      { tasks, taskQueue, maxCachedWorkflows: 0, workflowBundle: old },
+    );
+    const parkedCommands = commandsOf(history.events ?? []);
+    expect(parkedCommands).not.toContain('patch:line-budget-remeasure-v1');
+    expect(parkedCommands.at(-1)).toBe('raiseAlert');
+    expect(JSON.stringify(history)).not.toContain('budget-remeasure');
+    expect(JSON.stringify(history)).not.toContain('taskRemeasureLineBudget');
+    // 这段是旧工人真跑出来的停点，不是新代码自录后再用新 bundle 重放。
+    await Worker.runReplayHistory({ workflowBundle: await engineBundle() }, history, h.workflowId);
+    const run = await withWorker(
+      env,
+      world,
+      async () => {
+        const id = await parkedIdentity(h);
+        expect(id.base).toBeNull();
+        expect(await send(h, command(i, h, id))).toMatchObject({ outcome: 'refused', reason: 'unsupported' });
+        await waitingHuman(h);
+        expect(world.count('pushBranch')).toBe(0);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks, taskQueue },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(asks).toHaveLength(0);
+    expect(world.alerts.filter((a) => a.title.includes('体量预算'))).toHaveLength(1);
   });
 });
+
+/** #3249 改动前的 828c9d47：只打包那一版工作流，活动仍用现在的测试脚本。不改、不覆盖已有夹具。 */
+const OLD_WORKER_COMMIT = '828c9d47';
+const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+let oldParkBundle: Promise<WorkflowBundle> | undefined;
+
+function oldParkWorkerBundle(): Promise<WorkflowBundle> {
+  oldParkBundle ??= (async () => {
+    const root = mkdtempSync(join(tmpdir(), 'fleet-3249-old-park-'));
+    try {
+      const archive = join(root, 'src.tar');
+      execFileSync('git', ['archive', `--output=${archive}`, OLD_WORKER_COMMIT, 'packages/engine/src'], {
+        cwd: REPO_ROOT,
+      });
+      execFileSync('tar', ['-x', '-C', root, '-f', archive]);
+      const silent = { trace() {}, debug() {}, info() {}, warn() {}, error: console.error, log() {} };
+      const modules = [
+        fileURLToPath(new URL('../node_modules', import.meta.url)),
+        fileURLToPath(new URL('../../../node_modules', import.meta.url)),
+      ];
+      return await bundleWorkflowCode({
+        workflowsPath: join(root, 'packages/engine/src/workflows/index.ts'),
+        logger: silent as never,
+        webpackConfigHook: (config) => {
+          config.resolve ??= {};
+          const current = config.resolve.modules ?? ['node_modules'];
+          config.resolve.modules = [...modules, ...current];
+          return config;
+        },
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  })();
+  return oldParkBundle;
+}

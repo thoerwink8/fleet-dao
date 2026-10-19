@@ -12,7 +12,10 @@ import type {
   RemeasureLineBudgetCommand,
 } from '../task-contract.ts';
 
-/** 重评的 patched 标记：只在 Update 处理里第一次问，旧停点（旧历史里停下的）照样走得到。 */
+/**
+ * 重评的 patched 标记。两处问：体量停点报警多出来的提示（旧历史没有标记，重放时提示不出现、raiseAlert 入参不变）；
+ * taskRemeasureLineBudget Update（旧停点换上新代码后，这里仍是新历史才有的分支）。
+ */
 export const LINE_BUDGET_REMEASURE_PATCH = 'line-budget-remeasure-v1';
 /** 一次重评在工作流里最多等多久（活动自己的 5 分钟限时之内）。 */
 export const REMEASURE_TIMEOUT_SECONDS = 240;
@@ -133,6 +136,13 @@ export function judgeRemeasure(
   }
   if (answer.base !== command.base) {
     return { ok: false, reason: 'changed', detail: '测量基线不是请求的固定 base' };
+  }
+  if (answer.mergeBaseAfter !== command.base) {
+    return {
+      ok: false,
+      reason: 'changed',
+      detail: '测量之后主线基线不再是请求的固定 base（测量期间主线变了，或活动没再核对）',
+    };
   }
   if (answer.cleanAfter !== true) {
     return { ok: false, reason: 'changed', detail: '测量之后工作树不干净' };

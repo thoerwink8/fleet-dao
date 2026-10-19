@@ -405,12 +405,15 @@ export class TaskRuntime {
       waiting: this.status.waiting ? { ...this.status.waiting } : null,
       lineBudgetPark: {
         version: 1,
+        // 重评进行中不把停点身份交出去（避免拿它再开一次），同时标明 busy，管理入口回 busy 而不是 stale。
         identity: this.running.size === 0 && !this.budgetRemeasuring ? this.parkIdentity() : null,
+        busy: this.budgetRemeasuring,
         resumed: this.budgetResume
           ? {
               identity: { ...this.budgetResume.identity },
               head: this.budgetResume.head,
               base: this.budgetResume.base,
+              receipt: this.budgetResume.receipt,
             }
           : null,
       },

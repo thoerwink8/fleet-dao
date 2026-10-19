@@ -226,24 +226,30 @@ async function budgetRemeasure(
   ref: string,
 ): Promise<string> {
   const execute = args.execute === true;
+  // 同一条已执行请求（带当时的 run 和停点）重试：放行后工作流可能已经走完。只取幂等回执，不要求任务或工作流还在跑。
+  const idempotentRetry = execute && args.run !== undefined && args.park !== undefined;
   const fail = async (result: string): Promise<never> => {
     // 预检只读，不写操作记录；执行的每个结果都记
     if (execute) await record(deps, args, ref, { ok: false, result, taskId: task.id });
     throw new TaskCliError(`没做成：${ref}：${result}`, 1);
   };
-  if (isFinished(task.state)) return fail(`任务已经结束（${task.state}），没有可重评的停点`);
+  if (isFinished(task.state) && !idempotentRetry)
+    return fail(`任务已经结束（${task.state}），没有可重评的停点`);
   const remeasure = deps.workflows.remeasureLineBudget;
   const execution = deps.workflows.taskWorkflowExecution;
   if (!remeasure || !execution)
     return fail('这个入口没接上可信重评能力（Temporal 控制缺 remeasureLineBudget），没放行');
   let workflowId: string;
   let runId: string;
+  let workflowRunning = true;
   try {
     workflowId = deps.workflows.runningTaskWorkflow
       ? await deps.workflows.runningTaskWorkflow({ owner: repo.owner, name: repo.name }, task.issueNumber)
       : taskWorkflowId(repo, task.issueNumber);
     const current = await execution(workflowId);
-    if (!current.running) return fail(`任务工作流 ${workflowId} 已经结束，没有可重评的停点`);
+    workflowRunning = current.running;
+    if (!current.running && !idempotentRetry)
+      return fail(`任务工作流 ${workflowId} 已经结束，没有可重评的停点`);
     runId = current.runId;
   } catch (err) {
     if (err instanceof TaskCliError) throw err;
@@ -271,6 +277,9 @@ async function budgetRemeasure(
     if (err instanceof WorkflowGoneError) return fail('任务工作流已经结束，没放行');
     if (err instanceof WorkflowUnavailableError) return fail('工作流服务暂时连不上，结果未知，原停点保留');
     return fail(`重评没做成（结果未知，原停点保留）：${errMessage(err)}`);
+  }
+  if (!workflowRunning && response.ok && response.outcome !== 'already_resumed') {
+    return fail('工作流已经结束，这不是一条已完成请求的幂等回执，没放行任何成果');
   }
   if (!response.ok) {
     const where = response.park ? `；停点 ${response.park}` : '';

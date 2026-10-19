@@ -394,6 +394,31 @@ describe('fleet-api task budget-remeasure（#3249）', () => {
     ).toBe(0);
     expect(h.out.join('\n')).toContain('已放行过（幂等回执，不再放行别的头）');
 
+    const closedFlags = [
+      'budget-remeasure',
+      'example/canary',
+      '12',
+      ...FLAGS,
+      '--execute',
+      '--run',
+      RUN,
+      '--park',
+      '2.5.0',
+    ] as const;
+    const closed = setup({
+      remeasure: again.remeasure,
+      execution: { runId: RUN, running: false },
+    });
+    expect(await closed.run([...closedFlags])).toBe(0);
+    expect(closed.out.join('\n')).toContain('已放行过（幂等回执，不再放行别的头）');
+    const finished = setup({
+      remeasure: again.remeasure,
+      execution: { runId: RUN, running: false },
+    });
+    task12(finished.store).state = 'done';
+    expect(await finished.run([...closedFlags])).toBe(0);
+    expect(finished.out.join('\n')).toContain('已放行过（幂等回执，不再放行别的头）');
+
     const r = remeasurer();
     const moved = setup({ remeasure: r.remeasure, execution: { runId: 'run-0002', running: true } });
     expect(
@@ -467,6 +492,32 @@ describe('fleet-api task budget-remeasure（#3249）', () => {
     const ended = setup({ remeasure: remeasurer().remeasure, execution: { runId: RUN, running: false } });
     expect(await ended.run(['budget-remeasure', 'example/canary', '12', ...FLAGS])).toBe(1);
     expect(ended.err.join('\n')).toContain('已经结束');
+
+    const closedRelease = remeasurer((request) => ({
+      ok: true,
+      outcome: 'resumed',
+      park: request.park ?? '2.5.0',
+      receipt: RECEIPT,
+    }));
+    const closed = setup({
+      remeasure: closedRelease.remeasure,
+      execution: { runId: RUN, running: false },
+    });
+    expect(
+      await closed.run([
+        'budget-remeasure',
+        'example/canary',
+        '12',
+        ...FLAGS,
+        '--execute',
+        '--run',
+        RUN,
+        '--park',
+        '2.5.0',
+      ]),
+    ).toBe(1);
+    expect(closed.err.join('\n')).toContain('不是一条已完成请求的幂等回执');
+    expect(closed.out).toEqual([]);
 
     const boom = setup({
       remeasure: async () => {
@@ -569,6 +620,9 @@ describe('Temporal 重评适配（#3249）', () => {
     expect(old.r).toMatchObject({ ok: false, reason: 'unsupported' });
     const none = await run({ lineBudgetPark: { version: 1, identity: null } });
     expect(none.r).toMatchObject({ ok: false, reason: 'stale' });
+    const inflight = await run({ lineBudgetPark: { version: 1, identity: null, busy: true } });
+    expect(inflight.r).toMatchObject({ ok: false, reason: 'busy' });
+    expect(inflight.c.calls.map((y) => y.kind)).toEqual(['query']);
     const park = await run({ lineBudgetPark: { version: 1, identity } }, { park: '1.4.0' });
     expect(park.r).toMatchObject({ ok: false, reason: 'stale', park: '2.5.0' });
     const head = await run({ lineBudgetPark: { version: 1, identity } }, { head: 'f'.repeat(40) });
@@ -606,6 +660,51 @@ describe('Temporal 重评适配（#3249）', () => {
       expect(got).toMatchObject({ ok: false, reason: 'stale' });
       expect(c.calls.map((x) => x.kind)).toEqual(['query']);
     }
+  });
+
+  it('工作流已结束：Update 发不出去时，查询里对得上的回执仍是幂等回执；读不全不当成功', async () => {
+    const gone = new Error('workflow execution already completed');
+    gone.name = 'WorkflowNotFoundError';
+    const resumed = { identity, head: HEAD, base: BASE, receipt: { ...RECEIPT } };
+    const calls: string[] = [];
+    const got = await createTemporalLineBudgetRemeasure({
+      connection: { withDeadline: async <R>(_d: number | Date, fn: () => Promise<R>) => fn() },
+      workflow: {
+        getHandle: () => ({
+          async query() {
+            calls.push('query');
+            return { lineBudgetPark: { version: 1, identity: null, resumed } };
+          },
+          async executeUpdate() {
+            calls.push('update');
+            throw gone;
+          },
+        }),
+      },
+    })(request);
+    expect(got).toMatchObject({ ok: true, outcome: 'already_resumed', park: '2.5.0', receipt: RECEIPT });
+    expect(calls).toEqual(['query', 'update']);
+
+    const incomplete = await createTemporalLineBudgetRemeasure({
+      connection: { withDeadline: async <R>(_d: number | Date, fn: () => Promise<R>) => fn() },
+      workflow: {
+        getHandle: () => ({
+          async query() {
+            return {
+              lineBudgetPark: {
+                version: 1,
+                identity: null,
+                resumed: { identity, head: HEAD, base: BASE },
+              },
+            };
+          },
+          async executeUpdate() {
+            throw gone;
+          },
+        }),
+      },
+    })(request);
+    expect(incomplete).toMatchObject({ ok: false, reason: 'unknown' });
   });
 
   it('工作流回拒绝或认不出的回执：都不当成功', async () => {
