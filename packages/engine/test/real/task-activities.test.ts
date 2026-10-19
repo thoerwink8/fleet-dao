@@ -1770,6 +1770,7 @@ describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝
     const message = String((err as Error).message);
     expect(message).toContain('Pull request Pull request is in unstable status');
     expect(message).toContain('UNPROCESSABLE enablePullRequestAutoMerge');
+    expect(message).toContain(`原始 errors：${JSON.stringify([unstable])}`);
     expect(message).toContain(`PR #7 头 ${HEAD}`);
     const failure = toActivityFailure(err);
     expect(failure).toBeInstanceOf(ApplicationFailure);

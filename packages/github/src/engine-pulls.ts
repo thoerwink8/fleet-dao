@@ -200,8 +200,7 @@ function isUnstableRefusal(details: unknown): boolean {
     Array.isArray(e.path) &&
     e.path.length === 1 &&
     e.path[0] === 'enablePullRequestAutoMerge' &&
-    typeof e.message === 'string' &&
-    /^(?:Pull request )+is in unstable status\.?$/i.test(e.message.trim())
+    e.message === 'Pull request Pull request is in unstable status'
   );
 }
 
@@ -480,9 +479,10 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
         if (isGitHubError(error, 'GRAPHQL_ERROR') && isUnstableRefusal(error.details)) {
           const attempt = typeof ctx?.attempt === 'number' ? ctx.attempt : null;
           const head = typeof pull.headSha === 'string' ? pull.headSha : null;
+          const rawErrors = (error.details as { errors: unknown[] }).errors;
           throw new GitHubError(
             error.code,
-            `${error.message}（UNPROCESSABLE enablePullRequestAutoMerge；PR #${pull.number}${head ? ` 头 ${head}` : ''}${attempt === null ? '' : `，第 ${attempt} 次尝试`}；临时拒绝，交活动有界重试）`,
+            `${error.message}（UNPROCESSABLE enablePullRequestAutoMerge；原始 errors：${JSON.stringify(rawErrors)}；PR #${pull.number}${head ? ` 头 ${head}` : ''}${attempt === null ? '' : `，第 ${attempt} 次尝试`}；临时拒绝，交活动有界重试）`,
             {
               retryable: true,
               details: { ...(error.details as object), pull: pull.number, head, attempt },

@@ -400,6 +400,7 @@ describe('engine-pulls：挂自动合并的 unstable 临时拒绝（#3198）', (
     const message = String((err as Error).message);
     expect(message).toContain('GraphQL 出错：Pull request Pull request is in unstable status');
     expect(message).toContain('UNPROCESSABLE enablePullRequestAutoMerge');
+    expect(message).toContain(`原始 errors：${JSON.stringify([unstable])}`);
     expect(message).toContain(`PR #7 头 ${HEAD}`);
     expect(message).toContain('第 2 次尝试');
   });
@@ -415,6 +416,14 @@ describe('engine-pulls：挂自动合并的 unstable 临时拒绝（#3198）', (
       'FORBIDDEN',
     ],
     ['别的消息', [{ ...unstable, message: 'Pull request is in dirty status' }], 'GRAPHQL_ERROR'],
+    ['消息多一个句号', [{ ...unstable, message: `${unstable.message}.` }], 'GRAPHQL_ERROR'],
+    ['消息大小写不同', [{ ...unstable, message: unstable.message.toLowerCase() }], 'GRAPHQL_ERROR'],
+    ['消息带首尾空白', [{ ...unstable, message: ` ${unstable.message} ` }], 'GRAPHQL_ERROR'],
+    [
+      '重复的 Pull request 前缀',
+      [{ ...unstable, message: `Pull request ${unstable.message}` }],
+      'GRAPHQL_ERROR',
+    ],
     [
       '消息只带 unstable 子串',
       [{ ...unstable, message: 'Auto merge is not allowed, unstable policy' }],
