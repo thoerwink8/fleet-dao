@@ -177,6 +177,83 @@ describe('重活先出方案（#2755）', { timeout: 60_000 }, () => {
 });
 
 describe('体量预算（#2755）', { timeout: 60_000 }, () => {
+  it('可信单份生成快照单独计量，raw字段不改；旧history无新字段仍按原预算返工', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      brief: briefOf('medium'),
+      delivery: (n) => ({
+        head: fakeHead(100 + n),
+        commits: 1,
+        changedFiles: ['packages/db/migrations/meta/0095_snapshot.json'],
+        addedLines: 9550,
+        ...(n === 1
+          ? {}
+          : {
+              lineBudgetMeasurement: {
+                version: 1 as const,
+                base: fakeHead(1),
+                head: fakeHead(100 + n),
+                rawAddedLines: 9550,
+                rawDiffBytes: 330000,
+                verifiedGeneratedLines: 8037,
+                chargeableAddedLines: 1513,
+                verified: true,
+                reason: '已核单份快照',
+              },
+            }),
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(world.count('pushBranch')).toBe(1);
+    expect(calls.segment[1]?.feedback.join('\n')).toContain('9550');
+  });
+
+  it('失败或串head的折扣不适用，保持raw判并带明确原因', async () => {
+    const world = createFakeWorld();
+    const { tasks, calls } = scripted({
+      brief: briefOf('medium'),
+      delivery: (n) => ({
+        head: fakeHead(100 + n),
+        commits: 1,
+        changedFiles: ['packages/db/migrations/meta/0095_snapshot.json'],
+        addedLines: n < 3 ? 9550 : 100,
+        lineBudgetMeasurement: {
+          version: 1,
+          base: fakeHead(1),
+          head: fakeHead(999),
+          rawAddedLines: 9550,
+          verifiedGeneratedLines: 8037,
+          chargeableAddedLines: 1513,
+          verified: n === 2,
+          reason: '未核实当前head',
+        },
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => {
+        const h = await start(q, input());
+        await pollQuery(
+          () => h.query(taskStatusQuery) as Promise<TaskStatus>,
+          (x) => x.waiting?.kind === 'human',
+          'raw预算等待',
+        );
+        expect(world.count('pushBranch')).toBe(0);
+        await h.signal(taskContinueSignal, { by: 'frank' });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged' });
+    expect(calls.segment[1]?.feedback.join('\n')).toContain('未核实当前head');
+  });
   it('超了预算第一次：不推，打回收窄（意见写明新增几行、预算几行）；收窄到预算内再推', async () => {
     const world = createFakeWorld();
     const { tasks, calls } = scripted({

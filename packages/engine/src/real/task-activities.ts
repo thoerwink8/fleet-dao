@@ -28,6 +28,7 @@ import type { RepoRef } from '@fleet-dao/github';
 import { parseRepoProfile, type RepoProfile } from '@fleet-dao/shared';
 import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import type { EngineTasks } from '../activities.ts';
+import { DEFAULT_PR_LINE_BUDGET } from '../limits.ts';
 import { type PortContext, PortError } from '../ports.ts';
 import { readTaskBrief, sameRequirementContract } from '../runner/task-brief.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
@@ -51,6 +52,7 @@ import { MAX_MAIN_SYNCS } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import { bookMergedPull, readMergedTask } from './merge-receipt.ts';
+import { measureMigrationBudget } from './migration-budget.ts';
 import { mapped } from './mirror.ts';
 import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
 import { guardRequirementContract, holdRequirementContract } from './task-contract-guard.ts';
@@ -611,15 +613,16 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const leftover = await deliveryLeftover(t);
       // since 是起会话前的头：提交进 HEAD 的冲突标记要和它比。和主线一个字节都不差的文件在 unresolvedConflicts 里剔除。
       const conflicts = await unresolvedConflicts(t, { since: input.baseSha, mainline: span.mainline });
-      // 相对钉住的主线新增了多少行（#2755 体量预算）：只给预算判用，没数成不带、不挡交活核对
-      let addedLines: number | undefined;
-      if (span.mainline) {
-        try {
-          addedLines = await addedLinesAgainst(t, span.mainline, head);
-        } catch (error) {
-          if (ctx.signal.aborted) throw error;
-        }
-      }
+      // 原始统计不换口径；当前 Git 读取失败抛错。只有本仓超默认预算才尝试有界快照折扣。
+      const addedLines = span.mainline ? await addedLinesAgainst(t, span.mainline, head) : undefined;
+      const lineBudgetMeasurement =
+        span.mainline &&
+        addedLines !== undefined &&
+        addedLines > DEFAULT_PR_LINE_BUDGET &&
+        input.repo.owner.toLowerCase() === 'thoerwink8' &&
+        input.repo.name.toLowerCase() === 'fleet-dao'
+          ? await measureMigrationBudget(t, span.mainline, head, addedLines)
+          : undefined;
       return {
         head,
         commits: commits.length,
@@ -627,6 +630,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         leftover,
         conflicts,
         ...(addedLines === undefined ? {} : { addedLines }),
+        ...(lineBudgetMeasurement === undefined ? {} : { lineBudgetMeasurement }),
       };
     },
 

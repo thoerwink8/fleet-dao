@@ -7,6 +7,7 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - `packages/db/src/schema/`：全部表和枚举；`packages/db/src/queries/`：查询函数；`packages/db/src/index.ts`：对外导出。
 - `packages/db/migrations/`：迁移，drizzle-kit 生成的和手写的（触发器等，如 `0001_triggers.sql`）放在一起，按编号走。
 - `packages/db/drizzle.config.ts`：只用来生成迁移，不连库。
+- `@fleet-dao/db/migration-budget`：发布版固定子进程只核 PG7 snapshot JSON 与独立生成 SQL 的字节一致性，不加载候选 schema/config；完整已知形状、journal链和重复键先核，未知或超时明确失败。TS 与快照的漂移仍由 `schema-drift.test.ts` 核验。
 - 命令（`pnpm --filter @fleet-dao/db <命令>`）：`db:generate`（生成迁移并格式化）、`db:migrate`、`db:seed`、`db:catalog`、`db:routing`，入口都在 `packages/db/src/bin/`。
 - `packages/db/src/bin/local-pg.ts`：仓根 `pnpm start` / `pnpm stop` / `pnpm pg:local` 都指向它，起停本机嵌入式 Postgres（默认端口 55432，判法在 `src/local-pg.ts`）。
 - `src/queries/task-process.ts`：任务概览按请求的 runIds 单次批量读轻量统计列，不读 text 或整份 meta；调用/结果的接受和去重由 shared 的同一解析器供概览与步骤使用。无调用号命令仍未知；孤立失败和编辑事实保留在结果出现的步骤，不造调用号或文件路径。没有记录和读不到分开，不拿 0 代替。

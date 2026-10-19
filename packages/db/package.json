@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./testing": "./src/testing.ts"
+    "./testing": "./src/testing.ts",
+    "./migration-budget": "./src/migration-budget.ts"
   },
   "scripts": {
     "db:generate": "drizzle-kit generate && biome format --write migrations",
@@ -18,11 +19,12 @@
   "dependencies": {
     "@fleet-dao/shared": "workspace:*",
     "drizzle-orm": "^0.45.3",
+    "drizzle-kit": "0.31.11",
     "postgres": "^3.4.9",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.8",
-    "drizzle-kit": "^0.31.11"
+    "@electric-sql/pglite": "^0.5.8"
   }
 }
