@@ -144,7 +144,8 @@ describe('单子页「用哪个模型」', () => {
         return d.promise;
       },
     } as unknown as FleetApi;
-    openTask('/tasks/t-14', api);
+    // 「用哪个模型」在「用量和模型」里，默认收起（#3228）
+    openTask('/tasks/t-14?usage=open', api);
     await screen.findByRole('heading', { name: '用哪个模型' });
     const manual = document.querySelector('[data-pin-segment="manual"]') as HTMLElement;
     const back = within(manual).getByRole('button', { name: '回到自动' });
@@ -163,7 +164,7 @@ describe('单子页「用哪个模型」', () => {
         return d.promise;
       },
     } as unknown as FleetApi;
-    openTask('/tasks/t-12', api);
+    openTask('/tasks/t-12?usage=open', api);
     await screen.findByRole('heading', { name: '用哪个模型' });
     const manual = document.querySelector('[data-pin-segment="manual"]') as HTMLElement;
     fireEvent.click(await within(manual).findByRole('button', { name: '现在就换' }));

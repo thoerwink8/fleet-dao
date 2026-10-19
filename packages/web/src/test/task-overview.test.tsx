@@ -211,6 +211,30 @@ describe('新旧引擎交替的单：没记回合号的笔按回合收场时刻�
   });
 });
 
+describe('排版：左结论、右过程，用量收成一行（#3228）', () => {
+  test('用量和模型默认收起，摘要写几笔、用时、模型；点开才出明细，地址记下展开', async () => {
+    open('/tasks/t-c9');
+    const fold = await found('[data-usage-fold]');
+    const btn = fold.querySelector('button[aria-expanded]') as HTMLButtonElement;
+    expect(btn.getAttribute('aria-expanded')).toBe('false');
+    const summary = fold.querySelector('[data-usage-summary]')?.textContent ?? '';
+    expect(summary).toMatch(/^\d+ 笔 · 总耗时 /);
+    expect(summary).toContain('动手、验收都是自动选');
+    expect(screen.queryByRole('heading', { name: '每一笔' })).toBeNull();
+    fireEvent.click(btn);
+    await screen.findByRole('heading', { name: '每一笔' });
+    expect(btn.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  test('过程在右栏那一块里，结论（汇报、进度条）在左栏', async () => {
+    open('/tasks/t-c9');
+    const aside = await found('[data-task-aside]');
+    expect(aside.querySelector('[data-task-process]')).toBeTruthy();
+    expect(aside.querySelector('[data-task-summary]')).toBeNull();
+    expect(aside.querySelector('[data-round-progress]')).toBeNull();
+  });
+});
+
 describe('页头下面：这一回合走到哪（#3169）', () => {
   test('t-12 在跑的返工回合：当前一步带 aria-current="step"，写上一回合怎么收场', async () => {
     open('/tasks/t-12');
