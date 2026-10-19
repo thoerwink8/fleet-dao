@@ -136,7 +136,7 @@ import {
 import { activitiesFor, iso, limitsFor } from './kit.ts';
 import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
-import { TaskRuntime } from './task-runtime.ts';
+import { PermissionPushHandback, TaskRuntime } from './task-runtime.ts';
 import { planResume, writeSession } from './task-session.ts';
 import {
   Abandoned,
@@ -332,6 +332,7 @@ class TaskFlow {
       if (rt.flowMode === 'full') rt.fullPushes += 1;
       if (!implemented) {
         await this.endRound(roundOutcomeOf('implement', rt.status.lastProblem, rt.feedback));
+        rt.acceptPushHandback();
         continue;
       }
 
@@ -816,6 +817,15 @@ class TaskFlow {
         this.emptyDeliveryRedone ? [] : [EMPTY_DELIVERY_CODE],
       );
     } catch (error) {
+      if (error instanceof PermissionPushHandback) {
+        rt.feedback = [error.feedback];
+        rt.resumeFrom = null;
+        rt.lastSession = null;
+        rt.resumeStreak = 0;
+        rt.selfCheckOutput = null;
+        rt.status.lastProblem = '推送权限问题已交回返工';
+        return false;
+      }
       if (error instanceof HygieneHandoff) return this.hygieneHandback(error.detail);
       if (error instanceof ConflictHandoff) {
         return this.conflictStillThere(wt, error.files, error.pending ? null : error.instruction);
@@ -1328,6 +1338,10 @@ class TaskFlow {
     await this.cleanup(true);
     await CancellationScope.nonCancellable(() => rt.mirror('stopped'));
   }
+
+  stopPushHandbacks(): void {
+    this.rt.stopPushHandbacks();
+  }
 }
 
 export async function taskWorkflow(input: TaskWorkflowInput): Promise<TaskRun> {
@@ -1341,6 +1355,7 @@ export async function taskWorkflow(input: TaskWorkflowInput): Promise<TaskRun> {
     if (isCancellation(error)) await CancellationScope.nonCancellable(() => flow.cancelled());
     throw error;
   } finally {
+    flow.stopPushHandbacks();
     await condition(allHandlersFinished);
   }
 }
