@@ -127,7 +127,9 @@ export async function acceptanceGate(
     if (duty.state === 'superseded') {
       if (
         duty.settledAt !== null ||
-        duty.mergeCommit !== null ||
+        // 旧行可能保留历史合并字段；替代成立只认有效 state 与目标最终回执，不把旧字段当旧头已合证明。
+        (duty.mergeCommit !== null &&
+          (typeof duty.mergeCommit !== 'string' || !/^[a-f0-9]{40}$/.test(duty.mergeCommit))) ||
         typeof duty.supersededAt !== 'string' ||
         !Number.isFinite(Date.parse(duty.supersededAt)) ||
         typeof duty.supersededBy !== 'string' ||
