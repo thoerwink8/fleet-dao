@@ -544,6 +544,71 @@ while True: time.sleep(0.1)
         self.addCleanup(setattr, self.m, "read_bucket", original)
         return fired
 
+    def mutate_after_check(self, bucket, mutate):
+        """Run `mutate` once, right after the verify pass re-stamped `bucket`: no later step of the
+        round reads or stamps that bucket again."""
+        original, fired = self.m.check_bucket, []
+
+        def wrapped(ph, budget):
+            got = original(ph, budget)
+            if ph == bucket and not fired:
+                fired.append(ph)
+                mutate()
+            return got
+
+        self.m.check_bucket = wrapped
+        self.addCleanup(setattr, self.m, "check_bucket", original)
+        return fired
+
+    def test_cleanup_change_after_a_bucket_is_rechecked_is_never_complete(self):
+        paths, tail = self.crowded(130)
+        restored = next(r for r in self.settled.values() if r["phase"] == "RESTORED")
+        original = self.m.check_bucket
+        for name, bucket, mutate in (
+            ("re-checked bucket gains an open transaction", self.m.path_hash(paths[0]),
+             lambda: self.bucket_record(paths[0], "RECOVERY_REQUIRED", "9")),
+            ("re-checked RESTORED receipt reused as PREPARED", restored["pathHash"],
+             lambda: self.update_phase(restored, "PREPARED")),
+            ("tail intent rewritten after the last re-check", tail["pathHash"],
+             lambda: self.update_phase(tail, "DELETING")),
+        ):
+            with self.subTest(name):
+                self.m.check_bucket = original
+                first = self.m.main(["cleanup-status"])
+                fired = self.mutate_after_check(bucket, mutate)
+                reply = self.page(first)  # reads the last 30 buckets, then re-checks all 130
+                self.assertEqual(fired, [bucket])
+                self.assertEqual(reply["state"], "changed")  # never ok, rows, truncated=false
+                self.assertNotIn("rows", reply)
+        self.m.check_bucket = original
+        rows = self.complete(self.walk())
+        self.assertEqual(sorted(r["phase"] for r in rows), ["DELETING", "PREPARED", "RECOVERY_REQUIRED"])
+
+    def test_cleanup_single_page_change_after_recheck_is_never_complete(self):
+        paths, tail = self.crowded(5)
+        first = self.m.path_hash(paths[0])  # re-checked first, four more re-checks follow on the same page
+        self.mutate_after_check(first, lambda: self.bucket_record(paths[0], "RECOVERY_REQUIRED", "9"))
+        reply = self.m.main(["cleanup-status"])
+        self.assertEqual(reply["state"], "changed")
+        self.assertNotIn("rows", reply)
+        self.assertEqual(sorted(r["phase"] for r in self.complete(self.walk())), ["RECOVERY_REQUIRED", "RECOVERY_REQUIRED"])
+
+    def test_helper_writes_move_the_namespace_stamp(self):
+        rec = self.namespace_record("PREPARED")
+        private = self.root + "/" + self.m.PRIVATE
+        before = os.stat(private)
+        time.sleep(0.05)  # past a coarse timestamp tick
+        self.update_phase(rec, "CLAIMED")
+        after = os.stat(private)
+        self.assertGreater((after.st_mtime_ns, after.st_ctime_ns), (before.st_mtime_ns, before.st_ctime_ns))
+        self.assertEqual(sorted(os.listdir(private)), [rec["pathHash"]])  # nothing new in the namespace
+        moved = []
+        original = self.m.touch_namespace
+        self.m.touch_namespace = lambda: (moved.append(1), original())
+        self.addCleanup(setattr, self.m, "touch_namespace", original)
+        self.update_phase(rec, "DELETING")
+        self.assertEqual(len(moved), 2)  # before and after the intent write
+
     def update_phase(self, rec, phase):
         with self.m.chain(self.root + "/" + self.m.PRIVATE + "/" + rec["pathHash"] + "/" + rec["id"],
                           private=True) as (fd, _):

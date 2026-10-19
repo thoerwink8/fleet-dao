@@ -256,7 +256,25 @@ def read_record(fd, budget=None):
     return data
 
 
+def touch_namespace():
+    """Move the namespace root's stamp. Only this helper writes the root-private namespace; it does
+    so around every transaction it creates and every intent it writes, so a cleanup-status round,
+    which re-checks the root stamp on every page, sees any change to the pending set made while it
+    ran, including in a bucket it already read and re-stamped. Before the write: a round that
+    ends after the change has seen the stamp move. After it: a round that began in between too."""
+    with chain(BASE + "/" + PRIVATE, private=True) as (root, _):
+        os.utime(root)
+
+
 def write_record(fd, rec):
+    touch_namespace()
+    try:
+        _write_record(fd, rec)
+    finally:
+        touch_namespace()
+
+
+def _write_record(fd, rec):
     tmp = "intent.next"
     h = os.open(tmp, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=fd)
     try:
@@ -487,6 +505,7 @@ def remove(pathfd, qpath, exp):
             raise Kept(proof["reason"])
         parent_unchanged(path, marks)
         tx = id_hash(exp)
+        touch_namespace()  # A new transaction directory; the first intent write touches it again.
         try:
             os.mkdir(tx, 0o700, dir_fd=pathfd)
         except FileExistsError:
@@ -774,7 +793,9 @@ def cleanup_page(args):
     re-stamps every bucket (folded into `check`). It is complete only when both agree and the
     namespace root still has the stamp the round began with: a bucket added, removed or replaced,
     or a transaction added, rewritten or rolled back anywhere during the round, returns
-    state=changed and the caller restarts the round. Position, digests and round bounds travel in
+    state=changed and the caller restarts the round. The root stamp covers changes inside buckets
+    too, including ones already re-stamped: every helper write to the pending set touches it
+    (touch_namespace), and it is re-checked at the end of every page, the last one included. Position, digests and round bounds travel in
     a cursor signed with a root-only key, so a caller can only continue where this helper stopped.
     """
     global PAGE_UNTIL
