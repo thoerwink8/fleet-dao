@@ -21,7 +21,7 @@ pnpm typecheck
 
 无人值守执行回执由 `continuation-receipts.mjs` 共用，既有 Stop/start/progress 和开关命令传入已经算好的 authority，不另起通知、轮询或看护。现存v1会话/诊断jsonl原位只读保留，位置、内容和哈希不变；新入口用 `continuation-latest.mjs` 写有界v2当前状态，每份小于64KiB。allowed按会话保留最新Stop尝试、一个emitted请求和一组最近关联原证据；prepared不抹旧pending，同代次的迟到尝试拒写，未能证明先后的同floor不同尝试返回ORDER_UNKNOWN。machine/unknown只保留一条可替换的共享诊断，不占父快照、不提供根续轮或消费投影。缺authority默认unknown，缺真实generation不补造、不迁移为成功。
 
-v1/v2共用原128槽、258目录项和256MiB总预算；每个已有v1及其孤立锁按未来2MiB、每份v2按current和next两槽各64KiB预留，替换峰值计入准入。旧writer已有桶仍可按原上限追加，v2后缀使旧writer新桶准入安全拒绝。新写者仅抢一次原目录锁，孤立next、关闭失败或锁替换不清理抢占，明确未知且保留原业务决策。进程级替换不声称跨平台掉电安全或抵御本地恶意ABA替换。`pnpm exec node agents/hooks/unattended.mjs status --receipts` 分列旧历史和最新状态：合法v1恰好4096行仍读得出并保留LIMIT，损坏/锁/读失败不能被新状态洗成成功。只可证明替换次数，漏失量与coverage仍unknown；prepared只表示准备，emitted只表示stdout回调成功，根续轮和结果消费恒unknown。off/过期删除业务窗口后观测返回WINDOW_UNKNOWN，原业务照常。完整边界见 [CLI无人值守接续](../../docs/design/CLI无人值守接续.md)。
+v1/v2共用原128槽、258目录项和256MiB总预算；每个已有v1及其孤立锁按未来2MiB、每份v2按current和next两槽各64KiB预留，替换峰值计入准入。旧writer已有桶仍可按原上限追加，v2后缀使旧writer新桶准入安全拒绝。新写者仅抢一次原目录锁，孤立next、关闭失败或锁替换不清理抢占，明确未知且保留原业务决策。互斥合同仅覆盖遵守共享锁的合作writer；核验时可见身份变化拒绝，提交后身份不符返回IO。路径rename不是CAS，不能保证挡住末次核验后的任意外部替换或回滚，也不声称跨平台掉电安全。`pnpm exec node agents/hooks/unattended.mjs status --receipts` 分列旧历史和最新状态：合法v1恰好4096行仍读得出并保留LIMIT，损坏/锁/读失败不能被新状态洗成成功。只可证明替换次数，漏失量与coverage仍unknown；prepared只表示准备，emitted只表示stdout回调成功，根续轮和结果消费恒unknown。off/过期删除业务窗口后观测返回WINDOW_UNKNOWN，原业务照常。完整边界见 [CLI无人值守接续](../../docs/design/CLI无人值守接续.md)。
 
 session-start只列同血缘旧号实际prompt-log历史，保留时间/字数封顶与来源读取失败诊断。turns缺行不判断丢失，旧seen和steer-shown不参与投递。inbox-watch在退役目录中；inbox-tick和steer-shown也已移除，标准同步清理受管安装目录的旧脚本，不删除用户历史状态。Stop仍保留stop与work-watch，只有work-watch使用asyncRewake。
 

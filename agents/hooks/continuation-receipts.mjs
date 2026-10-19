@@ -133,12 +133,14 @@ const paths = (dir, session) => {
 function checkRoot(root) {
   const st = lstatSync(root);
   if (st.isSymbolicLink() || !st.isDirectory()) throw new Error('unsafe');
+  return st;
 }
 /** @param {string} file */
 function checkFile(file) {
   try {
     const st = lstatSync(file);
     if (st.isSymbolicLink() || !st.isFile()) throw new Error('unsafe');
+    return st;
   } catch (error) {
     if (codeOf(error) !== 'ENOENT') throw error;
   }
@@ -258,23 +260,51 @@ function readOpened(fd, validate, mismatch = 'IO') {
 function readJournal(dir, key, validate, mismatch = 'IO') {
   const p = paths(dir, key);
   /** @type {number|undefined} */ let fd;
+  let rootExisted = false;
   /** @returns {{ok:true, rows:T[], evidence:'observed'|'unknown'}|{ok:false, code:string}} */
   const read = () => {
     try {
-      checkRoot(p.root);
+      const beforeRoot = checkRoot(p.root);
+      rootExisted = true;
       try {
         statSync(p.lock);
         return { ok: false, code: 'BUSY' };
       } catch (error) {
         if (codeOf(error) !== 'ENOENT') throw error;
       }
-      checkFile(p.file);
+      const before = checkFile(p.file);
+      if (!before) {
+        const afterRoot = checkRoot(p.root);
+        if (beforeRoot.dev !== afterRoot.dev || beforeRoot.ino !== afterRoot.ino) throw Error('changed');
+        return { ok: true, rows: [], evidence: 'unknown' };
+      }
       fd = openSync(p.file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
-      return readOpened(fd, validate, mismatch);
+      const opened = fstatSync(fd);
+      if (before.dev !== opened.dev || before.ino !== opened.ino || before.size !== opened.size)
+        throw Error('changed');
+      const result = readOpened(fd, validate, mismatch);
+      const afterRoot = checkRoot(p.root),
+        after = checkFile(p.file);
+      if (
+        !after ||
+        beforeRoot.dev !== afterRoot.dev ||
+        beforeRoot.ino !== afterRoot.ino ||
+        before.dev !== after.dev ||
+        before.ino !== after.ino ||
+        before.size !== after.size
+      )
+        throw Error('changed');
+      try {
+        statSync(p.lock);
+        return { ok: false, code: 'BUSY' };
+      } catch (error) {
+        if (codeOf(error) !== 'ENOENT') throw error;
+      }
+      return result;
     } catch (error) {
-      return codeOf(error) === 'ENOENT'
+      return codeOf(error) === 'ENOENT' && !rootExisted
         ? { ok: true, rows: [], evidence: 'unknown' }
-        : { ok: false, code: codeOf(error) };
+        : { ok: false, code: codeOf(error) === 'ENOENT' ? 'IO' : codeOf(error) };
     }
   };
   let result = read();

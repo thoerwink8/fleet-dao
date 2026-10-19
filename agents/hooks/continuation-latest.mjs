@@ -526,6 +526,16 @@ function replaceSnapshot(dir, session, validate, reduce, binding) {
                   }
                 }
                 renameSync(next, current);
+                const committed = regular(current),
+                  committedRoot = rootDirectory(root);
+                if (
+                  committed.dev !== opened.dev ||
+                  committed.ino !== opened.ino ||
+                  committed.size !== Buffer.byteLength(text) ||
+                  committedRoot.dev !== before.dev ||
+                  committedRoot.ino !== before.ino
+                )
+                  throw Error('changed');
                 result = binding() ? { ok: true } : { ok: false, code: 'WINDOW_UNKNOWN' };
               }
             }

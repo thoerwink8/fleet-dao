@@ -696,4 +696,50 @@ describe('根有界最新状态与v1历史分开记账', { timeout: 0 }, () => {
       expect(readFileSync(s.oldFile)).toEqual(s.oldBytes);
     },
   );
+  it.each(['legacy-open', 'legacy-directory-after-read'] as const)(
+    '%s不被可读v2洗成observed成功',
+    async (kind) => {
+      const s = fixture(),
+        bytes = readFileSync(s.oldFile);
+      const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+      let failures = 2,
+        reads = 0;
+      if (kind === 'legacy-open')
+        vi.mocked(openSync).mockImplementation((...args) => {
+          if (String(args[0]) === s.oldFile && failures-- > 0)
+            throw Object.assign(Error('private-old-disappeared'), { code: 'ENOENT' });
+          return actual.openSync(...args);
+        });
+      else
+        vi.mocked(lstatSync).mockImplementation((...args) => {
+          if (String(args[0]) === s.root && ++reads === 2)
+            throw Object.assign(Error('private-root-disappeared'), { code: 'ENOENT' });
+          return actual.lstatSync(...args);
+        });
+      expect(readReceipts(s.dir, fingerprint(s.sid))).toEqual({ ok: false, code: 'IO' });
+      reads = 0;
+      expect(receiptStatus(s.dir, s.sid, s.state().generation)).toMatchObject({
+        evidence: 'unknown',
+        code: 'IO',
+        latestState: { evidence: 'observed' },
+      });
+      expect(readFileSync(s.oldFile)).toEqual(bytes);
+    },
+  );
+  it('rename后可检测到current被外部替换，明确IO而非成功，不承诺回滚', async () => {
+    const s = fixture();
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs');
+    vi.mocked(renameSync).mockImplementationOnce((from, to) => {
+      actual.renameSync(from, to);
+      actual.renameSync(s.current, `${s.current}.replaced`);
+      actual.writeFileSync(s.current, 'external-replacement\n');
+    });
+    expect(noteReceipt(s.context(), { phase: 'entered', decision: 'none' })).toEqual({
+      ok: false,
+      code: 'IO',
+    });
+    expect(readFileSync(s.current, 'utf8')).toBe('external-replacement\n');
+    expect(readFileSync(s.oldFile)).toEqual(s.oldBytes);
+    expect(readLatestReceiptState(s.dir, fingerprint(s.sid))).toMatchObject({ ok: false });
+  });
 });
