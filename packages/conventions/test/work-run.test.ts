@@ -1271,6 +1271,54 @@ describe('恢复入口的原子占位', () => {
     ).toHaveLength(1);
   });
 
+  it('两个进程同时接手死 owner，只有一个能发布新代 owner', async () => {
+    const dir = join(temp(), 'stale-lock');
+    mkdirSync(dir);
+    mkdirSync(join(dir, SUPERVISOR_START_LOCK));
+    writeJson(join(dir, SUPERVISOR_START_LOCK, 'owner.json'), {
+      pid: deadPid(),
+      token: 'old-generation',
+      claimedAt: '2026-10-16T09:00:00.000Z',
+    });
+    const mod = pathToFileURL(fileURLToPath(new URL('../src/work-run.ts', import.meta.url))).href;
+    const script = [
+      'const { claimRunLock, SUPERVISOR_START_LOCK } = await import(process.env.FLEET_LOCK_MOD);',
+      'const token = claimRunLock(process.env.FLEET_LOCK_DIR, SUPERVISOR_START_LOCK, process.pid, new Date());',
+      'process.stdout.write(token ? "won\\n" : "lost\\n");',
+      'if (token) await new Promise((r) => setTimeout(r, 400));',
+    ].join('\n');
+    const once = () =>
+      new Promise<{ stdout: string; stderr: string; code: number | null }>((resolve, reject) => {
+        const child = spawn(
+          process.execPath,
+          ['--experimental-strip-types', '--input-type=module', '-e', script],
+          {
+            env: { ...process.env, FLEET_LOCK_MOD: mod, FLEET_LOCK_DIR: dir },
+          },
+        );
+        let stdout = '';
+        let stderr = '';
+        child.stdout.on('data', (b: Buffer) => {
+          stdout += b;
+        });
+        child.stderr.on('data', (b: Buffer) => {
+          stderr += b;
+        });
+        child.on('error', reject);
+        child.on('close', (code) => resolve({ stdout, stderr, code }));
+      });
+    const [a, b] = await Promise.all([once(), once()]);
+    const detail = `${a.stderr}\n${b.stderr}`;
+    expect(
+      [a.stdout.trim(), b.stdout.trim()].filter((s) => s === 'won'),
+      detail,
+    ).toHaveLength(1);
+    expect(
+      [a.stdout.trim(), b.stdout.trim()].filter((s) => s === 'lost'),
+      detail,
+    ).toHaveLength(1);
+  });
+
   it('列表能看见正在起来的占位', () => {
     const dir = join(temp(), 'row');
     mkdirSync(dir, { recursive: true });

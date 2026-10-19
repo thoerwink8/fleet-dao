@@ -1038,10 +1038,11 @@ export function runLockHeld(dir: string, name: string, now: Date, ownReclaimerTo
 }
 
 /**
- * 原子占住运行目录里的一把锁。返回 token；占不上是 null（别人还占着）。
- * 死进程留下的目录改名挪走再占，挪走本身也是原子的，两个恢复只有一个能接手。
+ * 只占回收闸本身。主锁通过外层 claimRunLock 在持有这个闸时完成
+ * mkdir、generation 和 owner 发布；这里保留递归回收闸，处理看护
+ * 进程死在闸上的情况。
  */
-export function claimRunLock(dir: string, name: string, pid: number, now: Date): string | null {
+function claimRunLockRaw(dir: string, name: string, pid: number, now: Date): string | null {
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('占位进程号不对');
   mkdirSync(dir, { recursive: true });
   const lock = lockPath(dir, name);
@@ -1062,7 +1063,7 @@ export function claimRunLock(dir: string, name: string, pid: number, now: Date):
       const reclaim = `${name}.reclaim`;
       let reclaimToken: string | null = null;
       try {
-        reclaimToken = claimRunLock(dir, reclaim, pid, now);
+        reclaimToken = claimRunLockRaw(dir, reclaim, pid, now);
         if (!reclaimToken) return null;
         // 回收闸建立后仍服从完整主锁判据：owner 活着、主锁是新鲜空目录、
         // 或无法确认的目录都不能挪走。只排除自己持有的回收闸，不能把它
@@ -1092,6 +1093,47 @@ export function claimRunLock(dir: string, name: string, pid: number, now: Date):
     return null;
   }
   return null;
+}
+
+/**
+ * 占主锁的完整协议：先占住同一把 reclaim 闸，再检查/回收旧代，
+ * 创建目录并发布 owner，最后才释放闸。创建者不能在闸外通过预检后
+ * 延迟发布，从而被回收者换代后覆盖新赢家。
+ */
+export function claimRunLock(dir: string, name: string, pid: number, now: Date): string | null {
+  if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('占位进程号不对');
+  mkdirSync(dir, { recursive: true });
+  const reclaim = `${name}.reclaim`;
+  const reclaimToken = claimRunLockRaw(dir, reclaim, pid, now);
+  if (!reclaimToken) return null;
+
+  const lock = lockPath(dir, name);
+  lockSeq += 1;
+  const token = `${pid}-${now.getTime()}-${lockSeq}`;
+  const generation: RunLockGeneration = { pid, token, claimedAt: now.toISOString() };
+  try {
+    if (runLockHeld(dir, name, now, reclaimToken)) {
+      // 只有失败创建者留下的同一代 abandoned 才能在闸内回收；
+      // 活 owner、新鲜空目录和无法确认的目录一律保留。
+      if (!isAbandonedGeneration(lock)) return null;
+      discardDir(lock, `${lock}.abandoned-${pid}-${lockSeq}`);
+    } else if (existsSync(lock)) {
+      // 这里仅可能是已失联的旧代，回收操作仍在 reclaim 闸内。
+      discardDir(lock, `${lock}.stale-${pid}-${lockSeq}`);
+    }
+
+    try {
+      mkdirSync(lock);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'EEXIST') return null;
+      throw e;
+    }
+    writeJson(join(lock, LOCK_GENERATION_FILE), generation);
+    writeJson(join(lock, 'owner.json'), generation);
+    return readLockOwner(dir, name)?.token === token ? token : null;
+  } finally {
+    releaseRunLock(dir, reclaim, reclaimToken);
+  }
 }
 
 /** 只放自己占上的那一把。token 对不上就留着，避免并发的失败方把赢的那把删掉。 */
