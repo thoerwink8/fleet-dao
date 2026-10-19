@@ -1,5 +1,6 @@
 """Real Linux/root tests; isolated /var/lib fixture, never the installed helper."""
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -360,10 +361,19 @@ while True: time.sleep(0.1)
                 self.bucket_record(path, "DONE" if i % 4 == 2 else "RESTORED")
         return paths, self.bucket_record(paths[-1], tail_phase)
 
-    def page(self, prev, after=None):
+    def cursor_args(self, prev, after=None, proof=None):
+        """The honest cursor of `prev`, or a hand-built one: `after` alone gets the proof the helper would accept."""
         ns = prev["namespace"]
-        return self.m.main(["cleanup-status", "--after", after or prev["next"], "--dev", ns["dev"],
-                            "--ino", ns["ino"], "--generation", prev["generation"]])
+        if after is None:
+            after, proof = prev["next"], proof or prev["proof"]
+        elif proof is None:
+            names = sorted(os.listdir(self.root + "/" + self.m.PRIVATE))
+            proof = self.m.cursor_proof(prev["generation"], names, names.index(after) + 1) if after in names else "0" * 64
+        return ["--after", after, "--dev", ns["dev"], "--ino", ns["ino"], "--generation", prev["generation"],
+                "--proof", proof]
+
+    def page(self, prev, after=None, proof=None):
+        return self.m.main(["cleanup-status", *self.cursor_args(prev, after, proof)])
 
     def walk(self):
         pages = [self.m.main(["cleanup-status"])]
@@ -568,7 +578,7 @@ while True: time.sleep(0.1)
         for i in range(50):
             self.bucket_record(path, "PREPARED", str(100 + i))
         calls, original = [], self.m.read_record
-        self.m.read_record = lambda fd: (calls.append(1), original(fd))[1]
+        self.m.read_record = lambda fd, budget=None: (calls.append(1), original(fd, budget))[1]
         self.addCleanup(setattr, self.m, "read_record", original)
         self.m.PAGE_ROWS = 2
         with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
@@ -581,23 +591,76 @@ while True: time.sleep(0.1)
             self.m.main(["cleanup-status"])
         self.assertEqual(calls, [])  # entry count refused before any record is read
 
+    def test_cleanup_record_is_refused_before_it_is_parsed_when_the_page_cannot_hold_it(self):
+        path = self.root + "/_tmp/few"
+        recs = [self.bucket_record(path, "PREPARED", str(100 + i)) for i in range(3)]
+        loads, real_json = [], self.m.json
+        self.m.json = types.SimpleNamespace(
+            loads=lambda data: (loads.append(1), real_json.loads(data))[1], dumps=real_json.dumps)
+        self.addCleanup(setattr, self.m, "json", real_json)
+        # Room for one record only: the second must be refused on its size, without being parsed.
+        self.m.PAGE_BYTES = len(real_json.dumps(recs[0], separators=(",", ":"))) + 50
+        with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
+            self.m.main(["cleanup-status"])
+        self.assertEqual(len(loads), 2)  # the probe and the first row; never the second row
+
+    def test_cleanup_page_deadline_after_the_hundredth_bucket_is_not_a_truncated_page(self):
+        paths, tail = self.crowded(130)
+        slow_bucket = self.m.path_hash(paths[99])
+        self.m.PAGE_SECONDS = 2
+        original = self.m.bucket_rows
+
+        def wrapped(ph, budget):
+            got = original(ph, budget)
+            if ph == slow_bucket:
+                time.sleep(2.2)
+            return got
+
+        self.m.bucket_rows = wrapped
+        self.addCleanup(setattr, self.m, "bucket_rows", original)
+        with self.assertRaisesRegex(self.m.Kept, "page deadline"):
+            self.m.main(["cleanup-status"])
+
+    def test_cleanup_namespace_gains_a_bucket_while_the_last_page_is_read(self):
+        paths, tail = self.crowded(3, "DONE")
+        first_bucket = sorted(map(self.m.path_hash, paths))[0]
+        self.mutate_after_read(first_bucket, lambda: self.bucket_record(self.root + "/_tmp/late", "RECOVERY_REQUIRED"))
+        reply = self.m.main(["cleanup-status"])
+        self.assertEqual(reply["state"], "changed")  # never state=ok, rows=[], truncated=false
+        self.assertNotIn("rows", reply)
+        restarted = self.m.main(["cleanup-status"])  # the bounded restart sees the new transaction
+        self.assertEqual((restarted["state"], restarted["truncated"]), ("ok", False))
+        self.assertEqual([r["phase"] for r in restarted["rows"]], ["RECOVERY_REQUIRED"])
+
     def test_cleanup_cursor_forged_cycle_and_malformed_rejected(self):
-        self.crowded(102)
+        paths, tail = self.crowded(130)
         first = self.m.main(["cleanup-status"])
         ns = first["namespace"]
+        names = sorted(os.listdir(self.root + "/" + self.m.PRIVATE))
         with self.assertRaisesRegex(self.m.Kept, "not a namespace bucket"):
             self.page(first, "f" * 64)
         stale = self.page(dict(first, generation="0" * 64))
         self.assertEqual(stale["state"], "changed")
         again = self.page(first, first["next"])
         self.assertEqual(again, self.page(first))
-        for bad in (["--after", "A" * 64, "--dev", ns["dev"], "--ino", ns["ino"], "--generation", first["generation"]],
-                    ["--after", "../x", "--dev", ns["dev"], "--ino", ns["ino"], "--generation", first["generation"]],
-                    ["--after", first["next"], "--dev", "01", "--ino", ns["ino"], "--generation", first["generation"]],
+        # A legal later bucket as --after must not skip the buckets before it, however it is dressed up.
+        for forged in (names[-1], names[120], names[100]):
+            with self.subTest(forged=forged[:8]):
+                for proof in ("0" * 64, first["proof"], hashlib.sha256(forged.encode()).hexdigest(),
+                              self.m.cursor_proof(first["generation"], names, 120)):
+                    with self.assertRaisesRegex(self.m.Kept, "does not describe the covered prefix"):
+                        self.page(first, forged, proof)
+        good = self.cursor_args(first)
+        for bad in (["--after", "A" * 64, *good[2:]],
+                    ["--after", "../x", *good[2:]],
+                    [*good[:2], "--dev", "01", *good[4:]],
+                    [*good[:8], "--proof", "short"],
+                    good[:8],  # no proof at all
                     ["--after", first["next"], "--generation", first["generation"]],
                     ["--offset", "100"]):
             with self.assertRaises(self.m.Kept):
                 self.m.main(["cleanup-status", *bad])
+        self.assertEqual(ns, self.page(first)["namespace"])
 
     def test_cleanup_tail_bucket_guards_beyond_first_page(self):
         paths, tail = self.crowded(103)

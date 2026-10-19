@@ -198,6 +198,7 @@ async function readCleanupRound(
   let bytes = 0;
   let first: { namespace: TreeIdentity; generation: string } | null = null;
   let after: string | null = null;
+  let proof: string | null = null;
   for (let page = 1; ; page++) {
     if (page > CLEANUP_PAGE_LIMITS.pages) throw incomplete(`超过 ${CLEANUP_PAGE_LIMITS.pages} 页上限`);
     const left = deadline - Date.now();
@@ -206,7 +207,7 @@ async function readCleanupRound(
     const cursor = first
       ? ['--after', after as string, '--dev', first.namespace.dev, '--ino', first.namespace.ino]
       : [];
-    if (first) cursor.push('--generation', first.generation);
+    if (first) cursor.push('--generation', first.generation, '--proof', proof as string);
     let reply: Reply;
     try {
       reply = await invokeTreeHelper({ ...options, signal }, ['cleanup-status', ...cursor]);
@@ -235,6 +236,9 @@ async function readCleanupRound(
       (typeof next !== 'string' || !HASH.test(next) || (after !== null && next <= after))
     )
       throw incomplete(`第 ${page} 页游标缺失、重复或回退`);
+    // The helper binds the cursor to the covered prefix; a page that cannot be continued is a partial read.
+    if (reply.truncated && (typeof reply.proof !== 'string' || !HASH.test(reply.proof)))
+      throw incomplete(`第 ${page} 页缺游标证明`);
     for (const row of reply.rows as unknown[]) {
       const r = row as Reply;
       if (!r || typeof r !== 'object' || typeof r.id !== 'string' || !HASH.test(r.id))
@@ -255,6 +259,7 @@ async function readCleanupRound(
       throw incomplete('整轮记录条数或字节超过上限');
     if (!reply.truncated) return { rows, namespace: reply.namespace };
     after = next as string;
+    proof = reply.proof as string;
   }
 }
 

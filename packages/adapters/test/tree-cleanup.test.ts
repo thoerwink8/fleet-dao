@@ -71,7 +71,7 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
   const tail = { id: 'e'.repeat(64), pathHash: hash(129), phase: 'RECOVERY_REQUIRED' };
   const gen = (c: string) => c.repeat(64);
   const head = { version: 1, state: 'ok', namespace, generation: gen('a') };
-  const firstPage = { ...head, rows: [], truncated: true, after: null, next: hash(99) };
+  const firstPage = { ...head, rows: [], truncated: true, after: null, next: hash(99), proof: gen('9') };
   const lastPage = { ...head, rows: [tail], truncated: false, after: hash(99), next: null };
   let dir = '';
   const saved = { ...CLEANUP_PAGE_LIMITS };
@@ -104,7 +104,7 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     expect(await readCleanupNamespace(root, options)).toEqual([tail]);
     expect(cursors()).toEqual([
       [],
-      ['--after', hash(99), '--dev', '1', '--ino', '2', '--generation', gen('a')],
+      ['--after', hash(99), '--dev', '1', '--ino', '2', '--generation', gen('a'), '--proof', gen('9')],
     ]);
     pages([firstPage, lastPage]);
     expect(await cleanupStatus(options)).toEqual([tail]);
@@ -119,7 +119,7 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
       { ...lastPage, ...fresh },
     ]);
     expect(await readCleanupNamespace(root, options)).toEqual([tail]);
-    expect(cursors().map((args) => args.at(-1) ?? 'first')).toEqual(['first', gen('a'), 'first', gen('b')]);
+    expect(cursors().map((args) => args.at(-3) ?? 'first')).toEqual(['first', gen('a'), 'first', gen('b')]);
   });
 
   it.each([
@@ -143,6 +143,8 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     ],
     ['partial：首页冒充续页', [{ ...lastPage }], '首页回执带了游标'],
     ['partial：截断页缺游标', [{ ...firstPage, next: undefined }], '游标'],
+    ['partial：截断页缺游标证明，不能续读', [{ ...firstPage, proof: undefined }], '缺游标证明'],
+    ['partial：游标证明不是摘要', [{ ...firstPage, proof: '12' }], '缺游标证明'],
     ['partial：重复页/循环游标', [firstPage, { ...firstPage, after: hash(99) }], '重复或回退'],
     ['partial：游标回退', [firstPage, { ...firstPage, after: hash(99), next: hash(5) }], '重复或回退'],
     ['partial：回执不是所请求游标之后', [firstPage, { ...lastPage, after: hash(1) }], '所请求游标'],
@@ -172,6 +174,7 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
       ...firstPage,
       after: i ? hash(i * 10) : null,
       next: hash(i * 10 + 10),
+      proof: gen(String(i)),
     }));
     CLEANUP_PAGE_LIMITS.pages = 3;
     pages(chain);

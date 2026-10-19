@@ -60,6 +60,10 @@ class Budget:
     def __init__(self):
         self.rows, self.size, self.entries = PAGE_ROWS, PAGE_BYTES, PAGE_ENTRIES
 
+    def require(self, rows=0, size=0):
+        if self.rows < rows or self.size < size:
+            raise Overflow("cleanup page bound exceeded")
+
     def spend(self, rows=0, size=0, entries=0):
         self.rows -= rows
         self.size -= size
@@ -207,12 +211,15 @@ def locked(path):
                 os.close(lock)
 
 
-def read_record(fd):
+def read_record(fd, budget=None):
     h = os.open("intent.json", os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
     try:
         st = os.fstat(h)
         if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o077 or st.st_size > 32768:
             raise Kept("untrusted intent")
+        if budget:
+            # The page must still be able to hold this record before it is read and parsed.
+            budget.require(rows=1, size=st.st_size)
         data = json.loads(os.read(h, 32769))
     finally:
         os.close(h)
@@ -255,7 +262,7 @@ def pending(fd, budget=None, first=False):
             budget.spend(entries=1)
         h = os.open(name, FLAGS, dir_fd=fd)
         try:
-            rec = read_record(h)
+            rec = read_record(h, budget)
             if rec["id"] != name:
                 raise Kept("transaction directory identity mismatch")
             if rec["phase"] not in ("DONE", "RESTORED"):
@@ -531,15 +538,26 @@ def remove(pathfd, qpath, exp):
 def cleanup_cursor(args):
     if not args:
         return None
-    if len(args) != 8 or args[0::2] != ["--after", "--dev", "--ino", "--generation"]:
-        raise Kept("cleanup-status [--after H --dev D --ino I --generation G]")
-    after, dev, ino, gen = args[1::2]
+    if len(args) != 10 or args[0::2] != ["--after", "--dev", "--ino", "--generation", "--proof"]:
+        raise Kept("cleanup-status [--after H --dev D --ino I --generation G --proof P]")
+    after, dev, ino, gen, proof = args[1::2]
     number = r"0|[1-9][0-9]{0,39}"
-    if not HEX64.fullmatch(after) or not HEX64.fullmatch(gen):
+    if not all(HEX64.fullmatch(v) for v in (after, gen, proof)):
         raise Kept("invalid cleanup cursor")
     if any(not re.fullmatch(number, v) for v in (dev, ino)):
         raise Kept("invalid cleanup cursor identity")
-    return after, dev, ino, gen
+    return after, dev, ino, gen, proof
+
+
+def cursor_proof(generation, names, count):
+    """Binds a cursor to the exact sorted prefix it claims to have covered, in this generation.
+
+    There is no helper secret to sign with (the diagnostic stays read-only and creates nothing),
+    so this is not authentication: it only refuses a cursor that does not describe the current
+    prefix, e.g. a later bucket picked as --after without knowing every bucket before it.
+    """
+    body = generation + "\n" + str(count) + "\n" + "\n".join(names[:count])
+    return hashlib.sha256(body.encode()).hexdigest()
 
 
 def bucket_rows(ph, budget):
@@ -658,7 +676,7 @@ def read_page(cursor):
     namespace = identity(st, q)
     start = 0
     if cursor:
-        after, dev, ino, gen = cursor
+        after, dev, ino, gen, proof = cursor
         if (namespace["dev"], namespace["ino"]) != (dev, ino):
             raise Kept("cleanup cursor bound to another namespace")
         if gen != generation:
@@ -666,6 +684,8 @@ def read_page(cursor):
         if after not in names:
             raise Kept("cleanup cursor is not a namespace bucket")
         start = names.index(after) + 1
+        if proof != cursor_proof(generation, names, start):
+            raise Kept("cleanup cursor does not describe the covered prefix")
     rows, budget, done, began = [], Budget(), start, time.monotonic()
     for ph in names[start:start + PAGE_BUCKETS]:
         check_time()
@@ -680,17 +700,19 @@ def read_page(cursor):
             break
         rows.extend(got)
         done += 1
+    check_time()
     more = done < len(names)
-    if not more:
-        # Complete only if nothing moved while this page was read.
-        try:
-            again = namespace_state(False)
-        except FileNotFoundError:
-            raise Kept("cleanup namespace disappeared during paging")
-        if again is None or again[2] != generation or identity(again[0], q) != namespace:
-            return {"state": "changed", "namespace": namespace, "reason": "namespace changed during page read"}
+    # A page is only returned if the same namespace (re-resolved by path) kept the same generation
+    # while it was read; otherwise the caller restarts instead of trusting these rows.
+    try:
+        again = namespace_state(False)
+    except FileNotFoundError:
+        raise Kept("cleanup namespace disappeared during paging")
+    if again is None or again[2] != generation or identity(again[0], q) != namespace:
+        return {"state": "changed", "namespace": namespace, "reason": "namespace changed during page read"}
     return {"state": "ok", "rows": rows, "truncated": more, "namespace": namespace,
             "after": cursor[0] if cursor else None, "next": names[done - 1] if more else None,
+            "proof": cursor_proof(generation, names, done) if more else None,
             "generation": generation, "buckets": len(names)}
 
 
