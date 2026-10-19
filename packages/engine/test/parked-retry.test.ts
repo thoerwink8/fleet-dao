@@ -69,6 +69,7 @@ function fakeDeps(over: Partial<ParkedRetryDeps> & { snaps?: Record<string, Park
     audit: async (entry) => {
       audits.push(entry);
     },
+    resolveAlert: async () => {},
     runs: {
       start: async () => 7,
       finish: async (_id, result) => {
@@ -127,6 +128,45 @@ describe('retryParkedTasks：过一遍停着的单', () => {
     expect(audits).toHaveLength(1);
     expect(audits[0]?.why).toBe(sent[0]?.command.note);
     expect(audits[0]?.park.seq).toBe(2);
+  });
+
+  it('先记操作记录再发继续：记录写不进就不发，记进 problems，下一轮再试；记好了才撤提醒', async () => {
+    const order: string[] = [];
+    const failing = fakeDeps({
+      release: async () => after(90),
+      audit: async () => {
+        order.push('audit');
+        throw new Error('库写不进');
+      },
+      continueTask: async () => {
+        order.push('signal');
+        return 'sent';
+      },
+      resolveAlert: async () => {
+        order.push('resolve');
+      },
+    });
+    const got = await retryParkedTasks(failing.deps);
+    expect(order).toEqual(['audit']);
+    expect(got.continued).toEqual([]);
+    expect(got.problems).toEqual([expect.stringContaining('操作记录没写进，没发继续')]);
+
+    const ok: string[] = [];
+    const good = fakeDeps({
+      release: async () => after(90),
+      audit: async () => {
+        ok.push('audit');
+      },
+      continueTask: async () => {
+        ok.push('signal');
+        return 'sent';
+      },
+      resolveAlert: async () => {
+        ok.push('resolve');
+      },
+    });
+    expect((await retryParkedTasks(good.deps)).continued).toHaveLength(1);
+    expect(ok).toEqual(['audit', 'signal', 'resolve']);
   });
 
   it('没发新版：现读 PR 必过全绿、头没变、可以合才续；读的是停下时的头', async () => {

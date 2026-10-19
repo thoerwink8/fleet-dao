@@ -91,6 +91,8 @@ export function parkedRetryJob(w: ParkedRetryWiring): () => ParkedRetryDeps {
         via: 'engine',
         ok: true,
       });
+    },
+    async resolveAlert({ workflowId, park, why }) {
       await resolveAlertWithReason(w.db, {
         dedupeKey: `${workflowId}:park:${park.seq}`,
         by: PARKED_RETRY_ACTOR,

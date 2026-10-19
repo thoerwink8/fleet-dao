@@ -7,7 +7,8 @@
 //   同一原文（停法 + 标题 + 原因）引擎续过的再停下，工作流在查询里标 retriedBefore，这里不再续，交人。
 // - 额度超预算、体量超预算、改标准等人闸、轮数用尽、别的一律不续。老历史没有停法（status.park 缺），不续。
 // - 停法、编号、停在哪个头都现问工作流（taskStatus 查询），不信库里的字。库只用来列 stalled 的引擎任务和它们的工作流编号。
-// - 续了写一条操作记录（actor 是引擎、reason 写为什么续）。一张单出错不挡别的单：记进 problems，这一轮记 partial。
+// - 先写操作记录（actor 是引擎、reason 写为什么续）、再发「继续」、最后撤提醒：工作流收到这一次就标「已续」不再重试，
+//   所以记录写不进就不发，下一轮再来；发的时候出错，记录已经写了，下一轮可能再写一条（宁可多记不漏记）。一张单出错不挡别的单：记进 problems，这一轮记 partial。
 import type { ScheduleResult } from '@fleet-dao/db';
 import { errMessage } from '@fleet-dao/shared/util';
 import {
@@ -82,8 +83,15 @@ export interface ParkedRetryDeps {
   ): Promise<{ ready: boolean; why: string }>;
   /** 发「继续」；工作流已经没了回 gone。 */
   continueTask(workflowId: string, command: ContinueCommand): Promise<'sent' | 'gone'>;
-  /** 写操作记录、撤这一次停下的提醒。写不进照抛。 */
+  /** 写操作记录（发「继续」之前写）。写不进照抛，这一轮就不发。 */
   audit(entry: { row: ParkedRetryRow; workflowId: string; park: TaskParkInfo; why: string }): Promise<void>;
+  /** 「继续」发出去之后撤这一次停下的提醒。 */
+  resolveAlert(entry: {
+    row: ParkedRetryRow;
+    workflowId: string;
+    park: TaskParkInfo;
+    why: string;
+  }): Promise<void>;
   runs: ScheduleRunLog;
   now: () => Date;
   log: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
@@ -151,14 +159,22 @@ async function retryOne(
     return;
   }
   const why = `引擎续的（停法「${KIND_NAMES[park.kind]}」，第 ${park.seq} 次停下「${park.title}」）：${verdict.why}`;
+  // 先记操作记录、再发继续：工作流收到这一次就标「已续」，之后不会再续；记录写不进就不发，留到下一轮再试，不留下没记录的续
+  try {
+    await deps.audit({ row, workflowId, park, why });
+  } catch (err) {
+    result.problems.push(`${refOf(row)} 操作记录没写进，没发继续，下一轮再试：${errMessage(err)}`);
+    return;
+  }
   const sent = await deps.continueTask(workflowId, { by: PARKED_RETRY_ACTOR, note: why, parkSeq: park.seq });
   if (sent === 'gone') return;
   result.continued.push({ ref: refOf(row), workflowId, why });
   deps.log('info', '引擎续停：已发继续', { ref: refOf(row), workflowId, why });
+  // 继续发出去了才撤这一次停下的提醒
   try {
-    await deps.audit({ row, workflowId, park, why });
+    await deps.resolveAlert({ row, workflowId, park, why });
   } catch (err) {
-    result.problems.push(`${refOf(row)} 已续，但操作记录没写进：${errMessage(err)}`);
+    result.problems.push(`${refOf(row)} 已续，但这一次停下的提醒没撤掉：${errMessage(err)}`);
   }
 }
 

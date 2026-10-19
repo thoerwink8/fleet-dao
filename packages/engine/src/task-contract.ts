@@ -579,6 +579,8 @@ export interface ArmAutoMergeResult {
   /** merged 时的合并提交。 */
   mergeCommit?: string;
   why?: string;
+  /** 没挂是因为 PR 本身关了、还是草稿（要人处理，引擎续停不续）。老历史没有这个字段。 */
+  refused?: 'closed' | 'draft';
   mainSyncBudgetExhausted?: MainSyncBudgetExhausted;
   /** 挂的时候发现 PR 的头已经不是引擎验过、推上去的那个了（有人改过）：现在的头。老历史里没有这个字段。 */
   headMoved?: string;

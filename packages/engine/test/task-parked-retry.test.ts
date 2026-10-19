@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import { type ParkedRetryDeps, type ParkedRetryResult, retryParkedTasks } from '../src/jobs/parked-retry.ts';
+import { PortError } from '../src/ports.ts';
 import {
   type ArmAutoMergeResult,
   PARKED_RETRY_ACTOR,
@@ -91,6 +92,7 @@ function jobOn(
     audit: async ({ why }) => {
       out.audits.push(why);
     },
+    resolveAlert: async () => {},
     runs: { start: async () => 1, finish: async () => {} },
     now: () => new Date(),
     log: () => {},
@@ -246,6 +248,57 @@ describe('停下等人按规则续一次（#3294）', { timeout: 120_000 }, () =
     );
     expect(run.outcome).toBe('merged');
     expect(calls.arm).toBe(1);
+  });
+
+  it('PR 关了、还是草稿、等检查时挂合并认证失败：停法记 other，发了新版也不续，不算「自动合并没挂上」', async () => {
+    const cases: { name: string; arm: (n: number, input: { expectedHead: string }) => ArmAutoMergeResult }[] =
+      [
+        {
+          name: '关了',
+          arm: (n) => (n === 1 ? { ...UNARMED, why: 'PR 已经关了', refused: 'closed' } : ARMED),
+        },
+        {
+          name: '草稿',
+          arm: (n) => (n === 1 ? { ...UNARMED, why: 'PR 还是草稿', refused: 'draft' } : ARMED),
+        },
+        {
+          name: '认证失败',
+          arm: (n, input) => {
+            if (n === 1)
+              return {
+                armed: false,
+                merged: false,
+                why: '检查还在跑',
+                checksPending: { names: ['merge-gate'], head: input.expectedHead, detail: '检查还在跑' },
+              };
+            if (n === 2) throw new PortError('AUTH_REQUIRED', 'GitHub 令牌失效', { retryable: false });
+            return ARMED;
+          },
+        },
+      ];
+    for (const c of cases) {
+      const world = createFakeWorld();
+      const { tasks, calls } = scripted({ arm: c.arm });
+      await withWorker(
+        env,
+        world,
+        async (q) => {
+          const i = input();
+          const h = await start(q, i);
+          // 等检查那一觉要时钟往前走才醒来再挂一次
+          if (c.name === '认证失败') await env.sleep('1 minute');
+          const s = await statusUntil(h, (st) => st.phase === 'parked', `${c.name}，停下`);
+          expect(s.park?.kind, c.name).toBe('other');
+          const job = jobOn(h, i, anHourAfter);
+          expect((await retryParkedTasks(job.deps)).continued, c.name).toEqual([]);
+          expect(job.audits, c.name).toEqual([]);
+          expect((await h.query(taskStatusQuery)).phase, c.name).toBe('parked');
+          expect(calls.arm, c.name).toBeLessThanOrEqual(2);
+          await h.terminate('测试收场');
+        },
+        { tasks },
+      );
+    }
   });
 
   it('停下之后没发新版、PR 也还不能合：不续，原地等人', async () => {

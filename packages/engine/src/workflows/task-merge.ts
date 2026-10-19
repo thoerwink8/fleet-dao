@@ -196,7 +196,7 @@ async function parkInMerge(
   rt: TaskRuntime,
   title: string,
   detail: string,
-  kind: ParkKind = 'unarmed',
+  kind: ParkKind = 'other',
 ): Promise<void> {
   if (!patched('merge-park-recheck')) {
     await rt.park(title, detail, 'stuck', kind);
@@ -478,7 +478,13 @@ export async function armAndWaitMerged(
       // 不是还在跑、也不是真红：主线同步次数用尽才走结构化续段，别的失败仍停下报人。
       if (await rt.parkMainSyncBudget(armed.mainSyncBudgetExhausted, armed.why ?? '同步主线次数已到上限'))
         continue;
-      await parkInMerge(rt, '自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
+      // 只有「挂不上」本身才算自动合并没挂上（引擎可续）；PR 关了、还是草稿是要人处理的，不续
+      await parkInMerge(
+        rt,
+        '自动合并没挂上',
+        armed.why ?? 'GitHub 没说为什么',
+        armed.refused === undefined ? 'unarmed' : 'other',
+      );
       continue;
     }
     pending = null;
