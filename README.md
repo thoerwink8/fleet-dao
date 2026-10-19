@@ -67,6 +67,12 @@
 
 - 本机受管工人的审查退回：`pnpm work return <单号> --body-file <完整意见文件>` 交由退回专用工作流与既有合并闸按同一 PR 串行登记；先核实 PR 级 PREPARE，再写当前头阻合状态和正式 review 回执，未结 PREPARE 跨换头/强推继续阻合；只有核实真实状态与正式回执才报 `registered/blocked`，`queued/unconfirmed` 不代表已阻止合并。`pnpm work feedback <单号> [--wait|--retry]` 读取完整意见、等 Actions 结果或按原请求重试，取消、超时和断线保留本机意图。工人用 `pnpm work ack <单号> --return <编号>` 确认收到；审查方用 `pnpm work resolve <单号> --return <编号> --body-file <核验依据>` 对精确候选 head 解除责任；ack、CI 绿和新 head 都不代替 resolve。交付用 `pnpm work deliver <单号>`，不会擅自解除手工草稿。当前显式退回事务只允许个人仓 owner 发起，工人不能替审查方 resolve；普通组织仓和没有退回协议的本机 PR 保留原判法。
 
+### 真 Temporal 测试准备
+
+`pnpm test:temporal --cli <已安装的CLI绝对路径>` 登记本机测试 CLI，版本必须与 `deploy/france.sh` 一致；之后 `pnpm test:temporal` 检查登记是否仍可用。登记只写 `~/.fleet-dao/test-tools/`，不下载、不改全局 PATH、不启动服务端。也可直接设 `FLEET_TEST_TEMPORAL_CLI`，显式路径优先，坏路径不会退回登记；CI 必须显式设置。
+
+`pnpm check`、`pnpm test:changed` 选到调用 `createRealEnv` 的文件时先核 CLI；没选到则不做这项准备。直接跑单个测试也会在创建真环境前核验，缺失明确失败，不回退 SDK 隐式下载。`--version` 探测限 5 秒，超时终止该探测进程。随后 SDK 创建只报 `start-or-connect`：SDK 未公开启动和连接的细分状态，日志如实记未知；没有另套超时竞速，环境仍由 SDK 创建并由用例 teardown 清理。
+
 ### Windows 上的 Linux 安全测试
 
 `pnpm check`（含 `--all`）和 `pnpm test:changed` 选到安全归档测试时，会将它们交给显式配置的本机 Linux 普通用户；其余测试仍在 Windows 跑。单独验这组测试用 `pnpm test:linux`。不配置或环境不可用会明确失败，不跳过、不自动安装或启动新发行版、不改默认发行版。
