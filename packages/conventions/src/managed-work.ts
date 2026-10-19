@@ -16,8 +16,10 @@ import {
 import { readManagedFeedback, readManagedFeedbackForGate } from './managed-feedback-github.ts';
 import { issueColumnLinks } from './pr-columns.ts';
 import {
+  acceptRework,
   DeliveryCheckError,
   type ExternalDeliveryFact,
+  type ReworkIntent,
   type RunSpec,
   type RunStatus,
   readJson,
@@ -553,6 +555,31 @@ export async function managedFeedbackContext(gh: Gh, spec: RunSpec): Promise<str
   const pr = await managedPr(gh, spec.branch);
   const { records } = await readManagedFeedbackForGate(feedbackApi(gh, spec.repo), pr.number, pr.headRefOid);
   return `完整本机审查退回（ack仅确认收到，不能解除）：\n${JSON.stringify(records, null, 2)}\n交付前运行 pnpm work feedback ${spec.issue}，禁止根据旧CI或draft猜测退回已消失。`;
+}
+
+/** 读 GitHub 上仍未解决、且对得上原 run/session 的退回，得到这一次返工请求。 */
+export async function planManagedRework(gh: Gh, spec: RunSpec, state: RunStatus): Promise<ReworkIntent> {
+  const pr = await managedPr(gh, spec.branch);
+  const { records } = await readManagedFeedbackForGate(feedbackApi(gh, spec.repo), pr.number, pr.headRefOid);
+  return acceptRework(spec, state, records);
+}
+
+/** 再读一遍当前退回。代次或编号变了就拒绝，不能按旧请求起工人。 */
+export async function confirmManagedRework(
+  gh: Gh,
+  spec: RunSpec,
+  state: RunStatus,
+  intent: ReworkIntent,
+): Promise<void> {
+  const live = await planManagedRework(gh, spec, state);
+  if (
+    live.run !== intent.run ||
+    live.session !== intent.session ||
+    live.generation !== intent.generation ||
+    live.returnId !== intent.returnId
+  ) {
+    throw new Error('当前退回代次已变，不按旧返工起工人');
+  }
 }
 
 export async function managedWork(

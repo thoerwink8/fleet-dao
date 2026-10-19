@@ -10,7 +10,9 @@
 // run <单号> [--brief 文件] [--worktree 路径] [--again]：脱离聊天进程派一个无头工人（单 #2761，work-run.ts 开头有全貌）——先过本机容量，
 //        本机没租约才领单，建或复用工作树，经 detach.mjs 起看护进程；看护进程没了再跑一次就接着同一个会话续。
 //        交付停在 waiting 时再跑只起看护进程复核，不领单、不新开工人；已由其他真实 PR 交付而 stopped 的不再派。
-//        起看护进程前先原子占位：两个并发恢复不能同时判失联再各起一个工人。runs：列 run 派过的工人。
+//        起看护进程前先原子占位：两个并发恢复不能同时判失联再各起一个工人。
+// rework <单号>：审查等待要按原 run/session 和当前未解决退回返工。外部交付和已停不走这条。同一代次同时只起一个工人。
+// runs：列 run 派过的工人。
 //
 // 改这里之前必须知道：
 // - 写法国只用本机会话心跳同一个通行证（~/.fleet-dao/local-sessions/config.json 的 url、token，pnpm local-sessions install 写的），
@@ -24,7 +26,7 @@ import type { Git } from './directives.ts';
 import { localBranchPrefix } from './issue-branch.ts';
 import type { Gh } from './issue-new.ts';
 import { LOCAL_LABEL } from './labels.ts';
-import { managedWork, validateManagedDelivery } from './managed-work.ts';
+import { managedWork, planManagedRework, validateManagedDelivery } from './managed-work.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
 import { buildQueue, type LeaseRecord, type QueueDeps, readCurrentRepo, renderQueue } from './work-queue.ts';
 import {
@@ -69,7 +71,7 @@ export type LocalClaimRequest =
 
 export const WORK_USAGE =
   '用法：pnpm work claim <单号> | pnpm work renew <单号> | pnpm work done <单号> [--failed "原因" | --release "原因"] | pnpm work queue [--json]' +
-  ' | pnpm work run <单号> [--brief <交代文件>] [--worktree <工作树>] [--again] | pnpm work runs';
+  ' | pnpm work run <单号> [--brief <交代文件>] [--worktree <工作树>] [--again] | pnpm work rework <单号> | pnpm work runs';
 
 export interface ClaimsEndpoint {
   url: string;
@@ -555,6 +557,67 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
   }
 }
 
+/** 审查等待的受管返工：核原 run/session 和当前未解决退回，再起一个看护。不改 state，不另开运行。 */
+async function reworkCmd(rest: readonly string[], deps: WorkDeps): Promise<number> {
+  if (rest.length !== 1) throw new Error(`用法：pnpm work rework <单号>。${WORK_USAGE}`);
+  const issue = Number(rest[0]);
+  if (!Number.isSafeInteger(issue) || issue <= 0)
+    throw new Error(`单号要是正整数：${rest[0]}。${WORK_USAGE}`);
+  const r = deps.run;
+  if (!r) throw new Error('pnpm work rework 没接上容量、起进程的那几样（入口的 bug）');
+  const repo = await currentRepo(deps);
+  const dir = runDir(r.runsRoot, repo, issue);
+  const files = runFiles(dir);
+  const spec = readJson<RunSpec>(files.spec);
+  const status = readJson<RunStatus>(files.state);
+  const recorded = readJson<RunResult>(files.result);
+  if (!spec || !status) throw new Error(`#${issue} 没有受管运行记录，不能返工`);
+  if (recorded?.state === 'stopped' || status.state === 'stopped' || status.hold?.kind === 'external') {
+    throw new Error(`#${issue} 已由其他真实PR交付或已停，不重派工人`);
+  }
+  if (status.state !== 'waiting' || status.hold?.kind !== 'review' || !status.sessionId) {
+    throw new Error(`#${issue} 不是已停住的审查等待，不能返工`);
+  }
+  if (runPhase(dir, r.now()) === 'live') throw new Error(`#${issue} 已经有工人在跑，不再起第二个`);
+  let startToken: string | null = null;
+  try {
+    startToken = claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, r.now());
+    if (!startToken) throw new Error(`#${issue} 已有恢复占位，不再并发起工人`);
+    const again = readJson<RunStatus>(files.state);
+    if (!again || runPhase(dir, r.now()) === 'live')
+      throw new Error(`#${issue} 已经有工人在跑，不再起第二个`);
+    if (again.state !== 'waiting' || again.hold?.kind !== 'review' || again.sessionId !== status.sessionId) {
+      throw new Error(`#${issue} 等待状态变了，不按旧返工起工人`);
+    }
+    const cap = await r.capacity();
+    if (cap.enough !== true) {
+      throw new Error(
+        cap.enough === null ? `${cap.text}——没查成不当成够，不派` : `${cap.text}——等一个工人收口再派`,
+      );
+    }
+    const fresh = readJson<RunStatus>(files.state);
+    if (!fresh) throw new Error(`#${issue} 没有受管运行记录，不能返工`);
+    const intent = await planManagedRework(deps.gh, spec, fresh);
+    writeJson(files.rework, intent);
+    const started = r.spawnDetached(r.node, [r.supervisor, dir, '--rework'], { cwd: r.repoRoot });
+    if (!started.ok) {
+      rmSync(files.rework, { force: true });
+      throw new Error(
+        `看护进程没起成：${started.why}（记录在 ${dir}，修好再跑一次 pnpm work rework ${issue}）`,
+      );
+    }
+    const handed = handoffRunLock(dir, SUPERVISOR_START_LOCK, startToken, started.pid, r.now());
+    startToken = null;
+    if (!handed) throw new Error(`#${issue} 占位没交接到看护进程，不再当作已经派出去`);
+    deps.out(
+      `按第 ${intent.generation} 代未解决退回返工 #${issue}：看护进程 ${started.pid}，原会话 ${intent.session}，不另开运行。${cap.text}`,
+    );
+    return 0;
+  } finally {
+    if (startToken) releaseRunLock(dir, SUPERVISOR_START_LOCK, startToken);
+  }
+}
+
 export async function work(argv: readonly string[], deps: WorkDeps): Promise<number> {
   try {
     if (['return', 'feedback', 'ack', 'resolve', 'deliver'].includes(argv[0] ?? '')) {
@@ -568,6 +631,7 @@ export async function work(argv: readonly string[], deps: WorkDeps): Promise<num
     }
     if (argv[0] === 'queue') return await queueCmd(argv.slice(1), deps);
     if (argv[0] === 'run') return await runCmd(argv.slice(1), deps);
+    if (argv[0] === 'rework') return await reworkCmd(argv.slice(1), deps);
     if (argv[0] === 'runs') {
       if (!deps.run) throw new Error('pnpm work runs 没接上（入口的 bug）');
       for (const line of renderRuns(listRuns(deps.run.runsRoot), deps.run.now())) deps.out(line);

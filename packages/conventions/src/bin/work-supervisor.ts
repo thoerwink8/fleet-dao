@@ -6,10 +6,17 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ghRunner } from '../issue-new.ts';
-import { managedFeedbackContext, validateManagedDelivery } from '../managed-work.ts';
+import { confirmManagedRework, managedFeedbackContext, validateManagedDelivery } from '../managed-work.ts';
 import { liveClaimsPost, readClaimsEndpoint, work } from '../work.ts';
 import { removeLease, writeLease } from '../work-queue.ts';
-import { type AttemptOutput, type RunSpec, readJson, runFiles, superviseRun } from '../work-run.ts';
+import {
+  type AttemptOutput,
+  type RunSpec,
+  type RunStatus,
+  readJson,
+  runFiles,
+  superviseRun,
+} from '../work-run.ts';
 
 const dir = process.argv[2];
 if (!dir) {
@@ -103,6 +110,12 @@ try {
     renew,
     feedbackContext: (s) => managedFeedbackContext(ghRunner(s.worktree), s),
     validateDelivery: (s) => validateManagedDelivery(ghRunner(s.worktree), s, true, dirname(dir)),
+    rework: process.argv[3] === '--rework',
+    confirmRework: async (s, intent) => {
+      const state = readJson<RunStatus>(runFiles(dir).state);
+      if (!state) throw new Error('没有运行状态，不能核返工');
+      await confirmManagedRework(ghRunner(s.worktree), s, state, intent);
+    },
     repeat: (fn, ms) => {
       const t = setInterval(fn, ms);
       return () => clearInterval(t);

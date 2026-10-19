@@ -4,9 +4,11 @@
 // 又不能让主线程手写轮询（钩子拦，#2730）。所以收尾时由这个钩子盯着，只在终态叫一次：中间的心跳、网关断了在续，都不叫。
 // 做法：
 // - 找这个会话派的（state.json / spec.json 的 dispatcher = 本会话号）、还没叫醒过（没有 reported 文件）的运行记录；一件都没有就退 0；
-// - 每 WATCH_TICK_MS 看一次：有 result.json 的是终态（做完、没做成、已停不再派工）；state.json 是 waiting 的
-//   （审查未结或外部交付还不能终结）不盯、不叫，心跳再旧也不当成看护进程丢了；其余不是终态、beatAt 超过
-//   BEAT_STALE_MS 没动（没有 state.json 就看 spec.json 的修改时间）的是看护进程没了，也叫：要人再跑一次 pnpm work run <单号> 续；
+// - 每 WATCH_TICK_MS 看一次：有 result.json 的是终态（做完、没做成、已停不再派工）。waiting 且看护 pid 还在、心跳还新：正在复核，不叫。
+//   waiting 且 pid 已清（已 park）：叫一次，写明不是做完、不要再派写码；审查返工用 pnpm work rework，外部交付不要重派。
+//   waiting 但 pid 还记着、心跳已经旧：复核中的看护没了，叫一次，只让人 pnpm work run 接着复核，不叫人去写码。
+//   其余不是终态、beatAt 超过 BEAT_STALE_MS 没动（没有 state.json 就看 spec.json 的修改时间）的是看护进程没了，也叫：
+//   要人再跑一次 pnpm work run <单号> 续；
 // - 叫之前用独占创建 reported 文件占住（同一件只叫一次，几个盯着的进程抢，只有一个叫）；把每件一两句打到 stderr，退出码 2；
 // - 同一会话只留一个盯着的（锁 <运行目录根>/watch-<会话号>.lock，后来的接班），最长等 3 小时，起它的 Claude Code 没了也退 0；
 // - 子代理收尾（带 agent_id）、引擎无头、机器派的会话（工人自己）：直接退 0。
@@ -65,6 +67,11 @@ function readObj(path) {
   }
 }
 
+/** @param {unknown} pid */
+function heldPid(pid) {
+  return typeof pid === 'number' && Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
 /** @param {number} pid */
 function alive(pid) {
   try {
@@ -87,16 +94,18 @@ function hostAlive() {
 }
 
 /**
- * @typedef {{ dir: string, issue: number | null, kind: 'done' | 'failed' | 'stopped' | 'lost', text: string }} Ended 到终态的一件
+ * @typedef {{ dir: string, issue: number | null, kind: 'done' | 'failed' | 'stopped' | 'lost' | 'waiting', text: string }} Ended 要叫醒的一件
  */
 
 /**
  * 这个会话派的、还没叫醒过的运行目录。
+ * 复核中且心跳还新的 waiting 留在外面：放进名单会让 Stop 空等满 3 小时。
  * @param {string} root
  * @param {string} sessionId
+ * @param {number} [now]
  * @returns {string[]}
  */
-export function pendingRuns(root, sessionId) {
+export function pendingRuns(root, sessionId, now = Date.now()) {
   /** @type {string[]} */
   let names = [];
   try {
@@ -116,8 +125,11 @@ export function pendingRuns(root, sessionId) {
         // 没叫醒过
       }
       const state = readObj(join(dir, 'state.json'));
-      // 审查等待或外部交付还不能终结：不是还在写码。留在名单里会让 Stop 空等满 3 小时，并可能被说成看护进程丢了。
-      if (state?.state === 'waiting' && !readObj(join(dir, 'result.json'))) return false;
+      if (state?.state === 'waiting' && !readObj(join(dir, 'result.json'))) {
+        const pid = heldPid(state.supervisorPid);
+        const beat = typeof state.beatAt === 'string' ? Date.parse(state.beatAt) : Number.NaN;
+        if (pid !== null && Number.isFinite(beat) && now - beat <= BEAT_STALE_MS) return false;
+      }
       const owner = state?.dispatcher ?? readObj(join(dir, 'spec.json'))?.dispatcher;
       return owner === sessionId;
     });
@@ -162,8 +174,37 @@ export function endedOf(dir, now) {
       text: `${tag} 工人没做成（${attempts}）：${typeof result.why === 'string' ? result.why : '（没写原因）'}\n结果文件 ${join(dir, 'result.json')}，每次的输出在同目录 attempt-*.err.log`,
     };
   }
-  // 审查等待或外部交付未终结：故意停着，不是看护进程丢了，不要叫人去续跑工人。
-  if (state?.state === 'waiting') return null;
+  if (state?.state === 'waiting') {
+    const pid = heldPid(state.supervisorPid);
+    const beat = typeof state.beatAt === 'string' ? Date.parse(state.beatAt) : Number.NaN;
+    const fresh = Number.isFinite(beat) && now - beat <= BEAT_STALE_MS;
+    if (pid !== null && fresh) return null;
+    const hold = isObj(state.hold) ? state.hold : null;
+    const why =
+      typeof hold?.why === 'string'
+        ? hold.why
+        : typeof state.lastError === 'string'
+          ? state.lastError
+          : '停着复核';
+    if (pid !== null) {
+      return {
+        dir,
+        issue,
+        kind: 'lost',
+        text: `${tag} 复核中的看护进程没了（最后心跳 ${Number.isFinite(beat) ? new Date(beat).toISOString() : '没有'}）：pnpm work run ${issue ?? '<单号>'} 只复核交付、不新开写码。这不是做完，也不要另派工人`,
+      };
+    }
+    const next =
+      hold?.kind === 'external'
+        ? '外部交付不要重派工人'
+        : '审查返工用 pnpm work rework，不要手改状态、不要再派写码';
+    return {
+      dir,
+      issue,
+      kind: 'waiting',
+      text: `${tag} 停在一次待处理的等待，不是做完：${why}。${next}`,
+    };
+  }
   let beat = typeof state?.beatAt === 'string' ? Date.parse(state.beatAt) : Number.NaN;
   if (!state) {
     try {
@@ -230,7 +271,7 @@ export async function watchRuns(
   if (sessionId === null) return 0;
   if (isMachineSession({ env, cwd: input.cwd })) return 0;
   const root = runsRootOf(env, home);
-  if (pendingRuns(root, sessionId).length === 0) return 0;
+  if (pendingRuns(root, sessionId, clock()).length === 0) return 0;
 
   const tickMs = msFrom(env, 'FLEET_WORK_WATCH_TICK_MS', WATCH_TICK_MS);
   const maxMs = msFrom(env, 'FLEET_WORK_WATCH_MAX_MS', WATCH_MAX_MS);
@@ -262,7 +303,7 @@ export async function watchRuns(
         if (clock() - startedAt >= maxMs) return 0;
       }
       const now = clock();
-      const pending = pendingRuns(root, sessionId);
+      const pending = pendingRuns(root, sessionId, now);
       if (pending.length === 0) return 0;
       /** @type {Ended[]} */
       const ended = [];
@@ -271,7 +312,11 @@ export async function watchRuns(
         if (e && claimReport(dir, now)) ended.push(e);
       }
       if (ended.length > 0) {
-        err([`本机工人到终态 ${ended.length} 件：`, ...ended.map((e) => e.text)].join('\n'));
+        const quiet = ended.every((e) => e.kind === 'waiting' || e.text.includes('只复核'));
+        const head = quiet
+          ? `本机工人有 ${ended.length} 件要处理，不是做完：`
+          : `本机工人到终态 ${ended.length} 件：`;
+        err([head, ...ended.map((e) => e.text)].join('\n'));
         return 2;
       }
     }

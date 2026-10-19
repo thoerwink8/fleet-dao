@@ -10,16 +10,19 @@
 //   --output-format json，--session-id 定好会话号）；每 BEAT_EVERY_MS 写一次 state.json 的 beatAt，每 RENEW_EVERY_MS 续一次法国的租约
 //   （pnpm work renew 同一条路）；工人退出后判：做完 → 写 result.json（done）；网关、网络断（5xx、overloaded、连不上……）或认不出的失败 →
 //   等一会儿（1、2、4……分钟，最多 10 分钟）用 --resume <同一个会话号> 接着做，最多 MAX_ATTEMPTS 次；登录、权限坏了 → 写 result.json（failed）。
-//   工人进程自己没跑完（网关、崩溃）才 --resume。退出码成功但交付没核上：网络读失败只退避复核、不再起工人；
+//   工人进程自己没跑完（网关、崩溃）才 --resume。退出码成功但交付没核上：先把状态写成「只复核」再读交付；网络读失败只退避复核、不再起工人；
 //   审查未结、本分支没有唯一真实 PR、或其他确定条件写成 waiting（工作树、会话、检查点留着，不续写码）；
 //   同仓其他真实 PR 已合并且验收责任已结清才写 stopped，不把本运行记 done，也不靠 issue 已关闭或伪造本分支 PR。
 //   会话还没建起来就断了（--resume 报找不到会话）→ 下一次用原会话号重新起。
-// - 看护进程自己没了（关机、被杀）：state.json 不是终态、beatAt 超过 BEAT_STALE_MS 没动。再跑一次 pnpm work run <单号> 就接着同一个
-//   状态文件、同一个会话号续（--resume），尝试次数接着数，租约心跳重新跑起来。
+// - 看护进程自己没了（关机、被杀）：state.json 不是终态、beatAt 超过 BEAT_STALE_MS 没动。再跑一次 pnpm work run <单号>：
+//   waiting 只复核，不 --resume 写码；还在跑的才接着同一个会话续。尝试次数接着数，租约心跳重新跑起来。
 //   续跑和第一次派工都先在运行目录里原子占住 supervisor-start（mkdir，跨进程只有一个能建成）。占位上的进程还活着就不再起第二个看护，
 //   也不手写 state/result、不杀已有进程；进程已经没了的占位才由下一次接手。看护进程自己再占 worker-slot，两个看护也不会各起一个工人。
-// - 叫醒：agents/hooks/work-watch.mjs 挂在 Stop 上（asyncRewake），只在 result.json 写出来（或看护进程没了）时叫醒派它的会话
-//   （state.json 的 dispatcher = 派的时候的 CLAUDE_CODE_SESSION_ID），中间的心跳、重试都不叫。
+// - 审查等待要接着改：pnpm work rework <单号>。按原 run、session 和 GitHub 上当前未解决退回代次核验后，才用 --resume 起原会话；
+//   同一代次同时只起一个工人。外部交付和已停不走这条。rework.json 只是这次请求，pnpm work run 不因为它去写码。
+// - 叫醒：agents/hooks/work-watch.mjs 挂在 Stop 上（asyncRewake）。终态、看护进程没了、已 park 的等待各叫一次。
+//   已 park 的等待写明不是做完、不要再派写码。复核中心跳还在不叫；复核中心跳丢了只通知接着复核，不叫人去写码。
+//   Codex 同步续轮读同一份结束说明，用结果摘要去重，不把 waiting 当成做完。
 //
 // 文件（~/.fleet-dao/work-runs/<owner>__<name>__<单号>/，FLEET_WORK_RUNS_DIR 可改）：spec.json（怎么起）、brief.md（交代）、
 // state.json（现在怎样）、result.json（终态才有）、attempt-<n>.out.json / attempt-<n>.err.log（每次的输出）、reported（叫醒过了，钩子写）。
@@ -191,6 +194,8 @@ export const runFiles = (dir: string) => ({
   state: join(dir, 'state.json'),
   result: join(dir, 'result.json'),
   reported: join(dir, 'reported'),
+  /** pnpm work rework 写下的这一次返工请求。看护只在带着 --rework 进来时才认。 */
+  rework: join(dir, 'rework.json'),
   out: (n: number) => join(dir, `attempt-${n}.out.json`),
   err: (n: number) => join(dir, `attempt-${n}.err.log`),
 });
@@ -405,6 +410,67 @@ export function defaultBrief(o: { issue: number; title: string; worktree: string
   ].join('\n');
 }
 
+/** pnpm work rework 写进 rework.json 的这一次请求。代次和编号必须仍是 GitHub 上未解决的那条。 */
+export interface ReworkIntent {
+  v: 1;
+  /** spec.createdAt，不是调用方自己编的运行号 */
+  run: string;
+  /** state.sessionId */
+  session: string;
+  generation: number;
+  returnId: string;
+}
+
+/**
+ * 审查等待能不能按原 run/session 返工。外部交付和已停直接拒绝。
+ * 只认未解决、且 run/session 对得上的退回里代次最高的那一条。
+ */
+export function acceptRework(
+  spec: RunSpec,
+  state: RunStatus,
+  records: readonly {
+    resolved: boolean;
+    event: { action: string; run: string; session: string; generation: number; returnId: string };
+  }[],
+): ReworkIntent {
+  if (state.hold?.kind === 'external' || state.state === 'stopped') {
+    throw new Error(`#${spec.issue} 已由其他真实PR交付或已停，不重派工人`);
+  }
+  if (state.state !== 'waiting' || state.hold?.kind !== 'review' || !state.sessionId) {
+    throw new Error(`#${spec.issue} 不是已停住的审查等待，不能返工`);
+  }
+  const open = records.filter(
+    (r) =>
+      !r.resolved &&
+      r.event.action === 'return' &&
+      r.event.run === spec.createdAt &&
+      r.event.session === state.sessionId &&
+      Number.isSafeInteger(r.event.generation) &&
+      r.event.generation > 0 &&
+      typeof r.event.returnId === 'string' &&
+      r.event.returnId !== '',
+  );
+  if (open.length === 0) throw new Error(`#${spec.issue} 没有对得上原 run/session 的未解决退回，不能返工`);
+  const generation = Math.max(...open.map((r) => r.event.generation));
+  const current = open.filter((r) => r.event.generation === generation);
+  if (current.length !== 1) throw new Error(`#${spec.issue} 当前退回代次对不上唯一未解决退回，不能返工`);
+  const hit = current[0];
+  if (!hit) throw new Error(`#${spec.issue} 当前退回代次对不上唯一未解决退回，不能返工`);
+  return { v: 1, run: spec.createdAt, session: state.sessionId, generation, returnId: hit.event.returnId };
+}
+
+function readReworkIntent(path: string): ReworkIntent | null {
+  const v = readJson<Partial<ReworkIntent>>(path);
+  if (!v) return null;
+  if (v.v !== 1) return null;
+  if (typeof v.run !== 'string' || v.run === '') return null;
+  if (typeof v.session !== 'string' || v.session === '') return null;
+  if (typeof v.returnId !== 'string' || v.returnId === '') return null;
+  if (typeof v.generation !== 'number' || !Number.isSafeInteger(v.generation) || v.generation < 1)
+    return null;
+  return { v: 1, run: v.run, session: v.session, generation: v.generation, returnId: v.returnId };
+}
+
 export const RESUME_PROMPT =
   '上一次被打断了（网关断、或进程被停）。从断点接着做：先看工作树（git status、git log）和这张单的 PR（gh pr list --head <分支>）现在怎样，' +
   '别重做已经做完的；做完照原来的交代写最后一条回复。';
@@ -432,6 +498,10 @@ export interface SuperviseDeps {
   log: (line: string) => void;
   feedbackContext?: (spec: RunSpec) => Promise<string>;
   validateDelivery?: (spec: RunSpec) => Promise<void>;
+  /** 这次是 pnpm work rework 拉起的。没有这面旗，waiting 只复核，哪怕目录里有 rework.json。 */
+  rework?: boolean;
+  /** 用当前未解决退回核对 rework.json。对不上就不起工人。 */
+  confirmRework?: (spec: RunSpec, intent: ReworkIntent) => Promise<void>;
 }
 
 /** 工人的命令行：第一次定会话号，续的时候 --resume 同一个 */
@@ -460,6 +530,7 @@ function lastWorkerSummary(dir: string, attempts: number): string {
 /**
  * 看护一张单的工人到终态或等待复核。重复起（看护进程没了再起）接着同一个状态文件续。
  * 已经有一个活着的看护进程在管就回 null、什么都不动。waiting 的恢复只复核交付，不起工人。
+ * 带着 rework 且 rework.json 对得上原 run/session 时，先核当前未解决退回，再 --resume 原会话。
  * 真要起工人之前先原子占住 worker-slot：两个看护进程同时读到失联心跳，也只有一个能起工人。
  */
 export async function superviseRun(
@@ -602,7 +673,14 @@ async function superviseClaimed(
     return { state: 'waiting', why: hold.why, sessionId: s.sessionId, attempts: s.attempts };
   };
   // 工人已经正常退出之后只复核事实。网络失败退避再读；确定条件停下。两种都不另起 CLI。
+  // 第一次 await 之前就把「只复核」写盘：核验读到一半进程没了，恢复也不能再 --resume 写码。
   const settleDelivery = async (summary: string): Promise<RunResult | WaitingOutcome> => {
+    save({
+      state: 'waiting',
+      supervisorPid: deps.pid,
+      sessionStarted: true,
+      hold: s.hold ?? { kind: 'blocked', why: '工人已退出，正在复核交付，不起新工人' },
+    });
     let tries = 0;
     for (;;) {
       try {
@@ -644,7 +722,32 @@ async function superviseClaimed(
     await renew();
     const sessionId = s.sessionId ?? deps.newSessionId();
     if (s.sessionId === null) save({ sessionId });
-    if (prev?.state === 'waiting') return await settleDelivery(lastWorkerSummary(dir, s.attempts));
+    const intent = deps.rework ? readReworkIntent(f.rework) : null;
+    const applying =
+      prev?.state === 'waiting' &&
+      intent !== null &&
+      intent.run === spec.createdAt &&
+      intent.session === sessionId &&
+      s.hold?.kind === 'review';
+    if (prev?.state === 'waiting' && !applying)
+      return await settleDelivery(lastWorkerSummary(dir, s.attempts));
+    if (applying && intent) {
+      if (!deps.confirmRework) {
+        rmSync(f.rework, { force: true });
+        return park({ kind: 'review', why: '返工未经当前退回代次核验，不起工人' });
+      }
+      try {
+        await deps.confirmRework(spec, intent);
+      } catch (e) {
+        rmSync(f.rework, { force: true });
+        return park({
+          kind: 'review',
+          why: `返工未核上当前未解决退回，不续写码：${e instanceof Error ? e.message : String(e)}`,
+        });
+      }
+      save({ sessionStarted: true });
+    }
+    let dropRework = applying;
     for (;;) {
       if (s.attempts >= MAX_ATTEMPTS) {
         return finish(
@@ -655,7 +758,12 @@ async function superviseClaimed(
       }
       const n = s.attempts + 1;
       const resume = s.sessionStarted;
-      save({ state: 'running', attempts: n, nextTryAt: null });
+      save({ state: 'running', attempts: n, nextTryAt: null, hold: null });
+      if (dropRework) {
+        rmSync(f.rework, { force: true });
+        rmSync(f.reported, { force: true });
+        dropRework = false;
+      }
       deps.log(
         `#${spec.issue} 第 ${n} 次起工人（${resume ? `--resume ${sessionId}` : `新会话 ${sessionId}`}）`,
       );

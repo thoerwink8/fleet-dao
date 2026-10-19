@@ -1,16 +1,18 @@
 // pnpm work run（单 #2761 第二片）：脱离聊天进程派无头工人、看护进程靠租约心跳、网关断了从断点续、结束写结果文件。
 // 故意造出的失败：网关 502、会话还没建起来就断、看护进程自己死了再起、登录坏了、次数用完、容量不够 / 没查成、已经有一个在跑。
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GhResult } from '../src/issue-new.ts';
+import { type FeedbackEvent, feedbackBody, feedbackDigest } from '../src/managed-feedback.ts';
 import { validateManagedDelivery } from '../src/managed-work.ts';
 import { type LocalClaimRequest, type WorkDeps, work } from '../src/work.ts';
 import {
   type AttemptOutput,
+  acceptRework,
   BEAT_STALE_MS,
   backoffMs,
   claimRunLock,
@@ -20,6 +22,7 @@ import {
   MAX_ATTEMPTS,
   MAX_BACKOFF_MS,
   RESUME_PROMPT,
+  type ReworkIntent,
   type RunResult,
   type RunSpec,
   type RunStatus,
@@ -386,6 +389,7 @@ function runWorld(
     /** 容量检查让出事件循环，用来把两个恢复叠在占位还没交接的窗口里 */
     capacityDelayMs?: number;
     spawnPid?: number;
+    gh?: WorkDeps['gh'];
   } = {},
 ) {
   const root = temp();
@@ -401,14 +405,16 @@ function runWorld(
   const env = o.env ?? { CLAUDE_CODE_SESSION_ID: 'sess-main', PATH: '/bin', GH_TOKEN: 'secret' };
   const run = (...argv: string[]) =>
     work(argv, {
-      gh: async (args) => {
-        if (args[0] === 'repo') return ok(JSON.stringify({ nameWithOwner: 'acme/app' }));
-        if (args[0] === 'issue' && args[1] === 'view')
-          return ok(JSON.stringify({ title: 'Add captcha', state: 'OPEN' }));
-        if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
-        if (args[0] === 'issue' && args[1] === 'edit') return ok();
-        return { code: 1, stdout: '', stderr: `没想到的 gh：${args.join(' ')}` };
-      },
+      gh:
+        o.gh ??
+        (async (args) => {
+          if (args[0] === 'repo') return ok(JSON.stringify({ nameWithOwner: 'acme/app' }));
+          if (args[0] === 'issue' && args[1] === 'view')
+            return ok(JSON.stringify({ title: 'Add captcha', state: 'OPEN' }));
+          if (args[0] === 'pr' && args[1] === 'list') return ok('[]');
+          if (args[0] === 'issue' && args[1] === 'edit') return ok();
+          return { code: 1, stdout: '', stderr: `没想到的 gh：${args.join(' ')}` };
+        }),
       post: async (body) => {
         sent.push(body);
         return { status: 200, text: JSON.stringify({ ok: true, leaseUntil: '2026-10-16T12:00:00.000Z' }) };
@@ -1026,15 +1032,20 @@ describe('pnpm work run 对等待和已停不重派', () => {
   });
 });
 
+function checkpointOf(v: RunStatus | null): RunStatus {
+  if (!v) throw new Error('核验前没读到只复核状态');
+  return v;
+}
+
 function deadPid(): number {
-  const finished = spawnSync(process.execPath, ['-e', 'process.exit(0)']);
-  if (typeof finished.pid !== 'number' || finished.pid < 1) throw new Error('没拿到已退出的进程号');
-  try {
-    process.kill(finished.pid, 0);
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'ESRCH') return finished.pid;
+  for (let pid = 1 << 22; pid < (1 << 22) + 4096; pid++) {
+    try {
+      process.kill(pid, 0);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ESRCH') return pid;
+    }
   }
-  throw new Error('刚退出的进程号仍能发信号，不能拿来当死占位');
+  throw new Error('没找到已退出的进程号');
 }
 
 describe('恢复入口的原子占位', () => {
@@ -1249,5 +1260,359 @@ describe('看护进程的工人名额', () => {
     const result = await superviseRun(dir, w.deps);
     expect(result?.state).toBe('done');
     expect(w.calls).toHaveLength(1);
+  });
+});
+
+describe('工人退出后先落只复核，审查返工才续原会话', () => {
+  const intent: ReworkIntent = {
+    v: 1,
+    run: '2026-10-16T10:00:00.000Z',
+    session: SID,
+    generation: 1,
+    returnId: 'return1',
+  };
+
+  function writeWaiting(dir: string, hold: NonNullable<RunStatus['hold']>) {
+    writeJson(runFiles(dir).state, {
+      state: 'waiting',
+      supervisorPid: null,
+      beatAt: '2026-10-16T09:00:00.000Z',
+      sessionId: SID,
+      sessionStarted: true,
+      attempts: 1,
+      hold,
+      worktree: '/wt',
+    });
+  }
+
+  it('首次核验前已经写成只复核；这份状态过 10 分钟再进来也不再起工人', async () => {
+    const { dir } = runFixture();
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '做完了', session_id: SID }), stderr: '' }]);
+    let snap: RunStatus | null = null;
+    w.deps.validateDelivery = async () => {
+      snap = readJson<RunStatus>(runFiles(dir).state);
+      throw new Error('probe-exit');
+    };
+    await superviseRun(dir, w.deps);
+    expect(snap).toMatchObject({ state: 'waiting', attempts: 1, sessionStarted: true, supervisorPid: 777 });
+    expect(w.calls).toHaveLength(1);
+    const saved = checkpointOf(snap);
+    writeJson(runFiles(dir).state, { ...saved, beatAt: '2026-10-16T09:00:00.000Z' });
+    const again = fakeDeps([
+      { code: 0, stdout: resultJson({ result: '不该再写', session_id: SID }), stderr: '' },
+    ]);
+    let checks = 0;
+    again.deps.validateDelivery = async () => {
+      checks += 1;
+      throw new DeliveryCheckError('review', '审查未结');
+    };
+    const second = await superviseRun(dir, again.deps);
+    expect(again.calls).toEqual([]);
+    expect(checks).toBe(1);
+    expect(second?.state).toBe('waiting');
+  });
+
+  it('审查返工核上当前退回才 --resume 原会话；再进来没有请求就只复核', async () => {
+    const { dir } = runFixture();
+    writeWaiting(dir, { kind: 'review', why: '审查未结' });
+    writeJson(runFiles(dir).rework, intent);
+    writeFileSync(runFiles(dir).reported, 'old\n');
+    const seen: ReworkIntent[] = [];
+    const w = fakeDeps([
+      { code: 0, stdout: resultJson({ result: '按意见改了', session_id: SID }), stderr: '' },
+    ]);
+    w.deps.rework = true;
+    w.deps.confirmRework = async (_spec, got) => {
+      seen.push(got);
+    };
+    w.deps.feedbackContext = async () => '意见：必须改';
+    w.deps.validateDelivery = async () => {
+      throw new DeliveryCheckError('review', '审查仍未结');
+    };
+    const first = await superviseRun(dir, w.deps);
+    expect(first?.state).toBe('waiting');
+    expect(seen).toEqual([intent]);
+    expect(w.calls).toHaveLength(1);
+    expect(w.calls[0]?.args).toEqual(workerArgs(SID, true));
+    expect(w.calls[0]?.stdin).toContain('意见：必须改');
+    expect(existsSync(runFiles(dir).rework)).toBe(false);
+    expect(existsSync(runFiles(dir).reported)).toBe(false);
+    const again = fakeDeps([
+      { code: 0, stdout: resultJson({ result: '不该再写', session_id: SID }), stderr: '' },
+    ]);
+    again.deps.rework = true;
+    again.deps.confirmRework = async () => {
+      throw new Error('没有请求不该核');
+    };
+    again.deps.validateDelivery = async () => {
+      throw new DeliveryCheckError('review', '审查仍未结');
+    };
+    expect((await superviseRun(dir, again.deps))?.state).toBe('waiting');
+    expect(again.calls).toEqual([]);
+  });
+
+  it('退回代次核不上、或没装核验：不起工人', async () => {
+    const { dir } = runFixture();
+    writeWaiting(dir, { kind: 'review', why: '审查未结' });
+    writeJson(runFiles(dir).rework, intent);
+    const denied = fakeDeps([
+      { code: 0, stdout: resultJson({ result: '不该跑', session_id: SID }), stderr: '' },
+    ]);
+    denied.deps.rework = true;
+    denied.deps.confirmRework = async () => {
+      throw new Error('当前退回代次已变');
+    };
+    const result = await superviseRun(dir, denied.deps);
+    expect(denied.calls).toEqual([]);
+    expect(existsSync(runFiles(dir).rework)).toBe(false);
+    expect(result && 'why' in result ? result.why : '').toContain('不续写码');
+    writeJson(runFiles(dir).rework, intent);
+    const bare = fakeDeps([
+      { code: 0, stdout: resultJson({ result: '不该跑', session_id: SID }), stderr: '' },
+    ]);
+    bare.deps.rework = true;
+    const skipped = await superviseRun(dir, bare.deps);
+    expect(bare.calls).toEqual([]);
+    expect(skipped && 'why' in skipped ? skipped.why : '').toContain('未经当前退回代次核验');
+  });
+
+  it('外部交付即使带着返工请求也不起工人', async () => {
+    const { dir } = runFixture();
+    writeWaiting(dir, { kind: 'external', why: '需求已由其他真实PR交付' });
+    writeJson(runFiles(dir).rework, intent);
+    const w = fakeDeps([{ code: 0, stdout: resultJson({ result: '不该跑', session_id: SID }), stderr: '' }]);
+    w.deps.rework = true;
+    w.deps.confirmRework = async () => {
+      throw new Error('不该核');
+    };
+    w.deps.validateDelivery = async () => {
+      throw new DeliveryCheckError('review', '仍未结');
+    };
+    expect((await superviseRun(dir, w.deps))?.state).toBe('waiting');
+    expect(w.calls).toEqual([]);
+  });
+
+  it('两个返工看护同时进来只起一个工人', async () => {
+    const { dir } = runFixture();
+    writeWaiting(dir, { kind: 'review', why: '审查未结' });
+    writeJson(runFiles(dir).rework, intent);
+    const w1 = fakeDeps([
+      { code: 0, stdout: resultJson({ result: '只该这一次', session_id: SID }), stderr: '' },
+    ]);
+    const w2 = fakeDeps([{ code: 0, stdout: resultJson({ result: '不该跑', session_id: SID }), stderr: '' }]);
+    for (const w of [w1, w2]) {
+      w.deps.rework = true;
+      w.deps.confirmRework = async () => {};
+      w.deps.validateDelivery = async () => {
+        throw new DeliveryCheckError('review', '审查仍未结');
+      };
+    }
+    const [a, b] = await Promise.all([superviseRun(dir, w1.deps), superviseRun(dir, w2.deps)]);
+    expect(w1.calls.length + w2.calls.length).toBe(1);
+    expect([a, b].filter((x) => x === null)).toHaveLength(1);
+  });
+});
+
+describe('acceptRework 与 pnpm work rework', () => {
+  function event(over: Partial<FeedbackEvent> = {}): FeedbackEvent {
+    const text = '必须修复真实数据';
+    return {
+      v: 1,
+      action: 'return',
+      repoId: 1,
+      repo: 'acme/app',
+      issue: 42,
+      pr: 34,
+      run: '2026-10-16T10:00:00.000Z',
+      session: SID,
+      requestId: 'request1',
+      returnId: 'return1',
+      generation: 1,
+      head: HEAD,
+      text,
+      digest: feedbackDigest(text),
+      dispatcherId: 2,
+      ...over,
+    };
+  }
+
+  function reviewGh(reviews: unknown[]): NonNullable<WorkDeps['gh']> {
+    return async (args) => {
+      if (args[0] === 'repo') return ok(JSON.stringify({ nameWithOwner: 'acme/app' }));
+      if (args[0] === 'pr' && args[1] === 'list') {
+        return ok(
+          JSON.stringify([{ number: 34, headRefOid: HEAD, state: 'OPEN', mergedAt: null, isDraft: false }]),
+        );
+      }
+      if (args[0] === 'api') {
+        const path = args[3];
+        if (path === '/users/github-actions%5Bbot%5D') {
+          return ok(JSON.stringify({ id: 3, type: 'Bot', login: 'github-actions[bot]' }));
+        }
+        if (path === '/repos/acme/app') {
+          return ok(JSON.stringify({ id: 1, full_name: 'acme/app', owner: { id: 2, type: 'User' } }));
+        }
+        if (typeof path === 'string' && path.includes('/pulls/34/reviews'))
+          return ok(JSON.stringify(reviews));
+        return { code: 1, stdout: '', stderr: `没想到的 api ${String(path)}` };
+      }
+      return { code: 1, stdout: '', stderr: `没想到的 gh：${args.join(' ')}` };
+    };
+  }
+
+  function seed(dir: string, hold: NonNullable<RunStatus['hold']> = { kind: 'review', why: '审查未结' }) {
+    mkdirSync(dir, { recursive: true });
+    writeJson(runFiles(dir).spec, {
+      v: 1,
+      repo: 'acme/app',
+      issue: 42,
+      title: 'Add captcha',
+      repoRoot: '/repo',
+      worktree: '/wt',
+      branch: 'local/42-add-captcha',
+      dispatcher: 'sess-main',
+      reclaude: 'C:/bin/reclaude.exe',
+      env: {},
+      createdAt: '2026-10-16T10:00:00.000Z',
+    });
+    writeJson(runFiles(dir).state, {
+      state: 'waiting',
+      supervisorPid: null,
+      beatAt: '2026-10-16T09:00:00.000Z',
+      sessionId: SID,
+      sessionStarted: true,
+      attempts: 1,
+      hold,
+      repo: 'acme/app',
+      issue: 42,
+      worktree: '/wt',
+      branch: 'local/42-add-captcha',
+    });
+  }
+
+  it('只认对得上原 run/session 的未解决退回；外部交付和代次重复都拒绝', () => {
+    const { spec } = runFixture();
+    const waiting = {
+      state: 'waiting',
+      sessionId: SID,
+      hold: { kind: 'review', why: '审查未结' },
+    } as RunStatus;
+    const row = (generation: number, resolved = false, session = SID) => ({
+      resolved,
+      event: {
+        action: 'return',
+        run: spec.createdAt,
+        session,
+        generation,
+        returnId: `return${generation}`,
+      },
+    });
+    expect(acceptRework(spec, waiting, [row(1, true), row(2)])).toMatchObject({
+      generation: 2,
+      returnId: 'return2',
+      run: spec.createdAt,
+      session: SID,
+    });
+    expect(() => acceptRework(spec, waiting, [row(1, false, 'other-session')])).toThrow(
+      /没有对得上原 run\/session/,
+    );
+    expect(() =>
+      acceptRework(spec, { ...waiting, hold: { kind: 'external', why: '已交付' } }, [row(1)]),
+    ).toThrow(/不重派/);
+    expect(() =>
+      acceptRework(spec, waiting, [
+        row(2),
+        { resolved: false, event: { ...row(2).event, returnId: 'return-other' } },
+      ]),
+    ).toThrow(/对不上唯一/);
+  });
+
+  it('pnpm work rework 按当前未解决退回起一个看护；重复请求不再起第二个', async () => {
+    const review = {
+      id: 1,
+      user: { id: 3, type: 'Bot' },
+      state: 'COMMENTED',
+      commit_id: HEAD,
+      body: feedbackBody(event()),
+    };
+    const w = runWorld({ spawnPid: process.pid, gh: reviewGh([review]) });
+    seed(w.dir);
+    expect(await w.run('rework', '42'), w.err.join('\n')).toBe(0);
+    expect(w.spawned).toHaveLength(1);
+    expect(w.spawned[0]?.args.at(-1)).toBe('--rework');
+    expect(readJson<ReworkIntent>(runFiles(w.dir).rework)).toMatchObject({
+      generation: 1,
+      returnId: 'return1',
+      session: SID,
+      run: '2026-10-16T10:00:00.000Z',
+    });
+    expect(w.out.join('\n')).toContain('第 1 代');
+    w.err.length = 0;
+    expect(await w.run('rework', '42')).toBe(1);
+    expect(w.err.join('\n')).toContain('已有恢复占位');
+    expect(w.spawned).toHaveLength(1);
+  });
+
+  it('同时两下返工只起一个看护', async () => {
+    const review = {
+      id: 1,
+      user: { id: 3, type: 'Bot' },
+      state: 'COMMENTED',
+      commit_id: HEAD,
+      body: feedbackBody(event()),
+    };
+    const w = runWorld({ spawnPid: process.pid, gh: reviewGh([review]) });
+    seed(w.dir);
+    const [a, b] = await Promise.all([w.run('rework', '42'), w.run('rework', '42')]);
+    expect(w.spawned).toHaveLength(1);
+    expect([a, b].sort()).toEqual([0, 1]);
+    expect(w.err.join('\n')).toContain('已有恢复占位');
+  });
+
+  it('外部交付、对不上的会话、没有未解决退回都不起看护', async () => {
+    const external = runWorld();
+    seed(external.dir, { kind: 'external', why: '需求已由其他真实PR交付' });
+    expect(await external.run('rework', '42')).toBe(1);
+    expect(external.err.join('\n')).toContain('不重派');
+    expect(external.spawned).toEqual([]);
+
+    const wrong = runWorld({ gh: reviewGh([]) });
+    seed(wrong.dir);
+    expect(await wrong.run('rework', '42')).toBe(1);
+    expect(wrong.err.join('\n')).toContain('没有对得上原 run/session');
+    expect(wrong.spawned).toEqual([]);
+    expect(existsSync(runFiles(wrong.dir).rework)).toBe(false);
+
+    const other = event({ session: 'other-session', requestId: 'request-other', returnId: 'return-other' });
+    const mismatched = runWorld({
+      gh: reviewGh([
+        {
+          id: 1,
+          user: { id: 3, type: 'Bot' },
+          state: 'COMMENTED',
+          commit_id: HEAD,
+          body: feedbackBody(other),
+        },
+      ]),
+    });
+    seed(mismatched.dir);
+    expect(await mismatched.run('rework', '42')).toBe(1);
+    expect(mismatched.err.join('\n')).toContain('没有对得上原 run/session');
+    expect(mismatched.spawned).toEqual([]);
+  });
+
+  it('有返工文件时 pnpm work run 仍只复核，不把 --rework 传给看护', async () => {
+    const w = runWorld();
+    seed(w.dir);
+    writeJson(runFiles(w.dir).rework, {
+      v: 1,
+      run: '2026-10-16T10:00:00.000Z',
+      session: SID,
+      generation: 1,
+      returnId: 'return1',
+    });
+    expect(await w.run('run', '42'), w.err.join('\n')).toBe(0);
+    expect(w.spawned[0]?.args).not.toContain('--rework');
+    expect(w.out.join('\n')).toContain('复核等待，不新开工人');
   });
 });
