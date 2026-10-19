@@ -34,9 +34,9 @@ function announce(target = url, method = 'GET') {
   createChannel.publish({ request: value });
   return value;
 }
-async function failure(fetchImpl: typeof fetch, target = url) {
+async function failure(fetchImpl: typeof fetch, target = url, attempts?: number) {
   try {
-    await readPolicyHttp(target, repo, fetchImpl);
+    await readPolicyHttp(target, repo, fetchImpl, { attempts, pauseMs: 0 });
   } catch (error) {
     expect(error).toBeInstanceOf(Error);
     const e = error as Error;
@@ -448,7 +448,8 @@ describe('策略 HTTP 被动阶段诊断', () => {
       // Undici在body完成后的本机事件轮次归还空闲连接；不靠时间sleep。
       await new Promise<void>((resolve) => setImmediate(resolve));
       vi.spyOn(AbortSignal, 'timeout').mockReturnValue(controller.signal);
-      expect(await failure(fetch, target)).toMatch(/stage=headers;.*codes=TimeoutError/);
+      // 只看这一次读取的连接归属：重读会另开连接，重读本身见 ci-policy-read-retry.test.ts。
+      expect(await failure(fetch, target, 1)).toMatch(/stage=headers;.*codes=TimeoutError/);
       expect(requests).toBe(2);
       expect(sockets.size).toBe(1);
     } finally {
