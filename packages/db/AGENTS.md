@@ -9,6 +9,7 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - `packages/db/drizzle.config.ts`：只用来生成迁移，不连库。
 - 命令（`pnpm --filter @fleet-dao/db <命令>`）：`db:generate`（生成迁移并格式化）、`db:migrate`、`db:seed`、`db:catalog`、`db:routing`，入口都在 `packages/db/src/bin/`。
 - `packages/db/src/bin/local-pg.ts`：仓根 `pnpm start` / `pnpm stop` / `pnpm pg:local` 都指向它，起停本机嵌入式 Postgres（默认端口 55432，判法在 `src/local-pg.ts`）。
+- `src/queries/task-process.ts`：任务概览按请求的 runIds 单次批量读轻量统计列，不读 text 或整份 meta；调用/结果的接受和去重由 shared 的同一解析器供概览与步骤使用。无调用号命令仍未知；孤立失败和编辑事实保留在结果出现的步骤，不造调用号或文件路径。没有记录和读不到分开，不拿 0 代替。
 - `packages/db/routing.default.json`、`packages/db/quota-reserve.default.json`：路由骨架和额度留量线的默认值，只在新装机时写初始值。
 
 ## 测试

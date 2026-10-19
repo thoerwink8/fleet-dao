@@ -20,6 +20,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 ## 常见坑
 
+- 镜像给用户树的增量包统一经 `real/mirror.ts bundleFromMirror`，有 exclude 必须传目标 `UserTree`：以目标会话身份执行真实 `git bundle verify`，核全部 prerequisites/对象闭包；不通过只回退一次有大小和取消限制的完整包，再验证才能导入。不能用 previousHead 存在或错误文案代替证明，也不能 reset/强推掩盖旧树与远端不同步。
+
 - 主线同步每段最多 `MAX_MAIN_SYNCS` 次；只有精确 PR/head/已用次数对应的预算耗尽停法，实际收到这次停下之后的新「继续」，才能续下一段。普通失败、运行中或重复的「继续」不能预存额度。活动旧结果没有结构身份时先保持原停法，重试得到新身份后仍须下一次「继续」；每次同步新头仍重走仓原有 CI、验收与路径闸。
 
 - 冷验收完整检出：archive 前经 GitHub 的受管镜像入口补齐既定完整 head，复用镜像锁、只读凭据、取消和超时；已有对象不联网，不拿分支最新头替换待验头。获取或检出失败保留真实降级和报警，只有精确头完整检出成功才撤旧报警。
@@ -59,6 +61,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 ## 版本更新日志
 
 - `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。
+- `scanned` 统一计实际读全并逐条判断适用性的已关闭里程碑数，`found` 计需要补日志的版本数；只有旧版本或全部已补齐也按真实扫描数记 ok。没有已关闭里程碑时记 unscanned 和原因并正常收尾；读取失败仍记 failed，不用零扫描冒充成功。
 
 ## 固定版本宿主工具
 

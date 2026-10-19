@@ -10,6 +10,7 @@ import {
   stepVerb,
   sumTallies,
   tallyOf,
+  tallyProcessRows,
   toolClass,
 } from '../src/index.ts';
 
@@ -223,7 +224,7 @@ describe('调用和结果按调用号对（评审反例）', () => {
     expect(p.steps[0]).toMatchObject({ callsFailed: 1, failed: true });
   });
 
-  it('没有调用号的老记录不强配：命令成败记「结果未知」，legacyCalls 点名有几条；编辑没法确认成没成，不算改', () => {
+  it('没有调用号不强配命令或文件，但结果里已知的失败和未计行数编辑事实不丢', () => {
     reset();
     const p = cutSteps(
       [
@@ -238,6 +239,85 @@ describe('调用和结果按调用号对（评审反例）', () => {
     expect(p.legacyCalls).toBe(2);
     expect(p.counts).toMatchObject({ commands: 1, commandsDone: 0, commandsFailed: 0, commandsUnknown: 1 });
     expect(p.counts.files).toEqual([]);
+    expect(p.counts).toMatchObject({ callsFailed: 1, uncounted: 1 });
+    expect(p.steps[0]?.failed).toBe(true);
+  });
+
+  it('孤立结果归出现的步骤：保留失败和已知增删，不编调用号或文件路径', () => {
+    reset();
+    const p = cutSteps(
+      [
+        say(0, '旧的命令'),
+        call(1, undefined, 'Bash', 'exit 1'),
+        say(2, '读到结果'),
+        done(3, undefined, 'Bash', false),
+        done(4, 'orphan-edit', 'Edit', true, { added: 3, removed: 2 }),
+        done(5, 'orphan-edit', 'Edit', true, { added: 3, removed: 2 }),
+      ],
+      { running: false },
+    );
+    expect(p.steps[0]).toMatchObject({ commands: 1, commandsUnknown: 1, callsFailed: 0 });
+    expect(p.steps[1]).toMatchObject({ callsFailed: 1, failed: true, added: 3, removed: 2 });
+    expect(p.counts).toMatchObject({
+      commandsFailed: 0,
+      commandsUnknown: 1,
+      callsFailed: 1,
+      added: 3,
+      removed: 2,
+    });
+    expect(p.counts.files).toEqual([]);
+  });
+
+  it('原生重复调用号和结果只接受第一次；空调用号不配对，命令分类守恒', () => {
+    reset();
+    const p = cutSteps(
+      [
+        call(0, 'a', 'Bash', 'first'),
+        call(1, 'a', 'Bash', 'duplicate'),
+        done(2, 'a', 'Bash', false),
+        done(3, 'a', 'Bash', true),
+        call(4, '', 'Bash', 'legacy'),
+        done(5, '', 'Bash', false),
+      ],
+      { running: false },
+    );
+    expect(p.counts).toMatchObject({
+      commands: 2,
+      commandsFailed: 1,
+      commandsUnknown: 1,
+      commandsDone: 0,
+      callsFailed: 2,
+    });
+    expect(p.legacyCalls).toBe(1);
+  });
+
+  it('先到的孤立结果不倒配以后的调用；重复结果不把一次编辑或失败重复计数', () => {
+    reset();
+    const rows = [
+      done(0, 'late', 'Bash', false),
+      call(1, 'late', 'Bash', 'later call'),
+      done(2, 'late', 'Bash', false),
+      call(3, 'edit', 'Edit', 'a.ts'),
+      done(4, 'edit', 'Edit', true, { added: 2 }),
+      done(5, 'edit', 'Edit', true, { added: 99 }),
+      done(6, undefined, 'Write', true),
+    ];
+    for (const running of [false, true]) {
+      const p = cutSteps(rows, { running });
+      const tally = tallyOf(tallyProcessRows(rows), running);
+      const { files: _files, ...counts } = p.counts;
+      expect(tally).toMatchObject(counts);
+      expect(p.counts).toMatchObject({
+        commands: 1,
+        commandsFailed: 0,
+        callsFailed: 1,
+        added: 2,
+        uncounted: 1,
+      });
+      expect(p.counts.commandsRunning).toBe(running ? 1 : 0);
+      expect(p.counts.commandsUnknown).toBe(running ? 0 : 1);
+      expect(p.counts.files).toEqual([{ path: 'a.ts', edits: 1, added: 2, removed: 0 }]);
+    }
   });
 
   it('Mirasim 一类没有退出码的流：命令结果「完成」记结果未知，不算成功；明确 ok=false 仍算失败', () => {
@@ -335,6 +415,23 @@ describe('processRowOf：接口回的完整条目 → 算法的一行（和库�
 });
 
 describe('小计', () => {
+  it('记录条数和首尾时刻包括所有种类，按真实时刻取边界，不只算工具或按seq猜时间', () => {
+    reset();
+    const rows = [
+      row(9, { kind: 'prompt' }),
+      say(1, '先说的话'),
+      row(20, { kind: 'truncated' }),
+      row(5, { kind: 'result' }),
+    ];
+    expect(tallyProcessRows(rows)).toMatchObject({
+      entries: 4,
+      firstAt: at(1),
+      lastAt: at(20),
+      commands: 0,
+      calls: 0,
+    });
+  });
+
   const base = {
     entries: 10,
     calls: 6,
