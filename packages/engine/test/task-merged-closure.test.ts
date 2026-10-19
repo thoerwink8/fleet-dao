@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
+import { Context } from '@temporalio/activity';
+import type { WorkflowHandle } from '@temporalio/client';
+import { decodeRetryState } from '@temporalio/common';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { describe, expect, it } from 'vitest';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
@@ -45,6 +49,42 @@ function deferred() {
     resolve = r;
   });
   return { promise, resolve };
+}
+
+// query / executeUpdate 不像 result() 自动跳时；首个失败后只推进现有 5+10 秒退避，
+// 不无限解锁，避免跨过 parked 状态后继续跳到别的工作流定时器。sleep 自己成对管理锁。
+async function skipReadRetries<T>(
+  env: TestWorkflowEnvironment,
+  firstFailure: Promise<void>,
+  read: () => Promise<T>,
+): Promise<T> {
+  if (!env.supportsTimeSkipping) throw new Error('测试必须用 Temporal 时间跳跃环境');
+  const result = read();
+  await Promise.race([
+    firstFailure,
+    result.then(() => {
+      throw new Error('读取已结束，却没观察到首个真实失败');
+    }),
+  ]);
+  await env.sleep('16 seconds');
+  return result;
+}
+
+async function expectExhaustedReads(handle: WorkflowHandle, count: number): Promise<void> {
+  const events = (await handle.fetchHistory()).events ?? [];
+  const reads = new Set(
+    events
+      .filter((e) => e.activityTaskScheduledEventAttributes?.activityType?.name === 'readMergedTask')
+      .map((e) => e.eventId?.toString()),
+  );
+  const failures = events.flatMap((e) => {
+    const failed = e.activityTaskFailedEventAttributes;
+    return failed && reads.has(failed.scheduledEventId?.toString()) ? [failed] : [];
+  });
+  expect(failures).toHaveLength(count);
+  expect(failures.map((f) => decodeRetryState(f.retryState))).toEqual(
+    Array.from({ length: count }, () => 'MAXIMUM_ATTEMPTS_REACHED'),
+  );
 }
 
 describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout: 60_000 }, () => {
@@ -150,6 +190,8 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
       const { tasks } = scripted();
       const i = input();
       let allowMerged = false;
+      const failedAttempts: number[] = [];
+      let firstFailure = deferred();
       await withWorker(
         env,
         world,
@@ -159,14 +201,23 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
             taskQueue: q,
             args: [i],
           });
-          const parked = await pollQuery(
-            () => h.query<TaskStatus>(taskStatusQuery),
-            (s) => !!s.mergedTaskClose?.token,
-            'PR 现读未知，原任务停下',
+          const parked = await skipReadRetries(env, firstFailure.promise, () =>
+            pollQuery(
+              () => h.query<TaskStatus>(taskStatusQuery),
+              (s) => !!s.mergedTaskClose?.token,
+              'PR 现读未知，原任务停下',
+            ),
           );
+          expect(failedAttempts).toEqual([1, 2, 3]);
+          await expectExhaustedReads(h, 1);
           const request = { token: hold(parked), command: { by: 'closed-issue', reason: 'issue CLOSED' } };
           if (state === 'unknown') {
-            await expect(h.executeUpdate(taskCloseClosedIssueUpdate, { args: [request] })).rejects.toThrow();
+            firstFailure = deferred();
+            await skipReadRetries(env, firstFailure.promise, () =>
+              expect(h.executeUpdate(taskCloseClosedIssueUpdate, { args: [request] })).rejects.toThrow(),
+            );
+            expect(failedAttempts).toEqual([1, 2, 3, 1, 2, 3]);
+            await expectExhaustedReads(h, 2);
             expect(hold(await h.query<TaskStatus>(taskStatusQuery))).toEqual(request.token);
             allowMerged = true;
             expect(
@@ -194,6 +245,8 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
                   mergeCommit: commit,
                 };
               if (read.idle?.includeOpen && state === 'open') return null;
+              failedAttempts.push(Context.current().info.attempt);
+              firstFailure.resolve();
               throw new Error('GitHub 502 未知');
             },
           },
@@ -398,6 +451,8 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
     const world = createFakeWorld();
     const { tasks, calls } = scripted();
     const i = input();
+    const failedAttempts: number[] = [];
+    const firstFailure = deferred();
     let closes = 0;
     const originalClose = world.ports.closeIssue;
     world.ports.closeIssue = async (...args) => {
@@ -413,11 +468,15 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
           taskQueue: q,
           args: [i],
         });
-        const s = await pollQuery(
-          () => h.query<TaskStatus>(taskStatusQuery),
-          (s) => s.phase === 'parked' && !!s.mergedTaskClose?.token,
-          '现读失败停在原任务',
+        const s = await skipReadRetries(env, firstFailure.promise, () =>
+          pollQuery(
+            () => h.query<TaskStatus>(taskStatusQuery),
+            (s) => s.phase === 'parked' && !!s.mergedTaskClose?.token,
+            '现读失败停在原任务',
+          ),
         );
+        expect(failedAttempts).toEqual([1, 2, 3]);
+        await expectExhaustedReads(h, 1);
         const r = receipt(s);
         const token = hold(s);
         expect(
@@ -439,7 +498,11 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
         tasks: {
           ...tasks,
           readMergedTask: async (read) => {
-            if (!read.expectedMergeCommit) throw new Error('读 GitHub 失败，不能猜');
+            if (!read.expectedMergeCommit) {
+              failedAttempts.push(Context.current().info.attempt);
+              firstFailure.resolve();
+              throw new Error('读 GitHub 失败，不能猜');
+            }
             return { repo: read.repo, prNumber: read.prNumber, head: read.expectedHead, mergeCommit: commit };
           },
         },
@@ -476,6 +539,8 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
     const i = input();
     const started = deferred();
     const release = deferred();
+    const failedAttempts: number[] = [];
+    const firstFailure = deferred();
     let block = true;
     await withWorker(
       env,
@@ -486,22 +551,33 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
           taskQueue: q,
           args: [i],
         });
-        const first = await pollQuery(
-          () => h.query<TaskStatus>(taskStatusQuery),
-          (s) => !!s.mergedTaskClose?.token,
-          '第一代停法',
+        const first = await skipReadRetries(env, firstFailure.promise, () =>
+          pollQuery(
+            () => h.query<TaskStatus>(taskStatusQuery),
+            (s) => !!s.mergedTaskClose?.token,
+            '第一代停法',
+          ),
         );
+        expect(failedAttempts).toEqual([1, 2, 3]);
+        await expectExhaustedReads(h, 1);
         const settling = h.executeUpdate(taskSettleMergedUpdate, {
           args: [{ token: hold(first), receipt: receipt(first) }],
         });
-        await started.promise;
-        await h.signal(taskContinueSignal, { by: '测试' });
-        await pollQuery(
-          () => h.query<TaskStatus>(taskStatusQuery),
-          (s) => (s.mergedTaskClose?.token?.generation ?? 0) > hold(first).generation,
-          '继续后新停法',
-        );
-        release.resolve();
+        void settling.catch(() => {});
+        try {
+          await started.promise;
+          await h.signal(taskContinueSignal, { by: '测试' });
+          // 旧读取活动仍活着，会锁住跳时；保留真实竞争等待，不释放它来换取提速。
+          await pollQuery(
+            () => h.query<TaskStatus>(taskStatusQuery),
+            (s) => (s.mergedTaskClose?.token?.generation ?? 0) > hold(first).generation,
+            '继续后新停法',
+          );
+          expect(failedAttempts).toEqual([1, 2, 3, 1, 2, 3]);
+          await expectExhaustedReads(h, 2);
+        } finally {
+          release.resolve();
+        }
         expect(await settling).toBe('stale');
         block = false;
         const second = await h.query<TaskStatus>(taskStatusQuery);
@@ -516,7 +592,11 @@ describe('已合 PR 在任务必经检查点安全结清（#3193）', { timeout:
         tasks: {
           ...tasks,
           readMergedTask: async (read) => {
-            if (!read.expectedMergeCommit) throw new Error('读 PR 暂不可用');
+            if (!read.expectedMergeCommit) {
+              failedAttempts.push(Context.current().info.attempt);
+              firstFailure.resolve();
+              throw new Error('读 PR 暂不可用');
+            }
             if (block) {
               started.resolve();
               await release.promise;
