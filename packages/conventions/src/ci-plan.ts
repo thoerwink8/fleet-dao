@@ -260,7 +260,16 @@ export const E2E_PAGE_MAP: readonly E2ePageEntry[] = [
   },
   { files: [`${W}components/credentials-section.tsx`], specs: [spec('10-credentials')] },
   // 通知中心（06）；08 站内跳到它造后端断开
-  { files: [`${W}routes/notifications.tsx`], specs: [spec('06-notifications'), spec('08-backend-down')] },
+  // 卡上的看门狗修复区和共用的选项区（#3034）也只在通知中心
+  {
+    files: [
+      `${W}routes/notifications.tsx`,
+      `${W}components/alert-repair.tsx`,
+      `${W}components/decision-picker.tsx`,
+      `${W}lib/alert-repair.ts`,
+    ],
+    specs: [spec('06-notifications'), spec('08-backend-down')],
+  },
   // 法国页（环境页并进来，#1217；07b、07c 看六项事实和并排看多机）
   {
     files: [`${W}routes/france.tsx`, `${W}components/engine-master-card.tsx`],

@@ -1465,6 +1465,23 @@ export function useAnswerNotification() {
   });
 }
 
+/**
+ * 看门狗提醒的受控修复（#3034）：只送服务端给的动作编号 + incident + 幂等身份，不自动重试（没收到回执由卡上用同一 requestId 再问）。
+ * 成没成都重拉通知列表（结果、核验以列表为准）和操作记录。
+ */
+export function useExecuteAlertRepair() {
+  const api = useApi();
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: ExecuteAlertRepairBody }) =>
+      api.executeAlertRepair(id, body),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['notifications'] });
+      qc.invalidateQueries({ queryKey: ['audit'] });
+    },
+  });
+}
+
 /** 开、关一个项目的「让 AI 接活」：不先改缓存，等后端写完（开关和操作记录同一事务）再重拉，页面上永远是库里现在的值。 */
 export function useUpdateRepoDispatch() {
   const api = useApi();
