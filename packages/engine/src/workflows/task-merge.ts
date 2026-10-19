@@ -27,6 +27,8 @@
 //   不因 why 里写了 ci_not_green 就重试。必过检查没出现也是没查成：活动不交 checksPending，哪怕旁边还有在跑的。
 //   等到点仍没跑完：停下，写明 PR、头、检查名和原始原因。头变了回 head_moved，调用方重走
 //   CI、冷验收、批准，不沿用旧头。老历史的活动结果没有这两个字段；标记不在历史里就当没有，照旧停下。
+//   主线同步预算用尽（mainSyncBudgetExhausted，patched('main-sync-budget-continue')）排在还在跑和真红之后：
+//   有 checksPending / checksRed 时不当成同步次数到顶。
 // - 等合并时必过检查没出现或没出结论（patched('merge-wait-unreadable-checks')）：不是还在跑，活动回 checks_unreadable，
 //   这里停下并写明没查成。老历史里 waitMerged 不回这个状态；标记不在历史里就当还在等，不新增步序。
 
@@ -409,6 +411,9 @@ export async function armAndWaitMerged(
         }
       }
       pending = null;
+      // 不是还在跑、也不是真红：主线同步次数用尽才走结构化续段，别的失败仍停下报人。
+      if (await rt.parkMainSyncBudget(armed.mainSyncBudgetExhausted, armed.why ?? '同步主线次数已到上限'))
+        continue;
       await rt.park('自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
       continue;
     }
@@ -464,6 +469,14 @@ export async function armAndWaitMerged(
         await rt.advance('merge', MERGE_CONFLICT_NOTE);
         // 已经同步过 MAX_MAIN_SYNCS 次了还是冲突：不接着转（和「落后主线自动同步」同一个上限），原样停下报人。
         if (rt.mainSyncs >= MAX_MAIN_SYNCS) {
+          if (
+            await rt.parkMainSyncBudget(
+              { prNumber, headSha: head, used: rt.mainSyncs },
+              `PR #${prNumber} 的主线同步次数已到上限，GitHub 仍报告冲突`,
+              `连着 ${MAX_MAIN_SYNCS} 次并主线后 PR #${prNumber} 还是和主线冲突`,
+            )
+          )
+            continue;
           await rt.park(
             `连着 ${MAX_MAIN_SYNCS} 次并主线后 PR #${prNumber} 还是和主线冲突`,
             `PR #${prNumber} 和主线冲突，引擎自动并主线 ${MAX_MAIN_SYNCS} 次都没并干净：要人看。` +

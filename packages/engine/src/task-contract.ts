@@ -74,7 +74,7 @@ export const ARM_PENDING_CHECKS_MINUTES = 15;
 /** 上面那段有界等待里，隔这么多秒再挂一次。写死，和等合并确认红一样是 20 秒。 */
 export const ARM_PENDING_POLL_SECONDS = 20;
 
-/** 直接合被拒、因为落后主线：同一个任务对同一张 PR 最多自动同步主线几次（第 N+1 次起停下报人，免得主线一直在动就一直转）。 */
+/** 同一张 PR 每段最多自动同步主线几次；耗尽后停下，只有对应停法的新「继续」才能续下一段，免得主线一直在动就一直转。 */
 export const MAX_MAIN_SYNCS = 3;
 /** 没有可用路由、或额度没读成时隔多久再选一次（秒）。 */
 export const ROUTE_RETRY_SECONDS = 60;
@@ -472,10 +472,17 @@ export interface ArmAutoMergeInput {
   prNumber: number;
   expectedHead: string;
   /**
-   * 这张 PR 已经因为落后主线自动同步过几次（工作流数；没同步过就不带）。到了 MAX_MAIN_SYNCS 次，
-   * 再落后就不同步了，原样停下报人。老历史里没有这个字段，当作 0。
+   * 这张 PR 本段已自动同步主线几次（工作流数；没同步过就不带）。到了 MAX_MAIN_SYNCS 次，
+   * 再落后就不同步，回结构化耗尽身份交工作流停下。老历史里没有这个字段，当作 0。
    */
   syncedBehind?: number;
+}
+
+/** 本次精确 PR/头上的同步段已耗尽；只供明确停下后的「继续」续一段有限预算。 */
+export interface MainSyncBudgetExhausted {
+  prNumber: number;
+  headSha: string;
+  used: number;
 }
 
 export interface ArmAutoMergeResult {
@@ -486,6 +493,7 @@ export interface ArmAutoMergeResult {
   /** merged 时的合并提交。 */
   mergeCommit?: string;
   why?: string;
+  mainSyncBudgetExhausted?: MainSyncBudgetExhausted;
   /** 挂的时候发现 PR 的头已经不是引擎验过、推上去的那个了（有人改过）：现在的头。老历史里没有这个字段。 */
   headMoved?: string;
   /**
@@ -559,7 +567,7 @@ export interface MergeNowInput {
   repo: Repo;
   prNumber: number;
   expectedHead: string;
-  /** 这张 PR 已经因为落后主线自动同步过几次。到了 MAX_MAIN_SYNCS 次就不再同步。 */
+  /** 这张 PR 本段已自动同步主线几次。到了 MAX_MAIN_SYNCS 次就不再同步，回结构化耗尽身份。 */
   syncedBehind?: number;
 }
 
@@ -568,6 +576,7 @@ export interface MergeNowResult {
   mergeCommit?: string;
   reason?: 'conflict' | 'head_moved' | 'behind_main' | 'closed' | 'review_changes' | 'other';
   detail?: string;
+  mainSyncBudgetExhausted?: MainSyncBudgetExhausted;
   /** 头已经不是 expectedHead。syncedMain 为 true 时是引擎自己同步主线换的头。 */
   headMoved?: string;
   syncedMain?: boolean;

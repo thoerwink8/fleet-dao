@@ -514,6 +514,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         armed: false,
         merged: false,
         why: `连着 ${MAX_MAIN_SYNCS} 次同步主线后仍落后（主线一直在动）：${behindDetail}`,
+        mainSyncBudgetExhausted: { prNumber, headSha: expectedHead, used: syncedBefore },
       };
     }
     const synced = await mapped(() => gh.updateBranch({ repo, prNumber, expectedHead }, ctx));
@@ -843,7 +844,14 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
             ...(synced.syncedMain === true ? { syncedMain: true } : {}),
           };
         }
-        return { merged: false, reason: 'behind_main', detail: synced.why ?? merged.detail };
+        return {
+          merged: false,
+          reason: 'behind_main',
+          detail: synced.why ?? merged.detail,
+          ...(synced.mainSyncBudgetExhausted
+            ? { mainSyncBudgetExhausted: synced.mainSyncBudgetExhausted }
+            : {}),
+        };
       }
       if (merged.reason === 'conflict') return { merged: false, reason: 'conflict', detail: merged.detail };
       if (merged.reason === 'not_open') return { merged: false, reason: 'closed', detail: merged.detail };

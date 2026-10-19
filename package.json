@@ -22,6 +22,7 @@
     "mirasim:health": "node packages/mirasim-reclaude/bin/health",
     "mirasim:audit": "node packages/mirasim-reclaude/bin/audit",
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
+    "test:linux": "node packages/conventions/src/bin/test-linux.ts",
     "ci:timings": "node packages/conventions/src/bin/ci-timings.ts",
     "ci:stats": "node packages/conventions/src/bin/ci-stats.ts",
     "flow:stats": "node packages/conventions/src/bin/flow-stats.ts",

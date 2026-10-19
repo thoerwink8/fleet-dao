@@ -902,6 +902,7 @@ describe('挂自动合并', () => {
     expect(got.checksPending).toBeUndefined();
     expect(got.why).toContain('ci_not_green');
     expect(got.why).toContain('CI 红：check');
+    expect(got.mainSyncBudgetExhausted).toBeUndefined();
     expect(got.headMoved).toBeUndefined();
     expect(f.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr']);
     expect(seen).toEqual([`${REPO.owner}/${REPO.name}@${HEAD}`]);
@@ -1289,12 +1290,33 @@ describe('挂自动合并', () => {
     expect(got).toMatchObject({ armed: false, merged: false });
     expect(got.why).toContain('连着 3 次同步主线后仍落后');
     expect(got.why).toContain('主线比 PR 多 2 个提交');
+    expect(got.mainSyncBudgetExhausted).toEqual({ prNumber: 7, headSha: HEAD, used: 3 });
     expect(got.headMoved).toBeUndefined();
     expect(got.syncedMain).toBeUndefined();
     expect(f.calls).not.toContain('updateBranch');
     // 第 3 次还能同步（已同步 2 次）
     const again = cleanButBehind({ updateBranch: async () => ({ updated: true, head: 'd'.repeat(40) }) });
     expect(await runWith(again.gh, 2)).toMatchObject({ syncedMain: true });
+  });
+
+  it('不强制 CI 的直接合并透传精确预算耗尽身份，不再尝试同步', async () => {
+    const f = cleanButBehind();
+    const got = await make({ gh: f.gh }).acts.mergeNow(
+      {
+        schemaVersion: 1,
+        repo: REPO,
+        prNumber: 7,
+        expectedHead: HEAD,
+        syncedBehind: 3,
+      },
+      ctx(),
+    );
+    expect(got).toMatchObject({
+      merged: false,
+      reason: 'behind_main',
+      mainSyncBudgetExhausted: { prNumber: 7, headSha: HEAD, used: 3 },
+    });
+    expect(f.calls).not.toContain('updateBranch');
   });
 
   it('【故意造出的失败】同步主线时冲突：不当成同步成了，说清原因停下（没有 headMoved）', async () => {
@@ -1308,6 +1330,7 @@ describe('挂自动合并', () => {
     const got = await run(f.gh);
     expect(got).toMatchObject({ armed: false, merged: false });
     expect(got.why).toContain('同步主线没成');
+    expect(got.mainSyncBudgetExhausted).toBeUndefined();
     expect(got.why).toContain('conflict');
     expect(got.headMoved).toBeUndefined();
     expect(got.syncedMain).toBeUndefined();
