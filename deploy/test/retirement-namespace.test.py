@@ -19,7 +19,7 @@ import unittest
 
 HERE = pathlib.Path(__file__).resolve().parents[1]
 FIXTURE_TOOL = r'''#!/usr/bin/python3
-import json,os,pathlib,sys,time
+import json,os,pathlib,re,sys,time
 state=json.loads(pathlib.Path('/root/retirement-fixture/state.json').read_text())
 a=sys.argv[1:];now=state['at'];boot='a'*32;inv='b'*32
 if state['mode']=='swap-inflight' and not pathlib.Path(state['path']+'-swapped').exists():
@@ -31,6 +31,8 @@ if sys.argv[0].endswith('systemctl'):
   print('LoadState=not-found\nActiveState='+('active' if state['mode']=='active' else 'inactive')+'\nSubState=dead')
   sys.exit(4)
 else:
+ if state['mode']=='stop-query-failed' and 'SYSLOG_IDENTIFIER=sudo' in a:
+  sys.stderr.write('journal read failed\n');sys.exit(1)
  if state['mode']=='timeout':time.sleep(12)
  if state['mode']=='truncated':os.write(1,b'x'*(2*1024*1024+1));sys.exit(0)
  if '-u' in a and a[a.index('-u')+1]=='fleet-engine.service':
@@ -41,10 +43,22 @@ else:
   rows=[row('Started fixture scope.',t=now),row('fleet-agent-scope: Deactivated successfully.',t=now+100)]
   if state['mode']=='cancelled':rows.append(row('Killed process due to cancellation',t=now+50))
   if state['mode']=='unfinished':rows=rows[:1]
- elif any(x.startswith('_PID=') for x in a):rows=[row('pam_unix(sudo:session): session closed for user root','7001',now+150)]
+  if state['mode']=='stopping-log-only':rows.insert(1,row('Stopping fixture scope.',t=now+50))
+  if state['mode']=='stopped-log-only':rows.append(row('Stopped fixture scope.',t=now+150))
+ elif any(x.startswith('_PID=') for x in a):
+  rows=[row('pam_unix(sudo:session): session closed for user root','7001',now+150),row('pam_unix(sudo:session): session closed for user root','7003',now+150)]
+  rows.extend(row('pam_unix(sudo:session): session closed for user root','7002',now+550,old) for old in (True,False))
  else:
   rows=[dict(row('fleet : COMMAND=/usr/local/sbin/fleet-agent-scope run '+state['run']+' --cwd '+state['path'],'7001',now-100),SYSLOG_IDENTIFIER='sudo')]
+  if state['mode'] in ('extra-natural','stop-extra-old','stop-extra-new'):
+   rows.append(dict(row('fleet : COMMAND=/usr/local/sbin/fleet-agent-scope run self-check-fixture --cwd '+state['path'],'7003',now-100),SYSLOG_IDENTIFIER='sudo'))
+  if state['mode'] in ('stop-run-old','stop-run-new','stop-extra-old','stop-extra-new','unrelated-stop'):
+   target='self-check-fixture' if 'extra' in state['mode'] else ('unrelated-scope' if state['mode']=='unrelated-stop' else state['run'])
+   rows.append(dict(row('fleet : COMMAND=/usr/local/sbin/fleet-agent-scope stop '+target,'7002',now+450,'new' not in state['mode']),SYSLOG_IDENTIFIER='sudo'))
+ if 'SYSLOG_IDENTIFIER=sudo' in a:rows=[x for x in rows if x.get('SYSLOG_IDENTIFIER')=='sudo']
+ if '--grep' in a:rows=[x for x in rows if re.search(a[a.index('--grep')+1],x['MESSAGE'])]
  for x in rows:print(json.dumps(x))
+ if '--grep' in a and not rows:sys.exit(1)
 '''
 
 
@@ -129,6 +143,28 @@ class Retirement(unittest.TestCase):
                 self.assertNotEqual(p.returncode,0)
                 self.assertEqual(value['state'],'unknown')
                 self.assertLess(len(p.stdout),4096)
+
+    def test_explicit_stop_or_scope_stop_log_is_not_natural(self):
+        for mode in ('stop-run-old','stop-run-new','stop-extra-old','stop-extra-new','stopping-log-only','stopped-log-only'):
+            with self.subTest(mode=mode):
+                p,value=self.call(mode)
+                self.assertNotEqual(p.returncode,0)
+                self.assertEqual(value['state'],'unknown')
+                self.assertIn('scope',value['reason'])
+
+    def test_failed_intervention_query_is_unknown(self):
+        p,value=self.call('stop-query-failed')
+        self.assertNotEqual(p.returncode,0)
+        self.assertEqual(value['state'],'unknown')
+        self.assertIn('command failed',value['reason'])
+
+    def test_natural_extra_scope_and_unrelated_stop_do_not_reject(self):
+        for mode,count in (('extra-natural',2),('unrelated-stop',1)):
+            with self.subTest(mode=mode):
+                p,value=self.call(mode)
+                self.assertEqual(p.returncode,0,p.stderr)
+                self.assertEqual(value['state'],'natural-retired')
+                self.assertEqual(len(value['scopes']),count)
 
     def test_replaced_tree_and_symlink_rejected(self):
         os.rename(self.path,self.path+'-old');os.mkdir(self.path);os.chown(self.path,31002,31002)

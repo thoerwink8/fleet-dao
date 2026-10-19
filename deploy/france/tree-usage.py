@@ -957,7 +957,7 @@ def retirement_observe(text):
             raise Kept("retirement unit untrusted")
     remaining = {"bytes": 8 * 1024 * 1024, "rows": 20000}
 
-    def command(argv, limit=2 * 1024 * 1024, allow_missing=False):
+    def command(argv, limit=2 * 1024 * 1024, allow_missing=False, allow_empty=False):
         check_time()
         cap = min(limit, remaining["bytes"])
         if cap <= 0:
@@ -980,7 +980,7 @@ def retirement_observe(text):
                             if len(data) > cap:
                                 raise Kept("retirement byte limit")
                 code = proc.wait(timeout=max(0.001, end - time.monotonic()))
-                if code != 0 and not (allow_missing and code == 4):
+                if code != 0 and not ((allow_missing and code == 4) or (allow_empty and code == 1 and not data)):
                     raise Kept("retirement command failed")
         finally:
             if proc.poll() is None:
@@ -991,7 +991,7 @@ def retirement_observe(text):
         return bytes(data)
 
     def journal(extra):
-        raw = command(["/usr/bin/journalctl", "--no-pager", "--quiet", "-o", "json", "--since", "@" + str(since / 1000), "--until", "@" + str(until / 1000), *extra])
+        raw = command(["/usr/bin/journalctl", "--no-pager", "--quiet", "-o", "json", "--since", "@" + str(since / 1000), "--until", "@" + str(until / 1000), *extra], allow_empty="--grep" in extra)
         lines = raw.splitlines()
         remaining["rows"] -= len(lines)
         if remaining["rows"] < 0 or any(len(line) > 131072 for line in lines):
@@ -1057,13 +1057,19 @@ def retirement_observe(text):
             scopes.add(s[1])
     if not set(runs).issubset(scopes) or len(scopes) > 256:
         raise Kept("retirement scopes missing or limit")
+    # A successful stop is intervention too. Auxiliary scopes have no run UUID in
+    # their stop command, so the initial path/run query cannot prove its absence.
+    stop_pattern = r"COMMAND=/usr/local/sbin/fleet-agent-scope stop (?:" + "|".join(re.escape(scope) for scope in sorted(scopes)) + r")(?: |$)"
+    interventions = journal(["SYSLOG_IDENTIFIER=sudo", "--grep", stop_pattern])
+    if any(r.get("SYSLOG_IDENTIFIER") == "sudo" and re.search(stop_pattern, message(r)) for r in interventions):
+        raise Kept("retirement explicit scope stop")
     scope_rows = []
     for scope in sorted(scopes):
         name = "fleet-agent-" + scope + ".scope"
         logs = journal(["-u", name])
         starts = [r for r in logs if message(r).startswith("Started ")]
         ends = [r for r in logs if "Deactivated successfully" in message(r)]
-        if len(starts) != 1 or len(ends) != 1 or at(ends[0]) < at(starts[0]) or any(r.get("_BOOT_ID") != boot for r in logs) or any(re.search(r"Failed|failure|timed out|killed", message(r), re.I) for r in logs):
+        if len(starts) != 1 or len(ends) != 1 or at(ends[0]) < at(starts[0]) or any(r.get("_BOOT_ID") != boot for r in logs) or any(re.search(r"Failed|failure|timed out|killed|cancel(?:led|ed)", message(r), re.I) or re.match(r"(?:Stopping|Stopped)(?:[ .:]|$)", message(r)) for r in logs):
             raise Kept("retirement scope terminal unknown")
         props = command(["/usr/bin/systemctl", "show", name, "--property=LoadState,ActiveState,SubState"], allow_missing=True).decode()
         current = dict(line.split("=", 1) for line in props.splitlines() if "=" in line)
