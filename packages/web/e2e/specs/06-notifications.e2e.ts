@@ -1,7 +1,7 @@
 // 第六步：提醒页（通知中心）。要你拍的、卡住报警、日报；「处理了」要落库、进操作记录；没有追问入口（#939）。
 // 看门狗修复（#3034）：真后端算 repair 要 Temporal 和看门狗现场，e2e 这一套没有，所以修复那几条在浏览器网络层改写：
 // 列表照真后端读、只把「任务 12 卡住了」改成看门狗的键并挂上场景给的 repair（前端照契约校验形状），点修复的 POST 由场景回话，不碰真库。
-import type { BrowserContext, Page } from '@playwright/test';
+import type { BrowserContext, Page, Request } from '@playwright/test';
 import { expect, onlyDesktop, type PageProblems, test } from '../support/fixtures.ts';
 
 type Audit = { items: { action: string; target: string; after?: unknown }[] };
@@ -136,10 +136,17 @@ interface Scene {
   exec: (body: Body) => Promise<{ status: number; json: unknown } | 'timeout'>;
 }
 
-async function stage(context: BrowserContext, problems: PageProblems, scene: Scene): Promise<void> {
+async function stage(
+  context: BrowserContext,
+  problems: PageProblems,
+  scene: Scene,
+  viewForRequest?: (request: Request) => Scene,
+): Promise<void> {
   // 有意造的 409 和断线：只放过修复那一条请求的
   for (const s of ['/repair', 'status of 409', 'ERR_TIMED_OUT']) problems.allow(s);
   await context.route(/\/api\/notifications\?/, async (route) => {
+    // 特定多页场景按请求发出时的握手选视图，不能等 route.fetch 后再把后台读串成点击现读。
+    const view = viewForRequest?.(route.request()) ?? scene;
     let res: Awaited<ReturnType<typeof route.fetch>>;
     let json: { items: Record<string, unknown>[] };
     try {
@@ -153,13 +160,13 @@ async function stage(context: BrowserContext, problems: PageProblems, scene: Sce
       if (n.title !== STALLED) continue;
       n.dedupeKey = 'watchdog:idle-running:task-12';
       n.repair = {
-        incident: scene.incident ?? INCIDENT,
-        actions: scene.actions,
-        problems: scene.problems,
-        ...(scene.last ? { last: scene.last } : {}),
-        ...(scene.linked ? { linked: scene.linked } : {}),
+        incident: view.incident ?? INCIDENT,
+        actions: view.actions,
+        problems: view.problems,
+        ...(view.last ? { last: view.last } : {}),
+        ...(view.linked ? { linked: view.linked } : {}),
       };
-      if (scene.handling) n.handling = scene.handling;
+      if (view.handling) n.handling = view.handling;
     }
     await route.fulfill({ response: res, json }).catch(() => undefined);
   });
@@ -237,19 +244,113 @@ test.describe('通知中心：看门狗提醒的修复', () => {
         return { status: 200, json: { ok: true, repair: scene.last, replayed: false } };
       },
     };
-    await stage(context, problems, scene);
     const other = await context.newPage();
+    const oldView = { ...scene };
+    const clickHeader = 'x-e2e-repair-click';
+    let clickReads = 0;
+    let clicks = 0;
+    const beforeReads: Request[] = [];
+    await other.exposeBinding('e2eRepairClicked', () => {
+      clicks += 1;
+    });
+    await stage(context, problems, scene, (request) => {
+      if (request.frame().page() !== other) return scene;
+      if (request.headers()[clickHeader] === '1') {
+        expect(clicks).toBe(1);
+        clickReads += 1;
+        return { ...scene };
+      }
+      beforeReads.push(request);
+      return oldView;
+    });
     await page.goto('/notifications');
     await other.goto('/notifications');
     await expect(stalledCard(other).getByRole('button', { name: '叫醒任务继续' })).toBeVisible();
     await stalledCard(page).getByRole('button', { name: '叫醒任务继续' }).click();
     await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
-    // 另一页还摆着旧按钮：点了先重读，发现已经有人在修，不发
-    await stalledCard(other).getByRole('button', { name: '叫醒任务继续' }).click();
-    await expect(stalledCard(other).getByTestId('repair-note')).toContainText('现场变了');
-    await expect(phaseOf(other)).toHaveAttribute('data-phase', 'verifying');
-    expect(scene.bodies).toHaveLength(1);
-    await other.close();
+    // 真实 click 之后才切阶段；query/refetch 可异步进入 fetch，先等 Node 确认握手再发请求。
+    // 所有点击前的读都保持旧视图，不把“下一次 GET”猜成点击现读。
+    await other.evaluate(
+      ({ header, title }) => {
+        const original = window.fetch;
+        let clicked: Promise<void> | undefined;
+        const capture = (event: MouseEvent) => {
+          const button = event.target instanceof Element ? event.target.closest('button') : null;
+          if (
+            button?.getAttribute('aria-label') === '叫醒任务继续' &&
+            button.closest('li[data-notice-row]')?.textContent?.includes(title) === true
+          ) {
+            clicked = (window as unknown as { e2eRepairClicked: () => Promise<void> }).e2eRepairClicked();
+          }
+        };
+        document.addEventListener('click', capture, true);
+        window.fetch = async (input, init) => {
+          const req = new Request(input, init);
+          if (req.method !== 'GET' || new URL(req.url).pathname !== '/api/notifications') {
+            return original.call(window, input, init);
+          }
+          const afterClick = clicked !== undefined;
+          if (clicked) await clicked;
+          const headers = new Headers(req.headers);
+          headers.set(header, afterClick ? '1' : '0');
+          return original.call(window, new Request(req, { headers }));
+        };
+        // 只在本测试页面使用；finally 关闭页面即撤销监听与 fetch 包装。
+      },
+      { header: clickHeader, title: STALLED },
+    );
+    try {
+      await expect(stalledCard(other).getByRole('button', { name: '叫醒任务继续' })).toBeVisible();
+      await Promise.all([
+        other.waitForResponse(
+          (response) => response.request().headers()[clickHeader] === '1' && response.status() === 200,
+        ),
+        stalledCard(other).getByRole('button', { name: '叫醒任务继续' }).click(),
+      ]);
+      expect(clicks).toBe(1);
+      expect(clickReads).toBeGreaterThan(0);
+      expect(beforeReads.length).toBeGreaterThan(0);
+      await expect(stalledCard(other).getByTestId('repair-note')).toContainText('现场变了');
+      await expect(phaseOf(other)).toHaveAttribute('data-phase', 'verifying');
+      expect(scene.bodies).toHaveLength(1);
+    } finally {
+      await other.close();
+    }
+  });
+
+  test('两页同开：另一页先刷新到受理结果，旧按钮消失且不重复修复', async ({ page, context, problems }) => {
+    const scene: Scene = {
+      actions: [RECOVER],
+      problems: [],
+      bodies: [],
+      exec: async (body) => {
+        scene.last = record(body, 'accepted', '继续信号已受理（收到了，不等于修好）');
+        scene.actions = [];
+        return { status: 200, json: { ok: true, repair: scene.last, replayed: false } };
+      },
+    };
+    await stage(context, problems, scene);
+    const other = await context.newPage();
+    try {
+      await page.goto('/notifications');
+      await other.goto('/notifications');
+      await expect(stalledCard(other).getByRole('button', { name: '叫醒任务继续' })).toBeVisible();
+      await stalledCard(page).getByRole('button', { name: '叫醒任务继续' }).click();
+      await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
+      const listed = other.waitForResponse(
+        (response) =>
+          response.url().includes('/api/notifications?') &&
+          response.request().method() === 'GET' &&
+          response.status() === 200,
+      );
+      await other.getByRole('button', { name: '刷新', exact: true }).click();
+      await listed;
+      await expect(stalledCard(other).getByRole('button', { name: '叫醒任务继续' })).toHaveCount(0);
+      await expect(phaseOf(other)).toHaveAttribute('data-phase', 'verifying');
+      expect(scene.bodies).toHaveLength(1);
+    } finally {
+      await other.close();
+    }
   });
 
   test('网络超时：写没收到回执、不给新按钮；再问一次用同一个请求编号', async ({
