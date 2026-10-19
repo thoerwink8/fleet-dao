@@ -1,9 +1,18 @@
 import { userInfo } from 'node:os';
 import type { Db } from '@fleet-dao/db';
+import {
+  type AcceptanceMergeContract,
+  acceptanceMergeCanonical,
+  acceptanceMergeDutyContract,
+  acceptanceMergePlanHash,
+  mergeAcceptanceDuties,
+  readAcceptanceMergeReceipt,
+} from '@fleet-dao/db';
 import { type AcceptanceCoverage, acceptanceDutyState, parseAcceptanceCoverage } from '@fleet-dao/shared';
+import type { AcceptanceExecutionReader } from './acceptance-execution-reader.ts';
 
 export const ACCEPTANCE_USAGE =
-  '用法：fleet-api acceptance status <owner/仓> <单号> | fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号，协调责任为0> --head <SHA，协调责任为-> --evidence "验收证据" | fleet-api acceptance merge-plan <owner/仓> <单号> --task <任务UUID> --workflow <原workflowId> --run <原runId> --pr <PR号> --head <最终头SHA> --merge-commit <合并提交SHA> --duties <责任号:代次,…>（只读预检，不写账） | fleet-api acceptance supersede <owner/仓> <单号> --id <旧责任号> --generation <代次> --pr <PR号> --head <旧头SHA> --target-id <最终责任号> --target-generation <代次> --target-pr <PR号> --target-head <最终头SHA> --evidence "替代依据" [--coverage \'[{"source":"源项原文","target":"目标项原文","basis":"覆盖依据"}]\']（源项和目标项措辞不同才写 --coverage，逐条人工审定，原文整串照抄 status 的 items）';
+  '用法：fleet-api acceptance status <owner/仓> <单号> | fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号，协调责任为0> --head <SHA，协调责任为-> --evidence "验收证据" | fleet-api acceptance merge-plan <owner/仓> <单号> --task <任务UUID> --workflow <原workflowId> --run <原runId> --pr <PR号> --head <最终头SHA> --merge-commit <合并提交SHA> --duties <责任号:代次,…>（只读预检，不写账） | fleet-api acceptance merge <相同定位参数> --request <UUID> --plan <预检64hex> --reason "归并原因" --evidence "归并依据"（只建待验责任，不自动结清） | fleet-api acceptance supersede <owner/仓> <单号> --id <旧责任号> --generation <代次> --pr <PR号> --head <旧头SHA> --target-id <最终责任号> --target-generation <代次> --target-pr <PR号> --target-head <最终头SHA> --evidence "替代依据" [--coverage \'[{"source":"源项原文","target":"目标项原文","basis":"覆盖依据"}]\']（源项和目标项措辞不同才写 --coverage，逐条人工审定，原文整串照抄 status 的 items）';
 
 const FLAGS = {
   settle: ['--id', '--generation', '--pr', '--head', '--evidence'],
@@ -20,12 +29,29 @@ const FLAGS = {
     '--coverage',
   ],
   'merge-plan': ['--task', '--workflow', '--run', '--pr', '--head', '--merge-commit', '--duties'],
+  merge: [
+    '--task',
+    '--workflow',
+    '--run',
+    '--pr',
+    '--head',
+    '--merge-commit',
+    '--duties',
+    '--request',
+    '--plan',
+    '--reason',
+    '--evidence',
+  ],
 } as const;
 
 export function parseAcceptanceArgs(args: readonly string[]) {
   const [action, repo, issue, ...rest] = args;
   if (
-    (action !== 'status' && action !== 'settle' && action !== 'supersede' && action !== 'merge-plan') ||
+    (action !== 'status' &&
+      action !== 'settle' &&
+      action !== 'supersede' &&
+      action !== 'merge-plan' &&
+      action !== 'merge') ||
     !repo ||
     !/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo) ||
     !issue ||
@@ -54,7 +80,7 @@ export function parseAcceptanceArgs(args: readonly string[]) {
     return n;
   };
   const issueNumber = Number(issue);
-  if (action === 'merge-plan') {
+  if (action === 'merge-plan' || action === 'merge') {
     const text = (key: string) => {
       const value = values[key]?.trim() ?? '';
       if (!value || /\s/.test(value)) throw new Error(ACCEPTANCE_USAGE);
@@ -74,12 +100,37 @@ export function parseAcceptanceArgs(args: readonly string[]) {
       if (!m) throw new Error(ACCEPTANCE_USAGE);
       return { id: Number(m[1]), generation: Number(m[2]) };
     });
-    if (new Set(duties.map((d) => d.id)).size !== duties.length) throw new Error(ACCEPTANCE_USAGE);
+    if (
+      duties.length > 64 ||
+      duties.some((d) => !Number.isSafeInteger(d.id) || !Number.isSafeInteger(d.generation)) ||
+      new Set(duties.map((d) => d.id)).size !== duties.length
+    )
+      throw new Error(ACCEPTANCE_USAGE);
+    const write =
+      action === 'merge'
+        ? {
+            request: text('--request').toLowerCase(),
+            planHash: text('--plan'),
+            reason: values['--reason']?.trim() ?? '',
+            evidence: values['--evidence']?.trim() ?? '',
+          }
+        : undefined;
+    if (
+      write &&
+      (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(write.request) ||
+        !/^[0-9a-f]{64}$/.test(write.planHash) ||
+        !write.reason ||
+        !write.evidence ||
+        Buffer.byteLength(write.reason) > 8192 ||
+        Buffer.byteLength(write.evidence) > 8192)
+    )
+      throw new Error(ACCEPTANCE_USAGE);
     return {
       action,
+      write,
       repo,
       issueNumber,
-      taskId,
+      taskId: taskId.toLowerCase(),
       workflowId: text('--workflow'),
       temporalRunId: text('--run'),
       prNumber: positive('--pr'),
@@ -145,7 +196,10 @@ export function parseAcceptanceArgs(args: readonly string[]) {
   } as const;
 }
 
-type MergePlanInput = Extract<ReturnType<typeof parseAcceptanceArgs>, { action: 'merge-plan' }>;
+export type MergePlanInput = Omit<
+  Extract<ReturnType<typeof parseAcceptanceArgs>, { action: 'merge-plan' | 'merge' }>,
+  'write'
+> & { write?: { request: string; planHash: string; reason: string; evidence: string } | undefined };
 
 /** 目标责任某一项的来源：哪条原责任（精确身份和代次）带来的；已有的最终头行也算一个来源。 */
 export interface MergePlanItemSource {
@@ -160,7 +214,7 @@ export interface MergePlanItemSource {
  * 旧头是否合并过只认同仓 PR 镜像对最终头 / 合并提交的回执，不拿责任行自己的 merge 列证明；
  * 有任何拒绝原因 ok 就是 false、不出验收项（不是可用的计划）；点名的责任行读不全直接抛，不出空计划。
  */
-export async function planAcceptanceMerge(db: Db, input: MergePlanInput) {
+export async function planAcceptanceMerge(db: Db, input: MergePlanInput, reader?: AcceptanceExecutionReader) {
   const { readAcceptanceMergeFacts } = await import('@fleet-dao/db');
   const facts = await readAcceptanceMergeFacts(db, {
     taskId: input.taskId,
@@ -182,12 +236,7 @@ export async function planAcceptanceMerge(db: Db, input: MergePlanInput) {
     if (`${task.owner}/${task.name}` !== input.repo) reject(`错仓：任务属于 ${task.owner}/${task.name}`);
     if (task.issueNumber !== input.issueNumber) reject(`错单：任务是 #${task.issueNumber}`);
   }
-  if (!facts.runs.some((r) => r.taskId === input.taskId))
-    reject(
-      facts.runs.length
-        ? '错 run：该 workflow / run 属于别的任务'
-        : '错 run：按原 workflow ID 和 run ID 读不到这个任务的运行',
-    );
+  if (facts.runs.some((r) => r.taskId !== input.taskId)) reject('错 run：已存关联与任务冲突');
   if (task) {
     if (!pr) reject(`回执未知：同仓 PR 镜像里读不到 #${input.prNumber}`);
     else {
@@ -211,6 +260,46 @@ export async function planAcceptanceMerge(db: Db, input: MergePlanInput) {
     if (row.settledAt != null) reject('已最终验收，不是未结责任', row.id);
     if (row.supersededAt != null) reject('已有替代记录，不是未结责任', row.id);
   }
+  const observed = reader ? await reader.read(input) : { kind: 'unknown' as const, code: 'reader_required' };
+  if (observed.kind !== 'observed') reject('原 execution 读取未核实：' + observed.code);
+  else {
+    const proof = observed.proof;
+    if (
+      proof.taskId !== input.taskId ||
+      proof.repo !== input.repo ||
+      proof.issueNumber !== input.issueNumber ||
+      proof.workflowId !== input.workflowId ||
+      proof.runId !== input.temporalRunId ||
+      proof.final.head !== input.head ||
+      proof.final.prNumber !== input.prNumber
+    )
+      reject('原 execution 身份冲突');
+    for (const row of [...facts.duties, ...(facts.target ? [facts.target] : [])])
+      if (
+        row.items.some(
+          (item) =>
+            !proof.sources.some(
+              (p) => p.prNumber === row.prNumber && p.head === row.head && p.items.includes(item),
+            ),
+        )
+      )
+        reject('原 execution 缺少完整原项来源', row.id);
+  }
+  if (
+    facts.target &&
+    (facts.target.repo !== input.repo ||
+      facts.target.issueNumber !== input.issueNumber ||
+      facts.target.taskId !== input.taskId ||
+      facts.target.prNumber !== input.prNumber ||
+      facts.target.head !== input.head)
+  )
+    reject('最终责任身份矛盾');
+  const union = [
+    ...new Set([...facts.duties.flatMap((r) => r.items), ...(facts.target?.items ?? [])]),
+  ].sort();
+  if (union.length > 2048 || Buffer.byteLength(JSON.stringify(union)) > 1024 * 1024) reject('原项并集超限');
+  if (facts.target && union.every((item) => facts.target!.items.includes(item)))
+    reject('没有新增原项，无须归并，请走既有替代入口');
   const ok = rejections.length === 0;
   const from = (r: { id: number; generation: number; head: string }, existingTarget = false) => ({
     id: r.id,
@@ -226,8 +315,32 @@ export async function planAcceptanceMerge(db: Db, input: MergePlanInput) {
   if (ok)
     for (const { row, existing } of contributors)
       for (const item of row.items) byItem.set(item, [...(byItem.get(item) ?? []), from(row, existing)]);
+  const itemSources = [...byItem]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([item, sources]) => ({ item, sources }));
+  const contract: AcceptanceMergeContract | null =
+    ok && task && observed.kind === 'observed'
+      ? {
+          repo: input.repo,
+          issueNumber: input.issueNumber,
+          taskId: input.taskId,
+          repoId: task.repoId,
+          workflowId: input.workflowId,
+          temporalRunId: input.temporalRunId,
+          prNumber: input.prNumber,
+          head: input.head,
+          mergeCommit: input.mergeCommit,
+          sources: facts.duties.map(acceptanceMergeDutyContract),
+          target: facts.target ? acceptanceMergeDutyContract(facts.target) : null,
+          items: union,
+          itemSources,
+          proof: observed.proof,
+        }
+      : null;
   return {
     ok,
+    contract,
+    planHash: contract ? acceptanceMergePlanHash(contract) : null,
     repo: input.repo,
     issueNumber: input.issueNumber,
     taskId: input.taskId,
@@ -245,11 +358,43 @@ export async function planAcceptanceMerge(db: Db, input: MergePlanInput) {
   };
 }
 
-export async function runAcceptance(args: readonly string[], db: Db, now: Date) {
+export async function runAcceptance(
+  args: readonly string[],
+  db: Db,
+  now: Date,
+  reader?: AcceptanceExecutionReader,
+) {
   const input = parseAcceptanceArgs(args);
-  if (input.action === 'merge-plan') {
-    const plan = await planAcceptanceMerge(db, input);
+  if (input.action === 'merge-plan' || input.action === 'merge') {
+    const by = 'ops:acceptance:' + userInfo().username;
+    if (input.action === 'merge' && input.write) {
+      const prior = await readAcceptanceMergeReceipt(db, input.write.request);
+      if (prior) {
+        const c = prior.contract;
+        const observed = await reader?.read(input);
+        if (
+          !observed ||
+          observed.kind !== 'observed' ||
+          acceptanceMergeCanonical(observed.proof) !== acceptanceMergeCanonical(c.proof) ||
+          c.repo !== input.repo ||
+          c.issueNumber !== input.issueNumber ||
+          c.taskId !== input.taskId ||
+          c.workflowId !== input.workflowId ||
+          c.temporalRunId !== input.temporalRunId ||
+          c.prNumber !== input.prNumber ||
+          c.head !== input.head ||
+          c.mergeCommit !== input.mergeCommit ||
+          acceptanceMergeCanonical(c.sources.map((s) => ({ id: s.id, generation: s.generation }))) !==
+            acceptanceMergeCanonical([...input.duties].sort((a, b) => a.id - b.id))
+        )
+          throw new Error('归并重放原 execution 或定位合同不符');
+        return mergeAcceptanceDuties(db, { ...input.write, by, contract: c }, now);
+      }
+    }
+    const plan = await planAcceptanceMerge(db, input, reader);
     if (!plan.ok) throw new Error(`归并预检不通过，没有可用计划：${JSON.stringify(plan)}`);
+    if (input.action === 'merge' && input.write && plan.contract)
+      return mergeAcceptanceDuties(db, { ...input.write, by, contract: plan.contract }, now);
     return plan;
   }
   const { readAcceptanceDutyRows, settleAcceptanceDuty, supersedeAcceptanceDuty } = await import(
@@ -266,6 +411,7 @@ export async function runAcceptance(args: readonly string[], db: Db, now: Date) 
       { source: input.source, target: input.target, by, evidence: input.evidence, coverage: input.coverage },
       now,
     );
+  if (input.action !== 'settle') throw new Error(ACCEPTANCE_USAGE);
   const { action: _, ...identity } = input;
   return settleAcceptanceDuty(db, { ...identity, by }, now);
 }

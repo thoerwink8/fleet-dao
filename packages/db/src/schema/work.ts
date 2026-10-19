@@ -544,7 +544,7 @@ export const acceptanceDuties = pgTable(
     generation: integer('generation').notNull().default(1),
     /** 原验收项：验收方判「不归我验」的那几条原文。 */
     items: text('items').array().notNull(),
-    /** cold_verify = 冷验收转人；coordination = 协调验收责任（没有代码）。 */
+    /** cold_verify = 冷验收转人；coordination = 协调验收责任（没有代码）；management_merge = 管理归并初建，追加项来源在受限审计。 */
     source: text('source').notNull().default('cold_verify'),
     /** 合并回执：PR 合进主线的那个提交；还没合、或没有 PR 是空。 */
     mergeCommit: text('merge_commit'),
@@ -573,7 +573,10 @@ export const acceptanceDuties = pgTable(
     check('acceptance_duties_issue_positive', sql`${t.issueNumber} > 0`),
     check('acceptance_duties_pr_nonneg', sql`${t.prNumber} >= 0`),
     check('acceptance_duties_items_nonempty', sql`cardinality(${t.items}) > 0`),
-    check('acceptance_duties_source_known', sql`${t.source} in ('cold_verify', 'coordination')`),
+    check(
+      'acceptance_duties_source_known',
+      sql`${t.source} in ('cold_verify', 'coordination', 'management_merge')`,
+    ),
     check(
       'acceptance_duties_settled_complete',
       sql`(${t.settledAt} is null and ${t.settledBy} is null and ${t.settleEvidence} is null) or (${t.settledAt} is not null and ${t.settledBy} is not null and length(${t.settleEvidence}) > 0)`,

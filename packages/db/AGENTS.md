@@ -46,3 +46,5 @@ Postgres 的表结构（Drizzle）、迁移和查询函数，以及路由骨架�
 - `verify_aggregates` 独立存组合结论，来源 run 必须属于同任务/工作流/PR 且已有原始 verdict；已有来源不能跨头或跨验收轮复用。首次精确头由真实验收装配绑定，runs 自身没有 head 列，库不能独立证明首次头身份。
 
 - `recordCheckoutReceipt` 复用 audit_log：每次物理完整检出独立 receiptId，target 为 checkout:<receiptId>，同 ID 同内容幂等、异内容拒绝；事务锁串行查重。无回执的旧历史保持未知，不回填、不以已撤报警冒充成功证据。
+
+- 受管验收归并在 `queries/acceptance-merge.ts`：外部取证在事务外，按幂等键→runs SHARE表锁→任务/仓→同仓PR→数值升序责任行加锁，重读精确run关联；runs归属可变且无共同细锁，因此短暂排队全部run写入，2秒拿不到锁明确失败，提交后的新run写入可正常发生；目标、审计、幂等回执同事务。源原项不改，已有目标加项换代并撤旧终态；source 是初建来源，新增项的管理来源留受限审计，不伪造冷验收。
