@@ -10,7 +10,8 @@ test.describe('单子详情', () => {
     stack,
     shot,
   }) => {
-    await page.goto(`/tasks/${stack.facts.tasks.done}`);
+    // 四个数、三段、每一笔在「用量和模型」里，默认收起（#3228）：地址带 ?usage=open 打开
+    await page.goto(`/tasks/${stack.facts.tasks.done}?usage=open`);
     await expect(page.getByRole('heading', { name: /#13 README 加一行当前时间/ })).toBeVisible();
     await expect(page.getByText('已完成').first()).toBeVisible();
 
@@ -44,7 +45,7 @@ test.describe('单子详情', () => {
     // 老会话不是空数组，是接口里已经没有这个字段；用量也不再按老流程的阶段汇总
     expect(detail).not.toHaveProperty('runs');
     expect(detail.usage).not.toHaveProperty('byStage');
-    await page.goto(`/tasks/${stack.facts.tasks.running}`);
+    await page.goto(`/tasks/${stack.facts.tasks.running}?usage=open`);
     await expect(page.getByRole('heading', { name: /#12 登录页加验证码/ })).toBeVisible();
     // #12 的三段流水（对题收了、动手在跑）来自 runs 表。老会话表 #2357 已删，页面上「老流程的会话」计数为 0，这一块不再出现。
     await expect(page.getByText('老流程的会话')).toHaveCount(0);
@@ -58,7 +59,7 @@ test.describe('单子详情', () => {
     api,
   }) => {
     const taskId = stack.facts.tasks.running;
-    await page.goto(`/tasks/${taskId}`);
+    await page.goto(`/tasks/${taskId}?usage=open`);
     const pins = page.locator('section').filter({ has: page.getByRole('heading', { name: '用哪个模型' }) });
     await expect(pins).toBeVisible();
     // 对题在对话里做，指定不了；动手、验收没指定过是自动
@@ -87,7 +88,7 @@ test.describe('单子详情', () => {
     page,
     stack,
   }) => {
-    await page.goto(`/tasks/${stack.facts.tasks.stalled}`);
+    await page.goto(`/tasks/${stack.facts.tasks.stalled}?usage=open`);
     await expect(page.locator('[data-estimate-gap]').first()).toContainText('没读到缓存读、缓存写，估不了');
   });
 

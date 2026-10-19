@@ -37,11 +37,16 @@ function open(route: string) {
 
 const search = () => screen.getByTestId('search').textContent;
 const drawer = () => document.querySelector('[data-run-drawer]');
+// 「每一笔」「三段」在「用量和模型」里，默认收起（#3228）：收着也挂在页面上，等它出来就行，不改网址
+const ready = () =>
+  waitFor(() => {
+    if (!document.querySelector('[data-view-transcript]')) throw new Error('每一笔还没出来');
+  });
 
 describe('「看会话」抽屉', () => {
   test('每一笔不再把会话铺在页面里：只有摘要和「看会话」按钮', async () => {
     open('/tasks/t-c9');
-    await screen.findByRole('heading', { name: '每一笔' });
+    await ready();
     expect(document.querySelectorAll('[data-view-transcript]')).toHaveLength(4);
     expect(document.querySelector('[data-transcript-body]')).toBeNull();
     expect(drawer()).toBeNull();
@@ -50,7 +55,7 @@ describe('「看会话」抽屉', () => {
 
   test('点「看会话」：网址带 run=、右侧抽屉出现那一笔的会话；后退抽屉关闭', async () => {
     open('/tasks/t-c9');
-    await screen.findByRole('heading', { name: '每一笔' });
+    await ready();
     fireEvent.click(document.querySelector('[data-view-transcript="seg-c9-3"]') as HTMLElement);
     expect(search()).toBe('?run=seg-c9-3');
     expect(drawer()?.getAttribute('data-run-drawer')).toBe('seg-c9-3');
@@ -67,7 +72,7 @@ describe('「看会话」抽屉', () => {
 
   test('点抽屉的叉（关闭）：本页自己开的，等于后退', async () => {
     open('/tasks/t-c9?from=%2Ftasks');
-    await screen.findByRole('heading', { name: '每一笔' });
+    await ready();
     fireEvent.click(document.querySelector('[data-view-transcript="seg-c9-3"]') as HTMLElement);
     // 保留别的参数
     expect(search()).toBe('?from=%2Ftasks&run=seg-c9-3');
@@ -88,7 +93,7 @@ describe('「看会话」抽屉', () => {
 
   test('网址里的笔号对不上这张单的任何一笔：不开抽屉', async () => {
     open('/tasks/t-c9?run=nope');
-    await screen.findByRole('heading', { name: '每一笔' });
+    await ready();
     expect(drawer()).toBeNull();
   });
 });
@@ -96,7 +101,7 @@ describe('「看会话」抽屉', () => {
 describe('手机端（#1802 点验补充）', () => {
   test('四张统计卡（#2859 去掉了折算 token）手机上两列，宽屏四列并排', async () => {
     open('/tasks/t-c9');
-    await screen.findByRole('heading', { name: '每一笔' });
+    await ready();
     const grid = document.querySelector('[data-segment-stats] > div') as HTMLElement;
     expect(grid.children.length).toBe(4);
     expect(grid.className).toContain('grid-cols-2');
@@ -106,7 +111,7 @@ describe('手机端（#1802 点验补充）', () => {
 
   test('「三段」每段手机上一行摘要：段、模型、次数、耗时、token、花费；表格只在 md 以上', async () => {
     open('/tasks/t-c9');
-    await screen.findByRole('heading', { name: '三段' });
+    await ready();
     const manual = document.querySelector('[data-segment="manual"]') as HTMLElement;
     const line = manual.querySelector('[data-segment-summary]') as HTMLElement;
     expect(line.className).toContain('md:hidden');
