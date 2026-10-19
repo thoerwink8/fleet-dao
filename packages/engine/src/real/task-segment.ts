@@ -320,6 +320,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       brief: manualBriefOf(input.brief, { branch: input.branch, baseSha: input.baseSha }),
       specDir: input.brief.specDir,
       feedback: input.feedback,
+      ...(input.contractRevision ? { contractRevision: input.contractRevision } : {}),
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
       ...(input.resumeSessionId ? { resumed: true } : {}),
       ...(preload.length > 0 ? { preload } : {}),

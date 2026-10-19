@@ -46,7 +46,7 @@ import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.t
 import { fakeTrees } from './real/fixtures.ts';
 import { API, json, setup as reviewHttp, sha } from './review-http.ts';
 import { reviewWorker } from './review-worker.ts';
-import { OK_SEGMENT, type Script, scripted } from './task-script.ts';
+import { OK_SEGMENT, type Script, scripted, BODY as TASK_BODY } from './task-script.ts';
 
 const currentEnv = useEnv();
 let env: TestWorkflowEnvironment;
@@ -308,7 +308,20 @@ function wired(
     run: async () => report(MODEL_PASS),
     loginFix: () => '去登录',
   });
+  // 正式合同与脚本首次读到的需求来自同一正文；合并写前仍走生产读口核实。
+  const contractGh = {
+    readIssue: async ({ issueNumber }: { issueNumber: number }) => ({
+      number: issueNumber,
+      title: '给驾驶舱加状态',
+      body: TASK_BODY,
+      state: 'open' as const,
+    }),
+    readSpecDoc: async () => {
+      throw new Error('这份正式正文没有旧需求文档指针，不该读取需求文档');
+    },
+  };
   const verifyGh = {
+    ...contractGh,
     claims: github.claims,
     pullFiles: async () => [
       { filename: 'src/auth.ts', status: 'modified', patch: '@@ -1 +1 @@\n-a\n+b', changes: 2 },
@@ -365,6 +378,7 @@ function wired(
   });
   const merging = createTaskActivities({
     gh: {
+      ...contractGh,
       claims: github.claims,
       mergePr: async () => ({ merged: true, mergeCommit: 'f'.repeat(40) }),
     } as unknown as TaskActivitiesDeps['gh'],
