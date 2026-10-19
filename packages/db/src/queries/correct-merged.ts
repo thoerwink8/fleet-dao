@@ -95,25 +95,46 @@ function sessionLinks(
 }
 
 /**
- * 受管会话账是否仍把这张任务、这条工作流、这个 PR 和这次 run 钉在一起。
- * temporal_run_id 或 PR 号为空的老行不冒充别的交付；一旦同一工作流记下了别的 run，
- * 或同时还存在另一条不同 PR 的会话，就不能靠其中一条对得上的记录放行。
+ * 对不上时给出拒绝原因；对得上返回 null。
+ * 同一工作流里任意非空 PR 不同于请求都拒绝，不能任取一条匹配会话忽略另一条。
+ * 旧行 temporal run 为空又混着别的非空 PR 时，原因写明归属有歧义，不把这些行说成同一次执行的证据。
+ * 空 PR、多条相同 PR、别的工作流上的旧 PR 不在这里否决。显式不同的 run 仍单独拒绝。
+ * 不要求会话只有一条，也不改历史会话。
  */
+export function sessionLinkRefusal(
+  sessions: readonly CorrectMergedSessionLink[],
+  workflowId: string,
+  prNumber: number,
+  runId: string,
+): string | null {
+  const sameWorkflow = sessions.filter((row) => row.workflowId === workflowId);
+  const recordedRuns = sameWorkflow.map((row) => row.temporalRunId).filter((id): id is string => id !== null);
+  if (recordedRuns.some((id) => id !== runId)) {
+    return '受管会话账对不上这次交付（无证据，或 run 记成了别的）';
+  }
+  const foreign = sameWorkflow.filter((row) => row.prNumber !== null && row.prNumber !== prNumber);
+  if (foreign.length > 0) {
+    if (foreign.some((row) => row.temporalRunId === null)) {
+      return '同一工作流的会话 PR 归属有歧义：另有不同的非空 PR，旧行没有 temporal run，不能当作同一次执行的证据';
+    }
+    return '同一工作流记下了不同的非空 PR，不能任取一条匹配会话放行';
+  }
+  const holds = sameWorkflow.some(
+    (row) =>
+      row.ended && row.prNumber === prNumber && (row.temporalRunId === null || row.temporalRunId === runId),
+  );
+  if (!holds) return '受管会话账对不上这次交付（无证据，或 run 记成了别的）';
+  return null;
+}
+
+/** 受管会话账是否仍把这张任务、这条工作流、这个 PR 和这次 run 钉在一起。 */
 export function sessionLinkHolds(
   sessions: readonly CorrectMergedSessionLink[],
   workflowId: string,
   prNumber: number,
   runId: string,
 ): boolean {
-  const sameWorkflow = sessions.filter((row) => row.workflowId === workflowId);
-  const recordedRuns = sameWorkflow.map((row) => row.temporalRunId).filter((id): id is string => id !== null);
-  if (recordedRuns.some((id) => id !== runId)) return false;
-  const recordedPrs = sameWorkflow.map((row) => row.prNumber).filter((n): n is number => n !== null);
-  if (recordedPrs.some((n) => n !== prNumber)) return false;
-  return sameWorkflow.some(
-    (row) =>
-      row.ended && row.prNumber === prNumber && (row.temporalRunId === null || row.temporalRunId === runId),
-  );
+  return sessionLinkRefusal(sessions, workflowId, prNumber, runId) === null;
 }
 
 /** 仓或任务不在库里回 null。读不全（多行仓、会话数、审计翻不完）抛错，调用方拒绝，不纠正。 */
@@ -207,8 +228,8 @@ export async function readCorrectMergedLedger(
 
 /**
  * 仅当任务行仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍钉着这次交付时，
- * 改成 done/merged 并写操作记录。同一工作流另有不同 PR 的会话算对不上，回 stale，不写。
- * 审计失败抛错，整笔回滚。
+ * 改成 done/merged 并写操作记录。同一工作流另有不同非空 PR（含旧行 temporal run 为空的混合 PR）算对不上，
+ * 回 stale，不写。核对之后事务里才看到的冲突会话同样拒绝。审计失败抛错，整笔回滚。
  */
 export async function casCorrectMergedTask(
   db: Db,

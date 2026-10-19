@@ -28,6 +28,7 @@ interface World {
   extraGeneration: boolean;
   onSecondRead: (() => Promise<void>) | null;
   wrapCas: boolean;
+  conflictOnCas: boolean;
   reads: number;
   resultCalls: number;
   casCalls: number;
@@ -53,6 +54,7 @@ function world(): World {
     extraGeneration: false,
     onSecondRead: null,
     wrapCas: false,
+    conflictOnCas: false,
     reads: 0,
     resultCalls: 0,
     casCalls: 0,
@@ -175,6 +177,20 @@ describe('task correct-merged 真实装配', () => {
                   .update(tasks)
                   .set({ updatedAt: new Date('2026-10-19T04:00:00.000Z') })
                   .where(eq(tasks.id, input.taskId));
+              }
+              if (current.conflictOnCas) {
+                await t.db.insert(runs).values({
+                  id: 'c3114000-0000-4000-8000-000000000097',
+                  segment: 'manual',
+                  taskId: TASK,
+                  issueNumber: 3114,
+                  model: 'test',
+                  startedAt: WHEN,
+                  endedAt: WHEN,
+                  outcome: 'done',
+                  prNumber: 99999,
+                  workflowId: WF,
+                });
               }
               return real.cas(input);
             },
@@ -429,11 +445,11 @@ describe('task correct-merged 真实装配', () => {
             startedAt: WHEN,
             endedAt: WHEN,
             outcome: 'done',
-            prNumber: 1,
+            prNumber: 99999,
             workflowId: WF,
           });
         },
-        fragment: '矛盾',
+        fragment: '歧义',
         open: true,
       },
       {
@@ -524,22 +540,22 @@ describe('task correct-merged 真实装配', () => {
       startedAt: WHEN,
       endedAt: WHEN,
       outcome: 'done',
-      prNumber: 1,
+      prNumber: 99999,
       workflowId: WF,
-      temporalRunId: RUN,
     });
     current = world();
     const preview = await invoke(args());
     expect(preview.code).toBe(1);
     expect(preview.json?.status).toBe('refused');
-    expect(preview.json?.reason).toContain('矛盾');
+    expect(preview.json?.reason).toContain('歧义');
+    expect(preview.json?.reason).toContain('不能当作同一次执行的证据');
     expect(current.casCalls).toBe(0);
 
     current = world();
     const again = await invoke(args(['--apply'], { note: '换一句原因' }));
     expect(again.code).toBe(1);
     expect(again.json?.status).toBe('refused');
-    expect(again.json?.reason).toContain('矛盾');
+    expect(again.json?.reason).toContain('歧义');
     expect(current.casCalls).toBe(0);
     const row = await taskRow();
     expect(row?.state).toBe('done');
@@ -550,6 +566,24 @@ describe('task correct-merged 真实装配', () => {
     const kept = await t.db.select().from(runs).where(eq(runs.taskId, TASK));
     expect(kept).toHaveLength(2);
     expect(kept.every((run) => run.outcome === 'done')).toBe(true);
+  });
+
+  it('二次读取之后才出现冲突会话，事务拒绝且不写任务和审计', async () => {
+    current.conflictOnCas = true;
+    const result = await invoke(args(['--apply']));
+    expect(result.code).toBe(1);
+    expect(result.json?.reason).toContain('变了');
+    expect(current.reads).toBe(2);
+    expect(current.casCalls).toBe(1);
+    const row = await taskRow();
+    expect(row?.state).toBe('stopped');
+    expect(row?.phase).toBe('abandoned');
+    expect(row?.updatedAt?.toISOString()).toBe(WHEN.toISOString());
+    expect(await audits()).toEqual([]);
+    const changes = await t.db.select().from(stateChanges).where(eq(stateChanges.taskId, TASK));
+    expect(changes.some((change) => change.toState === 'done')).toBe(false);
+    const kept = await t.db.select().from(runs).where(eq(runs.taskId, TASK));
+    expect(kept.map((run) => run.prNumber).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([3137, 99999]);
   });
 
   it('第二次读到活会话或新一代就拒绝，不覆盖', async () => {

@@ -1,5 +1,5 @@
 // 合成的 #3114 反例：只在判断和读取替身上走，不连生产库、不发信号。
-import { sessionLinkHolds } from '@fleet-dao/db';
+import { sessionLinkHolds, sessionLinkRefusal } from '@fleet-dao/db';
 import { describe, expect, it } from 'vitest';
 import { TaskCliError } from '../src/task-cli.ts';
 import {
@@ -201,7 +201,7 @@ describe('decideCorrection', () => {
         req,
         snap({ sessions: [{ workflowId: WF, prNumber: 1, temporalRunId: null, ended: true }] }),
       ),
-    ).toContain('无证据');
+    ).toContain('歧义');
     expect(
       reason(
         'founder',
@@ -211,13 +211,43 @@ describe('decideCorrection', () => {
     ).toContain('无证据');
   });
 
-  it('同一工作流另有不同 PR 的会话就拒绝，不能靠一条匹配记录或已有回执放行', () => {
-    const matching = { workflowId: WF, prNumber: 3137, temporalRunId: RUN, ended: true };
-    const otherPr = { workflowId: WF, prNumber: 1, temporalRunId: null, ended: true };
+  it('同一工作流另有不同 PR 的会话就拒绝，旧行没记 run 时写明歧义，不能靠一条匹配记录或已有回执放行', () => {
+    const matching = { workflowId: WF, prNumber: 3137, temporalRunId: null, ended: true };
+    const otherPr = { workflowId: WF, prNumber: 99999, temporalRunId: null, ended: true };
     expect(sessionLinkHolds([matching, otherPr], WF, 3137, RUN)).toBe(false);
-    expect(sessionLinkHolds([matching, { ...otherPr, temporalRunId: RUN }], WF, 3137, RUN)).toBe(false);
+    const ambiguous = sessionLinkRefusal([matching, otherPr], WF, 3137, RUN);
+    expect(ambiguous).toContain('歧义');
+    expect(ambiguous).toContain('不能当作同一次执行的证据');
+    expect(reason('founder', req, snap({ sessions: [matching, otherPr] }))).toBe(ambiguous);
+    expect(
+      sessionLinkHolds(
+        [matching, { workflowId: WF, prNumber: 99999, temporalRunId: RUN, ended: true }],
+        WF,
+        3137,
+        RUN,
+      ),
+    ).toBe(false);
+    expect(
+      sessionLinkRefusal(
+        [
+          { workflowId: WF, prNumber: 3137, temporalRunId: RUN, ended: true },
+          { workflowId: WF, prNumber: 99999, temporalRunId: RUN, ended: true },
+        ],
+        WF,
+        3137,
+        RUN,
+      ),
+    ).toContain('不能任取一条');
     expect(sessionLinkHolds([matching, { ...otherPr, ended: false }], WF, 3137, RUN)).toBe(false);
     expect(sessionLinkHolds([matching], WF, 3137, RUN)).toBe(true);
+    expect(
+      sessionLinkHolds(
+        [matching, { workflowId: WF, prNumber: 3137, temporalRunId: null, ended: true }],
+        WF,
+        3137,
+        RUN,
+      ),
+    ).toBe(true);
     expect(
       sessionLinkHolds(
         [matching, { workflowId: WF, prNumber: null, temporalRunId: null, ended: true }],
@@ -228,14 +258,12 @@ describe('decideCorrection', () => {
     ).toBe(true);
     expect(
       sessionLinkHolds(
-        [matching, { workflowId: `${WF}:r2`, prNumber: 9, temporalRunId: null, ended: true }],
+        [matching, { workflowId: `${WF}:r2`, prNumber: 99999, temporalRunId: null, ended: true }],
         WF,
         3137,
         RUN,
       ),
     ).toBe(true);
-
-    expect(reason('founder', req, snap({ sessions: [matching, otherPr] }))).toContain('矛盾');
 
     const identity = correctionIdentity(req, TASK);
     const receipt = {
@@ -252,7 +280,10 @@ describe('decideCorrection', () => {
       }),
     );
     expect(repeat.ok).toBe(false);
-    if (!repeat.ok) expect(repeat.reason).toContain('矛盾');
+    if (!repeat.ok) {
+      expect(repeat.reason).toContain('歧义');
+      expect(repeat.reason).toContain('不能当作同一次执行的证据');
+    }
   });
 
   it('镜像没有不挡；对不上就拒绝。空的 issueRefs 不是矛盾', () => {

@@ -95,12 +95,15 @@ describe('内存版受管纠正', () => {
       endedAt: WHEN,
       outcome: 'done',
       workflowId: 'task:thoerwink8/fleet-dao#3114',
-      prNumber: 1,
+      prNumber: 99999,
     });
     expect(await memory.casCorrectMerged(input)).toBe('stale');
     expect(memory.data.tasks[0]?.state).toBe('stopped');
     expect(memory.data.taskClosures[0]?.phase).toBe('abandoned');
     expect(memory.data.audit).toEqual([]);
+    expect(memory.data.segmentRuns.map((run) => run.prNumber).sort((a, b) => (a ?? 0) - (b ?? 0))).toEqual([
+      3137, 99999,
+    ]);
   });
 
   it('开着的会话或更新时间变了就不写', async () => {

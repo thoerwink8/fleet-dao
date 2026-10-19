@@ -11,7 +11,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - `ci-policy-bridge.ts`、`ci-policy-public.ts`：受管公开仓 DB 策略只读协议与 source publisher。精确 GET 挂在 session 前，严格核 GitHub 当前 public/数字身份；协议在 shared 的 `ci-policy-bridge.ts`，独立于浏览器 FleetApi，路由契约测试仍逐条登记。私有 force 原路径，私有 off 明确不支持。
 - `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
 - `historical-audit` 管理命令从 stdin 收历史通知审计 JSON，现读 GitHub PR/head 与证据 issue，再以真实 ops 身份原子处理通知、记审计。结论只允许 `historical_unproven`，不能作为正常队列账或创始人批准；入口在 `src/historical-audit-cli.ts`。
-- `fleet-api task correct-merged`（`task-correct-merged-cli.ts`）：已经结束、误记 abandoned 的真实已合任务。不带 `--apply` 只预检；`--apply` 再核对仓、单、PR、头、合并提交、原工作流和原 run，经 Store 同一事务改成 done/merged 并写操作记录。同一工作流下另有不同 PR 的会话算证据矛盾，纠正和重复调用都拒绝，不能靠一条匹配记录或已有回执放行。不发信号、不重开 issue、不改待验责任。操作者只认 `FLEET_OPS_OPERATOR`。
+- `fleet-api task correct-merged`（`task-correct-merged-cli.ts`）：已经结束、误记 abandoned 的真实已合任务。不带 `--apply` 只预检；`--apply` 再核对仓、单、PR、头、合并提交、原工作流和原 run，经 Store 同一事务改成 done/merged 并写操作记录。同一工作流下另有不同非空 PR 的会话算归属歧义，纠正和重复调用都拒绝，不能靠一条匹配记录或已有回执放行；旧行没记 temporal run 时不把它们说成同一次执行。二次核对之后事务里才看到的冲突会话拒绝且不写。不发信号、不重开 issue、不改待验责任。操作者只认 `FLEET_OPS_OPERATOR`。
 
 ## 测试
 

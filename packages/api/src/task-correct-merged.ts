@@ -6,7 +6,7 @@ import {
   type CorrectMergedAuditReceipt,
   type CorrectMergedMirror,
   type CorrectMergedSessionLink,
-  sessionLinkHolds,
+  sessionLinkRefusal,
 } from '@fleet-dao/db';
 import { parseTaskWorkflowId } from '@fleet-dao/shared';
 import { generationLife } from '@fleet-dao/shared/task-redo';
@@ -220,9 +220,8 @@ export function decideCorrection(
   if (result.prNumber !== req.prNumber || result.head.toLowerCase() !== req.head.toLowerCase()) {
     return refuse('原执行的 PR 或 head 与请求不一致，不能用别的交付来纠正');
   }
-  if (!sessionLinkHolds(facts.sessions, req.workflowId, req.prNumber, req.runId)) {
-    return refuse('受管会话账对不上这次交付（无证据、run 记成了别的，或同一工作流下有矛盾的 PR）');
-  }
+  const sessionGap = sessionLinkRefusal(facts.sessions, req.workflowId, req.prNumber, req.runId);
+  if (sessionGap) return refuse(sessionGap);
   if (!facts.issue) return refuse('读不到这张 issue，不能确认编号属于这个仓');
   if (!sameRepo(facts.issue.repo, req.repo) || facts.issue.number !== req.issueNumber) {
     return refuse('GitHub 上的 issue 仓或编号与请求不一致（错仓或错单）');

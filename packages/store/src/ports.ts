@@ -456,7 +456,8 @@ export interface OpsStore {
   }): Promise<import('@fleet-dao/db').CorrectMergedLedger | null>;
   /**
    * 同一事务：任务行仍是引擎的 stopped/abandoned、更新时间没变、没有开着的会话、会话账仍钉着这次交付时，
-   * 改成 done/merged 并写操作记录。不改 runs、不改 PR 镜像、不改验收责任。对不上回 stale，不写。
+   * 改成 done/merged 并写操作记录。不改 runs、不改 PR 镜像、不改验收责任。同一工作流另有不同非空 PR
+   * （含旧行没记 temporal run 的混合 PR）或核对之后才出现的冲突会话，回 stale，不写。
    * 操作记录写不进抛错，任务行一起回到原样。时钟用 Store 自己的。
    */
   casCorrectMerged(
