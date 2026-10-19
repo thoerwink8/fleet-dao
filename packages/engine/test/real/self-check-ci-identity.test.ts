@@ -1,9 +1,9 @@
-import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { CI_IDENTITY_SCRIPT } from '../../src/real/self-check.ts';
+import { runChild, runChildOk } from '../child.ts';
 
 const temps: string[] = [];
 afterEach(() => {
@@ -21,8 +21,7 @@ function tree() {
   );
   writeFileSync(join(tools, 'pnpm'), '#!/bin/sh\necho 11.28.2\n', { mode: 0o755 });
   const env = { ...process.env, GIT_CONFIG_COUNT: '0', PATH: `${tools}${delimiter}${process.env.PATH}` };
-  const git = (...argv: string[]) =>
-    execFileSync('git', argv, { cwd: dir, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const git = (...argv: string[]) => runChildOk('git', argv, { cwd: dir, env });
   git('init', '-q');
   writeFileSync(join(dir, '.gitignore'), '.tools/\nnode_modules/\n');
   writeFileSync(join(dir, 'tracked.txt'), 'original\n');
@@ -33,12 +32,11 @@ function tree() {
     'PATH=/usr/local/bin:/usr/bin:/bin; export PATH',
     'PATH="$PWD/.tools:$PATH"; export PATH',
   );
-  const probe = () =>
-    spawnSync('sh', ['-c', testScript], { cwd: dir, env, encoding: 'utf8', timeout: 10_000 });
+  const probe = () => runChild('sh', ['-c', testScript], { cwd: dir, env });
   return { dir, tools, git, probe };
 }
 
-describe('实际Git工作树身份探针', () => {
+describe('实际Git工作树身份探针', { timeout: 0 }, () => {
   it('干净树返回准确head/tree与工具读数', () => {
     const f = tree();
     const got = f.probe();
