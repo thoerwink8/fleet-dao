@@ -155,7 +155,7 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     ]);
   });
 
-  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 adapters 和 core、agents 读 db、agents-sync 和 conventions），不往上、不顺依赖往下传 TEST_READS', () => {
+  it('源码闭包：单元自己 + 向下依赖 + TEST_READS（api 读 web、db 读 adapters 和 core、agents 读 db、agents-sync、conventions 和 core），不往上、不顺依赖往下传 TEST_READS', () => {
     expect(sourceClosure(GRAPH, ['api'])).toEqual(['api', 'db', 'shared', 'web']);
     // db 读 adapters 的夹具和 core 的告警文案（TEST_READS）；假依赖图里 adapters 没有下游
     expect(sourceClosure(GRAPH, ['db'])).toEqual(['adapters', 'core', 'db', 'shared']);
@@ -164,9 +164,9 @@ describe('这一台的文件清单：只认测试文件，别的不猜', () => {
     expect(sourceClosure(GRAPH, ['engine'])).not.toContain('web');
     // agents 不在依赖图里，但 agents/test/france.test.ts 直接读 shared 的源码：shared 每一组都带（UNIVERSAL_PACKAGES）；
     // agents/test/worker.test.ts 读 db 的路由骨架，prompt-log.rules.test.ts 读 agents-sync 的 targets.ts，
-    // project-subagents.rules.test.ts 读 conventions 的 standard-paths.json（TEST_READS）。
-    // db 读 adapters、core 是 db 测试自己的事：agents 的闭包里不带它们
-    expect(sourceClosure(GRAPH, ['agents'])).toEqual(['agents-sync', 'conventions', 'db', 'shared']);
+    // project-subagents.rules.test.ts 读 conventions 的 standard-paths.json，france.test.ts 直接读 core 的空闲判据和自测预算。
+    // db 读 adapters 是 db 测试自己的事：agents 的闭包里不带 adapters。
+    expect(sourceClosure(GRAPH, ['agents'])).toEqual(['agents-sync', 'conventions', 'core', 'db', 'shared']);
   });
 
   it('UNIVERSAL_PACKAGES 对得上 ci-plan.ts：PATH_RULES 里这些包一改就是全跑', () => {

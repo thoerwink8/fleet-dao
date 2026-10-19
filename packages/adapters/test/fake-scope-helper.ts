@@ -27,6 +27,9 @@ if (action === 'capabilities') {
       ],
     }),
   );
+} else if (action === 'cleanup-status') {
+  process.stdout.write(process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT ?? '');
+  process.exit(Number(process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT ?? '0'));
 } else if (action === 'run') {
   const at = rest.indexOf('--');
   const cwdAt = rest.indexOf('--cwd');

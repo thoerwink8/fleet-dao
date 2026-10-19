@@ -39,6 +39,7 @@ export function sameResolutionAudit(a: NewAuditEntry, b: NewAuditEntry): boolean
     a.via === b.via &&
     a.ok === b.ok &&
     isDeepStrictEqual(a.actor, b.actor) &&
+    isDeepStrictEqual(a.before, b.before) &&
     isDeepStrictEqual(a.after, b.after) &&
     a.reason === b.reason
   );

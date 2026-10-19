@@ -25,6 +25,7 @@ import {
 import {
   baseWorkflowIdOf,
   checkoutAlertKeyOf,
+  checkoutAuditProblem,
   checkoutNotificationProblem,
   checkoutRunProblem,
 } from './checkout-history-logic.ts';
@@ -67,7 +68,6 @@ import {
   readWorktreeInventoryPayload,
 } from './node-logic.ts';
 import {
-  HISTORICAL_CHECKOUT_ACTION,
   HISTORICAL_CHECKOUT_ACTOR,
   matchesNotification,
   sameResolutionAudit,
@@ -389,10 +389,14 @@ export function createMemoryStore(
       notification.raisedAt === undefined
     )
       throw new Error('原 checkout 通知不存在、不是报警、代次或 raisedAt 不匹配');
-    const notificationProblem = checkoutNotificationProblem(notification, input);
-    if (notificationProblem) throw new Error(notificationProblem);
     const actualRepo = data.repos.find((r) => `${r.owner}/${r.name}` === input.repo);
     if (!actualRepo) throw new Error('仓身份读不到或不完整');
+    const notificationProblem = checkoutNotificationProblem(notification, {
+      ...input,
+      repo: `${actualRepo.owner}/${actualRepo.name}`,
+      pr: input.pr,
+    });
+    if (notificationProblem) throw new Error(notificationProblem);
     const task = data.tasks.find(
       (t) => t.id === input.taskId && t.repoId === actualRepo.id && t.issueNumber === input.issueNumber,
     );
@@ -406,7 +410,7 @@ export function createMemoryStore(
       );
     });
     if (!run) throw new Error('原执行 run 不存在或不属于这张任务');
-    const runProblem = checkoutRunProblem(run, input);
+    const runProblem = checkoutRunProblem(run, { ...input, issueNumber: input.issueNumber });
     if (runProblem) throw new Error(runProblem);
     const baseWorkflowId = baseWorkflowIdOf(input.workflowId);
     if (baseWorkflowId !== taskWorkflowId(actualRepo, task.issueNumber))
@@ -801,15 +805,7 @@ export function createMemoryStore(
         facts.pullRequest.headSha !== input.head
       )
         return 'conflict';
-      if (
-        entry.actor.kind !== HISTORICAL_CHECKOUT_ACTOR.kind ||
-        entry.actor.id !== HISTORICAL_CHECKOUT_ACTOR.id ||
-        entry.action !== HISTORICAL_CHECKOUT_ACTION ||
-        entry.target !== `notification:${input.notificationId}` ||
-        entry.via !== 'ops' ||
-        !entry.ok
-      )
-        return 'conflict';
+      if (checkoutAuditProblem(input, facts, entry)) return 'conflict';
       checkAudit(entry);
       if (!isNotificationOpen(n)) {
         const same =

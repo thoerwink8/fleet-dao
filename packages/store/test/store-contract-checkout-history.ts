@@ -64,6 +64,7 @@ function data(opts: { run?: RunPatch; notification?: NotificationPatch } = {}): 
       title: '冷验收放不进 PR 头的完整检出（从镜像 git archive）',
       body: alertBody(),
       link: LINK,
+      taskId: IDS.task13,
       createdAt: RAISED_AT,
       raisedAt: RAISED_AT,
       dedupeKey: KEY,
@@ -130,7 +131,24 @@ const auditFor = (input: HistoricalCheckoutArchiveInput): NewAuditEntry => ({
   via: 'ops',
   ok: true,
   reason: input.reason,
-  after: { ...input, conclusion: 'historical_unproven' },
+  before: {
+    notificationId: input.notificationId,
+    dedupeKey: input.dedupeKey,
+    raisedAt: input.raisedAt,
+    repo: input.repo,
+    taskId: input.taskId,
+    workflowId: input.workflowId,
+    runId: input.runId,
+    temporalRunId: input.temporalRunId,
+    pr: input.pr,
+    head: input.head,
+  },
+  after: {
+    ...input,
+    originalTitle: '冷验收放不进 PR 头的完整检出（从镜像 git archive）',
+    runFailureReason: '缺对象',
+    conclusion: 'historical_unproven',
+  },
 });
 
 async function notificationOf(store: Store, id: string) {
@@ -270,10 +288,25 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
       }
     });
 
+    it('通知必须绑定原任务和对应 PR 链接，不能用正文相似凑关联', async () => {
+      for (const notification of [
+        { taskId: IDS.task12 },
+        { link: 'https://github.com/example/canary/pull/40' },
+      ] as NotificationPatch[]) {
+        const other = await make(data({ notification }));
+        await expect(other.store.readHistoricalCheckout(baseInput())).rejects.toThrow();
+        expect(await other.store.archiveHistoricalCheckout(baseInput(), auditFor(baseInput()))).toBe(
+          'conflict',
+        );
+        expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
+      }
+    });
+
     it('原 run 不是 verify 段 / 没有终态 / 不是同一 PR：拒绝', async () => {
       for (const run of [
         { segment: 'manual' },
         { endedAt: undefined, outcome: undefined },
+        { issueNumber: 12 },
         { prNumber: 38 },
         { workflowId: 'task:example/canary#13:r2' },
       ] as RunPatch[]) {
@@ -283,6 +316,25 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
         expect(await other.store.archiveHistoricalCheckout(input, auditFor(input))).toBe('conflict');
         expect((await notificationOf(other.store, NID)).resolvedAt).toBeUndefined();
       }
+    });
+
+    it('幂等重放必须是同一份完整审计，篡改 before 或结论证据都拒绝', async () => {
+      const input = baseInput();
+      const audit = auditFor(input);
+      expect(await store.archiveHistoricalCheckout(input, audit)).toBe('ok');
+      expect(
+        await store.archiveHistoricalCheckout(input, {
+          ...audit,
+          before: { ...(audit.before as Record<string, unknown>), head: 'c'.repeat(40) },
+        }),
+      ).toBe('conflict');
+      expect(
+        await store.archiveHistoricalCheckout(input, {
+          ...audit,
+          after: { ...(audit.after as Record<string, unknown>), evidence: '另一份证据' },
+        }),
+      ).toBe('conflict');
+      expect(await auditsOf(store, NID)).toHaveLength(1);
     });
 
     it('任务还有活执行（task_id 记了的 / 老兼容未记 task_id 的 / 重做代次的）：预检列出、归档 conflict', async () => {

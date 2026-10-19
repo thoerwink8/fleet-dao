@@ -61,6 +61,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lt, ne, or, sql } from 'drizzl
 import {
   baseWorkflowIdOf,
   checkoutAlertKeyOf,
+  checkoutAuditProblem,
   checkoutNotificationProblem,
   checkoutRunProblem,
 } from './checkout-history-logic.ts';
@@ -89,7 +90,6 @@ import {
   readWorktreeInventoryPayload,
 } from './node-logic.ts';
 import {
-  HISTORICAL_CHECKOUT_ACTION,
   HISTORICAL_CHECKOUT_ACTOR,
   matchesNotification,
   sameResolutionAudit,
@@ -335,6 +335,7 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
       .innerJoin(repos, eq(repos.id, tasks.repoId))
       .where(eq(tasks.id, input.taskId));
     if (!notification || !taskRow) throw new Error('历史 checkout 通知或任务不存在');
+    const repoName = `${taskRow.repo.owner}/${taskRow.repo.name}`;
     const notificationRaisedAt = isoOpt(notification.raisedAt);
     if (
       notification.level !== 'alert' ||
@@ -352,9 +353,16 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     ) {
       throw new Error('历史 checkout 通知已换代或身份不完整');
     }
-    const notificationProblem = checkoutNotificationProblem(notification, input);
+    const notificationProblem = checkoutNotificationProblem(
+      {
+        title: notification.title,
+        body: notification.body,
+        taskId: notification.taskId ?? undefined,
+        link: opt(notification.link),
+      },
+      { ...input, repo: repoName, pr: input.pr },
+    );
     if (notificationProblem) throw new Error(`历史 checkout ${notificationProblem}`);
-    const repoName = `${taskRow.repo.owner}/${taskRow.repo.name}`;
     if (repoName !== input.repo || taskRow.task.issueNumber !== input.issueNumber) {
       throw new Error('历史 checkout 仓或任务单号不匹配');
     }
@@ -376,11 +384,12 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         segment: run.segment,
         workflowId: opt(run.workflowId),
         temporalRunId: opt(run.temporalRunId),
+        issueNumber: opt(run.issueNumber),
         endedAt: isoOpt(run.endedAt),
         outcome: opt(run.outcome),
         prNumber: opt(run.prNumber),
       },
-      input,
+      { ...input, issueNumber: input.issueNumber },
     );
     if (runProblem) throw new Error(`历史 checkout ${runProblem}`);
     const activeRunIds = candidateRuns.filter((r) => r.endedAt === null).map((r) => r.id);
@@ -853,14 +862,8 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
         ) {
           return 'conflict';
         }
-        if (
-          entry.actor.kind !== HISTORICAL_CHECKOUT_ACTOR.kind ||
-          entry.actor.id !== HISTORICAL_CHECKOUT_ACTOR.id ||
-          entry.action !== HISTORICAL_CHECKOUT_ACTION ||
-          entry.target !== `notification:${input.notificationId}` ||
-          entry.via !== 'ops' ||
-          !entry.ok
-        ) {
+        const auditProblem = checkoutAuditProblem(input, facts, entry);
+        if (auditProblem) {
           return 'conflict';
         }
         const auditRows = await tx

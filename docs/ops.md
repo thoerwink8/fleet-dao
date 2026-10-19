@@ -612,6 +612,7 @@ order by started_at desc limit 6;"
 - 团队群：机器人所在的群只有一个，那就是团队群（和 `deploy/hk.sh` 补 `FEISHU_TEAM_CHAT_ID` 同一个判法），不另配群号。机器人不在群里、在好几个群里：记「没配」（设置 `feishu.push`，`why` 写清），看门狗马上报。飞书免费版每月 1 万次调用：没东西要推就不调，不另记用量（原来记用量的 `feishu_usage_*` 表随网关一起删了，#2226）。
 - 看通不通：`bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api feishu-push status`（推送状态、该推没送到几条、最近一次送到、结论）；真发一条：`… fleet-api feishu-push test`（建一条测试提醒，等在跑的后端推出去，读回送达记录，送到了退出 0；测试提醒随后标成已处理）。库里：`runuser -u fleet -- psql -d fleet -c "select n.created_at, left(n.title, 40), d.attempts, d.delivered_at, left(d.last_error, 80) from notifications n left join notification_deliveries d on d.notification_id = n.id order by n.created_at desc limit 20"`；日志 `journalctl -u fleet-api --since -1h | grep 飞书推送`。
 - 现在要人看的事一份结论（#2370，只读）：`bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api attention --json` 打一行 JSON——`healthz`（后端自己问一次 `/healthz`，地址取 `api.env` 的 `FLEET_COCKPIT_LISTEN`，连不上状态码是 0）、`notes`（开着、到点且按上面推送分级该推的提醒，判法就是 `feishuPushableSince`）、`feishuPushProblem`、`dailyBriefProblem`（通着、好着是 null）、`localOrphans`（贴了「本机做」超过 24 小时还没人领的单，对账写的名单，这里不另判；还没写过是空数组）；读不成打 `{"ok":false,…}` 退出码 1，参数不对退出码 2。指挥官巡检只读它。
+- 即时空闲与推送提醒分开：`fleet-api attention --json` 的 `runningIdle` 版本 1 返回采集时刻、完整任务身份/会话数及 core 唯一 idle 判据的结论；普通任务和 selfCheck 共用正式预算。法国诊断只读该结论，不从展示列表的条数、推送通知或心跳推断恢复；旧版本、读失败、坏形状、不完整或过旧显示未知，其他诊断块照常保留。`notes` 与巡检通知计数仍是推送白名单口径。
 - 推送渠道自己坏了，靠推送报不出来：看门狗（下面）和指挥官巡检（`patrol.mjs` 读 `fleet-api attention --json` 里的 `feishuPushProblem`）各看一遍，不通进「要你拍」、巡检出 ALERT。
 
 每日简报（决定 0096；不即时推的都在这里）：

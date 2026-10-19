@@ -12,6 +12,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - `packages/api/bin/`：法国上的管理命令 `fleet-api`，用法见 ops 第九节「发布应用（deploy/release.sh）」前后的 `fleet-api` 段落。
 - `historical-audit` 管理命令从 stdin 收历史通知审计 JSON，现读 GitHub PR/head 与证据 issue，再以真实 ops 身份原子处理通知、记审计。结论只允许 `historical_unproven`，不能作为正常队列账或创始人批准；入口在 `src/historical-audit-cli.ts`。
 - `checkout-history` 是 checkout 失败卡的私有 ops 管理命令：默认从 stdin 读精确身份做只读预检，只有显式 `--archive` 且提交完整快照、操作者、原因、证据和 `conclusion: "historical_unproven"` 才能原子撤旧通知并记审计；不证明检出恢复，不改任务、run、PR 或验收责任。
+- `attention --json` 的 `runningIdle` 是版本化即时只读结论：完整 `listRunningEngineTasks` 与 core 唯一 idle 判据，带任务身份、完整 openRuns 和采集时刻。`notes` 是按推送白名单到点的通知，两者不能相互替代；读取失败退出 1，诊断不回退为展示会话计数。
 
 ## 测试
 

@@ -14,12 +14,13 @@ import { renderApp } from './harness';
 
 afterEach(cleanup);
 
+// 「用哪个模型」在「用量和模型」里，默认收起（#3228），地址带 ?usage=open 打开
 function open(route: string, api?: FleetApi) {
   return renderApp(
     <Routes>
       <Route path="/tasks/:taskId" element={<TaskPage />} />
     </Routes>,
-    { route, ...(api ? { api } : {}) },
+    { route: `${route}${route.includes('?') ? '&' : '?'}usage=open`, ...(api ? { api } : {}) },
   );
 }
 
