@@ -139,9 +139,14 @@ export interface TaskStatus {
   closedIssueClose?: { version: 1; token: ClosedIssueHoldToken | null };
   /**
    * 体量关口重评（#3249）：只有此刻确实停在体量预算停点、没有活动在跑、没人在重评时 identity 才非空。旧 worker 缺此字段＝不支持，
-   * 调用方不能凭自由文本的停下原因猜身份。
+   * 调用方不能凭自由文本的停下原因猜身份。resumed 是最近一次可信重评放行绑定的停点、头和 base（放行后停点身份清空，
+   * 同一请求重发凭它拿幂等回执；它不放行任何别的头）。
    */
-  lineBudgetPark?: { version: 1; identity: LineBudgetParkIdentity | null };
+  lineBudgetPark?: {
+    version: 1;
+    identity: LineBudgetParkIdentity | null;
+    resumed?: { identity: LineBudgetParkIdentity; head: string; base: string } | null;
+  };
   /** Separate from closed-issue abandonment: real merged PR, even when acceptance keeps its issue open. */
   mergedTaskClose?: {
     version: 1;
@@ -210,6 +215,11 @@ export interface LineBudgetParkIdentity {
   rawAddedLines: number;
   chargeableAddedLines: number;
   budget: number;
+  /**
+   * 停下时那次测量的固定 base（头相对树里钉的主线的 merge-base，来自 readDelivery 的 lineBudgetMeasurement）；
+   * 停下时没有测量（老单、别的仓）为 null，这时重评活动现算 merge-base 核对。重评只认这个 base，不能换旧 base 改测量范围。
+   */
+  base: string | null;
 }
 
 /** 预检用 check（只测不放行）；执行用 resume（测过且不超原预算才放行这一份交付）。 */
@@ -220,7 +230,7 @@ export interface RemeasureLineBudgetCommand {
   repo: { owner: string; name: string };
   taskId: string;
   workflowId: string;
-  /** 精确的头和固定的测量 base（头相对主线的 merge-base，必须是头的祖先）。 */
+  /** 精确的头和固定的测量 base：必须正是头相对树里钉的主线的 merge-base；停点身份带 base 时还必须等于它。 */
   head: string;
   base: string;
   by: string;

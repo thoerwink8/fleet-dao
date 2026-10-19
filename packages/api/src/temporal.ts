@@ -150,6 +150,8 @@ interface ParkIdentityWire {
   rawAddedLines: number;
   chargeableAddedLines: number;
   budget: number;
+  /** 停下时那次测量的固定 base；停下时没测量为 null。 */
+  base: string | null;
 }
 
 export const parkLabel = (id: Pick<ParkIdentityWire, 'parks' | 'generation' | 'continued'>): string =>
@@ -188,8 +190,15 @@ export function createTemporalLineBudgetRemeasure(
       if (isUnavailable(err)) throw new WorkflowUnavailableError('Temporal 连不上或没回应', err);
       throw err;
     }
-    const field = (status as { lineBudgetPark?: { version?: unknown; identity?: ParkIdentityWire | null } })
-      ?.lineBudgetPark;
+    const field = (
+      status as {
+        lineBudgetPark?: {
+          version?: unknown;
+          identity?: ParkIdentityWire | null;
+          resumed?: { identity: ParkIdentityWire; head: string; base: string } | null;
+        };
+      }
+    )?.lineBudgetPark;
     if (field?.version !== 1) {
       return {
         ok: false,
@@ -197,6 +206,80 @@ export function createTemporalLineBudgetRemeasure(
         detail: '这条工作流的 worker 不报体量停点身份（旧版本），不能重评',
       };
     }
+    const send = async (
+      identity: ParkIdentityWire,
+      park: string,
+      current?: { head: string; rawAddedLines: number; chargeableAddedLines: number; budget: number },
+    ): Promise<LineBudgetRemeasureResponse> => {
+      let result: unknown;
+      try {
+        result = await client.connection.withDeadline(Date.now() + REMEASURE_DEADLINE_MS, () =>
+          handle.executeUpdate(REMEASURE_UPDATE_NAME, {
+            args: [
+              {
+                version: 1,
+                mode: request.mode,
+                identity,
+                repo: request.repo,
+                taskId: request.taskId,
+                workflowId: request.workflowId,
+                head: request.head,
+                base: request.base,
+                by: request.by,
+              },
+            ],
+          }),
+        );
+      } catch (err) {
+        if (isGone(err)) throw new WorkflowGoneError(request.workflowId, err);
+        if (isUnavailable(err)) throw new WorkflowUnavailableError('Temporal 连不上或没回应', err);
+        throw err;
+      }
+      const r = result as {
+        outcome?: string;
+        receipt?: LineBudgetRemeasureReceiptView;
+        reason?: string;
+        detail?: string;
+      };
+      const where = current ? { park, current } : { park };
+      if (
+        (r.outcome === 'eligible' || r.outcome === 'resumed' || r.outcome === 'already_resumed') &&
+        r.receipt
+      ) {
+        const g = r.receipt;
+        return {
+          ok: true,
+          outcome: r.outcome,
+          park,
+          receipt: {
+            head: g.head,
+            base: g.base,
+            rawAddedLines: g.rawAddedLines,
+            verifiedGeneratedLines: g.verifiedGeneratedLines,
+            chargeableAddedLines: g.chargeableAddedLines,
+            budget: g.budget,
+            reason: g.reason,
+          },
+        };
+      }
+      if (r.outcome === 'refused') {
+        return { ok: false, reason: String(r.reason), detail: String(r.detail ?? ''), ...where };
+      }
+      // 回执认不出：不当成功
+      return { ok: false, reason: 'unknown', detail: '工作流的回执认不出，当作没放行', ...where };
+    };
+    // 同一已放行请求重发：放行后停点身份已清空（或已是新停点），按工作流报的放行绑定（同 run、同停点编号、同头、同 base）
+    // 原样带回，由工作流自己核对并回幂等回执；对不上就走下面的现停点核对，不放行别的头。
+    const resumed = field.resumed;
+    if (
+      request.mode === 'resume' &&
+      resumed &&
+      resumed.identity.runId === request.runId &&
+      parkLabel(resumed.identity) === request.park &&
+      resumed.head === request.head &&
+      resumed.base === request.base
+    )
+      return send(resumed.identity, parkLabel(resumed.identity));
     const id = field.identity;
     if (!id) {
       return {
@@ -224,61 +307,16 @@ export function createTemporalLineBudgetRemeasure(
       };
     if (id.head !== request.head)
       return { ok: false, reason: 'changed', detail: '停点上的交付头与请求的 head 不同', park, current };
-    let result: unknown;
-    try {
-      result = await client.connection.withDeadline(Date.now() + REMEASURE_DEADLINE_MS, () =>
-        handle.executeUpdate(REMEASURE_UPDATE_NAME, {
-          args: [
-            {
-              version: 1,
-              mode: request.mode,
-              identity: id,
-              repo: request.repo,
-              taskId: request.taskId,
-              workflowId: request.workflowId,
-              head: request.head,
-              base: request.base,
-              by: request.by,
-            },
-          ],
-        }),
-      );
-    } catch (err) {
-      if (isGone(err)) throw new WorkflowGoneError(request.workflowId, err);
-      if (isUnavailable(err)) throw new WorkflowUnavailableError('Temporal 连不上或没回应', err);
-      throw err;
-    }
-    const r = result as {
-      outcome?: string;
-      receipt?: LineBudgetRemeasureReceiptView;
-      reason?: string;
-      detail?: string;
-    };
-    if (
-      (r.outcome === 'eligible' || r.outcome === 'resumed' || r.outcome === 'already_resumed') &&
-      r.receipt
-    ) {
-      const g = r.receipt;
+    // 停下时有测量就钉死那次的 base（null＝停下时没测量，由活动现算 merge-base 核对）
+    if (id.base !== null && id.base !== undefined && id.base !== request.base)
       return {
-        ok: true,
-        outcome: r.outcome,
+        ok: false,
+        reason: 'changed',
+        detail: `base 不是停下时测量的固定 base ${id.base}`,
         park,
-        receipt: {
-          head: g.head,
-          base: g.base,
-          rawAddedLines: g.rawAddedLines,
-          verifiedGeneratedLines: g.verifiedGeneratedLines,
-          chargeableAddedLines: g.chargeableAddedLines,
-          budget: g.budget,
-          reason: g.reason,
-        },
+        current,
       };
-    }
-    if (r.outcome === 'refused') {
-      return { ok: false, reason: String(r.reason), detail: String(r.detail ?? ''), park, current };
-    }
-    // 回执认不出：不当成功
-    return { ok: false, reason: 'unknown', detail: '工作流的回执认不出，当作没放行', park, current };
+    return send(id, park, current);
   };
 }
 

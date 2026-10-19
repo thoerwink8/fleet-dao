@@ -250,6 +250,22 @@ describe('体量关口重评活动（#3249）', { timeout: 30000 }, () => {
     });
   });
 
+  it('base 是头的祖先、也在主线上，但不是固定的 merge-base（更早的旧 base）：拒绝，不换测量范围', async () => {
+    const f = await ready();
+    f.git('update-ref', 'refs/remotes/origin/main', f.head); // 主线前进到原来的头
+    f.put('later.ts', 'export const later = 1;\n');
+    const head = f.commit();
+    // 原始新增行按旧 base 数，行数核对也对得上：拦下它的只能是固定 base 核对
+    const older = await addedLinesAgainst(f.tree, f.base, head);
+    expect(
+      (await remeasureLineBudget(f.tree, repo, { head, base: f.base, rawAddedLines: older })).budgetRemeasure,
+    ).toMatchObject({ status: 'refused', reason: 'base' });
+    const fixed = await addedLinesAgainst(f.tree, f.head, head);
+    expect(
+      (await remeasureLineBudget(f.tree, repo, { head, base: f.head, rawAddedLines: fixed })).budgetRemeasure,
+    ).toMatchObject({ status: 'measured', base: f.head, head });
+  });
+
   it('原始新增行与停下时不同、不适用的仓、读失败：回 refused 或抛错，不当 0', async () => {
     const f = await ready();
     expect(

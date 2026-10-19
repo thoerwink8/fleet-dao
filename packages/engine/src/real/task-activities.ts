@@ -134,13 +134,17 @@ export async function remeasureLineBudget(
     return refused('dirty', `工作树有没提交的改动：${dirtyBefore.slice(0, 5).join('、')}`);
   if (!(await hasCommit(t, ask.base))) return refused('base', '树里没有这个 base 提交');
   if (!(await isAncestor(t, ask.base, ask.head))) return refused('base', 'base 不是 head 的祖先');
-  const onMainline = await gitInTree(
+  // 固定 base 只认「头相对树里钉的主线的 merge-base」（停下时原始新增行就按它数）：主线上更早的祖先也拒，不让换范围
+  const fixed = await gitInTree(
     t,
-    ['merge-base', '--is-ancestor', ask.base, mainlineRef(repo.defaultBranch)],
-    '核 base 在树里钉的主线上',
+    ['merge-base', mainlineRef(repo.defaultBranch), ask.head],
+    '算头相对树里钉的主线的 merge-base',
     { allow: [1] },
   );
-  if (onMainline.code !== 0) return refused('base', 'base 不在树里钉的主线历史上');
+  const mergeBase = fixed.code === 0 ? fixed.stdout.toString('utf8').trim() : '';
+  if (!FULL_SHA.test(mergeBase)) return refused('base', '头和树里钉的主线没有共同祖先');
+  if (mergeBase !== ask.base)
+    return refused('base', `base 不是头相对树里钉的主线的 merge-base（应为 ${mergeBase.slice(0, 12)}）`);
   const raw = await addedLinesAgainst(t, ask.base, ask.head);
   if (raw !== ask.rawAddedLines)
     return refused('raw', `原始新增行是 ${raw}，与停下时的 ${ask.rawAddedLines} 不同`);

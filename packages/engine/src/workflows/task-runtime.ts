@@ -401,6 +401,13 @@ export class TaskRuntime {
       lineBudgetPark: {
         version: 1,
         identity: this.running.size === 0 && !this.budgetRemeasuring ? this.parkIdentity() : null,
+        resumed: this.budgetResume
+          ? {
+              identity: { ...this.budgetResume.identity },
+              head: this.budgetResume.head,
+              base: this.budgetResume.base,
+            }
+          : null,
       },
       closedIssueClose: { version: 1, token: this.closeToken() },
       mergedTaskClose: {
@@ -874,6 +881,7 @@ export class TaskRuntime {
             rawAddedLines: budget.rawAddedLines,
             chargeableAddedLines: budget.chargeableAddedLines,
             budget: budget.budget,
+            base: budget.base,
           },
         }
       : null;
@@ -970,8 +978,10 @@ export class TaskRuntime {
       command.identity.runId !== info.runId
     )
       return refuse('identity', 'repo / task / workflow / run 与这条工作流对不上');
+    // 同一已放行请求重发（只认执行）：回绑定原停点、原头、原 base 的回执，不再测、不放行别的头
     const done = this.budgetResume;
     if (
+      command.mode === 'resume' &&
       done &&
       sameParkIdentity(done.identity, command.identity) &&
       done.head === command.head &&
@@ -982,6 +992,9 @@ export class TaskRuntime {
     const current = this.parkIdentity();
     if (!park || !current || !sameParkIdentity(current, command.identity) || command.head !== current.head)
       return refuse('stale', '不在这次体量停点（旧停点、已继续、已放行、换代、放弃或已结束）');
+    // 停下时有测量就钉死那次的 base：不能换另一个旧 base 改测量范围（没有时活动现算 merge-base 核对）
+    if (current.base !== null && command.base !== current.base)
+      return refuse('changed', `base 不是停下时测量的固定 base ${current.base}`);
     if (this.budgetRemeasuring || this.running.size > 0) return refuse('busy', '已有重评或活动在跑');
 
     this.budgetRemeasuring = true;

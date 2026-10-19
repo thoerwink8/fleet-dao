@@ -90,7 +90,8 @@ function measured(
   } as DeliveryRead;
 }
 
-function setup(remeasure: Remeasure, verifyFirstFails = false) {
+/** parkedBase：常规交付带一份没核实的测量（base 是它），停点身份就钉这个 base。 */
+function setup(remeasure: Remeasure, verifyFirstFails = false, parkedBase?: string) {
   const world = createFakeWorld();
   let regular = 0;
   const asks: ReadDeliveryInput['budgetRemeasure'][] = [];
@@ -107,11 +108,26 @@ function setup(remeasure: Remeasure, verifyFirstFails = false) {
         return remeasure(read.budgetRemeasure) as DeliveryRead;
       }
       regular += 1;
+      const head = fakeHead(100 + regular);
       return {
-        head: fakeHead(100 + regular),
+        head,
         commits: 1,
         changedFiles: ['packages/db/migrations/meta/0095_snapshot.json', 'packages/api/src/a.ts'],
         addedLines: RAW,
+        ...(parkedBase === undefined
+          ? {}
+          : {
+              lineBudgetMeasurement: {
+                version: 1,
+                base: parkedBase,
+                head,
+                rawAddedLines: RAW,
+                verifiedGeneratedLines: 0,
+                chargeableAddedLines: RAW,
+                verified: false,
+                reason: '停下时没核实',
+              },
+            }),
       };
     },
   });
@@ -133,6 +149,8 @@ async function parkedIdentity(h: WorkflowHandle, notParks?: number): Promise<Lin
     () => status(h),
     (x) => !!x.lineBudgetPark?.identity && x.lineBudgetPark.identity.parks !== notParks,
     '停在体量关口',
+    // 走到停点要两段会话、一次打回：整包并行跑、机器忙时 20 秒默认不够
+    60_000,
   );
   return s.lineBudgetPark?.identity as LineBudgetParkIdentity;
 }
@@ -196,7 +214,7 @@ function commandsOf(events: readonly HistoryEvent[]): string[] {
   });
 }
 
-describe('体量关口重评（#3249）', { timeout: 90_000 }, () => {
+describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
   it('8037 行生成折扣、实际计量 1513：预检只测不放行，执行只放行这一份交付，不设永久豁免；旧停点历史可达、整段可重放', async () => {
     const { world, tasks, asks } = setup((ask) => measured(ask), true);
     const i = input();
@@ -212,6 +230,7 @@ describe('体量关口重评（#3249）', { timeout: 90_000 }, () => {
           rawAddedLines: RAW,
           chargeableAddedLines: RAW,
           budget: DEFAULT_PR_LINE_BUDGET,
+          base: null, // 停下时没有测量：活动现算 merge-base 核对
         });
 
         const checked = await send(h, command(i, h, id, { mode: 'check' }));
@@ -230,6 +249,12 @@ describe('体量关口重评（#3249）', { timeout: 90_000 }, () => {
 
         const resumed = await send(h, command(i, h, id));
         expect(resumed.outcome).toBe('resumed');
+        // 放行绑定对外可读（同一请求重发凭它拿幂等回执），停点身份不再可用
+        expect((await status(h)).lineBudgetPark?.resumed).toEqual({
+          identity: id,
+          head: id.head,
+          base: BASE,
+        });
         // 这一份交付被推走；验收第一次不过，第 3 份交付没有折扣：必须重新计量并再次停下，没有永久豁免
         const next = await parkedIdentity(h, id.parks);
         expect(next.head).not.toBe(id.head);
@@ -353,7 +378,8 @@ describe('体量关口重评（#3249）', { timeout: 90_000 }, () => {
       (ask) => measured(ask, { measurement: { rawAddedLines: RAW + 1, chargeableAddedLines: 1514 } }),
     ];
     let n = 0;
-    const { world, tasks } = setup((ask) => (answers[n++] as Remeasure)(ask));
+    // 停下时那次测量的 base 是 BASE：停点身份钉住它
+    const { world, tasks } = setup((ask) => (answers[n++] as Remeasure)(ask), false, BASE);
     const i = input();
     await withWorker(
       env,
@@ -361,6 +387,13 @@ describe('体量关口重评（#3249）', { timeout: 90_000 }, () => {
       async (q) => {
         const h = await start(q, i);
         const id = await parkedIdentity(h);
+        expect(id.base).toBe(BASE);
+        // 换另一个（更早的）base 改测量范围：不进活动就拒
+        expect(await send(h, command(i, h, id, { base: fakeHead(3) }))).toMatchObject({
+          outcome: 'refused',
+          reason: 'changed',
+        });
+        expect(n).toBe(0);
         for (let k = 0; k < answers.length; k++) {
           const r = await send(h, command(i, h, id));
           expect(r).toMatchObject({ outcome: 'refused', reason: 'changed' });
@@ -383,6 +416,10 @@ describe('体量关口重评（#3249）', { timeout: 90_000 }, () => {
         }
         expect(await send(h, command(i, h, id, { head: fakeHead(555) }))).toMatchObject({ reason: 'stale' });
         expect(await send(h, command(i, h, { ...id, continued: 7 }))).toMatchObject({ reason: 'stale' });
+        // 身份里的 base 也是身份的一部分：改了就不是这次停点
+        expect(
+          await send(h, command(i, h, { ...id, base: fakeHead(3) }, { base: fakeHead(3) })),
+        ).toMatchObject({ reason: 'stale' });
         expect(n).toBe(answers.length);
         expect(world.count('pushBranch')).toBe(0);
         await h.signal(taskAbandonSignal, { by: 'frank', reason: '测试收场' });

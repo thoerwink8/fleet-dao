@@ -136,6 +136,7 @@ import {
   taskBranch,
 } from '../task-contract.ts';
 import { activitiesFor, iso, limitsFor } from './kit.ts';
+import { parkedMeasurementBase } from './task-budget-remeasure.ts';
 import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
 import { TaskRuntime } from './task-runtime.ts';
@@ -1101,6 +1102,7 @@ class TaskFlow {
             rawAddedLines: rawAdded,
             chargeableAddedLines: added,
             budget,
+            base: parkedMeasurementBase(delivery),
             worktreePath: wt.path,
           },
     );

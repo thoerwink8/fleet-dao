@@ -503,6 +503,7 @@ describe('Temporal 重评适配（#3249）', () => {
     rawAddedLines: 9550,
     chargeableAddedLines: 9550,
     budget: 3000,
+    base: BASE,
   };
   function client(status: unknown, update?: unknown) {
     const calls: { kind: string; name: string; args?: unknown[] }[] = [];
@@ -572,7 +573,35 @@ describe('Temporal 重评适配（#3249）', () => {
     expect(park.r).toMatchObject({ ok: false, reason: 'stale', park: '2.5.0' });
     const head = await run({ lineBudgetPark: { version: 1, identity } }, { head: 'f'.repeat(40) });
     expect(head.r).toMatchObject({ ok: false, reason: 'changed' });
-    for (const x of [old, none, park, head]) expect(x.c.calls.map((y) => y.kind)).toEqual(['query']);
+    // 停下时测量的固定 base 钉在身份里：换另一个（更早的）base 改测量范围，本地就拒
+    const base = await run({ lineBudgetPark: { version: 1, identity } }, { base: 'e'.repeat(40) });
+    expect(base.r).toMatchObject({ ok: false, reason: 'changed', detail: expect.stringContaining(BASE) });
+    for (const x of [old, none, park, head, base]) expect(x.c.calls.map((y) => y.kind)).toEqual(['query']);
+  });
+
+  it('同一已放行请求重发：停点身份已清空或换成新停点，按放行绑定带回原身份，拿工作流的幂等回执', async () => {
+    const resumed = { identity, head: HEAD, base: BASE };
+    const receipt = { outcome: 'already_resumed', receipt: { ...RECEIPT, identity } };
+    const next = { ...identity, parks: 3, head: 'a'.repeat(40) };
+    for (const now of [null, next]) {
+      const c = client({ lineBudgetPark: { version: 1, identity: now, resumed } }, receipt);
+      const got = await createTemporalLineBudgetRemeasure(c.client)(request);
+      expect(got).toMatchObject({ ok: true, outcome: 'already_resumed', park: '2.5.0' });
+      expect(c.calls.map((x) => x.kind)).toEqual(['query', 'update']);
+      expect(c.calls[1]?.args?.[0]).toMatchObject({ mode: 'resume', identity, head: HEAD, base: BASE });
+    }
+    // 预检、别的头、别的停点编号、别的 base 都不借这份绑定：按现停点核对，对不上就拒，不发 Update
+    for (const over of [
+      { mode: 'check' as const },
+      { head: 'f'.repeat(40) },
+      { park: '1.4.0' },
+      { base: 'e'.repeat(40) },
+    ]) {
+      const c = client({ lineBudgetPark: { version: 1, identity: null, resumed } }, receipt);
+      const got = await createTemporalLineBudgetRemeasure(c.client)({ ...request, ...over });
+      expect(got).toMatchObject({ ok: false, reason: 'stale' });
+      expect(c.calls.map((x) => x.kind)).toEqual(['query']);
+    }
   });
 
   it('工作流回拒绝或认不出的回执：都不当成功', async () => {

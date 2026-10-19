@@ -31,6 +31,8 @@ export interface LineBudgetParkInput {
   rawAddedLines: number;
   chargeableAddedLines: number;
   budget: number;
+  /** 停下时那次测量的固定 base（没有测量时 null）。 */
+  base: string | null;
   worktreePath: string;
 }
 
@@ -54,8 +56,16 @@ export function sameParkIdentity(a: LineBudgetParkIdentity, b: LineBudgetParkIde
     a.head === b.head &&
     a.rawAddedLines === b.rawAddedLines &&
     a.chargeableAddedLines === b.chargeableAddedLines &&
-    a.budget === b.budget
+    a.budget === b.budget &&
+    a.base === b.base
   );
+}
+
+/** 停下时那次测量的固定 base：测量和这份交付对得上（同头、同原始行、完整 sha）才认，否则 null（重评时现算 merge-base 核对）。 */
+export function parkedMeasurementBase(delivery: DeliveryRead): string | null {
+  const m = delivery.lineBudgetMeasurement;
+  if (m?.version !== 1 || m.head !== delivery.head || m.rawAddedLines !== delivery.addedLines) return null;
+  return typeof m.base === 'string' && SHA.test(m.base) ? m.base : null;
 }
 
 /** 请求的形状：缺字段、非完整 sha、模式不认都拒（不猜）。回 null＝形状对。 */
@@ -74,7 +84,8 @@ export function commandShapeProblem(command: unknown): string | null {
     !safeCount(id.chargeableAddedLines) ||
     !safeCount(id.budget) ||
     typeof id.head !== 'string' ||
-    !(id.prNumber === null || safeCount(id.prNumber))
+    !(id.prNumber === null || safeCount(id.prNumber)) ||
+    !(id.base === null || (typeof id.base === 'string' && SHA.test(id.base)))
   )
     return '停点身份字段不全';
   if (typeof c.head !== 'string' || !SHA.test(c.head)) return 'head 要完整 40 位小写 sha';
