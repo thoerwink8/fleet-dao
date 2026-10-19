@@ -13,7 +13,7 @@
 // 以前这里报的「要人拍」（worktree:<仓>/<树>）还开着的，树没了、删了、又被在跑的任务用上了就撤。
 // 读不了、查不了、删不掉的都记「没查成」写明原因（这一轮不算 ok），不当成没事。
 
-import type { SessionUser } from '@fleet-dao/adapters';
+import { CLEANUP_TRANSACTION_DIR, type SessionUser } from '@fleet-dao/adapters';
 import type { AlertRow, IssueWorkFacts, OpenSessionTree, SubtaskTreeRef } from '@fleet-dao/db';
 import { SEGMENT_LABELS, type SizeRead, type StageKind, type WorktreeRow } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
@@ -67,6 +67,8 @@ export interface WorktreeSweepDeps {
   machine: string;
   /** 列一个目录（根和仓这两级归 root、755，引擎自己读得了）。读不了照抛。 */
   listDir(dir: string): Promise<{ name: string; isDir: boolean }[]>;
+  /** Exact private namespace attestation plus the original complete cleanup-status rows. */
+  cleanupNamespace?(): Promise<Record<string, unknown>[]>;
   /** 子任务的树在哪：和建树同一个拼法（real/worktrees.ts 的 treeFor）。 */
   treeFor(repo: { owner: string; name: string }, branch: string): string;
   /** 归哪个会话用户；不在回 null；归了别人、看不了照抛。 */
@@ -632,6 +634,17 @@ export async function sweepWorktrees(
     };
   }
   for (const entry of top) {
+    if (entry.name === CLEANUP_TRANSACTION_DIR && entry.isDir) {
+      try {
+        if (!deps.cleanupNamespace) throw new Error('没有接上可信帮手的身份核验');
+        for (const row of await deps.cleanupNamespace()) {
+          s.part.unchecked.push(`隔离清理待恢复：${JSON.stringify(row)}`);
+        }
+      } catch (err) {
+        s.part.unchecked.push(`清理事务命名空间 ${entry.name} 没核成（没碰）：${errMessage(err)}`);
+      }
+      continue;
+    }
     if (entry.name === deps.sessionTmpDir && entry.isDir) continue;
     if (entry.name === deps.probeDir && entry.isDir) {
       try {

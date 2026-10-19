@@ -269,6 +269,75 @@ while True: time.sleep(0.1)
         with self.assertRaisesRegex(self.m.Kept, "untrusted private parent"):
             self.do_remove()
 
+    def test_cleanup_namespace_absent_empty_and_settled(self):
+        absent = self.m.main(["cleanup-status"])
+        self.assertIsNone(absent["namespace"])
+        self.assertEqual(absent["rows"], [])
+        with self.m.locked(self.path):
+            pass
+        empty = self.m.main(["cleanup-status"])
+        private = self.root + "/" + self.m.PRIVATE
+        self.assertEqual(empty["namespace"], self.m.identity(os.stat(private), private))
+        self.assertEqual(empty["rows"], [])
+        self.assertFalse(empty["truncated"])
+        self.namespace_record("DONE")
+        self.assertEqual(self.m.main(["cleanup-status"])["rows"], [])
+
+    def namespace_record(self, phase):
+        rec = dict(version=1, identity=self.exp, id=self.m.id_hash(self.exp),
+                   pathHash=self.m.path_hash(self.path), phase=phase)
+        with self.m.locked(self.path) as (fd, _):
+            os.mkdir(rec["id"], 0o700, dir_fd=fd)
+            h = os.open(rec["id"], self.m.FLAGS, dir_fd=fd)
+            try:
+                self.m.write_record(h, rec)
+            finally:
+                os.close(h)
+        return rec
+
+    def test_cleanup_namespace_pending_and_bad_record_not_hidden(self):
+        rec = self.namespace_record("DELETING")
+        reply = self.m.main(["cleanup-status"])
+        self.assertEqual(reply["rows"], [rec])
+        self.assertIsNotNone(reply["namespace"])
+        intent = pathlib.Path(self.root, self.m.PRIVATE, rec["pathHash"], rec["id"], "intent.json")
+        intent.write_text("broken JSON")
+        with self.assertRaises(json.JSONDecodeError):
+            self.m.main(["cleanup-status"])
+
+    def test_cleanup_namespace_file_link_foreign_and_unsafe_rejected(self):
+        private = self.root + "/" + self.m.PRIVATE
+        pathlib.Path(private).write_text("not metadata directory")
+        with self.assertRaises(OSError):
+            self.m.main(["cleanup-status"])
+        os.unlink(private)
+        os.symlink(self.path, private)
+        with self.assertRaises(OSError):
+            self.m.main(["cleanup-status"])
+        os.unlink(private)
+        os.mkdir(private, 0o700)
+        os.chown(private, 1000, 1000)
+        with self.assertRaisesRegex(self.m.Kept, "untrusted private parent"):
+            self.m.main(["cleanup-status"])
+        os.chown(private, 0, 0)
+        os.chmod(private, 0o777)
+        with self.assertRaisesRegex(self.m.Kept, "untrusted private parent"):
+            self.m.main(["cleanup-status"])
+
+    def test_cleanup_namespace_truncation_and_read_failure_not_empty(self):
+        private = self.root + "/" + self.m.PRIVATE
+        os.mkdir(private, 0o700)
+        for i in range(101):
+            os.mkdir(private + "/" + format(i, "064x"), 0o700)
+        self.assertTrue(self.m.main(["cleanup-status"])["truncated"])
+        original = self.m.os.listdir
+        try:
+            self.m.os.listdir = lambda _: (_ for _ in ()).throw(PermissionError("denied"))
+            with self.assertRaises(PermissionError):
+                self.m.main(["cleanup-status"])
+        finally:
+            self.m.os.listdir = original
+
     def temp_file(self, name="ops-verify-2901.tar"):
         path = self.root + "/_tmp/" + name
         pathlib.Path(path).write_text("temporary payload")

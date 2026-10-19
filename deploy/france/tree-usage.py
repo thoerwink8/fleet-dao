@@ -503,8 +503,9 @@ def main(args):
         try:
             with chain(BASE + "/" + PRIVATE, private=True) as (root, _):
                 names = os.listdir(root)
+                namespace = identity(os.fstat(root), BASE + "/" + PRIVATE)
         except FileNotFoundError:
-            return {"state": "ok", "rows": [], "truncated": False}
+            return {"state": "ok", "rows": [], "truncated": False, "namespace": None}
         for ph in sorted(names)[:100]:
             if not re.fullmatch(r"[0-9a-f]{64}", ph):
                 raise Kept("invalid private namespace entry")
@@ -514,7 +515,8 @@ def main(args):
                     with locked(rec["identity"]["real"]) as (held, _):
                         rows.extend(pending(held))
                     break
-        return {"state": "ok", "rows": rows, "truncated": len(names) > 100}
+        return {"state": "ok", "rows": rows, "truncated": len(names) > 100,
+                "namespace": namespace}
     if action == "cleanup-rollback" and len(args) == 2 and all(re.fullmatch(r"[0-9a-f]{64}", x) for x in args):
         q = BASE + "/" + PRIVATE + "/" + args[0]
         with chain(q + "/" + args[1], private=True) as (fd, _):
