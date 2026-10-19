@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
+import { roomForAnother } from '../src/real/task-verify.ts';
 import { NoSlotError, type RunRecord, type RunStart, type RunsWriter } from '../src/runner/not-wired.ts';
 import type { OneShotDeps, SpawnCommand, SpawnOutcome } from '../src/runner/one-shot.ts';
 import {
@@ -1230,6 +1231,30 @@ describe('invokeVerifier：别家在等先等；两家都验先挑齐再起会�
       expect(out.problems[0]).toContain('gpt/gpt-1');
       expect(out.routeWait).toBeUndefined();
     });
+
+    it('【#3281】第一家超时后活动剩下的时间不够再起一家：不起第二家，回等待（工作流过一会儿重验），不拖到活动超时', async () => {
+      const { oneShot, models } = scriptedOneShot({ 'grok-1': hang });
+      const { choose } = scriptedChoose({ grok: 'grok-1', claude: 'claude-1', gpt: 'gpt-1' });
+      let asks = 0;
+      const out = await invokeVerifier(AUTHOR_GPT, {
+        ...deps(oneShot, choose),
+        timeoutMinutes: 0.0005,
+        roomForAnother: () => ++asks === 1,
+      });
+      expect(models).toEqual(['grok-1']);
+      expect(out.pass).toBe(false);
+      expect(out.session).toBeUndefined();
+      expect(out.routeWait?.reason).toContain('这一次验收剩下的时间不够再起一家');
+    });
+  });
+});
+
+describe('roomForAnother（#3281）', () => {
+  it('没有截止一直够；剩下的不够一家的限时加收尾就不够', () => {
+    const now = 1_000_000;
+    expect(roomForAnother(undefined, 30, now)).toBe(true);
+    expect(roomForAnother(now + 33 * 60_000, 30, now)).toBe(true);
+    expect(roomForAnother(now + 31 * 60_000, 30, now)).toBe(false);
   });
 });
 
