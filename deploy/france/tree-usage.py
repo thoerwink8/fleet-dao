@@ -17,7 +17,10 @@ import os
 import pwd
 import re
 import signal
+import selectors
+import socket
 import stat
+import subprocess
 import sys
 import time
 
@@ -918,12 +921,178 @@ def read_page(cursor):
     return reply
 
 
+def retirement_observe(text):
+    """Finite known actors of a naturally returned task. No locks, writes, or free commands."""
+    if len(text.encode()) > 16384:
+        raise Kept("retirement input limit")
+    dto = json.loads(text)
+    if not isinstance(dto, dict) or set(dto) != {"version", "identity", "runIds", "worker", "sinceMs", "untilMs"} or dto["version"] != 1:
+        raise Kept("retirement dto")
+    exp = dto["identity"]
+    if not isinstance(exp, dict) or set(exp) != {"lex", "real", "dev", "ino", "uid"}:
+        raise Kept("retirement identity")
+    path = valid_path(exp["lex"])
+    if path[len(BASE) + 1:].split("/")[0].startswith("_") or not stat.S_ISDIR(os.stat(path, follow_symlinks=False).st_mode):
+        raise Kept("retirement requires managed task directory")
+    if exp["real"] != path or any(not isinstance(exp[k], str) or not re.fullmatch(r"0|[1-9][0-9]{0,39}", exp[k]) for k in ("dev", "ino", "uid")):
+        raise Kept("retirement identity")
+    runs = dto["runIds"]
+    if not isinstance(runs, list) or not 1 <= len(runs) <= 16 or len(set(runs)) != len(runs) or any(not isinstance(r, str) or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}", r) for r in runs):
+        raise Kept("retirement run ids")
+    worker = dto["worker"]
+    match = re.fullmatch(r"([1-9][0-9]{0,9})@([A-Za-z0-9][A-Za-z0-9.-]{0,252})", worker) if isinstance(worker, str) else None
+    if not match or match[2] != socket.gethostname():
+        raise Kept("retirement worker")
+    since, until = dto["sinceMs"], dto["untilMs"]
+    if any(type(x) is not int for x in (since, until)) or since <= 0 or not since < until <= int(time.time() * 1000) + 1000 or until - since > 7 * 86400000:
+        raise Kept("retirement time window")
+    with place(path) as current:
+        if current != exp or int(exp["uid"]) != pwd.getpwnam(SESSION_USER).pw_uid:
+            raise Kept("retirement tree changed")
+    # Current trusted contract, not a claim about a historical binary hash.
+    unit = "/etc/systemd/system/fleet-engine.service"
+    for p in ("/etc", "/etc/systemd", "/etc/systemd/system", unit):
+        meta = os.stat(p, follow_symlinks=False)
+        if meta.st_uid != 0 or meta.st_mode & 0o022 or stat.S_ISLNK(meta.st_mode):
+            raise Kept("retirement unit untrusted")
+    remaining = {"bytes": 8 * 1024 * 1024, "rows": 20000}
+
+    def command(argv, limit=2 * 1024 * 1024, allow_missing=False, allow_empty=False):
+        check_time()
+        cap = min(limit, remaining["bytes"])
+        if cap <= 0:
+            raise Kept("retirement byte limit")
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C", "LC_ALL": "C"})
+        data = bytearray()
+        try:
+            with selectors.DefaultSelector() as sel:
+                sel.register(proc.stdout, selectors.EVENT_READ)
+                end = min(DEADLINE, time.monotonic() + 10)
+                while sel.get_map():
+                    if time.monotonic() >= end:
+                        raise Kept("retirement command deadline")
+                    for key, _ in sel.select(min(0.2, max(0, end - time.monotonic()))):
+                        chunk = os.read(key.fileobj.fileno(), min(65536, cap - len(data) + 1))
+                        if not chunk:
+                            sel.unregister(key.fileobj)
+                        else:
+                            data.extend(chunk)
+                            if len(data) > cap:
+                                raise Kept("retirement byte limit")
+                code = proc.wait(timeout=max(0.001, end - time.monotonic()))
+                if code != 0 and not ((allow_missing and code == 4) or (allow_empty and code == 1 and not data)):
+                    raise Kept("retirement command failed")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
+            proc.stdout.close()
+        remaining["bytes"] -= len(data)
+        return bytes(data)
+
+    def journal(extra):
+        raw = command(["/usr/bin/journalctl", "--no-pager", "--quiet", "-o", "json", "--since", "@" + str(since / 1000), "--until", "@" + str(until / 1000), *extra], allow_empty="--grep" in extra)
+        lines = raw.splitlines()
+        remaining["rows"] -= len(lines)
+        if remaining["rows"] < 0 or any(len(line) > 131072 for line in lines):
+            raise Kept("retirement row limit")
+        return [json.loads(line) for line in lines]
+
+    def message(row):
+        m = row.get("MESSAGE")
+        if not isinstance(m, str):
+            raise Kept("retirement malformed journal")
+        return m
+
+    def at(row):
+        t = row.get("__REALTIME_TIMESTAMP")
+        if not isinstance(t, str) or not t.isdigit():
+            raise Kept("retirement malformed timestamp")
+        return int(t)
+
+    source = journal(["--grep", "|".join(re.escape(x) for x in [path, *runs])])
+    calls = [r for r in source if r.get("SYSLOG_IDENTIFIER") == "sudo" and "COMMAND=" in message(r) and "fleet-agent-scope retirement " not in message(r)]
+    if not calls or len(calls) > 512:
+        raise Kept("retirement helper history missing or limit")
+    engine = journal(["-u", "fleet-engine.service", "--grep", "Worker state changed|Deactivated successfully|Stopped "])
+    old = [r for r in engine if r.get("_PID") == match[1] and "Worker state changed" in message(r)]
+    invocations = {r.get("_SYSTEMD_INVOCATION_ID") for r in old}
+    boots = {r.get("_BOOT_ID") for r in old}
+    if len(invocations) != 1 or len(boots) != 1:
+        raise Kept("retirement worker history missing or conflict")
+    invocation, boot = next(iter(invocations)), next(iter(boots))
+    if not isinstance(invocation, str) or not re.fullmatch(r"[0-9a-f]{32}", invocation) or not isinstance(boot, str) or not re.fullmatch(r"[0-9a-f]{32}", boot):
+        raise Kept("retirement malformed worker identity")
+    stopped = [at(r) for r in old if re.search(r"state: ['\"]STOPPED['\"]", message(r))]
+    if len(stopped) != 1:
+        raise Kept("retirement worker has no unique stopped record")
+    deactivated = [at(r) for r in engine if r.get("_PID") == "1" and r.get("_BOOT_ID") == boot and "Deactivated successfully" in message(r) and stopped[0] <= at(r) <= stopped[0] + 600000000]
+    ended = [at(r) for r in engine if r.get("_PID") == "1" and r.get("_BOOT_ID") == boot and message(r).startswith("Stopped ") and stopped[0] <= at(r) <= stopped[0] + 600000000]
+    if len(deactivated) != 1 or len(ended) != 1 or ended[0] < deactivated[0]:
+        raise Kept("retirement service end missing or conflict")
+    props = command(["/usr/bin/systemctl", "show", "fleet-engine.service", "--property=KillMode,InvocationID"]).decode()
+    kv = dict(line.split("=", 1) for line in props.splitlines() if "=" in line)
+    if kv.get("KillMode") not in ("mixed", "control-group") or kv.get("InvocationID") == invocation:
+        raise Kept("retirement engine cgroup contract unknown")
+    original = [r for r in calls if r.get("_SYSTEMD_INVOCATION_ID") == invocation]
+    if not original or any(r.get("_BOOT_ID") != boot for r in original):
+        raise Kept("retirement helper invocation conflict")
+    pids = {r.get("_PID") for r in calls}
+    if any(not isinstance(p, str) or not re.fullmatch(r"[1-9][0-9]{0,9}", p) for p in pids):
+        raise Kept("retirement helper pid")
+    lifetime_args = []
+    for pid in sorted(pids):
+        if lifetime_args:
+            lifetime_args.append("+")
+        lifetime_args.append("_PID=" + pid)
+    lifetimes = journal(lifetime_args)
+    for call in calls:
+        closed = [r for r in lifetimes if r.get("_PID") == call.get("_PID") and r.get("_BOOT_ID") == call.get("_BOOT_ID") and r.get("_SYSTEMD_INVOCATION_ID") == call.get("_SYSTEMD_INVOCATION_ID") and "session closed" in message(r) and at(r) >= at(call)]
+        if not closed:
+            raise Kept("retirement helper not closed")
+    scopes = set()
+    for call in calls:
+        s = re.search(r"fleet-agent-scope run ([A-Za-z0-9][A-Za-z0-9_-]{0,62})(?: |$)", message(call))
+        if s:
+            scopes.add(s[1])
+    if not set(runs).issubset(scopes) or len(scopes) > 256:
+        raise Kept("retirement scopes missing or limit")
+    # A successful stop is intervention too. Auxiliary scopes have no run UUID in
+    # their stop command, so the initial path/run query cannot prove its absence.
+    stop_pattern = r"COMMAND=/usr/local/sbin/fleet-agent-scope stop (?:" + "|".join(re.escape(scope) for scope in sorted(scopes)) + r")(?: |$)"
+    interventions = journal(["SYSLOG_IDENTIFIER=sudo", "--grep", stop_pattern])
+    if any(r.get("SYSLOG_IDENTIFIER") == "sudo" and re.search(stop_pattern, message(r)) for r in interventions):
+        raise Kept("retirement explicit scope stop")
+    scope_rows = []
+    for scope in sorted(scopes):
+        name = "fleet-agent-" + scope + ".scope"
+        logs = journal(["-u", name])
+        starts = [r for r in logs if message(r).startswith("Started ")]
+        ends = [r for r in logs if "Deactivated successfully" in message(r)]
+        if len(starts) != 1 or len(ends) != 1 or at(ends[0]) < at(starts[0]) or any(r.get("_BOOT_ID") != boot for r in logs) or any(re.search(r"Failed|failure|timed out|killed|cancel(?:led|ed)", message(r), re.I) or re.match(r"(?:Stopping|Stopped)(?:[ .:]|$)", message(r)) for r in logs):
+            raise Kept("retirement scope terminal unknown")
+        props = command(["/usr/bin/systemctl", "show", name, "--property=LoadState,ActiveState,SubState"], allow_missing=True).decode()
+        current = dict(line.split("=", 1) for line in props.splitlines() if "=" in line)
+        if current.get("ActiveState") != "inactive" or current.get("SubState") != "dead":
+            raise Kept("retirement scope active or unknown")
+        scope_rows.append({"id": scope, "startedUs": str(at(starts[0])), "endedUs": str(at(ends[0]))})
+    usage = scan(path, exp)
+    if usage.get("state") != "idle" or usage.get("failed") != 0:
+        raise Kept("retirement tree busy or unknown")
+    with place(path) as again:
+        if again != exp:
+            raise Kept("retirement tree changed")
+    return {"state": "natural-retired", "identity": exp, "bootId": boot, "invocationId": invocation, "worker": worker, "runIds": runs, "helperCount": len(calls), "scopes": scope_rows, "engineStoppedUs": str(ended[0]), "scanned": usage["scanned"], "failed": 0}
+
+
 def main(args):
     if os.geteuid() != 0:
         raise Kept("requires fixed root entry")
     action = args.pop(0) if args else ""
+    if action == "retirement" and len(args) == 1:
+        return retirement_observe(args[0])
     if action == "capabilities" and not args:
-        return {"state": "ok", "features": ["tree-usage", "identity-remove", "cleanup-status", "cleanup-rollback", "locked-adopt", "temporary-files", "cleanup-status-pages"]}
+        return {"state": "ok", "features": ["tree-usage", "identity-remove", "cleanup-status", "cleanup-rollback", "locked-adopt", "temporary-files", "cleanup-status-pages", "natural-retirement"]}
     if action == "guard-run" and len(args) == 1:
         path = os.path.realpath(args[0])
         if path == BASE + "/" + PRIVATE or path.startswith(BASE + "/" + PRIVATE + "/"):

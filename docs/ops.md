@@ -1352,3 +1352,12 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history
 执行写入：在相同定位参数后使用 `fleet-api acceptance merge … --request <UUID> --plan <预检64hex> --reason "为什么归并" --evidence "原项来源依据"`。执行前重新取可信证据，短事务重核原run关联和任务/PR/源目标合同；为覆盖NULL变匹配及新插入，任务/PR/责任行锁前取runs SHARE表锁，期间全部run写入短暂排队，2秒锁超时明确失败回滚，不自动重试；目标、审计与完整幂等回执一起提交，失败一起回滚。新目标初建来源 management_merge、状态 OPEN；已有目标保留初建来源，新增项令 generation+1、撤旧结清/替代，旧源保持原样。归并不自动 settle/supersede/关单，必须独立验清新代次，再走已有入口；指向旧目标代次的替代随之失效，须重新核验重绑。无新增项改走既有替代入口。
 
 同 request 原参数重试会重新验证成功后合同，不重复写入；改操作者/原因/证据冲突，源或目标后来新增换代则明确旧计划失效。合法后续 settle/supersede 不会被当成新增项。读失败/取消/超限不自动扩大范围或降级通过；先排查后重新预检，首次成功未知时保留原 request 重试。硬界为总30秒、单RPC5秒/2MiB、相关payload256KiB、256页/20000事件/32MiB protobuf、token16KiB；点名最多64源、并集2048项/1MiB，原因和证据各8KiB。原文、计划及证明只留私有管理输出/审计，不加公开写口。
+
+
+## 无 PR 推送权限停点的正式交还
+
+入口 `pnpm task:handback-permission-push --workflow-id <精确workflow> --run-id <精确run>`，也可显式加 `--check`。默认只查询该 run 并读取可信来源，不发送 Temporal Update/Signal，不在历史写一份“检查成功”；它复用引擎运行环境的只读来源。退出 0 仅表示此次观察得到 `natural-retired`，不代表已经交回任务，也不是下一次 execute 的凭据。退出 2 保留未知或预算阻塞，不替换成继续信号。
+
+只有确定要交还这个首次自然停点时才加 `--execute --request-id <固定业务编号> --by <操作者> --feedback-file <私有UTF-8文件>`。无 PR、原 run、首次 generation=1/continued=0、三段模式及预算仍须服务端核准；完整历史里任何不支持的控制变动或未证明退场的活动都会拒绝。原 helper 固定入口只增加 `retirement` 读取，不扩大 sudoers、不写锁、树或所有权。信任现行 root 管理的固定 helper 与 `fleet-engine.service` 的 KillMode=mixed/control-group cgroup 边界；SDK STOPPED 还须同 boot/invocation 的 PID1 服务终态，脱出 scopes 逐项自然结束。历史每个 helper 的二进制哈希不作无限追溯条件，缺已知生命周期则照实未知。
+
+断线后使用完全相同的 workflow/run、request-id、by 与 feedback 文件重试；CLI 固定构造首次 hold token，因此原 hold 已被消费后仍可取回原回执，不依赖 query 再生成新 token。相同 request-id 异文返回 conflict；超过有限幂等表容量返回 busy。仅 `handed_back` 证明主循环已接纳返工，ready/Update 接收不等于成功。输出不回显意见或操作者；原请求载荷存在受保护的 Temporal 历史中。真正上线验收另核自然发布后的只读 systemd 现场，namespace 测试中的 journalctl/systemctl 观察夹具不能冒充真 systemd。

@@ -22,6 +22,12 @@ import type { EngineActivities } from '../activity-options.ts';
 import type { FailureContext, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Limits } from '../limits.ts';
 import type { AcceptanceDutyRecord, RouteChoice, Worktree } from '../ports.ts';
+import {
+  type PushHandbackReceipt,
+  type PushHandbackRequest,
+  pushHandbackPayload,
+  samePushHold,
+} from '../push-handback.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import {
   type AbandonCommand,
@@ -29,8 +35,10 @@ import {
   CI_POLICY_POLL_SECONDS,
   type ClosedIssueHoldToken,
   type GuardedPaths,
+  MAX_IMPLEMENT_ROUNDS,
   MAX_MAIN_SYNCS,
   MAX_ROUND_RESETS,
+  MAX_VERIFY_ROUNDS,
   type MainSyncBudgetExhausted,
   type MergedTaskReceipt,
   PARKED_RETRY_ACTOR,
@@ -45,7 +53,9 @@ import {
   taskAbandonSignal,
   taskCloseClosedIssueUpdate,
   taskContinueSignal,
+  taskHandbackPermissionPushUpdate,
   taskPauseSignal,
+  taskPushHandbackQuery,
   taskRepinSignal,
   taskRouteWakeSignal,
   taskSettleMergedUpdate,
@@ -73,7 +83,27 @@ import {
   ZERO,
 } from './task-support.ts';
 
+export class PermissionPushHandback extends Error {
+  readonly feedback: string;
+  constructor(feedback: string) {
+    super('permission push handed back');
+    this.feedback = feedback;
+  }
+}
+
 export class TaskRuntime {
+  private permissionPushPark = false;
+  private handbackTerminal = false;
+  private pushHandback: {
+    request: PushHandbackRequest;
+    payload: string;
+    state: 'checking' | 'ready' | 'returning' | 'consumed';
+    receipt: PushHandbackReceipt | undefined;
+  } | null = null;
+  private readonly pushHandbackRequests = new Map<
+    string,
+    { payload: string; result: Promise<PushHandbackReceipt> }
+  >();
   readonly input: TaskWorkflowInput;
   readonly acts: EngineActivities;
   readonly limits: Limits;
@@ -317,8 +347,58 @@ export class TaskRuntime {
       this.abandon ??= command;
       this.cancelAll();
     });
+    setHandler(taskHandbackPermissionPushUpdate, (request) => {
+      const payload = pushHandbackPayload(request);
+      const cached = this.pushHandbackRequests.get(request.requestId);
+      if (cached)
+        return cached.payload === payload
+          ? cached.result
+          : Promise.resolve({
+              version: 1 as const,
+              requestId: request.requestId,
+              payload,
+              outcome: 'conflict' as const,
+            });
+      // 固定 JSON 快照，不能在 IO 期间改变请求或让新增字段逃过幂等比较。
+      const snapshot = JSON.parse(payload) as PushHandbackRequest;
+      const result = this.handlePushHandback(snapshot, payload);
+      if (this.pushHandbackRequests.size < 128)
+        this.pushHandbackRequests.set(snapshot.requestId, { payload, result });
+      return result;
+    });
+    setHandler(taskPushHandbackQuery, () => {
+      const token = this.closeToken();
+      if (
+        !token ||
+        !this.permissionPushPark ||
+        this.prNumber !== null ||
+        this.running.size !== 0 ||
+        this.flowMode === 'full' ||
+        this.pauseReq ||
+        this.abandon ||
+        this.verifiedMerged ||
+        !this.brief?.contract ||
+        !this.worktree
+      )
+        return null;
+      return {
+        version: 1 as const,
+        workflowId: workflowInfo().workflowId,
+        runId: workflowInfo().runId,
+        task: this.input,
+        branch: this.branch,
+        path: this.worktree.path,
+        contract: this.brief.contract,
+        token,
+        budgetGrants: this.budgetGrants,
+        taskTokenBudget: this.limits.taskTokenBudget,
+        round: this.round,
+        verifyRound: this.verifyRound,
+      };
+    });
     // 旧历史保留同步关单；新入口先核真实合并身份，不能绕过已合任务的成功收尾。
     setHandler(taskCloseClosedIssueUpdate, async ({ token, command }) => {
+      if (this.pushHandback !== null) return 'busy';
       if (typeof command?.by !== 'string' || typeof command.reason !== 'string') return 'busy';
       const current = this.closeToken();
       if (
@@ -376,6 +456,7 @@ export class TaskRuntime {
       return 'accepted';
     });
     setHandler(taskSettleMergedUpdate, async ({ token, receipt }) => {
+      if (this.pushHandback !== null) return 'busy';
       if (!this.mergedHoldMatches(token, receipt)) return 'stale';
       if (this.settlingMerged) return 'busy';
       this.settlingMerged = true;
@@ -409,6 +490,120 @@ export class TaskRuntime {
         head: this.head,
       },
     }));
+  }
+
+  private pushHoldMatches(request: PushHandbackRequest): boolean {
+    return (
+      samePushHold(this.closeToken(), request.token) &&
+      this.permissionPushPark &&
+      this.prNumber === null &&
+      this.running.size === 0 &&
+      this.pauseReq === null &&
+      this.abandon === null &&
+      this.verifiedMerged === null &&
+      this.flowMode !== 'full'
+    );
+  }
+
+  private async handlePushHandback(
+    request: PushHandbackRequest,
+    payload: string,
+  ): Promise<PushHandbackReceipt> {
+    const receipt = (outcome: PushHandbackReceipt['outcome'], code?: string): PushHandbackReceipt => ({
+      version: 1,
+      requestId: request.requestId,
+      payload,
+      outcome,
+      ...(code ? { code } : {}),
+    });
+    if (!patched('permission-push-handback-v1')) return receipt('unknown', 'unsupported_worker');
+    // 本协议只接首次自然推送停点。先拒未来代数，不能让伪造 token 悬住 handler。
+    if (
+      request.token.runId !== workflowInfo().runId ||
+      request.token.generation !== 1 ||
+      request.token.continued !== 0
+    )
+      return receipt('stale', 'unsupported_hold');
+    if (this.pushHandback || this.pushHandbackRequests.size >= 128) return receipt('busy');
+    // 无缓存重放时 Update 可先于原活动结果重建执行。等同一个首次 hold 重建完，
+    // 不读 isReplaying、不加 timer，也不占 checking；继续、其他停点或终态均结束等待。
+    await condition(
+      () =>
+        this.handbackTerminal ||
+        this.abandon !== null ||
+        this.continued !== 0 ||
+        this.closeHoldGeneration > 1 ||
+        (this.closeHoldGeneration === 1 && (!this.permissionPushPark || this.closeToken() !== null)),
+    );
+    if (!this.pushHoldMatches(request)) return receipt('stale');
+    if (this.pushHandback) return receipt('busy');
+    // 不唤醒旧 park，让 exhaustRounds 的自动 reset 分支借道发新预算。
+    if (this.round >= MAX_IMPLEMENT_ROUNDS || this.verifyRound >= MAX_VERIFY_ROUNDS)
+      return receipt('budget-held', 'round_budget');
+    const contract = this.brief?.contract;
+    if (!contract || !this.worktree) return receipt('unknown', 'missing_tree_or_contract');
+    const slot = {
+      request,
+      payload,
+      state: 'checking' as 'checking' | 'ready' | 'returning' | 'consumed',
+      receipt: undefined as PushHandbackReceipt | undefined,
+    };
+    this.pushHandback = slot;
+    try {
+      const preflight = await this.acts.readPushHandbackPreflight({
+        version: 1,
+        workflowId: workflowInfo().workflowId,
+        runId: workflowInfo().runId,
+        task: this.input,
+        branch: this.branch,
+        path: this.worktree.path,
+        contract,
+        token: request.token,
+        budgetGrants: this.budgetGrants,
+        taskTokenBudget: this.limits.taskTokenBudget,
+        round: this.round,
+        verifyRound: this.verifyRound,
+      });
+      if (!this.pushHoldMatches(request)) return receipt('stale');
+      if (preflight.outcome !== 'natural-retired') return receipt(preflight.outcome, preflight.code);
+      if (this.round >= MAX_IMPLEMENT_ROUNDS || this.verifyRound >= MAX_VERIFY_ROUNDS)
+        return receipt('budget-held', 'round_budget');
+      slot.state = 'ready';
+      // Update 接收/检查成功仍不是成功：只有原 park 同步消费后才给 handed_back。
+      await condition(
+        () =>
+          slot.state === 'consumed' ||
+          this.handbackTerminal ||
+          this.abandon !== null ||
+          this.continued !== request.token.continued ||
+          (slot.state !== 'returning' && !this.pushHoldMatches(request)),
+      );
+      return slot.receipt ?? receipt('stale');
+    } catch (error) {
+      return receipt('unknown', isCancellation(error) ? 'cancelled' : 'preflight_failed');
+    } finally {
+      if (this.pushHandback === slot) this.pushHandback = null;
+    }
+  }
+
+  /** 主循环写完本轮收场并接纳返工；原 park 只交控制权，不能提前签成功回执。 */
+  acceptPushHandback(): void {
+    const slot = this.pushHandback;
+    if (!slot || slot.state !== 'returning') return;
+    this.guard();
+    const valid = samePushHold(this.closeHold, slot.request.token) && this.pauseReq === null;
+    slot.receipt = {
+      version: 1,
+      requestId: slot.request.requestId,
+      payload: slot.payload,
+      outcome: valid ? 'handed_back' : 'stale',
+    };
+    slot.state = 'consumed';
+    this.closeHold = null;
+  }
+
+  stopPushHandbacks(): void {
+    this.handbackTerminal = true;
   }
 
   private mergedHoldMatches(token: ClosedIssueHoldToken, receipt: MergedTaskReceipt): boolean {
@@ -924,8 +1119,32 @@ export class TaskRuntime {
     }
     try {
       await this.waiting('human', `${title}（等「继续」或「放弃」）`, () =>
-        condition(() => this.continued > before || this.abandon !== null || this.verifiedMerged !== null),
+        condition(
+          () =>
+            this.continued > before ||
+            this.abandon !== null ||
+            this.verifiedMerged !== null ||
+            this.pushHandback?.state === 'ready',
+        ),
       );
+      const handback = this.pushHandback;
+      // waiting() 的 finally 已清等待展示；这里核原始 hold，不再调用要求展示仍为 human 的 closeToken()。
+      if (
+        handback?.state === 'ready' &&
+        samePushHold(this.closeHold, handback.request.token) &&
+        this.permissionPushPark &&
+        this.continued === before &&
+        this.pauseReq === null &&
+        this.abandon === null &&
+        this.verifiedMerged === null &&
+        this.running.size === 0 &&
+        this.prNumber === null
+      ) {
+        handback.state = 'returning';
+        this.status.phase = previous;
+        this.status.lastProblem = null;
+        throw new PermissionPushHandback(handback.request.feedback);
+      }
     } finally {
       this.leavePark();
     }
@@ -1118,12 +1337,18 @@ export class TaskRuntime {
           if (autoCodes.includes(failure.code.toLowerCase()) && patched('auto-before-park')) {
             throw new AutoEscape(failure.code, failure.message);
           }
-          await this.park(
-            next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason,
-            failure.message,
-            'stuck',
-            stepParkKind(source, next, failure.code),
-          );
+          this.permissionPushPark =
+            source === 'pushBranch' && failure.code.toLowerCase() === 'workflows_permission';
+          try {
+            await this.park(
+              next.humanFix ? `${next.reason}；要人：${next.humanFix}` : next.reason,
+              failure.message,
+              'stuck',
+              stepParkKind(source, next, failure.code),
+            );
+          } finally {
+            this.permissionPushPark = false;
+          }
           counters = ZERO;
           previousMessage = undefined;
         }
