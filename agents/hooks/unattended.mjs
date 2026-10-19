@@ -23,6 +23,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { codexSessionSource } from './codex-session-source.mjs';
 import { noteReceipt, receiptContext, receiptStatus } from './continuation-receipts.mjs';
 import { isMainModule } from './is-main.mjs';
 
@@ -297,6 +298,19 @@ export function isMachineSession({ env = process.env, cwd } = {}) {
   return typeof cwd === 'string' && MACHINE_TREE.test(cwd);
 }
 
+/** 必经身份闸：Codex当前来源未知时不读写无人值守，不借父会话状态；不充当hook根回合的消费证明。
+ * @param {{ env?: NodeJS.ProcessEnv, cwd?: unknown, hookId?: unknown, agentId?: unknown, expectedCli?: 'codex'|undefined }} [opts]
+ * @returns {{ kind: 'allowed'|'machine'|'unknown', code: string }}
+ */
+export function unattendedAuthority({ env = process.env, cwd, hookId, agentId, expectedCli } = {}) {
+  if (env.FLEET_HEADLESS === '1' || agentId || isMachineSession({ env, cwd }))
+    return { kind: 'machine', code: 'MACHINE' };
+  const source = codexSessionSource({ env, hookId, expectedCli });
+  if (source.kind === 'child') return { kind: 'machine', code: source.code };
+  if (source.kind === 'unknown') return { kind: 'unknown', code: source.code };
+  return { kind: 'allowed', code: source.code };
+}
+
 /**
  * 开会话钩子读的那一句：这个会话的无人值守开着（上下文被总结、重启之后还知道）；没开、读不了都是空数组。
  * @param {{ dir: string, sessionId: unknown, now?: number }} opts
@@ -456,6 +470,15 @@ export function main(argv, io) {
     return 2;
   }
   const id = session.id;
+  const authority = unattendedAuthority({ env, cwd: process.cwd() });
+  if (authority.kind === 'unknown') {
+    io.err(`没查成：当前 Codex 会话来源未知（${authority.code}），无人值守状态未读写。`);
+    return 2;
+  }
+  if (authority.kind === 'machine' && (cmd === 'on' || env.CODEX_THREAD_ID || env.CODEX_SESSION_ID)) {
+    io.err('没做成：工人、反方、原生子代理这类机器派的会话不开无人值守，也不代改父会话状态。');
+    return 2;
+  }
   try {
     if (cmd === 'status') {
       if (rest.includes('--receipts')) {
@@ -498,11 +521,6 @@ export function main(argv, io) {
       return 0;
     }
     if (cmd === 'on') {
-      // 工人和反方是机器派的会话，没有创始人在前面；让它们把自己按住没有意义，还会困住机器
-      if (isMachineSession({ env })) {
-        io.err('没做成：工人、反方这类机器派的会话不开无人值守（不挡它们的收尾）。');
-        return 2;
-      }
       let hours = DEFAULT_HOURS;
       const i = rest.indexOf('--hours');
       if (i >= 0) hours = Number(rest[i + 1]);

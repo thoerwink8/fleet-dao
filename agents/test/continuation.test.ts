@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import { main } from '../hooks/unattended.mjs';
 import { runChild } from './child.ts';
+import { codexSourceFixture } from './codex-source-fixture.ts';
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -15,6 +16,7 @@ function session(cli: 'claude' | 'codex') {
   const dir = mkdtempSync(join(tmpdir(), 'cli-continuation-'));
   dirs.push(dir);
   const sid = `${cli}-continuation-real`;
+  const { home } = codexSourceFixture(dir, sid);
   const env = {
     ...process.env,
     FLEET_UNATTENDED_DIR: dir,
@@ -24,6 +26,7 @@ function session(cli: 'claude' | 'codex') {
     CLAUDE_CODE_SESSION_ID: cli === 'claude' ? sid : '',
     CODEX_THREAD_ID: cli === 'codex' ? sid : '',
     CODEX_SESSION_ID: '',
+    CODEX_HOME: home,
   };
   const input = { session_id: sid, cwd: dir };
   const run = (name: string, more: object = {}) =>

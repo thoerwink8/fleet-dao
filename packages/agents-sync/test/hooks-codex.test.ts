@@ -71,8 +71,8 @@ describe('登记在哪、挂在哪', () => {
     expect(CODEX?.hooks).toEqual([
       { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
       { event: 'SessionStart', script: 'continuation-start.mjs', timeout: 10 },
-      { event: 'PostToolUse', script: 'continuation-progress.mjs', timeout: 10 },
-      { event: 'Stop', script: 'stop.mjs', timeout: 10 },
+      { event: 'PostToolUse', script: 'continuation-progress-codex.mjs', timeout: 10 },
+      { event: 'Stop', script: 'stop-codex.mjs', timeout: 10 },
     ]);
     expect(CODEX?.settings.linux).toBe('.codex/hooks.json');
     expect(HOOK_GAPS.codex).toBeUndefined();
@@ -101,6 +101,32 @@ describe('登记在哪、挂在哪', () => {
 });
 
 describe('装', () => {
+  it('旧共用Stop/进展入口迁到Codex专用入口，保留第三方和人关闭设置，重复同步不变', () => {
+    for (const disabled of [false, true]) {
+      const m = machine();
+      m.apply();
+      const oldHooks = JSON.stringify(m.hooksJson())
+        .replaceAll('continuation-progress-codex', 'continuation-progress')
+        .replaceAll('stop-codex', 'stop');
+      const json = JSON.parse(oldHooks);
+      const third = { hooks: [{ type: 'command', command: 'python third-party.py' }] };
+      json.hooks.UserPromptSubmit = [third];
+      put(m.home, '.codex/hooks.json', JSON.stringify(json));
+      let config = m.config();
+      if (disabled) config = config.replace(/(\[hooks\.state\."[^\n]*stop:0:0"\]\n)/, '$1enabled = false\n');
+      put(m.home, '.codex/config.toml', config);
+      const result = m.apply();
+      expectKind(result, HOOKS_JSON, 'changed');
+      const after = JSON.stringify(m.hooksJson());
+      expect(after).toContain('continuation-progress-codex');
+      expect(after).toContain('stop-codex');
+      expect(after).toContain('python third-party.py');
+      expect(after).not.toContain(m.cmd('stop.mjs').replaceAll('\\', '\\\\'));
+      expect(m.apply().filter((l) => l.kind === 'changed')).toEqual([]);
+      expect(state(m.config(), m.key('stop', 0)).enabled).toBe(disabled ? false : undefined);
+      expect(exitCode(m.check())).toBe(disabled ? 1 : 0);
+    }
+  });
   it('新机器：完整登记并信任安全与接续四条；查全绿；第二遍零改动', () => {
     const m = machine();
     const lines = m.apply();
@@ -112,9 +138,9 @@ describe('装', () => {
       ],
       SessionStart: [{ hooks: [{ type: 'command', command: m.cmd('continuation-start.mjs'), timeout: 10 }] }],
       PostToolUse: [
-        { hooks: [{ type: 'command', command: m.cmd('continuation-progress.mjs'), timeout: 10 }] },
+        { hooks: [{ type: 'command', command: m.cmd('continuation-progress-codex.mjs'), timeout: 10 }] },
       ],
-      Stop: [{ hooks: [{ type: 'command', command: m.cmd('stop.mjs'), timeout: 10 }] }],
+      Stop: [{ hooks: [{ type: 'command', command: m.cmd('stop-codex.mjs'), timeout: 10 }] }],
     });
     const toml = m.config();
     expect(state(toml, m.key('pre_tool_use', 0)).trusted).toBe(
@@ -233,10 +259,10 @@ describe('别人的钩子、别的配置一条不碰', () => {
       `trusted_hash = "${m.hash('SessionStart', undefined, 'continuation-start.mjs', 10)}"`,
       '',
       `[hooks.state."${m.key('post_tool_use', 0).replaceAll('\\', '\\\\')}"]`,
-      `trusted_hash = "${m.hash('PostToolUse', undefined, 'continuation-progress.mjs', 10)}"`,
+      `trusted_hash = "${m.hash('PostToolUse', undefined, 'continuation-progress-codex.mjs', 10)}"`,
       '',
       `[hooks.state."${m.key('stop', 0).replaceAll('\\', '\\\\')}"]`,
-      `trusted_hash = "${m.hash('Stop', undefined, 'stop.mjs', 10)}"`,
+      `trusted_hash = "${m.hash('Stop', undefined, 'stop-codex.mjs', 10)}"`,
       '',
     ].join('\n');
     put(m.home, '.codex/config.toml', outside);

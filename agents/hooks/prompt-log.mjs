@@ -12,7 +12,7 @@
 // - **只落盘，绝不插话、绝不拦**：正常路径 exit 0 且一个字符都不往 stdout 打。绝不 exit 2、
 //   绝不输出 decision:block、绝不打 additionalContext——UserPromptSubmit 上那几种都会把创始人
 //   刚打的字从上下文里抹掉，「防丢的钩子自己制造丢失」是这条路径上最坏的故障。
-// - 任何一步出错一律吞掉（exit 0、不出声）：这里是兜底，不是新的故障点。
+// - 任何一步出错均 exit 0；身份未知仅 stderr 说明，不输出创始人正文：这里是兜底，不是新的故障点。
 // - 入参走 stdin 的 JSON，原文在 `prompt`（未经模型改写）；`prompt_id` 同一轮共用，用它去重。
 // - 落盘路径是绝对路径（钩子的 cwd 是用户当前目录，别用相对路径）。
 // - 一天一个文件：~/.fleet-dao/prompt-log/<YYYY-MM-DD>.jsonl，一行一条，只追加。
@@ -20,7 +20,7 @@ import { appendFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { isMainModule } from './is-main.mjs';
-import { isMachineOpening, isMachineSession } from './unattended.mjs';
+import { isMachineOpening, unattendedAuthority } from './unattended.mjs';
 
 /** 落盘目录；测试给 FLEET_PROMPT_LOG_DIR 覆盖。 */
 export function logDir(env = process.env, home = homedir()) {
@@ -103,12 +103,23 @@ export function run({ stdin = '', env = process.env, now = Date.now() } = {}) {
     return { ok: false, why: '入参不是 JSON' };
   }
   // 机器派的会话（工人、反方）的提示不是创始人的话：不落盘，免得开会话列「创始人最近的话」时把真话挤出去
-  if (isMachineSession({ env, cwd: input?.cwd }) || isMachineOpening(input?.prompt))
-    return { ok: true, skipped: true };
+  const authority = unattendedAuthority({
+    env,
+    cwd: input?.cwd,
+    hookId: input?.session_id,
+    agentId: input?.agent_id,
+  });
+  if (authority.kind === 'unknown')
+    return {
+      ok: false,
+      code: 'IDENTITY_UNKNOWN',
+      why: `会话来源未知（${authority.code}），不记成创始人历史`,
+    };
+  if (authority.kind === 'machine' || isMachineOpening(input?.prompt)) return { ok: true, skipped: true };
   return appendEntry(entryFrom(input, now), { dir: logDir(env), now });
 }
 
-// 被当脚本跑（钩子就是这么跑的）：读 stdin，做完就退，绝不出声、绝不非 0。
+// 被当脚本跑：读 stdin，做完就退，stdout 永远空、退出码永远0。
 const isMain = isMainModule(import.meta);
 
 if (isMain) {
@@ -120,7 +131,8 @@ if (isMain) {
     text = '';
   }
   try {
-    run({ stdin: text });
+    const result = run({ stdin: text });
+    if ('code' in result && result.code === 'IDENTITY_UNKNOWN') process.stderr.write(`${result.why}\n`);
   } catch {
     // 落盘是兜底，任何意外都不许变成新的故障点。
   }

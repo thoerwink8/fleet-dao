@@ -27,6 +27,18 @@ function required<T>(value: T | undefined): T {
 }
 const codex = required(HOOK_TARGETS.find((t) => t.format === 'codex'));
 const originalSpecs = codex.hooks;
+// 迁移起点显式固定为旧入口，不能随当前targets升级后变成新→新。
+const legacySpecs = originalSpecs.map(
+  (spec): HookSpec => ({
+    ...spec,
+    script:
+      spec.event === 'Stop'
+        ? 'stop.mjs'
+        : spec.event === 'PostToolUse'
+          ? 'continuation-progress.mjs'
+          : spec.script,
+  }),
+);
 afterEach(() => {
   codex.hooks = originalSpecs;
 });
@@ -40,6 +52,7 @@ function handler(root: Root, event: string, group = 0, index = 0): Handler {
 const relay = '.mirasim/agent-homes/codex-relay';
 
 function machine(layout = 'default') {
+  codex.hooks = legacySpecs;
   const home = tempDir('codex-migration');
   const ctx = ctxFor(home, ['codex']);
   const src = sources(
@@ -52,6 +65,11 @@ function machine(layout = 'default') {
   if (layout !== 'default') mkdirSync(join(home, relay), { recursive: true });
   const apply = () => applyHooks(ctx, src, new Backups(home, PLATFORM, new Date('2026-10-19T00:00:00Z')));
   apply();
+  const seeded = getJson(home, '.codex/hooks.json') as Root;
+  expect(handler(seeded, 'Stop').command).toBe(hookCommand(home, PLATFORM, 'stop.mjs'));
+  expect(handler(seeded, 'PostToolUse').command).toBe(
+    hookCommand(home, PLATFORM, 'continuation-progress.mjs'),
+  );
   if (layout === 'shared-hooks' || layout === 'shared-both') {
     put(home, `${relay}/hooks.json`, '');
     // 链接替换的是本测试刚产生的文件，绝不触碰用户配置。
@@ -87,7 +105,7 @@ function entries(text: string) {
 }
 
 function useDedicatedSpecs() {
-  codex.hooks = originalSpecs.map(
+  codex.hooks = legacySpecs.map(
     (spec): HookSpec => ({
       ...spec,
       script:
@@ -101,6 +119,7 @@ function useDedicatedSpecs() {
 }
 
 it('受管Stop先于第三方时，修正timeout不能把人为disabled丢到旧位置', () => {
+  codex.hooks = legacySpecs;
   const home = tempDir('codex-disabled-migration');
   const ctx = ctxFor(home, ['codex']);
   const src = sources(makeRepo({}, undefined, HOOK_FILES));
@@ -123,6 +142,7 @@ it('受管Stop先于第三方时，修正timeout不能把人为disabled丢到旧
   const at = next.hooks.Stop.findIndex((g) =>
     g.hooks.some((h) => h.command === hookCommand(home, PLATFORM, 'stop.mjs')),
   );
+  expect(at).toBeGreaterThanOrEqual(0);
   const scanned = scanCodexConfig(get(home, '.codex/config.toml'));
   if (!scanned.ok) throw new Error(scanned.why);
   const key = `${join(realpath.native(join(home, '.codex')), 'hooks.json')}:stop:${at}:0`;

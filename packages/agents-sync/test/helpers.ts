@@ -59,11 +59,13 @@ export const HOOK_FILES: Record<string, string> = {
   'pretool.mjs': '// 假的调工具前钩子\n',
   'pretool-codex.mjs': '// 假的 Codex 调工具前钩子\n',
   'continuation-start.mjs': '// 假的无人值守开场钩子\n',
+  'continuation-progress-codex.mjs': '// 假的 Codex 完成进展钩子\n',
   'continuation-progress.mjs': '// 假的完成进展钩子\n',
   'pretool-gemini.mjs': '// 假的 Gemini CLI 调工具前钩子\n',
   'pretool-agy.mjs': '// 假的 Antigravity 调工具前钩子\n',
   'pretool-kimi.mjs': '// 假的 Kimi Code 调工具前钩子\n',
   'main-thread.mjs': '// 假的主对话两条（引导先回、子代理后台跑）钩子\n',
+  'stop-codex.mjs': '// 假的 Codex 收尾钩子\n',
   'stop.mjs': '// 假的收尾提醒钩子\n',
   'prompt-log.mjs': '// 假的落盘钩子\n',
 };
