@@ -10,7 +10,7 @@ import { enc, type RepoRef, repoSlug, unexpected } from './client.ts';
 import { botLogin } from './credentials.ts';
 import type { ActivityContext, Deps } from './deps.ts';
 import { recordEcho } from './echo.ts';
-import { GitHubError } from './errors.ts';
+import { GitHubError, isGitHubError } from './errors.ts';
 import { type CommentIssueResult, commentPull } from './issues.ts';
 import { assertPublishable } from './publish-check.ts';
 import { defaultCommitMessage, PullSchema } from './pulls.ts';
@@ -131,8 +131,8 @@ export interface ClaimsGitHub {
    */
   enableAutoMerge(
     repo: RepoRef,
-    pull: Pick<PullFacts, 'number' | 'nodeId'> & Partial<Pick<PullFacts, 'headSha'>>,
-    ctx?: ActivityContext,
+    pull: Pick<PullFacts, 'number' | 'nodeId'> & { headSha?: string | undefined },
+    ctx?: ActivityContext & { attempt?: number | undefined },
   ): Promise<void>;
   /** 关掉 PR（分支不动）。已经关了的不报错。 */
   closePull(repo: RepoRef, number: number): Promise<void>;
@@ -195,6 +195,20 @@ const StatusSchema = z.object({
   description: z.string().nullable().optional(),
   creator: z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable().optional(),
 });
+
+/** enablePullRequestAutoMerge 的 UNPROCESSABLE「is in unstable status」：回包里只有这一条，path 恰好是这个 mutation。 */
+function isUnstableRefusal(details: unknown): boolean {
+  const errors = (details as { errors?: unknown } | null | undefined)?.errors;
+  if (!Array.isArray(errors) || errors.length !== 1) return false;
+  const e = errors[0] as { type?: unknown; message?: unknown; path?: unknown } | null;
+  return (
+    e?.type === 'UNPROCESSABLE' &&
+    Array.isArray(e.path) &&
+    e.path.length === 1 &&
+    e.path[0] === 'enablePullRequestAutoMerge' &&
+    e.message === 'Pull request Pull request is in unstable status'
+  );
+}
 
 function factsOf(repo: RepoRef, p: z.infer<typeof ClaimPullSchema>): PullFacts {
   const merged = p.merged ?? (p.merged_at !== null && p.merged_at !== undefined);
@@ -559,6 +573,23 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
             });
           if (error.maybeLanded || error.code === 'UNEXPECTED_RESPONSE' || nestedAutoMergeError)
             await revokeUnverified(error);
+        }
+        // 只认这个 mutation 自己回的那一条 UNPROCESSABLE unstable 临时拒绝：标成可重试，交活动既有的有界重试。
+        // （git 档 3 次、退避），每次重入 armAutoMerge 从头现读 PR、评审、检查。码和原消息不变，原始 errors 原样留在
+        // details 里，消息后面补上 type/path、PR、头、第几次尝试，重试用尽停下时一眼看得出。别的一律原样抛。
+        if (isGitHubError(error, 'GRAPHQL_ERROR') && isUnstableRefusal(error.details)) {
+          const attempt = typeof ctx?.attempt === 'number' ? ctx.attempt : null;
+          const head = typeof pull.headSha === 'string' ? pull.headSha : null;
+          const rawErrors = (error.details as { errors: unknown[] }).errors;
+          throw new GitHubError(
+            error.code,
+            `${error.message}（UNPROCESSABLE enablePullRequestAutoMerge；原始 errors：${JSON.stringify(rawErrors)}；PR #${pull.number}${head ? ` 头 ${head}` : ''}${attempt === null ? '' : `，第 ${attempt} 次尝试`}；临时拒绝，交活动有界重试）`,
+            {
+              retryable: true,
+              details: { ...(error.details as object), pull: pull.number, head, attempt },
+              ...(error.status === undefined ? {} : { status: error.status }),
+            },
+          );
         }
         throw error;
       }
