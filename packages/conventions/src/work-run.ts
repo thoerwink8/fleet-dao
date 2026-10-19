@@ -960,6 +960,18 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+function lockOccupied(dir: string, name: string, now: Date): boolean {
+  const lock = lockPath(dir, name);
+  if (!existsSync(lock)) return false;
+  const owner = readLockOwner(dir, name);
+  if (owner) return pidAlive(owner.pid) || (owner.workerPid !== undefined && pidAlive(owner.workerPid));
+  try {
+    return now.getTime() - statSync(lock).mtimeMs <= BEAT_STALE_MS;
+  } catch {
+    return true;
+  }
+}
+
 function discardDir(lock: string, grave: string): void {
   try {
     renameSync(lock, grave);
@@ -973,19 +985,15 @@ function discardDir(lock: string, grave: string): void {
  * 占位还算不算数。进程还活着就占着，恢复不能再起一个工人。
  * 进程已经没了，或目录刚建上却没写上归属且已经过了失联窗口，才放手给下一次接手。
  * 认不出归属又还新鲜：当有人正在占，不并发起。
+ * ownReclaimerToken 只给已经占住同一回收闸的回收者使用；它仍必须服从主锁
+ * 的 owner/新鲜目录判据，不能把自己持有回收闸误当成主锁永远占用。
  */
-export function runLockHeld(dir: string, name: string, now: Date): boolean {
-  const lock = lockPath(dir, name);
+export function runLockHeld(dir: string, name: string, now: Date, ownReclaimerToken?: string): boolean {
   const reclaimer = readLockOwner(dir, `${name}.reclaim`);
-  if (reclaimer && pidAlive(reclaimer.pid)) return true;
-  if (!existsSync(lock)) return false;
-  const owner = readLockOwner(dir, name);
-  if (owner) return pidAlive(owner.pid) || (owner.workerPid !== undefined && pidAlive(owner.workerPid));
-  try {
-    return now.getTime() - statSync(lock).mtimeMs <= BEAT_STALE_MS;
-  } catch {
-    return true;
-  }
+  if (ownReclaimerToken !== undefined && reclaimer?.token === ownReclaimerToken)
+    return lockOccupied(dir, name, now);
+  if (lockOccupied(dir, `${name}.reclaim`, now)) return true;
+  return lockOccupied(dir, name, now);
 }
 
 /**
@@ -1011,13 +1019,10 @@ export function claimRunLock(dir: string, name: string, pid: number, now: Date):
       try {
         reclaimToken = claimRunLock(dir, reclaim, pid, now);
         if (!reclaimToken) return null;
-        // 回收闸建立后再读一次；只有仍是旧锁才允许挪走。
-        const current = readLockOwner(dir, name);
-        if (
-          current &&
-          (pidAlive(current.pid) || (current.workerPid !== undefined && pidAlive(current.workerPid)))
-        )
-          return null;
+        // 回收闸建立后仍服从完整主锁判据：owner 活着、主锁是新鲜空目录、
+        // 或无法确认的目录都不能挪走。只排除自己持有的回收闸，不能把它
+        // 当成主锁恒真；否则会误删另一恢复者刚 mkdir 尚未发布 owner 的活锁。
+        if (runLockHeld(dir, name, now, reclaimToken)) return null;
         discardDir(lock, `${lock}.stale-${pid}-${i}-${lockSeq}`);
       } finally {
         if (reclaimToken) releaseRunLock(dir, reclaim, reclaimToken);

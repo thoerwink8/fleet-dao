@@ -1157,6 +1157,23 @@ describe('恢复入口的原子占位', () => {
     if (reclaim) releaseRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, reclaim);
   });
 
+  it('主锁已新建但 owner 尚未发布时，另一恢复者拒绝回收或覆盖', () => {
+    const dir = join(temp(), 'publish-window');
+    mkdirSync(dir, { recursive: true });
+    const lock = join(dir, SUPERVISOR_START_LOCK);
+    mkdirSync(lock);
+    // 模拟 A 已完成 mkdir、尚未写 owner.json；新鲜且无归属的目录仍是占位。
+    expect(runLockHeld(dir, SUPERVISOR_START_LOCK, new Date())).toBe(true);
+    expect(claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date())).toBeNull();
+    writeJson(join(lock, 'owner.json'), {
+      pid: process.pid,
+      token: 'published-by-a',
+      claimedAt: new Date().toISOString(),
+    });
+    expect(claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date())).toBeNull();
+    expect(readJson<{ token: string }>(join(lock, 'owner.json'))?.token).toBe('published-by-a');
+  });
+
   it('看护已启动但占位交接失败时，不释放后来接手的占位', async () => {
     let replacement = false;
     const w = runWorld({
