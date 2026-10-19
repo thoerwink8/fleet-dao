@@ -29,6 +29,7 @@ import { TaskModelPins } from '../components/task-model-pins';
 import { TaskProcess } from '../components/task-process';
 import { TaskSummary } from '../components/task-summary';
 import { Button } from '../components/ui/button';
+import { UsageFold, usageFoldSummary } from '../components/usage-fold';
 import { formatAgo, formatDuration, TIME } from '../lib/format';
 import { useNow } from '../lib/hooks';
 import { liveMs, runNth, segmentLabel, UNKNOWN_SEGMENT } from '../lib/segments';
@@ -331,17 +332,27 @@ function Body({ d, now }: { d: TaskDetail; now: number }) {
       </>
     );
   }
+  // 照设计稿（#3228）：xl 起左结论、右「过程」两栏，右栏贴顶自己滚；窄屏一栏，过程在结论下面。用量明细收成一行。
   return (
     <>
-      <TaskHero d={d} now={now} />
-      <div className="flex flex-col gap-4 lg:gap-6">
-        <RoundProgressStrip d={d} />
-        <TaskSummary d={d} now={now} />
-        <TaskProcess d={d} now={now} onViewTranscript={open} />
-        <SegmentStats d={d} now={now} />
-        <Pins d={d} now={now} />
-        <SegmentBreakdown d={d} now={now} />
-        <SegmentRunList d={d} now={now} onViewTranscript={open} />
+      <div className="flex min-w-0 flex-col gap-4 lg:gap-6 xl:grid xl:grid-cols-task xl:items-start">
+        <div className="flex min-w-0 flex-col gap-4 lg:gap-6">
+          <TaskHero d={d} now={now} />
+          <RoundProgressStrip d={d} />
+          <TaskSummary d={d} now={now} />
+          <UsageFold summary={usageFoldSummary(d, now)}>
+            <SegmentStats d={d} now={now} />
+            <Pins d={d} now={now} />
+            <SegmentBreakdown d={d} now={now} />
+            <SegmentRunList d={d} now={now} onViewTranscript={open} />
+          </UsageFold>
+        </div>
+        <div
+          data-task-aside
+          className="min-w-0 xl:sticky xl:top-0 xl:max-h-task-aside xl:overflow-y-auto xl:scrollbar-thin"
+        >
+          <TaskProcess d={d} now={now} onViewTranscript={open} />
+        </div>
       </div>
       {drawer}
     </>
