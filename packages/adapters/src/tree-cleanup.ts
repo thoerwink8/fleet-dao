@@ -163,21 +163,105 @@ export async function removeTreeIdentity(
 }
 
 export async function cleanupStatus(options: TreeHelperOptions = {}): Promise<Reply[]> {
-  const reply = await invokeTreeHelper(options, ['cleanup-status']);
-  return cleanupRows(reply);
+  return (await readCleanupPages(options)).rows;
 }
 
-function cleanupRows(reply: Reply): Reply[] {
-  if (reply.state !== 'ok' || !Array.isArray(reply.rows) || reply.truncated !== false)
-    throw new Error('清理事务列表不完整');
-  return reply.rows as Reply[];
+/** Bounds of one whole cleanup-status read; past any of them the list stays incomplete. */
+export const CLEANUP_PAGE_LIMITS = { pages: 64, rounds: 3, rows: 5000, bytes: 4 * 1024 * 1024, ms: 300_000 };
+
+const HASH = /^[0-9a-f]{64}$/;
+
+function incomplete(why: string): Error {
+  return new Error(`清理事务列表不完整：${why}`);
+}
+
+/**
+ * Walk every helper page; only a final page with truncated=false proves the list complete. The
+ * cursor is the helper's last bucket, bound to the namespace inode and generation; a changed
+ * generation restarts the whole round (bounded), so pages of different listings are never stitched.
+ */
+async function readCleanupPages(options: TreeHelperOptions): Promise<{ rows: Reply[]; namespace: unknown }> {
+  const deadline = Date.now() + CLEANUP_PAGE_LIMITS.ms;
+  for (let round = 0; round < CLEANUP_PAGE_LIMITS.rounds; round++) {
+    const done = await readCleanupRound(options, deadline);
+    if (done) return done;
+  }
+  throw incomplete(`命名空间连续 ${CLEANUP_PAGE_LIMITS.rounds} 轮在翻页中换代`);
+}
+
+async function readCleanupRound(
+  options: TreeHelperOptions,
+  deadline: number,
+): Promise<{ rows: Reply[]; namespace: unknown } | null> {
+  const rows: Reply[] = [];
+  const ids = new Set<string>();
+  let bytes = 0;
+  let first: { namespace: TreeIdentity; generation: string } | null = null;
+  let after: string | null = null;
+  for (let page = 1; ; page++) {
+    if (page > CLEANUP_PAGE_LIMITS.pages) throw incomplete(`超过 ${CLEANUP_PAGE_LIMITS.pages} 页上限`);
+    const left = deadline - Date.now();
+    if (left <= 0) throw incomplete('整轮读取超时');
+    const signal = AbortSignal.any([AbortSignal.timeout(left), ...(options.signal ? [options.signal] : [])]);
+    const cursor = first
+      ? ['--after', after as string, '--dev', first.namespace.dev, '--ino', first.namespace.ino]
+      : [];
+    if (first) cursor.push('--generation', first.generation);
+    let reply: Reply;
+    try {
+      reply = await invokeTreeHelper({ ...options, signal }, ['cleanup-status', ...cursor]);
+    } catch (error) {
+      throw incomplete(`第 ${page} 页读失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (reply.state === 'changed') return null;
+    bytes += Buffer.byteLength(JSON.stringify(reply));
+    if (reply.state !== 'ok' || !Array.isArray(reply.rows) || typeof reply.truncated !== 'boolean')
+      throw incomplete(`第 ${page} 页回执不完整`);
+    if (first) {
+      if (reply.after !== after) throw incomplete(`第 ${page} 页不是所请求游标之后的页`);
+      if (JSON.stringify(treeIdentity(reply.namespace)) !== JSON.stringify(first.namespace))
+        throw incomplete('翻页中命名空间身份变了');
+      if (reply.generation !== first.generation) throw incomplete('翻页中命名空间代次变了');
+    } else if (reply.after != null) {
+      throw incomplete('首页回执带了游标');
+    } else if (reply.truncated) {
+      if (typeof reply.generation !== 'string' || !/^\d+\.\d+$/.test(reply.generation))
+        throw incomplete('帮手不支持分页游标（缺代次），只读到前缀');
+      first = { namespace: treeIdentity(reply.namespace), generation: reply.generation };
+    }
+    const next = reply.next;
+    if (
+      reply.truncated &&
+      (typeof next !== 'string' || !HASH.test(next) || (after !== null && next <= after))
+    )
+      throw incomplete(`第 ${page} 页游标缺失、重复或回退`);
+    for (const row of reply.rows as unknown[]) {
+      const r = row as Reply;
+      if (!r || typeof r !== 'object' || typeof r.id !== 'string' || !HASH.test(r.id))
+        throw incomplete(`第 ${page} 页有坏记录`);
+      const ph = r.pathHash;
+      if (
+        typeof ph !== 'string' ||
+        !HASH.test(ph) ||
+        (after !== null && ph <= after) ||
+        (reply.truncated && ph > (next as string))
+      )
+        throw incomplete(`第 ${page} 页记录不在本页游标范围内`);
+      if (ids.has(r.id)) throw incomplete(`第 ${page} 页记录重复`);
+      ids.add(r.id);
+      rows.push(r);
+    }
+    if (rows.length > CLEANUP_PAGE_LIMITS.rows || bytes > CLEANUP_PAGE_LIMITS.bytes)
+      throw incomplete('整轮记录条数或字节超过上限');
+    if (!reply.truncated) return { rows, namespace: reply.namespace };
+    after = next as string;
+  }
 }
 
 /** A missing/old/failed helper response cannot exempt a root entry from the sweep. */
 export async function readCleanupNamespace(root: string, options: TreeHelperOptions = {}): Promise<Reply[]> {
-  const reply = await invokeTreeHelper(options, ['cleanup-status']);
-  const rows = cleanupRows(reply);
-  const namespace = treeIdentity(reply.namespace);
+  const { rows, namespace: claimed } = await readCleanupPages(options);
+  const namespace = treeIdentity(claimed);
   if (namespace.real !== `${root}/${CLEANUP_TRANSACTION_DIR}` || namespace.uid !== '0')
     throw new Error('清理事务命名空间身份不匹配');
   return rows;

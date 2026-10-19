@@ -24,6 +24,11 @@ VERSION = 1
 FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 SESSION_USER = "fleet-agent-carpool"
 DEADLINE = time.monotonic() + 110
+# One cleanup-status page; a caller only calls the list complete after walking every page.
+PAGE_BUCKETS = 100
+PAGE_ROWS = 200
+PAGE_BYTES = 96 * 1024
+PAGE_SECONDS = 20
 
 
 class Kept(Exception):
@@ -487,36 +492,99 @@ def remove(pathfd, qpath, exp):
             os.close(fd)
 
 
+def cleanup_cursor(args):
+    if not args:
+        return None
+    if len(args) != 8 or args[0::2] != ["--after", "--dev", "--ino", "--generation"]:
+        raise Kept("cleanup-status [--after H --dev D --ino I --generation G]")
+    after, dev, ino, gen = args[1::2]
+    number = r"0|[1-9][0-9]{0,39}"
+    if not re.fullmatch(r"[0-9a-f]{64}", after) or not re.fullmatch("(" + number + r")\.(" + number + ")", gen):
+        raise Kept("invalid cleanup cursor")
+    if any(not re.fullmatch(number, v) for v in (dev, ino)):
+        raise Kept("invalid cleanup cursor identity")
+    return after, dev, ino, gen
+
+
+def bucket_rows(ph):
+    with chain(BASE + "/" + PRIVATE + "/" + ph, private=True) as (fd, _):
+        # Re-open under the same path lock after learning the original path.
+        for rec in pending(fd):
+            if rec["pathHash"] != ph:
+                raise Kept("transaction bucket identity mismatch")
+            with locked(rec["identity"]["real"]) as (held, _):
+                return pending(held)
+    return []
+
+
+def cleanup_page(args):
+    """One bounded page of buckets in sorted order, never an atomic snapshot across pages.
+
+    The cursor is an existing bucket of the same namespace inode and generation (ctime plus
+    bucket count; buckets are never removed). A changed generation returns state=changed so
+    the caller restarts its round instead of stitching pages of different listings.
+    """
+    cursor = cleanup_cursor(args)
+    q = BASE + "/" + PRIVATE
+    try:
+        with chain(q, private=True) as (root, _):
+            before = os.fstat(root)
+            names = sorted(os.listdir(root))
+            st = os.fstat(root)
+    except FileNotFoundError:
+        if cursor:
+            raise Kept("cleanup namespace disappeared during paging")
+        return {"state": "ok", "rows": [], "truncated": False, "namespace": None}
+    if any(not re.fullmatch(r"[0-9a-f]{64}", ph) for ph in names):
+        raise Kept("invalid private namespace entry")
+    namespace = identity(st, q)
+    generation = str(st.st_ctime_ns) + "." + str(len(names))
+    if stamp(before) != stamp(st) or before.st_ctime_ns != st.st_ctime_ns:
+        return {"state": "changed", "namespace": namespace, "reason": "namespace changed during listing"}
+    start = 0
+    if cursor:
+        after, dev, ino, gen = cursor
+        if (namespace["dev"], namespace["ino"]) != (dev, ino):
+            raise Kept("cleanup cursor bound to another namespace")
+        if gen != generation:
+            return {"state": "changed", "namespace": namespace, "reason": "namespace generation changed"}
+        if after not in names:
+            raise Kept("cleanup cursor is not a namespace bucket")
+        start = names.index(after) + 1
+    rows, size, done, began = [], 0, start, time.monotonic()
+    for ph in names[start:start + PAGE_BUCKETS]:
+        check_time()
+        first = done == start
+        if not first and time.monotonic() - began >= PAGE_SECONDS:
+            break
+        got = bucket_rows(ph)
+        cost = len(json.dumps(got, separators=(",", ":")))
+        if len(rows) + len(got) > PAGE_ROWS or size + cost > PAGE_BYTES:
+            if first:
+                raise Kept("cleanup bucket exceeds page bound: " + ph)
+            break
+        rows.extend(got)
+        size += cost
+        done += 1
+    more = done < len(names)
+    return {"state": "ok", "rows": rows, "truncated": more, "namespace": namespace,
+            "after": cursor[0] if cursor else None, "next": names[done - 1] if more else None,
+            "generation": generation, "buckets": len(names)}
+
+
 def main(args):
     if os.geteuid() != 0:
         raise Kept("requires fixed root entry")
     action = args.pop(0) if args else ""
     if action == "capabilities" and not args:
-        return {"state": "ok", "features": ["tree-usage", "identity-remove", "cleanup-status", "cleanup-rollback", "locked-adopt", "temporary-files"]}
+        return {"state": "ok", "features": ["tree-usage", "identity-remove", "cleanup-status", "cleanup-rollback", "locked-adopt", "temporary-files", "cleanup-status-pages"]}
     if action == "guard-run" and len(args) == 1:
         path = os.path.realpath(args[0])
         if path == BASE + "/" + PRIVATE or path.startswith(BASE + "/" + PRIVATE + "/"):
             raise Kept("reserved transaction namespace")
         return {"state": "ok"}
-    if action == "cleanup-status" and not args:
-        rows = []
-        try:
-            with chain(BASE + "/" + PRIVATE, private=True) as (root, _):
-                names = os.listdir(root)
-                namespace = identity(os.fstat(root), BASE + "/" + PRIVATE)
-        except FileNotFoundError:
-            return {"state": "ok", "rows": [], "truncated": False, "namespace": None}
-        for ph in sorted(names)[:100]:
-            if not re.fullmatch(r"[0-9a-f]{64}", ph):
-                raise Kept("invalid private namespace entry")
-            with chain(BASE + "/" + PRIVATE + "/" + ph, private=True) as (fd, _):
-                # Re-open under the same path lock after learning the original path.
-                for rec in pending(fd):
-                    with locked(rec["identity"]["real"]) as (held, _):
-                        rows.extend(pending(held))
-                    break
-        return {"state": "ok", "rows": rows, "truncated": len(names) > 100,
-                "namespace": namespace}
+    if action == "cleanup-status":
+        return cleanup_page(args)
     if action == "cleanup-rollback" and len(args) == 2 and all(re.fullmatch(r"[0-9a-f]{64}", x) for x in args):
         q = BASE + "/" + PRIVATE + "/" + args[0]
         with chain(q + "/" + args[1], private=True) as (fd, _):

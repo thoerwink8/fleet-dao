@@ -284,9 +284,13 @@ while True: time.sleep(0.1)
         self.assertEqual(self.m.main(["cleanup-status"])["rows"], [])
 
     def namespace_record(self, phase):
-        rec = dict(version=1, identity=self.exp, id=self.m.id_hash(self.exp),
-                   pathHash=self.m.path_hash(self.path), phase=phase)
-        with self.m.locked(self.path) as (fd, _):
+        return self.bucket_record(self.path, phase, self.exp["ino"])
+
+    def bucket_record(self, path, phase, ino="7"):
+        exp = dict(self.exp, lex=path, real=path, ino=ino)
+        rec = dict(version=1, identity=exp, id=self.m.id_hash(exp),
+                   pathHash=self.m.path_hash(path), phase=phase)
+        with self.m.locked(path) as (fd, _):
             os.mkdir(rec["id"], 0o700, dir_fd=fd)
             h = os.open(rec["id"], self.m.FLAGS, dir_fd=fd)
             try:
@@ -329,7 +333,9 @@ while True: time.sleep(0.1)
         os.mkdir(private, 0o700)
         for i in range(101):
             os.mkdir(private + "/" + format(i, "064x"), 0o700)
-        self.assertTrue(self.m.main(["cleanup-status"])["truncated"])
+        partial = self.m.main(["cleanup-status"])
+        self.assertTrue(partial["truncated"])
+        self.assertEqual(partial["next"], format(99, "064x"))
         original = self.m.os.listdir
         try:
             self.m.os.listdir = lambda _: (_ for _ in ()).throw(PermissionError("denied"))
@@ -337,6 +343,153 @@ while True: time.sleep(0.1)
                 self.m.main(["cleanup-status"])
         finally:
             self.m.os.listdir = original
+
+    def crowded(self, count, tail_phase="RECOVERY_REQUIRED"):
+        """Empty, lock-only and settled buckets first; the only open transaction sorts last."""
+        private = self.root + "/" + self.m.PRIVATE
+        os.mkdir(private, 0o700)
+        paths = sorted((self.root + "/_tmp/t" + str(i) for i in range(count)), key=self.m.path_hash)
+        for i, path in enumerate(paths[:-1]):
+            if i % 4 == 0:
+                os.mkdir(private + "/" + self.m.path_hash(path), 0o700)
+            elif i % 4 == 1:
+                with self.m.locked(path):
+                    pass
+            else:
+                self.bucket_record(path, "DONE" if i % 4 == 2 else "RESTORED")
+        return paths, self.bucket_record(paths[-1], tail_phase)
+
+    def page(self, prev, after=None):
+        ns = prev["namespace"]
+        return self.m.main(["cleanup-status", "--after", after or prev["next"], "--dev", ns["dev"],
+                            "--ino", ns["ino"], "--generation", prev["generation"]])
+
+    def walk(self):
+        pages = [self.m.main(["cleanup-status"])]
+        while pages[-1]["truncated"]:
+            self.assertLess(len(pages), 200, "cursor never finished")
+            pages.append(self.page(pages[-1]))
+        return pages
+
+    def test_cleanup_pages_complete_read_beyond_100_with_tail_recovery(self):
+        paths, tail = self.crowded(130)
+        first = self.m.main(["cleanup-status"])
+        # partial: the old fixed prefix shows no rows, which never proves the namespace is clear.
+        self.assertEqual((first["rows"], first["truncated"]), ([], True))
+        self.assertEqual(first["next"], self.m.path_hash(paths[99]))
+        pages = self.walk()
+        self.assertEqual(len(pages), 2)
+        self.assertEqual({p["generation"] for p in pages}, {first["generation"]})
+        self.assertEqual(pages[1]["after"], first["next"])
+        # complete: every page walked, the tail RECOVERY_REQUIRED is visible and nothing else is open.
+        self.assertEqual((pages[-1]["truncated"], pages[-1]["next"]), (False, None))
+        self.assertEqual([r for p in pages for r in p["rows"]], [tail])
+        for ph in map(self.m.path_hash, paths):
+            self.assertTrue(os.path.isdir(self.root + "/" + self.m.PRIVATE + "/" + ph))
+
+    def test_cleanup_page_boundaries_rows_bytes_and_time(self):
+        paths, tail = self.crowded(100, "PREPARED")
+        one = self.walk()
+        self.assertEqual((len(one), one[0]["truncated"], one[0]["rows"]), (1, False, [tail]))
+        self.bucket_record(self.root + "/_tmp/extra", "DELETING")
+        two = self.walk()
+        self.assertEqual(len(two), 2)
+        self.assertEqual(sum(len(p["rows"]) for p in two), 2)
+        last = self.page(two[0], max(map(self.m.path_hash, paths + [self.root + "/_tmp/extra"])))
+        self.assertEqual((last["rows"], last["truncated"], last["next"]), ([], False, None))
+        self.m.PAGE_ROWS = 1
+        rows = [r for p in self.walk() for r in p["rows"]]
+        self.assertEqual(len(rows), 2)
+        self.bucket_record(tail["identity"]["real"], "CLAIMED", "8")
+        with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
+            self.walk()
+        self.m.PAGE_ROWS = 200
+        self.m.PAGE_BYTES = 10
+        with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
+            self.walk()
+        self.m.PAGE_BYTES = 96 * 1024
+        self.m.PAGE_SECONDS = 0
+        timed = self.walk()
+        self.assertEqual(len(timed), 101)
+        self.assertTrue(all(p["truncated"] for p in timed[:-1]))
+        self.assertEqual(sum(len(p["rows"]) for p in timed), 3)
+        self.m.DEADLINE = time.monotonic() - 1
+        with self.assertRaisesRegex(self.m.Kept, "hard deadline"):
+            self.m.main(["cleanup-status"])
+
+    def test_cleanup_pages_concurrent_add_and_namespace_replacement(self):
+        paths, tail = self.crowded(105)
+        first = self.m.main(["cleanup-status"])
+        with self.m.locked(self.path):
+            pass
+        changed = self.page(first)
+        self.assertEqual(changed["state"], "changed")
+        self.assertNotIn("rows", changed)
+        restarted = self.walk()
+        self.assertEqual([r for p in restarted for r in p["rows"]], [tail])
+        private = self.root + "/" + self.m.PRIVATE
+        os.rename(private, private + "-old")
+        os.mkdir(private, 0o700)
+        for name in os.listdir(private + "-old"):
+            os.mkdir(private + "/" + name, 0o700)
+        replaced = self.m.main(["cleanup-status"])
+        with self.assertRaisesRegex(self.m.Kept, "another namespace"):
+            self.page(dict(restarted[0], generation=replaced["generation"]))
+        os.rename(private, private + "-gone")
+        with self.assertRaisesRegex(self.m.Kept, "disappeared"):
+            self.page(replaced)
+
+    def test_cleanup_cursor_forged_cycle_and_malformed_rejected(self):
+        self.crowded(102)
+        first = self.m.main(["cleanup-status"])
+        ns = first["namespace"]
+        with self.assertRaisesRegex(self.m.Kept, "not a namespace bucket"):
+            self.page(first, "f" * 64)
+        stale = self.page(dict(first, generation="1.1"))
+        self.assertEqual(stale["state"], "changed")
+        again = self.page(first, first["next"])
+        self.assertEqual(again, self.page(first))
+        for bad in (["--after", "A" * 64, "--dev", ns["dev"], "--ino", ns["ino"], "--generation", first["generation"]],
+                    ["--after", "../x", "--dev", ns["dev"], "--ino", ns["ino"], "--generation", first["generation"]],
+                    ["--after", first["next"], "--dev", "01", "--ino", ns["ino"], "--generation", first["generation"]],
+                    ["--after", first["next"], "--generation", first["generation"]],
+                    ["--offset", "100"]):
+            with self.assertRaises(self.m.Kept):
+                self.m.main(["cleanup-status", *bad])
+
+    def test_cleanup_tail_bucket_guards_beyond_first_page(self):
+        paths, tail = self.crowded(103)
+        private = self.root + "/" + self.m.PRIVATE
+        bucket = private + "/" + tail["pathHash"]
+        intent = pathlib.Path(bucket, tail["id"], "intent.json")
+        good = intent.read_bytes()
+        intent.write_text("broken JSON")
+        with self.assertRaises(json.JSONDecodeError):
+            self.walk()
+        intent.write_bytes(good)
+        os.chmod(bucket, 0o777)
+        with self.assertRaisesRegex(self.m.Kept, "untrusted private parent"):
+            self.walk()
+        os.chmod(bucket, 0o700)
+        os.rename(bucket, bucket + ".x")
+        os.symlink(bucket + ".x", bucket)
+        with self.assertRaises(self.m.Kept):  # an unrecognized ".x" entry is refused before following
+            self.walk()
+        os.unlink(bucket)
+        os.rename(bucket + ".x", private + "/" + "f" * 64)
+        os.symlink(private + "/" + "f" * 64, bucket)
+        with self.assertRaises(OSError):
+            self.walk()
+        os.unlink(bucket)
+        os.rename(private + "/" + "f" * 64, bucket)
+        moved = private + "/" + self.m.path_hash(paths[0])
+        os.rename(bucket + "/" + tail["id"], moved + "/" + tail["id"])
+        with self.assertRaisesRegex(self.m.Kept, "bucket identity mismatch"):
+            self.walk()
+        os.rename(moved + "/" + tail["id"], bucket + "/" + tail["id"])
+        pathlib.Path(private, "e" * 64).write_text("not a bucket")
+        with self.assertRaises(OSError):
+            self.walk()
 
     def temp_file(self, name="ops-verify-2901.tar"):
         path = self.root + "/_tmp/" + name

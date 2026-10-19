@@ -2,7 +2,8 @@
 // 不在回 null、归了别人明确报错（不碰）。
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { helperWorkTrees, layout, sessionUserUids } from '../../src/real/worktrees.ts';
@@ -87,5 +88,53 @@ describe('属主', () => {
   it('【故意造出的失败】_tmp 读不了（这里是个文件）：明确报错，不当成一个都没有', async () => {
     writeFileSync(join(root, '_tmp'), 'not a dir');
     await expect(helperWorkTrees({ root }).listTmp()).rejects.toMatchObject({ code: 'WORKTREE_UNREADABLE' });
+  });
+});
+
+describe('清理事务分页的真实装配（帮手回执由测试摆布）', () => {
+  const root = '/var/lib/fleet-work';
+  const namespace = {
+    lex: `${root}/.cleanup-transactions`,
+    real: `${root}/.cleanup-transactions`,
+    dev: '1',
+    ino: '2',
+    uid: '0',
+  };
+  const hash = (n: number) => n.toString(16).padStart(64, '0');
+  const tail = { id: 'e'.repeat(64), pathHash: hash(120), phase: 'RECOVERY_REQUIRED' };
+  const head = { version: 1, state: 'ok', namespace, generation: '9.121' };
+  const firstPage = { ...head, rows: [], truncated: true, after: null, next: hash(99) };
+  const lastPage = { ...head, rows: [tail], truncated: false, after: hash(99), next: null };
+  const trees = helperWorkTrees({
+    root,
+    helper: join(dirname(fileURLToPath(import.meta.url)), '../../../adapters/test/fake-scope-helper.ts'),
+    sudo: [process.execPath],
+  });
+  let dir: string;
+  function pages(list: unknown[]) {
+    process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES = JSON.stringify(list);
+    process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER = join(dir, `counter-${Math.random()}`);
+  }
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-pages-'));
+  });
+  afterEach(() => {
+    delete process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES;
+    delete process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('完整读取：cleanupNamespace/pendingCleanup 读完全部页，尾部待恢复事务照报', async () => {
+    pages([firstPage, lastPage]);
+    expect(await trees.cleanupNamespace()).toEqual([tail]);
+    pages([firstPage, lastPage]);
+    expect(await trees.pendingCleanup()).toEqual([tail]);
+  });
+
+  it('partial：只读到首页（空行）或缺页时仍是“清理事务列表不完整”，不当全清', async () => {
+    pages([firstPage]);
+    await expect(trees.cleanupNamespace()).rejects.toThrow('清理事务列表不完整');
+    pages([{ ...firstPage, generation: undefined, next: undefined }]);
+    await expect(trees.pendingCleanup()).rejects.toThrow('清理事务列表不完整');
   });
 });
