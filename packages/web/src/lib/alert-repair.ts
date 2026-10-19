@@ -117,15 +117,22 @@ export const STALE_CODES = new Set([
   'alert_not_repairable',
 ]);
 
-/** 卡上显示哪一条结果：这一页刚拿到的和列表里的，取更晚的那条；同一请求以列表（后端会再核验）为准。 */
+/**
+ * 卡上显示哪一条结果：这一页刚拿到的和列表里的，取更晚的那条；同一请求以列表（后端会再核验）为准。
+ * 本地回执只认当前事故。列表里的记录照服务端给的显示——上一代仍在执行、结果未知或待核验时，
+ * 后端会把那条旧记录连同「不能覆盖后重发」一起给过来，不能因为它换了代次就藏掉。
+ */
 export function shownRecord(
   listed: RepairRecord | undefined,
   local: RepairRecord | undefined,
+  incident: string,
 ): RepairRecord | undefined {
-  if (!local) return listed;
-  if (!listed) return local;
-  if (listed.requestId === local.requestId) return listed;
-  return Date.parse(local.at) > Date.parse(listed.at) ? local : listed;
+  const localHere = local?.incident === incident ? local : undefined;
+  if (!localHere) return listed;
+  if (!listed) return localHere;
+  if (listed.requestId === localHere.requestId) return listed;
+  if (listed.incident !== incident) return listed;
+  return Date.parse(localHere.at) > Date.parse(listed.at) ? localHere : listed;
 }
 
 /** 具体操作：动作对准的目标，一项一句（任务、仓、工作流 run、提交、发版那一趟）。 */
