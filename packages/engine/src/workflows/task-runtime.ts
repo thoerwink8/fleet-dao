@@ -1034,14 +1034,14 @@ export class TaskRuntime {
   }
 
   /**
-   * 这次请求的停点身份已经回不来：放弃或已核实合并，或继续次数、停点次数、关单代数已经超过请求里的。
+   * 这次请求的停点已经回不来：放弃、已核实合并，或停点次数、关单代数已经超过请求里的。
+   * 继续次数超过不在这里算。继续先落地、旧请求后到时，若在进等待之前就返回，condition 根本没挂上，放弃唤不醒。
    * 重放还没赶上时这些计数只会更小或相等，这里不用不等号拒绝，冷工人接手同一停点仍要等它出现。
    */
   private catchupClosed(identity: LineBudgetParkIdentity): boolean {
     return (
       this.abandon !== null ||
       this.verifiedMerged !== null ||
-      this.continued > identity.continued ||
       this.parks > identity.parks ||
       this.closeHoldGeneration > identity.generation
     );
@@ -1071,16 +1071,20 @@ export class TaskRuntime {
     if (resumed) return { outcome: 'already_resumed', receipt: resumed };
     // 新起的工人从整段历史重放接手时，Update 可能先于同一批里主流程走回停点（报警结果还没回填、waiting 还没设）。
     // 停点还看不见、而这请求的身份仍可能出现，就短等主流程追上（有缓存的工人上停点直接可见，不等、不起定时器）。
-    // 放弃、已核实合并，或继续/停点/关单代数已经超过这次请求：身份回不来，不再等（#3297）。不等进 running，
-    // 放弃靠条件里的事实唤醒，不靠 cancelAll。等的期间同一请求已经有回执，也从这里醒，醒了下面再核一次。
+    // 放弃、已核实合并，或停点/关单代数已经超过这次请求：身份回不来，不再等（#3297）。
+    // 继续次数已经超过也不在进等待之前返回：那次继续已经写进历史，旧请求仍要挂上 condition，放弃才叫得醒。
+    // 等待开始后再增加的继续次数会叫醒（严格大于进等待时的次数；重放赶上前次数更小，不会因此拒绝）。
+    // 不等进 running，放弃靠条件里的事实唤醒，不靠 cancelAll。等的期间同一请求已经有回执，也从这里醒，醒了下面再核一次。
     const earlyExit = patched(REMEASURE_CATCH_UP_CLOSED_PATCH);
     if (this.parkIdentity() === null && !(earlyExit && this.catchupClosed(command.identity))) {
       if (earlyExit) {
+        const continuedAtWait = this.continued;
         await condition(
           () =>
             this.parkIdentity() !== null ||
             this.sameResume(command) !== null ||
-            this.catchupClosed(command.identity),
+            this.catchupClosed(command.identity) ||
+            this.continued > continuedAtWait,
           `${REMEASURE_CATCH_UP_SECONDS} seconds`,
         );
       } else {

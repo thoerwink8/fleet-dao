@@ -38,11 +38,9 @@ export function verifyMigrationBudget(
       resolve(result);
     };
     const abort = () => finish({ verified: false, reason: '迁移核验已取消' });
-    // 冷启动 node 再让 drizzle 对两份快照独立生成 SQL。旁边还有别的测试时 5 秒会把本该可信的快照判成超时。
-    // 30 秒仍有界：挂死的子进程照样杀掉，超时只当未核实，不当成通过。
     const timer = setTimeout(
       () => finish({ verified: false, reason: '迁移核验超时' }),
-      options.timeoutMs ?? 30_000,
+      options.timeoutMs ?? 5000,
     );
     options.signal?.addEventListener('abort', abort, { once: true });
     child.stdout.on('data', (chunk: Buffer) => {

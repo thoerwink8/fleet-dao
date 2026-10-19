@@ -256,6 +256,7 @@ type HistEvent = {
   timerStartedEventAttributes?: { startToFireTimeout?: unknown } | null;
   timerFiredEventAttributes?: { startedEventId?: unknown } | null;
   timerCanceledEventAttributes?: { startedEventId?: unknown } | null;
+  workflowExecutionSignaledEventAttributes?: { signalName?: string | null } | null;
 };
 
 function timeoutSeconds(raw: unknown): number {
@@ -311,6 +312,28 @@ const historyOf = async (h: WorkflowHandle): Promise<HistEvent[]> =>
 
 const catchupTimers = (events: readonly HistEvent[], fired: boolean) =>
   settledTimerSeconds(events, fired).filter((s) => s === REMEASURE_CATCH_UP_SECONDS);
+
+/** 继续、30 秒 catchup、放弃在历史里的先后。证明旧请求是继续之后才挂上等待，放弃才取消。 */
+function catchupWakeTrace(events: readonly HistEvent[]): string[] {
+  const duration = new Map<string, number>();
+  const out: string[] = [];
+  for (const e of events) {
+    const signal = e.workflowExecutionSignaledEventAttributes?.signalName;
+    if (signal === 'taskContinue' || signal === 'taskAbandon') out.push(signal);
+    if (e.timerStartedEventAttributes && e.eventId != null) {
+      const secs = timeoutSeconds(e.timerStartedEventAttributes.startToFireTimeout);
+      duration.set(String(e.eventId), secs);
+      if (secs === REMEASURE_CATCH_UP_SECONDS) out.push('timerStarted');
+    }
+    const canceledId = e.timerCanceledEventAttributes?.startedEventId;
+    if (canceledId != null && duration.get(String(canceledId)) === REMEASURE_CATCH_UP_SECONDS)
+      out.push('timerCanceled');
+    const firedId = e.timerFiredEventAttributes?.startedEventId;
+    if (firedId != null && duration.get(String(firedId)) === REMEASURE_CATCH_UP_SECONDS)
+      out.push('timerFired');
+  }
+  return out;
+}
 
 /**
  * 等这次 Update。不可恢复的身份若仍起了 catchup 定时器，用 unblock 解开挂着的活动，
@@ -779,7 +802,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(world.count('pushBranch')).toBe(0);
   });
 
-  it('catchup：继续之后原请求才到，再放弃；不测不推，不等定时器响', async () => {
+  it('catchup：先查停点，继续后旧请求进入等待，等待中放弃叫醒；不测不推，定时器取消而不是响', async () => {
     let releaseMirror: () => void = () => {};
     const gate = new Promise<void>((r) => {
       releaseMirror = r;
@@ -800,11 +823,33 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
         await h.signal(taskContinueSignal, { by: 'frank' });
         await held;
         const pending = send(h, command(i, h, id));
+        // 定时器已起且还没结算：谓词当时为假，卡在 condition 里。继续若已让早退，这里等不到。
+        // 落库活动还挂着，测试服务端不能把 30 秒跳掉；放弃若唤不醒，下面会真等到定时器响。
+        await waitUntil(async () => {
+          const open = startedTimerSeconds(await historyOf(h)).filter(
+            (s) => s === REMEASURE_CATCH_UP_SECONDS,
+          );
+          const done =
+            catchupTimers(await historyOf(h), true).length + catchupTimers(await historyOf(h), false).length;
+          return open.length > done;
+        }, '继续之后旧请求的 catchup 定时器已起且还在等');
         await h.signal(taskAbandonSignal, { by: 'frank', reason: '不要了' });
-        const { result, events } = await finishUpdate(h, pending, releaseMirror);
-        expect(result).toMatchObject({ outcome: 'refused', reason: 'stale' });
-        expectNoCatchupTimer(events);
+        expect(await pending).toMatchObject({ outcome: 'refused', reason: 'stale' });
+        const events = await historyOf(h);
+        const trace = catchupWakeTrace(events);
+        const continuedAt = trace.indexOf('taskContinue');
+        const startedAt = trace.indexOf('timerStarted', continuedAt + 1);
+        const abandonedAt = trace.indexOf('taskAbandon', startedAt + 1);
+        const canceledAt = trace.indexOf('timerCanceled', abandonedAt + 1);
+        expect(continuedAt).toBeGreaterThanOrEqual(0);
+        expect(startedAt).toBeGreaterThan(continuedAt);
+        expect(abandonedAt).toBeGreaterThan(startedAt);
+        expect(canceledAt).toBeGreaterThan(abandonedAt);
+        expect(trace).not.toContain('timerFired');
+        expect(catchupTimers(events, true)).toEqual([]);
+        expect(catchupTimers(events, false)).toEqual([REMEASURE_CATCH_UP_SECONDS]);
         expect(asks).toHaveLength(0);
+        expect(world.count('pushBranch')).toBe(0);
         releaseMirror();
         return h.result() as Promise<TaskRun>;
       },
