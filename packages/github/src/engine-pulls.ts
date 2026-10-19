@@ -13,8 +13,14 @@ import { recordEcho } from './echo.ts';
 import { GitHubError, isGitHubError } from './errors.ts';
 import { type CommentIssueResult, commentPull } from './issues.ts';
 import { assertPublishable } from './publish-check.ts';
-import { PullSchema } from './pulls.ts';
-import { assertBodySize, type PrBodyInput, renderPrBody } from './text.ts';
+import { defaultCommitMessage, PullSchema } from './pulls.ts';
+import {
+  assertBodySize,
+  hasCloseKeywords,
+  neutralizeCloseKeywords,
+  type PrBodyInput,
+  renderPrBody,
+} from './text.ts';
 
 /** 引擎读 PR 要的样子。 */
 export interface PullFacts {
@@ -121,7 +127,7 @@ export interface ClaimsGitHub {
   /**
    * 给这个 PR 挂上自动合并（GraphQL enablePullRequestAutoMerge，squash）：用机器人（GitHub App）的身份挂，
    * 不用 Actions 自带的 GITHUB_TOKEN——它挂的自动合并合进主线后，不会触发主线上后面的工作流（#242）。
-   * 挂不上（权限不够、GitHub 报错）照抛，调用方不当成已经挂上。
+   * 有调用者预期头时先核对、再绑定现读头；显式写入非空安全 squash 消息并核回执；读不到、挂不上或消息未采用照抛，不当成已经安全挂上。
    */
   enableAutoMerge(
     repo: RepoRef,
@@ -460,20 +466,115 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
     },
 
     async enableAutoMerge(repo, pull, ctx) {
+      const options = {
+        signal: ctx?.signal,
+        ...(ctx?.attemptDeadlineMs === undefined ? {} : { attemptDeadlineMs: ctx.attemptDeadlineMs }),
+        ...(ctx?.scheduleDeadlineMs === undefined ? {} : { scheduleDeadlineMs: ctx.scheduleDeadlineMs }),
+      };
+      const current = await client.request({
+        method: 'GET',
+        path: `${base(repo)}/pulls/${pull.number}`,
+        auth: auth(repo),
+        ...options,
+      });
+      const parsed = ClaimPullSchema.safeParse(current.data);
+      if (!parsed.success || parsed.data.number !== pull.number || parsed.data.node_id !== pull.nodeId)
+        throw unexpected(`挂 PR #${pull.number} 自动合并前核身份`, current.data);
+      if (pull.headSha !== undefined && parsed.data.head.sha !== pull.headSha)
+        throw unexpected(`挂 PR #${pull.number} 自动合并前核预期头`, {
+          expected: pull.headSha,
+          actual: parsed.data.head.sha,
+        });
+      const title = neutralizeCloseKeywords(parsed.data.title);
+      const body = neutralizeCloseKeywords(parsed.data.body ?? '');
+      if (hasCloseKeywords(parsed.data.title) || hasCloseKeywords(parsed.data.body ?? '')) {
+        const changed = await client.request({
+          method: 'PATCH',
+          path: `${base(repo)}/pulls/${pull.number}`,
+          auth: auth(repo),
+          body: { title, body },
+          ...options,
+        });
+        const updated = ClaimPullSchema.safeParse(changed.data);
+        if (
+          !updated.success ||
+          updated.data.number !== pull.number ||
+          updated.data.node_id !== pull.nodeId ||
+          updated.data.title !== title ||
+          updated.data.body !== body
+        )
+          throw unexpected(`挂 PR #${pull.number} 自动合并前去关单词的回执`, changed.data);
+      }
+      const headline = `${title.trim() || `PR #${pull.number}`} (#${pull.number})`;
+      const commitBody = defaultCommitMessage(pull.number);
+      const revokeUnverified = async (original: GitHubError): Promise<never> => {
+        try {
+          const disabled = await client.graphql(
+            auth(repo),
+            'mutation($id: ID!) { disablePullRequestAutoMerge(input: { pullRequestId: $id }) { pullRequest { id number autoMergeRequest { commitHeadline } } } }',
+            { id: pull.nodeId },
+            { mutation: true, ...options },
+          );
+          const stopped = z
+            .object({
+              disablePullRequestAutoMerge: z.object({
+                pullRequest: z.object({
+                  id: z.literal(pull.nodeId),
+                  number: z.literal(pull.number),
+                  autoMergeRequest: z.null(),
+                }),
+              }),
+            })
+            .safeParse(disabled);
+          if (!stopped.success) throw unexpected('撤掉未核实自动合并的回执', disabled);
+        } catch (error) {
+          throw new GitHubError(original.code, `${original.message}；撤挂也未核实`, {
+            maybeLanded: true,
+            details: {
+              original: original.details,
+              cleanup: error instanceof Error ? error.message : String(error),
+            },
+          });
+        }
+        throw original;
+      };
+      let result: unknown;
       try {
-        await client.graphql(
+        result = await client.graphql(
           auth(repo),
-          'mutation($id: ID!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, mergeMethod: SQUASH }) { pullRequest { number } } }',
-          { id: pull.nodeId },
-          {
-            mutation: true,
-            signal: ctx?.signal,
-            ...(ctx?.attemptDeadlineMs === undefined ? {} : { attemptDeadlineMs: ctx.attemptDeadlineMs }),
-            ...(ctx?.scheduleDeadlineMs === undefined ? {} : { scheduleDeadlineMs: ctx.scheduleDeadlineMs }),
-          },
+          'mutation($id: ID!, $head: GitObjectID!, $headline: String!, $body: String!) { enablePullRequestAutoMerge(input: { pullRequestId: $id, expectedHeadOid: $head, mergeMethod: SQUASH, commitHeadline: $headline, commitBody: $body }) { pullRequest { id number autoMergeRequest { commitHeadline commitBody mergeMethod } } } }',
+          { id: pull.nodeId, head: parsed.data.head.sha, headline, body: commitBody },
+          { mutation: true, ...options },
         );
       } catch (error) {
-        // 只认这个 mutation 自己回的那一条 UNPROCESSABLE unstable 临时拒绝：标成可重试，交活动既有的有界重试
+        if (error instanceof GitHubError) {
+          // 非空子字段报错可把整份 payload 向上置 null；只认本次 mutation 的精确子字段路径。
+          const details = error.details;
+          const nestedAutoMergeError =
+            typeof details === 'object' &&
+            details !== null &&
+            'errors' in details &&
+            Array.isArray(details.errors) &&
+            details.errors.some((entry: unknown) => {
+              if (typeof entry !== 'object' || entry === null || !('path' in entry)) return false;
+              const path = entry.path;
+              return (
+                Array.isArray(path) &&
+                path.length > 1 &&
+                path[0] === 'enablePullRequestAutoMerge' &&
+                path
+                  .slice(1)
+                  .every(
+                    (part: unknown) =>
+                      typeof part === 'string' ||
+                      (typeof part === 'number' && Number.isInteger(part) && part >= 0),
+                  )
+              );
+            });
+          if (error.maybeLanded || error.code === 'UNEXPECTED_RESPONSE' || nestedAutoMergeError)
+            await revokeUnverified(error);
+        }
+        // 只认这个 mutation 自己回的那一条 UNPROCESSABLE unstable 临时拒绝：标成可重试，交活动既有的有界重试。
         // （git 档 3 次、退避），每次重入 armAutoMerge 从头现读 PR、评审、检查。码和原消息不变，原始 errors 原样留在
         // details 里，消息后面补上 type/path、PR、头、第几次尝试，重试用尽停下时一眼看得出。别的一律原样抛。
         if (isGitHubError(error, 'GRAPHQL_ERROR') && isUnstableRefusal(error.details)) {
@@ -492,6 +593,24 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
         }
         throw error;
       }
+      // 核已挂请求的消息；这不证明 merge queue 最终会沿用它（GitHub 明确会忽略自定义消息）。
+      const receipt = z
+        .object({
+          enablePullRequestAutoMerge: z.object({
+            pullRequest: z.object({
+              id: z.literal(pull.nodeId),
+              number: z.literal(pull.number),
+              autoMergeRequest: z.object({
+                commitHeadline: z.literal(headline),
+                commitBody: z.literal(commitBody),
+                mergeMethod: z.literal('SQUASH'),
+              }),
+            }),
+          }),
+        })
+        .safeParse(result);
+      if (!receipt.success)
+        await revokeUnverified(unexpected(`挂 PR #${pull.number} 自动合并的安全消息回执`, result));
     },
 
     async closePull(repo, number) {
@@ -513,7 +632,7 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
     },
 
     async updatePullBody(repo, number, input) {
-      const body = typeof input === 'string' ? input : renderPrBody(input);
+      const body = neutralizeCloseKeywords(typeof input === 'string' ? input : renderPrBody(input));
       assertBodySize('PR 正文', body);
       assertPublishable(
         repo,

@@ -470,6 +470,38 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
     });
   });
 
+  it('本仓小改动不启动例外核验；当前raw读取失败抛错，不冒充老历史缺字段', async () => {
+    const { dir, base } = await tree();
+    writeFileSync(join(dir, 'small.ts'), 'export const small = true;\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'small');
+    const real = localExec();
+    const { acts } = make({
+      gh: fakeGh().gh,
+      exec: (command) => {
+        if (command.argv.includes('merge-base') && command.argv.includes('--no-replace-objects'))
+          throw new Error('小改动不应进入快照预算');
+        return real(command);
+      },
+    });
+    const readInput = { ...input(dir, base), repo: { ...REPO, owner: 'thoerwink8', name: 'fleet-dao' } };
+    expect(await acts.readDelivery(readInput, ctx())).toMatchObject({ addedLines: 1 });
+    const broken = make({
+      gh: fakeGh().gh,
+      exec: (command) =>
+        command.argv.includes('--numstat')
+          ? Promise.resolve({
+              code: 1,
+              stdout: Buffer.alloc(0),
+              stderr: '真实计数失败',
+              timedOut: false,
+              aborted: false,
+            })
+          : real(command),
+    }).acts;
+    await expect(broken.readDelivery(readInput, ctx())).rejects.toMatchObject({ code: 'GIT_FAILED' });
+  });
+
   it('【故意造出的失败】一个提交都没有、工作树里有改过的和新建没加的文件：commits 是 0，leftover 把它们都列出来', async () => {
     const { dir, base } = await tree();
     writeFileSync(join(dir, 'README.md'), '# changed\n');
@@ -1828,6 +1860,26 @@ describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝
     message: 'Pull request Pull request is in unstable status',
   };
   const green: MergeWaitChecks = { overall: 'green', failed: [] };
+  const pullJson = (pull: ReturnType<typeof pullFacts>) => ({
+    number: 7,
+    node_id: 'PR_7',
+    html_url: 'https://github.test/acme/widgets/pulls/7',
+    state: pull.state,
+    title: pull.title,
+    body: pull.body,
+    draft: pull.draft,
+    merged: pull.merged,
+    merged_at: null,
+    merge_commit_sha: null,
+    mergeable: pull.mergeable,
+    mergeable_state: pull.mergeableState,
+    user: null,
+    merged_by: null,
+    head: { ref: pull.headRef, sha: pull.headSha, repo: { full_name: 'acme/widgets' } },
+    base: { ref: 'main', sha: 'b'.repeat(40), repo: { full_name: 'acme/widgets' } },
+    updated_at: '2026-10-19T00:00:00Z',
+    auto_merge: pull.autoMerge ? { merge_method: 'squash' } : null,
+  });
   /** git 档活动的重试次数（activity-options.ts 的 retry(3, …)）：这里按它逐次重入，不另起循环。 */
   const GIT_ATTEMPTS = 3;
 
@@ -1843,16 +1895,33 @@ describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝
     } = {},
   ) {
     const real = setupHttp();
+    const pulls = opts.pulls ?? [pullFacts()];
+    real.fake.before.push((r) =>
+      r.path === '/repos/acme/widgets/pulls/7' ? httpJson(200, pullJson(pulls[0]!)) : undefined,
+    );
     let sent = 0;
     real.fake.before.push((r) => {
       if (r.path !== '/graphql') return undefined;
       const reply = replies[Math.min(sent, replies.length - 1)];
       sent += 1;
       return reply === null
-        ? httpJson(200, { data: { enablePullRequestAutoMerge: { pullRequest: { number: 7 } } } })
+        ? httpJson(200, {
+            data: {
+              enablePullRequestAutoMerge: {
+                pullRequest: {
+                  id: 'PR_7',
+                  number: 7,
+                  autoMergeRequest: {
+                    commitHeadline: 't (#7)',
+                    commitBody: '由 fleet 引擎经合并队列 squash 合并（PR #7）。',
+                    mergeMethod: 'SQUASH',
+                  },
+                },
+              },
+            },
+          })
         : httpJson(200, { data: { enablePullRequestAutoMerge: null }, errors: reply });
     });
-    const pulls = opts.pulls ?? [pullFacts()];
     let reads = 0;
     const f = fakeGh({
       readPull: async () => pulls[Math.min(reads++, pulls.length - 1)],
