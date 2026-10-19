@@ -29,7 +29,7 @@ import { parseRepoProfile, type RepoProfile } from '@fleet-dao/shared';
 import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import type { EngineTasks } from '../activities.ts';
 import { type PortContext, PortError } from '../ports.ts';
-import { readTaskBrief } from '../runner/task-brief.ts';
+import { readTaskBrief, sameRequirementContract } from '../runner/task-brief.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
 import type {
   ArmAutoMergeInput,
@@ -53,6 +53,7 @@ import type { EngineGitHub } from './github-ports.ts';
 import { bookMergedPull, readMergedTask } from './merge-receipt.ts';
 import { mapped } from './mirror.ts';
 import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
+import { guardRequirementContract, holdRequirementContract } from './task-contract-guard.ts';
 import {
   addedLinesAgainst,
   changedFilesSince,
@@ -557,22 +558,37 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     },
     async readTaskBrief(input: ReadTaskBriefInput, ctx: PortContext) {
       const repo = refOf(input.repo);
-      const profile = await profileOf(repo);
-      return readTaskBrief(
-        {
-          readIssue: ({ repo: issueRepo, issueNumber }) =>
-            mapped(() => gh.readIssue({ repo: issueRepo, issueNumber, signal: ctx.signal })),
-          readSpecDoc: async ({ repo: docRepo, path }) => {
-            const doc = await mapped(() => gh.readSpecDoc({ repo: docRepo, path, signal: ctx.signal }, ctx));
-            return doc ? { content: doc.content } : null;
+      let got: Awaited<ReturnType<typeof readTaskBrief>>;
+      try {
+        const profile = await profileOf(repo);
+        got = await readTaskBrief(
+          {
+            readIssue: ({ repo: issueRepo, issueNumber }) =>
+              mapped(() => gh.readIssue({ repo: issueRepo, issueNumber, signal: ctx.signal })),
+            readSpecDoc: async ({ repo: docRepo, path }) => {
+              const doc = await mapped(() =>
+                gh.readSpecDoc({ repo: docRepo, path, signal: ctx.signal }, ctx),
+              );
+              return doc ? { content: doc.content } : null;
+            },
           },
-        },
-        {
-          repo,
-          issueNumber: input.issueNumber,
-          ...(profile ? { moduleRoots: profile.moduleRoots } : {}),
-        },
-      );
+          {
+            repo,
+            issueNumber: input.issueNumber,
+            ...(profile ? { moduleRoots: profile.moduleRoots } : {}),
+          },
+        );
+      } catch (error) {
+        if (input.contractGuard) await holdRequirementContract(gh, repo, input.contractGuard.prNumber);
+        throw error;
+      }
+      if (
+        input.contractGuard &&
+        (!got.ok || !sameRequirementContract(input.contractGuard.expected, got.brief.contract))
+      ) {
+        await holdRequirementContract(gh, repo, input.contractGuard.prNumber);
+      }
+      return got;
     },
 
     async readDelivery(input: ReadDeliveryInput, ctx: PortContext): Promise<DeliveryRead> {
@@ -641,6 +657,18 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     async armAutoMerge(input: ArmAutoMergeInput, ctx: PortContext): Promise<ArmAutoMergeResult> {
       const repo = refOf(input.repo);
       const { prNumber, expectedHead } = input;
+      const contractCurrent = () =>
+        input.contractGuard
+          ? guardRequirementContract(
+              gh,
+              repo,
+              prNumber,
+              input.contractGuard.issueNumber,
+              input.contractGuard.expected,
+              ctx,
+            )
+          : Promise.resolve(true);
+      const contractChanged: ArmAutoMergeResult = { armed: false, merged: false, contractChanged: true };
       const pull = await mapped(() => gh.claims.readPull(repo, prNumber));
       if (pull.merged) {
         const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
@@ -674,7 +702,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           reviewChanges: held,
         };
       }
-      if (pull.autoMerge) return { armed: true, merged: false };
+      if (pull.autoMerge) return (await contractCurrent()) ? { armed: true, merged: false } : contractChanged;
 
       // clean 之后的直接合。recheckCi 只在「现读已经是绿」时再走一次同一个 mergePr，避免检查刚转绿就停。
       const acceptDirectMerge = async (
@@ -686,6 +714,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           return { armed: false, merged: true, mergeCommit: result.mergeCommit };
         }
         if (result.reason === 'behind_main') {
+          if (!(await contractCurrent())) return contractChanged;
           return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, result.detail, ctx);
         }
         if (result.reason === 'ci_not_green') return classifyCiNotGreen(result.detail, recheckCi);
@@ -745,6 +774,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         if (checks.overall === 'green' && recheckCi) {
           refuseLateArmWrite(ctx);
+          if (!(await contractCurrent())) return contractChanged;
+          refuseLateArmWrite(ctx);
           const again = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
           return acceptDirectMerge(again, false);
         }
@@ -761,7 +792,10 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       try {
         // 读过 PR、读过评审了：已经挂上的在上面返回，不会走到这里。已取消或期限已过就不再开新的写。
         refuseLateArmWrite(ctx);
+        if (!(await contractCurrent())) return contractChanged;
+        refuseLateArmWrite(ctx);
         await mapped(() => gh.claims.enableAutoMerge(repo, pull, ctx));
+        if (!(await contractCurrent())) return contractChanged;
         // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
         // 这一次之后交的评审，事件那头读到的就是已挂着（会撤）。两头合起来不留「检查完才到」的窗口。
         const after = await reviewHold(repo, { ...pull, autoMerge: true });
@@ -779,6 +813,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
         // 这一下若已取消，或挂的时候把期限用完，不再另开直接合。已经发出去的挂合并请求撤不回来。
         refuseLateArmWrite(ctx);
+        if (!(await contractCurrent())) return contractChanged;
+        refuseLateArmWrite(ctx);
         let merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
         // 只是检查没跑完（没有红的、没出现的）：多半是验收结果刚写、合并闸在同一个头上重跑（#3165）。
         // 在这一步里隔一会儿再合。每一轮再看取消和绝对截止，过了就不再发新的合并写。
@@ -791,6 +827,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           const left = writeBudgetMs(ctx);
           if (left !== null && left < 1) break;
           await sleep(left === null ? pollEveryMs : Math.min(pollEveryMs, left), ctx.signal);
+          refuseLateArmWrite(ctx);
+          if (!(await contractCurrent())) return contractChanged;
           refuseLateArmWrite(ctx);
           merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
         }
@@ -833,6 +871,19 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         };
       }
       // 不核 CI。头、冲突、落后主线、还开着，mergePr 仍核。分支保护拒绝会抛，不装成合过了。
+      if (
+        input.contractGuard &&
+        !(await guardRequirementContract(
+          gh,
+          repo,
+          prNumber,
+          input.contractGuard.issueNumber,
+          input.contractGuard.expected,
+          ctx,
+        ))
+      ) {
+        return { merged: false, contractChanged: true };
+      }
       const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead, requireCi: false }, ctx));
       if (merged.merged) {
         await auditLateReview(repo, prNumber, ctx);
@@ -890,6 +941,18 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         if (pull.state !== 'open') return { state: 'closed' };
         if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
+        if (
+          input.contractGuard &&
+          !(await guardRequirementContract(
+            gh,
+            repo,
+            prNumber,
+            input.contractGuard.issueNumber,
+            input.contractGuard.expected,
+            ctx,
+          ))
+        )
+          return { state: 'contract_changed' };
         if (!pull.autoMerge) return { state: 'unarmed' };
         // 等合并时交的正式「要求改」（#2991）：每一圈现读，读到了先撤自动合并再交回工作流，不等 GitHub 把它合了
         const held = await reviewHold(repo, pull);
