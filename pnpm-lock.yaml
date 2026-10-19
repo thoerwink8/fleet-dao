@@ -112,12 +112,18 @@ importers:
       '@fleet-dao/shared':
         specifier: workspace:*
         version: link:../shared
+      drizzle-kit:
+        specifier: 0.31.11
+        version: 0.31.11(drizzle-orm@0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9))
       drizzle-orm:
         specifier: ^0.45.3
         version: 0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9)
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
+      yaml:
+        specifier: ^2.9.1
+        version: 2.9.1
       zod:
         specifier: ^4.6.5
         version: 4.6.5
@@ -125,9 +131,6 @@ importers:
       '@electric-sql/pglite':
         specifier: ^0.5.8
         version: 0.5.8
-      drizzle-kit:
-        specifier: ^0.31.11
-        version: 0.31.11(drizzle-orm@0.45.3(@electric-sql/pglite@0.5.8)(postgres@3.4.9))
 
   packages/engine:
     dependencies:

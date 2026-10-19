@@ -467,6 +467,38 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
     });
   });
 
+  it('本仓小改动不启动例外核验；当前raw读取失败抛错，不冒充老历史缺字段', async () => {
+    const { dir, base } = await tree();
+    writeFileSync(join(dir, 'small.ts'), 'export const small = true;\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-qm', 'small');
+    const real = localExec();
+    const { acts } = make({
+      gh: fakeGh().gh,
+      exec: (command) => {
+        if (command.argv.includes('merge-base') && command.argv.includes('--no-replace-objects'))
+          throw new Error('小改动不应进入快照预算');
+        return real(command);
+      },
+    });
+    const readInput = { ...input(dir, base), repo: { ...REPO, owner: 'thoerwink8', name: 'fleet-dao' } };
+    expect(await acts.readDelivery(readInput, ctx())).toMatchObject({ addedLines: 1 });
+    const broken = make({
+      gh: fakeGh().gh,
+      exec: (command) =>
+        command.argv.includes('--numstat')
+          ? Promise.resolve({
+              code: 1,
+              stdout: Buffer.alloc(0),
+              stderr: '真实计数失败',
+              timedOut: false,
+              aborted: false,
+            })
+          : real(command),
+    }).acts;
+    await expect(broken.readDelivery(readInput, ctx())).rejects.toMatchObject({ code: 'GIT_FAILED' });
+  });
+
   it('【故意造出的失败】一个提交都没有、工作树里有改过的和新建没加的文件：commits 是 0，leftover 把它们都列出来', async () => {
     const { dir, base } = await tree();
     writeFileSync(join(dir, 'README.md'), '# changed\n');

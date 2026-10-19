@@ -1057,18 +1057,38 @@ class TaskFlow {
   private async withinLineBudget(delivery: DeliveryRead): Promise<boolean> {
     const rt = this.rt;
     const budget = this.lineBudget();
-    const added = delivery.addedLines;
+    const rawAdded = delivery.addedLines;
+    const measurement = delivery.lineBudgetMeasurement;
+    const measured =
+      measurement &&
+      patched('verified-migration-budget-v1') &&
+      measurement.version === 1 &&
+      measurement.verified &&
+      measurement.head === delivery.head &&
+      measurement.rawAddedLines === rawAdded &&
+      Number.isSafeInteger(measurement.verifiedGeneratedLines) &&
+      measurement.verifiedGeneratedLines >= 0 &&
+      Number.isSafeInteger(measurement.chargeableAddedLines) &&
+      measurement.chargeableAddedLines >= 0 &&
+      measurement.chargeableAddedLines + measurement.verifiedGeneratedLines === rawAdded;
+    const added = measured ? measurement.chargeableAddedLines : rawAdded;
+    const detail = measurement
+      ? `原始新增 ${rawAdded} 行；已核生成快照 ${measured ? measurement.verifiedGeneratedLines : 0} 行；${measurement.reason}`
+      : '';
     if (budget === 0 || added === undefined || added <= budget || this.budgetApproved) return true;
     if (!patched('pr-line-budget')) return true;
     if (!this.budgetBounced) {
       this.budgetBounced = true;
-      rt.feedback = [overBudgetLine(added, budget, this.plan, delivery.changedFiles)];
+      rt.feedback = [
+        overBudgetLine(added, budget, this.plan, delivery.changedFiles),
+        ...(detail ? [detail] : []),
+      ];
       rt.status.lastProblem = '改动超出体量预算';
       return false;
     }
     await rt.park(
       `改动超出体量预算：新增 ${added} 行，预算 ${budget} 行，收窄过一次仍超`,
-      `${splitSuggestion(delivery.changedFiles)} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。`,
+      `${splitSuggestion(delivery.changedFiles)}${detail ? ` ${detail}` : ''} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。`,
     );
     this.budgetApproved = true;
     return true;

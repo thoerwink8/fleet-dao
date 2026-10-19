@@ -26,6 +26,21 @@ process.stdin.on('end', () => {
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
 describe('以会话用户的身份跑命令', { timeout: 30_000 }, () => {
+  it('单次输出可以收紧；溢出明确失败，默认普通命令不受这次小界影响', async () => {
+    const exec = localExec();
+    const command = {
+      user: 'fleet-agent-carpool' as const,
+      cwd: dir,
+      argv: [process.execPath, '-e', 'process.stdout.write("x".repeat(4096))'],
+      timeoutMs: 5000,
+      scopeId: 'small-output',
+    };
+    expect(await exec({ ...command, maxStdoutBytes: 32 })).toMatchObject({
+      code: null,
+      outputOverflow: true,
+    });
+    expect(await exec(command)).toMatchObject({ code: 0, stdout: Buffer.alloc(4096, 'x') });
+  });
   it('生产：经 fleet-agent-scope run 起，带用户、工作目录、命令；二进制输入输出原样进出', async () => {
     const exec = scopeExec({
       helper,

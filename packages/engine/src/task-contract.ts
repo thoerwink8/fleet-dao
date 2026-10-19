@@ -359,9 +359,23 @@ export interface DeliveryRead {
    */
   conflicts?: string[];
   /**
-   * 交的头相对树里钉住的主线新增了多少行（#2755 体量预算按它判）。没数成、老历史里没有：当作没量到，不判预算。
+   * 交的头相对钉住主线的原始新增行数，始终与 GitHub additions 同口径。当前真实读取失败抛错；老历史缺省不判预算。
    */
   addedLines?: number;
+  /** #3242：原 addedLines 永远是 raw；此项只供新版本预算判断，缺省沿用原判。 */
+  lineBudgetMeasurement?: LineBudgetMeasurement;
+}
+
+export interface LineBudgetMeasurement {
+  version: 1;
+  base: string;
+  head: string;
+  rawAddedLines: number;
+  rawDiffBytes?: number;
+  verifiedGeneratedLines: number;
+  chargeableAddedLines: number;
+  verified: boolean;
+  reason: string;
 }
 
 export interface ColdVerifyInput {
