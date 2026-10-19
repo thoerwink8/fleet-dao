@@ -35,10 +35,16 @@ import { freshRepo } from '../helpers.ts';
 
 const USER = 'fleet-agent-1' as SessionUser;
 
-// 只替 rename 留一个可控失败点；其余文件系统操作和默认 rename 仍跑真实实现。
+// 只在锁的读/改名操作留可控失败点；默认实现仍访问真实文件系统。
 vi.mock('node:fs/promises', async (original) => {
   const fs = await original<typeof import('node:fs/promises')>();
-  return { ...fs, rename: vi.fn(fs.rename) };
+  return {
+    ...fs,
+    rename: vi.fn(fs.rename),
+    readFile: vi.fn(fs.readFile),
+    readdir: vi.fn(fs.readdir),
+    stat: vi.fn(fs.stat),
+  };
 });
 
 function ctx(): PortContext {
@@ -452,15 +458,178 @@ describe('受影响包的整机锁', () => {
 });
 
 describe('自测名额', () => {
-  it('rename 报 EPERM 但目标锁目录不存在：原错照抛，私有 pending 目录清掉', async () => {
+  it('赢家在 rename 报错回到输家前释放：输家仍须原子拿到名额', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'self-check-slot-release-'));
+    const fs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    let entered!: () => void;
+    const atRename = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    let collide!: () => void;
+    const collision = new Promise<void>((resolve) => {
+      collide = resolve;
+    });
+    let releaseWinner!: () => void | Promise<void>;
+    let observedCode: string | undefined;
+    const rename = vi.mocked(fsPromises.rename).mockImplementationOnce(async (source, target) => {
+      entered();
+      await collision;
+      try {
+        await fs.rename(source, target);
+      } catch (error) {
+        observedCode = (error as NodeJS.ErrnoException).code;
+        await releaseWinner();
+        throw error;
+      }
+    });
+    const controller = new AbortController();
+    const releases: Array<() => void | Promise<void>> = [];
+    let loser: Promise<() => void | Promise<void>> | undefined;
+    try {
+      const slots = createSelfCheckSlots(dir, { slots: 1, pollMs: 10 });
+      loser = slots.acquire(controller.signal);
+      // 被测旧实现会拒绝，先挂处理器避免诊断窗口内出现未处理拒绝。
+      void loser.catch(() => {});
+      await atRename;
+      releaseWinner = await slots.acquire(controller.signal);
+      releases.push(releaseWinner);
+      collide();
+      releases.push(await loser);
+      expect(process.platform === 'win32' ? ['EPERM'] : ['EEXIST', 'ENOTEMPTY']).toContain(observedCode);
+      expect(readdirSync(join(dir, 'slot-0'))).toHaveLength(1);
+      expect(readdirSync(dir)).toEqual(['slot-0']);
+    } finally {
+      collide();
+      controller.abort();
+      await loser?.catch(() => {});
+      await Promise.all(releases.map((release) => release()));
+      rename.mockReset();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['readFile', 'readdir', 'stat'] as const)(
+    'Windows %s 遇到删除窗口：重试后按真实目录继续，持续权限拒绝仍抛',
+    async (operation) => {
+      const dir = mkdtempSync(join(tmpdir(), 'self-check-slot-read-'));
+      const denied = Object.assign(new Error(`${operation} denied`), { code: 'EPERM' });
+      const method = vi.mocked(
+        { readFile: fsPromises.readFile, readdir: fsPromises.readdir, stat: fsPromises.stat }[operation],
+      );
+      const controller = new AbortController();
+      let release: (() => void | Promise<void>) | undefined;
+      try {
+        const slots = createSelfCheckSlots(dir, { slots: 1, pollMs: 10 });
+        const seedDeadHolder = () => {
+          mkdirSync(join(dir, 'slot-0'));
+          writeFileSync(join(dir, 'slot-0', 'deadbeefdeadbeef'), `2147483646\n${Date.now()}\n`);
+        };
+        if (operation === 'readFile') {
+          const releaseHolder = await slots.acquire(controller.signal);
+          vi.mocked(fsPromises.readFile).mockImplementationOnce(async () => {
+            await releaseHolder();
+            throw denied;
+          });
+        } else {
+          if (operation === 'readdir') vi.mocked(fsPromises.readdir).mockResolvedValueOnce([]);
+          method.mockRejectedValueOnce(denied);
+        }
+        if (process.platform === 'win32') {
+          release = await slots.acquire(controller.signal);
+          await release();
+        } else {
+          await expect(slots.acquire(controller.signal)).rejects.toBe(denied);
+        }
+        if (operation === 'readFile') seedDeadHolder();
+        method.mockRejectedValue(denied);
+        await expect(slots.acquire(controller.signal)).rejects.toBe(denied);
+        expect(readdirSync(dir)).toEqual(operation === 'readFile' ? ['slot-0'] : []);
+      } finally {
+        controller.abort();
+        await release?.();
+        method.mockReset();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('重试时后续赢家仍持槽：输家继续排队，不覆盖其令牌', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'self-check-slot-next-winner-'));
+    const fs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
+    const controller = new AbortController();
+    const slots = createSelfCheckSlots(dir, { slots: 1, pollMs: 10 });
+    let releaseWinner: (() => void | Promise<void>) | undefined;
+    let releaseLoser: (() => void | Promise<void>) | undefined;
+    let winnerReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      winnerReady = resolve;
+    });
+    const rename = vi.mocked(fsPromises.rename).mockImplementationOnce(async (source, target) => {
+      releaseWinner = await slots.acquire(controller.signal);
+      winnerReady();
+      await fs.rename(source, target);
+    });
+    let acquired = false;
+    const loser = slots.acquire(controller.signal).then((release) => {
+      acquired = true;
+      return release;
+    });
+    void loser.catch(() => {});
+    try {
+      await ready;
+      const token = readdirSync(join(dir, 'slot-0'));
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(acquired).toBe(false);
+      expect(readdirSync(join(dir, 'slot-0'))).toEqual(token);
+      await releaseWinner?.();
+      releaseLoser = await loser;
+      expect(readdirSync(join(dir, 'slot-0'))).not.toEqual(token);
+    } finally {
+      controller.abort();
+      await loser.catch(() => {});
+      await releaseWinner?.();
+      await releaseLoser?.();
+      rename.mockReset();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.each(['EPERM', 'EIO'])('rename 持续报 %s 且目标不存在：原错照抛，私有 pending 清掉', async (code) => {
     const dir = mkdtempSync(join(tmpdir(), 'self-check-slot-permission-'));
-    const denied = Object.assign(new Error('rename denied'), { code: 'EPERM' });
-    const rename = vi.mocked(fsPromises.rename).mockRejectedValueOnce(denied);
+    const denied = Object.assign(new Error('rename denied'), { code });
+    const rename = vi.mocked(fsPromises.rename).mockClear().mockRejectedValue(denied);
     try {
       const slots = createSelfCheckSlots(dir, { slots: 1 });
       await expect(slots.acquire(new AbortController().signal)).rejects.toBe(denied);
+      expect(rename).toHaveBeenCalledTimes(process.platform === 'win32' && code === 'EPERM' ? 2 : 1);
       expect(readdirSync(dir)).toEqual([]);
     } finally {
+      rename.mockReset();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Windows EPERM 重试等候可取消，Linux 原错直抛；pending 清掉且不再 rename', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'self-check-slot-retry-abort-'));
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const rename = vi
+      .mocked(fsPromises.rename)
+      .mockClear()
+      .mockImplementationOnce(async () => {
+        timer = setTimeout(() => controller.abort(), 0);
+        throw Object.assign(new Error('rename pending delete'), { code: 'EPERM' });
+      });
+    try {
+      const slots = createSelfCheckSlots(dir, { slots: 1 });
+      await expect(slots.acquire(controller.signal)).rejects.toThrow(
+        process.platform === 'win32' ? 'aborted' : 'rename pending delete',
+      );
+      expect(rename).toHaveBeenCalledTimes(1);
+      expect(readdirSync(dir)).toEqual([]);
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
       rename.mockReset();
       rmSync(dir, { recursive: true, force: true });
     }
@@ -512,7 +681,10 @@ describe('自测名额', () => {
       }
       const got = await Promise.all(pending);
       expect(maxRunning).toBe(SELF_CHECK_SLOTS);
-      expect(got.map((g) => g.state)).toEqual(['green', 'green', 'green', 'green']);
+      expect(
+        got.map((g) => g.state),
+        JSON.stringify(got),
+      ).toEqual(['green', 'green', 'green', 'green']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
