@@ -63,12 +63,108 @@ import {
   changedFilesSince,
   commitsSince,
   deliveryLeftover,
+  ENVIRONMENT_FILES,
+  gitInTree,
+  hasCommit,
   headOf,
+  isAncestor,
+  mainlineRef,
   ownSpan,
   type UserTree,
   unresolvedConflicts,
 } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
+
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/** 两个提交的分叉点（完整 sha）；没有共同祖先回 null，git 没跑成照抛。 */
+async function mergeBaseOf(t: UserTree, a: string, b: string): Promise<string | null> {
+  const r = await gitInTree(t, ['merge-base', a, b], '算分叉点', { allow: [1] });
+  const sha = r.code === 0 ? r.stdout.toString('utf8').trim() : '';
+  return FULL_SHA.test(sha) ? sha : null;
+}
+
+/** 工作树里没提交的改动（含没跟踪的文件），环境文件不算。只读：不还原、不写（和 deliveryLeftover 的口径一样，但不动树）。 */
+async function dirtyEntries(t: UserTree): Promise<string[]> {
+  const status = await gitInTree(
+    t,
+    [
+      '-c',
+      'core.fsmonitor=false',
+      '--no-optional-locks',
+      'status',
+      '--porcelain=v1',
+      '--untracked-files=all',
+    ],
+    '重评前后看工作树是否干净',
+  );
+  const environment = new Set(ENVIRONMENT_FILES.map((f) => f.path));
+  return status.stdout
+    .toString('utf8')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .filter((line) => {
+      const path = line.slice(3);
+      const arrow = path.indexOf(' -> ');
+      return !environment.has(arrow >= 0 ? path.slice(arrow + 4) : path);
+    });
+}
+
+/**
+ * 体量关口重评（#3249）：只在这棵树上对精确 head、固定 base 重做可信计量。用发布版测量实现（只读 Git 对象，
+ * 不执行候选源码或配置、不起模型），测量前后各核一次头和干净程度。读失败抛错（工作流按未知处理），身份对不上回 refused。
+ */
+export async function remeasureLineBudget(
+  t: UserTree,
+  repo: { owner: string; name: string; defaultBranch: string },
+  ask: NonNullable<ReadDeliveryInput['budgetRemeasure']>,
+): Promise<DeliveryRead> {
+  if (!FULL_SHA.test(ask.head) || !FULL_SHA.test(ask.base) || !Number.isSafeInteger(ask.rawAddedLines)) {
+    throw new PortError('BAD_INPUT', '重评要完整 head / base 和原始新增行', { retryable: false });
+  }
+  if (repo.owner.toLowerCase() !== 'thoerwink8' || repo.name.toLowerCase() !== 'fleet-dao') {
+    throw new PortError('BAD_INPUT', '可信生成折扣只对本仓开放，不重评别的仓', { retryable: false });
+  }
+  const answer = (budgetRemeasure: NonNullable<DeliveryRead['budgetRemeasure']>): DeliveryRead => ({
+    head: ask.head,
+    // 重评不读会话交付：提交数、文件清单不代表交付，工作流只认 budgetRemeasure。
+    commits: 0,
+    changedFiles: [],
+    budgetRemeasure,
+  });
+  const refused = (reason: 'head' | 'base' | 'dirty' | 'raw', detail: string) =>
+    answer({ version: 1, status: 'refused', reason, detail });
+  const headBefore = await headOf(t);
+  if (headBefore !== ask.head)
+    return refused('head', `工作树的头是 ${headBefore.slice(0, 12)}，不是请求的头`);
+  const dirtyBefore = await dirtyEntries(t);
+  if (dirtyBefore.length > 0)
+    return refused('dirty', `工作树有没提交的改动：${dirtyBefore.slice(0, 5).join('、')}`);
+  if (!(await hasCommit(t, ask.base))) return refused('base', '树里没有这个 base 提交');
+  if (!(await isAncestor(t, ask.base, ask.head))) return refused('base', 'base 不是 head 的祖先');
+  // 工作流已核 base 等于停下时记的那个；这里再核它仍是「头相对树里钉的主线的 merge-base」：主线上更早的祖先、
+  // 主线在停下后被挪过，都拒，不让换测量范围
+  const mergeBase = await mergeBaseOf(t, mainlineRef(repo.defaultBranch), ask.head);
+  if (mergeBase === null) return refused('base', '头和树里钉的主线没有共同祖先');
+  if (mergeBase !== ask.base)
+    return refused('base', `base 不是头相对树里钉的主线的 merge-base（应为 ${mergeBase.slice(0, 12)}）`);
+  const raw = await addedLinesAgainst(t, ask.base, ask.head);
+  if (raw !== ask.rawAddedLines)
+    return refused('raw', `原始新增行是 ${raw}，与停下时的 ${ask.rawAddedLines} 不同`);
+  const measurement = await measureMigrationBudget(t, ask.base, ask.head, raw);
+  const headAfter = await headOf(t);
+  const dirtyAfter = await dirtyEntries(t);
+  return answer({
+    version: 1,
+    status: 'measured',
+    head: ask.head,
+    base: ask.base,
+    headAfter,
+    cleanAfter: dirtyAfter.length === 0,
+    measurement,
+  });
+}
 
 /** 等合并时多久看一次 PR（毫秒）。 */
 export const MERGE_POLL_EVERY_MS = 20_000;
@@ -613,6 +709,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         );
       }
       const t = treeAs(input.worktreePath, user, `delivery-${input.taskId}`, ctx);
+      if (input.budgetRemeasure) return remeasureLineBudget(t, input.repo, input.budgetRemeasure);
       const span = await ownSpan(t, input.baseSha, input.repo.defaultBranch);
       const head = await headOf(t);
       const changedFiles = await changedFilesSince(t, span);
@@ -623,6 +720,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const conflicts = await unresolvedConflicts(t, { since: input.baseSha, mainline: span.mainline });
       // 原始统计不换口径；当前 Git 读取失败抛错。只有本仓超默认预算才尝试有界快照折扣。
       const addedLines = span.mainline ? await addedLinesAgainst(t, span.mainline, head) : undefined;
+      // addedLines 实际按的 base（mainline...head 的分叉点）：体量停点记进身份，重评只认它（#3249）
+      const addedLinesBase = span.mainline ? await mergeBaseOf(t, span.mainline, head) : undefined;
       const lineBudgetMeasurement =
         span.mainline &&
         addedLines !== undefined &&
@@ -638,6 +737,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         leftover,
         conflicts,
         ...(addedLines === undefined ? {} : { addedLines }),
+        ...(addedLinesBase ? { addedLinesBase } : {}),
         ...(lineBudgetMeasurement === undefined ? {} : { lineBudgetMeasurement }),
       };
     },

@@ -137,6 +137,16 @@ export interface TaskStatus {
   tier: TierDecision | null;
   /** 关单收尾能力。旧 worker 缺此字段，调用方必须保留未核实，不能回退无条件放弃。 */
   closedIssueClose?: { version: 1; token: ClosedIssueHoldToken | null };
+  /**
+   * 体量关口重评（#3249）：只有此刻确实停在体量预算停点、没有活动在跑、没人在重评时 identity 才非空。旧 worker 缺此字段＝不支持，
+   * 调用方不能凭自由文本的停下原因猜身份。resumed 是最近一次可信重评放行绑定的停点、头和 base（放行后停点身份清空，
+   * 同一请求重发凭它拿幂等回执；它不放行任何别的头）。
+   */
+  lineBudgetPark?: {
+    version: 1;
+    identity: LineBudgetParkIdentity | null;
+    resumed?: { identity: LineBudgetParkIdentity; head: string; base: string } | null;
+  };
   /** Separate from closed-issue abandonment: real merged PR, even when acceptance keeps its issue open. */
   mergedTaskClose?: {
     version: 1;
@@ -188,6 +198,74 @@ export const taskSettleMergedUpdate = defineUpdate<
   ClosedIssueCloseResult,
   [{ token: ClosedIssueHoldToken; receipt: MergedTaskReceipt }]
 >('taskSettleMerged');
+
+/**
+ * 体量预算停点身份（#3249）：只在这一 run 的这一次停下有效。继续信号、再次停下、放弃、换代都会让它对不上。
+ * parks / generation / continued 三个数一起定「第几次停」；head 是被停下的那份交付的头。
+ */
+export interface LineBudgetParkIdentity {
+  version: 1;
+  runId: string;
+  parks: number;
+  generation: number;
+  continued: number;
+  prNumber: number | null;
+  head: string;
+  /** 停下时 readDelivery 的原始新增行、按预算判的行（可信折扣之后），预算是停下时这张单的 prLineBudget。 */
+  rawAddedLines: number;
+  chargeableAddedLines: number;
+  budget: number;
+  /**
+   * 停下时原始新增行实际按的固定 base（readDelivery 的 addedLinesBase，与 lineBudgetMeasurement.base 互相印证）。
+   * 重评只认这个 base，不能换另一个同 raw 的旧祖先改测量范围；老版本停下的没记（null），重评明确拒绝。
+   */
+  base: string | null;
+}
+
+/** 预检用 check（只测不放行）；执行用 resume（测过且不超原预算才放行这一份交付）。 */
+export interface RemeasureLineBudgetCommand {
+  version: 1;
+  mode: 'check' | 'resume';
+  identity: LineBudgetParkIdentity;
+  repo: { owner: string; name: string };
+  taskId: string;
+  workflowId: string;
+  /** 精确的头和固定的测量 base：必须等于停点身份里停下时记的 base，且仍是头相对树里钉的主线的 merge-base。 */
+  head: string;
+  base: string;
+  by: string;
+}
+
+export interface LineBudgetRemeasureReceipt {
+  identity: LineBudgetParkIdentity;
+  base: string;
+  head: string;
+  rawAddedLines: number;
+  verifiedGeneratedLines: number;
+  chargeableAddedLines: number;
+  budget: number;
+  reason: string;
+}
+
+export type LineBudgetRefusal =
+  | 'unsupported' // 旧 worker / 活动没按重评口径回答
+  | 'identity' // repo / task / workflow / 参数形状对不上
+  | 'stale' // 不在这个停点（旧停点、换代、已继续、放弃、已结束）
+  | 'busy' // 别的重评或在跑的活动
+  | 'unknown' // 读失败、超时、取消：未知，不当 0 或 ok
+  | 'changed' // 头、基线、工作树干净程度变化
+  | 'unverified' // 没有可信完整测量
+  | 'over_budget'; // 实际计量仍超原预算
+
+export type RemeasureLineBudgetResult =
+  | { outcome: 'eligible' | 'resumed' | 'already_resumed'; receipt: LineBudgetRemeasureReceipt }
+  | { outcome: 'refused'; reason: LineBudgetRefusal; detail: string };
+
+/** 同步处理并回执：发请求成功不能冒充工作流已经放行。 */
+export const taskRemeasureLineBudgetUpdate = defineUpdate<
+  RemeasureLineBudgetResult,
+  [RemeasureLineBudgetCommand]
+>('taskRemeasureLineBudget');
 
 export interface TaskRun {
   outcome: 'merged' | 'abandoned';
@@ -341,7 +419,26 @@ export interface ReadDeliveryInput {
   repo: Repo;
   worktreePath: string;
   baseSha: string;
+  /**
+   * 体量关口重评（#3249，可选）：不读会话交付，只在这棵树上对精确 head、固定 base 重做可信计量。
+   * 老 worker 不认这个字段，回的交付里没有 budgetRemeasure，工作流按不支持处理。
+   */
+  budgetRemeasure?: { head: string; base: string; rawAddedLines: number };
 }
+
+/** 重评的活动回答（DeliveryRead.budgetRemeasure）：拒绝带原因；测量带测量前后核对过的头和干净程度。 */
+export type BudgetRemeasureRead =
+  | {
+      version: 1;
+      status: 'measured';
+      head: string;
+      base: string;
+      /** 测量之后重读的头和工作树状态；与入参不同＝测量期间换了。 */
+      headAfter: string;
+      cleanAfter: boolean;
+      measurement: LineBudgetMeasurement;
+    }
+  | { version: 1; status: 'refused'; reason: 'head' | 'base' | 'dirty' | 'raw'; detail: string };
 
 /** 会话交付的东西：工作树现在的头、比起点多了几个提交、改了哪些文件。读不到抛错，不回空。 */
 export interface DeliveryRead {
@@ -362,8 +459,15 @@ export interface DeliveryRead {
    * 交的头相对钉住主线的原始新增行数，始终与 GitHub additions 同口径。当前真实读取失败抛错；老历史缺省不判预算。
    */
   addedLines?: number;
+  /**
+   * addedLines 实际按哪个 base 数的（头相对钉住主线的 merge-base，#3249）。体量停点把它记进停点身份，重评只认它；
+   * 老历史缺省＝停下时没记，重评明确拒绝，不拿现在的主线或请求者给的旧祖先顶替。
+   */
+  addedLinesBase?: string;
   /** #3242：原 addedLines 永远是 raw；此项只供新版本预算判断，缺省沿用原判。 */
   lineBudgetMeasurement?: LineBudgetMeasurement;
+  /** 只在 ReadDeliveryInput.budgetRemeasure 给了时才有（#3249）；这时其它交付字段不代表会话交付。 */
+  budgetRemeasure?: BudgetRemeasureRead;
 }
 
 export interface LineBudgetMeasurement {
