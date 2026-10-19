@@ -992,6 +992,12 @@ function BarAxis({
   );
 }
 
+/** 面板头、正文末尾那一行（#3277）：和过程头上同一句。 */
+export function processSummaryOf(d: TaskDetail, now: number): string {
+  const rounds = buildTimeline(d.segmentRuns, d.overview).filter((g) => g.seq !== undefined).length;
+  return processSummary(d.segmentRuns, rounds, now, isTaskFinished(d.task));
+}
+
 /** 头上一句：几个回合 · 几笔 · 用时（最早一笔起跑到最后收场或现在）。 */
 function processSummary(
   runs: readonly SegmentRunView[],
@@ -1014,10 +1020,13 @@ export function TaskProcess({
   d,
   now,
   onViewTranscript,
+  inPanel = false,
 }: {
   d: TaskDetail;
   now: number;
   onViewTranscript: (runId: string) => void;
+  /** 放在任务页右侧面板里（#3277）：标题和那一句在面板头上，这里不再画标题、不再套卡片。 */
+  inPanel?: boolean;
 }) {
   const o = d.overview;
   const runs = d.segmentRuns;
@@ -1077,8 +1086,9 @@ export function TaskProcess({
   }
   return (
     <Section
-      title="过程"
-      description={runs.length ? processSummary(runs, roundsCount, now, finished) : undefined}
+      title={inPanel ? undefined : '过程'}
+      description={!inPanel && runs.length ? processSummary(runs, roundsCount, now, finished) : undefined}
+      variant={inPanel ? 'plain' : 'card'}
       flush
       data-task-process
     >

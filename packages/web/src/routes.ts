@@ -3,6 +3,8 @@ import { designRoutes, isMockBuild } from './routes-design.ts';
 
 export default [
   route('login', 'routes/login.tsx'),
+  // 不带外壳的页：任务页面板「弹出到新窗口」的那一笔会话（#3277）
+  layout('routes/bare.tsx', [route('tasks/:taskId/runs/:runId', 'routes/task-run.tsx')]),
   layout('routes/shell.tsx', [
     // 主页：要你拍的、在跑的、上线了的三块（决定 0093）
     index('routes/home.tsx'),

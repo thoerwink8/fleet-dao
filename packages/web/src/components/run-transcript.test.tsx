@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-// 任务页「看会话」抽屉里的会话内容（#1640、#1802）：各种条目画出来、工具调用默认折叠、出错的自动展开、只看出错 / 只看文字、
+// 一笔的会话内容（#1640、#1802、#3277，任务页右侧面板和弹出窗口共用）：各种条目画出来、工具调用默认折叠、出错的自动展开、只看出错 / 只看文字、
 // 超长输出截断、没记录的文案、读失败能重试、在跑的段增量往后追加（done 后不再读）、不贴底时出现「跳到最新」、
 // 子代理的条目带标签、条目多只画最近 200 条。
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
@@ -13,7 +13,10 @@ import {
   CLAMP_LINES,
   filterItems,
   groupEntries,
-  RunTranscriptDrawer,
+  RunMeta,
+  RunOutcomeBadge,
+  RunTranscript,
+  runTitle,
   TRANSCRIPT_WINDOW,
 } from './run-transcript';
 
@@ -56,16 +59,19 @@ const RUN = {
   unread: [],
 } as unknown as SegmentRunView;
 
-function show(read: Reader, running = false, onClose: () => void = () => {}) {
+/** 面板、弹出窗口里放会话的那一套：头（第几笔、结局）、一行概况、会话内容。 */
+function show(read: Reader, running = false) {
   const api = { ...createMockApi({ live: false }), runTranscript: read } as unknown as FleetApi;
+  const run = { ...RUN, running };
   return renderApp(
-    <RunTranscriptDrawer
-      taskId="t-1"
-      run={{ ...RUN, running }}
-      nth={2}
-      now={Date.parse(at)}
-      onClose={onClose}
-    />,
+    <div className="flex h-96 flex-col">
+      <header data-run-head>
+        {runTitle(run, 2)}
+        <RunOutcomeBadge run={run} />
+        <RunMeta run={run} now={Date.parse(at)} />
+      </header>
+      <RunTranscript taskId="t-1" run={run} />
+    </div>,
     { api },
   );
 }
@@ -85,12 +91,11 @@ const FULL = [
 const kinds = () => [...document.querySelectorAll('[data-kind]')].map((e) => e.getAttribute('data-kind'));
 
 describe('会话内容：各种条目', () => {
-  test('抽屉顶上固定一行：段、第几次、模型、成败、时长、花费；打开才读一次接口', async () => {
+  test('会话头：第几笔、段、模型、成败、时长、花费；打开才读一次接口', async () => {
     const read = vi.fn<Reader>(async () => page(FULL));
     show(read);
-    const head = document.querySelector('[data-drawer-summary]') as HTMLElement;
-    expect(head.textContent).toContain('动手');
-    expect(head.textContent).toContain('第 2 次');
+    const head = document.querySelector('[data-run-head]') as HTMLElement;
+    expect(head.textContent).toContain('第 2 笔 · 动手');
     expect(head.textContent).toContain('Opus 5.5');
     expect(head.textContent).toContain('10 分钟');
     expect(head.textContent).toContain('$1.42');
@@ -199,27 +204,6 @@ describe('会话内容：各种条目', () => {
     expect(p.textContent).toBe(long);
     fireEvent.click(screen.getByRole('button', { name: '收起' }));
     expect(p.textContent).not.toContain(`第 ${CLAMP_LINES + 5} 行`);
-  });
-
-  test('点遮罩、按 Esc 都会调 onClose', async () => {
-    const onClose = vi.fn();
-    show(async () => page(FULL), false, onClose);
-    await screen.findByText('已提交 abc123');
-    fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' });
-    await waitFor(() => expect(onClose).toHaveBeenCalled());
-  });
-
-  test('抽屉左边沿可用左右键拉宽，不超过 80vw', async () => {
-    show(async () => page(FULL));
-    await screen.findByText('已提交 abc123');
-    const bar = screen.getByRole('separator');
-    const before = Number(bar.getAttribute('aria-valuenow'));
-    expect(before).toBe(640);
-    fireEvent.keyDown(bar, { key: 'ArrowLeft' });
-    const after = Number(bar.getAttribute('aria-valuenow'));
-    expect(after).toBeGreaterThan(before);
-    for (let i = 0; i < 40; i++) fireEvent.keyDown(bar, { key: 'ArrowLeft' });
-    expect(Number(bar.getAttribute('aria-valuenow'))).toBeLessThanOrEqual(window.innerWidth * 0.8);
   });
 
   test('子代理的条目缩进并标「子代理 <类型>」，调用的结果跨过子代理那几条也能对上', () => {
@@ -361,10 +345,10 @@ describe('会话内容：在跑的段', () => {
     expect(read).toHaveBeenCalledTimes(seen);
   });
 
-  test('在跑的那一段打开抽屉就读、顶上写「在跑」；人往上滚出现「跳到最新」，点了回到底部', async () => {
+  test('在跑的那一段打开就读、顶上写「在跑」；人往上滚出现「跳到最新」，点了回到底部', async () => {
     show(async () => page(FULL.slice(0, 2), { done: false }), true);
     expect(await screen.findByText(/先看一下/)).toBeTruthy();
-    expect(document.querySelector('[data-drawer-summary]')?.textContent).toContain('在跑');
+    expect(document.querySelector('[data-run-head]')?.textContent).toContain('在跑');
     const box = document.querySelector('[data-transcript-body]') as HTMLElement;
     Object.defineProperty(box, 'scrollHeight', { configurable: true, value: 1000 });
     Object.defineProperty(box, 'clientHeight', { configurable: true, value: 300 });
