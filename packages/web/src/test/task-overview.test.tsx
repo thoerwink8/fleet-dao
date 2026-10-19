@@ -44,7 +44,10 @@ describe('概览：汇报、命令计数、PR、改动文件', () => {
     const box = await found('[data-task-summary]');
     const report = await found('[data-task-report]', box);
     expect(report.textContent).toContain('测试里写死了旧标签');
-    expect(report.textContent).toContain('来自动手第 2 次');
+    // 标题「最新汇报」后面写第几笔 · 段 · 模型 · 多久前（照设计稿，#3228）；这一笔是整张单第 3 笔
+    expect(box.querySelector('h2')?.textContent).toBe('最新汇报');
+    expect(box.textContent).toMatch(/第 3 笔 · 动手 · Opus 5\.5 · /);
+    expect(within(box).getByRole('button', { name: '看全部过程' })).toBeTruthy();
     const line = await found('[data-progress-line]', box);
     expect(line.textContent).toContain('个命令已完成');
     expect(within(line).getByText('1 个失败').className).toContain('text-ink-fail');
@@ -313,6 +316,9 @@ describe('页头下面：这一回合走到哪（#3169）', () => {
     const now = strip.querySelectorAll('[aria-current="step"]');
     expect(now).toHaveLength(1);
     expect(now[0]?.getAttribute('data-stage-state')).toBe('now');
+    // 每格第二行（#3228）：在做的写第几笔跑了多久，没到的写还没到
+    expect(now[0]?.querySelector('[data-stage-detail]')?.textContent).toMatch(/^第 3 笔 · \d/);
+    expect(strip.querySelector('[data-stage="验收"] [data-stage-detail]')?.textContent).toBe('还没到');
     const rework = strip.querySelector('[data-round-rework]')?.textContent ?? '';
     expect(rework).toContain('上一回合');
     // 引擎记的意见以结局开头，页面不再重复一遍结局
