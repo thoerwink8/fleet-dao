@@ -71,6 +71,7 @@ export async function runStop(expectedCli) {
     process.env,
     authority.kind,
     expectedCli,
+    session.ok ? () => readState(dir, session.id) : undefined,
   );
   noteReceipt(context, { phase: 'entered', decision: 'none' });
   if (process.env.FLEET_HEADLESS === '1') {
