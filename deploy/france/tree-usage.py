@@ -198,6 +198,48 @@ def id_hash(exp):
     return hashlib.sha256(json.dumps(exp, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def trusted_lock(st):
+    return stat.S_ISREG(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o077
+
+
+def wait_flock(lock):
+    while True:
+        check_time()
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            time.sleep(0.02)
+
+
+@contextlib.contextmanager
+def bucket_lock(fd):
+    """The reader's side of the bucket lock every writer holds from before its first namespace touch
+    until its last intent write is done. While this is held no write is half done in the bucket, and
+    a writer that takes it later touches the namespace root after this reader began, so a cleanup-status
+    round either waits here for the writer (bounded by the page deadline) or sees the root move.
+    A bucket with no lock file has had no writer past its lock creation; it is refused if it holds
+    transactions (bucket_mark)."""
+    lock = None
+    try:
+        seen = os.stat("lock", dir_fd=fd, follow_symlinks=False)
+    except FileNotFoundError:
+        seen = None
+    try:
+        if seen is not None:
+            if not trusted_lock(seen):
+                raise Kept("untrusted transaction lock")
+            lock = os.open("lock", os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
+            held = os.fstat(lock)
+            if not trusted_lock(held) or (held.st_dev, held.st_ino) != (seen.st_dev, seen.st_ino):
+                raise Kept("untrusted transaction lock")
+            wait_flock(lock)
+        yield
+    finally:
+        if lock is not None:
+            os.close(lock)
+
+
 @contextlib.contextmanager
 def locked(path):
     # ROOT_BASE itself must be root-owned and not writable by another identity.
@@ -216,16 +258,9 @@ def locked(path):
         with chain(q + "/" + ph, private=True) as (fd, _):
             lock = os.open("lock", os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
             try:
-                st = os.fstat(lock)
-                if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or st.st_mode & 0o077:
+                if not trusted_lock(os.fstat(lock)):
                     raise Kept("untrusted transaction lock")
-                while True:
-                    check_time()
-                    try:
-                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                        break
-                    except BlockingIOError:
-                        time.sleep(0.02)
+                wait_flock(lock)
                 yield fd, q + "/" + ph
             finally:
                 os.close(lock)
@@ -258,10 +293,12 @@ def read_record(fd, budget=None):
 
 def touch_namespace():
     """Move the namespace root's stamp. Only this helper writes the root-private namespace; it does
-    so around every transaction it creates and every intent it writes, so a cleanup-status round,
-    which re-checks the root stamp on every page, sees any change to the pending set made while it
-    ran, including in a bucket it already read and re-stamped. Before the write: a round that
-    ends after the change has seen the stamp move. After it: a round that began in between too."""
+    so, holding the bucket lock, around every transaction it creates and every intent it writes, so
+    a cleanup-status round, which re-checks the root stamp on every page, sees any change to the
+    pending set made while it ran, including in a bucket it already read and re-stamped. The stamp
+    alone cannot tell a write still in flight from none: readers take the bucket lock (bucket_lock)
+    for every bucket in both passes, so a write that spans a reader's look at its bucket is waited
+    for, and one that starts later touches the root inside the round."""
     with chain(BASE + "/" + PRIVATE, private=True) as (root, _):
         os.utime(root)
 
@@ -303,12 +340,14 @@ def listing(fd, budget, limit=None):
     return out
 
 
-def pending(fd, budget=None, first=False):
+def pending(fd, budget=None):
     """Open transactions of one bucket; with a budget every entry and row is paid for before the next read."""
     out = []
     for name in listing(fd, budget) if budget else os.listdir(fd):
         check_time()
         if name == "lock":
+            if not trusted_lock(os.stat(name, dir_fd=fd, follow_symlinks=False)):
+                raise Kept("untrusted transaction lock")
             continue
         if not HEX64.fullmatch(name):
             raise Kept("unrecognized transaction entry")
@@ -319,8 +358,6 @@ def pending(fd, budget=None, first=False):
                 raise Kept("transaction directory identity mismatch")
             if rec["phase"] not in ("DONE", "RESTORED"):
                 out.append(rec)
-                if first:
-                    return out
                 if budget:
                     budget.spend(rows=1, size=len(json.dumps(rec, separators=(",", ":"))))
         finally:
@@ -685,12 +722,18 @@ def bucket_mark(fd, budget):
     """
     st = os.fstat(fd)
     lines, newest = [mark(".", st)], max(st.st_mtime_ns, st.st_ctime_ns)
-    for name in sorted(listing(fd, budget)):
+    names = sorted(listing(fd, budget))
+    if names and "lock" not in names:
+        raise Kept("transaction bucket without its lock")
+    for name in names:
         check_time()
         if name != "lock" and not HEX64.fullmatch(name):
             raise Kept("unrecognized transaction entry")
         cs = os.stat(name, dir_fd=fd, follow_symlinks=False)
-        if not (stat.S_ISREG(cs.st_mode) if name == "lock" else stat.S_ISDIR(cs.st_mode)):
+        if name == "lock":
+            if not trusted_lock(cs):
+                raise Kept("untrusted transaction lock")
+        elif not stat.S_ISDIR(cs.st_mode):
             raise Kept("unrecognized transaction entry type")
         stamps = [cs]
         if name != "lock":
@@ -725,18 +768,12 @@ def settled_mark(fd, budget):
 
 
 def read_bucket(ph, budget):
-    """Open rows of one bucket and its settled stamp, taken before its records are read."""
+    """Open rows of one bucket and its settled stamp, taken before its records are read, both under
+    the bucket lock: settled or not, empty or not, no writer is half way through an intent meanwhile."""
     with chain(BASE + "/" + PRIVATE + "/" + ph, private=True) as (fd, _):
-        seal = settled_mark(fd, budget)
-        probe = pending(fd, budget, first=True)
-        if not probe:
-            return [], seal
-        if probe[0]["pathHash"] != ph:
-            raise Kept("transaction bucket identity mismatch")
-        # Re-open under the same path lock after learning the original path, and stamp again there.
-        with locked(probe[0]["identity"]["real"]) as (held, _):
-            seal = settled_mark(held, budget)
-            rows = pending(held, budget)
+        with bucket_lock(fd):
+            seal = settled_mark(fd, budget)
+            rows = pending(fd, budget)
             if any(rec["pathHash"] != ph for rec in rows):
                 raise Kept("transaction bucket identity mismatch")
             return rows, seal
@@ -744,7 +781,8 @@ def read_bucket(ph, budget):
 
 def check_bucket(ph, budget):
     with chain(BASE + "/" + PRIVATE + "/" + ph, private=True) as (fd, _):
-        return bucket_mark(fd, budget)[0]
+        with bucket_lock(fd):
+            return bucket_mark(fd, budget)[0]
 
 
 def fold(digest, ph, stamp_digest):

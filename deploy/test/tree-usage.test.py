@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
@@ -593,6 +594,133 @@ while True: time.sleep(0.1)
         self.assertNotIn("rows", reply)
         self.assertEqual(sorted(r["phase"] for r in self.complete(self.walk())), ["RECOVERY_REQUIRED", "RECOVERY_REQUIRED"])
 
+    def in_flight_write(self, rec, phase, pause):
+        """A real write_record under the real bucket lock, parked at `pause` ("replace": before the
+        intent is replaced; "touch": after it, before the closing namespace touch)."""
+        reached, release = threading.Event(), threading.Event()
+        parked = []
+
+        def park():
+            reached.set()
+            if not release.wait(20):
+                parked.append("never released")
+
+        original_write, original_touch, calls = self.m._write_record, self.m.touch_namespace, []
+        if pause == "replace":
+            self.m._write_record = lambda fd, r: (park(), original_write(fd, r))[1]
+        else:
+            def touch():
+                calls.append(1)
+                if len(calls) == 2:
+                    park()
+                original_touch()
+
+            self.m.touch_namespace = touch
+
+        def restore():
+            self.m._write_record, self.m.touch_namespace = original_write, original_touch
+
+        self.addCleanup(restore)
+
+        def write():
+            with self.m.locked(rec["identity"]["real"]):
+                self.update_phase(rec, phase)
+
+        thread = threading.Thread(target=write)
+        thread.start()
+        self.assertTrue(reached.wait(20))
+
+        def finish():
+            release.set()
+            thread.join(20)
+            restore()
+            self.assertEqual(parked, [])
+
+        return finish
+
+    def test_cleanup_never_completes_across_an_in_flight_write(self):
+        # A RESTORED receipt is being turned into PREPARED by a live writer, the writer's closing
+        # touch of the namespace root not yet done: the reader must wait for the writer, not read
+        # the old intent (or the new one) and call the list complete.
+        for i, pause in enumerate(("replace", "touch")):
+            with self.subTest(pause):
+                rec = self.bucket_record(self.path, "RESTORED", str(50 + i))
+                time.sleep(0.1)
+                finish = self.in_flight_write(rec, "PREPARED", pause)
+                self.m.PAGE_SECONDS = 0.5
+                with self.assertRaisesRegex(self.m.Kept, "page deadline"):  # partial: never ok, never rows=[]
+                    self.m.main(["cleanup-status"])
+                finish()
+                self.m.PAGE_SECONDS = 20
+                reply = self.m.main(["cleanup-status"])
+                self.assertEqual((reply["state"], reply["truncated"]), ("ok", False))
+                self.assertEqual([r["phase"] for r in reply["rows"]], ["PREPARED"])
+                self.update_phase(rec, "RESTORED")
+                self.assertEqual(self.m.main(["cleanup-status"])["rows"], [])
+
+    def test_cleanup_in_flight_write_after_a_bucket_was_read_or_rechecked_is_not_complete(self):
+        paths, tail = self.crowded(5)
+        restored = next(r for r in self.settled.values() if r["phase"] == "RESTORED")
+        read_bucket, check_bucket = self.m.read_bucket, self.m.check_bucket
+        for pause in ("replace", "touch"):
+            # The writer takes the bucket lock after the reader let go of it, and parks mid-write.
+            for where, hook, outcome in (("read", self.mutate_after_read, "page deadline"),
+                                         ("check", self.mutate_after_check, "changed")):
+                with self.subTest(pause + " after " + where):
+                    started = []
+                    hook(restored["pathHash"], lambda: started.append(self.in_flight_write(restored, "PREPARED", pause)))
+                    self.m.PAGE_SECONDS = 1
+                    if outcome == "changed":
+                        reply = self.m.main(["cleanup-status"])  # the writer's first touch moved the root
+                        self.assertEqual(reply["state"], "changed")
+                        self.assertNotIn("rows", reply)
+                    else:
+                        with self.assertRaisesRegex(self.m.Kept, outcome):  # the re-check waits for the writer
+                            self.m.main(["cleanup-status"])
+                    started[0]()
+                    self.m.read_bucket, self.m.check_bucket = read_bucket, check_bucket
+                    self.update_phase(restored, "RESTORED")
+                    self.m.PAGE_SECONDS = 20
+        rows = self.complete(self.walk())
+        self.assertEqual([r["id"] for r in rows], [tail["id"]])
+
+    def test_cleanup_untrusted_or_missing_bucket_lock_is_never_complete(self):
+        paths, tail = self.crowded(8)
+        private = self.root + "/" + self.m.PRIVATE
+        lock_only = private + "/" + self.m.path_hash(paths[1]) + "/lock"
+        settled = private + "/" + self.m.path_hash(paths[2]) + "/lock"
+        self.assertEqual(self.complete(self.walk()), [tail])
+        for name, lock in (("lock-only bucket", lock_only), ("settled bucket", settled),
+                           ("open bucket", private + "/" + tail["pathHash"] + "/lock")):
+            for label, damage in (("group-readable", lambda: os.chmod(lock, 0o640)),
+                                  ("writable", lambda: os.chmod(lock, 0o666)),
+                                  ("foreign owner", lambda: os.chown(lock, 1000, 1000))):
+                with self.subTest(name + " " + label):
+                    good = os.stat(lock)
+                    damage()
+                    if os.stat(lock).st_mode == good.st_mode and os.stat(lock).st_uid == good.st_uid:
+                        self.skipTest("cannot change lock owner here")
+                    with self.assertRaisesRegex(self.m.Kept, "untrusted transaction lock"):
+                        self.m.main(["cleanup-status"])
+                    os.chown(lock, 0, 0)
+                    os.chmod(lock, 0o600)
+        # Damaged only after the bucket was read: the verify pass refuses it too.
+        self.mutate_after_read(self.m.path_hash(paths[-1]), lambda: os.chmod(lock_only, 0o644))
+        with self.assertRaisesRegex(self.m.Kept, "untrusted transaction lock"):
+            self.m.main(["cleanup-status"])
+        os.chmod(lock_only, 0o600)
+        # A directory or a link in place of the lock.
+        for make in (lambda: os.mkdir(lock_only), lambda: os.symlink("/etc/passwd", lock_only)):
+            os.unlink(lock_only)
+            make()
+            with self.assertRaises(self.m.Kept):
+                self.m.main(["cleanup-status"])
+            if os.path.isdir(lock_only) and not os.path.islink(lock_only):
+                os.rmdir(lock_only)
+            else:
+                os.unlink(lock_only)
+            pathlib.Path(lock_only).touch(mode=0o600)
+
     def test_helper_writes_move_the_namespace_stamp(self):
         rec = self.namespace_record("PREPARED")
         private = self.root + "/" + self.m.PRIVATE
@@ -740,7 +868,7 @@ while True: time.sleep(0.1)
         self.m.PAGE_BYTES = len(real_json.dumps(recs[0], separators=(",", ":"))) + 50
         with self.assertRaisesRegex(self.m.Kept, "exceeds page bound"):
             self.m.main(["cleanup-status"])
-        self.assertEqual(len(loads), 2)  # the probe and the first row; never the second row
+        self.assertEqual(len(loads), 1)  # the first row only; never the second row
 
     def test_cleanup_page_deadline_after_the_hundredth_bucket_is_not_a_truncated_page(self):
         paths, tail = self.crowded(130)
@@ -849,11 +977,16 @@ while True: time.sleep(0.1)
             self.walk()
         os.unlink(bucket)
         os.rename(private + "/" + "f" * 64, bucket)
-        moved = private + "/" + self.m.path_hash(paths[0])
+        moved = private + "/" + self.m.path_hash(paths[1])  # a lock-only bucket
         os.rename(bucket + "/" + tail["id"], moved + "/" + tail["id"])
         with self.assertRaisesRegex(self.m.Kept, "bucket identity mismatch"):
             self.walk()
         os.rename(moved + "/" + tail["id"], bucket + "/" + tail["id"])
+        lockless = private + "/" + self.m.path_hash(paths[0])  # an empty bucket without any lock file
+        os.rename(bucket + "/" + tail["id"], lockless + "/" + tail["id"])
+        with self.assertRaisesRegex(self.m.Kept, "without its lock"):
+            self.walk()
+        os.rename(lockless + "/" + tail["id"], bucket + "/" + tail["id"])
         pathlib.Path(private, "e" * 64).write_text("not a bucket")
         with self.assertRaises(OSError):
             self.walk()
@@ -868,9 +1001,12 @@ while True: time.sleep(0.1)
         os.unlink(bucket + "/" + "a" * 64)
         os.unlink(bucket + "/lock")
         os.symlink("/etc/passwd", bucket + "/lock")
-        with self.assertRaisesRegex(self.m.Kept, "unrecognized transaction entry type"):
+        with self.assertRaisesRegex(self.m.Kept, "untrusted transaction lock"):
             self.walk()
         os.unlink(bucket + "/lock")
+        with self.assertRaisesRegex(self.m.Kept, "without its lock"):
+            self.walk()
+        pathlib.Path(bucket, "lock").touch(mode=0o600)
         os.rename(bucket + "/" + tail["id"], bucket + "/" + "b" * 64)
         with self.assertRaisesRegex(self.m.Kept, "transaction directory identity mismatch"):
             self.walk()
