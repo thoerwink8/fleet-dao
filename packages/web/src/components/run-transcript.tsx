@@ -1,23 +1,15 @@
-// 任务页「每一笔」的「看会话」抽屉（#1640、#1802）：从右侧滑出，按对话的样子从上到下列提示词、助手的话、工具调用和结果、报错、结论。
-// 数据来自后端按段记的 run_transcript（引擎写、接口按段增量读）。抽屉打开才读；在跑的那一笔每 3 秒往后追加、贴底跟随，
+// 一笔的会话内容（#1640、#1802；#3277 起放在任务页右侧面板和弹出窗口里，不再是模态抽屉）：按对话的样子从上到下列提示词、
+// 助手的话、工具调用和结果、报错、结论。
+// 数据来自后端按段记的 run_transcript（引擎写、接口按段增量读）。看到这一笔才读；在跑的那一笔每 3 秒往后追加、贴底跟随，
 // 人往上滚就停止跟随并出现「跳到最新」。工具调用默认折成一行（工具名加摘要），出错的自动展开；超长的输出截断、点「显示全部」。
 // 有「只看出错」「只看文字」两个过滤。条目多时只画最近 200 条（没有虚拟滚动库，不加依赖），更早的点「显示更早的」再放出 200 条。
 import { isSubagentMeta } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
 import { ChevronRight, LoaderCircle } from 'lucide-react';
-import {
-  type CSSProperties,
-  type KeyboardEvent,
-  type ReactNode,
-  type PointerEvent as ReactPointerEvent,
-  useEffect,
-  useRef,
-  useState,
-} from 'react';
+import { type ReactNode, useEffect, useRef, useState } from 'react';
 import { useRunTranscript } from '../api/client';
 import type { TranscriptEntry } from '../api/types';
 import { formatClock, formatDuration, formatUsd } from '../lib/format';
-import { scaledPx, useRootScale } from '../lib/root-scale';
 import {
   liveMs,
   type SegmentRunView,
@@ -26,11 +18,11 @@ import {
   segmentOutcomeTone,
   UNKNOWN_SEGMENT,
 } from '../lib/segments';
+import { causeLabel, sessionLink } from '../lib/task-process';
 import { cn } from '../lib/utils';
 import { Notice } from './layout/notice';
 import { StatusBadge } from './layout/status-badge';
 import { Button } from './ui/button';
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from './ui/sheet';
 
 /** 一次最多画多少条；更早的点「显示更早的」再放出这么多。 */
 export const TRANSCRIPT_WINDOW = 200;
@@ -42,10 +34,6 @@ export const CLAMP_LINES = 16;
 export const CLAMP_CHARS = 1200;
 /** 离底部不到这么多像素算「贴底」。 */
 const NEAR_BOTTOM_PX = 48;
-/** 抽屉宽度：默认 640，拉宽不超过 80vw，最窄 420。 */
-const DRAWER_DEFAULT_PX = 640;
-const DRAWER_MIN_PX = 420;
-const DRAWER_STEP_PX = 40;
 
 /** 渲染用的一行：工具调用和紧跟着的工具结果并成一行。 */
 type Item =
@@ -524,8 +512,24 @@ function TranscriptBody({ taskId, runId, running }: { taskId: string; runId: str
   );
 }
 
-/** 抽屉顶上固定的一行：段、第几次、模型、成败、时长、花费。 */
-function DrawerSummary({ run, nth, now }: { run: SegmentRunView; nth: number; now: number }) {
+/** 这一笔的结局：在跑、过没过、没读到。会话头和弹出窗口左边的列表共用。 */
+export function RunOutcomeBadge({ run }: { run: SegmentRunView }) {
+  if (run.running) return <StatusBadge tone="run" label="在跑" />;
+  if (run.outcome)
+    return <StatusBadge tone={segmentOutcomeTone[run.outcome]} label={segmentOutcomeLabel[run.outcome]} />;
+  return <StatusBadge tone="stall" label="结局没读到" />;
+}
+
+/** 「第 N 笔 · 段」：N 是整张单按起跑先后的序号（runOrder），和过程、汇报、进度条同一个数（#3277）。 */
+export function runTitle(run: SegmentRunView, nth: number): string {
+  return `第 ${nth} 笔 · ${run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT}`;
+}
+
+/**
+ * 会话头下面一行（#3277）：为什么起、新会话还是接上一笔的、模型、起始时刻、用时、花费。没读到的写明没读到，不写 0；
+ * 起因、会话接续只有动手段记，别的段不写这两项。
+ */
+export function RunMeta({ run, now }: { run: SegmentRunView; now: number }) {
   const live = liveMs(run, now);
   const duration =
     run.durationMs !== undefined
@@ -533,99 +537,25 @@ function DrawerSummary({ run, nth, now }: { run: SegmentRunView; nth: number; no
       : live !== undefined
         ? formatDuration(live)
         : '耗时没读到';
-  const cost = run.costUsd !== undefined ? formatUsd(run.costUsd) : '花费没读到';
+  const parts = [
+    causeLabel(run)?.text,
+    sessionLink(run),
+    run.modelName,
+    run.startedAt ? `${formatClock(run.startedAt)} 起` : '起始时刻没读到',
+    duration,
+    run.costUsd !== undefined ? formatUsd(run.costUsd) : '花费没读到',
+  ].filter((p): p is string => p !== undefined && p !== '');
   return (
-    <div className="flex flex-wrap items-center gap-x-2 gap-y-1" data-drawer-summary>
-      <span className="text-body font-medium">
-        {run.segment ? segmentLabel[run.segment] : UNKNOWN_SEGMENT}
-      </span>
-      <span className="num text-meta text-muted-foreground">第 {nth} 次</span>
-      <span className="num text-body">{run.modelName}</span>
-      {run.running ? (
-        <StatusBadge tone="run" label="在跑" />
-      ) : run.outcome ? (
-        <StatusBadge tone={segmentOutcomeTone[run.outcome]} label={segmentOutcomeLabel[run.outcome]} />
-      ) : (
-        <StatusBadge tone="stall" label="结局没读到" />
-      )}
-      <span className="num text-meta text-muted-foreground">{duration}</span>
-      <span className="num text-meta text-muted-foreground">{cost}</span>
-    </div>
+    <p className="num min-w-0 break-words text-meta text-muted-foreground" data-run-meta>
+      {parts.join(' · ')}
+    </p>
   );
 }
 
 /**
- * 「看会话」抽屉：桌面从右侧滑出，默认 640px，左边沿可拖或用左右键拉宽（最多 80vw）；手机全屏。
- * 关不关由上面（网址的 ?run=）管：onClose 在点遮罩、按 Esc、点叉时调用。
+ * 一笔的会话内容（#3277）：任务页右侧面板和弹出窗口共用。读、过滤、在跑的贴底跟随都在这里；外面只管放在哪、多宽，
+ * 放它的容器要是竖排的 flex 并给定高度（它自己 flex-1 撑满、里面滚）。
  */
-export function RunTranscriptDrawer({
-  taskId,
-  run,
-  nth,
-  now,
-  onClose,
-}: {
-  taskId: string;
-  run: SegmentRunView;
-  nth: number;
-  now: number;
-  onClose: () => void;
-}) {
-  // 默认宽、最窄是 16px 根字号下的设计值，乘根字号倍数（桌面 125%，#1937），抽屉里 rem 写的字放大了，宽度跟着放大
-  const scale = useRootScale();
-  const minPx = scaledPx(DRAWER_MIN_PX, scale);
-  const [width, setWidth] = useState(() => scaledPx(DRAWER_DEFAULT_PX, scale));
-  const maxWidth = () => Math.max(minPx, Math.floor(window.innerWidth * 0.8));
-  const clamp = (w: number) => Math.min(maxWidth(), Math.max(minPx, w));
-  const onDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    const move = (ev: PointerEvent) => setWidth(clamp(window.innerWidth - ev.clientX));
-    const up = () => {
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  };
-  const onKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'ArrowLeft') setWidth((w) => clamp(w + DRAWER_STEP_PX));
-    else if (e.key === 'ArrowRight') setWidth((w) => clamp(w - DRAWER_STEP_PX));
-    else return;
-    e.preventDefault();
-  };
-  return (
-    <Sheet
-      open
-      // 打开这个抽屉时地址已经压了一条 ?run=（routes/task.tsx），后退本来就关它；再压一条会多按一次后退（#1820）
-      historyEntry={false}
-      onOpenChange={(o) => {
-        if (!o) onClose();
-      }}
-    >
-      <SheetContent
-        side="right"
-        className="w-full gap-0 sm:w-[min(var(--drawer-w),80vw)] sm:max-w-none"
-        style={{ '--drawer-w': `${width}px` } as CSSProperties}
-        data-run-drawer={run.id}
-      >
-        {/* biome-ignore lint/a11y/useSemanticElements: 可聚焦、可拖动的分隔条（window splitter），<hr> 不能带键盘和拖动 */}
-        <div
-          role="separator"
-          aria-orientation="vertical"
-          aria-label="拉宽抽屉"
-          aria-valuenow={width}
-          tabIndex={0}
-          onPointerDown={onDown}
-          onKeyDown={onKey}
-          className="absolute inset-y-0 left-0 z-10 hidden w-1.5 cursor-col-resize hover:bg-border-strong focus-visible:bg-ring focus-visible:outline-none sm:block"
-        />
-        <SheetHeader className="shrink-0 gap-1 border-b py-3 pr-12">
-          <SheetTitle className="text-body">会话内容</SheetTitle>
-          <SheetDescription className="sr-only">这一笔的提示词、助手的话、工具调用和结论</SheetDescription>
-          <DrawerSummary run={run} nth={nth} now={now} />
-        </SheetHeader>
-        <TranscriptBody taskId={taskId} runId={run.id} running={run.running} />
-      </SheetContent>
-    </Sheet>
-  );
+export function RunTranscript({ taskId, run }: { taskId: string; run: SegmentRunView }) {
+  return <TranscriptBody key={run.id} taskId={taskId} runId={run.id} running={run.running} />;
 }

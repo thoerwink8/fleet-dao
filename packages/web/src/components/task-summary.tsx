@@ -300,8 +300,16 @@ function ChangedFilesBlock({ d, o }: { d: TaskDetail; o: Overview }) {
   );
 }
 
-/** 概览整块：汇报、进度、PR、改动文件。 */
-export function TaskSummary({ d, now }: { d: TaskDetail; now: number }) {
+/** 概览整块：汇报、进度、PR、改动文件。onShowProcess：「看全部过程」打开右侧的过程面板（#3277）。 */
+export function TaskSummary({
+  d,
+  now,
+  onShowProcess,
+}: {
+  d: TaskDetail;
+  now: number;
+  onShowProcess: () => void;
+}) {
   const o = d.overview;
   if (!o) {
     return (
@@ -312,7 +320,7 @@ export function TaskSummary({ d, now }: { d: TaskDetail; now: number }) {
       </Section>
     );
   }
-  // 照设计稿（#3228）：不套卡片，标题「最新汇报」后面写谁、多久前说的，右边跳到过程
+  // 照设计稿（#3228）：不套卡片，标题「最新汇报」后面写谁、多久前说的，右边打开过程
   return (
     <Section
       title="最新汇报"
@@ -324,11 +332,7 @@ export function TaskSummary({ d, now }: { d: TaskDetail; now: number }) {
           size="xs"
           variant="ghost"
           className="text-muted-foreground"
-          onClick={() =>
-            document
-              .querySelector('[data-task-process]')
-              ?.scrollIntoView({ block: 'start', behavior: 'smooth' })
-          }
+          onClick={onShowProcess}
         >
           看全部过程
         </Button>
