@@ -51,8 +51,11 @@ process.exitCode = runCli(process.argv.slice(2), {
   becomeUser,
 });
 
+const maintenanceEnabled = !process.argv.includes('--no-maintenance');
+
 // 同步专用检出已取到主线；旧检出的 agents:sync 也能借这个入口迁移旧封装。
 if (
+  maintenanceEnabled &&
   process.exitCode === 0 &&
   process.argv.includes('--apply') &&
   !process.argv.includes('--help') &&
@@ -96,6 +99,7 @@ if (
 // 本机会话心跳（agents/local-sessions）：装过的机器顺手换新脚本和钩子登记（install.mjs refresh；没装过它自己说一句、不动）。
 // 调工具前不再挂心跳、其余改 async：不经这一步，各台要等有人重跑 pnpm local-sessions install 才换。
 if (
+  maintenanceEnabled &&
   process.argv.includes('--apply') &&
   !process.argv.includes('--user') &&
   !process.argv.includes('--help')
@@ -126,7 +130,12 @@ if (
 
 // reclaude 健康维护（预热 daemon、测速记录、更新检查）：后台脱离执行，不等它、不拖慢开会话；
 // 失败只写 ~/.fleet-dao/mirasim-reclaude/health.log，不让同步失败。没装 reclaude 时子进程自己直接退出。
-if (process.argv.includes('--apply') && !process.argv.includes('--help') && process.platform !== 'linux') {
+if (
+  maintenanceEnabled &&
+  process.argv.includes('--apply') &&
+  !process.argv.includes('--help') &&
+  process.platform !== 'linux'
+) {
   try {
     const args = process.argv.slice(2);
     const at = args.indexOf('--home');

@@ -228,6 +228,10 @@ export class TaskRuntime {
   budgetGrants = 1;
   round = 0;
   verifyRound = 0;
+  /**
+   * 冷验收这个头从什么时候起一直回「过会儿再验」（#3281，工作流时间，重放算得出）：换了头、验出结论清掉；alerted 是这一段报过警没有。
+   */
+  verifyWaitSince: { head: string; at: number; alerted: boolean } | null = null;
   /** 因轮数用尽点过几次「继续」（清零的次数；超过 MAX_ROUND_RESETS 就不再清）。 */
   private roundResets = 0;
   attemptSeq = 0;
@@ -642,6 +646,55 @@ export class TaskRuntime {
       ),
     );
     await this.checkpoint();
+    return woken ? 'woken' : 'timeout';
+  }
+
+  /**
+   * 等路由等太久（#3281）：任务行写成 stalled，让出在跑名额（intake 不数 stalled 的），别的单照常接；alert 为真时报一次警。
+   * 路由那边变了（叫醒信号，记号之后到过一次就算）、到 seconds 秒、人点「继续」都醒，醒了写回 running，调用方再试一次。
+   * 不改阶段、不进关单保持（不是停下等人，到点自己会再试）。放弃抛 Abandoned。
+   */
+  async stallForRoute(
+    title: string,
+    detail: string,
+    seconds: number,
+    mark: number,
+    alert: boolean,
+  ): Promise<'woken' | 'timeout'> {
+    this.guard();
+    const before = this.continued;
+    this.status.lastProblem = title;
+    this.status.doing = `让出名额等路由：${title}`;
+    await this.mirror('stalled');
+    if (alert) {
+      this.parks += 1;
+      try {
+        await CancellationScope.nonCancellable(() =>
+          this.acts.raiseAlert({
+            taskId: this.input.taskId,
+            level: 'stuck',
+            title,
+            detail,
+            dedupeKey: `${workflowInfo().workflowId}:park:${this.parks}`,
+          }),
+        );
+      } catch (error) {
+        log.warn('报警没发出去，照样让出名额等路由', { title, error: String(error) });
+      }
+    }
+    const woken = await this.waiting('retry', `${title}（路由恢复、到点或「继续」就再试）`, () =>
+      condition(
+        () =>
+          this.abandon !== null ||
+          this.continued > before ||
+          this.routeWakes > mark ||
+          this.verifiedMerged !== null,
+        `${seconds} seconds`,
+      ),
+    );
+    this.guard();
+    this.status.lastProblem = null;
+    await this.mirror('running');
     return woken ? 'woken' : 'timeout';
   }
 

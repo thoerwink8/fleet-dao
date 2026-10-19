@@ -196,8 +196,11 @@ const StatusSchema = z.object({
   creator: z.object({ login: z.string(), id: z.number(), type: z.string() }).nullable().optional(),
 });
 
-/** enablePullRequestAutoMerge 的 UNPROCESSABLE「is in unstable status」：回包里只有这一条，path 恰好是这个 mutation。 */
-function isUnstableRefusal(details: unknown): boolean {
+/**
+ * enablePullRequestAutoMerge 的 UNPROCESSABLE「is in unstable status」：回包里只有这一条，path 恰好是这个 mutation。
+ * 意思是必过检查已满足、只是非必过的还在跑或红了，PR 现在就能合；引擎挂合并那一步据此走直接合（#3281）。
+ */
+export function isUnstableRefusal(details: unknown): boolean {
   const errors = (details as { errors?: unknown } | null | undefined)?.errors;
   if (!Array.isArray(errors) || errors.length !== 1) return false;
   const e = errors[0] as { type?: unknown; message?: unknown; path?: unknown } | null;
