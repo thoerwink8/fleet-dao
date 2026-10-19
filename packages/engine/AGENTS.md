@@ -9,7 +9,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - `packages/engine/src/workflows/task.ts`：任务工作流，按职责拆在同目录 `task-*.ts`，共用零件在 `kit.ts`。
 - `packages/engine/src/activities.ts`、`packages/engine/src/real/`：活动和真端口的装配（库、GitHub、会话、工作树），缺一项就不起。
 - `src/real/execution-start-reader.ts`：未接生产准入的只读前置；专用 Connection 显式限制接收大小、禁默认重试，按精确 run 读首个 Start 参数。`observed` 只证明读取结果，可信 ActivityInfo、任务与派发身份仍须由后续 gate 核验，不能当执行资格或终态证明。
-- `src/real/execution-legacy-admission.ts`：未接生产的 legacy 来源适配器；无参入口从当前 Local Activity Context 读精确 Start 并登记持久责任，返回允许/拒绝/未知，不生成 Workflow 失败、不支持 managed 派发或终态释放；在途 SQL 取消后可能提交责任，仍不得返回允许。
+- `src/real/execution-legacy-admission.ts`：未接生产的 legacy 来源适配器；无参入口从当前 Local Activity Context 读精确 Start 并经独立有界 SQL 能力登记持久责任，返回允许/拒绝/未知，不生成 Workflow 失败、不支持 managed 派发或终态释放；History 和 SQL 共用单调总期限。
+- `src/real/legacy-admission-process.ts`：未接生产的独立单次 SQL 子进程；固定入口和封闭限长协议，一次最多一个在途子进程，取消/超时强杀后须核退出及管道关闭，未核清保持占槽。在途 COMMIT 可能已经持久化责任，未知不代表回滚；复用 Store 原事务，不把空通知警告当送达证明。
 - `src/real/github-reconcile.ts`：replay/poll 与 API 复用 store source publisher，`synced` 同样先发布再 accepted；失败留原投递账重放。`policy-source-origin.ts` 只读固定 `/etc/fleet-dao/api.env` 的唯一 `FLEET_PUBLIC_URL`，复用发布配置的 systemd parser，不装入环境或回显配置；缺失/重复/非法值使相关投递失败，不阻塞 engine 启动。旧已 accepted 版本保留去重，由标准 `fleet-api project refresh-policy-source` 补当前 open 头，不为已合 PR 补历史。
 - `src/real/self-check-ci.ts`：只给 fleet-dao 已有 PR 的同树标准源码测试识别规范 CI 覆盖；受信运行发布 SHA 绑定官方 Git 配置/锁合同，每台 test job 的实际 Node 声明须同 major/minor。未知、旧 CI、脏树/子模块、合同变更回本机路径；tsc 与自定义命令仍实跑，`coveredByCi` 不算本机 PASS。
 - `packages/engine/src/real/self-check.ts`：以工作树主人身份跑测试和 tsc；各段预算统一从 `packages/engine/src/self-check-budget.ts` 取，活动总限时只由这些预算相加。
