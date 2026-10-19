@@ -89,11 +89,11 @@ function gitEnv() {
   return env;
 }
 
-function git(args, cwd, input) {
+function git(args, cwd, input, maxBuffer = 110 * 1024 * 1024) {
   const result = spawnSync(
     gitBin,
     ['-c', 'core.quotePath=false', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...args],
-    { cwd, env: gitEnv(), input, maxBuffer: 110 * 1024 * 1024 },
+    { cwd, env: gitEnv(), input, maxBuffer },
   );
   if (result.error) fail(`git ${args[0]}：${result.error.message}`);
   if (result.status !== 0) {
@@ -1284,6 +1284,45 @@ async function validatePackedBudget(component, expectedCount, initialOffset = 0,
   }
 }
 
+// 恢复仓里按清单顺序核对象类型。每批一个短命 cat-file，输入输出都有上界，逐行核对象号、类型和行数。
+// 缺失、错类型、多行少行、截断、非法输出、退出码非零或被信号杀掉都失败，不当成通过。
+const CHECK_BATCH = 4096;
+// 40 位对象号、空格、最长的 missing、换行。
+const CHECK_LINE = 49;
+
+function checkObjectTypes(repo, objects, mismatch) {
+  if (!Array.isArray(objects) || objects.length > MAX_OBJECTS) fail('恢复对象清单数量越界');
+  const seen = new Set();
+  for (const obj of objects) {
+    if (!/^[0-9a-f]{40}$/.test(obj?.sha) || !['blob', 'tree', 'commit', 'tag'].includes(obj.type))
+      fail('恢复对象声明非法');
+    if (seen.has(obj.sha)) fail(`恢复对象声明重复：${obj.sha}`);
+    seen.add(obj.sha);
+  }
+  for (let start = 0; start < objects.length; start += CHECK_BATCH) {
+    const batch = objects.slice(start, start + CHECK_BATCH);
+    const out = git(
+      ['cat-file', '--buffer', '--batch-check=%(objectname) %(objecttype)'],
+      repo,
+      Buffer.from(`${batch.map((obj) => obj.sha).join('\n')}\n`),
+      batch.length * CHECK_LINE,
+    ).toString('latin1');
+    if (!out.endsWith('\n')) fail(`批量核对输出截断：第 ${start + 1} 个起`);
+    const lines = out.slice(0, -1).split('\n');
+    if (lines.length !== batch.length)
+      fail(`批量核对行数对不上：要 ${batch.length} 行，看到 ${lines.length} 行`);
+    for (let i = 0; i < batch.length; i += 1) {
+      const obj = batch[i];
+      const line = lines[i];
+      if (!line.startsWith(`${obj.sha} `)) fail(`批量核对输出对不上 ${obj.sha}：${line.slice(0, 80)}`);
+      const got = line.slice(41);
+      if (got === 'missing') fail(mismatch(obj, 'missing'));
+      if (!['blob', 'tree', 'commit', 'tag'].includes(got)) fail(`批量核对输出认不出：${line.slice(0, 80)}`);
+      if (got !== obj.type) fail(mismatch(obj, got));
+    }
+  }
+}
+
 function bundlePackOffset(component) {
   const fd = safeOpenFile(component.path);
   try {
@@ -1333,13 +1372,12 @@ async function restore(components, root) {
     } finally {
       closeSync(packFd);
     }
-    for (const obj of state.objects) {
-      const got = spawnSync(gitBin, ['-C', repo, 'cat-file', '-t', obj.sha], { env: gitEnv() });
-      if (got.status !== 0) fail(`对象包缺 ${obj.sha}，不能靠成果包补`);
-      if (got.stdout.toString('utf8').trim() !== obj.type) {
-        fail(`对象包里的 ${obj.sha} 应是 ${obj.type}，实际 ${got.stdout.toString('utf8').trim() || '没有'}`);
-      }
-    }
+    // 成果包导入前单独核对象包：BUNDLE 补上的对象不算原包完整。
+    checkObjectTypes(repo, state.objects, (obj, got) =>
+      got === 'missing'
+        ? `对象包缺 ${obj.sha}，不能靠成果包补`
+        : `对象包里的 ${obj.sha} 应是 ${obj.type}，实际 ${got}`,
+    );
     const bundlePath = bundle.path;
     const verified = spawnSync(gitBin, ['-C', repo, 'bundle', 'verify', bundlePath], { env: gitEnv() });
     if (verified.status !== 0) fail(`成果包核对失败：${verified.stderr?.toString('utf8').slice(0, 400)}`);
@@ -1407,10 +1445,7 @@ async function restore(components, root) {
       copyComponent(component, dest, item.sha256);
     }
     rebuildStash(repo, state.stash);
-    for (const obj of state.objects) {
-      const got = git(['cat-file', '-t', obj.sha], repo).toString('utf8').trim();
-      if (got !== obj.type) fail(`对象 ${obj.sha} 应是 ${obj.type}，实际 ${got}`);
-    }
+    checkObjectTypes(repo, state.objects, (obj, got) => `对象 ${obj.sha} 应是 ${obj.type}，实际 ${got}`);
     return collect(repo, false).state;
   } finally {
     cleanupOperationRoot(root);
