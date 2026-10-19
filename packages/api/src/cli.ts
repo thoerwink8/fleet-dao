@@ -1,5 +1,9 @@
 import { ACCEPTANCE_USAGE, parseAcceptanceArgs, runAcceptance } from './acceptance-cli.ts';
 import {
+  type AcceptanceExecutionReader,
+  openAcceptanceExecutionReader,
+} from './acceptance-execution-reader.ts';
+import {
   CHECKOUT_HISTORY_USAGE,
   parseCheckoutHistoryArgs,
   runCheckoutHistory,
@@ -881,6 +885,7 @@ export type CliEnv = Readonly<Record<string, string | undefined>>;
 
 /** 命令行碰外面的几样：环境变量、输出、连库、读 GitHub、连 Temporal、钟。测试换成内存库和假的，收下输出。 */
 export interface CliDeps {
+  acceptanceExecutionReader?: AcceptanceExecutionReader;
   openHistoricalAuditSource?: (
     url: string,
   ) => Promise<{ source: HistoricalAuditSource; close(): Promise<void> }>;
@@ -1186,12 +1191,16 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
     }
   }
   if (command === 'acceptance') {
-    parseAcceptanceArgs(rest);
+    const acceptanceInput = parseAcceptanceArgs(rest);
+    const reader =
+      acceptanceInput.action === 'merge-plan' || acceptanceInput.action === 'merge'
+        ? (deps.acceptanceExecutionReader ?? openAcceptanceExecutionReader(deps.env))
+        : undefined;
     const opened = deps.openDb
       ? await deps.openDb(databaseUrl(deps.env))
       : await import('@fleet-dao/db').then(({ createDb }) => createDb({ url: databaseUrl(deps.env) }));
     try {
-      deps.out(JSON.stringify(await runAcceptance(rest, opened.db, deps.now())));
+      deps.out(JSON.stringify(await runAcceptance(rest, opened.db, deps.now(), reader)));
       return 0;
     } finally {
       await opened.close();
