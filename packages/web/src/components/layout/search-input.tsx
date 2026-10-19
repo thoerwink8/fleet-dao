@@ -1,17 +1,21 @@
 // 搜索框：带放大镜图标。桌面 32 高 14px；手机 40 高 16px（防 iOS 点进去自动放大），样式由 ui/input 给。
+// onKeyDown：要按键的（会话里找：回车下一个、Esc 清空）自己接。
 import { Search } from 'lucide-react';
+import type { KeyboardEvent } from 'react';
 import { cn } from '../../lib/utils';
 import { Input } from '../ui/input';
 
 export function SearchInput({
   value,
   onChange,
+  onKeyDown,
   placeholder,
   className,
   'aria-label': ariaLabel,
 }: {
   value: string;
   onChange: (value: string) => void;
+  onKeyDown?: (e: KeyboardEvent<HTMLInputElement>) => void;
   placeholder?: string;
   className?: string;
   'aria-label'?: string;
@@ -28,6 +32,7 @@ export function SearchInput({
         placeholder={placeholder}
         aria-label={ariaLabel ?? placeholder ?? '搜索'}
         onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKeyDown}
         className="pl-8"
       />
     </div>

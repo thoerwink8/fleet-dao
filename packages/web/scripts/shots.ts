@@ -28,6 +28,8 @@ export const PAGES: readonly (readonly [string, string])[] = [
   // 过程面板开在一笔会话上、弹出窗口（#3277）
   ['task-c9-run', '/tasks/t-c9?run=seg-c9-3'],
   ['task-run-popout', '/tasks/t-c9/runs/seg-c9-3'],
+  // 在跑的那一笔：最后一步蓝字、底栏「还在跑」
+  ['task-12-run', '/tasks/t-12?run=seg-t-12-manual-40'],
   ['notifications', '/notifications'],
   ['routing', '/routing'],
   ['status', '/routing/status'],

@@ -11,12 +11,12 @@ import { formatAgo } from '../lib/format';
 import { segmentLabel, UNKNOWN_SEGMENT } from '../lib/segments';
 import { fileParts, PR_STATE, runOrder } from '../lib/task-process';
 import { cn } from '../lib/utils';
+import { Clamped } from './call-row';
 import { DiffStat } from './diff-stat';
 import { Notice } from './layout/notice';
 import { Section } from './layout/section';
 import { StatusBadge } from './layout/status-badge';
 import { RepoLink } from './repo-link';
-import { Clamped } from './run-transcript';
 import { Button } from './ui/button';
 
 /** 改动卡默认露几个文件；PR 横条默认露几条。 */
