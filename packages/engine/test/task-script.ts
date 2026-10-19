@@ -16,6 +16,8 @@ import type {
   GuardedPaths,
   MergeNowInput,
   MergeNowResult,
+  MergeReadyInput,
+  MergeReadyResult,
   MergeWait,
   NoteBare401Input,
   PlanSegmentResumeInput,
@@ -80,6 +82,8 @@ export interface Script {
   guarded: (n: number, input: CheckGuardedInput) => GuardedPaths;
   arm: (n: number, input: ArmAutoMergeInput) => ArmAutoMergeResult;
   merged: (n: number) => MergeWait;
+  /** 停在合并这一步后的复核（#3281）。默认不满足：老用例照旧等人点「继续」。不进 calls.order。 */
+  mergeReady: (n: number, input: MergeReadyInput) => MergeReadyResult;
   /** 默认强制。不进 calls.order。 */
   ciPolicy: () => ReadCiPolicyResult;
   mergeNow: (n: number, input: MergeNowInput) => MergeNowResult;
@@ -110,6 +114,8 @@ export interface Calls {
   /** 挂自动合并被调时收到的入参。 */
   armInputs: ArmAutoMergeInput[];
   merged: number;
+  /** 停在合并这一步后复核收到的入参。不进 order。 */
+  mergeReady: MergeReadyInput[];
   /** 读 CI 模式的次数。不进 order。 */
   ciPolicy: number;
   /** CI 红返工读评审的入参。不进 order（老用例比 order 一字不差）。默认成功且没有评审。 */
@@ -147,6 +153,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     arm: 0,
     armInputs: [],
     merged: 0,
+    mergeReady: [],
     ciPolicy: 0,
     ciReviews: [],
     merge: 0,
@@ -170,6 +177,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     guarded: () => ({ standards: [] }),
     arm: () => ({ armed: true, merged: false }),
     merged: () => ({ state: 'merged', mergeCommit: 'abc1234567890' }),
+    mergeReady: () => ({ ready: false, why: '测试默认不满足' }),
     ciPolicy: () => ({ mode: 'force' }),
     mergeNow: () => ({ merged: true, mergeCommit: 'abc1234567890' }),
     resume: () => ({ kind: 'new', reason: '测试默认不续' }),
@@ -239,6 +247,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.order.push('merged');
       calls.merged += 1;
       return script.merged(calls.merged);
+    },
+    async mergeReady(input) {
+      calls.mergeReady.push(input);
+      return script.mergeReady(calls.mergeReady.length, input);
     },
     async readCiPolicy() {
       calls.ciPolicy += 1;

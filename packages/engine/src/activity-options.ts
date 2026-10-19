@@ -21,6 +21,8 @@ import {
   type MergedTaskReceipt,
   type MergeNowInput,
   type MergeNowResult,
+  type MergeReadyInput,
+  type MergeReadyResult,
   type MergeWait,
   type NoteBare401Input,
   type NoteBare401Result,
@@ -73,6 +75,8 @@ export type EngineActivities = PortActivities & {
   armAutoMerge(input: ArmAutoMergeInput): Promise<ArmAutoMergeResult>;
   /** 等 PR 合并（长轮询，到点回 waiting 由工作流再来一次）。 */
   waitMerged(input: WaitMergedInput): Promise<MergeWait>;
+  /** 停在合并这一步时现读一次 PR，条件都满足才回 ready（#3281）。只读。 */
+  mergeReady(input: MergeReadyInput): Promise<MergeReadyResult>;
   /** 现读这个仓的 CI 模式（强制 / 不强制）。没有这个受管仓抛错，不当成不强制。 */
   readCiPolicy(input: ReadCiPolicyInput): Promise<ReadCiPolicyResult>;
   /** CI 红返工前现读仍有效的正式评审。读不全抛错；头变了回未交付。 */
@@ -144,6 +148,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   checkGuarded: 'git',
   armAutoMerge: 'git',
   waitMerged: 'poll',
+  mergeReady: 'git',
   readCiPolicy: 'quick',
   readCiReviews: 'git',
   mergeNow: 'git',
