@@ -46,6 +46,8 @@ function runWorker(o: {
   env: Record<string, string>;
   outFile: string;
   errFile: string;
+  onSpawn?: (pid: number) => void;
+  onExit?: (pid: number) => void;
 }): Promise<AttemptOutput> {
   return new Promise((done) => {
     let stdout = '';
@@ -61,6 +63,9 @@ function runWorker(o: {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    const workerPid =
+      typeof child.pid === 'number' && Number.isSafeInteger(child.pid) && child.pid > 0 ? child.pid : null;
+    if (workerPid !== null) o.onSpawn?.(workerPid);
     child.stdin.on('error', () => {});
     child.stdin.end(o.stdin);
     child.stdout.on('data', (b: Buffer) => {
@@ -73,6 +78,7 @@ function runWorker(o: {
       stderr += `\n起不来：${e.message}`;
     });
     child.on('close', (code) => {
+      if (workerPid !== null) o.onExit?.(workerPid);
       try {
         writeFileSync(o.outFile, stdout);
         writeFileSync(o.errFile, stderr);

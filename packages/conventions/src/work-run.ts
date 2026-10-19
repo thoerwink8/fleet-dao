@@ -490,6 +490,10 @@ export interface SuperviseDeps {
     env: Record<string, string>;
     outFile: string;
     errFile: string;
+    /** spawn 出真实工人后同步登记其 PID，防止看护进程死后重复派工 */
+    onSpawn?: (pid: number) => void;
+    /** 真实工人退出后清掉 PID；看护进程若先死则由 PID 存活性保护接管 */
+    onExit?: (pid: number) => void;
   }) => Promise<AttemptOutput>;
   /** 续一次法国的租约 */
   renew: () => Promise<{ ok: boolean; text: string }>;
@@ -577,7 +581,7 @@ export async function superviseRun(
     return null;
   }
   try {
-    return await superviseClaimed(dir, spec, brief, prev, deps);
+    return await superviseClaimed(dir, spec, brief, prev, slot, deps);
   } finally {
     releaseRunLock(dir, WORKER_SLOT_LOCK, slot);
     releaseRunLockByPid(dir, SUPERVISOR_START_LOCK, process.pid);
@@ -590,6 +594,7 @@ async function superviseClaimed(
   spec: RunSpec,
   brief: string,
   prev: RunStatus | null,
+  workerSlot: string,
   deps: SuperviseDeps,
 ): Promise<RunResult | WaitingOutcome | null> {
   const f = runFiles(dir);
@@ -784,6 +789,30 @@ async function superviseClaimed(
         },
         outFile: f.out(n),
         errFile: f.err(n),
+        onSpawn: (workerPid) => {
+          try {
+            if (!setRunLockWorker(dir, WORKER_SLOT_LOCK, workerSlot, workerPid)) {
+              deps.log(`#${spec.issue} 工人 PID ${workerPid} 没能登记到 worker-slot，保留看护进程占位`);
+            }
+          } catch (e) {
+            deps.log(
+              `#${spec.issue} 工人 PID ${workerPid} 登记 worker-slot 失败，保留看护进程占位：${
+                e instanceof Error ? e.message : String(e)
+              }`,
+            );
+          }
+        },
+        onExit: (workerPid) => {
+          try {
+            setRunLockWorker(dir, WORKER_SLOT_LOCK, workerSlot, null);
+          } catch (e) {
+            deps.log(
+              `#${spec.issue} 工人 PID ${workerPid} 退出后清理 worker-slot 失败：${
+                e instanceof Error ? e.message : String(e)
+              }`,
+            );
+          }
+        },
       });
       const v = judgeAttempt(out);
       if (v.kind === 'done') {
@@ -892,6 +921,8 @@ interface RunLockOwner {
   pid: number;
   token: string;
   claimedAt: string;
+  /** worker-slot 由看护进程交接给真实 spawn 子进程后留下的 PID */
+  workerPid?: number;
 }
 
 let lockSeq = 0;
@@ -905,7 +936,17 @@ function readLockOwner(dir: string, name: string): RunLockOwner | null {
   if (!v || typeof v.token !== 'string' || v.token === '') return null;
   if (typeof v.pid !== 'number' || !Number.isSafeInteger(v.pid) || v.pid < 1) return null;
   if (typeof v.claimedAt !== 'string') return null;
-  return { pid: v.pid, token: v.token, claimedAt: v.claimedAt };
+  if (
+    v.workerPid !== undefined &&
+    (typeof v.workerPid !== 'number' || !Number.isSafeInteger(v.workerPid) || v.workerPid < 1)
+  )
+    return null;
+  return {
+    pid: v.pid,
+    token: v.token,
+    claimedAt: v.claimedAt,
+    ...(v.workerPid === undefined ? {} : { workerPid: v.workerPid }),
+  };
 }
 
 /** 进程还在不在。EPERM 当还在（没有权限发信号不代表没这个进程）；只有 ESRCH 是真没了。 */
@@ -935,9 +976,11 @@ function discardDir(lock: string, grave: string): void {
  */
 export function runLockHeld(dir: string, name: string, now: Date): boolean {
   const lock = lockPath(dir, name);
+  const reclaimer = readLockOwner(dir, `${name}.reclaim`);
+  if (reclaimer && pidAlive(reclaimer.pid)) return true;
   if (!existsSync(lock)) return false;
   const owner = readLockOwner(dir, name);
-  if (owner) return pidAlive(owner.pid);
+  if (owner) return pidAlive(owner.pid) || (owner.workerPid !== undefined && pidAlive(owner.workerPid));
   try {
     return now.getTime() - statSync(lock).mtimeMs <= BEAT_STALE_MS;
   } catch {
@@ -961,7 +1004,24 @@ export function claimRunLock(dir: string, name: string, pid: number, now: Date):
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
       if (runLockHeld(dir, name, now)) return null;
-      discardDir(lock, `${lock}.stale-${pid}-${i}-${lockSeq}`);
+      // 先原子占住回收闸。没有这道闸，A 检查到旧 owner 已死后，
+      // B 可以先回收并建立新 owner，A 随后会把 B 的活锁一起挪走。
+      const reclaim = `${name}.reclaim`;
+      let reclaimToken: string | null = null;
+      try {
+        reclaimToken = claimRunLock(dir, reclaim, pid, now);
+        if (!reclaimToken) return null;
+        // 回收闸建立后再读一次；只有仍是旧锁才允许挪走。
+        const current = readLockOwner(dir, name);
+        if (
+          current &&
+          (pidAlive(current.pid) || (current.workerPid !== undefined && pidAlive(current.workerPid)))
+        )
+          return null;
+        discardDir(lock, `${lock}.stale-${pid}-${i}-${lockSeq}`);
+      } finally {
+        if (reclaimToken) releaseRunLock(dir, reclaim, reclaimToken);
+      }
       continue;
     }
     try {
@@ -997,6 +1057,29 @@ export function handoffRunLock(dir: string, name: string, token: string, pid: nu
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
   writeJson(join(lockPath(dir, name), 'owner.json'), { pid, token, claimedAt: now.toISOString() });
   return readLockOwner(dir, name)?.pid === pid;
+}
+
+/** 给 worker-slot 追加/清除真实工人 PID；看护 PID 仍保留，二者任一活着都占住名额。 */
+export function setRunLockWorker(
+  dir: string,
+  name: string,
+  token: string,
+  workerPid: number | null,
+): boolean {
+  const owner = readLockOwner(dir, name);
+  if (!owner || owner.token !== token) return false;
+  if (workerPid !== null && (!Number.isSafeInteger(workerPid) || workerPid < 1)) return false;
+  writeJson(join(lockPath(dir, name), 'owner.json'), {
+    pid: owner.pid,
+    token: owner.token,
+    claimedAt: owner.claimedAt,
+    ...(workerPid === null ? {} : { workerPid }),
+  });
+  const saved = readLockOwner(dir, name);
+  return (
+    saved?.token === token &&
+    (workerPid === null ? saved.workerPid === undefined : saved.workerPid === workerPid)
+  );
 }
 
 /** 一张单有没有运行记录、在不在跑、是不是终了、还是停着等复核 */

@@ -34,6 +34,7 @@ import {
   runLockHeld,
   SUPERVISOR_START_LOCK,
   type SuperviseDeps,
+  setRunLockWorker,
   superviseRun,
   WORKER_SLOT_LOCK,
   workerArgs,
@@ -389,6 +390,8 @@ function runWorld(
     /** 容量检查让出事件循环，用来把两个恢复叠在占位还没交接的窗口里 */
     capacityDelayMs?: number;
     spawnPid?: number;
+    /** 模拟看护已启动后占位被别人换代，验证入口 finally 不会释放新占位 */
+    onSpawnDetached?: () => void;
     gh?: WorkDeps['gh'];
   } = {},
 ) {
@@ -437,6 +440,7 @@ function runWorld(
         },
         spawnDetached: (file, args, opts) => {
           spawned.push({ file, args, ...opts });
+          o.onSpawnDetached?.();
           return o.spawnOk === false
             ? { ok: false, why: 'WMI 返回 9' }
             : { ok: true, pid: o.spawnPid ?? 4242, how: 'wmi' };
@@ -1134,6 +1138,47 @@ describe('恢复入口的原子占位', () => {
     if (token) releaseRunLock(w.dir, SUPERVISOR_START_LOCK, token);
   });
 
+  it('旧 owner 已死但另一恢复者持有回收闸时，不会挪走旧锁', () => {
+    const dir = join(temp(), 'stale-race');
+    mkdirSync(dir, { recursive: true });
+    const stale = deadPid();
+    mkdirSync(join(dir, SUPERVISOR_START_LOCK));
+    writeJson(join(dir, SUPERVISOR_START_LOCK, 'owner.json'), {
+      pid: stale,
+      token: 'old-generation',
+      claimedAt: '2026-10-16T09:00:00.000Z',
+    });
+    const reclaim = claimRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, process.pid, new Date());
+    expect(reclaim).toBeTruthy();
+    expect(claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date())).toBeNull();
+    expect(readJson<{ token: string }>(join(dir, SUPERVISOR_START_LOCK, 'owner.json'))?.token).toBe(
+      'old-generation',
+    );
+    if (reclaim) releaseRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, reclaim);
+  });
+
+  it('看护已启动但占位交接失败时，不释放后来接手的占位', async () => {
+    let replacement = false;
+    const w = runWorld({
+      onSpawnDetached: () => {
+        const lock = join(w.runs, 'acme__app__42', SUPERVISOR_START_LOCK);
+        rmSync(lock, { recursive: true, force: true });
+        mkdirSync(lock);
+        writeJson(join(lock, 'owner.json'), {
+          pid: process.pid,
+          token: 'replacement',
+          claimedAt: w.now.toISOString(),
+        });
+        replacement = true;
+      },
+    });
+    expect(await w.run('run', '42')).toBe(1);
+    expect(w.err.join('\n')).toContain('占位没交接');
+    expect(replacement).toBe(true);
+    expect(runLockHeld(w.dir, SUPERVISOR_START_LOCK, w.now)).toBe(true);
+    rmSync(join(w.dir, SUPERVISOR_START_LOCK), { recursive: true, force: true });
+  });
+
   it('两个进程同时占同一把锁，只有一个占上', async () => {
     const dir = join(temp(), 'lock');
     mkdirSync(dir);
@@ -1260,6 +1305,30 @@ describe('看护进程的工人名额', () => {
     const result = await superviseRun(dir, w.deps);
     expect(result?.state).toBe('done');
     expect(w.calls).toHaveLength(1);
+  });
+
+  it('看护进程死了但真实工人还活着时，worker-slot 仍不能接管', () => {
+    const { dir } = runFixture();
+    const deadSupervisor = deadPid();
+    mkdirSync(join(dir, WORKER_SLOT_LOCK));
+    writeJson(join(dir, WORKER_SLOT_LOCK, 'owner.json'), {
+      pid: deadSupervisor,
+      workerPid: process.pid,
+      token: 'worker-still-running',
+      claimedAt: '2026-10-16T09:00:00.000Z',
+    });
+    expect(runLockHeld(dir, WORKER_SLOT_LOCK, new Date())).toBe(true);
+  });
+
+  it('真实工人 spawn 后把 PID 写进 worker-slot，结束后可清掉', () => {
+    const { dir } = runFixture();
+    const token = claimRunLock(dir, WORKER_SLOT_LOCK, process.pid, new Date());
+    expect(token).toBeTruthy();
+    if (!token) return;
+    expect(setRunLockWorker(dir, WORKER_SLOT_LOCK, token, process.pid)).toBe(true);
+    expect(runLockHeld(dir, WORKER_SLOT_LOCK, new Date())).toBe(true);
+    expect(setRunLockWorker(dir, WORKER_SLOT_LOCK, token, null)).toBe(true);
+    releaseRunLock(dir, WORKER_SLOT_LOCK, token);
   });
 });
 

@@ -535,10 +535,12 @@ async function runCmd(rest: readonly string[], deps: WorkDeps): Promise<number> 
         `看护进程没起成：${started.why}（记录在 ${dir}，修好再跑一次 pnpm work run ${a.issue} 接着起）`,
       );
     }
-    const handed =
-      startToken !== null && handoffRunLock(dir, SUPERVISOR_START_LOCK, startToken, started.pid, r.now());
-    // 进程已经拉起：即便交接写入失败也别把占位删掉，避免另一个恢复再起一个工人。
+    // 进程已经拉起，入口不再拥有释放权；交接写入失败也必须留下占位，
+    // 让已经启动的看护继续成为唯一接管者，不能让下一次恢复再起一个工人。
+    const handoffToken = startToken;
     startToken = null;
+    const handed =
+      handoffToken !== null && handoffRunLock(dir, SUPERVISOR_START_LOCK, handoffToken, started.pid, r.now());
     if (!handed) throw new Error(`#${a.issue} 占位没交接到看护进程，不再当作已经派出去`);
     const spec = readJson<RunSpec>(files.spec);
     const how = phase === 'waiting' ? '复核等待，不新开工人' : resume ? '接着上次的会话续' : '派出去了';
@@ -606,8 +608,10 @@ async function reworkCmd(rest: readonly string[], deps: WorkDeps): Promise<numbe
         `看护进程没起成：${started.why}（记录在 ${dir}，修好再跑一次 pnpm work rework ${issue}）`,
       );
     }
-    const handed = handoffRunLock(dir, SUPERVISOR_START_LOCK, startToken, started.pid, r.now());
+    // 看护已启动，之后无论交接写入成功与否都不能由入口 finally 释放占位。
+    const handoffToken = startToken;
     startToken = null;
+    const handed = handoffRunLock(dir, SUPERVISOR_START_LOCK, handoffToken, started.pid, r.now());
     if (!handed) throw new Error(`#${issue} 占位没交接到看护进程，不再当作已经派出去`);
     deps.out(
       `按第 ${intent.generation} 代未解决退回返工 #${issue}：看护进程 ${started.pid}，原会话 ${intent.session}，不另开运行。${cap.text}`,
