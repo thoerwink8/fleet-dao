@@ -2,6 +2,9 @@
 // 页面只送服务端给的动作编号 + incident + 幂等身份，不拼命令、不扩权限；点之前先重读一次列表，按钮已经不是现在的就不发。
 // 依据：Temporal 消息与结果（发出去只代表收到，结果另查）——受理只写核验中，后端核验过（verified）才写已修复；
 // AWS Automation 批准步骤（要人批的由人本人点准或拒）——只有带 choice 的动作写「要你本人拍」，拒了、自己写一句都不执行。
+// 同一条通知撤销后重开（incident 换代）：回执、没收到回执、排队、选项、草稿和报错只认当前代次。
+// 上一代还在飞的成功或失败丢掉，不改这一代的执行状态，也不把那次请求再发一遍。
+// 服务端列表明示的上一代在途 / 结果未知 / 待核验仍照显示并挡住动作，不把异代记录一概滤掉。
 import { ExternalLink, ScrollText, Wrench } from 'lucide-react';
 import { useId, useRef, useState } from 'react';
 import { Link } from 'react-router';
@@ -42,6 +45,50 @@ export type RepairRefresh = (
 
 /** 卡上已经有一件在途或已了结的事：不再摆新的动作按钮（后端同样拒）。 */
 const BLOCKING: readonly RepairPhase[] = ['executing', 'verifying', 'unknown', 'verified', 'handed'];
+
+/** 这一页自己记下的状态，整包只对一代事故有效。换代以后不逐项挑，直接不认。 */
+type HeldRepair = {
+  incident: string;
+  local?: RepairRecord;
+  unsent?: { body: ExecuteAlertRepairBody; label: string };
+  note?: string;
+  choiceOpen?: string;
+  draft: string;
+  busy?: { label: string; step: 'checking' | 'sent' };
+};
+
+function blankHeld(incident: string): HeldRepair {
+  return { incident, draft: '' };
+}
+
+/**
+ * 改这一代自己记下的状态。键给了 undefined 就是去掉这一项：
+ * exactOptionalPropertyTypes 下可选字段不能显式写成 undefined。
+ */
+function applyHeld(
+  h: HeldRepair,
+  patch: {
+    local?: RepairRecord | undefined;
+    unsent?: { body: ExecuteAlertRepairBody; label: string } | undefined;
+    note?: string | undefined;
+    choiceOpen?: string | undefined;
+    draft?: string;
+    busy?: { label: string; step: 'checking' | 'sent' } | undefined;
+  },
+): HeldRepair {
+  const next: HeldRepair = { incident: h.incident, draft: patch.draft ?? h.draft };
+  const local = 'local' in patch ? patch.local : h.local;
+  if (local !== undefined) next.local = local;
+  const unsent = 'unsent' in patch ? patch.unsent : h.unsent;
+  if (unsent !== undefined) next.unsent = unsent;
+  const note = 'note' in patch ? patch.note : h.note;
+  if (note !== undefined) next.note = note;
+  const choiceOpen = 'choiceOpen' in patch ? patch.choiceOpen : h.choiceOpen;
+  if (choiceOpen !== undefined) next.choiceOpen = choiceOpen;
+  const busy = 'busy' in patch ? patch.busy : h.busy;
+  if (busy !== undefined) next.busy = busy;
+  return next;
+}
 
 const NOTICE_TONE: Record<RepairPhase, NoticeTone> = {
   queued: 'info',
@@ -301,23 +348,52 @@ export function AlertRepairPanel({
   const pickerId = useId();
   // 同一张卡同一时刻只走一件：连点、双击都只发一次
   const busyRef = useRef(false);
-  const [busy, setBusy] = useState<undefined | { label: string; step: 'checking' | 'sent' }>(undefined);
-  /** 发了没收到回执：留着同一请求，「再问一次」用它（后端同一 requestId 回原结果，不重复执行）。 */
-  const [unsent, setUnsent] = useState<undefined | { body: ExecuteAlertRepairBody; label: string }>(
-    undefined,
-  );
-  const [local, setLocal] = useState<RepairRecord | undefined>(undefined);
-  const [note, setNote] = useState<string | undefined>(undefined);
-  const [choiceOpen, setChoiceOpen] = useState<string | undefined>(undefined);
-  const [draft, setDraft] = useState('');
+  // 代次变了当帧作废上一笔在飞的操作。晚到的成功/失败改不到新一代，也不会把那次请求再发出去。
+  const genRef = useRef(0);
+  const incidentRef = useRef(n.repair?.incident);
+  const [held, setHeld] = useState<HeldRepair | undefined>(undefined);
 
   const repair = n.repair;
+  const incident = repair?.incident;
+  if (incidentRef.current !== incident) {
+    incidentRef.current = incident;
+    genRef.current += 1;
+    busyRef.current = false;
+  }
   if (!repair && !isWatchdogAlert(n)) return null;
+  const mine = held?.incident === incident ? held : undefined;
+  const local = mine?.local;
+  const unsent = mine?.unsent;
+  const note = mine?.note;
+  const choiceOpen = mine?.choiceOpen;
+  const draft = mine?.draft ?? '';
+  const busy = mine?.busy;
+
+  const write = (ticket: number, inc: string, updater: (h: HeldRepair) => HeldRepair) => {
+    setHeld((prev) => {
+      if (genRef.current !== ticket || incidentRef.current !== inc) return prev;
+      const base = prev?.incident === inc ? prev : blankHeld(inc);
+      return updater(base);
+    });
+  };
+  const writeCurrent = (updater: (h: HeldRepair) => HeldRepair) => {
+    const inc = incidentRef.current;
+    if (!inc) return;
+    setHeld((prev) => {
+      if (incidentRef.current !== inc) return prev;
+      const base = prev?.incident === inc ? prev : blankHeld(inc);
+      return updater(base);
+    });
+  };
+
   const resolved = Boolean(n.resolvedAt);
-  const rec = shownRecord(repair?.last, local);
+  const rec = shownRecord(repair?.last, local, incident ?? '');
   const recPhase = rec ? recordPhase(rec) : undefined;
-  // 列表已经认得这次请求（后端收到了）：不再算「没收到回执」
-  const pendingReceipt = unsent && repair?.last?.requestId !== unsent.body.requestId ? unsent : undefined;
+  // 列表已经认得这次请求（后端收到了）：不再算「没收到回执」。没收到回执也只认这一代。
+  const pendingReceipt =
+    unsent && unsent.body.incident === incident && repair?.last?.requestId !== unsent.body.requestId
+      ? unsent
+      : undefined;
   const blocked =
     Boolean(busy) || Boolean(pendingReceipt) || (recPhase !== undefined && BLOCKING.includes(recPhase));
   // 这次事故明确关联的单（只认这一代 incident 的）
@@ -329,75 +405,109 @@ export function AlertRepairPanel({
   );
   const rec2 = recommendation(actions);
 
-  const send = async (body: ExecuteAlertRepairBody, label: string) => {
-    setBusy({ label, step: 'sent' });
+  const owns = (ticket: number, incidentAtSend: string) =>
+    genRef.current === ticket && incidentRef.current === incidentAtSend;
+
+  const send = async (
+    body: ExecuteAlertRepairBody,
+    label: string,
+    ticket: number,
+    incidentAtSend: string,
+  ) => {
     try {
+      // 代次已经换了，或这包请求不是这一代的：不发、不改现在这一代的状态
+      if (!owns(ticket, incidentAtSend) || body.incident !== incidentAtSend) return;
+      write(ticket, incidentAtSend, (h) => applyHeld(h, { busy: { label, step: 'sent' } }));
       const r = await exec.mutateAsync({ id: n.id, body });
-      setLocal(r.repair);
-      setUnsent(undefined);
-      setChoiceOpen(undefined);
-      setDraft('');
-      resultToast(r);
+      if (!owns(ticket, incidentAtSend) || r.repair.incident !== incidentAtSend) return;
+      write(ticket, incidentAtSend, (h) =>
+        applyHeld(h, { local: r.repair, unsent: undefined, choiceOpen: undefined, draft: '' }),
+      );
+      if (owns(ticket, incidentAtSend)) resultToast(r);
     } catch (e) {
+      if (!owns(ticket, incidentAtSend)) return;
       if (e instanceof ApiError && e.status === 0) {
         // 超时、断网：不知道后端收没收到。不换新编号重发，留同一请求等人点「再问一次」
-        setUnsent({ body, label });
-        setNote(
-          `没收到回执（${e.message}）：可能已经执行，也可能没有。已重读列表；要再问用同一请求，不会重复执行。`,
+        write(ticket, incidentAtSend, (h) =>
+          applyHeld(h, {
+            unsent: { body, label },
+            note: `没收到回执（${e.message}）：可能已经执行，也可能没有。已重读列表；要再问用同一请求，不会重复执行。`,
+          }),
         );
         await refresh(n.id);
       } else if (e instanceof ApiError && e.status === 409) {
-        setUnsent(undefined);
-        setNote(
-          STALE_CODES.has(e.code)
-            ? `${e.message}。已刷新，按现在能点的重选。`
-            : `${e.message}。已刷新，卡上是后端现在记的样子。`,
+        write(ticket, incidentAtSend, (h) =>
+          applyHeld(h, {
+            unsent: undefined,
+            note: STALE_CODES.has(e.code)
+              ? `${e.message}。已刷新，按现在能点的重选。`
+              : `${e.message}。已刷新，卡上是后端现在记的样子。`,
+          }),
         );
         await refresh(n.id);
       } else {
-        setUnsent(undefined);
-        setNote(`没发成：${errorText(e)}`);
+        write(ticket, incidentAtSend, (h) =>
+          applyHeld(h, { unsent: undefined, note: `没发成：${errorText(e)}` }),
+        );
       }
     } finally {
-      busyRef.current = false;
-      setBusy(undefined);
+      if (owns(ticket, incidentAtSend)) {
+        busyRef.current = false;
+        write(ticket, incidentAtSend, (h) => applyHeld(h, { busy: undefined }));
+      }
     }
   };
 
   const pick = async (action: RepairAction, input?: { optionId: string } | { text: string }) => {
-    if (busyRef.current || !repair) return;
+    if (busyRef.current || !repair || !incident) return;
+    const incidentAtClick = incident;
+    const ticket = ++genRef.current;
     busyRef.current = true;
-    setNote(undefined);
-    setBusy({ label: action.label, step: 'checking' });
+    write(ticket, incidentAtClick, (h) =>
+      applyHeld(h, { note: undefined, busy: { label: action.label, step: 'checking' } }),
+    );
     // 过期先刷新：拿现在的列表核对按钮还在不在、还是不是这次事故，不沿旧按钮执行
     const fresh = await refresh(n.id);
+    if (!owns(ticket, incidentAtClick)) return;
     const cur = fresh.ok ? fresh.n?.repair : undefined;
     if (!fresh.ok) {
-      setNote(`点之前重读没成（${fresh.why}），没有执行：等页面读到了再点。`);
+      write(ticket, incidentAtClick, (h) =>
+        applyHeld(h, { note: `点之前重读没成（${fresh.why}），没有执行：等页面读到了再点。` }),
+      );
     } else if (
       !fresh.n ||
       fresh.n.resolvedAt ||
       !cur ||
-      cur.incident !== repair.incident ||
+      cur.incident !== incidentAtClick ||
       !cur.actions.some((a) => a.id === action.id)
     ) {
-      setNote('现场变了：这个按钮已经不是现在的了，没有执行。已刷新，按现在能点的重选。');
+      write(ticket, incidentAtClick, (h) =>
+        applyHeld(h, {
+          note: '现场变了：这个按钮已经不是现在的了，没有执行。已刷新，按现在能点的重选。',
+        }),
+      );
     } else {
       await send(
         { actionId: action.id, incident: cur.incident, requestId: newRequestId(), ...input },
         action.label,
+        ticket,
+        cur.incident,
       );
       return;
     }
+    if (!owns(ticket, incidentAtClick)) return;
     busyRef.current = false;
-    setBusy(undefined);
+    write(ticket, incidentAtClick, (h) => applyHeld(h, { busy: undefined }));
   };
 
   const askAgain = () => {
-    if (busyRef.current || !pendingReceipt) return;
+    if (busyRef.current || !pendingReceipt || !incident) return;
+    // 再问一次只重发这一代没收到回执的那一包，不新编号，也不在换代以后补发
+    if (pendingReceipt.body.incident !== incident) return;
+    const ticket = ++genRef.current;
     busyRef.current = true;
-    setNote(undefined);
-    void send(pendingReceipt.body, pendingReceipt.label);
+    write(ticket, incident, (h) => applyHeld(h, { note: undefined }));
+    void send(pendingReceipt.body, pendingReceipt.label, ticket, incident);
   };
 
   return (
@@ -473,7 +583,11 @@ export function AlertRepairPanel({
                     aria-expanded={a.choice ? choiceOpen === a.id : undefined}
                     disabled={Boolean(busy)}
                     onClick={() =>
-                      a.choice ? setChoiceOpen((v) => (v === a.id ? undefined : a.id)) : void pick(a)
+                      a.choice
+                        ? writeCurrent((h) =>
+                            applyHeld(h, { choiceOpen: h.choiceOpen === a.id ? undefined : a.id }),
+                          )
+                        : void pick(a)
                     }
                     className="flex min-h-10 w-full flex-col gap-0.5 px-3 py-2 text-left outline-none first:rounded-t-md last:rounded-b-md hover:bg-accent focus-visible:ring-focus focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-50 max-md:min-h-11 md:flex-row md:items-baseline md:gap-4"
                   >
@@ -501,7 +615,7 @@ export function AlertRepairPanel({
                         options={a.choice.options}
                         pending={Boolean(busy)}
                         text={draft}
-                        onText={setDraft}
+                        onText={(text) => writeCurrent((h) => applyHeld(h, { draft: text }))}
                         onAnswer={(input) => void pick(a, input)}
                         effect="自己写的：只记下，不执行这个动作"
                       />

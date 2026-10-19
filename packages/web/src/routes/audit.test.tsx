@@ -147,6 +147,7 @@ describe('操作记录页', () => {
 describe('操作记录页：50 条一页（#1837）', () => {
   test('默认只读、只画 50 条，点「再看 50 条」再读下一页，读完按钮没了', async () => {
     // 一次铺全部（手机端近两万像素）、或按钮不接着读下一页，这一条会红。
+    // 120 行在整包一起跑时画 DOM 会超过默认 5 秒，单独放宽。
     const api = createMockApi({ live: false });
     const sample = (await api.audit({ limit: 1 })).items[0];
     if (!sample) throw new Error('假数据没有操作记录');
@@ -177,7 +178,7 @@ describe('操作记录页：50 条一页（#1837）', () => {
     fireEvent.click(screen.getByRole('button', { name: '再看 50 条' }));
     await waitFor(() => expect(rows()).toBe(120));
     expect(screen.queryByRole('button', { name: '再看 50 条' })).toBeNull();
-  });
+  }, 15_000);
 });
 
 describe('操作记录页：事件名翻成中文（#1821）', () => {

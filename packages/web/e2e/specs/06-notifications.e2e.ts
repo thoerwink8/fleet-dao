@@ -110,7 +110,7 @@ const RESTORE = {
   },
 };
 const record = (body: Body, state: string, text: string, kind = 'task-recover'): Rec => ({
-  incident: INCIDENT,
+  incident: body.incident,
   actionId: body.actionId,
   kind,
   requestId: body.requestId,
@@ -130,6 +130,8 @@ interface Scene {
   linked?: Record<string, unknown>;
   /** 换掉真后端给的「谁在处理」（造线上那种过时的「没人在修」）。 */
   handling?: Record<string, unknown>;
+  /** 不填就是本文件的固定事故；重开时改它，列表重读才换代。 */
+  incident?: string;
   bodies: Body[];
   exec: (body: Body) => Promise<{ status: number; json: unknown } | 'timeout'>;
 }
@@ -151,7 +153,7 @@ async function stage(context: BrowserContext, problems: PageProblems, scene: Sce
       if (n.title !== STALLED) continue;
       n.dedupeKey = 'watchdog:idle-running:task-12';
       n.repair = {
-        incident: INCIDENT,
+        incident: scene.incident ?? INCIDENT,
         actions: scene.actions,
         problems: scene.problems,
         ...(scene.last ? { last: scene.last } : {}),
@@ -456,6 +458,216 @@ test.describe('通知中心：看门狗提醒的修复', () => {
     await expect(stalledCard(page).getByTestId('repair-linked')).toHaveAttribute('data-stage', 'invalid');
     await expect(stalledCard(page).getByTestId('repair-linked-invalid')).toContainText('单子已关闭');
     await expect(stalledCard(page).getByText('没人在修')).toBeVisible();
+    expect(scene.bodies).toHaveLength(0);
+  });
+
+  test('同一条通知重开：旧事故的已修复不显示、不挡住，新动作按新事故发出去', async ({
+    page,
+    context,
+    problems,
+  }) => {
+    const recoverB = {
+      ...RECOVER,
+      id: 'task-recover:e2e-b',
+      label: '重开后继续',
+      detail: '新事故：给任务 #12 的当前工作流发继续',
+    };
+    const scene: Scene = {
+      incident: 'incident-a',
+      actions: [RECOVER],
+      problems: [],
+      bodies: [],
+      exec: async (body) => {
+        if (body.incident === 'incident-b') {
+          const repair = record(body, 'accepted', '新事故已受理（收到了，不等于修好）');
+          scene.last = repair;
+          scene.actions = [];
+          return { status: 200, json: { ok: true, repair, replayed: false } };
+        }
+        const repair = record(body, 'verified', '核实恢复：上一代事故');
+        scene.last = repair;
+        scene.actions = [];
+        return { status: 200, json: { ok: true, repair, replayed: false } };
+      },
+    };
+    await stage(context, problems, scene);
+    await page.goto('/notifications');
+    const card = stalledCard(page);
+    await card.getByRole('button', { name: '叫醒任务继续' }).click();
+    await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verified');
+    await expect(card.getByText('已修复', { exact: true })).toBeVisible();
+
+    const refreshBtn = page.getByRole('button', { name: '刷新' });
+    await expect(refreshBtn).not.toHaveAttribute('aria-busy', 'true');
+    scene.incident = 'incident-b';
+    delete scene.last;
+    scene.actions = [recoverB];
+    await refreshBtn.click();
+    await expect(card.getByTestId('repair-actions')).toContainText(recoverB.detail);
+    await expect(card.getByText('已修复', { exact: true })).toHaveCount(0);
+    await expect(card.getByTestId('repair-record')).toHaveCount(0);
+
+    await card.getByRole('button', { name: '重开后继续' }).click();
+    await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
+    expect(scene.bodies.map((b) => b.incident)).toEqual(['incident-a', 'incident-b']);
+    expect(scene.bodies[1]).toMatchObject({ actionId: recoverB.id, incident: 'incident-b' });
+    expect(scene.bodies[1]?.requestId).not.toBe(scene.bodies[0]?.requestId);
+    expect(scene.bodies.filter((b) => b.requestId === scene.bodies[0]?.requestId)).toHaveLength(1);
+  });
+
+  test('迟到的上一代成功或失败不改这一代正在执行的状态，也不把那次请求再发一遍', async ({
+    page,
+    context,
+    problems,
+  }) => {
+    const recoverB = {
+      ...RECOVER,
+      id: 'task-recover:e2e-b',
+      label: '重开后继续',
+      detail: '新事故：给任务 #12 的当前工作流发继续',
+    };
+    let releaseA: () => void = () => undefined;
+    let releaseB: () => void = () => undefined;
+    const gateA = () =>
+      new Promise<void>((resolve) => {
+        releaseA = () => resolve();
+      });
+    const gateB = () =>
+      new Promise<void>((resolve) => {
+        releaseB = () => resolve();
+      });
+    let failA = false;
+    const scene: Scene = {
+      incident: 'incident-a',
+      actions: [RECOVER],
+      problems: [],
+      bodies: [],
+      exec: async (body) => {
+        if (body.incident === 'incident-a') {
+          await gateA();
+          if (failA) return 'timeout';
+          return {
+            status: 200,
+            json: {
+              ok: true,
+              repair: record(body, 'verified', '核实恢复：上一代事故'),
+              replayed: false,
+            },
+          };
+        }
+        await gateB();
+        const repair = record(body, 'accepted', '新事故已受理（收到了，不等于修好）');
+        if (scene.incident === body.incident) {
+          scene.last = repair;
+          scene.actions = [];
+        }
+        return { status: 200, json: { ok: true, repair, replayed: false } };
+      },
+    };
+    await stage(context, problems, scene);
+    try {
+      await page.goto('/notifications');
+      const card = stalledCard(page);
+      await card.getByRole('button', { name: '叫醒任务继续' }).click();
+      await expect(card.getByTestId('repair-busy')).toHaveAttribute('data-step', 'sent');
+      const refreshBtn = page.getByRole('button', { name: '刷新' });
+      await expect(refreshBtn).not.toHaveAttribute('aria-busy', 'true');
+      scene.incident = 'incident-b';
+      scene.actions = [recoverB];
+      delete scene.last;
+      await refreshBtn.click();
+      await expect(card.getByRole('button', { name: '重开后继续' })).toBeVisible();
+      await card.getByRole('button', { name: '重开后继续' }).click();
+      await expect(card.getByTestId('repair-busy')).toHaveAttribute('data-step', 'sent');
+
+      const listed = page.waitForResponse(
+        (res) => res.url().includes('/api/notifications?') && res.request().method() === 'GET',
+      );
+      releaseA();
+      await listed;
+      await expect(card.getByTestId('repair-busy')).toHaveAttribute('data-step', 'sent');
+      await expect(card.getByText('已修复', { exact: true })).toHaveCount(0);
+      await expect(card.getByText('核实恢复：上一代事故')).toHaveCount(0);
+      expect(scene.bodies).toHaveLength(2);
+      expect(scene.bodies[0]).toMatchObject({ actionId: RECOVER.id, incident: 'incident-a' });
+      expect(scene.bodies[1]).toMatchObject({ actionId: recoverB.id, incident: 'incident-b' });
+
+      releaseB();
+      await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
+      await expect(card.getByText('新事故已受理（收到了，不等于修好）')).toBeVisible();
+      await expect(card.getByText('已修复', { exact: true })).toHaveCount(0);
+      expect(scene.bodies).toHaveLength(2);
+    } finally {
+      releaseA();
+      releaseB();
+    }
+
+    failA = true;
+    releaseA = () => undefined;
+    releaseB = () => undefined;
+    scene.incident = 'incident-a';
+    scene.actions = [RECOVER];
+    delete scene.last;
+    scene.bodies.length = 0;
+    try {
+      await page.reload();
+      const card = stalledCard(page);
+      await card.getByRole('button', { name: '叫醒任务继续' }).click();
+      await expect(card.getByTestId('repair-busy')).toHaveAttribute('data-step', 'sent');
+      const refreshBtn = page.getByRole('button', { name: '刷新' });
+      await expect(refreshBtn).not.toHaveAttribute('aria-busy', 'true');
+      scene.incident = 'incident-b';
+      scene.actions = [recoverB];
+      delete scene.last;
+      await refreshBtn.click();
+      await expect(card.getByRole('button', { name: '重开后继续' })).toBeVisible();
+      await card.getByRole('button', { name: '重开后继续' }).click();
+      await expect(card.getByTestId('repair-busy')).toHaveAttribute('data-step', 'sent');
+
+      const listed = page.waitForResponse(
+        (res) => res.url().includes('/api/notifications?') && res.request().method() === 'GET',
+      );
+      releaseA();
+      await listed;
+      await expect(card.getByTestId('repair-busy')).toHaveAttribute('data-step', 'sent');
+      await expect(card.getByText('没收到回执')).toHaveCount(0);
+      expect(scene.bodies.filter((b) => b.incident === 'incident-a')).toHaveLength(1);
+      expect(scene.bodies.filter((b) => b.incident === 'incident-b')).toHaveLength(1);
+
+      releaseB();
+      await expect(phaseOf(page)).toHaveAttribute('data-phase', 'verifying');
+      await expect(card.getByText('没收到回执')).toHaveCount(0);
+    } finally {
+      releaseA();
+      releaseB();
+    }
+  });
+
+  test('服务端明示的上一代结果未知继续展示，并挡住新事故的动作', async ({ page, context, problems }) => {
+    const scene: Scene = {
+      incident: 'incident-b',
+      actions: [{ ...RECOVER, id: 'task-recover:e2e-b', label: '重开后继续', detail: '新事故不该摆出来' }],
+      problems: ['上一代事故的操作仍在执行、结果未知或待核验，不能覆盖后重发；请先核实原操作'],
+      last: record(
+        {
+          actionId: RECOVER.id,
+          incident: 'incident-a',
+          requestId: '11111111-1111-4111-8111-111111111111',
+        },
+        'unknown',
+        '上一代结果未知',
+      ),
+      bodies: [],
+      exec: async () => ({ status: 500, json: {} }),
+    };
+    await stage(context, problems, scene);
+    await page.goto('/notifications');
+    const card = stalledCard(page);
+    await expect(phaseOf(page)).toHaveAttribute('data-phase', 'unknown');
+    await expect(card.getByText('上一代结果未知')).toBeVisible();
+    await expect(card.getByText(/不能覆盖后重发/)).toBeVisible();
+    await expect(card.getByTestId('repair-actions')).toHaveCount(0);
+    await expect(card.getByRole('button', { name: '重开后继续' })).toHaveCount(0);
     expect(scene.bodies).toHaveLength(0);
   });
 });
