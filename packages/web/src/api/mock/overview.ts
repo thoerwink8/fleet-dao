@@ -2,7 +2,7 @@
 // - 每一笔的命令计数、步骤：把会话演示数据（transcripts.ts）转成轻量行，交给 shared 的 cutSteps 算（和真后端同一个算法）。
 // - 回合、引擎在会话外做的事、PR 改了哪些文件：照 t-c9（做完的单，两个回合，返工一次）和 t-12（在跑，返工的第二回合）手摆一份；
 //   别的单没摆，页面上就是「老记录没记回合」「这个 PR 没记过改了哪些文件」，演示老记录。
-// 网址参数 ?mockOverview=old（老后端没有这一项）、unread（几块都读不到）演示两种「没读到」。
+// 网址参数 ?mockOverview=old（老后端没有这一项）、unread（几块都读不到）演示两种「没读到」；mixed 演示新旧引擎交替的单。
 import { cutSteps, processRowOf } from '@fleet-dao/shared';
 import type { TaskDetail, TranscriptEntry } from '../types';
 
@@ -12,11 +12,24 @@ type EngineStep = Extract<Overview['engineSteps'], { state: 'ok' }>['items'][num
 type PrFile = Extract<Overview['prs'][number]['files'], { state: 'ok' }>['items'][number];
 type Tally = Extract<Overview['tally'], { state: 'ok' }>['total'];
 
-export type MockOverviewMode = 'old' | 'unread' | undefined;
+export type MockOverviewMode = 'old' | 'unread' | 'mixed' | undefined;
 
 export function mockOverviewMode(search: string): MockOverviewMode {
   const v = new URLSearchParams(search).get('mockOverview');
-  return v === 'old' || v === 'unread' ? v : undefined;
+  return v === 'old' || v === 'unread' || v === 'mixed' ? v : undefined;
+}
+
+/**
+ * ?mockOverview=mixed：演示新旧引擎交替那几天的单（#3190）——回合都记了收场时刻，但只有最后一回合的笔记了回合号，
+ * 前面的笔是旧引擎跑的、没记。页面按回合收场时刻把它们归进回合。
+ */
+export function withOldEngineRuns(runs: TaskDetail['segmentRuns']): TaskDetail['segmentRuns'] {
+  const last = Math.max(0, ...runs.map((r) => r.roundSeq ?? 0));
+  return runs.map((r) => {
+    if (r.roundSeq === undefined || r.roundSeq === last) return r;
+    const { roundSeq: _drop, ...rest } = r;
+    return rest;
+  });
 }
 
 interface TaskFixture {
@@ -250,7 +263,17 @@ export function mockOverview(input: {
                 ? '这张单还没跑过'
                 : '这张单还没有动手的会话',
           },
-    rounds: { state: 'ok', items: fx.rounds },
+    rounds: { state: 'ok', items: input.mode === 'mixed' ? withOldEngineRounds(fx.rounds) : fx.rounds },
     engineSteps: { state: 'ok', items: fx.engineSteps },
   };
+}
+
+/** 和 withOldEngineRuns 配对：旧引擎收场的回合没记开始时刻，只有最后一回合（新引擎）记了。 */
+function withOldEngineRounds(rounds: readonly Round[]): Round[] {
+  const last = Math.max(0, ...rounds.map((r) => r.seq));
+  return rounds.map((r) => {
+    if (r.seq === last) return r;
+    const { startedAt: _drop, ...rest } = r;
+    return rest;
+  });
 }

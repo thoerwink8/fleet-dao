@@ -788,6 +788,11 @@ function RoundHeader({
           {reworkWhy ? `——${reworkWhy}` : '（没记返工意见）'}
         </p>
       ) : null}
+      {g.byTime ? (
+        <p className="mt-0.5 text-meta text-muted-foreground" data-round-bytime>
+          其中 {g.byTime} 笔是旧引擎跑的、没记回合号，按回合收场时刻归进来
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -197,6 +197,20 @@ describe('过程：回合 → 笔 → 步骤 → 调用', () => {
   });
 });
 
+describe('新旧引擎交替的单：没记回合号的笔按回合收场时刻归（#3190）', () => {
+  test('t-c9 mixed：第 1 回合那笔没记回合号也归进第 1 回合，回合头写明是按时间归的；不再有「更早的几笔」', async () => {
+    open('/tasks/t-c9', '?mockOverview=mixed');
+    const proc = await found('[data-task-process]');
+    const r1 = await found('[data-round-header="1"]', proc);
+    expect(r1.querySelector('[data-round-bytime]')?.textContent).toContain('其中 1 笔是旧引擎跑的');
+    expect(proc.querySelector('[data-round-header="2"] [data-round-bytime]')).toBeNull();
+    expect(proc.querySelector('[data-round-header="old"]')).toBeNull();
+    // 那一笔就在第 1 回合那一节里
+    const section = proc.querySelector('section[aria-label="第 1 回合"]');
+    expect(section?.querySelector('[data-run-process="seg-c9-2"]')).toBeTruthy();
+  });
+});
+
 describe('页头下面：这一回合走到哪（#3169）', () => {
   test('t-12 在跑的返工回合：当前一步带 aria-current="step"，写上一回合怎么收场', async () => {
     open('/tasks/t-12');
