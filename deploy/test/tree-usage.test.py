@@ -694,6 +694,10 @@ while True: time.sleep(0.1)
                            ("open bucket", private + "/" + tail["pathHash"] + "/lock")):
             for label, damage in (("group-readable", lambda: os.chmod(lock, 0o640)),
                                   ("writable", lambda: os.chmod(lock, 0o666)),
+                                  ("read-only", lambda: os.chmod(lock, 0o400)),
+                                  ("owner-executable", lambda: os.chmod(lock, 0o700)),
+                                  ("no permissions", lambda: os.chmod(lock, 0o000)),
+                                  ("setuid", lambda: os.chmod(lock, 0o4600)),
                                   ("foreign owner", lambda: os.chown(lock, 1000, 1000))):
                 with self.subTest(name + " " + label):
                     good = os.stat(lock)

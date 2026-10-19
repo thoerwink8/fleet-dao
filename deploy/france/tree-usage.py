@@ -199,7 +199,8 @@ def id_hash(exp):
 
 
 def trusted_lock(st):
-    return stat.S_ISREG(st.st_mode) and st.st_uid == 0 and not st.st_mode & 0o077
+    # Exactly what locked() creates: root's 0600 regular file, no other mode, no special bits.
+    return stat.S_ISREG(st.st_mode) and st.st_uid == 0 and stat.S_IMODE(st.st_mode) == 0o600
 
 
 def wait_flock(lock):
