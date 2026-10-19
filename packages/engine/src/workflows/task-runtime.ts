@@ -19,6 +19,7 @@ import {
   workflowInfo,
 } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
+import { COMMANDER_ACTOR, ROUNDS_HANDOFF_TITLE } from '../commander-contract.ts';
 import type { FailureContext, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Limits } from '../limits.ts';
 import type { AcceptanceDutyRecord, RouteChoice, Worktree } from '../ports.ts';
@@ -28,7 +29,6 @@ import {
   AUTO_RETRY_PARK_KINDS,
   CI_POLICY_POLL_SECONDS,
   type ClosedIssueHoldToken,
-  COMMANDER_ACTOR,
   type GuardedPaths,
   MAX_MAIN_SYNCS,
   MAX_ROUND_RESETS,
@@ -39,7 +39,6 @@ import {
   type ParkKind,
   type PauseCommand,
   type RepinCommand,
-  ROUNDS_HANDOFF_TITLE,
   type TaskPhase,
   type TaskStatus,
   type TaskWait,

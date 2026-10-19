@@ -3,6 +3,7 @@
 import { auditLog, notifications, repos, settings, taskRounds, tasks } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { COMMANDER_ACTOR } from '../../src/commander-contract.ts';
 import { judgeSpin } from '../../src/decisions/spin.ts';
 import {
   COMMANDER_AUDIT_ACT,
@@ -10,7 +11,7 @@ import {
   type ParkTriageItem,
 } from '../../src/jobs/park-triage.ts';
 import { COMMANDER_SETTING, parkTriageJob } from '../../src/real/park-triage.ts';
-import { COMMANDER_ACTOR, type TaskParkInfo } from '../../src/task-contract.ts';
+import type { TaskParkInfo } from '../../src/task-contract.ts';
 
 const NOW = new Date('2026-10-19T12:00:00Z');
 const PARK: TaskParkInfo = {

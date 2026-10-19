@@ -6,13 +6,13 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { COMMANDER_ACTOR } from '../src/commander-contract.ts';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
 import { DEFAULT_TASK_TOKEN_BUDGET } from '../src/limits.ts';
 import { PortError } from '../src/ports.ts';
 import { buildTaskBrief } from '../src/runner/task-brief.ts';
 import {
-  COMMANDER_ACTOR,
   type SelfCheckResult,
   type TaskRun,
   type TaskStatus,

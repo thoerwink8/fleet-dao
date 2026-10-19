@@ -134,12 +134,6 @@ export const AUTO_RETRY_PARK_KINDS: readonly ParkKind[] = ['transient', 'unarmed
 /** 引擎续停发「继续」时的 by（操作记录、工作流认引擎续的都看它）。 */
 export const PARKED_RETRY_ACTOR = 'engine:parked-retry';
 
-/** 法国指挥官会话的裁决经引擎执行时的 by 和操作记录的 actor（#3294 第 2 片）。 */
-export const COMMANDER_ACTOR = 'engine:commander';
-
-/** 已继续 MAX_ROUND_RESETS 次仍没过时停下的标题（workflows/task-runtime.ts 的 exhaustRounds）：这一停是「交指挥官」，不用等 15 分钟。 */
-export const ROUNDS_HANDOFF_TITLE = `已继续 ${MAX_ROUND_RESETS} 次仍没过，交指挥官`;
-
 /** 正停着的这一次停下（#3294）：只在 patched('park-kind') 的新历史里有，老历史一直没有。 */
 export interface TaskParkInfo {
   kind: ParkKind;
