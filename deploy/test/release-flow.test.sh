@@ -417,8 +417,8 @@ api_healthz() {
 }
 FLEET_SERVICES="fleet-engine fleet-api"
 recon() { # 说明 工人证据序列（空格隔开） 探针序列：切之前引擎好、切之后探针红，跑一遍核对
-  EV_SEQ=($2)
-  PROBE_SEQ=($3)
+  read -ra EV_SEQ <<<"$2"
+  read -ra PROBE_SEQ <<<"$3"
   rm -f -- "$EV_N_FILE" "$PROBE_N_FILE"
   ENGINE_RECONCILE_VERDICT=""
   ENGINE_RECONCILE_RECEIPT=""

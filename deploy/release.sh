@@ -1797,13 +1797,13 @@ DRIFTING_HEALTH_ITEMS="judge deploy_lag session_org github_app watchdog"
 # 引擎工人眼下的证据（只看一眼、不等）：polling = 主进程在、任务队列上工作流和活动两类都在取活；
 # idle = 进程在、队列上没有它的取活记录；dead = 单元没在跑或没有主进程号（进程已退）
 engine_worker_evidence() { # 主进程号
-  local pid=${1:-} json
-  if [[ -z "$pid" || "$pid" == 0 ]] || [[ "$(systemctl is-active fleet-engine.service 2>/dev/null)" != active ]]; then
+  local wpid=${1:-} json
+  if [[ -z "$wpid" || "$wpid" == 0 ]] || [[ "$(systemctl is-active fleet-engine.service 2>/dev/null)" != active ]]; then
     echo dead
     return 0
   fi
   json=$(tcli task-queue describe --task-queue "$TASK_QUEUE" -o json 2>/dev/null </dev/null) || json=""
-  if engine_polling "$json" "$pid@"; then echo polling; else echo idle; fi
+  if engine_polling "$json" "$wpid@"; then echo polling; else echo idle; fi
 }
 
 # 再问一次后端的 engine 项：打印 ok，或「bad<TAB>原因」
@@ -1874,7 +1874,9 @@ reconcile_engine() { # 探针原因
     esac
   fi
   receipt="引擎核对回执：工人证据=$worker_text；API 探针=$probe_text；重试 $used 次（上限 $((tries - 1)) 次）；裁决=$verdict；理由=$reason"
+  # shellcheck disable=SC2034 # 只有 deploy/test/release-flow.test.sh 读
   ENGINE_RECONCILE_VERDICT=$verdict
+  # shellcheck disable=SC2034
   ENGINE_RECONCILE_RECEIPT=$receipt
   case "$verdict" in
   保留) ok "后端报 engine 好了（重试后转绿）：$receipt" ;;
