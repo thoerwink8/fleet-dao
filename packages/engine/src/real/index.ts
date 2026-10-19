@@ -135,6 +135,7 @@ import { createPlanSegmentResume, createSegmentSettled } from './segment-resume.
 import { reportSubagentDefs } from './segment-settings.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import { createSelfCheck } from './self-check.ts';
+import { realCiTestCoverage } from './self-check-ci.ts';
 import { DEFAULT_SESSION_IO_ROOT, type MirasimHandle, sessionHandoff } from './session-handoff.ts';
 import { SESSION_ORG_TIMEOUT_MS, type SessionOrgReader, sessionOrgReader } from './session-org.ts';
 import { createStorePorts } from './store-ports.ts';
@@ -1241,7 +1242,7 @@ export function realPortsFromEnv(
       latestManualRun: (taskId, startedAfter) =>
         latestRunOfTask(db, { taskId, segment: 'manual', startedAfter }),
     }),
-    selfCheck: createSelfCheck({ trees, exec, log: taskLog }),
+    selfCheck: createSelfCheck({ trees, exec, log: taskLog, ciCoverage: realCiTestCoverage(gh.client) }),
     noteBare401: createNoteBare401(db),
     taskSpend: async (input) => {
       if (input?.schemaVersion !== 1 || !input.taskId) {

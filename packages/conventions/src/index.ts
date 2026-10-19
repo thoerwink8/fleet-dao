@@ -155,6 +155,7 @@ export {
   requireAxis,
   THREE_FLOW_LABEL,
 } from './labels.ts';
+export { claimOf } from './main-reuse.ts';
 export { type MdDoc, parseMd } from './markdown.ts';
 export { type GateResult, type GitHubReads, gateGitHub, gatePr, runMergeGate } from './merge-gate.ts';
 export {
