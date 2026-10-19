@@ -2,12 +2,12 @@
 // 各平台先核所选真 Temporal 测试的 CLI；不安装 Linux、不跳过测试、不使用旧检出冒充当前源码。
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, lstatSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { verifyRun } from './ci-box.ts';
 import { fsRepo } from './repo.ts';
 import { prepareTemporalCli, selectedNeedsTemporal } from './temporal-test-cli.ts';
+import { createTestReport } from './test-report.ts';
 import { listTestFiles } from './test-split.ts';
 
 export const LINUX_TESTS = [
@@ -144,17 +144,23 @@ export function runLocalVitest(
   args: string[],
   env = process.env,
   platform = process.platform,
+  phase = 'run',
 ): Result {
+  let evidence: ReturnType<typeof createTestReport> | undefined;
+  let result: Result = { status: null };
   const direct = (argv: string[]) => {
-    const r = spawnSync(process.execPath, [join(root, 'node_modules/vitest/vitest.mjs'), ...argv], {
-      cwd: root,
-      env,
-      stdio: 'inherit',
-    });
+    const commandArgs = [join(root, 'node_modules/vitest/vitest.mjs'), ...argv];
+    const spawn = () =>
+      spawnSync(process.execPath, commandArgs, {
+        cwd: root,
+        env,
+        stdio: 'inherit',
+      });
+    const r = evidence ? evidence.command('native', process.execPath, commandArgs, spawn) : spawn();
     return { status: r.status, signal: r.signal, error: r.error };
   };
-  let temporary: string | undefined;
   try {
+    if (platform === 'win32') evidence = createTestReport(root, args, phase);
     const universe = listTestFiles(fsRepo(root));
     if (typeof universe === 'string') throw new Error(universe);
     // 调用入口只传 run、文件过滤和 = 形式的 reporter/outputFile 选项。
@@ -165,52 +171,69 @@ export function runLocalVitest(
       env = { ...env, FLEET_TEST_TEMPORAL_CLI: cli.path };
       console.log(`Temporal preparation 通过：CLI=${cli.path} version=${cli.version}`);
     }
-    if (platform !== 'win32') return direct(args);
-    if (!split.linux.length) return direct(args);
+    if (!evidence) return direct(args);
+    const files = snapshotSource(root);
+    const digest = sourceDigest(files);
+    evidence.metadata.source = { kind: 'worktree-sha256', digest, files: files.length };
+    evidence.save();
+    const output = args.find((a) => a.startsWith('--outputFile.json='))?.slice('--outputFile.json='.length);
+    const nativeArgs = (selectedArgs: string[]) => [
+      ...selectedArgs.filter((a) => !a.startsWith('--reporter=') && !a.startsWith('--outputFile.json=')),
+      '--reporter=default',
+      '--reporter=json',
+      `--outputFile.json=${evidence?.path('native.json')}`,
+    ];
+    if (!split.linux.length) {
+      result = direct(nativeArgs(args));
+      evidence.read('native', evidence.path('native.json'));
+      if (output) writeFileSync(output, readFileSync(evidence.path('native.json')));
+      const after = snapshotSource(root);
+      evidence.metadata.sourceAfter = { digest: sourceDigest(after), files: after.length };
+      return result;
+    }
     const config = env.FLEET_TEST_LINUX_RUNNER;
     if (!config)
       throw new Error(
         '这些测试依赖真实 Linux 安全归档/进程语义。先显式设置 FLEET_TEST_LINUX_RUNNER 为本机 runner JSON 文件，再执行 pnpm test:linux 或 pnpm check；未跑测试，不算通过',
       );
     const runner = parseLinuxRunner(readFileSync(config, 'utf8'));
-    const files = snapshotSource(root);
-    const digest = sourceDigest(files);
     const worker = readFileSync(join(root, 'packages/conventions/src/linux-test-worker.mjs'), 'utf8');
     console.log(`Linux 转交 ${split.linux.length} 个文件；当前工作树快照 sha256=${digest}`);
-    const r = spawnSync(runner.command, [...runner.args, '--input-type=module', '-e', worker], {
-      cwd: root,
-      env,
-      encoding: 'utf8',
-      maxBuffer: 128 * 1024 * 1024,
-      timeout: 15 * 60 * 1000,
-      input: JSON.stringify({ files, digest, tests: split.linux, dependencyRoot: runner.dependencyRoot }),
-    });
+    const r = evidence.command(
+      'linux',
+      runner.command,
+      [...runner.args, '--input-type=module', '-e'],
+      () =>
+        spawnSync(runner.command, [...runner.args, '--input-type=module', '-e', worker], {
+          cwd: root,
+          env,
+          encoding: 'utf8',
+          maxBuffer: 128 * 1024 * 1024,
+          timeout: 15 * 60 * 1000,
+          input: JSON.stringify({ files, digest, tests: split.linux, dependencyRoot: runner.dependencyRoot }),
+        }),
+      createHash('sha256').update(worker).digest('hex'),
+    );
     if (r.stderr) process.stderr.write(r.stderr);
     const start = r.stdout?.lastIndexOf(RECEIPT) ?? -1;
-    if (start < 0)
+    if (start < 0) {
+      evidence.metadata.reports.linuxReceipt = 'missing';
       throw new Error(`Linux runner 没有真实测试回执：${r.error?.message ?? r.stdout ?? r.status}`);
+    }
     process.stdout.write(r.stdout.slice(0, start));
-    const receipt = verifyLinuxReceipt(
-      r.stdout.slice(start + RECEIPT.length).trim(),
-      split.linux,
-      digest,
-      r.status,
-    );
-    const report = receipt.report;
+    const rawReceipt = r.stdout.slice(start + RECEIPT.length).trim();
+    writeFileSync(evidence.path('linux-receipt.json'), rawReceipt);
+    evidence.metadata.reports.linuxReceipt = 'invalid';
+    const receipt = verifyLinuxReceipt(rawReceipt, split.linux, digest, r.status);
+    evidence.metadata.reports.linuxReceipt = 'valid';
+    writeFileSync(evidence.path('linux.json'), JSON.stringify(receipt.report));
+    // 原回执保持 Linux 路径；只在合并副本上改成本机路径。
+    const report = structuredClone(receipt.report);
     for (const t of report.testResults) t.name = join(root, t.name.slice(receipt.root.length + 1));
     let native: Result = { status: 0 };
-    const output = args.find((a) => a.startsWith('--outputFile.json='))?.slice('--outputFile.json='.length);
     if (split.native.length) {
-      temporary = mkdtempSync(join(tmpdir(), 'fleet-native-tests-'));
-      const json = join(temporary, 'result.json');
-      native = direct([
-        ...args.filter((a) => !a.startsWith('--reporter=') && !a.startsWith('--outputFile.json=')),
-        ...split.linux.map((f) => `--exclude=${f}`),
-        '--reporter=default',
-        '--reporter=json',
-        `--outputFile.json=${json}`,
-      ]);
-      const nativeReport = JSON.parse(readFileSync(json, 'utf8'));
+      native = direct(nativeArgs([...args, ...split.linux.map((f) => `--exclude=${f}`)]));
+      const nativeReport = evidence.read('native', evidence.path('native.json'));
       const nativeVerification = verifyRun({
         assigned: split.native,
         mode: '',
@@ -237,13 +260,19 @@ export function runLocalVitest(
       report.success = report.success && nativeReport.success;
     }
     // check --all 的重试仍从同一份失败文件清单读取，Linux 路径转换回本机树。
+    writeFileSync(evidence.path('merged.json'), JSON.stringify(report));
+    evidence.metadata.reports.merged = 'valid';
     if (output) writeFileSync(output, JSON.stringify(report));
-    if (sourceDigest(snapshotSource(root)) !== digest)
+    const after = snapshotSource(root);
+    evidence.metadata.sourceAfter = { digest: sourceDigest(after), files: after.length };
+    if (evidence.metadata.sourceAfter.digest !== digest)
       throw new Error('测试期间当前工作树源码发生变化；本次结果不能证明新源码通过，请重新执行 pnpm check');
-    return native.status !== 0 || native.error ? native : { status: receipt.status };
+    result = native.status !== 0 || native.error ? native : { status: receipt.status };
+    return result;
   } catch (e) {
-    return { status: null, error: e instanceof Error ? e : new Error(String(e)) };
+    result = { status: null, error: e instanceof Error ? e : new Error(String(e)) };
+    return result;
   } finally {
-    if (temporary) rmSync(temporary, { recursive: true, force: true });
+    evidence?.finish(result);
   }
 }

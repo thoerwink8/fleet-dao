@@ -193,8 +193,14 @@ it('正规选测只为真正选到的文件准备 CLI；缺 CLI 在启动 Vitest
   const executed = join(root, 'executed');
   writeFileSync(
     join(vitestRoot, 'vitest.mjs'),
-    `import{writeFileSync}from'node:fs'; writeFileSync(${JSON.stringify(executed)}, 'ran');`,
+    `import{writeFileSync}from'node:fs';import{join}from'node:path';
+     writeFileSync(${JSON.stringify(executed)}, 'ran');
+     const output=process.argv.find(arg=>arg.startsWith('--outputFile.json='))?.slice(18);
+     if(output)writeFileSync(output,JSON.stringify({success:true,numTotalTests:1,numPassedTests:1,numFailedTests:0,numPendingTests:0,testResults:[{name:join(process.cwd(),'packages/example/test/plain.test.ts'),status:'passed',assertionResults:[{status:'passed'}]}]}));`,
   );
+  writeFileSync(join(root, '.gitignore'), 'node_modules/\n_tmp/\nexecuted\n');
+  expect(runChild('git', ['init'], { cwd: root }).status).toBe(0);
+  expect(runChild('git', ['add', '.'], { cwd: root }).status).toBe(0);
   // 显式坏路径排除机器原有登记的影响；plain 不应碰它。
   const env = { ...process.env, FLEET_TEST_TEMPORAL_CLI: join(root, 'absent-cli') };
   expect(runLocalVitest(root, ['run', 'plain.test.ts'], env).status).toBe(0);
