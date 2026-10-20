@@ -138,6 +138,7 @@ import {
   wakeAfterProbeRound,
 } from './route-wake.ts';
 import { realChannelAttempts, realReservations, realRuns } from './runs-writer.ts';
+import { productionScopeOom } from './scope-oom-evidence.ts';
 import { createPlanSegmentResume, createSegmentSettled } from './segment-resume.ts';
 import { reportSubagentDefs } from './segment-settings.ts';
 import type { SegmentSpawnerDeps } from './segment-spawner.ts';
@@ -1168,6 +1169,8 @@ export function realPortsFromEnv(
     memoryPeak: productionMemoryPeak(),
     // 会话用掉的 CPU 秒数写进 runs（#1980）：边跑边读 cpu.stat，收场再读一次 usage_usec
     cpuUsage: productionCpuUsage(),
+    // 会话 scope 自己的内存事件见证写进 result.json（#3448）：边跑边读 memory.events.local，只证明 scope 内有事件
+    scopeOom: productionScopeOom(),
     // 拼车池上的会话被拒：证据当场交给切号判（#194 方案 4.3），不等路由探针那一轮；不等结果（切号要等这个会话收场）
     onCarpoolRejection: (rejection) => {
       void orgSwitch.now({ by: '拼车会话被拒', rejection });

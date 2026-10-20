@@ -35,6 +35,7 @@ import { clipCauseSummary, type RunCause, sessionlessUsage } from '@fleet-dao/sh
 import { errMessage } from '@fleet-dao/shared/util';
 import type { MemoryAdmissionDeps } from '../real/memory-admission.ts';
 import { admitSessionMemory } from '../real/memory-admission.ts';
+import type { ScopeOomEvidence } from '../real/scope-oom-evidence.ts';
 import type { AnyBrief } from './brief.ts';
 import { routeOutcomeOf } from './evidence.ts';
 import { NoSlotError, type RunRecord, type RunStart, RunStartSchema, type RunsWriter } from './not-wired.ts';
@@ -208,6 +209,11 @@ export interface SpawnFacts {
   usageWhy?: string;
   /** 没读到 CPU 秒数的原因（白话）：进日志和落盘的 result.json，runs 那一列留空。 */
   cpuWhy?: string;
+  /**
+   * 会话 scope 自己的内存事件见证（real/scope-oom-evidence.ts，#3448）：只落 result.json，不进 runs 列、stderr、failureReason。
+   * 证明「这个 scope 里有没有 OOM 事件」，不证明主进程被谁终止。
+   */
+  scopeOom?: ScopeOomEvidence;
 }
 
 export interface SpawnCommand {
@@ -528,6 +534,7 @@ async function persistArtifacts(runDir: string, result: OneShotResult): Promise<
     memoryPeakWhy: result.facts?.memoryPeakWhy,
     cpuSeconds: result.facts?.cpuSeconds,
     cpuWhy: result.facts?.cpuWhy,
+    scopeOom: result.facts?.scopeOom,
     /** 落盘 TTL：调用方该在这之后清理。 */
     cleanupAfter: SESSION_ARTIFACT_TTL_MS,
   };

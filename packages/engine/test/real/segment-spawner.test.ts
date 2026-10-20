@@ -29,6 +29,7 @@ import type { CarpoolRejection } from '../../src/jobs/carpool-outage.ts';
 import type { CpuUsageDeps } from '../../src/real/cpu-usage.ts';
 import type { HostDriver, HostReport, HostRunHooks, HostRunSpec, WiredHost } from '../../src/real/hosts.ts';
 import type { MemoryPeakDeps } from '../../src/real/memory-peak.ts';
+import type { ScopeOomDeps } from '../../src/real/scope-oom-evidence.ts';
 import {
   hostSegmentSpawner,
   MIRASIM_CPU_UNREAD,
@@ -129,6 +130,8 @@ function harness(
     memoryPeak?: MemoryPeakDeps;
     /** 给了就采 scope 的 CPU 秒数（#1980）；readText 假的，不碰真 cgroup。 */
     cpuUsage?: CpuUsageDeps;
+    /** 给了就读 scope 自己的内存事件见证（#3448）；readText 假的，不碰真 cgroup。 */
+    scopeOom?: ScopeOomDeps;
     /** 会话过程记录（#1640）写到哪；不给就不记。 */
     transcriptWrite?: (runId: string, rows: TranscriptRow[]) => Promise<void>;
     /** 动手会话脱开引擎跑（#2238）。 */
@@ -188,6 +191,7 @@ function harness(
     ...(opts.db ? { db: opts.db } : {}),
     ...(opts.memoryPeak ? { memoryPeak: opts.memoryPeak } : {}),
     ...(opts.cpuUsage ? { cpuUsage: opts.cpuUsage } : {}),
+    ...(opts.scopeOom ? { scopeOom: opts.scopeOom } : {}),
     ...(opts.transcriptWrite ? { transcriptWrite: opts.transcriptWrite, transcriptFlushMs: 5 } : {}),
     ...(opts.onCarpoolRejection ? { onCarpoolRejection: opts.onCarpoolRejection } : {}),
     ...(opts.handoff ? { handoff: opts.handoff } : {}),
@@ -1455,5 +1459,194 @@ describe('hostSegmentSpawner · 脱开引擎跑、引擎重启后接回（#2238�
       /接回会话 .* 没接成：这个引擎没装收发目录/,
     );
     expect(h.calls).toEqual([]);
+  });
+});
+
+describe('hostSegmentSpawner · scope 内存事件见证（#3448）', () => {
+  const SCOPE_DIR = `/sys/fs/cgroup/fleet.slice/fleet-agents.slice/fleet-agent-${RUN_ID}.scope`;
+  const LOCAL = `${SCOPE_DIR}/memory.events.local`;
+  const events = (oom: number, kill: number) => `low 0\nhigh 0\nmax ${oom}\noom ${oom}\noom_kill ${kill}\n`;
+  const FAKE_OOM = (readText: ScopeOomDeps['readText'], intervalMs = 5): ScopeOomDeps => ({
+    readText,
+    cgroupRoot: '/sys/fs/cgroup',
+    slicePath: 'fleet.slice/fleet-agents.slice',
+    intervalMs,
+  });
+  const enoent = () => Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  const afterAWhile = () => new Promise((r) => setTimeout(r, 120));
+  const OOM_TEXT = /oom[-_ ]?kill|out of memory/i;
+  const meta = async () =>
+    JSON.parse(await readFile(join(tmp, RUN_ID, 'result.json'), 'utf8')) as {
+      exitCode: number | null;
+      failureReason?: string;
+      scopeOom?: Record<string, unknown>;
+    };
+
+  it('143 没有终帧、同一 scope 跑着时计数 0→1、收场前 scope 被收走：result.json 里有 scope 身份、观测时刻、本地计数和完整性；退出事实不变，不被分流成 oom_killed', async () => {
+    const paths: string[] = [];
+    let n = 0;
+    const h = harness({
+      scopeOom: FAKE_OOM(async (path) => {
+        paths.push(path);
+        if (path !== LOCAL) throw enoent();
+        n += 1;
+        if (n <= 2) return events(0, 0);
+        if (n <= 6) return events(1, 1);
+        throw enoent();
+      }),
+      driverRun: async () => {
+        await afterAWhile();
+        return report({ facts: okFacts({ exitCode: 143, terminal: undefined }), answer: '' });
+      },
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('failed');
+    expect(r.exitCode).toBe(143);
+    expect(r.facts?.scopeOom).toMatchObject({
+      verdict: 'oom_events_in_scope',
+      integrity: 'partial',
+      runId: RUN_ID,
+      scope: `fleet-agent-${RUN_ID}.scope`,
+      source: 'memory.events.local',
+      finalRead: 'gone',
+      delta: { oomEvents: 1, killedProcs: 1 },
+      killTarget: 'unknown',
+    });
+    const saved = await meta();
+    expect(saved.exitCode).toBe(143);
+    expect(saved.scopeOom).toMatchObject({ verdict: 'oom_events_in_scope', observedAt: expect.any(String) });
+    // 失败说明、分流用的文字里没有见证的任何字样
+    expect(saved.failureReason ?? '').not.toMatch(OOM_TEXT);
+    expect(r.stderrTail ?? '').not.toMatch(OOM_TEXT);
+    expect(JSON.stringify(saved.scopeOom)).not.toMatch(OOM_TEXT);
+    // 只读本 scope 自己的两个文件
+    expect(paths.every((p) => p.startsWith(`${SCOPE_DIR}/`))).toBe(true);
+  });
+
+  it('旧行为对照：不给 scopeOom 时结局和 result.json 里没有这份见证，只有退出码', async () => {
+    const h = harness({
+      driverRun: async () => report({ facts: okFacts({ exitCode: 143, terminal: undefined }), answer: '' }),
+    });
+    const r = await h.run();
+    expect(r.exitCode).toBe(143);
+    expect(r.facts).not.toHaveProperty('scopeOom');
+    expect((await meta()).scopeOom).toBeUndefined();
+  });
+
+  it('无事件且读取完整：none_observed / complete，计数 0 如实写出', async () => {
+    const h = harness({
+      scopeOom: FAKE_OOM(async (path) => {
+        if (path !== LOCAL) throw enoent();
+        return events(0, 0);
+      }),
+      driverRun: async () => {
+        await afterAWhile();
+        return report();
+      },
+    });
+    const r = await h.run();
+    expect(r.outcome).toBe('done');
+    expect(r.facts?.scopeOom).toMatchObject({
+      verdict: 'none_observed',
+      integrity: 'complete',
+      delta: { oomEvents: 0, killedProcs: 0 },
+    });
+  });
+
+  it('【故意造出的失败】采样一直读不到（文件不在、拒绝读取、内容非法）：见证写 unknown，原结果照常落盘，退出事实不变', async () => {
+    for (const bad of [
+      async () => {
+        throw enoent();
+      },
+      async () => {
+        throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+      },
+      async () => 'oom 0\n',
+    ]) {
+      const h = harness({
+        scopeOom: FAKE_OOM(bad),
+        driverRun: async () => {
+          await afterAWhile();
+          return report();
+        },
+      });
+      const r = await h.run();
+      expect(r.outcome).toBe('done');
+      expect(r.exitCode).toBe(0);
+      expect(r.facts?.scopeOom).toMatchObject({ verdict: 'unknown', integrity: 'unknown' });
+      expect((await meta()).scopeOom).toMatchObject({ verdict: 'unknown' });
+      expect(h.removed).toEqual([`/var/lib/fleet-work/_tmp/${RUN_ID}`]);
+    }
+  });
+
+  it('被叫停（killed）：收场照样保全见证，结局仍是叫停，不改成别的', async () => {
+    const h = harness({
+      scopeOom: FAKE_OOM(async (path) => {
+        if (path !== LOCAL) throw enoent();
+        return events(0, 0);
+      }),
+      driverRun: async () => report({ facts: okFacts({ exitCode: null, killed: 'aborted' }), answer: '' }),
+    });
+    const r = await h.run();
+    expect(r.exitCode).toBeNull();
+    expect(r.facts?.scopeOom).toMatchObject({ verdict: 'none_observed' });
+  });
+
+  it('放手（引擎要走）：采样停掉不再读，不交见证（会话还在跑）', async () => {
+    const handoff = sessionHandoff(join(tmp, 'io'));
+    let reads = 0;
+    const h = harness({
+      handoff,
+      scopeOom: FAKE_OOM(async () => {
+        reads += 1;
+        return events(0, 0);
+      }),
+      driverRun: (_spec, hooks) =>
+        new Promise<HostReport>(() => {
+          if (hooks.io && !hooks.io.attach) mkdirSync(hooks.io.dir, { recursive: true });
+        }),
+    });
+    const running = h.run({ detach: {} });
+    await vi.waitFor(() => expect(h.calls).toHaveLength(1));
+    await vi.waitFor(() => expect(reads).toBeGreaterThan(0));
+    expect(handoff.leave('收到 SIGTERM')).toEqual([RUN_ID]);
+    await expect(running).rejects.toBeInstanceOf(OneShotDetached);
+    const after = reads;
+    await afterAWhile();
+    expect(reads).toBe(after);
+    expect(h.recorded).toEqual([]);
+  });
+
+  it('接回：窗口写 attach，完整性不会是 complete', async () => {
+    const handoff = sessionHandoff(join(tmp, 'io'));
+    const startedAt = new Date().toISOString();
+    const h = harness({
+      handoff,
+      scopeOom: FAKE_OOM(async (path) => {
+        if (path !== LOCAL) throw enoent();
+        return events(0, 0);
+      }),
+    });
+    const got = await h.run({ detach: { attach: { startedAt } } });
+    expect(got.facts?.scopeOom).toMatchObject({ window: 'attach', integrity: 'partial', verdict: 'unknown' });
+  });
+
+  it('Mirasim：不读任何 cgroup 文件，见证明确 unsupported，不写 0 计数', async () => {
+    const paths: string[] = [];
+    const h = harness({
+      route: route({ hostId: 'mirasim' }),
+      scopeOom: FAKE_OOM(async (path) => {
+        paths.push(path);
+        return events(0, 0);
+      }),
+      driverRun: async () => report({ hostId: 'mirasim' }),
+    });
+    const r = await h.run();
+    expect(paths).toEqual([]);
+    const ev = r.facts?.scopeOom;
+    expect(ev).toMatchObject({ verdict: 'unsupported', integrity: 'unknown', killTarget: 'unknown' });
+    expect(ev).not.toHaveProperty('baseline');
+    expect(ev).not.toHaveProperty('delta');
+    expect(ev?.problems.join()).toContain('不经本机 scope');
   });
 });
