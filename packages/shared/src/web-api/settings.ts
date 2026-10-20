@@ -145,6 +145,11 @@ export const SETTING_SCHEMAS = {
    * 库里的值认不出时引擎和命令行按 three 办并报出来（shared 的 readFlowModeSetting）。引擎定模式时读这一次（decideFlowMode），结果进分组记录，之后改开关不影响已经分过组的单。
    */
   'engine.flowMode': z.string().refine((v) => parseFlowModeSetting(v).ok, `只收 ${FLOW_MODE_FORMS}`),
+  /**
+   * 法国指挥官会话开关（#3294 第 2 片）：true = 停下的单交指挥官会话看、引擎白名单核了再执行；false = 不看（任务只靠引擎续停和人处理）。
+   * 没设过 = 开；值认不出引擎按关算并说明原因。每天处理张数、每张单每次停下处理一次的限制不受这个开关影响。
+   */
+  'engine.commander': z.boolean(),
 } as const;
 export type SettingKey = keyof typeof SETTING_SCHEMAS;
 

@@ -233,6 +233,15 @@ describe('默认配置 routing.default.json', () => {
     for (const m of chat) expect(Object.keys(cfg.models), m).toContain(m);
   });
 
+  it('指挥官（commander，#3294 第 2 片）：默认顺序 grok-4.7 → sonnet-5.5 → opus-5.5，没有 Fable、没有 Jev；引用的模型都在骨架的 models 里', async () => {
+    const cfg = await loadRoutingConfig();
+    const commander = cfg.purposes.commander ?? [];
+    expect(commander.slice(0, 3)).toEqual(['grok-4.7', 'sonnet-5.5', 'opus-5.5']);
+    expect(commander.some((m) => /fable/i.test(m))).toBe(false);
+    expect(commander).not.toContain('jev-1.13');
+    for (const m of commander) expect(Object.keys(cfg.models), m).toContain(m);
+  });
+
   it('Haiku 5.5（#1351）：骨架里路由顺序 solo → carpool → cursor、只有 solo 开着；只进 groom；目录里两条 claude-code 路由点名 claude-haiku-5-5', async () => {
     const cfg = await loadRoutingConfig();
     expect(cfg.models['haiku-5.5']?.map((r) => [r.routeId, r.enabled])).toEqual([

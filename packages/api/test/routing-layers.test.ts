@@ -85,6 +85,7 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
       'judge',
       'groom',
       'intake-chat',
+      'commander',
     ]);
     // 库里有 plan、review 的行也不列：triage、spec、plan、research 以及 review 都不进用途列表
     for (const gone of ['triage', 'spec', 'plan', 'research', 'review'] as const) {
@@ -158,6 +159,14 @@ describe('驾驶舱路由页：路由两层每一层现在活着吗', () => {
     // 提需求（intake-chat，#2061）：同样自动多出这一行，没配写明
     expect(by.get('intake-chat')).toEqual({
       purpose: 'intake-chat',
+      version: 0,
+      verdict: 'dead',
+      problems: ['这个用途没有模型，派不了'],
+      models: [],
+    });
+    // 指挥官（commander，#3294 第 2 片）：同样自动多出这一行，没配写明（引擎那边也会明说「没配模型」并报警）
+    expect(by.get('commander')).toEqual({
+      purpose: 'commander',
       version: 0,
       verdict: 'dead',
       problems: ['这个用途没有模型，派不了'],

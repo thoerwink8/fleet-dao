@@ -31,10 +31,10 @@ const routeItem = (routeId: string) => {
 };
 
 describe('路由页：每一层现在活着吗', () => {
-  test('只列在用的六个用途；没点名先看靠后备撑着的验收（整理待办不抢）；对题不选路；Jev、整理待办、提需求单列', async () => {
+  test('只列在用的七个用途；没点名先看靠后备撑着的验收（整理待办不抢）；对题不选路；Jev、整理待办、提需求、指挥官单列', async () => {
     renderApp(<RoutingPage />, { route: '/routing' });
     const links = await purposeLinks();
-    expect(links).toHaveLength(6);
+    expect(links).toHaveLength(7);
     expect(links[0]?.textContent).toContain('动手');
     expect(links[0]?.textContent).not.toContain('动手 · 界面');
     expect(links[1]?.textContent).toContain('动手 · 界面');
@@ -43,6 +43,7 @@ describe('路由页：每一层现在活着吗', () => {
     expect(links[4]?.textContent).toContain('整理待办');
     expect(links[4]?.textContent).toContain('这里配指挥官用的模型');
     expect(links[5]?.textContent).toContain('提需求');
+    expect(links[6]?.textContent).toContain('指挥官');
     expect(screen.getByText('在对话里做，不选路', { exact: false })).toBeTruthy();
     // 对题是用途那一排里只读的一项，说明在悬停里，不另占一行（#1914 第 4 轮）
     const scope = document.querySelector('[data-tab-note]');
@@ -63,7 +64,7 @@ describe('路由页：每一层现在活着吗', () => {
       expect(screen.queryByText(gone)).toBeNull();
     }
     // 页头一句汇总（#1914）：派得出去几个；不知道、派不出去是 0 就不写（红灯数为 0 不显示红），算的时刻在悬停里
-    expect(screen.getByText('6 个派得出去')).toBeTruthy();
+    expect(screen.getByText('7 个派得出去')).toBeTruthy();
     expect(screen.queryByText(/个不知道/)).toBeNull();
     expect(screen.queryByText(/个派不出去/)).toBeNull();
     expect(document.querySelector('[data-routing-summary]')?.getAttribute('title')).toMatch(/现算$/);

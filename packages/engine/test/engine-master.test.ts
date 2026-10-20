@@ -193,6 +193,7 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
       dailyBrief: never,
       e2eQuarantine: never,
       parkedRetry: never,
+      parkTriage: never,
     } as unknown as EngineJobs;
   };
   const client = { workflow: { start: async () => ({}), getHandle: () => ({}) } } as never;
@@ -242,7 +243,8 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
     expect(count.hourly).toBeGreaterThanOrEqual(1);
     expect(count.watchdog).toBeGreaterThanOrEqual(1);
     const skippedJobs = new Set(r.skipped.map((s) => s.jobId));
-    expect([...skippedJobs].sort()).toEqual(['intake']);
+    // 拉单和指挥官会话（#3294 第 2 片）都要起模型会话，总开关关着不跑
+    expect([...skippedJobs].sort()).toEqual(['intake', 'park-triage']);
     for (const s of r.skipped) expect(s.why).toContain('总开关');
   });
 
@@ -262,7 +264,8 @@ describe('闸门测试：总开关关着，跑一轮所有定时任务', () => {
       .filter((j) => j.needsMaster)
       .map((j) => j.id)
       .sort();
-    expect(flagged).toEqual(['intake']);
+    // 拉单和指挥官会话（park-triage）要起模型会话才标；探针、对账这些看家检查一个都不标
+    expect(flagged).toEqual(['intake', 'park-triage']);
   });
 
   it('【故意造出的失败】总开关读不到（闸按关算）：拉单照样不跑；记「跳过」没记上也只记日志，不停掉定时', async () => {
