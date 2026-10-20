@@ -24,7 +24,7 @@ import {
   waitUntil,
 } from './helpers.ts';
 import { DiagnosticOutput, SyntheticHistoryDiagnostics } from './history-diagnostics.ts';
-import { scripted } from './task-script.ts';
+import { OK_SEGMENT, scripted } from './task-script.ts';
 
 // #3413：PR #3412 首轮完整 CI（workflow run 39392992046 / job 118528847472，head
 // d45207791e21faa6c7c166f5023b49fe18f21264，CI merge 71652455b385751c413650a5c9c99ce5d5a2032a，
@@ -382,9 +382,18 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
   });
 
   it('same run reconstructs business receipts after worker replacement, then accepts one new request', async () => {
+    let segmentsDone = 0;
     const env = testEnvironment(),
       w = world(),
-      { tasks, calls } = scripted(),
+      { tasks, calls } = scripted({
+        // 记下活动函数已经返回：length 在函数开头就加。本地负载复现（#3413）里放弃紧跟第二段调度发出，
+        // 那一个 workflow task 要取消的 runSegment 刚被测试服务端记完成，完成被拒 ACTIVITY_UNKNOWN，
+        // 之后服务端不再派也不判超时，result() 一直等到原 60 秒。
+        segment: async () => {
+          segmentsDone += 1;
+          return OK_SEGMENT;
+        },
+      }),
       taskQueue = `handback-${randomUUID()}`;
     let h: WorkflowHandle | undefined, r: PushHandbackRequest | undefined;
     tasks.readPushHandbackPreflight = async () => ({ outcome: 'unknown', code: 'first_observation' });
@@ -433,6 +442,8 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
         ).toBe('handed_back');
         scopeFor(handle).mark('replacement:await-second-segment');
         await waitUntil(() => calls.segment.length === 2, 'new bounded segment after worker replacement');
+        scopeFor(handle).mark('replacement:await-second-segment-returned');
+        await waitUntil(() => segmentsDone === 2, 'second segment activity returned');
         await abandon(handle, 'replacement:abandon-signal-and-result');
       },
       { tasks, taskQueue, maxCachedWorkflows: 0 },
