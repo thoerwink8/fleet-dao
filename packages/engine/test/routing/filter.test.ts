@@ -526,6 +526,19 @@ describe('已选定、还没开工的也占位子（一批任务同时选路）'
     expect(blocks[0]?.text).toBe('池a并发满了（已经有 5 个（在跑 3 个、已选定还没开工 2 个），上限 5 个）');
     expect(codes(route('a', { inFlight: 3, reserved: 1 }))).toEqual([]);
   });
+
+  it('用途 commander（法国指挥官）在名额判断里让位：动手会话占满 5/5 仍能派，到 6 才等空位', () => {
+    const commander = ctx({ stage: 'commander' });
+    const full = route('a', { inFlight: 5, reserved: 0, blockers: ['no-slot'] });
+    expect(codes(full)).toContain('no-slot');
+    expect(codes(full, commander)).not.toContain('no-slot');
+    expect(codes(route('a', { inFlight: 4, reserved: 1, blockers: ['no-slot'] }), commander)).not.toContain(
+      'no-slot',
+    );
+    expect(codes(route('a', { inFlight: 5, reserved: 1, blockers: ['no-slot'] }), commander)).toContain(
+      'no-slot',
+    );
+  });
 });
 
 describe('避开', () => {
