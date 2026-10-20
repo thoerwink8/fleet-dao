@@ -26,6 +26,8 @@ export const ROUTING_PURPOSES = [
   { purpose: 'groom', label: '整理待办', aside: true },
   // 驾驶舱「提需求」的指挥官会话（母单 #2047 第 C 片）：和人聊需求、写草稿，不是流程里的一段
   { purpose: 'intake-chat', label: '提需求', aside: true },
+  // 法国指挥官会话（母单 #3294 第 2 片）：看停下的任务、交裁决，引擎核了再执行。「指派指挥官」的入口就是路由页这一行
+  { purpose: 'commander', label: '指挥官', aside: true },
 ] as const satisfies readonly RoutingPurpose[];
 
 export type RoutingPurposeId = (typeof ROUTING_PURPOSES)[number]['purpose'];

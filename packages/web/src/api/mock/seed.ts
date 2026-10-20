@@ -1593,6 +1593,7 @@ export function createSeed(now: number): MockState {
     { key: 'judge.dailyCallLimit', value: null, version: 0 },
     { key: 'engine.soloPaused', value: null, version: 0 },
     { key: 'engine.flowMode', value: null, version: 0 },
+    { key: 'engine.commander', value: null, version: 0 },
     {
       key: 'engine.quotaReserve',
       value: {},
@@ -1861,6 +1862,8 @@ export function createSeed(now: number): MockState {
       groom: ['sonnet-5', 'opus-5.5'],
       // 提需求的指挥官会话（#2061）：默认 Sonnet，人在对话里能换 Opus
       'intake-chat': ['sonnet-5', 'opus-5.5'],
+      // 法国指挥官会话（#3294 第 2 片）：默认 grok-4.7 在前；路由页这一行就是「指派指挥官」的入口
+      commander: ['grok-4.7', 'sonnet-5', 'opus-5.5'],
     },
     routing: {
       'opus-5.5': ['r-ca-opus', 'r-cb-opus', 'r-rl-opus'],

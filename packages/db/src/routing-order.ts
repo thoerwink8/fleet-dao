@@ -441,6 +441,7 @@ const PURPOSE_WORD: Record<StageKind, string> = {
   judge: '判断',
   groom: '整理待办',
   'intake-chat': '提需求',
+  commander: '指挥官',
 };
 
 /** 加进 / 移出 / 改档位共用的锁命名空间，和换位置那把锁分开。 */

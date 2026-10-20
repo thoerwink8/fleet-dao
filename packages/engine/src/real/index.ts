@@ -117,6 +117,7 @@ import { readMergeWaitChecks } from './merge-wait-checks.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
+import { parkTriageJob } from './park-triage.ts';
 import { parkedRetryJob } from './parked-retry.ts';
 import type { AssignedProber } from './pick-then-probe.ts';
 import {
@@ -1342,6 +1343,21 @@ export function realPortsFromEnv(
     pickRoute: real.ports.pickRoute,
     sessions: oneShots,
     probe: probeAssigned,
+  });
+  // 法国指挥官会话（#3294 第 2 片）：停下的单交选路用途 commander 的模型看，会话和整理待办同一段起法（real/read-only-session.ts），
+  // 没有 GitHub 令牌；裁决经白名单核过，继续 / 放弃发信号、重做走 redoTask、拆单开子单，都在 real/park-triage.ts 的引擎代码里
+  jobs.parkTriage = parkTriageJob({
+    db,
+    gh,
+    trees,
+    exec,
+    tmpDir: join(config.stateDir, 'tmp'),
+    spawner: segmentSpawner,
+    pickRoute: real.ports.pickRoute,
+    sessions: oneShots,
+    probe: probeAssigned,
+    temporal: wakeClient,
+    taskQueue: temporal.taskQueue,
   });
   // 驾驶舱「提需求」的指挥官会话（#2061，母单 #2047 第 C 片）：和整理待办同一条路（选路用途 intake-chat、主线的只读检出、
   // 同一份 Spawner、登记进一次性会话清单），多轮 --resume 续，闲置 30 分钟收掉；会话没有 GitHub 令牌
