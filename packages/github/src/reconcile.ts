@@ -130,8 +130,24 @@ type ScanCursor = Record<string, string>;
 interface ResumeState {
   newestAt: string;
   cursor: ScanCursor;
+  /**
+   * 前几轮已查到、还没重投成的失败投递（超出一次的重投名额、或重投失败的）。续扫不会再翻回那一段，所以连同位置一起带着，
+   * 下一轮并回待重投名单；这样名额不够、重投失败也不必停住不存位置，水位照样能往前翻。
+   */
+  pending: PendingDelivery[];
 }
-const ResumeStateSchema = z.object({ newestAt: z.string(), cursor: z.record(z.string(), z.string()) });
+interface PendingDelivery {
+  guid: string;
+  id: string;
+  deliveredAt: string;
+}
+const ResumeStateSchema = z.object({
+  newestAt: z.string(),
+  cursor: z.record(z.string(), z.string()),
+  pending: z.array(z.object({ guid: z.string(), id: z.string(), deliveredAt: z.string() })).default([]),
+});
+/** 续扫位置里最多带多少个待重投的；超出就不存位置（宁可从头翻，也不丢）。 */
+const MAX_PENDING_DELIVERIES = 2000;
 /** 同一个 since 最多存几个续扫位置（一轮存一个，翻完整个回看窗口也用不了几个）。 */
 const MAX_RESUME_SLOTS = 1000;
 const resumeKey = (since: Date, n: number): string =>
@@ -321,6 +337,10 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
       } catch (err) {
         return { outcome: 'unscanned', checked, recovered: 0, why: `读投递日志失败：${errMessage(err)}` };
       }
+      // 前几轮留下的待重投：这一轮翻到的新尝试优先，没见过的并回来；这一轮见到成功的（含重投后成功的）就不用补了
+      for (const p of slot.state?.pending ?? []) {
+        if (!failed.has(p.guid)) failed.set(p.guid, { id: p.id, deliveredAt: p.deliveredAt });
+      }
       const neverOk = [...failed].filter(([guid]) => !ok.has(guid));
       let stored: ReadonlySet<string> = new Set();
       try {
@@ -345,6 +365,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
       const limit = options.maxRedeliveries ?? 50;
       let recovered = 0;
       const errors: string[] = [];
+      const redelivered = new Set<string>();
       for (const [guid, { id }] of todo.slice(0, limit)) {
         try {
           await client.request({
@@ -353,26 +374,30 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
             auth: { as: 'app', role: 'engine' },
           });
           recovered += 1;
+          redelivered.add(guid);
         } catch (err) {
           errors.push(`${guid}：${errMessage(err)}`);
         }
       }
       if (todo.length > 0) log.warn('有投递一直没成功，已重投', { failed: todo.length, recovered });
       const attempted = Math.min(todo.length, limit);
-      // 没翻到 since：存下续扫位置，下一轮从它接着往更早翻（水位不动，这一步仍是 partial）。这一轮重投没做完（名额不够、
-      // 有失败的）就不存：这一段里没补上的，下一轮得还能看到
+      // 没翻到 since：存下续扫位置，下一轮从它接着往更早翻（水位不动，这一步仍是 partial）。这一轮没重投成的（名额不够、
+      // 重投失败）随位置带到下一轮继续补：不然要么丢了，要么只能每轮从头翻同一截
+      const pending = todo
+        .filter(([guid]) => !redelivered.has(guid))
+        .map(([guid, d]) => ({ guid, id: d.id, deliveredAt: d.deliveredAt }));
       let resumeSaved = false;
       if (
         !scanDone &&
         nextCursor &&
         cursorSavable &&
         seen.newest !== null &&
-        todo.length <= limit &&
-        errors.length === 0
+        pending.length <= MAX_PENDING_DELIVERIES
       ) {
         resumeSaved = await saveResume(since, slot.n, {
           newestAt: seen.newest,
           cursor: nextCursor,
+          pending,
         });
       }
       const notes = [

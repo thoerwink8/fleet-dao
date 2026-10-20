@@ -313,6 +313,47 @@ describe('对账与补漏', () => {
     expect([...slots.rows.keys()].filter((k) => k.includes('deliveries-resume'))).toHaveLength(3);
   });
 
+  it('翻到页数上限、失败的比重投名额多或重投失败：照样存续扫位置，没补上的随位置带到下一轮，不重翻同一截也不丢', async () => {
+    const { gh, fake } = setup();
+    // 300 条 = 3 页；一轮只翻 2 页、只许重投 1 个。第 1 页两个失败，第 2 页一个失败（其 id 重投会被拒一次）
+    fake.deliveries = deliveryLog(300, {
+      10: { guid: 'g-a', status_code: 502 },
+      20: { guid: 'g-b', status_code: 502 },
+      150: { guid: 'g-c', status_code: 502 },
+    });
+    let rejectC = true;
+    fake.before.push((req) =>
+      rejectC && req.path === `/app/hook/deliveries/${300 - 150}/attempts`
+        ? json(422, { message: 'Validation Failed' })
+        : undefined,
+    );
+    const { intake } = fakeIntake(() => true);
+    const rec = gh.reconciler({
+      intake,
+      pollDeliveryId,
+      storedDeliveries: async () => new Set(),
+      maxDeliveryPages: 2,
+      maxRedeliveries: 1,
+    });
+    const since = new Date('2026-09-25T09:00:00Z');
+    const pageNumbers = () =>
+      fake.calls('GET', /\/app\/hook\/deliveries$/).map((r) => r.query.get('page') ?? '1');
+
+    // 最老的先补：g-c（id 150）重投被拒；g-a、g-b 超出名额，一起留到下一轮
+    const r1 = await rec.redeliverFailed(since);
+    expect(r1).toMatchObject({ outcome: 'failed', recovered: 0 });
+    expect(r1.why).toContain('续扫位置已存');
+    expect(pageNumbers()).toEqual(['1', '2']);
+
+    // 第二轮不再重翻第 2 页，直接接第 3 页；待重投的三个轮流补（一轮一个，最老的先）
+    rejectC = false;
+    const r2 = await rec.redeliverFailed(since);
+    expect(pageNumbers().slice(2)).toEqual(['1', '3']);
+    expect(r2).toMatchObject({ outcome: 'partial', recovered: 1 });
+    expect(fake.redelivered).toEqual([150]);
+    expect(r2.why).toContain('还有 2 个没重投');
+  });
+
   it('续扫位置存不进去、读不出来：退回从头翻，不挡对账，也不报 ok', async () => {
     const { gh, fake, ledger } = setup();
     fake.deliveries = deliveryLog(300, { 5: { guid: 'g-x', status_code: 502 } });
