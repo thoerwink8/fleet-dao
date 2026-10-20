@@ -4,8 +4,10 @@
 import { IDLE_RUNNING_STALE_MS } from '@fleet-dao/core/idle-running';
 import { SELF_CHECK_ACTIVITY_MS, SELF_CHECK_DOING } from '@fleet-dao/core/self-check-budget';
 import {
+  COMMANDER_AUDIT_TARGET,
   LOCAL_ORPHANS_SETTING,
   notificationDeliveries,
+  recordEngineAudit,
   repos,
   runs,
   settings,
@@ -96,6 +98,67 @@ describe('fleet-api attention', () => {
     });
     expect(result.runningIdle.rows.find((r) => r.issueNumber === 7)?.updatedAt).toBeNull();
   });
+
+  it('attention 带当前停下任务的指挥官处理统计', async () => {
+    const [repo] = await t.db
+      .insert(repos)
+      .values({ owner: 'o', name: 'stalled', testCommand: 'pnpm check' })
+      .returning();
+    if (!repo) throw new Error('repo fixture missing');
+    const [task] = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 8,
+        title: '停下的单',
+        rawRequest: '停下',
+        requestedBy: 'test',
+        priority: 1,
+        state: 'stalled',
+        executor: 'engine',
+      })
+      .returning();
+    if (!task) throw new Error('task fixture missing');
+    await upsertAlert(t.db, {
+      dedupeKey: 'task-stalled:park:1',
+      level: 'alert',
+      taskId: task.id,
+      title: '停下',
+      body: '停着',
+      link: '/tasks',
+    });
+    const result = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
+    expect(result.commander).toEqual({
+      stalled: 1,
+      handled: 0,
+      forHuman: 1,
+      line: '停下 1 张，指挥官处理 0 张，留给人 1 张',
+    });
+
+    // 指挥官认领了这一次停下（commander.claim 记的是工作流编号 + 第几次停下）：算进「指挥官处理」
+    await recordEngineAudit(t.db, {
+      action: 'commander.claim',
+      target: COMMANDER_AUDIT_TARGET,
+      actorId: 'engine:commander',
+      after: { taskId: task.id, workflowId: 'task-stalled', parkSeq: 1 },
+      ok: true,
+    });
+    const claimed = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
+    expect(claimed.commander.line).toBe('停下 1 张，指挥官处理 1 张，留给人 0 张');
+    // 别的工作流的认领不串到这一张；--json 打出来的也是同一句
+    await recordEngineAudit(t.db, {
+      action: 'commander.claim',
+      target: COMMANDER_AUDIT_TARGET,
+      actorId: 'engine:commander',
+      after: { taskId: task.id, workflowId: 'other', parkSeq: 1 },
+      ok: true,
+    });
+    const json = JSON.parse((await attentionJson({ db: t.db, now: () => new Date(), env: {} })).text) as {
+      commander: { line: string };
+    };
+    expect(json.commander.line).toBe('停下 1 张，指挥官处理 1 张，留给人 0 张');
+  });
+
   it('参数：只认 --json', () => {
     expect(() => parseAttentionArgs(['--json'])).not.toThrow();
     expect(() => parseAttentionArgs([])).toThrow(/--json/);

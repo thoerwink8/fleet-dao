@@ -25,6 +25,7 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { CARPOOL_WATCH_JOB } from '../src/jobs/carpool-watch.ts';
+import { PARK_TRIAGE_JOB } from '../src/jobs/park-triage.ts';
 import {
   failedTrainAlertCleared,
   judgeReleaseAttention,
@@ -116,6 +117,21 @@ const watchdogRuns = async () =>
 const firstLine = (body: string | undefined) => body?.split('\n')[0];
 
 describe('看门狗一轮（真库）', () => {
+  it('park-triage 登记为每 10 分钟跑、60 分钟不新鲜；停了由现有定时任务项报警', async () => {
+    expect(PARK_TRIAGE_JOB).toMatchObject({
+      id: 'park-triage',
+      schedule: '每 10 分钟（7 分起）',
+      expectEveryMinutes: 60,
+    });
+    await register(PARK_TRIAGE_JOB);
+    const ok = await run(PARK_TRIAGE_JOB.id, -120, { outcome: 'ok', scanned: 1, found: 0 });
+    const result = await runWatchdogJob(deps());
+    expect(result).toMatchObject({ outcome: 'ok', scanned: 1, found: 1 });
+    expect((await openAlerts()).map((a) => a.dedupeKey)).toEqual([
+      `watchdog:job:${PARK_TRIAGE_JOB.id}:after-${ok}`,
+    ]);
+  });
+
   it(
     '【故意造出的失败】停了（stale）：上次跑成过了期望间隔，推一条卡住报警（写上次跑成的时刻，不写「多久了」），点进去是定时任务页；再看一轮没变不改卡',
     async () => {
