@@ -157,6 +157,39 @@ interface ParkIdentityWire {
 export const parkLabel = (id: Pick<ParkIdentityWire, 'parks' | 'generation' | 'continued'>): string =>
   `${id.parks}.${id.generation}.${id.continued}`;
 
+const isCount = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0;
+
+/**
+ * 工作流回的回执要和请求、被核的停点逐项对上才算成功：头、base 是请求的、预算是停点的原预算、
+ * 行数是非负整数、原始行数是停下时的那个数、计量加已核生成等于原始行数且计量不超预算。对不上（含空对象）一律返回 null，调用方当未知，不当放行。
+ */
+export function checkedReceipt(
+  g: unknown,
+  want: { head: string; base: string; rawAddedLines: number; budget: number },
+): LineBudgetRemeasureReceiptView | null {
+  if (typeof g !== 'object' || g === null) return null;
+  const r = g as Partial<LineBudgetRemeasureReceiptView>;
+  if (r.head !== want.head || r.base !== want.base || r.budget !== want.budget) return null;
+  if (r.rawAddedLines !== want.rawAddedLines) return null;
+  if (!isCount(r.rawAddedLines) || !isCount(r.verifiedGeneratedLines) || !isCount(r.chargeableAddedLines))
+    return null;
+  if (
+    r.chargeableAddedLines > r.budget ||
+    r.chargeableAddedLines + r.verifiedGeneratedLines !== r.rawAddedLines
+  )
+    return null;
+  if (typeof r.reason !== 'string') return null;
+  return {
+    head: r.head,
+    base: r.base,
+    rawAddedLines: r.rawAddedLines,
+    verifiedGeneratedLines: r.verifiedGeneratedLines,
+    chargeableAddedLines: r.chargeableAddedLines,
+    budget: r.budget,
+    reason: r.reason,
+  };
+}
+
 interface RemeasureClientLike {
   connection: TemporalClientLike['connection'];
   workflow: {
@@ -248,25 +281,25 @@ export function createTemporalLineBudgetRemeasure(
         detail?: string;
       };
       const where = current ? { park, current } : { park };
-      if (
-        (r.outcome === 'eligible' || r.outcome === 'resumed' || r.outcome === 'already_resumed') &&
-        r.receipt
-      ) {
-        const g = r.receipt;
-        return {
-          ok: true,
-          outcome: r.outcome,
-          park,
-          receipt: {
-            head: g.head,
-            base: g.base,
-            rawAddedLines: g.rawAddedLines,
-            verifiedGeneratedLines: g.verifiedGeneratedLines,
-            chargeableAddedLines: g.chargeableAddedLines,
-            budget: g.budget,
-            reason: g.reason,
-          },
-        };
+      // 预检只收 eligible，执行只收 resumed / already_resumed；回执逐项对上请求和停点，否则按未知处理。
+      const outcomeFits =
+        request.mode === 'check'
+          ? r.outcome === 'eligible'
+          : r.outcome === 'resumed' || r.outcome === 'already_resumed';
+      if (outcomeFits) {
+        const receipt = checkedReceipt(r.receipt, {
+          head: request.head,
+          base: request.base,
+          rawAddedLines: identity.rawAddedLines,
+          budget: identity.budget,
+        });
+        if (receipt)
+          return {
+            ok: true,
+            outcome: r.outcome as 'eligible' | 'resumed' | 'already_resumed',
+            park,
+            receipt,
+          };
       }
       if (r.outcome === 'refused') {
         return { ok: false, reason: String(r.reason), detail: String(r.detail ?? ''), ...where };
@@ -292,16 +325,13 @@ export function createTemporalLineBudgetRemeasure(
       } catch (err) {
         // send 把「已结束」包成 WorkflowGoneError，原始错误在 cause 上。
         if (!(err instanceof WorkflowGoneError) && !isGone(err)) throw err;
-        const receipt = resumed.receipt;
-        if (
-          receipt &&
-          receipt.head === request.head &&
-          receipt.base === request.base &&
-          Number.isSafeInteger(receipt.rawAddedLines) &&
-          Number.isSafeInteger(receipt.verifiedGeneratedLines) &&
-          Number.isSafeInteger(receipt.chargeableAddedLines) &&
-          Number.isSafeInteger(receipt.budget)
-        ) {
+        const receipt = checkedReceipt(resumed.receipt, {
+          head: request.head,
+          base: request.base,
+          rawAddedLines: resumed.identity.rawAddedLines,
+          budget: resumed.identity.budget,
+        });
+        if (receipt) {
           return { ok: true, outcome: 'already_resumed', park, receipt };
         }
         return {

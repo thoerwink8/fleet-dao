@@ -718,4 +718,86 @@ describe('Temporal 重评适配（#3249）', () => {
     );
     expect(odd).toMatchObject({ ok: false, reason: 'unknown' });
   });
+
+  it('回执不是空对象、绑错头/base、数字对不上、结果和模式不符：一律按未知，不当成功', async () => {
+    const status = { lineBudgetPark: { version: 1, identity } };
+    const bad: [string, unknown][] = [
+      ['空回执', { outcome: 'resumed', receipt: {} }],
+      ['错 head', { outcome: 'resumed', receipt: { ...RECEIPT, head: 'f'.repeat(40) } }],
+      ['错 base', { outcome: 'resumed', receipt: { ...RECEIPT, base: 'e'.repeat(40) } }],
+      ['原预算被改', { outcome: 'resumed', receipt: { ...RECEIPT, budget: 99999 } }],
+      [
+        '原始行数不是停下时的',
+        { outcome: 'resumed', receipt: { ...RECEIPT, rawAddedLines: 100, verifiedGeneratedLines: 0 } },
+      ],
+      [
+        '计量仍超预算',
+        {
+          outcome: 'resumed',
+          receipt: { ...RECEIPT, verifiedGeneratedLines: 0, chargeableAddedLines: 9550 },
+        },
+      ],
+      ['计量加生成对不上原始', { outcome: 'resumed', receipt: { ...RECEIPT, chargeableAddedLines: 1 } }],
+      [
+        '负数',
+        {
+          outcome: 'resumed',
+          receipt: { ...RECEIPT, chargeableAddedLines: -1, verifiedGeneratedLines: 9551 },
+        },
+      ],
+      [
+        '非整数',
+        {
+          outcome: 'resumed',
+          receipt: { ...RECEIPT, chargeableAddedLines: 1512.5, verifiedGeneratedLines: 8037.5 },
+        },
+      ],
+      ['缺 reason', { outcome: 'resumed', receipt: { ...RECEIPT, reason: undefined } }],
+      ['执行拿到 eligible', { outcome: 'eligible', receipt: RECEIPT }],
+    ];
+    for (const [name, update] of bad) {
+      const got = await createTemporalLineBudgetRemeasure(client(status, update).client)(request);
+      expect(got, name).toMatchObject({ ok: false, reason: 'unknown' });
+    }
+    const check = await createTemporalLineBudgetRemeasure(
+      client(status, { outcome: 'resumed', receipt: RECEIPT }).client,
+    )({ ...request, mode: 'check' });
+    expect(check, '预检拿到 resumed').toMatchObject({ ok: false, reason: 'unknown' });
+    const eligible = await createTemporalLineBudgetRemeasure(
+      client(status, { outcome: 'eligible', receipt: RECEIPT }).client,
+    )({ ...request, mode: 'check', park: undefined });
+    expect(eligible).toMatchObject({ ok: true, outcome: 'eligible' });
+  });
+
+  it('工作流已结束时查询里的回执同样逐项核对：错头、数字对不上都读不全', async () => {
+    const gone = new Error('workflow execution already completed');
+    gone.name = 'WorkflowNotFoundError';
+    for (const receipt of [
+      { ...RECEIPT, head: 'f'.repeat(40) },
+      { ...RECEIPT, chargeableAddedLines: 9999 },
+      { ...RECEIPT, budget: 1 },
+      {},
+    ]) {
+      const got = await createTemporalLineBudgetRemeasure({
+        connection: { withDeadline: async <R>(_d: number | Date, fn: () => Promise<R>) => fn() },
+        workflow: {
+          getHandle: () => ({
+            async query() {
+              return {
+                lineBudgetPark: {
+                  version: 1,
+                  identity: null,
+                  resumed: { identity, head: HEAD, base: BASE, receipt },
+                },
+              };
+            },
+            async executeUpdate() {
+              throw gone;
+            },
+          }),
+        },
+      })(request);
+      expect(got).toMatchObject({ ok: false, reason: 'unknown' });
+    }
+  });
 });
