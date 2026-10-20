@@ -201,6 +201,8 @@ export interface RealPorts {
   ports: EnginePorts;
   /** 工人起来接活之前收上一轮留下的会话 scope、临时目录、没收场的 runs 行、预占的名额（real/orphan-reap.ts）；回收了几个 scope。 */
   reapOrphanSessions(): Promise<number>;
+  /** 并主线冲突里机械可解的引擎自己解（#3428）：任务活动，和端口共用同一份 GitHub 推送装配。 */
+  resolveConflictMechanically: NonNullable<EngineTasks['resolveConflictMechanically']>;
 }
 
 /** _tmp 归了 root 时，冷验收自己 mkdir 会 EACCES。经已放行的帮手把这一层改回引擎用户（不递归）。 */
@@ -292,6 +294,7 @@ export function createRealPorts(deps: RealPortsDeps): RealPorts {
   };
   return {
     ports,
+    resolveConflictMechanically: github.resolveConflictMechanically,
     reapOrphanSessions: orphanReaper({
       db: deps.db,
       trees: deps.trees,
@@ -1211,6 +1214,7 @@ export function realPortsFromEnv(
   };
   const tasks: EngineTasks = {
     ...taskActivities,
+    resolveConflictMechanically: real.resolveConflictMechanically,
     readPushHandbackPreflight: createPushHandbackPreflight(pushHandbackDeps),
     async readCiPolicy(input) {
       if (input?.schemaVersion !== 1 || !input.repo?.owner || !input.repo?.name) {
