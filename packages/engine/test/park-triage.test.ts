@@ -2,20 +2,24 @@
 // 假依赖测任务本身：选哪些单、护栏（每次停下一次、每天上限、开关、没配模型报警）、白名单放行/拒绝、诊断文字带进提醒；
 // 真装配的开关、操作记录名下在 real/park-triage.test.ts。
 import { describe, expect, it, vi } from 'vitest';
-import { COMMANDER_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
+import { COMMANDER_ACTOR, COMMANDER_LEGACY_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
 import type { SpinRound } from '../src/decisions/spin.ts';
 import type { GroomSessionOutcome } from '../src/jobs/groom.ts';
 import type { IntakeRepo } from '../src/jobs/intake.ts';
 import {
+  COMMANDER_AUDIT_ACT,
   COMMANDER_AUDIT_CLAIM,
+  COMMANDER_AUDIT_RETRY,
   type CommanderNotice,
+  type OpenParkAlert,
   PARK_TRIAGE_DAILY_CAP,
+  PARK_TRIAGE_SESSION_TRIES,
   type ParkTriageDeps,
   runParkTriageJob,
   triageParkedTasks,
 } from '../src/jobs/park-triage.ts';
 import type { ParkedRetryRow, ParkedSnapshot } from '../src/jobs/parked-retry.ts';
-import type { ContinueCommand, ParkKind } from '../src/task-contract.ts';
+import { type ContinueCommand, PARK_CODE_ROUTE_SWITCH, type ParkKind } from '../src/task-contract.ts';
 
 const NOW = new Date('2026-10-19T12:00:00Z');
 const minutesAgo = (m: number) => new Date(NOW.getTime() - m * 60_000).toISOString();
@@ -81,7 +85,8 @@ function rig(
     rounds?: SpinRound[] | null;
     enabled?: boolean;
     configured?: boolean;
-    audits?: { at: Date; action: string; after: unknown }[];
+    audits?: { at: Date; action: string; after: unknown; ok?: boolean }[];
+    openPark?: OpenParkAlert | null;
     over?: Partial<ParkTriageDeps>;
   } = {},
 ) {
@@ -91,21 +96,38 @@ function rig(
     abandoned: [] as string[],
     redone: [] as string[],
     opened: [] as { title: string; body: string; labels: string[] }[],
-    acts: [] as { action: string; ok: boolean }[],
+    labels: [] as { issue: number; label: string }[],
+    acts: [] as { action: string; ok: boolean; source?: string }[],
     notices: [] as CommanderNotice[],
     audits: opts.audits ?? [],
     deps: undefined as unknown as ParkTriageDeps,
   };
-  const answer = opts.answer ?? verdict('leave');
+  const answer = opts.answer ?? verdict('leave', { leaveReason: 'new-money' });
   r.deps = {
     enabled: async () => (opts.enabled === false ? { on: false, why: '设置关着' } : { on: true }),
     purposeConfigured: async () => opts.configured !== false,
     resolveNoModelAlert: vi.fn(async () => {}),
     tasks: async () => [ROW],
     status: async () => opts.snap ?? snap('rounds'),
+    openPark: async () => opts.openPark ?? null,
     audits: async () => r.audits,
-    claim: async ({ workflowId, park }) => {
-      r.audits.push({ at: NOW, action: COMMANDER_AUDIT_CLAIM, after: { workflowId, parkSeq: park.seq } });
+    claim: async ({ workflowId, park, kind }) => {
+      r.audits.push({
+        at: NOW,
+        action: COMMANDER_AUDIT_CLAIM,
+        after: { workflowId, parkSeq: park.seq, kind },
+      });
+    },
+    retry: async ({ workflowId, park, attempt }) => {
+      r.audits.push({
+        at: NOW,
+        action: COMMANDER_AUDIT_RETRY,
+        after: { workflowId, parkSeq: park.seq, attempt },
+        ok: false,
+      });
+    },
+    addLabel: async (_repo, issue, label) => {
+      r.labels.push({ issue, label });
     },
     detail: async () => '动手 3 轮仍没过',
     rounds: async () => (opts.rounds === undefined ? PROGRESSING : opts.rounds),
@@ -132,7 +154,7 @@ function rig(
       return { number: 4000 + r.opened.length };
     },
     audit: async (e) => {
-      r.acts.push({ action: e.action, ok: e.ok });
+      r.acts.push({ action: e.action, ok: e.ok, ...(e.source ? { source: e.source } : {}) });
     },
     notify: async (n) => {
       r.notices.push(n);
@@ -197,14 +219,46 @@ describe('护栏', () => {
     expect(r.sessions).toHaveLength(0);
   });
 
-  it('会话没跑成也算处理过：提醒写明交人、不再来第二次', async () => {
-    const r = rig({ answer: { ok: false, why: '会话超时' } });
-    const out = await triageParkedTasks(r.deps);
-    expect(out.left).toHaveLength(1);
-    expect(r.notices[0]?.body).toContain('会话超时');
-    expect(r.notices[0]?.body).toContain('不会再自动来第二次');
-    await triageParkedTasks(r.deps);
-    expect(r.sessions).toHaveLength(1);
+  it('选不到路由（会话没起成）不消耗这一次停下：下一轮同一 parkSeq 仍进候选；满 3 次按默认动作执行', async () => {
+    const why = '选不到路由（用途 commander）：拼车并发满了（4/4）';
+    const r = rig({ answer: { ok: false, why } });
+    const first = await triageParkedTasks(r.deps);
+    expect(first.retrying).toEqual([
+      { ref: 'thoerwink8/fleet-dao#3296', why: `第 1 次没起成：指挥官会话没跑成：${why}` },
+    ]);
+    expect(first.left).toEqual([]);
+    expect(r.notices[0]?.body).toContain('拼车并发满了');
+    expect(r.notices[0]?.body).toContain('不算处理过');
+    expect(r.audits.filter((a) => a.action === COMMANDER_AUDIT_RETRY)).toHaveLength(1);
+    // 下一轮：同一次停下（parkSeq 2）还是候选，又起了一次会话
+    const second = await triageParkedTasks(r.deps);
+    expect(second.candidates).toBe(1);
+    expect(r.sessions).toHaveLength(2);
+    expect(r.redone).toHaveLength(0);
+    // 第 3 次还没起成：按轮数用尽的默认动作（重做）执行，之后不再看
+    const third = await triageParkedTasks(r.deps);
+    expect(r.sessions).toHaveLength(PARK_TRIAGE_SESSION_TRIES);
+    expect(third.retrying).toEqual([]);
+    expect(third.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'redo', source: 'default' }]);
+    expect(r.redone).toEqual([WF]);
+    expect(r.acts).toEqual([{ action: 'redo', ok: true, source: 'default' }]);
+    expect(r.notices.at(-1)?.body).toContain(`第 ${PARK_TRIAGE_SESSION_TRIES} 次没起成`);
+    expect((await triageParkedTasks(r.deps)).candidates).toBe(0);
+  });
+
+  it('回答里找不到裁决清单、主线头没读到：也算没起成，下一轮再看', async () => {
+    const bad = rig({ answer: '我看完了，但没写清单' });
+    expect((await triageParkedTasks(bad.deps)).retrying).toHaveLength(1);
+    expect((await triageParkedTasks(bad.deps)).candidates).toBe(1);
+    const head = rig({
+      over: {
+        mainHead: async () => {
+          throw new Error('GitHub 读不到');
+        },
+      },
+    });
+    expect((await triageParkedTasks(head.deps)).retrying[0]?.why).toContain('没读到主线头');
+    expect((await triageParkedTasks(head.deps)).candidates).toBe(1);
   });
 
   it(`每天总次数有上限：24 小时内已认领 ${PARK_TRIAGE_DAILY_CAP} 张，不再起会话`, async () => {
@@ -296,10 +350,10 @@ describe('裁决：引擎白名单核过才执行', () => {
   it('轮数用尽·继续：发继续（by 是 engine:commander，带停下编号），记执行，诊断文字带进提醒', async () => {
     const r = rig({ answer: verdict('continue') });
     const out = await triageParkedTasks(r.deps);
-    expect(out.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'continue' }]);
+    expect(out.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'continue', source: 'verdict' }]);
     expect(r.sent[0]).toMatchObject({ by: COMMANDER_ACTOR, parkSeq: 2 });
     expect(r.sent[0]?.widenBudget).toBeUndefined();
-    expect(r.acts).toEqual([{ action: 'continue', ok: true }]);
+    expect(r.acts).toEqual([{ action: 'continue', ok: true, source: 'verdict' }]);
     expect(r.notices[0]).toMatchObject({ level: 'daily', key: `commander:${WF}:park:2` });
     expect(r.notices[0]?.body).toContain('理由：测试里的诊断文字');
     expect(r.notices[0]?.body).toContain('grok-4.7');
@@ -319,14 +373,14 @@ describe('裁决：引擎白名单核过才执行', () => {
     expect(r.notices[0]?.body).toContain('空转判断：没有空转');
   });
 
-  it('额度超预算·同一原因连续失败、没有新提交：判空转，拒绝原样继续，诊断带进提醒', async () => {
+  it('额度超预算·同一原因连续失败、没有新提交：判空转，拒绝原样继续，改按默认动作重做，诊断带进提醒', async () => {
     const r = rig({ snap: snap('quota'), rounds: SPINNING, answer: verdict('continue') });
     const out = await triageParkedTasks(r.deps);
-    expect(out.acted).toEqual([]);
+    expect(out.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'redo', source: 'default' }]);
     expect(r.sent).toHaveLength(0);
-    expect(r.acts).toHaveLength(0);
-    expect(r.notices[0]?.level).toBe('alert');
+    expect(r.redone).toEqual([WF]);
     expect(r.notices[0]?.body).toContain('不许原样继续');
+    expect(r.notices[0]?.body).toContain('默认动作');
     expect(r.notices[0]?.body).toContain('理由：测试里的诊断文字');
   });
 
@@ -350,35 +404,46 @@ describe('裁决：引擎白名单核过才执行', () => {
     await triageParkedTasks(one.deps);
     expect(one.opened).toHaveLength(0);
     expect(one.notices[0]?.body).toContain('2~5');
+    // 拆单不放行：体量超预算的默认动作是照这一版继续推
+    expect(one.sent).toHaveLength(1);
+    expect(one.notices[0]?.body).toContain('照这一版继续推');
   });
 
-  it('改标准、没权限这类人闸：继续、重做、拆单、停掉都不执行，只写诊断建议；留给人放行', async () => {
-    for (const kind of ['standard', 'other'] as const) {
-      for (const action of ['continue', 'redo', 'split', 'stop']) {
-        const r = rig({ snap: snap(kind), answer: verdict(action, { subtasks: SUBS }) });
-        expect((await triageParkedTasks(r.deps)).acted, `${kind}/${action}`).toEqual([]);
-        expect(r.sent.length + r.redone.length + r.abandoned.length + r.opened.length).toBe(0);
-        expect(r.notices[0]?.body).toContain('不放行');
-      }
-      const leave = rig({ snap: snap(kind), answer: verdict('leave') });
-      expect((await triageParkedTasks(leave.deps)).left).toHaveLength(1);
-      expect(leave.notices[0]?.body).toContain('请人看一眼');
+  it('改标准、没权限这类人闸：继续、重做、拆单、停掉都不执行，改按默认动作（改标准贴「本机做」，没权限写卡）', async () => {
+    for (const action of ['continue', 'redo', 'split', 'stop']) {
+      const standard = rig({ snap: snap('standard'), answer: verdict(action, { subtasks: SUBS }) });
+      expect((await triageParkedTasks(standard.deps)).acted, `standard/${action}`).toEqual([]);
+      expect(
+        standard.sent.length + standard.redone.length + standard.abandoned.length + standard.opened.length,
+      ).toBe(0);
+      expect(standard.labels).toEqual([{ issue: 3296, label: '本机做' }]);
+      expect(standard.notices[0]?.body).toContain('不放行');
+      expect(standard.notices[0]?.level).toBe('daily');
+      const other = rig({ snap: snap('other'), answer: verdict(action, { subtasks: SUBS }) });
+      expect((await triageParkedTasks(other.deps)).acted, `other/${action}`).toEqual([]);
+      expect(other.sent.length + other.redone.length + other.abandoned.length + other.opened.length).toBe(0);
+      expect(other.labels).toEqual([]);
+      expect(other.notices[0]).toMatchObject({ level: 'decision', reason: 'human-only' });
+      expect(other.notices[0]?.options?.length).toBeGreaterThanOrEqual(2);
     }
   });
 
-  it('会话交了白名单外的裁决：不执行，提醒写明不在白名单', async () => {
+  it('会话交了白名单外的裁决：不认，按默认动作执行（轮数用尽 → 重做），提醒写明不在白名单', async () => {
     for (const action of ['merge', 'close', 'force-push']) {
       const r = rig({ answer: verdict(action) });
-      expect((await triageParkedTasks(r.deps)).acted, action).toEqual([]);
-      expect(r.sent.length + r.redone.length + r.abandoned.length + r.acts.length).toBe(0);
+      expect((await triageParkedTasks(r.deps)).acted, action).toEqual([
+        { ref: 'thoerwink8/fleet-dao#3296', action: 'redo', source: 'default' },
+      ]);
+      expect(r.sent.length + r.abandoned.length).toBe(0);
+      expect(r.redone).toEqual([WF]);
       expect(r.notices[0]?.body).toContain('不在白名单里');
     }
   });
 
-  it('会话没给裁决、停下编号对不上、对同一张单交了两个：都不执行', async () => {
+  it('会话没给裁决、停下编号对不上、对同一张单交了两个：都不认会话的，按默认动作执行', async () => {
     const none = rig({ answer: fence({ summary: '没看', verdicts: [] }) });
     await triageParkedTasks(none.deps);
-    expect(none.notices[0]?.body).toContain('没给裁决');
+    expect(none.notices[0]?.body).toContain('没给这张单裁决');
     const stale = rig({ answer: verdict('continue', { parkSeq: 1 }) });
     await triageParkedTasks(stale.deps);
     expect(stale.notices[0]?.body).toContain('对不上');
@@ -388,8 +453,9 @@ describe('裁决：引擎白名单核过才执行', () => {
     ];
     const dup = rig({ answer: fence({ summary: '', verdicts: two }) });
     await triageParkedTasks(dup.deps);
-    expect(dup.notices[0]?.body).toContain('只许交一个裁决');
-    expect(none.sent.length + stale.sent.length + dup.sent.length + dup.redone.length).toBe(0);
+    expect(dup.notices[0]?.body).toContain('不止一个裁决');
+    expect(none.sent.length + stale.sent.length + dup.sent.length).toBe(0);
+    expect([...none.redone, ...stale.redone, ...dup.redone]).toEqual([WF, WF, WF]);
   });
 
   it('执行没成（重做被拒）：记一条失败的操作记录，任务不动，提醒写明', async () => {
@@ -399,9 +465,161 @@ describe('裁决：引擎白名单核过才执行', () => {
     });
     expect((await triageParkedTasks(r.deps)).acted).toEqual([]);
     expect(r.acts).toEqual([
-      { action: 'redo', ok: true },
-      { action: 'redo', ok: false },
+      { action: 'redo', ok: true, source: 'verdict' },
+      { action: 'redo', ok: false, source: 'verdict' },
     ]);
     expect(r.notices[0]?.body).toContain('上一代还在跑');
+  });
+});
+
+describe('留给人只剩三种理由类别', () => {
+  it('不带类别的留给人：不认，按这种停法的默认动作执行（轮数用尽 → 重做）', async () => {
+    const r = rig({ answer: verdict('leave') });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'redo', source: 'default' }]);
+    expect(r.redone).toEqual([WF]);
+    expect(r.notices[0]?.body).toContain('要带理由类别');
+    const unsure = rig({ answer: verdict('leave', { leaveReason: '拿不准' }), snap: snap('size') });
+    await triageParkedTasks(unsure.deps);
+    expect(unsure.sent).toHaveLength(1);
+    expect(unsure.labels.length + unsure.redone.length).toBe(0);
+  });
+
+  it('带「掏新钱」类别的留给人：写「要你拍」卡（带会话给的选项和原因），任务不动', async () => {
+    const options = [
+      { label: '开按量计费', detail: '每月多花约 20 美元', recommended: true },
+      { label: '先不开', detail: '这张单先停着' },
+    ];
+    const r = rig({ answer: verdict('leave', { leaveReason: 'new-money', options }) });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.acted).toEqual([]);
+    expect(out.left[0]?.why).toContain('要掏新钱');
+    expect(r.sent.length + r.redone.length + r.abandoned.length + r.opened.length + r.labels.length).toBe(0);
+    expect(r.acts).toEqual([{ action: 'leave', ok: true, source: 'verdict' }]);
+    const card = r.notices[0];
+    expect(card).toMatchObject({ level: 'decision', reason: 'new-money', key: `commander:${WF}:park:2` });
+    expect(card?.options?.map((o) => o.label)).toEqual(['开按量计费', '先不开']);
+    expect(card?.options?.filter((o) => o.recommended !== undefined)).toHaveLength(1);
+  });
+
+  it('「删了找不回」类别没给够选项：照样写卡，用只留言的两项', async () => {
+    const r = rig({ answer: verdict('leave', { leaveReason: 'irreversible' }) });
+    await triageParkedTasks(r.deps);
+    expect(r.notices[0]).toMatchObject({ level: 'decision', reason: 'irreversible-delete' });
+    expect(r.notices[0]?.options).toHaveLength(2);
+    expect(r.sent.length + r.redone.length).toBe(0);
+  });
+
+  it('改标准类别的留给人：给单子贴「本机做」交本机指挥官，不写要你拍，任务不动', async () => {
+    const r = rig({ answer: verdict('leave', { leaveReason: 'standard' }) });
+    const out = await triageParkedTasks(r.deps);
+    expect(r.labels).toEqual([{ issue: 3296, label: '本机做' }]);
+    expect(out.left[0]?.why).toContain('改标准');
+    expect(r.notices[0]?.level).toBe('daily');
+    expect(r.notices[0]?.body).toContain('本机做');
+    expect(r.sent.length + r.redone.length + r.abandoned.length).toBe(0);
+  });
+});
+
+describe('运行环境类停法：按失败码认，放行继续和重做', () => {
+  const runtimeSnaps = {
+    换路由续不上: snap('other', { title: '换路由续不上', code: PARK_CODE_ROUTE_SWITCH }),
+    会话总时长到顶: snap('other', { title: '会话总时长到顶', code: 'wall_clock_timeout', rule: 'WT1' }),
+    进程被信号杀掉: snap('other', { title: '进程被信号杀掉，没查到是谁杀的', code: 'exit_143', rule: 'KL4' }),
+    连不上执行机: snap('other', { title: '网络不通', code: 'econnrefused', rule: 'NT1' }),
+  };
+
+  it('每一种都放行继续和重做', async () => {
+    for (const [name, s] of Object.entries(runtimeSnaps)) {
+      const c = rig({ snap: s, answer: verdict('continue') });
+      expect((await triageParkedTasks(c.deps)).acted, name).toEqual([
+        { ref: 'thoerwink8/fleet-dao#3296', action: 'continue', source: 'verdict' },
+      ]);
+      expect(c.sent[0]).toMatchObject({ by: COMMANDER_ACTOR, parkSeq: 2 });
+      const d = rig({ snap: s, answer: verdict('redo') });
+      await triageParkedTasks(d.deps);
+      expect(d.redone, name).toEqual([WF]);
+    }
+  });
+
+  it('提示词里写运行环境停法和失败码', async () => {
+    const r = rig({ snap: runtimeSnaps.会话总时长到顶, answer: verdict('continue') });
+    await triageParkedTasks(r.deps);
+    const prompt = r.sessions[0]?.prompt ?? '';
+    expect(prompt).toContain('停法：运行环境');
+    expect(prompt).toContain('失败码：wall_clock_timeout，规则：WT1');
+    expect(prompt).toContain('默认动作：继续');
+  });
+
+  it('没给裁决：默认继续；同一张单之前判过继续、又停在同一种上 → 重做', async () => {
+    const first = rig({ snap: runtimeSnaps.进程被信号杀掉, answer: fence({ summary: '', verdicts: [] }) });
+    await triageParkedTasks(first.deps);
+    expect(first.sent).toHaveLength(1);
+    const earlier = [
+      { at: NOW, action: COMMANDER_AUDIT_CLAIM, after: { workflowId: WF, parkSeq: 1, kind: 'runtime' } },
+      {
+        at: NOW,
+        action: COMMANDER_AUDIT_ACT,
+        after: { workflowId: WF, parkSeq: 1, action: 'continue', kind: 'runtime' },
+        ok: true,
+      },
+    ];
+    const again = rig({
+      snap: runtimeSnaps.进程被信号杀掉,
+      answer: fence({ summary: '', verdicts: [] }),
+      audits: earlier,
+    });
+    await triageParkedTasks(again.deps);
+    expect(again.sent).toHaveLength(0);
+    expect(again.redone).toEqual([WF]);
+    // 引擎续停续过同一原文（retriedBefore）也算继续过
+    const retried = rig({
+      snap: snap('other', { code: 'wall_clock_timeout', retriedBefore: true }),
+      answer: fence({ summary: '', verdicts: [] }),
+    });
+    await triageParkedTasks(retried.deps);
+    expect(retried.redone).toEqual([WF]);
+  });
+});
+
+describe('老历史（查询里没有 status.park）不再静默跳过', () => {
+  const legacySnap: ParkedSnapshot = { phase: 'parked', prNumber: 3300 };
+  const sizeAlert: OpenParkAlert = {
+    seq: 1,
+    title: '改动超出体量预算：新增 9550 行，预算 3000 行，收窄过一次仍超',
+    body: '点「继续」照这一版推（这张单后面不再按预算打回）',
+    at: new Date(NOW.getTime() - 26 * 3_600_000),
+  };
+
+  it('提醒是体量超预算的停着任务进候选，交会话看；继续用老历史的 by', async () => {
+    const r = rig({ snap: legacySnap, openPark: sizeAlert, answer: verdict('continue', { parkSeq: 1 }) });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.candidates).toBe(1);
+    expect(out.problems).toEqual([]);
+    expect(r.sessions).toHaveLength(1);
+    expect(r.sessions[0]?.prompt).toContain('停法：体量超预算');
+    expect(r.sessions[0]?.prompt).toContain('老历史');
+    expect(r.sent[0]).toMatchObject({ by: COMMANDER_LEGACY_ACTOR });
+    expect(out.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'continue', source: 'verdict' }]);
+  });
+
+  it('认不出的写进 problems，按「按临时的办」处理（没给裁决就继续）', async () => {
+    const r = rig({
+      snap: legacySnap,
+      openPark: { ...sizeAlert, title: 'CI 的结果没查成', body: '没有检查，或超时读不到' },
+      answer: fence({ summary: '', verdicts: [] }),
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.candidates).toBe(1);
+    expect(out.problems.some((p) => p.includes('认不出停法') && p.includes('按临时的办'))).toBe(true);
+    expect(r.sessions[0]?.prompt).toContain('停法：认不出、按临时的办');
+    expect(r.sent[0]).toMatchObject({ by: COMMANDER_LEGACY_ACTOR });
+  });
+
+  it('连开着的停下提醒都没有：写进 problems，不交会话', async () => {
+    const r = rig({ snap: legacySnap, openPark: null });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.candidates).toBe(0);
+    expect(out.problems[0]).toContain('认不出停在哪一次');
   });
 });
