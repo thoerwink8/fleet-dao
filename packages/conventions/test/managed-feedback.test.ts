@@ -365,7 +365,10 @@ describe('work真实客户端交付与未知回执持久化', () => {
       expect(await managedWork('deliver', ['12'], f.o)).toBe(0);
       expect(f.merges[0]).toContain('--squash');
       expect(f.merges[0]).toContain(HEAD);
-      await expect(validateManagedDelivery(f.gh, f.spec, true, f.root)).rejects.toThrow('尚未真实合并');
+      await expect(validateManagedDelivery(f.gh, f.spec, true, f.root)).rejects.toMatchObject({
+        kind: 'review',
+        message: expect.stringContaining('尚未真实合并'),
+      });
       f.live.merged = true;
       await expect(validateManagedDelivery(f.gh, f.spec, true, f.root)).resolves.toBeUndefined();
     } finally {
@@ -516,4 +519,249 @@ it('可信prepare坏摘要或伪报仓身份failclosed；陌生Bot prepare不增
   await expect(readManagedFeedbackForGate(f.api, 34, HEAD)).rejects.toThrow('不匹配');
   f.reviews[0] = { ...review(base), user: { id: 999, type: 'Bot' }, body: prepareBody(base, HEAD) };
   expect(await readManagedFeedbackForGate(f.api, 34, HEAD)).toEqual({ records: [] });
+});
+
+const MERGE = 'd'.repeat(40);
+const OTHER_HEAD = 'e'.repeat(40);
+
+function externalSpec(): RunSpec {
+  return {
+    v: 1,
+    repo: 'acme/app',
+    issue: 42,
+    title: 'captcha',
+    repoRoot: '/repo',
+    worktree: '/wt',
+    branch: 'local/42-work',
+    dispatcher: 'sess',
+    reclaude: 'reclaude',
+    env: {},
+    createdAt: '2026-10-19T00:00:00.000Z',
+  };
+}
+
+function mergedBody(n: number, body: string, patch: Record<string, unknown> = {}) {
+  return {
+    number: n,
+    state: 'closed',
+    merged: true,
+    merged_at: '2026-10-19T01:36:55Z',
+    merge_commit_sha: MERGE,
+    body,
+    head: { ref: `fleet/${n}-other`, sha: OTHER_HEAD },
+    base: { repo: { full_name: 'acme/app' } },
+    ...patch,
+  };
+}
+
+function ghScript(script: {
+  head?: { code: number; stdout: string; stderr: string };
+  search?: { code: number; stdout: string; stderr: string };
+  pulls?: Record<number, { code: number; stdout: string; stderr: string }>;
+}): { gh: Gh; calls: string[][] } {
+  const calls: string[][] = [];
+  const gh: Gh = async (args) => {
+    calls.push([...args]);
+    if (args.includes('create') || (args[0] === 'pr' && args[1] === 'merge')) {
+      return { code: 0, stdout: 'forged', stderr: '' };
+    }
+    if (args[0] === 'pr' && args[1] === 'list' && args.includes('--head')) {
+      return script.head ?? { code: 0, stdout: '[]', stderr: '' };
+    }
+    if (args[0] === 'pr' && args[1] === 'list') {
+      return script.search ?? { code: 0, stdout: '[]', stderr: '' };
+    }
+    if (args[0] === 'api') {
+      const matched = /pulls\/(\d+)$/.exec(args[1] ?? '');
+      const n = Number(matched?.[1]);
+      return script.pulls?.[n] ?? { code: 1, stdout: '', stderr: `missing pull ${args[1] ?? ''}` };
+    }
+    if (args[0] === 'issue') return { code: 0, stdout: JSON.stringify({ state: 'CLOSED' }), stderr: '' };
+    return { code: 1, stdout: '', stderr: `unexpected ${args.join(' ')}` };
+  };
+  return { gh, calls };
+}
+
+const ok = (value: unknown) => ({ code: 0, stdout: JSON.stringify(value), stderr: '' });
+const settled = async () => 'settled' as const;
+const noAcceptance = async () => {
+  throw new Error('没有核到外部事实，不该读验收责任');
+};
+
+describe('他分支交付必须核同仓真实PR，不能靠关单或伪造', () => {
+  it('issue已关闭、同仓也没有关联的已合并PR：blocked，不记完成', async () => {
+    const spec = externalSpec();
+    const { gh, calls } = ghScript({ search: ok([]) });
+    await expect(validateManagedDelivery(gh, spec, true, '/unused', noAcceptance)).rejects.toMatchObject({
+      kind: 'blocked',
+      message: expect.stringContaining('issue是否关闭不能当作交付'),
+    });
+    expect(calls.some((c) => c[0] === 'issue')).toBe(false);
+    expect(calls.some((c) => c.includes('create') || c.includes('merge'))).toBe(false);
+  });
+
+  it('别的仓、缺mergeCommit、标题或分片Refs、分支对不上：都不当已交付', async () => {
+    const spec = externalSpec();
+    const cases: Record<string, unknown>[] = [
+      mergedBody(3194, '**需求**：Closes #42\n', { base: { repo: { full_name: 'other/repo' } } }),
+      mergedBody(3194, '**需求**：Closes #42\n', { merge_commit_sha: null }),
+      mergedBody(3194, '标题里提到 #42，没有关单词'),
+      mergedBody(3194, '**需求**：Refs #42 分片、关不了它\n', {
+        head: { ref: 'fleet/42-slice', sha: OTHER_HEAD },
+      }),
+      mergedBody(3194, '```\nCloses #42\n```\n'),
+      mergedBody(3194, 'Closes other/repo#42'),
+    ];
+    for (const body of cases) {
+      const { gh, calls } = ghScript({
+        search: ok([{ number: 3194 }]),
+        pulls: { 3194: ok(body) },
+      });
+      await expect(validateManagedDelivery(gh, spec, true, '/unused', noAcceptance)).rejects.toMatchObject({
+        kind: 'blocked',
+      });
+      expect(calls.some((c) => c.includes('create') || c.includes('merge'))).toBe(false);
+    }
+  });
+
+  it('同分支名即使写了关单词也不当成外部交付，避免伪造本分支PR', async () => {
+    const spec = externalSpec();
+    const { gh } = ghScript({
+      search: ok([{ number: 9 }]),
+      pulls: {
+        9: ok(
+          mergedBody(9, '**需求**：Closes #42\n', {
+            head: { ref: spec.branch, sha: OTHER_HEAD },
+          }),
+        ),
+      },
+    });
+    await expect(validateManagedDelivery(gh, spec, true, '/unused', noAcceptance)).rejects.toMatchObject({
+      kind: 'blocked',
+      message: expect.stringContaining('不记完成'),
+    });
+  });
+
+  it('两条都核上：不猜哪条交付', async () => {
+    const spec = externalSpec();
+    const { gh } = ghScript({
+      search: ok([{ number: 3194 }, { number: 3195 }]),
+      pulls: {
+        3194: ok(mergedBody(3194, '**需求**：Closes #42\n')),
+        3195: ok(mergedBody(3195, 'Fixes #42')),
+      },
+    });
+    await expect(validateManagedDelivery(gh, spec, true, '/unused', settled)).rejects.toMatchObject({
+      kind: 'blocked',
+      message: expect.stringContaining('#3194、#3195'),
+    });
+  });
+
+  it('同仓关单、head、mergeCommit都核上才报外部交付；验收未结不能当完成', async () => {
+    const spec = externalSpec();
+    const { gh, calls } = ghScript({
+      search: ok([{ number: 3194 }]),
+      pulls: { 3194: ok(mergedBody(3194, '**需求**：Closes #42\n')) },
+    });
+    await expect(
+      validateManagedDelivery(gh, spec, true, '/unused', async () => 'open'),
+    ).rejects.toMatchObject({
+      kind: 'external',
+      acceptance: 'open',
+      external: { repo: 'acme/app', pr: 3194, head: OTHER_HEAD, mergeCommit: MERGE },
+    });
+    expect(calls.some((c) => c.includes('create') || c.includes('merge'))).toBe(false);
+  });
+
+  it('本机退回意图还在：外部事实齐了也带保留，不能终结', async () => {
+    const spec = externalSpec();
+    const root = mkdtempSync(join(tmpdir(), 'external-intent-'));
+    try {
+      const dir = runDir(root, spec.repo, spec.issue);
+      mkdirSync(dir, { recursive: true });
+      writeJson(join(dir, 'feedback-intent.json'), { requestId: 'keep' });
+      const { gh } = ghScript({
+        search: ok([{ number: 3194 }]),
+        pulls: { 3194: ok(mergedBody(3194, 'Closes #42')) },
+      });
+      await expect(validateManagedDelivery(gh, spec, true, root, settled)).rejects.toMatchObject({
+        kind: 'external',
+        retain: true,
+        acceptance: 'settled',
+        message: expect.stringContaining('不能终结'),
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('搜索被截断、列表认不出、404跳过后没有第二条：都不记完成', async () => {
+    const spec = externalSpec();
+    const truncated = ghScript({ search: ok(Array.from({ length: 100 }, (_, i) => ({ number: i + 1 }))) });
+    await expect(
+      validateManagedDelivery(truncated.gh, spec, true, '/unused', noAcceptance),
+    ).rejects.toMatchObject({
+      kind: 'blocked',
+      message: expect.stringContaining('截断'),
+    });
+    const odd = ghScript({ head: ok({ state: 'CLOSED' }) });
+    await expect(validateManagedDelivery(odd.gh, spec, true, '/unused', noAcceptance)).rejects.toMatchObject({
+      kind: 'blocked',
+      message: expect.stringContaining('认不出'),
+    });
+    const missing = ghScript({
+      search: ok([{ number: 3194, title: 'not a field we trust' }]),
+      pulls: { 3194: { code: 1, stdout: '', stderr: 'HTTP 404: Not Found' } },
+    });
+    await expect(
+      validateManagedDelivery(missing.gh, spec, true, '/unused', noAcceptance),
+    ).rejects.toMatchObject({
+      kind: 'blocked',
+    });
+  });
+
+  it('本分支列表、搜索或外部PR读失败是可重试，不是已交付', async () => {
+    const spec = externalSpec();
+    const headDown = ghScript({ head: { code: 1, stdout: '', stderr: 'socket hang up' } });
+    await expect(
+      validateManagedDelivery(headDown.gh, spec, true, '/unused', noAcceptance),
+    ).rejects.toMatchObject({
+      kind: 'retry',
+      message: expect.stringContaining('受管PR读取失败'),
+    });
+    const searchDown = ghScript({ search: { code: 1, stdout: '', stderr: 'timed out' } });
+    await expect(
+      validateManagedDelivery(searchDown.gh, spec, true, '/unused', noAcceptance),
+    ).rejects.toMatchObject({
+      kind: 'retry',
+      message: expect.stringContaining('他分支交付没读成'),
+    });
+    const apiDown = ghScript({
+      search: ok([{ number: 3194 }]),
+      pulls: { 3194: { code: 1, stdout: '', stderr: 'HTTP 502' } },
+    });
+    await expect(
+      validateManagedDelivery(apiDown.gh, spec, true, '/unused', noAcceptance),
+    ).rejects.toMatchObject({
+      kind: 'retry',
+      message: expect.stringContaining('外部PR #3194'),
+    });
+    const badJson = ghScript({ head: { code: 0, stdout: 'not-json', stderr: '' } });
+    await expect(
+      validateManagedDelivery(badJson.gh, spec, true, '/unused', noAcceptance),
+    ).rejects.toMatchObject({
+      kind: 'retry',
+      message: expect.stringContaining('响应不是JSON'),
+    });
+  });
+
+  it('重派前本分支没有PR且没有退回意图：不因外部交付挡住关单', async () => {
+    const spec = externalSpec();
+    const { gh, calls } = ghScript({
+      search: ok([{ number: 3194 }]),
+      pulls: { 3194: ok(mergedBody(3194, 'Closes #42')) },
+    });
+    await expect(validateManagedDelivery(gh, spec, false, '/unused', settled)).resolves.toBeUndefined();
+    expect(calls.some((c) => c.includes('--search'))).toBe(false);
+  });
 });
