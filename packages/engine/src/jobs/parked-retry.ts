@@ -53,6 +53,8 @@ export interface ParkedRetryRow {
   issueNumber: number;
   /** 最近一条记下工作流编号的 runs。没有就不猜。 */
   workflowId: string | null;
+  /** 任务行上最近一次卡住的原因（指挥官认老历史的停法用，#3423）；没读到是缺省。 */
+  lastProblem?: string | null;
 }
 
 /** 现问工作流读到的那几样（taskStatus 查询）。 */

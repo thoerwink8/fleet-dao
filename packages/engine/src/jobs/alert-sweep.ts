@@ -10,7 +10,8 @@
 //    同一份模板拼，再用 requiredSectionProblems 核过；不贴「要人拍」。单号写回这条提醒的正文开头。同一键只一张；那张关了
 //    而提醒还在，隔 7 天才再开。每次对账最多 2 张，每个仓每天最多 4 张。GitHub 写不进记没立成、不回写单号，下一轮再试。
 //    reconcile:* 虽在「自己会撤」的前缀里（过期兜底不碰它们），条件没了的核对那一步已经撤了，还开着的是断链，要立案。
-//    其余自己会撤的（备份、切号……）不立案。认不出仓的不猜、不开。谁在处理读不到：不立案（跟再推相反，开单宁可不开）。
+//    其余自己会撤的（备份、切号……）不立案。任务的停下提醒（task:*:park:*）和指挥官的（commander:*:park:*）不立案：
+//    交法国指挥官拍板（#3423），PR 撤不掉任务的停下。认不出仓的不猜、不开。谁在处理读不到：不立案（跟再推相反，开单宁可不开）。
 //    历史事实类不立案（#1420）：键以 reconcile:pr:、reconcile:ledger: 开头且对应 PR 已合并超过 7 天。事实已经发生、改不了，
 //    对账只在合并时判一次，条件永远还在，开单没有可做的事（#1418、#1419 因此白起了会话）。合并未满 7 天仍立案，但验收不写
 //    「条件不再成立」：缺证据不可逆，那句会诱导按 PR 号或分支名豁免来清卡。验收改为真实来源与完整回执按现规则核实，或缺证据
@@ -67,7 +68,7 @@ import { type AlertStage, criteriaOf, HANDLED_STAGES, isEscalationKey } from '@f
 import type { AlertRow } from '@fleet-dao/db';
 import type { StageKind, TaskState } from '@fleet-dao/shared';
 import { errMessage } from '@fleet-dao/shared/util';
-import { TASK_DONE_PARK_WHY } from '../park-alerts.ts';
+import { isTaskParkAlertKey, TASK_DONE_PARK_WHY } from '../park-alerts.ts';
 import { duration, STAGE_NAMES } from '../routing/names.ts';
 import type { AllOpenCheck } from '../routing/types.ts';
 import { plainText } from './groom-plan.ts';
@@ -384,6 +385,10 @@ const resolvesItself = (key: string) => SELF_RESOLVING_PREFIXES.some((p) => key.
  */
 export function eligibleToFile(key: string): boolean {
   if (isEscalationKey(key)) return false;
+  // 停下提醒（task:<仓>#<号>:park:<n>）和指挥官对它写的那条（commander:<工作流>:park:<n>）不立案（#3423）：
+  // 停着的任务本身就是那张单，撤提醒要的是续上、放弃、拆单这类状态动作，PR 做不到（#3407 派了 6 轮、4 次冷验收拒）。
+  // 交给法国指挥官（jobs/park-triage.ts）拍板；它也看不了的，原因写在它那条提醒的正文里。
+  if (isTaskParkAlertKey(key) || /^commander:.+:park:\d+$/.test(key)) return false;
   if (key.startsWith('reconcile:')) return true;
   return !resolvesItself(key);
 }
