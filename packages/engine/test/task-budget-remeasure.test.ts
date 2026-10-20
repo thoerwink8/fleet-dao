@@ -1,6 +1,6 @@
 // 体量关口重评（#3249）：停在体量预算停点的单，可信重评只放行「这一次停点的这一份交付」，不授权后续。
 // 真 Temporal 开发服务端（createRealEnv，不能跳时间）+ 假端口 + 脚本化的任务活动（重评走 readDelivery 的 budgetRemeasure 入参）。
-// 跨工人重放那一条仍用可跳时间的测试服务端：真开发服务端在工人不缓存时会把 self-check-own-timeout 的补丁标记判成不确定。
+// 跨工人重放、整段历史离线重放那两条仍用可跳时间的测试服务端：真开发服务端录的历史会把 self-check-own-timeout 的补丁标记判成不确定（#3258）。
 // 不碰真实 #3207，不改生产数据。
 
 import { randomUUID } from 'node:crypto';
@@ -242,6 +242,13 @@ const OLD_PARK = (() => {
   return { workflowId: (JSON.parse(first) as { workflowId: string }).workflowId, events };
 })();
 const OLD_PARK_COMMANDS = commandsOf(OLD_PARK.events);
+/**
+ * 夹具录下之后主线在 park() 里新加、只有新历史才写的标记（#3294 停法类别）。和 #3249 无关，旧历史重放时 patched() 为假不写；
+ * 比「#3249 没改命令序」时从现录的历史里去掉它们，夹具不重录。
+ */
+const NEWER_PARK_MARKERS = ['patch:park-kind'];
+const parkCommandsOf = (events: readonly CommandEvent[]): string[] =>
+  commandsOf(events).filter((c) => !NEWER_PARK_MARKERS.includes(c));
 
 /** 停点报警还挂着、waiting 尚未设上时，第一次体量停点应有的身份（交付头是第二份常规交付）。 */
 function formingPark(runId: string, over: Partial<LineBudgetParkIdentity> = {}): LineBudgetParkIdentity {
@@ -378,16 +385,13 @@ const expectNoCatchupTimer = (events: readonly HistEvent[]) => {
   expect(catchupTimers(events, true)).toEqual([]);
 };
 
-describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
-  beforeAll(async () => {
-    await engineBundle();
-  }, 120_000);
-  beforeEach(async () => {
-    env = await createRealEnv();
-  }, 120_000);
-  afterEach(async () => {
-    await env.teardown();
-  }, 60_000);
+// 这条要把录下的整段历史离线重放：真开发服务端录的历史会间歇命中 #3258（self-check-own-timeout 标记 TMPRL1100），
+// 所以仍用可跳时间的测试服务端；它不经过 catchup 的 30 秒定时器，跳时间掩盖不了 catchup 的问题。
+describe('体量关口重评（#3249）：放行与整段重放（可跳时间的测试服务端）', { timeout: 180_000 }, () => {
+  const currentEnv = useEnv();
+  beforeEach(() => {
+    env = currentEnv();
+  });
 
   it('8037 行生成折扣、实际计量 1513：预检只测不放行，执行只放行这一份交付，不设永久豁免；旧停点历史可达、整段可重放', async () => {
     const { world, tasks, asks } = setup((ask) => measured(ask), true);
@@ -458,14 +462,26 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
 
     // 旧在途历史：停到体量关口的命令序与重评之前的代码一致；这段前缀原样在整段历史里，后面接重评 Update
     // （标记第一次在 Update 里问）和放行后的推、验收、再停、继续、合并。两段都按现在的代码重放不报对不上。
-    expect(commandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
+    expect(parkCommandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
     expect(JSON.stringify(parked)).not.toContain('taskRemeasureLineBudget');
-    expect(commandsOf(full.events ?? []).slice(0, OLD_PARK_COMMANDS.length)).toEqual(OLD_PARK_COMMANDS);
+    expect(parkCommandsOf(full.events ?? []).slice(0, OLD_PARK_COMMANDS.length)).toEqual(OLD_PARK_COMMANDS);
     expect(JSON.stringify(full)).toContain('taskRemeasureLineBudget');
     const bundle = { workflowBundle: await engineBundle() };
     await Worker.runReplayHistory(bundle, parked, workflowId);
     await Worker.runReplayHistory(bundle, full, workflowId);
   });
+});
+
+describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
+  beforeAll(async () => {
+    await engineBundle();
+  }, 120_000);
+  beforeEach(async () => {
+    env = await createRealEnv();
+  }, 120_000);
+  afterEach(async () => {
+    await env.teardown();
+  }, 60_000);
 
   it('人点「继续」仍保留既有授权语义：之后的交付不再判体量', async () => {
     const { world, tasks } = setup((ask) => measured(ask), true);
@@ -680,6 +696,7 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
     expect(text).not.toContain('taskRemeasureLineBudget');
     expect(OLD_PARK_COMMANDS).not.toContain('patch:line-budget-remeasure-v1');
     expect(OLD_PARK_COMMANDS).toContain('patch:pr-line-budget');
+    for (const marker of NEWER_PARK_MARKERS) expect(OLD_PARK_COMMANDS).not.toContain(marker);
     expect(OLD_PARK_COMMANDS.at(-1)).toBe('raiseAlert');
     expect(text).not.toContain('addedLinesBase');
     await Worker.runReplayHistory(
@@ -1018,9 +1035,9 @@ describe('跨工人接停点（可跳时间的测试服务端）', { timeout: 18
       },
       { tasks, taskQueue, maxCachedWorkflows: 0 },
     );
-    // 下线时的停点历史，命令序与旧代码录的真实历史逐条一致
+    // 下线时的停点历史，命令序与旧代码录的真实历史逐条一致（主线后加的新历史标记除外）
     const parked = await h.fetchHistory();
-    expect(commandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
+    expect(parkCommandsOf(parked.events ?? [])).toEqual(OLD_PARK_COMMANDS);
     // 新起的工人（像部署后的新进程，缓存是空的）：第一个工作流任务就是从上面那份历史整段重放，再处理重评
     const run = await withWorker(
       env,
