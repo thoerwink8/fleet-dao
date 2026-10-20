@@ -10,8 +10,11 @@ import { createMockApi, type MockApi } from '../api/mock/server';
 import type { EnvResponse, FrancePreflightResponse, FranceReleaseState, Jobs } from '../api/types';
 import France from '../routes/france';
 import { renderApp } from '../test/harness';
+import { installStageTrace } from '../test/stage-trace';
 
 afterEach(cleanup);
+// 只加观测，超时和断言都不动：测试卡住时日志里要能读到时间花在了哪一步（#3372）。
+installStageTrace();
 
 function envOk(): EnvResponse {
   const fact = <T,>(value: T) => ({ ok: true as const, value });
