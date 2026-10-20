@@ -11,7 +11,7 @@ import { dirname, isAbsolute, join } from 'node:path';
 import { fsRepo, type RepoView } from './repo.ts';
 import { TEMPORAL_MARKER } from './test-split.ts';
 
-const REPAIR = 'pnpm test:temporal --cli <已安装的固定版本CLI绝对路径>';
+const REPAIR = 'pnpm temporal:install；或 pnpm test:temporal --cli <已安装的固定版本CLI绝对路径>';
 export const TEMPORAL_PROBE_LIMIT_MS = 5_000;
 
 function preparationError(detail: string, cause?: unknown): Error {
@@ -73,7 +73,11 @@ export function temporalCliRegistration(home = homedir()): string {
   return join(home, '.fleet-dao', 'test-tools', `temporal-cli-${process.platform}-${process.arch}.json`);
 }
 
-function verifyCli(path: string, version: string, options: TemporalCliOptions): PreparedTemporalCli {
+export function verifyTemporalCli(
+  path: string,
+  version: string,
+  options: TemporalCliOptions,
+): PreparedTemporalCli {
   if (!isAbsolute(path)) throw preparationError('CLI 路径必须是绝对路径');
   try {
     if (!statSync(path).isFile()) throw new Error('不是普通文件');
@@ -91,7 +95,7 @@ export function prepareTemporalCli(root: string, options: TemporalCliOptions = {
   const version = temporalTestVersion(fsRepo(root));
   const env = options.env ?? process.env;
   const explicit = env.FLEET_TEST_TEMPORAL_CLI?.trim();
-  if (explicit) return verifyCli(explicit, version, options);
+  if (explicit) return verifyTemporalCli(explicit, version, options);
   // CI 的 CLI 由工作流按固定制品准备，不能拿机器上残留的登记掩盖它没装成。
   if (env.CI) throw preparationError('CI 没给 FLEET_TEST_TEMPORAL_CLI');
   const registration = temporalCliRegistration(options.home);
@@ -112,7 +116,7 @@ export function prepareTemporalCli(root: string, options: TemporalCliOptions = {
     saved.version !== version
   )
     throw preparationError(`本机 CLI 登记无效或版本已变成 ${version}`);
-  return verifyCli(saved.path, version, options);
+  return verifyTemporalCli(saved.path, version, options);
 }
 
 /** 登记现有程序，不安装、不下载、不改 PATH；写完前失败保留原登记。 */
@@ -121,7 +125,7 @@ export function registerTemporalCli(
   path: string,
   options: TemporalCliOptions = {},
 ): PreparedTemporalCli {
-  const prepared = verifyCli(path, temporalTestVersion(fsRepo(root)), options);
+  const prepared = verifyTemporalCli(path, temporalTestVersion(fsRepo(root)), options);
   const target = temporalCliRegistration(options.home);
   const temporary = `${target}.${randomUUID()}.tmp`;
   try {

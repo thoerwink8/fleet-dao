@@ -1,6 +1,17 @@
 // 法国指挥官会话的真装配（real/park-triage.ts，#3294 第 2 片）在库上的几样：设置开关怎么读、用途没配模型怎么认、
 // 认领和执行的操作记录记在 engine:commander 名下、提醒带诊断文字、回合怎么读给空转判断。会话和 Temporal 不真连（另有 jobs 的假依赖测试）。
-import { auditLog, notifications, repos, settings, taskRounds, tasks } from '@fleet-dao/db';
+import {
+  auditLog,
+  families,
+  models,
+  notifications,
+  registerScheduledJobs,
+  repos,
+  routingPurposeModels,
+  settings,
+  taskRounds,
+  tasks,
+} from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { COMMANDER_ACTOR } from '../../src/commander-contract.ts';
@@ -8,7 +19,9 @@ import { judgeSpin } from '../../src/decisions/spin.ts';
 import {
   COMMANDER_AUDIT_ACT,
   COMMANDER_AUDIT_CLAIM,
+  PARK_TRIAGE_JOB,
   type ParkTriageItem,
+  runParkTriageJob,
 } from '../../src/jobs/park-triage.ts';
 import { COMMANDER_SETTING, parkTriageJob } from '../../src/real/park-triage.ts';
 import type { TaskParkInfo } from '../../src/task-contract.ts';
@@ -29,7 +42,10 @@ describe('real/park-triage', () => {
     t = await createTestDb();
   }, TEST_DB_TIMEOUT_MS);
   afterAll(() => t.close());
-  beforeEach(() => resetTestDb(t));
+  beforeEach(async () => {
+    await resetTestDb(t);
+    await registerScheduledJobs(t.db, [PARK_TRIAGE_JOB]);
+  });
 
   const deps = () =>
     parkTriageJob({
@@ -95,6 +111,60 @@ describe('real/park-triage', () => {
 
   it('用途 commander 下一个模型都没有：认成没配模型', async () => {
     expect(await deps().purposeConfigured()).toBe(false);
+  });
+
+  async function configureModelWithoutRoute() {
+    await t.db.insert(families).values({ id: 'test-family', displayName: '测试', vendor: 'test' });
+    await t.db.insert(models).values({ id: 'test-model', family: 'test-family', displayName: '测试模型' });
+    await t.db
+      .insert(routingPurposeModels)
+      .values({ purpose: 'commander', modelId: 'test-model', position: 0 });
+  }
+
+  it('任务入口空→非空→重复：只撤缺模型卡、保留原文，审计幂等；没有活路由也只证明配置恢复', async () => {
+    const d = deps();
+    expect((await runParkTriageJob(d)).outcome).toBe('partial');
+    await d.notify({
+      level: 'alert',
+      key: 'commander:other',
+      title: '其它故障',
+      body: '原故障证据',
+      taskId: null,
+    });
+    const before = await t.db.select().from(notifications);
+    const oldCard = before.find((n) => n.dedupeKey === 'commander:no-model');
+    expect(oldCard?.resolvedAt).toBeNull();
+    await configureModelWithoutRoute();
+    expect(await d.purposeConfigured()).toBe(true);
+    expect((await runParkTriageJob(d)).outcome).toBe('ok');
+    const once = await t.db.select().from(notifications);
+    const resolved = once.find((n) => n.dedupeKey === 'commander:no-model');
+    expect(resolved).toMatchObject({ id: oldCard?.id, resolvedAt: NOW, resolvedBy: COMMANDER_ACTOR });
+    expect(resolved?.body).toContain(oldCard?.body ?? '旧正文丢失');
+    expect(resolved?.body).toContain('调用是否恢复仍待验证');
+    expect(once.find((n) => n.dedupeKey === 'commander:other')).toEqual(
+      before.find((n) => n.dedupeKey === 'commander:other'),
+    );
+    expect((await runParkTriageJob(d)).outcome).toBe('ok');
+    expect(await t.db.select().from(notifications)).toEqual(once);
+    const audits = (await t.db.select().from(auditLog)).filter((a) => a.action === 'notification.resolve');
+    expect(audits).toHaveLength(1);
+    expect(audits[0]).toMatchObject({
+      target: `notification:${oldCard?.id}`,
+      actorKind: 'engine',
+      actorId: COMMANDER_ACTOR,
+      at: NOW,
+      reason: expect.stringContaining('调用是否恢复仍待验证'),
+    });
+  });
+
+  it('用途已配但没有旧卡：不创建故障卡、不补造解除审计', async () => {
+    await configureModelWithoutRoute();
+    expect((await runParkTriageJob(deps())).outcome).toBe('ok');
+    expect(await t.db.select().from(notifications)).toHaveLength(0);
+    expect(
+      (await t.db.select().from(auditLog)).filter((a) => a.action === 'notification.resolve'),
+    ).toHaveLength(0);
   });
 
   it('认领和执行的操作记录都记在 engine:commander 名下；认领带工作流编号和停下编号', async () => {

@@ -46,7 +46,7 @@ it('版本唯一来自部署固定值，缺失、重复或认不出都在准备�
 
 it('缺登记、坏JSON、旧版本、相对路径、文件不存在和目录都明确失败', () => {
   const { root, home, options } = fixture();
-  expect(() => prepareTemporalCli(root, options)).toThrow('pnpm test:temporal --cli');
+  expect(() => prepareTemporalCli(root, options)).toThrow('pnpm temporal:install');
   const registration = temporalCliRegistration(home);
   mkdirSync(join(home, '.fleet-dao', 'test-tools'), { recursive: true });
   for (const content of [

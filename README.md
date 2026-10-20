@@ -70,7 +70,9 @@
 
 ### 真 Temporal 测试准备
 
-`pnpm test:temporal --cli <已安装的CLI绝对路径>` 登记本机测试 CLI，版本必须与 `deploy/france.sh` 一致；之后 `pnpm test:temporal` 检查登记是否仍可用。登记只写 `~/.fleet-dao/test-tools/`，不下载、不改全局 PATH、不启动服务端。也可直接设 `FLEET_TEST_TEMPORAL_CLI`，显式路径优先，坏路径不会退回登记；CI 必须显式设置。
+首次准备本机真 Temporal 测试运行 `pnpm temporal:install`。它按 `deploy/france.sh` 的固定版本和当前平台（macOS arm64/x64、Linux x64/arm64、Windows x64）从 Temporal 官方发布地址下载，核固定 SHA-256，验证 `--version` 后原子落到 `~/.fleet-dao/test-tools/temporal-cli/`，不改全局 PATH、不碰 SDK 缓存。已准备好的同版本不会重下。下载失败、超时、校验不符或版本不符都不会登记成可用 CLI。
+
+也可以用 `pnpm test:temporal --cli <已安装的CLI绝对路径>` 登记已有 CLI，版本必须与 `deploy/france.sh` 一致；之后 `pnpm test:temporal` 检查登记是否仍可用。登记只写 `~/.fleet-dao/test-tools/`，不下载、不启动服务端。也可直接设 `FLEET_TEST_TEMPORAL_CLI`，显式路径优先，坏路径不会退回登记；CI 必须显式设置。
 
 `pnpm check`、`pnpm test:changed` 选到调用 `createRealEnv` 的文件时先核 CLI；没选到则不做这项准备。直接跑单个测试也会在创建真环境前核验，缺失明确失败，不回退 SDK 隐式下载。`--version` 探测限 5 秒，超时终止该探测进程。随后 SDK 创建只报 `start-or-connect`：SDK 未公开启动和连接的细分状态，日志如实记未知；没有另套超时竞速，环境仍由 SDK 创建并由用例 teardown 清理。
 
@@ -89,6 +91,12 @@
 ```
 
 `command` 和 `args` 合起来必须启动 Linux Node（符合仓根 Node 版本要求），检查器在末尾加执行参数，JSON 快照从 stdin 传入；支持已有的其他本机 Linux 启动器。不要将 SSH/VPS 命令当本机 runner。`dependencyRoot` 是该 Linux 中已用 `pnpm install --frozen-lockfile` 安装依赖的仓目录，锁文件、workspace 设置和各包依赖声明须与本次工作树一致。运行时把当前已跟踪和未忽略的新文件复制到独立 Linux 临时目录，包含未提交改动，已删的文件不复活；workspace 依赖链接指向本次快照，第三方依赖复用已安装目录。源码摘要、普通用户、测试清单和 JSON 结果逐项核对后才算通过。Linux 本机和 CI 直接跑原测试。
+
+### 本机私有回环验证资源
+
+`pnpm test:isolated --resource <本机资源JSON绝对路径> -- <完整测试文件...>` 将明确审阅为只用本地服务的一组完整文件交给一次性 Linux 私有网络资源。它沿用本机测试槽、工作树快照与 Linux 结果核验，单独留报告，不替代 `pnpm check` 或 CI，也不改变全局选测。资源摘要过期、未知文件、真实 PG 请求、缺依赖或工具、namespace/关闭证据不符都明确失败。共享 WSL 故障与这条隔离路径的通过分别记账。
+
+资源需先由可信主线安装 root-owned helper，再按[资源说明](packages/conventions/resources/README.md)准备本机 JSON；配置和机器路径不进仓。网络仅有该资源内的回环，server/client/worker 在同一 namespace，业务 Node 与所有服务均普通用户，取消或宿主失联会回收本次进程。不能把依赖外网、共享 TCP PostgreSQL 或未审能力的检查整批送进去，也不能为了通过删除数据库环境变量或改用 PGlite。
 
 实现依据：[Node 的真实路径解析](https://github.com/nodejs/node/blob/main/doc/api/cli.md#--preserve-symlinks)要求防止依赖链接回到旧源码；[WSL 显式发行版和用户参数](https://learn.microsoft.com/windows/wsl/basic-commands)允许使用现有环境而不修改默认设置。Windows 不提供 `/proc/self/fd` 上逐级固定目录句柄的归档语义，不能以普通路径操作替代安全断言。
 
