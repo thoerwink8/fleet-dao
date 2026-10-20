@@ -396,6 +396,79 @@ describe('冲突引擎先自己并（决定 0093）', { timeout: 60_000 }, () =>
     expect(calls.segment).toHaveLength(2);
     expect(calls.segment[1]?.feedback.join('\n')).toContain('和最新主线有冲突，要解决：a.ts');
   });
+
+  const JOURNAL = 'packages/db/migrations/meta/_journal.json';
+
+  it('冲突文件全在机械可解名单里（#3428）：引擎机械解开，不派模型，对新头重跑 CI 和验收', async () => {
+    const world = createFakeWorld({
+      sync: (_i, n) => (n <= 2 ? { state: 'conflict', conflictFiles: [JOURNAL] } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      merged: (n) => (n === 1 ? { state: 'conflict', detail: 'PR #1 和主线冲突' } : { state: 'merged' }),
+      resolveConflict: () => ({
+        state: 'resolved',
+        head: fakeHead(820),
+        files: [JOURNAL],
+        note: '引擎机械解开了迁移',
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 1, head: fakeHead(820) });
+    expect(calls.segment).toHaveLength(1);
+    expect(calls.resolveConflict).toHaveLength(1);
+    expect(calls.resolveConflict[0]).toMatchObject({ conflictFiles: [JOURNAL], head: fakeHead(101) });
+    expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), fakeHead(820)]);
+    expect(world.states.some((s) => s.doing.includes('引擎机械解开了迁移'))).toBe(true);
+    expect(world.alerts).toEqual([]);
+  });
+
+  it('机械解没做成或只解了一部分：照旧交给会话，原因和已解掉的名单内文件写进返工意见', async () => {
+    const world = createFakeWorld({
+      sync: (_i, n) => (n <= 2 ? { state: 'conflict', conflictFiles: [JOURNAL, 'a.ts'] } : undefined),
+    });
+    const why = `名单外还有冲突文件（a.ts），引擎只解了名单内的 ${JOURNAL}`;
+    const { tasks, calls } = scripted({
+      merged: (n) => (n === 1 ? { state: 'conflict', detail: 'PR #1 和主线冲突' } : { state: 'merged' }),
+      resolveConflict: () => ({ state: 'declined', reason: why, resolvedFiles: [JOURNAL], inTree: true }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    const feedback = calls.segment[1]?.feedback.join('\n') ?? '';
+    expect(feedback).toContain(`和最新主线有冲突，要解决：${JOURNAL}、a.ts`);
+    expect(feedback).toContain(why);
+  });
+
+  it('机械解的活动抛了（没装、读不到树）：当没解成，交给会话，不挡路', async () => {
+    const world = createFakeWorld({
+      sync: (_i, n) => (n <= 2 ? { state: 'conflict', conflictFiles: [JOURNAL] } : undefined),
+    });
+    const { tasks, calls } = scripted({
+      merged: (n) => (n === 1 ? { state: 'conflict', detail: 'PR #1 和主线冲突' } : { state: 'merged' }),
+      resolveConflict: () => {
+        throw new PortError('INVALID_INPUT', '工作树不在', { retryable: false });
+      },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(calls.segment).toHaveLength(2);
+    expect(calls.segment[1]?.feedback.join('\n')).toContain('引擎机械解冲突没做成');
+  });
 });
 
 const RED: SelfCheckResult = {
