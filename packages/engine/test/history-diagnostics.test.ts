@@ -76,7 +76,7 @@ describe('bounded original history transport', () => {
   });
 });
 
-async function fixture(failed = false) {
+async function fixture(failed = false, started = true) {
   const root = await mkdtemp(join(tmpdir(), 'fleet-synthetic-history-'));
   roots.push(root);
   const lines: string[] = [],
@@ -138,11 +138,50 @@ async function fixture(failed = false) {
   scope.environment(env);
   scope.worker(env, worker, run, { code: 'actual synthetic bundle' } as WorkflowBundle);
   scope.track(run);
-  await scope.start(env, 'taskWorkflow', { workflowId: 'workflow', taskQueue: 'q', args: [] });
+  if (started) await scope.start(env, 'taskWorkflow', { workflowId: 'workflow', taskQueue: 'q', args: [] });
   return { scope, env, worker, run, stop, lines, exactHandle, withDeadline, root, raw, order };
 }
 
 describe('local watchdog and owned worker cleanup', () => {
+  it('captures a tracked early failure before manual finally closes the environment and preserves the original error', async () => {
+    const f = await fixture();
+    const original = new Error('synthetic assertion failure');
+    f.stop();
+    try {
+      await expect(f.scope.track(Promise.reject(original))).rejects.toBe(original);
+      expect(f.env.teardown).not.toHaveBeenCalled();
+      expect(f.exactHandle.fetchHistory).toHaveBeenCalledTimes(1);
+      expect(f.lines.map(parse)).toContainEqual(
+        expect.objectContaining({ outcome: 'captured', kind: 'history', reason: 'test-body-failed' }),
+      );
+    } finally {
+      await f.scope.closeEnvironment(f.env);
+    }
+    await f.scope.finish();
+    expect(f.env.teardown).toHaveBeenCalledTimes(1);
+    expect(f.exactHandle.fetchHistory).toHaveBeenCalledTimes(1);
+  });
+  it('keeps start/creation failures without a handle explicitly unknown and preserves the original error', async () => {
+    const f = await fixture(false, false);
+    const original = new Error('synthetic start failure');
+    vi.mocked(f.env.client.workflow.start).mockRejectedValue(original);
+    f.stop();
+    await expect(
+      f.scope.track(
+        f.scope.start(f.env, 'taskWorkflow', {
+          workflowId: 'workflow',
+          taskQueue: 'q',
+          args: [],
+        }),
+      ),
+    ).rejects.toBe(original);
+    await f.scope.finish();
+    expect(f.lines.map(parse)).toContainEqual(
+      expect.objectContaining({ outcome: 'unknown', code: 'no-started-run' }),
+    );
+    expect(f.exactHandle.fetchHistory).not.toHaveBeenCalled();
+    expect(f.env.teardown).toHaveBeenCalledTimes(1);
+  });
   it('starts the diagnostic clock before environment and Workflow start, without inventing a run', async () => {
     vi.useFakeTimers();
     const lines: string[] = [];

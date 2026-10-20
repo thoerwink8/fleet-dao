@@ -178,8 +178,12 @@ export class SyntheticHistoryDiagnostics {
     return env;
   }
   track<T>(run: Promise<T>): Promise<T> {
-    this.operations.push(settled(run));
-    return run;
+    const observed = run.catch(async (error) => {
+      await this.captureFailure();
+      throw error;
+    });
+    this.operations.push(settled(observed));
+    return observed;
   }
   worker(env: TestWorkflowEnvironment, worker: Worker, run: Promise<unknown>, bundle: WorkflowBundle): void {
     if (!this.environments.has(env)) this.environments.set(env, undefined);
@@ -212,6 +216,10 @@ export class SyntheticHistoryDiagnostics {
       });
     });
     return this.capturePromise;
+  }
+  /** 必须在 manual finally 关环境之前调用；保留原失败对象，由调用者原样抛出。 */
+  captureFailure(): Promise<void> {
+    return this.capture('test-body-failed');
   }
   private async read(reason: string): Promise<void> {
     const stage = this.stage;

@@ -221,6 +221,9 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
           },
           { tasks },
         );
+      } catch (error) {
+        await diagnostics.captureFailure();
+        throw error;
       } finally {
         await diagnostics.closeEnvironment(env);
       }
