@@ -90,6 +90,8 @@ function fakeGh(over: Partial<Record<string, unknown>> = {}): { gh: Gh; calls: s
     pullFiles: pick('pullFiles'),
     mergePr: pick('mergePr'),
     updateBranch: pick('updateBranch'),
+    // 认自己同步的头：只有用例给了才装上，没给就是老装配（当不是自己同步的）
+    ...('branchUpdateOf' in over ? { branchUpdateOf: pick('branchUpdateOf') } : {}),
     claims: {
       readPull: pick('readPull'),
       enableAutoMerge: pick('enableAutoMerge'),
@@ -2137,5 +2139,156 @@ describe('挂自动合并：enablePullRequestAutoMerge 的 unstable 临时拒绝
       expect(await a.attempt(1)).toEqual({ armed: true, merged: false });
       expect(a.sent()).toBe(1);
     });
+  });
+});
+
+describe('同步主线后回执丢了：认出是引擎自己同步换的头（#3443）', () => {
+  const NEW = 'd'.repeat(40);
+  const arm = (gh: Gh) =>
+    make({ gh }).acts.armAutoMerge({ schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD }, ctx());
+  const wait = (gh: Gh) =>
+    make({ gh }).acts.waitMerged(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD, minutes: 1 },
+      ctx(),
+    );
+  const behind = (over: Partial<Record<string, unknown>>) =>
+    fakeGh({
+      readPull: async () => pullFacts(),
+      enableAutoMerge: async () => {
+        throw new GitHubError('GRAPHQL_ERROR', 'Pull request is in clean status');
+      },
+      mergePr: async () => ({ merged: false, reason: 'behind_main', detail: '主线比 PR 多 1 个提交' }),
+      ...over,
+    });
+  type Asked = {
+    repo: { owner: string; name: string };
+    prNumber: number;
+    expectedHead: string;
+    head: string;
+  };
+  /** 认同步的假口子：只认这个仓、PR 7、旧头 HEAD、新头 NEW 这一组；记下每次问的。 */
+  const ownSync = (asked: Asked[]) => async (input: Asked) => {
+    asked.push(input);
+    const same =
+      input.repo.owner === REPO.owner &&
+      input.repo.name === REPO.name &&
+      input.prNumber === 7 &&
+      input.expectedHead === HEAD &&
+      input.head === NEW;
+    return same ? { synced: true } : { synced: false, reason: 'no_record', detail: '账上没有' };
+  };
+
+  it('第一次尝试同步被收下、等新头没等到就抛了；重试读到新头：标 syncedMain，不当成别人改的', async () => {
+    let head = HEAD;
+    const asked: Asked[] = [];
+    const f = behind({
+      readPull: async () => pullFacts({ headSha: head }),
+      updateBranch: async () => {
+        // GitHub 收下了（202），新头过一会儿才出来：这一次没等到，抛可重试
+        head = NEW;
+        throw new GitHubError('UPDATE_BRANCH_PENDING', '同步主线 GitHub 收下了，但头一直没变：稍后重试', {
+          retryable: true,
+        });
+      },
+      branchUpdateOf: ownSync(asked),
+    });
+    await expect(arm(f.gh)).rejects.toMatchObject({ code: 'UPDATE_BRANCH_PENDING' });
+    const got = await arm(f.gh);
+    expect(got).toMatchObject({ armed: false, merged: false, headMoved: NEW, syncedMain: true });
+    expect(asked).toEqual([
+      { repo: { owner: REPO.owner, name: REPO.name }, prNumber: 7, expectedHead: HEAD, head: NEW },
+    ]);
+    // 重试不再同步、不再挂
+    expect(f.calls.filter((c) => c === 'updateBranch')).toHaveLength(1);
+    expect(f.calls.slice(-2)).toEqual(['readPull', 'branchUpdateOf']);
+  });
+
+  it('挂上之后才被另一次尝试同步（等合并读到新头）：head_moved 标 syncedMain', async () => {
+    const asked: Asked[] = [];
+    const f = fakeGh({
+      readPull: async () => pullFacts({ headSha: NEW, autoMerge: true }),
+      branchUpdateOf: ownSync(asked),
+    });
+    expect(await wait(f.gh)).toEqual({ state: 'head_moved', head: NEW, syncedMain: true });
+    expect(asked).toHaveLength(1);
+  });
+
+  it('同步时 updateBranch 读到的新头正是上一次尝试同步出来的：标 syncedMain', async () => {
+    const f = behind({
+      updateBranch: async () => ({ updated: false, reason: 'head_moved', detail: '头变了', head: NEW }),
+      branchUpdateOf: ownSync([]),
+    });
+    expect(await arm(f.gh)).toMatchObject({ headMoved: NEW, syncedMain: true });
+  });
+
+  it('不强制 CI 的直接合并读到自己同步的新头：同样标 syncedMain', async () => {
+    const f = fakeGh({ readPull: async () => pullFacts({ headSha: NEW }), branchUpdateOf: ownSync([]) });
+    const got = await make({ gh: f.gh }).acts.mergeNow(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(got).toMatchObject({ merged: false, reason: 'head_moved', headMoved: NEW, syncedMain: true });
+  });
+
+  it('【故意造出的失败】别人改的头（账上没有）：挂合并、等合并、同步时都不标 syncedMain', async () => {
+    const OTHER = 'e'.repeat(40);
+    const asked: Asked[] = [];
+    const armed = await arm(
+      fakeGh({ readPull: async () => pullFacts({ headSha: OTHER }), branchUpdateOf: ownSync(asked) }).gh,
+    );
+    expect(armed).toMatchObject({ armed: false, merged: false, headMoved: OTHER });
+    expect(armed.syncedMain).toBeUndefined();
+    expect(armed.why).toContain('有人改过');
+    expect(
+      await wait(
+        fakeGh({
+          readPull: async () => pullFacts({ headSha: OTHER, autoMerge: true }),
+          branchUpdateOf: ownSync(asked),
+        }).gh,
+      ),
+    ).toEqual({ state: 'head_moved', head: OTHER });
+    const synced = await arm(
+      behind({
+        updateBranch: async () => ({ updated: false, reason: 'head_moved', detail: '头变了', head: OTHER }),
+        branchUpdateOf: ownSync(asked),
+      }).gh,
+    );
+    expect(synced).toMatchObject({ headMoved: OTHER });
+    expect(synced.syncedMain).toBeUndefined();
+    expect(asked).toHaveLength(3);
+  });
+
+  it('【故意造出的失败】账是这张 PR 别的旧头的（身份不匹配）：不标 syncedMain', async () => {
+    const f = fakeGh({
+      readPull: async () => pullFacts({ headSha: NEW }),
+      branchUpdateOf: async (input: Asked) =>
+        input.expectedHead === 'f'.repeat(40)
+          ? { synced: true }
+          : { synced: false, reason: 'no_record', detail: '账上没有这个旧头的同步' },
+    });
+    const got = await arm(f.gh);
+    expect(got).toMatchObject({ headMoved: NEW });
+    expect(got.syncedMain).toBeUndefined();
+  });
+
+  it('【故意造出的失败】认同步时读账 / 读提交失败：照抛，不当成别人改的，也不当成自己同步的', async () => {
+    const broken = async () => {
+      throw new GitHubError('NETWORK', '读账超时', { retryable: true });
+    };
+    await expect(
+      arm(fakeGh({ readPull: async () => pullFacts({ headSha: NEW }), branchUpdateOf: broken }).gh),
+    ).rejects.toMatchObject({ retryable: true });
+    await expect(
+      wait(
+        fakeGh({ readPull: async () => pullFacts({ headSha: NEW, autoMerge: true }), branchUpdateOf: broken })
+          .gh,
+      ),
+    ).rejects.toMatchObject({ retryable: true });
+  });
+
+  it('没装上认同步的口子（老装配）：照旧回 headMoved，不标 syncedMain', async () => {
+    const got = await arm(fakeGh({ readPull: async () => pullFacts({ headSha: NEW }) }).gh);
+    expect(got).toMatchObject({ headMoved: NEW });
+    expect(got.syncedMain).toBeUndefined();
   });
 });

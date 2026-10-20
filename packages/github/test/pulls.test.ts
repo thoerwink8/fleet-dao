@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mergeKey } from '../src/pulls.ts';
+import { branchUpdateKey, mergeKey } from '../src/pulls.ts';
 import { hasCloseKeywords } from '../src/text.ts';
 import { json, repo, setup, sha } from './helpers.ts';
 
@@ -1043,5 +1043,143 @@ describe('同步主线（update-branch）', () => {
       retryable: true,
     });
     expect(sleeps).toEqual([1000, 2000, 4000, 8000, 16000]);
+  });
+});
+
+describe('认出引擎自己同步主线换的头（branchUpdateOf，#3443）', () => {
+  const MAIN = sha('9');
+  const SYNC = sha('5');
+  function open(fake: ReturnType<typeof setup>['fake'], headSha = A) {
+    return fake.addPull({ title: '登录页加验证码', head: { ref: 'task/1', sha: headSha } });
+  }
+  /** GitHub 收下了同步（202），新头在等的那几秒里一直没出来：这一次抛可重试，回执丢了。之后 GitHub 才把头换成 SYNC。 */
+  async function stalledThenLanded(w: ReturnType<typeof setup>, prNumber: number) {
+    w.fake.updateBranchMode = 'stall';
+    await expect(w.gh.updateBranch({ repo, prNumber, expectedHead: A })).rejects.toMatchObject({
+      code: 'UPDATE_BRANCH_PENDING',
+    });
+    const pr = w.fake.pulls.get(prNumber);
+    if (!pr) throw new Error('PR 不见了');
+    pr.head.sha = SYNC;
+    w.fake.commitParents.set(SYNC, [A, MAIN]);
+    w.fake.aheadBy.set(MAIN, 0);
+  }
+
+  it('同步被收下、回执丢了：账绑着仓、PR、旧头，新头正是并主线的合并提交，认成自己同步的', async () => {
+    const w = setup();
+    const pr = open(w.fake);
+    await stalledThenLanded(w, pr.number);
+    expect(await w.ledger.idempotency.peek(branchUpdateKey(repo, pr.number, A))).toMatchObject({
+      action: 'github.update_branch',
+      result: { accepted: true, prNumber: pr.number, expectedHead: A },
+    });
+    expect(await w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: SYNC })).toEqual({
+      synced: true,
+    });
+    // 只读：不再发同步、不写别的
+    expect(w.fake.calls('PUT', /\/update-branch$/)).toHaveLength(1);
+  });
+
+  it('正常同步：新头当场等到，账也记上', async () => {
+    const w = setup();
+    const pr = open(w.fake);
+    w.fake.aheadBy.set(w.fake.updateBranchMainline, 0);
+    const res = await w.gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A });
+    if (!res.updated) throw new Error('应当同步成了');
+    expect(await w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: res.head })).toEqual(
+      { synced: true },
+    );
+    const row = await w.ledger.idempotency.peek(branchUpdateKey(repo, pr.number, A));
+    expect(row?.completedAt).toBeTruthy();
+    expect(row?.result).toEqual({
+      accepted: true,
+      repo: 'acme/widgets',
+      prNumber: pr.number,
+      expectedHead: A,
+    });
+  });
+
+  it('【故意造出的失败】账上没有（外部推的头，哪怕长得像并主线）：不认', async () => {
+    const w = setup();
+    const pr = open(w.fake, SYNC);
+    w.fake.commitParents.set(SYNC, [A, MAIN]);
+    w.fake.aheadBy.set(MAIN, 0);
+    expect(
+      await w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: SYNC }),
+    ).toMatchObject({ synced: false, reason: 'no_record' });
+  });
+
+  it('【故意造出的失败】身份不匹配：别的旧头、别的 PR 的账都不认', async () => {
+    const w = setup();
+    const pr = open(w.fake);
+    const other = open(w.fake, B);
+    await stalledThenLanded(w, pr.number);
+    // 同一张 PR，问的旧头不是账上那个
+    expect(
+      await w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: B, head: SYNC }),
+    ).toMatchObject({ synced: false, reason: 'no_record' });
+    // 账是 pr 的，问的是另一张 PR
+    expect(
+      await w.gh.branchUpdateOf({ repo, prNumber: other.number, expectedHead: A, head: SYNC }),
+    ).toMatchObject({ synced: false, reason: 'no_record' });
+  });
+
+  it('【故意造出的失败】同步之后又有人推了提交 / 强推成别的：新头不是那次的合并提交，不认', async () => {
+    const w = setup();
+    const pr = open(w.fake);
+    await stalledThenLanded(w, pr.number);
+    const ON_TOP = sha('6');
+    w.fake.commitParents.set(ON_TOP, [SYNC]);
+    expect(
+      await w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: ON_TOP }),
+    ).toMatchObject({ synced: false, reason: 'not_sync_commit' });
+    const FORCED = sha('7');
+    w.fake.commitParents.set(FORCED, [B, MAIN]);
+    expect(
+      await w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: FORCED }),
+    ).toMatchObject({ synced: false, reason: 'not_sync_commit' });
+  });
+
+  it('【故意造出的失败】第二个父不在主线里：不认', async () => {
+    const w = setup();
+    const pr = open(w.fake);
+    await stalledThenLanded(w, pr.number);
+    w.fake.aheadBy.set(MAIN, 2);
+    expect(
+      await w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: SYNC }),
+    ).toMatchObject({ synced: false, reason: 'not_sync_commit' });
+  });
+
+  it('【故意造出的失败】读账失败、读提交失败：照抛，不当成认出或没认出', async () => {
+    const w = setup();
+    const pr = open(w.fake);
+    await stalledThenLanded(w, pr.number);
+    const peek = w.ledger.idempotency.peek;
+    w.ledger.idempotency.peek = async () => {
+      throw new Error('库连不上');
+    };
+    await expect(
+      w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: SYNC }),
+    ).rejects.toThrow('库连不上');
+    w.ledger.idempotency.peek = peek;
+    w.fake.commitParents.delete(SYNC);
+    await expect(
+      w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: SYNC }),
+    ).rejects.toBeTruthy();
+  });
+
+  it('记账失败不挡同步：照样回新头，只是之后认不出（照旧当别人改的）', async () => {
+    const w = setup();
+    const pr = open(w.fake);
+    w.ledger.idempotency.claim = async () => {
+      throw new Error('库连不上');
+    };
+    const res = await w.gh.updateBranch({ repo, prNumber: pr.number, expectedHead: A });
+    expect(res.updated).toBe(true);
+    expect(w.logs.some((l) => l.level === 'warn' && l.message.includes('账没记上'))).toBe(true);
+    if (!res.updated) return;
+    expect(
+      await w.gh.branchUpdateOf({ repo, prNumber: pr.number, expectedHead: A, head: res.head }),
+    ).toMatchObject({ synced: false, reason: 'no_record' });
   });
 });

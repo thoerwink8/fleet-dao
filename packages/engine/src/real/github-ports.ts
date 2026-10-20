@@ -78,6 +78,7 @@ export type EngineGitHub = Pick<
   | 'waitCi'
   | 'mergePr'
   | 'updateBranch'
+  | 'branchUpdateOf'
   | 'updateIssueProgress'
   | 'closeIssue'
   | 'commitIdentity'

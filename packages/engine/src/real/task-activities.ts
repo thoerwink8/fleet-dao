@@ -194,7 +194,9 @@ export interface TaskActivitiesDeps extends ReviewAuditDeps {
   gh: Pick<
     EngineGitHub,
     'readIssue' | 'readSpecDoc' | 'readRepoFile' | 'pullFiles' | 'mergePr' | 'updateBranch' | 'claims'
-  >;
+  > &
+    /** 头换了时认「是不是引擎自己同步主线换的」。没装上（老测试）就当不是：照旧回 headMoved、停下等人。真装配必给。 */
+    Partial<Pick<EngineGitHub, 'branchUpdateOf'>>;
   trees: Pick<WorkTrees, 'ownerOf'>;
   exec: UserExec;
   now?: () => Date;
@@ -637,6 +639,16 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       };
     }
     if (synced.reason === 'head_moved' && synced.head !== undefined) {
+      // 同一个旧头上一次（重试前的尝试）已经同步过、这一下读到的正是那次的新头：照自己同步的交回去
+      if (await ownMainSync(repo, prNumber, expectedHead, synced.head, ctx)) {
+        return {
+          armed: false,
+          merged: false,
+          why: `落后主线，PR #${prNumber} 已由引擎上一次同步到最新主线（新头 ${short(synced.head)}）`,
+          headMoved: synced.head,
+          syncedMain: true,
+        };
+      }
       return {
         armed: false,
         merged: false,
@@ -649,6 +661,28 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       merged: false,
       why: `落后主线，同步主线没成（${synced.reason}）：${synced.detail}`,
     };
+  };
+
+  /**
+   * 头已经不是 expectedHead：是不是引擎自己同步主线换的（#3443：同步被 GitHub 收下后回执丢了、活动重试，
+   * 或另一次尝试刚同步完，挂合并、等合并读到新头就当成别人改了，停下等人）。只认 github 包的 branchUpdateOf：
+   * 账上有这个仓、这张 PR、这个旧头被收下的同步，新头正是那次的合并提交。不看作者、提交说明。
+   * 没装上当不是；读不成照抛（活动重试），不当成别人改的、也不当成自己同步的。认出来也只是不停下：新头照样重走 CI 和冷验收。
+   */
+  const ownMainSync = async (
+    repo: RepoRef,
+    prNumber: number,
+    expectedHead: string,
+    head: string,
+    ctx: PortContext,
+  ): Promise<boolean> => {
+    const branchUpdateOf = gh.branchUpdateOf;
+    if (branchUpdateOf === undefined || !FULL_SHA.test(head) || !FULL_SHA.test(expectedHead)) return false;
+    const got = await mapped(() => branchUpdateOf({ repo, prNumber, expectedHead, head }, ctx));
+    if (!got.synced) {
+      log('PR 的头换了，不是引擎自己同步主线换的', { prNumber, expectedHead, head, reason: got.reason });
+    }
+    return got.synced;
   };
 
   return {
@@ -798,6 +832,15 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         return { armed: false, merged: false, why: `PR #${prNumber} 已经关了`, refused: 'closed' };
       }
       if (pull.headSha !== expectedHead) {
+        if (await ownMainSync(repo, prNumber, expectedHead, pull.headSha, ctx)) {
+          return {
+            armed: false,
+            merged: false,
+            why: `落后主线，PR #${prNumber} 已由引擎同步到最新主线（新头 ${short(pull.headSha)}，上一次没收到回执）`,
+            headMoved: pull.headSha,
+            syncedMain: true,
+          };
+        }
         return {
           armed: false,
           merged: false,
@@ -995,11 +1038,15 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         return { merged: false, reason: 'closed', detail: `PR #${prNumber} 已经关了` };
       }
       if (pull.headSha !== expectedHead) {
+        const own = await ownMainSync(repo, prNumber, expectedHead, pull.headSha, ctx);
         return {
           merged: false,
           reason: 'head_moved',
-          detail: `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎推上去的 ${short(expectedHead)}`,
+          detail: own
+            ? `PR #${prNumber} 已由引擎同步到最新主线（新头 ${short(pull.headSha)}，上一次没收到回执）`
+            : `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎推上去的 ${short(expectedHead)}`,
           headMoved: pull.headSha,
+          ...(own ? { syncedMain: true } : {}),
         };
       }
       const held = await reviewHold(repo, pull);
@@ -1081,7 +1128,13 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           };
         }
         if (pull.state !== 'open') return { state: 'closed' };
-        if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
+        if (pull.headSha !== expectedHead) {
+          // 挂上之后头才换：另一次挂合并的尝试（服务端判了超时、进程还在跑）把它同步到了最新主线
+          if (await ownMainSync(repo, prNumber, expectedHead, pull.headSha, ctx)) {
+            return { state: 'head_moved', head: pull.headSha, syncedMain: true };
+          }
+          return { state: 'head_moved', head: pull.headSha };
+        }
         if (
           input.contractGuard &&
           !(await guardRequirementContract(

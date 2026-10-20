@@ -36,6 +36,11 @@
 //   已合，或开着、头没变、没挂着「要求改」、必过检查（含合并闸、cold-verify）全绿，就自己醒来、和人点「继续」回来走同一条路，不用人点；
 //   不满足原地接着等、不再报警。人闸（改标准、头被别人改了、PR 被关、并主线并不动）不走这条，照旧只等人。
 //   标记不在历史里就照旧 park（无限等人）。
+// - 头是引擎自己同步主线换的、回执却丢了（#3443：update-branch 被 GitHub 收下后等新头没等到、活动重试，或服务端判超时的
+//   那次尝试在等合并期间才把头换掉）：活动凭 github 包的 branchUpdateOf（账上这个仓、这张 PR、这个旧头的同步被收下，
+//   新头正是那次的合并提交）在 headMoved / head_moved 上标 syncedMain，这里不停下，和挂合并时 syncedMain 同一处理：
+//   对新头重走 CI、冷验收、查路径。认不出（没账、新头上又推了提交、别的旧头的账）照旧当别人改的停下；读不成活动抛错，不当成任一种。
+//   等合并那一支用 patched('merge-wait-synced-main') 守住，老历史的活动结果没有 syncedMain，走不进去。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { CancellationScope, isCancellation, log, patched } from '@temporalio/workflow';
@@ -533,6 +538,14 @@ export async function armAndWaitMerged(
         break;
       }
       if (w.state === 'head_moved') {
+        // 头是引擎自己同步主线换的（#3443）：和挂合并时 syncedMain 同一处理，不停下等人，对新头重走 CI 和冷验收。
+        // 老历史的活动结果没有 syncedMain，进不了这一支、不打标记
+        if (w.syncedMain === true && patched('merge-wait-synced-main')) {
+          rt.mainSyncs += 1;
+          rt.status.lastProblem = `PR #${prNumber} 落后主线，引擎已同步到最新主线（新头 ${w.head.slice(0, 7)}）`;
+          rt.head = w.head;
+          return { kind: 'head_moved' };
+        }
         await rt.park('PR 的头被别人改了', headMovedDetail(w.head, head));
         rt.head = w.head;
         return { kind: 'head_moved' };
