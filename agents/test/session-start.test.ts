@@ -116,10 +116,24 @@ function temp(name: string): string {
   return dir;
 }
 
+// gc.auto / maintenance.auto 关掉：commit 之后 git 可能在后台自动整理，往 .git/objects/pack 里写，
+// 正好碰上 afterEach 删临时仓（CI 上报过 ENOTEMPTY rmdir objects/pack）
 const g = (cwd: string, ...a: string[]) =>
   runChildOk(
     'git',
-    ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...a],
+    [
+      '-c',
+      'user.name=t',
+      '-c',
+      'user.email=t@example.invalid',
+      '-c',
+      'commit.gpgsign=false',
+      '-c',
+      'gc.auto=0',
+      '-c',
+      'maintenance.auto=false',
+      ...a,
+    ],
     {
       cwd,
     },

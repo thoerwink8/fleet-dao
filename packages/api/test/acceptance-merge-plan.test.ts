@@ -10,10 +10,17 @@ import {
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { eq } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { parseAcceptanceArgs, planAcceptanceMerge } from '../src/acceptance-cli.ts';
+import {
+  type MergePlanInput,
+  parseAcceptanceArgs,
+  planAcceptanceMerge as realPlanAcceptanceMerge,
+} from '../src/acceptance-cli.ts';
 import { type CliDeps, main } from '../src/cli.ts';
 
 let t: TestDb;
+let reader: import('../src/acceptance-execution-reader.ts').AcceptanceExecutionReader;
+const planAcceptanceMerge = (db: TestDb['db'], input: MergePlanInput) =>
+  realPlanAcceptanceMerge(db, input, reader);
 beforeAll(async () => {
   t = await createTestDb();
 }, TEST_DB_TIMEOUT_MS);
@@ -95,6 +102,55 @@ async function seed() {
     mergeCommit: MERGE,
     duties: [d23, d24, d32].map((d) => ({ id: d.id, generation: d.generation })),
   } as const;
+  reader = {
+    read: async (id) =>
+      id.workflowId !== input.workflowId || id.temporalRunId !== input.temporalRunId
+        ? { kind: 'unknown', code: '错 run' }
+        : {
+            kind: 'observed',
+            stats: { events: 8, pages: 1, bytes: 1000 },
+            proof: {
+              namespace: 'test',
+              workflowId: input.workflowId,
+              runId: input.temporalRunId,
+              taskId: task.id,
+              repo: 'o/r',
+              issueNumber: 3090,
+              workflowType: 'taskWorkflow',
+              taskQueue: 'test',
+              startHash: '0'.repeat(64),
+              closeEvent: '8',
+              status: 2,
+              final: {
+                scheduled: '6',
+                completed: '7',
+                head: FINAL,
+                prNumber: 3104,
+                payloadHash: '0'.repeat(64),
+              },
+              sources: [
+                ...[d23, d24, d32].map((r) => ({
+                  kind: 'acceptanceDuties' as const,
+                  prNumber: r.prNumber,
+                  head: r.head,
+                  items: [...r.items],
+                  scheduled: '2',
+                  completed: '3',
+                  payloadHash: '0'.repeat(64),
+                })),
+                {
+                  kind: 'coldVerify',
+                  prNumber: 3104,
+                  head: FINAL,
+                  items: ['最终头新增项'],
+                  scheduled: '6',
+                  completed: '7',
+                  payloadHash: '0'.repeat(64),
+                },
+              ],
+            },
+          },
+  };
   return { repo, task, d23, d24, d32, input };
 }
 
@@ -240,6 +296,7 @@ describe('acceptance merge-plan 只读预检', () => {
     const err: string[] = [];
     const deps = {
       env: { DATABASE_URL: 'test' },
+      acceptanceExecutionReader: reader,
       out: (x: string) => out.push(x),
       err: (x: string) => err.push(x),
       openDb: async () => ({ db: t.db, close: async () => {} }),

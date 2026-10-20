@@ -28,6 +28,7 @@ export class TreeHelperError extends Error {
 }
 
 async function call(options: TreeHelperOptions, args: string[]): Promise<Reply> {
+  options.signal?.throwIfAborted();
   const [bin, ...rest] = [
     ...(options.sudo ?? ['/usr/bin/sudo', '-n']),
     options.helper ?? '/usr/local/sbin/fleet-agent-scope',
@@ -163,21 +164,115 @@ export async function removeTreeIdentity(
 }
 
 export async function cleanupStatus(options: TreeHelperOptions = {}): Promise<Reply[]> {
-  const reply = await invokeTreeHelper(options, ['cleanup-status']);
-  return cleanupRows(reply);
+  return (await readCleanupPages(options)).rows;
 }
 
-function cleanupRows(reply: Reply): Reply[] {
-  if (reply.state !== 'ok' || !Array.isArray(reply.rows) || reply.truncated !== false)
-    throw new Error('清理事务列表不完整');
-  return reply.rows as Reply[];
+/** Bounds of one whole cleanup-status read; past any of them the list stays incomplete. */
+export const CLEANUP_PAGE_LIMITS = { pages: 256, rounds: 3, rows: 5000, bytes: 8 * 1024 * 1024, ms: 300_000 };
+
+const HASH = /^[0-9a-f]{64}$/;
+const ROUND = /^[0-9a-f]{32}$/;
+const CURSOR = /^[A-Za-z0-9_-]{1,2048}\.[0-9a-f]{64}$/;
+
+function incomplete(why: string): Error {
+  return new Error(`清理事务列表不完整：${why}`);
+}
+
+/**
+ * Walk every helper page; only a final page with truncated=false proves the list complete. The
+ * cursor is opaque and signed by the helper (position, namespace stamp, digests, round bounds);
+ * this side checks the chain: one round, consecutive pages, each starting at the bucket the last
+ * one stopped at, rows inside that range, no cursor or row twice. state=changed restarts the whole
+ * round (bounded), so pages of different rounds are never stitched.
+ */
+async function readCleanupPages(options: TreeHelperOptions): Promise<{ rows: Reply[]; namespace: unknown }> {
+  const deadline = Date.now() + CLEANUP_PAGE_LIMITS.ms;
+  for (let round = 0; round < CLEANUP_PAGE_LIMITS.rounds; round++) {
+    const done = await readCleanupRound(options, deadline);
+    if (done) return done;
+  }
+  throw incomplete(`命名空间连续 ${CLEANUP_PAGE_LIMITS.rounds} 轮在翻页中换代`);
+}
+
+async function readCleanupRound(
+  options: TreeHelperOptions,
+  deadline: number,
+): Promise<{ rows: Reply[]; namespace: unknown } | null> {
+  const rows: Reply[] = [];
+  const ids = new Set<string>();
+  const seen = new Set<string>();
+  let bytes = 0;
+  let round: { id: string; namespace: TreeIdentity } | null = null;
+  let through: string | null = null;
+  let cursor: string | null = null;
+  for (let page = 1; ; page++) {
+    if (page > CLEANUP_PAGE_LIMITS.pages) throw incomplete(`超过 ${CLEANUP_PAGE_LIMITS.pages} 页上限`);
+    const left = deadline - Date.now();
+    if (left <= 0) throw incomplete('整轮读取超时');
+    const signal = AbortSignal.any([AbortSignal.timeout(left), ...(options.signal ? [options.signal] : [])]);
+    let reply: Reply;
+    try {
+      reply = await invokeTreeHelper(
+        { ...options, signal },
+        cursor ? ['cleanup-status', '--cursor', cursor] : ['cleanup-status'],
+      );
+    } catch (error) {
+      throw incomplete(`第 ${page} 页读失败：${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (reply.state === 'changed') return null;
+    bytes += Buffer.byteLength(JSON.stringify(reply));
+    if (reply.state !== 'ok' || !Array.isArray(reply.rows) || typeof reply.truncated !== 'boolean')
+      throw incomplete(`第 ${page} 页回执不完整`);
+    // A helper without pages answers one untruncated page; it is complete only because it says so.
+    const legacy = page === 1 && !reply.truncated && reply.round === undefined;
+    if (round) {
+      if (reply.round !== round.id || reply.page !== page) throw incomplete(`第 ${page} 页不是本轮的下一页`);
+      if (JSON.stringify(treeIdentity(reply.namespace)) !== JSON.stringify(round.namespace))
+        throw incomplete('翻页中命名空间身份变了');
+    } else if (!legacy) {
+      if (typeof reply.round !== 'string' || !ROUND.test(reply.round) || reply.page !== 1)
+        throw incomplete('帮手不支持分页游标，只读到前缀');
+      if (reply.truncated) round = { id: reply.round, namespace: treeIdentity(reply.namespace) };
+    }
+    const from = reply.from ?? null;
+    const end = reply.through ?? null;
+    if (!legacy) {
+      if (from !== through) throw incomplete(`第 ${page} 页不是从上一页停下的桶接着读`);
+      if (end !== null && (typeof end !== 'string' || !HASH.test(end) || (from !== null && end < from)))
+        throw incomplete(`第 ${page} 页读到的位置缺失或回退`);
+    }
+    if (reply.truncated) {
+      if (typeof reply.cursor !== 'string' || !CURSOR.test(reply.cursor) || seen.has(reply.cursor))
+        throw incomplete(`第 ${page} 页游标缺失或重复`);
+      seen.add(reply.cursor);
+    }
+    for (const row of reply.rows as unknown[]) {
+      const r = row as Reply;
+      if (!r || typeof r !== 'object' || typeof r.id !== 'string' || !HASH.test(r.id))
+        throw incomplete(`第 ${page} 页有坏记录`);
+      const ph = r.pathHash;
+      if (
+        typeof ph !== 'string' ||
+        !HASH.test(ph) ||
+        (!legacy && (end === null || ph > end || (from !== null && ph <= from)))
+      )
+        throw incomplete(`第 ${page} 页记录不在本页读到的桶范围内`);
+      if (ids.has(r.id)) throw incomplete(`第 ${page} 页记录重复`);
+      ids.add(r.id);
+      rows.push(r);
+    }
+    if (rows.length > CLEANUP_PAGE_LIMITS.rows || bytes > CLEANUP_PAGE_LIMITS.bytes)
+      throw incomplete('整轮记录条数或字节超过上限');
+    if (!reply.truncated) return { rows, namespace: reply.namespace };
+    through = end as string | null;
+    cursor = reply.cursor as string;
+  }
 }
 
 /** A missing/old/failed helper response cannot exempt a root entry from the sweep. */
 export async function readCleanupNamespace(root: string, options: TreeHelperOptions = {}): Promise<Reply[]> {
-  const reply = await invokeTreeHelper(options, ['cleanup-status']);
-  const rows = cleanupRows(reply);
-  const namespace = treeIdentity(reply.namespace);
+  const { rows, namespace: claimed } = await readCleanupPages(options);
+  const namespace = treeIdentity(claimed);
   if (namespace.real !== `${root}/${CLEANUP_TRANSACTION_DIR}` || namespace.uid !== '0')
     throw new Error('清理事务命名空间身份不匹配');
   return rows;

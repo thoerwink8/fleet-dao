@@ -44,6 +44,11 @@ export interface PauseCommand {
 export interface ContinueCommand {
   by: string;
   note?: string;
+  /**
+   * 引擎自己续（#3294，engine:parked-retry）时带上它看到的那一次停下的编号：工作流只认正停在这一次上的，
+   * 晚到的不会把后来另一次停下解开。人点的「继续」不带。
+   */
+  parkSeq?: number;
 }
 
 /** 「放弃」：工作流收尾退出（工作树存档后删，PR 和单子不动，由人处理）。reason 必填，工作流用它写状态。 */

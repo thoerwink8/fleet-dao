@@ -6,13 +6,20 @@ import {
   resetTestDb,
   TEST_DB_TIMEOUT_MS,
 } from '@fleet-dao/db/testing';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { IDS } from '../src/dev-fixtures.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import type { Store } from '../src/ports.ts';
 import type { ExecutionResult } from '../src/task-execution.ts';
 import { seedPg } from '../src/testing.ts';
+import {
+  admissionSeed,
+  birthInput,
+  describeAdmissionContract,
+  legacyInput,
+  requiredAdmissionTask,
+} from './task-admission-contract.ts';
 import {
   describeExecutionContract,
   EXECUTION_TIME,
@@ -48,6 +55,7 @@ describe.runIf(Boolean(url))('真实PG执行资格（同随机隔离库/独立ba
     expect(first.db).toBe(second.db);
     expect(first.pid).not.toBe(second.pid);
     pids = [first.pid, second.pid];
+    console.info('真实PG竞争夹具', { database: first.db, backendPids: pids });
     stores = [
       createPgStore(t.peers[0].db, { now: () => EXECUTION_TIME }),
       createPgStore(t.peers[1].db, { now: () => EXECUTION_TIME }),
@@ -235,5 +243,256 @@ describe.runIf(Boolean(url))('真实PG执行资格（同随机隔离库/独立ba
   describeExecutionSchema('真实PG SQL约束', async () => {
     await resetTestDb(t);
     return t;
+  });
+
+  describeAdmissionContract('真实PG出生/legacy共用合同', async () => {
+    await resetTestDb(t);
+    await seedPg(t.db, admissionSeed());
+    return {
+      store: stores[0],
+      rebuild: (now) => createPgStore(t.peers[1].db, { now: () => now }),
+      audits: async () =>
+        (await t.client.query('select action,target,after,ok from audit_log order by id')).rows,
+    };
+  });
+
+  describe('出生与legacy真实双连接可控交错', () => {
+    beforeEach(async () => {
+      await resetTestDb(t);
+      await seedPg(t.db, admissionSeed());
+    });
+    /** INSERT trigger由真正PG advisory锁阻塞；读pg_stat_activity证明指定backend到达窗口。 */
+    async function withInsertBarrier(
+      table: 'task_execution_births' | 'task_legacy_execution_admissions',
+      body: (wait: (indices: number[]) => Promise<void>) => Promise<void>,
+    ): Promise<void> {
+      await t.client.exec(
+        `create function admission_test_barrier() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(3337001); return NEW; end $$; create trigger test_admission_barrier before insert on ${table} for each row execute function admission_test_barrier()`,
+      );
+      let release!: () => void;
+      let ready!: () => void;
+      let failed!: (error: unknown) => void;
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const entered = new Promise<void>((resolve, reject) => {
+        ready = resolve;
+        failed = reject;
+      });
+      const blocker = t.blocker.db.transaction(async (tx) => {
+        await tx.execute(sql`select pg_advisory_xact_lock(3337001)`);
+        ready();
+        await gate;
+      });
+      void blocker.catch(failed);
+      const wait = async (indices: number[]) => {
+        const chosen = indices.map((i) => pids[i]);
+        const deadline = performance.now() + 5000;
+        while (performance.now() < deadline) {
+          const observed = await t.client.query<{ n: number }>(
+            "select count(*)::int as n from pg_stat_activity where datname=current_database() and pid=any($1::int[]) and wait_event_type='Lock' and cardinality(pg_blocking_pids(pid))>0",
+            [chosen],
+          );
+          if (observed.rows[0]?.n === chosen.length) return;
+        }
+        throw new Error('准入barrier未观察到指定backend真实锁等待');
+      };
+      try {
+        await entered;
+        await body(wait);
+      } finally {
+        release();
+        await blocker;
+        await t.client.exec(
+          `drop trigger test_admission_barrier on ${table}; drop function admission_test_barrier()`,
+        );
+      }
+    }
+    const rows = async () => {
+      const result: Record<string, unknown> = {};
+      for (const table of [
+        'tasks',
+        'task_execution_controls',
+        'task_execution_births',
+        'task_legacy_execution_admissions',
+        'state_changes',
+        'audit_log',
+      ])
+        result[table] = (await t.client.query(`select * from ${table} order by 1`)).rows;
+      return result;
+    };
+    it('同完整出生请求竞争只审计一次，赢家created、其余replayed', async () => {
+      const input = birthInput();
+      let pending: ReturnType<Store['createManagedTaskFromIssue']>[] = [];
+      await withInsertBarrier('task_execution_births', async (wait) => {
+        pending = [
+          stores[0].createManagedTaskFromIssue(input, executionAudit),
+          stores[1].createManagedTaskFromIssue(input, executionAudit),
+        ];
+        for (const promise of pending) void promise.catch(() => {});
+        await wait([0, 1]);
+        // 调用后修改外部对象，事务必须仍只使用入口时的快照。
+        input.task.title = 'caller mutation while blocked';
+      });
+      const results = await allSettledOrThrow(pending);
+      expect(results.map((r) => r.kind).sort()).toEqual(['created', 'replayed']);
+      for (const result of results) {
+        if (result.kind === 'rejected') throw new Error('出生竞争失败');
+        expect(result.task.title).toBe('出生');
+        expect(result.birth.birthInputCanonical).not.toContain('caller mutation');
+      }
+      expect((await rows()).audit_log).toHaveLength(1);
+    });
+    for (const sameIssue of [true, false])
+      it(`并发出生${sameIssue ? '同issue不同request' : '不同task同全局request'} loser整事务零残留`, async () => {
+        const first = birthInput();
+        const second = birthInput({
+          birthRequestId: sameIssue ? birthInput().birthRequestId : first.birthRequestId,
+          task: {
+            ...first.task,
+            id: birthInput().task.id,
+            issueNumber: sameIssue ? first.task.issueNumber : 901,
+          },
+        });
+        let pending: Promise<unknown>[] = [];
+        await withInsertBarrier('task_execution_births', async (wait) => {
+          pending = [
+            stores[0].createManagedTaskFromIssue(first, executionAudit),
+            stores[1].createManagedTaskFromIssue(second, executionAudit),
+          ];
+          for (const promise of pending) void promise.catch(() => {});
+          await wait([0, 1]);
+        });
+        const results = (await allSettledOrThrow(pending)) as { kind: string }[];
+        expect(results.filter((r) => r.kind === 'created')).toHaveLength(1);
+        expect(results.filter((r) => r.kind === 'rejected')).toHaveLength(1);
+        const state = await rows();
+        expect(state.task_execution_controls).toHaveLength(1);
+        expect(state.task_execution_births).toHaveLength(1);
+        expect(state.task_legacy_execution_admissions).toHaveLength(0);
+        expect(
+          (state.tasks as { id: string }[]).filter((t) => [first.task.id, second.task.id].includes(t.id)),
+        ).toHaveLength(1);
+        expect(
+          (state.state_changes as { task_id: string }[]).filter((s) =>
+            [first.task.id, second.task.id].includes(s.task_id),
+          ),
+        ).toHaveLength(1);
+        expect(state.audit_log).toHaveLength(1);
+      });
+    it('出生未提交时legacy不读脏task；提交后只允许operation路径', async () => {
+      const input = birthInput();
+      let pending!: ReturnType<Store['createManagedTaskFromIssue']>;
+      await withInsertBarrier('task_execution_births', async (wait) => {
+        pending = stores[0].createManagedTaskFromIssue(input, executionAudit);
+        void pending.catch(() => {});
+        await wait([0]);
+        expect(await stores[1].admitLegacyExecution(legacyInput({ ...input.task }), executionAudit)).toEqual({
+          kind: 'rejected',
+          reason: 'not_found',
+        });
+      });
+      expect(await pending).toMatchObject({ kind: 'created' });
+      expect(await stores[1].admitLegacyExecution(legacyInput(input.task), executionAudit)).toEqual({
+        kind: 'rejected',
+        reason: 'managed_requires_operation',
+      });
+      expect(await stores[0].listLegacyExecutionAdmissions(input.task.id)).toEqual([]);
+    });
+    it('legacy先持task锁写责任时，出生不能管理化旧task', async () => {
+      const task = requiredAdmissionTask(await stores[0].findTaskByIssue(IDS.repo, 12));
+      const input = legacyInput(task);
+      let pending!: ReturnType<Store['admitLegacyExecution']>;
+      await withInsertBarrier('task_legacy_execution_admissions', async (wait) => {
+        pending = stores[0].admitLegacyExecution(input, executionAudit);
+        void pending.catch(() => {});
+        await wait([0]);
+        expect(
+          await stores[1].createManagedTaskFromIssue(
+            birthInput({
+              task: {
+                id: task.id,
+                repoId: task.repoId,
+                issueNumber: task.issueNumber,
+                title: task.title,
+                rawRequest: task.rawRequest,
+                requestedBy: task.requestedBy,
+              },
+            }),
+            executionAudit,
+          ),
+        ).toEqual({ kind: 'rejected', reason: 'existing_task_forbidden' });
+      });
+      expect(await pending).toMatchObject({ kind: 'admitted' });
+      expect(await stores[0].getExecutionBirth(task.id)).toBeNull();
+      expect(await stores[0].getExecutionControl(task.id)).toEqual({ kind: 'unmanaged' });
+    });
+    it('不同task同时竞争namespace/run，身份均自洽也只允许一条责任', async () => {
+      const a = requiredAdmissionTask(await stores[0].findTaskByIssue(IDS.repo, 12));
+      const b = requiredAdmissionTask(await stores[0].findTaskByIssue(IDS.repo, 13));
+      const first = legacyInput(a);
+      let pending: Promise<unknown>[] = [];
+      await withInsertBarrier('task_legacy_execution_admissions', async (wait) => {
+        pending = [
+          stores[0].admitLegacyExecution(first, executionAudit),
+          stores[1].admitLegacyExecution(legacyInput(b, { runId: first.runId }), executionAudit),
+        ];
+        for (const promise of pending) void promise.catch(() => {});
+        await wait([0, 1]);
+      });
+      const results = (await allSettledOrThrow(pending)) as { kind: string; reason?: string }[];
+      expect(results.filter((r) => r.kind === 'admitted')).toHaveLength(1);
+      expect(results.filter((r) => r.kind === 'rejected' && r.reason === 'identity_conflict')).toHaveLength(
+        1,
+      );
+      const state = await rows();
+      expect(state.task_legacy_execution_admissions).toHaveLength(1);
+      expect(state.audit_log).toHaveLength(1);
+    });
+    it('相同legacy run并发重送只写一次，等待期间输入修改不改变持久候选', async () => {
+      const task = requiredAdmissionTask(await stores[0].findTaskByIssue(IDS.repo, 12));
+      const input = legacyInput(task);
+      let pending: ReturnType<Store['admitLegacyExecution']>[] = [];
+      await withInsertBarrier('task_legacy_execution_admissions', async (wait) => {
+        pending = [
+          stores[0].admitLegacyExecution(input, executionAudit),
+          stores[1].admitLegacyExecution(input, executionAudit),
+        ];
+        for (const promise of pending) void promise.catch(() => {});
+        await wait([0, 1]);
+        input.taskQueue = 'caller mutation while blocked';
+      });
+      const results = await allSettledOrThrow(pending);
+      expect(results.map((r) => r.kind).sort()).toEqual(['admitted', 'replayed']);
+      for (const result of results) {
+        if (result.kind === 'rejected') throw new Error('legacy并发重送失败');
+        expect(result.admission.taskQueue).toBe('legacy');
+      }
+      const state = await rows();
+      expect(state.task_legacy_execution_admissions).toHaveLength(1);
+      expect(state.audit_log).toHaveLength(1);
+    });
+    for (const action of ['birth', 'legacy_admit'] as const)
+      it(`${action}审计触发器失败包括state_changes的整事务回滚`, async () => {
+        const before = await rows();
+        await t.client.exec(
+          `create function reject_admission_audit() returns trigger language plpgsql as $$ begin if NEW.action = 'task_execution.${action}' then raise exception 'test_admission_audit_failure'; end if; return NEW; end $$; create trigger test_admission_audit_failure before insert on audit_log for each row execute function reject_admission_audit()`,
+        );
+        try {
+          const call =
+            action === 'birth'
+              ? stores[0].createManagedTaskFromIssue(birthInput(), executionAudit)
+              : stores[0].admitLegacyExecution(
+                  legacyInput(requiredAdmissionTask(await stores[0].findTaskByIssue(IDS.repo, 12))),
+                  executionAudit,
+                );
+          await expect(call).rejects.toThrow();
+          expect(await rows()).toEqual(before);
+        } finally {
+          await t.client.exec(
+            'drop trigger test_admission_audit_failure on audit_log; drop function reject_admission_audit()',
+          );
+        }
+      });
   });
 });

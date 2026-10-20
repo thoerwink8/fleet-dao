@@ -6,6 +6,8 @@ export * from './domain-map.ts';
 export * from './migrate.ts';
 export * from './model-naming.ts';
 export * from './queries/acceptance-duties.ts';
+export * from './queries/acceptance-merge.ts';
+export * from './queries/admission-alerts.ts';
 export * from './queries/alert-work.ts';
 export * from './queries/alerts.ts';
 export * from './queries/bare-401.ts';
