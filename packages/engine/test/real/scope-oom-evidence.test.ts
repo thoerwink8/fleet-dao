@@ -80,6 +80,7 @@ describe('sampleScopeOom', () => {
       verdict: 'oom_events_in_scope',
       integrity: 'complete',
       runId: 'run-1',
+      scopeId: 'run-1',
       scope: 'fleet-agent-run-1.scope',
       source: 'memory.events.local',
       sourcePath: LOCAL,
@@ -102,6 +103,20 @@ describe('sampleScopeOom', () => {
     expect(ev).toMatchObject({ verdict: 'unknown', integrity: 'partial', finalRead: 'gone' });
     expect(ev.problems.join()).toContain('收场时文件已不在');
     expect(ev.baseline).toEqual({ oomEvents: 0, killedProcs: 0 });
+  });
+
+  it('首次采样时文件还没创建、后来才出现：保留缺口，不能说完整无事件', async () => {
+    const { deps } = fake({ [LOCAL]: [enoent(), events(0, 0)] });
+    const ev = await sample(deps).stop();
+    expect(ev).toMatchObject({
+      verdict: 'unknown',
+      integrity: 'partial',
+      scopeId: 'run-1',
+      missingBeforeFirstRead: 1,
+      baseline: { oomEvents: 0, killedProcs: 0 },
+      delta: { oomEvents: 0, killedProcs: 0 },
+    });
+    expect(ev.problems.join()).toContain('首次采样时文件尚未创建');
   });
 
   it('无事件且读取完整：none_observed / complete；层级计数单列，不参与判断', async () => {
@@ -147,6 +162,10 @@ describe('sampleScopeOom', () => {
     expect(ev.missingBeforeFirstRead).toBeGreaterThan(0);
     expect(ev.baseline).toBeUndefined();
     expect(ev.problems.join()).toContain('从头到尾都不在');
+  });
+
+  it('scope id 不能借路径穿出受管 scope 目录', () => {
+    expect(() => scopeEventsPath(SLICE, '../parent')).toThrow(/scope id 认不出/);
   });
 
   it('【故意造出的失败】拒绝读取：unknown，原因带路径和报错', async () => {

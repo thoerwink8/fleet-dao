@@ -64,6 +64,8 @@ export interface ScopeOomEvidence {
   /** complete = 收场那一读读成且全程没有问题；partial = 读到过但有缺口；unknown = 一次都没读成（或不支持）。 */
   integrity: 'complete' | 'partial' | 'unknown';
   runId: string;
+  /** 传给 systemd 的原始 scope id；和 runId 一起核对实际受管单元。 */
+  scopeId: string;
   /** 实际受管的 scope 单元名。 */
   scope: string;
   /** 证据来源：scope 自己的本地事件文件；不支持时不写。 */
@@ -77,7 +79,7 @@ export interface ScopeOomEvidence {
   reads: number;
   /** 收场那一读：ok 读成、gone 文件已不在（scope 被 --collect 收走）、failed 读不成。 */
   finalRead: 'ok' | 'gone' | 'failed';
-  /** 第一次读成之前文件还不在的次数（scope 还没建出来是正常的，只记数）。 */
+  /** 第一次读成之前文件还不在的次数；这段窗口没有证据，不能判完整无事件。 */
   missingBeforeFirstRead: number;
   /** 第一次读成的本地计数。 */
   baseline?: ScopeOomCounts;
@@ -102,6 +104,7 @@ const defuse = (raw: string) =>
 
 const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 const isMissing = (err: unknown) => (err as NodeJS.ErrnoException | undefined)?.code === 'ENOENT';
+const SCOPE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$/;
 
 /** memory.events(.local) 的 oom、oom_kill 两行；缺项、重复、不是非负整数、行不认识都抛。别的 key（low、high、max……）忽略。 */
 export function parseScopeOomCounts(text: string): ScopeOomCounts {
@@ -132,6 +135,7 @@ export function scopeEventsPath(
   scopeId: string,
   file: 'memory.events.local' | 'memory.events' = 'memory.events.local',
 ): string {
+  if (!SCOPE_ID.test(scopeId)) throw new Error(`scope id 认不出：${scopeId}`);
   return posix.join(deps.cgroupRoot, deps.slicePath, `fleet-agent-${scopeId}.scope`, file);
 }
 
@@ -143,10 +147,12 @@ export function unavailableScopeOom(
   why: string,
   window: 'start' | 'attach' = 'start',
 ): ScopeOomEvidence {
+  if (!SCOPE_ID.test(scopeId)) throw new Error(`scope id 认不出：${scopeId}`);
   return {
     verdict,
     integrity: 'unknown',
     runId,
+    scopeId,
     scope: `fleet-agent-${scopeId}.scope`,
     window,
     reads: 0,
@@ -242,6 +248,8 @@ export function sampleScopeOom(
     const finalRead = lastReadOutcome;
     if (finalRead === 'gone' && last)
       problem('收场时文件已不在（scope 被收走），最后一次读数之后的事件看不到');
+    if (missingBeforeFirstRead > 0)
+      problem(`首次采样时文件尚未创建（${localPath}），首次成功读数前的事件无法核对`);
     if (window === 'attach') problem('引擎接回后才开始读，接回之前的事件看不到');
     const base = {
       runId,
@@ -253,18 +261,17 @@ export function sampleScopeOom(
       killTarget: 'unknown' as const,
     };
     if (!baseline || !last) {
-      if (problems.length === 0) {
-        problem(
-          missingBeforeFirstRead > 0
-            ? `${localPath} 从头到尾都不在（这台没有 cgroup，或 scope 没建出来）`
-            : `收场前一次都没读成（${localPath}）`,
-        );
+      if (missingBeforeFirstRead > 0) {
+        problem(`${localPath} 从头到尾都不在（这台没有 cgroup，或 scope 没建出来）`);
+      } else if (problems.length === 0) {
+        problem(`收场前一次都没读成（${localPath}）`);
       }
       const why = problems.join('；');
       return {
         ...base,
         verdict: 'unknown',
         integrity: 'unknown',
+        scopeId,
         source: 'memory.events.local',
         sourcePath: localPath,
         problems: [...problems],
@@ -297,6 +304,7 @@ export function sampleScopeOom(
     }
     return {
       ...base,
+      scopeId,
       verdict,
       integrity: complete ? 'complete' : 'partial',
       source: 'memory.events.local',
