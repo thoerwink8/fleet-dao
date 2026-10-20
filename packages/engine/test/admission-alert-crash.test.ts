@@ -110,6 +110,17 @@ function classifyCommitStall(t: StallTimes): 'commit' | 'sample' | 'fsync' | 'be
   const top = phases.reduce((best, item) => (item[1] > best[1] ? item : best));
   return index < 0 || top[1] <= 0 ? 'unknown' : top[0];
 }
+// 同步用例体堵住事件循环，vitest 的 15000ms 计时器只能等用例体返回后才判超时（runWithTimeout 的 deadline.exceeded）。
+// 所以「Test timed out in 15000ms」意味着 256 条已经走完，是累计超时，不是卡死在某个边界；afterEach 另有自己的计时。
+// 失败时据此分：有一条占了全部 record 耗时的一半以上是 single-record（单条卡住），否则是 cumulative；一条都没走完是 unknown。
+type RecordSpan = { index: number; recordMs: number; commitMs: number };
+function classifyStallShape(
+  slowest: RecordSpan | undefined,
+  recordMs: number,
+): 'single-record' | 'cumulative' | 'unknown' {
+  if (!slowest || recordMs <= 0) return 'unknown';
+  return slowest.recordMs * 2 >= recordMs ? 'single-record' : 'cumulative';
+}
 function measureSpoolExec(
   original: (this: DatabaseSync, sql: string) => unknown,
   db: DatabaseSync,
@@ -282,7 +293,9 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       recordMs = 0,
       sampleMs = 0,
       fsyncCalls = 0,
-      fsyncMs = 0;
+      fsyncMs = 0,
+      recordsDone = 0;
+    let slowest: RecordSpan | undefined;
     const stall: CommitStall & { index: number } = { commitMs: 0, stage: 'unknown', index: -1 };
     const originalFsync = fs.fsyncSync;
     const sample = () => {
@@ -351,6 +364,15 @@ describe('SQLite真实进程崩溃与恢复界', () => {
               fsyncCalls,
               fullPayloadScans,
               opens,
+              recordsDone,
+              shape: classifyStallShape(slowest, recordMs),
+              slowestRecord: slowest
+                ? {
+                    index: slowest.index,
+                    recordMs: Math.round(slowest.recordMs),
+                    commitMs: sampled ? Math.round(slowest.commitMs) : 'unknown',
+                  }
+                : 'unknown',
               currentMainBytes: currentMain,
               currentJournalBytes: currentJournal,
               rssBytes: rss,
@@ -388,11 +410,19 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         const o = observation();
         o.identity.namespace = '\u0001'.repeat(300);
         o.identity.workflowId = '\u0002'.repeat(300);
-        const started = performance.now();
+        const started = performance.now(),
+          commitBefore = stall.commitMs;
         try {
           expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+          recordsDone++;
         } finally {
-          recordMs += performance.now() - started;
+          const span = {
+            index: n,
+            recordMs: performance.now() - started,
+            commitMs: stall.commitMs - commitBefore,
+          };
+          recordMs += span.recordMs;
+          if (!slowest || span.recordMs > slowest.recordMs) slowest = span;
         }
       }
       stall.stage = 'assert';
@@ -477,6 +507,10 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     // 产品自己的 fsyncSync 单列，不并进 between-records 残差。
     expect(classifyCommitStall({ ...unsampled, sampled: true, fsyncMs: 200 })).toBe('fsync');
     expect(classifyCommitStall({ ...unsampled, sampled: true, fsyncMs: 100 })).toBe('between-records');
+    // 单条卡住与 256 条累计超时分开：一条没走完说不清形状。
+    expect(classifyStallShape(undefined, 0)).toBe('unknown');
+    expect(classifyStallShape({ index: 3, recordMs: 9000, commitMs: 8900 }, 15000)).toBe('single-record');
+    expect(classifyStallShape({ index: 255, recordMs: 120, commitMs: 40 }, 18000)).toBe('cumulative');
   });
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
