@@ -40,6 +40,8 @@
 
 ## 测试
 
+`bin/ci-runtime.ts` 包装原 Vitest run：同进程 reporter 保存白名单配置与有界资源快照，runner 另记真实退出码；默认未解析 maxWorkers、缓存来源保持 unknown。always 诊断后仅上传三份 JSON（每份≤64KiB、7天），不上传原 report.json；观测失败独立报红，不覆盖测试失败。
+
 - `npx vitest run packages/conventions/test/<文件>`。读仓里文件的检查都经 `src/repo.ts` 的 `RepoView`，测试换成内存假仓（`test/helpers.ts` 的 `memRepo`）。
 - `test/doc-pointers.test.ts` 对全仓活文档（design、ops、README、仓根和各包 AGENTS.md、`docs/design/`）跑指针检查。
 - 字符数上限：`test/agents-md-size.test.ts`（engine 10,000，conventions 与 api 各 8,000）。

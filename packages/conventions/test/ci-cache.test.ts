@@ -268,6 +268,47 @@ describe('键：盖住测试的全部输入，不相干的不变', { timeout: 30
     for (const c of change) expect(keyOf({ env: c }).key, JSON.stringify(c)).not.toBe(base);
   });
 
+  it('真仓无conventions依赖的hygiene台也覆盖reporter及其全部本地输入的字节', () => {
+    const graph = readGraph(fsRepo(ROOT));
+    if (typeof graph === 'string') throw new Error(graph);
+    const closure = sourceClosure(graph, ['hygiene']);
+    expect(closure).not.toContain('conventions');
+    expect(keyRoots(['hygiene'], closure).wholeRepoTests).toBe(false);
+    const disk = fsHashFs(ROOT);
+    const contents = new Map<string, Uint8Array | undefined>();
+    const directories = new Map<string, string[] | undefined>();
+    const cached: HashFs = {
+      bytes(rel) {
+        if (!contents.has(rel)) contents.set(rel, disk.bytes(rel));
+        return contents.get(rel);
+      },
+      list(rel) {
+        if (!directories.has(rel)) directories.set(rel, disk.list(rel));
+        return directories.get(rel);
+      },
+    };
+    const box = ['packages/hygiene/test/check.test.ts'];
+    const before = computeKey({ fs: cached, graph, box, env: ENV }).key;
+    for (const path of [
+      'packages/conventions/src/ci-runtime-evidence.ts',
+      'packages/conventions/src/ci-runtime-reporter.ts',
+      'packages/conventions/src/ci-runtime-run.ts',
+      'packages/conventions/src/bin/ci-runtime.ts',
+    ]) {
+      expect(EXTERNAL_INPUT_FILES).toContain(path);
+      const bytes = cached.bytes(path);
+      expect(bytes, path).toBeDefined();
+      const changed: HashFs = {
+        list: cached.list,
+        bytes: (rel) =>
+          rel === path
+            ? Buffer.concat([bytes as Uint8Array, Buffer.from('\n// input-byte-change')])
+            : cached.bytes(rel),
+      };
+      expect(computeKey({ fs: changed, graph, box, env: ENV }).key, path).not.toBe(before);
+    }
+  });
+
   it('这一台分到的文件变了（多一个、少一个、换一个）、文件内容变了：键变', () => {
     const two = [...testsOf('api'), 'packages/db/test/index.test.ts'];
     expect(keyOf({ box: two }).key).not.toBe(base);
@@ -924,19 +965,16 @@ describe('ci.yml 的 test job', () => {
 
   it('跑 vitest 那一步：交出去的是这一台分到的文件清单（不再有 --shard），每一轮都出 JSON 报告给后面核对', () => {
     const run = need(
-      steps.find((s) => /vitest run/.test(s.run ?? '') && !/ci-cache/.test(s.run ?? '')),
+      steps.find((s) => s.id === 'runtime-vitest'),
       '跑 vitest 那一步',
     );
     const text = run.run ?? '';
-    // 缓存模式为空（主线、缓存没开）：整台照跑，也出报告（核对那一步要它）
-    expect(text).toMatch(/^\s+""\) pnpm exec vitest run "\$\{box\[@\]\}" "\$\{report\[@\]\}" ;;$/m);
-    expect(text).toMatch(/^\s+all\) pnpm exec vitest run "\$\{box\[@\]\}" "\$\{report\[@\]\}" ;;$/m);
-    expect(text).toContain('mapfile -t box <"$BOX_FILE"');
+    // 同一wrapper在真实子进程反例中核all/files/none，仍保留原报告给verify/record。
+    expect(text).toContain('node packages/conventions/src/bin/ci-runtime.ts run');
+    expect(text).toContain('--reporter=json --outputFile.json="$REPORT"');
     expect(text).not.toContain('--shard');
-    // 认不出的模式红，不是悄悄全跑或悄悄跳过
-    expect(text).toMatch(/\*\)\n\s+echo "认不出的缓存模式[^\n]*>&2\n\s+exit 1/);
-    // none 不跑 vitest
-    expect(text).toMatch(/none\) echo "[^"]*不跑 vitest"/);
+    expect(run.env?.CACHE_MODE).toBe(GH('steps.cache-plan.outputs.mode'));
+    expect(run.env?.RUN_FILES).toBe(GH('steps.cache-plan.outputs.run_files'));
     // 同一份文件清单：键算的、vitest 跑的、跑完核对的是同一台（都从「这一台跑哪些文件」那步的输出来）
     const keyStep = need(
       cacheSteps.find((s) => s.id === 'cache-key'),
@@ -950,7 +988,7 @@ describe('ci.yml 的 test job', () => {
   it('【故意造出的失败】跑完核对「实际跑的 == 分到的」那一步在、排在写清单之前、读的是同一份报告和矩阵', () => {
     const at = (pred: (s: Step) => boolean) => steps.findIndex(pred);
     const verify = at((s) => /ci-box\.ts verify/.test(s.run ?? ''));
-    const runAt = at((s) => /vitest run/.test(s.run ?? '') && !/ci-cache/.test(s.run ?? ''));
+    const runAt = at((s) => s.id === 'runtime-vitest');
     const recordAt = at((s) => s.id === 'cache-record');
     expect(verify, '没有核对那一步').toBeGreaterThan(runAt);
     expect(verify).toBeLessThan(recordAt);

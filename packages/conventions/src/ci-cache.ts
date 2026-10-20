@@ -23,8 +23,9 @@ import { AGENTS_UNIT, FIXTURE_PATH, type PackageGraph, ROOT_CONFIG_FILES, TEST_R
 import { isTestFile, unitOfTestFile, withSiblings } from './test-split.ts';
 
 /** 键和清单的格式版本：算键的办法、清单的字段一变就加一，旧缓存自然读不到、也不会被当成清单。
- * 2：分台从「包目录 + --shard」换成明确的文件清单（键里的 args 换成 box，清单、交接文件同改）。 */
-export const CACHE_SCHEMA = 3;
+ * 2：分台从「包目录 + --shard」换成明确的文件清单（键里的 args 换成 box，清单、交接文件同改）。
+ * 4：每台额外覆盖同进程运行证据及wrapper输入，不改清单字段或命中判据。 */
+export const CACHE_SCHEMA = 4;
 /** 只有 pull_request 才缓存。 */
 export const PR_EVENT = 'pull_request';
 /** 缓存目录名（放在 $RUNNER_TEMP 下；ci.yml 的 restore/save 用同一个名字）。 */
@@ -209,6 +210,11 @@ export function sourceClosure(graph: PackageGraph, units: readonly string[]): st
 
 /** 测试读的包外文件（单个）；根配置那份和 ci-plan.ts 的 PATH_RULES 共用 ROOT_CONFIG_FILES。 */
 export const EXTERNAL_INPUT_FILES: readonly string[] = [
+  // CI 每台都会加载，不依赖该台的源码闭包是否含 conventions。
+  'packages/conventions/src/ci-runtime-evidence.ts',
+  'packages/conventions/src/ci-runtime-reporter.ts',
+  'packages/conventions/src/ci-runtime-run.ts',
+  'packages/conventions/src/bin/ci-runtime.ts',
   ...ROOT_CONFIG_FILES,
   'AGENTS.md',
   'docs/ops.md',
