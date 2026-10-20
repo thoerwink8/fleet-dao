@@ -27,6 +27,9 @@
 // - 也看「点名和读回不一致的旧挂起」（jobs/model-mismatch-stall.ts，#2742）：stalled 且 last_problem / doing 是 MD3 那句
 //   「回话的模型不是点名的那个（model_mismatch）：挂起并报警」的，问工作流还停在这句上就发 taskContinue，醒来后按点名重派。
 //   没有可派路由的新挂起对不上这句，不叫醒。不给这一项（只测别的部分）就不看。
+// - 也看「停下超过 30 分钟、法国指挥官还没看」（jobs/watchdog-commander.ts）：报
+//   watchdog:commander:<任务>，指挥官记 commander.claim 后自动撤。停下任务的明细来自当前未撤的
+//   <workflow>:park:<序号> 提醒；不把已继续的旧停点算进去。
 // - 拼车池整池暂停时 carpool-watch 不要求新鲜（deps.pausedJobs，真装配读和盯读同一句暂停）：登记行还在也不报「停了」，
 //   开着的这条撤掉。摘登记行会被引擎启动时的重新登记清掉，单靠登记行会误报；暂停读不到不当成暂停，照常盯。
 
@@ -58,6 +61,7 @@ import {
   type ReleaseFacts,
 } from './release-watch.ts';
 import { type BriefWatchDeps, watchDailyBrief } from './watchdog-brief.ts';
+import { type CommanderWatchDeps, watchCommander } from './watchdog-commander.ts';
 import { type PushWatchDeps, watchFeishuPush } from './watchdog-push.ts';
 import { type QuotaWatchDeps, watchQuotaFreshness } from './watchdog-quota.ts';
 import { type QuotaWasteDeps, watchQuotaWaste } from './watchdog-quota-waste.ts';
@@ -165,6 +169,11 @@ export interface WatchdogDeps {
    * 不给（只测别的部分的单测）就不看这一条。
    */
   modelMismatch?: Pick<ModelMismatchStallDeps, 'tasks' | 'release'>;
+  /**
+   * 「停下超过 30 分钟、法国指挥官还没看」。读不到照抛：这一轮记没查成，开着的不撤。
+   * 不给（只测其它部分的单测）就不看这一项。
+   */
+  commander?: Pick<CommanderWatchDeps, 'tasks'>;
   /**
    * 有意不要求按期跑的定时任务（任务编号 → 为什么）。登记行还在也不报「停了 / 没跑成」，开着的这条撤掉。
    * 拼车池整池暂停时 carpool-watch 在这里（real/watchdog.ts）：摘登记行挡不住引擎启动把它登记回来。
@@ -509,6 +518,13 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
       s.problems.push(`列点名和读回不一致的挂起没列成：${errMessage(err)}`);
     }
   }
+  let commanderScanned = 0;
+  if (deps.commander) {
+    const commander = await watchCommander({ ...deps.commander, alerts: deps.alerts, log: deps.log }, now);
+    s.problems.push(...commander.problems);
+    found += commander.found;
+    commanderScanned = commander.scanned;
+  }
   const scanned =
     others.length +
     merges.scanned +
@@ -518,7 +534,8 @@ async function round(deps: WatchdogDeps): Promise<ScheduleResult> {
     pushScanned +
     briefScanned +
     idleScanned +
-    mismatchScanned;
+    mismatchScanned +
+    commanderScanned;
 
   if (s.problems.length > 0) {
     const why = `${s.problems.length > 1 ? `${s.problems.length} 处没做成：` : ''}${s.problems.join('；')}`;

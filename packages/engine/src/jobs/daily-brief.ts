@@ -22,6 +22,8 @@ import {
   type BriefPull,
   type BriefStoppedTask,
   beijingDay,
+  type CommanderStalledSummary,
+  commanderSummaryLine,
   DAILY_BRIEF_AT_MINUTES,
   DAILY_BRIEF_JOB_ID,
   dailyBriefKey,
@@ -124,6 +126,8 @@ export interface DailyBriefDeps {
   releaseKills?(to: Date): Promise<ReleaseKills>;
   /** 截至 to 两种流程（全程 / 三段）的对照（@fleet-dao/db 的 flowModeHealth，决定 0105，#2827）。读不到照抛；没接上的不写这一栏。 */
   flowModeHealth?(to: Date): Promise<FlowModeHealth>;
+  /** 当前仍停着的任务，以及指挥官已经看过多少。读不到照抛。 */
+  commanderSummary(): Promise<CommanderStalledSummary>;
   /** 写那一行提醒（有就原地更新）。写不进照抛。 */
   publish(input: { dedupeKey: string; title: string; body: string; link: string }): Promise<void>;
   /** 在 #1055 发评论（幂等：同一个 key 只发一条）。没发成照抛。 */
@@ -344,10 +348,13 @@ function decisionsSection(notes: readonly BriefNote[], now: Date): BriefSection 
 function failuresSection(
   alerts: readonly BriefNote[],
   stopped: readonly BriefStoppedTask[],
+  commander: CommanderStalledSummary | string,
   now: Date,
 ): BriefSection {
   const heading = '三、失败了要你看的';
   const lines: string[] = [];
+  if (typeof commander === 'string') lines.push(`停下任务统计：没查成：${commander}`);
+  else lines.push(commanderSummaryLine(commander));
   if (stopped.length === 0) lines.push('昨天没有停下（failed / stalled）还没恢复的单。');
   else {
     lines.push(`昨天停下、到现在还停着的单（${stopped.length} 张）：`);
@@ -579,6 +586,7 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
   const decisions = await guard('读要你拍的', () => deps.decisions());
   const alerts = await guard('读卡住报警', () => deps.alerts());
   const stopped = await guard('读昨天停下的单', () => deps.stopped(yesterday, today));
+  const commander = await guard('读停下任务的指挥官处理统计', () => deps.commanderSummary());
   const stats = await guard('读交付指标', () => deps.lineStats(now));
   const health = await guard('读流程健康', () => deps.pipelineHealth(today));
   const healthBefore = await guard('读 7 天前的流程健康', () =>
@@ -604,9 +612,12 @@ export async function collectBrief(deps: DailyBriefDeps, now: Date): Promise<Col
     sections: [
       typeof shipped === 'string' ? unread('一、昨天上线了什么', shipped) : shipped.section,
       typeof decisions === 'string' ? unread('二、要你拍的', decisions) : decisionsSection(decisions, now),
-      typeof alerts === 'string' || typeof stopped === 'string'
-        ? unread('三、失败了要你看的', [alerts, stopped].filter((x) => typeof x === 'string').join('；'))
-        : failuresSection(alerts, stopped, now),
+      typeof alerts === 'string' || typeof stopped === 'string' || typeof commander === 'string'
+        ? unread(
+            '三、失败了要你看的',
+            [alerts, stopped, commander].filter((x) => typeof x === 'string').join('；'),
+          )
+        : failuresSection(alerts, stopped, commander, now),
       metricsSection(typeof shipped === 'string' ? null : shipped.leadMinutes, stats),
       healthSection(health, healthBefore, kills, flow),
     ],
