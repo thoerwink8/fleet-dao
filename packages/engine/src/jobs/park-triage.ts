@@ -100,6 +100,8 @@ export interface ParkTriageDeps {
   enabled(): Promise<CommanderSwitch>;
   /** 用途 commander 下有没有模型。 */
   purposeConfigured(): Promise<boolean>;
+  /** 用途已明确配有模型时，只解除缺配置提醒；不代表路由或会话已恢复。 */
+  resolveNoModelAlert(): Promise<void>;
   /** state=stalled、executor=engine 的任务。读不到照抛。 */
   tasks(): Promise<ParkedRetryRow[]>;
   /** 现问工作流；已经没了回 gone。 */
@@ -618,6 +620,12 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
       .catch((e: unknown) => deps.log('error', '指挥官：没配模型的警报没推出去', { error: errMessage(e) }));
     return result;
   }
+  await deps.resolveNoModelAlert().catch((err: unknown) => {
+    const problem = `指挥官缺模型提醒解除失败：${errMessage(err)}`;
+    result.problems.push(problem);
+    // 后续业务读取仍可能抛错；立即留证，不能让那个错误覆盖解除失败。
+    deps.log('error', problem);
+  });
   // 认领记录不能只看最近几天：一个停点可以挂很久，过了窗口再认领就违反「每次停下最多处理一次」。
   // 每日上限仍只按下面的 24 小时窗口计算；这里读的是 commander 自己的审计记录，不把历史操作混进来。
   const audits = await deps.audits(new Date(0));

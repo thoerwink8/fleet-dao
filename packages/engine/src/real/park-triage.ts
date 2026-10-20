@@ -163,6 +163,14 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     async purposeConfigured() {
       return (await countPurposeModels(w.db, 'commander')) > 0;
     },
+    async resolveNoModelAlert() {
+      await resolveAlertWithReason(w.db, {
+        dedupeKey: 'commander:no-model',
+        by: COMMANDER_ACTOR,
+        why: '路由用途「指挥官」已配有模型；仅解除缺配置提醒，调用是否恢复仍待验证',
+        at: now(),
+      });
+    },
     tasks: () => listStalledEngineTasks(w.db),
     async status(workflowId) {
       try {
