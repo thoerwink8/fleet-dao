@@ -22,7 +22,9 @@
     "@temporalio/client": "1.24.0",
     "drizzle-orm": "^0.45.3",
     "hono": "^4.13.9",
-    "zod": "^4.6.5"
+    "zod": "^4.6.5",
+    "@temporalio/common": "1.24.0",
+    "@temporalio/proto": "1.24.0"
   },
   "devDependencies": {
     "@fleet-dao/engine": "workspace:*"

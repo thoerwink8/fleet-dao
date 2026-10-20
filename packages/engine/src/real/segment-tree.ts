@@ -14,7 +14,7 @@
 import type { SessionUser } from '@fleet-dao/adapters';
 import type { Repo } from '@fleet-dao/shared';
 import { type PortContext, PortError } from '../ports.ts';
-import type { UserExec } from './exec.ts';
+import { cancellationCheckedExec, type UserExec } from './exec.ts';
 import { bundleFromMirror, type MirrorGitHub, mapped } from './mirror.ts';
 import {
   checkoutBranch,
@@ -57,6 +57,7 @@ export async function prepareSegmentTree(
   ctx: Pick<PortContext, 'signal'>,
 ): Promise<void> {
   const { repo, worktreePath: dir, branch, baseSha, user } = input;
+  ctx.signal.throwIfAborted();
   if (!SHA.test(baseSha)) {
     throw new PortError('BAD_INPUT', `起会话前的头要是完整提交号：${baseSha || '没给'}`, {
       retryable: false,
@@ -64,10 +65,12 @@ export async function prepareSegmentTree(
   }
   if (!branch) throw new PortError('BAD_INPUT', '动手会话要给分支名', { retryable: false });
   const owner = await deps.trees.ownerOf(dir);
+  ctx.signal.throwIfAborted();
   const fresh = owner === null;
-  if (owner !== user) await deps.trees.adopt(dir, user);
+  if (owner !== user) await deps.trees.adopt(dir, user, ctx.signal);
+  ctx.signal.throwIfAborted();
   const t: UserTree = {
-    exec: deps.exec,
+    exec: cancellationCheckedExec(deps.exec, ctx.signal),
     user,
     dir,
     scopePrefix: `prep-${input.runId}`,
@@ -78,7 +81,9 @@ export async function prepareSegmentTree(
   if (fresh || !(await hasCheckout(t))) {
     const repoRef = { owner: repo.owner, name: repo.name };
     const identity = await mapped(() => deps.gh.commitIdentity(repoRef));
+    ctx.signal.throwIfAborted();
     const { bytes, ref } = await bundleFromMirror(deps.gh, deps.tmpDir, repoRef, baseSha, [], ctx.signal);
+    ctx.signal.throwIfAborted();
     await fetchBundle(t, bytes, ref, { identity });
     await checkoutBranch(t, branch, baseSha);
     await pinMainline(t, repo.defaultBranch, baseSha);

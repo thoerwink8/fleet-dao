@@ -86,6 +86,66 @@ function policyErrorCodes(error: unknown): string[] {
 
 class PolicyHttpContractError extends Error {}
 
+/** 一次读取的脱敏失败：stage/codes 只来自本次观测，供是否重读判断。 */
+class PolicyHttpReadError extends Error {
+  readonly stage: PolicyTrace['stage'];
+  readonly codes: string[];
+  constructor(message: string, stage: PolicyTrace['stage'], codes: string[]) {
+    super(message);
+    this.stage = stage;
+    this.codes = codes;
+  }
+}
+
+/** 每次都是完整的 10 秒合同；只有没收到响应头的网络失败才再读一次。 */
+export const POLICY_READ_ATTEMPTS = 2;
+const RETRY_PAUSE_MS = 1000;
+// 没收到响应的网络错（DNS、TCP、超时、连接被断）：请求可能根本没到入口（#3268），重读同一个只读 GET 不改变判据。
+// 证书类错误读多少次都一样；收到响应以后（stage=body）的状态、重定向、缓存头、串仓、超限是对方的答复，照原样失败。
+const policyRetryCodes = new Set([
+  'ENOTFOUND',
+  'EAI_AGAIN',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'ETIMEDOUT',
+  'EPIPE',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET',
+  'TimeoutError',
+  'AbortError',
+]);
+
+export async function readPolicyHttp(
+  url: string,
+  repo: Pick<PolicyRepo, 'githubId' | 'repo'>,
+  fetchImpl: typeof fetch = fetch,
+  { attempts = POLICY_READ_ATTEMPTS, pauseMs = RETRY_PAUSE_MS } = {},
+): Promise<PolicyResponse> {
+  const failures: string[] = [];
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await readPolicyHttpOnce(url, repo, fetchImpl);
+    } catch (error) {
+      if (!(error instanceof PolicyHttpReadError)) throw error;
+      failures.push(error.message);
+      const retry =
+        attempt < attempts &&
+        error.stage !== 'body' &&
+        error.codes.some((code) => policyRetryCodes.has(code));
+      if (!retry) {
+        if (failures.length === 1) throw error;
+        throw new Error(
+          `读了 ${failures.length} 次都没读成：${failures.map((m, i) => `第 ${i + 1} 次 ${m}`).join('；')}`,
+        );
+      }
+      await new Promise((resolve) => setTimeout(resolve, pauseMs));
+    }
+  }
+}
+
 function observePolicyHttp(url: string, trace: PolicyTrace): () => void {
   const requestCreated = channel('undici:request:create');
   const sendHeaders = channel('undici:client:sendHeaders');
@@ -146,10 +206,10 @@ function observePolicyHttp(url: string, trace: PolicyTrace): () => void {
   };
 }
 
-export async function readPolicyHttp(
+async function readPolicyHttpOnce(
   url: string,
   repo: Pick<PolicyRepo, 'githubId' | 'repo'>,
-  fetchImpl: typeof fetch = fetch,
+  fetchImpl: typeof fetch,
 ): Promise<PolicyResponse> {
   const trace: PolicyTrace = { stage: 'unknown' };
   const started = performance.now();
@@ -230,8 +290,10 @@ export async function readPolicyHttp(
       // 被撤销的 Proxy 等未知异常也只报告固定失败。
     }
     const codes = policyErrorCodes(error);
-    throw new Error(
+    throw new PolicyHttpReadError(
       `${reason} [stage=${trace.stage}; elapsedMs=${Math.max(0, Math.round(performance.now() - started))}; codes=${codes.join(',') || 'unknown'}]`,
+      trace.stage,
+      codes,
     );
   } finally {
     cleanup();

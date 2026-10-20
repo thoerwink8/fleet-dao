@@ -15,6 +15,7 @@ import {
 import { defineQuery, defineSignal, defineUpdate } from '@temporalio/workflow';
 import type { FailureEvidence } from './failure/types.ts';
 import type { RouteChoice } from './ports.ts';
+import type { PushHandbackReceipt, PushHandbackRequest } from './push-handback.ts';
 import type { RequirementContract, TaskBrief } from './runner/task-brief.ts';
 import type { TierDecision } from './runner/tier.ts';
 
@@ -195,6 +196,15 @@ export interface ClosedIssueCloseCommand {
 export const taskCloseClosedIssueUpdate = defineUpdate<ClosedIssueCloseResult, [ClosedIssueCloseCommand]>(
   'taskCloseClosedIssue',
 );
+
+export const taskHandbackPermissionPushUpdate = defineUpdate<PushHandbackReceipt, [PushHandbackRequest]>(
+  'taskHandbackPermissionPush',
+);
+
+/** Temporal 私有只读查询；check 不写历史，execute 仍需 Activity 重新核验。 */
+export const taskPushHandbackQuery = defineQuery<
+  import('./push-handback.ts').PushHandbackPreflightInput | null
+>('taskPushHandback');
 
 export interface MergedTaskReceipt {
   repo: { owner: string; name: string };

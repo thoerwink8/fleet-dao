@@ -1,5 +1,5 @@
 {
-  "id": "6c1f0a52-3b7e-4d1a-9a52-0d96c0aa0096",
+  "id": "9ace4c57-1453-492a-b0a5-d760afaf6030",
   "prevId": "9beefce5-7008-4eb0-ba93-3d738fa9af6f",
   "version": "7",
   "dialect": "postgresql",
@@ -5710,7 +5710,13 @@
         }
       },
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "task_execution_controls_task_epoch_unique": {
+          "name": "task_execution_controls_task_epoch_unique",
+          "nullsNotDistinct": false,
+          "columns": ["task_id", "coverage_epoch"]
+        }
+      },
       "policies": {},
       "checkConstraints": {
         "task_execution_controls_protocol_known": {
@@ -8057,8 +8063,7 @@
         "research",
         "judge",
         "groom",
-        "intake-chat",
-        "commander"
+        "intake-chat"
       ]
     },
     "public.state_entity": {

@@ -8,6 +8,9 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - `packages/engine/src/worker.ts`：起 worker；`packages/engine/src/workflows/index.ts` 是工作流打包入口（只导出 `helloWorkflow`、`taskWorkflow`）。
 - `packages/engine/src/workflows/task.ts`：任务工作流，按职责拆在同目录 `task-*.ts`，共用零件在 `kit.ts`。
 - `packages/engine/src/activities.ts`、`packages/engine/src/real/`：活动和真端口的装配（库、GitHub、会话、工作树），缺一项就不起。
+- `src/real/execution-start-reader.ts`：未接生产准入的只读前置；专用 Connection 显式限制接收大小、禁默认重试，按精确 run 读首个 Start 参数。`observed` 只证明读取结果，可信 ActivityInfo、任务与派发身份仍须由后续 gate 核验，不能当执行资格或终态证明。
+- `src/real/execution-legacy-admission.ts`：未接生产的 legacy 来源适配器；无参入口从当前 Local Activity Context 读精确 Start 并经独立有界 SQL 能力登记持久责任，返回允许/拒绝/未知，不生成 Workflow 失败、不支持 managed 派发或终态释放；History 和 SQL 共用单调总期限。
+- `src/real/legacy-admission-process.ts`：未接生产的独立单次 SQL 子进程；固定入口和封闭限长协议，一次最多一个在途子进程，取消/超时强杀后须核退出及管道关闭，未核清保持占槽。在途 COMMIT 可能已经持久化责任，未知不代表回滚；复用 Store 原事务，不把空通知警告当送达证明。
 - `src/real/github-reconcile.ts`：replay/poll 与 API 复用 store source publisher，`synced` 同样先发布再 accepted；失败留原投递账重放。`policy-source-origin.ts` 只读固定 `/etc/fleet-dao/api.env` 的唯一 `FLEET_PUBLIC_URL`，复用发布配置的 systemd parser，不装入环境或回显配置；缺失/重复/非法值使相关投递失败，不阻塞 engine 启动。旧已 accepted 版本保留去重，由标准 `fleet-api project refresh-policy-source` 补当前 open 头，不为已合 PR 补历史。
 - `src/real/self-check-ci.ts`：只给 fleet-dao 已有 PR 的同树标准源码测试识别规范 CI 覆盖；受信运行发布 SHA 绑定官方 Git 配置/锁合同，每台 test job 的实际 Node 声明须同 major/minor。未知、旧 CI、脏树/子模块、合同变更回本机路径；tsc 与自定义命令仍实跑，`coveredByCi` 不算本机 PASS。
 - `packages/engine/src/real/self-check.ts`：以工作树主人身份跑测试和 tsc；各段预算统一从 `packages/engine/src/self-check-budget.ts` 取，活动总限时只由这些预算相加。
@@ -33,7 +36,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - 重启收孤儿（`real/orphan-reap.ts`）：脱开会话的真实临时 cwd 从原 `runs.worktree_path` 读，冷验收的目录名不等于 runId。交接或账读不到先报错，不把未知当空清掉；延迟回收前重读 detached 标记及 TTL，已经接回的不碰。
 
-- 根清扫只将精确 `.cleanup-transactions` 真目录交给固定 root 帮手的 `cleanup-status` 核身份、属主/权限和完整事务列表，不以会话身份读私有目录。核准才排除业务树分类；同名文件/链接、旧帮手缺身份、读取失败或截断均报问题，未结事务仍保留恢复责任，其它陌生点目录不豁免。
+- 根清扫只将精确 `.cleanup-transactions` 真目录交给固定 root 帮手的 `cleanup-status` 核身份、属主/权限和完整事务列表，不以会话身份读私有目录。核准才排除业务树分类；同名文件/链接、旧帮手缺身份、读取失败或截断均报问题；完整列表须经适配器有界分页读完全部页、只原样交回帮手签发的游标（缺页、游标重复回退、页不接续、变动超轮次、超界都算没读全），未结事务仍保留恢复责任，其它陌生点目录不豁免。
 
 - 正式评审先按原白名单选尚未解决的要求改，再翻全该 review 的行内原文，核仓/PR/review 与原审查者数字身份。总述与行内编辑都进消费键，新完整原文按code point安全分段、带引用尾界保住末空白，旧历史缺行内字段时保留原键和反馈。读不全明确未送达，合前已挂的 autoMerge 尝试撤掉，撤失败一并报明；三个合并入口及waitCi确认已合后共用review-audit补读留账，补读失败记未读，写账失败抛重试。CI 红返工入口走同一读取（readCiReviews，patched('ci-red-review-context')），和失败证据一起交下一轮；读失败不当成没有评审。
 
@@ -48,6 +51,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 自测容量只有一层归属：`test:changed` 和普通本机测试共用 conventions 的测试槽，引擎不再占自测名额，也不设环境变量冒充持槽；自测名额只管 tsc 和其他测试命令。所有等槽、等锁合用 20 分钟排队预算，拿到容量后才算 30 分钟测试执行预算，tsc 另有 5 分钟，杀进程、放锁都有收尾上限。
 - 自测心跳带 probe / queue / test / tsc / done、阶段起点、最后输出时刻；看门狗在活动总限时内把自测无会话视为正常。超时、取消、异常退出保留已有输出并脱敏限长；已确认测试失败或真实 tsc 诊断仍为 fail/red，不能被中断或顶层兜底抹成跳过。无失败证据的普通超时交给 CI；测试未完成而 tsc 通过时，摘要必须写明测试没有结果。
 - 工作流对外的输入（`packages/engine/src/contract.ts`）加字段只许可选，不然在途任务的输入对不上。
+- 无 PR 的 `pushBranch/WORKFLOWS_PERMISSION` 首次自然停点只走 `taskHandbackPermissionPush` Update（`push-handback.ts`）；限定同 run、generation=1、continued=0。默认 CLI/check 只 query/读证据，不写 Temporal 历史；execute 才发 Update。旧 worker/cgroup、固定 scopes 和 helper 自然终态、持久 run/result、合同、树与用量由 Activity 现读；未知拒绝。原 park 交回控制权、主循环记完本轮且接纳返工后才签 `handed_back`，保留全部轮数和预算，不拿继续信号、accepted 或人工报告替代。
+
 - 自动关单收尾只走 `taskCloseClosedIssue` Update：同步核精确 run、当前停法代数和继续代数，只有 `accepted` 回执才能记成功、撤提醒。继续信号先使凭据失效，不能等公开 phase 改好。旧 worker 缺能力、Update RPC 超时或回执未知保留未核实，不能退回人类的无条件放弃信号。
 - 新 PR 创建前从需求单现读两轴（正文无需求号时认任务分支）；缺失、冲突或未知值拒开并明报，不猜分类。groom 新单显式提供 domain/nature，拆分单可逐轴继承来源单的唯一有效值，写前仍须齐全。驾驶舱会话在 modules 中独立声明两轴，后端开单前同样校验，正文移到独立查询分类节，不计入模块范围和派工规模。查询轴不参与派工、合并与版本判定；此处只保证创建的元数据齐全。报警立案贴 engine/bug，耗时表直开 PR 贴 engine/process，隔离集直开 PR 贴 engine/bug；直开 PR 贴后回读，失败不能当成功。
 - 引擎自己挑单，进队条件见 design 第九节。要它接：单的四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。

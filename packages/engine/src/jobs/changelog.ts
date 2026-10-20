@@ -58,7 +58,8 @@ export function changelogReleases(history: string): { sha: string; date: string 
       !/^[a-f0-9]{40}$/.test(sha) ||
       !event ||
       !['release', 'rollback', 'auto-rollback', 'unhealthy', 'recovered'].includes(event) ||
-      (extra !== undefined && extra !== 'unmerged') ||
+      // 旧 release writer 用 auto 标记自动发布；它是 release 的元数据，不是新事件。
+      (extra !== undefined && extra !== 'unmerged' && !(event === 'release' && extra === 'auto')) ||
       rest.length > 0
     )
       throw new Error('法国发布历史有认不出的行');
