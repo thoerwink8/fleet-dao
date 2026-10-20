@@ -26,6 +26,7 @@ const REQUIRED = [
   'task-full-merged',
   'task-full-reworked',
   'task-verify-reattach',
+  'task-contract-first-accept',
 ];
 
 const HOW =
@@ -158,6 +159,32 @@ describe('老历史按现在的代码重放', { timeout: 60_000 }, () => {
     // 只动手一次：脱开不是没过，没回去返工
     expect(scheduledActivities(history).filter((n) => n === 'runSegment').length).toBe(1);
     for (const old of files.filter((f) => f !== 'task-verify-reattach.json')) {
+      expect(readFileSync(`${DIR}${old}`, 'utf8')).not.toContain(marker);
+    }
+  });
+
+  it('task-contract-first-accept 夹具（#3402）真走过「旧交代没有合同、第一次安全边界按首次接纳」：读合同之后紧接写进度行；其余夹具都没有读合同这一步', () => {
+    const marker = Buffer.from(
+      JSON.stringify({ id: 'task-contract-revisions-v1', deprecated: false }),
+    ).toString('base64');
+    const { history } = load('task-contract-first-accept.json');
+    expect(JSON.stringify(history)).toContain(marker);
+    const scheduled = history.events
+      .map((e) => e.activityTaskScheduledEventAttributes)
+      .filter((a): a is NonNullable<typeof a> => a !== undefined) as {
+      activityType: { name: string };
+      input?: { payloads?: { data?: string }[] };
+    }[];
+    const checks = (a: (typeof scheduled)[number]) =>
+      a.activityType.name === 'readTaskBrief' &&
+      Buffer.from(a.input?.payloads?.[0]?.data ?? '', 'base64')
+        .toString('utf8')
+        .includes('checkContract');
+    const at = scheduled.findIndex(checks);
+    expect(at).toBeGreaterThanOrEqual(0);
+    // 首次接纳（之前没有合同）才会写进度行；被默认参数吞成「没变」就直接往下选路，重放当场对不上
+    expect(scheduled[at + 1]?.activityType.name).toBe('saveTaskState');
+    for (const old of files.filter((f) => f !== 'task-contract-first-accept.json')) {
       expect(readFileSync(`${DIR}${old}`, 'utf8')).not.toContain(marker);
     }
   });
