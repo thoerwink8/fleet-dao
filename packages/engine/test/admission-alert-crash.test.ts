@@ -76,13 +76,16 @@ async function bounded<T>(promise: Promise<T>, milliseconds: number): Promise<T>
 }
 type CommitStall = { commitMs: number; stage: string };
 // 256 条用例的失败分类。COMMIT 抛错也要把耗时算进 commit，不能让 record 的 finally 把残差归到 between-records。
-// 没有下标或三段都没有正耗时就是 unknown。这只给合成计时分类，不是原完整 CI 首红的根因证明。
+// 没有下标、一次 COMMIT 边界采样都没成，或三段都没有正耗时，就是 unknown。
+// 没采到样时 recordMs 的残差说不清落在哪段，不能归到 between-records。这只给合成计时分类，不是原完整 CI 首红的根因证明。
 function classifyCommitStall(
   index: number,
   commitMs: number,
   recordMs: number,
   sampleMs: number,
+  sampled: boolean,
 ): 'commit' | 'sample' | 'between-records' | 'unknown' {
+  if (!sampled) return 'unknown';
   const betweenMs = Math.max(0, recordMs - commitMs - sampleMs);
   const phases = [
     ['commit', commitMs],
@@ -304,7 +307,7 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         rss = 'unknown';
       }
       const sampled = observed > 0;
-      const dominant = classifyCommitStall(stall.index, stall.commitMs, recordMs, sampleMs);
+      const dominant = classifyCommitStall(stall.index, stall.commitMs, recordMs, sampleMs, sampled);
       try {
         console.log(
           'SPOOL_COMMIT_STALL=' +
@@ -419,8 +422,13 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(stall.stage).toBe('commit');
     expect(samples).toBe(1);
     expect(stall.commitMs).toBeGreaterThanOrEqual(250);
-    expect(classifyCommitStall(stall.index, stall.commitMs, stall.recordMs, stall.sampleMs)).toBe('commit');
-    expect(classifyCommitStall(-1, stall.commitMs, stall.recordMs, 0)).toBe('unknown');
+    expect(
+      classifyCommitStall(stall.index, stall.commitMs, stall.recordMs, stall.sampleMs, samples > 0),
+    ).toBe('commit');
+    expect(classifyCommitStall(-1, stall.commitMs, stall.recordMs, 0, true)).toBe('unknown');
+    // 一次都没采到样：哪怕 recordMs 有残差，也不能归到 between-records 或别的具体阶段。
+    expect(classifyCommitStall(0, 0, 250, 0, false)).toBe('unknown');
+    expect(classifyCommitStall(0, 250, 250, 0, false)).toBe('unknown');
   });
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
