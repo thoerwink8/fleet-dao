@@ -396,6 +396,15 @@ export function temporalClosedIssueTasks(
       const openSessions = await countOpenRunsForIssue(db, ref.repo, ref.issueNumber, workflowId);
       return { kind: 'paused', openSessions, token };
     },
+    async parkOf(workflowId) {
+      try {
+        const status = await client.workflow.getHandle(workflowId).query(taskStatusQuery);
+        return status.phase === 'parked' && status.park ? status.park : null;
+      } catch (err) {
+        if (isWorkflowGone(err)) return 'gone';
+        throw err;
+      }
+    },
     resolveParkAlerts: (workflowId, why, by) =>
       resolveClosedIssueParkAlerts(db, workflowId, why, { at: now(), ...(by ? { by } : {}) }),
     openTaskRows: () => listOpenTaskRows(db),

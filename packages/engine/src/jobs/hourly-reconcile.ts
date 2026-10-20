@@ -2,6 +2,7 @@
 // 在用的树，什么都不剩的删掉，剩着没推的东西的报要人拍）→ 核对（jobs/reconcile-checks.ts：合了的
 // PR 都记了账、贴了「本机做」超过 24 小时又没租约的写成一份名单、撤掉随 Fusion 删了的那一处核对留下的旧提醒；额度读数那处等 #76）→ 提醒（jobs/alert-sweep.ts：条件没了的撤掉、卡住报警超过 24 小时没人处理的再推一次、同一条立案）
 // → 单已关且停着等人、或已在检查点软暂停且没有开着会话的，发放弃信号并撤挂起提醒（jobs/closed-issue-tasks.ts，#1198 / #1816 / #3002）
+// → 名单里成果已合入的退役停点，精确身份对上的放弃这一代并撤挂起提醒（jobs/retired-parks.ts，#3407）
 // → GitHub 两个机器人的权限自检（jobs/github-app-check.ts：缺的、没查成的报提醒，好了自己撤）
 // → 整池暂停到期的飞书（jobs/pool-hold-push.ts：没配、没推成记没查成，不当成推过；不给 poolHoldPush 的单测这一项跳过）
 // → 主线红的飞书（jobs/main-red-push.ts：变红推一次、转绿推已恢复；没配、没推成、运行列表读不到记没查成，不当成推过；不给 mainRedPush 的单测这一项跳过）
@@ -41,6 +42,7 @@ import {
   retireWorkflowAlerts,
 } from './reconcile-checks.ts';
 import { clip, type SweepPart } from './reconcile-common.ts';
+import { abandonRetiredParks } from './retired-parks.ts';
 import { inventoryOf } from './worktree-cleanup.ts';
 import { sweepWorktrees, type WorktreeSweepDeps } from './worktree-sweep.ts';
 
@@ -221,6 +223,8 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
   // 单已关且停着等人、或已在检查点软暂停且没有开着会话的，撤掉（#1816 / #3002）：当场发放弃并撤挂起提醒；放在提醒清扫之前
   const mergedTasks = await settleMergedTasks(deps);
   const closedTasks = await abandonClosedIssueTasks(deps);
+  // 退役停点（#3407）：成果已由别的 PR 合入的停点，按名单精确身份放弃这一代、撤挂起提醒；同样放在提醒清扫之前
+  const retiredParks = await abandonRetiredParks(deps);
   // 单已关、没有工作流的遗留行也收掉（#1622）：和上面的任务工作流对账合并统计
   const idleClosedRows = await settleIdleClosedIssueRows(deps);
   let alerts: SweepPart;
@@ -268,6 +272,7 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     historical,
     autoMerges,
     closedTasks,
+    retiredParks,
     idleClosedRows,
     alerts,
     apps,

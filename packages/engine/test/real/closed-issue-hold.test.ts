@@ -10,6 +10,7 @@ import {
   CLOSED_ISSUE_ABANDON_REASON,
   type ClosedIssueTaskDeps,
 } from '../../src/jobs/closed-issue-tasks.ts';
+import { abandonRetiredParks, RETIRED_PARK_BY, type RetiredPark } from '../../src/jobs/retired-parks.ts';
 import { temporalClosedIssueTasks } from '../../src/real/hourly-reconcile.ts';
 import type { ClosedIssueHoldToken } from '../../src/task-contract.ts';
 
@@ -305,5 +306,56 @@ describe('temporalClosedIssueTasks.holdForClose（#3002）', () => {
     expect(w.signals).toEqual([]);
     expect(part.found).toBe(0);
     expect(part.unchecked[0]).toContain('GitHub 502');
+  });
+});
+
+describe('temporalClosedIssueTasks.parkOf + 退役停点（#3407）', () => {
+  const parkedStatus = {
+    ...pausedStatus,
+    phase: 'parked',
+    waiting: { kind: 'human', detail: '等人', since: NOW.toISOString() },
+    park: {
+      kind: 'size',
+      seq: 1,
+      at: NOW.toISOString(),
+      title: '改动超出体量预算：新增 9550 行，预算 3000 行，收窄过一次仍超',
+      head: null,
+      retriedBefore: false,
+    },
+    closedIssueClose: { version: 1, token: { ...TOKEN, kind: 'parked' } },
+  };
+  const entry: RetiredPark = {
+    workflowId: WF,
+    runId: TOKEN.runId,
+    parkSeq: 1,
+    kind: 'size',
+    reason: '成果已合入，停点退役',
+  };
+
+  it('单开着也照名单放弃这一代：Update 带停法凭据，accepted 后挂起提醒在库里撤掉、记在 engine:retired-park 名下', async () => {
+    await upsertAlert(t.db, {
+      dedupeKey: PARK,
+      level: 'alert',
+      taskId: null,
+      title: '挂起',
+      body: '停下等人',
+    });
+    const w = wired(parkedStatus, 'open');
+    expect(await w.deps.closedIssueTasks.parkOf?.(WF)).toMatchObject({ kind: 'size', seq: 1 });
+    const part = await abandonRetiredParks(w.deps, [entry]);
+    expect(part).toEqual({ scanned: 1, found: 1, unchecked: [] });
+    expect(w.signals).toEqual([{ by: RETIRED_PARK_BY, reason: entry.reason }]);
+    const alert = await alertByKey(t.db, PARK);
+    expect(alert?.resolvedBy).toBe(RETIRED_PARK_BY);
+    expect(alert?.resolvedAt).not.toBeNull();
+  });
+
+  it('没在停、工作流没了：parkOf 回 null / gone，不发放弃', async () => {
+    const running = wired({ ...parkedStatus, phase: 'implement' });
+    expect(await running.deps.closedIssueTasks.parkOf?.(WF)).toBeNull();
+    expect(await abandonRetiredParks(running.deps, [entry])).toEqual({ scanned: 1, found: 0, unchecked: [] });
+    const gone = wired(new WorkflowNotFoundError('没有这条', WF, undefined));
+    expect(await gone.deps.closedIssueTasks.parkOf?.(WF)).toBe('gone');
+    expect(running.signals.length + gone.signals.length).toBe(0);
   });
 });

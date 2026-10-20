@@ -14,7 +14,7 @@ import type { RepoRef } from '@fleet-dao/github';
 import type { AbandonCommand } from '@fleet-dao/shared/task-signals';
 import { errMessage } from '@fleet-dao/shared/util';
 import { parseTaskWorkflowId } from '@fleet-dao/shared/workflow-ids';
-import type { ClosedIssueCloseResult, ClosedIssueHoldToken } from '../task-contract.ts';
+import type { ClosedIssueCloseResult, ClosedIssueHoldToken, TaskParkInfo } from '../task-contract.ts';
 import type { ReconcileLog, SweepPart } from './reconcile-common.ts';
 
 export { parseTaskWorkflowId };
@@ -47,6 +47,8 @@ export interface ClosedIssueTaskDeps {
      * 查不到、会话数认不出都照抛，不当成没停着、也不当成没有会话。
      */
     holdForClose?(workflowId: string): Promise<ClosedIssueHold>;
+    /** 现问工作流正停着的那一次（退役停点 jobs/retired-parks.ts 用）；没在停是 null，工作流没了回 gone。读不到照抛。 */
+    parkOf?(workflowId: string): Promise<TaskParkInfo | null | 'gone'>;
     /** 撤掉这个工作流还开着的挂起提醒（task:…:park:N）；why 进正文「已撤：」和操作记录，by 记是谁撤的（不给是每小时对账）。回实际新撤了几条。 */
     resolveParkAlerts(workflowId: string, why: string, by?: string): Promise<number>;
     /** 库里还没到终态的任务行。旧的测试装配可以不提供，真装配必须提供。 */
