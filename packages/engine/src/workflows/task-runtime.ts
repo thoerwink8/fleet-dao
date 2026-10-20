@@ -51,6 +51,7 @@ import {
   type MergedTaskReceipt,
   PARKED_RETRY_ACTOR,
   PAUSED_BY_HUMAN,
+  type ParkCause,
   type ParkKind,
   type PauseCommand,
   type RemeasureLineBudgetCommand,
@@ -1216,10 +1217,11 @@ export class TaskRuntime {
     level: 'stuck' | 'decision' = 'stuck',
     kind: ParkKind = 'other',
     budget?: LineBudgetParkInput,
+    cause?: ParkCause,
   ): Promise<void> {
     this.guard();
     this.parks += 1;
-    this.notePark(kind, title, detail);
+    this.notePark(kind, title, detail, cause);
     const before = this.continued;
     const previous = this.status.phase;
     this.status.lastProblem = title;
@@ -1503,8 +1505,10 @@ export class TaskRuntime {
   /**
    * 记下正停着的这一次（#3294）：停法类别、第几次、几点、停在哪个头，同一原文引擎续过没有。纯状态，只给查询看（引擎续停读它）。
    * 老历史没有这个标记：patched() 为假就不记，引擎续停看不到停法，一律不续。
+   * cause（失败码、规则编号，#3423）只进查询给指挥官认运行环境类停法：不进 parkKey、不改 kind，信号处理和命令序都不看它，
+   * 所以不另打标记（重放时同一段历史算出的命令一样，只是查询里多两样）。
    */
-  private notePark(kind: ParkKind, title: string, detail: string): void {
+  private notePark(kind: ParkKind, title: string, detail: string, cause?: ParkCause): void {
     if (!patched('park-kind')) return;
     this.parkKey = `${kind}\n${title}\n${detail}`;
     this.status.park = {
@@ -1514,6 +1518,8 @@ export class TaskRuntime {
       title,
       head: this.head,
       retriedBefore: this.engineRetried.has(this.parkKey),
+      ...(cause?.code ? { code: cause.code.trim().toLowerCase() } : {}),
+      ...(cause?.rule ? { rule: cause.rule } : {}),
     };
   }
 
@@ -1690,6 +1696,8 @@ export class TaskRuntime {
               failure.message,
               'stuck',
               stepParkKind(source, next, failure.code),
+              undefined,
+              { code: failure.code, rule: next.rule },
             );
           } finally {
             this.permissionPushPark = false;
