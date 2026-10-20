@@ -1,6 +1,6 @@
 // 法国指挥官会话（engine/src/jobs/park-triage.ts，#3294 第 2 片）读库的那几样。写操作记录经 recordEngineAudit（queries/session-org.ts）。
 // 都是只读；读不到原样抛，调用方记没查成，不当成空。
-import { and, asc, desc, eq, gte, isNull, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, gte, inArray, isNull, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import {
   auditLog,
@@ -91,6 +91,45 @@ export async function readParkAlertBody(db: Db, dedupeKey: string): Promise<stri
   return body === '' ? null : body;
 }
 
+export interface OpenParkAlertRow {
+  seq: number;
+  title: string;
+  body: string | null;
+  at: Date;
+}
+
+/**
+ * 这个工作流还开着的、最新的一条停下提醒（键 <工作流编号>:park:<第几次>，#3423）。老历史的查询里没有停法和停下编号，
+ * 指挥官从这里认停在哪一次、为什么停。没有开着的回 null。
+ */
+export async function readOpenParkAlert(db: Db, workflowId: string): Promise<OpenParkAlertRow | null> {
+  const prefix = `${workflowId}:park:`;
+  const rows = await db
+    .select({
+      dedupeKey: notifications.dedupeKey,
+      title: notifications.title,
+      body: notifications.body,
+      raisedAt: notifications.raisedAt,
+    })
+    .from(notifications)
+    .where(
+      and(
+        isNull(notifications.resolvedAt),
+        sql`left(${notifications.dedupeKey}, ${prefix.length}) = ${prefix}`,
+      ),
+    );
+  let best: OpenParkAlertRow | null = null;
+  for (const row of rows) {
+    const rest = row.dedupeKey.slice(prefix.length);
+    if (!/^[1-9]\d*$/.test(rest)) continue;
+    const seq = Number(rest);
+    if (!Number.isSafeInteger(seq) || (best && best.seq >= seq)) continue;
+    const body = row.body.trim();
+    best = { seq, title: row.title, body: body === '' ? null : body, at: row.raisedAt };
+  }
+  return best;
+}
+
 /** 任务标题（重做起新一代要带）。 */
 export async function readTaskTitle(db: Db, taskId: string): Promise<string | null> {
   const [row] = await db.select({ title: tasks.title }).from(tasks).where(eq(tasks.id, taskId));
@@ -98,6 +137,7 @@ export async function readTaskTitle(db: Db, taskId: string): Promise<string | nu
 }
 
 const COMMANDER_CLAIM = 'commander.claim';
+const COMMANDER_RETRY = 'commander.retry';
 const PARK_KEY = /^(.*):park:([1-9]\d*)$/;
 
 export interface CommanderStalledTask {
@@ -149,19 +189,27 @@ export async function listCommanderStalledTasks(db: Db): Promise<CommanderStalle
       )
       .orderBy(asc(notifications.raisedAt), asc(notifications.id)),
     db
-      .select({ after: auditLog.after })
+      .select({ action: auditLog.action, after: auditLog.after })
       .from(auditLog)
-      .where(and(eq(auditLog.target, COMMANDER_AUDIT_TARGET), eq(auditLog.action, COMMANDER_CLAIM))),
+      .where(
+        and(
+          eq(auditLog.target, COMMANDER_AUDIT_TARGET),
+          inArray(auditLog.action, [COMMANDER_CLAIM, COMMANDER_RETRY]),
+        ),
+      ),
   ]);
 
-  const seen = new Set<string>();
+  // 认领数多于「会话没起成」数才算看过（#3423：没起成的那次认领不消耗这一次停下，下一轮还会再看）
+  const tally = new Map<string, number>();
   for (const claim of claims) {
     const after = claim.after;
     if (typeof after !== 'object' || after === null) continue;
     const value = after as { workflowId?: unknown; parkSeq?: unknown };
-    if (typeof value.workflowId === 'string' && typeof value.parkSeq === 'number')
-      seen.add(`${value.workflowId}#${value.parkSeq}`);
+    if (typeof value.workflowId !== 'string' || typeof value.parkSeq !== 'number') continue;
+    const key = `${value.workflowId}#${value.parkSeq}`;
+    tally.set(key, (tally.get(key) ?? 0) + (claim.action === COMMANDER_CLAIM ? 1 : -1));
   }
+  const seen = new Set([...tally].filter(([, n]) => n > 0).map(([key]) => key));
 
   const byTask = new Map<string, CommanderStalledTask>();
   for (const park of parks) {

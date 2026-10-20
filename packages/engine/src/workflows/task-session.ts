@@ -74,6 +74,8 @@ import type { TaskBrief } from '../runner/task-brief.ts';
 import type { TierDecision } from '../runner/tier.ts';
 import {
   ORG_SWITCH_CODE,
+  PARK_CODE_NO_ROUTE,
+  PARK_CODE_ROUTE_SWITCH,
   ROUTE_RETRY_SECONDS,
   type RunSegmentInput,
   SEGMENT_DETACHED,
@@ -659,6 +661,9 @@ export async function writeSession(
         modelDown ? modelUnavailableStallDetail(failure.message) : failure.message,
         'stuck',
         code === 'model_mismatch' || modelDown || mb1Redispatch ? 'other' : stepParkKind('runSegment', next),
+        undefined,
+        // 只进查询（#3423）：指挥官按码和规则认运行环境类停法，不改 kind、不进命令序
+        { code: failure.code, rule: next.rule },
       );
       // 已经按旧标题挂上的在途单：上面两支重放都为假，所以走进了这次 park。
       // 人点「继续」或看门狗发 taskContinue 之后才到这里。这一支是新执行（标记为真）：按点名开新会话重派。
@@ -720,7 +725,9 @@ export function modelUnavailableStallDetail(detail: string): string {
  */
 async function parkIfModelDown(rt: TaskRuntime, detail: string): Promise<boolean> {
   if (!rt.modelDownLand) return false;
-  await rt.park(MODEL_UNAVAILABLE_STALL, modelUnavailableStallDetail(detail));
+  await rt.park(MODEL_UNAVAILABLE_STALL, modelUnavailableStallDetail(detail), 'stuck', 'other', undefined, {
+    rule: 'MU1',
+  });
   return true;
 }
 
@@ -1061,7 +1068,9 @@ async function pickRoute(
           await stopForProbe(got.detail, mark);
           continue;
         }
-        await rt.park('没有可用的路由', got.detail);
+        await rt.park('没有可用的路由', got.detail, 'stuck', 'other', undefined, {
+          code: PARK_CODE_NO_ROUTE,
+        });
         avoid = NO_AVOID;
         prefer = undefined;
         droppedDry = false;
@@ -1103,11 +1112,29 @@ async function pickRoute(
       // 仍睡原来那一觉；醒了（继续附带的叫醒、或定时器）再走 wall-clock-switch-wake，下一轮选不出就停下，不睡第二觉。
       // switchWake 为假时不调用 wake 那个标记，避免在途的这一觉把它记成永久的假。
       if (rt.landSwitch && rt.switchWake && patched('wall-clock-switch-wake')) {
-        await rt.park(WALL_CLOCK_SWITCH_STALL, wallClockSwitchStallDetail(got.detail));
+        await rt.park(
+          WALL_CLOCK_SWITCH_STALL,
+          wallClockSwitchStallDetail(got.detail),
+          'stuck',
+          'other',
+          undefined,
+          {
+            code: PARK_CODE_ROUTE_SWITCH,
+          },
+        );
         continue;
       }
       if (rt.landSwitch && !rt.switchWake && patched('wall-clock-switch-lands')) {
-        await rt.park(WALL_CLOCK_SWITCH_STALL, wallClockSwitchStallDetail(got.detail));
+        await rt.park(
+          WALL_CLOCK_SWITCH_STALL,
+          wallClockSwitchStallDetail(got.detail),
+          'stuck',
+          'other',
+          undefined,
+          {
+            code: PARK_CODE_ROUTE_SWITCH,
+          },
+        );
         continue;
       }
       // 模型暂时不可用之后选路只剩等：不睡。这一睡可以到几小时，任务仍是 running、没有开着的会话，占着名额。

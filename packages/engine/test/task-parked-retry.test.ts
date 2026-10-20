@@ -343,6 +343,8 @@ describe('停下等人按规则续一次（#3294）', { timeout: 120_000 }, () =
           const s = await statusUntil(h, (st) => st.phase === 'parked', `${c.name}，第一次挂合并停下`);
           expect(s.park?.kind, c.name).toBe('other');
           expect(s.park?.title, c.name).toMatch(c.title);
+          // 失败码只进查询（#3423）：指挥官按它认运行环境类停法；这几种要人修，认不成运行环境
+          expect(s.park?.code, c.name).toBe(c.code.toLowerCase());
           expect(s.lastProblem, c.name).toMatch(c.title);
           expect(calls.arm, c.name).toBe(1);
           const job = jobOn(h, i, anHourAfter);
