@@ -26,6 +26,8 @@ import type {
   ReadCiReviewsInput,
   ReadDeliveryInput,
   ReadTaskBriefInput,
+  ResolveConflictInput,
+  ResolveConflictResult,
   RunSegmentInput,
   RunSegmentResult,
   SegmentSettledInput,
@@ -97,6 +99,8 @@ export interface Script {
   settled: (input: SegmentSettledInput, n: number) => SegmentSettledResult;
   /** 定这张单走三段还是全程（#2826）。默认三段：老用例照旧。 */
   flow: (input: DecideFlowModeInput, n: number) => DecideFlowModeResult;
+  /** 并主线冲突里机械可解的引擎自己解（#3428）。默认没解（declined、无原因）：老用例照旧交给会话。抛了＝活动没做成。 */
+  resolveConflict: (input: ResolveConflictInput, n: number) => ResolveConflictResult;
 }
 
 export interface Calls {
@@ -133,6 +137,8 @@ export interface Calls {
   settled: SegmentSettledInput[];
   /** 定模式收到的入参。不进 order（老用例比 order 一字不差）。 */
   flow: DecideFlowModeInput[];
+  /** 机械解冲突收到的入参。不进 order（老用例比 order 一字不差）。 */
+  resolveConflict: ResolveConflictInput[];
   /** 每次定模式时已经起过几段会话（第一段动手之前定＝0）。 */
   flowAfterSegments: number[];
 }
@@ -183,6 +189,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     spendInputs: [],
     settled: [],
     flow: [],
+    resolveConflict: [],
     flowAfterSegments: [],
   };
   const script: Script = {
@@ -205,6 +212,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     spend: () => ({ tokens: 0, runs: 0, unmetered: 0, estimated: 0 }),
     settled: () => ({ settled: true }),
     flow: () => ({ mode: 'three', source: 'ineligible', reason: '测试默认三段' }),
+    resolveConflict: () => ({ state: 'declined', reason: '' }),
     ...over,
   };
   const bare401 = new Map<string, Bare401Stamp>();
@@ -303,6 +311,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     },
     async noteBare401(input) {
       return noteSharedBare401(bare401, input);
+    },
+    async resolveConflictMechanically(input) {
+      calls.resolveConflict.push(input);
+      return script.resolveConflict(input, calls.resolveConflict.length);
     },
     async decideFlowMode(input) {
       calls.flowAfterSegments.push(calls.segment.length);
