@@ -144,6 +144,27 @@ describe('在途正式合同修订（#3216）', { timeout: 60_000 }, () => {
     expect(calls.spendInputs.every((i) => i.since === calls.spendInputs[0]?.since)).toBe(true);
     expect(calls.armInputs[0]?.contractGuard?.expected).toEqual(next.contract);
   });
+  it('旧交代没有合同：第一次安全边界读到合同按首次接纳处理，不被当成没变（#3402）', async () => {
+    const live = goodBrief();
+    const { contract, ...legacy } = live;
+    expect(contract).toBeDefined();
+    const { tasks, calls } = scripted({
+      brief: () => ({ ok: true, brief: legacy }),
+      contractBrief: () => ({ ok: true, brief: live }),
+    });
+    const run = await withWorker(
+      env,
+      createFakeWorld(),
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged' });
+    const first = calls.segment[0];
+    // 默认参数会把显式传入的「之前没有合同」换成刚读回的合同，于是 changed 恒为假：这三样一个都不会有
+    expect(first?.brief.contract).toEqual(live.contract);
+    expect(first?.contractRevision).toEqual({ reviews: [] });
+    expect(first?.feedback.join('\n')).toContain('正式需求已修订');
+  });
   it('同head验收中改正文：旧/晚到pass作废，轮数不清零，新合同从全量重验', async () => {
     let current = goodBrief();
     const next = revised();
