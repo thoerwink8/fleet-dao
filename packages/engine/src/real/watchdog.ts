@@ -22,6 +22,7 @@ import {
   feishuPushFacts,
   finishScheduleRun,
   latestAlertByPrefix,
+  listCommanderStalledTasks,
   listRunningEngineTasks,
   listStalledEngineTasks,
   mergeStallFacts,
@@ -314,6 +315,9 @@ export function watchdogJob(w: WatchdogWiring): () => WatchdogDeps {
             },
           }
         : {}),
+      commander: {
+        tasks: () => listCommanderStalledTasks(w.db),
+      },
       // 拼车池整池暂停：carpool-watch 登记行还在也不报「停了」，开着的撤掉。读不到照抛（不当成没暂停）。
       pausedJobs: async () => {
         const why = await carpoolPoolsHeldReason(w.db, now());
