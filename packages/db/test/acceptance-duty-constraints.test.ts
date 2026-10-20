@@ -97,3 +97,17 @@ describe('acceptance_duties_superseded_complete', () => {
     );
   });
 });
+
+describe('acceptance_duties_source_known', () => {
+  it('三种初建来源都接受（含迁移 0098 加的 management_merge），未知来源拒绝', async () => {
+    const { row } = await seedDuties();
+    const sources = ['cold_verify', 'coordination', 'management_merge'] as const;
+    for (const [i, source] of sources.entries())
+      await t.db.insert(acceptanceDuties).values({ ...row('acd'[i] ?? 'a'), source });
+    await expectViolation(
+      t.db.insert(acceptanceDuties).values({ ...row('f'), source: 'manual' as never }),
+      'acceptance_duties_source_known',
+    );
+    expect(await t.db.select().from(acceptanceDuties)).toHaveLength(4);
+  });
+});

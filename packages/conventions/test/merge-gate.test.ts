@@ -494,6 +494,7 @@ describe('入口：认出要算哪些 PR、写状态、退出码', () => {
         state: 'success',
         description: '能合：不是引擎任务 PR，只看 CI。',
         targetUrl: 'https://github.com/o/r/actions/runs/1',
+        publication: { number: 80, lines: ['能合：不是引擎任务 PR，只看 CI。'], notChecked: false },
       },
     ]);
   });

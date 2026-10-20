@@ -129,6 +129,48 @@ describe('受管归并原子事务', () => {
     await expect(mergeAcceptanceDuties(t.db, { ...f.write, [field]: 'different' }, NOW)).rejects.toThrow();
     expect(await snapshot()).toBe(before);
   });
+  it('成功的审计记录带操作者、原因、证据、逐项来源与源责任前像；回执记同一审计号', async () => {
+    const f = await mergeFixture(t.db, true);
+    const r = await mergeAcceptanceDuties(t.db, f.write, NOW);
+    const [audit] = await t.db.select().from(auditLog);
+    expect(audit).toMatchObject({
+      id: r.auditId,
+      actorKind: 'ops',
+      actorId: f.write.by,
+      action: 'acceptance.merge',
+      via: 'ops',
+      ok: true,
+      reason: f.write.reason,
+    });
+    expect(audit?.before).toMatchObject({
+      target: { id: f.target!.id, generation: 1 },
+      sources: expect.arrayContaining(
+        f.sources.map((s) =>
+          expect.objectContaining({ id: s.id, generation: s.generation, head: s.head, items: s.items }),
+        ),
+      ),
+    });
+    expect(audit?.after).toMatchObject({
+      target: { id: r.target.id, generation: 2, source: 'cold_verify' },
+      items: f.contract.itemSources,
+      proof: f.contract.proof,
+      evidence: f.write.evidence,
+      request: f.write.request,
+      planHash: f.write.planHash,
+    });
+    const [key] = await t.db.select().from(idempotencyKeys);
+    expect(key?.result).toMatchObject({
+      auditId: r.auditId,
+      operator: f.write.by,
+      planHash: f.write.planHash,
+    });
+  });
+  it.each(['by', 'reason', 'evidence'])('%s为空白拒绝，不写目标、占键和审计', async (field) => {
+    const f = await mergeFixture(t.db);
+    const before = await snapshot();
+    await expect(mergeAcceptanceDuties(t.db, { ...f.write, [field]: '  ' }, NOW)).rejects.toThrow();
+    expect(await snapshot()).toBe(before);
+  });
   it.each(['source', 'target'])('成功后%s新增换代，不能把旧成功报当前有效', async (which) => {
     const f = await mergeFixture(t.db),
       r = await mergeAcceptanceDuties(t.db, f.write, NOW);
