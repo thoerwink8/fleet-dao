@@ -225,7 +225,9 @@ class TaskFlow {
       }
       brief = (await this.readBrief()).brief;
     };
-    const acceptContract = (got: TaskBrief, boundary: string, before = rt.brief?.contract) => {
+    // before 必须由调用方明说，不能给默认值：旧历史最初读到的交代没有合同（before 为 undefined），
+    // 默认参数会把显式传入的 undefined 换成刚读回的新合同，把「第一次接纳」误判成没变，少调度一次 readCiReviews（#3402）。
+    const acceptContract = (got: TaskBrief, boundary: string, before: TaskBrief['contract'] | undefined) => {
       const next = got.contract;
       if (next?.version !== 1 || !/^[a-f0-9]{64}$/.test(next.sha256))
         throw new Error('正式合同版本或摘要未核实');
@@ -253,7 +255,7 @@ class TaskFlow {
       return true;
     };
     rt.acceptHandbackContract = (got) => {
-      acceptContract(got, '权限推送原停点返工');
+      acceptContract(got, '权限推送原停点返工', rt.brief?.contract);
     };
     rt.refreshContract = async (boundary) => {
       if (!patched('task-contract-revisions-v1')) return false;
