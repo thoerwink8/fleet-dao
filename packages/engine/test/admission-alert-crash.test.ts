@@ -1,7 +1,16 @@
 import { type ChildProcess, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import fs, {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { syncBuiltinESMExports } from 'node:module';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
@@ -76,20 +85,26 @@ async function bounded<T>(promise: Promise<T>, milliseconds: number): Promise<T>
 }
 type CommitStall = { commitMs: number; stage: string };
 // 256 条用例的失败分类。COMMIT 抛错也要把耗时算进 commit，不能让 record 的 finally 把残差归到 between-records。
-// 没有下标、一次 COMMIT 边界采样都没成，或三段都没有正耗时，就是 unknown。
+// 产品 JS 自己的 fsyncSync（父目录、新库、叶目录）单列 fsync；SQLite 内部的 fsync 在 COMMIT 里，不经 node:fs。
+// between-records 是 record 里扣掉这三段的残差：整表 decode、路径核验、打开连接都在这里，不再细分。
+// 没有下标、一次 COMMIT 边界采样都没成，或各段都没有正耗时，就是 unknown。
 // 没采到样时 recordMs 的残差说不清落在哪段，不能归到 between-records。这只给合成计时分类，不是原完整 CI 首红的根因证明。
-function classifyCommitStall(
-  index: number,
-  commitMs: number,
-  recordMs: number,
-  sampleMs: number,
-  sampled: boolean,
-): 'commit' | 'sample' | 'between-records' | 'unknown' {
-  if (!sampled) return 'unknown';
-  const betweenMs = Math.max(0, recordMs - commitMs - sampleMs);
+type StallTimes = {
+  index: number;
+  commitMs: number;
+  recordMs: number;
+  sampleMs: number;
+  fsyncMs: number;
+  sampled: boolean;
+};
+function classifyCommitStall(t: StallTimes): 'commit' | 'sample' | 'fsync' | 'between-records' | 'unknown' {
+  const { index, commitMs, recordMs, sampleMs, fsyncMs } = t;
+  if (!t.sampled) return 'unknown';
+  const betweenMs = Math.max(0, recordMs - commitMs - sampleMs - fsyncMs);
   const phases = [
     ['commit', commitMs],
     ['sample', sampleMs],
+    ['fsync', fsyncMs],
     ['between-records', betweenMs],
   ] as const;
   const top = phases.reduce((best, item) => (item[1] > best[1] ? item : best));
@@ -265,8 +280,11 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       fullPayloadScans = 0,
       opens = 0,
       recordMs = 0,
-      sampleMs = 0;
+      sampleMs = 0,
+      fsyncCalls = 0,
+      fsyncMs = 0;
     const stall: CommitStall & { index: number } = { commitMs: 0, stage: 'unknown', index: -1 };
+    const originalFsync = fs.fsyncSync;
     const sample = () => {
       const started = performance.now();
       try {
@@ -307,7 +325,14 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         rss = 'unknown';
       }
       const sampled = observed > 0;
-      const dominant = classifyCommitStall(stall.index, stall.commitMs, recordMs, sampleMs, sampled);
+      const dominant = classifyCommitStall({
+        index: stall.index,
+        commitMs: stall.commitMs,
+        recordMs,
+        sampleMs,
+        fsyncMs,
+        sampled,
+      });
       try {
         console.log(
           'SPOOL_COMMIT_STALL=' +
@@ -322,6 +347,8 @@ describe('SQLite真实进程崩溃与恢复界', () => {
               commitMs: sampled ? Math.round(stall.commitMs) : 'unknown',
               recordMs: stall.index >= 0 ? Math.round(recordMs) : 'unknown',
               sampleMs: sampled ? Math.round(sampleMs) : 'unknown',
+              fsyncMs: Math.round(fsyncMs),
+              fsyncCalls,
               fullPayloadScans,
               opens,
               currentMainBytes: currentMain,
@@ -343,6 +370,17 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       if (sql === 'SELECT key,payload,record_hash FROM pending') fullPayloadScans++;
       return originalPrepare.call(this, sql);
     };
+    // 产品经 node:fs 的命名导入调 fsyncSync，改模块对象后要同步到 ESM 导出才量得到。只计时，原调用照做。
+    fs.fsyncSync = (fd: number) => {
+      fsyncCalls++;
+      const started = performance.now();
+      try {
+        originalFsync(fd);
+      } finally {
+        fsyncMs += performance.now() - started;
+      }
+    };
+    syncBuiltinESMExports();
     try {
       for (let n = 0; n < 256; n++) {
         stall.index = n;
@@ -361,7 +399,10 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     } finally {
       DatabaseSync.prototype.exec = original;
       DatabaseSync.prototype.prepare = originalPrepare;
+      fs.fsyncSync = originalFsync;
+      syncBuiltinESMExports();
     }
+    expect(fs.fsyncSync).toBe(originalFsync);
     expect(count()).toBe(256);
     expect(observed).toBeGreaterThanOrEqual(512);
     // prepare 次数的回归：不记住代次时 256 次写入是 512 次全表 prepare、65280 行解码。计数的是 prepare。
@@ -370,6 +411,10 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(fullPayloadScans).toBeLessThanOrEqual(4);
     // 每次重开都再建立一次 DELETE journal。256 次必须仍是这一次打开。
     expect(opens).toBe(1);
+    // 产品 JS 的 fsyncSync 只在首条建叶/建库/建表时付：父目录、新库、叶目录两次。
+    // 旧实现每条都重开，已有叶也再同步一次父目录，256 条至少 256 次；SQLite 自己 COMMIT 的 fsync 不在这里计。
+    expect(fsyncCalls).toBeGreaterThan(0);
+    expect(fsyncCalls).toBeLessThanOrEqual(4);
     expect(mainPeak).toBeGreaterThan(1024 * 1024);
     expect(journalPeak).toBeGreaterThan(0);
     expect(mainPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.databaseBytes);
@@ -422,13 +467,16 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     expect(stall.stage).toBe('commit');
     expect(samples).toBe(1);
     expect(stall.commitMs).toBeGreaterThanOrEqual(250);
-    expect(
-      classifyCommitStall(stall.index, stall.commitMs, stall.recordMs, stall.sampleMs, samples > 0),
-    ).toBe('commit');
-    expect(classifyCommitStall(-1, stall.commitMs, stall.recordMs, 0, true)).toBe('unknown');
+    const times = { ...stall, fsyncMs: 0, sampled: samples > 0 };
+    expect(classifyCommitStall(times)).toBe('commit');
+    expect(classifyCommitStall({ ...times, index: -1, sampleMs: 0 })).toBe('unknown');
     // 一次都没采到样：哪怕 recordMs 有残差，也不能归到 between-records 或别的具体阶段。
-    expect(classifyCommitStall(0, 0, 250, 0, false)).toBe('unknown');
-    expect(classifyCommitStall(0, 250, 250, 0, false)).toBe('unknown');
+    const unsampled = { index: 0, commitMs: 0, recordMs: 250, sampleMs: 0, fsyncMs: 0, sampled: false };
+    expect(classifyCommitStall(unsampled)).toBe('unknown');
+    expect(classifyCommitStall({ ...unsampled, commitMs: 250 })).toBe('unknown');
+    // 产品自己的 fsyncSync 单列，不并进 between-records 残差。
+    expect(classifyCommitStall({ ...unsampled, sampled: true, fsyncMs: 200 })).toBe('fsync');
+    expect(classifyCommitStall({ ...unsampled, sampled: true, fsyncMs: 100 })).toBe('between-records');
   });
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
