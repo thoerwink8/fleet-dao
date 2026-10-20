@@ -466,6 +466,8 @@ describe('读交付（真 git）', { timeout: 60_000 }, () => {
       conflicts: [],
       // 相对钉住的主线新增几行（#2755 体量预算）：两个文件各一行
       addedLines: 2,
+      // 这两行实际按的 base（头相对钉住主线的分叉点，#3249 体量停点身份钉它）
+      addedLinesBase: base,
     });
   });
 
