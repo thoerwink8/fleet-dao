@@ -2,7 +2,7 @@
 // 发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停。
 // 每个按钮：后端说能点才出现；点了先弹确认框写明后果；确认键后端慢时转圈（aria-busy）、连点只发一次，成功才关；失败留在框里写原因。
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, aroundEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const { toast } = vi.hoisted(() => ({
   toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
@@ -18,18 +18,47 @@ import { boundLine, clipBytes, installStageTrace } from './stage-trace';
 
 // 完整 CI 里这个文件有两项 5000ms 超时（#3396），只报「Test timed out」。
 // 每次 findBy / waitFor 的进出交给 stage-trace；本文件再给各阶段（渲染、矩阵各分支、弹框、同步查询、转圈、deferred、关框）打标记。
-// 只在失败（抛错）或离 5000ms 上限还剩一截仍没收尾时输出一行；标记只含固定阶段名，不含页面内容和凭据。不改超时、不改断言。
-installStageTrace();
+// 只在失败时写出：断言抛错，或测试框架超时后的收尾（函数体不会自己抛）。
+// stage-trace 的 4 秒快超时先留在缓冲里，成功就丢掉，失败才跟阶段标记一起写出。不改超时、不改断言。
+const traceLines: string[] = [];
+aroundEach(async (runTest, ctx) => {
+  traceLines.length = 0;
+  try {
+    await runTest();
+  } finally {
+    // 内层 stage-trace 收尾之后才到这里，偏慢/快超时都已经进了缓冲。
+    flushTrace(ctx.task.result?.state === 'fail');
+  }
+});
+installStageTrace({
+  emit: (line) => {
+    traceLines.push(line);
+  },
+});
 
 const PHASE_CAP = 32;
 const PHASE_LABEL_MAX_BYTES = 48;
-const PHASE_WATCH_MS = 4000;
 
-function startPhases(
-  test: string,
-  emit: (line: string) => void = (l) => process.stderr.write(`${l}\n`),
-  watchMs: number = PHASE_WATCH_MS,
-) {
+function writePhaseLine(line: string) {
+  process.stderr.write(`${line}\n`);
+}
+/** 失败收尾时才读。合同测试可临时换掉，afterEach 用完即还原。 */
+let emitPhase: (line: string) => void = writePhaseLine;
+
+/** 成功路径丢掉 stage-trace 缓冲；失败才写出。输出口坏了也不外冒。 */
+function flushTrace(failed: boolean) {
+  const lines = traceLines.splice(0, traceLines.length);
+  if (!failed) return;
+  for (const line of lines) {
+    try {
+      emitPhase(line);
+    } catch {
+      /* 输出口出错不影响测试 */
+    }
+  }
+}
+
+function startPhases(test: string, emit: (line: string) => void = emitPhase) {
   const t0 = performance.now();
   const marks: { label: string; ms: number }[] = [];
   let dropped = 0;
@@ -50,8 +79,7 @@ function startPhases(
       /* 输出口出错不影响测试 */
     }
   };
-  const timer = setTimeout(() => dump('快超时'), watchMs);
-  return {
+  const api = {
     marks,
     dropped: () => dropped,
     dump,
@@ -63,14 +91,19 @@ function startPhases(
       marks.push({ label: clipBytes(label, PHASE_LABEL_MAX_BYTES), ms: Math.round(performance.now() - t0) });
     },
     stop() {
-      clearTimeout(timer);
+      if (active === api) active = null;
     },
   };
+  return api;
 }
 
+type Phases = ReturnType<typeof startPhases>;
+/** 当前用例的阶段。框架超时不会进入 traced 的 catch，afterEach 靠它补输出。 */
+let active: Phases | null = null;
+
 /**
- * 合同测试用可控时钟推阶段标记的定时器：只伪造 setTimeout/clearTimeout。
- * 不到点不触发、到点才触发、stop 之后再推也不触发。不碰原来 10 个用例的等待。
+ * 合同测试用可控时钟：只伪造 setTimeout/clearTimeout。
+ * 成功路径本身不排定时器；把时钟推过 4 秒仍应没有输出。不碰原来 10 个用例的等待。
  */
 async function withPhaseClock(run: (advance: (ms: number) => Promise<void>) => Promise<void>) {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
@@ -83,10 +116,11 @@ async function withPhaseClock(run: (advance: (ms: number) => Promise<void>) => P
   }
 }
 
-/** 包一个测试体：抛错时输出标记再原样抛；不论如何收尾都停定时器。 */
+/** 包一个测试体：抛错时输出标记再原样抛。框架超时进不了这里的 catch，交给 afterEach。 */
 function traced(name: string, body: (mark: (label: string) => void) => Promise<void>): () => Promise<void> {
   return async () => {
     const ph = startPhases(name);
+    active = ph;
     try {
       await body(ph.mark);
     } catch (e) {
@@ -101,7 +135,13 @@ function traced(name: string, body: (mark: (label: string) => void) => Promise<v
 beforeEach(() => {
   for (const f of [toast.success, toast.error, toast.info, toast.warning]) f.mockClear();
 });
-afterEach(cleanup);
+afterEach((ctx) => {
+  // 断言失败时 traced 已经输出过；这里补的是测试框架超时（函数还挂着、catch 没跑）。
+  if (ctx.task.result?.state === 'fail') active?.dump('失败');
+  active?.stop();
+  cleanup();
+  emitPhase = writePhaseLine;
+});
 
 function deferred() {
   let resolve: (v: unknown) => void = () => {};
@@ -330,15 +370,15 @@ describe('假后端（dev:mock）：三个按钮点得动', () => {
 });
 
 describe('阶段标记的诊断合同（#3396）', () => {
-  test('标记数有上限、超了只计数；整行有字节上限；标记名被截；失败后再快超时也只输出一次', () => {
+  test('标记数有上限、超了只计数；整行有字节上限；标记名被截；失败收尾再走一次也只输出一次', () => {
     const lines: string[] = [];
-    const ph = startPhases('t'.repeat(500), (l) => lines.push(l), 10_000);
+    const ph = startPhases('t'.repeat(500), (l) => lines.push(l));
     try {
       for (let i = 0; i < PHASE_CAP + 5; i++) ph.mark(`阶段${i}${'长'.repeat(100)}`);
       expect(ph.marks).toHaveLength(PHASE_CAP);
       expect(ph.dropped()).toBe(5);
       ph.dump('失败');
-      ph.dump('快超时');
+      ph.dump('失败');
     } finally {
       ph.stop();
     }
@@ -350,44 +390,55 @@ describe('阶段标记的诊断合同（#3396）', () => {
       expect(Buffer.byteLength(m.label, 'utf8')).toBeLessThanOrEqual(PHASE_LABEL_MAX_BYTES);
   });
 
-  test('正常收尾（stop）后不输出；输出口抛错不外冒', async () => {
+  test('成功时丢掉 stage-trace 缓冲，失败才写出', () => {
+    const lines: string[] = [];
+    emitPhase = (l) => lines.push(l);
+    try {
+      traceLines.push('[阶段记录·快超时] test=ok');
+      flushTrace(false);
+      expect(lines).toEqual([]);
+      expect(traceLines).toEqual([]);
+      traceLines.push('[阶段记录·快超时] test=bad');
+      flushTrace(true);
+      expect(lines).toEqual(['[阶段记录·快超时] test=bad']);
+    } finally {
+      emitPhase = writePhaseLine;
+      traceLines.length = 0;
+    }
+  });
+
+  test('临近 5000ms 上限仍成功时不输出；输出口抛错不外冒', async () => {
     await withPhaseClock(async (advance) => {
       const lines: string[] = [];
-      const ok = startPhases('ok', (l) => lines.push(l), 20);
-      ok.mark('a');
+      const ok = startPhases('ok', (l) => lines.push(l));
+      ok.mark('等确认框');
+      await advance(4500);
       ok.stop();
-      await advance(20);
       expect(lines).toEqual([]);
-      const bad = startPhases(
-        'bad',
-        () => {
-          throw new Error('口坏了');
-        },
-        5,
-      );
-      await advance(4);
-      expect(lines).toEqual([]);
-      await advance(1);
+      const bad = startPhases('bad', () => {
+        throw new Error('口坏了');
+      });
+      expect(() => bad.dump('失败')).not.toThrow();
       bad.stop();
       expect(lines).toEqual([]);
-      expect(() => bad.dump('失败')).not.toThrow();
     });
   });
 
-  test('没收尾的在快超时时输出一次，写明停在哪一步', async () => {
-    await withPhaseClock(async (advance) => {
-      const lines: string[] = [];
-      const ph = startPhases('slow', (l) => lines.push(l), 10);
-      ph.mark('等确认框');
-      await advance(9);
-      expect(lines).toEqual([]);
-      await advance(1);
-      await advance(50);
-      ph.stop();
-      expect(lines).toHaveLength(1);
-      expect(lines[0]).toContain('[阶段标记·快超时]');
-      expect(lines[0]).toContain('停在：等确认框');
-    });
+  const timeoutLines: string[] = [];
+  test.fails('测试框架超时后，失败收尾输出已收集的阶段（函数体不会自己抛）', async () => {
+    emitPhase = (l) => timeoutLines.push(l);
+    await traced('timeout-case', async (mark) => {
+      mark('等确认框');
+      await new Promise<void>(() => {});
+    })();
+  }, 200);
+
+  test('框架超时那次只留下失败阶段，没有在成功时提前输出', () => {
+    expect(timeoutLines).toHaveLength(1);
+    expect(timeoutLines[0]).toContain('[阶段标记·失败]');
+    expect(timeoutLines[0]).toContain('停在：等确认框');
+    expect(timeoutLines[0]).toContain('test=timeout-case');
+    expect(timeoutLines[0]).not.toContain('快超时');
   });
 
   test('traced 把断言错误原样抛回去，诊断行只有阶段名', async () => {
