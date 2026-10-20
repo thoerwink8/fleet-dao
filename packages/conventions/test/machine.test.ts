@@ -21,19 +21,24 @@ interface Rig {
 
 function rig(o: {
   ssh?: { status: number; stdout: string; stderr?: string };
-  install?: { status: number; stdout?: string; stderr?: string };
+  install?: { status: number; stdout?: string; stderr?: string } | Error;
   get?: { status: number; body: string } | Error;
+  /** join 自动作废时法国 revoke 的回答；不给就照 ssh 的。 */
+  revoke?: { status: number; stdout: string; stderr?: string } | Error;
   stdin?: string;
 }): Rig {
   const r: Rig = { out: [], err: [], sshCalls: [], installCalls: [], getCalls: [], deps: undefined as never };
   r.deps = {
     ssh: async (alias, cmd) => {
       r.sshCalls.push({ alias, cmd });
-      const s = o.ssh ?? { status: 0, stdout: JSON.stringify({ env: 'founder-mac', token: TOKEN }) };
+      const v = / revoke /.test(cmd) ? o.revoke : undefined;
+      if (v instanceof Error) throw v;
+      const s = v ?? o.ssh ?? { status: 0, stdout: JSON.stringify({ env: 'founder-mac', token: TOKEN }) };
       return { status: s.status, stdout: s.stdout, stderr: s.stderr ?? '' };
     },
     install: async (args, env) => {
       r.installCalls.push({ args, env });
+      if (o.install instanceof Error) throw o.install;
       const i = o.install ?? { status: 0, stdout: '成  试推：法国收下了\n' };
       return { status: i.status, stdout: i.stdout ?? '', stderr: i.stderr ?? '' };
     },
@@ -142,6 +147,55 @@ describe('machine join --ssh', () => {
   });
 });
 
+describe('machine join --ssh 中途失败自动作废刚发的通行证（#3397）', () => {
+  const REVOKE_CMD =
+    'sudo -n bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api node-key revoke founder-mac';
+  const revokes = (r: Rig) => r.sshCalls.filter((c) => / revoke /.test(c.cmd));
+
+  it.each([
+    ['安装失败', { install: new Error(`spawn failed ${TOKEN}`) }, '本机安装没跑起来'],
+    ['试推失败', { install: { status: 1, stdout: '', stderr: `boom ${TOKEN}` } }, '试推没成'],
+    ['试读失败', { get: { status: 401, body: '{}' } }, '试读租约没成'],
+  ] as const)('%s：经同一别名作废一次，非零，写明可直接重跑', async (_name, o, why) => {
+    const r = rig(o);
+    expect(await runMachine(joinSsh, r.deps)).toBe(1);
+    expect(revokes(r)).toEqual([{ alias: 'france', cmd: REVOKE_CMD }]);
+    const err = r.err.join('\n');
+    expect(err).toContain(why);
+    expect(err).toContain('已作废，可直接重跑 join');
+    expect(err).not.toContain('通行证还有效');
+    expect(r.out.join('\n')).not.toContain('装好了');
+    expect(everything(r)).not.toContain(TOKEN);
+  });
+
+  it.each([
+    ['法国 revoke 非零', { status: 1, stdout: '', stderr: `库出错 ${TOKEN}` }, '库出错'],
+    ['ssh 没连上', new Error(`timeout ${TOKEN}`), '没连上'],
+  ] as const)('作废也失败（%s）：非零，写明通行证还有效、先手动 revoke', async (_name, revoke, why) => {
+    const r = rig({ get: { status: 503, body: '' }, revoke });
+    expect(await runMachine(joinSsh, r.deps)).toBe(1);
+    expect(revokes(r)).toHaveLength(1);
+    const err = r.err.join('\n');
+    expect(err).toContain(why);
+    expect(err).toContain('通行证还有效，先 pnpm machine revoke founder-mac');
+    expect(err).not.toContain('已作废，可直接重跑');
+    expect(everything(r)).not.toContain(TOKEN);
+  });
+
+  it('成功路径不调用 revoke', async () => {
+    const r = rig({});
+    expect(await runMachine(joinSsh, r.deps)).toBe(0);
+    expect(revokes(r)).toHaveLength(0);
+    expect(r.sshCalls).toHaveLength(1);
+  });
+
+  it('发钥匙本身没成：没有可作废的，不调用 revoke', async () => {
+    const r = rig({ ssh: { status: 1, stdout: '', stderr: '已存在' } });
+    expect(await runMachine(joinSsh, r.deps)).toBe(1);
+    expect(revokes(r)).toHaveLength(0);
+  });
+});
+
 describe('machine join --token-stdin', () => {
   const base: MachineArgs = {
     cmd: 'join',
@@ -166,6 +220,20 @@ describe('machine join --token-stdin', () => {
     expect(await runMachine(base, bad.deps)).toBe(1);
     expect(bad.installCalls).toHaveLength(0);
     expect(everything(bad)).not.toContain(TOKEN);
+  });
+
+  it('装或试读失败：不 ssh、不自动作废（通行证不是本命令发的），非零写原因', async () => {
+    const a = rig({ stdin: TOKEN, install: { status: 1, stdout: '', stderr: '没推成' } });
+    expect(await runMachine(base, a.deps)).toBe(1);
+    const b = rig({ stdin: TOKEN, get: { status: 401, body: '{}' } });
+    expect(await runMachine(base, b.deps)).toBe(1);
+    for (const r of [a, b]) {
+      expect(r.sshCalls).toHaveLength(0);
+      expect(r.err.join('\n')).not.toContain('作废');
+      expect(everything(r)).not.toContain(TOKEN);
+    }
+    expect(a.err.join('\n')).toContain('没推成');
+    expect(b.err.join('\n')).toContain('HTTP 401');
   });
 
   it('标准输入为空：非零', async () => {
