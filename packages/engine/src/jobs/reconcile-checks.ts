@@ -51,6 +51,9 @@ export const CHANGELOG_SKIP_WHY = '引擎受管的更新日志 PR，只改 CHANG
 /** 撤「合并记录晚记」那种时写的原因。 */
 export const MERGE_RECORD_LANDED_WHY =
   '实际合并人是「引擎」，真实 github.merge_pr 的目标及完整回执与 GitHub 一致，条件不再成立';
+/** 合并超过 7 天自动收「没经合并队列合」时写的原因：只是不再催，不证明经过队列，也不是走过 historical-audit 的审计处置。 */
+export const HISTORICAL_PR_RETIRE_WHY =
+  '历史事实：PR 已合并超过 7 天，改不了，自动收；这只是不再催，不证明经过合并队列，缺证据的仍是 historical_unproven（未做 ops 历史审计处置）';
 /**
  * 已经开着、下一轮可能已经出了 26 小时回看的误报：对账按键撤，不靠再看见那张 PR。
  * #2175 是引擎机器人自己开、自己合的耗时表。
@@ -296,7 +299,8 @@ export async function checkMergedPrs(deps: ReconcileCheckDeps): Promise<SweepPar
           body: [
             ...lines,
             '我们机器人开的 PR 该由合并队列以「引擎」机器人合、账上留合并记录；不是这样合的，合并前那几道核对（不落后主线、' +
-              'CI 全绿、人闸）可能没走。实际合并人是「引擎」、真实 github.merge_pr 的目标与完整回执均已核对一致，对账自己撤；补账不能证明经过队列，别的不会自己撤，看过点「处理」。',
+              'CI 全绿、人闸）可能没走。实际合并人是「引擎」、真实 github.merge_pr 的目标与完整回执均已核对一致，对账自己撤；补账不能证明经过队列，别的不会自己撤。' +
+              '缺证据的是 historical_unproven：要用 `fleet-api historical-audit` 记精确身份、证据、缺口和后续责任（见 ops 手册「历史合并通知的审计处置」），不是条件已消失；单纯点「处理」只表示看过。',
           ].join('\n'),
           link: `https://github.com/${slug}/pull/${number}`,
         });
@@ -390,7 +394,12 @@ export async function retireHistoricalFactAlerts(deps: ReconcileCheckDeps): Prom
       continue;
     }
     if (old) {
-      await resolveOne(deps, part, alert.dedupeKey, '历史事实：PR 已合并超过 7 天，改不了，自动收');
+      await resolveOne(
+        deps,
+        part,
+        alert.dedupeKey,
+        prefix === PR_ALERT_PREFIX ? HISTORICAL_PR_RETIRE_WHY : '历史事实：PR 已合并超过 7 天，改不了，自动收',
+      );
     }
   }
   return part;

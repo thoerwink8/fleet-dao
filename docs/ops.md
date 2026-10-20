@@ -1099,6 +1099,8 @@ FLEET_HK_PARTS=web                      # 往香港发哪几样：web 静态文�
 
 ### 历史合并通知的审计处置
 
+`reconcile:pr:`（机器人开的 PR 没经合并队列合）只有实际合并人是「引擎」、真实 `github.merge_pr` 的目标与完整回执和 GitHub 一致时，对账才自己撤；缺证据的是 `historical_unproven`。合并超过 7 天对账会自动收掉不再催，原因写明这不证明经过队列、也不等于做过审计处置；要留精确身份、证据、缺口和责任，走下面的命令。点「处理」只表示看过。
+
 只有历史资料已核查但仍不能证明完整队列时，使用 `fleet-api historical-audit`，从 stdin 输入 JSON；先读原通知、PR 和证据 issue，不替代修复当前生产故障。字段是 `notificationId`、`dedupeKey`（精确 `reconcile:pr:owner/repo#PR`）、`repo`、数字 `pr`、40 位真实 `head`、同仓 `evidenceIssue` URL、固定 `conclusion: "historical_unproven"`，以及非空的 `evidence`（已核实事实）、`gaps`（缺失证据）、`responsibility`（后续责任）。证据 issue 正文必须明确指向该 PR。
 
 ```sh
