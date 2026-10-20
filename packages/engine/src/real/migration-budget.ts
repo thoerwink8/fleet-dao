@@ -33,6 +33,9 @@ const TRUST_INPUTS = new Set([
   'packages/engine/src/limits.ts',
   'packages/engine/src/workflows/task.ts',
   'packages/engine/src/workflows/kit.ts',
+  // 体量重评（#3249）的资格裁决链：judgeRemeasure 定 verified/预算/回执，TaskRuntime 消费裁决并放行当前交付。
+  'packages/engine/src/workflows/task-budget-remeasure.ts',
+  'packages/engine/src/workflows/task-runtime.ts',
 ]);
 let sequence = 0;
 function utf8(buffer: Buffer): string | null {
