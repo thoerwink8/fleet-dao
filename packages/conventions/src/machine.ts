@@ -1,7 +1,8 @@
 // pnpm machine join|issue|list|revoke：一条命令把新机器接入本机会话上报和领单（#3390，母单 #3353）。
 // 通行证明文只活在内存里：经 ssh 从法国标准输出接住（或从标准输入读），交给本机安装时只走子进程环境变量
 // FLEET_NODE_TOKEN，不进命令行参数、不打屏、不写日志；所有对外文字出口都先过 redact。
-// 三态：任何一步没成都返回非 0 和原因，不拿 0 冒充；发了钥匙却没装成时写明「先 revoke 再重来」。
+// 三态：任何一步没成都返回非 0 和原因，不拿 0 冒充；join --ssh 发了钥匙却没装成时经同一别名自动作废这把（#3397），
+// 作废也没成才写明「先 revoke 再重来」。--token-stdin 的钥匙不是本命令发的，不动它。
 
 export const NODE_ID_RE = /^[a-z][a-z0-9-]*$/;
 const REMOTE_BIN = 'sudo -n bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api node-key';
@@ -118,6 +119,24 @@ async function issueKey(
   return { token: parsed.token };
 }
 
+/** 作废 join 刚发的那把；原因里的明文抹掉。 */
+async function revokeIssued(
+  deps: MachineDeps,
+  alias: string,
+  id: string,
+  token: string,
+): Promise<{ ok: true } | { ok: false; why: string }> {
+  try {
+    const r = await deps.ssh(alias, `${REMOTE_BIN} revoke ${id}`);
+    return r.status === 0 ? { ok: true } : { ok: false, why: sshReason(r, token) };
+  } catch (e) {
+    return {
+      ok: false,
+      why: `ssh ${alias} 没连上：${redact(e instanceof Error ? e.message : String(e), token)}`,
+    };
+  }
+}
+
 /** 试读租约：200 且 {"claims":[...]} 才算成。 */
 export async function probeClaims(
   deps: MachineDeps,
@@ -167,32 +186,37 @@ async function join(a: MachineArgs, deps: MachineDeps): Promise<number> {
     }
     token = got.token;
   }
-  const hint = a.ssh
-    ? `钥匙已在法国发出，通行证没有保存；要重来先 pnpm machine revoke ${id} --ssh ${a.ssh}`
-    : '';
+  const ssh = a.ssh;
+  /** 发完钥匙之后、报「装好了」之前没成：--ssh 时作废刚发的这把，作废也没成就写明手动作废。 */
+  const fail = async (why: string): Promise<number> => {
+    if (!ssh) {
+      deps.err(why);
+      return 1;
+    }
+    const rv = await revokeIssued(deps, ssh, id, token);
+    deps.err(
+      rv.ok
+        ? `${why}\n刚在法国发的通行证已作废，可直接重跑 join`
+        : `${why}\n自动作废没成：${rv.why}\n通行证还有效，先 pnpm machine revoke ${id} --ssh ${ssh} 再重跑 join`,
+    );
+    return 1;
+  };
   let inst: RunResult;
   try {
     inst = await deps.install(['install', '--url', a.url, '--machine', a.name ?? id], {
       FLEET_NODE_TOKEN: token,
     });
   } catch (e) {
-    deps.err(
-      `本机安装没跑起来：${redact(e instanceof Error ? e.message : String(e), token)}\n${hint}`.trim(),
-    );
-    return 1;
+    return fail(`本机安装没跑起来：${redact(e instanceof Error ? e.message : String(e), token)}`);
   }
   const instOut = redact(inst.stdout, token).trimEnd();
   if (instOut) deps.out(instOut);
   if (inst.status !== 0) {
     const e = redact(inst.stderr, token).trim();
-    deps.err(`本机安装/试推没成（退出码 ${inst.status ?? '无'}）${e ? `：${e}` : ''}\n${hint}`.trim());
-    return 1;
+    return fail(`本机安装/试推没成（退出码 ${inst.status ?? '无'}）${e ? `：${e}` : ''}`);
   }
   const probe = await probeClaims(deps, a.url, token);
-  if (!probe.ok) {
-    deps.err(`装好了但试读租约没成：${probe.why}\n不能算接入完成。${hint}`.trim());
-    return 1;
-  }
+  if (!probe.ok) return fail(`装好了但试读租约没成：${probe.why}\n不能算接入完成。`);
   deps.out(`试读租约成：GET /api/nodes/claims 回 200，现有 ${probe.count} 条`);
   deps.out(
     `装好了：${id} 已接入本机会话上报，试推和试读租约都成了。新开的会话才有心跳；领单用 pnpm work claim <单号>`,
