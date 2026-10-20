@@ -1,6 +1,5 @@
 // 并主线冲突里机械可解的（迁移生成文件、pnpm-lock.yaml）引擎自己解（#3428）：真 git、临时目录里的小仓，
 // 重新生成迁移、装锁文件、自测的命令换成夹具脚本（真的 drizzle-kit 在 schema-drift 里核）。
-import { spawnSync } from 'node:child_process';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,7 +13,7 @@ import {
   resolveMechanically,
 } from '../../src/real/mechanical-conflict.ts';
 import { headOf, type UserTree } from '../../src/real/user-git.ts';
-import { runChildOk } from '../child.ts';
+import { runChild, runChildOk } from '../child.ts';
 
 let root: string;
 beforeEach(() => {
@@ -423,11 +422,10 @@ describe('生成核对脚本（真 drizzle-kit）', { timeout: 120_000 }, () => 
   if (!last || !before) throw new Error('仓里的迁移记录不够');
   const arg = `${last.idx}:${last.tag}:${before.idx}`;
   const run = (migDir: string) =>
-    spawnSync(process.execPath, ['--input-type=module', '-', arg], {
+    runChild(process.execPath, ['--input-type=module', '-', arg], {
       cwd: dbDir,
       input: GENERATED_CHECK_SCRIPT,
       env: { ...process.env, MIG_DIR: migDir },
-      encoding: 'utf8',
     });
 
   it('已提交的最新迁移是 drizzle-kit 生成的：逐字节一致', () => {
