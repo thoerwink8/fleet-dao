@@ -285,6 +285,9 @@ describe('合了的 PR：镜像、合并人、合并记录', () => {
     expect(alert.body).toContain('#7 不是「引擎」机器人合的（合并人 founder）');
     expect(alert.body).toContain('#7 合并了，但账上没有合并队列的合并记录');
     expect(alert.body).toContain('不会自己撤');
+    expect(alert.body).toContain('historical_unproven');
+    expect(alert.body).toContain('fleet-api historical-audit');
+    expect(alert.body).not.toContain('条件不再成立');
     expect(alert.link).toBe('https://github.com/acme/widgets/pull/7');
 
     // 再来一轮（库里已有这条 insertOnce 落过的）：不应重复插
@@ -665,6 +668,16 @@ describe('历史事实类提醒合并超过 7 天自动收（#1645）', () => {
     expect(w.resolved).toHaveLength(1);
     expect(w.resolved[0]?.why).toContain('历史事实');
     expect(old.resolvedAt).not.toBeNull();
+  });
+
+  it('自动收 reconcile:pr: 的原因不声称条件消失或队列已证明，写明缺证据仍是 historical_unproven', async () => {
+    const w = world({ open: [aged(prAlertKey('acme', 'widgets', 389))], prMergedAt: async () => daysAgo(8) });
+    await retireHistoricalFactAlerts(w.deps);
+    const why = w.resolved[0]?.why ?? '';
+    expect(why).toContain('不证明经过合并队列');
+    expect(why).toContain('historical_unproven');
+    expect(why).not.toContain('条件不再成立');
+    expect(why).not.toContain('条件已消失');
   });
 
   it('合并 2 天的不撤', async () => {
