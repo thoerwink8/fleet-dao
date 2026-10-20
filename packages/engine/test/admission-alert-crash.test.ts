@@ -256,7 +256,8 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       'SPOOL_PEAK_EVIDENCE=' +
         JSON.stringify({ uid: process.getuid?.(), version, mainPeak, journalPeak, blocksPeak, observed }),
     );
-  }, 15000);
+    // 256 次逐条 fsync 的 COMMIT 在 CI 负载下实测 17.8s；断言不变，只放宽墙钟。
+  }, 45000);
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
     (mode) => {
