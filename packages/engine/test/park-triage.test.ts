@@ -1,7 +1,7 @@
 // 法国指挥官会话（#3294 第 2 片）：停了 15 分钟规则没解开的单交 commander 会话看，会话只交裁决，引擎白名单核了再执行。
 // 假依赖测任务本身：选哪些单、护栏（每次停下一次、每天上限、开关、没配模型报警）、白名单放行/拒绝、诊断文字带进提醒；
 // 真装配的开关、操作记录名下在 real/park-triage.test.ts。
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { COMMANDER_ACTOR, ROUNDS_HANDOFF_TITLE } from '../src/commander-contract.ts';
 import type { SpinRound } from '../src/decisions/spin.ts';
 import type { GroomSessionOutcome } from '../src/jobs/groom.ts';
@@ -100,6 +100,7 @@ function rig(
   r.deps = {
     enabled: async () => (opts.enabled === false ? { on: false, why: '设置关着' } : { on: true }),
     purposeConfigured: async () => opts.configured !== false,
+    resolveNoModelAlert: vi.fn(async () => {}),
     tasks: async () => [ROW],
     status: async () => opts.snap ?? snap('rounds'),
     audits: async () => r.audits,
@@ -230,6 +231,64 @@ describe('护栏', () => {
     expect(r.notices[0]).toMatchObject({ level: 'alert', key: 'commander:no-model' });
     expect(r.notices[0]?.title).toContain('没配模型');
     expect(result.outcome).toBe('partial');
+    expect(r.deps.resolveNoModelAlert).not.toHaveBeenCalled();
+  });
+
+  it('明确配有模型才解除缺配置提醒，不依赖本轮是否找到活路由', async () => {
+    const r = rig({ answer: { ok: false, why: '没有可用路由' } });
+    await triageParkedTasks(r.deps);
+    expect(r.deps.resolveNoModelAlert).toHaveBeenCalledOnce();
+    expect(r.notices[0]?.body).toContain('没有可用路由');
+  });
+
+  it('配置读取异常保留未知，不解除旧卡、不起会话', async () => {
+    const r = rig({
+      over: {
+        purposeConfigured: async () => {
+          throw new Error('配置读失败');
+        },
+      },
+    });
+    await expect(runParkTriageJob(r.deps)).rejects.toThrow('配置读失败');
+    expect(r.deps.resolveNoModelAlert).not.toHaveBeenCalled();
+    expect(r.sessions).toHaveLength(0);
+  });
+
+  it('解除失败明确记 partial，仍处理任务并保留原业务诊断', async () => {
+    const log = vi.fn();
+    const r = rig({
+      over: {
+        resolveNoModelAlert: async () => {
+          throw new Error('解除写库失败');
+        },
+        status: async () => {
+          throw new Error('原工作流读取失败');
+        },
+        log,
+      },
+    });
+    const out = await runParkTriageJob(r.deps);
+    expect(out.outcome).toBe('partial');
+    expect(out.why).toContain('解除写库失败');
+    expect(out.why).toContain('原工作流读取失败');
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('解除写库失败'));
+  });
+
+  it('解除与后续业务同时失败时，业务失败不被覆盖且解除失败已留日志', async () => {
+    const log = vi.fn();
+    const r = rig({
+      over: {
+        resolveNoModelAlert: async () => {
+          throw new Error('解除写库失败');
+        },
+        tasks: async () => {
+          throw new Error('原任务列表读失败');
+        },
+        log,
+      },
+    });
+    await expect(runParkTriageJob(r.deps)).rejects.toThrow('原任务列表读失败');
+    expect(log).toHaveBeenCalledWith('error', expect.stringContaining('解除写库失败'));
   });
 });
 
