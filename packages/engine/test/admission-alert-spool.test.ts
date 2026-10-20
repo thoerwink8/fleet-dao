@@ -88,7 +88,8 @@ describe('专用SQLite持久pending', () => {
     const d = database();
     expect(d.prepare('SELECT count(*) n FROM pending').get()?.n).toBe(256);
     d.close();
-  });
+    // 257 次同步落盘（每次 fsync），慢盘上默认 5 秒不够。
+  }, 30000);
   it('实际写锁第二连接fail-fast busy，原事务回滚后重开成功', () => {
     const o = observation();
     recordAdmissionAlert(path, o);
