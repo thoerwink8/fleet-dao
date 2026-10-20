@@ -46,7 +46,7 @@ function findReclaude(): string | null {
   return lines.find((l) => /\.exe$/i.test(l)) ?? lines[0] ?? null;
 }
 
-const wantsRun = process.argv[2] === 'run' || process.argv[2] === 'runs';
+const wantsRun = process.argv[2] === 'run' || process.argv[2] === 'runs' || process.argv[2] === 'rework';
 const detach = wantsRun ? await agentsLib<DetachLib>('agents/local-sessions/detach.mjs') : null;
 const capacity = wantsRun ? await agentsLib<CapacityLib>('agents/hooks/capacity.mjs') : null;
 const session = wantsRun ? await agentsLib<SessionLib>('agents/hooks/unattended.mjs') : null;

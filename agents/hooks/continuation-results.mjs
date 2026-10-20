@@ -1,4 +1,5 @@
 // Stop 同步把本会话派出的工人终态放进续轮提示。Codex async hook 不会启动新轮，不能借用 Claude asyncRewake。
+// waiting 的结束说明也从 endedOf 来：已 park 的叫一次且不写成做完，活动复核不出现，复核心跳丢了只说接着复核。去重靠消费方的结果摘要。
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
