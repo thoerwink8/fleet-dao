@@ -765,7 +765,16 @@ describe('Temporal 重评适配（#3249）', () => {
     expect(check, '预检拿到 resumed').toMatchObject({ ok: false, reason: 'unknown' });
     const eligible = await createTemporalLineBudgetRemeasure(
       client(status, { outcome: 'eligible', receipt: RECEIPT }).client,
-    )({ ...request, mode: 'check', park: undefined });
+    )({
+      workflowId: request.workflowId,
+      runId: RUN,
+      repo: request.repo,
+      taskId: request.taskId,
+      head: HEAD,
+      base: BASE,
+      by: request.by,
+      mode: 'check',
+    });
     expect(eligible).toMatchObject({ ok: true, outcome: 'eligible' });
   });
 
