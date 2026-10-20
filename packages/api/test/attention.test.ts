@@ -96,6 +96,39 @@ describe('fleet-api attention', () => {
     });
     expect(result.runningIdle.rows.find((r) => r.issueNumber === 7)?.updatedAt).toBeNull();
   });
+
+  it('attention 带当前停下任务的指挥官处理统计', async () => {
+    const [repo] = await t.db
+      .insert(repos)
+      .values({ owner: 'o', name: 'stalled', testCommand: 'pnpm check' })
+      .returning();
+    if (!repo) throw new Error('repo fixture missing');
+    const [task] = await t.db
+      .insert(tasks)
+      .values({
+        repoId: repo.id,
+        issueNumber: 8,
+        title: '停下的单',
+        rawRequest: '停下',
+        requestedBy: 'test',
+        priority: 1,
+        state: 'stalled',
+        executor: 'engine',
+      })
+      .returning();
+    if (!task) throw new Error('task fixture missing');
+    await upsertAlert(t.db, {
+      dedupeKey: 'task-stalled:park:1',
+      level: 'alert',
+      taskId: task.id,
+      title: '停下',
+      body: '停着',
+      link: '/tasks',
+    });
+    const result = await runAttention({ db: t.db, now: () => new Date(), healthz: GREEN });
+    expect(result.commander).toEqual({ stalled: 1, handled: 0, forHuman: 1 });
+  });
+
   it('参数：只认 --json', () => {
     expect(() => parseAttentionArgs(['--json'])).not.toThrow();
     expect(() => parseAttentionArgs([])).toThrow(/--json/);
