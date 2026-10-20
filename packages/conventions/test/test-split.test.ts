@@ -304,6 +304,7 @@ describe('环境类、能力标记', () => {
     expect(needsPg('packages/store/test/task-execution.real-pg.test.ts')).toBe(true);
     expect(needsPg('packages/store/test/idempotency-race.real-pg.test.ts')).toBe(true);
     expect(needsPg('packages/engine/test/legacy-admission.real-pg.test.ts')).toBe(true);
+    expect(needsPg('packages/engine/test/admission-alert.real-pg.test.ts')).toBe(true);
     expect(needsPg('packages/store/test/task-execution.pg.test.ts')).toBe(false);
     expect(needsPg('packages/store/test/other.real-pg.test.ts')).toBe(false);
   });
@@ -413,6 +414,7 @@ describe('在真仓上装箱（全跑那一轮）', () => {
           (f) =>
             f.startsWith('packages/db/') ||
             f === 'packages/engine/test/legacy-admission.real-pg.test.ts' ||
+            f === 'packages/engine/test/admission-alert.real-pg.test.ts' ||
             f === 'packages/store/test/task-execution.real-pg.test.ts' ||
             f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),

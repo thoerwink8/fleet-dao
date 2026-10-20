@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import net from 'node:net';
 
-export async function commitAckProxy(databaseUrl: string) {
+export async function commitAckProxy(databaseUrl: string, listenHost = '127.0.0.1') {
   const target = new URL(databaseUrl);
   assert.match(target.pathname, /^\/fleet_test_[a-f0-9]{32}$/);
   assert(['127.0.0.1', 'localhost', '[::1]'].includes(target.hostname));
@@ -69,12 +69,12 @@ export async function commitAckProxy(databaseUrl: string) {
   });
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(0, '127.0.0.1', resolve);
+    server.listen(0, listenHost, resolve);
   });
   const address = server.address();
   assert(address && typeof address !== 'string');
   const url = new URL(databaseUrl);
-  url.hostname = '127.0.0.1';
+  url.hostname = listenHost;
   url.port = String(address.port);
   url.searchParams.set('sslmode', 'disable');
   return {
