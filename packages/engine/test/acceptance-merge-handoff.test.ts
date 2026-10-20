@@ -74,7 +74,15 @@ async function seed() {
 const addSource = async (taskId: string, head: string, items: string[]) => {
   const [row] = await t.db
     .insert(acceptanceDuties)
-    .values({ taskId, repo: 'merge/handoff', issueNumber: 3207, prNumber: PR, head, items, source: 'cold_verify' })
+    .values({
+      taskId,
+      repo: 'merge/handoff',
+      issueNumber: 3207,
+      prNumber: PR,
+      head,
+      items,
+      source: 'cold_verify',
+    })
     .returning();
   return row!;
 };
@@ -104,7 +112,12 @@ async function merge(
       item,
       sources: [...sources, ...(target ? [target] : [])]
         .filter((r) => r.items.includes(item))
-        .map((r) => ({ id: r.id, generation: r.generation, head: r.head, existingTarget: r.id === target?.id })),
+        .map((r) => ({
+          id: r.id,
+          generation: r.generation,
+          head: r.head,
+          existingTarget: r.id === target?.id,
+        })),
     })),
     proof: { fixture: 'synthetic' },
   };
