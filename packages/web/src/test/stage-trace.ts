@@ -9,6 +9,9 @@
 // - 进程 CPU 时间是整个进程所有线程的合计（含 GC、工作线程），除以墙钟：低不等于没排上 CPU（空等也低），高不等于本测试在烧。
 // - 事件循环利用率高只说明主线程没闲着：同步等待（如 spawnSync）能让 CPU 空闲而它仍是 1。
 // - Windows 的 os.loadavg() 恒为 0，不是「负载 0」，输出写「未知」。
+// - 「渲染」是 harness 外层 <Profiler> 报的 actualDuration：React 开发版里组件渲染阶段的墙钟（被抢走 CPU 也算在里面），
+//   不含提交到 DOM（happy-dom 改节点）、不含 findBy 的查询；记进它发生时还没结束的那次等待，不在等待里的单列。
+//   一次等待的时长减去它名下的渲染，剩下的是查询、DOM、空等和别的，这里分不开。
 // - 归属：findBy / waitFor 属于哪个测试靠 AsyncLocalStorage 跟着异步链走，不看「当前是哪个测试」的全局状态；
 //   超时的旧测试迟到的等待记进它自己（已收尾，丢弃），不会算到下一个测试头上；认不出归属的只计数。
 // 输出有界：阶段最多 STAGE_CAP 条，测试名、位置、整行都有字节上限，超了写明已截断；输出口抛错不会冒成测试失败，只计「输出失败」次数，并尽力在 stderr 留一行。
@@ -38,6 +41,8 @@ export interface StageEntry {
   startMs: number;
   /** 还没结束的写 null（卡在这一步）。 */
   endMs: number | null;
+  /** 这次等待还没结束时 React 组件渲染用掉的毫秒（Profiler 的 actualDuration 合计）。 */
+  renderMs: number;
 }
 
 export interface StageReport {
@@ -57,6 +62,8 @@ export interface StageReport {
     overlapStages: number[];
     overlapComplete: boolean;
   };
+  /** React 渲染：提交次数、组件渲染合计毫秒，其中不在任何已记等待里的毫秒（含 render() 首屏、fireEvent 和没展开的等待）。 */
+  render: { commits: number; totalMs: number; outsideWaitsMs: number };
   /** 本进程（所有线程合计）拿到的 CPU 时间（用户+内核）占墙钟的比例。 */
   processCpuShare: number;
   /** 事件循环利用率（performance.eventLoopUtilization），高 ≠ 一定在计算。 */
@@ -143,6 +150,9 @@ export class StageTrace {
   private blockedTo: number | null = null;
   private blockedOverlap: number[] = [];
   private blockedOverlapComplete = true;
+  private renderCommits = 0;
+  private renderTotal = 0;
+  private renderOutside = 0;
   private lastTick = performance.now();
   private probe: NodeJS.Timeout | null = null;
   private watchdog: NodeJS.Timeout | null = null;
@@ -213,6 +223,7 @@ export class StageTrace {
       at: clipBytes(at, STAGE_AT_MAX_BYTES),
       startMs: round(performance.now() - this.t0),
       endMs: null,
+      renderMs: 0,
     };
     this.stages.push(e);
     return e;
@@ -222,6 +233,16 @@ export class StageTrace {
     if (e && !this.finished) e.endMs = round(performance.now() - this.t0);
   }
 
+  /** 记一次 React 提交的组件渲染耗时：算进最近一次还没结束的等待；没有就算「不在等待里」。 */
+  noteRender(ms: number): void {
+    if (this.finished || !Number.isFinite(ms) || ms < 0) return;
+    this.renderCommits += 1;
+    this.renderTotal += ms;
+    const open = this.stages.findLast((s) => s.endMs === null);
+    if (open) open.renderMs += ms;
+    else this.renderOutside += ms;
+  }
+
   report(): StageReport {
     const wallMs = performance.now() - this.t0;
     const cpu = process.cpuUsage(this.cpu0);
@@ -229,7 +250,7 @@ export class StageTrace {
     return {
       test: this.test,
       elapsedMs: round(wallMs),
-      stages: this.stages.map((s) => ({ ...s })),
+      stages: this.stages.map((s) => ({ ...s, renderMs: round(s.renderMs) })),
       droppedStages: this.dropped,
       blocked: {
         count: this.blockedCount,
@@ -238,6 +259,11 @@ export class StageTrace {
         maxToMs: this.blockedTo,
         overlapStages: [...this.blockedOverlap],
         overlapComplete: this.blockedOverlapComplete,
+      },
+      render: {
+        commits: this.renderCommits,
+        totalMs: round(this.renderTotal),
+        outsideWaitsMs: round(this.renderOutside),
       },
       processCpuShare: wallMs > 0 ? Math.round(((cpu.user + cpu.system) / 1000 / wallMs) * 100) / 100 : 0,
       loopUtilization: Math.round(elu.utilization * 100) / 100,
@@ -292,8 +318,17 @@ function loadavgOrUnknown(): number | null {
 /** 一行里读完，各读数的含义见文件头：别把它们读成根因。整行经 send 输出时不超过 LINE_MAX_BYTES，超了截断并写明。 */
 export function format(r: StageReport): string {
   const stages = r.stages
-    .map((s) => `#${s.n} ${s.at} ${s.startMs}→${s.endMs === null ? '…' : s.endMs}ms`)
+    .map(
+      (s) =>
+        `#${s.n} ${s.at} ${s.startMs}→${s.endMs === null ? '…' : s.endMs}ms` +
+        (s.renderMs > 0 ? `（渲染 ${s.renderMs}ms）` : ''),
+    )
     .join('，');
+  const rd = r.render;
+  const render =
+    rd.commits === 0
+      ? 'React 没有提交（或没装 Profiler）'
+      : `React 提交 ${rd.commits} 次、组件渲染合计 ${rd.totalMs}ms（不在已记等待里的 ${rd.outsideWaitsMs}ms；不含改 DOM 和查询）`;
   const more = r.droppedStages > 0 ? `，另有 ${r.droppedStages} 次未展开` : '';
   const b = r.blocked;
   let blocked: string;
@@ -310,9 +345,25 @@ export function format(r: StageReport): string {
   const load = r.loadavg1 === null ? '未知（平台不支持）' : String(r.loadavg1);
   const out = r.outputFailures > 0 ? `；输出失败 ${r.outputFailures} 次` : '';
   return (
-    `test=${r.test} 已过 ${r.elapsedMs}ms；${blocked}；` +
+    `test=${r.test} 已过 ${r.elapsedMs}ms；${blocked}；${render}；` +
     `进程 CPU 时间/墙钟 ${r.processCpuShare}（含所有线程）；事件循环利用率 ${r.loopUtilization}；负载 ${load}；逻辑核 ${r.cores}${out}；等待：${stages}${more}`
   );
+}
+
+/** 装上的各份阶段记录各自的归属（异步链 → 本测试的 StageTrace）；React 提交时靠它找到是谁的测试。 */
+const owners = new Set<AsyncLocalStorage<StageTrace>>();
+
+/**
+ * harness 外层 <Profiler> 的 onRender：把这次提交的组件渲染耗时记进当前异步链所属测试的阶段记录。
+ * 没装阶段记录、或认不出归属时什么都不做；自己出错也不外冒（不能让渲染失败）。
+ */
+export function noteReactRender(_id: string, _phase: string, actualDuration: number): void {
+  if (owners.size === 0) return;
+  try {
+    for (const owner of owners) owner.getStore()?.noteRender(actualDuration);
+  } catch {
+    /* 观测出错不影响渲染 */
+  }
 }
 
 interface TaskLike {
@@ -343,6 +394,7 @@ export function installStageTrace(
   const reportOverMs = opts.reportOverMs ?? 2500;
   const emit = opts.emit ?? ((line: string) => process.stderr.write(`${line}\n`));
   const owner = new AsyncLocalStorage<StageTrace>();
+  owners.add(owner);
   let installed = 0;
   let base: ReturnType<typeof getConfig>['asyncWrapper'] | null = null;
   let unowned = 0;
@@ -423,6 +475,7 @@ export function installStageTrace(
   });
 
   afterAll(() => {
+    owners.delete(owner);
     try {
       if (getConfig().asyncWrapper === wrapper && base) configure({ asyncWrapper: base });
     } catch (e) {
