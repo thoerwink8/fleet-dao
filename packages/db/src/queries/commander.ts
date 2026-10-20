@@ -199,3 +199,8 @@ export async function commanderStalledSummary(db: Db): Promise<CommanderStalledS
   const handled = rows.filter((row) => row.commanderSeen).length;
   return { stalled: rows.length, handled, forHuman: rows.length - handled };
 }
+
+/** 「停下 N 张，指挥官处理 M 张，留给人 K 张」：attention 和每日简报打同一句。 */
+export function commanderSummaryLine(s: CommanderStalledSummary): string {
+  return `停下 ${s.stalled} 张，指挥官处理 ${s.handled} 张，留给人 ${s.forHuman} 张`;
+}

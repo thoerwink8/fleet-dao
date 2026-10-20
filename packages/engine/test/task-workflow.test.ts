@@ -66,10 +66,17 @@ async function start(q: string, i: TaskWorkflowInput): Promise<WorkflowHandle> {
 
 const statusOf = (h: WorkflowHandle): Promise<TaskStatus> => h.query(taskStatusQuery);
 
-const statusUntil = (h: WorkflowHandle, check: (s: TaskStatus) => boolean, what: string) =>
-  pollQuery(() => statusOf(h), check, what);
+const statusUntil = (
+  h: WorkflowHandle,
+  check: (s: TaskStatus) => boolean,
+  what: string,
+  timeoutMs?: number,
+) => pollQuery(() => statusOf(h), check, what, timeoutMs);
 
 const parked = (s: TaskStatus) => s.waiting?.kind === 'human';
+
+/** 跑很多轮的用例里单次等待的上限（默认 20 秒在整套并行跑时会压线）。 */
+const LONG_WAIT_MS = 60_000;
 
 describe('任务工作流 · 走通', { timeout: 60_000 }, () => {
   it('一张单：选路、建树、动手、读交付、推分支、开 PR、等 CI、验收、挂自动合并、等合并、关单、收树', async () => {
@@ -2621,7 +2628,10 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
     ).toBe(true);
   });
 
-  it('同一次继续里动手仍停在上限；自动续那一次加点「继续」累计超过 3 次不再清零，停下并写明交指挥官', async () => {
+  // 一共要跑 4×3 轮动手，是这一块里最长的：整套并行跑时单次等 20 秒会压线（#3295 返工时实咬过），等待和用例时限放宽
+  it('同一次继续里动手仍停在上限；自动续那一次加点「继续」累计超过 3 次不再清零，停下并写明交指挥官', {
+    timeout: 180_000,
+  }, async () => {
     const world = createFakeWorld({
       ci: () => ({ state: 'red', failedChecks: ['test (engine)'] }),
     });
@@ -2635,6 +2645,7 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
           h,
           (s) => parked(s) && (s.waiting?.detail.includes('动手 3 轮都没过') ?? false),
           '动手 3 轮用尽',
+          LONG_WAIT_MS,
         );
         // 头一回用尽自动续了一次（决定 0093），第二回才停下
         expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 2);
@@ -2644,11 +2655,13 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
           await waitUntil(
             () => calls.segment.length >= before + MAX_IMPLEMENT_ROUNDS,
             `第 ${time + 1} 次继续后再动手到上限`,
+            LONG_WAIT_MS,
           );
           await statusUntil(
             h,
             (s) => parked(s) && (s.waiting?.detail.includes('动手 3 轮都没过') ?? false),
             `第 ${time + 1} 次继续用尽后再停下`,
+            LONG_WAIT_MS,
           );
           expect(calls.segment).toHaveLength(before + MAX_IMPLEMENT_ROUNDS);
         }
@@ -2659,12 +2672,14 @@ describe('任务工作流 · 继续后轮数清零、验收停下写明原因（
             calls.segment.length > MAX_IMPLEMENT_ROUNDS * 4 ||
             world.alerts.some((alert) => alert.detail.includes(HANDOFF)),
           '第 4 次继续要么停住交指挥官，要么又动手',
+          LONG_WAIT_MS,
         );
         expect(calls.segment).toHaveLength(MAX_IMPLEMENT_ROUNDS * 4);
         const stopped = await statusUntil(
           h,
           (s) => parked(s) && (s.waiting?.detail.includes(HANDOFF) ?? false),
           '已继续 3 次仍没过',
+          LONG_WAIT_MS,
         );
         expect(stopped.waiting?.detail).toContain(HANDOFF);
         expect(world.alerts.at(-1)?.title).toBe(HANDOFF);

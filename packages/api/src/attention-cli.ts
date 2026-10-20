@@ -15,6 +15,7 @@ import { isIdleRunningStale } from '@fleet-dao/core/idle-running';
 import {
   beijingDay,
   commanderStalledSummary,
+  commanderSummaryLine,
   type Db,
   dailyBriefProblem,
   dailyBriefStatus,
@@ -72,8 +73,8 @@ export interface Attention {
   localOrphans: LocalOrphan[];
   /** 即时原条件；不等于推送白名单里的通知，也不受展示 runs 的条数限制。 */
   runningIdle: Awaited<ReturnType<typeof runningIdleFacts>>;
-  /** 当前仍停着的任务：指挥官已经认领的和还留给人的。 */
-  commander: Awaited<ReturnType<typeof commanderStalledSummary>>;
+  /** 当前仍停着的任务：指挥官已经认领的和还留给人的；line 和每日简报是同一句。 */
+  commander: Awaited<ReturnType<typeof commanderStalledSummary>> & { line: string };
 }
 
 export async function runningIdleFacts(db: Db, at: Date) {
@@ -200,7 +201,7 @@ export async function runAttention(deps: {
     dailyBriefProblem: dailyBriefProblem(briefStatus, at),
     localOrphans,
     runningIdle,
-    commander,
+    commander: { ...commander, line: commanderSummaryLine(commander) },
   };
 }
 

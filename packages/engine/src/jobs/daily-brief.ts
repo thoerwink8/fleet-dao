@@ -23,6 +23,7 @@ import {
   type BriefStoppedTask,
   beijingDay,
   type CommanderStalledSummary,
+  commanderSummaryLine,
   DAILY_BRIEF_AT_MINUTES,
   DAILY_BRIEF_JOB_ID,
   dailyBriefKey,
@@ -353,10 +354,7 @@ function failuresSection(
   const heading = '三、失败了要你看的';
   const lines: string[] = [];
   if (typeof commander === 'string') lines.push(`停下任务统计：没查成：${commander}`);
-  else
-    lines.push(
-      `停下 ${commander.stalled} 张，指挥官处理 ${commander.handled} 张，留给人 ${commander.forHuman} 张`,
-    );
+  else lines.push(commanderSummaryLine(commander));
   if (stopped.length === 0) lines.push('昨天没有停下（failed / stalled）还没恢复的单。');
   else {
     lines.push(`昨天停下、到现在还停着的单（${stopped.length} 张）：`);
