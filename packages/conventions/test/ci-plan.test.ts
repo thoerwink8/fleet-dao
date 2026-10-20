@@ -1828,14 +1828,14 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     const steps = e2e?.steps ?? [];
     const runs = steps.map((s) => String(s.run ?? '')).join('\n');
     expect(runs).toContain('pnpm --filter @fleet-dao/web e2e');
-    expect(runs).toContain('playwright install --with-deps chromium');
+    expect(runs).toContain('node packages/conventions/src/bin/ci-browser.ts');
     const browserCache = steps.find(
       (s) => (s.with as Record<string, unknown> | undefined)?.path === '~/.cache/ms-playwright',
     );
     expect(browserCache?.uses).toBe('actions/cache@v4');
     expect(browserCache?.env).toEqual({ SEGMENT_DOWNLOAD_TIMEOUT_MINS: '1' });
     const browserInstall = steps.find((s) =>
-      String(s.run ?? '').includes('playwright install --with-deps chromium'),
+      String(s.run ?? '').includes('node packages/conventions/src/bin/ci-browser.ts'),
     );
     expect(browserInstall, '缓存未恢复也要真的安装浏览器和系统库').toBeDefined();
     expect(browserInstall).not.toHaveProperty('if');
@@ -1846,19 +1846,7 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     expect(steps.filter((s) => 'continue-on-error' in s)).toEqual([]);
     expect(JSON.stringify(steps)).not.toContain('E2E_QUARANTINE: only');
     const quarantineYml = readFileSync(join(ROOT, '.github/workflows/e2e-quarantine.yml'), 'utf8');
-    const installScript = String(browserInstall?.run);
-    const dropped = installScript.indexOf('packages.microsoft.com');
-    const installAt = installScript.indexOf('playwright install --with-deps chromium');
-    expect(dropped, '装系统库前摘掉会 403 的 Microsoft apt 源').toBeGreaterThanOrEqual(0);
-    expect(installAt).toBeGreaterThan(dropped);
-    const quarantineInstall = quarantineYml.slice(
-      quarantineYml.indexOf('装 Chromium 和系统库'),
-      quarantineYml.indexOf('等 postgres:16 起来', quarantineYml.indexOf('装 Chromium 和系统库')),
-    );
-    expect(quarantineInstall.indexOf('packages.microsoft.com')).toBeGreaterThanOrEqual(0);
-    expect(quarantineInstall.indexOf('playwright install --with-deps chromium')).toBeGreaterThan(
-      quarantineInstall.indexOf('packages.microsoft.com'),
-    );
+    expect(quarantineYml).toContain('run: node packages/conventions/src/bin/ci-browser.ts');
     expect(quarantineYml).toMatch(/^ {2}schedule:/m);
     expect(quarantineYml).toMatch(/^ {2}workflow_dispatch:/m);
     expect(quarantineYml).toContain('E2E_QUARANTINE: only');
