@@ -21,6 +21,11 @@ export const LINE_BUDGET_REMEASURE_PATCH = 'line-budget-remeasure-v1';
 export const REMEASURE_TIMEOUT_SECONDS = 240;
 /** 重放接手时停点还没走回来：最多等主流程追上这么久，再按不在停点拒。 */
 export const REMEASURE_CATCH_UP_SECONDS = 30;
+/**
+ * 这次请求的身份已经回不来时，catchup 提前结束（#3297）。
+ * 只在重评 Update 里问。#3249 那一版「只等停点出现」的在途等待，重放时这个标记为假，定时器命令和原来一样。
+ */
+export const REMEASURE_CATCH_UP_CLOSED_PATCH = 'remeasure-catchup-closed';
 
 const SHA = /^[0-9a-f]{40}$/;
 
