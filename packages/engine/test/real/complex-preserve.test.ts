@@ -522,7 +522,7 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
       expect(lstatSync(replacement).isSymbolicLink()).toBe(true);
     } finally {
-      if (replacement) rmSync(replacement, { force: true });
+      if (replacement) rmSync(replacement, { force: true, recursive: true });
       if (moved) rmSync(moved, { recursive: true, force: true });
     }
   });
