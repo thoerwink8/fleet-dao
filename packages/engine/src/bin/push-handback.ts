@@ -3,7 +3,7 @@ import { constants } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
 import { Client, Connection } from '@temporalio/client';
-import { type PushHandbackRequest, pushHandbackPayload } from '../push-handback.ts';
+import { type PushHandbackRequest, pushHandbackPayload, validHandbackContract } from '../push-handback.ts';
 import { requestPushHandback } from '../push-handback-client.ts';
 import { configFromEnv } from '../worker.ts';
 
@@ -24,7 +24,15 @@ export async function runPermissionPushHandback(args: string[]): Promise<number>
       continue;
     }
     if (
-      !['--workflow-id', '--run-id', '--request-id', '--feedback-file', '--by'].includes(key) ||
+      ![
+        '--workflow-id',
+        '--run-id',
+        '--request-id',
+        '--feedback-file',
+        '--by',
+        '--original-contract-sha256',
+        '--expected-contract-sha256',
+      ].includes(key) ||
       flags.has(key) ||
       !args[i + 1] ||
       args[i + 1]!.startsWith('--')
@@ -41,13 +49,39 @@ export async function runPermissionPushHandback(args: string[]): Promise<number>
     (!execute && ['--request-id', '--feedback-file', '--by'].some((k) => flags.has(k)))
   )
     throw new Error('invalid_mode_or_identity');
+  const originalHash = flags.get('--original-contract-sha256');
+  const expectedHash = flags.get('--expected-contract-sha256');
+  const revision =
+    originalHash !== undefined || expectedHash !== undefined
+      ? {
+          originalContract: { version: 1 as const, sha256: originalHash ?? '' },
+          expectedContract: { version: 1 as const, sha256: expectedHash ?? '' },
+        }
+      : undefined;
+  if (
+    revision &&
+    (!validHandbackContract(revision.originalContract) || !validHandbackContract(revision.expectedContract))
+  )
+    throw new Error('invalid_contract_revision');
   const signal = AbortSignal.timeout(execute ? 420_000 : 230_000);
   if (!execute) {
     const { realPortsFromEnv } = await import('../real/index.ts');
     const real = realPortsFromEnv();
     try {
-      const result = await real.checkPushHandback(workflowId, runId, signal);
-      console.log(JSON.stringify({ version: 1, mode: 'check', ...result }));
+      const result = revision
+        ? await real.checkPushHandback(workflowId, runId, signal, revision)
+        : await real.checkPushHandback(workflowId, runId, signal);
+      // 正式读回的完整 brief 仅交工作流；日志不暴露正文、验收原文或反馈。
+      console.log(
+        JSON.stringify({
+          version: revision ? 2 : 1,
+          mode: 'check',
+          outcome: result.outcome,
+          ...(result.outcome === 'natural-retired'
+            ? { head: result.head, evidenceSha256: result.evidenceSha256 }
+            : { code: result.code }),
+        }),
+      );
       return result.outcome === 'natural-retired' ? 0 : 2;
     } finally {
       await real.close();
@@ -79,24 +113,27 @@ export async function runPermissionPushHandback(args: string[]): Promise<number>
     const h = new Client({ connection, namespace: config.namespace }).workflow.getHandle(workflowId, runId);
     // 本协议只支持首次自然 hold；固定输入可在断线后逐字重试，不依赖已被消费的 query。
     // 服务端仍重读全部证据并核 token；这里不把 check 报告当成 bearer 凭据。
-    const request: PushHandbackRequest = {
-      version: 1,
+    const common = {
       requestId,
       by,
       feedback,
-      token: { version: 1, runId, kind: 'parked', generation: 1, continued: 0 },
+      token: { version: 1 as const, runId, kind: 'parked' as const, generation: 1, continued: 0 },
     };
+    const request: PushHandbackRequest = revision
+      ? { ...common, version: 2, ...revision }
+      : { ...common, version: 1 };
     pushHandbackPayload(request);
     const receipt = await connection.withAbortSignal(signal, () =>
       connection.withDeadline(Date.now() + 410_000, () => requestPushHandback(h, request)),
     );
     console.log(
       JSON.stringify({
-        version: 1,
+        version: receipt.version,
         mode: 'execute',
         requestId: receipt.requestId,
         outcome: receipt.outcome,
         ...(receipt.code ? { code: receipt.code } : {}),
+        ...(receipt.acceptedContract ? { acceptedContract: receipt.acceptedContract } : {}),
       }),
     );
     return receipt.outcome === 'handed_back' ? 0 : 2;

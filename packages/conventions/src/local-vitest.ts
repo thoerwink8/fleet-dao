@@ -11,6 +11,8 @@ import { createTestReport } from './test-report.ts';
 import { listTestFiles } from './test-split.ts';
 
 export const LINUX_TESTS = [
+  'packages/engine/test/admission-alert-spool.test.ts',
+  'packages/engine/test/admission-alert-crash.test.ts',
   'packages/engine/test/real/complex-preserve.test.ts',
   'packages/engine/test/real/github-ports.test.ts',
   'packages/engine/test/real/hourly-reconcile.test.ts',

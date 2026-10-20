@@ -24,10 +24,12 @@ import type { FailureContext, LadderCounters, NextAction } from '../decisions/fa
 import type { Limits } from '../limits.ts';
 import type { AcceptanceDutyRecord, RouteChoice, Worktree } from '../ports.ts';
 import {
+  type PushHandbackPreflightInput,
   type PushHandbackReceipt,
   type PushHandbackRequest,
   pushHandbackPayload,
   samePushHold,
+  validHandbackContract,
 } from '../push-handback.ts';
 import type { TaskBrief } from '../runner/task-brief.ts';
 import {
@@ -86,9 +88,11 @@ import {
 
 export class PermissionPushHandback extends Error {
   readonly feedback: string;
-  constructor(feedback: string) {
+  readonly acceptedContract: boolean;
+  constructor(feedback: string, acceptedContract = false) {
     super('permission push handed back');
     this.feedback = feedback;
+    this.acceptedContract = acceptedContract;
   }
 }
 
@@ -98,8 +102,10 @@ export class TaskRuntime {
   private pushHandback: {
     request: PushHandbackRequest;
     payload: string;
-    state: 'checking' | 'ready' | 'returning' | 'consumed';
+    state: 'checking' | 'ready' | 'accepted' | 'returning' | 'consumed';
     receipt: PushHandbackReceipt | undefined;
+    input: PushHandbackPreflightInput;
+    acceptedContract: TaskBrief['contract'];
   } | null = null;
   private readonly pushHandbackRequests = new Map<
     string,
@@ -182,6 +188,9 @@ export class TaskRuntime {
   brief: TaskBrief | null = null;
   /** 首次安全边界核实之后才具备版本身份，旧历史不伪造。 */
   contractVersioned = false;
+  /** 只供原 park 的主路径同步安装可信合同快照；未支持合同修订的旧运行不接 v2。 */
+  acceptHandbackContract: ((brief: TaskBrief) => void) | null = null;
+  handbackContractBoundary = false;
   contractRevision: { reviews: string[] } | null = null;
   refreshContract: (boundary: string) => Promise<boolean> = async () => false;
   contractGuard() {
@@ -364,7 +373,7 @@ export class TaskRuntime {
         return cached.payload === payload
           ? cached.result
           : Promise.resolve({
-              version: 1 as const,
+              version: request.version,
               requestId: request.requestId,
               payload,
               outcome: 'conflict' as const,
@@ -520,13 +529,20 @@ export class TaskRuntime {
     payload: string,
   ): Promise<PushHandbackReceipt> {
     const receipt = (outcome: PushHandbackReceipt['outcome'], code?: string): PushHandbackReceipt => ({
-      version: 1,
+      version: request.version,
       requestId: request.requestId,
       payload,
       outcome,
       ...(code ? { code } : {}),
+      ...(request.version === 2 &&
+      this.pushHandback?.request.requestId === request.requestId &&
+      this.pushHandback.acceptedContract
+        ? { acceptedContract: this.pushHandback.acceptedContract }
+        : {}),
     });
     if (!patched('permission-push-handback-v1')) return receipt('unknown', 'unsupported_worker');
+    if (request.version === 2 && !patched('permission-push-contract-handback-v2'))
+      return receipt('unknown', 'unsupported_contract_boundary');
     // 本协议只接首次自然推送停点。先拒未来代数，不能让伪造 token 悬住 handler。
     if (
       request.token.runId !== workflowInfo().runId ||
@@ -547,33 +563,44 @@ export class TaskRuntime {
     );
     if (!this.pushHoldMatches(request)) return receipt('stale');
     if (this.pushHandback) return receipt('busy');
+    // 等原 hold 重建后再核该运行真正启用的合同边界，不把 cache0 初始化中的 false 当旧版缺能力。
+    if (request.version === 2 && (!this.contractVersioned || !this.acceptHandbackContract))
+      return receipt('unknown', 'unsupported_contract_boundary');
     // 不唤醒旧 park，让 exhaustRounds 的自动 reset 分支借道发新预算。
     if (this.round >= MAX_IMPLEMENT_ROUNDS || this.verifyRound >= MAX_VERIFY_ROUNDS)
       return receipt('budget-held', 'round_budget');
     const contract = this.brief?.contract;
     if (!contract || !this.worktree) return receipt('unknown', 'missing_tree_or_contract');
+    if (request.version === 2 && request.originalContract.sha256 !== contract.sha256)
+      return receipt('unknown', 'original_contract');
+    const common = {
+      workflowId: workflowInfo().workflowId,
+      runId: workflowInfo().runId,
+      task: this.input,
+      branch: this.branch,
+      path: this.worktree.path,
+      contract,
+      token: request.token,
+      budgetGrants: this.budgetGrants,
+      taskTokenBudget: this.limits.taskTokenBudget,
+      round: this.round,
+      verifyRound: this.verifyRound,
+    };
+    const input: PushHandbackPreflightInput =
+      request.version === 2
+        ? { ...common, version: 2, requestId: request.requestId, expectedContract: request.expectedContract }
+        : { ...common, version: 1 };
     const slot = {
       request,
       payload,
-      state: 'checking' as 'checking' | 'ready' | 'returning' | 'consumed',
+      state: 'checking' as 'checking' | 'ready' | 'accepted' | 'returning' | 'consumed',
       receipt: undefined as PushHandbackReceipt | undefined,
+      input,
+      acceptedContract: undefined as TaskBrief['contract'],
     };
     this.pushHandback = slot;
     try {
-      const preflight = await this.acts.readPushHandbackPreflight({
-        version: 1,
-        workflowId: workflowInfo().workflowId,
-        runId: workflowInfo().runId,
-        task: this.input,
-        branch: this.branch,
-        path: this.worktree.path,
-        contract,
-        token: request.token,
-        budgetGrants: this.budgetGrants,
-        taskTokenBudget: this.limits.taskTokenBudget,
-        round: this.round,
-        verifyRound: this.verifyRound,
-      });
+      const preflight = await this.acts.readPushHandbackPreflight(input);
       if (!this.pushHoldMatches(request)) return receipt('stale');
       if (preflight.outcome !== 'natural-retired') return receipt(preflight.outcome, preflight.code);
       if (this.round >= MAX_IMPLEMENT_ROUNDS || this.verifyRound >= MAX_VERIFY_ROUNDS)
@@ -601,12 +628,18 @@ export class TaskRuntime {
     const slot = this.pushHandback;
     if (!slot || slot.state !== 'returning') return;
     this.guard();
-    const valid = samePushHold(this.closeHold, slot.request.token) && this.pauseReq === null;
+    const valid =
+      samePushHold(this.closeHold, slot.request.token) &&
+      this.pauseReq === null &&
+      (slot.request.version === 1 || slot.acceptedContract?.sha256 === slot.request.expectedContract.sha256);
     slot.receipt = {
-      version: 1,
+      version: slot.request.version,
       requestId: slot.request.requestId,
       payload: slot.payload,
       outcome: valid ? 'handed_back' : 'stale',
+      ...(slot.request.version === 2 && slot.acceptedContract
+        ? { acceptedContract: slot.acceptedContract }
+        : {}),
     };
     slot.state = 'consumed';
     this.closeHold = null;
@@ -614,6 +647,41 @@ export class TaskRuntime {
 
   stopPushHandbacks(): void {
     this.handbackTerminal = true;
+  }
+
+  /** 原 park 主路径的最终观察；失败不离开 waiting、不记新轮、不改变原 hold。 */
+  private async preparePushHandbackRevision(): Promise<boolean> {
+    const slot = this.pushHandback;
+    if (!slot || slot.request.version !== 2 || slot.state !== 'ready') return true;
+    const reject = (outcome: PushHandbackReceipt['outcome'], code: string) => {
+      slot.receipt = { version: 2, requestId: slot.request.requestId, payload: slot.payload, outcome, code };
+      slot.state = 'consumed';
+      return false;
+    };
+    if (!this.pushHoldMatches(slot.request)) return reject('stale', 'hold_changed');
+    try {
+      const observed = await this.acts.readPushHandbackPreflight(slot.input);
+      if (!this.pushHoldMatches(slot.request)) return reject('stale', 'hold_changed');
+      if (observed.outcome !== 'natural-retired') return reject(observed.outcome, observed.code);
+      if (this.round >= MAX_IMPLEMENT_ROUNDS || this.verifyRound >= MAX_VERIFY_ROUNDS)
+        return reject('budget-held', 'round_budget');
+      if (
+        !observed.brief ||
+        !validHandbackContract(observed.brief.contract) ||
+        observed.brief.contract.sha256 !== slot.request.expectedContract.sha256 ||
+        observed.brief.issueNumber !== this.input.issueNumber ||
+        !this.acceptHandbackContract
+      )
+        return reject('unknown', 'contract_snapshot');
+      // 此处到 returning 无 await；成功表示接纳这一刻的快照，不宣称外部正文原子不变。
+      this.acceptHandbackContract(observed.brief);
+      slot.acceptedContract = observed.brief.contract;
+      slot.state = 'accepted';
+      this.handbackContractBoundary = true;
+      return true;
+    } catch (error) {
+      return reject('unknown', isCancellation(error) ? 'cancelled' : 'preflight_failed');
+    }
   }
 
   private mergedHoldMatches(token: ClosedIssueHoldToken, receipt: MergedTaskReceipt): boolean {
@@ -1128,19 +1196,25 @@ export class TaskRuntime {
       log.warn('报警没发出去，照样停下等人', { title, error: String(error) });
     }
     try {
-      await this.waiting('human', `${title}（等「继续」或「放弃」）`, () =>
-        condition(
-          () =>
-            this.continued > before ||
-            this.abandon !== null ||
-            this.verifiedMerged !== null ||
-            this.pushHandback?.state === 'ready',
-        ),
-      );
+      await this.waiting('human', `${title}（等「继续」或「放弃」）`, async () => {
+        for (;;) {
+          await condition(
+            () =>
+              this.continued > before ||
+              this.abandon !== null ||
+              this.verifiedMerged !== null ||
+              this.pushHandback?.state === 'ready',
+          );
+          if (this.pushHandback?.request.version !== 2 || this.pushHandback.state !== 'ready') return;
+          if (await this.preparePushHandbackRevision()) return;
+          // 继续/放弃沿原语义离开；仅本次新合同核验失败则仍在同一个等待中。
+          if (this.continued > before || this.abandon !== null || this.verifiedMerged !== null) return;
+        }
+      });
       const handback = this.pushHandback;
       // waiting() 的 finally 已清等待展示；这里核原始 hold，不再调用要求展示仍为 human 的 closeToken()。
       if (
-        handback?.state === 'ready' &&
+        (handback?.state === 'ready' || handback?.state === 'accepted') &&
         samePushHold(this.closeHold, handback.request.token) &&
         this.permissionPushPark &&
         this.continued === before &&
@@ -1153,7 +1227,7 @@ export class TaskRuntime {
         handback.state = 'returning';
         this.status.phase = previous;
         this.status.lastProblem = null;
-        throw new PermissionPushHandback(handback.request.feedback);
+        throw new PermissionPushHandback(handback.request.feedback, handback.request.version === 2);
       }
     } finally {
       this.leavePark();

@@ -53,6 +53,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 工作流对外的输入（`packages/engine/src/contract.ts`）加字段只许可选，不然在途任务的输入对不上。
 - 无 PR 的 `pushBranch/WORKFLOWS_PERMISSION` 首次自然停点只走 `taskHandbackPermissionPush` Update（`push-handback.ts`）；限定同 run、generation=1、continued=0。默认 CLI/check 只 query/读证据，不写 Temporal 历史；execute 才发 Update。旧 worker/cgroup、固定 scopes 和 helper 自然终态、持久 run/result、合同、树与用量由 Activity 现读；未知拒绝。原 park 交回控制权、主循环记完本轮且接纳返工后才签 `handed_back`，保留全部轮数和预算，不拿继续信号、accepted 或人工报告替代。
 
+- 合同修订原位交还用显式 v2 同时绑定 H0/H1；v1 不自动放宽。主路径在原 park 内最终核 H1，失败保原 hold；成功同步接纳完整 brief/tier 并撤旧批准，accepted 待收场状态按历史恢复。回执 acceptedContract 只证明快照，handed_back 才证明控制消费，不证明统计落库或外部正文永久不变。后续动手前必须有旧运行实际启用的合同修订边界，否则拒 v2；不直接在 Update 调 refresh，不把普通新 actor 加进自然退场历史白名单。
+
 - 自动关单收尾只走 `taskCloseClosedIssue` Update：同步核精确 run、当前停法代数和继续代数，只有 `accepted` 回执才能记成功、撤提醒。继续信号先使凭据失效，不能等公开 phase 改好。旧 worker 缺能力、Update RPC 超时或回执未知保留未核实，不能退回人类的无条件放弃信号。
 - 新 PR 创建前从需求单现读两轴（正文无需求号时认任务分支）；缺失、冲突或未知值拒开并明报，不猜分类。groom 新单显式提供 domain/nature，拆分单可逐轴继承来源单的唯一有效值，写前仍须齐全。驾驶舱会话在 modules 中独立声明两轴，后端开单前同样校验，正文移到独立查询分类节，不计入模块范围和派工规模。查询轴不参与派工、合并与版本判定；此处只保证创建的元数据齐全。报警立案贴 engine/bug，耗时表直开 PR 贴 engine/process，隔离集直开 PR 贴 engine/bug；直开 PR 贴后回读，失败不能当成功。
 - 引擎自己挑单，进队条件见 design 第九节。要它接：单的四节齐、范围写死、验收条写成 diff 里看得见的、不贴「本机做」「待补」「要人拍」。引擎不直写主线，它的单它自己关。
@@ -70,6 +72,14 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 改读写的表：表结构在 `packages/db`（生成迁移），共用的读写在 `packages/store`（两套实现一起改）。
 - 改派工、选路：同步 design 第九节「自由组合的派工模型」。
 - 改了法国上的单元、环境变量：同步 ops 第五节「AI 会话」或第九节「发布应用（deploy/release.sh）」。
+
+## 独立准入未知承接能力
+
+- `real/admission-alert-process.ts` 提供封闭的 `record` / `transferOne`，各持一个独立进程槽；尚未接入 worker、workflow、定时任务或终态释放。调用方传入父进程单调绝对期限，只能缩短单次十秒上限，最后一秒留收尾；退出或管道未核清时槽继续占用。
+- 私有 pending 使用 Node 的 experimental `node:sqlite`，仅 Linux 普通服务用户，路径祖先只允许 root/可信服务 UID 写，叶目录 0700、文件 0600。恶意 root/同一可信 UID 不属于权限隔离范围；不把 SQLite 字符串路径冒称 dirfd 锚定。
+- `real/admission-alert-spool.ts` 固定 DELETE/EXTRA、4096 字节页、1024 页、关闭 spill/auto-vacuum，最多 256 条/1MiB payload。已有超额、错 schema、损坏 journal 或身份不明均保留原件并返回未知；不删库重建。移交先核 PG 真实 COMMIT 与 close，再在同一 transfer child 内按 key/hash 删除 pending，没有 caller ACK 接口。文件字节界和私有路径/耐久边界见 `docs/design/admission-alert-spool.md`。
+- 全局 identity 不含首诊断码；同 run 换码重建仍归并原通知。通知持久化不代表飞书送达，新前缀未加入推送白名单。本能力不接受 Start 正文、token 或任意 SQL。
+- `test/admission-alert-spool.test.ts` / `test/admission-alert-crash.test.ts` 必须用真实 Linux 普通用户；Windows 本机入口按 `local-vitest.ts` 转交明确配置的 runner。`test/admission-alert.real-pg.test.ts` 在真实 PG 台使用随机隔离库验证移交，缺配置的 CI 明确报错。
 
 ## 版本更新日志
 
