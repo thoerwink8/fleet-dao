@@ -16,8 +16,9 @@ import {
 import { InvalidNodeReportError, type NodeReportSummary } from '@fleet-dao/store';
 import type { Deps } from './deps.ts';
 import { ApiError } from './http.ts';
+import { effectiveNodeKeys } from './node-keys.ts';
 
-type ViewDeps = Pick<Deps, 'config' | 'store' | 'now'>;
+type ViewDeps = Pick<Deps, 'config' | 'store' | 'now' | 'log'>;
 
 const listItem = (r: NodeReportSummary, now: Date): NodeListItem => ({
   id: r.nodeId,
@@ -31,9 +32,10 @@ const listItem = (r: NodeReportSummary, now: Date): NodeListItem => ({
 /** GET /nodes：本台（名字现读配置、引擎调用方给）加每个远程环境。 */
 export async function readNodes(deps: ViewDeps, selfEngine: EnvEngine): Promise<NodesResponse> {
   const now = deps.now();
+  const keys = await effectiveNodeKeys(deps);
   const reports = await deps.store.listNodeReports();
   const items = new Map<string, NodeListItem>(reports.map((r) => [r.nodeId, listItem(r, now)]));
-  for (const id of Object.keys(deps.config.nodeKeys)) {
+  for (const id of Object.keys(keys)) {
     if (!items.has(id)) items.set(id, { id, name: id, freshness: nodeFreshness(undefined, now) });
   }
   return {
@@ -54,7 +56,7 @@ export async function readNodeDetail(deps: ViewDeps, nodeId: string): Promise<No
     throw err;
   }
   if (record === null) {
-    if (Object.hasOwn(deps.config.nodeKeys, nodeId)) {
+    if (Object.hasOwn(await effectiveNodeKeys(deps), nodeId)) {
       throw new ApiError(404, 'node_never_reported', `环境 ${nodeId} 配了通行证，但一次快照都没推来过`);
     }
     throw new ApiError(404, 'node_not_found', '没有这个环境');

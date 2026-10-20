@@ -71,6 +71,7 @@ export const AUDIT_ACTION_TEXT: Readonly<Record<string, string>> = {
   [GROOM_ACTION.done]: '整理完待办',
   'session.mint': '发了一个会话登录',
   'node_key.new': '给机器发了新密钥',
+  'node_key.revoke': '作废了机器密钥',
   'session-org.drift': '会话账号对不上了',
   'session-org.settle': '会话账号对齐了',
   'session-org.limit': '会话账号碰到用量上限',

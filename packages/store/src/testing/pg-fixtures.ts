@@ -12,6 +12,7 @@ import {
   githubEventVersions,
   insertSubtasks,
   models,
+  nodeKeys,
   nodeReports,
   nodeSessions,
   notificationDeliveries,
@@ -324,6 +325,17 @@ export async function seedPg(db: Db, data: Partial<MemoryData>): Promise<void> {
         reportedAt: date(r.reportedAt),
         receivedAt: date(r.receivedAt),
         payload: r.snapshot,
+      })),
+    );
+  }
+  if (data.nodeKeys?.length) {
+    await db.insert(nodeKeys).values(
+      data.nodeKeys.map((k) => ({
+        nodeId: k.nodeId,
+        tokenHash: k.tokenHash,
+        displayName: k.displayName,
+        createdAt: date(k.createdAt),
+        revokedAt: k.revokedAt === undefined ? null : date(k.revokedAt),
       })),
     );
   }
