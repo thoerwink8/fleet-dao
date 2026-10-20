@@ -13,6 +13,7 @@ import type { SessionUser } from '@fleet-dao/adapters';
 import { GATE_CONTEXT, issueOfBranch, pullsOnIssue, resolveQueryAxes } from '@fleet-dao/conventions';
 import { type GitHub, type PrBodyInput, renderPrBody } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
+import type { EngineTasks } from '../activities.ts';
 import type { CiResult, SyncResult } from '../decisions/types.ts';
 import {
   type EnginePorts,
@@ -28,6 +29,7 @@ import {
 import { isTaskBranch } from '../task-branch.ts';
 import type { ProcLook } from './complex-preserve.ts';
 import type { UserExec } from './exec.ts';
+import { resolveMechanically } from './mechanical-conflict.ts';
 import { type MergeLog, settleMergedCi } from './merge-receipt.ts';
 import { bundleFromMirror, mapped } from './mirror.ts';
 import { preserveThenRemove } from './preserve-worktree.ts';
@@ -416,7 +418,9 @@ async function reconcileUnpushed(
   return { state: 'clean', head: pushed, conflictFiles: [] };
 }
 
-export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
+export function createGitHubPorts(
+  deps: GitHubPortsDeps,
+): GitHubPorts & { resolveConflictMechanically: NonNullable<EngineTasks['resolveConflictMechanically']> } {
   const { gh, trees } = deps;
   const now = deps.now ?? (() => new Date());
   const heartbeatEveryMs = deps.heartbeatEveryMs ?? HEARTBEAT_EVERY_MS;
@@ -1057,6 +1061,37 @@ export function createGitHubPorts(deps: GitHubPortsDeps): GitHubPorts {
           ctx,
         ),
       );
+    },
+
+    /** 并主线冲突里机械可解的（迁移生成文件、锁文件）引擎自己解、自测、推上去（#3428，real/mechanical-conflict.ts）。 */
+    async resolveConflictMechanically(input, ctx) {
+      const user = await ownerOrFail(input.worktreePath);
+      const t = treeAs(input.worktreePath, user, `mech-${input.subtaskId ?? input.taskId}`, ctx);
+      const beat = () => {
+        try {
+          ctx.heartbeat({ mechanicalConflict: input.taskId });
+        } catch {
+          // 心跳发不出去不搅解冲突本身（活动已被叫停时 Temporal 这边会拒）
+        }
+      };
+      beat();
+      const timer = setInterval(beat, heartbeatEveryMs);
+      try {
+        return await resolveMechanically(t, {
+          head: input.head,
+          defaultBranch: input.repo.defaultBranch,
+          conflictFiles: input.conflictFiles,
+          heartbeat: beat,
+          push: async (tree, merged, base) => {
+            const syncInput = { taskId: input.taskId, repo: input.repo, branch: input.branch, head: base };
+            const pushed = await pushReconciled(gh, deps, tree, syncInput, merged, base, ctx);
+            await pinIncoming(tree, merged);
+            return pushed;
+          },
+        });
+      } finally {
+        clearInterval(timer);
+      }
     },
   };
 }

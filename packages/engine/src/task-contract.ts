@@ -915,6 +915,32 @@ export type SelfCheckResult =
 export const SELF_CHECK_DIGEST_MAX = 4000;
 
 /**
+ * 和主线冲突的文件全在机械可解名单里（迁移生成文件、pnpm-lock.yaml）时，引擎自己解
+ * （patched('mechanical-conflict-resolve')，名单见 real/mechanical-conflict.ts）。conflictFiles 是并主线时 GitHub 报的冲突文件。
+ */
+export interface ResolveConflictInput {
+  schemaVersion: 1;
+  taskId: string;
+  subtaskId?: string;
+  repo: Repo;
+  prNumber: number;
+  branch: string;
+  /** 以为分支现在的头（也必须是工作树的头）。 */
+  head: string;
+  worktreePath: string;
+  conflictFiles: string[];
+}
+
+/**
+ * resolved：机械解开、自测过、已推上去，head 是新头。
+ * declined：没解（有名单外的文件、手写迁移、自测没过……），reason 写原因，工作流把它连同「哪些已机械解掉」交给会话。
+ * resolvedFiles 只在 inTree 为真时有：名单内的已取主线版暂存，树里正停在没并完的合并上，冲突标记留在其余文件里。
+ */
+export type ResolveConflictResult =
+  | { state: 'resolved'; head: string; files: string[]; note: string }
+  | { state: 'declined'; reason: string; resolvedFiles?: string[]; inTree?: boolean };
+
+/**
  * 这张单到现在花掉多少 token（四样相加，动手和验收都算）。读不到的行不算进去，数出有几行没读到。
  * since 只算这一刻之后起的会话（当前这一代的开工时刻）。不给就整张单都算——老历史重放不带这个字段。
  */

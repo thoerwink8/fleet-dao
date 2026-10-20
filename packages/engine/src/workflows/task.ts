@@ -742,7 +742,11 @@ class TaskFlow {
     // 上一轮因为和主线冲突返工、冲突没留在树里：先看引擎自己并不并得干净
     const conflictRework = rt.status.lastProblem === '和主线有冲突' && !this.conflictInTree;
     this.conflictInTree = false;
-    const synced = await syncMainlineBeforeImplement(rt);
+    // 机械解（#3428）和自己并共用 MAX_MAIN_SYNCS 的上限：次数到了就不再试，交给会话
+    const attempt = await syncMainlineBeforeImplement(rt, {
+      mechanical: conflictRework && this.conflictSelfSyncs < MAX_MAIN_SYNCS,
+    });
+    const synced = attempt.result;
     if (
       conflictRework &&
       synced === 'merged' &&
@@ -756,7 +760,7 @@ class TaskFlow {
       rt.status.lastProblem = null;
       await rt.advance(
         'implement',
-        `和主线的冲突引擎自己并掉了（git 自动合并），不派模型，PR #${rt.prNumber} 重跑 CI`,
+        `和主线的冲突引擎自己并掉了（${attempt.mechanicalNote ?? 'git 自动合并'}），不派模型，PR #${rt.prNumber} 重跑 CI`,
       );
       return true;
     }
