@@ -187,6 +187,10 @@ export function gateGitHub(api: GhApi): GitHubReads {
       let targetUrl = s.targetUrl;
       if (s.publication && targetUrl) {
         const statuses = await gh.statuses(sha);
+        for (const raw of statuses) {
+          if (!isObject(raw) || typeof raw.context !== 'string' || !raw.context.trim())
+            throw new Error('发表前提交状态列表有认不出的条目或 context');
+        }
         const scope = statusWitness.getStore();
         targetUrl = publicationUrl(
           targetUrl,

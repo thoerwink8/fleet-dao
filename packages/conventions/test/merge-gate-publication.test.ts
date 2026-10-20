@@ -230,4 +230,12 @@ describe('merge-gate publication idempotency', () => {
     expect(f.posts).toHaveLength(1);
     expect(f.posts[0]?.state).toBe('failure');
   });
+  it.each([null, {}, { context: '' }])('rejects unrecognized status list entries: %j', async (raw) => {
+    const f = fixture();
+    f.statuses.push(raw as unknown as Record<string, unknown>);
+    const result = await f.run();
+    expect(result.code).toBe(2);
+    expect(result.lines.join('\n')).toContain('认不出的条目');
+    expect(f.posts).toHaveLength(0);
+  });
 });
