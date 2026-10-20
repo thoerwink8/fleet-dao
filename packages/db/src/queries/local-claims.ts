@@ -3,7 +3,7 @@
 // 读不到、写不成照抛，不拿空顶。
 import type { LocalClaimRefusal, LocalFinishOutcome, TaskExecutor, TaskState } from '@fleet-dao/shared';
 import { LOCAL_LEASE_MS } from '@fleet-dao/shared';
-import { and, arrayContains, asc, eq, gte, like, lt, or, sql } from 'drizzle-orm';
+import { and, arrayContains, asc, eq, gt, gte, like, lt, or, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
 import { auditLog, pullRequests, repos, tasks } from '../schema/index.ts';
 
@@ -303,6 +303,40 @@ export async function activeLocalLeaseKeys(db: Db, now: Date): Promise<Set<strin
     .innerJoin(repos, eq(repos.id, tasks.repoId))
     .where(and(eq(tasks.executor, 'local'), eq(tasks.state, 'running'), gte(tasks.leaseUntil, now)));
   return new Set(rows.map((r) => `${r.owner.toLowerCase()}/${r.name.toLowerCase()}#${r.issueNumber}`));
+}
+
+/**
+ * 读口（GET /api/nodes/claims，#3388）：所有仓里 executor = local 且租约未到期的行，只给仓（owner/name 原样）、单号、claimed_by、
+ * lease_until 四样，按仓、单号排。没有 claimed_by 的行（不该有）claimedBy 是空串，不跳过、不编名字。
+ */
+export async function listLocalClaims(
+  db: Db,
+  now: Date,
+): Promise<{ repo: string; issue: number; claimedBy: string; leaseUntil: Date }[]> {
+  const rows = await db
+    .select({
+      owner: repos.owner,
+      name: repos.name,
+      issueNumber: tasks.issueNumber,
+      claimedBy: tasks.claimedBy,
+      leaseUntil: tasks.leaseUntil,
+    })
+    .from(tasks)
+    .innerJoin(repos, eq(repos.id, tasks.repoId))
+    .where(and(eq(tasks.executor, 'local'), gt(tasks.leaseUntil, now)))
+    .orderBy(asc(repos.owner), asc(repos.name), asc(tasks.issueNumber));
+  return rows.flatMap((r) =>
+    r.leaseUntil
+      ? [
+          {
+            repo: `${r.owner}/${r.name}`,
+            issue: r.issueNumber,
+            claimedBy: r.claimedBy ?? '',
+            leaseUntil: r.leaseUntil,
+          },
+        ]
+      : [],
+  );
 }
 
 /** 这个仓里本机在做、租约还没到期的行（单关了就提前收的候选），按到期先后。 */

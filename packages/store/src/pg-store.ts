@@ -19,6 +19,7 @@ import {
   listFlowAssignments as listFlowAssignmentRows,
   listTaskRows,
   models,
+  nodeKeys,
   nodeReports,
   nodeSessions,
   notificationDeliveries,
@@ -83,6 +84,7 @@ import {
 } from './delivery-logic.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import {
+  checkNodeKeyHash,
   nodeReportRow,
   nodeSessionsRow,
   readNodeSessions,
@@ -105,6 +107,7 @@ import type {
   HistoricalCheckoutFacts,
   JobRecord,
   NewAuditEntry,
+  NodeKeyRecord,
   NodeReportSummary,
   NotificationRecord,
   OpsStore,
@@ -158,6 +161,16 @@ function toUser(r: UserRow): User {
     githubLogin: opt(r.githubLogin),
     githubId: opt(r.githubId),
     sessionVersion: r.sessionVersion,
+  };
+}
+
+function toNodeKeyRecord(r: typeof nodeKeys.$inferSelect): NodeKeyRecord {
+  return {
+    nodeId: r.nodeId,
+    tokenHash: r.tokenHash,
+    displayName: r.displayName,
+    createdAt: iso(r.createdAt),
+    revokedAt: r.revokedAt === null ? undefined : iso(r.revokedAt),
   };
 }
 
@@ -1171,6 +1184,50 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     async getWorktreeInventory() {
       const [row] = await db.select().from(worktreeInventory).where(eq(worktreeInventory.key, 'latest'));
       return row ? readWorktreeInventoryPayload(row.payload) : null;
+    },
+
+    // —— 机器通行证（#3388）——
+    async listNodeKeys() {
+      const rows = await db.select().from(nodeKeys);
+      return rows
+        .map(toNodeKeyRecord)
+        .sort((a, b) => (a.nodeId < b.nodeId ? -1 : a.nodeId > b.nodeId ? 1 : 0));
+    },
+    async createNodeKey(input, entry) {
+      checkNodeKeyHash(input.tokenHash);
+      return db.transaction(async (tx): Promise<'created' | 'exists'> => {
+        const [current] = await tx
+          .select()
+          .from(nodeKeys)
+          .where(eq(nodeKeys.nodeId, input.nodeId))
+          .for('update');
+        if (current && current.revokedAt === null) return 'exists';
+        const values = {
+          nodeId: input.nodeId,
+          tokenHash: input.tokenHash,
+          displayName: input.displayName,
+          createdAt: now(),
+          revokedAt: null,
+        };
+        if (current) {
+          const { nodeId: _key, ...overwrite } = values;
+          await tx.update(nodeKeys).set(overwrite).where(eq(nodeKeys.nodeId, input.nodeId));
+        } else {
+          await tx.insert(nodeKeys).values(values);
+        }
+        await insertAudit(tx, entry);
+        return 'created';
+      });
+    },
+    async revokeNodeKey(nodeId, entry) {
+      return db.transaction(async (tx): Promise<'revoked' | 'not_found' | 'already_revoked'> => {
+        const [current] = await tx.select().from(nodeKeys).where(eq(nodeKeys.nodeId, nodeId)).for('update');
+        if (!current) return 'not_found';
+        if (current.revokedAt !== null) return 'already_revoked';
+        await tx.update(nodeKeys).set({ revokedAt: now() }).where(eq(nodeKeys.nodeId, nodeId));
+        await insertAudit(tx, entry);
+        return 'revoked';
+      });
     },
 
     // —— fleet 命令 ——
