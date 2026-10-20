@@ -25,6 +25,7 @@
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
     "test:linux": "node packages/conventions/src/bin/test-linux.ts",
     "test:temporal": "node packages/conventions/src/bin/test-temporal.ts",
+    "temporal:install": "node packages/conventions/src/bin/install-temporal-cli.ts",
     "ci:timings": "node packages/conventions/src/bin/ci-timings.ts",
     "ci:stats": "node packages/conventions/src/bin/ci-stats.ts",
     "flow:stats": "node packages/conventions/src/bin/flow-stats.ts",
