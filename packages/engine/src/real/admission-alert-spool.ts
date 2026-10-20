@@ -76,6 +76,8 @@ type DbGeneration = {
 };
 type ValidatedDb = DbGeneration & { rows: number; payloadBytes: number };
 let validatedDb: ValidatedDb | undefined;
+// 本进程已经把该父目录的目录项同步过。新叶仍要再同步；已有叶的重开不必再付一次 fsync。
+const syncedParentInodes = new Set<string>();
 
 function sqlNumber(value: unknown): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -146,9 +148,11 @@ class PrivatePath {
         next = piece ? join(next, piece) : next;
         const leaf = next === path;
         try {
+          let createdLeaf = false;
           if (leaf) {
             try {
               mkdirSync(next, { mode: 0o700 });
+              createdLeaf = true;
             } catch (e) {
               if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
             }
@@ -164,9 +168,15 @@ class PrivatePath {
           )
             fail('private_path');
           if (!same(s, lstatSync(next))) fail('private_path');
-          // 叶目录首次创建/重试都同步父目录。EXTRA不替代这一步。
+          // 新叶，或本进程还没同步过这个父目录（含别的进程创建后崩溃），都要同步父目录。EXTRA 不替代。
           const parent = this.anchors[this.anchors.length - 2];
-          if (leaf && parent) fsyncSync(parent.fd);
+          if (leaf && parent) {
+            const id = `${parent.initial.dev}:${parent.initial.ino}`;
+            if (createdLeaf || !syncedParentInodes.has(id)) {
+              fsyncSync(parent.fd);
+              syncedParentInodes.add(id);
+            }
+          }
         } catch (e) {
           if (e instanceof SpoolError) throw e;
           fail('private_path');
@@ -527,6 +537,13 @@ class Spool {
       notificationId: persisted.notificationId,
     };
   }
+  // 复用前再核路径和 journal 上界。代次对不上就返回 false，调用方冷打开；核验失败照旧抛出，不能先让 SQLite 回放。
+  revalidateOpen(): boolean {
+    this.path.check();
+    this.path.checkRecoveryBounds();
+    const generation = readDbGeneration(join(this.path.path, NAME));
+    return Boolean(this.db && generation && validatedDb && sameGeneration(validatedDb, generation));
+  }
   close(): void {
     try {
       this.db?.close();
@@ -537,15 +554,66 @@ class Spool {
   }
 }
 
+// 同进程连续写入复用已提交、未持锁的连接。每次重开都让 DELETE+EXTRA 再付一次新建 journal 的目录同步，
+// 256 次真实 COMMIT 会超过原来的 15 秒。跨调用不持有事务；代次变化、路径/journal 核验失败或本次抛错就关掉。
+type CachedSpool = { path: string; spool: Spool; held: boolean };
+let cachedSpool: CachedSpool | undefined;
+
+function dropCached(spool: Spool | undefined): void {
+  if (cachedSpool?.spool === spool) cachedSpool = undefined;
+  try {
+    spool?.close();
+  } catch {
+    /* 关掉失败不改这次的结果 */
+  }
+}
+
+function takeSpool(path: string): { spool: Spool; ownsCache: boolean } {
+  if (cachedSpool?.path === path && !cachedSpool.held) {
+    const current = cachedSpool.spool;
+    try {
+      if (current.revalidateOpen()) {
+        cachedSpool.held = true;
+        return { spool: current, ownsCache: true };
+      }
+    } catch (e) {
+      cachedSpool = undefined;
+      dropCached(current);
+      throw e;
+    }
+    dropCached(current);
+  } else if (cachedSpool && !cachedSpool.held) {
+    dropCached(cachedSpool.spool);
+  }
+  const spool = new Spool(path);
+  const ownsCache = !cachedSpool?.held;
+  if (ownsCache) cachedSpool = { path, spool, held: true };
+  return { spool, ownsCache };
+}
+
+function finishSpool(spool: Spool, ownsCache: boolean, keep: boolean): void {
+  if (keep && ownsCache && cachedSpool?.spool === spool) {
+    cachedSpool.held = false;
+    return;
+  }
+  dropCached(spool);
+}
+
 export function recordAdmissionAlert(path: string, input: AdmissionAlertObservation): AlertOutcome {
   let spool: Spool | undefined;
+  let ownsCache = false;
+  let keep = false;
   try {
-    spool = new Spool(path);
-    return spool.record(input);
+    const got = takeSpool(path);
+    spool = got.spool;
+    ownsCache = got.ownsCache;
+    const result = spool.record(input);
+    keep = true;
+    return result;
   } catch (e) {
     return { kind: 'unknown', code: errorCode(e) };
   } finally {
-    spool?.close();
+    if (spool) finishSpool(spool, ownsCache, keep);
   }
 }
 export async function transferOneAdmissionAlert(
@@ -554,12 +622,18 @@ export async function transferOneAdmissionAlert(
   deadlineAt: number,
 ): Promise<AlertOutcome> {
   let spool: Spool | undefined;
+  let ownsCache = false;
+  let keep = false;
   try {
-    spool = new Spool(path);
-    return await spool.transfer(databaseUrl, deadlineAt);
+    const got = takeSpool(path);
+    spool = got.spool;
+    ownsCache = got.ownsCache;
+    const result = await spool.transfer(databaseUrl, deadlineAt);
+    keep = true;
+    return result;
   } catch (e) {
     return { kind: 'unknown', code: errorCode(e) };
   } finally {
-    spool?.close();
+    if (spool) finishSpool(spool, ownsCache, keep);
   }
 }

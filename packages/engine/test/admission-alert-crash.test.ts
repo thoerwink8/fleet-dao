@@ -215,6 +215,7 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       blocksPeak = 0,
       observed = 0,
       fullPayloadScans = 0,
+      opens = 0,
       commitMs = 0,
       recordMs = 0,
       sampleMs = 0,
@@ -283,6 +284,7 @@ describe('SQLite真实进程崩溃与恢复界', () => {
               recordMs: index >= 0 ? Math.round(recordMs) : 'unknown',
               sampleMs: sampled ? Math.round(sampleMs) : 'unknown',
               fullPayloadScans,
+              opens,
               currentMainBytes: currentMain,
               currentJournalBytes: currentJournal,
               rssBytes: rss,
@@ -295,6 +297,7 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       }
     });
     DatabaseSync.prototype.exec = function (sql: string) {
+      if (sql.startsWith('PRAGMA busy_timeout=0')) opens++;
       if (sql === 'COMMIT') {
         stage = 'before-commit';
         sample();
@@ -337,6 +340,8 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     // 不记住代次时每次提交前都会整表再读：256 次是 2*(0+…+255)=65280 次。采到的次数必须仍是个位数。
     expect(fullPayloadScans).toBeGreaterThan(0);
     expect(fullPayloadScans).toBeLessThanOrEqual(4);
+    // 每次重开都让 DELETE+EXTRA 再建一次 journal。256 次必须仍是这一次打开。
+    expect(opens).toBe(1);
     expect(mainPeak).toBeGreaterThan(1024 * 1024);
     expect(journalPeak).toBeGreaterThan(0);
     expect(mainPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.databaseBytes);

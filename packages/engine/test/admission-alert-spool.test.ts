@@ -92,10 +92,16 @@ describe('专用SQLite持久pending', () => {
   }, 30000);
   it('同一代次连续近上限写入不再整表重解；代次被改写后仍拒绝且不改旧库', () => {
     const original = DatabaseSync.prototype.prepare;
+    const originalExec = DatabaseSync.prototype.exec;
     let fullPayloadScans = 0;
+    let opens = 0;
     DatabaseSync.prototype.prepare = function (sql: string) {
       if (sql === 'SELECT key,payload,record_hash FROM pending') fullPayloadScans++;
       return original.call(this, sql);
+    };
+    DatabaseSync.prototype.exec = function (sql: string) {
+      if (sql.startsWith('PRAGMA busy_timeout=0')) opens++;
+      return originalExec.call(this, sql);
     };
     const first = observation();
     first.identity.namespace = `${'测'.repeat(40)}${'\u0001'.repeat(200)}`;
@@ -111,8 +117,11 @@ describe('专用SQLite持久pending', () => {
       // 不记住代次时，构造和事务内各扫一次已有行：32 次写入是 2*(0+…+31)=992 次整表读取。
       expect(fullPayloadScans).toBeGreaterThan(0);
       expect(fullPayloadScans).toBeLessThanOrEqual(4);
+      // 代次记住之后若仍每次重开，EXTRA 的 journal 目录同步会把近上限连续写入拖过固定时限。
+      expect(opens).toBe(1);
     } finally {
       DatabaseSync.prototype.prepare = original;
+      DatabaseSync.prototype.exec = originalExec;
     }
     const dbPath = join(path, 'pending.sqlite');
     const d = database();
