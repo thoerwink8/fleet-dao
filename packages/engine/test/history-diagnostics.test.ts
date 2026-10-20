@@ -365,6 +365,27 @@ describe('local watchdog and owned worker cleanup', () => {
       if (saved.kind === 'history') expect(await readFile(join(f.root, dir, 'history.bin'))).toEqual(f.raw);
     }
   });
+  it('reports a bounded stage timeline with entry times only when an exact run is captured', async () => {
+    vi.useFakeTimers();
+    const f = await fixture();
+    for (let i = 0; i < 30; i++) {
+      await vi.advanceTimersByTimeAsync(100);
+      f.scope.mark(`stage-${i}-${'x'.repeat(100)}`);
+    }
+    f.scope.mark('replacement:new-request');
+    await vi.advanceTimersByTimeAsync(50_000 - 3000);
+    f.stop();
+    await f.scope.finish();
+    const timeline = f.lines.map(parse).find((frame) => frame.outcome === 'timeline');
+    expect(timeline).toMatchObject({ reason: 'watchdog', stage: 'replacement:new-request', dropped: 9 });
+    expect(timeline.stages).toHaveLength(24);
+    expect(timeline.stages.at(-1)).toEqual(['replacement:new-request', 3000]);
+    expect(timeline.stages.every(([name]: [string]) => name.length <= 64)).toBe(true);
+    expect(timeline.elapsedMs).toBeGreaterThanOrEqual(50_000);
+    expect(f.lines.map(parse)).toContainEqual(
+      expect.objectContaining({ outcome: 'captured', kind: 'history', stage: 'replacement:new-request' }),
+    );
+  });
   it('waits for the actual worker Promise before teardown and deduplicates manual finally/afterEach', async () => {
     const f = await fixture();
     const finishing = f.scope.finish();

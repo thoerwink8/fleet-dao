@@ -1,4 +1,4 @@
-// 仅 push-handback-contract 全假端口测试启用：保留原 protobuf 字节，失败不伪装成空历史。
+// 仅 push-handback-contract 与 push-handback 全假端口测试启用：保留原 protobuf 字节，失败不伪装成空历史。
 import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -12,6 +12,8 @@ export const DESCRIBE_LIMIT = 128 * 1024;
 export const OUTPUT_LIMIT = 8 * 1024 * 1024;
 export const PREFIX = 'FLEET_SYNTHETIC_HISTORY_V1 ';
 const STATUS_RESERVE = 32 * 1024;
+// 每次取证的阶段时间线条数上限：24 条 × 64 字符名在整文件状态额度里留得下多条失败。
+const TIMELINE_LIMIT = 24;
 const hash = (bytes: Uint8Array | string) => createHash('sha256').update(bytes).digest('hex');
 const settled = <T>(promise: Promise<T>): Promise<PromiseSettledResult<T>> =>
   promise.then(
@@ -150,6 +152,10 @@ const scheduleWatchdog: WatchdogScheduler = (onFire, delayMs) => {
 
 export class SyntheticHistoryDiagnostics {
   private stage = 'test-start';
+  // 阶段进入时刻（毫秒，自本对象创建起算）；只留最近 TIMELINE_LIMIT 条，dropped 明示前面丢了几条。
+  private readonly createdAt = Date.now();
+  private readonly timeline: [string, number][] = [];
+  private timelineDropped = 0;
   private readonly cancelWatchdog: () => void;
   private capturePromise?: Promise<void>;
   private finished = false;
@@ -179,6 +185,11 @@ export class SyntheticHistoryDiagnostics {
   }
   mark(stage: string): void {
     this.stage = stage;
+    this.timeline.push([stage.slice(0, 64), Date.now() - this.createdAt]);
+    if (this.timeline.length > TIMELINE_LIMIT) {
+      this.timeline.shift();
+      this.timelineDropped++;
+    }
   }
   environment(env: TestWorkflowEnvironment): TestWorkflowEnvironment {
     if (!this.environments.has(env)) this.environments.set(env, undefined);
@@ -240,6 +251,20 @@ export class SyntheticHistoryDiagnostics {
         code: 'no-started-run',
         test: this.options.test.slice(0, 512),
       });
+    else {
+      // 只有测试自己登记的阶段名和进入时刻，不含业务正文；和 history 事件时刻对照定位实际在等哪一步。
+      // 状态额度耗尽时时间线缺失，但不能连带丢掉下面的原 protobuf/describe。
+      try {
+        this.options.output.status({
+          outcome: 'timeline',
+          reason,
+          stage,
+          elapsedMs: Date.now() - this.createdAt,
+          dropped: this.timelineDropped,
+          stages: this.timeline,
+        });
+      } catch {}
+    }
     for (const run of this.runs) {
       const identity: Identity = {
         test: this.options.test.slice(0, 512),
