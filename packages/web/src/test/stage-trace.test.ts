@@ -2,9 +2,12 @@
 // 阶段记录（stage-trace.ts，#3372）：测试卡住时日志里要能读到时间花在了哪一步。这里核它自己：
 // ① 调用栈里认得出测试文件的行号；② 阶段有上限、没结束的写成「…」；③ 事件循环晚到能量出来，并用时间区间的交集（不是「发生在那一步」）关联等待；
 // ④ 离超时还差一截没收尾会打一行，收尾后不再打；输出口抛错不外冒；⑤ 字段和整行有字节上限、写明截断；
-// ⑥ 装到测试文件里后 findBy / waitFor 按异步链归属：串行超时的旧测试迟到的等待不会算到下一个测试，并发的各算各的；asyncWrapper 用完还原。
-import { configure, getConfig, waitFor } from '@testing-library/react';
+// ⑥ 装到测试文件里后 findBy / waitFor 按异步链归属：串行超时的旧测试迟到的等待不会算到下一个测试，并发的各算各的；asyncWrapper 用完还原；
+// ⑦ harness 外层 Profiler 报的 React 渲染耗时记进它发生时的那次等待，render() 首屏这种不在等待里的单列。
+import { cleanup, configure, getConfig, screen, waitFor } from '@testing-library/react';
+import { createElement, useEffect, useState } from 'react';
 import { afterAll, afterEach, describe, expect, test, vi } from 'vitest';
+import { renderApp } from './harness';
 import {
   boundLine,
   callerOf,
@@ -160,6 +163,26 @@ describe('StageTrace', () => {
     expect(format(r)).toContain('含所有线程');
   });
 
+  test('React 渲染耗时记进最近一次还没结束的等待，没有等待时单列；收尾后、非数的不记', () => {
+    const t = newTrace(60_000);
+    t.noteRender(30);
+    const a = t.enter('x.test.tsx:1');
+    t.noteRender(50);
+    t.noteRender(Number.NaN);
+    t.noteRender(-1);
+    t.leave(a);
+    t.leave(t.enter('x.test.tsx:2'));
+    const r = t.finish();
+    t.noteRender(1000);
+    expect(r.stages.map((s) => s.renderMs)).toEqual([50, 0]);
+    expect(r.render).toEqual({ commits: 2, totalMs: 80, outsideWaitsMs: 30 });
+    const line = format(r);
+    expect(line).toContain('React 提交 2 次、组件渲染合计 80ms（不在已记等待里的 30ms');
+    expect(line).toMatch(/#1 x\.test\.tsx:1 \d+→\d+ms（渲染 50ms）/);
+    expect(line).not.toMatch(/#2 x\.test\.tsx:2 \d+→\d+ms（渲染/);
+    expect(format(newTrace(60_000).report())).toContain('React 没有提交');
+  });
+
   test('收尾之后才到的等待不记，只计迟到', () => {
     const t = newTrace(60_000);
     t.finish();
@@ -280,6 +303,40 @@ describe('installStageTrace：并发的测试各记各的，收尾后全部还�
       ).match(/#\d+ stage-trace\.test\.ts:\d+/g) ?? [];
     expect(stagesOf('P：等一次')).toHaveLength(1);
     expect(stagesOf('Q：等两次')).toHaveLength(2);
+    configure({ asyncWrapper: original });
+  });
+});
+
+describe('installStageTrace + harness 的 Profiler：渲染耗时记进它发生时的那次等待', () => {
+  const lines: string[] = [];
+  const original = getConfig().asyncWrapper;
+  installStageTrace({ watchAtMs: 60_000, reportOverMs: 0, emit: (l) => lines.push(l) });
+
+  // 首屏渲染占 60ms，数据「回来」后的那次占 120ms：前者在 render() 里（不在等待里），后者在 findByText 里。
+  function Slow() {
+    const [ready, setReady] = useState(false);
+    useEffect(() => {
+      const t = setTimeout(() => setReady(true), 20);
+      return () => clearTimeout(t);
+    }, []);
+    busyWait(ready ? 120 : 60);
+    return createElement('p', null, ready ? '好了' : '等着');
+  }
+
+  test('首屏算在等待外，数据回来后的渲染算进 findBy', async () => {
+    renderApp(createElement(Slow));
+    await screen.findByText('好了');
+    cleanup();
+  });
+
+  afterAll(() => {
+    expect(getConfig().asyncWrapper).toBe(original);
+    const line = lines.find((l) => l.includes('首屏算在等待外')) ?? '';
+    const inWait = /#1 stage-trace\.test\.ts:\d+ \d+→\d+ms（渲染 (\d+)ms）/.exec(line);
+    const outside = /不在已记等待里的 (\d+)ms/.exec(line);
+    expect(Number(inWait?.[1])).toBeGreaterThanOrEqual(110);
+    // 外壳里的 Provider 首屏后可能再渲染一遍，等待外不设上限；120ms 那次进了 findBy 才说明归属是对的。
+    expect(Number(outside?.[1])).toBeGreaterThanOrEqual(55);
     configure({ asyncWrapper: original });
   });
 });

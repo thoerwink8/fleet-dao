@@ -41,12 +41,23 @@ interface PreflightCall {
   preflight: FrancePreflightResponse | { error: Error };
 }
 
-function apiWith({ release, preflight }: PreflightCall): MockApi {
+/**
+ * 发版一键卡用不到的读取收成「只有本台」：假后端默认带一台远程环境「本机 WSL」，页面会再读它的快照、多画一整列对照，
+ * 和发版卡无关。本机加压复现里这些多出的渲染约占本文件三成耗时，CI 忙时把用例往 5 秒上限推（#3372）。
+ */
+function baseApi(): MockApi {
   const inner = createMockApi({ live: false });
   return {
     ...inner,
     env: () => Promise.resolve(envOk()),
+    nodes: () => Promise.resolve({ self: { name: '法国', engine: { state: 'on' } }, nodes: [] }),
     jobs: () => Promise.resolve(jobsEmpty()),
+  } as MockApi;
+}
+
+function apiWith({ release, preflight }: PreflightCall): MockApi {
+  return {
+    ...baseApi(),
     franceReleaseState: () => Promise.resolve(release),
     francePreflight:
       'error' in preflight ? () => Promise.reject(preflight.error) : () => Promise.resolve(preflight),
@@ -196,11 +207,8 @@ describe('/france 页发版一键卡', () => {
   test('连点「发版预检」只发一次：同一帧两下、忙着再点，francePreflight 只被调一次', async () => {
     const d = deferred<FrancePreflightResponse>();
     const calls: number[] = [];
-    const inner = createMockApi({ live: false });
     const api = {
-      ...inner,
-      env: () => Promise.resolve(envOk()),
-      jobs: () => Promise.resolve(jobsEmpty()),
+      ...baseApi(),
       franceReleaseState: () => Promise.resolve(idleRelease),
       francePreflight: () => {
         calls.push(1);
@@ -218,5 +226,23 @@ describe('/france 页发版一键卡', () => {
       d.resolve(donePreflight());
     });
     expect(await screen.findByText('能发')).toBeTruthy();
+  });
+
+  test('夹具只画本台：不带进假后端默认的远程环境，不读它的快照、不画对照列', async () => {
+    const snapshotReads: string[] = [];
+    const base = baseApi();
+    const api = {
+      ...base,
+      node: (id: string) => {
+        snapshotReads.push(id);
+        return base.node(id);
+      },
+      franceReleaseState: () => Promise.resolve(idleRelease),
+    } as MockApi;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    expect(await screen.findByText('没在走')).toBeTruthy();
+    expect(document.querySelector('[data-env-columns]')).toBeNull();
+    expect(screen.queryByText(/本机 WSL/)).toBeNull();
+    expect(snapshotReads).toEqual([]);
   });
 });
