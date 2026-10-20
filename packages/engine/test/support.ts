@@ -5,7 +5,7 @@ import { prepareTemporalCli, startTemporalTestEnvironment } from '@fleet-dao/con
 import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
-import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
+import { DefaultLogger, Runtime, type Worker, type WorkflowBundle } from '@temporalio/worker';
 import type { EngineJobs, EngineTasks } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
@@ -59,6 +59,8 @@ export interface WorkerOptions {
   tasks?: EngineTasks;
   /** 换一份工作流包（测试宿主工作流）；不给就是引擎自己的。 */
   workflowBundle?: WorkflowBundle;
+  /** 仅合成历史诊断使用；观察真实 runUntil Promise，不改变 worker 生命周期。 */
+  observeWorker?: (worker: Worker, run: Promise<unknown>, bundle: WorkflowBundle) => void;
 }
 
 /**
@@ -91,6 +93,7 @@ export async function withWorker<T>(
     const base = options.tasks?.readMergedTask ? routed : { ...routed, readMergedTask: async () => null };
     return userWrap ? userWrap(base) : base;
   };
+  const workflowBundle = options.workflowBundle ?? (await engineBundle());
   const worker = await createEngineWorker({
     config: {
       address: env.address,
@@ -101,7 +104,7 @@ export async function withWorker<T>(
     },
     ports: world.ports,
     connection: env.nativeConnection,
-    workflowBundle: options.workflowBundle ?? (await engineBundle()),
+    workflowBundle,
     ...(options.triage ? { triage: options.triage } : {}),
     ...(options.decide ? { decide: options.decide } : {}),
     wrapActivities,
@@ -109,7 +112,9 @@ export async function withWorker<T>(
     ...(options.jobs ? { jobs: options.jobs } : {}),
     ...(options.tasks ? { tasks: options.tasks } : {}),
   });
-  return worker.runUntil(fn(taskQueue));
+  const run = worker.runUntil(fn(taskQueue));
+  options.observeWorker?.(worker, run, workflowBundle);
+  return run;
 }
 
 export const REPO: Repo = {
