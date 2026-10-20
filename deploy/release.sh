@@ -2101,7 +2101,7 @@ train_health_owner() {
     const fs = require("fs"); let s;
     try { s = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); }
     catch (e) { if (e.code === "ENOENT") process.exit(0); throw e; }
-    if (s.release?.healthAttempt) process.stdout.write(JSON.stringify([s.target?.value, s.release.healthAttempt, s.startedAt]));
+    if (s.release?.healthAttempt) process.stdout.write(JSON.stringify([s.target?.value, s.release.healthAttempt, s.startedAt, s.requestId ?? null]));
   ' "$RELEASES/.train/release-train.json"
 }
 
@@ -2121,7 +2121,7 @@ settle_train_succeeded() { # 提交号
     let raw = "", prev;
     try { raw = fs.readFileSync(file, "utf8"); prev = JSON.parse(raw); }
     catch (e) { if (e.code !== "ENOENT") throw e; }
-    if (prev?.release?.healthAttempt) throw Error("发布请求已换代，不覆盖");
+    if (prev?.release?.healthAttempt || prev?.requestId) throw Error("发布请求已换代，不覆盖");
     const next = {
       schema: 1,
       phase: 8,
@@ -2150,15 +2150,39 @@ settle_train_pending() { # 提交号 切前完整逐项基线 write|check
     try { raw = fs.readFileSync(file, "utf8"); s = JSON.parse(raw); }
     catch (e) { if (e.code !== "ENOENT") throw e; }
     if (s && s.target?.value !== sha) throw Error("发布目标已换代，不覆盖");
-    if (mode === "write" && owner && JSON.stringify([s?.target?.value, s?.release?.healthAttempt, s?.startedAt]) !== owner) throw Error("发布请求已换代，不覆盖");
-    if (mode === "write" && !owner && s?.release?.healthAttempt) throw Error("发布请求已换代，不接管后来者");
+    if (mode === "write" && owner && JSON.stringify([s?.target?.value, s?.release?.healthAttempt, s?.startedAt, s?.requestId ?? null]) !== owner) throw Error("发布请求已换代，不覆盖");
+    if (mode === "write" && !owner && (s?.release?.healthAttempt || s?.requestId)) throw Error("发布请求已换代，不接管后来者");
     if (!s) s = {schema: 1, target: {kind: "sha", value: sha}, startedAt: new Date().toISOString(), release: {}};
     s.release ??= {};
     const attempt = s.release.healthAttempt ?? crypto.randomUUID();
     const pending = {schema: 1, sha, attempt, before, identity, receipt, at: new Date().toISOString()};
     if (mode === "write") {
+      const priorStatus = s.status;
       s.release.healthPending = pending;
       s.status = "blocked"; s.phase = 4; s.updatedAt = pending.at; s.why = receipt;
+      // 子发布也是受管状态的写入者：先核完整链，再同步本次精确 attempt，不能只改顶层。
+      if (s.requestId) {
+        const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+        const nodes = s.requests;
+        if (!Array.isArray(nodes) || !nodes.length || nodes.length > 16) throw Error("发布请求身份链缺失或超限");
+        const seen = new Set();
+        for (let i = 0; i < nodes.length; i++) {
+          const node = nodes[i], id = node?.identity, previous = nodes[i - 1];
+          if (!id || Object.keys(id).sort().join(",") !== "at,by,kind,requestId,sha" ||
+              !["release", "retry", "restore", "abort"].includes(id.kind) ||
+              typeof id.at !== "string" || !Number.isFinite(Date.parse(id.at)) || typeof id.by !== "string" ||
+              !/^[\p{L}\p{N}_.@ -]{1,64}$/u.test(id.by) ||
+              !uuid.test(id.requestId) || seen.has(id.requestId) || node.target !== sha ||
+              (["release", "retry"].includes(id.kind) ? id.sha !== sha : id.sha !== null) ||
+              (node.parent ?? null) !== (previous?.identity.requestId ?? null) ||
+              (previous && previous.supersededBy !== id.requestId)) throw Error("发布请求身份链损坏");
+          seen.add(id.requestId);
+        }
+        const active = nodes.at(-1);
+        if (active.identity.requestId !== s.requestId || active.supersededBy != null || active.status !== priorStatus ||
+            s.rootRequestId !== nodes[0].identity.requestId) throw Error("发布请求当前 attempt 已换代");
+        Object.assign(active, {status: s.status, why: s.why, check: s.check ?? null});
+      }
       if ((fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "") !== raw) throw Error("发布进度已换代，不覆盖");
       fs.writeFileSync(file + ".tmp", JSON.stringify(s) + "\n"); fs.renameSync(file + ".tmp", file);
     }

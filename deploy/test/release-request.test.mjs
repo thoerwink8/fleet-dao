@@ -2,6 +2,7 @@
 // 走一趟的各步记进进度（和 release-train.json 同一个格式）、单元文件的路径和权限读回。
 // 用法：node --test deploy/test/release-request.test.mjs（run.sh 的 node-tests 里跑）。
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
@@ -15,6 +16,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { gateVerdict, HUMAN_TIER_PATHS, INSTALLED_COPIES, reasonOf } from '../france/auto-release/lib.mjs';
+import { requestArchiveIo } from '../france/release-request/fleet-release-request.mjs';
 import {
   EXIT,
   FLEET_API,
@@ -40,6 +42,7 @@ import {
   runRequest,
   STATE_FILE,
   safeReadRequest,
+  segmentFileName,
   TRAIN_DIR,
 } from '../france/release-request/lib.mjs';
 import { runChild } from './child.mjs';
@@ -2025,4 +2028,721 @@ test('发版提醒走通知中心：接活脚本和 lib 不再读 engine.env 的
   assert.match(script, /resolved_by = 'release-request'/);
   assert.match(script, /note\.level !== null/, '开始、成功（level 为 null）不写通知');
   assert.doesNotMatch(script, /release:start:/);
+});
+const ID1 = '11111111-1111-4111-8111-111111111111';
+const ID2 = '22222222-2222-4222-8222-222222222222';
+const ID3 = '33333333-3333-4333-8333-333333333333';
+const requestIdentity = (requestId = ID1, over = {}) => ({
+  requestId,
+  kind: 'release',
+  sha: SHA,
+  at: REQ_AT,
+  by: 'commander',
+  ...over,
+});
+const protocolRequest = (requestId = ID1, over = {}) => goodRequest({ by: 'commander', requestId, ...over });
+async function recordedAttempt(over = {}) {
+  const m = fakeIo({ readRequest: () => ({ kind: 'ok', text: protocolRequest() }), ...over });
+  const code = await runRequest(m.io);
+  return { state: m.log.states.at(-1), code, ...m };
+}
+
+test('#3409 请求身份贯穿 accepted、结局、当前 attempt 和新体检，处理时间不冒充请求时间', async () => {
+  const m = await recordedAttempt();
+  assert.equal(m.code, 0);
+  assert.equal(m.state.requestId, ID1);
+  assert.equal(m.state.rootRequestId, ID1);
+  assert.deepEqual(m.state.requests[0].identity, requestIdentity());
+  assert.equal(m.state.check.attemptId, ID1);
+  assert.equal(m.state.check.sha, SHA);
+  assert.ok(Date.parse(m.state.check.at) >= Date.parse(m.state.attemptStartedAt));
+  for (const last of m.log.lasts) {
+    assert.equal(last.requestId, ID1);
+    assert.equal(last.requestAt, REQ_AT);
+    assert.notEqual(last.at, REQ_AT);
+  }
+  assert.equal(parseRequest(protocolRequest(ID1, { requestId: 'same-sha-is-not-an-id' })).ok, false);
+  assert.equal(parseRequest(protocolRequest(ID1, { supersedes: { requestId: ID2 } })).ok, false);
+});
+
+test('#3409 同 UUID 同参数重放不重复执行；不同参数拒绝', async () => {
+  const original = await recordedAttempt();
+  const replay = fakeIo({
+    readState: () => ({ ok: true, state: original.state }),
+    readRequest: () => ({ kind: 'ok', text: protocolRequest() }),
+  });
+  assert.equal(await runRequest(replay.io), 0);
+  assert.equal(replay.log.release.length, 0);
+  assert.equal(replay.log.states.length, 0);
+  const different = fakeIo({
+    readState: () => ({ ok: true, state: original.state }),
+    readRequest: () => ({ kind: 'ok', text: protocolRequest(ID1, { at: '2026-10-07T11:59:01.000Z' }) }),
+  });
+  assertRefused(await runRequest(different.io), different.log, /参数不同/);
+  const running = structuredClone(original.state);
+  running.status = running.requests[0].status = 'running';
+  const pending = fakeIo({
+    readState: () => ({ ok: true, state: running }),
+    readRequest: () => ({ kind: 'ok', text: protocolRequest() }),
+  });
+  assert.equal(await runRequest(pending.io), 2);
+  assert.equal(pending.log.lasts[0].outcome, 'running');
+  assert.equal(pending.log.release.length, 0);
+});
+
+test('#3409 auto 在既有 gate 允许的 failed 上显式接续，原失败与双向身份一次落盘', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '现场失败' }) });
+  assert.equal(original.code, 2);
+  const next = fakeIo({
+    readState: () => ({ ok: true, state: original.state }),
+    readRequest: () => ({
+      kind: 'ok',
+      text: protocolRequest(ID2, { by: '自动发版 决定0088', supersedes: requestIdentity() }),
+    }),
+  });
+  assert.equal(await runRequest(next.io), 0);
+  for (const state of next.log.states) {
+    assert.equal(state.requests[0].status, 'failed');
+    assert.equal(state.requests[0].why, original.state.why);
+    assert.equal(state.requests[0].supersededBy, ID2);
+    assert.equal(state.requests[1].parent, ID1);
+  }
+  assert.equal(next.log.states.at(-1).requestId, ID2);
+  assert.equal(next.log.states.at(-1).rootRequestId, ID1);
+  assert.equal(next.log.states.at(-1).check.attemptId, ID2);
+});
+
+test('#3409 supersedes 精确 CAS，旧前驱、不同目标、非 failed 都不发布', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '失败' }) });
+  for (const over of [
+    { supersedes: requestIdentity(ID3) },
+    { supersedes: requestIdentity(ID1, { sha: 'b'.repeat(40) }) },
+    { supersedes: requestIdentity(ID1, { at: '2026-10-07T11:58:00.000Z' }) },
+  ]) {
+    const m = fakeIo({
+      readState: () => ({ ok: true, state: original.state }),
+      readRequest: () => ({ kind: 'ok', text: protocolRequest(ID2, over) }),
+    });
+    assert.equal(await runRequest(m.io), 1);
+    assert.equal(m.log.release.length, 0);
+    assert.equal(m.log.states.length, 0);
+  }
+  const done = await recordedAttempt();
+  const m = fakeIo({
+    readState: () => ({ ok: true, state: done.state }),
+    readRequest: () => ({ kind: 'ok', text: protocolRequest(ID2, { supersedes: requestIdentity() }) }),
+  });
+  assertRefused(await runRequest(m.io), m.log, /前驱已变化/);
+});
+
+test('#3409 retry 换 attempt、保留原 blocked；restore 重新实读体检，不刷新旧 check', async () => {
+  const original = await recordedAttempt();
+  for (const kind of ['retry', 'restore']) {
+    const prev = structuredClone(original.state);
+    prev.status = prev.requests[0].status = kind === 'retry' ? 'blocked' : 'failed';
+    prev.phase = kind === 'retry' ? 3 : 7;
+    prev.pausedMaster = true;
+    prev.before.master = true;
+    prev.release = {};
+    let healthReads = 0;
+    const m = fakeIo({
+      readState: () => ({ ok: true, state: prev }),
+      readRequest: () => ({
+        kind: 'ok',
+        text: protocolRequest(ID2, {
+          kind,
+          ...(kind === 'restore' ? { sha: undefined } : {}),
+          expectedAttempt: requestIdentity(),
+        }),
+      }),
+      healthz: async () => {
+        healthReads++;
+        return { status: 200, body: healthBody() };
+      },
+    });
+    assert.equal(await runRequest(m.io), 0);
+    const state = m.log.states.at(-1);
+    assert.equal(state.requests[0].status, prev.requests[0].status);
+    assert.equal(state.requests[1].status, 'done');
+    assert.equal(state.check.attemptId, ID2);
+    assert.equal(state.check.sha, SHA);
+    assert.ok(healthReads > 0, `${kind} 的新 attempt 必须有真实新检查`);
+    assert.equal(m.log.states[0].check, null);
+  }
+});
+
+test('#3409 abort 精确绑定 active attempt，保留失败；自身重放返回原成功', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '失败' }) });
+  const req = protocolRequest(ID2, { kind: 'abort', sha: undefined, expectedAttempt: requestIdentity() });
+  const m = fakeIo({
+    readState: () => ({ ok: true, state: original.state }),
+    readRequest: () => ({ kind: 'ok', text: req }),
+  });
+  assert.equal(await runRequest(m.io), 0);
+  const state = m.log.states.at(-1);
+  assert.equal(state.requests[0].status, 'failed');
+  assert.equal(state.requests[1].status, 'aborted');
+  assert.equal(state.requests[1].identity.requestId, ID2);
+  const replay = fakeIo({
+    readState: () => ({ ok: true, state }),
+    readRequest: () => ({ kind: 'ok', text: req }),
+  });
+  assert.equal(await runRequest(replay.io), 0);
+  assert.equal(replay.log.states.length, 0);
+  const stale = fakeIo({
+    readState: () => ({ ok: true, state }),
+    readRequest: () => ({
+      kind: 'ok',
+      text: protocolRequest(ID3, { kind: 'abort', sha: undefined, expectedAttempt: requestIdentity() }),
+    }),
+  });
+  assertRefused(await runRequest(stale.io), stale.log, /目标已变化/);
+});
+
+test('#3409 坏链、环、超限明确拒绝；链满仍先识别原请求的幂等重放', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '失败' }) });
+  const full = structuredClone(original.state);
+  full.requests = Array.from({ length: 16 }, (_, i) => {
+    const id = `${String(i + 1).padStart(8, '0')}-1111-4111-8111-111111111111`;
+    return {
+      ...structuredClone(full.requests[0]),
+      identity: requestIdentity(id),
+      parent: null,
+      supersededBy: null,
+    };
+  });
+  for (let i = 0; i < full.requests.length; i++) {
+    full.requests[i].parent = full.requests[i - 1]?.identity.requestId ?? null;
+    full.requests[i].supersededBy = full.requests[i + 1]?.identity.requestId ?? null;
+  }
+  full.rootRequestId = full.requests[0].identity.requestId;
+  full.requestId = full.requests.at(-1).identity.requestId;
+  const overLimit = fakeIo({
+    readState: () => ({ ok: true, state: full }),
+    readRequest: () => ({
+      kind: 'ok',
+      text: protocolRequest(ID2, { supersedes: full.requests.at(-1).identity }),
+    }),
+  });
+  assertRefused(await runRequest(overLimit.io), overLimit.log, /已满/);
+  const replay = fakeIo({
+    readState: () => ({ ok: true, state: full }),
+    readRequest: () => ({ kind: 'ok', text: protocolRequest(full.requests[0].identity.requestId) }),
+  });
+  assert.equal(await runRequest(replay.io), 2);
+  assert.equal(replay.log.lasts[0].outcome, 'failed');
+  assert.equal(replay.log.states.length, 0);
+  for (const corrupt of [
+    (state) => (state.requests[0].supersededBy = ID1),
+    (state) => (state.requests[1].identity.requestId = state.requests[0].identity.requestId),
+    (state) => state.requests.push(structuredClone(state.requests[0])),
+  ]) {
+    const state = structuredClone(full);
+    corrupt(state);
+    const m = fakeIo({
+      readState: () => ({ ok: true, state }),
+      readRequest: () => ({ kind: 'ok', text: protocolRequest(ID2) }),
+    });
+    assert.equal(await runRequest(m.io), 1);
+    assert.equal(m.log.states.length, 0);
+  }
+});
+
+test('#3409 恢复和撤销在异步预检后重新核 active，不能操作刚换掉的目标', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '失败' }) });
+  for (const kind of ['retry', 'abort']) {
+    const before = structuredClone(original.state);
+    if (kind === 'retry') {
+      before.status = before.requests[0].status = 'blocked';
+      before.phase = 3;
+    }
+    const replaced = structuredClone(before);
+    replaced.requestId = replaced.rootRequestId = ID3;
+    replaced.requests[0].identity.requestId = ID3;
+    let reads = 0;
+    const m = fakeIo({
+      readState: () => ({ ok: true, state: ++reads <= (kind === 'retry' ? 3 : 2) ? before : replaced }),
+      readRequest: () => ({
+        kind: 'ok',
+        text: protocolRequest(ID2, {
+          kind,
+          ...(kind === 'abort' ? { sha: undefined } : {}),
+          expectedAttempt: requestIdentity(),
+        }),
+      }),
+    });
+    assertRefused(await runRequest(m.io), m.log, /目标已变化/);
+  }
+});
+
+test('#3409 restore 先开回引擎才采样健康，不在恢复动作前等待体检', async () => {
+  const original = await recordedAttempt();
+  const prev = structuredClone(original.state);
+  prev.status = prev.requests[0].status = 'failed';
+  prev.phase = 7;
+  prev.pausedMaster = true;
+  prev.before.master = true;
+  const events = [];
+  let engineRestored = false;
+  const m = fakeIo({
+    readState: () => ({ ok: true, state: prev }),
+    readRequest: () => ({
+      kind: 'ok',
+      text: protocolRequest(ID2, {
+        kind: 'restore',
+        sha: undefined,
+        expectedAttempt: requestIdentity(),
+      }),
+    }),
+    healthz: async () => {
+      events.push('health');
+      return { status: engineRestored ? 200 : 503, body: healthBody({ engine: { ok: engineRestored } }) };
+    },
+  });
+  m.setMaster('off');
+  const fleetApi = m.io.fleetApi;
+  m.io.fleetApi = async (args) => {
+    if (args.startsWith('engine on')) {
+      assert.equal(m.log.sleeps, 0, '恢复动作前没有等健康重试');
+      events.push('engine-on');
+      engineRestored = true;
+    }
+    return fleetApi(args);
+  };
+  assert.equal(await runRequest(m.io), 0);
+  assert.deepEqual(events.slice(0, 2), ['engine-on', 'health']);
+  assert.equal(m.log.release.length, 0, 'restore 不重新发布');
+  const state = m.log.states.at(-1);
+  assert.equal(state.requests[0].status, 'failed');
+  assert.equal(state.requests[1].status, 'done');
+  assert.equal(state.check.attemptId, ID2);
+  assert.equal(state.check.ok, true);
+});
+
+test('#3409 restore 开回失败直接保留失败，不提前或事后采样健康', async () => {
+  const original = await recordedAttempt();
+  const prev = structuredClone(original.state);
+  prev.status = prev.requests[0].status = 'failed';
+  prev.phase = 7;
+  prev.pausedMaster = true;
+  prev.before.master = true;
+  let healthReads = 0;
+  const m = fakeIo(
+    {
+      readState: () => ({ ok: true, state: prev }),
+      readRequest: () => ({
+        kind: 'ok',
+        text: protocolRequest(ID2, {
+          kind: 'restore',
+          sha: undefined,
+          expectedAttempt: requestIdentity(),
+        }),
+      }),
+      healthz: async () => {
+        healthReads++;
+        return { status: 503, body: healthBody({ engine: { ok: false } }) };
+      },
+    },
+    { onFails: true },
+  );
+  m.setMaster('off');
+  assert.equal(await runRequest(m.io), 2);
+  assert.equal(healthReads, 0);
+  assert.equal(m.log.sleeps, 0);
+  assert.equal(m.log.release.length, 0);
+  const state = m.log.states.at(-1);
+  assert.equal(state.requests[0].status, 'failed');
+  assert.equal(state.requests[1].status, 'failed');
+  assert.equal(state.check, null);
+});
+
+// 直接执行 release.sh 装配里的真实 Node 片段，临时文件代替生产进度目录。
+function releaseShellNode(name) {
+  const source = readFileSync(new URL('../release.sh', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const start = source.indexOf(`\n${name}()`);
+  assert.ok(start >= 0, `找到真实 ${name}`);
+  const body = source.slice(start, source.indexOf('\n}\n', start) + 3);
+  const snippet = /"\$node_bin" -e '([\s\S]*?)'\s+"/.exec(body)?.[1];
+  assert.ok(snippet, `找到 ${name} 的真实 Node 子进程`);
+  return snippet;
+}
+
+test('#3409 真实子发布 pending 同步当前 attempt；旧 owner 跨 retry 必须拒绝且不落盘', async () => {
+  const original = await recordedAttempt();
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-pending-owner-'));
+  const file = join(dir, 'release-train.json');
+  try {
+    const state = structuredClone(original.state);
+    state.status = state.requests[0].status = 'running';
+    state.release.healthAttempt = '44444444-4444-4444-8444-444444444444';
+    writeFileSync(file, JSON.stringify(state));
+    const owner = runChild(process.execPath, ['-e', releaseShellNode('train_health_owner'), file]);
+    assert.equal(owner.status, 0);
+    assert.equal(JSON.parse(owner.stdout).at(-1), ID1);
+    const pending = (ownerText) =>
+      runChild(process.execPath, [
+        '-e',
+        releaseShellNode('settle_train_pending'),
+        file,
+        SHA,
+        '{}',
+        '真实未决证据',
+        'write',
+        'service-identity',
+        ownerText,
+      ]);
+    const result = pending(owner.stdout);
+    assert.equal(result.status, 0, result.stderr);
+    const blocked = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(blocked.status, 'blocked');
+    assert.equal(blocked.requests[0].status, 'blocked');
+    assert.equal(blocked.requests[0].why, blocked.why);
+    assert.deepEqual(blocked.requests[0].check, blocked.check);
+    const replaced = structuredClone(blocked);
+    replaced.requestId = replaced.rootRequestId = ID2;
+    replaced.requests[0].identity.requestId = ID2;
+    writeFileSync(file, JSON.stringify(replaced));
+    const before = readFileSync(file, 'utf8');
+    const stale = pending(owner.stdout);
+    assert.notEqual(stale.status, 0);
+    assert.match(stale.stderr, /已换代/);
+    assert.equal(readFileSync(file, 'utf8'), before);
+    const freshOwner = runChild(process.execPath, ['-e', releaseShellNode('train_health_owner'), file]);
+    replaced.requests[0].supersededBy = ID1;
+    writeFileSync(file, JSON.stringify(replaced));
+    const corruptBefore = readFileSync(file, 'utf8');
+    assert.notEqual(pending(freshOwner.stdout).status, 0);
+    assert.equal(readFileSync(file, 'utf8'), corruptBefore);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#3409 真实子发布 pending 保留无请求 ID 的旧现场兼容', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-pending-legacy-'));
+  const file = join(dir, 'release-train.json');
+  try {
+    const state = {
+      status: 'running',
+      target: { kind: 'sha', value: SHA },
+      startedAt: REQ_AT,
+      release: { healthAttempt: '44444444-4444-4444-8444-444444444444' },
+    };
+    writeFileSync(file, JSON.stringify(state));
+    const owner = runChild(process.execPath, ['-e', releaseShellNode('train_health_owner'), file]);
+    assert.equal(JSON.parse(owner.stdout).at(-1), null);
+    const result = runChild(process.execPath, [
+      '-e',
+      releaseShellNode('settle_train_pending'),
+      file,
+      SHA,
+      '{}',
+      '旧现场真实未决证据',
+      'write',
+      'service-identity',
+      owner.stdout,
+    ]);
+    assert.equal(result.status, 0, result.stderr);
+    const blocked = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(blocked.status, 'blocked');
+    assert.equal(blocked.requestId, undefined);
+    assert.equal(blocked.requests, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function fullAttemptSegment(original, status = 'failed', phase = 7) {
+  const state = structuredClone(original);
+  state.status = status;
+  state.phase = phase;
+  state.requests = Array.from({ length: 16 }, (_, i) => {
+    const requestId = `${String(i + 1).padStart(8, '0')}-1111-4111-8111-111111111111`;
+    return {
+      ...structuredClone(original.requests[0]),
+      identity: requestIdentity(requestId),
+      status,
+      parent: null,
+      supersededBy: null,
+    };
+  });
+  for (let i = 0; i < state.requests.length; i++) {
+    state.requests[i].parent = state.requests[i - 1]?.identity.requestId ?? null;
+    state.requests[i].supersededBy = state.requests[i + 1]?.identity.requestId ?? null;
+  }
+  state.rootRequestId = state.requests[0].identity.requestId;
+  state.requestId = state.requests.at(-1).identity.requestId;
+  return state;
+}
+
+test('#3409 满段人工 abort/restore/retry 先真实只增归档再恢复，不被容量锁死', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '原失败' }) });
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-request-segments-'));
+  try {
+    for (const kind of ['abort', 'restore', 'retry']) {
+      const directory = join(dir, kind);
+      const archive = requestArchiveIo(directory);
+      const prev = fullAttemptSegment(
+        original.state,
+        kind === 'retry' ? 'blocked' : 'failed',
+        kind === 'retry' ? 3 : 7,
+      );
+      prev.pausedMaster = true;
+      prev.before = { master: true, repos: { 'thoerwink8/fleet-dao': SINCE, 'thoerwink8/other': null } };
+      prev.release = {};
+      prev.marker = true;
+      const req = protocolRequest(ID2, {
+        kind,
+        ...(kind === 'retry' ? {} : { sha: undefined }),
+        expectedAttempt: prev.requests.at(-1).identity,
+      });
+      const m = fakeIo({
+        ...archive,
+        readState: () => ({ ok: true, state: prev }),
+        readRequest: () => ({ kind: 'ok', text: req }),
+        markerExists: () => true,
+      });
+      m.setMaster('off');
+      assert.equal(await runRequest(m.io), 0, `${kind} 不因旧段满而拒绝`);
+      const state = m.log.states.at(-1);
+      assert.equal(state.requests.length, 1);
+      assert.equal(state.requestId, ID2);
+      const archived = archive.readArchivedRequest(prev.rootRequestId);
+      assert.equal(archived.ok, true);
+      assert.deepEqual(archived.state, prev, '旧段原始失败证据完整不变');
+      assert.equal(state.previousSegment, segmentFileName(prev));
+      assert.equal(
+        state.previousSegment,
+        `${prev.rootRequestId}--${prev.requestId}--${createHash('sha256')
+          .update(`${JSON.stringify(prev)}\n`)
+          .digest('hex')}.json`,
+        '档名绑定包含换行的完整文件内容 SHA256',
+      );
+      if (kind === 'abort') assert.ok(m.log.cleared > 0, '真正清掉暂停标记');
+      if (kind === 'restore')
+        assert.ok(
+          m.log.fleetApi.some((args) => args.startsWith('engine on')),
+          '真正恢复引擎',
+        );
+      assert.equal(archive.archiveSegment(prev), state.previousSegment, '同内容归档重放幂等');
+      const conflict = structuredClone(prev);
+      conflict.requests[0].identity.by = '不同请求者';
+      assert.throws(() => archive.archiveSegment(conflict), /内容不同/);
+      assert.deepEqual(archive.readArchivedRequest(prev.rootRequestId).state, prev);
+      const replay = fakeIo({
+        ...archive,
+        readState: () => ({ ok: true, state }),
+        readRequest: () => ({ kind: 'ok', text: protocolRequest(prev.rootRequestId) }),
+      });
+      assert.equal(await runRequest(replay.io), kind === 'retry' ? 3 : 2, '归档重放保留原终态');
+      assert.equal(replay.log.states.length, 0);
+      assert.equal(replay.log.cleared, 0);
+      const conflictReplay = fakeIo({
+        ...archive,
+        readState: () => ({ ok: true, state }),
+        readRequest: () => ({
+          kind: 'ok',
+          text: protocolRequest(prev.rootRequestId, { at: '2026-10-07T11:59:01.000Z' }),
+        }),
+      });
+      assertRefused(await runRequest(conflictReplay.io), conflictReplay.log, /参数不同/);
+      assert.equal(archive.readArchivedRequest('../not-a-uuid').ok, false);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#3409 人工恢复归档失败不动当前状态、标记和开关', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '原失败' }) });
+  for (const kind of ['abort', 'restore', 'retry']) {
+    const prev = fullAttemptSegment(
+      original.state,
+      kind === 'retry' ? 'blocked' : 'failed',
+      kind === 'retry' ? 3 : 7,
+    );
+    prev.pausedMaster = true;
+    prev.before = { master: true };
+    prev.release = {};
+    const before = JSON.stringify(prev);
+    const m = fakeIo({
+      readState: () => ({ ok: true, state: prev }),
+      archiveSegment: () => {
+        throw new Error('归档磁盘不可写');
+      },
+      readRequest: () => ({
+        kind: 'ok',
+        text: protocolRequest(ID2, {
+          kind,
+          ...(kind === 'retry' ? {} : { sha: undefined }),
+          expectedAttempt: prev.requests.at(-1).identity,
+        }),
+      }),
+    });
+    assertRefused(await runRequest(m.io), m.log, /归档没成/);
+    assert.equal(m.log.cleared, 0);
+    assert.equal(m.log.fleetApi.length, 0);
+    assert.equal(JSON.stringify(prev), before);
+  }
+});
+
+test('#3409 无 owner 的直接发布不能覆盖尚未产生 healthAttempt 的协议请求', async () => {
+  const original = await recordedAttempt();
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-direct-settle-'));
+  const file = join(dir, 'release-train.json');
+  try {
+    const state = structuredClone(original.state);
+    state.status = state.requests[0].status = 'running';
+    state.phase = 0;
+    state.release = {};
+    writeFileSync(file, JSON.stringify(state));
+    const before = readFileSync(file, 'utf8');
+    const result = runChild(process.execPath, [
+      '-e',
+      releaseShellNode('settle_train_succeeded'),
+      file,
+      SHA,
+      REQ_AT,
+      '',
+    ]);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /已换代/);
+    assert.equal(readFileSync(file, 'utf8'), before);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#3409 真实归档缺索引时可补齐，symlink 不覆盖、不读取', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '原失败' }) });
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-segment-repair-'));
+  try {
+    const archive = requestArchiveIo(dir);
+    const state = fullAttemptSegment(original.state);
+    const name = archive.archiveSegment(state);
+    const missing = join(dir, 'by-request', `${state.rootRequestId}.json`);
+    rmSync(missing);
+    assert.equal(archive.readArchivedRequest(state.rootRequestId).state, null);
+    assert.equal(archive.archiveSegment(state), name);
+    assert.deepEqual(archive.readArchivedRequest(state.rootRequestId).state, state);
+    assert.equal(archive.readArchivedRequest('AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA').ok, false);
+    const link = join(dir, 'by-request', `${ID3}.json`);
+    symlinkSync(join(dir, name), link);
+    assert.equal(archive.readArchivedRequest(ID3).ok, false);
+    assert.equal(archive.readArchivedRequest('../escape').ok, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#3409 完整归档后元数据变化先拒绝陈旧 CAS，下一轮新 abort 真正清标记并保留旧档', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '原失败' }) });
+  const prev = fullAttemptSegment(original.state);
+  prev.pausedMaster = true;
+  prev.before = { master: true };
+  let stored = structuredClone(prev);
+  const dir = mkdtempSync(join(tmpdir(), 'fleet-segment-cas-'));
+  try {
+    const archive = requestArchiveIo(dir);
+    const m = fakeIo({
+      readState: () => ({ ok: true, state: stored }),
+      archiveSegment: (state) => {
+        const pointer = archive.archiveSegment(state);
+        stored = { ...structuredClone(stored), why: '同 UUID 的新状态' };
+        return pointer;
+      },
+      readRequest: () => ({
+        kind: 'ok',
+        text: protocolRequest(ID2, {
+          kind: 'abort',
+          sha: undefined,
+          expectedAttempt: prev.requests.at(-1).identity,
+        }),
+      }),
+    });
+    assertRefused(await runRequest(m.io), m.log, /快照已变化/);
+    assert.equal(m.log.cleared, 0);
+    assert.equal(stored.why, '同 UUID 的新状态');
+    assert.deepEqual(archive.readArchivedRequest(prev.rootRequestId).state, prev);
+    const oldName = segmentFileName(prev);
+    const oldText = readFileSync(join(dir, oldName), 'utf8');
+    stored.updatedAt = '2026-10-07T12:10:00.000Z';
+    stored.requests.at(-1).why = stored.why;
+    const fresh = structuredClone(stored);
+    const next = fakeIo({
+      ...archive,
+      readState: () => ({ ok: true, state: stored }),
+      markerExists: () => true,
+      readRequest: () => ({
+        kind: 'ok',
+        text: protocolRequest(ID3, {
+          kind: 'abort',
+          sha: undefined,
+          expectedAttempt: fresh.requests.at(-1).identity,
+        }),
+      }),
+    });
+    assert.equal(await runRequest(next.io), 0, '新精确 expectedAttempt 不被旧索引锁死');
+    assert.ok(next.log.cleared > 0, '真正清掉暂停标记');
+    assert.equal(next.log.states.at(-1).requestId, ID3);
+    assert.equal(next.log.states.at(-1).previousSegment, segmentFileName(fresh));
+    assert.notEqual(segmentFileName(fresh), oldName);
+    assert.equal(readFileSync(join(dir, oldName), 'utf8'), oldText, '旧 hash 档全文未变');
+    assert.equal(readFileSync(join(dir, segmentFileName(fresh)), 'utf8'), `${JSON.stringify(fresh)}\n`);
+    assert.deepEqual(archive.readArchivedRequest(prev.rootRequestId).state, fresh, '索引原子刷新完整快照');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('#3409 UUID 索引刷新不改变身份、目标、双向链、恢复目标、原终态或 check', async () => {
+  const original = await recordedAttempt({ prepareCheckout: async () => ({ ok: false, why: '原失败' }) });
+  const state = fullAttemptSegment(original.state);
+  const mutations = [
+    (s) => {
+      s.requests[0].identity.by = '另一个请求者';
+    },
+    (s) => {
+      s.target.value = 'b'.repeat(40);
+    },
+    (s) => {
+      s.requests[1].parent = ID3;
+    },
+    (s) => {
+      s.requests[0].supersededBy = ID3;
+    },
+    (s) => {
+      s.requests[0].supersedes = requestIdentity(ID3);
+    },
+    (s) => {
+      s.requests[0].expectedAttempt = requestIdentity(ID3);
+    },
+    (s) => {
+      s.requests[0].status = 'done';
+    },
+    (s) => {
+      s.status = s.requests.at(-1).status = 'done';
+    },
+    (s) => {
+      s.requests[0].check = { ok: true, at: REQ_AT };
+    },
+    (s) => {
+      s.check = s.requests.at(-1).check = { ok: true, at: REQ_AT };
+    },
+  ];
+  for (const mutate of mutations) {
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-segment-conflict-'));
+    try {
+      const archive = requestArchiveIo(dir);
+      const oldName = archive.archiveSegment(state);
+      const oldText = readFileSync(join(dir, oldName), 'utf8');
+      const changed = structuredClone(state);
+      mutate(changed);
+      assert.throws(() => archive.archiveSegment(changed), /不合格|损坏|不一致|内容不同/);
+      assert.deepEqual(archive.readArchivedRequest(state.rootRequestId).state, state);
+      assert.equal(readFileSync(join(dir, oldName), 'utf8'), oldText);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });
