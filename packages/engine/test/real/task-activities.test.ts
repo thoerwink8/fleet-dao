@@ -2291,4 +2291,179 @@ describe('同步主线后回执丢了：认出是引擎自己同步换的头（#
     expect(got).toMatchObject({ headMoved: NEW });
     expect(got.syncedMain).toBeUndefined();
   });
+
+  /**
+   * 合并的读还是旧头，写之前受管同步已经换头：mergePr 只回 head_moved，结果里没有新头。
+   * 下面这几条断言在修之前是红的（装配不回读、不调 branchUpdateOf，直接合把拒绝原文当普通失败交回，
+   * 不强制 CI 的直接合只回 reason/detail，没有 headMoved、没有 syncedMain）。断言保持原样。
+   */
+  const mergeHeadMoved = () =>
+    ({ merged: false, reason: 'head_moved', detail: '合并时 PR 的头变了' }) as const;
+  const headsThen = (second: string) => {
+    let n = 0;
+    return async () => {
+      n += 1;
+      return pullFacts({ headSha: n === 1 ? HEAD : second });
+    };
+  };
+
+  it('直接合读写之间受管同步换了头：回读新头，凭账标 syncedMain，调用顺序固定', async () => {
+    const asked: Asked[] = [];
+    const mergeNowGh = fakeGh({
+      readPull: headsThen(NEW),
+      mergePr: async () => mergeHeadMoved(),
+      branchUpdateOf: ownSync(asked),
+    });
+    const merged = await make({ gh: mergeNowGh.gh }).acts.mergeNow(
+      { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+      ctx(),
+    );
+    expect(merged).toMatchObject({
+      merged: false,
+      reason: 'head_moved',
+      headMoved: NEW,
+      syncedMain: true,
+    });
+    expect(merged.detail).toContain(`新头 ${NEW.slice(0, 7)}`);
+    expect(mergeNowGh.calls).toEqual(['readPull', 'mergePr', 'readPull', 'branchUpdateOf']);
+    expect(asked).toEqual([
+      { repo: { owner: REPO.owner, name: REPO.name }, prNumber: 7, expectedHead: HEAD, head: NEW },
+    ]);
+
+    const armedGh = behind({
+      readPull: headsThen(NEW),
+      mergePr: async () => mergeHeadMoved(),
+      branchUpdateOf: ownSync(asked),
+    });
+    const armed = await arm(armedGh.gh);
+    expect(armed).toMatchObject({
+      armed: false,
+      merged: false,
+      headMoved: NEW,
+      syncedMain: true,
+    });
+    expect(armed.why).toContain('已由引擎同步');
+    expect(armed.why).not.toMatch(/直接合被拒/);
+    expect(armedGh.calls).toEqual(['readPull', 'enableAutoMerge', 'mergePr', 'readPull', 'branchUpdateOf']);
+    expect(armedGh.calls).not.toContain('updateBranch');
+  });
+
+  it('同步落在合并读写之间后，等合并再读到同一新头：两边问的是同一组仓、PR、旧头、新头', async () => {
+    const asked: Asked[] = [];
+    const sync = ownSync(asked);
+    const merged = await make({
+      gh: fakeGh({
+        readPull: headsThen(NEW),
+        mergePr: async () => mergeHeadMoved(),
+        branchUpdateOf: sync,
+      }).gh,
+    }).acts.mergeNow({ schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD }, ctx());
+    expect(merged).toMatchObject({ headMoved: NEW, syncedMain: true });
+    const waited = await wait(
+      fakeGh({
+        readPull: async () => pullFacts({ headSha: NEW, autoMerge: true }),
+        branchUpdateOf: sync,
+      }).gh,
+    );
+    expect(waited).toEqual({ state: 'head_moved', head: NEW, syncedMain: true });
+    expect(asked.map((item) => item.head)).toEqual([NEW, NEW]);
+    expect(asked.every((item) => item.expectedHead === HEAD && item.prNumber === 7)).toBe(true);
+  });
+
+  it('【故意造出的失败】直接合读写之间是别人改的头：交出回读到的新头，不标 syncedMain', async () => {
+    const OTHER = 'e'.repeat(40);
+    const asked: Asked[] = [];
+    const got = await make({
+      gh: fakeGh({
+        readPull: headsThen(OTHER),
+        mergePr: async () => mergeHeadMoved(),
+        branchUpdateOf: ownSync(asked),
+      }).gh,
+    }).acts.mergeNow({ schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD }, ctx());
+    expect(got).toMatchObject({
+      merged: false,
+      reason: 'head_moved',
+      detail: '合并时 PR 的头变了',
+      headMoved: OTHER,
+    });
+    expect(got.syncedMain).toBeUndefined();
+    expect(asked).toHaveLength(1);
+    const armed = await arm(
+      behind({
+        readPull: headsThen(OTHER),
+        mergePr: async () => mergeHeadMoved(),
+        branchUpdateOf: ownSync(asked),
+      }).gh,
+    );
+    expect(armed).toMatchObject({ armed: false, merged: false, headMoved: OTHER });
+    expect(armed.syncedMain).toBeUndefined();
+    expect(armed.why).toBe('合并时 PR 的头变了');
+  });
+
+  it('【故意造出的失败】直接合读写之间账是别的旧头的：不标 syncedMain', async () => {
+    const got = await make({
+      gh: fakeGh({
+        readPull: headsThen(NEW),
+        mergePr: async () => mergeHeadMoved(),
+        branchUpdateOf: async (input: Asked) =>
+          input.expectedHead === 'f'.repeat(40)
+            ? { synced: true }
+            : { synced: false, reason: 'no_record', detail: '账上没有这个旧头的同步' },
+      }).gh,
+    }).acts.mergeNow({ schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD }, ctx());
+    expect(got).toMatchObject({ headMoved: NEW, detail: '合并时 PR 的头变了' });
+    expect(got.syncedMain).toBeUndefined();
+  });
+
+  it('【故意造出的失败】直接合说头变了，回读仍是旧头、不是完整 sha、或读失败：照抛，不交 headMoved', async () => {
+    await expect(
+      make({
+        gh: fakeGh({
+          readPull: async () => pullFacts(),
+          mergePr: async () => mergeHeadMoved(),
+          branchUpdateOf: ownSync([]),
+        }).gh,
+      }).acts.mergeNow({ schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD }, ctx()),
+    ).rejects.toMatchObject({ code: 'HEAD_MOVED_UNCONFIRMED', retryable: true });
+    await expect(
+      make({
+        gh: fakeGh({
+          readPull: headsThen('abc'),
+          mergePr: async () => mergeHeadMoved(),
+          branchUpdateOf: ownSync([]),
+        }).gh,
+      }).acts.mergeNow({ schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD }, ctx()),
+    ).rejects.toMatchObject({ code: 'HEAD_MOVED_UNCONFIRMED', retryable: true });
+    let reads = 0;
+    const broken = fakeGh({
+      readPull: async () => {
+        reads += 1;
+        if (reads > 1) throw new GitHubError('NETWORK', '回读 PR 超时', { retryable: true });
+        return pullFacts();
+      },
+      mergePr: async () => mergeHeadMoved(),
+      branchUpdateOf: ownSync([]),
+    });
+    await expect(
+      make({ gh: broken.gh }).acts.mergeNow(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx(),
+      ),
+    ).rejects.toMatchObject({ code: 'NETWORK', retryable: true });
+    expect(broken.calls).toEqual(['readPull', 'mergePr', 'readPull']);
+    const ledger = fakeGh({
+      readPull: headsThen(NEW),
+      mergePr: async () => mergeHeadMoved(),
+      branchUpdateOf: async () => {
+        throw new GitHubError('NETWORK', '读账超时', { retryable: true });
+      },
+    });
+    await expect(
+      make({ gh: ledger.gh }).acts.mergeNow(
+        { schemaVersion: 1, repo: REPO, prNumber: 7, expectedHead: HEAD },
+        ctx(),
+      ),
+    ).rejects.toMatchObject({ code: 'NETWORK', retryable: true });
+    expect(ledger.calls).toEqual(['readPull', 'mergePr', 'readPull', 'branchUpdateOf']);
+  });
 });

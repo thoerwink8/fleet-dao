@@ -40,6 +40,7 @@
 //   那次尝试在等合并期间才把头换掉）：活动凭 github 包的 branchUpdateOf（账上这个仓、这张 PR、这个旧头的同步被收下，
 //   新头正是那次的合并提交）在 headMoved / head_moved 上标 syncedMain，这里不停下，和挂合并时 syncedMain 同一处理：
 //   对新头重走 CI、冷验收、查路径。认不出（没账、新头上又推了提交、别的旧头的账）照旧当别人改的停下；读不成活动抛错，不当成任一种。
+//   直接合的 mergePr 只回 head_moved、结果里没有新头：活动先回读再问同一笔账，认出来同样标 syncedMain，这里和挂合并时同一处理。
 //   等合并那一支用 patched('merge-wait-synced-main') 守住，老历史的活动结果没有 syncedMain，走不进去。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
