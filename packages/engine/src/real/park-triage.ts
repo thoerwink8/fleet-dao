@@ -190,7 +190,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         after: r.after,
       }));
     },
-    async claim({ row, workflowId, park, requestId }) {
+    async claim({ row, workflowId, park, requestId, whitelist }) {
       await recordEngineAudit(w.db, {
         action: COMMANDER_AUDIT_CLAIM,
         target: COMMANDER_AUDIT_TARGET,
@@ -203,6 +203,7 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           kind: park.kind,
           title: park.title,
           requestId,
+          whitelist,
         },
         reason: `交指挥官会话看：停法 ${park.kind}，停下「${park.title}」`,
         ok: true,

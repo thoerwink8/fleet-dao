@@ -19,6 +19,7 @@ import { judgeSpin } from '../../src/decisions/spin.ts';
 import {
   COMMANDER_AUDIT_ACT,
   COMMANDER_AUDIT_CLAIM,
+  COMMANDER_WHITELIST_VERSION,
   PARK_TRIAGE_JOB,
   type ParkTriageItem,
   runParkTriageJob,
@@ -176,6 +177,7 @@ describe('real/park-triage', () => {
       workflowId: item.workflowId,
       park: PARK,
       requestId: 'park-triage:acme/app:1',
+      whitelist: COMMANDER_WHITELIST_VERSION,
     });
     await d.audit({ item, action: 'continue', reason: '指挥官判继续（引擎核对放行）', ok: true });
     await d.audit({ item, action: 'redo', reason: '重做', ok: false, error: '上一代还在跑' });
@@ -185,7 +187,12 @@ describe('real/park-triage', () => {
       [COMMANDER_AUDIT_ACT, COMMANDER_ACTOR, 'engine', true],
       [COMMANDER_AUDIT_ACT, COMMANDER_ACTOR, 'engine', false],
     ]);
-    expect(rows[0]?.after).toMatchObject({ workflowId: 'task-acme-app-7', parkSeq: 3, kind: 'quota' });
+    expect(rows[0]?.after).toMatchObject({
+      workflowId: 'task-acme-app-7',
+      parkSeq: 3,
+      kind: 'quota',
+      whitelist: COMMANDER_WHITELIST_VERSION,
+    });
     expect(rows[1]?.after).toMatchObject({ action: 'continue', parkSeq: 3 });
     // 认领读得回来（jobs 靠它判同一次停下处理过没有）
     const back = await d.audits(new Date(NOW.getTime() - 3_600_000));
