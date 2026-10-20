@@ -41,6 +41,9 @@
 //   watchdog-down:…（后端看着看门狗，packages/api 的 watchdog-health.ts：看门狗又按期跑完一轮就撤）、
 //   github-app:<机器人>:<仓>（机器人权限自检 jobs/github-app-check.ts：权限够了就撤）、reconcile:workflow:<任务>（开着的单
 //   没有着落）、reconcile:ledger:<仓>#<号>（合了的 PR 记账不全）——后两个由两处核对自己撤（jobs/reconcile-checks.ts）。
+//   late-review:<仓>#<号>:<评审>、late-review-unread:<仓>#<号>（合并后才到的「要求改」没交给工人 / 合并后没读成评审，
+//   packages/db 的 queries/late-review.ts）：RULES 里的「合后晚到的评审」现读 PR 上还没解决的正式「要求改」，
+//   这条评审已被撤、审查者后来通过了就撤（读不到的不撤）。条件还在的是要人跟进的事，不立案也不过期。
 //   cold-verify:checkout:<目标>（冷验收完整检出，checkoutAlertKey：只有精确头完整检出成功才由 placeVerifyCheckout 的
 //   onRecovered 撤。缺对象、获取失败、落地失败不撤；任务还活跃、已经结束、或状态未知，都不能在这里当成恢复，过期也不算恢复。
 //   老键 cold-verify:checkout-dir 不带目标，前缀对不上，仍走三天过期；不把整个 cold-verify: 算成自己会撤）。
@@ -132,6 +135,8 @@ export const SELF_RESOLVING_PREFIXES: readonly string[] = [
   'carpool-cap:',
   'engine-drain',
   'engine-session-io',
+  'late-review:',
+  'late-review-unread:',
   'cursor-pending:',
   'mirasim-pending:',
   // 冷验收完整检出（checkoutAlertKey）。只到 cold-verify:checkout:，不含 checkout-dir，也不含整个 cold-verify:。
@@ -181,6 +186,11 @@ export interface AlertSweepDeps {
    * 真装配一定接上；没接上、抛了、认不出的都不跳过，记没查成。
    */
   prMergedAt?(repo: AlertRepo, number: number): Promise<Date>;
+  /**
+   * 这个 PR 上此刻还没解决的正式「要求改」评审编号（real/task-verify.ts 的 reviewChangesReader，和合并后补读同一个读法）。
+   * 读不到照抛，不当成没有。真装配一定接上；没接上的当没查成，不撤。
+   */
+  lateReviews?(repo: AlertRepo, number: number): Promise<readonly number[]>;
   /** 单测换立案单「怎么算做完」的条目（带「- 」）。生产不接。 */
   doneItems?(key: string): readonly string[];
   now: () => Date;
@@ -338,6 +348,27 @@ export const RULES: readonly Rule[] = [
       const check = await deps.stageAllOpen(stage);
       if (check.allOpen) return { keep: true };
       return { resolve: `${STAGE_NAMES[stage]}有路由不熔断了：${check.detail}` };
+    },
+  },
+  {
+    name: '合后晚到的评审',
+    pattern: /^late-review(?:-unread)?:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)(?::(\d+))?$/,
+    async judge(deps, _alert, m) {
+      if (!deps.lateReviews) throw new Error('合后晚到的评审判不了：没接上读评审的口子');
+      const outstanding = await deps.lateReviews(
+        { owner: m[1] as string, name: m[2] as string },
+        Number(m[3]),
+      );
+      // 评审编号 0（事件没带编号）和「没读成」那一类认不出是哪一条：PR 上一条没解决的都没有才撤。
+      const id = Number(m[4] ?? 0);
+      if (id === 0) {
+        return outstanding.length === 0
+          ? { resolve: 'PR 上现在没有还没解决的正式「要求改」评审了' }
+          : { keep: true };
+      }
+      return outstanding.includes(id)
+        ? { keep: true }
+        : { resolve: `review ${id} 已经不是还没解决的「要求改」了（被撤了，或审查者后来通过了）` };
     },
   },
 ];

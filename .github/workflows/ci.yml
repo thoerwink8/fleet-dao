@@ -481,7 +481,7 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # 浏览器缓存按 Playwright 的版本（锁文件里钉住的那一版）：没命中才下 Chromium（约 150M）；系统库（--with-deps）每台新机器都要装
+      # 浏览器缓存按锁定 Playwright 版本；共用准备器每台机器实装系统库，APT 仅限 Ubuntu 必要源。
       - name: Playwright 版本
         id: pw
         run: |
@@ -500,7 +500,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - name: 装 Chromium 和系统库
-        run: pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
+        run: node packages/conventions/src/bin/ci-browser.ts
       - name: 等 postgres:16 起来
         run: |
           set -euo pipefail

@@ -14,6 +14,10 @@ import { installStageTrace } from '../test/stage-trace';
 
 afterEach(cleanup);
 // 只加观测，超时和断言都不动：测试卡住时日志里要能读到时间花在了哪一步（#3372）。
+// 未结责任（#3372）：首次完整 CI 红灯（run 39358167914 / job 118417833091）只记了「本文件首个用例超过 5000ms」
+//   （当时的 :90 就是首个用例，含整个文件的冷启动：首次加载页面代码、首次渲染），那一次还没装阶段记录，
+//   超时落在首个用例里的哪一个 findBy、是渲染、异步等待还是整进程没排上 CPU，没有证据，至今没查明，
+//   这里也没有声称修好。下次在 CI 再红，先读 stderr 里的「[阶段记录·快超时]」那一行，再回 #3372 接着查。
 installStageTrace();
 
 function envOk(): EnvResponse {
@@ -41,12 +45,24 @@ interface PreflightCall {
   preflight: FrancePreflightResponse | { error: Error };
 }
 
-function apiWith({ release, preflight }: PreflightCall): MockApi {
+/**
+ * 发版一键卡用不到的读取收成「只有本台」：假后端默认带一台远程环境「本机 WSL」，页面会再读它的快照、多画一整列对照，
+ * 和发版卡无关。这只是减少无关渲染的工作量，不是首次 CI 红灯的已证实根因：
+ * 本机 1 核加压复现里这些多出的渲染约占本文件三成耗时，没有 CI 那次运行的阶段数据可对照（#3372 未结）。
+ */
+function baseApi(): MockApi {
   const inner = createMockApi({ live: false });
   return {
     ...inner,
     env: () => Promise.resolve(envOk()),
+    nodes: () => Promise.resolve({ self: { name: '法国', engine: { state: 'on' } }, nodes: [] }),
     jobs: () => Promise.resolve(jobsEmpty()),
+  } as MockApi;
+}
+
+function apiWith({ release, preflight }: PreflightCall): MockApi {
+  return {
+    ...baseApi(),
     franceReleaseState: () => Promise.resolve(release),
     francePreflight:
       'error' in preflight ? () => Promise.reject(preflight.error) : () => Promise.resolve(preflight),
@@ -196,11 +212,8 @@ describe('/france 页发版一键卡', () => {
   test('连点「发版预检」只发一次：同一帧两下、忙着再点，francePreflight 只被调一次', async () => {
     const d = deferred<FrancePreflightResponse>();
     const calls: number[] = [];
-    const inner = createMockApi({ live: false });
     const api = {
-      ...inner,
-      env: () => Promise.resolve(envOk()),
-      jobs: () => Promise.resolve(jobsEmpty()),
+      ...baseApi(),
       franceReleaseState: () => Promise.resolve(idleRelease),
       francePreflight: () => {
         calls.push(1);
@@ -218,5 +231,24 @@ describe('/france 页发版一键卡', () => {
       d.resolve(donePreflight());
     });
     expect(await screen.findByText('能发')).toBeTruthy();
+  });
+
+  // 只锁夹具的形状，防以后改回默认远程环境又多画一整列；它不复现、也不证明首次 CI 超时的原因（#3372 未结）。
+  test('夹具只画本台：不带进假后端默认的远程环境，不读它的快照、不画对照列', async () => {
+    const snapshotReads: string[] = [];
+    const base = baseApi();
+    const api = {
+      ...base,
+      node: (id: string) => {
+        snapshotReads.push(id);
+        return base.node(id);
+      },
+      franceReleaseState: () => Promise.resolve(idleRelease),
+    } as MockApi;
+    renderApp(<France />, { api: api as unknown as FleetApi, route: '/france' });
+    expect(await screen.findByText('没在走')).toBeTruthy();
+    expect(document.querySelector('[data-env-columns]')).toBeNull();
+    expect(screen.queryByText(/本机 WSL/)).toBeNull();
+    expect(snapshotReads).toEqual([]);
   });
 });

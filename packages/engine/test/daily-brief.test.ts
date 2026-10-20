@@ -152,6 +152,7 @@ function makeDeps(over: Partial<DailyBriefDeps> = {}) {
         lastProblem: '动手 3 轮都没过',
       },
     ],
+    commanderSummary: async () => ({ stalled: 3, handled: 2, forHuman: 1 }),
     lineStats: async () => stats,
     pipelineHealth: async (to) => healthFixture(to),
     publish: async (x) => {
@@ -216,6 +217,7 @@ describe('runDailyBriefJob', () => {
     );
     expect(body).toContain('https://github.com/acme/fleet-dao/issues/88 挂了的单（failed：动手 3 轮都没过）');
     expect(body).toContain('没有开着的卡住报警');
+    expect(body).toContain('停下 3 张，指挥官处理 2 张，留给人 1 张');
     // b 60 分钟、c 60 分钟（第一次上线是 09:00Z 那一版，后来退回又被 d 带上）；d 对不上单不进中位
     expect(body).toContain('开单→上线中位：60 分钟（昨天上线、对得上单的 2 个 PR）');
     expect(body).toContain(
