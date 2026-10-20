@@ -11,6 +11,8 @@
 // 机器人 × 仓），found = 处理了几个问题（删掉的树、改成要人拍的树、合并 PR 对上的问题、记账不全的
 // PR、撤掉的过时提醒、再推的提醒、立的单、权限不对的和撤掉的权限提醒）。一部分没跑成、只查了一部分，照实记 failed / partial，
 // 写明哪里没查成；不记成 ok（没跑成 ≠ 没问题）。
+// 每个必经子步骤经现有 deps.log 记同一轮 runId、稳定步骤名、开始/结束/失败和耗时。还在等的那一步只有开始、
+// 没有结束，最后一条就能对上卡在哪；不另起探针、轮询、告警或落库。这只补在途证据，不表示现机超时已经恢复。
 
 import type { AlertRow, LocalOrphan, ScheduleResult } from '@fleet-dao/db';
 import type { WorktreeInventory } from '@fleet-dao/shared';
@@ -60,6 +62,42 @@ export const HOURLY_RECONCILE_OFFSET_MINUTES = 41;
 export const OPEN_ALERT_LIMIT = 500;
 /** why 最长多少字：没查成的一条一句，太多了截断（总数照写）。 */
 export const WHY_MAX = 1500;
+
+/**
+ * 一轮实际往下走的子步骤，顺序就是执行顺序（和最后 combineParts 的数组顺序不是同一件事）。
+ * 名字稳定，只出现在在途日志里，不随说明文案改。
+ */
+export const HOURLY_RECONCILE_STEPS = [
+  'alerts-before-worktrees',
+  'worktrees',
+  'pending-cleanup',
+  'save-inventory',
+  'retire-workflow-alerts',
+  'known-not-installed',
+  'merged-prs',
+  'ledgers',
+  'local-orphans',
+  'historical-facts',
+  'auto-merges',
+  'merged-tasks',
+  'closed-issue-tasks',
+  'idle-closed-rows',
+  'open-alerts',
+  'alert-sweep',
+  'github-apps',
+  'pool-hold-push',
+  'main-red-push',
+] as const;
+
+export type HourlyReconcileStep = (typeof HOURLY_RECONCILE_STEPS)[number];
+
+/** 没把依赖接上就整步跳过（单测外壳可以不给；真装配会给）。跳过只记一笔，不算开始，也不算跑完。 */
+export const HOURLY_RECONCILE_OPTIONAL_STEPS = [
+  'pending-cleanup',
+  'save-inventory',
+  'pool-hold-push',
+  'main-red-push',
+] as const satisfies readonly HourlyReconcileStep[];
 
 export type HourlyReconcileJobDeps = WorktreeSweepDeps &
   AlertSweepDeps &
@@ -175,37 +213,106 @@ function skipRepos<T extends { owner: string; name: string }>(
   return async () => (await repos()).filter((r) => !skip.has(`${r.owner}/${r.name}`));
 }
 
-async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
+type StepPhase = 'start' | 'end' | 'failed' | 'skip';
+
+/** 只认本文件这些步骤回的失败部分。别的返回值（列提醒、跳过的仓）没有 failed，不算这一步失败。 */
+function returnedFailure(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false;
+  const row = value as Record<string, unknown>;
+  return (
+    typeof row.failed === 'string' &&
+    row.failed !== '' &&
+    Array.isArray(row.unchecked) &&
+    typeof row.scanned === 'number'
+  );
+}
+
+function durationMs(deps: HourlyReconcileJobDeps, started: number): number | undefined {
+  const ms = deps.now().getTime() - started;
+  return Number.isSafeInteger(ms) && ms >= 0 ? ms : undefined;
+}
+
+/**
+ * 在途证据只带运行编号、步骤名、阶段和耗时。不写命令行、环境、令牌、凭据路径，也不把原始返回值塞进日志。
+ * 开始在 await 之前记：这一步还不回来时，最后一条就是它，后面的步骤还没有开始。
+ */
+function markStep(
+  deps: HourlyReconcileJobDeps,
+  runId: number,
+  step: HourlyReconcileStep,
+  phase: StepPhase,
+  ms?: number,
+): void {
+  const word =
+    phase === 'start' ? '开始' : phase === 'end' ? '结束' : phase === 'failed' ? '失败' : '缺省跳过';
+  const fields: Record<string, unknown> = { runId, step, phase };
+  if (ms !== undefined) fields.ms = ms;
+  deps.log(phase === 'failed' ? 'error' : 'info', `每小时对账：子步骤 ${step} ${word}`, fields);
+}
+
+async function runStep<T>(
+  deps: HourlyReconcileJobDeps,
+  runId: number,
+  step: HourlyReconcileStep,
+  fn: () => Promise<T>,
+): Promise<T> {
+  markStep(deps, runId, step, 'start');
+  const started = deps.now().getTime();
+  try {
+    const value = await fn();
+    markStep(deps, runId, step, returnedFailure(value) ? 'failed' : 'end', durationMs(deps, started));
+    return value;
+  } catch (err) {
+    markStep(deps, runId, step, 'failed', durationMs(deps, started));
+    throw err;
+  }
+}
+
+function skipStep(deps: HourlyReconcileJobDeps, runId: number, step: HourlyReconcileStep): void {
+  markStep(deps, runId, step, 'skip');
+}
+
+async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<ScheduleResult> {
   // 工作树先跑（它撤的「工作树没收掉」，提醒那部分就不再为它再推）；两部分各列一次没处理的提醒
   let before: AlertRow[] | null = null;
   try {
-    before = (await listOpen(deps)).alerts;
+    before = (await runStep(deps, runId, 'alerts-before-worktrees', () => listOpen(deps))).alerts;
   } catch (err) {
     deps.log('warn', '每小时对账：列没处理的提醒没成，工作树照删，和树有关的提醒留到下一轮撤', {
       error: errMessage(err),
     });
   }
-  const trees = await sweepWorktrees(deps, before);
-  if (deps.pendingCleanup) {
+  const trees = await runStep(deps, runId, 'worktrees', () => sweepWorktrees(deps, before));
+  const pendingCleanup = deps.pendingCleanup;
+  if (pendingCleanup) {
     try {
-      for (const row of await deps.pendingCleanup()) {
-        trees.unchecked.push(`隔离清理待恢复：${JSON.stringify(row)}`);
-      }
+      await runStep(deps, runId, 'pending-cleanup', async () => {
+        for (const row of await pendingCleanup()) {
+          trees.unchecked.push(`隔离清理待恢复：${JSON.stringify(row)}`);
+        }
+      });
     } catch (error) {
       trees.unchecked.push(`隔离清理事务未读全：${errMessage(error)}`);
     }
+  } else {
+    skipStep(deps, runId, 'pending-cleanup');
   }
-  if (deps.saveInventory) {
+  const saveInventory = deps.saveInventory;
+  if (saveInventory) {
     try {
-      await deps.saveInventory(inventoryOf(trees, { trigger: 'hourly', at: deps.now(), root: deps.root }));
+      await runStep(deps, runId, 'save-inventory', () =>
+        saveInventory(inventoryOf(trees, { trigger: 'hourly', at: deps.now(), root: deps.root })),
+      );
     } catch (err) {
       trees.unchecked.push(`工作树清单没存成（资源页上还是上一份）：${errMessage(err)}`);
     }
+  } else {
+    skipStep(deps, runId, 'save-inventory');
   }
   // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会再推它们
-  const retired = await retireWorkflowAlerts(deps);
+  const retired = await runStep(deps, runId, 'retire-workflow-alerts', () => retireWorkflowAlerts(deps));
   // 已知没装机器人的仓（有开着的 decision 级 github-app:<仓> 提醒）：读不了是意料之中，两处读 PR 的核对跳过，why 里交代一句
-  const skip = await knownNotInstalled(deps);
+  const skip = await runStep(deps, runId, 'known-not-installed', () => knownNotInstalled(deps));
   const skipping = { ...deps, repos: skipRepos(deps.repos, skip.slugs) };
   const skipPart: SweepPart = {
     scanned: 0,
@@ -213,29 +320,32 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
     unchecked: [],
     ...(skip.slugs.size > 0 ? { notes: [skippedReposNote([...skip.slugs])] } : {}),
   };
-  const merged = await checkMergedPrs(skipping);
-  const ledgers = await checkLedgers(deps);
-  const localOrphans = await localOrphanPart(deps);
-  const historical = await retireHistoricalFactAlerts(deps);
-  const autoMerges = await checkAutoMerges(skipping);
+  const merged = await runStep(deps, runId, 'merged-prs', () => checkMergedPrs(skipping));
+  const ledgers = await runStep(deps, runId, 'ledgers', () => checkLedgers(deps));
+  const localOrphans = await runStep(deps, runId, 'local-orphans', () => localOrphanPart(deps));
+  const historical = await runStep(deps, runId, 'historical-facts', () => retireHistoricalFactAlerts(deps));
+  const autoMerges = await runStep(deps, runId, 'auto-merges', () => checkAutoMerges(skipping));
   // 单已关且停着等人、或已在检查点软暂停且没有开着会话的，撤掉（#1816 / #3002）：当场发放弃并撤挂起提醒；放在提醒清扫之前
-  const mergedTasks = await settleMergedTasks(deps);
-  const closedTasks = await abandonClosedIssueTasks(deps);
+  const mergedTasks = await runStep(deps, runId, 'merged-tasks', () => settleMergedTasks(deps));
+  const closedTasks = await runStep(deps, runId, 'closed-issue-tasks', () => abandonClosedIssueTasks(deps));
   // 单已关、没有工作流的遗留行也收掉（#1622）：和上面的任务工作流对账合并统计
-  const idleClosedRows = await settleIdleClosedIssueRows(deps);
+  const idleClosedRows = await runStep(deps, runId, 'idle-closed-rows', () =>
+    settleIdleClosedIssueRows(deps),
+  );
   let alerts: SweepPart;
   try {
-    const now = await listOpen(deps);
-    alerts = await sweepAlerts(deps, now.alerts, now.truncated);
+    const now = await runStep(deps, runId, 'open-alerts', () => listOpen(deps));
+    alerts = await runStep(deps, runId, 'alert-sweep', () => sweepAlerts(deps, now.alerts, now.truncated));
   } catch (err) {
     alerts = { failed: `列没处理的提醒没成：${errMessage(err)}`, scanned: 0, found: 0, unchecked: [] };
   }
   // 权限自检放最后：它新报、撤的提醒这一轮提醒那部分不再碰
-  const apps = await checkGitHubApps(deps);
+  const apps = await runStep(deps, runId, 'github-apps', () => checkGitHubApps(deps));
   let poolHoldPart: SweepPart = { scanned: 0, found: 0, unchecked: [] };
-  if (deps.poolHoldPush) {
+  const poolHoldPush = deps.poolHoldPush;
+  if (poolHoldPush) {
     try {
-      poolHoldPart = await deps.poolHoldPush();
+      poolHoldPart = await runStep(deps, runId, 'pool-hold-push', () => poolHoldPush());
     } catch (err) {
       poolHoldPart = {
         failed: `整池暂停到期的飞书推送没跑成：${errMessage(err)}`,
@@ -244,11 +354,14 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
         unchecked: [],
       };
     }
+  } else {
+    skipStep(deps, runId, 'pool-hold-push');
   }
   let mainRedPart: SweepPart = { scanned: 0, found: 0, unchecked: [] };
-  if (deps.mainRedPush) {
+  const mainRedPush = deps.mainRedPush;
+  if (mainRedPush) {
     try {
-      mainRedPart = await deps.mainRedPush();
+      mainRedPart = await runStep(deps, runId, 'main-red-push', () => mainRedPush());
     } catch (err) {
       mainRedPart = {
         failed: `主线红的飞书推送没跑成：${errMessage(err)}`,
@@ -257,6 +370,8 @@ async function round(deps: HourlyReconcileJobDeps): Promise<ScheduleResult> {
         unchecked: [],
       };
     }
+  } else {
+    skipStep(deps, runId, 'main-red-push');
   }
   return combineParts([
     mergedTasks,
@@ -285,7 +400,7 @@ export async function runHourlyReconcileJob(deps: HourlyReconcileJobDeps): Promi
   const runId = await deps.runs.start(HOURLY_RECONCILE_JOB.id, deps.now());
   let result: ScheduleResult;
   try {
-    result = await round(deps);
+    result = await round(deps, runId);
   } catch (err) {
     result = { outcome: 'failed', why: `每小时对账没跑成：${errMessage(err)}` };
   }
