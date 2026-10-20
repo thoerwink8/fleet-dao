@@ -10,7 +10,8 @@
 //   再走这一入口。真红交 checksRed。必过名单里有一条没出现，哪怕旁边还有在跑的，也不交 checksPending。读不成、没出现、对不上，
 //   why 里写明没查成并点名没出现的检查，不靠「ci_not_green / 没跑完」这句原文当还在跑。
 //   只是检查没跑完（合并闸在同一个头上重跑，ciPendingOnly）先在这一步里隔一会儿再合，等满 MERGE_PENDING_RETRIES 次
-//   还没跑完再交回有界等待。别的拒绝原样说明原因交工作流停下报人。
+//   还没跑完再交回有界等待。别的拒绝原样说明原因交工作流停下报人。例外是 head_moved：mergePr 的结果里没有新头，
+//   先回读再凭账认是不是自己同步的（classifyMergeHeadMoved），不把拒绝原文当成别人改的，也不从原文里猜 sha。
 // - 挂合并的写请求（enableAutoMerge、因 clean 才走的直接合、以及落后主线后的同步主线）在真正发出之前同时看取消信号和
 //   这次活动的截止（PortContext 上的 attemptDeadlineMs / scheduleDeadlineMs）。信号已经取消（前面的读 PR、读评审、读检查
 //   被挂住后再放行）就不再向 GitHub 发起新的写，哪怕数值截止还在将来。比较判出落后是在截止前开始的慢读，同步写要带上同一
@@ -194,7 +195,9 @@ export interface TaskActivitiesDeps extends ReviewAuditDeps {
   gh: Pick<
     EngineGitHub,
     'readIssue' | 'readSpecDoc' | 'readRepoFile' | 'pullFiles' | 'mergePr' | 'updateBranch' | 'claims'
-  >;
+  > &
+    /** 头换了时认「是不是引擎自己同步主线换的」。没装上（老测试）就当不是：照旧回 headMoved、停下等人。真装配必给。 */
+    Partial<Pick<EngineGitHub, 'branchUpdateOf'>>;
   trees: Pick<WorkTrees, 'ownerOf'>;
   exec: UserExec;
   now?: () => Date;
@@ -637,6 +640,16 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       };
     }
     if (synced.reason === 'head_moved' && synced.head !== undefined) {
+      // 同一个旧头上一次（重试前的尝试）已经同步过、这一下读到的正是那次的新头：照自己同步的交回去
+      if (await ownMainSync(repo, prNumber, expectedHead, synced.head, ctx)) {
+        return {
+          armed: false,
+          merged: false,
+          why: `落后主线，PR #${prNumber} 已由引擎上一次同步到最新主线（新头 ${short(synced.head)}）`,
+          headMoved: synced.head,
+          syncedMain: true,
+        };
+      }
       return {
         armed: false,
         merged: false,
@@ -648,6 +661,59 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       armed: false,
       merged: false,
       why: `落后主线，同步主线没成（${synced.reason}）：${synced.detail}`,
+    };
+  };
+
+  /**
+   * 头已经不是 expectedHead：是不是引擎自己同步主线换的（#3443：同步被 GitHub 收下后回执丢了、活动重试，
+   * 或另一次尝试刚同步完，挂合并、等合并读到新头就当成别人改了，停下等人）。只认 github 包的 branchUpdateOf：
+   * 账上有这个仓、这张 PR、这个旧头被收下的同步，新头正是那次的合并提交。不看作者、提交说明。
+   * 没装上当不是；读不成照抛（活动重试），不当成别人改的、也不当成自己同步的。认出来也只是不停下：新头照样重走 CI 和冷验收。
+   * 直接合的 mergePr 只回 head_moved、不带新头时，先经 classifyMergeHeadMoved 回读，再问这一笔。
+   */
+  const ownMainSync = async (
+    repo: RepoRef,
+    prNumber: number,
+    expectedHead: string,
+    head: string,
+    ctx: PortContext,
+  ): Promise<boolean> => {
+    const branchUpdateOf = gh.branchUpdateOf;
+    if (branchUpdateOf === undefined || !FULL_SHA.test(head) || !FULL_SHA.test(expectedHead)) return false;
+    const got = await mapped(() => branchUpdateOf({ repo, prNumber, expectedHead, head }, ctx));
+    if (!got.synced) {
+      log('PR 的头换了，不是引擎自己同步主线换的', { prNumber, expectedHead, head, reason: got.reason });
+    }
+    return got.synced;
+  };
+
+  /**
+   * 直接合的 mergePr 说头变了，结果里没有新头（合并读到的还是旧头，写之前受管同步已经换头）。
+   * 先回读拿完整新头，再凭 branchUpdateOf 问同一笔账（这个仓、这张 PR、预期旧头、实际新头）。
+   * 回读仍是旧头、不是完整 sha、读失败都抛错重试，不从拒绝原文里猜 sha。这一下是读，不另开挂合并或同步写。
+   * 认出来只标自己同步：新头仍重走 CI 和冷验收。认不出交出回读到的新头，不标，沿用合并拒绝的原文。
+   */
+  const classifyMergeHeadMoved = async (
+    repo: RepoRef,
+    prNumber: number,
+    expectedHead: string,
+    detail: string,
+    ctx: PortContext,
+  ): Promise<{ head: string; own: boolean; detail: string }> => {
+    const again = await mapped(() => gh.claims.readPull(repo, prNumber));
+    const head = again.headSha;
+    if (head === expectedHead || !FULL_SHA.test(head)) {
+      throw new PortError(
+        'HEAD_MOVED_UNCONFIRMED',
+        `合并说 PR #${prNumber} 的头变了，回读仍是 ${short(head)}，未核实是谁换的`,
+        { retryable: true },
+      );
+    }
+    const own = await ownMainSync(repo, prNumber, expectedHead, head, ctx);
+    return {
+      head,
+      own,
+      detail: own ? `落后主线，PR #${prNumber} 已由引擎同步到最新主线（新头 ${short(head)}）` : detail,
     };
   };
 
@@ -798,6 +864,15 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         return { armed: false, merged: false, why: `PR #${prNumber} 已经关了`, refused: 'closed' };
       }
       if (pull.headSha !== expectedHead) {
+        if (await ownMainSync(repo, prNumber, expectedHead, pull.headSha, ctx)) {
+          return {
+            armed: false,
+            merged: false,
+            why: `落后主线，PR #${prNumber} 已由引擎同步到最新主线（新头 ${short(pull.headSha)}，上一次没收到回执）`,
+            headMoved: pull.headSha,
+            syncedMain: true,
+          };
+        }
         return {
           armed: false,
           merged: false,
@@ -859,6 +934,17 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, result.detail, ctx);
         }
         if (result.reason === 'ci_not_green') return classifyCiNotGreen(result.detail, recheckCi);
+        // 读写之间头换了：mergePr 不带新头。回读后再问同步账，认出来才标 syncedMain。不是写，不看挂合并截止。
+        if (result.reason === 'head_moved') {
+          const moved = await classifyMergeHeadMoved(repo, prNumber, expectedHead, result.detail, ctx);
+          return {
+            armed: false,
+            merged: false,
+            why: moved.detail,
+            headMoved: moved.head,
+            ...(moved.own ? { syncedMain: true as const } : {}),
+          };
+        }
         return { armed: false, merged: false, why: directRefusal(result.reason, result.detail) };
       };
 
@@ -995,11 +1081,15 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         return { merged: false, reason: 'closed', detail: `PR #${prNumber} 已经关了` };
       }
       if (pull.headSha !== expectedHead) {
+        const own = await ownMainSync(repo, prNumber, expectedHead, pull.headSha, ctx);
         return {
           merged: false,
           reason: 'head_moved',
-          detail: `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎推上去的 ${short(expectedHead)}`,
+          detail: own
+            ? `PR #${prNumber} 已由引擎同步到最新主线（新头 ${short(pull.headSha)}，上一次没收到回执）`
+            : `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎推上去的 ${short(expectedHead)}`,
           headMoved: pull.headSha,
+          ...(own ? { syncedMain: true } : {}),
         };
       }
       const held = await reviewHold(repo, pull);
@@ -1059,8 +1149,16 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       }
       if (merged.reason === 'conflict') return { merged: false, reason: 'conflict', detail: merged.detail };
       if (merged.reason === 'not_open') return { merged: false, reason: 'closed', detail: merged.detail };
-      if (merged.reason === 'head_moved')
-        return { merged: false, reason: 'head_moved', detail: merged.detail };
+      if (merged.reason === 'head_moved') {
+        const moved = await classifyMergeHeadMoved(repo, prNumber, expectedHead, merged.detail, ctx);
+        return {
+          merged: false,
+          reason: 'head_moved',
+          detail: moved.detail,
+          headMoved: moved.head,
+          ...(moved.own ? { syncedMain: true } : {}),
+        };
+      }
       return { merged: false, reason: 'other', detail: `${merged.reason}：${merged.detail}` };
     },
 
@@ -1081,7 +1179,13 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           };
         }
         if (pull.state !== 'open') return { state: 'closed' };
-        if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
+        if (pull.headSha !== expectedHead) {
+          // 挂上之后头才换：另一次挂合并的尝试（服务端判了超时、进程还在跑）把它同步到了最新主线
+          if (await ownMainSync(repo, prNumber, expectedHead, pull.headSha, ctx)) {
+            return { state: 'head_moved', head: pull.headSha, syncedMain: true };
+          }
+          return { state: 'head_moved', head: pull.headSha };
+        }
         if (
           input.contractGuard &&
           !(await guardRequirementContract(

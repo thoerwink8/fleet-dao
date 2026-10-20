@@ -1116,6 +1116,96 @@ describe('任务工作流 · 验收的岔路（#632 S2-5b）', { timeout: 60_000
     expect(calls.verify[1]?.headSha).toBe(moved);
   });
 
+  it('等合并时头是引擎自己同步主线换的（回执丢了、活动认出来标 syncedMain，#3443）：不停下等人，对新头重走 CI、冷验收、查路径、再挂', async () => {
+    const world = createFakeWorld();
+    const synced = fakeHead(889);
+    const { tasks, calls } = scripted({
+      merged: (n) =>
+        n === 1
+          ? { state: 'head_moved', head: synced, syncedMain: true }
+          : { state: 'merged', mergeCommit: 'f00d1234567890' },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    // 一次都没停下等人、没报警
+    expect(run).toMatchObject({ outcome: 'merged', head: synced });
+    expect(world.alerts).toEqual([]);
+    expect(calls.order.slice(-8)).toEqual([
+      'verify',
+      'guarded',
+      'arm',
+      'merged',
+      'verify',
+      'guarded',
+      'arm',
+      'merged',
+    ]);
+    // 新头不继承旧头的 CI、冷验收：两样都在新头上重跑
+    expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), synced]);
+    expect(world.callsOf('waitCi').map((c) => (c.input as { head: string }).head)).toEqual([
+      fakeHead(101),
+      synced,
+    ]);
+    // 计进主线同步次数，下一次挂合并按新头、带上已同步次数
+    expect(calls.armInputs.map((i) => [i.expectedHead, i.syncedBehind])).toEqual([
+      [fakeHead(101), undefined],
+      [synced, 1],
+    ]);
+  });
+
+  it('#3441 现场顺序（#3443）：挂合并第一次同步被收下、没等到新头抛可重试；重试在旧头上挂上；等合并读到同步出来的新头——不停下，新头重走 CI、冷验收', async () => {
+    const world = createFakeWorld();
+    const synced = fakeHead(890);
+    const { tasks, calls } = scripted({
+      arm: (n) => {
+        if (n === 1) {
+          throw new PortError('UPDATE_BRANCH_PENDING', '同步主线 GitHub 收下了，但头一直没变：稍后重试', {
+            retryable: true,
+          });
+        }
+        return { armed: true, merged: false };
+      },
+      merged: (n) =>
+        n === 1
+          ? { state: 'head_moved', head: synced, syncedMain: true }
+          : { state: 'merged', mergeCommit: 'f00d1234567890' },
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', head: synced });
+    expect(world.alerts).toEqual([]);
+    // 第一次挂合并在同一个活动里重试（Temporal 重试，工作流只看到挂上了），之后才等合并
+    expect(calls.order.slice(-9)).toEqual([
+      'verify',
+      'guarded',
+      'arm',
+      'arm',
+      'merged',
+      'verify',
+      'guarded',
+      'arm',
+      'merged',
+    ]);
+    expect(calls.verify.map((v) => v.headSha)).toEqual([fakeHead(101), synced]);
+    expect(world.callsOf('waitCi').map((c) => (c.input as { head: string }).head)).toEqual([
+      fakeHead(101),
+      synced,
+    ]);
+    expect(calls.armInputs.map((i) => [i.expectedHead, i.syncedBehind])).toEqual([
+      [fakeHead(101), undefined],
+      [fakeHead(101), undefined],
+      [synced, 1],
+    ]);
+  });
+
   it('挂自动合并时发现头已经不是验过的那个：同样回去对新的头重走，不在「自动合并没挂上」里原地打转', async () => {
     const world = createFakeWorld();
     const moved = fakeHead(777);
