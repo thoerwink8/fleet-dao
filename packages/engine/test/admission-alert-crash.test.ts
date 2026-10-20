@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 import type { AdmissionAlertObservation } from '@fleet-dao/db';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFailed } from 'vitest';
 import { createAdmissionAlertSink } from '../src/real/admission-alert-process.ts';
 import { ALERT_SPOOL_LIMITS, recordAdmissionAlert } from '../src/real/admission-alert-spool.ts';
 
@@ -209,41 +209,134 @@ describe('SQLite真实进程崩溃与恢复界', () => {
   }, 15000);
   it('256个近DTO上界记录的COMMIT边界：主库和journal峰值在固定字节界内', () => {
     const original = DatabaseSync.prototype.exec;
+    const originalPrepare = DatabaseSync.prototype.prepare;
     let mainPeak = 0,
       journalPeak = 0,
       blocksPeak = 0,
-      observed = 0;
+      observed = 0,
+      fullPayloadScans = 0,
+      commitMs = 0,
+      recordMs = 0,
+      sampleMs = 0,
+      index = -1;
+    let stage = 'unknown';
     const sample = () => {
-      if (!existsSync(path)) return;
-      for (const name of readdirSync(path))
-        expect(['pending.sqlite', 'pending.sqlite-journal']).toContain(name);
-      const db = join(path, 'pending.sqlite'),
-        journal = `${db}-journal`;
-      const main = existsSync(db) ? statSync(db) : undefined;
-      const rollback = existsSync(journal) ? statSync(journal) : undefined;
-      mainPeak = Math.max(mainPeak, main?.size ?? 0);
-      journalPeak = Math.max(journalPeak, rollback?.size ?? 0);
-      blocksPeak = Math.max(blocksPeak, ((main?.blocks ?? 0) + (rollback?.blocks ?? 0)) * 512);
-      observed++;
+      const started = performance.now();
+      try {
+        if (!existsSync(path)) return;
+        for (const name of readdirSync(path))
+          expect(['pending.sqlite', 'pending.sqlite-journal']).toContain(name);
+        const db = join(path, 'pending.sqlite'),
+          journal = `${db}-journal`;
+        const main = existsSync(db) ? statSync(db) : undefined;
+        const rollback = existsSync(journal) ? statSync(journal) : undefined;
+        mainPeak = Math.max(mainPeak, main?.size ?? 0);
+        journalPeak = Math.max(journalPeak, rollback?.size ?? 0);
+        blocksPeak = Math.max(blocksPeak, ((main?.blocks ?? 0) + (rollback?.blocks ?? 0)) * 512);
+        observed++;
+      } finally {
+        sampleMs += performance.now() - started;
+      }
     };
+    const reading = (value: number, sampled: boolean): number | 'unknown' => (sampled ? value : 'unknown');
+    onTestFailed(() => {
+      // 只在失败时留下合成样本、阶段和文件读数。成功不打印。采不到就是 unknown，不用 0 冒充。
+      // 这里是用例失败回调，不是 afterEach；删目录/杀子进程的错误不记成这次 COMMIT 的根因。
+      let currentMain: number | 'unknown' = 'unknown';
+      let currentJournal: number | 'unknown' = 'unknown';
+      let rss: number | 'unknown' = 'unknown';
+      try {
+        const db = join(path, 'pending.sqlite');
+        const journal = `${db}-journal`;
+        currentMain = existsSync(db) ? statSync(db).size : 'unknown';
+        currentJournal = existsSync(journal) ? statSync(journal).size : existsSync(db) ? 0 : 'unknown';
+      } catch {
+        currentMain = 'unknown';
+        currentJournal = 'unknown';
+      }
+      try {
+        rss = process.memoryUsage().rss;
+      } catch {
+        rss = 'unknown';
+      }
+      const sampled = observed > 0;
+      const validateMs = Math.max(0, recordMs - commitMs - sampleMs);
+      const phases = [
+        ['commit', commitMs],
+        ['sample', sampleMs],
+        ['between-records', validateMs],
+      ] as const;
+      const top = phases.reduce((best, item) => (item[1] > best[1] ? item : best));
+      const dominant = index < 0 || top[1] <= 0 ? 'unknown' : top[0];
+      try {
+        console.log(
+          'SPOOL_COMMIT_STALL=' +
+            JSON.stringify({
+              lastStage: stage,
+              dominantStage: dominant,
+              index: index >= 0 ? index : 'unknown',
+              observed: reading(observed, sampled),
+              mainPeak: reading(mainPeak, sampled),
+              journalPeak: reading(journalPeak, sampled),
+              blocksPeak: reading(blocksPeak, sampled),
+              commitMs: sampled ? Math.round(commitMs) : 'unknown',
+              recordMs: index >= 0 ? Math.round(recordMs) : 'unknown',
+              sampleMs: sampled ? Math.round(sampleMs) : 'unknown',
+              fullPayloadScans,
+              currentMainBytes: currentMain,
+              currentJournalBytes: currentJournal,
+              rssBytes: rss,
+              synthetic: { rows: 256, namespaceChars: 300, workflowIdChars: 300 },
+              teardownIsRootCause: false,
+            }),
+        );
+      } catch {
+        /* 诊断写不出时不改原失败 */
+      }
+    });
     DatabaseSync.prototype.exec = function (sql: string) {
-      if (sql === 'COMMIT') sample();
+      if (sql === 'COMMIT') {
+        stage = 'before-commit';
+        sample();
+        stage = 'commit';
+      }
+      const started = sql === 'COMMIT' ? performance.now() : 0;
       const result = original.call(this, sql);
-      if (sql === 'COMMIT') sample();
+      if (sql === 'COMMIT') {
+        commitMs += performance.now() - started;
+        stage = 'after-commit';
+        sample();
+      }
       return result;
+    };
+    DatabaseSync.prototype.prepare = function (sql: string) {
+      if (sql === 'SELECT key,payload,record_hash FROM pending') fullPayloadScans++;
+      return originalPrepare.call(this, sql);
     };
     try {
       for (let n = 0; n < 256; n++) {
+        index = n;
+        stage = 'between-records';
         const o = observation();
         o.identity.namespace = '\u0001'.repeat(300);
         o.identity.workflowId = '\u0002'.repeat(300);
-        expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+        const started = performance.now();
+        try {
+          expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+        } finally {
+          recordMs += performance.now() - started;
+        }
       }
+      stage = 'assert';
     } finally {
       DatabaseSync.prototype.exec = original;
+      DatabaseSync.prototype.prepare = originalPrepare;
     }
     expect(count()).toBe(256);
     expect(observed).toBeGreaterThanOrEqual(512);
+    // 不记住代次时每次提交前都会整表再读：256 次是 2*(0+…+255)=65280 次。采到的次数必须仍是个位数。
+    expect(fullPayloadScans).toBeGreaterThan(0);
+    expect(fullPayloadScans).toBeLessThanOrEqual(4);
     expect(mainPeak).toBeGreaterThan(1024 * 1024);
     expect(journalPeak).toBeGreaterThan(0);
     expect(mainPeak).toBeLessThanOrEqual(ALERT_SPOOL_LIMITS.databaseBytes);

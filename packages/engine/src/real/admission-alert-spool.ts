@@ -63,6 +63,73 @@ function errorCode(error: unknown): AlertUnknownCode {
 }
 const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.uid === b.uid;
 
+// 本进程已经整表核过的提交代次。连续写入若每次重解全部旧行，时间花在解码，不是 COMMIT。
+// 文件身份或 change counter 对不上就整表重解。close 失败不清这份记忆。
+type DbGeneration = {
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  change: number;
+  schema: number;
+  pages: number;
+};
+type ValidatedDb = DbGeneration & { rows: number; payloadBytes: number };
+let validatedDb: ValidatedDb | undefined;
+
+function sqlNumber(value: unknown): number {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'bigint') return Number(value);
+  return Number.NaN;
+}
+
+function sameGeneration(a: DbGeneration, b: DbGeneration): boolean {
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.size === b.size &&
+    a.mtimeMs === b.mtimeMs &&
+    a.change === b.change &&
+    a.schema === b.schema &&
+    a.pages === b.pages
+  );
+}
+
+function readDbGeneration(dbPath: string): DbGeneration | undefined {
+  let fd: number;
+  try {
+    fd = openSync(dbPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch {
+    return undefined;
+  }
+  try {
+    const st = fstatSync(fd);
+    const data = Buffer.alloc(100);
+    let offset = 0;
+    while (offset < data.length) {
+      const n = readSync(fd, data, offset, data.length - offset, offset);
+      if (n === 0) return undefined;
+      offset += n;
+    }
+    if (!data.subarray(0, 16).equals(Buffer.from('SQLite format 3\0'))) return undefined;
+    const pageSize = data.readUInt16BE(16);
+    if (pageSize !== 4096) return undefined;
+    return {
+      dev: st.dev,
+      ino: st.ino,
+      size: st.size,
+      mtimeMs: st.mtimeMs,
+      change: data.readUInt32BE(24),
+      schema: data.readUInt32BE(40),
+      pages: data.readUInt32BE(28),
+    };
+  } catch {
+    return undefined;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 class PrivatePath {
   readonly path: string;
   private anchors: { path: string; fd: number; initial: Stats }[] = [];
@@ -277,7 +344,7 @@ class Spool {
       throw e;
     }
   }
-  private validate(): void {
+  private validate(): ValidatedDb | undefined {
     const d = this.db as DatabaseSync;
     this.path.check();
     if (
@@ -297,6 +364,16 @@ class Spool {
     )
       fail('corrupt');
     if (d.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') fail('corrupt');
+    const generation = readDbGeneration(join(this.path.path, NAME));
+    if (generation && validatedDb && sameGeneration(validatedDb, generation)) {
+      const total = d
+        .prepare('SELECT count(*) AS n,coalesce(sum(length(CAST(payload AS BLOB))),0) AS bytes FROM pending')
+        .get();
+      const rows = sqlNumber(total?.n);
+      const payloadBytes = sqlNumber(total?.bytes);
+      if (rows !== validatedDb.rows || payloadBytes !== validatedDb.payloadBytes) fail('corrupt');
+      return validatedDb;
+    }
     const rows = d.prepare('SELECT key,payload,record_hash FROM pending').all();
     if (rows.length > ALERT_SPOOL_LIMITS.rows) fail('capacity');
     let bytes = 0;
@@ -305,6 +382,26 @@ class Spool {
       bytes += Buffer.byteLength(r.payload as string);
     }
     if (bytes > ALERT_SPOOL_LIMITS.payloadBytes) fail('capacity');
+    if (!generation) return undefined;
+    validatedDb = { ...generation, rows: rows.length, payloadBytes: bytes };
+    return validatedDb;
+  }
+  // 只在本次 INSERT 已提交且头计数正好 +1 时推进代次。对不上就留空，下次整表重解；不把 close 失败写成这一代无效。
+  private rememberInsert(seen: ValidatedDb | undefined, payloadBytes: number): void {
+    if (!seen) return;
+    const generation = readDbGeneration(join(this.path.path, NAME));
+    if (
+      !generation ||
+      generation.dev !== seen.dev ||
+      generation.ino !== seen.ino ||
+      generation.schema !== seen.schema
+    )
+      return;
+    if (generation.change !== (seen.change + 1) >>> 0) return;
+    const rows = seen.rows + 1;
+    const bytes = seen.payloadBytes + payloadBytes;
+    if (rows > ALERT_SPOOL_LIMITS.rows || bytes > ALERT_SPOOL_LIMITS.payloadBytes) return;
+    validatedDb = { ...generation, rows, payloadBytes: bytes };
   }
   private decode(row: Record<string, unknown>): AdmissionAlertObservation {
     if (typeof row.payload !== 'string' || Buffer.byteLength(row.payload) > 4096) fail('corrupt');
@@ -328,7 +425,7 @@ class Spool {
     const d = this.db as DatabaseSync;
     d.exec('BEGIN IMMEDIATE');
     try {
-      this.validate();
+      const seen = this.validate();
       const row = d.prepare('SELECT key,payload,record_hash FROM pending WHERE key=?').get(key);
       if (row) {
         if (admissionAlertIdentityJson(this.decode(row).identity) !== admissionAlertIdentityJson(o.identity))
@@ -351,6 +448,7 @@ class Spool {
       d.prepare('INSERT INTO pending(key,payload,record_hash) VALUES(?,?,?)').run(key, payload, recordHash);
       d.exec('COMMIT');
       this.path.check();
+      this.rememberInsert(seen, Buffer.byteLength(payload));
       return { kind: 'spooled', key, recordHash };
     } catch (e) {
       try {

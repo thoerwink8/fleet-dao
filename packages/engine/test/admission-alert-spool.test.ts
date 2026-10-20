@@ -90,6 +90,41 @@ describe('专用SQLite持久pending', () => {
     d.close();
     // 257 次同步落盘（每次 fsync），慢盘上默认 5 秒不够。
   }, 30000);
+  it('同一代次连续近上限写入不再整表重解；代次被改写后仍拒绝且不改旧库', () => {
+    const original = DatabaseSync.prototype.prepare;
+    let fullPayloadScans = 0;
+    DatabaseSync.prototype.prepare = function (sql: string) {
+      if (sql === 'SELECT key,payload,record_hash FROM pending') fullPayloadScans++;
+      return original.call(this, sql);
+    };
+    const first = observation();
+    first.identity.namespace = `${'测'.repeat(40)}${'\u0001'.repeat(200)}`;
+    first.identity.workflowId = '\u0002'.repeat(300);
+    try {
+      expect(recordAdmissionAlert(path, first).kind).toBe('spooled');
+      for (let n = 1; n < 32; n++) {
+        const o = observation();
+        o.identity.namespace = '\u0001'.repeat(300);
+        o.identity.workflowId = '\u0002'.repeat(300);
+        expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+      }
+      // 不记住代次时，构造和事务内各扫一次已有行：32 次写入是 2*(0+…+31)=992 次整表读取。
+      expect(fullPayloadScans).toBeGreaterThan(0);
+      expect(fullPayloadScans).toBeLessThanOrEqual(4);
+    } finally {
+      DatabaseSync.prototype.prepare = original;
+    }
+    const dbPath = join(path, 'pending.sqlite');
+    const d = database();
+    d.prepare('UPDATE pending SET record_hash=? WHERE key=?').run(
+      'c'.repeat(64),
+      admissionAlertKey(first.identity),
+    );
+    d.close();
+    const before = readFileSync(dbPath);
+    expect(recordAdmissionAlert(path, observation())).toEqual({ kind: 'unknown', code: 'corrupt' });
+    expect(readFileSync(dbPath).equals(before)).toBe(true);
+  });
   it('实际写锁第二连接fail-fast busy，原事务回滚后重开成功', () => {
     const o = observation();
     recordAdmissionAlert(path, o);
