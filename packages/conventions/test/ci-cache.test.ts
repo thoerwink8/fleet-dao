@@ -18,6 +18,7 @@ import {
   EXTERNAL_INPUT_FILES,
   fsHashFs,
   type HashFs,
+  INSTALLED_MANIFEST_PACKAGES,
   isWholeRepoInput,
   keyCovers,
   keyFromParts,
@@ -324,6 +325,68 @@ describe('键：盖住测试的全部输入，不相干的不变', { timeout: 30
       const changed = keyOf({ files: { [p]: 'changed again' } }).key !== base;
       expect(changed, p).toBe(keyCovers(roots, p));
     }
+  });
+
+  it('engine 这一台把本包 node_modules 的直接依赖清单算进键；别的台不算，依赖包里的源码不算', () => {
+    expect(INSTALLED_MANIFEST_PACKAGES).toEqual(['engine']);
+    const engine = testsOf('engine');
+    const absent = keyOf({ box: engine });
+    expect(absent.parts['installed:engine']).toBe('absent');
+    expect(keyOf({}).parts['installed:engine']).toBeUndefined();
+
+    const manifest = 'packages/engine/node_modules/@temporalio/workflow/package.json';
+    const zod = 'packages/engine/node_modules/zod/package.json';
+    const js = 'packages/engine/node_modules/@temporalio/workflow/lib/workflow.js';
+    const v1 = '{"name":"@temporalio/workflow","version":"1.24.0"}';
+    const zodManifest = '{"name":"zod","version":"4.6.5"}';
+    const withV1 = keyOf({ box: engine, files: { [manifest]: v1, [zod]: zodManifest } });
+    expect(withV1.key).not.toBe(absent.key);
+    expect(withV1.parts['installed:engine']).not.toBe('absent');
+    const withV2 = keyOf({
+      box: engine,
+      files: { [manifest]: '{"name":"@temporalio/workflow","version":"1.24.1"}', [zod]: zodManifest },
+    });
+    expect(withV2.key).not.toBe(withV1.key);
+    // 只改 zod 的版本，键也变
+    const zodNext = keyOf({
+      box: engine,
+      files: { [manifest]: v1, [zod]: '{"name":"zod","version":"4.6.6"}' },
+    });
+    expect(zodNext.key).not.toBe(withV1.key);
+    // 同一份清单不进 api 那台
+    expect(keyOf({ files: { [manifest]: v1, [zod]: zodManifest } }).key).toBe(base);
+    // .bin 不是依赖清单：目录在，但不因此去读一份不存在的 package.json
+    const onlyBin = keyOf({ box: engine, files: { 'packages/engine/node_modules/.bin/vitest': 'x' } });
+    expect(onlyBin.parts['installed:engine']).not.toBe('absent');
+    expect(onlyBin.key).not.toBe(absent.key);
+
+    const roots = keyRoots(['engine'], sourceClosure(GRAPH, ['engine']));
+    expect(keyCovers(roots, 'packages/engine/node_modules')).toBe(true);
+    expect(keyCovers(roots, manifest)).toBe(true);
+    expect(keyCovers(roots, zod)).toBe(true);
+    expect(keyCovers(roots, js)).toBe(false);
+    expect(keyCovers(roots, 'packages/engine/src/index.ts')).toBe(true);
+    const apiRoots = keyRoots(['api'], sourceClosure(GRAPH, ['api']));
+    expect(keyCovers(apiRoots, 'packages/engine/node_modules')).toBe(false);
+    expect(keyCovers(apiRoots, manifest)).toBe(false);
+    // 清单没变、只改依赖包里的源码：键不变（这份源码没进摘要）
+    expect(keyOf({ box: engine, files: { [manifest]: v1, [zod]: zodManifest, [js]: 'changed' } }).key).toBe(
+      withV1.key,
+    );
+    // 列得出包、读不到 package.json：不算成没有
+    expect(() => keyOf({ box: engine, files: { [js]: 'only-js' } })).toThrow(CacheError);
+    expect(() =>
+      keyOf({ box: engine, files: { 'packages/engine/node_modules/@ghost': 'not-a-dir' } }),
+    ).toThrow(CacheError);
+    const fs = memFs({ ...BASE_FILES, [manifest]: v1 });
+    const bad: HashFs = {
+      list: fs.list,
+      bytes(rel) {
+        if (rel === manifest) throw new Error('EACCES');
+        return fs.bytes(rel);
+      },
+    };
+    expect(() => computeKey({ fs: bad, graph: GRAPH, box: engine, env: ENV })).toThrow('EACCES');
   });
 
   it('【故意造出的失败】读不了的文件不当成没有：读盘抛错，整个算键抛出去（不缓存），不是悄悄少盖一块', () => {

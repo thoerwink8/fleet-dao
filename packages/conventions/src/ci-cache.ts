@@ -14,8 +14,11 @@
 //   重算比对；拿「分到这一台的文件」当全集再减去已覆盖的（新增的测试文件必须跑）。跑完 ci-box.ts 再核对一遍
 //   「盖住的 + 实际跑的 == 分到的」，对不上 job 红。
 // - 键要盖住测试读的一切：这一台的文件清单、被测单元整棵源码、向下依赖闭包、TEST_READS、根配置和包外读的文件、夹具、
-//   这一台的测试文件内容、环境身份（node、系统、vitest 版本、有没有真 Postgres、Temporal 命令行版本、日期）、本文件的 CACHE_SCHEMA。
-//   test/ci-plan.test.ts 从扫描器反推「测试读的包外文件」，漏盖一处就红；键怎么算改了（多盖少盖）要升 CACHE_SCHEMA。
+//   这一台的测试文件内容、环境身份（node、系统、vitest 版本、有没有真 Postgres、Temporal 命令行版本、日期）、
+//   闭包里登记过的包自己 node_modules 的直接依赖清单、本文件的 CACHE_SCHEMA。
+//   源码树哈希跳过 node_modules（会链到仓外的安装目录）。测试按路径读它时，不能只靠「在包目录下」假装盖住，
+//   要把直接依赖的 package.json 单独算进键。test/ci-plan.test.ts 从扫描器反推「测试读的包外文件」，漏盖一处就红；
+//   键怎么算改了（多盖少盖）要升 CACHE_SCHEMA。
 import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -23,8 +26,9 @@ import { AGENTS_UNIT, FIXTURE_PATH, type PackageGraph, ROOT_CONFIG_FILES, TEST_R
 import { isTestFile, unitOfTestFile, withSiblings } from './test-split.ts';
 
 /** 键和清单的格式版本：算键的办法、清单的字段一变就加一，旧缓存自然读不到、也不会被当成清单。
- * 2：分台从「包目录 + --shard」换成明确的文件清单（键里的 args 换成 box，清单、交接文件同改）。 */
-export const CACHE_SCHEMA = 3;
+ * 2：分台从「包目录 + --shard」换成明确的文件清单（键里的 args 换成 box，清单、交接文件同改）。
+ * 4：闭包含 engine 时，把 packages/engine/node_modules 里直接依赖的 package.json 算进键。 */
+export const CACHE_SCHEMA = 4;
 /** 只有 pull_request 才缓存。 */
 export const PR_EVENT = 'pull_request';
 /** 缓存目录名（放在 $RUNNER_TEMP 下；ci.yml 的 restore/save 用同一个名字）。 */
@@ -50,7 +54,9 @@ export interface HashFs {
   list(rel: string): string[] | undefined;
 }
 
-/** 不进哈希的目录：和 .gitignore 里忽略的生成物、本机工具目录同一批（被忽略的东西进不了 CI 的检出，也不是测试的输入）。 */
+/** 不进源码树哈希的目录：生成物、本机工具目录，还有 node_modules。
+ * node_modules 会链到仓外的安装目录，整棵算进来既慢又会把别的包的源码再哈希一遍。
+ * 测试按路径读某个包自己的 node_modules 时，直接依赖的 package.json 另算（INSTALLED_MANIFEST_PACKAGES）。 */
 const SKIP_DIRS = new Set([
   'node_modules',
   'dist',
@@ -231,6 +237,56 @@ export const EXTERNAL_INPUT_DIRS: readonly string[] = [
  */
 export const WHOLE_REPO_READERS: readonly string[] = ['conventions'];
 
+/**
+ * 这些包的测试会按路径读自己的 node_modules（工作流打包的解析根）。
+ * 源码树哈希跳过 node_modules，所以直接依赖的 package.json（含 @scope/name）单独进这一台的键。
+ * 没把这个包收进闭包的台不加这一块。不哈希仓根 node_modules，也不跟着符号链接走进 pnpm 仓库。
+ */
+export const INSTALLED_MANIFEST_PACKAGES: readonly string[] = ['engine'];
+
+/** packages/<包>/node_modules 下，直接依赖的清单：<名>/package.json 或 @<scope>/<名>/package.json。 */
+const DIRECT_MANIFEST = /^(?:@[^/]+\/)?[^/]+\/package\.json$/;
+
+/** 这个路径是不是某个包的 node_modules。inKey：登记过的包，且是目录本身或一份直接依赖清单。 */
+function nodeModulesInput(path: string): { pkgDir: string; inKey: boolean } | undefined {
+  const m = /^packages\/([^/]+)\/node_modules(?:\/(.*))?$/.exec(path);
+  if (!m) return undefined;
+  const pkg = m[1] as string;
+  const rest = m[2];
+  const registered = (INSTALLED_MANIFEST_PACKAGES as readonly string[]).includes(pkg);
+  return {
+    pkgDir: `packages/${pkg}`,
+    inKey: registered && (rest === undefined || DIRECT_MANIFEST.test(rest)),
+  };
+}
+
+/**
+ * 一个包的 node_modules 里，直接依赖的 package.json 合成的摘要。
+ * 目录不存在记成 absent。列出来的包没有 package.json、或读不了，抛（不拿空摘要冒充没装）。
+ * 以 . 开头的（.bin、.pnpm）跳过。符号链接由 bytes 跟着读，不把链接目标整棵树算进来。
+ */
+export function installedManifestDigest(fs: HashFs, packageName: string): string {
+  const root = `packages/${packageName}/node_modules`;
+  const names = fs.list(root);
+  if (names === undefined) return 'absent';
+  const manifests: string[] = [];
+  for (const name of [...names].sort()) {
+    if (name.startsWith('.')) continue;
+    if (name.startsWith('@')) {
+      const scope = `${root}/${name}`;
+      const pkgs = fs.list(scope);
+      if (pkgs === undefined) throw new CacheError(`读不到 ${scope}（列出来了、读时没了）`);
+      for (const pkg of [...pkgs].sort()) {
+        if (pkg.startsWith('.')) continue;
+        manifests.push(`${scope}/${pkg}/package.json`);
+      }
+    } else {
+      manifests.push(`${root}/${name}/package.json`);
+    }
+  }
+  return makeHasher(fs).digestOf(manifests);
+}
+
 /** 全仓测试源码（含 agents/test）和各包的 package.json。 */
 export function isWholeRepoInput(path: string): boolean {
   if (/^packages\/[^/]+\/package\.json$/.test(path)) return true;
@@ -311,10 +367,15 @@ export function keyRoots(units: readonly string[], closure: readonly string[]): 
   };
 }
 
-/** 仓内这个路径（文件，或目录）改了，会不会让这组测试的键变。 */
+/** 仓内这个路径（文件，或目录）改了，会不会让这组测试的键变。
+ * node_modules 不在源码树哈希里：只有登记过、并且这一组的闭包含那个包时，目录本身和直接依赖的 package.json 才算盖住。
+ * 依赖包里的其它文件（打包进去的源码）不算——没哈希的不假装盖住。 */
 export function keyCovers(roots: KeyRoots, path: string): boolean {
   const under = (d: string) => path === d || path.startsWith(`${d}/`);
-  if (roots.files.includes(path) || roots.dirs.some(under) || roots.packages.some(under)) return true;
+  if (roots.files.includes(path) || roots.dirs.some(under)) return true;
+  const nm = nodeModulesInput(path);
+  if (nm) return nm.inKey && roots.packages.includes(nm.pkgDir);
+  if (roots.packages.some(under)) return true;
   if (roots.fixtures && (FIXTURE_PATH.test(path) || FIXTURE_PATH.test(`${path}/x`))) return true;
   return roots.wholeRepoTests && isWholeRepoInput(path);
 }
@@ -367,6 +428,10 @@ export function computeKey(input: KeyInput): KeyResult {
     env: sha256(JSON.stringify(env)),
   };
   for (const p of roots.packages) parts[`pkg:${p}`] = h.tree(p);
+  for (const name of INSTALLED_MANIFEST_PACKAGES) {
+    if (roots.packages.includes(`packages/${name}`))
+      parts[`installed:${name}`] = installedManifestDigest(fs, name);
+  }
   for (const f of roots.files) parts[`file:${f}`] = h.tree(f);
   for (const d of roots.dirs) parts[`dir:${d}`] = h.tree(d);
   const everything = [...(h.filesUnder('packages') ?? []), ...(h.filesUnder('agents/test') ?? [])];

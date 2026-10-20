@@ -674,7 +674,8 @@ describe('体量关口重评（#3249）', { timeout: 180_000 }, () => {
 /**
  * #3249 改动前的 828c9d47（树 99756f1fa095868b373a9360e3dcc43625458067）里的 packages/engine/src。
  * CI 的测试检出是浅克隆，那个提交对象不在仓里，不能在测试里 git archive。源码包随夹具走，不许为了变绿重打包。
- * 只打包那一版工作流；活动仍用现在的测试脚本。依赖只挂本包自己的 node_modules（仓根那份不在测试缓存键里）。
+ * 只打包那一版工作流；活动仍用现在的测试脚本。解析根是本包的 node_modules：
+ * 直接依赖的 package.json 记在 engine 这一台的缓存键里（INSTALLED_MANIFEST_PACKAGES）。
  */
 const OLD_WORKER_ARCHIVE = fileURLToPath(
   new URL('./replay/fixtures/old-park-worker-828c9d47.tar.gz', import.meta.url),
