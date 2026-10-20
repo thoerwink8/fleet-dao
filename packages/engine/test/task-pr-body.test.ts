@@ -11,10 +11,15 @@ import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import type { TaskRun, TaskWorkflowInput } from '../src/task-contract.ts';
 import {
+  DELIVERY_ITEM_MAX,
+  DELIVERY_OWED_MAX,
+  deliveryClaimPrFields,
   PR_DID_ANSWER_LINES,
   PR_DID_ANSWER_MAX,
+  parseDeliveryClaim,
   sessionDidLines,
   shotsPrLines,
+  stripDeliveryClaim,
   taskPrDid,
 } from '../src/workflows/task-support.ts';
 import { freshRepo, useEnv, withWorker } from './helpers.ts';
@@ -121,6 +126,144 @@ describe('开 PR、第 2 轮更新 PR 说明（#2723）', { timeout: 60_000 }, (
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(world.count('updatePrBody')).toBeGreaterThan(0);
     expect(world.alerts).toEqual([]);
+  });
+});
+
+const claimBlock = (json: string) => `\n\`\`\`fleet-delivery\n${json}\n\`\`\`\n`;
+const SLICE_ANSWER = `验收条 1：只做了诊断，Refs #3396，关不了它\n欠：原两项超时未定因${claimBlock(
+  '{"scope":"slice","owed":["原两项超时未定因（见 #3396）","@someone 看一下 <!-- x -->"]}',
+)}`;
+const FULL_ANSWER = `验收条 1：做到了\n欠：无${claimBlock('{"scope":"full","owed":[]}')}`;
+
+describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了不写「无」', { timeout: 60_000 }, () => {
+  it('完整交付：full 且 owed 为空，不加任何东西', () => {
+    expect(parseDeliveryClaim(FULL_ANSWER)).toEqual({ kind: 'full' });
+    expect(deliveryClaimPrFields({ kind: 'full' })).toEqual({});
+  });
+
+  it('诊断分片仍欠事项：标分片，欠项原样进 owed；回复里别的单号、@、HTML 注释都中和', () => {
+    const claim = parseDeliveryClaim(SLICE_ANSWER);
+    expect(claim).toEqual({
+      kind: 'slice',
+      owed: ['原两项超时未定因（见 ＃3396）', '@​someone 看一下 <!‑‑ x ‑‑>'],
+    });
+    const fields = deliveryClaimPrFields(claim);
+    expect(fields.partial).toBe(true);
+    const body = renderPrBody({ requirement: 12, did: ['x'], verified: ['y'], ...fields });
+    expect(body).toContain('**需求**：Refs #12（分片、关不了它：会话声明只交了一部分）');
+    expect(body).toContain('- 会话声明还欠：原两项超时未定因（见 ＃3396）');
+    expect(body).not.toContain('**还欠什么**：无');
+    expect(body).not.toMatch(/#3396/);
+    expect(body).not.toContain('<!--');
+  });
+
+  it('【故意造出的失败】无元数据旧回复、截断、非法、多个块、自相矛盾、字段越界：一律 unknown，渲染成未核，不是「无」', () => {
+    const cases: [string | null, RegExp][] = [
+      [null, /没有最后一条回复/],
+      ['验收条 1：做到了\n欠：无\nRefs #3396', /没有交付声明/],
+      ['做了\n```fleet-delivery\n{"scope":"full","ow', /没封口/],
+      [`做了${claimBlock('{"scope":"full",')}`, /不是合法 JSON/],
+      [`做了${claimBlock('["full"]')}`, /不是一个 JSON 对象/],
+      [
+        `做了${claimBlock('{"scope":"full","owed":[]}')}${claimBlock('{"scope":"full","owed":[]}')}`,
+        /不止一个/,
+      ],
+      [`做了${claimBlock('{"scope":"full","owed":["还差 e2e"]}')}`, /交全了却还列着欠项/],
+      [`做了${claimBlock('{"scope":"slice","owed":[]}')}`, /没列欠什么/],
+      [`做了${claimBlock('{"scope":"done","owed":[]}')}`, /scope 只能是/],
+      [`做了${claimBlock('{"scope":"full","owed":[],"closes":3396}')}`, /认不得的字段/],
+      [
+        `做了${claimBlock(JSON.stringify({ scope: 'slice', owed: ['x'.repeat(DELIVERY_ITEM_MAX + 1)] }))}`,
+        /owed/,
+      ],
+      [
+        `做了${claimBlock(JSON.stringify({ scope: 'slice', owed: Array(DELIVERY_OWED_MAX + 1).fill('x') }))}`,
+        /owed/,
+      ],
+    ];
+    for (const [answer, why] of cases) {
+      const claim = parseDeliveryClaim(answer);
+      expect(claim.kind, String(answer)).toBe('unknown');
+      if (claim.kind === 'unknown') expect(claim.why).toMatch(why);
+      const fields = deliveryClaimPrFields(claim);
+      expect(fields.partial).toBeUndefined();
+      const body = renderPrBody({ requirement: 12, did: ['x'], verified: ['y'], ...fields });
+      expect(body).toContain('交付范围未核');
+      expect(body).not.toContain('**还欠什么**：无');
+      expect(body).toContain('**需求**：#12');
+    }
+  });
+
+  it('声明块不占「做了什么」的行；去掉后其余回复照旧', () => {
+    expect(stripDeliveryClaim(FULL_ANSWER)?.trim()).toBe('验收条 1：做到了\n欠：无');
+    expect(stripDeliveryClaim(null)).toBeNull();
+  });
+
+  it('开 PR：分片回复写 Refs 标分片和欠项；已有 PR 第 2 轮换成完整交付，分片和欠项跟着撤掉；需求始终只挂这张单', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL x' } : undefined,
+    });
+    const { tasks } = scripted({
+      segment: async (_i, n) => ({
+        ok: true,
+        runId: `run-${n}`,
+        answer: n === 1 ? SLICE_ANSWER : FULL_ANSWER,
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    const opened = world.callsOf('openPr')[0]?.input.body;
+    expect(opened).toMatchObject({ requirement: 12, partial: true });
+    expect(opened?.requirementRefs).toBeUndefined();
+    expect(opened?.owed).toEqual(['会话声明还欠：原两项超时未定因（见 ＃3396）', expect.any(String)]);
+    expect(opened?.did.join('\n')).not.toContain('fleet-delivery');
+    const openedText = renderPrBody(opened ?? { did: [], verified: [] });
+    expect(openedText).not.toContain('**还欠什么**：无');
+    expect(openedText).toContain('**需求**：Refs #12（分片、关不了它：会话声明只交了一部分）');
+    const updated = world.callsOf('updatePrBody')[0]?.input.body;
+    expect(updated).toMatchObject({ requirement: 12 });
+    expect(updated?.partial).toBeUndefined();
+    expect(updated?.owed).toBeUndefined();
+    expect(updated?.risks).toBeUndefined();
+    // 关单政策不变：没有验收责任照旧关
+    expect(world.count('closeIssue')).toBe(1);
+  });
+
+  it('已有 PR 更新：第 2 轮回复没有声明（老样子），已开 PR 的说明改成「交付范围未核」，不写「无」', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL x' } : undefined,
+    });
+    const { tasks } = scripted({
+      segment: async (_i, n) => ({
+        ok: true,
+        runId: `run-${n}`,
+        answer: n === 1 ? FULL_ANSWER : '修了 CI\n欠：无\nRefs #3396',
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(world.callsOf('openPr')[0]?.input.body.risks).toBeUndefined();
+    const updated = world.callsOf('updatePrBody')[0]?.input.body;
+    expect(updated?.requirement).toBe(12);
+    expect(updated?.partial).toBeUndefined();
+    expect(updated?.risks?.[0]).toContain('交付范围未核');
+    const text = renderPrBody(updated ?? { did: [], verified: [] });
+    expect(text).not.toContain('**还欠什么**：无');
+    expect(text).toContain('**需求**：#12');
+    // 整篇 14 行以内（github 包的 PR_BODY_MAX_LINES）
+    expect(text.split('\n').length).toBeLessThanOrEqual(14);
   });
 });
 

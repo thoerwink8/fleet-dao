@@ -78,6 +78,8 @@
 //   （ColdVerifyInput.testOutput，只给和验收的头对得上的那一份）。
 // - PR 说明的「做了什么」取动手会话最后一条回复（#2723，taskPrDid / sessionDidLines，有截断上限）：开 PR 时写进去；
 //   第 2 轮起推上去后改 PR 正文换成这一轮的回复（patched('pr-body-from-session')，updatePrBody，没改成不挡原流程）。
+//   回复末尾的 fleet-delivery 交付声明（#3406，patched('pr-body-delivery-claim')，parseDeliveryClaim）定「还欠什么」和分片 Refs；
+//   没有、非法、截断写「交付范围未核」，不写「无」。只让说明更保守，不改关单、合并。
 // - 重活先出方案（#2755，patched('plan-first-heavy')，planFirst）：heavyweight 第一轮先跑一段只读会话，最后一条回复只回方案 JSON，
 //   格式不对续进会话重出一次，还不对照常动手；认下了带进意见、动手续这个会话。
 // - 体量预算（#2755，Limits.prLineBudget，0 = 关；patched('pr-line-budget')，withinLineBudget）：推之前看交的头相对主线新增几行，
@@ -149,6 +151,7 @@ import {
   commitNudgeFeedback,
   conflictFilesForHandoff,
   conflictHandoffLine,
+  deliveryClaimPrFields,
   EMPTY_DELIVERY_CODE,
   emptyCommitFeedback,
   freshSessionFeedback,
@@ -159,6 +162,7 @@ import {
   MergedTask,
   noteEmptyCommit,
   overBudgetLine,
+  parseDeliveryClaim,
   parsePlan,
   planGoLine,
   planRetryLine,
@@ -172,6 +176,7 @@ import {
   shotsPrLines,
   splitSuggestion,
   stoppedOutcomeOf,
+  stripDeliveryClaim,
   type TaskPlan,
   taskPrDid,
   withFamily,
@@ -912,18 +917,25 @@ class TaskFlow {
       const owed = [...new Set(duties.flatMap((d) => d.items))].map((item) => `待人验：${item}`);
       return { ...base, requirementRefs: true, owed: [...(base.owed ?? []), ...owed] };
     }
+    // 交付声明（#3406）：回复末尾的 fleet-delivery 块定「还欠什么」和分片，缺失、非法、截断都写未核，不写「无」。
+    // 只让说明更保守，不碰关单和合并。老历史没有这个标记，正文照原来写。
+    const claimed = patched('pr-body-delivery-claim');
+    const answer = claimed ? stripDeliveryClaim(rt.lastAnswer) : rt.lastAnswer;
+    const claim = claimed ? deliveryClaimPrFields(parseDeliveryClaim(rt.lastAnswer)) : {};
     const body: PrBody = {
       requirement: rt.input.issueNumber,
-      did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length, rt.lastAnswer),
+      did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length, answer),
       verified: [
         patched('repo-ci-policy') && this.ciMode === 'off'
           ? SKIP_CI_PR_VERIFIED
           : 'CI 和冷验收的结果看这个 PR 的检查（验收通过才挂自动合并）',
       ],
+      ...claim,
     };
     // 合并收树后（#2983）：代码一句、图片一句分开写，图片有欠项进「还欠什么」
     if (!shots) return body;
-    return { ...body, verified: shots.verified, ...(shots.owed.length > 0 ? { owed: shots.owed } : {}) };
+    const owed = [...shots.owed, ...(claim.owed ?? [])];
+    return { ...body, verified: shots.verified, ...(owed.length > 0 ? { owed } : {}) };
   }
 
   /**

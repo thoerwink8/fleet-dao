@@ -43,6 +43,8 @@ export interface PrBodyInput {
    * 合并收口、每日对账认「分片」只挂不关。不给 = 原样写 `#号`（引擎自己收尾关单）。
    */
   requirementRefs?: boolean | undefined;
+  /** 动手会话的交付声明说只交了一部分（#3406）：「需求」栏同样写 Refs 标分片，和验收责任的原因可以并写。 */
+  partial?: boolean | undefined;
   /** 子任务名，例如「A 登录表单」。 */
   subtask?: string | undefined;
   /** 做了什么，3–5 条。 */
@@ -73,8 +75,11 @@ export function renderPrBody(input: PrBodyInput): string {
     [
       input.requirement === undefined
         ? ''
-        : input.requirementRefs
-          ? `Refs #${input.requirement}（分片、关不了它：验收责任待人验）`
+        : input.requirementRefs || input.partial
+          ? `Refs #${input.requirement}（分片、关不了它：${[
+              ...(input.requirementRefs ? ['验收责任待人验'] : []),
+              ...(input.partial ? ['会话声明只交了一部分'] : []),
+            ].join('；')}）`
           : `#${input.requirement}`,
       input.subtask ? `子任务 ${oneLine(input.subtask)}` : '',
     ]

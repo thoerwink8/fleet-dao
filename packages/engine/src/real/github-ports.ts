@@ -192,6 +192,7 @@ function prBody(body: PrBody): PrBodyInput {
   return {
     ...(body.requirement === undefined ? {} : { requirement: body.requirement }),
     ...(body.requirementRefs ? { requirementRefs: true } : {}),
+    ...(body.partial ? { partial: true } : {}),
     ...(body.subtask === undefined ? {} : { subtask: body.subtask }),
     did: body.did,
     verified: body.verified,

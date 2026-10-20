@@ -912,6 +912,101 @@ export function taskPrDid(
   return did;
 }
 
+/**
+ * 会话在最后一条回复末尾声明交付范围（#3406）：一个 ```fleet-delivery 代码块，里面一个 JSON 对象，
+ * scope 是 full（这张单交全了）或 slice（只交了一部分/诊断分片），owed 是还欠的事。PR 说明「还欠什么」「需求」按它写：
+ * slice 写 Refs 标分片、owed 原样进「还欠什么」；缺失、非法、截断都是 unknown，不写成「无」。
+ * 只能让说明更保守，不当验收通过或关单授权；里面写的单号不当关联（PR 只关联这张单）。
+ */
+export const DELIVERY_FENCE = 'fleet-delivery';
+/** owed 最多几条、每条最多几个字：超了算非法，不替会话截。 */
+export const DELIVERY_OWED_MAX = 5;
+export const DELIVERY_ITEM_MAX = 200;
+
+export type DeliveryClaim =
+  | { kind: 'full' }
+  | { kind: 'slice'; owed: string[] }
+  | { kind: 'unknown'; why: string };
+
+const DELIVERY_OPEN = new RegExp(`^[ \\t]*\`\`\`${DELIVERY_FENCE}[ \\t]*$`, 'gm');
+const DELIVERY_BLOCK = new RegExp(
+  `^[ \\t]*\`\`\`${DELIVERY_FENCE}[ \\t]*\\n([\\s\\S]*?)^[ \\t]*\`\`\`[ \\t]*$`,
+  'gm',
+);
+
+/** 会话自己写的欠项进 PR 正文前：压成一行，@ 提醒、HTML 注释、#号（别的单）都中和掉。 */
+function inertOwed(item: string): string {
+  return item
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/@(?=[A-Za-z0-9-])/g, '@\u200b')
+    .replace(/<!--/g, '<!‑‑')
+    .replace(/-->/g, '‑‑>')
+    .replace(/#(?=\d)/g, '＃');
+}
+
+/** 从最后一条回复读交付声明。只认恰好一个封口的 fleet-delivery 块；别的都按 unknown 交代原因。 */
+export function parseDeliveryClaim(answer: string | null | undefined): DeliveryClaim {
+  const text = answer ?? '';
+  if (!text.trim()) return { kind: 'unknown', why: '没有最后一条回复' };
+  const opens = [...text.matchAll(DELIVERY_OPEN)].length;
+  if (opens === 0) return { kind: 'unknown', why: '回复里没有交付声明' };
+  const blocks = [...text.matchAll(DELIVERY_BLOCK)].map((m) => m[1] ?? '');
+  if (blocks.length < opens) return { kind: 'unknown', why: '交付声明没封口（回复可能截断了）' };
+  if (blocks.length > 1) return { kind: 'unknown', why: '交付声明不止一个' };
+  let value: unknown;
+  try {
+    value = JSON.parse(blocks[0] ?? '');
+  } catch {
+    return { kind: 'unknown', why: '交付声明不是合法 JSON' };
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return { kind: 'unknown', why: '交付声明不是一个 JSON 对象' };
+  const v = value as Record<string, unknown>;
+  if (Object.keys(v).some((k) => k !== 'scope' && k !== 'owed'))
+    return { kind: 'unknown', why: '交付声明有认不得的字段' };
+  const owed = v.owed;
+  if (
+    !Array.isArray(owed) ||
+    owed.length > DELIVERY_OWED_MAX ||
+    !owed.every((o) => typeof o === 'string' && o.trim() && o.trim().length <= DELIVERY_ITEM_MAX)
+  ) {
+    return {
+      kind: 'unknown',
+      why: `交付声明的 owed 要是至多 ${DELIVERY_OWED_MAX} 条、每条 ${DELIVERY_ITEM_MAX} 字以内的文字`,
+    };
+  }
+  const items = (owed as string[]).map(inertOwed);
+  if (v.scope === 'full') {
+    return items.length === 0 ? { kind: 'full' } : { kind: 'unknown', why: '交付声明说交全了却还列着欠项' };
+  }
+  if (v.scope === 'slice') {
+    return items.length > 0
+      ? { kind: 'slice', owed: items }
+      : { kind: 'unknown', why: '交付声明说只交了一部分却没列欠什么' };
+  }
+  return { kind: 'unknown', why: '交付声明的 scope 只能是 full 或 slice' };
+}
+
+/** 去掉回复里的交付声明块（它另进「还欠什么」「需求」，不占「做了什么」的行）。 */
+export function stripDeliveryClaim(answer: string | null | undefined): string | null {
+  if (answer == null) return null;
+  return answer.replace(DELIVERY_BLOCK, '').replace(DELIVERY_OPEN, '');
+}
+
+/**
+ * 交付声明 → PR 说明的字段：slice 标分片、欠项进 owed；unknown 进 risks（渲染在「还欠什么」里，不会是「无」）；full 什么都不加。
+ */
+export function deliveryClaimPrFields(claim: DeliveryClaim): {
+  partial?: true;
+  owed?: string[];
+  risks?: string[];
+} {
+  if (claim.kind === 'slice') return { partial: true, owed: claim.owed.map((o) => `会话声明还欠：${o}`) };
+  if (claim.kind === 'unknown') return { risks: [`交付范围未核（${claim.why}）：还欠什么不知道，不当成无`] };
+  return {};
+}
+
 /** 等合并时必过检查红了交回的意见、lastProblem 的开头（和 @fleet-dao/shared/checks-red 同一个字面）。 */
 const CHECKS_RED_LEAD = '检查红了：';
 

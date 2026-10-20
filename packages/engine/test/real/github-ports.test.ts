@@ -1267,6 +1267,36 @@ describe('开 PR、CI、合并', () => {
     ]);
   });
 
+  it('会话声明的分片和欠项（#3406）：开 PR、改正文都原样交给 github 包，渲染出 Refs 分片、欠项和未核风险', async () => {
+    const { ports, calls } = setup();
+    const partial = {
+      ...body,
+      partial: true,
+      owed: ['会话声明还欠：两项超时未定因'],
+      risks: ['交付范围未核（回复里没有交付声明）：还欠什么不知道，不当成无'],
+    };
+    await ports.openPr(
+      { taskId: 't1', repo, branch: BRANCH, head: m.head, title: '登录', body: partial },
+      ctx,
+    );
+    await ports.updatePrBody({ taskId: 't1', repo, prNumber: 101, body: partial }, ctx);
+    const sentBodies = [calls.openPr?.[0], calls.updatePullBody?.[0]].map(
+      (call) => (call as { body: Parameters<typeof renderPrBody>[0] }).body,
+    );
+    expect(sentBodies).toHaveLength(2);
+    for (const sent of sentBodies) {
+      expect(sent).toMatchObject({
+        requirement: 12,
+        partial: true,
+        owed: partial.owed,
+        risks: partial.risks,
+      });
+      const text = renderPrBody(sent);
+      expect(text).toContain('**需求**：Refs #12（分片、关不了它：会话声明只交了一部分）');
+      expect(text).not.toContain('**还欠什么**：无');
+    }
+  });
+
   it('待验分片写后现读正文；旧正文或读失败明确拒绝，不能当已改', async () => {
     const { ports, gh } = setup();
     const kept = { ...body, requirementRefs: true };
