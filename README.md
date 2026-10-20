@@ -90,6 +90,12 @@
 
 `command` 和 `args` 合起来必须启动 Linux Node（符合仓根 Node 版本要求），检查器在末尾加执行参数，JSON 快照从 stdin 传入；支持已有的其他本机 Linux 启动器。不要将 SSH/VPS 命令当本机 runner。`dependencyRoot` 是该 Linux 中已用 `pnpm install --frozen-lockfile` 安装依赖的仓目录，锁文件、workspace 设置和各包依赖声明须与本次工作树一致。运行时把当前已跟踪和未忽略的新文件复制到独立 Linux 临时目录，包含未提交改动，已删的文件不复活；workspace 依赖链接指向本次快照，第三方依赖复用已安装目录。源码摘要、普通用户、测试清单和 JSON 结果逐项核对后才算通过。Linux 本机和 CI 直接跑原测试。
 
+### 本机私有回环验证资源
+
+`pnpm test:isolated --resource <本机资源JSON绝对路径> -- <完整测试文件...>` 将明确审阅为只用本地服务的一组完整文件交给一次性 Linux 私有网络资源。它沿用本机测试槽、工作树快照与 Linux 结果核验，单独留报告，不替代 `pnpm check` 或 CI，也不改变全局选测。资源摘要过期、未知文件、真实 PG 请求、缺依赖或工具、namespace/关闭证据不符都明确失败。共享 WSL 故障与这条隔离路径的通过分别记账。
+
+资源需先由可信主线安装 root-owned helper，再按[资源说明](packages/conventions/resources/README.md)准备本机 JSON；配置和机器路径不进仓。网络仅有该资源内的回环，server/client/worker 在同一 namespace，业务 Node 与所有服务均普通用户，取消或宿主失联会回收本次进程。不能把依赖外网、共享 TCP PostgreSQL 或未审能力的检查整批送进去，也不能为了通过删除数据库环境变量或改用 PGlite。
+
 实现依据：[Node 的真实路径解析](https://github.com/nodejs/node/blob/main/doc/api/cli.md#--preserve-symlinks)要求防止依赖链接回到旧源码；[WSL 显式发行版和用户参数](https://learn.microsoft.com/windows/wsl/basic-commands)允许使用现有环境而不修改默认设置。Windows 不提供 `/proc/self/fd` 上逐级固定目录句柄的归档语义，不能以普通路径操作替代安全断言。
 
 ### 批量开母子单
