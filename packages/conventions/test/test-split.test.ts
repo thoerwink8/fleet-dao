@@ -329,6 +329,7 @@ describe('环境类、能力标记', () => {
       'packages/engine/test/execution-legacy-admission-real.test.ts',
       'packages/engine/test/execution-start-reader-real.test.ts',
       'packages/engine/test/github-reconcile.test.ts',
+      'packages/engine/test/history-diagnostics.real.test.ts',
       'packages/engine/test/push-handback-contract.test.ts',
     ]);
     // 定义它的只有 support.ts：本仓别的非测试文件要是包了一层再调（createRealEnv 不出现、认不出要 Temporal），
