@@ -925,7 +925,7 @@ class TaskFlow {
     // 交付声明（#3406）：回复末尾的 fleet-delivery 块定「还欠什么」和分片，缺失、非法、截断都写未核，不写「无」。
     // 只让说明更保守，不碰关单和合并。老结果没有可核验元数据也必须写未知，不能落成「无」。
     const claimed = patched('pr-body-delivery-claim');
-    const answer = claimed ? answerForPrDid(rt.lastAnswer, rt.input.issueNumber) : rt.lastAnswer;
+    const answer = answerForPrDid(rt.lastAnswer, rt.input.issueNumber);
     const claim = deliveryClaimPrFields(deliveryClaimForPrBody(rt.lastAnswer, claimed));
     const body: PrBody = {
       requirement: rt.input.issueNumber,
