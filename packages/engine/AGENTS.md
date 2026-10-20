@@ -23,6 +23,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 法国工具链 `/bin/sh` 和目录 chmod 权限测试在 Linux 跑真端口；Windows 用明示的命令/阶段错误夹具验证装配与失败分类，不代表引擎支持 Windows 生产宿主。Git 归档检出在两种系统都跑真实 git/tar，归档名相对私有 scratch，避免 GNU tar 把 Windows 盘符当远端。
 - Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；真服务端先用 `pnpm test:temporal --cli <绝对路径>` 登记已安装 CLI，或设 `FLEET_TEST_TEMPORAL_CLI`，版本须与 `deploy/france.sh` 一致。正规选测和创建入口都核路径/版本，不隐式下载；SDK 创建阶段只报 `start-or-connect`，内部细分状态未知。
 - 重放：`packages/engine/test/replay.test.ts` 拿 `test/replay/fixtures/task-*.json` 对现在的代码重放。录新场景用 `node packages/engine/test/replay/record.ts <场景>`，已有的夹具拒绝覆盖。
+- `push-handback-contract.test.ts` 仅对本文件全合成假端口历史启用失败取证：第一个 beforeEach 起算 50 秒的 watchdog 或原测试失败时，按真实 handle/run 和 SDK 三秒 RPC deadline 读原 protobuf（每份 2MiB）与白名单 describe（128KiB）。先落 `_tmp/synthetic-history`，再以 SHA256、gzip/base64 完整帧写日志；整文件最多 8MiB，超限/读失败/缺帧均未知，不能当成功历史。正常快速用例不额外读取；watchdog 不停 worker，原测试结束后才等实际 runUntil 收尾、按环境去重关闭，再 teardown。禁止扩大到真实端口或其它测试历史，不放宽原断言、60 秒测试超时、缓存或 SDK 阈值；这只是诊断分片，不结清 #3258 的重放兼容责任。
 
 ## 常见坑
 
