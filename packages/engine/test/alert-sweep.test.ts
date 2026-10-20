@@ -70,6 +70,7 @@ function harness(
     prMergedAt?: AlertSweepDeps['prMergedAt'];
     lateReviews?: AlertSweepDeps['lateReviews'];
     doneItems?: AlertSweepDeps['doneItems'];
+    workflows?: AlertSweepDeps['workflows'];
   } = {},
 ) {
   const opened: Opened[] = [];
@@ -98,7 +99,7 @@ function harness(
   const handling: AlertSweepDeps['handling'] | undefined =
     over.handling === 'omit' ? undefined : (over.handling ?? (async (ids) => unclaimed(ids)));
   const deps: AlertSweepDeps = {
-    workflows: {
+    workflows: over.workflows ?? {
       state: async () => ({ state: 'missing' }),
       view: async () => {
         throw new Error('不该问工作流');
@@ -733,6 +734,40 @@ describe('冷验收检出报警不落三天过期兜底', () => {
         );
       }
     }
+  });
+
+  it('挂满 24 小时的停下提醒（task:*:park:*）和指挥官那条（commander:*:park:*）不开单，交法国指挥官', async () => {
+    const parkKey = 'task:thoerwink8/fleet-dao#3207:park:1';
+    const commanderKey = `commander:${parkKey}`;
+    expect(eligibleToFile(parkKey)).toBe(false);
+    expect(eligibleToFile(commanderKey)).toBe(false);
+    expect(eligibleToFile('task:thoerwink8/fleet-dao#3207:failure:WT1')).toBe(true);
+    const since = new Date(NOW.getTime() - 30 * HOUR);
+    const park = row({
+      dedupeKey: parkKey,
+      taskId: 't-3207',
+      title: '改动超出体量预算：新增 9550 行，预算 3000 行，收窄过一次仍超',
+      createdAt: since,
+      updatedAt: since,
+    });
+    const commander = row({ dedupeKey: commanderKey, taskId: 't-3207', createdAt: since, updatedAt: since });
+    const h = harness([park, commander], {
+      workflows: {
+        state: async () => ({ state: 'running' }),
+        view: async () => ({
+          parked: true,
+          waiting: { kind: 'human', detail: '挂起：改动超出体量预算', since: since.toISOString() },
+          doing: '停下等人',
+          approval: null,
+        }),
+      },
+    });
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(h.opened).toEqual([]);
+    expect(park.resolvedAt).toBeNull();
+    expect(park.body).not.toContain('已立案：');
+    expect(commander.body).not.toContain('已立案：');
   });
 
   it('检出前缀不走自动兜底立案，普通未知键仍立案', async () => {

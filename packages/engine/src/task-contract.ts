@@ -147,7 +147,25 @@ export interface TaskParkInfo {
   head: string | null;
   /** 同一原文（停法 + 标题 + 原因）引擎已经续过一次：这次不再续。 */
   retriedBefore: boolean;
+  /**
+   * 停下那一次的失败码（失败分流的 failure.code，小写原样）；引擎自己判的、没有失败的停下用 PARK_CODE_* 里的码（#3423）。
+   * 指挥官按它（和 rule）认运行环境类停法（decisions/park-triage.ts 的 triageKindOf），不按标题文字猜。只是查询里的状态，不进命令序；没有就是缺省。
+   */
+  code?: string;
+  /** 失败分流判的规则编号（failure/rules.ts 的 id，例如 WT1、KL4）；没有就是缺省。 */
+  rule?: string;
 }
+
+/** 停下时记给查询的失败码和规则编号（notePark 用）。 */
+export interface ParkCause {
+  code?: string | undefined;
+  rule?: string | undefined;
+}
+
+/** 换路由续不上（WALL_CLOCK_SWITCH_STALL）：总时长到顶换路由时选不到别的路由。不是失败分流判的，引擎自己给这个码。 */
+export const PARK_CODE_ROUTE_SWITCH = 'route_switch_stall';
+/** 没有可用的路由（选路一条都派不出）。 */
+export const PARK_CODE_NO_ROUTE = 'no_route';
 
 export interface TaskStatus {
   /** 最近一次安全边界核实的正式合同；没有＝旧历史/尚未核实。 */
