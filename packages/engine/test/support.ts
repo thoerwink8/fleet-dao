@@ -31,7 +31,7 @@ export function createEnv(): Promise<TestWorkflowEnvironment> {
 /**
  * 真的 Temporal 开发服务端（temporal server start-dev），不能跳时间。只给「测试服务端和真服务端行为不同」的用例用：
  * 比如测试服务端不会让已经请求叫停、又不心跳的活动超时（一直等工人回话），真服务端到了限时就判超时。
- * CLI 必须与 deploy/france.sh 固定版本相同；先 pnpm temporal:install 安装，或用 pnpm test:temporal --cli <绝对路径> 登记，或设 FLEET_TEST_TEMPORAL_CLI。
+ * CLI 必须与 deploy/france.sh 固定版本相同；先 pnpm test:temporal --cli <绝对路径> 登记，或设 FLEET_TEST_TEMPORAL_CLI。
  * 本机和 CI 都先核路径与版本，缺失明确失败；不在业务测试里隐式下载。
  */
 export function createRealEnv(): Promise<TestWorkflowEnvironment> {
