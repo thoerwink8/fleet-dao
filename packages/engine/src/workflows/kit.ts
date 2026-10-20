@@ -148,6 +148,7 @@ function startToCloseFor(activity: string, limits?: Limits): number | undefined 
     case 'createWorktree':
       return 20 * 60;
     case 'selfCheck':
+    case 'resolveConflictMechanically':
       return SELF_CHECK_ACTIVITY_MS / 1000;
     case 'waitMerged':
       return 20 * 60;
