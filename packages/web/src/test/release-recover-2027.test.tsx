@@ -270,7 +270,9 @@ for (const [kind, recover, last, opener, confirmName, needle] of [
     test(
       '【故意造出的失败】后端回 409：框留在原处写原因、弹失败提示，确认键恢复能再点（不当成成功）',
       traced(`${kind}-409`, async (mark) => {
-        const a = api(card(recover, last), () => Promise.reject(new Error('现在没有可点的按钮：刷新页面再看')));
+        const a = api(card(recover, last), () =>
+          Promise.reject(new Error('现在没有可点的按钮：刷新页面再看')),
+        );
         mark('渲染');
         renderApp(<France />, { api: a, route: '/france' });
         mark('等打开按钮');
@@ -329,7 +331,8 @@ describe('阶段标记的诊断合同（#3396）', () => {
     expect(lines[0]).toContain('[阶段标记·失败]');
     expect(lines[0]).toContain('另有 5 个标记未展开');
     expect(Buffer.byteLength(lines[0] ?? '', 'utf8')).toBeLessThanOrEqual(4096);
-    for (const m of ph.marks) expect(Buffer.byteLength(m.label, 'utf8')).toBeLessThanOrEqual(PHASE_LABEL_MAX_BYTES);
+    for (const m of ph.marks)
+      expect(Buffer.byteLength(m.label, 'utf8')).toBeLessThanOrEqual(PHASE_LABEL_MAX_BYTES);
   });
 
   test('正常收尾（stop）后不输出；输出口抛错不外冒', async () => {
