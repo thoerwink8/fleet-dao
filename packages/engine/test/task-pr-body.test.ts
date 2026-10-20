@@ -202,7 +202,7 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     expect(parseDeliveryClaim(`${FULL_ANSWER}x`).kind).toBe('unknown');
   });
 
-  it('【故意造出的失败】只认回复顶层末尾的声明：示例、外层围栏、引用块、缩进、HTML 注释里的都是 unknown（review 5584630520）', () => {
+  it('【故意造出的失败】只认回复顶层末尾的声明：示例、外层围栏、引用块、缩进、HTML 注释里的都是 unknown（review 5584630520、5585224386）', () => {
     const example = '```fleet-delivery\n{"scope":"full","owed":[]}\n```';
     const cases: [string, RegExp][] = [
       // 单个声明块后面接着写真实范围：不当完整交付
@@ -217,6 +217,12 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
       [`做了\n\n    ${example.split('\n').join('\n    ')}`, /不在回复顶层/],
       [`做了\n  ${example.split('\n').join('\n  ')}`, /不在回复顶层/],
       [`做了\n<!-- 示例\n${example}`, /HTML 注释/],
+      // review 5585224386：末尾三反引号关的是外层 markdown 示例块，里面的 fleet-delivery 只是外层代码内容
+      [`实际只交诊断，仍欠修复。以下只是协议示例：\n\`\`\`markdown\n${example}`, /不在回复顶层/],
+      [
+        `\`\`\`\`text\n实际只交诊断，仍欠修复。以下只是协议示例：\n\`\`\`markdown\n${example}\n\`\`\`\``,
+        /不在回复顶层/,
+      ],
       // 示例加末尾真声明：结构说不清，不挑一个信
       [`示例：\n\`\`\`\`\n${example}\n\`\`\`\`\n做了\n${example}`, /不止一个/],
       [`示例：\n> ${example.split('\n').join('\n> ')}\n\n做了\n${example}`, /不止一个/],
