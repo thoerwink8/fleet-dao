@@ -795,7 +795,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         };
       }
       if (pull.state !== 'open') {
-        return { armed: false, merged: false, why: `PR #${prNumber} 已经关了` };
+        return { armed: false, merged: false, why: `PR #${prNumber} 已经关了`, refused: 'closed' };
       }
       if (pull.headSha !== expectedHead) {
         return {
@@ -806,7 +806,12 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         };
       }
       if (pull.draft) {
-        return { armed: false, merged: false, why: `PR #${prNumber} 还是草稿，不挂自动合并` };
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 还是草稿，不挂自动合并`,
+          refused: 'draft',
+        };
       }
       const held = await reviewHold(repo, pull);
       if (held.length > 0) {

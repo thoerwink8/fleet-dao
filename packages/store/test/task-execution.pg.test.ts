@@ -3,6 +3,7 @@ import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fle
 import { afterAll, beforeAll } from 'vitest';
 import { createPgStore } from '../src/pg-store.ts';
 import { seedPg } from '../src/testing.ts';
+import { admissionSeed, describeAdmissionContract } from './task-admission-contract.ts';
 import { describeExecutionContract, EXECUTION_TIME, executionSeed } from './task-execution-contract.ts';
 import { readExecutionOperations } from './task-execution-pg-fixture.ts';
 import { describeExecutionSchema } from './task-execution-schema-contract.ts';
@@ -31,4 +32,14 @@ describeExecutionContract('执行资格 PgStore（默认PGlite）', async (contr
 describeExecutionSchema('执行资格SQL约束（默认PGlite）', async () => {
   await resetTestDb(t);
   return t;
+});
+
+describeAdmissionContract('出生/legacy PgStore（默认PGlite）', async () => {
+  await resetTestDb(t);
+  await seedPg(t.db, admissionSeed());
+  return {
+    store: createPgStore(t.db, { now: () => EXECUTION_TIME }),
+    rebuild: (now) => createPgStore(t.db, { now: () => now }),
+    audits: () => t.db.select().from(auditLog),
+  };
 });

@@ -188,6 +188,7 @@ const STAGE_WORDS: Record<StageKind, string> = {
   judge: '判断',
   groom: '整理待办',
   'intake-chat': '提需求',
+  commander: '指挥官',
 };
 /** 假数据里一次做成的结果：开 1、补 2、建议关 1、贴要人拍 1，单号给页面链到 GitHub。 */
 const MOCK_GROOM_OK_RESULT = {

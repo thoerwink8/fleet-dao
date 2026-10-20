@@ -1,6 +1,7 @@
 // 后端（@fleet-dao/api）和引擎（@fleet-dao/engine）共用、不碰 HTTP 的那一层。依赖方向只许 api → store、engine → store，
 // store 不许依赖 api、engine（packages/conventions/test/package-layers.test.ts 钉住）。
 export * from './alert-work.ts';
+export { checkoutNotificationProblem } from './checkout-history-logic.ts';
 export * from './deploy-lag.ts';
 export * from './dev-fixtures.ts';
 export * from './done-check.ts';
@@ -14,6 +15,7 @@ export * from './policy-source.ts';
 export * from './ports.ts';
 export * from './reconcile.ts';
 export * from './release-waits.ts';
+export { canonicalExecutionInput, executionInputHash } from './task-admission-logic.ts';
 export * from './task-execution.ts';
 export {
   actorFor,

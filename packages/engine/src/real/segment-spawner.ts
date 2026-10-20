@@ -249,10 +249,21 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
   return async (cmd) => {
     const { input } = cmd;
     const runId = input.runId;
-    const { route, driver, user } = await resolveSegmentRoute(deps, input.routeId);
+    const attach = cmd.detach?.attach === true;
+    // 已在跑的 attach 要把叫停交给驱动；新会话的准备不能在取消后再启动。
+    const preparing = () => {
+      if (!attach) cmd.signal.throwIfAborted();
+    };
+    preparing();
+    let resolved: Awaited<ReturnType<typeof resolveSegmentRoute>>;
+    try {
+      resolved = await resolveSegmentRoute(deps, input.routeId);
+    } finally {
+      preparing();
+    }
+    const { route, driver, user } = resolved;
     const handoff = deps.handoff;
     const detach = cmd.detach && handoff && DETACHABLE_HOSTS.has(driver.hostId) ? handoff : undefined;
-    const attach = cmd.detach?.attach === true;
     if (attach && !detach) {
       throw new Error(
         `接回会话 ${runId} 没接成：${handoff ? `执行方式 ${driver.hostId} 不走文件` : '这个引擎没装收发目录'}，读不到它的输出`,
@@ -264,148 +275,18 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
 
     const tmpDir = deps.trees.tmpFor(runId);
     // 接回的临时目录还归会话在用：不重新交接
-    const tmpIdentity = !attach ? await deps.trees.adoptTemporary(tmpDir, user) : undefined;
-    if (detach && !attach) await ensureIoRoot(detach.root);
-    // 接回：先删放手标记——删了收孤儿就不会再当它没人接
-    if (io && attach) await clearDetached(io.dir);
-    const spec: HostRunSpec = {
-      runId,
-      user,
-      cwd: cmd.cwd,
-      prompt: cmd.stdin,
-      // 一次性段不用 fleet 命令（只认 stdout / 退出码 / 提交）：不发通行证，命令连不上后端是预期
-      env: { base: deps.baseEnv, fleetApi: '', fleetToken: '', pathPrepend: [], tmpDir },
-      limits: { wallClockMs: Math.max(MIN_WALL_MS, cmd.timeoutMs - SEGMENT_WALL_MARGIN_MS) },
-      testCommands: [],
-      // 命令行那几家用这个 id 起 fleet-agent-<runId>.scope。Mirasim 的驱动不用它，也不按它采样。
-      cgroup: {
-        id: runId,
-        user,
-        limits: {
-          memoryHigh: sizeArg('memoryHighMb', deps.resources.memoryHighMb),
-          memoryMax: sizeArg('memoryMaxMb', deps.resources.memoryMaxMb),
-          memorySwapMax: sizeArg('swapMaxMb', deps.resources.swapMaxMb),
-        },
-        ...(deps.helper ? { helper: deps.helper } : {}),
-        ...(deps.sudo ? { sudo: deps.sudo } : {}),
-      },
-      model: route.upstreamModel ?? route.modelId,
-      ...(route.executor ? { executor: route.executor } : {}),
-      // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
-      ...(route.effort !== null ? { effort: route.effort } : {}),
-      ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
-      // 给了会话号就续它（动手段续上一段、指挥官会话），不给开新的。接回时新会话的号照执行编号算回当初命令行上那个
-      // （hosts.ts 的 sessionUuidOf），核对会话号、记账才对得上
-      session: cmd.resumeSessionId
-        ? { mode: 'resume', id: cmd.resumeSessionId }
-        : { mode: 'new', id: driver.newSessionId(runId).id },
-      purpose: 'work',
-    };
-    // 内存峰值（#948）：会话跑着时采它 scope 的 memory.peak，收场后交结果；scope 一收场 cgroup 就没了，只能边跑边读
-    // 会话过程记录（#1640）：提示词记第一条，插头交来的接着记；收场前等写完。
-    // 外键要求 runs 里先有这一行。三段会话由 runOneShot 先写开跑那一行（有了就不改）。
-    // 提需求、临时指挥官不走 runOneShot：补一行没有 route_id 的锚点（不占池的名额），收场再补结局。
-    const db = deps.db;
-    const write =
-      deps.transcriptWrite ??
-      (db ? (id: string, rows: TranscriptRow[]) => appendRunTranscript(db, id, rows) : undefined);
-    let transcriptAnchor = false;
-    if (write && db && deps.transcriptWrite === undefined) {
-      try {
-        transcriptAnchor = await ensureRunForTranscript(db, {
-          id: runId,
-          segment: input.segment,
-          model: input.modelId,
-        });
-      } catch (err) {
-        log('会话过程记录的锚点行没写上（过程记录可能整批写不进）', { runId, ...dbWriteFailure(err) });
-      }
-    }
-    // Mirasim 接回（#2815）：重读订阅回的快照拼不出和放手前一模一样的条目，不能靠重复编号去重；接回的记录员从交接单里记的序号
-    // 接着编，订阅回的旧内容（meta.replay）不记
-    const mirasimAttach = attach && driver.hostId === 'mirasim' && io !== undefined;
-    const attachHandle = mirasimAttach ? await readMirasimHandle(io.dir).catch(() => undefined) : undefined;
-    const recorder = write
-      ? new TranscriptRecorder({
-          runId,
-          write,
-          log,
-          ...(attachHandle?.transcriptNext === undefined ? {} : { startSeq: attachHandle.transcriptNext }),
-          ...(deps.transcriptFlushMs === undefined ? {} : { flushEveryMs: deps.transcriptFlushMs }),
+    const tmpIdentity = !attach
+      ? await deps.trees.adoptTemporary(tmpDir, user, cmd.signal).catch((error: unknown) => {
+          log('临时目录认领未取得原始身份，若操作已发出则保留给任务/TTL门后的孤儿清理', {
+            runId,
+            tmpDir,
+            error: errMessage(error),
+          });
+          cmd.signal.throwIfAborted();
+          throw error;
         })
       : undefined;
-    const sessionWrites: Promise<void>[] = [];
-    const observeSessionId = (sessionId: string): void => {
-      if (/^[a-z]+-pending:/.test(sessionId)) return;
-      const observe = deps.runs?.observeSessionId;
-      if (!observe) return;
-      sessionWrites.push(
-        observe(runId, sessionId).catch((error: unknown) => {
-          log('流里拿到的会话号没提前写回 runs', { runId, sessionId, error: errMessage(error) });
-        }),
-      );
-    };
-    let anchorOutcome: 'done' | 'failed' | 'killed' | undefined;
-    // 接回时提示词那一条（编号 0）上一个引擎记过了：占住编号，后面重读出来的条目编号和原来一样，库里按编号跳过重复的
-    if (!(mirasimAttach && attachHandle?.transcriptNext !== undefined))
-      recorder?.prompt(attach ? '' : cmd.stdin);
-    // Mirasim 的模型会话不在 fleet-agent-<runId>.scope 里（那个目录根本不会建）。本机 scope 是桥接自己起的
-    // fleet-agent-mirasim-<随机>.scope，一次会话还不止一个，读到的也只是桥接。不拿它填用量。
-    const sampleLocalScope = driver.hostId !== 'mirasim';
-    const peak = sampleLocalScope && deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
-    let peakResult: MemoryPeakResult | undefined;
-    const finishPeak = async (): Promise<MemoryPeakResult | undefined> => {
-      if (peakResult) return peakResult;
-      if (!sampleLocalScope) {
-        peakResult = { why: MIRASIM_MEMORY_UNREAD };
-        log('会话内存峰值没读到', { runId, why: peakResult.why });
-        return peakResult;
-      }
-      if (!peak) return undefined;
-      peakResult = await peak.stop();
-      if (peakResult.why !== undefined) log('会话内存峰值没读到', { runId, why: peakResult.why });
-      return peakResult;
-    };
-    // CPU 秒数（#1980）：和内存峰值同一段时间采这个 scope 的 cpu.stat；收场那一读在 stop() 里。scope 一收场 cgroup 就没了。
-    const cpu = sampleLocalScope && deps.cpuUsage ? sampleCpuUsage(deps.cpuUsage, runId) : undefined;
-    let cpuResult: CpuUsageResult | undefined;
-    const finishCpu = async (): Promise<CpuUsageResult | undefined> => {
-      if (cpuResult) return cpuResult;
-      if (!sampleLocalScope) {
-        cpuResult = { why: MIRASIM_CPU_UNREAD };
-        log('会话 CPU 没读到', { runId, why: cpuResult.why });
-        return cpuResult;
-      }
-      if (!cpu) return undefined;
-      cpuResult = await cpu.stop();
-      if (cpuResult.why !== undefined) log('会话 CPU 没读到', { runId, why: cpuResult.why });
-      return cpuResult;
-    };
-    // 过程记录和调用方的流（指挥官会话推给页面）都要：调用方的抛了只记日志
-    const listen = cmd.onTranscript;
-    const onTranscript =
-      recorder || listen
-        ? (entry: TranscriptEntry, meta?: { replay: boolean }) => {
-            if (!(mirasimAttach && meta?.replay)) recorder?.record(entry);
-            if (!listen) return;
-            try {
-              listen(entry);
-            } catch (err) {
-              log('会话过程的流没交出去', { runId, error: errMessage(err) });
-            }
-          }
-        : undefined;
-    let detached = false;
-    const cleanup = async (): Promise<void> => {
-      if (io) {
-        await removeIo(io.dir).catch((err: unknown) => {
-          log('动手会话的收发目录没删掉（引擎下次起来时的清理会收）', {
-            runId,
-            dir: io.dir,
-            error: errMessage(err),
-          });
-        });
-      }
+    const cleanupTemporary = async (): Promise<void> => {
       if (!tmpIdentity) {
         log('接回会话没有原始临时目录身份，保留给任务/TTL门后的孤儿清理', { runId, tmpDir });
         return;
@@ -418,149 +299,305 @@ export function hostSegmentSpawner(deps: SegmentSpawnerDeps): OneShotSpawner {
         });
       });
     };
-    const leaveHandoff = io && detach ? detach.enter(runId) : undefined;
+    // 临时目录的责任从拿到原始身份起就开始；取消可能发生在完整会话生命周期进入之前。
+    let lifecycleEntered = false;
     try {
-      if (io) cmd.detach?.detachable?.();
-      const running = driver.run(spec, {
-        signal: cmd.signal,
-        ...(onTranscript ? { onTranscript } : {}),
-        ...(io ? { io } : {}),
-        ...(deps.db
-          ? { onRateLimit: (reading: RateLimitReading) => saveReading(deps.db as Db, route, reading) }
-          : {}),
-        onSessionId: observeSessionId,
-      });
-      // 放手：写标记、交回 detached（会话和收发目录都留给下一个引擎）
-      const letGo = async (dir: string): Promise<SpawnOutcome> => {
-        detached = true;
-        const at = new Date();
-        try {
-          await markDetached(dir, at);
-        } catch (err) {
-          // 标记没写上：新引擎收孤儿时会把它当没人接的收掉，接回那一步读不到输出、照实报
-          log('放手标记没写上（新引擎起来可能把这个会话当孤儿收掉）', { runId, error: errMessage(err) });
-        }
-        log(`引擎要走了：${input.segment === 'verify' ? '验收' : '动手'}会话脱开接着跑，下一个引擎接回`, {
-          runId,
-          dir,
-        });
-        return {
-          exitCode: null,
-          stdout: '',
-          stderr: '',
-          killed: false,
-          detached: { at: at.toISOString() },
-        };
+      preparing();
+      if (detach && !attach) await ensureIoRoot(detach.root);
+      preparing();
+      // 接回：先删放手标记——删了收孤儿就不会再当它没人接
+      if (io && attach) await clearDetached(io.dir);
+      const spec: HostRunSpec = {
+        runId,
+        user,
+        cwd: cmd.cwd,
+        prompt: cmd.stdin,
+        // 一次性段不用 fleet 命令（只认 stdout / 退出码 / 提交）：不发通行证，命令连不上后端是预期
+        env: { base: deps.baseEnv, fleetApi: '', fleetToken: '', pathPrepend: [], tmpDir },
+        limits: { wallClockMs: Math.max(MIN_WALL_MS, cmd.timeoutMs - SEGMENT_WALL_MARGIN_MS) },
+        testCommands: [],
+        // 命令行那几家用这个 id 起 fleet-agent-<runId>.scope。Mirasim 的驱动不用它，也不按它采样。
+        cgroup: {
+          id: runId,
+          user,
+          limits: {
+            memoryHigh: sizeArg('memoryHighMb', deps.resources.memoryHighMb),
+            memoryMax: sizeArg('memoryMaxMb', deps.resources.memoryMaxMb),
+            memorySwapMax: sizeArg('swapMaxMb', deps.resources.swapMaxMb),
+          },
+          ...(deps.helper ? { helper: deps.helper } : {}),
+          ...(deps.sudo ? { sudo: deps.sudo } : {}),
+        },
+        model: route.upstreamModel ?? route.modelId,
+        ...(route.executor ? { executor: route.executor } : {}),
+        // 两个来源原样交给驱动，合成哪一档只在 hosts.ts 的 sessionEffortFor：路由配的是上限，分档只往下压
+        ...(route.effort !== null ? { effort: route.effort } : {}),
+        ...(input.effort !== undefined ? { tierEffort: input.effort } : {}),
+        // 给了会话号就续它（动手段续上一段、指挥官会话），不给开新的。接回时新会话的号照执行编号算回当初命令行上那个
+        // （hosts.ts 的 sessionUuidOf），核对会话号、记账才对得上
+        session: cmd.resumeSessionId
+          ? { mode: 'resume', id: cmd.resumeSessionId }
+          : { mode: 'new', id: driver.newSessionId(runId).id },
+        purpose: 'work',
       };
-      let report: HostReport;
-      if (io && detach && driver.hostId !== 'mirasim') {
-        // 引擎要走了：命令行那几家的驱动放手以后这次调用永远不落定（detached.ts），所以和放手信号赛跑；放手先到就交回 detached
-        const released = new Promise<null>((resolve) => {
-          if (detach.signal.aborted) resolve(null);
-          else detach.signal.addEventListener('abort', () => resolve(null), { once: true });
-        });
-        const first = await Promise.race([running, released]);
-        if (first === null) {
-          running.catch(() => undefined);
-          return await letGo(io.dir);
+      // 内存峰值（#948）：会话跑着时采它 scope 的 memory.peak，收场后交结果；scope 一收场 cgroup 就没了，只能边跑边读
+      // 会话过程记录（#1640）：提示词记第一条，插头交来的接着记；收场前等写完。
+      // 外键要求 runs 里先有这一行。三段会话由 runOneShot 先写开跑那一行（有了就不改）。
+      // 提需求、临时指挥官不走 runOneShot：补一行没有 route_id 的锚点（不占池的名额），收场再补结局。
+      const db = deps.db;
+      const write =
+        deps.transcriptWrite ??
+        (db ? (id: string, rows: TranscriptRow[]) => appendRunTranscript(db, id, rows) : undefined);
+      let transcriptAnchor = false;
+      if (write && db && deps.transcriptWrite === undefined) {
+        try {
+          transcriptAnchor = await ensureRunForTranscript(db, {
+            id: runId,
+            segment: input.segment,
+            model: input.modelId,
+          });
+        } catch (err) {
+          log('会话过程记录的锚点行没写上（过程记录可能整批写不进）', { runId, ...dbWriteFailure(err) });
         }
-        report = first;
-      } else {
-        report = await running;
-        // Mirasim（#2815）：插头放手以后会交回一份「放手了」的报告（不赛跑：它要等到服务端接下、有了会话号才放手，
-        // 交接单在那一刻已经写好）。交接单不在就接不回，日志里明说
-        if (report.detached && io) {
-          const handle = await readMirasimHandle(io.dir).catch(() => undefined);
-          if (!handle) {
-            log('Mirasim 会话放手了，可交接单没有（新引擎接不回，会话要等孤儿清扫收）', {
+      }
+      // Mirasim 接回（#2815）：重读订阅回的快照拼不出和放手前一模一样的条目，不能靠重复编号去重；接回的记录员从交接单里记的序号
+      // 接着编，订阅回的旧内容（meta.replay）不记
+      const mirasimAttach = attach && driver.hostId === 'mirasim' && io !== undefined;
+      const attachHandle = mirasimAttach ? await readMirasimHandle(io.dir).catch(() => undefined) : undefined;
+      const recorder = write
+        ? new TranscriptRecorder({
+            runId,
+            write,
+            log,
+            ...(attachHandle?.transcriptNext === undefined ? {} : { startSeq: attachHandle.transcriptNext }),
+            ...(deps.transcriptFlushMs === undefined ? {} : { flushEveryMs: deps.transcriptFlushMs }),
+          })
+        : undefined;
+      const sessionWrites: Promise<void>[] = [];
+      const observeSessionId = (sessionId: string): void => {
+        if (/^[a-z]+-pending:/.test(sessionId)) return;
+        const observe = deps.runs?.observeSessionId;
+        if (!observe) return;
+        sessionWrites.push(
+          observe(runId, sessionId).catch((error: unknown) => {
+            log('流里拿到的会话号没提前写回 runs', { runId, sessionId, error: errMessage(error) });
+          }),
+        );
+      };
+      let anchorOutcome: 'done' | 'failed' | 'killed' | undefined;
+      // 接回时提示词那一条（编号 0）上一个引擎记过了：占住编号，后面重读出来的条目编号和原来一样，库里按编号跳过重复的
+      if (!(mirasimAttach && attachHandle?.transcriptNext !== undefined))
+        recorder?.prompt(attach ? '' : cmd.stdin);
+      // Mirasim 的模型会话不在 fleet-agent-<runId>.scope 里（那个目录根本不会建）。本机 scope 是桥接自己起的
+      // fleet-agent-mirasim-<随机>.scope，一次会话还不止一个，读到的也只是桥接。不拿它填用量。
+      const sampleLocalScope = driver.hostId !== 'mirasim';
+      const peak = sampleLocalScope && deps.memoryPeak ? sampleMemoryPeak(deps.memoryPeak, runId) : undefined;
+      let peakResult: MemoryPeakResult | undefined;
+      const finishPeak = async (): Promise<MemoryPeakResult | undefined> => {
+        if (peakResult) return peakResult;
+        if (!sampleLocalScope) {
+          peakResult = { why: MIRASIM_MEMORY_UNREAD };
+          log('会话内存峰值没读到', { runId, why: peakResult.why });
+          return peakResult;
+        }
+        if (!peak) return undefined;
+        peakResult = await peak.stop();
+        if (peakResult.why !== undefined) log('会话内存峰值没读到', { runId, why: peakResult.why });
+        return peakResult;
+      };
+      // CPU 秒数（#1980）：和内存峰值同一段时间采这个 scope 的 cpu.stat；收场那一读在 stop() 里。scope 一收场 cgroup 就没了。
+      const cpu = sampleLocalScope && deps.cpuUsage ? sampleCpuUsage(deps.cpuUsage, runId) : undefined;
+      let cpuResult: CpuUsageResult | undefined;
+      const finishCpu = async (): Promise<CpuUsageResult | undefined> => {
+        if (cpuResult) return cpuResult;
+        if (!sampleLocalScope) {
+          cpuResult = { why: MIRASIM_CPU_UNREAD };
+          log('会话 CPU 没读到', { runId, why: cpuResult.why });
+          return cpuResult;
+        }
+        if (!cpu) return undefined;
+        cpuResult = await cpu.stop();
+        if (cpuResult.why !== undefined) log('会话 CPU 没读到', { runId, why: cpuResult.why });
+        return cpuResult;
+      };
+      // 过程记录和调用方的流（指挥官会话推给页面）都要：调用方的抛了只记日志
+      const listen = cmd.onTranscript;
+      const onTranscript =
+        recorder || listen
+          ? (entry: TranscriptEntry, meta?: { replay: boolean }) => {
+              if (!(mirasimAttach && meta?.replay)) recorder?.record(entry);
+              if (!listen) return;
+              try {
+                listen(entry);
+              } catch (err) {
+                log('会话过程的流没交出去', { runId, error: errMessage(err) });
+              }
+            }
+          : undefined;
+      let detached = false;
+      const cleanup = async (): Promise<void> => {
+        if (io) {
+          await removeIo(io.dir).catch((err: unknown) => {
+            log('动手会话的收发目录没删掉（引擎下次起来时的清理会收）', {
               runId,
               dir: io.dir,
+              error: errMessage(err),
+            });
+          });
+        }
+        await cleanupTemporary();
+      };
+      const leaveHandoff = io && detach ? detach.enter(runId) : undefined;
+      lifecycleEntered = true;
+      try {
+        preparing();
+        if (io) cmd.detach?.detachable?.();
+        const running = driver.run(spec, {
+          signal: cmd.signal,
+          ...(onTranscript ? { onTranscript } : {}),
+          ...(io ? { io } : {}),
+          ...(deps.db
+            ? { onRateLimit: (reading: RateLimitReading) => saveReading(deps.db as Db, route, reading) }
+            : {}),
+          onSessionId: observeSessionId,
+        });
+        // 放手：写标记、交回 detached（会话和收发目录都留给下一个引擎）
+        const letGo = async (dir: string): Promise<SpawnOutcome> => {
+          detached = true;
+          const at = new Date();
+          try {
+            await markDetached(dir, at);
+          } catch (err) {
+            // 标记没写上：新引擎收孤儿时会把它当没人接的收掉，接回那一步读不到输出、照实报
+            log('放手标记没写上（新引擎起来可能把这个会话当孤儿收掉）', { runId, error: errMessage(err) });
+          }
+          log(`引擎要走了：${input.segment === 'verify' ? '验收' : '动手'}会话脱开接着跑，下一个引擎接回`, {
+            runId,
+            dir,
+          });
+          return {
+            exitCode: null,
+            stdout: '',
+            stderr: '',
+            killed: false,
+            detached: { at: at.toISOString() },
+          };
+        };
+        let report: HostReport;
+        if (io && detach && driver.hostId !== 'mirasim') {
+          // 引擎要走了：命令行那几家的驱动放手以后这次调用永远不落定（detached.ts），所以和放手信号赛跑；放手先到就交回 detached
+          const released = new Promise<null>((resolve) => {
+            if (detach.signal.aborted) resolve(null);
+            else detach.signal.addEventListener('abort', () => resolve(null), { once: true });
+          });
+          const first = await Promise.race([running, released]);
+          if (first === null) {
+            running.catch(() => undefined);
+            return await letGo(io.dir);
+          }
+          report = first;
+        } else {
+          report = await running;
+          // Mirasim（#2815）：插头放手以后会交回一份「放手了」的报告（不赛跑：它要等到服务端接下、有了会话号才放手，
+          // 交接单在那一刻已经写好）。交接单不在就接不回，日志里明说
+          if (report.detached && io) {
+            const handle = await readMirasimHandle(io.dir).catch(() => undefined);
+            if (!handle) {
+              log('Mirasim 会话放手了，可交接单没有（新引擎接不回，会话要等孤儿清扫收）', {
+                runId,
+                dir: io.dir,
+              });
+            }
+            return await letGo(io.dir);
+          }
+        }
+        await Promise.all(sessionWrites);
+        const outcome = outcomeOfReport(report);
+        const measured = await finishPeak();
+        if (measured) {
+          outcome.facts = {
+            ...outcome.facts,
+            ...(measured.mb !== undefined ? { memoryPeakMb: measured.mb } : { memoryPeakWhy: measured.why }),
+          };
+        }
+        const measuredCpu = await finishCpu();
+        if (measuredCpu) {
+          outcome.facts = {
+            ...outcome.facts,
+            ...(measuredCpu.seconds !== undefined
+              ? { cpuSeconds: measuredCpu.seconds }
+              : { cpuWhy: measuredCpu.why }),
+          };
+        }
+        if (
+          deps.onCarpoolRejection &&
+          route.orgKind === 'carpool' &&
+          !outcome.killed &&
+          outcome.exitCode !== 0
+        ) {
+          const resets = outcome.facts?.resetsAt ? new Date(outcome.facts.resetsAt) : undefined;
+          try {
+            deps.onCarpoolRejection({
+              at: new Date(),
+              ...(outcome.facts?.quotaExhausted ? { code: 'quota_exhausted' } : {}),
+              ...(outcome.facts?.httpStatus !== undefined ? { httpStatus: outcome.facts.httpStatus } : {}),
+              ...(resets && !Number.isNaN(resets.getTime()) ? { resetsAt: resets } : {}),
+              // 执行体报的原话（reclaude 的「拼车 5 小时额度已用完，约 N 分钟后重置」在终帧里）排在前面：判是哪一种、几点恢复靠它
+              text: [
+                report.facts.terminal?.detail,
+                outcome.facts?.detail,
+                outcome.facts?.rawError,
+                outcome.stderr,
+              ]
+                .filter(Boolean)
+                .join('\n'),
+            });
+          } catch (err) {
+            log('拼车被拒的证据没交给切号', { runId, error: errMessage(err) });
+          }
+        }
+        anchorOutcome = outcome.killed ? 'killed' : outcome.exitCode === 0 ? 'done' : 'failed';
+        return outcome;
+      } finally {
+        leaveHandoff?.();
+        await recorder?.close();
+        // Mirasim 放手：交接单里记下过程记录写到了第几条，接回的记录员从这里接着编
+        if (detached && recorder && io && driver.hostId === 'mirasim') {
+          try {
+            const handle = await readMirasimHandle(io.dir);
+            if (handle) writeMirasimHandle(io.dir, { ...handle, transcriptNext: recorder.nextSeq });
+          } catch (err) {
+            log('Mirasim 交接单没补上过程记录的序号（接回后的过程记录可能和放手前的编号重了）', {
+              runId,
+              error: errMessage(err),
             });
           }
-          return await letGo(io.dir);
         }
-      }
-      await Promise.all(sessionWrites);
-      const outcome = outcomeOfReport(report);
-      const measured = await finishPeak();
-      if (measured) {
-        outcome.facts = {
-          ...outcome.facts,
-          ...(measured.mb !== undefined ? { memoryPeakMb: measured.mb } : { memoryPeakWhy: measured.why }),
-        };
-      }
-      const measuredCpu = await finishCpu();
-      if (measuredCpu) {
-        outcome.facts = {
-          ...outcome.facts,
-          ...(measuredCpu.seconds !== undefined
-            ? { cpuSeconds: measuredCpu.seconds }
-            : { cpuWhy: measuredCpu.why }),
-        };
-      }
-      if (
-        deps.onCarpoolRejection &&
-        route.orgKind === 'carpool' &&
-        !outcome.killed &&
-        outcome.exitCode !== 0
-      ) {
-        const resets = outcome.facts?.resetsAt ? new Date(outcome.facts.resetsAt) : undefined;
-        try {
-          deps.onCarpoolRejection({
-            at: new Date(),
-            ...(outcome.facts?.quotaExhausted ? { code: 'quota_exhausted' } : {}),
-            ...(outcome.facts?.httpStatus !== undefined ? { httpStatus: outcome.facts.httpStatus } : {}),
-            ...(resets && !Number.isNaN(resets.getTime()) ? { resetsAt: resets } : {}),
-            // 执行体报的原话（reclaude 的「拼车 5 小时额度已用完，约 N 分钟后重置」在终帧里）排在前面：判是哪一种、几点恢复靠它
-            text: [
-              report.facts.terminal?.detail,
-              outcome.facts?.detail,
-              outcome.facts?.rawError,
-              outcome.stderr,
-            ]
-              .filter(Boolean)
-              .join('\n'),
-          });
-        } catch (err) {
-          log('拼车被拒的证据没交给切号', { runId, error: errMessage(err) });
+        // 只收自己补的那一行。三段会话的开跑行留给 runOneShot 收场，带着用量；脱开引擎跑的还没结束，留着。
+        if (transcriptAnchor && !detached && db) {
+          const settled = anchorOutcome ?? 'failed';
+          try {
+            await finishRun(db, {
+              runId,
+              outcome: settled,
+              ...(settled === 'done'
+                ? {}
+                : { failureReason: settled === 'killed' ? '会话被叫停或超时' : '会话没成功收场' }),
+            });
+          } catch (err) {
+            log('会话过程记录的锚点行没收到场', { runId, ...dbWriteFailure(err) });
+          }
         }
+        await finishPeak().catch(() => undefined);
+        await finishCpu().catch(() => undefined);
+        // 放手了：临时目录、收发目录都留给接回的那个引擎
+        if (!detached) await cleanup();
       }
-      anchorOutcome = outcome.killed ? 'killed' : outcome.exitCode === 0 ? 'done' : 'failed';
-      return outcome;
     } finally {
-      leaveHandoff?.();
-      await recorder?.close();
-      // Mirasim 放手：交接单里记下过程记录写到了第几条，接回的记录员从这里接着编
-      if (detached && recorder && io && driver.hostId === 'mirasim') {
-        try {
-          const handle = await readMirasimHandle(io.dir);
-          if (handle) writeMirasimHandle(io.dir, { ...handle, transcriptNext: recorder.nextSeq });
-        } catch (err) {
-          log('Mirasim 交接单没补上过程记录的序号（接回后的过程记录可能和放手前的编号重了）', {
-            runId,
-            error: errMessage(err),
-          });
-        }
+      if (!lifecycleEntered && !attach) {
+        await cleanupTemporary();
+        preparing();
       }
-      // 只收自己补的那一行。三段会话的开跑行留给 runOneShot 收场，带着用量；脱开引擎跑的还没结束，留着。
-      if (transcriptAnchor && !detached && db) {
-        const settled = anchorOutcome ?? 'failed';
-        try {
-          await finishRun(db, {
-            runId,
-            outcome: settled,
-            ...(settled === 'done'
-              ? {}
-              : { failureReason: settled === 'killed' ? '会话被叫停或超时' : '会话没成功收场' }),
-          });
-        } catch (err) {
-          log('会话过程记录的锚点行没收到场', { runId, ...dbWriteFailure(err) });
-        }
-      }
-      await finishPeak().catch(() => undefined);
-      await finishCpu().catch(() => undefined);
-      // 放手了：临时目录、收发目录都留给接回的那个引擎
-      if (!detached) await cleanup();
     }
   };
 }

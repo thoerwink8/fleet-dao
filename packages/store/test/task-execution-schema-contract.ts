@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { IDS } from '../src/dev-fixtures.ts';
 import { createPgStore } from '../src/pg-store.ts';
 import { seedPg } from '../src/testing.ts';
+import { birthInput, legacyInput, requiredAdmissionTask } from './task-admission-contract.ts';
 import {
   EXECUTION_TIME,
   executionAudit,
@@ -109,6 +110,70 @@ export function describeExecutionSchema(name: string, setup: () => Promise<TestD
         kind: 'rejected',
         reason: 'unmanaged',
       });
+    });
+    it('出生DB约束拒绝半条、未知protocol、错epoch和坏hash', async () => {
+      const store = createPgStore(t.db, { now: () => EXECUTION_TIME });
+      const input = birthInput();
+      expect(await store.createManagedTaskFromIssue(input, executionAudit)).toMatchObject({
+        kind: 'created',
+      });
+      for (const change of [
+        'protocol_version=2',
+        "namespace=' '",
+        "workflow_type='unknown'",
+        "task_queue=' '",
+        "birth_input_canonical=' '",
+        "birth_input_hash='bad'",
+        'birth_request_id=null',
+        'created_at=null',
+        `coverage_epoch='${randomUUID()}'`,
+      ])
+        await expect(t.client.exec(`update task_execution_births set ${change}`)).rejects.toThrow();
+      await expect(
+        t.client.query('update task_execution_controls set coverage_epoch=$1 where task_id=$2', [
+          randomUUID(),
+          input.task.id,
+        ]),
+      ).rejects.toThrow();
+      await expect(
+        t.client.query('insert into task_execution_births(task_id) values($1)', [IDS.task12]),
+      ).rejects.toThrow();
+    });
+    it('legacy DB约束按namespace/run唯一，拒半条和非法代次', async () => {
+      const store = createPgStore(t.db, { now: () => EXECUTION_TIME });
+      const task = requiredAdmissionTask(await store.findTaskByIssue(IDS.repo, 13));
+      expect(await store.admitLegacyExecution(legacyInput(task), executionAudit)).toMatchObject({
+        kind: 'admitted',
+      });
+      for (const change of [
+        'schema_version=2',
+        'generation=0',
+        'generation=21',
+        "namespace=' '",
+        "workflow_id=' '",
+        "workflow_type='unknown'",
+        "task_queue=' '",
+        "input_canonical=' '",
+        "input_hash='bad'",
+        'admitted_at=null',
+        'run_id=null',
+      ])
+        await expect(
+          t.client.exec(`update task_legacy_execution_admissions set ${change}`),
+        ).rejects.toThrow();
+      await expect(
+        t.client.query('insert into task_legacy_execution_admissions(id,task_id) values($1,$2)', [
+          randomUUID(),
+          task.id,
+        ]),
+      ).rejects.toThrow();
+      // workflowId改写也不能绕开(namespace,runId)唯一键。
+      await expect(
+        t.client.query(
+          `insert into task_legacy_execution_admissions select $1::uuid,schema_version,task_id,namespace,workflow_id||':r2',run_id,workflow_type,task_queue,2,input_canonical,input_hash,admitted_at from task_legacy_execution_admissions`,
+          [randomUUID()],
+        ),
+      ).rejects.toThrow();
     });
   });
 }

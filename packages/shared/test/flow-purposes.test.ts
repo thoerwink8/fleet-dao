@@ -24,7 +24,16 @@ describe('三段 → 用途', () => {
       ['judge', 'Jev 判断', true],
       ['groom', '整理待办', true],
       ['intake-chat', '提需求', true],
+      ['commander', '指挥官', true],
     ]);
+  });
+
+  it('指挥官（commander，#3294 第 2 片）出现在路由目录里：路由页那一行就是「指派指挥官」的入口；Fable 照样只有创始人本人能配', () => {
+    expect(ROUTING_PURPOSE_IDS).toContain('commander');
+    expect(routingPurposeLabel('commander')).toBe('指挥官');
+    const fable = { id: 'claude-fable-5.2', family: 'claude', displayName: 'Claude Fable 5.2' };
+    expect(hardBanFor(fable, 'commander')).toBeUndefined();
+    expect(founderOnlyFor(fable)?.id).toBe('fable-founder-only');
   });
 
   it('提需求（intake-chat，#2061）出现在路由目录里；Fable 照样只有创始人本人能配进这个用途', () => {

@@ -8,9 +8,10 @@
 // 每一项都分清「查了、0 个问题」和「这次没查成」：读不到 GitHub 就报 unscanned，不报 ok；做了一半报 partial，全没做成报 failed。
 import { errMessage } from '@fleet-dao/shared/util';
 import { z } from 'zod';
-import { enc, type Logger, parseRepoSlug, repoSlug } from './client.ts';
+import { enc, type GhRequest, type Logger, nextLink, parseRepoSlug, repoSlug } from './client.ts';
 import type { Deps } from './deps.ts';
 import { type EchoKind, echoOf } from './echo.ts';
+import { isGitHubError } from './errors.ts';
 import { mirrorExtrasOf } from './events.ts';
 import { HYGIENE_REPO } from './hygiene-scope.ts';
 import { type MergeReceipt, mergeKey, readPull } from './pulls.ts';
@@ -106,6 +107,60 @@ export interface ReconcilerOptions {
   storedDeliveries?: ((guids: readonly string[]) => Promise<ReadonlySet<string>>) | undefined;
   /** 一次最多重投几个（重投是写请求，要串行、要间隔），默认 50。 */
   maxRedeliveries?: number | undefined;
+  /**
+   * 投递日志最多翻几页（每页 100 条），默认 DELIVERY_MAX_PAGES。翻到上限还没翻到 since：翻到的那一截照样重投，
+   * 这一步报 partial（没查全，不推进成功水位）。
+   */
+  maxDeliveryPages?: number | undefined;
+}
+
+/**
+ * 投递日志默认最多翻 200 页 = 2 万条。client 通用的 50 页（5000 条）在发布勤的时候几小时就满（法国实测 2026-10-20：
+ * 每 15 分钟撞一次 50 页上限、一轮轮报没查全、一个都不重投，since 停在原地，窗口越拉越长、越翻越翻不完）。
+ * 定时任务在引擎进程里跑、没有活动超时；GitHub 每页约 1 秒，翻满也只要几分钟，落在 15 分钟一轮里。
+ */
+export const DELIVERY_MAX_PAGES = 200;
+
+/** 翻页位置：下一页的查询参数（GitHub 在 Link 头里给游标，原样带回去）。 */
+type ScanCursor = Record<string, string>;
+/**
+ * 翻到页数上限时留下的续扫位置：[cursor 之前, newestAt 到现在] 已经查全，更早的接着从 cursor 翻。
+ * 下一轮先从最新翻到 newestAt（这中间新来的），再从 cursor 往更早接。
+ */
+interface ResumeState {
+  newestAt: string;
+  cursor: ScanCursor;
+  /**
+   * 前几轮已查到、还没重投成的失败投递（超出一次的重投名额、或重投失败的）。续扫不会再翻回那一段，所以连同位置一起带着，
+   * 下一轮并回待重投名单；这样名额不够、重投失败也不必停住不存位置，水位照样能往前翻。
+   */
+  pending: PendingDelivery[];
+}
+interface PendingDelivery {
+  guid: string;
+  id: string;
+  deliveredAt: string;
+}
+const ResumeStateSchema = z.object({
+  newestAt: z.string(),
+  cursor: z.record(z.string(), z.string()),
+  pending: z.array(z.object({ guid: z.string(), id: z.string(), deliveredAt: z.string() })).default([]),
+});
+/** 续扫位置里最多带多少个待重投的；超出就不存位置（宁可从头翻，也不丢）。 */
+const MAX_PENDING_DELIVERIES = 2000;
+/** 同一个 since 最多存几个续扫位置（一轮存一个，翻完整个回看窗口也用不了几个）。 */
+const MAX_RESUME_SLOTS = 1000;
+const resumeKey = (since: Date, n: number): string =>
+  `gh:reconcile-deliveries-resume:${since.toISOString()}:${n}`;
+
+function cursorOf(link: string | null): ScanCursor | null {
+  const next = nextLink(link);
+  if (!next) return null;
+  try {
+    return Object.fromEntries(new URL(next).searchParams);
+  } catch {
+    return null;
+  }
 }
 
 // 投递编号已超出 JS 安全整数（19 位）：client 按原文留成字符串，小的照旧是数字；一律转成原文拼重投的路径。
@@ -151,37 +206,140 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
   const { client, ledger } = deps;
   const log: Logger = deps.log;
 
+  // 投递日志续扫位置记在幂等账里（不新增表）：账里的键完成后不能改，所以同一个 since 一轮存一个键，编号 0、1、2……往后排，
+  // 读的时候顺着找到最后一个完成的。成功推进水位后 since 变了，旧的这一串就不再被读到。读写失败只是退回从头翻，不挡对账。
+  const loadResume = async (
+    since: Date,
+  ): Promise<{ n: number; state: ResumeState | null; usable: boolean }> => {
+    let state: ResumeState | null = null;
+    let n = 0;
+    try {
+      for (; n < MAX_RESUME_SLOTS; n += 1) {
+        const row = await ledger.idempotency.peek(resumeKey(since, n));
+        if (!row) return { n, state, usable: true };
+        if (row.completedAt) {
+          const parsed = ResumeStateSchema.safeParse(row.result);
+          state = parsed.success ? parsed.data : null;
+        }
+      }
+    } catch (err) {
+      log.warn('读投递日志续扫位置失败，这一轮从头翻', { error: errMessage(err) });
+    }
+    return { n, state: null, usable: false };
+  };
+  const saveResume = async (since: Date, n: number, state: ResumeState): Promise<boolean> => {
+    try {
+      const key = resumeKey(since, n);
+      const now = client.now();
+      const claim = await ledger.idempotency.claim(
+        { key, action: 'github.reconcile_deliveries_resume', target: since.toISOString() },
+        now,
+      );
+      if (claim.status !== 'claimed') return false;
+      await ledger.idempotency.complete(key, state, now);
+      return true;
+    } catch (err) {
+      log.warn('存投递日志续扫位置失败，下一轮从头翻', { error: errMessage(err) });
+      return false;
+    }
+  };
+
   return {
     async redeliverFailed(since) {
       const failed = new Map<string, { id: string; deliveredAt: string }>();
       const ok = new Set<string>();
       let checked = 0;
-      try {
-        for await (const page of client.pages({
-          method: 'GET',
-          path: '/app/hook/deliveries',
-          auth: { as: 'app', role: 'engine' },
-          query: { per_page: 100 },
-        })) {
-          const parsed = z.array(Delivery).safeParse(page.data);
-          if (!parsed.success)
-            return { outcome: 'unscanned', checked, recovered: 0, why: '投递日志的形状不认识' };
-          let older = false;
-          // 新的在前：同一个 guid 先看到的是最近一次尝试
-          for (const d of parsed.data) {
-            if (Date.parse(d.delivered_at) < since.getTime()) {
-              older = true;
-              continue;
+      const maxPages = options.maxDeliveryPages ?? DELIVERY_MAX_PAGES;
+      // 续扫位置只在能向后端问「这条投递库里有没有原文」时用：续扫的几轮之间不带 ok 名单，早先轮次里已经成功的 guid
+      // （成功 = 后端收到并记了原文）靠这个过滤掉，不会再叫 GitHub 重投一遍
+      const resumable = options.storedDeliveries !== undefined;
+      const slot = resumable ? await loadResume(since) : { n: 0, state: null, usable: false };
+      // 这一轮见到的最老、最新一条的时刻
+      const seen: { oldest: string | null; newest: string | null } = { oldest: null, newest: null };
+      let pagesUsed = 0;
+      const base: GhRequest = {
+        method: 'GET',
+        path: '/app/hook/deliveries',
+        auth: { as: 'app', role: 'engine' },
+        query: { per_page: 100 },
+      };
+      // 从 req 起新的在前往老翻，翻到早于 floorMs 的就停。翻到页数预算还没翻完：done = false，next = 下一页的查询参数
+      // （GitHub 的游标在 Link 头里），续扫从它接着翻。形状不认识回 null。
+      const walk = async (
+        req: GhRequest,
+        floorMs: number,
+        budget: number,
+      ): Promise<{ done: boolean; next: ScanCursor | null } | null> => {
+        let next: ScanCursor | null = null;
+        try {
+          for await (const page of client.pages(req, budget)) {
+            pagesUsed += 1;
+            next = cursorOf(page.headers.get('link'));
+            const parsed = z.array(Delivery).safeParse(page.data);
+            if (!parsed.success) return null;
+            let older = false;
+            // 新的在前：同一个 guid 先看到的是最近一次尝试
+            for (const d of parsed.data) {
+              if (Date.parse(d.delivered_at) < floorMs) {
+                older = true;
+                continue;
+              }
+              checked += 1;
+              seen.oldest = d.delivered_at;
+              if (seen.newest === null || Date.parse(d.delivered_at) > Date.parse(seen.newest)) {
+                seen.newest = d.delivered_at;
+              }
+              const code = d.status_code ?? 0;
+              if (code >= 200 && code < 300) ok.add(d.guid);
+              else if (!failed.has(d.guid)) failed.set(d.guid, { id: d.id, deliveredAt: d.delivered_at });
             }
-            checked += 1;
-            const code = d.status_code ?? 0;
-            if (code >= 200 && code < 300) ok.add(d.guid);
-            else if (!failed.has(d.guid)) failed.set(d.guid, { id: d.id, deliveredAt: d.delivered_at });
+            if (older || parsed.data.length === 0) return { done: true, next: null };
           }
-          if (older || parsed.data.length === 0) break;
+        } catch (err) {
+          if (!isGitHubError(err, 'TOO_MANY_PAGES') || checked === 0) throw err;
+          return { done: false, next };
+        }
+        return { done: true, next: null };
+      };
+      // 扫完了 = 翻到了 since；没扫完时 nextCursor 是续扫位置，cursorSavable = 它接得上已查全的那一截
+      let scanDone = true;
+      let nextCursor: ScanCursor | null = null;
+      let cursorSavable = resumable && slot.usable;
+      try {
+        // 有存下的续扫位置：先从最新翻到上一轮见到的最新一条（这中间新来的），再从存下的位置往更早接着翻。
+        // 已查全的是 [续扫位置, 现在] 这一整段；从头起的话就是翻到 since 为止
+        const resumeFrom = slot.state;
+        const head = await walk(
+          base,
+          resumeFrom ? Date.parse(resumeFrom.newestAt) : since.getTime(),
+          maxPages,
+        );
+        if (!head) return { outcome: 'unscanned', checked, recovered: 0, why: '投递日志的形状不认识' };
+        scanDone = head.done;
+        nextCursor = head.next;
+        if (resumeFrom) {
+          // 上一段接不上（新来的就占满了页数预算）：这一轮不动存下的位置
+          if (!head.done) cursorSavable = false;
+          else if (maxPages - pagesUsed <= 0) {
+            scanDone = false;
+            nextCursor = resumeFrom.cursor;
+          } else {
+            const tail = await walk(
+              { ...base, query: resumeFrom.cursor },
+              since.getTime(),
+              maxPages - pagesUsed,
+            );
+            if (!tail) return { outcome: 'unscanned', checked, recovered: 0, why: '投递日志的形状不认识' };
+            scanDone = tail.done;
+            nextCursor = tail.next;
+          }
         }
       } catch (err) {
         return { outcome: 'unscanned', checked, recovered: 0, why: `读投递日志失败：${errMessage(err)}` };
+      }
+      // 前几轮留下的待重投：这一轮翻到的新尝试优先，没见过的并回来；这一轮见到成功的（含重投后成功的）就不用补了
+      for (const p of slot.state?.pending ?? []) {
+        if (!failed.has(p.guid)) failed.set(p.guid, { id: p.id, deliveredAt: p.deliveredAt });
       }
       const neverOk = [...failed].filter(([guid]) => !ok.has(guid));
       let stored: ReadonlySet<string> = new Set();
@@ -207,6 +365,7 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
       const limit = options.maxRedeliveries ?? 50;
       let recovered = 0;
       const errors: string[] = [];
+      const redelivered = new Set<string>();
       for (const [guid, { id }] of todo.slice(0, limit)) {
         try {
           await client.request({
@@ -215,13 +374,36 @@ export function createReconciler(deps: Deps, options: ReconcilerOptions): Reconc
             auth: { as: 'app', role: 'engine' },
           });
           recovered += 1;
+          redelivered.add(guid);
         } catch (err) {
           errors.push(`${guid}：${errMessage(err)}`);
         }
       }
       if (todo.length > 0) log.warn('有投递一直没成功，已重投', { failed: todo.length, recovered });
       const attempted = Math.min(todo.length, limit);
+      // 没翻到 since：存下续扫位置，下一轮从它接着往更早翻（水位不动，这一步仍是 partial）。这一轮没重投成的（名额不够、
+      // 重投失败）随位置带到下一轮继续补：不然要么丢了，要么只能每轮从头翻同一截
+      const pending = todo
+        .filter(([guid]) => !redelivered.has(guid))
+        .map(([guid, d]) => ({ guid, id: d.id, deliveredAt: d.deliveredAt }));
+      let resumeSaved = false;
+      if (
+        !scanDone &&
+        nextCursor &&
+        cursorSavable &&
+        seen.newest !== null &&
+        pending.length <= MAX_PENDING_DELIVERIES
+      ) {
+        resumeSaved = await saveResume(since, slot.n, {
+          newestAt: seen.newest,
+          cursor: nextCursor,
+          pending,
+        });
+      }
       const notes = [
+        scanDone
+          ? ''
+          : `投递日志这一轮翻了 ${pagesUsed} 页还没翻到 ${since.toISOString()}：只查了 ${seen.oldest} 以后的 ${checked} 条，更早的这次没查全${resumeSaved ? '（续扫位置已存，下一轮接着往更早翻）' : ''}`,
         todo.length > limit ? `还有 ${todo.length - limit} 个没重投（一次最多 ${limit} 个）` : '',
         errors.length ? `重投失败 ${errors.length} 个：${errors.slice(0, 3).join('；')}` : '',
       ].filter(Boolean);

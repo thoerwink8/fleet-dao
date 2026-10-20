@@ -12,7 +12,14 @@ import { TooltipProvider } from '../components/ui/tooltip';
 
 export function renderApp<A extends FleetApi = MockApi>(
   ui: ReactElement,
-  opts: { api?: A; route?: string; retry?: false | 1; staleTime?: number } = {},
+  opts: {
+    api?: A;
+    route?: string;
+    retry?: false | 1;
+    staleTime?: number;
+    /** 在第一次渲染前写入查询缓存。页面不必再等这一次读取才离开骨架。 */
+    hydrate?: (qc: QueryClient) => void;
+  } = {},
 ): RenderResult & { api: A; qc: QueryClient } {
   const api = opts.api ?? (createMockApi({ live: false }) as FleetApi as A);
   // retry 不传就关，传 1 才对齐 root.tsx 的全局默认。
@@ -25,6 +32,7 @@ export function renderApp<A extends FleetApi = MockApi>(
       queries: { retry: opts.retry ?? false, retryDelay: 0, staleTime: opts.staleTime ?? 0 },
     },
   });
+  opts.hydrate?.(qc);
   const view = render(
     <MemoryRouter initialEntries={[opts.route ?? '/']}>
       <QueryClientProvider client={qc}>

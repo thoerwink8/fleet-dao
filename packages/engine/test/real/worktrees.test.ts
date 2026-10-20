@@ -3,9 +3,11 @@
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { CLEANUP_PAGE_LIMITS } from '@fleet-dao/adapters';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { PortError } from '../../src/ports.ts';
 import { helperWorkTrees, layout, sessionUserUids } from '../../src/real/worktrees.ts';
+import { pagedCleanupHelper } from './fixtures.ts';
 
 const repo = { owner: 'acme', name: 'widgets' };
 
@@ -87,5 +89,52 @@ describe('属主', () => {
   it('【故意造出的失败】_tmp 读不了（这里是个文件）：明确报错，不当成一个都没有', async () => {
     writeFileSync(join(root, '_tmp'), 'not a dir');
     await expect(helperWorkTrees({ root }).listTmp()).rejects.toMatchObject({ code: 'WORKTREE_UNREADABLE' });
+  });
+});
+
+describe('清理事务分页的真实装配（帮手回执由测试摆布）', () => {
+  const root = '/var/lib/fleet-work';
+  let dir: string;
+  let fake: ReturnType<typeof pagedCleanupHelper>;
+  let trees: ReturnType<typeof helperWorkTrees>;
+  beforeEach(() => {
+    dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-pages-'));
+    fake = pagedCleanupHelper(dir, root);
+    trees = helperWorkTrees({ root, helper: fake.helper, sudo: [process.execPath] });
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('完整读取：cleanupNamespace/pendingCleanup 读完全部页，尾部待恢复事务照报', async () => {
+    fake.pages([fake.firstPage, fake.lastPage]);
+    expect(await trees.cleanupNamespace()).toEqual([fake.tail]);
+    fake.pages([fake.firstPage, fake.lastPage]);
+    expect(await trees.pendingCleanup()).toEqual([fake.tail]);
+  });
+
+  it('partial：只读到首页（空行）、缺页、旧帮手无游标或变动超轮次时仍是“清理事务列表不完整”，不当全清', async () => {
+    const changed = { version: 1, state: 'changed' };
+    for (const list of [
+      [fake.firstPage],
+      [{ ...fake.firstPage, round: undefined, cursor: undefined }],
+      [fake.firstPage, changed, fake.firstPage, changed, fake.firstPage, changed],
+    ]) {
+      fake.pages(list);
+      await expect(trees.cleanupNamespace()).rejects.toThrow('清理事务列表不完整');
+      fake.pages(list);
+      await expect(trees.pendingCleanup()).rejects.toThrow('清理事务列表不完整');
+    }
+  }, 30_000); // 每页起两个子进程，变动超轮次那组一共二十来个，机器忙时会超默认 5 秒
+
+  it('partial：超过整轮页数上限仍不完整，不放宽上限', async () => {
+    const saved = CLEANUP_PAGE_LIMITS.pages;
+    CLEANUP_PAGE_LIMITS.pages = 1;
+    try {
+      fake.pages([fake.firstPage, fake.lastPage]);
+      await expect(trees.pendingCleanup()).rejects.toThrow('页上限');
+    } finally {
+      CLEANUP_PAGE_LIMITS.pages = saved;
+    }
   });
 });

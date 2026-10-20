@@ -139,7 +139,7 @@ import { activitiesFor, iso, limitsFor } from './kit.ts';
 import { parkedMeasurementBase } from './task-budget-remeasure.ts';
 import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
-import { TaskRuntime } from './task-runtime.ts';
+import { PermissionPushHandback, TaskRuntime } from './task-runtime.ts';
 import { planResume, writeSession } from './task-session.ts';
 import {
   Abandoned,
@@ -225,16 +225,14 @@ class TaskFlow {
       }
       brief = (await this.readBrief()).brief;
     };
-    rt.refreshContract = async (boundary) => {
-      if (!patched('task-contract-revisions-v1')) return false;
-      const before = rt.brief?.contract;
-      const got = await this.readBrief(true);
-      const next = got.brief.contract;
+    const acceptContract = (got: TaskBrief, boundary: string, before = rt.brief?.contract) => {
+      const next = got.contract;
       if (next?.version !== 1 || !/^[a-f0-9]{64}$/.test(next.sha256))
         throw new Error('正式合同版本或摘要未核实');
       rt.contractVersioned = true;
       rt.status.contract = next;
-      brief = got.brief;
+      rt.brief = got;
+      brief = got;
       tier = got.tier;
       rt.status.tier = tier;
       const changed = before?.version !== next.version || before?.sha256 !== next.sha256;
@@ -252,6 +250,18 @@ class TaskFlow {
         ),
         revision,
       ];
+      return true;
+    };
+    rt.acceptHandbackContract = (got) => {
+      acceptContract(got, '权限推送原停点返工');
+    };
+    rt.refreshContract = async (boundary) => {
+      if (!patched('task-contract-revisions-v1')) return false;
+      const before = rt.brief?.contract;
+      const got = await this.readBrief(true);
+      if (!acceptContract(got.brief, boundary, before)) return false;
+      const next = got.brief.contract;
+      if (!next) throw new Error('正式合同摘要未核实');
       if (rt.prNumber !== null && rt.head !== null) {
         for (;;) {
           const snapshot = await rt.step('readCiReviews', () =>
@@ -285,6 +295,11 @@ class TaskFlow {
     await rt.mirror('running');
 
     for (;;) {
+      // v2 在 park 内接纳快照后才离开。收场 IO 期间外部又改正文，先过既有合同边界再有新动作。
+      if (rt.handbackContractBoundary) {
+        await rt.refreshContract('原位返工动手前');
+        rt.handbackContractBoundary = false;
+      }
       await rt.checkpoint();
       await rt.refreshContract('动手前');
       // 验收没过要返工、验收还没到 2 轮的上限：这一轮动手照给（#1967：CI 红了 2 轮、第 3 轮才验，验收意见还没交给会话就因
@@ -335,6 +350,7 @@ class TaskFlow {
       if (rt.flowMode === 'full') rt.fullPushes += 1;
       if (!implemented) {
         await this.endRound(roundOutcomeOf('implement', rt.status.lastProblem, rt.feedback));
+        rt.acceptPushHandback();
         continue;
       }
 
@@ -359,6 +375,8 @@ class TaskFlow {
     await rt.park(
       rejected ? `全程：冷验收被拒 ${MAX_VERIFY_ROUNDS} 次` : `全程：推送 ${MAX_FULL_PUSHES} 次还没合`,
       `最近的意见：${problems}。点「继续」两样都从 0 再计、重读单子，接着续同一个会话修；或「放弃」。`,
+      'stuck',
+      'rounds',
     );
     rt.fullPushes = 0;
     rt.verifyRound = 0;
@@ -655,7 +673,10 @@ class TaskFlow {
       }
       if (await rt.parkMainSyncBudget(r.mainSyncBudgetExhausted, r.detail ?? '同步主线次数已到上限'))
         continue;
-      await rt.park('直接合并没成', r.detail ?? 'GitHub 没说为什么');
+      // 结构化拒绝（关了、基线不对、合到了别的头）不是「自动合并没挂上」：法国发了新版也不续。
+      // 抛出去的错仍走上面 step 的失败分流（认证、权限是 other，其余合并步是 unarmed）。
+      // 停法只进查询，不改报警活动的入参，老历史重放不变。
+      await rt.park('直接合并没成', r.detail ?? 'GitHub 没说为什么', 'stuck', 'other');
     }
   }
 
@@ -814,6 +835,15 @@ class TaskFlow {
         this.emptyDeliveryRedone ? [] : [EMPTY_DELIVERY_CODE],
       );
     } catch (error) {
+      if (error instanceof PermissionPushHandback) {
+        rt.feedback = error.acceptedContract ? [error.feedback, ...rt.feedback] : [error.feedback];
+        rt.resumeFrom = null;
+        rt.lastSession = null;
+        rt.resumeStreak = 0;
+        rt.selfCheckOutput = null;
+        rt.status.lastProblem = '推送权限问题已交回返工';
+        return false;
+      }
       if (error instanceof HygieneHandoff) return this.hygieneHandback(error.detail);
       if (error instanceof ConflictHandoff) {
         return this.conflictStillThere(wt, error.files, error.pending ? null : error.instruction);
@@ -1095,6 +1125,7 @@ class TaskFlow {
       `改动超出体量预算：新增 ${added} 行，预算 ${budget} 行，收窄过一次仍超`,
       `${splitSuggestion(delivery.changedFiles)}${detail ? ` ${detail}` : ''} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。管理入口 fleet-api task budget-remeasure 可只重新核这一份成果的体量（不授权后续）。`,
       'stuck',
+      'size',
       rawAdded === undefined
         ? undefined
         : {
@@ -1338,6 +1369,10 @@ class TaskFlow {
     await this.cleanup(true);
     await CancellationScope.nonCancellable(() => rt.mirror('stopped'));
   }
+
+  stopPushHandbacks(): void {
+    this.rt.stopPushHandbacks();
+  }
 }
 
 export async function taskWorkflow(input: TaskWorkflowInput): Promise<TaskRun> {
@@ -1351,6 +1386,7 @@ export async function taskWorkflow(input: TaskWorkflowInput): Promise<TaskRun> {
     if (isCancellation(error)) await CancellationScope.nonCancellable(() => flow.cancelled());
     throw error;
   } finally {
+    flow.stopPushHandbacks();
     await condition(allHandlersFinished);
   }
 }

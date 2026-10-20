@@ -6,6 +6,7 @@ import {
   tasks,
 } from '@fleet-dao/db';
 import { and, eq, or } from 'drizzle-orm';
+import { pgTaskAdmission } from './task-admission-pg.ts';
 import type {
   ExecutionAudit,
   ExecutionOperation,
@@ -153,6 +154,7 @@ export function pgTaskExecution(db: Db, now: () => Date): TaskExecutionStore {
   return {
     getExecutionControl: async (taskId) =>
       canonicalExecutionUuid(taskId) ? db.transaction((tx) => readLocked(tx, taskId)) : { kind: 'not_found' },
+    ...pgTaskAdmission(db, now),
     reserveExecution: (input, audit) => mutate('reserve', input, audit),
     dispatchExecution: (input, audit) => mutate('dispatch', input, audit),
     admitExecution: (input, audit) => mutate('admit', input, audit),
