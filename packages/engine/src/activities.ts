@@ -69,6 +69,8 @@ import type {
   ReadTaskBriefInput,
   ReleaseReservationInput,
   ReleaseReservationResult,
+  ResolveConflictInput,
+  ResolveConflictResult,
   RunSegmentInput,
   RunSegmentResult,
   SegmentSettledInput,
@@ -331,6 +333,11 @@ export interface EngineTasks {
   readCiReviews?: (input: ReadCiReviewsInput, ctx: PortContext) => Promise<ReadCiReviewsResult>;
   /** 不强制 CI：直接合并，不等检查。 */
   mergeNow?: (input: MergeNowInput, ctx: PortContext) => Promise<MergeNowResult>;
+  /** 并主线冲突里机械可解的（迁移生成文件、锁文件）自己解、自测、推（#3428）。没解成回 declined，不抛。 */
+  resolveConflictMechanically?: (
+    input: ResolveConflictInput,
+    ctx: PortContext,
+  ) => Promise<ResolveConflictResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）。续不上回原因，不抛。 */
   planSegmentResume?: (input: PlanSegmentResumeInput, ctx: PortContext) => Promise<PlanSegmentResumeResult>;
   /** 上一段收场了没有（决定 0093）：重试、重派前问，没收场不起第二段。库读不了抛。 */
@@ -361,6 +368,7 @@ const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
   readCiPolicy: true,
   readCiReviews: true,
   mergeNow: true,
+  resolveConflictMechanically: true,
   planSegmentResume: true,
   segmentSettled: true,
   selfCheck: true,
