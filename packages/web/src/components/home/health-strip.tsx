@@ -184,9 +184,11 @@ function MenuPopover({
 }
 
 /**
- * 三格摊开放不放得下：量一次摊开要多宽，再盯着外框还剩多宽，放不下就收成「状态」按钮。
- * 只看屏宽不够：顶栏里还有环境切换、总开关、搜索框，三格的说明又长短不一，桌面根字号放大到 125%（#1937）后更容易压到搜索框上。
- * 量不到（测试环境宽度恒为 0、没有 ResizeObserver）当放得下，照屏宽档走。
+ * 三格摊开放不放得下：摊开时记下要多宽，再盯着外框还剩多宽，放不下就收成「状态」按钮。
+ * 只看屏宽不够：顶栏里还有流程开关、刷新，三格的说明又长短不一，桌面根字号放大到 125%（#1937）后更容易挤到旁边。
+ * 字宽会在首屏之后变：网页字体晚到、三格的字变了，外框宽度不一定变，只盯 ResizeObserver 会停在变宽之前的宽度，
+ * 摊开的条就盖住开关或刷新（#3433）。摊开着就按现在的 scrollWidth 重记；字体加载完再量一次。
+ * 量不到（宽度是 0）当放得下，照屏宽档走。
  */
 function useStripRoom(items: readonly HealthItem[], wanted: boolean) {
   const box = useRef<HTMLDivElement>(null);
@@ -198,17 +200,41 @@ function useStripRoom(items: readonly HealthItem[], wanted: boolean) {
   useLayoutEffect(() => {
     setNeeded(0);
   }, [key]);
+  // 摊开着就记现在的内容宽。字体或字变了把条重新挂上时，提交前就能量到，不会把旧宽度留在屏幕上。
   useLayoutEffect(() => {
-    if (wanted && needed === 0 && strip.current) setNeeded(strip.current.scrollWidth);
+    if (!wanted || !strip.current) return;
+    const width = strip.current.scrollWidth;
+    if (width <= 0) return;
+    setNeeded((prev) => (prev === width ? prev : width));
   });
   useLayoutEffect(() => {
     const el = box.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const ro = new ResizeObserver(() => setAvail(el.clientWidth));
+    if (!el) return;
+    const read = () => setAvail(el.clientWidth);
+    read();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(read);
     ro.observe(el);
-    setAvail(el.clientWidth);
     return () => ro.disconnect();
   }, []);
+  useLayoutEffect(() => {
+    if (!wanted) return;
+    const fonts = document.fonts;
+    if (!fonts?.addEventListener) return;
+    let cancelled = false;
+    const measure = () => {
+      if (cancelled || !strip.current) return;
+      const width = strip.current.scrollWidth;
+      if (width <= 0) return;
+      setNeeded((prev) => (prev === width ? prev : width));
+    };
+    void fonts.ready.then(measure);
+    fonts.addEventListener('loadingdone', measure);
+    return () => {
+      cancelled = true;
+      fonts.removeEventListener('loadingdone', measure);
+    };
+  }, [wanted]);
   const fits = needed === 0 || avail === 0 || needed <= avail;
   return { box, strip, fits };
 }
