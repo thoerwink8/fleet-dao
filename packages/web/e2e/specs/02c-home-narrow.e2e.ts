@@ -119,8 +119,33 @@ const LAYOUT_JS = `(() => {
     };
   })()`;
 
+/**
+ * 等版面落定再量（#3433 偶发）：「data-health-strip 可见」只说明条出现了，不说明页头排完了。
+ * 页面外框有 0.28s 的 fd-rise 进场（位移 4px、透明度），字体晚到会改字宽，健康条又会按量到的宽度
+ * 在「三格摊开」和「状态按钮」之间切（HealthStrip 的 useStripRoom，刷新条的字变了也会触发）；
+ * 首跑恰好在这几步中间量，就会量到开关/状态/刷新的中间态。断言一条没放宽，只是先等到不再变。
+ */
 async function layout(page: Page): Promise<HeaderLayout> {
-  return page.evaluate(LAYOUT_JS);
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+  await expect
+    .poll(() => page.evaluate(() => document.getAnimations().filter((a) => a.playState === 'running').length), {
+      message: '页头进场动画没跑完',
+    })
+    .toBe(0);
+  let last = '';
+  let stable = 0;
+  await expect
+    .poll(
+      async () => {
+        const now = JSON.stringify(await page.evaluate(LAYOUT_JS));
+        stable = now === last ? stable + 1 : 0;
+        last = now;
+        return stable;
+      },
+      { message: '页头版面一直在变', intervals: [100] },
+    )
+    .toBeGreaterThanOrEqual(3);
+  return JSON.parse(last) as HeaderLayout;
 }
 
 test.describe('首页页头窄屏', () => {
