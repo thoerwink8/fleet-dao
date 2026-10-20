@@ -29,7 +29,7 @@ import {
 const run = vi.hoisted(() => vi.fn());
 vi.mock('node:child_process', async (original) => ({
   ...(await original<typeof import('node:child_process')>()),
-  spawnSync: run,
+  execFile: run,
 }));
 const digest = (text: string) => createHash('sha256').update(text).digest('hex');
 function fixture() {
@@ -118,7 +118,9 @@ it('目录或链接不当作可信binary，拒绝且不删除目标', async () =
   expect(second.download).not.toHaveBeenCalled();
 });
 it('curl有硬期限与有限429重试，失败保留原始原因、不启动提取', async () => {
-  run.mockReturnValue({ status: 22, stderr: 'curl: (22) 429 Too Many Requests' });
+  run.mockImplementation((_cmd, _args, _options, callback) =>
+    callback(Object.assign(new Error('curl failed'), { code: 22 }), '', 'curl: (22) 429 Too Many Requests'),
+  );
   await expect(downloadTestServer('https://fixture.invalid/a', '/fixture/out')).rejects.toThrow(
     '429 Too Many Requests',
   );
@@ -126,6 +128,7 @@ it('curl有硬期限与有限429重试，失败保留原始原因、不启动提
     'curl',
     expect.arrayContaining(['--retry', '2', '--max-time', '25', '--retry-max-time', '55']),
     expect.objectContaining({ timeout: 90_000, killSignal: 'SIGKILL' }),
+    expect.any(Function),
   );
   const f = fixture();
   const failed = vi.fn(async () => {
@@ -154,9 +157,29 @@ it('未知平台明确拒绝；每个受支持身份都有固定archive与binary
   }
 });
 
+it('异步提取关闭回执之前不发布binary；等待成功回执后再校验、原子发布', async () => {
+  const f = fixture();
+  let finish!: () => void;
+  const started = new Promise<void>((resolve) => {
+    run.mockImplementation((_cmd, args, _options, callback) => {
+      finish = () => {
+        f.extract(args[1], args[3], args[4]);
+        callback(null, '', '');
+      };
+      resolve();
+    });
+  });
+  const pending = installTestServer(f.a, f.root, { download: f.download });
+  await started;
+  expect(existsSync(testServerPath(f.a, f.root))).toBe(false);
+  finish();
+  expect(await pending).toBe(testServerPath(f.a, f.root));
+  expect(requireTestServer(f.a, f.root)).toBe(testServerPath(f.a, f.root));
+});
+
 it('下载body或提取超时保留期限错误，不发布也不留后台等待', async () => {
   const timeout = Object.assign(new Error('fixture timed out'), { code: 'ETIMEDOUT' });
-  run.mockReturnValue({ status: null, stderr: '', error: timeout });
+  run.mockImplementation((_cmd, _args, _options, callback) => callback(timeout, '', ''));
   await expect(
     downloadTestServer('https://fixture.invalid/body-hangs', '/fixture/out'),
   ).rejects.toMatchObject({ cause: timeout });

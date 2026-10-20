@@ -1,7 +1,7 @@
 // 时间跳跃服务只消费已核验的制品；下载只在显式准备命令发生，不进入每条业务测试。
 // 官方身份：https://github.com/temporalio/sdk-java/releases/tag/v1.40.0 （GitHub release asset digest）。
 // existing-path：https://typescript.temporal.io/api/classes/testing.TestWorkflowEnvironment#createTimeSkipping
-import { spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, linkSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -90,26 +90,38 @@ export function requireTestServer(a = testServerArtifact(), cacheRoot = testServ
 }
 export interface TestServerPreparationPorts {
   download?: (url: string, path: string) => Promise<void>;
-  extract?: (archive: string, destination: string, member: string) => void;
+  extract?: (archive: string, destination: string, member: string) => void | Promise<void>;
 }
-function command(cmd: string, args: string[], timeout: number): void {
-  const result = spawnSync(cmd, args, {
-    encoding: 'utf8',
-    windowsHide: true,
-    shell: false,
-    timeout,
-    killSignal: 'SIGKILL',
-    maxBuffer: 64 * 1024,
-  });
-  if (result.error || result.status !== 0)
-    throw failure(
-      `${cmd} 失败（exit=${result.status}）：${result.error?.message ?? result.stderr.slice(-2000)}`,
-      result.error,
+function command(cmd: string, args: string[], timeout: number): Promise<void> {
+  // execFile 的 callback 在子进程关闭后才回；等待实际终态，不用 Promise.race 留下后台下载/提取。
+  return new Promise((resolve, reject) => {
+    execFile(
+      cmd,
+      args,
+      {
+        encoding: 'utf8',
+        windowsHide: true,
+        shell: false,
+        timeout,
+        killSignal: 'SIGKILL',
+        maxBuffer: 64 * 1024,
+      },
+      (error, _stdout, stderr) => {
+        if (error)
+          reject(
+            failure(
+              `${cmd} 失败（exit=${error.code ?? 'unknown'}, signal=${error.signal ?? 'none'}）：${(stderr || error.message).slice(-2000)}`,
+              error,
+            ),
+          );
+        else resolve();
+      },
     );
+  });
 }
 /** curl 自身有界重试（最多三次；429 保留 stderr），外层硬期限避免网络准备悬挂。 */
 export async function downloadTestServer(url: string, path: string): Promise<void> {
-  command(
+  await command(
     'curl',
     [
       '--fail',
@@ -131,13 +143,13 @@ export async function downloadTestServer(url: string, path: string): Promise<voi
     90_000,
   );
 }
-function extractTestServer(archive: string, destination: string, member: string): void {
+async function extractTestServer(archive: string, destination: string, member: string): Promise<void> {
   // Windows 自带 bsdtar 支持 zip；不让 Git 的 GNU tar 抢到这个路径。
   const tar =
     process.platform === 'win32'
       ? join(process.env.SystemRoot ?? 'C:/Windows', 'System32', 'tar.exe')
       : 'tar';
-  command(tar, ['-xf', archive, '-C', destination, member], 30_000);
+  await command(tar, ['-xf', archive, '-C', destination, member], 30_000);
 }
 /** 不上锁、不读半截：各自准备独立临时文件，完整验过后 link 原子发布，竞争者只接收相同 SHA。 */
 export async function installTestServer(
@@ -163,7 +175,7 @@ export async function installTestServer(
       archive,
     );
     verify(archive, a.archiveSha);
-    (ports.extract ?? extractTestServer)(archive, staging, a.member);
+    await (ports.extract ?? extractTestServer)(archive, staging, a.member);
     const binary = join(staging, a.member);
     verify(binary, a.binarySha);
     chmodSync(binary, 0o755);
