@@ -15,8 +15,11 @@ import { keys, NOTIFICATIONS_PAGE } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
 import NotificationsPage from '../routes/notifications';
 import { renderApp } from './harness';
+import { installStageTrace } from './stage-trace';
 
 afterEach(cleanup);
+// 只加观测，超时和断言都不动：测试卡住时日志里要能读到时间花在渲染、等卡片还是同步查询上（#3386，首红 run 39364377483）。
+installStageTrace();
 beforeEach(() => {
   for (const f of [toast.success, toast.error, toast.info, toast.warning]) f.mockClear();
 });
