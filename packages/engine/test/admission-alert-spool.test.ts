@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import {
@@ -133,6 +134,43 @@ describe('专用SQLite持久pending', () => {
     const before = readFileSync(dbPath);
     expect(recordAdmissionAlert(path, observation())).toEqual({ kind: 'unknown', code: 'corrupt' });
     expect(readFileSync(dbPath).equals(before)).toBe(true);
+  });
+  it('同inode同大小且mtime拨回的同长record_hash原字节改写仍按损坏拒绝且不改文件', () => {
+    const o = observation();
+    expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
+    const dbPath = join(path, 'pending.sqlite');
+    const beforeStat = statSync(dbPath);
+    const beforeNs = statSync(dbPath, { bigint: true });
+    const file = readFileSync(dbPath);
+    const hash = admissionAlertRecordHash(o);
+    const at = file.indexOf(hash);
+    expect(at).toBeGreaterThanOrEqual(100);
+    const flipped = Buffer.from(file);
+    flipped[at] = flipped[at] === 0x61 ? 0x62 : 0x61;
+    expect(flipped.subarray(0, 100).equals(file.subarray(0, 100))).toBe(true);
+    writeFileSync(dbPath, flipped);
+    chmodSync(dbPath, 0o600);
+    // utimes 的秒级 double 对不齐 mtimeMs，代次会因此失效，盖住这条同元数据改写。
+    const restored = spawnSync(
+      'python3',
+      [
+        '-c',
+        'import os,sys; os.utime(sys.argv[1], ns=(int(sys.argv[2]), int(sys.argv[3])))',
+        dbPath,
+        beforeNs.atimeNs.toString(),
+        beforeNs.mtimeNs.toString(),
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(restored.status).toBe(0);
+    const afterStat = statSync(dbPath);
+    expect(afterStat.ino).toBe(beforeStat.ino);
+    expect(afterStat.size).toBe(beforeStat.size);
+    expect(afterStat.mtimeMs).toBe(beforeStat.mtimeMs);
+    const corrupted = readFileSync(dbPath);
+    expect(corrupted.equals(flipped)).toBe(true);
+    expect(recordAdmissionAlert(path, observation())).toEqual({ kind: 'unknown', code: 'corrupt' });
+    expect(readFileSync(dbPath).equals(corrupted)).toBe(true);
   });
   it('实际写锁第二连接fail-fast busy，原事务回滚后重开成功', () => {
     const o = observation();

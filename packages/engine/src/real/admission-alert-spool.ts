@@ -1,5 +1,6 @@
 // 仅固定 child 调用。Linux 私有目录，SQLite 原生事务/恢复；不自建 WAL、TTL 锁或 tombstone。
 
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   constants,
@@ -66,12 +67,11 @@ const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.uid
 // 本进程已经整表核过的提交代次，只省连续写入的整表重解。
 // 不记住时，每次打开和事务里各 prepare 一次全表：256 次是 512 次 prepare、65280 行解码。
 // 这是读取次数，不是原完整 CI 首红的等待阶段；那次运行没有失败阶段输出。
-// 文件身份或 SQLite 头计数对不上就整表重解。close 失败不清这份记忆。
-// 记忆只覆盖 SQLite 自己提交会改动的头和元数据：dev/ino/size/mtime 加上 change/schema/pages。
-// 命中后仍核行数和 payload 字节，schema 与 quick_check 每次都跑；整行解码（含 record_hash 对规范哈希）
-// 留在代次不中、行数或字节对不上、以及没有记忆时。清掉记忆后同一库回到整表解码。
-// 同 inode、同大小、头字段不变、再把 mtime 拨回去的同长 record_hash 原字节改写，不在这个模型里。
-// 那要冻结元数据，不是普通 SQL UPDATE（UPDATE 会推进 change counter），也不把它当成已经发生的生产事故。
+// 记忆含 dev/ino/size/mtime、change/schema/pages，以及主库文件字节的 sha256。
+// 身份对上但摘要对不上就丢掉记忆和已开连接，下次冷打开走原来的逐行 decode（含 record_hash）。
+// 同 inode、同大小、头字段不变、再把 mtime 拨回的同长原字节改写也走这条。
+// 那是合成的存储损坏反例，不是普通 SQL UPDATE，也不把它当成已经发生的生产事故。
+// schema 与 quick_check 每次都跑。close 失败不清这份记忆，但字节对不上不会沿用它。
 type DbGeneration = {
   dev: number;
   ino: number;
@@ -81,7 +81,7 @@ type DbGeneration = {
   schema: number;
   pages: number;
 };
-type ValidatedDb = DbGeneration & { rows: number; payloadBytes: number };
+type ValidatedDb = DbGeneration & { rows: number; payloadBytes: number; fileDigest: string };
 let validatedDb: ValidatedDb | undefined;
 // 本进程已经把该父目录的目录项同步过。新叶仍要再同步；已有叶的重开不必再付一次 fsync。
 const syncedParentInodes = new Set<string>();
@@ -104,7 +104,7 @@ function sameGeneration(a: DbGeneration, b: DbGeneration): boolean {
   );
 }
 
-function readDbGeneration(dbPath: string): DbGeneration | undefined {
+function readDbGeneration(dbPath: string): (DbGeneration & { fileDigest: string }) | undefined {
   let fd: number;
   try {
     fd = openSync(dbPath, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -113,24 +113,37 @@ function readDbGeneration(dbPath: string): DbGeneration | undefined {
   }
   try {
     const st = fstatSync(fd);
-    const data = Buffer.alloc(100);
+    if (!Number.isSafeInteger(st.size) || st.size < 100 || st.size > ALERT_SPOOL_LIMITS.databaseBytes) {
+      return undefined;
+    }
+    const header = Buffer.alloc(100);
     let offset = 0;
-    while (offset < data.length) {
-      const n = readSync(fd, data, offset, data.length - offset, offset);
+    while (offset < header.length) {
+      const n = readSync(fd, header, offset, header.length - offset, offset);
       if (n === 0) return undefined;
       offset += n;
     }
-    if (!data.subarray(0, 16).equals(Buffer.from('SQLite format 3\0'))) return undefined;
-    const pageSize = data.readUInt16BE(16);
+    if (!header.subarray(0, 16).equals(Buffer.from('SQLite format 3\0'))) return undefined;
+    const pageSize = header.readUInt16BE(16);
     if (pageSize !== 4096) return undefined;
+    const hash = createHash('sha256');
+    hash.update(header);
+    const buf = Buffer.alloc(65536);
+    while (offset < st.size) {
+      const n = readSync(fd, buf, 0, Math.min(buf.length, st.size - offset), offset);
+      if (n === 0) return undefined;
+      hash.update(buf.subarray(0, n));
+      offset += n;
+    }
     return {
       dev: st.dev,
       ino: st.ino,
       size: st.size,
       mtimeMs: st.mtimeMs,
-      change: data.readUInt32BE(24),
-      schema: data.readUInt32BE(40),
-      pages: data.readUInt32BE(28),
+      change: header.readUInt32BE(24),
+      schema: header.readUInt32BE(40),
+      pages: header.readUInt32BE(28),
+      fileDigest: hash.digest('hex'),
     };
   } catch {
     return undefined;
@@ -383,13 +396,18 @@ class Spool {
     if (d.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') fail('corrupt');
     const generation = readDbGeneration(join(this.path.path, NAME));
     if (generation && validatedDb && sameGeneration(validatedDb, generation)) {
-      const total = d
-        .prepare('SELECT count(*) AS n,coalesce(sum(length(CAST(payload AS BLOB))),0) AS bytes FROM pending')
-        .get();
-      const rows = sqlNumber(total?.n);
-      const payloadBytes = sqlNumber(total?.bytes);
-      if (rows !== validatedDb.rows || payloadBytes !== validatedDb.payloadBytes) fail('corrupt');
-      return validatedDb;
+      if (generation.fileDigest !== validatedDb.fileDigest) validatedDb = undefined;
+      else {
+        const total = d
+          .prepare(
+            'SELECT count(*) AS n,coalesce(sum(length(CAST(payload AS BLOB))),0) AS bytes FROM pending',
+          )
+          .get();
+        const rows = sqlNumber(total?.n);
+        const payloadBytes = sqlNumber(total?.bytes);
+        if (rows !== validatedDb.rows || payloadBytes !== validatedDb.payloadBytes) fail('corrupt');
+        return validatedDb;
+      }
     }
     const rows = d.prepare('SELECT key,payload,record_hash FROM pending').all();
     if (rows.length > ALERT_SPOOL_LIMITS.rows) fail('capacity');
@@ -544,12 +562,18 @@ class Spool {
       notificationId: persisted.notificationId,
     };
   }
-  // 复用前再核路径和 journal 上界。代次对不上就返回 false，调用方冷打开；核验失败照旧抛出，不能先让 SQLite 回放。
+  // 复用前再核路径、journal 上界和主库字节摘要。对不上就丢掉记忆并返回 false，调用方冷打开走原逐行校验。
+  // 核验失败照旧抛出，不能先让 SQLite 回放。
   revalidateOpen(): boolean {
     this.path.check();
     this.path.checkRecoveryBounds();
     const generation = readDbGeneration(join(this.path.path, NAME));
-    return Boolean(this.db && generation && validatedDb && sameGeneration(validatedDb, generation));
+    if (!(this.db && generation && validatedDb && sameGeneration(validatedDb, generation))) return false;
+    if (generation.fileDigest !== validatedDb.fileDigest) {
+      validatedDb = undefined;
+      return false;
+    }
+    return true;
   }
   close(): void {
     try {
