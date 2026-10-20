@@ -8,8 +8,17 @@ import type { RunRow } from '@fleet-dao/db';
 import { Context } from '@temporalio/activity';
 import { Client, Connection } from '@temporalio/client';
 import type { PortContext } from '../ports.ts';
-import type { PushHandbackPreflight, PushHandbackPreflightInput } from '../push-handback.ts';
-import { sameRequirementContract, type TaskBriefResult } from '../runner/task-brief.ts';
+import {
+  type PushHandbackPreflight,
+  type PushHandbackPreflightInput,
+  validHandbackContract,
+} from '../push-handback.ts';
+import {
+  type RequirementContract,
+  sameRequirementContract,
+  type TaskBrief,
+  type TaskBriefResult,
+} from '../runner/task-brief.ts';
 import {
   MAX_IMPLEMENT_ROUNDS,
   MAX_VERIFY_ROUNDS,
@@ -91,7 +100,12 @@ export function createPushHandbackPreflight(deps: PushHandbackPreflightDeps) {
 
 /** 真只读入口：只查询精确 run，不发 Update/Signal，不在 Temporal 历史写证据。报告不是交还凭据。 */
 export function createPushHandbackChecker(deps: PushHandbackPreflightDeps) {
-  return async (workflowId: string, runId: string, signal: AbortSignal): Promise<PushHandbackPreflight> => {
+  return async (
+    workflowId: string,
+    runId: string,
+    signal: AbortSignal,
+    revision?: { originalContract: RequirementContract; expectedContract: RequirementContract },
+  ): Promise<PushHandbackPreflight> => {
     let connection: Connection | undefined;
     try {
       if (
@@ -113,16 +127,31 @@ export function createPushHandbackChecker(deps: PushHandbackPreflightDeps) {
         connection!.withAbortSignal(signal, () =>
           connection!.withDeadline(Date.now() + 10_000, () => handle.query(taskPushHandbackQuery)),
         );
-      const input = await query();
-      if (!input || input.workflowId !== workflowId || input.runId !== runId)
+      const original = await query();
+      if (!original || original.workflowId !== workflowId || original.runId !== runId)
         return { outcome: 'unknown', code: 'unsupported_or_not_eligible' };
+      if (
+        revision &&
+        (!validHandbackContract(revision.originalContract) ||
+          !validHandbackContract(revision.expectedContract) ||
+          !sameRequirementContract(original.contract, revision.originalContract))
+      )
+        return { outcome: 'unknown', code: 'original_contract' };
+      const input: PushHandbackPreflightInput = revision
+        ? {
+            ...original,
+            version: 2,
+            requestId: 'readonly-check',
+            expectedContract: revision.expectedContract,
+          }
+        : original;
       const result = await observe(deps, input, {
         signal,
         attempt: 1,
         lastHeartbeat: undefined,
         heartbeat() {},
       });
-      if (JSON.stringify(await query()) !== JSON.stringify(input))
+      if (JSON.stringify(await query()) !== JSON.stringify(original))
         return { outcome: 'unknown', code: 'check_changed' };
       signal.throwIfAborted();
       return result;
@@ -160,7 +189,12 @@ async function observe(
   let code = 'context';
   try {
     if (
-      input.version !== 1 ||
+      (input.version !== 1 && input.version !== 2) ||
+      !validHandbackContract(input.contract) ||
+      (input.version === 2 &&
+        (!validHandbackContract(input.expectedContract) ||
+          typeof input.requestId !== 'string' ||
+          !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$/.test(input.requestId))) ||
       input.token.runId !== input.runId ||
       input.token.kind !== 'parked' ||
       input.token.generation !== 1 ||
@@ -247,13 +281,27 @@ async function observe(
     };
     code = 'budget';
     if (!(await checkBudget())) return { outcome: 'budget-held', code: 'token_budget' };
+    let snapshot: TaskBrief | undefined;
     const checkContract = async () => {
-      const brief = await deps.brief(
-        { schemaVersion: 1, repo: input.task.repo, issueNumber: input.task.issueNumber, checkContract: true },
-        ctx,
+      const brief = await read(() =>
+        deps.brief(
+          {
+            schemaVersion: 1,
+            repo: input.task.repo,
+            issueNumber: input.task.issueNumber,
+            checkContract: true,
+          },
+          ctx,
+        ),
       );
-      if (!brief.ok || !sameRequirementContract(input.contract, brief.brief.contract))
+      const expected = input.version === 2 ? input.expectedContract : input.contract;
+      if (
+        !brief.ok ||
+        !sameRequirementContract(expected, brief.brief.contract) ||
+        (input.version === 2 && brief.brief.issueNumber !== input.task.issueNumber)
+      )
         throw new Error('contract_changed');
+      snapshot = brief.brief;
     };
     code = 'contract';
     await checkContract();
@@ -334,12 +382,24 @@ async function observe(
     )
       throw new Error('observation_changed');
     ctx.signal.throwIfAborted();
+    if (input.version === 2 && !snapshot) return { outcome: 'unknown', code: 'contract_snapshot' };
     return {
       outcome: 'natural-retired',
       head,
       evidenceSha256: createHash('sha256')
-        .update(JSON.stringify({ history: history.sha256, retirement, head, contract: input.contract }))
+        .update(
+          JSON.stringify({
+            history: history.sha256,
+            retirement,
+            head,
+            contract: input.contract,
+            ...(input.version === 2
+              ? { requestId: input.requestId, expectedContract: input.expectedContract }
+              : {}),
+          }),
+        )
         .digest('hex'),
+      ...(input.version === 2 && snapshot ? { brief: snapshot } : {}),
     };
   } catch {
     return { outcome: 'unknown', code: ctx.signal.aborted ? 'cancelled' : code };

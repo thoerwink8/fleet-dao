@@ -329,6 +329,7 @@ describe('环境类、能力标记', () => {
       'packages/engine/test/execution-legacy-admission-real.test.ts',
       'packages/engine/test/execution-start-reader-real.test.ts',
       'packages/engine/test/github-reconcile.test.ts',
+      'packages/engine/test/push-handback-contract.test.ts',
     ]);
     // 定义它的只有 support.ts：本仓别的非测试文件要是包了一层再调（createRealEnv 不出现、认不出要 Temporal），
     // 这里就红——那种包一层会绕开标记，跑到没装命令行的台上（CI 里 support.ts 会抛错，不会悄悄过）。

@@ -222,16 +222,14 @@ class TaskFlow {
       }
       brief = (await this.readBrief()).brief;
     };
-    rt.refreshContract = async (boundary) => {
-      if (!patched('task-contract-revisions-v1')) return false;
-      const before = rt.brief?.contract;
-      const got = await this.readBrief(true);
-      const next = got.brief.contract;
+    const acceptContract = (got: TaskBrief, boundary: string, before = rt.brief?.contract) => {
+      const next = got.contract;
       if (next?.version !== 1 || !/^[a-f0-9]{64}$/.test(next.sha256))
         throw new Error('正式合同版本或摘要未核实');
       rt.contractVersioned = true;
       rt.status.contract = next;
-      brief = got.brief;
+      rt.brief = got;
+      brief = got;
       tier = got.tier;
       rt.status.tier = tier;
       const changed = before?.version !== next.version || before?.sha256 !== next.sha256;
@@ -249,6 +247,18 @@ class TaskFlow {
         ),
         revision,
       ];
+      return true;
+    };
+    rt.acceptHandbackContract = (got) => {
+      acceptContract(got, '权限推送原停点返工');
+    };
+    rt.refreshContract = async (boundary) => {
+      if (!patched('task-contract-revisions-v1')) return false;
+      const before = rt.brief?.contract;
+      const got = await this.readBrief(true);
+      if (!acceptContract(got.brief, boundary, before)) return false;
+      const next = got.brief.contract;
+      if (!next) throw new Error('正式合同摘要未核实');
       if (rt.prNumber !== null && rt.head !== null) {
         for (;;) {
           const snapshot = await rt.step('readCiReviews', () =>
@@ -282,6 +292,11 @@ class TaskFlow {
     await rt.mirror('running');
 
     for (;;) {
+      // v2 在 park 内接纳快照后才离开。收场 IO 期间外部又改正文，先过既有合同边界再有新动作。
+      if (rt.handbackContractBoundary) {
+        await rt.refreshContract('原位返工动手前');
+        rt.handbackContractBoundary = false;
+      }
       await rt.checkpoint();
       await rt.refreshContract('动手前');
       // 验收没过要返工、验收还没到 2 轮的上限：这一轮动手照给（#1967：CI 红了 2 轮、第 3 轮才验，验收意见还没交给会话就因
@@ -818,7 +833,7 @@ class TaskFlow {
       );
     } catch (error) {
       if (error instanceof PermissionPushHandback) {
-        rt.feedback = [error.feedback];
+        rt.feedback = error.acceptedContract ? [error.feedback, ...rt.feedback] : [error.feedback];
         rt.resumeFrom = null;
         rt.lastSession = null;
         rt.resumeStreak = 0;
