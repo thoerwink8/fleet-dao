@@ -8,7 +8,7 @@ import { createActivities, PORT_NAMES, TASK_ACTIVITY_NAMES } from '../src/activi
 import { ACTIVITY_PROFILE, profileOptions } from '../src/activity-options.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import { DEFAULT_LIMITS } from '../src/limits.ts';
-import { type ActivityTiming, type EnginePorts, PortError } from '../src/ports.ts';
+import { type ActivityTiming, type EnginePorts, type PortContext, PortError } from '../src/ports.ts';
 import { freshRepo } from './helpers.ts';
 
 const quiet = { log() {}, trace() {}, debug() {}, info() {}, warn() {}, error() {} };
@@ -33,6 +33,130 @@ const createWorktreeInput = {
   repo: freshRepo(),
   branch: 'fleet/1-a',
 };
+
+describe.each(['createWorktree', 'coldVerify'] as const)('%s 的取消传播', (activity) => {
+  function fixture() {
+    const world = createFakeWorld();
+    const env = envWith();
+    const run = (
+      handler: (input: unknown, ctx: PortContext) => Promise<never>,
+      recordTiming = world.ports.recordTiming,
+    ) => {
+      const activities = createActivities(
+        { ...world.ports, createWorktree: handler, recordTiming },
+        {},
+        { coldVerify: handler },
+      );
+      return activity === 'createWorktree'
+        ? env.run(activities.createWorktree, createWorktreeInput)
+        : env.run(activities.coldVerify, {
+            schemaVersion: 1 as const,
+            taskId: 't1',
+            repo: freshRepo(),
+            issueNumber: 3429,
+            prNumber: 1,
+            branch: 'local/3429-cancellation-reason',
+            baseSha: 'a'.repeat(40),
+            headSha: 'b'.repeat(40),
+            what: '取消原因原样传播',
+            howToFinish: ['保留 SDK 取消原因'],
+            authorFamilies: [],
+            round: 1 as const,
+          });
+    };
+    return { world, env, run };
+  }
+
+  it.each([
+    ['PortError', false],
+    ['Error', false],
+    ['PortError', true],
+    ['Error', true],
+  ] as const)('取消后包装成 %s，计时失败=%s，仍抛原 reason', async (kind, timingFails) => {
+    const { world, env, run } = fixture();
+    let reason: unknown;
+    const error = await run(
+      async (_input, ctx) => {
+        env.cancel();
+        reason = ctx.signal.reason;
+        throw kind === 'PortError'
+          ? new PortError('CONTRACT_UNVERIFIED', '正式合同未核实：CANCELLED', { retryable: true })
+          : new Error('取消被包装');
+      },
+      async (entry, ctx) => {
+        expect(ctx.signal.aborted).toBe(false);
+        await world.ports.recordTiming(entry, ctx);
+        if (timingFails) throw new Error('计时库不可用');
+      },
+    ).catch((e: unknown) => e);
+    expect(reason).toBeInstanceOf(CancelledFailure);
+    expect(error).toBe(reason);
+    expect(error).toBeInstanceOf(CancelledFailure);
+    expect(world.timings).toHaveLength(1);
+    expect(world.timings[0]).toMatchObject({ activity, outcome: 'cancelled' });
+    expect(world.timings[0]).not.toHaveProperty('errorCode');
+  });
+
+  it('handler 直接抛 SDK 取消 reason 时保持原引用', async () => {
+    const { world, env, run } = fixture();
+    let reason: unknown;
+    const error = await run(async (_input, ctx) => {
+      env.cancel();
+      reason = ctx.signal.reason;
+      ctx.signal.throwIfAborted();
+      throw new Error('不可到达');
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(CancelledFailure);
+    expect(error).toBe(reason);
+    expect(world.timings).toHaveLength(1);
+    expect(world.timings[0]).toMatchObject({ activity, outcome: 'cancelled' });
+  });
+
+  it('signal 未取消时直接抛 CancelledFailure，保持原实例和取消计时', async () => {
+    const { world, run } = fixture();
+    const original = new CancelledFailure('直接取消');
+    const error = await run(async (_input, ctx) => {
+      expect(ctx.signal.aborted).toBe(false);
+      throw original;
+    }).catch((e: unknown) => e);
+    expect(error).toBe(original);
+    expect(world.timings).toHaveLength(1);
+    expect(world.timings[0]).toMatchObject({ activity, outcome: 'cancelled' });
+  });
+
+  it('未取消的普通错误保持原引用并记 failed', async () => {
+    const { world, run } = fixture();
+    const original = new Error('业务失败');
+    const error = await run(async () => {
+      throw original;
+    }).catch((e: unknown) => e);
+    expect(error).toBe(original);
+    expect(world.timings).toHaveLength(1);
+    expect(world.timings[0]).toMatchObject({ activity, outcome: 'failed', errorCode: 'Error' });
+  });
+
+  it('未取消的 PortError 保留重试策略和明细映射', async () => {
+    const { world, run } = fixture();
+    const error = await run(async () => {
+      throw new PortError('CONTRACT_UNVERIFIED', '正式合同未核实', {
+        retryable: true,
+        details: { reason: '读取失败' },
+      });
+    }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ApplicationFailure);
+    expect(error).toMatchObject({
+      type: 'CONTRACT_UNVERIFIED',
+      nonRetryable: false,
+      details: [{ reason: '读取失败' }],
+    });
+    expect(world.timings).toHaveLength(1);
+    expect(world.timings[0]).toMatchObject({
+      activity,
+      outcome: 'failed',
+      errorCode: 'CONTRACT_UNVERIFIED',
+    });
+  });
+});
 
 describe('活动外壳', () => {
   it('活动表齐全：工作流会调的每个名字 worker 都挂上了（windsurf-dao#1422）', () => {

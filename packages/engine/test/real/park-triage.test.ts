@@ -13,6 +13,7 @@ import {
   tasks,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { noteOnlyOptions } from '@fleet-dao/shared';
 import { WorkflowNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { COMMANDER_ACTOR } from '../../src/commander-contract.ts';
@@ -20,6 +21,7 @@ import { judgeSpin } from '../../src/decisions/spin.ts';
 import {
   COMMANDER_AUDIT_ACT,
   COMMANDER_AUDIT_CLAIM,
+  COMMANDER_AUDIT_RETRY,
   PARK_TRIAGE_JOB,
   type ParkTriageItem,
   runParkTriageJob,
@@ -205,6 +207,41 @@ describe('real/park-triage', () => {
     const [row] = await t.db.select().from(notifications);
     expect(row?.body).toContain('同一个命令反复失败');
     expect(row?.taskId).toBe(task.id);
+  });
+
+  it('留给人·掏新钱写成「要你拍」：选项和原因一起落库；会话没起成记 commander.retry（ok=false）', async () => {
+    const task = await seedTask();
+    const d = deps();
+    await d.notify({
+      level: 'decision',
+      key: 'commander:task-acme-app-7:park:3',
+      title: '要你拍：acme/app#7',
+      body: '要掏新钱',
+      taskId: task.id,
+      options: noteOnlyOptions(),
+      reason: 'new-money',
+    });
+    const [card] = await t.db.select().from(notifications);
+    expect(card).toMatchObject({ level: 'decision', decisionReason: 'new-money' });
+    expect(card?.decisionOptions).toHaveLength(2);
+    const item = itemOf(task.id);
+    await d.retry({ row: item.row, workflowId: item.workflowId, park: PARK, attempt: 1, why: '选不到路由' });
+    const rows = (await t.db.select().from(auditLog)).filter((r) => r.action === COMMANDER_AUDIT_RETRY);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actorId: COMMANDER_ACTOR, ok: false });
+    expect(rows[0]?.after).toMatchObject({ workflowId: 'task-acme-app-7', parkSeq: 3, attempt: 1 });
+  });
+
+  it('老历史认停在哪一次：读开着的、编号最大的停下提醒', async () => {
+    const task = await seedTask();
+    await deps().notify({
+      level: 'alert',
+      key: 'task-acme-app-7:park:2',
+      title: '动手 3 轮都没过',
+      body: '原文',
+      taskId: task.id,
+    });
+    expect(await deps().openPark('task-acme-app-7')).toMatchObject({ seq: 2, title: '动手 3 轮都没过' });
   });
 
   it('回合读给空转判断：旧的在前，没有收场的回合回空数组', async () => {

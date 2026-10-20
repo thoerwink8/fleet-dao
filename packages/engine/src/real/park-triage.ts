@@ -6,7 +6,8 @@
 //   继续 / 放弃是发 Temporal 信号，重做走 shared 的 redoTask（和驾驶舱、命令行的「重做」同一份判断），拆单只有「开子单」一种 GitHub 写操作。
 // - 开关是设置 engine.commander（驾驶舱设置页能关）：没设过算开；值认不出按关并说明，不当成开。
 // - 操作记录经 recordEngineAudit 写，actor 是 engine:commander、target 是 commander；「认领」和「执行」各一条（jobs/park-triage.ts 看认领判是否处理过）。
-// - 提醒（诊断文字）经 upsertAlert 推：执行了的是 daily，留给人 / 没成的是 alert。
+// - 提醒（诊断文字）经 upsertAlert 推：执行了的、贴「本机做」交本机指挥官的是 daily；留给人（要掏新钱、删了找不回、只有人能做）
+//   是 decision（带选项和原因）；没成、会话没起成的是 alert。改标准的停下经 addIssueLabel 贴「本机做」（#3423）。
 import {
   beginTaskStart,
   bindTaskStart,
@@ -16,6 +17,7 @@ import {
   finishScheduleRun,
   listIntakeRepos,
   listStalledEngineTasks,
+  readOpenParkAlert,
   readParkAlertBody,
   readSettingValue,
   readTaskRoundsForSpin,
@@ -38,7 +40,13 @@ import {
 import { errMessage } from '@fleet-dao/shared/util';
 import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { COMMANDER_ACTOR } from '../commander-contract.ts';
-import { COMMANDER_AUDIT_ACT, COMMANDER_AUDIT_CLAIM, type ParkTriageDeps } from '../jobs/park-triage.ts';
+import { triageKindOf } from '../decisions/park-triage.ts';
+import {
+  COMMANDER_AUDIT_ACT,
+  COMMANDER_AUDIT_CLAIM,
+  COMMANDER_AUDIT_RETRY,
+  type ParkTriageDeps,
+} from '../jobs/park-triage.ts';
 import { taskAbandonSignal, taskContinueSignal, taskStatusQuery } from '../task-contract.ts';
 import { type GroomWiring, toRepo } from './groom.ts';
 import { mapped } from './mirror.ts';
@@ -234,14 +242,17 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         throw err;
       }
     },
+    openPark: (workflowId) => readOpenParkAlert(w.db, workflowId),
     async audits(since) {
       return (await commanderAuditRows(w.db, since)).map((r) => ({
         at: r.at,
         action: r.action,
         after: r.after,
+        ok: r.ok,
       }));
     },
-    async claim({ row, workflowId, park, requestId }) {
+    async claim({ row, workflowId, park, requestId, kind, legacy, attempt }) {
+      const triage = kind ?? triageKindOf(park);
       await recordEngineAudit(w.db, {
         action: COMMANDER_AUDIT_CLAIM,
         target: COMMANDER_AUDIT_TARGET,
@@ -251,12 +262,35 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           ref: `${row.owner}/${row.name}#${row.issueNumber}`,
           workflowId,
           parkSeq: park.seq,
-          kind: park.kind,
+          kind: triage,
+          parkKind: park.kind,
+          ...(park.code ? { code: park.code } : {}),
+          ...(park.rule ? { rule: park.rule } : {}),
+          ...(legacy ? { legacy: true } : {}),
+          ...(attempt ? { attempt } : {}),
           title: park.title,
           requestId,
         },
-        reason: `交指挥官会话看：停法 ${park.kind}，停下「${park.title}」`,
+        reason: `交指挥官会话看：停法 ${triage}，停下「${park.title}」`,
         ok: true,
+        at: now(),
+      });
+    },
+    async retry({ row, workflowId, park, attempt, why }) {
+      await recordEngineAudit(w.db, {
+        action: COMMANDER_AUDIT_RETRY,
+        target: COMMANDER_AUDIT_TARGET,
+        actorId: COMMANDER_ACTOR,
+        after: {
+          taskId: row.taskId,
+          ref: `${row.owner}/${row.name}#${row.issueNumber}`,
+          workflowId,
+          parkSeq: park.seq,
+          attempt,
+        },
+        reason: `指挥官会话没起成（第 ${attempt} 次），这一次停下下一轮再看`,
+        ok: false,
+        error: why.slice(0, 1000),
         at: now(),
       });
     },
@@ -308,7 +342,10 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
       });
       return { number: got.number };
     },
-    async audit({ item, action, reason, ok, error }) {
+    async addLabel(repo, issueNumber, label) {
+      await w.gh.addIssueLabel({ repo: { owner: repo.owner, name: repo.name }, issueNumber, label });
+    },
+    async audit({ item, action, reason, ok, error, source }) {
       await recordEngineAudit(w.db, {
         action: COMMANDER_AUDIT_ACT,
         target: COMMANDER_AUDIT_TARGET,
@@ -319,6 +356,8 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
           workflowId: item.workflowId,
           parkSeq: item.park.seq,
           action,
+          kind: item.kind ?? triageKindOf(item.park),
+          ...(source ? { source } : {}),
         },
         reason,
         ok,
@@ -333,6 +372,8 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
         taskId: n.taskId,
         title: n.title,
         body: n.body,
+        ...(n.options ? { options: n.options } : {}),
+        ...(n.reason ? { reason: n.reason } : {}),
       });
     },
     async resolveAlert({ workflowId, park, why }) {

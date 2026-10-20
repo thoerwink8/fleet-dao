@@ -6,6 +6,7 @@ import {
   hardBanFor,
   type OrgKind,
   poolFull,
+  poolOccupied,
   poolOccupiedText,
   type ReserveReading,
   ROUTE_PROBE_EVERY_MINUTES,
@@ -37,6 +38,9 @@ import type {
   RouteWindow,
   StageRouteEntry,
 } from './types.ts';
+
+/** 用途 commander 比池的并发上限多算几个名额（只它有，见 candidateBlocks）。 */
+export const COMMANDER_SLOT_GRACE = 1;
 
 export interface FilterContext {
   stage: StageKind;
@@ -156,8 +160,14 @@ function candidateBlocks(route: RouteFacts, ctx: FilterContext): Block[] {
     out.push(hard('banned', `犯禁令：${reasons.length > 0 ? reasons.join('、') : '原因没写'}`));
   }
   if (route.blockers.includes('quota-exhausted')) out.push(exhaustedBlock(route, ctx.now));
-  // 判满只有 shared 的 poolFull（在跑 + 已选定还没开工；驾驶舱路由页、换路由选项、候选查询的 no-slot 同一个判法）
-  if (route.blockers.includes('no-slot') || poolFull(route)) {
+  // 判满只有 shared 的 poolFull（在跑 + 已选定还没开工；驾驶舱路由页、换路由选项、候选查询的 no-slot 同一个判法）。
+  // 用途 commander（法国指挥官，#3423）在名额判断里让位：它是只读的一次性会话、不预占名额，动手会话占满 N/N 时它仍能派，
+  // 到 N+COMMANDER_SLOT_GRACE 才挡。不然名额满了它就排不上，停下的单没人拍板（#3249）。
+  const full =
+    ctx.stage === 'commander'
+      ? poolOccupied(route) >= route.maxConcurrency + COMMANDER_SLOT_GRACE
+      : route.blockers.includes('no-slot') || poolFull(route);
+  if (full) {
     const text =
       route.reserved > 0
         ? `${poolOccupiedText(route)}，上限 ${route.maxConcurrency} 个`

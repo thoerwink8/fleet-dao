@@ -659,7 +659,7 @@ export async function readCorrectMergedExecution(
   }
   if (generations.length === MAX_TASK_GENERATION) throw new Error('原任务工作流的代数没有列全，不纠正');
   const row = generations.find((item) => item.workflowId === input.workflowId) ?? null;
-  if (!row || row.status !== 'COMPLETED' || row.runId !== input.runId) {
+  if (row?.status !== 'COMPLETED' || row.runId !== input.runId) {
     return { generations, matched: row ? { ...row, result: null } : null };
   }
   const raw = await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
