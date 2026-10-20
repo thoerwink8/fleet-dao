@@ -206,6 +206,7 @@ function timed(name: string, handler: Handler, record: EnginePorts['recordTiming
     } catch (error) {
       if (error instanceof CancelledFailure || ctx.cancellationSignal.aborted) {
         outcome = 'cancelled';
+        ctx.cancellationSignal.throwIfAborted();
         throw error;
       }
       outcome = 'failed';
