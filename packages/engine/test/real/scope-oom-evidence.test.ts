@@ -106,14 +106,14 @@ describe('sampleScopeOom', () => {
   });
 
   it('首次采样时文件还没创建、后来才出现：保留缺口，不能说完整无事件', async () => {
-    const { deps } = fake({ [LOCAL]: [enoent(), events(0, 0)] });
+    const { deps } = fake({ [LOCAL]: [enoent(), events(1, 1)] });
     const ev = await sample(deps).stop();
     expect(ev).toMatchObject({
       verdict: 'unknown',
       integrity: 'partial',
       scopeId: 'run-1',
       missingBeforeFirstRead: 1,
-      baseline: { oomEvents: 0, killedProcs: 0 },
+      baseline: { oomEvents: 1, killedProcs: 1 },
       delta: { oomEvents: 0, killedProcs: 0 },
     });
     expect(ev.problems.join()).toContain('首次采样时文件尚未创建');
@@ -197,6 +197,26 @@ describe('sampleScopeOom', () => {
     expect(ev.verdict).toBe('unknown');
     expect(ev.integrity).toBe('partial');
     expect(ev.problems.join()).toContain('回退');
+  });
+
+  it('【故意造出的失败】成功读数之间 scope 文件短暂消失又出现：不把前后计数差当作本次事件', async () => {
+    let reads = 0;
+    const deps: ScopeOomDeps = {
+      ...SLICE,
+      intervalMs: 5,
+      async readText(path) {
+        if (path !== LOCAL) throw enoent();
+        reads += 1;
+        if (reads === 2) throw enoent();
+        return events(reads >= 3 ? 1 : 0, reads >= 3 ? 1 : 0);
+      },
+    };
+    const s = sample(deps);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    const ev = await s.stop();
+    expect(ev).toMatchObject({ verdict: 'unknown', integrity: 'partial' });
+    expect(ev.problems.join()).toContain('成功读数之间有文件读不成');
+    expect(ev.delta).toEqual({ oomEvents: 1, killedProcs: 1 });
   });
 
   it('【故意造出的失败】首读计数就不是 0（scope 重用，或首读前已发生）：不认作这次运行的事件，计数照记', async () => {

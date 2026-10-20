@@ -185,6 +185,8 @@ export function sampleScopeOom(
   let observedAt: string | undefined;
   let hierarchical: ScopeOomCounts | undefined;
   let regressed = false;
+  let unreadBetweenReads = false;
+  let continuityBroken = false;
   const problems: string[] = [];
   let lastReadOutcome: 'ok' | 'gone' | 'failed' = 'failed';
   let stopped = false;
@@ -202,6 +204,15 @@ export function sampleScopeOom(
       const at = now().toISOString();
       reads += 1;
       lastReadOutcome = 'ok';
+      if (unreadBetweenReads) {
+        continuityBroken = true;
+        problem(
+          last
+            ? '成功读数之间有文件读不成，无法确认前后仍是同一个 scope'
+            : '首次成功读数前有文件读不成，无法确认这个 scope 从运行开始就是同一个',
+        );
+      }
+      unreadBetweenReads = false;
       if (!last) {
         baseline = counts;
         firstReadAt = at;
@@ -218,9 +229,11 @@ export function sampleScopeOom(
       if (isMissing(err)) {
         lastReadOutcome = 'gone';
         if (!last) missingBeforeFirstRead += 1;
+        unreadBetweenReads = true;
       } else {
         lastReadOutcome = 'failed';
         problem(`${localPath} 读不成或认不出：${message(err)}`);
+        unreadBetweenReads = true;
       }
       return;
     }
@@ -289,9 +302,9 @@ export function sampleScopeOom(
     const complete = finalRead === 'ok' && problems.length === 0;
     let verdict: ScopeOomVerdict;
     let note: string;
-    if (regressed || !baselineZero) {
+    if (regressed || continuityBroken || missingBeforeFirstRead > 0 || !baselineZero) {
       verdict = 'unknown';
-      note = `这个 scope 的计数对不上，不能认作这一次运行的事件：${problems.join('；')}；${NOTE_KILL_UNKNOWN}`;
+      note = `这个 scope 的计数窗口对不上，不能认作这一次运行的事件：${problems.join('；')}；${NOTE_KILL_UNKNOWN}`;
     } else if (delta.oomEvents > 0 || delta.killedProcs > 0) {
       verdict = 'oom_events_in_scope';
       note = `这个 scope（${base.scope}）自己的本地计数里有 OOM 事件（oom ${delta.oomEvents} 次、被杀进程 ${delta.killedProcs} 个）；${NOTE_KILL_UNKNOWN}`;
