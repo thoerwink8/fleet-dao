@@ -140,6 +140,10 @@ export function prepareCiBrowser(options: BrowserOptions = {}): number {
         `Dir::Etc::sourcelist ${quote(selected)};`,
         `Dir::Etc::sourceparts ${quote(empty)};`,
         'APT::Update::Error-Mode "any";',
+        // Moving Binary's source leaves also moves their empty parent values.
+        // Keep the supported Ubuntu defaults for all state/cache/log/etc paths.
+        'Binary::apt-get::Dir "/";',
+        'Binary::apt-get::Dir::Etc "etc/apt";',
         `Binary::apt-get::Dir::Etc::sourcelist ${quote(selected)};`,
         `Binary::apt-get::Dir::Etc::sourceparts ${quote(empty)};`,
         'Binary::apt-get::APT::Update::Error-Mode "any";',

@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -6,12 +5,14 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { prepareCiBrowser, validateUbuntuSources } from '../src/ci-browser.ts';
+import { runChild } from './child.ts';
 
 const UBUNTU = `Types: deb
 URIs: http://azure.archive.ubuntu.com/ubuntu/
@@ -74,22 +75,15 @@ process.exit(Number(process.env.BROWSER_EXIT||0));
           expect(args.slice(3)).toEqual([process.execPath, cli, 'install-deps', 'chromium']);
           const aptConfig = (args[2] ?? '').slice('APT_CONFIG='.length);
           expect(args[2]).toMatch(/^APT_CONFIG=/);
-          const result = spawnSync(process.execPath, [cli, 'install-deps', 'chromium'], {
+          const result = runChild(process.execPath, [cli, 'install-deps', 'chromium'], {
             env: { ...env, APT_CONFIG: aptConfig, QUERIED_SOURCES: queried, DEPS_EXIT: String(deps) },
-            encoding: 'utf8',
           });
-          expect(result.error).toBeUndefined();
-          expect(result.signal).toBeNull();
-          if (result.status === null) throw Error('Dependency fixture did not exit');
           return result.status;
         }
         expect(command).toBe(process.execPath);
-        const result = spawnSync(command, args, {
+        const result = runChild(command, args, {
           env: { ...env, BROWSER_EXIT: String(browser) },
-          encoding: 'utf8',
         });
-        expect(result.error).toBeUndefined();
-        if (result.status === null) throw Error('Browser fixture did not exit');
         return result.status;
       },
     });
@@ -211,6 +205,40 @@ describe('CI browser preparation', () => {
     'real APT ignores later source/Main/Binary redirection while preserving original Parts/Main options (offline)',
     () => {
       const f = fixture();
+      // apt-config normally applies its own Binary subtree. This alias applies
+      // apt-get's subtree, including its parent values, just like the installer.
+      const aptConfigPath = runChild('which', ['apt-config']);
+      expect(aptConfigPath.status).toBe(0);
+      const aptGetConfig = join(f.root, 'apt-get');
+      symlinkSync(aptConfigPath.stdout.trim(), aptGetConfig);
+      const paths = [
+        'ROOT',
+        'Dir/d',
+        'ETC',
+        'Dir::Etc/d',
+        'STATE',
+        'Dir::State/d',
+        'LISTS',
+        'Dir::State::lists/d',
+        'CACHE',
+        'Dir::Cache/d',
+        'ARCHIVES',
+        'Dir::Cache::archives/d',
+        'LOG',
+        'Dir::Log/d',
+        'STATUS',
+        'Dir::State::status/f',
+        'METHODS',
+        'Dir::Bin::methods/d',
+        'TRUSTED',
+        'Dir::Etc::trustedparts/d',
+        'PREFERENCES',
+        'Dir::Etc::preferences/f',
+      ];
+      const baseline = runChild(aptGetConfig, ['shell', ...paths], {
+        env: { ...process.env, APT_CONFIG: undefined },
+      });
+      expect(baseline.status).toBe(0);
       const bad = join(f.apt, 'microsoft.list');
       const redirected = join(f.apt, 'redirected.conf');
       writeFileSync(bad, 'deb https://packages.microsoft.com/ubuntu/24.04/prod noble main\n');
@@ -245,19 +273,18 @@ describe('CI browser preparation', () => {
           run(command, args, env) {
             if (command !== 'sudo') return 0;
             const childEnv = { ...env, APT_CONFIG: (args[2] ?? '').slice('APT_CONFIG='.length) };
-            const dump = spawnSync('apt-config', ['dump'], { env: childEnv, encoding: 'utf8' });
-            expect(dump.error).toBeUndefined();
+            const dump = runChild(aptGetConfig, ['dump'], { env: childEnv });
             expect(dump.status).toBe(0);
             expect(dump.stdout).toContain('APT::FixtureParts "loaded"');
             expect(dump.stdout).toContain('APT::FixtureMain "loaded"');
             expect(dump.stdout).not.toContain('APT::UnexpectedMain');
-            expect(dump.stdout).toContain('Binary::apt-get::APT::Update::Error-Mode "any"');
-            const indices = spawnSync(
-              'apt-get',
-              ['indextargets', '--no-release-info', '--format', '$(URI)'],
-              { env: childEnv, encoding: 'utf8' },
-            );
-            expect(indices.error).toBeUndefined();
+            expect(dump.stdout).toContain('APT::Update::Error-Mode "any"');
+            const actualPaths = runChild(aptGetConfig, ['shell', ...paths], { env: childEnv });
+            expect(actualPaths.status).toBe(0);
+            expect(actualPaths.stdout).toBe(baseline.stdout);
+            const indices = runChild('apt-get', ['indextargets', '--no-release-info', '--format', '$(URI)'], {
+              env: childEnv,
+            });
             expect(indices.status).toBe(0);
             const uris = indices.stdout.trim().split('\n');
             expect(uris.length).toBeGreaterThan(0);
