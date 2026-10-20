@@ -3,7 +3,7 @@
 //
 //   停法                    继续      重做      拆单      停掉      留给人
 //   轮数用尽                ✓         ✓         ✗         ✗         ✓     （已经继续满三次交指挥官的：继续没用，工作流会再停一次，只许重做）
-//   体量超预算              ✗         ✗         ✓         ✗         ✓
+//   体量超预算              ✗         ✗         ✓         ✓*        ✓     （*只在成果已由别的提交合进主线时：裁决带 mergedIn）
 //   额度超预算·没空转        ✓+放宽    ✓         ✓         ✗         ✓     （看 decisions/spin.ts：判的是空转，不是钱）
 //   额度超预算·空转          ✗         ✓         ✓         ✓         ✓     （不许原样继续）
 //   额度超预算·没法判        ✗         ✗         ✗         ✗         ✓     （回合没读到：不拿「没读到」当「没有空转」）
@@ -11,6 +11,9 @@
 //   改标准、没权限等人闸、别的   ✗         ✗         ✗         ✗         ✓     （只写诊断建议，不动）
 //
 // 「留给人」永远放行：它不动任务，只把诊断写进提醒。
+// 体量停点的停掉（#3407）：#3207 停在体量超预算，成果已由 #3324、#3358 分片合进主线，指挥官只能拆单（把已合的活再开一遍）
+// 或留给人，提醒挂着没人接。停掉只放弃这一代（PR、单子不动），比拆单少开子单；裁决必须写明主线上带着这份成果的提交号，
+// 引擎核不了内容，提交号写进操作记录和提醒给人对照。
 
 import type { ParkKind } from '../task-contract.ts';
 import type { SpinJudgement } from './spin.ts';
@@ -57,7 +60,7 @@ export function allowedActions(park: ParkFacts, spin: SpinJudgement | null): Act
     continue: '这种停法不许继续',
     redo: '这种停法不许重做',
     split: '这种停法不许拆单',
-    stop: '只有额度超预算判成空转时才许停掉',
+    stop: '只有额度超预算判成空转、或体量超预算而成果已在主线时才许停掉',
     leave: true,
   };
   switch (park.kind) {
@@ -68,7 +71,7 @@ export function allowedActions(park: ParkFacts, spin: SpinJudgement | null): Act
         redo: true,
       };
     case 'size':
-      return { ...base, split: true };
+      return { ...base, split: true, stop: true };
     case 'quota': {
       if (spin === null) {
         const why = '这张单的回合没读到，判不了空转，不放行任何动手的动作';
@@ -98,7 +101,12 @@ export interface RawVerdict {
   action: string;
   /** 拆单时会话给了几张子单（具体内容由执行那一边再核）。 */
   subtaskCount?: number | undefined;
+  /** 体量停点判停掉时，主线上已经带着这份成果的提交号。 */
+  mergedIn?: string | undefined;
 }
+
+/** 主线提交号的样子：7~40 位小写十六进制。 */
+export const MERGED_IN_SHA = /^[0-9a-f]{7,40}$/;
 
 export type VerdictCheck =
   | {
@@ -129,6 +137,12 @@ export function checkVerdict(park: ParkFacts, spin: SpinJudgement | null, verdic
     const n = verdict.subtaskCount ?? 0;
     if (n < SPLIT_MIN || n > SPLIT_MAX)
       return { ok: false, why: `拆单要给 ${SPLIT_MIN}~${SPLIT_MAX} 张子单，会话给了 ${n} 张` };
+  }
+  if (action === 'stop' && park.kind === 'size' && !MERGED_IN_SHA.test(verdict.mergedIn ?? '')) {
+    return {
+      ok: false,
+      why: '体量超预算只在成果已由别的提交合进主线时才许停掉，裁决要带 mergedIn（主线上的提交号，7~40 位十六进制）',
+    };
   }
   return { ok: true, action, widenBudget: action === 'continue' && park.kind === 'quota' };
 }

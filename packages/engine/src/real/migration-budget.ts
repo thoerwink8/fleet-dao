@@ -101,7 +101,10 @@ export async function measureMigrationBudget(
   for (let i = 0; i < parts.length; i += 2) {
     const p = parts[i + 1] as string;
     if (TRUST_INPUTS.has(p) || p === '.gitattributes' || p.endsWith('/.gitattributes')) {
-      return fallback(`候选改动信任根 ${p}，不适用快照折扣`, rawDiffBytes);
+      return fallback(
+        `候选改动信任根 ${p}，不适用快照折扣；把依赖、锁和计量代码的改动拆成单独一片先合，迁移那一片才按快照折扣计`,
+        rawDiffBytes,
+      );
     }
     if (p.startsWith(MIGRATIONS)) changed.set(p, parts[i] as string);
   }

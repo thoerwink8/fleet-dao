@@ -6,7 +6,8 @@
 //   引擎拿裁决先过纯函数白名单（decisions/park-triage.ts；额度超预算另按 decisions/spin.ts 判空转），放行的才执行，
 //   没放行的、会话没给裁决的、交了白名单外动作的，一律退成「留给人」：只把诊断写进提醒，任务不动。
 // - 每张单每次停下最多处理一次：处理前先记一条 commander.claim（键 = 工作流编号 + 第几次停下），之后就算会话没跑成也不再来第二次，
-//   交人（提醒里写明）。每天处理的张数有上限（PARK_TRIAGE_DAILY_CAP，数 24 小时内的 claim）。设置 engine.commander 能关，关着不看。
+//   交人（提醒里写明）。唯一例外：白名单版本升了（COMMANDER_WHITELIST_VERSION），旧版本下认领过的体量停点再看一回。
+//   每天处理的张数有上限（PARK_TRIAGE_DAILY_CAP，数 24 小时内的 claim）。设置 engine.commander 能关，关着不看。
 // - 用途 commander 没配模型（路由页清空了）：明说「没配模型」并报警，不悄悄不跑。
 // - 执行的操作都记在 engine:commander 名下（操作记录 target=commander），诊断文字（理由、白名单核对结果、空转判断）带进发出的提醒。
 // - 额度超预算不再是人闸，判的是空转不是钱：没空转 → 允许继续并把额度预算放宽一档；判成空转 → 不许原样继续。回合没读到的不拿来当「没空转」。
@@ -55,6 +56,12 @@ export const PARK_TRIAGE_JOB = {
 /** 操作记录的 action：先记「认领」，执行了再记「执行」。 */
 export const COMMANDER_AUDIT_CLAIM = 'commander.claim';
 export const COMMANDER_AUDIT_ACT = 'commander.act';
+/**
+ * 认领时按的白名单版本（记进 commander.claim 的 after.whitelist）。2＝体量停点放行「停掉」（#3407）。
+ * 版本 2 之前认领过的体量停点（after.kind=size、没有 whitelist）再看一次：那时只能拆单或留给人，
+ * 成果已分片合进主线的（#3207 park:1）只能挂着等人；重看认领记新版本，之后照旧每次停下只看一回。
+ */
+export const COMMANDER_WHITELIST_VERSION = 2;
 
 export type CommanderSwitch = { on: true } | { on: false; why: string };
 
@@ -84,6 +91,8 @@ export interface ParkTriageItem {
   rounds: SpinRound[] | null;
   /** 只有额度停法算；回合没读到也是 null（allowedActions 当「没法判」）。 */
   spin: SpinJudgement | null;
+  /** 按旧白名单看过一次、这次按新白名单重看的体量停点。 */
+  recheck?: boolean;
 }
 
 export interface CommanderActEntry {
@@ -108,12 +117,13 @@ export interface ParkTriageDeps {
   status(workflowId: string): Promise<ParkedSnapshot | 'gone'>;
   /** since 之后 target=commander 的操作记录。读不到照抛。 */
   audits(since: Date): Promise<CommanderAuditView[]>;
-  /** 认领这一次停下（写 commander.claim）。写不进照抛：这一张这一轮不处理。 */
+  /** 认领这一次停下（写 commander.claim，after 带 whitelist）。写不进照抛：这一张这一轮不处理。 */
   claim(entry: {
     row: ParkedRetryRow;
     workflowId: string;
     park: TaskParkInfo;
     requestId: string;
+    whitelist: number;
   }): Promise<void>;
   /** 这一次停下的提醒正文。 */
   detail(workflowId: string, parkSeq: number): Promise<string | null>;
@@ -177,6 +187,7 @@ const Verdict = z.object({
   action: Text(40),
   reason: Text(1200),
   subtasks: z.array(z.unknown()).max(10).optional(),
+  mergedIn: z.unknown().optional(),
 });
 
 export interface ParsedVerdict {
@@ -185,6 +196,8 @@ export interface ParsedVerdict {
   action: string;
   reason: string;
   subtasks: Subtask[];
+  /** 体量停点判停掉时，主线上已带着这份成果的提交号（会话原话，checkVerdict 核样子）。 */
+  mergedIn?: string;
   /** 拆单里格式不对的子单数。 */
   badSubtasks: number;
 }
@@ -219,6 +232,7 @@ export function parseCommanderAnswer(
       return;
     }
     const subs = (parsed.data.subtasks ?? []).map((s) => Subtask.safeParse(s));
+    const mergedIn = parsed.data.mergedIn;
     verdicts.push({
       issue: parsed.data.issue,
       parkSeq: parsed.data.parkSeq,
@@ -226,6 +240,7 @@ export function parseCommanderAnswer(
       reason: parsed.data.reason,
       subtasks: subs.flatMap((s) => (s.success ? [s.data] : [])),
       badSubtasks: subs.filter((s) => !s.success).length,
+      ...(typeof mergedIn === 'string' ? { mergedIn: mergedIn.trim().slice(0, 80) } : {}),
     });
   });
   const summary = typeof obj.summary === 'string' ? obj.summary.trim().slice(0, 600) : '';
@@ -261,6 +276,10 @@ export function renderParkTriagePrompt(input: {
       `- 停下的时刻：${stamp(new Date(park.at))}（北京时间）${park.head ? `，PR 头 ${park.head.slice(0, 12)}` : ''}`,
       `- 原因原文：${item.detail ?? '没读到'}`,
     ];
+    if (item.recheck)
+      lines.push(
+        '- 这一停按旧白名单看过一次（那时体量停点只能拆单或留给人），这次按新白名单重看：先查成果是不是已经进了主线',
+      );
     if (item.rounds === null) lines.push('- 回合记录：没读到');
     else if (item.rounds.length === 0) lines.push('- 回合记录：还没有收场的回合');
     else {
@@ -285,9 +304,10 @@ export function renderParkTriagePrompt(input: {
     '- continue：继续（接着做）。',
     '- redo：重做（叫停这一代、换路由或换模型另起一代；新一代自己重新选路）。',
     '- split：拆单（体量太大或反复空转时拆成 2~5 张互相独立的子单，每张写 title、scene、done；原单随后收尾）。',
-    '- stop：停掉并报原因（只有额度超预算且引擎判成空转时才放行）。',
+    '- stop：停掉并报原因（额度超预算且引擎判成空转时；或体量超预算而这份成果已经由别的提交合进主线时，要带 mergedIn：主线上带着这份成果的提交号）。',
     '- leave：留给人（改标准、没权限等人闸，或你拿不准）：只把诊断建议写给人，任务不动。',
     '额度超预算不是看花了多少钱，而是看有没有空转：回合有新提交、失败原因在变就是有进展，可以继续；同一个原因连着失败、没有新提交、命令反复失败就是空转，不许原样继续。',
+    '体量超预算先在主线里查（`git log --grep "#<单号>"`、代码里写的 #<单号>、原因原文里改到的目录）这份成果是不是已经由别的 PR 合进去了（比如分片各自合了）：合了就 stop 并带 mergedIn（主线上带着成果的那个提交号），别再拆单把已合的活开一遍；没合才拆单。',
     '',
     '要处理的单：',
     '',
@@ -296,7 +316,8 @@ export function renderParkTriagePrompt(input: {
     '最后只回一段 ```json 围栏，里面是一个对象，每张单最多一条裁决，别的话不用写：',
     '```json',
     '{"summary":"一句话总结","verdicts":[{"issue":123,"parkSeq":1,"action":"continue","reason":"为什么这么判（给人看的诊断）"},' +
-      '{"issue":124,"parkSeq":2,"action":"split","reason":"…","subtasks":[{"title":"…","scene":"…","done":["…"]}]}]}',
+      '{"issue":124,"parkSeq":2,"action":"split","reason":"…","subtasks":[{"title":"…","scene":"…","done":["…"]}]},' +
+      '{"issue":125,"parkSeq":1,"action":"stop","reason":"…","mergedIn":"主线提交号"}]}',
     '```',
   ].join('\n');
 }
@@ -341,6 +362,7 @@ async function perform(
   const check = checkVerdict(parkFactsOf(item), item.spin, {
     action: verdict.action,
     subtaskCount: verdict.subtasks.length + verdict.badSubtasks,
+    mergedIn: verdict.mergedIn,
   });
   if (!check.ok) {
     return {
@@ -451,16 +473,20 @@ async function perform(
         ]),
       };
     }
-    // stop
+    // stop：额度空转，或体量停点的成果已在主线（checkVerdict 已要求带 mergedIn）
+    const merged = item.park.kind === 'size' ? verdict.mergedIn : undefined;
     const sent = await deps.abandonTask(
       item.workflowId,
-      `指挥官判空转，停掉：${verdict.reason}`.slice(0, 500),
+      (merged
+        ? `指挥官判成果已在主线（${merged}），停掉：${verdict.reason}`
+        : `指挥官判空转，停掉：${verdict.reason}`
+      ).slice(0, 500),
     );
     if (sent === 'gone') return await failed('工作流已经没了，没发出放弃');
     return {
       acted: action,
       text: diagnosisText(item, model, verdict, [
-        '已执行：停掉这一代（工作树存档后删，PR 和单子不动，由人处理）。',
+        `已执行：停掉这一代${merged ? `（成果已在主线 ${merged}，请人对照后决定是否关单）` : ''}（工作树存档后删，PR 和单子不动，由人处理）。`,
       ]),
     };
   } catch (err) {
@@ -630,30 +656,51 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
   // 每日上限仍只按下面的 24 小时窗口计算；这里读的是 commander 自己的审计记录，不把历史操作混进来。
   const audits = await deps.audits(new Date(0));
   const handled = new Set<string>();
+  // 旧白名单下认领过的体量停点：再看一回（COMMANDER_WHITELIST_VERSION）。同一停点有新版本认领的照旧算处理过。
+  const stale = new Set<string>();
   let claimsToday = 0;
   for (const a of audits) {
     if (a.action !== COMMANDER_AUDIT_CLAIM) continue;
-    const after = (a.after ?? {}) as { workflowId?: unknown; parkSeq?: unknown };
-    if (typeof after.workflowId === 'string' && typeof after.parkSeq === 'number')
-      handled.add(claimKey(after.workflowId, after.parkSeq));
+    const after = (a.after ?? {}) as {
+      workflowId?: unknown;
+      parkSeq?: unknown;
+      kind?: unknown;
+      whitelist?: unknown;
+    };
+    if (typeof after.workflowId === 'string' && typeof after.parkSeq === 'number') {
+      const key = claimKey(after.workflowId, after.parkSeq);
+      const oldSize =
+        after.kind === 'size' &&
+        !(typeof after.whitelist === 'number' && after.whitelist >= COMMANDER_WHITELIST_VERSION);
+      (oldSize ? stale : handled).add(key);
+    }
     if (a.at.getTime() >= now.getTime() - 24 * 3_600_000) claimsToday += 1;
   }
   let remaining = PARK_TRIAGE_DAILY_CAP - claimsToday;
   const rows = await deps.tasks();
   result.listed = rows.length;
-  const waiting: { row: ParkedRetryRow; workflowId: string; park: TaskParkInfo; at: number }[] = [];
+  const waiting: {
+    row: ParkedRetryRow;
+    workflowId: string;
+    park: TaskParkInfo;
+    at: number;
+    recheck: boolean;
+  }[] = [];
   for (const row of rows) {
     if (!row.workflowId) continue;
     try {
       const snap = await deps.status(row.workflowId);
       if (snap === 'gone' || snap.phase !== 'parked' || !snap.park) continue;
       const park = snap.park;
-      if (handled.has(claimKey(row.workflowId, park.seq))) continue;
+      const key = claimKey(row.workflowId, park.seq);
+      if (handled.has(key)) continue;
+      const recheck = stale.has(key);
+      if (recheck && park.kind !== 'size') continue;
       const at = Date.parse(park.at);
       const handoff = park.title === ROUNDS_HANDOFF_TITLE;
       if (!handoff && !(Number.isFinite(at) && now.getTime() - at >= PARK_TRIAGE_AFTER_MINUTES * 60_000))
         continue;
-      waiting.push({ row, workflowId: row.workflowId, park, at: Number.isFinite(at) ? at : 0 });
+      waiting.push({ row, workflowId: row.workflowId, park, at: Number.isFinite(at) ? at : 0, recheck });
     } catch (err) {
       result.problems.push(`${refOf(row)} 没问到工作流：${errMessage(err)}`);
     }
@@ -689,7 +736,13 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
     const items: ParkTriageItem[] = [];
     for (const w of group.slice(0, Math.min(PARK_TRIAGE_BATCH, remaining))) {
       try {
-        await deps.claim({ row: w.row, workflowId: w.workflowId, park: w.park, requestId });
+        await deps.claim({
+          row: w.row,
+          workflowId: w.workflowId,
+          park: w.park,
+          requestId,
+          whitelist: COMMANDER_WHITELIST_VERSION,
+        });
       } catch (err) {
         result.problems.push(`${refOf(w.row)} 认领没记进操作记录，这一轮不处理：${errMessage(err)}`);
         continue;
@@ -708,6 +761,7 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
         detail,
         rounds,
         spin: spinOf(w.park, rounds),
+        ...(w.recheck ? { recheck: true } : {}),
       });
     }
     if (items.length === 0) continue;

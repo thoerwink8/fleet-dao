@@ -8,6 +8,7 @@ import type { GroomSessionOutcome } from '../src/jobs/groom.ts';
 import type { IntakeRepo } from '../src/jobs/intake.ts';
 import {
   COMMANDER_AUDIT_CLAIM,
+  COMMANDER_WHITELIST_VERSION,
   type CommanderNotice,
   PARK_TRIAGE_DAILY_CAP,
   type ParkTriageDeps,
@@ -104,8 +105,12 @@ function rig(
     tasks: async () => [ROW],
     status: async () => opts.snap ?? snap('rounds'),
     audits: async () => r.audits,
-    claim: async ({ workflowId, park }) => {
-      r.audits.push({ at: NOW, action: COMMANDER_AUDIT_CLAIM, after: { workflowId, parkSeq: park.seq } });
+    claim: async ({ workflowId, park, whitelist }) => {
+      r.audits.push({
+        at: NOW,
+        action: COMMANDER_AUDIT_CLAIM,
+        after: { workflowId, parkSeq: park.seq, kind: park.kind, whitelist },
+      });
     },
     detail: async () => '动手 3 轮仍没过',
     rounds: async () => (opts.rounds === undefined ? PROGRESSING : opts.rounds),
@@ -195,6 +200,32 @@ describe('护栏', () => {
     expect(out.candidates).toBe(0);
     expect(out.claimed).toBe(0);
     expect(r.sessions).toHaveLength(0);
+  });
+
+  it('旧白名单下认领过的体量停点（#3207 park:1）再看一回：成果已在主线就停掉、撤停点；重看之后不再来第三次', async () => {
+    const oldClaim = (kind: ParkKind, whitelist?: number) => ({
+      at: new Date(NOW.getTime() - 2 * 24 * 3_600_000),
+      action: COMMANDER_AUDIT_CLAIM,
+      after: { workflowId: WF, parkSeq: 2, kind, ...(whitelist === undefined ? {} : { whitelist }) },
+    });
+    const r = rig({
+      audits: [oldClaim('size')],
+      snap: snap('size', { title: '改动超出体量预算：新增 9550 行，预算 3000 行，收窄过一次仍超' }),
+      answer: verdict('stop', { mergedIn: '378af18f04b6e82c8a99ad8cb1f850edb0c34269' }),
+    });
+    const first = await triageParkedTasks(r.deps);
+    expect(first.claimed).toBe(1);
+    expect(first.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'stop' }]);
+    expect(r.sessions[0]?.prompt).toContain('按旧白名单看过一次');
+    expect(r.abandoned[0]).toContain('成果已在主线（378af18f04b6e82c8a99ad8cb1f850edb0c34269）');
+    expect(r.audits.at(-1)?.after).toMatchObject({ kind: 'size', whitelist: COMMANDER_WHITELIST_VERSION });
+    expect((await triageParkedTasks(r.deps)).candidates).toBe(0);
+    expect(r.sessions).toHaveLength(1);
+    // 新版本认领过的体量停点、旧认领的别的停法：照旧每次停下只看一回
+    for (const audits of [[oldClaim('size', COMMANDER_WHITELIST_VERSION)], [oldClaim('rounds')]]) {
+      const again = rig({ audits, snap: snap('size') });
+      expect((await triageParkedTasks(again.deps)).candidates).toBe(0);
+    }
   });
 
   it('会话没跑成也算处理过：提醒写明交人、不再来第二次', async () => {
@@ -350,6 +381,19 @@ describe('裁决：引擎白名单核过才执行', () => {
     await triageParkedTasks(one.deps);
     expect(one.opened).toHaveLength(0);
     expect(one.notices[0]?.body).toContain('2~5');
+  });
+
+  it('体量超预算·成果已在主线（#3207）：带主线提交号的停掉放行，只放弃这一代、不开子单；没带提交号不执行', async () => {
+    const ok = rig({ snap: snap('size'), answer: verdict('stop', { mergedIn: '378af18f' }) });
+    expect((await triageParkedTasks(ok.deps)).acted).toHaveLength(1);
+    expect(ok.opened).toHaveLength(0);
+    expect(ok.abandoned).toHaveLength(1);
+    expect(ok.abandoned[0]).toContain('成果已在主线（378af18f）');
+    expect(ok.notices[0]?.body).toContain('成果已在主线 378af18f');
+    const bare = rig({ snap: snap('size'), answer: verdict('stop') });
+    expect((await triageParkedTasks(bare.deps)).acted).toEqual([]);
+    expect(bare.abandoned).toHaveLength(0);
+    expect(bare.notices[0]?.body).toContain('mergedIn');
   });
 
   it('改标准、没权限这类人闸：继续、重做、拆单、停掉都不执行，只写诊断建议；留给人放行', async () => {
