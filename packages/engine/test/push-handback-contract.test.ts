@@ -1,10 +1,13 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { WorkflowHandle } from '@temporalio/client';
-import { describe, expect, it } from 'vitest';
+import type { TestWorkflowEnvironment } from '@temporalio/testing';
+import { beforeEach, describe, expect, it } from 'vitest';
+import type { FakeWorld } from '../src/fakes.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import { PortError } from '../src/ports.ts';
 import type { PushHandbackPreflight, PushHandbackRequest } from '../src/push-handback.ts';
-import { requestPushHandback } from '../src/push-handback-client.ts';
+import { requestPushHandback as originalRequestPushHandback } from '../src/push-handback-client.ts';
 import { buildTaskBrief, type TaskBrief } from '../src/runner/task-brief.ts';
 import {
   type TaskStatus,
@@ -12,10 +15,84 @@ import {
   taskAbandonSignal,
   taskContinueSignal,
 } from '../src/task-contract.ts';
-import { createRealEnv, freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
+import {
+  freshRepo,
+  createRealEnv as originalCreateRealEnv,
+  withWorker as originalWithWorker,
+  pollQuery,
+  useEnv,
+  type WorkerOptions,
+  waitUntil,
+} from './helpers.ts';
+import { DiagnosticOutput, SyntheticHistoryDiagnostics } from './history-diagnostics.ts';
 import { BODY, scripted } from './task-script.ts';
 
-const environment = useEnv();
+// 先登记 watchdog，再让 useEnv 的 beforeEach 创建服务端；不延后原测试的诊断时钟。
+const output = new DiagnosticOutput();
+const testSha256 = createHash('sha256')
+  .update(readFileSync(new URL(import.meta.url)))
+  .digest('hex');
+const environmentScopes = new WeakMap<TestWorkflowEnvironment, SyntheticHistoryDiagnostics>();
+const handleScopes = new WeakMap<object, SyntheticHistoryDiagnostics>();
+let activeDiagnostics: SyntheticHistoryDiagnostics;
+beforeEach((context) => {
+  activeDiagnostics = new SyntheticHistoryDiagnostics({
+    test: context.task.name,
+    testSha256,
+    output,
+    failed: () => context.task.result?.state === 'fail',
+  });
+});
+const environment = useEnv({
+  beforeTeardown: () => activeDiagnostics.finish(),
+  teardown: (env) => activeDiagnostics.closeEnvironment(env),
+});
+async function createRealEnv() {
+  const scope = activeDiagnostics;
+  return scope.track(
+    originalCreateRealEnv().then((env) => {
+      scope.environment(env);
+      environmentScopes.set(env, scope);
+      return env;
+    }),
+  );
+}
+function withWorker<T>(
+  env: TestWorkflowEnvironment,
+  world: FakeWorld,
+  fn: (taskQueue: string) => Promise<T>,
+  options: WorkerOptions,
+) {
+  const scope = environmentScopes.get(env) ?? activeDiagnostics;
+  environmentScopes.set(env, scope);
+  scope.environment(env);
+  scope.mark('worker-create');
+  return scope.track(
+    originalWithWorker(env, world, fn, {
+      ...options,
+      observeWorker: (worker, run, bundle) => scope.worker(env, worker, run, bundle),
+    }),
+  );
+}
+async function startWorkflow(
+  env: TestWorkflowEnvironment,
+  options: Parameters<TestWorkflowEnvironment['client']['workflow']['start']>[1],
+) {
+  const scope = environmentScopes.get(env);
+  if (!scope) throw new Error('diagnostics: environment not registered');
+  const handle = await scope.start(env, 'taskWorkflow', options);
+  handleScopes.set(handle, scope);
+  return handle;
+}
+function requestPushHandback(...args: Parameters<typeof originalRequestPushHandback>) {
+  scopeFor(args[0]).mark('handback-update');
+  return originalRequestPushHandback(...args);
+}
+function scopeFor(handle: object) {
+  const scope = handleScopes.get(handle);
+  if (!scope) throw new Error('diagnostics: handle not registered');
+  return scope;
+}
 function brief(revision: string): TaskBrief {
   const result = buildTaskBrief({
     issue: {
@@ -47,12 +124,14 @@ function input(): TaskWorkflowInput {
     title: 'contract handback',
   };
 }
-const parked = (handle: WorkflowHandle) =>
-  pollQuery(
+const parked = (handle: WorkflowHandle) => {
+  scopeFor(handle).mark('parked-query');
+  return pollQuery(
     () => handle.query<TaskStatus>('taskStatus'),
     (s) => s.phase === 'parked' && s.waiting?.kind === 'human',
     'permission original hold',
   );
+};
 function request(s: TaskStatus, requestId = 'contract-snapshot'): PushHandbackRequest {
   const token = s.closedIssueClose?.token;
   if (!token || !h0.contract || !h1.contract) throw new Error('missing synthetic identity');
@@ -73,6 +152,7 @@ const success = (): PushHandbackPreflight => ({
   brief: h1,
 });
 async function abandon(handle: WorkflowHandle) {
+  scopeFor(handle).mark('abandon-signal-and-result');
   await handle.signal(taskAbandonSignal, { by: 'test', reason: 'isolated teardown' });
   await handle.result();
 }
@@ -86,6 +166,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
   it.each(['final-read', 'accepted-round'] as const)(
     'real Workflow cancellation during %s never signs control consumption or starts a session',
     async (stage) => {
+      const diagnostics = activeDiagnostics;
       const env = await createRealEnv(),
         w = world(),
         { tasks, calls } = scripted({ brief: () => ({ ok: true, brief: h0 }) });
@@ -110,13 +191,14 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
           env,
           w,
           async (taskQueue) => {
-            const handle = await env.client.workflow.start('taskWorkflow', {
+            const handle = await startWorkflow(env, {
               workflowId: `contract-cancel-${randomUUID()}`,
               taskQueue,
               args: [input()],
             });
             const pending = requestPushHandback(handle, request(await parked(handle)));
             try {
+              diagnostics.mark('await-final-preflight-or-round-entry');
               await entered.promise;
               await handle.cancel();
               const receipt = await pending;
@@ -126,6 +208,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
                 stage === 'accepted-round' ? h1.contract : h0.contract,
               );
             } finally {
+              diagnostics.mark('release-preflight-or-round');
               release.resolve();
             }
             await expect(handle.result()).rejects.toThrow();
@@ -139,7 +222,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
           { tasks },
         );
       } finally {
-        await env.teardown();
+        await diagnostics.closeEnvironment(env);
       }
     },
   );
@@ -156,7 +239,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
       env,
       w,
       async (taskQueue) => {
-        const handle = await env.client.workflow.start('taskWorkflow', {
+        const handle = await startWorkflow(env, {
           workflowId: `contract-${randomUUID()}`,
           taskQueue,
           args: [input()],
@@ -184,6 +267,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
     );
   });
   it('another request is busy during final read; changed target under the same request is conflict', async () => {
+    const diagnostics = activeDiagnostics;
     const env = environment(),
       w = world();
     let live = h0,
@@ -203,7 +287,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
       env,
       w,
       async (taskQueue) => {
-        const handle = await env.client.workflow.start('taskWorkflow', {
+        const handle = await startWorkflow(env, {
           workflowId: `contract-${randomUUID()}`,
           taskQueue,
           args: [input()],
@@ -211,6 +295,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
         const r = request(await parked(handle));
         live = h1;
         const result = requestPushHandback(handle, r);
+        diagnostics.mark('await-final-preflight-or-round-entry');
         await entered.promise;
         expect(await requestPushHandback(handle, { ...r, requestId: 'competing-operation' })).toMatchObject({
           outcome: 'busy',
@@ -218,6 +303,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
         expect(
           await requestPushHandback(handle, { ...r, expectedContract: h2.contract } as PushHandbackRequest),
         ).toMatchObject({ outcome: 'conflict' });
+        diagnostics.mark('release-preflight-or-round');
         release.resolve(success());
         const receipt = await result;
         expect(receipt).toMatchObject({ outcome: 'handed_back', acceptedContract: h1.contract });
@@ -248,7 +334,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
       env,
       w,
       async (taskQueue) => {
-        const handle = await env.client.workflow.start('taskWorkflow', {
+        const handle = await startWorkflow(env, {
           workflowId: `contract-${randomUUID()}`,
           taskQueue,
           args: [input()],
@@ -293,7 +379,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
         env,
         w,
         async (taskQueue) => {
-          const handle = await env.client.workflow.start('taskWorkflow', {
+          const handle = await startWorkflow(env, {
             workflowId: `contract-${randomUUID()}`,
             taskQueue,
             args: [input()],
@@ -320,6 +406,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
   );
 
   it('accepted snapshot waits for control consumption; H2 during round IO is read before the next segment', async () => {
+    const diagnostics = activeDiagnostics;
     const env = environment(),
       w = world();
     let live = h0,
@@ -344,7 +431,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
       env,
       w,
       async (taskQueue) => {
-        const handle = await env.client.workflow.start('taskWorkflow', {
+        const handle = await startWorkflow(env, {
           workflowId: `contract-${randomUUID()}`,
           taskQueue,
           args: [input()],
@@ -356,12 +443,14 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
           settled = true;
           return x;
         });
+        diagnostics.mark('await-final-preflight-or-round-entry');
         await entered.promise;
         expect(settled).toBe(false);
         expect(calls.segment).toHaveLength(1);
         const accepted = await handle.query<TaskStatus>('taskStatus');
         expect(accepted.contract).toEqual(h1.contract);
         live = h2;
+        diagnostics.mark('release-preflight-or-round');
         release.resolve();
         const receipt = await result;
         expect(receipt).toMatchObject({ outcome: 'handed_back', acceptedContract: h1.contract });
@@ -381,6 +470,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
   it.each(['continue', 'abandon'] as const)(
     '%s during final trusted observation never accepts a late snapshot',
     async (control) => {
+      const diagnostics = activeDiagnostics;
       const env = environment(),
         w = world(),
         { tasks, calls } = scripted({ brief: () => ({ ok: true, brief: h0 }) });
@@ -396,15 +486,18 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
         env,
         w,
         async (taskQueue) => {
-          const handle = await env.client.workflow.start('taskWorkflow', {
+          const handle = await startWorkflow(env, {
             workflowId: `contract-${randomUUID()}`,
             taskQueue,
             args: [input()],
           });
           const result = requestPushHandback(handle, request(await parked(handle)));
+          diagnostics.mark('await-final-preflight-or-round-entry');
           await entered.promise;
+          diagnostics.mark('control-signal');
           if (control === 'continue') await handle.signal(taskContinueSignal, { by: 'test' });
           else await handle.signal(taskAbandonSignal, { by: 'test', reason: 'during source IO' });
+          diagnostics.mark('release-preflight-or-round');
           release.resolve(success());
           const receipt = await result;
           expect(receipt.outcome).toBe('stale');
@@ -419,6 +512,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
   );
 
   it('abandon after snapshot acceptance preserves that fact but never reports control consumed', async () => {
+    const diagnostics = activeDiagnostics;
     const env = environment(),
       w = world(),
       { tasks, calls } = scripted({ brief: () => ({ ok: true, brief: h0 }) });
@@ -435,15 +529,17 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
       env,
       w,
       async (taskQueue) => {
-        const handle = await env.client.workflow.start('taskWorkflow', {
+        const handle = await startWorkflow(env, {
           workflowId: `contract-${randomUUID()}`,
           taskQueue,
           args: [input()],
         });
         const r = request(await parked(handle)),
           result = requestPushHandback(handle, r);
+        diagnostics.mark('await-final-preflight-or-round-entry');
         await entered.promise;
         await handle.signal(taskAbandonSignal, { by: 'test', reason: 'after accepted snapshot' });
+        diagnostics.mark('release-preflight-or-round');
         release.resolve();
         const receipt = await result;
         expect(receipt).toMatchObject({ outcome: 'stale', acceptedContract: h1.contract });
@@ -480,7 +576,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
       env,
       w,
       async (taskQueue) => {
-        const handle = await env.client.workflow.start('taskWorkflow', {
+        const handle = await startWorkflow(env, {
           workflowId: `contract-${randomUUID()}`,
           taskQueue,
           args: [input()],
