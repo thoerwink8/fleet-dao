@@ -17,7 +17,8 @@ export type StageKind =
   | 'research' // 调研
   | 'judge' // Jev 判断题
   | 'groom' // 临时指挥官整理待办（母单 #1335 第 3 片）
-  | 'intake-chat'; // 驾驶舱「提需求」的指挥官会话（母单 #2047 第 C 片）
+  | 'intake-chat' // 驾驶舱「提需求」的指挥官会话（母单 #2047 第 C 片）
+  | 'commander'; // 法国指挥官会话：看停下的任务、交裁决（母单 #3294 第 2 片）
 
 // 引擎只写 queued、running、done、stopped、failed、stalled；triaging、asking、planning、merging 是库里枚举留下的旧值（删枚举属删数据），代码不再认。
 export type TaskState =

@@ -11,8 +11,6 @@
 // - 读 GitHub、写 GitHub 都是「引擎」机器人（@fleet-dao/github）；单子正文是 AI 写的，写之前中和 @ 提醒和 <!-- -->、过卫生检查（github 包里做）。
 // - 任务表（停下等人）读不到：stoppedTasks 是 null，整理照常跑，摘要和提示词写没查成，不换成空数组。
 
-import { randomUUID } from 'node:crypto';
-import { StopReason } from '@fleet-dao/adapters';
 import { loadStandardPaths } from '@fleet-dao/conventions';
 import {
   type Db,
@@ -25,22 +23,16 @@ import {
 import type { GitHub } from '@fleet-dao/github';
 import { errMessage } from '@fleet-dao/shared/util';
 import { createPgStore, githubWhitelist } from '@fleet-dao/store';
-import {
-  GROOM_CLOSED_DAYS,
-  type GroomFacts,
-  type GroomRunDeps,
-  type GroomSessionOutcome,
-  readStoppedTasks,
-} from '../jobs/groom.ts';
+import { GROOM_CLOSED_DAYS, type GroomFacts, type GroomRunDeps, readStoppedTasks } from '../jobs/groom.ts';
 import type { IntakeRepo } from '../jobs/intake.ts';
-import type { PickRouteInput, PickRouteResult, PortContext, RouteChoice } from '../ports.ts';
+import type { PickRouteInput, PickRouteResult, PortContext } from '../ports.ts';
 import type { UserExec } from './exec.ts';
 import { groomRequestDeps } from './groom-request.ts';
 import { mapped } from './mirror.ts';
 import type { OneShotSessions } from './one-shot-sessions.ts';
-import { type AssignedProber, pickThenProbe, pickThenProbeStopText } from './pick-then-probe.ts';
-import { hostSegmentSpawner, resolveSegmentRoute, type SegmentSpawnerDeps } from './segment-spawner.ts';
-import { prepareSegmentTree } from './segment-tree.ts';
+import type { AssignedProber } from './pick-then-probe.ts';
+import { readOnlySessionRunner } from './read-only-session.ts';
+import type { SegmentSpawnerDeps } from './segment-spawner.ts';
 import type { Identity } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
 
@@ -60,7 +52,7 @@ export type GroomGitHub = Pick<
   commitIdentity(repo: { owner: string; name: string }): Promise<Identity>;
 };
 
-const toRepo = (r: Awaited<ReturnType<typeof listIntakeRepos>>[number]): IntakeRepo => ({
+export const toRepo = (r: Awaited<ReturnType<typeof listIntakeRepos>>[number]): IntakeRepo => ({
   id: r.id,
   owner: r.owner,
   name: r.name,
@@ -92,8 +84,6 @@ export interface GroomWiring {
   log?: (level: 'info' | 'warn' | 'error', message: string, fields?: Record<string, unknown>) => void;
 }
 
-const SPAWN_MARGIN_MS = 60_000;
-
 /**
  * 整理待办读窗口里合并了的 PR。since 是现在往回 GROOM_CLOSED_DAYS 天。
  * listMergedPulls 翻页触顶会抛：调用方记「没读到分片关系」，不当成没有。
@@ -113,7 +103,6 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
   const now = w.now ?? (() => new Date());
   const log: GroomRunDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
-  const spawn = hostSegmentSpawner(w.spawner);
   const store = createPgStore(w.db, { now });
   const ref = (repo: IntakeRepo) => ({ owner: repo.owner, name: repo.name });
 
@@ -158,124 +147,11 @@ export function groomJob(w: GroomWiring): () => GroomRunDeps {
     };
   };
 
-  const runSession: GroomRunDeps['runSession'] = async (input): Promise<GroomSessionOutcome> => {
-    const runId = randomUUID();
-    const stop = new AbortController();
-    const ctx: PortContext = {
-      signal: stop.signal,
-      heartbeat: () => undefined,
-      attempt: 1,
-      lastHeartbeat: undefined,
-    };
-    // 1. 选路：用途 groom。taskId 只是个占位（没有属于任何需求的任务行，不预占池的名额）。
-    //    派前探一次（#1798 片 4）：探不通就避开它再选，一轮最多 3 条；3 条都不通就当这一次没整理成。
-    const pickOnce = (avoidRouteIds: readonly string[]) =>
-      w.pickRoute(
-        {
-          taskId: `groom:${runId}`,
-          stage: 'groom',
-          avoidRouteIds: [...avoidRouteIds],
-          avoidPoolIds: [],
-          avoidModelIds: [],
-        },
-        ctx,
-      );
-    let route: RouteChoice;
-    if (w.probe) {
-      const outcome = await pickThenProbe({ pick: pickOnce, probe: w.probe });
-      if (outcome.kind === 'unavailable') {
-        return { ok: false, why: `选不到路由（用途 groom）：${outcome.result.detail}` };
-      }
-      if (outcome.kind === 'exhausted') {
-        return { ok: false, why: `选到的整理路由派前探测都不通：${pickThenProbeStopText(outcome.failures)}` };
-      }
-      route = outcome.route;
-    } else {
-      const got = await pickOnce([]);
-      if (!got.ok) return { ok: false, why: `选不到路由（用途 groom）：${got.detail}` };
-      route = got.route;
-    }
-    // 2. 路由 → 会话用户（树要归它）
-    let info: Awaited<ReturnType<typeof resolveSegmentRoute>>;
-    try {
-      info = await resolveSegmentRoute(w.spawner, route.routeId);
-    } catch (err) {
-      return { ok: false, why: errMessage(err), routeId: route.routeId };
-    }
-    const ticket = w.sessions.enter({ poolId: route.poolId, stage: 'groom', taskId: `groom:${runId}` });
-    ticket.attempt(runId);
-    const dir = w.trees.treeFor(ref(input.repo), `fleet/groom-${runId.slice(0, 8)}`);
-    const timeoutMs = input.timeoutMinutes * 60_000;
-    let treeIdentity: Awaited<ReturnType<WorkTrees['adoptTemporary']>> | undefined;
-    try {
-      treeIdentity = await w.trees.adoptTemporary(dir, info.user);
-      // 3. 主线的检出（钉在读到的主线头）
-      await prepareSegmentTree(
-        { gh: w.gh, trees: w.trees, exec: w.exec, tmpDir: w.tmpDir },
-        {
-          repo: { owner: input.repo.owner, name: input.repo.name, defaultBranch: input.repo.defaultBranch },
-          worktreePath: dir,
-          branch: `groom-${runId.slice(0, 8)}`,
-          baseSha: input.mainHead,
-          user: info.user,
-          runId,
-        },
-        ctx,
-      );
-      // 4. 起会话：切号 / 排空叫停（ticket.signal）和我们自己的时限都接进去
-      const timer = setTimeout(() => stop.abort(new StopReason('wall-clock', '整理会话超时')), timeoutMs);
-      let out: Awaited<ReturnType<typeof spawn>>;
-      try {
-        ticket.running();
-        out = await spawn({
-          argv: [],
-          cwd: dir,
-          stdin: input.prompt,
-          signal: AbortSignal.any([stop.signal, ticket.signal]),
-          timeoutMs: timeoutMs + SPAWN_MARGIN_MS,
-          // 生产 Spawner 只读 routeId、runId、effort；segment 在这里只是占位（不进 runs）
-          input: {
-            runId,
-            segment: 'scope',
-            modelId: route.modelId,
-            routeId: route.routeId,
-            prompt: input.prompt,
-            cwd: dir,
-          },
-        });
-      } finally {
-        clearTimeout(timer);
-      }
-      const facts = out.facts;
-      const usage = facts?.usage;
-      const base = {
-        routeId: route.routeId,
-        ...(facts?.actualModel === undefined ? {} : { model: facts.actualModel }),
-        ...(usage === undefined ? {} : { usage }),
-        ...(facts?.costUsd === undefined ? {} : { costUsd: facts.costUsd }),
-      };
-      if (ticket.signal.aborted) {
-        return {
-          ok: false,
-          why: `被切号或发布排空停下：${errMessage(ticket.signal.reason)}`,
-          routeId: route.routeId,
-        };
-      }
-      if (out.exitCode === 0) return { ok: true, answer: out.stdout, ...base };
-      const why = out.killed
-        ? `会话被杀（超时或被叫停）：${errMessage(stop.signal.reason ?? '原因不明')}`
-        : `会话没成功收场（退出码 ${out.exitCode}）：${facts?.detail ?? out.stderr.slice(-300)}`;
-      return { ok: false, why, routeId: route.routeId };
-    } catch (err) {
-      return { ok: false, why: errMessage(err), routeId: route.routeId };
-    } finally {
-      ticket.leave();
-      if (treeIdentity)
-        await w.trees.removeTemporary(dir, treeIdentity).catch((err: unknown) => {
-          log('warn', '整理会话的检出没删掉（引擎下次起来时的清理会收）', { dir, error: errMessage(err) });
-        });
-    }
-  };
+  // 起会话那一段和法国指挥官会话共用（real/read-only-session.ts）：选路按用途 groom、只读检出、不带令牌
+  const runSession: GroomRunDeps['runSession'] = readOnlySessionRunner(
+    { ...w, log },
+    { stage: 'groom', word: '整理' },
+  );
 
   const request = groomRequestDeps(w.db, now);
   return () => ({

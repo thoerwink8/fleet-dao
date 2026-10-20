@@ -41,6 +41,8 @@ export interface TaskListPage {
 /** 一张单的三段流水（库里的 runs 表）一笔，加上它是怎么和这张单对上的。 */
 export type SegmentRunRecord = SegmentRun & {
   matchedBy: SegmentMatch;
+  temporalRunId?: string | undefined;
+  worktreePath?: string | undefined;
   /**
    * 对上的是哪张单。listSegmentRunsForTasks 开了 includeIssueMatch 时才写：task_id 对上的就是 taskId，
    * task_id 没记、按单号兜底的是那张单的 id。主页那条路不写。
@@ -231,6 +233,63 @@ export interface PullRequestRecord {
   title?: string | undefined;
 }
 
+/** 历史 checkout 处置要钉住的原始 runs 身份；缺任一关键列都不能把它当成完整证据。 */
+export interface HistoricalCheckoutRun {
+  id: string;
+  segment: string;
+  taskId?: string | undefined;
+  issueNumber?: number | undefined;
+  model: string;
+  workflowId?: string | undefined;
+  temporalRunId?: string | undefined;
+  startedAt: string;
+  endedAt?: string | undefined;
+  outcome?: string | undefined;
+  failureReason?: string | undefined;
+  prNumber?: number | undefined;
+  branch?: string | undefined;
+  worktreePath?: string | undefined;
+}
+
+/** 预检和原子归档共用的精确身份。expected 字段是预检回显后执行时的 CAS 快照。 */
+export interface HistoricalCheckoutArchiveInput {
+  notificationId: string;
+  dedupeKey: string;
+  raisedAt: string;
+  notificationBody: string;
+  notificationLink: string | null;
+  repo: string;
+  repoId: string;
+  taskId: string;
+  issueNumber: number;
+  workflowId: string;
+  runId: string;
+  temporalRunId: string;
+  runSegment: string;
+  runStartedAt: string;
+  runEndedAt: string;
+  runOutcome: string;
+  runPrNumber: number;
+  pr: number;
+  head: string;
+  operator: string;
+  reason: string;
+  evidence: string;
+  gaps: string;
+  responsibility: string;
+  conclusion: 'historical_unproven';
+}
+
+/** checkout 历史归档前现读到的全部事实；它不是恢复证明。 */
+export interface HistoricalCheckoutFacts {
+  notification: NotificationRecord;
+  repo: Repo;
+  task: Task;
+  run: HistoricalCheckoutRun;
+  pullRequest: PullRequestRecord;
+  activeRunIds: string[];
+}
+
 /**
  * 会话里跑过的一次测试（checkDone 的输入）。passed 为 null 是结果认不出（接了管道、放了后台……，
  * 插头写明了原因），照样列出来：交活核对以最后一次为准，认不出的那一次不能被它前面一次「通过」顶掉。
@@ -397,6 +456,27 @@ export interface OpsStore {
   listNotifications(query: { status: 'open' | 'all' } & PageRequest): Promise<Page<NotificationRecord>>;
   /** 各级别的真实条数（不受分页上限影响）；status 口径同 listNotifications。 */
   countNotifications(query: { status: 'open' | 'all' }): Promise<Record<NotificationRecord['level'], number>>;
+  /** 只读现查任务、原工作流 run、旧 checkout 卡和 merged PR；不会写任何东西。 */
+  readHistoricalCheckout(input: {
+    notificationId: string;
+    dedupeKey: string;
+    repo: string;
+    taskId: string;
+    issueNumber: number;
+    workflowId: string;
+    runId: string;
+    temporalRunId: string;
+    pr: number;
+    head: string;
+  }): Promise<HistoricalCheckoutFacts>;
+  /**
+   * checkout 专用历史归档：事务内重读所有身份和 CAS 快照，只撤旧通知并记审计。
+   * 不写 cold_verify.checkout_full，不改任务、run、PR、验收责任或 Temporal 历史。
+   */
+  archiveHistoricalCheckout(
+    input: HistoricalCheckoutArchiveInput,
+    audit: NewAuditEntry,
+  ): Promise<'ok' | 'already_archived' | 'not_found' | 'conflict'>;
   resolveNotification(
     input: {
       id: string;
@@ -769,7 +849,8 @@ export interface NodeSessionsRecord {
   report: LocalSessionsReport;
 }
 
-export type Store = UserStore &
+export type Store = import('./task-execution.ts').TaskExecutionStore &
+  UserStore &
   BoardStore &
   RoutingStore &
   OpsStore &

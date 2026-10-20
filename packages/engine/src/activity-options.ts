@@ -4,6 +4,7 @@
 import { type ActivityOptions, msToNumber, type RetryPolicy } from '@temporalio/common';
 import type { Limits } from './limits.ts';
 import type { EnginePorts } from './ports.ts';
+import type { PushHandbackPreflight, PushHandbackPreflightInput } from './push-handback.ts';
 import type { TaskBriefResult } from './runner/task-brief.ts';
 import { SELF_CHECK_ACTIVITY_MS } from './self-check-budget.ts';
 import {
@@ -57,6 +58,7 @@ type PortActivities = {
 
 /** 工作流看到的活动：端口（EnginePorts）里的，加上引擎自己的。 */
 export type EngineActivities = PortActivities & {
+  readPushHandbackPreflight(input: PushHandbackPreflightInput): Promise<PushHandbackPreflight>;
   readMergedTask(input: ReadMergedTaskInput): Promise<MergedTaskReceipt | null>;
   /** 当前 worker 进程的启动时刻；超时分流用它和旧活动最后一次心跳作严格比较。 */
   engineStartedAt(input: { schemaVersion: 1 }): Promise<EngineStartedAt>;
@@ -118,9 +120,19 @@ export type ActivityName = keyof EngineActivities;
  * 别的定时任务（对账、探针、读额度、看门狗……）不是活动了（#1072）：引擎的定时器直接跑，一轮的限时在 jobs/engine-timers.ts。
  * segment：一次无头会话（动手、冷验收）——限时是会话最长时间加一刻钟收尾，必须心跳；只试一次：会话贵又不幂等，
  * 活动失败怎么办（重试、换路由、挂起）由工作流按失败分流定，不在 Temporal 这一层自动再起一遍。
+ * handbackRead：推送权限停点可信只读观察，4 分钟、心跳、只试一次；未知不发执行资格。
  * poll：长轮询（等合并）——一次最多 MERGE_POLL_MINUTES 分钟加余量，必须心跳；工人丢了重试没有副作用（只读）。
  */
-export type Profile = 'quick' | 'git' | 'setup' | 'selfCheck' | 'ci' | 'job' | 'segment' | 'poll';
+export type Profile =
+  | 'quick'
+  | 'git'
+  | 'setup'
+  | 'selfCheck'
+  | 'ci'
+  | 'job'
+  | 'segment'
+  | 'poll'
+  | 'handbackRead';
 
 export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   engineStartedAt: 'quick',
@@ -154,6 +166,7 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   mergeNow: 'git',
   planSegmentResume: 'quick',
   segmentSettled: 'quick',
+  readPushHandbackPreflight: 'handbackRead',
   selfCheck: 'selfCheck',
   taskSpend: 'quick',
   noteBare401: 'quick',
@@ -184,6 +197,8 @@ function retry(maximumAttempts: number, initialInterval: string, maximumInterval
 export function profileOptions(profile: Profile, limits: Limits): ActivityOptions {
   const heartbeatTimeout = `${limits.heartbeatSeconds} seconds`;
   switch (profile) {
+    case 'handbackRead':
+      return { startToCloseTimeout: '4 minutes', heartbeatTimeout, retry: retry(1, '1 second', '1 second') };
     case 'quick':
       return {
         startToCloseTimeout: `${QUICK_TIMEOUT_SECONDS} seconds`,

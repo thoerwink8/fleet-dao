@@ -86,7 +86,7 @@ import {
 import { judgeImplementUiWork, UI_UNRECOGNIZED_NOTE, type UiJudgement } from '../ui-work.ts';
 import { failureOf, iso } from './kit.ts';
 import { decideFlowOnce } from './task-flow.ts';
-import type { TaskRuntime } from './task-runtime.ts';
+import { stepParkKind, type TaskRuntime } from './task-runtime.ts';
 import {
   Abandoned,
   AUTO_REDISPATCH_CODES,
@@ -550,7 +550,7 @@ export async function writeSession(
           await rt.pause('retry', next.reason, step.seconds);
           continue;
         }
-        await rt.park(`${next.reason}；${step.reason}`, failure.message);
+        await rt.park(`${next.reason}；${step.reason}`, failure.message, 'stuck', 'transient');
         patienceFrom = null;
         patienceRounds = 0;
         counters = ZERO;
@@ -657,6 +657,8 @@ export async function writeSession(
                 ? `${next.reason}；要人：${next.humanFix}`
                 : next.reason,
         modelDown ? modelUnavailableStallDetail(failure.message) : failure.message,
+        'stuck',
+        code === 'model_mismatch' || modelDown || mb1Redispatch ? 'other' : stepParkKind('runSegment', next),
       );
       // 已经按旧标题挂上的在途单：上面两支重放都为假，所以走进了这次 park。
       // 人点「继续」或看门狗发 taskContinue 之后才到这里。这一支是新执行（标记为真）：按点名开新会话重派。
@@ -796,9 +798,11 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
     estimated: counted - measured,
     ...(equivalent ? { raw: spent } : {}),
   });
-  await rt.park(stop.title, stop.detail);
+  await rt.park(stop.title, stop.detail, 'stuck', 'quota');
   // 人看过、点了「继续」：再给到比花掉的多一份
-  rt.budgetGrants = Math.floor(counted / budget) + 1;
+  // 指挥官判了不是空转（#3294 第 2 片）：多放宽的那几档一起加上，用掉就清
+  rt.budgetGrants = Math.floor(counted / budget) + 1 + rt.budgetWiden;
+  rt.budgetWiden = 0;
 }
 
 /**

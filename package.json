@@ -7,6 +7,7 @@
     "node": ">=22.22"
   },
   "scripts": {
+    "task:handback-permission-push": "node packages/engine/src/bin/push-handback.ts",
     "dev": "pnpm --filter @fleet-dao/web dev:mock",
     "start": "node packages/db/src/bin/local-pg.ts start",
     "stop": "node packages/db/src/bin/local-pg.ts stop",
@@ -23,6 +24,9 @@
     "mirasim:audit": "node packages/mirasim-reclaude/bin/audit",
     "test:changed": "node packages/conventions/src/bin/test-changed.ts",
     "test:linux": "node packages/conventions/src/bin/test-linux.ts",
+    "test:isolated": "node packages/conventions/src/bin/test-isolated.ts",
+    "test:temporal": "node packages/conventions/src/bin/test-temporal.ts",
+    "temporal:install": "node packages/conventions/src/bin/install-temporal-cli.ts",
     "ci:timings": "node packages/conventions/src/bin/ci-timings.ts",
     "ci:stats": "node packages/conventions/src/bin/ci-stats.ts",
     "flow:stats": "node packages/conventions/src/bin/flow-stats.ts",

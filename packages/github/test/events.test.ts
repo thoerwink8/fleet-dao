@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { PullFacts } from '../src/engine-pulls.ts';
 import { type IngestedEvent, reviewMergeHold, type WakeEvent } from '../src/events.ts';
+import type { memoryIdempotencyStore } from '../src/idempotency.ts';
 import { mergeKey } from '../src/pulls.ts';
 import type { Intake } from '../src/reconcile.ts';
 import { json, REPO_ID, repo, setup, sha } from './helpers.ts';
@@ -223,6 +224,169 @@ describe('对账与补漏', () => {
     expect(fake.redelivered).toEqual([1, 2]);
     expect(report).toMatchObject({ outcome: 'partial', checked: 3, recovered: 2 });
     expect(report.why).toContain('还有 1 个没重投（一次最多 2 个）');
+  });
+
+  // 新的在前排好的投递日志：n 条、每条早一秒，全在 since 之后；over 按下标改某几条
+  const deliveryLog = (n: number, over: Record<number, { guid: string; status_code: number }> = {}) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: n - i,
+      guid: over[i]?.guid ?? `g-${n - i}`,
+      delivered_at: new Date(Date.parse('2026-09-25T11:00:00Z') - i * 1000).toISOString(),
+      status_code: over[i]?.status_code ?? 200,
+      event: 'issues',
+    }));
+
+  it('投递日志超过 client 默认的 50 页：照样翻到 since、查全，最老的失败也补上（法国实测每轮撞 50 页、since 卡住不前进）', async () => {
+    const { gh, fake } = setup();
+    fake.deliveries = deliveryLog(6000, { 5999: { guid: 'g-oldest', status_code: 502 } });
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId })
+      .redeliverFailed(new Date('2026-09-25T09:00:00Z'));
+    expect(report).toEqual({ outcome: 'ok', checked: 6000, recovered: 1, why: undefined });
+    expect(fake.redelivered).toEqual([1]);
+    expect(fake.calls('GET', /\/app\/hook\/deliveries$/)).toHaveLength(60);
+  });
+
+  it('投递日志翻到页数上限还没到 since：翻到的那一截照样重投，这一步报 partial（没查全，不当 ok），页数有界', async () => {
+    const { gh, fake } = setup();
+    fake.deliveries = deliveryLog(500, {
+      10: { guid: 'g-later-ok', status_code: 200 },
+      20: { guid: 'g-later-ok', status_code: 504 },
+      150: { guid: 'g-never-ok', status_code: 502 },
+      // 第 4 页：上限 3 页，这一轮看不到
+      350: { guid: 'g-beyond', status_code: 502 },
+    });
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId, maxDeliveryPages: 3 })
+      .redeliverFailed(new Date('2026-09-25T09:00:00Z'));
+    expect(fake.calls('GET', /\/app\/hook\/deliveries$/)).toHaveLength(3);
+    expect(fake.redelivered).toEqual([500 - 150]);
+    expect(report).toMatchObject({ outcome: 'partial', checked: 300, recovered: 1 });
+    expect(report.why).toContain('投递日志这一轮翻了 3 页还没翻到 2026-09-25T09:00:00.000Z');
+    expect(report.why).toContain(`只查了 ${fake.deliveries[299]?.delivered_at} 以后的 300 条`);
+  });
+
+  it('翻到页数上限：存下续扫位置，同一个 since 的后几轮接着往更早翻，翻到头才报 ok（不再每轮重翻同一截）', async () => {
+    const { gh, fake, ledger } = setup();
+    // 500 条 = 5 页；一轮只许翻 2 页
+    fake.deliveries = deliveryLog(500, {
+      50: { guid: 'g-p1', status_code: 502 },
+      10: { guid: 'g-late-ok', status_code: 200 },
+      260: { guid: 'g-late-ok', status_code: 504 },
+      250: { guid: 'g-p3', status_code: 502 },
+      450: { guid: 'g-p5', status_code: 502 },
+    });
+    const { intake } = fakeIntake(() => true);
+    // 成功过的投递后端库里有原文：续扫的几轮不带 ok 名单，靠它认出 g-late-ok 早已成功
+    const storedDeliveries = async (guids: readonly string[]) =>
+      new Set(guids.filter((g) => g === 'g-late-ok'));
+    const rec = gh.reconciler({ intake, pollDeliveryId, storedDeliveries, maxDeliveryPages: 2 });
+    const since = new Date('2026-09-25T09:00:00Z');
+    const pageNumbers = () =>
+      fake.calls('GET', /\/app\/hook\/deliveries$/).map((r) => r.query.get('page') ?? '1');
+
+    const r1 = await rec.redeliverFailed(since);
+    expect(r1).toMatchObject({ outcome: 'partial', checked: 200 });
+    expect(r1.why).toContain('续扫位置已存');
+    expect(pageNumbers()).toEqual(['1', '2']);
+    expect(fake.redelivered).toEqual([500 - 50]);
+
+    // 第二轮：先看最新一页（新来的），再从存下的位置（第 3 页）接着翻，不再重翻第 2 页
+    const r2 = await rec.redeliverFailed(since);
+    expect(r2).toMatchObject({ outcome: 'partial' });
+    expect(pageNumbers().slice(2)).toEqual(['1', '3']);
+    expect(fake.redelivered).toEqual([450, 250]);
+
+    const r3 = await rec.redeliverFailed(since);
+    expect(r3).toMatchObject({ outcome: 'partial' });
+    expect(pageNumbers().slice(4)).toEqual(['1', '4']);
+
+    // 第四轮翻到最后一页、没有下一页了：整个窗口查全，报 ok（水位这时才能推进）
+    const r4 = await rec.redeliverFailed(since);
+    expect(r4).toMatchObject({ outcome: 'ok', recovered: 1 });
+    expect(pageNumbers().slice(6)).toEqual(['1', '5']);
+    // 每个没成功过的只重投一次；g-late-ok 后来成功过，不动
+    expect(fake.redelivered).toEqual([450, 250, 50]);
+    const slots = ledger.idempotency as ReturnType<typeof memoryIdempotencyStore>;
+    expect([...slots.rows.keys()].filter((k) => k.includes('deliveries-resume'))).toHaveLength(3);
+  });
+
+  it('翻到页数上限、失败的比重投名额多或重投失败：照样存续扫位置，没补上的随位置带到下一轮，不重翻同一截也不丢', async () => {
+    const { gh, fake } = setup();
+    // 300 条 = 3 页；一轮只翻 2 页、只许重投 1 个。第 1 页两个失败，第 2 页一个失败（其 id 重投会被拒一次）
+    fake.deliveries = deliveryLog(300, {
+      10: { guid: 'g-a', status_code: 502 },
+      20: { guid: 'g-b', status_code: 502 },
+      150: { guid: 'g-c', status_code: 502 },
+    });
+    let rejectC = true;
+    fake.before.push((req) =>
+      rejectC && req.path === `/app/hook/deliveries/${300 - 150}/attempts`
+        ? json(422, { message: 'Validation Failed' })
+        : undefined,
+    );
+    const { intake } = fakeIntake(() => true);
+    const rec = gh.reconciler({
+      intake,
+      pollDeliveryId,
+      storedDeliveries: async () => new Set(),
+      maxDeliveryPages: 2,
+      maxRedeliveries: 1,
+    });
+    const since = new Date('2026-09-25T09:00:00Z');
+    const pageNumbers = () =>
+      fake.calls('GET', /\/app\/hook\/deliveries$/).map((r) => r.query.get('page') ?? '1');
+
+    // 最老的先补：g-c（id 150）重投被拒；g-a、g-b 超出名额，一起留到下一轮
+    const r1 = await rec.redeliverFailed(since);
+    expect(r1).toMatchObject({ outcome: 'failed', recovered: 0 });
+    expect(r1.why).toContain('续扫位置已存');
+    expect(pageNumbers()).toEqual(['1', '2']);
+
+    // 第二轮不再重翻第 2 页，直接接第 3 页；待重投的三个轮流补（一轮一个，最老的先）
+    rejectC = false;
+    const r2 = await rec.redeliverFailed(since);
+    expect(pageNumbers().slice(2)).toEqual(['1', '3']);
+    expect(r2).toMatchObject({ outcome: 'partial', recovered: 1 });
+    expect(fake.redelivered).toEqual([150]);
+    expect(r2.why).toContain('还有 2 个没重投');
+  });
+
+  it('续扫位置存不进去、读不出来：退回从头翻，不挡对账，也不报 ok', async () => {
+    const { gh, fake, ledger } = setup();
+    fake.deliveries = deliveryLog(300, { 5: { guid: 'g-x', status_code: 502 } });
+    ledger.idempotency.peek = async () => {
+      throw new Error('库连不上');
+    };
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({
+        intake,
+        pollDeliveryId,
+        storedDeliveries: async () => new Set(),
+        maxDeliveryPages: 2,
+      })
+      .redeliverFailed(new Date('2026-09-25T09:00:00Z'));
+    expect(report).toMatchObject({ outcome: 'partial', checked: 200, recovered: 1 });
+    expect(report.why).not.toContain('续扫位置已存');
+  });
+
+  it('投递日志翻到页数上限、翻到的那截重投全失败：报 failed，不报 ok', async () => {
+    const { gh, fake } = setup();
+    fake.deliveries = deliveryLog(300, { 5: { guid: 'g-x', status_code: 502 } });
+    fake.before.push((req) =>
+      req.path === '/app/hook/deliveries/295/attempts'
+        ? json(422, { message: 'Validation Failed' })
+        : undefined,
+    );
+    const { intake } = fakeIntake(() => true);
+    const report = await gh
+      .reconciler({ intake, pollDeliveryId, maxDeliveryPages: 2 })
+      .redeliverFailed(new Date('2026-09-25T09:00:00Z'));
+    expect(report).toMatchObject({ outcome: 'failed', checked: 200, recovered: 0 });
+    expect(report.why).toContain('翻了 2 页还没翻到');
   });
 
   it('重投：19 位的投递编号按原文拼路径，不丢精度（法国实测 …928 被改成 …000，重投全 404）', async () => {

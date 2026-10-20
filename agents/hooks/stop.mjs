@@ -63,7 +63,16 @@ export async function runStop(expectedCli) {
   });
   const initial = session.ok && authority.kind === 'allowed' ? readState(dir, session.id) : null;
   // 开始时捕获身份和generation；旧事件晚到也不能挂到后来重新on的窗口。
-  const context = receiptContext(dir, input, initial?.ok ? initial.state : null, 'Stop');
+  const context = receiptContext(
+    dir,
+    input,
+    initial?.ok ? initial.state : null,
+    'Stop',
+    process.env,
+    authority.kind,
+    expectedCli,
+    session.ok ? () => readState(dir, session.id) : undefined,
+  );
   noteReceipt(context, { phase: 'entered', decision: 'none' });
   if (process.env.FLEET_HEADLESS === '1') {
     noteReceipt(context, { phase: 'bypass', decision: 'headless' });

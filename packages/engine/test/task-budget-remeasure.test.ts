@@ -235,13 +235,16 @@ const OLD_PARK = (() => {
 })();
 const OLD_PARK_COMMANDS = commandsOf(OLD_PARK.events);
 
-/** 新代码在体量停点报警前问一次重评标记（提示句跟着它走）。旧夹具没有这个标记，命令序不该被改写成新的。 */
+/**
+ * 新代码在体量停点报警前问一次重评标记（提示句跟着它走），park() 记停法时再问一次主线的 park-kind（#3294）。
+ * 旧夹具两个标记都没有，命令序不该被改写成新的。
+ */
 function withRemeasurePatch(commands: readonly string[]): string[] {
   const next = [...commands];
   const alert = next.lastIndexOf('raiseAlert');
   const save = next.lastIndexOf('saveTaskState', alert);
   const at = save >= 0 && save < alert ? save : Math.max(alert, 0);
-  next.splice(at, 0, 'patch:line-budget-remeasure-v1');
+  next.splice(at, 0, 'patch:line-budget-remeasure-v1', 'patch:park-kind');
   return next;
 }
 

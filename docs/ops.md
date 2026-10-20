@@ -293,6 +293,7 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 | `/root/.ssh/authorized_keys2` | root:root 600 | 整份归 fleet-dao：法国上传钥匙一行，限死成只许从 `10.99.0.2` 来、不给终端、只能跑 `rrsync -wo -munge /srv/fleet-dao-web`。root 原有的 `authorized_keys` 一行不碰 |
 | `/var/www/fleet-dao-acme` | root:root 755 | 证书续期的验证文件 |
 | `/etc/nginx/sites-available/fleet-dao`（`sites-enabled` 里有链接） | root 644 | fleet-dao 的站点。同一个 nginx 上另有 MiraQuota 的站点 `ai-gateway`（不归 fleet-dao 管，装机不碰） |
+| `/var/lib/nginx/body` | www-data，700；保留已有组 | 香港 Ubuntu nginx 请求体落盘目录。`hk.sh` 配置没变也核/修；只接受实际 worker 全为 www-data、父目录逐级非链接且归 root、组和其他人不可写。只原位修该目录 owner/必要的 700 权限，不递归、不动内容或其他 nginx 临时路径、不为此重载服务。`--check` 只核 metadata 并以 www-data 执行 `test -w/-x`，不建探针；识别不了身份或路径不安全明确失败 |
 | `/etc/letsencrypt/live/<驾驶舱域名>` | certbot 管 | 证书；`certbot.timer` 续期，续完重载 nginx |
 | `/etc/wireguard/wg-fleet.conf`、`wg-fleet.key` | root 600 | 隧道配置与私钥 |
 | `/var/backups/fleet-dao/restic-copies` | root:root 700 | 备份仓库的第二份：root 每天复制一份，按日期一个目录，留 14 天。备份用户碰不到（第十一节） |
@@ -373,7 +374,7 @@ deploy/hk/fleet-hk-france-probe.timer → 每分钟探一次法国 healthz（经
 
 工作树删除统一经固定 root `fleet-agent-scope` 的 v1 身份协议；二级代码装在 root 不可写链的 `/usr/local/libexec/fleet-dao-tree-usage.py`，仅以 `/usr/bin/python3 -I -S` 和空环境启动。旧 helper 不支持完整能力时引擎留树；旧调用没有 dev/ino/uid 时新 helper 同样拒删。所有活 TGID/TID 的 cwd 都要查全，权限或枚举未知即保留，不按用户豁免。
 
-正常临时目录持创建/认领回执的身份；历史接回会话没有原身份时保留，后续仅在孤儿清理的任务/TTL门通过后显式认领。root 在同一文件系统的 `.cleanup-transactions` 私有目录持锁隔离，记录 PREPARED、CLAIMED、DELETING、DONE。小时清扫把未结事务列为 unchecked，不因原路径消失报成功。只读诊断用 `sudo -n fleet-agent-scope cleanup-status`；未开始破坏的事务可按回执中的 pathHash 和 id 执行 `sudo -n fleet-agent-scope cleanup-rollback <pathHash> <id>`，目标已被占用时不覆盖。DELETING 或已部分删除的事务拒绝伪装完整回退，保留剩余隔离内容和明确错误供恢复；不要手动复用隔离路径或直接 rm 原路径。扫描是删除必经点的有界证据，不保证阻止任意进程随后进入目录。
+正常临时目录持创建/认领回执的身份；历史接回会话没有原身份时保留，后续仅在孤儿清理的任务/TTL门通过后显式认领。root 在同一文件系统的 `.cleanup-transactions` 私有目录持锁隔离，记录 PREPARED、CLAIMED、DELETING、DONE。小时清扫把未结事务列为 unchecked，不因原路径消失报成功。只读诊断用 `sudo -n fleet-agent-scope cleanup-status`，它按排序路径桶分页读一整轮：先逐桶读（每桶先取已落定的桶戳——桶目录、各事务目录和 intent.json 的 ino/大小/mtime/ctime，戳里最新时间须早于开始取戳 50 毫秒，否则等一下重取，三次不落定回 `changed`——再读记录；读和复核两遍都对每个桶（含空桶、只有锁的桶、只剩 DONE/RESTORED 的桶）取该桶的 `lock` flock，等锁受整页 20 秒限制，超时按失败返回而不是回完整），再逐桶重取戳复核，两遍摘要一致且命名空间根的 dev/ino/mtime/ctime 仍是本轮开头那份才回 `truncated: false`。写者（建事务、写 intent.json）全程持同一把桶锁，并在持锁后、写 intent 前后都刷新命名空间根的时间戳（命名空间 root 私有，只有帮手写）：读者取到锁时没有写到一半的 intent；读者放锁之后才开始的写，其写前刷新必落在本轮内，每页（含末页）核根戳时回 `changed`；跨越读者取锁时刻的写，读者要等它做完。所以已读或已复核过的桶此后再新增或改事务、或有在途写入，本轮都不会回完整，也不靠多等一会儿或多读一次猜稳定；绕过帮手手改私有目录不在这份保证里。`lock` 必须是 root 属主、权限恰为 0600 的普通文件（0400、0700、0000、带 setuid 等一律不认）（符号链接、目录、属主或权限不对按 `untrusted transaction lock` 失败）；桶里有事务目录却没有 `lock` 按 `transaction bucket without its lock` 失败，空桶没有 `lock` 照常放过。每页上限：读 100 桶、复核 500 桶、200 条、96 KiB 返回行、1 MiB 记录读取（DONE/RESTORED 也照扣，读前先扣）、2000 个桶内目录项（列目录和取戳都扣）、命名空间根最多 10000 个桶（超了直接失败，不截前缀），整页硬限 20 秒（含锁等待；桶数够了 10 秒后不再开新桶），单桶一页装不下直接失败；整轮最多 256 页、600 秒。`truncated: true` 时回 `cursor`，下一页只能用 `cleanup-status --cursor <cursor>` 续读：游标是帮手用 `/run/fleet-dao-tree-usage/cursor.key`（root 属主 0600、32 字节、每次开机首个跨页轮次生成，单页读完不生成）做 HMAC-SHA256 签的不透明串，里面是位置、命名空间 dev/ino 和根戳、两遍摘要、轮次号、页号和起始时间；调用方不能自选桶名、偏移或摘要，改一个字节、拿公开信息自己算或换钥匙都按“不是本帮手签发”拒绝，钥匙不在（重启）、属主/权限/类型不对也拒绝所有旧游标。身份不符、格式不对、签名不对、命名空间消失或被换、超页数/时限均按失败（退出码 1、`state: unknown`）返回；根戳变了（加删桶）、读过的桶在复核前有任何变动（新增或改事务、回退、RESTORED 复用）回 `state: changed`，要从首页重读。分页不是跨页原子快照：只保证整轮里一直未结的事务都读到，复核之后才发生的变动留给下一轮。回执另带 `round`、`page`、`pass`（read/verify）、`from`/`through`（本页开头和读到的桶），引擎据此核同一轮、页号连续、每页从上页停下的桶接着读、行落在本页读到的桶范围、游标和行都不重复；引擎每次最多 256 页、重启 3 轮、5000 条、8 MiB、5 分钟，只有读到 `truncated: false` 的末页才认完整，缺页、重复/回退游标、越界记录或超界一律报“清理事务列表不完整”；未开始破坏的事务可按回执中的 pathHash 和 id 执行 `sudo -n fleet-agent-scope cleanup-rollback <pathHash> <id>`，目标已被占用时不覆盖。DELETING 或已部分删除的事务拒绝伪装完整回退，保留剩余隔离内容和明确错误供恢复；不要手动复用隔离路径或直接 rm 原路径。扫描是删除必经点的有界证据，不保证阻止任意进程随后进入目录。
 
 资源池与起会话：
 
@@ -809,7 +810,7 @@ rm -r /etc/systemd/system/fleet-hk-france-probe.service.d && systemctl daemon-re
 - `curl -I https://<驾驶舱域名>`、`certbot certificates`
 - `curl -s -o /dev/null -w '%{http_code}\n' https://<驾驶舱域名>/release.json`：从公网取应为 404（它只给法国经隧道读，第九节）
 - `certbot renew --dry-run --cert-name <驾驶舱域名>`：只演练续期，不换证书
-- `wg show wg-fleet`（看法国的 latest handshake）、`nginx -t`
+- `wg show wg-fleet`（看法国的 latest handshake）；只读核 nginx 请求体目录用 `hk.sh --check`。`nginx -t` / `nginx -T` 不是纯只读：检查配置时也可能创建或改变临时目录的属主，不能用作不改现场的巡检；隔离测试必须显式配置全部五种 temp path（client_body、proxy、fastcgi、uwsgi、scgi）到测试目录。
 - 往法国的连接有没有复用：`for i in 1 2 3; do curl -s -o /dev/null -w '%{time_starttransfer}\n' https://<驾驶舱域名>/api/me; done`，复用时每次约 0.2 秒（一趟隧道往返），每次新建连接约 0.4 秒；`hk.sh --check` 的读回也核对站点里的 `upstream fleet_dao_api`
 
 自检（P02：以 root 执行的文件要全链属 root、组和其他人不可写）分三档：
@@ -1106,6 +1107,22 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit
 
 命令沿用 wrapper 提供的 `FLEET_OPS_OPERATOR`，不冒充创始人。现读 GitHub 的仓、PR、合并状态、head 和证据 issue，任一失败都不处置。成功只把通知标为处理，并在同一事务追加 `notification.historical_audit`（target `notification:<id>`），留下原正文、真实 GitHub 合并人/提交、证据 issue 快照、缺口及责任。正常合并账与 backfill 完全不改；输出明确历史队列仍未证明。相同处置重复执行不新增审计，不同处置或通知已被其他入口处理则拒绝；退出码 0 成功、1 未做成、2 参数不对。核查现有 `/audit` 操作记录及通知的原始正文，不把通知已处理解释成“队列已证明”。
 
+### 已结束任务的 checkout 历史归档
+
+checkout 失败卡不能用 `historical-audit` 冒充，也不能靠重派任务证明恢复。使用私有 `fleet-api checkout-history`：标准输入给通知、仓、任务、原工作流/run、Temporal run、PR 和 head 的精确身份；默认只读预检，不写库：
+
+```sh
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history < /受控目录/checkout-history.json
+```
+
+预检通过后，人工把完整预检快照补齐 `raisedAt`、通知正文/link、仓 id、run 的 segment/起止/结局/PR、操作者、原因、证据、缺口、责任和固定 `conclusion: "historical_unproven"`，再显式执行：
+
+```sh
+bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history --archive < /受控目录/checkout-history-archive.json
+```
+
+归档在 Store 事务内（先锁 runs 表挡住并发新增，含 task_id 为空的历史兼容 run）重新核对全部身份、通知代次、通知标题/正文确为该目标该 head 的检出失败报警、原 run 确为该任务该 PR 已终态的 verify 段、终态、无在途 run、merged PR/head，并只撤旧通知、追加 `notification.checkout_history_archive` 审计；失败写审计会回滚撤卡。输出明确“历史归档、检出恢复未证实”，不修改任务、run、PR、正常冷验收账或验收责任。重复同一完整请求幂等，不同快照冲突；实际生产处置前仍须由指挥官独立核验。
+
 ### 命令行工具升级（#1971）
 
 法国上的 Claude Code、Codex 是 2026-09 用 root 的 `npm i -g` 装进 `/usr/lib/node_modules` 的（二进制在 `/usr/bin`）。Claude Code 官方的自动更新在这种「目录不归运行用户写」的装法下不生效。Cursor、reclaude 有各自的更新路径，不在这里升。Grok 装在会话用户家里（`~/.grok/bin/grok`），会话里关了自动更新，这里在空闲或发版窗口里替它跑 `grok update`。
@@ -1319,6 +1336,7 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit
 
 ### 本机领单（决定 0096）
 
+- 每台开发机使用独立环境编号和通行证；Windows 的 `founder-pc` 不能给另一台 Mac 共用。先按下节为新机器安装本机会话上报，再 `pnpm work claim <单号>`；领单成功后用 `pnpm work queue` 核实领者是这台机器的环境编号。没配置、法国拒收或没查成时不能当作已登记，也不能只贴「本机做」标签就开始写码。
 - 本机会话做一张单先 `pnpm work claim <单号>`（`pnpm issue:new --local` 开完自动领）：查过没有开着的 PR 在做，POST 到法国 `/api/nodes/claims` 在 `tasks` 登记（`executor = local`、`lease_until` 两小时、`claimed_by` 是通行证认出的环境编号），再贴「本机做」，打出分支名 `local/<单号>-<短名>`。通行证和地址用本机会话上报那份 `~/.fleet-dao/local-sessions/config.json`（下面一节装的），没装就领不了、退出码 1。引擎手上排队、在跑的回 409（原因写明状态和现在在干什么），不领；引擎已经停下等人的（`stalled`，或 `running` 而 `phase = parked`）一步接手：后端在同一事务里锁行、给任务工作流发 `taskAbandon`（by = `node:<环境>`，note「本机接手」）、把 `executor` 改成 `local`、记租约和操作记录（`task.local.claim`，reason「本机接手」）；叫停信号发不出去（Temporal 连不上）整个领单回滚、回 409。接手后工作流收尾写的 `stopped` 快照被 `saveTaskSnapshot` 挡掉（本机的行不让引擎写），引擎遗留行对账和拉单都不碰这行；租约到期、单关且 PR 合了照常收。
 - 续租不用人记：拉单每轮看本机会话心跳（`node_sessions`），有会话在 `local/<单号>-` 分支上、不到两小时前动过就顺延；有开着的 PR 挂着这张单也顺延。跑超过两小时、期间不调工具的长活前手动 `pnpm work renew <单号>`。
 - 结束：有 PR 合并且单已关，拉单下一轮自动记做完（租约没到期也收，PR 镜像晚几分钟到就晚一轮），不用手动。无 PR 的运维成功，凭真实验证先 `pnpm issue:close <单号> --note "验证结果"`，再 `pnpm work done <单号>` 收租约账；只关单不会立即收未过期的无 PR 租约。未完成验收责任仍保留开放，不能用 done 代替验收结清或绕过关单检查。没做成用 `pnpm work done <单号> --failed "原因"`（还是本机的账，法国不自动接）；放手用 `pnpm work done <单号> --release "原因"`，摘「本机做」、退回法国队列。
@@ -1328,13 +1346,37 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api historical-audit
 
 ### 本机会话上报（#1991）
 
-创始人电脑上读 `~/.claude/settings.json` 钩子的 Claude Code 会话让法国看板看得见：主页抽屉右上第三段「本机 N 在跑 / 本机没上报」，点开是「本机会话」一页，不混进画布上「在跑的」（那是引擎的单）。本机不起常驻进程，也不复活上面撤掉的 `local`，用新的环境编号 `founder-pc`。
+开发机上读 `~/.claude/settings.json` 钩子的 Claude Code 会话让法国看板看得见：主页抽屉右上第三段「本机 N 在跑 / 本机没上报」，点开是「本机会话」一页，不混进画布上「在跑的」（那是引擎的单）。每台机器一个环境编号和一把通行证，不能共用；`founder-pc` 只属于原 Windows 电脑，Mac 另建如 `founder-mac`，不复活上面撤掉的 `local`。
+
+- **macOS 装法**：先按「接上法国看板」第 1、2 步为这台 Mac 的独立环境编号生成钥匙、放哈希；不要复制 `founder-pc` 的配置或通行证。Mac 登录后在仓根安全设置环境变量 `FLEET_NODE_TOKEN`，运行 `pnpm local-sessions install --url https://<法国看板域名> --machine <机器名>`，随后清除该环境变量，不把明文写进命令历史、聊天或日志。安装使用当前 Node 可执行文件的绝对路径，写入用户的 `~/Library/LaunchAgents/org.fleet-dao.local-sessions.plist`，经 `launchctl bootstrap` 加入当前用户的 GUI 域，每 120 秒直接运行 `push.mjs`，不用 sudo、不另起常驻循环；退出登录后不运行，下次登录重新加载。安装当场单独试推并读回 `last-push.json`；定时任务不同时抢这次试推。重装先卸载本任务、再启用和加载，任何一步失败都非零退出，没卸掉就保留文件供重试，不动其他 LaunchAgent。`pnpm local-sessions status` 分别显示任务是否已加载、登录自启文件、上次推送结果；查询失败不能当作没装，返回非零。`pnpm local-sessions uninstall` 先核实本任务卸载，再删自己的 plist、钩子和本机会话目录，失败保留资源。Node 路径换了要重装；未支持的平台在写入前拒绝。定时方式遵循 [Apple 定时任务说明](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/ScheduledJobs.html) 和 [Apple launchd.plist 手册](https://github.com/apple-oss-distributions/launchd/blob/main/man/launchd.plist.5)。
+- **Mac 现场验收**：Windows 上的注入测试不能代替实际安装。合并后在目标 Mac 安装，确认 `pnpm local-sessions status` 显示上次推送成功；实际 `pnpm work claim <单号>` 后在 `pnpm work queue` 核实领者，并将时间、环境编号、退出码和结果贴在现场单。未取得这份证据前，现场单保持开放；不要为验证重复领取其他机器正在做的单。
 
 - **钩子写什么**：`agents/local-sessions/heartbeat.mjs` 挂在 Claude Code 的 SessionStart、Stop、SubagentStop、SessionEnd 上（async，不让会话等；2026-10-13 起调工具前不挂，每次调用省 138-250ms），每次触发写（覆盖）一份 `~/.fleet-dao/local-sessions/sessions/<会话编号>.json`，子代理单算一个。只有这几项：会话编号、仓（origin 是 GitHub 时写 owner/name，否则主检出的目录名）、分支、工作树目录名（不是整条路径）、是不是子代理和类型、起的时刻、最后一次动、最后一件事、最后在调的工具名。推的时候拿各会话记录（`~/.claude/projects/…/<会话>.jsonl`，子代理是 `<会话>/subagents/agent-<编号>.jsonl`）的修改时间补「最后一次动」、从记录尾巴读最后的工具名，只改推出去的那份，不推路径和参数；看板误差不超过推送间隔 2 分钟。同步（`agents-sync --apply`）对装过的机器顺手跑 `install.mjs refresh` 换脚本和登记。读 `.git` 里的 HEAD、commondir、config 三个小文件，不起 git 进程、不联网，出什么错都 exit 0，不挡会话。
 - **隐私边界**：不写提示词、代码、命令参数、文件路径、cwd、transcript 路径。钩子输入里的 `tool_input`、`prompt` 一个字都不落盘（`agents/test/local-sessions.test.ts` 故意塞进去验）。法国那边 schema 是 strict：多带一个字段整份拒收 400。
-- **怎么推**：定时推送有两种装法，装的时候先试第一种、不行自动退回第二种，装完输出的「定时推送」那一行写明用的哪种。① Windows 计划任务 `fleet-local-sessions` 每 2 分钟经 `wscript` 静默跑一次 `push.mjs`（不闪黑窗口）。② 有的电脑不让建计划任务（创始人这台：`schtasks /Create` 和 PowerShell `Register-ScheduledTask` 在非管理员 shell 下都报「拒绝访问」，不退回就会静默断掉、看板一直写没上报），就退回：启动文件夹（`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`）里放 `fleet-local-sessions.vbs`，登录时用 `wscript` 隐藏起 `~/.fleet-dao/local-sessions/bin/loop.mjs`，它每 2 分钟调一次 `push.mjs`；只认一个实例（`loop.pid` 锁，里面的进程活着就不起第二个），一次没推成不退出；装的时候当场起一个并读回 `last-push.json` 核对。两种都没成退出码非 0、不说装好了。两路只留一路：计划任务建成了就清掉自启，退回自启时先结束旧循环再起新的；旧版手工放在 `~/.fleet-dao/local-sessions/loop.mjs`（根上）的重装时删掉。推的内容是一样的：把心跳凑成一份 POST 到法国 `/api/nodes/sessions`，请求头 `X-Fleet-Node-Token` 和上面看板多机同一套 `FLEET_NODE_KEYS`，环境编号按对上的钥匙认。法国存进 `node_sessions`（一个环境一行、覆盖写）。同一个环境 20 秒内只收一次（429），超 128KB 回 413，没配钥匙回 503。结果写进本机 `~/.fleet-dao/local-sessions/last-push.json`（成没成、法国回了什么、为什么）。超过一天没动的心跳文件推之前删掉，收场超过 2 小时的不再推。退回自启的那一路，循环被睡眠、重启或杀进程弄死后，启动文件夹的 vbs 只在登录时跑一次，看板会一直写「上次收到的已经过期」：心跳钩子每次触发顺手看一眼 `loop.pid`，锁文件在、里面的进程已不在，就隐藏着拉起一个新的循环（`loop.mjs` 的 `reviveLoop`；锁文件不在不管，计划任务那一路没有循环）。循环经 `agents/local-sessions/detach.mjs` 起：Windows 走 WMI（`Win32_Process.Create`），父进程不在 Claude Code 的进程树里——以前用 node 的 `detached` spawn，Mirasim 重启会话的 `taskkill /T /F` 顺着父进程号把它一起杀了（#2761）。首页「在跑的」只列做着的事：本机领的单（`tasks.executor = local`，决定 0096）写成「本机 · 哪台 · 租约到几点」，和引擎的单排在一起；本机会话上报没推上来的环境不占行，列表下面用一行写「本机会话没上报」（早就不用的环境编号也会出现在这一行，要清掉就照上面「撤掉一个环境」删法国 `FLEET_NODE_KEYS` 里那一项；`local` 已删，#2236）。
+- **怎么推（Windows）**：定时推送有两种装法，装的时候先试第一种、不行自动退回第二种，装完输出的「定时推送」那一行写明用的哪种。① Windows 计划任务 `fleet-local-sessions` 每 2 分钟经 `wscript` 静默跑一次 `push.mjs`（不闪黑窗口）。② 有的电脑不让建计划任务（创始人这台：`schtasks /Create` 和 PowerShell `Register-ScheduledTask` 在非管理员 shell 下都报「拒绝访问」，不退回就会静默断掉、看板一直写没上报），就退回：启动文件夹（`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`）里放 `fleet-local-sessions.vbs`，登录时用 `wscript` 隐藏起 `~/.fleet-dao/local-sessions/bin/loop.mjs`，它每 2 分钟调一次 `push.mjs`；只认一个实例（`loop.pid` 锁，里面的进程活着就不起第二个），一次没推成不退出；装的时候当场起一个并读回 `last-push.json` 核对。两种都没成退出码非 0、不说装好了。两路只留一路：计划任务建成了就清掉自启，退回自启时先结束旧循环再起新的；旧版手工放在 `~/.fleet-dao/local-sessions/loop.mjs`（根上）的重装时删掉。推的内容是一样的：把心跳凑成一份 POST 到法国 `/api/nodes/sessions`，请求头 `X-Fleet-Node-Token` 和上面看板多机同一套 `FLEET_NODE_KEYS`，环境编号按对上的钥匙认。法国存进 `node_sessions`（一个环境一行、覆盖写）。同一个环境 20 秒内只收一次（429），超 128KB 回 413，没配钥匙回 503。结果写进本机 `~/.fleet-dao/local-sessions/last-push.json`（成没成、法国回了什么、为什么）。超过一天没动的心跳文件推之前删掉，收场超过 2 小时的不再推。退回自启的那一路，循环被睡眠、重启或杀进程弄死后，启动文件夹的 vbs 只在登录时跑一次，看板会一直写「上次收到的已经过期」：心跳钩子每次触发顺手看一眼 `loop.pid`，锁文件在、里面的进程已不在，就隐藏着拉起一个新的循环（`loop.mjs` 的 `reviveLoop`；锁文件不在不管，计划任务那一路没有循环）。循环经 `agents/local-sessions/detach.mjs` 起：Windows 走 WMI（`Win32_Process.Create`），父进程不在 Claude Code 的进程树里——以前用 node 的 `detached` spawn，Mirasim 重启会话的 `taskkill /T /F` 顺着父进程号把它一起杀了（#2761）。首页「在跑的」只列做着的事：本机领的单（`tasks.executor = local`，决定 0096）写成「本机 · 哪台 · 租约到几点」，和引擎的单排在一起；本机会话上报没推上来的环境不占行，列表下面用一行写「本机会话没上报」（早就不用的环境编号也会出现在这一行，要清掉就照上面「撤掉一个环境」删法国 `FLEET_NODE_KEYS` 里那一项；`local` 已删，#2236）。
 - **阈值**（`packages/shared/src/web-api/local-sessions.ts`）：一个会话 15 分钟没调工具、没开新的一轮算「超过 15 分钟没动」（`LOCAL_SESSION_IDLE_MS`；每次调工具都刷新，跑得久的不会误判）；一轮做完（Stop）或收场后 2 小时内算「刚停」；法国超过 5 分钟没收到这台推来的算「没上报」（`LOCAL_SESSIONS_FRESH_MS`，错过两轮多一点），页面写上次收到在多久前，那时候的会话灰着写「上次看到」，不冒充还在跑；配了钥匙从没收到写「没上报：一次都没收到」。多久没动按推送方自己钟上的差加上收到后过了多久算，不比两台的钟。
-- **装**（本机，一条命令）：先在法国以 root 生成钥匙、放哈希（上一节第 1、2 步，环境编号换成 `founder-pc`），再在本机仓根跑（PowerShell）`$env:FLEET_NODE_TOKEN='<明文>'; pnpm local-sessions install --url https://<法国看板域名> --machine 创始人的电脑; Remove-Item Env:FLEET_NODE_TOKEN`。它拷脚本到 `~/.fleet-dao/local-sessions/bin/`、写 `config.json`（通行证只从环境变量读，不进命令行历史）、在 `~/.claude/settings.json` 登记五条钩子（只动指向那个目录的，别人的钩子原样留着，改之前留一份 `settings.json.local-sessions.bak`，坏 JSON 不覆盖）、建计划任务（建不成就退回启动文件夹自启，见上一条），当场试推一次打出结果；新开的会话才有心跳。不放进 `~/.fleet-dao/hooks/`、不登记成 `~/.fleet-dao/bin/quiet-*.exe`：那两处归 agents-sync，同步时会被摘掉。
+- **Windows 装法**（本机，一条命令）：先在法国以 root 生成钥匙、放哈希（上一节第 1、2 步，环境编号换成 `founder-pc`），再在本机仓根跑（PowerShell）`$env:FLEET_NODE_TOKEN='<明文>'; pnpm local-sessions install --url https://<法国看板域名> --machine 创始人的电脑; Remove-Item Env:FLEET_NODE_TOKEN`。它拷脚本到 `~/.fleet-dao/local-sessions/bin/`、写 `config.json`（通行证只从环境变量读，不进命令行历史）、在 `~/.claude/settings.json` 登记四条钩子（只动指向那个目录的，别人的钩子原样留着，改之前留一份 `settings.json.local-sessions.bak`，坏 JSON 不覆盖）、建计划任务（建不成就退回启动文件夹自启，见上一条），当场试推一次打出结果；新开的会话才有心跳。不放进 `~/.fleet-dao/hooks/`、不登记成 `~/.fleet-dao/bin/quiet-*.exe`：那两处归 agents-sync，同步时会被摘掉。
 - **看 / 停**：`pnpm local-sessions status` 看钩子登记了几条、定时推送用的哪种、循环进程活着没有、推到哪、上次推的结果。`pnpm local-sessions uninstall` 一条命令卸：摘掉那几条钩子、删计划任务、删启动文件夹里的 vbs、结束 `loop.pid` 指向的进程、删整个 `~/.fleet-dao/local-sessions/`。法国那边要作废，`config.mjs drop-entry api.env FLEET_NODE_KEYS founder-pc` 删掉那一项、重启 `fleet-api`、新指纹换进期望。
 
 最终验收责任用 `fleet-api acceptance status <owner/仓> <单号>` 查看；现场验过后用 `fleet-api acceptance settle <owner/仓> <单号> --id <责任号> --generation <代次> --pr <PR号> --head <40位SHA> --evidence "现场验收记录"` 落账。协调责任用 `--pr 0 --head -`。命令沿既有 root 包装器和数据库身份执行，没有公开结算写口。代次不符、PR未合并、证据缺失均拒绝，随后仍需标准关单。公开仓机器只读入口 `/api/public/acceptance/v1/repos/:githubId/issues/:issue` 不缓存，先经现有 CI bridge 核实公开仓身份，只返回责任身份与结清证据，不返回原验收正文。PR 换头后旧头永远没有合并回执时，用 `fleet-api acceptance supersede <owner/仓> <单号> --id <旧责任号> --generation <代次> --pr <PR号> --head <旧头SHA> --target-id <最终责任号> --target-generation <代次> --target-pr <PR号> --target-head <最终头SHA> --evidence "替代依据"` 替代收口：目标须同仓同单同 PR、有真实合并回执、已最终验收且验收项盖住旧头的；两头验收项是不同冷验收轮次写的、措辞不同时，整串相等的判不过，要加 `--coverage '[{"source":"旧头验收项原文","target":"目标验收项原文","basis":"覆盖依据"}]'` 逐条人工声明（source / target 必须是 `status` 里两行 items 的原文整串，basis 写为什么算覆盖；漏一条、写错原文、空依据都拒，不做模糊或子串匹配），声明随替代写进旧行和操作记录，重放同一声明幂等、换声明不冒充成功，目标或旧头新增项后替代与声明一并作废、重新指要重新给声明；旧行不伪填合并回执，读口每行带 `state`（open / settled / superseded）。`issue:close` 和 `close-on-merge` 的关单闸只认这个 `state`，目标后来新增项则替代作废、旧头回到 open。
+
+历史责任归并是私有 ops 命令，先只读预检：`fleet-api acceptance merge-plan <owner/仓> <单号> --task <任务UUID> --workflow <原workflowId> --run <原run ID> --pr <PR号> --head <最终头SHA> --merge-commit <合并提交SHA> --duties <责任号:代次,…>`。成功输出完整逐项来源、已有目标和稳定 `planHash`，失败非0退出且没有可用计划。原 run 由服务端配置的 Temporal namespace 精确读取，不找 latest、不换成 runs 会话号；历史 runs.temporal_run_id 为 NULL 不构成授权或拒绝依据。Start 绑定任务/仓/单，完整连续历史和终态须读全；来源只认同 run 已完成 acceptanceDuties 的 input.record 或 coldVerify 的 result.outOfScope，按精确任务/仓/单/PR/head逐项原串核验。最终头另须同 run coldVerify.pass=true 与同仓 PR 镜像 merged/mergeCommit 一致。仅 scheduled、任意正文碰巧匹配、调用方上传证明、跨 run 拼接均拒绝。
+
+执行写入：在相同定位参数后使用 `fleet-api acceptance merge … --request <UUID> --plan <预检64hex> --reason "为什么归并" --evidence "原项来源依据"`。执行前重新取可信证据，短事务重核原run关联和任务/PR/源目标合同；为覆盖NULL变匹配及新插入，任务/PR/责任行锁前取runs SHARE表锁，期间全部run写入短暂排队，2秒锁超时明确失败回滚，不自动重试；目标、审计与完整幂等回执一起提交，失败一起回滚。新目标初建来源 management_merge、状态 OPEN；已有目标保留初建来源，新增项令 generation+1、撤旧结清/替代，旧源保持原样。归并不自动 settle/supersede/关单，必须独立验清新代次，再走已有入口；指向旧目标代次的替代随之失效，须重新核验重绑。无新增项改走既有替代入口。
+
+同 request 原参数重试会重新验证成功后合同，不重复写入；改操作者/原因/证据冲突，源或目标后来新增换代则明确旧计划失效。合法后续 settle/supersede 不会被当成新增项。读失败/取消/超限不自动扩大范围或降级通过；先排查后重新预检，首次成功未知时保留原 request 重试。硬界为总30秒、单RPC5秒/2MiB、相关payload256KiB、256页/20000事件/32MiB protobuf、token16KiB；点名最多64源、并集2048项/1MiB，原因和证据各8KiB。原文、计划及证明只留私有管理输出/审计，不加公开写口。
+
+
+## 无 PR 推送权限停点的正式交还
+
+入口 `pnpm task:handback-permission-push --workflow-id <精确workflow> --run-id <精确run>`，也可显式加 `--check`。默认只查询该 run 并读取可信来源，不发送 Temporal Update/Signal，不在历史写一份“检查成功”；它复用引擎运行环境的只读来源。退出 0 仅表示此次观察得到 `natural-retired`，不代表已经交回任务，也不是下一次 execute 的凭据。退出 2 保留未知或预算阻塞，不替换成继续信号。
+
+只有确定要交还这个首次自然停点时才加 `--execute --request-id <固定业务编号> --by <操作者> --feedback-file <私有UTF-8文件>`。无 PR、原 run、首次 generation=1/continued=0、三段模式及预算仍须服务端核准；完整历史里任何不支持的控制变动或未证明退场的活动都会拒绝。原 helper 固定入口只增加 `retirement` 读取，不扩大 sudoers、不写锁、树或所有权。信任现行 root 管理的固定 helper 与 `fleet-engine.service` 的 KillMode=mixed/control-group cgroup 边界；SDK STOPPED 还须同 boot/invocation 的 PID1 服务终态，脱出 scopes 逐项自然结束。历史每个 helper 的二进制哈希不作无限追溯条件，缺已知生命周期则照实未知。
+
+断线后使用完全相同的 workflow/run、request-id、by 与 feedback 文件重试；CLI 固定构造首次 hold token，因此原 hold 已被消费后仍可取回原回执，不依赖 query 再生成新 token。相同 request-id 异文返回 conflict；超过有限幂等表容量返回 busy。仅 `handed_back` 证明主循环已接纳返工，ready/Update 接收不等于成功。输出不回显意见或操作者；原请求载荷存在受保护的 Temporal 历史中。真正上线验收另核自然发布后的只读 systemd 现场，namespace 测试中的 journalctl/systemctl 观察夹具不能冒充真 systemd。
+
+正式正文已经从 H0 修订到 H1 时，保留真实正文，先从产品读口取得原停点合同 H0 与当前正式合同 H1；为 check 与 execute 同时提供 `--original-contract-sha256 <H0完整摘要> --expected-contract-sha256 <H1完整摘要>`，显式选择 v2。两个参数缺一或格式不对立即拒绝；不带参数仍按原 v1 同合同规则，不能自动接受任意新正文。check 仍只 query/读来源，execute 会重新核原 hold、H0 及服务端正式读回的 H1、完整历史、退场、树和原预算，不接受调用人报告的 brief。缺旧合同修订边界的运行明确拒绝 v2。
+
+v2 的 `acceptedContract` 表示实际接纳过的 H1 快照；只有 `outcome=handed_back` 才表示主路径交还控制已完成，二者不能混用。接纳后放弃或停点失效时可能返回带 H1 的 stale，表示合同接纳事实保留、控制没有交回。回执不保证外部正文此后不再编辑，也不证明 recordRound 统计提交；原统计写入失败的告警仍保留。收场期间出现 H2，后续动手先重新核正文，不按过时 H1 起会话或续旧 session。
+
+收到响应前断线、超时或结果未知，只允许原 request-id 和原完整载荷重取，不换 UUID、不发 continue/redo。已经收到服务端明确的预检拒绝回执，则该请求已完成且无控制消费；同编号仍返回该拒绝。来源修复后重新观察是另一次明确操作，可使用新业务编号，但仍绑定同一原 hold；不能用它绕过前一个尚未知晓结果的执行。

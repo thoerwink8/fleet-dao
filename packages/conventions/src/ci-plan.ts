@@ -132,6 +132,8 @@ export const DEPLOY_READS_PACKAGES = ['agents-sync', 'web'] as const;
  */
 export const TEST_READS: Record<string, string[]> = {
   api: ['web'],
+  // engine source origin 复用发布配置的 systemd parser。
+  engine: ['deploy/france/auto-release/config.mjs'],
   // 派工/同步 Stop 集成与 subagent:stats 读取真实 hooks 及其依赖，缓存和本机选测须覆盖同一输入。
   conventions: [
     'agents/hooks/',

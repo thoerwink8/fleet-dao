@@ -56,7 +56,7 @@
 - 开发：`pnpm install`，Node 和 pnpm 的版本钉在 `package.json`；给 AI 的约定在 [AGENTS.md](AGENTS.md)。
 - 跑检查：本机推前只跑改动影响到的测试（`pnpm test:changed`，和 origin/main 比、按 CI 那套判法选包，整个 `agents/test/` 只在它受影响时带、CI 每个 PR 照旧全跑，引擎的会话交活只认它；它判出要全跑时本机不跑、退出码 3，写明全量交给 CI，真要在本机全跑带 `--all`，只跑受影响的包带 `--affected`）和格式、类型；`pnpm check` 默认 = 格式 + 类型 + 改到的测试（同 `pnpm test:changed`，相对 origin/main）+ 卫生检查，四样都跑完再判红，每样报耗时，任何一样没跑成都算红；`pnpm check --all` 才全量 vitest run（本机要 8 分钟以上，和 CI 重复，一般不跑）。只改一个包的入口脚本、包内模块、测试（不在它 `exports`、`bin` 走得到的面上）时只测这个包自己，不连带依赖它的包（`packages/conventions/src/package-surface.ts`）。本机要真 Postgres 的（驾驶舱 e2e）先 `pnpm pg:local start`（Windows 嵌入式库，脱离会话起，见 `packages/web/e2e/README.md`）。CI 一律全套、并行跑，PR 和 main 都一样（`.github/workflows/ci.yml`，见 design 第五节「CI 一律全套」，决定 0101）；本机按改动选只是推前的快反馈。
 - 开单：`pnpm issue:new --kind 需求 --domain engine --nature bug --milestone 当前 --title "一句话" --body-file 正文.md`（`--domain` 是 engine、api、mirasim 里一个，`--nature` 是 bug、perf、process 里一个，标签名带「域:」「性质:」，只用来筛；`当前`＝开着的那个 `v<N>` 版本，一周一版、到期自动收口，别写死 `v<N>`；未排期写 `--milestone 未排期`，母单加 `--mother`，子单加 `--parent <母单号>`），缺类别、域、性质、里程碑，或正文里「## 场景」「## 原话」「## 已知的模块」「## 怎么算做完」有一节没写都不开；整份正文原样进 issue（没有 `--specs`，不再另存需求.md，#654）。
-- 关单：本机最后一个 PR 在「需求」栏下面另起一行写 `Closes #<号>`，合并时 GitHub 自己关。引擎 PR 正文只保留需求关联，正文与实际 squash 消息均去掉自动关单词，由工作流在合并收尾时关单；有未结验收责任时写 `Refs #号` 并留单，正式验收责任入口结清后才关，评论不能代替结清。没有 PR 的收尾用 `pnpm issue:close <号>`：关成「完成」要有证据（合并了的 PR 提到它、或下面的子单都关了、或 `--note "做成了什么"`），没有就不关（退出码 1），子单还开着也不关；读不到 GitHub 报错不关（退出码 2）。见 design 第七节「关单要有证据」。
+- 关单：本机最后一个 PR 在「需求」栏下面另起一行写 `Closes #<号>`，合并时 GitHub 自己关。引擎 PR 正文只保留需求关联，正文与实际 squash 消息均去掉自动关单词，由工作流在合并收尾时关单；有未结验收责任时写 `Refs #号（分片、关不了它）` 并留单，正式验收责任入口结清后才关，评论不能代替结清。没有 PR 的收尾用 `pnpm issue:close <号>`：关成「完成」要有证据（合并了的 PR 提到它、或下面的子单都关了、或 `--note "做成了什么"`），没有就不关（退出码 1），子单还开着也不关；读不到 GitHub 报错不关（退出码 2）。见 design 第七节「关单要有证据」。
 - 欠账：`pnpm debt:check` 只看文件，查活文档里推后的话带着单号（debt.yml 在主线推送和每天跑，只报告、不挡合并，不读 GitHub；不在 PR 上跑）；加 `--live` 另读 GitHub，查挂的单号开没开着（定时任务 debt.yml 用，它再加 `--comment` 留言到单上）。见 design 第七节「欠账不漏」。
 - 加新项目：`pnpm project add <owner/仓>` 一条命令做到底（登记、装两个 App、流程标签、仓档案、补齐 PR、真实策略读桥、全绿才开接活、冒烟单），可重复跑；`pnpm project check <owner/仓>` 只查（退出码 0 全绿、1 有没过的、2 没查成）。两个 App 装没装经法国的 `fleet-api project installations <owner/仓> --github-id <仓号>` 读（只读，和驾驶舱导入列表同一份归并；没读全是没查成，不是没装）。见 ops 第九节「加新项目」。
 - 计划：`pnpm plan` 从 GitHub 现读版本、先后、母单和子单打印出来，不写文件（#654 起仓里不存快照）；没登录、GitHub 读不到、先后标记认不出都报错、退出码 2。每天一轮 GitHub 对账（`.github/workflows/github-audit.yml`，随时也能 `pnpm github:audit`）查单子和先后有没有断，见 design 第七节「GitHub 对账」。
@@ -67,6 +67,14 @@
 - `pnpm work run <单号>` 登记真实 Claude session / Codex thread，开启无人值守后由同步 Stop 一次性消费本会话终态；Codex 后台完成不主动开新轮。只有 `CODEX_SESSION_ID` 的 root-session 不代替 thread；缺归属及旧 `dispatcher=null` 记录用 `pnpm work runs` 手工读取，续跑不改原归属。
 
 - 本机受管工人的审查退回：`pnpm work return <单号> --body-file <完整意见文件>` 交由退回专用工作流与既有合并闸按同一 PR 串行登记；先核实 PR 级 PREPARE，再写当前头阻合状态和正式 review 回执，未结 PREPARE 跨换头/强推继续阻合；只有核实真实状态与正式回执才报 `registered/blocked`，`queued/unconfirmed` 不代表已阻止合并。`pnpm work feedback <单号> [--wait|--retry]` 读取完整意见、等 Actions 结果或按原请求重试，取消、超时和断线保留本机意图。工人用 `pnpm work ack <单号> --return <编号>` 确认收到；审查方用 `pnpm work resolve <单号> --return <编号> --body-file <核验依据>` 对精确候选 head 解除责任；ack、CI 绿和新 head 都不代替 resolve。交付用 `pnpm work deliver <单号>`，不会擅自解除手工草稿。当前显式退回事务只允许个人仓 owner 发起，工人不能替审查方 resolve；普通组织仓和没有退回协议的本机 PR 保留原判法。
+
+### 真 Temporal 测试准备
+
+首次准备本机真 Temporal 测试运行 `pnpm temporal:install`。它按 `deploy/france.sh` 的固定版本和当前平台（macOS arm64/x64、Linux x64/arm64、Windows x64）从 Temporal 官方发布地址下载，核固定 SHA-256，验证 `--version` 后原子落到 `~/.fleet-dao/test-tools/temporal-cli/`，不改全局 PATH、不碰 SDK 缓存。已准备好的同版本不会重下。下载失败、超时、校验不符或版本不符都不会登记成可用 CLI。
+
+也可以用 `pnpm test:temporal --cli <已安装的CLI绝对路径>` 登记已有 CLI，版本必须与 `deploy/france.sh` 一致；之后 `pnpm test:temporal` 检查登记是否仍可用。登记只写 `~/.fleet-dao/test-tools/`，不下载、不启动服务端。也可直接设 `FLEET_TEST_TEMPORAL_CLI`，显式路径优先，坏路径不会退回登记；CI 必须显式设置。
+
+`pnpm check`、`pnpm test:changed` 选到调用 `createRealEnv` 的文件时先核 CLI；没选到则不做这项准备。直接跑单个测试也会在创建真环境前核验，缺失明确失败，不回退 SDK 隐式下载。`--version` 探测限 5 秒，超时终止该探测进程。随后 SDK 创建只报 `start-or-connect`：SDK 未公开启动和连接的细分状态，日志如实记未知；没有另套超时竞速，环境仍由 SDK 创建并由用例 teardown 清理。
 
 ### Windows 上的 Linux 安全测试
 
@@ -83,6 +91,12 @@
 ```
 
 `command` 和 `args` 合起来必须启动 Linux Node（符合仓根 Node 版本要求），检查器在末尾加执行参数，JSON 快照从 stdin 传入；支持已有的其他本机 Linux 启动器。不要将 SSH/VPS 命令当本机 runner。`dependencyRoot` 是该 Linux 中已用 `pnpm install --frozen-lockfile` 安装依赖的仓目录，锁文件、workspace 设置和各包依赖声明须与本次工作树一致。运行时把当前已跟踪和未忽略的新文件复制到独立 Linux 临时目录，包含未提交改动，已删的文件不复活；workspace 依赖链接指向本次快照，第三方依赖复用已安装目录。源码摘要、普通用户、测试清单和 JSON 结果逐项核对后才算通过。Linux 本机和 CI 直接跑原测试。
+
+### 本机私有回环验证资源
+
+`pnpm test:isolated --resource <本机资源JSON绝对路径> -- <完整测试文件...>` 将明确审阅为只用本地服务的一组完整文件交给一次性 Linux 私有网络资源。它沿用本机测试槽、工作树快照与 Linux 结果核验，单独留报告，不替代 `pnpm check` 或 CI，也不改变全局选测。资源摘要过期、未知文件、真实 PG 请求、缺依赖或工具、namespace/关闭证据不符都明确失败。共享 WSL 故障与这条隔离路径的通过分别记账。
+
+资源需先由可信主线安装 root-owned helper，再按[资源说明](packages/conventions/resources/README.md)准备本机 JSON；配置和机器路径不进仓。网络仅有该资源内的回环，server/client/worker 在同一 namespace，业务 Node 与所有服务均普通用户，取消或宿主失联会回收本次进程。不能把依赖外网、共享 TCP PostgreSQL 或未审能力的检查整批送进去，也不能为了通过删除数据库环境变量或改用 PGlite。
 
 实现依据：[Node 的真实路径解析](https://github.com/nodejs/node/blob/main/doc/api/cli.md#--preserve-symlinks)要求防止依赖链接回到旧源码；[WSL 显式发行版和用户参数](https://learn.microsoft.com/windows/wsl/basic-commands)允许使用现有环境而不修改默认设置。Windows 不提供 `/proc/self/fd` 上逐级固定目录句柄的归档语义，不能以普通路径操作替代安全断言。
 
@@ -115,6 +129,6 @@
 
 ## 协作
 
-GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。批量建单的 `mother` 必填 `domain`、`nature`，子单逐轴继承母单有效值；缺失或无效在任何 GitHub 写入前拒绝。查询轴两套，名字带轴：域（`域:engine`、`域:api`、`域:mirasim`）和性质（`性质:bug`、`性质:perf`、`性质:process`）；新开的单和 PR 每轴贴一个，按这两个标签筛。受控入口创建前校验；旧检出、网页或直接 gh 创建的对象由可信主线事件补漏，只认明确声明或唯一来源单，不明就报错，`pnpm github:audit` 持续查漏。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，只有四栏：做了什么、怎么验证的、还欠什么、需求（本机最终 PR 在「需求」栏下面另起一行写 `Closes #号`；引擎 PR 正文和实际 squash 消息都去掉自动关单词，由受管收尾检查验收责任后关单；有未结验收责任时用 `Refs #号` 留单，按上面的关单约定收尾），并带和开单同一套 `--domain`、`--nature`；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654）；能不能合只看 CI 和 merge-gate（见 design 第五节）。
+GitHub 上只用标签和里程碑：每个标签的意思写在[标签页](https://github.com/thoerwink8/fleet-dao/labels)，里程碑就是版本（没挂就是未排期），母单贴「母单」标签、子单用子议题挂在它下面，P0–P6 已关留作历史；怎么用、为什么这样定，见 design 第七节。批量建单的 `mother` 必填 `domain`、`nature`，子单逐轴继承母单有效值；缺失或无效在任何 GitHub 写入前拒绝。查询轴两套，名字带轴：域（`域:engine`、`域:api`、`域:mirasim`）和性质（`性质:bug`、`性质:perf`、`性质:process`）；新开的单和 PR 每轴贴一个，按这两个标签筛。受控入口创建前校验；旧检出、网页或直接 gh 创建的对象由可信主线事件补漏，只认明确声明或唯一来源单，不明就报错，`pnpm github:audit` 持续查漏。开 issue 用上面的 `pnpm issue:new`，做完用 `pnpm issue:close` 关；开 PR 照模板填，只有四栏：做了什么、怎么验证的、还欠什么、需求（本机最终 PR 在「需求」栏下面另起一行写 `Closes #号`；引擎 PR 正文和实际 squash 消息都去掉自动关单词，由受管收尾检查验收责任后关单；有未结验收责任时用 `Refs #号（分片、关不了它）` 留单，按上面的关单约定收尾），并带和开单同一套 `--domain`、`--nature`；PR 不贴类别标签、不挂里程碑（里程碑页只数单子，#654）；能不能合只看 CI 和 merge-gate（见 design 第五节）。
 
 最终现场验收责任由法国管理命令 `fleet-api acceptance status <owner/仓> <单号>` 查看；`settle` 需精确责任号、代次、PR/head 和现场证据（完整参数见 `--help`）。`pnpm issue:close` 的任何关法都先核对真实责任账，有待验项或读不到时保留原单。

@@ -2,7 +2,7 @@
 // stop 只记一笔。记录写到环境变量 FLEET_FAKE_SCOPE_LOG 指的文件（一行一条 JSON）。
 // 真帮手（deploy/france/fleet-agent-scope.sh）以 root 跑、换身份、进 scope；这里只验插头交给它的东西对不对。
 import { spawn } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 
 const [action, ...rest] = process.argv.slice(2);
 const log = process.env.FLEET_FAKE_SCOPE_LOG;
@@ -27,6 +27,14 @@ if (action === 'capabilities') {
       ],
     }),
   );
+} else if (action === 'cleanup-status' && process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES) {
+  // 分页：按调用顺序逐个吐 JSON 数组里的回执，用过几页记在 FLEET_FAKE_SCOPE_CLEANUP_COUNTER 文件；吐完了按读失败退出
+  const counter = process.env.FLEET_FAKE_SCOPE_CLEANUP_COUNTER as string;
+  const used = existsSync(counter) ? Number(readFileSync(counter, 'utf8')) : 0;
+  writeFileSync(counter, String(used + 1));
+  const pages = JSON.parse(process.env.FLEET_FAKE_SCOPE_CLEANUP_PAGES) as unknown[];
+  if (used >= pages.length) process.exit(1);
+  process.stdout.write(JSON.stringify(pages[used]));
 } else if (action === 'cleanup-status') {
   process.stdout.write(process.env.FLEET_FAKE_SCOPE_CLEANUP_STDOUT ?? '');
   process.exit(Number(process.env.FLEET_FAKE_SCOPE_CLEANUP_EXIT ?? '0'));

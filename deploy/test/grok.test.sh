@@ -216,6 +216,10 @@ check "解释器没了（起不来也退出 127）：不认成没装" "$GROK_ABS
 has "解释器没了：原因是跑 --version 没成" "$GROK_BAD" "$B --version 退出 (126|127)"
 expect_bad "输出认不出" 'echo "Grok Build v1"' '--version 的输出认不出（该是一行「grok 版本号 \(提交\)」）：「Grok Build v1」'
 expect_bad "多打了一行" "echo 'grok $VER (4220f3b224a6)'; echo 'update available'" "输出认不出.*：「grok $VER \\(4220f3b224a6\\) ⏎ update available」"
+put_grok "echo 'grok $VER (1474f9cbdd91) [stable]'"
+grok_version "$U" "$B"
+check "末尾带发布通道（1.0.62 起）：读得到" "$GROK_HAVE" "$VER"
+expect_bad "通道后面又多了字" "echo 'grok $VER (1474f9cbdd91) [stable] extra'" "输出认不出.*：「grok $VER \\(1474f9cbdd91\\) \\[stable\\] extra」"
 expect_bad "什么都不打" 'exit 0' '输出认不出.*：「」'
 GROK_TIMEOUT=1
 t0=$SECONDS

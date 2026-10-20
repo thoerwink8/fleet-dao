@@ -1,7 +1,7 @@
 // 本机会话心跳（#1991）：钩子写心跳、推送、装和卸。
 // 故意造出的失败：钩子输入里带提示词、命令参数，落盘的心跳里一个字都没有；推不出去、法国回 401、没配 config 都写进 last-push.json；
 // settings.json 坏了不覆盖；常量和法国那边的 schema 对不上就红。
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -10,9 +10,13 @@ import {
   addHooks,
   heartbeatCommand,
   install,
+  LAUNCH_AGENT_LABEL,
+  launchAgentPath,
+  launchAgentPlist,
   refresh,
   removeHooks,
   status,
+  statusReport,
   uninstall,
 } from '../local-sessions/install.mjs';
 import {
@@ -97,6 +101,301 @@ describe('常量和法国那边对得上', () => {
     expect(PUSH_EVERY_MS).toBe(LOCAL_SESSIONS_PUSH_EVERY_MS);
     expect(RECENT_STOP_MS).toBe(LOCAL_SESSION_RECENT_STOP_MS);
     expect(MAX_SESSIONS).toBe(LOCAL_SESSIONS_MAX);
+  });
+});
+
+describe('macOS LaunchAgent 生命周期（全部命令注入，不操作真实 launchd）', () => {
+  const srcDir = join(import.meta.dirname, '..', 'local-sessions');
+  const domain = 'gui/501';
+  const service = `${domain}/${LAUNCH_AGENT_LABEL}`;
+  const good = { status: 0, stdout: '', stderr: '' };
+  const missing = {
+    status: 113,
+    stdout: '',
+    stderr: `Could not find service "${LAUNCH_AGENT_LABEL}" in domain for user gui: 501`,
+  };
+  const fixture = () => {
+    const home = tmp();
+    const calls: string[][] = [];
+    let loaded = false;
+    let failure: string | undefined;
+    let pushed = 0;
+    const run = (cmd: string, args: string[]) => {
+      calls.push([cmd, ...args]);
+      expect(cmd).toBe('/bin/launchctl');
+      if (args[0] === failure) return { status: 5, stdout: '', stderr: 'denied' };
+      if (args[0] === 'print') return args[1] === domain || loaded ? good : missing;
+      if (args[0] === 'bootout') loaded = false;
+      if (args[0] === 'bootstrap') loaded = true;
+      return good;
+    };
+    const opts = {
+      home,
+      srcDir,
+      platform: 'darwin' as const,
+      uid: 501,
+      run,
+      nodePath: '/opt/node with space&<>"\'/bin/node',
+      url: 'https://fleet.example',
+      token: 'test-only-token',
+      now: () => T0,
+      fetchImpl: (async () => {
+        pushed++;
+        return new Response('{"ok":true}', { status: 200 });
+      }) as typeof fetch,
+    };
+    return {
+      home,
+      calls,
+      opts,
+      fail: (command: string) => {
+        failure = command;
+      },
+      pushed: () => pushed,
+    };
+  };
+
+  it('安装直接定时 push、核实加载与真实试推；重装先卸旧任务，保留别人的文件和钩子', async () => {
+    const f = fixture();
+    mkdirSync(join(f.home, '.claude'), { recursive: true });
+    const otherHook = { type: 'command', command: 'node other.mjs' };
+    writeFileSync(
+      join(f.home, '.claude', 'settings.json'),
+      JSON.stringify({ hooks: { Stop: [{ hooks: [otherHook] }] } }),
+    );
+    mkdirSync(dirname(launchAgentPath(f.home)), { recursive: true });
+    const otherPlist = join(dirname(launchAgentPath(f.home)), 'org.other.plist');
+    writeFileSync(otherPlist, 'keep');
+    for (let i = 0; i < 2; i++) {
+      const steps = await install(f.opts);
+      expect(
+        steps.every((s) => s.ok),
+        JSON.stringify(steps),
+      ).toBe(true);
+    }
+    expect(f.calls.filter((c) => c[1] === 'bootstrap')).toEqual([
+      ['/bin/launchctl', 'bootstrap', domain, launchAgentPath(f.home)],
+      ['/bin/launchctl', 'bootstrap', domain, launchAgentPath(f.home)],
+    ]);
+    expect(f.calls.filter((c) => c[1] === 'bootout')).toEqual([['/bin/launchctl', 'bootout', service]]);
+    expect(f.calls.findIndex((c) => c[1] === 'bootout')).toBeLessThan(
+      f.calls.findLastIndex((c) => c[1] === 'bootstrap'),
+    );
+    const plist = readFileSync(launchAgentPath(f.home), 'utf8');
+    expect(plist).toBe(
+      launchAgentPlist(f.opts.nodePath, join(f.home, '.fleet-dao', 'local-sessions', 'bin', 'push.mjs')),
+    );
+    expect(plist).toContain('node with space&amp;&lt;&gt;&quot;&apos;');
+    expect(plist).toContain('<integer>120</integer>');
+    expect(plist).not.toMatch(/RunAtLoad|KeepAlive|test-only-token|loop.mjs/);
+    expect(f.pushed()).toBe(2);
+    const report = statusReport(f.home, f.opts);
+    expect(report.ok).toBe(true);
+    expect(report.lines.join('\n')).toContain('已加载');
+    expect(report.lines.join('\n')).toMatch(/"ok":\s*true/);
+    expect(report.lines.join('\n')).not.toContain(f.opts.token);
+    const steps = uninstall(f.opts);
+    expect(
+      steps.every((s) => s.ok),
+      JSON.stringify(steps),
+    ).toBe(true);
+    expect(existsSync(launchAgentPath(f.home))).toBe(false);
+    expect(existsSync(join(f.home, '.fleet-dao', 'local-sessions'))).toBe(false);
+    expect(readFileSync(otherPlist, 'utf8')).toBe('keep');
+    expect(JSON.parse(readFileSync(join(f.home, '.claude', 'settings.json'), 'utf8')).hooks.Stop).toEqual([
+      { hooks: [otherHook] },
+    ]);
+    expect(uninstall(f.opts).every((s) => s.ok)).toBe(true);
+  });
+
+  it.each(['$&', '$$', '$`', "$'"])(
+    '合法 Node 路径的 %s 不作为替换模板展开，安装、重装、查、卸都能认回自身 plist',
+    async (part) => {
+      const f = fixture();
+      const opts = { ...f.opts, nodePath: `/opt/node${part}/bin/node` };
+      expect((await install(opts)).every((s) => s.ok)).toBe(true);
+      expect(statusReport(f.home, opts).ok).toBe(true);
+      expect((await install(opts)).every((s) => s.ok)).toBe(true);
+      expect(statusReport(f.home, opts).ok).toBe(true);
+      expect(uninstall(opts).every((s) => s.ok)).toBe(true);
+    },
+  );
+
+  it.each(['enable', 'bootstrap'])('【失败】%s 不成不试推，留下文件但不冒充装好', async (command) => {
+    const f = fixture();
+    f.fail(command);
+    const steps = await install(f.opts);
+    expect(steps.at(-1)).toMatchObject({ ok: false, step: '定时推送' });
+    expect(steps.at(-1)?.detail).toContain(command);
+    expect(f.pushed()).toBe(0);
+    expect(existsSync(launchAgentPath(f.home))).toBe(true);
+    expect(statusReport(f.home, f.opts).ok).toBe(false);
+  });
+
+  it('【失败】读不到域或服务不能当成未安装；未知查询失败不删自己的配置', async () => {
+    const f = fixture();
+    expect((await install(f.opts)).every((s) => s.ok)).toBe(true);
+    f.fail('print');
+    expect(statusReport(f.home, f.opts)).toMatchObject({ ok: false });
+    expect(status(f.home, f.opts).join('\n')).toContain('没查成');
+    expect(uninstall(f.opts).at(-1)).toMatchObject({ ok: false });
+    expect(existsSync(launchAgentPath(f.home))).toBe(true);
+    expect(existsSync(join(f.home, '.fleet-dao', 'local-sessions', 'config.json'))).toBe(true);
+    const first = fixture();
+    first.fail('print');
+    expect((await install(first.opts)).at(-1)).toMatchObject({ ok: false });
+    expect(existsSync(join(first.home, '.fleet-dao'))).toBe(false);
+  });
+
+  it('【失败】bootout 失败保留文件与钩子，不继续重装或卸载', async () => {
+    const f = fixture();
+    expect((await install(f.opts)).every((s) => s.ok)).toBe(true);
+    f.fail('bootout');
+    const before = readFileSync(join(f.home, '.claude', 'settings.json'), 'utf8');
+    expect(uninstall(f.opts).at(-1)).toMatchObject({ ok: false });
+    expect(readFileSync(join(f.home, '.claude', 'settings.json'), 'utf8')).toBe(before);
+    expect(existsSync(launchAgentPath(f.home))).toBe(true);
+    expect((await install(f.opts)).at(-1)).toMatchObject({ ok: false });
+    expect(f.calls.filter((c) => c[1] === 'bootstrap')).toHaveLength(1);
+    expect(f.pushed()).toBe(1);
+  });
+
+  it('【失败】bootstrap 回零但服务未加载，仍不试推、不冒充成功', async () => {
+    const f = fixture();
+    const steps = await install({
+      ...f.opts,
+      run: (_cmd, args) => (args[0] === 'print' && args[1] === service ? missing : good),
+    });
+    expect(steps.at(-1)).toMatchObject({ ok: false, step: '定时推送' });
+    expect(f.pushed()).toBe(0);
+  });
+
+  it('【失败】卸载时 settings 坏 JSON，先拒绝，不卸任务也不删除 plist、凭据或脚本', async () => {
+    const f = fixture();
+    expect((await install(f.opts)).every((s) => s.ok)).toBe(true);
+    const settingsPath = join(f.home, '.claude', 'settings.json');
+    const original = readFileSync(settingsPath, 'utf8');
+    writeFileSync(settingsPath, '{ broken');
+    const before = f.calls.length;
+    expect(uninstall(f.opts).at(-1)).toMatchObject({ ok: false, step: '钩子' });
+    expect(f.calls).toHaveLength(before);
+    expect(readFileSync(settingsPath, 'utf8')).toBe('{ broken');
+    expect(existsSync(launchAgentPath(f.home))).toBe(true);
+    expect(existsSync(join(f.home, '.fleet-dao', 'local-sessions', 'config.json'))).toBe(true);
+    expect(existsSync(join(f.home, '.fleet-dao', 'local-sessions', 'bin', 'push.mjs'))).toBe(true);
+    writeFileSync(settingsPath, original);
+    expect(uninstall(f.opts).every((s) => s.ok)).toBe(true);
+  });
+
+  it.each(['backup', 'write'])(
+    '【失败】卸载摘钩的 %s 路径被目录占用，保留全部文件，消除冲突可重试',
+    async (part) => {
+      const f = fixture();
+      expect((await install(f.opts)).every((s) => s.ok)).toBe(true);
+      const settingsPath = join(f.home, '.claude', 'settings.json');
+      const original = readFileSync(settingsPath, 'utf8');
+      const conflict =
+        part === 'backup' ? `${settingsPath}.local-sessions.bak` : `${settingsPath}.${process.pid}.tmp`;
+      mkdirSync(conflict);
+      expect(uninstall(f.opts).at(-1)).toMatchObject({ ok: false, step: '钩子' });
+      expect(readFileSync(settingsPath, 'utf8')).toBe(original);
+      expect(existsSync(launchAgentPath(f.home))).toBe(true);
+      expect(existsSync(join(f.home, '.fleet-dao', 'local-sessions', 'config.json'))).toBe(true);
+      expect(existsSync(join(f.home, '.fleet-dao', 'local-sessions', 'bin', 'push.mjs'))).toBe(true);
+      expect(f.calls.filter((c) => c[1] === 'bootout')).toHaveLength(1);
+      rmSync(conflict, { recursive: true });
+      expect(uninstall(f.opts).every((s) => s.ok)).toBe(true);
+      expect(existsSync(launchAgentPath(f.home))).toBe(false);
+      expect(existsSync(join(f.home, '.fleet-dao', 'local-sessions'))).toBe(false);
+    },
+  );
+
+  it('【失败】陌生平台或 root UID 在任何写入、命令执行前拒绝', async () => {
+    const f = fixture();
+    expect((await install({ ...f.opts, platform: 'linux' })).at(-1)).toMatchObject({
+      ok: false,
+      step: '平台',
+    });
+    expect(uninstall({ ...f.opts, platform: 'linux' }).at(-1)).toMatchObject({ ok: false, step: '平台' });
+    expect(statusReport(f.home, { ...f.opts, platform: 'linux' }).ok).toBe(false);
+    expect((await install({ ...f.opts, uid: 0 })).at(-1)).toMatchObject({ ok: false });
+    expect(existsSync(join(f.home, '.fleet-dao'))).toBe(false);
+    expect(f.calls).toEqual([]);
+  });
+
+  it.each(['label', 'program', 'override', 'duplicate-key', 'extra-root'])(
+    '【失败】已有 plist 的 %s 不属于本任务，不覆盖、不卸载',
+    async (part) => {
+      const f = fixture();
+      mkdirSync(dirname(launchAgentPath(f.home)), { recursive: true });
+      const own = launchAgentPlist(
+        f.opts.nodePath,
+        join(f.home, '.fleet-dao', 'local-sessions', 'bin', 'push.mjs'),
+      );
+      const foreign =
+        part === 'label'
+          ? own.replace(LAUNCH_AGENT_LABEL, 'org.someone.else')
+          : part === 'program'
+            ? own.replace('push.mjs', 'unrelated.mjs')
+            : part === 'override'
+              ? own.replace(
+                  '<key>StartInterval</key>',
+                  '<key>Program</key><string>/bin/other</string><key>StartInterval</key>',
+                )
+              : part === 'duplicate-key'
+                ? own.replace(
+                    '<key>StartInterval</key>',
+                    '<key>Label</key><string>org.other</string><key>StartInterval</key>',
+                  )
+                : own.replace(
+                    '</plist>',
+                    '<dict><key>Program</key><string>/bin/other</string></dict></plist>',
+                  );
+      writeFileSync(launchAgentPath(f.home), foreign);
+      expect((await install(f.opts)).at(-1)).toMatchObject({ ok: false });
+      expect(statusReport(f.home, f.opts).ok).toBe(false);
+      expect(uninstall(f.opts).at(-1)).toMatchObject({ ok: false });
+      expect(readFileSync(launchAgentPath(f.home), 'utf8')).toBe(foreign);
+      expect(f.calls).toEqual([]);
+      expect(existsSync(join(f.home, '.fleet-dao'))).toBe(false);
+    },
+  );
+
+  it('【失败】同名任务已加载但没有自身 plist，不能判断归属，不执行 bootout', async () => {
+    const f = fixture();
+    const calls: string[][] = [];
+    const run = (cmd: string, args: string[]) => {
+      calls.push([cmd, ...args]);
+      return good;
+    };
+    expect((await install({ ...f.opts, run })).at(-1)).toMatchObject({ ok: false });
+    expect(uninstall({ ...f.opts, run }).at(-1)).toMatchObject({ ok: false });
+    expect(calls.every((c) => c[1] === 'print')).toBe(true);
+    expect(existsSync(join(f.home, '.fleet-dao'))).toBe(false);
+  });
+
+  it('【失败】域可读但服务查询出错，不是精确 not found 就不当作未安装', async () => {
+    const f = fixture();
+    const run = (_cmd: string, args: string[]) =>
+      args[1] === domain ? good : { ...missing, stderr: 'permission denied' };
+    expect((await install({ ...f.opts, run })).at(-1)).toMatchObject({ ok: false });
+    expect(statusReport(f.home, { ...f.opts, run }).ok).toBe(false);
+    expect(uninstall({ ...f.opts, run }).at(-1)).toMatchObject({ ok: false });
+    expect(existsSync(join(f.home, '.fleet-dao'))).toBe(false);
+  });
+
+  it('【失败】试推被法国拒收，安装与状态都保留失败，不把任务已加载当作推送成功', async () => {
+    const f = fixture();
+    const steps = await install({
+      ...f.opts,
+      fetchImpl: (async () => new Response('denied', { status: 401 })) as typeof fetch,
+    });
+    expect(steps.find((s) => s.step === '试推')).toMatchObject({ ok: false });
+    const report = statusReport(f.home, f.opts);
+    expect(report.ok).toBe(false);
+    expect(report.lines.join('\n')).toContain('已加载');
+    expect(report.lines.join('\n')).toMatch(/"ok":\s*false/);
+    expect(report.lines.join('\n')).not.toContain(f.opts.token);
   });
 });
 

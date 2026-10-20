@@ -717,7 +717,7 @@ export function unexpected(what: string, data: unknown): GitHubError {
   });
 }
 
-function nextLink(link: string | null): string | null {
+export function nextLink(link: string | null): string | null {
   if (!link) return null;
   for (const part of link.split(',')) {
     const m = /<([^>]+)>\s*;\s*rel="([^"]+)"/.exec(part.trim());
