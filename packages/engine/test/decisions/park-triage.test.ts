@@ -128,7 +128,10 @@ describe('checkVerdict：核一条裁决', () => {
 
   it('体量超预算的停掉（#3207 成果已分片合进主线）：带主线提交号才放行，没带、样子不对拒绝', () => {
     expect(
-      checkVerdict(park('size'), null, { action: 'stop', mergedIn: '378af18f04b6e82c8a99ad8cb1f850edb0c34269' }),
+      checkVerdict(park('size'), null, {
+        action: 'stop',
+        mergedIn: '378af18f04b6e82c8a99ad8cb1f850edb0c34269',
+      }),
     ).toEqual({ ok: true, action: 'stop', widenBudget: false });
     expect(checkVerdict(park('size'), null, { action: 'stop', mergedIn: '378af18' })).toMatchObject({
       ok: true,
