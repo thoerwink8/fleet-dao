@@ -168,13 +168,15 @@ export function issueColumnRefs(body: string): { closes: number[]; refs: number[
 /** 一行里写了「分片、关不了它」这类话：Refs 在这一行是有意只挂不关（母单的一片），不当成做完了。 */
 const SLICE_WORDS = /分片|关不了|不关单|没做完|未做完/;
 
-/** 新 PR 的每个 Refs 行都要明确分片；逐行检查，不让另一行同号的说明掩盖歧义。旧正文读取不受此约束。 */
+/** 新 PR 的每个 Refs 必须在同一行明确分片；跨行关联直接拒绝。旧正文读取不受此约束。 */
 export function unmarkedIssueRefs(body: string): number[] {
   const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase()) ?? '';
   const found = new Set<number>();
-  for (const line of col.split('\n')) {
-    if (SLICE_WORDS.test(line)) continue;
-    for (const m of line.matchAll(REFS)) found.add(Number(m[1]));
+  for (const m of col.matchAll(REFS)) {
+    const start = col.lastIndexOf('\n', m.index - 1) + 1;
+    const end = col.indexOf('\n', m.index);
+    const line = col.slice(start, end === -1 ? col.length : end);
+    if (/[\r\n]/.test(m[0]) || !SLICE_WORDS.test(line)) found.add(Number(m[1]));
   }
   return [...found].sort((a, b) => a - b);
 }

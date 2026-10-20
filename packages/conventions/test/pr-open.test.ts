@@ -422,6 +422,11 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、PR 不挂里程碑', ()
       '**需求**：Refs #3（不关单）\nRefs #3\n',
       '**需求**：Closes #3\nRefs #3\n',
       '**需求**：Refs #3 <!-- 分片、关不了它 -->\n',
+      '**需求**：Refs\n#3\n',
+      '**需求**：Refs:\n#3\n',
+      '**需求**：Refs\r\n#3（分片、关不了它）\r\n',
+      '**需求**：Refs <!-- 注释\n跨行 -->\n#3（不关单）\n',
+      '**需求**：Refs（不关单）\nRefs\n#3\n',
     ]) {
       const w = world([], body);
       expect(w.run(), body).toBe(1);
