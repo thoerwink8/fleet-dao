@@ -60,7 +60,7 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - name: 装 Chromium 和系统库
-        run: pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
+        run: node packages/conventions/src/bin/ci-browser.ts
       - name: 等 postgres:16 起来
         run: |
           set -euo pipefail
