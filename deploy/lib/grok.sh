@@ -27,8 +27,9 @@ GROK_BAD=""              # 没读成的原因
 GROK_ABSENT=0            # 没读成时：1＝不在、不是文件、不能跑（没装），0＝在、但跑不成，或者没查成
 GROK_TIMEOUT=20          # --version 等几秒
 GROK_INSTALL_TIMEOUT=900 # 安装脚本等几秒（要下一百多兆的二进制）
-# grok --version 的样子：grok 1.0.41 (4220f3b224a6)
-GROK_VERSION_RE='^grok ([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._]+)?)( \([0-9a-f]+\))?$'
+# grok --version 的样子：grok 1.0.41 (4220f3b224a6)，1.0.62 起末尾带发布通道：grok 1.0.62 (1474f9cbdd91) [stable]
+# 和 packages/shared/src/cli-versions.ts 的 grok 判法保持一致
+GROK_VERSION_RE='^grok ([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9._]+)?)( \([0-9a-f]+\))?([ 	]+\[[A-Za-z0-9._-]+\])?$'
 
 grok_bin() { printf '%s' "${GROK_BIN//\{user\}/$1}"; }             # 会话用户
 grok_auth_file() { printf '%s' "${GROK_AUTH_FILE//\{user\}/$1}"; } # 会话用户

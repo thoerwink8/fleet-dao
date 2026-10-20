@@ -24,6 +24,8 @@ it.each(['watchdog', 'early-failure'] as const)(
     let scope: SyntheticHistoryDiagnostics | undefined;
     let handle: WorkflowHandleWithFirstExecutionRunId | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
+    let fireWatchdog: (() => void) | undefined;
+    let watchdogCancelled = false;
     const originalFailure = new Error('bounded synthetic early assertion');
     try {
       await engineBundle();
@@ -33,7 +35,14 @@ it.each(['watchdog', 'early-failure'] as const)(
           .update(readFileSync(new URL(import.meta.url)))
           .digest('hex'),
         failed: () => false,
-        watchdogMs: mode === 'watchdog' ? 1000 : 50_000,
+        scheduleWatchdog: (onFire, delayMs) => {
+          expect(delayMs).toBe(50_000);
+          fireWatchdog = onFire;
+          return () => {
+            fireWatchdog = undefined;
+            watchdogCancelled = true;
+          };
+        },
         output: new DiagnosticOutput((line) => {
           lines.push(line);
           console.error(line);
@@ -54,6 +63,9 @@ it.each(['watchdog', 'early-failure'] as const)(
             expect(await handle.result()).toBe('你好，isolated fixture');
             if (mode === 'early-failure') throw originalFailure;
             current.mark('bounded-host-wait-after-real-result');
+            expect(lines).toEqual([]);
+            if (!fireWatchdog) throw new Error('controlled watchdog unavailable');
+            fireWatchdog();
             await Promise.race([
               observation,
               new Promise<never>((_, reject) => {
@@ -92,8 +104,11 @@ it.each(['watchdog', 'early-failure'] as const)(
       throw error;
     } finally {
       clearTimeout(timeout);
-      if (scope) await scope.finish();
-      else await env.teardown();
+      if (scope) {
+        await scope.finish();
+        expect(watchdogCancelled).toBe(true);
+        expect(fireWatchdog).toBeUndefined();
+      } else await env.teardown();
     }
   },
   20_000,
