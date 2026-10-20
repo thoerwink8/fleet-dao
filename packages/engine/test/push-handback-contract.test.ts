@@ -162,8 +162,7 @@ function world() {
   });
 }
 
-// 整套并行跑时 Temporal 测试环境会被挤得很慢（#3295 返工时实咬过：单个用例 60 秒超时），用例时限放宽
-describe('permission contract snapshot consumption', { timeout: 120_000 }, () => {
+describe('permission contract snapshot consumption', { timeout: 60_000 }, () => {
   it.each(['final-read', 'accepted-round'] as const)(
     'real Workflow cancellation during %s never signs control consumption or starts a session',
     async (stage) => {
