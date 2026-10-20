@@ -3,6 +3,7 @@
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
+  commanderStalledSummary,
   type Db,
   executorLineStats,
   finishScheduleRun,
@@ -54,6 +55,7 @@ export function dailyBriefJob(w: {
     decisions: () => openBriefNotes(w.db, 'decision'),
     alerts: () => openBriefNotes(w.db, 'alert'),
     stopped: (from, to) => stoppedTasksBetween(w.db, from, to),
+    commanderSummary: () => commanderStalledSummary(w.db),
     lineStats: (at) => executorLineStats(w.db, at),
     pipelineHealth: (to) => pipelineHealth(w.db, to),
     releaseKills: (to) => releaseKilledSessions(w.db, to),
