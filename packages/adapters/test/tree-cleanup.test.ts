@@ -232,5 +232,5 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     Object.assign(CLEANUP_PAGE_LIMITS, saved, { ms: 0 });
     pages([firstPage, lastPage]);
     await expect(cleanupStatus(options)).rejects.toThrow('超时');
-  });
+  }, 30_000); // 四段各自起几页子进程，和上面同理：机器忙时会超默认 5 秒（CI 上 5 秒超时红过）
 });
