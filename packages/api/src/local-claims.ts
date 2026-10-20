@@ -1,4 +1,4 @@
-// 本机领单（决定 0096，shared 的 local-claims.ts）：POST /api/nodes/claims，本机会话领单、续租、结束。
+// 本机领单（决定 0096，shared 的 local-claims.ts）：POST /api/nodes/claims，本机会话领单、续租、结束；GET 同一路径读所有仓本机领着的未到期租约（#3388，协议在 shared 的 node-claims.ts）。
 // 挂在 node-report.ts 那个登录门前面的小应用里，和本机会话心跳同一个头（X-Fleet-Node-Token）、同一套钥匙（FLEET_NODE_KEYS）：
 // 本机不放机器人凭据，只拿这台环境的通行证。环境编号取对上的那把钥匙，载荷里自报什么都不信。
 // 改这里之前必须知道：
@@ -21,6 +21,7 @@ import {
 import { errMessage } from '@fleet-dao/shared/util';
 import type { Hono, MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
+import { z } from 'zod';
 import type { Deps } from './deps.ts';
 import { ApiError, errorBody, readJson, reply } from './http.ts';
 import {
@@ -35,6 +36,10 @@ type NodeEnv = { Variables: { nodeId: string } };
 /** 本机领单那一口：真装配是 db 的 claimLocalTask / renewLocalTask / finishLocalTask。 */
 export interface LocalClaimsPort {
   apply(input: { nodeId: string; request: LocalClaimRequest; now: Date }): Promise<LocalClaimResponse>;
+  /** 所有仓里 executor = local 且租约未到期的行（GET 读口）；读不到照抛。 */
+  list(input: {
+    now: Date;
+  }): Promise<{ repo: string; issue: number; claimedBy: string; leaseUntil: string }[]>;
 }
 
 export const LOCAL_CLAIMS_NOT_WIRED = '这台后端没接库，本机领单登记不了（开发、内存版）';
@@ -44,11 +49,46 @@ const small = bodyLimit({
   onError: (c) => c.json(errorBody('too_large', '本机领单的请求超过 4 KB，没收'), 413),
 });
 
+/** GET 的回包：只这四个字段（协议在 shared 的 node-claims.ts）。 */
+const LocalClaimsListSchema = z
+  .object({
+    claims: z.array(
+      z
+        .object({ repo: z.string(), issue: z.number().int(), claimedBy: z.string(), leaseUntil: z.string() })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export const LOCAL_CLAIMS_UNREADABLE = '读不到本机租约（库读失败），不拿空列表冒充「没人领着」';
+
 export function registerLocalClaimsReceiver(
   app: Hono<NodeEnv>,
   deps: Deps,
   authenticate: MiddlewareHandler<NodeEnv>,
 ): void {
+  // 读口（#3388）：和 POST 同一个认人（只认机器通行证）；所有仓里本机领着、租约没到期的单，让别的机器领单前能看到。
+  app.get(LOCAL_CLAIMS_PATH, authenticate, async (c) => {
+    const port = deps.localClaims;
+    if (!port) throw new ApiError(503, 'local_claims_not_wired', LOCAL_CLAIMS_NOT_WIRED);
+    let claims: Awaited<ReturnType<LocalClaimsPort['list']>>;
+    try {
+      claims = await port.list({ now: deps.now() });
+    } catch (err) {
+      deps.log.warn('本机租约读不到', { nodeId: c.get('nodeId'), error: errMessage(err) });
+      throw new ApiError(503, 'local_claims_unreadable', LOCAL_CLAIMS_UNREADABLE);
+    }
+    // 明确只投影这四个字段：端口多给什么都不外漏
+    return reply(c, LocalClaimsListSchema, {
+      claims: claims.map((r) => ({
+        repo: r.repo,
+        issue: r.issue,
+        claimedBy: r.claimedBy,
+        leaseUntil: r.leaseUntil,
+      })),
+    });
+  });
+
   app.post(LOCAL_CLAIMS_PATH, authenticate, small, async (c) => {
     const port = deps.localClaims;
     if (!port) throw new ApiError(503, 'local_claims_not_wired', LOCAL_CLAIMS_NOT_WIRED);
@@ -84,8 +124,13 @@ export function pgLocalClaims(ops: {
   }) => Promise<Result>;
   /** 接手停下的单要叫停引擎任务用；不给就不接手（停下的单也照旧拒）。 */
   workflows?: WorkflowControl | undefined;
+  /** 读口：真装配是 db 的 listLocalClaims。 */
+  list: (now: Date) => Promise<{ repo: string; issue: number; claimedBy: string; leaseUntil: Date }[]>;
 }): LocalClaimsPort {
   return {
+    async list({ now }) {
+      return (await ops.list(now)).map((r) => ({ ...r, leaseUntil: r.leaseUntil.toISOString() }));
+    },
     async apply({ nodeId, request, now }) {
       const base = { repo: request.repo, issueNumber: request.issue, nodeId, now };
       const r =

@@ -584,6 +584,26 @@ export const nodeReports = pgTable('node_reports', {
 });
 
 /**
+ * 机器通行证（#3388）：往法国推快照、推本机会话、领单的机器各发一把，一个环境编号一行。只存明文的 sha256（64 位小写十六进制），
+ * 明文只在 `fleet-api node-key new` 打印那一次。作废是写 revoked_at、不删行：该编号从此只认库（作废的行遮住同编号的 FLEET_NODE_KEYS 旧配置）。
+ * 认人时现读这张表，加机器、作废都不改配置、不重启。
+ */
+export const nodeKeys = pgTable(
+  'node_keys',
+  {
+    nodeId: text('node_id').primaryKey(),
+    /** 通行证明文的 sha256 十六进制。 */
+    tokenHash: text('token_hash').notNull().unique(),
+    /** 给人看的名字，不填就是环境编号。 */
+    displayName: text('display_name').notNull(),
+    createdAt: timestamp('created_at', tz).notNull(),
+    /** 作废的时刻；空 = 有效。 */
+    revokedAt: timestamp('revoked_at', tz),
+  },
+  (t) => [check('node_keys_hash_shape', sql`${t.tokenHash} ~ '^[0-9a-f]{64}$'`)],
+);
+
+/**
  * 法国工作树的清单（#1993）：每小时对账、一键清理那一轮看到的每棵树的去向，最近一份覆盖写（key 恒为 latest）。
  * 引擎写（只有它能以会话用户的身份看树），后端读。形状是 shared 的 WorktreeInventorySchema，读回来认不出明确报错。
  */

@@ -16,6 +16,9 @@ function port(reply: Awaited<ReturnType<LocalClaimsPort['apply']>>) {
       seen.push(input);
       return reply;
     },
+    async list() {
+      return [];
+    },
   };
   return { p, seen };
 }
@@ -137,6 +140,7 @@ describe('engineTakeOver / pgLocalClaims：接手停下的单要叫停引擎任�
           leaseUntil: null,
         };
       },
+      list: async () => [],
       renew: async () => {
         throw new Error('不该调');
       },
