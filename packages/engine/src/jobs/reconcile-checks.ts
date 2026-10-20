@@ -398,7 +398,9 @@ export async function retireHistoricalFactAlerts(deps: ReconcileCheckDeps): Prom
         deps,
         part,
         alert.dedupeKey,
-        prefix === PR_ALERT_PREFIX ? HISTORICAL_PR_RETIRE_WHY : '历史事实：PR 已合并超过 7 天，改不了，自动收',
+        prefix === PR_ALERT_PREFIX
+          ? HISTORICAL_PR_RETIRE_WHY
+          : '历史事实：PR 已合并超过 7 天，改不了，自动收',
       );
     }
   }
