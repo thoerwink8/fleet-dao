@@ -55,6 +55,7 @@ describe('工作流文件的规矩', () => {
       'hello.ts',
       'index.ts',
       'kit.ts',
+      'task-budget-remeasure.ts',
       'task-ci.ts',
       'task-flow.ts',
       'task-merge.ts',

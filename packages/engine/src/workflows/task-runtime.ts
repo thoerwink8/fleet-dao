@@ -16,6 +16,7 @@ import {
   log,
   patched,
   setHandler,
+  sleep,
   workflowInfo,
 } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
@@ -37,7 +38,11 @@ import {
   AUTO_RETRY_PARK_KINDS,
   CI_POLICY_POLL_SECONDS,
   type ClosedIssueHoldToken,
+  type DeliveryRead,
   type GuardedPaths,
+  type LineBudgetParkIdentity,
+  type LineBudgetRefusal,
+  type LineBudgetRemeasureReceipt,
   MAX_IMPLEMENT_ROUNDS,
   MAX_MAIN_SYNCS,
   MAX_ROUND_RESETS,
@@ -48,6 +53,8 @@ import {
   PAUSED_BY_HUMAN,
   type ParkKind,
   type PauseCommand,
+  type RemeasureLineBudgetCommand,
+  type RemeasureLineBudgetResult,
   type RepinCommand,
   type TaskPhase,
   type TaskStatus,
@@ -59,12 +66,24 @@ import {
   taskHandbackPermissionPushUpdate,
   taskPauseSignal,
   taskPushHandbackQuery,
+  taskRemeasureLineBudgetUpdate,
   taskRepinSignal,
   taskRouteWakeSignal,
   taskSettleMergedUpdate,
   taskStatusQuery,
 } from '../task-contract.ts';
 import { conflictFilesOf, conflictPendingOf, failureOf, iso, judgeRetrying } from './kit.ts';
+import {
+  commandShapeProblem,
+  judgeRemeasure,
+  LINE_BUDGET_REMEASURE_PATCH,
+  type LineBudgetParkInput,
+  type LineBudgetParkState,
+  REMEASURE_CATCH_UP_CLOSED_PATCH,
+  REMEASURE_CATCH_UP_SECONDS,
+  REMEASURE_TIMEOUT_SECONDS,
+  sameParkIdentity,
+} from './task-budget-remeasure.ts';
 import {
   Abandoned,
   AutoEscape,
@@ -130,6 +149,19 @@ export class TaskRuntime {
   private closeHold: ClosedIssueHoldToken | null = null;
   private verifiedMerged: MergedTaskReceipt | null = null;
   private settlingMerged = false;
+  /** 此刻停着的体量停点（#3249）；park() 起止之间才有，离开就清。 */
+  private budgetPark: LineBudgetParkState | null = null;
+  private budgetRemeasuring = false;
+  /** 最近一次可信重评放行的记录（只此一条）：只绑定它那一次停点和那一份交付，consumed 后不再唤醒任何东西。 */
+  private budgetResume: {
+    identity: LineBudgetParkIdentity;
+    head: string;
+    base: string;
+    receipt: LineBudgetRemeasureReceipt;
+    consumed: boolean;
+  } | null = null;
+  /** 刚结束的那次 park 是不是被人点「继续」唤醒的（人点的优先，保留原授权语义）。 */
+  private parkWokeByContinue = false;
   finishingMerged = false;
   /**
    * 正在跑的长活动的取消钩子。冷验收和等 CI 并行（决定 0093）时同时有好几个（和 CI 同时起的那次验收没被认时让它自己跑完，
@@ -497,9 +529,21 @@ export class TaskRuntime {
         this.settlingMerged = false;
       }
     });
+    setHandler(taskRemeasureLineBudgetUpdate, (command) => this.remeasureLineBudget(command));
     setHandler(taskStatusQuery, () => ({
       ...this.status,
       waiting: this.status.waiting ? { ...this.status.waiting } : null,
+      lineBudgetPark: {
+        version: 1,
+        identity: this.running.size === 0 && !this.budgetRemeasuring ? this.parkIdentity() : null,
+        resumed: this.budgetResume
+          ? {
+              identity: { ...this.budgetResume.identity },
+              head: this.budgetResume.head,
+              base: this.budgetResume.base,
+            }
+          : null,
+      },
       closedIssueClose: { version: 1, token: this.closeToken() },
       mergedTaskClose: {
         version: 1,
@@ -1171,6 +1215,7 @@ export class TaskRuntime {
     detail: string,
     level: 'stuck' | 'decision' = 'stuck',
     kind: ParkKind = 'other',
+    budget?: LineBudgetParkInput,
   ): Promise<void> {
     this.guard();
     this.parks += 1;
@@ -1180,6 +1225,26 @@ export class TaskRuntime {
     this.status.lastProblem = title;
     this.status.phase = 'parked';
     this.enterCloseHold('parked');
+    // 体量停点（#3249）：只记身份，不改命令序；旧历史里停下的重放到这里也有身份，重评走得到。
+    this.budgetPark = budget
+      ? {
+          worktreePath: budget.worktreePath,
+          identity: {
+            version: 1,
+            runId: workflowInfo().runId,
+            parks: this.parks,
+            generation: this.closeHoldGeneration,
+            continued: this.continued,
+            prNumber: this.prNumber,
+            head: budget.head,
+            rawAddedLines: budget.rawAddedLines,
+            chargeableAddedLines: budget.chargeableAddedLines,
+            budget: budget.budget,
+            base: budget.base,
+          },
+        }
+      : null;
+    this.parkWokeByContinue = false;
     this.status.doing = `停下等人：${title}`;
     await this.mirror('stalled');
     try {
@@ -1203,7 +1268,8 @@ export class TaskRuntime {
               this.continued > before ||
               this.abandon !== null ||
               this.verifiedMerged !== null ||
-              this.pushHandback?.state === 'ready',
+              this.pushHandback?.state === 'ready' ||
+              this.budgetResumePending(),
           );
           // 放弃或已核实合并时不再为还停在 ready 的合同交还去读预检。那次读取不取消，
           // 活动没结束测试服务端不跳时间，外面等 result() 会一直坐到用例自己的时限。
@@ -1238,6 +1304,8 @@ export class TaskRuntime {
         throw new PermissionPushHandback(handback.request.feedback, handback.request.version === 2);
       }
     } finally {
+      this.parkWokeByContinue = this.continued > before;
+      this.budgetPark = null;
       this.leavePark();
     }
     this.guard();
@@ -1245,6 +1313,191 @@ export class TaskRuntime {
     this.status.phase = previous;
     this.status.lastProblem = null;
     await this.mirror('running');
+  }
+
+  // ---- 体量关口重评（#3249）
+
+  /** 当前这次体量停点的身份；不在体量停点、继续/放弃/换代后、已放行待消费，都回 null。 */
+  private parkIdentity(): LineBudgetParkIdentity | null {
+    const park = this.budgetPark;
+    const token = this.closeToken();
+    if (!park || !token || token.kind !== 'parked') return null;
+    const id = park.identity;
+    if (
+      token.runId !== id.runId ||
+      token.generation !== id.generation ||
+      token.continued !== id.continued ||
+      this.parks !== id.parks ||
+      this.budgetResumePending()
+    )
+      return null;
+    return { ...id };
+  }
+
+  /** 有一份只绑定当前这次停点的放行等着被 park() 消费。 */
+  private budgetResumePending(): boolean {
+    const resume = this.budgetResume;
+    const park = this.budgetPark;
+    return !!resume && !resume.consumed && !!park && resume.identity.parks === park.identity.parks;
+  }
+
+  /**
+   * park() 回来之后问：这次是不是可信重评放行的（人点「继续」优先，那时走原来的授权语义）。
+   * 只认这一次停点编号；用掉就标记，旧测量不能再唤醒别的成果。
+   */
+  takeLineBudgetResume(parks: number): boolean {
+    const resume = this.budgetResume;
+    if (!resume || resume.consumed || resume.identity.parks !== parks) return false;
+    resume.consumed = true;
+    return !this.parkWokeByContinue;
+  }
+
+  /** 同一 resume 请求已经有匹配回执：同身份、同头、同 base。不看别的停点。 */
+  private sameResume(command: RemeasureLineBudgetCommand): LineBudgetRemeasureReceipt | null {
+    const done = this.budgetResume;
+    if (
+      command.mode !== 'resume' ||
+      !done ||
+      !sameParkIdentity(done.identity, command.identity) ||
+      done.head !== command.head ||
+      done.base !== command.base
+    )
+      return null;
+    return done.receipt;
+  }
+
+  /**
+   * 这次请求的停点已经回不来：放弃、已核实合并，或停点次数、关单代数已经超过请求里的。
+   * 继续次数也一样：超过请求身份后，原停点不可能再恢复；若在进等待之前就返回，condition 根本没挂上，放弃唤不醒。
+   * 重放还没赶上时这些计数只会更小或相等，这里不用不等号拒绝，冷工人接手同一停点仍要等它出现。
+   */
+  private catchupClosed(identity: LineBudgetParkIdentity): boolean {
+    return (
+      this.abandon !== null ||
+      this.verifiedMerged !== null ||
+      this.continued > identity.continued ||
+      this.parks > identity.parks ||
+      this.closeHoldGeneration > identity.generation
+    );
+  }
+
+  private async remeasureLineBudget(command: RemeasureLineBudgetCommand): Promise<RemeasureLineBudgetResult> {
+    const refuse = (reason: LineBudgetRefusal, detail: string): RemeasureLineBudgetResult => ({
+      outcome: 'refused',
+      reason,
+      detail,
+    });
+    // 第一次问标记就在这里（不在停下处）：旧历史里停下的单换新代码后，这里仍是新历史才有的分支。
+    if (!patched(LINE_BUDGET_REMEASURE_PATCH)) return refuse('unsupported', '这条工作流不支持体量关口重评');
+    const bad = commandShapeProblem(command);
+    if (bad) return refuse('identity', bad);
+    const info = workflowInfo();
+    if (
+      command.repo.owner !== this.input.repo.owner ||
+      command.repo.name !== this.input.repo.name ||
+      command.taskId !== this.input.taskId ||
+      command.workflowId !== info.workflowId ||
+      command.identity.runId !== info.runId
+    )
+      return refuse('identity', 'repo / task / workflow / run 与这条工作流对不上');
+    // 同一已放行请求重发（只认执行）：回绑定原停点、原头、原 base 的回执，不再测、不放行别的头
+    const resumed = this.sameResume(command);
+    if (resumed) return { outcome: 'already_resumed', receipt: resumed };
+    // 新起的工人从整段历史重放接手时，Update 可能先于同一批里主流程走回停点（报警结果还没回填、waiting 还没设）。
+    // 停点还看不见、而这请求的身份仍可能出现，就短等主流程追上（有缓存的工人上停点直接可见，不等、不起定时器）。
+    // 放弃、已核实合并，或停点/关单代数已经超过这次请求：身份回不来，不再等（#3297）。
+    // 继续次数尚未赶上时不能提前拒绝；等待开始后再增加的继续次数会叫醒（严格大于进等待时的次数）。
+    // 不等进 running，放弃靠条件里的事实唤醒，不靠 cancelAll。等的期间同一请求已经有回执，也从这里醒，醒了下面再核一次。
+    const earlyExit = patched(REMEASURE_CATCH_UP_CLOSED_PATCH);
+    if (this.parkIdentity() === null && !(earlyExit && this.catchupClosed(command.identity))) {
+      if (earlyExit) {
+        const continuedAtWait = this.continued;
+        await condition(
+          () =>
+            this.parkIdentity() !== null ||
+            this.sameResume(command) !== null ||
+            this.catchupClosed(command.identity) ||
+            this.continued > continuedAtWait,
+          `${REMEASURE_CATCH_UP_SECONDS} seconds`,
+        );
+      } else {
+        await condition(() => this.parkIdentity() !== null, `${REMEASURE_CATCH_UP_SECONDS} seconds`);
+      }
+    }
+    if (earlyExit) {
+      const again = this.sameResume(command);
+      if (again) return { outcome: 'already_resumed', receipt: again };
+    }
+    const park = this.budgetPark;
+    const current = this.parkIdentity();
+    if (!park || !current || !sameParkIdentity(current, command.identity) || command.head !== current.head)
+      return refuse('stale', '不在这次体量停点（旧停点、已继续、已放行、换代、放弃或已结束）');
+    // 只认停下时原始新增行实际按的那个 base：同 raw 的旧祖先会换掉测量范围（变更构成不同），一律拒。
+    // 老版本停下的没记这个 base，证明不了原测量范围：明确拒绝，不拿现在的主线或请求者给的值顶替。
+    if (current.base === null)
+      return refuse(
+        'unsupported',
+        '这次停点没有记下停下时的测量 base（重评能力之前停下的），证明不了原测量范围；要放行请用原来的「继续」',
+      );
+    if (command.base !== current.base)
+      return refuse('changed', `base 不是停下时测量的固定 base ${current.base}`);
+    if (this.budgetRemeasuring || this.running.size > 0) return refuse('busy', '已有重评或活动在跑');
+
+    this.budgetRemeasuring = true;
+    let read: DeliveryRead | null = null;
+    let failure: string | null = null;
+    let timedOut = false;
+    const scope = new CancellationScope({ cancellable: true });
+    const cancel = () => scope.cancel();
+    this.running.add(cancel);
+    const timer = new CancellationScope({ cancellable: true });
+    void timer
+      .run(() => sleep(REMEASURE_TIMEOUT_SECONDS * 1000))
+      .then(
+        () => {
+          timedOut = true;
+          scope.cancel();
+        },
+        () => undefined,
+      );
+    try {
+      read = await scope.run(() =>
+        this.acts.readDelivery({
+          schemaVersion: 1,
+          taskId: this.input.taskId,
+          repo: this.input.repo,
+          worktreePath: park.worktreePath,
+          baseSha: this.since,
+          budgetRemeasure: {
+            head: command.head,
+            base: command.base,
+            rawAddedLines: command.identity.rawAddedLines,
+          },
+        }),
+      );
+    } catch (error) {
+      failure = timedOut ? '超时' : isCancellation(error) ? '被取消（放弃或停下）' : String(error);
+    } finally {
+      timer.cancel();
+      this.running.delete(cancel);
+      this.budgetRemeasuring = false;
+    }
+    if (failure !== null || read === null) return refuse('unknown', `重评没做成，保留原停点：${failure}`);
+    // 测量期间继续、放弃、再次停下（换代）：旧测量不能唤醒任何东西。
+    const after = this.parkIdentity();
+    if (!after || !sameParkIdentity(after, command.identity))
+      return refuse('stale', '测量期间停点已变（继续、放弃或换代），旧测量作废');
+    const judged = judgeRemeasure(command, read);
+    if (!judged.ok) return refuse(judged.reason, judged.detail);
+    if (command.mode === 'check') return { outcome: 'eligible', receipt: judged.receipt };
+    this.budgetResume = {
+      identity: command.identity,
+      head: command.head,
+      base: command.base,
+      receipt: judged.receipt,
+      consumed: false,
+    };
+    return { outcome: 'resumed', receipt: judged.receipt };
   }
 
   /**
