@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import {
@@ -32,6 +31,7 @@ import {
   recordAdmissionAlert,
   transferOneAdmissionAlert,
 } from '../src/real/admission-alert-spool.ts';
+import { runChild } from './child.ts';
 
 let root: string, path: string;
 const observation = (): AdmissionAlertObservation => ({
@@ -151,17 +151,13 @@ describe('专用SQLite持久pending', () => {
     writeFileSync(dbPath, flipped);
     chmodSync(dbPath, 0o600);
     // utimes 的秒级 double 对不齐 mtimeMs，代次会因此失效，盖住这条同元数据改写。
-    const restored = spawnSync(
-      'python3',
-      [
-        '-c',
-        'import os,sys; os.utime(sys.argv[1], ns=(int(sys.argv[2]), int(sys.argv[3])))',
-        dbPath,
-        beforeNs.atimeNs.toString(),
-        beforeNs.mtimeNs.toString(),
-      ],
-      { encoding: 'utf8' },
-    );
+    const restored = runChild('python3', [
+      '-c',
+      'import os,sys; os.utime(sys.argv[1], ns=(int(sys.argv[2]), int(sys.argv[3])))',
+      dbPath,
+      beforeNs.atimeNs.toString(),
+      beforeNs.mtimeNs.toString(),
+    ]);
     expect(restored.status).toBe(0);
     const afterStat = statSync(dbPath);
     expect(afterStat.ino).toBe(beforeStat.ino);
