@@ -16,7 +16,7 @@
 //   会话还没建起来就断了（--resume 报找不到会话）→ 下一次用原会话号重新起。
 // - 看护进程自己没了（关机、被杀）：state.json 不是终态、beatAt 超过 BEAT_STALE_MS 没动。再跑一次 pnpm work run <单号>：
 //   waiting 只复核，不 --resume 写码；还在跑的才接着同一个会话续。尝试次数接着数，租约心跳重新跑起来。
-//   续跑和第一次派工都先在运行目录里原子占住 supervisor-start（mkdir，跨进程只有一个能建成）。占位上的进程还活着就不再起第二个看护，
+//   续跑和第一次派工都先在运行目录里原子占住 supervisor-start（建下一代 gen-<n>，同一编号跨进程只有一个能建成，见 claimRunLock 上面的说明）。占位上的进程还活着就不再起第二个看护，
 //   也不手写 state/result、不杀已有进程；进程已经没了的占位才由下一次接手。看护进程自己再占 worker-slot，两个看护也不会各起一个工人。
 // - 审查等待要接着改：pnpm work rework <单号>。按原 run、session 和 GitHub 上当前未解决退回代次核验后，才用 --resume 起原会话；
 //   同一代次同时只起一个工人。外部交付和已停不走这条。rework.json 只是这次请求，pnpm work run 不因为它去写码。
@@ -28,13 +28,11 @@
 // state.json（现在怎样）、result.json（终态才有）、attempt-<n>.out.json / attempt-<n>.err.log（每次的输出）、reported（叫醒过了，钩子写）。
 // work-watch.mjs 按同样的文件名和字段读（那边是纯 node，引不了这里；两边的测试各自钉着同一份形状）。
 import {
-  type Dirent,
   existsSync,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
-  rmdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -914,7 +912,17 @@ export function renderRuns(rows: RunRow[], now: Date): string[] {
   });
 }
 
-/** 恢复入口的跨进程占位。目录名本身就是锁：mkdir 只有一个进程能建成。 */
+/**
+ * 恢复入口和工人名额的跨进程占位。锁目录只是容器，归属看里面编号最大的代次目录 gen-<n>：
+ * - 占位：读出最大的一代，判它没人占（已放开，或 owner 进程和它登记的工人都没了），只接它的下一代——
+ *   先在容器里把 generation.json、owner.json 写进临时目录，再整个改名成 gen-<n+1>。改名撞上已经在的非空目录必失败，
+ *   同一个编号只有一个人建得成；建成那一刻 owner 已经在里面，没有「目录有了、owner 还没发布」的窗口。
+ * - 建成后再列一次：已经有比自己大的一代，说明有人接替得更早，自己这一代作废，只删自己的。
+ * - 代次只增不减：放开只在自己那一代里写 released.json，不删目录；赢家只清比自己小的代次（它们不可能还占着）。
+ *   编号不回收，凭旧判断慢一步的恢复者要么撞上已经在的编号，要么建出比现任小的一代，复核时认输。
+ * 不靠时间先后，也不另设回收闸：判死的那一代就是被接替的那一代，接替只是新建下一代，不挪、不删、不覆盖任何活着的代次。
+ * owner.json 之后还会被交接、登记工人改写，所以先后只看编号，不看目录时间。
+ */
 export const SUPERVISOR_START_LOCK = 'supervisor-start';
 /** 看护进程里的工人名额。两个看护进程同时进来，只有占到的那个起工人。 */
 export const WORKER_SLOT_LOCK = 'worker-slot';
@@ -927,14 +935,18 @@ interface RunLockOwner {
   workerPid?: number;
 }
 
-interface RunLockGeneration {
-  pid: number;
-  token: string;
-  claimedAt: string;
+interface LockGeneration {
+  n: number;
+  path: string;
 }
 
-const LOCK_GENERATION_FILE = 'generation.json';
-const LOCK_CANDIDATES_DIR = 'candidates';
+const GENERATION_DIR = /^gen-(\d{1,15})$/;
+const GENERATION_FILE = 'generation.json';
+const OWNER_FILE = 'owner.json';
+const RELEASED_FILE = 'released.json';
+const TMP_PREFIX = '.tmp-';
+/** 改名成某一代没成：编号已经被别人建了（Windows 上是 EPERM/EACCES），或临时目录、容器不在了。都当没占上。 */
+const LOST_PUBLISH = new Set(['EEXIST', 'ENOTEMPTY', 'EPERM', 'EACCES', 'EBUSY', 'ENOENT']);
 
 let lockSeq = 0;
 
@@ -943,7 +955,12 @@ function lockPath(dir: string, name: string): string {
 }
 
 function parseLockOwner(path: string): RunLockOwner | null {
-  const v = readJson<Partial<RunLockOwner>>(path);
+  let v: Partial<RunLockOwner> | null;
+  try {
+    v = readJson<Partial<RunLockOwner>>(path);
+  } catch {
+    return null;
+  }
   if (!v || typeof v.token !== 'string' || v.token === '') return null;
   if (typeof v.pid !== 'number' || !Number.isSafeInteger(v.pid) || v.pid < 1) return null;
   if (typeof v.claimedAt !== 'string') return null;
@@ -960,85 +977,23 @@ function parseLockOwner(path: string): RunLockOwner | null {
   };
 }
 
-interface LockCandidate {
-  path: string;
-  token: string;
-  generation: RunLockGeneration | null;
-  owner: RunLockOwner | null;
-  createdAt: number;
-}
-
-function candidatePath(lock: string, token: string): string {
-  return join(lock, LOCK_CANDIDATES_DIR, token);
-}
-
-function readCandidateGeneration(path: string): RunLockGeneration | null {
-  const v = readJson<Partial<RunLockGeneration>>(join(path, LOCK_GENERATION_FILE));
-  if (
-    !v ||
-    typeof v.token !== 'string' ||
-    v.token === '' ||
-    typeof v.pid !== 'number' ||
-    !Number.isSafeInteger(v.pid) ||
-    v.pid < 1 ||
-    typeof v.claimedAt !== 'string'
-  )
-    return null;
-  return { pid: v.pid, token: v.token, claimedAt: v.claimedAt };
-}
-
-function readCandidates(lock: string): LockCandidate[] {
-  let entries: Dirent[];
+function listNames(path: string): string[] {
   try {
-    entries = readdirSync(join(lock, LOCK_CANDIDATES_DIR), { withFileTypes: true });
-  } catch {
-    return [];
+    return readdirSync(path);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw e;
   }
-  return entries
-    .filter((entry) => entry.isDirectory() && entry.name !== '' && !entry.name.includes('/'))
-    .map((entry) => {
-      const path = join(lock, LOCK_CANDIDATES_DIR, entry.name);
-      let createdAt = Number.POSITIVE_INFINITY;
-      try {
-        createdAt = statSync(path).ctimeMs;
-      } catch {
-        // 无法确认创建时间的候选不能抢在已知候选前面。
-      }
-      return {
-        path,
-        token: entry.name,
-        generation: readCandidateGeneration(path),
-        owner: parseLockOwner(join(path, 'owner.json')),
-        createdAt,
-      };
-    });
 }
 
-function ownerAlive(owner: RunLockOwner | null): boolean {
-  return !!owner && (pidAlive(owner.pid) || (owner.workerPid !== undefined && pidAlive(owner.workerPid)));
-}
-
-function candidateFresh(candidate: LockCandidate, now: Date): boolean {
-  return !Number.isFinite(candidate.createdAt) || now.getTime() - candidate.createdAt <= BEAT_STALE_MS;
-}
-
-function candidateCompare(a: LockCandidate, b: LockCandidate): number {
-  return a.createdAt - b.createdAt || a.token.localeCompare(b.token);
-}
-
-function candidateActive(candidate: LockCandidate, now: Date): boolean {
-  if (candidate.owner) return ownerAlive(candidate.owner);
-  return candidateFresh(candidate, now);
-}
-
-function readLockOwner(dir: string, name: string): RunLockOwner | null {
-  const lock = lockPath(dir, name);
-  const root = parseLockOwner(join(lock, 'owner.json'));
-  if (ownerAlive(root)) return root;
-  const candidate = readCandidates(lock)
-    .filter((item) => ownerAlive(item.owner))
-    .sort(candidateCompare)[0];
-  return candidate?.owner ?? root;
+/** 容器里的各代，编号从大到小 */
+function generations(lock: string): LockGeneration[] {
+  const out: LockGeneration[] = [];
+  for (const name of listNames(lock)) {
+    const m = GENERATION_DIR.exec(name);
+    if (m) out.push({ n: Number(m[1]), path: join(lock, name) });
+  }
+  return out.sort((a, b) => b.n - a.n);
 }
 
 /** 进程还在不在。EPERM 当还在（没有权限发信号不代表没这个进程）；只有 ESRCH 是真没了。 */
@@ -1052,146 +1007,154 @@ function pidAlive(pid: number): boolean {
   }
 }
 
-function lockOccupied(dir: string, name: string, now: Date): boolean {
-  const lock = lockPath(dir, name);
-  if (!existsSync(lock)) return false;
-  const root = parseLockOwner(join(lock, 'owner.json'));
-  if (root) {
-    if (ownerAlive(root)) return true;
-    return readCandidates(lock).some((item) => candidateActive(item, now));
-  }
-  const candidates = readCandidates(lock);
-  if (candidates.length > 0) return candidates.some((item) => candidateActive(item, now));
+function ownerAlive(owner: RunLockOwner | null): boolean {
+  return !!owner && (pidAlive(owner.pid) || (owner.workerPid !== undefined && pidAlive(owner.workerPid)));
+}
+
+function fresh(path: string, now: Date): boolean {
   try {
-    return now.getTime() - statSync(lock).mtimeMs <= BEAT_STALE_MS;
+    return now.getTime() - statSync(path).mtimeMs <= BEAT_STALE_MS;
   } catch {
+    // 看不到就当有人刚动过，不并发起
     return true;
   }
 }
 
+/** 这一代还占不占着：放开了不占；owner 认得出看进程和工人；认不出（正常不会有）按目录新不新鲜保守地算。 */
+function generationHeld(g: LockGeneration, now: Date): boolean {
+  if (existsSync(join(g.path, RELEASED_FILE))) return false;
+  const owner = parseLockOwner(join(g.path, OWNER_FILE));
+  return owner ? ownerAlive(owner) : fresh(g.path, now);
+}
+
+/** 旧版本的占位（容器根上的 owner.json、candidates/*）还活着就当占着：升级时不和还在跑的旧看护抢。 */
+function legacyHeld(lock: string): boolean {
+  if (ownerAlive(parseLockOwner(join(lock, OWNER_FILE)))) return true;
+  return listNames(join(lock, 'candidates')).some((n) =>
+    ownerAlive(parseLockOwner(join(lock, 'candidates', n, OWNER_FILE))),
+  );
+}
+
+interface LockView {
+  /** 判空闲时读到的最大一代；接替只接它的下一代 */
+  top: LockGeneration | null;
+  held: boolean;
+  /** 还没有任何一代、也认不出旧归属，容器又是新鲜的：有人刚建好容器正要发布 */
+  pending: boolean;
+}
+
+function inspectLock(lock: string, now: Date): LockView {
+  if (!existsSync(lock)) return { top: null, held: false, pending: false };
+  const top = generations(lock)[0] ?? null;
+  if (legacyHeld(lock)) return { top, held: true, pending: false };
+  if (top) return { top, held: generationHeld(top, now), pending: false };
+  if (parseLockOwner(join(lock, OWNER_FILE))) return { top, held: false, pending: false };
+  return { top, held: false, pending: fresh(lock, now) };
+}
+
+function removeQuietly(path: string): void {
+  try {
+    rmSync(path, { recursive: true, force: true });
+  } catch {
+    // 清不掉的残骸不影响判归属：只有最大的一代算数
+  }
+}
+
+/** 某个 token 现在拥有的那一代（没放开的）。 */
+function generationOf(lock: string, token: string): { g: LockGeneration; owner: RunLockOwner } | null {
+  for (const g of generations(lock)) {
+    const owner = parseLockOwner(join(g.path, OWNER_FILE));
+    if (owner?.token !== token) continue;
+    if (existsSync(join(g.path, RELEASED_FILE))) return null;
+    return { g, owner };
+  }
+  return null;
+}
+
+/** 现任：最大一代的 owner（放开了就没有）；还没有任何一代时是旧版本留下的 owner。 */
+function readLockOwner(dir: string, name: string): RunLockOwner | null {
+  const lock = lockPath(dir, name);
+  const top = generations(lock)[0];
+  if (!top) return parseLockOwner(join(lock, OWNER_FILE));
+  if (existsSync(join(top.path, RELEASED_FILE))) return null;
+  return parseLockOwner(join(top.path, OWNER_FILE));
+}
+
 /**
- * 占位还算不算数。进程还活着就占着，恢复不能再起一个工人。
- * 进程已经没了，或目录刚建上却没写上归属且已经过了失联窗口，才放手给下一次接手。
- * 认不出归属又还新鲜：当有人正在占，不并发起。
- * ownReclaimerToken 只给已经占住同一回收闸的回收者使用；它仍必须服从主锁
- * 的 owner/新鲜目录判据，不能把自己持有回收闸误当成主锁永远占用。
+ * 占位还算不算数。最大一代的进程或它登记的工人还活着就占着，恢复不能再起一个工人。
+ * 放开了、进程和工人都没了，才轮到下一次接手。还没有任何一代、又认不出归属的新鲜容器：当有人正在占，不并发起。
  */
-export function runLockHeld(dir: string, name: string, now: Date, ownReclaimerToken?: string): boolean {
-  const reclaimer = readLockOwner(dir, `${name}.reclaim`);
-  if (ownReclaimerToken !== undefined && reclaimer?.token === ownReclaimerToken)
-    return lockOccupied(dir, name, now);
-  if (lockOccupied(dir, `${name}.reclaim`, now)) return true;
-  return lockOccupied(dir, name, now);
-}
-
-function removeCandidate(lock: string, token: string): void {
-  const path = candidatePath(lock, token);
-  const generation = readCandidateGeneration(path);
-  if (generation?.token !== token) return;
-  rmSync(path, { recursive: true, force: true });
-}
-
-function cleanReleasedLock(lock: string): void {
-  try {
-    rmdirSync(join(lock, LOCK_CANDIDATES_DIR));
-  } catch {
-    // 新候选出现时目录非空，不能删除它。
-  }
-  try {
-    rmdirSync(lock);
-  } catch {
-    // owner/generation 或新候选仍在，保留主锁目录。
-  }
-}
-
-function ownerForToken(lock: string, token: string): RunLockOwner | null {
-  const root = parseLockOwner(join(lock, 'owner.json'));
-  if (root?.token === token) return root;
-  return readCandidates(lock).find((item) => item.owner?.token === token)?.owner ?? null;
-}
-
-function writeOwnerForToken(lock: string, owner: RunLockOwner): void {
-  const candidate = readCandidates(lock).find((item) => item.token === owner.token);
-  if (candidate) writeJson(join(candidate.path, 'owner.json'), owner);
-  const root = parseLockOwner(join(lock, 'owner.json'));
-  if (root?.token === owner.token) writeJson(join(lock, 'owner.json'), owner);
-}
-
-function peerLockName(name: string): string {
-  return name.endsWith('.reclaim') ? name.slice(0, -'.reclaim'.length) : `${name}.reclaim`;
+export function runLockHeld(dir: string, name: string, now: Date): boolean {
+  const view = inspectLock(lockPath(dir, name), now);
+  return view.held || view.pending;
 }
 
 export function claimRunLock(dir: string, name: string, pid: number, now: Date): string | null {
   if (!Number.isSafeInteger(pid) || pid < 1) throw new Error('占位进程号不对');
   mkdirSync(dir, { recursive: true });
   const lock = lockPath(dir, name);
-  if (lockOccupied(dir, peerLockName(name), now) || lockOccupied(dir, name, now)) return null;
+  let created = false;
   try {
     mkdirSync(lock);
+    created = true;
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
-    if (lockOccupied(dir, peerLockName(name), now) || lockOccupied(dir, name, now)) return null;
   }
-
+  // 判空闲和定编号用同一次读：判的是哪一代没人占，就只接它的下一代。
+  const view = inspectLock(lock, now);
+  if (view.held || (view.pending && !created)) return null;
+  const n = (view.top?.n ?? 0) + 1;
   lockSeq += 1;
   const token = `${pid}-${now.getTime()}-${lockSeq}`;
-  const generation: RunLockGeneration = { pid, token, claimedAt: now.toISOString() };
-  mkdirSync(join(lock, LOCK_CANDIDATES_DIR), { recursive: true });
-  const candidate = candidatePath(lock, token);
+  const generation = { pid, token, claimedAt: now.toISOString() };
+  const tmp = join(lock, `${TMP_PREFIX}${token}`);
+  const mine = join(lock, `gen-${n}`);
   try {
-    mkdirSync(candidate);
+    mkdirSync(tmp);
+    writeJson(join(tmp, GENERATION_FILE), generation);
+    writeJson(join(tmp, OWNER_FILE), generation);
+    renameSync(tmp, mine);
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === 'EEXIST') return null;
+    removeQuietly(tmp);
+    if (LOST_PUBLISH.has(String((e as NodeJS.ErrnoException).code))) return null;
     throw e;
   }
-  writeJson(join(candidate, LOCK_GENERATION_FILE), generation);
-  writeJson(join(candidate, 'owner.json'), generation);
-
-  if (lockOccupied(dir, peerLockName(name), now)) {
-    removeCandidate(lock, token);
-    cleanReleasedLock(lock);
+  // 建成之后再列一次：已经有更大的一代，这一代作废。只删自己这一代，别人的一律不碰。
+  if (generations(lock).some((g) => g.n > n) || legacyHeld(lock)) {
+    removeQuietly(mine);
     return null;
   }
-  const winner = readCandidates(lock)
-    .filter((item) => candidateActive(item, now))
-    .sort(candidateCompare)[0];
-  if (!winner || winner.token !== token) {
-    removeCandidate(lock, token);
-    cleanReleasedLock(lock);
-    return null;
+  for (const g of generations(lock)) if (g.n < n) removeQuietly(g.path);
+  for (const entry of listNames(lock)) {
+    if (!entry.startsWith(TMP_PREFIX)) continue;
+    const owner = Number(entry.slice(TMP_PREFIX.length).split('-')[0]);
+    if (Number.isSafeInteger(owner) && owner > 0 && !pidAlive(owner)) removeQuietly(join(lock, entry));
   }
-  writeJson(join(lock, LOCK_GENERATION_FILE), generation);
-  writeJson(join(lock, 'owner.json'), generation);
   return token;
 }
 
-/** 只放自己占上的那一把。token 对不上就留着，避免并发的失败方把赢的那把删掉。 */
+/** 只放自己占上的那一代：在里面写 released.json，目录和编号留着。token 对不上就不动，失败方放不掉赢家。 */
 export function releaseRunLock(dir: string, name: string, token: string): void {
-  const lock = lockPath(dir, name);
-  const owner = ownerForToken(lock, token);
-  if (!owner || owner.token !== token) return;
-  removeCandidate(lock, token);
-  const root = parseLockOwner(join(lock, 'owner.json'));
-  if (root?.token === token) rmSync(join(lock, 'owner.json'), { force: true });
-  const generation = readJson<Partial<RunLockGeneration>>(join(lock, LOCK_GENERATION_FILE));
-  if (generation?.token === token) rmSync(join(lock, LOCK_GENERATION_FILE), { force: true });
-  cleanReleasedLock(lock);
+  const hit = generationOf(lockPath(dir, name), token);
+  if (!hit) return;
+  writeJson(join(hit.g.path, RELEASED_FILE), { token, releasedAt: new Date().toISOString() });
 }
 
-/** 看护进程退出时放开入口交过来的占位。只认自己的进程号，不删别人刚占上的。 */
+/** 看护进程退出时放开入口交过来的占位。只认自己的进程号，不放别人刚占上的。 */
 export function releaseRunLockByPid(dir: string, name: string, pid: number): void {
   const owner = readLockOwner(dir, name);
   if (!owner || owner.pid !== pid) return;
   releaseRunLock(dir, name, owner.token);
 }
 
-/** 入口把占位从自己改到刚拉起的看护进程。token 不变，失败方的 finally 仍删不掉这把锁。 */
+/** 入口把占位从自己改到刚拉起的看护进程。只改自己那一代的 owner，token 不变，失败方的 finally 仍放不掉这把锁。 */
 export function handoffRunLock(dir: string, name: string, token: string, pid: number, now: Date): boolean {
-  const owner = ownerForToken(lockPath(dir, name), token);
-  if (!owner || owner.token !== token) return false;
   if (!Number.isSafeInteger(pid) || pid < 1) return false;
-  writeOwnerForToken(lockPath(dir, name), { pid, token, claimedAt: now.toISOString() });
-  return readLockOwner(dir, name)?.pid === pid;
+  const hit = generationOf(lockPath(dir, name), token);
+  if (!hit) return false;
+  writeJson(join(hit.g.path, OWNER_FILE), { pid, token, claimedAt: now.toISOString() });
+  const saved = readLockOwner(dir, name);
+  return saved?.token === token && saved.pid === pid;
 }
 
 /** 给 worker-slot 追加/清除真实工人 PID；看护 PID 仍保留，二者任一活着都占住名额。 */
@@ -1201,14 +1164,13 @@ export function setRunLockWorker(
   token: string,
   workerPid: number | null,
 ): boolean {
-  const lock = lockPath(dir, name);
-  const owner = ownerForToken(lock, token);
-  if (!owner || owner.token !== token) return false;
   if (workerPid !== null && (!Number.isSafeInteger(workerPid) || workerPid < 1)) return false;
-  writeOwnerForToken(lock, {
-    pid: owner.pid,
-    token: owner.token,
-    claimedAt: owner.claimedAt,
+  const hit = generationOf(lockPath(dir, name), token);
+  if (!hit) return false;
+  writeJson(join(hit.g.path, OWNER_FILE), {
+    pid: hit.owner.pid,
+    token: hit.owner.token,
+    claimedAt: hit.owner.claimedAt,
     ...(workerPid === null ? {} : { workerPid }),
   });
   const saved = readLockOwner(dir, name);

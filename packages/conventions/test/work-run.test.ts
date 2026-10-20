@@ -1139,14 +1139,40 @@ describe('恢复入口的原子占位', () => {
     expect(w.spawned).toHaveLength(1);
   });
 
-  it('锁发布会留下同一代身份，失败方不能靠无身份清理换代后的主锁', () => {
+  it('每次占位发布一个只增不减的代次，放开只做标记，下一代才清旧代', () => {
     const dir = join(temp(), 'generation');
     mkdirSync(dir, { recursive: true });
+    const lock = join(dir, SUPERVISOR_START_LOCK);
+    const first = claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date());
+    expect(first).toBeTruthy();
+    expect(readJson<{ token: string }>(join(lock, 'gen-1', 'generation.json'))?.token).toBe(first);
+    expect(readJson<{ token: string }>(join(lock, 'gen-1', 'owner.json'))?.token).toBe(first);
+    if (!first) return;
+    releaseRunLock(dir, SUPERVISOR_START_LOCK, first);
+    expect(existsSync(join(lock, 'gen-1', 'released.json'))).toBe(true);
+    expect(runLockHeld(dir, SUPERVISOR_START_LOCK, new Date())).toBe(false);
+    const second = claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date());
+    expect(second).toBeTruthy();
+    expect(readJson<{ token: string }>(join(lock, 'gen-2', 'owner.json'))?.token).toBe(second);
+    expect(existsSync(join(lock, 'gen-1'))).toBe(false);
+    // 旧 token 放不掉新一代
+    releaseRunLock(dir, SUPERVISOR_START_LOCK, first);
+    expect(runLockHeld(dir, SUPERVISOR_START_LOCK, new Date())).toBe(true);
+    if (second) releaseRunLock(dir, SUPERVISOR_START_LOCK, second);
+  });
+
+  it('owner 进程已死的一代可以接替，接替只建下一代', () => {
+    const dir = join(temp(), 'dead-generation');
+    mkdirSync(dir, { recursive: true });
+    const dead = claimRunLock(dir, SUPERVISOR_START_LOCK, deadPid(), new Date());
+    expect(dead).toBeTruthy();
+    expect(runLockHeld(dir, SUPERVISOR_START_LOCK, new Date())).toBe(false);
     const token = claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date());
     expect(token).toBeTruthy();
-    expect(readJson<{ token: string }>(join(dir, SUPERVISOR_START_LOCK, 'generation.json'))).toMatchObject({
+    expect(readJson<{ token: string }>(join(dir, SUPERVISOR_START_LOCK, 'gen-2', 'owner.json'))?.token).toBe(
       token,
-    });
+    );
+    expect(claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date())).toBeNull();
     if (token) releaseRunLock(dir, SUPERVISOR_START_LOCK, token);
   });
 
@@ -1155,29 +1181,23 @@ describe('恢复入口的原子占位', () => {
     lostRun(w);
     expect(await w.run('run', '42')).toBe(1);
     expect(w.err.join('\n')).toContain('看护进程没起成');
-    expect(existsSync(join(w.dir, SUPERVISOR_START_LOCK))).toBe(false);
+    expect(runLockHeld(w.dir, SUPERVISOR_START_LOCK, w.now)).toBe(false);
     const token = claimRunLock(w.dir, SUPERVISOR_START_LOCK, process.pid, w.now);
     expect(token).toBeTruthy();
     if (token) releaseRunLock(w.dir, SUPERVISOR_START_LOCK, token);
   });
 
-  it('旧 owner 已死但另一恢复者持有回收闸时，不会挪走旧锁', () => {
-    const dir = join(temp(), 'stale-race');
-    mkdirSync(dir, { recursive: true });
-    const stale = deadPid();
-    mkdirSync(join(dir, SUPERVISOR_START_LOCK));
-    writeJson(join(dir, SUPERVISOR_START_LOCK, 'owner.json'), {
-      pid: stale,
-      token: 'old-generation',
+  it('旧版本留下的活占位（根 owner 或候选）照样算占着，升级时不抢', () => {
+    const dir = join(temp(), 'legacy-live');
+    mkdirSync(join(dir, SUPERVISOR_START_LOCK, 'candidates', 'old'), { recursive: true });
+    writeJson(join(dir, SUPERVISOR_START_LOCK, 'candidates', 'old', 'owner.json'), {
+      pid: process.pid,
+      token: 'old-candidate',
       claimedAt: '2026-10-16T09:00:00.000Z',
     });
-    const reclaim = claimRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, process.pid, new Date());
-    expect(reclaim).toBeTruthy();
+    expect(runLockHeld(dir, SUPERVISOR_START_LOCK, new Date())).toBe(true);
     expect(claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date())).toBeNull();
-    expect(readJson<{ token: string }>(join(dir, SUPERVISOR_START_LOCK, 'owner.json'))?.token).toBe(
-      'old-generation',
-    );
-    if (reclaim) releaseRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, reclaim);
+    expect(existsSync(join(dir, SUPERVISOR_START_LOCK, 'gen-1'))).toBe(false);
   });
 
   it('主锁已新建但 owner 尚未发布时，另一恢复者拒绝回收或覆盖', () => {
@@ -1195,16 +1215,6 @@ describe('恢复入口的原子占位', () => {
     });
     expect(claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date())).toBeNull();
     expect(readJson<{ token: string }>(join(lock, 'owner.json'))?.token).toBe('published-by-a');
-  });
-
-  it('主锁暂时消失但回收闸仍在时，不创建并发布平行 owner', () => {
-    const dir = join(temp(), 'reclaim-publish');
-    mkdirSync(dir, { recursive: true });
-    const reclaim = claimRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, process.pid, new Date());
-    expect(reclaim).toBeTruthy();
-    expect(claimRunLock(dir, SUPERVISOR_START_LOCK, process.pid, new Date())).toBeNull();
-    expect(existsSync(join(dir, SUPERVISOR_START_LOCK))).toBe(false);
-    if (reclaim) releaseRunLock(dir, `${SUPERVISOR_START_LOCK}.reclaim`, reclaim);
   });
 
   it('看护已启动但占位交接失败时，不释放后来接手的占位', async () => {
