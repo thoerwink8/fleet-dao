@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // 顶栏状态胶囊（单 #1899）：用 StatusBadge 的 tone 色并带短状态字；窄于 1440 收进一个「状态」菜单。
-import { cleanup, fireEvent, render } from '@testing-library/react';
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/react';
 import { afterEach, expect, test, vi } from 'vitest';
 import { HealthStrip, healthItems, healthSummary } from './health-strip.tsx';
 import type { HomeHealth } from './types.ts';
@@ -79,4 +79,66 @@ test('手机：同样是带字的状态按钮，不小于 40 高', () => {
   const menu = document.querySelector('[data-health-menu]') as HTMLElement;
   expect(menu.textContent).toBe('状态 正常');
   expect(menu.className).toContain('min-h-10');
+});
+
+test('宽屏：字体晚到把三格撑过外框，收成状态按钮，不再摊开', async () => {
+  viewport(1600);
+  let content = 120;
+  const room = 400;
+  const listeners = new Set<(event: Event) => void>();
+  const fonts = {
+    ready: Promise.resolve(),
+    addEventListener(_type: string, cb: (event: Event) => void) {
+      listeners.add(cb);
+    },
+    removeEventListener(_type: string, cb: (event: Event) => void) {
+      listeners.delete(cb);
+    },
+    dispatchEvent(event: Event) {
+      for (const cb of listeners) cb(event);
+      return true;
+    },
+  };
+  const previousFonts = Object.getOwnPropertyDescriptor(document, 'fonts');
+  const clientWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+  const scrollWidth = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollWidth');
+  Object.defineProperty(document, 'fonts', { configurable: true, value: fonts });
+  Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+    configurable: true,
+    get() {
+      return this instanceof HTMLElement && this.hasAttribute('data-health-strip-box')
+        ? room
+        : clientWidth?.get
+          ? clientWidth.get.call(this)
+          : 0;
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
+    configurable: true,
+    get() {
+      return this instanceof HTMLElement &&
+        this.hasAttribute('data-health-strip') &&
+        !this.hasAttribute('data-health-menu')
+        ? content
+        : scrollWidth?.get
+          ? scrollWidth.get.call(this)
+          : 0;
+    },
+  });
+  try {
+    render(<HealthStrip health={BAD} />);
+    expect(document.querySelector('[data-health-menu]')).toBeNull();
+    expect(document.querySelectorAll('[data-health-chip]')).toHaveLength(3);
+    content = 800;
+    fonts.dispatchEvent(new Event('loadingdone'));
+    await waitFor(() => expect(document.querySelector('[data-health-menu]')).toBeTruthy());
+    expect(document.querySelectorAll('[data-health-chip]')).toHaveLength(0);
+  } finally {
+    if (previousFonts) Object.defineProperty(document, 'fonts', previousFonts);
+    else Reflect.deleteProperty(document, 'fonts');
+    if (clientWidth) Object.defineProperty(HTMLElement.prototype, 'clientWidth', clientWidth);
+    else Reflect.deleteProperty(HTMLElement.prototype, 'clientWidth');
+    if (scrollWidth) Object.defineProperty(HTMLElement.prototype, 'scrollWidth', scrollWidth);
+    else Reflect.deleteProperty(HTMLElement.prototype, 'scrollWidth');
+  }
 });
