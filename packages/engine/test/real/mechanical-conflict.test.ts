@@ -1,17 +1,19 @@
 // 并主线冲突里机械可解的（迁移生成文件、pnpm-lock.yaml）引擎自己解（#3428）：真 git、临时目录里的小仓，
 // 重新生成迁移、装锁文件、自测的命令换成夹具脚本（真的 drizzle-kit 在 schema-drift 里核）。
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { localExec } from '../../src/real/exec.ts';
 import {
+  GENERATED_CHECK_SCRIPT,
   MECHANICAL_CONFLICT_RULES,
   mechanicalKindOf,
   resolveMechanically,
 } from '../../src/real/mechanical-conflict.ts';
 import { headOf, type UserTree } from '../../src/real/user-git.ts';
-import { runChildOk } from '../child.ts';
+import { runChild, runChildOk } from '../child.ts';
 
 let root: string;
 beforeEach(() => {
@@ -58,6 +60,17 @@ function write(dir: string, rel: string, text: string): void {
 function scripts() {
   const tools = join(root, 'tools');
   mkdirSync(tools, { recursive: true });
+  writeFileSync(
+    join(tools, 'generated.mjs'),
+    [
+      "import { readFileSync } from 'node:fs';",
+      'for (const arg of process.argv.slice(2)) {',
+      "  const tag = arg.split(':')[1];",
+      "  if (/UPDATE|INSERT/.test(readFileSync(`migrations/${tag}.sql`, 'utf8'))) console.log(`MISMATCH ${tag}`);",
+      '}',
+      "console.log('CHECKED');",
+    ].join('\n'),
+  );
   const regen = join(tools, 'regen.mjs').replaceAll('\\', '/');
   const check = join(tools, 'check.mjs').replaceAll('\\', '/');
   writeFileSync(
@@ -90,6 +103,8 @@ function scripts() {
     lockfile: "echo 'lock: regenerated' > pnpm-lock.yaml",
     drift: `node ${check}`,
     tsc: 'true',
+    // 夹具里没有 drizzle-kit：认「生成后手加了 UPDATE/INSERT」的当不一致（真的字节比对在下面单独核）
+    generatedCheck: `node ${join(tools, 'generated.mjs').replaceAll('\\', '/')}`,
   };
 }
 
@@ -104,7 +119,13 @@ interface Fixture {
  * 想要的变化：branchLock 分支也改锁文件；branchOther 分支改了名单外的 other.ts（主线也改）；custom 分支的迁移是手写的。
  */
 function fixture(
-  opts: { branchLock?: boolean; branchOther?: boolean; custom?: boolean; noMigrations?: boolean } = {},
+  opts: {
+    branchLock?: boolean;
+    branchOther?: boolean;
+    custom?: boolean;
+    edited?: boolean;
+    noMigrations?: boolean;
+  } = {},
 ): Fixture {
   const dir = join(root, 'tree');
   mkdirSync(dir, { recursive: true });
@@ -121,7 +142,13 @@ function fixture(
   git(dir, 'commit', '-q', '-m', 'base');
   git(dir, 'checkout', '-q', '-b', 'task');
   if (!opts.noMigrations) {
-    write(dir, `${M}/0001_branch.sql`, opts.custom ? 'CREATE TRIGGER x;\n' : 'CREATE TABLE b (id int);\n');
+    write(
+      dir,
+      `${M}/0001_branch.sql`,
+      opts.custom
+        ? 'CREATE TRIGGER x;\n'
+        : `CREATE TABLE b (id int);\n${opts.edited ? '--> statement-breakpoint\nUPDATE b SET id = 1;\n' : ''}`,
+    );
     write(dir, `${M}/meta/0001_snapshot.json`, snapshot('s1b', 's0', opts.custom ? ['a'] : ['a', 'b']));
     write(dir, JOURNAL, journalOf(['0000_init', '0001_branch']));
   }
@@ -303,6 +330,44 @@ describe('机械解并主线冲突', { timeout: 60_000 }, () => {
     expect(push).not.toHaveBeenCalled();
   });
 
+  it('生成后手加了 UPDATE/INSERT 的迁移：不机械解，树一点不动，意见写明是哪个文件、为什么', async () => {
+    const f = fixture({ edited: true });
+    const push = vi.fn(async (_t: UserTree, merged: string) => merged);
+    const got = await resolveMechanically(f.t, {
+      head: f.head,
+      defaultBranch: 'main',
+      conflictFiles: [JOURNAL, `${M}/meta/0001_snapshot.json`],
+      push,
+      commands: scripts(),
+      shellPath: null,
+    });
+    expect(got).toMatchObject({ state: 'declined' });
+    if (got.state === 'declined') {
+      expect(got.reason).toContain('0001_branch.sql');
+      expect(got.reason).toContain('逐字节');
+      expect(got.reason).toContain('手改');
+      expect(got.inTree).toBeUndefined();
+    }
+    expect(await headOf(f.t)).toBe(f.head);
+    expect(git(f.t.dir, 'status', '--porcelain')).toBe('');
+    expect(() => git(f.t.dir, 'rev-parse', '-q', '--verify', 'MERGE_HEAD')).toThrow();
+    expect(push).not.toHaveBeenCalled();
+  });
+
+  it('核对本身没跑成：不当成纯生成，不自己解', async () => {
+    const f = fixture();
+    const got = await resolveMechanically(f.t, {
+      head: f.head,
+      defaultBranch: 'main',
+      conflictFiles: [JOURNAL],
+      push: async (_t, merged) => merged,
+      commands: { ...scripts(), generatedCheck: "echo '核对脚本坏了'; exit 3 #" },
+      shellPath: null,
+    });
+    expect(got).toMatchObject({ state: 'declined', reason: expect.stringContaining('没能核对') });
+    expect(await headOf(f.t)).toBe(f.head);
+  });
+
   it('冲突文件一个都不在名单里：什么都不动，不留原因', async () => {
     const f = fixture();
     const got = await resolveMechanically(f.t, {
@@ -343,5 +408,38 @@ describe('机械解并主线冲突', { timeout: 60_000 }, () => {
       shellPath: null,
     });
     expect(got).toMatchObject({ state: 'declined', reason: expect.stringContaining('不是 PR 的头') });
+  });
+});
+
+// 真的 drizzle-kit：对仓里已提交的迁移重新生成，逐字节一致；手加一行 UPDATE 就不一致
+describe('生成核对脚本（真 drizzle-kit）', { timeout: 120_000 }, () => {
+  const dbDir = fileURLToPath(new URL('../../../db', import.meta.url));
+  const journal = JSON.parse(readFileSync(join(dbDir, 'migrations/meta/_journal.json'), 'utf8')) as {
+    entries: { idx: number; tag: string }[];
+  };
+  const last = journal.entries.at(-1);
+  const before = journal.entries.at(-2);
+  if (!last || !before) throw new Error('仓里的迁移记录不够');
+  const arg = `${last.idx}:${last.tag}:${before.idx}`;
+  const run = (migDir: string) =>
+    runChild(process.execPath, ['--input-type=module', '-', arg], {
+      cwd: dbDir,
+      input: GENERATED_CHECK_SCRIPT,
+      env: { ...process.env, MIG_DIR: migDir },
+    });
+
+  it('已提交的最新迁移是 drizzle-kit 生成的：逐字节一致', () => {
+    const r = run(join(dbDir, 'migrations'));
+    expect(r.stdout).toContain('CHECKED');
+    expect(r.stdout).not.toContain('MISMATCH');
+  });
+
+  it('手加一行 UPDATE：判不一致', () => {
+    const copy = join(root, 'migrations-copy');
+    cpSync(join(dbDir, 'migrations'), copy, { recursive: true });
+    const file = join(copy, `${last.tag}.sql`);
+    writeFileSync(file, `${readFileSync(file, 'utf8')}--> statement-breakpoint\nUPDATE tasks SET id = id;\n`);
+    const r = run(copy);
+    expect(r.stdout).toContain(`MISMATCH ${last.tag}`);
   });
 });
