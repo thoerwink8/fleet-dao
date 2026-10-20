@@ -455,7 +455,8 @@ export interface AcceptanceDuty {
   prNumber: number;
   head: string;
   items: string[];
-  source: 'cold_verify' | 'coordination';
+  /** 初建来源：management_merge 是管理归并建出的待验目标（#3207），照原样读，不说成冷验收转的。 */
+  source: 'cold_verify' | 'coordination' | 'management_merge';
   mergeCommit: string | null;
 }
 

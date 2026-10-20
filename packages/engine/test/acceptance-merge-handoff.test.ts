@@ -152,16 +152,18 @@ describe('归并目标由引擎原有入口接续（#3207）', () => {
     const target = await merge(s, [a, b], null, REQ1);
     expect(target).toMatchObject({ source: 'management_merge', generation: 1, head: FINAL, settledAt: null });
 
-    // 引擎读：目标连同合并回执、并集验收项都在待验里
+    // 引擎读：目标连同合并回执、并集验收项都在待验里，来源照原样是管理归并、不说成冷验收转的
     const open = await openAcceptanceDuties(t.db, s.taskId);
     expect(open.find((d) => d.head === FINAL)).toMatchObject({
       prNumber: PR,
       items: ['历史要求', '检查'],
       mergeCommit: MERGE,
+      source: 'management_merge',
     });
+    expect(open.filter((d) => d.head !== FINAL).map((d) => d.source)).toEqual(['cold_verify', 'cold_verify']);
 
-    // 引擎重放同头同项：幂等，不换代
-    await recordAcceptanceDuties(
+    // 引擎重放同头同项：幂等，不换代，读回的来源仍是管理归并
+    const replayed = await recordAcceptanceDuties(
       t.db,
       {
         taskId: s.taskId,
@@ -171,6 +173,7 @@ describe('归并目标由引擎原有入口接续（#3207）', () => {
       },
       NOW,
     );
+    expect(replayed.find((d) => d.head === FINAL)?.source).toBe('management_merge');
     expect((await rows()).find((r) => r.head === FINAL)).toMatchObject({
       generation: 1,
       source: 'management_merge',

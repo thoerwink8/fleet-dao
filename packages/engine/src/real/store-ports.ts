@@ -1141,14 +1141,18 @@ const dutyUnchecked = (what: string, error: unknown): PortError =>
 
 type DutyRow = typeof acceptanceDuties.$inferSelect;
 
+const DUTY_SOURCES: readonly string[] = ['cold_verify', 'coordination', 'management_merge'];
+
 function dutyOf(row: DutyRow): AcceptanceDuty {
+  // 库约束只放这三种；认不出的照抛（调用方记没查成），不猜成冷验收
+  if (!DUTY_SOURCES.includes(row.source)) throw new Error(`验收责任 ${row.id} 的来源「${row.source}」认不出`);
   return {
     repo: row.repo,
     issueNumber: row.issueNumber,
     prNumber: row.prNumber,
     head: row.head,
     items: [...row.items],
-    source: row.source === 'coordination' ? 'coordination' : 'cold_verify',
+    source: row.source as AcceptanceDuty['source'],
     mergeCommit: row.mergeCommit,
   };
 }
