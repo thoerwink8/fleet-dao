@@ -122,6 +122,29 @@ describe('PR 正文模板', () => {
     expect(plain).not.toContain('Refs');
   });
 
+  it('会话声明只交了一部分（#3406）：「需求」栏同样 Refs 标分片；和验收责任并写一行；欠项进「还欠什么」不写「无」', () => {
+    const partial = renderPrBody({
+      requirement: 12,
+      partial: true,
+      did: ['a'],
+      verified: ['b'],
+      owed: ['会话声明还欠：两项超时未定因'],
+    });
+    expect(partial).toContain('**需求**：Refs #12（分片、关不了它：会话声明只交了一部分）');
+    expect(partial).toContain('- 会话声明还欠：两项超时未定因');
+    expect(partial).not.toContain('**还欠什么**：无');
+    const both = renderPrBody({
+      requirement: 12,
+      requirementRefs: true,
+      partial: true,
+      did: ['a'],
+      verified: ['b'],
+    });
+    expect(both).toContain('**需求**：Refs #12（分片、关不了它：验收责任待人验；会话声明只交了一部分）');
+    expect(both.split('\n').filter((l) => l.includes('Refs'))).toHaveLength(1);
+    expect(hasCloseKeywords(both)).toBe(false);
+  });
+
   it('条目里的关单词也中和', () => {
     expect(renderPrBody({ did: ['fixes #3'], verified: ['ok'] })).toContain('- 关联 #3');
   });
