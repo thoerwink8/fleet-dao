@@ -45,9 +45,6 @@ export const PARK_TRIAGE_BATCH = 5;
 export const PARK_TRIAGE_MAX_SESSIONS = 2;
 /** 会话最长几分钟。 */
 export const PARK_TRIAGE_SESSION_MINUTES = 20;
-/** 查「这一次停下处理过没有」往回看几天的操作记录。 */
-export const PARK_TRIAGE_HANDLED_DAYS = 30;
-
 export const PARK_TRIAGE_JOB = {
   id: 'park-triage',
   name: '停下的单交指挥官会话看',
@@ -621,7 +618,9 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
       .catch((e: unknown) => deps.log('error', '指挥官：没配模型的警报没推出去', { error: errMessage(e) }));
     return result;
   }
-  const audits = await deps.audits(new Date(now.getTime() - PARK_TRIAGE_HANDLED_DAYS * 24 * 3_600_000));
+  // 认领记录不能只看最近几天：一个停点可以挂很久，过了窗口再认领就违反「每次停下最多处理一次」。
+  // 每日上限仍只按下面的 24 小时窗口计算；这里读的是 commander 自己的审计记录，不把历史操作混进来。
+  const audits = await deps.audits(new Date(0));
   const handled = new Set<string>();
   let claimsToday = 0;
   for (const a of audits) {

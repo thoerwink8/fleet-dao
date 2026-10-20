@@ -153,4 +153,11 @@ describe('零件', () => {
       'npx vitest run packages/a',
     ]);
   });
+
+  it('commandsIn：反引号外也认常见命令，包括 git', () => {
+    expect(commandsIn('git status 失败\nnode scripts/check.mjs 失败')).toEqual([
+      'git status 失败',
+      'node scripts/check.mjs 失败',
+    ]);
+  });
 });

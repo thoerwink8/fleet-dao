@@ -95,7 +95,10 @@ export function commandsIn(text: string): string[] {
   }
   for (const line of text.split('\n')) {
     const cmd = line.replace(/^[\s>$-]+/, '').trim();
-    if (/^(pnpm|npx|npm|yarn|vitest|tsc|make|cargo|pytest)\b/.test(cmd) && cmd.length <= 160)
+    if (
+      /^(pnpm|npx|npm|yarn|vitest|tsc|git|make|cargo|go|pytest|node|bash|sh)\b/.test(cmd) &&
+      cmd.length <= 160
+    )
       found.add(cmd.replace(/\s+/g, ' '));
   }
   return [...found];

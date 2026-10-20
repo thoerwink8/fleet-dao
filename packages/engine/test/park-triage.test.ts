@@ -183,6 +183,19 @@ describe('护栏', () => {
     expect((await triageParkedTasks(next.deps)).candidates).toBe(1);
   });
 
+  it('停点挂过 30 天也不重复认领：去重看完整的指挥官认领记录', async () => {
+    const oldClaim = {
+      at: new Date(NOW.getTime() - 31 * 24 * 3_600_000),
+      action: COMMANDER_AUDIT_CLAIM,
+      after: { workflowId: WF, parkSeq: 2 },
+    };
+    const r = rig({ audits: [oldClaim] });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.candidates).toBe(0);
+    expect(out.claimed).toBe(0);
+    expect(r.sessions).toHaveLength(0);
+  });
+
   it('会话没跑成也算处理过：提醒写明交人、不再来第二次', async () => {
     const r = rig({ answer: { ok: false, why: '会话超时' } });
     const out = await triageParkedTasks(r.deps);
