@@ -352,6 +352,19 @@ describe('裁决：引擎白名单核过才执行', () => {
     expect(one.notices[0]?.body).toContain('2~5');
   });
 
+  it('体量超预算·成果已在主线（#3207）：带主线提交号的停掉放行，只放弃这一代、不开子单；没带提交号不执行', async () => {
+    const ok = rig({ snap: snap('size'), answer: verdict('stop', { mergedIn: '378af18f' }) });
+    expect((await triageParkedTasks(ok.deps)).acted).toHaveLength(1);
+    expect(ok.opened).toHaveLength(0);
+    expect(ok.abandoned).toHaveLength(1);
+    expect(ok.abandoned[0]).toContain('成果已在主线（378af18f）');
+    expect(ok.notices[0]?.body).toContain('成果已在主线 378af18f');
+    const bare = rig({ snap: snap('size'), answer: verdict('stop') });
+    expect((await triageParkedTasks(bare.deps)).acted).toEqual([]);
+    expect(bare.abandoned).toHaveLength(0);
+    expect(bare.notices[0]?.body).toContain('mergedIn');
+  });
+
   it('改标准、没权限这类人闸：继续、重做、拆单、停掉都不执行，只写诊断建议；留给人放行', async () => {
     for (const kind of ['standard', 'other'] as const) {
       for (const action of ['continue', 'redo', 'split', 'stop']) {

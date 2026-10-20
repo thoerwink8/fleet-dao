@@ -49,8 +49,8 @@ describe('白名单：每类停法放行哪些', () => {
     expect(allowedOf(park('rounds', true))).toEqual(['redo', 'leave']);
   });
 
-  it('体量超预算：只许拆单和留给人', () => {
-    expect(allowedOf(park('size'))).toEqual(['split', 'leave']);
+  it('体量超预算：拆单、停掉（成果已在主线，checkVerdict 再核 mergedIn）、留给人', () => {
+    expect(allowedOf(park('size'))).toEqual(['split', 'stop', 'leave']);
   });
 
   it('认不出按临时的办、自动合并没挂上：继续、重做、留给人', () => {
@@ -75,8 +75,8 @@ describe('白名单：每类停法放行哪些', () => {
     expect(allowedOf(park('quota'), null)).toEqual(['leave']);
   });
 
-  it('停掉只有额度超预算判成空转才放行', () => {
-    for (const kind of ['rounds', 'size', 'transient', 'unarmed', 'standard', 'other'] as ParkKind[])
+  it('停掉只有额度超预算判成空转、体量超预算才放行', () => {
+    for (const kind of ['rounds', 'transient', 'unarmed', 'standard', 'other'] as ParkKind[])
       expect(allowedOf(park(kind), PROGRESSING)).not.toContain('stop');
     expect(allowedOf(park('quota'), PROGRESSING)).not.toContain('stop');
   });
@@ -123,6 +123,20 @@ describe('checkVerdict：核一条裁决', () => {
     for (const n of [undefined, 0, 1, 6]) {
       const got = checkVerdict(park('size'), null, { action: 'split', subtaskCount: n });
       expect(got.ok, String(n)).toBe(false);
+    }
+  });
+
+  it('体量超预算的停掉（#3207 成果已分片合进主线）：带主线提交号才放行，没带、样子不对拒绝', () => {
+    expect(
+      checkVerdict(park('size'), null, { action: 'stop', mergedIn: '378af18f04b6e82c8a99ad8cb1f850edb0c34269' }),
+    ).toEqual({ ok: true, action: 'stop', widenBudget: false });
+    expect(checkVerdict(park('size'), null, { action: 'stop', mergedIn: '378af18' })).toMatchObject({
+      ok: true,
+    });
+    for (const mergedIn of [undefined, '', '#3358', '378af1', 'main', '378AF18F']) {
+      const got = checkVerdict(park('size'), null, { action: 'stop', mergedIn });
+      expect(got.ok, String(mergedIn)).toBe(false);
+      if (!got.ok) expect(got.why).toContain('mergedIn');
     }
   });
 

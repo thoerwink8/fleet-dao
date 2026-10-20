@@ -177,6 +177,7 @@ const Verdict = z.object({
   action: Text(40),
   reason: Text(1200),
   subtasks: z.array(z.unknown()).max(10).optional(),
+  mergedIn: z.unknown().optional(),
 });
 
 export interface ParsedVerdict {
@@ -185,6 +186,8 @@ export interface ParsedVerdict {
   action: string;
   reason: string;
   subtasks: Subtask[];
+  /** 体量停点判停掉时，主线上已带着这份成果的提交号（会话原话，checkVerdict 核样子）。 */
+  mergedIn?: string;
   /** 拆单里格式不对的子单数。 */
   badSubtasks: number;
 }
@@ -219,6 +222,7 @@ export function parseCommanderAnswer(
       return;
     }
     const subs = (parsed.data.subtasks ?? []).map((s) => Subtask.safeParse(s));
+    const mergedIn = parsed.data.mergedIn;
     verdicts.push({
       issue: parsed.data.issue,
       parkSeq: parsed.data.parkSeq,
@@ -226,6 +230,7 @@ export function parseCommanderAnswer(
       reason: parsed.data.reason,
       subtasks: subs.flatMap((s) => (s.success ? [s.data] : [])),
       badSubtasks: subs.filter((s) => !s.success).length,
+      ...(typeof mergedIn === 'string' ? { mergedIn: mergedIn.trim().slice(0, 80) } : {}),
     });
   });
   const summary = typeof obj.summary === 'string' ? obj.summary.trim().slice(0, 600) : '';
@@ -285,9 +290,10 @@ export function renderParkTriagePrompt(input: {
     '- continue：继续（接着做）。',
     '- redo：重做（叫停这一代、换路由或换模型另起一代；新一代自己重新选路）。',
     '- split：拆单（体量太大或反复空转时拆成 2~5 张互相独立的子单，每张写 title、scene、done；原单随后收尾）。',
-    '- stop：停掉并报原因（只有额度超预算且引擎判成空转时才放行）。',
+    '- stop：停掉并报原因（额度超预算且引擎判成空转时；或体量超预算而这份成果已经由别的提交合进主线时，要带 mergedIn：主线上带着这份成果的提交号）。',
     '- leave：留给人（改标准、没权限等人闸，或你拿不准）：只把诊断建议写给人，任务不动。',
     '额度超预算不是看花了多少钱，而是看有没有空转：回合有新提交、失败原因在变就是有进展，可以继续；同一个原因连着失败、没有新提交、命令反复失败就是空转，不许原样继续。',
+    '体量超预算先在主线里查（git log、读代码）这份成果是不是已经由别的 PR 合进去了（比如分片各自合了）：合了就 stop 并带 mergedIn，别再拆单把已合的活开一遍；没合才拆单。',
     '',
     '要处理的单：',
     '',
@@ -296,7 +302,8 @@ export function renderParkTriagePrompt(input: {
     '最后只回一段 ```json 围栏，里面是一个对象，每张单最多一条裁决，别的话不用写：',
     '```json',
     '{"summary":"一句话总结","verdicts":[{"issue":123,"parkSeq":1,"action":"continue","reason":"为什么这么判（给人看的诊断）"},' +
-      '{"issue":124,"parkSeq":2,"action":"split","reason":"…","subtasks":[{"title":"…","scene":"…","done":["…"]}]}]}',
+      '{"issue":124,"parkSeq":2,"action":"split","reason":"…","subtasks":[{"title":"…","scene":"…","done":["…"]}]},' +
+      '{"issue":125,"parkSeq":1,"action":"stop","reason":"…","mergedIn":"主线提交号"}]}',
     '```',
   ].join('\n');
 }
@@ -341,6 +348,7 @@ async function perform(
   const check = checkVerdict(parkFactsOf(item), item.spin, {
     action: verdict.action,
     subtaskCount: verdict.subtasks.length + verdict.badSubtasks,
+    mergedIn: verdict.mergedIn,
   });
   if (!check.ok) {
     return {
@@ -451,16 +459,20 @@ async function perform(
         ]),
       };
     }
-    // stop
+    // stop：额度空转，或体量停点的成果已在主线（checkVerdict 已要求带 mergedIn）
+    const merged = item.park.kind === 'size' ? verdict.mergedIn : undefined;
     const sent = await deps.abandonTask(
       item.workflowId,
-      `指挥官判空转，停掉：${verdict.reason}`.slice(0, 500),
+      (merged
+        ? `指挥官判成果已在主线（${merged}），停掉：${verdict.reason}`
+        : `指挥官判空转，停掉：${verdict.reason}`
+      ).slice(0, 500),
     );
     if (sent === 'gone') return await failed('工作流已经没了，没发出放弃');
     return {
       acted: action,
       text: diagnosisText(item, model, verdict, [
-        '已执行：停掉这一代（工作树存档后删，PR 和单子不动，由人处理）。',
+        `已执行：停掉这一代${merged ? `（成果已在主线 ${merged}，请人对照后决定是否关单）` : ''}（工作树存档后删，PR 和单子不动，由人处理）。`,
       ]),
     };
   } catch (err) {
