@@ -11,10 +11,17 @@ import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import type { TaskRun, TaskWorkflowInput } from '../src/task-contract.ts';
 import {
+  answerForPrDid,
+  DELIVERY_ITEM_MAX,
+  DELIVERY_OWED_MAX,
+  deliveryClaimForPrBody,
+  deliveryClaimPrFields,
   PR_DID_ANSWER_LINES,
   PR_DID_ANSWER_MAX,
+  parseDeliveryClaim,
   sessionDidLines,
   shotsPrLines,
+  stripDeliveryClaim,
   taskPrDid,
 } from '../src/workflows/task-support.ts';
 import { freshRepo, useEnv, withWorker } from './helpers.ts';
@@ -121,6 +128,285 @@ describe('开 PR、第 2 轮更新 PR 说明（#2723）', { timeout: 60_000 }, (
     expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
     expect(world.count('updatePrBody')).toBeGreaterThan(0);
     expect(world.alerts).toEqual([]);
+  });
+});
+
+const claimBlock = (json: string) => `\n\`\`\`fleet-delivery\n${json}\n\`\`\`\n`;
+const SLICE_ANSWER = `验收条 1：只做了诊断，Refs #3396，关不了它\n欠：原两项超时未定因${claimBlock(
+  '{"scope":"slice","owed":["原两项超时未定因（见 #3396）","@someone 看一下 <!-- x -->","GH-88 和 https://github.com/acme/widgets/issues/99"]}',
+)}`;
+const FULL_ANSWER = `验收条 1：做到了\n欠：无${claimBlock('{"scope":"full","owed":[]}')}`;
+
+describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了不写「无」', { timeout: 60_000 }, () => {
+  it('完整交付：full 且 owed 为空，不加任何东西', () => {
+    expect(parseDeliveryClaim(FULL_ANSWER)).toEqual({ kind: 'full' });
+    expect(deliveryClaimPrFields({ kind: 'full' })).toEqual({});
+  });
+
+  it('旧结果没有启用交付协议：明确未知，不把缺元数据当成完整交付', () => {
+    const claim = deliveryClaimForPrBody(FULL_ANSWER, false);
+    expect(claim).toEqual({ kind: 'unknown', why: '旧结果没有可核验的交付声明元数据' });
+    expect(deliveryClaimPrFields(claim)).toEqual({
+      risks: ['交付范围未核（旧结果没有可核验的交付声明元数据）：还欠什么不知道，不当成无'],
+    });
+    const body = renderPrBody({
+      requirement: 12,
+      did: ['x'],
+      verified: ['y'],
+      ...deliveryClaimPrFields(claim),
+    });
+    expect(body).toContain('交付范围未核');
+    expect(body).not.toContain('**还欠什么**：无');
+  });
+
+  it('诊断分片仍欠事项：标分片，欠项原样进 owed；回复里别的单号、@、HTML 注释都中和', () => {
+    const claim = parseDeliveryClaim(SLICE_ANSWER);
+    expect(claim).toEqual({
+      kind: 'slice',
+      owed: [
+        '原两项超时未定因（见 ＃3396）',
+        '@​someone 看一下 <!‑‑ x ‑‑>',
+        'GH‑88 和 https:\u200b//github.com/acme/widgets/issues/99',
+      ],
+    });
+    const fields = deliveryClaimPrFields(claim);
+    expect(fields.partial).toBe(true);
+    const body = renderPrBody({ requirement: 12, did: ['x'], verified: ['y'], ...fields });
+    expect(body).toContain('**需求**：Refs #12（分片、关不了它：会话声明只交了一部分）');
+    expect(body).toContain('- 会话声明还欠：原两项超时未定因（见 ＃3396）');
+    expect(body).not.toContain('**还欠什么**：无');
+    expect(body).not.toMatch(/#3396/);
+    expect(body).not.toContain('<!--');
+    expect(body).not.toContain('GH-88');
+    expect(body).not.toContain('https://github.com/acme/widgets/issues/99');
+  });
+
+  it('【故意造出的失败】无元数据旧回复、截断、非法、多个块、自相矛盾、字段越界：一律 unknown，渲染成未核，不是「无」', () => {
+    const cases: [string | null, RegExp][] = [
+      [null, /没有最后一条回复/],
+      ['验收条 1：做到了\n欠：无\nRefs #3396', /没有交付声明/],
+      ['做了\n```fleet-delivery\n{"scope":"full","ow', /没封口/],
+      [`做了${claimBlock('{"scope":"full",')}`, /不是合法 JSON/],
+      [`做了${claimBlock('["full"]')}`, /不是一个 JSON 对象/],
+      [
+        `做了${claimBlock('{"scope":"full","owed":[]}')}${claimBlock('{"scope":"full","owed":[]}')}`,
+        /不止一个/,
+      ],
+      [`做了${claimBlock('{"scope":"full","owed":["还差 e2e"]}')}`, /交全了却还列着欠项/],
+      [`做了${claimBlock('{"scope":"slice","owed":[]}')}`, /没列欠什么/],
+      [`做了${claimBlock('{"scope":"done","owed":[]}')}`, /scope 只能是/],
+      [`做了${claimBlock('{"scope":"full","owed":[],"closes":3396}')}`, /认不得的字段/],
+      [`${FULL_ANSWER}\n后来又改了：还欠 e2e`, /后面还有内容/],
+      [`${SLICE_ANSWER}\n补一句：其实都做完了`, /后面还有内容/],
+      [
+        `做了${claimBlock(JSON.stringify({ scope: 'slice', owed: ['x'.repeat(DELIVERY_ITEM_MAX + 1)] }))}`,
+        /owed/,
+      ],
+      [
+        `做了${claimBlock(JSON.stringify({ scope: 'slice', owed: Array(DELIVERY_OWED_MAX + 1).fill('x') }))}`,
+        /owed/,
+      ],
+    ];
+    for (const [answer, why] of cases) {
+      const claim = parseDeliveryClaim(answer);
+      expect(claim.kind, String(answer)).toBe('unknown');
+      if (claim.kind === 'unknown') expect(claim.why).toMatch(why);
+      const fields = deliveryClaimPrFields(claim);
+      expect(fields.partial).toBeUndefined();
+      const body = renderPrBody({ requirement: 12, did: ['x'], verified: ['y'], ...fields });
+      expect(body).toContain('交付范围未核');
+      expect(body).not.toContain('**还欠什么**：无');
+      expect(body).toContain('**需求**：#12');
+    }
+  });
+
+  it('声明块之后只有空白算收尾；块之后追加内容不接受', () => {
+    expect(parseDeliveryClaim(`${FULL_ANSWER}\n\n  \n`)).toEqual({ kind: 'full' });
+    expect(parseDeliveryClaim(`${FULL_ANSWER}x`).kind).toBe('unknown');
+  });
+
+  it('【故意造出的失败】只认回复顶层末尾的声明：示例、外层围栏、HTML 块、引用块、缩进、HTML 注释里的都是 unknown（review 5584630520、5585224386、5585850557）', () => {
+    const example = '```fleet-delivery\n{"scope":"full","owed":[]}\n```';
+    const cases: [string, RegExp][] = [
+      // 单个声明块后面接着写真实范围：不当完整交付
+      [`做了\n${example}\n实际交付：仅诊断分片，仍欠两项超时定因`, /后面还有内容/],
+      // 四反引号围栏里的协议示例
+      [`协议长这样：\n\`\`\`\`markdown\n${example}\n\`\`\`\``, /不在回复顶层/],
+      [`协议长这样：\n\`\`\`\`\n${example}\n\`\`\`\`\n欠：两项超时定因`, /不在回复顶层/],
+      // 外层围栏没收口（截断）：声明在它里面，不是顶层
+      [`做了\n~~~text\n${example}`, /不在回复顶层/],
+      [`做了\n\`\`\`\`\n${example}\n`, /不在回复顶层/],
+      [`做了\n> ${example.split('\n').join('\n> ')}`, /不在回复顶层/],
+      [`做了\n\n    ${example.split('\n').join('\n    ')}`, /不在回复顶层/],
+      [`做了\n  ${example.split('\n').join('\n  ')}`, /不在回复顶层/],
+      // 行首开的 <!-- 是 HTML 块，没收口到文末；段落中间开的由「没收口的 HTML 注释」兜住
+      [`做了\n<!-- 示例\n${example}`, /不在回复顶层/],
+      [`做了 <!-- 示例\n${example}`, /HTML 注释/],
+      // review 5585850557：没收口的 <pre>/<script>/<style>/<textarea> 原文块延伸到文末，里面的反引号行不是顶层声明
+      [`只交诊断，仍欠修复。以下仅是协议示例：\n<pre>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复。以下仅是协议示例：\n<script type="text/plain">\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复。以下仅是协议示例：\n<STYLE>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复。以下仅是协议示例：\n   <textarea>\n${example}`, /不在回复顶层/],
+      // 其它 HTML 块（<div>、单独一行的标签、<?、<!X、CDATA）：没空行收口时声明在块里
+      [`只交诊断，仍欠修复：\n<div>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<details open>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<my-example>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<?example\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<!EXAMPLE\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<![CDATA[\n${example}`, /不在回复顶层/],
+      // review 5585224386：末尾三反引号关的是外层 markdown 示例块，里面的 fleet-delivery 只是外层代码内容
+      [`实际只交诊断，仍欠修复。以下只是协议示例：\n\`\`\`markdown\n${example}`, /不在回复顶层/],
+      [
+        `\`\`\`\`text\n实际只交诊断，仍欠修复。以下只是协议示例：\n\`\`\`markdown\n${example}\n\`\`\`\``,
+        /不在回复顶层/,
+      ],
+      // 示例加末尾真声明：结构说不清，不挑一个信
+      [`示例：\n\`\`\`\`\n${example}\n\`\`\`\`\n做了\n${example}`, /不止一个/],
+      [`示例：\n> ${example.split('\n').join('\n> ')}\n\n做了\n${example}`, /不止一个/],
+    ];
+    for (const [answer, why] of cases) {
+      const claim = parseDeliveryClaim(answer);
+      expect(claim.kind, answer).toBe('unknown');
+      if (claim.kind === 'unknown') expect(claim.why, answer).toMatch(why);
+      const body = renderPrBody({
+        requirement: 12,
+        did: ['x'],
+        verified: ['y'],
+        ...deliveryClaimPrFields(claim),
+      });
+      expect(body).toContain('交付范围未核');
+      expect(body).not.toContain('**还欠什么**：无');
+    }
+  });
+
+  it('前面有收好口的别的代码块、换行是 CRLF：末尾的顶层声明照认', () => {
+    const answer = `做了\n\`\`\`ts\nconst a = 1;\n\`\`\`\n~~~\n\`\`\`\n~~~\n${claimBlock('{"scope":"full","owed":[]}')}`;
+    expect(parseDeliveryClaim(answer)).toEqual({ kind: 'full' });
+    expect(parseDeliveryClaim(SLICE_ANSWER.replace(/\n/g, '\r\n'))).toMatchObject({ kind: 'slice' });
+  });
+
+  it('前面的 HTML 块收好了口（<pre> 闭合、注释闭合、<div> 后空行、单行 <pre>x</pre>）：末尾的顶层声明照认（review 5585850557 的控制）', () => {
+    const full = claimBlock('{"scope":"full","owed":[]}');
+    const slice = claimBlock('{"scope":"slice","owed":["两项超时定因"]}');
+    const answers = [
+      `做了\n<pre>\n\`\`\`fleet\n示例\n\`\`\`\n</pre>${full}`,
+      `做了\n<script>\nlet a = 1;\n</SCRIPT>${full}`,
+      `做了\n<!-- 注释\n还是注释 -->${full}`,
+      `做了\n<div>\n内容\n\n${full.trimStart()}`,
+      `做了\n<pre>单行</pre>${full}`,
+      `做了\n<br>\n\n${full.trimStart()}`,
+      // 围栏里的 <pre> 是代码原文，不开 HTML 块
+      `做了\n\`\`\`html\n<pre>\n\`\`\`${full}`,
+    ];
+    for (const answer of answers) expect(parseDeliveryClaim(answer), answer).toEqual({ kind: 'full' });
+    expect(parseDeliveryClaim(`做了\n<div>\n\u00a0\n${full.trimStart()}`).kind).toBe('unknown');
+    expect(parseDeliveryClaim(`做了\n</pre>\n<pre>x</pre>${slice}`)).toEqual({
+      kind: 'slice',
+      owed: ['两项超时定因'],
+    });
+  });
+
+  it('回复里别的单的引用不进「做了什么」成链接：#号、owner/仓#号、GH-号、github 链接都中和，本单号留着', () => {
+    const raw = [
+      '验收条 1：做到了，Refs #3396，Closes #3401',
+      '见 acme/widgets#77、GH-88 和 https://github.com/acme/widgets/issues/99',
+      '@alice 看一下 <!-- 不要截断 -->',
+      '本单 #12 留着，#123 不是本单',
+    ].join('\n');
+    const did = answerForPrDid(raw, 12) ?? '';
+    expect(did).not.toMatch(/(?<![\w＃])#(3396|3401|77|123)\b/);
+    expect(did).not.toMatch(/GH-88/);
+    expect(did).not.toMatch(/https?:\/\/github\.com/);
+    expect(did).toContain('＃3396');
+    expect(did).toContain('acme/widgets＃77');
+    expect(did).toContain('@​alice');
+    expect(did).toContain('<!‑‑ 不要截断 ‑‑>');
+    expect(did).not.toContain('@alice');
+    expect(did).not.toContain('<!--');
+    expect(did).not.toContain('-->');
+    expect(did).toContain('本单 #12 留着');
+    const body = renderPrBody({ requirement: 12, did: taskPrDid(12, 1, 1, did), verified: ['y'] });
+    expect([...body.matchAll(/#(\d+)/g)].map((m) => m[1])).toEqual(['12', '12', '12']);
+    expect(answerForPrDid(null, 12)).toBeNull();
+  });
+
+  it('声明块不占「做了什么」的行；去掉后其余回复照旧', () => {
+    expect(stripDeliveryClaim(FULL_ANSWER)?.trim()).toBe('验收条 1：做到了\n欠：无');
+    expect(stripDeliveryClaim(null)).toBeNull();
+  });
+
+  it('开 PR：分片回复写 Refs 标分片和欠项；已有 PR 第 2 轮换成完整交付，分片和欠项跟着撤掉；需求始终只挂这张单', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL x' } : undefined,
+    });
+    const { tasks } = scripted({
+      segment: async (_i, n) => ({
+        ok: true,
+        runId: `run-${n}`,
+        answer: n === 1 ? SLICE_ANSWER : FULL_ANSWER,
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    const opened = world.callsOf('openPr')[0]?.input.body;
+    expect(opened).toMatchObject({ requirement: 12, partial: true });
+    expect(opened?.requirementRefs).toBeUndefined();
+    expect(opened?.owed).toEqual([
+      '会话声明还欠：原两项超时未定因（见 ＃3396）',
+      '会话声明还欠：@​someone 看一下 <!‑‑ x ‑‑>',
+      '会话声明还欠：GH‑88 和 https:\u200b//github.com/acme/widgets/issues/99',
+    ]);
+    expect(opened?.did.join('\n')).not.toContain('fleet-delivery');
+    expect(opened?.did.join('\n')).not.toMatch(/(?<!＃)#3396/);
+    expect(opened?.did.join('\n')).toContain('＃3396');
+    const openedText = renderPrBody(opened ?? { did: [], verified: [] });
+    expect(openedText).not.toContain('**还欠什么**：无');
+    expect(openedText).toContain('**需求**：Refs #12（分片、关不了它：会话声明只交了一部分）');
+    const updated = world.callsOf('updatePrBody')[0]?.input.body;
+    expect(updated).toMatchObject({ requirement: 12 });
+    expect(updated?.partial).toBeUndefined();
+    expect(updated?.owed).toBeUndefined();
+    expect(updated?.risks).toBeUndefined();
+    // 关单政策不变：没有验收责任照旧关
+    expect(world.count('closeIssue')).toBe(1);
+  });
+
+  it('已有 PR 更新：第 2 轮回复没有声明（老样子），已开 PR 的说明改成「交付范围未核」，不写「无」', async () => {
+    const world = createFakeWorld({
+      ci: (_i, n) =>
+        n === 1 ? { state: 'red', failedChecks: ['test (engine)'], digest: 'FAIL x' } : undefined,
+    });
+    const { tasks } = scripted({
+      segment: async (_i, n) => ({
+        ok: true,
+        runId: `run-${n}`,
+        answer: n === 1 ? FULL_ANSWER : '修了 CI\n欠：无\nRefs #3396',
+      }),
+    });
+    const run = await withWorker(
+      env,
+      world,
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged', rounds: 2 });
+    expect(world.callsOf('openPr')[0]?.input.body.risks).toBeUndefined();
+    const updated = world.callsOf('updatePrBody')[0]?.input.body;
+    expect(updated?.requirement).toBe(12);
+    expect(updated?.partial).toBeUndefined();
+    expect(updated?.risks?.[0]).toContain('交付范围未核');
+    expect(updated?.did.join('\n')).not.toMatch(/(?<!＃)#3396/);
+    const text = renderPrBody(updated ?? { did: [], verified: [] });
+    expect(text).not.toContain('**还欠什么**：无');
+    expect(text).toContain('**需求**：#12');
+    // 整篇 14 行以内（github 包的 PR_BODY_MAX_LINES）
+    expect(text.split('\n').length).toBeLessThanOrEqual(14);
   });
 });
 

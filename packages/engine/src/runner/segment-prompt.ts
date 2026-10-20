@@ -92,6 +92,13 @@ export const NO_BACKGROUND_RULE =
 /** 会话自己改不了 PR 正文：引擎把它最后一条回复写进 PR 说明的「做了什么」（#2723，workflows/task-support.ts 的 sessionDidLines）。 */
 export const ANSWER_TO_PR = '最后一条回复会写进 PR 的说明';
 
+/**
+ * 交付声明（#3406，workflows/task-support.ts 的 parseDeliveryClaim）：PR 说明的「还欠什么」和分片 Refs 只按这个块写，
+ * 回复里别的话、提到的别的单号都不算。新会话、续会话都写。
+ */
+export const DELIVERY_CLAIM_RULE =
+  '最后一条回复末尾附一个 ```fleet-delivery 代码块，里面只放一个 JSON：交全了写 {"scope":"full","owed":[]}；只交了一部分（诊断分片、还有没做的）写 {"scope":"slice","owed":["还欠的事，一条一件，最多 5 条、每条 200 字以内"]}。没有、写错、没封口，PR 说明一律写「交付范围未核」。';
+
 function clip(text: string): string {
   const t = text.trim();
   return t.length <= FEEDBACK_ITEM_MAX
@@ -138,6 +145,7 @@ export function renderResumePrompt(input: {
       : [
           NO_BACKGROUND_RULE,
           `改完照旧 git add、git commit 提交，不推送、不开 PR；${ANSWER_TO_PR}：逐条一行回验收条，再加一行欠什么。`,
+          DELIVERY_CLAIM_RULE,
         ]),
     ...(input.full && !input.plan ? FULL_FLOW_RESUME_LINES : []),
   ];
@@ -172,6 +180,7 @@ export function renderSegmentPrompt(input: SegmentPromptInput): string {
     `- 不要新建需求文档、结果文档：需求在单子里；${ANSWER_TO_PR}（引擎开 PR，你改不了 PR 正文），做成了什么、怎么验的写在那里。`,
     '- 家目录里装的通用技能（~/.agents/skills、~/.claude/skills 下的 SKILL.md）这次用不上，别去读：要做的、怎么算做完都在上面。',
     `- ${NO_BACKGROUND_RULE}`,
+    `- ${DELIVERY_CLAIM_RULE}`,
     '- 最后一条回复逐条一行回验收条，再加一行欠什么。',
   ];
   const interrupted = input.interrupted?.trim();

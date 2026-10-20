@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { ManualBriefSchema } from '../../src/runner/brief.ts';
 import {
+  DELIVERY_CLAIM_RULE,
   FEEDBACK_ITEM_MAX,
   FULL_FLOW_LINES,
   renderResumePrompt,
@@ -207,8 +208,18 @@ describe('全程的提示词（#2826）', () => {
   it('三段的提示词一字不变（新会话、续会话都按改之前的原文钉住）', () => {
     const fresh = render({ feedback: ['CI 红了：test (engine)'] });
     const resumed = renderSegmentPrompt({ brief, feedback: ['CI 红了：test (engine)'], resumed: true });
-    expect(sha(fresh)).toBe('a5f50d0399872249a2eaed64115fc40ce4a63343ba5bf39f6c4de4f8c47f8b45');
-    expect(sha(resumed)).toBe('6e555f4b8d6e661fea22a4579547fef28928323d433a7c665a0046fe7cdf3894');
+    // 交付声明那一行（#3406）是唯一的新增：各出现恰好一次，去掉它和原文一字不差
+    for (const [text, line] of [
+      [fresh, `- ${DELIVERY_CLAIM_RULE}\n`],
+      [resumed, `\n${DELIVERY_CLAIM_RULE}`],
+    ] as const)
+      expect(text.split(line)).toHaveLength(2);
+    expect(sha(fresh.replace(`- ${DELIVERY_CLAIM_RULE}\n`, ''))).toBe(
+      'a5f50d0399872249a2eaed64115fc40ce4a63343ba5bf39f6c4de4f8c47f8b45',
+    );
+    expect(sha(resumed.replace(`\n${DELIVERY_CLAIM_RULE}`, ''))).toBe(
+      '6e555f4b8d6e661fea22a4579547fef28928323d433a7c665a0046fe7cdf3894',
+    );
     for (const line of FULL_FLOW_LINES) expect(fresh).not.toContain(line);
     expect(render({ full: false, feedback: ['CI 红了：test (engine)'] })).toBe(fresh);
   });
