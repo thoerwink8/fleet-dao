@@ -68,6 +68,21 @@ function startPhases(
   };
 }
 
+/**
+ * 合同测试用可控时钟推阶段标记的定时器：只伪造 setTimeout/clearTimeout。
+ * 不到点不触发、到点才触发、stop 之后再推也不触发。不碰原来 10 个用例的等待。
+ */
+async function withPhaseClock(run: (advance: (ms: number) => Promise<void>) => Promise<void>) {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    await run(async (ms) => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
 /** 包一个测试体：抛错时输出标记再原样抛；不论如何收尾都停定时器。 */
 function traced(name: string, body: (mark: (label: string) => void) => Promise<void>): () => Promise<void> {
   return async () => {
@@ -336,32 +351,43 @@ describe('阶段标记的诊断合同（#3396）', () => {
   });
 
   test('正常收尾（stop）后不输出；输出口抛错不外冒', async () => {
-    const lines: string[] = [];
-    const ok = startPhases('ok', (l) => lines.push(l), 20);
-    ok.mark('a');
-    ok.stop();
-    const bad = startPhases(
-      'bad',
-      () => {
-        throw new Error('口坏了');
-      },
-      5,
-    );
-    await new Promise((r) => setTimeout(r, 60));
-    bad.stop();
-    expect(lines).toEqual([]);
-    expect(() => bad.dump('失败')).not.toThrow();
+    await withPhaseClock(async (advance) => {
+      const lines: string[] = [];
+      const ok = startPhases('ok', (l) => lines.push(l), 20);
+      ok.mark('a');
+      ok.stop();
+      await advance(20);
+      expect(lines).toEqual([]);
+      const bad = startPhases(
+        'bad',
+        () => {
+          throw new Error('口坏了');
+        },
+        5,
+      );
+      await advance(4);
+      expect(lines).toEqual([]);
+      await advance(1);
+      bad.stop();
+      expect(lines).toEqual([]);
+      expect(() => bad.dump('失败')).not.toThrow();
+    });
   });
 
   test('没收尾的在快超时时输出一次，写明停在哪一步', async () => {
-    const lines: string[] = [];
-    const ph = startPhases('slow', (l) => lines.push(l), 10);
-    ph.mark('等确认框');
-    await new Promise((r) => setTimeout(r, 60));
-    ph.stop();
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toContain('[阶段标记·快超时]');
-    expect(lines[0]).toContain('停在：等确认框');
+    await withPhaseClock(async (advance) => {
+      const lines: string[] = [];
+      const ph = startPhases('slow', (l) => lines.push(l), 10);
+      ph.mark('等确认框');
+      await advance(9);
+      expect(lines).toEqual([]);
+      await advance(1);
+      await advance(50);
+      ph.stop();
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toContain('[阶段标记·快超时]');
+      expect(lines[0]).toContain('停在：等确认框');
+    });
   });
 
   test('traced 把断言错误原样抛回去，诊断行只有阶段名', async () => {
