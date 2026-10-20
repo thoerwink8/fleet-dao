@@ -14,6 +14,7 @@ export const STAGE_NAMES: Readonly<Record<StageKind, string>> = {
   judge: '判断题',
   groom: '整理待办',
   'intake-chat': '提需求',
+  commander: '指挥官',
 };
 
 export const HOST_NAMES: Readonly<Record<HostId, string>> = {

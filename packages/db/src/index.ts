@@ -17,6 +17,7 @@ export * from './queries/channel-fallback.ts';
 export * from './queries/channel-models.ts';
 export * from './queries/checkout-receipts.ts';
 export * from './queries/cli-versions.ts';
+export * from './queries/commander.ts';
 export * from './queries/daily-brief.ts';
 export * from './queries/engine.ts';
 export * from './queries/engine-master.ts';

@@ -21,8 +21,9 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - `npx vitest run packages/engine/test/<文件>`。不要 Postgres（用到库的跑在 PGlite 上）。
 - 法国工具链 `/bin/sh` 和目录 chmod 权限测试在 Linux 跑真端口；Windows 用明示的命令/阶段错误夹具验证装配与失败分类，不代表引擎支持 Windows 生产宿主。Git 归档检出在两种系统都跑真实 git/tar，归档名相对私有 scratch，避免 GNU tar 把 Windows 盘符当远端。
-- Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；真服务端先用 `pnpm test:temporal --cli <绝对路径>` 登记已安装 CLI，或设 `FLEET_TEST_TEMPORAL_CLI`，版本须与 `deploy/france.sh` 一致。正规选测和创建入口都核路径/版本，不隐式下载；SDK 创建阶段只报 `start-or-connect`，内部细分状态未知。
+- Temporal 测试用 `@temporalio/testing` 的时间跳跃环境（`packages/engine/test/support.ts`）；真服务端先用 `pnpm temporal:install` 按 `deploy/france.sh` 固定版本准备本机 CLI，或用 `pnpm test:temporal --cli <绝对路径>` 登记已安装 CLI、设 `FLEET_TEST_TEMPORAL_CLI`，版本须一致。正规选测和创建入口都核路径/版本，不隐式下载；SDK 创建阶段只报 `start-or-connect`，内部细分状态未知。
 - 重放：`packages/engine/test/replay.test.ts` 拿 `test/replay/fixtures/task-*.json` 对现在的代码重放。录新场景用 `node packages/engine/test/replay/record.ts <场景>`，已有的夹具拒绝覆盖。
+- `push-handback-contract.test.ts` 仅对本文件全合成假端口历史启用失败取证：第一个 beforeEach 起算 50 秒的 watchdog 或原测试失败时，按真实 handle/run 和 SDK 三秒 RPC deadline 读原 protobuf（每份 2MiB）与白名单 describe（128KiB）。先落 `_tmp/synthetic-history`，再以 SHA256、gzip/base64 完整帧写日志；整文件最多 8MiB，超限/读失败/缺帧均未知，不能当成功历史。正常快速用例不额外读取；watchdog 不停 worker，原测试结束后才等实际 runUntil 收尾、按环境去重关闭，再 teardown。禁止扩大到真实端口或其它测试历史，不放宽原断言、60 秒测试超时、缓存或 SDK 阈值；这只是诊断分片，不结清 #3258 的重放兼容责任。
 
 ## 常见坑
 
@@ -52,6 +53,8 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 自测心跳带 probe / queue / test / tsc / done、阶段起点、最后输出时刻；看门狗在活动总限时内把自测无会话视为正常。超时、取消、异常退出保留已有输出并脱敏限长；已确认测试失败或真实 tsc 诊断仍为 fail/red，不能被中断或顶层兜底抹成跳过。无失败证据的普通超时交给 CI；测试未完成而 tsc 通过时，摘要必须写明测试没有结果。
 - 工作流对外的输入（`packages/engine/src/contract.ts`）加字段只许可选，不然在途任务的输入对不上。
 - 无 PR 的 `pushBranch/WORKFLOWS_PERMISSION` 首次自然停点只走 `taskHandbackPermissionPush` Update（`push-handback.ts`）；限定同 run、generation=1、continued=0。默认 CLI/check 只 query/读证据，不写 Temporal 历史；execute 才发 Update。旧 worker/cgroup、固定 scopes 和 helper 自然终态、持久 run/result、合同、树与用量由 Activity 现读；未知拒绝。原 park 交回控制权、主循环记完本轮且接纳返工后才签 `handed_back`，保留全部轮数和预算，不拿继续信号、accepted 或人工报告替代。
+
+- 合同修订原位交还用显式 v2 同时绑定 H0/H1；v1 不自动放宽。主路径在原 park 内最终核 H1，失败保原 hold；成功同步接纳完整 brief/tier 并撤旧批准，accepted 待收场状态按历史恢复。回执 acceptedContract 只证明快照，handed_back 才证明控制消费，不证明统计落库或外部正文永久不变。后续动手前必须有旧运行实际启用的合同修订边界，否则拒 v2；不直接在 Update 调 refresh，不把普通新 actor 加进自然退场历史白名单。
 
 - 自动关单收尾只走 `taskCloseClosedIssue` Update：同步核精确 run、当前停法代数和继续代数，只有 `accepted` 回执才能记成功、撤提醒。继续信号先使凭据失效，不能等公开 phase 改好。旧 worker 缺能力、Update RPC 超时或回执未知保留未核实，不能退回人类的无条件放弃信号。
 - 新 PR 创建前从需求单现读两轴（正文无需求号时认任务分支）；缺失、冲突或未知值拒开并明报，不猜分类。groom 新单显式提供 domain/nature，拆分单可逐轴继承来源单的唯一有效值，写前仍须齐全。驾驶舱会话在 modules 中独立声明两轴，后端开单前同样校验，正文移到独立查询分类节，不计入模块范围和派工规模。查询轴不参与派工、合并与版本判定；此处只保证创建的元数据齐全。报警立案贴 engine/bug，耗时表直开 PR 贴 engine/process，隔离集直开 PR 贴 engine/bug；直开 PR 贴后回读，失败不能当成功。

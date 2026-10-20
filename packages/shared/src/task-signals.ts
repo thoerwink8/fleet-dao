@@ -49,6 +49,11 @@ export interface ContinueCommand {
    * 晚到的不会把后来另一次停下解开。人点的「继续」不带。
    */
   parkSeq?: number;
+  /**
+   * 法国指挥官（#3294 第 2 片，engine:commander）判了这张单的额度超预算不是空转：继续的同时把额度预算多放宽一档。
+   * 只在正停着的这一次是额度停法、且带了 parkSeq 对得上时生效；别的停法、人点的「继续」不带它。
+   */
+  widenBudget?: boolean;
 }
 
 /** 「放弃」：工作流收尾退出（工作树存档后删，PR 和单子不动，由人处理）。reason 必填，工作流用它写状态。 */

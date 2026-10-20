@@ -6,8 +6,9 @@
 
 - `packages/conventions/src/bin/`：每个命令一个入口文件，逻辑在 `packages/conventions/src/` 同名模块里。仓根 `package.json` 的 `check`、`test:changed`、`pr:open`、`issue:new`、`issue:close`、`progress`、`plan`、`intents`、`debt:check`、`github:audit`、`branch:hygiene`、`ci:timings`、`ci:stats`、`flow:stats`、`subagent:stats` 都指到这里。
 - `pr-open` 的同步 GitHub 运输用 `pr-arm.ts` 的 `livePrGh`：复用 `github-api.ts` 的仓身份识别，显式传 canonical repo；创建 PR 明确已推送当前分支，避免 Git relay 改写 remote 后让 gh 猜错仓。
+- 新 PR 的需求行完成用 `Closes #号`，分片用 `Refs #号（分片、关不了它）`；手写正文中的裸 Refs 在任何推送或 GitHub 写入前拒绝。正文其它位置的保留说明不能代替同行意图，旧 PR 的收口和对账读法不变。
 - `check.ts`：`pnpm check` = biome 格式 + `tsc -b` + 改到的测试（`--all` 才全量）+ 卫生检查，四样跑完再判红。
-- `test:temporal`：登记/核验现有测试 CLI；版本复用 `deploy/france.sh`，登记只在本机 `~/.fleet-dao/test-tools/`，不下载、不启动服务端。`local-vitest.ts` 按共用能力标记预检实际选到的真服务端测试，`temporal-test-cli.ts` 也供引擎测试创建入口核验，不能绕过后隐式下载。
+- `temporal:install`：按 `deploy/france.sh` 的固定版本和当前平台从 Temporal 官方发布地址下载 CLI，核 SHA-256、`--version` 后原子落到本机受管缓存并登记；不改 PATH、不碰 SDK 缓存。`test:temporal` 只登记/核验已有 CLI，不下载、不启动服务端。`local-vitest.ts` 按共用能力标记预检实际选到的真服务端测试，`temporal-test-cli.ts` 也供引擎测试创建入口核验，不能绕过后隐式下载。
 - `local-vitest.ts`：Windows 的 `check`（含 `--all`）、`test:changed`、`test:linux` 共用执行入口。四个需要 Linux FD/进程语义的保全测试只能转交显式配置的本机 Linux 普通用户；当前工作树字节快照包含未提交/新文件，删除不复活。Linux 依赖须与当前锁文件和依赖声明一致，workspace 链接重指快照。无配置、摘要/测试清单对不上、报告缺失或跳过都明确失败；CI/Linux 仍直接跑原测试。Windows 每次执行在仓根临时目录下、名字以 local-vitest- 开头的唯一目录留原生 JSON、Linux 原回执与合并副本、工作树字节摘要和必要命令/起止/退出元数据；路径在启动前打印，不保存环境或源码快照正文。`check-vitest.ts` 沿原 `withRetry` 把首轮与重试分开留存，缺报告或坏 JSON 明确未获完整报告，已有字节保留。
 - `work.ts` 的派工归属复用入口动态加载的 `unattended.mjs/selectSessionId`；Claude session / Codex thread 接同步 Stop，只有 Codex root-session 不冒充 thread，缺归属仍保留结果供 `pnpm work runs` 读取。续跑不重绑原 spec（包括旧的 null），Codex 后台完成不主动开启新轮。
 - `issue-batch.ts`：`pnpm issue:batch --spec <JSON>`，整批校验后建母子单、写 parent 并挂原生关系；失败关闭本批，创建结果不明按唯一标记找回。`--recover <记录>` 清理中断产物，记录生成在仓根临时目录的 issue-batch 子目录。GitHub 无跨单事务，撤销失败必须保留记录并报错。

@@ -329,6 +329,7 @@ describe('执行方式 × 阶段是数据', () => {
   it('每个阶段都写了要什么，每个执行方式都写了会什么', () => {
     expect(Object.keys(STAGE_NEEDS).sort()).toEqual(
       [
+        'commander',
         'execute',
         'groom',
         'intake-chat',

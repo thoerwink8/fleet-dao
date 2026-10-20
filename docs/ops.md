@@ -1365,3 +1365,9 @@ bash /srv/fleet-dao-releases/current/packages/api/bin/fleet-api checkout-history
 只有确定要交还这个首次自然停点时才加 `--execute --request-id <固定业务编号> --by <操作者> --feedback-file <私有UTF-8文件>`。无 PR、原 run、首次 generation=1/continued=0、三段模式及预算仍须服务端核准；完整历史里任何不支持的控制变动或未证明退场的活动都会拒绝。原 helper 固定入口只增加 `retirement` 读取，不扩大 sudoers、不写锁、树或所有权。信任现行 root 管理的固定 helper 与 `fleet-engine.service` 的 KillMode=mixed/control-group cgroup 边界；SDK STOPPED 还须同 boot/invocation 的 PID1 服务终态，脱出 scopes 逐项自然结束。历史每个 helper 的二进制哈希不作无限追溯条件，缺已知生命周期则照实未知。
 
 断线后使用完全相同的 workflow/run、request-id、by 与 feedback 文件重试；CLI 固定构造首次 hold token，因此原 hold 已被消费后仍可取回原回执，不依赖 query 再生成新 token。相同 request-id 异文返回 conflict；超过有限幂等表容量返回 busy。仅 `handed_back` 证明主循环已接纳返工，ready/Update 接收不等于成功。输出不回显意见或操作者；原请求载荷存在受保护的 Temporal 历史中。真正上线验收另核自然发布后的只读 systemd 现场，namespace 测试中的 journalctl/systemctl 观察夹具不能冒充真 systemd。
+
+正式正文已经从 H0 修订到 H1 时，保留真实正文，先从产品读口取得原停点合同 H0 与当前正式合同 H1；为 check 与 execute 同时提供 `--original-contract-sha256 <H0完整摘要> --expected-contract-sha256 <H1完整摘要>`，显式选择 v2。两个参数缺一或格式不对立即拒绝；不带参数仍按原 v1 同合同规则，不能自动接受任意新正文。check 仍只 query/读来源，execute 会重新核原 hold、H0 及服务端正式读回的 H1、完整历史、退场、树和原预算，不接受调用人报告的 brief。缺旧合同修订边界的运行明确拒绝 v2。
+
+v2 的 `acceptedContract` 表示实际接纳过的 H1 快照；只有 `outcome=handed_back` 才表示主路径交还控制已完成，二者不能混用。接纳后放弃或停点失效时可能返回带 H1 的 stale，表示合同接纳事实保留、控制没有交回。回执不保证外部正文此后不再编辑，也不证明 recordRound 统计提交；原统计写入失败的告警仍保留。收场期间出现 H2，后续动手先重新核正文，不按过时 H1 起会话或续旧 session。
+
+收到响应前断线、超时或结果未知，只允许原 request-id 和原完整载荷重取，不换 UUID、不发 continue/redo。已经收到服务端明确的预检拒绝回执，则该请求已完成且无控制消费；同编号仍返回该拒绝。来源修复后重新观察是另一次明确操作，可使用新业务编号，但仍绑定同一原 hold；不能用它绕过前一个尚未知晓结果的执行。

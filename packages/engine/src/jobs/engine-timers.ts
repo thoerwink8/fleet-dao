@@ -51,6 +51,12 @@ import {
 import { INTAKE_EVERY_MINUTES, INTAKE_JOB, INTAKE_OFFSET_MINUTES, runIntakeJob } from './intake.ts';
 import { runJudgeSelfCheckJob } from './judge-self-check.ts';
 import {
+  PARK_TRIAGE_EVERY_MINUTES,
+  PARK_TRIAGE_JOB,
+  PARK_TRIAGE_OFFSET_MINUTES,
+  runParkTriageJob,
+} from './park-triage.ts';
+import {
   PARKED_RETRY_EVERY_MINUTES,
   PARKED_RETRY_JOB,
   PARKED_RETRY_OFFSET_MINUTES,
@@ -120,6 +126,7 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
   const dailyBrief = need(jobs, 'dailyBrief');
   const e2eQuarantine = need(jobs, 'e2eQuarantine');
   const parkedRetry = need(jobs, 'parkedRetry');
+  const parkTriage = need(jobs, 'parkTriage');
   return [
     {
       id: GITHUB_RECONCILE_JOB.id,
@@ -253,6 +260,17 @@ export function engineTimerJobs(o: { jobs: EngineJobs; client: Client; taskQueue
       catchupMinutes: PARKED_RETRY_EVERY_MINUTES,
       overdueMinutes: OVERDUE_MINUTES,
       run: () => runParkedRetryJob(parkedRetry()),
+    },
+    {
+      // 停下的单交指挥官会话看（#3294 第 2 片）：停了 15 分钟规则没解开的、交指挥官的，会话交裁决、引擎白名单核了再执行。
+      // 要起模型会话，总开关关着（含每次发版后）不跑：标 needsMaster。设置 engine.commander 另有自己的开关
+      id: PARK_TRIAGE_JOB.id,
+      everyMinutes: PARK_TRIAGE_EVERY_MINUTES,
+      offsetMinutes: PARK_TRIAGE_OFFSET_MINUTES,
+      catchupMinutes: PARK_TRIAGE_EVERY_MINUTES,
+      overdueMinutes: OVERDUE_MINUTES,
+      needsMaster: true,
+      run: () => runParkTriageJob(parkTriage()),
     },
   ];
 }
