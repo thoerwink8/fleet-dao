@@ -54,7 +54,7 @@ export async function unregisterScheduledJobs(
 /**
  * 这个定时任务最近一次跑成（outcome = ok，不含 partial）的结束时刻。
  * 对账用它当回看起点：没查全的那一轮不能把窗口往前推，否则没扫到的仓在这段里的事件就补不回来。
- * 一次都没跑成回 null，不回时刻 0。读库失败照抛，由调用方按「没有记录」退。
+ * 一次都没跑成回 null，不回时刻 0。读库失败或成功时刻不能用照抛，不能把坏历史当成没有记录。
  */
 export async function lastSuccessfulScheduleRunEndedAt(db: Db, job: string): Promise<Date | null> {
   const [row] = await db
@@ -66,7 +66,7 @@ export async function lastSuccessfulScheduleRunEndedAt(db: Db, job: string): Pro
   const endedAt = row?.endedAt ?? null;
   if (endedAt === null) return null;
   const ms = endedAt.getTime();
-  if (!Number.isFinite(ms) || ms <= 0) return null;
+  if (!Number.isFinite(ms) || ms <= 0) throw new Error(`定时任务 ${job} 的成功结束时刻不能用`);
   return endedAt;
 }
 

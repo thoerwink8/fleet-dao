@@ -17,6 +17,7 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - `src/real/scope-oom-evidence.ts`（#3448）：会话 scope 自己的内存事件见证。边跑边读 `fleet-agent-<runId>.scope/memory.events.local`（层级的 `memory.events` 只作旁证），收场再读一次，经 `facts.scopeOom` 进 result.json；只证明「这个 scope 里有 OOM 事件」，被杀的是谁永远 unknown，不能拿 137/143、内存峰值、时间邻近、父 slice 或兄弟 scope 的计数顶替。每次读前后取 scope 目录的实例身份（生产 stat 的 dev:ino），同路径被同名新 scope 重建、前后对不上或取不到身份的读数不收，判 unknown 并标 `instanceChanged`（第一次读成之前就被换掉的看不出，限制写在文件头）。没读到、读不全、计数回退、首读非 0 都记 unknown 和完整性，不写 0；Mirasim 不经本机 scope，写 unsupported。文字刻意避开 `failure/rules.ts` 里 oom_killed 的文本判法，不进 stderr / failureReason；保全失败不改退出事实。只保存证据，不为旧运行补原因。
 - `packages/engine/src/real/self-check.ts`：以工作树主人身份跑测试和 tsc；各段预算统一从 `packages/engine/src/self-check-budget.ts` 取，活动总限时只由这些预算相加。
 - `packages/engine/src/decisions/`：判断（纯函数）；`packages/engine/src/routing/`：选路；`packages/engine/src/jobs/`：引擎进程里的定时器（不是 Temporal 工作流，登记表在 `real/jobs.ts`）。
+- `src/jobs/github-reconcile-window.ts`：真实对账在扫描前按上次完整成功身份把窗口封存到既有幂等账；partial、失败和重启都复用原下限，避免 fallback/cap 移动而丢游标。读写或回执异常明确失败；此账不当扫描锁。超过 GitHub 保留期仍保留原下限并警告可能有漏，持久窗口不证明过期投递已补回。
 - `src/real/migration-budget.ts`：本仓超默认体量预算时，按固定 Git blob 和发布版数据验证器识别唯一新增 PG7 快照；原始 addedLines 不换口径，未知回 raw，Git读取失败抛错。候选改动验证器、依赖声明/锁、计量判据或任意层级 `.gitattributes` 等固定信任输入时不折扣。20k行/2MiB只限自动折扣资格，不自动恢复已停任务。
 
 ## 测试
