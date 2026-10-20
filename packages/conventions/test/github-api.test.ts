@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { githubResponseEvidence } from '../src/gh-api.ts';
 import {
   acceptViewedRepo,
   explicitRepo,
@@ -9,6 +10,7 @@ import {
   resolveRepo,
   toIssue,
 } from '../src/github-api.ts';
+import { reconcileQueryMetadata } from '../src/query-metadata.ts';
 
 const TOKEN = 'test-token-value';
 
@@ -171,7 +173,7 @@ describe('读 GitHub：读不到、认不出都抛（调用方判没查成）', 
     }) as unknown as typeof fetch;
     await expect(
       liveGitHub('o/r', {}, { fetchImpl: impl, token: () => undefined }).openIssues(),
-    ).rejects.toThrow('连不上 GitHub（fetch failed：ECONNRESET）');
+    ).rejects.toThrow('连不上 GitHub；阶段=响应未收到；name=TypeError；code=ECONNRESET');
   });
 
   it('回了 500：报状态码', async () => {
@@ -182,12 +184,17 @@ describe('读 GitHub：读不到、认不出都抛（调用方判没查成）', 
 
   it('被限流、又没带令牌：说清怎么办；报错里不带令牌', async () => {
     const limited = () => new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0' } });
-    await expect(read(limited)).rejects.toThrow(
-      '没带令牌时每小时 60 次；设 GITHUB_TOKEN，或本机 gh auth login',
-    );
+    const anon = await read(limited).catch((e: Error) => e.message);
+    expect(anon).toContain('没带令牌时每小时 60 次；设 GITHUB_TOKEN，或本机 gh auth login');
+    expect(anon).toContain('阶段=响应已收到');
+    expect(anon).toContain('remaining=0');
+    expect(anon).toContain('reset=unknown');
+    expect(anon).not.toContain(TOKEN);
     const err = await read(limited, { GITHUB_TOKEN: TOKEN }).catch((e: Error) => e.message);
-    expect(err).toBe('读开着的 issue，GitHub 回了 403：被限流了');
+    expect(err).toContain('读开着的 issue，GitHub 回了 403：被限流了');
+    expect(err).toContain(githubResponseEvidence(new Headers({ 'x-ratelimit-remaining': '0' })));
     expect(err).not.toContain(TOKEN);
+    expect(err).not.toContain('已恢复');
   });
 
   it('不是 JSON', async () => {
@@ -470,5 +477,189 @@ describe('读 GitHub：计划和对账要的几样（里程碑说明、关单原
     expect(githubToken({ GITHUB_TOKEN: '' }, () => 'c')).toBe('c');
     expect(githubToken({}, () => undefined)).toBeUndefined();
     expect(githubToken({ GITHUB_TOKEN: '' }, () => '')).toBeUndefined();
+  });
+});
+
+const SECRET = 'ghp_fakeSyntheticTokenValue3335';
+const QUERY_SECRET = 'synthetic-query-fake-3335';
+
+async function withLogs(run: () => Promise<void>): Promise<string[]> {
+  const logs: string[] = [];
+  const previous = {
+    log: console.log,
+    info: console.info,
+    warn: console.warn,
+    error: console.error,
+    debug: console.debug,
+  };
+  const capture = (...args: unknown[]) => {
+    logs.push(args.map((arg) => (arg instanceof Error ? arg.message : String(arg))).join(' '));
+  };
+  console.log = capture;
+  console.info = capture;
+  console.warn = capture;
+  console.error = capture;
+  console.debug = capture;
+  try {
+    await run();
+  } finally {
+    console.log = previous.log;
+    console.info = previous.info;
+    console.warn = previous.warn;
+    console.error = previous.error;
+    console.debug = previous.debug;
+  }
+  return logs;
+}
+
+describe('正式 reader：liveGitHub 失败保留脱敏限流证据', () => {
+  const rate = {
+    date: 'Mon, 19 Oct 2026 19:25:25 GMT',
+    'x-ratelimit-limit': '5000',
+    'x-ratelimit-remaining': '0',
+    'x-ratelimit-reset': '1792441800',
+    'x-ratelimit-resource': 'core',
+    'x-github-request-id': 'ABCD:1234:9ABC',
+  };
+
+  it('HTTP 403 remaining=0 带上 reset 的 UTC，只请求一次，成功 JSON 仍照旧', async () => {
+    const seen: string[] = [];
+    const impl = (async (input: string | URL | Request) => {
+      seen.push(String(input));
+      const url = String(input);
+      if (url.endsWith('/issues/9')) return json(row(9, { body: 'ok' }), { headers: rate });
+      return new Response(JSON.stringify({ message: SECRET }), { status: 403, headers: rate });
+    }) as typeof fetch;
+    const gh = liveGitHub('o/r', { GH_TOKEN: SECRET }, { fetchImpl: impl });
+    await expect(gh.issue(9)).resolves.toMatchObject({ number: 9, body: 'ok' });
+    const logs = await withLogs(async () => {
+      await expect(gh.openIssues()).rejects.toThrow(
+        `读开着的 issue，GitHub 回了 403：被限流了；${githubResponseEvidence(new Headers(rate))}`,
+      );
+    });
+    expect(seen).toEqual([`${API}/issues/9`, `${API}/issues?state=open&per_page=100`]);
+    expect(seen.some((url) => url.includes('/rate_limit'))).toBe(false);
+    expect(logs).toEqual([]);
+  });
+
+  it('429 的 retry-after、权限 403、缺头和畸形头都仍失败，缺的是 unknown', async () => {
+    const cases: {
+      headers: Record<string, string>;
+      status: number;
+      includes: string[];
+      excludes: string[];
+    }[] = [
+      {
+        status: 429,
+        headers: { 'retry-after': '60', 'x-ratelimit-resource': 'search' },
+        includes: ['GitHub 回了 429', 'retry-after=seconds:60', 'resource=search', 'remaining=unknown'],
+        excludes: ['被限流了', '已恢复'],
+      },
+      {
+        status: 403,
+        headers: { 'x-ratelimit-remaining': '4974', 'x-ratelimit-resource': 'core' },
+        includes: ['GitHub 回了 403', 'remaining=4974', 'resource=core', 'retry-after=unknown'],
+        excludes: ['被限流了', '已恢复'],
+      },
+      {
+        status: 403,
+        headers: {},
+        includes: ['GitHub 回了 403', 'date=unknown', 'reset=unknown', 'resource=unknown'],
+        excludes: ['被限流了', 'remaining=0', 'utc='],
+      },
+      {
+        status: 403,
+        headers: {
+          'x-ratelimit-remaining': '1.5',
+          'x-ratelimit-reset': 'yesterday',
+          'x-ratelimit-resource': 'not-a-resource',
+          'retry-after': 'soon',
+          'x-github-request-id': SECRET,
+          'x-unlisted-secret': SECRET,
+          cookie: `session=${SECRET}`,
+        },
+        includes: [
+          'remaining=unknown',
+          'reset=unknown',
+          'resource=unknown',
+          'retry-after=unknown',
+          'request-id=unknown',
+        ],
+        excludes: [SECRET, 'yesterday', 'not-a-resource', 'soon', 'cookie', 'x-unlisted-secret', '已恢复'],
+      },
+    ];
+    for (const item of cases) {
+      const seen: string[] = [];
+      const impl = (async (input: string | URL | Request) => {
+        seen.push(String(input));
+        return new Response(JSON.stringify({ token: SECRET }), {
+          status: item.status,
+          headers: item.headers,
+        });
+      }) as typeof fetch;
+      const logs = await withLogs(async () => {
+        const message = await liveGitHub('o/r', { GH_TOKEN: SECRET }, { fetchImpl: impl })
+          .openIssues()
+          .catch((error: Error) => error.message);
+        expect(message).toContain('阶段=响应已收到');
+        for (const part of item.includes) expect(message).toContain(part);
+        for (const part of item.excludes) expect(message).not.toContain(part);
+        expect(message).not.toContain(SECRET);
+      });
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).not.toContain('/rate_limit');
+      expect(logs).toEqual([]);
+    }
+  });
+
+  it('网络错误不抄令牌、查询和错误原文，也不编响应头', async () => {
+    const impl = (async (input: string | URL | Request) => {
+      throw new TypeError(`fetch failed ${SECRET} ${String(input)}?access_token=${QUERY_SECRET}`, {
+        cause: { code: 'ECONNRESET' },
+      });
+    }) as typeof fetch;
+    const logs = await withLogs(async () => {
+      const message = await liveGitHub('o/r', { GH_TOKEN: SECRET }, { fetchImpl: impl })
+        .openIssues()
+        .catch((error: Error) => error.message);
+      expect(message).toContain('连不上 GitHub；阶段=响应未收到；name=TypeError；code=ECONNRESET');
+      expect(message).toContain('date=unknown');
+      expect(message).toContain('reset=unknown');
+      expect(message).not.toContain('阶段=响应已收到');
+      expect(message).not.toContain(SECRET);
+      expect(message).not.toContain(QUERY_SECRET);
+      expect(message).not.toContain('access_token');
+      expect(message).not.toContain('fetch failed');
+      expect(message).not.toContain('utc=');
+    });
+    expect(logs).toEqual([]);
+  });
+
+  it('query-metadata 装配把 403 继续当没查成，不增加请求', async () => {
+    const seen: string[] = [];
+    const headers = {
+      date: 'Mon, 19 Oct 2026 19:25:25 GMT',
+      'x-ratelimit-limit': '5000',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-reset': '1792441800',
+      'x-ratelimit-resource': 'core',
+    };
+    const impl = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push(String(input));
+      const authorization = new Headers(init?.headers).get('authorization');
+      expect(authorization).toBe(`Bearer ${SECRET}`);
+      return new Response(JSON.stringify({ message: SECRET, authorization }), {
+        status: 403,
+        headers,
+      });
+    }) as typeof fetch;
+    const gh = liveGitHub('o/r', { GH_TOKEN: SECRET }, { fetchImpl: impl });
+    const logs = await withLogs(async () => {
+      await expect(reconcileQueryMetadata(gh, 3332)).rejects.toThrow(
+        `读 #3332 ，GitHub 回了 403：被限流了；${githubResponseEvidence(new Headers(headers))}`,
+      );
+    });
+    expect(seen).toEqual([`${API}/issues/3332`]);
+    expect(logs).toEqual([]);
   });
 });

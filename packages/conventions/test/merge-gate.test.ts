@@ -2,7 +2,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ghApi } from '../src/gh-api.ts';
+import { ghApi, githubResponseEvidence, githubTransportEvidence } from '../src/gh-api.ts';
 import {
   type GateDeps,
   type GateState,
@@ -745,13 +745,212 @@ describe('读写 GitHub（假的 fetch）', () => {
         .getOrNull('/contents/x')
         .catch((e: Error) => e.message),
     ]);
+    const noHeaders = githubResponseEvidence(new Headers());
     expect(errors).toEqual([
-      'GitHub 回了 500（GET /pulls/1）',
+      `GitHub 回了 500（GET /pulls/1）；${noHeaders}`,
       '没有 GITHUB_TOKEN',
       '没有 GITHUB_REPOSITORY（owner/名字）',
-      'GitHub 回了 403（POST /statuses/x）',
-      'GitHub 回了 500（GET /contents/x）',
+      `GitHub 回了 403（POST /statuses/x）；${noHeaders}`,
+      `GitHub 回了 500（GET /contents/x）；${noHeaders}`,
     ]);
     for (const m of errors) expect(m).not.toContain('token-for-test');
+  });
+});
+
+const EVIDENCE_SECRET = 'ghp_fakeSyntheticTokenValue3335';
+const EVIDENCE_QUERY = 'synthetic-query-fake-3335';
+
+async function evidenceLogs(run: () => Promise<void>): Promise<string[]> {
+  const logs: string[] = [];
+  const previous = {
+    log: console.log,
+    info: console.info,
+    warn: console.warn,
+    error: console.error,
+    debug: console.debug,
+  };
+  const capture = (...args: unknown[]) => {
+    logs.push(args.map((arg) => (arg instanceof Error ? arg.message : String(arg))).join(' '));
+  };
+  console.log = capture;
+  console.info = capture;
+  console.warn = capture;
+  console.error = capture;
+  console.debug = capture;
+  try {
+    await run();
+  } finally {
+    console.log = previous.log;
+    console.info = previous.info;
+    console.warn = previous.warn;
+    console.error = previous.error;
+    console.debug = previous.debug;
+  }
+  return logs;
+}
+
+describe('正式 reader：ghApi 失败保留脱敏限流证据', () => {
+  const env = {
+    GITHUB_TOKEN: EVIDENCE_SECRET,
+    GITHUB_REPOSITORY: 'o/r',
+    GITHUB_API_URL: 'https://api.example/',
+  };
+
+  function scripted(respond: (url: string, init?: RequestInit) => Response | Promise<Response>): {
+    fn: typeof fetch;
+    calls: string[];
+  } {
+    const calls: string[] = [];
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push(String(input));
+      return await respond(String(input), init);
+    }) as typeof fetch;
+    return { fn, calls };
+  }
+
+  it('403 remaining=0、429 retry-after、权限 403 和畸形头都失败，且不增加请求', async () => {
+    const primary = {
+      date: 'Mon, 19 Oct 2026 19:36:46 GMT',
+      'x-ratelimit-limit': '5000',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-reset': '1792442374',
+      'x-ratelimit-resource': 'core',
+    };
+    const primaryFetch = scripted(
+      () => new Response(JSON.stringify({ token: EVIDENCE_SECRET }), { status: 403, headers: primary }),
+    );
+    const logs = await evidenceLogs(async () => {
+      const message = await ghApi(env, primaryFetch.fn)
+        .get(`/pulls/3332?access_token=${EVIDENCE_QUERY}`)
+        .catch((error: Error) => error.message);
+      expect(message).toBe(
+        `GitHub 回了 403（GET /pulls/3332）；${githubResponseEvidence(new Headers(primary))}`,
+      );
+      expect(message).toContain('reset=1792442374 utc=2026-10-19T20:39:34.000Z');
+      expect(message).not.toContain(EVIDENCE_SECRET);
+      expect(message).not.toContain(EVIDENCE_QUERY);
+      expect(message).not.toContain('access_token');
+      expect(message).not.toContain('已恢复');
+    });
+    expect(primaryFetch.calls).toEqual([
+      `https://api.example/repos/o/r/pulls/3332?access_token=${EVIDENCE_QUERY}`,
+    ]);
+    expect(logs).toEqual([]);
+
+    const secondary = scripted(
+      () =>
+        new Response('secondary', {
+          status: 429,
+          headers: { 'retry-after': 'Mon, 19 Oct 2026 19:40:00 GMT', 'x-ratelimit-resource': 'core' },
+        }),
+    );
+    const limited = await ghApi(env, secondary.fn)
+      .post('/statuses/x', { token: EVIDENCE_SECRET })
+      .catch((error: Error) => error.message);
+    expect(limited).toContain('GitHub 回了 429（POST /statuses/x）');
+    expect(limited).toContain('retry-after=http-date:2026-10-19T19:40:00.000Z');
+    expect(limited).not.toContain('secondary');
+    expect(limited).not.toContain(EVIDENCE_SECRET);
+    expect(secondary.calls).toHaveLength(1);
+
+    const permission = scripted(() => new Response('{}', { status: 403 }));
+    const denied = await ghApi(env, permission.fn)
+      .get('/pulls/3332')
+      .catch((error: Error) => error.message);
+    expect(denied).toContain('GitHub 回了 403（GET /pulls/3332）');
+    expect(denied).toContain('阶段=响应已收到');
+    expect(denied).toContain('remaining=unknown');
+    expect(denied).toContain('reset=unknown');
+    expect(denied).not.toContain('remaining=0');
+    expect(denied).not.toContain('已恢复');
+    expect(permission.calls).toHaveLength(1);
+
+    const malformed = scripted(
+      () =>
+        new Response(EVIDENCE_SECRET, {
+          status: 403,
+          headers: {
+            'x-ratelimit-limit': '00',
+            'x-ratelimit-remaining': `0 ${EVIDENCE_SECRET}`,
+            'x-ratelimit-reset': 'not-a-date',
+            'x-ratelimit-resource': 'audit_log',
+            'retry-after': 'soon',
+            'x-github-request-id': EVIDENCE_SECRET,
+            cookie: EVIDENCE_SECRET,
+            authorization: `Bearer ${EVIDENCE_SECRET}`,
+          },
+        }),
+    );
+    const bad = await ghApi(env, malformed.fn)
+      .get('/pulls/3332')
+      .catch((error: Error) => error.message);
+    expect(bad).toContain('limit=unknown');
+    expect(bad).toContain('remaining=unknown');
+    expect(bad).toContain('reset=unknown');
+    expect(bad).toContain('resource=unknown');
+    expect(bad).toContain('retry-after=unknown');
+    expect(bad).toContain('request-id=unknown');
+    expect(bad).not.toContain(EVIDENCE_SECRET);
+    expect(bad).not.toContain('audit_log');
+    expect(bad).not.toContain('cookie');
+    expect(bad).not.toContain('Bearer');
+    expect(malformed.calls).toHaveLength(1);
+
+    const missing = scripted(() => new Response(null, { status: 404 }));
+    await expect(
+      ghApi(env, missing.fn).getOrNull(`/contents/x?token=${EVIDENCE_SECRET}`),
+    ).resolves.toBeNull();
+    expect(missing.calls).toHaveLength(1);
+  });
+
+  it('没有响应时标明阶段，不抄 fetch 原文里的令牌', async () => {
+    const failure = new TypeError(`socket ${EVIDENCE_SECRET} access_token=${EVIDENCE_QUERY}`, {
+      cause: { code: `ECONNRESET ${EVIDENCE_SECRET}` },
+    });
+    const offline = scripted(() => {
+      throw failure;
+    });
+    const message = await ghApi(env, offline.fn)
+      .graphql(`query { token: "${EVIDENCE_SECRET}" }`, { token: EVIDENCE_SECRET })
+      .catch((error: Error) => error.message);
+    expect(message).toBe(`连不上 GitHub（POST /graphql）；${githubTransportEvidence(failure)}`);
+    expect(message).toContain('阶段=响应未收到');
+    expect(message).toContain('code=unknown');
+    expect(message).not.toContain('阶段=响应已收到');
+    expect(message).not.toContain(EVIDENCE_SECRET);
+    expect(message).not.toContain(EVIDENCE_QUERY);
+    expect(offline.calls).toHaveLength(1);
+  });
+
+  it('merge-gate 装配把读 PR 的 403 继续当成没查成', async () => {
+    const headers = {
+      date: 'Mon, 19 Oct 2026 19:36:46 GMT',
+      'x-ratelimit-remaining': '0',
+      'x-ratelimit-reset': '1792442374',
+      'x-ratelimit-resource': 'core',
+    };
+    const fetch = scripted(
+      () => new Response(JSON.stringify({ body: EVIDENCE_SECRET }), { status: 403, headers }),
+    );
+    const logs = await evidenceLogs(async () => {
+      const result = await runMergeGate({
+        eventName: 'pull_request',
+        eventPath: undefined,
+        gh: gateGitHub(ghApi(env, fetch.fn)),
+        write: false,
+        targetPr: 3332,
+      });
+      expect(result.code).toBe(2);
+      const text = result.lines.join('\n');
+      expect(text).toContain('没查成：读不到 PR #3332 现在的样子');
+      expect(text).toContain(
+        `GitHub 回了 403（GET /pulls/3332）；${githubResponseEvidence(new Headers(headers))}`,
+      );
+      expect(text).not.toContain('能合');
+      expect(text).not.toContain(EVIDENCE_SECRET);
+      expect(text).not.toContain('已恢复');
+    });
+    expect(fetch.calls).toEqual(['https://api.example/repos/o/r/pulls/3332']);
+    expect(logs).toEqual([]);
   });
 });
