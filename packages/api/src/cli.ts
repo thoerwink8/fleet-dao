@@ -28,9 +28,11 @@ import { parseQuoteArgs, QUOTE_USAGE, runQuote } from './quote-cli.ts';
 // 全程模式开关（设置 engine.flowMode）：three 都走三步单，full 都走全程，split:N 约 N% 的单走全程。没设过是 three；库里的值认不出也按
 // three 并把原因打印出来。set 改的同时记一条操作记录（原因必填）。引擎在每张单第一次选路之后读一次
 // （decideFlowMode），写进分组记录；之后改开关不影响已经分过组的单。
-//   node-key new <环境编号>（看板多机）：给一个要往这台推快照的环境发一把新通行证：明文只在这一次打印（推送方放进自己的
-//   FLEET_NODE_REPORT_TOKEN），同时打印要贴进这台 api.env 的 FLEET_NODE_KEYS 的那一项（只有哈希）。先写操作记录（不含明文、哈希），
-//   记不成就不打印——发出去的钥匙必须有记录。不改任何配置文件、不重启服务。
+//   node-key new <环境编号> [--name <显示名>] [--json] | list | revoke <环境编号>（看板多机、本机会话、本机领单，#3388）：
+//   new 给一台机器发一把新通行证：直接写库（node_keys 只存 sha256）并在同一事务记操作记录（只记哈希前 12 位指纹），明文只在这一次打印
+//   （推送方放进自己的 FLEET_NODE_REPORT_TOKEN）；记不成就整笔不做、不打印。不改任何配置文件、不重启服务，后端下一个请求就认。
+//   --json 时标准输出只有一行 {"env","token"}，提示走标准错误。编号已有有效的（库里的，或 FLEET_NODE_KEYS 里的）退出 1、不发新的。
+//   list 列编号、显示名、指纹前缀、创建/作废、最近一次推送、来源（库/旧配置；同编号以库为准会标出）；revoke 作废，该通行证立刻被拒。
 //   session-mint <飞书名或用户 id> --reason "<为什么>" [--ttl <分钟>]（#1800）：发一枚短命的驾驶舱会话 Cookie 给 AI 点验线上用（默认 60 分钟，最多 120）。
 //   先写操作记录（谁、给谁、多久、原因，不含 Cookie 值）再打印两行：Cookie 名、Cookie 值；记不进就不打印、退出 1。
 //   会话里的登录方式记 cli-mint，版本号取此人当前的 sessionVersion（「退出所有设备」能作废它）。只在服务器上跑，不加网络入口。
@@ -151,7 +153,7 @@ const DAILY_BRIEF_POINTER =
 const SESSION_MINT_USAGE =
   '用法：fleet-api session-mint <飞书名或用户 id> --reason "<为什么>" [--ttl <分钟，默认 60，最多 120>]（发一枚短命的驾驶舱会话 Cookie 给 AI 点验用：打印两行，Cookie 名和值；先写操作记录，不含 Cookie 值）';
 const NODE_KEY_USAGE =
-  '用法：fleet-api node-key new <环境编号>（环境编号：小写字母开头，只许小写字母、数字、短横线；打印一次通行证明文和要贴进 FLEET_NODE_KEYS 的哈希）';
+  '用法：fleet-api node-key new <环境编号> [--name <显示名>] [--json] | list | revoke <环境编号>（环境编号：小写字母开头，只许小写字母、数字、短横线；new 直接写库、打印一次通行证明文，--json 时标准输出只有一行 {"env","token"}；list 列编号、显示名、指纹前缀、创建/作废、最近推送；revoke 作废、立刻被拒）';
 const DISPATCH_USAGE =
   '用法：fleet-api dispatch <owner/仓名> on|off|status（「让 AI 接活」开关：on 打开，off 关上，status 只看）；fleet-api dispatch --all off --reason <原因>（所有仓都关上，原因写进操作记录）';
 
@@ -336,54 +338,230 @@ export function stdioPrompter(): Prompter & { close(): void } {
 /** node-key 的操作记录：和 set-password 一样记成引擎那一类，reason 写明谁跑的哪条命令。 */
 export const NODE_KEY_NEW = 'node_key.new';
 
-/** 只认 `new <环境编号>` 这一种写法；别的子命令、多的参数、带 - 的一律拒，不猜。 */
-export function parseNodeKeyArgs(argv: readonly string[]): { id: string } {
-  const [sub, id, ...extra] = argv;
-  if (sub !== 'new') throw new CliError(NODE_KEY_USAGE, 2);
-  const flag = [id, ...extra].find((a) => a?.startsWith('-'));
-  if (flag !== undefined) throw new CliError(`认不出参数 ${flag.split('=')[0]}。${NODE_KEY_USAGE}`, 2);
-  if (id === undefined || extra.length > 0) throw new CliError(`要恰好一个环境编号。${NODE_KEY_USAGE}`, 2);
-  if (!NodeIdSchema.safeParse(id).success) {
-    throw new CliError(`环境编号「${id}」不合法。${NODE_KEY_USAGE}`, 2);
+export const NODE_KEY_REVOKE = 'node_key.revoke';
+const NODE_KEY_NAME_MAX = 80;
+
+export type NodeKeyArgs =
+  | { sub: 'new'; id: string; name: string | undefined; json: boolean }
+  | { sub: 'list' }
+  | { sub: 'revoke'; id: string };
+
+/** 认 `new <编号> [--name 显示名] [--json]`、`list`、`revoke <编号>`；别的子命令、多的参数、认不出的 - 开头一律拒，不猜。 */
+export function parseNodeKeyArgs(argv: readonly string[]): NodeKeyArgs {
+  const [sub, ...rest] = argv;
+  const idOf = (id: string | undefined): string => {
+    if (id === undefined) throw new CliError(`要一个环境编号。${NODE_KEY_USAGE}`, 2);
+    if (!NodeIdSchema.safeParse(id).success) {
+      throw new CliError(`环境编号「${id}」不合法。${NODE_KEY_USAGE}`, 2);
+    }
+    return id;
+  };
+  if (sub === 'list') {
+    if (rest.length > 0) throw new CliError(`list 不带参数。${NODE_KEY_USAGE}`, 2);
+    return { sub: 'list' };
   }
-  return { id };
+  if (sub === 'revoke') {
+    const flag = rest.find((a) => a.startsWith('-'));
+    if (flag !== undefined) throw new CliError(`认不出参数 ${flag.split('=')[0]}。${NODE_KEY_USAGE}`, 2);
+    if (rest.length !== 1) throw new CliError(`要恰好一个环境编号。${NODE_KEY_USAGE}`, 2);
+    return { sub: 'revoke', id: idOf(rest[0]) };
+  }
+  if (sub !== 'new') throw new CliError(NODE_KEY_USAGE, 2);
+  let id: string | undefined;
+  let name: string | undefined;
+  let json = false;
+  for (let i = 0; i < rest.length; i += 1) {
+    const a = rest[i] as string;
+    if (a === '--json') json = true;
+    else if (a === '--name' || a.startsWith('--name=')) {
+      const value = a === '--name' ? rest[i + 1] : a.slice('--name='.length);
+      if (a === '--name') i += 1;
+      if (name !== undefined) throw new CliError(`--name 只能写一次。${NODE_KEY_USAGE}`, 2);
+      if (value === undefined || value.trim() === '' || value.startsWith('--')) {
+        throw new CliError(`--name 后面要跟显示名。${NODE_KEY_USAGE}`, 2);
+      }
+      if (value.trim().length > NODE_KEY_NAME_MAX) {
+        throw new CliError(`显示名最长 ${NODE_KEY_NAME_MAX} 个字符。${NODE_KEY_USAGE}`, 2);
+      }
+      name = value.trim();
+    } else if (a.startsWith('-')) {
+      throw new CliError(`认不出参数 ${a.split('=')[0]}。${NODE_KEY_USAGE}`, 2);
+    } else if (id === undefined) id = a;
+    else throw new CliError(`要恰好一个环境编号。${NODE_KEY_USAGE}`, 2);
+  }
+  return { sub: 'new', id: idOf(id), name, json };
+}
+
+/** 旧配置 FLEET_NODE_KEYS（api.env）里的 编号 → 哈希；没写是空；写坏了抛 CliError（后端也起不来，别在这时候发新的）。 */
+export function envNodeKeysOf(env: CliEnv): Record<string, string> {
+  const raw = env.FLEET_NODE_KEYS?.trim();
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new CliError('环境里的 FLEET_NODE_KEYS 不是合法 JSON，先改对它再管通行证');
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new CliError('环境里的 FLEET_NODE_KEYS 要是一个 JSON 对象，先改对它再管通行证');
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(parsed)) if (typeof v === 'string') out[k] = v;
+  return out;
 }
 
 /**
- * 发一把新通行证：随机 32 字节（43 个字符），哈希是明文的 sha256 十六进制（接收方 node-report.ts 同一个算法）。
- * 先写操作记录再回明文：记录写不进抛错、什么都不打印。回的文字就是要给人看的全部（明文只有这一份）。
+ * 发一把新通行证（#3388）：随机 32 字节（43 个字符），哈希是明文的 sha256 十六进制（接收方 node-report.ts 同一个算法）。
+ * 直接写 node_keys 并在同一事务记操作记录，不改任何配置文件、不重启：记录写不进就整笔不做、什么都不回。
+ * 编号已有有效的（库里的，或 FLEET_NODE_KEYS 里没被库里作废行遮住的）拒，不发新的。回 { token, hash }，怎么打印由调用方定（明文只有这一份）。
  */
 export async function newNodeKey(input: {
   store: Store;
   id: string;
+  name?: string | undefined;
   operator: string;
+  envKeys?: Readonly<Record<string, string>> | undefined;
   token?: (() => string) | undefined;
-}): Promise<string> {
+}): Promise<{ token: string; hash: string }> {
+  let rows: Awaited<ReturnType<Store['listNodeKeys']>>;
+  try {
+    rows = await input.store.listNodeKeys();
+  } catch (err) {
+    throw new CliError(`没发成：读不到库里的通行证（${errMessage(err)}），没有发新的`);
+  }
+  const row = rows.find((k) => k.nodeId === input.id);
+  const inEnv = Object.hasOwn(input.envKeys ?? {}, input.id);
+  if ((row && row.revokedAt === undefined) || (inEnv && !row)) {
+    throw new CliError(
+      `环境 ${input.id} 已经有一把有效的通行证（${row ? '库里' : 'FLEET_NODE_KEYS 里'}），没有发新的。要换：先 fleet-api node-key revoke ${input.id}${row ? '' : '（旧配置里的要先从 api.env 删掉那一项，见 docs/ops.md）'}，再 new`,
+    );
+  }
   const token = (input.token ?? (() => randomBytes(32).toString('base64url')))();
   const hash = createHash('sha256').update(token).digest('hex');
+  let result: 'created' | 'exists';
   try {
-    await input.store.appendAudit({
+    result = await input.store.createNodeKey(
+      { nodeId: input.id, tokenHash: hash, displayName: input.name ?? input.id },
+      {
+        actor: { kind: 'ops', id: 'ops:node-key' },
+        action: NODE_KEY_NEW,
+        target: `node:${input.id}`,
+        // 只记哈希的前 12 位当指纹：对不上是哪一把时用，拿它还原不出通行证
+        after: { fingerprint: hash.slice(0, 12) },
+        reason: `服务器上 ${input.operator} 跑的 fleet-api node-key new ${input.id}`,
+        via: 'ops',
+        ok: true,
+      },
+    );
+  } catch (err) {
+    throw new CliError(`没发成：通行证和操作记录写不进（${errMessage(err)}），没有打印通行证`);
+  }
+  if (result === 'exists') {
+    throw new CliError(`环境 ${input.id} 刚刚被别处发了一把有效的通行证，没有发新的`);
+  }
+  return { token, hash };
+}
+
+/** 给人看的发放说明（不带 --json 时的标准输出）：明文只有这一份。 */
+export function nodeKeyNewText(id: string, token: string): string {
+  return [
+    `环境 ${id} 的通行证（只显示这一次，这边不存明文）：`,
+    `  ${token}`,
+    '',
+    `这一台（收的一方）已经认这把了：写进库、立刻生效，不用改 api.env、不用重启。`,
+    `推送方那一台：api.env 里 FLEET_NODE_REPORT_TOKEN 填上面那串通行证，FLEET_NODE_REPORT_URL 填这一台的 /api/nodes/report 地址，再重启 fleet-api。`,
+    `明文别进聊天、仓库、日志；这一份丢了就 fleet-api node-key revoke ${id} 之后重新发一把。`,
+  ].join('\n');
+}
+
+/** 作废：写 revoked_at 并在同一事务记操作记录；之后这把立刻被拒。只在 FLEET_NODE_KEYS 里的旧配置，这里作废不了，说明怎么删。 */
+export async function revokeNodeKey(input: {
+  store: Store;
+  id: string;
+  operator: string;
+  envKeys?: Readonly<Record<string, string>> | undefined;
+}): Promise<string> {
+  const rows = await input.store.listNodeKeys();
+  const row = rows.find((k) => k.nodeId === input.id);
+  if (!row) {
+    throw new CliError(
+      Object.hasOwn(input.envKeys ?? {}, input.id)
+        ? `环境 ${input.id} 只在旧配置 FLEET_NODE_KEYS 里，库里没有这把，这里作废不了：按 docs/ops.md 删掉 api.env 的那一项并重启 fleet-api`
+        : `没有环境 ${input.id} 的通行证`,
+    );
+  }
+  if (row.revokedAt !== undefined)
+    throw new CliError(`环境 ${input.id} 的通行证早已作废（${row.revokedAt}）`);
+  let result: Awaited<ReturnType<Store['revokeNodeKey']>>;
+  try {
+    result = await input.store.revokeNodeKey(input.id, {
       actor: { kind: 'ops', id: 'ops:node-key' },
-      action: NODE_KEY_NEW,
+      action: NODE_KEY_REVOKE,
       target: `node:${input.id}`,
-      // 只记哈希的前 12 位当指纹：对不上是哪一把时用，拿它还原不出通行证
-      after: { fingerprint: hash.slice(0, 12) },
-      reason: `服务器上 ${input.operator} 跑的 fleet-api node-key new ${input.id}`,
+      after: { fingerprint: row.tokenHash.slice(0, 12) },
+      reason: `服务器上 ${input.operator} 跑的 fleet-api node-key revoke ${input.id}`,
       via: 'ops',
       ok: true,
     });
   } catch (err) {
-    throw new CliError(`没发成：操作记录写不进（${errMessage(err)}），没有打印通行证`);
+    throw new CliError(`没作废成：${errMessage(err)}`);
   }
-  return [
-    `环境 ${input.id} 的通行证（只显示这一次，这边不存明文）：`,
-    `  ${token}`,
-    '',
-    `1. 这一台（收的一方）：api.env 的 FLEET_NODE_KEYS 里加这一项（已有别的环境就用逗号接在同一个 JSON 对象里），再重启 fleet-api：`,
-    `  "${input.id}":"${hash}"`,
-    `2. 推送方那一台：api.env 里 FLEET_NODE_REPORT_TOKEN 填上面那串通行证，FLEET_NODE_REPORT_URL 填这一台的 /api/nodes/report 地址，再重启 fleet-api。`,
-    `明文别进聊天、仓库、日志；这一份丢了就重新发一把（旧的从 FLEET_NODE_KEYS 里删掉就作废）。`,
-  ].join('\n');
+  if (result !== 'revoked') throw new CliError(`环境 ${input.id} 没作废成（${result}）`);
+  return `环境 ${input.id} 的通行证已作废（指纹 ${row.tokenHash.slice(0, 12)}），立刻不再被认`;
+}
+
+/** 列：编号、显示名、指纹前缀、创建/作废、最近一次推送（快照、本机会话取晚的）、来源；同编号库和环境变量都有时标出以库为准。 */
+export async function listNodeKeys(input: {
+  store: Store;
+  envKeys?: Readonly<Record<string, string>> | undefined;
+  warn: (text: string) => void;
+}): Promise<string> {
+  const rows = await input.store.listNodeKeys();
+  const pushes = new Map<string, string>();
+  const note = (nodeId: string, at: string) => {
+    const before = pushes.get(nodeId);
+    if (before === undefined || at > before) pushes.set(nodeId, at);
+  };
+  let pushKnown = true;
+  try {
+    for (const r of await input.store.listNodeReports()) note(r.nodeId, r.receivedAt);
+    for (const r of await input.store.listNodeSessions()) note(r.nodeId, r.receivedAt);
+  } catch (err) {
+    pushKnown = false;
+    input.warn(`最近一次推送没读成（${errMessage(err)}），那一列写「读不到」`);
+  }
+  const lines: string[] = [];
+  const last = (id: string) => (pushKnown ? (pushes.get(id) ?? '从未') : '读不到');
+  const envKeys = input.envKeys ?? {};
+  for (const k of rows) {
+    const shadow = Object.hasOwn(envKeys, k.nodeId) ? '；FLEET_NODE_KEYS 里同编号的被它盖掉（以库为准）' : '';
+    lines.push(
+      [
+        k.nodeId,
+        k.displayName,
+        k.tokenHash.slice(0, 12),
+        `创建 ${k.createdAt}`,
+        k.revokedAt === undefined ? '有效' : `已作废 ${k.revokedAt}`,
+        `最近推送 ${last(k.nodeId)}`,
+        `来源 库${shadow}`,
+      ].join('  '),
+    );
+  }
+  for (const [id, hash] of Object.entries(envKeys)) {
+    if (rows.some((k) => k.nodeId === id)) continue;
+    lines.push(
+      [
+        id,
+        id,
+        hash.slice(0, 12),
+        '创建 -',
+        '有效',
+        `最近推送 ${last(id)}`,
+        '来源 FLEET_NODE_KEYS（旧配置）',
+      ].join('  '),
+    );
+  }
+  return lines.length === 0 ? '还没有任何机器通行证（库里没有，FLEET_NODE_KEYS 也没配）' : lines.join('\n');
 }
 
 // —— session-mint：给 AI 点验线上驾驶舱发一枚短命会话 Cookie（#1800）——
@@ -1262,11 +1440,33 @@ export async function runCli(argv: readonly string[], deps: CliDeps = processDep
   }
   if (command === 'node-key') {
     const args = parseNodeKeyArgs(rest);
+    const envKeys = envNodeKeysOf(deps.env);
     const { store, close } = await deps.openStore(databaseUrl(deps.env));
     try {
-      deps.out(
-        await newNodeKey({ store, id: args.id, operator: operatorName(deps.env), token: deps.newToken }),
-      );
+      const operator = operatorName(deps.env);
+      if (args.sub === 'list') {
+        deps.out(await listNodeKeys({ store, envKeys, warn: deps.err }));
+      } else if (args.sub === 'revoke') {
+        deps.out(await revokeNodeKey({ store, id: args.id, operator, envKeys }));
+      } else {
+        const { token } = await newNodeKey({
+          store,
+          id: args.id,
+          name: args.name,
+          operator,
+          envKeys,
+          token: deps.newToken,
+        });
+        if (args.json) {
+          // 标准输出只一行 JSON 给程序接；人看的提示走标准错误
+          deps.out(JSON.stringify({ env: args.id, token }));
+          deps.err(
+            `环境 ${args.id} 的通行证已写进库、立刻生效（不用改 api.env、不用重启）；明文只在上面那一行，别进聊天、仓库、日志`,
+          );
+        } else {
+          deps.out(nodeKeyNewText(args.id, token));
+        }
+      }
       return 0;
     } finally {
       await close();

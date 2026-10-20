@@ -1,13 +1,14 @@
 // 接收方（看板多机，全仓审查第 1 路 PR-3）：别的环境（本机 WSL）把自己的主页、环境页快照推到这一台，这里按通行证认人、校验、落表。
 // 这是对公网新开的一个写口（香港 nginx 的 /api/* 转进来），改这里之前必须知道：
-// - 认人只看请求头 X-Fleet-Node-Token：把它算 sha256，和 FLEET_NODE_KEYS（{"<环境编号>":"<sha256 十六进制>"}）里每一把定长比较，
-//   一把都不留空档地比完；node_id 取对上的那把钥匙的编号，载荷里自报什么都不信。库里不存明文、环境文件里只有哈希。
+// - 认人只看请求头 X-Fleet-Node-Token：把它算 sha256，和现在有效的每一把（库里 node_keys 的有效行 + 旧配置 FLEET_NODE_KEYS
+//   {"<环境编号>":"<sha256 十六进制>"}，同编号以库为准，见 node-keys.ts）定长比较，一把都不留空档地比完；node_id 取对上的那把钥匙的编号，
+//   载荷里自报什么都不信。库里、环境文件里都只有哈希、不存明文。每次现读库：发钥匙不重启，作废后下一个请求就被拒；读库失败回 503（node_keys_unreadable）。
 // - 挂在登录门之前（app.ts，和飞书网关的意图接口同一个位置），不认 Cookie、不认 Authorization（香港 nginx 会清掉它）；
 //   反过来，登录门后面的接口（GET /api/nodes …）不认这个头——通行证只能写这一个口子。
 // - 先认人、再看大小、再校验：认不出的人回 401、一个字节的请求体也不读；超 256KB 回 413；坏 schema（含不认识的版本）回 400；
 //   reportedAt 比收的钟快 5 分钟以上回 400；同一个环境 20 秒内只收一次，快了回 429（槽位在认完人当场占、没收成就还回去，
 //   并发的两份也只放一份过）。
-// - 这台没配 FLEET_NODE_KEYS 就是不收：回 503 写明原因，不回 401 冒充「通行证不对」（发布读回那条「假通行证要回 401」也因此能红）。
+// - 库里和 FLEET_NODE_KEYS 都没有一把有效的就是不收：回 503 写明原因，不回 401 冒充「通行证不对」（发布读回那条「假通行证要回 401」也因此能红）。
 // - 收下的快照只用来展示（看板按 received_at 判新不新鲜），不当作停止、确认的依据；写口只写 node_reports 这一张表。
 // - 日志只记环境编号、原因，不记通行证和载荷。
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -27,6 +28,7 @@ import type { Deps } from './deps.ts';
 import { ApiError, errorBody, readJson, reply } from './http.ts';
 import { registerLocalClaimsReceiver } from './local-claims.ts';
 import { registerLocalSessionsReceiver } from './local-sessions.ts';
+import { readNodeKeys } from './node-keys.ts';
 
 /** 通行证明文的哈希（和 fleet-api node-key new 打印的、FLEET_NODE_KEYS 里贴的同一个算法）。 */
 export const nodeKeyHash = (token: string): string => createHash('sha256').update(token).digest('hex');
@@ -50,7 +52,7 @@ export function nodeIdForToken(keys: Readonly<Record<string, string>>, token: st
 }
 
 export const NODE_KEYS_NOT_WIRED =
-  '这台没配 FLEET_NODE_KEYS，不收别的环境推来的快照（要收就在 api.env 里放通行证的哈希，见 docs/ops.md「接上法国看板」）';
+  '这台还没发过机器通行证（库里没有、FLEET_NODE_KEYS 也没配），不收别的环境推来的快照（要收就跑 fleet-api node-key new <环境编号>，见 docs/ops.md「接上法国看板」）';
 
 const oversize = bodyLimit({
   maxSize: NODE_REPORT_MAX_BYTES,
@@ -59,7 +61,7 @@ const oversize = bodyLimit({
 
 /** POST /api/nodes/report。只有这一条；读（GET /api/nodes …）在 cockpit.ts 的登录门后面。 */
 export function nodeReportRoutes(deps: Deps): Hono<{ Variables: { nodeId: string } }> {
-  const { config, store, log } = deps;
+  const { store, log } = deps;
   const app = new Hono<{ Variables: { nodeId: string } }>();
   /** 每个环境上次被收下（或正在收）的时刻。 */
   const lastAccepted = new Map<string, number>();
@@ -70,14 +72,23 @@ export function nodeReportRoutes(deps: Deps): Hono<{ Variables: { nodeId: string
   };
 
   const authenticate: MiddlewareHandler<{ Variables: { nodeId: string } }> = async (c, next) => {
-    if (Object.keys(config.nodeKeys).length === 0) {
+    // 现读库里的有效通行证并上旧配置（同编号库为准）；读库失败回 503，不放行、也不当成通行证不对
+    let state: Awaited<ReturnType<typeof readNodeKeys>>;
+    try {
+      state = await readNodeKeys(deps);
+    } catch (err) {
+      if (err instanceof ApiError) throw reject(null, 503, err.code, err.message);
+      throw err;
+    }
+    const keys = state.keys;
+    if (!state.configured) {
       throw reject(null, 503, 'node_keys_not_wired', NODE_KEYS_NOT_WIRED);
     }
     const token = c.req.header(NODE_REPORT_HEADER);
     if (token === undefined) {
       throw reject(null, 401, 'node_token_missing', `要带通行证：请求头 ${NODE_REPORT_HEADER}`);
     }
-    const nodeId = nodeIdForToken(config.nodeKeys, token.trim());
+    const nodeId = nodeIdForToken(keys, token.trim());
     if (nodeId === null) throw reject(null, 401, 'node_token_invalid', '通行证不对');
     c.set('nodeId', nodeId);
     await next();

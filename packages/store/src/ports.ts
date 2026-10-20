@@ -841,6 +841,28 @@ export interface NodeStore {
   listNodeSessions(): Promise<NodeSessionsRecord[]>;
   /** 法国工作树最近一份清单（#1993，引擎写）；一次都没存过是 null。认不出抛错，不当成没有树。 */
   getWorktreeInventory(): Promise<WorktreeInventory | null>;
+  /** 机器通行证（#3388，node_keys 表）：所有行（含已作废的），按 nodeId 排。读不到照抛，认人的一方据此回 503，不当成没有。 */
+  listNodeKeys(): Promise<NodeKeyRecord[]>;
+  /**
+   * 发一把：写 node_keys 一行并在同一事务记 audit。该编号已有有效的返回 'exists'、什么都不写；
+   * 该编号只有作废的行就整行换成新的（createdAt 换新、revokedAt 清空）。tokenHash 必须是 64 位小写十六进制，否则抛错。
+   */
+  createNodeKey(
+    input: { nodeId: string; tokenHash: string; displayName: string },
+    audit: NewAuditEntry,
+  ): Promise<'created' | 'exists'>;
+  /** 作废：写 revokedAt（Store 的钟）并在同一事务记 audit；没有这个编号 'not_found'，已经作废 'already_revoked'（都不写）。 */
+  revokeNodeKey(nodeId: string, audit: NewAuditEntry): Promise<'revoked' | 'not_found' | 'already_revoked'>;
+}
+
+/** 机器通行证一行（node_keys）。tokenHash 是明文的 sha256，明文不入库。 */
+export interface NodeKeyRecord {
+  nodeId: string;
+  tokenHash: string;
+  displayName: string;
+  createdAt: string;
+  /** 作废的时刻；有效的没有这一项。 */
+  revokedAt?: string | undefined;
 }
 
 export interface NodeSessionsRecord {

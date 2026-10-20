@@ -243,6 +243,88 @@ export function describeNodeStoreContract(name: string, make: MakeStore): void {
       await expect(store.listNodeSessions()).rejects.toBeInstanceOf(InvalidNodeReportError);
     });
 
+    // —— 机器通行证（#3388）——
+    const HASH_A = 'a'.repeat(64);
+    const HASH_B = 'b'.repeat(64);
+    const audit = (action: string, target = 'node:founder-pc') => ({
+      actor: { kind: 'ops' as const, id: 'ops:node-key' },
+      action,
+      target,
+      after: { fingerprint: 'aaaaaaaaaaaa' },
+      via: 'ops' as const,
+      ok: true,
+    });
+    const auditActions = async (target: string) =>
+      (await store.listAudit({ target, limit: 50 })).items.map((a) => a.action);
+
+    it('通行证：发、列、作废；同一事务记操作记录；已有有效的不能再发，作废的可以换新', async () => {
+      expect(await store.listNodeKeys()).toEqual([]);
+      expect(
+        await store.createNodeKey(
+          { nodeId: 'wsl-2', tokenHash: HASH_B, displayName: '二号' },
+          audit('node_key.new', 'node:wsl-2'),
+        ),
+      ).toBe('created');
+      expect(
+        await store.createNodeKey(
+          { nodeId: 'founder-pc', tokenHash: HASH_A, displayName: '创始人电脑' },
+          audit('node_key.new'),
+        ),
+      ).toBe('created');
+      expect(await store.listNodeKeys()).toEqual([
+        {
+          nodeId: 'founder-pc',
+          tokenHash: HASH_A,
+          displayName: '创始人电脑',
+          createdAt: at(0),
+          revokedAt: undefined,
+        },
+        { nodeId: 'wsl-2', tokenHash: HASH_B, displayName: '二号', createdAt: at(0), revokedAt: undefined },
+      ]);
+      // 已有有效的：不写、也不记操作记录
+      expect(
+        await store.createNodeKey(
+          { nodeId: 'founder-pc', tokenHash: 'c'.repeat(64), displayName: 'x' },
+          audit('node_key.new'),
+        ),
+      ).toBe('exists');
+      expect(await auditActions('node:founder-pc')).toEqual(['node_key.new']);
+
+      clock.now = new Date(T0.getTime() + MIN);
+      expect(await store.revokeNodeKey('founder-pc', audit('node_key.revoke'))).toBe('revoked');
+      expect(await store.revokeNodeKey('founder-pc', audit('node_key.revoke'))).toBe('already_revoked');
+      expect(await store.revokeNodeKey('nobody', audit('node_key.revoke', 'node:nobody'))).toBe('not_found');
+      const revoked = (await store.listNodeKeys()).find((k) => k.nodeId === 'founder-pc');
+      expect(revoked?.revokedAt).toBe(at(MIN));
+      expect((await auditActions('node:founder-pc')).sort()).toEqual(['node_key.new', 'node_key.revoke']);
+      expect(await auditActions('node:nobody')).toEqual([]);
+
+      // 作废的编号可以换一把新的：整行换掉，作废清空
+      clock.now = new Date(T0.getTime() + 2 * MIN);
+      expect(
+        await store.createNodeKey(
+          { nodeId: 'founder-pc', tokenHash: 'c'.repeat(64), displayName: '换新' },
+          audit('node_key.new'),
+        ),
+      ).toBe('created');
+      const again = (await store.listNodeKeys()).find((k) => k.nodeId === 'founder-pc');
+      expect(again).toMatchObject({ tokenHash: 'c'.repeat(64), displayName: '换新', createdAt: at(2 * MIN) });
+      expect(again?.revokedAt).toBeUndefined();
+    });
+
+    it('【故意造出的失败】哈希不是 64 位小写十六进制（比如把明文塞进来）：拒，什么都不写', async () => {
+      for (const bad of ['plain-token', 'A'.repeat(64), 'a'.repeat(63)]) {
+        await expect(
+          store.createNodeKey(
+            { nodeId: 'founder-pc', tokenHash: bad, displayName: 'x' },
+            audit('node_key.new'),
+          ),
+        ).rejects.toThrow();
+      }
+      expect(await store.listNodeKeys()).toEqual([]);
+      expect(await auditActions('node:founder-pc')).toEqual([]);
+    });
+
     // —— 工作树清单（#1993）——
     it('工作树清单：没存过是 null；存着的读得回；坏的抛错，不当成没有树', async () => {
       expect(await store.getWorktreeInventory()).toBeNull();

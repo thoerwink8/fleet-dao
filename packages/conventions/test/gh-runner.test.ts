@@ -153,6 +153,7 @@ describe('ghRunner：relay origin 仍能盘点真实仓库', () => {
       git: gitRunner(root),
       readBeats: () => [],
       readLeases: () => [{ repo: 'acme/app', issue: 11, leaseUntil: '2030-01-01T00:00:00Z' }],
+      readFranceClaims: async () => [],
       now: () => new Date('2026-10-18T00:00:00Z'),
     };
     const result = await buildQueue(deps);
@@ -208,6 +209,7 @@ describe('work 真装配：显式目标仓走 ghRunner，租约和前置读全�
             queue: {
               git: gitRunner(root),
               readBeats: () => [],
+              readFranceClaims: async () => [],
               readLeases: () =>
                 leases
                   ? [

@@ -12,8 +12,11 @@ import { work } from '../src/work.ts';
 import {
   type BeatLite,
   buildQueue,
+  type FranceClaim,
   type LeaseRecord,
   LIVE_MINUTES,
+  liveFranceClaims,
+  parseFranceClaims,
   parseWorktrees,
   type QueueItem,
   type QueueReport,
@@ -104,6 +107,7 @@ function deps(
     issues?: GhResult;
     beats?: () => BeatLite[];
     leases?: () => LeaseRecord[];
+    france?: () => Promise<FranceClaim[]>;
     gitFails?: boolean;
     graphqlFails?: boolean;
     repoView?: GhResult;
@@ -139,6 +143,7 @@ function deps(
     git,
     readBeats: o.beats ?? (() => BEATS),
     readLeases: o.leases ?? (() => LEASES),
+    readFranceClaims: o.france ?? (async () => []),
     now: () => NOW,
     graphql,
   };
@@ -182,7 +187,10 @@ describe('buildQueue：本机做的开着的单，每张一个状态', () => {
   it('在做之二：本机记下、没到期的领单租约，领者一栏显示它；过期的、别的仓的不算', async () => {
     const by = byIssue(await buildQueue(deps()));
     const until = LEASES[0]?.leaseUntil ?? '';
-    expect(by.get(70)).toMatchObject({ state: 'working', claimers: [{ kind: 'lease', until }] });
+    expect(by.get(70)).toMatchObject({
+      state: 'working',
+      claimers: [{ kind: 'lease', until, source: 'local' }],
+    });
     expect(by.get(70)?.why).toBe(`在做：租约到 ${until}`);
     expect(by.get(71)).toMatchObject({ state: 'takeable', claimers: [] });
     expect(by.get(10)?.claimers).toEqual([]);
@@ -267,7 +275,13 @@ describe('buildQueue：本机做的开着的单，每张一个状态', () => {
         },
         out: (l) => out.push(l),
         err: () => {},
-        queue: { git: d.git, readBeats: d.readBeats, readLeases: d.readLeases, now: d.now },
+        queue: {
+          git: d.git,
+          readBeats: d.readBeats,
+          readLeases: d.readLeases,
+          readFranceClaims: d.readFranceClaims,
+          now: d.now,
+        },
       });
       expect(out[0]).toContain('等前置 1');
       expect(out.find((l) => l.includes('#1960 '))).toMatch(
@@ -359,7 +373,13 @@ describe('pnpm work queue [--json]', () => {
       },
       out: (l) => out.push(l),
       err: (l) => err.push(l),
-      queue: { git: d.git, readBeats: d.readBeats, readLeases: d.readLeases, now: d.now },
+      queue: {
+        git: d.git,
+        readBeats: d.readBeats,
+        readLeases: d.readLeases,
+        readFranceClaims: d.readFranceClaims,
+        now: d.now,
+      },
     });
     return { code, out, err };
   };
@@ -393,6 +413,198 @@ describe('pnpm work queue [--json]', () => {
     expect(r.code).toBe(1);
     expect(r.err.join('\n')).toContain('could not resolve host');
     expect((await run(['queue', '--all'])).code).toBe(1);
+  });
+});
+
+describe('法国全部机器的租约（#3389）', () => {
+  const future = new Date(NOW.getTime() + 3_600_000).toISOString();
+  const past = new Date(NOW.getTime() - 60_000).toISOString();
+  const franceClaims: FranceClaim[] = [
+    { repo: REPO, issue: 10, claimedBy: 'founder-pc', leaseUntil: future },
+    { repo: REPO, issue: 50, claimedBy: 'old-box', leaseUntil: past },
+    { repo: 'other/repo', issue: 82, claimedBy: 'other-box', leaseUntil: future },
+  ];
+  const wire = (claims: unknown) => JSON.stringify({ claims });
+  const TOKEN = ['pass', 'xyz', '123'].join('-');
+  const ep = () => ({ url: 'https://fr.example/', token: TOKEN });
+  const res = (status: number, body: string) => async () => new Response(body, { status });
+
+  it('别的机器的有效租约判在做，领者写它的编号和到期、来源 france；过期的、别的仓的不算', async () => {
+    const r = await buildQueue(deps({ france: async () => franceClaims }));
+    const by = byIssue(r);
+    expect(r.problems).toEqual([]);
+    expect(by.get(10)).toMatchObject({
+      state: 'working',
+      takeable: false,
+      claimers: [{ kind: 'lease', until: future, source: 'france', claimedBy: 'founder-pc' }],
+    });
+    expect(by.get(10)?.why).toBe(`在做：founder-pc 的租约到 ${future}`);
+    expect(by.get(50)).toMatchObject({
+      state: 'takeable',
+      claimers: [expect.objectContaining({ kind: 'heartbeat' })],
+    });
+    expect(by.get(82)?.state).toBe('takeable');
+    expect(renderQueue(r).find((l) => l.includes('#10 '))).toContain(`领者：founder-pc 租约到 ${future}`);
+  });
+
+  it('法国和本机文件都有同一张单的租约：只列法国的，本机文件只作补充', async () => {
+    const france = async () => [{ repo: REPO, issue: 70, claimedBy: 'mac', leaseUntil: future }];
+    const by = byIssue(await buildQueue(deps({ france })));
+    expect(by.get(70)?.claimers).toEqual([
+      { kind: 'lease', until: future, source: 'france', claimedBy: 'mac' },
+    ]);
+    // 法国没有、本机文件有：仍判在做
+    expect(byIssue(await buildQueue(deps({ france: async () => [] }))).get(70)?.state).toBe('working');
+  });
+
+  it('读不到法国：领者写没查成、原本可接的改判不可接、problems 照报；有 PR 的仍在做', async () => {
+    const r = await buildQueue(
+      deps({
+        france: async () => {
+          throw new Error('法国回 HTTP 503（nodes_disabled）');
+        },
+      }),
+    );
+    const by = byIssue(r);
+    expect(r.items.some((i) => i.takeable)).toBe(false);
+    expect(by.get(10)).toMatchObject({
+      state: 'blocked',
+      claimers: [{ kind: 'unchecked', reason: '法国回 HTTP 503（nodes_disabled）' }],
+    });
+    expect(by.get(10)?.why).toContain('没查成：法国回 HTTP 503');
+    expect(by.get(30)?.state).toBe('working');
+    expect(r.problems.join('\n')).toContain('法国的租约没查成');
+    const lines = renderQueue(r);
+    expect(lines.find((l) => l.includes('#10 '))).toMatch(/^\[没查成\] #10 .*领者：没查成：法国回 HTTP 503/);
+  });
+
+  it('--json 带领者编号和来源；读不到时带没查成的原因', async () => {
+    const d = deps({ france: async () => franceClaims });
+    const out: string[] = [];
+    await work(['queue', '--json'], {
+      gh: d.gh,
+      post: async () => {
+        throw new Error('queue 不该 POST');
+      },
+      out: (l) => out.push(l),
+      err: () => {},
+      queue: {
+        git: d.git,
+        readBeats: d.readBeats,
+        readLeases: d.readLeases,
+        readFranceClaims: d.readFranceClaims,
+        now: d.now,
+      },
+    });
+    const rep = JSON.parse(out.join('')) as QueueReport;
+    expect(byIssue(rep).get(10)?.claimers).toEqual([
+      { kind: 'lease', until: future, source: 'france', claimedBy: 'founder-pc' },
+    ]);
+  });
+
+  describe('liveFranceClaims：真读（注入 fetch）', () => {
+    it('GET /api/nodes/claims，通行证在请求头；200 严格解析；去掉地址尾斜杠', async () => {
+      const calls: { url: string; init: RequestInit }[] = [];
+      const fetchImpl = (async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return new Response(wire([{ repo: REPO, issue: 10, claimedBy: 'x', leaseUntil: future }]), {
+          status: 200,
+        });
+      }) as unknown as typeof fetch;
+      const got = await liveFranceClaims(ep, fetchImpl)();
+      expect(got).toEqual([{ repo: REPO, issue: 10, claimedBy: 'x', leaseUntil: future }]);
+      expect(calls[0]?.url).toBe('https://fr.example/api/nodes/claims');
+      expect(calls[0]?.init.method).toBe('GET');
+      const headers = (calls[0]?.init.headers ?? {}) as Record<string, string>;
+      expect(headers['X-Fleet-Node-Token']).toBe(TOKEN);
+      expect(calls[0]?.init.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('没装配置：endpoint 抛的话原样成为没查成的原因', async () => {
+      const run = liveFranceClaims(
+        () => {
+          throw new Error('读不到 config.json：先装本机会话上报');
+        },
+        res(200, wire([])),
+      );
+      await expect(run()).rejects.toThrow('读不到 config.json');
+      const r = await buildQueue(deps({ france: run }));
+      expect(r.items.some((i) => i.takeable)).toBe(false);
+      expect(r.problems.join('\n')).toContain('读不到 config.json');
+    });
+
+    it.each([
+      [401, '{"error":"invalid_token"}', 'HTTP 401（invalid_token）'],
+      [503, '{"error":"nodes_disabled"}', 'HTTP 503（nodes_disabled）'],
+      [404, '<html>nope</html>', 'HTTP 404'],
+    ])('HTTP %i：没查成，写状态和错误码，不带 body 和通行证', async (status, body, want) => {
+      const r = await buildQueue(deps({ france: liveFranceClaims(ep, res(status, body)) }));
+      expect(r.items.some((i) => i.takeable)).toBe(false);
+      const all = JSON.stringify(r) + renderQueue(r).join('\n');
+      expect(all).toContain(want);
+      expect(all).not.toContain(TOKEN);
+      expect(all).not.toContain('<html>');
+    });
+
+    it('超时：没查成「超时」，不判可接', async () => {
+      const fetchImpl = ((_u: string, init: RequestInit) =>
+        new Promise((_res, rej) => {
+          init.signal?.addEventListener('abort', () => rej(init.signal?.reason));
+        })) as unknown as typeof fetch;
+      const r = await buildQueue(deps({ france: liveFranceClaims(ep, fetchImpl, 20) }));
+      expect(r.items.some((i) => i.takeable)).toBe(false);
+      expect(r.problems.join('\n')).toContain('超时');
+    });
+
+    it('连不上：原因里的通行证被抹掉', async () => {
+      const fetchImpl = (async () => {
+        throw new Error(`connect ECONNREFUSED ${TOKEN}`);
+      }) as unknown as typeof fetch;
+      const r = await buildQueue(deps({ france: liveFranceClaims(ep, fetchImpl) }));
+      expect(r.problems.join('\n')).toContain('连不上法国');
+      expect(JSON.stringify(r)).not.toContain(TOKEN);
+    });
+
+    it.each([
+      ['坏 JSON', '{not json'],
+      ['不是对象', '[]'],
+      ['多顶层字段', JSON.stringify({ claims: [], extra: 1 })],
+      ['缺 claims', '{}'],
+      ['claims 不是数组', JSON.stringify({ claims: {} })],
+      [
+        '条目多字段',
+        wire([{ repo: REPO, issue: 1, claimedBy: 'a', leaseUntil: '2026-10-20T05:00:00.000Z', x: 1 }]),
+      ],
+      ['条目缺字段', wire([{ repo: REPO, issue: 1, claimedBy: 'a' }])],
+      [
+        'issue 是字符串',
+        wire([{ repo: REPO, issue: '1', claimedBy: 'a', leaseUntil: '2026-10-20T05:00:00.000Z' }]),
+      ],
+      [
+        'issue 非正整数',
+        wire([{ repo: REPO, issue: 0, claimedBy: 'a', leaseUntil: '2026-10-20T05:00:00.000Z' }]),
+      ],
+      ['时刻不是时间', wire([{ repo: REPO, issue: 1, claimedBy: 'a', leaseUntil: 'soon' }])],
+      [
+        'claimedBy 为空',
+        wire([{ repo: REPO, issue: 1, claimedBy: '', leaseUntil: '2026-10-20T05:00:00.000Z' }]),
+      ],
+      [
+        'repo 不是 owner/name',
+        wire([{ repo: 'x', issue: 1, claimedBy: 'a', leaseUntil: '2026-10-20T05:00:00.000Z' }]),
+      ],
+    ])('认不出（%s）：没查成，不判可接', async (_name, body) => {
+      expect(() => parseFranceClaims(body)).toThrow();
+      const r = await buildQueue(deps({ france: liveFranceClaims(ep, res(200, body)) }));
+      expect(r.items.some((i) => i.takeable)).toBe(false);
+      expect(r.problems.join('\n')).toContain('法国的租约没查成');
+    });
+
+    it('空表合法：没有别的机器的租约，照常判', async () => {
+      const r = await buildQueue(deps({ france: liveFranceClaims(ep, res(200, wire([]))) }));
+      expect(r.problems).toEqual([]);
+      expect(r.items.filter((i) => i.takeable).map((i) => i.issue)).toEqual([10, 50, 71, 82]);
+    });
   });
 });
 
