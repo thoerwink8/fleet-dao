@@ -1081,7 +1081,10 @@ export async function updateBranch(
     );
   }
 
-  // 202：排上队了。新头要重读才拿得到，读到头换了才算完
+  // 202：GitHub 收下了这次同步（绑着 expected_head_sha）。先记账再等新头：新头没等到、回执丢了，
+  // 下一次尝试由 branchUpdateOf 凭这笔账认出「头是引擎自己同步换的」，不当成别人改了
+  await noteBranchUpdate(deps, input);
+  // 新头要重读才拿得到，读到头换了才算完
   for (let i = 0; ; i += 1) {
     const now = await readPull(deps, repo, prNumber, 'engine', ctx.signal);
     if (now.head.sha !== expectedHead) return { updated: true, head: now.head.sha };
@@ -1095,6 +1098,145 @@ export async function updateBranch(
     }
     await deps.client.sleep(wait, ctx.signal);
   }
+}
+
+/** 同步主线的账：仓、PR、同步前的头（GitHub 收下 update-branch 时绑的 expected_head_sha）。 */
+export function branchUpdateKey(repo: RepoRef, prNumber: number, expectedHead: string): string {
+  return idempotencyKey('update_branch', `${repoSlug(repo).toLowerCase()}#${prNumber}`, expectedHead);
+}
+
+/** 账里记的那份：和键是同一组身份，读出来再核一次，不只看键。 */
+interface BranchUpdateRecord {
+  accepted: true;
+  repo: string;
+  prNumber: number;
+  expectedHead: string;
+}
+
+/**
+ * GitHub 回 202 之后记一笔「这个仓这张 PR 在 expectedHead 上的同步主线被收下了」。同一个头重发（上一次没等到新头）不重记。
+ * 记不进去只记日志：这一次照样等新头、照样回 updated；丢的只是回执丢了之后的认领，那时照旧当「头被别人改了」停下等人。
+ */
+async function noteBranchUpdate(deps: Deps, input: UpdateBranchInput): Promise<void> {
+  const { repo, prNumber, expectedHead } = input;
+  const slug = repoSlug(repo);
+  const key = branchUpdateKey(repo, prNumber, expectedHead);
+  const record: BranchUpdateRecord = { accepted: true, repo: slug.toLowerCase(), prNumber, expectedHead };
+  try {
+    const at = deps.client.now();
+    const claim = await deps.ledger.idempotency.claim(
+      { key, action: 'github.update_branch', target: `${slug}#${prNumber}` },
+      at,
+    );
+    if (claim.status === 'done') return;
+    await deps.ledger.idempotency.complete(key, record, at);
+  } catch (error) {
+    deps.log.warn('同步主线 GitHub 收下了，但账没记上（回执丢了就只能停下等人认）', {
+      repo: slug,
+      prNumber,
+      expectedHead,
+      error: errMessage(error),
+    });
+  }
+}
+
+export interface BranchUpdateOfInput {
+  repo: RepoRef;
+  prNumber: number;
+  /** 同步之前的头（引擎验过、要合的那个）。 */
+  expectedHead: string;
+  /** PR 现在的头。 */
+  head: string;
+}
+
+export type BranchUpdateOf =
+  | { synced: true }
+  | {
+      synced: false;
+      /** no_record：账上没有这张 PR 在 expectedHead 上被收下的同步；not_sync_commit：现在的头不是那次同步造的合并提交。 */
+      reason: 'no_record' | 'not_sync_commit';
+      detail: string;
+    };
+
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/**
+ * PR 的头不是 expectedHead 了：是不是引擎自己 update-branch 换的（等新头时回执丢了、活动重试，或别的尝试刚同步完）。
+ * 两样都要：账上有这个仓、这张 PR、这个 expectedHead 的同步被 GitHub 收下（不看作者名、提交说明）；
+ * 现在的头正是那次同步造的合并提交——恰好两个父，第一个父是 expectedHead，第二个父已在主线里。
+ * 在它上面又推了提交、强推、别的 PR 或别的旧头的账，都不算。读账、读提交、比主线读不成照抛：不当成别人改的，也不当成自己同步的。
+ */
+export async function branchUpdateOf(
+  deps: Deps,
+  input: BranchUpdateOfInput,
+  ctx: ActivityContext = {},
+): Promise<BranchUpdateOf> {
+  const { repo, prNumber, expectedHead, head } = input;
+  if (!FULL_SHA.test(expectedHead) || !FULL_SHA.test(head) || !Number.isSafeInteger(prNumber)) {
+    throw new GitHubError('BAD_INPUT', '认同步主线要完整的仓、PR、旧头和新头');
+  }
+  const slug = repoSlug(repo);
+  const no = (reason: 'no_record' | 'not_sync_commit', detail: string): BranchUpdateOf => ({
+    synced: false,
+    reason,
+    detail,
+  });
+  const row = await deps.ledger.idempotency.peek(branchUpdateKey(repo, prNumber, expectedHead));
+  const record = row?.completedAt ? (row.result as Partial<BranchUpdateRecord> | null) : null;
+  if (
+    row?.action !== 'github.update_branch' ||
+    record?.accepted !== true ||
+    record.repo !== slug.toLowerCase() ||
+    record.prNumber !== prNumber ||
+    record.expectedHead !== expectedHead
+  ) {
+    return no('no_record', `账上没有 ${slug}#${prNumber} 在 ${expectedHead.slice(0, 7)} 上被收下的同步主线`);
+  }
+  const base = `/repos/${enc(repo.owner)}/${enc(repo.name)}`;
+  const auth = { as: 'engine' as const, repo };
+  const commit = await deps.client.request<{ sha?: string; parents?: { sha?: string }[] }>({
+    method: 'GET',
+    path: `${base}/commits/${head}`,
+    auth,
+    signal: ctx.signal,
+  });
+  const parents = commit.data?.parents;
+  if (commit.data?.sha !== head || !Array.isArray(parents)) {
+    throw unexpected(`读提交 ${head.slice(0, 7)}`, commit.data);
+  }
+  const shas = parents.map((p) => p?.sha);
+  const mainParent = shas[1];
+  if (
+    shas.length !== 2 ||
+    shas[0] !== expectedHead ||
+    typeof mainParent !== 'string' ||
+    !FULL_SHA.test(mainParent)
+  ) {
+    const listed = shas.map((s) => String(s).slice(0, 7)).join('、') || '无';
+    return no(
+      'not_sync_commit',
+      `${head.slice(0, 7)} 不是在 ${expectedHead.slice(0, 7)} 上并主线的合并提交（父：${listed}）`,
+    );
+  }
+  const facts = await deps.facts.get(repo, 'engine', ctx.signal);
+  const cmp = await deps.client.request<{ ahead_by?: number }>({
+    method: 'GET',
+    path: `${base}/compare/${encRef(facts.defaultBranch)}...${mainParent}`,
+    auth,
+    query: { per_page: 1 },
+    signal: ctx.signal,
+  });
+  const aheadBy = cmp.data?.ahead_by;
+  if (typeof aheadBy !== 'number') {
+    throw unexpected(`比较 ${facts.defaultBranch}...${mainParent.slice(0, 7)}`, cmp.data);
+  }
+  if (aheadBy !== 0) {
+    return no(
+      'not_sync_commit',
+      `${head.slice(0, 7)} 并进来的 ${mainParent.slice(0, 7)} 不在主线 ${facts.defaultBranch} 里（比主线多 ${aheadBy} 个提交）`,
+    );
+  }
+  return { synced: true };
 }
 
 export function defaultCommitMessage(prNumber: number): string {

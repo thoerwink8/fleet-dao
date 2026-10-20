@@ -167,6 +167,10 @@ export {
 } from './progress.ts';
 export { assertPublishable, type PublishText } from './publish-check.ts';
 export {
+  type BranchUpdateOf,
+  type BranchUpdateOfInput,
+  branchUpdateKey,
+  branchUpdateOf,
   type CiWaitResult,
   defaultCommitMessage,
   type MergePrInput,
