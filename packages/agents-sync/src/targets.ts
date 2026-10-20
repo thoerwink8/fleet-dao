@@ -289,8 +289,8 @@ export const HOOK_TARGETS: readonly HookTarget[] = [
     hooks: [
       { event: 'PreToolUse', matcher: '^Bash$', script: 'pretool-codex.mjs', timeout: 10 },
       { event: 'SessionStart', script: 'continuation-start.mjs', timeout: 10 },
-      { event: 'PostToolUse', script: 'continuation-progress.mjs', timeout: 10 },
-      { event: 'Stop', script: 'stop.mjs', timeout: 10 },
+      { event: 'PostToolUse', script: 'continuation-progress-codex.mjs', timeout: 10 },
+      { event: 'Stop', script: 'stop-codex.mjs', timeout: 10 },
     ],
   },
   {

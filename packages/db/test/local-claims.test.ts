@@ -16,6 +16,7 @@ import {
   expiredLocalClaims,
   extendLocalLease,
   finishLocalTask,
+  listLocalClaims,
   mergedPrForIssue,
   renewLocalTask,
   settleExpiredLocalClaim,
@@ -324,6 +325,35 @@ describe('到期收回', () => {
       await settleExpiredLocalClaim(t.db, { taskId: e.taskId, how: 'done', why: 'PR 合了', now: NOW }),
     ).toBe(1);
     expect(await row(repo.id, 3)).toMatchObject({ state: 'done', executor: 'local' });
+  });
+
+  it('listLocalClaims（GET 读口）：所有仓里本机领着、租约没到期的行，只给仓、单号、claimedBy、leaseUntil；到期的、引擎的、领完又结束的不在', async () => {
+    await addRepo(t.db, 'app');
+    const other = await addRepo(t.db, 'web');
+    await claimLocalTask(t.db, { repo: 'acme/app', issueNumber: 5, title: 'x', nodeId: NODE, now: NOW });
+    await claimLocalTask(t.db, { repo: 'acme/web', issueNumber: 2, title: 'y', nodeId: 'wsl-2', now: NOW });
+    await claimLocalTask(t.db, { repo: 'acme/web', issueNumber: 3, title: 'z', nodeId: NODE, now: NOW });
+    await finishLocalTask(t.db, {
+      repo: 'acme/web',
+      issueNumber: 3,
+      outcome: 'done',
+      nodeId: NODE,
+      now: NOW,
+    });
+    await addTask(t.db, other.id, { issueNumber: 4, state: 'running', createdAt: NOW }); // 引擎的行
+    const list = await listLocalClaims(t.db, NOW);
+    expect(list).toEqual([
+      { repo: 'acme/app', issue: 5, claimedBy: NODE, leaseUntil: new Date(NOW.getTime() + LOCAL_LEASE_MS) },
+      {
+        repo: 'acme/web',
+        issue: 2,
+        claimedBy: 'wsl-2',
+        leaseUntil: new Date(NOW.getTime() + LOCAL_LEASE_MS),
+      },
+    ]);
+    for (const r of list) expect(Object.keys(r).sort()).toEqual(['claimedBy', 'issue', 'leaseUntil', 'repo']);
+    // 租约到点就不算了
+    expect(await listLocalClaims(t.db, new Date(NOW.getTime() + LOCAL_LEASE_MS))).toEqual([]);
   });
 
   it('没到期的租约：unexpiredLocalClaims 列出；early 收成 done 不看租约时刻，不带 early 不动', async () => {

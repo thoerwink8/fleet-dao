@@ -15,7 +15,8 @@ import {
 import { defineQuery, defineSignal, defineUpdate } from '@temporalio/workflow';
 import type { FailureEvidence } from './failure/types.ts';
 import type { RouteChoice } from './ports.ts';
-import type { TaskBrief } from './runner/task-brief.ts';
+import type { PushHandbackReceipt, PushHandbackRequest } from './push-handback.ts';
+import type { RequirementContract, TaskBrief } from './runner/task-brief.ts';
 import type { TierDecision } from './runner/tier.ts';
 
 /** 动手最多几轮（CI 红了、没交付、验收没过都回动手重来一轮）。这个数不随「继续」改变。 */
@@ -121,7 +122,36 @@ export interface TaskWait {
   since: string;
 }
 
+/**
+ * 停下等人的停法类别（#3294，patched('park-kind')）：引擎续停（jobs/parked-retry.ts）按它判续不续。
+ * transient＝失败分流认不出、按临时的办；unarmed＝自动合并没挂上；rounds＝轮数用尽；quota＝token 额度超预算；
+ * size＝改动体量超预算；standard＝改标准等人闸；other＝别的（不续）。
+ */
+export type ParkKind = 'transient' | 'unarmed' | 'rounds' | 'quota' | 'size' | 'standard' | 'other';
+
+/** 引擎会自己续一次的停法：别的（预算、人闸、轮数用尽……）一律不续。 */
+export const AUTO_RETRY_PARK_KINDS: readonly ParkKind[] = ['transient', 'unarmed'];
+
+/** 引擎续停发「继续」时的 by（操作记录、工作流认引擎续的都看它）。 */
+export const PARKED_RETRY_ACTOR = 'engine:parked-retry';
+
+/** 正停着的这一次停下（#3294）：只在 patched('park-kind') 的新历史里有，老历史一直没有。 */
+export interface TaskParkInfo {
+  kind: ParkKind;
+  /** 第几次停下（TaskRuntime.parks）：引擎续停的「继续」带上它，对不上的不认。 */
+  seq: number;
+  /** 停下的时刻（ISO，工作流时钟）。 */
+  at: string;
+  title: string;
+  /** 停下时的 PR 头；没有 PR 是 null。 */
+  head: string | null;
+  /** 同一原文（停法 + 标题 + 原因）引擎已经续过一次：这次不再续。 */
+  retriedBefore: boolean;
+}
+
 export interface TaskStatus {
+  /** 最近一次安全边界核实的正式合同；没有＝旧历史/尚未核实。 */
+  contract?: RequirementContract;
   phase: TaskPhase;
   /** 白话：正在做什么。 */
   doing: string;
@@ -133,8 +163,20 @@ export interface TaskStatus {
   /** 最近一次卡住的原因；顺利推进时是 null。 */
   lastProblem: string | null;
   tier: TierDecision | null;
+  /** 正停着的这一次停下（#3294）；没在停、老历史是缺省。 */
+  park?: TaskParkInfo;
   /** 关单收尾能力。旧 worker 缺此字段，调用方必须保留未核实，不能回退无条件放弃。 */
   closedIssueClose?: { version: 1; token: ClosedIssueHoldToken | null };
+  /**
+   * 体量关口重评（#3249）：只有此刻确实停在体量预算停点、没有活动在跑、没人在重评时 identity 才非空。旧 worker 缺此字段＝不支持，
+   * 调用方不能凭自由文本的停下原因猜身份。resumed 是最近一次可信重评放行绑定的停点、头和 base（放行后停点身份清空，
+   * 同一请求重发凭它拿幂等回执；它不放行任何别的头）。
+   */
+  lineBudgetPark?: {
+    version: 1;
+    identity: LineBudgetParkIdentity | null;
+    resumed?: { identity: LineBudgetParkIdentity; head: string; base: string } | null;
+  };
   /** Separate from closed-issue abandonment: real merged PR, even when acceptance keeps its issue open. */
   mergedTaskClose?: {
     version: 1;
@@ -165,6 +207,15 @@ export const taskCloseClosedIssueUpdate = defineUpdate<ClosedIssueCloseResult, [
   'taskCloseClosedIssue',
 );
 
+export const taskHandbackPermissionPushUpdate = defineUpdate<PushHandbackReceipt, [PushHandbackRequest]>(
+  'taskHandbackPermissionPush',
+);
+
+/** Temporal 私有只读查询；check 不写历史，execute 仍需 Activity 重新核验。 */
+export const taskPushHandbackQuery = defineQuery<
+  import('./push-handback.ts').PushHandbackPreflightInput | null
+>('taskPushHandback');
+
 export interface MergedTaskReceipt {
   repo: { owner: string; name: string };
   prNumber: number;
@@ -186,6 +237,74 @@ export const taskSettleMergedUpdate = defineUpdate<
   ClosedIssueCloseResult,
   [{ token: ClosedIssueHoldToken; receipt: MergedTaskReceipt }]
 >('taskSettleMerged');
+
+/**
+ * 体量预算停点身份（#3249）：只在这一 run 的这一次停下有效。继续信号、再次停下、放弃、换代都会让它对不上。
+ * parks / generation / continued 三个数一起定「第几次停」；head 是被停下的那份交付的头。
+ */
+export interface LineBudgetParkIdentity {
+  version: 1;
+  runId: string;
+  parks: number;
+  generation: number;
+  continued: number;
+  prNumber: number | null;
+  head: string;
+  /** 停下时 readDelivery 的原始新增行、按预算判的行（可信折扣之后），预算是停下时这张单的 prLineBudget。 */
+  rawAddedLines: number;
+  chargeableAddedLines: number;
+  budget: number;
+  /**
+   * 停下时原始新增行实际按的固定 base（readDelivery 的 addedLinesBase，与 lineBudgetMeasurement.base 互相印证）。
+   * 重评只认这个 base，不能换另一个同 raw 的旧祖先改测量范围；老版本停下的没记（null），重评明确拒绝。
+   */
+  base: string | null;
+}
+
+/** 预检用 check（只测不放行）；执行用 resume（测过且不超原预算才放行这一份交付）。 */
+export interface RemeasureLineBudgetCommand {
+  version: 1;
+  mode: 'check' | 'resume';
+  identity: LineBudgetParkIdentity;
+  repo: { owner: string; name: string };
+  taskId: string;
+  workflowId: string;
+  /** 精确的头和固定的测量 base：必须等于停点身份里停下时记的 base，且仍是头相对树里钉的主线的 merge-base。 */
+  head: string;
+  base: string;
+  by: string;
+}
+
+export interface LineBudgetRemeasureReceipt {
+  identity: LineBudgetParkIdentity;
+  base: string;
+  head: string;
+  rawAddedLines: number;
+  verifiedGeneratedLines: number;
+  chargeableAddedLines: number;
+  budget: number;
+  reason: string;
+}
+
+export type LineBudgetRefusal =
+  | 'unsupported' // 旧 worker / 活动没按重评口径回答
+  | 'identity' // repo / task / workflow / 参数形状对不上
+  | 'stale' // 不在这个停点（旧停点、换代、已继续、放弃、已结束）
+  | 'busy' // 别的重评或在跑的活动
+  | 'unknown' // 读失败、超时、取消：未知，不当 0 或 ok
+  | 'changed' // 头、基线、工作树干净程度变化
+  | 'unverified' // 没有可信完整测量
+  | 'over_budget'; // 实际计量仍超原预算
+
+export type RemeasureLineBudgetResult =
+  | { outcome: 'eligible' | 'resumed' | 'already_resumed'; receipt: LineBudgetRemeasureReceipt }
+  | { outcome: 'refused'; reason: LineBudgetRefusal; detail: string };
+
+/** 同步处理并回执：发请求成功不能冒充工作流已经放行。 */
+export const taskRemeasureLineBudgetUpdate = defineUpdate<
+  RemeasureLineBudgetResult,
+  [RemeasureLineBudgetCommand]
+>('taskRemeasureLineBudget');
 
 export interface TaskRun {
   outcome: 'merged' | 'abandoned';
@@ -213,13 +332,19 @@ export const taskStatusQuery = defineQuery<TaskStatus>('taskStatus');
 // ---- 新增的活动（EngineActivities 里的「任务」一组）
 
 export interface ReadTaskBriefInput {
+  /** 安全边界读取；旧历史缺此字段，不能伪造已核当前合同。 */
+  checkContract?: true;
   schemaVersion: 1;
   repo: Pick<Repo, 'owner' | 'name'>;
   issueNumber: number;
+  /** 安全边界读取：过期或读取失败必须先阻合；旧输入没有。 */
+  contractGuard?: { prNumber: number; expected?: RequirementContract };
 }
 
 /** 起一段动手会话。runId 由活动自己起（每次尝试一个，进 runs 表的主键），工作流里不生成编号。 */
 export interface RunSegmentInput {
+  /** 新版正式正文必须完整交给续会话，不能走日志反馈的长度截断。 */
+  contractRevision?: { reviews: string[] };
   schemaVersion: 1;
   /** 库里的 tasks.id（runs 里这一段挂在这张单上，#216）。 */
   taskId: string;
@@ -333,7 +458,26 @@ export interface ReadDeliveryInput {
   repo: Repo;
   worktreePath: string;
   baseSha: string;
+  /**
+   * 体量关口重评（#3249，可选）：不读会话交付，只在这棵树上对精确 head、固定 base 重做可信计量。
+   * 老 worker 不认这个字段，回的交付里没有 budgetRemeasure，工作流按不支持处理。
+   */
+  budgetRemeasure?: { head: string; base: string; rawAddedLines: number };
 }
+
+/** 重评的活动回答（DeliveryRead.budgetRemeasure）：拒绝带原因；测量带测量前后核对过的头和干净程度。 */
+export type BudgetRemeasureRead =
+  | {
+      version: 1;
+      status: 'measured';
+      head: string;
+      base: string;
+      /** 测量之后重读的头和工作树状态；与入参不同＝测量期间换了。 */
+      headAfter: string;
+      cleanAfter: boolean;
+      measurement: LineBudgetMeasurement;
+    }
+  | { version: 1; status: 'refused'; reason: 'head' | 'base' | 'dirty' | 'raw'; detail: string };
 
 /** 会话交付的东西：工作树现在的头、比起点多了几个提交、改了哪些文件。读不到抛错，不回空。 */
 export interface DeliveryRead {
@@ -351,12 +495,34 @@ export interface DeliveryRead {
    */
   conflicts?: string[];
   /**
-   * 交的头相对树里钉住的主线新增了多少行（#2755 体量预算按它判）。没数成、老历史里没有：当作没量到，不判预算。
+   * 交的头相对钉住主线的原始新增行数，始终与 GitHub additions 同口径。当前真实读取失败抛错；老历史缺省不判预算。
    */
   addedLines?: number;
+  /**
+   * addedLines 实际按哪个 base 数的（头相对钉住主线的 merge-base，#3249）。体量停点把它记进停点身份，重评只认它；
+   * 老历史缺省＝停下时没记，重评明确拒绝，不拿现在的主线或请求者给的旧祖先顶替。
+   */
+  addedLinesBase?: string;
+  /** #3242：原 addedLines 永远是 raw；此项只供新版本预算判断，缺省沿用原判。 */
+  lineBudgetMeasurement?: LineBudgetMeasurement;
+  /** 只在 ReadDeliveryInput.budgetRemeasure 给了时才有（#3249）；这时其它交付字段不代表会话交付。 */
+  budgetRemeasure?: BudgetRemeasureRead;
+}
+
+export interface LineBudgetMeasurement {
+  version: 1;
+  base: string;
+  head: string;
+  rawAddedLines: number;
+  rawDiffBytes?: number;
+  verifiedGeneratedLines: number;
+  chargeableAddedLines: number;
+  verified: boolean;
+  reason: string;
 }
 
 export interface ColdVerifyInput {
+  contract?: RequirementContract;
   schemaVersion: 1;
   taskId: string;
   repo: Repo;
@@ -409,6 +575,8 @@ export interface ColdVerifyAttach {
 }
 
 export interface ColdVerifyResult {
+  /** 原会话已收场，但正式合同变化，不能认其结论或复用增量验收。 */
+  contractChanged?: true;
   /** 验收有结论且通过。 */
   pass: boolean;
   /** 只有三种能挡：没做到验收条、弄坏了原有功能、安全或丢数据。 */
@@ -497,6 +665,7 @@ export interface CheckGuardedInput {
 }
 
 export interface ArmAutoMergeInput {
+  contractGuard?: { issueNumber: number; expected: RequirementContract };
   schemaVersion: 1;
   repo: Repo;
   prNumber: number;
@@ -516,6 +685,7 @@ export interface MainSyncBudgetExhausted {
 }
 
 export interface ArmAutoMergeResult {
+  contractChanged?: true;
   /** 自动合并挂上了（或本来就挂着）。 */
   armed: boolean;
   /** 挂的时候发现已经合了（或本来就满足合并条件、当场合了）。 */
@@ -523,6 +693,8 @@ export interface ArmAutoMergeResult {
   /** merged 时的合并提交。 */
   mergeCommit?: string;
   why?: string;
+  /** 没挂是因为 PR 本身关了、还是草稿（要人处理，引擎续停不续）。老历史没有这个字段。 */
+  refused?: 'closed' | 'draft';
   mainSyncBudgetExhausted?: MainSyncBudgetExhausted;
   /** 挂的时候发现 PR 的头已经不是引擎验过、推上去的那个了（有人改过）：现在的头。老历史里没有这个字段。 */
   headMoved?: string;
@@ -593,6 +765,7 @@ export type ReadCiReviewsResult =
 
 /** 不强制 CI 的仓：开完 PR、查完改标准路径之后由引擎直接合并（不等检查、不挂自动合并）。 */
 export interface MergeNowInput {
+  contractGuard?: { issueNumber: number; expected: RequirementContract };
   schemaVersion: 1;
   repo: Repo;
   prNumber: number;
@@ -602,6 +775,7 @@ export interface MergeNowInput {
 }
 
 export interface MergeNowResult {
+  contractChanged?: true;
   merged: boolean;
   mergeCommit?: string;
   reason?: 'conflict' | 'head_moved' | 'behind_main' | 'closed' | 'review_changes' | 'other';
@@ -615,6 +789,7 @@ export interface MergeNowResult {
 }
 
 export interface WaitMergedInput {
+  contractGuard?: { issueNumber: number; expected: RequirementContract };
   schemaVersion: 1;
   repo: Repo;
   prNumber: number;
@@ -622,7 +797,26 @@ export interface WaitMergedInput {
   minutes: number;
 }
 
+/** 停在合并这一步时现读一次 PR：条件都满足了（#3281）就自己醒来接着合，不等人点「继续」。只读。 */
+export interface MergeReadyInput {
+  schemaVersion: 1;
+  repo: Repo;
+  prNumber: number;
+  expectedHead: string;
+}
+
+export interface MergeReadyResult {
+  /** 已合并，或开着、头没变、没有挂着的「要求改」、必过检查（含合并闸、cold-verify）全绿。 */
+  ready: boolean;
+  /** 为什么能 / 不能，写进等待那一行。 */
+  why: string;
+}
+
+/** 停在合并这一步（等检查超时、挂合并没成、检查没查成）后多久现读一次 PR，条件满足就自己醒（#3281）。 */
+export const MERGE_PARK_RECHECK_SECONDS = 60 * 60;
+
 export type MergeWait =
+  | { state: 'contract_changed' }
   | { state: 'merged'; mergeCommit?: string }
   | { state: 'closed' }
   | { state: 'head_moved'; head: string }
@@ -676,6 +870,25 @@ export interface SelfCheckInput {
   taskId: string;
   repo: RepoWithProfile;
   worktreePath: string;
+  /** 只由新 patched 历史携带；旧历史保持本机自测。 */
+  expectedHead?: string;
+  prNumber?: number;
+}
+
+/** 规范 CI 对源码测试的覆盖，不能计作本机 PASS。 */
+export interface CiTestCoverage {
+  repo: 'thoerwink8/fleet-dao';
+  pr: number;
+  head: string;
+  tree: string;
+  run: number;
+  attempt: number;
+  workflow: number;
+  contractCommit: string;
+  contractHash: string;
+  checks: string[];
+  ciNodes: string[];
+  node: string;
 }
 
 /** 一条命令的结果：精炼过的输出（失败的行和末尾一段，不是整份日志）。 */
@@ -686,6 +899,8 @@ export interface SelfCheckStep {
   exitCode: number | null;
   /** 精炼过的输出（SELF_CHECK_DIGEST_MAX 以内）；跳过的写为什么跳过。 */
   digest: string;
+  /** outcome 仍是 skipped：这条没有在本机实跑。 */
+  coveredByCi?: CiTestCoverage;
 }
 
 /**

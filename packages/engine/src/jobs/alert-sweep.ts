@@ -41,6 +41,9 @@
 //   watchdog-down:…（后端看着看门狗，packages/api 的 watchdog-health.ts：看门狗又按期跑完一轮就撤）、
 //   github-app:<机器人>:<仓>（机器人权限自检 jobs/github-app-check.ts：权限够了就撤）、reconcile:workflow:<任务>（开着的单
 //   没有着落）、reconcile:ledger:<仓>#<号>（合了的 PR 记账不全）——后两个由两处核对自己撤（jobs/reconcile-checks.ts）。
+//   cold-verify:checkout:<目标>（冷验收完整检出，checkoutAlertKey：只有精确头完整检出成功才由 placeVerifyCheckout 的
+//   onRecovered 撤。缺对象、获取失败、落地失败不撤；任务还活跃、已经结束、或状态未知，都不能在这里当成恢复，过期也不算恢复。
+//   老键 cold-verify:checkout-dir 不带目标，前缀对不上，仍走三天过期；不把整个 cold-verify: 算成自己会撤）。
 //   历史上 unclaimed:<提醒>:…、stuck:<提醒>:…（已删的「提醒派单」推出来的）、ask-issue:<提问>、ask-answer:<提问>
 //   （已删的对账给提问另开单推出来的，#530）如果还开着，不再有代码去撤它们，落进下面「判不了、还没接的」那一档，
 //   只靠 24 小时再推。canary:*（全流程巡检，决定 0093）、no-verifier:*（开 PR 前验证留一家）库里还开着的，
@@ -131,6 +134,8 @@ export const SELF_RESOLVING_PREFIXES: readonly string[] = [
   'engine-session-io',
   'cursor-pending:',
   'mirasim-pending:',
+  // 冷验收完整检出（checkoutAlertKey）。只到 cold-verify:checkout:，不含 checkout-dir，也不含整个 cold-verify:。
+  'cold-verify:checkout:',
 ];
 /** 「「<阶段>」没有能用的路由」挂着时，路由恢复了写在正文开头的那一句以它开头（再恢复、再没了按它认出来换掉）。 */
 export const ROUTE_BACK_PREFIX = '路由已经恢复';

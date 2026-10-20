@@ -663,6 +663,52 @@ export function describeStoreContract(name: string, make: MakeStore): void {
         expect(stillOpen?.resolvedBy).toBeUndefined();
       });
 
+      it('历史 checkout 只认专用事故键；未知通知归档不写任何东西', async () => {
+        const identity = {
+          notificationId: IDS.notification1,
+          dedupeKey: 'cold-verify:checkout:task:example/canary#13',
+          repo: 'example/canary',
+          taskId: IDS.task13,
+          issueNumber: 13,
+          workflowId: 'task:example/canary#13',
+          runId: IDS.seg13manual2,
+          temporalRunId: 'temporal-run-not-in-fixture',
+          pr: 39,
+          head: 'b'.repeat(40),
+        };
+        await expect(store.readHistoricalCheckout(identity)).rejects.toThrow();
+        expect(
+          await store.archiveHistoricalCheckout(
+            {
+              ...identity,
+              raisedAt: T0.toISOString(),
+              notificationBody: '旧 checkout',
+              notificationLink: null,
+              repoId: IDS.repo,
+              runSegment: 'verify',
+              runStartedAt: T0.toISOString(),
+              runEndedAt: T0.toISOString(),
+              runOutcome: 'failed',
+              runPrNumber: 39,
+              operator: 'test',
+              reason: 'contract',
+              evidence: 'contract',
+              gaps: 'contract',
+              responsibility: 'contract',
+              conclusion: 'historical_unproven',
+            },
+            {
+              actor: { kind: 'ops', id: 'ops:checkout-history' },
+              action: 'notification.checkout_history_archive',
+              target: `notification:${IDS.notification1}`,
+              via: 'ops',
+              ok: true,
+              reason: 'contract',
+            },
+          ),
+        ).toBe('conflict');
+      });
+
       it('「要你拍」（#1915）：列表带选项；点选项先记下，settleDecision 才转已处理，执行结果不另记操作记录', async () => {
         const by = { kind: 'user' as const, id: DEV_USER_ID };
         const open = await store.listNotifications({ status: 'open', limit: 10 });

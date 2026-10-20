@@ -358,6 +358,11 @@ export interface PickedVerifier {
 
 export interface VerifierInvokeDeps {
   oneShot: OneShotDeps;
+  /**
+   * 还够不够再起一家验收会话（#3281）：换家族链接着起下一家之前问一次，回 false 就不再起，这一次回等待（routeWait），
+   * 工作流过一会儿重验，不让整个活动超时被挂起。没接的（测试、老装配）一直够。
+   */
+  roomForAnother?: () => boolean;
   /** 写证据失败的诊断；不改变真实裁决。生产接任务日志，未装配时仍输出警告。 */
   log?: (message: string, fields?: Record<string, unknown>) => void;
   fetchDiff: FetchDiff;
@@ -1049,6 +1054,9 @@ export async function attachVerifier(
  * - 冷调用跑成 + verdict fail → 模型「## 问题」里以三种能挡开头的那几条
  * - 冷调用跑成 + verdict pass → problems 是空数组（模型该写的「## 问题」也是空的）
  */
+/** 换家族链不再往下起的原因（roomForAnother 回 false）：记进等待，工作流过一会儿重验。 */
+const OUT_OF_TIME = '这一次验收剩下的时间不够再起一家，过一会儿重验';
+
 export async function invokeVerifier(
   input: VerifierInvokeInput,
   deps: VerifierInvokeDeps,
@@ -1362,6 +1370,11 @@ async function invokeVerifierInner(
       const p = await pickFor(family);
       if (p.kind === 'wait') waiting.push({ family, detail: p.detail });
       if (p.kind !== 'model') continue;
+      // 前面的族没验成、活动剩下的时间不够再起一家：不起，等一会儿重验（#3281）
+      if (deps.roomForAnother?.() === false) {
+        waiting.push({ family, detail: OUT_OF_TIME });
+        break;
+      }
       // 一家验：一次只跑一个会话，可以脱开引擎跑（#2848）
       const r = await runFamily(family, p.m, true);
       if (r.kind === 'final') return r.out;
@@ -1421,6 +1434,10 @@ async function invokeVerifierInner(
     const p = await pickFor(family);
     if (p.kind === 'wait') waiting.push({ family, detail: p.detail });
     if (p.kind !== 'model') continue;
+    if (deps.roomForAnother?.() === false) {
+      waiting.push({ family, detail: OUT_OF_TIME });
+      break;
+    }
     const r = await runFamily(family, p.m);
     if (r.kind === 'final') return r.out;
     if (r.kind === 'verdict') verdicts.push(r);

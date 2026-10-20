@@ -31,6 +31,11 @@
 //   有 checksPending / checksRed 时不当成同步次数到顶。
 // - 等合并时必过检查没出现或没出结论（patched('merge-wait-unreadable-checks')）：不是还在跑，活动回 checks_unreadable，
 //   这里停下并写明没查成。老历史里 waitMerged 不回这个状态；标记不在历史里就当还在等，不新增步序。
+// - 停在合并这一步、过一会儿可能自己好的那几种（等检查超时、挂合并没跑成、自动合并没挂上、必过检查没查成；#3281，
+//   patched('merge-park-recheck')）：照旧停下报一次警，之后每 MERGE_PARK_RECHECK_SECONDS 现读一次 PR（mergeReady，只读）——
+//   已合，或开着、头没变、没挂着「要求改」、必过检查（含合并闸、cold-verify）全绿，就自己醒来、和人点「继续」回来走同一条路，不用人点；
+//   不满足原地接着等、不再报警。人闸（改标准、头被别人改了、PR 被关、并主线并不动）不走这条，照旧只等人。
+//   标记不在历史里就照旧 park（无限等人）。
 
 import { CHECKS_RED_PREFIX } from '@fleet-dao/shared/checks-red';
 import { CancellationScope, isCancellation, log, patched } from '@temporalio/workflow';
@@ -41,9 +46,11 @@ import {
   type ColdVerifyResult,
   type GuardedPaths,
   MAX_MAIN_SYNCS,
+  MERGE_PARK_RECHECK_SECONDS,
   MERGE_POLL_MINUTES,
   MERGE_RED_CONFIRM_SECONDS,
   type MergeWait,
+  type ParkKind,
 } from '../task-contract.ts';
 import { activityWithin, failureOf } from './kit.ts';
 import type { TaskRuntime } from './task-runtime.ts';
@@ -181,6 +188,53 @@ function pendingExhaustedDetail(prNumber: number, wait: PendingWait, last?: stri
 }
 
 /**
+ * 停在合并这一步、过一会儿可能自己好的（#3281）：新历史停下后每 MERGE_PARK_RECHECK_SECONDS 现读一次 PR，条件都满足就自己醒，
+ * 回来由调用方照人点「继续」回来那样接着走；老历史照旧 park。现读没跑成不算满足，记下原因接着等，不再报警、不叠一层停下。
+ * 自己醒来后同一个头又因同一个原因停下：不再报警（rt.mergeRecheckWoke），免得条件看着满足、挂合并又不成时每小时一条。
+ */
+async function parkInMerge(
+  rt: TaskRuntime,
+  title: string,
+  detail: string,
+  kind: ParkKind = 'other',
+): Promise<void> {
+  if (!patched('merge-park-recheck')) {
+    await rt.park(title, detail, 'stuck', kind);
+    return;
+  }
+  const prNumber = rt.prNumber;
+  const head = rt.head;
+  if (prNumber === null || head === null) {
+    await rt.park(title, detail, 'stuck', kind);
+    return;
+  }
+  const woke = rt.mergeRecheckWoke;
+  const again = woke !== null && woke.head === head && woke.title === title;
+  const how = await rt.parkUnless(
+    title,
+    `${detail}。引擎每 ${MERGE_PARK_RECHECK_SECONDS / 60} 分钟现读一次这张 PR：必过检查全绿、头没变、没有挂着的「要求改」就自己接着合，不用点「继续」。`,
+    async () => {
+      try {
+        const got = await rt.acts.mergeReady({
+          schemaVersion: 1,
+          repo: rt.input.repo,
+          prNumber,
+          expectedHead: head,
+        });
+        rt.status.lastProblem = got.ready ? null : `${title}：${got.why}`;
+        return got.ready;
+      } catch (error) {
+        if (error instanceof MergedTask || isCancellation(error)) throw error;
+        rt.status.lastProblem = `${title}：复核合并条件没跑成（${failureOf(error, 'mergeReady', rt.limits).message}），下一次再读`;
+        return false;
+      }
+    },
+    { pollSeconds: MERGE_PARK_RECHECK_SECONDS, until: '或引擎复核到合并条件都满足', alert: !again, kind },
+  );
+  rt.mergeRecheckWoke = how === 'left' ? { head, title } : null;
+}
+
+/**
  * 等检查期间再挂一次：这一下（排队、尝试、重试）受剩余期限约束，不走 rt.step 的失败分流梯（那条梯子的退避不看期限）。
  * 到期或这一下超时：park 等检查超时。重试也治不好的错（认证、权限）：当场 park，不当成还在跑。
  * 别的错、期限还有：隔一会儿（不越过期限）再来（again）。parked＝已经停下过、人点了继续，调用方丢掉这段等待从头挂。
@@ -192,7 +246,7 @@ async function armWithinDeadline(
 ): Promise<{ kind: 'result'; armed: ArmAutoMergeResult } | { kind: 'parked' } | { kind: 'again' }> {
   const left = secondsLeft(wait);
   if (left < 1) {
-    await rt.park('等检查超时', pendingExhaustedDetail(prNumber, wait));
+    await parkInMerge(rt, '等检查超时', pendingExhaustedDetail(prNumber, wait));
     return { kind: 'parked' };
   }
   rt.guard();
@@ -203,6 +257,7 @@ async function armWithinDeadline(
       repo: rt.input.repo,
       prNumber,
       expectedHead: wait.head,
+      ...rt.contractGuard(),
       ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
     });
     return { kind: 'result', armed };
@@ -218,14 +273,15 @@ async function armWithinDeadline(
       failure.code === 'WRITE_DEADLINE_PASSED' ||
       after < 1
     ) {
-      await rt.park(
+      await parkInMerge(
+        rt,
         '等检查超时',
         pendingExhaustedDetail(prNumber, wait, `${failure.code}：${failure.message}`),
       );
       return { kind: 'parked' };
     }
     if (failure.retryable === false) {
-      await rt.park(`挂自动合并没跑成（${failure.code}）`, `${failure.message}。${where}`);
+      await parkInMerge(rt, `挂自动合并没跑成（${failure.code}）`, `${failure.message}。${where}`);
       return { kind: 'parked' };
     }
     rt.status.lastProblem = `等检查时挂合并没跑成，再来一次：${failure.message}`;
@@ -262,6 +318,8 @@ export async function guardedPaths(rt: TaskRuntime): Promise<void> {
       await rt.park(
         '改到了标准路径，要创始人同意才挂自动合并（人闸：改标准）',
         `改到：${g.standards.join('、')}。创始人同意后点「继续」；不同意点「放弃」。`,
+        'stuck',
+        'standard',
       );
       approve(rt, head, g, approved);
       continue;
@@ -295,6 +353,7 @@ export async function armAndWaitMerged(
   let pending: PendingWait | null = null;
   for (;;) {
     const head: string = rt.head;
+    if (await rt.refreshContract('挂自动合并前')) return { kind: 'rework' };
     if (pending !== null && pending.head !== head) pending = null;
     // 这一下挂合并开调前的工作流时间：第一次读到还在跑时，期限从这里起算，这一下的耗时也在里面。
     const armStartedAt = Date.now();
@@ -307,6 +366,7 @@ export async function armAndWaitMerged(
           repo: rt.input.repo,
           prNumber,
           expectedHead: head,
+          ...rt.contractGuard(),
           ...(rt.mainSyncs > 0 ? { syncedBehind: rt.mainSyncs } : {}),
         }),
       );
@@ -318,6 +378,10 @@ export async function armAndWaitMerged(
       }
       if (got.kind === 'again') continue;
       armed = got.armed;
+    }
+    if (armed.contractChanged) {
+      await rt.refreshContract('挂合并活动发现修订');
+      return { kind: 'rework' };
     }
     if (armed.merged) return { kind: 'merged', commit: armed.mergeCommit };
     // 挂之前现读到还挂着的正式「要求改」（#2991）：没挂（挂着的已撤），交给工人；交过的停下等审查者，点「继续」回来重挂、重读。
@@ -357,7 +421,7 @@ export async function armAndWaitMerged(
           if (outcome === 'expired' && pending !== null) {
             const detail = pendingExhaustedDetail(prNumber, pending);
             pending = null;
-            await rt.park('等检查超时', detail);
+            await parkInMerge(rt, '等检查超时', detail);
             continue;
           }
           if (outcome === 'rework') return { kind: 'rework' };
@@ -383,7 +447,7 @@ export async function armAndWaitMerged(
           if (left < 1) {
             const detail = pendingExhaustedDetail(prNumber, pending);
             pending = null;
-            await rt.park('等检查超时', detail);
+            await parkInMerge(rt, '等检查超时', detail);
             continue;
           }
           const names = running.names.join('、');
@@ -395,7 +459,7 @@ export async function armAndWaitMerged(
               if (noted === 'expired') {
                 const detail = pendingExhaustedDetail(prNumber, pending);
                 pending = null;
-                await rt.park('等检查超时', detail);
+                await parkInMerge(rt, '等检查超时', detail);
                 continue;
               }
             } else {
@@ -414,7 +478,13 @@ export async function armAndWaitMerged(
       // 不是还在跑、也不是真红：主线同步次数用尽才走结构化续段，别的失败仍停下报人。
       if (await rt.parkMainSyncBudget(armed.mainSyncBudgetExhausted, armed.why ?? '同步主线次数已到上限'))
         continue;
-      await rt.park('自动合并没挂上', armed.why ?? 'GitHub 没说为什么');
+      // 只有「挂不上」本身才算自动合并没挂上（引擎可续）；PR 关了、还是草稿是要人处理的，不续
+      await parkInMerge(
+        rt,
+        '自动合并没挂上',
+        armed.why ?? 'GitHub 没说为什么',
+        armed.refused === undefined ? 'unarmed' : 'other',
+      );
       continue;
     }
     pending = null;
@@ -431,6 +501,7 @@ export async function armAndWaitMerged(
                 prNumber,
                 expectedHead: head,
                 minutes: MERGE_POLL_MINUTES,
+                ...rt.contractGuard(),
               }),
             ),
           ),
@@ -438,6 +509,10 @@ export async function armAndWaitMerged(
       // 不是连着两次红：中间有别的结果就把确认清掉（红一下又变回还在跑，不算要返工）。
       if (w.state !== 'checks_red') rt.mergeRedNoted = false;
       if (w.state === 'merged') return { kind: 'merged', commit: w.mergeCommit };
+      if (w.state === 'contract_changed') {
+        await rt.refreshContract('等待合并发现修订');
+        return { kind: 'rework' };
+      }
       if (w.state === 'review_changes') {
         // 等合并时交的正式「要求改」（#2991）：活动已撤掉自动合并。交给工人，或停下等审查者后回去重挂（挂之前再读一次）。
         // 老历史里 waitMerged 不回这个状态
@@ -500,7 +575,7 @@ export async function armAndWaitMerged(
       if (w.state === 'checks_unreadable') {
         // 老历史重放：这一支是加进来的。patched() 为假就当还在等，不多调活动。
         if (!patched('merge-wait-unreadable-checks')) continue;
-        await rt.park('必过检查没查成', w.detail);
+        await parkInMerge(rt, '必过检查没查成', w.detail, 'transient');
         continue;
       }
       if (w.state === 'checks_red') {

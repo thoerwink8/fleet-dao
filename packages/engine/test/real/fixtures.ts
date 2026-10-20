@@ -386,10 +386,83 @@ export function fakeTrees(root: string) {
     async pendingCleanup() {
       return [];
     },
+    async cleanupNamespace() {
+      return [];
+    },
   };
   /** 工作树、检出副本的交接（会话临时目录的不算）。 */
   const treeAdopts = () => adopts.filter((a) => !a.dir.startsWith(`${tmpBase}/`));
   return { trees, owners, adopts, removes, fail, tmpBase, treeAdopts };
+}
+
+/**
+ * 清理事务分页的假 root 帮手（放在 dir 里）：只认能力和 cleanup-status，按调用顺序吐 pages() 给的回执，
+ * 吐完了按读失败退出。另给一组两页的回执：首页 100 个空/已结桶没有行、仍截断，第二页读完尾桶并复核全部桶，
+ * 尾部 RECOVERY_REQUIRED 只在它里面。
+ */
+export function pagedCleanupHelper(dir: string, root: string) {
+  const helper = join(dir, 'fake-scope.mjs');
+  const features = [
+    'tree-usage',
+    'identity-remove',
+    'cleanup-status',
+    'cleanup-rollback',
+    'locked-adopt',
+    'temporary-files',
+  ];
+  writeFileSync(
+    helper,
+    [
+      "import { readFileSync, writeFileSync } from 'node:fs';",
+      'const [action] = process.argv.slice(2);',
+      `const dir = ${JSON.stringify(dir)};`,
+      `if (action === 'capabilities') { process.stdout.write(JSON.stringify({ version: 1, state: 'ok', features: ${JSON.stringify(features)} })); process.exit(0); }`,
+      "const used = Number(readFileSync(dir + '/used', 'utf8'));",
+      "writeFileSync(dir + '/used', String(used + 1));",
+      "const list = JSON.parse(readFileSync(dir + '/pages.json', 'utf8'));",
+      "if (action !== 'cleanup-status' || used >= list.length) process.exit(1);",
+      'process.stdout.write(JSON.stringify(list[used]));',
+    ].join('\n'),
+  );
+  const namespace = {
+    lex: `${root}/.cleanup-transactions`,
+    real: `${root}/.cleanup-transactions`,
+    dev: '1',
+    ino: '2',
+    uid: '0',
+  };
+  const hash = (n: number) => n.toString(16).padStart(64, '0');
+  const tail = { id: 'e'.repeat(64), pathHash: hash(120), phase: 'RECOVERY_REQUIRED' };
+  const head = { version: 1, state: 'ok', namespace, round: 'd'.repeat(32) };
+  const firstPage = {
+    ...head,
+    rows: [],
+    truncated: true,
+    page: 1,
+    pass: 'read',
+    from: null,
+    through: hash(99),
+    cursor: `c1.${'c'.repeat(64)}`,
+  };
+  const lastPage = {
+    ...head,
+    rows: [tail],
+    truncated: false,
+    page: 2,
+    pass: 'verify',
+    from: hash(99),
+    through: hash(120),
+  };
+  return {
+    helper,
+    tail,
+    firstPage,
+    lastPage,
+    pages(list: unknown[]) {
+      writeFileSync(join(dir, 'pages.json'), JSON.stringify(list));
+      writeFileSync(join(dir, 'used'), '0');
+    },
+  };
 }
 
 export interface FakeRunScript {

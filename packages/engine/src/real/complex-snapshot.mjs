@@ -2,24 +2,29 @@
 // 恢复仓不写 alternates，也不读调用方的 GIT_DIR / GIT_OBJECT_DIRECTORY。
 // 对象包只按清单里的对象名打包。抓成果包之前先证明这些对象都在包里，不靠 refs、reflog 或成果包补洞。
 // 索引按原始字节写回；指纹带标志和 resolve-undo。源仓上不做 reset、clean、stash drop。
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { once } from 'node:events';
 import {
   chmodSync,
   closeSync,
   constants,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  mkdtempSync,
+  opendirSync,
   openSync,
-  readdirSync,
-  readFileSync,
   readlinkSync,
+  readSync,
   rmSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve, sep } from 'node:path';
+import { createInflate } from 'node:zlib';
 
 const mode = process.env.FLEET_SNAP_MODE || 'inspect';
 const gitBin = process.env.FLEET_GIT || 'git';
@@ -27,6 +32,15 @@ const skipDirs = new Set((process.env.FLEET_SKIP_DIRS || '').split('\n').filter(
 const skipFilePats = (process.env.FLEET_SKIP_FILES || '').split('\n').filter(Boolean);
 const envPaths = new Set((process.env.FLEET_ENV_PATHS || '').split('\n').filter(Boolean));
 const preserved = new Set((process.env.FLEET_PRESERVED || '').split('\n').filter(Boolean));
+const MAX_METADATA = 32 * 1024 * 1024;
+const MAX_TOTAL = 1024 * 1024 * 1024;
+const MAX_COMPONENTS = 100003;
+const MAX_OBJECTS = 250000;
+const MAX_OBJECT_BYTES = 256 * 1024 * 1024;
+let captureRoot;
+let captureBytes = 0;
+let metadataRead = 0;
+let visitedPaths = 0;
 const STATE_NAMES = [
   'MERGE_HEAD',
   'MERGE_MSG',
@@ -75,11 +89,11 @@ function gitEnv() {
   return env;
 }
 
-function git(args, cwd, input) {
+function git(args, cwd, input, maxBuffer = 110 * 1024 * 1024) {
   const result = spawnSync(
     gitBin,
     ['-c', 'core.quotePath=false', '-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...args],
-    { cwd, env: gitEnv(), input, maxBuffer: 110 * 1024 * 1024 },
+    { cwd, env: gitEnv(), input, maxBuffer },
   );
   if (result.error) fail(`git ${args[0]}：${result.error.message}`);
   if (result.status !== 0) {
@@ -110,6 +124,7 @@ function safeRel(path) {
     path.includes('\0') ||
     path.includes('\n') ||
     path.includes('\\') ||
+    Buffer.byteLength(path) > 4096 ||
     path.split('/').some((part) => part === '' || part === '.' || part === '..')
   ) {
     fail(`路径不能归档：${String(path).slice(0, 80)}`);
@@ -119,8 +134,13 @@ function safeRel(path) {
 function readNoFollow(full, path) {
   let fd;
   try {
-    fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW);
-    return readFileSync(fd);
+    fd = safeOpenFile(full);
+    const before = fstatSync(fd);
+    metadataRead += before.size;
+    if (metadataRead > MAX_METADATA) fail(`元数据超过 32MiB：${path}`);
+    const bytes = readFixedMetadata(fd, before.size);
+    if (bytes.length !== before.size || !sameFile(before, fstatSync(fd))) fail(`元数据读取期间变化：${path}`);
+    return bytes;
   } catch (error) {
     fail(`读文件失败 ${path}：${error instanceof Error ? error.message : '读不了'}`);
   } finally {
@@ -129,15 +149,160 @@ function readNoFollow(full, path) {
   return Buffer.alloc(0);
 }
 
+function readFixedMetadata(fd, size) {
+  if (!Number.isSafeInteger(size) || size < 0 || size > MAX_METADATA) fail('元数据长度越界');
+  const bytes = Buffer.alloc(size);
+  let offset = 0;
+  while (offset < size) {
+    const length = readSync(fd, bytes, offset, size - offset, offset);
+    if (!length) fail('元数据读取截断');
+    offset += length;
+  }
+  if (readSync(fd, Buffer.alloc(1), 0, 1, size)) fail('元数据读取期间变长');
+  return bytes;
+}
+
+// 逐级固定目录FD，不能只防最后一级链接。沿用合法Unix名字，不增加Windows名单。
+function safeOpenFile(full, directory = false) {
+  const parts = resolve(full).split('/').filter(Boolean);
+  let fd = openSync('/', constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    for (let i = 0; i < parts.length; i += 1) {
+      const next = openSync(
+        `/proc/self/fd/${fd}/${parts[i]}`,
+        constants.O_RDONLY |
+          constants.O_NOFOLLOW |
+          constants.O_NONBLOCK |
+          (i === parts.length - 1 && !directory ? 0 : constants.O_DIRECTORY),
+      );
+      closeSync(fd);
+      fd = next;
+    }
+    if (directory ? !fstatSync(fd).isDirectory() : !fstatSync(fd).isFile()) fail('快照组件类型不符');
+    return fd;
+  } catch (error) {
+    closeSync(fd);
+    throw error;
+  }
+}
+
+function boundedNames(full) {
+  const fd = safeOpenFile(full, true);
+  let directory;
+  try {
+    directory = opendirSync(`/proc/self/fd/${fd}`);
+    const names = [];
+    for (;;) {
+      const item = directory.readSync();
+      if (!item) break;
+      if (names.length >= 100000) fail('目录项超过快照数量预算');
+      names.push(item.name);
+    }
+    return names;
+  } finally {
+    directory?.closeSync();
+    closeSync(fd);
+  }
+}
+
+function operationRoot(prefix) {
+  if (!process.env.FLEET_SNAP_TEMP) return mkdtempSync(join(tmpdir(), prefix));
+  const identity = JSON.parse(process.env.FLEET_SNAP_TEMP);
+  if (
+    typeof identity.path !== 'string' ||
+    !identity.path.endsWith(`/fleet-snapshot-${identity.token}`) ||
+    !/^[0-9a-f-]{36}$/.test(identity.token)
+  )
+    fail('临时事务身份非法');
+  const fd = safeOpenFile(identity.path, true);
+  try {
+    const stat = fstatSync(fd);
+    if (
+      String(stat.dev) !== identity.dev ||
+      String(stat.ino) !== identity.ino ||
+      String(stat.uid) !== identity.uid ||
+      stat.uid !== process.getuid() ||
+      (stat.mode & 0o777) !== 0o700
+    )
+      fail('临时事务身份变化');
+    return identity.path;
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function cleanupOperationRoot(root) {
+  if (!process.env.FLEET_SNAP_TEMP) rmSync(root, { recursive: true, force: true });
+}
+
+function sameFile(a, b) {
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.size === b.size &&
+    a.mode === b.mode &&
+    a.mtimeMs === b.mtimeMs &&
+    a.ctimeMs === b.ctimeMs
+  );
+}
+
+function streamSourceFile(full, path, save) {
+  const fd = safeOpenFile(full);
+  let output;
+  let component;
+  try {
+    const before = fstatSync(fd);
+    if (before.size > MAX_TOTAL) fail(`文件超过快照预算：${path}`);
+    if (save) {
+      captureBytes += before.size;
+      if (captureBytes > MAX_TOTAL) fail('快照临时组件超过 1GiB');
+      const dest = join(captureRoot, `blob-${captureBytes}-${Math.random().toString(16).slice(2)}`);
+      output = openSync(
+        dest,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+        0o600,
+      );
+      component = { path: dest, length: before.size };
+    }
+    const hash = createHash('sha256');
+    const block = Buffer.alloc(64 * 1024);
+    let offset = 0;
+    for (;;) {
+      const length = readSync(fd, block, 0, block.length, offset);
+      if (!length) break;
+      offset += length;
+      if (offset > before.size) fail(`文件读取期间变长：${path}`);
+      const bytes = block.subarray(0, length);
+      hash.update(bytes);
+      if (output !== undefined) writeAll(output, bytes);
+    }
+    if (offset !== before.size || !sameFile(before, fstatSync(fd))) fail(`文件读取期间变化：${path}`);
+    return { sum: hash.digest('hex'), component };
+  } finally {
+    closeSync(fd);
+    if (output !== undefined) closeSync(output);
+  }
+}
+
+function writeAll(fd, bytes) {
+  let offset = 0;
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset, bytes.length - offset);
+    if (!written) fail('组件写入没有进展');
+    offset += written;
+  }
+}
+
 function walk(root, rel, files, ignored, blobs) {
   const abs = rel ? join(root, rel) : root;
   let names;
   try {
-    names = readdirSync(abs);
+    names = boundedNames(abs);
   } catch (error) {
     fail(`列目录失败 ${rel || '.'}：${error instanceof Error ? error.message : '读不了'}`);
   }
   for (const name of names.sort()) {
+    if (++visitedPaths > 100000) fail('快照路径太多');
     const path = rel ? `${rel}/${name}` : name;
     safeRel(path);
     const full = join(abs, name);
@@ -159,7 +324,7 @@ function walk(root, rel, files, ignored, blobs) {
       }
       let nested;
       try {
-        nested = readdirSync(full);
+        nested = boundedNames(full);
       } catch (error) {
         fail(`列目录失败 ${path}：${error instanceof Error ? error.message : '读不了'}`);
       }
@@ -199,10 +364,10 @@ function walk(root, rel, files, ignored, blobs) {
       continue;
     }
     if (st.isFile()) {
-      const buf = readNoFollow(full, path);
-      const sum = sha256(buf);
+      const content = streamSourceFile(full, path, Boolean(blobs));
+      const sum = content.sum;
       files.push({ path, kind: 'file', mode: st.mode & 0o777, sha256: sum });
-      blobs?.set(sum, buf);
+      blobs?.set(sum, content.component);
       continue;
     }
     fail(`${path} 不是普通文件、目录或符号链接，不能丢`);
@@ -218,7 +383,7 @@ function readStateFiles(cwd, blobs) {
   const wanted = new Set(STATE_NAMES);
   let top;
   try {
-    top = readdirSync(gitDir);
+    top = boundedNames(gitDir);
   } catch (error) {
     fail(`列 Git 目录失败：${error instanceof Error ? error.message : '读不了'}`);
   }
@@ -250,7 +415,7 @@ function readStateFiles(cwd, blobs) {
         const dir = sub ? join(abs, sub) : abs;
         let entries;
         try {
-          entries = readdirSync(dir);
+          entries = boundedNames(dir);
         } catch (error) {
           fail(`列合并状态 ${name} 失败：${error instanceof Error ? error.message : '读不了'}`);
         }
@@ -581,7 +746,7 @@ function rejectSplitIndex(cwd) {
     const abs = rel.startsWith('/') ? rel : join(cwd, rel);
     let names;
     try {
-      names = readdirSync(abs);
+      names = boundedNames(abs);
     } catch (error) {
       fail(`列 Git 目录失败：${error instanceof Error ? error.message : '读不了'}`);
     }
@@ -621,11 +786,13 @@ function mergeText(cwd, name) {
   const rest = name.slice(top.length + 1);
   const rel = gitPath(top, cwd);
   const abs = rel.startsWith('/') ? rel : join(cwd, rel);
-  return readFileSync(rest ? join(abs, rest) : abs);
+  return readNoFollow(rest ? join(abs, rest) : abs, name);
 }
 
 function collect(cwd, keepBytes) {
   CLOSED.clear();
+  metadataRead = 0;
+  visitedPaths = 0;
   const blobs = keepBytes ? new Map() : null;
   const head = git(['rev-parse', 'HEAD'], cwd).toString('utf8').trim();
   if (!/^[0-9a-f]{40}$/.test(head)) fail(`HEAD 认不出：${head}`);
@@ -669,8 +836,9 @@ function collect(cwd, keepBytes) {
     for (const sha of sequenceObjects(item.name, text, cwd)) addClosure(sha, cwd, oids);
   }
   const list = [...oids].sort();
+  if (list.length > MAX_OBJECTS) fail('快照对象太多');
   const checked = git(
-    ['cat-file', '--batch-check=%(objectname) %(objecttype)'],
+    ['cat-file', '--batch-check=%(objectname) %(objecttype) %(objectsize)'],
     cwd,
     Buffer.from(`${list.join('\n')}\n`),
   )
@@ -679,15 +847,21 @@ function collect(cwd, keepBytes) {
     .split('\n')
     .filter(Boolean);
   if (checked.length !== list.length) fail(`对象闭包对不上：要 ${list.length} 个，看到 ${checked.length} 个`);
+  let expanded = 0;
   const objects = checked.map((line) => {
-    const [sha, type] = line.split(' ');
+    const [sha, type, sizeText] = line.split(' ');
     if (!sha || !type || type === 'missing') fail(`对象缺失：${line}`);
+    const size = Number(sizeText);
+    expanded += size;
+    if (!Number.isSafeInteger(size) || size < 0 || size > MAX_OBJECT_BYTES || expanded > MAX_TOTAL)
+      fail('对象解压预算越界');
     return { sha, type };
   });
   const objectsSha = sha256(Buffer.from(objects.map((item) => `${item.sha} ${item.type}`).join('\n')));
   files.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   ignored.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   merge.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  if (files.length + ignored.length + merge.length > 100000) fail('快照路径太多');
   return {
     state: {
       version: 3,
@@ -711,46 +885,100 @@ function collect(cwd, keepBytes) {
   };
 }
 
-function frameOf(state, blobs, pack, bundle) {
-  const parts = [];
-  const add = (name, buf) => {
-    parts.push(Buffer.from(`${name} ${buf.length}\n`));
-    parts.push(buf);
-  };
-  add('JSON', Buffer.from(JSON.stringify(state)));
-  add('PACK', pack);
-  add('BUNDLE', bundle);
-  for (const [sum, buf] of [...blobs.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) add(`BLOB ${sum}`, buf);
-  parts.push(Buffer.from('END\n'));
-  return Buffer.concat(parts);
+async function gitComponent(args, input, name) {
+  const path = join(captureRoot, name);
+  const fd = openSync(
+    path,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+  const child = spawn(gitBin, ['-c', 'maintenance.auto=false', '-c', 'gc.auto=0', ...args], {
+    cwd: process.cwd(),
+    env: gitEnv(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  let length = 0;
+  let stderr = '';
+  const closed = new Promise((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', resolve);
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr = (stderr + chunk.toString()).slice(-4000);
+  });
+  child.stdin.on('error', () => {});
+  child.stdin.end(input);
+  try {
+    for await (const chunk of child.stdout) {
+      length += chunk.length;
+      captureBytes += chunk.length;
+      if (captureBytes > MAX_TOTAL) throw new Error('快照临时组件超过 1GiB');
+      writeAll(fd, chunk);
+    }
+    if ((await closed) !== 0) fail(`git ${args[0]} 失败：${stderr}`);
+    if (!length) fail(`git ${args[0]} 输出为空`);
+    return { path, length };
+  } catch (error) {
+    child.kill('SIGKILL');
+    await closed.catch(() => {});
+    throw error;
+  } finally {
+    closeSync(fd);
+  }
 }
 
-function parseFrame(buf) {
-  let at = 0;
-  const blobs = new Map();
-  let state;
-  let pack;
-  let bundle;
-  while (at < buf.length) {
-    const nl = buf.indexOf(0x0a, at);
-    if (nl < 0) fail('快照帧不完整');
-    const header = buf.subarray(at, nl).toString('utf8');
-    at = nl + 1;
-    if (header === 'END') break;
-    const matched = /^(JSON|PACK|BUNDLE|BLOB [0-9a-f]{64}) (\d+)$/.exec(header);
-    if (!matched?.[1] || !matched[2]) fail(`快照帧认不出：${header.slice(0, 80)}`);
-    const len = Number(matched[2]);
-    if (!Number.isInteger(len) || at + len > buf.length) fail('快照帧长度不对');
-    const body = buf.subarray(at, at + len);
-    at += len;
-    if (matched[1] === 'JSON') state = JSON.parse(body.toString('utf8'));
-    else if (matched[1] === 'PACK') pack = body;
-    else if (matched[1] === 'BUNDLE') bundle = body;
-    else blobs.set(matched[1].slice(5), Buffer.from(body));
+async function outputBytes(bytes) {
+  if (!process.stdout.write(bytes)) await once(process.stdout, 'drain');
+}
+
+async function outputFrame(state, blobs, pack, bundle) {
+  const json = Buffer.from(JSON.stringify(state));
+  if (json.length > MAX_METADATA) fail('快照状态超过 32MiB');
+  let total = 4;
+  const components = [
+    ['JSON', json],
+    ['PACK', pack],
+    ['BUNDLE', bundle],
+    ...[...blobs.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : 1))
+      .map(([sum, value]) => [`BLOB ${sum}`, value]),
+  ];
+  if (components.length > MAX_COMPONENTS) fail('快照组件太多');
+  for (const [name, value] of components) {
+    const length = Buffer.isBuffer(value) ? value.length : value.length;
+    total += Buffer.byteLength(`${name} ${length}\n`) + length;
   }
-  if (at !== buf.length) fail('快照帧尾部有多余字节');
-  if (!state || !pack || !bundle) fail('快照帧缺内容');
-  return { state, pack, bundle, blobs };
+  if (total > MAX_TOTAL) fail('快照帧超过 1GiB');
+  for (const [name, value] of components) {
+    if (Buffer.isBuffer(value)) {
+      await outputBytes(Buffer.from(`${name} ${value.length}\n`));
+      await outputBytes(value);
+      continue;
+    }
+    const fd = safeOpenFile(value.path);
+    try {
+      const before = fstatSync(fd);
+      if (before.size !== value.length || (before.mode & 0o777) !== 0o600 || before.uid !== process.getuid())
+        fail('临时组件身份或长度变化');
+      await outputBytes(Buffer.from(`${name} ${value.length}\n`));
+      const block = Buffer.alloc(64 * 1024);
+      const hash = createHash('sha256');
+      let offset = 0;
+      while (offset < value.length) {
+        const length = readSync(fd, block, 0, Math.min(block.length, value.length - offset), offset);
+        if (!length) fail('临时组件读取不全');
+        const bytes = block.subarray(0, length);
+        hash.update(bytes);
+        await outputBytes(bytes);
+        offset += length;
+      }
+      if (!sameFile(before, fstatSync(fd))) fail('临时组件读取期间变化');
+      if (name.startsWith('BLOB ') && hash.digest('hex') !== name.slice(5)) fail('源文件内容变化');
+    } finally {
+      closeSync(fd);
+    }
+  }
+  await outputBytes(Buffer.from('END\n'));
 }
 
 function place(root, rel, write) {
@@ -800,27 +1028,357 @@ function rebuildStash(repo, stash) {
   }
 }
 
-function restore(frame) {
-  const { state, pack, bundle, blobs } = parseFrame(frame);
-  const root = join(tmpdir(), `fleet-recovery-${process.pid}-${Date.now()}`);
-  mkdirSync(root, { mode: 0o700 });
+function readComponent(component, limit) {
+  if (component.length > limit) fail('恢复元数据过大');
+  const fd = safeOpenFile(component.path);
+  try {
+    if (fstatSync(fd).size !== component.length) fail('恢复组件长度不符');
+    return readFixedMetadata(fd, component.length);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+function copyComponent(component, dest, expected) {
+  const fd = safeOpenFile(component.path);
+  const output = openSync(
+    dest,
+    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    const before = fstatSync(fd);
+    const hash = createHash('sha256');
+    const block = Buffer.alloc(64 * 1024);
+    let offset = 0;
+    while (offset < component.length) {
+      const length = readSync(fd, block, 0, Math.min(block.length, component.length - offset), offset);
+      if (!length) fail('恢复组件截断');
+      const bytes = block.subarray(0, length);
+      hash.update(bytes);
+      writeAll(output, bytes);
+      offset += length;
+    }
+    if (
+      !sameFile(before, fstatSync(fd)) ||
+      before.size !== component.length ||
+      hash.digest('hex') !== expected
+    )
+      fail('恢复组件内容变化');
+  } finally {
+    closeSync(fd);
+    closeSync(output);
+  }
+}
+
+async function receiveFrame(root) {
+  const blobs = new Map();
+  const components = {};
+  let header = Buffer.alloc(0);
+  let current;
+  let fd;
+  let hash;
+  let remaining = 0;
+  let total = 0;
+  let declared = 0;
+  let count = 0;
+  let ended = false;
+  let lastBlob = '';
+  const finish = () => {
+    closeSync(fd);
+    fd = undefined;
+    const sum = hash.digest('hex');
+    if (current.name.startsWith('BLOB ')) {
+      if (sum !== current.name.slice(5)) fail('恢复BLOB哈希不符');
+      blobs.set(sum, current);
+    } else components[current.name] = current;
+    current = undefined;
+  };
+  try {
+    for await (const chunk of process.stdin) {
+      total += chunk.length;
+      if (total > MAX_TOTAL) fail('恢复帧超过 1GiB');
+      let offset = 0;
+      while (offset < chunk.length) {
+        if (ended) fail('恢复帧END后有多余字节');
+        if (current) {
+          const take = Math.min(remaining, chunk.length - offset);
+          const bytes = chunk.subarray(offset, offset + take);
+          writeAll(fd, bytes);
+          hash.update(bytes);
+          remaining -= take;
+          offset += take;
+          if (!remaining) finish();
+          continue;
+        }
+        const nl = chunk.indexOf(10, offset);
+        const stop = nl < 0 ? chunk.length : nl;
+        if (header.length + stop - offset > 100) fail('恢复帧头太长');
+        header = Buffer.concat([header, chunk.subarray(offset, stop)]);
+        offset = stop;
+        if (nl < 0) break;
+        offset += 1;
+        if ([...header].some((byte) => byte > 127)) fail('恢复帧头不是ASCII');
+        const line = header.toString('ascii');
+        declared += header.length + 1;
+        header = Buffer.alloc(0);
+        if (line === 'END') {
+          if (count < 3 || declared > MAX_TOTAL) fail('恢复帧缺组件');
+          ended = true;
+          continue;
+        }
+        const matched = /^(JSON|PACK|BUNDLE|BLOB [0-9a-f]{64}) (0|[1-9][0-9]*)$/.exec(line);
+        if (!matched) fail('恢复帧头认不出');
+        const name = matched[1];
+        const length = Number(matched[2]);
+        const required = ['JSON', 'PACK', 'BUNDLE'][count];
+        if (required ? name !== required : !name.startsWith('BLOB ')) fail('恢复组件重复或次序不符');
+        if (name.startsWith('BLOB ')) {
+          if (name.slice(5) <= lastBlob) fail('恢复BLOB重复或次序不符');
+          lastBlob = name.slice(5);
+        }
+        if (!Number.isSafeInteger(length) || length < 0 || (name === 'JSON' && length > MAX_METADATA))
+          fail('恢复组件长度越界');
+        declared += length;
+        if (declared + 4 > MAX_TOTAL || ++count > MAX_COMPONENTS) fail('恢复帧超过预算');
+        current = { name, path: join(root, `component-${count}`), length };
+        fd = openSync(
+          current.path,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o600,
+        );
+        hash = createHash('sha256');
+        remaining = length;
+        if (!remaining) finish();
+      }
+    }
+    if (!ended || current || header.length || total !== declared) fail('恢复帧不完整');
+    const state = JSON.parse(readComponent(components.JSON, MAX_METADATA).toString('utf8'));
+    if (
+      !Array.isArray(state.objects) ||
+      state.objects.length > MAX_OBJECTS ||
+      !Array.isArray(state.files) ||
+      state.files.length > 100000 ||
+      !Array.isArray(state.merge) ||
+      state.merge.length > 100000
+    )
+      fail('恢复状态数量越界');
+    for (const obj of state.objects)
+      if (!/^[0-9a-f]{40}$/.test(obj.sha) || !['blob', 'tree', 'commit', 'tag'].includes(obj.type))
+        fail('恢复对象声明非法');
+    for (const item of state.files) safeRel(item.path);
+    for (const item of state.merge) safeRel(item.name);
+    return { state, pack: components.PACK, bundle: components.BUNDLE, blobs };
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+// 在交给Git之前逐对象验证解压预算。丢弃解压块，不持有对象或整个PACK。
+async function validatePackedBudget(component, expectedCount, initialOffset = 0, exact = true) {
+  const fd = safeOpenFile(component.path);
+  const before = fstatSync(fd);
+  let offset = initialOffset;
+  const byte = () => {
+    const value = Buffer.alloc(1);
+    if (readSync(fd, value, 0, 1, offset++) !== 1) fail('对象包头截断');
+    return value[0];
+  };
+  try {
+    const header = Buffer.alloc(12);
+    if (
+      readSync(fd, header, 0, 12, initialOffset) !== 12 ||
+      header.toString('ascii', 0, 4) !== 'PACK' ||
+      ![2, 3].includes(header.readUInt32BE(4))
+    )
+      fail('对象包头非法');
+    const count = header.readUInt32BE(8);
+    if (count > MAX_OBJECTS || (exact ? count !== expectedCount : count > expectedCount))
+      fail('对象包数量不符或越界');
+    offset = initialOffset + 12;
+    let expanded = 0;
+    let inflatedTotal = 0;
+    for (let index = 0; index < count; index += 1) {
+      let value = byte();
+      const type = (value >> 4) & 7;
+      let size = value & 15;
+      let factor = 16;
+      let headerBytes = 1;
+      while (value & 128) {
+        if (++headerBytes > 10) fail('对象长度头越界');
+        value = byte();
+        size += (value & 127) * factor;
+        factor *= 128;
+      }
+      if (!Number.isSafeInteger(size) || size > MAX_OBJECT_BYTES) fail('单对象解压超过 256MiB');
+      if (![1, 2, 3, 4, 6, 7].includes(type)) fail('对象包类型非法');
+      if (type === 6) {
+        let n = 0;
+        do {
+          value = byte();
+          if (++n > 10) fail('delta偏移越界');
+        } while (value & 128);
+      }
+      if (type === 7) for (let n = 0; n < 20; n += 1) byte();
+      const inflater = createInflate({ chunkSize: 64 * 1024 });
+      let ended = false;
+      let error;
+      let output = 0;
+      let prefix = Buffer.alloc(0);
+      inflater.on('end', () => {
+        ended = true;
+      });
+      inflater.on('error', (cause) => {
+        error = cause;
+      });
+      inflater.on('data', (chunk) => {
+        output += chunk.length;
+        inflatedTotal += chunk.length;
+        if (prefix.length < 20) prefix = Buffer.concat([prefix, chunk.subarray(0, 20 - prefix.length)]);
+        if (output > size || output > MAX_OBJECT_BYTES || inflatedTotal > MAX_TOTAL)
+          inflater.destroy(new Error('对象实际解压越界'));
+      });
+      const start = offset;
+      let supplied = 0;
+      try {
+        while (!ended && !error) {
+          const buffer = Buffer.alloc(64 * 1024);
+          const length = readSync(fd, buffer, 0, buffer.length, start + supplied);
+          if (!length) fail('对象压缩流截断');
+          supplied += length;
+          await new Promise((resolve, reject) =>
+            inflater.write(buffer.subarray(0, length), (cause) => (cause ? reject(cause) : resolve())),
+          );
+        }
+        if (error) throw error;
+        if (output !== size || !ended) fail('对象解压长度不符');
+        offset = start + inflater.bytesWritten;
+      } finally {
+        inflater.destroy();
+      }
+      let actual = size;
+      if (type === 6 || type === 7) {
+        let pos = 0;
+        const number = () => {
+          let result = 0;
+          let scale = 1;
+          let b;
+          do {
+            if (pos >= prefix.length) fail('delta长度头截断');
+            b = prefix[pos++];
+            result += (b & 127) * scale;
+            scale *= 128;
+            if (!Number.isSafeInteger(result) || result > MAX_OBJECT_BYTES) fail('delta对象解压超过 256MiB');
+          } while (b & 128);
+          return result;
+        };
+        number();
+        actual = number();
+      }
+      expanded += actual;
+      if (expanded > MAX_TOTAL) fail('对象解压总量超过 1GiB');
+    }
+    if (offset + 20 !== component.length || !sameFile(before, fstatSync(fd))) fail('对象包尾部或身份不符');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+// 恢复仓里按清单顺序核对象类型。每批一个短命 cat-file，输入输出都有上界，逐行核对象号、类型和行数。
+// 缺失、错类型、多行少行、截断、非法输出、退出码非零或被信号杀掉都失败，不当成通过。
+const CHECK_BATCH = 4096;
+// 40 位对象号、空格、最长的 missing、换行。
+const CHECK_LINE = 49;
+
+function checkObjectTypes(repo, objects, mismatch) {
+  if (!Array.isArray(objects) || objects.length > MAX_OBJECTS) fail('恢复对象清单数量越界');
+  const seen = new Set();
+  for (const obj of objects) {
+    if (!/^[0-9a-f]{40}$/.test(obj?.sha) || !['blob', 'tree', 'commit', 'tag'].includes(obj.type))
+      fail('恢复对象声明非法');
+    if (seen.has(obj.sha)) fail(`恢复对象声明重复：${obj.sha}`);
+    seen.add(obj.sha);
+  }
+  for (let start = 0; start < objects.length; start += CHECK_BATCH) {
+    const batch = objects.slice(start, start + CHECK_BATCH);
+    const out = git(
+      ['cat-file', '--buffer', '--batch-check=%(objectname) %(objecttype)'],
+      repo,
+      Buffer.from(`${batch.map((obj) => obj.sha).join('\n')}\n`),
+      batch.length * CHECK_LINE,
+    ).toString('latin1');
+    if (!out.endsWith('\n')) fail(`批量核对输出截断：第 ${start + 1} 个起`);
+    const lines = out.slice(0, -1).split('\n');
+    if (lines.length !== batch.length)
+      fail(`批量核对行数对不上：要 ${batch.length} 行，看到 ${lines.length} 行`);
+    for (let i = 0; i < batch.length; i += 1) {
+      const obj = batch[i];
+      const line = lines[i];
+      if (!line.startsWith(`${obj.sha} `)) fail(`批量核对输出对不上 ${obj.sha}：${line.slice(0, 80)}`);
+      const got = line.slice(41);
+      if (got === 'missing') fail(mismatch(obj, 'missing'));
+      if (!['blob', 'tree', 'commit', 'tag'].includes(got)) fail(`批量核对输出认不出：${line.slice(0, 80)}`);
+      if (got !== obj.type) fail(mismatch(obj, got));
+    }
+  }
+}
+
+function bundlePackOffset(component) {
+  const fd = safeOpenFile(component.path);
+  try {
+    const block = Buffer.alloc(64 * 1024);
+    let offset = 0;
+    let previous = -1;
+    while (offset < Math.min(component.length, MAX_METADATA)) {
+      const length = readSync(fd, block, 0, Math.min(block.length, MAX_METADATA - offset), offset);
+      if (!length) break;
+      for (let i = 0; i < length; i += 1) {
+        if (previous === 10 && block[i] === 10) return offset + i + 1;
+        previous = block[i];
+      }
+      offset += length;
+    }
+    fail('成果包头缺失或超过元数据预算');
+  } finally {
+    closeSync(fd);
+  }
+}
+
+async function restore(components, root) {
+  const { state, pack, bundle, blobs } = components;
   const repo = join(root, 'repo');
   try {
     if (state.version !== 3 || typeof state.indexBlob !== 'string')
       fail('快照状态不是完整版本，不能放行删除');
+    await validatePackedBudget(pack, state.objects.length);
+    await validatePackedBudget(bundle, state.objects.length, bundlePackOffset(bundle), false);
     git(['init', '-q', '-b', 'main', repo], root);
     // git 2.43 拒绝把成果包抓进当前检出的分支。这个名字不会落成引用。
     git(['symbolic-ref', 'HEAD', 'refs/heads/fleet-restore-unborn'], repo);
-    git(['unpack-objects'], repo, pack);
-    for (const obj of state.objects) {
-      const got = spawnSync(gitBin, ['-C', repo, 'cat-file', '-t', obj.sha], { env: gitEnv() });
-      if (got.status !== 0) fail(`对象包缺 ${obj.sha}，不能靠成果包补`);
-      if (got.stdout.toString('utf8').trim() !== obj.type) {
-        fail(`对象包里的 ${obj.sha} 应是 ${obj.type}，实际 ${got.stdout.toString('utf8').trim() || '没有'}`);
-      }
+    const packFd = safeOpenFile(pack.path);
+    try {
+      const result = spawnSync(
+        gitBin,
+        ['index-pack', '--stdin', '--strict', '--threads=1', `--max-input-size=${MAX_TOTAL}`],
+        {
+          cwd: repo,
+          env: gitEnv(),
+          stdio: [packFd, 'pipe', 'pipe'],
+          maxBuffer: MAX_METADATA,
+        },
+      );
+      if (result.error || result.status !== 0)
+        fail(`对象包独立恢复失败：${result.stderr?.toString().slice(0, 400) || result.error?.message}`);
+    } finally {
+      closeSync(packFd);
     }
-    const bundlePath = join(root, 'recovery.bundle');
-    writeFileSync(bundlePath, bundle, { mode: 0o600 });
+    // 成果包导入前单独核对象包：BUNDLE 补上的对象不算原包完整。
+    checkObjectTypes(repo, state.objects, (obj, got) =>
+      got === 'missing'
+        ? `对象包缺 ${obj.sha}，不能靠成果包补`
+        : `对象包里的 ${obj.sha} 应是 ${obj.type}，实际 ${got}`,
+    );
+    const bundlePath = bundle.path;
     const verified = spawnSync(gitBin, ['-C', repo, 'bundle', 'verify', bundlePath], { env: gitEnv() });
     if (verified.status !== 0) fail(`成果包核对失败：${verified.stderr?.toString('utf8').slice(0, 400)}`);
     git(['fetch', '--no-tags', '-q', bundlePath, '+refs/*:refs/*', 'HEAD'], repo);
@@ -838,15 +1396,18 @@ function restore(frame) {
         fail('看恢复仓 alternates 没看成');
       }
     }
+    let restoredBytes = 0;
     for (const file of state.files) {
-      const buf = blobs.get(file.sha256);
-      if (!buf) fail(`归档缺文件内容：${file.path}`);
-      if (sha256(buf) !== file.sha256) fail(`归档内容哈希对不上：${file.path}`);
+      const component = blobs.get(file.sha256);
+      if (!component) fail(`归档缺文件内容：${file.path}`);
+      restoredBytes += component.length;
+      if (restoredBytes > MAX_TOTAL) fail('恢复工作文件超过 1GiB');
       if (file.kind === 'symlink') {
+        const buf = readComponent(component, 4096);
         place(repo, file.path, (dest) => symlinkSync(buf.toString('utf8'), dest));
       } else if (file.kind === 'file') {
         place(repo, file.path, (dest) => {
-          writeFileSync(dest, buf);
+          copyComponent(component, dest, file.sha256);
           chmodSync(dest, file.mode);
         });
       } else if (file.kind === 'dir') {
@@ -856,8 +1417,10 @@ function restore(frame) {
         });
       } else fail(`认不出的文件种类：${file.kind}`);
     }
-    const indexBuf = blobs.get(state.indexBlob);
-    if (!indexBuf || sha256(indexBuf) !== state.indexBlob) fail('归档缺索引内容');
+    const indexComponent = blobs.get(state.indexBlob);
+    if (!indexComponent) fail('归档缺索引内容');
+    const indexBuf = readComponent(indexComponent, MAX_METADATA);
+    if (sha256(indexBuf) !== state.indexBlob) fail('归档索引内容不符');
     const indexRel = gitPath('index', repo);
     const indexAbs = indexRel.startsWith('/') ? indexRel : join(repo, indexRel);
     try {
@@ -871,47 +1434,59 @@ function restore(frame) {
     const gitDir = git(['rev-parse', '--absolute-git-dir'], repo).toString('utf8').trim();
     for (const item of state.merge) {
       safeRel(item.name);
-      const buf = blobs.get(item.sha256);
-      if (!buf || sha256(buf) !== item.sha256) fail(`合并状态内容对不上：${item.name}`);
+      const component = blobs.get(item.sha256);
+      if (!component) fail(`合并状态内容对不上：${item.name}`);
+      restoredBytes += component.length;
+      if (restoredBytes > MAX_TOTAL) fail('恢复状态超过 1GiB');
       const dest = resolve(gitDir, item.name);
       const gitRoot = resolve(gitDir);
       if (dest !== gitRoot && !dest.startsWith(`${gitRoot}${sep}`)) fail(`合并状态越界：${item.name}`);
       mkdirSync(dirname(dest), { recursive: true });
-      writeFileSync(dest, buf, { mode: 0o600 });
+      copyComponent(component, dest, item.sha256);
     }
     rebuildStash(repo, state.stash);
-    for (const obj of state.objects) {
-      const got = git(['cat-file', '-t', obj.sha], repo).toString('utf8').trim();
-      if (got !== obj.type) fail(`对象 ${obj.sha} 应是 ${obj.type}，实际 ${got}`);
-    }
+    checkObjectTypes(repo, state.objects, (obj, got) => `对象 ${obj.sha} 应是 ${obj.type}，实际 ${got}`);
     return collect(repo, false).state;
   } finally {
-    rmSync(root, { recursive: true, force: true });
+    cleanupOperationRoot(root);
   }
 }
 
 try {
   if (mode === 'verify') {
-    const chunks = [];
-    for await (const chunk of process.stdin) chunks.push(chunk);
-    process.stdout.write(JSON.stringify(restore(Buffer.concat(chunks))));
+    const root = operationRoot('fleet-recovery-');
+    try {
+      const components = await receiveFrame(root);
+      const json = JSON.stringify(await restore(components, root));
+      if (Buffer.byteLength(json) > MAX_METADATA) fail('恢复元数据超过 32MiB');
+      process.stdout.write(json);
+    } finally {
+      cleanupOperationRoot(root);
+    }
   } else if (mode === 'inspect') {
-    process.stdout.write(JSON.stringify(collect(process.cwd(), false).state));
+    const json = JSON.stringify(collect(process.cwd(), false).state);
+    if (Buffer.byteLength(json) > MAX_METADATA) fail('快照元数据超过 32MiB');
+    process.stdout.write(json);
   } else if (mode === 'capture') {
+    captureRoot = operationRoot('fleet-snapshot-');
     const { state, blobs } = collect(process.cwd(), true);
     const oids = Buffer.from(`${state.objects.map((item) => item.sha).join('\n')}\n`);
     // git 2.43 把单独的 --stdin 缩成 --stdin-packs，不能拿来传对象名。
     // --all 会改走修订列表，只被 MERGE_HEAD、sequencer/todo 指着、又不在 refs/reflog/index 的对象进不了包。
     // 这里不传这些开关：pack-objects 默认从标准输入读对象名，清单里的每一个都要进包。
-    const pack = git(['pack-objects', '--stdout'], process.cwd(), oids);
-    if (pack.length === 0) fail('对象包是空的');
-    const bundle = git(['bundle', 'create', '-', '--all', 'HEAD'], process.cwd());
-    if (bundle.length === 0) fail('成果包是空的');
-    process.stdout.write(frameOf(state, blobs, pack, bundle));
+    const pack = await gitComponent(['pack-objects', '--stdout'], oids, 'objects.pack');
+    const bundle = await gitComponent(
+      ['bundle', 'create', '-', '--all', 'HEAD'],
+      undefined,
+      'recovery.bundle',
+    );
+    await outputFrame(state, blobs, pack, bundle);
   } else fail(`不认识的快照模式：${mode}`);
 } catch (error) {
   if (process.exitCode !== 1) {
     process.stderr.write(`${error instanceof Error ? error.message : '快照失败'}\n`);
     process.exitCode = 1;
   }
+} finally {
+  if (captureRoot) cleanupOperationRoot(captureRoot);
 }

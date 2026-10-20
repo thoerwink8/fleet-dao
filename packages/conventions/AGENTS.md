@@ -6,15 +6,21 @@
 
 - `packages/conventions/src/bin/`：每个命令一个入口文件，逻辑在 `packages/conventions/src/` 同名模块里。仓根 `package.json` 的 `check`、`test:changed`、`pr:open`、`issue:new`、`issue:close`、`progress`、`plan`、`intents`、`debt:check`、`github:audit`、`branch:hygiene`、`ci:timings`、`ci:stats`、`flow:stats`、`subagent:stats` 都指到这里。
 - `pr-open` 的同步 GitHub 运输用 `pr-arm.ts` 的 `livePrGh`：复用 `github-api.ts` 的仓身份识别，显式传 canonical repo；创建 PR 明确已推送当前分支，避免 Git relay 改写 remote 后让 gh 猜错仓。
+- 新 PR 的需求行完成用 `Closes #号`，分片用 `Refs #号（分片、关不了它）`；手写正文中的裸 Refs 在任何推送或 GitHub 写入前拒绝。正文其它位置的保留说明不能代替同行意图，旧 PR 的收口和对账读法不变。
+- `machine.ts`（#3390）：`pnpm machine join|issue|list|revoke`，ssh / 安装 / HTTP 全注入；通行证明文只在内存和子进程环境变量，所有输出先 `redact`，测试断言任何输出与参数里没有它。
 - `check.ts`：`pnpm check` = biome 格式 + `tsc -b` + 改到的测试（`--all` 才全量）+ 卫生检查，四样跑完再判红。
-- `local-vitest.ts`：Windows 的 `check`（含 `--all`）、`test:changed`、`test:linux` 共用执行入口。四个需要 Linux FD/进程语义的保全测试只能转交显式配置的本机 Linux 普通用户；当前工作树字节快照包含未提交/新文件，删除不复活。Linux 依赖须与当前锁文件和依赖声明一致，workspace 链接重指快照。无配置、摘要/测试清单对不上、报告缺失或跳过都明确失败；CI/Linux 仍直接跑原测试。
+- `temporal:install`：按 `deploy/france.sh` 的固定版本和当前平台从 Temporal 官方发布地址下载 CLI，核 SHA-256、`--version` 后原子落到本机受管缓存并登记；不改 PATH、不碰 SDK 缓存。`test:temporal` 只登记/核验已有 CLI，不下载、不启动服务端。`local-vitest.ts` 按共用能力标记预检实际选到的真服务端测试，`temporal-test-cli.ts` 也供引擎测试创建入口核验，不能绕过后隐式下载。
+- `test:isolated`：只读显式本机资源 JSON 和完整离线文件，复用原槽/源码快照/Linux 回执；不改全局选测或 CI。可信 root-owned helper 仅创建私有 PID/网络资源后降权，候选代码和全部服务用普通用户；先核工具/IPv4/IPv6/Temporal，再跑原完整文件，取消/失联回收。规范在 `resources/README.md`；共享故障仍独立记账，不能把 PG/未知联网检查整批塞进断网资源。
+- `local-vitest.ts`：Windows 的 `check`（含 `--all`）、`test:changed`、`test:linux` 共用执行入口。四个需要 Linux FD/进程语义的保全测试只能转交显式配置的本机 Linux 普通用户；当前工作树字节快照包含未提交/新文件，删除不复活。Linux 依赖须与当前锁文件和依赖声明一致，workspace 链接重指快照。无配置、摘要/测试清单对不上、报告缺失或跳过都明确失败；CI/Linux 仍直接跑原测试。Windows 每次执行在仓根临时目录下、名字以 local-vitest- 开头的唯一目录留原生 JSON、Linux 原回执与合并副本、工作树字节摘要和必要命令/起止/退出元数据；路径在启动前打印，不保存环境或源码快照正文。`check-vitest.ts` 沿原 `withRetry` 把首轮与重试分开留存，缺报告或坏 JSON 明确未获完整报告，已有字节保留。
 - `work.ts` 的派工归属复用入口动态加载的 `unattended.mjs/selectSessionId`；Claude session / Codex thread 接同步 Stop，只有 Codex root-session 不冒充 thread，缺归属仍保留结果供 `pnpm work runs` 读取。续跑不重绑原 spec（包括旧的 null），Codex 后台完成不主动开启新轮。
+- `work-queue.ts` 的 `pnpm work queue`（#3389）还用本机会话配置的地址和通行证 GET 法国 `/api/nodes/claims`（8 秒超时，通行证只进请求头），任何机器的有效租约判在做、领者写编号和到期；没装配置、401/503/404、超时、返回认不出都写「没查成：原因」，原本可接的改判不可接并进 problems。本机租约文件只作补充。
 - `issue-batch.ts`：`pnpm issue:batch --spec <JSON>`，整批校验后建母子单、写 parent 并挂原生关系；失败关闭本批，创建结果不明按唯一标记找回。`--recover <记录>` 清理中断产物，记录生成在仓根临时目录的 issue-batch 子目录。GitHub 无跨单事务，撤销失败必须保留记录并报错。
 - 只给 CI 用的（`.github/workflows/` 里调）：`ci-plan.ts`、`ci-box.ts`、`ci-cache.ts`、`ci-verdict.ts`、`main-reuse.ts`、`merge-gate.ts`、`close-on-merge.ts`、`debt-check.ts`、`github-audit.ts`（`--alarm` 红了开同一张「GitHub 对账没过」单，`audit-alarm.ts`）、`version-cut.ts`（版本一周一版、到期自动收口，`github-audit.yml` 的 version-cut 任务每天跑）。
 - 查询轴词汇只在 `src/labels.ts`：`pnpm issue:new`、`pnpm pr:open` 显式带 `--domain engine|api|mirasim --nature bug|perf|process`。`src/bin/label-sync.ts` 和 `label-sync.yml` 同步六标签。`issue:batch` 母单必须提供 `domain`、`nature`，子单可逐轴继承母单有效值；整批写入前检查，缺失或无效就拒绝，原子补偿和恢复语义不变。固定流水线报警贴 engine/bug，引导和项目冒烟单贴 engine/process。`query-metadata.yml` 用可信默认分支代码处理创建/编辑/重开事件，只从当前标签、明确正文声明或唯一来源单补轴；写后回读，未知/冲突/读失败报错，不猜、不改排期。`github:audit` 检查两轴约定落地后的新 issue/PR，漏轴和冲突报断裂，PR 标签读失败报没查成。
 - `packages/conventions/standard-paths.json`：改标准的路径清单（人闸第四类），**改它本身就是改标准**。
 - `src/changelog.ts`（#3110）：完成关单按类别/性质生成版本节，固定交付物、兼容性、验证限制三尾；显式版本锚点幂等替换，临时 AI 运营不当产品条目。引擎每天补齐，里程碑只留链接和排期事实。
 - `packages/conventions/test-timings.json`：CI 测试按耗时分台的耗时表，用 `pnpm ci:timings` 从 CI 日志刷新，别手改。
+- `test-split.ts` 的 `needsPg` 除db测试外，只把 `packages/store/test/task-execution.real-pg.test.ts`、`packages/store/test/idempotency-race.real-pg.test.ts` 和 `packages/engine/test/legacy-admission.real-pg.test.ts` 精确放入pg台；其它Store测试保持原分台，不能把真实竞争悄悄降成PGlite。
 
 ## 测试
 
@@ -24,7 +30,7 @@
 ## 常见坑
 
 - `plan-reader.ts` 给 `pnpm plan` 装配只读传输，`audit-client.ts` 给 `pnpm github:audit` 显式复用同一读取传输：gh 明确配置 socket 时经 `gh api --include --method GET`，不搬令牌；没有配置仍走原生 HTTP。数字仓号分页先经当前仓元信息核对 id 和 full_name，不能信 Link 自报身份。配置或进程真失败必须报没读成，不能静默换身份、匿名或直连；audit 的本机 socket 写入限定在对账需要的 issue、留言、里程碑、母子关系，JSON 经 stdin 发送，逐字段核真实回执；创建、更新、关闭失败或回执不符都报没查成。Actions 的 token 身份及其他 GitHub 读写入口保持原路径，不在 401 后切传输。
-- `ci-policy-bridge.ts` 是 Actions 零安装的真实 HTTPS reader，只相对引用 shared 的纯协议文件。可信标准 App slug 查数字 Bot，逐 PR `fleet-ci-policy-source/pr/<号>` 选当前头最新可信 source；来源缺失 force，坏来源/读失败明确没查成，私有即时 force 不跟历史公开 URL。发表前重读 head/mode。不得加 caller mode、策略快照或旧 off fallback。
+- `ci-policy-bridge.ts` 是 Actions 零安装的真实 HTTPS reader，只相对引用 shared 的纯协议文件。可信标准 App slug 查数字 Bot，逐 PR `fleet-ci-policy-source/pr/<号>` 选当前头最新可信 source；来源缺失 force，坏来源/读失败明确没查成，私有即时 force 不跟历史公开 URL。发表前重读 head/mode。不得加 caller mode、策略快照或旧 off fallback。没收到响应头的网络失败（超时、DNS、连不上、连接被断）重读一次即时来源，每次各自 10 秒（#3268：Actions 偶发请求没到入口）；收到了响应的（状态、重定向、缓存头、串仓、超限）和证书错误不重读；两次都失败时逐次列出脱敏的 stage/elapsedMs/codes。
 - `pnpm project check` 的第六步真 HTTP 读桥，caller 按生成模板精确识别；show 缺 mode/数字仓号等字段不猜。缺 source 报红，check 不写，add 才经受保护 `fleet-api project refresh-policy-source` 补齐；没有 PR 必须明说尚未验真实事件全链。
 
 - `mother-manifest.ts` 严格读写母单正文 JSON 清单；`family-manifest.ts` 全量读含已关闭子单后按唯一清单修复正文与原生关系，多母认领先报冲突、不写。入口 `bin/github-audit.ts` 显式给 family reader/writer；原对账接口仍可只读。批量写清单失败走整批补偿；`issue:new --parent` 的清单失败须明说子单已开已挂，不能建议重开。
@@ -51,6 +57,7 @@
 - 改开单、关单、PR 栏目的规矩：同步 design 第七节和 `README.md`「常用」。
 
 - `issue:close` 和 `close-on-merge` 收尾都现读数据库最终验收责任；`--note`、Bot 评论不能替代结清。Actions 从可信 engine App 的精确 PR/head policy-source 找只读口，本机复用已安装的 local-sessions 地址。没读成明确退出 2、不关单。
+- `close-on-merge-gh.ts` 只给合并收尾入口包装原 gh 运输：确定限流的无 payload REST GET 整轮最多重试一次；403 必须正向匹配明确的限流消息，不能只凭 remaining=0 判断，429 按协议头。遵守 `Retry-After` 和 remaining=0 的 reset 较晚时点；整轮30秒预算，超预算不等待。缺/坏恢复头、权限拒绝或未知失败仍没查成；写请求不重放，不改身份。诊断只留 HTTP 状态、白名单限流字段和 request id，不输出原始头、stderr 或私有响应正文。
 
 - 对外仓引导（#3109）由 repo-kind 按 INIT_CWD 判，原话只从 prompt-log/stdin 进私有待传目录和 quote 管理链，公开文件、开单及收件箱迁移回写只用 meaning；缺 meaning 先拒绝。同编号回执精确确认才删待传，后台失败留明确提醒。协议在 shared 的 private-quotes.ts 零依赖叶子，conventions 相对导入保持同步检出零安装可用。
 

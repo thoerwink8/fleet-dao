@@ -24,12 +24,13 @@
 
 import type { SessionUser } from '@fleet-dao/adapters';
 import { type ChangedFile, STANDARD_PATHS_FILE, standardFiles } from '@fleet-dao/conventions';
-import type { RepoRef } from '@fleet-dao/github';
+import { isUnstableRefusal, type RepoRef } from '@fleet-dao/github';
 import { parseRepoProfile, type RepoProfile } from '@fleet-dao/shared';
 import { abortableSleep, errMessage } from '@fleet-dao/shared/util';
 import type { EngineTasks } from '../activities.ts';
+import { DEFAULT_PR_LINE_BUDGET } from '../limits.ts';
 import { type PortContext, PortError } from '../ports.ts';
-import { readTaskBrief } from '../runner/task-brief.ts';
+import { readTaskBrief, sameRequirementContract } from '../runner/task-brief.ts';
 import { standardPathsList } from '../standard-paths-list.ts';
 import type {
   ArmAutoMergeInput,
@@ -39,6 +40,8 @@ import type {
   GuardedPaths,
   MergeNowInput,
   MergeNowResult,
+  MergeReadyInput,
+  MergeReadyResult,
   MergeWait,
   ReadCiReviewsInput,
   ReadCiReviewsResult,
@@ -51,19 +54,117 @@ import { MAX_MAIN_SYNCS } from '../task-contract.ts';
 import type { UserExec } from './exec.ts';
 import type { EngineGitHub } from './github-ports.ts';
 import { bookMergedPull, readMergedTask } from './merge-receipt.ts';
+import { measureMigrationBudget } from './migration-budget.ts';
 import { mapped } from './mirror.ts';
 import { createReviewAudit, type ReviewAuditDeps } from './review-audit.ts';
+import { guardRequirementContract, holdRequirementContract } from './task-contract-guard.ts';
 import {
   addedLinesAgainst,
   changedFilesSince,
   commitsSince,
   deliveryLeftover,
+  ENVIRONMENT_FILES,
+  gitInTree,
+  hasCommit,
   headOf,
+  isAncestor,
+  mainlineRef,
   ownSpan,
   type UserTree,
   unresolvedConflicts,
 } from './user-git.ts';
 import type { WorkTrees } from './worktrees.ts';
+
+const FULL_SHA = /^[0-9a-f]{40}$/;
+
+/** 两个提交的分叉点（完整 sha）；没有共同祖先回 null，git 没跑成照抛。 */
+async function mergeBaseOf(t: UserTree, a: string, b: string): Promise<string | null> {
+  const r = await gitInTree(t, ['merge-base', a, b], '算分叉点', { allow: [1] });
+  const sha = r.code === 0 ? r.stdout.toString('utf8').trim() : '';
+  return FULL_SHA.test(sha) ? sha : null;
+}
+
+/** 工作树里没提交的改动（含没跟踪的文件），环境文件不算。只读：不还原、不写（和 deliveryLeftover 的口径一样，但不动树）。 */
+async function dirtyEntries(t: UserTree): Promise<string[]> {
+  const status = await gitInTree(
+    t,
+    [
+      '-c',
+      'core.fsmonitor=false',
+      '--no-optional-locks',
+      'status',
+      '--porcelain=v1',
+      '--untracked-files=all',
+    ],
+    '重评前后看工作树是否干净',
+  );
+  const environment = new Set(ENVIRONMENT_FILES.map((f) => f.path));
+  return status.stdout
+    .toString('utf8')
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .filter((line) => {
+      const path = line.slice(3);
+      const arrow = path.indexOf(' -> ');
+      return !environment.has(arrow >= 0 ? path.slice(arrow + 4) : path);
+    });
+}
+
+/**
+ * 体量关口重评（#3249）：只在这棵树上对精确 head、固定 base 重做可信计量。用发布版测量实现（只读 Git 对象，
+ * 不执行候选源码或配置、不起模型），测量前后各核一次头和干净程度。读失败抛错（工作流按未知处理），身份对不上回 refused。
+ */
+export async function remeasureLineBudget(
+  t: UserTree,
+  repo: { owner: string; name: string; defaultBranch: string },
+  ask: NonNullable<ReadDeliveryInput['budgetRemeasure']>,
+): Promise<DeliveryRead> {
+  if (!FULL_SHA.test(ask.head) || !FULL_SHA.test(ask.base) || !Number.isSafeInteger(ask.rawAddedLines)) {
+    throw new PortError('BAD_INPUT', '重评要完整 head / base 和原始新增行', { retryable: false });
+  }
+  if (repo.owner.toLowerCase() !== 'thoerwink8' || repo.name.toLowerCase() !== 'fleet-dao') {
+    throw new PortError('BAD_INPUT', '可信生成折扣只对本仓开放，不重评别的仓', { retryable: false });
+  }
+  const answer = (budgetRemeasure: NonNullable<DeliveryRead['budgetRemeasure']>): DeliveryRead => ({
+    head: ask.head,
+    // 重评不读会话交付：提交数、文件清单不代表交付，工作流只认 budgetRemeasure。
+    commits: 0,
+    changedFiles: [],
+    budgetRemeasure,
+  });
+  const refused = (reason: 'head' | 'base' | 'dirty' | 'raw', detail: string) =>
+    answer({ version: 1, status: 'refused', reason, detail });
+  const headBefore = await headOf(t);
+  if (headBefore !== ask.head)
+    return refused('head', `工作树的头是 ${headBefore.slice(0, 12)}，不是请求的头`);
+  const dirtyBefore = await dirtyEntries(t);
+  if (dirtyBefore.length > 0)
+    return refused('dirty', `工作树有没提交的改动：${dirtyBefore.slice(0, 5).join('、')}`);
+  if (!(await hasCommit(t, ask.base))) return refused('base', '树里没有这个 base 提交');
+  if (!(await isAncestor(t, ask.base, ask.head))) return refused('base', 'base 不是 head 的祖先');
+  // 工作流已核 base 等于停下时记的那个；这里再核它仍是「头相对树里钉的主线的 merge-base」：主线上更早的祖先、
+  // 主线在停下后被挪过，都拒，不让换测量范围
+  const mergeBase = await mergeBaseOf(t, mainlineRef(repo.defaultBranch), ask.head);
+  if (mergeBase === null) return refused('base', '头和树里钉的主线没有共同祖先');
+  if (mergeBase !== ask.base)
+    return refused('base', `base 不是头相对树里钉的主线的 merge-base（应为 ${mergeBase.slice(0, 12)}）`);
+  const raw = await addedLinesAgainst(t, ask.base, ask.head);
+  if (raw !== ask.rawAddedLines)
+    return refused('raw', `原始新增行是 ${raw}，与停下时的 ${ask.rawAddedLines} 不同`);
+  const measurement = await measureMigrationBudget(t, ask.base, ask.head, raw);
+  const headAfter = await headOf(t);
+  const dirtyAfter = await dirtyEntries(t);
+  return answer({
+    version: 1,
+    status: 'measured',
+    head: ask.head,
+    base: ask.base,
+    headAfter,
+    cleanAfter: dirtyAfter.length === 0,
+    measurement,
+  });
+}
 
 /** 等合并时多久看一次 PR（毫秒）。 */
 export const MERGE_POLL_EVERY_MS = 20_000;
@@ -122,6 +223,7 @@ type TaskActivities = Required<
     | 'checkGuarded'
     | 'armAutoMerge'
     | 'waitMerged'
+    | 'mergeReady'
     | 'mergeNow'
     | 'readCiReviews'
     | 'readMergedTask'
@@ -144,9 +246,14 @@ function checksRedWait(checks: MergeWaitChecks): Extract<MergeWait, { state: 'ch
   return { state: 'checks_red', failedChecks, detail };
 }
 
-/** GitHub 拒绝挂自动合并、因为 PR 已经满足全部合并条件（没什么可等的）。 */
-function isCleanStatus(error: unknown): boolean {
-  return /clean status/i.test(errMessage(error));
+/**
+ * GitHub 拒绝挂自动合并、因为 PR 现在就能合（没什么可等的）：clean 是全部检查都过了；unstable 是必过检查已满足、
+ * 只是非必过的还在跑或红了（引擎自己写验收状态、改正文会触发几条非必过的 job）。两种都走直接合，mergePr 只核必过检查。
+ * unstable 只认这个 mutation 自己回的那一条（github 包的 isUnstableRefusal，原始 errors 在 details 里），别的原样抛。
+ */
+function isMergeableNow(error: unknown): boolean {
+  if (/clean status/i.test(errMessage(error))) return true;
+  return isUnstableRefusal((error as { details?: unknown } | null)?.details);
 }
 
 /**
@@ -557,22 +664,37 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     },
     async readTaskBrief(input: ReadTaskBriefInput, ctx: PortContext) {
       const repo = refOf(input.repo);
-      const profile = await profileOf(repo);
-      return readTaskBrief(
-        {
-          readIssue: ({ repo: issueRepo, issueNumber }) =>
-            mapped(() => gh.readIssue({ repo: issueRepo, issueNumber, signal: ctx.signal })),
-          readSpecDoc: async ({ repo: docRepo, path }) => {
-            const doc = await mapped(() => gh.readSpecDoc({ repo: docRepo, path, signal: ctx.signal }, ctx));
-            return doc ? { content: doc.content } : null;
+      let got: Awaited<ReturnType<typeof readTaskBrief>>;
+      try {
+        const profile = await profileOf(repo);
+        got = await readTaskBrief(
+          {
+            readIssue: ({ repo: issueRepo, issueNumber }) =>
+              mapped(() => gh.readIssue({ repo: issueRepo, issueNumber, signal: ctx.signal })),
+            readSpecDoc: async ({ repo: docRepo, path }) => {
+              const doc = await mapped(() =>
+                gh.readSpecDoc({ repo: docRepo, path, signal: ctx.signal }, ctx),
+              );
+              return doc ? { content: doc.content } : null;
+            },
           },
-        },
-        {
-          repo,
-          issueNumber: input.issueNumber,
-          ...(profile ? { moduleRoots: profile.moduleRoots } : {}),
-        },
-      );
+          {
+            repo,
+            issueNumber: input.issueNumber,
+            ...(profile ? { moduleRoots: profile.moduleRoots } : {}),
+          },
+        );
+      } catch (error) {
+        if (input.contractGuard) await holdRequirementContract(gh, repo, input.contractGuard.prNumber);
+        throw error;
+      }
+      if (
+        input.contractGuard &&
+        (!got.ok || !sameRequirementContract(input.contractGuard.expected, got.brief.contract))
+      ) {
+        await holdRequirementContract(gh, repo, input.contractGuard.prNumber);
+      }
+      return got;
     },
 
     async readDelivery(input: ReadDeliveryInput, ctx: PortContext): Promise<DeliveryRead> {
@@ -587,6 +709,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         );
       }
       const t = treeAs(input.worktreePath, user, `delivery-${input.taskId}`, ctx);
+      if (input.budgetRemeasure) return remeasureLineBudget(t, input.repo, input.budgetRemeasure);
       const span = await ownSpan(t, input.baseSha, input.repo.defaultBranch);
       const head = await headOf(t);
       const changedFiles = await changedFilesSince(t, span);
@@ -595,15 +718,18 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       const leftover = await deliveryLeftover(t);
       // since 是起会话前的头：提交进 HEAD 的冲突标记要和它比。和主线一个字节都不差的文件在 unresolvedConflicts 里剔除。
       const conflicts = await unresolvedConflicts(t, { since: input.baseSha, mainline: span.mainline });
-      // 相对钉住的主线新增了多少行（#2755 体量预算）：只给预算判用，没数成不带、不挡交活核对
-      let addedLines: number | undefined;
-      if (span.mainline) {
-        try {
-          addedLines = await addedLinesAgainst(t, span.mainline, head);
-        } catch (error) {
-          if (ctx.signal.aborted) throw error;
-        }
-      }
+      // 原始统计不换口径；当前 Git 读取失败抛错。只有本仓超默认预算才尝试有界快照折扣。
+      const addedLines = span.mainline ? await addedLinesAgainst(t, span.mainline, head) : undefined;
+      // addedLines 实际按的 base（mainline...head 的分叉点）：体量停点记进身份，重评只认它（#3249）
+      const addedLinesBase = span.mainline ? await mergeBaseOf(t, span.mainline, head) : undefined;
+      const lineBudgetMeasurement =
+        span.mainline &&
+        addedLines !== undefined &&
+        addedLines > DEFAULT_PR_LINE_BUDGET &&
+        input.repo.owner.toLowerCase() === 'thoerwink8' &&
+        input.repo.name.toLowerCase() === 'fleet-dao'
+          ? await measureMigrationBudget(t, span.mainline, head, addedLines)
+          : undefined;
       return {
         head,
         commits: commits.length,
@@ -611,6 +737,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         leftover,
         conflicts,
         ...(addedLines === undefined ? {} : { addedLines }),
+        ...(addedLinesBase ? { addedLinesBase } : {}),
+        ...(lineBudgetMeasurement === undefined ? {} : { lineBudgetMeasurement }),
       };
     },
 
@@ -641,6 +769,18 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
     async armAutoMerge(input: ArmAutoMergeInput, ctx: PortContext): Promise<ArmAutoMergeResult> {
       const repo = refOf(input.repo);
       const { prNumber, expectedHead } = input;
+      const contractCurrent = () =>
+        input.contractGuard
+          ? guardRequirementContract(
+              gh,
+              repo,
+              prNumber,
+              input.contractGuard.issueNumber,
+              input.contractGuard.expected,
+              ctx,
+            )
+          : Promise.resolve(true);
+      const contractChanged: ArmAutoMergeResult = { armed: false, merged: false, contractChanged: true };
       const pull = await mapped(() => gh.claims.readPull(repo, prNumber));
       if (pull.merged) {
         const booked = await bookMerge(repo, prNumber, expectedHead, ctx);
@@ -655,7 +795,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         };
       }
       if (pull.state !== 'open') {
-        return { armed: false, merged: false, why: `PR #${prNumber} 已经关了` };
+        return { armed: false, merged: false, why: `PR #${prNumber} 已经关了`, refused: 'closed' };
       }
       if (pull.headSha !== expectedHead) {
         return {
@@ -663,6 +803,14 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           merged: false,
           why: `PR #${prNumber} 的头是 ${short(pull.headSha)}，不是引擎验过、推上去的 ${short(expectedHead)}（有人改过）`,
           headMoved: pull.headSha,
+        };
+      }
+      if (pull.draft) {
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 还是草稿，不挂自动合并`,
+          refused: 'draft',
         };
       }
       const held = await reviewHold(repo, pull);
@@ -674,7 +822,28 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           reviewChanges: held,
         };
       }
-      if (pull.autoMerge) return { armed: true, merged: false };
+      if (pull.autoMerge) return (await contractCurrent()) ? { armed: true, merged: false } : contractChanged;
+      // 挂之前现读这个头上的必过检查（#3206）：真红不写，交 checksRed。还在跑、没出现不拦（自动合并本来就是等它们）。
+      // 没接上读检查不写、明说；读不成照抛（取消原样抛，可重试的交活动重试，下一次从头现读 PR、评审、检查）。
+      const readChecksNow = deps.readChecks;
+      if (!readChecksNow) {
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 头 ${expectedHead} 的必过检查没查成：没接上读检查，不挂自动合并`,
+        };
+      }
+      const before = await mapped(() => readChecksNow(repo, expectedHead, ctx.signal));
+      const redBefore = before.failed.filter((item) => item.name.trim().length > 0);
+      if (before.overall === 'red' || redBefore.length > 0) {
+        const red = checksRedWait({ ...before, failed: redBefore });
+        return {
+          armed: false,
+          merged: false,
+          why: `PR #${prNumber} 头 ${expectedHead} 的必过检查红了，不挂自动合并：${red.detail}`,
+          checksRed: { failedChecks: red.failedChecks, detail: red.detail, head: expectedHead },
+        };
+      }
 
       // clean 之后的直接合。recheckCi 只在「现读已经是绿」时再走一次同一个 mergePr，避免检查刚转绿就停。
       const acceptDirectMerge = async (
@@ -686,6 +855,7 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           return { armed: false, merged: true, mergeCommit: result.mergeCommit };
         }
         if (result.reason === 'behind_main') {
+          if (!(await contractCurrent())) return contractChanged;
           return syncBehindMain(repo, prNumber, expectedHead, input.syncedBehind ?? 0, result.detail, ctx);
         }
         if (result.reason === 'ci_not_green') return classifyCiNotGreen(result.detail, recheckCi);
@@ -745,6 +915,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         if (checks.overall === 'green' && recheckCi) {
           refuseLateArmWrite(ctx);
+          if (!(await contractCurrent())) return contractChanged;
+          refuseLateArmWrite(ctx);
           const again = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
           return acceptDirectMerge(again, false);
         }
@@ -761,7 +933,10 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
       try {
         // 读过 PR、读过评审了：已经挂上的在上面返回，不会走到这里。已取消或期限已过就不再开新的写。
         refuseLateArmWrite(ctx);
+        if (!(await contractCurrent())) return contractChanged;
+        refuseLateArmWrite(ctx);
         await mapped(() => gh.claims.enableAutoMerge(repo, pull, ctx));
+        if (!(await contractCurrent())) return contractChanged;
         // 先挂、再读（#2991）：挂之前读到之后才交的评审，事件那头看到的是没挂（不撤）；挂上之后再读一遍，
         // 这一次之后交的评审，事件那头读到的就是已挂着（会撤）。两头合起来不留「检查完才到」的窗口。
         const after = await reviewHold(repo, { ...pull, autoMerge: true });
@@ -775,9 +950,11 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         return { armed: true, merged: false };
       } catch (error) {
-        if (!isCleanStatus(error)) throw error;
-        // 所有条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核 CI 绿）。
+        if (!isMergeableNow(error)) throw error;
+        // 必过条件都已满足：自动合并没有可等的东西，GitHub 不让挂。直接合（核头、核不落后主线、核必过检查绿）。
         // 这一下若已取消，或挂的时候把期限用完，不再另开直接合。已经发出去的挂合并请求撤不回来。
+        refuseLateArmWrite(ctx);
+        if (!(await contractCurrent())) return contractChanged;
         refuseLateArmWrite(ctx);
         let merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
         // 只是检查没跑完（没有红的、没出现的）：多半是验收结果刚写、合并闸在同一个头上重跑（#3165）。
@@ -791,6 +968,8 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
           const left = writeBudgetMs(ctx);
           if (left !== null && left < 1) break;
           await sleep(left === null ? pollEveryMs : Math.min(pollEveryMs, left), ctx.signal);
+          refuseLateArmWrite(ctx);
+          if (!(await contractCurrent())) return contractChanged;
           refuseLateArmWrite(ctx);
           merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead }, ctx));
         }
@@ -833,6 +1012,19 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         };
       }
       // 不核 CI。头、冲突、落后主线、还开着，mergePr 仍核。分支保护拒绝会抛，不装成合过了。
+      if (
+        input.contractGuard &&
+        !(await guardRequirementContract(
+          gh,
+          repo,
+          prNumber,
+          input.contractGuard.issueNumber,
+          input.contractGuard.expected,
+          ctx,
+        ))
+      ) {
+        return { merged: false, contractChanged: true };
+      }
       const merged = await mapped(() => gh.mergePr({ repo, prNumber, expectedHead, requireCi: false }, ctx));
       if (merged.merged) {
         await auditLateReview(repo, prNumber, ctx);
@@ -890,6 +1082,18 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         if (pull.state !== 'open') return { state: 'closed' };
         if (pull.headSha !== expectedHead) return { state: 'head_moved', head: pull.headSha };
+        if (
+          input.contractGuard &&
+          !(await guardRequirementContract(
+            gh,
+            repo,
+            prNumber,
+            input.contractGuard.issueNumber,
+            input.contractGuard.expected,
+            ctx,
+          ))
+        )
+          return { state: 'contract_changed' };
         if (!pull.autoMerge) return { state: 'unarmed' };
         // 等合并时交的正式「要求改」（#2991）：每一圈现读，读到了先撤自动合并再交回工作流，不等 GitHub 把它合了
         const held = await reviewHold(repo, pull);
@@ -916,6 +1120,52 @@ export function createTaskActivities(deps: TaskActivitiesDeps): TaskActivities {
         }
         await sleep(pollEveryMs, ctx.signal);
       }
+    },
+
+    /**
+     * 停在合并这一步时现读一次（#3281）：只读，不挂、不撤、不合。合了的算满足（工作流醒来重挂时现读到已合、照常记账收尾）；
+     * 关了、换了头、挂着「要求改」、必过检查（含合并闸、cold-verify）没全绿都不满足，写明哪一条。读不到抛，不当成满足。
+     */
+    async mergeReady(input: MergeReadyInput, ctx: PortContext): Promise<MergeReadyResult> {
+      ctx.heartbeat();
+      const repo = refOf(input.repo);
+      const pull = await mapped(() => gh.claims.readPull(repo, input.prNumber));
+      if (pull.merged) return { ready: true, why: `PR #${input.prNumber} 已经合并了` };
+      if (pull.state !== 'open') return { ready: false, why: `PR #${input.prNumber} 被关了` };
+      if (pull.headSha !== input.expectedHead) {
+        return {
+          ready: false,
+          why: `PR #${input.prNumber} 的头换了（${short(input.expectedHead)} → ${short(pull.headSha)}），要重走 CI 和验收`,
+        };
+      }
+      if (deps.reviewChanges !== undefined) {
+        const held = await deps.reviewChanges(repo, pull.number);
+        if (held.length > 0) {
+          return { ready: false, why: `PR #${input.prNumber} 还挂着 ${held.length} 条正式「要求改」` };
+        }
+      }
+      const readChecks = deps.readChecks;
+      if (!readChecks) {
+        throw new PortError('MERGE_CHECKS_UNWIRED', '复核合并条件没接上读检查：不知道绿没绿，不当成满足', {
+          retryable: false,
+        });
+      }
+      const checks = await mapped(() => readChecks(repo, pull.headSha, ctx.signal));
+      if (checks.overall !== 'green') {
+        const red = checks.failed.map((f) => f.name).join('、');
+        const running = (checks.pending ?? []).map((p) => p.name).join('、');
+        const missing = (checks.missing ?? []).map((m) => m.name).join('、');
+        const parts = [
+          red ? `红：${red}` : '',
+          running ? `还在跑：${running}` : '',
+          missing ? `没出现：${missing}` : '',
+        ].filter((p) => p !== '');
+        return {
+          ready: false,
+          why: `头 ${short(pull.headSha)} 的必过检查还没全绿（${parts.join('；') || checks.overall}）`,
+        };
+      }
+      return { ready: true, why: `头 ${short(pull.headSha)} 的必过检查全绿、没有挂着的「要求改」` };
     },
 
     async readCiReviews(input: ReadCiReviewsInput, ctx: PortContext): Promise<ReadCiReviewsResult> {

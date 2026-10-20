@@ -651,26 +651,29 @@ function listedSkip(repo: IntakeRepo, issue: IntakeIssue, whitelist: GithubWhite
 
 const issueRefs = (numbers: readonly number[]) => numbers.map((n) => `#${n}`).join('、');
 
+/** 前置判下来的样子：没有或都等完了（clear）、在等（waiting）、开没开着没查成（unchecked，不当成都关了）。 */
+export type PrerequisiteVerdict =
+  | { kind: 'clear' }
+  | { kind: 'waiting'; why: string }
+  | { kind: 'unchecked'; numbers: number[]; why: string };
+
 /**
  * 前置（#2783）：正文里以「前置：」开头的那一行（conventions 的 parsePrerequisites，和 pnpm work queue 同一份认法）。
  * 日期没到：「等到 <日期>」，不用读任何东西。写了单号：还开着的就「等前置 #N」；开没开着读不到（整批读失败，或回来的结果缺了这个号），
- * 按「等前置」算、记进这一轮的没查成，不当成都关了。回 null＝没有前置、或前置都等完了。
+ * 回 unchecked，不当成都关了。拉单（prerequisiteSkip）和点名派单（dispatch-issue.ts）共用这一份判法，读法各自给。
+ * 正文不是文字（读不到）就抛：不当成「没写前置」（和 workflowPathIn 同一个口径）。
  */
-async function prerequisiteSkip(
-  deps: IntakeDeps,
-  repo: IntakeRepo,
-  issue: IntakeIssue,
+export async function judgePrerequisites(
+  body: unknown,
+  now: Date,
   states: (numbers: readonly number[]) => Promise<Map<number, 'open' | 'closed'>>,
-  t: Tally,
-): Promise<IntakeSkip | null> {
-  // 正文不是文字（读不到）就抛：不当成「没写前置」（和 workflowPathIn 同一个口径，这张单这一轮记没查成）
-  const body: unknown = issue.body;
+): Promise<PrerequisiteVerdict> {
   if (typeof body !== 'string')
     throw new Error(`单正文读不到（拿到的是 ${body === null ? 'null' : typeof body}）`);
   const pre = parsePrerequisites(body);
-  const until = waitingUntil(pre, deps.now());
-  if (until !== null) return { reason: 'waiting_prerequisite', why: `等到 ${until}` };
-  if (pre.issues.length === 0) return null;
+  const until = waitingUntil(pre, now);
+  if (until !== null) return { kind: 'waiting', why: `等到 ${until}` };
+  if (pre.issues.length === 0) return { kind: 'clear' };
   const open: number[] = [];
   try {
     const got = await states(pre.issues);
@@ -680,15 +683,31 @@ async function prerequisiteSkip(
       if (s === 'open') open.push(n);
     }
   } catch (err) {
-    t.unchecked.push(
-      `${repo.owner}/${repo.name}#${issue.number}：前置单 ${issueRefs(pre.issues)} 开没开着没查成，按等前置算（${errMessage(err)}）`,
-    );
     return {
-      reason: 'waiting_prerequisite',
-      why: `等前置 ${issueRefs(pre.issues)}（前置单状态没查成，按没关算）`,
+      kind: 'unchecked',
+      numbers: pre.issues,
+      why: `前置单 ${issueRefs(pre.issues)} 开没开着没查成，按等前置算（${errMessage(err)}）`,
     };
   }
-  return open.length > 0 ? { reason: 'waiting_prerequisite', why: `等前置 ${issueRefs(open)}` } : null;
+  return open.length > 0 ? { kind: 'waiting', why: `等前置 ${issueRefs(open)}` } : { kind: 'clear' };
+}
+
+/** 拉单这一道：在等的不拉；没查成的按「等前置」算、记进这一轮的没查成。回 null＝没有前置、或前置都等完了。 */
+async function prerequisiteSkip(
+  deps: IntakeDeps,
+  repo: IntakeRepo,
+  issue: IntakeIssue,
+  states: (numbers: readonly number[]) => Promise<Map<number, 'open' | 'closed'>>,
+  t: Tally,
+): Promise<IntakeSkip | null> {
+  const verdict = await judgePrerequisites(issue.body, deps.now(), states);
+  if (verdict.kind === 'clear') return null;
+  if (verdict.kind === 'waiting') return { reason: 'waiting_prerequisite', why: verdict.why };
+  t.unchecked.push(`${repo.owner}/${repo.name}#${issue.number}：${verdict.why}`);
+  return {
+    reason: 'waiting_prerequisite',
+    why: `等前置 ${issueRefs(verdict.numbers)}（前置单状态没查成，按没关算）`,
+  };
 }
 
 /**

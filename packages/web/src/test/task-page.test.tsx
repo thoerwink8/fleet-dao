@@ -21,12 +21,13 @@ import { renderApp } from './harness';
 
 afterEach(cleanup);
 
+// 这里测的是用量明细：「用量和模型」默认收起（#3228），地址带 ?usage=open 打开
 function open(route: string, api?: FleetApi) {
   return renderApp(
     <Routes>
       <Route path="/tasks/:taskId" element={<TaskPage />} />
     </Routes>,
-    { route, ...(api ? { api } : {}) },
+    { route: `${route}${route.includes('?') ? '&' : '?'}usage=open`, ...(api ? { api } : {}) },
   );
 }
 

@@ -1,14 +1,16 @@
 // 会话的目录在哪、归谁（design 十四：/var/lib/fleet-work/<仓>/<需求号>-<子任务>/，归会话用户、700；还不归它的
 // 由 fleet-agent-scope 建或改属主）。引擎只看属主（stat 目录本身，不进去）、叫助手建 / 改属主 / 删，
 // 目录里的东西一律由会话用户自己碰（user-git.ts）。
-// 根下还有两样不是工作树的：探针的工作目录 _route-probe/<会话用户>（route-probe.ts），每个会话自己的临时目录
+// 根下还有不是工作树的：探针的工作目录 _route-probe/<会话用户>（route-probe.ts），每个会话自己的临时目录
 // _tmp/<会话编号>（会话的 TMPDIR，会话结束就删，sessions.ts）。仓的目录是 <owner>_<name>，打头的是字母数字，撞不上这两个。
+// .cleanup-transactions 只经 root 帮手的 cleanup-status 核验，不能以会话身份读它。
 
 import { readFileSync } from 'node:fs';
 import { readdir, stat } from 'node:fs/promises';
 import {
   adoptWorktree,
   cleanupStatus,
+  readCleanupNamespace,
   readTreePlace,
   removeWorktreeDir,
   SESSION_USERS,
@@ -47,14 +49,16 @@ export interface WorkTrees {
   /** 目录归哪个会话用户；不在回 null。归了别人（不是会话用户）明确报错。 */
   ownerOf(dir: string): Promise<SessionUser | null>;
   /** 交给这个会话用户（不在就建）。 */
-  adopt(dir: string, user: SessionUser): Promise<void>;
-  adoptTemporary(dir: string, user: SessionUser): Promise<TreeIdentity>;
+  adopt(dir: string, user: SessionUser, signal?: AbortSignal): Promise<void>;
+  adoptTemporary(dir: string, user: SessionUser, signal?: AbortSignal): Promise<TreeIdentity>;
   remove(dir: string, identity: TreeIdentity): Promise<{ gone: boolean }>;
   /** Disposable session directories only; preservation callers must pass their original identity to remove. */
   removeTemporary(dir: string, expected: TreeIdentity): Promise<{ gone: boolean }>;
   /** Only after the caller's orphan task/TTL gate: explicitly claim the current object. */
   reapTemporary(dir: string): Promise<{ gone: boolean }>;
   pendingCleanup(): Promise<Record<string, unknown>[]>;
+  /** Fixed root helper checks the private namespace, without a session/guard-run read. */
+  cleanupNamespace(): Promise<Record<string, unknown>[]>;
 }
 
 const SEGMENT = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
@@ -157,16 +161,20 @@ export function helperWorkTrees(options: HelperWorkTreesOptions = {}): WorkTrees
       }
       return user;
     },
-    async adopt(dir, user) {
-      const r = await adoptWorktree({ dir, user, ...helperOpts });
+    async adopt(dir, user, signal) {
+      signal?.throwIfAborted();
+      const r = await adoptWorktree({ dir, user, ...helperOpts, ...(signal ? { signal } : {}) });
+      signal?.throwIfAborted();
       if (r.ok) return;
       throw new PortError('ADOPT_FAILED', `把 ${dir} 交给 ${user} 没成：${r.detail}`, {
         retryable: r.code !== 'usage',
         details: { exitCode: r.exitCode },
       });
     },
-    async adoptTemporary(dir, user) {
-      const r = await adoptWorktree({ dir, user, ...helperOpts });
+    async adoptTemporary(dir, user, signal) {
+      signal?.throwIfAborted();
+      const r = await adoptWorktree({ dir, user, ...helperOpts, ...(signal ? { signal } : {}) });
+      signal?.throwIfAborted();
       if (r.ok) return r.identity;
       throw new PortError('ADOPT_FAILED', `临时目录认领失败：${r.detail}`, { retryable: r.code !== 'usage' });
     },
@@ -188,6 +196,9 @@ export function helperWorkTrees(options: HelperWorkTreesOptions = {}): WorkTrees
     },
     pendingCleanup() {
       return cleanupStatus(helperOpts);
+    },
+    cleanupNamespace() {
+      return readCleanupNamespace(root, helperOpts);
     },
   };
 }

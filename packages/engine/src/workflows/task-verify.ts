@@ -33,6 +33,13 @@ import { headMovedDetail, verifyStopDetail } from './task-support.ts';
 export const VERIFY_REATTACH_SECONDS = 20;
 
 /**
+ * 冷验收同一个头一直回「过会儿再验」最多占着在跑名额等这么久（#3281）：所有验收家族一起没额度时，不让几张单卡在这里把
+ * 在跑名额占满、引擎拉不了新单。过了就让出名额（任务行 stalled），每 VERIFY_STALL_POLL_SECONDS 或路由恢复时自己再验。
+ */
+export const VERIFY_WAIT_CAP_SECONDS = 2 * 60 * 60;
+export const VERIFY_STALL_POLL_SECONDS = 30 * 60;
+
+/**
  * 冷验收。没过：记下问题表回动手（'rework'）；做不出来：停下等人，不让写代码的会话白改一轮；这会儿验不了、过一会儿就行：睡一会儿再来，
  * 不算一轮；要验的头已经被别人换了：停下等人看过，回 'head_moved'，由调用方对新的头重走一遍。
  * early：和 CI 同时验过、已经认下的那一次结果（决定 0093）。给了就当第一轮的结果用，不再调活动；后面的处理和串行一样。
@@ -49,6 +56,11 @@ export async function coldVerifyPr(
   let current = brief;
   let ready = early;
   for (;;) {
+    const revisedBefore = await rt.refreshContract('冷验收开始前');
+    if (revisedBefore && ready) {
+      rt.verifyRound += 1;
+      ready = undefined;
+    }
     if (rt.verifyRound >= MAX_VERIFY_ROUNDS) {
       const problems = rt.feedback.join('；') || '（没有）';
       const mode = await rt.exhaustRounds(
@@ -86,6 +98,11 @@ export async function coldVerifyPr(
       }
     });
     if (wasDetached && patched('settle-merged-task-checkpoint')) await rt.checkpoint();
+    const revisedAfter = await rt.refreshContract('冷验收结果接纳前');
+    if (revisedAfter || res.contractChanged) {
+      // 真跑过的旧验收仍占原轮数；旧/晚到结论不授予新版合同合并资格。
+      continue;
+    }
     if (res.headMoved !== undefined) {
       rt.verifyRound -= 1;
       await rt.park('PR 的头被别人改了', headMovedDetail(res.headMoved, headSha));
@@ -95,9 +112,32 @@ export async function coldVerifyPr(
     if (res.retry) {
       // 这会儿验不了、过一会儿就行（没空位、内存放不下、引擎在停机、上游临时故障）：不算一轮，不停下报人
       rt.verifyRound -= 1;
+      // 同一个头一直验不了满 VERIFY_WAIT_CAP_SECONDS（#3281，patched('verify-wait-cap')）：不再占着在跑名额干等，
+      // 任务行写成 stalled 让给别的单，报一次警；路由恢复、到点、「继续」都醒来再验，不用人点。老历史没有这个标记，照旧等。
+      if (patched('verify-wait-cap')) {
+        if (rt.verifyWaitSince?.head !== headSha) {
+          rt.verifyWaitSince = { head: headSha, at: Date.now(), alerted: false };
+        }
+        const since = rt.verifyWaitSince;
+        const waited = Math.floor((Date.now() - since.at) / 1000);
+        if (waited >= VERIFY_WAIT_CAP_SECONDS) {
+          const first = !since.alerted;
+          since.alerted = true;
+          await rt.stallForRoute(
+            '冷验收一直派不出',
+            `头 ${headSha.slice(0, 12)} 已等 ${Math.round(waited / 60)} 分钟仍验不了：${res.retry.reason}。` +
+              `让出在跑名额，路由恢复或每 ${VERIFY_STALL_POLL_SECONDS / 60} 分钟自己再验；不用点「继续」。`,
+            VERIFY_STALL_POLL_SECONDS,
+            mark,
+            first,
+          );
+          continue;
+        }
+      }
       await rt.pauseForRoute(res.retry.wait, res.retry.reason, res.retry.afterSeconds, mark);
       continue;
     }
+    if (patched('verify-wait-cap')) rt.verifyWaitSince = null;
     if (res.unavailable) {
       rt.verifyRound -= 1; // 没验成不算一轮
       await rt.park('验收做不出来', res.unavailable);
@@ -191,6 +231,7 @@ function coldVerifyInput(rt: TaskRuntime, brief: TaskBrief, round: number): Cold
     branch: rt.branch,
     baseSha: wt.baseSha,
     headSha,
+    ...(rt.contractVersioned && brief.contract ? { contract: brief.contract } : {}),
     what: brief.request,
     howToFinish: brief.acceptance,
     authorFamilies: [...rt.families],

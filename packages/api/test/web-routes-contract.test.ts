@@ -48,7 +48,8 @@ describe('契约 ↔ 后端注册的路由', () => {
     const own = (r: Entry) =>
       !/^\/api\/(feishu|intents?|drafts?|nodes\/report)(\/|$)/.test(r.path) &&
       !(r.method === 'POST' && r.path === '/api/nodes/sessions') &&
-      !(r.method === 'POST' && r.path === '/api/nodes/claims');
+      // 同一路径的 GET（#3388，别的机器领单前看谁领着什么）同样只认通行证，本机脚本调，浏览器不调。
+      !(r.path === '/api/nodes/claims' && (r.method === 'POST' || r.method === 'GET'));
     const extra = registered
       .filter(
         (r) => (r.path.startsWith(`${WEB_API_PREFIX}/`) || r.path.startsWith(`${AUTH_PREFIX}/`)) && own(r),

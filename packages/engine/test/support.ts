@@ -1,9 +1,11 @@
 // 测试共用（不依赖 vitest，录重放夹具的脚本也用）：可跳时间的 Temporal 测试服务端 + 真的工作流包 + 假端口。
 import { randomUUID } from 'node:crypto';
+import { fileURLToPath } from 'node:url';
+import { prepareTemporalCli, startTemporalTestEnvironment } from '@fleet-dao/conventions/temporal-test-cli';
 import type { Repo } from '@fleet-dao/shared';
 import type { WorkflowHandle } from '@temporalio/client';
 import { TestWorkflowEnvironment } from '@temporalio/testing';
-import { DefaultLogger, Runtime, type WorkflowBundle } from '@temporalio/worker';
+import { DefaultLogger, Runtime, type Worker, type WorkflowBundle } from '@temporalio/worker';
 import type { EngineJobs, EngineTasks } from '../src/activities.ts';
 import type { EngineActivities } from '../src/activity-options.ts';
 import type { FailureTriage } from '../src/decisions/failure.ts';
@@ -29,33 +31,14 @@ export function createEnv(): Promise<TestWorkflowEnvironment> {
 /**
  * 真的 Temporal 开发服务端（temporal server start-dev），不能跳时间。只给「测试服务端和真服务端行为不同」的用例用：
  * 比如测试服务端不会让已经请求叫停、又不心跳的活动超时（一直等工人回话），真服务端到了限时就判超时。
- * FLEET_TEST_TEMPORAL_CLI 指向本机的 temporal 命令就用它（最好和法国同一版），否则按 SDK 默认的版本下载一份（缓存一天）。
+ * CLI 必须与 deploy/france.sh 固定版本相同；先 pnpm test:temporal --cli <绝对路径> 登记，或设 FLEET_TEST_TEMPORAL_CLI。
+ * 本机和 CI 都先核路径与版本，缺失明确失败；不在业务测试里隐式下载。
  */
 export function createRealEnv(): Promise<TestWorkflowEnvironment> {
-  const cli = process.env.FLEET_TEST_TEMPORAL_CLI?.trim();
-  // CI 按 deploy/france.sh 钉的版本装好命令行再交过来（.github/workflows/ci.yml）；没给说明那几步坏了，
-  // 不许悄悄退回 SDK 默认版本（和法国不同版，测过也不算数）。
-  if (!cli && process.env.CI) {
-    throw new Error(
-      'CI 里没给 FLEET_TEST_TEMPORAL_CLI：Temporal 命令行没按法国的版本装上，这条真服务端的测试不算数',
-    );
-  }
-  const options = cli ? { server: { executable: { type: 'existing-path' as const, path: cli } } } : {};
-  if (cli) return TestWorkflowEnvironment.createLocal(options);
-
-  // 本地没有固定命令行时，SDK 会按需从网络下载；连接重置不应让整次验收直接抖红。
-  return (async () => {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      try {
-        return await TestWorkflowEnvironment.createLocal(options);
-      } catch (error) {
-        lastError = error;
-        if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
-      }
-    }
-    throw lastError;
-  })();
+  const cli = prepareTemporalCli(fileURLToPath(new URL('../../../', import.meta.url)));
+  return startTemporalTestEnvironment(cli, (path) =>
+    TestWorkflowEnvironment.createLocal({ server: { executable: { type: 'existing-path', path } } }),
+  );
 }
 
 export interface WorkerOptions {
@@ -76,6 +59,8 @@ export interface WorkerOptions {
   tasks?: EngineTasks;
   /** 换一份工作流包（测试宿主工作流）；不给就是引擎自己的。 */
   workflowBundle?: WorkflowBundle;
+  /** 仅合成历史诊断使用；观察真实 runUntil Promise，不改变 worker 生命周期。 */
+  observeWorker?: (worker: Worker, run: Promise<unknown>, bundle: WorkflowBundle) => void;
 }
 
 /**
@@ -108,6 +93,7 @@ export async function withWorker<T>(
     const base = options.tasks?.readMergedTask ? routed : { ...routed, readMergedTask: async () => null };
     return userWrap ? userWrap(base) : base;
   };
+  const workflowBundle = options.workflowBundle ?? (await engineBundle());
   const worker = await createEngineWorker({
     config: {
       address: env.address,
@@ -118,7 +104,7 @@ export async function withWorker<T>(
     },
     ports: world.ports,
     connection: env.nativeConnection,
-    workflowBundle: options.workflowBundle ?? (await engineBundle()),
+    workflowBundle,
     ...(options.triage ? { triage: options.triage } : {}),
     ...(options.decide ? { decide: options.decide } : {}),
     wrapActivities,
@@ -126,7 +112,9 @@ export async function withWorker<T>(
     ...(options.jobs ? { jobs: options.jobs } : {}),
     ...(options.tasks ? { tasks: options.tasks } : {}),
   });
-  return worker.runUntil(fn(taskQueue));
+  const run = worker.runUntil(fn(taskQueue));
+  options.observeWorker?.(worker, run, workflowBundle);
+  return run;
 }
 
 export const REPO: Repo = {

@@ -16,6 +16,8 @@ import type {
   GuardedPaths,
   MergeNowInput,
   MergeNowResult,
+  MergeReadyInput,
+  MergeReadyResult,
   MergeWait,
   NoteBare401Input,
   PlanSegmentResumeInput,
@@ -23,6 +25,7 @@ import type {
   ReadCiPolicyResult,
   ReadCiReviewsInput,
   ReadDeliveryInput,
+  ReadTaskBriefInput,
   RunSegmentInput,
   RunSegmentResult,
   SegmentSettledInput,
@@ -61,6 +64,8 @@ export function goodBrief(): TaskBrief {
 
 export interface Script {
   brief: (n: number) => TaskBriefResult;
+  /** 安全边界的当前正文；旧脚本没有外部编辑时沿用最近一次显式读取的正文。 */
+  contractBrief?: (input: ReadTaskBriefInput, n: number) => TaskBriefResult;
   segment: (
     input: RunSegmentInput,
     n: number,
@@ -77,6 +82,8 @@ export interface Script {
   guarded: (n: number, input: CheckGuardedInput) => GuardedPaths;
   arm: (n: number, input: ArmAutoMergeInput) => ArmAutoMergeResult;
   merged: (n: number) => MergeWait;
+  /** 停在合并这一步后的复核（#3281）。默认不满足：老用例照旧等人点「继续」。不进 calls.order。 */
+  mergeReady: (n: number, input: MergeReadyInput) => MergeReadyResult;
   /** 默认强制。不进 calls.order。 */
   ciPolicy: () => ReadCiPolicyResult;
   mergeNow: (n: number, input: MergeNowInput) => MergeNowResult;
@@ -93,6 +100,7 @@ export interface Script {
 }
 
 export interface Calls {
+  contractReads: ReadTaskBriefInput[];
   /** 任务活动被调的先后（验收一定在挂自动合并之前）。 */
   order: string[];
   brief: number;
@@ -106,6 +114,8 @@ export interface Calls {
   /** 挂自动合并被调时收到的入参。 */
   armInputs: ArmAutoMergeInput[];
   merged: number;
+  /** 停在合并这一步后复核收到的入参。不进 order。 */
+  mergeReady: MergeReadyInput[];
   /** 读 CI 模式的次数。不进 order。 */
   ciPolicy: number;
   /** CI 红返工读评审的入参。不进 order（老用例比 order 一字不差）。默认成功且没有评审。 */
@@ -129,9 +139,30 @@ export interface Calls {
 
 export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: '已提交' };
 
+/**
+ * 活动还在跑时给心跳，放弃的取消靠它送进来。
+ * 间隔 200ms，且上一次心跳的调用没回来就不再开下一次：20ms 不重叠地打 RPC 时，慢的测试服务端会把活动完成挤到用例时限之后，时间也不跳。
+ */
+function heartbeats(beat: () => unknown): () => void {
+  let pending = false;
+  let stopped = false;
+  const timer = setInterval(() => {
+    if (pending || stopped) return;
+    pending = true;
+    Promise.resolve(beat()).finally(() => {
+      pending = false;
+    });
+  }, 200);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
 /** 默认全走通；哪一步要出岔子，给那一步的脚本。 */
 export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; calls: Calls } {
   const calls: Calls = {
+    contractReads: [],
     order: [],
     brief: 0,
     segment: [],
@@ -142,6 +173,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     arm: 0,
     armInputs: [],
     merged: 0,
+    mergeReady: [],
     ciPolicy: 0,
     ciReviews: [],
     merge: 0,
@@ -165,6 +197,7 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     guarded: () => ({ standards: [] }),
     arm: () => ({ armed: true, merged: false }),
     merged: () => ({ state: 'merged', mergeCommit: 'abc1234567890' }),
+    mergeReady: () => ({ ready: false, why: '测试默认不满足' }),
     ciPolicy: () => ({ mode: 'force' }),
     mergeNow: () => ({ merged: true, mergeCommit: 'abc1234567890' }),
     resume: () => ({ kind: 'new', reason: '测试默认不续' }),
@@ -175,21 +208,31 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     ...over,
   };
   const bare401 = new Map<string, Bare401Stamp>();
+  let currentBrief: TaskBriefResult | null = null;
   const tasks: EngineTasks = {
-    async readTaskBrief() {
+    async readTaskBrief(input) {
+      if (input.checkContract) {
+        calls.contractReads.push(input);
+        return (
+          script.contractBrief?.(input, calls.contractReads.length) ??
+          currentBrief ??
+          script.brief(calls.brief)
+        );
+      }
       calls.order.push('brief');
       calls.brief += 1;
-      return script.brief(calls.brief);
+      currentBrief = script.brief(calls.brief);
+      return currentBrief;
     },
     async runSegment(input, ctx) {
       calls.order.push('segment');
       calls.segment.push(input);
-      // 心跳：放弃时 Temporal 要靠心跳把取消送进来
-      const beat = setInterval(() => ctx.heartbeat(), 20);
+      // 心跳：放弃时 Temporal 要靠心跳把取消送进来。上一次还没回来就不再叠下一次。
+      const stop = heartbeats(() => ctx.heartbeat());
       try {
         return await script.segment(input, calls.segment.length, ctx.signal, () => ctx.heartbeat());
       } finally {
-        clearInterval(beat);
+        stop();
       }
     },
     async readDelivery(input) {
@@ -200,12 +243,12 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     async coldVerify(input, ctx) {
       calls.order.push('verify');
       calls.verify.push(input);
-      // 心跳：取消要靠心跳送进来
-      const beat = setInterval(() => ctx.heartbeat(), 20);
+      // 心跳：取消要靠心跳送进来。上一次还没回来就不再叠下一次。
+      const stop = heartbeats(() => ctx.heartbeat());
       try {
         return await script.verify(input, calls.verify.length, ctx.signal);
       } finally {
-        clearInterval(beat);
+        stop();
       }
     },
     async checkGuarded(input) {
@@ -224,6 +267,10 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
       calls.order.push('merged');
       calls.merged += 1;
       return script.merged(calls.merged);
+    },
+    async mergeReady(input) {
+      calls.mergeReady.push(input);
+      return script.mergeReady(calls.mergeReady.length, input);
     },
     async readCiPolicy() {
       calls.ciPolicy += 1;

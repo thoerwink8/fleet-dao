@@ -25,12 +25,13 @@ import type { Hono, MiddlewareHandler } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Deps } from './deps.ts';
 import { ApiError, errorBody, readJson, reply } from './http.ts';
+import { readNodeKeys } from './node-keys.ts';
 
 type NodeEnv = { Variables: { nodeId: string } };
 
 /** 这台没配钥匙时，读口写的原因。 */
 export const LOCAL_SESSIONS_NOT_WIRED =
-  '法国没配 FLEET_NODE_KEYS，不收本机推来的会话（见 docs/ops.md「本机会话上报」）';
+  '法国还没发过机器通行证（库里没有、FLEET_NODE_KEYS 也没配），不收本机推来的会话（见 docs/ops.md「本机会话上报」）';
 
 const oversize = bodyLimit({
   maxSize: LOCAL_SESSIONS_MAX_BYTES,
@@ -96,9 +97,10 @@ function freshnessOf(receivedAt: string, now: Date): 'fresh' | 'stale' {
 
 /** GET /nodes/sessions。库里那份认不出回 500 写明，不当成没有会话。 */
 export async function readLocalSessions(
-  deps: Pick<Deps, 'config' | 'store' | 'now'>,
+  deps: Pick<Deps, 'config' | 'store' | 'now' | 'log'>,
 ): Promise<LocalSessionsResponse> {
   const now = deps.now();
+  const { keys, configured } = await readNodeKeys(deps);
   let records: Awaited<ReturnType<Deps['store']['listNodeSessions']>>;
   try {
     records = await deps.store.listNodeSessions();
@@ -122,10 +124,10 @@ export async function readLocalSessions(
       problems: r.report.problems,
     });
   }
-  for (const id of Object.keys(deps.config.nodeKeys)) {
+  for (const id of Object.keys(keys)) {
     if (!nodes.has(id)) nodes.set(id, { id, freshness: 'never', sessions: [], problems: [] });
   }
-  const notWired = Object.keys(deps.config.nodeKeys).length === 0;
+  const notWired = !configured;
   return {
     asOf: now.toISOString(),
     ...(notWired ? { notWired: LOCAL_SESSIONS_NOT_WIRED } : {}),

@@ -14,12 +14,13 @@ import { renderApp } from './harness';
 
 afterEach(cleanup);
 
+// 「用哪个模型」在「用量和模型」里，默认收起（#3228），地址带 ?usage=open 打开
 function open(route: string, api?: FleetApi) {
   return renderApp(
     <Routes>
       <Route path="/tasks/:taskId" element={<TaskPage />} />
     </Routes>,
-    { route, ...(api ? { api } : {}) },
+    { route: `${route}${route.includes('?') ? '&' : '?'}usage=open`, ...(api ? { api } : {}) },
   );
 }
 
@@ -30,6 +31,12 @@ async function row(segment: string): Promise<HTMLElement> {
     if (!(el instanceof HTMLElement)) throw new Error(`没有 ${segment} 这一行`);
     return el;
   });
+}
+
+function liveRow(segment: string): HTMLElement {
+  const el = document.querySelector(`[data-pin-segment="${segment}"]`);
+  if (!(el instanceof HTMLElement)) throw new Error(`没有 ${segment} 这一行`);
+  return el;
 }
 
 describe('用哪个模型', () => {
@@ -53,19 +60,37 @@ describe('用哪个模型', () => {
   test('回到自动：发给后端的是清掉这一段的指定，页面跟着变成自动', async () => {
     const inner = createMockApi({ live: false });
     const sent: UpdateTaskRoutePinBody[] = [];
+    // 请求先记下、先不落库：忙态按钮文案是「正在回到自动」，里面就有「自动」，旧的指定还在。
+    // 原先等「自动」会在落库前提前过，再拿点击前那一行同步查「指定 Kimi」；那一行被换掉后也不再跟着变。
+    let releaseUpdate = () => {};
+    const updateGate = new Promise<void>((resolve) => {
+      releaseUpdate = resolve;
+    });
     const api: FleetApi = {
       ...inner,
       updateTaskRoutePin: async (taskId, body) => {
         sent.push(body);
+        await updateGate;
         return inner.updateTaskRoutePin(taskId, body);
       },
     };
-    open('/tasks/t-14', api);
-    const manual = await row('manual');
-    fireEvent.click(within(manual).getByRole('button', { name: '回到自动' }));
-    await waitFor(() => expect(sent).toEqual([{ segment: 'manual', modelId: null, routeId: null }]));
-    await waitFor(() => expect(manual.textContent).toContain('自动'));
-    expect(manual.textContent).not.toContain('指定 Kimi');
+    try {
+      open('/tasks/t-14', api);
+      fireEvent.click(within(await row('manual')).getByRole('button', { name: '回到自动' }));
+      await waitFor(() => expect(sent).toEqual([{ segment: 'manual', modelId: null, routeId: null }]));
+      const inflight = liveRow('manual');
+      expect(inflight.textContent).toContain('指定 Kimi');
+      expect(inflight.textContent).not.toContain('按路由两层的顺序选');
+      releaseUpdate();
+      await waitFor(() => {
+        const live = liveRow('manual');
+        expect(live.textContent).toContain('自动');
+        expect(live.textContent).toContain('按路由两层的顺序选');
+        expect(live.textContent).not.toContain('指定 Kimi');
+      });
+    } finally {
+      releaseUpdate();
+    }
   });
 
   test('【故意造出的失败】指定读不了：写明读不了、下拉锁上，不当成「自动」', async () => {

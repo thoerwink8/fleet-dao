@@ -154,6 +154,54 @@ describe('每天补齐更新日志', () => {
     expect(await runChangelogJob(w.deps)).toMatchObject({ outcome: 'ok', found: 0 });
     expect(w.opened).toEqual([]);
   });
+  it('旧auto与现代原账混合一次补全两版，跨北京午夜归版；生成内容再读不重复开PR', async () => {
+    const w = world();
+    const rollback = 'c'.repeat(40);
+    const unhealthy = 'd'.repeat(40);
+    const recovered = 'e'.repeat(40);
+    w.deps.history = async () =>
+      [
+        `2026-10-18T15:59:59Z ${SHA} release auto`,
+        `2026-10-18T16:00:00Z ${HEAD} release`,
+        `2026-10-19T00:00:00Z ${rollback} auto-rollback unmerged`,
+        `2026-10-19T01:00:00Z ${unhealthy} unhealthy`,
+        `2026-10-19T02:00:00Z ${recovered} recovered`,
+      ].join('\n');
+    expect(await runChangelogJob(w.deps)).toEqual({ outcome: 'ok', scanned: 2, found: 2 });
+    expect(w.opened).toHaveLength(1);
+    const pr = w.opened[0];
+    if (!pr) throw new Error('混合发布历史没有生成PR');
+    expect(pr).toMatchObject({ baseCommit: HEAD, version: 5, versions: [4, 5] });
+    const v4 = pr.content.split('## [v4]')[1] ?? '';
+    const v5 = pr.content.split('## [v4]')[0] ?? '';
+    expect(v4).toContain(SHA);
+    expect(v4).not.toContain(`发到法国的提交：\`${HEAD}`);
+    expect(v5).toContain(`发到法国的提交：\`${HEAD}`);
+    expect(v5).toContain(rollback);
+    expect(v5).not.toContain(SHA);
+    expect(pr.content).not.toContain(unhealthy);
+    expect(pr.content).not.toContain(recovered);
+    expect(pr.content).toContain('#40');
+    expect(pr.content).toContain('#50');
+    w.deps.github.readHead = async () => ({ commit: HEAD, text: pr.content });
+    w.deps.history = async () => {
+      throw new Error('没有缺版不应再读历史');
+    };
+    expect(await runChangelogJob(w.deps)).toEqual({ outcome: 'ok', scanned: 2, found: 0 });
+    expect(w.opened).toHaveLength(1);
+    expect(w.finished).toEqual([
+      { outcome: 'ok', scanned: 2, found: 2 },
+      { outcome: 'ok', scanned: 2, found: 0 },
+    ]);
+  });
+  it('【故意失败】混合合法旧auto后仍有未知行，整轮failed且不开部分PR', async () => {
+    const w = world();
+    w.deps.history = async () =>
+      `2026-10-18T15:59:59Z ${SHA} release auto\n2026-10-19T00:00:00Z ${HEAD} rollback\n2026-10-19T01:00:00Z ${HEAD} unknown auto`;
+    await expect(runChangelogJob(w.deps)).rejects.toThrow('法国发布历史有认不出的行');
+    expect(w.opened).toEqual([]);
+    expect(w.finished).toEqual([{ outcome: 'failed', why: '没查成：法国发布历史有认不出的行' }]);
+  });
   it.each(['github', 'history', 'bad-history', 'head', 'cut', 'issues'])(
     '【故意失败】%s 没查成：记failed，不生成部分PR',
     async (failure) => {
@@ -267,6 +315,47 @@ describe('更新日志结果接真实schedule_runs约束', () => {
 });
 
 describe('法国发布原账', () => {
+  it('旧release auto与现代发布、回滚、unmerged合同并存，按北京时间归日', () => {
+    expect(
+      changelogReleases(
+        [
+          `2026-10-18T15:59:59Z ${SHA} release auto`,
+          `2026-10-18T16:00:00Z ${HEAD} release`,
+          `2026-10-19T00:00:00Z ${SHA} rollback`,
+          `2026-10-19T01:00:00Z ${HEAD} release unmerged`,
+          `2026-10-19T02:00:00Z ${SHA} auto-rollback unmerged`,
+          `2026-10-19T03:00:00Z ${HEAD} unhealthy unmerged`,
+          `2026-10-19T04:00:00Z ${HEAD} recovered unmerged`,
+        ].join('\n'),
+      ),
+    ).toEqual([
+      { sha: SHA, date: '2026-10-18' },
+      { sha: HEAD, date: '2026-10-19' },
+      { sha: SHA, date: '2026-10-19' },
+      { sha: HEAD, date: '2026-10-19' },
+      { sha: SHA, date: '2026-10-19' },
+    ]);
+  });
+  it.each([
+    `2026-02-31T00:00:00Z ${SHA} release auto`,
+    `2026-10-18T24:00:00Z ${SHA} release auto`,
+    `2026-10-18T00:00:00+00:00 ${SHA} release auto`,
+    '2026-10-18T00:00:00Z short release auto',
+    `2026-10-18T00:00:00Z ${SHA.toUpperCase()} release auto`,
+    `2026-10-18T00:00:00Z ${SHA}`,
+    `2026-10-18T00:00:00Z ${SHA} unknown auto`,
+    ...['rollback', 'auto-rollback', 'unhealthy', 'recovered'].map(
+      (event) => `2026-10-18T00:00:00Z ${SHA} ${event} auto`,
+    ),
+    `2026-10-18T00:00:00Z ${SHA} release manual`,
+    `2026-10-18T00:00:00Z ${SHA} release Auto`,
+    `2026-10-18T00:00:00Z ${SHA} release auto unmerged`,
+    `2026-10-18T00:00:00Z ${SHA} release unmerged auto`,
+    `2026-10-18T00:00:00Z ${SHA} release auto trailing`,
+    `2026-10-18T00:00:00Z ${SHA} release unmerged trailing`,
+  ])('【故意失败】兼容auto仍拒绝坏日期、SHA、缺项、未知事件/标签与尾字段：%s', (line) => {
+    expect(() => changelogReleases(line)).toThrow('认不出');
+  });
   it('健康事件不算切版本，回滚算，保留合法空账；坏行/未知事件不静默丢弃', () => {
     expect(
       changelogReleases(

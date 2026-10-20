@@ -41,4 +41,6 @@ export function createDecide(deps: DecideDeps = {}): Decide {
 }
 
 export * from './failure.ts';
+export * from './park-triage.ts';
+export * from './spin.ts';
 export * from './types.ts';

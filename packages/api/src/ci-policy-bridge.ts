@@ -1,4 +1,4 @@
-import { type Locker, type PolicyGitHub, parseRepoSlug, type RepoRef, redact } from '@fleet-dao/github';
+import { type Locker, type PolicyGitHub, type RepoRef, redact } from '@fleet-dao/github';
 import {
   CI_POLICY_BRIDGE_VERSION,
   type CiPolicy,
@@ -9,11 +9,10 @@ import {
   policyEndpoint,
   policyId,
   policyOrigin,
-  policySourceContext,
-  policySourceUrl,
 } from '@fleet-dao/shared';
+import { createPolicySourcePublisher, PolicySourceUnavailable } from '@fleet-dao/store';
 import { ApiError } from './http.ts';
-import type { CiPolicyChange, GitHubEventSink } from './ports.ts';
+import type { CiPolicyChange } from './ports.ts';
 
 export interface PolicyRow extends RepoRef {
   id: string;
@@ -58,23 +57,15 @@ export function createCiPolicyBridge(deps: {
     return { row, identity };
   };
   const endpoint = (id: number) => policyEndpoint(origin, id);
-  const publish = async (repo: RepoRef, identity: PolicyRepo, number: number, force: boolean) => {
-    const head = await deps.gh.pull(repo, number, identity);
-    if (!head.open || head.fork) return false;
-    const url = policySourceUrl(endpoint(identity.githubId), head);
-    const context = policySourceContext(number);
-    const old = await deps.gh.latest(repo, identity, head.head, context);
-    if (force || !old || old.state !== 'success' || old.target_url !== url)
-      await deps.gh.write(repo, identity, head.head, {
-        context,
-        state: 'success',
-        description: '当前数据库 CI 策略只读来源（非模式快照）',
-        targetUrl: url,
-      });
-    const back = await deps.gh.pull(repo, number, identity);
-    if (!back.open || back.head !== head.head || back.fork)
-      throw new Error('source 发布期间 PR head 改变，请重试');
-    return true;
+  const publisher = createPolicySourcePublisher({ origin, gh: deps.gh, find: deps.find });
+  const publish = async (repo: RepoRef, number: number, force: boolean) => {
+    try {
+      return await publisher.publish(repo, number, force);
+    } catch (err) {
+      if (err instanceof PolicySourceUnavailable)
+        throw new ApiError(404, 'policy_unavailable', '没有可用的公开策略');
+      throw err;
+    }
   };
   const revoke = async (repo: RepoRef, identity: PolicyRepo) => {
     for (const number of await deps.gh.openPulls(repo)) {
@@ -121,15 +112,14 @@ export function createCiPolicyBridge(deps: {
       };
     },
     async publish(repo, number) {
-      const { identity } = await checked(repo);
-      if (identity.public) await publish(repo, identity, number, false);
+      await publish(repo, number, false);
     },
     async refresh(repo, forceEvent = false) {
       const { identity } = await checked(repo);
       if (!identity.public) return { public: false, heads: 0 };
       const numbers = await deps.gh.openPulls(repo);
       let heads = 0;
-      for (const n of numbers) if (await publish(repo, identity, n, forceEvent)) heads++;
+      for (const n of numbers) if (await publish(repo, n, forceEvent)) heads++;
       return { public: true, heads };
     },
     async set(repo, mode, commit) {
@@ -188,16 +178,5 @@ export function createCiPolicyBridge(deps: {
   return bridge;
 }
 
-/** 必须在 intake 的 await accept 内：失败记 failed，沿同一本投递账重放；不依赖 wake。 */
-export function withPolicySource(sink: GitHubEventSink, bridge: CiPolicyBridge): GitHubEventSink {
-  return {
-    async accept(ev) {
-      if (ev.event === 'pull_request' && ['opened', 'synchronize', 'reopened'].includes(ev.action ?? '')) {
-        const payload = ev.payload as { pull_request?: { number?: unknown } };
-        if (!policyId(payload?.pull_request?.number)) throw new Error('source PR 事件缺可信单号');
-        await bridge.publish(parseRepoSlug(ev.repo), payload.pull_request.number);
-      }
-      await sink.accept(ev);
-    },
-  };
-}
+// 保留 API 旧入口；真实实现归 store，engine 与 API 共用。
+export { withPolicySource } from '@fleet-dao/store';

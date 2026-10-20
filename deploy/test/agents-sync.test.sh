@@ -76,8 +76,10 @@ printf '// 假的调工具前钩子\n' >"$R/agents/hooks/pretool.mjs"
 printf '// 假的 Codex 调工具前钩子\n' >"$R/agents/hooks/pretool-codex.mjs"
 printf '// 假的无人值守开场钩子\n' >"$R/agents/hooks/continuation-start.mjs"
 printf '// 假的完成进展钩子\n' >"$R/agents/hooks/continuation-progress.mjs"
+printf '// 假的 Codex 完成进展钩子\n' >"$R/agents/hooks/continuation-progress-codex.mjs"
 printf '// 假的开会话钩子\n' >"$R/agents/hooks/session-start.mjs"
 printf '// 假的收尾提醒钩子\n' >"$R/agents/hooks/stop.mjs"
+printf '// 假的 Codex 收尾提醒钩子\n' >"$R/agents/hooks/stop-codex.mjs"
 printf '// 假的落盘钩子\n' >"$R/agents/hooks/prompt-log.mjs"
 printf '// 假的主对话两条（引导先回、子代理后台跑）钩子\n' >"$R/agents/hooks/main-thread.mjs"
 chmod -R go-rwx "$R"
@@ -118,6 +120,8 @@ check "手写的 my-own.md 没碰" "$(grep -c '^手写的$' "$H/.claude/agents/m
 # Claude 过程钩子走项目订阅；Codex 用户入口登记安全和无人值守接续，脚本整份拷进家里。
 check "钩子脚本拷进了他家" "$(cat "$H/.fleet-dao/hooks/pretool.mjs")" "// 假的调工具前钩子"
 check "Stop 钩子脚本也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop.mjs")" "// 假的收尾提醒钩子"
+check "Codex 完成进展入口也拷进了他家" "$(cat "$H/.fleet-dao/hooks/continuation-progress-codex.mjs")" "// 假的 Codex 完成进展钩子"
+check "Codex Stop 入口也拷进了他家" "$(cat "$H/.fleet-dao/hooks/stop-codex.mjs")" "// 假的 Codex 收尾提醒钩子"
 check "主对话钩子脚本也拷进了他家（决定 0078）" "$(cat "$H/.fleet-dao/hooks/main-thread.mjs")" \
   "// 假的主对话两条（引导先回、子代理后台跑）钩子"
 check "Claude 的设置里登记了订阅加载器和调工具前" \

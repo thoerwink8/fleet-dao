@@ -53,6 +53,7 @@ import {
   SEGMENT_STAGE,
   type SegmentAttach,
 } from '../task-contract.ts';
+import { cancellationCheckedExec } from './exec.ts';
 import type { MemoryAdmissionDeps } from './memory-admission.ts';
 import type { OneShotSessions, OneShotTicket } from './one-shot-sessions.ts';
 import type { ChannelAttempts, SegmentReservations } from './runs-writer.ts';
@@ -212,14 +213,18 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
 
   const runSegment = async (input: RunSegmentInput, ctx: PortContext): Promise<RunSegmentResult> => {
     try {
+      // 接回已有会话仍须把叫停交给原驱动；这里只阻止新会话的迟到准备。
+      if (!input.attach) ctx.signal.throwIfAborted();
       ctx.heartbeat();
       // 1. 路由 → 会话用户（树要归它）。查不到、没接上都是配置问题，重试没用。
       let routeInfo: Awaited<ReturnType<typeof resolveSegmentRoute>>;
       try {
         routeInfo = await resolveSegmentRoute(deps.spawner, input.route.routeId);
       } catch (error) {
+        ctx.signal.throwIfAborted();
         throw new PortError('SEGMENT_ROUTE_UNUSABLE', errMessage(error), { retryable: false });
       }
+      if (!input.attach) ctx.signal.throwIfAborted();
       // 接回时引擎又在走（发版连着发）：不碰它，当场再交回，等下一个引擎
       if (input.attach && deps.spawner.handoff?.signal.aborted) return detachedResult(input.attach);
       // 定了路由就登记（#59）：从这里到收场（建树、等内存、起会话），切号都看得见这一段、停得下它
@@ -236,6 +241,9 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       } finally {
         ticket?.leave();
       }
+    } catch (error) {
+      ctx.signal.throwIfAborted();
+      throw error;
     } finally {
       await releaseReservation(input.route.reservationId);
     }
@@ -265,16 +273,20 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       },
       ctx,
     );
+    ctx.signal.throwIfAborted();
+    const prepareExec = cancellationCheckedExec(deps.tree.exec, ctx.signal);
     // 2.5 Mirasim 的会话读树里的本地设置：写 deny（带 isolation 的子代理、非 Claude 模型时全部子代理）和并发上限（#1641）
     if (deps.subagentGuard && routeInfo.route.hostId === 'mirasim') {
       let guard: SubagentGuard;
       try {
         guard = await deps.subagentGuard();
       } catch (error) {
+        ctx.signal.throwIfAborted();
         throw new PortError('SEGMENT_SUBAGENT_GUARD', errMessage(error), { retryable: true });
       }
+      ctx.signal.throwIfAborted();
       const settingsTree = {
-        exec: deps.tree.exec,
+        exec: prepareExec,
         user: routeInfo.user,
         dir: input.worktreePath,
         scopePrefix: `local-settings-${treeRunId}`,
@@ -286,13 +298,16 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       // Claude 模型：定义靠会话用户家里的 ~/.claude/agents（agents-sync 装的），开跑前核对和仓里是同一份（#2820）；
       // 对不上照常起会话，只报一条提醒（#2834）
       const problems = await checkSubagentsInstalled(settingsTree, guard, sessionModel, deps.subagentsHome);
+      ctx.signal.throwIfAborted();
       if (problems !== null && deps.reportSubagentDefs) {
         try {
           await deps.reportSubagentDefs(routeInfo.user, problems);
         } catch (error) {
+          ctx.signal.throwIfAborted();
           log('子代理定义对不上的提醒没报成（不挡会话）', { user: routeInfo.user, error: errMessage(error) });
         }
       }
+      ctx.signal.throwIfAborted();
       await writeSegmentLocalSettings(settingsTree, guard, sessionModel);
     }
     // 3. 提示词
@@ -300,7 +315,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     const preload: PreloadRead[] = [];
     if (!input.resumeSessionId) {
       const t = {
-        exec: deps.tree.exec,
+        exec: prepareExec,
         user: routeInfo.user,
         dir: input.worktreePath,
         scopePrefix: `preload-${treeRunId}`,
@@ -320,12 +335,14 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
       brief: manualBriefOf(input.brief, { branch: input.branch, baseSha: input.baseSha }),
       specDir: input.brief.specDir,
       feedback: input.feedback,
+      ...(input.contractRevision ? { contractRevision: input.contractRevision } : {}),
       ...(input.interrupted ? { interrupted: input.interrupted } : {}),
       ...(input.resumeSessionId ? { resumed: true } : {}),
       ...(preload.length > 0 ? { preload } : {}),
       ...(input.mode === 'plan' ? { plan: true } : {}),
       ...(input.flowMode === 'full' ? { full: true } : {}),
     });
+    ctx.signal.throwIfAborted();
     return session(input, ctx, routeInfo, ticket, runId, prompt);
   }
 
@@ -349,6 +366,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
     let attemptStartedAt = now();
     try {
       for (;;) {
+        if (!attach) stopSignal.throwIfAborted();
         attemptStartedAt = now();
         try {
           result = await runOneShot(
@@ -380,6 +398,7 @@ export function createRunSegment(deps: RunSegmentDeps): NonNullable<EngineTasks[
             },
             {
               spawn: (cmd) => {
+                if (!attach) stopSignal.throwIfAborted();
                 ticket?.running();
                 return spawner({
                   ...cmd,

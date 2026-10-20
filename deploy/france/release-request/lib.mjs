@@ -24,13 +24,24 @@
 //   卡住、失败是卡住报警级（alert，不是「要你拍」，#2728）；开始、成功等不写通知，只写进度记录（#2368）。
 // - 发版还没动手（第 0–3 步、release.sh 没起）就没成的，不挡自动发版：进度记录的 untouchedFails 记同一个提交连败几趟，
 //   自动发布下一轮照常再请求，满 UNTOUCHED_FAIL_LIMIT 趟才停、开急修单（auto-release/lib.mjs 的 gateVerdict、emergencyStep）。
+//   动手之后没成（release.sh 起了，多半已自动退回）的：startedFails 记动手后连败几趟（不论哪个提交），自动发布不重发同一个提交、
+//   照发更新的绿提交，满 STARTED_FAIL_LIMIT 趟才全停、开急修单。
 // - 失败原因用 reasonOf：保留认得出的关键行（Cannot find package '…' 这种），不只取尾几行（#2728）。
 // - 这个目录的脚本是自动档：发完版由 france.sh --auto-tier 照在用那一版换上；只有 fleet-release-request.{service,path} 和目录是人工档。
 // - 请求的种类（#2027，请求文件的 kind，没写就是 release 发布，老后端照常）：retry 从停在第 3 步「等收尾」的那一趟接着走（老版本留下的）、
 //   restore 从没成在第 7 步「恢复」的那一趟把引擎总开关开回（只认我们关过的：发版前开着、pausedMaster 不是 false）、abort 撤掉暂停（等价 release-train abort：
 //   我们关过的、还没动手发版就开回暂停前的样子，已动手发过版保持关）；不认识的 kind 拒绝并写原因，不当成发布。各种都落 last-request.json（kind、by）。
+
+import { randomUUID } from 'node:crypto';
 import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, unlinkSync } from 'node:fs';
-import { ciVerdict, reasonOf, UNTOUCHED_FAIL_LIMIT, untouchedFails } from '../auto-release/lib.mjs';
+import {
+  ciVerdict,
+  reasonOf,
+  STARTED_FAIL_LIMIT,
+  startedFails,
+  UNTOUCHED_FAIL_LIMIT,
+  untouchedFails,
+} from '../auto-release/lib.mjs';
 import { SESSION_WAIT_MS } from './session-wait.mjs';
 
 export const REQUEST_DIR = '/var/lib/fleet-dao/release-request';
@@ -453,6 +464,11 @@ function newState(io, req) {
      * 这一趟也这样没成再加一。自动发布按它判下一轮重不重试（满 UNTOUCHED_FAIL_LIMIT 停、开急修单），不靠内存。
      */
     untouchedFails: 0,
+    /**
+     * 发版动手之后（release.sh 起了）连着没成几趟，不论是不是同一个提交：上一趟也是动手后没成就带过来，这一趟再这样没成加一，做完清零。
+     * 自动发布按它判：同一个提交不重发、更新的提交照发，满 STARTED_FAIL_LIMIT 趟全停、开急修单。
+     */
+    startedFails: 0,
     via: 'cockpit',
     requestedBy: req.by,
     requestedAt: req.at,
@@ -461,6 +477,100 @@ function newState(io, req) {
 }
 
 const failed = (why) => ({ ok: false, kind: 'failed', why });
+
+function ownsHealthState(read, state) {
+  const s = read.state;
+  return (
+    read.ok &&
+    s?.target?.value === state.target.value &&
+    s.startedAt === state.startedAt &&
+    s.release?.healthAttempt === state.release.healthAttempt &&
+    s.phase === state.phase &&
+    (s.status === 'running' || s.status === 'blocked')
+  );
+}
+
+// 普通退出2仍表示待配；只有本次子进程绑定目标和nonce的健康回执才能停在“待核验”。
+function releaseHealthResult(r, state) {
+  const lines = String(r.stdout ?? '')
+    .split(/\r?\n/)
+    .filter((s) => s.startsWith('FLEET_RELEASE_HEALTH_PENDING\t'));
+  if (lines.length === 0) return null;
+  if (lines.length !== 1) return failed('健康待核验回执不唯一，不能认作发布完成');
+  let p;
+  try {
+    p = JSON.parse(lines[0].slice('FLEET_RELEASE_HEALTH_PENDING\t'.length));
+  } catch {
+    return failed('健康待核验回执认不出，不能认作发布完成');
+  }
+  if (
+    p?.schema !== 1 ||
+    p.sha !== state.target.value ||
+    p.attempt !== state.release.healthAttempt ||
+    typeof p.before !== 'string' ||
+    typeof p.receipt !== 'string' ||
+    !p.receipt ||
+    typeof p.identity !== 'string' ||
+    !p.identity ||
+    (state.release.healthPending &&
+      (p.identity !== state.release.healthPending.identity ||
+        p.before !== state.release.healthPending.before)) ||
+    !Number.isFinite(Date.parse(p.at)) ||
+    (r.status !== 0 && r.status !== 2)
+  ) {
+    return failed('健康待核验回执的提交、本次身份或结果不匹配，不能沿用旧回执');
+  }
+  state.release.healthPending = p;
+  return { ok: false, kind: 'blocked', why: `目标版本已切上，健康尚未核实：${p.receipt}` };
+}
+
+async function checkPendingHealth(io, state) {
+  let current;
+  try {
+    current = await io.currentRelease();
+  } catch {
+    current = { ok: false };
+  }
+  const prior = io.readState();
+  if (!ownsHealthState(prior, state)) {
+    return { ...failed('健康复核前发布进度已换代或读不到，不覆盖其它请求'), detached: true };
+  }
+  if (!current.ok || current.sha !== state.target.value)
+    return { ok: false, kind: 'blocked', why: '健康待核验目标已换代或读不到，不重发、不清旧回执' };
+  state.release.healthAttempt = randomUUID();
+  io.writeState(state);
+  let r;
+  try {
+    r = await io.releaseCheck(io.limits.checkMs);
+  } catch (e) {
+    r = { status: null, error: String(e) };
+  }
+  const latest = io.readState();
+  if (
+    !ownsHealthState(latest, state) ||
+    latest.state?.release?.healthPending?.identity !== state.release.healthPending.identity
+  ) {
+    return { ...failed('健康复核期间发布进度已换代，不能覆盖别人的回执'), detached: true };
+  }
+  if (r.error || r.status === null)
+    return { ok: false, kind: 'blocked', why: '健康复核没有读完整，原待核验回执保留' };
+  const result = releaseHealthResult(r, state);
+  if (result) return result;
+  if (r.status !== 0 && r.status !== 2) return failed('健康复核仍有红，原待核验回执保留');
+  let after;
+  try {
+    after = await io.currentRelease();
+  } catch {
+    after = { ok: false };
+  }
+  if (!ownsHealthState(io.readState(), state))
+    return { ...failed('健康复核收敛前进度已换代，不覆盖其它请求'), detached: true };
+  if (!after.ok || after.sha !== state.target.value)
+    return { ok: false, kind: 'blocked', why: '健康复核前后目标不一致或读不到，原待核验回执保留' };
+  // 同一请求的只读复核已通过，只有协调者清理自己持有的未决，--check不写生产。
+  delete state.release.healthPending;
+  return { ok: true };
+}
 
 async function engineRead(io) {
   const r = await io.fleetApi('engine status', io.limits.stepMs);
@@ -586,24 +696,55 @@ async function phaseWait(io) {
 }
 
 async function phaseRelease(io, state) {
+  if (state.release.healthPending) return checkPendingHealth(io, state);
   if (typeof state.founderOk !== 'string' || state.founderOk.trim() === '') {
     return failed('发版是对外发布，必须有创始人的同意（founderOk）：没有，不发');
   }
   const sha = state.target.value;
   state.release = { ...(state.release ?? {}), started: true };
+  state.release.healthAttempt = randomUUID();
   io.writeState(state);
   waitOn(io, state, `部署检出快进到 ${sha.slice(0, 12)}`);
-  const prep = await io.prepareCheckout(sha);
+  let prep;
+  try {
+    prep = await io.prepareCheckout(sha);
+  } catch (e) {
+    prep = { ok: false, why: String(e) };
+  }
+  if (!ownsHealthState(io.readState(), state)) {
+    return { ...failed('准备发布期间进度已换代，不覆盖其它请求'), detached: true };
+  }
   if (!prep.ok) return failed(`部署检出没准备好：${prep.why}`);
   say(io, `发版：跑 release.sh ${sha.slice(0, 12)}（${state.founderOk}）`);
   waitOn(io, state, `release.sh ${sha.slice(0, 12)} 在跑（最多 ${minutes(io.limits.releaseMs)} 分钟）`);
-  const r = await io.runRelease(sha, io.limits.releaseMs);
+  let r;
+  try {
+    r = await io.runRelease(sha, io.limits.releaseMs);
+  } catch (e) {
+    r = { status: null, error: String(e) };
+  }
   state.target.sha = sha;
+  // 成功、失败和取消都先核所有权，旧协调者不能以失败收尾覆盖后来者。
+  const latest = io.readState();
+  if (!latest.ok) return { ...failed('发布后的健康回执读不到，不把待核验当完成'), detached: true };
+  if (!ownsHealthState(latest, state)) {
+    return { ...failed('发布期间进度已换代，不覆盖其它请求'), detached: true };
+  }
+  const saved = latest.state?.release?.healthPending;
+  if (saved) {
+    return releaseHealthResult(
+      { status: 2, stdout: `FLEET_RELEASE_HEALTH_PENDING\t${JSON.stringify(saved)}` },
+      state,
+    );
+  }
   if (r.error || r.status === null) {
     return failed(
       `release.sh 没跑完整（${tail(r.error ?? r.stderr)}）：不知道发出去没有，看 ${HISTORY_FILE}，再点一次（同一个提交重发什么都不变）`,
     );
   }
+  // 子进程已持久写未决但stdout丢失时，也不能让父进程的旧state覆盖它。
+  const health = releaseHealthResult(r, state);
+  if (health) return health;
   if (r.status === 0) return { ok: true };
   if (r.status === 2) {
     say(io, 'release.sh 退出码 2：没有红，但有待配事项（验证那一步会再看）');
@@ -613,11 +754,17 @@ async function phaseRelease(io, state) {
 }
 
 async function phaseDeploy(io, state) {
+  if (state.release.healthPending) {
+    const checked = await checkPendingHealth(io, state);
+    if (!checked.ok) return checked;
+  }
   const sha = state.target.value;
   const started = io.now().getTime();
   waitOn(io, state, `等法国在用的切到 ${sha.slice(0, 12)}`);
   for (;;) {
     const h = await io.historyLast();
+    if (!ownsHealthState(io.readState(), state))
+      return { ...failed('发布复核期间进度已换代，不覆盖其它请求'), detached: true };
     if (!h.ok) return failed(`法国发布历史读不到：${h.why}`);
     const [, got, event] = h.line.trim().split(/\s+/);
     if (!got || !event) return failed('法国发布历史末行认不出');
@@ -646,7 +793,15 @@ async function phaseDeploy(io, state) {
         ? 'release.sh --check 在跑'
         : `release.sh --check 第 ${attempt + 1} 次（上一次没过，退避后重跑）`,
     );
-    chk = await io.releaseCheck(io.limits.checkMs);
+    try {
+      chk = await io.releaseCheck(io.limits.checkMs);
+    } catch (e) {
+      chk = { status: null, error: String(e) };
+    }
+    if (!ownsHealthState(io.readState(), state))
+      return { ...failed('发布复核期间进度已换代，不覆盖其它请求'), detached: true };
+    const health = releaseHealthResult(chk, state);
+    if (health) return health;
     const bad = chk.error || chk.status === null || chk.status === 1;
     if (!bad || attempt >= io.limits.checkRetries) break;
     await io.sleep(io.limits.pollMs * 2 ** attempt);
@@ -954,12 +1109,23 @@ function buttonHint(state, kind) {
       ? `版本还没发、什么都没动；同一个提交已连败 ${n} 趟，自动发版停下、开急修单修根因，修好的新提交合进主线后照常自动发`
       : `版本还没发、什么都没动；自动发版下一轮自动重试（第 ${n} 趟，同一个提交连败 ${UNTOUCHED_FAIL_LIMIT} 趟才停、开急修单）`;
   }
+  if (kind === 'failed' && started(state)) {
+    const n = Number.isInteger(state.startedFails) ? state.startedFails : 1;
+    return n >= STARTED_FAIL_LIMIT
+      ? `发版动手后已连败 ${n} 趟，自动发版停下、开急修单修根因；要马上发到驾驶舱「法国」页点「发布到法国」`
+      : `这个提交不再自动重发；主线上更新的绿提交照常自动发（动手后连败 ${STARTED_FAIL_LIMIT} 趟才停、开急修单）`;
+  }
   return '到驾驶舱「法国」页看发版卡写的原因（版本可能已经发出去了）';
 }
 
 /** 这一趟是不是发版还没动手就没成（第 0–3 步、release.sh 没起；判法同 auto-release 的 untouchedFails）。 */
 function untouched(state) {
   return untouchedFails({ ...state, untouchedFails: 1 }) > 0;
+}
+
+/** 这一趟是不是发版动手之后没成（release.sh 起了或第 4 步以后；判法同 auto-release 的 startedFails）。 */
+function started(state) {
+  return startedFails({ ...state, startedFails: 1 }) > 0;
 }
 
 /**
@@ -1107,6 +1273,8 @@ export async function runRequest(io) {
   }
   // 同一个提交上一趟发版还没动手就没成：连败趟数带过来（这一趟再这样没成就加一）
   if (prev?.target?.value === req.sha) state.untouchedFails = untouchedFails(prev);
+  // 上一趟发版动手之后没成（不论哪个提交）：动手后连败趟数带过来
+  state.startedFails = startedFails(prev);
   io.writeLast({ v: 1, at: iso(io), outcome: 'accepted', sha: req.sha, by: req.by, why: null });
   say(io, `收到驾驶舱的发布请求：${req.sha.slice(0, 12)}，${req.by} 在 ${req.at} 点的`);
   await push(io, state, 'start');
@@ -1130,12 +1298,18 @@ async function runPhases(io, state, req, from) {
       r = failed(`这一步出错：${e instanceof Error ? e.message : String(e)}`);
     }
     if (!r.ok) {
+      if (r.detached) {
+        io.err(r.why);
+        return EXIT.failed;
+      }
       state.status = r.kind === 'blocked' ? 'blocked' : 'failed';
       state.why = r.why;
       state.laggards = r.laggards ?? [];
       state.waiting = null;
       if (state.status === 'failed' && untouched(state)) {
         state.untouchedFails = (Number.isInteger(state.untouchedFails) ? state.untouchedFails : 0) + 1;
+      } else if (state.status === 'failed' && started(state)) {
+        state.startedFails = (Number.isInteger(state.startedFails) ? state.startedFails : 0) + 1;
       }
       io.writeState(state);
       io.err(`第 ${p} 步「${PHASES[p]}」${r.kind === 'blocked' ? '卡住了' : '没成'}：${r.why}`);
@@ -1147,6 +1321,7 @@ async function runPhases(io, state, req, from) {
   state.status = 'done';
   state.why = null;
   state.waiting = null;
+  state.startedFails = 0;
   io.writeState(state);
   const passed = state.check?.ok === true;
   say(io, passed ? '这一趟做完了，发后体检通过。' : '这一趟发完了，但发后体检没通过（看上面的 [没过]）。');
@@ -1168,7 +1343,14 @@ async function runResume(io, req) {
   const read = io.readState();
   if (!read.ok) return refuse(io, req, `进度记录读不了，不敢接着走：${read.why}`);
   const prev = read.state;
-  const want = retry ? { status: 'blocked', phase: 3 } : { status: 'failed', phase: 7 };
+  const healthRetry =
+    retry &&
+    prev?.status === 'blocked' &&
+    [4, 5].includes(prev?.phase) &&
+    prev.release?.healthPending?.sha === prev.target?.value;
+  const want = retry
+    ? { status: 'blocked', phase: healthRetry ? prev.phase : 3 }
+    : { status: 'failed', phase: 7 };
   if (!prev || prev.status !== want.status || prev.phase !== want.phase) {
     const at = prev
       ? `现在是「${prev.status}」，停在第 ${prev.phase} 步「${PHASES[prev.phase] ?? '?'}」`

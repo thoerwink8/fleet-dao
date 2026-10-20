@@ -55,8 +55,9 @@ import {
   workflowViewOf,
 } from '../../src/real/hourly-reconcile.ts';
 import { registerEngineJobs } from '../../src/real/jobs.ts';
+import { helperWorkTrees } from '../../src/real/worktrees.ts';
 import { runChildOk } from '../child.ts';
-import { fakeTrees, fixtureProcLook, git, world } from './fixtures.ts';
+import { fakeTrees, fixtureProcLook, git, pagedCleanupHelper, world } from './fixtures.ts';
 
 let t: TestDb;
 beforeAll(async () => {
@@ -474,6 +475,64 @@ const runsOf = async () =>
   (await t.db.select().from(scheduleRuns)).filter((r) => r.job === HOURLY_RECONCILE_JOB.id);
 
 describe('工作树：残留的经成果保全后清理，非 Git 成果和人指定留的树保留', { timeout: 120_000 }, () => {
+  it('真实清扫装配现读帮手命名空间；正常元数据不误报，未结/读失败仍报问题', async () => {
+    mkdirSync(join(root, '.cleanup-transactions'));
+    const calls: string[] = [];
+    ft.trees.cleanupNamespace = async () => {
+      calls.push('cleanup-status');
+      return [];
+    };
+    const listDir: HourlyReconcileWiring['listDir'] = async (dir) => {
+      calls.push(dir);
+      if (dir === join(root, '.cleanup-transactions')) throw new Error('不得普通读取私有目录');
+      return listDirEntries(dir);
+    };
+    const normal = await runHourlyReconcileJob(deps({ listDir }));
+    expect(normal.why ?? '').not.toContain('.cleanup-transactions');
+    expect(calls).toContain('cleanup-status');
+    expect(calls).not.toContain(join(root, '.cleanup-transactions'));
+
+    ft.trees.cleanupNamespace = async () => [{ id: 'tx', phase: 'DELETING' }];
+    const pending = await runHourlyReconcileJob(deps({ listDir }));
+    expect(pending.outcome).toBe('partial');
+    expect(pending.why).toContain('隔离清理待恢复');
+    ft.trees.cleanupNamespace = async () => {
+      throw new Error('bad private namespace');
+    };
+    const bad = await runHourlyReconcileJob(deps({ listDir }));
+    expect(bad.outcome).toBe('partial');
+    expect(bad.why).toContain('bad private namespace');
+    expect(existsSync(join(root, '.cleanup-transactions'))).toBe(true);
+  });
+
+  it('真实清扫装配经分页帮手：读完全部页才报尾部待恢复；只读到不截断前的前缀仍报列表不完整', async () => {
+    mkdirSync(join(root, '.cleanup-transactions'));
+    const dir = mkdtempSync(join(tmpdir(), 'fleet-cleanup-pages-'));
+    try {
+      const fake = pagedCleanupHelper(dir, root);
+      const real = helperWorkTrees({ root, helper: fake.helper, sudo: [process.execPath] });
+      ft.trees.cleanupNamespace = () => real.cleanupNamespace();
+      ft.trees.pendingCleanup = () => real.pendingCleanup();
+      const listDir: HourlyReconcileWiring['listDir'] = async (dir) => {
+        if (dir === join(root, '.cleanup-transactions')) throw new Error('不得普通读取私有目录');
+        return listDirEntries(dir);
+      };
+      // 根清扫和待恢复各读一整轮。
+      fake.pages([fake.firstPage, fake.lastPage, fake.firstPage, fake.lastPage]);
+      const complete = await runHourlyReconcileJob(deps({ listDir }));
+      expect(complete.outcome).toBe('partial');
+      expect(complete.why).toContain(`隔离清理待恢复：${JSON.stringify(fake.tail)}`);
+      expect(complete.why).not.toContain('清理事务列表不完整');
+      fake.pages([fake.firstPage]);
+      const prefix = await runHourlyReconcileJob(deps({ listDir }));
+      expect(prefix.outcome).toBe('partial');
+      expect(prefix.why).toContain('清理事务列表不完整');
+      expect(prefix.why).not.toContain('隔离清理待恢复');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('没有在跑的任务在用、什么都不剩的树删掉，「工作树没收掉」跟着撤（写明为什么、记操作记录）；检出副本里会话交给引擎的结论文件不算剩着；探针目录不算残留', async () => {
     const { sub } = await work();
     const tree = makeTree('acme_widgets/160-login');

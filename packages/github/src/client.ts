@@ -388,7 +388,15 @@ export class GitHubClient {
       throw new GitHubError(
         forbidden ? 'FORBIDDEN' : notFound ? 'NOT_FOUND' : 'GRAPHQL_ERROR',
         `GraphQL 出错：${text}`,
-        { details: { errors } },
+        {
+          details: { errors },
+          // GraphQL 可在 mutation 已落地后才报子字段错误，不能把部分成功当作确定未写。
+          maybeLanded:
+            options.mutation === true &&
+            typeof res.data.data === 'object' &&
+            res.data.data !== null &&
+            Object.values(res.data.data).some((value) => value !== null),
+        },
       );
     }
     if (!res.data?.data) throw unexpected('GraphQL', res.data);
@@ -709,7 +717,7 @@ export function unexpected(what: string, data: unknown): GitHubError {
   });
 }
 
-function nextLink(link: string | null): string | null {
+export function nextLink(link: string | null): string | null {
   if (!link) return null;
   for (const part of link.split(',')) {
     const m = /<([^>]+)>\s*;\s*rel="([^"]+)"/.exec(part.trim());

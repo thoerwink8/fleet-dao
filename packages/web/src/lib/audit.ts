@@ -74,6 +74,7 @@ export const settingLabel: Record<SettingKey, string> = {
   'engine.poolHolds': '整池暂停',
   'engine.master': '引擎总开关',
   'engine.flowMode': '全程模式开关',
+  'engine.commander': '指挥官看停下的任务',
 };
 
 function isStage(s: string): s is StageKind {

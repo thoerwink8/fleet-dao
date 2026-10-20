@@ -13,7 +13,8 @@ export function assertBodySize(what: string, body: string): void {
   }
 }
 
-// —— 关单词：PR 正文或合并提交里写「Closes #12」，合并那一刻 GitHub 自己就把需求单关了，绕过引擎的关单（C13）。——
+// —— 关单词：合并进默认分支那一刻，正文或 squash 提交里的「Closes #12」会让 GitHub 自己关单，绕过引擎的关单（C13）。
+// 引擎正文与实际 squash 消息都去掉自动关单语义；由受管收尾检查验收责任后关单。——
 
 const KEYWORD = '(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)';
 const REF = String.raw`(?:[A-Za-z0-9-]+\/[A-Za-z0-9._-]+)?#\d+|GH-\d+|https?:\/\/github\.com\/[A-Za-z0-9-]+\/[A-Za-z0-9._-]+\/issues\/\d+`;
@@ -106,6 +107,7 @@ export function renderPrBody(input: PrBodyInput): string {
     }
   });
   lines.push(...tail);
+  // 正文保留需求关联，关单由受管收尾执行。
   return neutralizeCloseKeywords(lines.join('\n'));
 }
 

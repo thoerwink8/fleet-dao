@@ -116,10 +116,24 @@ function temp(name: string): string {
   return dir;
 }
 
+// gc.auto / maintenance.auto 关掉：commit 之后 git 可能在后台自动整理，往 .git/objects/pack 里写，
+// 正好碰上 afterEach 删临时仓（CI 上报过 ENOTEMPTY rmdir objects/pack）
 const g = (cwd: string, ...a: string[]) =>
   runChildOk(
     'git',
-    ['-c', 'user.name=t', '-c', 'user.email=t@example.invalid', '-c', 'commit.gpgsign=false', ...a],
+    [
+      '-c',
+      'user.name=t',
+      '-c',
+      'user.email=t@example.invalid',
+      '-c',
+      'commit.gpgsign=false',
+      '-c',
+      'gc.auto=0',
+      '-c',
+      'maintenance.auto=false',
+      ...a,
+    ],
     {
       cwd,
     },
@@ -505,7 +519,13 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
       if (args[0] === 'fetch' && cwd === w.work) fetches.push(cwd);
       return git(cwd, args);
     };
-    const lines = hook.sessionStart({ cwd: w.work, home: w.home, git: counting, sync: fakeSync().sync });
+    const lines = hook.sessionStart({
+      env: {},
+      cwd: w.work,
+      home: w.home,
+      git: counting,
+      sync: fakeSync().sync,
+    });
     expect(fetches).toHaveLength(1);
     expect(lines[0]).toMatch(/已把 main 快进到最新/);
     expect(lines[1]).toMatch(/已同步到主线最新/);
@@ -549,6 +569,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
       return git(cwd, args);
     };
     const first = hook.sessionStart({
+      env: {},
       cwd: w.work,
       home: w.home,
       git: counting,
@@ -564,6 +585,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     expect(existsSync(join(w.home, '.fleet-dao', 'fetch-ok'))).toBe(true);
 
     const second = hook.sessionStart({
+      env: {},
       cwd: w.work,
       home: w.home,
       git: counting,
@@ -585,6 +607,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
       utimesSync(stamp, old, old);
     }
     hook.sessionStart({
+      env: {},
       cwd: w.work,
       home: w.home,
       git: counting,
@@ -621,6 +644,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     };
     const now = Date.now();
     const first = hook.sessionStart({
+      env: {},
       cwd: w.work,
       home: w.home,
       git: failing,
@@ -633,6 +657,7 @@ describe('同步这台机器：专用检出 + 同步，没查成、没做成都�
     const afterFirst = fetches;
     expect(afterFirst).toBeGreaterThan(0);
     const second = hook.sessionStart({
+      env: {},
       cwd: w.work,
       home: w.home,
       git: failing,
@@ -840,7 +865,14 @@ describe('会话所在仓的「生效中的临时调整」表', SLOW, () => {
     g(w.work, 'add', '-A');
     g(w.work, 'commit', '-q', '-m', 'progress');
     record(w.home, w.work, g(w.work, 'rev-parse', 'HEAD'));
-    const lines = hook.sessionStart({ cwd: w.work, home: w.home, git, sync: fakeSync().sync, now: NOW });
+    const lines = hook.sessionStart({
+      env: {},
+      cwd: w.work,
+      home: w.home,
+      git,
+      sync: fakeSync().sync,
+      now: NOW,
+    });
     expect(lines[0]).toMatch(/临时调整到了最迟复查日期 1 条（PROGRESS\.md/);
     expect(lines.at(-1)).toMatch(/^规矩同步/);
   });
@@ -1227,6 +1259,7 @@ describe('有活的残留树：有主，不是只打一行', SLOW, () => {
       git,
       sync: fakeSync().sync,
       now: Date.now() + 3 * 60 * 60_000,
+      env: {},
     });
     expect(lines.join('\n')).toMatch(/残留工作树 has-dirty 有主：指挥官/);
   });
@@ -1925,6 +1958,7 @@ describe('整池暂停到期（#954）', SLOW, () => {
       sync: fakeSync().sync,
       now: Date.parse('2026-10-05T04:00:00Z'),
       poolHolds,
+      env: {},
     });
     expect(reads).toBe(1);
     expect(lines.some((l) => l.includes('整池暂停到期：claude-solo') && l.includes('驾驶舱额度页'))).toBe(

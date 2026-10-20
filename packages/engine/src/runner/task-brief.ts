@@ -7,8 +7,9 @@
 // 需求原文＝单子正文自己（#654 起新单都是这样：正文就是需求的唯一的家，不再另存 specs 需求文档）；单子指着一份文档的是 #654
 // 之前开的老单（issue 上只留了概述），照旧读主线上那份的全文。
 // 不拼装、不挑栏：「不许碰」「依据」这类栏里常有约束，挑了就丢。引擎写进正文的进度段不是需求，先去掉。
-// 分档按「已知的模块」一次定死（decideTierFromModules）：写在反引号里的才认作路径，认不出的一项就不猜、走主力档。
+// 分档按当前正式合同的「已知的模块」确定（decideTierFromModules）：修订后同版重算；认不出的路径不猜、走主力档。
 
+import { createHash } from 'node:crypto';
 import { type MdDoc, parseMd, requiredSectionProblems, sectionText } from '@fleet-dao/conventions';
 import { cleanBody, criteriaOf, hasSpecPointer, REQUIREMENT_FILE, specDirOf } from '@fleet-dao/core';
 import { humanPart, type RepoRef } from '@fleet-dao/github';
@@ -31,6 +32,8 @@ export interface BriefProblem {
 
 /** 动手那一段要的交代（还没带分支和起点——那是建工作树时才有的，见 manualBriefOf）。 */
 export interface TaskBrief {
+  /** 正式需求正文的规范版本与摘要；旧活动历史没有，不能当作核过当前正文。 */
+  contract?: RequirementContract;
   issueNumber: number;
   title: string;
   /** 需求原文：需求文档全文，或单子正文（去掉了注释和进度段）。 */
@@ -42,6 +45,35 @@ export interface TaskBrief {
   /** 单子指着的需求文档目录（已经在主线上的那份；#654 之前开的老单才有）。正文自己就是需求的单没有，也不会再建。 */
   specDir?: string | undefined;
   tier: TierDecision;
+}
+
+export interface RequirementContract {
+  version: 1;
+  sha256: string;
+}
+
+/** v1：去自动进度/注释，统一换行，去行尾空白与文末空行；保留正文内部空行。只在活动中计算。 */
+export function requirementContract(markdown: string): RequirementContract {
+  const text = cleanBody(humanPart(markdown.replace(/\r\n?/g, '\n')))
+    .split('\n')
+    .map((line) => line.trimEnd())
+    .join('\n')
+    .trimEnd();
+  if (!text) throw new Error('正式需求正文为空，合同未核实');
+  return { version: 1, sha256: createHash('sha256').update(`fleet-task-contract-v1\n${text}`).digest('hex') };
+}
+
+export function validRequirementContract(
+  value: RequirementContract | undefined,
+): value is RequirementContract {
+  return value?.version === 1 && /^[a-f0-9]{64}$/.test(value.sha256);
+}
+
+export function sameRequirementContract(
+  a: RequirementContract | undefined,
+  b: RequirementContract | undefined,
+): boolean {
+  return validRequirementContract(a) && validRequirementContract(b) && a.sha256 === b.sha256;
 }
 
 export type TaskBriefResult = { ok: true; brief: TaskBrief } | { ok: false; problems: BriefProblem[] };
@@ -187,6 +219,7 @@ export function buildTaskBrief(input: BuildInput): TaskBriefResult {
   return {
     ok: true,
     brief: {
+      contract: requirementContract(text),
       issueNumber: issue.number,
       title: issue.title.replace(/\s+/g, ' ').trim() || `#${issue.number}`,
       request: text,

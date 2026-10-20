@@ -8,7 +8,9 @@
 
 ```
 pnpm agents:sync              # 取远端 → 把同步专用的检出切到 origin/main → 同步（规矩、技能、子代理定义、钩子、权限）→ 每家一行报结果
-pnpm agents:sync --check      # 只读，不取远端、不写，只报差在哪
+pnpm agents:sync --check      # 预检：不取远端、不切源、不更新目标配置，只报差在哪；封装仍临时创建并释放源锁 ~/.fleet-dao/origin-main.lock，不是零写入
+node ~/.fleet-dao/origin-main/packages/agents-sync/bin/agents-sync --check --repo ~/.fleet-dao/origin-main
+                              # 严格零写入：不经封装、不碰源锁、不拉远端；须另核官方树提交身份（rev-parse HEAD 对 origin/main），旧缓存或候选树不能冒充最新主线
 pnpm agents:sync --offline    # 网络不通时用：不取远端，按本机上次取到的 origin/main 同步
 pnpm agents:sync --seed <目录> # 拿这个 fleet-dao 检出当种子（第一次建、或专用检出坏了要重建时用；
                               # 默认：~/.fleet-dao/synced.json 记的检出，再没有就是脚本所在的检出）

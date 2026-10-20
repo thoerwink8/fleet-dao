@@ -13,12 +13,36 @@ import {
   moduleItems,
   moduleRefsOf,
   readTaskBrief,
+  requirementContract,
+  sameRequirementContract,
   type TaskBriefPorts,
   type TaskIssue,
 } from '../../src/runner/task-brief.ts';
 import { decideTierFromModules, TIER_HEAVYWEIGHT_FILE_THRESHOLD } from '../../src/runner/tier.ts';
 
 const REPO = { owner: 'acme', name: 'demo' };
+
+describe('正式正文合同 v1', () => {
+  it('换行、行末空白、自动进度不改变有效合同；范围和验收变化改变合同', () => {
+    const original = body();
+    const identity = requirementContract(original);
+    expect(requirementContract(original.replaceAll('\n', '  \r\n'))).toEqual(identity);
+    expect(
+      requirementContract(
+        `${original}\n<!-- fleet:progress:start as-of=x -->\n自动进度\n<!-- fleet:progress:end -->\n`,
+      ),
+    ).toEqual(identity);
+    expect(requirementContract(body({ 怎么算做完: '- 引擎关联单，不要求 Closes' }))).not.toEqual(identity);
+    expect(requirementContract(body({ 已知的模块: '- `packages/engine/`' }))).not.toEqual(identity);
+  });
+  it('缺正文、未知规范及缺版本历史不能伪装成已核实', () => {
+    expect(() => requirementContract('  ')).toThrow('未核实');
+    expect(sameRequirementContract(undefined, undefined)).toBe(false);
+    expect(
+      sameRequirementContract({ version: 2, sha256: 'a'.repeat(64) } as never, requirementContract(body())),
+    ).toBe(false);
+  });
+});
 
 const PARTS: Record<string, string> = {
   场景: '创始人要在驾驶舱看到每张单走到哪一步。',

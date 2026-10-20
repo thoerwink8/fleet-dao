@@ -7,7 +7,14 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { buildSessionEnv, type RateLimitReading, type RunFacts, type SessionUser } from '@fleet-dao/adapters';
+import {
+  buildSessionEnv,
+  type RateLimitReading,
+  type RunFacts,
+  type SessionUser,
+  type TreeIdentity,
+} from '@fleet-dao/adapters';
+import * as database from '@fleet-dao/db';
 import {
   type Db,
   getRun,
@@ -29,6 +36,7 @@ import {
   outcomeOfReport,
   SEGMENT_WALL_MARGIN_MS,
 } from '../../src/real/segment-spawner.ts';
+import * as handoffFiles from '../../src/real/session-handoff.ts';
 import {
   DETACHED_MARK,
   readMirasimHandle,
@@ -36,6 +44,7 @@ import {
   sessionHandoff,
   writeMirasimHandle,
 } from '../../src/real/session-handoff.ts';
+import type { WorkTrees } from '../../src/real/worktrees.ts';
 import type { RunRecord } from '../../src/runner/not-wired.ts';
 import { OneShotDetached, OneShotError, type OneShotInput, runOneShot } from '../../src/runner/one-shot.ts';
 
@@ -87,6 +96,7 @@ interface Harness {
   calls: { spec: HostRunSpec; hooks: HostRunHooks }[];
   adopted: { dir: string; user: SessionUser }[];
   removed: string[];
+  removedIdentities: TreeIdentity[];
   order: string[];
   recorded: RunRecord[];
   logs: string[];
@@ -125,11 +135,14 @@ function harness(
     handoff?: SessionHandoff;
     /** 流里拿到会话号时的 runs 写回钩子。 */
     observeSessionId?: (runId: string, sessionId: string) => Promise<void>;
+    adoptTemporary?: WorkTrees['adoptTemporary'];
+    removeTemporary?: WorkTrees['removeTemporary'];
   } = {},
 ): Harness {
   const calls: Harness['calls'] = [];
   const adopted: Harness['adopted'] = [];
   const removed: string[] = [];
+  const removedIdentities: TreeIdentity[] = [];
   const order: string[] = [];
   const recorded: RunRecord[] = [];
   const logs: string[] = [];
@@ -156,15 +169,18 @@ function harness(
     drivers,
     trees: {
       tmpFor: (runId) => `/var/lib/fleet-work/_tmp/${runId}`,
-      async adoptTemporary(dir, user) {
+      async adoptTemporary(dir, user, signal) {
         order.push('adopt');
         adopted.push({ dir, user });
-        return { lex: dir, real: dir, dev: '0', ino: '0', uid: '0' };
+        return opts.adoptTemporary
+          ? opts.adoptTemporary(dir, user, signal)
+          : { lex: dir, real: dir, dev: '0', ino: '0', uid: '0' };
       },
-      async removeTemporary(dir) {
+      async removeTemporary(dir, identity) {
         order.push('remove');
         removed.push(dir);
-        return { gone: false };
+        removedIdentities.push(identity);
+        return opts.removeTemporary ? opts.removeTemporary(dir, identity) : { gone: false };
       },
     },
     baseEnv: { PATH: '/usr/bin', GITHUB_TOKEN: 'secret-should-not-pass' },
@@ -205,7 +221,7 @@ function harness(
         tmpDir: tmp,
       },
     );
-  return { calls, adopted, removed, order, recorded, logs, spawn, run };
+  return { calls, adopted, removed, removedIdentities, order, recorded, logs, spawn, run };
 }
 
 describe('hostSegmentSpawner · 会话号与花费', () => {
@@ -785,6 +801,155 @@ const command = (): Parameters<ReturnType<typeof hostSegmentSpawner>>[0] => ({
   signal: new AbortController().signal,
   input: { runId: RUN_ID, segment: 'manual', modelId: 'm', routeId: 'r1', prompt: 'p', cwd: '/w' },
   timeoutMs: 60_000,
+});
+
+function preparationBarrier() {
+  let enter: () => void = () => undefined;
+  let release: () => void = () => undefined;
+  const entered = new Promise<void>((resolve) => {
+    enter = resolve;
+  });
+  const released = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return {
+    entered,
+    release,
+    async wait() {
+      enter();
+      await released;
+    },
+  };
+}
+
+describe('hostSegmentSpawner · 准备期取消的资源收尾', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('临时认领迟到返回身份：取消后用该原始身份清理，不启动驱动', async () => {
+    const barrier = preparationBarrier();
+    const stop = new AbortController();
+    const reason = new Error('during temporary adopt');
+    let receivedSignal: AbortSignal | undefined;
+    const identity = { lex: '/original', real: '/original', dev: '1', ino: '41', uid: '993' };
+    const h = harness({
+      adoptTemporary: async (_dir, _user, signal) => {
+        receivedSignal = signal;
+        await barrier.wait();
+        return identity;
+      },
+    });
+    const checked = expect(h.spawn({ ...command(), signal: stop.signal })).rejects.toBe(reason);
+    await barrier.entered;
+    stop.abort(reason);
+    barrier.release();
+    await checked;
+    expect(receivedSignal).toBe(stop.signal);
+    expect(h.calls).toEqual([]);
+    expect(h.removedIdentities).toEqual([identity]);
+    expect(h.removedIdentities[0]).toBe(identity);
+  });
+
+  it('临时认领已发但取消后没有身份：明确留给孤儿清理，不能重新读身份删除', async () => {
+    const barrier = preparationBarrier();
+    const stop = new AbortController();
+    const reason = new Error('adopt reply interrupted');
+    const h = harness({
+      adoptTemporary: async () => {
+        await barrier.wait();
+        stop.signal.throwIfAborted();
+        throw new Error('unreachable');
+      },
+    });
+    const checked = expect(h.spawn({ ...command(), signal: stop.signal })).rejects.toBe(reason);
+    await barrier.entered;
+    stop.abort(reason);
+    barrier.release();
+    await checked;
+    expect(h.calls).toEqual([]);
+    expect(h.removed).toEqual([]);
+    expect(h.logs.join('\n')).toContain('若操作已发出则保留给任务/TTL门后的孤儿清理');
+  });
+
+  it.each(['return', 'throw'] as const)(
+    'IO 根准备期间取消（%s）：临时目录仍以原始身份清理，不启动驱动',
+    async (finish) => {
+      const barrier = preparationBarrier();
+      const stop = new AbortController();
+      const reason = new Error('during IO root');
+      vi.spyOn(handoffFiles, 'ensureIoRoot').mockImplementation(async () => {
+        await barrier.wait();
+        if (finish === 'throw') throw new Error('late IO failure');
+      });
+      const h = harness({ handoff: sessionHandoff(join(tmp, 'io')) });
+      const checked = expect(h.spawn({ ...command(), signal: stop.signal, detach: {} })).rejects.toBe(reason);
+      await barrier.entered;
+      stop.abort(reason);
+      barrier.release();
+      await checked;
+      expect(h.calls).toEqual([]);
+      expect(h.removedIdentities).toHaveLength(1);
+      expect(h.removedIdentities[0]).toMatchObject({ dev: '0', ino: '0', uid: '0' });
+    },
+  );
+
+  it('准备期取消后安全清理失败：保留取消原因，并明确记录待清理', async () => {
+    const stop = new AbortController();
+    const reason = new Error('temporary setup canceled');
+    const h = harness({
+      adoptTemporary: async (dir) => {
+        stop.abort(reason);
+        return { lex: dir, real: dir, dev: '1', ino: '2', uid: '993' };
+      },
+      removeTemporary: async () => {
+        throw new Error('identity changed');
+      },
+    });
+    await expect(h.spawn({ ...command(), signal: stop.signal })).rejects.toBe(reason);
+    expect(h.removed).toHaveLength(1);
+    expect(h.calls).toEqual([]);
+    expect(h.logs.join('\n')).toContain('临时目录没删掉');
+    expect(h.logs.join('\n')).toContain('identity changed');
+  });
+
+  it('锚点写入期间取消：不启动驱动，已写锚点、记录员和采样器走正常收尾', async () => {
+    vi.useFakeTimers();
+    const barrier = preparationBarrier();
+    const stop = new AbortController();
+    const reason = new Error('during transcript anchor');
+    vi.spyOn(database, 'ensureRunForTranscript').mockImplementation(async () => {
+      await barrier.wait();
+      return true;
+    });
+    const finish = vi.spyOn(database, 'finishRun').mockResolvedValue('finished');
+    const append = vi.spyOn(database, 'appendRunTranscript').mockResolvedValue(undefined);
+    const memory = vi.fn(async () => '0');
+    const cpu = vi.fn(async () => 'usage_usec 0');
+    const sampler = { cgroupRoot: '/sys/fs/cgroup', slicePath: 'fleet.slice', intervalMs: 500 };
+    const h = harness({
+      db: {} as Db,
+      memoryPeak: { ...sampler, readText: memory },
+      cpuUsage: { ...sampler, readText: cpu },
+    });
+    const checked = expect(h.spawn({ ...command(), signal: stop.signal })).rejects.toBe(reason);
+    await barrier.entered;
+    stop.abort(reason);
+    barrier.release();
+    await checked;
+    expect(h.calls).toEqual([]);
+    expect(h.removedIdentities).toHaveLength(1);
+    expect(finish).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ runId: RUN_ID, outcome: 'failed' }),
+    );
+    expect(append).toHaveBeenCalledTimes(1);
+    // Memory reads once at start; CPU also reads at stop. No sampler or recorder timer survives cleanup.
+    expect(memory).toHaveBeenCalledTimes(1);
+    expect(cpu).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
 });
 
 describe('hostSegmentSpawner · 【故意造出的失败】读不到、认不出就明确失败，不落到默认执行体', () => {

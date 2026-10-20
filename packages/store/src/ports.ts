@@ -42,6 +42,8 @@ export interface TaskListPage {
 /** 一张单的三段流水（库里的 runs 表）一笔，加上它是怎么和这张单对上的。 */
 export type SegmentRunRecord = SegmentRun & {
   matchedBy: SegmentMatch;
+  temporalRunId?: string | undefined;
+  worktreePath?: string | undefined;
   /**
    * 对上的是哪张单。listSegmentRunsForTasks 开了 includeIssueMatch 时才写：task_id 对上的就是 taskId，
    * task_id 没记、按单号兜底的是那张单的 id。主页那条路不写。
@@ -232,6 +234,63 @@ export interface PullRequestRecord {
   title?: string | undefined;
 }
 
+/** 历史 checkout 处置要钉住的原始 runs 身份；缺任一关键列都不能把它当成完整证据。 */
+export interface HistoricalCheckoutRun {
+  id: string;
+  segment: string;
+  taskId?: string | undefined;
+  issueNumber?: number | undefined;
+  model: string;
+  workflowId?: string | undefined;
+  temporalRunId?: string | undefined;
+  startedAt: string;
+  endedAt?: string | undefined;
+  outcome?: string | undefined;
+  failureReason?: string | undefined;
+  prNumber?: number | undefined;
+  branch?: string | undefined;
+  worktreePath?: string | undefined;
+}
+
+/** 预检和原子归档共用的精确身份。expected 字段是预检回显后执行时的 CAS 快照。 */
+export interface HistoricalCheckoutArchiveInput {
+  notificationId: string;
+  dedupeKey: string;
+  raisedAt: string;
+  notificationBody: string;
+  notificationLink: string | null;
+  repo: string;
+  repoId: string;
+  taskId: string;
+  issueNumber: number;
+  workflowId: string;
+  runId: string;
+  temporalRunId: string;
+  runSegment: string;
+  runStartedAt: string;
+  runEndedAt: string;
+  runOutcome: string;
+  runPrNumber: number;
+  pr: number;
+  head: string;
+  operator: string;
+  reason: string;
+  evidence: string;
+  gaps: string;
+  responsibility: string;
+  conclusion: 'historical_unproven';
+}
+
+/** checkout 历史归档前现读到的全部事实；它不是恢复证明。 */
+export interface HistoricalCheckoutFacts {
+  notification: NotificationRecord;
+  repo: Repo;
+  task: Task;
+  run: HistoricalCheckoutRun;
+  pullRequest: PullRequestRecord;
+  activeRunIds: string[];
+}
+
 /**
  * 会话里跑过的一次测试（checkDone 的输入）。passed 为 null 是结果认不出（接了管道、放了后台……，
  * 插头写明了原因），照样列出来：交活核对以最后一次为准，认不出的那一次不能被它前面一次「通过」顶掉。
@@ -398,6 +457,27 @@ export interface OpsStore {
   listNotifications(query: { status: 'open' | 'all' } & PageRequest): Promise<Page<NotificationRecord>>;
   /** 各级别的真实条数（不受分页上限影响）；status 口径同 listNotifications。 */
   countNotifications(query: { status: 'open' | 'all' }): Promise<Record<NotificationRecord['level'], number>>;
+  /** 只读现查任务、原工作流 run、旧 checkout 卡和 merged PR；不会写任何东西。 */
+  readHistoricalCheckout(input: {
+    notificationId: string;
+    dedupeKey: string;
+    repo: string;
+    taskId: string;
+    issueNumber: number;
+    workflowId: string;
+    runId: string;
+    temporalRunId: string;
+    pr: number;
+    head: string;
+  }): Promise<HistoricalCheckoutFacts>;
+  /**
+   * checkout 专用历史归档：事务内重读所有身份和 CAS 快照，只撤旧通知并记审计。
+   * 不写 cold_verify.checkout_full，不改任务、run、PR、验收责任或 Temporal 历史。
+   */
+  archiveHistoricalCheckout(
+    input: HistoricalCheckoutArchiveInput,
+    audit: NewAuditEntry,
+  ): Promise<'ok' | 'already_archived' | 'not_found' | 'conflict'>;
   resolveNotification(
     input: {
       id: string;
@@ -800,6 +880,28 @@ export interface NodeStore {
   listNodeSessions(): Promise<NodeSessionsRecord[]>;
   /** 法国工作树最近一份清单（#1993，引擎写）；一次都没存过是 null。认不出抛错，不当成没有树。 */
   getWorktreeInventory(): Promise<WorktreeInventory | null>;
+  /** 机器通行证（#3388，node_keys 表）：所有行（含已作废的），按 nodeId 排。读不到照抛，认人的一方据此回 503，不当成没有。 */
+  listNodeKeys(): Promise<NodeKeyRecord[]>;
+  /**
+   * 发一把：写 node_keys 一行并在同一事务记 audit。该编号已有有效的返回 'exists'、什么都不写；
+   * 该编号只有作废的行就整行换成新的（createdAt 换新、revokedAt 清空）。tokenHash 必须是 64 位小写十六进制，否则抛错。
+   */
+  createNodeKey(
+    input: { nodeId: string; tokenHash: string; displayName: string },
+    audit: NewAuditEntry,
+  ): Promise<'created' | 'exists'>;
+  /** 作废：写 revokedAt（Store 的钟）并在同一事务记 audit；没有这个编号 'not_found'，已经作废 'already_revoked'（都不写）。 */
+  revokeNodeKey(nodeId: string, audit: NewAuditEntry): Promise<'revoked' | 'not_found' | 'already_revoked'>;
+}
+
+/** 机器通行证一行（node_keys）。tokenHash 是明文的 sha256，明文不入库。 */
+export interface NodeKeyRecord {
+  nodeId: string;
+  tokenHash: string;
+  displayName: string;
+  createdAt: string;
+  /** 作废的时刻；有效的没有这一项。 */
+  revokedAt?: string | undefined;
 }
 
 export interface NodeSessionsRecord {
@@ -808,7 +910,8 @@ export interface NodeSessionsRecord {
   report: LocalSessionsReport;
 }
 
-export type Store = UserStore &
+export type Store = import('./task-execution.ts').TaskExecutionStore &
+  UserStore &
   BoardStore &
   RoutingStore &
   OpsStore &

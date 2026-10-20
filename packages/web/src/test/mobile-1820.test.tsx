@@ -157,9 +157,12 @@ describe('任务详情手机首屏一行摘要', () => {
   test('手机：任务页头的状态行不收起（它是关键信息）', async () => {
     viewport(390);
     open();
-    await screen.findByRole('heading', { name: '每一笔' });
     // #1920 起状态行是正文顶上的结论块（不再是页头说明）；页头 ⓘ 里放的是各块的长说明，结论块不在 ⓘ 里、直接看得到
-    const hero = document.querySelector('[data-now-banner]') as HTMLElement;
+    const hero = await waitFor(() => {
+      const el = document.querySelector('[data-now-banner]');
+      if (!el) throw new Error('还没出结论块');
+      return el as HTMLElement;
+    });
     expect(hero).toBeTruthy();
     expect(hero.closest('[data-description-hint]')).toBeNull();
     expect(within(hero).getByText(/开单/)).toBeTruthy();

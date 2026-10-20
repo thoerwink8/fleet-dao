@@ -1,7 +1,8 @@
 // 复杂脏工作树：独立恢复对上、原树没变、没人用，才允许清理入口删树。失败留树，人工备份不是回执。
 import { type ChildProcess, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomFillSync } from 'node:crypto';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   lstatSync,
@@ -10,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -27,6 +29,7 @@ import {
 } from '../../src/jobs/worktree-sweep.ts';
 import { PortError } from '../../src/ports.ts';
 import {
+  archiveFrame,
   assertArchiveContainer,
   cleanupLockPath,
   holdCleanupLock,
@@ -41,6 +44,7 @@ import {
 import { localExec, type UserExec } from '../../src/real/exec.ts';
 import { preserveThenRemove, preserveWorktree } from '../../src/real/preserve-worktree.ts';
 import { PROBE_DIR } from '../../src/real/route-probe.ts';
+import { SnapshotFrameReader } from '../../src/real/snapshot-frame.ts';
 import { DISPOSABLE, ENVIRONMENT_FILES, treeLeftovers, type UserTree } from '../../src/real/user-git.ts';
 import { layout, SESSION_TMP_DIR } from '../../src/real/worktrees.ts';
 import { runChild, runChildBytes } from '../child.ts';
@@ -400,6 +404,281 @@ function sweepDeps(
 }
 
 describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
+  it('BUNDLE完整也不能补坏PACK，超大对象头及缺END均从真实verify入口拒绝留源', async () => {
+    const t = tree('bad-stream/3213-keep');
+    dirtyFile(t);
+    const fixture = JSON.parse(
+      readFileSync(new URL('./snapshot-fixtures/v3-2b81d9ae.json', import.meta.url), 'utf8'),
+    );
+    const components = new Map<string, Buffer>();
+    let name = '';
+    let chunks: Buffer[] = [];
+    const parser = new SnapshotFrameReader({
+      begin: async (component) => {
+        name = component.name;
+        chunks = [];
+      },
+      write: async (chunk) => {
+        chunks.push(Buffer.from(chunk));
+      },
+      end: async () => {
+        components.set(name, Buffer.concat(chunks));
+      },
+    });
+    await parser.write(Buffer.from(fixture.frameBase64, 'base64'));
+    parser.finish();
+    const frame = (pack?: Buffer) => {
+      const parts: Buffer[] = [];
+      for (const [key, bytes] of components) {
+        const value = key === 'PACK' && pack ? pack : bytes;
+        parts.push(Buffer.from(`${key} ${value.length}\n`), value);
+      }
+      parts.push(Buffer.from('END\n'));
+      return Buffer.concat(parts);
+    };
+    const bundle = components.get('BUNDLE');
+    if (!bundle) throw new Error('旧夹具缺BUNDLE');
+    const bundlePath = join(root, 'intact.bundle');
+    writeFileSync(bundlePath, bundle);
+    gitClean(t.dir, ['bundle', 'verify', bundlePath]);
+    const head = gitClean(t.dir, ['rev-parse', 'HEAD']);
+    const script = readFileSync(new URL('../../src/real/complex-snapshot.mjs', import.meta.url), 'utf8');
+    const objectHeader = [0x31 | 0x80];
+    let size = Math.floor((256 * 1024 * 1024 + 1) / 16);
+    while (size) {
+      const part = size & 127;
+      size = Math.floor(size / 128);
+      objectHeader.push(part | (size ? 128 : 0));
+    }
+    const huge = Buffer.concat([
+      Buffer.from('5041434b0000000200000003', 'hex'),
+      Buffer.from(objectHeader),
+      Buffer.alloc(20),
+    ]);
+    for (const [input, error] of [
+      [frame(Buffer.from('broken independent pack')), /对象包头非法/],
+      [frame(huge), /256MiB/],
+      [frame().subarray(0, frame().length - 4), /帧不完整/],
+      [Buffer.from('JSON 33554433\n'), /长度越界/],
+    ] as const) {
+      const result = await localExec()({
+        user: USER,
+        cwd: t.dir,
+        argv: [process.execPath, '--input-type=module', '-e', script],
+        stdin: input,
+        timeoutMs: 10_000,
+        scopeId: 'bad-snapshot-3213',
+        env: { FLEET_SNAP_MODE: 'verify', FLEET_GIT: 'git' },
+      });
+      expect(result.code).not.toBe(0);
+      expect(result.stderr).toMatch(error);
+      expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
+      expect(gitClean(t.dir, ['rev-parse', 'HEAD'])).toBe(head);
+    }
+  });
+  it('capture超时SIGKILL后仍按本次身份回收大临时件，半归档没有receipt', async () => {
+    const real = localExec();
+    let scratch = '';
+    const exec: UserExec = async (command) => {
+      if (command.env?.FLEET_SNAP_MODE !== 'capture') return real(command);
+      scratch = JSON.parse(command.env.FLEET_SNAP_TEMP ?? '{}').path;
+      return real({
+        ...command,
+        timeoutMs: 150,
+        argv: [
+          process.execPath,
+          '--input-type=module',
+          '-e',
+          `import{writeFileSync}from'node:fs';const t=JSON.parse(process.env.FLEET_SNAP_TEMP);writeFileSync(t.path+'/partial',Buffer.alloc(1048576));process.stdout.write('JSON 2\\n{');setInterval(()=>{},1000);`,
+        ],
+      });
+    };
+    const t = tree('timeout/3213-keep', exec);
+    dirtyFile(t);
+    await expect(preserveWorktree(t, archive, gate())).rejects.toThrow(/超时/);
+    expect(scratch).not.toBe('');
+    expect(existsSync(scratch)).toBe(false);
+    for (const name of archives()) expect(existsSync(join(archive, name, 'receipt.json'))).toBe(false);
+    expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
+  });
+
+  it('临时事务被替换为源树链接时清理拒绝，绝不跟随链接删源', async () => {
+    const real = localExec();
+    let moved = '';
+    let replacement = '';
+    const t = tree('temp-swap/3213-keep');
+    dirtyFile(t);
+    const exec: UserExec = async (command) => {
+      if (command.env?.FLEET_SNAP_TEMP_ACTION === 'cleanup' && !moved) {
+        replacement = JSON.parse(command.env.FLEET_SNAP_TEMP ?? '{}').path;
+        moved = `${replacement}-fixture-held`;
+        renameSync(replacement, moved);
+        symlinkSync(t.dir, replacement);
+      }
+      return real(command);
+    };
+    try {
+      await expect(preserveWorktree({ ...t, exec }, archive, gate())).rejects.toThrow(/身份变化|未清理/);
+      expect(readFileSync(join(t.dir, 'dirty.txt'), 'utf8')).toBe('dirty\n');
+      expect(lstatSync(replacement).isSymbolicLink()).toBe(true);
+    } finally {
+      if (replacement) rmSync(replacement, { force: true });
+      if (moved) rmSync(moved, { recursive: true, force: true });
+    }
+  });
+  it('真实旧2b81d9ae helper生成的v3持久组件可由新reader回读并恢复', async () => {
+    const fixture = JSON.parse(
+      readFileSync(new URL('./snapshot-fixtures/v3-2b81d9ae.json', import.meta.url), 'utf8'),
+    );
+    expect(fixture.sourceHead).toBe('2b81d9ae15ba223525de7343bb0b5ef2c2ded9ca');
+    const original = Buffer.from(fixture.frameBase64, 'base64');
+    const saved = join(archive, 'worktree-legacy-v3');
+    await assertArchiveContainer(archive);
+    await makeArchiveDir(saved);
+    await makeArchiveDir(join(saved, 'blobs'));
+    const sums = new Map<string, string>();
+    let name = '';
+    let chunks: Buffer[] = [];
+    const parser = new SnapshotFrameReader({
+      begin: async (component) => {
+        name = component.name;
+        chunks = [];
+      },
+      write: async (chunk) => {
+        chunks.push(Buffer.from(chunk));
+      },
+      end: async () => {
+        const bytes = Buffer.concat(chunks);
+        sums.set(name, sha256(bytes));
+        const path =
+          name === 'JSON'
+            ? 'state.json'
+            : name === 'PACK'
+              ? 'objects.pack'
+              : name === 'BUNDLE'
+                ? 'recovery.bundle'
+                : `blobs/${name.slice(5)}`;
+        await writeExclusiveArchive(join(saved, path), bytes);
+      },
+    });
+    await parser.write(original);
+    parser.finish();
+    const dir = restoreArchive(saved, join(workRoot, 'legacy-source'));
+    const t: UserTree = {
+      exec: localExec(),
+      user: USER,
+      dir,
+      scopePrefix: 'legacy-v3',
+      git: 'git',
+      sh: 'sh',
+    };
+    const place = await locateTree(t);
+    const state = JSON.parse(readFileSync(join(saved, 'state.json'), 'utf8'));
+    const { ignored, ...comparable } = state;
+    const artifacts = {
+      state: sums.get('JSON'),
+      pack: sums.get('PACK'),
+      bundle: sums.get('BUNDLE'),
+      blobs: [...sums.keys()]
+        .filter((key) => key.startsWith('BLOB '))
+        .map((key) => key.slice(5))
+        .sort(),
+    };
+    // 夹具重新挂到本轮临时目录，只重绑定物理身份，保留旧状态/字节/指纹。
+    await writeExclusiveArchive(
+      join(saved, 'receipt.json'),
+      Buffer.from(
+        JSON.stringify({
+          version: 3,
+          kind: 'complex',
+          originalPath: dir,
+          realPath: place.real,
+          dev: place.dev,
+          ino: place.ino,
+          uid: place.uid,
+          head: state.head,
+          fingerprint: sha256(Buffer.from(JSON.stringify(comparable))),
+          ignored,
+          preservedPaths: [],
+          ignoreRules: [],
+          artifacts,
+        }),
+      ),
+    );
+    const streamed: Buffer[] = [];
+    for await (const bytes of archiveFrame(saved, artifacts as Parameters<typeof archiveFrame>[1]))
+      streamed.push(bytes);
+    expect(Buffer.concat(streamed)).toEqual(original);
+    await recheckPreservedArchive(t, saved, gate(), place, []);
+    expect(readFileSync(join(dir, 'unpublished.txt'), 'utf8')).toBe('legacy unpublished work\n');
+  });
+  it('40MiB随机成果跨旧110MiB帧界，capture/verify/recheck全通且原树不变', async () => {
+    const real = localExec();
+    let captured = 0;
+    let verified = 0;
+    const exec: UserExec = async (command) => {
+      const output = command.snapshotStream?.output;
+      if (command.env?.FLEET_SNAP_MODE === 'verify') verified += 1;
+      if (command.env?.FLEET_SNAP_MODE !== 'capture' || !output) return real(command);
+      return real({
+        ...command,
+        snapshotStream: {
+          output: async (chunk, signal) => {
+            captured += chunk.length;
+            await output(chunk, signal);
+          },
+        },
+      });
+    };
+    const t = tree('large/3213-keep', exec);
+    git(t.dir, 'init', '-q', '-b', 'main');
+    const payload = join(t.dir, 'payload.bin');
+    const hash = createHash('sha256');
+    const block = Buffer.alloc(1024 * 1024);
+    for (let i = 0; i < 40; i += 1) {
+      randomFillSync(block);
+      hash.update(block);
+      appendFileSync(payload, block);
+    }
+    const expected = hash.digest('hex');
+    git(t.dir, 'add', '.');
+    git(t.dir, 'commit', '-q', '-m', 'large fixture');
+    writeFileSync(join(t.dir, 'unpublished.txt'), 'must survive\n');
+    const head = gitClean(t.dir, ['rev-parse', 'HEAD']);
+    const saved = await preserveWorktree(t, archive, gate());
+    if (!saved) throw new Error('未产生快照回执');
+    expect(captured).toBeGreaterThan(110 * 1024 * 1024);
+    await recheckPreservedArchive(t, saved, gate(), await locateTree(t), []);
+    expect(verified).toBe(2);
+    expect(sha256(readFileSync(payload))).toBe(expected);
+    expect(gitClean(t.dir, ['rev-parse', 'HEAD'])).toBe(head);
+    expect(readFileSync(join(t.dir, 'unpublished.txt'), 'utf8')).toBe('must survive\n');
+    const receipt = JSON.parse(readFileSync(join(saved, 'receipt.json'), 'utf8'));
+    expect(receipt.version).toBe(3);
+  });
+
+  it('旧v3组件的流reader与原buildFrame字节逐一相同', async () => {
+    const t = tree();
+    dirtyFile(t);
+    const saved = await preserveWorktree(t, archive, gate());
+    if (!saved) throw new Error('未产生快照回执');
+    const receipt = JSON.parse(readFileSync(join(saved, 'receipt.json'), 'utf8'));
+    // 原buildFrame算法原样作为oracle，只在这个小夹具里整包拼接。
+    const parts: Buffer[] = [];
+    const add = (name: string, bytes: Buffer) => {
+      parts.push(Buffer.from(`${name} ${bytes.length}\n`), bytes);
+    };
+    add('JSON', readFileSync(join(saved, 'state.json')));
+    add('PACK', readFileSync(join(saved, 'objects.pack')));
+    add('BUNDLE', readFileSync(join(saved, 'recovery.bundle')));
+    for (const sum of [...receipt.artifacts.blobs].sort())
+      add(`BLOB ${sum}`, readFileSync(join(saved, 'blobs', sum)));
+    parts.push(Buffer.from('END\n'));
+    const streamed: Buffer[] = [];
+    for await (const bytes of archiveFrame(saved, receipt.artifacts)) streamed.push(bytes);
+    expect(Buffer.concat(streamed)).toEqual(Buffer.concat(parts));
+    await recheckPreservedArchive(t, saved, gate(), await locateTree(t), []);
+  });
   it('忽略项只认可丢弃、环境文件、已核对截图和顶层 .git', () => {
     expect(ignoreRuleAllowed('node_modules/', 'node_modules', [])).toBe(true);
     expect(ignoreRuleAllowed('node_modules/', 'pkg/node_modules', [])).toBe(true);
@@ -709,10 +988,20 @@ describe('复杂工作树受管保全', { timeout: 180_000 }, () => {
       return { gone: false };
     };
     const truncate: UserExec = async (command) => {
-      const result = await real(command);
-      if (command.env?.FLEET_SNAP_MODE === 'capture')
-        return { ...result, stdout: result.stdout.subarray(0, 24) };
-      return result;
+      if (command.env?.FLEET_SNAP_MODE !== 'capture') return real(command);
+      const output = command.snapshotStream?.output;
+      if (!output) throw new Error('capture 必须走快照流');
+      let left = 24;
+      return real({
+        ...command,
+        snapshotStream: {
+          output: async (chunk, signal) => {
+            const take = Math.min(left, chunk.length);
+            left -= take;
+            if (take) await output(chunk.subarray(0, take), signal);
+          },
+        },
+      });
     };
     await expect(
       preserveThenRemove({ ...t, exec: truncate }, archive, gate(), undefined, remove),

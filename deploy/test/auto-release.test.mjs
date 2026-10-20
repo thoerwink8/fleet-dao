@@ -42,6 +42,10 @@ import {
   ENGINE_RESTART_GAP_MS,
   emergencyIssue,
   gateVerdict,
+  HEALTH_RETRY_LIMIT,
+  HEALTH_RETRY_MS,
+  HELD_ALERT_MS,
+  HELD_KEY,
   HUMAN_TIER_PATHS,
   INSTALLED_COPIES,
   MARKER_CLEAR_ACTION,
@@ -57,8 +61,10 @@ import {
   RULES_USERS,
   runOnce,
   runRound,
+  STARTED_FAIL_LIMIT,
   STATE_SCHEMA,
   STATE_UNREADABLE_KEY,
+  startedFails,
   summary,
   TIER_BOOT_MS,
   TIER_PREFIX,
@@ -1521,10 +1527,10 @@ test('gateVerdict：current 已等于或新于失败进度记的目标时，旧 
   );
   assert.match(
     gateVerdict({ ...GOOD_GATE, current: older, mainline: [oldSha, older], trainText }),
-    /要人看/,
-    'current 比失败目标旧（退回了）：仍要人看',
+    /同一个提交不自动重发/,
+    'current 比失败目标旧（退回了）、不知道要发哪个：当同一个提交，不重发',
   );
-  assert.match(gateVerdict({ ...GOOD_GATE, trainText }), /要人看/, '比不出先后：仍要人看');
+  assert.match(gateVerdict({ ...GOOD_GATE, trainText }), /同一个提交不自动重发/, '比不出先后：不重发');
 });
 
 test('上一趟 failed 记的是更旧的提交，current 已经新于它：不写「要人看」，照常请求发主线头', async () => {
@@ -1545,7 +1551,7 @@ test('上一趟 failed 记的是更旧的提交，current 已经新于它：不�
   assert.doesNotMatch(st.auto.note, /要人看/);
 });
 
-test('failed 的目标比 current 新（退回了还没追上）：仍要人看，不自动再发', async () => {
+test('failed 的目标比 current 新（退回了还没追上）、要发的就是它：同一个提交不自动重发', async () => {
   const m = autoMachine();
   m.gate = {
     ...GOOD_GATE,
@@ -1557,7 +1563,151 @@ test('failed 的目标比 current 新（退回了还没追上）：仍要人看�
   };
   const st = await m.round();
   assert.equal(m.requests.length, 0);
-  assert.match(st.auto.note, /要人看/);
+  assert.match(st.auto.note, /同一个提交不自动重发，等主线上更新的绿提交/);
+  assert.equal(st.last.action, 'auto-held');
+});
+
+// ── #3278：动手后没成、已退回的那一趟不再永久挡住自动发版 ──
+
+/** 动手后没成的一趟（照 2026-10-19 828c9d47 的原样：第 4 步、release.sh 起了、已退回）。 */
+const startedTrain = (sha, n = 1) => ({
+  status: 'failed',
+  phase: 4,
+  target: { kind: 'sha', value: sha },
+  release: { started: true },
+  startedFails: n,
+  why: 'release.sh 退出码 1（有红或已退回）：fleet-api：engine 切之前是好的，换了这一版不好了：引擎不在线',
+});
+
+test('【#3278 故意造出的失败】动手后没成、已退回，主线上来了更新的绿提交：照发新提交，不停在「要人看」', async () => {
+  const m = autoMachine();
+  // 主线 H2(头，绿) H1(发失败、已退回) H0(在用)
+  m.main.unshift([H2, '2026-09-27T07:50:00Z']);
+  m.ci = runsBody(run(H2, 'completed', 'success'));
+  m.gate = { ...GOOD_GATE, trainText: JSON.stringify(startedTrain(H1)) };
+  const st = await m.round();
+  assert.deepEqual(
+    m.requests.map((r) => r.sha),
+    [H2],
+  );
+  assert.doesNotMatch(st.auto.note, /要人看/);
+  assert.equal(st.last.action, 'auto-release-requested');
+});
+
+test('【#3278】闸：动手后没成的挡同一个提交、放更新的提交；发版历史里这个提交没过健康检查也不重发；连败满上限全挡', () => {
+  const facts = (train, target, extra = {}) => ({
+    ...GOOD_GATE,
+    trainText: JSON.stringify(train),
+    target,
+    current: H0,
+    mainline: [H2, H1, H0],
+    ...extra,
+  });
+  assert.match(gateVerdict(facts(startedTrain(H1), H1)), /同一个提交不自动重发/);
+  assert.equal(gateVerdict(facts(startedTrain(H1), H2)), null, '更新的提交照发');
+  assert.match(
+    gateVerdict(facts(startedTrain(H1), H2, { historyLast: `2026-09-27T07:55:00Z ${H2} unhealthy` })),
+    /同一个提交不自动重发/,
+    '要发的提交上次没过健康检查：不重发',
+  );
+  assert.equal(
+    gateVerdict(facts(startedTrain(H1), H2, { historyLast: `2026-09-27T07:55:00Z ${H1} auto-rollback` })),
+    null,
+    '历史里退回的是别的提交：照发',
+  );
+  assert.match(
+    gateVerdict(facts(startedTrain(H1, STARTED_FAIL_LIMIT), H2)),
+    new RegExp(`动手发版已连败 ${STARTED_FAIL_LIMIT} 趟.*等急修`),
+  );
+  assert.equal(startedFails({ ...startedTrain(H1), startedFails: undefined }), 1, '老记录没有键算 1 趟');
+  assert.equal(startedFails({ ...startedTrain(H1), status: 'done' }), 0);
+  assert.equal(startedFails(untouchedTrain(H1, 1)), 0, '还没动手的不算');
+});
+
+test('【#3278】动手后连败满上限：不发、开急修单（动手后那一种），报 auto-release:held 等它', async () => {
+  const m = autoMachine();
+  m.main.unshift([H2, '2026-09-27T07:50:00Z']);
+  m.ci = runsBody(run(H2, 'completed', 'success'));
+  m.gate = { ...GOOD_GATE, trainText: JSON.stringify(startedTrain(H1, STARTED_FAIL_LIMIT)) };
+  const issues = [];
+  m.io.fileIssue = async (issue) => {
+    issues.push(issue);
+    return { number: 3300, url: 'https://github.com/o/r/issues/3300', created: true };
+  };
+  let st = await m.round();
+  assert.equal(m.requests.length, 0);
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].key, `release-started:${H1}`);
+  assert.match(issues[0].title, /动手后连败 2 趟/);
+  assert.match(st.auto.note, /已开急修单 #3300/);
+  assert.equal(
+    m.alerts.some((a) => a.key === HELD_KEY),
+    false,
+    '刚拦下不报',
+  );
+  m.t += HELD_ALERT_MS;
+  st = await m.round();
+  assert.equal(issues.length, 1, '同一个提交只开一张');
+  const held = m.alerts.find((a) => a.key === HELD_KEY);
+  assert.ok(held, '拦满 30 分钟报 auto-release:held');
+  assert.match(held.body, /落后主线 2 个提交/);
+  // 有人手动发成了（进度 done）：照常请求、撤掉拦下的报警
+  m.gate = {
+    ...GOOD_GATE,
+    trainText: JSON.stringify({ ...startedTrain(H1), status: 'done', startedFails: 0 }),
+  };
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.deepEqual(
+    m.requests.map((r) => r.sha),
+    [H2],
+  );
+  assert.ok(m.resolvedKeys.includes(HELD_KEY), '写出请求后撤掉');
+  assert.equal(st.heldSince, undefined);
+});
+
+test('【#3278】版本切上了、健康没核实：隔 10 分钟自动请求只读复核，最多 3 次，之后开急修单', async () => {
+  const m = autoMachine();
+  // 在用的就是那一趟的目标 H1，主线又来了 H2
+  m.current = H1;
+  m.main = [
+    [H2, '2026-09-27T07:50:00Z'],
+    [H1, '2026-09-27T07:30:00Z'],
+    [H0, '2026-09-27T06:00:00Z'],
+  ];
+  m.ci = runsBody(run(H2, 'completed', 'success'));
+  m.gate = {
+    ...GOOD_GATE,
+    trainText: JSON.stringify({
+      status: 'blocked',
+      phase: 5,
+      target: { kind: 'sha', value: H1 },
+      release: { started: true, healthPending: { sha: H1, identity: 'x', before: H0 } },
+      why: '目标版本已切上，健康尚未核实',
+    }),
+  };
+  const retries = [];
+  m.io.requestRetry = async (req) => retries.push(req);
+  const issues = [];
+  m.io.fileIssue = async (issue) => {
+    issues.push(issue);
+    return { number: 3301, url: null, created: true };
+  };
+  let st = await m.round();
+  assert.equal(m.requests.length, 0, '健康没核实不发新的');
+  assert.deepEqual(retries, [{ sha: H1, at: new Date(m.t).toISOString(), by: AUTO_RELEASE_BY }]);
+  assert.match(st.auto.note, /已请求第 1 次只读复核/);
+  m.t += 5 * MIN;
+  st = await m.round();
+  assert.equal(retries.length, 1, '不到 10 分钟不再请求');
+  for (let i = 0; i < HEALTH_RETRY_LIMIT; i++) {
+    m.t += HEALTH_RETRY_MS;
+    st = await m.round();
+  }
+  assert.equal(retries.length, HEALTH_RETRY_LIMIT, '最多 3 次');
+  assert.equal(issues.length, 1);
+  assert.equal(issues[0].key, `release-health:${H1}`);
+  assert.match(st.auto.note, /自动复核 3 次仍没核实；已开急修单 #3301/);
 });
 
 // ── 发版驱动死在中途的残局（#2038、决定 0093）：暂停名单没人发「继续」、老版驱动关了总开关没开回 ──
@@ -2073,7 +2223,7 @@ test('【#2728 故意造出的失败】急修单没开成（fleet-api 坏了）�
   assert.ok(m.resolvedKeys.includes(EMERGENCY_KEY), '开成了撤掉那一条');
 });
 
-test('【#2728】闸：还没动手的失败不足 3 趟放行；满 3 趟挡同一个提交，不挡别的提交；动了手的失败照旧要人看', () => {
+test('【#2728】闸：还没动手的失败不足 3 趟放行；满 3 趟挡同一个提交，不挡别的提交；动了手的失败不重发同一个提交', () => {
   const facts = (train, target = H1) => ({ ...GOOD_GATE, trainText: JSON.stringify(train), target });
   assert.equal(gateVerdict(facts(untouchedTrain(H1, 1))), null);
   assert.equal(gateVerdict(facts(untouchedTrain(H1, 2))), null);
@@ -2086,7 +2236,7 @@ test('【#2728】闸：还没动手的失败不足 3 趟放行；满 3 趟挡同
   );
   assert.match(
     gateVerdict(facts({ ...untouchedTrain(H1, 1), phase: 5, release: { started: true } })),
-    /要人看/,
+    /同一个提交不自动重发/,
   );
 });
 
