@@ -151,12 +151,12 @@ export function founderQuote(body: string): { quote: string; at: string } | unde
 
 /** 不是任何真仓的名字：拿它当 closingIssues 的 repo，写明是别的仓的（owner/仓#号）都被挡掉，只剩没写仓名的。 */
 const THIS_REPO = '(本仓)';
-/** 「Refs #12」「refs: #12」：只挂不关的写法（母单分片）；owner/仓#号 不算（# 前面只许空白）。 */
+/** 「Refs #12」「refs: #12」关联单号；同一行须标明分片才不自动关单。owner/仓#号 不算。 */
 const REFS = /(?<![\w/])refs?(?:\s*:\s*|\s+)#(\d+)\b/gi;
 
 /**
  * 「需求」栏里写明挂的单（同仓的，从小到大）：closes 是 GitHub 合并时会关的（认法同 closing-issues.ts，Closes/Fixes/Resolves），
- * refs 是只挂不关的（Refs #号）。栏里只写「#12」、「无」、只留着模板提示都读不到：开 PR 那一步（pr-open.ts）据此拒开。
+ * refs 是关联的（Refs #号），是否分片由 issueColumnLinks 的同行说明决定。栏里只写「#12」、「无」、只留模板提示都读不到。
  */
 export function issueColumnRefs(body: string): { closes: number[]; refs: number[] } {
   const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase()) ?? '';
@@ -167,6 +167,17 @@ export function issueColumnRefs(body: string): { closes: number[]; refs: number[
 
 /** 一行里写了「分片、关不了它」这类话：Refs 在这一行是有意只挂不关（母单的一片），不当成做完了。 */
 const SLICE_WORDS = /分片|关不了|不关单|没做完|未做完/;
+
+/** 新 PR 的每个 Refs 行都要明确分片；逐行检查，不让另一行同号的说明掩盖歧义。旧正文读取不受此约束。 */
+export function unmarkedIssueRefs(body: string): number[] {
+  const col = prColumns(body).get(ISSUE_COLUMN.toLowerCase()) ?? '';
+  const found = new Set<number>();
+  for (const line of col.split('\n')) {
+    if (SLICE_WORDS.test(line)) continue;
+    for (const m of line.matchAll(REFS)) found.add(Number(m[1]));
+  }
+  return [...found].sort((a, b) => a - b);
+}
 
 /** 「需求」栏里挂的一张单：怎么挂的（Closes 或 Refs），那一行有没有写明「分片、关不了」。 */
 export interface IssueColumnLink {

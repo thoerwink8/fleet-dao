@@ -396,8 +396,9 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、PR 不挂里程碑', ()
     expect(junk.text()).toContain('认不出');
   });
 
-  it('只写 Refs（母单分片）也认；Closes 的排前面', () => {
-    const w = world([CREATED, files('a.ts'), ok()], '**需求**：Refs #3\nCloses #9\n', [
+  it('明确分片的 Refs 也认；Closes 的排前面，原正文逐字保留', () => {
+    const body = '**需求**：Refs #3（分片、关不了它）\nCloses #9\n';
+    const w = world([CREATED, files('a.ts'), ok()], body, [
       ok('[false,"v4 统一与验收","open"]'),
       ok('[false,"v3","open"]'),
     ]);
@@ -406,10 +407,42 @@ describe('pnpm pr:open：需求栏必挂单（#1052）、PR 不挂里程碑', ()
       'repos/{owner}/{repo}/issues/9',
       'repos/{owner}/{repo}/issues/3',
     ]);
+    expect(w.bodies).toEqual([body]);
 
-    const only = world([CREATED, files('a.ts'), ok()], '**需求**：Refs #1016\n');
+    const only = world([CREATED, files('a.ts'), ok()], '**需求**：Refs #1016（不关单）\n');
     expect(only.run()).toBe(0);
     expect(only.asked[0]?.[1]).toBe('repos/{owner}/{repo}/issues/1016');
+  });
+
+  it('任意需求行裸 Refs 均在推送和 GitHub 读写前拒绝，别处的说明不能遮盖', () => {
+    for (const body of [
+      '**需求**：Refs #3\n',
+      '**做了什么**：#3 尚未完成\n\n**需求**：Closes #7\nRefs #3\n',
+      '**需求**：Refs #3（分片、关不了它）\nRefs #9\n',
+      '**需求**：Refs #3（不关单）\nRefs #3\n',
+      '**需求**：Closes #3\nRefs #3\n',
+      '**需求**：Refs #3 <!-- 分片、关不了它 -->\n',
+    ]) {
+      const w = world([], body);
+      expect(w.run(), body).toBe(1);
+      expect(w.gitCalls, body).toEqual([]);
+      expect(w.calls, body).toEqual([]);
+      expect(w.asked, body).toEqual([]);
+      expect(w.listed, body).toEqual([]);
+      expect(w.labelCalls, body).toEqual([]);
+      expect(w.text(), body).toContain('Closes #号');
+      expect(w.text(), body).toContain('Refs #号（分片、关不了它）');
+      expect(readFileSync(join(w.cwd, 'body.md'), 'utf8'), body).toBe(body);
+    }
+  });
+
+  it('需求栏外和别仓 Refs 不改变本仓明确 Closes，原话仍保留', () => {
+    const body =
+      '**做了什么**：Refs #3\n\n**需求**：Closes #7\nRefs other/repo#9\n\n**创始人原话**：「保留」（2026-10-20）\n';
+    const w = world([CREATED, files('a.ts'), ok()], body);
+    expect(w.run()).toBe(0);
+    expect(w.bodies).toEqual([body]);
+    expect(w.asked).toHaveLength(1);
   });
 
   it('PR 不挂里程碑（决定 0015）：单挂了里程碑也不给 PR 挂，gh 调用里没有 --milestone', () => {
@@ -645,10 +678,10 @@ describe('pnpm pr:open：同一张单不开第二个 PR（决定 0096）', () =>
     expect(w.text()).toContain('没列成');
   });
 
-  it('只 Refs 的 PR（不关单）不查', () => {
+  it('只含明确分片的 Refs 的 PR 不查重复交付', () => {
     const w = world(
       [CREATED, files('packages/api/src/home.ts'), ok()],
-      '**做了什么**：x\n\n**需求**：\nRefs #7\n',
+      '**做了什么**：x\n\n**需求**：\nRefs #7（分片、关不了它）\n',
     );
     expect(w.run()).toBe(0);
     expect(w.listed).toEqual([]);

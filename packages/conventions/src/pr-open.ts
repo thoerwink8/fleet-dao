@@ -31,7 +31,7 @@ import {
 } from './labels.ts';
 import { type Gh, judgePaths, listOf, loadPathLists, prFiles, reasonOf } from './pr-arm.ts';
 import { type OpenPullRef, otherPrOnIssue } from './pr-claims.ts';
-import { founderQuote, issueColumnRefs, withIssueColumn } from './pr-columns.ts';
+import { founderQuote, issueColumnRefs, unmarkedIssueRefs, withIssueColumn } from './pr-columns.ts';
 
 /**
  * 从 gh pr create 的输出里认 PR 号。gh 正常时最后一行是 PR 地址（…/pull/<N>）；输出里认不出 PR 号直接抛错——
@@ -59,7 +59,8 @@ export const PR_OPEN_USAGE = `用法：pnpm pr:open --title <标题> --domain <e
      --no-issue "<理由>"  确实没有单：理由原样写进「需求」栏（「无：<理由>」）
      --founder-quote "<原话>" --at "<时间>"  改标准、创始人已经同意：在「需求」栏下面写「人闸：改标准」、再写一段「创始人原话」，
                           并挂自动合并（等价于 --founder-approved 加手写那一段）；也能配 --body-file，这两段追加到正文末尾
-  需求栏要能读到 Closes #号 / Refs #号：读不到、单不存在就不开。PR 不挂里程碑（里程碑页只数单子）。
+  需求栏：做完关单写 Closes #号；分片写 Refs #号（分片、关不了它）。裸 Refs 会被旧收口机制自动关单，新建时拒绝。
+  需求栏读不到关联、单不存在就不开。PR 不挂里程碑（里程碑页只数单子）。
   --no-issue 在 --body-file 下也能用；需求栏已经挂了单就不能再带
   分支是 local/<单号>-、fleet/<单号>-：需求栏没挂单就自动补 Closes #<单号>；不能带 --no-issue，需求栏挂的单要含这张单
   --founder-approved  改标准、创始人已经同意（自己写正文时用）：正文里要有一行 **创始人原话**：「<原话>」（<时间>）
@@ -163,6 +164,13 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
 
   // 需求栏必挂单：Closes / Refs 读得到，或者带 --no-issue 写明理由；两样都没有就什么也不做
   // 分支是 local/<单号>-、fleet/<单号>-：分支已经对应一张单，--no-issue 不收，需求栏没挂就自动补 Closes，挂了的要含这张
+  const ambiguous = unmarkedIssueRefs(body);
+  if (ambiguous.length > 0) {
+    err(
+      `需求栏的 Refs #${ambiguous.join('、#')} 没写明收口意图：完成用「Closes #号」；分片用「Refs #号（分片、关不了它）」。裸 Refs 可能触发自动关单，没开 PR，什么也没做。`,
+    );
+    return 1;
+  }
   const linked = issueColumnRefs(body);
   let issueNumbers = [...linked.closes, ...linked.refs];
   let closes = linked.closes;
@@ -208,7 +216,7 @@ export function prOpen(argv: string[], deps: OpenDeps): number {
   } else if (issueNumbers.length === 0) {
     err(
       '正文「需求」栏里读不到 Closes #号 / Refs #号：每个 PR 都要挂单，里程碑页才看得出进展（#1052）。\n' +
-        '  这个 PR 做完就关单 → 需求栏写「Closes #号」；母单的分片、关不了它 → 写「Refs #号」；\n' +
+        '  这个 PR 做完就关单 → 需求栏写「Closes #号」；母单分片 → 写「Refs #号（分片、关不了它）」；\n' +
         '  确实没有单 → 加 --no-issue "<为什么不挂单>"。没开 PR，什么也没做。',
     );
     return 1;
