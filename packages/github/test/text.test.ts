@@ -1,7 +1,13 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { type CheckRun, evaluateChecks } from '../src/checks.ts';
-import { hasCloseKeywords, neutralizeCloseKeywords, PR_BODY_MAX_LINES, renderPrBody } from '../src/text.ts';
+import {
+  hasCloseKeywords,
+  neutralizeCloseKeywords,
+  PR_BODY_MAX_LINES,
+  publishPrBody,
+  renderPrBody,
+} from '../src/text.ts';
 
 describe('C13：GitHub 关单词', () => {
   it('认得出 GitHub 认的所有写法', () => {
@@ -98,6 +104,34 @@ describe('PR 正文模板', () => {
     for (const old of ['认领', '这个 PR 做完就关单', '对应计划', 'specs', '档位', '文档']) {
       expect(body, old).not.toContain(`**${old}**`);
     }
+  });
+
+  it('会话逐字写了 Closes #本单：发出去的需求栏保留这句；句子里顺带的、分片的不保留', () => {
+    const kept = publishPrBody({
+      requirement: 3445,
+      did: ['按 #3445 的要求动手（第 2 轮）', 'Closes #3445', '顺带 Fixes #99'],
+      verified: ['看检查'],
+    });
+    expect(kept).toContain('**需求**：Closes #3445');
+    expect(kept).toContain('- 关联 #3445');
+    expect(kept).toContain('- 顺带 关联 #99');
+    expect(hasCloseKeywords(kept)).toBe(true);
+    const mentioned = publishPrBody({
+      requirement: 12,
+      did: ['Closes #12 的那条做完了'],
+      verified: ['ok'],
+    });
+    expect(mentioned).toContain('**需求**：#12');
+    expect(hasCloseKeywords(mentioned)).toBe(false);
+    const partial = publishPrBody({
+      requirement: 3445,
+      partial: true,
+      did: ['Closes #3445'],
+      verified: ['ok'],
+    });
+    expect(partial).toContain('Refs #3445');
+    expect(hasCloseKeywords(partial)).toBe(false);
+    expect(publishPrBody('Closes #3445')).toBe('关联 #3445');
   });
 
   it('引擎正文只保留关联，关单留给受管收尾', () => {

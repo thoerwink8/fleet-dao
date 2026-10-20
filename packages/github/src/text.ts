@@ -112,8 +112,25 @@ export function renderPrBody(input: PrBodyInput): string {
     }
   });
   lines.push(...tail);
-  // 正文保留需求关联，关单由受管收尾执行。
+  // 正文保留需求关联，关单由受管收尾执行。会话逐字声明的「Closes #本单」由 publishPrBody 在发出前写回需求栏。
   return neutralizeCloseKeywords(lines.join('\n'));
+}
+
+/**
+ * 开 PR、改正文实际发出去的正文。别的关单词仍收成「关联」。
+ * 做了什么里有一整条恰好是 `Closes #本单`，且不是分片、没有未结验收责任时，需求栏写回这句，验收对得上。
+ * 顺带提到的关单词不恢复。挂自动合并和直接合并之前仍会整篇收成「关联」，合并时 GitHub 不会因此自己关单。
+ */
+export function publishPrBody(input: string | PrBodyInput): string {
+  const rendered = typeof input === 'string' ? input : renderPrBody(input);
+  const neutralized = neutralizeCloseKeywords(rendered);
+  if (typeof input === 'string') return neutralized;
+  const issue = input.requirement;
+  if (issue === undefined || input.requirementRefs || input.partial) return neutralized;
+  const declared = `Closes #${issue}`;
+  const wroteIt = input.did.some((line) => line.split('；').some((part) => part.trim() === declared));
+  if (!wroteIt) return neutralized;
+  return neutralized.replace(new RegExp(`^\\*\\*需求\\*\\*：#${issue}(?!\\d)`, 'm'), `**需求**：${declared}`);
 }
 
 /** 折叠空白（含换行）成单个空格、掐头去尾：标题、单行栏目用这个压。 */

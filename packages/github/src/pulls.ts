@@ -29,7 +29,7 @@ import {
   hasCloseKeywords,
   neutralizeCloseKeywords,
   type PrBodyInput,
-  renderPrBody,
+  publishPrBody,
 } from './text.ts';
 
 const User = z.object({ login: z.string(), id: z.number(), type: z.string() });
@@ -99,7 +99,7 @@ export interface OpenPrInput {
   /** 刚推上去的头（回读核对用）。 */
   head: string;
   title: string;
-  /** 字符串原样用；给结构就按仓里的 PR 模板渲染（renderPrBody）。 */
+  /** 字符串原样用；给结构就按仓里的 PR 模板渲染（publishPrBody）。 */
   body: string | PrBodyInput;
   draft?: boolean | undefined;
   /**
@@ -145,9 +145,7 @@ export async function openPr(
 ): Promise<OpenPrResult> {
   const { repo, branch } = input;
   const slug = repoSlug(repo);
-  const body = neutralizeCloseKeywords(
-    typeof input.body === 'string' ? input.body : renderPrBody(input.body),
-  );
+  const body = publishPrBody(input.body);
   const title = neutralizeCloseKeywords(input.title.trim());
   assertBodySize('PR 正文', body);
   // 标题、正文（会话交活时写的总结在里面）和分支名开出去就公开了（分支名进 PR 的网页地址和 git 的分支列表），

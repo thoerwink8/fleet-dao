@@ -19,7 +19,7 @@ import {
   hasCloseKeywords,
   neutralizeCloseKeywords,
   type PrBodyInput,
-  renderPrBody,
+  publishPrBody,
 } from './text.ts';
 
 /** 引擎读 PR 要的样子。 */
@@ -137,8 +137,8 @@ export interface ClaimsGitHub {
   /** 关掉 PR（分支不动）。已经关了的不报错。 */
   closePull(repo: RepoRef, number: number): Promise<void>;
   /**
-   * 换掉 PR 的正文（#2723：第 2 轮起「做了什么」换成这一轮会话的回复）。给结构就按 PR 模板渲染（renderPrBody），
-   * 关单词中和成「关联」、超长和发布前检查照开 PR 那一套。标题、分支、状态都不动。
+   * 换掉 PR 的正文（#2723：第 2 轮起「做了什么」换成这一轮会话的回复）。给结构就按 PR 模板渲染（publishPrBody），
+   * 关单词中和成「关联」；会话逐字写了 `Closes #本单` 且不是分片时，需求栏保留这句。超长和发布前检查照开 PR。标题、分支、状态都不动。
    */
   updatePullBody(repo: RepoRef, number: number, body: string | PrBodyInput): Promise<void>;
   /** 在 PR 上留一条评论（幂等，同一个 key 只发一次）。 */
@@ -635,7 +635,7 @@ export function createClaimsGitHub(deps: Deps): ClaimsGitHub {
     },
 
     async updatePullBody(repo, number, input) {
-      const body = neutralizeCloseKeywords(typeof input === 'string' ? input : renderPrBody(input));
+      const body = publishPrBody(input);
       assertBodySize('PR 正文', body);
       assertPublishable(
         repo,

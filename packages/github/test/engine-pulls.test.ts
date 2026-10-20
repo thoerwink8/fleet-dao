@@ -575,6 +575,19 @@ describe('engine-pulls：撤自动合并、关 PR、留言', () => {
     expect(fake.pulls.get(pr.number)?.state).toBe('open');
   });
 
+  it('会话逐字写了 Closes #本单：改正文的需求栏保留这句', async () => {
+    const { gh, fake } = setup();
+    const pr = fake.addPull({ head: { ref: 'fleet/3445-t1', sha: sha('a') }, body: '旧的' });
+    await gh.claims.updatePullBody(repo, pr.number, {
+      requirement: 3445,
+      did: ['按 #3445 的要求动手（第 2 轮）', 'Closes #3445'],
+      verified: ['看检查'],
+    });
+    const body = fake.pulls.get(pr.number)?.body ?? '';
+    expect(body).toContain('**需求**：Closes #3445');
+    expect(body).toContain('- 关联 #3445');
+  });
+
   it('【故意造出的失败】往 issue 号上留「PR 的话」：拒绝，不写到 issue 上', async () => {
     const { gh, fake } = setup();
     const issue = fake.addIssue();
