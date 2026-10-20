@@ -202,7 +202,7 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     expect(parseDeliveryClaim(`${FULL_ANSWER}x`).kind).toBe('unknown');
   });
 
-  it('【故意造出的失败】只认回复顶层末尾的声明：示例、外层围栏、引用块、缩进、HTML 注释里的都是 unknown（review 5584630520、5585224386）', () => {
+  it('【故意造出的失败】只认回复顶层末尾的声明：示例、外层围栏、HTML 块、引用块、缩进、HTML 注释里的都是 unknown（review 5584630520、5585224386、5585850557）', () => {
     const example = '```fleet-delivery\n{"scope":"full","owed":[]}\n```';
     const cases: [string, RegExp][] = [
       // 单个声明块后面接着写真实范围：不当完整交付
@@ -216,7 +216,21 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
       [`做了\n> ${example.split('\n').join('\n> ')}`, /不在回复顶层/],
       [`做了\n\n    ${example.split('\n').join('\n    ')}`, /不在回复顶层/],
       [`做了\n  ${example.split('\n').join('\n  ')}`, /不在回复顶层/],
-      [`做了\n<!-- 示例\n${example}`, /HTML 注释/],
+      // 行首开的 <!-- 是 HTML 块，没收口到文末；段落中间开的由「没收口的 HTML 注释」兜住
+      [`做了\n<!-- 示例\n${example}`, /不在回复顶层/],
+      [`做了 <!-- 示例\n${example}`, /HTML 注释/],
+      // review 5585850557：没收口的 <pre>/<script>/<style>/<textarea> 原文块延伸到文末，里面的反引号行不是顶层声明
+      [`只交诊断，仍欠修复。以下仅是协议示例：\n<pre>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复。以下仅是协议示例：\n<script type="text/plain">\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复。以下仅是协议示例：\n<STYLE>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复。以下仅是协议示例：\n   <textarea>\n${example}`, /不在回复顶层/],
+      // 其它 HTML 块（<div>、单独一行的标签、<?、<!X、CDATA）：没空行收口时声明在块里
+      [`只交诊断，仍欠修复：\n<div>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<details open>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<my-example>\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<?example\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<!EXAMPLE\n${example}`, /不在回复顶层/],
+      [`只交诊断，仍欠修复：\n<![CDATA[\n${example}`, /不在回复顶层/],
       // review 5585224386：末尾三反引号关的是外层 markdown 示例块，里面的 fleet-delivery 只是外层代码内容
       [`实际只交诊断，仍欠修复。以下只是协议示例：\n\`\`\`markdown\n${example}`, /不在回复顶层/],
       [
@@ -246,6 +260,26 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     const answer = `做了\n\`\`\`ts\nconst a = 1;\n\`\`\`\n~~~\n\`\`\`\n~~~\n${claimBlock('{"scope":"full","owed":[]}')}`;
     expect(parseDeliveryClaim(answer)).toEqual({ kind: 'full' });
     expect(parseDeliveryClaim(SLICE_ANSWER.replace(/\n/g, '\r\n'))).toMatchObject({ kind: 'slice' });
+  });
+
+  it('前面的 HTML 块收好了口（<pre> 闭合、注释闭合、<div> 后空行、单行 <pre>x</pre>）：末尾的顶层声明照认（review 5585850557 的控制）', () => {
+    const full = claimBlock('{"scope":"full","owed":[]}');
+    const slice = claimBlock('{"scope":"slice","owed":["两项超时定因"]}');
+    const answers = [
+      `做了\n<pre>\n\`\`\`fleet\n示例\n\`\`\`\n</pre>${full}`,
+      `做了\n<script>\nlet a = 1;\n</SCRIPT>${full}`,
+      `做了\n<!-- 注释\n还是注释 -->${full}`,
+      `做了\n<div>\n内容\n\n${full.trimStart()}`,
+      `做了\n<pre>单行</pre>${full}`,
+      `做了\n<br>\n\n${full.trimStart()}`,
+      // 围栏里的 <pre> 是代码原文，不开 HTML 块
+      `做了\n\`\`\`html\n<pre>\n\`\`\`${full}`,
+    ];
+    for (const answer of answers) expect(parseDeliveryClaim(answer), answer).toEqual({ kind: 'full' });
+    expect(parseDeliveryClaim(`做了\n</pre>\n<pre>x</pre>${slice}`)).toEqual({
+      kind: 'slice',
+      owed: ['两项超时定因'],
+    });
   });
 
   it('回复里别的单的引用不进「做了什么」成链接：#号、owner/仓#号、GH-号、github 链接都中和，本单号留着', () => {

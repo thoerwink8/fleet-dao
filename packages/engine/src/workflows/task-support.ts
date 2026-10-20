@@ -954,17 +954,61 @@ interface Fence {
   info: string;
 }
 
-/** 回复的顶层代码围栏（引用块里的、缩进 4 格以上的不算）。围栏里面的围栏是原文，不另算。 */
+/** HTML 块第 6 类的标签名（CommonMark 0.31.2 §4.6）。 */
+const HTML_BLOCK_TAGS =
+  'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|' +
+  'fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|' +
+  'menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
+const HTML_BLOCK_TAG_START = new RegExp(`^</?(?:${HTML_BLOCK_TAGS})(?:[ \\t>]|/>|$)`, 'i');
+
+/**
+ * 顶层 HTML 块（CommonMark 0.31.2 §4.6，缩进至多 3 格）：认出开头那一行是哪类，回这一类的收口（收口串所在的行，end 为 null＝到空行为止）。
+ * 第 7 类（单独一行的任意标签）按宽认：段落里本不算的也当 HTML 块，只会让声明多判 unknown，不会把示例认成交付。
+ */
+function htmlBlockStart(line: string): { end: RegExp | null } | null {
+  const head = /^ {0,3}(<.*)$/.exec(line)?.[1];
+  if (!head) return null;
+  if (/^<(?:pre|script|style|textarea)(?:[ \t>]|$)/i.test(head))
+    return { end: /<\/(?:pre|script|style|textarea)>/i };
+  if (head.startsWith('<!--')) return { end: /-->/ };
+  if (head.startsWith('<?')) return { end: /\?>/ };
+  if (head.startsWith('<![CDATA[')) return { end: /\]\]>/ };
+  if (/^<![A-Za-z]/.test(head)) return { end: />/ };
+  if (HTML_BLOCK_TAG_START.test(head)) return { end: null };
+  // 第 7 类不含 pre/script/style/textarea：单独一行的 </pre> 是段落文字
+  if (
+    /^<\/?[A-Za-z][A-Za-z0-9-]*(?:[ \t/].*)?>[ \t]*$/.test(head) &&
+    !/^<\/?(?:pre|script|style|textarea)(?:[ \t/>]|$)/i.test(head)
+  )
+    return { end: null };
+  return null;
+}
+
+/**
+ * 回复的顶层代码围栏（引用块里的、缩进 4 格以上的不算）。围栏里面的围栏是原文，不另算；
+ * 顶层 HTML 块（<pre>、<script>、<!--、<div>……到它的收口为止，没收口就到文末）里的反引号行也是原文，不算围栏（review 5585850557）。
+ */
 function topLevelFences(lines: readonly string[]): Fence[] {
   const fences: Fence[] = [];
   let open: Fence | null = null;
+  let html: { end: RegExp | null } | null = null;
   for (const [i, line] of lines.entries()) {
+    if (html) {
+      if (html.end === null ? line.trim() === '' : html.end.test(line)) html = null;
+      continue;
+    }
     if (open) {
       const marker = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
       if (marker && marker[0] === open.marker[0] && marker.length >= open.marker.length) {
         open.end = i;
         open = null;
       }
+      continue;
+    }
+    const block = htmlBlockStart(line);
+    if (block) {
+      // 开头那一行就收口（如 <pre>x</pre>）：块只有这一行
+      if (block.end === null || !block.end.test(line)) html = block;
       continue;
     }
     const start = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
@@ -985,7 +1029,7 @@ const DELIVERY_OPEN_ANYWHERE = new RegExp(
 );
 
 /**
- * 从最后一条回复读交付声明。只认恰好一个、在回复顶层（不在别的代码围栏、引用块、缩进里，也不在没收口的 HTML 注释里）、
+ * 从最后一条回复读交付声明。只认恰好一个、在回复顶层（不在别的代码围栏、HTML 块、引用块、缩进里，也不在没收口的 HTML 注释里）、
  * 封口、且是回复最后内容的 fleet-delivery 块；示例、非末尾、结构说不清都按 unknown 交代原因，不从自然语言推断交付范围。
  */
 export function parseDeliveryClaim(answer: string | null | undefined): DeliveryClaim {
@@ -998,7 +1042,8 @@ export function parseDeliveryClaim(answer: string | null | undefined): DeliveryC
   const fence = topLevelFences(lines).find(
     (f) => f.indent === 0 && f.marker[0] === '`' && f.info === DELIVERY_FENCE,
   );
-  if (!fence) return { kind: 'unknown', why: '交付声明不在回复顶层（在别的代码块、引用或缩进里，像是示例）' };
+  if (!fence)
+    return { kind: 'unknown', why: '交付声明不在回复顶层（在别的代码块、HTML 块、引用或缩进里，像是示例）' };
   if (fence.end === null) return { kind: 'unknown', why: '交付声明没封口（回复可能截断了）' };
   // 声明必须是最后一条回复的最后内容：后面还有字，说明这不是收尾的结论，不当成完整交付
   if (lines.slice(fence.end + 1).some((line) => line.trim() !== ''))
