@@ -684,11 +684,14 @@ export function createTemporalTaskRedo(client: Client, taskQueue: string): TaskR
       });
       if (!read.ok) return read;
       const generations = read.generations;
+      // 列代顺着 1、2、3… 问到第一个没有的为止，问清的这几代都明确存在
+      input.observed?.(generations.length);
       return redoTask({
         list: async () => generations,
         posture: (workflowId) => redoPosture(client, workflowId),
         abandonParked: (workflowId) => abandonParkedWorkflow(client, workflowId),
         start: async (workflowId) => {
+          await input.beforeStart?.(workflowId);
           try {
             await client.connection.withDeadline(Date.now() + DEFAULT_SIGNAL_TIMEOUT_MS, () =>
               client.workflow.start(TASK_WORKFLOW_TYPE, {

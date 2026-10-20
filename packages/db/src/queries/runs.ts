@@ -379,7 +379,7 @@ export async function taskTokenSpend(
  * 按起跑先后排。workflowId 传第一代的编号（taskWorkflowId 不带代数）。
  */
 export async function runsOfTask(
-  db: Db,
+  db: Pick<Db, 'select'>,
   task: { id: string; issueNumber: number; workflowId: string },
 ): Promise<RunRow[]> {
   return db

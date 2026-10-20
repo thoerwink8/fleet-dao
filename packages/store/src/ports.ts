@@ -538,19 +538,31 @@ export interface OpsStore {
   /**
    * 受管起代（重做、拉单接手老行）在起 Temporal 之前调：锁任务行，状态在 allowed 里才落起代意图（操作记录）
    * 并改更新时间，提交后才许起。回意图编号；状态不对回 ok=false 带现状（没有这行是 null）。
+   * 有结果未知的起代时接手（落新意图，旧意图从此绑不了目标）；已绑目标超过 coverUpTo（这次最多能核清的代数）就拒。
    */
   beginTaskStart(input: {
     taskId: string;
     allowed: readonly TaskState[];
+    coverUpTo?: number | undefined;
     actor: import('@fleet-dao/db').TaskStartActor;
   }): Promise<import('@fleet-dao/db').TaskStartBegun>;
+  /** 起 Temporal 之前绑下这次要起的代数。回 false 不许起：意图已被接手或已结算。 */
+  bindTaskStart(input: {
+    taskId: string;
+    intent: string;
+    workflowId: string;
+    generation: number;
+    actor: import('@fleet-dao/db').TaskStartActor;
+  }): Promise<boolean>;
   /**
-   * 起代结果明确（起成或确定没起）才调，覆盖到这条为止的意图。抛错、超时、结果未知不调：
+   * 起代结果明确才调，覆盖到这条为止的意图；claimed 是明确起成或明确已存在的代数，没走到起是 null。
+   * 被覆盖的意图绑过的目标高于 claimed（或 claimed 为 null）就抛错不结。抛错、超时、结果未知不调：
    * 意图一直挂着，受管纠正一直拒绝，不靠超时或进程退出放行。
    */
   settleTaskStart(input: {
     taskId: string;
     intent: string;
+    claimed: number | null;
     outcome: string;
     actor: import('@fleet-dao/db').TaskStartActor;
   }): Promise<void>;

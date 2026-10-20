@@ -45,6 +45,10 @@ export interface TaskRedoPort {
     issueNumber: number;
     title: string;
     repo: Repo;
+    /** 真要起某一代之前调（受管起代绑目标）；抛错就不起。 */
+    beforeStart?: ((workflowId: string) => Promise<void>) | undefined;
+    /** 列代问清了就报：1..generation 每一代都在 Temporal 里（核清结果未知的旧起代用）。 */
+    observed?: ((generation: number) => void) | undefined;
   }): Promise<{ ok: true; workflowId: string; generation: number } | { ok: false; why: string }>;
 }
 

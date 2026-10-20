@@ -8,6 +8,12 @@ import {
   sessionLinkHolds,
   TASK_START_INTENT_ACTION,
   TASK_START_SETTLED_ACTION,
+  TASK_START_TARGET_ACTION,
+  taskStartBeginRefusal,
+  taskStartBindRefusal,
+  taskStartLedger,
+  taskStartPending,
+  taskStartSettleRefusal,
 } from '@fleet-dao/db';
 import {
   type Ban,
@@ -21,6 +27,7 @@ import {
   type RealtimeTable,
   type Repo,
   type Route,
+  runBelongsToTask,
   type ScheduleOutcome,
   type SegmentRun,
   type SessionRun,
@@ -383,43 +390,45 @@ export function createMemoryStore(
     return owner.toLowerCase() === repo.owner.toLowerCase() && name.toLowerCase() === repo.name.toLowerCase();
   }
 
-  function openRunCount(taskId: string): number {
+  function openRunCount(task: Task): number {
     const ids = new Set<string>();
-    for (const run of data.segmentRuns) {
-      if (run.taskId === taskId && run.endedAt === undefined) ids.add(run.id);
+    for (const run of sessionsOf(task)) {
+      if (run.endedAt === undefined) ids.add(run.id);
     }
     for (const run of data.runs) {
-      if (run.taskId === taskId && run.endedAt === undefined) ids.add(`session:${run.id}`);
+      if (run.taskId === task.id && run.endedAt === undefined) ids.add(`session:${run.id}`);
     }
     if (!Number.isSafeInteger(ids.size) || ids.size < 0) throw new Error('活跃会话数读不到');
     return ids.size;
   }
 
-  /** 和库里同一判法：最新的起代意图比已结覆盖到的还新，就是结果未知。 */
-  function startPending(taskId: string): boolean {
-    let intent = 0;
-    let settled = 0;
-    for (const row of data.audit) {
-      if (row.target !== `task:${taskId}`) continue;
-      if (row.action === TASK_START_INTENT_ACTION) {
-        if (!/^\d+$/.test(row.id)) throw new Error('起代意图读不全');
-        const value = Number(row.id);
-        if (!Number.isSafeInteger(value)) throw new Error('起代意图读不全');
-        intent = Math.max(intent, value);
-      }
-      if (row.action === TASK_START_SETTLED_ACTION) {
-        const value = (row.after as { upTo?: unknown } | undefined)?.upTo;
-        if (
-          (typeof value !== 'number' && typeof value !== 'string') ||
-          !/^\d+$/.test(String(value)) ||
-          !Number.isSafeInteger(Number(value))
-        )
-          throw new Error('起代意图读不全');
-        settled = Math.max(settled, Number(value));
-      }
-    }
-    return intent > settled;
+  /** 和库里同一套起代账判法（db 的 taskStartLedger）。 */
+  function taskStarts(taskId: string) {
+    return taskStartLedger(data.audit.filter((row) => row.target === `task:${taskId}`));
   }
+  const startPending = (taskId: string): boolean => taskStartPending(taskStarts(taskId));
+
+  /** 和库里 runsOfTask 同一判法：task_id 对上的，加上 task_id 为空、单号和任务工作流对上的旧行。 */
+  function sessionsOf(task: Task) {
+    const repo = data.repos.find((row) => row.id === task.repoId);
+    if (!repo) throw new Error('任务所在的仓读不到，会话账读不全');
+    const link = {
+      id: task.id,
+      issueNumber: task.issueNumber,
+      workflowId: taskWorkflowId(repo, task.issueNumber),
+    };
+    return data.segmentRuns
+      .filter((run) => runBelongsToTask(run, link) !== undefined)
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id));
+  }
+
+  const sessionLinksOf = (task: Task) =>
+    sessionsOf(task).map((run) => ({
+      workflowId: run.workflowId ?? null,
+      prNumber: run.prNumber ?? null,
+      temporalRunId: data.runIdentities.find((row) => row.runId === run.id)?.temporalRunId ?? null,
+      ended: run.endedAt !== undefined,
+    }));
 
   function readLedger(input: {
     owner: string;
@@ -435,15 +444,6 @@ export function createMemoryStore(
     const task = data.tasks.find((row) => row.repoId === repo.id && row.issueNumber === input.issueNumber);
     if (!task) return null;
     const closure = data.taskClosures.find((row) => row.taskId === task.id);
-    const sessions = data.segmentRuns
-      .filter((run) => run.taskId === task.id)
-      .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))
-      .map((run) => ({
-        workflowId: run.workflowId ?? null,
-        prNumber: run.prNumber ?? null,
-        temporalRunId: data.runIdentities.find((row) => row.runId === run.id)?.temporalRunId ?? null,
-        ended: run.endedAt !== undefined,
-      }));
     const mirrorRow = data.pullRequests.find(
       (row) => row.repoId === repo.id && row.number === input.prNumber,
     );
@@ -462,10 +462,10 @@ export function createMemoryStore(
         phase: closure?.phase ?? null,
         executor: task.executor ?? 'engine',
         updatedAt: closure?.updatedAt ?? null,
-        openRunCount: openRunCount(task.id),
+        openRunCount: openRunCount(task),
         startPending: startPending(task.id),
       },
-      sessions,
+      sessions: sessionLinksOf(task),
       mirror: mirrorRow
         ? {
             number: mirrorRow.number,
@@ -502,19 +502,12 @@ export function createMemoryStore(
       (task.executor ?? 'engine') !== 'engine' ||
       updatedAtMs !== input.expectedUpdatedAtMs ||
       startPending(task.id) ||
-      openRunCount(task.id) !== 0
+      openRunCount(task) !== 0
     ) {
       return 'stale';
     }
-    const sessions = data.segmentRuns
-      .filter((run) => run.taskId === task.id)
-      .map((run) => ({
-        workflowId: run.workflowId ?? null,
-        prNumber: run.prNumber ?? null,
-        temporalRunId: data.runIdentities.find((row) => row.runId === run.id)?.temporalRunId ?? null,
-        ended: run.endedAt !== undefined,
-      }));
-    if (!sessionLinkHolds(sessions, input.workflowId, input.prNumber, input.runId)) return 'stale';
+    if (!sessionLinkHolds(sessionLinksOf(task), input.workflowId, input.prNumber, input.runId))
+      return 'stale';
     const entry: NewAuditEntry = {
       actor: { kind: 'ops', id: input.audit.actorId },
       action: CORRECT_MERGED_AUDIT_ACTION,
@@ -1130,18 +1123,13 @@ export function createMemoryStore(
     async readCorrectMergedLedger(input) {
       return readLedger(input);
     },
-    async beginTaskStart({ taskId, allowed, actor }) {
+    async beginTaskStart({ taskId, allowed, coverUpTo, actor }) {
       // 和库里一样：查状态、落意图、改更新时间之间不 await
       const task = data.tasks.find((row) => row.id === taskId);
       if (!task) return { ok: false, state: null };
       if (!allowed.includes(task.state)) return { ok: false, state: task.state };
-      if (startPending(taskId)) {
-        return {
-          ok: false,
-          state: task.state,
-          reason: '这张单已有一次受管起代结果未知，不能再次起代；先核清那次起代',
-        };
-      }
+      const refusal = taskStartBeginRefusal(taskStarts(taskId), coverUpTo);
+      if (refusal) return { ok: false, state: task.state, reason: refusal };
       const intent = audit({
         actor: { kind: actor.kind, id: actor.id },
         action: TASK_START_INTENT_ACTION,
@@ -1155,40 +1143,33 @@ export function createMemoryStore(
       changed('tasks', taskId);
       return { ok: true, intent };
     },
-    async settleTaskStart({ taskId, intent, outcome, actor }) {
+    async bindTaskStart({ taskId, intent, workflowId, generation, actor }) {
       if (!/^\d+$/.test(intent)) throw new Error('起代意图编号不对');
-      const wanted = Number(intent);
-      if (!Number.isSafeInteger(wanted)) throw new Error('起代意图编号不对');
-      let latest: number | null = null;
-      let settled = 0;
-      for (const row of data.audit) {
-        if (row.target !== `task:${taskId}`) continue;
-        if (row.action === TASK_START_INTENT_ACTION) {
-          if (!/^\d+$/.test(row.id) || !Number.isSafeInteger(Number(row.id)))
-            throw new Error('起代意图读不全');
-          latest = latest === null ? Number(row.id) : Math.max(latest, Number(row.id));
-        }
-        if (row.action === TASK_START_SETTLED_ACTION) {
-          const value = (row.after as { upTo?: unknown } | undefined)?.upTo;
-          if (
-            (typeof value !== 'number' && typeof value !== 'string') ||
-            !/^\d+$/.test(String(value)) ||
-            !Number.isSafeInteger(Number(value))
-          )
-            throw new Error('起代意图读不全');
-          settled = Math.max(settled, Number(value));
-        }
-      }
-      if (latest === null || latest !== wanted) throw new Error('起代意图已经换代，不能结算旧意图');
-      if (settled >= wanted) {
-        if (settled === wanted) return;
-        throw new Error('起代意图已经被别的结果覆盖，不能越代结算');
-      }
+      if (!data.tasks.some((row) => row.id === taskId)) return false;
+      const refusal = taskStartBindRefusal(taskStarts(taskId), BigInt(intent), generation);
+      if (refusal === 'bound') return true;
+      if (refusal !== null) return false;
+      audit({
+        actor: { kind: actor.kind, id: actor.id },
+        action: TASK_START_TARGET_ACTION,
+        target: `task:${taskId}`,
+        after: { intent: Number(intent), workflowId, generation },
+        via: actor.via,
+        ok: true,
+      });
+      return true;
+    },
+    async settleTaskStart({ taskId, intent, claimed, outcome, actor }) {
+      if (!/^\d+$/.test(intent)) throw new Error('起代意图编号不对');
+      if (!data.tasks.some((row) => row.id === taskId)) throw new Error('任务不在库里，不能结算起代意图');
+      const refusal = taskStartSettleRefusal(taskStarts(taskId), BigInt(intent), claimed);
+      if (refusal === 'settled') return;
+      if (refusal !== null) throw new Error(refusal);
       audit({
         actor: { kind: actor.kind, id: actor.id },
         action: TASK_START_SETTLED_ACTION,
         target: `task:${taskId}`,
-        after: { upTo: Number(intent), outcome },
+        after: { upTo: Number(intent), claimed, outcome },
         via: actor.via,
         ok: true,
       });

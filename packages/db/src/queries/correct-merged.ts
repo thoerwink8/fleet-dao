@@ -2,13 +2,18 @@
 // 不改 runs、不改 pull_requests、不改 acceptance_duties、不碰 Temporal。审计插入失败时事务回滚，任务行保持原样。
 // 受管起代（重做、拉单接手老行）先在任务行锁里落一条起代意图并改更新时间，提交后才去起 Temporal；结果明确才落已结。
 // 纠正事务锁同一行：有没结的意图就拒绝；意图落在纠正读账之后，更新时间对不上也拒绝。没有租约，不靠超时放行。
-import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+// 起 Temporal 之前在行锁里绑下目标代数；结果未知的意图只能由后来一次明确起到不低于那一代的受管起代核清（重入），
+// 被接手的旧持有者绑不了目标、不会再起。
+import { taskWorkflowId } from '@fleet-dao/shared';
+import { and, desc, eq, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../client.ts';
-import { auditLog, pullRequests, repos, runs, tasks } from '../schema/index.ts';
+import { auditLog, pullRequests, repos, tasks } from '../schema/index.ts';
+import { type RunRow, runsOfTask } from './runs.ts';
 
 export const CORRECT_MERGED_AUDIT_ACTION = 'task.correct-merged';
 export const TASK_START_INTENT_ACTION = 'task.start-intent';
 export const TASK_START_SETTLED_ACTION = 'task.start-settled';
+export const TASK_START_TARGET_ACTION = 'task.start-target';
 
 /** 审计一次最多读这么多条成功回执。再多就当没读全，拒绝，不挑一条方便的。 */
 const AUDIT_LIMIT = 20;
@@ -73,57 +78,154 @@ export type TaskStartBegun =
   | { ok: true; intent: string }
   | { ok: false; state: string | null; reason?: string };
 
-function serialValue(value: unknown): bigint | null {
-  if (value === null || value === undefined) return null;
+/** 起代账（审计里这张任务的意图、目标、已结三种行）。库和内存版用同一套判法。 */
+export interface TaskStartRow {
+  id: string;
+  action: string;
+  after?: unknown;
+}
+
+export interface TaskStartLedger {
+  latest: bigint | null;
+  /** 已结覆盖到的意图编号；没有是 0。 */
+  settled: bigint;
+  /** 意图编号 → 起 Temporal 之前绑下的代数。 */
+  targets: Map<bigint, number>;
+}
+
+function serialValue(value: unknown): bigint {
   if (typeof value === 'bigint') return value;
-  if (typeof value === 'number' && Number.isSafeInteger(value)) return BigInt(value);
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
   if (typeof value === 'string' && /^\d+$/.test(value)) return BigInt(value);
   throw new Error('起代意图读不全');
 }
 
-/** 最新一条起代意图比已结覆盖到的还新，就是有一次起代结果未知。读不成就抛，不当成没有。 */
-async function startPending(db: Pick<Db, 'select'>, taskId: string): Promise<boolean> {
-  const [row] = await db
-    .select({
-      intent: sql<unknown>`max(${auditLog.id}) filter (where ${auditLog.action} = ${TASK_START_INTENT_ACTION})`,
-      settled: sql<unknown>`max((${auditLog.after} ->> 'upTo')::bigint) filter (where ${auditLog.action} = ${TASK_START_SETTLED_ACTION})`,
-    })
+/** 读不懂就抛，不当成没有。 */
+export function taskStartLedger(rows: readonly TaskStartRow[]): TaskStartLedger {
+  const out: TaskStartLedger = { latest: null, settled: 0n, targets: new Map() };
+  for (const row of rows) {
+    const after = (row.after ?? {}) as { upTo?: unknown; intent?: unknown; generation?: unknown };
+    if (row.action === TASK_START_INTENT_ACTION) {
+      const id = serialValue(row.id);
+      if (out.latest === null || id > out.latest) out.latest = id;
+    } else if (row.action === TASK_START_SETTLED_ACTION) {
+      const upTo = serialValue(after.upTo);
+      if (upTo > out.settled) out.settled = upTo;
+    } else if (row.action === TASK_START_TARGET_ACTION) {
+      const generation = after.generation;
+      if (typeof generation !== 'number' || !Number.isSafeInteger(generation) || generation < 1)
+        throw new Error('起代意图读不全');
+      out.targets.set(serialValue(after.intent), generation);
+    }
+  }
+  return out;
+}
+
+/** 最新一条起代意图比已结覆盖到的还新，就是有一次起代结果未知。 */
+export function taskStartPending(ledger: TaskStartLedger): boolean {
+  return ledger.latest !== null && ledger.latest > ledger.settled;
+}
+
+/** 已结之后、到 upTo 为止的意图绑过的代数：这些起代可能已经发出，结果未知。 */
+function openTargets(ledger: TaskStartLedger, upTo: bigint | null): number[] {
+  if (upTo === null) return [];
+  return [...ledger.targets]
+    .filter(([intent]) => intent > ledger.settled && intent <= upTo)
+    .map(([, generation]) => generation);
+}
+
+export const START_UNKNOWN_REASON =
+  '这张单已有一次受管起代结果未知，这次起代核不清它，不能再次起代；先用重做核清那次起代';
+
+/**
+ * 有没结的起代时也许接手：新落一条意图，旧意图从此绑不了目标（不会再起），由这一次明确的起代一并核清。
+ * coverUpTo 是这一次最多能核清到第几代（拉单只起第一代）；已绑目标超过它就拒，不白落意图。
+ */
+export function taskStartBeginRefusal(ledger: TaskStartLedger, coverUpTo?: number): string | null {
+  if (!taskStartPending(ledger) || coverUpTo === undefined) return null;
+  return openTargets(ledger, ledger.latest).some((g) => g > coverUpTo) ? START_UNKNOWN_REASON : null;
+}
+
+/** 起 Temporal 之前绑目标：只有最新、没结的意图能绑；同一代重绑幂等。回 null 是可以起。 */
+export function taskStartBindRefusal(
+  ledger: TaskStartLedger,
+  intent: bigint,
+  generation: number,
+): 'bound' | string | null {
+  if (ledger.latest !== intent || ledger.settled >= intent)
+    return '这次起代意图已被后来的起代接手或已经结算，不再起';
+  const bound = ledger.targets.get(intent);
+  if (bound === undefined) return null;
+  return bound === generation ? 'bound' : '这次起代意图已绑了别的代数，不再起';
+}
+
+/**
+ * 只有最新的意图能结算，覆盖到它为止的所有意图。claimed 是这一次明确起成或明确已存在的代数，没走到起是 null。
+ * 被覆盖的意图绑过的目标，代数都不超过 claimed 才算核清：列代只增不减，这次要起第 claimed 代时比它小的都已存在；
+ * 等于的是同一个编号，REJECT_DUPLICATE 下只有一个能起。没走到起就核不清任何已绑目标，留着不结。
+ * 回 null 要写已结；'settled' 已经结过；其余是不能结算的原因。
+ */
+export function taskStartSettleRefusal(
+  ledger: TaskStartLedger,
+  intent: bigint,
+  claimed: number | null,
+): 'settled' | string | null {
+  if (ledger.latest !== intent) return '起代意图已经换代，不能结算旧意图';
+  if (ledger.settled >= intent)
+    return ledger.settled === intent ? 'settled' : '起代意图已经被别的结果覆盖，不能越代结算';
+  if (openTargets(ledger, intent).some((g) => claimed === null || g > claimed))
+    return '还有已发出、结果未知的起代目标，这一次的结果核不清它，不结算';
+  return null;
+}
+
+async function loadTaskStarts(db: Pick<Db, 'select'>, taskId: string): Promise<TaskStartLedger> {
+  const rows = await db
+    .select({ id: auditLog.id, action: auditLog.action, after: auditLog.after })
     .from(auditLog)
     .where(
       and(
         eq(auditLog.target, `task:${taskId}`),
-        inArray(auditLog.action, [TASK_START_INTENT_ACTION, TASK_START_SETTLED_ACTION]),
+        inArray(auditLog.action, [
+          TASK_START_INTENT_ACTION,
+          TASK_START_TARGET_ACTION,
+          TASK_START_SETTLED_ACTION,
+        ]),
       ),
     );
-  const intent = serialValue(row?.intent);
-  if (intent === null) return false;
-  const settled = serialValue(row?.settled);
-  return settled === null || settled < intent;
+  return taskStartLedger(rows.map((row) => ({ ...row, id: String(row.id) })));
+}
+
+async function startPending(db: Pick<Db, 'select'>, taskId: string): Promise<boolean> {
+  return taskStartPending(await loadTaskStarts(db, taskId));
+}
+
+/** 锁任务行，回这行在不在。 */
+async function lockTask(tx: Pick<Db, 'select'>, taskId: string): Promise<{ state: string } | undefined> {
+  const [row] = await tx.select({ state: tasks.state }).from(tasks).where(eq(tasks.id, taskId)).for('update');
+  return row;
 }
 
 /**
  * 受管起代之前调：锁任务行，状态在 allowed 里才落起代意图并改更新时间。提交之后调用方才许去起 Temporal。
- * 纠正先写成 done/merged 的，这里重读到就拒绝。起完、结果明确，再拿意图编号调 settleTaskStart。
+ * 纠正先写成 done/merged 的，这里重读到就拒绝。有没结的起代时按 taskStartBeginRefusal 接手或拒绝。
+ * 起之前拿意图编号调 bindTaskStart，结果明确再调 settleTaskStart。
  */
 export async function beginTaskStart(
   db: Db,
-  input: { taskId: string; allowed: readonly string[]; actor: TaskStartActor; now: Date },
+  input: {
+    taskId: string;
+    allowed: readonly string[];
+    coverUpTo?: number | undefined;
+    actor: TaskStartActor;
+    now: Date;
+  },
 ): Promise<TaskStartBegun> {
   return db.transaction(async (tx) => {
-    const [row] = await tx
-      .select({ state: tasks.state })
-      .from(tasks)
-      .where(eq(tasks.id, input.taskId))
-      .for('update');
+    const row = await lockTask(tx, input.taskId);
     if (!row) return { ok: false as const, state: null };
     if (!input.allowed.includes(row.state)) return { ok: false as const, state: row.state };
-    if (await startPending(tx, input.taskId)) {
-      return {
-        ok: false as const,
-        state: row.state,
-        reason: '这张单已有一次受管起代结果未知，不能再次起代；先核清那次起代',
-      };
-    }
+    const refusal = taskStartBeginRefusal(await loadTaskStarts(tx, input.taskId), input.coverUpTo);
+    if (refusal) return { ok: false as const, state: row.state, reason: refusal };
     const [audit] = await tx
       .insert(auditLog)
       .values({
@@ -144,45 +246,76 @@ export async function beginTaskStart(
 }
 
 /**
- * 起代结果明确了（起成，或确定没起）才调。覆盖到这条为止的所有意图：这一次明确的列代晚于更早那次未知的起代。
- * 起代抛错、超时、进程退出都不调，意图一直挂着，纠正一直拒绝。
+ * 起 Temporal 之前、在任务行锁里绑下这次要起的代数。回 false 就不许起：意图已被后来的起代接手或已经结算。
+ * 被接手的旧持有者因此不会越代再起；起之后结果不明，靠这条目标让后来的明确起代判断能不能核清它。
+ */
+export async function bindTaskStart(
+  db: Db,
+  input: {
+    taskId: string;
+    intent: string;
+    workflowId: string;
+    generation: number;
+    actor: TaskStartActor;
+    now: Date;
+  },
+): Promise<boolean> {
+  if (!/^\d+$/.test(input.intent)) throw new Error('起代意图编号不对');
+  return db.transaction(async (tx) => {
+    if (!(await lockTask(tx, input.taskId))) return false;
+    const refusal = taskStartBindRefusal(
+      await loadTaskStarts(tx, input.taskId),
+      BigInt(input.intent),
+      input.generation,
+    );
+    if (refusal === 'bound') return true;
+    if (refusal !== null) return false;
+    await tx.insert(auditLog).values({
+      at: input.now,
+      actorKind: input.actor.kind,
+      actorId: input.actor.id,
+      action: TASK_START_TARGET_ACTION,
+      target: `task:${input.taskId}`,
+      after: { intent: Number(input.intent), workflowId: input.workflowId, generation: input.generation },
+      via: input.actor.via,
+      ok: true,
+    });
+    return true;
+  });
+}
+
+/**
+ * 起代结果明确了（起成、编号已存在，或确定没走到起）才调，判法见 taskStartSettleRefusal。
+ * 起代抛错、超时、进程退出都不调；核不清已绑目标也不结：意图一直挂着，纠正一直拒绝，不靠超时放行。
  */
 export async function settleTaskStart(
   db: Db,
-  input: { taskId: string; intent: string; outcome: string; actor: TaskStartActor; now: Date },
+  input: {
+    taskId: string;
+    intent: string;
+    claimed: number | null;
+    outcome: string;
+    actor: TaskStartActor;
+    now: Date;
+  },
 ): Promise<void> {
   if (!/^\d+$/.test(input.intent)) throw new Error('起代意图编号不对');
-  const intent = BigInt(input.intent);
   await db.transaction(async (tx) => {
-    const [task] = await tx
-      .select({ id: tasks.id })
-      .from(tasks)
-      .where(eq(tasks.id, input.taskId))
-      .for('update');
-    if (!task) throw new Error('任务不在库里，不能结算起代意图');
-    const [row] = await tx
-      .select({
-        latestIntent: sql<unknown>`max(${auditLog.id}) filter (where ${auditLog.action} = ${TASK_START_INTENT_ACTION})`,
-        settled: sql<unknown>`max((${auditLog.after} ->> 'upTo')::bigint) filter (where ${auditLog.action} = ${TASK_START_SETTLED_ACTION})`,
-      })
-      .from(auditLog)
-      .where(eq(auditLog.target, `task:${input.taskId}`));
-    const latest = serialValue(row?.latestIntent);
-    const settled = serialValue(row?.settled);
-    if (latest === null || latest !== intent) {
-      throw new Error('起代意图已经换代，不能结算旧意图');
-    }
-    if (settled !== null && settled >= intent) {
-      if (settled === intent) return;
-      throw new Error('起代意图已经被别的结果覆盖，不能越代结算');
-    }
+    if (!(await lockTask(tx, input.taskId))) throw new Error('任务不在库里，不能结算起代意图');
+    const refusal = taskStartSettleRefusal(
+      await loadTaskStarts(tx, input.taskId),
+      BigInt(input.intent),
+      input.claimed,
+    );
+    if (refusal === 'settled') return;
+    if (refusal !== null) throw new Error(refusal);
     await tx.insert(auditLog).values({
       at: input.now,
       actorKind: input.actor.kind,
       actorId: input.actor.id,
       action: TASK_START_SETTLED_ACTION,
       target: `task:${input.taskId}`,
-      after: { upTo: Number(input.intent), outcome: input.outcome },
+      after: { upTo: Number(input.intent), claimed: input.claimed, outcome: input.outcome },
       via: input.actor.via,
       ok: true,
     });
@@ -191,25 +324,27 @@ export async function settleTaskStart(
 
 const DOING = '受管纠正为真实已合；原 abandoned 结论留在操作记录和原执行结果';
 
-/** count(*) 有时是字符串。不是非负安全整数就当没读成，不把未知当成没有会话。 */
-function countValue(value: unknown): number {
-  if (typeof value === 'bigint' && value >= 0n && value <= BigInt(Number.MAX_SAFE_INTEGER))
-    return Number(value);
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
-  if (typeof value === 'string' && /^\d+$/.test(value)) {
-    const n = Number(value);
-    if (Number.isSafeInteger(n)) return n;
-  }
-  throw new Error('活跃会话数读不到');
+/**
+ * 这张任务的全部会话，和 runsOfTask 同一判法：task_id 对上的，加上 task_id 为空、单号和任务工作流（含后几代）对上的旧行。
+ * 只筛 task_id 会漏掉旧行里活着的会话或另一条 PR。仓读不到就抛，不当成没有会话。
+ */
+async function taskRuns(
+  db: Pick<Db, 'select'>,
+  task: { id: string; repoId: string; issueNumber: number },
+): Promise<RunRow[]> {
+  const [repo] = await db
+    .select({ owner: repos.owner, name: repos.name })
+    .from(repos)
+    .where(eq(repos.id, task.repoId));
+  if (!repo) throw new Error('任务所在的仓读不到，会话账读不全');
+  return runsOfTask(db, {
+    id: task.id,
+    issueNumber: task.issueNumber,
+    workflowId: taskWorkflowId(repo, task.issueNumber),
+  });
 }
 
-async function openRuns(db: Pick<Db, 'select'>, taskId: string): Promise<number> {
-  const [row] = await db
-    .select({ n: sql<unknown>`count(*)::int` })
-    .from(runs)
-    .where(and(eq(runs.taskId, taskId), isNull(runs.endedAt)));
-  return countValue(row?.n ?? null);
-}
+const openRuns = (rows: readonly RunRow[]): number => rows.filter((row) => row.endedAt === null).length;
 
 function sessionLinks(
   rows: {
@@ -300,17 +435,7 @@ export async function readCorrectMergedLedger(
     .from(tasks)
     .where(and(eq(tasks.repoId, repo.id), eq(tasks.issueNumber, input.issueNumber)));
   if (!task) return null;
-  const openRunCount = await openRuns(db, task.id);
-  const sessionRows = await db
-    .select({
-      workflowId: runs.workflowId,
-      prNumber: runs.prNumber,
-      temporalRunId: runs.temporalRunId,
-      endedAt: runs.endedAt,
-    })
-    .from(runs)
-    .where(eq(runs.taskId, task.id))
-    .orderBy(asc(runs.startedAt), asc(runs.id));
+  const sessionRows = await taskRuns(db, { ...task, repoId: repo.id });
   const [mirror] = await db
     .select({
       number: pullRequests.number,
@@ -343,7 +468,7 @@ export async function readCorrectMergedLedger(
       phase: task.phase,
       executor: task.executor,
       updatedAt: task.updatedAt ? task.updatedAt.toISOString() : null,
-      openRunCount,
+      openRunCount: openRuns(sessionRows),
       startPending: await startPending(db, task.id),
     },
     sessions: sessionLinks(sessionRows),
@@ -375,6 +500,8 @@ export async function casCorrectMergedTask(
     const [row] = await tx
       .select({
         id: tasks.id,
+        repoId: tasks.repoId,
+        issueNumber: tasks.issueNumber,
         state: tasks.state,
         phase: tasks.phase,
         executor: tasks.executor,
@@ -383,20 +510,11 @@ export async function casCorrectMergedTask(
       .from(tasks)
       .where(eq(tasks.id, input.taskId))
       .for('update');
-    if (!row || row.state !== 'stopped' || row.phase !== 'abandoned' || row.executor !== 'engine')
-      return 'stale';
+    if (row?.state !== 'stopped' || row.phase !== 'abandoned' || row.executor !== 'engine') return 'stale';
     if (row.updatedAt === null || row.updatedAt.getTime() !== input.expectedUpdatedAtMs) return 'stale';
     if (await startPending(tx, row.id)) return 'stale';
-    if ((await openRuns(tx, row.id)) !== 0) return 'stale';
-    const sessionRows = await tx
-      .select({
-        workflowId: runs.workflowId,
-        prNumber: runs.prNumber,
-        temporalRunId: runs.temporalRunId,
-        endedAt: runs.endedAt,
-      })
-      .from(runs)
-      .where(eq(runs.taskId, row.id));
+    const sessionRows = await taskRuns(tx, row);
+    if (openRuns(sessionRows) !== 0) return 'stale';
     if (!sessionLinkHolds(sessionLinks(sessionRows), input.workflowId, input.prNumber, input.runId))
       return 'stale';
     await tx

@@ -440,6 +440,8 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
           : await store.beginTaskStart({
               taskId: created.task.id,
               allowed: ['queued', 'stopped'],
+              // 拉单只起第一代：结果未知的起代绑的目标不高于第一代才接手，这次明确起成或已存在就一并核清
+              coverUpTo: 1,
               actor: startActor,
             });
         if (intent && !intent.ok) {
@@ -463,16 +465,49 @@ export function intakeJob(w: IntakeWiring): (client: Client, taskQueue: string) 
             intent.reason ?? `任务 ${created.task.id} 现在是 ${intent.state ?? '不在库里'}，不起工作流`,
           );
         }
+        const restorePrepared = (before: {
+          title: string;
+          rawRequest: string;
+          state: 'queued' | 'stopped';
+        }) =>
+          store.restoreOrphanTask({
+            taskId: created.task.id,
+            title: before.title,
+            rawRequest: before.rawRequest,
+            state: before.state,
+          });
+        // 起成或编号已存在：第一代明确存在，能核清不高于第一代的旧目标。起之后抛错不结，下一轮拉单接手再核清。
         const settle = async (outcome: string) => {
           if (intent?.ok) {
             await store.settleTaskStart({
               taskId: created.task.id,
               intent: intent.intent,
+              claimed: 1,
               outcome,
               actor: startActor,
             });
           }
         };
+        if (intent?.ok) {
+          const workflowId = taskWorkflowId(repo, issueNumber);
+          let bound: boolean;
+          try {
+            bound = await store.bindTaskStart({
+              taskId: created.task.id,
+              intent: intent.intent,
+              workflowId,
+              generation: 1,
+              actor: startActor,
+            });
+          } catch (error) {
+            if (prepared) await restorePrepared(prepared).catch(() => undefined);
+            throw error;
+          }
+          if (!bound) {
+            if (prepared) await restorePrepared(prepared).catch(() => undefined);
+            throw new Error(`任务 ${created.task.id} 的起代意图已被后来的起代接手或已经结算，不起工作流`);
+          }
+        }
         try {
           await client.connection.withDeadline(Date.now() + startTimeoutMs, () =>
             client.workflow.start(WORKFLOW_TYPES.task, {

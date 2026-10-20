@@ -19,6 +19,7 @@ import {
   TASK_ADOPT_AUDIT_ACTION,
   TASK_START_INTENT_ACTION,
   TASK_START_SETTLED_ACTION,
+  TASK_START_TARGET_ACTION,
   tasks,
   upsertAlert,
   users,
@@ -550,10 +551,12 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     const audit = (await t.db.select().from(auditLog)).filter((a) => a.target === `task:${old.id}`);
     expect(audit.map((a) => a.action)).toEqual([
       TASK_START_INTENT_ACTION,
+      TASK_START_TARGET_ACTION,
       TASK_START_SETTLED_ACTION,
       TASK_ADOPT_AUDIT_ACTION,
     ]);
-    expect(audit[2]).toMatchObject({ ok: true, reason: ORPHAN_TASK_ADOPT_NOTE, via: 'github' });
+    expect(audit[2]?.after).toMatchObject({ claimed: 1 });
+    expect(audit[3]).toMatchObject({ ok: true, reason: ORPHAN_TASK_ADOPT_NOTE, via: 'github' });
   });
 
   it('已叫停的老行、没有任何一代：接手后改回排队，原来的状态变化还在', async () => {
@@ -659,12 +662,29 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
     expect((await t.db.select().from(auditLog)).filter((a) => a.action === TASK_ADOPT_AUDIT_ACTION)).toEqual(
       [],
     );
-    // 起代没成也不知道到底起没起：意图挂着、不落已结，纠正一直拒绝
-    const pending = (await t.db.select().from(auditLog)).filter((a) => a.action.startsWith('task.start-'));
-    expect(pending.map((a) => a.action)).toEqual([TASK_START_INTENT_ACTION]);
+    // 绑了第一代、起代没成也不知道到底起没起：意图挂着、不落已结，纠正一直拒绝
+    const startRows = async () =>
+      (await t.db.select().from(auditLog))
+        .filter((a) => a.action.startsWith('task.start-'))
+        .sort((a, b) => a.id - b.id)
+        .map((a) => a.action);
+    expect(await startRows()).toEqual([TASK_START_INTENT_ACTION, TASK_START_TARGET_ACTION]);
+
+    // 不会永久卡住：下一轮拉单接手，明确起成第一代，一并核清那次未知起代
+    const retry = fakeClient();
+    const again = await runIntakeJob(wire(fakeGh().gh)(retry.client, 'fleet'));
+    expect(again.outcome).toBe('ok');
+    expect(retry.starts).toHaveLength(1);
+    expect(await startRows()).toEqual([
+      TASK_START_INTENT_ACTION,
+      TASK_START_TARGET_ACTION,
+      TASK_START_INTENT_ACTION,
+      TASK_START_TARGET_ACTION,
+      TASK_START_SETTLED_ACTION,
+    ]);
   });
 
-  it('老行有未知起代责任：不再次起工作流，也不把接手改动留在行上', async () => {
+  it('老行只有没绑目标的旧意图（没走到起）：接手起第一代并一并结算', async () => {
     const { repo } = await seedWorld(t.db);
     const old = await seedOrphan(repo.id, { state: 'stopped' });
     await t.db.insert(auditLog).values({
@@ -675,6 +695,42 @@ describe('拉单的真装配', { timeout: 60_000 }, () => {
       target: `task:${old.id}`,
       after: { state: 'stopped' },
       via: 'engine',
+      ok: true,
+    });
+    const { client, starts } = fakeClient();
+    const run = await runIntakeJob(wire(fakeGh().gh)(client, 'fleet'));
+    expect(run.outcome).toBe('ok');
+    expect(starts).toHaveLength(1);
+    const settled = (await t.db.select().from(auditLog)).filter(
+      (a) => a.action === TASK_START_SETTLED_ACTION,
+    );
+    expect(settled).toHaveLength(1);
+  });
+
+  it('老行有绑了更高代数的未知起代（重做留下的）：拉单核不清，不再次起工作流，也不把接手改动留在行上', async () => {
+    const { repo } = await seedWorld(t.db);
+    const old = await seedOrphan(repo.id, { state: 'stopped' });
+    const [intent] = await t.db
+      .insert(auditLog)
+      .values({
+        at: NOW,
+        actorKind: 'ops',
+        actorId: 'founder',
+        action: TASK_START_INTENT_ACTION,
+        target: `task:${old.id}`,
+        after: { state: 'stopped' },
+        via: 'ops',
+        ok: true,
+      })
+      .returning({ id: auditLog.id });
+    await t.db.insert(auditLog).values({
+      at: NOW,
+      actorKind: 'ops',
+      actorId: 'founder',
+      action: TASK_START_TARGET_ACTION,
+      target: `task:${old.id}`,
+      after: { intent: Number(intent?.id), workflowId: 'task:acme/demo#12:r2', generation: 2 },
+      via: 'ops',
       ok: true,
     });
     const { client, starts } = fakeClient();

@@ -260,13 +260,24 @@ describe('task correct-merged 真实装配', () => {
 
   /**
    * 经真实 runTask（task 命令的重做）+ fencedTaskRedo + pg Store 起代。替身 Temporal：
-   * ok 起成第二代；deadline 抛 DEADLINE_EXCEEDED（结果未知，起代可能迟到落地）。
+   * 和真 createTemporalTaskRedo 同一份口子约定：列代后报 observed，起之前调 beforeStart。
+   * ok 起成第二代；deadline 绑了第二代后抛 DEADLINE_EXCEEDED（结果未知，起代可能迟到落地）；
+   * landed 列代看到迟到的第二代已在跑，拒绝另起（不调 start）。
    * beforeRedo 在 runTask 读到 stopped 之后、进起代意图之前跑。
    */
-  function redoViaRunTask(mode: 'ok' | 'deadline', beforeRedo?: () => Promise<void>): Promise<string> {
+  function redoViaRunTask(
+    mode: 'ok' | 'deadline' | 'landed',
+    beforeRedo?: () => Promise<void>,
+  ): Promise<string> {
     const store = pgStore();
     const port: TaskRedoPort = {
-      async redo() {
+      async redo(input) {
+        if (mode === 'landed') {
+          input.observed?.(2);
+          return { ok: false, why: `上一代还在跑（${WF}:r2），先叫停再重做` };
+        }
+        input.observed?.(1);
+        await input.beforeStart?.(`${WF}:r2`);
         current.redoStarts += 1;
         if (mode === 'deadline') throw Object.assign(new Error('4 DEADLINE_EXCEEDED'), { code: 4 });
         current.extraGeneration = true;
@@ -454,6 +465,23 @@ describe('task correct-merged 真实装配', () => {
         fragment: '歧义',
       },
       {
+        name: '旧行（task_id 为空、单号和工作流对上）活会话',
+        prepare: () => addRun({ id: 'c3114000-0000-4000-8000-0000000000a1', taskId: null }),
+        fragment: '活跃会话',
+      },
+      {
+        name: '旧行（task_id 为空、单号和工作流对上）另有不同 PR',
+        prepare: () =>
+          addRun({
+            id: 'c3114000-0000-4000-8000-0000000000a2',
+            taskId: null,
+            endedAt: WHEN,
+            outcome: 'done',
+            prNumber: 99999,
+          }),
+        fragment: '歧义',
+      },
+      {
         name: '起代意图没结',
         prepare: () =>
           pgStore().beginTaskStart({
@@ -560,7 +588,22 @@ describe('task correct-merged 真实装配', () => {
     current.extraGeneration = true;
     await expectUntouched('迟到落地');
     expect(await audits('task.start-intent')).toHaveLength(1);
+    expect(await audits('task.start-target')).toHaveLength(1);
     expect(await audits('task.start-settled')).toEqual([]);
+
+    // 不会永久卡住：再跑一次重做，列代明确看到第二代已在，才核清那次未知起代；拒绝另起，不调 start
+    const starts = current.redoStarts;
+    expect(await redoViaRunTask('landed')).toContain('上一代还在跑');
+    expect(current.redoStarts).toBe(starts);
+    expect(await audits('task.start-intent')).toHaveLength(2);
+    expect(await audits('task.start-settled')).toHaveLength(1);
+    await expectUntouched('核清之后');
+    // 核清之后纠正的拒绝理由是新一代在跑，不是结果未知
+    current.casCalls = 0;
+    const settled = await invoke(args(['--apply']));
+    expect(settled.json?.status).toBe('refused');
+    expect(settled.json?.reason).toContain('仍在运行');
+    expect(current.casCalls).toBe(0);
   }, 30_000);
 
   it('固定交错：重做已读到 stopped、还没落意图时纠正先提交——起代意图重读到 done 而拒绝，新代从未起', async () => {

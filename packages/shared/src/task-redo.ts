@@ -5,6 +5,7 @@
 // 真在跑就拒绝，不叫停。没给叫停口子时，任何还在跑的都拒绝（和以前一样）。
 // 接活扫描不走这里（撤掉的单不会自己重来）。
 // 不碰工作流代码：编号是起的时候从外面传的，不用 patched()。
+import { errMessage } from './util.ts';
 import { parseTaskWorkflowId, taskWorkflowId, type WorkflowRepoRef } from './workflow-ids.ts';
 
 /** 一张单最多重做到第几代。再往上不再另起，免得编号无限长。 */
@@ -181,4 +182,76 @@ export async function redoTask(deps: RedoDeps): Promise<RedoOutcome> {
     return { ok: false, why: `编号 ${workflowId} 已经有记录，没有覆盖旧代，也没另起` };
   }
   return { ok: true, workflowId, generation: next };
+}
+
+/**
+ * 受管起代的账（任务行锁里的起代意图）。驾驶舱、task 命令、指挥官的重做都套 fenceRedo，和受管纠正抢同一行。
+ * begin 落意图（会接手结果未知的旧意图）；bind 在起 Temporal 之前绑目标代数，回 false 不许起；
+ * settle 交这一次明确看到存在的最高代数（没有是 null），核不清已绑目标就抛错不结。
+ */
+export interface StartFencePorts {
+  begin(): Promise<{ ok: true; intent: string } | { ok: false; why: string }>;
+  bind(intent: string, workflowId: string, generation: number): Promise<boolean>;
+  settle(intent: string, claimed: number | null, outcome: string): Promise<void>;
+}
+
+export interface StartFenceHooks {
+  /** 真要起某一代之前调；抛错就不起。 */
+  beforeStart(workflowId: string): Promise<void>;
+  /** 列代问清了：1..generation 每一代都在 Temporal 里（明确看到存在，那几代的起代结果已定）。 */
+  observed(generation: number): void;
+}
+
+export class StartSupersededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StartSupersededError';
+  }
+}
+
+/**
+ * 套着受管起代意图重做。结果明确才结算：
+ * - 列代时明确看到存在的最高代数，核清不高于它的旧目标（列代在接手之后，旧意图已绑不了新目标）；
+ * - 绑了目标、起的那一步正常回来（起成或编号已存在），这一代也是明确的；
+ * - 绑了目标之后抛错（超时、连不上、进程退出）：这一代结果未知，不结，意图挂着，纠正一直拒绝，下次重做再核清。
+ * 结算没写进或核不清：起代结果照实交回，意图挂着（保守）。
+ */
+export async function fenceRedo(
+  ports: StartFencePorts,
+  redo: (hooks: StartFenceHooks) => Promise<RedoOutcome>,
+): Promise<RedoOutcome> {
+  const begun = await ports.begin();
+  if (!begun.ok) return begun;
+  let bound: number | null = null;
+  let seen = 0;
+  const settle = (claimed: number | null, outcome: string) => ports.settle(begun.intent, claimed, outcome);
+  let outcome: RedoOutcome;
+  try {
+    outcome = await redo({
+      async beforeStart(workflowId) {
+        const generation = parseTaskWorkflowId(workflowId)?.generation;
+        if (generation === undefined)
+          throw new StartSupersededError(`认不出要起的编号 ${workflowId}，没有起`);
+        if (!(await ports.bind(begun.intent, workflowId, generation)))
+          throw new StartSupersededError('这次起代意图已被后来的起代接手或已经结算，没有再起');
+        bound = generation;
+      },
+      observed(generation) {
+        if (Number.isSafeInteger(generation) && generation > seen) seen = generation;
+      },
+    });
+  } catch (err) {
+    if (err instanceof StartSupersededError) return { ok: false, why: err.message };
+    // 还没绑目标：没走到起，这一次明确没起；看到的代数照样能核清旧目标
+    if (bound === null) await settle(seen || null, `not_started ${errMessage(err)}`).catch(() => undefined);
+    throw err;
+  }
+  const claimed = Math.max(bound ?? 0, seen) || null;
+  try {
+    await settle(claimed, outcome.ok ? `started ${outcome.workflowId}` : `not_started ${outcome.why}`);
+  } catch (err) {
+    if (outcome.ok) return outcome;
+    return { ok: false, why: `${outcome.why}；起代没有结算（${errMessage(err)}）` };
+  }
+  return outcome;
 }

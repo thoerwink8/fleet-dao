@@ -10,6 +10,7 @@ import {
   auditLog,
   bans,
   beginTaskStart,
+  bindTaskStart,
   casCorrectMergedTask,
   channels,
   countTaskGroups,
@@ -1047,6 +1048,10 @@ export function createPgStore(db: Db, options: PgStoreOptions = {}): Store {
     async beginTaskStart(input) {
       if (!isUuid(input.taskId)) return { ok: false, state: null };
       return beginTaskStart(db, { ...input, now: now() });
+    },
+    async bindTaskStart(input) {
+      if (!isUuid(input.taskId)) return false;
+      return bindTaskStart(db, { ...input, now: now() });
     },
     async settleTaskStart(input) {
       await settleTaskStart(db, { ...input, now: now() });

@@ -13,6 +13,7 @@ import {
   tasks,
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { WorkflowNotFoundError } from '@temporalio/client';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { COMMANDER_ACTOR } from '../../src/commander-contract.ts';
 import { judgeSpin } from '../../src/decisions/spin.ts';
@@ -227,5 +228,85 @@ describe('real/park-triage', () => {
     const rounds = await deps().rounds(task.id);
     expect(rounds).toHaveLength(3);
     expect(judgeSpin(rounds ?? []).spinning).toBe(true);
+  });
+
+  /** 替身 Temporal：第一代已结束；start 按 startFails 抛错或起成。 */
+  function redoDeps(startFails?: Error) {
+    const starts: string[] = [];
+    const existing = new Set(['task:acme/app#7']);
+    const client = {
+      connection: { withDeadline: async (_at: number, fn: () => Promise<unknown>) => fn() },
+      workflow: {
+        getHandle(id: string) {
+          return {
+            async describe() {
+              if (!existing.has(id)) throw new WorkflowNotFoundError('not found', id, undefined);
+              return { status: { name: 'COMPLETED' } };
+            },
+          };
+        },
+        async start(_type: string, options: { workflowId: string }) {
+          starts.push(options.workflowId);
+          if (startFails) throw startFails;
+          existing.add(options.workflowId);
+          return {};
+        },
+      },
+    };
+    const job = parkTriageJob({
+      db: t.db,
+      gh: {} as never,
+      trees: {} as never,
+      exec: {} as never,
+      tmpDir: '/tmp/none',
+      spawner: {} as never,
+      pickRoute: (async () => ({ ok: false, detail: '测试里不选路' })) as never,
+      sessions: {} as never,
+      temporal: { use: async (fn) => fn(client as never) },
+      taskQueue: 'fleet',
+      now: () => NOW,
+      log: () => {},
+    })();
+    return { job, starts };
+  }
+
+  const startActions = async (taskId: string) =>
+    (await t.db.select().from(auditLog))
+      .filter((a) => a.target === `task:${taskId}` && a.action.startsWith('task.start-'))
+      .sort((a, b) => a.id - b.id)
+      .map((a) => [a.action, a.actorId]);
+
+  it('指挥官重做走受管起代栅栏：落意图、绑目标、起成再结算；已被纠正成 done 的不起', async () => {
+    const task = await seedTask();
+    const ok = redoDeps();
+    expect(await ok.job.redoTask(itemOf(task.id).row, 'task:acme/app#7')).toEqual({
+      ok: true,
+      workflowId: 'task:acme/app#7:r2',
+      generation: 2,
+    });
+    expect(ok.starts).toEqual(['task:acme/app#7:r2']);
+    expect(await startActions(task.id)).toEqual([
+      ['task.start-intent', COMMANDER_ACTOR],
+      ['task.start-target', COMMANDER_ACTOR],
+      ['task.start-settled', COMMANDER_ACTOR],
+    ]);
+
+    await t.db.update(tasks).set({ state: 'done' });
+    const done = redoDeps();
+    const refused = await done.job.redoTask(itemOf(task.id).row, 'task:acme/app#7');
+    expect(refused.ok).toBe(false);
+    expect(done.starts).toEqual([]);
+  });
+
+  it('指挥官重做起代超时：结果未知，意图挂着不结算（受管纠正一直拒绝）', async () => {
+    const task = await seedTask();
+    const timeout = redoDeps(Object.assign(new Error('4 DEADLINE_EXCEEDED'), { code: 4 }));
+    await expect(timeout.job.redoTask(itemOf(task.id).row, 'task:acme/app#7')).rejects.toThrow(
+      'DEADLINE_EXCEEDED',
+    );
+    expect((await startActions(task.id)).map(([action]) => action)).toEqual([
+      'task.start-intent',
+      'task.start-target',
+    ]);
   });
 });

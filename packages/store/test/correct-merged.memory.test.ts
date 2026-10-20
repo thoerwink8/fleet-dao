@@ -102,7 +102,13 @@ describe('内存版受管纠正', () => {
     expect(await memory.casCorrectMerged(input)).toBe('stale');
     expect(await memory.casCorrectMerged({ ...input, expectedUpdatedAtMs: bumped })).toBe('stale');
     expect(memory.data.tasks[0]?.state).toBe('stopped');
-    await memory.settleTaskStart({ taskId: TASK, intent: begun.intent, outcome: 'not_started', actor });
+    await memory.settleTaskStart({
+      taskId: TASK,
+      intent: begun.intent,
+      claimed: null,
+      outcome: 'not_started',
+      actor,
+    });
     expect(await memory.casCorrectMerged({ ...input, expectedUpdatedAtMs: bumped })).toBe('corrected');
     expect(await memory.beginTaskStart({ taskId: TASK, allowed: ['stopped'], actor })).toEqual({
       ok: false,

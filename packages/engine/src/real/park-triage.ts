@@ -8,6 +8,8 @@
 // - 操作记录经 recordEngineAudit 写，actor 是 engine:commander、target 是 commander；「认领」和「执行」各一条（jobs/park-triage.ts 看认领判是否处理过）。
 // - 提醒（诊断文字）经 upsertAlert 推：执行了的是 daily，留给人 / 没成的是 alert。
 import {
+  beginTaskStart,
+  bindTaskStart,
   COMMANDER_AUDIT_TARGET,
   commanderAuditRows,
   countPurposeModels,
@@ -20,11 +22,19 @@ import {
   readTaskTitle,
   recordEngineAudit,
   resolveAlertWithReason,
+  settleTaskStart,
   startScheduleRun,
   upsertAlert,
 } from '@fleet-dao/db';
 import { TASK_WORKFLOW_TYPE } from '@fleet-dao/shared';
-import { generationLife, readTaskGenerations, redoCanStop, redoTask } from '@fleet-dao/shared/task-redo';
+import {
+  fenceRedo,
+  generationLife,
+  readTaskGenerations,
+  redoCanStop,
+  redoTask,
+  type StartFencePorts,
+} from '@fleet-dao/shared/task-redo';
 import { errMessage } from '@fleet-dao/shared/util';
 import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { COMMANDER_ACTOR } from '../commander-contract.ts';
@@ -41,6 +51,8 @@ export const COMMANDER_SETTING = 'engine.commander';
 const SIGNAL_TIMEOUT_MS = 5_000;
 /** 重做前叫停停着的上一代：等它收尾终止最多多久。 */
 const ABANDON_WAIT_MS = 60_000;
+/** 指挥官重做落起代意图用的身份。 */
+const START_ACTOR = { kind: 'engine', id: COMMANDER_ACTOR, via: 'engine' } as const;
 
 export interface ParkTriageWiring extends GroomWiring {
   temporal: { use<T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>): Promise<T> };
@@ -67,86 +79,125 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     const repo = await findRepo(row.owner, row.name);
     const title = await readTaskTitle(w.db, row.taskId);
     if (!repo || title === null) return { ok: false, why: `读不到仓或任务标题，没有重做（${workflowId}）` };
-    return w.temporal.use(async (client) => {
-      const lifeOf = async (id: string) => {
-        const described = await client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () =>
-          client.workflow.getHandle(id).describe(),
+    // 和驾驶舱、task 命令的重做同一道受管起代栅栏，和受管纠正抢同一行（db 的 correct-merged.ts）
+    const fence: StartFencePorts = {
+      async begin() {
+        const begun = await beginTaskStart(w.db, {
+          taskId: row.taskId,
+          allowed: ['stalled', 'stopped'],
+          actor: START_ACTOR,
+          now: now(),
+        });
+        if (begun.ok) return begun;
+        return {
+          ok: false,
+          why: begun.reason ?? `任务现在是 ${begun.state ?? '不在库里'}，没有重做（${workflowId}）`,
+        };
+      },
+      bind: (intent, id, generation) =>
+        bindTaskStart(w.db, {
+          taskId: row.taskId,
+          intent,
+          workflowId: id,
+          generation,
+          actor: START_ACTOR,
+          now: now(),
+        }),
+      settle: (intent, claimed, outcome) =>
+        settleTaskStart(w.db, {
+          taskId: row.taskId,
+          intent,
+          claimed,
+          outcome,
+          actor: START_ACTOR,
+          now: now(),
+        }),
+    };
+    return fenceRedo(fence, (hooks) =>
+      w.temporal.use(async (client) => {
+        const lifeOf = async (id: string) => {
+          const described = await client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () =>
+            client.workflow.getHandle(id).describe(),
+          );
+          return generationLife(described.status.name);
+        };
+        const read = await readTaskGenerations(
+          { owner: row.owner, name: row.name },
+          row.issueNumber,
+          async (id) => {
+            try {
+              return { life: await lifeOf(id), record: { workflowId: id } };
+            } catch (err) {
+              return err instanceof WorkflowNotFoundError ? { life: 'missing' } : { life: 'unknown' };
+            }
+          },
         );
-        return generationLife(described.status.name);
-      };
-      const read = await readTaskGenerations(
-        { owner: row.owner, name: row.name },
-        row.issueNumber,
-        async (id) => {
-          try {
-            return { life: await lifeOf(id), record: { workflowId: id } };
-          } catch (err) {
-            return err instanceof WorkflowNotFoundError ? { life: 'missing' } : { life: 'unknown' };
-          }
-        },
-      );
-      if (!read.ok) return read;
-      return redoTask({
-        list: async () => read.generations,
-        posture: async (id) => {
-          try {
-            const status = await withDeadline((c) => c.workflow.getHandle(id).query(taskStatusQuery));
-            return redoCanStop(status.phase) ? 'parked' : 'running';
-          } catch (err) {
-            return isWorkflowGone(err) ? 'parked' : 'running';
-          }
-        },
-        abandonParked: async (id) => {
-          try {
-            await withDeadline((c) =>
-              c.workflow.getHandle(id).signal(taskAbandonSignal, {
-                by: COMMANDER_ACTOR,
-                reason: '指挥官判重做：先叫停停住的上一代',
-              }),
-            );
-          } catch (err) {
-            if (!isWorkflowGone(err)) throw err;
-          }
-          const deadline = Date.now() + ABANDON_WAIT_MS;
-          while (Date.now() < deadline) {
-            if ((await lifeOf(id).catch(() => 'terminated' as const)) !== 'running') return;
-            await new Promise((resolve) => setTimeout(resolve, 200));
-          }
-          throw new Error(`叫停 ${id} 后还没停，没有另起`);
-        },
-        start: async (id) => {
-          try {
-            await withDeadline((c) =>
-              c.workflow.start(TASK_WORKFLOW_TYPE, {
-                taskQueue: w.taskQueue,
-                workflowId: id,
-                args: [
-                  {
-                    schemaVersion: 1,
-                    taskId: row.taskId,
-                    repo: {
-                      id: repo.id,
-                      owner: repo.owner,
-                      name: repo.name,
-                      defaultBranch: repo.defaultBranch,
-                      testCommand: repo.testCommand,
+        if (!read.ok) return read;
+        // 列代顺着 1、2、3… 问到第一个没有的为止，问清的这几代都明确存在
+        hooks.observed(read.generations.length);
+        return redoTask({
+          list: async () => read.generations,
+          posture: async (id) => {
+            try {
+              const status = await withDeadline((c) => c.workflow.getHandle(id).query(taskStatusQuery));
+              return redoCanStop(status.phase) ? 'parked' : 'running';
+            } catch (err) {
+              return isWorkflowGone(err) ? 'parked' : 'running';
+            }
+          },
+          abandonParked: async (id) => {
+            try {
+              await withDeadline((c) =>
+                c.workflow.getHandle(id).signal(taskAbandonSignal, {
+                  by: COMMANDER_ACTOR,
+                  reason: '指挥官判重做：先叫停停住的上一代',
+                }),
+              );
+            } catch (err) {
+              if (!isWorkflowGone(err)) throw err;
+            }
+            const deadline = Date.now() + ABANDON_WAIT_MS;
+            while (Date.now() < deadline) {
+              if ((await lifeOf(id).catch(() => 'terminated' as const)) !== 'running') return;
+              await new Promise((resolve) => setTimeout(resolve, 200));
+            }
+            throw new Error(`叫停 ${id} 后还没停，没有另起`);
+          },
+          start: async (id) => {
+            await hooks.beforeStart(id);
+            try {
+              await withDeadline((c) =>
+                c.workflow.start(TASK_WORKFLOW_TYPE, {
+                  taskQueue: w.taskQueue,
+                  workflowId: id,
+                  args: [
+                    {
+                      schemaVersion: 1,
+                      taskId: row.taskId,
+                      repo: {
+                        id: repo.id,
+                        owner: repo.owner,
+                        name: repo.name,
+                        defaultBranch: repo.defaultBranch,
+                        testCommand: repo.testCommand,
+                      },
+                      issueNumber: row.issueNumber,
+                      title,
                     },
-                    issueNumber: row.issueNumber,
-                    title,
-                  },
-                ],
-                workflowIdConflictPolicy: 'FAIL',
-                workflowIdReusePolicy: 'REJECT_DUPLICATE',
-              }),
-            );
-            return 'started';
-          } catch (err) {
-            if (err instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
-            throw err;
-          }
-        },
-      });
-    });
+                  ],
+                  workflowIdConflictPolicy: 'FAIL',
+                  workflowIdReusePolicy: 'REJECT_DUPLICATE',
+                }),
+              );
+              return 'started';
+            } catch (err) {
+              if (err instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
+              throw err;
+            }
+          },
+        });
+      }),
+    );
   };
 
   return () => ({

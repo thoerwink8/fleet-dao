@@ -36,7 +36,7 @@
 `resolveNotification` 的可选 `expected` 用于历史审计处置：事务内核对原通知键、正文和链接，已处理时只有同一份审计可以幂等返回，否则 `conflict`。普通处理入口不带它，保留现有行为。
 
 - 改接口：`ports.ts` → `memory-store.ts` + `pg-store.ts` → 契约测试；调用方在 api 和 engine。
-- `readCorrectMergedLedger` / `casCorrectMerged`：误记 abandoned 的已合任务。读任务行、会话、请求的 PR 镜像和既有纠正回执；CAS 只在仍是引擎的 stopped/abandoned、更新时间没变、没有没结的起代意图、没有开着的会话、会话账仍钉着这次交付时，把任务行改成 done/merged，并在同一事务写操作记录。同一工作流另有不同非空 PR 的会话算没钉住，回 stale；读取之后事务里才读到的冲突会话同样不写。不改 runs、PR 镜像、验收责任。`beginTaskStart` / `settleTaskStart`：受管起代前锁任务行、状态对才落 `task.start-intent` 并改更新时间；结果明确才落 `task.start-settled`（覆盖到这条为止的意图）。没结的意图让纠正一直拒绝，不靠租约或超时放行。内存版的 phase / 更新时间在 `taskClosures`，合并提交在 `pullMerges`，不塞进驾驶舱读出去的任务和 PR。
+- `readCorrectMergedLedger` / `casCorrectMerged`：误记 abandoned 的已合任务。读任务行、会话、请求的 PR 镜像和既有纠正回执；CAS 只在仍是引擎的 stopped/abandoned、更新时间没变、没有没结的起代意图、没有开着的会话、会话账仍钉着这次交付时，把任务行改成 done/merged，并在同一事务写操作记录。同一工作流另有不同非空 PR 的会话算没钉住，回 stale；读取之后事务里才读到的冲突会话同样不写。不改 runs、PR 镜像、验收责任。`beginTaskStart` / `settleTaskStart`：受管起代前锁任务行、状态对才落 `task.start-intent` 并改更新时间；`bindTaskStart` 在真起之前落 `task.start-target`（绑代数，被接手的旧意图绑不了）；结果明确才落 `task.start-settled`（覆盖到这条为止的意图，`claimed` 要不低于这些意图绑过的代数）。判法在 db 的 `taskStartLedger` 一族，两套实现共用。没结的意图让纠正一直拒绝，不靠租约或超时放行；后来的受管起代接手后明确看到那一代才核清。会话按 runsOfTask 同一判法（含 task_id 为空的旧行）。内存版的 phase / 更新时间在 `taskClosures`，合并提交在 `pullMerges`，不塞进驾驶舱读出去的任务和 PR。
 - 要新表或新列：先在 `packages/db` 改表结构并生成迁移（见 `packages/db/AGENTS.md`），再改这里。
 - 要驾驶舱实时看到的新表：登记 `packages/shared/src/realtime.ts` 的 `REALTIME_TABLES`，触发器在 db 的迁移里。
 
