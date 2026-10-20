@@ -142,10 +142,15 @@ type WorkerEntry = {
   settled: Promise<PromiseSettledResult<unknown>>;
 };
 type Run = { env: TestWorkflowEnvironment; handle: WorkflowHandle; workflowId: string; runId: string };
+type WatchdogScheduler = (onFire: () => void, delayMs: number) => () => void;
+const scheduleWatchdog: WatchdogScheduler = (onFire, delayMs) => {
+  const timer = setTimeout(onFire, delayMs);
+  return () => clearTimeout(timer);
+};
 
 export class SyntheticHistoryDiagnostics {
   private stage = 'test-start';
-  private readonly timer: ReturnType<typeof setTimeout>;
+  private readonly cancelWatchdog: () => void;
   private capturePromise?: Promise<void>;
   private finished = false;
   private readonly workers: WorkerEntry[] = [];
@@ -161,11 +166,13 @@ export class SyntheticHistoryDiagnostics {
     failed: () => boolean;
     // 在本文件 beforeEach 的第一个钩子中创建，先于 useEnv 的服务端创建。
     watchdogMs?: number;
+    // 真实诊断夹具可在 host 屏障就绪后触发；默认仍使用原生计时器。
+    scheduleWatchdog?: WatchdogScheduler;
     artifactRoot?: string;
   };
   constructor(options: SyntheticHistoryDiagnostics['options']) {
     this.options = options;
-    this.timer = setTimeout(() => {
+    this.cancelWatchdog = (options.scheduleWatchdog ?? scheduleWatchdog)(() => {
       // 原拒绝保留在 capturePromise，finish 独立报告；定时器不能制造未处理拒绝。
       void this.capture('watchdog').catch(() => undefined);
     }, options.watchdogMs ?? 50_000);
@@ -326,7 +333,7 @@ export class SyntheticHistoryDiagnostics {
     return this.finishPromise;
   }
   private async close(): Promise<void> {
-    clearTimeout(this.timer);
+    this.cancelWatchdog();
     const problems: unknown[] = [];
     try {
       if (this.options.failed()) await this.capture('test-failed');
