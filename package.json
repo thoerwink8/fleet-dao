@@ -33,6 +33,7 @@
     "issue:new": "node packages/conventions/src/bin/issue-new.ts",
     "issue:batch": "node packages/conventions/src/bin/issue-batch.ts",
     "progress": "node packages/conventions/src/bin/progress.ts",
+    "machine": "node packages/conventions/src/bin/machine.ts",
     "issue:close": "node packages/conventions/src/bin/issue-close.ts",
     "debt:check": "node packages/conventions/src/bin/debt-check.ts",
     "deps:check": "node packages/conventions/src/bin/deps-check.ts",

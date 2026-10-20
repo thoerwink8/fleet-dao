@@ -7,6 +7,7 @@
 - `packages/conventions/src/bin/`：每个命令一个入口文件，逻辑在 `packages/conventions/src/` 同名模块里。仓根 `package.json` 的 `check`、`test:changed`、`pr:open`、`issue:new`、`issue:close`、`progress`、`plan`、`intents`、`debt:check`、`github:audit`、`branch:hygiene`、`ci:timings`、`ci:stats`、`flow:stats`、`subagent:stats` 都指到这里。
 - `pr-open` 的同步 GitHub 运输用 `pr-arm.ts` 的 `livePrGh`：复用 `github-api.ts` 的仓身份识别，显式传 canonical repo；创建 PR 明确已推送当前分支，避免 Git relay 改写 remote 后让 gh 猜错仓。
 - 新 PR 的需求行完成用 `Closes #号`，分片用 `Refs #号（分片、关不了它）`；手写正文中的裸 Refs 在任何推送或 GitHub 写入前拒绝。正文其它位置的保留说明不能代替同行意图，旧 PR 的收口和对账读法不变。
+- `machine.ts`（#3390）：`pnpm machine join|issue|list|revoke`，ssh / 安装 / HTTP 全注入；通行证明文只在内存和子进程环境变量，所有输出先 `redact`，测试断言任何输出与参数里没有它。
 - `check.ts`：`pnpm check` = biome 格式 + `tsc -b` + 改到的测试（`--all` 才全量）+ 卫生检查，四样跑完再判红。
 - `temporal:install`：按 `deploy/france.sh` 的固定版本和当前平台从 Temporal 官方发布地址下载 CLI，核 SHA-256、`--version` 后原子落到本机受管缓存并登记；不改 PATH、不碰 SDK 缓存。`test:temporal` 只登记/核验已有 CLI，不下载、不启动服务端。`local-vitest.ts` 按共用能力标记预检实际选到的真服务端测试，`temporal-test-cli.ts` 也供引擎测试创建入口核验，不能绕过后隐式下载。
 - `test:isolated`：只读显式本机资源 JSON 和完整离线文件，复用原槽/源码快照/Linux 回执；不改全局选测或 CI。可信 root-owned helper 仅创建私有 PID/网络资源后降权，候选代码和全部服务用普通用户；先核工具/IPv4/IPv6/Temporal，再跑原完整文件，取消/失联回收。规范在 `resources/README.md`；共享故障仍独立记账，不能把 PG/未知联网检查整批塞进断网资源。
