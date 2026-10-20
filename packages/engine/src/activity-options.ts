@@ -40,6 +40,8 @@ import {
   type ReadTaskBriefInput,
   type ReleaseReservationInput,
   type ReleaseReservationResult,
+  type ResolveConflictInput,
+  type ResolveConflictResult,
   type RunSegmentInput,
   type RunSegmentResult,
   SEGMENT_MINUTES,
@@ -85,6 +87,8 @@ export type EngineActivities = PortActivities & {
   readCiReviews(input: ReadCiReviewsInput): Promise<ReadCiReviewsResult>;
   /** 不强制 CI 的仓：直接合并这张 PR（不等检查）。 */
   mergeNow(input: MergeNowInput): Promise<MergeNowResult>;
+  /** 并主线冲突里机械可解的（迁移生成文件、锁文件）自己解、自测、推（#3428）。没解成回 declined，不抛。 */
+  resolveConflictMechanically(input: ResolveConflictInput): Promise<ResolveConflictResult>;
   /** 判这一段能不能续上一段的会话（决定 0088）：续不上回 new 加原因，不抛。 */
   planSegmentResume(input: PlanSegmentResumeInput): Promise<PlanSegmentResumeResult>;
   /** 上一段收场了没有（决定 0093）：重试、重派前问，没收场不起第二段。库读不了抛。 */
@@ -168,6 +172,8 @@ export const ACTIVITY_PROFILE: Readonly<Record<ActivityName, Profile>> = {
   segmentSettled: 'quick',
   readPushHandbackPreflight: 'handbackRead',
   selfCheck: 'selfCheck',
+  // 重新生成迁移、装锁文件、schema-drift 和 tsc 自测加推：要心跳、只试一次（失败回工作流交会话），限时借自测这一档
+  resolveConflictMechanically: 'selfCheck',
   taskSpend: 'quick',
   noteBare401: 'quick',
   decideFlowMode: 'git',
