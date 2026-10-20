@@ -934,7 +934,7 @@ const DELIVERY_BLOCK = new RegExp(
   'gm',
 );
 
-/** 会话自己写的欠项进 PR 正文前：压成一行，@ 提醒、HTML 注释、#号（别的单）都中和掉。 */
+/** 会话自己写的欠项进 PR 正文前：压成一行，@ 提醒、HTML 注释、#号、GH-号和 GitHub 链接都中和掉。 */
 function inertOwed(item: string): string {
   return item
     .replace(/\s+/g, ' ')
@@ -942,7 +942,9 @@ function inertOwed(item: string): string {
     .replace(/@(?=[A-Za-z0-9-])/g, '@\u200b')
     .replace(/<!--/g, '<!‑‑')
     .replace(/-->/g, '‑‑>')
-    .replace(/#(?=\d)/g, '＃');
+    .replace(/#(?=\d)/g, '＃')
+    .replace(/\bGH-(\d+)/gi, 'GH\u2011$1')
+    .replace(/\b(https?):\/\/(?=(?:www\.)?github\.com)/gi, '$1:\u200b//');
 }
 
 /** 一个代码围栏：从哪行开、到哪行收（没收口为 null）。按 CommonMark 认：缩进至多 3 格、` 或 ~ 至少 3 个。 */
@@ -994,7 +996,7 @@ function topLevelFences(lines: readonly string[]): Fence[] {
   let html: { end: RegExp | null } | null = null;
   for (const [i, line] of lines.entries()) {
     if (html) {
-      if (html.end === null ? line.trim() === '' : html.end.test(line)) html = null;
+      if (html.end === null ? /^[ \t]*$/.test(line) : html.end.test(line)) html = null;
       continue;
     }
     if (open) {

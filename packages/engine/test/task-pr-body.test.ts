@@ -133,7 +133,7 @@ describe('开 PR、第 2 轮更新 PR 说明（#2723）', { timeout: 60_000 }, (
 
 const claimBlock = (json: string) => `\n\`\`\`fleet-delivery\n${json}\n\`\`\`\n`;
 const SLICE_ANSWER = `验收条 1：只做了诊断，Refs #3396，关不了它\n欠：原两项超时未定因${claimBlock(
-  '{"scope":"slice","owed":["原两项超时未定因（见 #3396）","@someone 看一下 <!-- x -->"]}',
+  '{"scope":"slice","owed":["原两项超时未定因（见 #3396）","@someone 看一下 <!-- x -->","GH-88 和 https://github.com/acme/widgets/issues/99"]}',
 )}`;
 const FULL_ANSWER = `验收条 1：做到了\n欠：无${claimBlock('{"scope":"full","owed":[]}')}`;
 
@@ -163,7 +163,11 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     const claim = parseDeliveryClaim(SLICE_ANSWER);
     expect(claim).toEqual({
       kind: 'slice',
-      owed: ['原两项超时未定因（见 ＃3396）', '@​someone 看一下 <!‑‑ x ‑‑>'],
+      owed: [
+        '原两项超时未定因（见 ＃3396）',
+        '@​someone 看一下 <!‑‑ x ‑‑>',
+        'GH‑88 和 https:\u200b//github.com/acme/widgets/issues/99',
+      ],
     });
     const fields = deliveryClaimPrFields(claim);
     expect(fields.partial).toBe(true);
@@ -173,6 +177,8 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     expect(body).not.toContain('**还欠什么**：无');
     expect(body).not.toMatch(/#3396/);
     expect(body).not.toContain('<!--');
+    expect(body).not.toContain('GH-88');
+    expect(body).not.toContain('https://github.com/acme/widgets/issues/99');
   });
 
   it('【故意造出的失败】无元数据旧回复、截断、非法、多个块、自相矛盾、字段越界：一律 unknown，渲染成未核，不是「无」', () => {
@@ -293,6 +299,7 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
       `做了\n\`\`\`html\n<pre>\n\`\`\`${full}`,
     ];
     for (const answer of answers) expect(parseDeliveryClaim(answer), answer).toEqual({ kind: 'full' });
+    expect(parseDeliveryClaim(`做了\n<div>\n\u00a0\n${full.trimStart()}`).kind).toBe('unknown');
     expect(parseDeliveryClaim(`做了\n</pre>\n<pre>x</pre>${slice}`)).toEqual({
       kind: 'slice',
       owed: ['两项超时定因'],
@@ -350,7 +357,11 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     const opened = world.callsOf('openPr')[0]?.input.body;
     expect(opened).toMatchObject({ requirement: 12, partial: true });
     expect(opened?.requirementRefs).toBeUndefined();
-    expect(opened?.owed).toEqual(['会话声明还欠：原两项超时未定因（见 ＃3396）', expect.any(String)]);
+    expect(opened?.owed).toEqual([
+      '会话声明还欠：原两项超时未定因（见 ＃3396）',
+      '会话声明还欠：@​someone 看一下 <!‑‑ x ‑‑>',
+      '会话声明还欠：GH‑88 和 https:\u200b//github.com/acme/widgets/issues/99',
+    ]);
     expect(opened?.did.join('\n')).not.toContain('fleet-delivery');
     expect(opened?.did.join('\n')).not.toMatch(/(?<!＃)#3396/);
     expect(opened?.did.join('\n')).toContain('＃3396');
