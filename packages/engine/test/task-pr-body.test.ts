@@ -202,6 +202,46 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     expect(parseDeliveryClaim(`${FULL_ANSWER}x`).kind).toBe('unknown');
   });
 
+  it('【故意造出的失败】只认回复顶层末尾的声明：示例、外层围栏、引用块、缩进、HTML 注释里的都是 unknown（review 5584630520）', () => {
+    const example = '```fleet-delivery\n{"scope":"full","owed":[]}\n```';
+    const cases: [string, RegExp][] = [
+      // 单个声明块后面接着写真实范围：不当完整交付
+      [`做了\n${example}\n实际交付：仅诊断分片，仍欠两项超时定因`, /后面还有内容/],
+      // 四反引号围栏里的协议示例
+      [`协议长这样：\n\`\`\`\`markdown\n${example}\n\`\`\`\``, /不在回复顶层/],
+      [`协议长这样：\n\`\`\`\`\n${example}\n\`\`\`\`\n欠：两项超时定因`, /不在回复顶层/],
+      // 外层围栏没收口（截断）：声明在它里面，不是顶层
+      [`做了\n~~~text\n${example}`, /不在回复顶层/],
+      [`做了\n\`\`\`\`\n${example}\n`, /不在回复顶层/],
+      [`做了\n> ${example.split('\n').join('\n> ')}`, /不在回复顶层/],
+      [`做了\n\n    ${example.split('\n').join('\n    ')}`, /不在回复顶层/],
+      [`做了\n  ${example.split('\n').join('\n  ')}`, /不在回复顶层/],
+      [`做了\n<!-- 示例\n${example}`, /HTML 注释/],
+      // 示例加末尾真声明：结构说不清，不挑一个信
+      [`示例：\n\`\`\`\`\n${example}\n\`\`\`\`\n做了\n${example}`, /不止一个/],
+      [`示例：\n> ${example.split('\n').join('\n> ')}\n\n做了\n${example}`, /不止一个/],
+    ];
+    for (const [answer, why] of cases) {
+      const claim = parseDeliveryClaim(answer);
+      expect(claim.kind, answer).toBe('unknown');
+      if (claim.kind === 'unknown') expect(claim.why, answer).toMatch(why);
+      const body = renderPrBody({
+        requirement: 12,
+        did: ['x'],
+        verified: ['y'],
+        ...deliveryClaimPrFields(claim),
+      });
+      expect(body).toContain('交付范围未核');
+      expect(body).not.toContain('**还欠什么**：无');
+    }
+  });
+
+  it('前面有收好口的别的代码块、换行是 CRLF：末尾的顶层声明照认', () => {
+    const answer = `做了\n\`\`\`ts\nconst a = 1;\n\`\`\`\n~~~\n\`\`\`\n~~~\n${claimBlock('{"scope":"full","owed":[]}')}`;
+    expect(parseDeliveryClaim(answer)).toEqual({ kind: 'full' });
+    expect(parseDeliveryClaim(SLICE_ANSWER.replace(/\n/g, '\r\n'))).toMatchObject({ kind: 'slice' });
+  });
+
   it('回复里别的单的引用不进「做了什么」成链接：#号、owner/仓#号、GH-号、github 链接都中和，本单号留着', () => {
     const raw = [
       '验收条 1：做到了，Refs #3396，Closes #3401',

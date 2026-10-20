@@ -79,7 +79,7 @@
 // - PR 说明的「做了什么」取动手会话最后一条回复（#2723，taskPrDid / sessionDidLines，有截断上限）：开 PR 时写进去；
 //   第 2 轮起推上去后改 PR 正文换成这一轮的回复（patched('pr-body-from-session')，updatePrBody，没改成不挡原流程）。
 //   回复末尾的 fleet-delivery 交付声明（#3406，patched('pr-body-delivery-claim')，parseDeliveryClaim）定「还欠什么」和分片 Refs；
-//   没有、非法、截断、声明后面还有内容都写「交付范围未核」，不写「无」；回复里别的单的引用中和后才进「做了什么」（answerForPrDid）。
+//   只认回复顶层末尾那一个块：没有、非法、截断、声明后面还有内容、在别的代码块/引用/缩进里的示例都写「交付范围未核」，不写「无」；回复里别的单的引用中和后才进「做了什么」（answerForPrDid）。
 //   只让说明更保守，不改关单、合并。
 // - 重活先出方案（#2755，patched('plan-first-heavy')，planFirst）：heavyweight 第一轮先跑一段只读会话，最后一条回复只回方案 JSON，
 //   格式不对续进会话重出一次，还不对照常动手；认下了带进意见、动手续这个会话。

@@ -928,9 +928,9 @@ export type DeliveryClaim =
   | { kind: 'slice'; owed: string[] }
   | { kind: 'unknown'; why: string };
 
-const DELIVERY_OPEN = new RegExp(`^[ \\t]*\`\`\`${DELIVERY_FENCE}[ \\t]*$`, 'gm');
+const DELIVERY_OPEN = new RegExp(`^[ \\t]*\`\`\`${DELIVERY_FENCE}[ \\t\\r]*$`, 'gm');
 const DELIVERY_BLOCK = new RegExp(
-  `^[ \\t]*\`\`\`${DELIVERY_FENCE}[ \\t]*\\n([\\s\\S]*?)^[ \\t]*\`\`\`[ \\t]*$`,
+  `^[ \\t]*\`\`\`${DELIVERY_FENCE}[ \\t\\r]*\\n([\\s\\S]*?)^[ \\t]*\`\`\`[ \\t\\r]*$`,
   'gm',
 );
 
@@ -945,23 +945,70 @@ function inertOwed(item: string): string {
     .replace(/#(?=\d)/g, '＃');
 }
 
-/** 从最后一条回复读交付声明。只认恰好一个封口、且是回复最后内容的 fleet-delivery 块；别的都按 unknown 交代原因。 */
+/** 一个代码围栏：从哪行开、到哪行收（没收口为 null）。按 CommonMark 认：缩进至多 3 格、` 或 ~ 至少 3 个。 */
+interface Fence {
+  start: number;
+  end: number | null;
+  indent: number;
+  marker: string;
+  info: string;
+}
+
+/** 回复的顶层代码围栏（引用块里的、缩进 4 格以上的不算）。围栏里面的围栏是原文，不另算。 */
+function topLevelFences(lines: readonly string[]): Fence[] {
+  const fences: Fence[] = [];
+  let open: Fence | null = null;
+  for (const [i, line] of lines.entries()) {
+    if (open) {
+      const marker = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
+      if (marker && marker[0] === open.marker[0] && marker.length >= open.marker.length) {
+        open.end = i;
+        open = null;
+      }
+      continue;
+    }
+    const start = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!start) continue;
+    const marker = start[2] ?? '';
+    const info = (start[3] ?? '').trim();
+    if (marker[0] === '`' && info.includes('`')) continue;
+    open = { start: i, end: null, indent: (start[1] ?? '').length, marker, info };
+    fences.push(open);
+  }
+  return fences;
+}
+
+/** 回复里任何位置像交付声明开头的行（引用块、列表、缩进、外层围栏里的示例都算）：只为数出多出来的示例。 */
+const DELIVERY_OPEN_ANYWHERE = new RegExp(
+  `^[ \\t>*+\\-\\d.)]*(?:\`{3,}|~{3,})[ \\t]*${DELIVERY_FENCE}[ \\t\\r]*$`,
+  'gm',
+);
+
+/**
+ * 从最后一条回复读交付声明。只认恰好一个、在回复顶层（不在别的代码围栏、引用块、缩进里，也不在没收口的 HTML 注释里）、
+ * 封口、且是回复最后内容的 fleet-delivery 块；示例、非末尾、结构说不清都按 unknown 交代原因，不从自然语言推断交付范围。
+ */
 export function parseDeliveryClaim(answer: string | null | undefined): DeliveryClaim {
   const text = answer ?? '';
   if (!text.trim()) return { kind: 'unknown', why: '没有最后一条回复' };
-  const opens = [...text.matchAll(DELIVERY_OPEN)].length;
+  const opens = [...text.matchAll(DELIVERY_OPEN_ANYWHERE)].length;
   if (opens === 0) return { kind: 'unknown', why: '回复里没有交付声明' };
-  const matched = [...text.matchAll(DELIVERY_BLOCK)];
-  const blocks = matched.map((m) => m[1] ?? '');
-  if (blocks.length < opens) return { kind: 'unknown', why: '交付声明没封口（回复可能截断了）' };
-  if (blocks.length > 1) return { kind: 'unknown', why: '交付声明不止一个' };
+  if (opens > 1) return { kind: 'unknown', why: '交付声明不止一个（含引用的示例）' };
+  const lines = text.split(/\r?\n/);
+  const fence = topLevelFences(lines).find(
+    (f) => f.indent === 0 && f.marker[0] === '`' && f.info === DELIVERY_FENCE,
+  );
+  if (!fence) return { kind: 'unknown', why: '交付声明不在回复顶层（在别的代码块、引用或缩进里，像是示例）' };
+  if (fence.end === null) return { kind: 'unknown', why: '交付声明没封口（回复可能截断了）' };
   // 声明必须是最后一条回复的最后内容：后面还有字，说明这不是收尾的结论，不当成完整交付
-  const only = matched[0];
-  if (only && text.slice((only.index ?? 0) + only[0].length).trim() !== '')
+  if (lines.slice(fence.end + 1).some((line) => line.trim() !== ''))
     return { kind: 'unknown', why: '交付声明后面还有内容（声明必须是回复的最后内容）' };
+  const before = lines.slice(0, fence.start).join('\n');
+  if (before.lastIndexOf('<!--') > before.lastIndexOf('-->'))
+    return { kind: 'unknown', why: '交付声明在没收口的 HTML 注释里' };
   let value: unknown;
   try {
-    value = JSON.parse(blocks[0] ?? '');
+    value = JSON.parse(lines.slice(fence.start + 1, fence.end).join('\n'));
   } catch {
     return { kind: 'unknown', why: '交付声明不是合法 JSON' };
   }
