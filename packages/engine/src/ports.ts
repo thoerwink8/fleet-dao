@@ -278,6 +278,8 @@ export interface PrBody {
   requirement?: number;
   /** 验收责任还开着（#3037）：「需求」栏写 Refs、标分片，合并收口和每日对账都不关它。 */
   requirementRefs?: boolean;
+  /** 会话的交付声明说只交了一部分（#3406）：「需求」栏同样写 Refs 标分片。只让说明更保守，不改关单。 */
+  partial?: boolean;
   /** 子任务名。 */
   subtask?: string;
   /** 做了什么，3–5 条。 */

@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { completedRuns } from '../hooks/continuation-results.mjs';
 import { BEAT_STALE_MS, watchRuns } from '../hooks/work-watch.mjs';
 
 const dirs: string[] = [];
@@ -150,6 +151,133 @@ describe('work-watch：只在终态叫醒派它的会话', () => {
       'state.json': state({ dispatcher: 'other', state: 'done' }),
       'result.json': { issue: 42, state: 'done', summary: 'x', attempts: 1 },
     });
+    expect((await watch(root, main)).code).toBe(0);
+  });
+
+  it('已 park 的审查等待叫一次：不是做完，也不叫人去写码', async () => {
+    const { root, run } = setup();
+    const dir = run('acme__app__42', {
+      'spec.json': { dispatcher: 'sess-main', issue: 42 },
+      'state.json': state({
+        state: 'waiting',
+        supervisorPid: null,
+        beatAt: new Date(T0 - BEAT_STALE_MS - 1).toISOString(),
+        lastError: '审查未结',
+        hold: { kind: 'review', why: '审查未结' },
+      }),
+    });
+    const r = await watch(root, main);
+    expect(r.code).toBe(2);
+    expect(r.ticks).toBe(0);
+    expect(r.said).toContain('不是做完');
+    expect(r.said).toContain('pnpm work rework');
+    expect(r.said).not.toContain('到终态');
+    expect(r.said).not.toContain('接着同一个会话续');
+    expect(r.said).not.toContain('做完了');
+    expect(existsSync(join(dir, 'reported'))).toBe(true);
+    expect((await watch(root, main)).code).toBe(0);
+  });
+
+  it('复核还在心跳里：不叫；心跳早 20 分钟只通知接着复核', async () => {
+    const { root, run } = setup();
+    const fresh = run('acme__app__42', {
+      'state.json': state({
+        state: 'waiting',
+        supervisorPid: 12345,
+        beatAt: new Date(T0).toISOString(),
+        hold: { kind: 'blocked', why: '正在复核' },
+      }),
+    });
+    const quiet = await watch(root, main);
+    expect(quiet).toEqual({ code: 0, said: '', ticks: 0 });
+    expect(existsSync(join(fresh, 'reported'))).toBe(false);
+    const stale = run('acme__app__7', {
+      'state.json': state({
+        issue: 7,
+        state: 'waiting',
+        supervisorPid: 12345,
+        beatAt: new Date(T0 - 20 * 60_000).toISOString(),
+        hold: { kind: 'blocked', why: '交付核验没读成' },
+      }),
+    });
+    const lost = await watch(root, main);
+    expect(lost.code).toBe(2);
+    expect(lost.said).toContain('#7');
+    expect(lost.said).toContain('只复核');
+    expect(lost.said).not.toContain('接着同一个会话续');
+    expect(existsSync(join(stale, 'reported'))).toBe(true);
+    expect((await watch(root, main)).code).toBe(0);
+  });
+
+  it('Codex completedRuns：已 park 的等待进续轮且不是做完；活动复核不进，心跳丢失只说复核', () => {
+    const { root, run } = setup();
+    const now = Date.now();
+    run('acme__app__42', {
+      'spec.json': { dispatcher: 'sess-main', issue: 42 },
+      'state.json': state({
+        state: 'waiting',
+        supervisorPid: null,
+        beatAt: new Date(now - BEAT_STALE_MS - 1).toISOString(),
+        hold: { kind: 'review', why: '审查未结' },
+      }),
+    });
+    const parked = completedRuns('sess-main', { FLEET_WORK_RUNS_DIR: root });
+    expect(parked).toHaveLength(1);
+    expect(parked[0]?.text).toContain('不是做完');
+    expect(parked[0]?.text).toContain('pnpm work rework');
+    expect(parked[0]?.text).not.toContain('做完了');
+    expect(completedRuns('sess-main', { FLEET_WORK_RUNS_DIR: root })[0]?.key).toBe(parked[0]?.key);
+    run('acme__app__7', {
+      'spec.json': { dispatcher: 'sess-main', issue: 7 },
+      'state.json': state({
+        issue: 7,
+        state: 'waiting',
+        supervisorPid: 12345,
+        beatAt: new Date(now).toISOString(),
+        hold: { kind: 'review', why: '正在复核' },
+      }),
+    });
+    expect(
+      completedRuns('sess-main', { FLEET_WORK_RUNS_DIR: root })
+        .map((r) => r.text)
+        .join('\n'),
+    ).not.toContain('#7');
+    run('acme__app__8', {
+      'spec.json': { dispatcher: 'sess-main', issue: 8 },
+      'state.json': state({
+        issue: 8,
+        state: 'waiting',
+        supervisorPid: 12345,
+        beatAt: new Date(now - 20 * 60_000).toISOString(),
+        hold: { kind: 'blocked', why: '交付核验没读成' },
+      }),
+    });
+    const text = completedRuns('sess-main', { FLEET_WORK_RUNS_DIR: root })
+      .map((r) => r.text)
+      .join('\n');
+    expect(text).toContain('#8');
+    expect(text).toContain('只复核');
+    expect(text).not.toContain('接着同一个会话续');
+  });
+
+  it('已由其他真实PR交付而停止：叫一次，写明不再派工；再盯不重复叫', async () => {
+    const { root, run } = setup();
+    const dir = run('acme__app__42', {
+      'state.json': state({ state: 'stopped' }),
+      'result.json': {
+        issue: 42,
+        state: 'stopped',
+        why: '需求已由同仓其他真实PR #3194 交付',
+        attempts: 7,
+        summary: '按审查停下',
+      },
+    });
+    const r = await watch(root, main);
+    expect(r.code).toBe(2);
+    expect(r.said).toContain('不再派工');
+    expect(r.said).toContain('PR #3194');
+    expect(r.said).not.toContain('接着');
+    expect(existsSync(join(dir, 'reported'))).toBe(true);
     expect((await watch(root, main)).code).toBe(0);
   });
 

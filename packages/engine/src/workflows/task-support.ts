@@ -912,6 +912,232 @@ export function taskPrDid(
   return did;
 }
 
+/**
+ * 会话在最后一条回复末尾声明交付范围（#3406）：一个 ```fleet-delivery 代码块，里面一个 JSON 对象，
+ * scope 是 full（这张单交全了）或 slice（只交了一部分/诊断分片），owed 是还欠的事。PR 说明「还欠什么」「需求」按它写：
+ * slice 写 Refs 标分片、owed 原样进「还欠什么」；缺失、非法、截断都是 unknown，不写成「无」。
+ * 只能让说明更保守，不当验收通过或关单授权；里面写的单号不当关联（PR 只关联这张单）。
+ */
+export const DELIVERY_FENCE = 'fleet-delivery';
+/** owed 最多几条、每条最多几个字：超了算非法，不替会话截。 */
+export const DELIVERY_OWED_MAX = 5;
+export const DELIVERY_ITEM_MAX = 200;
+
+export type DeliveryClaim =
+  | { kind: 'full' }
+  | { kind: 'slice'; owed: string[] }
+  | { kind: 'unknown'; why: string };
+
+const DELIVERY_OPEN = new RegExp(`^[ \\t]*\`\`\`${DELIVERY_FENCE}[ \\t\\r]*$`, 'gm');
+const DELIVERY_BLOCK = new RegExp(
+  `^[ \\t]*\`\`\`${DELIVERY_FENCE}[ \\t\\r]*\\n([\\s\\S]*?)^[ \\t]*\`\`\`[ \\t\\r]*$`,
+  'gm',
+);
+
+/** 会话自己写的欠项进 PR 正文前：压成一行，@ 提醒、HTML 注释、#号、GH-号和 GitHub 链接都中和掉。 */
+function inertOwed(item: string): string {
+  return item
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/@(?=[A-Za-z0-9-])/g, '@\u200b')
+    .replace(/<!--/g, '<!‑‑')
+    .replace(/-->/g, '‑‑>')
+    .replace(/#(?=\d)/g, '＃')
+    .replace(/\bGH-(\d+)/gi, 'GH\u2011$1')
+    .replace(/\b(https?):\/\/(?=(?:www\.)?github\.com)/gi, '$1:\u200b//');
+}
+
+/** 一个代码围栏：从哪行开、到哪行收（没收口为 null）。按 CommonMark 认：缩进至多 3 格、` 或 ~ 至少 3 个。 */
+interface Fence {
+  start: number;
+  end: number | null;
+  indent: number;
+  marker: string;
+  info: string;
+}
+
+/** HTML 块第 6 类的标签名（CommonMark 0.31.2 §4.6）。 */
+const HTML_BLOCK_TAGS =
+  'address|article|aside|base|basefont|blockquote|body|caption|center|col|colgroup|dd|details|dialog|dir|div|dl|dt|' +
+  'fieldset|figcaption|figure|footer|form|frame|frameset|h[1-6]|head|header|hr|html|iframe|legend|li|link|main|menu|' +
+  'menuitem|nav|noframes|ol|optgroup|option|p|param|search|section|summary|table|tbody|td|tfoot|th|thead|title|tr|track|ul';
+const HTML_BLOCK_TAG_START = new RegExp(`^</?(?:${HTML_BLOCK_TAGS})(?:[ \\t>]|/>|$)`, 'i');
+
+/**
+ * 顶层 HTML 块（CommonMark 0.31.2 §4.6，缩进至多 3 格）：认出开头那一行是哪类，回这一类的收口（收口串所在的行，end 为 null＝到空行为止）。
+ * 第 7 类（单独一行的任意标签）按宽认：段落里本不算的也当 HTML 块，只会让声明多判 unknown，不会把示例认成交付。
+ */
+function htmlBlockStart(line: string): { end: RegExp | null } | null {
+  const head = /^ {0,3}(<.*)$/.exec(line)?.[1];
+  if (!head) return null;
+  if (/^<(?:pre|script|style|textarea)(?:[ \t>]|$)/i.test(head))
+    return { end: /<\/(?:pre|script|style|textarea)>/i };
+  if (head.startsWith('<!--')) return { end: /-->/ };
+  if (head.startsWith('<?')) return { end: /\?>/ };
+  if (head.startsWith('<![CDATA[')) return { end: /\]\]>/ };
+  if (/^<![A-Za-z]/.test(head)) return { end: />/ };
+  if (HTML_BLOCK_TAG_START.test(head)) return { end: null };
+  // 第 7 类不含 pre/script/style/textarea：单独一行的 </pre> 是段落文字
+  if (
+    /^<\/?[A-Za-z][A-Za-z0-9-]*(?:[ \t/].*)?>[ \t]*$/.test(head) &&
+    !/^<\/?(?:pre|script|style|textarea)(?:[ \t/>]|$)/i.test(head)
+  )
+    return { end: null };
+  return null;
+}
+
+/**
+ * 回复的顶层代码围栏（引用块里的、缩进 4 格以上的不算）。围栏里面的围栏是原文，不另算；
+ * 顶层 HTML 块（<pre>、<script>、<!--、<div>……到它的收口为止，没收口就到文末）里的反引号行也是原文，不算围栏（review 5585850557）。
+ */
+function topLevelFences(lines: readonly string[]): Fence[] {
+  const fences: Fence[] = [];
+  let open: Fence | null = null;
+  let html: { end: RegExp | null } | null = null;
+  for (const [i, line] of lines.entries()) {
+    if (html) {
+      if (html.end === null ? /^[ \t]*$/.test(line) : html.end.test(line)) html = null;
+      continue;
+    }
+    if (open) {
+      const marker = /^ {0,3}(`{3,}|~{3,})[ \t]*$/.exec(line)?.[1];
+      if (marker && marker[0] === open.marker[0] && marker.length >= open.marker.length) {
+        open.end = i;
+        open = null;
+      }
+      continue;
+    }
+    const block = htmlBlockStart(line);
+    if (block) {
+      // 开头那一行就收口（如 <pre>x</pre>）：块只有这一行
+      if (block.end === null || !block.end.test(line)) html = block;
+      continue;
+    }
+    const start = /^( {0,3})(`{3,}|~{3,})(.*)$/.exec(line);
+    if (!start) continue;
+    const marker = start[2] ?? '';
+    const info = (start[3] ?? '').trim();
+    if (marker[0] === '`' && info.includes('`')) continue;
+    open = { start: i, end: null, indent: (start[1] ?? '').length, marker, info };
+    fences.push(open);
+  }
+  return fences;
+}
+
+/** 回复里任何位置像交付声明开头的行（引用块、列表、缩进、外层围栏里的示例都算）：只为数出多出来的示例。 */
+const DELIVERY_OPEN_ANYWHERE = new RegExp(
+  `^[ \\t>*+\\-\\d.)]*(?:\`{3,}|~{3,})[ \\t]*${DELIVERY_FENCE}[ \\t\\r]*$`,
+  'gm',
+);
+
+/**
+ * 从最后一条回复读交付声明。只认恰好一个、在回复顶层（不在别的代码围栏、HTML 块、引用块、缩进里，也不在没收口的 HTML 注释里）、
+ * 封口、且是回复最后内容的 fleet-delivery 块；示例、非末尾、结构说不清都按 unknown 交代原因，不从自然语言推断交付范围。
+ */
+export function parseDeliveryClaim(answer: string | null | undefined): DeliveryClaim {
+  const text = answer ?? '';
+  if (!text.trim()) return { kind: 'unknown', why: '没有最后一条回复' };
+  const opens = [...text.matchAll(DELIVERY_OPEN_ANYWHERE)].length;
+  if (opens === 0) return { kind: 'unknown', why: '回复里没有交付声明' };
+  if (opens > 1) return { kind: 'unknown', why: '交付声明不止一个（含引用的示例）' };
+  const lines = text.split(/\r?\n/);
+  const fence = topLevelFences(lines).find(
+    (f) => f.indent === 0 && f.marker[0] === '`' && f.info === DELIVERY_FENCE,
+  );
+  if (!fence)
+    return { kind: 'unknown', why: '交付声明不在回复顶层（在别的代码块、HTML 块、引用或缩进里，像是示例）' };
+  if (fence.end === null) return { kind: 'unknown', why: '交付声明没封口（回复可能截断了）' };
+  // 声明必须是最后一条回复的最后内容：后面还有字，说明这不是收尾的结论，不当成完整交付
+  if (lines.slice(fence.end + 1).some((line) => line.trim() !== ''))
+    return { kind: 'unknown', why: '交付声明后面还有内容（声明必须是回复的最后内容）' };
+  const before = lines.slice(0, fence.start).join('\n');
+  if (before.lastIndexOf('<!--') > before.lastIndexOf('-->'))
+    return { kind: 'unknown', why: '交付声明在没收口的 HTML 注释里' };
+  let value: unknown;
+  try {
+    value = JSON.parse(lines.slice(fence.start + 1, fence.end).join('\n'));
+  } catch {
+    return { kind: 'unknown', why: '交付声明不是合法 JSON' };
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return { kind: 'unknown', why: '交付声明不是一个 JSON 对象' };
+  const v = value as Record<string, unknown>;
+  if (Object.keys(v).some((k) => k !== 'scope' && k !== 'owed'))
+    return { kind: 'unknown', why: '交付声明有认不得的字段' };
+  const owed = v.owed;
+  if (
+    !Array.isArray(owed) ||
+    owed.length > DELIVERY_OWED_MAX ||
+    !owed.every((o) => typeof o === 'string' && o.trim() && o.trim().length <= DELIVERY_ITEM_MAX)
+  ) {
+    return {
+      kind: 'unknown',
+      why: `交付声明的 owed 要是至多 ${DELIVERY_OWED_MAX} 条、每条 ${DELIVERY_ITEM_MAX} 字以内的文字`,
+    };
+  }
+  const items = (owed as string[]).map(inertOwed);
+  if (v.scope === 'full') {
+    return items.length === 0 ? { kind: 'full' } : { kind: 'unknown', why: '交付声明说交全了却还列着欠项' };
+  }
+  if (v.scope === 'slice') {
+    return items.length > 0
+      ? { kind: 'slice', owed: items }
+      : { kind: 'unknown', why: '交付声明说只交了一部分却没列欠什么' };
+  }
+  return { kind: 'unknown', why: '交付声明的 scope 只能是 full 或 slice' };
+}
+
+/** 交付声明协议未在这段历史里启用时，旧结果也必须保持未知，不能让渲染器把欠账猜成「无」。 */
+export function deliveryClaimForPrBody(
+  answer: string | null | undefined,
+  protocolEnabled: boolean,
+): DeliveryClaim {
+  return protocolEnabled
+    ? parseDeliveryClaim(answer)
+    : { kind: 'unknown', why: '旧结果没有可核验的交付声明元数据' };
+}
+
+/** 去掉回复里的交付声明块（它另进「还欠什么」「需求」，不占「做了什么」的行）。 */
+export function stripDeliveryClaim(answer: string | null | undefined): string | null {
+  if (answer == null) return null;
+  return answer.replace(DELIVERY_BLOCK, '').replace(DELIVERY_OPEN, '');
+}
+
+/**
+ * 回复进「做了什么」前中和外部副作用（#3406）：PR 只关联本单，会话顺手写的 #号、owner/仓#号、GH-号、github.com 链接、
+ * @提醒和 HTML 注释都换成看着一样但不触发 GitHub 行为的写法。本单自己的 #号留着。
+ */
+export function neutralizeForeignRefs(text: string, issueNumber: number): string {
+  return text
+    .replace(/@(?=[A-Za-z0-9-])/g, '@\u200b')
+    .replace(/<!--/g, '<!‑‑')
+    .replace(/-->/g, '‑‑>')
+    .replace(/(?:[A-Za-z0-9-]+\/[A-Za-z0-9._-]+)?#(\d+)/g, (m, n: string) =>
+      m === `#${n}` && Number(n) === issueNumber ? m : m.replace('#', '＃'),
+    )
+    .replace(/\bGH-(\d+)/gi, 'GH\u2011$1')
+    .replace(/\b(https?):\/\/(?=(?:www\.)?github\.com)/gi, '$1:\u200b//');
+}
+
+/** 动手会话最后一条回复 → 「做了什么」用的文字：去掉交付声明块，别的单的引用中和掉。 */
+export function answerForPrDid(answer: string | null | undefined, issueNumber: number): string | null {
+  const stripped = stripDeliveryClaim(answer);
+  return stripped === null ? null : neutralizeForeignRefs(stripped, issueNumber);
+}
+
+/**
+ * 交付声明 → PR 说明的字段：slice 标分片、欠项进 owed；unknown 进 risks（渲染在「还欠什么」里，不会是「无」）；full 什么都不加。
+ */
+export function deliveryClaimPrFields(claim: DeliveryClaim): {
+  partial?: true;
+  owed?: string[];
+  risks?: string[];
+} {
+  if (claim.kind === 'slice') return { partial: true, owed: claim.owed.map((o) => `会话声明还欠：${o}`) };
+  if (claim.kind === 'unknown') return { risks: [`交付范围未核（${claim.why}）：还欠什么不知道，不当成无`] };
+  return {};
+}
+
 /** 等合并时必过检查红了交回的意见、lastProblem 的开头（和 @fleet-dao/shared/checks-red 同一个字面）。 */
 const CHECKS_RED_LEAD = '检查红了：';
 

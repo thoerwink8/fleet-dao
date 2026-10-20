@@ -33,12 +33,28 @@ afterAll(() => t.close());
 beforeEach(async () => {
   await resetTestDb(t);
   heard = [];
-  unlisten = await t.client.listen(FLEET_CHANGES_CHANNEL, (payload) => heard.push(JSON.parse(payload)));
+  unlisten = await t.client.listen(FLEET_CHANGES_CHANNEL, (payload) => {
+    const msg = JSON.parse(payload) as { settle?: number };
+    if (msg.settle === undefined) heard.push(msg);
+    else marks.get(msg.settle)?.();
+  });
 });
 afterEach(() => unlisten());
 
-/** 通知在提交后才送达，PGlite 在下一个任务里回调。 */
-const settle = () => new Promise((r) => setTimeout(r, 20));
+/** 等着的哨兵号 → 收到它时放行。 */
+const marks = new Map<number, () => void>();
+let lastMark = 0;
+/**
+ * 通知在提交后才送达：PGlite 在下一个任务里回调，真 Postgres 走单独的 LISTEN 连接，机器忙时晚多少说不准。
+ * 所以不按固定时长等，发一条哨兵通知、等它回来：通知按提交顺序排队，哨兵到了，之前已提交的写入引起的通知都到了。
+ */
+async function settle() {
+  const mark = ++lastMark;
+  const back = new Promise<void>((resolve) => marks.set(mark, resolve));
+  await t.client.query('select pg_notify($1, $2)', [FLEET_CHANGES_CHANNEL, JSON.stringify({ settle: mark })]);
+  await back;
+  marks.delete(mark);
+}
 const tables = () => heard.map((h) => (h as { table: string }).table);
 
 /** 先把准备数据引起的通知收完、清空，再做要测的那一下。 */

@@ -6,10 +6,17 @@ import { randomUUID } from 'node:crypto';
 import { appendFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { ghRunner } from '../issue-new.ts';
-import { managedFeedbackContext, validateManagedDelivery } from '../managed-work.ts';
+import { confirmManagedRework, managedFeedbackContext, validateManagedDelivery } from '../managed-work.ts';
 import { liveClaimsPost, readClaimsEndpoint, work } from '../work.ts';
 import { removeLease, writeLease } from '../work-queue.ts';
-import { type AttemptOutput, type RunSpec, readJson, runFiles, superviseRun } from '../work-run.ts';
+import {
+  type AttemptOutput,
+  type RunSpec,
+  type RunStatus,
+  readJson,
+  runFiles,
+  superviseRun,
+} from '../work-run.ts';
 
 const dir = process.argv[2];
 if (!dir) {
@@ -39,6 +46,8 @@ function runWorker(o: {
   env: Record<string, string>;
   outFile: string;
   errFile: string;
+  onSpawn?: (pid: number) => void;
+  onExit?: (pid: number) => void;
 }): Promise<AttemptOutput> {
   return new Promise((done) => {
     let stdout = '';
@@ -54,6 +63,9 @@ function runWorker(o: {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+    const workerPid =
+      typeof child.pid === 'number' && Number.isSafeInteger(child.pid) && child.pid > 0 ? child.pid : null;
+    if (workerPid !== null) o.onSpawn?.(workerPid);
     child.stdin.on('error', () => {});
     child.stdin.end(o.stdin);
     child.stdout.on('data', (b: Buffer) => {
@@ -66,6 +78,7 @@ function runWorker(o: {
       stderr += `\n起不来：${e.message}`;
     });
     child.on('close', (code) => {
+      if (workerPid !== null) o.onExit?.(workerPid);
       try {
         writeFileSync(o.outFile, stdout);
         writeFileSync(o.errFile, stderr);
@@ -103,6 +116,12 @@ try {
     renew,
     feedbackContext: (s) => managedFeedbackContext(ghRunner(s.worktree), s),
     validateDelivery: (s) => validateManagedDelivery(ghRunner(s.worktree), s, true, dirname(dir)),
+    rework: process.argv[3] === '--rework',
+    confirmRework: async (s, intent) => {
+      const state = readJson<RunStatus>(runFiles(dir).state);
+      if (!state) throw new Error('没有运行状态，不能核返工');
+      await confirmManagedRework(ghRunner(s.worktree), s, state, intent);
+    },
     repeat: (fn, ms) => {
       const t = setInterval(fn, ms);
       return () => clearInterval(t);
