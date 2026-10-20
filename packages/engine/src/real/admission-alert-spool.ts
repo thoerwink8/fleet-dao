@@ -63,9 +63,15 @@ function errorCode(error: unknown): AlertUnknownCode {
 }
 const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.uid === b.uid;
 
-// 本进程已经整表核过的提交代次。不记住时，每次打开和事务里各整表重解一次：
-// 256 次写入是 512 次全表 prepare、2*(0+…+255)=65280 行解码，时间在两次 COMMIT 之间，不是 fsync。
-// 文件身份或 change counter 对不上就整表重解。close 失败不清这份记忆。
+// 本进程已经整表核过的提交代次，只省连续写入的整表重解。
+// 不记住时，每次打开和事务里各 prepare 一次全表：256 次是 512 次 prepare、65280 行解码。
+// 这是读取次数，不是原完整 CI 首红的等待阶段；那次运行没有失败阶段输出。
+// 文件身份或 SQLite 头计数对不上就整表重解。close 失败不清这份记忆。
+// 记忆只覆盖 SQLite 自己提交会改动的头和元数据：dev/ino/size/mtime 加上 change/schema/pages。
+// 命中后仍核行数和 payload 字节，schema 与 quick_check 每次都跑；整行解码（含 record_hash 对规范哈希）
+// 留在代次不中、行数或字节对不上、以及没有记忆时。清掉记忆后同一库回到整表解码。
+// 同 inode、同大小、头字段不变、再把 mtime 拨回去的同长 record_hash 原字节改写，不在这个模型里。
+// 那要冻结元数据，不是普通 SQL UPDATE（UPDATE 会推进 change counter），也不把它当成已经发生的生产事故。
 type DbGeneration = {
   dev: number;
   ino: number;
@@ -555,9 +561,9 @@ class Spool {
   }
 }
 
-// 同进程连续写入复用已提交、未持锁的连接。每次重开都再付一次打开和 DELETE journal 建立；
-// 和上面的整表重解叠在一起，256 次真实 COMMIT 的总等待会超过原来的 15 秒。
+// 同进程连续写入复用已提交、未持锁的连接，避免每次重开再付一次打开和 DELETE journal 建立。
 // 跨调用不持有事务；代次变化、路径/journal 核验失败或本次抛错就关掉。
+// 少重开不是原 15 秒首红已经定位完成。
 type CachedSpool = { path: string; spool: Spool; held: boolean };
 let cachedSpool: CachedSpool | undefined;
 

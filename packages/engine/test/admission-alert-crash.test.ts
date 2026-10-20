@@ -74,6 +74,51 @@ async function bounded<T>(promise: Promise<T>, milliseconds: number): Promise<T>
     clearTimeout(timer);
   }
 }
+type CommitStall = { commitMs: number; stage: string };
+// 256 条用例的失败分类。COMMIT 抛错也要把耗时算进 commit，不能让 record 的 finally 把残差归到 between-records。
+// 没有下标或三段都没有正耗时就是 unknown。这只给合成计时分类，不是原完整 CI 首红的根因证明。
+function classifyCommitStall(
+  index: number,
+  commitMs: number,
+  recordMs: number,
+  sampleMs: number,
+): 'commit' | 'sample' | 'between-records' | 'unknown' {
+  const betweenMs = Math.max(0, recordMs - commitMs - sampleMs);
+  const phases = [
+    ['commit', commitMs],
+    ['sample', sampleMs],
+    ['between-records', betweenMs],
+  ] as const;
+  const top = phases.reduce((best, item) => (item[1] > best[1] ? item : best));
+  return index < 0 || top[1] <= 0 ? 'unknown' : top[0];
+}
+function measureSpoolExec(
+  original: (this: DatabaseSync, sql: string) => unknown,
+  db: DatabaseSync,
+  sql: string,
+  stall: CommitStall,
+  sample: () => void,
+): unknown {
+  if (sql === 'COMMIT') {
+    stall.stage = 'before-commit';
+    sample();
+    stall.stage = 'commit';
+  }
+  const started = sql === 'COMMIT' ? performance.now() : 0;
+  let result: unknown;
+  try {
+    result = original.call(db, sql);
+  } catch (error) {
+    if (sql === 'COMMIT') stall.commitMs += performance.now() - started;
+    throw error;
+  }
+  if (sql === 'COMMIT') {
+    stall.commitMs += performance.now() - started;
+    stall.stage = 'after-commit';
+    sample();
+  }
+  return result;
+}
 describe('SQLite真实进程崩溃与恢复界', () => {
   it.each(['before-begin', 'after-schema', 'after-version', 'before-commit', 'after-commit'])(
     '首次初始化%s强杀：未确认不冒成功，零字节/无schema保留unknown；已提交schema可重开',
@@ -216,11 +261,9 @@ describe('SQLite真实进程崩溃与恢复界', () => {
       observed = 0,
       fullPayloadScans = 0,
       opens = 0,
-      commitMs = 0,
       recordMs = 0,
-      sampleMs = 0,
-      index = -1;
-    let stage = 'unknown';
+      sampleMs = 0;
+    const stall: CommitStall & { index: number } = { commitMs: 0, stage: 'unknown', index: -1 };
     const sample = () => {
       const started = performance.now();
       try {
@@ -261,27 +304,20 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         rss = 'unknown';
       }
       const sampled = observed > 0;
-      const validateMs = Math.max(0, recordMs - commitMs - sampleMs);
-      const phases = [
-        ['commit', commitMs],
-        ['sample', sampleMs],
-        ['between-records', validateMs],
-      ] as const;
-      const top = phases.reduce((best, item) => (item[1] > best[1] ? item : best));
-      const dominant = index < 0 || top[1] <= 0 ? 'unknown' : top[0];
+      const dominant = classifyCommitStall(stall.index, stall.commitMs, recordMs, sampleMs);
       try {
         console.log(
           'SPOOL_COMMIT_STALL=' +
             JSON.stringify({
-              lastStage: stage,
+              lastStage: stall.stage,
               dominantStage: dominant,
-              index: index >= 0 ? index : 'unknown',
+              index: stall.index >= 0 ? stall.index : 'unknown',
               observed: reading(observed, sampled),
               mainPeak: reading(mainPeak, sampled),
               journalPeak: reading(journalPeak, sampled),
               blocksPeak: reading(blocksPeak, sampled),
-              commitMs: sampled ? Math.round(commitMs) : 'unknown',
-              recordMs: index >= 0 ? Math.round(recordMs) : 'unknown',
+              commitMs: sampled ? Math.round(stall.commitMs) : 'unknown',
+              recordMs: stall.index >= 0 ? Math.round(recordMs) : 'unknown',
               sampleMs: sampled ? Math.round(sampleMs) : 'unknown',
               fullPayloadScans,
               opens,
@@ -296,21 +332,9 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         /* 诊断写不出时不改原失败 */
       }
     });
-    DatabaseSync.prototype.exec = function (sql: string) {
+    DatabaseSync.prototype.exec = function (sql: string): void {
       if (sql.startsWith('PRAGMA busy_timeout=0')) opens++;
-      if (sql === 'COMMIT') {
-        stage = 'before-commit';
-        sample();
-        stage = 'commit';
-      }
-      const started = sql === 'COMMIT' ? performance.now() : 0;
-      const result = original.call(this, sql);
-      if (sql === 'COMMIT') {
-        commitMs += performance.now() - started;
-        stage = 'after-commit';
-        sample();
-      }
-      return result;
+      measureSpoolExec(original, this, sql, stall, sample);
     };
     DatabaseSync.prototype.prepare = function (sql: string) {
       if (sql === 'SELECT key,payload,record_hash FROM pending') fullPayloadScans++;
@@ -318,8 +342,8 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     };
     try {
       for (let n = 0; n < 256; n++) {
-        index = n;
-        stage = 'between-records';
+        stall.index = n;
+        stall.stage = 'between-records';
         const o = observation();
         o.identity.namespace = '\u0001'.repeat(300);
         o.identity.workflowId = '\u0002'.repeat(300);
@@ -330,15 +354,15 @@ describe('SQLite真实进程崩溃与恢复界', () => {
           recordMs += performance.now() - started;
         }
       }
-      stage = 'assert';
+      stall.stage = 'assert';
     } finally {
       DatabaseSync.prototype.exec = original;
       DatabaseSync.prototype.prepare = originalPrepare;
     }
     expect(count()).toBe(256);
     expect(observed).toBeGreaterThanOrEqual(512);
-    // 不记住代次时，每次打开和事务内各 prepare 一次全表：256 次是 512 次，行解码 2*(0+…+255)=65280。
-    // 计数的是 prepare，不是行。采到的次数必须仍是个位数，否则等待落在两次 COMMIT 之间。
+    // prepare 次数的回归：不记住代次时 256 次写入是 512 次全表 prepare、65280 行解码。计数的是 prepare。
+    // 个位数上限只约束这条路径，不能当成原完整 CI 首红卡在整表解码的证据。
     expect(fullPayloadScans).toBeGreaterThan(0);
     expect(fullPayloadScans).toBeLessThanOrEqual(4);
     // 每次重开都再建立一次 DELETE journal。256 次必须仍是这一次打开。
@@ -356,6 +380,48 @@ describe('SQLite真实进程崩溃与恢复界', () => {
         JSON.stringify({ uid: process.getuid?.(), version, mainPeak, journalPeak, blocksPeak, observed }),
     );
   }, 15000);
+  it('COMMIT在返回前抛错时耗时计入commit，原错误继续抛出', () => {
+    const boom = Error('synthetic-commit');
+    const stall = { commitMs: 0, recordMs: 0, sampleMs: 0, stage: 'unknown', index: 0 };
+    const original = DatabaseSync.prototype.exec;
+    let samples = 0;
+    const stub = function (this: DatabaseSync, sql: string): void {
+      if (sql !== 'COMMIT') {
+        original.call(this, sql);
+        return;
+      }
+      const until = performance.now() + 250;
+      while (performance.now() < until) {
+        /* 合成时钟：只占用 COMMIT 调用本身，不改 SQLite */
+      }
+      throw boom;
+    };
+    DatabaseSync.prototype.exec = function (sql: string): void {
+      measureSpoolExec(stub, this, sql, stall, () => {
+        samples += 1;
+      });
+    };
+    const mark = performance.now();
+    let caught: unknown;
+    try {
+      try {
+        DatabaseSync.prototype.exec.call({} as DatabaseSync, 'COMMIT');
+      } finally {
+        stall.recordMs += performance.now() - mark;
+      }
+    } catch (error) {
+      caught = error;
+    } finally {
+      DatabaseSync.prototype.exec = original;
+    }
+    expect(caught).toBe(boom);
+    expect(DatabaseSync.prototype.exec).toBe(original);
+    expect(stall.stage).toBe('commit');
+    expect(samples).toBe(1);
+    expect(stall.commitMs).toBeGreaterThanOrEqual(250);
+    expect(classifyCommitStall(stall.index, stall.commitMs, stall.recordMs, stall.sampleMs)).toBe('commit');
+    expect(classifyCommitStall(-1, stall.commitMs, stall.recordMs, 0)).toBe('unknown');
+  });
   it.each(['zero-second-oversize', 'minus-one-oversize', 'different-sector'])(
     '%s损坏journal在SQLite打开前保留且拒绝',
     (mode) => {
