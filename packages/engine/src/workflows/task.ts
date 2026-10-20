@@ -153,6 +153,7 @@ import {
   commitNudgeFeedback,
   conflictFilesForHandoff,
   conflictHandoffLine,
+  deliveryClaimForPrBody,
   deliveryClaimPrFields,
   EMPTY_DELIVERY_CODE,
   emptyCommitFeedback,
@@ -164,7 +165,6 @@ import {
   MergedTask,
   noteEmptyCommit,
   overBudgetLine,
-  parseDeliveryClaim,
   parsePlan,
   planGoLine,
   planRetryLine,
@@ -923,10 +923,10 @@ class TaskFlow {
       return { ...base, requirementRefs: true, owed: [...(base.owed ?? []), ...owed] };
     }
     // 交付声明（#3406）：回复末尾的 fleet-delivery 块定「还欠什么」和分片，缺失、非法、截断都写未核，不写「无」。
-    // 只让说明更保守，不碰关单和合并。老历史没有这个标记，正文照原来写。
+    // 只让说明更保守，不碰关单和合并。老结果没有可核验元数据也必须写未知，不能落成「无」。
     const claimed = patched('pr-body-delivery-claim');
     const answer = claimed ? answerForPrDid(rt.lastAnswer, rt.input.issueNumber) : rt.lastAnswer;
-    const claim = claimed ? deliveryClaimPrFields(parseDeliveryClaim(rt.lastAnswer)) : {};
+    const claim = deliveryClaimPrFields(deliveryClaimForPrBody(rt.lastAnswer, claimed));
     const body: PrBody = {
       requirement: rt.input.issueNumber,
       did: taskPrDid(rt.input.issueNumber, rt.round, rt.changedFiles.length, answer),

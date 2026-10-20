@@ -14,6 +14,7 @@ import {
   answerForPrDid,
   DELIVERY_ITEM_MAX,
   DELIVERY_OWED_MAX,
+  deliveryClaimForPrBody,
   deliveryClaimPrFields,
   PR_DID_ANSWER_LINES,
   PR_DID_ANSWER_MAX,
@@ -140,6 +141,22 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
   it('完整交付：full 且 owed 为空，不加任何东西', () => {
     expect(parseDeliveryClaim(FULL_ANSWER)).toEqual({ kind: 'full' });
     expect(deliveryClaimPrFields({ kind: 'full' })).toEqual({});
+  });
+
+  it('旧结果没有启用交付协议：明确未知，不把缺元数据当成完整交付', () => {
+    const claim = deliveryClaimForPrBody(FULL_ANSWER, false);
+    expect(claim).toEqual({ kind: 'unknown', why: '旧结果没有可核验的交付声明元数据' });
+    expect(deliveryClaimPrFields(claim)).toEqual({
+      risks: ['交付范围未核（旧结果没有可核验的交付声明元数据）：还欠什么不知道，不当成无'],
+    });
+    const body = renderPrBody({
+      requirement: 12,
+      did: ['x'],
+      verified: ['y'],
+      ...deliveryClaimPrFields(claim),
+    });
+    expect(body).toContain('交付范围未核');
+    expect(body).not.toContain('**还欠什么**：无');
   });
 
   it('诊断分片仍欠事项：标分片，欠项原样进 owed；回复里别的单号、@、HTML 注释都中和', () => {
@@ -286,6 +303,7 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     const raw = [
       '验收条 1：做到了，Refs #3396，Closes #3401',
       '见 acme/widgets#77、GH-88 和 https://github.com/acme/widgets/issues/99',
+      '@alice 看一下 <!-- 不要截断 -->',
       '本单 #12 留着，#123 不是本单',
     ].join('\n');
     const did = answerForPrDid(raw, 12) ?? '';
@@ -294,6 +312,11 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     expect(did).not.toMatch(/https?:\/\/github\.com/);
     expect(did).toContain('＃3396');
     expect(did).toContain('acme/widgets＃77');
+    expect(did).toContain('@​alice');
+    expect(did).toContain('<!‑‑ 不要截断 ‑‑>');
+    expect(did).not.toContain('@alice');
+    expect(did).not.toContain('<!--');
+    expect(did).not.toContain('-->');
     expect(did).toContain('本单 #12 留着');
     const body = renderPrBody({ requirement: 12, did: taskPrDid(12, 1, 1, did), verified: ['y'] });
     expect([...body.matchAll(/#(\d+)/g)].map((m) => m[1])).toEqual(['12', '12', '12']);

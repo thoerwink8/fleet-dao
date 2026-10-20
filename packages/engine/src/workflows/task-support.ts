@@ -1085,6 +1085,16 @@ export function parseDeliveryClaim(answer: string | null | undefined): DeliveryC
   return { kind: 'unknown', why: '交付声明的 scope 只能是 full 或 slice' };
 }
 
+/** 交付声明协议未在这段历史里启用时，旧结果也必须保持未知，不能让渲染器把欠账猜成「无」。 */
+export function deliveryClaimForPrBody(
+  answer: string | null | undefined,
+  protocolEnabled: boolean,
+): DeliveryClaim {
+  return protocolEnabled
+    ? parseDeliveryClaim(answer)
+    : { kind: 'unknown', why: '旧结果没有可核验的交付声明元数据' };
+}
+
 /** 去掉回复里的交付声明块（它另进「还欠什么」「需求」，不占「做了什么」的行）。 */
 export function stripDeliveryClaim(answer: string | null | undefined): string | null {
   if (answer == null) return null;
@@ -1092,11 +1102,14 @@ export function stripDeliveryClaim(answer: string | null | undefined): string | 
 }
 
 /**
- * 回复进「做了什么」前中和别的单的引用（#3406）：PR 只关联本单，会话顺手写的 #号、owner/仓#号、GH-号、github.com 链接
- * 都会让 GitHub 在别的单上留下引用，换成看着一样但不成链接的写法。本单自己的 #号留着。
+ * 回复进「做了什么」前中和外部副作用（#3406）：PR 只关联本单，会话顺手写的 #号、owner/仓#号、GH-号、github.com 链接、
+ * @提醒和 HTML 注释都换成看着一样但不触发 GitHub 行为的写法。本单自己的 #号留着。
  */
 export function neutralizeForeignRefs(text: string, issueNumber: number): string {
   return text
+    .replace(/@(?=[A-Za-z0-9-])/g, '@\u200b')
+    .replace(/<!--/g, '<!‑‑')
+    .replace(/-->/g, '‑‑>')
     .replace(/(?:[A-Za-z0-9-]+\/[A-Za-z0-9._-]+)?#(\d+)/g, (m, n: string) =>
       m === `#${n}` && Number(n) === issueNumber ? m : m.replace('#', '＃'),
     )
