@@ -285,6 +285,7 @@ describe('按改动算要跑什么', () => {
           (f) =>
             f.startsWith('packages/db/') ||
             f === 'packages/engine/test/legacy-admission.real-pg.test.ts' ||
+            f === 'packages/engine/test/admission-alert.real-pg.test.ts' ||
             f === 'packages/store/test/task-execution.real-pg.test.ts' ||
             f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
@@ -298,6 +299,7 @@ describe('按改动算要跑什么', () => {
           (f) =>
             f.startsWith('packages/db/') ||
             f === 'packages/engine/test/legacy-admission.real-pg.test.ts' ||
+            f === 'packages/engine/test/admission-alert.real-pg.test.ts' ||
             f === 'packages/store/test/task-execution.real-pg.test.ts' ||
             f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
@@ -1455,6 +1457,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
           (f) =>
             f.startsWith('packages/db/') ||
             f === 'packages/engine/test/legacy-admission.real-pg.test.ts' ||
+            f === 'packages/engine/test/admission-alert.real-pg.test.ts' ||
             f === 'packages/store/test/task-execution.real-pg.test.ts' ||
             f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
@@ -1465,6 +1468,7 @@ describe('测试分台（按耗时装箱，一台一份明确的文件清单）'
           (f) =>
             f.startsWith('packages/db/') ||
             f === 'packages/engine/test/legacy-admission.real-pg.test.ts' ||
+            f === 'packages/engine/test/admission-alert.real-pg.test.ts' ||
             f === 'packages/store/test/task-execution.real-pg.test.ts' ||
             f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),
