@@ -24,6 +24,7 @@ const identity = {
   ciSha: 'unknown',
 };
 const roots: string[] = [];
+const realImmediate = globalThis.setImmediate;
 afterEach(async () => {
   vi.useRealTimers();
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -76,7 +77,7 @@ describe('bounded original history transport', () => {
   });
 });
 
-async function fixture(failed = false, started = true) {
+async function fixture(failed = false, started = true, emit?: (line: string) => void) {
   const root = await mkdtemp(join(tmpdir(), 'fleet-synthetic-history-'));
   roots.push(root);
   const lines: string[] = [],
@@ -114,7 +115,10 @@ async function fixture(failed = false, started = true) {
   const scope = new SyntheticHistoryDiagnostics({
     test: 'synthetic',
     testSha256: identity.testSha256,
-    output: new DiagnosticOutput((line) => lines.push(line)),
+    output: new DiagnosticOutput((line) => {
+      lines.push(line);
+      emit?.(line);
+    }),
     failed: () => failed,
     artifactRoot: root,
   });
@@ -146,16 +150,63 @@ describe('local watchdog and owned worker cleanup', () => {
   it('does not replace the original error when diagnostic output itself fails', async () => {
     const original = new Error('original assertion');
     const sink = new Error('diagnostic output unavailable');
-    const scope = new SyntheticHistoryDiagnostics({
-      test: 'sink failure',
-      testSha256: identity.testSha256,
-      failed: () => false,
-      output: new DiagnosticOutput(() => {
-        throw sink;
-      }),
+    const f = await fixture(false, true, () => {
+      throw sink;
     });
-    await expect(scope.track(Promise.reject(original))).rejects.toBe(original);
-    await expect(scope.finish()).rejects.toBe(sink);
+    await expect(f.scope.track(Promise.reject(original))).rejects.toBe(original);
+    const finishing = f.scope.finish();
+    void finishing.catch(() => undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(f.worker.shutdown).toHaveBeenCalledTimes(1);
+    expect(f.env.teardown).not.toHaveBeenCalled();
+    f.stop();
+    await expect(finishing).rejects.toBe(sink);
+    await f.scope.closeEnvironment(f.env);
+    expect(f.env.teardown).toHaveBeenCalledTimes(1);
+    expect(f.order).toEqual(['shutdown', 'worker-run-settled', 'teardown']);
+  });
+  it('consumes watchdog output rejection but retains it for finish after closing owned resources', async () => {
+    vi.useFakeTimers();
+    const sink = new Error('watchdog sink unavailable');
+    let finalSink!: () => void;
+    const finalStatus = new Promise<void>((resolve) => {
+      finalSink = resolve;
+    });
+    const f = await fixture(false, true, (line) => {
+      if (parse(line).code === 'capture-failed') finalSink();
+      throw sink;
+    });
+    await vi.advanceTimersByTimeAsync(50_000);
+    await finalStatus;
+    // 在用户读取 capturePromise 之前过一轮真实事件循环；未消费的 watchdog 拒绝会被 Vitest 报出。
+    await new Promise<void>((resolve) => realImmediate(resolve));
+    await expect(f.scope.captureFailure()).rejects.toBe(sink);
+    expect(f.worker.shutdown).not.toHaveBeenCalled();
+    expect(f.env.teardown).not.toHaveBeenCalled();
+    f.stop();
+    await expect(f.scope.finish()).rejects.toBe(sink);
+    expect(f.env.teardown).toHaveBeenCalledTimes(1);
+  });
+  it('preserves both diagnostic output and cleanup errors when the final status sink also fails', async () => {
+    const sink = new Error('sink failure');
+    const cleanup = new Error('teardown failure');
+    const f = await fixture(false, true, () => {
+      throw sink;
+    });
+    vi.mocked(f.env.teardown).mockRejectedValue(cleanup);
+    f.stop();
+    await expect(f.scope.track(Promise.reject(new Error('original assertion')))).rejects.toThrow(
+      'original assertion',
+    );
+    try {
+      await f.scope.finish();
+      expect.unreachable('cleanup must report unknown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AggregateError);
+      expect((error as AggregateError).errors).toEqual([sink, cleanup]);
+    }
+    expect(f.env.teardown).toHaveBeenCalledTimes(1);
   });
   it('captures a tracked early failure before manual finally closes the environment and preserves the original error', async () => {
     const f = await fixture();
@@ -276,7 +327,7 @@ describe('local watchdog and owned worker cleanup', () => {
     const f = await fixture();
     vi.mocked(f.env.teardown).mockRejectedValue(new Error('close failed'));
     f.stop();
-    await expect(f.scope.finish()).rejects.toThrow('cleanup failed');
+    await expect(f.scope.finish()).rejects.toThrow('close failed');
     expect(f.lines.map(parse)).toContainEqual(
       expect.objectContaining({ outcome: 'unknown', code: 'cleanup-failed' }),
     );

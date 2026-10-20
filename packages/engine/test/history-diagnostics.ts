@@ -166,7 +166,8 @@ export class SyntheticHistoryDiagnostics {
   constructor(options: SyntheticHistoryDiagnostics['options']) {
     this.options = options;
     this.timer = setTimeout(() => {
-      void this.capture('watchdog');
+      // 原拒绝保留在 capturePromise，finish 独立报告；定时器不能制造未处理拒绝。
+      void this.capture('watchdog').catch(() => undefined);
     }, options.watchdogMs ?? 50_000);
   }
   mark(stage: string): void {
@@ -326,26 +327,41 @@ export class SyntheticHistoryDiagnostics {
   }
   private async close(): Promise<void> {
     clearTimeout(this.timer);
-    if (this.options.failed()) await this.capture('test-failed');
-    else await this.capturePromise;
+    const problems: unknown[] = [];
+    try {
+      if (this.options.failed()) await this.capture('test-failed');
+      else await this.capturePromise;
+    } catch (error) {
+      problems.push(error);
+    }
     // 只在测试已成功/失败/超时后关闭。watchdog 本身不改变 worker 或业务屏障。
     this.finished = true;
-    for (const { worker } of this.workers) if (worker.getState() === 'RUNNING') worker.shutdown();
+    for (const { worker } of this.workers) {
+      try {
+        if (worker.getState() === 'RUNNING') worker.shutdown();
+      } catch (error) {
+        problems.push(error);
+      }
+    }
     await Promise.all(this.operations);
     await Promise.all(this.workers.map((entry) => entry.settled));
     const results = await Promise.allSettled(
       [...this.environments.keys()].map((env) => this.closeEnvironment(env)),
     );
-    if (results.some((r) => r.status === 'rejected')) {
-      this.options.output.status({
-        outcome: 'unknown',
-        code: 'cleanup-failed',
-        test: this.options.test.slice(0, 512),
-      });
-      throw new AggregateError(
-        results.flatMap((r) => (r.status === 'rejected' ? [r.reason] : [])),
-        'diagnostics: environment cleanup failed',
-      );
+    problems.push(...results.flatMap((r) => (r.status === 'rejected' ? [r.reason] : [])));
+    if (problems.length) {
+      try {
+        this.options.output.status({
+          outcome: 'unknown',
+          code: 'cleanup-failed',
+          test: this.options.test.slice(0, 512),
+        });
+      } catch (error) {
+        problems.push(error);
+      }
+      const unique = [...new Set(problems)];
+      if (unique.length === 1) throw unique[0];
+      throw new AggregateError(unique, 'diagnostics: capture or environment cleanup failed');
     }
   }
 }
