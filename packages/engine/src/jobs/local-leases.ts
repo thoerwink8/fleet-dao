@@ -99,19 +99,28 @@ export interface LeaseSweepResult {
   unchecked: string[];
 }
 
+type LeaseDuty = Pick<AcceptanceDuty, 'prNumber' | 'head' | 'items'> & {
+  /** 没带来源的旧调用仍按冷验收转人说；管理归并必须带来源，不能说成转给人验。 */
+  source?: AcceptanceDuty['source'];
+};
+
+/** 一条还开着的责任在留言里怎么起头。管理归并是待独立验收的目标，不是冷验收转人。 */
+function leaseDutyHeading(d: LeaseDuty): string {
+  if (d.prNumber === 0) return '协调验收责任：';
+  const where = `PR #${d.prNumber}（头 ${d.head}）`;
+  return d.source === 'management_merge' ? `${where}管理归并待验：` : `${where}转给人验的：`;
+}
+
 /** 验收责任还开着、不退回法国时留在单上的话（#3037）：原验收项原样列出来，不丢验收范围。 */
 export function leaseAcceptanceComment(
   issueNumber: number,
   merged: number | null,
-  duties: readonly Pick<AcceptanceDuty, 'prNumber' | 'head' | 'items'>[],
+  duties: readonly LeaseDuty[],
 ): string {
   return [
     `本机领这张单的租约到期了，可${merged !== null ? `代码已经合了（PR #${merged}）` : '这张单只剩协调验收责任（没有代码要写）'}，验收责任还开着：不退回法国重做，单子留着等人验。`,
     '',
-    ...duties.flatMap((d) => [
-      d.prNumber > 0 ? `PR #${d.prNumber}（头 ${d.head}）转给人验的：` : '协调验收责任：',
-      ...d.items.map((i) => `- ${i}`),
-    ]),
+    ...duties.flatMap((d) => [leaseDutyHeading(d), ...d.items.map((i) => `- ${i}`)]),
     '',
     `验完记下最终验收完成以后才关 #${issueNumber}。`,
   ].join('\n');

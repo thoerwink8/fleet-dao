@@ -1141,18 +1141,26 @@ const dutyUnchecked = (what: string, error: unknown): PortError =>
 
 type DutyRow = typeof acceptanceDuties.$inferSelect;
 
-const DUTY_SOURCES: readonly string[] = ['cold_verify', 'coordination', 'management_merge'];
+const DUTY_SOURCES = [
+  'cold_verify',
+  'coordination',
+  'management_merge',
+] as const satisfies readonly AcceptanceDuty['source'][];
+
+function dutySource(row: DutyRow): AcceptanceDuty['source'] {
+  // 库约束只放这三种；认不出的照抛（调用方记没查成），不猜成冷验收
+  for (const known of DUTY_SOURCES) if (known === row.source) return known;
+  throw new Error(`验收责任 ${row.id} 的来源「${row.source}」认不出`);
+}
 
 function dutyOf(row: DutyRow): AcceptanceDuty {
-  // 库约束只放这三种；认不出的照抛（调用方记没查成），不猜成冷验收
-  if (!DUTY_SOURCES.includes(row.source)) throw new Error(`验收责任 ${row.id} 的来源「${row.source}」认不出`);
   return {
     repo: row.repo,
     issueNumber: row.issueNumber,
     prNumber: row.prNumber,
     head: row.head,
     items: [...row.items],
-    source: row.source as AcceptanceDuty['source'],
+    source: dutySource(row),
     mergeCommit: row.mergeCommit,
   };
 }
@@ -1193,7 +1201,8 @@ export async function openAcceptanceDuties(db: Db, taskId: string): Promise<Acce
 
 /**
  * 记下几条验收责任，再读回这张单还开着的全部。按「单 + PR + 头」幂等：已有的那一行原验收项只并不删，合并回执只补不改
- * （已经记了合并提交的不覆盖）。最终验收完成过的那一行不会因为重来又开回去。
+ * （已经记了合并提交的不覆盖），初建来源也不改——管理归并的目标不会被这次冷验收重放写成冷验收转的。
+ * 没有新验收项时，最终验收完成过的那一行不会因为重来又开回去；有新项才换代并撤掉旧终态。
  */
 export async function recordAcceptanceDuties(
   db: Db,

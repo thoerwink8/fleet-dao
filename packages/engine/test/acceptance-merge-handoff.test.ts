@@ -1,6 +1,7 @@
 // 历史验收责任归并（#3207）与引擎的接续：merge 建出的 management_merge 目标是普通待验行，
 // 引擎原有的读（openAcceptanceDuties）、重复转交（recordAcceptanceDuties）、最终验收（settleAcceptanceDuty）、
-// 旧头替代（supersedeAcceptanceDuty）都按精确身份和代次接得住；换代后旧代次、旧替代不再放行。
+// 旧头替代（supersedeAcceptanceDuty）都按精确身份和代次接得住。验完再重放不重开；引擎自己补上新项才换代，
+// 旧代次收不掉，旧替代不再放行。认不出的来源记没查成，不猜成冷验收。
 
 import {
   type AcceptanceDutyRow,
@@ -18,6 +19,8 @@ import {
 } from '@fleet-dao/db';
 import { createTestDb, resetTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { leaseAcceptanceComment } from '../src/jobs/local-leases.ts';
+import { PortError } from '../src/ports.ts';
 import { openAcceptanceDuties, recordAcceptanceDuties } from '../src/real/store-ports.ts';
 
 const NOW = new Date('2026-10-20T08:00:00Z');
@@ -47,10 +50,11 @@ async function seed() {
     .insert(repos)
     .values({ ...REPO, testCommand: 'pnpm check' })
     .returning();
+  if (!repo) throw new Error('仓没建成');
   const [task] = await t.db
     .insert(tasks)
     .values({
-      repoId: repo!.id,
+      repoId: repo.id,
       issueNumber: 3207,
       title: '归并',
       rawRequest: 'x',
@@ -58,8 +62,9 @@ async function seed() {
       priority: 1,
     })
     .returning();
+  if (!task) throw new Error('任务行没建成');
   await t.db.insert(pullRequests).values({
-    repoId: repo!.id,
+    repoId: repo.id,
     number: PR,
     state: 'merged',
     headRef: 'b',
@@ -68,7 +73,7 @@ async function seed() {
     mergedAt: NOW,
     updatedAt: NOW,
   });
-  return { repoId: repo!.id, taskId: task!.id };
+  return { repoId: repo.id, taskId: task.id };
 }
 
 const addSource = async (taskId: string, head: string, items: string[]) => {
@@ -84,7 +89,8 @@ const addSource = async (taskId: string, head: string, items: string[]) => {
       source: 'cold_verify',
     })
     .returning();
-  return row!;
+  if (!row) throw new Error('源责任没建成');
+  return row;
 };
 
 /** 用真实归并事务把 sources 并进最终头；target 为库里已有的最终头行（没有传 null）。 */
@@ -133,6 +139,7 @@ async function merge(
     },
     NOW,
   );
+  if (!made) throw new Error('归并目标没建成');
   return made;
 }
 
@@ -143,6 +150,28 @@ const settle = (r: AcceptanceDutyRow) =>
   settleAcceptanceDuty(t.db, { ...ident(r), by: 'frank', evidence: '最终头现场验收' }, NOW);
 const openHeads = async (taskId: string) =>
   (await openAcceptanceDuties(t.db, taskId)).map((d) => d.head).sort();
+const rowAt = async (head: string) => {
+  const row = (await rows()).find((r) => r.head === head);
+  if (!row) throw new Error(`头 ${head.slice(0, 8)} 的责任没读到`);
+  return row;
+};
+const replay = (taskId: string, items: string[]) =>
+  recordAcceptanceDuties(
+    t.db,
+    {
+      taskId,
+      repo: REPO,
+      issueNumber: 3207,
+      record: [{ prNumber: PR, head: FINAL, items, mergeCommit: MERGE }],
+    },
+    NOW,
+  );
+const pointAt = (source: AcceptanceDutyRow, target: AcceptanceDutyRow) =>
+  supersedeAcceptanceDuty(
+    t.db,
+    { source: ident(source), target: ident(target), by: 'ops:test', evidence: 'PR 最终头已合已验' },
+    NOW,
+  );
 
 describe('归并目标由引擎原有入口接续（#3207）', () => {
   it('merge 建出的待验目标：引擎读得到、重复转交不换代不开回、旧代次拿不到终态、最终验收+替代后收得掉', async () => {
@@ -161,52 +190,46 @@ describe('归并目标由引擎原有入口接续（#3207）', () => {
       source: 'management_merge',
     });
     expect(open.filter((d) => d.head !== FINAL).map((d) => d.source)).toEqual(['cold_verify', 'cold_verify']);
-
-    // 引擎重放同头同项：幂等，不换代，读回的来源仍是管理归并
-    const replayed = await recordAcceptanceDuties(
-      t.db,
-      {
-        taskId: s.taskId,
-        repo: REPO,
-        issueNumber: 3207,
-        record: [{ prNumber: PR, head: FINAL, items: ['检查'], mergeCommit: MERGE }],
-      },
-      NOW,
+    const comment = leaseAcceptanceComment(3207, PR, open);
+    expect(comment.split('\n').find((line) => line.includes(FINAL))).toBe(
+      `PR #${PR}（头 ${FINAL}）管理归并待验：`,
     );
-    expect(replayed.find((d) => d.head === FINAL)?.source).toBe('management_merge');
-    expect((await rows()).find((r) => r.head === FINAL)).toMatchObject({
+    expect(comment).toContain(`PR #${PR}（头 ${a.head}）转给人验的：`);
+
+    // 引擎重放同头、项是子集：不换代、不丢并集、来源仍是管理归并
+    const replayed = await replay(s.taskId, ['检查']);
+    expect(replayed.find((d) => d.head === FINAL)).toMatchObject({
+      source: 'management_merge',
+      items: ['历史要求', '检查'],
+    });
+    expect(await rowAt(FINAL)).toMatchObject({ generation: 1, source: 'management_merge' });
+
+    // 独立验收入口：错代次拿不到终态，精确身份收得掉；验完再重放不开回去
+    await expect(settle({ ...target, generation: 0 })).rejects.toThrow('身份、代次或完成回执已变');
+    await settle(target);
+    expect(await openHeads(s.taskId)).toEqual([a.head, b.head]);
+    await replay(s.taskId, ['历史要求', '检查']);
+    expect(await openHeads(s.taskId)).toEqual([a.head, b.head]);
+    expect(await rowAt(FINAL)).toMatchObject({
       generation: 1,
       source: 'management_merge',
+      settledAt: NOW,
+      items: ['历史要求', '检查'],
     });
 
-    // 独立验收入口：错代次拿不到终态，精确身份收得掉
-    await expect(settle({ ...target!, generation: 0 })).rejects.toThrow('身份、代次或完成回执已变');
-    await settle(target!);
-    expect(await openHeads(s.taskId)).toEqual([a.head, b.head]);
-
     // 旧头沿原替代入口指向已验目标后，库里不再有待验行
-    const final = (await rows()).find((r) => r.head === FINAL)!;
-    for (const src of [a, b]) {
-      await supersedeAcceptanceDuty(
-        t.db,
-        { source: ident(src), target: ident(final), by: 'ops:test', evidence: 'PR 最终头已合已验' },
-        NOW,
-      );
-    }
+    const final = await rowAt(FINAL);
+    for (const src of [a, b]) await pointAt(src, final);
     expect(await openAcceptanceDuties(t.db, s.taskId)).toEqual([]);
   });
 
-  it('换代：已验目标再并进新来源项后，旧代次验收和旧替代都失效，目标重新待验', async () => {
+  it('换代：已验目标再并进新来源项后，旧代次验收和旧替代都失效，新代次仍走原入口', async () => {
     const s = await seed();
     const a = await addSource(s.taskId, 'a'.repeat(40), ['历史要求']);
     const target = await merge(s, [a], null, REQ1);
-    await settle(target!);
-    const settled = (await rows()).find((r) => r.head === FINAL)!;
-    await supersedeAcceptanceDuty(
-      t.db,
-      { source: ident(a), target: ident(settled), by: 'ops:test', evidence: '最终头已验' },
-      NOW,
-    );
+    await settle(target);
+    const settled = await rowAt(FINAL);
+    await pointAt(a, settled);
     expect(await openAcceptanceDuties(t.db, s.taskId)).toEqual([]);
 
     // 又发现一条旧头的新项：二次归并换代，撤掉最终验收；旧头的替代因目标换代过期
@@ -214,14 +237,76 @@ describe('归并目标由引擎原有入口接续（#3207）', () => {
     const regenerated = await merge(s, [c], settled, REQ2);
     expect(regenerated).toMatchObject({
       generation: 2,
+      source: 'management_merge',
       settledAt: null,
       items: ['历史要求', '新发现的要求'],
     });
-    expect(await openHeads(s.taskId)).toEqual([a.head, c.head, FINAL].sort());
+    const open = await openAcceptanceDuties(t.db, s.taskId);
+    expect(open.map((d) => d.head).sort()).toEqual([a.head, c.head, FINAL].sort());
+    expect(open.find((d) => d.head === FINAL)?.source).toBe('management_merge');
 
-    // 迟到的旧代次验收不能收掉新项；新代次验收后只收目标，不误收未替代的新来源
+    // 迟到的旧代次验收、旧代次替代都不能收掉新项；新代次验收后只收目标
     await expect(settle(settled)).rejects.toThrow('身份、代次或完成回执已变');
-    await settle(regenerated!);
+    await expect(pointAt(a, settled)).rejects.toThrow('目标验收责任身份或代次已变');
+    await expect(pointAt(c, regenerated)).rejects.toThrow('最终验收');
+    await settle(regenerated);
     expect(await openHeads(s.taskId)).toEqual([a.head, c.head].sort());
+
+    // 新代次验完，替代仍沿原入口重绑，旧来源才收得掉
+    const current = await rowAt(FINAL);
+    await pointAt(a, current);
+    await pointAt(c, current);
+    expect(await openAcceptanceDuties(t.db, s.taskId)).toEqual([]);
+  });
+
+  it('引擎自己补上新项：换代、来源仍是管理归并，旧代次收不掉，旧替代不再放行', async () => {
+    const s = await seed();
+    const a = await addSource(s.taskId, 'a'.repeat(40), ['历史要求']);
+    const target = await merge(s, [a], null, REQ1);
+    await settle(target);
+    await pointAt(a, await rowAt(FINAL));
+    expect(await openAcceptanceDuties(t.db, s.taskId)).toEqual([]);
+
+    const opened = await replay(s.taskId, ['引擎后来补上的']);
+    expect(opened.find((d) => d.head === FINAL)).toMatchObject({
+      source: 'management_merge',
+      items: ['历史要求', '引擎后来补上的'],
+    });
+    expect(opened.map((d) => d.head).sort()).toEqual([a.head, FINAL].sort());
+    const next = await rowAt(FINAL);
+    expect(next).toMatchObject({ generation: 2, source: 'management_merge', settledAt: null });
+    await expect(settle(target)).rejects.toThrow('身份、代次或完成回执已变');
+    await settle(next);
+    expect(await openHeads(s.taskId)).toEqual([a.head]);
+    await pointAt(a, await rowAt(FINAL));
+    expect(await openAcceptanceDuties(t.db, s.taskId)).toEqual([]);
+  });
+
+  it('【故意造出的失败】认不出的来源照抛、记没查成，不猜成冷验收', async () => {
+    const broken = {
+      query: {
+        acceptanceDuties: {
+          findMany: async () => [
+            {
+              id: 1,
+              repo: 'merge/handoff',
+              issueNumber: 3207,
+              prNumber: PR,
+              head: FINAL,
+              items: ['历史要求'],
+              source: 'imported',
+              mergeCommit: MERGE,
+              settledAt: null,
+              supersededAt: null,
+            },
+          ],
+        },
+      },
+    } as unknown as TestDb['db'];
+    const err = await openAcceptanceDuties(broken, 'x').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(PortError);
+    expect(err).toMatchObject({ code: 'ACCEPTANCE_DUTY_UNCHECKED', retryable: true });
+    expect(String((err as Error).message)).toContain('认不出');
+    expect(String((err as Error).message)).toContain('imported');
   });
 });
