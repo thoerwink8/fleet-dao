@@ -48,10 +48,39 @@ export const MECHANICAL_COMMANDS = {
   tsc: 'node_modules/.bin/tsc -b --pretty false',
   /** 有这两个才算装了依赖，能自测。 */
   deps: 'test -x node_modules/.bin/tsc && test -x node_modules/.bin/vitest',
+  /** 在 packages/db 里跑，脚本（GENERATED_CHECK_SCRIPT）从标准输入进，参数是 idx:tag:prevIdx。 */
+  generatedCheck: 'node --input-type=module -',
 };
+
+/** 迁移所在的包目录；生成核对在这里跑，drizzle-kit 从它的 node_modules 解析。 */
+export const MIGRATIONS_PACKAGE = 'packages/db';
+
+/**
+ * 核「分支新增的迁移是纯生成的」：对每个新增迁移，用它的上一版快照和它自己的快照重新跑一遍 drizzle-kit 的生成，
+ * 产物（语句之间用 drizzle-kit 写 .sql 时的分隔）和提交的 .sql 逐字节比。有一个不同打印 `MISMATCH <tag>`；
+ * 全部比完打印 `CHECKED`。迁移目录默认 migrations，环境变量 MIG_DIR 可换（测试用）。
+ */
+export const GENERATED_CHECK_SCRIPT = [
+  "import { readFileSync } from 'node:fs';",
+  "import { generateMigration } from 'drizzle-kit/api';",
+  "const dir = process.env.MIG_DIR || 'migrations';",
+  "const pad = (n) => String(n).padStart(4, '0');",
+  'for (const arg of process.argv.slice(2)) {',
+  "  const [idx, tag, prevIdx] = arg.split(':');",
+  "  const prev = JSON.parse(readFileSync(`${dir}/meta/${pad(prevIdx)}_snapshot.json`, 'utf8'));",
+  "  const cur = JSON.parse(readFileSync(`${dir}/meta/${pad(idx)}_snapshot.json`, 'utf8'));",
+  '  const statements = await generateMigration(prev, cur);',
+  "  const made = statements.join('--> statement-breakpoint\\n');",
+  "  const committed = readFileSync(`${dir}/${tag}.sql`, 'utf8');",
+  '  if (made !== committed) console.log(`MISMATCH ${tag}`);',
+  '}',
+  "console.log('CHECKED');",
+  '',
+].join('\n');
 
 /** 各条命令的限时（毫秒）。 */
 export const MECHANICAL_TIMEOUTS_MS = {
+  generatedCheck: 2 * 60_000,
   install: 5 * 60_000,
   regenerate: 5 * 60_000,
   drift: 10 * 60_000,
@@ -135,6 +164,7 @@ async function planMigrations(
   t: UserTree,
   head: string,
   mainline: string,
+  verify: (added: { idx: number; tag: string; prevIdx: number }[]) => Promise<string | null>,
 ): Promise<{ drop: string[] } | string> {
   const base = await gitInTree(t, ['merge-base', head, mainline], '找分支和主线的共同祖先', { allow: [1] });
   const mb = textOf(base).trim();
@@ -163,6 +193,7 @@ async function planMigrations(
     const mine = parseJournal(await showFile(t, head, MIGRATIONS_JOURNAL));
     const known = new Set(parseJournal(await showFile(t, mb, MIGRATIONS_JOURNAL)).map((e) => e.tag));
     const pad = (n: number) => String(n).padStart(4, '0');
+    const added: { idx: number; tag: string; prevIdx: number }[] = [];
     for (const [i, entry] of mine.entries()) {
       if (known.has(entry.tag)) continue;
       const prev = mine[i - 1];
@@ -175,7 +206,11 @@ async function planMigrations(
       );
       if (own === before)
         return `分支新增的迁移 ${entry.tag} 的快照和上一版一致，像是手写的（触发器之类），不自己解`;
+      added.push({ idx: entry.idx, tag: entry.tag, prevIdx: prev.idx });
     }
+    // 硬条件：快照比对只挡得住纯手写的；生成后又手改过 SQL 的（补 UPDATE/INSERT 之类）快照照样变，重生成会悄悄丢掉手改部分
+    const mismatch = await verify(added);
+    if (mismatch !== null) return mismatch;
   } catch (error) {
     return `读不懂分支的迁移记录（${error instanceof Error ? error.message : String(error)}），不自己解`;
   }
@@ -231,6 +266,43 @@ export async function resolveMechanically(t: UserTree, o: MechanicalOptions): Pr
     return declined('树里没有钉住的最新主线，机械解没动');
   }
 
+  // ---- 并之前（树在分支头上、干净）判分支新增的迁移是不是纯生成的；不是就一点不动
+  const verify = async (added: { idx: number; tag: string; prevIdx: number }[]): Promise<string | null> => {
+    if (added.length === 0) return null;
+    const args = added.map((a) => `${a.idx}:${a.tag}:${a.prevIdx}`).join(' ');
+    beat();
+    const prefix = shellPath === null ? '' : `PATH=${shellPath}; export PATH; `;
+    const r = await runInTree(
+      t,
+      [
+        t.sh ?? SH,
+        '-c',
+        `${prefix}unset FLEET_RUN_ID; cd ${MIGRATIONS_PACKAGE} && ${cmds.generatedCheck} ${args} 2>&1`,
+      ],
+      { timeoutMs: MECHANICAL_TIMEOUTS_MS.generatedCheck, stdin: Buffer.from(GENERATED_CHECK_SCRIPT) },
+    );
+    const out = textOf(r);
+    const bad = /^MISMATCH (\S+)$/gm;
+    const tags = [...out.matchAll(bad)].map((m) => m[1]);
+    if (r.code === 0 && /^CHECKED$/m.test(out) && tags.length === 0) return null;
+    if (tags.length > 0) {
+      return `分支新增的迁移 ${tags.map((tag) => `${tag}.sql`).join('、')} 和用上一版快照重新生成的产物不是逐字节一致，像是生成后又手改过（比如补了 UPDATE/INSERT）；重新生成会丢掉手改的部分，不自己解`;
+    }
+    return `没能核对分支新增的迁移是不是纯生成的（${digestOutput(out, 400)}），不自己解`;
+  };
+  let plan: { drop: string[] } | undefined;
+  if (o.conflictFiles.some((name) => mechanicalKindOf(name) === 'migration')) {
+    try {
+      const got = await planMigrations(t, head, mainline, verify);
+      if (typeof got === 'string') return declined(got);
+      plan = got;
+    } catch (error) {
+      return declined(
+        `判分支的迁移没成：${error instanceof Error ? error.message : String(error)}，机械解没动`,
+      );
+    }
+  }
+
   // ---- 并主线，看 git 报的冲突
   let merge: Awaited<ReturnType<typeof mergeInto>>;
   try {
@@ -255,10 +327,10 @@ export async function resolveMechanically(t: UserTree, o: MechanicalOptions): Pr
   const wantLockfile = mech.some((name) => mechanicalKindOf(name) === 'lockfile');
   try {
     if (wantMigrations) {
-      const plan = await planMigrations(t, head, mainline);
-      if (typeof plan === 'string') {
+      if (plan === undefined) {
+        // git 报的迁移冲突比 GitHub 报的多：并之前没核过分支的迁移，不凭空解
         await restore(t, head);
-        return declined(plan);
+        return declined('git 报了迁移文件冲突，但并之前没核过分支的迁移是不是纯生成的，不自己解');
       }
       if (plan.drop.length > 0)
         await gitInTree(
