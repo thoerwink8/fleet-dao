@@ -481,7 +481,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      # 浏览器缓存按 Playwright 的版本（锁文件里钉住的那一版）：没命中才下 Chromium（约 150M）；系统库（--with-deps）每台新机器都要装
+      # 浏览器缓存按 Playwright 的版本（锁文件里钉住的那一版）：没命中才下 Chromium（约 150M）；系统库（--with-deps）每台新机器都要装。
+      # ubuntu-24.04 镜像里的 packages.microsoft.com 会 403，apt update 整段失败，系统库就装不上。装之前摘掉；本 job 不装那些包。
       - name: Playwright 版本
         id: pw
         run: |
@@ -500,7 +501,30 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - name: 装 Chromium 和系统库
-        run: pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
+        run: |
+          set -euo pipefail
+          # 只删指向 packages.microsoft.com 的源。deb822 整段去掉；一行式只删那一行。安装失败仍按原退出码停下。
+          sudo python3 - << 'PY'
+          from pathlib import Path
+          host = "packages.microsoft.com"
+          paths = [Path("/etc/apt/sources.list")]
+          directory = Path("/etc/apt/sources.list.d")
+          if directory.is_dir():
+              paths.extend(path for path in directory.iterdir() if path.is_file())
+          for path in paths:
+              if not path.is_file():
+                  continue
+              text = path.read_text(errors="replace")
+              if host not in text:
+                  continue
+              if "URIs:" in text:
+                  kept = [part for part in text.split("\n\n") if host not in part and part.strip()]
+                  updated = ("\n\n".join(kept) + "\n") if kept else ""
+              else:
+                  updated = "".join(line for line in text.splitlines(True) if host not in line)
+              path.write_text(updated)
+          PY
+          pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
       - name: 等 postgres:16 起来
         run: |
           set -euo pipefail

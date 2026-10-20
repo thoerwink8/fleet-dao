@@ -1846,6 +1846,19 @@ describe('驾驶舱 e2e（#930）：CI 一律全套（决定 0101），本机 pl
     expect(steps.filter((s) => 'continue-on-error' in s)).toEqual([]);
     expect(JSON.stringify(steps)).not.toContain('E2E_QUARANTINE: only');
     const quarantineYml = readFileSync(join(ROOT, '.github/workflows/e2e-quarantine.yml'), 'utf8');
+    const installScript = String(browserInstall?.run);
+    const dropped = installScript.indexOf('packages.microsoft.com');
+    const installAt = installScript.indexOf('playwright install --with-deps chromium');
+    expect(dropped, '装系统库前摘掉会 403 的 Microsoft apt 源').toBeGreaterThanOrEqual(0);
+    expect(installAt).toBeGreaterThan(dropped);
+    const quarantineInstall = quarantineYml.slice(
+      quarantineYml.indexOf('装 Chromium 和系统库'),
+      quarantineYml.indexOf('等 postgres:16 起来', quarantineYml.indexOf('装 Chromium 和系统库')),
+    );
+    expect(quarantineInstall.indexOf('packages.microsoft.com')).toBeGreaterThanOrEqual(0);
+    expect(quarantineInstall.indexOf('playwright install --with-deps chromium')).toBeGreaterThan(
+      quarantineInstall.indexOf('packages.microsoft.com'),
+    );
     expect(quarantineYml).toMatch(/^ {2}schedule:/m);
     expect(quarantineYml).toMatch(/^ {2}workflow_dispatch:/m);
     expect(quarantineYml).toContain('E2E_QUARANTINE: only');

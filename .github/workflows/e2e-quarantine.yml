@@ -60,7 +60,30 @@ jobs:
           path: ~/.cache/ms-playwright
           key: playwright-${{ runner.os }}-${{ steps.pw.outputs.version }}
       - name: 装 Chromium 和系统库
-        run: pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
+        run: |
+          set -euo pipefail
+          # 与 ci.yml 的 e2e 相同：镜像里的 packages.microsoft.com 会 403，先摘掉再装系统库。
+          sudo python3 - << 'PY'
+          from pathlib import Path
+          host = "packages.microsoft.com"
+          paths = [Path("/etc/apt/sources.list")]
+          directory = Path("/etc/apt/sources.list.d")
+          if directory.is_dir():
+              paths.extend(path for path in directory.iterdir() if path.is_file())
+          for path in paths:
+              if not path.is_file():
+                  continue
+              text = path.read_text(errors="replace")
+              if host not in text:
+                  continue
+              if "URIs:" in text:
+                  kept = [part for part in text.split("\n\n") if host not in part and part.strip()]
+                  updated = ("\n\n".join(kept) + "\n") if kept else ""
+              else:
+                  updated = "".join(line for line in text.splitlines(True) if host not in line)
+              path.write_text(updated)
+          PY
+          pnpm --filter @fleet-dao/web exec playwright install --with-deps chromium
       - name: 等 postgres:16 起来
         run: |
           set -euo pipefail
