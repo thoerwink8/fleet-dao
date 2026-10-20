@@ -545,7 +545,7 @@ describe('既有钩子持久脱敏回执与真实回合关联', { timeout: 0 }, 
     symlinkSync(outside, join(s.dir, '.receipts'), process.platform === 'win32' ? 'junction' : 'dir');
     expect(appendReceipt(s.context(), { phase: 'entered', decision: 'none' }).ok).toBe(false);
     expect(readReceipts(s.dir, fingerprint(s.sid)).ok).toBe(false);
-    rmSync(join(s.dir, '.receipts'));
+    rmSync(join(s.dir, '.receipts'), { recursive: true });
     mkdirSync(join(s.dir, '.receipts'));
     mkdirSync(s.file);
     expect(appendReceipt(s.context(), { phase: 'entered', decision: 'none' }).ok).toBe(false);

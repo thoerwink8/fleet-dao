@@ -119,8 +119,76 @@ const LAYOUT_JS = `(() => {
     };
   })()`;
 
+/** 稳定性只看整像素。亚像素在进场尾巴上会抖，不拿来判断版面还在变；断言仍用没取整的量。 */
+function settledKey(raw: string): string {
+  const m = JSON.parse(raw) as HeaderLayout;
+  const r = (n: number) => Math.round(n);
+  const b = (box: Box | null) =>
+    box
+      ? {
+          left: r(box.left),
+          right: r(box.right),
+          top: r(box.top),
+          bottom: r(box.bottom),
+          width: r(box.width),
+          height: r(box.height),
+        }
+      : null;
+  return JSON.stringify({
+    ...m,
+    sw: b(m.sw),
+    health: b(m.health),
+    refresh: b(m.refresh),
+    title: b(m.title),
+    headline: b(m.headline),
+    choices: m.choices.map((c) => ({ ...c, h: r(c.h), w: r(c.w) })),
+    healthH: r(m.healthH),
+    refreshH: r(m.refreshH),
+  });
+}
+
+/**
+ * 等版面落定再量（#3433）。条已经可见，只说明节点在，不说明字宽和健康条的摊开/收起落定了。
+ * 字体晚到会改字宽；健康条按量到的宽度在「三格摊开」和「状态按钮」之间切，切完之前量就会叠在一起。
+ * 页头进场 fd-rise 只有 0.28s。在跑的状态点是无限循环，等「所有动画停」会一直等到超时。
+ * 这里只等字体、fd-rise，再等页头盒子连续三次（间隔 100ms）不变。断言没放宽。
+ */
 async function layout(page: Page): Promise<HeaderLayout> {
-  return page.evaluate(LAYOUT_JS);
+  await page.evaluate(() => document.fonts.ready.then(() => undefined));
+  await expect
+    .poll(
+      () =>
+        page.evaluate(
+          () =>
+            document.getAnimations().filter((animation) => {
+              const effect = animation.effect;
+              const target = effect && 'target' in effect ? effect.target : null;
+              return (
+                animation.playState === 'running' &&
+                target instanceof Element &&
+                target.classList.contains('fd-rise')
+              );
+            }).length,
+        ),
+      { message: '页头进场动画没跑完' },
+    )
+    .toBe(0);
+  let lastRaw = '';
+  let lastKey = '';
+  let stable = 0;
+  await expect
+    .poll(
+      async () => {
+        lastRaw = JSON.stringify(await page.evaluate(LAYOUT_JS));
+        const key = settledKey(lastRaw);
+        stable = key === lastKey ? stable + 1 : 0;
+        lastKey = key;
+        return stable;
+      },
+      { message: '页头版面一直在变', intervals: [100] },
+    )
+    .toBeGreaterThanOrEqual(3);
+  return JSON.parse(lastRaw) as HeaderLayout;
 }
 
 test.describe('首页页头窄屏', () => {
