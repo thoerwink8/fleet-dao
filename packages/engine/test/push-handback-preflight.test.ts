@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PushHandbackPreflightInput } from '../src/push-handback.ts';
 import type { PushHandbackPreflightDeps } from '../src/real/push-handback-preflight.ts';
+import { goodBrief } from './task-script.ts';
 
 const state = vi.hoisted(() => ({
   input: null as PushHandbackPreflightInput | null,
@@ -178,6 +179,109 @@ beforeEach(() => {
   }));
 });
 describe('trusted reader assembly; source IO mocks, full observation policy runs', () => {
+  it('v2 retains H0 source and returns the complete server-read H1; v1 does not silently accept it', async () => {
+    const target = {
+      ...goodBrief(),
+      issueNumber: input.task.issueNumber,
+      contract: { version: 1 as const, sha256: 'f'.repeat(64) },
+    };
+    const revised: PushHandbackPreflightInput = {
+      ...input,
+      version: 2,
+      requestId: 'read-revision',
+      expectedContract: target.contract,
+    };
+    const d = deps();
+    const reads = vi.fn<PushHandbackPreflightDeps['brief']>(async () => ({
+      ok: true as const,
+      brief: target,
+    }));
+    d.brief = reads;
+    expect(await createPushHandbackPreflight(d)(input, ctx())).toMatchObject({
+      outcome: 'unknown',
+      code: 'contract',
+    });
+    reads.mockClear();
+    const result = await createPushHandbackPreflight(d)(revised, ctx());
+    expect(result).toMatchObject({ outcome: 'natural-retired', brief: target });
+    expect(reads).toHaveBeenCalledTimes(2);
+    expect(state.history.mock.calls.at(-1)?.[2]).toEqual(revised);
+    expect(revised.contract).toEqual(input.contract);
+    expect(reads.mock.calls[0]?.[0]).toEqual({
+      schemaVersion: 1,
+      repo: input.task.repo,
+      issueNumber: input.task.issueNumber,
+      checkContract: true,
+    });
+  });
+  it('v2 observes H1 then H2 and refuses instead of returning an outdated snapshot', async () => {
+    const d = deps(),
+      target = { version: 1 as const, sha256: 'f'.repeat(64) };
+    let n = 0;
+    d.brief = async () => ({
+      ok: true,
+      brief: {
+        ...goodBrief(),
+        issueNumber: input.task.issueNumber,
+        contract: ++n === 1 ? target : input.contract,
+      },
+    });
+    const result = await createPushHandbackPreflight(d)(
+      { ...input, version: 2, requestId: 'drift', expectedContract: target },
+      ctx(),
+    );
+    expect(result.outcome).toBe('unknown');
+    expect(result).not.toHaveProperty('brief');
+  });
+  it('v2 checker remains query-only and requires the exact observed H0', async () => {
+    const d = deps(),
+      target = {
+        ...goodBrief(),
+        issueNumber: input.task.issueNumber,
+        contract: { version: 1 as const, sha256: 'f'.repeat(64) },
+      };
+    d.brief = async () => ({ ok: true, brief: target });
+    const checker = createPushHandbackChecker(d);
+    const revision = { originalContract: input.contract, expectedContract: target.contract };
+    expect(await checker(input.workflowId, run, ctx().signal, revision)).toMatchObject({
+      outcome: 'natural-retired',
+      brief: target,
+    });
+    expect(state.queries).toBe(2);
+    expect(state.input).toEqual(input);
+    expect(state.writes).not.toHaveBeenCalled();
+    state.history.mockClear();
+    expect(
+      await checker(input.workflowId, run, ctx().signal, { ...revision, originalContract: target.contract }),
+    ).toEqual({ outcome: 'unknown', code: 'original_contract' });
+    expect(state.history).not.toHaveBeenCalled();
+  });
+  it('v2 missing or malformed H1 rejects before source IO', async () => {
+    const d = deps();
+    expect(
+      await createPushHandbackPreflight(d)(
+        { ...input, version: 2, requestId: 'bad', expectedContract: { version: 1, sha256: 'bad' } },
+        ctx(),
+      ),
+    ).toEqual({ outcome: 'unknown', code: 'context' });
+    expect(state.history).not.toHaveBeenCalled();
+  });
+  it('contract-source cancellation is bounded even when its read never resolves', async () => {
+    const d = deps(),
+      control = new AbortController(),
+      entered = vi.fn();
+    d.brief = async () => {
+      entered();
+      return new Promise(() => {});
+    };
+    const result = createPushHandbackPreflight(d)(
+      { ...input, version: 2, requestId: 'cancel-read', expectedContract: input.contract },
+      { ...ctx(), signal: control.signal },
+    );
+    await vi.waitFor(() => expect(entered).toHaveBeenCalledOnce());
+    control.abort();
+    expect(await result).toEqual({ outcome: 'unknown', code: 'cancelled' });
+  });
   it('checker performs only two queries and reads, never Update or signal; no current activity history required', async () => {
     const result = await createPushHandbackChecker(deps())(input.workflowId, run, ctx().signal);
     expect(result).toMatchObject({ outcome: 'natural-retired', head: 'a'.repeat(40) });

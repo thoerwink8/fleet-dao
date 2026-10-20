@@ -111,6 +111,24 @@ function fixture() {
 }
 
 describe('natural permission-push complete history identity', () => {
+  it('v2 managed observations are recognized without allowing ordinary post-failure activities', () => {
+    const f = fixture();
+    const revised: PushHandbackPreflightInput = {
+      ...input,
+      version: 2,
+      requestId: 'fixed-operation',
+      expectedContract: { version: 1, sha256: 'f'.repeat(64) },
+    };
+    (f.rows.at(-1)!.activityTaskScheduledEventAttributes as Record<string, unknown>).input = payload(revised);
+    expect(naturalPushHistory(f.events, revised, 'current', 'fleet').failedHead).toBe('a'.repeat(40));
+    expect(() =>
+      naturalPushHistory(f.events, { ...revised, expectedContract: input.contract }, 'current', 'fleet'),
+    ).toThrow('history_preflight_identity');
+    f.activity('readTaskBrief', { taskId: input.task.taskId, checkContract: true }, { ok: true });
+    expect(() => naturalPushHistory(f.events, revised, 'current', 'fleet')).toThrow(
+      'history_actor_after_failed_push',
+    );
+  });
   it('accepts exact natural shape including post-failure bookkeeping and separate read-only actor', () => {
     const f = fixture(),
       r = naturalPushHistory(f.events, input, 'current', 'fleet');

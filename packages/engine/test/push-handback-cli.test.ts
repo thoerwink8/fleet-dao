@@ -50,6 +50,88 @@ afterEach(async () => {
   await rm(scratch, { recursive: true, force: true });
 });
 describe('private permission-push CLI modes and retry inputs', () => {
+  it('explicit H0/H1 check is read-only and does not print the server brief', async () => {
+    state.checker.mockResolvedValue({
+      outcome: 'natural-retired',
+      head: 'a'.repeat(40),
+      evidenceSha256: 'c'.repeat(64),
+      brief: { request: 'private formal requirement', acceptance: ['private acceptance'] },
+    });
+    const flags = [
+      '--original-contract-sha256',
+      'a'.repeat(64),
+      '--expected-contract-sha256',
+      'b'.repeat(64),
+    ];
+    expect(await runPermissionPushHandback([...identity, ...flags])).toBe(0);
+    expect(state.checker.mock.calls[0]?.[3]).toEqual({
+      originalContract: { version: 1, sha256: 'a'.repeat(64) },
+      expectedContract: { version: 1, sha256: 'b'.repeat(64) },
+    });
+    expect(state.update).not.toHaveBeenCalled();
+    expect(state.signal).not.toHaveBeenCalled();
+    expect(state.connect).not.toHaveBeenCalled();
+    expect(JSON.stringify(vi.mocked(console.log).mock.calls)).not.toMatch(
+      /private formal|private acceptance|brief/,
+    );
+  });
+  it.each([
+    ['--original-contract-sha256', 'a'.repeat(64)],
+    ['--expected-contract-sha256', 'b'.repeat(64)],
+    ['--original-contract-sha256', 'bad', '--expected-contract-sha256', 'b'.repeat(64)],
+  ])('rejects partial or malformed contract identity before any source operation: %j', async (...flags) => {
+    await expect(runPermissionPushHandback([...identity, ...flags])).rejects.toThrow(
+      'invalid_contract_revision',
+    );
+    expect(state.checker).not.toHaveBeenCalled();
+    expect(state.update).not.toHaveBeenCalled();
+    expect(state.connect).not.toHaveBeenCalled();
+  });
+  it('v2 retries exact H0/H1 and request after lost response; output distinguishes snapshot from control', async () => {
+    const file = join(scratch, 'feedback-v2.txt');
+    await writeFile(file, 'private revision feedback');
+    let lost = true;
+    state.update.mockImplementation(async (_name, options) => {
+      const request = options.args[0] as PushHandbackRequest;
+      if (lost) {
+        lost = false;
+        throw new Error('response lost after server consumption');
+      }
+      return {
+        version: 2,
+        requestId: request.requestId,
+        payload: pushHandbackPayload(request),
+        outcome: 'handed_back',
+        acceptedContract: { version: 1, sha256: 'b'.repeat(64) },
+      };
+    });
+    const args = [
+      ...identity,
+      '--execute',
+      '--request-id',
+      'fixed-v2',
+      '--by',
+      'private operator',
+      '--feedback-file',
+      file,
+      '--original-contract-sha256',
+      'a'.repeat(64),
+      '--expected-contract-sha256',
+      'b'.repeat(64),
+    ];
+    await expect(runPermissionPushHandback(args)).rejects.toThrow('response lost');
+    expect(await runPermissionPushHandback(args)).toBe(0);
+    expect(state.update.mock.calls[0]).toEqual(state.update.mock.calls[1]);
+    const call = state.update.mock.calls[1]?.[1].args[0];
+    expect(call.version).toBe(2);
+    expect(call.originalContract.sha256).toBe('a'.repeat(64));
+    expect(call.expectedContract.sha256).toBe('b'.repeat(64));
+    const output = JSON.stringify(vi.mocked(console.log).mock.calls);
+    expect(output).toContain('acceptedContract');
+    expect(output).not.toMatch(/private operator|private revision|payload/);
+    expect(state.query).not.toHaveBeenCalled();
+    expect(state.signal).not.toHaveBeenCalled();
+  });
   it.each([{ mode: [] }, { mode: ['--check'] }])(
     'default/check is truly query-only: $mode',
     async ({ mode }) => {
