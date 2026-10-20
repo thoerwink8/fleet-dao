@@ -79,6 +79,7 @@ describe('固定 Git blob 的生成快照计量', { timeout: 30000 }, () => {
       chargeableAddedLines: raw,
       reason: expect.stringContaining(`信任根 ${p}`),
     });
+    expect(measured.reason).toContain('拆成单独一片先合');
   });
   it('全局raw识别改名时，不用局部no-renames全量快照错误抵扣代码', async () => {
     const f = await fixture(true);
