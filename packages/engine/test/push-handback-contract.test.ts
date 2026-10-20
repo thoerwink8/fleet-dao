@@ -451,7 +451,8 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
         expect(calls.segment).toHaveLength(1);
         expect(rounds).toBe(1);
       },
-      { tasks, maxCachedWorkflows: 0 },
+      // 本例核接纳后的放弃语义，不驱逐工作流；固定原历史/真换 worker 另外覆盖重放。
+      { tasks },
     );
   });
 
@@ -496,7 +497,8 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
         expect(calls.segment[1]?.brief).toEqual(h1);
         await abandon(handle);
       },
-      { tasks, maxCachedWorkflows: 0 },
+      // 本例核统计失败后的控制消费，不驱逐工作流；固定原历史/真换 worker 另外覆盖重放。
+      { tasks },
     );
   });
 });
