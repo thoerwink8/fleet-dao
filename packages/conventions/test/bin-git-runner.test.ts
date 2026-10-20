@@ -71,6 +71,7 @@ describe('pnpm work queue 走到「git grep 没匹配」那条路径', () => {
       git: gitRunner(dir),
       readBeats: () => [],
       readLeases: () => [],
+      readFranceClaims: async () => [],
       now: () => new Date('2026-10-16T09:00:00Z'),
     });
     expect(r.problems.filter((p) => p.includes('引导'))).toEqual([]);

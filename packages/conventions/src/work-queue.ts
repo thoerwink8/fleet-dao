@@ -16,6 +16,9 @@
 // 没有读的口子；pnpm work claim 以前也不在本机留底——所以队列读不到、领过的单都显示「领者：无」。现在 claim / renew 成了就在
 // ~/.fleet-dao/local-claims/ 记一份（单号、仓、租约到期），done 删掉；队列只认没到期的。法国自己顺延的租约（会话在动、PR 挂着）
 // 本机看不到，那两种情况由工作树、PR 两个信号兜住。改这之前领的单本机没有底，要靠工作树、PR。
+// 单 #3389：现在队列还读法国 GET /api/nodes/claims（本机通行证读全部机器的租约）：任何机器的没到期租约都判「在做」，领者写
+// claimed_by 的编号和到期；读不到法国（没装配置、401、503、404、超时、返回认不出）领者写「没查成：原因」，本来会判成可接的改判不可接，
+// 并在 problems 里报。本机租约文件只作补充。
 // 读不成的部分记进 problems 照实报；单和 PR 读不成整条命令失败，退出码 1。
 // 当前仓或本机租约没读成时，本来会判成可接的改为不可接：没对上仓的租约不能当成没有。
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -46,7 +49,9 @@ export const STATE_WORDS: Record<QueueState, string> = {
 /** 一个「有人在做」的迹象：工作树、租约、会话心跳 */
 export type Claimer =
   | { kind: 'worktree'; branch: string; path: string }
-  | { kind: 'lease'; until: string }
+  | { kind: 'lease'; until: string; source: 'local' }
+  | { kind: 'lease'; until: string; source: 'france'; claimedBy: string }
+  | { kind: 'unchecked'; reason: string }
   | { kind: 'heartbeat'; session: string; worktree: string | null; branch: string; minutesAgo: number };
 
 export interface QueueItem {
@@ -94,6 +99,15 @@ export interface LeaseRecord {
   leaseUntil: string;
 }
 
+/** 法国 GET /api/nodes/claims 回的一条租约 */
+export interface FranceClaim {
+  repo: string;
+  issue: number;
+  claimedBy: string;
+  /** ISO 时刻 */
+  leaseUntil: string;
+}
+
 export interface QueueDeps {
   gh: Gh;
   git: Git;
@@ -101,6 +115,8 @@ export interface QueueDeps {
   readBeats: () => BeatLite[];
   /** 本机记下的领单租约；读不成抛 */
   readLeases: () => LeaseRecord[];
+  /** 法国所有机器的租约（#3389）；读不到抛，message 就是写进「没查成：」的原因 */
+  readFranceClaims: () => Promise<FranceClaim[]>;
   now: () => Date;
   /**
    * 识仓。不传 env 用进程环境；传了 root 才把 origin（含 relay 路径里的 github 仓名）和显式 GH_REPO 放在同一份规则里判。
@@ -118,6 +134,89 @@ async function ghJson(gh: Gh, args: string[], what: string): Promise<unknown> {
   } catch {
     throw new Error(`${what}：gh 回的不是 JSON`);
   }
+}
+
+const FRANCE_TIMEOUT_MS = 8_000;
+const FRANCE_CLAIMS_PATH = '/api/nodes/claims';
+const FRANCE_TOKEN_HEADER = 'X-Fleet-Node-Token';
+
+const exactKeys = (o: Record<string, unknown>, keys: readonly string[]) =>
+  Object.keys(o).length === keys.length && keys.every((k) => k in o);
+
+/** 严格认法国回的租约表：多字段、缺字段、类型不对都抛「认不出」 */
+export function parseFranceClaims(text: string): FranceClaim[] {
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    throw new Error('法国返回的不是 JSON，认不出');
+  }
+  const top =
+    typeof v === 'object' && v !== null && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  if (top === null || !exactKeys(top, ['claims']) || !Array.isArray(top.claims))
+    throw new Error('法国返回的租约表形状不对，认不出');
+  return top.claims.map((raw: unknown, idx: number): FranceClaim => {
+    const c =
+      typeof raw === 'object' && raw !== null && !Array.isArray(raw)
+        ? (raw as Record<string, unknown>)
+        : null;
+    if (
+      c === null ||
+      !exactKeys(c, ['repo', 'issue', 'claimedBy', 'leaseUntil']) ||
+      typeof c.repo !== 'string' ||
+      !/^[^/\s]+\/[^/\s]+$/.test(c.repo) ||
+      typeof c.issue !== 'number' ||
+      !Number.isSafeInteger(c.issue) ||
+      c.issue <= 0 ||
+      typeof c.claimedBy !== 'string' ||
+      c.claimedBy === '' ||
+      typeof c.leaseUntil !== 'string' ||
+      Number.isNaN(Date.parse(c.leaseUntil))
+    )
+      throw new Error(`法国返回的第 ${idx + 1} 条租约认不出`);
+    return { repo: c.repo, issue: c.issue, claimedBy: c.claimedBy, leaseUntil: c.leaseUntil };
+  });
+}
+
+/**
+ * 真读：GET <地址>/api/nodes/claims，通行证只放请求头、不进任何输出。
+ * endpoint 读不到配置时抛（message 写明怎么补）；非 200、超时、认不出都抛带原因的 Error。
+ */
+export function liveFranceClaims(
+  endpoint: () => { url: string; token: string },
+  fetchImpl: typeof fetch = fetch,
+  timeoutMs = FRANCE_TIMEOUT_MS,
+): () => Promise<FranceClaim[]> {
+  return async () => {
+    const { url, token } = endpoint();
+    let res: Response;
+    let text: string;
+    try {
+      res = await fetchImpl(`${url.replace(/\/+$/, '')}${FRANCE_CLAIMS_PATH}`, {
+        method: 'GET',
+        headers: { [FRANCE_TOKEN_HEADER]: token },
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      text = await res.text();
+    } catch (e) {
+      const name = (e as { name?: unknown } | null)?.name;
+      if (name === 'TimeoutError' || name === 'AbortError')
+        throw new Error(`法国 ${timeoutMs / 1000} 秒内没回（超时）`);
+      throw new Error(`连不上法国：${msg(e).replaceAll(token, '***').slice(0, 200)}`);
+    }
+    if (res.status !== 200) {
+      let code = '';
+      try {
+        const e = (JSON.parse(text) as { error?: unknown }).error;
+        if (typeof e === 'string' && /^[\w.-]{1,64}$/.test(e)) code = `（${e}）`;
+      } catch {
+        // body 不是约定的 JSON：只报状态
+      }
+      const hint = res.status === 404 ? '，接口可能还没上线' : '';
+      throw new Error(`法国回 HTTP ${res.status}${code}${hint}`);
+    }
+    return parseFranceClaims(text);
+  };
 }
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : String(e));
@@ -285,7 +384,17 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
     leaseFailed = true;
     problems.push(`本机记下的领单租约没读成（不当成没有，也不当成可接）：${msg(e)}`);
   }
-  const leaseUnchecked = repo === null || leaseFailed;
+  let franceError: string | null = null;
+  let franceClaims: FranceClaim[] = [];
+  try {
+    franceClaims = (await deps.readFranceClaims()).filter(
+      (c) => repo !== null && c.repo.toLowerCase() === repo.toLowerCase(),
+    );
+  } catch (e) {
+    franceError = msg(e);
+    problems.push(`法国的租约没查成（别的机器领的单看不到，不当成可接）：${franceError}`);
+  }
+  const leaseUnchecked = repo === null || leaseFailed || franceError !== null;
   let pending: Set<string> | null = null;
   try {
     pending = new Set((await listPending(deps.git, deps.gh, MAIN)).map((d) => d.id));
@@ -323,10 +432,20 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
       const trees = worktrees
         .filter((w) => mine(w.branch))
         .map((w): Claimer => ({ kind: 'worktree', branch: w.branch, path: w.path }));
-      const lease = leases
-        .filter((l) => l.issue === i.number && Date.parse(l.leaseUntil) > nowMs)
-        .map((l): Claimer => ({ kind: 'lease', until: l.leaseUntil }));
-      const claimers = [...trees, ...lease, ...heartbeats];
+      const france = franceClaims
+        .filter((c) => c.issue === i.number && Date.parse(c.leaseUntil) > nowMs)
+        .map(
+          (c): Claimer => ({ kind: 'lease', until: c.leaseUntil, source: 'france', claimedBy: c.claimedBy }),
+        );
+      // 本机文件只作补充：法国已经有这张单的有效租约就不重复列
+      const lease =
+        france.length > 0
+          ? france
+          : leases
+              .filter((l) => l.issue === i.number && Date.parse(l.leaseUntil) > nowMs)
+              .map((l): Claimer => ({ kind: 'lease', until: l.leaseUntil, source: 'local' }));
+      const unchecked: Claimer[] = franceError === null ? [] : [{ kind: 'unchecked', reason: franceError }];
+      const claimers = [...trees, ...lease, ...heartbeats, ...unchecked];
       const first = heartbeats[0];
       const heartbeatMinutes = first?.kind === 'heartbeat' ? first.minutesAgo : null;
       const pr = claimed.get(i.number) ?? null;
@@ -349,7 +468,9 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
         const how: string[] = [];
         if (pr !== null) how.push(`PR #${pr} 开着`);
         for (const t of trees) if (t.kind === 'worktree') how.push(`工作树 ${t.branch}`);
-        for (const l of lease) if (l.kind === 'lease') how.push(`租约到 ${l.until}`);
+        for (const l of lease)
+          if (l.kind === 'lease')
+            how.push(l.source === 'france' ? `${l.claimedBy} 的租约到 ${l.until}` : `租约到 ${l.until}`);
         if (alive) how.push(`心跳 ${heartbeatMinutes} 分钟前`);
         why = `在做：${how.join('、')}`;
       } else if (blockedBy.length > 0 || blockedUntil !== null) {
@@ -367,7 +488,10 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
         why = `等人拍：贴了「${HUMAN_DECISION_LABEL}」`;
       } else if (leaseUnchecked) {
         state = 'blocked';
-        why = '租约没查成，不当成可接、也不当成没有';
+        why =
+          franceError !== null
+            ? `没查成：${franceError}；不当成可接、也不当成没有`
+            : '租约没查成，不当成可接、也不当成没有';
       } else {
         state = 'takeable';
         why = '可接：没有 PR、工作树、租约、活着的心跳，没有没关的前置';
@@ -391,7 +515,9 @@ export async function buildQueue(deps: QueueDeps): Promise<QueueReport> {
 
 function claimerText(c: Claimer): string {
   if (c.kind === 'worktree') return `工作树 ${c.branch}`;
-  if (c.kind === 'lease') return `租约到 ${c.until}`;
+  if (c.kind === 'unchecked') return `没查成：${c.reason}`;
+  if (c.kind === 'lease')
+    return c.source === 'france' ? `${c.claimedBy} 租约到 ${c.until}` : `租约到 ${c.until}`;
   return `会话 ${c.session}${c.worktree ? `（${c.worktree}）` : ''}`;
 }
 
