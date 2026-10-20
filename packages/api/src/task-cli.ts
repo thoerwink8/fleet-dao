@@ -28,9 +28,12 @@ export const TASK_USAGE =
   '（继续、放弃发给任务工作流，信号名和驾驶舱「继续」「叫停」一样：taskContinue、taskAbandon；' +
   '继续同时发 taskRouteWake，把睡在等选路里的叫醒；' +
   '重做走现成的 taskRedo.redo，只在已叫停或挂起时另起一代，做完、失败和还在跑的拒绝并说原因。' +
-  '--note 必填，写进操作记录。找不到任务工作流退出码 1，不打印成功。退出码：0 做成了；1 没做成；2 参数不对）';
+  '--note 必填，写进操作记录。找不到任务工作流退出码 1，不打印成功。退出码：0 做成了；1 没做成；2 参数不对）' +
+  '。体量关口重评：fleet-api task budget-remeasure <owner/仓名> <单号> --head <完整sha> --base <完整sha> --note "<为什么>"' +
+  ' 默认只读预检（只重新测量、不放行、不写操作记录）；预检通过后加 --execute --run <完整runId> --park <停点编号>（都取自预检输出）' +
+  '才放行这一份成果；不调用「继续」、不授权后续交付，测不全、超预算、换头换代都保留原停点';
 
-const ACTIONS = ['continue', 'abandon', 'redo'] as const;
+const ACTIONS = ['continue', 'abandon', 'redo', 'budget-remeasure'] as const;
 export type TaskAction = (typeof ACTIONS)[number];
 
 export interface TaskArgs {
@@ -39,7 +42,17 @@ export interface TaskArgs {
   name: string;
   issueNumber: number;
   note: string;
+  /** budget-remeasure 专用：精确 head、固定测量 base；--execute 才放行，且必须带预检看到的 run 和停点编号。 */
+  head?: string;
+  base?: string;
+  run?: string;
+  park?: string;
+  execute?: boolean;
 }
+
+const FULL_SHA = /^[0-9a-f]{40}$/;
+const VALUE_FLAGS = ['--head', '--base', '--run', '--park'] as const;
+type ValueFlag = (typeof VALUE_FLAGS)[number];
 
 /** GitHub 的写法：owner 是字母、数字、连字符，仓名再加 . 和 _。和 dispatch 同一条。 */
 const REPO_ARG = /^([A-Za-z0-9][A-Za-z0-9-]*)\/([A-Za-z0-9._-]+)$/;
@@ -53,27 +66,56 @@ function usage(message: string): never {
 export function parseTaskArgs(argv: readonly string[]): TaskArgs {
   const positionals: string[] = [];
   let note: string | undefined;
+  const flags: Partial<Record<ValueFlag, string>> = {};
+  let execute = false;
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i] ?? '';
     if (arg === '--note') {
       const value = argv[++i];
       if (value === undefined || value.startsWith('--')) usage('--note 后面要跟为什么');
       note = value.trim();
+    } else if ((VALUE_FLAGS as readonly string[]).includes(arg)) {
+      const value = argv[++i];
+      if (value === undefined || value.startsWith('--')) usage(`${arg} 后面要跟值`);
+      if (flags[arg as ValueFlag] !== undefined) usage(`${arg} 给了两次`);
+      flags[arg as ValueFlag] = value.trim();
+    } else if (arg === '--execute') {
+      execute = true;
     } else if (arg.startsWith('-')) {
       usage(`认不出参数 ${arg.split('=')[0]}`);
     } else {
       positionals.push(arg);
     }
   }
-  if (positionals.length !== 3) usage('要三个参数：continue、abandon 或 redo，仓，单号');
+  if (positionals.length !== 3) usage('要三个参数：continue、abandon、redo 或 budget-remeasure，仓，单号');
   const [action = '', repo = '', num = ''] = positionals;
-  if (!ACTIONS.includes(action as TaskAction)) usage(`认不出「${action}」：只收 continue、abandon、redo`);
+  if (!ACTIONS.includes(action as TaskAction))
+    usage(`认不出「${action}」：只收 continue、abandon、redo、budget-remeasure`);
   const m = REPO_ARG.exec(repo);
   if (!m?.[1] || !m[2]) usage(`认不出仓「${repo}」：要写成 owner/仓名`);
   if (!/^[1-9]\d{0,8}$/.test(num)) usage(`单号「${num}」不是正整数`);
   if (note === undefined || note === '') usage('--note 必填（写进操作记录）');
   if (note.length > MAX_NOTE) usage(`--note 太长（最多 ${MAX_NOTE} 个字）`);
-  return { action: action as TaskAction, owner: m[1], name: m[2], issueNumber: Number(num), note };
+  const base = { action: action as TaskAction, owner: m[1], name: m[2], issueNumber: Number(num), note };
+  if (action !== 'budget-remeasure') {
+    if (execute || Object.keys(flags).length > 0)
+      usage('--head、--base、--run、--park、--execute 只给 budget-remeasure 用');
+    return base;
+  }
+  const { '--head': head, '--base': from, '--run': run, '--park': park } = flags;
+  if (head === undefined || !FULL_SHA.test(head)) usage('--head 要完整 40 位小写 sha（精确的成果头）');
+  if (from === undefined || !FULL_SHA.test(from)) usage('--base 要完整 40 位小写 sha（固定的测量基线）');
+  if (park !== undefined && !/^\d+\.\d+\.\d+$/.test(park)) usage('--park 要写成预检打印的 停点编号 N.N.N');
+  if (execute && (run === undefined || park === undefined))
+    usage('--execute 必须同时带预检看到的 --run 和 --park，不凭当前最新状态放行');
+  return {
+    ...base,
+    head,
+    base: from,
+    ...(run === undefined ? {} : { run }),
+    ...(park === undefined ? {} : { park }),
+    ...(execute ? { execute: true } : {}),
+  };
 }
 
 export interface TaskRunDeps {
@@ -165,14 +207,103 @@ export async function runTask(args: TaskArgs, deps: TaskRunDeps): Promise<string
   } catch (err) {
     if (err instanceof TaskCliError) throw err;
     const result = `没查成：${errMessage(err)}`;
-    await record(deps, args, typed, { ok: false, result }).catch(() => undefined);
+    // 重评预检只读，不写操作记录
+    if (args.action !== 'budget-remeasure' || args.execute === true)
+      await record(deps, args, typed, { ok: false, result }).catch(() => undefined);
     throw new TaskCliError(`没做成：${typed}：${result}`, 1);
   }
 }
 
+/**
+ * 体量关口重评（#3249）。默认只读预检：重新测量这一份成果，不放行、不写操作记录；--execute 才让工作流放行这一份交付，
+ * 并写一条操作记录。不发 taskContinue、不增加继续次数、不授权后续交付。任何拒绝都保留原停点，原因照实说。
+ */
+async function budgetRemeasure(
+  args: TaskArgs,
+  deps: TaskRunDeps,
+  repo: { owner: string; name: string },
+  task: { id: string; issueNumber: number; state: TaskState },
+  ref: string,
+): Promise<string> {
+  const execute = args.execute === true;
+  const fail = async (result: string): Promise<never> => {
+    // 预检只读，不写操作记录；执行的每个结果都记
+    if (execute) await record(deps, args, ref, { ok: false, result, taskId: task.id });
+    throw new TaskCliError(`没做成：${ref}：${result}`, 1);
+  };
+  if (isFinished(task.state)) return fail(`任务已经结束（${task.state}），没有可重评的停点`);
+  const remeasure = deps.workflows.remeasureLineBudget;
+  const execution = deps.workflows.taskWorkflowExecution;
+  if (!remeasure || !execution)
+    return fail('这个入口没接上可信重评能力（Temporal 控制缺 remeasureLineBudget），没放行');
+  let workflowId: string;
+  let runId: string;
+  try {
+    workflowId = deps.workflows.runningTaskWorkflow
+      ? await deps.workflows.runningTaskWorkflow({ owner: repo.owner, name: repo.name }, task.issueNumber)
+      : taskWorkflowId(repo, task.issueNumber);
+    const current = await execution(workflowId);
+    if (!current.running) return fail(`任务工作流 ${workflowId} 已经结束，没有可重评的停点`);
+    runId = current.runId;
+  } catch (err) {
+    if (err instanceof TaskCliError) throw err;
+    if (err instanceof WorkflowGoneError || err instanceof WorkflowTargetNotFoundError)
+      return fail('这张单的任务工作流已经结束或不存在，没有可重评的停点');
+    const why = err instanceof WorkflowUnavailableError ? err.message : errMessage(err);
+    return fail(`查在跑的任务工作流没成：${why}`);
+  }
+  if (args.run !== undefined && args.run !== runId)
+    return fail(`工作流已换代：现在的 run 是 ${runId}，不是请求的 ${args.run}，没放行`);
+  let response: Awaited<ReturnType<typeof remeasure>>;
+  try {
+    response = await remeasure({
+      workflowId,
+      runId,
+      repo: { owner: repo.owner, name: repo.name },
+      taskId: task.id,
+      head: args.head as string,
+      base: args.base as string,
+      mode: execute ? 'resume' : 'check',
+      ...(args.park === undefined ? {} : { park: args.park }),
+      by: deps.operator,
+    });
+  } catch (err) {
+    if (err instanceof WorkflowGoneError) return fail('任务工作流已经结束，没放行');
+    if (err instanceof WorkflowUnavailableError) return fail('工作流服务暂时连不上，结果未知，原停点保留');
+    return fail(`重评没做成（结果未知，原停点保留）：${errMessage(err)}`);
+  }
+  if (!response.ok) {
+    const where = response.park ? `；停点 ${response.park}` : '';
+    const now = response.current
+      ? `；停点上的交付头 ${response.current.head}，原始 ${response.current.rawAddedLines} 行，按预算计 ${response.current.chargeableAddedLines} 行，预算 ${response.current.budget} 行`
+      : '';
+    return fail(
+      `体量重评被拒（${response.reason}）：${response.detail}${where}${now}；原停点保留，没放行任何成果`,
+    );
+  }
+  const r = response.receipt;
+  const facts =
+    `run ${runId}，停点 ${response.park}，头 ${r.head}，基线 ${r.base}，原始 ${r.rawAddedLines} 行，` +
+    `已核生成 ${r.verifiedGeneratedLines} 行，实际计量 ${r.chargeableAddedLines} 行，原预算 ${r.budget} 行`;
+  if (!execute) {
+    return (
+      `预检通过（只读，没放行）：${ref}：${facts}。要放行这一份成果：` +
+      `fleet-api task budget-remeasure ${repo.owner}/${repo.name} ${task.issueNumber} --head ${r.head} --base ${r.base} ` +
+      `--execute --run ${runId} --park ${response.park} --note "<为什么>"`
+    );
+  }
+  const text =
+    response.outcome === 'already_resumed'
+      ? `已放行过（幂等回执，不再放行别的头）：${ref}：${facts}`
+      : `已放行这一份成果（不算「继续」，不授权后续交付）：${ref}：${facts}`;
+  await record(deps, args, ref, { ok: true, result: text, taskId: task.id });
+  return text;
+}
+
 async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise<string> {
   const refuse = async (ref: string, result: string, taskId?: string): Promise<never> => {
-    await record(deps, args, ref, { ok: false, result, taskId });
+    if (args.action !== 'budget-remeasure' || args.execute === true)
+      await record(deps, args, ref, { ok: false, result, taskId });
     throw new TaskCliError(`没做成：${ref}：${result}`, 1);
   };
 
@@ -203,6 +334,8 @@ async function decide(args: TaskArgs, deps: TaskRunDeps, typed: string): Promise
     await record(deps, args, ref, { ok: true, result: text, taskId: task.id });
     return text;
   }
+
+  if (args.action === 'budget-remeasure') return budgetRemeasure(args, deps, repo, task, ref);
 
   const word = args.action === 'continue' ? '继续' : '放弃';
   if (isFinished(task.state)) {
