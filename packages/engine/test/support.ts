@@ -61,6 +61,8 @@ export interface WorkerOptions {
   workflowBundle?: WorkflowBundle;
   /** 仅合成历史诊断使用；观察真实 runUntil Promise，不改变 worker 生命周期。 */
   observeWorker?: (worker: Worker, run: Promise<unknown>, bundle: WorkflowBundle) => void;
+  /** 测试按住工作流任务完成；不给就是不注册。 */
+  sinks?: NonNullable<Parameters<typeof Worker.create>[0]>['sinks'];
 }
 
 /**
@@ -111,6 +113,7 @@ export async function withWorker<T>(
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
     ...(options.jobs ? { jobs: options.jobs } : {}),
     ...(options.tasks ? { tasks: options.tasks } : {}),
+    ...(options.sinks ? { sinks: options.sinks } : {}),
   });
   const run = worker.runUntil(fn(taskQueue));
   options.observeWorker?.(worker, run, workflowBundle);

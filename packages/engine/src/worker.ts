@@ -99,6 +99,8 @@ export interface CreateEngineWorkerOptions {
   wrapActivities?: (activities: EngineActivities) => EngineActivities;
   /** 缓存几条工作流；0 = 不缓存、每个工作流任务都从历史重放（换工人、换代码演练用）。 */
   maxCachedWorkflows?: number;
+  /** 测试把放弃任务的完成 RPC 按住，用来稳定造出活动完成与取消交错。生产不传。 */
+  sinks?: NonNullable<Parameters<typeof Worker.create>[0]>['sinks'];
   log?: (message: string) => void;
 }
 
@@ -128,6 +130,7 @@ export async function createEngineWorker(options: CreateEngineWorkerOptions): Pr
     shutdownForceTime: `${config.shutdownGraceSeconds + SHUTDOWN_FORCE_EXTRA_SECONDS} seconds`,
     maxConcurrentActivityTaskExecutions: config.maxConcurrentActivities,
     ...(options.maxCachedWorkflows === undefined ? {} : { maxCachedWorkflows: options.maxCachedWorkflows }),
+    ...(options.sinks ? { sinks: options.sinks } : {}),
   });
 }
 

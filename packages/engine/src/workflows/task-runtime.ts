@@ -9,6 +9,7 @@
 
 import type { TaskState } from '@fleet-dao/shared';
 import { clipCauseSummary, type RunCause } from '@fleet-dao/shared/run-cause';
+import { HandlerUnfinishedPolicy } from '@temporalio/common';
 import {
   CancellationScope,
   condition,
@@ -394,10 +395,26 @@ export class TaskRuntime {
     setHandler(taskRouteWakeSignal, () => {
       this.routeWakes += 1;
     });
-    setHandler(taskAbandonSignal, (command) => {
-      this.abandon ??= command;
-      this.cancelAll();
-    });
+    setHandler(
+      taskAbandonSignal,
+      async (command) => {
+        this.abandon ??= command;
+        // 只在放弃信号里问（#3413）。问在「还有没有长活动」之前：重放时标记在不在只看这次信号，
+        // 不看当时 running。没走到放弃的历史不记这个标记，体量关口旧停点的命令序保持原样。
+        // 可跳时间测试服务端在「活动完成已从待办表摘掉、完成事件还缓冲着」时，同任务的
+        // RequestCancel 会 FailedPrecondition：ACTIVITY_UNKNOWN，并且不写失败、不判工作流任务超时。
+        // 真服务端会收下取消。新历史且还有长活动：这一任务只挂 1ms 定时器。完成若在本任务在途时到达，
+        // 下一任务看到完成已经进历史，不再发取消；活动若仍在跑，下一任务再取消。老历史没有标记，仍当场取消。
+        if (patched('abandon-cancel-after-buffer') && this.running.size > 0) {
+          await sleep('1 ms');
+          if (this.abandon && this.running.size > 0) this.cancelAll();
+          return;
+        }
+        this.cancelAll();
+        // 被缓冲的完成和放弃同一任务到达时，主循环可能先收场、1ms 定时器还没响：这个处理器随工作流丢下，不报未完成。
+      },
+      { unfinishedPolicy: HandlerUnfinishedPolicy.ABANDON },
+    );
     setHandler(taskHandbackPermissionPushUpdate, (request) => {
       const payload = pushHandbackPayload(request);
       const cached = this.pushHandbackRequests.get(request.requestId);

@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import type { WorkflowHandle } from '@temporalio/client';
+import { fileURLToPath } from 'node:url';
+import type { WorkflowHandle, WorkflowHandleWithFirstExecutionRunId } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
+import { bundleWorkflowCode } from '@temporalio/worker';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { FakeWorld } from '../src/fakes.ts';
 import { createFakeWorld } from '../src/fakes.ts';
@@ -28,10 +30,12 @@ import { OK_SEGMENT, scripted } from './task-script.ts';
 
 // #3413：PR #3412 首轮完整 CI（workflow run 39392992046 / job 118528847472，head
 // d45207791e21faa6c7c166f5023b49fe18f21264，CI merge 71652455b385751c413650a5c9c99ce5d5a2032a，
-// 2026-10-20T08:25:28Z）在 worker replacement 用例原 60 秒超时；当时本文件未取证，该 run 的原 history
-// 缺失、等待阶段未知，收尾的 worker 引用/channel shutdown 报错不是根因证据。另一台 push-handback-contract
-// 的 park-kind 重放错误（#3258）是别的用例、别的 run，不拿来顶替。之后本文件失败或 50 秒 watchdog
-// 按精确 run 保全原 protobuf/describe 与阶段时间线；正常通过不读不写。
+// 2026-10-20T08:25:28Z）在 worker replacement 用例原 60 秒超时。该 run 没有留下 history。
+// 同一等待是 abandon 之后的 result()：第二段 runSegment 已经开始，放弃信号的工作流任务要取消它，
+// 完成却在该任务在途时被测试服务端缓冲并从待办表摘掉，RequestCancel 被拒 ACTIVITY_UNKNOWN，
+// 历史停在 WorkflowTaskStarted，不写失败也不判超时。另一台 park-kind（#3258）不是这条 run。
+// 工作流用 abandon-cancel-after-buffer 把取消让到下一任务。失败或 50 秒 watchdog 仍按精确 run
+// 保全原 protobuf/describe 与阶段；正常通过不读不写。
 // 先登记 watchdog，再让 useEnv 的 beforeEach 创建服务端；不延后原测试的诊断时钟。
 const output = new DiagnosticOutput();
 const testSha256 = createHash('sha256')
@@ -153,6 +157,15 @@ function world() {
     push: () => new PortError('WORKFLOWS_PERMISSION', 'isolated failure', { retryable: false }),
   });
 }
+
+type HistEvent = {
+  workflowExecutionSignaledEventAttributes?: { signalName?: string } | null;
+  timerStartedEventAttributes?: object | null;
+  activityTaskCompletedEventAttributes?: object | null;
+  activityTaskCancelRequestedEventAttributes?: object | null;
+  workflowTaskStartedEventAttributes?: object | null;
+  workflowExecutionCompletedEventAttributes?: object | null;
+};
 
 describe('permission push handback original park protocol', { timeout: 60_000 }, () => {
   it('unknown leaves original park unchanged; same business ID with changed payload reaches real Update conflict', async () => {
@@ -382,18 +395,9 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
   });
 
   it('same run reconstructs business receipts after worker replacement, then accepts one new request', async () => {
-    let segmentsDone = 0;
     const env = testEnvironment(),
       w = world(),
-      { tasks, calls } = scripted({
-        // 记下活动函数已经返回：length 在函数开头就加。本地负载复现（#3413）里放弃紧跟第二段调度发出，
-        // 那一个 workflow task 要取消的 runSegment 刚被测试服务端记完成，完成被拒 ACTIVITY_UNKNOWN，
-        // 之后服务端不再派也不判超时，result() 一直等到原 60 秒。
-        segment: async () => {
-          segmentsDone += 1;
-          return OK_SEGMENT;
-        },
-      }),
+      { tasks, calls } = scripted(),
       taskQueue = `handback-${randomUUID()}`;
     let h: WorkflowHandle | undefined, r: PushHandbackRequest | undefined;
     tasks.readPushHandbackPreflight = async () => ({ outcome: 'unknown', code: 'first_observation' });
@@ -442,12 +446,134 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
         ).toBe('handed_back');
         scopeFor(handle).mark('replacement:await-second-segment');
         await waitUntil(() => calls.segment.length === 2, 'new bounded segment after worker replacement');
-        scopeFor(handle).mark('replacement:await-second-segment-returned');
-        await waitUntil(() => segmentsDone === 2, 'second segment activity returned');
         await abandon(handle, 'replacement:abandon-signal-and-result');
       },
       { tasks, taskQueue, maxCachedWorkflows: 0 },
       'replacement-worker',
+    );
+  });
+
+  it('buffered runSegment completion during the abandon workflow task still reaches abandoned on that run', async () => {
+    const silent = { trace() {}, debug() {}, info() {}, warn() {}, error: console.error, log() {} };
+    const bundle = await bundleWorkflowCode({
+      workflowsPath: fileURLToPath(new URL('../src/workflows/index.ts', import.meta.url)),
+      workflowInterceptorModules: [fileURLToPath(new URL('./abandon-buffer-hold.ts', import.meta.url))],
+      logger: silent as never,
+    });
+    let releaseSecond: (() => void) | undefined;
+    let hold: 'missing' | 'ok' | 'timeout' = 'missing';
+    let pendingNames: string[] = [];
+    const env = testEnvironment(),
+      w = world(),
+      { tasks, calls } = scripted({
+        segment: async (_input, n) => {
+          if (n === 2) {
+            await new Promise<void>((resolve) => {
+              releaseSecond = resolve;
+            });
+          }
+          return OK_SEGMENT;
+        },
+      }),
+      taskQueue = `handback-${randomUUID()}`;
+    let h: WorkflowHandleWithFirstExecutionRunId | undefined, r: PushHandbackRequest | undefined;
+    tasks.readPushHandbackPreflight = async () => ({ outcome: 'unknown', code: 'first_observation' });
+    await withWorker(
+      env,
+      w,
+      async () => {
+        h = await startWorkflow(env, {
+          workflowId: `handback-${randomUUID()}`,
+          taskQueue,
+          args: [task()],
+        });
+        r = request(await parked(h, 'buffer:first-parked'));
+        expect((await requestPushHandback(h, r, 'buffer:first-request')).outcome).toBe('unknown');
+      },
+      { tasks, taskQueue, maxCachedWorkflows: 0 },
+      'buffer-first-worker',
+    );
+    tasks.readPushHandbackPreflight = async () => success;
+    await withWorker(
+      env,
+      w,
+      async () => {
+        const handle = h;
+        const original = r;
+        if (!handle || !original) throw new Error('first worker did not leave a run');
+        expect((await requestPushHandback(handle, original, 'buffer:duplicate')).outcome).toBe('unknown');
+        expect(
+          (
+            await requestPushHandback(
+              handle,
+              { ...original, requestId: 'newObservation' },
+              'buffer:new-request',
+            )
+          ).outcome,
+        ).toBe('handed_back');
+        scopeFor(handle).mark('buffer:await-second-segment');
+        await waitUntil(
+          () => calls.segment.length === 2 && releaseSecond !== undefined,
+          'second segment held',
+        );
+        scopeFor(handle).mark('buffer:abandon-while-segment-held');
+        await abandon(handle, 'buffer:abandon-signal-and-result');
+        expect(hold).toBe('ok');
+        const described = await handle.describe();
+        expect(described.workflowId).toBe(handle.workflowId);
+        expect(described.runId).toBe(handle.firstExecutionRunId);
+        expect(described.status.name).toBe('COMPLETED');
+        const events = ((await handle.fetchHistory()).events ?? []) as HistEvent[];
+        const signalAt = events.findIndex(
+          (e) => e.workflowExecutionSignaledEventAttributes?.signalName === 'taskAbandon',
+        );
+        expect(signalAt).toBeGreaterThan(0);
+        const after = events.slice(signalAt + 1);
+        const timerAt = after.findIndex((e) => e.timerStartedEventAttributes);
+        const completedAt = after.findIndex((e) => e.activityTaskCompletedEventAttributes);
+        // 放弃任务先记下 1ms 定时器，被缓冲的 runSegment 完成排在它后面；没有取消请求，run 不是停在 WorkflowTaskStarted。
+        expect(timerAt).toBeGreaterThanOrEqual(0);
+        expect(completedAt).toBeGreaterThan(timerAt);
+        expect(events.some((e) => e.activityTaskCancelRequestedEventAttributes)).toBe(false);
+        expect(events.at(-1)?.workflowExecutionCompletedEventAttributes).toBeTruthy();
+        expect(events.at(-1)?.workflowTaskStartedEventAttributes).toBeFalsy();
+      },
+      {
+        tasks,
+        taskQueue,
+        maxCachedWorkflows: 0,
+        workflowBundle: bundle,
+        sinks: {
+          hold: {
+            abandon: {
+              callDuringReplay: false,
+              fn: async () => {
+                const handle = h;
+                const release = releaseSecond;
+                if (!release || !handle) {
+                  hold = 'missing';
+                  return;
+                }
+                release();
+                try {
+                  await waitUntil(
+                    async () => {
+                      const pending = (await handle.describe()).raw.pendingActivities ?? [];
+                      pendingNames = pending.map((a) => a.activityType?.name ?? '');
+                      return pendingNames.every((name) => name !== 'runSegment');
+                    },
+                    `runSegment left pending while abandon task open (${pendingNames.join(',')})`,
+                  );
+                  hold = 'ok';
+                } catch {
+                  hold = 'timeout';
+                }
+              },
+            },
+          },
+        },
+      },
+      'buffer-replacement-worker',
     );
   });
   it('future hold generation rejects immediately without preflight or a stranded terminal handler', async () => {
