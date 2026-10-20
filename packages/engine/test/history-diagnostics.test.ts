@@ -77,7 +77,12 @@ describe('bounded original history transport', () => {
   });
 });
 
-async function fixture(failed = false, started = true, emit?: (line: string) => void) {
+async function fixture(
+  failed = false,
+  started = true,
+  emit?: (line: string) => void,
+  scheduleWatchdog?: (onFire: () => void, delayMs: number) => () => void,
+) {
   const root = await mkdtemp(join(tmpdir(), 'fleet-synthetic-history-'));
   roots.push(root);
   const lines: string[] = [],
@@ -121,6 +126,7 @@ async function fixture(failed = false, started = true, emit?: (line: string) => 
     }),
     failed: () => failed,
     artifactRoot: root,
+    ...(scheduleWatchdog ? { scheduleWatchdog } : {}),
   });
   let state = 'RUNNING';
   let resolve!: () => void;
@@ -147,6 +153,64 @@ async function fixture(failed = false, started = true, emit?: (line: string) => 
 }
 
 describe('local watchdog and owned worker cleanup', () => {
+  it('defers a controlled watchdog until slow preparation and the exact-run host barrier are ready', async () => {
+    vi.useFakeTimers();
+    let fire!: () => void;
+    const cancel = vi.fn();
+    const schedule = vi.fn((onFire: () => void, _delayMs: number) => {
+      fire = onFire;
+      return cancel;
+    });
+    const f = await fixture(false, false, undefined, schedule);
+    expect(schedule).toHaveBeenCalledWith(expect.any(Function), 50_000);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.lines).toEqual([]);
+    expect(f.exactHandle.fetchHistory).not.toHaveBeenCalled();
+    await f.scope.start(f.env, 'taskWorkflow', { workflowId: 'workflow', taskQueue: 'q', args: [] });
+    f.scope.mark('bounded-host-wait-after-real-result');
+    fire();
+    await f.scope.captureFailure();
+    expect(f.lines.map(parse)).toContainEqual(
+      expect.objectContaining({
+        outcome: 'captured',
+        kind: 'history',
+        reason: 'watchdog',
+        stage: 'bounded-host-wait-after-real-result',
+        runId: 'exact-run',
+      }),
+    );
+    expect(f.exactHandle.fetchHistory).toHaveBeenCalledTimes(1);
+    expect(f.worker.shutdown).not.toHaveBeenCalled();
+    f.stop();
+    await f.scope.finish();
+    await f.scope.finish();
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+  it('cancels an unfired controlled watchdog exactly once without capture', async () => {
+    const cancel = vi.fn();
+    const f = await fixture(false, true, undefined, () => cancel);
+    f.stop();
+    await f.scope.finish();
+    await f.scope.finish();
+    expect(cancel).toHaveBeenCalledTimes(1);
+    expect(f.exactHandle.fetchHistory).not.toHaveBeenCalled();
+    expect(f.lines).toEqual([]);
+  });
+  it('keeps an intentionally early controlled watchdog explicitly unknown without inventing a run', async () => {
+    let fire!: () => void;
+    const f = await fixture(false, false, undefined, (onFire) => {
+      fire = onFire;
+      return () => undefined;
+    });
+    fire();
+    await f.scope.captureFailure();
+    f.stop();
+    await f.scope.finish();
+    expect(f.lines.map(parse)).toEqual([
+      expect.objectContaining({ reason: 'watchdog', stage: 'test-start', code: 'no-started-run' }),
+    ]);
+    expect(f.exactHandle.fetchHistory).not.toHaveBeenCalled();
+  });
   it('does not replace the original error when diagnostic output itself fails', async () => {
     const original = new Error('original assertion');
     const sink = new Error('diagnostic output unavailable');
@@ -279,7 +343,9 @@ describe('local watchdog and owned worker cleanup', () => {
     vi.useFakeTimers();
     const f = await fixture();
     f.scope.mark('final-preflight-entered');
-    await vi.advanceTimersByTimeAsync(50_000);
+    await vi.advanceTimersByTimeAsync(49_999);
+    expect(f.exactHandle.fetchHistory).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
     expect(f.worker.shutdown).not.toHaveBeenCalled();
     f.stop();
     await f.scope.finish();
