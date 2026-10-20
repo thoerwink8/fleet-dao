@@ -63,7 +63,8 @@ function errorCode(error: unknown): AlertUnknownCode {
 }
 const same = (a: Stats, b: Stats) => a.dev === b.dev && a.ino === b.ino && a.uid === b.uid;
 
-// 本进程已经整表核过的提交代次。连续写入若每次重解全部旧行，时间花在解码，不是 COMMIT。
+// 本进程已经整表核过的提交代次。不记住时，每次打开和事务里各整表重解一次：
+// 256 次写入是 512 次全表 prepare、2*(0+…+255)=65280 行解码，时间在两次 COMMIT 之间，不是 fsync。
 // 文件身份或 change counter 对不上就整表重解。close 失败不清这份记忆。
 type DbGeneration = {
   dev: number;
@@ -554,8 +555,9 @@ class Spool {
   }
 }
 
-// 同进程连续写入复用已提交、未持锁的连接。每次重开都让 DELETE+EXTRA 再付一次新建 journal 的目录同步，
-// 256 次真实 COMMIT 会超过原来的 15 秒。跨调用不持有事务；代次变化、路径/journal 核验失败或本次抛错就关掉。
+// 同进程连续写入复用已提交、未持锁的连接。每次重开都再付一次打开和 DELETE journal 建立；
+// 和上面的整表重解叠在一起，256 次真实 COMMIT 的总等待会超过原来的 15 秒。
+// 跨调用不持有事务；代次变化、路径/journal 核验失败或本次抛错就关掉。
 type CachedSpool = { path: string; spool: Spool; held: boolean };
 let cachedSpool: CachedSpool | undefined;
 

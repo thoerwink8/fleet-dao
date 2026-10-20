@@ -114,10 +114,10 @@ describe('专用SQLite持久pending', () => {
         o.identity.workflowId = '\u0002'.repeat(300);
         expect(recordAdmissionAlert(path, o).kind).toBe('spooled');
       }
-      // 不记住代次时，构造和事务内各扫一次已有行：32 次写入是 2*(0+…+31)=992 次整表读取。
+      // 不记住代次时，构造和事务内各 prepare 一次全表：32 次写入是 64 次，行解码 2*(0+…+31)=992。
       expect(fullPayloadScans).toBeGreaterThan(0);
       expect(fullPayloadScans).toBeLessThanOrEqual(4);
-      // 代次记住之后若仍每次重开，EXTRA 的 journal 目录同步会把近上限连续写入拖过固定时限。
+      // 代次记住之后若仍每次重开，DELETE journal 的建立会再叠到连续写入上。必须仍是这一次打开。
       expect(opens).toBe(1);
     } finally {
       DatabaseSync.prototype.prepare = original;

@@ -337,10 +337,11 @@ describe('SQLite真实进程崩溃与恢复界', () => {
     }
     expect(count()).toBe(256);
     expect(observed).toBeGreaterThanOrEqual(512);
-    // 不记住代次时每次提交前都会整表再读：256 次是 2*(0+…+255)=65280 次。采到的次数必须仍是个位数。
+    // 不记住代次时，每次打开和事务内各 prepare 一次全表：256 次是 512 次，行解码 2*(0+…+255)=65280。
+    // 计数的是 prepare，不是行。采到的次数必须仍是个位数，否则等待落在两次 COMMIT 之间。
     expect(fullPayloadScans).toBeGreaterThan(0);
     expect(fullPayloadScans).toBeLessThanOrEqual(4);
-    // 每次重开都让 DELETE+EXTRA 再建一次 journal。256 次必须仍是这一次打开。
+    // 每次重开都再建立一次 DELETE journal。256 次必须仍是这一次打开。
     expect(opens).toBe(1);
     expect(mainPeak).toBeGreaterThan(1024 * 1024);
     expect(journalPeak).toBeGreaterThan(0);
