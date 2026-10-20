@@ -12,6 +12,8 @@
 // merge-gate.yml 在 PR 事件（头变了、正文改了——补上原话要重算）或 cold-verify 状态写上来时跑它（后一种逐个重算所有开着的 PR）；
 // 主线推送只在闸认的东西（判法、清单、工作流本身）变了才触发、同样重算所有开着的 PR——判法收紧了，开着的 PR 上旧的 success
 // 不能留着（#654 第二意见）；不检出、不跑 PR 里的代码：判法和清单用跑这段代码的那一份（主线的）。
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
   CI_POLICY_SOURCE_PREFIX,
@@ -37,6 +39,88 @@ import { loadStandardPaths } from './standard-paths-file.ts';
 
 export type GateState = 'success' | 'failure';
 
+interface Publication {
+  number: number;
+  lines: string[];
+  notChecked: boolean;
+  policy?: 'force' | 'off';
+  repo?: PolicyRepo;
+  feedback?: unknown;
+  failure?: string;
+}
+
+interface StatusWitness {
+  number: number;
+  consumed: Map<string, string>;
+}
+
+// 只保存本次计算实际读过的来源，不跨运行缓存；policyReader 的既有闭包也经过同一个 statuses 入口。
+const statusWitness = new AsyncLocalStorage<StatusWitness>();
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+  if (isObject(value))
+    return `{${Object.keys(value)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(value[k])}`)
+      .join(',')}}`;
+  return JSON.stringify(value) ?? 'null';
+}
+
+function sourceSnapshot(statuses: unknown[], number: number): string {
+  const contexts = new Set([COLD_VERIFY_CONTEXT, `${CI_POLICY_SOURCE_PREFIX}${number}`]);
+  // policy reader 会越过陌生 writer 选择可信来源，不能仅见证每个 context 的第一条。
+  return canonical(statuses.filter((raw) => isObject(raw) && contexts.has(String(raw.context))));
+}
+
+function observeSources(sha: string, statuses: unknown[]): void {
+  const scope = statusWitness.getStore();
+  if (!scope) return;
+  const current = sourceSnapshot(statuses, scope.number);
+  const consumed = scope.consumed.get(sha);
+  if (consumed !== undefined && consumed !== current)
+    throw new Error('本轮已消费的 cold/source 身份或内容改变，请重算');
+  scope.consumed.set(sha, current);
+}
+
+function sameRepoRun(url: URL, repo: PolicyRepo | undefined): boolean {
+  return (
+    !!repo &&
+    url.origin === 'https://github.com' &&
+    new RegExp(`^/${repo.repo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/actions/runs/[1-9]\\d*$`, 'i').test(
+      url.pathname,
+    )
+  );
+}
+
+function publicationUrl(targetUrl: string, proof: unknown, repo: PolicyRepo | undefined): string {
+  const url = new URL(targetUrl);
+  if (url.protocol !== 'https:') throw new Error('状态详情 URL 不是 HTTPS');
+  // Actions runId 只是首次发表的追溯位置，不是判定输入；其他链接（含自带 fragment）完整绑定。
+  const target =
+    repo && sameRepoRun(url, repo) && !url.search && !url.hash
+      ? `${url.origin}/${repo.repo.toLowerCase()}/actions/runs/`
+      : url.href;
+  const digest = createHash('sha256').update(canonical({ target, proof })).digest('hex');
+  url.hash = `fleet-merge-gate-v1=${digest}`;
+  return url.href;
+}
+
+function samePublicationUrl(left: unknown, right: string, repo: PolicyRepo | undefined): boolean {
+  if (typeof left !== 'string') return false;
+  try {
+    const old = new URL(left);
+    const current = new URL(right);
+    if (sameRepoRun(old, repo) && sameRepoRun(current, repo)) {
+      old.pathname = old.pathname.replace(/\d+$/, '1');
+      current.pathname = current.pathname.replace(/\d+$/, '1');
+    }
+    return old.href === current.href;
+  } catch {
+    return false;
+  }
+}
+
 /** 合并闸要读写的 GitHub 上的东西；读不到、读回来认不出就抛（调用方判「没查成」）。 */
 export interface GitHubReads {
   /** PR 现在的样子（GET /pulls/{n}）。 */
@@ -49,8 +133,8 @@ export interface GitHubReads {
   openPrs(): Promise<unknown[]>;
   writeStatus(
     sha: string,
-    status: { state: GateState; description: string; targetUrl?: string },
-  ): Promise<void>;
+    status: { state: GateState; description: string; targetUrl?: string; publication?: Publication },
+  ): Promise<undefined | 'unchanged' | 'closed'>;
 }
 
 const PRS_MAX_PAGES = 20;
@@ -60,7 +144,7 @@ const FILES_MAX_PAGES = 30;
 const STATUS_MAX_PAGES = 30;
 
 export function gateGitHub(api: GhApi): GitHubReads {
-  return {
+  const gh: GitHubReads = {
     pr: (number) => api.get(`/pulls/${number}`),
     async files(number) {
       const all: unknown[] = [];
@@ -82,7 +166,10 @@ export function gateGitHub(api: GhApi): GitHubReads {
         if (!Array.isArray(got))
           throw new Error(`提交 ${sha.slice(0, 7)} 的状态列表第 ${page} 页认不出（不是列表）`);
         all.push(...got);
-        if (got.length < 100) return all;
+        if (got.length < 100) {
+          observeSources(sha, all);
+          return all;
+        }
       }
       throw new Error(`提交 ${sha.slice(0, 7)} 的状态超过 ${STATUS_MAX_PAGES * 100} 条，没读完`);
     },
@@ -97,14 +184,84 @@ export function gateGitHub(api: GhApi): GitHubReads {
       throw new Error(`开着的 PR 超过 ${PRS_MAX_PAGES * 100} 个，没读完`);
     },
     async writeStatus(sha, s) {
+      let targetUrl = s.targetUrl;
+      if (s.publication && targetUrl) {
+        const statuses = await gh.statuses(sha);
+        const scope = statusWitness.getStore();
+        targetUrl = publicationUrl(
+          targetUrl,
+          {
+            sha,
+            state: s.state,
+            description: s.description,
+            ...s.publication,
+            sources: scope?.consumed.get(sha) ?? null,
+          },
+          s.publication.repo,
+        );
+        const latest = statuses.find((raw) => isObject(raw) && raw.context === GATE_CONTEXT);
+        let unchanged = false;
+        if (latest !== undefined) {
+          if (!isObject(latest) || !isObject(latest.creator) || !api.globalGet)
+            throw new Error('最新 merge-gate 的发表者身份未核实');
+          const writer = await api.globalGet('/users/github-actions%5Bbot%5D');
+          if (
+            !isObject(writer) ||
+            writer.login !== 'github-actions[bot]' ||
+            writer.type !== 'Bot' ||
+            !Number.isSafeInteger(writer.id) ||
+            Number(writer.id) < 1 ||
+            latest.creator.id !== writer.id ||
+            latest.creator.login !== writer.login ||
+            latest.creator.type !== writer.type
+          )
+            throw new Error('最新 merge-gate 不是已核实的 Actions Bot');
+          if (
+            !Number.isSafeInteger(latest.id) ||
+            Number(latest.id) < 1 ||
+            !['success', 'failure', 'pending', 'error'].includes(String(latest.state)) ||
+            (latest.description !== null && typeof latest.description !== 'string') ||
+            (latest.target_url !== null && typeof latest.target_url !== 'string')
+          )
+            throw new Error('最新 merge-gate 状态认不出');
+          if (
+            s.publication.repo &&
+            (typeof latest.url !== 'string' ||
+              latest.url.toLowerCase() !==
+                `https://api.github.com/repos/${s.publication.repo.repo}/statuses/${sha}`.toLowerCase())
+          )
+            throw new Error('最新 merge-gate 状态 URL 的仓或 SHA 对不上');
+          unchanged =
+            !!s.publication.repo &&
+            latest.state === s.state &&
+            latest.description === s.description &&
+            samePublicationUrl(latest.target_url, targetUrl, s.publication.repo);
+        }
+        // 分页与发表者读取也可能耗时；去重和写入共用这次最后的 head 守卫。
+        if (!s.publication.failure) {
+          const raw = await gh.pr(s.publication.number);
+          const current = metaOf(raw);
+          if (typeof current === 'string') throw new Error(current);
+          if (current.number !== s.publication.number || current.head !== sha)
+            throw new Error('发表前 PR 身份或 head 改变，请重算');
+          if (s.publication.repo) {
+            const identity = policyHead(raw, s.publication.repo);
+            if (identity.number !== current.number || identity.head !== sha)
+              throw new Error('发表前 PR 仓身份改变，请重算');
+          }
+          if (!current.open) return 'closed';
+        }
+        if (unchanged) return 'unchanged';
+      }
       await api.post(`/statuses/${sha}`, {
         state: s.state,
         context: GATE_CONTEXT,
         description: s.description,
-        ...(s.targetUrl ? { target_url: s.targetUrl } : {}),
+        ...(targetUrl ? { target_url: targetUrl } : {}),
       });
     },
   };
+  return gh;
 }
 
 export interface LiveMeta {
@@ -427,82 +584,122 @@ export async function runMergeGate(opts: {
   readCiPolicy?: GateDeps['readCiPolicy'];
   readFeedback?: GateDeps['readFeedback'];
 }): Promise<RunResult> {
-  const fail = (why: string): RunResult => ({ code: 2, lines: [`没查成：${why}。`] });
-  if (opts.targetPr !== undefined && (!Number.isSafeInteger(opts.targetPr) || opts.targetPr < 1))
-    return fail('精确 PR 号不是正安全整数');
-  const numbers =
-    opts.targetPr === undefined
-      ? await eventTargets(opts.eventName, opts.eventPath, opts.gh)
-      : [opts.targetPr];
-  if (typeof numbers === 'string') return fail(numbers);
-  if (!opts.write && numbers.length !== 1) return fail('只报不写时一次只算一个 PR（pull_request 事件）');
-  if (numbers.length === 0) return { code: 0, lines: ['这次没有要算的 PR。'] };
+  const witness: StatusWitness = { number: 0, consumed: new Map() };
+  return statusWitness.run(witness, async () => {
+    const fail = (why: string): RunResult => ({ code: 2, lines: [`没查成：${why}。`] });
+    if (opts.targetPr !== undefined && (!Number.isSafeInteger(opts.targetPr) || opts.targetPr < 1))
+      return fail('精确 PR 号不是正安全整数');
+    const numbers =
+      opts.targetPr === undefined
+        ? await eventTargets(opts.eventName, opts.eventPath, opts.gh)
+        : [opts.targetPr];
+    if (typeof numbers === 'string') return fail(numbers);
+    if (!opts.write && numbers.length !== 1) return fail('只报不写时一次只算一个 PR（pull_request 事件）');
+    if (numbers.length === 0) return { code: 0, lines: ['这次没有要算的 PR。'] };
 
-  const deps: GateDeps = {
-    gh: opts.gh,
-    ...(opts.readFeedback ? { readFeedback: opts.readFeedback } : {}),
-    ...(opts.readCiPolicy ? { readCiPolicy: opts.readCiPolicy } : {}),
-  };
-  const lines: string[] = [];
-  let code: 0 | 1 | 2 = 0;
-  for (const n of numbers) {
-    const r = await gatePr(n, deps);
-    if (r.closed) {
-      lines.push(`PR #${n} 已经关了，不算。`);
-      continue;
-    }
-    lines.push(`PR #${n}：${GATE_CONTEXT} ${r.state}`, ...r.lines.map((l) => `  ${l}`));
-    if (!opts.write) {
-      code = r.notChecked ? 2 : r.state === 'success' ? 0 : 1;
-      continue;
-    }
-    if (r.notChecked) code = 2;
-    if (r.head === null) {
-      lines.push('  没写上状态：连 PR 的头都没读到。');
-      code = 2;
-      continue;
-    }
-    try {
-      if (opts.readCiPolicy && r.policy) {
-        const policy = await opts.readCiPolicy(n, r.head);
-        if (!r.repo) throw new Error('本轮 PR 仓身份未查成');
-        if (typeof policy !== 'string') {
-          assertClosed(policy, n, r.head, r.repo);
-          lines.push(`PR #${n} 已经关了，不发表状态。`);
-          continue;
-        }
-        if (policy !== r.policy) throw new Error('发表前 DB 策略改变，请重算');
-        const raw = await opts.gh.pr(n);
-        const identity = policyHead(raw, r.repo);
-        if (identity.number !== n || identity.head !== r.head)
-          throw new Error('发表前 PR 身份或 head 改变，请重算');
-        const current = metaOf(raw);
-        if (typeof current === 'string') throw new Error(current);
-        if (!current.open) {
-          lines.push(`PR #${n} 已经关了，不发表状态。`);
-          continue;
-        }
+    let feedback: unknown;
+    const readFeedback = opts.readFeedback;
+    const deps: GateDeps = {
+      gh: opts.gh,
+      ...(readFeedback
+        ? {
+            readFeedback: async (n: number, head: string) => {
+              const result = await readFeedback(n, head);
+              feedback = result;
+              return result;
+            },
+          }
+        : {}),
+      ...(opts.readCiPolicy ? { readCiPolicy: opts.readCiPolicy } : {}),
+    };
+    const lines: string[] = [];
+    let code: 0 | 1 | 2 = 0;
+    for (const n of numbers) {
+      witness.number = n;
+      witness.consumed.clear();
+      feedback = undefined;
+      const r = await gatePr(n, deps);
+      if (r.closed) {
+        lines.push(`PR #${n} 已经关了，不算。`);
+        continue;
       }
-      await opts.gh.writeStatus(r.head, {
-        state: r.state,
-        description: statusDescription(r.lines),
-        ...(opts.targetUrl ? { targetUrl: opts.targetUrl } : {}),
-      });
-    } catch (e) {
-      lines.push(`  最终核验或发表失败（${message(e)}）。`);
-      // 已知头上撤掉旧结论；不能在来源读取失败时留下本轮准备的 success。
+      lines.push(`PR #${n}：${GATE_CONTEXT} ${r.state}`, ...r.lines.map((l) => `  ${l}`));
+      if (!opts.write) {
+        code = r.notChecked ? 2 : r.state === 'success' ? 0 : 1;
+        continue;
+      }
+      if (r.notChecked) code = 2;
+      if (r.head === null) {
+        lines.push('  没写上状态：连 PR 的头都没读到。');
+        code = 2;
+        continue;
+      }
+      const head = r.head;
       try {
-        await opts.gh.writeStatus(r.head, {
-          state: 'failure',
-          description: '没查成：发表前策略/head 核验或状态写入失败',
+        if (opts.readCiPolicy && r.policy) {
+          const policy = await opts.readCiPolicy(n, r.head);
+          if (!r.repo) throw new Error('本轮 PR 仓身份未查成');
+          if (typeof policy !== 'string') {
+            assertClosed(policy, n, r.head, r.repo);
+            lines.push(`PR #${n} 已经关了，不发表状态。`);
+            continue;
+          }
+          if (policy !== r.policy) throw new Error('发表前 DB 策略改变，请重算');
+          const raw = await opts.gh.pr(n);
+          const identity = policyHead(raw, r.repo);
+          if (identity.number !== n || identity.head !== r.head)
+            throw new Error('发表前 PR 身份或 head 改变，请重算');
+          const current = metaOf(raw);
+          if (typeof current === 'string') throw new Error(current);
+          if (!current.open) {
+            lines.push(`PR #${n} 已经关了，不发表状态。`);
+            continue;
+          }
+        }
+        const publication = await opts.gh.writeStatus(r.head, {
+          state: r.state,
+          description: statusDescription(r.lines),
+          publication: {
+            number: n,
+            lines: r.lines,
+            notChecked: r.notChecked,
+            ...(r.policy ? { policy: r.policy } : {}),
+            ...(r.repo ? { repo: r.repo } : {}),
+            ...(feedback === undefined ? {} : { feedback }),
+          },
+          ...(opts.targetUrl ? { targetUrl: opts.targetUrl } : {}),
         });
-      } catch (writeError) {
-        lines.push(`  失败状态也没写上（${message(writeError)}）。`);
+        if (publication === 'unchanged')
+          lines.push('  本轮现读判定与最新可信状态的完整凭证一致，未追加状态。');
+        if (publication === 'closed') lines.push(`PR #${n} 已经关了，不发表状态。`);
+      } catch (e) {
+        lines.push(`  最终核验或发表失败（${message(e)}）。`);
+        // 已知头上撤掉旧结论；不能在来源读取失败时留下本轮准备的 success。
+        try {
+          const failure = message(e);
+          // 兜底的结论是「本轮未核成」，不能把变后的来源签进先前的 success。
+          await statusWitness.run({ number: n, consumed: new Map() }, () =>
+            opts.gh.writeStatus(head, {
+              state: 'failure',
+              description: '没查成：发表前策略/head 核验或状态写入失败',
+              publication: {
+                number: n,
+                lines: [failure],
+                notChecked: true,
+                failure,
+                ...(r.repo ? { repo: r.repo } : {}),
+              },
+              ...(opts.targetUrl ? { targetUrl: opts.targetUrl } : {}),
+            }),
+          );
+        } catch (writeError) {
+          lines.push(`  失败状态也没写上（${message(writeError)}）。`);
+        }
+        code = 2;
       }
-      code = 2;
     }
-  }
-  return { code, lines };
+    return { code, lines };
+  });
 }
 
 function prRepo(raw: unknown): PolicyRepo {
