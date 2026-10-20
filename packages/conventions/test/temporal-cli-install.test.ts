@@ -88,6 +88,35 @@ describe('installTemporalCli', () => {
     expect(download).toHaveBeenCalledOnce();
   });
 
+  it('登记丢了但受管缓存里的程序核得过版本时只补登记，不重下', async () => {
+    const value = fixture();
+    const download = vi.fn(async (_url: string, path: string) => writeFileSync(path, value.binary));
+    const first = await installTemporalCli(value.root, options(value, download));
+    rmSync(join(value.home, '.fleet-dao', 'test-tools', 'temporal-cli-linux-x64.json'), { force: true });
+    const again = await installTemporalCli(value.root, options(value, download));
+    expect(again).toMatchObject({ downloaded: false, path: first.path });
+    expect(download).toHaveBeenCalledOnce();
+    expect(prepareTemporalCli(value.root, { home: value.home, env: {}, probe: value.probe }).path).toBe(
+      first.path,
+    );
+  });
+
+  it('重装失败不删掉受管缓存里已有的文件', async () => {
+    const value = fixture();
+    const target = join(value.home, '.fleet-dao', 'test-tools', 'temporal-cli', '1.9.1', 'linux_amd64');
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, 'temporal'), 'old');
+    const download = vi.fn(async (_url: string, path: string) => writeFileSync(path, Buffer.from('wrong')));
+    await expect(
+      installTemporalCli(value.root, {
+        ...options(value, download),
+        probe: () => 'temporal version 1.9.0',
+        attempts: 1,
+      }),
+    ).rejects.toThrow('SHA-256 校验不符');
+    expect(existsSync(join(target, 'temporal'))).toBe(true);
+  });
+
   it('校验和不对时失败，不登记、不把半截归档当成已安装', async () => {
     const value = fixture();
     const download = vi.fn(async (_url: string, path: string) => writeFileSync(path, Buffer.from('wrong')));

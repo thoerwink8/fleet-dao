@@ -237,6 +237,19 @@ function existingPrepared(
   }
 }
 
+function managedCliUsable(
+  target: string,
+  artifact: TemporalCliArtifact,
+  options: TemporalCliInstallOptions,
+): boolean {
+  try {
+    verifyTemporalCli(target, artifact.version, options);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function installTemporalCli(
   root: string,
   options: TemporalCliInstallOptions = {},
@@ -248,11 +261,15 @@ export async function installTemporalCli(
 
   const managedRoot = managedCliRoot(home, artifact);
   const target = join(managedRoot, artifact.executable);
+  // 受管缓存里已有核得过版本的程序（登记丢了或指向别处）：只补登记，不重下。
+  if (managedCliUsable(target, artifact, options)) {
+    const registered = registerTemporalCli(root, target, { ...options, home });
+    return { ...registered, artifact, downloaded: false };
+  }
   mkdirSync(dirname(managedRoot), { recursive: true, mode: 0o700 });
   const stage = mkdtempSync(join(dirname(managedRoot), `.temporal-cli-${artifact.target}-`));
   const archive = join(stage, artifact.archive);
   const stagedBinary = join(stage, artifact.executable);
-  let moved = false;
   try {
     await downloadWithRetry(artifact, archive, {
       attempts: options.attempts ?? TEMPORAL_CLI_INSTALL_ATTEMPTS,
@@ -275,11 +292,9 @@ export async function installTemporalCli(
     } catch (cause) {
       throw installError(`原子落盘失败：${target}`, cause);
     }
-    moved = true;
     const registered = registerTemporalCli(root, target, { ...options, home });
     return { ...registered, artifact, downloaded: true };
   } finally {
     rmSync(stage, { recursive: true, force: true });
-    if (!moved) rmSync(target, { force: true });
   }
 }
