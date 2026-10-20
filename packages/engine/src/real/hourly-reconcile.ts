@@ -55,7 +55,14 @@ import {
   requirementWorkflowId,
   subtaskWorkflowId,
 } from '@fleet-dao/shared/workflow-ids';
-import { deployFacts, handlingOf, pgAlertWork, readDeployLagInput } from '@fleet-dao/store';
+import {
+  createPgStore,
+  deployFacts,
+  githubWhitelist,
+  handlingOf,
+  pgAlertWork,
+  readDeployLagInput,
+} from '@fleet-dao/store';
 import { type Client, WorkflowNotFoundError } from '@temporalio/client';
 import { WORKFLOW_TYPES } from '../contract.ts';
 import { alertRepoFromText } from '../jobs/alert-sweep.ts';
@@ -101,6 +108,7 @@ import { isWorkflowGone } from './route-wake.ts';
 import type { SessionOrgReader } from './session-org.ts';
 import { keepShotsBeforeRemove } from './shots.ts';
 import { createStorePorts } from './store-ports.ts';
+import { reviewChangesReader } from './task-verify.ts';
 import { treeBytes, treeLeftovers } from './user-git.ts';
 import { SESSION_TMP_DIR, type WorkTrees } from './worktrees.ts';
 
@@ -269,6 +277,7 @@ export interface HourlyReconcileWiring {
     Partial<
       Pick<GitHub, 'readGroomFacts' | 'readIssueLabelEvents' | 'readIssueComments' | 'readIssueStates'>
     > &
+    Partial<Pick<GitHub, 'claims'>> &
     AutoMergeWiringGitHub;
   trees: WorkTrees;
   exec: UserExec;
@@ -589,6 +598,19 @@ export function hourlyReconcileJob(
     if (!r.ok) throw new Error(r.why);
     return new Map([...r.byId].map(([id, h]) => [id, { stage: h.stage, line: h.line }]));
   };
+  // 合并后才到的「要求改」提醒（late-review:）条件还在不在：和冷验收、合并后补读同一个读评审的口子，成员白名单现读。
+  // gh 没带 claims（单测外壳）就不接，对应提醒记没查成、不撤。
+  const claims = w.gh.claims;
+  const lateReviews: HourlyReconcileJobDeps['lateReviews'] = claims
+    ? async (repo, number) => {
+        const read = reviewChangesReader({
+          listReviews: (r, n) => claims.listReviews(r, n),
+          listReviewComments: (r, n, id) => claims.listReviewComments(r, n, id),
+          whitelist: async () => githubWhitelist(await createPgStore(w.db).listUsers()),
+        });
+        return (await read(repo, number)).map((r) => r.reviewId);
+      }
+    : undefined;
   // 立案（#1406）：没人处理超过 24 小时的卡住报警开一张未排期的缺陷单。仓优先用提醒挂着的任务的仓，
   // 没有任务再从键和链接里认；认不出不猜。单状态的关单时刻 GitHub 这个口子不给，关了先记看见的时刻。
   const filing: HourlyReconcileJobDeps['filing'] = {
@@ -826,6 +848,7 @@ export function hourlyReconcileJob(
       stageAllOpen,
       handling,
       filing,
+      ...(lateReviews ? { lateReviews } : {}),
       // 历史事实类（reconcile:pr、reconcile:ledger）要合并时刻才知道该不该跳过。镜像没写上再问 GitHub；都没有就抛，上面记没查成、不跳过。
       prMergedAt: async (repo, number) => {
         const mirrored = await pullMergedAt(w.db, repo.owner, repo.name, number);

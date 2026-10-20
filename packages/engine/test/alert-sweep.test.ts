@@ -68,6 +68,7 @@ function harness(
     issueState?: AlertFiling['issueState'];
     openIssue?: AlertFiling['openIssue'];
     prMergedAt?: AlertSweepDeps['prMergedAt'];
+    lateReviews?: AlertSweepDeps['lateReviews'];
     doneItems?: AlertSweepDeps['doneItems'];
   } = {},
 ) {
@@ -136,6 +137,7 @@ function harness(
     ...(handling ? { handling } : {}),
     filing,
     prMergedAt: over.prMergedAt ?? (async () => new Date((over.now ?? (() => NOW))().getTime() - DAY)),
+    ...(over.lateReviews ? { lateReviews: over.lateReviews } : {}),
     ...(over.doneItems ? { doneItems: over.doneItems } : {}),
     now: over.now ?? (() => NOW),
     log: () => {},
@@ -754,6 +756,74 @@ describe('冷验收检出报警不落三天过期兜底', () => {
     expect(checkout.body).toBe('原来的正文');
     expect(h.opened.map((o) => o.key)).toEqual(['alert-file:wf:failure:acme/widgets:plain']);
     expect(unknown.body.startsWith('已立案：#')).toBe(true);
+  });
+});
+
+describe('合并后才到的「要求改」提醒（late-review）条件没了由对账撤', () => {
+  const key = 'late-review:thoerwink8/fleet-dao#3178:5565465101';
+  const unreadKey = 'late-review-unread:thoerwink8/fleet-dao#3178';
+  const eventKey = 'late-review:thoerwink8/fleet-dao#3178:0';
+  // 开了不止 3 天：要是落到过期兜底或立案，下面的断言会看到
+  const old = new Date(NOW.getTime() - 4 * DAY);
+
+  it('评审不再是未解决的「要求改」（被撤、审查者后来通过）：撤，写明原因；读的是键里的仓和 PR', async () => {
+    const alert = row({ dedupeKey: key, createdAt: old });
+    const asked: string[] = [];
+    const h = harness([alert], {
+      lateReviews: async (repo, number) => {
+        asked.push(`${repo.owner}/${repo.name}#${number}`);
+        return [];
+      },
+    });
+    const part = await h.run();
+    expect(part.unchecked).toEqual([]);
+    expect(asked).toEqual(['thoerwink8/fleet-dao#3178']);
+    expect(alert.resolvedBy).toBe(RECONCILE_ACTOR);
+    expect(alert.body).toContain('review 5565465101 已经不是还没解决的「要求改」了');
+    expect(h.opened).toEqual([]);
+  });
+
+  it('这条评审还没解决：不撤、不过期、不立案（要人跟进的事）；别的评审没解决不算它', async () => {
+    const still = row({ dedupeKey: key, createdAt: old });
+    const h = harness([still], { lateReviews: async () => [5565465101, 7] });
+    expect((await h.run()).unchecked).toEqual([]);
+    expect(still.resolvedAt).toBeNull();
+    expect(h.opened).toEqual([]);
+    expect(eligibleToFile(key)).toBe(false);
+    expect(eligibleToFile(unreadKey)).toBe(false);
+
+    const other = row({ dedupeKey: key, createdAt: old });
+    const h2 = harness([other], { lateReviews: async () => [7] });
+    await h2.run();
+    expect(other.resolvedAt).not.toBeNull();
+  });
+
+  it('没读成评审 / 事件没带评审号：认不出是哪一条，PR 上一条没解决的都没有才撤', async () => {
+    for (const k of [unreadKey, eventKey]) {
+      const kept = row({ dedupeKey: k, createdAt: old });
+      await harness([kept], { lateReviews: async () => [42] }).run();
+      expect(kept.resolvedAt).toBeNull();
+      const gone = row({ dedupeKey: k, createdAt: old });
+      await harness([gone], { lateReviews: async () => [] }).run();
+      expect(gone.resolvedAt).not.toBeNull();
+    }
+  });
+
+  it('【故意造出的失败】读评审失败或没接上读法：不撤，记没查成', async () => {
+    const a = row({ dedupeKey: key, createdAt: old });
+    const failed = await harness([a], {
+      lateReviews: async () => {
+        throw new Error('HTTP 502');
+      },
+    }).run();
+    expect(a.resolvedAt).toBeNull();
+    expect(failed.unchecked).toHaveLength(1);
+    expect(failed.unchecked[0]).toContain('HTTP 502');
+
+    const b = row({ dedupeKey: key, createdAt: old });
+    const unwired = await harness([b]).run();
+    expect(b.resolvedAt).toBeNull();
+    expect(unwired.unchecked[0]).toContain('没接上读评审的口子');
   });
 });
 
