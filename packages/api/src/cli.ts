@@ -38,6 +38,8 @@ import { parseQuoteArgs, QUOTE_USAGE, runQuote } from './quote-cli.ts';
 //   会话里的登录方式记 cli-mint，版本号取此人当前的 sessionVersion（「退出所有设备」能作废它）。只在服务器上跑，不加网络入口。
 //   alert …（design 15.3「谁在处理」）：开着的提醒谁在处理、修到哪；静默。写法和退出码见 alert-cli.ts。
 //   task continue|abandon|redo <owner/仓名> <单号> --note "<为什么>"（#1402）：续、放弃、重做一张单。见 task-cli.ts。
+//   task budget-remeasure <owner/仓名> <单号> --head <sha> --base <sha> [--execute --run <runId> --park <编号>] --note "<为什么>"（#3249）：
+//     体量停点只重新核这一份成果；默认只读预检，--execute 才放行这一份，不算「继续」、不授权后续。见 task-cli.ts。
 //   feishu-push status|test（决定 0090）：提醒推飞书通不通；test 建一条测试提醒、等后端推出去、读回送达记录。见 feishu-push-cli.ts。
 //   attention --json（#2370）：现在要人看的事一份结论（healthz、该推的通知、推送不通、简报没到），指挥官巡检只读它。见 attention-cli.ts。
 //   release pause|continue（#2038）：release.sh 切版本前给手上有会话的任务发 hard 暂停、切完只继续这一批。见 release-pause.ts。
