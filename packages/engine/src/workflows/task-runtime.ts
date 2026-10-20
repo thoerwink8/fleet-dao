@@ -1205,6 +1205,14 @@ export class TaskRuntime {
               this.verifiedMerged !== null ||
               this.pushHandback?.state === 'ready',
           );
+          // 放弃或已核实合并时不再为还停在 ready 的合同交还去读预检。那次读取不取消，
+          // 活动没结束测试服务端不跳时间，外面等 result() 会一直坐到用例自己的时限。
+          // 老历史没有这个标记，仍先走原来的预检再看放弃。
+          if (
+            patched('abandon-before-handback-preflight') &&
+            (this.abandon !== null || this.verifiedMerged !== null)
+          )
+            return;
           if (this.pushHandback?.request.version !== 2 || this.pushHandback.state !== 'ready') return;
           if (await this.preparePushHandbackRevision()) return;
           // 继续/放弃沿原语义离开；仅本次新合同核验失败则仍在同一个等待中。
