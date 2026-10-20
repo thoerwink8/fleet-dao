@@ -363,4 +363,35 @@ describe('阶段标记的诊断合同（#3396）', () => {
     expect(lines[0]).toContain('[阶段标记·快超时]');
     expect(lines[0]).toContain('停在：等确认框');
   });
+
+  test('traced 把断言错误原样抛回去，诊断行只有阶段名', async () => {
+    const lines: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    }) as typeof write;
+    const leaked = '不该进诊断的句子甲乙丙';
+    const err = new Error(`刷新失败 ${leaked}`);
+    try {
+      await expect(
+        traced('secret-case', async (mark) => {
+          mark('等确认框');
+          throw err;
+        })(),
+      ).rejects.toBe(err);
+      await traced('ok-case', async (mark) => {
+        mark('完成');
+      })();
+    } finally {
+      process.stderr.write = write;
+    }
+    const phase = lines.filter((l) => l.includes('[阶段标记·'));
+    expect(phase).toHaveLength(1);
+    expect(phase[0]).toContain('[阶段标记·失败]');
+    expect(phase[0]).toContain('停在：等确认框');
+    expect(phase[0]).toContain('test=secret-case');
+    expect(phase[0]).not.toContain(leaked);
+    expect(phase[0]).not.toContain('刷新失败');
+  });
 });
