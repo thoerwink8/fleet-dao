@@ -33,6 +33,18 @@ import { fsRepo } from '../src/repo.ts';
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const BIN = fileURLToPath(new URL('../src/bin/ci-runtime.ts', import.meta.url));
 const SENTINEL = 'private_RUNTIME_SENTINEL_do_not_upload';
+interface CiStep {
+  id?: string;
+  run?: string;
+  if?: string;
+  uses?: string;
+  env?: Record<string, string>;
+  with?: Record<string, string | number>;
+  'continue-on-error'?: boolean;
+}
+function testSteps(): CiStep[] {
+  return parse(fsRepo(ROOT).read('.github/workflows/ci.yml') as string).jobs.test.steps;
+}
 const temp = () => mkdtempSync(join(tmpdir(), 'fleet-runtime-evidence-'));
 function envFor(dir: string): NodeJS.ProcessEnv {
   return {
@@ -287,9 +299,12 @@ describe('最终诊断不会把缺回执、缓存或框架reason当成功', () =
 function command(
   args: string[],
   env: NodeJS.ProcessEnv,
+  bin: 'ci-runtime' | 'ci-cache' | 'ci-box' = 'ci-runtime',
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [BIN, ...args], {
+    const entry =
+      bin === 'ci-runtime' ? BIN : fileURLToPath(new URL(`../src/bin/${bin}.ts`, import.meta.url));
+    const child = spawn(process.execPath, [entry, ...args], {
       cwd: ROOT,
       env,
       windowsHide: true,
@@ -394,6 +409,96 @@ function fixture(
 }
 
 describe('真实Vitest子进程与真实wrapper退出', () => {
+  it('reporter单独写失败时，真实verify0之后先diagnose1，阻止complete缓存及下一attempt的none', async () => {
+    const dir = temp();
+    const test = 'packages/conventions/test/ci-box.test.ts';
+    const box = join(dir, 'box.txt');
+    writeFileSync(box, `${test}\n`);
+    const report = join(dir, 'report.json');
+    const state = join(dir, 'fleet-test-cache-state.json');
+    const env: NodeJS.ProcessEnv = {
+      ...envFor(dir),
+      BOX_FILE: box,
+      STATE: state,
+      RUNNER_TEMP: dir,
+      CACHE_MODE: 'all',
+      GITHUB_EVENT_NAME: 'pull_request',
+      VITEST_MAX_WORKERS: '1',
+      STEP_VERIFY: 'success',
+    };
+    const keyArgs = ['key', '--event', 'pull_request', '--tmp', dir, '--box-file', box, '--label', '1/1'];
+    const planArgs = ['plan', '--event', 'pull_request', '--tmp', dir];
+    expect((await command(keyArgs, env, 'ci-cache')).code).toBe(0);
+    expect((await command(planArgs, env, 'ci-cache')).code).toBe(0);
+    expect(json(state).mode).toBe('all');
+    // runner仍可写，只有reporter原子写的固定临时文件被目录挡住。
+    mkdirSync(join(env.FLEET_CI_EVIDENCE_DIR as string, 'reporter.json.tmp'), { recursive: true });
+    const run = await command(
+      ['run', '--maxWorkers=1', '--reporter=json', `--outputFile.json=${report}`],
+      env,
+    );
+    expect(run.code).toBe(0);
+    expect(json<RunnerEvidence>(join(env.FLEET_CI_EVIDENCE_DIR as string, 'runner.json')).exitCode).toBe(0);
+    const matrix = { label: '1/1', files: [test], pg: false, temporal: false, estMs: 1 };
+    const outcomes: Record<string, number | 'skipped'> = {};
+    let success = true;
+    let saved = false;
+    // 只复现这四步的顺序和GitHub success()短路；本场景的PR/all/cache-miss条件均已满足。
+    // 每个本地步骤仍调用真实标准CLI，调换工作流顺序会实际写出错误manifest，使本测试失败。
+    for (const step of testSteps()) {
+      const name = step.uses === 'actions/cache/save@v4' ? 'cache-save' : step.id;
+      if (!name || !['runtime-verify', 'runtime-diagnose', 'cache-record', 'cache-save'].includes(name))
+        continue;
+      if (step.if?.startsWith('success()') && !success) {
+        outcomes[name] = 'skipped';
+        continue;
+      }
+      if (name === 'cache-save') {
+        saved = true;
+        continue;
+      }
+      const result =
+        name === 'runtime-verify'
+          ? await command(
+              [
+                'verify',
+                '--box',
+                JSON.stringify(matrix),
+                '--mode',
+                'all',
+                '--report',
+                report,
+                '--state',
+                state,
+              ],
+              env,
+              'ci-box',
+            )
+          : name === 'runtime-diagnose'
+            ? await command(['diagnose'], env)
+            : await command(
+                ['record', '--event', 'pull_request', '--tmp', dir, '--report', report],
+                env,
+                'ci-cache',
+              );
+      outcomes[name] = result.code ?? -1;
+      if (name === 'runtime-verify') env.STEP_VERIFY = result.code === 0 ? 'success' : 'failure';
+      success = success && result.code === 0;
+    }
+    env.GITHUB_RUN_ATTEMPT = '2';
+    expect((await command(keyArgs, env, 'ci-cache')).code).toBe(0);
+    expect((await command(planArgs, env, 'ci-cache')).code).toBe(0);
+    expect(outcomes).toEqual({
+      'runtime-verify': 0,
+      'runtime-diagnose': 1,
+      'cache-record': 'skipped',
+      'cache-save': 'skipped',
+    });
+    expect(saved).toBe(false);
+    expect(existsSync(join(dir, 'fleet-test-cache/manifest.json'))).toBe(false);
+    expect(json(state).mode).toBe('all');
+    uploaded(env);
+  }, 60000);
   it('显式all走真实Vitest；未知CACHE_MODE明确失败，不降成跳过', async () => {
     const f = fixture({ mode: 'all' });
     expect((await command(f.args, f.env)).code).toBe(0);
@@ -493,16 +598,7 @@ describe('真实Vitest子进程与真实wrapper退出', () => {
 });
 
 it('工作流保留verify/record判据，always独立核对并只上传固定三JSON', () => {
-  const workflow = parse(fsRepo(ROOT).read('.github/workflows/ci.yml') as string);
-  const steps = workflow.jobs.test.steps as {
-    id?: string;
-    run?: string;
-    if?: string;
-    uses?: string;
-    env?: Record<string, string>;
-    with?: Record<string, string | number>;
-    'continue-on-error'?: boolean;
-  }[];
+  const steps = testSteps();
   const runtime = steps.find((s) => s.id === 'runtime-vitest');
   expect(runtime?.run).toContain('ci-runtime.ts run');
   expect(runtime?.['continue-on-error']).toBeUndefined();
@@ -513,6 +609,13 @@ it('工作流保留verify/record判据，always独立核对并只上传固定三
   const diagnose = steps.find((s) => s.run?.includes('ci-runtime.ts diagnose'));
   expect(diagnose?.if).toBe('always()');
   expect(diagnose?.['continue-on-error']).toBeUndefined();
+  const verifyAt = steps.findIndex((step) => step.id === 'runtime-verify');
+  const diagnoseAt = steps.findIndex((step) => step.id === 'runtime-diagnose');
+  const recordAt = steps.findIndex((step) => step.id === 'cache-record');
+  const saveAt = steps.findIndex((step) => step.uses === 'actions/cache/save@v4');
+  expect(diagnoseAt).toBeGreaterThan(verifyAt);
+  expect(recordAt).toBeGreaterThan(diagnoseAt);
+  expect(saveAt).toBeGreaterThan(recordAt);
   expect(diagnose?.env?.STEP_INSTALL).toBe(`${'$'}{{ steps.runtime-install.outcome }}`);
   const upload = steps.find((s) => s.uses === 'actions/upload-artifact@v4');
   expect(upload?.if).toBe('always()');

@@ -384,20 +384,9 @@ jobs:
           REPORT: ${{ runner.temp }}/fleet-test-out/report.json
           STATE: ${{ runner.temp }}/fleet-test-cache-state.json
         run: node packages/conventions/src/bin/ci-box.ts verify --box "$MATRIX" --mode "${CACHE_MODE:-}" --report "$REPORT" --state "$STATE"
-      # 4. 只在这一台全绿之后写清单（record 自己再核对一遍），再存缓存
-      - name: 测试缓存：全绿，写清单
-        if: success() && github.event_name == 'pull_request' && (steps.cache-plan.outputs.mode == 'all' || steps.cache-plan.outputs.mode == 'files')
-        id: cache-record
-        run: node packages/conventions/src/bin/ci-cache.ts record --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --report "$RUNNER_TEMP/fleet-test-out/report.json"
-      - name: 测试缓存：存清单
-        if: success() && github.event_name == 'pull_request' && steps.cache-record.outputs.written == 'true' && steps.cache-restore.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ runner.temp }}/fleet-test-cache
-          key: ${{ steps.cache-key.outputs.cache_key }}
-
       # 准备阶段只记录具名 step outcome；reporter passed 不代表 CLI/job 成功。
       - name: 核对脱敏运行证据
+        id: runtime-diagnose
         if: always()
         env:
           STEP_POSTGRES_START: ${{ steps.runtime-postgres-start.outcome }}
@@ -417,6 +406,18 @@ jobs:
           STEP_VITEST: ${{ steps.runtime-vitest.outcome }}
           STEP_VERIFY: ${{ steps.runtime-verify.outcome }}
         run: node packages/conventions/src/bin/ci-runtime.ts diagnose
+      # 4. 必需诊断也通过后才写/存清单，失败的证据不能在下一attempt通过none绕过。
+      - name: 测试缓存：全绿，写清单
+        if: success() && github.event_name == 'pull_request' && (steps.cache-plan.outputs.mode == 'all' || steps.cache-plan.outputs.mode == 'files')
+        id: cache-record
+        run: node packages/conventions/src/bin/ci-cache.ts record --event "$GITHUB_EVENT_NAME" --tmp "$RUNNER_TEMP" --report "$RUNNER_TEMP/fleet-test-out/report.json"
+      - name: 测试缓存：存清单
+        if: success() && github.event_name == 'pull_request' && steps.cache-record.outputs.written == 'true' && steps.cache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/fleet-test-cache
+          key: ${{ steps.cache-key.outputs.cache_key }}
+
       # runner 失联或 checkout 失败可能没有附件，不承诺上传必达。
       - name: 保存脱敏运行证据（7天）
         if: always()
