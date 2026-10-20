@@ -38,6 +38,7 @@ export const STAGE_KINDS = valuesOf<StageKind>()([
   'judge',
   'groom',
   'intake-chat',
+  'commander',
 ]);
 export const TASK_STATES = valuesOf<TaskState>()([
   'queued',

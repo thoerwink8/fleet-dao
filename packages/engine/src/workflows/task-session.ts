@@ -800,7 +800,9 @@ async function holdForBudget(rt: TaskRuntime): Promise<void> {
   });
   await rt.park(stop.title, stop.detail, 'stuck', 'quota');
   // 人看过、点了「继续」：再给到比花掉的多一份
-  rt.budgetGrants = Math.floor(counted / budget) + 1;
+  // 指挥官判了不是空转（#3294 第 2 片）：多放宽的那几档一起加上，用掉就清
+  rt.budgetGrants = Math.floor(counted / budget) + 1 + rt.budgetWiden;
+  rt.budgetWiden = 0;
 }
 
 /**

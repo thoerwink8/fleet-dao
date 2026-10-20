@@ -19,6 +19,7 @@ import {
   workflowInfo,
 } from '@temporalio/workflow';
 import type { EngineActivities } from '../activity-options.ts';
+import { COMMANDER_ACTOR, ROUNDS_HANDOFF_TITLE } from '../commander-contract.ts';
 import type { FailureContext, LadderCounters, NextAction } from '../decisions/failure.ts';
 import type { Limits } from '../limits.ts';
 import type { AcceptanceDutyRecord, RouteChoice, Worktree } from '../ports.ts';
@@ -274,6 +275,8 @@ export class TaskRuntime {
   selfCheckOutput: { head: string; text: string } | null = null;
   /** 单任务 token 预算给了几份（决定 0093）：超了停下，点「继续」再给。 */
   budgetGrants = 1;
+  /** 指挥官判了不是空转、继续时多放宽的几档额度预算（#3294 第 2 片）：下一次额度停下回来时加进 budgetGrants 就清零。 */
+  budgetWiden = 0;
   round = 0;
   verifyRound = 0;
   /**
@@ -327,6 +330,13 @@ export class TaskRuntime {
         this.engineRetried.add(this.parkKey);
         // 查询里也立刻标上：这一次在离开 parked 之前（报警还在发、状态还在落库）下一轮续停读到的就是「已续」，不再发、不再记操作记录
         park.retriedBefore = true;
+      }
+      // 指挥官（#3294 第 2 片）：同样只认正停着的这一次（编号对得上），晚到的不解开后来的停下。能不能继续由引擎侧的白名单核过，
+      // 这里只多认一样：额度停法带 widenBudget 就把预算放宽一档（task-session.ts 的 enforceTokenBudget 读 budgetWiden）。老历史没有这个 by
+      if (command?.by === COMMANDER_ACTOR) {
+        const park = this.status.park;
+        if (!park || park.seq !== command.parkSeq) return;
+        if (command.widenBudget === true && park.kind === 'quota') this.budgetWiden += 1;
       }
       this.continued += 1;
       this.closeHold = null;
@@ -1071,7 +1081,7 @@ export class TaskRuntime {
     if (!reset) return 'legacy';
     this.roundResets += 1;
     if (this.roundResets > MAX_ROUND_RESETS) {
-      const handoff = `已继续 ${MAX_ROUND_RESETS} 次仍没过，交指挥官`;
+      const handoff = ROUNDS_HANDOFF_TITLE;
       for (;;) {
         await this.park(handoff, handoff, 'stuck', 'rounds');
       }
