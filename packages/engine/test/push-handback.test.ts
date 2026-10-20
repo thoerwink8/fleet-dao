@@ -30,12 +30,17 @@ import { OK_SEGMENT, scripted } from './task-script.ts';
 
 // #3413：PR #3412 首轮完整 CI（workflow run 39392992046 / job 118528847472，head
 // d45207791e21faa6c7c166f5023b49fe18f21264，CI merge 71652455b385751c413650a5c9c99ce5d5a2032a，
-// 2026-10-20T08:25:28Z）在 worker replacement 用例原 60 秒超时。该 run 没有留下 history。
-// 同一等待是 abandon 之后的 result()：第二段 runSegment 已经开始，放弃信号的工作流任务要取消它，
-// 完成却在该任务在途时被测试服务端缓冲并从待办表摘掉，RequestCancel 被拒 ACTIVITY_UNKNOWN，
-// 历史停在 WorkflowTaskStarted，不写失败也不判超时。另一台 park-kind（#3258）不是这条 run。
-// 工作流用 abandon-cancel-after-buffer 把取消让到下一任务。失败或 50 秒 watchdog 仍按精确 run
-// 保全原 protobuf/describe 与阶段；正常通过不读不写。
+// 2026-10-20T08:25:28Z）在 worker replacement 用例原 60 秒超时。该 run 没有留下 history，
+// 收尾的 worker 引用和 channel shutdown 不是根因。
+// 本机一次原用例 watchdog 停在 first-worker:parked-query（workflow handback-0c8f4322-17be-4b14-9e92-c81f0514e949，
+// run 6385a827-f825-4d12-8bd9-d3e2351b6db6）：readTaskBrief 完成后工作流任务 TMPRL1100
+//（self-check-own-timeout 没有对应 change command），随后任务超时。原 protobuf/describe 在
+// test/replay/worker-replacement-3413/。这是这条用例自己的 run，不冒充 CI 那次，也不写成和
+// push-handback-contract 的 park-kind（#3258）同根；不改 kit.ts。同一份字节离线重放仍是这条
+// TMPRL1100，重放通过不等于这次超时已修。
+// 另一条本机复现是放弃后的 result()：第二段 runSegment 完成被缓冲，同任务 RequestCancel 被拒
+// ACTIVITY_UNKNOWN。abandon-cancel-after-buffer 只管这一条，不能解释上面这次停在查停点。
+// 失败或 50 秒 watchdog 仍按精确 run 保全原 protobuf/describe 与阶段；正常通过不读不写。
 // 先登记 watchdog，再让 useEnv 的 beforeEach 创建服务端；不延后原测试的诊断时钟。
 const output = new DiagnosticOutput();
 const testSha256 = createHash('sha256')

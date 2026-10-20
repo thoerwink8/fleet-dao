@@ -7,4 +7,4 @@
 | `stuck-before-fix.history` | 用 `test/abandon-buffer-hold.ts` 按住放弃信号那一次工作流任务的完成，放行第二段并等它离开待办表，再放行。墙钟 20 秒后 describe 仍是 RUNNING，待办活动 0；历史停在事件 303 `WorkflowTaskStarted`，第二段（事件 300）没有 Started/Completed/CancelRequested | `a3051b16-dacb-486a-b637-d57bd62a0d53` | 303 |
 | `abandon-mid-segment-before-fix.history` | 不按住，第二段还在跑时放弃：放弃任务完成后紧接 `ActivityTaskCancelRequested`（第二段），run 以 abandoned 收场 | `5baabb3f-95c5-4b0f-b1f8-e603c8df1fbe` | 330 |
 
-第一份是本单要找的等待：放弃之后的 `result()` 等的是一个永远收不了场的工作流任务。它是本机稳定复现的那条 run，不是 CI run 39392992046 自己的历史（那条 run 没有留下历史，也读不回来了），不能拿它冒充原 run，也不能据此说原 run 一定是这个交错；它只说明原用例在这一步会卡到 60 秒。另一台 push-handback-contract 的 park-kind 重放错误（#3258）不是这里的任何一条 run。
+第一份说明放弃之后的 `result()` 可以卡死：工作流任务收不了场。它是本机按住放弃任务录的 run `a3051b16-dacb-486a-b637-d57bd62a0d53`，不是 CI run 39392992046（那次没留历史），也不是 `worker-replacement-3413/` 里原用例停在 `first-worker:parked-query` 的那次（run `6385a827-f825-4d12-8bd9-d3e2351b6db6`，`self-check-own-timeout` 的 TMPRL1100）。不能拿这两份互相冒充，也不能据此说原 CI run 一定是这个交错。另一台 push-handback-contract 的 park-kind 重放错误（#3258）不是这里的任何一条 run。
