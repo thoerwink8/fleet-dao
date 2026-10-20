@@ -18,6 +18,7 @@ import {
   EXECUTION_HISTORY_MAX_BYTES,
   type ExecutionHistoryConnection,
 } from '../src/real/execution-start-reader.ts';
+import type { BoundedLegacyAdmission } from '../src/real/legacy-admission-protocol.ts';
 
 type History = Partial<
   Awaited<ReturnType<ExecutionHistoryConnection['workflowService']['getWorkflowExecutionHistory']>>
@@ -93,6 +94,17 @@ function setup(input: unknown = startInput(), info: Partial<Info> = {}, notifyFa
     withAbortSignal: async <T>(_signal: AbortSignal, fn: () => Promise<T>) => fn(),
   } as unknown as ExecutionHistoryConnection;
   const admit = vi.fn(store.admitLegacyExecution.bind(store));
+  const bounded = vi.fn<BoundedLegacyAdmission>(async (input, audit) => {
+    const result = await admit(input, audit);
+    return result.kind === 'rejected'
+      ? { kind: 'denied', code: result.reason }
+      : {
+          kind: 'allowed',
+          status: result.kind,
+          admissionId: result.admission.id,
+          postCommitWarnings: result.postCommitWarnings,
+        };
+  });
   const env = new MockActivityEnvironment({
     namespace: 'test',
     activityNamespace: 'test',
@@ -106,7 +118,7 @@ function setup(input: unknown = startInput(), info: Partial<Info> = {}, notifyFa
   });
   const deps = {
     connection,
-    store: { admitLegacyExecution: admit },
+    admit: bounded,
     namespace: 'test',
     taskQueue: 'legacy',
     audit,
@@ -117,6 +129,7 @@ function setup(input: unknown = startInput(), info: Partial<Info> = {}, notifyFa
     rpc,
     connection,
     admit,
+    bounded,
     env,
     deps,
     entry,
@@ -410,5 +423,53 @@ describe('可信 legacy 来源适配器（未接生产）', () => {
     options.interceptors = [];
     options.channelArgs['grpc.max_receive_message_length'] = EXECUTION_HISTORY_MAX_BYTES + 1;
     expect(() => createLegacyExecutionAdmission(s.deps)).toThrow(/接收上限/);
+  });
+
+  it('History耗时不重置SQL预算，墙钟回拨不重新获得时间', async () => {
+    const s = setup();
+    let mono = 1000;
+    const monoClock = vi.spyOn(performance, 'now').mockImplementation(() => mono);
+    const wallClock = vi.spyOn(Date, 'now').mockReturnValue(100_000);
+    try {
+      s.rpc.mockImplementation(async () => {
+        mono += 4000;
+        wallClock.mockReturnValue(1);
+        return history();
+      });
+      expect(await s.run()).toMatchObject({ kind: 'allowed' });
+      expect(s.bounded.mock.calls[0]?.[2].deadlineAt).toBe(11_000);
+      expect(s.bounded.mock.calls[0]?.[2].signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      monoClock.mockRestore();
+      wallClock.mockRestore();
+    }
+  });
+  it('History已用尽运行预算时不spawn/登记，也不把超时变成denied', async () => {
+    const s = setup();
+    let mono = 1000;
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => mono);
+    try {
+      s.rpc.mockImplementation(async () => {
+        mono += 9001;
+        return history();
+      });
+      expect(await s.run()).toEqual({ kind: 'unknown', code: 'deadline' });
+      expect(s.bounded).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+    }
+  });
+  it('History即使不响应取消也在本机5秒边界返回未知，绝不登记', async () => {
+    const s = setup();
+    vi.useFakeTimers();
+    try {
+      s.rpc.mockImplementation(() => new Promise(() => {}));
+      const run = s.run();
+      await vi.advanceTimersByTimeAsync(5001);
+      expect(await run).toEqual({ kind: 'unknown', code: 'start_deadline' });
+      expect(s.bounded).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

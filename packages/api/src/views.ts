@@ -61,6 +61,7 @@ export const STAGE_WORDS: Record<StageKind, string> = {
   judge: '判断',
   groom: '整理待办',
   'intake-chat': '提需求',
+  commander: '指挥官',
 };
 
 const TERMINAL_TASK_STATES = new Set(['done', 'stopped', 'failed']);

@@ -9,7 +9,10 @@ export * from './support.ts';
  * 每条用例一个测试服务端（起一个一两百毫秒）。跳时间是整个服务端共用的：上一条用例留下的工作流
  * （比如空闲等待中的合并队列）挂在已经关掉的任务队列上，会把跳时间锁住，下一条用例的定时器只能按真实时间走。
  */
-export function useEnv(): () => TestWorkflowEnvironment {
+export function useEnv(lifecycle?: {
+  beforeTeardown?: () => Promise<void>;
+  teardown?: (env: TestWorkflowEnvironment) => Promise<void>;
+}): () => TestWorkflowEnvironment {
   let env: TestWorkflowEnvironment | undefined;
   beforeAll(async () => {
     await engineBundle();
@@ -18,7 +21,8 @@ export function useEnv(): () => TestWorkflowEnvironment {
     env = await createEnv();
   }, 60_000);
   afterEach(async () => {
-    await env?.teardown();
+    await lifecycle?.beforeTeardown?.();
+    if (env) await (lifecycle?.teardown ? lifecycle.teardown(env) : env.teardown());
     env = undefined;
   }, 60_000);
   return () => {

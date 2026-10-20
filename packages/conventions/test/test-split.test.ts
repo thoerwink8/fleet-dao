@@ -303,6 +303,8 @@ describe('环境类、能力标记', () => {
     expect(needsPg('packages/api/test/store.pg.test.ts')).toBe(false);
     expect(needsPg('packages/store/test/task-execution.real-pg.test.ts')).toBe(true);
     expect(needsPg('packages/store/test/idempotency-race.real-pg.test.ts')).toBe(true);
+    expect(needsPg('packages/engine/test/legacy-admission.real-pg.test.ts')).toBe(true);
+    expect(needsPg('packages/engine/test/admission-alert.real-pg.test.ts')).toBe(true);
     expect(needsPg('packages/store/test/task-execution.pg.test.ts')).toBe(false);
     expect(needsPg('packages/store/test/other.real-pg.test.ts')).toBe(false);
   });
@@ -327,6 +329,9 @@ describe('环境类、能力标记', () => {
       'packages/engine/test/execution-legacy-admission-real.test.ts',
       'packages/engine/test/execution-start-reader-real.test.ts',
       'packages/engine/test/github-reconcile.test.ts',
+      'packages/engine/test/history-diagnostics.real.test.ts',
+      'packages/engine/test/push-handback-contract.test.ts',
+      'packages/engine/test/task-budget-remeasure.test.ts',
     ]);
     // 定义它的只有 support.ts：本仓别的非测试文件要是包了一层再调（createRealEnv 不出现、认不出要 Temporal），
     // 这里就红——那种包一层会绕开标记，跑到没装命令行的台上（CI 里 support.ts 会抛错，不会悄悄过）。
@@ -411,6 +416,8 @@ describe('在真仓上装箱（全跑那一轮）', () => {
         b.files.every(
           (f) =>
             f.startsWith('packages/db/') ||
+            f === 'packages/engine/test/legacy-admission.real-pg.test.ts' ||
+            f === 'packages/engine/test/admission-alert.real-pg.test.ts' ||
             f === 'packages/store/test/task-execution.real-pg.test.ts' ||
             f === 'packages/store/test/idempotency-race.real-pg.test.ts',
         ),

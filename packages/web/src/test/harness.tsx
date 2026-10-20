@@ -1,7 +1,7 @@
 // 组件测试的外壳：假后端（不开模拟器）+ React Query + 路由 + 主题 + 当前仓 + 快捷操作。
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { fireEvent, type RenderResult, render, screen } from '@testing-library/react';
-import type { ReactElement } from 'react';
+import { Profiler, type ReactElement } from 'react';
 import { MemoryRouter } from 'react-router';
 import { ApiProvider, type FleetApi } from '../api/client';
 import { createMockApi, type MockApi } from '../api/mock/server';
@@ -9,10 +9,18 @@ import { RepoProvider } from '../components/repo-context';
 import { TaskActionsProvider } from '../components/task-actions';
 import { ThemeProvider } from '../components/theme-provider';
 import { TooltipProvider } from '../components/ui/tooltip';
+import { noteReactRender } from './stage-trace';
 
 export function renderApp<A extends FleetApi = MockApi>(
   ui: ReactElement,
-  opts: { api?: A; route?: string; retry?: false | 1; staleTime?: number } = {},
+  opts: {
+    api?: A;
+    route?: string;
+    retry?: false | 1;
+    staleTime?: number;
+    /** 在第一次渲染前写入查询缓存。页面不必再等这一次读取才离开骨架。 */
+    hydrate?: (qc: QueryClient) => void;
+  } = {},
 ): RenderResult & { api: A; qc: QueryClient } {
   const api = opts.api ?? (createMockApi({ live: false }) as FleetApi as A);
   // retry 不传就关，传 1 才对齐 root.tsx 的全局默认。
@@ -25,20 +33,24 @@ export function renderApp<A extends FleetApi = MockApi>(
       queries: { retry: opts.retry ?? false, retryDelay: 0, staleTime: opts.staleTime ?? 0 },
     },
   });
+  opts.hydrate?.(qc);
+  // 外层 Profiler 只为阶段记录（stage-trace.ts，#3372）：装了它的测试文件慢时能读出多少时间花在 React 渲染；没装时回调直接返回。
   const view = render(
-    <MemoryRouter initialEntries={[opts.route ?? '/']}>
-      <QueryClientProvider client={qc}>
-        <ApiProvider api={api}>
-          <ThemeProvider>
-            <TooltipProvider>
-              <RepoProvider>
-                <TaskActionsProvider>{ui}</TaskActionsProvider>
-              </RepoProvider>
-            </TooltipProvider>
-          </ThemeProvider>
-        </ApiProvider>
-      </QueryClientProvider>
-    </MemoryRouter>,
+    <Profiler id="app" onRender={noteReactRender}>
+      <MemoryRouter initialEntries={[opts.route ?? '/']}>
+        <QueryClientProvider client={qc}>
+          <ApiProvider api={api}>
+            <ThemeProvider>
+              <TooltipProvider>
+                <RepoProvider>
+                  <TaskActionsProvider>{ui}</TaskActionsProvider>
+                </RepoProvider>
+              </TooltipProvider>
+            </ThemeProvider>
+          </ApiProvider>
+        </QueryClientProvider>
+      </MemoryRouter>
+    </Profiler>,
   );
   return { api, qc, ...view };
 }

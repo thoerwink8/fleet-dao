@@ -82,6 +82,8 @@
 //   格式不对续进会话重出一次，还不对照常动手；认下了带进意见、动手续这个会话。
 // - 体量预算（#2755，Limits.prLineBudget，0 = 关；patched('pr-line-budget')，withinLineBudget）：推之前看交的头相对主线新增几行，
 //   超了第一次打回收窄，第二次停下等人并附拆单建议，人点「继续」照推。
+//   体量关口重评（#3249，patched('line-budget-remeasure-v1') 只在 taskRemeasureLineBudget Update 处理里问）：停点身份由 park() 记（不改命令序，
+//   旧历史里停下的单也有），可信重测通过只放行「这一次停点的这一份交付」，不设 budgetApproved、不增加继续数；人点「继续」优先，仍是原授权语义。
 // - 每一轮收场记进库（#2762，patched('round-outcome')，startRound / endRound）：返工、合并、放弃叫停时各记一行 task_rounds
 //   （怎么结束的按 lastProblem 认，roundOutcomeOf；档位、首派模型、PR 新增行数），每日简报「流程健康」按它算。记不成不挡原流程。
 // - 交活没提交续一次（#2722，patched('commit-nudge-same-round')，nudgeCommit）：会话收场时没提交、或树里有剩（常见是把测试丢到后台就结束了），
@@ -134,9 +136,10 @@ import {
   taskBranch,
 } from '../task-contract.ts';
 import { activitiesFor, iso, limitsFor } from './kit.ts';
+import { parkedMeasurementBase } from './task-budget-remeasure.ts';
 import { readRepoCiPolicy, waitForCi, waitForCiPolicy } from './task-ci.ts';
 import { armAndWaitMerged, guardedPaths } from './task-merge.ts';
-import { TaskRuntime } from './task-runtime.ts';
+import { PermissionPushHandback, TaskRuntime } from './task-runtime.ts';
 import { planResume, writeSession } from './task-session.ts';
 import {
   Abandoned,
@@ -222,16 +225,16 @@ class TaskFlow {
       }
       brief = (await this.readBrief()).brief;
     };
-    rt.refreshContract = async (boundary) => {
-      if (!patched('task-contract-revisions-v1')) return false;
-      const before = rt.brief?.contract;
-      const got = await this.readBrief(true);
-      const next = got.brief.contract;
+    // before 必须由调用方明说，不能给默认值：旧历史最初读到的交代没有合同（before 为 undefined），
+    // 默认参数会把显式传入的 undefined 换成刚读回的新合同，把「第一次接纳」误判成没变，少调度一次 readCiReviews（#3402）。
+    const acceptContract = (got: TaskBrief, boundary: string, before: TaskBrief['contract'] | undefined) => {
+      const next = got.contract;
       if (next?.version !== 1 || !/^[a-f0-9]{64}$/.test(next.sha256))
         throw new Error('正式合同版本或摘要未核实');
       rt.contractVersioned = true;
       rt.status.contract = next;
-      brief = got.brief;
+      rt.brief = got;
+      brief = got;
       tier = got.tier;
       rt.status.tier = tier;
       const changed = before?.version !== next.version || before?.sha256 !== next.sha256;
@@ -249,6 +252,18 @@ class TaskFlow {
         ),
         revision,
       ];
+      return true;
+    };
+    rt.acceptHandbackContract = (got) => {
+      acceptContract(got, '权限推送原停点返工', rt.brief?.contract);
+    };
+    rt.refreshContract = async (boundary) => {
+      if (!patched('task-contract-revisions-v1')) return false;
+      const before = rt.brief?.contract;
+      const got = await this.readBrief(true);
+      if (!acceptContract(got.brief, boundary, before)) return false;
+      const next = got.brief.contract;
+      if (!next) throw new Error('正式合同摘要未核实');
       if (rt.prNumber !== null && rt.head !== null) {
         for (;;) {
           const snapshot = await rt.step('readCiReviews', () =>
@@ -282,6 +297,11 @@ class TaskFlow {
     await rt.mirror('running');
 
     for (;;) {
+      // v2 在 park 内接纳快照后才离开。收场 IO 期间外部又改正文，先过既有合同边界再有新动作。
+      if (rt.handbackContractBoundary) {
+        await rt.refreshContract('原位返工动手前');
+        rt.handbackContractBoundary = false;
+      }
       await rt.checkpoint();
       await rt.refreshContract('动手前');
       // 验收没过要返工、验收还没到 2 轮的上限：这一轮动手照给（#1967：CI 红了 2 轮、第 3 轮才验，验收意见还没交给会话就因
@@ -332,6 +352,7 @@ class TaskFlow {
       if (rt.flowMode === 'full') rt.fullPushes += 1;
       if (!implemented) {
         await this.endRound(roundOutcomeOf('implement', rt.status.lastProblem, rt.feedback));
+        rt.acceptPushHandback();
         continue;
       }
 
@@ -796,7 +817,7 @@ class TaskFlow {
       return false;
     }
     if (patched('avoid-empty-commit-route')) rt.commitMisses = 0;
-    if (!(await this.withinLineBudget(delivery))) return false;
+    if (!(await this.withinLineBudget(delivery, wt))) return false;
     let pushed: Awaited<ReturnType<typeof rt.acts.pushBranch>>;
     // 这个头改了哪些文件记进库（#3140，pr_head_files）：只给活动多带可选入参，不改步序；老历史没有这个标记，入参和原来一样
     const recordHeadFiles = patched('pr-head-files');
@@ -816,6 +837,15 @@ class TaskFlow {
         this.emptyDeliveryRedone ? [] : [EMPTY_DELIVERY_CODE],
       );
     } catch (error) {
+      if (error instanceof PermissionPushHandback) {
+        rt.feedback = error.acceptedContract ? [error.feedback, ...rt.feedback] : [error.feedback];
+        rt.resumeFrom = null;
+        rt.lastSession = null;
+        rt.resumeStreak = 0;
+        rt.selfCheckOutput = null;
+        rt.status.lastProblem = '推送权限问题已交回返工';
+        return false;
+      }
       if (error instanceof HygieneHandoff) return this.hygieneHandback(error.detail);
       if (error instanceof ConflictHandoff) {
         return this.conflictStillThere(wt, error.files, error.pending ? null : error.instruction);
@@ -1059,7 +1089,7 @@ class TaskFlow {
    * 推之前比体量预算（#2755，patched('pr-line-budget')）：交的头相对主线新增行超了预算，第一次打回让会话收窄（意见带上方案和方案外的文件）；
    * 收窄过还超就停下等人，附拆单建议，人点「继续」照这一版推、这张单后面不再判。没量到新增行（老历史、没数成）不判。回 false＝这一轮返工。
    */
-  private async withinLineBudget(delivery: DeliveryRead): Promise<boolean> {
+  private async withinLineBudget(delivery: DeliveryRead, wt: Worktree): Promise<boolean> {
     const rt = this.rt;
     const budget = this.lineBudget();
     const rawAdded = delivery.addedLines;
@@ -1091,12 +1121,25 @@ class TaskFlow {
       rt.status.lastProblem = '改动超出体量预算';
       return false;
     }
+    // 停点身份（#3249）：不改命令序。可信重评只放行这一份交付（budgetResume 绑停点编号），不设 budgetApproved。
+    const parks = rt.parks + 1;
     await rt.park(
       `改动超出体量预算：新增 ${added} 行，预算 ${budget} 行，收窄过一次仍超`,
-      `${splitSuggestion(delivery.changedFiles)}${detail ? ` ${detail}` : ''} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。`,
+      `${splitSuggestion(delivery.changedFiles)}${detail ? ` ${detail}` : ''} 点「继续」照这一版推（这张单后面不再按预算打回）；不要了点「放弃」，拆成几张单再开。管理入口 fleet-api task budget-remeasure 可只重新核这一份成果的体量（不授权后续）。`,
       'stuck',
       'size',
+      rawAdded === undefined
+        ? undefined
+        : {
+            head: delivery.head,
+            rawAddedLines: rawAdded,
+            chargeableAddedLines: added,
+            budget,
+            base: parkedMeasurementBase(delivery),
+            worktreePath: wt.path,
+          },
     );
+    if (rt.takeLineBudgetResume(parks)) return true;
     this.budgetApproved = true;
     return true;
   }
@@ -1328,6 +1371,10 @@ class TaskFlow {
     await this.cleanup(true);
     await CancellationScope.nonCancellable(() => rt.mirror('stopped'));
   }
+
+  stopPushHandbacks(): void {
+    this.rt.stopPushHandbacks();
+  }
 }
 
 export async function taskWorkflow(input: TaskWorkflowInput): Promise<TaskRun> {
@@ -1341,6 +1388,7 @@ export async function taskWorkflow(input: TaskWorkflowInput): Promise<TaskRun> {
     if (isCancellation(error)) await CancellationScope.nonCancellable(() => flow.cancelled());
     throw error;
   } finally {
+    flow.stopPushHandbacks();
     await condition(allHandlersFinished);
   }
 }

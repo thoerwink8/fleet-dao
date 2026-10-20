@@ -6,6 +6,7 @@ import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import type { WorkflowHandle } from '@temporalio/client';
 import type { TestWorkflowEnvironment } from '@temporalio/testing';
 import { beforeEach, describe, expect, it } from 'vitest';
+import { COMMANDER_ACTOR } from '../src/commander-contract.ts';
 import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld, fakeHead } from '../src/fakes.ts';
 import { DEFAULT_TASK_TOKEN_BUDGET } from '../src/limits.ts';
@@ -142,6 +143,27 @@ describe('在途正式合同修订（#3216）', { timeout: 60_000 }, () => {
     expect(second?.feedback.join('\n')).toContain('正式需求已修订');
     expect(calls.spendInputs.every((i) => i.since === calls.spendInputs[0]?.since)).toBe(true);
     expect(calls.armInputs[0]?.contractGuard?.expected).toEqual(next.contract);
+  });
+  it('旧交代没有合同：第一次安全边界读到合同按首次接纳处理，不被当成没变（#3402）', async () => {
+    const live = goodBrief();
+    const { contract, ...legacy } = live;
+    expect(contract).toBeDefined();
+    const { tasks, calls } = scripted({
+      brief: () => ({ ok: true, brief: legacy }),
+      contractBrief: () => ({ ok: true, brief: live }),
+    });
+    const run = await withWorker(
+      env,
+      createFakeWorld(),
+      async (q) => (await start(q, input())).result() as Promise<TaskRun>,
+      { tasks },
+    );
+    expect(run).toMatchObject({ outcome: 'merged' });
+    const first = calls.segment[0];
+    // 默认参数会把显式传入的「之前没有合同」换成刚读回的合同，于是 changed 恒为假：这三样一个都不会有
+    expect(first?.brief.contract).toEqual(live.contract);
+    expect(first?.contractRevision).toEqual({ reviews: [] });
+    expect(first?.feedback.join('\n')).toContain('正式需求已修订');
   });
   it('同head验收中改正文：旧/晚到pass作废，轮数不清零，新合同从全量重验', async () => {
     let current = goodBrief();
@@ -618,6 +640,63 @@ describe('单任务 token 预算（决定 0093）', { timeout: 60_000 }, () => {
     expect(world.alerts[0]?.detail).toContain(String(over));
     expect(world.alerts[0]?.detail).toContain('p95');
     expect(world.alerts[0]?.detail).toContain('1 次会话用量还没补上');
+  });
+
+  it('指挥官判不是空转、继续并放宽预算（#3294 第 2 片）：下一次超预算不再停；不放宽的继续，同样的花费会再停一次', async () => {
+    const B = DEFAULT_TASK_TOKEN_BUDGET;
+    // 第一次查花费超一份；第二次（返工回来）超两份多一点：只给一份的继续挡得住，放宽一档的放得过
+    const scripts = () =>
+      scripted({
+        spend: (n) => ({
+          tokens: n === 1 ? B + 1_000_000 : 2 * B + 1_000_000,
+          runs: 9,
+          unmetered: 0,
+          estimated: 0,
+        }),
+        verify: (_i, n) =>
+          n === 1
+            ? { pass: false, problems: ['没做到验收条：缺测试'], round: 1 }
+            : { pass: true, problems: [], round: 2 },
+      });
+
+    const widened = scripts();
+    const run = await withWorker(
+      env,
+      createFakeWorld(),
+      async (q) => {
+        const h = await start(q, input());
+        const s = await pollQuery(() => statusOf(h), parked, '超了预算停下');
+        expect(s.park).toMatchObject({ kind: 'quota', seq: 1 });
+        // 带错编号的指挥官继续不算：还停着
+        await h.signal(taskContinueSignal, { by: COMMANDER_ACTOR, parkSeq: 99, widenBudget: true });
+        await env.sleep('1 minute');
+        expect(parked(await statusOf(h))).toBe(true);
+        await h.signal(taskContinueSignal, { by: COMMANDER_ACTOR, parkSeq: 1, widenBudget: true });
+        return h.result() as Promise<TaskRun>;
+      },
+      { tasks: widened.tasks },
+    );
+    expect(run.outcome).toBe('merged');
+    expect(widened.calls.spend).toBeGreaterThanOrEqual(2);
+
+    const plain = scripts();
+    await withWorker(
+      env,
+      createFakeWorld(),
+      async (q) => {
+        const h = await start(q, input());
+        await pollQuery(() => statusOf(h), parked, '超了预算停下');
+        await h.signal(taskContinueSignal, { by: COMMANDER_ACTOR, parkSeq: 1 });
+        const again = await pollQuery(
+          () => statusOf(h),
+          (s) => parked(s) && s.park?.seq === 2,
+          '没放宽：返工回来又超了预算，再停下',
+        );
+        expect(again.park?.kind).toBe('quota');
+        await h.terminate('测试收场');
+      },
+      { tasks: plain.tasks },
+    );
   });
 
   it('原始合计超了、输入当量没超（缓存读占大头，#2859）：不停，照旧起会话', async () => {

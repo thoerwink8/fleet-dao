@@ -2,8 +2,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { DEFAULT_PR_LINE_BUDGET } from '../../src/limits.ts';
 import { localExec } from '../../src/real/exec.ts';
 import { measureMigrationBudget } from '../../src/real/migration-budget.ts';
+import { remeasureLineBudget } from '../../src/real/task-activities.ts';
 import { addedLinesAgainst, type UserTree } from '../../src/real/user-git.ts';
 import { gitIn, isolatedGitEnv } from './isolated-git.ts';
 
@@ -167,5 +169,159 @@ describe('固定 Git blob 的生成快照计量', { timeout: 30000 }, () => {
     await expect(measureMigrationBudget(f.tree, 'f'.repeat(40), head, raw)).rejects.toMatchObject({
       code: 'GIT_FAILED',
     });
+  });
+});
+
+describe('体量关口重评活动（#3249）', { timeout: 30000 }, () => {
+  const repo = { owner: 'thoerwink8', name: 'fleet-dao', defaultBranch: 'main' };
+  async function ready() {
+    const f = await fixture();
+    // 会话树里钉的主线：base 就是主线头
+    f.git('update-ref', 'refs/remotes/origin/main', f.base);
+    return f;
+  }
+  const ask = (
+    f: Awaited<ReturnType<typeof ready>>,
+    over: Partial<{ head: string; base: string; rawAddedLines: number }> = {},
+  ) => ({
+    head: f.head,
+    base: f.base,
+    rawAddedLines: f.raw,
+    ...over,
+  });
+
+  it('精确头、固定 base、干净树：可信完整测量，测量前后头和干净程度都核过，不动树', async () => {
+    const f = await ready();
+    f.put('.claude/settings.json', '{"hooks":"noise"}\n'); // 环境文件噪声不算脏，也不被还原
+    const got = await remeasureLineBudget(f.tree, repo, ask(f));
+    expect(got.budgetRemeasure).toMatchObject({
+      version: 1,
+      status: 'measured',
+      head: f.head,
+      base: f.base,
+      headAfter: f.head,
+      cleanAfter: true,
+      measurement: { verified: true, rawAddedLines: f.raw, base: f.base, head: f.head },
+    });
+    const m = (
+      got.budgetRemeasure as { measurement: { verifiedGeneratedLines: number; chargeableAddedLines: number } }
+    ).measurement;
+    expect(m.verifiedGeneratedLines + m.chargeableAddedLines).toBe(f.raw);
+    expect(readFileSync(join(root, '.claude/settings.json'), 'utf8')).toContain('noise');
+  });
+
+  it('头不是请求的头、有改动或未跟踪文件、base 不是祖先或不在主线：拒绝并写明原因', async () => {
+    const f = await ready();
+    expect((await remeasureLineBudget(f.tree, repo, ask(f, { head: f.base }))).budgetRemeasure).toMatchObject(
+      {
+        status: 'refused',
+        reason: 'head',
+      },
+    );
+    f.put('source.ts', 'export const changed = false;\n');
+    expect((await remeasureLineBudget(f.tree, repo, ask(f))).budgetRemeasure).toMatchObject({
+      status: 'refused',
+      reason: 'dirty',
+    });
+    f.git('checkout', '--', 'source.ts');
+    f.put('untracked.ts', 'x\n');
+    expect((await remeasureLineBudget(f.tree, repo, ask(f))).budgetRemeasure).toMatchObject({
+      status: 'refused',
+      reason: 'dirty',
+    });
+    rmSync(join(root, 'untracked.ts'));
+    expect((await remeasureLineBudget(f.tree, repo, ask(f, { base: f.head }))).budgetRemeasure).toMatchObject(
+      {
+        status: 'refused',
+        reason: 'base',
+      },
+    );
+    expect(
+      (await remeasureLineBudget(f.tree, repo, ask(f, { base: 'e'.repeat(40) }))).budgetRemeasure,
+    ).toMatchObject({
+      status: 'refused',
+      reason: 'base',
+    });
+    // base 是头的祖先，但不在树里钉的主线历史上
+    const orphan = f.git('commit-tree', '4b825dc642cb6eb9a060e54bf8d69288fbee4904', '-m', 'orphan');
+    f.git('update-ref', 'refs/remotes/origin/main', orphan);
+    expect((await remeasureLineBudget(f.tree, repo, ask(f))).budgetRemeasure).toMatchObject({
+      status: 'refused',
+      reason: 'base',
+    });
+  });
+
+  it('base 是头的祖先、也在主线上，但不是固定的 merge-base（更早的旧 base）：拒绝，不换测量范围', async () => {
+    const f = await ready();
+    f.git('update-ref', 'refs/remotes/origin/main', f.head); // 主线前进到原来的头
+    f.put('later.ts', 'export const later = 1;\n');
+    const head = f.commit();
+    // 原始新增行按旧 base 数，行数核对也对得上：拦下它的只能是固定 base 核对
+    const older = await addedLinesAgainst(f.tree, f.base, head);
+    expect(
+      (await remeasureLineBudget(f.tree, repo, { head, base: f.base, rawAddedLines: older })).budgetRemeasure,
+    ).toMatchObject({ status: 'refused', reason: 'base' });
+    const fixed = await addedLinesAgainst(f.tree, f.head, head);
+    expect(
+      (await remeasureLineBudget(f.tree, repo, { head, base: f.head, rawAddedLines: fixed })).budgetRemeasure,
+    ).toMatchObject({ status: 'measured', base: f.head, head });
+  });
+
+  it('同头同 raw、不同 base 的变更构成不同（评审反例）：旧祖先 A 会把主线已有的 0094 当新增折掉，必须拒绝', async () => {
+    const f = await fixture();
+    // 0094 那份迁移（journal、快照、SQL）的新增行；业务文件凑成同样行数，让 A→H 与 S→H 的 raw 恰好相等
+    const migrationLines = f.raw - 1; // fixture 的头另加了一行 source.ts
+    const business = Array.from({ length: migrationLines }, (_, k) => `export const line${k} = ${k};\n`).join(
+      '',
+    );
+    f.git('checkout', '-q', '--detach', f.base);
+    f.put('business.ts', business);
+    const a = f.commit(); // 旧主线 A：合法 0093 + 业务文件
+    f.git('checkout', f.head, '--', 'packages/db/migrations');
+    f.git('rm', '-q', 'business.ts');
+    const s = f.commit(); // 主线 S：完整追加合法 0094，删掉业务文件
+    f.put('business.ts', business);
+    const h = f.commit(); // 候选 H：只恢复业务文件；真正的分叉点是 S
+    f.git('update-ref', 'refs/remotes/origin/main', s);
+    const fromS = await addedLinesAgainst(f.tree, s, h);
+    const fromA = await addedLinesAgainst(f.tree, a, h);
+    expect(fromA).toBe(fromS); // 同 head、同 raw
+    // 主线真实测量：全是业务行，没有可折扣的快照，超预算
+    expect(await measureMigrationBudget(f.tree, s, h, fromS)).toMatchObject({
+      verified: false,
+      verifiedGeneratedLines: 0,
+      chargeableAddedLines: fromS,
+    });
+    // 换成旧祖先 A：业务文件没变，已在主线的 0094 反被当新增，可信验证器会核成快照并大幅折扣——这正是要挡住的
+    const wrong = await measureMigrationBudget(f.tree, a, h, fromA);
+    expect(wrong).toMatchObject({ verified: true, base: a });
+    expect(wrong.chargeableAddedLines).toBeLessThan(DEFAULT_PR_LINE_BUDGET);
+    expect(fromS).toBeGreaterThan(DEFAULT_PR_LINE_BUDGET);
+    // 重评活动：A 是头的祖先、也在主线历史上、raw 也对得上，照样拒绝；只认固定的 S
+    expect(
+      (await remeasureLineBudget(f.tree, repo, { head: h, base: a, rawAddedLines: fromA })).budgetRemeasure,
+    ).toMatchObject({ status: 'refused', reason: 'base' });
+    expect(
+      (await remeasureLineBudget(f.tree, repo, { head: h, base: s, rawAddedLines: fromS })).budgetRemeasure,
+    ).toMatchObject({
+      status: 'measured',
+      measurement: { verified: false, base: s, chargeableAddedLines: fromS },
+    });
+  });
+
+  it('原始新增行与停下时不同、不适用的仓、读失败：回 refused 或抛错，不当 0', async () => {
+    const f = await ready();
+    expect(
+      (await remeasureLineBudget(f.tree, repo, ask(f, { rawAddedLines: f.raw + 1 }))).budgetRemeasure,
+    ).toMatchObject({ status: 'refused', reason: 'raw' });
+    await expect(remeasureLineBudget(f.tree, { ...repo, name: 'other' }, ask(f))).rejects.toMatchObject({
+      code: 'BAD_INPUT',
+    });
+    await expect(remeasureLineBudget(f.tree, repo, ask(f, { head: 'abc' }))).rejects.toMatchObject({
+      code: 'BAD_INPUT',
+    });
+    // 主线引用不存在：读不到，抛错（未知），不当作「不在主线」之外的任何结论
+    f.git('update-ref', '-d', 'refs/remotes/origin/main');
+    await expect(remeasureLineBudget(f.tree, repo, ask(f))).rejects.toMatchObject({ code: 'GIT_FAILED' });
   });
 });

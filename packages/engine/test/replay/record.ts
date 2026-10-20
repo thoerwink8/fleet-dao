@@ -26,7 +26,7 @@ import {
   taskStatusQuery,
 } from '../../src/task-contract.ts';
 import { createEnv, engineBundle, REPO, waitUntil, withWorker } from '../support.ts';
-import { OK_SEGMENT, scripted } from '../task-script.ts';
+import { goodBrief, OK_SEGMENT, scripted } from '../task-script.ts';
 
 const OUT = fileURLToPath(new URL('./fixtures/', import.meta.url));
 const repo = { ...REPO, id: 'repo-fixture', name: 'fixture' };
@@ -119,6 +119,25 @@ const SCENARIOS: Record<string, Scenario> = {
       return { 'task-run-cause': handle };
     },
   },
+  // 旧交代没有正式合同（#3402）：最初读到的交代不带合同，第一次安全边界读回合同要按「首次接纳」走（写进度行、记修订意见），
+  // 而不是被当成没变。生产里 #3199/#3200 就是栽在这一步：默认参数把显式传入的「之前没有合同」换成刚读回的合同，
+  // 少了接纳那一串活动，重放对不上历史（TMPRL1100）。不走 CI 红（「旧夹具没有 CI 红带评审」那条只许老夹具有）：第一轮没提交，第 2 轮合上。
+  'task-contract-first-accept': (() => {
+    const live = goodBrief();
+    const { contract: _contract, ...legacy } = live;
+    return {
+      tasks: scripted({
+        brief: () => ({ ok: true, brief: legacy }),
+        contractBrief: () => ({ ok: true, brief: live }),
+        delivery: (n) => ({ head: fakeHead(100 + n), commits: n === 1 ? 0 : 1, changedFiles: ['a.ts'] }),
+      }).tasks,
+      async run(r: Run) {
+        const handle = await startTask(r);
+        await handle.result();
+        return { 'task-contract-first-accept': handle };
+      },
+    };
+  })(),
   // 第一轮 CI 红了、回去动手第 2 轮、再推上去合上（#1246）：这份历史录在「第 2 轮动手前并最新主线」加进来之前的代码上，
   // 重放它证明新加的并主线步骤被 patched('sync-mainline-before-implement') 守住了（第 2 轮动手前老历史里没有 syncMainline）。
   'task-reworked': {

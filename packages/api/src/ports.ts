@@ -43,7 +43,54 @@ export interface WorkflowControl {
    * 问不清抛 WorkflowUnavailableError，不假装打到第一代。
    */
   runningTaskWorkflow?(repo: { owner: string; name: string }, issueNumber: number): Promise<string>;
+  /**
+   * 体量关口重评（#3249）：对精确 run、精确停点、精确 head 和固定 base，让工作流自己确认停在体量关口并重新核这一份成果。
+   * 先现读 taskStatus 的停点身份（不凭自由文本猜），再发 taskRemeasureLineBudget Update；check 只测，resume 才放行这一份。
+   * 没接 Temporal、旧 worker 不认都明确拒绝；Temporal 连不上抛 WorkflowUnavailableError。
+   */
+  remeasureLineBudget?(request: LineBudgetRemeasureRequest): Promise<LineBudgetRemeasureResponse>;
 }
+
+/** 停点编号：parks.generation.continued（预检打印、执行时必须原样带回）。 */
+export interface LineBudgetRemeasureRequest {
+  workflowId: string;
+  runId: string;
+  repo: { owner: string; name: string };
+  taskId: string;
+  head: string;
+  base: string;
+  mode: 'check' | 'resume';
+  /** 执行（resume）必带：预检时看到的停点编号。 */
+  park?: string;
+  by: string;
+}
+
+export interface LineBudgetRemeasureReceiptView {
+  head: string;
+  base: string;
+  rawAddedLines: number;
+  verifiedGeneratedLines: number;
+  chargeableAddedLines: number;
+  budget: number;
+  reason: string;
+}
+
+export type LineBudgetRemeasureResponse =
+  | {
+      ok: true;
+      outcome: 'eligible' | 'resumed' | 'already_resumed';
+      park: string;
+      receipt: LineBudgetRemeasureReceiptView;
+    }
+  | {
+      ok: false;
+      /** 引擎的拒绝类别（unsupported / identity / stale / busy / unknown / changed / unverified / over_budget）。 */
+      reason: string;
+      detail: string;
+      park?: string;
+      /** 工作流此刻停点上的交付头和预算，供人对照；不在体量停点时没有。 */
+      current?: { head: string; rawAddedLines: number; chargeableAddedLines: number; budget: number };
+    };
 
 export class WorkflowGoneError extends Error {
   readonly workflowId: string;

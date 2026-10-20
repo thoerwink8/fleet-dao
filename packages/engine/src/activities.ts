@@ -19,6 +19,7 @@ import type { HourlyReconcileJobDeps } from './jobs/hourly-reconcile.ts';
 import type { IntakeDeps } from './jobs/intake.ts';
 import type { IntakeChatDeps } from './jobs/intake-chat.ts';
 import type { JudgeSelfCheckJobDeps } from './jobs/judge-self-check.ts';
+import type { ParkTriageDeps as ParkTriageJobDeps } from './jobs/park-triage.ts';
 import type { ParkedRetryDeps as ParkedRetryJobDeps } from './jobs/parked-retry.ts';
 import type { QuotaReadJobDeps } from './jobs/quota-read.ts';
 import type { RequestSweepJobDeps } from './jobs/request-sweep.ts';
@@ -35,6 +36,7 @@ import {
   PortError,
   type PortName,
 } from './ports.ts';
+import type { PushHandbackPreflight, PushHandbackPreflightInput } from './push-handback.ts';
 import type { TaskBriefResult } from './runner/task-brief.ts';
 import type {
   ArmAutoMergeInput,
@@ -296,6 +298,8 @@ export interface EngineJobs {
   e2eQuarantine?: () => E2eQuarantineJobDeps;
   /** 停下等人的单按规则续一次（#3294）：发了新版或 PR 已能合就发「继续」。不调模型、不拉单。 */
   parkedRetry?: () => ParkedRetryJobDeps;
+  /** 停下的单交指挥官会话看（#3294 第 2 片）：停了 15 分钟规则没解开的、交指挥官的，会话交裁决，引擎白名单核了再执行。起会话，标 needsMaster。 */
+  parkTriage?: () => ParkTriageJobDeps;
 }
 
 /**
@@ -303,6 +307,10 @@ export interface EngineJobs {
  * 的活动明确报 TASK_NOT_CONFIGURED（不重试），不装作做过。
  */
 export interface EngineTasks {
+  readPushHandbackPreflight?: (
+    input: PushHandbackPreflightInput,
+    ctx: PortContext,
+  ) => Promise<PushHandbackPreflight>;
   readMergedTask?: (input: ReadMergedTaskInput, ctx: PortContext) => Promise<MergedTaskReceipt | null>;
   /** 当前 worker 的进程启动时刻；只读、无业务副作用。 */
   engineStartedAt?: (input: { schemaVersion: 1 }, ctx: PortContext) => Promise<EngineStartedAt>;
@@ -339,6 +347,7 @@ export interface EngineTasks {
 
 /** 任务工作流的活动名全集（写成 Record 让编译器保证一个不漏）。 */
 const TASK_ACTIVITY_KEYS: Readonly<Record<keyof EngineTasks, true>> = {
+  readPushHandbackPreflight: true,
   readMergedTask: true,
   engineStartedAt: true,
   readTaskBrief: true,

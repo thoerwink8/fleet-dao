@@ -117,8 +117,14 @@ import { readMergeWaitChecks } from './merge-wait-checks.ts';
 import { oneShotSessions } from './one-shot-sessions.ts';
 import { NO_FUSION_SESSIONS, orgDriftReporter, orgSwitchRound } from './org-switch.ts';
 import { orphanReaper } from './orphan-reap.ts';
+import { parkTriageJob } from './park-triage.ts';
 import { parkedRetryJob } from './parked-retry.ts';
 import type { AssignedProber } from './pick-then-probe.ts';
+import {
+  createPushHandbackChecker,
+  createPushHandbackPreflight,
+  type PushHandbackPreflightDeps,
+} from './push-handback-preflight.ts';
 import { type QuotaReadWiring, quotaReadJob } from './quota-read.ts';
 import { realReleaseEvidence } from './release-evidence.ts';
 import { requestSweepJob } from './request-sweep.ts';
@@ -859,6 +865,7 @@ export function realPortsFromEnv(
   jobs: EngineJobs;
   /** 任务工作流（#632）的真活动：不碰会话的五个、动手会话、冷验收会话。 */
   tasks: EngineTasks;
+  checkPushHandback: ReturnType<typeof createPushHandbackChecker>;
   registerJobs(): Promise<void>;
   /** 引擎起来、定时器起之前跑一遍：把退役名单（jobs/retired-schedules.ts）里 Temporal 上还在的删掉，见 real/retire-schedules.ts。 */
   retireSchedules(client: Pick<Client, 'schedule'>): Promise<void>;
@@ -1172,25 +1179,39 @@ export function realPortsFromEnv(
   // cursor、grok、mirasim 不再被 kept 放行，15 分钟新鲜线一律真探。
   const probeAssigned: AssignedProber = (input) => probeAssignedRoute(routeProbe(), routeProbeLock, input);
   const runsDir = join(config.stateDir, 'runs');
+  const taskActivities = createTaskActivities({
+    openRunsForIssue: (repo, issue, workflowId) => countOpenRunsForIssue(db, repo, issue, workflowId),
+    gh,
+    trees,
+    exec,
+    log: taskLog,
+    ...reviewAudit,
+    profileOf: async (repo) => {
+      const row = await findRepoProfile(db, repo.owner, repo.name);
+      if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);
+      return row.profile;
+    },
+    readChecks: async (repo, head, signal) => {
+      const row = await findRepoProfile(db, repo.owner, repo.name);
+      if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，不知道合并要等哪些检查`);
+      return readMergeWaitChecks(gh, repo, head, parseRepoProfile(row.profile).mergeSignals, signal);
+    },
+  });
+  const pushHandbackDeps: PushHandbackPreflightDeps = {
+    address: temporal.address,
+    namespace: temporal.namespace,
+    taskQueue: temporal.taskQueue,
+    runsDir,
+    trees,
+    exec,
+    getRun: (id) => getRun(db, id),
+    openRuns: (input) => countOpenRunsForIssue(db, input.task.repo, input.task.issueNumber, input.workflowId),
+    spend: async (taskId, since) => toTaskSpendResult(await taskTokenSpend(db, taskId, { since })),
+    brief: taskActivities.readTaskBrief,
+  };
   const tasks: EngineTasks = {
-    ...createTaskActivities({
-      openRunsForIssue: (repo, issue, workflowId) => countOpenRunsForIssue(db, repo, issue, workflowId),
-      gh,
-      trees,
-      exec,
-      log: taskLog,
-      ...reviewAudit,
-      profileOf: async (repo) => {
-        const row = await findRepoProfile(db, repo.owner, repo.name);
-        if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，读不了仓档案`);
-        return row.profile;
-      },
-      readChecks: async (repo, head, signal) => {
-        const row = await findRepoProfile(db, repo.owner, repo.name);
-        if (!row) throw new Error(`没有受管仓 ${repo.owner}/${repo.name}，不知道合并要等哪些检查`);
-        return readMergeWaitChecks(gh, repo, head, parseRepoProfile(row.profile).mergeSignals, signal);
-      },
-    }),
+    ...taskActivities,
+    readPushHandbackPreflight: createPushHandbackPreflight(pushHandbackDeps),
     async readCiPolicy(input) {
       if (input?.schemaVersion !== 1 || !input.repo?.owner || !input.repo?.name) {
         throw new PortError('INVALID_INPUT', '读 CI 模式：要有仓的 owner 和 name', { retryable: false });
@@ -1323,6 +1344,21 @@ export function realPortsFromEnv(
     sessions: oneShots,
     probe: probeAssigned,
   });
+  // 法国指挥官会话（#3294 第 2 片）：停下的单交选路用途 commander 的模型看，会话和整理待办同一段起法（real/read-only-session.ts），
+  // 没有 GitHub 令牌；裁决经白名单核过，继续 / 放弃发信号、重做走 redoTask、拆单开子单，都在 real/park-triage.ts 的引擎代码里
+  jobs.parkTriage = parkTriageJob({
+    db,
+    gh,
+    trees,
+    exec,
+    tmpDir: join(config.stateDir, 'tmp'),
+    spawner: segmentSpawner,
+    pickRoute: real.ports.pickRoute,
+    sessions: oneShots,
+    probe: probeAssigned,
+    temporal: wakeClient,
+    taskQueue: temporal.taskQueue,
+  });
   // 驾驶舱「提需求」的指挥官会话（#2061，母单 #2047 第 C 片）：和整理待办同一条路（选路用途 intake-chat、主线的只读检出、
   // 同一份 Spawner、登记进一次性会话清单），多轮 --resume 续，闲置 30 分钟收掉；会话没有 GitHub 令牌
   jobs.intakeChat = intakeChatJob({
@@ -1349,6 +1385,7 @@ export function realPortsFromEnv(
     ...real,
     jobs,
     tasks,
+    checkPushHandback: createPushHandbackChecker(pushHandbackDeps),
     drainControl,
     releaseSessions: (why) => handoff.leave(why),
     stateDir: config.stateDir,

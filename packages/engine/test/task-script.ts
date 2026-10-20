@@ -139,6 +139,26 @@ export interface Calls {
 
 export const OK_SEGMENT: RunSegmentResult = { ok: true, runId: 'run-1', answer: '已提交' };
 
+/**
+ * 活动还在跑时给心跳，放弃的取消靠它送进来。
+ * 间隔 200ms，且上一次心跳的调用没回来就不再开下一次：20ms 不重叠地打 RPC 时，慢的测试服务端会把活动完成挤到用例时限之后，时间也不跳。
+ */
+function heartbeats(beat: () => unknown): () => void {
+  let pending = false;
+  let stopped = false;
+  const timer = setInterval(() => {
+    if (pending || stopped) return;
+    pending = true;
+    Promise.resolve(beat()).finally(() => {
+      pending = false;
+    });
+  }, 200);
+  return () => {
+    stopped = true;
+    clearInterval(timer);
+  };
+}
+
 /** 默认全走通；哪一步要出岔子，给那一步的脚本。 */
 export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; calls: Calls } {
   const calls: Calls = {
@@ -207,12 +227,12 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     async runSegment(input, ctx) {
       calls.order.push('segment');
       calls.segment.push(input);
-      // 心跳：放弃时 Temporal 要靠心跳把取消送进来
-      const beat = setInterval(() => ctx.heartbeat(), 20);
+      // 心跳：放弃时 Temporal 要靠心跳把取消送进来。上一次还没回来就不再叠下一次。
+      const stop = heartbeats(() => ctx.heartbeat());
       try {
         return await script.segment(input, calls.segment.length, ctx.signal, () => ctx.heartbeat());
       } finally {
-        clearInterval(beat);
+        stop();
       }
     },
     async readDelivery(input) {
@@ -223,12 +243,12 @@ export function scripted(over: Partial<Script> = {}): { tasks: EngineTasks; call
     async coldVerify(input, ctx) {
       calls.order.push('verify');
       calls.verify.push(input);
-      // 心跳：取消要靠心跳送进来
-      const beat = setInterval(() => ctx.heartbeat(), 20);
+      // 心跳：取消要靠心跳送进来。上一次还没回来就不再叠下一次。
+      const stop = heartbeats(() => ctx.heartbeat());
       try {
         return await script.verify(input, calls.verify.length, ctx.signal);
       } finally {
-        clearInterval(beat);
+        stop();
       }
     },
     async checkGuarded(input) {

@@ -16,6 +16,13 @@ import {
 import type { z } from 'zod';
 import { InvalidNodeReportError, type NodeReportSummary } from './ports.ts';
 
+/** 机器通行证入库的哈希：sha256 的 64 位小写十六进制（node_keys 的 check 也这么要求）。明文、别的长度一律抛错，不存。 */
+export function checkNodeKeyHash(tokenHash: string): void {
+  if (!/^[0-9a-f]{64}$/.test(tokenHash)) {
+    throw new Error('node_keys 的 tokenHash 要是 64 位小写十六进制（通行证明文的 sha256）');
+  }
+}
+
 const SnapshotSchema = NodeReportSchema.pick({ home: true, env: true });
 
 const issuesOf = (error: z.ZodError): string =>

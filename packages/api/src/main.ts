@@ -10,6 +10,7 @@ import {
   createDb,
   feishuPushFacts,
   finishLocalTask,
+  listLocalClaims,
   readAcceptanceDutyRows,
   renewLocalTask,
 } from '@fleet-dao/db';
@@ -268,6 +269,7 @@ async function assemble(): Promise<{
       claim: (i) => claimLocalTask(db, i),
       renew: (i) => renewLocalTask(db, i),
       finish: (i) => finishLocalTask(db, i),
+      list: (now) => listLocalClaims(db, now),
       workflows: temporal.control,
     }),
     // 任务详情每段的会话内容（#1640）：读引擎按条记下的 run_transcript

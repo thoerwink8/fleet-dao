@@ -2,7 +2,7 @@
 // 发版卡卡住、失败后的三个按钮（#2027）：重试、恢复引擎开关、撤掉暂停。
 // 每个按钮：后端说能点才出现；点了先弹确认框写明后果；确认键后端慢时转圈（aria-busy）、连点只发一次，成功才关；失败留在框里写原因。
 import { act, cleanup, fireEvent, screen, waitFor, within } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
+import { afterEach, aroundEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 const { toast } = vi.hoisted(() => ({
   toast: Object.assign(vi.fn(), { success: vi.fn(), error: vi.fn(), info: vi.fn(), warning: vi.fn() }),
@@ -14,11 +14,134 @@ import { createMockApi, type MockApi } from '../api/mock/server';
 import type { EnvResponse, Jobs, ReleaseCard } from '../api/types';
 import France from '../routes/france';
 import { renderApp } from './harness';
+import { boundLine, clipBytes, installStageTrace } from './stage-trace';
+
+// 完整 CI 里这个文件有两项 5000ms 超时（#3396），只报「Test timed out」。
+// 每次 findBy / waitFor 的进出交给 stage-trace；本文件再给各阶段（渲染、矩阵各分支、弹框、同步查询、转圈、deferred、关框）打标记。
+// 只在失败时写出：断言抛错，或测试框架超时后的收尾（函数体不会自己抛）。
+// stage-trace 的 4 秒快超时先留在缓冲里，成功就丢掉，失败才跟阶段标记一起写出。不改超时、不改断言。
+const traceLines: string[] = [];
+aroundEach(async (runTest, ctx) => {
+  traceLines.length = 0;
+  try {
+    await runTest();
+  } finally {
+    // 内层 stage-trace 收尾之后才到这里，偏慢/快超时都已经进了缓冲。
+    flushTrace(ctx.task.result?.state === 'fail');
+  }
+});
+installStageTrace({
+  emit: (line) => {
+    traceLines.push(line);
+  },
+});
+
+const PHASE_CAP = 32;
+const PHASE_LABEL_MAX_BYTES = 48;
+
+function writePhaseLine(line: string) {
+  process.stderr.write(`${line}\n`);
+}
+/** 失败收尾时才读。合同测试可临时换掉，afterEach 用完即还原。 */
+let emitPhase: (line: string) => void = writePhaseLine;
+
+/** 成功路径丢掉 stage-trace 缓冲；失败才写出。输出口坏了也不外冒。 */
+function flushTrace(failed: boolean) {
+  const lines = traceLines.splice(0, traceLines.length);
+  if (!failed) return;
+  for (const line of lines) {
+    try {
+      emitPhase(line);
+    } catch {
+      /* 输出口出错不影响测试 */
+    }
+  }
+}
+
+function startPhases(test: string, emit: (line: string) => void = emitPhase) {
+  const t0 = performance.now();
+  const marks: { label: string; ms: number }[] = [];
+  let dropped = 0;
+  let dumped = false;
+  const dump = (why: string) => {
+    if (dumped) return;
+    dumped = true;
+    try {
+      const last = marks[marks.length - 1];
+      const body = marks.map((m) => `${m.label}@${m.ms}ms`).join(' → ');
+      const more = dropped > 0 ? `，另有 ${dropped} 个标记未展开` : '';
+      emit(
+        boundLine(
+          `[阶段标记·${why}] test=${clipBytes(test, 160)} 停在：${last ? last.label : '（还没开始）'}；已过 ${Math.round(performance.now() - t0)}ms；${body}${more}`,
+        ),
+      );
+    } catch {
+      /* 输出口出错不影响测试 */
+    }
+  };
+  const api = {
+    marks,
+    dropped: () => dropped,
+    dump,
+    mark(label: string) {
+      if (marks.length >= PHASE_CAP) {
+        dropped += 1;
+        return;
+      }
+      marks.push({ label: clipBytes(label, PHASE_LABEL_MAX_BYTES), ms: Math.round(performance.now() - t0) });
+    },
+    stop() {
+      if (active === api) active = null;
+    },
+  };
+  return api;
+}
+
+type Phases = ReturnType<typeof startPhases>;
+/** 当前用例的阶段。框架超时不会进入 traced 的 catch，afterEach 靠它补输出。 */
+let active: Phases | null = null;
+
+/**
+ * 合同测试用可控时钟：只伪造 setTimeout/clearTimeout。
+ * 成功路径本身不排定时器；把时钟推过 4 秒仍应没有输出。不碰原来 10 个用例的等待。
+ */
+async function withPhaseClock(run: (advance: (ms: number) => Promise<void>) => Promise<void>) {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  try {
+    await run(async (ms) => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+/** 包一个测试体：抛错时输出标记再原样抛。框架超时进不了这里的 catch，交给 afterEach。 */
+function traced(name: string, body: (mark: (label: string) => void) => Promise<void>): () => Promise<void> {
+  return async () => {
+    const ph = startPhases(name);
+    active = ph;
+    try {
+      await body(ph.mark);
+    } catch (e) {
+      ph.dump('失败');
+      throw e;
+    } finally {
+      ph.stop();
+    }
+  };
+}
 
 beforeEach(() => {
   for (const f of [toast.success, toast.error, toast.info, toast.warning]) f.mockClear();
 });
-afterEach(cleanup);
+afterEach((ctx) => {
+  // 断言失败时 traced 已经输出过；这里补的是测试框架超时（函数还挂着、catch 没跑）。
+  if (ctx.task.result?.state === 'fail') active?.dump('失败');
+  active?.stop();
+  cleanup();
+  emitPhase = writePhaseLine;
+});
 
 function deferred() {
   let resolve: (v: unknown) => void = () => {};
@@ -119,26 +242,35 @@ function api(c: ReleaseCard, recover: MockApi['franceReleaseRecover']) {
 }
 
 describe('三个按钮什么时候出现', () => {
-  test('后端说能点才出现：卡住给「重试」「撤掉暂停」，没成给「恢复引擎开关」，只剩标记给「撤掉暂停」；没有就一个都不画', async () => {
-    const cases: [Recover | undefined, Action['last'], string[]][] = [
-      [STUCK, BLOCKED, ['重试', '撤掉暂停']],
-      [RESTORE, FAILED, ['恢复引擎开关']],
-      [PAUSED, NOLAST, ['撤掉暂停']],
-      [NONE, NOLAST, []],
-      [undefined, NOLAST, []],
-    ];
-    for (const [recover, last, names] of cases) {
-      const { unmount } = renderApp(<France />, {
-        api: api(card(recover, last), () => Promise.reject(new Error('不该点'))),
-        route: '/france',
-      });
-      await screen.findByRole('button', { name: '发布到法国' });
-      const box = document.querySelector('[data-release-recover]');
-      const got = [...(box?.querySelectorAll('button') ?? [])].map((b) => b.textContent);
-      expect(got, JSON.stringify(recover)).toEqual(names);
-      unmount();
-    }
-  });
+  test(
+    '后端说能点才出现：卡住给「重试」「撤掉暂停」，没成给「恢复引擎开关」，只剩标记给「撤掉暂停」；没有就一个都不画',
+    traced('matrix', async (mark) => {
+      const cases: [Recover | undefined, Action['last'], string[]][] = [
+        [STUCK, BLOCKED, ['重试', '撤掉暂停']],
+        [RESTORE, FAILED, ['恢复引擎开关']],
+        [PAUSED, NOLAST, ['撤掉暂停']],
+        [NONE, NOLAST, []],
+        [undefined, NOLAST, []],
+      ];
+      let i = 0;
+      for (const [recover, last, names] of cases) {
+        i += 1;
+        mark(`矩阵${i}/${cases.length}·渲染`);
+        const { unmount } = renderApp(<France />, {
+          api: api(card(recover, last), () => Promise.reject(new Error('不该点'))),
+          route: '/france',
+        });
+        mark(`矩阵${i}·等发布按钮`);
+        await screen.findByRole('button', { name: '发布到法国' });
+        mark(`矩阵${i}·读恢复按钮`);
+        const box = document.querySelector('[data-release-recover]');
+        const got = [...(box?.querySelectorAll('button') ?? [])].map((b) => b.textContent);
+        expect(got, JSON.stringify(recover)).toEqual(names);
+        unmount();
+        mark(`矩阵${i}·卸载`);
+      }
+    }),
+  );
 });
 
 for (const [kind, recover, last, opener, confirmName, needle] of [
@@ -148,49 +280,72 @@ for (const [kind, recover, last, opener, confirmName, needle] of [
   ['abort', PAUSED, NOLAST, '撤掉暂停', '确认撤掉', '引擎总开关不动'],
 ] as const) {
   describe(`「${opener}」（${kind}）`, () => {
-    test('点了先弹确认框写明后果；确认后发请求只带种类；后端慢时连点只发一次、确认键转圈（aria-busy）、框关不掉；成功才关并弹成功', async () => {
-      const d = deferred();
-      const calls: string[] = [];
-      const a = api(card(recover, last), (k) => {
-        calls.push(k);
-        return d.promise.then(() => ({ requested: true as const, kind: k, at: ASOF }));
-      });
-      renderApp(<France />, { api: a, route: '/france' });
-      const open = await screen.findByRole('button', { name: opener });
-      fireEvent.click(open);
-      const dialog = await screen.findByRole('alertdialog');
-      expect(dialog.querySelector('[data-recover-body]')?.textContent).toContain(needle);
-      expect(dialog.textContent).toContain('记一条操作记录');
-      expect(calls).toEqual([]);
+    test(
+      '点了先弹确认框写明后果；确认后发请求只带种类；后端慢时连点只发一次、确认键转圈（aria-busy）、框关不掉；成功才关并弹成功',
+      traced(`${kind}-slow`, async (mark) => {
+        const d = deferred();
+        const calls: string[] = [];
+        const a = api(card(recover, last), (k) => {
+          calls.push(k);
+          return d.promise.then(() => ({ requested: true as const, kind: k, at: ASOF }));
+        });
+        mark('渲染');
+        renderApp(<France />, { api: a, route: '/france' });
+        mark('等打开按钮');
+        const open = await screen.findByRole('button', { name: opener });
+        fireEvent.click(open);
+        mark('等确认框');
+        const dialog = await screen.findByRole('alertdialog');
+        expect(dialog.querySelector('[data-recover-body]')?.textContent).toContain(needle);
+        expect(dialog.textContent).toContain('记一条操作记录');
+        expect(calls).toEqual([]);
 
-      const ok = within(dialog).getByRole('button', { name: confirmName });
-      fireEvent.click(ok);
-      fireEvent.click(ok);
-      await waitFor(() => expect(ok.getAttribute('aria-busy')).toBe('true'));
-      fireEvent.click(ok);
-      expect(calls).toEqual([kind]);
-      fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
-      expect(screen.queryByRole('alertdialog')).not.toBeNull();
+        mark('同步取确认键');
+        const ok = within(dialog).getByRole('button', { name: confirmName });
+        fireEvent.click(ok);
+        fireEvent.click(ok);
+        mark('等转圈');
+        await waitFor(() => expect(ok.getAttribute('aria-busy')).toBe('true'));
+        fireEvent.click(ok);
+        expect(calls).toEqual([kind]);
+        mark('转圈中点先不');
+        fireEvent.click(within(dialog).getByRole('button', { name: '先不' }));
+        expect(screen.queryByRole('alertdialog')).not.toBeNull();
 
-      await act(async () => d.resolve(undefined));
-      await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
-      expect(toast.success).toHaveBeenCalledTimes(1);
-      expect(calls).toEqual([kind]);
-    });
+        mark('解决 deferred');
+        await act(async () => d.resolve(undefined));
+        mark('等关框');
+        await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull());
+        expect(toast.success).toHaveBeenCalledTimes(1);
+        expect(calls).toEqual([kind]);
+        mark('完成');
+      }),
+    );
 
-    test('【故意造出的失败】后端回 409：框留在原处写原因、弹失败提示，确认键恢复能再点（不当成成功）', async () => {
-      const a = api(card(recover, last), () => Promise.reject(new Error('现在没有可点的按钮：刷新页面再看')));
-      renderApp(<France />, { api: a, route: '/france' });
-      fireEvent.click(await screen.findByRole('button', { name: opener }));
-      const dialog = await screen.findByRole('alertdialog');
-      const ok = within(dialog).getByRole('button', { name: confirmName });
-      fireEvent.click(ok);
-      await waitFor(() => expect(within(dialog).getByRole('alert').textContent).toContain('刷新页面再看'));
-      expect(screen.queryByRole('alertdialog')).not.toBeNull();
-      expect(toast.error).toHaveBeenCalledTimes(1);
-      expect(toast.success).not.toHaveBeenCalled();
-      expect(ok.getAttribute('aria-busy')).not.toBe('true');
-    });
+    test(
+      '【故意造出的失败】后端回 409：框留在原处写原因、弹失败提示，确认键恢复能再点（不当成成功）',
+      traced(`${kind}-409`, async (mark) => {
+        const a = api(card(recover, last), () =>
+          Promise.reject(new Error('现在没有可点的按钮：刷新页面再看')),
+        );
+        mark('渲染');
+        renderApp(<France />, { api: a, route: '/france' });
+        mark('等打开按钮');
+        fireEvent.click(await screen.findByRole('button', { name: opener }));
+        mark('等确认框');
+        const dialog = await screen.findByRole('alertdialog');
+        mark('同步取确认键');
+        const ok = within(dialog).getByRole('button', { name: confirmName });
+        fireEvent.click(ok);
+        mark('等失败原因');
+        await waitFor(() => expect(within(dialog).getByRole('alert').textContent).toContain('刷新页面再看'));
+        expect(screen.queryByRole('alertdialog')).not.toBeNull();
+        expect(toast.error).toHaveBeenCalledTimes(1);
+        expect(toast.success).not.toHaveBeenCalled();
+        expect(ok.getAttribute('aria-busy')).not.toBe('true');
+        mark('完成');
+      }),
+    );
   });
 }
 
@@ -211,5 +366,109 @@ describe('假后端（dev:mock）：三个按钮点得动', () => {
     } finally {
       localStorage.removeItem('mockRelease');
     }
+  });
+});
+
+describe('阶段标记的诊断合同（#3396）', () => {
+  test('标记数有上限、超了只计数；整行有字节上限；标记名被截；失败收尾再走一次也只输出一次', () => {
+    const lines: string[] = [];
+    const ph = startPhases('t'.repeat(500), (l) => lines.push(l));
+    try {
+      for (let i = 0; i < PHASE_CAP + 5; i++) ph.mark(`阶段${i}${'长'.repeat(100)}`);
+      expect(ph.marks).toHaveLength(PHASE_CAP);
+      expect(ph.dropped()).toBe(5);
+      ph.dump('失败');
+      ph.dump('失败');
+    } finally {
+      ph.stop();
+    }
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('[阶段标记·失败]');
+    expect(lines[0]).toContain('另有 5 个标记未展开');
+    expect(Buffer.byteLength(lines[0] ?? '', 'utf8')).toBeLessThanOrEqual(4096);
+    for (const m of ph.marks)
+      expect(Buffer.byteLength(m.label, 'utf8')).toBeLessThanOrEqual(PHASE_LABEL_MAX_BYTES);
+  });
+
+  test('成功时丢掉 stage-trace 缓冲，失败才写出', () => {
+    const lines: string[] = [];
+    emitPhase = (l) => lines.push(l);
+    try {
+      traceLines.push('[阶段记录·快超时] test=ok');
+      flushTrace(false);
+      expect(lines).toEqual([]);
+      expect(traceLines).toEqual([]);
+      traceLines.push('[阶段记录·快超时] test=bad');
+      flushTrace(true);
+      expect(lines).toEqual(['[阶段记录·快超时] test=bad']);
+    } finally {
+      emitPhase = writePhaseLine;
+      traceLines.length = 0;
+    }
+  });
+
+  test('临近 5000ms 上限仍成功时不输出；输出口抛错不外冒', async () => {
+    await withPhaseClock(async (advance) => {
+      const lines: string[] = [];
+      const ok = startPhases('ok', (l) => lines.push(l));
+      ok.mark('等确认框');
+      await advance(4500);
+      ok.stop();
+      expect(lines).toEqual([]);
+      const bad = startPhases('bad', () => {
+        throw new Error('口坏了');
+      });
+      expect(() => bad.dump('失败')).not.toThrow();
+      bad.stop();
+      expect(lines).toEqual([]);
+    });
+  });
+
+  const timeoutLines: string[] = [];
+  test.fails('测试框架超时后，失败收尾输出已收集的阶段（函数体不会自己抛）', async () => {
+    emitPhase = (l) => timeoutLines.push(l);
+    await traced('timeout-case', async (mark) => {
+      mark('等确认框');
+      await new Promise<void>(() => {});
+    })();
+  }, 200);
+
+  test('框架超时那次只留下失败阶段，没有在成功时提前输出', () => {
+    expect(timeoutLines).toHaveLength(1);
+    expect(timeoutLines[0]).toContain('[阶段标记·失败]');
+    expect(timeoutLines[0]).toContain('停在：等确认框');
+    expect(timeoutLines[0]).toContain('test=timeout-case');
+    expect(timeoutLines[0]).not.toContain('快超时');
+  });
+
+  test('traced 把断言错误原样抛回去，诊断行只有阶段名', async () => {
+    const lines: string[] = [];
+    const write = process.stderr.write;
+    process.stderr.write = ((chunk: string | Uint8Array) => {
+      lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+      return true;
+    }) as typeof write;
+    const leaked = '不该进诊断的句子甲乙丙';
+    const err = new Error(`刷新失败 ${leaked}`);
+    try {
+      await expect(
+        traced('secret-case', async (mark) => {
+          mark('等确认框');
+          throw err;
+        })(),
+      ).rejects.toBe(err);
+      await traced('ok-case', async (mark) => {
+        mark('完成');
+      })();
+    } finally {
+      process.stderr.write = write;
+    }
+    const phase = lines.filter((l) => l.includes('[阶段标记·'));
+    expect(phase).toHaveLength(1);
+    expect(phase[0]).toContain('[阶段标记·失败]');
+    expect(phase[0]).toContain('停在：等确认框');
+    expect(phase[0]).toContain('test=secret-case');
+    expect(phase[0]).not.toContain(leaked);
+    expect(phase[0]).not.toContain('刷新失败');
   });
 });

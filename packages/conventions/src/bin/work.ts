@@ -8,7 +8,7 @@ import type { Git } from '../directives.ts';
 import { gitRunner } from '../git-runner.ts';
 import { ghRunner } from '../issue-new.ts';
 import { liveClaimsPost, readClaimsEndpoint, work } from '../work.ts';
-import { readLeases, readLocalBeats, removeLease, writeLease } from '../work-queue.ts';
+import { liveFranceClaims, readLeases, readLocalBeats, removeLease, writeLease } from '../work-queue.ts';
 import { runsRoot } from '../work-run.ts';
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
@@ -62,6 +62,7 @@ process.exitCode = await work(process.argv.slice(2), {
     git,
     readBeats: () => readLocalBeats(),
     readLeases: () => readLeases(),
+    readFranceClaims: liveFranceClaims(() => readClaimsEndpoint()),
     now: () => new Date(),
     env: process.env,
     root,
