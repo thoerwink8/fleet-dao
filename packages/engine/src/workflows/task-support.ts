@@ -945,15 +945,20 @@ function inertOwed(item: string): string {
     .replace(/#(?=\d)/g, '＃');
 }
 
-/** 从最后一条回复读交付声明。只认恰好一个封口的 fleet-delivery 块；别的都按 unknown 交代原因。 */
+/** 从最后一条回复读交付声明。只认恰好一个封口、且是回复最后内容的 fleet-delivery 块；别的都按 unknown 交代原因。 */
 export function parseDeliveryClaim(answer: string | null | undefined): DeliveryClaim {
   const text = answer ?? '';
   if (!text.trim()) return { kind: 'unknown', why: '没有最后一条回复' };
   const opens = [...text.matchAll(DELIVERY_OPEN)].length;
   if (opens === 0) return { kind: 'unknown', why: '回复里没有交付声明' };
-  const blocks = [...text.matchAll(DELIVERY_BLOCK)].map((m) => m[1] ?? '');
+  const matched = [...text.matchAll(DELIVERY_BLOCK)];
+  const blocks = matched.map((m) => m[1] ?? '');
   if (blocks.length < opens) return { kind: 'unknown', why: '交付声明没封口（回复可能截断了）' };
   if (blocks.length > 1) return { kind: 'unknown', why: '交付声明不止一个' };
+  // 声明必须是最后一条回复的最后内容：后面还有字，说明这不是收尾的结论，不当成完整交付
+  const only = matched[0];
+  if (only && text.slice((only.index ?? 0) + only[0].length).trim() !== '')
+    return { kind: 'unknown', why: '交付声明后面还有内容（声明必须是回复的最后内容）' };
   let value: unknown;
   try {
     value = JSON.parse(blocks[0] ?? '');
@@ -992,6 +997,25 @@ export function parseDeliveryClaim(answer: string | null | undefined): DeliveryC
 export function stripDeliveryClaim(answer: string | null | undefined): string | null {
   if (answer == null) return null;
   return answer.replace(DELIVERY_BLOCK, '').replace(DELIVERY_OPEN, '');
+}
+
+/**
+ * 回复进「做了什么」前中和别的单的引用（#3406）：PR 只关联本单，会话顺手写的 #号、owner/仓#号、GH-号、github.com 链接
+ * 都会让 GitHub 在别的单上留下引用，换成看着一样但不成链接的写法。本单自己的 #号留着。
+ */
+export function neutralizeForeignRefs(text: string, issueNumber: number): string {
+  return text
+    .replace(/(?:[A-Za-z0-9-]+\/[A-Za-z0-9._-]+)?#(\d+)/g, (m, n: string) =>
+      m === `#${n}` && Number(n) === issueNumber ? m : m.replace('#', '＃'),
+    )
+    .replace(/\bGH-(\d+)/gi, 'GH\u2011$1')
+    .replace(/\b(https?):\/\/(?=(?:www\.)?github\.com)/gi, '$1:\u200b//');
+}
+
+/** 动手会话最后一条回复 → 「做了什么」用的文字：去掉交付声明块，别的单的引用中和掉。 */
+export function answerForPrDid(answer: string | null | undefined, issueNumber: number): string | null {
+  const stripped = stripDeliveryClaim(answer);
+  return stripped === null ? null : neutralizeForeignRefs(stripped, issueNumber);
 }
 
 /**

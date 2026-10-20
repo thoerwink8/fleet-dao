@@ -11,6 +11,7 @@ import { WORKFLOW_TYPES } from '../src/contract.ts';
 import { createFakeWorld } from '../src/fakes.ts';
 import type { TaskRun, TaskWorkflowInput } from '../src/task-contract.ts';
 import {
+  answerForPrDid,
   DELIVERY_ITEM_MAX,
   DELIVERY_OWED_MAX,
   deliveryClaimPrFields,
@@ -172,6 +173,8 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
       [`做了${claimBlock('{"scope":"slice","owed":[]}')}`, /没列欠什么/],
       [`做了${claimBlock('{"scope":"done","owed":[]}')}`, /scope 只能是/],
       [`做了${claimBlock('{"scope":"full","owed":[],"closes":3396}')}`, /认不得的字段/],
+      [`${FULL_ANSWER}\n后来又改了：还欠 e2e`, /后面还有内容/],
+      [`${SLICE_ANSWER}\n补一句：其实都做完了`, /后面还有内容/],
       [
         `做了${claimBlock(JSON.stringify({ scope: 'slice', owed: ['x'.repeat(DELIVERY_ITEM_MAX + 1)] }))}`,
         /owed/,
@@ -192,6 +195,29 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
       expect(body).not.toContain('**还欠什么**：无');
       expect(body).toContain('**需求**：#12');
     }
+  });
+
+  it('声明块之后只有空白算收尾；块之后追加内容不接受', () => {
+    expect(parseDeliveryClaim(`${FULL_ANSWER}\n\n  \n`)).toEqual({ kind: 'full' });
+    expect(parseDeliveryClaim(`${FULL_ANSWER}x`).kind).toBe('unknown');
+  });
+
+  it('回复里别的单的引用不进「做了什么」成链接：#号、owner/仓#号、GH-号、github 链接都中和，本单号留着', () => {
+    const raw = [
+      '验收条 1：做到了，Refs #3396，Closes #3401',
+      '见 acme/widgets#77、GH-88 和 https://github.com/acme/widgets/issues/99',
+      '本单 #12 留着，#123 不是本单',
+    ].join('\n');
+    const did = answerForPrDid(raw, 12) ?? '';
+    expect(did).not.toMatch(/(?<![\w＃])#(3396|3401|77|123)\b/);
+    expect(did).not.toMatch(/GH-88/);
+    expect(did).not.toMatch(/https?:\/\/github\.com/);
+    expect(did).toContain('＃3396');
+    expect(did).toContain('acme/widgets＃77');
+    expect(did).toContain('本单 #12 留着');
+    const body = renderPrBody({ requirement: 12, did: taskPrDid(12, 1, 1, did), verified: ['y'] });
+    expect([...body.matchAll(/#(\d+)/g)].map((m) => m[1])).toEqual(['12', '12', '12']);
+    expect(answerForPrDid(null, 12)).toBeNull();
   });
 
   it('声明块不占「做了什么」的行；去掉后其余回复照旧', () => {
@@ -223,6 +249,8 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     expect(opened?.requirementRefs).toBeUndefined();
     expect(opened?.owed).toEqual(['会话声明还欠：原两项超时未定因（见 ＃3396）', expect.any(String)]);
     expect(opened?.did.join('\n')).not.toContain('fleet-delivery');
+    expect(opened?.did.join('\n')).not.toMatch(/(?<!＃)#3396/);
+    expect(opened?.did.join('\n')).toContain('＃3396');
     const openedText = renderPrBody(opened ?? { did: [], verified: [] });
     expect(openedText).not.toContain('**还欠什么**：无');
     expect(openedText).toContain('**需求**：Refs #12（分片、关不了它：会话声明只交了一部分）');
@@ -259,6 +287,7 @@ describe('交付声明进 PR 说明（#3406）：分片、欠项可核，缺了�
     expect(updated?.requirement).toBe(12);
     expect(updated?.partial).toBeUndefined();
     expect(updated?.risks?.[0]).toContain('交付范围未核');
+    expect(updated?.did.join('\n')).not.toMatch(/(?<!＃)#3396/);
     const text = renderPrBody(updated ?? { did: [], verified: [] });
     expect(text).not.toContain('**还欠什么**：无');
     expect(text).toContain('**需求**：#12');
