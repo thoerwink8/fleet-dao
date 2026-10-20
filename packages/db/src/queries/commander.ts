@@ -141,6 +141,10 @@ export async function listCommanderStalledTasks(db: Db): Promise<CommanderStalle
           eq(tasks.state, 'stalled'),
           eq(tasks.executor, 'engine'),
           sql`position(':park:' in ${notifications.dedupeKey}) > 0`,
+          // 指挥官自己留给人的提醒（commander:<工作流>:park:<第几次>，park-triage 的 noticeKey）也带 :park:，
+          // 它在认领之后才写、raised_at 更新：不排掉的话工作流编号会解成 commander:<工作流>，对不上认领记录，
+          // 还会盖掉原来那条工作流报的停下提醒，已认领的停点被算成没看过。
+          sql`${notifications.dedupeKey} not like 'commander:%'`,
         ),
       )
       .orderBy(asc(notifications.raisedAt), asc(notifications.id)),
