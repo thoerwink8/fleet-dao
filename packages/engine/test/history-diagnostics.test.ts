@@ -143,6 +143,20 @@ async function fixture(failed = false, started = true) {
 }
 
 describe('local watchdog and owned worker cleanup', () => {
+  it('does not replace the original error when diagnostic output itself fails', async () => {
+    const original = new Error('original assertion');
+    const sink = new Error('diagnostic output unavailable');
+    const scope = new SyntheticHistoryDiagnostics({
+      test: 'sink failure',
+      testSha256: identity.testSha256,
+      failed: () => false,
+      output: new DiagnosticOutput(() => {
+        throw sink;
+      }),
+    });
+    await expect(scope.track(Promise.reject(original))).rejects.toBe(original);
+    await expect(scope.finish()).rejects.toBe(sink);
+  });
   it('captures a tracked early failure before manual finally closes the environment and preserves the original error', async () => {
     const f = await fixture();
     const original = new Error('synthetic assertion failure');

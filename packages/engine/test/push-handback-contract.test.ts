@@ -222,7 +222,8 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
           { tasks },
         );
       } catch (error) {
-        await diagnostics.captureFailure();
+        // afterEach 的 finish 另报诊断写出故障，原断言错误保持原对象。
+        await diagnostics.captureFailure().catch(() => undefined);
         throw error;
       } finally {
         await diagnostics.closeEnvironment(env);

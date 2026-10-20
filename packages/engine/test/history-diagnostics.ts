@@ -179,7 +179,8 @@ export class SyntheticHistoryDiagnostics {
   }
   track<T>(run: Promise<T>): Promise<T> {
     const observed = run.catch(async (error) => {
-      await this.captureFailure();
+      // 写出故障仍由 finish 的原 capturePromise 报出，不替换此处原业务错误/堆栈。
+      await this.captureFailure().catch(() => undefined);
       throw error;
     });
     this.operations.push(settled(observed));
