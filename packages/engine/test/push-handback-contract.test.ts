@@ -25,7 +25,7 @@ import {
   waitUntil,
 } from './helpers.ts';
 import { DiagnosticOutput, SyntheticHistoryDiagnostics } from './history-diagnostics.ts';
-import { BODY, scripted } from './task-script.ts';
+import { BODY, OK_SEGMENT, scripted } from './task-script.ts';
 
 // 先登记 watchdog，再让 useEnv 的 beforeEach 创建服务端；不延后原测试的诊断时钟。
 const output = new DiagnosticOutput();
@@ -561,10 +561,16 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
       w = world();
     let live = h0,
       rounds = 0,
-      reads = 0;
+      reads = 0,
+      segmentsDone = 0;
     const { tasks, calls } = scripted({
       brief: () => ({ ok: true, brief: live }),
       contractBrief: () => ({ ok: true, brief: live }),
+      // 记下活动函数已经返回。length 在函数开头就加，放弃若抢在返回前发出，活动还开着，测试服务端不跳时间。
+      segment: async () => {
+        segmentsDone += 1;
+        return OK_SEGMENT;
+      },
     });
     tasks.readPushHandbackPreflight = async () => {
       reads++;
@@ -595,6 +601,7 @@ describe('permission contract snapshot consumption', { timeout: 60_000 }, () => 
         expect(rounds).toBe(1);
         expect(reads).toBe(2);
         expect(calls.segment[1]?.brief).toEqual(h1);
+        await waitUntil(() => segmentsDone === 2, 'second segment activity returned');
         await abandon(handle);
       },
       // 本例核统计失败后的控制消费，不驱逐工作流；固定原历史/真换 worker 另外覆盖重放。

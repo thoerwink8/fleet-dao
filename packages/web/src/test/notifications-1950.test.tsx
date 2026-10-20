@@ -11,7 +11,8 @@ const { toast } = vi.hoisted(() => ({
 }));
 vi.mock('sonner', () => ({ toast, Toaster: () => null }));
 
-import { createMockApi } from '../api/mock/server';
+import { keys, NOTIFICATIONS_PAGE } from '../api/client';
+import { createMockApi, type MockApi } from '../api/mock/server';
 import NotificationsPage from '../routes/notifications';
 import { renderApp } from './harness';
 
@@ -26,9 +27,22 @@ const APP = 'acme/fluxwatch：机器人还没装（还没装：「干活的」�
 const TREE = '工作树里有没推的东西，删不删要你拍：acme_orbit/11-callback'; // n-12：删掉交给引擎
 const rowOf = (title: string) => screen.getByText(title).closest('li[data-notice-row]') as HTMLElement;
 
+/** 列表先放进缓存再画。页面不用等这一次读取才离开骨架；findBy 第一次就能看见标题。 */
+async function renderListed(api: MockApi = createMockApi({ live: false })) {
+  const initial = await api.notifications({ status: 'open', limit: NOTIFICATIONS_PAGE });
+  return renderApp(<NotificationsPage />, {
+    api,
+    route: '/notifications',
+    staleTime: 60_000,
+    hydrate: (qc) => {
+      qc.setQueryData(keys.notifications('open'), initial);
+    },
+  });
+}
+
 describe('「要你拍」选项直接摆在卡上（#2353）', () => {
   test('标题加「等你拍板」、灰字写推荐哪项；选项、自己写一句、正文都直接在；没有「看选项」「处理了」，「打开」照旧在', async () => {
-    renderApp(<NotificationsPage />, { api: createMockApi({ live: false }), route: '/notifications' });
+    await renderListed();
     await screen.findByText(RELEASE);
     const row = rowOf(RELEASE);
     const nameLine = row.querySelector('[data-row-name-line]') as HTMLElement;
