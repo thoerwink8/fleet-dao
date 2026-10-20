@@ -61,6 +61,7 @@ import {
 } from './delivery-logic.ts';
 import { isSerial, isUuid, parseCursor } from './ids.ts';
 import {
+  checkNodeKeyHash,
   nodeReportRow,
   nodeSessionsRow,
   readNodeSessions,
@@ -81,6 +82,7 @@ import type {
   HistoricalCheckoutRun,
   JobRecord,
   NewAuditEntry,
+  NodeKeyRecord,
   NodeReportRecord,
   NotificationRecord,
   Page,
@@ -223,6 +225,8 @@ export interface MemoryData {
   nodeReports: NodeReportRecord[];
   /** 本机会话（node_sessions，#1991），一个环境一行；report 原样放（读回来再认一遍）。 */
   nodeSessions: { nodeId: string; receivedAt: string; report: unknown }[];
+  /** 机器通行证（node_keys，#3388），一个环境编号一行。 */
+  nodeKeys: NodeKeyRecord[];
   /** 法国工作树最近一份清单（worktree_inventory，#1993）；没存过是 null。原样放，读回来再认一遍。 */
   worktreeInventory: unknown;
 }
@@ -261,6 +265,7 @@ export function emptyData(): MemoryData {
     credentials: new Map(),
     nodeReports: [],
     nodeSessions: [],
+    nodeKeys: [],
     worktreeInventory: null,
   };
 }
@@ -997,6 +1002,38 @@ export function createMemoryStore(
           receivedAt: r.receivedAt,
           report: readNodeSessions(r.nodeId, structuredClone(r.report)),
         }));
+    },
+    async listNodeKeys() {
+      return data.nodeKeys.map((k) => ({ ...k })).sort((a, b) => compareIds(a.nodeId, b.nodeId));
+    },
+    async createNodeKey(input, entry) {
+      checkNodeKeyHash(input.tokenHash);
+      checkAudit(entry);
+      const current = data.nodeKeys.find((k) => k.nodeId === input.nodeId);
+      if (current && current.revokedAt === undefined) return 'exists';
+      if (data.nodeKeys.some((k) => k.tokenHash === input.tokenHash && k.nodeId !== input.nodeId)) {
+        throw new Error('node_keys_token_hash_unique：这把通行证的哈希已经有人在用');
+      }
+      const next: NodeKeyRecord = {
+        nodeId: input.nodeId,
+        tokenHash: input.tokenHash,
+        displayName: input.displayName,
+        createdAt: now().toISOString(),
+      };
+      data.nodeKeys = [...data.nodeKeys.filter((k) => k.nodeId !== input.nodeId), next];
+      audit(entry);
+      return 'created';
+    },
+    async revokeNodeKey(nodeId, entry) {
+      checkAudit(entry);
+      const current = data.nodeKeys.find((k) => k.nodeId === nodeId);
+      if (!current) return 'not_found';
+      if (current.revokedAt !== undefined) return 'already_revoked';
+      data.nodeKeys = data.nodeKeys.map((k) =>
+        k.nodeId === nodeId ? { ...k, revokedAt: now().toISOString() } : k,
+      );
+      audit(entry);
+      return 'revoked';
     },
     async getWorktreeInventory() {
       if (data.worktreeInventory === null || data.worktreeInventory === undefined) return null;

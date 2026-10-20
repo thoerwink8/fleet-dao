@@ -24,6 +24,7 @@ Hono 写的驾驶舱后端，跑在法国：登录、驾驶舱接口、实时推
 - 接口契约只有一份：`packages/shared/src/web-api.ts` 的 `WebRoutes`、`AuthRoutes`。`packages/api/test/web-routes-contract.test.ts` 两头核对（契约里有、后端没注册；后端注册了、契约里没有，都红）。
 - 「只有创始人本人能开」（决定 0033）：打开 Fable 的路由/模型、加进或拖动用途，一律调 `packages/api/src/founder-only.ts` 的 `guardFounderOnly`，不另写判法；`packages/api/test/fable-founder-only.test.ts` 两道门都测。
 - 飞书网关的意图接口、别的环境推快照的写口挂在登录门前面，只认各自的通行证；改挂载顺序会把它们关到登录门后面（见 `app.ts` 注释）。
+- 机器通行证（#3388）认谁只有一份：`src/node-keys.ts` 的 `readNodeKeys`（库表 `node_keys` 的有效行 + 旧配置 `FLEET_NODE_KEYS`，同编号库为准，作废行遮住旧配置），快照、本机会话、领单（含 `GET /api/nodes/claims`）、看板读口都走它；每次现读、不缓存，库读失败 503 `node_keys_unreadable`，不放行也不回 401。发/列/作废在 `fleet-api node-key new|list|revoke`（`cli.ts`），读口协议在 shared 的 `node-claims.ts`（零依赖，本机脚本直接导入）。
 - 读不到就如实报红：GitHub 机器人凭据、Temporal 连不上都不能当成没事，健康检查照实报。
 - CI 策略的唯一权威是 repos 行，不能把 mode 写进 caller/source。publisher 必须在 intake 的 await accept 内，wake=false 也执行，失败沿投递账重放；不让 source status 再发布 source。setter 用策略专用 strict pgLocker，先撤绿、原 DB+audit 事务、再撤绿+刷新 source；成功只排重算，失锁和部分同步返回明确阶段。
 - 两个 App 装没装的判法只有一份：`packages/api/src/repo-import-routes.ts` 的 `mergedInstallations`（一边失败整次失败）。驾驶舱 `GET /api/repos/importable` 和 `fleet-api project installations`（`project-cli.ts` 的 `installationFacts`，#2977）都调它，别另写；后者按仓号认、只打目标仓，没读全、身份对不上退出 1（没查成），不当成没装，也不碰 repos 表、不写安装。
