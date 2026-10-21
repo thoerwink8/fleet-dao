@@ -299,8 +299,10 @@ class Spool {
       schema[1]?.sql !== null
     )
       fail('corrupt');
-    if (d.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') fail('corrupt');
     if (!decodeRows) return;
+    // quick_check 扫全库，只在写事务内做一遍；打开时同样扫一遍是第二份 O(页数) 的 CPU 和读（#3414），
+    // 且锁前的结果挡不住之后的变化。打开时的结构核对已足以触发 hot journal 恢复和格式拒绝。
+    if (d.prepare('PRAGMA quick_check').get()?.quick_check !== 'ok') fail('corrupt');
     const rows = d.prepare('SELECT key,payload,record_hash FROM pending').all();
     if (rows.length > ALERT_SPOOL_LIMITS.rows) fail('capacity');
     let bytes = 0;

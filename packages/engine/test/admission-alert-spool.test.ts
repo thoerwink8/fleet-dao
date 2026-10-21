@@ -143,6 +143,28 @@ describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
       four = counted();
     expect(four - three).toBe(1);
   });
+  // #3414：quick_check 扫全库，原先打开时和写事务内各做一遍；只留事务内一遍。
+  it('每次记录只做一遍 quick_check，且发生在写事务内', () => {
+    for (let n = 0; n < 3; n++) expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    const exec = DatabaseSync.prototype.exec,
+      prepare = DatabaseSync.prototype.prepare;
+    const events: string[] = [];
+    DatabaseSync.prototype.exec = function (sql: string) {
+      if (sql === 'BEGIN IMMEDIATE') events.push('begin');
+      return exec.call(this, sql);
+    };
+    DatabaseSync.prototype.prepare = function (sql: string) {
+      if (sql === 'PRAGMA quick_check') events.push('quick_check');
+      return prepare.call(this, sql);
+    };
+    try {
+      expect(recordAdmissionAlert(path, observation()).kind).toBe('spooled');
+    } finally {
+      DatabaseSync.prototype.exec = exec;
+      DatabaseSync.prototype.prepare = prepare;
+    }
+    expect(events).toEqual(['begin', 'quick_check']);
+  });
   it('实际写锁第二连接fail-fast busy，原事务回滚后重开成功', () => {
     const o = observation();
     recordAdmissionAlert(path, o);
