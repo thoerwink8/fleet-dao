@@ -1,8 +1,19 @@
 // 每小时对账的一轮外壳（jobs/hourly-reconcile.ts）和工作流：几部分的结局怎么并、记开始和记结局没成、这一轮整个没跑成、
 // 真 Temporal 测试服务端上跑一轮。工作树和提醒各自怎么判在 test/real/hourly-reconcile.test.ts（真库、真 git）。
 // 每条失败路径都故意造一次：都不许记成 ok。
-import type { ScheduleResult } from '@fleet-dao/db';
-import { describe, expect, it } from 'vitest';
+import {
+  closeInterruptedScheduleRuns,
+  finishScheduleRun,
+  INTERRUPTED_SCHEDULE_WHY,
+  recordScheduleRunProgress,
+  registerScheduledJobs,
+  SCHEDULE_PROGRESS_PREFIX,
+  type ScheduleResult,
+  scheduleRuns,
+  startScheduleRun,
+} from '@fleet-dao/db';
+import { createTestDb, TEST_DB_TIMEOUT_MS, type TestDb } from '@fleet-dao/db/testing';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   combineParts,
   HOURLY_RECONCILE_JOB,
@@ -10,6 +21,7 @@ import {
   type HourlyReconcileJobDeps,
   runHourlyReconcileJob,
   WHY_MAX,
+  witnessWorktreeCalls,
 } from '../src/jobs/hourly-reconcile.ts';
 import type { SweepPart } from '../src/jobs/reconcile-common.ts';
 import { describeLeftovers } from '../src/jobs/worktree-sweep.ts';
@@ -301,6 +313,200 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     };
     expect(await runHourlyReconcileJob(h.deps)).toMatchObject({
       outcome: expect.not.stringMatching(/failed/),
+    });
+  });
+
+  describe('工作树这一步里的子调用见证（卡在哪棵树的哪条命令）', () => {
+    const TREE_STEP = 'worktrees.leftovers.acme_repo.12-abc';
+    const withTree = (over: Partial<HourlyReconcileJobDeps> = {}): Harness => {
+      const base = harness();
+      return harness({
+        listDir: async (dir) => {
+          if (dir === ROOT) return [{ name: 'acme_repo', isDir: true }];
+          if (dir === `${ROOT}/acme_repo`) return [{ name: '12-abc', isDir: true }];
+          throw new Error(`用例没给 ${dir}`);
+        },
+        ownerOf: async () => 'fleet-agent-carpool',
+        alerts: base.deps.alerts,
+        ...over,
+      });
+    };
+
+    it('检查子进程一直不回：最后一笔是它的开始、同一运行编号，没有结束也没有结局（不记成 ok）', async () => {
+      let sawStart!: () => void;
+      const started = new Promise<void>((resolve) => {
+        sawStart = resolve;
+      });
+      let release!: (err: Error) => void;
+      const hung = new Promise<never>((_, reject) => {
+        release = reject;
+      });
+      const h = withTree({ leftovers: () => hung });
+      const originalProgress = h.deps.runs.progress;
+      h.deps.runs.progress = async (id, progress, at) => {
+        await originalProgress?.(id, progress, at);
+        if (progress.step === TREE_STEP && progress.phase === 'start') sawStart();
+      };
+
+      const running = runHourlyReconcileJob(h.deps);
+      await started;
+      expect(h.progressed.at(-1)).toEqual({ id: 7, step: TREE_STEP, phase: 'start' });
+      expect(h.progressed).toContainEqual({ id: 7, step: 'worktrees', phase: 'start' });
+      expect(h.progressed.some((p) => p.step === 'worktrees' && p.phase === 'end')).toBe(false);
+      expect(h.finished).toEqual([]);
+
+      release(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
+      const run = await running;
+      expect(h.progressed).toContainEqual({ id: 7, step: TREE_STEP, phase: 'failed' });
+      expect(run.outcome).not.toBe('ok');
+      expect(h.finished[0]?.result).toMatchObject({
+        outcome: 'partial',
+        why: expect.stringContaining('12-abc'),
+      });
+    });
+
+    it('子调用的步骤名都是库里认的写法，并带着相对路径、同一运行编号', async () => {
+      const h = withTree();
+      await runHourlyReconcileJob(h.deps);
+      const subs = h.progressed.filter((p) => p.step.startsWith('worktrees.'));
+      expect(subs.length).toBeGreaterThan(0);
+      for (const p of h.progressed) {
+        expect(p.id).toBe(7);
+        expect(p.step).toMatch(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
+      }
+      expect(subs).toContainEqual({ id: 7, step: TREE_STEP, phase: 'start' });
+      expect(subs).toContainEqual({ id: 7, step: TREE_STEP, phase: 'end' });
+      expect(subs).toContainEqual({ id: 7, step: 'worktrees.owner-of.acme_repo.12-abc', phase: 'end' });
+      // 子调用只进持久见证，控制台步骤轨迹不跟着变
+      expect(h.logs.some((l) => l.includes('worktrees.'))).toBe(false);
+    });
+
+    it('子调用见证写不进：只记 warn，工作树这一步的结果不变', async () => {
+      const h = withTree();
+      const expected = await runHourlyReconcileJob(withTree().deps);
+      h.deps.runs.progress = async (_id, progress) => {
+        if (progress.step.startsWith('worktrees.')) throw new Error('见证库写不进');
+      };
+      expect(await runHourlyReconcileJob(h.deps)).toEqual(expected);
+      expect(h.logs.some((l) => l.startsWith('warn:') && l.includes('worktrees.leftovers'))).toBe(true);
+    });
+
+    it('判在不在用的库和 Temporal 口子也各留见证：问工作流卡住时最后一笔是它的开始', async () => {
+      let sawStart!: () => void;
+      const started = new Promise<void>((resolve) => {
+        sawStart = resolve;
+      });
+      const h = withTree({
+        workflows: {
+          state: () => new Promise<never>(() => {}),
+          view: async () => {
+            throw new Error('不该问');
+          },
+        },
+      });
+      const originalProgress = h.deps.runs.progress;
+      h.deps.runs.progress = async (id, progress, at) => {
+        await originalProgress?.(id, progress, at);
+        if (progress.step.startsWith('worktrees.workflow-state.') && progress.phase === 'start') sawStart();
+      };
+      void runHourlyReconcileJob(h.deps);
+      await started;
+      const last = h.progressed.at(-1);
+      expect(last).toMatchObject({ id: 7, phase: 'start' });
+      expect(last?.step).toMatch(/^worktrees\.workflow-state\.task\.acme\.repo\.12/);
+      expect(h.progressed).toContainEqual({ id: 7, step: 'worktrees.issue.acme_repo.12', phase: 'end' });
+      expect(h.finished).toEqual([]);
+    });
+
+    it('其余口子（会话、PR 头、子任务的树、提醒、仓）都包上了，见证照常写', async () => {
+      const h = withTree();
+      await runHourlyReconcileJob(h.deps);
+      // 这棵树用不到的几个口子直接经包装调一次：子任务的树、提醒读撤、受管的仓
+      const wrapped = witnessWorktreeCalls(h.deps, 7);
+      await wrapped.subtaskTrees(['s1']);
+      await wrapped.alerts.byKey('worktree:acme_repo/12-abc');
+      await wrapped.alerts.resolve({ dedupeKey: 'worktree:acme_repo/12-abc', by: 'x', why: 'y' });
+      await wrapped.repos();
+      expect(h.progressed.every((p) => p.id === 7)).toBe(true);
+      const steps = new Set(h.progressed.map((p) => p.step));
+      for (const step of [
+        'worktrees.open-sessions',
+        'worktrees.pr-heads.acme_repo.fleet.12-abc',
+        'worktrees.workflow-state.task.acme.repo.12',
+        'worktrees.subtask-trees',
+        'worktrees.alert-by-key.worktree.acme_repo.12-abc',
+        'worktrees.alert-resolve.worktree.acme_repo.12-abc',
+        'worktrees.repos',
+      ]) {
+        expect(
+          [...steps].some((s) => s.startsWith(step)),
+          step,
+        ).toBe(true);
+      }
+    });
+  });
+
+  describe('子调用见证真落库：写进 schedule_runs、读得回、启动补记后还在', () => {
+    let t: TestDb;
+    beforeAll(async () => {
+      t = await createTestDb();
+    }, TEST_DB_TIMEOUT_MS);
+    afterAll(() => t.close());
+
+    it('检查子进程卡住：未结束行带着这一轮的子调用开始；补记成 failed、scanned/found 仍是 NULL、补记时刻不当结束', async () => {
+      await registerScheduledJobs(t.db, [HOURLY_RECONCILE_JOB]);
+      const STEP = 'worktrees.leftovers.acme_repo.12-abc';
+      let sawStart!: () => void;
+      const started = new Promise<void>((resolve) => {
+        sawStart = resolve;
+      });
+      const h = harness({
+        listDir: async (dir) => {
+          if (dir === ROOT) return [{ name: 'acme_repo', isDir: true }];
+          if (dir === `${ROOT}/acme_repo`) return [{ name: '12-abc', isDir: true }];
+          throw new Error(`用例没给 ${dir}`);
+        },
+        ownerOf: async () => 'fleet-agent-carpool',
+        leftovers: () => new Promise<never>(() => {}),
+        runs: {
+          start: (job, at) => startScheduleRun(t.db, job, at),
+          finish: (id, result, at) => finishScheduleRun(t.db, id, result, at),
+          async progress(id, progress, at) {
+            await recordScheduleRunProgress(t.db, { id, ...progress, at });
+            if (progress.step === STEP && progress.phase === 'start') sawStart();
+          },
+        },
+      });
+      void runHourlyReconcileJob(h.deps);
+      await started;
+
+      const read = async () =>
+        (await t.db.select().from(scheduleRuns)).filter((r) => r.job === HOURLY_RECONCILE_JOB.id);
+      const [open] = await read();
+      expect(open).toMatchObject({ endedAt: null, outcome: null, scanned: null, found: null });
+      expect(open?.why).toBe(
+        `${SCHEDULE_PROGRESS_PREFIX}run=${open?.id} step=${STEP} phase=start at=${NOW.toISOString()}`,
+      );
+
+      // 进程没了、下次启动补记：只认库里留下的，不伪造阶段、统计和结束时刻
+      const closedAt = new Date(NOW.getTime() + 3 * 60 * 60 * 1000);
+      expect(
+        await closeInterruptedScheduleRuns(t.db, {
+          jobs: [{ id: HOURLY_RECONCILE_JOB.id, startedBefore: new Date(NOW.getTime() + 60_000) }],
+          at: closedAt,
+        }),
+      ).toEqual([open?.id]);
+      const [closed] = await read();
+      expect(closed).toMatchObject({
+        id: open?.id,
+        startedAt: NOW,
+        endedAt: NOW,
+        outcome: 'failed',
+        scanned: null,
+        found: null,
+        why: `${INTERRUPTED_SCHEDULE_WHY}；${open?.why}`,
+      });
+      expect(closed?.endedAt).not.toEqual(closedAt);
     });
   });
 
