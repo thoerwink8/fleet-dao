@@ -1,63 +1,34 @@
-// 按目录的磁盘占用（#1985）：照登记表（vps-apps.ts）把各应用名下的目录遍历一遍、按块算大小，再用 SQL 取库的大小。
-// 遍历较重：测量器每 FOOTPRINT_EVERY_MS（10 分钟）最多测一回，只在有人看（采样器「戳」它）时测，测完缓存；
-// 5 秒那一回读数只带上最近一回的结果，从不等遍历（host-resources.ts 的 createHostResourceSampler）。
+// 按目录的磁盘占用（#1985、#3456）：法国上 root 的单元（deploy/france/fleet-footprint.service，定时器每 10 分钟拉起）对登记表（vps-apps.ts）
+// 里每个目录跑 du，只把数字写进 /var/lib/fleet-footprint/sizes.json（644）；这里读它，再用 SQL 取库的大小。后端以 fleet 跑、
+// 没有 root，读不了会话用户 700 的工作树、/home、别家应用的 750 目录，也不该读：所以不在 node 里逐个文件遍历（以前那样做，
+// /var/lib/fleet-work 一个目录把共用的时限吃光，后面的目录全标「没测完」，页面写「≥ 不到 1M」），一律读 root 单元量好的数。
 //
 // 改这里之前必须知道：
-// - 口径和 du 一样：lstat 的 blocks × 512（占的块，不是文件名义大小），硬链接（nlink > 1）同一个 dev:ino 只算一次
-//   （发布目录里各版的 node_modules 是 pnpm 硬链接出来的，按名义大小算会多算好几倍），符号链接不跟。
-// - 读不了的子树（EACCES、中途没了）记一棵，数照算其余的，页面写「不全：有 N 棵树没读到」；
-//   登记的目录本身不在或列不出，整个目录是 unread（绝不当成 0）。后端以 fleet 跑、没有 root，
-//   /var/lib/fleet-work 里每棵树归会话用户、700，就是靠这一条照实报「不全」；不为了量全加 root 小工具。
-// - 一回最多测 FOOTPRINT_BUDGET_MS：到时限没测完的目录标 capped（数是下限），不一直占着磁盘 IO。
-// - 一个一个 lstat 顺序走（不并发），每一步都是 await，不卡事件循环；主页接口和推送照常。
+// - 文件是 deploy/france/footprint/fleet-footprint.mjs 写的：每个目录一行 {path, bytes, measuredAt, attemptedAt, tookMs, skipped, error}。
+//   这一回没量成的目录，bytes/measuredAt 是上次量成的、error 写这回为什么没成：这里照实报「旧数」（stale：数是 measuredAt 量的、
+//   为什么没更新），从没量成过（bytes 为 null）报 unread 带原因。绝不显示「不到 1M」这种没有信息的下限。
+// - 文件旧了（超过两个间隔没更新，单元停了或坏了）：每个目录的数都标 stale，原因写「N 分钟没更新、上次写在几点」；
+//   文件不在或认不出：整块 unread（不是 0，也不是 pending），原因写缺的是哪个文件、怎么装。
+// - 登记表里有、文件里没有的目录（刚登记、清单跟着发版换，还没轮到）：unread，原因写清楚；文件里有、登记表里没有的忽略。
+// - 每个目录各自的数各自带测量时刻；没有共用的时限（单元里每个目录各有自己的超时）。
+// - 这里读文件很便宜（几 KB），采样器每 5 秒戳一下也只是几十秒才真读一回；库的大小（pg_database_size）10 分钟才查一回。
 // - 库：pg_database_size（没有 CONNECT 权限的库单写没读到），不读数据目录（归 postgres、700）。
-import { lstat, readdir } from 'node:fs/promises';
-import { posix } from 'node:path';
-import type { DirSizeSchema, DiskFootprintSchema } from '@fleet-dao/shared';
-import type { z } from 'zod';
+import { readFile } from 'node:fs/promises';
+import type { DiskFootprintSchema } from '@fleet-dao/shared';
+import { z } from 'zod';
 import type { Logger } from './ports.ts';
 import type { VpsApp } from './vps-apps.ts';
 
-type DirSize = z.infer<typeof DirSizeSchema>;
 type DiskFootprint = z.infer<typeof DiskFootprintSchema>;
+type Dirs = Extract<DiskFootprint, { state: 'ok' }>['dirs'];
+type Databases = Extract<DiskFootprint, { state: 'ok' }>['databases'];
 
-/** 多久最多测一回。 */
+/** root 单元多久量一回（和 deploy/france/fleet-footprint.timer 的 OnUnitInactiveSec 一样）；超过两倍没更新就是旧了。 */
 export const FOOTPRINT_EVERY_MS = 10 * 60_000;
-/** 一回最多测多久。 */
-export const FOOTPRINT_BUDGET_MS = 3 * 60_000;
-
-export interface FootprintStat {
-  dir: boolean;
-  link: boolean;
-  /** 占的字节（blocks × 512）。 */
-  bytes: number;
-  dev: number;
-  ino: number;
-  nlink: number;
-}
-
-export interface FootprintFs {
-  lstat(path: string): Promise<FootprintStat>;
-  readDir(path: string): Promise<string[]>;
-}
-
-export function realFootprintFs(): FootprintFs {
-  return {
-    async lstat(path) {
-      const s = await lstat(path);
-      return {
-        dir: s.isDirectory(),
-        link: s.isSymbolicLink(),
-        // 有的文件系统不给 blocks（Windows）：退回名义大小
-        bytes: Number.isFinite(s.blocks) && s.blocks >= 0 ? s.blocks * 512 : s.size,
-        dev: s.dev,
-        ino: s.ino,
-        nlink: s.nlink,
-      };
-    },
-    readDir: (path) => readdir(path),
-  };
-}
+/** root 单元写的文件（和 deploy/france/footprint/fleet-footprint.mjs 的 SIZES_FILE 一样）。 */
+export const FOOTPRINT_SIZES_FILE = '/var/lib/fleet-footprint/sizes.json';
+/** 多久重读一回文件（便宜）。 */
+const REFRESH_MS = 30_000;
 
 /** 库的大小：每个库一行；bytes 缺 = 没有这个库的 CONNECT 权限。 */
 export type DatabaseSizes = () => Promise<{ name: string; bytes: number | undefined }[]>;
@@ -66,188 +37,194 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 const codeOf = (err: unknown) =>
   typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
 
-/** 量一个目录。seen 是这一回已经算过的硬链接（dev:ino），跨目录共用。 */
-export async function measureDir(
-  root: string,
-  fs: FootprintFs,
-  opts: { deadline: number; seen: Set<string>; now?: () => number },
-): Promise<DirSize> {
-  const now = opts.now ?? Date.now;
-  let top: FootprintStat;
+const SizesFileSchema = z.object({
+  schema: z.literal(1),
+  measuredAt: z.string().refine((s) => !Number.isNaN(Date.parse(s))),
+  everyMs: z.number().int().positive().optional(),
+  tookMs: z.number().int().min(0),
+  timers: z
+    .array(
+      z.union([
+        z.object({
+          unit: z.string().min(1),
+          runs24h: z.number().int().min(1),
+          cpuSeconds24h: z.number().min(0),
+          peakMemoryBytes: z.number().int().min(0).nullable(),
+        }),
+        z.object({ unit: z.string().min(1), why: z.string().min(1) }),
+      ]),
+    )
+    .optional(),
+  dirs: z.array(
+    z.object({
+      path: z.string().min(1),
+      bytes: z.number().int().min(0).nullable(),
+      measuredAt: z.string().nullable(),
+      attemptedAt: z.string(),
+      skipped: z.number().int().min(0).default(0),
+      error: z.string().nullable(),
+    }),
+  ),
+});
+
+const minutes = (ms: number) => Math.max(0, Math.round(ms / 60_000));
+const HOW = '（deploy/france.sh --auto-tier 装 fleet-footprint.timer；docs/ops.md「按目录的磁盘」）';
+
+/** 把 root 单元写的文件原文（或读不到的原因）变成这一回的按目录占用。纯函数：不读盘、不查库。 */
+export function footprintFromSizes(input: {
+  apps: readonly VpsApp[];
+  /** 文件原文；读不到是 { error }。 */
+  file: string | { error: string };
+  databases: Databases;
+  now: Date;
+}): DiskFootprint {
+  if (typeof input.file !== 'string') return { state: 'unread', why: input.file.error };
+  let parsed: z.infer<typeof SizesFileSchema>;
   try {
-    top = await fs.lstat(root);
+    const r = SizesFileSchema.safeParse(JSON.parse(input.file));
+    if (!r.success) {
+      return {
+        state: 'unread',
+        why: `${FOOTPRINT_SIZES_FILE} 的格式认不出（${r.error.issues[0]?.path.join('.') || '整份'}）：量磁盘的单元和后端版本对不上`,
+      };
+    }
+    parsed = r.data;
   } catch (err) {
-    return {
-      state: 'unread',
-      why:
-        codeOf(err) === 'ENOENT'
-          ? `没有 ${root} 这个目录（或后端看不见它）`
-          : `读不了 ${root}：${message(err)}`,
-    };
+    return { state: 'unread', why: `${FOOTPRINT_SIZES_FILE} 不是合法的 JSON：${message(err)}` };
   }
-  if (!top.dir) return { state: 'unread', why: `${root} 不是目录` };
-  let names: string[];
-  try {
-    names = await fs.readDir(root);
-  } catch (err) {
-    return { state: 'unread', why: `读不了 ${root}：${message(err)}` };
-  }
-  let bytes = top.bytes;
-  let unreadTrees = 0;
-  let unreadSample: string | undefined;
-  let capped = false;
-  // 拷一份再一个个弹：readDir 给的数组不归这里改
-  const stack: { dir: string; names: string[] }[] = [{ dir: root, names: [...names] }];
-  const miss = (path: string, err: unknown) => {
-    unreadTrees += 1;
-    unreadSample ??= `${path}：${message(err)}`;
-  };
-  while (stack.length > 0) {
-    const frame = stack[stack.length - 1];
-    if (!frame) break;
-    const name = frame.names.pop();
-    if (name === undefined) {
-      stack.pop();
-      continue;
-    }
-    if (now() > opts.deadline) {
-      capped = true;
-      break;
-    }
-    const path = posix.join(frame.dir, name);
-    let s: FootprintStat;
-    try {
-      s = await fs.lstat(path);
-    } catch (err) {
-      // 两步之间没了的不算缺口：它本来就不在了
-      if (codeOf(err) !== 'ENOENT') miss(path, err);
-      continue;
-    }
-    if (s.link) continue;
-    if (!s.dir && s.nlink > 1) {
-      const key = `${s.dev}:${s.ino}`;
-      if (opts.seen.has(key)) continue;
-      opts.seen.add(key);
-    }
-    bytes += s.bytes;
-    if (s.dir) {
-      try {
-        stack.push({ dir: path, names: [...(await fs.readDir(path))] });
-      } catch (err) {
-        if (codeOf(err) !== 'ENOENT') miss(path, err);
+  const everyMs = parsed.everyMs ?? FOOTPRINT_EVERY_MS;
+  const age = input.now.getTime() - Date.parse(parsed.measuredAt);
+  const fileStale =
+    age > 2 * everyMs
+      ? `量磁盘的单元已经 ${minutes(age)} 分钟没更新（上次写文件在 ${parsed.measuredAt}，该每 ${minutes(everyMs)} 分钟一回）`
+      : undefined;
+  const byPath = new Map(parsed.dirs.map((d) => [d.path, d]));
+  const dirs: Dirs = [];
+  for (const app of input.apps) {
+    for (const path of app.dirs) {
+      const e = byPath.get(path);
+      let size: Dirs[number]['size'];
+      if (!e) {
+        size = {
+          state: 'unread',
+          why: `量磁盘的单元清单里还没有 ${path}（清单跟着发版装，新登记的目录下一轮发完版才有）`,
+        };
+      } else if (e.bytes === null || e.measuredAt === null) {
+        size = {
+          state: 'unread',
+          why: `${path} 从没量成过：${e.error ?? '没有数'}（最近一次试在 ${e.attemptedAt}）`,
+        };
+      } else {
+        const why = e.error ?? fileStale;
+        size = {
+          state: 'ok',
+          bytes: e.bytes,
+          unreadTrees: e.skipped,
+          measuredAt: e.measuredAt,
+          ...(why ? { stale: { why, attemptedAt: e.attemptedAt } } : {}),
+        };
       }
+      dirs.push({ path, appId: app.id, appName: app.name, size });
     }
   }
   return {
     state: 'ok',
-    bytes,
-    unreadTrees,
-    ...(unreadSample ? { unreadSample } : {}),
-    ...(capped ? { capped: true } : {}),
+    measuredAt: parsed.measuredAt,
+    everyMs,
+    tookMs: parsed.tookMs,
+    ...(parsed.timers ? { timers: parsed.timers } : {}),
+    dirs,
+    databases: input.databases,
   };
 }
 
-/** 测一回：登记表里每个目录、每个库。 */
-export async function measureFootprint(input: {
-  apps: readonly VpsApp[];
-  fs: FootprintFs;
-  databases?: DatabaseSizes | undefined;
-  now: () => Date;
-  budgetMs?: number;
-}): Promise<DiskFootprint> {
-  const started = input.now().getTime();
-  const deadline = started + (input.budgetMs ?? FOOTPRINT_BUDGET_MS);
-  const seen = new Set<string>();
-  const dirs: Extract<DiskFootprint, { state: 'ok' }>['dirs'] = [];
-  for (const app of input.apps) {
-    for (const path of app.dirs) {
-      dirs.push({
-        path,
-        appId: app.id,
-        appName: app.name,
-        size: await measureDir(path, input.fs, { deadline, seen, now: () => input.now().getTime() }),
-      });
-    }
+/** 库的大小：登记表里记库的那个应用名下，每个库一行。不抛。 */
+export async function readDatabases(
+  apps: readonly VpsApp[],
+  databases: DatabaseSizes | undefined,
+): Promise<Databases> {
+  const dbApp = apps.find((a) => a.databases === 'all');
+  if (!databases) return { state: 'unread', why: '这台后端没连数据库（开发用的内存版）' };
+  if (!dbApp) return { state: 'unread', why: '登记表里没有记库的应用' };
+  try {
+    const rows = await databases();
+    return {
+      state: 'ok',
+      items: rows.map((r) => ({
+        name: r.name,
+        appId: dbApp.id,
+        appName: dbApp.name,
+        size:
+          r.bytes === undefined
+            ? { state: 'unread' as const, why: '没有这个库的 CONNECT 权限，量不了' }
+            : { state: 'ok' as const, bytes: r.bytes },
+      })),
+    };
+  } catch (err) {
+    return { state: 'unread', why: `库的大小没查成：${message(err)}` };
   }
-  const dbApp = input.apps.find((a) => a.databases === 'all');
-  let databases: Extract<DiskFootprint, { state: 'ok' }>['databases'];
-  if (!input.databases) {
-    databases = { state: 'unread', why: '这台后端没连数据库（开发用的内存版）' };
-  } else if (!dbApp) {
-    databases = { state: 'unread', why: '登记表里没有记库的应用' };
-  } else {
-    try {
-      const rows = await input.databases();
-      databases = {
-        state: 'ok',
-        items: rows.map((r) => ({
-          name: r.name,
-          appId: dbApp.id,
-          appName: dbApp.name,
-          size:
-            r.bytes === undefined
-              ? { state: 'unread' as const, why: '没有这个库的 CONNECT 权限，量不了' }
-              : { state: 'ok' as const, bytes: r.bytes },
-        })),
-      };
-    } catch (err) {
-      databases = { state: 'unread', why: `库的大小没查成：${message(err)}` };
-    }
+}
+
+/** 读 root 单元写的文件；读不到回 { error }（缺文件说明怎么装）。 */
+export async function readSizesFile(path = FOOTPRINT_SIZES_FILE): Promise<string | { error: string }> {
+  try {
+    return await readFile(path, 'utf8');
+  } catch (err) {
+    return {
+      error:
+        codeOf(err) === 'ENOENT'
+          ? `没有 ${path}：这台机器上量磁盘的单元还没装或还没跑过第一轮${HOW}`
+          : `读不了 ${path}：${message(err)}`,
+    };
   }
-  const done = input.now();
-  return {
-    state: 'ok',
-    measuredAt: done.toISOString(),
-    everyMs: FOOTPRINT_EVERY_MS,
-    tookMs: Math.max(0, done.getTime() - started),
-    dirs,
-    databases,
-  };
 }
 
 export interface FootprintMeter {
-  /** 最近测完的一回；还没有就是 pending 带原因。 */
+  /** 最近读到的一回；还没读过是 pending 带原因。 */
   latest(): DiskFootprint;
-  /** 该测了（没测过、上一回超过间隔）且没在测，就在后台起一回；不等它。 */
+  /** 该重读了（没读过、上一回超过 30 秒）且没在读，就在后台读一回；不等它。 */
   poke(): void;
 }
 
 export function createFootprintMeter(input: {
-  measure: () => Promise<DiskFootprint>;
+  apps: readonly VpsApp[];
+  /** 读文件原文；默认读 FOOTPRINT_SIZES_FILE。 */
+  read?: () => Promise<string | { error: string }>;
+  databases?: DatabaseSizes | undefined;
   now: () => Date;
-  everyMs?: number;
   log?: Logger;
+  refreshMs?: number;
 }): FootprintMeter {
-  const everyMs = input.everyMs ?? FOOTPRINT_EVERY_MS;
+  const refreshMs = input.refreshMs ?? REFRESH_MS;
+  const read = input.read ?? (() => readSizesFile());
   let last: DiskFootprint | undefined;
   let lastStart: number | undefined;
-  let failed: string | undefined;
   let running = false;
+  let db: { at: number; value: Databases } | undefined;
   return {
     latest() {
-      if (last) return last;
-      if (running)
-        return { state: 'pending', why: '正在测第一回（要遍历文件，测完就有；之后每 10 分钟测一次）' };
-      if (failed) return { state: 'pending', why: `上一回没测成：${failed}（10 分钟后再测）` };
-      return { state: 'pending', why: '还没测过（有页面开着才测，每 10 分钟一次）' };
+      return last ?? { state: 'pending', why: '正在读量磁盘的单元写的文件（几秒内就有）' };
     },
     poke() {
       const t = input.now().getTime();
-      if (running || (lastStart !== undefined && t - lastStart < everyMs)) return;
+      if (running || (lastStart !== undefined && t - lastStart < refreshMs)) return;
       running = true;
       lastStart = t;
-      input.measure().then(
-        (fp) => {
-          last = fp;
-          failed = undefined;
+      void (async () => {
+        try {
+          const file = await read();
+          // 库的大小查一回要连库，10 分钟一回就够
+          if (!db || t - db.at >= FOOTPRINT_EVERY_MS) {
+            db = { at: t, value: await readDatabases(input.apps, input.databases) };
+          }
+          last = footprintFromSizes({ apps: input.apps, file, databases: db.value, now: input.now() });
+        } catch (err) {
+          input.log?.warn('按目录的磁盘占用这一回没读成', { error: message(err) });
+          last = { state: 'unread', why: `读按目录的磁盘占用时出错：${message(err)}` };
+        } finally {
           running = false;
-        },
-        (err: unknown) => {
-          failed = message(err);
-          running = false;
-          input.log?.warn('按目录的磁盘占用这一回没测成', { error: failed });
-        },
-      );
+        }
+      })();
     },
   };
 }

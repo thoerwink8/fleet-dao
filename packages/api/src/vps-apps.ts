@@ -1,14 +1,19 @@
 // 法国 VPS 上的「上线项目」登记表（#1985）：每个应用 = 哪些 systemd 单元 + 哪些目录 + 哪些库。资源页一行一个，
-// 采样器（host-resources.ts）按这里读各单元的 cgroup，磁盘遍历（disk-footprint.ts）按这里量各目录。
+// 采样器（host-resources.ts）按这里读各单元的 cgroup，各目录的磁盘由法国上 root 的单元（fleet-footprint）按这里的目录用 du 量、
+// 后端读它写的文件（disk-footprint.ts）。
 // 清单只在这一份；test/vps-apps.test.ts 核对：每个单元在 docs/ops.md 里对得上，deploy/france 下每个常驻 .service / .slice
 // 要么登记在这里、要么在 NOT_APPS 里写明为什么不算，目录不许互相套（套了就算两遍）。
 //
 // 改这里之前必须知道：
 // - cgroup 是相对 /sys/fs/cgroup 的路径。普通服务在 system.slice/<单元>；模板单元的实例在 system-<模板>.slice 下
 //   （postgresql@16-main.service 在 system.slice/system-postgresql.slice/）；会话资源池在 fleet.slice/fleet-agents.slice。
-// - 目录要后端（fleet 用户，fleet-api.service 开着 ProtectSystem=strict、ProtectHome=yes）读得到才量得出：
-//   /home 下的后端看不见，照登记、照实报「没读到」；/var/lib/fleet-work 里每棵树归会话用户、700，报「不全：有 N 棵树没读到」。
-//   不为了量全加 root 小工具（那要人以 root 重跑 france.sh，是人闸）。
+// - 目录不用后端（fleet 用户，开着 ProtectSystem=strict、ProtectHome=yes）读得到：量它的是 root 的 oneshot 单元（deploy/france/
+//   fleet-footprint.service，每 10 分钟，只留 CAP_DAC_READ_SEARCH，只把数字写进 /var/lib/fleet-footprint/sizes.json），所以会话用户 700 的
+//   工作树、/home 下会话用户的家、别家应用 750 的目录都量得到（决定 0109，取代以前「不加 root 小工具」那条）。
+// - 它量哪些目录由 deploy/france/footprint/dirs.json 定（france.sh 的自动档装到 root 拥有的位置，fleet 改不了，也就没法让 root 量任意路径）：
+//   这里加、改、删目录或带 .timer 的应用，要同步改那份 json（test/disk-footprint.test.ts 核对一致，不一致就红）。
+// - 带 .timer 的 oneshot 应用（跑完 cgroup 就没了，5 秒一采抓不到）：单元写 service 加 timer 两个，json 的 timers 列它的 service；
+//   同一个 root 单元从 journal 里数 systemd 每回结束的「Consumed … CPU time、memory peak」，资源页写近 24 小时的账。
 // - databases: 'all' = pg_database 里所有非模板库都算在这个应用名下（数据库那一行）；Temporal 的数据在库里，不另算。
 // - external：不归本仓管的别家常驻服务，照样占这台机器，排在最后。
 
@@ -43,7 +48,7 @@ export const VPS_APPS: readonly VpsApp[] = [
     id: 'cockpit',
     name: '驾驶舱',
     place: '/srv/fleet-dao-releases/current（后端代码）',
-    units: [service('fleet-api.service')],
+    units: [service('fleet-api.service'), service('fleet-footprint.service')],
     dirs: ['/var/lib/fleet-dao/release-request'],
     diskNote: '代码在发布版本目录里，算在「发布版本」；静态页在香港那台',
   },

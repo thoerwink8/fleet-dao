@@ -979,6 +979,11 @@ const AUTO_TIER_FILES = [
   'deploy/france/user-0-slice-memory.conf',
   'deploy/france/fleet-auto-release.service',
   'deploy/france/fleet-auto-release.timer',
+  // 按目录量磁盘占用（#3456）：root 的 oneshot + 定时器 + 脚本和目录清单副本，自动档
+  'deploy/france/fleet-footprint.service',
+  'deploy/france/fleet-footprint.timer',
+  'deploy/france/footprint/fleet-footprint.mjs',
+  'deploy/france/footprint/dirs.json',
   // Mirasim 常驻单元（#1274）：只是个 systemd 单元，归自动档；它的函数在 lib/mirasim.sh，一并登记
   'deploy/france/fleet-mirasim-session.service',
   'deploy/france/mirasim-retired',
@@ -1061,6 +1066,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
     'retire_old_units',
     'setup_auto_release',
     'setup_release_request_scripts',
+    'setup_footprint',
     'setup_mirasim_session',
   ]) {
     const text = body(fn);
@@ -1075,7 +1081,7 @@ test('自动档不碰防火墙、sudoers、建用户：auto-tier 那几个函数
   // （Mirasim 常驻单元仍放最后，#1274）；注释行不算
   assert.match(
     body('setup_auto_tier').replace(/^\s*#.*\n/gm, ''),
-    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*if declare -F install_scope_bin >\/dev\/null; then install_scope_bin; fi\n\s*if declare -F ensure_work_tmp >\/dev\/null; then ensure_work_tmp; fi\n\s*setup_mirasim_session\s*$/,
+    /^\s*setup_slice\n\s*setup_user_slice_cap\n\s*retire_old_units\n\s*setup_auto_release\n\s*setup_release_request_scripts\n\s*setup_footprint\n\s*if declare -F install_scope_bin >\/dev\/null; then install_scope_bin; fi\n\s*if declare -F ensure_work_tmp >\/dev\/null; then ensure_work_tmp; fi\n\s*setup_mirasim_session\s*$/,
   );
   assert.match(body('readback_auto_tier'), /readback_work_tmp/);
   // 读回也读回它：缺了 MIRASIM_NO_AGENT_EGRESS=1 之类判红（check_mirasim_session_unit_file）

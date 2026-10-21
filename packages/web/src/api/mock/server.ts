@@ -617,20 +617,20 @@ function mockApps(
 
 type DiskFootprint = z.infer<typeof DiskFootprintSchema>;
 
-/** 假的按目录占用：会话工作树有几棵读不到（700、归会话用户）演示「不全」；会话用户的家后端看不见演示「没读到」。 */
+/** 假的按目录占用：会话工作树这一回没量完、用上次量成的旧数演示「不全：旧数」；unread 档演示整个目录从没量成过。 */
 function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): DiskFootprint {
   if (mode === 'pending') {
-    return { state: 'pending', why: '正在测第一回（要遍历文件，测完就有；之后每 10 分钟测一次）' };
+    return { state: 'pending', why: '正在读量磁盘的单元写的文件（几秒内就有）' };
   }
   const GIB = 1024 ** 3;
   const MIB = 1024 ** 2;
   const g = (n: number) => Math.round(n * GIB);
   const big = mode === 'tight' ? 4 : 1;
-  const ok = (bytes: number, unreadTrees = 0, unreadSample?: string) => ({
+  const ok = (bytes: number, unreadTrees = 0) => ({
     state: 'ok' as const,
     bytes,
     unreadTrees,
-    ...(unreadSample ? { unreadSample } : {}),
+    measuredAt: new Date(at.getTime() - 4 * 60_000).toISOString(),
   });
   return {
     state: 'ok',
@@ -647,21 +647,23 @@ function mockFootprint(at: Date, mode: 'ok' | 'tight' | 'unread' | 'pending'): D
         size:
           mode === 'unread'
             ? { state: 'unread', why: '读不了 /var/lib/fleet-work：EACCES: permission denied' }
-            : ok(
-                g(0.3),
-                7,
-                '/var/lib/fleet-work/thoerwink8_fleet-dao/fleet/1979-t3a9c0d1：EACCES: permission denied',
-              ),
+            : {
+                ...ok(g(5.2)),
+                stale: { why: '超过 300 秒没量完，被停掉', attemptedAt: at.toISOString() },
+              },
       },
       { path: '/var/lib/fleet-sessions', appId: 'sessions', appName: 'AI 会话', size: ok(312 * MIB) },
       {
         path: '/home/fleet-agent-carpool',
         appId: 'sessions',
         appName: 'AI 会话',
-        size: {
-          state: 'unread',
-          why: '读不了 /home/fleet-agent-carpool：EACCES: permission denied（后端开了 ProtectHome，看不见 /home）',
-        },
+        size:
+          mode === 'unread'
+            ? {
+                state: 'unread',
+                why: '/home/fleet-agent-carpool 从没量成过：没有这个目录（或这台机器上没有）',
+              }
+            : ok(g(1.9)),
       },
       { path: '/var/lib/fleet-dao/engine', appId: 'engine', appName: '引擎', size: ok(g(2.7 * big)) },
       { path: '/var/lib/fleet-dao/github', appId: 'engine', appName: '引擎', size: ok(g(3.9)) },

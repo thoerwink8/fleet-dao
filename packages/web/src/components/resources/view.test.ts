@@ -257,6 +257,58 @@ describe('每个上线项目一行', () => {
     expect(appRows(undefined, [])).toEqual({ kind: 'unread', why: '这台后端没给资源读数' });
   });
 
+  test('整块没读到（量磁盘的单元没装、文件认不出）：每行磁盘写没读到和原因，不是 0 也不是下限', () => {
+    const r = resources({ footprint: { state: 'unread', why: '没有 sizes.json：单元还没装' } });
+    expect(rowsOf(r).engine?.disk).toEqual({ kind: 'unread', why: '没有 sizes.json：单元还没装' });
+  });
+
+  test('这一回没量成、用上次的旧数：数照写，缺口写「有 N 个目录是上次量成的旧数」', () => {
+    const r = resources();
+    if (r.footprint?.state !== 'ok') throw new Error('造数错了');
+    const d = r.footprint.dirs.find((x) => x.appId === 'sessions');
+    if (!d) throw new Error('造数错了：没有 sessions 的目录');
+    d.size = {
+      state: 'ok',
+      bytes: 9 * GIB,
+      unreadTrees: 0,
+      measuredAt: '2026-10-13T01:00:00.000Z',
+      stale: { why: '超过 300 秒没量完，被停掉' },
+    };
+    const disk = rowsOf(r).sessions?.disk;
+    expect(disk?.kind).toBe('ok');
+    if (disk?.kind === 'ok') expect(disk.incomplete).toContain('有 1 个目录是上次量成的旧数');
+  });
+
+  test('定时任务：CPU 写近 24 小时平均核数和次数、内存写单次峰值；读不到写原因', () => {
+    const base = resources();
+    const withTimers = (
+      timers: NonNullable<Extract<NonNullable<HomeResources['footprint']>, { state: 'ok' }>['timers']>,
+    ) => {
+      const r = resources();
+      if (r.footprint?.state !== 'ok') throw new Error('造数错了');
+      r.footprint.timers = timers;
+      return r;
+    };
+    expect(base.footprint?.state).toBe('ok');
+    const row = rowsOf(
+      withTimers([
+        { unit: 'release.service', runs24h: 1422, cpuSeconds24h: 3193, peakMemoryBytes: 116 * MIB },
+      ]),
+    ).release;
+    expect(row?.cpu).toMatchObject({ kind: 'ok', text: '近 24 小时平均 0.04 核（跑了 1422 次）' });
+    expect(row?.memory).toMatchObject({ kind: 'ok', text: '单次峰值 116M' });
+    const radar = rowsOf(
+      withTimers([{ unit: 'release.service', runs24h: 126, cpuSeconds24h: 179, peakMemoryBytes: 68 * MIB }]),
+    ).release;
+    expect(radar?.cpu).toMatchObject({
+      text: '近 24 小时平均 <0.01 核（跑了 126 次）',
+    });
+    const bad = rowsOf(
+      withTimers([{ unit: 'release.service', why: 'journalctl 超过 60 秒没读完，被停掉' }]),
+    ).release;
+    expect(bad?.cpu).toMatchObject({ kind: 'unread', why: expect.stringContaining('超过 60 秒') });
+  });
+
   test('老后端没有 footprint：每行磁盘写没读到、原因是没给', () => {
     const r = resources();
     delete r.footprint;

@@ -87,6 +87,8 @@ readback_user_slice_cap() { CALLS+=(readback_user_slice_cap); }
 retire_old_units() { CALLS+=(retire_old_units); }
 setup_auto_release() { CALLS+=(setup_auto_release); }
 setup_release_request_scripts() { CALLS+=(setup_release_request_scripts); }
+setup_footprint() { CALLS+=(setup_footprint); }
+readback_footprint() { CALLS+=(readback_footprint); }
 readback_slice() { CALLS+=(readback_slice); }
 readback_retired_units() { CALLS+=(readback_retired_units); }
 
@@ -116,7 +118,7 @@ fresh
 SERVER_INSTALLED=0
 setup_auto_tier >/dev/null
 check "setup_auto_tier 先走完自动发布那几步" "${CALLS[*]}" \
-  "setup_slice setup_user_slice_cap retire_old_units setup_auto_release setup_release_request_scripts"
+  "setup_slice setup_user_slice_cap retire_old_units setup_auto_release setup_release_request_scripts setup_footprint"
 has "setup_auto_tier 走到了 Mirasim 常驻单元这一步（本体不在，所以只记待配）" "${PENDING[*]}" "还没有 Mirasim 服务端本体"
 fresh
 readback_auto_tier >/dev/null 2>&1

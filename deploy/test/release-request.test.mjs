@@ -1876,7 +1876,10 @@ test('【#2728】接活脚本是自动档：不在 HUMAN_TIER_PATHS，france.sh 
     /put_file "\$RELEASE_REQUEST_LIB\/\$f" root:root 644 "\$\(<"\$DEPLOY_DIR\/france\/release-request\/\$f"\)"/,
   );
   // 整套里也装（在单元起来之前），人工档的 setup_release_request 不再自己拷脚本
-  assert.match(france, /^ {4}setup_release_request_scripts\n {4}setup_release_request$/m);
+  assert.match(
+    france,
+    /^ {4}setup_release_request_scripts\n {4}setup_footprint\n {4}setup_release_request$/m,
+  );
   assert.doesNotMatch(
     body(human, 'setup_release_request'),
     /RELEASE_REQUEST_FILES|put_file "\$RELEASE_REQUEST_LIB/,
