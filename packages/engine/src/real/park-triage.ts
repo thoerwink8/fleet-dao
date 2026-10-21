@@ -29,18 +29,36 @@ import {
   upsertAlert,
 } from '@fleet-dao/db';
 import { TASK_WORKFLOW_TYPE } from '@fleet-dao/shared';
-import { generationLife, readTaskGenerations, redoCanStop, redoTask } from '@fleet-dao/shared/task-redo';
+import {
+  type GenerationView,
+  generationLife,
+  MAX_TASK_GENERATION,
+  type RedoOutcome,
+  readTaskGenerations,
+  redoCanStop,
+  redoTask,
+} from '@fleet-dao/shared/task-redo';
 import { errMessage } from '@fleet-dao/shared/util';
+import { taskWorkflowId } from '@fleet-dao/shared/workflow-ids';
 import { type Client, WorkflowExecutionAlreadyStartedError, WorkflowNotFoundError } from '@temporalio/client';
 import { COMMANDER_ACTOR } from '../commander-contract.ts';
 import { triageKindOf } from '../decisions/park-triage.ts';
+import type { IntakeRepo } from '../jobs/intake.ts';
 import {
   COMMANDER_AUDIT_ACT,
   COMMANDER_AUDIT_CLAIM,
+  COMMANDER_AUDIT_REDO,
   COMMANDER_AUDIT_RETRY,
+  type CommanderRedoOutcome,
   PARK_TRIAGE_CAP_ALERT_KEY,
+  PARK_TRIAGE_REDO_START_TRIES,
   type ParkTriageDeps,
+  REDO_FAILURE_PHASES,
+  type RedoJournal,
+  type RedoJournalRec,
+  type RedoTrail,
 } from '../jobs/park-triage.ts';
+import type { ParkedRetryRow } from '../jobs/parked-retry.ts';
 import {
   taskAbandonSignal,
   taskContinueSignal,
@@ -62,12 +80,18 @@ const ABANDON_WAIT_MS = 60_000;
 export interface ParkTriageWiring extends GroomWiring {
   temporal: { use<T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>): Promise<T> };
   taskQueue: string;
+  /** 叫停后等旧代终态用的时钟；只有测试传假的，生产不传。 */
+  clock?: { nowMs(): number; sleep(ms: number): Promise<void> };
 }
 
 export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
   const now = w.now ?? (() => new Date());
   const log: ParkTriageDeps['log'] =
     w.log ?? ((level, text, fields) => console[level === 'info' ? 'info' : level](text, fields ?? {}));
+  const clock = w.clock ?? {
+    nowMs: () => Date.now(),
+    sleep: (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
+  };
   const runSession = readOnlySessionRunner({ ...w, log }, { stage: 'commander', word: '指挥官' });
   const withDeadline = <T>(fn: (client: Pick<Client, 'workflow' | 'connection'>) => Promise<T>) =>
     w.temporal.use((client) =>
@@ -80,89 +104,329 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
     return hit ? toRepo(hit) : null;
   };
 
-  const redo: ParkTriageDeps['redoTask'] = async (row, workflowId) => {
-    const repo = await findRepo(row.owner, row.name);
-    const title = await readTaskTitle(w.db, row.taskId);
-    if (!repo || title === null) return { ok: false, why: `读不到仓或任务标题，没有重做（${workflowId}）` };
-    return w.temporal.use(async (client) => {
-      const lifeOf = async (id: string) => {
+  type TemporalClient = Pick<Client, 'workflow' | 'connection'>;
+  /** 叫停没等到终态：已经把请求发出去了，旧代之后可能才结束。 */
+  class StopUnconfirmedError extends Error {}
+
+  /** 旧代现在到底是在跑还是已终止：读失败原样抛，绝不当成已终止。 */
+  const lifeOf = async (client: TemporalClient, id: string) => {
+    const described = await client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () =>
+      client.workflow.getHandle(id).describe(),
+    );
+    return generationLife(described.status.name);
+  };
+
+  /** 这张单全部代次的真实状态（含 run 身份）；某一代查不清就整体失败，不跳过去猜。 */
+  const readGenerations = (client: TemporalClient, row: ParkedRetryRow) =>
+    readTaskGenerations({ owner: row.owner, name: row.name }, row.issueNumber, async (id) => {
+      try {
         const described = await client.connection.withDeadline(Date.now() + SIGNAL_TIMEOUT_MS, () =>
           client.workflow.getHandle(id).describe(),
         );
-        return generationLife(described.status.name);
+        return {
+          life: generationLife(described.status.name),
+          record: { workflowId: id, runId: described.runId },
+        };
+      } catch (err) {
+        return err instanceof WorkflowNotFoundError ? { life: 'missing' } : { life: 'unknown' };
+      }
+    });
+
+  const trailOf = (generations: readonly GenerationView[]): RedoTrail => ({
+    fromGeneration: generations.length,
+    runs: generations.map((g) => ({
+      workflowId: g.workflowId,
+      runId: (g.record as { runId: string }).runId,
+    })),
+  });
+
+  type Gate =
+    | { kind: 'ready' }
+    | { kind: 'exists'; workflowId: string; generation: number }
+    | { kind: 'waiting'; why: string }
+    | { kind: 'final'; why: string };
+
+  /**
+   * 每次起新代之前都走这一关：现读全部代次，旧代 run 身份必须和叫停前记下的一致，且都真实终止；
+   * 已经有更高的一代就不再起。读不到、还在跑只是等（waiting）；身份对不上、旧代不见了是不能再接续（final）。
+   */
+  const gateOf = async (client: TemporalClient, row: ParkedRetryRow, trail: RedoTrail): Promise<Gate> => {
+    const read = await readGenerations(client, row);
+    if (!read.ok) return { kind: 'waiting', why: read.why };
+    const gens = read.generations;
+    for (const known of trail.runs) {
+      const seen = gens.find((g) => g.workflowId === known.workflowId);
+      if (!seen) return { kind: 'final', why: `旧代 ${known.workflowId} 现在读不到了，身份对不上，不再接续` };
+      const runId = (seen.record as { runId: string }).runId;
+      if (runId !== known.runId)
+        return {
+          kind: 'final',
+          why: `旧代 ${known.workflowId} 的 run 身份变了（记下的 ${known.runId}，现在 ${runId}），不再接续`,
+        };
+    }
+    if (gens.length < trail.fromGeneration)
+      return {
+        kind: 'final',
+        why: `现在只有 ${gens.length} 代，少于叫停前的 ${trail.fromGeneration} 代，不再接续`,
       };
-      const read = await readTaskGenerations(
-        { owner: row.owner, name: row.name },
-        row.issueNumber,
-        async (id) => {
-          try {
-            return { life: await lifeOf(id), record: { workflowId: id } };
-          } catch (err) {
-            return err instanceof WorkflowNotFoundError ? { life: 'missing' } : { life: 'unknown' };
-          }
-        },
+    const next = gens[trail.fromGeneration];
+    if (next) return { kind: 'exists', workflowId: next.workflowId, generation: next.generation };
+    const alive = gens.filter((g) => g.life !== 'terminated');
+    if (alive.length > 0)
+      return {
+        kind: 'waiting',
+        why: `旧代 ${alive.map((g) => g.workflowId).join('、')} 终态未确认（仍在运行）`,
+      };
+    return { kind: 'ready' };
+  };
+
+  /** 叫停发出后等旧代终止最多 ABANDON_WAIT_MS；读不到状态不算终止，等不到抛 StopUnconfirmedError。 */
+  const waitTerminal = async (client: TemporalClient, id: string) => {
+    const deadline = clock.nowMs() + ABANDON_WAIT_MS;
+    let last = '一直没读到状态';
+    while (clock.nowMs() < deadline) {
+      try {
+        if ((await lifeOf(client, id)) === 'terminated') return;
+        last = '仍在运行';
+      } catch (err) {
+        last = `读状态失败：${errMessage(err)}`;
+      }
+      await clock.sleep(200);
+    }
+    throw new StopUnconfirmedError(`叫停 ${id} 后还没停，没有另起（最后一次：${last}）`);
+  };
+
+  /** 起新代。已经有这个编号（开着或已结束）回 already_exists，不覆盖旧记录。 */
+  const startGeneration = async (
+    row: ParkedRetryRow,
+    repo: IntakeRepo,
+    title: string,
+    id: string,
+  ): Promise<'started' | 'already_exists'> => {
+    try {
+      await withDeadline((c) =>
+        c.workflow.start(TASK_WORKFLOW_TYPE, {
+          taskQueue: w.taskQueue,
+          workflowId: id,
+          args: [
+            {
+              schemaVersion: 1,
+              taskId: row.taskId,
+              repo: {
+                id: repo.id,
+                owner: repo.owner,
+                name: repo.name,
+                defaultBranch: repo.defaultBranch,
+                testCommand: repo.testCommand,
+              },
+              issueNumber: row.issueNumber,
+              title,
+            },
+          ],
+          workflowIdConflictPolicy: 'FAIL',
+          workflowIdReusePolicy: 'REJECT_DUPLICATE',
+        }),
       );
-      if (!read.ok) return read;
-      return redoTask({
-        list: async () => read.generations,
-        posture: async (id) => {
-          try {
-            const status = await withDeadline((c) => c.workflow.getHandle(id).query(taskStatusQuery));
-            return redoCanStop(status.phase) ? 'parked' : 'running';
-          } catch (err) {
-            return isWorkflowGone(err) ? 'parked' : 'running';
-          }
-        },
-        abandonParked: async (id) => {
-          try {
-            await withDeadline((c) =>
-              c.workflow.getHandle(id).signal(taskAbandonSignal, {
-                by: COMMANDER_ACTOR,
-                reason: '指挥官判重做：先叫停停住的上一代',
-              }),
-            );
-          } catch (err) {
-            if (!isWorkflowGone(err)) throw err;
-          }
-          const deadline = Date.now() + ABANDON_WAIT_MS;
-          while (Date.now() < deadline) {
-            if ((await lifeOf(id).catch(() => 'terminated' as const)) !== 'running') return;
-            await new Promise((resolve) => setTimeout(resolve, 200));
-          }
-          throw new Error(`叫停 ${id} 后还没停，没有另起`);
-        },
-        start: async (id) => {
-          try {
-            await withDeadline((c) =>
-              c.workflow.start(TASK_WORKFLOW_TYPE, {
-                taskQueue: w.taskQueue,
-                workflowId: id,
-                args: [
-                  {
-                    schemaVersion: 1,
-                    taskId: row.taskId,
-                    repo: {
-                      id: repo.id,
-                      owner: repo.owner,
-                      name: repo.name,
-                      defaultBranch: repo.defaultBranch,
-                      testCommand: repo.testCommand,
-                    },
-                    issueNumber: row.issueNumber,
-                    title,
-                  },
-                ],
-                workflowIdConflictPolicy: 'FAIL',
-                workflowIdReusePolicy: 'REJECT_DUPLICATE',
-              }),
-            );
-            return 'started';
-          } catch (err) {
-            if (err instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
-            throw err;
-          }
-        },
+      return 'started';
+    } catch (err) {
+      if (err instanceof WorkflowExecutionAlreadyStartedError) return 'already_exists';
+      throw err;
+    }
+  };
+
+  /** 终态账写不进只记警告：新代已经起了（或已存在），不能因此把成功改报失败；账上留着待接续，下一轮会读到新代已存在。 */
+  const journalBestEffort = async (journal: RedoJournal, rec: RedoJournalRec) => {
+    try {
+      await journal(rec);
+    } catch (err) {
+      log('warn', '指挥官：重做接续账没写进，账上仍是待接续，下一轮核对', {
+        phase: rec.phase,
+        error: errMessage(err),
       });
+    }
+  };
+
+  const redo: ParkTriageDeps['redoTask'] = async (row, workflowId, journal) => {
+    const repo = await findRepo(row.owner, row.name);
+    const title = await readTaskTitle(w.db, row.taskId);
+    if (!repo || title === null) return { ok: false, why: `读不到仓或任务标题，没有重做（${workflowId}）` };
+    return w.temporal.use(async (client): Promise<CommanderRedoOutcome> => {
+      const read = await readGenerations(client, row);
+      if (!read.ok) return read;
+      const trail = trailOf(read.generations);
+      // idle：什么都没发；stop：叫停已写账并发出；old-terminal：旧代已重核终止，起新代前；start：起新代请求已写账并发出
+      let phase: 'idle' | 'stop' | 'old-terminal' | 'start' = 'idle';
+      // 接续账里已经有这一轮的第一笔（后续调度才有东西可接）
+      let ledgered = false;
+      let existing: { workflowId: string; generation: number } | null = null;
+      let outcome: RedoOutcome;
+      try {
+        outcome = await redoTask({
+          list: async () => read.generations,
+          posture: async (id) => {
+            try {
+              const status = await withDeadline((c) => c.workflow.getHandle(id).query(taskStatusQuery));
+              return redoCanStop(status.phase) ? 'parked' : 'running';
+            } catch (err) {
+              return isWorkflowGone(err) ? 'parked' : 'running';
+            }
+          },
+          abandonParked: async (id) => {
+            // 先记账再叫停：账写不进就不发，回执才能如实写「任务没动」
+            if (phase === 'idle') {
+              await journal({ phase: 'stop-requested', trail });
+              ledgered = true;
+              phase = 'stop';
+            }
+            try {
+              await withDeadline((c) =>
+                c.workflow.getHandle(id).signal(taskAbandonSignal, {
+                  by: COMMANDER_ACTOR,
+                  reason: '指挥官判重做：先叫停停住的上一代',
+                }),
+              );
+            } catch (err) {
+              if (!isWorkflowGone(err)) throw err;
+            }
+            await waitTerminal(client, id);
+          },
+          start: async (id) => {
+            // 起之前把全部旧代的真实终态和 run 身份再核一遍，不信前面的等待结果
+            const gate = await gateOf(client, row, trail);
+            if (gate.kind === 'exists') {
+              existing = { workflowId: gate.workflowId, generation: gate.generation };
+              return 'already_exists';
+            }
+            if (gate.kind !== 'ready') throw new StopUnconfirmedError(gate.why);
+            phase = 'old-terminal';
+            await journal({
+              phase: 'start-requested',
+              trail,
+              newWorkflowId: id,
+              generation: trail.fromGeneration + 1,
+            });
+            ledgered = true;
+            phase = 'start';
+            const started = await startGeneration(row, repo, title, id);
+            if (started === 'already_exists')
+              existing = { workflowId: id, generation: trail.fromGeneration + 1 };
+            return started;
+          },
+        });
+      } catch (err) {
+        const why = errMessage(err);
+        if (phase === 'idle') return { ok: false, why };
+        if (phase === 'stop') {
+          await journalBestEffort(journal, { phase: 'stop-unconfirmed', why });
+          return { ok: false, why, stage: 'stop-unconfirmed' };
+        }
+        // 旧代已重核终止、起新代的账还没写进去：账上没有这一轮的第一笔就是什么都没发，不假装有后续
+        if (!ledgered) return { ok: false, why };
+        await journalBestEffort(journal, { phase: 'start-unconfirmed', why });
+        return { ok: false, why, stage: 'start-unconfirmed' };
+      }
+      const found = existing as { workflowId: string; generation: number } | null;
+      if (found) {
+        await journalBestEffort(journal, {
+          phase: 'exists',
+          newWorkflowId: found.workflowId,
+          generation: found.generation,
+        });
+        return { ok: true, workflowId: found.workflowId, generation: found.generation, existing: true };
+      }
+      if (outcome.ok) {
+        await journalBestEffort(journal, {
+          phase: 'started',
+          newWorkflowId: outcome.workflowId,
+          generation: outcome.generation,
+        });
+        return outcome;
+      }
+      // 没起成又没抛错：要么什么都没动（旧代真在跑被拒），要么叫停已执行但不能另起（例如代数到顶）
+      if (phase === 'idle') return outcome;
+      await journalBestEffort(journal, { phase: 'given-up', why: outcome.why });
+      return { ok: false, why: outcome.why, stage: 'final' };
+    });
+  };
+
+  const resume: ParkTriageDeps['resumeRedo'] = async (pending, opts, journal) => {
+    const { row, trail } = pending;
+    const repo = await findRepo(row.owner, row.name);
+    const title = await readTaskTitle(w.db, row.taskId);
+    if (!repo || title === null)
+      return {
+        ok: false,
+        stage: 'waiting',
+        why: `读不到仓或任务标题，这一轮不接续（${pending.workflowId}）`,
+      };
+    return w.temporal.use(async (client): Promise<CommanderRedoOutcome> => {
+      const gate = await gateOf(client, row, trail);
+      if (gate.kind === 'final') return { ok: false, stage: 'final', why: gate.why };
+      if (gate.kind === 'waiting') return { ok: false, stage: 'waiting', why: gate.why };
+      if (gate.kind === 'exists') {
+        await journalBestEffort(journal, {
+          phase: 'exists',
+          newWorkflowId: gate.workflowId,
+          generation: gate.generation,
+        });
+        return { ok: true, workflowId: gate.workflowId, generation: gate.generation, existing: true };
+      }
+      const generation = trail.fromGeneration + 1;
+      if (generation > MAX_TASK_GENERATION)
+        return { ok: false, stage: 'final', why: `已经重做到第 ${MAX_TASK_GENERATION} 代，不再另起` };
+      if (!opts.canStart)
+        return {
+          ok: false,
+          stage: 'final',
+          why: `旧代已终止但新代还没起，而接续已过 24 小时或起新代已试满 ${PARK_TRIAGE_REDO_START_TRIES} 次，不再起`,
+        };
+      const id = taskWorkflowId({ owner: row.owner, name: row.name }, row.issueNumber, generation);
+      try {
+        await journal({ phase: 'start-requested', trail, newWorkflowId: id, generation });
+      } catch (err) {
+        return { ok: false, stage: 'waiting', why: `接续账没写进，没有起新代：${errMessage(err)}` };
+      }
+      let started: 'started' | 'already_exists';
+      try {
+        started = await startGeneration(row, repo, title, id);
+      } catch (err) {
+        const why = errMessage(err);
+        await journalBestEffort(journal, { phase: 'start-unconfirmed', why });
+        return { ok: false, stage: 'start-unconfirmed', why };
+      }
+      await journalBestEffort(journal, {
+        phase: started === 'started' ? 'started' : 'exists',
+        newWorkflowId: id,
+        generation,
+      });
+      return { ok: true, workflowId: id, generation, ...(started === 'started' ? {} : { existing: true }) };
+    });
+  };
+
+  const redoJournal: ParkTriageDeps['redoJournal'] = async ({ row, workflowId, parkSeq, rec }) => {
+    const failure = REDO_FAILURE_PHASES.includes(rec.phase);
+    await recordEngineAudit(w.db, {
+      action: COMMANDER_AUDIT_REDO,
+      target: COMMANDER_AUDIT_TARGET,
+      actorId: COMMANDER_ACTOR,
+      after: {
+        taskId: row.taskId,
+        ref: `${row.owner}/${row.name}#${row.issueNumber}`,
+        owner: row.owner,
+        name: row.name,
+        issueNumber: row.issueNumber,
+        workflowId,
+        parkSeq,
+        phase: rec.phase,
+        ...(rec.trail ? { trail: rec.trail } : {}),
+        ...(rec.newWorkflowId ? { newWorkflowId: rec.newWorkflowId } : {}),
+        ...(rec.generation ? { generation: rec.generation } : {}),
+        ...(rec.why ? { why: rec.why } : {}),
+      },
+      reason: `重做接续账：${rec.phase}`,
+      ok: !failure,
+      ...(failure ? { error: (rec.why ?? rec.phase).slice(0, 1000) } : {}),
+      at: now(),
     });
   };
 
@@ -353,6 +617,8 @@ export function parkTriageJob(w: ParkTriageWiring): () => ParkTriageDeps {
       }
     },
     redoTask: redo,
+    redoJournal,
+    resumeRedo: resume,
     async openIssue(repo, input) {
       const got = await w.gh.openIssue({
         repo: { owner: repo.owner, name: repo.name },

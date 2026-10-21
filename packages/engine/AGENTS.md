@@ -92,6 +92,12 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 
 - schedule_runs 的 why 列在一轮没收尾期间只放诊断见证：每小时对账的最后一个子步骤（`在途阶段见证：`，写不进只记 warn，不改步骤结果）；引擎正常停机、宽限到了某任务一轮还没回，再追加 `停机宽限到期时这一轮仍在跑 at=…`（`timers.ts` 的 `recordUnfinished`，只写本进程起定时器之后开始的未结束行）。它们只证明「最后记到的位置」，不证明卡在哪、为什么中断，也不是结束时刻；这一行不结束，ended_at、scanned、found 仍未知，由下次启动补记成 failed（ended_at=started_at 是补记，不是真实结束时间）。SIGKILL/OOM/断电没有机会写，仍只有最后一笔阶段见证。
 
+## 指挥官重做的受管接续（#3496）
+
+- `jobs/park-triage.ts` 的重做是多步（叫停旧代 → 等终态 → 起新代），每跨一步前先写接续账 `commander.redo`（`stop-requested` / `start-requested`，带叫停前读到的全部旧代 workflowId + runId），账写不进就不动手；等不到终态、启动没确认各记 `stop-unconfirmed` / `start-unconfirmed`，终态是 `started` / `exists` / `given-up`。不另建表、不另起巡检：同一个 10 分钟定时任务每轮先读这份账，对没到终态的按原裁决调 `real/park-triage.ts` 的 `resumeRedo`，不新认领、不占每日名额、没配模型也接续。
+- 起新代之前（首次和接续都一样）现读全部代次：旧代 run 身份须与账一致且都真实终止，已有更高一代就不再起；旧代还在跑/读不到只是这一轮不动（不写账、不发提醒），身份对不上、代数到顶、起新代试满 `PARK_TRIAGE_REDO_START_TRIES` 次、接续满 24 小时转 `given-up` 交人。叫停后读状态失败从不当成已终止。账里缺旧代身份或读不懂的记录不接续、进 problems。
+- 回执分三种：叫停已发送、终态未确认；旧代已终态、新代待启动/启动未确认；新代已确认启动（或已存在、本次没再起）。什么都没发出去才写「任务没动」。测试：`test/real/park-triage.test.ts`（假 Temporal + `ParkTriageWiring.clock` 假时钟）、`test/park-triage.test.ts`（假存储）。
+
 ## 版本更新日志
 
 - `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。

@@ -12,13 +12,17 @@ import type { IntakeRepo } from '../src/jobs/intake.ts';
 import {
   COMMANDER_AUDIT_ACT,
   COMMANDER_AUDIT_CLAIM,
+  COMMANDER_AUDIT_REDO,
   COMMANDER_AUDIT_RETRY,
   type CommanderNotice,
+  type CommanderRedoOutcome,
   detailHashOf,
   type OpenParkAlert,
   PARK_TRIAGE_DAILY_CAP,
+  PARK_TRIAGE_REDO_START_TRIES,
   PARK_TRIAGE_SESSION_TRIES,
   type ParkTriageDeps,
+  REDO_FAILURE_PHASES,
   runParkTriageJob,
   triageParkedTasks,
 } from '../src/jobs/park-triage.ts';
@@ -134,9 +138,14 @@ function rig(
     audits?: { at: Date; action: string; after: unknown; ok?: boolean }[];
     openPark?: OpenParkAlert | null;
     over?: Partial<ParkTriageDeps>;
+    /** 接续时 resumeRedo 回什么；缺省是「这一轮还不能动」。 */
+    resume?: CommanderRedoOutcome;
+    resumeThrows?: string;
   } = {},
 ) {
   const r = {
+    journal: [] as { phase: string; why?: string | undefined }[],
+    resumed: [] as { phase: string; canStart: boolean }[],
     sessions: [] as Parameters<ParkTriageDeps['runSession']>[0][],
     sent: [] as ContinueCommand[],
     abandoned: [] as string[],
@@ -195,6 +204,30 @@ function rig(
     redoTask: async (_row, id) => {
       r.redone.push(id);
       return { ok: true, workflowId: `${id}-2`, generation: 2 };
+    },
+    redoJournal: async ({ row, workflowId, parkSeq, rec }) => {
+      r.journal.push({ phase: rec.phase, why: rec.why });
+      r.audits.push({
+        at: NOW,
+        action: COMMANDER_AUDIT_REDO,
+        after: {
+          taskId: row.taskId,
+          owner: row.owner,
+          name: row.name,
+          issueNumber: row.issueNumber,
+          workflowId,
+          parkSeq,
+          phase: rec.phase,
+          ...(rec.trail ? { trail: rec.trail } : {}),
+          ...(rec.why ? { why: rec.why } : {}),
+        },
+        ok: !REDO_FAILURE_PHASES.includes(rec.phase),
+      });
+    },
+    resumeRedo: async (pending, o) => {
+      r.resumed.push({ phase: pending.phase, canStart: o.canStart });
+      if (opts.resumeThrows) throw new Error(opts.resumeThrows);
+      return opts.resume ?? { ok: false, stage: 'waiting', why: '默认：不动' };
     },
     openIssue: async (_repo, input) => {
       r.opened.push(input);
@@ -983,5 +1016,236 @@ describe('单张单防空转：同一张单反复停、反复继续，不再放�
     };
     await triageParkedTasks(r.deps);
     expect(seen[0]).toBe(detailHashOf('动手 3 轮仍没过'));
+  });
+});
+
+// —— #3496：重做的受管接续。可信意图 = 接续账（commander.redo）里已记下的阶段，实际阶段由 resumeRedo 现读 ——
+describe('重做接续账：叫停后终态迟到，沿原裁决接续', () => {
+  const TRAIL = { fromGeneration: 1, runs: [{ workflowId: WF, runId: 'run-1' }] };
+  const redoRow = (
+    phase: string,
+    extra: Record<string, unknown> = {},
+    minutesBefore = 40,
+  ): { at: Date; action: string; after: unknown; ok: boolean } => ({
+    at: new Date(NOW.getTime() - minutesBefore * 60_000),
+    action: COMMANDER_AUDIT_REDO,
+    ok: !(REDO_FAILURE_PHASES as readonly string[]).includes(phase),
+    after: {
+      taskId: ROW.taskId,
+      owner: ROW.owner,
+      name: ROW.name,
+      issueNumber: ROW.issueNumber,
+      workflowId: WF,
+      parkSeq: 2,
+      phase,
+      ...extra,
+    },
+  });
+  const STOPPED = redoRow('stop-requested', { trail: TRAIL });
+  /** 任务行已不在停着的候选里（线上 #3258：旧代迟到结束后被放弃）。 */
+  const GONE = { tasks: async () => [] as ParkedRetryRow[] };
+
+  it('进程在叫停后断了（账上只有 stop-requested）：下一轮调度接续一次，新代已确认就写回执', async () => {
+    const r = rig({
+      audits: [STOPPED],
+      over: GONE,
+      resume: { ok: true, workflowId: `${WF}:r2`, generation: 2 },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(r.resumed).toEqual([{ phase: 'stop-requested', canStart: true }]);
+    expect(out.acted).toEqual([{ ref: 'thoerwink8/fleet-dao#3296', action: 'redo', source: 'verdict' }]);
+    expect(r.sessions).toHaveLength(0);
+    expect(r.notices).toHaveLength(1);
+    expect(r.notices[0]).toMatchObject({ level: 'daily', key: `commander:${WF}:park:2`, taskId: ROW.taskId });
+    expect(r.notices[0]?.body).toContain('已确认启动');
+  });
+
+  it('账上已是 started / exists / given-up：重复调度不再接续', async () => {
+    for (const end of ['started', 'exists', 'given-up']) {
+      const r = rig({
+        audits: [STOPPED, redoRow(end, end === 'given-up' ? { why: '放弃' } : {}, 30)],
+        over: GONE,
+      });
+      await triageParkedTasks(r.deps);
+      await triageParkedTasks(r.deps);
+      expect(r.resumed, end).toEqual([]);
+      expect(r.notices, end).toEqual([]);
+    }
+  });
+
+  it('旧代还在跑/读不到：这一轮不动，不写账、不发提醒，下一轮仍接续（不无限发提醒）', async () => {
+    const r = rig({ audits: [STOPPED], over: GONE });
+    const first = await triageParkedTasks(r.deps);
+    await triageParkedTasks(r.deps);
+    expect(r.resumed).toHaveLength(2);
+    expect(r.journal).toEqual([]);
+    expect(r.notices).toEqual([]);
+    expect(first.acted).toEqual([]);
+    expect(first.left).toEqual([]);
+    expect(first.problems).toEqual([]);
+  });
+
+  it('查询失败（resumeRedo 抛错）：保持待接续，记 problems，不写完成', async () => {
+    const r = rig({ audits: [STOPPED], over: GONE, resumeThrows: 'Temporal 暂时不可用' });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.problems.join('\n')).toContain('Temporal 暂时不可用');
+    expect(out.acted).toEqual([]);
+    expect(r.journal).toEqual([]);
+    await triageParkedTasks(r.deps);
+    expect(r.resumed).toHaveLength(2);
+  });
+
+  it('已经存在新代：回执写「已经存在、没有再启动」，不算这次启动的', async () => {
+    const r = rig({
+      audits: [
+        STOPPED,
+        redoRow('start-requested', { trail: TRAIL, newWorkflowId: `${WF}:r2`, generation: 2 }, 35),
+      ],
+      over: GONE,
+      resume: { ok: true, workflowId: `${WF}:r2`, generation: 2, existing: true },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(r.resumed).toEqual([{ phase: 'start-requested', canStart: true }]);
+    expect(out.acted).toHaveLength(1);
+    expect(r.notices[0]?.body).toContain('已经存在');
+    expect(r.notices[0]?.body).toContain('没有再启动');
+    expect(r.notices[0]?.body).not.toContain('已确认启动');
+  });
+
+  it('旧代终态已确认、新代启动没得到确认：回执写这一阶段并保留最早的失败原文', async () => {
+    const r = rig({
+      audits: [
+        STOPPED,
+        redoRow('stop-unconfirmed', { why: '叫停 task:x 后还没停，没有另起' }, 39),
+        redoRow('start-requested', { trail: TRAIL, newWorkflowId: `${WF}:r2`, generation: 2 }, 20),
+      ],
+      over: GONE,
+      resume: { ok: false, stage: 'start-unconfirmed', why: 'DEADLINE_EXCEEDED：start 的响应丢了' },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.left).toHaveLength(1);
+    expect(r.notices[0]?.level).toBe('alert');
+    expect(r.notices[0]?.title).toContain('新代启动未确认');
+    expect(r.notices[0]?.body).toContain('DEADLINE_EXCEEDED');
+    expect(r.notices[0]?.body).toContain('叫停 task:x 后还没停，没有另起');
+    expect(r.notices[0]?.body).not.toContain('任务没动');
+  });
+
+  it('身份变化（旧代 run 对不上）：不再接续，记 given-up 并交人看，之后不再重试', async () => {
+    const r = rig({
+      audits: [STOPPED],
+      over: GONE,
+      resume: {
+        ok: false,
+        stage: 'final',
+        why: '旧代 x 的 run 身份变了（记下的 run-1，现在 run-9），不再接续',
+      },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(r.journal).toEqual([{ phase: 'given-up', why: expect.stringContaining('run 身份变了') }]);
+    expect(out.left).toHaveLength(1);
+    expect(r.notices[0]?.level).toBe('alert');
+    expect(r.notices[0]?.title).toContain('不再接续');
+    await triageParkedTasks(r.deps);
+    expect(r.resumed).toHaveLength(1);
+  });
+
+  it('起新代最多试满次数：试满后 canStart=false，只许核存在、不许再起', async () => {
+    const tries = Array.from({ length: PARK_TRIAGE_REDO_START_TRIES }, (_, i) =>
+      redoRow('start-requested', { trail: TRAIL, newWorkflowId: `${WF}:r2`, generation: 2 }, 30 - i),
+    );
+    const r = rig({ audits: [STOPPED, ...tries], over: GONE });
+    await triageParkedTasks(r.deps);
+    expect(r.resumed).toEqual([{ phase: 'start-requested', canStart: false }]);
+  });
+
+  it('接续超过 24 小时仍没进展：转人看，不无限等', async () => {
+    const r = rig({ audits: [redoRow('stop-requested', { trail: TRAIL }, 25 * 60)], over: GONE });
+    const out = await triageParkedTasks(r.deps);
+    expect(r.resumed).toEqual([{ phase: 'stop-requested', canStart: false }]);
+    expect(r.journal[0]?.phase).toBe('given-up');
+    expect(r.journal[0]?.why).toContain('24 小时');
+    expect(out.left).toHaveLength(1);
+    expect(r.notices[0]?.level).toBe('alert');
+  });
+
+  it('账上缺旧代 run 身份或读不懂：不接续，明报，不拿它凑成功', async () => {
+    const noTrail = rig({ audits: [redoRow('stop-requested')], over: GONE });
+    const a = await triageParkedTasks(noTrail.deps);
+    expect(noTrail.resumed).toEqual([]);
+    expect(a.problems.join('\n')).toContain('缺旧代身份');
+    const garbled = rig({
+      audits: [{ at: NOW, action: COMMANDER_AUDIT_REDO, ok: true, after: { phase: 'stop-requested' } }],
+      over: GONE,
+    });
+    const b = await triageParkedTasks(garbled.deps);
+    expect(garbled.resumed).toEqual([]);
+    expect(b.problems.join('\n')).toContain('读不懂');
+  });
+
+  it('没配模型也接续（已核的裁决不依赖模型）；开关关着则不动', async () => {
+    const r = rig({
+      audits: [STOPPED],
+      configured: false,
+      over: GONE,
+      resume: { ok: true, workflowId: `${WF}:r2`, generation: 2 },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.noModel).toBe(true);
+    expect(out.acted).toHaveLength(1);
+    const off = rig({ audits: [STOPPED], enabled: false, over: GONE });
+    await triageParkedTasks(off.deps);
+    expect(off.resumed).toEqual([]);
+  });
+
+  it('接续不占每日名额、不起会话：账上有待接续时认领数不变', async () => {
+    const r = rig({
+      audits: [STOPPED],
+      over: GONE,
+      resume: { ok: true, workflowId: `${WF}:r2`, generation: 2 },
+    });
+    const out = await triageParkedTasks(r.deps);
+    expect(out.claimed).toBe(0);
+    expect(r.sessions).toHaveLength(0);
+  });
+
+  it('首次执行的回执按阶段写：叫停已发送终态未知 / 旧代已终态新代待启动 / 不再接续；什么都没动才写「任务没动」', async () => {
+    const run = async (outcome: CommanderRedoOutcome) => {
+      const r = rig({ answer: verdict('redo'), over: { redoTask: async () => outcome } });
+      await triageParkedTasks(r.deps);
+      return r.notices[0]?.body ?? '';
+    };
+    const stop = await run({ ok: false, stage: 'stop-unconfirmed', why: '叫停 x 后还没停，没有另起' });
+    expect(stop).toContain('叫停请求已发送');
+    expect(stop).toContain('终态还没确认');
+    expect(stop).toContain('叫停 x 后还没停，没有另起');
+    expect(stop).not.toContain('任务没动。');
+    const start = await run({ ok: false, stage: 'start-unconfirmed', why: 'start 超时' });
+    expect(start).toContain('上一代已确认终态');
+    expect(start).toContain('start 超时');
+    expect(start).not.toContain('任务没动。');
+    const final = await run({ ok: false, stage: 'final', why: '已经重做到第 20 代，不再另起' });
+    expect(final).toContain('不会再接续');
+    expect(final).not.toContain('任务没动。');
+    const untouched = await run({ ok: false, why: '读不到仓或任务标题，没有重做' });
+    expect(untouched).toContain('任务没动。');
+  });
+
+  it('首次执行把接续账的写口交给 redoTask：账带这张单的编号和停下编号，之后的定时调度读得到', async () => {
+    const r = rig({
+      answer: verdict('redo'),
+      over: {
+        redoTask: async (_row, _id, journal) => {
+          await journal({ phase: 'stop-requested', trail: TRAIL });
+          return { ok: false, stage: 'stop-unconfirmed', why: '叫停 x 后还没停' };
+        },
+      },
+    });
+    await triageParkedTasks(r.deps);
+    const row = r.audits.find((a) => a.action === COMMANDER_AUDIT_REDO);
+    expect(row?.after).toMatchObject({ workflowId: WF, parkSeq: 2, phase: 'stop-requested', trail: TRAIL });
+    const next = rig({ audits: r.audits, over: GONE });
+    await triageParkedTasks(next.deps);
+    expect(next.resumed).toEqual([{ phase: 'stop-requested', canStart: true }]);
   });
 });
