@@ -199,6 +199,232 @@ export function bashBacktickSubst(cmd) {
   return false;
 }
 
+// bash 里不加引号的 $变量 展开后还要过一遍「按空白拆词、把带 * ? [ ] 的词换成当前目录里匹配的文件名」。
+// 变量的值是写在引号里的通配（for via in "--noproxy *"、H='-H x *'），用的时候又没加引号，* 就变成了当前目录的全部文件名：
+// curl 把它们当成 http://<文件名>/ 经代理发出去，换成 rm、cp 一样会把整个目录塞进参数。
+// 只认这一条命令里写死的值：NAME=… 赋值（含 export、local 这类前缀）、for NAME in 列表里写在引号内的通配；
+// 前面命令留下的变量、$1 这类看不到（只会漏拦、不会误拦）。命令里有 set -f / set -o noglob 就不判。
+const VAR_NAME_RE = /^[A-Za-z_]\w*$/;
+const DECLARE_WORDS = new Set(['export', 'local', 'declare', 'typeset', 'readonly']);
+const GLOB_CHARS = '*?[';
+
+/**
+ * 拆词后会被当成通配去匹配文件名的那几段：带 *，或带 ?、[…] 又不是路径、网址（那种匹配不到当前目录的文件）
+ * @param {string} value
+ */
+const globFields = (value) =>
+  value.split(/[ \t\n]+/).filter((f) => f.includes('*') || (!f.includes('/') && /\?|\[[^\]]*\]/.test(f)));
+
+/**
+ * 词的原文里原样进变量的字面部分：引号去掉；$x、${…}、$( )、反引号换成一个 x（展开出来的是别的值，里面的 ${p##*:} 不是通配）；
+ * 转义的字符原样留着。quotedOnly：引号外、没转义的通配换成 x（for 列表里的那种当场就按文件名展开了，进变量的是文件名）
+ * @param {string} raw
+ * @param {boolean} quotedOnly
+ */
+function literalPart(raw, quotedOnly) {
+  let out = '';
+  let q = '';
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i] ?? '';
+    if (q === "'") {
+      if (c === "'") q = '';
+      else out += c;
+      continue;
+    }
+    if (c === '\\') {
+      out += raw[i + 1] ?? '';
+      i++;
+      continue;
+    }
+    if (c === '$' && (raw[i + 1] === '{' || raw[i + 1] === '(')) {
+      const open = raw[i + 1];
+      const close = open === '{' ? '}' : ')';
+      let depth = 0;
+      let j = i + 1;
+      for (; j < raw.length; j++) {
+        if (raw[j] === open) depth++;
+        else if (raw[j] === close && --depth === 0) break;
+      }
+      out += 'x';
+      i = j;
+      continue;
+    }
+    if (c === '$' && /[A-Za-z_]/.test(raw[i + 1] ?? '')) {
+      while (/\w/.test(raw[i + 1] ?? '')) i++;
+      out += 'x';
+      continue;
+    }
+    if (c === '`') {
+      const j = raw.indexOf('`', i + 1);
+      out += 'x';
+      i = j < 0 ? raw.length : j;
+      continue;
+    }
+    if (q === '"') {
+      if (c === '"') q = '';
+      else out += c;
+      continue;
+    }
+    if (c === "'" || c === '"') q = c;
+    else out += quotedOnly && GLOB_CHARS.includes(c) ? 'x' : c;
+  }
+  return out;
+}
+
+/**
+ * 词里没闭合的 $( 多几层（引号里的不算）：for x in $(gh api … --jq '.[].id') 被空格拆成几个词，中间那几个是命令，不是列表项
+ * @param {string} raw
+ */
+function substDepth(raw) {
+  let d = 0;
+  let q = '';
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw[i];
+    if (q) {
+      if (c === q) q = '';
+      else if (q === '"' && c === '\\') i++;
+      continue;
+    }
+    if (c === '\\') i++;
+    else if (c === "'" || c === '"') q = c;
+    else if (c === '$' && raw[i + 1] === '(') {
+      d++;
+      i++;
+    } else if (c === ')') d--;
+  }
+  return d;
+}
+
+/**
+ * 词的原文里在引号外展开的变量名（$x、${x…}）；$( ) 里面引号重新算
+ * @param {string} raw
+ * @returns {string[]}
+ */
+function unquotedRefs(raw) {
+  /** @type {string[]} */
+  const out = [];
+  /** @type {('none' | 'sq' | 'dq')[]} */
+  const stack = ['none'];
+  let i = 0;
+  while (i < raw.length) {
+    const top = stack[stack.length - 1];
+    const c = raw[i];
+    if (top === 'sq') {
+      if (c === "'") stack.pop();
+      i++;
+      continue;
+    }
+    if (c === '\\') {
+      i += 2;
+      continue;
+    }
+    if (c === '$' && raw[i + 1] === '(') {
+      stack.push('none');
+      i += 2;
+      continue;
+    }
+    if (top === 'dq') {
+      if (c === '"') stack.pop();
+      i++;
+      continue;
+    }
+    if (c === "'") {
+      stack.push('sq');
+      i++;
+      continue;
+    }
+    if (c === '"') {
+      stack.push('dq');
+      i++;
+      continue;
+    }
+    if (c === ')' && stack.length > 1) {
+      stack.pop();
+      i++;
+      continue;
+    }
+    if (c === '$') {
+      const m = /^\$(?:\{([A-Za-z_]\w*)|([A-Za-z_]\w*))/.exec(raw.slice(i));
+      if (m) {
+        out.push(m[1] ?? m[2] ?? '');
+        i += m[0].length;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out;
+}
+
+/**
+ * 这条 bash 命令里第一个「值带通配、又在引号外展开」的变量；没有返回 null
+ * @param {unknown} cmd
+ * @returns {{ name: string, value: string } | null}
+ */
+export function unquotedGlobVar(cmd) {
+  const { outer } = splitHeredocs(String(cmd));
+  if (!outer.includes('$') || !/[*?[]/.test(outer)) return null;
+  if (/(?:^|[\s;&|(])set\s+(?:-[A-Za-z]*f[A-Za-z]*|-o\s+noglob)(?![\w-])/.test(outer)) return null;
+  const cmds = scanCommand(outer, 'bash').pipelines.flat();
+  /** @type {Map<string, string>} 变量名 → 带通配的值 */
+  const globby = new Map();
+  /** @type {Set<Word>} 赋值、case、[[ ]] 里的词：展开后不拆词、不匹配文件名 */
+  const noGlob = new Set();
+  for (const c of cmds) {
+    const w = c.words;
+    let k = 0;
+    while (k < w.length && BASH_KEYWORDS.has(w[k]?.raw ?? '') && w[k]?.raw !== 'for' && w[k]?.raw !== 'case')
+      k++;
+    const head = w[k]?.raw ?? '';
+    if (head === 'for' && w[k + 2]?.raw === 'in') {
+      const name = w[k + 1]?.raw ?? '';
+      let depth = 0;
+      for (const x of w.slice(k + 3)) {
+        const inSubst = depth > 0 || x.raw.includes('$(');
+        depth += substDepth(x.raw);
+        if (!inSubst && VAR_NAME_RE.test(name) && globFields(literalPart(x.raw, true)).length > 0) {
+          globby.set(name, x.value);
+          break;
+        }
+      }
+      continue;
+    }
+    if (head === 'case') {
+      const subject = w[k + 1];
+      if (subject) noGlob.add(subject);
+      continue;
+    }
+    // 打头的 NAME=… 和 export / local 后面的 NAME=…：赋值不展开通配，值原样进变量
+    const declare = DECLARE_WORDS.has(head);
+    for (const x of w.slice(declare ? k + 1 : k)) {
+      const m = /^([A-Za-z_]\w*)\+?=/.exec(x.raw);
+      if (!m) {
+        if (declare && x.raw.startsWith('-')) continue;
+        break;
+      }
+      noGlob.add(x);
+      if (globFields(literalPart(x.raw.slice(m[0].length), false)).length > 0) {
+        globby.set(m[1] ?? '', x.value.slice(x.value.indexOf('=') + 1));
+      }
+    }
+    let test = false;
+    for (const x of w) {
+      if (x.raw === '[[') test = true;
+      else if (x.raw === ']]') test = false;
+      else if (test) noGlob.add(x);
+    }
+  }
+  if (globby.size === 0) return null;
+  for (const c of cmds) {
+    for (const x of c.words) {
+      if (noGlob.has(x)) continue;
+      const name = unquotedRefs(x.raw).find((n) => globby.has(n));
+      if (name !== undefined) return { name, value: globby.get(name) ?? '' };
+    }
+  }
+  return null;
+}
+
 /**
  * @param {string} message
  * @returns {Block}
@@ -2482,6 +2708,15 @@ export function decide(raw, fallbackCwd = '', { claudeRunning = countClaudeProce
   if (kind === 'bash' && bashBacktickSubst(cmd)) {
     return block(
       "这条 bash 命令里有会被当成命令执行的反引号（在双引号里、没加引号、或 <<EOF 不带引号的 heredoc 里）：bash 会先把反引号里的内容当命令跑掉。Markdown 的 `代码` 写法放进单引号里、用 <<'EOF' 的 heredoc，或者先用 Write 写进文件再用 --body-file / -F / 读文件；真要取命令输出用 $(…)。",
+    );
+  }
+  // 值带通配的变量在引号外展开，通配被换成当前目录的文件名塞进参数（单 #3515：curl 把会话记录的文件名当网址经代理发了出去）。
+  // 只管 bash，不分仓，全机都拦。
+  const globVar = kind === 'bash' ? unquotedGlobVar(cmd) : null;
+  if (globVar) {
+    const shown = Array.from(globVar.value).slice(0, 80).join('');
+    return block(
+      `这条 bash 命令里变量 $${globVar.name} 的值带通配符（「${shown}」），后面又在引号外用了它：bash 会先按空白拆开，再把通配换成当前目录里的文件名，这些文件名就成了命令的参数（curl 会把它们当成 http://<文件名>/ 经代理发出去）。用的地方写成 "$${globVar.name}"；要拆成几个参数就用数组，如 args=(--noproxy '*') 再写 "\${args[@]}"；真要通配就把通配直接写在命令里，或先 set -f。`,
     );
   }
   // 改仓里的文件只用 Edit/Write（单 #2844）：Bash 里 sed -i、node -e / python 写文件、> >> tee 写进仓里的，当场拦；只管 Bash 工具，认不清的放行

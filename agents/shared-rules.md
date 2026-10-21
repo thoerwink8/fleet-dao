@@ -38,6 +38,7 @@
 - 仓自己的规矩从仓根 AGENTS.md 进：它只当目录，细则在它指到的文档和各目录自己的 AGENTS.md 里，改到哪个目录先读那个目录的 AGENTS.md（有的话）。通用的改 fleet-dao 的这一份。几个 AI 同时干活各用各的工作树，建在主检出的 `.claude/worktrees/` 下；改动走 PR，碰界面的带截图，提交信息一句话说清改了什么、为什么。来龙去脉只进决定记录和方案（对外仓里照「对外仓和对外内容怎么写」写成结论）；规矩、技能、注释只写现在怎么做和为什么。
 - 自用仓仓根要有 `pnpm dev/start/stop/check`（缺了 `pnpm repo:init`），对我只说 pnpm 命令；对外仓照它自己的起停命令。临时文件放 `_tmp/`。
 - Claude 一律经 reclaude 起；本机有 Claude 会话在跑时别切号。
+- 本机装了 ego lite（有 `ego-browser` 命令）就一律用它开 task space 操作浏览器（看网页、点页面、截图、界面点验），照 `ego-browser` 技能做；不用桌面版自带的浏览器窗格、Claude in Chrome、`playwright-cli`，我点名才换。没装的机器照旧；仓里写好的 e2e 测试照旧跑仓里的。
 - GPT 系不做界面类的活。子代理和工人不用 Fable，Fable 只由我自己选，AI 不替我配。子代理只用 `Explore`、`general-purpose`、`Plan`，不传 `model` 就用定义里钉的档；窄改动编码在改动窄、派前定好机器核对、规矩写全三条都满足时，工人传 `model: "haiku"` 降档，真难的才传 `model: "opus"` 升档，别的活一律不改档；各档做什么、护栏、`model` 的写法见 `agents/subagents/README.md`。
 
 <!-- fleet-dao:通用段 结束 -->

@@ -3,10 +3,11 @@
 // ssh 全是假的（fetchRaw 换掉）；基线文件换成内存里的一份。故意造的失败：空输出、截断、库查询报错、采集时间过旧、
 // 认不出的行、attention 命令不存在（旧版本）、attention 输出坏了、ssh 名字没配，都必须判 BROKEN；坏样本必须判 ALERT。
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runChildOk } from './child.ts';
 
 const SCRIPTS = fileURLToPath(new URL('../skills/commander/scripts/', import.meta.url));
@@ -17,7 +18,11 @@ interface Report {
   alerts: string[];
   delta: string[];
   broken: string | null;
-  facts: { at: string; notes: { key: string; level?: string }[] } | null;
+  facts: {
+    at: string;
+    notes: { key: string; level?: string }[];
+    jobs: { job: string; outcome: string }[];
+  } | null;
 }
 interface SampleOpts {
   at: Date;
@@ -532,6 +537,207 @@ describe('巡查脚本：只读、不抄引擎的判法、读不到 ssh 名字�
     expect(raw.ok).toBe(false);
     const r = await patrol(raw, null);
     expect(r.code).toBe(2);
+  });
+});
+
+const dbRequire = createRequire(fileURLToPath(new URL('../../packages/db/package.json', import.meta.url)));
+const { PGlite } = (await import(pathToFileURL(dbRequire.resolve('@electric-sql/pglite')).href)) as {
+  PGlite: new () => {
+    exec(sql: string): Promise<unknown>;
+    query(sql: string, params: unknown[], opts: { rowMode: 'array' }): Promise<{ rows: unknown[][] }>;
+    close(): Promise<void>;
+  };
+};
+
+/**
+ * #3513：定时任务「最近一次已结束」的真实结局。这一组不手喂 job| 行：用 REMOTE_SCRIPT 里实际的 `q jobs` 那条 SQL，
+ * 在隔离的 PGlite 里按生产的表结构（schedule_outcome 枚举、两张表的约束）真执行，再把结果按 psql -At -F'|' 的样子
+ * 拼成远端输出喂回 judge，走完 REMOTE_SCRIPT → parseRaw → invariants → delta → render 一整条链。
+ */
+describe('巡查脚本：定时任务最近结局，partial 要报、恢复要有真实 ok（#3513）', () => {
+  let db: InstanceType<typeof PGlite>;
+  beforeAll(async () => {
+    db = new PGlite();
+    await db.exec(`
+      create type schedule_outcome as enum ('ok', 'partial', 'unscanned', 'failed');
+      create table scheduled_jobs (id text primary key, removed_at timestamptz);
+      create table schedule_runs (
+        id bigint generated always as identity primary key,
+        job text not null references scheduled_jobs(id),
+        started_at timestamptz not null default now(),
+        ended_at timestamptz,
+        outcome schedule_outcome,
+        scanned int, found int, why text,
+        check ((ended_at is null) = (outcome is null)),
+        check (outcome is null or outcome = 'ok' or why is not null)
+      );`);
+  });
+  afterAll(async () => {
+    await db.close();
+  });
+  beforeEach(async () => {
+    await db.exec('truncate schedule_runs restart identity; truncate scheduled_jobs cascade;');
+  });
+
+  /** 登记任务；retired 的带摘除时刻 */
+  const job = (id: string, retired = false) =>
+    db.exec(`insert into scheduled_jobs (id, removed_at) values ('${id}', ${retired ? 'now()' : 'null'})`);
+  /** 一次跑。minutesAgo 是结束时刻；outcome 为 null 是还在跑（没有结束时刻） */
+  const run = (
+    jobId: string,
+    outcome: 'ok' | 'partial' | 'failed' | 'unscanned' | null,
+    minutesAgo: number,
+    why = '',
+  ) =>
+    db.exec(
+      outcome === null
+        ? `insert into schedule_runs (job, started_at) values ('${jobId}', now() - interval '${minutesAgo} minutes')`
+        : `insert into schedule_runs (job, started_at, ended_at, outcome, scanned, found, why) values ('${jobId}', now() - interval '${minutesAgo + 1} minutes', now() - interval '${minutesAgo} minutes', '${outcome}', 259, 7, ${why ? `'${why}'` : 'null'})`,
+    );
+
+  /** 取出 REMOTE_SCRIPT 里 `q jobs "<sql>"` 那条实际 SQL，真执行，结果按 psql -At -F'|' 拼成行（NULL 是空） */
+  async function jobsLines(): Promise<string[]> {
+    const m = lib.REMOTE_SCRIPT.split('\n')
+      .find((l) => l.startsWith('q jobs "'))
+      ?.match(/^q jobs "(.*)"$/);
+    if (!m?.[1]) throw new Error('REMOTE_SCRIPT 里找不到 q jobs 那一行');
+    expect(m[1]).not.toMatch(/\\"|\$|`/); // sh 双引号里没有要转义的东西，SQL 原样就是 psql 收到的
+    const r = await db.query(m[1], [], { rowMode: 'array' });
+    return r.rows.map((row) => row.map((v) => (v === null ? '' : String(v))).join('|'));
+  }
+  /** 拿这一刻的库读数走一整轮 judge */
+  async function round(base: ReturnType<typeof baseOf> | null) {
+    const at = new Date();
+    const raw = lib.sampleRaw({ at, jobs: await jobsLines() });
+    return { raw, report: lib.judge({ raw: ok(raw), now: at, base }), at };
+  }
+
+  async function seedRound96() {
+    await job('hourly-reconcile');
+    await job('healthy-job');
+    await run('hourly-reconcile', 'failed', 120, '旧的失败');
+    await run('hourly-reconcile', 'partial', 30, '扫 259 处，7 处有问题，46 处没查成');
+    await run('hourly-reconcile', null, 1);
+    await run('healthy-job', 'ok', 60);
+  }
+
+  it('真实 SQL：较新的在途不盖住最近已结束的 partial，why 和时点留着；healthy-job 的 ok 不进异常列表', async () => {
+    await seedRound96();
+    const lines = await jobsLines();
+    expect(lines).toContain('job|healthy-job|ok|60|');
+    const partial = lines.find((l) => l.startsWith('job|hourly-reconcile|'));
+    expect(partial).toMatch(/^job\|hourly-reconcile\|partial\|30\|扫 259 处，7 处有问题，46 处没查成$/);
+    const { report } = await round(null);
+    expect(report.verdict).toBe('ALERT');
+    expect(report.alerts).toEqual([
+      '定时任务 hourly-reconcile 最近一次是 partial（30 分钟前）：扫 259 处，7 处有问题，46 处没查成',
+    ]);
+    const text = lib.render(report);
+    expect(text).toContain(`定时任务 最近一次不是 ok 的 1 个 @${report.facts?.at ?? ''}`);
+    expect(text.join('\n')).not.toContain('healthy-job');
+    expect(text.at(-1)).toBe('VERDICT: ALERT 1');
+  });
+
+  it('纯 ok：不报警，不在计数、变化里刷健康任务；退役任务和从没跑完的任务也不计', async () => {
+    await job('healthy-job');
+    await job('retired-job', true);
+    await job('never-finished');
+    await run('healthy-job', 'ok', 60);
+    await run('retired-job', 'failed', 10, '退役前最后一次是失败');
+    await run('never-finished', null, 1);
+    const first = await round(null);
+    expect(first.report.verdict).toBe('OK');
+    expect(first.report.alerts).toEqual([]);
+    expect(lib.render(first.report)).toContain(`定时任务 最近一次不是 ok 的 0 个 @${first.report.facts?.at}`);
+    const second = await round(first.report.facts as ReturnType<typeof baseOf>);
+    expect(second.report.verdict).toBe('OK');
+    expect(second.report.delta).toEqual([]);
+  });
+
+  it('failed → partial 不是恢复；partial → 当前真实 ok 才是恢复；ok 之后又冒出新的在途不影响', async () => {
+    await job('hourly-reconcile');
+    await run('hourly-reconcile', 'failed', 120, '旧的失败');
+    const r1 = await round(null);
+    expect(r1.report.facts?.jobs.map((j) => j.outcome)).toEqual(['failed']);
+    await run('hourly-reconcile', 'partial', 30, '46 处没查成');
+    const r2 = await round(r1.report.facts as ReturnType<typeof baseOf>);
+    expect(r2.report.verdict).toBe('ALERT');
+    expect(r2.report.delta).toEqual(['~ 定时任务 hourly-reconcile failed → partial']);
+    expect(r2.report.delta.join('\n')).not.toContain('恢复');
+    await run('hourly-reconcile', 'ok', 5);
+    await run('hourly-reconcile', null, 1);
+    const r3 = await round(r2.report.facts as ReturnType<typeof baseOf>);
+    expect(r3.report.verdict).toBe('OK');
+    expect(r3.report.delta).toEqual(['- 定时任务 hourly-reconcile（恢复了：最近一次已结束的是 ok）']);
+  });
+
+  it('旧异常任务本轮不见了（退役，或还没有已结束的跑）：不凭缺席叫恢复', async () => {
+    await job('hourly-reconcile');
+    await run('hourly-reconcile', 'partial', 30, '46 处没查成');
+    const r1 = await round(null);
+    expect(r1.report.verdict).toBe('ALERT');
+    await db.exec(`update scheduled_jobs set removed_at = now() where id = 'hourly-reconcile'`);
+    const r2 = await round(r1.report.facts as ReturnType<typeof baseOf>);
+    expect(r2.report.verdict).toBe('OK');
+    expect(r2.report.delta.join('\n')).not.toContain('恢复了');
+    expect(r2.report.delta).toEqual(['- 定时任务 hourly-reconcile（本轮不再出现，没读到当前 ok，不算恢复）']);
+  });
+
+  it('旧基线（没有 okJobs，也从没记过 partial）照读：旧失败读到 ok 才是恢复；缺席不是恢复；新冒出的 partial 报成新增', async () => {
+    const old = (jobs: { job: string; outcome: string }[]) => {
+      const f = JSON.parse(JSON.stringify(baseOf(lib.sampleRaw({ at: NOW }))));
+      f.jobs = jobs.map((j) => ({ ...j, minutes: 9, why: '旧' }));
+      delete f.okJobs;
+      const parsed = JSON.parse(`{"schema":1,"facts":${JSON.stringify(f)}}`);
+      return parsed.facts as ReturnType<typeof baseOf>;
+    };
+    await job('a-job');
+    await job('b-job');
+    await run('a-job', 'ok', 5);
+    await run('b-job', 'partial', 5, '没查成');
+    const base = old([
+      { job: 'a-job', outcome: 'failed' },
+      { job: 'gone-job', outcome: 'failed' },
+    ]);
+    const r = await round(base);
+    expect(r.report.delta).toEqual([
+      '+ 定时任务 b-job partial',
+      '- 定时任务 a-job（恢复了：最近一次已结束的是 ok）',
+      '- 定时任务 gone-job（本轮不再出现，没读到当前 ok，不算恢复）',
+    ]);
+    // 同一份旧基线经 readBaseline 过一遍也认
+    const read = JSON.stringify({ schema: 1, facts: base });
+    const viaRun = await patrol(ok(lib.sampleRaw({ at: NOW, jobs: await jobsLines() })), read);
+    expect(viaRun.lines.join('\n')).toContain('- 定时任务 a-job（恢复了：最近一次已结束的是 ok）');
+    expect(viaRun.code).toBe(1);
+  });
+
+  it('读失败、截断、认不出的 job 行：照旧 BROKEN，不写基线、不拿旧值或空 0 凑绿', async () => {
+    await job('hourly-reconcile');
+    await run('hourly-reconcile', 'partial', 30, '46 处没查成');
+    const lines = await jobsLines();
+    const at = NOW;
+    const base = JSON.stringify({ schema: 1, facts: baseOf(lib.sampleRaw({ at: NOW })) });
+    // 对照：同一份读数没坏的时候是 ALERT（不是因为时间差才 BROKEN）
+    expect((await patrol(ok(lib.sampleRaw({ at, jobs: lines })), base)).code).toBe(1);
+    const fails = [
+      lib.sampleRaw({ at, jobs: lines, err: 'ERR|jobs|permission denied' }),
+      lib.sampleRaw({ at, jobs: lines, noEnd: true }),
+      lib.sampleRaw({ at, jobs: [...lines, 'job|x||5|空结局'] }),
+      lib.sampleRaw({ at, jobs: [...lines, 'job|x|ok|不是数字|y'] }),
+    ];
+    for (const stdout of fails) {
+      const r = await patrol(ok(stdout), base);
+      expect(r.code, stdout).toBe(2);
+      expect(r.saved, stdout).toEqual([]);
+      expect(r.report.facts, stdout).toBeNull();
+      expect(r.lines.at(-1)).toBe('VERDICT: BROKEN');
+    }
+  });
+
+  it('--selftest 里有 partial 必须报的样本', () => {
+    const r = lib.selftest(NOW);
+    expect(r.lines.some((l) => l.startsWith('自检 过 定时任务最近一次是 partial'))).toBe(true);
   });
 });
 
