@@ -55,7 +55,8 @@ afterEach(() => {
   if (root) rmSync(root, { recursive: true, force: true });
 });
 
-describe('专用SQLite持久pending', () => {
+// 子进程冷启动和 256 行同步重开库都会超过默认 5 秒。同步写完才返回，时限必须盖住做完。
+describe('专用SQLite持久pending', { timeout: 120_000 }, () => {
   it('无任何PG配置也可持久写入，两个独立child重开回同一key/hash和首码', async () => {
     const o = observation();
     const c = createAdmissionAlertSink({ spoolPath: path });
