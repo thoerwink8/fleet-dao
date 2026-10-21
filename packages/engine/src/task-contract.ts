@@ -837,7 +837,15 @@ export type MergeWait =
   | { state: 'contract_changed' }
   | { state: 'merged'; mergeCommit?: string }
   | { state: 'closed' }
-  | { state: 'head_moved'; head: string }
+  | {
+      state: 'head_moved';
+      head: string;
+      /**
+       * 新头是引擎自己同步主线换的（github 包 branchUpdateOf 凭账和合并提交认出来的，#3443）：工作流不停下，对新头重走 CI 和冷验收。
+       * 老历史里没有这个字段，当作没有（头是别人改的）。
+       */
+      syncedMain?: true;
+    }
   /** 自动合并被撤掉了（人撤的，或 GitHub 因为头变了撤的）：回去重新挂。 */
   | { state: 'unarmed' }
   /**
