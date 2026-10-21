@@ -4,7 +4,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
   closeInterruptedScheduleRuns,
   finishScheduleRun,
+  INTERRUPTED_SCHEDULE_STAGE_UNKNOWN,
   INTERRUPTED_SCHEDULE_WHY,
+  recordScheduleRunProgress,
   registerScheduledJobs,
   scheduleHealth,
   startScheduleRun,
@@ -59,7 +61,7 @@ describe('起来时补记进程中断没收尾的 schedule_runs（#1522）', () 
     const byId = new Map(rows.map((r) => [r.id, r]));
     expect(byId.get(oldId)).toMatchObject({
       outcome: 'failed',
-      why: INTERRUPTED_SCHEDULE_WHY,
+      why: `${INTERRUPTED_SCHEDULE_WHY}；${INTERRUPTED_SCHEDULE_STAGE_UNKNOWN}`,
       endedAt: ago(3 * 60 * MIN),
     });
     expect(byId.get(boundaryId)).toMatchObject({ outcome: null, endedAt: null });
@@ -95,6 +97,35 @@ describe('起来时补记进程中断没收尾的 schedule_runs（#1522）', () 
     const [open] = await t.db.select().from(scheduleRuns).where(eq(scheduleRuns.outcome, 'failed'));
     expect(open?.why).toContain('没收尾');
     expect(open?.endedAt).toEqual(ago(3 * 60 * MIN));
+  });
+
+  it('保留中断前最后一个持久阶段，身份、阶段和统计未知都不被补记伪造', async () => {
+    await registerScheduledJobs(t.db, [job('hourly-reconcile')]);
+    const id = await startScheduleRun(t.db, 'hourly-reconcile', ago(3 * 60 * MIN));
+    await recordScheduleRunProgress(t.db, {
+      id,
+      step: 'worktrees',
+      phase: 'start',
+      at: ago(2 * 60 * MIN),
+    });
+
+    expect(
+      await closeInterruptedScheduleRuns(t.db, {
+        jobs: [{ id: 'hourly-reconcile', startedBefore: ago(15 * MIN) }],
+        at: NOW,
+      }),
+    ).toEqual([id]);
+
+    const [row] = await t.db.select().from(scheduleRuns).where(eq(scheduleRuns.id, id));
+    expect(row).toMatchObject({
+      id,
+      startedAt: ago(3 * 60 * MIN),
+      endedAt: ago(3 * 60 * MIN),
+      outcome: 'failed',
+      scanned: null,
+      found: null,
+      why: `${INTERRUPTED_SCHEDULE_WHY}；在途阶段见证：run=${id} step=worktrees phase=start at=2026-09-25T10:00:00.000Z`,
+    });
   });
 
   it('不写为什么：抛，一行都不动', async () => {

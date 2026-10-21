@@ -34,10 +34,19 @@ export const GITHUB_RECONCILE_LOOKBACK_MS = 2 * 60 * 60_000;
  */
 export const GITHUB_RECONCILE_LOOKBACK_CAP_MS = 3 * 24 * 60 * 60_000;
 
-/** schedule_runs 的读写（真实现是 @fleet-dao/db 的 startScheduleRun / finishScheduleRun / closeInterruptedScheduleRuns）。 */
+/** schedule_runs 的读写（真实实现是 @fleet-dao/db 的 startScheduleRun / finishScheduleRun / closeInterruptedScheduleRuns）。 */
+export type ScheduleRunProgressPhase = 'start' | 'end' | 'failed' | 'skip';
+
+export interface ScheduleRunProgress {
+  step: string;
+  phase: ScheduleRunProgressPhase;
+}
+
 export interface ScheduleRunLog {
   start(job: string, at: Date): Promise<number>;
   finish(id: number, result: ScheduleResult, at: Date): Promise<void>;
+  /** 写进未结束的 schedule_runs；正常结局会覆盖它，中断补记会保留它。 */
+  progress?(id: number, progress: ScheduleRunProgress, at: Date): Promise<void>;
   /**
    * 超过 startedBefore 还没结束的补记成 failed（和引擎起来时同一份 closeInterruptedScheduleRuns）。
    * 写库失败照抛。没装这个入口时，巡检补记会记一条没补上，不当成补上了。

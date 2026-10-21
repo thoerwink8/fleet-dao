@@ -33,6 +33,7 @@ import {
   pullMergedAt,
   readPoolHoldsSetting,
   recordAlertFiling,
+  recordScheduleRunProgress,
   recordWorktreeCleanupDone,
   recordWorktreeCleanupStart,
   resolveAlertWithReason,
@@ -896,6 +897,7 @@ export function hourlyReconcileJob(
       runs: {
         start: (job, at) => startScheduleRun(w.db, job, at),
         finish: (id, result, at) => finishScheduleRun(w.db, id, result, at),
+        progress: (id, progress, at) => recordScheduleRunProgress(w.db, { id, ...progress, at }),
       },
       ...localOrphanWiring(w, now),
       poolHoldPush: () =>

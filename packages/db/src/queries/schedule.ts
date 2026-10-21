@@ -128,6 +128,40 @@ export const MASTER_OFF_SKIP_WHY = '引擎总开关关着，这一轮不跑：';
 
 /** 进程被发版或重启腰斩、已经记下开始却没人收尾时，起来补记写的原因。 */
 export const INTERRUPTED_SCHEDULE_WHY = '进程中断没收尾，启动时补记';
+/** 没有在途阶段见证的旧记录，不能猜它中断前走到了哪里。 */
+export const INTERRUPTED_SCHEDULE_STAGE_UNKNOWN = '中断前阶段未知';
+/** 进行中的阶段见证写在已有的 why 列，进程中断后由补记逻辑保留下来。 */
+export const SCHEDULE_PROGRESS_PREFIX = '在途阶段见证：';
+
+export type ScheduleProgressPhase = 'start' | 'end' | 'failed' | 'skip';
+
+export interface RecordScheduleRunProgressInput {
+  id: number;
+  step: string;
+  phase: ScheduleProgressPhase;
+  at: Date;
+}
+
+/**
+ * 在 schedule_runs 的未结束行上留下最后一个阶段见证。
+ * 复用 why 列避免为只读诊断再加表；正常 finish 会用真实结局覆盖它，进程中断时 closeInterrupted 会把它带进失败原因。
+ */
+export async function recordScheduleRunProgress(
+  db: Db,
+  input: RecordScheduleRunProgressInput,
+): Promise<void> {
+  if (!Number.isSafeInteger(input.id) || input.id < 1) throw new Error('阶段见证要有有效的定时任务编号');
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(input.step)) throw new Error('阶段见证的步骤名无效');
+  if (!['start', 'end', 'failed', 'skip'].includes(input.phase)) throw new Error('阶段见证的阶段状态无效');
+  if (Number.isNaN(input.at.getTime())) throw new Error('阶段见证要有有效时刻');
+  const why = `${SCHEDULE_PROGRESS_PREFIX}run=${input.id} step=${input.step} phase=${input.phase} at=${input.at.toISOString()}`;
+  const updated = await db
+    .update(scheduleRuns)
+    .set({ why })
+    .where(and(eq(scheduleRuns.id, input.id), isNull(scheduleRuns.endedAt)))
+    .returning({ id: scheduleRuns.id });
+  if (updated.length === 0) throw new Error(`没有这次进行中的定时任务记录：${input.id}`);
+}
 
 export interface CloseInterruptedScheduleRunsInput {
   /** 本进程会跑的任务，和各自的补记线：开始得比这早、还没结束的才补。 */
@@ -160,7 +194,7 @@ export async function closeInterruptedScheduleRuns(
     const ids: number[] = [];
     for (const job of input.jobs) {
       const open = await db
-        .select({ id: scheduleRuns.id, startedAt: scheduleRuns.startedAt })
+        .select({ id: scheduleRuns.id, startedAt: scheduleRuns.startedAt, why: scheduleRuns.why })
         .from(scheduleRuns)
         .where(
           and(
@@ -171,9 +205,18 @@ export async function closeInterruptedScheduleRuns(
         )
         .orderBy(asc(scheduleRuns.id));
       for (const row of open) {
+        const interruptedWhy = `${why}；${
+          row.why?.startsWith(SCHEDULE_PROGRESS_PREFIX) ? row.why : INTERRUPTED_SCHEDULE_STAGE_UNKNOWN
+        }`;
         const updated = await db
           .update(scheduleRuns)
-          .set({ endedAt: row.startedAt, outcome: 'failed', why })
+          .set({
+            endedAt: row.startedAt,
+            outcome: 'failed',
+            scanned: null,
+            found: null,
+            why: interruptedWhy,
+          })
           .where(and(eq(scheduleRuns.id, row.id), isNull(scheduleRuns.endedAt)))
           .returning({ id: scheduleRuns.id });
         for (const written of updated) ids.push(written.id);
