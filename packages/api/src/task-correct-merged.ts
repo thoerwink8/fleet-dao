@@ -116,6 +116,12 @@ export async function correctMerged(
   if (!deps.pulls) return fail('这个入口没接上 GitHub 只读，不能核真实合并');
   const readClosed = deps.workflows.closedTaskWorkflow;
   if (!readClosed) return fail('这个入口没接上 Temporal 只读核原 run（控制缺 closedTaskWorkflow）');
+  // 「最新一代」只能现查，不能回退成请求里的旧编号：没接上就拒绝，免得对陈旧代次执行
+  const latestOf = deps.workflows.runningTaskWorkflow;
+  if (!latestOf)
+    return fail(
+      '这个入口没接上最新一代工作流的查询（控制缺 runningTaskWorkflow），不能确认原 run 是最新一代',
+    );
 
   // —— 1. GitHub：真实已合并的精确 PR ——
   let rawPull: unknown;
@@ -148,9 +154,11 @@ export async function correctMerged(
   // —— 2. Temporal：原 run 已结束、是最新的一代、结果就是误记的 abandoned ——
   let closure: Awaited<ReturnType<typeof readClosed>>;
   try {
-    const latestId = deps.workflows.runningTaskWorkflow
-      ? await deps.workflows.runningTaskWorkflow({ owner: repo.owner, name: repo.name }, task.issueNumber)
-      : workflowId;
+    const latestId = await latestOf.call(
+      deps.workflows,
+      { owner: repo.owner, name: repo.name },
+      task.issueNumber,
+    );
     if (latestId !== workflowId)
       return fail(`这张单已经有更新的一代工作流 ${latestId}，原 ${workflowId} 不是最新，拒绝陈旧请求`);
     closure = await readClosed(workflowId, req.run);
@@ -202,6 +210,13 @@ export async function correctMerged(
       mergedAt: pull.merged_at,
       mergedBy: pull.merged_by?.login ?? null,
       baseRef: pull.base.ref,
+      baseRepo: pull.base.repo.full_name,
+      state: pull.state,
+      // 认定「这个 PR 指向这张单」用的标题和正文：整体进摘要，审计留原文（正文只截前 4000 字，完整性靠 bodySha256）
+      title: pull.title ?? null,
+      bodySha256: sha256(pull.body ?? null),
+      body: (pull.body ?? '').slice(0, 4000),
+      linksIssue: true,
     },
     workflow: { status: closure.status, closeTime: closure.closeTime ?? null, result: result.data },
   };

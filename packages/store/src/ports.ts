@@ -388,10 +388,14 @@ export function judgeMergedCorrection(
   const was = [...e.runIds].sort();
   if (now.length !== was.length || now.some((id, i) => id !== was[i]))
     return conflict('任务的 run 集合与预检时不一样（出现了新的运行），请重新预检');
+  // 持久 run 必须存在，且每一条都精确绑定请求的工作流和 Temporal run；缺字段不当成「对得上」
+  if (runs.length === 0) return conflict('任务没有持久的 run 记录，证明不了请求的 Temporal run 是它的原 run');
   if (runs.some((r) => r.workflowId !== undefined && r.workflowId !== input.workflowId))
     return conflict('任务有别的工作流（换代）的 run，不是同一代');
   if (runs.some((r) => r.temporalRunId !== undefined && r.temporalRunId !== input.temporalRunId))
     return conflict('任务有别的 Temporal run，请求的 run 不是它的原 run');
+  if (runs.some((r) => r.workflowId === undefined || r.temporalRunId === undefined))
+    return conflict('任务有 run 没记工作流编号或 Temporal run，绑定不上请求的 run');
   return { result: 'ok' };
 }
 

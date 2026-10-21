@@ -27,6 +27,8 @@ interface Options {
   executor?: 'engine' | 'local';
   extraRuns?: Record<string, unknown>[];
   runOverride?: Record<string, unknown>;
+  /** 这张任务一条 run 都没有。 */
+  noRuns?: boolean;
 }
 
 function data(opts: Options = {}): Partial<MemoryData> {
@@ -48,20 +50,24 @@ function data(opts: Options = {}): Partial<MemoryData> {
   // 只留这张任务自己的 run（样例里 #13 的别的 run 会干扰「无活 run」）
   d.segmentRuns = [
     ...(d.segmentRuns ?? []).filter((r) => r.taskId !== TASK && r.issueNumber !== 13),
-    {
-      id: RUN_ID,
-      segment: 'manual',
-      taskId: TASK,
-      issueNumber: 13,
-      model: 'opus-5.5',
-      startedAt: '2026-10-19T00:00:00.000Z',
-      endedAt: '2026-10-19T01:50:00.000Z',
-      outcome: 'done',
-      prNumber: 3137,
-      workflowId: WF,
-      temporalRunId: TEMPORAL_RUN,
-      ...opts.runOverride,
-    } as unknown as NonNullable<MemoryData['segmentRuns']>[number],
+    ...(opts.noRuns
+      ? []
+      : [
+          {
+            id: RUN_ID,
+            segment: 'manual',
+            taskId: TASK,
+            issueNumber: 13,
+            model: 'opus-5.5',
+            startedAt: '2026-10-19T00:00:00.000Z',
+            endedAt: '2026-10-19T01:50:00.000Z',
+            outcome: 'done',
+            prNumber: 3137,
+            workflowId: WF,
+            temporalRunId: TEMPORAL_RUN,
+            ...opts.runOverride,
+          } as unknown as NonNullable<MemoryData['segmentRuns']>[number],
+        ]),
     ...((opts.extraRuns ?? []) as unknown as NonNullable<MemoryData['segmentRuns']>),
   ];
   return d;
@@ -290,6 +296,25 @@ export function describeCorrectMergedContract(make: MakeStore): void {
         result: 'conflict',
         why: expect.stringContaining('换代'),
       });
+    });
+
+    it('持久 run 绑不上请求的 workflow / Temporal run：没有 run、缺 Temporal run、缺工作流编号都拒绝，任务不动', async () => {
+      const cases: [Options, string[], string][] = [
+        [{ noRuns: true }, [], '没有持久的 run'],
+        [{ runOverride: { temporalRunId: undefined } }, [RUN_ID], '没记工作流编号或 Temporal run'],
+        [{ runOverride: { workflowId: undefined } }, [RUN_ID], '没记工作流编号或 Temporal run'],
+      ];
+      for (const [opts, runIds, why] of cases) {
+        const store = await open(opts);
+        const key = input({ expected: { phase: 'abandoned', doing: DOING, updatedAt: UPDATED_AT, runIds } });
+        expect(await store.correctMergedAbandoned(key, entry())).toMatchObject({
+          result: 'conflict',
+          why: expect.stringContaining(why),
+        });
+        const facts = await store.readMergedCorrection({ repoId: IDS.repo, taskId: TASK, issueNumber: 13 });
+        expect(facts?.task.state).toBe('stopped');
+        expect(await auditsOf(store)).toEqual([]);
+      }
     });
 
     it('操作记录不是这张任务的受管纠正成功记录：拒绝，任务不动', async () => {

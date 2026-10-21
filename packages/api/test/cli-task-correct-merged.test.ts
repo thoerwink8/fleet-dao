@@ -104,6 +104,8 @@ interface Options {
   closure?: Partial<ClosedTaskWorkflow>;
   closureError?: Error;
   latestWorkflow?: string;
+  /** 控制端没接最新一代的查询（runningTaskWorkflow）。 */
+  noLatestLookup?: boolean;
   operator?: string | null;
 }
 
@@ -153,9 +155,13 @@ function setup(options: Options = {}) {
         async signal(workflowId: string, signal: TaskSignal) {
           signals.push({ workflowId, signal });
         },
-        async runningTaskWorkflow() {
-          return options.latestWorkflow ?? WF;
-        },
+        ...(options.noLatestLookup
+          ? {}
+          : {
+              async runningTaskWorkflow() {
+                return options.latestWorkflow ?? WF;
+              },
+            }),
         async closedTaskWorkflow() {
           if (options.closureError) throw options.closureError;
           return closure(currentClosure);
@@ -442,6 +448,47 @@ describe('fleet-api task correct-merged（#3114 反例）', () => {
     expect(task(h)?.state).toBe('stopped');
   });
 
+  it('控制端没接最新一代的查询：不回退成请求里的旧编号，预检和执行都拒绝', async () => {
+    const h = setup({ noLatestLookup: true });
+    expect(await h.run([...FLAGS, '--note', NOTE])).toBe(1);
+    expect(text(h)).toContain('不能确认原 run 是最新一代');
+    expect(task(h)?.state).toBe('stopped');
+    expect(h.correctCalls()).toBe(0);
+  });
+
+  it('关联用的 PR 标题 / 正文进证据：审计留原文和正文摘要，之后标题或正文变了不能冒充同一请求的幂等成功', async () => {
+    const h = setup();
+    await h.run([...FLAGS, ...(await preflight(h)), '--note', NOTE]);
+    const record = audits(h)[0];
+    expect(record?.after).toMatchObject({
+      evidence: {
+        pull: {
+          title: '任务收尾修复',
+          body: 'Refs #3114',
+          linksIssue: true,
+          state: 'closed',
+          baseRepo: 'thoerwink8/fleet-dao',
+        },
+      },
+    });
+    const after = record?.after as { evidence: { pull: { bodySha256: string } } };
+    expect(after.evidence.pull.bodySha256).toMatch(/^[0-9a-f]{64}$/);
+    // 标题和正文变了（仍然指向 #3114）：证据不同，拒绝，不再记
+    for (const changed of [{ title: '改了标题' }, { body: 'Refs #3114\n后来又补了一段' }]) {
+      h.changeEvidence(changed);
+      expect(await h.run([...FLAGS, '--note', NOTE]), JSON.stringify(changed)).toBe(1);
+      expect(text(h)).toContain('已做过受管纠正');
+    }
+    expect(audits(h)).toHaveLength(1);
+    // 预检之后标题变了：--seen 对不上
+    const fresh = setup();
+    const execute = await preflight(fresh);
+    fresh.changeEvidence({ title: '改了标题' });
+    expect(await fresh.run([...FLAGS, ...execute, '--note', NOTE])).toBe(1);
+    expect(text(fresh)).toContain('--seen 对不上');
+    expect(fresh.correctCalls()).toBe(0);
+  });
+
   it('换代：这张单已有更新一代的工作流 → 拒绝陈旧请求', async () => {
     const h = setup({ latestWorkflow: `${WF}:r2` });
     expect(await h.run([...FLAGS, '--note', NOTE])).toBe(1);
@@ -540,6 +587,7 @@ describe('fleet-api task correct-merged（#3114 反例）', () => {
       startedAt: '2026-10-19T04:30:00.000Z',
       endedAt: '2026-10-19T04:40:00.000Z',
       workflowId: WF,
+      temporalRunId: TEMPORAL_RUN,
     } as unknown as MemoryData['segmentRuns'][number]);
     expect(await a.run([...FLAGS, ...executeA, '--note', NOTE])).toBe(1);
     expect(text(a)).toContain('--seen 对不上');
