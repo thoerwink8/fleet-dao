@@ -381,13 +381,13 @@ export function describeCheckoutHistoryContract(name: string, make: MakeCheckout
 
     // #3067 真实形状：检出失败在 prepareCwd，之后会话照常跑完（outcome=done）；旧 run 没记 temporal_run_id；
     // runs 行比报警晚 46ms 才开始。
-    const REAL_3067_RUN: RunPatch = {
+    const REAL_3067_RUN = {
       outcome: 'done',
       failureReason: undefined,
       temporalRunId: undefined,
       startedAt: '2026-10-19T03:10:00.046Z',
       endedAt: '2026-10-19T03:40:00.000Z',
-    };
+    } as unknown as RunPatch;
     const real3067Input = () =>
       baseInput({
         temporalRunId: '',
