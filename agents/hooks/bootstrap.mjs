@@ -110,6 +110,19 @@ export function healthReasons({ home }) {
   if (source === null) {
     reasons.push('没有同步专用检出（~/.fleet-dao/origin-main，新办法才有），说明钩子是老办法装的');
   } else if (installed !== null) {
+    // 主线应装的文件集 = agents/hooks/ + 额外装的 _detach.mjs。这条映射和 packages/agents-sync/src/sync.ts 的 readHooks
+    // 是同一条（那边是 TS、没法静态 import 这个 .mjs，所以两处各写一份）：改一处必须改另一处。
+    if (source.has('background-launch.mjs')) {
+      try {
+        const detach = join(home, SYNC_REL, 'agents', 'local-sessions', 'detach.mjs');
+        source.set('_detach.mjs', readFileSync(detach, 'utf8').replace(/\r\n/g, '\n'));
+      } catch (err) {
+        reasons.push(
+          `主线的后台钩子依赖 agents/local-sessions/detach.mjs，专用检出里读不了（${err?.code ?? '读不了'}），装着的 _detach.mjs 没法核`,
+        );
+        source.set('_detach.mjs', installed.get('_detach.mjs'));
+      }
+    }
     const names = new Set([...source.keys(), ...installed.keys()]);
     const diff = [...names].filter((n) => source.get(n) !== installed.get(n)).sort();
     if (diff.length > 0)

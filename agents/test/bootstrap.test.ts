@@ -98,6 +98,35 @@ describe('是现在这一代：一个字不说、不同步', () => {
   });
 });
 
+describe('后台钩子额外装的 _detach.mjs（与 sync.ts 的 readHooks 同一条映射）', () => {
+  const withDetach = (installedDetach: string | null, mainDetach: string | null) => {
+    const home = currentMachine({ 'session-start.mjs': 'new\n', 'background-launch.mjs': 'bg\n' });
+    if (installedDetach !== null) write(join(home, '.fleet-dao', 'hooks', '_detach.mjs'), installedDetach);
+    if (mainDetach !== null)
+      write(join(home, '.fleet-dao', 'origin-main', 'agents', 'local-sessions', 'detach.mjs'), mainDetach);
+    return home;
+  };
+
+  it('装着的 _detach.mjs 与 local-sessions/detach.mjs 一致（CRLF 不算差）：不报', () => {
+    expect(lib.healthReasons({ home: withDetach('d\n', 'd\r\n') })).toEqual({ reasons: [] });
+  });
+
+  it('内容不同：报 _detach.mjs', () => {
+    const r = lib.healthReasons({ home: withDetach('old\n', 'd\n') }).reasons ?? [];
+    expect(r.join('；')).toMatch(/主线不一样（_detach\.mjs）/);
+  });
+
+  it('没装 _detach.mjs：报 _detach.mjs', () => {
+    const r = lib.healthReasons({ home: withDetach(null, 'd\n') }).reasons ?? [];
+    expect(r.join('；')).toMatch(/_detach\.mjs/);
+  });
+
+  it('故意造的失败：主线有 background-launch.mjs 却没有 detach.mjs：照实报出，不静默当一致', () => {
+    const r = lib.healthReasons({ home: withDetach('d\n', null) }).reasons ?? [];
+    expect(r.join('；')).toMatch(/agents\/local-sessions\/detach\.mjs/);
+  });
+});
+
 describe('发现旧钩子 → 说为什么 → 强制同步换新', () => {
   it('更老的一代：还挂着 fleet-guard 手装的，开会话钩子没登记到新位置', () => {
     const home = currentMachine();
