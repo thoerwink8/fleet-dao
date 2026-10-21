@@ -1,69 +1,59 @@
-// 首页按项目出卡（#2759）：一个仓一块。本周上线几版、在跑几张、卡住几张、当前里程碑。
-// 有问题的排前面。区块并排，里面只有行，不再套一层卡片（界面规范：最多两层容器）。
-import { cn } from '../../lib/utils';
-import { Section, SectionGrid } from '../layout/section';
-import { inkClass, type LayoutTone } from '../layout/tone';
+// 工作台「项目」（#2759，#3509 起是一张表）：一个仓一行。本周上线几版、在跑几张、卡住几张、当前里程碑。
+// 有问题的排前面；卡住的数标橙（颜色只给异常），本周上线、里程碑读不到写「没记」，不拿 0 顶。
+
+import { EmptyState } from '../layout/empty-state';
+import { Section } from '../layout/section';
+import { Table, type TableColumn } from '../layout/table';
+import { Tag } from '../layout/tag';
+import { Text } from '../layout/text';
 import { milestoneText, projectProblem, shippedText, sortProjects } from './projects';
 import type { HomeProject } from './types';
 
-function Fact({ label, value, tone }: { label: string; value: string; tone?: LayoutTone }) {
-  return (
-    <div className="min-w-0">
-      <dt className="text-meta text-muted-foreground">{label}</dt>
-      <dd className={cn('num mt-0.5 truncate text-body font-medium', tone && inkClass[tone])}>{value}</dd>
-    </div>
-  );
-}
+const COLUMNS: TableColumn<HomeProject>[] = [
+  {
+    key: 'repo',
+    title: '仓',
+    render: (_, p) => (
+      <span data-project={p.repo} data-problem={projectProblem(p) ? 'yes' : 'no'}>
+        <Text strong>{p.repo}</Text>
+      </span>
+    ),
+  },
+  {
+    key: 'shippedThisWeek',
+    title: '本周上线',
+    align: 'right',
+    render: (_, p) => shippedText(p.shippedThisWeek),
+  },
+  { key: 'running', title: '在跑', align: 'right', render: (_, p) => `${p.running} 张` },
+  {
+    key: 'stuck',
+    title: '卡住',
+    align: 'right',
+    render: (_, p) => (p.stuck > 0 ? <Tag tone="warning">{p.stuck} 张</Tag> : `${p.stuck} 张`),
+  },
+  { key: 'milestone', title: '里程碑', render: (_, p) => milestoneText(p.milestone) },
+];
 
-function ProjectCard({ project }: { project: HomeProject }) {
-  const problem = projectProblem(project);
-  const tone: LayoutTone | undefined =
-    project.stuck > 0 ? 'fail' : project.decisions > 0 ? 'human' : undefined;
-  return (
-    <Section
-      data-project={project.repo}
-      data-problem={problem ? 'yes' : 'no'}
-      title={project.repo}
-      {...(tone ? { tone } : {})}
-    >
-      <dl className="grid grid-cols-2 gap-3">
-        <Fact label="本周上线" value={shippedText(project.shippedThisWeek)} />
-        <Fact label="在跑" value={`${project.running} 张`} />
-        <Fact
-          label="卡住"
-          value={`${project.stuck} 张`}
-          {...(project.stuck > 0 ? { tone: 'fail' as const } : {})}
-        />
-        <Fact label="里程碑" value={milestoneText(project.milestone)} />
-      </dl>
-    </Section>
-  );
-}
-
-/** 每个仓一张。没给这一块（老后端）写明没给，不画成「还没有项目」。 */
+/** 每个仓一行。没给这一块（老后端）写明没给，不画成「还没有项目」。 */
 export function ProjectCards({ projects }: { projects: readonly HomeProject[] | undefined }) {
   if (projects === undefined) {
     return (
       <Section title="项目" data-project-cards="missing">
-        <p className="text-body text-muted-foreground">项目这一块没给</p>
+        <Text tone="muted">项目这一块没给</Text>
       </Section>
     );
   }
   if (projects.length === 0) {
     return (
       <Section title="项目" data-project-cards="empty">
-        <p className="text-body text-muted-foreground">还没有项目</p>
+        <EmptyState size="inline" title="还没有项目" />
       </Section>
     );
   }
-  const sorted = sortProjects(projects);
   return (
-    <div data-project-cards>
-      <SectionGrid cols={2}>
-        {sorted.map((project) => (
-          <ProjectCard key={project.id} project={project} />
-        ))}
-      </SectionGrid>
-    </div>
+    <Section flush title="项目" data-project-cards>
+      <Table caption="项目" columns={COLUMNS} rows={sortProjects(projects)} rowKey="id" />
+    </Section>
   );
 }

@@ -155,7 +155,7 @@ describe('顶栏环境切换器', () => {
 describe('选了远程环境：主页', () => {
   test('渲染它的快照：标题带环境名，顶上一条「本机 WSL … 报的，只读」，快照里的单子链接不指向本台', async () => {
     await mount(apiFor('fresh'), '/?node=wsl');
-    expect((await screen.findAllByText(/主页 · 本机 WSL/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/工作台 · 本机 WSL/)).length).toBeGreaterThan(0);
     await waitFor(() => expect(document.querySelector('[data-snapshot-banner]')).not.toBeNull());
     const banner = document.querySelector('[data-snapshot-banner]') as HTMLElement;
     expect(banner.getAttribute('data-snapshot-banner')).toBe('fresh');
@@ -168,14 +168,19 @@ describe('选了远程环境：主页', () => {
       expect(href.startsWith('/tasks/') || href.startsWith('/notifications'), href).toBe(false);
     }
     // 要你拍的：去答按钮置灰、说明去那台上
-    for (const b of main.querySelectorAll('[data-remote-disabled]')) {
-      expect((b as HTMLButtonElement).disabled).toBe(true);
+    await waitFor(() =>
+      expect(main.querySelectorAll('[data-home-block="ask"] button').length).toBeGreaterThan(0),
+    );
+    for (const b of main.querySelectorAll('[data-home-block="ask"] button')) {
+      expect(b.getAttribute('aria-disabled')).toBe('true');
     }
+    // 看门狗的卡是本台通知里的：远程快照里写只在本台看
+    expect(main.querySelector('[data-home-block="alarm"]')?.textContent).toContain('卡住报警只在本台看');
   });
 
   test('【故意造出的失败】失联的（12 分钟前最后一次报）：横幅写失联多久、说不是现在的，顶栏标「失联」', async () => {
     await mount(apiFor('stale'), '/?node=wsl');
-    await screen.findAllByText(/主页 · 本机 WSL/);
+    await screen.findAllByText(/工作台 · 本机 WSL/);
     await waitFor(() => expect(document.querySelector('[data-snapshot-banner]')).not.toBeNull());
     const banner = document.querySelector('[data-snapshot-banner]') as HTMLElement;
     expect(banner.getAttribute('data-snapshot-banner')).toBe('stale');
@@ -196,7 +201,7 @@ describe('选了远程环境：主页', () => {
 
   test('提醒铃铛是本台的数据：看远程环境时不露出来，切回本台才有', async () => {
     await mount(apiFor('fresh'), '/?node=wsl');
-    await screen.findAllByText(/主页 · 本机 WSL/);
+    await screen.findAllByText(/工作台 · 本机 WSL/);
     expect(screen.queryByRole('button', { name: /^提醒/ })).toBeNull();
     cleanup();
     await mount(apiFor('fresh'), '/');

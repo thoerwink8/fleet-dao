@@ -85,10 +85,13 @@ export function ListRow({
   defaultOpen = false,
   details,
   tall = false,
+  wrapTrailing = false,
   className,
   children,
   ...rest
 }: {
+  /** 行尾放的是按钮这类宽东西：手机上行尾整块落到文字下面，标题不截断、换行写全（工作台「要你拍的」，不再把文字挤成一条缝）。 */
+  wrapTrailing?: boolean | undefined;
   /** 两行的行（主行一行加一行小字）：行高取 row-tall（标准 48、紧凑 40），和 RowFrame tall 同高（任务列表，#1919）。 */
   tall?: boolean | undefined;
   /** 行首：状态点、图标。 */
@@ -121,8 +124,10 @@ export function ListRow({
   const body = summary ?? (
     <>
       {leading}
-      <span className="min-w-0 flex-1">
-        {title ? <span className="block truncate text-body">{title}</span> : null}
+      <span className={cn('min-w-0 flex-1', wrapTrailing && 'max-md:basis-full')}>
+        {title ? (
+          <span className={cn('block text-body', wrapTrailing ? 'break-words' : 'truncate')}>{title}</span>
+        ) : null}
         {meta ? <span className="block">{meta}</span> : null}
       </span>
       {trailing}
@@ -131,6 +136,7 @@ export function ListRow({
   const rowClass = cn(
     rowBase,
     tall ? rowHeight.tall : rowHeight.single,
+    wrapTrailing && 'max-md:flex-wrap max-md:py-2',
     (expandable || href || onClick) && rowHover,
     // 选中照 Arco（fd3 `.pick.on`、`tr.sel`）：只换 brand-1 底，不另画竖线
     selected && 'bg-brand-1 hover:bg-brand-1',

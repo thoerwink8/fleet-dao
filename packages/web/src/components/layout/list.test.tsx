@@ -88,4 +88,18 @@ describe('ListRow', () => {
     );
     expect(document.querySelector('[data-row-rail]')).toBeNull();
   });
+
+  test('wrapTrailing：行尾是按钮时，手机上落到文字下面，标题不截断', () => {
+    render(
+      <List>
+        <ListRow wrapTrailing title="一个很长的标题" meta="说明" trailing={<span>按钮</span>} />
+        <ListRow title="普通行" trailing={<span>时间</span>} />
+      </List>,
+    );
+    const wrapped = screen.getByText('一个很长的标题');
+    expect(wrapped.className).toContain('break-words');
+    expect(wrapped.className).not.toContain('truncate');
+    expect(wrapped.parentElement?.parentElement?.className).toContain('max-md:flex-wrap');
+    expect(screen.getByText('普通行').className).toContain('truncate');
+  });
 });

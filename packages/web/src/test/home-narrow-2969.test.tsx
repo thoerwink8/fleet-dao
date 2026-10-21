@@ -39,7 +39,8 @@ async function ready() {
   await waitFor(() =>
     expect(screen.getByRole('button', { name: '刷新' }).getAttribute('aria-busy')).toBe('false'),
   );
-  await waitFor(() => expect(document.querySelector('[data-health-strip]')).toBeTruthy());
+  // 系统状态读到了（健康条不再挤在页头，放进「系统状态」那一块）
+  await waitFor(() => expect(screen.getByText('引擎进程')).toBeTruthy());
   await waitFor(() =>
     expect(screen.getByRole('button', { name: '三步法' }).getAttribute('aria-pressed')).toBe('true'),
   );
@@ -57,13 +58,12 @@ describe('窄屏页头结构', () => {
       expect(header().className).toContain('max-md:flex-col');
       expect(header().className).not.toMatch(/(^|\s)flex-col(\s|$)/);
       const sw = document.querySelector('[data-flow-mode-switch]') as HTMLElement;
-      const health = document.querySelector('[data-health-strip-box]') as HTMLElement;
       const refresh = document.querySelector('[data-refresh-bar]') as HTMLElement;
       expect(bar.contains(sw)).toBe(true);
-      expect(bar.contains(health)).toBe(true);
       expect(bar.contains(refresh)).toBe(true);
-      expect(health.contains(document.querySelector('[data-health-strip]'))).toBe(true);
-      expect(bar.contains(screen.getByRole('heading', { name: '主页' }))).toBe(false);
+      expect(bar.contains(screen.getByRole('heading', { level: 1, name: '工作台' }))).toBe(false);
+      // 页头只剩开关和刷新：状态不再叠在页头里
+      expect(bar.textContent).not.toContain('引擎进程');
       // 两个选择和刷新都还在，名字没被收掉
       expect(screen.getByRole('button', { name: '全程' })).toBeTruthy();
       expect(screen.getByRole('button', { name: '刷新' })).toBeTruthy();
@@ -121,7 +121,7 @@ describe('窄屏上切换、刷新、读失败仍在', () => {
     fireEvent.click(screen.getByRole('button', { name: '刷新' }));
     expect(refetch).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(home.mock.calls.length).toBe(before + 1));
-    expect(document.querySelector('[data-health-strip]')).toBeTruthy();
+    expect(screen.getByText('引擎进程')).toBeTruthy();
     expect(screen.getByRole('button', { name: '全程' })).toBeTruthy();
   });
 
@@ -130,13 +130,15 @@ describe('窄屏上切换、刷新、读失败仍在', () => {
     const api = createMockApi({ live: false });
     api.home = () => Promise.reject(new ApiError(500, 'internal', '后端出错了'));
     renderApp(<HomePage />, { api });
-    const alert = await screen.findByRole('alert');
-    expect(alert.textContent).toContain('主页没读成');
-    expect(alert.textContent).toContain('后端出错了');
-    expect(screen.getByRole('button', { name: '重试' })).toBeTruthy();
+    const alerts = await screen.findAllByRole('alert');
+    const alert = alerts.find((a) => a.textContent?.includes('主页没读成'));
+    expect(alert?.textContent).toContain('后端出错了');
+    expect(screen.getAllByRole('button', { name: '重试' }).length).toBeGreaterThan(0);
     expect(actions().contains(document.querySelector('[data-flow-mode-switch]'))).toBe(true);
     expect(actions().contains(document.querySelector('[data-refresh-bar]'))).toBe(true);
-    expect(document.querySelector('[data-health-strip]')).toBeNull();
+    // 没读到系统状态就不画「引擎进程 运行中」这类状态，也不画额度和估算的数
+    expect(screen.queryByText('引擎进程')).toBeNull();
+    expect(document.querySelector('[data-spend-line]')).toBeNull();
     expect(screen.getByRole('button', { name: '刷新' })).toBeTruthy();
   });
 });

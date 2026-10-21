@@ -17,27 +17,30 @@ test.describe('主页三块', () => {
   }) => {
     const notes = (await api.get('/api/notifications?status=open&limit=200')) as Notifications;
     const home = (await api.get('/api/home')) as Home;
-    const asks = notes.items.filter(
-      (n) =>
-        (n.level === 'decision' && !n.answer) ||
-        (n.level === 'alert' && n.dedupeKey?.startsWith('watchdog:')),
-    );
+    const asks = notes.items.filter((n) => n.level === 'decision' && !n.answer);
+    const alarms = notes.items.filter((n) => n.level === 'alert' && n.dedupeKey?.startsWith('watchdog:'));
     await page.goto('/');
-    await expect(page.getByRole('heading', { level: 1, name: '主页' })).toBeVisible();
+    await expect(page.getByRole('heading', { level: 1, name: '工作台' })).toBeVisible();
     const blocks = page.locator('[data-home-block]');
-    await expect(blocks).toHaveCount(3);
+    await expect(blocks).toHaveCount(4);
+    // 左列要你拍的、在跑的任务，右列卡住报警、最近上线
     expect(await blocks.evaluateAll((els) => els.map((e) => e.getAttribute('data-home-block')))).toEqual([
       'ask',
       'run',
+      'alarm',
       'shipped',
     ]);
 
     const ask = page.locator('[data-home-block="ask"]');
     if (asks.length === 0) await expect(ask).toContainText('没有要你拍的');
     else await expect(ask.locator('[data-ask-row]')).toHaveCount(asks.length);
-    // 别的卡住报警（不是看门狗报的）不进主页
+    const alarm = page.locator('[data-home-block="alarm"]');
+    if (alarms.length === 0) await expect(alarm).toContainText('没有卡住报警');
+    else await expect(alarm.locator('[data-ask-row]')).toHaveCount(alarms.length);
+    // 别的卡住报警（不是看门狗报的）不进工作台
     for (const n of notes.items.filter((x) => x.level === 'alert' && !x.dedupeKey?.startsWith('watchdog:'))) {
       await expect(ask).not.toContainText(n.title);
+      await expect(alarm).not.toContainText(n.title);
     }
 
     const run = page.locator('[data-home-block="run"]');

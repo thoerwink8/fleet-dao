@@ -20,14 +20,9 @@ type HeaderGeometry = {
   overlap: boolean;
   sameRow: boolean;
   actionsPastMain: boolean;
-  hitHealth: boolean;
   hitRefresh: boolean;
   hitFlow: boolean;
   titleText: string;
-};
-
-type DetailGeometry = {
-  items: { text: string; font: number; overlaps: boolean; inside: boolean }[];
 };
 
 // 字符串送进浏览器：函数里的类型注解会被原样带过去，浏览器解析不了。
@@ -78,35 +73,13 @@ const HEADER_JS = `(() => {
       Math.min(tb.bottom, ab.bottom) - Math.max(tb.top, ab.top) > 1,
     sameRow: tb.top < ab.bottom - 1 && ab.top < tb.bottom - 1 && tb.left < ab.left,
     actionsPastMain: ab.right > mb.right + 1 || ab.left < mb.left - 1,
-    hitHealth: hit(document.querySelector('[data-health-strip]')),
     hitRefresh: hit(document.querySelector('[data-refresh-bar] button')),
     hitFlow: flowButtons.length > 0 && flowButtons.every((el) => hit(el)),
     titleText: h1.textContent ?? '',
   };
 })()`;
 
-const DETAIL_JS = `(() => {
-  const h1 = document.querySelector('[data-page-titlebar] h1');
-  const hr = h1 instanceof HTMLElement ? h1.getBoundingClientRect() : null;
-  const vw = window.innerWidth;
-  const vh = window.innerHeight;
-  const items = [...document.querySelectorAll('[data-health-detail]')].flatMap((el) => {
-    if (!(el instanceof HTMLElement)) return [];
-    const r = el.getBoundingClientRect();
-    if (r.width < 1 || r.height < 1) return [];
-    return [{
-      text: el.textContent ?? '',
-      font: parseFloat(getComputedStyle(el).fontSize),
-      overlaps: hr !== null &&
-        Math.min(hr.right, r.right) - Math.max(hr.left, r.left) > 1 &&
-        Math.min(hr.bottom, r.bottom) - Math.max(hr.top, r.top) > 1,
-      inside: r.left >= -1 && r.right <= vw + 1 && r.top >= -1 && r.bottom <= vh + 1,
-    }];
-  });
-  return { items };
-})()`;
-
-/** 远程首页页头：短标题一行放完，长状态说明还在版面上、不盖住标题、不把页面撑出横向滚动。 */
+/** 远程工作台页头：短标题一行放完，不盖住操作区、不把页面撑出横向滚动。 */
 async function remoteHeaderLayout(page: Page): Promise<HeaderGeometry> {
   const g = await page.evaluate(HEADER_JS);
   if (!g) throw new Error('页头量不到');
@@ -180,13 +153,17 @@ test.describe('看板多机', () => {
     page,
   }) => {
     await page.goto('/?node=wsl');
-    await expect(page.getByRole('heading', { name: new RegExp(`主页 · ${WSL}`) })).toBeVisible();
+    await expect(page.getByRole('heading', { name: new RegExp(`工作台 · ${WSL}`) })).toBeVisible();
     await expect(page.locator('[data-snapshot-banner]')).toContainText('报的，只读');
     await expect(page.locator('[data-home-block="run"]')).toBeVisible();
     await expect(page.locator('[data-home-block="shipped"]')).toContainText('上线记录只在本台看');
+    await expect(page.locator('[data-home-block="alarm"]')).toContainText('卡住报警只在本台看');
     expect(await page.locator('main a[href^="/tasks/"]').count()).toBe(0);
     expect(await page.locator('main a[href^="/notifications"]').count()).toBe(0);
-    for (const b of await page.locator('[data-remote-disabled]').all()) await expect(b).toBeDisabled();
+    // 要你拍的去答置灰（aria-disabled，悬停写要去那台上答）
+    for (const b of await page.locator('[data-home-block="ask"] button').all()) {
+      await expect(b).toHaveAttribute('aria-disabled', 'true');
+    }
   });
 
   test('切到远程：画布渲染它的快照，顶上写「报的，只读」；单子链接是 GitHub 链接，去答置灰；铃铛不露出来', async ({
@@ -244,9 +221,9 @@ test.describe('看板多机', () => {
     await expect(banner).toContainText('失联 10 分钟');
     await expect(banner).toContainText('不是现在的');
     await expect(trigger).toContainText('失联');
-    // 长健康说明和远程标题挤在同一行时，标题列至少留得下一整行，说明收进「状态」或截在自己的格子里，不改失联文案。
+    // 远程标题（「工作台 · 演练 WSL」）在桌面一行放完，操作区（流程开关、刷新）不盖住它。
     const g = await remoteHeaderLayout(page);
-    expect(g.titleText, `${g.vw} 标题`).toContain(`主页 · ${WSL}`);
+    expect(g.titleText, `${g.vw} 标题`).toContain(`工作台 · ${WSL}`);
     expect(
       g.titleLines,
       `${g.vw} 标题行数（列宽 ${Math.round(g.titleHave)}，一行要 ${Math.round(g.titleNeed)}）`,
@@ -258,29 +235,11 @@ test.describe('看板多机', () => {
     expect(g.overlap, `${g.vw} 标题和操作区重叠`).toBe(false);
     expect(g.sameRow, `${g.vw} 标题和操作区不在同一行`).toBe(true);
     expect(g.actionsPastMain, `${g.vw} 操作区超出正文`).toBe(false);
-    expect(g.hitHealth, `${g.vw} 状态点不着`).toBe(true);
     expect(g.hitRefresh, `${g.vw} 刷新点不着`).toBe(true);
     expect(g.hitFlow, `${g.vw} 流程开关点不着`).toBe(true);
-    let details = (await page.evaluate(DETAIL_JS)) as DetailGeometry;
-    let openedMenu = false;
-    if (details.items.length === 0) {
-      await page.locator('[data-health-menu]').click();
-      await expect(page.locator('[data-health-detail]').first()).toBeVisible();
-      details = (await page.evaluate(DETAIL_JS)) as DetailGeometry;
-      openedMenu = true;
-    }
-    const longest = details.items.reduce((m, item) => Math.max(m, item.text.length), 0);
-    expect(longest, `${g.vw} 长状态消息还在`).toBeGreaterThanOrEqual(16);
-    for (const item of details.items) {
-      // 辅助说明用 text-meta：Arco 一套里中文最小 12（docs/design/驾驶舱界面.md 2.2 节，#3509），原来的 14 是旧档位
-      expect(item.font, `${g.vw} 状态说明字号「${item.text}」`).toBeGreaterThanOrEqual(12);
-      expect(item.overlaps, `${g.vw} 状态说明盖住标题「${item.text}」`).toBe(false);
-      expect(item.inside, `${g.vw} 状态说明超出屏幕「${item.text}」`).toBe(true);
-    }
-    if (openedMenu) {
-      await page.keyboard.press('Escape');
-      await expect(page.locator('[data-slot="popover-content"]')).toHaveCount(0);
-    }
+    // 健康条不在页头了：系统状态（流水线、中转、引擎进程）写在页里「系统状态」那一块，带着那台快照里的说明
+    await expect(page.getByText('系统状态')).toBeVisible();
+    await expect(page.getByText('引擎进程')).toBeVisible();
     await trigger.click();
     await expect(page.locator('[data-node-item="wsl"]')).toHaveAttribute('data-node-state', 'stale');
     await shot(page, '07c-失联');
