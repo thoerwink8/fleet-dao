@@ -283,34 +283,6 @@ export function decideRun(input: {
   return { kind: 'refuse', code: REFUSED_FULL_RUN, lines: refuseLines(selection.local) };
 }
 
-/**
- * 仓根 package.json 这次只是在 scripts 里新加了命令（已有的脚本、依赖、别的字段一字没动）：不算根配置改动。
- * 新加一条脚本不会改变任何包已有的行为，可 ROOT_CONFIG_FILES 一碰 package.json 就判所有包受影响，引擎自测的受影响包
- * 要跑完全部（实测超 30 分钟）。读不出、不是 JSON、别的字段有一点不同，都返回 false（照原判法全跑）。
- */
-export function onlyAddsScripts(base: string, now: string): boolean {
-  try {
-    const a = JSON.parse(base) as Record<string, unknown>;
-    const b = JSON.parse(now) as Record<string, unknown>;
-    const { scripts: sa, ...restA } = a;
-    const { scripts: sb, ...restB } = b;
-    if (typeof sa !== 'object' || sa === null || typeof sb !== 'object' || sb === null) return false;
-    if (JSON.stringify(restA) !== JSON.stringify(restB)) return false;
-    const was = sa as Record<string, unknown>;
-    const is = sb as Record<string, unknown>;
-    return Object.keys(was).every((k) => k in is && is[k] === was[k]);
-  } catch {
-    return false;
-  }
-}
-
-function packageJsonOnlyAddsScripts(deps: TestChangedDeps): boolean {
-  const now = deps.readText?.('package.json');
-  if (now === undefined) return false;
-  const base = deps.git(['show', `${BASE}:package.json`]);
-  return base.status === 0 && !base.error && onlyAddsScripts(base.stdout, now);
-}
-
 export interface TestChangedDeps {
   argv: readonly string[];
   env: Readonly<Record<string, string | undefined>>;
@@ -318,8 +290,6 @@ export interface TestChangedDeps {
   graph: () => PackageGraph | string;
   /** 改到的文档谁读（不给就照 CI 每次都跑的整份带上 agents/test/）。 */
   docReaders?: DocReaders | undefined;
-  /** 读工作树里的文件（仓内相对路径），读不到是 undefined。不给就不认「package.json 只新加了脚本」（onlyAddsScripts）。 */
-  readText?: ((path: string) => string | undefined) | undefined;
   /** 跑 vitest（参数不含 vitest 本身）：回退出码；被信号杀掉 status 是 null；起不来 error 有值。 */
   vitest: (args: string[]) => { status: number | null; signal?: string | null; error?: Error | undefined };
   out: (line: string) => void;
@@ -343,15 +313,8 @@ export function testChanged(deps: TestChangedDeps): number {
     deps.err(`test:changed 没跑成：${e.message}`);
     return 2;
   }
-  const scriptsOnly = changed.includes('package.json') && packageJsonOnlyAddsScripts(deps);
-  const selection = selectTests(
-    scriptsOnly ? changed.filter((f) => f !== 'package.json') : changed,
-    deps.graph(),
-    deps.docReaders,
-  );
+  const selection = selectTests(changed, deps.graph(), deps.docReaders);
   deps.out(`和 ${BASE} 比改了 ${changed.length} 个文件（含没提交的）`);
-  if (scriptsOnly)
-    deps.out('- package.json 只在 scripts 里新加了命令（已有的没动）：不算根配置改动，不因它全跑');
   for (const reason of selection.reasons) deps.out(`- ${reason}`);
   if (selection.ciOnly.length > 0) deps.out(`CI 另外还跑（这里不跑）：${selection.ciOnly.join('、')}`);
   const decision = decideRun({

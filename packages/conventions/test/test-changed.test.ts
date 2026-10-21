@@ -25,7 +25,6 @@ import {
   ENGINE_SESSION_MARKER,
   type GitRun,
   LOCAL_ALWAYS_TESTS,
-  onlyAddsScripts,
   REFUSED_FULL_RUN,
   SKILL_POINTERS_TEST,
   selectTests,
@@ -71,14 +70,9 @@ function run(
     graph?: PackageGraph | string;
     docReaders?: Parameters<typeof testChanged>[0]['docReaders'];
     vitest?: () => VitestResult;
-    /** 根 package.json：base 是 origin/main 上的，now 是工作树里的。 */
-    packageJson?: { base: string; now: string };
   } = {},
 ) {
-  const { git } = fakeGit({
-    committed: { stdout: changed.map((f) => `${f}\0`).join('') },
-    ...(opts.packageJson ? { show: { stdout: opts.packageJson.base } } : {}),
-  });
+  const { git } = fakeGit({ committed: { stdout: changed.map((f) => `${f}\0`).join('') } });
   const out: string[] = [];
   const err: string[] = [];
   const vitestCalls: string[][] = [];
@@ -88,7 +82,6 @@ function run(
     git,
     graph: () => opts.graph ?? GRAPH,
     docReaders: opts.docReaders,
-    readText: (path) => (path === 'package.json' ? opts.packageJson?.now : undefined),
     vitest: (args) => {
       vitestCalls.push(args);
       return opts.vitest?.() ?? { status: 0 };
@@ -98,52 +91,6 @@ function run(
   });
   return { code, out, err, vitestCalls };
 }
-
-describe('根 package.json 只新加脚本：不算根配置改动，不因它全跑', () => {
-  const pkg = (scripts: Record<string, string>, extra: Record<string, unknown> = {}) =>
-    JSON.stringify({ name: 'x', scripts, ...extra });
-
-  it('onlyAddsScripts：只新加脚本才算；改了、删了已有脚本，依赖或别的字段有变，读不出都不算', () => {
-    const base = pkg({ a: '1', b: '2' }, { devDependencies: { v: '1' } });
-    expect(onlyAddsScripts(base, pkg({ a: '1', b: '2', c: '3' }, { devDependencies: { v: '1' } }))).toBe(
-      true,
-    );
-    expect(onlyAddsScripts(base, base)).toBe(true);
-    expect(onlyAddsScripts(base, pkg({ a: '1', b: '9' }, { devDependencies: { v: '1' } }))).toBe(false);
-    expect(onlyAddsScripts(base, pkg({ a: '1' }, { devDependencies: { v: '1' } }))).toBe(false);
-    expect(onlyAddsScripts(base, pkg({ a: '1', b: '2', c: '3' }, { devDependencies: { v: '2' } }))).toBe(
-      false,
-    );
-    expect(
-      onlyAddsScripts(base, pkg({ a: '1', b: '2' }, { devDependencies: { v: '1' }, type: 'module' })),
-    ).toBe(false);
-    expect(onlyAddsScripts(base, '{坏的')).toBe(false);
-    expect(onlyAddsScripts('', base)).toBe(false);
-    expect(onlyAddsScripts('{}', '{}')).toBe(false);
-  });
-
-  it('只新加脚本：package.json 不触发全跑，只按别的改动选；说明打在输出里', () => {
-    const packageJson = { base: pkg({ a: '1' }), now: pkg({ a: '1', b: '2' }) };
-    const { code, out, vitestCalls } = run(['package.json', 'packages/conventions/src/specs-index.ts'], {
-      packageJson,
-    });
-    expect(code).toBe(0);
-    expect(out.join('\n')).toContain('只在 scripts 里新加了命令');
-    expect(out.join('\n')).not.toContain('所有包都受影响');
-    expect(vitestCalls[0]).toContain('packages/conventions/');
-    expect(vitestCalls[0]).not.toContain('packages/agents-sync/');
-    expect(vitestCalls[0]).not.toContain('agents/');
-  });
-
-  it('改了已有脚本、或没给读工作树的办法：照原判法，根配置全跑', () => {
-    const changed = ['package.json', 'packages/conventions/src/specs-index.ts'];
-    const edited = run(changed, { packageJson: { base: pkg({ a: '1' }), now: pkg({ a: '2' }) } });
-    expect(edited.out.join('\n')).toContain('所有包都受影响');
-    expect(edited.code).toBe(REFUSED_FULL_RUN);
-    const noRead = run(changed, {});
-    expect(noRead.out.join('\n')).toContain('所有包都受影响');
-  });
-});
 
 describe('改了哪些文件', () => {
   it('提交了的（和 origin/main 分叉以来，三个点）+ 暂存 + 没暂存 + 没跟踪，去重排序；-z 原样读中文名和空格', () => {

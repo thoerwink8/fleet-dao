@@ -35,7 +35,6 @@ const code = testChanged({
   git,
   graph: () => readGraph(repo),
   docReaders: (docs) => docReaders(repo, docs),
-  readText: (path) => repo.read(path),
   vitest(args) {
     const vitest = join(root, 'node_modules', 'vitest', 'vitest.mjs');
     if (!existsSync(vitest)) return { status: null, error: new Error(`找不到 ${vitest}：先 pnpm install`) };

@@ -451,13 +451,6 @@ export const PATH_RULES: readonly Rule[] = [
     why: '推前钩子调卫生检查、查认领（agents 的测试直接跑这个钩子）',
   },
   { match: under('docs/'), units: [], why: '文档' },
-  // 方案索引 specs/README.md 由各目录主文件头部生成，conventions 的 specs-index.test.ts 拿真仓核对；只改各份方案仍当纯文档
-  // （CI 一律全套照样跑那条测试，本机 pnpm check 另有 specs:index --check 一步）。
-  {
-    match: exact('specs/README.md'),
-    units: ['conventions'],
-    why: 'specs-index.test.ts 核对索引和各目录头部一致（pnpm specs:index 重新生成）',
-  },
   { match: under('specs/'), units: [], why: '需求文档' },
   { match: exact('README.md'), units: [], why: '文档' },
   { match: under('.github/ISSUE_TEMPLATE/'), units: [], why: 'GitHub 上开单的表单，测试不读' },
