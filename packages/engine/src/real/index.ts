@@ -43,6 +43,7 @@ import {
   recordPrHeadFiles,
   recordRouteProbeDone,
   recordRouteProbeStart,
+  recordScheduleRunsShutdown,
   recordWorktreeRemoval,
   resolveAlertIfUnchangedSince,
   routeProbeAuditRows,
@@ -882,6 +883,8 @@ export function realPortsFromEnv(
   recordSkippedRun(jobId: string, why: string): Promise<void>;
   /** 定时器起之前：超过一轮工作上限还没结束的 schedule_runs 补记成 failed（#1522）。写库失败照抛。 */
   closeInterruptedScheduleRuns: InterruptedScheduleClose;
+  /** 停机宽限到了还没回的定时任务：在本进程开始的未结束行上留「退出时仍在跑」见证，不结束这一行（jobs/timers.ts 的 recordUnfinished）。 */
+  recordUnfinishedScheduleRuns(jobIds: readonly string[], since: Date, at: Date): Promise<void>;
   close(): Promise<void>;
   stateDir: string;
   /** 排空要的几样（drain-control.ts）：读发布脚本的排空请求、查发布锁、到点停会话、报提醒。 */
@@ -1419,6 +1422,9 @@ export function realPortsFromEnv(
       await finishScheduleRun(db, id, { outcome: 'partial', why }, at);
     },
     closeInterruptedScheduleRuns: (input) => closeInterruptedScheduleRunsInDb(db, input),
+    recordUnfinishedScheduleRuns: async (jobIds, since, at) => {
+      await recordScheduleRunsShutdown(db, { jobs: jobIds, since, at });
+    },
     jobLastStartedAt: async () =>
       new Map(
         (await scheduleHealth(db)).flatMap((h) =>

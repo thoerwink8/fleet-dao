@@ -270,6 +270,40 @@ describe('一轮（runHourlyReconcileJob，不起 Temporal）', () => {
     expect(h.progressed).toContainEqual({ id: 7, step: 'worktrees', phase: 'start' });
   });
 
+  it('持久阶段见证写不进：只记 warn，步骤和真正的报错不变（失败不被记成 ok，也不被见证的错盖掉）', async () => {
+    const h = harness({
+      listDir: async () => {
+        throw new Error('EACCES: 故意造的');
+      },
+      alerts: {
+        ...harness().deps.alerts,
+        listOpen: async () => {
+          throw new Error('库连不上');
+        },
+      },
+    });
+    h.deps.runs.progress = async () => {
+      throw new Error('见证库写不进');
+    };
+    await expect(runHourlyReconcileJob(h.deps)).rejects.toMatchObject({
+      name: 'HourlyReconcileFailedError',
+      runId: 7,
+      message: expect.stringContaining('EACCES'),
+    });
+    expect(h.finished[0]?.result).toMatchObject({ outcome: 'failed' });
+    expect(h.logs.some((l) => l.startsWith('warn:') && l.includes('持久阶段见证没写进'))).toBe(true);
+  });
+
+  it('持久阶段见证写不进，别的都正常：这一轮照常跑完，不因为见证失败变成 failed', async () => {
+    const h = harness();
+    h.deps.runs.progress = async () => {
+      throw new Error('见证库写不进');
+    };
+    expect(await runHourlyReconcileJob(h.deps)).toMatchObject({
+      outcome: expect.not.stringMatching(/failed/),
+    });
+  });
+
   it('根下什么都没有：记 unscanned、写明为什么', async () => {
     const h = harness({ listDir: async () => [] });
     expect(await runHourlyReconcileJob(h.deps)).toMatchObject({ outcome: 'unscanned', scanned: 0, found: 0 });

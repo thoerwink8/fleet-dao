@@ -243,7 +243,17 @@ async function markStep(
   phase: StepPhase,
   ms?: number,
 ): Promise<void> {
-  await deps.runs.progress?.(runId, { step, phase: phase as ScheduleRunProgressPhase }, deps.now());
+  // 见证只是诊断：写不进不能让这一步（或它真正的报错）变样，记一条日志；这一行的见证停在上一笔，不假装更新过
+  try {
+    await deps.runs.progress?.(runId, { step, phase: phase as ScheduleRunProgressPhase }, deps.now());
+  } catch (err) {
+    deps.log('warn', `每小时对账：子步骤 ${step} 的持久阶段见证没写进 schedule_runs`, {
+      runId,
+      step,
+      phase,
+      error: errMessage(err),
+    });
+  }
   const word =
     phase === 'start' ? '开始' : phase === 'end' ? '结束' : phase === 'failed' ? '失败' : '缺省跳过';
   const fields: Record<string, unknown> = { runId, step, phase };

@@ -7,7 +7,9 @@ import {
   INTERRUPTED_SCHEDULE_STAGE_UNKNOWN,
   INTERRUPTED_SCHEDULE_WHY,
   recordScheduleRunProgress,
+  recordScheduleRunsShutdown,
   registerScheduledJobs,
+  SCHEDULE_SHUTDOWN_MARK,
   scheduleHealth,
   startScheduleRun,
 } from '../src/queries/schedule.ts';
@@ -125,6 +127,91 @@ describe('起来时补记进程中断没收尾的 schedule_runs（#1522）', () 
       scanned: null,
       found: null,
       why: `${INTERRUPTED_SCHEDULE_WHY}；在途阶段见证：run=${id} step=worktrees phase=start at=2026-09-25T10:00:00.000Z`,
+    });
+  });
+
+  describe('停机宽限到期时仍在跑的一轮留见证', () => {
+    const jobs = [{ id: 'hourly-reconcile', startedBefore: ago(15 * MIN) }];
+
+    it('只写本进程起的未结束行；不结束、不写结局和统计；保留阶段见证；补记时带进失败原因；之后的阶段见证不冲掉它', async () => {
+      await registerScheduledJobs(t.db, [job('hourly-reconcile'), job('backup')]);
+      const older = await startScheduleRun(t.db, 'hourly-reconcile', ago(3 * 60 * MIN));
+      const running = await startScheduleRun(t.db, 'hourly-reconcile', ago(20 * MIN));
+      const noStage = await startScheduleRun(t.db, 'backup', ago(20 * MIN));
+      const finished = await startScheduleRun(t.db, 'hourly-reconcile', ago(19 * MIN));
+      await finishScheduleRun(t.db, finished, { outcome: 'ok', scanned: 3, found: 1 }, ago(18 * MIN));
+      await recordScheduleRunProgress(t.db, {
+        id: running,
+        step: 'worktrees',
+        phase: 'start',
+        at: ago(19 * MIN),
+      });
+
+      const marked = await recordScheduleRunsShutdown(t.db, {
+        jobs: ['hourly-reconcile', 'backup'],
+        since: ago(30 * MIN),
+        at: ago(2 * MIN),
+      });
+      expect(marked.sort()).toEqual([running, noStage].sort());
+      // 重复写不叠加
+      expect(
+        await recordScheduleRunsShutdown(t.db, { jobs: ['hourly-reconcile'], since: ago(30 * MIN), at: NOW }),
+      ).toEqual([]);
+
+      await recordScheduleRunProgress(t.db, {
+        id: running,
+        step: 'pending-cleanup',
+        phase: 'start',
+        at: ago(MIN),
+      });
+
+      const rows = await t.db.select().from(scheduleRuns).orderBy(scheduleRuns.id);
+      const byId = new Map(rows.map((r) => [r.id, r]));
+      const stopAt = `${SCHEDULE_SHUTDOWN_MARK} at=${ago(2 * MIN).toISOString()}`;
+      expect(byId.get(running)).toMatchObject({
+        endedAt: null,
+        outcome: null,
+        scanned: null,
+        found: null,
+        why: `在途阶段见证：run=${running} step=pending-cleanup phase=start at=${ago(MIN).toISOString()}${stopAt}`,
+      });
+      expect(byId.get(noStage)).toMatchObject({
+        endedAt: null,
+        outcome: null,
+        why: `${INTERRUPTED_SCHEDULE_STAGE_UNKNOWN}${stopAt}`,
+      });
+      expect(byId.get(older)).toMatchObject({ endedAt: null, why: null });
+      expect(byId.get(finished)).toMatchObject({ outcome: 'ok', scanned: 3, found: 1, why: null });
+
+      await closeInterruptedScheduleRuns(t.db, {
+        jobs: [...jobs, { id: 'backup', startedBefore: ago(15 * MIN) }],
+        at: NOW,
+      });
+      const [closed] = await t.db.select().from(scheduleRuns).where(eq(scheduleRuns.id, running));
+      expect(closed).toMatchObject({
+        outcome: 'failed',
+        scanned: null,
+        found: null,
+        endedAt: ago(20 * MIN),
+        why: `${INTERRUPTED_SCHEDULE_WHY}；在途阶段见证：run=${running} step=pending-cleanup phase=start at=${ago(MIN).toISOString()}${stopAt}`,
+      });
+      const [stageless] = await t.db.select().from(scheduleRuns).where(eq(scheduleRuns.id, noStage));
+      expect(stageless?.why).toBe(
+        `${INTERRUPTED_SCHEDULE_WHY}；${INTERRUPTED_SCHEDULE_STAGE_UNKNOWN}${stopAt}`,
+      );
+    });
+
+    it('宽限期里这一轮其实跑完了：正常结局盖掉见证，不留「仍在跑」的说法', async () => {
+      await registerScheduledJobs(t.db, [job('hourly-reconcile')]);
+      const id = await startScheduleRun(t.db, 'hourly-reconcile', ago(20 * MIN));
+      await recordScheduleRunsShutdown(t.db, {
+        jobs: ['hourly-reconcile'],
+        since: ago(30 * MIN),
+        at: ago(MIN),
+      });
+      await finishScheduleRun(t.db, id, { outcome: 'ok', scanned: 4, found: 0 }, NOW);
+      const [row] = await t.db.select().from(scheduleRuns).where(eq(scheduleRuns.id, id));
+      expect(row).toMatchObject({ outcome: 'ok', scanned: 4, found: 0, why: null, endedAt: NOW });
     });
   });
 
