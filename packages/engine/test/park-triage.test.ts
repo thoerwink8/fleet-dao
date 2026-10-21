@@ -478,7 +478,16 @@ describe('合并后的验收责任交给指挥官', () => {
             r.audits.push({
               at: NOW,
               action: COMMANDER_AUDIT_ACT,
-              after: { workflowId: claimIdOf(t), parkSeq: 0, kind: 'acceptance', action, dutyId: duty.id },
+              after: {
+                workflowId: claimIdOf(t),
+                parkSeq: 0,
+                kind: 'acceptance',
+                action,
+                dutyId: duty.id,
+                generation: duty.generation,
+                prNumber: duty.prNumber,
+                head: duty.head,
+              },
               ok,
             });
           },
@@ -837,6 +846,77 @@ describe('合并后的验收责任交给指挥官', () => {
       }
       expect(r.sessions).toHaveLength(1);
       expectNoHumanApproval(r);
+    });
+
+    it('一条真转人加另一条机读失败且重试记账写不进：转人只覆盖它自己，另一条每轮仍报，不能全单跳过', async () => {
+      const close = vi.fn(async () => {});
+      const task = acceptanceTask([open(7), open(9)]);
+      const r = tracked(
+        acceptanceFence([base(7, { action: 'leave', ...LEAVE }), base(9, { action: 'settle' })]),
+        { closeAcceptanceTask: close, ...withFounderFacts(7) },
+        task,
+      );
+      r.deps.acceptanceRetry = async () => {
+        throw new Error('retry写账失败');
+      };
+      const first = await triageParkedTasks(r.deps);
+      expect(first.left).toHaveLength(1);
+      expect(first.problems.join('；')).toContain('重试记录没写进');
+      for (let i = 0; i < PARK_TRIAGE_SESSION_TRIES + 1; i++) {
+        const next = await triageParkedTasks(r.deps);
+        expect(next.candidates).toBe(0);
+        expect(next.problems).toEqual([expect.stringContaining('duty 9（第 1 代）既没有重试记录')]);
+        expect(next.problems[0]).not.toContain('duty 7');
+      }
+      expect(r.sessions).toHaveLength(1);
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('同一头认领并转人之后新增的 open 责任，不能被旧转人记录遮掉', async () => {
+      let duties = [open(7)];
+      const r = tracked(acceptanceFence([base(7, { action: 'leave', ...LEAVE })]), withFounderFacts(7));
+      r.deps.acceptanceTasks = async () => [acceptanceTask(duties)];
+      const first = await triageParkedTasks(r.deps);
+      expect(first.left).toHaveLength(1);
+      // 所有 open 责任都有精确凭据：整单在等创始人，不报
+      expect((await triageParkedTasks(r.deps)).problems).toEqual([]);
+      duties = [open(7), open(9)];
+      const next = await triageParkedTasks(r.deps);
+      expect(next.problems).toEqual([expect.stringContaining('duty 9（第 1 代）')]);
+      expect(r.sessions).toHaveLength(1);
+    });
+
+    it('转人记录缺字段或身份、代次不符：不算凭据，不遮住该责任', async () => {
+      const bad = [
+        { dutyId: 7 }, // 缺代次/PR/head
+        { dutyId: 7, generation: 2, prNumber: 3300, head: ACCEPTANCE_HEAD }, // 代次不符
+        { dutyId: 7, generation: 1, prNumber: 3301, head: ACCEPTANCE_HEAD }, // PR 不符
+        { dutyId: 7, generation: 1, prNumber: 3300, head: 'd'.repeat(40) }, // head 不符
+        { dutyId: 8, generation: 1, prNumber: 3300, head: ACCEPTANCE_HEAD }, // 别的责任
+      ];
+      for (const extra of bad) {
+        const r = tracked(acceptanceFence([]));
+        r.audits.push({
+          at: NOW,
+          action: COMMANDER_AUDIT_CLAIM,
+          after: { workflowId: claimIdOf(acceptanceTask()), parkSeq: 0, kind: 'acceptance' },
+        });
+        r.audits.push({
+          at: NOW,
+          action: COMMANDER_AUDIT_ACT,
+          ok: true,
+          after: {
+            workflowId: claimIdOf(acceptanceTask()),
+            parkSeq: 0,
+            kind: 'acceptance',
+            action: 'leave',
+            ...extra,
+          },
+        });
+        const out = await triageParkedTasks(r.deps);
+        expect(out.problems, JSON.stringify(extra)).toEqual([expect.stringContaining('duty 7（第 1 代）')]);
+        expect(r.sessions).toHaveLength(0);
+      }
     });
 
     it('已认领、没有结论的验收责任所在单已关闭：不再报（只报还开着的单）', async () => {

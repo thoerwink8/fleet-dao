@@ -1116,6 +1116,9 @@ async function triageRepo(
 
 const acceptanceKeyOf = (task: CommanderAcceptanceTask) =>
   `acceptance:${task.taskId}:${task.prNumber}:${task.head}#0`;
+/** 转人凭据的身份键：duty / 代次 / PR / head 四项都精确相等才对得上。 */
+const dutyCredentialKey = (d: { id: number; generation: number; prNumber: number; head: string }) =>
+  `${d.id}:${d.generation}:${d.prNumber}:${d.head}`;
 const acceptanceRefOf = (task: CommanderAcceptanceTask) => `${task.owner}/${task.name}#${task.issueNumber}`;
 
 async function triageAcceptanceRepo(
@@ -1383,8 +1386,11 @@ interface AuditBook {
    * 和最近一次原因（账里没记原因是 null）：有界预算和「用满后每轮仍报」都只读这一处，不另建账。
    */
   acceptanceWindowRetries: Map<string, { n: number; lastWhy: string | null }>;
-  /** 验收候选已按可信创始人证据转人（commander.act 的 leave，ok）：这是有结论的「已处理」，其余没被重试抵销的认领不是。 */
-  acceptanceHumanHeld: Set<string>;
+  /**
+   * 验收候选键 → 已按可信创始人证据转人的责任凭据（commander.act 的 leave，ok；每条精确到 duty/代次/PR/head）。
+   * 只有当前仍 open 的每条责任都有凭据，才算整个候选在等创始人；缺字段、身份不符、只覆盖一部分、认领后才新增的责任都不能被遮掉。
+   */
+  acceptanceHumanHeld: Map<string, Set<string>>;
   /** 每个工作流上判过继续的停下（编号、停法）。 */
   continued: Map<string, { seq: number; kind: string | null }[]>;
   /** 24 小时内有效认领（没起成的不算）的数量；等于 claimTimes.length。 */
@@ -1566,7 +1572,7 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
   const claimKind = new Map<string, string>();
   const retries = new Map<string, number>();
   const acceptanceWindowRetries = new Map<string, { n: number; lastWhy: string | null }>();
-  const acceptanceHumanHeld = new Set<string>();
+  const acceptanceHumanHeld = new Map<string, Set<string>>();
   const continued = new Map<string, { seq: number; kind: string | null }[]>();
   const windowStart = now.getTime() - WINDOW_MS;
   // 窗口内每个停点的有效认领：认领入栈，没起成（retry）把它前面最近一条认领出栈。没起成的不占名额，也不算处理过。
@@ -1620,7 +1626,22 @@ function readBook(audits: readonly CommanderAuditView[], now: Date): AuditBook {
       after.kind === 'acceptance' &&
       key
     ) {
-      acceptanceHumanHeld.add(key);
+      // 转人凭据逐责任精确：缺任何一项身份字段的记录不算凭据，也不会覆盖别的责任。
+      const id = (after as { dutyId?: unknown }).dutyId;
+      const generation = (after as { generation?: unknown }).generation;
+      const pr = (after as { prNumber?: unknown }).prNumber;
+      const head = (after as { head?: unknown }).head;
+      if (
+        typeof id === 'number' &&
+        typeof generation === 'number' &&
+        typeof pr === 'number' &&
+        typeof head === 'string' &&
+        head !== ''
+      ) {
+        const held = acceptanceHumanHeld.get(key) ?? new Set<string>();
+        held.add(dutyCredentialKey({ id, generation, prNumber: pr, head }));
+        acceptanceHumanHeld.set(key, held);
+      }
     } else if (a.action === COMMANDER_AUDIT_ACT && a.ok !== false && after.action === 'continue') {
       if (typeof after.ref === 'string')
         lastContinueHash.set(after.ref, typeof after.detailHash === 'string' ? after.detailHash : null);
@@ -1984,16 +2005,25 @@ export async function triageParkedTasks(deps: ParkTriageDeps): Promise<ParkTriag
     try {
       for (const task of await deps.acceptanceTasks()) {
         const key = acceptanceKeyOf(task);
-        // 已认领且没有被重试抵销：只有「已转人（人工批准已发，账里有转人记录）」才算有结论；
-        // 其余（例如重试记账写失败）责任仍 open 却没有任何结论，不能静默消失，每轮继续报。
-        if (book.handled.has(key) && book.acceptanceHumanHeld.has(key)) continue;
-        if (deps.acceptanceIssueOpen && !(await deps.acceptanceIssueOpen(task))) continue;
+        // 已认领且没有被重试抵销：只有「当前每条 open 责任都有精确对应的转人凭据」才算整个候选在等创始人；
+        // 其余责任（重试记账写失败、认领后新增、凭据不全）仍 open 却没有结论，不能静默消失，每轮继续报，不再起会话。
         if (book.handled.has(key)) {
+          const held = book.acceptanceHumanHeld.get(key);
+          const uncovered = task.duties.filter(
+            (d) => acceptanceDutyState(d, task.duties) === 'open' && !held?.has(dutyCredentialKey(d)),
+          );
+          if (uncovered.length === 0) continue;
+          if (deps.acceptanceIssueOpen && !(await deps.acceptanceIssueOpen(task))) continue;
           result.problems.push(
-            `${acceptanceRefOf(task)} 验收责任仍未核实：已认领，但账里没有重试记录也没有转人记录（可能是重试记账没写进），责任仍 open，不再自动起会话`,
+            `${acceptanceRefOf(task)} 验收责任仍未核实：已认领，但${uncovered
+              .map((d) => `duty ${d.id}（第 ${d.generation} 代）`)
+              .join(
+                '、',
+              )}既没有重试记录也没有精确对应的转人记录（可能是重试记账没写进，或认领后才新增的责任），责任仍 open，不再自动起会话`,
           );
           continue;
         }
+        if (deps.acceptanceIssueOpen && !(await deps.acceptanceIssueOpen(task))) continue;
         const spent = book.acceptanceWindowRetries.get(key);
         if (spent && spent.n >= PARK_TRIAGE_SESSION_TRIES) {
           // 24 小时内的核验次数（读取失败、裁决核不过、执行没成合用）用满：不再起模型会话，也不再执行；
