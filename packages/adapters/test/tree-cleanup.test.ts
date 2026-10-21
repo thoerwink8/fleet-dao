@@ -352,25 +352,23 @@ describe('cleanup-status 分页：只有全部页读完才算完整', () => {
     30_000,
   ); // 每页起两个子进程，机器忙时轮次用尽的那条会超默认 5 秒
 
-  it('partial：页数、条数、字节、整轮时间超界不放宽', async () => {
-    const chain = [0, 1, 2, 3].map((i) => ({
-      ...firstPage,
-      page: i + 1,
-      from: i ? hash(i * 10) : null,
-      through: hash(i * 10 + 10),
-      cursor: cursor(i + 1),
-    }));
-    CLEANUP_PAGE_LIMITS.pages = 3;
-    pages(chain);
-    await expect(cleanupStatus(options)).rejects.toThrow('页上限');
-    Object.assign(CLEANUP_PAGE_LIMITS, saved, { rows: 0 });
-    pages([firstPage, lastPage]);
-    await expect(cleanupStatus(options)).rejects.toThrow('条数或字节');
-    Object.assign(CLEANUP_PAGE_LIMITS, saved, { bytes: 100 });
-    pages([firstPage, lastPage]);
-    await expect(cleanupStatus(options)).rejects.toThrow('条数或字节');
-    Object.assign(CLEANUP_PAGE_LIMITS, saved, { ms: 0 });
-    pages([firstPage, lastPage]);
-    await expect(cleanupStatus(options)).rejects.toThrow('超时');
+  // 四种超界各自一条用例：每条只起几个帮手子进程，不再把十来个子进程攒在同一条 5 秒用例里
+  // （Windows 上机器忙时 4 种合在一起实测到 3.7 秒，逼近默认 5 秒）。断言和限值都不变。
+  const chain = [0, 1, 2, 3].map((i) => ({
+    ...firstPage,
+    page: i + 1,
+    from: i ? hash(i * 10) : null,
+    through: hash(i * 10 + 10),
+    cursor: cursor(i + 1),
+  }));
+  it.each([
+    ['页数', { pages: 3 }, () => chain, '页上限'],
+    ['条数', { rows: 0 }, () => [firstPage, lastPage], '条数或字节'],
+    ['字节', { bytes: 100 }, () => [firstPage, lastPage], '条数或字节'],
+    ['整轮时间', { ms: 0 }, () => [firstPage, lastPage], '超时'],
+  ])('partial：%s超界不放宽', async (_name, limit, list, why) => {
+    Object.assign(CLEANUP_PAGE_LIMITS, saved, limit);
+    pages(list());
+    await expect(cleanupStatus(options)).rejects.toThrow(why);
   });
 });

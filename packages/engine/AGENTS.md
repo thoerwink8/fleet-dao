@@ -88,6 +88,10 @@ Temporal 工作流、活动与 worker，跑在法国：每张单一条任务工�
 - 全局 identity 不含首诊断码；同 run 换码重建仍归并原通知。通知持久化不代表飞书送达，新前缀未加入推送白名单。本能力不接受 Start 正文、token 或任意 SQL。
 - `test/admission-alert-spool.test.ts` / `test/admission-alert-crash.test.ts` 必须用真实 Linux 普通用户；Windows 本机入口按 `local-vitest.ts` 转交明确配置的 runner。`test/admission-alert.real-pg.test.ts` 在真实 PG 台使用随机隔离库验证移交，缺配置的 CI 明确报错。
 
+## 定时任务中断见证（#3477）
+
+- schedule_runs 的 why 列在一轮没收尾期间只放诊断见证：每小时对账的最后一个子步骤（`在途阶段见证：`，写不进只记 warn，不改步骤结果）；引擎正常停机、宽限到了某任务一轮还没回，再追加 `停机宽限到期时这一轮仍在跑 at=…`（`timers.ts` 的 `recordUnfinished`，只写本进程起定时器之后开始的未结束行）。它们只证明「最后记到的位置」，不证明卡在哪、为什么中断，也不是结束时刻；这一行不结束，ended_at、scanned、found 仍未知，由下次启动补记成 failed（ended_at=started_at 是补记，不是真实结束时间）。SIGKILL/OOM/断电没有机会写，仍只有最后一笔阶段见证。
+
 ## 版本更新日志
 
 - `jobs/changelog.ts` / `real/changelog.ts`（#3110）：每天 06:30（北京时间）按主线缺版一次补齐 v4 起已收口版本，只写 CHANGELOG.md，复用 `real/ci-timings.ts` 的 `openManagedFilePr` 受管模板，分支 `changelog/v<N>`。法国发布历史只读 release.sh 的 `.history`；没有文件、坏行、收口头/日期/单读不全均记 schedule_runs failed，不开部分 PR。合并对账仅对自仓、同仓分支、真实引擎开合且只改该文件的 PR 免队列，其他仍报。

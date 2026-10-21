@@ -22,6 +22,7 @@
 - `packages/conventions/standard-paths.json`：改标准的路径清单（人闸第四类），**改它本身就是改标准**。
 - `src/changelog.ts`（#3110）：完成关单按类别/性质生成版本节，固定交付物、兼容性、验证限制三尾；显式版本锚点幂等替换，临时 AI 运营不当产品条目。引擎每天补齐，里程碑只留链接和排期事实。
 - `packages/conventions/test-timings.json`：CI 测试按耗时分台的耗时表，用 `pnpm ci:timings` 从 CI 日志刷新，别手改。
+- `test-split.ts` 的 `HEAVY_FILES`（#3469）：一条用例同时起几十个子进程的测试文件（现在只有 `packages/engine/test/admission-alert-crash.test.ts` 的 32 进程用例）单独占一台（label 带 `· heavy`），台里不放别的文件、不和另一个重负载文件并台；同台并行的 5 秒用例会被它占满 CPU 饿到超时。占的台数从总台数（8）里扣；`ci-plan.ts` 的 `testsProblem` 在汇总里拦「重负载文件和别的测试同台」。不靠加超时、删断言、跳用例解决。新增成员要在 `test/test-split.test.ts` 里有对应的覆盖。
 - `test-split.ts` 的 `needsPg` 除db测试外，只把 `packages/store/test/task-execution.real-pg.test.ts`、`packages/store/test/idempotency-race.real-pg.test.ts` 和 `packages/engine/test/legacy-admission.real-pg.test.ts` 精确放入pg台；其它Store测试保持原分台，不能把真实竞争悄悄降成PGlite。
 
 ## 测试

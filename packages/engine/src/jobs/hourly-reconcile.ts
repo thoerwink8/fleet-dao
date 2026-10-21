@@ -31,7 +31,7 @@ import {
   reposKnownNotInstalled,
   skippedReposNote,
 } from './github-app-check.ts';
-import type { ScheduleRunLog } from './github-reconcile.ts';
+import type { ScheduleRunLog, ScheduleRunProgressPhase } from './github-reconcile.ts';
 import { type MergedTaskClosureDeps, settleMergedTasks } from './merged-task-closure.ts';
 import {
   checkLedgers,
@@ -236,13 +236,24 @@ function durationMs(deps: HourlyReconcileJobDeps, started: number): number | und
  * 在途证据只带运行编号、步骤名、阶段和耗时。不写命令行、环境、令牌、凭据路径，也不把原始返回值塞进日志。
  * 开始在 await 之前记：这一步还不回来时，最后一条就是它，后面的步骤还没有开始。
  */
-function markStep(
+async function markStep(
   deps: HourlyReconcileJobDeps,
   runId: number,
   step: HourlyReconcileStep,
   phase: StepPhase,
   ms?: number,
-): void {
+): Promise<void> {
+  // 见证只是诊断：写不进不能让这一步（或它真正的报错）变样，记一条日志；这一行的见证停在上一笔，不假装更新过
+  try {
+    await deps.runs.progress?.(runId, { step, phase: phase as ScheduleRunProgressPhase }, deps.now());
+  } catch (err) {
+    deps.log('warn', `每小时对账：子步骤 ${step} 的持久阶段见证没写进 schedule_runs`, {
+      runId,
+      step,
+      phase,
+      error: errMessage(err),
+    });
+  }
   const word =
     phase === 'start' ? '开始' : phase === 'end' ? '结束' : phase === 'failed' ? '失败' : '缺省跳过';
   const fields: Record<string, unknown> = { runId, step, phase };
@@ -256,20 +267,24 @@ async function runStep<T>(
   step: HourlyReconcileStep,
   fn: () => Promise<T>,
 ): Promise<T> {
-  markStep(deps, runId, step, 'start');
+  await markStep(deps, runId, step, 'start');
   const started = deps.now().getTime();
   try {
     const value = await fn();
-    markStep(deps, runId, step, returnedFailure(value) ? 'failed' : 'end', durationMs(deps, started));
+    await markStep(deps, runId, step, returnedFailure(value) ? 'failed' : 'end', durationMs(deps, started));
     return value;
   } catch (err) {
-    markStep(deps, runId, step, 'failed', durationMs(deps, started));
+    await markStep(deps, runId, step, 'failed', durationMs(deps, started));
     throw err;
   }
 }
 
-function skipStep(deps: HourlyReconcileJobDeps, runId: number, step: HourlyReconcileStep): void {
-  markStep(deps, runId, step, 'skip');
+async function skipStep(
+  deps: HourlyReconcileJobDeps,
+  runId: number,
+  step: HourlyReconcileStep,
+): Promise<void> {
+  await markStep(deps, runId, step, 'skip');
 }
 
 async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<ScheduleResult> {
@@ -295,7 +310,7 @@ async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<Sched
       trees.unchecked.push(`隔离清理事务未读全：${errMessage(error)}`);
     }
   } else {
-    skipStep(deps, runId, 'pending-cleanup');
+    await skipStep(deps, runId, 'pending-cleanup');
   }
   const saveInventory = deps.saveInventory;
   if (saveInventory) {
@@ -307,7 +322,7 @@ async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<Sched
       trees.unchecked.push(`工作树清单没存成（资源页上还是上一份）：${errMessage(err)}`);
     }
   } else {
-    skipStep(deps, runId, 'save-inventory');
+    await skipStep(deps, runId, 'save-inventory');
   }
   // 核对在提醒之前：这一轮新报的还不满 24 小时，提醒那部分不会再推它们
   const retired = await runStep(deps, runId, 'retire-workflow-alerts', () => retireWorkflowAlerts(deps));
@@ -355,7 +370,7 @@ async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<Sched
       };
     }
   } else {
-    skipStep(deps, runId, 'pool-hold-push');
+    await skipStep(deps, runId, 'pool-hold-push');
   }
   let mainRedPart: SweepPart = { scanned: 0, found: 0, unchecked: [] };
   const mainRedPush = deps.mainRedPush;
@@ -371,7 +386,7 @@ async function round(deps: HourlyReconcileJobDeps, runId: number): Promise<Sched
       };
     }
   } else {
-    skipStep(deps, runId, 'main-red-push');
+    await skipStep(deps, runId, 'main-red-push');
   }
   return combineParts([
     mergedTasks,

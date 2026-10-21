@@ -78,7 +78,9 @@ describe('installTemporalCli', () => {
     const download = vi.fn(async (_url: string, path: string) => writeFileSync(path, value.binary));
     const first = await installTemporalCli(value.root, options(value, download));
     expect(first.downloaded).toBe(true);
-    expect(first.path).toContain('.fleet-dao/test-tools/temporal-cli/1.9.1/linux_amd64/temporal');
+    expect(first.path).toBe(
+      join(value.home, '.fleet-dao', 'test-tools', 'temporal-cli', '1.9.1', 'linux_amd64', 'temporal'),
+    );
     expect(prepareTemporalCli(value.root, { home: value.home, env: {}, probe: value.probe })).toMatchObject({
       path: first.path,
       version: '1.9.1',
