@@ -1,6 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import type { WorkflowHandle } from '@temporalio/client';
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { createFakeWorld } from '../src/fakes.ts';
 import { PortError } from '../src/ports.ts';
 import type { PushHandbackPreflight, PushHandbackRequest } from '../src/push-handback.ts';
@@ -13,9 +14,33 @@ import {
   taskContinueSignal,
 } from '../src/task-contract.ts';
 import { freshRepo, pollQuery, useEnv, waitUntil, withWorker } from './helpers.ts';
+import { DiagnosticOutput, SyntheticHistoryDiagnostics } from './history-diagnostics.ts';
 import { scripted } from './task-script.ts';
 
-const environment = useEnv();
+// 只给 worker replacement 这一条接既有合成假端口取证。钩子先于 useEnv 起 50 秒 watchdog。
+// 失败或 watchdog 时，阶段写进该 run 的 history/describe 帧；通过不读历史。
+const WORKER_REPLACEMENT =
+  'same run reconstructs business receipts after worker replacement, then accepts one new request';
+const output = new DiagnosticOutput();
+const testSha256 = createHash('sha256')
+  .update(readFileSync(new URL(import.meta.url)))
+  .digest('hex');
+let replacementDiagnostics: SyntheticHistoryDiagnostics | undefined;
+beforeEach((context) => {
+  replacementDiagnostics =
+    context.task.name === WORKER_REPLACEMENT
+      ? new SyntheticHistoryDiagnostics({
+          test: context.task.name,
+          testSha256,
+          output,
+          failed: () => context.task.result?.state === 'fail',
+        })
+      : undefined;
+});
+const environment = useEnv({
+  beforeTeardown: () => replacementDiagnostics?.finish() ?? Promise.resolve(),
+  teardown: (env) => (replacementDiagnostics ? replacementDiagnostics.closeEnvironment(env) : env.teardown()),
+});
 const success: PushHandbackPreflight = {
   outcome: 'natural-retired',
   head: 'a'.repeat(40),
@@ -286,46 +311,67 @@ describe('permission push handback original park protocol', { timeout: 60_000 },
     );
   });
 
-  it('same run reconstructs business receipts after worker replacement, then accepts one new request', async () => {
+  it(WORKER_REPLACEMENT, async () => {
+    const diagnostics = replacementDiagnostics;
+    if (!diagnostics) throw new Error('diagnostics: worker replacement scope missing');
     const env = environment(),
       w = world(),
       { tasks, calls } = scripted(),
       taskQueue = `handback-${randomUUID()}`;
+    diagnostics.environment(env);
     let h: WorkflowHandle | undefined, r: PushHandbackRequest | undefined;
+    const runWorker = (fn: () => Promise<void>) =>
+      diagnostics.track(
+        withWorker(env, w, fn, {
+          tasks,
+          taskQueue,
+          maxCachedWorkflows: 0,
+          observeWorker: (worker, run, bundle) => diagnostics.worker(env, worker, run, bundle),
+        }),
+      );
     tasks.readPushHandbackPreflight = async () => ({ outcome: 'unknown', code: 'first_observation' });
-    await withWorker(
-      env,
-      w,
-      async () => {
-        h = await env.client.workflow.start('taskWorkflow', {
+    try {
+      diagnostics.mark('wait:first-worker:worker-start');
+      await runWorker(async () => {
+        diagnostics.mark('wait:first-worker:workflow-start');
+        h = await diagnostics.start(env, 'taskWorkflow', {
           workflowId: `handback-${randomUUID()}`,
           taskQueue,
           args: [task()],
         });
+        diagnostics.mark('wait:first-worker:parked-query');
         r = request(await parked(h));
+        diagnostics.mark('wait:first-worker:handback-update');
         expect((await requestPushHandback(h, r)).outcome).toBe('unknown');
-      },
-      { tasks, taskQueue, maxCachedWorkflows: 0 },
-    );
-    tasks.readPushHandbackPreflight = async () => success;
-    await withWorker(
-      env,
-      w,
-      async () => {
-        const handle = h!,
-          original = r!;
+        diagnostics.mark('wait:first-worker:worker-stop');
+      });
+      diagnostics.mark('wait:replacement:worker-start');
+      tasks.readPushHandbackPreflight = async () => success;
+      await runWorker(async () => {
+        if (!h || !r) throw new Error('worker replacement handle missing');
+        const handle = h,
+          original = r;
+        diagnostics.mark('wait:replacement:reconstruct-update');
         expect((await requestPushHandback(handle, original)).outcome).toBe('unknown');
+        diagnostics.mark('wait:replacement:conflict-update');
         expect((await requestPushHandback(handle, { ...original, feedback: 'different' })).outcome).toBe(
           'conflict',
         );
+        diagnostics.mark('wait:replacement:new-request-update');
         expect(
           (await requestPushHandback(handle, { ...original, requestId: 'newObservation' })).outcome,
         ).toBe('handed_back');
+        diagnostics.mark('wait:replacement:second-segment');
         await waitUntil(() => calls.segment.length === 2, 'new bounded segment after worker replacement');
+        diagnostics.mark('wait:replacement:abandon-signal-and-result');
         await abandon(handle);
-      },
-      { tasks, taskQueue, maxCachedWorkflows: 0 },
-    );
+        diagnostics.mark('wait:replacement:worker-stop');
+      });
+    } catch (error) {
+      // finish 另报写出故障。这里先取证，原断言错误保持原对象。
+      await diagnostics.captureFailure().catch(() => undefined);
+      throw error;
+    }
   });
   it('future hold generation rejects immediately without preflight or a stranded terminal handler', async () => {
     const env = environment(),
