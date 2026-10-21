@@ -29,6 +29,7 @@
 - `pnpm install`
 - `npx vitest run <文件>`
 - `pnpm check`
+- `pnpm specs:index [--check]`
 - `pnpm test:isolated --resource <本机资源JSON绝对路径> -- <完整测试文件...>`
 - `pnpm test:linux`（Windows 的 Linux 安全归档测试，须显式配置本机 Linux runner）
 - `pnpm pr:open`

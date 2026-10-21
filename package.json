@@ -40,6 +40,7 @@
     "deps:check": "node packages/conventions/src/bin/deps-check.ts",
     "release:smoke": "bash deploy/release-smoke.sh",
     "decisions:index": "node packages/conventions/src/bin/decisions-index.ts",
+    "specs:index": "node packages/conventions/src/bin/specs-index.ts",
     "plan": "node packages/conventions/src/bin/plan.ts",
     "github:audit": "node packages/conventions/src/bin/github-audit.ts",
     "branch:hygiene": "node packages/conventions/src/bin/branch-hygiene.ts",
