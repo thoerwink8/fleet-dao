@@ -1,4 +1,6 @@
-// 空状态：一句话说明为什么空，能做什么就给个按钮。替掉 Empty 和各页手写的虚线框。
+// 空状态（#3509，照 Arco，样稿 canvas/fd3.css `.empty`）：一句话说明为什么空，能做什么就给个按钮。替掉 Empty 和各页手写的虚线框。
+// section 占一整块：居中，48 的灰圆底图标、标题 16/500、说明 14 灰字（最宽 480），按钮在下面；上下 48 左右 24。
+// inline 夹在一行内容里，只有一行灰字。
 import type { LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { cn } from '../../lib/utils';
@@ -24,7 +26,7 @@ export function EmptyState({
       <div
         data-size="inline"
         className={cn(
-          'flex flex-wrap items-center gap-2 px-section py-stack text-body text-muted-foreground',
+          'flex flex-wrap items-center gap-2 px-section py-stack text-body text-ink-3',
           className,
         )}
       >
@@ -38,19 +40,16 @@ export function EmptyState({
   return (
     <div
       data-size="section"
-      className={cn(
-        'flex flex-col items-center justify-center gap-2 px-section-gap py-[calc(var(--spacing-section-gap)*2)] text-center',
-        className,
-      )}
+      className={cn('flex flex-col items-center justify-center gap-2 px-6 py-12 text-center', className)}
     >
       {Icon ? (
-        <div className="grid size-10 place-items-center rounded-full bg-muted text-muted-foreground">
-          <Icon className="size-5" aria-hidden />
+        <div className="grid size-12 place-items-center rounded-full bg-fill-2 text-ink-3">
+          <Icon className="size-6" aria-hidden />
         </div>
       ) : null}
-      <div className="text-body font-medium">{title}</div>
-      {hint ? <div className="max-w-sm text-meta text-muted-foreground">{hint}</div> : null}
-      {action ? <div className="mt-1">{action}</div> : null}
+      <div className="text-heading text-ink">{title}</div>
+      {hint ? <div className="max-w-120 text-body text-ink-3">{hint}</div> : null}
+      {action ? <div className="mt-2 flex flex-wrap justify-center gap-2">{action}</div> : null}
     </div>
   );
 }

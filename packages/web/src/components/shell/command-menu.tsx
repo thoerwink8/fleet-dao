@@ -11,9 +11,9 @@ import {
   CommandList,
   CommandSeparator,
 } from '../ui/command';
-import { NAV } from './nav';
+import { NAV, NAV_SOON } from './nav';
 
-/** ⌘K：跳页面、切仓。（主题只有一套、亮暗跟随系统，#3509 起没有切主题。） */
+/** ⌘K：跳页面（不进菜单的页也都在这里搜得到）、切仓。（主题只有一套、亮暗跟随系统，#3509 起没有切主题。） */
 export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChange(o: boolean): void }) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -40,22 +40,25 @@ export function CommandMenu({ open, onOpenChange }: { open: boolean; onOpenChang
       <CommandInput placeholder="输入页面名、操作…" />
       <CommandList className="max-h-command-list">
         <CommandEmpty>没找到</CommandEmpty>
-        <CommandGroup heading="跳转">
-          {NAV.flatMap((g) => g.items).map((item) => {
-            const Icon = item.icon;
-            return (
-              <CommandItem
-                key={item.to}
-                value={`${item.label} ${item.hint}`}
-                onSelect={() => run(() => navigate(item.to))}
-              >
-                <Icon />
-                {item.label}
-                <span className="truncate text-meta text-muted-foreground">{item.hint}</span>
-              </CommandItem>
-            );
-          })}
-        </CommandGroup>
+        {/* 菜单里的八项和不进菜单的页（定时任务、资源、发布记录、操作记录、渠道状态、画布）都在这里，还没做的账单在最后 */}
+        {[...NAV, { group: '还没做', items: NAV_SOON }].map((g) => (
+          <CommandGroup key={g.group} heading={g.group}>
+            {g.items.map((item) => {
+              const Icon = item.icon;
+              return (
+                <CommandItem
+                  key={item.to}
+                  value={`${item.label} ${item.to} ${item.hint}`}
+                  onSelect={() => run(() => navigate(item.to))}
+                >
+                  <Icon />
+                  <span className="shrink-0">{item.label}</span>
+                  <span className="min-w-0 truncate text-meta text-ink-3">{item.hint}</span>
+                </CommandItem>
+              );
+            })}
+          </CommandGroup>
+        ))}
         {repos.length ? (
           <>
             <CommandSeparator />

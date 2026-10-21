@@ -5,34 +5,19 @@ import { brand } from '#brand';
 import { ApiError, errorText, useLiveSync, useMe, useNotifications } from '../api/client';
 import { loginPath } from '../api/index';
 import { GatewayHealthLink } from '../components/gateway-health-link';
-import { LogoMark } from '../components/logo';
 import { isRemotePage, OnlyLocalNotice } from '../components/node-notice';
 import { RepoProvider } from '../components/repo-context';
-import { BottomNav } from '../components/shell/bottom-nav';
 import { CommandMenu } from '../components/shell/command-menu';
-import { SidebarNav } from '../components/shell/sidebar';
-import { Topbar } from '../components/shell/topbar';
+import { AppFrame, ShellScreen } from '../components/shell/frame';
 import { TopbarSlotProvider } from '../components/shell/topbar-slot';
 import { TaskActionsProvider } from '../components/task-actions';
 import { Button } from '../components/ui/button';
-import { Sheet, SheetContent, SheetDescription, SheetTitle } from '../components/ui/sheet';
-import { useLocalState } from '../lib/hooks';
+import { useLocalState, useMediaQuery } from '../lib/hooks';
 import { useNodeSelection } from '../lib/node';
 import { useAppBadge, useBadgeCount } from '../lib/pwa/hooks';
 import { showSystemNotification } from '../lib/pwa/notify';
 import { cn } from '../lib/utils';
-import { useNavRoom, usePhone } from '../lib/viewport';
-
-function Screen({ children }: { children: ReactNode }) {
-  return (
-    <div className="grid h-dvh place-items-center bg-background p-6">
-      <div className="flex max-w-sm flex-col items-center gap-3 text-center text-body text-muted-foreground">
-        <LogoMark className="size-10" />
-        {children}
-      </div>
-    </div>
-  );
-}
+import { usePhone } from '../lib/viewport';
 
 /**
  * 没登录就不进外壳：401 时 API 层已经在跳登录页，这里只负责别把半截页面露出来。
@@ -48,7 +33,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         <div className={cn('contents', me.isPending && 'invisible')}>{children}</div>
         {me.isPending ? (
           <div className="fixed inset-0 z-50">
-            <Screen>正在确认登录…</Screen>
+            <ShellScreen>正在确认登录…</ShellScreen>
           </div>
         ) : null}
       </>
@@ -56,21 +41,24 @@ export function AuthGate({ children }: { children: ReactNode }) {
   }
   const unauthenticated = me.error instanceof ApiError && me.error.status === 401;
   return (
-    <Screen>
-      <p className="text-foreground">{unauthenticated ? '要先登录，正在跳到登录页…' : '没能确认登录'}</p>
+    <ShellScreen
+      title={unauthenticated ? '要先登录，正在跳到登录页…' : '没能确认登录'}
+      actions={
+        <>
+          {unauthenticated ? null : (
+            <Button size="sm" variant="outline" onClick={() => void me.refetch()}>
+              重试
+            </Button>
+          )}
+          <Button asChild size="sm">
+            <Link to={loginPath()}>去登录页</Link>
+          </Button>
+        </>
+      }
+    >
       {unauthenticated ? null : <p>{errorText(me.error)}</p>}
       {unauthenticated ? null : <GatewayHealthLink error={me.error} />}
-      <div className="flex gap-2">
-        {unauthenticated ? null : (
-          <Button size="sm" variant="outline" onClick={() => void me.refetch()}>
-            重试
-          </Button>
-        )}
-        <Button asChild size="sm">
-          <Link to={loginPath()}>去登录页</Link>
-        </Button>
-      </div>
-    </Screen>
+    </ShellScreen>
   );
 }
 
@@ -115,12 +103,11 @@ function skipToContent(event: { preventDefault(): void }) {
 
 function Frame() {
   const location = useLocation();
-  // 侧栏收不收：人手动选过就按人选的；没选过按屏宽，≥1440 展开、768–1439 收成图标栏（#1937）
+  // 左菜单收不收：人手动选过就按人选的（记在浏览器本地）；没选过按屏宽，≥1280 展开 220、768–1279 收成 48 宽的图标条（#3509，照 Arco Pro）
   const [picked, setPicked] = useLocalState<boolean | null>(`${brand.storagePrefix}sidebar-collapsed`, null);
-  const navRoom = useNavRoom();
-  const collapsed = picked ?? !navRoom;
+  const menuRoom = useMediaQuery('(min-width: 1280px)');
+  const collapsed = picked ?? !menuRoom;
   const phone = usePhone();
-  const [mobileNav, setMobileNav] = useState(false);
   const [cmdk, setCmdk] = useState(false);
   // 推送等确认登录之后再连：连上时的全量重拉不和首屏的读取挤在一起，没登录也不去连
   const { data: me } = useMe();
@@ -128,7 +115,7 @@ function Frame() {
   useNoticeToasts();
   useAppBadge(useBadgeCount());
 
-  // 看板多机：选了远程环境（?node=）时，只有主页、法国页和资源页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
+  // 看板多机：选了远程环境（?node=）时，只有工作台、画布、法国页和资源页读得到它的快照；别的页读的全是本台的库，整页明说、不渲染（也就不去读）
   const { nodeId } = useNodeSelection();
   const onlyLocal = nodeId !== null && !isRemotePage(location.pathname);
 
@@ -138,44 +125,18 @@ function Frame() {
       <a href={`#${CONTENT_ID}`} className="skip-to-content" onClick={skipToContent}>
         跳到正文
       </a>
-      <div className="flex h-dvh flex-col overflow-hidden bg-background">
-        <div className="flex min-h-0 flex-1 overflow-hidden">
-          {phone ? null : (
-            <aside
-              className={cn(
-                'shrink-0 border-r bg-panel transition-[width] duration-200',
-                collapsed ? 'w-sidebar-collapsed' : 'w-sidebar',
-              )}
-            >
-              <SidebarNav collapsed={collapsed} onToggle={() => setPicked(!collapsed)} />
-            </aside>
-          )}
-          <div className="flex min-w-0 flex-1 flex-col">
-            <Topbar onSearch={() => setCmdk(true)} />
-            {/* min-w-0 + overflow-x-hidden：任何一页的内容比正文区宽，都只在自己里面处理，不把整页撑出横向滚动（点验 audit.md，390/768 宽主页被切） */}
-            <main
-              id={CONTENT_ID}
-              tabIndex={-1}
-              className="skip-target relative min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto scrollbar-thin"
-              onMouseDown={(event) => {
-                // 点空白不该把焦点抢走：只有「跳到正文」才聚焦正文区本身。
-                if (event.target === event.currentTarget) event.preventDefault();
-              }}
-            >
-              {onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
-            </main>
-          </div>
-        </div>
-        {phone ? <BottomNav onMore={() => setMobileNav(true)} /> : null}
-        <Sheet open={mobileNav && phone} onOpenChange={setMobileNav}>
-          <SheetContent side="left" className="w-sidebar-sheet bg-panel p-0">
-            <SheetTitle className="sr-only">导航</SheetTitle>
-            <SheetDescription className="sr-only">{brand.product}的全部页面</SheetDescription>
-            <SidebarNav onNavigate={() => setMobileNav(false)} />
-          </SheetContent>
-        </Sheet>
-        <CommandMenu open={cmdk} onOpenChange={setCmdk} />
-      </div>
+      {/* 照 Arco Pro：顶栏 60 横跨全宽，下面左菜单 + 内容区（版式在 components/shell/frame.tsx） */}
+      <AppFrame
+        phone={phone}
+        collapsed={collapsed}
+        onToggleMenu={() => setPicked(!collapsed)}
+        onSearch={() => setCmdk(true)}
+        contentId={CONTENT_ID}
+      >
+        {onlyLocal ? <OnlyLocalNotice /> : <Outlet />}
+      </AppFrame>
+      {/* ⌘K 始终可用：远程环境、只在本台有的页上也能开 */}
+      <CommandMenu open={cmdk} onOpenChange={setCmdk} />
     </>
   );
 }

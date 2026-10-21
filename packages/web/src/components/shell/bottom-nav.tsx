@@ -1,59 +1,97 @@
-// 手机底部导航：主页、更多（打开导航抽屉，其余页面都在里面；决定 0093 导航降级，主页三块就是要看的全部）。
-// 每项至少 40×40，实际按钮占满整条（h-14），拇指够得着；待处理的数挂在「更多」上（通知中心在里面）。
-import { Home, Menu } from 'lucide-react';
-import { NavLink } from 'react-router';
-import { useNotifications } from '../../api/client';
+// 手机底部导航（<768，照 Phone.dc.html）：工作台、通知、任务、更多四格，每格占满一份宽、高 56，拇指够得着。
+// 「更多」往上弹一个菜单：法国、路由、额度、提需求、设置，和「搜全部页面」（⌘K 面板，不进菜单的页都在里面）。
+// 选了远程环境时，只在本台有的页在菜单里置灰并写明（悬停提示），不点进去再看整页说明。
+import { Ellipsis, Search } from 'lucide-react';
+import { Link, useLocation } from 'react-router';
 import { useNodeSelection, withNode } from '../../lib/node';
-import { pendingCount } from '../../lib/notice-count';
 import { cn } from '../../lib/utils';
+import { isRemotePage } from '../node-notice';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '../ui/dropdown-menu';
+import { activeMenu, NAV_FOOT, NAV_OPS, NAV_TOP } from './nav';
+import { CountBadge, useNoticeBadge } from './sidebar';
 
-const ITEMS = [{ to: '/', label: '主页', icon: Home }] as const;
+const TABS = NAV_TOP.slice(0, 3);
+const MORE = [...NAV_OPS.items, ...NAV_TOP.slice(3), NAV_FOOT];
 
 const cell =
-  'relative flex h-14 min-w-10 flex-1 flex-col items-center justify-center gap-0.5 text-meta text-muted-foreground transition-colors active:bg-accent';
+  'relative flex h-14 min-w-10 flex-1 flex-col items-center justify-center gap-0.5 text-meta text-ink-3 transition-colors duration-100 active:bg-fill-2';
 
-export function BottomNav({ onMore }: { onMore(): void }) {
+export function BottomNav({ onSearch }: { onSearch(): void }) {
   const { nodeId } = useNodeSelection();
-  const notices = useNotifications('open');
-  const badge = notices.data ? pendingCount(notices.data.counts) : notices.error ? '!' : 0;
+  const { pathname } = useLocation();
+  const active = activeMenu(pathname);
+  const badge = useNoticeBadge();
+  const moreActive = MORE.some((m) => m.to === active);
   return (
     <nav
       aria-label="底部导航"
       data-bottom-nav
-      className="flex shrink-0 border-t bg-panel pb-[env(safe-area-inset-bottom)]"
+      className="flex shrink-0 border-t border-line bg-card pb-[env(safe-area-inset-bottom)]"
     >
-      {ITEMS.map(({ to, label, icon: Icon }) => (
-        <NavLink
+      {TABS.map(({ to, label, icon: Icon }) => (
+        <Link
           key={to}
           to={withNode(to, nodeId)}
-          end={to === '/'}
-          className={({ isActive }) => cn(cell, isActive && 'font-medium text-foreground')}
+          aria-current={active === to ? 'page' : undefined}
+          className={cn(cell, active === to && 'font-medium text-brand-ink')}
         >
-          {({ isActive }) => (
-            <>
-              {isActive ? <span className="absolute top-0 h-0.5 w-8 rounded-full bg-brand" /> : null}
-              <Icon className="size-5" aria-hidden />
-              {label}
-            </>
-          )}
-        </NavLink>
+          <span className="relative">
+            <Icon className="size-5" aria-hidden />
+            {to === '/notifications' ? (
+              <CountBadge value={badge} className="absolute -top-1.5 left-3 h-4 min-w-4 px-1" />
+            ) : null}
+          </span>
+          {label}
+        </Link>
       ))}
-      <button type="button" onClick={onMore} className={cell} aria-label="更多，打开全部页面">
-        <span className="relative">
-          <Menu className="size-5" aria-hidden />
-          {badge !== 0 ? (
-            <span
-              className={cn(
-                'num absolute -top-1.5 left-3 grid min-w-4 place-items-center rounded-full px-1 text-meta font-semibold',
-                badge === '!' ? 'bg-destructive text-destructive-foreground' : 'bg-st-human text-background',
-              )}
-            >
-              {badge}
-            </span>
-          ) : null}
-        </span>
-        更多
-      </button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <button
+            type="button"
+            className={cn(cell, moreActive && 'font-medium text-brand-ink')}
+            aria-label="更多，打开其余页面"
+          >
+            <Ellipsis className="size-5" aria-hidden />
+            更多
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="top" align="end" className="w-52">
+          {MORE.map(({ to, label, icon: Icon }) => {
+            const locked = nodeId !== null && !isRemotePage(to);
+            return (
+              <DropdownMenuItem
+                key={to}
+                asChild={!locked}
+                disabled={locked}
+                title={locked ? '远程环境下只读，这页要去那台上看' : undefined}
+              >
+                {locked ? (
+                  <>
+                    <Icon aria-hidden />
+                    {label}
+                  </>
+                ) : (
+                  <Link to={withNode(to, nodeId)} aria-current={active === to ? 'page' : undefined}>
+                    <Icon aria-hidden />
+                    {label}
+                  </Link>
+                )}
+              </DropdownMenuItem>
+            );
+          })}
+          <DropdownMenuSeparator />
+          <DropdownMenuItem onSelect={onSearch}>
+            <Search aria-hidden />
+            搜全部页面
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
     </nav>
   );
 }
