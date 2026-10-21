@@ -232,6 +232,8 @@ BUILD_SANDBOX_STATE="" # 空：还没试过；ok：读回确认挡住了；bad�
 BUILD_SANDBOX_WHY=""
 # 只有测试会改：接到构建环境 PATH 最前面，用来放故意去读密钥的假 pnpm。正式发布不设，PATH 和以前一样
 FLEET_BUILD_PATH_PREFIX=${FLEET_BUILD_PATH_PREFIX:-}
+# 只有 build_web 在跑前端构建的那一条命令前后改：额外给 pnpm 命令带的环境变量（见 web_build_extra_env），平时是空的
+BUILD_EXTRA_ENV=()
 build_sandbox_paths() {
   local p phys have=" "
   BUILD_SANDBOX_PATHS=()
@@ -265,9 +267,9 @@ build_sandbox_run() { # 工作目录 命令…
     joined+="${joined:+ }-$p"
   done
   if [[ -n "$FLEET_BUILD_PATH_PREFIX" ]]; then path=$FLEET_BUILD_PATH_PREFIX:$path; fi
-  # pnpm 的设置只给 pnpm 带（见 RELEASE_PNPM_ENV）；探针、tar 这些命令行里不出现
+  # pnpm 的设置只给 pnpm 带（见 RELEASE_PNPM_ENV、BUILD_EXTRA_ENV）；探针、tar 这些命令行里不出现
   local -a pnpm_env=()
-  if [[ "${1:-}" == pnpm ]]; then pnpm_env=("${RELEASE_PNPM_ENV[@]}"); fi
+  if [[ "${1:-}" == pnpm ]]; then pnpm_env=("${RELEASE_PNPM_ENV[@]}" "${BUILD_EXTRA_ENV[@]}"); fi
   systemd-run --wait --pipe --collect --quiet \
     --service-type=exec \
     --expand-environment=no \
@@ -732,6 +734,15 @@ fetch_code() { # 要发的提交（空 = 主线最新）
 RELEASE_PNPM_ENV=(pnpm_config_enable_global_virtual_store=false)
 RELEASE_PNPM_INSTALL=(install --frozen-lockfile --package-import-method=copy --reporter=append-only)
 RELEASE_PNPM_WEB_BUILD=(--filter ./packages/web run build)
+# 前端构建时预载的只读探针（#3491）：给预渲染发往本机的那个请求打时间点和进程 CPU 用量，见 deploy/lib/prerender-trace.mjs。
+# release.sh（build_web）和 CI 的 release-smoke.sh 都从这里读；老提交里没有这个文件就不带（预载一个不存在的文件会让每个 node 进程起不来）。
+RELEASE_WEB_TRACE=deploy/lib/prerender-trace.mjs
+web_build_extra_env() { # 代码目录：把探针放进 BUILD_EXTRA_ENV（构建命令的额外环境变量，跑完由调用方清空）
+  BUILD_EXTRA_ENV=()
+  if [[ -f "$1/$RELEASE_WEB_TRACE" ]]; then
+    BUILD_EXTRA_ENV=("NODE_OPTIONS=--import=$1/$RELEASE_WEB_TRACE")
+  fi
+}
 
 # 把这一版目录自己的 pnpm 工作区文件改成「不用全局虚拟仓、依赖整份拷贝」，所以此后有人在这个目录里直接敲 pnpm（不带上面那组环境变量）
 # 也不会把 node_modules 重装成链到 /root 的全局虚拟仓。必须改 pnpm-workspace.yaml：pnpm 11 里工作区文件的设置压过 .npmrc
@@ -891,15 +902,68 @@ web_script() { # 临时目录 脚本名：packages/web 有没有这个 npm 脚�
       "$1/packages/web/package.json" "$2"
 }
 
+# 一行资源读数，前端构建前后各打一次进发布日志（#3491：预渲染请求 10 秒不回时，要能对照当时机器忙不忙）。
+# 每一项读不到就写「读不到」，不留空、不写 0。PSI 的 some 是「至少有一个任务在等」的时间占比。
+psi_some() { # /proc/pressure/ 下的文件：some 一行里的 avg10、avg60
+  local out
+  out=$(awk '$1 == "some" { print $2 " " $3 }' "$1" 2>/dev/null) || out=""
+  printf '%s' "${out:-读不到}"
+}
+resource_line() {
+  local cores load avail
+  cores=$(nproc 2>/dev/null) || cores=""
+  load=$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null) || load=""
+  avail=$(awk '/^MemAvailable:/ { printf "%d", $2 / 1024 }' /proc/meminfo 2>/dev/null) || avail=""
+  printf '%s 核，load %s，CPU 压力 %s，内存压力 %s，可用内存 %sMB' "${cores:-读不到}" "${load:-读不到}" \
+    "$(psi_some /proc/pressure/cpu)" "$(psi_some /proc/pressure/memory)" "${avail:-读不到}"
+}
+
+# 前端构建失败的红字：取日志里真正的报错行（以 Error:、[ERR_…]、[CODE] 开头的行，最后 3 条，去掉颜色码）。
+# 不能按「含 error 的行」取：产物文件名 route-error-*.js、shown-error-*.js 也含 error，会把一行文件大小粘进报错里（#3491）。
+# 一行这样的都没有就取日志最后 3 行（不含 pnpm 的 Progress 行）
+web_build_why() { # 日志
+  local esc=$'\033' out
+  out=$(sed -E "s/${esc}\[[0-9;]*m//g" -- "$1" 2>/dev/null |
+    grep -aE '^[[:space:]]*(([A-Za-z]*Error(\[[A-Z_]+\])?:)|(\[?ERR_[A-Z_]+\]?)|(\[[A-Z][A-Z_]{3,}\]))' | tail -n 3 | tr '\n' ' ') || out=""
+  if [[ -z "${out// /}" ]]; then
+    out=$(grep -av '^Progress: ' -- "$1" 2>/dev/null | grep -a . | tail -n 3 | tr '\n' ' ') || out=""
+  fi
+  printf '%s' "${out:-日志里读不到报错}"
+}
+
+# 探针（deploy/lib/prerender-trace.mjs）打进构建日志的行，原样摘到发布日志里。一行都没有也说一声：没出声本身是线索
+web_build_trace_lines() { # 日志
+  local lines
+  lines=$(grep -a '^\[prerender-trace\]' -- "$1" 2>/dev/null | sed 's/^/    /') || lines=""
+  if [[ -n "$lines" ]]; then
+    echo "  预渲染请求的时间点："
+    printf '%s\n' "$lines"
+  else
+    echo "  预渲染请求的时间点：探针没出声（没带探针，或构建没走到发请求那一步）"
+  fi
+}
+
 # 静态文件 web/：正式驾驶舱（有 packages/web 就构建它，没有就用占位页）加健康页 /health/、版本标记
 # release.json（由 root 写；香港只给经隧道来的读）。发到哪见 sync_web
 build_web() { # 临时目录 日志
-  local stage=$1 log=$2
+  local stage=$1 log=$2 started rc=0
   if web_script "$stage" build; then
     echo "  构建驾驶舱前端（packages/web）"
-    if ! as_build_in "$stage" pnpm "${RELEASE_PNPM_WEB_BUILD[@]}" >>"$log" 2>&1; then
+    echo "  构建前资源：$(resource_line)"
+    web_build_extra_env "$stage"
+    started=$SECONDS
+    as_build_in "$stage" pnpm "${RELEASE_PNPM_WEB_BUILD[@]}" >>"$log" 2>&1 || rc=$?
+    BUILD_EXTRA_ENV=()
+    echo "  前端构建用了 $((SECONDS - started)) 秒，退出码 $rc；构建后资源：$(resource_line)"
+    web_build_trace_lines "$log"
+    if ((rc != 0)); then
       log_tail "$log" 60
-      red "驾驶舱前端构建失败（没切版本）：$(grep -aE 'Error|error' "$log" | tail -3 | tr '\n' ' ')"
+      if grep -aq 'Prerender: Request' -- "$log"; then
+        echo "  ! 预渲染请求：@react-router/dev 固定 10 秒不回就报错、不重试（dist/vite.js prerender 的 timeout 默认 10000、retryCount 0）。" \
+          "请求和 vite preview 服务在同一个 node 进程里，进程拿不到 CPU 或被换出时整个进程一起停；对照上面的时间点和前后资源读数，" \
+          "分清是没连上、连上没回，还是进程自己用掉的 CPU 远少于墙钟（被抢占）"
+      fi
+      red "驾驶舱前端构建失败（没切版本）：$(web_build_why "$log")"
       return 1
     fi
     if [[ ! -f "$stage/packages/web/dist/client/index.html" ]]; then

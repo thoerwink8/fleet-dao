@@ -5,7 +5,7 @@
 # （065445a4：法国的构建沙箱是 env -i，不算 CI，依赖链到家目录里，fleet-api 报 ERR_MODULE_NOT_FOUND）。
 # 这里和 release.sh 的 build_release 同一套：git archive 出这一版的文件 → pin_release_workspace 固定工作区设置 →
 # env -i 下带 RELEASE_PNPM_ENV 用 RELEASE_PNPM_INSTALL 装 →
-# 用 RELEASE_PNPM_WEB_BUILD 构建驾驶舱前端 → links_inside 查符号链接没指到目录外 →
+# 用 RELEASE_PNPM_WEB_BUILD 构建驾驶舱前端（带预渲染探针，并核它出了声，#3491）→ links_inside 查符号链接没指到目录外 →
 # 再模拟事后有人在发布目录里直接敲 pnpm install（不带 RELEASE_PNPM_ENV、另一个家目录，#2901）：不许 Recreating、链接不许越界 →
 # packages/conventions/src/bin/release-smoke.ts 从 fleet-api、fleet-engine 的入口把每条 import 用 node 解析一遍（只解析、不执行）。
 # 唯一不同：pnpm 仓库用 CI 缓存的那份（pnpm_config_store_dir），不从零下载；仓库在目录外不要紧，链到它的会被 links_inside 拦下。
@@ -49,7 +49,7 @@ run_pnpm() { # 日志 参数…
   local log=$1
   shift
   (cd -- "$REL" && env -i HOME="$TMP/home" PATH="$(dirname -- "$pnpm_bin"):$(dirname -- "$node_bin"):/usr/bin:/bin" \
-    LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "${RELEASE_PNPM_ENV[@]}" "pnpm_config_store_dir=$store" \
+    LANG=C.UTF-8 COREPACK_ENABLE_DOWNLOAD_PROMPT=0 "${RELEASE_PNPM_ENV[@]}" "${BUILD_EXTRA_ENV[@]}" "pnpm_config_store_dir=$store" \
     "$pnpm_bin" "$@" >"$log" 2>&1)
 }
 echo "照法国装依赖：env -i ${RELEASE_PNPM_ENV[*]} pnpm ${RELEASE_PNPM_INSTALL[*]}（仓库 $store）"
@@ -58,10 +58,20 @@ if ! run_pnpm "$TMP/install.log" "${RELEASE_PNPM_INSTALL[@]}"; then
   echo "没过：照法国的参数 pnpm install 失败" >&2
   exit 1
 fi
-echo "照法国构建前端：pnpm ${RELEASE_PNPM_WEB_BUILD[*]}"
-if ! run_pnpm "$TMP/web.log" "${RELEASE_PNPM_WEB_BUILD[@]}"; then
+echo "照法国构建前端：pnpm ${RELEASE_PNPM_WEB_BUILD[*]}（带预渲染探针 $RELEASE_WEB_TRACE）"
+web_build_extra_env "$REL"
+run_pnpm "$TMP/web.log" "${RELEASE_PNPM_WEB_BUILD[@]}"
+web_rc=$?
+BUILD_EXTRA_ENV=()
+if ((web_rc != 0)); then
   grep -av '^Progress: ' "$TMP/web.log" | tail -60 >&2
-  echo "没过：照法国的样子构建驾驶舱前端失败（发版会在这一步停下、不切版本）" >&2
+  echo "没过：照法国的样子构建驾驶舱前端失败（发版会在这一步停下、不切版本）：$(web_build_why "$TMP/web.log")" >&2
+  exit 1
+fi
+# 探针要真出声（发往本机的预渲染请求拿到了响应头）：构建换了框架版本、探针失灵了，在这里红，不等到法国上预渲染超时才发现没有线索（#3491）
+if ! grep -aq '^\[prerender-trace\] #1 响应头 200 ' "$TMP/web.log"; then
+  grep -a '^\[prerender-trace\]' "$TMP/web.log" >&2
+  echo "没过：前端构建带着预渲染探针，却没看到预渲染请求拿到 200 响应头的那一行（探针失灵，或预渲染不再经 node:http 发请求）" >&2
   exit 1
 fi
 if grep -aq 'Recreating ' "$TMP/web.log"; then
